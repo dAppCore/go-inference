@@ -62,9 +62,10 @@ func ApplyGenerateOpts(opts []GenerateOption) GenerateConfig {
 
 // LoadConfig holds model loading parameters.
 type LoadConfig struct {
-	Backend    string // "metal", "rocm", "llama_cpp" (empty = auto-detect)
-	ContextLen int    // Context window size (0 = model default)
-	GPULayers  int    // Number of layers to offload to GPU (-1 = all, 0 = none)
+	Backend       string // "metal", "rocm", "llama_cpp" (empty = auto-detect)
+	ContextLen    int    // Context window size (0 = model default)
+	GPULayers     int    // Number of layers to offload to GPU (-1 = all, 0 = none)
+	ParallelSlots int    // Number of concurrent inference slots (0 = server default)
 }
 
 // LoadOption configures model loading.
@@ -84,6 +85,13 @@ func WithContextLen(n int) LoadOption {
 // -1 means all layers (full GPU offload).
 func WithGPULayers(n int) LoadOption {
 	return func(c *LoadConfig) { c.GPULayers = n }
+}
+
+// WithParallelSlots sets the number of concurrent inference slots.
+// Higher values allow parallel Generate/Chat calls but increase VRAM usage.
+// 0 or unset uses the server default (typically 1).
+func WithParallelSlots(n int) LoadOption {
+	return func(c *LoadConfig) { c.ParallelSlots = n }
 }
 
 // ApplyLoadOpts builds a LoadConfig from options.
