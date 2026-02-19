@@ -74,6 +74,16 @@ type GenerateMetrics struct {
 	ActiveMemoryBytes uint64 // Active GPU memory after operation
 }
 
+// ModelInfo holds metadata about a loaded model.
+type ModelInfo struct {
+	Architecture string // e.g. "gemma3", "qwen3", "llama"
+	VocabSize    int    // Vocabulary size
+	NumLayers    int    // Number of transformer layers
+	HiddenSize   int    // Hidden dimension
+	QuantBits    int    // Quantisation bits (0 = unquantised, 4 = 4-bit, 8 = 8-bit)
+	QuantGroup   int    // Quantisation group size (0 if unquantised)
+}
+
 // TextModel generates text from a loaded model.
 type TextModel interface {
 	// Generate streams tokens for the given prompt.
@@ -94,6 +104,9 @@ type TextModel interface {
 
 	// ModelType returns the architecture identifier (e.g. "gemma3", "qwen3", "llama3").
 	ModelType() string
+
+	// Info returns metadata about the loaded model (architecture, quantisation, etc.).
+	Info() ModelInfo
 
 	// Metrics returns performance metrics from the last inference operation.
 	// Valid after Generate (iterator exhausted), Chat, Classify, or BatchGenerate.
