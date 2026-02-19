@@ -2,12 +2,13 @@ package inference
 
 // GenerateConfig holds generation parameters.
 type GenerateConfig struct {
-	MaxTokens   int
-	Temperature float32
-	TopK        int
-	TopP        float32
-	StopTokens  []int32
+	MaxTokens     int
+	Temperature   float32
+	TopK          int
+	TopP          float32
+	StopTokens    []int32
 	RepeatPenalty float32
+	ReturnLogits  bool // Return raw logits in ClassifyResult (default false)
 }
 
 // DefaultGenerateConfig returns sensible defaults.
@@ -49,6 +50,11 @@ func WithStopTokens(ids ...int32) GenerateOption {
 // WithRepeatPenalty sets the repetition penalty. 0 = disabled, 1.0 = no penalty.
 func WithRepeatPenalty(p float32) GenerateOption {
 	return func(c *GenerateConfig) { c.RepeatPenalty = p }
+}
+
+// WithLogits requests raw logits in ClassifyResult. Off by default to save memory.
+func WithLogits() GenerateOption {
+	return func(c *GenerateConfig) { c.ReturnLogits = true }
 }
 
 // ApplyGenerateOpts builds a GenerateConfig from options.

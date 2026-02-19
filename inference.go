@@ -40,6 +40,18 @@ type Message struct {
 	Content string
 }
 
+// ClassifyResult holds the output for a single prompt in a batch classification.
+type ClassifyResult struct {
+	Token  Token     // Sampled/greedy token at last prompt position
+	Logits []float32 // Raw vocab-sized logits (only when WithLogits is set)
+}
+
+// BatchResult holds the output for a single prompt in batch generation.
+type BatchResult struct {
+	Tokens []Token // All generated tokens for this prompt
+	Err    error   // Per-prompt error (context cancel, OOM, etc.)
+}
+
 // TextModel generates text from a loaded model.
 type TextModel interface {
 	// Generate streams tokens for the given prompt.
@@ -48,6 +60,15 @@ type TextModel interface {
 	// Chat streams tokens from a multi-turn conversation.
 	// The model applies its native chat template.
 	Chat(ctx context.Context, messages []Message, opts ...GenerateOption) iter.Seq[Token]
+
+	// Classify runs batched prefill-only inference. Each prompt gets a single
+	// forward pass and the token at the last position is sampled. This is the
+	// fast path for classification tasks (e.g. domain labelling).
+	Classify(ctx context.Context, prompts []string, opts ...GenerateOption) ([]ClassifyResult, error)
+
+	// BatchGenerate runs batched autoregressive generation. Each prompt is
+	// decoded up to MaxTokens. Returns all generated tokens per prompt.
+	BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) ([]BatchResult, error)
 
 	// ModelType returns the architecture identifier (e.g. "gemma3", "qwen3", "llama3").
 	ModelType() string
