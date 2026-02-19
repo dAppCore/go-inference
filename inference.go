@@ -4,6 +4,8 @@
 // and consumers (go-ml, go-ai, go-i18n). It has zero dependencies and compiles
 // on all platforms.
 //
+// # Backend registration
+//
 // Backend implementations register via init() with build tags:
 //
 //	// go-mlx: //go:build darwin && arm64
@@ -12,12 +14,52 @@
 //	// go-rocm: //go:build linux && amd64
 //	func init() { inference.Register(rocm.NewBackend()) }
 //
-// Consumers load models via the registry:
+// # Loading and generating
 //
 //	m, err := inference.LoadModel("/path/to/model/")
 //	defer m.Close()
+//
+//	ctx := context.Background()
 //	for tok := range m.Generate(ctx, "prompt", inference.WithMaxTokens(128)) {
 //	    fmt.Print(tok.Text)
+//	}
+//	if err := m.Err(); err != nil { log.Fatal(err) }
+//
+// # Chat, classify, and batch generate
+//
+// [TextModel] supports multi-turn chat (with model-native templates),
+// batch classification (prefill-only, fast path), and batch generation:
+//
+//	// Chat
+//	for tok := range m.Chat(ctx, []inference.Message{
+//	    {Role: "user", Content: "Hello"},
+//	}, inference.WithMaxTokens(64)) {
+//	    fmt.Print(tok.Text)
+//	}
+//
+//	// Classify — single forward pass per prompt
+//	results, _ := m.Classify(ctx, prompts, inference.WithTemperature(0))
+//
+//	// Batch generate — parallel autoregressive decoding
+//	batched, _ := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(32))
+//
+// # Functional options
+//
+// Generation and loading are configured via functional options:
+//
+//	inference.WithMaxTokens(256)     // cap output length
+//	inference.WithTemperature(0.7)   // sampling temperature
+//	inference.WithTopK(40)           // top-k sampling
+//	inference.WithRepeatPenalty(1.1) // discourage repetition
+//	inference.WithContextLen(4096)   // limit KV cache memory
+//
+// # Model discovery
+//
+// [Discover] scans a directory for model directories (config.json + *.safetensors):
+//
+//	models, _ := inference.Discover("/path/to/models/")
+//	for _, d := range models {
+//	    fmt.Printf("%s (%s)\n", d.Path, d.ModelType)
 //	}
 package inference
 
