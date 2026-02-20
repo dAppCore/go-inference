@@ -10,11 +10,11 @@ Dispatched from core/go orchestration. This package is minimal by design.
 - [x] **Add tests for backend registry** — Register, Get, List, Default priority order, LoadModel routing.
 - [x] **Add tests for Default() platform preference** — Verify metal > rocm > llama_cpp ordering.
 
-## Phase 2: Integration
+## Phase 2: Integration — COMPLETE
 
-- [ ] **go-mlx migration** — go-mlx Phase 4 backend abstraction should import go-inference instead of defining its own TextModel/Backend. Update go-mlx's design doc and plan to reference this package.
-- [ ] **go-rocm implementation** — go-rocm implements inference.Backend + inference.TextModel.
-- [ ] **go-ml migration** — go-ml's Backend/StreamingBackend should align with or wrap inference.TextModel. The go-ml Backend adds context.Context + non-streaming helpers on top.
+- [x] **go-mlx migration** — `register_metal.go` implements `inference.Backend` via `metalBackend{}` + `metalAdapter{}` wrapping `internal/metal.Model`. Auto-registers via `inference.Register()` in `init()`. Build-tagged `darwin && arm64`. Full TextModel coverage: Generate, Chat, Classify, BatchGenerate, Info, Metrics, Err, Close.
+- [x] **go-rocm implementation** — `register_rocm.go` implements `inference.Backend` + `inference.TextModel` via llama-server subprocess. Auto-registers via `inference.Register(&rocmBackend{})`. Phase 4 complete (5,794 LOC by Charon).
+- [x] **go-ml migration** — `adapter.go` bridges `inference.TextModel` → `ml.Backend/StreamingBackend` (118 LOC, 13 tests). `backend_mlx.go` collapsed from 253 to 35 LOC using `inference.LoadModel`. `backend_http_textmodel.go` provides reverse wrappers (135 LOC, 19 tests).
 
 ## Phase 3: Extended Interfaces (when needed)
 
