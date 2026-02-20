@@ -79,8 +79,8 @@ type Token struct {
 
 // Message represents a chat message for multi-turn conversation.
 type Message struct {
-	Role    string // "system", "user", "assistant"
-	Content string
+	Role    string `json:"role"`    // "system", "user", "assistant"
+	Content string `json:"content"`
 }
 
 // ClassifyResult holds the output for a single prompt in a batch classification.
