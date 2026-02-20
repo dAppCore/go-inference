@@ -7,6 +7,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// --- DefaultGenerateConfig stability ---
+
+func TestDefaultGenerateConfig_Good_Idempotent(t *testing.T) {
+	// Calling DefaultGenerateConfig twice should yield identical results.
+	a := DefaultGenerateConfig()
+	b := DefaultGenerateConfig()
+	assert.Equal(t, a, b, "DefaultGenerateConfig should be idempotent")
+}
+
 // --- GenerateConfig defaults ---
 
 func TestDefaultGenerateConfig_Good(t *testing.T) {
@@ -41,12 +50,25 @@ func TestWithMaxTokens_Good(t *testing.T) {
 }
 
 func TestWithMaxTokens_Bad(t *testing.T) {
-	// Zero and negative values are accepted (no validation in options layer)
+	// Zero and negative values are accepted (no validation in options layer).
 	cfg := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(0)})
 	assert.Equal(t, 0, cfg.MaxTokens)
 
 	cfg = ApplyGenerateOpts([]GenerateOption{WithMaxTokens(-1)})
 	assert.Equal(t, -1, cfg.MaxTokens)
+}
+
+func TestWithMaxTokens_Good_OtherFieldsUnchanged(t *testing.T) {
+	// Setting MaxTokens should not affect other fields.
+	cfg := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(512)})
+	def := DefaultGenerateConfig()
+	assert.Equal(t, 512, cfg.MaxTokens)
+	assert.Equal(t, def.Temperature, cfg.Temperature, "Temperature should remain at default")
+	assert.Equal(t, def.TopK, cfg.TopK, "TopK should remain at default")
+	assert.Equal(t, def.TopP, cfg.TopP, "TopP should remain at default")
+	assert.Nil(t, cfg.StopTokens, "StopTokens should remain nil")
+	assert.Equal(t, def.RepeatPenalty, cfg.RepeatPenalty, "RepeatPenalty should remain at default")
+	assert.Equal(t, def.ReturnLogits, cfg.ReturnLogits, "ReturnLogits should remain at default")
 }
 
 // --- WithTemperature ---
@@ -70,6 +92,12 @@ func TestWithTemperature_Good(t *testing.T) {
 	}
 }
 
+func TestWithTemperature_Bad(t *testing.T) {
+	// Negative temperature is accepted at the options layer (no validation).
+	cfg := ApplyGenerateOpts([]GenerateOption{WithTemperature(-0.5)})
+	assert.InDelta(t, -0.5, cfg.Temperature, 0.0001, "negative temperature should be stored as-is")
+}
+
 // --- WithTopK ---
 
 func TestWithTopK_Good(t *testing.T) {
@@ -89,6 +117,12 @@ func TestWithTopK_Good(t *testing.T) {
 			assert.Equal(t, tt.want, cfg.TopK)
 		})
 	}
+}
+
+func TestWithTopK_Bad(t *testing.T) {
+	// Negative TopK is accepted at the options layer (no validation).
+	cfg := ApplyGenerateOpts([]GenerateOption{WithTopK(-1)})
+	assert.Equal(t, -1, cfg.TopK, "negative TopK should be stored as-is")
 }
 
 // --- WithTopP ---
@@ -124,6 +158,13 @@ func TestWithStopTokens_Good(t *testing.T) {
 		cfg := ApplyGenerateOpts([]GenerateOption{WithStopTokens(1, 2, 3)})
 		assert.Equal(t, []int32{1, 2, 3}, cfg.StopTokens)
 	})
+}
+
+func TestWithStopTokens_Bad(t *testing.T) {
+	// Empty variadic — Go passes nil to the variadic parameter, so StopTokens
+	// is set to nil (same as default). This is a known Go behaviour.
+	cfg := ApplyGenerateOpts([]GenerateOption{WithStopTokens()})
+	assert.Nil(t, cfg.StopTokens, "empty variadic should set StopTokens to nil")
 }
 
 func TestWithStopTokens_Ugly(t *testing.T) {
@@ -163,6 +204,12 @@ func TestWithLogits_Good(t *testing.T) {
 	assert.True(t, cfg.ReturnLogits)
 }
 
+func TestWithLogits_Good_DefaultIsFalse(t *testing.T) {
+	// Without WithLogits, ReturnLogits stays false.
+	cfg := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(64)})
+	assert.False(t, cfg.ReturnLogits, "ReturnLogits should be false when WithLogits is not applied")
+}
+
 // --- ApplyGenerateOpts ---
 
 func TestApplyGenerateOpts_Good(t *testing.T) {
@@ -198,6 +245,22 @@ func TestApplyGenerateOpts_Good(t *testing.T) {
 	})
 }
 
+func TestApplyGenerateOpts_Good_PartialOptions(t *testing.T) {
+	// Applying only some options should preserve defaults for the rest.
+	cfg := ApplyGenerateOpts([]GenerateOption{
+		WithTemperature(0.8),
+		WithTopK(50),
+	})
+	def := DefaultGenerateConfig()
+	assert.Equal(t, def.MaxTokens, cfg.MaxTokens, "MaxTokens should remain at default")
+	assert.InDelta(t, 0.8, cfg.Temperature, 0.0001)
+	assert.Equal(t, 50, cfg.TopK)
+	assert.Equal(t, def.TopP, cfg.TopP, "TopP should remain at default")
+	assert.Nil(t, cfg.StopTokens, "StopTokens should remain nil")
+	assert.Equal(t, def.RepeatPenalty, cfg.RepeatPenalty, "RepeatPenalty should remain at default")
+	assert.False(t, cfg.ReturnLogits, "ReturnLogits should remain false")
+}
+
 func TestApplyGenerateOpts_Ugly(t *testing.T) {
 	t.Run("last_option_wins", func(t *testing.T) {
 		cfg := ApplyGenerateOpts([]GenerateOption{
@@ -214,6 +277,30 @@ func TestApplyGenerateOpts_Ugly(t *testing.T) {
 			WithTemperature(1.0),
 		})
 		assert.InDelta(t, 1.0, cfg.Temperature, 0.0001, "last WithTemperature should win")
+	})
+
+	t.Run("topk_override", func(t *testing.T) {
+		cfg := ApplyGenerateOpts([]GenerateOption{
+			WithTopK(10),
+			WithTopK(50),
+		})
+		assert.Equal(t, 50, cfg.TopK, "last WithTopK should win")
+	})
+
+	t.Run("topp_override", func(t *testing.T) {
+		cfg := ApplyGenerateOpts([]GenerateOption{
+			WithTopP(0.5),
+			WithTopP(0.95),
+		})
+		assert.InDelta(t, 0.95, cfg.TopP, 0.0001, "last WithTopP should win")
+	})
+
+	t.Run("repeat_penalty_override", func(t *testing.T) {
+		cfg := ApplyGenerateOpts([]GenerateOption{
+			WithRepeatPenalty(1.1),
+			WithRepeatPenalty(1.5),
+		})
+		assert.InDelta(t, 1.5, cfg.RepeatPenalty, 0.0001, "last WithRepeatPenalty should win")
 	})
 }
 
@@ -333,6 +420,15 @@ func TestApplyLoadOpts_Good_Combined(t *testing.T) {
 	assert.Equal(t, 2, cfg.ParallelSlots)
 }
 
+func TestApplyLoadOpts_Good_PartialOptions(t *testing.T) {
+	// Applying only some options should preserve defaults for the rest.
+	cfg := ApplyLoadOpts([]LoadOption{WithContextLen(4096)})
+	assert.Equal(t, "", cfg.Backend, "Backend should remain at default (auto-detect)")
+	assert.Equal(t, 4096, cfg.ContextLen)
+	assert.Equal(t, -1, cfg.GPULayers, "GPULayers should remain at default (-1)")
+	assert.Equal(t, 0, cfg.ParallelSlots, "ParallelSlots should remain at default (0)")
+}
+
 func TestApplyLoadOpts_Ugly(t *testing.T) {
 	t.Run("last_option_wins", func(t *testing.T) {
 		cfg := ApplyLoadOpts([]LoadOption{
@@ -346,5 +442,29 @@ func TestApplyLoadOpts_Ugly(t *testing.T) {
 		cfg := ApplyLoadOpts([]LoadOption{})
 		require.Equal(t, -1, cfg.GPULayers, "empty opts should keep default GPULayers=-1")
 		assert.Equal(t, "", cfg.Backend)
+	})
+
+	t.Run("context_len_override", func(t *testing.T) {
+		cfg := ApplyLoadOpts([]LoadOption{
+			WithContextLen(2048),
+			WithContextLen(8192),
+		})
+		assert.Equal(t, 8192, cfg.ContextLen, "last WithContextLen should win")
+	})
+
+	t.Run("gpu_layers_override", func(t *testing.T) {
+		cfg := ApplyLoadOpts([]LoadOption{
+			WithGPULayers(24),
+			WithGPULayers(0),
+		})
+		assert.Equal(t, 0, cfg.GPULayers, "last WithGPULayers should win")
+	})
+
+	t.Run("parallel_slots_override", func(t *testing.T) {
+		cfg := ApplyLoadOpts([]LoadOption{
+			WithParallelSlots(4),
+			WithParallelSlots(1),
+		})
+		assert.Equal(t, 1, cfg.ParallelSlots, "last WithParallelSlots should win")
 	})
 }
