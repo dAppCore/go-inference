@@ -6,9 +6,9 @@ Dispatched from core/go orchestration. This package is minimal by design.
 
 ## Phase 1: Foundation — `d76448d` (Charon)
 
-- [x] **Add tests for option application** — Verify GenerateConfig defaults, all With* options, ApplyGenerateOpts/ApplyLoadOpts behaviour. Comprehensive API tests (1,074 LOC).
-- [x] **Add tests for backend registry** — Register, Get, List, Default priority order, LoadModel routing.
-- [x] **Add tests for Default() platform preference** — Verify metal > rocm > llama_cpp ordering.
+- [x] **Add tests for option application** — Verify GenerateConfig defaults, all With* options, ApplyGenerateOpts/ApplyLoadOpts behaviour. Comprehensive API tests (1,074 LOC). (`d76448d`, `c633be1`)
+- [x] **Add tests for backend registry** — Register, Get, List, Default priority order, LoadModel routing. (`d76448d`, `c633be1`)
+- [x] **Add tests for Default() platform preference** — Verify metal > rocm > llama_cpp ordering. (`d76448d`, `c633be1`)
 
 ## Phase 2: Integration — COMPLETE
 
