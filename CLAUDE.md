@@ -4,7 +4,7 @@
 
 Shared inference interfaces for the Core Go ecosystem. Module: `forge.lthn.ai/core/go-inference`
 
-This package defines the contract between GPU-specific backends (go-mlx on macOS, go-rocm on Linux) and consumers (go-ml, go-ai, go-i18n). It has **zero dependencies** and compiles on all platforms.
+Zero dependencies. Compiles on all platforms. See `docs/architecture.md` for design rationale.
 
 ## Commands
 
@@ -13,64 +13,34 @@ go test ./...        # Run all tests
 go vet ./...         # Vet
 ```
 
-## Architecture
+## Stability Rules
 
-```
-go-inference (this package) ← defines TextModel, Backend, Token, Message
-    ↑                    ↑
-    │                    │
-go-mlx (darwin/arm64)   go-rocm (linux/amd64)
-    │                    │
-    └────── go-ml ───────┘   (wraps backends into scoring engine)
-             ↑
-          go-ai (MCP hub)
-```
+This package is the shared contract. Changes here affect go-mlx, go-rocm, and go-ml simultaneously.
 
-### Key Types
-
-| Type | Purpose |
-|------|---------|
-| `TextModel` | Core interface: Generate, Chat, Err, Close |
-| `Backend` | Named engine that can LoadModel → TextModel |
-| `Token` | Streaming token (ID + Text) |
-| `Message` | Chat message (Role + Content) |
-| `GenerateOption` | Functional option for generation (temp, topK, etc.) |
-| `LoadOption` | Functional option for model loading (backend, GPU layers, etc.) |
-
-### Backend Registry
-
-Backends register via `init()` with build tags. Consumers call `LoadModel()` which auto-selects the best available backend:
-
-```go
-// Auto-detect: Metal on macOS, ROCm on Linux
-m, err := inference.LoadModel("/path/to/model/")
-
-// Explicit backend
-m, err := inference.LoadModel("/path/", inference.WithBackend("rocm"))
-```
+- Never change existing method signatures on `TextModel` or `Backend`
+- Only add methods when two or more consumers need them
+- Prefer new interfaces that embed `TextModel` over extending `TextModel` itself
+- New fields on `GenerateConfig` or `LoadConfig` are safe (zero-value defaults)
+- All new interface methods require Virgil approval before merging
 
 ## Coding Standards
 
 - UK English
-- Zero external dependencies — stdlib only
-- Tests: testify assert/require
-- Conventional commits
+- Zero external dependencies — stdlib only (testify permitted in tests)
+- Conventional commits: `type(scope): description`
 - Co-Author: `Co-Authored-By: Virgil <virgil@lethean.io>`
 - Licence: EUPL-1.2
 
 ## Consumers
 
-- **go-mlx**: Implements `Backend` + `TextModel` for Apple Metal (darwin/arm64)
-- **go-rocm**: Implements `Backend` + `TextModel` for AMD ROCm (linux/amd64)
-- **go-ml**: Wraps inference backends into scoring engine, adds llama.cpp HTTP backend
+- **go-mlx**: implements `Backend` + `TextModel` for Apple Metal (darwin/arm64)
+- **go-rocm**: implements `Backend` + `TextModel` for AMD ROCm (linux/amd64)
+- **go-ml**: wraps inference backends into scoring engine, adds llama.cpp HTTP backend
 - **go-ai**: MCP hub, exposes inference via MCP tools
-- **go-i18n**: Uses TextModel for Gemma3-1B domain classification
+- **go-i18n**: uses `TextModel` for Gemma3-1B domain classification
 
-## Stability
+## Documentation
 
-This package is the shared contract. Changes here affect all backends and consumers. Keep the interface minimal and stable. Add new methods only when two or more consumers need them.
-
-## Task Queue
-
-See `TODO.md` for prioritised work.
-See `FINDINGS.md` for research notes.
+- `docs/architecture.md` — interfaces, registry, options, design decisions
+- `docs/development.md` — prerequisites, build, test patterns, coding standards
+- `docs/history.md` — completed phases, commit log, known limitations
