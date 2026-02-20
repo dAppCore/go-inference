@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"iter"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,6 +36,20 @@ func (s *stubBackend) LoadModel(path string, opts ...LoadOption) (TextModel, err
 		return nil, s.loadErr
 	}
 	return &stubTextModel{backend: s.name, path: path}, nil
+}
+
+// capturingBackend records the LoadOption values it received.
+type capturingBackend struct {
+	name         string
+	available    bool
+	capturedOpts []LoadOption
+}
+
+func (c *capturingBackend) Name() string      { return c.name }
+func (c *capturingBackend) Available() bool    { return c.available }
+func (c *capturingBackend) LoadModel(path string, opts ...LoadOption) (TextModel, error) {
+	c.capturedOpts = opts
+	return &stubTextModel{backend: c.name, path: path}, nil
 }
 
 // stubTextModel is a minimal TextModel for testing LoadModel routing.
@@ -453,4 +468,229 @@ func TestGenerateMetrics_Good(t *testing.T) {
 	assert.InDelta(t, 25.0, m.DecodeTokensPerSec, 0.01)
 	assert.Equal(t, uint64(1<<30), m.PeakMemoryBytes)
 	assert.Equal(t, uint64(512<<20), m.ActiveMemoryBytes)
+}
+
+// --- Concurrent registry access ---
+
+func TestRegistry_Good_ConcurrentAccess(t *testing.T) {
+	// Verify the registry is safe for concurrent reads and writes.
+	// The -race flag will catch data races if the mutex is broken.
+	resetBackends(t)
+
+	var wg sync.WaitGroup
+
+	// Concurrent writers.
+	for i := range 20 {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			Register(&stubBackend{
+				name:      fmt.Sprintf("backend_%d", id),
+				available: true,
+			})
+		}(i)
+	}
+
+	// Concurrent readers interleaved with writers.
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = List()
+		}()
+	}
+
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = Get("backend_0")
+		}()
+	}
+
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = Default()
+		}()
+	}
+
+	wg.Wait()
+
+	// After all goroutines finish, verify all 20 backends are registered.
+	names := List()
+	assert.Len(t, names, 20, "all 20 backends should be registered after concurrent writes")
+}
+
+// --- Register overwrite count ---
+
+func TestRegister_Ugly_OverwriteKeepsCount(t *testing.T) {
+	resetBackends(t)
+
+	Register(&stubBackend{name: "alpha", available: true})
+	Register(&stubBackend{name: "beta", available: true})
+	Register(&stubBackend{name: "alpha", available: false}) // overwrite
+
+	names := List()
+	assert.Len(t, names, 2, "overwriting a backend should not increase the count")
+}
+
+// --- Default with all preferred unavailable and custom available ---
+
+func TestDefault_Ugly_AllPreferredUnavailableCustomAvailable(t *testing.T) {
+	resetBackends(t)
+
+	Register(&stubBackend{name: "metal", available: false})
+	Register(&stubBackend{name: "rocm", available: false})
+	Register(&stubBackend{name: "llama_cpp", available: false})
+	Register(&stubBackend{name: "custom_vulkan", available: true})
+
+	b, err := Default()
+	require.NoError(t, err)
+	assert.Equal(t, "custom_vulkan", b.Name(),
+		"should fall back to custom backend when all preferred backends are unavailable")
+}
+
+// --- Default with multiple custom backends ---
+
+func TestDefault_Ugly_MultipleCustomBackends(t *testing.T) {
+	resetBackends(t)
+
+	// Only non-preferred backends registered — one available, one not.
+	Register(&stubBackend{name: "custom_a", available: false})
+	Register(&stubBackend{name: "custom_b", available: true})
+
+	b, err := Default()
+	require.NoError(t, err)
+	assert.Equal(t, "custom_b", b.Name(),
+		"should find the available custom backend in the fallback loop")
+}
+
+// --- LoadModel option forwarding ---
+
+func TestLoadModel_Good_ExplicitBackendForwardsOptions(t *testing.T) {
+	resetBackends(t)
+
+	cb := &capturingBackend{name: "cap", available: true}
+	Register(cb)
+
+	opts := []LoadOption{
+		WithBackend("cap"),
+		WithContextLen(4096),
+		WithGPULayers(16),
+	}
+	m, err := LoadModel("/path/to/model", opts...)
+	require.NoError(t, err)
+	require.NotNil(t, m)
+
+	// The capturing backend should have received all options.
+	assert.Len(t, cb.capturedOpts, len(opts),
+		"all LoadOptions should be forwarded to the backend")
+
+	// Verify the forwarded options produce the correct config.
+	cfg := ApplyLoadOpts(cb.capturedOpts)
+	assert.Equal(t, "cap", cfg.Backend)
+	assert.Equal(t, 4096, cfg.ContextLen)
+	assert.Equal(t, 16, cfg.GPULayers)
+	require.NoError(t, m.Close())
+}
+
+func TestLoadModel_Good_DefaultBackendForwardsOptions(t *testing.T) {
+	resetBackends(t)
+
+	cb := &capturingBackend{name: "metal", available: true}
+	Register(cb)
+
+	opts := []LoadOption{
+		WithContextLen(8192),
+		WithGPULayers(-1),
+		WithParallelSlots(2),
+	}
+	m, err := LoadModel("/path/to/model", opts...)
+	require.NoError(t, err)
+	require.NotNil(t, m)
+
+	// The default backend should have received all options.
+	assert.Len(t, cb.capturedOpts, len(opts),
+		"all LoadOptions should be forwarded to the default backend")
+
+	cfg := ApplyLoadOpts(cb.capturedOpts)
+	assert.Equal(t, 8192, cfg.ContextLen)
+	assert.Equal(t, -1, cfg.GPULayers)
+	assert.Equal(t, 2, cfg.ParallelSlots)
+	require.NoError(t, m.Close())
+}
+
+// --- Default preference order does not depend on registration order ---
+
+func TestDefault_Good_RegistrationOrderIrrelevant(t *testing.T) {
+	// Register in reverse priority order — metal should still be chosen.
+	resetBackends(t)
+
+	Register(&stubBackend{name: "llama_cpp", available: true})
+	Register(&stubBackend{name: "rocm", available: true})
+	Register(&stubBackend{name: "metal", available: true})
+
+	b, err := Default()
+	require.NoError(t, err)
+	assert.Equal(t, "metal", b.Name(),
+		"metal should win regardless of registration order")
+
+	// Register in yet another order.
+	resetBackends(t)
+
+	Register(&stubBackend{name: "rocm", available: true})
+	Register(&stubBackend{name: "metal", available: true})
+	Register(&stubBackend{name: "llama_cpp", available: true})
+
+	b, err = Default()
+	require.NoError(t, err)
+	assert.Equal(t, "metal", b.Name(),
+		"metal should win regardless of registration order")
+}
+
+// --- LoadModel with empty path ---
+
+func TestLoadModel_Ugly_EmptyPath(t *testing.T) {
+	resetBackends(t)
+
+	Register(&stubBackend{name: "metal", available: true})
+
+	// Empty path is accepted at this layer — backend decides what to do.
+	m, err := LoadModel("")
+	require.NoError(t, err)
+	sm := m.(*stubTextModel)
+	assert.Equal(t, "", sm.path, "empty path should be forwarded to the backend as-is")
+	require.NoError(t, m.Close())
+}
+
+// --- Get after register and overwrite ---
+
+func TestGet_Good_AfterOverwrite(t *testing.T) {
+	resetBackends(t)
+
+	Register(&stubBackend{name: "gpu", available: false})
+	Register(&stubBackend{name: "gpu", available: true}) // overwrite
+
+	b, ok := Get("gpu")
+	require.True(t, ok)
+	assert.True(t, b.Available(), "Get should return the most recently registered backend")
+}
+
+// --- List returns new slice each call ---
+
+func TestList_Good_IndependentSlices(t *testing.T) {
+	resetBackends(t)
+
+	Register(&stubBackend{name: "alpha", available: true})
+
+	a := List()
+	b := List()
+	assert.Equal(t, a, b, "both calls should return the same names")
+
+	// Mutating one slice should not affect the other.
+	a[0] = "mutated"
+	c := List()
+	assert.NotEqual(t, a[0], c[0], "List should return independent slices")
 }
