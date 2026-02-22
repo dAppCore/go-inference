@@ -72,6 +72,7 @@ type LoadConfig struct {
 	ContextLen    int    // Context window size (0 = model default)
 	GPULayers     int    // Number of layers to offload to GPU (-1 = all, 0 = none)
 	ParallelSlots int    // Number of concurrent inference slots (0 = server default)
+	AdapterPath   string // Path to LoRA adapter directory (empty = no adapter)
 }
 
 // LoadOption configures model loading.
@@ -98,6 +99,14 @@ func WithGPULayers(n int) LoadOption {
 // 0 or unset uses the server default (typically 1).
 func WithParallelSlots(n int) LoadOption {
 	return func(c *LoadConfig) { c.ParallelSlots = n }
+}
+
+// WithAdapterPath sets the path to a LoRA adapter directory.
+// The directory should contain adapter_config.json and adapter safetensors files.
+// The adapter weights are loaded and injected into the model at load time,
+// enabling inference with a fine-tuned adapter without fusing/merging first.
+func WithAdapterPath(path string) LoadOption {
+	return func(c *LoadConfig) { c.AdapterPath = path }
 }
 
 // ApplyLoadOpts builds a LoadConfig from options.

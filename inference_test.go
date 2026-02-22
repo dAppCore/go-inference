@@ -29,7 +29,7 @@ type stubBackend struct {
 	loadErr   error
 }
 
-func (s *stubBackend) Name() string { return s.name }
+func (s *stubBackend) Name() string    { return s.name }
 func (s *stubBackend) Available() bool { return s.available }
 func (s *stubBackend) LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 	if s.loadErr != nil {
@@ -45,8 +45,8 @@ type capturingBackend struct {
 	capturedOpts []LoadOption
 }
 
-func (c *capturingBackend) Name() string      { return c.name }
-func (c *capturingBackend) Available() bool    { return c.available }
+func (c *capturingBackend) Name() string    { return c.name }
+func (c *capturingBackend) Available() bool { return c.available }
 func (c *capturingBackend) LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 	c.capturedOpts = opts
 	return &stubTextModel{backend: c.name, path: path}, nil
@@ -71,10 +71,10 @@ func (m *stubTextModel) BatchGenerate(_ context.Context, _ []string, _ ...Genera
 	return nil, nil
 }
 func (m *stubTextModel) ModelType() string        { return "stub" }
-func (m *stubTextModel) Info() ModelInfo           { return ModelInfo{} }
-func (m *stubTextModel) Metrics() GenerateMetrics  { return GenerateMetrics{} }
-func (m *stubTextModel) Err() error                { return nil }
-func (m *stubTextModel) Close() error              { return nil }
+func (m *stubTextModel) Info() ModelInfo          { return ModelInfo{} }
+func (m *stubTextModel) Metrics() GenerateMetrics { return GenerateMetrics{} }
+func (m *stubTextModel) Err() error               { return nil }
+func (m *stubTextModel) Close() error             { return nil }
 
 // --- Register ---
 
@@ -493,27 +493,21 @@ func TestRegistry_Good_ConcurrentAccess(t *testing.T) {
 
 	// Concurrent readers interleaved with writers.
 	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_ = List()
-		}()
+		})
 	}
 
 	for range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _ = Get("backend_0")
-		}()
+		})
 	}
 
 	for range 10 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _ = Default()
-		}()
+		})
 	}
 
 	wg.Wait()
