@@ -467,4 +467,51 @@ func TestApplyLoadOpts_Ugly(t *testing.T) {
 		})
 		assert.Equal(t, 1, cfg.ParallelSlots, "last WithParallelSlots should win")
 	})
+
+	t.Run("adapter_path_override", func(t *testing.T) {
+		cfg := ApplyLoadOpts([]LoadOption{
+			WithAdapterPath("/path/a"),
+			WithAdapterPath("/path/b"),
+		})
+		assert.Equal(t, "/path/b", cfg.AdapterPath, "last WithAdapterPath should win")
+	})
+}
+
+// --- WithAdapterPath ---
+
+func TestWithAdapterPath_Good(t *testing.T) {
+	tests := []struct {
+		name string
+		val  string
+		want string
+	}{
+		{"simple", "/path/to/adapter", "/path/to/adapter"},
+		{"relative", "adapters/lora-v1", "adapters/lora-v1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ApplyLoadOpts([]LoadOption{WithAdapterPath(tt.val)})
+			assert.Equal(t, tt.want, cfg.AdapterPath)
+		})
+	}
+}
+
+func TestWithAdapterPath_Bad(t *testing.T) {
+	// Empty string is valid at the options layer (means no adapter).
+	cfg := ApplyLoadOpts([]LoadOption{WithAdapterPath("")})
+	assert.Equal(t, "", cfg.AdapterPath)
+}
+
+func TestWithAdapterPath_Good_DefaultIsEmpty(t *testing.T) {
+	cfg := ApplyLoadOpts(nil)
+	assert.Equal(t, "", cfg.AdapterPath, "default AdapterPath should be empty")
+}
+
+func TestWithAdapterPath_Good_OtherFieldsUnchanged(t *testing.T) {
+	cfg := ApplyLoadOpts([]LoadOption{WithAdapterPath("/some/path")})
+	assert.Equal(t, "", cfg.Backend, "Backend should remain at default")
+	assert.Equal(t, 0, cfg.ContextLen, "ContextLen should remain at default")
+	assert.Equal(t, -1, cfg.GPULayers, "GPULayers should remain at default")
+	assert.Equal(t, 0, cfg.ParallelSlots, "ParallelSlots should remain at default")
+	assert.Equal(t, "/some/path", cfg.AdapterPath)
 }
