@@ -67,6 +67,8 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"maps"
+	"slices"
 	"sync"
 	"time"
 )
@@ -212,15 +214,24 @@ func Get(name string) (Backend, bool) {
 	return b, ok
 }
 
-// List returns the names of all registered backends.
+// List returns the names of all registered backends in alphabetical order.
 func List() []string {
 	backendsMu.RLock()
 	defer backendsMu.RUnlock()
-	names := make([]string, 0, len(backends))
-	for name := range backends {
-		names = append(names, name)
+	return slices.Sorted(maps.Keys(backends))
+}
+
+// All returns an iterator over all registered backends.
+func All() iter.Seq2[string, Backend] {
+	return func(yield func(string, Backend) bool) {
+		backendsMu.RLock()
+		defer backendsMu.RUnlock()
+		for k, v := range backends {
+			if !yield(k, v) {
+				return
+			}
+		}
 	}
-	return names
 }
 
 // Default returns the first available backend.
@@ -236,7 +247,7 @@ func Default() (Backend, error) {
 		}
 	}
 	// Fall back to any available
-	for _, b := range backends {
+	for b := range maps.Values(backends) {
 		if b.Available() {
 			return b, nil
 		}

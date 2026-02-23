@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 // DiscoveredModel describes a model directory found by Discover.
@@ -39,7 +40,7 @@ func Discover(baseDir string) ([]DiscoveredModel, error) {
 	// Also check baseDir itself (in case it's a model directory).
 	if m, ok := probeModelDir(baseDir); ok {
 		// Prepend so the base dir appears first.
-		models = append([]DiscoveredModel{m}, models...)
+		models = slices.Insert(models, 0, m)
 	}
 
 	return models, nil

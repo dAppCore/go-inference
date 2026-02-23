@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"iter"
-	"sort"
 	"sync"
 	"testing"
 
@@ -96,9 +95,7 @@ func TestRegister_Good_Multiple(t *testing.T) {
 	Register(&stubBackend{name: "beta", available: true})
 	Register(&stubBackend{name: "gamma", available: true})
 
-	names := List()
-	sort.Strings(names)
-	assert.Equal(t, []string{"alpha", "beta", "gamma"}, names)
+	assert.Equal(t, []string{"alpha", "beta", "gamma"}, List())
 }
 
 func TestRegister_Ugly_Overwrites(t *testing.T) {
@@ -150,9 +147,7 @@ func TestList_Good_Populated(t *testing.T) {
 	Register(&stubBackend{name: "a", available: true})
 	Register(&stubBackend{name: "b", available: true})
 
-	names := List()
-	sort.Strings(names)
-	assert.Equal(t, []string{"a", "b"}, names)
+	assert.Equal(t, []string{"a", "b"}, List())
 }
 
 // --- Default ---
