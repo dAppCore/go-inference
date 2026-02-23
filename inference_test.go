@@ -394,6 +394,45 @@ func TestTypes_Good_InterfaceCompliance(t *testing.T) {
 	var _ TextModel = (*stubTextModel)(nil)
 }
 
+// --- AttentionSnapshot ---
+
+func TestAttentionSnapshot_Good(t *testing.T) {
+	snap := AttentionSnapshot{
+		NumLayers:    28,
+		NumHeads:     16,
+		SeqLen:       42,
+		HeadDim:      64,
+		Keys:         make([][][]float32, 28),
+		Architecture: "gemma3",
+	}
+	assert.Equal(t, 28, snap.NumLayers)
+	assert.Equal(t, 16, snap.NumHeads)
+	assert.Equal(t, 42, snap.SeqLen)
+	assert.Equal(t, 64, snap.HeadDim)
+	assert.Len(t, snap.Keys, 28)
+	assert.Equal(t, "gemma3", snap.Architecture)
+}
+
+func TestAttentionInspector_Good_InterfaceCompliance(t *testing.T) {
+	// Compile-time check: the interface exists and has the right signature.
+	var _ AttentionInspector = (*mockInspector)(nil)
+}
+
+type mockInspector struct{ stubTextModel }
+
+func (m *mockInspector) InspectAttention(_ context.Context, _ string, _ ...GenerateOption) (*AttentionSnapshot, error) {
+	return &AttentionSnapshot{NumLayers: 28, NumHeads: 8, SeqLen: 10, HeadDim: 64, Architecture: "qwen3"}, nil
+}
+
+func TestAttentionInspector_Good_ReturnsSnapshot(t *testing.T) {
+	var inspector AttentionInspector = &mockInspector{}
+	snap, err := inspector.InspectAttention(context.Background(), "hello")
+	require.NoError(t, err)
+	assert.Equal(t, 28, snap.NumLayers)
+	assert.Equal(t, 8, snap.NumHeads)
+	assert.Equal(t, "qwen3", snap.Architecture)
+}
+
 // --- Struct types ---
 
 func TestToken_Good(t *testing.T) {
