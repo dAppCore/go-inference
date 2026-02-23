@@ -131,6 +131,50 @@ type ModelInfo struct {
 
 Static metadata about a loaded model. `QuantBits` is zero for unquantised (FP16/BF16) models.
 
+### AttentionSnapshot
+
+```go
+type AttentionSnapshot struct {
+    NumLayers    int
+    NumHeads     int           // num_kv_heads (may differ from query heads in GQA)
+    SeqLen       int           // number of tokens in the prompt
+    HeadDim      int
+    Keys         [][][]float32 // [layer][head] → flat float32 of len seq_len*head_dim
+    Architecture string
+}
+```
+
+Post-RoPE K vectors extracted from the KV cache after a single prefill pass. The `Keys` tensor is indexed `[layer][head][position*head_dim]` — each head's K vectors are flattened into a single slice of length `SeqLen * HeadDim`.
+
+This type is consumed by LEM's Q/K Bone Orientation analysis engine, which computes coherence, cross-layer alignment, head entropy, phase-lock, and joint collapse metrics from the raw K tensors. The analysis is pure Go CPU math — no GPU dependencies.
+
+For GQA models (e.g. Gemma3 where `num_kv_heads < num_query_heads`), `NumHeads` reflects the KV head count. Single-head layers use position-wise differentiation rather than pairwise head comparison.
+
+## Optional Interfaces
+
+### AttentionInspector
+
+```go
+type AttentionInspector interface {
+    InspectAttention(ctx context.Context, prompt string, opts ...GenerateOption) (*AttentionSnapshot, error)
+}
+```
+
+Backends may implement `AttentionInspector` to expose attention-level data for Q/K Bone Orientation analysis. This is an optional interface — consumers discover it via type assertion:
+
+```go
+if inspector, ok := model.(AttentionInspector); ok {
+    snap, err := inspector.InspectAttention(ctx, prompt)
+    // analyse snap.Keys
+}
+```
+
+Following rule 3 of the stability contract: new capability is expressed as separate interfaces, not by extending `TextModel`. Backends that don't support attention inspection (HTTP, llama.cpp subprocess) are unaffected.
+
+**Implementations:**
+- `go-mlx` — Extracts post-RoPE K vectors from Metal KV cache after prefill (native GPU memory read)
+- `go-ml` — `InferenceAdapter.InspectAttention()` delegates via type assertion to the underlying `TextModel`
+
 ## TextModel Interface
 
 ```go
