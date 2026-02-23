@@ -126,6 +126,24 @@ type ModelInfo struct {
 	QuantGroup   int    // Quantisation group size (0 if unquantised)
 }
 
+// AttentionSnapshot holds K vectors extracted from the KV cache after prefill.
+// Keys is indexed [layer][head][position*head_dim] — flattened per head.
+type AttentionSnapshot struct {
+	NumLayers    int           `json:"num_layers"`
+	NumHeads     int           `json:"num_heads"`     // num_kv_heads (may differ from query heads in GQA)
+	SeqLen       int           `json:"seq_len"`       // number of tokens in the prompt
+	HeadDim      int           `json:"head_dim"`
+	Keys         [][][]float32 `json:"keys"`          // [layer][head] → flat float32 of len seq_len*head_dim
+	Architecture string        `json:"architecture"`
+}
+
+// AttentionInspector is an optional interface that backends may implement
+// to expose attention-level data for Q/K Bone Orientation analysis.
+// Use type assertion: if inspector, ok := model.(AttentionInspector); ok { ... }
+type AttentionInspector interface {
+	InspectAttention(ctx context.Context, prompt string, opts ...GenerateOption) (*AttentionSnapshot, error)
+}
+
 // TextModel generates text from a loaded model.
 type TextModel interface {
 	// Generate streams tokens for the given prompt.
