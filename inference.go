@@ -128,15 +128,22 @@ type ModelInfo struct {
 	QuantGroup   int    // Quantisation group size (0 if unquantised)
 }
 
-// AttentionSnapshot holds K vectors extracted from the KV cache after prefill.
+// AttentionSnapshot holds Q and/or K vectors extracted from the KV cache after prefill.
 // Keys is indexed [layer][head][position*head_dim] — flattened per head.
 type AttentionSnapshot struct {
-	NumLayers    int           `json:"num_layers"`
-	NumHeads     int           `json:"num_heads"`     // num_kv_heads (may differ from query heads in GQA)
-	SeqLen       int           `json:"seq_len"`       // number of tokens in the prompt
-	HeadDim      int           `json:"head_dim"`
-	Keys         [][][]float32 `json:"keys"`          // [layer][head] → flat float32 of len seq_len*head_dim
-	Architecture string        `json:"architecture"`
+	NumLayers     int           `json:"num_layers"`
+	NumHeads      int           `json:"num_heads"`       // num_kv_heads (may differ from query heads in GQA)
+	SeqLen        int           `json:"seq_len"`         // number of tokens in the prompt
+	HeadDim       int           `json:"head_dim"`
+	NumQueryHeads int           `json:"num_query_heads"` // num_attention_heads (0 = Q not available)
+	Keys          [][][]float32 `json:"keys"`            // [layer][head] → flat float32 of len seq_len*head_dim
+	Queries       [][][]float32 `json:"queries"`         // [layer][head] → flat float32 (nil if K-only)
+	Architecture  string        `json:"architecture"`
+}
+
+// HasQueries reports whether this snapshot contains query vectors.
+func (s *AttentionSnapshot) HasQueries() bool {
+	return s.Queries != nil && len(s.Queries) > 0
 }
 
 // AttentionInspector is an optional interface that backends may implement
