@@ -428,6 +428,34 @@ func TestAttentionInspector_Good_ReturnsSnapshot(t *testing.T) {
 	assert.Equal(t, "qwen3", snap.Architecture)
 }
 
+func TestAttentionSnapshotWithQueries(t *testing.T) {
+	snap := AttentionSnapshot{
+		NumLayers:     28,
+		NumHeads:      8,
+		NumQueryHeads: 32,
+		SeqLen:        42,
+		HeadDim:       128,
+		Keys:          make([][][]float32, 28),
+		Queries:       make([][][]float32, 28),
+		Architecture:  "gemma3",
+	}
+	if snap.NumQueryHeads != 32 {
+		t.Fatalf("expected 32 query heads, got %d", snap.NumQueryHeads)
+	}
+	if snap.HasQueries() != true {
+		t.Fatal("expected HasQueries() == true when Queries is non-nil")
+	}
+
+	kOnly := AttentionSnapshot{
+		NumLayers: 28,
+		NumHeads:  8,
+		Keys:      make([][][]float32, 28),
+	}
+	if kOnly.HasQueries() != false {
+		t.Fatal("expected HasQueries() == false when Queries is nil")
+	}
+}
+
 // --- Struct types ---
 
 func TestToken_Good(t *testing.T) {
