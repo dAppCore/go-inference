@@ -1,0 +1,20 @@
+version: 1
+
+project:
+  name: go-inference
+  repository: core/go-inference
+
+publishers: []
+
+changelog:
+  include:
+    - feat
+    - fix
+    - perf
+    - refactor
+  exclude:
+    - chore
+    - docs
+    - style
+    - test
+    - ci
