@@ -2,9 +2,9 @@ package inference
 
 import (
 	"encoding/json"
+	"iter"
 	"os"
 	"path/filepath"
-	"slices"
 )
 
 // DiscoveredModel describes a model directory found by Discover.
@@ -19,31 +19,33 @@ type DiscoveredModel struct {
 // Discover scans baseDir for model directories. A valid model directory
 // contains config.json and at least one .safetensors file.
 // Scans one level deep (immediate subdirectories of baseDir).
-func Discover(baseDir string) ([]DiscoveredModel, error) {
-	entries, err := os.ReadDir(baseDir)
-	if err != nil {
-		return nil, err
-	}
-
-	var models []DiscoveredModel
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
+func Discover(baseDir string) iter.Seq[DiscoveredModel] {
+	return func(yield func(DiscoveredModel) bool) {
+		baseDir = filepath.Clean(baseDir)
+		entries, err := os.ReadDir(baseDir)
+		if err != nil {
+			return
 		}
-		dir := filepath.Join(baseDir, entry.Name())
-		m, ok := probeModelDir(dir)
-		if ok {
-			models = append(models, m)
+
+		// Check baseDir itself (in case it's a model directory).
+		if m, ok := probeModelDir(baseDir); ok {
+			if !yield(m) {
+				return
+			}
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			dir := filepath.Join(baseDir, entry.Name())
+			if m, ok := probeModelDir(dir); ok {
+				if !yield(m) {
+					return
+				}
+			}
 		}
 	}
-
-	// Also check baseDir itself (in case it's a model directory).
-	if m, ok := probeModelDir(baseDir); ok {
-		// Prepend so the base dir appears first.
-		models = slices.Insert(models, 0, m)
-	}
-
-	return models, nil
 }
 
 // probeModelDir checks if dir looks like a model directory.
@@ -55,12 +57,15 @@ func probeModelDir(dir string) (DiscoveredModel, bool) {
 	}
 
 	// Count safetensors files.
-	matches, _ := filepath.Glob(filepath.Join(dir, "*.safetensors"))
-	if len(matches) == 0 {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.safetensors"))
+	if err != nil || len(matches) == 0 {
 		return DiscoveredModel{}, false
 	}
 
-	absDir, _ := filepath.Abs(dir)
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		absDir = dir
+	}
 
 	var probe struct {
 		ModelType    string `json:"model_type"`
@@ -69,7 +74,9 @@ func probeModelDir(dir string) (DiscoveredModel, bool) {
 			GroupSize int `json:"group_size"`
 		} `json:"quantization"`
 	}
-	_ = json.Unmarshal(data, &probe)
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return DiscoveredModel{}, false
+	}
 
 	m := DiscoveredModel{
 		Path:      absDir,

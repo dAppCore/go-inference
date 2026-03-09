@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,8 +39,7 @@ func TestDiscover_Good_SingleModel(t *testing.T) {
 		"model_type": "gemma3",
 	}, 1)
 
-	models, err := Discover(base)
-	require.NoError(t, err)
+	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 
 	m := models[0]
@@ -60,8 +60,7 @@ func TestDiscover_Good_MultipleModels(t *testing.T) {
 		"model_type": "qwen3",
 	}, 4)
 
-	models, err := Discover(base)
-	require.NoError(t, err)
+	models := slices.Collect(Discover(base))
 	require.Len(t, models, 2)
 
 	// Collect model types for assertion (order may vary due to ReadDir).
@@ -82,8 +81,7 @@ func TestDiscover_Good_Quantised(t *testing.T) {
 		},
 	}, 1)
 
-	models, err := Discover(base)
-	require.NoError(t, err)
+	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 
 	m := models[0]
@@ -98,8 +96,7 @@ func TestDiscover_Good_BaseDirIsModel(t *testing.T) {
 		"model_type": "llama",
 	}, 2)
 
-	models, err := Discover(base)
-	require.NoError(t, err)
+	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 
 	m := models[0]
@@ -117,8 +114,7 @@ func TestDiscover_Good_BaseDirPlusSubdir(t *testing.T) {
 		"model_type": "child_model",
 	}, 1)
 
-	models, err := Discover(base)
-	require.NoError(t, err)
+	models := slices.Collect(Discover(base))
 	require.Len(t, models, 2)
 
 	// Base dir should appear first (prepended).
@@ -129,14 +125,13 @@ func TestDiscover_Good_BaseDirPlusSubdir(t *testing.T) {
 func TestDiscover_Good_EmptyDir(t *testing.T) {
 	base := t.TempDir()
 
-	models, err := Discover(base)
-	require.NoError(t, err)
+	models := slices.Collect(Discover(base))
 	assert.Empty(t, models)
 }
 
 func TestDiscover_Bad_NonexistentDir(t *testing.T) {
-	_, err := Discover("/nonexistent/path/that/should/not/exist")
-	require.Error(t, err)
+	models := slices.Collect(Discover("/nonexistent/path/that/should/not/exist"))
+	assert.Empty(t, models)
 }
 
 func TestDiscover_Bad_NoSafetensors(t *testing.T) {
@@ -150,8 +145,7 @@ func TestDiscover_Bad_NoSafetensors(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), data, 0o644))
 
-	models, err := Discover(base)
-	require.NoError(t, err)
+	models := slices.Collect(Discover(base))
 	assert.Empty(t, models, "directory without safetensors should be skipped")
 }
 
@@ -162,25 +156,20 @@ func TestDiscover_Bad_NoConfig(t *testing.T) {
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "model.safetensors"), []byte("fake"), 0o644))
 
-	models, err := Discover(base)
-	require.NoError(t, err)
+	models := slices.Collect(Discover(base))
 	assert.Empty(t, models, "directory without config.json should be skipped")
 }
 
 func TestDiscover_Bad_InvalidJSON(t *testing.T) {
-	// config.json exists but contains invalid JSON. Should still count safetensors files
-	// since json.Unmarshal failure is silently ignored.
+	// config.json exists but contains invalid JSON. Should NOT count as a model anymore.
 	base := t.TempDir()
 	dir := filepath.Join(base, "bad-json")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), []byte("{invalid}"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "model.safetensors"), []byte("fake"), 0o644))
 
-	models, err := Discover(base)
-	require.NoError(t, err)
-	require.Len(t, models, 1)
-	assert.Equal(t, "", models[0].ModelType, "invalid JSON should yield empty model_type")
-	assert.Equal(t, 1, models[0].NumFiles)
+	models := slices.Collect(Discover(base))
+	require.Len(t, models, 0)
 }
 
 func TestDiscover_Ugly_SkipsRegularFiles(t *testing.T) {
@@ -192,8 +181,7 @@ func TestDiscover_Ugly_SkipsRegularFiles(t *testing.T) {
 		"model_type": "gemma3",
 	}, 1)
 
-	models, err := Discover(base)
-	require.NoError(t, err)
+	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 	assert.Equal(t, "gemma3", models[0].ModelType)
 }
@@ -205,8 +193,7 @@ func TestDiscover_Ugly_MissingModelType(t *testing.T) {
 		"vocab_size": 32000,
 	}, 1)
 
-	models, err := Discover(base)
-	require.NoError(t, err)
+	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 	assert.Equal(t, "", models[0].ModelType, "missing model_type should yield empty string")
 }
@@ -218,8 +205,7 @@ func TestDiscover_Ugly_NoQuantisation(t *testing.T) {
 		"model_type": "gemma3",
 	}, 1)
 
-	models, err := Discover(base)
-	require.NoError(t, err)
+	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 	assert.Equal(t, 0, models[0].QuantBits)
 	assert.Equal(t, 0, models[0].QuantGroup)
@@ -231,8 +217,7 @@ func TestDiscover_Good_MultipleSafetensors(t *testing.T) {
 		"model_type": "llama",
 	}, 8)
 
-	models, err := Discover(base)
-	require.NoError(t, err)
+	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 	assert.Equal(t, 8, models[0].NumFiles)
 }
@@ -243,8 +228,7 @@ func TestDiscover_Good_AbsolutePath(t *testing.T) {
 		"model_type": "gemma3",
 	}, 1)
 
-	models, err := Discover(base)
-	require.NoError(t, err)
+	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 	assert.True(t, filepath.IsAbs(models[0].Path), "discovered path must be absolute")
 }
