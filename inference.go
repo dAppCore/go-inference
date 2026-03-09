@@ -230,15 +230,10 @@ func List() []string {
 
 // All returns an iterator over all registered backends.
 func All() iter.Seq2[string, Backend] {
-	return func(yield func(string, Backend) bool) {
-		backendsMu.RLock()
-		defer backendsMu.RUnlock()
-		for k, v := range backends {
-			if !yield(k, v) {
-				return
-			}
-		}
-	}
+	backendsMu.RLock()
+	snap := maps.Clone(backends)
+	backendsMu.RUnlock()
+	return maps.All(snap)
 }
 
 // Default returns the first available backend.

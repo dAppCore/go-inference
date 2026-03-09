@@ -150,6 +150,48 @@ func TestList_Good_Populated(t *testing.T) {
 	assert.Equal(t, []string{"a", "b"}, List())
 }
 
+// --- All ---
+
+func TestAll_Good(t *testing.T) {
+	resetBackends(t)
+
+	Register(&stubBackend{name: "a", available: true})
+	Register(&stubBackend{name: "b", available: true})
+
+	found := map[string]Backend{}
+	for name, b := range All() {
+		found[name] = b
+	}
+
+	assert.Len(t, found, 2)
+	assert.Contains(t, found, "a")
+	assert.Contains(t, found, "b")
+}
+
+func TestAll_Good_Empty(t *testing.T) {
+	resetBackends(t)
+
+	for name := range All() {
+		t.Errorf("expected no backends, got %q", name)
+	}
+}
+
+func TestAll_Good_YieldFalse(t *testing.T) {
+	resetBackends(t)
+
+	Register(&stubBackend{name: "a", available: true})
+	Register(&stubBackend{name: "b", available: true})
+
+	count := 0
+	for name := range All() {
+		count++
+		if name == "a" || name == "b" {
+			break // Stop iteration
+		}
+	}
+	assert.Equal(t, 1, count, "iteration should stop early")
+}
+
 // --- Default ---
 
 func TestDefault_Good_Metal(t *testing.T) {
