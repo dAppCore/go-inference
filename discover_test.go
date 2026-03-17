@@ -222,6 +222,44 @@ func TestDiscover_Good_MultipleSafetensors(t *testing.T) {
 	assert.Equal(t, 8, models[0].NumFiles)
 }
 
+func TestDiscover_Good_EarlyBreakOnBaseDir(t *testing.T) {
+	// Base dir is a model and a subdir is also a model.
+	// Breaking after the first yield should stop iteration.
+	base := t.TempDir()
+	createModelDir(t, base, map[string]any{
+		"model_type": "parent",
+	}, 1)
+	createModelDir(t, filepath.Join(base, "child"), map[string]any{
+		"model_type": "child",
+	}, 1)
+
+	count := 0
+	for range Discover(base) {
+		count++
+		break // stop after first model
+	}
+	assert.Equal(t, 1, count, "iterator should stop after first yield when break is called")
+}
+
+func TestDiscover_Good_EarlyBreakOnSubdir(t *testing.T) {
+	// Base dir is NOT a model; two subdirs are models.
+	// Breaking after the first subdir yield should stop iteration.
+	base := t.TempDir()
+	createModelDir(t, filepath.Join(base, "model-a"), map[string]any{
+		"model_type": "a",
+	}, 1)
+	createModelDir(t, filepath.Join(base, "model-b"), map[string]any{
+		"model_type": "b",
+	}, 1)
+
+	count := 0
+	for range Discover(base) {
+		count++
+		break
+	}
+	assert.Equal(t, 1, count, "iterator should stop after first subdir yield when break is called")
+}
+
 func TestDiscover_Good_AbsolutePath(t *testing.T) {
 	base := t.TempDir()
 	createModelDir(t, filepath.Join(base, "test-model"), map[string]any{
