@@ -4,7 +4,7 @@
 
 `go-inference` is the shared interface contract for text generation backends in the Core Go ecosystem. It defines the types that GPU-specific backends implement and consumers depend on, without itself importing any backend or consumer code.
 
-Module path: `forge.lthn.ai/core/go-inference`
+Module path: `dappco.re/go/core/inference`
 
 ## Design Philosophy
 

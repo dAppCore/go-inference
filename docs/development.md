@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- Go 1.25 or later (uses `iter.Seq` from Go 1.23 and range-over-function from 1.22)
+- Go 1.26 or later (uses `iter.Seq`, `maps`, `slices`)
 - No CGO, no build tags, no external tools required
 - The package compiles on macOS, Linux, and Windows without modification
 
@@ -38,16 +38,16 @@ The workspace root is `/Users/snider/Code/host-uk/core`. The workspace file (`go
 ## Module Path
 
 ```
-forge.lthn.ai/core/go-inference
+dappco.re/go/core/inference
 ```
 
 Import it in consumers:
 
 ```go
-import "forge.lthn.ai/core/go-inference"
+import "dappco.re/go/core/inference"
 ```
 
-Remote: `ssh://git@forge.lthn.ai:2223/core/go-inference.git`
+Remote: `ssh://git@forge.lthn.ai:2223/core/go-inference.git` (legacy — module path is now `dappco.re/go/core/inference`)
 
 ## Repository Layout
 
@@ -209,7 +209,7 @@ Co-Authored-By: Virgil <virgil@lethean.io>
 
 To implement a new backend (e.g. `go-vulkan` for cross-platform GPU inference):
 
-1. Import `forge.lthn.ai/core/go-inference` in the new module.
+1. Import `dappco.re/go/core/inference` in the new module.
 2. Implement `inference.Backend`:
 
 ```go
