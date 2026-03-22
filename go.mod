@@ -1,4 +1,4 @@
-module forge.lthn.ai/core/go-inference
+module dappco.re/go/core/inference
 
 go 1.26.0
 
