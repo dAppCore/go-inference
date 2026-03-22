@@ -31,5 +31,5 @@ We follow the [Conventional Commits](https://www.conventionalcommits.org/) speci
 
 Example: `feat: add new endpoint for health check`
 
-## License
-By contributing to this project, you agree that your contributions will be licensed under the **European Union Public Licence (EUPL-1.2)**.
+## Licence
+By contributing to this project, you agree that your contributions will be licenced under the **European Union Public Licence (EUPL-1.2)**.
