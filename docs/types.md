@@ -5,7 +5,7 @@ description: Token, Message, config structs, functional options, and all support
 
 # Types
 
-All types are defined in the `inference` package (`forge.lthn.ai/core/go-inference`). There are no sub-packages.
+All types are defined in the `inference` package (`dappco.re/go/core/inference`). There are no sub-packages.
 
 ## Core value types
 
