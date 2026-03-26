@@ -1,10 +1,11 @@
 package inference
 
 import (
-	"encoding/json"
 	"iter"
 	"os"
 	"path/filepath"
+
+	"dappco.re/go/core"
 )
 
 // DiscoveredModel describes a model directory found by Discover.
@@ -21,7 +22,7 @@ type DiscoveredModel struct {
 // Scans one level deep (immediate subdirectories of baseDir).
 func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	return func(yield func(DiscoveredModel) bool) {
-		baseDir = filepath.Clean(baseDir)
+		baseDir = core.CleanPath(baseDir, core.Env("DS"))
 		entries, err := os.ReadDir(baseDir)
 		if err != nil {
 			return
@@ -38,7 +39,7 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 			if !entry.IsDir() {
 				continue
 			}
-			dir := filepath.Join(baseDir, entry.Name())
+			dir := core.Path(baseDir, entry.Name())
 			if m, ok := probeModelDir(dir); ok {
 				if !yield(m) {
 					return
@@ -50,15 +51,15 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 
 // probeModelDir checks if dir looks like a model directory.
 func probeModelDir(dir string) (DiscoveredModel, bool) {
-	configPath := filepath.Join(dir, "config.json")
+	configPath := core.Path(dir, "config.json")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return DiscoveredModel{}, false
 	}
 
 	// Count safetensors files.
-	matches, err := filepath.Glob(filepath.Join(dir, "*.safetensors"))
-	if err != nil || len(matches) == 0 {
+	matches := core.PathGlob(core.Path(dir, "*.safetensors"))
+	if len(matches) == 0 {
 		return DiscoveredModel{}, false
 	}
 
@@ -74,7 +75,7 @@ func probeModelDir(dir string) (DiscoveredModel, bool) {
 			GroupSize int `json:"group_size"`
 		} `json:"quantization"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	if r := core.JSONUnmarshal(data, &probe); !r.OK {
 		return DiscoveredModel{}, false
 	}
 

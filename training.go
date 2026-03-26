@@ -1,6 +1,6 @@
 package inference
 
-import "fmt"
+import "dappco.re/go/core"
 
 // LoRAConfig specifies LoRA adapter parameters for fine-tuning.
 type LoRAConfig struct {
@@ -65,7 +65,7 @@ func LoadTrainable(path string, opts ...LoadOption) (TrainableModel, error) {
 	tm, ok := model.(TrainableModel)
 	if !ok {
 		model.Close()
-		return nil, fmt.Errorf("inference: backend %q does not support training", model.ModelType())
+		return nil, core.NewError(core.Sprintf("inference: backend %q does not support training", model.ModelType()))
 	}
 	return tm, nil
 }

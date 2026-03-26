@@ -2,11 +2,11 @@ package inference
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"sync"
 	"testing"
 
+	"dappco.re/go/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -383,7 +383,7 @@ func TestLoadModel_Bad_BackendLoadError(t *testing.T) {
 	Register(&stubBackend{
 		name:      "broken",
 		available: true,
-		loadErr:   fmt.Errorf("GPU out of memory"),
+		loadErr:   core.NewError("GPU out of memory"),
 	})
 
 	_, err := LoadModel("/path/to/model", WithBackend("broken"))
@@ -414,7 +414,7 @@ func TestLoadModel_Ugly_DefaultBackendLoadError(t *testing.T) {
 	Register(&stubBackend{
 		name:      "metal",
 		available: true,
-		loadErr:   fmt.Errorf("model not found"),
+		loadErr:   core.NewError("model not found"),
 	})
 
 	_, err := LoadModel("/nonexistent/model")
@@ -534,7 +534,7 @@ func TestBatchResult_Good(t *testing.T) {
 func TestBatchResult_Bad(t *testing.T) {
 	br := BatchResult{
 		Tokens: nil,
-		Err:    fmt.Errorf("OOM"),
+		Err:    core.NewError("OOM"),
 	}
 	assert.Nil(t, br.Tokens)
 	assert.Error(t, br.Err)
@@ -589,7 +589,7 @@ func TestRegistry_Good_ConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			Register(&stubBackend{
-				name:      fmt.Sprintf("backend_%d", id),
+				name:      core.Sprintf("backend_%d", id),
 				available: true,
 			})
 		}(i)
