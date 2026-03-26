@@ -65,12 +65,13 @@ package inference
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"maps"
 	"slices"
 	"sync"
 	"time"
+
+	"dappco.re/go/core"
 )
 
 // Token represents a single generated token for streaming.
@@ -254,7 +255,7 @@ func Default() (Backend, error) {
 			return b, nil
 		}
 	}
-	return nil, fmt.Errorf("inference: no backends registered (import a backend package)")
+	return nil, core.NewError("inference: no backends registered (import a backend package)")
 }
 
 // LoadModel loads a model using the specified or default backend.
@@ -263,10 +264,10 @@ func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 	if cfg.Backend != "" {
 		b, ok := Get(cfg.Backend)
 		if !ok {
-			return nil, fmt.Errorf("inference: backend %q not registered", cfg.Backend)
+			return nil, core.NewError(core.Sprintf("inference: backend %q not registered", cfg.Backend))
 		}
 		if !b.Available() {
-			return nil, fmt.Errorf("inference: backend %q not available on this hardware", cfg.Backend)
+			return nil, core.NewError(core.Sprintf("inference: backend %q not available on this hardware", cfg.Backend))
 		}
 		return b.LoadModel(path, opts...)
 	}
