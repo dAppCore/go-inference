@@ -77,7 +77,7 @@ func (m *stubTextModel) Close() error             { return nil }
 
 // --- Register ---
 
-func TestRegister_Good(t *testing.T) {
+func TestInference_Register_Good(t *testing.T) {
 	resetBackends(t)
 
 	b := &stubBackend{name: "test_backend", available: true}
@@ -88,7 +88,7 @@ func TestRegister_Good(t *testing.T) {
 	assert.Equal(t, "test_backend", got.Name())
 }
 
-func TestRegister_Good_Multiple(t *testing.T) {
+func TestInference_Register_Good_Multiple(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "alpha", available: true})
@@ -98,7 +98,7 @@ func TestRegister_Good_Multiple(t *testing.T) {
 	assert.Equal(t, []string{"alpha", "beta", "gamma"}, List())
 }
 
-func TestRegister_Ugly_Overwrites(t *testing.T) {
+func TestInference_Register_Ugly_Overwrites(t *testing.T) {
 	resetBackends(t)
 
 	b1 := &stubBackend{name: "dup", available: false}
@@ -114,7 +114,7 @@ func TestRegister_Ugly_Overwrites(t *testing.T) {
 
 // --- Get ---
 
-func TestGet_Good(t *testing.T) {
+func TestInference_Get_Good(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "exists", available: true})
@@ -124,7 +124,7 @@ func TestGet_Good(t *testing.T) {
 	assert.Equal(t, "exists", b.Name())
 }
 
-func TestGet_Bad(t *testing.T) {
+func TestInference_Get_Bad(t *testing.T) {
 	resetBackends(t)
 
 	b, ok := Get("nonexistent")
@@ -134,14 +134,14 @@ func TestGet_Bad(t *testing.T) {
 
 // --- List ---
 
-func TestList_Good_Empty(t *testing.T) {
+func TestInference_List_Good_Empty(t *testing.T) {
 	resetBackends(t)
 
 	names := List()
 	assert.Empty(t, names)
 }
 
-func TestList_Good_Populated(t *testing.T) {
+func TestInference_List_Good_Populated(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "a", available: true})
@@ -152,7 +152,7 @@ func TestList_Good_Populated(t *testing.T) {
 
 // --- All ---
 
-func TestAll_Good(t *testing.T) {
+func TestInference_All_Good(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "a", available: true})
@@ -168,7 +168,7 @@ func TestAll_Good(t *testing.T) {
 	assert.Contains(t, found, "b")
 }
 
-func TestAll_Good_Empty(t *testing.T) {
+func TestInference_All_Good_Empty(t *testing.T) {
 	resetBackends(t)
 
 	for name := range All() {
@@ -176,7 +176,7 @@ func TestAll_Good_Empty(t *testing.T) {
 	}
 }
 
-func TestAll_Good_YieldFalse(t *testing.T) {
+func TestInference_All_Good_YieldFalse(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "a", available: true})
@@ -194,7 +194,7 @@ func TestAll_Good_YieldFalse(t *testing.T) {
 
 // --- Default ---
 
-func TestDefault_Good_Metal(t *testing.T) {
+func TestInference_Default_Good_Metal(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "metal", available: true})
@@ -206,7 +206,7 @@ func TestDefault_Good_Metal(t *testing.T) {
 	assert.Equal(t, "metal", b.Name(), "metal should be preferred when available")
 }
 
-func TestDefault_Good_Rocm(t *testing.T) {
+func TestInference_Default_Good_Rocm(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "rocm", available: true})
@@ -217,7 +217,7 @@ func TestDefault_Good_Rocm(t *testing.T) {
 	assert.Equal(t, "rocm", b.Name(), "rocm should be preferred when metal is absent")
 }
 
-func TestDefault_Good_LlamaCpp(t *testing.T) {
+func TestInference_Default_Good_LlamaCpp(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "llama_cpp", available: true})
@@ -227,7 +227,7 @@ func TestDefault_Good_LlamaCpp(t *testing.T) {
 	assert.Equal(t, "llama_cpp", b.Name(), "llama_cpp should be used as fallback")
 }
 
-func TestDefault_Good_PriorityOrder(t *testing.T) {
+func TestInference_Default_Good_PriorityOrder(t *testing.T) {
 	// Full priority test: metal > rocm > llama_cpp
 	tests := []struct {
 		name     string
@@ -275,7 +275,7 @@ func TestDefault_Good_PriorityOrder(t *testing.T) {
 	}
 }
 
-func TestDefault_Good_FallbackToAny(t *testing.T) {
+func TestInference_Default_Good_FallbackToAny(t *testing.T) {
 	resetBackends(t)
 
 	// A custom backend that's not in the priority list.
@@ -286,7 +286,7 @@ func TestDefault_Good_FallbackToAny(t *testing.T) {
 	assert.Equal(t, "custom_gpu", b.Name(), "should fall back to any available backend")
 }
 
-func TestDefault_Bad_NoBackends(t *testing.T) {
+func TestInference_Default_Bad_NoBackends(t *testing.T) {
 	resetBackends(t)
 
 	_, err := Default()
@@ -294,7 +294,7 @@ func TestDefault_Bad_NoBackends(t *testing.T) {
 	assert.Contains(t, err.Error(), "no backends registered")
 }
 
-func TestDefault_Bad_NoneAvailable(t *testing.T) {
+func TestInference_Default_Bad_NoneAvailable(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "metal", available: false})
@@ -305,7 +305,7 @@ func TestDefault_Bad_NoneAvailable(t *testing.T) {
 	assert.Contains(t, err.Error(), "no backends registered")
 }
 
-func TestDefault_Ugly_SkipsUnavailablePreferred(t *testing.T) {
+func TestInference_Default_Ugly_SkipsUnavailablePreferred(t *testing.T) {
 	resetBackends(t)
 
 	// metal registered but not available; custom_gpu is available.
@@ -319,7 +319,7 @@ func TestDefault_Ugly_SkipsUnavailablePreferred(t *testing.T) {
 
 // --- LoadModel ---
 
-func TestLoadModel_Good_DefaultBackend(t *testing.T) {
+func TestInference_LoadModel_Good_DefaultBackend(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "metal", available: true})
@@ -334,7 +334,7 @@ func TestLoadModel_Good_DefaultBackend(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-func TestLoadModel_Good_ExplicitBackend(t *testing.T) {
+func TestInference_LoadModel_Good_ExplicitBackend(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "metal", available: true})
@@ -349,7 +349,7 @@ func TestLoadModel_Good_ExplicitBackend(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-func TestLoadModel_Bad_NoBackends(t *testing.T) {
+func TestInference_LoadModel_Bad_NoBackends(t *testing.T) {
 	resetBackends(t)
 
 	_, err := LoadModel("/path/to/model")
@@ -357,7 +357,7 @@ func TestLoadModel_Bad_NoBackends(t *testing.T) {
 	assert.Contains(t, err.Error(), "no backends registered")
 }
 
-func TestLoadModel_Bad_ExplicitBackendNotRegistered(t *testing.T) {
+func TestInference_LoadModel_Bad_ExplicitBackendNotRegistered(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "metal", available: true})
@@ -367,7 +367,7 @@ func TestLoadModel_Bad_ExplicitBackendNotRegistered(t *testing.T) {
 	assert.Contains(t, err.Error(), "backend \"rocm\" not registered")
 }
 
-func TestLoadModel_Bad_ExplicitBackendNotAvailable(t *testing.T) {
+func TestInference_LoadModel_Bad_ExplicitBackendNotAvailable(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "rocm", available: false})
@@ -377,7 +377,7 @@ func TestLoadModel_Bad_ExplicitBackendNotAvailable(t *testing.T) {
 	assert.Contains(t, err.Error(), "backend \"rocm\" not available")
 }
 
-func TestLoadModel_Bad_BackendLoadError(t *testing.T) {
+func TestInference_LoadModel_Bad_BackendLoadError(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{
@@ -391,7 +391,7 @@ func TestLoadModel_Bad_BackendLoadError(t *testing.T) {
 	assert.Contains(t, err.Error(), "GPU out of memory")
 }
 
-func TestLoadModel_Good_PassesOptionsThrough(t *testing.T) {
+func TestInference_LoadModel_Good_PassesOptionsThrough(t *testing.T) {
 	resetBackends(t)
 
 	// Use a backend that captures the load path.
@@ -408,7 +408,7 @@ func TestLoadModel_Good_PassesOptionsThrough(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-func TestLoadModel_Ugly_DefaultBackendLoadError(t *testing.T) {
+func TestInference_LoadModel_Ugly_DefaultBackendLoadError(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{
@@ -433,7 +433,7 @@ func TestInference_InterfaceCompliance_Good(t *testing.T) {
 
 // --- AttentionSnapshot ---
 
-func TestAttentionSnapshot_Good(t *testing.T) {
+func TestInference_AttentionSnapshot_Good(t *testing.T) {
 	snap := AttentionSnapshot{
 		NumLayers:    28,
 		NumHeads:     16,
@@ -461,7 +461,7 @@ func (m *mockInspector) InspectAttention(_ context.Context, _ string, _ ...Gener
 	return &AttentionSnapshot{NumLayers: 28, NumHeads: 8, SeqLen: 10, HeadDim: 64, Architecture: "qwen3"}, nil
 }
 
-func TestAttentionInspector_Good_ReturnsSnapshot(t *testing.T) {
+func TestInference_AttentionInspector_Good_ReturnsSnapshot(t *testing.T) {
 	var inspector AttentionInspector = &mockInspector{}
 	snap, err := inspector.InspectAttention(context.Background(), "hello")
 	require.NoError(t, err)
@@ -470,7 +470,7 @@ func TestAttentionInspector_Good_ReturnsSnapshot(t *testing.T) {
 	assert.Equal(t, "qwen3", snap.Architecture)
 }
 
-func TestAttentionSnapshot_Good_HasQueries(t *testing.T) {
+func TestInference_AttentionSnapshot_Good_HasQueries(t *testing.T) {
 	snap := AttentionSnapshot{
 		NumLayers:     28,
 		NumHeads:      8,
@@ -494,19 +494,19 @@ func TestAttentionSnapshot_Good_HasQueries(t *testing.T) {
 
 // --- Struct types ---
 
-func TestToken_Good(t *testing.T) {
+func TestInference_Token_Good(t *testing.T) {
 	tok := Token{ID: 42, Text: "hello"}
 	assert.Equal(t, int32(42), tok.ID)
 	assert.Equal(t, "hello", tok.Text)
 }
 
-func TestMessage_Good(t *testing.T) {
+func TestInference_Message_Good(t *testing.T) {
 	msg := Message{Role: "user", Content: "Hi there"}
 	assert.Equal(t, "user", msg.Role)
 	assert.Equal(t, "Hi there", msg.Content)
 }
 
-func TestClassifyResult_Good(t *testing.T) {
+func TestInference_ClassifyResult_Good(t *testing.T) {
 	cr := ClassifyResult{
 		Token:  Token{ID: 1, Text: "yes"},
 		Logits: []float32{0.1, 0.9},
@@ -516,7 +516,7 @@ func TestClassifyResult_Good(t *testing.T) {
 	assert.Len(t, cr.Logits, 2)
 }
 
-func TestBatchResult_Good(t *testing.T) {
+func TestInference_BatchResult_Good(t *testing.T) {
 	br := BatchResult{
 		Tokens: []Token{{ID: 1, Text: "a"}, {ID: 2, Text: "b"}},
 		Err:    nil,
@@ -525,7 +525,7 @@ func TestBatchResult_Good(t *testing.T) {
 	assert.NoError(t, br.Err)
 }
 
-func TestBatchResult_Bad(t *testing.T) {
+func TestInference_BatchResult_Bad(t *testing.T) {
 	br := BatchResult{
 		Tokens: nil,
 		Err:    core.NewError("OOM"),
@@ -534,7 +534,7 @@ func TestBatchResult_Bad(t *testing.T) {
 	assert.Error(t, br.Err)
 }
 
-func TestModelInfo_Good(t *testing.T) {
+func TestInference_ModelInfo_Good(t *testing.T) {
 	info := ModelInfo{
 		Architecture: "gemma3",
 		VocabSize:    256128,
@@ -551,7 +551,7 @@ func TestModelInfo_Good(t *testing.T) {
 	assert.Equal(t, 64, info.QuantGroup)
 }
 
-func TestGenerateMetrics_Good(t *testing.T) {
+func TestInference_GenerateMetrics_Good(t *testing.T) {
 	metrics := GenerateMetrics{
 		PromptTokens:        100,
 		GeneratedTokens:     50,
@@ -570,7 +570,7 @@ func TestGenerateMetrics_Good(t *testing.T) {
 
 // --- Concurrent registry access ---
 
-func TestRegistry_Good_ConcurrentAccess(t *testing.T) {
+func TestInference_Registry_Good_ConcurrentAccess(t *testing.T) {
 	// Verify the registry is safe for concurrent reads and writes.
 	// The -race flag will catch data races if the mutex is broken.
 	resetBackends(t)
@@ -617,7 +617,7 @@ func TestRegistry_Good_ConcurrentAccess(t *testing.T) {
 
 // --- Register overwrite count ---
 
-func TestRegister_Ugly_OverwriteKeepsCount(t *testing.T) {
+func TestInference_Register_Ugly_OverwriteKeepsCount(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "alpha", available: true})
@@ -630,7 +630,7 @@ func TestRegister_Ugly_OverwriteKeepsCount(t *testing.T) {
 
 // --- Default with all preferred unavailable and custom available ---
 
-func TestDefault_Ugly_AllPreferredUnavailableCustomAvailable(t *testing.T) {
+func TestInference_Default_Ugly_AllPreferredUnavailableCustomAvailable(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "metal", available: false})
@@ -646,7 +646,7 @@ func TestDefault_Ugly_AllPreferredUnavailableCustomAvailable(t *testing.T) {
 
 // --- Default with multiple custom backends ---
 
-func TestDefault_Ugly_MultipleCustomBackends(t *testing.T) {
+func TestInference_Default_Ugly_MultipleCustomBackends(t *testing.T) {
 	resetBackends(t)
 
 	// Only non-preferred backends registered — one available, one not.
@@ -661,7 +661,7 @@ func TestDefault_Ugly_MultipleCustomBackends(t *testing.T) {
 
 // --- LoadModel option forwarding ---
 
-func TestLoadModel_Good_ExplicitBackendForwardsOptions(t *testing.T) {
+func TestInference_LoadModel_Good_ExplicitBackendForwardsOptions(t *testing.T) {
 	resetBackends(t)
 
 	cb := &capturingBackend{name: "cap", available: true}
@@ -688,7 +688,7 @@ func TestLoadModel_Good_ExplicitBackendForwardsOptions(t *testing.T) {
 	require.NoError(t, m.Close())
 }
 
-func TestLoadModel_Good_DefaultBackendForwardsOptions(t *testing.T) {
+func TestInference_LoadModel_Good_DefaultBackendForwardsOptions(t *testing.T) {
 	resetBackends(t)
 
 	cb := &capturingBackend{name: "metal", available: true}
@@ -716,7 +716,7 @@ func TestLoadModel_Good_DefaultBackendForwardsOptions(t *testing.T) {
 
 // --- Default preference order does not depend on registration order ---
 
-func TestDefault_Good_RegistrationOrderIrrelevant(t *testing.T) {
+func TestInference_Default_Good_RegistrationOrderIrrelevant(t *testing.T) {
 	// Register in reverse priority order — metal should still be chosen.
 	resetBackends(t)
 
@@ -744,7 +744,7 @@ func TestDefault_Good_RegistrationOrderIrrelevant(t *testing.T) {
 
 // --- LoadModel with empty path ---
 
-func TestLoadModel_Ugly_EmptyPath(t *testing.T) {
+func TestInference_LoadModel_Ugly_EmptyPath(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "metal", available: true})
@@ -759,7 +759,7 @@ func TestLoadModel_Ugly_EmptyPath(t *testing.T) {
 
 // --- Get after register and overwrite ---
 
-func TestGet_Good_AfterOverwrite(t *testing.T) {
+func TestInference_Get_Good_AfterOverwrite(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "gpu", available: false})
@@ -772,7 +772,7 @@ func TestGet_Good_AfterOverwrite(t *testing.T) {
 
 // --- List slice independence ---
 
-func TestList_Good_IndependentSlices(t *testing.T) {
+func TestInference_List_Good_IndependentSlices(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "alpha", available: true})
