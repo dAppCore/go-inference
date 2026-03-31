@@ -221,7 +221,7 @@ Via type assertion on an existing model:
 ```go
 trainableModel, ok := model.(inference.TrainableModel)
 if !ok {
-    log.Fatal("backend does not support training")
+    log.Fatal("loaded model does not support training")
 }
 ```
 

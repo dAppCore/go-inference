@@ -69,6 +69,7 @@ func TestLoadTrainable_Bad_NotTrainable(t *testing.T) {
 
 	_, err := LoadTrainable("/path/to/model")
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "model type")
 	assert.Contains(t, err.Error(), "does not support training")
 }
 

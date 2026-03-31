@@ -31,8 +31,8 @@ type Adapter interface {
 	Save(path string) error
 }
 
-// trainableModel, ok := model.(inference.TrainableModel)
-// if !ok { return fmt.Errorf("backend does not support training") }
+// trainableModel, ok := loadedModel.(inference.TrainableModel)
+// if !ok { return fmt.Errorf("loaded model does not support training") }
 type TrainableModel interface {
 	TextModel
 
@@ -60,7 +60,7 @@ func LoadTrainable(path string, loadOptions ...LoadOption) (TrainableModel, erro
 	trainableModel, ok := loadedModel.(TrainableModel)
 	if !ok {
 		loadedModel.Close()
-		return nil, fmt.Errorf("inference: backend %q does not support training", loadedModel.ModelType())
+		return nil, fmt.Errorf("inference: model type %q does not support training", loadedModel.ModelType())
 	}
 	return trainableModel, nil
 }
