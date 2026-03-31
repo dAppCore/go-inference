@@ -9,7 +9,7 @@ import (
 
 // --- DefaultGenerateConfig stability ---
 
-func TestDefaultGenerateConfig_Good_Idempotent(t *testing.T) {
+func TestOptions_DefaultGenerateConfig_Good_Idempotent(t *testing.T) {
 	// Calling DefaultGenerateConfig twice should yield identical results.
 	firstConfig := DefaultGenerateConfig()
 	secondConfig := DefaultGenerateConfig()
@@ -18,7 +18,7 @@ func TestDefaultGenerateConfig_Good_Idempotent(t *testing.T) {
 
 // --- GenerateConfig defaults ---
 
-func TestDefaultGenerateConfig_Good(t *testing.T) {
+func TestOptions_DefaultGenerateConfig_Good(t *testing.T) {
 	cfg := DefaultGenerateConfig()
 	assert.Equal(t, 256, cfg.MaxTokens, "default MaxTokens should be 256")
 	assert.Equal(t, float32(0.0), cfg.Temperature, "default Temperature should be 0.0 (greedy)")
@@ -31,7 +31,7 @@ func TestDefaultGenerateConfig_Good(t *testing.T) {
 
 // --- WithMaxTokens ---
 
-func TestWithMaxTokens_Good(t *testing.T) {
+func TestOptions_WithMaxTokens_Good(t *testing.T) {
 	tests := []struct {
 		name string
 		val  int
@@ -49,7 +49,7 @@ func TestWithMaxTokens_Good(t *testing.T) {
 	}
 }
 
-func TestWithMaxTokens_Bad(t *testing.T) {
+func TestOptions_WithMaxTokens_Bad(t *testing.T) {
 	// Zero and negative values are accepted (no validation in options layer).
 	cfg := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(0)})
 	assert.Equal(t, 0, cfg.MaxTokens)
@@ -58,7 +58,7 @@ func TestWithMaxTokens_Bad(t *testing.T) {
 	assert.Equal(t, -1, cfg.MaxTokens)
 }
 
-func TestWithMaxTokens_Good_OtherFieldsUnchanged(t *testing.T) {
+func TestOptions_WithMaxTokens_Good_OtherFieldsUnchanged(t *testing.T) {
 	// Setting MaxTokens should not affect other fields.
 	cfg := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(512)})
 	def := DefaultGenerateConfig()
@@ -73,7 +73,7 @@ func TestWithMaxTokens_Good_OtherFieldsUnchanged(t *testing.T) {
 
 // --- WithTemperature ---
 
-func TestWithTemperature_Good(t *testing.T) {
+func TestOptions_WithTemperature_Good(t *testing.T) {
 	tests := []struct {
 		name string
 		val  float32
@@ -92,7 +92,7 @@ func TestWithTemperature_Good(t *testing.T) {
 	}
 }
 
-func TestWithTemperature_Bad(t *testing.T) {
+func TestOptions_WithTemperature_Bad(t *testing.T) {
 	// Negative temperature is accepted at the options layer (no validation).
 	cfg := ApplyGenerateOpts([]GenerateOption{WithTemperature(-0.5)})
 	assert.InDelta(t, -0.5, cfg.Temperature, 0.0001, "negative temperature should be stored as-is")
@@ -100,7 +100,7 @@ func TestWithTemperature_Bad(t *testing.T) {
 
 // --- WithTopK ---
 
-func TestWithTopK_Good(t *testing.T) {
+func TestOptions_WithTopK_Good(t *testing.T) {
 	tests := []struct {
 		name string
 		val  int
@@ -119,7 +119,7 @@ func TestWithTopK_Good(t *testing.T) {
 	}
 }
 
-func TestWithTopK_Bad(t *testing.T) {
+func TestOptions_WithTopK_Bad(t *testing.T) {
 	// Negative TopK is accepted at the options layer (no validation).
 	cfg := ApplyGenerateOpts([]GenerateOption{WithTopK(-1)})
 	assert.Equal(t, -1, cfg.TopK, "negative TopK should be stored as-is")
@@ -127,7 +127,7 @@ func TestWithTopK_Bad(t *testing.T) {
 
 // --- WithTopP ---
 
-func TestWithTopP_Good(t *testing.T) {
+func TestOptions_WithTopP_Good(t *testing.T) {
 	tests := []struct {
 		name string
 		val  float32
@@ -148,7 +148,7 @@ func TestWithTopP_Good(t *testing.T) {
 
 // --- WithStopTokens ---
 
-func TestWithStopTokens_Good(t *testing.T) {
+func TestOptions_WithStopTokens_Good(t *testing.T) {
 	t.Run("single", func(t *testing.T) {
 		cfg := ApplyGenerateOpts([]GenerateOption{WithStopTokens(1)})
 		assert.Equal(t, []int32{1}, cfg.StopTokens)
@@ -160,14 +160,14 @@ func TestWithStopTokens_Good(t *testing.T) {
 	})
 }
 
-func TestWithStopTokens_Bad(t *testing.T) {
+func TestOptions_WithStopTokens_Bad(t *testing.T) {
 	// Empty variadic — Go passes nil to the variadic parameter, so StopTokens
 	// is set to nil (same as default). This is a known Go behaviour.
 	cfg := ApplyGenerateOpts([]GenerateOption{WithStopTokens()})
 	assert.Nil(t, cfg.StopTokens, "empty variadic should set StopTokens to nil")
 }
 
-func TestWithStopTokens_Ugly(t *testing.T) {
+func TestOptions_WithStopTokens_Ugly(t *testing.T) {
 	// Last call wins — stop tokens are replaced, not merged.
 	cfg := ApplyGenerateOpts([]GenerateOption{
 		WithStopTokens(1, 2),
@@ -178,7 +178,7 @@ func TestWithStopTokens_Ugly(t *testing.T) {
 
 // --- WithRepeatPenalty ---
 
-func TestWithRepeatPenalty_Good(t *testing.T) {
+func TestOptions_WithRepeatPenalty_Good(t *testing.T) {
 	tests := []struct {
 		name string
 		val  float32
@@ -199,12 +199,12 @@ func TestWithRepeatPenalty_Good(t *testing.T) {
 
 // --- WithLogits ---
 
-func TestWithLogits_Good(t *testing.T) {
+func TestOptions_WithLogits_Good(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithLogits()})
 	assert.True(t, cfg.ReturnLogits)
 }
 
-func TestWithLogits_Good_DefaultIsFalse(t *testing.T) {
+func TestOptions_WithLogits_Good_DefaultIsFalse(t *testing.T) {
 	// Without WithLogits, ReturnLogits stays false.
 	cfg := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(64)})
 	assert.False(t, cfg.ReturnLogits, "ReturnLogits should be false when WithLogits is not applied")
@@ -212,7 +212,7 @@ func TestWithLogits_Good_DefaultIsFalse(t *testing.T) {
 
 // --- ApplyGenerateOpts ---
 
-func TestApplyGenerateOpts_Good(t *testing.T) {
+func TestOptions_ApplyGenerateOpts_Good(t *testing.T) {
 	t.Run("nil_opts_returns_defaults", func(t *testing.T) {
 		actualConfig := ApplyGenerateOpts(nil)
 		defaultConfig := DefaultGenerateConfig()
@@ -245,7 +245,7 @@ func TestApplyGenerateOpts_Good(t *testing.T) {
 	})
 }
 
-func TestApplyGenerateOpts_Good_PartialOptions(t *testing.T) {
+func TestOptions_ApplyGenerateOpts_Good_PartialOptions(t *testing.T) {
 	// Applying only some options should preserve defaults for the rest.
 	cfg := ApplyGenerateOpts([]GenerateOption{
 		WithTemperature(0.8),
@@ -261,7 +261,7 @@ func TestApplyGenerateOpts_Good_PartialOptions(t *testing.T) {
 	assert.False(t, cfg.ReturnLogits, "ReturnLogits should remain false")
 }
 
-func TestApplyGenerateOpts_Ugly(t *testing.T) {
+func TestOptions_ApplyGenerateOpts_Ugly(t *testing.T) {
 	t.Run("last_option_wins", func(t *testing.T) {
 		cfg := ApplyGenerateOpts([]GenerateOption{
 			WithMaxTokens(100),
@@ -306,7 +306,7 @@ func TestApplyGenerateOpts_Ugly(t *testing.T) {
 
 // --- LoadConfig defaults ---
 
-func TestApplyLoadOpts_Good_Defaults(t *testing.T) {
+func TestOptions_ApplyLoadOpts_Good_Defaults(t *testing.T) {
 	cfg := ApplyLoadOpts(nil)
 	assert.Equal(t, "", cfg.Backend, "default Backend should be empty (auto-detect)")
 	assert.Equal(t, 0, cfg.ContextLen, "default ContextLen should be 0 (model default)")
@@ -316,7 +316,7 @@ func TestApplyLoadOpts_Good_Defaults(t *testing.T) {
 
 // --- WithBackend ---
 
-func TestWithBackend_Good(t *testing.T) {
+func TestOptions_WithBackend_Good(t *testing.T) {
 	tests := []struct {
 		name    string
 		backend string
@@ -333,7 +333,7 @@ func TestWithBackend_Good(t *testing.T) {
 	}
 }
 
-func TestWithBackend_Bad(t *testing.T) {
+func TestOptions_WithBackend_Bad(t *testing.T) {
 	// Empty string is valid at the options layer (means auto-detect).
 	cfg := ApplyLoadOpts([]LoadOption{WithBackend("")})
 	assert.Equal(t, "", cfg.Backend)
@@ -341,7 +341,7 @@ func TestWithBackend_Bad(t *testing.T) {
 
 // --- WithContextLen ---
 
-func TestWithContextLen_Good(t *testing.T) {
+func TestOptions_WithContextLen_Good(t *testing.T) {
 	tests := []struct {
 		name string
 		val  int
@@ -361,7 +361,7 @@ func TestWithContextLen_Good(t *testing.T) {
 
 // --- WithGPULayers ---
 
-func TestWithGPULayers_Good(t *testing.T) {
+func TestOptions_WithGPULayers_Good(t *testing.T) {
 	tests := []struct {
 		name string
 		val  int
@@ -379,7 +379,7 @@ func TestWithGPULayers_Good(t *testing.T) {
 	}
 }
 
-func TestWithGPULayers_Ugly(t *testing.T) {
+func TestOptions_WithGPULayers_Ugly(t *testing.T) {
 	// Override the default -1 with 0
 	cfg := ApplyLoadOpts([]LoadOption{WithGPULayers(0)})
 	assert.Equal(t, 0, cfg.GPULayers, "WithGPULayers(0) should override default -1")
@@ -387,7 +387,7 @@ func TestWithGPULayers_Ugly(t *testing.T) {
 
 // --- WithParallelSlots ---
 
-func TestWithParallelSlots_Good(t *testing.T) {
+func TestOptions_WithParallelSlots_Good(t *testing.T) {
 	tests := []struct {
 		name string
 		val  int
@@ -407,7 +407,7 @@ func TestWithParallelSlots_Good(t *testing.T) {
 
 // --- ApplyLoadOpts combined ---
 
-func TestApplyLoadOpts_Good_Combined(t *testing.T) {
+func TestOptions_ApplyLoadOpts_Good_Combined(t *testing.T) {
 	cfg := ApplyLoadOpts([]LoadOption{
 		WithBackend("rocm"),
 		WithContextLen(8192),
@@ -420,7 +420,7 @@ func TestApplyLoadOpts_Good_Combined(t *testing.T) {
 	assert.Equal(t, 2, cfg.ParallelSlots)
 }
 
-func TestApplyLoadOpts_Good_PartialOptions(t *testing.T) {
+func TestOptions_ApplyLoadOpts_Good_PartialOptions(t *testing.T) {
 	// Applying only some options should preserve defaults for the rest.
 	cfg := ApplyLoadOpts([]LoadOption{WithContextLen(4096)})
 	assert.Equal(t, "", cfg.Backend, "Backend should remain at default (auto-detect)")
@@ -429,7 +429,7 @@ func TestApplyLoadOpts_Good_PartialOptions(t *testing.T) {
 	assert.Equal(t, 0, cfg.ParallelSlots, "ParallelSlots should remain at default (0)")
 }
 
-func TestApplyLoadOpts_Ugly(t *testing.T) {
+func TestOptions_ApplyLoadOpts_Ugly(t *testing.T) {
 	t.Run("last_option_wins", func(t *testing.T) {
 		cfg := ApplyLoadOpts([]LoadOption{
 			WithBackend("metal"),
@@ -479,7 +479,7 @@ func TestApplyLoadOpts_Ugly(t *testing.T) {
 
 // --- WithAdapterPath ---
 
-func TestWithAdapterPath_Good(t *testing.T) {
+func TestOptions_WithAdapterPath_Good(t *testing.T) {
 	tests := []struct {
 		name string
 		val  string
@@ -496,18 +496,18 @@ func TestWithAdapterPath_Good(t *testing.T) {
 	}
 }
 
-func TestWithAdapterPath_Bad(t *testing.T) {
+func TestOptions_WithAdapterPath_Bad(t *testing.T) {
 	// Empty string is valid at the options layer (means no adapter).
 	cfg := ApplyLoadOpts([]LoadOption{WithAdapterPath("")})
 	assert.Equal(t, "", cfg.AdapterPath)
 }
 
-func TestWithAdapterPath_Good_DefaultIsEmpty(t *testing.T) {
+func TestOptions_WithAdapterPath_Good_DefaultIsEmpty(t *testing.T) {
 	cfg := ApplyLoadOpts(nil)
 	assert.Equal(t, "", cfg.AdapterPath, "default AdapterPath should be empty")
 }
 
-func TestWithAdapterPath_Good_OtherFieldsUnchanged(t *testing.T) {
+func TestOptions_WithAdapterPath_Good_OtherFieldsUnchanged(t *testing.T) {
 	cfg := ApplyLoadOpts([]LoadOption{WithAdapterPath("/some/path")})
 	assert.Equal(t, "", cfg.Backend, "Backend should remain at default")
 	assert.Equal(t, 0, cfg.ContextLen, "ContextLen should remain at default")

@@ -10,7 +10,7 @@ import (
 
 // --- DefaultLoRAConfig ---
 
-func TestDefaultLoRAConfig_Good(t *testing.T) {
+func TestTraining_DefaultLoRAConfig_Good(t *testing.T) {
 	cfg := DefaultLoRAConfig()
 	assert.Equal(t, 8, cfg.Rank, "default Rank should be 8")
 	assert.InDelta(t, float32(16), cfg.Alpha, 0.0001, "default Alpha should be 16")
@@ -18,7 +18,7 @@ func TestDefaultLoRAConfig_Good(t *testing.T) {
 	assert.False(t, cfg.BFloat16, "default BFloat16 should be false")
 }
 
-func TestDefaultLoRAConfig_Good_Idempotent(t *testing.T) {
+func TestTraining_DefaultLoRAConfig_Good_Idempotent(t *testing.T) {
 	firstConfig := DefaultLoRAConfig()
 	secondConfig := DefaultLoRAConfig()
 	assert.Equal(t, firstConfig, secondConfig, "DefaultLoRAConfig should be idempotent")
@@ -46,7 +46,7 @@ func (b *trainableBackend) LoadModel(_ string, _ ...LoadOption) (TextModel, erro
 	return &stubTrainableModel{stubTextModel: stubTextModel{backend: b.name}}, nil
 }
 
-func TestLoadTrainable_Good(t *testing.T) {
+func TestTraining_LoadTrainable_Good(t *testing.T) {
 	resetBackends(t)
 
 	Register(&trainableBackend{name: "metal", available: true})
@@ -58,7 +58,7 @@ func TestLoadTrainable_Good(t *testing.T) {
 	require.NoError(t, tm.Close())
 }
 
-func TestLoadTrainable_Bad_NoBackends(t *testing.T) {
+func TestTraining_LoadTrainable_Bad_NoBackends(t *testing.T) {
 	resetBackends(t)
 
 	_, err := LoadTrainable("/path/to/model")
@@ -66,7 +66,7 @@ func TestLoadTrainable_Bad_NoBackends(t *testing.T) {
 	assert.Contains(t, err.Error(), "no backends registered")
 }
 
-func TestLoadTrainable_Bad_NotTrainable(t *testing.T) {
+func TestTraining_LoadTrainable_Bad_NotTrainable(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{name: "metal", available: true})
@@ -76,7 +76,7 @@ func TestLoadTrainable_Bad_NotTrainable(t *testing.T) {
 	assert.Contains(t, err.Error(), "does not support training")
 }
 
-func TestLoadTrainable_Bad_LoadError(t *testing.T) {
+func TestTraining_LoadTrainable_Bad_LoadError(t *testing.T) {
 	resetBackends(t)
 
 	Register(&stubBackend{
@@ -90,7 +90,7 @@ func TestLoadTrainable_Bad_LoadError(t *testing.T) {
 	assert.Contains(t, err.Error(), "GPU out of memory")
 }
 
-func TestLoadTrainable_Good_ExplicitBackend(t *testing.T) {
+func TestTraining_LoadTrainable_Good_ExplicitBackend(t *testing.T) {
 	resetBackends(t)
 
 	Register(&trainableBackend{name: "rocm", available: true})
@@ -103,6 +103,34 @@ func TestLoadTrainable_Good_ExplicitBackend(t *testing.T) {
 
 // --- TrainableModel interface compliance ---
 
-func TestTrainableModel_Good_InterfaceCompliance(t *testing.T) {
+func TestTraining_TrainableModel_Good_InterfaceCompliance(t *testing.T) {
 	var _ TrainableModel = (*stubTrainableModel)(nil)
+}
+
+// --- Ugly: edge cases ---
+
+func TestTraining_LoadTrainable_Ugly_SkipsUnavailableBackend(t *testing.T) {
+	resetBackends(t)
+
+	// Preferred backend registered but unavailable; a fallback is available.
+	// Default() should skip the unavailable one and return the fallback.
+	Register(&trainableBackend{name: "unavailable", available: false})
+	Register(&trainableBackend{name: "fallback", available: true})
+
+	// LoadTrainable without explicit backend — Default() picks the available fallback.
+	tm, err := LoadTrainable("/path/to/model")
+	require.NoError(t, err)
+	require.NotNil(t, tm)
+	require.NoError(t, tm.Close())
+}
+
+func TestTraining_DefaultLoRAConfig_Good_TargetKeysIndependent(t *testing.T) {
+	// Mutating the returned TargetKeys should not affect a subsequent call.
+	cfg1 := DefaultLoRAConfig()
+	cfg1.TargetKeys = append(cfg1.TargetKeys, "o_proj")
+
+	cfg2 := DefaultLoRAConfig()
+	assert.Equal(t, []string{"q_proj", "v_proj"}, cfg2.TargetKeys,
+		"DefaultLoRAConfig should return independent TargetKeys slices")
+	assert.Len(t, cfg1.TargetKeys, 3, "mutated copy should have 3 keys")
 }

@@ -1,9 +1,8 @@
 package inference
 
 import (
+	iofs "io/fs"
 	"iter"
-	"os"
-	"path/filepath"
 
 	"dappco.re/go/core"
 )
@@ -32,12 +31,15 @@ type DiscoveredModel struct {
 func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	return func(yield func(DiscoveredModel) bool) {
 		baseDir = core.CleanPath(baseDir, core.Env("DS"))
-		entries, err := os.ReadDir(baseDir)
-		if err != nil {
+		fs := (&core.Fs{}).NewUnrestricted()
+
+		r := fs.List(baseDir)
+		if !r.OK {
 			return
 		}
+		entries := r.Value.([]iofs.DirEntry)
 
-		if m, ok := probeModelDir(baseDir); ok {
+		if m, ok := probeModelDir(baseDir, fs); ok {
 			if !yield(m) {
 				return
 			}
@@ -48,7 +50,7 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 				continue
 			}
 			dir := core.Path(baseDir, entry.Name())
-			if m, ok := probeModelDir(dir); ok {
+			if m, ok := probeModelDir(dir, fs); ok {
 				if !yield(m) {
 					return
 				}
@@ -58,10 +60,10 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 }
 
 // Accepts directories that contain config.json and at least one .safetensors file.
-func probeModelDir(dir string) (DiscoveredModel, bool) {
+func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
 	configPath := core.Path(dir, "config.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
+	r := fs.Read(configPath)
+	if !r.OK {
 		return DiscoveredModel{}, false
 	}
 
@@ -70,9 +72,9 @@ func probeModelDir(dir string) (DiscoveredModel, bool) {
 		return DiscoveredModel{}, false
 	}
 
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		absDir = dir
+	absDir := dir
+	if !core.PathIsAbs(dir) {
+		absDir = core.Path(dir)
 	}
 
 	var probe struct {
@@ -82,7 +84,7 @@ func probeModelDir(dir string) (DiscoveredModel, bool) {
 			GroupSize int `json:"group_size"`
 		} `json:"quantization"`
 	}
-	if r := core.JSONUnmarshal(data, &probe); !r.OK {
+	if rr := core.JSONUnmarshalString(r.Value.(string), &probe); !rr.OK {
 		return DiscoveredModel{}, false
 	}
 
