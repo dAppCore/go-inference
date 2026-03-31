@@ -2,10 +2,8 @@ package inference
 
 import "dappco.re/go/core"
 
-// LoRAConfig specifies LoRA adapter parameters for fine-tuning.
-//
-//	inference.LoRAConfig{Rank: 16, Alpha: 32, TargetKeys: []string{"q_proj", "k_proj", "v_proj"}}
-//	inference.LoRAConfig{Rank: 8, Alpha: 16, BFloat16: true} // mixed-precision adapter
+// inference.LoRAConfig{Rank: 16, Alpha: 32, TargetKeys: []string{"q_proj", "k_proj", "v_proj"}}
+// inference.LoRAConfig{Rank: 8, Alpha: 16, BFloat16: true} // mixed-precision adapter
 type LoRAConfig struct {
 	Rank       int      // Decomposition rank (default 8)
 	Alpha      float32  // Scaling factor (default 16)
@@ -13,9 +11,7 @@ type LoRAConfig struct {
 	BFloat16   bool     // Use BFloat16 for adapter weights (mixed precision)
 }
 
-// DefaultLoRAConfig returns Rank=8, Alpha=16, targeting q_proj and v_proj layers.
-//
-//	cfg := inference.DefaultLoRAConfig() // Rank=8, Alpha=16, TargetKeys=["q_proj","v_proj"]
+// cfg := inference.DefaultLoRAConfig() // Rank=8, Alpha=16, TargetKeys=["q_proj","v_proj"]
 func DefaultLoRAConfig() LoRAConfig {
 	return LoRAConfig{
 		Rank:       8,
@@ -24,7 +20,6 @@ func DefaultLoRAConfig() LoRAConfig {
 	}
 }
 
-// Adapter holds trainable LoRA parameters applied to a model.
 // The concrete type is backend-specific (e.g. *metal.LoRAAdapter for go-mlx).
 //
 //	adapter := tm.ApplyLoRA(inference.DefaultLoRAConfig())
@@ -42,8 +37,6 @@ type Adapter interface {
 	Save(path string) error
 }
 
-// TrainableModel extends TextModel with LoRA fine-tuning capabilities.
-//
 // Use type assertion to check if a loaded model supports training:
 //
 //	tm, ok := model.(inference.TrainableModel)
@@ -77,10 +70,8 @@ type TrainableModel interface {
 	NumLayers() int
 }
 
-// LoadTrainable loads a model and asserts fine-tuning support. Errors if the backend cannot train.
-//
-//	tm, err := inference.LoadTrainable("/models/gemma3-1b")
-//	adapter := tm.ApplyLoRA(inference.DefaultLoRAConfig())
+// tm, err := inference.LoadTrainable("/models/gemma3-1b")
+// adapter := tm.ApplyLoRA(inference.DefaultLoRAConfig())
 func LoadTrainable(path string, opts ...LoadOption) (TrainableModel, error) {
 	model, err := LoadModel(path, opts...)
 	if err != nil {
