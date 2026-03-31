@@ -424,7 +424,7 @@ func TestLoadModel_Ugly_DefaultBackendLoadError(t *testing.T) {
 
 // --- Type assertions (compile-time checks) ---
 
-func TestTypes_Good_InterfaceCompliance(t *testing.T) {
+func TestInference_InterfaceCompliance_Good(t *testing.T) {
 	// Verify stubBackend implements Backend.
 	var _ Backend = (*stubBackend)(nil)
 	// Verify stubTextModel implements TextModel.
@@ -450,7 +450,7 @@ func TestAttentionSnapshot_Good(t *testing.T) {
 	assert.Equal(t, "gemma3", snap.Architecture)
 }
 
-func TestAttentionInspector_Good_InterfaceCompliance(t *testing.T) {
+func TestInference_AttentionInspectorCompliance_Good(t *testing.T) {
 	// Compile-time check: the interface exists and has the right signature.
 	var _ AttentionInspector = (*mockInspector)(nil)
 }
@@ -481,21 +481,15 @@ func TestAttentionSnapshot_Good_HasQueries(t *testing.T) {
 		Queries:       make([][][]float32, 28),
 		Architecture:  "gemma3",
 	}
-	if snap.NumQueryHeads != 32 {
-		t.Fatalf("expected 32 query heads, got %d", snap.NumQueryHeads)
-	}
-	if snap.HasQueries() != true {
-		t.Fatal("expected HasQueries() == true when Queries is non-nil")
-	}
+	assert.Equal(t, 32, snap.NumQueryHeads, "expected 32 query heads")
+	assert.True(t, snap.HasQueries(), "HasQueries() should be true when Queries is non-nil")
 
 	kOnly := AttentionSnapshot{
 		NumLayers: 28,
 		NumHeads:  8,
 		Keys:      make([][][]float32, 28),
 	}
-	if kOnly.HasQueries() != false {
-		t.Fatal("expected HasQueries() == false when Queries is nil")
-	}
+	assert.False(t, kOnly.HasQueries(), "HasQueries() should be false when Queries is nil")
 }
 
 // --- Struct types ---
@@ -558,7 +552,7 @@ func TestModelInfo_Good(t *testing.T) {
 }
 
 func TestGenerateMetrics_Good(t *testing.T) {
-	m := GenerateMetrics{
+	metrics := GenerateMetrics{
 		PromptTokens:        100,
 		GeneratedTokens:     50,
 		PrefillTokensPerSec: 1000.0,
@@ -566,12 +560,12 @@ func TestGenerateMetrics_Good(t *testing.T) {
 		PeakMemoryBytes:     1 << 30,   // 1 GiB
 		ActiveMemoryBytes:   512 << 20, // 512 MiB
 	}
-	assert.Equal(t, 100, m.PromptTokens)
-	assert.Equal(t, 50, m.GeneratedTokens)
-	assert.InDelta(t, 1000.0, m.PrefillTokensPerSec, 0.01)
-	assert.InDelta(t, 25.0, m.DecodeTokensPerSec, 0.01)
-	assert.Equal(t, uint64(1<<30), m.PeakMemoryBytes)
-	assert.Equal(t, uint64(512<<20), m.ActiveMemoryBytes)
+	assert.Equal(t, 100, metrics.PromptTokens)
+	assert.Equal(t, 50, metrics.GeneratedTokens)
+	assert.InDelta(t, 1000.0, metrics.PrefillTokensPerSec, 0.01)
+	assert.InDelta(t, 25.0, metrics.DecodeTokensPerSec, 0.01)
+	assert.Equal(t, uint64(1<<30), metrics.PeakMemoryBytes)
+	assert.Equal(t, uint64(512<<20), metrics.ActiveMemoryBytes)
 }
 
 // --- Concurrent registry access ---
@@ -783,12 +777,12 @@ func TestList_Good_IndependentSlices(t *testing.T) {
 
 	Register(&stubBackend{name: "alpha", available: true})
 
-	a := List()
-	b := List()
-	assert.Equal(t, a, b, "both calls should return the same names")
+	firstList := List()
+	secondList := List()
+	assert.Equal(t, firstList, secondList, "both calls should return the same names")
 
 	// Mutating one slice should not affect the other.
-	a[0] = "mutated"
-	c := List()
-	assert.NotEqual(t, a[0], c[0], "List should return independent slices")
+	firstList[0] = "mutated"
+	thirdList := List()
+	assert.NotEqual(t, firstList[0], thirdList[0], "List should return independent slices")
 }

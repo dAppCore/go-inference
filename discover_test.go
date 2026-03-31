@@ -40,13 +40,13 @@ func TestDiscover_Good_SingleModel(t *testing.T) {
 	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 
-	m := models[0]
-	assert.Equal(t, "gemma3", m.ModelType)
-	assert.Equal(t, 1, m.NumFiles)
-	assert.Equal(t, 0, m.QuantBits)
-	assert.Equal(t, 0, m.QuantGroup)
-	assert.True(t, core.PathIsAbs(m.Path), "path should be absolute")
-	assert.Contains(t, m.Path, "gemma3-1b")
+	discovered := models[0]
+	assert.Equal(t, "gemma3", discovered.ModelType)
+	assert.Equal(t, 1, discovered.NumFiles)
+	assert.Equal(t, 0, discovered.QuantBits)
+	assert.Equal(t, 0, discovered.QuantGroup)
+	assert.True(t, core.PathIsAbs(discovered.Path), "path should be absolute")
+	assert.Contains(t, discovered.Path, "gemma3-1b")
 }
 
 func TestDiscover_Good_MultipleModels(t *testing.T) {
@@ -82,9 +82,9 @@ func TestDiscover_Good_Quantised(t *testing.T) {
 	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 
-	m := models[0]
-	assert.Equal(t, 4, m.QuantBits)
-	assert.Equal(t, 64, m.QuantGroup)
+	discovered := models[0]
+	assert.Equal(t, 4, discovered.QuantBits)
+	assert.Equal(t, 64, discovered.QuantGroup)
 }
 
 func TestDiscover_Good_BaseDirIsModel(t *testing.T) {
@@ -97,9 +97,9 @@ func TestDiscover_Good_BaseDirIsModel(t *testing.T) {
 	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 
-	m := models[0]
-	assert.Equal(t, "llama", m.ModelType)
-	assert.Equal(t, 2, m.NumFiles)
+	discovered := models[0]
+	assert.Equal(t, "llama", discovered.ModelType)
+	assert.Equal(t, 2, discovered.NumFiles)
 }
 
 func TestDiscover_Good_BaseDirPlusSubdir(t *testing.T) {

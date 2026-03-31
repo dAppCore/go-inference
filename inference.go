@@ -226,9 +226,10 @@ type TextModel interface {
 	//	fmt.Println(m.ModelType()) // "gemma3", "qwen3", "llama3"
 	ModelType() string
 
-	// Info returns architecture, quantisation, layer count, and vocab size.
+	// Info returns architecture metadata for the loaded model.
 	//
-	//	info := m.Info() // architecture, quantisation, layer count, vocab size
+	//	info := m.Info()
+	//	fmt.Printf("%s %d-bit quant, %d layers, vocab %d\n", info.Architecture, info.QuantBits, info.NumLayers, info.VocabSize)
 	Info() ModelInfo
 
 	// Metrics returns throughput and memory counters from the last completed operation.
