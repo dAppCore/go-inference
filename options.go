@@ -9,7 +9,7 @@ type GenerateConfig struct {
 	TopP          float32
 	StopTokens    []int32
 	RepeatPenalty float32
-	ReturnLogits  bool // Include raw logits in ClassifyResult
+	ReturnLogits  bool
 }
 
 // config := inference.DefaultGenerateConfig() // MaxTokens=256, Temperature=0.0
