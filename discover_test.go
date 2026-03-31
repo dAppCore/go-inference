@@ -226,11 +226,11 @@ func TestDiscover_Good_EarlyBreakOnBaseDir(t *testing.T) {
 
 func TestDiscover_Good_EarlyBreakOnSubdir(t *testing.T) {
 	base := t.TempDir()
-	createModelDir(t, filepath.Join(base, "model-a"), map[string]any{
-		"model_type": "a",
+	createModelDir(t, filepath.Join(base, "primary-model"), map[string]any{
+		"model_type": "primary_model",
 	}, 1)
-	createModelDir(t, filepath.Join(base, "model-b"), map[string]any{
-		"model_type": "b",
+	createModelDir(t, filepath.Join(base, "secondary-model"), map[string]any{
+		"model_type": "secondary_model",
 	}, 1)
 
 	count := 0
