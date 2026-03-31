@@ -20,54 +20,54 @@ func DefaultGenerateConfig() GenerateConfig {
 	}
 }
 
-// options := []inference.GenerateOption{inference.WithMaxTokens(128), inference.WithTemperature(0.7)}
+// generateOptions := []inference.GenerateOption{inference.WithMaxTokens(128), inference.WithTemperature(0.7)}
 type GenerateOption func(*GenerateConfig)
 
 // inference.WithMaxTokens(128)  // short reply
 // inference.WithMaxTokens(2048) // long-form generation
-func WithMaxTokens(n int) GenerateOption {
-	return func(config *GenerateConfig) { config.MaxTokens = n }
+func WithMaxTokens(maxTokens int) GenerateOption {
+	return func(generateConfig *GenerateConfig) { generateConfig.MaxTokens = maxTokens }
 }
 
 // inference.WithTemperature(0.0) // deterministic
 // inference.WithTemperature(0.7) // balanced creativity
 // inference.WithTemperature(1.5) // high variance
-func WithTemperature(t float32) GenerateOption {
-	return func(config *GenerateConfig) { config.Temperature = t }
+func WithTemperature(temperature float32) GenerateOption {
+	return func(generateConfig *GenerateConfig) { generateConfig.Temperature = temperature }
 }
 
 // inference.WithTopK(40) // typical value for creative generation
-func WithTopK(k int) GenerateOption {
-	return func(config *GenerateConfig) { config.TopK = k }
+func WithTopK(topK int) GenerateOption {
+	return func(generateConfig *GenerateConfig) { generateConfig.TopK = topK }
 }
 
 // inference.WithTopP(0.9) // typical nucleus sampling threshold
-func WithTopP(p float32) GenerateOption {
-	return func(config *GenerateConfig) { config.TopP = p }
+func WithTopP(topP float32) GenerateOption {
+	return func(generateConfig *GenerateConfig) { generateConfig.TopP = topP }
 }
 
 // inference.WithStopTokens(2)       // EOS token only
 // inference.WithStopTokens(2, 1, 0) // EOS + pad tokens
-func WithStopTokens(ids ...int32) GenerateOption {
-	return func(config *GenerateConfig) { config.StopTokens = ids }
+func WithStopTokens(stopTokenIDs ...int32) GenerateOption {
+	return func(generateConfig *GenerateConfig) { generateConfig.StopTokens = stopTokenIDs }
 }
 
 // inference.WithRepeatPenalty(1.1) // mild repetition suppression
 // inference.WithRepeatPenalty(1.5) // strong repetition suppression
-func WithRepeatPenalty(p float32) GenerateOption {
-	return func(config *GenerateConfig) { config.RepeatPenalty = p }
+func WithRepeatPenalty(repeatPenalty float32) GenerateOption {
+	return func(generateConfig *GenerateConfig) { generateConfig.RepeatPenalty = repeatPenalty }
 }
 
 // inference.WithLogits() // enable logit capture for classification scoring
 func WithLogits() GenerateOption {
-	return func(config *GenerateConfig) { config.ReturnLogits = true }
+	return func(generateConfig *GenerateConfig) { generateConfig.ReturnLogits = true }
 }
 
-// config := inference.ApplyGenerateOpts(options)
-func ApplyGenerateOpts(options []GenerateOption) GenerateConfig {
+// generateConfig := inference.ApplyGenerateOpts(generateOptions)
+func ApplyGenerateOpts(generateOptions []GenerateOption) GenerateConfig {
 	generateConfig := DefaultGenerateConfig()
-	for _, option := range options {
-		option(&generateConfig)
+	for _, generateOption := range generateOptions {
+		generateOption(&generateConfig)
 	}
 	return generateConfig
 }
@@ -82,46 +82,46 @@ type LoadConfig struct {
 	AdapterPath   string
 }
 
-// options := []inference.LoadOption{inference.WithBackend("metal"), inference.WithContextLen(4096)}
+// loadOptions := []inference.LoadOption{inference.WithBackend("metal"), inference.WithContextLen(4096)}
 type LoadOption func(*LoadConfig)
 
 // inference.WithBackend("metal")     // Apple Silicon GPU
 // inference.WithBackend("rocm")      // AMD GPU
 // inference.WithBackend("llama_cpp") // CPU fallback
-func WithBackend(name string) LoadOption {
-	return func(config *LoadConfig) { config.Backend = name }
+func WithBackend(backendName string) LoadOption {
+	return func(loadConfig *LoadConfig) { loadConfig.Backend = backendName }
 }
 
 // inference.WithContextLen(4096)  // standard context
 // inference.WithContextLen(32768) // extended context
-func WithContextLen(n int) LoadOption {
-	return func(config *LoadConfig) { config.ContextLen = n }
+func WithContextLen(contextLength int) LoadOption {
+	return func(loadConfig *LoadConfig) { loadConfig.ContextLen = contextLength }
 }
 
 // inference.WithGPULayers(-1) // full GPU offload (default)
 // inference.WithGPULayers(0)  // CPU-only inference
 // inference.WithGPULayers(24) // partial offload (24 layers to GPU)
-func WithGPULayers(n int) LoadOption {
-	return func(config *LoadConfig) { config.GPULayers = n }
+func WithGPULayers(gpuLayerCount int) LoadOption {
+	return func(loadConfig *LoadConfig) { loadConfig.GPULayers = gpuLayerCount }
 }
 
 // inference.WithParallelSlots(4) // allow 4 concurrent inference requests
-func WithParallelSlots(n int) LoadOption {
-	return func(config *LoadConfig) { config.ParallelSlots = n }
+func WithParallelSlots(parallelSlotCount int) LoadOption {
+	return func(loadConfig *LoadConfig) { loadConfig.ParallelSlots = parallelSlotCount }
 }
 
 // inference.WithAdapterPath("/models/lora/domain-v2") // load fine-tuned adapter
 func WithAdapterPath(path string) LoadOption {
-	return func(config *LoadConfig) { config.AdapterPath = path }
+	return func(loadConfig *LoadConfig) { loadConfig.AdapterPath = path }
 }
 
-// config := inference.ApplyLoadOpts(options)
-func ApplyLoadOpts(options []LoadOption) LoadConfig {
+// loadConfig := inference.ApplyLoadOpts(loadOptions)
+func ApplyLoadOpts(loadOptions []LoadOption) LoadConfig {
 	loadConfig := LoadConfig{
 		GPULayers: -1,
 	}
-	for _, option := range options {
-		option(&loadConfig)
+	for _, loadOption := range loadOptions {
+		loadOption(&loadConfig)
 	}
 	return loadConfig
 }

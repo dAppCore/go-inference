@@ -34,7 +34,7 @@ type DiscoveredModel struct {
 func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	return func(yield func(DiscoveredModel) bool) {
 		baseDir = filepath.Clean(baseDir)
-		entries, err := os.ReadDir(baseDir)
+		directoryEntries, err := os.ReadDir(baseDir)
 		if err != nil {
 			return
 		}
@@ -45,7 +45,7 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 			}
 		}
 
-		for _, entry := range entries {
+		for _, entry := range directoryEntries {
 			if !entry.IsDir() {
 				continue
 			}
@@ -61,40 +61,40 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 
 func probeModelDir(dir string) (DiscoveredModel, bool) {
 	configPath := filepath.Join(dir, "config.json")
-	data, err := os.ReadFile(configPath)
+	configData, err := os.ReadFile(configPath)
 	if err != nil {
 		return DiscoveredModel{}, false
 	}
 
-	matches, err := filepath.Glob(filepath.Join(dir, "*.safetensors"))
-	if err != nil || len(matches) == 0 {
+	safetensorFiles, err := filepath.Glob(filepath.Join(dir, "*.safetensors"))
+	if err != nil || len(safetensorFiles) == 0 {
 		return DiscoveredModel{}, false
 	}
 
-	absDir, err := filepath.Abs(dir)
+	absoluteDir, err := filepath.Abs(dir)
 	if err != nil {
-		absDir = dir
+		absoluteDir = dir
 	}
 
-	var probe struct {
+	var modelProbe struct {
 		ModelType    string `json:"model_type"`
 		Quantization *struct {
 			Bits      int `json:"bits"`
 			GroupSize int `json:"group_size"`
 		} `json:"quantization"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	if err := json.Unmarshal(configData, &modelProbe); err != nil {
 		return DiscoveredModel{}, false
 	}
 
 	model := DiscoveredModel{
-		Path:      absDir,
-		ModelType: probe.ModelType,
-		NumFiles:  len(matches),
+		Path:      absoluteDir,
+		ModelType: modelProbe.ModelType,
+		NumFiles:  len(safetensorFiles),
 	}
-	if probe.Quantization != nil {
-		model.QuantBits = probe.Quantization.Bits
-		model.QuantGroup = probe.Quantization.GroupSize
+	if modelProbe.Quantization != nil {
+		model.QuantBits = modelProbe.Quantization.Bits
+		model.QuantGroup = modelProbe.Quantization.GroupSize
 	}
 
 	return model, true

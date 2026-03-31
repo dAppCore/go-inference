@@ -95,7 +95,7 @@ Two interfaces are specified but not yet implemented, pending concrete consumer 
 ```go
 type BatchModel interface {
     TextModel
-    BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) iter.Seq2[int, Token]
+    BatchGenerate(ctx context.Context, prompts []string, generateOptions ...GenerateOption) iter.Seq2[int, Token]
 }
 ```
 

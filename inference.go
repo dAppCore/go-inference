@@ -153,7 +153,7 @@ func (snapshot *AttentionSnapshot) HasQueries() bool {
 //		snapshot, err := inspector.InspectAttention(ctx, prompt)
 //	}
 type AttentionInspector interface {
-	InspectAttention(ctx context.Context, prompt string, options ...GenerateOption) (*AttentionSnapshot, error)
+	InspectAttention(ctx context.Context, prompt string, generateOptions ...GenerateOption) (*AttentionSnapshot, error)
 }
 
 // model, _ := inference.LoadModel("/models/gemma3-1b")
@@ -166,20 +166,20 @@ type TextModel interface {
 	// if err := model.Err(); err != nil {
 	// 	return err
 	// }
-	Generate(ctx context.Context, prompt string, options ...GenerateOption) iter.Seq[Token]
+	Generate(ctx context.Context, prompt string, generateOptions ...GenerateOption) iter.Seq[Token]
 
 	// for token := range model.Chat(ctx, []inference.Message{{Role: "user", Content: "Hi"}}) {
 	// 	fmt.Print(token.Text)
 	// }
-	Chat(ctx context.Context, messages []Message, options ...GenerateOption) iter.Seq[Token]
+	Chat(ctx context.Context, messages []Message, generateOptions ...GenerateOption) iter.Seq[Token]
 
 	// classificationResults, _ := model.Classify(ctx, []string{"positive review", "negative review"})
 	// label := classificationResults[0].Token.Text
-	Classify(ctx context.Context, prompts []string, options ...GenerateOption) ([]ClassifyResult, error)
+	Classify(ctx context.Context, prompts []string, generateOptions ...GenerateOption) ([]ClassifyResult, error)
 
 	// batchResults, _ := model.BatchGenerate(ctx, prompts, inference.WithMaxTokens(128))
 	// for index, result := range batchResults { fmt.Println(index, result.Tokens) }
-	BatchGenerate(ctx context.Context, prompts []string, options ...GenerateOption) ([]BatchResult, error)
+	BatchGenerate(ctx context.Context, prompts []string, generateOptions ...GenerateOption) ([]BatchResult, error)
 
 	// fmt.Println(model.ModelType()) // "gemma3", "qwen3", "llama3"
 	ModelType() string
@@ -204,7 +204,7 @@ type Backend interface {
 	Name() string
 
 	// model, err := backend.LoadModel("/models/gemma3-1b", inference.WithContextLen(4096))
-	LoadModel(path string, options ...LoadOption) (TextModel, error)
+	LoadModel(path string, loadOptions ...LoadOption) (TextModel, error)
 
 	// if !backend.Available() { skip }
 	Available() bool
@@ -267,8 +267,8 @@ func Default() (Backend, error) {
 
 // model, err := inference.LoadModel("/models/gemma3-1b")
 // model, err := inference.LoadModel("/models/qwen3-4b", inference.WithBackend("rocm"), inference.WithContextLen(8192))
-func LoadModel(path string, options ...LoadOption) (TextModel, error) {
-	loadConfig := ApplyLoadOpts(options)
+func LoadModel(path string, loadOptions ...LoadOption) (TextModel, error) {
+	loadConfig := ApplyLoadOpts(loadOptions)
 	if loadConfig.Backend != "" {
 		backend, ok := Get(loadConfig.Backend)
 		if !ok {
@@ -277,11 +277,11 @@ func LoadModel(path string, options ...LoadOption) (TextModel, error) {
 		if !backend.Available() {
 			return nil, fmt.Errorf("inference: backend %q not available on this hardware", loadConfig.Backend)
 		}
-		return backend.LoadModel(path, options...)
+		return backend.LoadModel(path, loadOptions...)
 	}
 	backend, err := Default()
 	if err != nil {
 		return nil, err
 	}
-	return backend.LoadModel(path, options...)
+	return backend.LoadModel(path, loadOptions...)
 }

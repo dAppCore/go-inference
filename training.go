@@ -38,7 +38,7 @@ type TrainableModel interface {
 
 	// adapter := trainableModel.ApplyLoRA(inference.LoRAConfig{Rank: 16, Alpha: 32})
 	// fmt.Printf("%d trainable parameters\n", adapter.TotalParams())
-	ApplyLoRA(config LoRAConfig) Adapter
+	ApplyLoRA(loraConfig LoRAConfig) Adapter
 
 	// ids := trainableModel.Encode("Hello, world!") // [1, 22172, 29892, 3186, 29991]
 	Encode(text string) []int32
@@ -52,8 +52,8 @@ type TrainableModel interface {
 
 // trainableModel, err := inference.LoadTrainable("/models/gemma3-1b")
 // adapter := trainableModel.ApplyLoRA(inference.DefaultLoRAConfig())
-func LoadTrainable(path string, options ...LoadOption) (TrainableModel, error) {
-	loadedModel, err := LoadModel(path, options...)
+func LoadTrainable(path string, loadOptions ...LoadOption) (TrainableModel, error) {
+	loadedModel, err := LoadModel(path, loadOptions...)
 	if err != nil {
 		return nil, err
 	}

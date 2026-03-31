@@ -68,18 +68,18 @@ go-inference (this package)
 import "dappco.re/go/core/inference"
 
 // Load a model (auto-detects the best available backend)
-m, err := inference.LoadModel("/path/to/model/")
+model, err := inference.LoadModel("/path/to/model/")
 if err != nil {
     log.Fatal(err)
 }
-defer m.Close()
+defer model.Close()
 
 // Stream tokens
 ctx := context.Background()
-for tok := range m.Generate(ctx, "Once upon a time", inference.WithMaxTokens(128)) {
-    fmt.Print(tok.Text)
+for token := range model.Generate(ctx, "Once upon a time", inference.WithMaxTokens(128)) {
+    fmt.Print(token.Text)
 }
-if err := m.Err(); err != nil {
+if err := model.Err(); err != nil {
     log.Fatal(err)
 }
 ```

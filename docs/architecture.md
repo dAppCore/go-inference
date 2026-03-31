@@ -156,7 +156,7 @@ For GQA models (e.g. Gemma3 where `num_kv_heads < num_query_heads`), `NumHeads` 
 
 ```go
 type AttentionInspector interface {
-    InspectAttention(ctx context.Context, prompt string, opts ...GenerateOption) (*AttentionSnapshot, error)
+    InspectAttention(ctx context.Context, prompt string, generateOptions ...GenerateOption) (*AttentionSnapshot, error)
 }
 ```
 
@@ -164,8 +164,8 @@ Backends may implement `AttentionInspector` to expose attention-level data for Q
 
 ```go
 if inspector, ok := model.(AttentionInspector); ok {
-    snap, err := inspector.InspectAttention(ctx, prompt)
-    // analyse snap.Keys
+    attentionSnapshot, err := inspector.InspectAttention(ctx, prompt)
+    // analyse attentionSnapshot.Keys
 }
 ```
 
@@ -179,10 +179,10 @@ Following rule 3 of the stability contract: new capability is expressed as separ
 
 ```go
 type TextModel interface {
-    Generate(ctx context.Context, prompt string, opts ...GenerateOption) iter.Seq[Token]
-    Chat(ctx context.Context, messages []Message, opts ...GenerateOption) iter.Seq[Token]
-    Classify(ctx context.Context, prompts []string, opts ...GenerateOption) ([]ClassifyResult, error)
-    BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) ([]BatchResult, error)
+    Generate(ctx context.Context, prompt string, generateOptions ...GenerateOption) iter.Seq[Token]
+    Chat(ctx context.Context, messages []Message, generateOptions ...GenerateOption) iter.Seq[Token]
+    Classify(ctx context.Context, prompts []string, generateOptions ...GenerateOption) ([]ClassifyResult, error)
+    BatchGenerate(ctx context.Context, prompts []string, generateOptions ...GenerateOption) ([]BatchResult, error)
     ModelType() string
     Info() ModelInfo
     Metrics() GenerateMetrics
@@ -210,7 +210,7 @@ Key design decisions:
 ```go
 type Backend interface {
     Name() string
-    LoadModel(path string, opts ...LoadOption) (TextModel, error)
+    LoadModel(path string, loadOptions ...LoadOption) (TextModel, error)
     Available() bool
 }
 ```
@@ -232,7 +232,7 @@ var (
 )
 ```
 
-**Registration** — Backends call `inference.Register(b Backend)` from their `init()` function. The `init()` is guarded by a build tag so it only compiles on the target platform:
+**Registration** — Backends call `inference.Register(backend Backend)` from their `init()` function. The `init()` is guarded by a build tag so it only compiles on the target platform:
 
 ```go
 // In go-mlx: register_metal.go
@@ -254,8 +254,8 @@ Registering a name that already exists silently overwrites the previous entry. T
 
 ```go
 for _, name := range []string{"metal", "rocm", "llama_cpp"} {
-    if b, ok := backends[name]; ok && b.Available() {
-        return b, nil
+    if backend, ok := backends[name]; ok && backend.Available() {
+        return backend, nil
     }
 }
 // Fall back to any registered available backend.
@@ -266,13 +266,13 @@ The priority order encodes hardware preference: Metal (Apple Silicon) delivers t
 **`LoadModel()` routing** — The top-level `LoadModel()` function is the primary consumer entry point:
 
 ```go
-func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
-    cfg := ApplyLoadOpts(opts)
-    if cfg.Backend != "" {
-        b, ok := Get(cfg.Backend)
+func LoadModel(path string, loadOptions ...LoadOption) (TextModel, error) {
+    loadConfig := ApplyLoadOpts(loadOptions)
+    if loadConfig.Backend != "" {
+        backend, ok := Get(loadConfig.Backend)
         // ... validate and use explicit backend
     }
-    b, err := Default()
+    backend, err := Default()
     // ... use auto-selected backend
 }
 ```
@@ -299,7 +299,7 @@ type GenerateConfig struct {
 
 Defaults (from `DefaultGenerateConfig()`): `MaxTokens=256`, `Temperature=0.0` (greedy), all others zero/disabled.
 
-`ApplyGenerateOpts(opts []GenerateOption) GenerateConfig` is called by backends at the start of each inference operation. Options are applied in order; the last write wins for scalar fields.
+`ApplyGenerateOpts(generateOptions []GenerateOption) GenerateConfig` is called by backends at the start of each inference operation. Options are applied in order; the last write wins for scalar fields.
 
 `WithLogits()` is a flag rather than a value option because logit arrays are vocab-sized (256,128 floats for Gemma3) and should only be allocated when explicitly requested.
 

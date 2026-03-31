@@ -13,10 +13,10 @@ The primary inference interface. Every loaded model satisfies this.
 
 ```go
 type TextModel interface {
-    Generate(ctx context.Context, prompt string, opts ...GenerateOption) iter.Seq[Token]
-    Chat(ctx context.Context, messages []Message, opts ...GenerateOption) iter.Seq[Token]
-    Classify(ctx context.Context, prompts []string, opts ...GenerateOption) ([]ClassifyResult, error)
-    BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) ([]BatchResult, error)
+    Generate(ctx context.Context, prompt string, generateOptions ...GenerateOption) iter.Seq[Token]
+    Chat(ctx context.Context, messages []Message, generateOptions ...GenerateOption) iter.Seq[Token]
+    Classify(ctx context.Context, prompts []string, generateOptions ...GenerateOption) ([]ClassifyResult, error)
+    BatchGenerate(ctx context.Context, prompts []string, generateOptions ...GenerateOption) ([]BatchResult, error)
     ModelType() string
     Info() ModelInfo
     Metrics() GenerateMetrics
@@ -28,7 +28,7 @@ type TextModel interface {
 ### Generate
 
 ```go
-Generate(ctx context.Context, prompt string, opts ...GenerateOption) iter.Seq[Token]
+Generate(ctx context.Context, prompt string, generateOptions ...GenerateOption) iter.Seq[Token]
 ```
 
 Streams tokens for a raw text prompt. The caller ranges over the returned iterator; the backend controls token production. The iterator stops on end-of-sequence (EOS), context cancellation, or hitting `MaxTokens`.
@@ -36,10 +36,10 @@ Streams tokens for a raw text prompt. The caller ranges over the returned iterat
 After the iterator is exhausted, call `Err()` to check for errors. This follows the `database/sql` `Row.Err()` pattern — `iter.Seq` cannot carry errors alongside values.
 
 ```go
-for tok := range m.Generate(ctx, "The capital of France is", inference.WithMaxTokens(32)) {
-    fmt.Print(tok.Text)
+for token := range model.Generate(ctx, "The capital of France is", inference.WithMaxTokens(32)) {
+    fmt.Print(token.Text)
 }
-if err := m.Err(); err != nil {
+if err := model.Err(); err != nil {
     log.Fatal(err)
 }
 ```
@@ -47,7 +47,7 @@ if err := m.Err(); err != nil {
 ### Chat
 
 ```go
-Chat(ctx context.Context, messages []Message, opts ...GenerateOption) iter.Seq[Token]
+Chat(ctx context.Context, messages []Message, generateOptions ...GenerateOption) iter.Seq[Token]
 ```
 
 Streams tokens from a multi-turn conversation. The model applies its native chat template internally — Gemma3, Qwen3, and Llama3 all use distinct formats, so template application belongs in the backend rather than in every consumer.
@@ -57,15 +57,15 @@ msgs := []inference.Message{
     {Role: "system", Content: "You are a helpful assistant."},
     {Role: "user", Content: "What is 2+2?"},
 }
-for tok := range m.Chat(ctx, msgs, inference.WithMaxTokens(64)) {
-    fmt.Print(tok.Text)
+for token := range model.Chat(ctx, msgs, inference.WithMaxTokens(64)) {
+    fmt.Print(token.Text)
 }
 ```
 
 ### Classify
 
 ```go
-Classify(ctx context.Context, prompts []string, opts ...GenerateOption) ([]ClassifyResult, error)
+Classify(ctx context.Context, prompts []string, generateOptions ...GenerateOption) ([]ClassifyResult, error)
 ```
 
 Runs batched prefill-only inference. Each prompt gets a single forward pass and the token at the last position is sampled. This is the fast path for classification tasks — no autoregressive decoding loop. Used by go-i18n for domain labelling.
@@ -73,16 +73,16 @@ Runs batched prefill-only inference. Each prompt gets a single forward pass and 
 Set `WithLogits()` to receive the full vocab-sized logit array in each result. This is off by default to avoid large allocations.
 
 ```go
-results, err := m.Classify(ctx, prompts, inference.WithTemperature(0))
-for _, r := range results {
-    fmt.Printf("predicted: %s (id=%d)\n", r.Token.Text, r.Token.ID)
+results, err := model.Classify(ctx, prompts, inference.WithTemperature(0))
+for _, result := range results {
+    fmt.Printf("predicted: %s (id=%d)\n", result.Token.Text, result.Token.ID)
 }
 ```
 
 ### BatchGenerate
 
 ```go
-BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) ([]BatchResult, error)
+BatchGenerate(ctx context.Context, prompts []string, generateOptions ...GenerateOption) ([]BatchResult, error)
 ```
 
 Runs batched autoregressive generation. Each prompt is decoded up to `MaxTokens`. Unlike `Classify`, this runs the full decoding loop for every prompt. Per-prompt errors (context cancellation, OOM) are captured in `BatchResult.Err` rather than aborting the entire batch.
@@ -136,7 +136,7 @@ A named inference engine that can load models.
 ```go
 type Backend interface {
     Name() string
-    LoadModel(path string, opts ...LoadOption) (TextModel, error)
+    LoadModel(path string, loadOptions ...LoadOption) (TextModel, error)
     Available() bool
 }
 ```
@@ -152,7 +152,7 @@ Returns the registry key: `"metal"`, `"rocm"`, or `"llama_cpp"`. This is the str
 ### LoadModel
 
 ```go
-LoadModel(path string, opts ...LoadOption) (TextModel, error)
+LoadModel(path string, loadOptions ...LoadOption) (TextModel, error)
 ```
 
 Loads a model from a filesystem path. The directory must contain `config.json` and one or more `.safetensors` weight files (HuggingFace safetensors layout). Returns a ready-to-use `TextModel`.
@@ -175,7 +175,7 @@ Extends `TextModel` with LoRA fine-tuning capabilities. Not all backends support
 type TrainableModel interface {
     TextModel
 
-    ApplyLoRA(cfg LoRAConfig) Adapter
+    ApplyLoRA(loraConfig LoRAConfig) Adapter
     Encode(text string) []int32
     Decode(ids []int32) string
     NumLayers() int
@@ -185,10 +185,10 @@ type TrainableModel interface {
 ### ApplyLoRA
 
 ```go
-ApplyLoRA(cfg LoRAConfig) Adapter
+ApplyLoRA(loraConfig LoRAConfig) Adapter
 ```
 
-Injects LoRA adapters into the target projection layers specified by `cfg.TargetKeys`. Returns an `Adapter` that holds references to all trainable parameters. The concrete adapter type is backend-specific (e.g. `*metal.LoRAAdapter` for go-mlx).
+Injects LoRA adapters into the target projection layers specified by `loraConfig.TargetKeys`. Returns an `Adapter` that holds references to all trainable parameters. The concrete adapter type is backend-specific (e.g. `*metal.LoRAAdapter` for go-mlx).
 
 ### Encode
 
@@ -219,7 +219,7 @@ Returns the number of transformer layers. Used by training code to configure lay
 Via type assertion on an existing model:
 
 ```go
-tm, ok := model.(inference.TrainableModel)
+trainableModel, ok := model.(inference.TrainableModel)
 if !ok {
     log.Fatal("backend does not support training")
 }
@@ -228,11 +228,11 @@ if !ok {
 Via the convenience function (loads and asserts in one step):
 
 ```go
-tm, err := inference.LoadTrainable("/path/to/model/")
+trainableModel, err := inference.LoadTrainable("/path/to/model/")
 if err != nil {
     log.Fatal(err)
 }
-defer tm.Close()
+defer trainableModel.Close()
 ```
 
 `LoadTrainable` calls `LoadModel` internally and returns an error if the resulting model does not implement `TrainableModel`. It also closes the model before returning the error, so there is no resource leak.
@@ -245,25 +245,25 @@ An optional interface for extracting attention-level data. Used for Q/K Bone Ori
 
 ```go
 type AttentionInspector interface {
-    InspectAttention(ctx context.Context, prompt string, opts ...GenerateOption) (*AttentionSnapshot, error)
+    InspectAttention(ctx context.Context, prompt string, generateOptions ...GenerateOption) (*AttentionSnapshot, error)
 }
 ```
 
 ### InspectAttention
 
 ```go
-InspectAttention(ctx context.Context, prompt string, opts ...GenerateOption) (*AttentionSnapshot, error)
+InspectAttention(ctx context.Context, prompt string, generateOptions ...GenerateOption) (*AttentionSnapshot, error)
 ```
 
 Runs a prefill pass and extracts Q and/or K vectors from the KV cache. Returns an `AttentionSnapshot` containing the raw vectors indexed by layer, head, and position.
 
 ```go
 if inspector, ok := model.(inference.AttentionInspector); ok {
-    snap, err := inspector.InspectAttention(ctx, "analyse this prompt")
+    attentionSnapshot, err := inspector.InspectAttention(ctx, "analyse this prompt")
     if err != nil {
         log.Fatal(err)
     }
-    fmt.Printf("layers=%d heads=%d seq_len=%d\n", snap.NumLayers, snap.NumHeads, snap.SeqLen)
+    fmt.Printf("layers=%d heads=%d seq_len=%d\n", attentionSnapshot.NumLayers, attentionSnapshot.NumHeads, attentionSnapshot.SeqLen)
 }
 ```
 
