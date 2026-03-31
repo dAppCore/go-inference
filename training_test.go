@@ -26,7 +26,6 @@ func TestDefaultLoRAConfig_Good_Idempotent(t *testing.T) {
 
 // --- LoadTrainable ---
 
-// stubTrainableModel extends stubTextModel with TrainableModel methods.
 type stubTrainableModel struct {
 	stubTextModel
 }
@@ -36,7 +35,6 @@ func (m *stubTrainableModel) Encode(_ string) []int32        { return nil }
 func (m *stubTrainableModel) Decode(_ []int32) string        { return "" }
 func (m *stubTrainableModel) NumLayers() int                 { return 26 }
 
-// trainableBackend returns a stubTrainableModel from LoadModel.
 type trainableBackend struct {
 	name      string
 	available bool
@@ -71,7 +69,6 @@ func TestLoadTrainable_Bad_NoBackends(t *testing.T) {
 func TestLoadTrainable_Bad_NotTrainable(t *testing.T) {
 	resetBackends(t)
 
-	// stubBackend returns a stubTextModel which does NOT implement TrainableModel.
 	Register(&stubBackend{name: "metal", available: true})
 
 	_, err := LoadTrainable("/path/to/model")

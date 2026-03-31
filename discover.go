@@ -8,20 +8,17 @@ import (
 	"dappco.re/go/core"
 )
 
-// DiscoveredModel describes a model directory found by Discover.
-//
 //	for m := range inference.Discover("/Volumes/Data/models") {
 //	    fmt.Printf("%s  arch=%s  quant=%dbit\n", m.Path, m.ModelType, m.QuantBits)
 //	}
 type DiscoveredModel struct {
-	Path      string // Absolute path to the model directory
-	ModelType string // Architecture from config.json (e.g. "gemma3", "qwen3", "llama")
-	QuantBits int    // Quantisation bits (0 if unquantised)
-	QuantGroup int   // Quantisation group size
-	NumFiles  int    // Number of safetensors weight files
+	Path       string // Absolute path to the model directory
+	ModelType  string // Architecture from config.json (e.g. "gemma3", "qwen3", "llama")
+	QuantBits  int    // Quantisation bits (0 if unquantised)
+	QuantGroup int    // Quantisation group size
+	NumFiles   int    // Number of safetensors weight files
 }
 
-// Discover yields model directories one level deep under baseDir.
 // A valid directory has config.json + at least one .safetensors file.
 //
 //	for m := range inference.Discover("/Volumes/Data/models") {
@@ -40,7 +37,6 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 			return
 		}
 
-		// Check baseDir itself (in case it's a model directory).
 		if m, ok := probeModelDir(baseDir); ok {
 			if !yield(m) {
 				return
@@ -61,7 +57,7 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	}
 }
 
-// probeModelDir returns (model, true) when dir contains config.json + *.safetensors.
+// Accepts directories that contain config.json and at least one .safetensors file.
 func probeModelDir(dir string) (DiscoveredModel, bool) {
 	configPath := core.Path(dir, "config.json")
 	data, err := os.ReadFile(configPath)
