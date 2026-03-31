@@ -42,7 +42,7 @@ func TestDiscover_Good_SingleModel(t *testing.T) {
 	assert.Equal(t, 1, model.NumFiles)
 	assert.Equal(t, 0, model.QuantBits)
 	assert.Equal(t, 0, model.QuantGroup)
-	assert.True(t, filepath.IsAbs(model.Path), "path should be absolute")
+	assert.True(t, filepath.IsAbs(model.Path))
 	assert.Contains(t, model.Path, "gemma3-1b")
 }
 
@@ -109,7 +109,7 @@ func TestDiscover_Good_BaseDirPlusSubdir(t *testing.T) {
 	models := slices.Collect(Discover(base))
 	require.Len(t, models, 2)
 
-	assert.Equal(t, "parent_model", models[0].ModelType, "base dir model should be first")
+	assert.Equal(t, "parent_model", models[0].ModelType)
 	assert.Equal(t, "child_model", models[1].ModelType)
 }
 
@@ -136,7 +136,7 @@ func TestDiscover_Bad_NoSafetensors(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), data, 0o644))
 
 	models := slices.Collect(Discover(base))
-	assert.Empty(t, models, "directory without safetensors should be skipped")
+	assert.Empty(t, models)
 }
 
 func TestDiscover_Bad_NoConfig(t *testing.T) {
@@ -146,7 +146,7 @@ func TestDiscover_Bad_NoConfig(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "model.safetensors"), []byte("fake"), 0o644))
 
 	models := slices.Collect(Discover(base))
-	assert.Empty(t, models, "directory without config.json should be skipped")
+	assert.Empty(t, models)
 }
 
 func TestDiscover_Bad_InvalidJSON(t *testing.T) {
@@ -181,7 +181,7 @@ func TestDiscover_Ugly_MissingModelType(t *testing.T) {
 
 	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
-	assert.Equal(t, "", models[0].ModelType, "missing model_type should yield empty string")
+	assert.Equal(t, "", models[0].ModelType)
 }
 
 func TestDiscover_Ugly_NoQuantisation(t *testing.T) {
@@ -221,7 +221,7 @@ func TestDiscover_Good_EarlyBreakOnBaseDir(t *testing.T) {
 		count++
 		break
 	}
-	assert.Equal(t, 1, count, "iterator should stop after first yield when break is called")
+	assert.Equal(t, 1, count)
 }
 
 func TestDiscover_Good_EarlyBreakOnSubdir(t *testing.T) {
@@ -238,7 +238,7 @@ func TestDiscover_Good_EarlyBreakOnSubdir(t *testing.T) {
 		count++
 		break
 	}
-	assert.Equal(t, 1, count, "iterator should stop after first subdir yield when break is called")
+	assert.Equal(t, 1, count)
 }
 
 func TestDiscover_Good_AbsolutePath(t *testing.T) {
@@ -249,5 +249,5 @@ func TestDiscover_Good_AbsolutePath(t *testing.T) {
 
 	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
-	assert.True(t, filepath.IsAbs(models[0].Path), "discovered path must be absolute")
+	assert.True(t, filepath.IsAbs(models[0].Path))
 }

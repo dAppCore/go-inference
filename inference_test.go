@@ -93,15 +93,15 @@ func TestRegister_Good_Multiple(t *testing.T) {
 func TestRegister_Ugly_Overwrites(t *testing.T) {
 	resetBackends(t)
 
-	b1 := &stubBackend{name: "dup", available: false}
-	b2 := &stubBackend{name: "dup", available: true}
+	firstBackend := &stubBackend{name: "dup", available: false}
+	replacementBackend := &stubBackend{name: "dup", available: true}
 
-	Register(b1)
-	Register(b2)
+	Register(firstBackend)
+	Register(replacementBackend)
 
 	got, ok := Get("dup")
 	require.True(t, ok)
-	assert.True(t, got.Available(), "second registration should overwrite the first")
+	assert.True(t, got.Available())
 }
 
 func TestGet_Good(t *testing.T) {
@@ -117,9 +117,9 @@ func TestGet_Good(t *testing.T) {
 func TestGet_Bad(t *testing.T) {
 	resetBackends(t)
 
-	b, ok := Get("nonexistent")
+	backend, ok := Get("nonexistent")
 	assert.False(t, ok)
-	assert.Nil(t, b)
+	assert.Nil(t, backend)
 }
 
 func TestList_Good_Empty(t *testing.T) {
@@ -177,7 +177,7 @@ func TestAll_Good_YieldFalse(t *testing.T) {
 			break
 		}
 	}
-	assert.Equal(t, 1, count, "iteration should stop early")
+	assert.Equal(t, 1, count)
 }
 
 func TestDefault_Good_Metal(t *testing.T) {
@@ -187,9 +187,9 @@ func TestDefault_Good_Metal(t *testing.T) {
 	Register(&stubBackend{name: "rocm", available: true})
 	Register(&stubBackend{name: "llama_cpp", available: true})
 
-	b, err := Default()
+	backend, err := Default()
 	require.NoError(t, err)
-	assert.Equal(t, "metal", b.Name(), "metal should be preferred when available")
+	assert.Equal(t, "metal", backend.Name())
 }
 
 func TestDefault_Good_Rocm(t *testing.T) {
@@ -198,9 +198,9 @@ func TestDefault_Good_Rocm(t *testing.T) {
 	Register(&stubBackend{name: "rocm", available: true})
 	Register(&stubBackend{name: "llama_cpp", available: true})
 
-	b, err := Default()
+	backend, err := Default()
 	require.NoError(t, err)
-	assert.Equal(t, "rocm", b.Name(), "rocm should be preferred when metal is absent")
+	assert.Equal(t, "rocm", backend.Name())
 }
 
 func TestDefault_Good_LlamaCpp(t *testing.T) {
@@ -208,9 +208,9 @@ func TestDefault_Good_LlamaCpp(t *testing.T) {
 
 	Register(&stubBackend{name: "llama_cpp", available: true})
 
-	b, err := Default()
+	backend, err := Default()
 	require.NoError(t, err)
-	assert.Equal(t, "llama_cpp", b.Name(), "llama_cpp should be used as fallback")
+	assert.Equal(t, "llama_cpp", backend.Name())
 }
 
 func TestDefault_Good_PriorityOrder(t *testing.T) {
@@ -267,7 +267,7 @@ func TestDefault_Good_FallbackToAny(t *testing.T) {
 
 	backend, err := Default()
 	require.NoError(t, err)
-	assert.Equal(t, "custom_gpu", backend.Name(), "should fall back to any available backend")
+	assert.Equal(t, "custom_gpu", backend.Name())
 }
 
 func TestDefault_Bad_NoBackends(t *testing.T) {
@@ -295,9 +295,9 @@ func TestDefault_Ugly_SkipsUnavailablePreferred(t *testing.T) {
 	Register(&stubBackend{name: "metal", available: false})
 	Register(&stubBackend{name: "custom_gpu", available: true})
 
-	b, err := Default()
+	backend, err := Default()
 	require.NoError(t, err)
-	assert.Equal(t, "custom_gpu", b.Name(), "should skip unavailable preferred and use any available")
+	assert.Equal(t, "custom_gpu", backend.Name())
 }
 
 func TestLoadModel_Good_DefaultBackend(t *testing.T) {
@@ -326,7 +326,7 @@ func TestLoadModel_Good_ExplicitBackend(t *testing.T) {
 	require.NotNil(t, model)
 
 	stubModel := model.(*stubTextModel)
-	assert.Equal(t, "rocm", stubModel.backend, "should use explicitly requested backend")
+	assert.Equal(t, "rocm", stubModel.backend)
 	require.NoError(t, model.Close())
 }
 
@@ -416,7 +416,7 @@ func TestTypes_Good_InterfaceCompliance(t *testing.T) {
 }
 
 func TestAttentionSnapshot_Good(t *testing.T) {
-	snap := AttentionSnapshot{
+	snapshot := AttentionSnapshot{
 		NumLayers:    28,
 		NumHeads:     16,
 		SeqLen:       42,
@@ -424,12 +424,12 @@ func TestAttentionSnapshot_Good(t *testing.T) {
 		Keys:         make([][][]float32, 28),
 		Architecture: "gemma3",
 	}
-	assert.Equal(t, 28, snap.NumLayers)
-	assert.Equal(t, 16, snap.NumHeads)
-	assert.Equal(t, 42, snap.SeqLen)
-	assert.Equal(t, 64, snap.HeadDim)
-	assert.Len(t, snap.Keys, 28)
-	assert.Equal(t, "gemma3", snap.Architecture)
+	assert.Equal(t, 28, snapshot.NumLayers)
+	assert.Equal(t, 16, snapshot.NumHeads)
+	assert.Equal(t, 42, snapshot.SeqLen)
+	assert.Equal(t, 64, snapshot.HeadDim)
+	assert.Len(t, snapshot.Keys, 28)
+	assert.Equal(t, "gemma3", snapshot.Architecture)
 }
 
 func TestAttentionInspector_Good_InterfaceCompliance(t *testing.T) {
@@ -536,8 +536,8 @@ func TestGenerateMetrics_Good(t *testing.T) {
 		GeneratedTokens:     50,
 		PrefillTokensPerSec: 1000.0,
 		DecodeTokensPerSec:  25.0,
-		PeakMemoryBytes:     1 << 30,   // 1 GiB
-		ActiveMemoryBytes:   512 << 20, // 512 MiB
+		PeakMemoryBytes:     1 << 30,
+		ActiveMemoryBytes:   512 << 20,
 	}
 	assert.Equal(t, 100, metrics.PromptTokens)
 	assert.Equal(t, 50, metrics.GeneratedTokens)
@@ -584,7 +584,7 @@ func TestRegistry_Good_ConcurrentAccess(t *testing.T) {
 	waitGroup.Wait()
 
 	names := List()
-	assert.Len(t, names, 20, "all 20 backends should be registered after concurrent writes")
+	assert.Len(t, names, 20)
 }
 
 func TestRegister_Ugly_OverwriteKeepsCount(t *testing.T) {
@@ -595,7 +595,7 @@ func TestRegister_Ugly_OverwriteKeepsCount(t *testing.T) {
 	Register(&stubBackend{name: "alpha", available: false})
 
 	names := List()
-	assert.Len(t, names, 2, "overwriting a backend should not increase the count")
+	assert.Len(t, names, 2)
 }
 
 func TestDefault_Ugly_AllPreferredUnavailableCustomAvailable(t *testing.T) {
@@ -608,8 +608,7 @@ func TestDefault_Ugly_AllPreferredUnavailableCustomAvailable(t *testing.T) {
 
 	backend, err := Default()
 	require.NoError(t, err)
-	assert.Equal(t, "custom_vulkan", backend.Name(),
-		"should fall back to custom backend when all preferred backends are unavailable")
+	assert.Equal(t, "custom_vulkan", backend.Name())
 }
 
 func TestDefault_Ugly_MultipleCustomBackends(t *testing.T) {
@@ -620,8 +619,7 @@ func TestDefault_Ugly_MultipleCustomBackends(t *testing.T) {
 
 	backend, err := Default()
 	require.NoError(t, err)
-	assert.Equal(t, "custom_b", backend.Name(),
-		"should find the available custom backend in the fallback loop")
+	assert.Equal(t, "custom_b", backend.Name())
 }
 
 func TestLoadModel_Good_ExplicitBackendForwardsOptions(t *testing.T) {
@@ -639,8 +637,7 @@ func TestLoadModel_Good_ExplicitBackendForwardsOptions(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, model)
 
-	assert.Len(t, captureBackend.capturedOpts, len(loadOptions),
-		"all LoadOptions should be forwarded to the backend")
+	assert.Len(t, captureBackend.capturedOpts, len(loadOptions))
 
 	loadConfig := ApplyLoadOpts(captureBackend.capturedOpts)
 	assert.Equal(t, "cap", loadConfig.Backend)
@@ -664,8 +661,7 @@ func TestLoadModel_Good_DefaultBackendForwardsOptions(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, model)
 
-	assert.Len(t, captureBackend.capturedOpts, len(loadOptions),
-		"all LoadOptions should be forwarded to the default backend")
+	assert.Len(t, captureBackend.capturedOpts, len(loadOptions))
 
 	loadConfig := ApplyLoadOpts(captureBackend.capturedOpts)
 	assert.Equal(t, 8192, loadConfig.ContextLen)
@@ -683,8 +679,7 @@ func TestDefault_Good_RegistrationOrderIrrelevant(t *testing.T) {
 
 	backend, err := Default()
 	require.NoError(t, err)
-	assert.Equal(t, "metal", backend.Name(),
-		"metal should win regardless of registration order")
+	assert.Equal(t, "metal", backend.Name())
 
 	resetBackends(t)
 
@@ -694,8 +689,7 @@ func TestDefault_Good_RegistrationOrderIrrelevant(t *testing.T) {
 
 	backend, err = Default()
 	require.NoError(t, err)
-	assert.Equal(t, "metal", backend.Name(),
-		"metal should win regardless of registration order")
+	assert.Equal(t, "metal", backend.Name())
 }
 
 func TestLoadModel_Ugly_EmptyPath(t *testing.T) {
@@ -706,7 +700,7 @@ func TestLoadModel_Ugly_EmptyPath(t *testing.T) {
 	model, err := LoadModel("")
 	require.NoError(t, err)
 	stubModel := model.(*stubTextModel)
-	assert.Equal(t, "", stubModel.path, "empty path should be forwarded to the backend as-is")
+	assert.Equal(t, "", stubModel.path)
 	require.NoError(t, model.Close())
 }
 
@@ -718,7 +712,7 @@ func TestGet_Good_AfterOverwrite(t *testing.T) {
 
 	backend, ok := Get("gpu")
 	require.True(t, ok)
-	assert.True(t, backend.Available(), "Get should return the most recently registered backend")
+	assert.True(t, backend.Available())
 }
 
 func TestList_Good_IndependentSlices(t *testing.T) {
@@ -728,9 +722,9 @@ func TestList_Good_IndependentSlices(t *testing.T) {
 
 	firstNames := List()
 	secondNames := List()
-	assert.Equal(t, firstNames, secondNames, "both calls should return the same names")
+	assert.Equal(t, firstNames, secondNames)
 
 	firstNames[0] = "mutated"
 	thirdNames := List()
-	assert.NotEqual(t, firstNames[0], thirdNames[0], "List should return independent slices")
+	assert.NotEqual(t, firstNames[0], thirdNames[0])
 }
