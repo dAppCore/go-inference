@@ -188,18 +188,18 @@ Defaults (from `DefaultGenerateConfig()`):
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `WithMaxTokens` | `WithMaxTokens(n int) GenerateOption` | Cap output length |
-| `WithTemperature` | `WithTemperature(t float32) GenerateOption` | Sampling temperature (0 = greedy) |
-| `WithTopK` | `WithTopK(k int) GenerateOption` | Top-k sampling (0 = disabled) |
-| `WithTopP` | `WithTopP(p float32) GenerateOption` | Nucleus sampling threshold (0 = disabled) |
-| `WithStopTokens` | `WithStopTokens(ids ...int32) GenerateOption` | Token IDs that stop generation |
-| `WithRepeatPenalty` | `WithRepeatPenalty(p float32) GenerateOption` | Repetition penalty (1.0 = none) |
+| `WithMaxTokens` | `WithMaxTokens(maxTokens int) GenerateOption` | Cap output length |
+| `WithTemperature` | `WithTemperature(temperature float32) GenerateOption` | Sampling temperature (0 = greedy) |
+| `WithTopK` | `WithTopK(topK int) GenerateOption` | Top-k sampling (0 = disabled) |
+| `WithTopP` | `WithTopP(topP float32) GenerateOption` | Nucleus sampling threshold (0 = disabled) |
+| `WithStopTokens` | `WithStopTokens(stopTokenIDs ...int32) GenerateOption` | Token IDs that stop generation |
+| `WithRepeatPenalty` | `WithRepeatPenalty(repeatPenalty float32) GenerateOption` | Repetition penalty (1.0 = none) |
 | `WithLogits` | `WithLogits() GenerateOption` | Return raw logits in `ClassifyResult` |
 
 ### ApplyGenerateOpts
 
 ```go
-func ApplyGenerateOpts(opts []GenerateOption) GenerateConfig
+func ApplyGenerateOpts(generateOptions []GenerateOption) GenerateConfig
 ```
 
 Builds a `GenerateConfig` from options, starting from `DefaultGenerateConfig()`. Called by backends at the start of each inference operation. Options are applied in order; the last write wins for scalar fields.
@@ -228,16 +228,16 @@ Default `GPULayers` is `-1` (full GPU offload). Positive values specify a layer 
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `WithBackend` | `WithBackend(name string) LoadOption` | Select specific backend by name |
-| `WithContextLen` | `WithContextLen(n int) LoadOption` | Context window size |
-| `WithGPULayers` | `WithGPULayers(n int) LoadOption` | GPU layer offload count (-1 = all) |
-| `WithParallelSlots` | `WithParallelSlots(n int) LoadOption` | Concurrent inference slots |
-| `WithAdapterPath` | `WithAdapterPath(path string) LoadOption` | LoRA adapter directory |
+| `WithBackend` | `WithBackend(backendName string) LoadOption` | Select specific backend by name |
+| `WithContextLen` | `WithContextLen(contextLength int) LoadOption` | Context window size |
+| `WithGPULayers` | `WithGPULayers(gpuLayerCount int) LoadOption` | GPU layer offload count (-1 = all) |
+| `WithParallelSlots` | `WithParallelSlots(parallelSlotCount int) LoadOption` | Concurrent inference slots |
+| `WithAdapterPath` | `WithAdapterPath(adapterPath string) LoadOption` | LoRA adapter directory |
 
 ### ApplyLoadOpts
 
 ```go
-func ApplyLoadOpts(opts []LoadOption) LoadConfig
+func ApplyLoadOpts(loadOptions []LoadOption) LoadConfig
 ```
 
 Builds a `LoadConfig` from options. Default `GPULayers` is `-1`. Called by `LoadModel()` and by backends in their `LoadModel` implementations.

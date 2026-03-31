@@ -111,16 +111,16 @@ Prefer table-driven tests for options and configuration variants. The existing `
 ```go
 tests := []struct {
     name string
-    val  float32
+    temperature float32
     want float32
 }{
     {"greedy", 0.0, 0.0},
     {"low", 0.3, 0.3},
 }
-for _, tt := range tests {
-    t.Run(tt.name, func(t *testing.T) {
-        cfg := ApplyGenerateOpts([]GenerateOption{WithTemperature(tt.val)})
-        assert.InDelta(t, tt.want, cfg.Temperature, 0.0001)
+for _, testCase := range tests {
+    t.Run(testCase.name, func(t *testing.T) {
+        generateConfig := ApplyGenerateOpts([]GenerateOption{WithTemperature(testCase.temperature)})
+        assert.InDelta(t, testCase.want, generateConfig.Temperature, 0.0001)
     })
 }
 ```
@@ -149,8 +149,8 @@ Error strings start with the package name and a colon, lowercase, no trailing pe
 
 ```go
 fmt.Errorf("inference: no backends registered (import a backend package)")
-fmt.Errorf("inference: backend %q not registered", cfg.Backend)
-fmt.Errorf("inference: backend %q not available on this hardware", cfg.Backend)
+fmt.Errorf("inference: backend %q not registered", loadConfig.Backend)
+fmt.Errorf("inference: backend %q not available on this hardware", loadConfig.Backend)
 ```
 
 This convention matches the Go standard library and makes `errors.Is`/`errors.As` wrapping straightforward.
@@ -215,16 +215,16 @@ To implement a new backend (e.g. `go-vulkan` for cross-platform GPU inference):
 ```go
 type vulkanBackend struct{}
 
-func (b *vulkanBackend) Name() string { return "vulkan" }
+func (backend *vulkanBackend) Name() string { return "vulkan" }
 
-func (b *vulkanBackend) Available() bool {
+func (backend *vulkanBackend) Available() bool {
     // Check whether Vulkan runtime is present on this host.
     return vulkan.IsAvailable()
 }
 
-func (b *vulkanBackend) LoadModel(path string, opts ...inference.LoadOption) (inference.TextModel, error) {
-    cfg := inference.ApplyLoadOpts(opts)
-    // Load model using cfg.ContextLen, cfg.GPULayers, etc.
+func (backend *vulkanBackend) LoadModel(path string, loadOptions ...inference.LoadOption) (inference.TextModel, error) {
+    loadConfig := inference.ApplyLoadOpts(loadOptions)
+    // Load model using loadConfig.ContextLen, loadConfig.GPULayers, etc.
     return &vulkanModel{...}, nil
 }
 ```

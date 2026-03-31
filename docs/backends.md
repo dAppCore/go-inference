@@ -15,13 +15,13 @@ The registry is a package-level `map[string]Backend` protected by a `sync.RWMute
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `Register` | `Register(b Backend)` | Add a backend to the registry (called from `init()`) |
+| `Register` | `Register(backend Backend)` | Add a backend to the registry (called from `init()`) |
 | `Get` | `Get(name string) (Backend, bool)` | Retrieve a backend by name |
 | `List` | `List() []string` | All registered backend names, sorted alphabetically |
 | `All` | `All() iter.Seq2[string, Backend]` | Iterator over all registered backends |
 | `Default` | `Default() (Backend, error)` | First available backend by platform preference |
-| `LoadModel` | `LoadModel(path string, opts ...LoadOption) (TextModel, error)` | Load via specified or default backend |
-| `LoadTrainable` | `LoadTrainable(path string, opts ...LoadOption) (TrainableModel, error)` | Load a training-capable model |
+| `LoadModel` | `LoadModel(path string, loadOptions ...LoadOption) (TextModel, error)` | Load via specified or default backend |
+| `LoadTrainable` | `LoadTrainable(path string, loadOptions ...LoadOption) (TrainableModel, error)` | Load a training-capable model |
 
 ### Platform preference
 
@@ -45,10 +45,10 @@ inference: no backends registered (import a backend package)
 
 ```go
 // Explicit backend
-m, err := inference.LoadModel("/path/to/model/", inference.WithBackend("rocm"))
+model, err := inference.LoadModel("/path/to/model/", inference.WithBackend("rocm"))
 
 // Auto-detect (uses Default())
-m, err := inference.LoadModel("/path/to/model/")
+model, err := inference.LoadModel("/path/to/model/")
 ```
 
 When `WithBackend()` is set, `LoadModel` looks up the named backend directly and returns an error if it is not registered or not available. When no backend is specified, it calls `Default()`.
@@ -119,18 +119,18 @@ func NewBackend() inference.Backend {
     return &myBackend{}
 }
 
-func (b *myBackend) Name() string { return "mybackend" }
+func (backend *myBackend) Name() string { return "mybackend" }
 
-func (b *myBackend) Available() bool {
+func (backend *myBackend) Available() bool {
     // Check whether the runtime/hardware is present.
     // Return false if the GPU driver is missing, the server is unreachable, etc.
     return checkHardware()
 }
 
-func (b *myBackend) LoadModel(path string, opts ...inference.LoadOption) (inference.TextModel, error) {
-    cfg := inference.ApplyLoadOpts(opts)
+func (backend *myBackend) LoadModel(path string, loadOptions ...inference.LoadOption) (inference.TextModel, error) {
+    loadConfig := inference.ApplyLoadOpts(loadOptions)
     // Load weights, allocate GPU memory, set up KV cache...
-    return &myModel{config: cfg}, nil
+    return &myModel{config: loadConfig}, nil
 }
 ```
 
@@ -141,20 +141,20 @@ Every method on the `TextModel` interface must be implemented. Key consideration
 **Generate and Chat** must return `iter.Seq[Token]`. The iterator pattern gives the backend control over token production:
 
 ```go
-func (m *myModel) Generate(ctx context.Context, prompt string, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
-    cfg := inference.ApplyGenerateOpts(opts)
+func (model *myModel) Generate(ctx context.Context, prompt string, generateOptions ...inference.GenerateOption) iter.Seq[inference.Token] {
+    generateConfig := inference.ApplyGenerateOpts(generateOptions)
     return func(yield func(inference.Token) bool) {
         // Prefill the prompt...
-        for i := 0; i < cfg.MaxTokens; i++ {
+        for index := 0; index < generateConfig.MaxTokens; index++ {
             if ctx.Err() != nil {
-                m.lastErr = ctx.Err()
+                model.lastErr = ctx.Err()
                 return
             }
-            tok := m.decodeNext()
-            if !yield(tok) {
+            token := model.decodeNext()
+            if !yield(token) {
                 return // caller broke out of range loop
             }
-            if tok.ID == m.eosTokenID {
+            if token.ID == model.eosTokenID {
                 return
             }
         }
@@ -165,7 +165,7 @@ func (m *myModel) Generate(ctx context.Context, prompt string, opts ...inference
 **Err** stores the error from the last Generate/Chat call:
 
 ```go
-func (m *myModel) Err() error { return m.lastErr }
+func (model *myModel) Err() error { return model.lastErr }
 ```
 
 **Chat** should apply the model's native chat template before calling Generate internally. Do not expose template logic to the consumer.
@@ -194,22 +194,22 @@ func init() {
 If your backend supports LoRA fine-tuning, have your model type also implement `TrainableModel`:
 
 ```go
-func (m *myModel) ApplyLoRA(cfg inference.LoRAConfig) inference.Adapter {
-    // Inject LoRA layers into cfg.TargetKeys projections.
+func (model *myModel) ApplyLoRA(loraConfig inference.LoRAConfig) inference.Adapter {
+    // Inject LoRA layers into loraConfig.TargetKeys projections.
     // Return an Adapter that wraps the trainable parameters.
     return &myAdapter{params: loraParams}
 }
 
-func (m *myModel) Encode(text string) []int32 {
-    return m.tokeniser.Encode(text)
+func (model *myModel) Encode(text string) []int32 {
+    return model.tokeniser.Encode(text)
 }
 
-func (m *myModel) Decode(ids []int32) string {
-    return m.tokeniser.Decode(ids)
+func (model *myModel) Decode(ids []int32) string {
+    return model.tokeniser.Decode(ids)
 }
 
-func (m *myModel) NumLayers() int {
-    return m.config.NumLayers
+func (model *myModel) NumLayers() int {
+    return model.config.NumLayers
 }
 ```
 
@@ -239,15 +239,15 @@ func (a *myAdapter) Save(path string) error {
 If your backend can extract attention vectors from the KV cache, implement `AttentionInspector`:
 
 ```go
-func (m *myModel) InspectAttention(ctx context.Context, prompt string, opts ...inference.GenerateOption) (*inference.AttentionSnapshot, error) {
+func (model *myModel) InspectAttention(ctx context.Context, prompt string, generateOptions ...inference.GenerateOption) (*inference.AttentionSnapshot, error) {
     // Run prefill, then read Q/K vectors from the KV cache.
     return &inference.AttentionSnapshot{
-        NumLayers:    m.numLayers,
-        NumHeads:     m.numKVHeads,
+        NumLayers:    model.numLayers,
+        NumHeads:     model.numKVHeads,
         SeqLen:       seqLen,
-        HeadDim:      m.headDim,
+        HeadDim:      model.headDim,
         Keys:         keys,    // [layer][head] -> flat []float32
-        Architecture: m.arch,
+        Architecture: model.arch,
     }, nil
 }
 ```
@@ -270,13 +270,13 @@ The function scans one level deep (immediate subdirectories of `baseDir`). It al
 
 ```go
 // Scan a models directory
-for m := range inference.Discover("/path/to/models/") {
-    fmt.Printf("%s — %s (%d files)\n", m.Path, m.ModelType, m.NumFiles)
+for model := range inference.Discover("/path/to/models/") {
+    fmt.Printf("%s — %s (%d files)\n", model.Path, model.ModelType, model.NumFiles)
 }
 
 // Check a single model directory
-for m := range inference.Discover("/path/to/models/gemma3-1b") {
-    fmt.Printf("arch=%s quant=%d-bit\n", m.ModelType, m.QuantBits)
+for model := range inference.Discover("/path/to/models/gemma3-1b") {
+    fmt.Printf("arch=%s quant=%d-bit\n", model.ModelType, model.QuantBits)
 }
 ```
 
