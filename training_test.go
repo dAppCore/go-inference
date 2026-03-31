@@ -8,8 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- DefaultLoRAConfig ---
-
 func TestDefaultLoRAConfig_Good(t *testing.T) {
 	config := DefaultLoRAConfig()
 	assert.Equal(t, 8, config.Rank, "default Rank should be 8")
@@ -24,9 +22,6 @@ func TestDefaultLoRAConfig_Good_Idempotent(t *testing.T) {
 	assert.Equal(t, firstConfig, secondConfig, "DefaultLoRAConfig should be idempotent")
 }
 
-// --- LoadTrainable ---
-
-// stubTrainableModel extends stubTextModel with TrainableModel methods.
 type stubTrainableModel struct {
 	stubTextModel
 }
@@ -36,7 +31,6 @@ func (model *stubTrainableModel) Encode(_ string) []int32        { return nil }
 func (model *stubTrainableModel) Decode(_ []int32) string        { return "" }
 func (model *stubTrainableModel) NumLayers() int                 { return 26 }
 
-// trainableBackend returns a stubTrainableModel from LoadModel.
 type trainableBackend struct {
 	name      string
 	available bool
@@ -71,7 +65,6 @@ func TestLoadTrainable_Bad_NoBackends(t *testing.T) {
 func TestLoadTrainable_Bad_NotTrainable(t *testing.T) {
 	resetBackends(t)
 
-	// stubBackend returns a stubTextModel which does NOT implement TrainableModel.
 	Register(&stubBackend{name: "metal", available: true})
 
 	_, err := LoadTrainable("/path/to/model")
@@ -103,8 +96,6 @@ func TestLoadTrainable_Good_ExplicitBackend(t *testing.T) {
 	require.NotNil(t, trainableModel)
 	require.NoError(t, trainableModel.Close())
 }
-
-// --- TrainableModel interface compliance ---
 
 func TestTrainableModel_Good_InterfaceCompliance(t *testing.T) {
 	var _ TrainableModel = (*stubTrainableModel)(nil)
