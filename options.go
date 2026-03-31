@@ -88,8 +88,8 @@ func WithLogits() GenerateOption {
 //	cfg := inference.ApplyGenerateOpts(opts) // used internally by backends
 func ApplyGenerateOpts(opts []GenerateOption) GenerateConfig {
 	cfg := DefaultGenerateConfig()
-	for _, o := range opts {
-		o(&cfg)
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 	return cfg
 }
@@ -159,8 +159,8 @@ func ApplyLoadOpts(opts []LoadOption) LoadConfig {
 	cfg := LoadConfig{
 		GPULayers: -1, // default: full GPU offload
 	}
-	for _, o := range opts {
-		o(&cfg)
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 	return cfg
 }
