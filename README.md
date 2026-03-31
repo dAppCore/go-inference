@@ -14,15 +14,23 @@ Shared interface contract for text generation backends in the Core Go ecosystem.
 
 ```go
 import (
+    "context"
+    "fmt"
+    "log"
+
     "dappco.re/go/core/inference"
     _ "dappco.re/go/core/mlx"   // registers "metal" backend on darwin/arm64
 )
 
+ctx := context.Background()
 model, err := inference.LoadModel("/path/to/safetensors/model/")
+if err != nil {
+    log.Fatal(err)
+}
 defer model.Close()
 
-for tok := range model.Generate(ctx, "Hello", inference.WithMaxTokens(256)) {
-    fmt.Print(tok.Text)
+for token := range model.Generate(ctx, "Hello", inference.WithMaxTokens(256)) {
+    fmt.Print(token.Text)
 }
 ```
 
