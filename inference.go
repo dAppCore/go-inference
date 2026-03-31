@@ -43,9 +43,7 @@
 //	// Batch generate — parallel autoregressive decoding
 //	batched, _ := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(32))
 //
-// # Functional options
-//
-// Generation and loading are configured via functional options:
+// # Generation options
 //
 //	inference.WithMaxTokens(256)     // cap output length
 //	inference.WithTemperature(0.7)   // sampling temperature
@@ -57,9 +55,8 @@
 //
 // [Discover] scans a directory for model directories (config.json + *.safetensors):
 //
-//	models, _ := inference.Discover("/path/to/models/")
-//	for _, d := range models {
-//	    fmt.Printf("%s (%s)\n", d.Path, d.ModelType)
+//	for m := range inference.Discover("/path/to/models/") {
+//	    fmt.Printf("%s (%s)\n", m.Path, m.ModelType)
 //	}
 package inference
 
@@ -74,32 +71,57 @@ import (
 	"dappco.re/go/core"
 )
 
-// Token represents a single generated token for streaming.
+// Token is a single generated token emitted by the streaming iterator.
+//
+//	for tok := range m.Generate(ctx, prompt) {
+//	    fmt.Print(tok.Text) // tok.ID holds the vocab index
+//	}
 type Token struct {
 	ID   int32
 	Text string
 }
 
-// Message represents a chat message for multi-turn conversation.
+// Message is a single turn in a multi-turn chat conversation.
+//
+//	messages := []inference.Message{
+//	    {Role: "system",    Content: "You are a helpful assistant."},
+//	    {Role: "user",      Content: "What is 2+2?"},
+//	    {Role: "assistant", Content: "4"},
+//	    {Role: "user",      Content: "Are you sure?"},
+//	}
 type Message struct {
 	Role    string `json:"role"`    // "system", "user", "assistant"
 	Content string `json:"content"`
 }
 
 // ClassifyResult holds the output for a single prompt in a batch classification.
+//
+//	results, _ := m.Classify(ctx, []string{"positive", "negative"})
+//	label := results[0].Token.Text  // sampled token at last position
+//	logits := results[0].Logits     // only populated when WithLogits() is set
 type ClassifyResult struct {
 	Token  Token     // Sampled/greedy token at last prompt position
 	Logits []float32 // Raw vocab-sized logits (only when WithLogits is set)
 }
 
 // BatchResult holds the output for a single prompt in batch generation.
+//
+//	batched, _ := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(64))
+//	for i, r := range batched {
+//	    if r.Err != nil { continue }
+//	    for _, tok := range r.Tokens { fmt.Print(tok.Text) }
+//	}
 type BatchResult struct {
 	Tokens []Token // All generated tokens for this prompt
 	Err    error   // Per-prompt error (context cancel, OOM, etc.)
 }
 
-// GenerateMetrics holds performance metrics from the last inference operation.
+// GenerateMetrics holds performance counters from the last inference operation.
 // Retrieved via TextModel.Metrics() after Generate, Chat, Classify, or BatchGenerate.
+//
+//	m := model.Metrics()
+//	fmt.Printf("prefill: %.0f tok/s  decode: %.0f tok/s\n", m.PrefillTokensPerSec, m.DecodeTokensPerSec)
+//	fmt.Printf("peak GPU memory: %d MiB\n", m.PeakMemoryBytes>>20)
 type GenerateMetrics struct {
 	// Token counts
 	PromptTokens    int // Input tokens (sum across batch for batch ops)
@@ -120,6 +142,9 @@ type GenerateMetrics struct {
 }
 
 // ModelInfo holds metadata about a loaded model.
+//
+//	info := model.Info()
+//	fmt.Printf("%s %d-bit quant, %d layers, vocab %d\n", info.Architecture, info.QuantBits, info.NumLayers, info.VocabSize)
 type ModelInfo struct {
 	Architecture string // e.g. "gemma3", "qwen3", "llama"
 	VocabSize    int    // Vocabulary size
@@ -131,6 +156,9 @@ type ModelInfo struct {
 
 // AttentionSnapshot holds Q and/or K vectors extracted from the KV cache after prefill.
 // Keys is indexed [layer][head][position*head_dim] — flattened per head.
+//
+//	snap, _ := inspector.InspectAttention(ctx, prompt)
+//	layer0Head0 := snap.Keys[0][0] // flat float32 of len seq_len*head_dim
 type AttentionSnapshot struct {
 	NumLayers     int           `json:"num_layers"`
 	NumHeads      int           `json:"num_heads"`       // num_kv_heads (may differ from query heads in GQA)
@@ -143,62 +171,102 @@ type AttentionSnapshot struct {
 }
 
 // HasQueries reports whether this snapshot contains query vectors.
+//
+//	if snap.HasQueries() { processQK(snap.Queries, snap.Keys) }
 func (s *AttentionSnapshot) HasQueries() bool {
 	return s.Queries != nil && len(s.Queries) > 0
 }
 
 // AttentionInspector is an optional interface that backends may implement
 // to expose attention-level data for Q/K Bone Orientation analysis.
-// Use type assertion: if inspector, ok := model.(AttentionInspector); ok { ... }
+//
+//	if inspector, ok := model.(inference.AttentionInspector); ok {
+//	    snap, err := inspector.InspectAttention(ctx, prompt)
+//	}
 type AttentionInspector interface {
 	InspectAttention(ctx context.Context, prompt string, opts ...GenerateOption) (*AttentionSnapshot, error)
 }
 
 // TextModel generates text from a loaded model.
+//
+//	m, _ := inference.LoadModel("/models/gemma3-1b")
+//	defer m.Close()
+//	for tok := range m.Generate(ctx, "Hello") { fmt.Print(tok.Text) }
 type TextModel interface {
 	// Generate streams tokens for the given prompt.
+	//
+	//	for tok := range m.Generate(ctx, "The quick brown fox", inference.WithMaxTokens(64)) {
+	//	    fmt.Print(tok.Text)
+	//	}
+	//	if err := m.Err(); err != nil { return err }
 	Generate(ctx context.Context, prompt string, opts ...GenerateOption) iter.Seq[Token]
 
-	// Chat streams tokens from a multi-turn conversation.
-	// The model applies its native chat template.
+	// Chat streams tokens from a multi-turn conversation using the model's native template.
+	//
+	//	for tok := range m.Chat(ctx, []inference.Message{{Role: "user", Content: "Hi"}}) {
+	//	    fmt.Print(tok.Text)
+	//	}
 	Chat(ctx context.Context, messages []Message, opts ...GenerateOption) iter.Seq[Token]
 
-	// Classify runs batched prefill-only inference. Each prompt gets a single
-	// forward pass and the token at the last position is sampled. This is the
-	// fast path for classification tasks (e.g. domain labelling).
+	// Classify runs batched prefill-only inference — fast path for classification tasks.
+	// Each prompt gets one forward pass; the token at the last position is sampled.
+	//
+	//	results, _ := m.Classify(ctx, []string{"positive review", "negative review"})
+	//	label := results[0].Token.Text
 	Classify(ctx context.Context, prompts []string, opts ...GenerateOption) ([]ClassifyResult, error)
 
-	// BatchGenerate runs batched autoregressive generation. Each prompt is
-	// decoded up to MaxTokens. Returns all generated tokens per prompt.
+	// BatchGenerate runs batched autoregressive generation up to MaxTokens per prompt.
+	//
+	//	results, _ := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(128))
+	//	for i, r := range results { fmt.Println(i, r.Tokens) }
 	BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) ([]BatchResult, error)
 
-	// ModelType returns the architecture identifier (e.g. "gemma3", "qwen3", "llama3").
+	// ModelType returns the architecture identifier.
+	//
+	//	fmt.Println(m.ModelType()) // "gemma3", "qwen3", "llama3"
 	ModelType() string
 
-	// Info returns metadata about the loaded model (architecture, quantisation, etc.).
+	// Info returns metadata about the loaded model.
+	//
+	//	info := m.Info() // architecture, quantisation, layer count, vocab size
 	Info() ModelInfo
 
-	// Metrics returns performance metrics from the last inference operation.
+	// Metrics returns performance counters from the last inference operation.
 	// Valid after Generate (iterator exhausted), Chat, Classify, or BatchGenerate.
+	//
+	//	fmt.Printf("%.0f tok/s decode\n", m.Metrics().DecodeTokensPerSec)
 	Metrics() GenerateMetrics
 
-	// Err returns the error from the last Generate/Chat call, if any.
-	// Check this after the iterator stops to distinguish EOS from errors.
+	// Err returns the error from the last Generate or Chat call.
+	// Check after the iterator stops to distinguish EOS from errors.
+	//
+	//	for tok := range m.Generate(ctx, prompt) { ... }
+	//	if err := m.Err(); err != nil { return err }
 	Err() error
 
 	// Close releases all resources (GPU memory, caches, subprocess).
+	//
+	//	defer m.Close()
 	Close() error
 }
 
 // Backend is a named inference engine that can load models.
+//
+//	func init() { inference.Register(metal.NewBackend()) } // called from backend packages
 type Backend interface {
-	// Name returns the backend identifier (e.g. "metal", "rocm", "llama_cpp").
+	// Name returns the backend identifier.
+	//
+	//	b.Name() // "metal", "rocm", "llama_cpp"
 	Name() string
 
-	// LoadModel loads a model from the given path.
+	// LoadModel loads a model from the given directory path.
+	//
+	//	m, err := b.LoadModel("/models/gemma3-1b", inference.WithContextLen(4096))
 	LoadModel(path string, opts ...LoadOption) (TextModel, error)
 
 	// Available reports whether this backend can run on the current hardware.
+	//
+	//	if !b.Available() { skip } // e.g. Metal on non-Apple hardware returns false
 	Available() bool
 }
 
@@ -207,7 +275,9 @@ var (
 	backends   = map[string]Backend{}
 )
 
-// Register adds a backend to the registry. Typically called from init().
+// Register adds a backend to the global registry. Called from backend init() functions.
+//
+//	func init() { inference.Register(metal.NewBackend()) }
 func Register(b Backend) {
 	backendsMu.Lock()
 	defer backendsMu.Unlock()
@@ -215,6 +285,8 @@ func Register(b Backend) {
 }
 
 // Get returns a registered backend by name.
+//
+//	b, ok := inference.Get("metal")
 func Get(name string) (Backend, bool) {
 	backendsMu.RLock()
 	defer backendsMu.RUnlock()
@@ -223,6 +295,8 @@ func Get(name string) (Backend, bool) {
 }
 
 // List returns the names of all registered backends in alphabetical order.
+//
+//	names := inference.List() // ["llama_cpp", "metal", "rocm"]
 func List() []string {
 	backendsMu.RLock()
 	defer backendsMu.RUnlock()
@@ -230,6 +304,10 @@ func List() []string {
 }
 
 // All returns an iterator over all registered backends.
+//
+//	for name, b := range inference.All() {
+//	    fmt.Println(name, b.Available())
+//	}
 func All() iter.Seq2[string, Backend] {
 	backendsMu.RLock()
 	snap := maps.Clone(backends)
@@ -237,8 +315,10 @@ func All() iter.Seq2[string, Backend] {
 	return maps.All(snap)
 }
 
-// Default returns the first available backend.
-// Prefers "metal" on macOS, "rocm" on Linux, then any registered backend.
+// Default returns the first available backend using platform preference order:
+// metal → rocm → llama_cpp → any registered backend.
+//
+//	b, err := inference.Default() // returns metal on Apple Silicon if available
 func Default() (Backend, error) {
 	backendsMu.RLock()
 	defer backendsMu.RUnlock()
@@ -259,6 +339,9 @@ func Default() (Backend, error) {
 }
 
 // LoadModel loads a model using the specified or default backend.
+//
+//	m, err := inference.LoadModel("/models/gemma3-1b")
+//	m, err := inference.LoadModel("/models/qwen3-4b", inference.WithBackend("rocm"), inference.WithContextLen(8192))
 func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 	cfg := ApplyLoadOpts(opts)
 	if cfg.Backend != "" {
