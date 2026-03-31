@@ -470,7 +470,7 @@ func TestAttentionInspector_Good_ReturnsSnapshot(t *testing.T) {
 	assert.Equal(t, "qwen3", snap.Architecture)
 }
 
-func TestAttentionSnapshotWithQueries(t *testing.T) {
+func TestAttentionSnapshot_Good_HasQueries(t *testing.T) {
 	snap := AttentionSnapshot{
 		NumLayers:     28,
 		NumHeads:      8,

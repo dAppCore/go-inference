@@ -14,7 +14,7 @@ type GenerateConfig struct {
 	ReturnLogits  bool // Return raw logits in ClassifyResult (default false)
 }
 
-// DefaultGenerateConfig returns sensible defaults for text generation.
+// DefaultGenerateConfig returns generation defaults: 256 tokens, greedy (temperature 0).
 //
 //	cfg := inference.DefaultGenerateConfig() // MaxTokens=256, Temperature=0.0 (greedy)
 func DefaultGenerateConfig() GenerateConfig {
@@ -24,7 +24,7 @@ func DefaultGenerateConfig() GenerateConfig {
 	}
 }
 
-// GenerateOption configures text generation.
+// GenerateOption is a functional option for Generate, Chat, Classify, and BatchGenerate.
 //
 //	m.Generate(ctx, prompt, inference.WithMaxTokens(128), inference.WithTemperature(0.7))
 type GenerateOption func(*GenerateConfig)
@@ -37,7 +37,7 @@ func WithMaxTokens(n int) GenerateOption {
 	return func(c *GenerateConfig) { c.MaxTokens = n }
 }
 
-// WithTemperature sets the sampling temperature. 0 = greedy decoding.
+// WithTemperature controls randomness. 0 = deterministic greedy, >1 = high variance.
 //
 //	inference.WithTemperature(0.0) // deterministic
 //	inference.WithTemperature(0.7) // balanced creativity
@@ -60,7 +60,7 @@ func WithTopP(p float32) GenerateOption {
 	return func(c *GenerateConfig) { c.TopP = p }
 }
 
-// WithStopTokens sets token IDs that halt generation when sampled.
+// WithStopTokens halts generation as soon as any listed token ID is sampled.
 //
 //	inference.WithStopTokens(2)       // EOS token only
 //	inference.WithStopTokens(2, 1, 0) // EOS + pad tokens
@@ -83,7 +83,7 @@ func WithLogits() GenerateOption {
 	return func(c *GenerateConfig) { c.ReturnLogits = true }
 }
 
-// ApplyGenerateOpts builds a GenerateConfig from a slice of options.
+// ApplyGenerateOpts folds a slice of GenerateOption into a GenerateConfig, starting from defaults.
 //
 //	cfg := inference.ApplyGenerateOpts(opts) // used internally by backends
 func ApplyGenerateOpts(opts []GenerateOption) GenerateConfig {
@@ -106,7 +106,7 @@ type LoadConfig struct {
 	AdapterPath   string // Path to LoRA adapter directory (empty = no adapter)
 }
 
-// LoadOption configures model loading.
+// LoadOption is a functional option for LoadModel and LoadTrainable.
 //
 //	inference.LoadModel("/models/gemma3-1b", inference.WithBackend("metal"), inference.WithContextLen(4096))
 type LoadOption func(*LoadConfig)
@@ -120,7 +120,7 @@ func WithBackend(name string) LoadOption {
 	return func(c *LoadConfig) { c.Backend = name }
 }
 
-// WithContextLen sets the context window size in tokens.
+// WithContextLen caps the KV cache to n tokens. 0 = use the model's built-in default.
 //
 //	inference.WithContextLen(4096)  // standard context
 //	inference.WithContextLen(32768) // extended context
@@ -128,8 +128,7 @@ func WithContextLen(n int) LoadOption {
 	return func(c *LoadConfig) { c.ContextLen = n }
 }
 
-// WithGPULayers sets how many transformer layers to offload to GPU.
-// -1 = all layers (full GPU offload), 0 = CPU only.
+// WithGPULayers offloads n transformer layers to GPU. -1 = all (default), 0 = CPU-only.
 //
 //	inference.WithGPULayers(-1) // full GPU offload (default)
 //	inference.WithGPULayers(0)  // CPU-only inference
@@ -138,25 +137,22 @@ func WithGPULayers(n int) LoadOption {
 	return func(c *LoadConfig) { c.GPULayers = n }
 }
 
-// WithParallelSlots sets the number of concurrent inference slots.
-// Higher values allow parallel Generate/Chat calls but increase VRAM usage.
-// 0 = server default (typically 1).
+// WithParallelSlots allows n concurrent Generate/Chat calls at the cost of VRAM. 0 = backend default.
 //
 //	inference.WithParallelSlots(4) // allow 4 concurrent inference requests
 func WithParallelSlots(n int) LoadOption {
 	return func(c *LoadConfig) { c.ParallelSlots = n }
 }
 
-// WithAdapterPath sets the path to a LoRA adapter directory.
+// WithAdapterPath injects a LoRA adapter at load time without fusing into the base model.
 // The directory must contain adapter_config.json and adapter safetensors files.
-// Adapter weights are injected at load time without fusing into the base model.
 //
 //	inference.WithAdapterPath("/models/lora/domain-v2") // load fine-tuned adapter
 func WithAdapterPath(path string) LoadOption {
 	return func(c *LoadConfig) { c.AdapterPath = path }
 }
 
-// ApplyLoadOpts builds a LoadConfig from a slice of options.
+// ApplyLoadOpts folds a slice of LoadOption into a LoadConfig, starting from defaults (GPULayers=-1).
 //
 //	cfg := inference.ApplyLoadOpts(opts) // used internally by LoadModel
 func ApplyLoadOpts(opts []LoadOption) LoadConfig {

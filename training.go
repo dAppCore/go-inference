@@ -13,7 +13,7 @@ type LoRAConfig struct {
 	BFloat16   bool     // Use BFloat16 for adapter weights (mixed precision)
 }
 
-// DefaultLoRAConfig returns standard LoRA parameters for LLM fine-tuning.
+// DefaultLoRAConfig returns Rank=8, Alpha=16, targeting q_proj and v_proj layers.
 //
 //	cfg := inference.DefaultLoRAConfig() // Rank=8, Alpha=16, TargetKeys=["q_proj","v_proj"]
 func DefaultLoRAConfig() LoRAConfig {
@@ -31,12 +31,12 @@ func DefaultLoRAConfig() LoRAConfig {
 //	fmt.Printf("%d trainable parameters\n", adapter.TotalParams())
 //	adapter.Save("/models/lora/domain-v2/adapter.safetensors")
 type Adapter interface {
-	// TotalParams returns the total number of trainable parameters.
+	// TotalParams is the sum of all injected adapter weight elements.
 	//
 	//	fmt.Printf("%d trainable params\n", adapter.TotalParams())
 	TotalParams() int
 
-	// Save writes adapter weights to a safetensors file.
+	// Save persists adapter weights to a safetensors file at path.
 	//
 	//	adapter.Save("/models/lora/epoch3/adapter.safetensors")
 	Save(path string) error
@@ -71,14 +71,13 @@ type TrainableModel interface {
 	//	text := tm.Decode([]int32{1, 22172, 29892}) // "Hello,"
 	Decode(ids []int32) string
 
-	// NumLayers returns the number of transformer layers.
+	// NumLayers is the transformer depth used to size per-layer LoRA matrices.
 	//
 	//	layers := tm.NumLayers() // e.g. 26 for gemma3-1b
 	NumLayers() int
 }
 
-// LoadTrainable loads a model and asserts it implements TrainableModel.
-// Returns an error if the backend does not support fine-tuning.
+// LoadTrainable loads a model and asserts fine-tuning support. Errors if the backend cannot train.
 //
 //	tm, err := inference.LoadTrainable("/models/gemma3-1b")
 //	adapter := tm.ApplyLoRA(inference.DefaultLoRAConfig())

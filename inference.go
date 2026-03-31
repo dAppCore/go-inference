@@ -221,30 +221,30 @@ type TextModel interface {
 	//	for i, r := range results { fmt.Println(i, r.Tokens) }
 	BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) ([]BatchResult, error)
 
-	// ModelType returns the architecture identifier.
+	// ModelType is the architecture string from config.json ("gemma3", "qwen3", "llama3").
 	//
 	//	fmt.Println(m.ModelType()) // "gemma3", "qwen3", "llama3"
 	ModelType() string
 
-	// Info returns metadata about the loaded model.
+	// Info returns architecture, quantisation, layer count, and vocab size.
 	//
 	//	info := m.Info() // architecture, quantisation, layer count, vocab size
 	Info() ModelInfo
 
-	// Metrics returns performance counters from the last inference operation.
+	// Metrics returns throughput and memory counters from the last completed operation.
 	// Valid after Generate (iterator exhausted), Chat, Classify, or BatchGenerate.
 	//
 	//	fmt.Printf("%.0f tok/s decode\n", m.Metrics().DecodeTokensPerSec)
 	Metrics() GenerateMetrics
 
-	// Err returns the error from the last Generate or Chat call.
-	// Check after the iterator stops to distinguish EOS from errors.
+	// Err holds any error from the last Generate or Chat call.
+	// Check after the iterator stops to distinguish normal EOS from errors.
 	//
 	//	for tok := range m.Generate(ctx, prompt) { ... }
 	//	if err := m.Err(); err != nil { return err }
 	Err() error
 
-	// Close releases all resources (GPU memory, caches, subprocess).
+	// Close releases GPU memory, KV caches, and any subprocess.
 	//
 	//	defer m.Close()
 	Close() error
@@ -254,17 +254,17 @@ type TextModel interface {
 //
 //	func init() { inference.Register(metal.NewBackend()) } // called from backend packages
 type Backend interface {
-	// Name returns the backend identifier.
+	// Name is the stable identifier used for registration and selection.
 	//
 	//	b.Name() // "metal", "rocm", "llama_cpp"
 	Name() string
 
-	// LoadModel loads a model from the given directory path.
+	// LoadModel reads the model directory at path and returns a ready TextModel.
 	//
 	//	m, err := b.LoadModel("/models/gemma3-1b", inference.WithContextLen(4096))
 	LoadModel(path string, opts ...LoadOption) (TextModel, error)
 
-	// Available reports whether this backend can run on the current hardware.
+	// Available reports whether the required hardware or driver is present at runtime.
 	//
 	//	if !b.Available() { skip } // e.g. Metal on non-Apple hardware returns false
 	Available() bool
@@ -275,7 +275,7 @@ var (
 	backends   = map[string]Backend{}
 )
 
-// Register adds a backend to the global registry. Called from backend init() functions.
+// Register adds b to the global registry, overwriting any existing entry with the same name.
 //
 //	func init() { inference.Register(metal.NewBackend()) }
 func Register(b Backend) {
@@ -284,7 +284,7 @@ func Register(b Backend) {
 	backends[b.Name()] = b
 }
 
-// Get returns a registered backend by name.
+// Get looks up a backend by name. Returns (nil, false) when not registered.
 //
 //	b, ok := inference.Get("metal")
 func Get(name string) (Backend, bool) {
@@ -294,7 +294,7 @@ func Get(name string) (Backend, bool) {
 	return b, ok
 }
 
-// List returns the names of all registered backends in alphabetical order.
+// List returns registered backend names sorted alphabetically.
 //
 //	names := inference.List() // ["llama_cpp", "metal", "rocm"]
 func List() []string {
@@ -303,7 +303,7 @@ func List() []string {
 	return slices.Sorted(maps.Keys(backends))
 }
 
-// All returns an iterator over all registered backends.
+// All iterates over a snapshot of the registry — safe to range over while other goroutines register.
 //
 //	for name, b := range inference.All() {
 //	    fmt.Println(name, b.Available())
@@ -315,8 +315,7 @@ func All() iter.Seq2[string, Backend] {
 	return maps.All(snap)
 }
 
-// Default returns the first available backend using platform preference order:
-// metal → rocm → llama_cpp → any registered backend.
+// Default picks the first available backend in preference order: metal → rocm → llama_cpp → any.
 //
 //	b, err := inference.Default() // returns metal on Apple Silicon if available
 func Default() (Backend, error) {
@@ -338,7 +337,7 @@ func Default() (Backend, error) {
 	return nil, core.NewError("inference: no backends registered (import a backend package)")
 }
 
-// LoadModel loads a model using the specified or default backend.
+// LoadModel loads the model at path via the backend named by WithBackend, or Default() if none.
 //
 //	m, err := inference.LoadModel("/models/gemma3-1b")
 //	m, err := inference.LoadModel("/models/qwen3-4b", inference.WithBackend("rocm"), inference.WithContextLen(8192))

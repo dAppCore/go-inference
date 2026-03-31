@@ -21,9 +21,8 @@ type DiscoveredModel struct {
 	NumFiles  int    // Number of safetensors weight files
 }
 
-// Discover scans baseDir for model directories.
-// A valid model directory contains config.json and at least one .safetensors file.
-// Scans one level deep (baseDir itself plus immediate subdirectories).
+// Discover yields model directories one level deep under baseDir.
+// A valid directory has config.json + at least one .safetensors file.
 //
 //	for m := range inference.Discover("/Volumes/Data/models") {
 //	    model, _ := inference.LoadModel(m.Path)
@@ -62,8 +61,7 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	}
 }
 
-// probeModelDir checks if dir looks like a model directory.
-// Returns the parsed DiscoveredModel and true if config.json + *.safetensors are present.
+// probeModelDir returns (model, true) when dir contains config.json + *.safetensors.
 func probeModelDir(dir string) (DiscoveredModel, bool) {
 	configPath := core.Path(dir, "config.json")
 	data, err := os.ReadFile(configPath)
