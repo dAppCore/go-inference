@@ -134,3 +134,46 @@ func TestTraining_DefaultLoRAConfig_Good_TargetKeysIndependent(t *testing.T) {
 		"DefaultLoRAConfig should return independent TargetKeys slices")
 	assert.Len(t, cfg1.TargetKeys, 3, "mutated copy should have 3 keys")
 }
+
+// --- LoRAConfig Bad: zero/negative values are accepted at the config layer ---
+
+func TestTraining_LoRAConfig_Bad_ZeroRank(t *testing.T) {
+	// Rank=0 is accepted at the config layer — backends validate at load time.
+	cfg := LoRAConfig{Rank: 0, Alpha: 16, TargetKeys: []string{"q_proj"}}
+	assert.Equal(t, 0, cfg.Rank, "zero Rank should be stored as-is")
+}
+
+func TestTraining_LoRAConfig_Bad_NegativeRank(t *testing.T) {
+	// Negative Rank is accepted at the config layer — backends validate at load time.
+	cfg := LoRAConfig{Rank: -8, Alpha: 16, TargetKeys: []string{"q_proj"}}
+	assert.Equal(t, -8, cfg.Rank, "negative Rank should be stored as-is")
+}
+
+func TestTraining_LoRAConfig_Bad_ZeroAlpha(t *testing.T) {
+	// Alpha=0 disables the adapter scaling — accepted at config layer.
+	cfg := LoRAConfig{Rank: 8, Alpha: 0, TargetKeys: []string{"q_proj"}}
+	assert.InDelta(t, float32(0), cfg.Alpha, 0.0001, "zero Alpha should be stored as-is")
+}
+
+// --- LoRAConfig Ugly: atypical but valid configurations ---
+
+func TestTraining_LoRAConfig_Ugly_EmptyTargetKeys(t *testing.T) {
+	// Empty TargetKeys is accepted at the config layer — backends decide what to do.
+	cfg := LoRAConfig{Rank: 8, Alpha: 16, TargetKeys: []string{}}
+	assert.Empty(t, cfg.TargetKeys, "empty TargetKeys should be stored as-is")
+}
+
+func TestTraining_LoRAConfig_Ugly_NilTargetKeys(t *testing.T) {
+	// Nil TargetKeys (zero value) is accepted at the config layer.
+	cfg := LoRAConfig{Rank: 8, Alpha: 16}
+	assert.Nil(t, cfg.TargetKeys, "nil TargetKeys should remain nil (zero value)")
+}
+
+func TestTraining_LoRAConfig_Ugly_BFloat16WithHighRank(t *testing.T) {
+	// BFloat16=true with a high rank — valid mixed-precision config.
+	cfg := LoRAConfig{Rank: 64, Alpha: 128, TargetKeys: []string{"q_proj", "k_proj", "v_proj"}, BFloat16: true}
+	assert.Equal(t, 64, cfg.Rank)
+	assert.InDelta(t, float32(128), cfg.Alpha, 0.0001)
+	assert.True(t, cfg.BFloat16, "BFloat16 should be stored as-is")
+	assert.Len(t, cfg.TargetKeys, 3)
+}
