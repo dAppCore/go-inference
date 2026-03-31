@@ -14,11 +14,11 @@ import (
 //		NumFiles:  4,
 //	}
 type DiscoveredModel struct {
-	Path       string // Absolute model-directory path
-	ModelType  string // Architecture from config.json
-	QuantBits  int    // Quantisation bits (0 if unquantised)
-	QuantGroup int    // Quantisation group size
-	NumFiles   int    // safetensors weight-file count
+	Path       string
+	ModelType  string
+	QuantBits  int
+	QuantGroup int
+	NumFiles   int
 }
 
 //	for model := range inference.Discover("/Volumes/Data/models") {

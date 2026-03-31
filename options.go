@@ -20,7 +20,7 @@ func DefaultGenerateConfig() GenerateConfig {
 	}
 }
 
-// opts := []inference.GenerateOption{inference.WithMaxTokens(128), inference.WithTemperature(0.7)}
+// options := []inference.GenerateOption{inference.WithMaxTokens(128), inference.WithTemperature(0.7)}
 type GenerateOption func(*GenerateConfig)
 
 // inference.WithMaxTokens(128)  // short reply
@@ -75,14 +75,14 @@ func ApplyGenerateOpts(options []GenerateOption) GenerateConfig {
 // config := inference.LoadConfig{Backend: "metal", ContextLen: 4096, GPULayers: -1}
 // config := inference.LoadConfig{Backend: "rocm", AdapterPath: "/models/lora/v1"}
 type LoadConfig struct {
-	Backend       string // Backend name ("metal", "rocm", "llama_cpp")
-	ContextLen    int    // Context window size (0 = model default)
-	GPULayers     int    // GPU-offload layer count (-1 = all, 0 = none)
-	ParallelSlots int    // Concurrent inference slot count (0 = backend default)
-	AdapterPath   string // LoRA adapter directory path
+	Backend       string
+	ContextLen    int
+	GPULayers     int
+	ParallelSlots int
+	AdapterPath   string
 }
 
-// opts := []inference.LoadOption{inference.WithBackend("metal"), inference.WithContextLen(4096)}
+// options := []inference.LoadOption{inference.WithBackend("metal"), inference.WithContextLen(4096)}
 type LoadOption func(*LoadConfig)
 
 // inference.WithBackend("metal")     // Apple Silicon GPU
