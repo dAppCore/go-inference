@@ -146,6 +146,18 @@ func TestOptions_WithTopP_Good(t *testing.T) {
 	}
 }
 
+func TestOptions_WithTopP_Bad(t *testing.T) {
+	// Negative TopP is accepted at the options layer (no validation).
+	cfg := ApplyGenerateOpts([]GenerateOption{WithTopP(-0.1)})
+	assert.InDelta(t, -0.1, cfg.TopP, 0.0001, "negative TopP should be stored as-is")
+}
+
+func TestOptions_WithTopP_Ugly(t *testing.T) {
+	// Value >1.0 is technically out of range but accepted at the options layer.
+	cfg := ApplyGenerateOpts([]GenerateOption{WithTopP(1.5)})
+	assert.InDelta(t, 1.5, cfg.TopP, 0.0001, "TopP >1.0 should be stored as-is; backend validates")
+}
+
 // --- WithStopTokens ---
 
 func TestOptions_WithStopTokens_Good(t *testing.T) {
@@ -195,6 +207,18 @@ func TestOptions_WithRepeatPenalty_Good(t *testing.T) {
 			assert.InDelta(t, tt.want, cfg.RepeatPenalty, 0.0001)
 		})
 	}
+}
+
+func TestOptions_WithRepeatPenalty_Bad(t *testing.T) {
+	// Negative RepeatPenalty is accepted at the options layer (no validation).
+	cfg := ApplyGenerateOpts([]GenerateOption{WithRepeatPenalty(-1.0)})
+	assert.InDelta(t, -1.0, cfg.RepeatPenalty, 0.0001, "negative RepeatPenalty should be stored as-is")
+}
+
+func TestOptions_WithRepeatPenalty_Ugly(t *testing.T) {
+	// Very high penalty — accepted at options layer; backend decides behaviour.
+	cfg := ApplyGenerateOpts([]GenerateOption{WithRepeatPenalty(10.0)})
+	assert.InDelta(t, 10.0, cfg.RepeatPenalty, 0.0001, "extreme RepeatPenalty should be stored as-is")
 }
 
 // --- WithLogits ---

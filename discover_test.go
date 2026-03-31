@@ -1,7 +1,6 @@
 package inference
 
 import (
-	"os"
 	"slices"
 	"testing"
 
@@ -13,19 +12,23 @@ import (
 // --- test helpers for discover ---
 
 // createModelDir creates a fake model directory with config.json and n safetensors files.
+//
+//	createModelDir(t, core.Path(base, "gemma3-1b"), map[string]any{"model_type": "gemma3"}, 1)
 func createModelDir(t *testing.T, dir string, config map[string]any, numSafetensors int) {
 	t.Helper()
-	require.NoError(t, os.MkdirAll(dir, 0o755))
+	fs := (&core.Fs{}).NewUnrestricted()
+
+	require.True(t, fs.EnsureDir(dir).OK)
 
 	if config != nil {
 		r := core.JSONMarshal(config)
 		require.True(t, r.OK)
-		require.NoError(t, os.WriteFile(core.Path(dir, "config.json"), r.Value.([]byte), 0o644))
+		require.True(t, fs.Write(core.Path(dir, "config.json"), string(r.Value.([]byte))).OK)
 	}
 
 	for i := range numSafetensors {
 		fname := core.Path(dir, core.Sprintf("model-%05d-of-%05d.safetensors", i+1, numSafetensors))
-		require.NoError(t, os.WriteFile(fname, []byte("fake"), 0o644))
+		require.True(t, fs.Write(fname, "fake").OK)
 	}
 }
 
@@ -136,12 +139,13 @@ func TestDiscover_Bad_NoSafetensors(t *testing.T) {
 	// Directory with config.json but no .safetensors files.
 	base := t.TempDir()
 	dir := core.Path(base, "incomplete")
-	require.NoError(t, os.MkdirAll(dir, 0o755))
+	fs := (&core.Fs{}).NewUnrestricted()
 
+	require.True(t, fs.EnsureDir(dir).OK)
 	config := map[string]any{"model_type": "gemma3"}
 	r := core.JSONMarshal(config)
 	require.True(t, r.OK)
-	require.NoError(t, os.WriteFile(core.Path(dir, "config.json"), r.Value.([]byte), 0o644))
+	require.True(t, fs.Write(core.Path(dir, "config.json"), string(r.Value.([]byte))).OK)
 
 	models := slices.Collect(Discover(base))
 	assert.Empty(t, models, "directory without safetensors should be skipped")
@@ -151,8 +155,9 @@ func TestDiscover_Bad_NoConfig(t *testing.T) {
 	// Directory with .safetensors but no config.json.
 	base := t.TempDir()
 	dir := core.Path(base, "no-config")
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	require.NoError(t, os.WriteFile(core.Path(dir, "model.safetensors"), []byte("fake"), 0o644))
+	fs := (&core.Fs{}).NewUnrestricted()
+
+	require.True(t, fs.Write(core.Path(dir, "model.safetensors"), "fake").OK)
 
 	models := slices.Collect(Discover(base))
 	assert.Empty(t, models, "directory without config.json should be skipped")
@@ -162,9 +167,10 @@ func TestDiscover_Bad_InvalidJSON(t *testing.T) {
 	// config.json exists but contains invalid JSON. Should NOT count as a model anymore.
 	base := t.TempDir()
 	dir := core.Path(base, "bad-json")
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	require.NoError(t, os.WriteFile(core.Path(dir, "config.json"), []byte("{invalid}"), 0o644))
-	require.NoError(t, os.WriteFile(core.Path(dir, "model.safetensors"), []byte("fake"), 0o644))
+	fs := (&core.Fs{}).NewUnrestricted()
+
+	require.True(t, fs.Write(core.Path(dir, "config.json"), "{invalid}").OK)
+	require.True(t, fs.Write(core.Path(dir, "model.safetensors"), "fake").OK)
 
 	models := slices.Collect(Discover(base))
 	require.Len(t, models, 0)
@@ -173,7 +179,8 @@ func TestDiscover_Bad_InvalidJSON(t *testing.T) {
 func TestDiscover_Ugly_SkipsRegularFiles(t *testing.T) {
 	// Regular files in base dir should be silently skipped.
 	base := t.TempDir()
-	require.NoError(t, os.WriteFile(core.Path(base, "README.md"), []byte("hello"), 0o644))
+	fs := (&core.Fs{}).NewUnrestricted()
+	require.True(t, fs.Write(core.Path(base, "README.md"), "hello").OK)
 
 	createModelDir(t, core.Path(base, "real-model"), map[string]any{
 		"model_type": "gemma3",
