@@ -71,8 +71,6 @@ import (
 	"dappco.re/go/core"
 )
 
-// Token is a single generated token emitted by the streaming iterator.
-//
 //	for tok := range m.Generate(ctx, prompt) {
 //	    fmt.Print(tok.Text) // tok.ID holds the vocab index
 //	}
@@ -81,8 +79,6 @@ type Token struct {
 	Text string
 }
 
-// Message is a single turn in a multi-turn chat conversation.
-//
 //	messages := []inference.Message{
 //	    {Role: "system",    Content: "You are a helpful assistant."},
 //	    {Role: "user",      Content: "What is 2+2?"},
@@ -90,23 +86,20 @@ type Token struct {
 //	    {Role: "user",      Content: "Are you sure?"},
 //	}
 type Message struct {
-	Role    string `json:"role"`    // "system", "user", "assistant"
+	Role    string `json:"role"` // "system", "user", "assistant"
 	Content string `json:"content"`
 }
 
-// ClassifyResult holds the output for a single prompt in a batch classification.
-//
-//	results, _ := m.Classify(ctx, []string{"positive", "negative"})
-//	label := results[0].Token.Text  // sampled token at last position
-//	logits := results[0].Logits     // only populated when WithLogits() is set
+// results, _ := m.Classify(ctx, []string{"positive", "negative"})
+// label := results[0].Token.Text  // sampled token at last position
+// logits := results[0].Logits     // only populated when WithLogits() is set
 type ClassifyResult struct {
 	Token  Token     // Sampled/greedy token at last prompt position
 	Logits []float32 // Raw vocab-sized logits (only when WithLogits is set)
 }
 
-// BatchResult holds the output for a single prompt in batch generation.
+// batched, _ := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(64))
 //
-//	batched, _ := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(64))
 //	for i, r := range batched {
 //	    if r.Err != nil { continue }
 //	    for _, tok := range r.Tokens { fmt.Print(tok.Text) }
@@ -116,7 +109,6 @@ type BatchResult struct {
 	Err    error   // Per-prompt error (context cancel, OOM, etc.)
 }
 
-// GenerateMetrics holds performance counters from the last inference operation.
 // Retrieved via TextModel.Metrics() after Generate, Chat, Classify, or BatchGenerate.
 //
 //	m := model.Metrics()
@@ -141,10 +133,8 @@ type GenerateMetrics struct {
 	ActiveMemoryBytes uint64 // Active GPU memory after operation
 }
 
-// ModelInfo holds metadata about a loaded model.
-//
-//	info := model.Info()
-//	fmt.Printf("%s %d-bit quant, %d layers, vocab %d\n", info.Architecture, info.QuantBits, info.NumLayers, info.VocabSize)
+// info := model.Info()
+// fmt.Printf("%s %d-bit quant, %d layers, vocab %d\n", info.Architecture, info.QuantBits, info.NumLayers, info.VocabSize)
 type ModelInfo struct {
 	Architecture string // e.g. "gemma3", "qwen3", "llama"
 	VocabSize    int    // Vocabulary size
@@ -154,15 +144,14 @@ type ModelInfo struct {
 	QuantGroup   int    // Quantisation group size (0 if unquantised)
 }
 
-// AttentionSnapshot holds Q and/or K vectors extracted from the KV cache after prefill.
 // Keys is indexed [layer][head][position*head_dim] — flattened per head.
 //
 //	snap, _ := inspector.InspectAttention(ctx, prompt)
 //	layer0Head0 := snap.Keys[0][0] // flat float32 of len seq_len*head_dim
 type AttentionSnapshot struct {
 	NumLayers     int           `json:"num_layers"`
-	NumHeads      int           `json:"num_heads"`       // num_kv_heads (may differ from query heads in GQA)
-	SeqLen        int           `json:"seq_len"`         // number of tokens in the prompt
+	NumHeads      int           `json:"num_heads"` // num_kv_heads (may differ from query heads in GQA)
+	SeqLen        int           `json:"seq_len"`   // number of tokens in the prompt
 	HeadDim       int           `json:"head_dim"`
 	NumQueryHeads int           `json:"num_query_heads"` // num_attention_heads (0 = Q not available)
 	Keys          [][][]float32 `json:"keys"`            // [layer][head] → flat float32 of len seq_len*head_dim
@@ -170,16 +159,11 @@ type AttentionSnapshot struct {
 	Architecture  string        `json:"architecture"`
 }
 
-// HasQueries reports whether this snapshot contains query vectors.
-//
-//	if snap.HasQueries() { processQK(snap.Queries, snap.Keys) }
+// if snap.HasQueries() { processQK(snap.Queries, snap.Keys) }
 func (s *AttentionSnapshot) HasQueries() bool {
 	return s.Queries != nil && len(s.Queries) > 0
 }
 
-// AttentionInspector is an optional interface that backends may implement
-// to expose attention-level data for Q/K Bone Orientation analysis.
-//
 //	if inspector, ok := model.(inference.AttentionInspector); ok {
 //	    snap, err := inspector.InspectAttention(ctx, prompt)
 //	}
@@ -251,9 +235,7 @@ type TextModel interface {
 	Close() error
 }
 
-// Backend is a named inference engine that can load models.
-//
-//	func init() { inference.Register(metal.NewBackend()) } // called from backend packages
+// func init() { inference.Register(metal.NewBackend()) } // called from backend packages
 type Backend interface {
 	// Name is the stable identifier used for registration and selection.
 	//
@@ -295,17 +277,13 @@ func Get(name string) (Backend, bool) {
 	return b, ok
 }
 
-// List returns registered backend names sorted alphabetically.
-//
-//	names := inference.List() // ["llama_cpp", "metal", "rocm"]
+// names := inference.List() // ["llama_cpp", "metal", "rocm"]
 func List() []string {
 	backendsMu.RLock()
 	defer backendsMu.RUnlock()
 	return slices.Sorted(maps.Keys(backends))
 }
 
-// All iterates over a snapshot of the registry — safe to range over while other goroutines register.
-//
 //	for name, b := range inference.All() {
 //	    fmt.Println(name, b.Available())
 //	}
@@ -338,10 +316,8 @@ func Default() (Backend, error) {
 	return nil, core.NewError("inference: no backends registered (import a backend package)")
 }
 
-// LoadModel loads the model at path via the backend named by WithBackend, or Default() if none.
-//
-//	m, err := inference.LoadModel("/models/gemma3-1b")
-//	m, err := inference.LoadModel("/models/qwen3-4b", inference.WithBackend("rocm"), inference.WithContextLen(8192))
+// m, err := inference.LoadModel("/models/gemma3-1b")
+// m, err := inference.LoadModel("/models/qwen3-4b", inference.WithBackend("rocm"), inference.WithContextLen(8192))
 func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 	cfg := ApplyLoadOpts(opts)
 	if cfg.Backend != "" {
