@@ -1,52 +1,31 @@
-// Package inference defines the shared contract for text-generation backends.
+// Package inference provides the shared contract for text-generation backends.
 //
-// This package is the contract between GPU-specific backends (go-mlx, go-rocm)
-// and consumers (go-ml, go-ai, go-i18n). It has zero dependencies and compiles
-// on all platforms.
+// model, err := inference.LoadModel("/models/gemma3-1b")
+// if err != nil {
+// 	log.Fatal(err)
+// }
+// defer model.Close()
 //
-// # Backend registration
+// ctx := context.Background()
+// for token := range model.Generate(ctx, "Hello", inference.WithMaxTokens(128)) {
+// 	fmt.Print(token.Text)
+// }
+// if err := model.Err(); err != nil {
+// 	log.Fatal(err)
+// }
 //
-// Backend implementations register via init() with build tags:
+// classificationResults, _ := model.Classify(ctx, []string{"positive", "negative"}, inference.WithTemperature(0))
+// batchResults, _ := model.BatchGenerate(ctx, []string{"First", "Second"}, inference.WithMaxTokens(32))
 //
-//	// go-mlx: //go:build darwin && arm64
-//	func init() { inference.Register(metal.NewBackend()) }
+// if inspector, ok := model.(inference.AttentionInspector); ok {
+// 	snapshot, err := inspector.InspectAttention(ctx, "Hello")
+// 	_ = snapshot.HasQueries()
+// 	_ = err
+// }
 //
-//	// go-rocm: //go:build linux && amd64
-//	func init() { inference.Register(rocm.NewBackend()) }
-//
-// # Loading and generating
-//
-//	model, err := inference.LoadModel("/models/gemma3-1b")
-//	defer model.Close()
-//
-//	ctx := context.Background()
-//	for token := range model.Generate(ctx, "Hello", inference.WithMaxTokens(128)) {
-//	    fmt.Print(token.Text)
-//	}
-//	if err := model.Err(); err != nil { log.Fatal(err) }
-//
-//	for token := range model.Chat(ctx, []inference.Message{
-//	    {Role: "user", Content: "Hello"},
-//	}, inference.WithMaxTokens(64)) {
-//	    fmt.Print(token.Text)
-//	}
-//
-//	classificationResults, _ := model.Classify(ctx, []string{"positive", "negative"}, inference.WithTemperature(0))
-//	batchResults, _ := model.BatchGenerate(ctx, []string{"First", "Second"}, inference.WithMaxTokens(32))
-//
-// # Generation options
-//
-//	inference.WithMaxTokens(256)     // cap output length
-//	inference.WithTemperature(0.7)   // sampling temperature
-//	inference.WithTopK(40)           // top-k sampling
-//	inference.WithRepeatPenalty(1.1) // discourage repetition
-//	inference.WithContextLen(4096)   // limit KV cache memory
-//
-// # Model discovery
-//
-//	for model := range inference.Discover("/path/to/models/") {
-//	    fmt.Printf("%s (%s)\n", model.Path, model.ModelType)
-//	}
+// for discoveredModel := range inference.Discover("/path/to/models") {
+// 	fmt.Printf("%s (%s)\n", discoveredModel.Path, discoveredModel.ModelType)
+// }
 package inference
 
 import (
@@ -80,8 +59,8 @@ type Message struct {
 // label := classificationResults[0].Token.Text
 // logits := classificationResults[0].Logits
 type ClassifyResult struct {
-	Token  Token     // Sampled or greedy token at the last prompt position
-	Logits []float32 // Raw vocab-sized logits when WithLogits is set
+	Token  Token
+	Logits []float32
 }
 
 // batchResults, _ := model.BatchGenerate(ctx, []string{"First", "Second"}, inference.WithMaxTokens(64))
@@ -135,12 +114,12 @@ type ModelInfo struct {
 //	}
 type AttentionSnapshot struct {
 	NumLayers     int           `json:"num_layers"`
-	NumHeads      int           `json:"num_heads"` // key-value heads (may differ from query heads in grouped-query attention)
+	NumHeads      int           `json:"num_heads"`
 	SeqLen        int           `json:"seq_len"`
 	HeadDim       int           `json:"head_dim"`
-	NumQueryHeads int           `json:"num_query_heads"` // query heads (0 = query tensors are unavailable)
-	Keys          [][][]float32 `json:"keys"`            // [layer][head] -> flattened len seq_len*head_dim
-	Queries       [][][]float32 `json:"queries"`         // [layer][head] -> flattened len seq_len*head_dim
+	NumQueryHeads int           `json:"num_query_heads"`
+	Keys          [][][]float32 `json:"keys"`
+	Queries       [][][]float32 `json:"queries"`
 	Architecture  string        `json:"architecture"`
 }
 
