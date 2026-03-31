@@ -655,7 +655,7 @@ func TestDefault_Ugly_AllPreferredUnavailableCustomAvailable(t *testing.T) {
 func TestDefault_Ugly_MultipleCustomBackends(t *testing.T) {
 	resetBackends(t)
 
-	// Only non-preferred backends registered — one available, one not.
+	// Only non-preferred backends registered - one available, one not.
 	Register(&stubBackend{name: "custom_a", available: false})
 	Register(&stubBackend{name: "custom_b", available: true})
 
@@ -723,7 +723,7 @@ func TestLoadModel_Good_DefaultBackendForwardsOptions(t *testing.T) {
 // --- Default preference order does not depend on registration order ---
 
 func TestDefault_Good_RegistrationOrderIrrelevant(t *testing.T) {
-	// Register in reverse priority order — metal should still be chosen.
+	// Register in reverse priority order - metal should still be chosen.
 	resetBackends(t)
 
 	Register(&stubBackend{name: "llama_cpp", available: true})
@@ -755,7 +755,7 @@ func TestLoadModel_Ugly_EmptyPath(t *testing.T) {
 
 	Register(&stubBackend{name: "metal", available: true})
 
-	// Empty path is accepted at this layer — backend decides what to do.
+	// Empty path is accepted at this layer - backend decides what to do.
 	model, err := LoadModel("")
 	require.NoError(t, err)
 	stubModel := model.(*stubTextModel)
