@@ -11,17 +11,17 @@ import (
 // --- DefaultLoRAConfig ---
 
 func TestDefaultLoRAConfig_Good(t *testing.T) {
-	cfg := DefaultLoRAConfig()
-	assert.Equal(t, 8, cfg.Rank, "default Rank should be 8")
-	assert.InDelta(t, float32(16), cfg.Alpha, 0.0001, "default Alpha should be 16")
-	assert.Equal(t, []string{"q_proj", "v_proj"}, cfg.TargetKeys, "default TargetKeys should be q_proj and v_proj")
-	assert.False(t, cfg.BFloat16, "default BFloat16 should be false")
+	config := DefaultLoRAConfig()
+	assert.Equal(t, 8, config.Rank, "default Rank should be 8")
+	assert.InDelta(t, float32(16), config.Alpha, 0.0001, "default Alpha should be 16")
+	assert.Equal(t, []string{"q_proj", "v_proj"}, config.TargetKeys, "default TargetKeys should be q_proj and v_proj")
+	assert.False(t, config.BFloat16, "default BFloat16 should be false")
 }
 
 func TestDefaultLoRAConfig_Good_Idempotent(t *testing.T) {
-	a := DefaultLoRAConfig()
-	b := DefaultLoRAConfig()
-	assert.Equal(t, a, b, "DefaultLoRAConfig should be idempotent")
+	firstConfig := DefaultLoRAConfig()
+	secondConfig := DefaultLoRAConfig()
+	assert.Equal(t, firstConfig, secondConfig, "DefaultLoRAConfig should be idempotent")
 }
 
 // --- LoadTrainable ---
@@ -31,10 +31,10 @@ type stubTrainableModel struct {
 	stubTextModel
 }
 
-func (m *stubTrainableModel) ApplyLoRA(_ LoRAConfig) Adapter { return nil }
-func (m *stubTrainableModel) Encode(_ string) []int32        { return nil }
-func (m *stubTrainableModel) Decode(_ []int32) string        { return "" }
-func (m *stubTrainableModel) NumLayers() int                 { return 26 }
+func (model *stubTrainableModel) ApplyLoRA(_ LoRAConfig) Adapter { return nil }
+func (model *stubTrainableModel) Encode(_ string) []int32        { return nil }
+func (model *stubTrainableModel) Decode(_ []int32) string        { return "" }
+func (model *stubTrainableModel) NumLayers() int                 { return 26 }
 
 // trainableBackend returns a stubTrainableModel from LoadModel.
 type trainableBackend struct {
@@ -42,10 +42,10 @@ type trainableBackend struct {
 	available bool
 }
 
-func (b *trainableBackend) Name() string    { return b.name }
-func (b *trainableBackend) Available() bool { return b.available }
-func (b *trainableBackend) LoadModel(_ string, _ ...LoadOption) (TextModel, error) {
-	return &stubTrainableModel{stubTextModel: stubTextModel{backend: b.name}}, nil
+func (backend *trainableBackend) Name() string    { return backend.name }
+func (backend *trainableBackend) Available() bool { return backend.available }
+func (backend *trainableBackend) LoadModel(_ string, _ ...LoadOption) (TextModel, error) {
+	return &stubTrainableModel{stubTextModel: stubTextModel{backend: backend.name}}, nil
 }
 
 func TestLoadTrainable_Good(t *testing.T) {
@@ -53,11 +53,11 @@ func TestLoadTrainable_Good(t *testing.T) {
 
 	Register(&trainableBackend{name: "metal", available: true})
 
-	tm, err := LoadTrainable("/path/to/model")
+	trainableModel, err := LoadTrainable("/path/to/model")
 	require.NoError(t, err)
-	require.NotNil(t, tm)
-	assert.Equal(t, 26, tm.NumLayers())
-	require.NoError(t, tm.Close())
+	require.NotNil(t, trainableModel)
+	assert.Equal(t, 26, trainableModel.NumLayers())
+	require.NoError(t, trainableModel.Close())
 }
 
 func TestLoadTrainable_Bad_NoBackends(t *testing.T) {
@@ -98,10 +98,10 @@ func TestLoadTrainable_Good_ExplicitBackend(t *testing.T) {
 
 	Register(&trainableBackend{name: "rocm", available: true})
 
-	tm, err := LoadTrainable("/path/to/model", WithBackend("rocm"))
+	trainableModel, err := LoadTrainable("/path/to/model", WithBackend("rocm"))
 	require.NoError(t, err)
-	require.NotNil(t, tm)
-	require.NoError(t, tm.Close())
+	require.NotNil(t, trainableModel)
+	require.NoError(t, trainableModel.Close())
 }
 
 // --- TrainableModel interface compliance ---

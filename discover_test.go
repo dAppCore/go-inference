@@ -25,9 +25,9 @@ func createModelDir(t *testing.T, dir string, config map[string]any, numSafetens
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), data, 0o644))
 	}
 
-	for i := range numSafetensors {
-		fname := filepath.Join(dir, fmt.Sprintf("model-%05d-of-%05d.safetensors", i+1, numSafetensors))
-		require.NoError(t, os.WriteFile(fname, []byte("fake"), 0o644))
+	for fileIndex := range numSafetensors {
+		filename := filepath.Join(dir, fmt.Sprintf("model-%05d-of-%05d.safetensors", fileIndex+1, numSafetensors))
+		require.NoError(t, os.WriteFile(filename, []byte("fake"), 0o644))
 	}
 }
 
@@ -42,13 +42,13 @@ func TestDiscover_Good_SingleModel(t *testing.T) {
 	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 
-	m := models[0]
-	assert.Equal(t, "gemma3", m.ModelType)
-	assert.Equal(t, 1, m.NumFiles)
-	assert.Equal(t, 0, m.QuantBits)
-	assert.Equal(t, 0, m.QuantGroup)
-	assert.True(t, filepath.IsAbs(m.Path), "path should be absolute")
-	assert.Contains(t, m.Path, "gemma3-1b")
+	model := models[0]
+	assert.Equal(t, "gemma3", model.ModelType)
+	assert.Equal(t, 1, model.NumFiles)
+	assert.Equal(t, 0, model.QuantBits)
+	assert.Equal(t, 0, model.QuantGroup)
+	assert.True(t, filepath.IsAbs(model.Path), "path should be absolute")
+	assert.Contains(t, model.Path, "gemma3-1b")
 }
 
 func TestDiscover_Good_MultipleModels(t *testing.T) {
@@ -64,11 +64,11 @@ func TestDiscover_Good_MultipleModels(t *testing.T) {
 	require.Len(t, models, 2)
 
 	// Collect model types for assertion (order may vary due to ReadDir).
-	types := make([]string, len(models))
-	for i, m := range models {
-		types[i] = m.ModelType
+	modelTypes := make([]string, len(models))
+	for index, model := range models {
+		modelTypes[index] = model.ModelType
 	}
-	assert.ElementsMatch(t, []string{"gemma3", "qwen3"}, types)
+	assert.ElementsMatch(t, []string{"gemma3", "qwen3"}, modelTypes)
 }
 
 func TestDiscover_Good_Quantised(t *testing.T) {
@@ -84,9 +84,9 @@ func TestDiscover_Good_Quantised(t *testing.T) {
 	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 
-	m := models[0]
-	assert.Equal(t, 4, m.QuantBits)
-	assert.Equal(t, 64, m.QuantGroup)
+	model := models[0]
+	assert.Equal(t, 4, model.QuantBits)
+	assert.Equal(t, 64, model.QuantGroup)
 }
 
 func TestDiscover_Good_BaseDirIsModel(t *testing.T) {
@@ -99,9 +99,9 @@ func TestDiscover_Good_BaseDirIsModel(t *testing.T) {
 	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 
-	m := models[0]
-	assert.Equal(t, "llama", m.ModelType)
-	assert.Equal(t, 2, m.NumFiles)
+	model := models[0]
+	assert.Equal(t, "llama", model.ModelType)
+	assert.Equal(t, 2, model.NumFiles)
 }
 
 func TestDiscover_Good_BaseDirPlusSubdir(t *testing.T) {

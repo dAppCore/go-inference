@@ -1,6 +1,7 @@
 package inference
 
-// GenerateConfig holds generation parameters.
+// inference.GenerateConfig{MaxTokens: 256, Temperature: 0.7, TopK: 40}
+// inference.GenerateConfig{MaxTokens: 64, StopTokens: []int32{2}, RepeatPenalty: 1.1}
 type GenerateConfig struct {
 	MaxTokens     int
 	Temperature   float32
@@ -11,7 +12,7 @@ type GenerateConfig struct {
 	ReturnLogits  bool // Return raw logits in ClassifyResult (default false)
 }
 
-// DefaultGenerateConfig returns sensible defaults.
+// config := inference.DefaultGenerateConfig() // MaxTokens=256, Temperature=0.0 (greedy)
 func DefaultGenerateConfig() GenerateConfig {
 	return GenerateConfig{
 		MaxTokens:   256,
@@ -19,54 +20,62 @@ func DefaultGenerateConfig() GenerateConfig {
 	}
 }
 
-// GenerateOption configures text generation.
+// Used by Generate, Chat, Classify, and BatchGenerate.
+//
+//	inference.WithMaxTokens(128), inference.WithTemperature(0.7)
 type GenerateOption func(*GenerateConfig)
 
-// WithMaxTokens sets the maximum number of tokens to generate.
+// inference.WithMaxTokens(128)  // short reply
+// inference.WithMaxTokens(2048) // long-form generation
 func WithMaxTokens(n int) GenerateOption {
-	return func(c *GenerateConfig) { c.MaxTokens = n }
+	return func(config *GenerateConfig) { config.MaxTokens = n }
 }
 
-// WithTemperature sets the sampling temperature. 0 = greedy.
+// inference.WithTemperature(0.0) // deterministic
+// inference.WithTemperature(0.7) // balanced creativity
+// inference.WithTemperature(1.5) // high variance
 func WithTemperature(t float32) GenerateOption {
-	return func(c *GenerateConfig) { c.Temperature = t }
+	return func(config *GenerateConfig) { config.Temperature = t }
 }
 
-// WithTopK sets top-k sampling. 0 = disabled.
+// inference.WithTopK(40) // typical value for creative generation
 func WithTopK(k int) GenerateOption {
-	return func(c *GenerateConfig) { c.TopK = k }
+	return func(config *GenerateConfig) { config.TopK = k }
 }
 
-// WithTopP sets nucleus sampling threshold. 0 = disabled.
+// inference.WithTopP(0.9) // typical nucleus sampling threshold
 func WithTopP(p float32) GenerateOption {
-	return func(c *GenerateConfig) { c.TopP = p }
+	return func(config *GenerateConfig) { config.TopP = p }
 }
 
-// WithStopTokens sets token IDs that stop generation.
+// inference.WithStopTokens(2)       // EOS token only
+// inference.WithStopTokens(2, 1, 0) // EOS + pad tokens
 func WithStopTokens(ids ...int32) GenerateOption {
-	return func(c *GenerateConfig) { c.StopTokens = ids }
+	return func(config *GenerateConfig) { config.StopTokens = ids }
 }
 
-// WithRepeatPenalty sets the repetition penalty. 0 = disabled, 1.0 = no penalty.
+// inference.WithRepeatPenalty(1.1) // mild repetition suppression
+// inference.WithRepeatPenalty(1.5) // strong repetition suppression
 func WithRepeatPenalty(p float32) GenerateOption {
-	return func(c *GenerateConfig) { c.RepeatPenalty = p }
+	return func(config *GenerateConfig) { config.RepeatPenalty = p }
 }
 
-// WithLogits requests raw logits in ClassifyResult. Off by default to save memory.
+// inference.WithLogits() // enable logit capture for classification scoring
 func WithLogits() GenerateOption {
-	return func(c *GenerateConfig) { c.ReturnLogits = true }
+	return func(config *GenerateConfig) { config.ReturnLogits = true }
 }
 
-// ApplyGenerateOpts builds a GenerateConfig from options.
-func ApplyGenerateOpts(opts []GenerateOption) GenerateConfig {
-	cfg := DefaultGenerateConfig()
-	for _, o := range opts {
-		o(&cfg)
+// config := inference.ApplyGenerateOpts(options) // used internally by backends
+func ApplyGenerateOpts(options []GenerateOption) GenerateConfig {
+	generateConfig := DefaultGenerateConfig()
+	for _, option := range options {
+		option(&generateConfig)
 	}
-	return cfg
+	return generateConfig
 }
 
-// LoadConfig holds model loading parameters.
+// inference.LoadConfig{Backend: "metal", ContextLen: 4096, GPULayers: -1}
+// inference.LoadConfig{Backend: "rocm", AdapterPath: "/models/lora/v1"}
 type LoadConfig struct {
 	Backend       string // "metal", "rocm", "llama_cpp" (empty = auto-detect)
 	ContextLen    int    // Context window size (0 = model default)
@@ -75,47 +84,48 @@ type LoadConfig struct {
 	AdapterPath   string // Path to LoRA adapter directory (empty = no adapter)
 }
 
-// LoadOption configures model loading.
+// Used by LoadModel and LoadTrainable.
+//
+//	inference.LoadModel("/models/gemma3-1b", inference.WithBackend("metal"), inference.WithContextLen(4096))
 type LoadOption func(*LoadConfig)
 
-// WithBackend selects a specific inference backend by name.
+// inference.WithBackend("metal")     // Apple Silicon GPU
+// inference.WithBackend("rocm")      // AMD GPU
+// inference.WithBackend("llama_cpp") // CPU fallback
 func WithBackend(name string) LoadOption {
-	return func(c *LoadConfig) { c.Backend = name }
+	return func(config *LoadConfig) { config.Backend = name }
 }
 
-// WithContextLen sets the context window size.
+// inference.WithContextLen(4096)  // standard context
+// inference.WithContextLen(32768) // extended context
 func WithContextLen(n int) LoadOption {
-	return func(c *LoadConfig) { c.ContextLen = n }
+	return func(config *LoadConfig) { config.ContextLen = n }
 }
 
-// WithGPULayers sets how many layers to offload to GPU.
-// -1 means all layers (full GPU offload).
+// inference.WithGPULayers(-1) // full GPU offload (default)
+// inference.WithGPULayers(0)  // CPU-only inference
+// inference.WithGPULayers(24) // partial offload (24 layers to GPU)
 func WithGPULayers(n int) LoadOption {
-	return func(c *LoadConfig) { c.GPULayers = n }
+	return func(config *LoadConfig) { config.GPULayers = n }
 }
 
-// WithParallelSlots sets the number of concurrent inference slots.
-// Higher values allow parallel Generate/Chat calls but increase VRAM usage.
-// 0 or unset uses the server default (typically 1).
+// inference.WithParallelSlots(4) // allow 4 concurrent inference requests
 func WithParallelSlots(n int) LoadOption {
-	return func(c *LoadConfig) { c.ParallelSlots = n }
+	return func(config *LoadConfig) { config.ParallelSlots = n }
 }
 
-// WithAdapterPath sets the path to a LoRA adapter directory.
-// The directory should contain adapter_config.json and adapter safetensors files.
-// The adapter weights are loaded and injected into the model at load time,
-// enabling inference with a fine-tuned adapter without fusing/merging first.
+// inference.WithAdapterPath("/models/lora/domain-v2") // load fine-tuned adapter
 func WithAdapterPath(path string) LoadOption {
-	return func(c *LoadConfig) { c.AdapterPath = path }
+	return func(config *LoadConfig) { config.AdapterPath = path }
 }
 
-// ApplyLoadOpts builds a LoadConfig from options.
-func ApplyLoadOpts(opts []LoadOption) LoadConfig {
-	cfg := LoadConfig{
+// config := inference.ApplyLoadOpts(options) // used internally by LoadModel
+func ApplyLoadOpts(options []LoadOption) LoadConfig {
+	loadConfig := LoadConfig{
 		GPULayers: -1, // default: full GPU offload
 	}
-	for _, o := range opts {
-		o(&cfg)
+	for _, option := range options {
+		option(&loadConfig)
 	}
-	return cfg
+	return loadConfig
 }
