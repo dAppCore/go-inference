@@ -90,15 +90,15 @@ func probeModelDir(dir string) (DiscoveredModel, bool) {
 		return DiscoveredModel{}, false
 	}
 
-	m := DiscoveredModel{
+	model := DiscoveredModel{
 		Path:      absDir,
 		ModelType: probe.ModelType,
 		NumFiles:  len(matches),
 	}
 	if probe.Quantization != nil {
-		m.QuantBits = probe.Quantization.Bits
-		m.QuantGroup = probe.Quantization.GroupSize
+		model.QuantBits = probe.Quantization.Bits
+		model.QuantGroup = probe.Quantization.GroupSize
 	}
 
-	return m, true
+	return model, true
 }

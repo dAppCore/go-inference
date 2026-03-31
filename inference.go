@@ -330,9 +330,9 @@ func Default() (Backend, error) {
 		}
 	}
 	// Fall back to any available
-	for b := range maps.Values(backends) {
-		if b.Available() {
-			return b, nil
+	for backend := range maps.Values(backends) {
+		if backend.Available() {
+			return backend, nil
 		}
 	}
 	return nil, core.NewError("inference: no backends registered (import a backend package)")
