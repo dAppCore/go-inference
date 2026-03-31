@@ -24,26 +24,26 @@ type stubBackend struct {
 	loadErr   error
 }
 
-func (s *stubBackend) Name() string    { return s.name }
-func (s *stubBackend) Available() bool { return s.available }
-func (s *stubBackend) LoadModel(path string, opts ...LoadOption) (TextModel, error) {
-	if s.loadErr != nil {
-		return nil, s.loadErr
+func (backend *stubBackend) Name() string    { return backend.name }
+func (backend *stubBackend) Available() bool { return backend.available }
+func (backend *stubBackend) LoadModel(path string, options ...LoadOption) (TextModel, error) {
+	if backend.loadErr != nil {
+		return nil, backend.loadErr
 	}
-	return &stubTextModel{backend: s.name, path: path}, nil
+	return &stubTextModel{backend: backend.name, path: path}, nil
 }
 
 type capturingBackend struct {
-	name         string
-	available    bool
-	capturedOpts []LoadOption
+	name            string
+	available       bool
+	capturedOptions []LoadOption
 }
 
-func (c *capturingBackend) Name() string    { return c.name }
-func (c *capturingBackend) Available() bool { return c.available }
-func (c *capturingBackend) LoadModel(path string, opts ...LoadOption) (TextModel, error) {
-	c.capturedOpts = opts
-	return &stubTextModel{backend: c.name, path: path}, nil
+func (backend *capturingBackend) Name() string    { return backend.name }
+func (backend *capturingBackend) Available() bool { return backend.available }
+func (backend *capturingBackend) LoadModel(path string, options ...LoadOption) (TextModel, error) {
+	backend.capturedOptions = options
+	return &stubTextModel{backend: backend.name, path: path}, nil
 }
 
 type stubTextModel struct {
@@ -51,23 +51,23 @@ type stubTextModel struct {
 	path    string
 }
 
-func (m *stubTextModel) Generate(_ context.Context, _ string, _ ...GenerateOption) iter.Seq[Token] {
+func (model *stubTextModel) Generate(_ context.Context, _ string, _ ...GenerateOption) iter.Seq[Token] {
 	return func(yield func(Token) bool) {}
 }
-func (m *stubTextModel) Chat(_ context.Context, _ []Message, _ ...GenerateOption) iter.Seq[Token] {
+func (model *stubTextModel) Chat(_ context.Context, _ []Message, _ ...GenerateOption) iter.Seq[Token] {
 	return func(yield func(Token) bool) {}
 }
-func (m *stubTextModel) Classify(_ context.Context, _ []string, _ ...GenerateOption) ([]ClassifyResult, error) {
+func (model *stubTextModel) Classify(_ context.Context, _ []string, _ ...GenerateOption) ([]ClassifyResult, error) {
 	return nil, nil
 }
-func (m *stubTextModel) BatchGenerate(_ context.Context, _ []string, _ ...GenerateOption) ([]BatchResult, error) {
+func (model *stubTextModel) BatchGenerate(_ context.Context, _ []string, _ ...GenerateOption) ([]BatchResult, error) {
 	return nil, nil
 }
-func (m *stubTextModel) ModelType() string        { return "stub" }
-func (m *stubTextModel) Info() ModelInfo          { return ModelInfo{} }
-func (m *stubTextModel) Metrics() GenerateMetrics { return GenerateMetrics{} }
-func (m *stubTextModel) Err() error               { return nil }
-func (m *stubTextModel) Close() error             { return nil }
+func (model *stubTextModel) ModelType() string        { return "stub" }
+func (model *stubTextModel) Info() ModelInfo          { return ModelInfo{} }
+func (model *stubTextModel) Metrics() GenerateMetrics { return GenerateMetrics{} }
+func (model *stubTextModel) Err() error               { return nil }
+func (model *stubTextModel) Close() error             { return nil }
 
 func TestRegister_Good(t *testing.T) {
 	resetBackends(t)
@@ -386,8 +386,8 @@ func TestLoadModel_Good_PassesOptionsThrough(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, model)
 
-	require.Len(t, captureBackend.capturedOpts, len(loadOptions))
-	loadConfig := ApplyLoadOpts(captureBackend.capturedOpts)
+	require.Len(t, captureBackend.capturedOptions, len(loadOptions))
+	loadConfig := ApplyLoadOpts(captureBackend.capturedOptions)
 	assert.Equal(t, 4096, loadConfig.ContextLen)
 	assert.Equal(t, 24, loadConfig.GPULayers)
 
@@ -438,7 +438,7 @@ func TestAttentionInspector_Good_InterfaceCompliance(t *testing.T) {
 
 type mockInspector struct{ stubTextModel }
 
-func (m *mockInspector) InspectAttention(_ context.Context, _ string, _ ...GenerateOption) (*AttentionSnapshot, error) {
+func (inspector *mockInspector) InspectAttention(_ context.Context, _ string, _ ...GenerateOption) (*AttentionSnapshot, error) {
 	return &AttentionSnapshot{NumLayers: 28, NumHeads: 8, SeqLen: 10, HeadDim: 64, Architecture: "qwen3"}, nil
 }
 
@@ -637,9 +637,9 @@ func TestLoadModel_Good_ExplicitBackendForwardsOptions(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, model)
 
-	assert.Len(t, captureBackend.capturedOpts, len(loadOptions))
+	assert.Len(t, captureBackend.capturedOptions, len(loadOptions))
 
-	loadConfig := ApplyLoadOpts(captureBackend.capturedOpts)
+	loadConfig := ApplyLoadOpts(captureBackend.capturedOptions)
 	assert.Equal(t, "cap", loadConfig.Backend)
 	assert.Equal(t, 4096, loadConfig.ContextLen)
 	assert.Equal(t, 16, loadConfig.GPULayers)
@@ -661,9 +661,9 @@ func TestLoadModel_Good_DefaultBackendForwardsOptions(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, model)
 
-	assert.Len(t, captureBackend.capturedOpts, len(loadOptions))
+	assert.Len(t, captureBackend.capturedOptions, len(loadOptions))
 
-	loadConfig := ApplyLoadOpts(captureBackend.capturedOpts)
+	loadConfig := ApplyLoadOpts(captureBackend.capturedOptions)
 	assert.Equal(t, 8192, loadConfig.ContextLen)
 	assert.Equal(t, -1, loadConfig.GPULayers)
 	assert.Equal(t, 2, loadConfig.ParallelSlots)

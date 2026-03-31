@@ -26,9 +26,9 @@ func TestDefaultGenerateConfig_Good(t *testing.T) {
 
 func TestWithMaxTokens_Good(t *testing.T) {
 	tests := []struct {
-		name string
-		val  int
-		want int
+		name  string
+		value int
+		want  int
 	}{
 		{"small", 32, 32},
 		{"medium", 512, 512},
@@ -36,7 +36,7 @@ func TestWithMaxTokens_Good(t *testing.T) {
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			config := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(testCase.val)})
+			config := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(testCase.value)})
 			assert.Equal(t, testCase.want, config.MaxTokens)
 		})
 	}
@@ -64,9 +64,9 @@ func TestWithMaxTokens_Good_OtherFieldsUnchanged(t *testing.T) {
 
 func TestWithTemperature_Good(t *testing.T) {
 	tests := []struct {
-		name string
-		val  float32
-		want float32
+		name  string
+		value float32
+		want  float32
 	}{
 		{"greedy", 0.0, 0.0},
 		{"low", 0.3, 0.3},
@@ -75,7 +75,7 @@ func TestWithTemperature_Good(t *testing.T) {
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			config := ApplyGenerateOpts([]GenerateOption{WithTemperature(testCase.val)})
+			config := ApplyGenerateOpts([]GenerateOption{WithTemperature(testCase.value)})
 			assert.InDelta(t, testCase.want, config.Temperature, 0.0001)
 		})
 	}
@@ -88,9 +88,9 @@ func TestWithTemperature_Bad(t *testing.T) {
 
 func TestWithTopK_Good(t *testing.T) {
 	tests := []struct {
-		name string
-		val  int
-		want int
+		name  string
+		value int
+		want  int
 	}{
 		{"disabled", 0, 0},
 		{"small", 10, 10},
@@ -99,7 +99,7 @@ func TestWithTopK_Good(t *testing.T) {
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			config := ApplyGenerateOpts([]GenerateOption{WithTopK(testCase.val)})
+			config := ApplyGenerateOpts([]GenerateOption{WithTopK(testCase.value)})
 			assert.Equal(t, testCase.want, config.TopK)
 		})
 	}
@@ -112,9 +112,9 @@ func TestWithTopK_Bad(t *testing.T) {
 
 func TestWithTopP_Good(t *testing.T) {
 	tests := []struct {
-		name string
-		val  float32
-		want float32
+		name  string
+		value float32
+		want  float32
 	}{
 		{"disabled", 0.0, 0.0},
 		{"tight", 0.5, 0.5},
@@ -123,7 +123,7 @@ func TestWithTopP_Good(t *testing.T) {
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			config := ApplyGenerateOpts([]GenerateOption{WithTopP(testCase.val)})
+			config := ApplyGenerateOpts([]GenerateOption{WithTopP(testCase.value)})
 			assert.InDelta(t, testCase.want, config.TopP, 0.0001)
 		})
 	}
@@ -156,9 +156,9 @@ func TestWithStopTokens_Ugly(t *testing.T) {
 
 func TestWithRepeatPenalty_Good(t *testing.T) {
 	tests := []struct {
-		name string
-		val  float32
-		want float32
+		name  string
+		value float32
+		want  float32
 	}{
 		{"disabled", 0.0, 0.0},
 		{"no_penalty", 1.0, 1.0},
@@ -167,7 +167,7 @@ func TestWithRepeatPenalty_Good(t *testing.T) {
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			config := ApplyGenerateOpts([]GenerateOption{WithRepeatPenalty(testCase.val)})
+			config := ApplyGenerateOpts([]GenerateOption{WithRepeatPenalty(testCase.value)})
 			assert.InDelta(t, testCase.want, config.RepeatPenalty, 0.0001)
 		})
 	}
@@ -184,13 +184,13 @@ func TestWithLogits_Good_DefaultIsFalse(t *testing.T) {
 }
 
 func TestApplyGenerateOpts_Good(t *testing.T) {
-	t.Run("nil_opts_returns_defaults", func(t *testing.T) {
+	t.Run("nil_options_returns_defaults", func(t *testing.T) {
 		config := ApplyGenerateOpts(nil)
 		defaultConfig := DefaultGenerateConfig()
 		assert.Equal(t, defaultConfig, config)
 	})
 
-	t.Run("empty_opts_returns_defaults", func(t *testing.T) {
+	t.Run("empty_options_returns_defaults", func(t *testing.T) {
 		config := ApplyGenerateOpts([]GenerateOption{})
 		defaultConfig := DefaultGenerateConfig()
 		assert.Equal(t, defaultConfig, config)
@@ -306,9 +306,9 @@ func TestWithBackend_Bad(t *testing.T) {
 
 func TestWithContextLen_Good(t *testing.T) {
 	tests := []struct {
-		name string
-		val  int
-		want int
+		name  string
+		value int
+		want  int
 	}{
 		{"small", 2048, 2048},
 		{"medium", 4096, 4096},
@@ -316,7 +316,7 @@ func TestWithContextLen_Good(t *testing.T) {
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			loadConfig := ApplyLoadOpts([]LoadOption{WithContextLen(testCase.val)})
+			loadConfig := ApplyLoadOpts([]LoadOption{WithContextLen(testCase.value)})
 			assert.Equal(t, testCase.want, loadConfig.ContextLen)
 		})
 	}
@@ -324,9 +324,9 @@ func TestWithContextLen_Good(t *testing.T) {
 
 func TestWithGPULayers_Good(t *testing.T) {
 	tests := []struct {
-		name string
-		val  int
-		want int
+		name  string
+		value int
+		want  int
 	}{
 		{"all", -1, -1},
 		{"none", 0, 0},
@@ -334,7 +334,7 @@ func TestWithGPULayers_Good(t *testing.T) {
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			loadConfig := ApplyLoadOpts([]LoadOption{WithGPULayers(testCase.val)})
+			loadConfig := ApplyLoadOpts([]LoadOption{WithGPULayers(testCase.value)})
 			assert.Equal(t, testCase.want, loadConfig.GPULayers)
 		})
 	}
@@ -347,9 +347,9 @@ func TestWithGPULayers_Ugly(t *testing.T) {
 
 func TestWithParallelSlots_Good(t *testing.T) {
 	tests := []struct {
-		name string
-		val  int
-		want int
+		name  string
+		value int
+		want  int
 	}{
 		{"default", 0, 0},
 		{"one", 1, 1},
@@ -357,7 +357,7 @@ func TestWithParallelSlots_Good(t *testing.T) {
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			loadConfig := ApplyLoadOpts([]LoadOption{WithParallelSlots(testCase.val)})
+			loadConfig := ApplyLoadOpts([]LoadOption{WithParallelSlots(testCase.value)})
 			assert.Equal(t, testCase.want, loadConfig.ParallelSlots)
 		})
 	}
@@ -434,16 +434,16 @@ func TestApplyLoadOpts_Ugly(t *testing.T) {
 
 func TestWithAdapterPath_Good(t *testing.T) {
 	tests := []struct {
-		name string
-		val  string
-		want string
+		name  string
+		value string
+		want  string
 	}{
 		{"simple", "/path/to/adapter", "/path/to/adapter"},
 		{"relative", "adapters/lora-v1", "adapters/lora-v1"},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
-			loadConfig := ApplyLoadOpts([]LoadOption{WithAdapterPath(testCase.val)})
+			loadConfig := ApplyLoadOpts([]LoadOption{WithAdapterPath(testCase.value)})
 			assert.Equal(t, testCase.want, loadConfig.AdapterPath)
 		})
 	}

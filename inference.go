@@ -16,23 +16,23 @@
 //
 // # Loading and generating
 //
-//	m, err := inference.LoadModel("/models/gemma3-1b")
-//	defer m.Close()
+//	model, err := inference.LoadModel("/models/gemma3-1b")
+//	defer model.Close()
 //
 //	ctx := context.Background()
-//	for tok := range m.Generate(ctx, "Hello", inference.WithMaxTokens(128)) {
-//	    fmt.Print(tok.Text)
+//	for token := range model.Generate(ctx, "Hello", inference.WithMaxTokens(128)) {
+//	    fmt.Print(token.Text)
 //	}
-//	if err := m.Err(); err != nil { log.Fatal(err) }
+//	if err := model.Err(); err != nil { log.Fatal(err) }
 //
-//	for tok := range m.Chat(ctx, []inference.Message{
+//	for token := range model.Chat(ctx, []inference.Message{
 //	    {Role: "user", Content: "Hello"},
 //	}, inference.WithMaxTokens(64)) {
-//	    fmt.Print(tok.Text)
+//	    fmt.Print(token.Text)
 //	}
 //
-//	results, _ := m.Classify(ctx, []string{"positive", "negative"}, inference.WithTemperature(0))
-//	batched, _ := m.BatchGenerate(ctx, []string{"First", "Second"}, inference.WithMaxTokens(32))
+//	classificationResults, _ := model.Classify(ctx, []string{"positive", "negative"}, inference.WithTemperature(0))
+//	batchResults, _ := model.BatchGenerate(ctx, []string{"First", "Second"}, inference.WithMaxTokens(32))
 //
 // # Generation options
 //
@@ -72,138 +72,138 @@ type Token struct {
 //		{Role: "user", Content: "Are you sure?"},
 //	}
 type Message struct {
-	Role    string `json:"role"` // "system", "user", "assistant"
+	Role    string `json:"role"`
 	Content string `json:"content"`
 }
 
-// results, _ := m.Classify(ctx, []string{"positive", "negative"})
-// label := results[0].Token.Text
-// logits := results[0].Logits
+// classificationResults, _ := model.Classify(ctx, []string{"positive", "negative"})
+// label := classificationResults[0].Token.Text
+// logits := classificationResults[0].Logits
 type ClassifyResult struct {
 	Token  Token     // Sampled or greedy token at the last prompt position
 	Logits []float32 // Raw vocab-sized logits when WithLogits is set
 }
 
-// batched, _ := m.BatchGenerate(ctx, []string{"First", "Second"}, inference.WithMaxTokens(64))
+// batchResults, _ := model.BatchGenerate(ctx, []string{"First", "Second"}, inference.WithMaxTokens(64))
 //
-//	for i, result := range batched {
+//	for index, result := range batchResults {
 //		if result.Err != nil {
 //			continue
 //		}
-//		for _, tok := range result.Tokens {
-//			fmt.Print(tok.Text)
+//		for _, token := range result.Tokens {
+//			fmt.Print(token.Text)
 //		}
 //	}
 type BatchResult struct {
-	Tokens []Token // Generated tokens for this prompt
-	Err    error   // Per-prompt error
+	Tokens []Token
+	Err    error
 }
 
 // metrics := model.Metrics()
-// fmt.Printf("prefill: %.0f tok/s  decode: %.0f tok/s\n", metrics.PrefillTokensPerSec, metrics.DecodeTokensPerSec)
+// fmt.Printf("prefill: %.0f tokens/s  decode: %.0f tokens/s\n", metrics.PrefillTokensPerSec, metrics.DecodeTokensPerSec)
 // fmt.Printf("peak GPU memory: %d MiB\n", metrics.PeakMemoryBytes>>20)
 type GenerateMetrics struct {
-	PromptTokens    int // Input token count
-	GeneratedTokens int // Output token count
+	PromptTokens    int
+	GeneratedTokens int
 
-	PrefillDuration time.Duration // Prompt processing time
-	DecodeDuration  time.Duration // Autoregressive decode time
-	TotalDuration   time.Duration // Whole-operation wall time
+	PrefillDuration time.Duration
+	DecodeDuration  time.Duration
+	TotalDuration   time.Duration
 
-	PrefillTokensPerSec float64 // PromptTokens / PrefillDuration
-	DecodeTokensPerSec  float64 // GeneratedTokens / DecodeDuration
+	PrefillTokensPerSec float64
+	DecodeTokensPerSec  float64
 
-	PeakMemoryBytes   uint64 // Peak GPU memory
-	ActiveMemoryBytes uint64 // GPU memory after the call
+	PeakMemoryBytes   uint64
+	ActiveMemoryBytes uint64
 }
 
-// info := model.Info()
-// fmt.Printf("%s %d-bit quant, %d layers, vocab %d\n", info.Architecture, info.QuantBits, info.NumLayers, info.VocabSize)
+// modelInfo := model.Info()
+// fmt.Printf("%s %d-bit quant, %d layers, vocab %d\n", modelInfo.Architecture, modelInfo.QuantBits, modelInfo.NumLayers, modelInfo.VocabSize)
 type ModelInfo struct {
-	Architecture string // Model architecture
-	VocabSize    int    // Vocabulary size
-	NumLayers    int    // Transformer layer count
-	HiddenSize   int    // Hidden dimension
-	QuantBits    int    // Quantisation bits (0 = unquantised)
-	QuantGroup   int    // Quantisation group size
+	Architecture string
+	VocabSize    int
+	NumLayers    int
+	HiddenSize   int
+	QuantBits    int
+	QuantGroup   int
 }
 
-// snap, _ := inspector.InspectAttention(ctx, prompt)
+// snapshot, _ := inspector.InspectAttention(ctx, prompt)
 //
-//	if snap.HasQueries() {
-//		processQK(snap.Queries, snap.Keys)
+//	if snapshot.HasQueries() {
+//		processQK(snapshot.Queries, snapshot.Keys)
 //	}
 type AttentionSnapshot struct {
 	NumLayers     int           `json:"num_layers"`
-	NumHeads      int           `json:"num_heads"` // num_kv_heads (may differ from query heads in GQA)
-	SeqLen        int           `json:"seq_len"`   // Prompt token count
+	NumHeads      int           `json:"num_heads"` // key-value heads (may differ from query heads in grouped-query attention)
+	SeqLen        int           `json:"seq_len"`
 	HeadDim       int           `json:"head_dim"`
-	NumQueryHeads int           `json:"num_query_heads"` // num_attention_heads (0 = Q not available)
+	NumQueryHeads int           `json:"num_query_heads"` // query heads (0 = query tensors are unavailable)
 	Keys          [][][]float32 `json:"keys"`            // [layer][head] -> flattened len seq_len*head_dim
 	Queries       [][][]float32 `json:"queries"`         // [layer][head] -> flattened len seq_len*head_dim
 	Architecture  string        `json:"architecture"`
 }
 
-// if snap.HasQueries() { processQK(snap.Queries, snap.Keys) }
-func (s *AttentionSnapshot) HasQueries() bool {
-	return s.Queries != nil && len(s.Queries) > 0
+// if snapshot.HasQueries() { processQK(snapshot.Queries, snapshot.Keys) }
+func (snapshot *AttentionSnapshot) HasQueries() bool {
+	return snapshot.Queries != nil && len(snapshot.Queries) > 0
 }
 
 //	if inspector, ok := model.(inference.AttentionInspector); ok {
-//		snap, err := inspector.InspectAttention(ctx, prompt)
+//		snapshot, err := inspector.InspectAttention(ctx, prompt)
 //	}
 type AttentionInspector interface {
 	InspectAttention(ctx context.Context, prompt string, options ...GenerateOption) (*AttentionSnapshot, error)
 }
 
-// m, _ := inference.LoadModel("/models/gemma3-1b")
-// defer m.Close()
-// for tok := range m.Generate(ctx, "Hello") { fmt.Print(tok.Text) }
+// model, _ := inference.LoadModel("/models/gemma3-1b")
+// defer model.Close()
+// for token := range model.Generate(ctx, "Hello") { fmt.Print(token.Text) }
 type TextModel interface {
-	// for tok := range m.Generate(ctx, "The quick brown fox", inference.WithMaxTokens(64)) {
-	// 	fmt.Print(tok.Text)
+	// for token := range model.Generate(ctx, "The quick brown fox", inference.WithMaxTokens(64)) {
+	// 	fmt.Print(token.Text)
 	// }
-	// if err := m.Err(); err != nil {
+	// if err := model.Err(); err != nil {
 	// 	return err
 	// }
 	Generate(ctx context.Context, prompt string, options ...GenerateOption) iter.Seq[Token]
 
-	// for tok := range m.Chat(ctx, []inference.Message{{Role: "user", Content: "Hi"}}) {
-	// 	fmt.Print(tok.Text)
+	// for token := range model.Chat(ctx, []inference.Message{{Role: "user", Content: "Hi"}}) {
+	// 	fmt.Print(token.Text)
 	// }
 	Chat(ctx context.Context, messages []Message, options ...GenerateOption) iter.Seq[Token]
 
-	// results, _ := m.Classify(ctx, []string{"positive review", "negative review"})
-	// label := results[0].Token.Text
+	// classificationResults, _ := model.Classify(ctx, []string{"positive review", "negative review"})
+	// label := classificationResults[0].Token.Text
 	Classify(ctx context.Context, prompts []string, options ...GenerateOption) ([]ClassifyResult, error)
 
-	// results, _ := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(128))
-	// for i, result := range results { fmt.Println(i, result.Tokens) }
+	// batchResults, _ := model.BatchGenerate(ctx, prompts, inference.WithMaxTokens(128))
+	// for index, result := range batchResults { fmt.Println(index, result.Tokens) }
 	BatchGenerate(ctx context.Context, prompts []string, options ...GenerateOption) ([]BatchResult, error)
 
-	// fmt.Println(m.ModelType()) // "gemma3", "qwen3", "llama3"
+	// fmt.Println(model.ModelType()) // "gemma3", "qwen3", "llama3"
 	ModelType() string
 
-	// info := m.Info()
-	// fmt.Printf("%s %d-bit quant, %d layers, vocab %d\n", info.Architecture, info.QuantBits, info.NumLayers, info.VocabSize)
+	// modelInfo := model.Info()
+	// fmt.Printf("%s %d-bit quant, %d layers, vocab %d\n", modelInfo.Architecture, modelInfo.QuantBits, modelInfo.NumLayers, modelInfo.VocabSize)
 	Info() ModelInfo
 
-	// fmt.Printf("%.0f tok/s decode\n", m.Metrics().DecodeTokensPerSec)
+	// fmt.Printf("%.0f tokens/s decode\n", model.Metrics().DecodeTokensPerSec)
 	Metrics() GenerateMetrics
 
-	// for tok := range m.Generate(ctx, prompt) { ... }
-	// if err := m.Err(); err != nil { return err }
+	// for token := range model.Generate(ctx, prompt) { ... }
+	// if err := model.Err(); err != nil { return err }
 	Err() error
 
-	// defer m.Close()
+	// defer model.Close()
 	Close() error
 }
 
 type Backend interface {
-	// b.Name() // "metal", "rocm", "llama_cpp"
+	// backend.Name() // "metal", "rocm", "llama_cpp"
 	Name() string
 
-	// m, err := b.LoadModel("/models/gemma3-1b", inference.WithContextLen(4096))
+	// model, err := backend.LoadModel("/models/gemma3-1b", inference.WithContextLen(4096))
 	LoadModel(path string, options ...LoadOption) (TextModel, error)
 
 	// if !backend.Available() { skip }
@@ -242,9 +242,9 @@ func List() []string {
 //	}
 func All() iter.Seq2[string, Backend] {
 	backendsMu.RLock()
-	snap := maps.Clone(backends)
+	backendSnapshot := maps.Clone(backends)
 	backendsMu.RUnlock()
-	return maps.All(snap)
+	return maps.All(backendSnapshot)
 }
 
 // backend, err := inference.Default()
@@ -265,8 +265,8 @@ func Default() (Backend, error) {
 	return nil, fmt.Errorf("inference: no backends registered (import a backend package)")
 }
 
-// m, err := inference.LoadModel("/models/gemma3-1b")
-// m, err := inference.LoadModel("/models/qwen3-4b", inference.WithBackend("rocm"), inference.WithContextLen(8192))
+// model, err := inference.LoadModel("/models/gemma3-1b")
+// model, err := inference.LoadModel("/models/qwen3-4b", inference.WithBackend("rocm"), inference.WithContextLen(8192))
 func LoadModel(path string, options ...LoadOption) (TextModel, error) {
 	loadConfig := ApplyLoadOpts(options)
 	if loadConfig.Backend != "" {

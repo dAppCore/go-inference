@@ -5,10 +5,10 @@ import "fmt"
 // config := inference.LoRAConfig{Rank: 16, Alpha: 32, TargetKeys: []string{"q_proj", "k_proj", "v_proj"}}
 // config := inference.LoRAConfig{Rank: 8, Alpha: 16, BFloat16: true}
 type LoRAConfig struct {
-	Rank       int      // LoRA rank (default 8)
-	Alpha      float32  // LoRA scaling factor (default 16)
-	TargetKeys []string // Projection suffixes to target
-	BFloat16   bool     // Use BFloat16 adapter weights
+	Rank       int
+	Alpha      float32
+	TargetKeys []string
+	BFloat16   bool
 }
 
 // config := inference.DefaultLoRAConfig() // Rank=8, Alpha=16, TargetKeys=["q_proj","v_proj"]
@@ -24,7 +24,7 @@ func DefaultLoRAConfig() LoRAConfig {
 // fmt.Printf("%d trainable parameters\n", adapter.TotalParams())
 // adapter.Save("/models/lora/domain-v2/adapter.safetensors")
 type Adapter interface {
-	// fmt.Printf("%d trainable params\n", adapter.TotalParams())
+	// fmt.Printf("%d trainable parameters\n", adapter.TotalParams())
 	TotalParams() int
 
 	// adapter.Save("/models/lora/epoch3/adapter.safetensors")
@@ -37,7 +37,7 @@ type TrainableModel interface {
 	TextModel
 
 	// adapter := trainableModel.ApplyLoRA(inference.LoRAConfig{Rank: 16, Alpha: 32})
-	// fmt.Printf("%d trainable params\n", adapter.TotalParams())
+	// fmt.Printf("%d trainable parameters\n", adapter.TotalParams())
 	ApplyLoRA(config LoRAConfig) Adapter
 
 	// ids := trainableModel.Encode("Hello, world!") // [1, 22172, 29892, 3186, 29991]
