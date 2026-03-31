@@ -80,12 +80,12 @@ func (m *stubTextModel) Close() error             { return nil }
 func TestRegister_Good(t *testing.T) {
 	resetBackends(t)
 
-	b := &stubBackend{name: "test_backend", available: true}
-	Register(b)
+	backend := &stubBackend{name: "test_backend", available: true}
+	Register(backend)
 
-	got, ok := Get("test_backend")
+	registeredBackend, ok := Get("test_backend")
 	require.True(t, ok)
-	assert.Equal(t, "test_backend", got.Name())
+	assert.Equal(t, "test_backend", registeredBackend.Name())
 }
 
 func TestRegister_Good_Multiple(t *testing.T) {
@@ -119,9 +119,9 @@ func TestGet_Good(t *testing.T) {
 
 	Register(&stubBackend{name: "exists", available: true})
 
-	b, ok := Get("exists")
+	backend, ok := Get("exists")
 	require.True(t, ok)
-	assert.Equal(t, "exists", b.Name())
+	assert.Equal(t, "exists", backend.Name())
 }
 
 func TestGet_Bad(t *testing.T) {
@@ -159,8 +159,8 @@ func TestAll_Good(t *testing.T) {
 	Register(&stubBackend{name: "b", available: true})
 
 	found := map[string]Backend{}
-	for name, b := range All() {
-		found[name] = b
+	for name, backend := range All() {
+		found[name] = backend
 	}
 
 	assert.Len(t, found, 2)
@@ -262,15 +262,15 @@ func TestDefault_Good_PriorityOrder(t *testing.T) {
 			want: "llama_cpp",
 		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
 			resetBackends(t)
-			for i := range tt.backends {
-				Register(&tt.backends[i])
+			for backendIndex := range testCase.backends {
+				Register(&testCase.backends[backendIndex])
 			}
-			b, err := Default()
+			backend, err := Default()
 			require.NoError(t, err)
-			assert.Equal(t, tt.want, b.Name())
+			assert.Equal(t, testCase.want, backend.Name())
 		})
 	}
 }
@@ -281,9 +281,9 @@ func TestDefault_Good_FallbackToAny(t *testing.T) {
 	// A custom backend that's not in the priority list.
 	Register(&stubBackend{name: "custom_gpu", available: true})
 
-	b, err := Default()
+	backend, err := Default()
 	require.NoError(t, err)
-	assert.Equal(t, "custom_gpu", b.Name(), "should fall back to any available backend")
+	assert.Equal(t, "custom_gpu", backend.Name(), "should fall back to any available backend")
 }
 
 func TestDefault_Bad_NoBackends(t *testing.T) {
@@ -324,14 +324,14 @@ func TestLoadModel_Good_DefaultBackend(t *testing.T) {
 
 	Register(&stubBackend{name: "metal", available: true})
 
-	m, err := LoadModel("/path/to/model")
+	model, err := LoadModel("/path/to/model")
 	require.NoError(t, err)
-	require.NotNil(t, m)
+	require.NotNil(t, model)
 
-	sm := m.(*stubTextModel)
-	assert.Equal(t, "metal", sm.backend)
-	assert.Equal(t, "/path/to/model", sm.path)
-	require.NoError(t, m.Close())
+	stubModel := model.(*stubTextModel)
+	assert.Equal(t, "metal", stubModel.backend)
+	assert.Equal(t, "/path/to/model", stubModel.path)
+	require.NoError(t, model.Close())
 }
 
 func TestLoadModel_Good_ExplicitBackend(t *testing.T) {
@@ -340,13 +340,13 @@ func TestLoadModel_Good_ExplicitBackend(t *testing.T) {
 	Register(&stubBackend{name: "metal", available: true})
 	Register(&stubBackend{name: "rocm", available: true})
 
-	m, err := LoadModel("/path/to/model", WithBackend("rocm"))
+	model, err := LoadModel("/path/to/model", WithBackend("rocm"))
 	require.NoError(t, err)
-	require.NotNil(t, m)
+	require.NotNil(t, model)
 
-	sm := m.(*stubTextModel)
-	assert.Equal(t, "rocm", sm.backend, "should use explicitly requested backend")
-	require.NoError(t, m.Close())
+	stubModel := model.(*stubTextModel)
+	assert.Equal(t, "rocm", stubModel.backend, "should use explicitly requested backend")
+	require.NoError(t, model.Close())
 }
 
 func TestLoadModel_Bad_NoBackends(t *testing.T) {
@@ -397,15 +397,15 @@ func TestLoadModel_Good_PassesOptionsThrough(t *testing.T) {
 	// Use a backend that captures the load path.
 	Register(&stubBackend{name: "metal", available: true})
 
-	m, err := LoadModel("/models/gemma3-1b",
+	model, err := LoadModel("/models/gemma3-1b",
 		WithContextLen(4096),
 		WithGPULayers(24),
 	)
 	require.NoError(t, err)
 
-	sm := m.(*stubTextModel)
-	assert.Equal(t, "/models/gemma3-1b", sm.path)
-	require.NoError(t, m.Close())
+	stubModel := model.(*stubTextModel)
+	assert.Equal(t, "/models/gemma3-1b", stubModel.path)
+	require.NoError(t, model.Close())
 }
 
 func TestLoadModel_Ugly_DefaultBackendLoadError(t *testing.T) {
@@ -463,15 +463,15 @@ func (m *mockInspector) InspectAttention(_ context.Context, _ string, _ ...Gener
 
 func TestAttentionInspector_Good_ReturnsSnapshot(t *testing.T) {
 	var inspector AttentionInspector = &mockInspector{}
-	snap, err := inspector.InspectAttention(context.Background(), "hello")
+	snapshot, err := inspector.InspectAttention(context.Background(), "hello")
 	require.NoError(t, err)
-	assert.Equal(t, 28, snap.NumLayers)
-	assert.Equal(t, 8, snap.NumHeads)
-	assert.Equal(t, "qwen3", snap.Architecture)
+	assert.Equal(t, 28, snapshot.NumLayers)
+	assert.Equal(t, 8, snapshot.NumHeads)
+	assert.Equal(t, "qwen3", snapshot.Architecture)
 }
 
 func TestAttentionSnapshotWithQueries(t *testing.T) {
-	snap := AttentionSnapshot{
+	snapshot := AttentionSnapshot{
 		NumLayers:     28,
 		NumHeads:      8,
 		NumQueryHeads: 32,
@@ -481,19 +481,19 @@ func TestAttentionSnapshotWithQueries(t *testing.T) {
 		Queries:       make([][][]float32, 28),
 		Architecture:  "gemma3",
 	}
-	if snap.NumQueryHeads != 32 {
-		t.Fatalf("expected 32 query heads, got %d", snap.NumQueryHeads)
+	if snapshot.NumQueryHeads != 32 {
+		t.Fatalf("expected 32 query heads, got %d", snapshot.NumQueryHeads)
 	}
-	if snap.HasQueries() != true {
+	if snapshot.HasQueries() != true {
 		t.Fatal("expected HasQueries() == true when Queries is non-nil")
 	}
 
-	kOnly := AttentionSnapshot{
+	keyOnlySnapshot := AttentionSnapshot{
 		NumLayers: 28,
 		NumHeads:  8,
 		Keys:      make([][][]float32, 28),
 	}
-	if kOnly.HasQueries() != false {
+	if keyOnlySnapshot.HasQueries() != false {
 		t.Fatal("expected HasQueries() == false when Queries is nil")
 	}
 }
@@ -501,43 +501,43 @@ func TestAttentionSnapshotWithQueries(t *testing.T) {
 // --- Struct types ---
 
 func TestToken_Good(t *testing.T) {
-	tok := Token{ID: 42, Text: "hello"}
-	assert.Equal(t, int32(42), tok.ID)
-	assert.Equal(t, "hello", tok.Text)
+	token := Token{ID: 42, Text: "hello"}
+	assert.Equal(t, int32(42), token.ID)
+	assert.Equal(t, "hello", token.Text)
 }
 
 func TestMessage_Good(t *testing.T) {
-	msg := Message{Role: "user", Content: "Hi there"}
-	assert.Equal(t, "user", msg.Role)
-	assert.Equal(t, "Hi there", msg.Content)
+	message := Message{Role: "user", Content: "Hi there"}
+	assert.Equal(t, "user", message.Role)
+	assert.Equal(t, "Hi there", message.Content)
 }
 
 func TestClassifyResult_Good(t *testing.T) {
-	cr := ClassifyResult{
+	classifyResult := ClassifyResult{
 		Token:  Token{ID: 1, Text: "yes"},
 		Logits: []float32{0.1, 0.9},
 	}
-	assert.Equal(t, int32(1), cr.Token.ID)
-	assert.Equal(t, "yes", cr.Token.Text)
-	assert.Len(t, cr.Logits, 2)
+	assert.Equal(t, int32(1), classifyResult.Token.ID)
+	assert.Equal(t, "yes", classifyResult.Token.Text)
+	assert.Len(t, classifyResult.Logits, 2)
 }
 
 func TestBatchResult_Good(t *testing.T) {
-	br := BatchResult{
+	batchResult := BatchResult{
 		Tokens: []Token{{ID: 1, Text: "a"}, {ID: 2, Text: "b"}},
 		Err:    nil,
 	}
-	assert.Len(t, br.Tokens, 2)
-	assert.NoError(t, br.Err)
+	assert.Len(t, batchResult.Tokens, 2)
+	assert.NoError(t, batchResult.Err)
 }
 
 func TestBatchResult_Bad(t *testing.T) {
-	br := BatchResult{
+	batchResult := BatchResult{
 		Tokens: nil,
 		Err:    fmt.Errorf("OOM"),
 	}
-	assert.Nil(t, br.Tokens)
-	assert.Error(t, br.Err)
+	assert.Nil(t, batchResult.Tokens)
+	assert.Error(t, batchResult.Err)
 }
 
 func TestModelInfo_Good(t *testing.T) {
@@ -558,7 +558,7 @@ func TestModelInfo_Good(t *testing.T) {
 }
 
 func TestGenerateMetrics_Good(t *testing.T) {
-	m := GenerateMetrics{
+	metrics := GenerateMetrics{
 		PromptTokens:        100,
 		GeneratedTokens:     50,
 		PrefillTokensPerSec: 1000.0,
@@ -566,12 +566,12 @@ func TestGenerateMetrics_Good(t *testing.T) {
 		PeakMemoryBytes:     1 << 30,   // 1 GiB
 		ActiveMemoryBytes:   512 << 20, // 512 MiB
 	}
-	assert.Equal(t, 100, m.PromptTokens)
-	assert.Equal(t, 50, m.GeneratedTokens)
-	assert.InDelta(t, 1000.0, m.PrefillTokensPerSec, 0.01)
-	assert.InDelta(t, 25.0, m.DecodeTokensPerSec, 0.01)
-	assert.Equal(t, uint64(1<<30), m.PeakMemoryBytes)
-	assert.Equal(t, uint64(512<<20), m.ActiveMemoryBytes)
+	assert.Equal(t, 100, metrics.PromptTokens)
+	assert.Equal(t, 50, metrics.GeneratedTokens)
+	assert.InDelta(t, 1000.0, metrics.PrefillTokensPerSec, 0.01)
+	assert.InDelta(t, 25.0, metrics.DecodeTokensPerSec, 0.01)
+	assert.Equal(t, uint64(1<<30), metrics.PeakMemoryBytes)
+	assert.Equal(t, uint64(512<<20), metrics.ActiveMemoryBytes)
 }
 
 // --- Concurrent registry access ---
@@ -581,40 +581,40 @@ func TestRegistry_Good_ConcurrentAccess(t *testing.T) {
 	// The -race flag will catch data races if the mutex is broken.
 	resetBackends(t)
 
-	var wg sync.WaitGroup
+	var waitGroup sync.WaitGroup
 
 	// Concurrent writers.
-	for i := range 20 {
-		wg.Add(1)
+	for index := range 20 {
+		waitGroup.Add(1)
 		go func(id int) {
-			defer wg.Done()
+			defer waitGroup.Done()
 			Register(&stubBackend{
 				name:      fmt.Sprintf("backend_%d", id),
 				available: true,
 			})
-		}(i)
+		}(index)
 	}
 
 	// Concurrent readers interleaved with writers.
 	for range 20 {
-		wg.Go(func() {
+		waitGroup.Go(func() {
 			_ = List()
 		})
 	}
 
 	for range 20 {
-		wg.Go(func() {
+		waitGroup.Go(func() {
 			_, _ = Get("backend_0")
 		})
 	}
 
 	for range 10 {
-		wg.Go(func() {
+		waitGroup.Go(func() {
 			_, _ = Default()
 		})
 	}
 
-	wg.Wait()
+	waitGroup.Wait()
 
 	// After all goroutines finish, verify all 20 backends are registered.
 	names := List()
@@ -644,9 +644,9 @@ func TestDefault_Ugly_AllPreferredUnavailableCustomAvailable(t *testing.T) {
 	Register(&stubBackend{name: "llama_cpp", available: false})
 	Register(&stubBackend{name: "custom_vulkan", available: true})
 
-	b, err := Default()
+	backend, err := Default()
 	require.NoError(t, err)
-	assert.Equal(t, "custom_vulkan", b.Name(),
+	assert.Equal(t, "custom_vulkan", backend.Name(),
 		"should fall back to custom backend when all preferred backends are unavailable")
 }
 
@@ -659,9 +659,9 @@ func TestDefault_Ugly_MultipleCustomBackends(t *testing.T) {
 	Register(&stubBackend{name: "custom_a", available: false})
 	Register(&stubBackend{name: "custom_b", available: true})
 
-	b, err := Default()
+	backend, err := Default()
 	require.NoError(t, err)
-	assert.Equal(t, "custom_b", b.Name(),
+	assert.Equal(t, "custom_b", backend.Name(),
 		"should find the available custom backend in the fallback loop")
 }
 
@@ -670,54 +670,54 @@ func TestDefault_Ugly_MultipleCustomBackends(t *testing.T) {
 func TestLoadModel_Good_ExplicitBackendForwardsOptions(t *testing.T) {
 	resetBackends(t)
 
-	cb := &capturingBackend{name: "cap", available: true}
-	Register(cb)
+	captureBackend := &capturingBackend{name: "cap", available: true}
+	Register(captureBackend)
 
-	opts := []LoadOption{
+	loadOptions := []LoadOption{
 		WithBackend("cap"),
 		WithContextLen(4096),
 		WithGPULayers(16),
 	}
-	m, err := LoadModel("/path/to/model", opts...)
+	model, err := LoadModel("/path/to/model", loadOptions...)
 	require.NoError(t, err)
-	require.NotNil(t, m)
+	require.NotNil(t, model)
 
 	// The capturing backend should have received all options.
-	assert.Len(t, cb.capturedOpts, len(opts),
+	assert.Len(t, captureBackend.capturedOpts, len(loadOptions),
 		"all LoadOptions should be forwarded to the backend")
 
 	// Verify the forwarded options produce the correct config.
-	cfg := ApplyLoadOpts(cb.capturedOpts)
-	assert.Equal(t, "cap", cfg.Backend)
-	assert.Equal(t, 4096, cfg.ContextLen)
-	assert.Equal(t, 16, cfg.GPULayers)
-	require.NoError(t, m.Close())
+	loadConfig := ApplyLoadOpts(captureBackend.capturedOpts)
+	assert.Equal(t, "cap", loadConfig.Backend)
+	assert.Equal(t, 4096, loadConfig.ContextLen)
+	assert.Equal(t, 16, loadConfig.GPULayers)
+	require.NoError(t, model.Close())
 }
 
 func TestLoadModel_Good_DefaultBackendForwardsOptions(t *testing.T) {
 	resetBackends(t)
 
-	cb := &capturingBackend{name: "metal", available: true}
-	Register(cb)
+	captureBackend := &capturingBackend{name: "metal", available: true}
+	Register(captureBackend)
 
-	opts := []LoadOption{
+	loadOptions := []LoadOption{
 		WithContextLen(8192),
 		WithGPULayers(-1),
 		WithParallelSlots(2),
 	}
-	m, err := LoadModel("/path/to/model", opts...)
+	model, err := LoadModel("/path/to/model", loadOptions...)
 	require.NoError(t, err)
-	require.NotNil(t, m)
+	require.NotNil(t, model)
 
 	// The default backend should have received all options.
-	assert.Len(t, cb.capturedOpts, len(opts),
+	assert.Len(t, captureBackend.capturedOpts, len(loadOptions),
 		"all LoadOptions should be forwarded to the default backend")
 
-	cfg := ApplyLoadOpts(cb.capturedOpts)
-	assert.Equal(t, 8192, cfg.ContextLen)
-	assert.Equal(t, -1, cfg.GPULayers)
-	assert.Equal(t, 2, cfg.ParallelSlots)
-	require.NoError(t, m.Close())
+	loadConfig := ApplyLoadOpts(captureBackend.capturedOpts)
+	assert.Equal(t, 8192, loadConfig.ContextLen)
+	assert.Equal(t, -1, loadConfig.GPULayers)
+	assert.Equal(t, 2, loadConfig.ParallelSlots)
+	require.NoError(t, model.Close())
 }
 
 // --- Default preference order does not depend on registration order ---
@@ -730,9 +730,9 @@ func TestDefault_Good_RegistrationOrderIrrelevant(t *testing.T) {
 	Register(&stubBackend{name: "rocm", available: true})
 	Register(&stubBackend{name: "metal", available: true})
 
-	b, err := Default()
+	backend, err := Default()
 	require.NoError(t, err)
-	assert.Equal(t, "metal", b.Name(),
+	assert.Equal(t, "metal", backend.Name(),
 		"metal should win regardless of registration order")
 
 	// Register in yet another order.
@@ -742,9 +742,9 @@ func TestDefault_Good_RegistrationOrderIrrelevant(t *testing.T) {
 	Register(&stubBackend{name: "metal", available: true})
 	Register(&stubBackend{name: "llama_cpp", available: true})
 
-	b, err = Default()
+	backend, err = Default()
 	require.NoError(t, err)
-	assert.Equal(t, "metal", b.Name(),
+	assert.Equal(t, "metal", backend.Name(),
 		"metal should win regardless of registration order")
 }
 
@@ -756,11 +756,11 @@ func TestLoadModel_Ugly_EmptyPath(t *testing.T) {
 	Register(&stubBackend{name: "metal", available: true})
 
 	// Empty path is accepted at this layer — backend decides what to do.
-	m, err := LoadModel("")
+	model, err := LoadModel("")
 	require.NoError(t, err)
-	sm := m.(*stubTextModel)
-	assert.Equal(t, "", sm.path, "empty path should be forwarded to the backend as-is")
-	require.NoError(t, m.Close())
+	stubModel := model.(*stubTextModel)
+	assert.Equal(t, "", stubModel.path, "empty path should be forwarded to the backend as-is")
+	require.NoError(t, model.Close())
 }
 
 // --- Get after register and overwrite ---
@@ -771,9 +771,9 @@ func TestGet_Good_AfterOverwrite(t *testing.T) {
 	Register(&stubBackend{name: "gpu", available: false})
 	Register(&stubBackend{name: "gpu", available: true}) // overwrite
 
-	b, ok := Get("gpu")
+	backend, ok := Get("gpu")
 	require.True(t, ok)
-	assert.True(t, b.Available(), "Get should return the most recently registered backend")
+	assert.True(t, backend.Available(), "Get should return the most recently registered backend")
 }
 
 // --- List returns new slice each call ---
@@ -783,12 +783,12 @@ func TestList_Good_IndependentSlices(t *testing.T) {
 
 	Register(&stubBackend{name: "alpha", available: true})
 
-	a := List()
-	b := List()
-	assert.Equal(t, a, b, "both calls should return the same names")
+	firstNames := List()
+	secondNames := List()
+	assert.Equal(t, firstNames, secondNames, "both calls should return the same names")
 
 	// Mutating one slice should not affect the other.
-	a[0] = "mutated"
-	c := List()
-	assert.NotEqual(t, a[0], c[0], "List should return independent slices")
+	firstNames[0] = "mutated"
+	thirdNames := List()
+	assert.NotEqual(t, firstNames[0], thirdNames[0], "List should return independent slices")
 }
