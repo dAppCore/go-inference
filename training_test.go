@@ -19,9 +19,9 @@ func TestDefaultLoRAConfig_Good(t *testing.T) {
 }
 
 func TestDefaultLoRAConfig_Good_Idempotent(t *testing.T) {
-	a := DefaultLoRAConfig()
-	b := DefaultLoRAConfig()
-	assert.Equal(t, a, b, "DefaultLoRAConfig should be idempotent")
+	firstConfig := DefaultLoRAConfig()
+	secondConfig := DefaultLoRAConfig()
+	assert.Equal(t, firstConfig, secondConfig, "DefaultLoRAConfig should be idempotent")
 }
 
 // --- LoadTrainable ---

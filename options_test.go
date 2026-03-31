@@ -11,9 +11,9 @@ import (
 
 func TestDefaultGenerateConfig_Good_Idempotent(t *testing.T) {
 	// Calling DefaultGenerateConfig twice should yield identical results.
-	a := DefaultGenerateConfig()
-	b := DefaultGenerateConfig()
-	assert.Equal(t, a, b, "DefaultGenerateConfig should be idempotent")
+	firstConfig := DefaultGenerateConfig()
+	secondConfig := DefaultGenerateConfig()
+	assert.Equal(t, firstConfig, secondConfig, "DefaultGenerateConfig should be idempotent")
 }
 
 // --- GenerateConfig defaults ---
@@ -214,15 +214,15 @@ func TestWithLogits_Good_DefaultIsFalse(t *testing.T) {
 
 func TestApplyGenerateOpts_Good(t *testing.T) {
 	t.Run("nil_opts_returns_defaults", func(t *testing.T) {
-		cfg := ApplyGenerateOpts(nil)
-		def := DefaultGenerateConfig()
-		assert.Equal(t, def, cfg)
+		actualConfig := ApplyGenerateOpts(nil)
+		defaultConfig := DefaultGenerateConfig()
+		assert.Equal(t, defaultConfig, actualConfig)
 	})
 
 	t.Run("empty_opts_returns_defaults", func(t *testing.T) {
-		cfg := ApplyGenerateOpts([]GenerateOption{})
-		def := DefaultGenerateConfig()
-		assert.Equal(t, def, cfg)
+		actualConfig := ApplyGenerateOpts([]GenerateOption{})
+		defaultConfig := DefaultGenerateConfig()
+		assert.Equal(t, defaultConfig, actualConfig)
 	})
 
 	t.Run("all_options_combined", func(t *testing.T) {
