@@ -23,17 +23,17 @@ go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
 
-There is no Taskfile in this package; it is small enough that direct `go` invocations suffice. The parent workspace (`/Users/snider/Code/host-uk/core`) uses Task for cross-repo operations.
+There is no Taskfile in this package; use direct `go` invocations here and run workspace-level automation from the parent repository if needed.
 
 ## Go Workspace
 
-This package is part of the `host-uk/core` Go workspace. After adding or changing module dependencies:
+This package is part of the parent Go workspace. After adding or changing module dependencies:
 
 ```bash
 go work sync
 ```
 
-The workspace root is `/Users/snider/Code/host-uk/core`. The workspace file (`go.work`) includes this module alongside `cmd/core-gui`, `cmd/bugseti`, and others.
+From the workspace root, run `go work sync`. The workspace file (`go.work`) includes this module alongside the other core modules.
 
 ## Module Path
 
@@ -46,8 +46,6 @@ Import it in consumers:
 ```go
 import "dappco.re/go/core/inference"
 ```
-
-Remote: `ssh://git@forge.lthn.ai:2223/core/go-inference.git` (legacy — module path is now `dappco.re/go/core/inference`)
 
 ## Repository Layout
 
