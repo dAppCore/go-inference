@@ -12,9 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- test helpers for discover ---
-
-// createModelDir creates a fake model directory with config.json and n safetensors files.
 func createModelDir(t *testing.T, dir string, config map[string]any, numSafetensors int) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(dir, 0o755))
@@ -30,8 +27,6 @@ func createModelDir(t *testing.T, dir string, config map[string]any, numSafetens
 		require.NoError(t, os.WriteFile(filename, []byte("fake"), 0o644))
 	}
 }
-
-// --- Discover ---
 
 func TestDiscover_Good_SingleModel(t *testing.T) {
 	base := t.TempDir()
@@ -63,7 +58,6 @@ func TestDiscover_Good_MultipleModels(t *testing.T) {
 	models := slices.Collect(Discover(base))
 	require.Len(t, models, 2)
 
-	// Collect model types for assertion (order may vary due to ReadDir).
 	modelTypes := make([]string, len(models))
 	for index, model := range models {
 		modelTypes[index] = model.ModelType
@@ -90,7 +84,6 @@ func TestDiscover_Good_Quantised(t *testing.T) {
 }
 
 func TestDiscover_Good_BaseDirIsModel(t *testing.T) {
-	// The base directory itself is a model directory.
 	base := t.TempDir()
 	createModelDir(t, base, map[string]any{
 		"model_type": "llama",
@@ -105,7 +98,6 @@ func TestDiscover_Good_BaseDirIsModel(t *testing.T) {
 }
 
 func TestDiscover_Good_BaseDirPlusSubdir(t *testing.T) {
-	// Both base dir and a subdir are valid models. Base should appear first.
 	base := t.TempDir()
 	createModelDir(t, base, map[string]any{
 		"model_type": "parent_model",
@@ -117,7 +109,6 @@ func TestDiscover_Good_BaseDirPlusSubdir(t *testing.T) {
 	models := slices.Collect(Discover(base))
 	require.Len(t, models, 2)
 
-	// Base dir should appear first (prepended).
 	assert.Equal(t, "parent_model", models[0].ModelType, "base dir model should be first")
 	assert.Equal(t, "child_model", models[1].ModelType)
 }
@@ -135,7 +126,6 @@ func TestDiscover_Bad_NonexistentDir(t *testing.T) {
 }
 
 func TestDiscover_Bad_NoSafetensors(t *testing.T) {
-	// Directory with config.json but no .safetensors files.
 	base := t.TempDir()
 	dir := filepath.Join(base, "incomplete")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
@@ -150,7 +140,6 @@ func TestDiscover_Bad_NoSafetensors(t *testing.T) {
 }
 
 func TestDiscover_Bad_NoConfig(t *testing.T) {
-	// Directory with .safetensors but no config.json.
 	base := t.TempDir()
 	dir := filepath.Join(base, "no-config")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
@@ -161,7 +150,6 @@ func TestDiscover_Bad_NoConfig(t *testing.T) {
 }
 
 func TestDiscover_Bad_InvalidJSON(t *testing.T) {
-	// config.json exists but contains invalid JSON. Should NOT count as a model anymore.
 	base := t.TempDir()
 	dir := filepath.Join(base, "bad-json")
 	require.NoError(t, os.MkdirAll(dir, 0o755))
@@ -173,7 +161,6 @@ func TestDiscover_Bad_InvalidJSON(t *testing.T) {
 }
 
 func TestDiscover_Ugly_SkipsRegularFiles(t *testing.T) {
-	// Regular files in base dir should be silently skipped.
 	base := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(base, "README.md"), []byte("hello"), 0o644))
 
@@ -187,7 +174,6 @@ func TestDiscover_Ugly_SkipsRegularFiles(t *testing.T) {
 }
 
 func TestDiscover_Ugly_MissingModelType(t *testing.T) {
-	// config.json without model_type field.
 	base := t.TempDir()
 	createModelDir(t, filepath.Join(base, "no-type"), map[string]any{
 		"vocab_size": 32000,
@@ -199,7 +185,6 @@ func TestDiscover_Ugly_MissingModelType(t *testing.T) {
 }
 
 func TestDiscover_Ugly_NoQuantisation(t *testing.T) {
-	// config.json without quantization key - QuantBits/QuantGroup should be 0.
 	base := t.TempDir()
 	createModelDir(t, filepath.Join(base, "fp16"), map[string]any{
 		"model_type": "gemma3",
@@ -223,8 +208,6 @@ func TestDiscover_Good_MultipleSafetensors(t *testing.T) {
 }
 
 func TestDiscover_Good_EarlyBreakOnBaseDir(t *testing.T) {
-	// Base dir is a model and a subdir is also a model.
-	// Breaking after the first yield should stop iteration.
 	base := t.TempDir()
 	createModelDir(t, base, map[string]any{
 		"model_type": "parent",
@@ -236,14 +219,12 @@ func TestDiscover_Good_EarlyBreakOnBaseDir(t *testing.T) {
 	count := 0
 	for range Discover(base) {
 		count++
-		break // stop after first model
+		break
 	}
 	assert.Equal(t, 1, count, "iterator should stop after first yield when break is called")
 }
 
 func TestDiscover_Good_EarlyBreakOnSubdir(t *testing.T) {
-	// Base dir is NOT a model; two subdirs are models.
-	// Breaking after the first subdir yield should stop iteration.
 	base := t.TempDir()
 	createModelDir(t, filepath.Join(base, "model-a"), map[string]any{
 		"model_type": "a",

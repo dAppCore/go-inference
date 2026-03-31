@@ -12,11 +12,11 @@ type GenerateConfig struct {
 	ReturnLogits  bool // Include raw logits in ClassifyResult
 }
 
-// config := inference.DefaultGenerateConfig() // MaxTokens=256, Temperature=0.0 (greedy)
+// config := inference.DefaultGenerateConfig() // MaxTokens=256, Temperature=0.0
 func DefaultGenerateConfig() GenerateConfig {
 	return GenerateConfig{
 		MaxTokens:   256,
-		Temperature: 0.0, // greedy
+		Temperature: 0.0,
 	}
 }
 
@@ -63,7 +63,7 @@ func WithLogits() GenerateOption {
 	return func(config *GenerateConfig) { config.ReturnLogits = true }
 }
 
-// config := inference.ApplyGenerateOpts(options) // used internally by backends
+// config := inference.ApplyGenerateOpts(options)
 func ApplyGenerateOpts(options []GenerateOption) GenerateConfig {
 	generateConfig := DefaultGenerateConfig()
 	for _, option := range options {
@@ -115,10 +115,10 @@ func WithAdapterPath(path string) LoadOption {
 	return func(config *LoadConfig) { config.AdapterPath = path }
 }
 
-// config := inference.ApplyLoadOpts(options) // used internally by LoadModel
+// config := inference.ApplyLoadOpts(options)
 func ApplyLoadOpts(options []LoadOption) LoadConfig {
 	loadConfig := LoadConfig{
-		GPULayers: -1, // default: full GPU offload
+		GPULayers: -1,
 	}
 	for _, option := range options {
 		option(&loadConfig)
