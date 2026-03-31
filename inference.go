@@ -233,6 +233,10 @@ func Default() (Backend, error) {
 	backendsMu.RLock()
 	defer backendsMu.RUnlock()
 
+	if len(backends) == 0 {
+		return nil, fmt.Errorf("inference: no backends registered (import a backend package)")
+	}
+
 	for _, name := range []string{"metal", "rocm", "llama_cpp"} {
 		if backend, ok := backends[name]; ok && backend.Available() {
 			return backend, nil
@@ -243,7 +247,7 @@ func Default() (Backend, error) {
 			return backend, nil
 		}
 	}
-	return nil, fmt.Errorf("inference: no backends registered (import a backend package)")
+	return nil, fmt.Errorf("inference: no registered backends are available on this hardware")
 }
 
 // model, err := inference.LoadModel("/models/gemma3-1b")

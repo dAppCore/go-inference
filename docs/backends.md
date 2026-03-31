@@ -39,6 +39,13 @@ If no backends are registered at all, `Default()` returns:
 inference: no backends registered (import a backend package)
 ```
 
+If backends are registered but none report `Available() == true`, `Default()`
+returns:
+
+```
+inference: no registered backends are available on this hardware
+```
+
 ### LoadModel routing
 
 `LoadModel` is the primary consumer entry point. It resolves the backend then delegates:

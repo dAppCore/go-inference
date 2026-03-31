@@ -124,8 +124,6 @@ Neither interface will be added until at least two consumers have a concrete nee
 
 **No de-registration** — `Register` overwrites silently; there is no `Unregister`. This is intentional for simplicity. Backends registered in `init()` live for the lifetime of the process.
 
-**`Default()` error message** — When all registered backends are unavailable, the error says "no backends registered" rather than "no backends available". This is slightly misleading but matches the no-backends case exactly, which simplifies error handling in consumers that treat both cases identically.
-
 **`ParallelSlots` ignored by Metal** — Apple Metal manages concurrency internally. `WithParallelSlots` is accepted by `go-mlx` but has no effect. This is documented in `options.go` but not enforced.
 
 ## Future Considerations

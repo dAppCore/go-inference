@@ -286,7 +286,7 @@ func TestDefault_Bad_NoneAvailable(t *testing.T) {
 
 	_, err := Default()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no backends registered")
+	assert.Contains(t, err.Error(), "no registered backends are available on this hardware")
 }
 
 func TestDefault_Ugly_SkipsUnavailablePreferred(t *testing.T) {
