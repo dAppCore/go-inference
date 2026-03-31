@@ -770,7 +770,7 @@ func TestGet_Good_AfterOverwrite(t *testing.T) {
 	assert.True(t, b.Available(), "Get should return the most recently registered backend")
 }
 
-// --- List returns new slice each call ---
+// --- List slice independence ---
 
 func TestList_Good_IndependentSlices(t *testing.T) {
 	resetBackends(t)

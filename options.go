@@ -1,9 +1,7 @@
 package inference
 
-// GenerateConfig holds generation parameters.
-//
-//	inference.GenerateConfig{MaxTokens: 256, Temperature: 0.7, TopK: 40}
-//	inference.GenerateConfig{MaxTokens: 64, StopTokens: []int32{2}, RepeatPenalty: 1.1}
+// inference.GenerateConfig{MaxTokens: 256, Temperature: 0.7, TopK: 40}
+// inference.GenerateConfig{MaxTokens: 64, StopTokens: []int32{2}, RepeatPenalty: 1.1}
 type GenerateConfig struct {
 	MaxTokens     int
 	Temperature   float32
@@ -14,9 +12,7 @@ type GenerateConfig struct {
 	ReturnLogits  bool // Return raw logits in ClassifyResult (default false)
 }
 
-// DefaultGenerateConfig returns generation defaults: 256 tokens, greedy (temperature 0).
-//
-//	cfg := inference.DefaultGenerateConfig() // MaxTokens=256, Temperature=0.0 (greedy)
+// cfg := inference.DefaultGenerateConfig() // MaxTokens=256, Temperature=0.0 (greedy)
 func DefaultGenerateConfig() GenerateConfig {
 	return GenerateConfig{
 		MaxTokens:   256,
@@ -24,7 +20,7 @@ func DefaultGenerateConfig() GenerateConfig {
 	}
 }
 
-// GenerateOption is a functional option for Generate, Chat, Classify, and BatchGenerate.
+// Used by Generate, Chat, Classify, and BatchGenerate.
 //
 //	m.Generate(ctx, prompt, inference.WithMaxTokens(128), inference.WithTemperature(0.7))
 type GenerateOption func(*GenerateConfig)
@@ -83,9 +79,7 @@ func WithLogits() GenerateOption {
 	return func(c *GenerateConfig) { c.ReturnLogits = true }
 }
 
-// ApplyGenerateOpts folds a slice of GenerateOption into a GenerateConfig, starting from defaults.
-//
-//	cfg := inference.ApplyGenerateOpts(opts) // used internally by backends
+// cfg := inference.ApplyGenerateOpts(opts) // used internally by backends
 func ApplyGenerateOpts(opts []GenerateOption) GenerateConfig {
 	cfg := DefaultGenerateConfig()
 	for _, opt := range opts {
@@ -94,10 +88,8 @@ func ApplyGenerateOpts(opts []GenerateOption) GenerateConfig {
 	return cfg
 }
 
-// LoadConfig holds model loading parameters.
-//
-//	inference.LoadConfig{Backend: "metal", ContextLen: 4096, GPULayers: -1}
-//	inference.LoadConfig{Backend: "rocm", AdapterPath: "/models/lora/v1"}
+// inference.LoadConfig{Backend: "metal", ContextLen: 4096, GPULayers: -1}
+// inference.LoadConfig{Backend: "rocm", AdapterPath: "/models/lora/v1"}
 type LoadConfig struct {
 	Backend       string // "metal", "rocm", "llama_cpp" (empty = auto-detect)
 	ContextLen    int    // Context window size (0 = model default)
@@ -106,7 +98,7 @@ type LoadConfig struct {
 	AdapterPath   string // Path to LoRA adapter directory (empty = no adapter)
 }
 
-// LoadOption is a functional option for LoadModel and LoadTrainable.
+// Used by LoadModel and LoadTrainable.
 //
 //	inference.LoadModel("/models/gemma3-1b", inference.WithBackend("metal"), inference.WithContextLen(4096))
 type LoadOption func(*LoadConfig)
@@ -152,9 +144,7 @@ func WithAdapterPath(path string) LoadOption {
 	return func(c *LoadConfig) { c.AdapterPath = path }
 }
 
-// ApplyLoadOpts folds a slice of LoadOption into a LoadConfig, starting from defaults (GPULayers=-1).
-//
-//	cfg := inference.ApplyLoadOpts(opts) // used internally by LoadModel
+// cfg := inference.ApplyLoadOpts(opts) // used internally by LoadModel
 func ApplyLoadOpts(opts []LoadOption) LoadConfig {
 	cfg := LoadConfig{
 		GPULayers: -1, // default: full GPU offload
