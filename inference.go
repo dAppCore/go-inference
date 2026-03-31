@@ -1,31 +1,33 @@
-// Package inference provides the shared contract for text-generation backends.
-//
 // model, err := inference.LoadModel("/models/gemma3-1b")
-// if err != nil {
-// 	log.Fatal(err)
-// }
+//
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
 // defer model.Close()
 //
 // ctx := context.Background()
-// for token := range model.Generate(ctx, "Hello", inference.WithMaxTokens(128)) {
-// 	fmt.Print(token.Text)
-// }
-// if err := model.Err(); err != nil {
-// 	log.Fatal(err)
-// }
+//
+//	for token := range model.Generate(ctx, "Hello", inference.WithMaxTokens(128)) {
+//		fmt.Print(token.Text)
+//	}
+//
+//	if err := model.Err(); err != nil {
+//		log.Fatal(err)
+//	}
 //
 // classificationResults, _ := model.Classify(ctx, []string{"positive", "negative"}, inference.WithTemperature(0))
 // batchResults, _ := model.BatchGenerate(ctx, []string{"First", "Second"}, inference.WithMaxTokens(32))
 //
-// if inspector, ok := model.(inference.AttentionInspector); ok {
-// 	snapshot, err := inspector.InspectAttention(ctx, "Hello")
-// 	_ = snapshot.HasQueries()
-// 	_ = err
-// }
+//	if inspector, ok := model.(inference.AttentionInspector); ok {
+//		snapshot, err := inspector.InspectAttention(ctx, "Hello")
+//		_ = snapshot.HasQueries()
+//		_ = err
+//	}
 //
-// for discoveredModel := range inference.Discover("/path/to/models") {
-// 	fmt.Printf("%s (%s)\n", discoveredModel.Path, discoveredModel.ModelType)
-// }
+//	for discoveredModel := range inference.Discover("/path/to/models") {
+//		fmt.Printf("%s (%s)\n", discoveredModel.Path, discoveredModel.ModelType)
+//	}
 package inference
 
 import (

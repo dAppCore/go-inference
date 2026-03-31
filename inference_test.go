@@ -132,17 +132,17 @@ func TestList_Good_Empty(t *testing.T) {
 func TestList_Good_Populated(t *testing.T) {
 	resetBackends(t)
 
-	Register(&stubBackend{name: "a", available: true})
-	Register(&stubBackend{name: "b", available: true})
+	Register(&stubBackend{name: "primary_backend", available: true})
+	Register(&stubBackend{name: "secondary_backend", available: true})
 
-	assert.Equal(t, []string{"a", "b"}, List())
+	assert.Equal(t, []string{"primary_backend", "secondary_backend"}, List())
 }
 
 func TestAll_Good(t *testing.T) {
 	resetBackends(t)
 
-	Register(&stubBackend{name: "a", available: true})
-	Register(&stubBackend{name: "b", available: true})
+	Register(&stubBackend{name: "primary_backend", available: true})
+	Register(&stubBackend{name: "secondary_backend", available: true})
 
 	found := map[string]Backend{}
 	for name, backend := range All() {
@@ -150,8 +150,8 @@ func TestAll_Good(t *testing.T) {
 	}
 
 	assert.Len(t, found, 2)
-	assert.Contains(t, found, "a")
-	assert.Contains(t, found, "b")
+	assert.Contains(t, found, "primary_backend")
+	assert.Contains(t, found, "secondary_backend")
 }
 
 func TestAll_Good_Empty(t *testing.T) {
@@ -167,13 +167,13 @@ func TestAll_Good_Empty(t *testing.T) {
 func TestAll_Good_YieldFalse(t *testing.T) {
 	resetBackends(t)
 
-	Register(&stubBackend{name: "a", available: true})
-	Register(&stubBackend{name: "b", available: true})
+	Register(&stubBackend{name: "primary_backend", available: true})
+	Register(&stubBackend{name: "secondary_backend", available: true})
 
 	count := 0
 	for name := range All() {
 		count++
-		if name == "a" || name == "b" {
+		if name == "primary_backend" || name == "secondary_backend" {
 			break
 		}
 	}
@@ -497,7 +497,7 @@ func TestClassifyResult_Good(t *testing.T) {
 
 func TestBatchResult_Good(t *testing.T) {
 	batchResult := BatchResult{
-		Tokens: []Token{{ID: 1, Text: "a"}, {ID: 2, Text: "b"}},
+		Tokens: []Token{{ID: 1, Text: "primary"}, {ID: 2, Text: "secondary"}},
 		Err:    nil,
 	}
 	assert.Len(t, batchResult.Tokens, 2)

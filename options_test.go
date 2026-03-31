@@ -425,10 +425,10 @@ func TestApplyLoadOpts_Ugly(t *testing.T) {
 
 	t.Run("adapter_path_override", func(t *testing.T) {
 		loadConfig := ApplyLoadOpts([]LoadOption{
-			WithAdapterPath("/path/a"),
-			WithAdapterPath("/path/b"),
+			WithAdapterPath("/models/lora/primary"),
+			WithAdapterPath("/models/lora/secondary"),
 		})
-		assert.Equal(t, "/path/b", loadConfig.AdapterPath)
+		assert.Equal(t, "/models/lora/secondary", loadConfig.AdapterPath)
 	})
 }
 
