@@ -10,16 +10,16 @@ import (
 
 func TestDefaultLoRAConfig_Good(t *testing.T) {
 	config := DefaultLoRAConfig()
-	assert.Equal(t, 8, config.Rank, "default Rank should be 8")
-	assert.InDelta(t, float32(16), config.Alpha, 0.0001, "default Alpha should be 16")
-	assert.Equal(t, []string{"q_proj", "v_proj"}, config.TargetKeys, "default TargetKeys should be q_proj and v_proj")
-	assert.False(t, config.BFloat16, "default BFloat16 should be false")
+	assert.Equal(t, 8, config.Rank)
+	assert.InDelta(t, float32(16), config.Alpha, 0.0001)
+	assert.Equal(t, []string{"q_proj", "v_proj"}, config.TargetKeys)
+	assert.False(t, config.BFloat16)
 }
 
 func TestDefaultLoRAConfig_Good_Idempotent(t *testing.T) {
 	firstConfig := DefaultLoRAConfig()
 	secondConfig := DefaultLoRAConfig()
-	assert.Equal(t, firstConfig, secondConfig, "DefaultLoRAConfig should be idempotent")
+	assert.Equal(t, firstConfig, secondConfig)
 }
 
 type stubTrainableModel struct {
