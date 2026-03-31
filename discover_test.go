@@ -199,7 +199,7 @@ func TestDiscover_Ugly_MissingModelType(t *testing.T) {
 }
 
 func TestDiscover_Ugly_NoQuantisation(t *testing.T) {
-	// config.json without quantization key — QuantBits/QuantGroup should be 0.
+	// config.json without quantization key - QuantBits/QuantGroup should be 0.
 	base := t.TempDir()
 	createModelDir(t, filepath.Join(base, "fp16"), map[string]any{
 		"model_type": "gemma3",

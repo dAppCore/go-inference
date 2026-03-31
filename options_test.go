@@ -161,14 +161,14 @@ func TestWithStopTokens_Good(t *testing.T) {
 }
 
 func TestWithStopTokens_Bad(t *testing.T) {
-	// Empty variadic — Go passes nil to the variadic parameter, so StopTokens
+	// Empty variadic - Go passes nil to the variadic parameter, so StopTokens
 	// is set to nil (same as default). This is a known Go behaviour.
 	config := ApplyGenerateOpts([]GenerateOption{WithStopTokens()})
 	assert.Nil(t, config.StopTokens, "empty variadic should set StopTokens to nil")
 }
 
 func TestWithStopTokens_Ugly(t *testing.T) {
-	// Last call wins — stop tokens are replaced, not merged.
+	// Last call wins - stop tokens are replaced, not merged.
 	config := ApplyGenerateOpts([]GenerateOption{
 		WithStopTokens(1, 2),
 		WithStopTokens(3, 4, 5),

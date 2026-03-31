@@ -59,19 +59,17 @@ import (
 	"time"
 )
 
-//	for tok := range m.Generate(ctx, prompt) {
-//	    fmt.Print(tok.Text) // tok.ID holds the vocab index
-//	}
+// token := inference.Token{ID: 123, Text: "hello"}
 type Token struct {
 	ID   int32
 	Text string
 }
 
 //	messages := []inference.Message{
-//	    {Role: "system",    Content: "You are a helpful assistant."},
-//	    {Role: "user",      Content: "What is 2+2?"},
-//	    {Role: "assistant", Content: "4"},
-//	    {Role: "user",      Content: "Are you sure?"},
+//		{Role: "system", Content: "You are a helpful assistant."},
+//		{Role: "user", Content: "What is 2+2?"},
+//		{Role: "assistant", Content: "4"},
+//		{Role: "user", Content: "Are you sure?"},
 //	}
 type Message struct {
 	Role    string `json:"role"` // "system", "user", "assistant"
@@ -79,72 +77,70 @@ type Message struct {
 }
 
 // results, _ := m.Classify(ctx, []string{"positive", "negative"})
-// label := results[0].Token.Text  // sampled token at last position
-// logits := results[0].Logits     // only populated when WithLogits is set
+// label := results[0].Token.Text
+// logits := results[0].Logits
 type ClassifyResult struct {
-	Token  Token     // Sampled/greedy token at last prompt position
-	Logits []float32 // Raw vocab-sized logits (only when WithLogits is set)
+	Token  Token     // Sampled or greedy token at the last prompt position
+	Logits []float32 // Raw vocab-sized logits when WithLogits is set
 }
 
 // batched, _ := m.BatchGenerate(ctx, []string{"First", "Second"}, inference.WithMaxTokens(64))
 //
 //	for i, result := range batched {
-//	    if result.Err != nil { continue }
-//	    for _, tok := range result.Tokens { fmt.Print(tok.Text) }
+//		if result.Err != nil {
+//			continue
+//		}
+//		for _, tok := range result.Tokens {
+//			fmt.Print(tok.Text)
+//		}
 //	}
 type BatchResult struct {
-	Tokens []Token // All generated tokens for this prompt
-	Err    error   // Per-prompt error (context cancel, OOM, etc.)
+	Tokens []Token // Generated tokens for this prompt
+	Err    error   // Per-prompt error
 }
 
-// Retrieved via TextModel.Metrics() after Generate, Chat, Classify, or BatchGenerate.
-//
-//	m := model.Metrics()
-//	fmt.Printf("prefill: %.0f tok/s  decode: %.0f tok/s\n", m.PrefillTokensPerSec, m.DecodeTokensPerSec)
-//	fmt.Printf("peak GPU memory: %d MiB\n", m.PeakMemoryBytes>>20)
+// metrics := model.Metrics()
+// fmt.Printf("prefill: %.0f tok/s  decode: %.0f tok/s\n", metrics.PrefillTokensPerSec, metrics.DecodeTokensPerSec)
+// fmt.Printf("peak GPU memory: %d MiB\n", metrics.PeakMemoryBytes>>20)
 type GenerateMetrics struct {
-	// Token counts
-	PromptTokens    int // Input tokens (sum across batch for batch ops)
-	GeneratedTokens int // Output tokens generated
+	PromptTokens    int // Input token count
+	GeneratedTokens int // Output token count
 
-	// Timing
-	PrefillDuration time.Duration // Time to process the prompt(s)
-	DecodeDuration  time.Duration // Time for autoregressive decoding
-	TotalDuration   time.Duration // Wall-clock time for the full operation
+	PrefillDuration time.Duration // Prompt processing time
+	DecodeDuration  time.Duration // Autoregressive decode time
+	TotalDuration   time.Duration // Whole-operation wall time
 
-	// Throughput (computed)
 	PrefillTokensPerSec float64 // PromptTokens / PrefillDuration
 	DecodeTokensPerSec  float64 // GeneratedTokens / DecodeDuration
 
-	// Memory (Metal/GPU)
-	PeakMemoryBytes   uint64 // Peak GPU memory during this operation
-	ActiveMemoryBytes uint64 // Active GPU memory after operation
+	PeakMemoryBytes   uint64 // Peak GPU memory
+	ActiveMemoryBytes uint64 // GPU memory after the call
 }
 
 // info := model.Info()
 // fmt.Printf("%s %d-bit quant, %d layers, vocab %d\n", info.Architecture, info.QuantBits, info.NumLayers, info.VocabSize)
 type ModelInfo struct {
-	Architecture string // e.g. "gemma3", "qwen3", "llama"
+	Architecture string // Model architecture
 	VocabSize    int    // Vocabulary size
-	NumLayers    int    // Number of transformer layers
+	NumLayers    int    // Transformer layer count
 	HiddenSize   int    // Hidden dimension
-	QuantBits    int    // Quantisation bits (0 = unquantised, 4 = 4-bit, 8 = 8-bit)
-	QuantGroup   int    // Quantisation group size (0 if unquantised)
+	QuantBits    int    // Quantisation bits (0 = unquantised)
+	QuantGroup   int    // Quantisation group size
 }
 
-// AttentionSnapshot holds Q and/or K vectors extracted from the KV cache after prefill.
-// Keys is indexed [layer][head][position*head_dim] — flattened per head.
+// snap, _ := inspector.InspectAttention(ctx, prompt)
 //
-//	snap, _ := inspector.InspectAttention(ctx, prompt)
-//	layer0Head0 := snap.Keys[0][0] // flat float32 of len seq_len*head_dim
+//	if snap.HasQueries() {
+//		processQK(snap.Queries, snap.Keys)
+//	}
 type AttentionSnapshot struct {
 	NumLayers     int           `json:"num_layers"`
 	NumHeads      int           `json:"num_heads"` // num_kv_heads (may differ from query heads in GQA)
-	SeqLen        int           `json:"seq_len"`   // number of tokens in the prompt
+	SeqLen        int           `json:"seq_len"`   // Prompt token count
 	HeadDim       int           `json:"head_dim"`
 	NumQueryHeads int           `json:"num_query_heads"` // num_attention_heads (0 = Q not available)
-	Keys          [][][]float32 `json:"keys"`            // [layer][head] → flat float32 of len seq_len*head_dim
-	Queries       [][][]float32 `json:"queries"`         // [layer][head] → flat float32 (nil if K-only)
+	Keys          [][][]float32 `json:"keys"`            // [layer][head] -> flattened len seq_len*head_dim
+	Queries       [][][]float32 `json:"queries"`         // [layer][head] -> flattened len seq_len*head_dim
 	Architecture  string        `json:"architecture"`
 }
 
@@ -154,7 +150,7 @@ func (s *AttentionSnapshot) HasQueries() bool {
 }
 
 //	if inspector, ok := model.(inference.AttentionInspector); ok {
-//	    snap, err := inspector.InspectAttention(ctx, prompt)
+//		snap, err := inspector.InspectAttention(ctx, prompt)
 //	}
 type AttentionInspector interface {
 	InspectAttention(ctx context.Context, prompt string, options ...GenerateOption) (*AttentionSnapshot, error)
@@ -165,13 +161,15 @@ type AttentionInspector interface {
 // for tok := range m.Generate(ctx, "Hello") { fmt.Print(tok.Text) }
 type TextModel interface {
 	// for tok := range m.Generate(ctx, "The quick brown fox", inference.WithMaxTokens(64)) {
-	//     fmt.Print(tok.Text)
+	// 	fmt.Print(tok.Text)
 	// }
-	// if err := m.Err(); err != nil { return err }
+	// if err := m.Err(); err != nil {
+	// 	return err
+	// }
 	Generate(ctx context.Context, prompt string, options ...GenerateOption) iter.Seq[Token]
 
 	// for tok := range m.Chat(ctx, []inference.Message{{Role: "user", Content: "Hi"}}) {
-	//     fmt.Print(tok.Text)
+	// 	fmt.Print(tok.Text)
 	// }
 	Chat(ctx context.Context, messages []Message, options ...GenerateOption) iter.Seq[Token]
 
@@ -208,7 +206,7 @@ type Backend interface {
 	// m, err := b.LoadModel("/models/gemma3-1b", inference.WithContextLen(4096))
 	LoadModel(path string, options ...LoadOption) (TextModel, error)
 
-	// if !b.Available() { skip } // e.g. Metal on non-Apple hardware returns false
+	// if !backend.Available() { skip }
 	Available() bool
 }
 
@@ -249,18 +247,16 @@ func All() iter.Seq2[string, Backend] {
 	return maps.All(snap)
 }
 
-// b, err := inference.Default() // returns metal on Apple Silicon if available
+// backend, err := inference.Default()
 func Default() (Backend, error) {
 	backendsMu.RLock()
 	defer backendsMu.RUnlock()
 
-	// Platform preference order
 	for _, name := range []string{"metal", "rocm", "llama_cpp"} {
 		if backend, ok := backends[name]; ok && backend.Available() {
 			return backend, nil
 		}
 	}
-	// Fall back to any available
 	for backend := range maps.Values(backends) {
 		if backend.Available() {
 			return backend, nil

@@ -7,27 +7,29 @@ import (
 	"path/filepath"
 )
 
-//	for model := range inference.Discover("/Volumes/Data/models") {
-//	    fmt.Printf("%s  arch=%s  quant=%dbit\n", model.Path, model.ModelType, model.QuantBits)
+//	model := inference.DiscoveredModel{
+//		Path:      "/models/gemma3-1b",
+//		ModelType: "gemma3",
+//		QuantBits: 4,
+//		NumFiles:  4,
 //	}
 type DiscoveredModel struct {
-	Path       string // Absolute path to the model directory
-	ModelType  string // Architecture from config.json (e.g. "gemma3", "qwen3", "llama")
+	Path       string // Absolute model-directory path
+	ModelType  string // Architecture from config.json
 	QuantBits  int    // Quantisation bits (0 if unquantised)
 	QuantGroup int    // Quantisation group size
-	NumFiles   int    // Number of safetensors weight files
+	NumFiles   int    // safetensors weight-file count
 }
 
-// A valid directory has config.json + at least one .safetensors file.
-//
 //	for model := range inference.Discover("/Volumes/Data/models") {
-//	    loadedModel, _ := inference.LoadModel(model.Path)
-//	    _ = loadedModel.Close()
+//		loadedModel, _ := inference.LoadModel(model.Path)
+//		_ = loadedModel.Close()
 //	}
 //
-//	// Early exit - stop after finding the first match
 //	for model := range inference.Discover(baseDir) {
-//	    if model.ModelType == "gemma3" { use(model); break }
+//		if model.ModelType == "gemma3" {
+//			break
+//		}
 //	}
 func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	return func(yield func(DiscoveredModel) bool) {
@@ -37,7 +39,6 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 			return
 		}
 
-		// Check baseDir itself (in case it's a model directory).
 		if model, ok := probeModelDir(baseDir); ok {
 			if !yield(model) {
 				return
@@ -58,7 +59,6 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	}
 }
 
-// Accepts directories that contain config.json and at least one .safetensors file.
 func probeModelDir(dir string) (DiscoveredModel, bool) {
 	configPath := filepath.Join(dir, "config.json")
 	data, err := os.ReadFile(configPath)
@@ -66,7 +66,6 @@ func probeModelDir(dir string) (DiscoveredModel, bool) {
 		return DiscoveredModel{}, false
 	}
 
-	// Count safetensors files.
 	matches, err := filepath.Glob(filepath.Join(dir, "*.safetensors"))
 	if err != nil || len(matches) == 0 {
 		return DiscoveredModel{}, false
