@@ -1,34 +1,45 @@
 package inference
 
 import (
-	"encoding/json"
+	iofs "io/fs"
 	"iter"
-	"os"
-	"path/filepath"
+
+	"dappco.re/go/core"
 )
 
-// DiscoveredModel describes a model directory found by Discover.
+//	for m := range inference.Discover("/Volumes/Data/models") {
+//	    fmt.Printf("%s  arch=%s  quant=%dbit\n", m.Path, m.ModelType, m.QuantBits)
+//	}
 type DiscoveredModel struct {
-	Path         string // Absolute path to the model directory
-	ModelType    string // Architecture from config.json (e.g. "gemma3", "qwen3", "llama")
-	QuantBits    int    // Quantisation bits (0 if unquantised)
-	QuantGroup   int    // Quantisation group size
-	NumFiles     int    // Number of safetensors weight files
+	Path       string // Absolute path to the model directory
+	ModelType  string // Architecture from config.json (e.g. "gemma3", "qwen3", "llama")
+	QuantBits  int    // Quantisation bits (0 if unquantised)
+	QuantGroup int    // Quantisation group size
+	NumFiles   int    // Number of safetensors weight files
 }
 
-// Discover scans baseDir for model directories. A valid model directory
-// contains config.json and at least one .safetensors file.
-// Scans one level deep (immediate subdirectories of baseDir).
+// A valid directory has config.json + at least one .safetensors file.
+//
+//	for m := range inference.Discover("/Volumes/Data/models") {
+//	    model, _ := inference.LoadModel(m.Path)
+//	}
+//
+//	// Early exit — stop after finding the first match
+//	for m := range inference.Discover(dir) {
+//	    if m.ModelType == "gemma3" { use(m); break }
+//	}
 func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	return func(yield func(DiscoveredModel) bool) {
-		baseDir = filepath.Clean(baseDir)
-		entries, err := os.ReadDir(baseDir)
-		if err != nil {
+		baseDir = core.CleanPath(baseDir, core.Env("DS"))
+		fs := (&core.Fs{}).NewUnrestricted()
+
+		r := fs.List(baseDir)
+		if !r.OK {
 			return
 		}
+		entries := r.Value.([]iofs.DirEntry)
 
-		// Check baseDir itself (in case it's a model directory).
-		if m, ok := probeModelDir(baseDir); ok {
+		if m, ok := probeModelDir(baseDir, fs); ok {
 			if !yield(m) {
 				return
 			}
@@ -38,8 +49,8 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 			if !entry.IsDir() {
 				continue
 			}
-			dir := filepath.Join(baseDir, entry.Name())
-			if m, ok := probeModelDir(dir); ok {
+			dir := core.Path(baseDir, entry.Name())
+			if m, ok := probeModelDir(dir, fs); ok {
 				if !yield(m) {
 					return
 				}
@@ -48,23 +59,22 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	}
 }
 
-// probeModelDir checks if dir looks like a model directory.
-func probeModelDir(dir string) (DiscoveredModel, bool) {
-	configPath := filepath.Join(dir, "config.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
+// Accepts directories that contain config.json and at least one .safetensors file.
+func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
+	configPath := core.Path(dir, "config.json")
+	r := fs.Read(configPath)
+	if !r.OK {
 		return DiscoveredModel{}, false
 	}
 
-	// Count safetensors files.
-	matches, err := filepath.Glob(filepath.Join(dir, "*.safetensors"))
-	if err != nil || len(matches) == 0 {
+	matches := core.PathGlob(core.Path(dir, "*.safetensors"))
+	if len(matches) == 0 {
 		return DiscoveredModel{}, false
 	}
 
-	absDir, err := filepath.Abs(dir)
-	if err != nil {
-		absDir = dir
+	absDir := dir
+	if !core.PathIsAbs(dir) {
+		absDir = core.Path(dir)
 	}
 
 	var probe struct {
@@ -74,19 +84,19 @@ func probeModelDir(dir string) (DiscoveredModel, bool) {
 			GroupSize int `json:"group_size"`
 		} `json:"quantization"`
 	}
-	if err := json.Unmarshal(data, &probe); err != nil {
+	if rr := core.JSONUnmarshalString(r.Value.(string), &probe); !rr.OK {
 		return DiscoveredModel{}, false
 	}
 
-	m := DiscoveredModel{
+	model := DiscoveredModel{
 		Path:      absDir,
 		ModelType: probe.ModelType,
 		NumFiles:  len(matches),
 	}
 	if probe.Quantization != nil {
-		m.QuantBits = probe.Quantization.Bits
-		m.QuantGroup = probe.Quantization.GroupSize
+		model.QuantBits = probe.Quantization.Bits
+		model.QuantGroup = probe.Quantization.GroupSize
 	}
 
-	return m, true
+	return model, true
 }
