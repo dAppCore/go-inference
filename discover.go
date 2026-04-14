@@ -1,10 +1,11 @@
 package inference
 
 import (
-	iofs "io/fs"
+	"encoding/json"
+	"io/fs"
 	"iter"
-
-	"dappco.re/go/core"
+	"os"
+	"path/filepath"
 )
 
 //	for m := range inference.Discover("/Volumes/Data/models") {
@@ -30,51 +31,48 @@ type DiscoveredModel struct {
 //	}
 func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	return func(yield func(DiscoveredModel) bool) {
-		baseDir = core.CleanPath(baseDir, core.Env("DS"))
-		fs := (&core.Fs{}).NewUnrestricted()
-
-		r := fs.List(baseDir)
-		if !r.OK {
+		root, err := filepath.Abs(baseDir)
+		if err != nil {
 			return
 		}
-		entries := r.Value.([]iofs.DirEntry)
 
-		if m, ok := probeModelDir(baseDir, fs); ok {
-			if !yield(m) {
-				return
+		stopWalk := fs.SkipAll
+		walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
 			}
-		}
-
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
+			if !d.IsDir() {
+				return nil
 			}
-			dir := core.Path(baseDir, entry.Name())
-			if m, ok := probeModelDir(dir, fs); ok {
+			if m, ok := probeModelDir(path); ok {
 				if !yield(m) {
-					return
+					return stopWalk
 				}
 			}
+			return nil
+		})
+		if walkErr != nil && walkErr != stopWalk {
+			return
 		}
 	}
 }
 
 // Accepts directories that contain config.json and at least one .safetensors file.
-func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
-	configPath := core.Path(dir, "config.json")
-	r := fs.Read(configPath)
-	if !r.OK {
+func probeModelDir(dir string) (DiscoveredModel, bool) {
+	configPath := filepath.Join(dir, "config.json")
+	configData, err := os.ReadFile(configPath)
+	if err != nil {
 		return DiscoveredModel{}, false
 	}
 
-	matches := core.PathGlob(core.Path(dir, "*.safetensors"))
-	if len(matches) == 0 {
+	matches, err := filepath.Glob(filepath.Join(dir, "*.safetensors"))
+	if err != nil || len(matches) == 0 {
 		return DiscoveredModel{}, false
 	}
 
 	absDir := dir
-	if !core.PathIsAbs(dir) {
-		absDir = core.Path(dir)
+	if abs, err := filepath.Abs(dir); err == nil {
+		absDir = abs
 	}
 
 	var probe struct {
@@ -83,8 +81,12 @@ func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
 			Bits      int `json:"bits"`
 			GroupSize int `json:"group_size"`
 		} `json:"quantization"`
+		QuantConfig *struct {
+			Bits      int `json:"bits"`
+			GroupSize int `json:"group_size"`
+		} `json:"quantization_config"`
 	}
-	if rr := core.JSONUnmarshalString(r.Value.(string), &probe); !rr.OK {
+	if err := json.Unmarshal(configData, &probe); err != nil {
 		return DiscoveredModel{}, false
 	}
 
@@ -96,6 +98,9 @@ func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
 	if probe.Quantization != nil {
 		model.QuantBits = probe.Quantization.Bits
 		model.QuantGroup = probe.Quantization.GroupSize
+	} else if probe.QuantConfig != nil {
+		model.QuantBits = probe.QuantConfig.Bits
+		model.QuantGroup = probe.QuantConfig.GroupSize
 	}
 
 	return model, true
