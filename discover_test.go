@@ -275,3 +275,52 @@ func TestDiscover_Good_AbsolutePath(t *testing.T) {
 	require.Len(t, models, 1)
 	assert.True(t, core.PathIsAbs(models[0].Path), "discovered path must be absolute")
 }
+
+func TestDiscover_Good_RecursiveNestedModels(t *testing.T) {
+	base := t.TempDir()
+	createModelDir(t, core.Path(base, "models"), map[string]any{
+		"model_type": "parent",
+	}, 1)
+	createModelDir(t, core.Path(base, "models", "qwen3"), map[string]any{
+		"model_type": "qwen3",
+	}, 1)
+	createModelDir(t, core.Path(base, "models", "qwen3", "fine-tuned"), map[string]any{
+		"model_type": "qwen3",
+	}, 1)
+	createModelDir(t, core.Path(base, "other"), map[string]any{
+		"model_type": "gemma3",
+	}, 1)
+
+	models := slices.Collect(Discover(base))
+	require.Len(t, models, 4)
+
+	gotParent := false
+	gotNested := false
+	for _, m := range models {
+		if m.Path == core.Path(base, "models") {
+			gotParent = true
+		}
+		if m.Path == core.Path(base, "models", "qwen3", "fine-tuned") {
+			gotNested = true
+		}
+	}
+	assert.True(t, gotParent, "nested model directories should be discovered")
+	assert.True(t, gotNested, "deeply nested model directories should be discovered")
+}
+
+func TestDiscover_Good_RecursiveEarlyBreak(t *testing.T) {
+	base := t.TempDir()
+	createModelDir(t, core.Path(base, "a", "b", "deep"), map[string]any{
+		"model_type": "deep",
+	}, 1)
+	createModelDir(t, core.Path(base, "a", "c"), map[string]any{
+		"model_type": "second",
+	}, 1)
+
+	count := 0
+	for range Discover(base) {
+		count++
+		break
+	}
+	assert.Equal(t, 1, count, "breaking from Discover should stop further traversal immediately")
+}
