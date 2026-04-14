@@ -168,6 +168,20 @@ func TestInference_All_Good(t *testing.T) {
 	assert.Contains(t, found, "b")
 }
 
+func TestInference_All_Good_SortedOrder(t *testing.T) {
+	resetBackends(t)
+
+	Register(&stubBackend{name: "beta", available: true})
+	Register(&stubBackend{name: "alpha", available: true})
+
+	var names []string
+	for name := range All() {
+		names = append(names, name)
+	}
+
+	assert.Equal(t, []string{"alpha", "beta"}, names)
+}
+
 func TestInference_All_Good_Empty(t *testing.T) {
 	resetBackends(t)
 
@@ -225,6 +239,17 @@ func TestInference_Default_Good_LlamaCpp(t *testing.T) {
 	b, err := Default()
 	require.NoError(t, err)
 	assert.Equal(t, "llama_cpp", b.Name(), "llama_cpp should be used as fallback")
+}
+
+func TestInference_Default_Good_AlphabeticalFallback(t *testing.T) {
+	resetBackends(t)
+
+	Register(&stubBackend{name: "zeta", available: true})
+	Register(&stubBackend{name: "alpha", available: true})
+
+	b, err := Default()
+	require.NoError(t, err)
+	assert.Equal(t, "alpha", b.Name(), "fallback should be deterministic across non-preferred backends")
 }
 
 func TestInference_Default_Good_PriorityOrder(t *testing.T) {

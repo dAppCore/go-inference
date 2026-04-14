@@ -254,9 +254,22 @@ type Backend interface {
 }
 
 var (
-	backendsMu sync.RWMutex
-	backends   = map[string]Backend{}
+	backendsMu            sync.RWMutex
+	backends              = map[string]Backend{}
+	preferredBackendOrder = []string{"metal", "rocm", "llama_cpp"}
+	preferredBackendSet   = map[string]struct{}{
+		"metal":     {},
+		"rocm":      {},
+		"llama_cpp": {},
+	}
 )
+
+func snapshotBackends() map[string]Backend {
+	backendsMu.RLock()
+	snap := maps.Clone(backends)
+	backendsMu.RUnlock()
+	return snap
+}
 
 // Register adds b to the global registry, overwriting any existing entry with the same name.
 //
@@ -279,37 +292,42 @@ func Get(name string) (Backend, bool) {
 
 // names := inference.List() // ["llama_cpp", "metal", "rocm"]
 func List() []string {
-	backendsMu.RLock()
-	defer backendsMu.RUnlock()
-	return slices.Sorted(maps.Keys(backends))
+	return slices.Sorted(maps.Keys(snapshotBackends()))
 }
 
 //	for name, b := range inference.All() {
 //	    fmt.Println(name, b.Available())
 //	}
 func All() iter.Seq2[string, Backend] {
-	backendsMu.RLock()
-	snap := maps.Clone(backends)
-	backendsMu.RUnlock()
-	return maps.All(snap)
+	snap := snapshotBackends()
+	names := slices.Sorted(maps.Keys(snap))
+	return func(yield func(string, Backend) bool) {
+		for _, name := range names {
+			if !yield(name, snap[name]) {
+				return
+			}
+		}
+	}
 }
 
 // Default picks the first available backend in preference order: metal → rocm → llama_cpp → any.
 //
 //	b, err := inference.Default() // returns metal on Apple Silicon if available
 func Default() (Backend, error) {
-	backendsMu.RLock()
-	defer backendsMu.RUnlock()
+	snap := snapshotBackends()
 
 	// Platform preference order
-	for _, name := range []string{"metal", "rocm", "llama_cpp"} {
-		if b, ok := backends[name]; ok && b.Available() {
+	for _, name := range preferredBackendOrder {
+		if b, ok := snap[name]; ok && b.Available() {
 			return b, nil
 		}
 	}
 	// Fall back to any available
-	for backend := range maps.Values(backends) {
-		if backend.Available() {
+	for _, name := range slices.Sorted(maps.Keys(snap)) {
+		if _, ok := preferredBackendSet[name]; ok {
+			continue
+		}
+		if backend := snap[name]; backend.Available() {
 			return backend, nil
 		}
 	}
