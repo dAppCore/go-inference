@@ -1,6 +1,9 @@
 package inference
 
-import "dappco.re/go/core"
+import (
+	"errors"
+	"strconv"
+)
 
 // inference.LoRAConfig{Rank: 16, Alpha: 32, TargetKeys: []string{"q_proj", "k_proj", "v_proj"}}
 // inference.LoRAConfig{Rank: 8, Alpha: 16, BFloat16: true} // mixed-precision adapter
@@ -78,13 +81,13 @@ func LoadTrainable(path string, opts ...LoadOption) (TrainableModel, error) {
 		return nil, err
 	}
 	if model == nil {
-		return nil, core.E("inference.LoadTrainable", "load returned a nil model", nil)
+		return nil, errors.New("inference.LoadTrainable: load returned a nil model")
 	}
 	modelType := model.ModelType()
 	tm, ok := model.(TrainableModel)
 	if !ok {
 		model.Close()
-		return nil, core.E("inference.LoadTrainable", core.Sprintf("backend %q does not support training", modelType), nil)
+		return nil, errors.New("inference.LoadTrainable: backend " + strconv.Quote(modelType) + " does not support training")
 	}
 	return tm, nil
 }
