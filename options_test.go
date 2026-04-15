@@ -25,7 +25,7 @@ func TestOptions_DefaultGenerateConfig_Good(t *testing.T) {
 	assert.Equal(t, 0, cfg.TopK, "default TopK should be 0 (disabled)")
 	assert.Equal(t, float32(0.0), cfg.TopP, "default TopP should be 0.0 (disabled)")
 	assert.Nil(t, cfg.StopTokens, "default StopTokens should be nil")
-	assert.Equal(t, float32(0.0), cfg.RepeatPenalty, "default RepeatPenalty should be 0.0 (disabled)")
+	assert.Equal(t, float32(1.0), cfg.RepeatPenalty, "default RepeatPenalty should be 1.0 (no penalty)")
 	assert.False(t, cfg.ReturnLogits, "default ReturnLogits should be false")
 }
 

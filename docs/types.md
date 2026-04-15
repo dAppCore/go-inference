@@ -182,6 +182,7 @@ Defaults (from `DefaultGenerateConfig()`):
 |-------|---------|-------|
 | `MaxTokens` | 256 | Maximum tokens to generate |
 | `Temperature` | 0.0 | Greedy decoding |
+| `RepeatPenalty` | 1.0 | No repetition penalty |
 | All others | zero value | Disabled |
 
 ### GenerateOption functions
