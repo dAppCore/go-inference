@@ -188,6 +188,14 @@ func TestOptions_WithStopTokens_Ugly(t *testing.T) {
 	assert.Equal(t, []int32{3, 4, 5}, cfg.StopTokens, "last WithStopTokens should win")
 }
 
+func TestOptions_WithStopTokens_Good_CopyIsolation(t *testing.T) {
+	ids := []int32{7, 8, 9}
+	cfg := ApplyGenerateOpts([]GenerateOption{WithStopTokens(ids...)})
+
+	ids[0] = 42
+	assert.Equal(t, []int32{7, 8, 9}, cfg.StopTokens, "StopTokens should not alias caller input")
+}
+
 // --- WithRepeatPenalty ---
 
 func TestOptions_WithRepeatPenalty_Good(t *testing.T) {
