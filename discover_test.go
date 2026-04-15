@@ -1,6 +1,8 @@
 package inference
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -289,4 +291,38 @@ func TestDiscover_Good_AbsolutePath(t *testing.T) {
 	models := slices.Collect(Discover(base))
 	require.Len(t, models, 1)
 	assert.True(t, core.PathIsAbs(models[0].Path), "discovered path must be absolute")
+}
+
+func TestDiscover_Good_RelativeBaseDir(t *testing.T) {
+	base := t.TempDir()
+	createModelDir(t, core.Path(base, "relative-model"), map[string]any{
+		"model_type": "gemma3",
+	}, 1)
+
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+
+	relBase, err := filepath.Rel(cwd, base)
+	require.NoError(t, err)
+
+	models := slices.Collect(Discover(relBase))
+	require.Len(t, models, 1)
+	assert.True(t, core.PathIsAbs(models[0].Path), "discovered path must be absolute even for relative input")
+	assert.Equal(t, "gemma3", models[0].ModelType)
+}
+
+func TestDiscover_Good_QuantizationConfigFallback(t *testing.T) {
+	base := t.TempDir()
+	createModelDir(t, core.Path(base, "qwen3-4b"), map[string]any{
+		"model_type": "qwen3",
+		"quantization_config": map[string]any{
+			"bits":       8,
+			"group_size": 128,
+		},
+	}, 1)
+
+	models := slices.Collect(Discover(base))
+	require.Len(t, models, 1)
+	assert.Equal(t, 8, models[0].QuantBits)
+	assert.Equal(t, 128, models[0].QuantGroup)
 }
