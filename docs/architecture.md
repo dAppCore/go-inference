@@ -297,7 +297,7 @@ type GenerateConfig struct {
 }
 ```
 
-Defaults (from `DefaultGenerateConfig()`): `MaxTokens=256`, `Temperature=0.0` (greedy), all others zero/disabled.
+Defaults (from `DefaultGenerateConfig()`): `MaxTokens=256`, `Temperature=0.0` (greedy), `RepeatPenalty=1.0` (no penalty), all others zero/disabled.
 
 `ApplyGenerateOpts(opts []GenerateOption) GenerateConfig` is called by backends at the start of each inference operation. Options are applied in order; the last write wins for scalar fields.
 
