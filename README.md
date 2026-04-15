@@ -1,4 +1,4 @@
-[![Go Reference](https://pkg.go.dev/badge/forge.lthn.ai/core/go-inference.svg)](https://pkg.go.dev/forge.lthn.ai/core/go-inference)
+[![Go Reference](https://pkg.go.dev/badge/dappco.re/go/inference.svg)](https://pkg.go.dev/dappco.re/go/inference)
 [![License: EUPL-1.2](https://img.shields.io/badge/License-EUPL--1.2-blue.svg)](LICENSE.md)
 [![Go Version](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat&logo=go)](go.mod)
 
@@ -6,7 +6,7 @@
 
 Shared interface contract for text generation backends in the Core Go ecosystem. Defines `TextModel`, `Backend`, `Token`, `Message`, and associated configuration types that GPU-specific backends implement and consumers depend on. Zero external dependencies — stdlib only — and compiles on all platforms regardless of GPU availability. The backend registry supports automatic selection (Metal preferred on macOS, ROCm on Linux) and explicit pinning.
 
-**Module**: `forge.lthn.ai/core/go-inference`
+**Module**: `dappco.re/go/inference`
 **Licence**: EUPL-1.2
 **Language**: Go 1.25
 
@@ -14,7 +14,7 @@ Shared interface contract for text generation backends in the Core Go ecosystem.
 
 ```go
 import (
-    "forge.lthn.ai/core/go-inference"
+    "dappco.re/go/inference"
     _ "forge.lthn.ai/core/go-mlx"   // registers "metal" backend on darwin/arm64
 )
 
