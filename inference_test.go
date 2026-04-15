@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"dappco.re/go/core"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -438,6 +439,7 @@ func TestInference_LoadModel_Bad_BackendLoadError(t *testing.T) {
 	_, err := LoadModel("/path/to/model", WithBackend("broken"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GPU out of memory")
+	assert.Equal(t, "inference.LoadModel", core.Operation(err))
 }
 
 func TestInference_LoadModel_Good_PassesOptionsThrough(t *testing.T) {
@@ -469,6 +471,7 @@ func TestInference_LoadModel_Ugly_DefaultBackendLoadError(t *testing.T) {
 	_, err := LoadModel("/nonexistent/model")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "model not found")
+	assert.Equal(t, "inference.LoadModel", core.Operation(err))
 }
 
 func TestInference_LoadModel_Bad_BackendReturnsNilModel(t *testing.T) {

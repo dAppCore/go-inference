@@ -355,7 +355,7 @@ func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 		}
 		model, err := b.LoadModel(path, opts...)
 		if err != nil {
-			return nil, err
+			return nil, core.Wrap(err, "inference.LoadModel", "backend "+strconv.Quote(cfg.Backend)+" failed to load model")
 		}
 		if model == nil {
 			return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(cfg.Backend)+" returned a nil model", nil)
@@ -368,7 +368,7 @@ func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 	}
 	model, err := b.LoadModel(path, opts...)
 	if err != nil {
-		return nil, err
+		return nil, core.Wrap(err, "inference.LoadModel", "backend "+strconv.Quote(b.Name())+" failed to load model")
 	}
 	if model == nil {
 		return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(b.Name())+" returned a nil model", nil)
