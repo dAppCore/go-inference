@@ -1,11 +1,10 @@
 package inference
 
 import (
-	"testing"
-
-	"dappco.re/go/core"
+	"errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"testing"
 )
 
 // --- DefaultLoRAConfig ---
@@ -82,7 +81,7 @@ func TestTraining_LoadTrainable_Bad_LoadError(t *testing.T) {
 	Register(&stubBackend{
 		name:      "broken",
 		available: true,
-		loadErr:   core.NewError("GPU out of memory"),
+		loadErr:   errors.New("GPU out of memory"),
 	})
 
 	_, err := LoadTrainable("/path/to/model", WithBackend("broken"))
