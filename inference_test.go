@@ -340,7 +340,7 @@ func TestInference_Default_Bad_NoneAvailable(t *testing.T) {
 
 	_, err := Default()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no backends registered")
+	assert.Contains(t, err.Error(), "no backends available")
 }
 
 func TestInference_Default_Ugly_SkipsUnavailablePreferred(t *testing.T) {
@@ -393,6 +393,17 @@ func TestInference_LoadModel_Bad_NoBackends(t *testing.T) {
 	_, err := LoadModel("/path/to/model")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no backends registered")
+}
+
+func TestInference_LoadModel_Bad_NoBackendsAvailable(t *testing.T) {
+	resetBackends(t)
+
+	Register(&stubBackend{name: "metal", available: false})
+	Register(&stubBackend{name: "rocm", available: false})
+
+	_, err := LoadModel("/path/to/model")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no backends available")
 }
 
 func TestInference_LoadModel_Bad_ExplicitBackendNotRegistered(t *testing.T) {
