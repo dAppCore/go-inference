@@ -4,6 +4,7 @@ import (
 	"cmp"
 	iofs "io/fs"
 	"iter"
+	"path/filepath"
 	"slices"
 
 	"dappco.re/go/core"
@@ -32,8 +33,12 @@ type DiscoveredModel struct {
 //	}
 func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	return func(yield func(DiscoveredModel) bool) {
+		absBase, err := filepath.Abs(baseDir)
+		if err != nil {
+			return
+		}
 		fs := (&core.Fs{}).NewUnrestricted()
-		discoverDir(baseDir, fs, yield)
+		discoverDir(absBase, fs, yield)
 	}
 }
 
@@ -58,7 +63,7 @@ func discoverDir(dir string, fs *core.Fs, yield func(DiscoveredModel) bool) bool
 		if !entry.IsDir() {
 			continue
 		}
-		if !discoverDir(core.Path(dir, entry.Name()), fs, yield) {
+		if !discoverDir(filepath.Join(dir, entry.Name()), fs, yield) {
 			return false
 		}
 	}
@@ -68,13 +73,13 @@ func discoverDir(dir string, fs *core.Fs, yield func(DiscoveredModel) bool) bool
 
 // Accepts directories that contain config.json and at least one .safetensors file.
 func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
-	configPath := core.Path(dir, "config.json")
+	configPath := filepath.Join(dir, "config.json")
 	r := fs.Read(configPath)
 	if !r.OK {
 		return DiscoveredModel{}, false
 	}
 
-	matches := core.PathGlob(core.Path(dir, "*.safetensors"))
+	matches, _ := filepath.Glob(filepath.Join(dir, "*.safetensors"))
 	if len(matches) == 0 {
 		return DiscoveredModel{}, false
 	}
@@ -85,6 +90,10 @@ func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
 			Bits      int `json:"bits"`
 			GroupSize int `json:"group_size"`
 		} `json:"quantization"`
+		QuantizationConfig *struct {
+			Bits      int `json:"bits"`
+			GroupSize int `json:"group_size"`
+		} `json:"quantization_config"`
 	}
 	if rr := core.JSONUnmarshalString(r.Value.(string), &probe); !rr.OK {
 		return DiscoveredModel{}, false
@@ -98,14 +107,18 @@ func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
 	if probe.Quantization != nil {
 		model.QuantBits = probe.Quantization.Bits
 		model.QuantGroup = probe.Quantization.GroupSize
+	} else if probe.QuantizationConfig != nil {
+		model.QuantBits = probe.QuantizationConfig.Bits
+		model.QuantGroup = probe.QuantizationConfig.GroupSize
 	}
 
 	return model, true
 }
 
 func absolutePath(dir string) string {
-	if core.PathIsAbs(dir) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
 		return dir
 	}
-	return core.Path(dir)
+	return abs
 }
