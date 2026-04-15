@@ -1,5 +1,7 @@
 package inference
 
+import "slices"
+
 // inference.GenerateConfig{MaxTokens: 256, Temperature: 0.7, TopK: 40}
 // inference.GenerateConfig{MaxTokens: 64, StopTokens: []int32{2}, RepeatPenalty: 1.1}
 type GenerateConfig struct {
@@ -62,7 +64,7 @@ func WithTopP(p float32) GenerateOption {
 //	inference.WithStopTokens(2)       // EOS token only
 //	inference.WithStopTokens(2, 1, 0) // EOS + pad tokens
 func WithStopTokens(ids ...int32) GenerateOption {
-	return func(c *GenerateConfig) { c.StopTokens = ids }
+	return func(c *GenerateConfig) { c.StopTokens = slices.Clone(ids) }
 }
 
 // WithRepeatPenalty penalises repeated tokens. 1.0 = no penalty.
