@@ -62,13 +62,14 @@ package inference
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"maps"
 	"slices"
 	"strconv"
 	"sync"
 	"time"
+
+	"dappco.re/go/core"
 )
 
 //	for tok := range m.Generate(ctx, prompt) {
@@ -319,7 +320,7 @@ func All() iter.Seq2[string, Backend] {
 func Default() (Backend, error) {
 	snap := snapshotBackends()
 	if len(snap) == 0 {
-		return nil, fmt.Errorf("inference: no backends registered")
+		return nil, core.E("inference.Default", "no backends registered", nil)
 	}
 
 	// Platform preference order
@@ -337,7 +338,7 @@ func Default() (Backend, error) {
 			return backend, nil
 		}
 	}
-	return nil, fmt.Errorf("inference: no backends available")
+	return nil, core.E("inference.Default", "no backends available", nil)
 }
 
 // m, err := inference.LoadModel("/models/gemma3-1b")
@@ -347,17 +348,17 @@ func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 	if cfg.Backend != "" {
 		b, ok := Get(cfg.Backend)
 		if !ok {
-			return nil, fmt.Errorf("inference: backend %s not registered", strconv.Quote(cfg.Backend))
+			return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(cfg.Backend)+" not registered", nil)
 		}
 		if !b.Available() {
-			return nil, fmt.Errorf("inference: backend %s not available on this hardware", strconv.Quote(cfg.Backend))
+			return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(cfg.Backend)+" not available on this hardware", nil)
 		}
 		model, err := b.LoadModel(path, opts...)
 		if err != nil {
 			return nil, err
 		}
 		if model == nil {
-			return nil, fmt.Errorf("inference: backend %s returned a nil model", strconv.Quote(cfg.Backend))
+			return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(cfg.Backend)+" returned a nil model", nil)
 		}
 		return model, nil
 	}
@@ -370,7 +371,7 @@ func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 		return nil, err
 	}
 	if model == nil {
-		return nil, fmt.Errorf("inference: backend %s returned a nil model", strconv.Quote(b.Name()))
+		return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(b.Name())+" returned a nil model", nil)
 	}
 	return model, nil
 }
