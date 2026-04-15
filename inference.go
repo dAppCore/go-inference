@@ -331,7 +331,7 @@ func Default() (Backend, error) {
 			return backend, nil
 		}
 	}
-	return nil, core.NewError("inference: no backends registered (import a backend package)")
+	return nil, core.E("inference.Default", "no backends registered (import a backend package)", nil)
 }
 
 // m, err := inference.LoadModel("/models/gemma3-1b")
@@ -341,10 +341,10 @@ func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 	if cfg.Backend != "" {
 		b, ok := Get(cfg.Backend)
 		if !ok {
-			return nil, core.NewError(core.Sprintf("inference: backend %q not registered", cfg.Backend))
+			return nil, core.E("inference.LoadModel", core.Sprintf("backend %q not registered", cfg.Backend), nil)
 		}
 		if !b.Available() {
-			return nil, core.NewError(core.Sprintf("inference: backend %q not available on this hardware", cfg.Backend))
+			return nil, core.E("inference.LoadModel", core.Sprintf("backend %q not available on this hardware", cfg.Backend), nil)
 		}
 		return b.LoadModel(path, opts...)
 	}

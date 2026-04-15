@@ -72,6 +72,21 @@ func TestDiscover_Good_MultipleModels(t *testing.T) {
 	assert.ElementsMatch(t, []string{"gemma3", "qwen3"}, types)
 }
 
+func TestDiscover_Good_RecursiveNestedModels(t *testing.T) {
+	base := t.TempDir()
+	createModelDir(t, core.Path(base, "outer"), map[string]any{
+		"model_type": "outer",
+	}, 1)
+	createModelDir(t, core.Path(base, "outer", "inner"), map[string]any{
+		"model_type": "inner",
+	}, 1)
+
+	models := slices.Collect(Discover(base))
+	require.Len(t, models, 2)
+	assert.Equal(t, "outer", models[0].ModelType)
+	assert.Equal(t, "inner", models[1].ModelType)
+}
+
 func TestDiscover_Good_Quantised(t *testing.T) {
 	base := t.TempDir()
 	createModelDir(t, core.Path(base, "gemma3-1b-4bit"), map[string]any{

@@ -1,4 +1,4 @@
-module dappco.re/go/core/inference
+module dappco.re/go/inference
 
 go 1.26.0
 

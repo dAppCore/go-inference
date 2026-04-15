@@ -1,8 +1,10 @@
 package inference
 
 import (
+	"cmp"
 	iofs "io/fs"
 	"iter"
+	"slices"
 
 	"dappco.re/go/core"
 )
@@ -31,31 +33,37 @@ type DiscoveredModel struct {
 func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	return func(yield func(DiscoveredModel) bool) {
 		fs := (&core.Fs{}).NewUnrestricted()
+		discoverDir(baseDir, fs, yield)
+	}
+}
 
-		r := fs.List(baseDir)
-		if !r.OK {
-			return
-		}
-		entries := r.Value.([]iofs.DirEntry)
-
-		if m, ok := probeModelDir(baseDir, fs); ok {
-			if !yield(m) {
-				return
-			}
-		}
-
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			dir := core.Path(baseDir, entry.Name())
-			if m, ok := probeModelDir(dir, fs); ok {
-				if !yield(m) {
-					return
-				}
-			}
+func discoverDir(dir string, fs *core.Fs, yield func(DiscoveredModel) bool) bool {
+	if m, ok := probeModelDir(dir, fs); ok {
+		if !yield(m) {
+			return false
 		}
 	}
+
+	r := fs.List(dir)
+	if !r.OK {
+		return true
+	}
+
+	entries := r.Value.([]iofs.DirEntry)
+	slices.SortFunc(entries, func(a, b iofs.DirEntry) int {
+		return cmp.Compare(a.Name(), b.Name())
+	})
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if !discoverDir(core.Path(dir, entry.Name()), fs, yield) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // Accepts directories that contain config.json and at least one .safetensors file.
@@ -71,11 +79,6 @@ func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
 		return DiscoveredModel{}, false
 	}
 
-	absDir := dir
-	if !core.PathIsAbs(dir) {
-		absDir = core.Path(dir)
-	}
-
 	var probe struct {
 		ModelType    string `json:"model_type"`
 		Quantization *struct {
@@ -88,7 +91,7 @@ func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
 	}
 
 	model := DiscoveredModel{
-		Path:      absDir,
+		Path:      absolutePath(dir),
 		ModelType: probe.ModelType,
 		NumFiles:  len(matches),
 	}
@@ -98,4 +101,11 @@ func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
 	}
 
 	return model, true
+}
+
+func absolutePath(dir string) string {
+	if core.PathIsAbs(dir) {
+		return dir
+	}
+	return core.Path(dir)
 }

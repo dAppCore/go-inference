@@ -81,7 +81,7 @@ func LoadTrainable(path string, opts ...LoadOption) (TrainableModel, error) {
 	tm, ok := model.(TrainableModel)
 	if !ok {
 		model.Close()
-		return nil, core.NewError(core.Sprintf("inference: backend %q does not support training", modelType))
+		return nil, core.E("inference.LoadTrainable", core.Sprintf("backend %q does not support training", modelType), nil)
 	}
 	return tm, nil
 }
