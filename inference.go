@@ -275,6 +275,9 @@ func snapshotBackends() map[string]Backend {
 //
 //	func init() { inference.Register(metal.NewBackend()) }
 func Register(b Backend) {
+	if b == nil {
+		return
+	}
 	backendsMu.Lock()
 	defer backendsMu.Unlock()
 	backends[b.Name()] = b

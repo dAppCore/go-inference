@@ -112,6 +112,14 @@ func TestInference_Register_Ugly_Overwrites(t *testing.T) {
 	assert.True(t, got.Available(), "second registration should overwrite the first")
 }
 
+func TestInference_Register_Ugly_NilBackendNoop(t *testing.T) {
+	resetBackends(t)
+
+	Register(nil)
+
+	assert.Empty(t, List(), "Register(nil) should be ignored")
+}
+
 // --- Get ---
 
 func TestInference_Get_Good(t *testing.T) {
