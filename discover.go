@@ -30,7 +30,6 @@ type DiscoveredModel struct {
 //	}
 func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	return func(yield func(DiscoveredModel) bool) {
-		baseDir = core.CleanPath(baseDir, core.Env("DS"))
 		fs := (&core.Fs{}).NewUnrestricted()
 
 		r := fs.List(baseDir)

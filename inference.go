@@ -161,7 +161,7 @@ type AttentionSnapshot struct {
 
 // if snap.HasQueries() { processQK(snap.Queries, snap.Keys) }
 func (s *AttentionSnapshot) HasQueries() bool {
-	return s.Queries != nil && len(s.Queries) > 0
+	return s != nil && s.Queries != nil && len(s.Queries) > 0
 }
 
 //	if inspector, ok := model.(inference.AttentionInspector); ok {
