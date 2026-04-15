@@ -62,13 +62,14 @@ package inference
 
 import (
 	"context"
-	"errors"
 	"iter"
 	"maps"
 	"slices"
 	"strconv"
 	"sync"
 	"time"
+
+	"dappco.re/go/core"
 )
 
 //	for tok := range m.Generate(ctx, prompt) {
@@ -334,7 +335,7 @@ func Default() (Backend, error) {
 			return backend, nil
 		}
 	}
-	return nil, errors.New("inference.Default: no backends registered or available")
+	return nil, core.E("inference.Default", "no backends registered or available", nil)
 }
 
 // m, err := inference.LoadModel("/models/gemma3-1b")
@@ -344,17 +345,17 @@ func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 	if cfg.Backend != "" {
 		b, ok := Get(cfg.Backend)
 		if !ok {
-			return nil, errors.New("inference.LoadModel: backend " + strconv.Quote(cfg.Backend) + " not registered")
+			return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(cfg.Backend)+" not registered", nil)
 		}
 		if !b.Available() {
-			return nil, errors.New("inference.LoadModel: backend " + strconv.Quote(cfg.Backend) + " not available on this hardware")
+			return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(cfg.Backend)+" not available on this hardware", nil)
 		}
 		model, err := b.LoadModel(path, opts...)
 		if err != nil {
 			return nil, err
 		}
 		if model == nil {
-			return nil, errors.New("inference.LoadModel: backend " + strconv.Quote(cfg.Backend) + " returned a nil model")
+			return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(cfg.Backend)+" returned a nil model", nil)
 		}
 		return model, nil
 	}
@@ -367,7 +368,7 @@ func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 		return nil, err
 	}
 	if model == nil {
-		return nil, errors.New("inference.LoadModel: backend " + strconv.Quote(b.Name()) + " returned a nil model")
+		return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(b.Name())+" returned a nil model", nil)
 	}
 	return model, nil
 }
