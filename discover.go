@@ -84,6 +84,11 @@ func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
 		return DiscoveredModel{}, false
 	}
 
+	model := DiscoveredModel{
+		Path:     absolutePath(dir),
+		NumFiles: len(matches),
+	}
+
 	var probe struct {
 		ModelType    string `json:"model_type"`
 		Quantization *struct {
@@ -95,21 +100,15 @@ func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
 			GroupSize int `json:"group_size"`
 		} `json:"quantization_config"`
 	}
-	if rr := core.JSONUnmarshalString(r.Value.(string), &probe); !rr.OK {
-		return DiscoveredModel{}, false
-	}
-
-	model := DiscoveredModel{
-		Path:      absolutePath(dir),
-		ModelType: probe.ModelType,
-		NumFiles:  len(matches),
-	}
-	if probe.Quantization != nil {
-		model.QuantBits = probe.Quantization.Bits
-		model.QuantGroup = probe.Quantization.GroupSize
-	} else if probe.QuantizationConfig != nil {
-		model.QuantBits = probe.QuantizationConfig.Bits
-		model.QuantGroup = probe.QuantizationConfig.GroupSize
+	if rr := core.JSONUnmarshalString(r.Value.(string), &probe); rr.OK {
+		model.ModelType = probe.ModelType
+		if probe.Quantization != nil {
+			model.QuantBits = probe.Quantization.Bits
+			model.QuantGroup = probe.Quantization.GroupSize
+		} else if probe.QuantizationConfig != nil {
+			model.QuantBits = probe.QuantizationConfig.Bits
+			model.QuantGroup = probe.QuantizationConfig.GroupSize
+		}
 	}
 
 	return model, true
