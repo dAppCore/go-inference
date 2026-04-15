@@ -318,6 +318,9 @@ func All() iter.Seq2[string, Backend] {
 //	b, err := inference.Default() // returns metal on Apple Silicon if available
 func Default() (Backend, error) {
 	snap := snapshotBackends()
+	if len(snap) == 0 {
+		return nil, fmt.Errorf("inference: no backends registered")
+	}
 
 	// Platform preference order
 	for _, name := range preferredBackendOrder {
@@ -334,7 +337,7 @@ func Default() (Backend, error) {
 			return backend, nil
 		}
 	}
-	return nil, fmt.Errorf("inference: no backends registered or available")
+	return nil, fmt.Errorf("inference: no backends available")
 }
 
 // m, err := inference.LoadModel("/models/gemma3-1b")
