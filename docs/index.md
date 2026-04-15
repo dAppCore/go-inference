@@ -5,7 +5,7 @@ description: Shared interfaces for text generation backends in the Core Go ecosy
 
 # go-inference
 
-Module: `forge.lthn.ai/core/go-inference`
+Module: `dappco.re/go/inference`
 
 go-inference defines the shared contract between GPU-specific inference backends and their consumers. It contains the interfaces, types, and registry that let a consumer load a model and generate text without knowing which GPU runtime is underneath.
 
@@ -65,7 +65,7 @@ go-inference (this package)
 ## Quick start
 
 ```go
-import "forge.lthn.ai/core/go-inference"
+import "dappco.re/go/inference"
 
 // Load a model (auto-detects the best available backend)
 m, err := inference.LoadModel("/path/to/model/")

@@ -38,13 +38,13 @@ The workspace root is `/Users/snider/Code/host-uk/core`. The workspace file (`go
 ## Module Path
 
 ```
-forge.lthn.ai/core/go-inference
+dappco.re/go/inference
 ```
 
 Import it in consumers:
 
 ```go
-import "forge.lthn.ai/core/go-inference"
+import "dappco.re/go/inference"
 ```
 
 Remote: `ssh://git@forge.lthn.ai:2223/core/go-inference.git`
@@ -209,7 +209,7 @@ Co-Authored-By: Virgil <virgil@lethean.io>
 
 To implement a new backend (e.g. `go-vulkan` for cross-platform GPU inference):
 
-1. Import `forge.lthn.ai/core/go-inference` in the new module.
+1. Import `dappco.re/go/inference` in the new module.
 2. Implement `inference.Backend`:
 
 ```go
