@@ -90,6 +90,16 @@ func TestTraining_LoadTrainable_Bad_LoadError(t *testing.T) {
 	assert.Contains(t, err.Error(), "GPU out of memory")
 }
 
+func TestTraining_LoadTrainable_Bad_NilModel(t *testing.T) {
+	resetBackends(t)
+
+	Register(&stubBackend{name: "metal", available: true, nilModel: true})
+
+	_, err := LoadTrainable("/path/to/model")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "returned a nil model")
+}
+
 func TestTraining_LoadTrainable_Good_ExplicitBackend(t *testing.T) {
 	resetBackends(t)
 

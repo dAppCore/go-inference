@@ -77,6 +77,9 @@ func LoadTrainable(path string, opts ...LoadOption) (TrainableModel, error) {
 	if err != nil {
 		return nil, err
 	}
+	if model == nil {
+		return nil, core.E("inference.LoadTrainable", "load returned a nil model", nil)
+	}
 	modelType := model.ModelType()
 	tm, ok := model.(TrainableModel)
 	if !ok {
