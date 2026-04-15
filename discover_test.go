@@ -181,7 +181,8 @@ func TestDiscover_Bad_NoConfig(t *testing.T) {
 }
 
 func TestDiscover_Bad_InvalidJSON(t *testing.T) {
-	// config.json exists but contains invalid JSON. Should NOT count as a model anymore.
+	// config.json exists but contains invalid JSON. The directory is still
+	// discovered, but the parsed metadata fields remain at their zero values.
 	base := t.TempDir()
 	dir := core.Path(base, "bad-json")
 	fs := (&core.Fs{}).NewUnrestricted()
@@ -190,7 +191,11 @@ func TestDiscover_Bad_InvalidJSON(t *testing.T) {
 	require.True(t, fs.Write(core.Path(dir, "model.safetensors"), "fake").OK)
 
 	models := slices.Collect(Discover(base))
-	require.Len(t, models, 0)
+	require.Len(t, models, 1)
+	assert.Empty(t, models[0].ModelType)
+	assert.Equal(t, 1, models[0].NumFiles)
+	assert.Equal(t, 0, models[0].QuantBits)
+	assert.Equal(t, 0, models[0].QuantGroup)
 }
 
 func TestDiscover_Ugly_SkipsRegularFiles(t *testing.T) {
