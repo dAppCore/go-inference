@@ -334,7 +334,7 @@ func Default() (Backend, error) {
 			return backend, nil
 		}
 	}
-	return nil, core.E("inference.Default", "no backends registered", nil)
+	return nil, core.E("inference.Default", "no backends registered or available", nil)
 }
 
 // m, err := inference.LoadModel("/models/gemma3-1b")
