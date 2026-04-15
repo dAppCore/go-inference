@@ -2,12 +2,12 @@ package inference
 
 import (
 	"cmp"
+	"encoding/json"
 	iofs "io/fs"
 	"iter"
+	"os"
 	"path/filepath"
 	"slices"
-
-	"dappco.re/go/core"
 )
 
 //	for m := range inference.Discover("/Volumes/Data/models") {
@@ -37,24 +37,22 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 		if err != nil {
 			return
 		}
-		fs := (&core.Fs{}).NewUnrestricted()
-		discoverDir(absBase, fs, yield)
+		discoverDir(absBase, yield)
 	}
 }
 
-func discoverDir(dir string, fs *core.Fs, yield func(DiscoveredModel) bool) bool {
-	if m, ok := probeModelDir(dir, fs); ok {
+func discoverDir(dir string, yield func(DiscoveredModel) bool) bool {
+	if m, ok := probeModelDir(dir); ok {
 		if !yield(m) {
 			return false
 		}
 	}
 
-	r := fs.List(dir)
-	if !r.OK {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return true
 	}
 
-	entries := r.Value.([]iofs.DirEntry)
 	slices.SortFunc(entries, func(a, b iofs.DirEntry) int {
 		return cmp.Compare(a.Name(), b.Name())
 	})
@@ -63,7 +61,7 @@ func discoverDir(dir string, fs *core.Fs, yield func(DiscoveredModel) bool) bool
 		if !entry.IsDir() {
 			continue
 		}
-		if !discoverDir(filepath.Join(dir, entry.Name()), fs, yield) {
+		if !discoverDir(filepath.Join(dir, entry.Name()), yield) {
 			return false
 		}
 	}
@@ -72,10 +70,10 @@ func discoverDir(dir string, fs *core.Fs, yield func(DiscoveredModel) bool) bool
 }
 
 // Accepts directories that contain config.json and at least one .safetensors file.
-func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
+func probeModelDir(dir string) (DiscoveredModel, bool) {
 	configPath := filepath.Join(dir, "config.json")
-	r := fs.Read(configPath)
-	if !r.OK {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
 		return DiscoveredModel{}, false
 	}
 
@@ -100,7 +98,7 @@ func probeModelDir(dir string, fs *core.Fs) (DiscoveredModel, bool) {
 			GroupSize int `json:"group_size"`
 		} `json:"quantization_config"`
 	}
-	if rr := core.JSONUnmarshalString(r.Value.(string), &probe); rr.OK {
+	if err := json.Unmarshal(data, &probe); err == nil {
 		model.ModelType = probe.ModelType
 		if probe.Quantization != nil {
 			model.QuantBits = probe.Quantization.Bits
