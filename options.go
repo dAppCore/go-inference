@@ -83,7 +83,9 @@ func WithLogits() GenerateOption {
 func ApplyGenerateOpts(opts []GenerateOption) GenerateConfig {
 	cfg := DefaultGenerateConfig()
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	return cfg
 }
@@ -150,7 +152,9 @@ func ApplyLoadOpts(opts []LoadOption) LoadConfig {
 		GPULayers: -1, // default: full GPU offload
 	}
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	return cfg
 }

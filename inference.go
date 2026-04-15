@@ -349,11 +349,25 @@ func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 		if !b.Available() {
 			return nil, core.E("inference.LoadModel", core.Sprintf("backend %q not available on this hardware", cfg.Backend), nil)
 		}
-		return b.LoadModel(path, opts...)
+		model, err := b.LoadModel(path, opts...)
+		if err != nil {
+			return nil, err
+		}
+		if model == nil {
+			return nil, core.E("inference.LoadModel", core.Sprintf("backend %q returned a nil model", cfg.Backend), nil)
+		}
+		return model, nil
 	}
 	b, err := Default()
 	if err != nil {
 		return nil, err
 	}
-	return b.LoadModel(path, opts...)
+	model, err := b.LoadModel(path, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if model == nil {
+		return nil, core.E("inference.LoadModel", core.Sprintf("backend %q returned a nil model", b.Name()), nil)
+	}
+	return model, nil
 }

@@ -26,6 +26,7 @@ type stubBackend struct {
 	name      string
 	available bool
 	loadErr   error
+	nilModel  bool
 }
 
 func (s *stubBackend) Name() string    { return s.name }
@@ -33,6 +34,9 @@ func (s *stubBackend) Available() bool { return s.available }
 func (s *stubBackend) LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 	if s.loadErr != nil {
 		return nil, s.loadErr
+	}
+	if s.nilModel {
+		return nil, nil
 	}
 	return &stubTextModel{backend: s.name, path: path}, nil
 }
@@ -453,6 +457,20 @@ func TestInference_LoadModel_Ugly_DefaultBackendLoadError(t *testing.T) {
 	_, err := LoadModel("/nonexistent/model")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "model not found")
+}
+
+func TestInference_LoadModel_Bad_BackendReturnsNilModel(t *testing.T) {
+	resetBackends(t)
+
+	Register(&stubBackend{
+		name:      "metal",
+		available: true,
+		nilModel:  true,
+	})
+
+	_, err := LoadModel("/path/to/model")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "returned a nil model")
 }
 
 // --- Type assertions (compile-time checks) ---

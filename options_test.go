@@ -243,6 +243,12 @@ func TestOptions_ApplyGenerateOpts_Good(t *testing.T) {
 		assert.Equal(t, defaultConfig, actualConfig)
 	})
 
+	t.Run("nil_option_is_ignored", func(t *testing.T) {
+		actualConfig := ApplyGenerateOpts([]GenerateOption{nil})
+		defaultConfig := DefaultGenerateConfig()
+		assert.Equal(t, defaultConfig, actualConfig)
+	})
+
 	t.Run("empty_opts_returns_defaults", func(t *testing.T) {
 		actualConfig := ApplyGenerateOpts([]GenerateOption{})
 		defaultConfig := DefaultGenerateConfig()
@@ -336,6 +342,15 @@ func TestOptions_ApplyLoadOpts_Good_Defaults(t *testing.T) {
 	assert.Equal(t, 0, cfg.ContextLen, "default ContextLen should be 0 (model default)")
 	assert.Equal(t, -1, cfg.GPULayers, "default GPULayers should be -1 (all layers)")
 	assert.Equal(t, 0, cfg.ParallelSlots, "default ParallelSlots should be 0 (server default)")
+}
+
+func TestOptions_ApplyLoadOpts_Good_NilOptionIsIgnored(t *testing.T) {
+	cfg := ApplyLoadOpts([]LoadOption{nil})
+	assert.Equal(t, "", cfg.Backend)
+	assert.Equal(t, 0, cfg.ContextLen)
+	assert.Equal(t, -1, cfg.GPULayers)
+	assert.Equal(t, 0, cfg.ParallelSlots)
+	assert.Equal(t, "", cfg.AdapterPath)
 }
 
 // --- WithBackend ---
