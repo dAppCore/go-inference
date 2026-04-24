@@ -2,31 +2,27 @@ package inference
 
 import (
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // --- DefaultGenerateConfig stability ---
 
 func TestOptions_DefaultGenerateConfig_Good_Idempotent(t *testing.T) {
-	// Calling DefaultGenerateConfig twice should yield identical results.
 	firstConfig := DefaultGenerateConfig()
 	secondConfig := DefaultGenerateConfig()
-	assert.Equal(t, firstConfig, secondConfig, "DefaultGenerateConfig should be idempotent")
+	checkEqual(t, firstConfig, secondConfig)
 }
 
 // --- GenerateConfig defaults ---
 
 func TestOptions_DefaultGenerateConfig_Good(t *testing.T) {
 	cfg := DefaultGenerateConfig()
-	assert.Equal(t, 256, cfg.MaxTokens, "default MaxTokens should be 256")
-	assert.Equal(t, float32(0.0), cfg.Temperature, "default Temperature should be 0.0 (greedy)")
-	assert.Equal(t, 0, cfg.TopK, "default TopK should be 0 (disabled)")
-	assert.Equal(t, float32(0.0), cfg.TopP, "default TopP should be 0.0 (disabled)")
-	assert.Nil(t, cfg.StopTokens, "default StopTokens should be nil")
-	assert.Equal(t, float32(1.0), cfg.RepeatPenalty, "default RepeatPenalty should be 1.0 (no penalty)")
-	assert.False(t, cfg.ReturnLogits, "default ReturnLogits should be false")
+	checkEqual(t, 256, cfg.MaxTokens)
+	checkEqual(t, float32(0.0), cfg.Temperature)
+	checkEqual(t, 0, cfg.TopK)
+	checkEqual(t, float32(0.0), cfg.TopP)
+	checkNil(t, cfg.StopTokens)
+	checkEqual(t, float32(1.0), cfg.RepeatPenalty)
+	checkFalse(t, cfg.ReturnLogits)
 }
 
 // --- WithMaxTokens ---
@@ -44,31 +40,29 @@ func TestOptions_WithMaxTokens_Good(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(tt.val)})
-			assert.Equal(t, tt.want, cfg.MaxTokens)
+			checkEqual(t, tt.want, cfg.MaxTokens)
 		})
 	}
 }
 
 func TestOptions_WithMaxTokens_Bad(t *testing.T) {
-	// Zero and negative values are accepted (no validation in options layer).
 	cfg := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(0)})
-	assert.Equal(t, 0, cfg.MaxTokens)
+	checkEqual(t, 0, cfg.MaxTokens)
 
 	cfg = ApplyGenerateOpts([]GenerateOption{WithMaxTokens(-1)})
-	assert.Equal(t, -1, cfg.MaxTokens)
+	checkEqual(t, -1, cfg.MaxTokens)
 }
 
 func TestOptions_WithMaxTokens_Good_OtherFieldsUnchanged(t *testing.T) {
-	// Setting MaxTokens should not affect other fields.
 	cfg := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(512)})
 	def := DefaultGenerateConfig()
-	assert.Equal(t, 512, cfg.MaxTokens)
-	assert.Equal(t, def.Temperature, cfg.Temperature, "Temperature should remain at default")
-	assert.Equal(t, def.TopK, cfg.TopK, "TopK should remain at default")
-	assert.Equal(t, def.TopP, cfg.TopP, "TopP should remain at default")
-	assert.Nil(t, cfg.StopTokens, "StopTokens should remain nil")
-	assert.Equal(t, def.RepeatPenalty, cfg.RepeatPenalty, "RepeatPenalty should remain at default")
-	assert.Equal(t, def.ReturnLogits, cfg.ReturnLogits, "ReturnLogits should remain at default")
+	checkEqual(t, 512, cfg.MaxTokens)
+	checkEqual(t, def.Temperature, cfg.Temperature)
+	checkEqual(t, def.TopK, cfg.TopK)
+	checkEqual(t, def.TopP, cfg.TopP)
+	checkNil(t, cfg.StopTokens)
+	checkEqual(t, def.RepeatPenalty, cfg.RepeatPenalty)
+	checkEqual(t, def.ReturnLogits, cfg.ReturnLogits)
 }
 
 // --- WithTemperature ---
@@ -87,15 +81,14 @@ func TestOptions_WithTemperature_Good(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := ApplyGenerateOpts([]GenerateOption{WithTemperature(tt.val)})
-			assert.InDelta(t, tt.want, cfg.Temperature, 0.0001)
+			checkInDelta(t, tt.want, cfg.Temperature, 0.0001)
 		})
 	}
 }
 
 func TestOptions_WithTemperature_Bad(t *testing.T) {
-	// Negative temperature is accepted at the options layer (no validation).
 	cfg := ApplyGenerateOpts([]GenerateOption{WithTemperature(-0.5)})
-	assert.InDelta(t, -0.5, cfg.Temperature, 0.0001, "negative temperature should be stored as-is")
+	checkInDelta(t, float32(-0.5), cfg.Temperature, 0.0001)
 }
 
 // --- WithTopK ---
@@ -114,15 +107,14 @@ func TestOptions_WithTopK_Good(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := ApplyGenerateOpts([]GenerateOption{WithTopK(tt.val)})
-			assert.Equal(t, tt.want, cfg.TopK)
+			checkEqual(t, tt.want, cfg.TopK)
 		})
 	}
 }
 
 func TestOptions_WithTopK_Bad(t *testing.T) {
-	// Negative TopK is accepted at the options layer (no validation).
 	cfg := ApplyGenerateOpts([]GenerateOption{WithTopK(-1)})
-	assert.Equal(t, -1, cfg.TopK, "negative TopK should be stored as-is")
+	checkEqual(t, -1, cfg.TopK)
 }
 
 // --- WithTopP ---
@@ -141,21 +133,19 @@ func TestOptions_WithTopP_Good(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := ApplyGenerateOpts([]GenerateOption{WithTopP(tt.val)})
-			assert.InDelta(t, tt.want, cfg.TopP, 0.0001)
+			checkInDelta(t, tt.want, cfg.TopP, 0.0001)
 		})
 	}
 }
 
 func TestOptions_WithTopP_Bad(t *testing.T) {
-	// Negative TopP is accepted at the options layer (no validation).
 	cfg := ApplyGenerateOpts([]GenerateOption{WithTopP(-0.1)})
-	assert.InDelta(t, -0.1, cfg.TopP, 0.0001, "negative TopP should be stored as-is")
+	checkInDelta(t, float32(-0.1), cfg.TopP, 0.0001)
 }
 
 func TestOptions_WithTopP_Ugly(t *testing.T) {
-	// Value >1.0 is technically out of range but accepted at the options layer.
 	cfg := ApplyGenerateOpts([]GenerateOption{WithTopP(1.5)})
-	assert.InDelta(t, 1.5, cfg.TopP, 0.0001, "TopP >1.0 should be stored as-is; backend validates")
+	checkInDelta(t, float32(1.5), cfg.TopP, 0.0001)
 }
 
 // --- WithStopTokens ---
@@ -163,29 +153,26 @@ func TestOptions_WithTopP_Ugly(t *testing.T) {
 func TestOptions_WithStopTokens_Good(t *testing.T) {
 	t.Run("single", func(t *testing.T) {
 		cfg := ApplyGenerateOpts([]GenerateOption{WithStopTokens(1)})
-		assert.Equal(t, []int32{1}, cfg.StopTokens)
+		checkEqual(t, []int32{1}, cfg.StopTokens)
 	})
 
 	t.Run("multiple", func(t *testing.T) {
 		cfg := ApplyGenerateOpts([]GenerateOption{WithStopTokens(1, 2, 3)})
-		assert.Equal(t, []int32{1, 2, 3}, cfg.StopTokens)
+		checkEqual(t, []int32{1, 2, 3}, cfg.StopTokens)
 	})
 }
 
 func TestOptions_WithStopTokens_Bad(t *testing.T) {
-	// Empty variadic — Go passes nil to the variadic parameter, so StopTokens
-	// is set to nil (same as default). This is a known Go behaviour.
 	cfg := ApplyGenerateOpts([]GenerateOption{WithStopTokens()})
-	assert.Nil(t, cfg.StopTokens, "empty variadic should set StopTokens to nil")
+	checkNil(t, cfg.StopTokens)
 }
 
 func TestOptions_WithStopTokens_Ugly(t *testing.T) {
-	// Last call wins — stop tokens are replaced, not merged.
 	cfg := ApplyGenerateOpts([]GenerateOption{
 		WithStopTokens(1, 2),
 		WithStopTokens(3, 4, 5),
 	})
-	assert.Equal(t, []int32{3, 4, 5}, cfg.StopTokens, "last WithStopTokens should win")
+	checkEqual(t, []int32{3, 4, 5}, cfg.StopTokens)
 }
 
 func TestOptions_WithStopTokens_Good_CopyIsolation(t *testing.T) {
@@ -193,7 +180,7 @@ func TestOptions_WithStopTokens_Good_CopyIsolation(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithStopTokens(ids...)})
 
 	ids[0] = 42
-	assert.Equal(t, []int32{7, 8, 9}, cfg.StopTokens, "StopTokens should not alias caller input")
+	checkEqual(t, []int32{7, 8, 9}, cfg.StopTokens)
 }
 
 // --- WithRepeatPenalty ---
@@ -212,34 +199,31 @@ func TestOptions_WithRepeatPenalty_Good(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := ApplyGenerateOpts([]GenerateOption{WithRepeatPenalty(tt.val)})
-			assert.InDelta(t, tt.want, cfg.RepeatPenalty, 0.0001)
+			checkInDelta(t, tt.want, cfg.RepeatPenalty, 0.0001)
 		})
 	}
 }
 
 func TestOptions_WithRepeatPenalty_Bad(t *testing.T) {
-	// Negative RepeatPenalty is accepted at the options layer (no validation).
 	cfg := ApplyGenerateOpts([]GenerateOption{WithRepeatPenalty(-1.0)})
-	assert.InDelta(t, -1.0, cfg.RepeatPenalty, 0.0001, "negative RepeatPenalty should be stored as-is")
+	checkInDelta(t, float32(-1.0), cfg.RepeatPenalty, 0.0001)
 }
 
 func TestOptions_WithRepeatPenalty_Ugly(t *testing.T) {
-	// Very high penalty — accepted at options layer; backend decides behaviour.
 	cfg := ApplyGenerateOpts([]GenerateOption{WithRepeatPenalty(10.0)})
-	assert.InDelta(t, 10.0, cfg.RepeatPenalty, 0.0001, "extreme RepeatPenalty should be stored as-is")
+	checkInDelta(t, float32(10.0), cfg.RepeatPenalty, 0.0001)
 }
 
 // --- WithLogits ---
 
 func TestOptions_WithLogits_Good(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithLogits()})
-	assert.True(t, cfg.ReturnLogits)
+	checkTrue(t, cfg.ReturnLogits)
 }
 
 func TestOptions_WithLogits_Good_DefaultIsFalse(t *testing.T) {
-	// Without WithLogits, ReturnLogits stays false.
 	cfg := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(64)})
-	assert.False(t, cfg.ReturnLogits, "ReturnLogits should be false when WithLogits is not applied")
+	checkFalse(t, cfg.ReturnLogits)
 }
 
 // --- ApplyGenerateOpts ---
@@ -248,19 +232,19 @@ func TestOptions_ApplyGenerateOpts_Good(t *testing.T) {
 	t.Run("nil_opts_returns_defaults", func(t *testing.T) {
 		actualConfig := ApplyGenerateOpts(nil)
 		defaultConfig := DefaultGenerateConfig()
-		assert.Equal(t, defaultConfig, actualConfig)
+		checkEqual(t, defaultConfig, actualConfig)
 	})
 
 	t.Run("nil_option_is_ignored", func(t *testing.T) {
 		actualConfig := ApplyGenerateOpts([]GenerateOption{nil})
 		defaultConfig := DefaultGenerateConfig()
-		assert.Equal(t, defaultConfig, actualConfig)
+		checkEqual(t, defaultConfig, actualConfig)
 	})
 
 	t.Run("empty_opts_returns_defaults", func(t *testing.T) {
 		actualConfig := ApplyGenerateOpts([]GenerateOption{})
 		defaultConfig := DefaultGenerateConfig()
-		assert.Equal(t, defaultConfig, actualConfig)
+		checkEqual(t, defaultConfig, actualConfig)
 	})
 
 	t.Run("all_options_combined", func(t *testing.T) {
@@ -273,30 +257,29 @@ func TestOptions_ApplyGenerateOpts_Good(t *testing.T) {
 			WithRepeatPenalty(1.1),
 			WithLogits(),
 		})
-		assert.Equal(t, 128, cfg.MaxTokens)
-		assert.InDelta(t, 0.7, cfg.Temperature, 0.0001)
-		assert.Equal(t, 40, cfg.TopK)
-		assert.InDelta(t, 0.9, cfg.TopP, 0.0001)
-		assert.Equal(t, []int32{1, 2}, cfg.StopTokens)
-		assert.InDelta(t, 1.1, cfg.RepeatPenalty, 0.0001)
-		assert.True(t, cfg.ReturnLogits)
+		checkEqual(t, 128, cfg.MaxTokens)
+		checkInDelta(t, float32(0.7), cfg.Temperature, 0.0001)
+		checkEqual(t, 40, cfg.TopK)
+		checkInDelta(t, float32(0.9), cfg.TopP, 0.0001)
+		checkEqual(t, []int32{1, 2}, cfg.StopTokens)
+		checkInDelta(t, float32(1.1), cfg.RepeatPenalty, 0.0001)
+		checkTrue(t, cfg.ReturnLogits)
 	})
 }
 
 func TestOptions_ApplyGenerateOpts_Good_PartialOptions(t *testing.T) {
-	// Applying only some options should preserve defaults for the rest.
 	cfg := ApplyGenerateOpts([]GenerateOption{
 		WithTemperature(0.8),
 		WithTopK(50),
 	})
 	def := DefaultGenerateConfig()
-	assert.Equal(t, def.MaxTokens, cfg.MaxTokens, "MaxTokens should remain at default")
-	assert.InDelta(t, 0.8, cfg.Temperature, 0.0001)
-	assert.Equal(t, 50, cfg.TopK)
-	assert.Equal(t, def.TopP, cfg.TopP, "TopP should remain at default")
-	assert.Nil(t, cfg.StopTokens, "StopTokens should remain nil")
-	assert.Equal(t, def.RepeatPenalty, cfg.RepeatPenalty, "RepeatPenalty should remain at default")
-	assert.False(t, cfg.ReturnLogits, "ReturnLogits should remain false")
+	checkEqual(t, def.MaxTokens, cfg.MaxTokens)
+	checkInDelta(t, float32(0.8), cfg.Temperature, 0.0001)
+	checkEqual(t, 50, cfg.TopK)
+	checkEqual(t, def.TopP, cfg.TopP)
+	checkNil(t, cfg.StopTokens)
+	checkEqual(t, def.RepeatPenalty, cfg.RepeatPenalty)
+	checkFalse(t, cfg.ReturnLogits)
 }
 
 func TestOptions_ApplyGenerateOpts_Ugly(t *testing.T) {
@@ -306,7 +289,7 @@ func TestOptions_ApplyGenerateOpts_Ugly(t *testing.T) {
 			WithMaxTokens(200),
 			WithMaxTokens(300),
 		})
-		assert.Equal(t, 300, cfg.MaxTokens, "last WithMaxTokens should win")
+		checkEqual(t, 300, cfg.MaxTokens)
 	})
 
 	t.Run("temperature_override", func(t *testing.T) {
@@ -314,7 +297,7 @@ func TestOptions_ApplyGenerateOpts_Ugly(t *testing.T) {
 			WithTemperature(0.5),
 			WithTemperature(1.0),
 		})
-		assert.InDelta(t, 1.0, cfg.Temperature, 0.0001, "last WithTemperature should win")
+		checkInDelta(t, float32(1.0), cfg.Temperature, 0.0001)
 	})
 
 	t.Run("topk_override", func(t *testing.T) {
@@ -322,7 +305,7 @@ func TestOptions_ApplyGenerateOpts_Ugly(t *testing.T) {
 			WithTopK(10),
 			WithTopK(50),
 		})
-		assert.Equal(t, 50, cfg.TopK, "last WithTopK should win")
+		checkEqual(t, 50, cfg.TopK)
 	})
 
 	t.Run("topp_override", func(t *testing.T) {
@@ -330,7 +313,7 @@ func TestOptions_ApplyGenerateOpts_Ugly(t *testing.T) {
 			WithTopP(0.5),
 			WithTopP(0.95),
 		})
-		assert.InDelta(t, 0.95, cfg.TopP, 0.0001, "last WithTopP should win")
+		checkInDelta(t, float32(0.95), cfg.TopP, 0.0001)
 	})
 
 	t.Run("repeat_penalty_override", func(t *testing.T) {
@@ -338,7 +321,7 @@ func TestOptions_ApplyGenerateOpts_Ugly(t *testing.T) {
 			WithRepeatPenalty(1.1),
 			WithRepeatPenalty(1.5),
 		})
-		assert.InDelta(t, 1.5, cfg.RepeatPenalty, 0.0001, "last WithRepeatPenalty should win")
+		checkInDelta(t, float32(1.5), cfg.RepeatPenalty, 0.0001)
 	})
 }
 
@@ -346,19 +329,19 @@ func TestOptions_ApplyGenerateOpts_Ugly(t *testing.T) {
 
 func TestOptions_ApplyLoadOpts_Good_Defaults(t *testing.T) {
 	cfg := ApplyLoadOpts(nil)
-	assert.Equal(t, "", cfg.Backend, "default Backend should be empty (auto-detect)")
-	assert.Equal(t, 0, cfg.ContextLen, "default ContextLen should be 0 (model default)")
-	assert.Equal(t, -1, cfg.GPULayers, "default GPULayers should be -1 (all layers)")
-	assert.Equal(t, 0, cfg.ParallelSlots, "default ParallelSlots should be 0 (server default)")
+	checkEqual(t, "", cfg.Backend)
+	checkEqual(t, 0, cfg.ContextLen)
+	checkEqual(t, -1, cfg.GPULayers)
+	checkEqual(t, 0, cfg.ParallelSlots)
 }
 
 func TestOptions_ApplyLoadOpts_Good_NilOptionIsIgnored(t *testing.T) {
 	cfg := ApplyLoadOpts([]LoadOption{nil})
-	assert.Equal(t, "", cfg.Backend)
-	assert.Equal(t, 0, cfg.ContextLen)
-	assert.Equal(t, -1, cfg.GPULayers)
-	assert.Equal(t, 0, cfg.ParallelSlots)
-	assert.Equal(t, "", cfg.AdapterPath)
+	checkEqual(t, "", cfg.Backend)
+	checkEqual(t, 0, cfg.ContextLen)
+	checkEqual(t, -1, cfg.GPULayers)
+	checkEqual(t, 0, cfg.ParallelSlots)
+	checkEqual(t, "", cfg.AdapterPath)
 }
 
 // --- WithBackend ---
@@ -375,15 +358,14 @@ func TestOptions_WithBackend_Good(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := ApplyLoadOpts([]LoadOption{WithBackend(tt.backend)})
-			assert.Equal(t, tt.backend, cfg.Backend)
+			checkEqual(t, tt.backend, cfg.Backend)
 		})
 	}
 }
 
 func TestOptions_WithBackend_Bad(t *testing.T) {
-	// Empty string is valid at the options layer (means auto-detect).
 	cfg := ApplyLoadOpts([]LoadOption{WithBackend("")})
-	assert.Equal(t, "", cfg.Backend)
+	checkEqual(t, "", cfg.Backend)
 }
 
 // --- WithContextLen ---
@@ -401,7 +383,7 @@ func TestOptions_WithContextLen_Good(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := ApplyLoadOpts([]LoadOption{WithContextLen(tt.val)})
-			assert.Equal(t, tt.want, cfg.ContextLen)
+			checkEqual(t, tt.want, cfg.ContextLen)
 		})
 	}
 }
@@ -421,15 +403,14 @@ func TestOptions_WithGPULayers_Good(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := ApplyLoadOpts([]LoadOption{WithGPULayers(tt.val)})
-			assert.Equal(t, tt.want, cfg.GPULayers)
+			checkEqual(t, tt.want, cfg.GPULayers)
 		})
 	}
 }
 
 func TestOptions_WithGPULayers_Ugly(t *testing.T) {
-	// Override the default -1 with 0
 	cfg := ApplyLoadOpts([]LoadOption{WithGPULayers(0)})
-	assert.Equal(t, 0, cfg.GPULayers, "WithGPULayers(0) should override default -1")
+	checkEqual(t, 0, cfg.GPULayers)
 }
 
 // --- WithParallelSlots ---
@@ -447,7 +428,7 @@ func TestOptions_WithParallelSlots_Good(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := ApplyLoadOpts([]LoadOption{WithParallelSlots(tt.val)})
-			assert.Equal(t, tt.want, cfg.ParallelSlots)
+			checkEqual(t, tt.want, cfg.ParallelSlots)
 		})
 	}
 }
@@ -461,19 +442,18 @@ func TestOptions_ApplyLoadOpts_Good_Combined(t *testing.T) {
 		WithGPULayers(32),
 		WithParallelSlots(2),
 	})
-	assert.Equal(t, "rocm", cfg.Backend)
-	assert.Equal(t, 8192, cfg.ContextLen)
-	assert.Equal(t, 32, cfg.GPULayers)
-	assert.Equal(t, 2, cfg.ParallelSlots)
+	checkEqual(t, "rocm", cfg.Backend)
+	checkEqual(t, 8192, cfg.ContextLen)
+	checkEqual(t, 32, cfg.GPULayers)
+	checkEqual(t, 2, cfg.ParallelSlots)
 }
 
 func TestOptions_ApplyLoadOpts_Good_PartialOptions(t *testing.T) {
-	// Applying only some options should preserve defaults for the rest.
 	cfg := ApplyLoadOpts([]LoadOption{WithContextLen(4096)})
-	assert.Equal(t, "", cfg.Backend, "Backend should remain at default (auto-detect)")
-	assert.Equal(t, 4096, cfg.ContextLen)
-	assert.Equal(t, -1, cfg.GPULayers, "GPULayers should remain at default (-1)")
-	assert.Equal(t, 0, cfg.ParallelSlots, "ParallelSlots should remain at default (0)")
+	checkEqual(t, "", cfg.Backend)
+	checkEqual(t, 4096, cfg.ContextLen)
+	checkEqual(t, -1, cfg.GPULayers)
+	checkEqual(t, 0, cfg.ParallelSlots)
 }
 
 func TestOptions_ApplyLoadOpts_Ugly(t *testing.T) {
@@ -482,13 +462,13 @@ func TestOptions_ApplyLoadOpts_Ugly(t *testing.T) {
 			WithBackend("metal"),
 			WithBackend("rocm"),
 		})
-		assert.Equal(t, "rocm", cfg.Backend, "last WithBackend should win")
+		checkEqual(t, "rocm", cfg.Backend)
 	})
 
 	t.Run("empty_slice_returns_defaults", func(t *testing.T) {
 		cfg := ApplyLoadOpts([]LoadOption{})
-		require.Equal(t, -1, cfg.GPULayers, "empty opts should keep default GPULayers=-1")
-		assert.Equal(t, "", cfg.Backend)
+		checkEqual(t, -1, cfg.GPULayers)
+		checkEqual(t, "", cfg.Backend)
 	})
 
 	t.Run("context_len_override", func(t *testing.T) {
@@ -496,7 +476,7 @@ func TestOptions_ApplyLoadOpts_Ugly(t *testing.T) {
 			WithContextLen(2048),
 			WithContextLen(8192),
 		})
-		assert.Equal(t, 8192, cfg.ContextLen, "last WithContextLen should win")
+		checkEqual(t, 8192, cfg.ContextLen)
 	})
 
 	t.Run("gpu_layers_override", func(t *testing.T) {
@@ -504,7 +484,7 @@ func TestOptions_ApplyLoadOpts_Ugly(t *testing.T) {
 			WithGPULayers(24),
 			WithGPULayers(0),
 		})
-		assert.Equal(t, 0, cfg.GPULayers, "last WithGPULayers should win")
+		checkEqual(t, 0, cfg.GPULayers)
 	})
 
 	t.Run("parallel_slots_override", func(t *testing.T) {
@@ -512,7 +492,7 @@ func TestOptions_ApplyLoadOpts_Ugly(t *testing.T) {
 			WithParallelSlots(4),
 			WithParallelSlots(1),
 		})
-		assert.Equal(t, 1, cfg.ParallelSlots, "last WithParallelSlots should win")
+		checkEqual(t, 1, cfg.ParallelSlots)
 	})
 
 	t.Run("adapter_path_override", func(t *testing.T) {
@@ -520,7 +500,7 @@ func TestOptions_ApplyLoadOpts_Ugly(t *testing.T) {
 			WithAdapterPath("/path/a"),
 			WithAdapterPath("/path/b"),
 		})
-		assert.Equal(t, "/path/b", cfg.AdapterPath, "last WithAdapterPath should win")
+		checkEqual(t, "/path/b", cfg.AdapterPath)
 	})
 }
 
@@ -538,27 +518,26 @@ func TestOptions_WithAdapterPath_Good(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := ApplyLoadOpts([]LoadOption{WithAdapterPath(tt.val)})
-			assert.Equal(t, tt.want, cfg.AdapterPath)
+			checkEqual(t, tt.want, cfg.AdapterPath)
 		})
 	}
 }
 
 func TestOptions_WithAdapterPath_Bad(t *testing.T) {
-	// Empty string is valid at the options layer (means no adapter).
 	cfg := ApplyLoadOpts([]LoadOption{WithAdapterPath("")})
-	assert.Equal(t, "", cfg.AdapterPath)
+	checkEqual(t, "", cfg.AdapterPath)
 }
 
 func TestOptions_WithAdapterPath_Good_DefaultIsEmpty(t *testing.T) {
 	cfg := ApplyLoadOpts(nil)
-	assert.Equal(t, "", cfg.AdapterPath, "default AdapterPath should be empty")
+	checkEqual(t, "", cfg.AdapterPath)
 }
 
 func TestOptions_WithAdapterPath_Good_OtherFieldsUnchanged(t *testing.T) {
 	cfg := ApplyLoadOpts([]LoadOption{WithAdapterPath("/some/path")})
-	assert.Equal(t, "", cfg.Backend, "Backend should remain at default")
-	assert.Equal(t, 0, cfg.ContextLen, "ContextLen should remain at default")
-	assert.Equal(t, -1, cfg.GPULayers, "GPULayers should remain at default")
-	assert.Equal(t, 0, cfg.ParallelSlots, "ParallelSlots should remain at default")
-	assert.Equal(t, "/some/path", cfg.AdapterPath)
+	checkEqual(t, "", cfg.Backend)
+	checkEqual(t, 0, cfg.ContextLen)
+	checkEqual(t, -1, cfg.GPULayers)
+	checkEqual(t, 0, cfg.ParallelSlots)
+	checkEqual(t, "/some/path", cfg.AdapterPath)
 }
