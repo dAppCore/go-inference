@@ -1,8 +1,6 @@
 package inference
 
 import (
-	"strconv"
-
 	"dappco.re/go/core"
 )
 
@@ -88,7 +86,7 @@ func LoadTrainable(path string, opts ...LoadOption) (TrainableModel, error) {
 	tm, ok := model.(TrainableModel)
 	if !ok {
 		model.Close()
-		return nil, core.E("inference.LoadTrainable", "backend "+strconv.Quote(modelType)+" does not support training", nil)
+		return nil, core.E("inference.LoadTrainable", "backend "+core.Sprintf("%q", modelType)+" does not support training", nil)
 	}
 	return tm, nil
 }
