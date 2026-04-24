@@ -2,11 +2,12 @@ package inference
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"dappco.re/go/core"
 )
 
 // --- test helpers for discover ---
@@ -26,7 +27,7 @@ func createModelDir(t *testing.T, dir string, config map[string]any, numSafetens
 	}
 
 	for i := range numSafetensors {
-		fname := filepath.Join(dir, fmt.Sprintf("model-%05d-of-%05d.safetensors", i+1, numSafetensors))
+		fname := filepath.Join(dir, core.Sprintf("model-%05d-of-%05d.safetensors", i+1, numSafetensors))
 		checkNoError(t, os.WriteFile(fname, []byte("fake"), 0o644))
 	}
 }
