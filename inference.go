@@ -65,8 +65,6 @@ import (
 	"iter"
 	"maps"
 	"slices"
-	"strconv"
-	"sync"
 	"time"
 
 	"dappco.re/go/core"
@@ -255,7 +253,7 @@ type Backend interface {
 }
 
 var (
-	backendsMu            sync.RWMutex
+	backendsMu            = core.New().Lock("inference.backends").Mutex
 	backends              = map[string]Backend{}
 	preferredBackendOrder = []string{"metal", "rocm", "llama_cpp"}
 	preferredBackendSet   = map[string]struct{}{
@@ -348,17 +346,17 @@ func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 	if cfg.Backend != "" {
 		b, ok := Get(cfg.Backend)
 		if !ok {
-			return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(cfg.Backend)+" not registered", nil)
+			return nil, core.E("inference.LoadModel", core.Sprintf("backend %q not registered", cfg.Backend), nil)
 		}
 		if !b.Available() {
-			return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(cfg.Backend)+" not available on this hardware", nil)
+			return nil, core.E("inference.LoadModel", core.Sprintf("backend %q not available on this hardware", cfg.Backend), nil)
 		}
 		model, err := b.LoadModel(path, opts...)
 		if err != nil {
-			return nil, core.Wrap(err, "inference.LoadModel", "backend "+strconv.Quote(cfg.Backend)+" failed to load model")
+			return nil, core.Wrap(err, "inference.LoadModel", core.Sprintf("backend %q failed to load model", cfg.Backend))
 		}
 		if model == nil {
-			return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(cfg.Backend)+" returned a nil model", nil)
+			return nil, core.E("inference.LoadModel", core.Sprintf("backend %q returned a nil model", cfg.Backend), nil)
 		}
 		return model, nil
 	}
@@ -368,10 +366,10 @@ func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 	}
 	model, err := b.LoadModel(path, opts...)
 	if err != nil {
-		return nil, core.Wrap(err, "inference.LoadModel", "backend "+strconv.Quote(b.Name())+" failed to load model")
+		return nil, core.Wrap(err, "inference.LoadModel", core.Sprintf("backend %q failed to load model", b.Name()))
 	}
 	if model == nil {
-		return nil, core.E("inference.LoadModel", "backend "+strconv.Quote(b.Name())+" returned a nil model", nil)
+		return nil, core.E("inference.LoadModel", core.Sprintf("backend %q returned a nil model", b.Name()), nil)
 	}
 	return model, nil
 }
