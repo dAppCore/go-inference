@@ -2,8 +2,6 @@ package inference
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"iter"
 	"sync"
 	"testing"
@@ -428,7 +426,7 @@ func TestInference_LoadModel_Bad_BackendLoadError(t *testing.T) {
 	Register(&stubBackend{
 		name:      "broken",
 		available: true,
-		loadErr:   errors.New("GPU out of memory"),
+		loadErr:   core.E("test", "GPU out of memory", nil),
 	})
 
 	_, err := LoadModel("/path/to/model", WithBackend("broken"))
@@ -459,7 +457,7 @@ func TestInference_LoadModel_Ugly_DefaultBackendLoadError(t *testing.T) {
 	Register(&stubBackend{
 		name:      "metal",
 		available: true,
-		loadErr:   errors.New("model not found"),
+		loadErr:   core.E("test", "model not found", nil),
 	})
 
 	_, err := LoadModel("/nonexistent/model")
@@ -585,7 +583,7 @@ func TestInference_BatchResult_Good(t *testing.T) {
 func TestInference_BatchResult_Bad(t *testing.T) {
 	br := BatchResult{
 		Tokens: nil,
-		Err:    errors.New("OOM"),
+		Err:    core.E("test", "OOM", nil),
 	}
 	checkNil(t, br.Tokens)
 	checkError(t, br.Err)
@@ -637,7 +635,7 @@ func TestInference_Registry_Good_ConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			Register(&stubBackend{
-				name:      fmt.Sprintf("backend_%d", id),
+				name:      core.Sprintf("backend_%d", id),
 				available: true,
 			})
 		}(i)
