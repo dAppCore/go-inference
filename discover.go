@@ -2,12 +2,11 @@ package inference
 
 import (
 	"cmp"
-	"encoding/json"
-	iofs "io/fs"
 	"iter"
-	"os"
-	"path/filepath"
+	"reflect"
 	"slices"
+
+	"dappco.re/go/core"
 )
 
 //	for m := range inference.Discover("/Volumes/Data/models") {
@@ -33,35 +32,28 @@ type DiscoveredModel struct {
 //	}
 func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	return func(yield func(DiscoveredModel) bool) {
-		absBase, err := filepath.Abs(baseDir)
-		if err != nil {
-			return
-		}
-		discoverDir(absBase, yield)
+		c := core.New()
+		discoverDir(c.Fs(), absolutePath(baseDir), yield)
 	}
 }
 
-func discoverDir(dir string, yield func(DiscoveredModel) bool) bool {
-	if m, ok := probeModelDir(dir); ok {
+func discoverDir(fsys *core.Fs, dir string, yield func(DiscoveredModel) bool) bool {
+	if m, ok := probeModelDir(fsys, dir); ok {
 		if !yield(m) {
 			return false
 		}
 	}
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	entries, ok := readDir(fsys, dir)
+	if !ok {
 		return true
 	}
-
-	slices.SortFunc(entries, func(a, b iofs.DirEntry) int {
-		return cmp.Compare(a.Name(), b.Name())
-	})
 
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
-		if !discoverDir(filepath.Join(dir, entry.Name()), yield) {
+		if !discoverDir(fsys, joinPath(dir, entry.Name()), yield) {
 			return false
 		}
 	}
@@ -70,21 +62,20 @@ func discoverDir(dir string, yield func(DiscoveredModel) bool) bool {
 }
 
 // Accepts directories that contain config.json and at least one .safetensors file.
-func probeModelDir(dir string) (DiscoveredModel, bool) {
-	configPath := filepath.Join(dir, "config.json")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
+func probeModelDir(fsys *core.Fs, dir string) (DiscoveredModel, bool) {
+	config := fsys.Read(joinPath(dir, "config.json"))
+	if !config.OK {
 		return DiscoveredModel{}, false
 	}
 
-	matches, _ := filepath.Glob(filepath.Join(dir, "*.safetensors"))
-	if len(matches) == 0 {
+	numFiles, ok := countSafetensors(fsys, dir)
+	if !ok || numFiles == 0 {
 		return DiscoveredModel{}, false
 	}
 
 	model := DiscoveredModel{
 		Path:     absolutePath(dir),
-		NumFiles: len(matches),
+		NumFiles: numFiles,
 	}
 
 	var probe struct {
@@ -98,7 +89,7 @@ func probeModelDir(dir string) (DiscoveredModel, bool) {
 			GroupSize int `json:"group_size"`
 		} `json:"quantization_config"`
 	}
-	if err := json.Unmarshal(data, &probe); err == nil {
+	if data, ok := config.Value.(string); ok && core.JSONUnmarshalString(data, &probe).OK {
 		model.ModelType = probe.ModelType
 		if probe.Quantization != nil {
 			model.QuantBits = probe.Quantization.Bits
@@ -112,10 +103,84 @@ func probeModelDir(dir string) (DiscoveredModel, bool) {
 	return model, true
 }
 
-func absolutePath(dir string) string {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return dir
+type dirEntry interface {
+	Name() string
+	IsDir() bool
+}
+
+func readDir(fsys *core.Fs, dir string) ([]dirEntry, bool) {
+	result := fsys.List(dir)
+	if !result.OK {
+		return nil, false
 	}
-	return abs
+
+	entries, ok := dirEntries(result.Value)
+	if !ok {
+		return nil, false
+	}
+
+	slices.SortFunc(entries, func(a, b dirEntry) int {
+		return cmp.Compare(a.Name(), b.Name())
+	})
+	return entries, true
+}
+
+func dirEntries(value any) ([]dirEntry, bool) {
+	// core.Fs.List returns standard directory entries; adapt them locally.
+	slice := reflect.ValueOf(value)
+	if !slice.IsValid() || slice.Kind() != reflect.Slice {
+		return nil, false
+	}
+
+	entries := make([]dirEntry, 0, slice.Len())
+	for i := range slice.Len() {
+		entry, ok := slice.Index(i).Interface().(dirEntry)
+		if !ok {
+			return nil, false
+		}
+		entries = append(entries, entry)
+	}
+	return entries, true
+}
+
+func countSafetensors(fsys *core.Fs, dir string) (int, bool) {
+	entries, ok := readDir(fsys, dir)
+	if !ok {
+		return 0, false
+	}
+
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && core.HasSuffix(entry.Name(), ".safetensors") {
+			count++
+		}
+	}
+	return count, true
+}
+
+func absolutePath(dir string) string {
+	if core.PathIsAbs(dir) {
+		return cleanPath(dir)
+	}
+
+	cwd := core.Env("DIR_CWD")
+	if cwd == "" {
+		return cleanPath(dir)
+	}
+	return joinPath(cwd, dir)
+}
+
+func joinPath(parts ...string) string {
+	return core.CleanPath(core.Join(pathSeparator(), parts...), pathSeparator())
+}
+
+func cleanPath(path string) string {
+	return core.CleanPath(path, pathSeparator())
+}
+
+func pathSeparator() string {
+	if separator := core.Env("DS"); separator != "" {
+		return separator
+	}
+	return "/"
 }
