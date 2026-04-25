@@ -3,7 +3,7 @@ package inference
 import (
 	"context"
 	"iter"
-	"sync"
+	"sync" // Note: test-only
 	"testing"
 
 	"dappco.re/go/core"
