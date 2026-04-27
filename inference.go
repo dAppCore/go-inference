@@ -65,7 +65,6 @@ import (
 	"iter"
 	"maps"
 	"slices"
-	"sync"
 	"time"
 
 	"dappco.re/go/core"
@@ -161,7 +160,7 @@ type AttentionSnapshot struct {
 
 // if snap.HasQueries() { processQK(snap.Queries, snap.Keys) }
 func (s *AttentionSnapshot) HasQueries() bool {
-	return s.Queries != nil && len(s.Queries) > 0
+	return s != nil && s.Queries != nil && len(s.Queries) > 0
 }
 
 //	if inspector, ok := model.(inference.AttentionInspector); ok {
@@ -254,7 +253,7 @@ type Backend interface {
 }
 
 var (
-	backendsMu            sync.RWMutex
+	backendsMu            = core.New().Lock("inference.backends").Mutex
 	backends              = map[string]Backend{}
 	preferredBackendOrder = []string{"metal", "rocm", "llama_cpp"}
 	preferredBackendSet   = map[string]struct{}{
@@ -275,6 +274,9 @@ func snapshotBackends() map[string]Backend {
 //
 //	func init() { inference.Register(metal.NewBackend()) }
 func Register(b Backend) {
+	if b == nil {
+		return
+	}
 	backendsMu.Lock()
 	defer backendsMu.Unlock()
 	backends[b.Name()] = b
@@ -315,6 +317,9 @@ func All() iter.Seq2[string, Backend] {
 //	b, err := inference.Default() // returns metal on Apple Silicon if available
 func Default() (Backend, error) {
 	snap := snapshotBackends()
+	if len(snap) == 0 {
+		return nil, core.E("inference.Default", "no backends registered", nil)
+	}
 
 	// Platform preference order
 	for _, name := range preferredBackendOrder {
@@ -331,7 +336,7 @@ func Default() (Backend, error) {
 			return backend, nil
 		}
 	}
-	return nil, core.NewError("inference: no backends registered (import a backend package)")
+	return nil, core.E("inference.Default", "no backends available", nil)
 }
 
 // m, err := inference.LoadModel("/models/gemma3-1b")
@@ -341,16 +346,30 @@ func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
 	if cfg.Backend != "" {
 		b, ok := Get(cfg.Backend)
 		if !ok {
-			return nil, core.NewError(core.Sprintf("inference: backend %q not registered", cfg.Backend))
+			return nil, core.E("inference.LoadModel", core.Sprintf("backend %q not registered", cfg.Backend), nil)
 		}
 		if !b.Available() {
-			return nil, core.NewError(core.Sprintf("inference: backend %q not available on this hardware", cfg.Backend))
+			return nil, core.E("inference.LoadModel", core.Sprintf("backend %q not available on this hardware", cfg.Backend), nil)
 		}
-		return b.LoadModel(path, opts...)
+		model, err := b.LoadModel(path, opts...)
+		if err != nil {
+			return nil, core.Wrap(err, "inference.LoadModel", core.Sprintf("backend %q failed to load model", cfg.Backend))
+		}
+		if model == nil {
+			return nil, core.E("inference.LoadModel", core.Sprintf("backend %q returned a nil model", cfg.Backend), nil)
+		}
+		return model, nil
 	}
 	b, err := Default()
 	if err != nil {
 		return nil, err
 	}
-	return b.LoadModel(path, opts...)
+	model, err := b.LoadModel(path, opts...)
+	if err != nil {
+		return nil, core.Wrap(err, "inference.LoadModel", core.Sprintf("backend %q failed to load model", b.Name()))
+	}
+	if model == nil {
+		return nil, core.E("inference.LoadModel", core.Sprintf("backend %q returned a nil model", b.Name()), nil)
+	}
+	return model, nil
 }

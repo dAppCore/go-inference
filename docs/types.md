@@ -5,7 +5,7 @@ description: Token, Message, config structs, functional options, and all support
 
 # Types
 
-All types are defined in the `inference` package (`dappco.re/go/core/inference`). There are no sub-packages.
+All types are defined in the `inference` package (`dappco.re/go/inference`). There are no sub-packages.
 
 ## Core value types
 
@@ -182,6 +182,7 @@ Defaults (from `DefaultGenerateConfig()`):
 |-------|---------|-------|
 | `MaxTokens` | 256 | Maximum tokens to generate |
 | `Temperature` | 0.0 | Greedy decoding |
+| `RepeatPenalty` | 1.0 | No repetition penalty |
 | All others | zero value | Disabled |
 
 ### GenerateOption functions

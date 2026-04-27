@@ -4,7 +4,7 @@
 
 `go-inference` is the shared interface contract for text generation backends in the Core Go ecosystem. It defines the types that GPU-specific backends implement and consumers depend on, without itself importing any backend or consumer code.
 
-Module path: `dappco.re/go/core/inference`
+Module path: `dappco.re/go/inference`
 
 ## Design Philosophy
 
@@ -297,7 +297,7 @@ type GenerateConfig struct {
 }
 ```
 
-Defaults (from `DefaultGenerateConfig()`): `MaxTokens=256`, `Temperature=0.0` (greedy), all others zero/disabled.
+Defaults (from `DefaultGenerateConfig()`): `MaxTokens=256`, `Temperature=0.0` (greedy), `RepeatPenalty=1.0` (no penalty), all others zero/disabled.
 
 `ApplyGenerateOpts(opts []GenerateOption) GenerateConfig` is called by backends at the start of each inference operation. Options are applied in order; the last write wins for scalar fields.
 

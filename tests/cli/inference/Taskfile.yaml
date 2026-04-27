@@ -1,0 +1,25 @@
+version: "3"
+
+tasks:
+  default:
+    deps: [build, test, vet]
+
+  build:
+    dir: ../../..
+    cmds:
+      - go build ./...
+
+  test:
+    dir: ../../..
+    cmds:
+      - go test -count=1 -race ./...
+
+  test-discover:
+    dir: ../../..
+    cmds:
+      - go test -count=1 -race -run '^TestDiscover_Good_SingleModel$' ./...
+
+  vet:
+    dir: ../../..
+    cmds:
+      - go vet ./...
