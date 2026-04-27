@@ -69,7 +69,7 @@ Backends call `inference.Register()` from an `init()` function guarded by build 
 
 package metal
 
-import "dappco.re/go/core/inference"
+import "dappco.re/go/inference"
 
 func init() {
     inference.Register(NewBackend())
@@ -82,7 +82,7 @@ func init() {
 
 package rocm
 
-import "dappco.re/go/core/inference"
+import "dappco.re/go/inference"
 
 func init() {
     inference.Register(NewBackend())
@@ -93,8 +93,8 @@ The consumer imports the backend package with a blank import to trigger `init()`
 
 ```go
 import (
-    "dappco.re/go/core/inference"
-    _ "dappco.re/go/core/mlx/metal"  // registers "metal" backend
+    "dappco.re/go/inference"
+    _ "forge.lthn.ai/core/go-mlx/metal"  // registers "metal" backend
 )
 ```
 
@@ -111,7 +111,7 @@ To add a new inference backend (e.g. for a new GPU runtime or inference server),
 ```go
 package mybackend
 
-import "dappco.re/go/core/inference"
+import "dappco.re/go/inference"
 
 type myBackend struct{}
 
@@ -182,7 +182,7 @@ Create a registration file with appropriate build constraints:
 
 package mybackend
 
-import "dappco.re/go/core/inference"
+import "dappco.re/go/inference"
 
 func init() {
     inference.Register(NewBackend())

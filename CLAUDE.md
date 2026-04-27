@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Shared inference interfaces for the Core Go ecosystem. Module: `dappco.re/go/core/inference`
+Shared inference interfaces for the Core Go ecosystem. Module: `dappco.re/go/inference`
 
 Zero external dependencies (stdlib only). Compiles on all platforms. See `docs/architecture.md` for design rationale.
 

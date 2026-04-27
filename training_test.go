@@ -1,27 +1,24 @@
 package inference
 
 import (
+	"errors"
 	"testing"
-
-	"dappco.re/go/core"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // --- DefaultLoRAConfig ---
 
 func TestTraining_DefaultLoRAConfig_Good(t *testing.T) {
 	cfg := DefaultLoRAConfig()
-	assert.Equal(t, 8, cfg.Rank, "default Rank should be 8")
-	assert.InDelta(t, float32(16), cfg.Alpha, 0.0001, "default Alpha should be 16")
-	assert.Equal(t, []string{"q_proj", "v_proj"}, cfg.TargetKeys, "default TargetKeys should be q_proj and v_proj")
-	assert.False(t, cfg.BFloat16, "default BFloat16 should be false")
+	checkEqual(t, 8, cfg.Rank)
+	checkInDelta(t, float32(16), cfg.Alpha, 0.0001)
+	checkEqual(t, []string{"q_proj", "v_proj"}, cfg.TargetKeys)
+	checkFalse(t, cfg.BFloat16)
 }
 
 func TestTraining_DefaultLoRAConfig_Good_Idempotent(t *testing.T) {
 	firstConfig := DefaultLoRAConfig()
 	secondConfig := DefaultLoRAConfig()
-	assert.Equal(t, firstConfig, secondConfig, "DefaultLoRAConfig should be idempotent")
+	checkEqual(t, firstConfig, secondConfig)
 }
 
 // --- LoadTrainable ---
@@ -52,18 +49,18 @@ func TestTraining_LoadTrainable_Good(t *testing.T) {
 	Register(&trainableBackend{name: "metal", available: true})
 
 	tm, err := LoadTrainable("/path/to/model")
-	require.NoError(t, err)
-	require.NotNil(t, tm)
-	assert.Equal(t, 26, tm.NumLayers())
-	require.NoError(t, tm.Close())
+	checkNoError(t, err)
+	checkNotNil(t, tm)
+	checkEqual(t, 26, tm.NumLayers())
+	checkNoError(t, tm.Close())
 }
 
 func TestTraining_LoadTrainable_Bad_NoBackends(t *testing.T) {
 	resetBackends(t)
 
 	_, err := LoadTrainable("/path/to/model")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no backends registered")
+	checkError(t, err)
+	checkContains(t, err.Error(), "no backends registered")
 }
 
 func TestTraining_LoadTrainable_Bad_NotTrainable(t *testing.T) {
@@ -72,8 +69,8 @@ func TestTraining_LoadTrainable_Bad_NotTrainable(t *testing.T) {
 	Register(&stubBackend{name: "metal", available: true})
 
 	_, err := LoadTrainable("/path/to/model")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not support training")
+	checkError(t, err)
+	checkContains(t, err.Error(), "does not support training")
 }
 
 func TestTraining_LoadTrainable_Bad_LoadError(t *testing.T) {
@@ -82,12 +79,22 @@ func TestTraining_LoadTrainable_Bad_LoadError(t *testing.T) {
 	Register(&stubBackend{
 		name:      "broken",
 		available: true,
-		loadErr:   core.NewError("GPU out of memory"),
+		loadErr:   errors.New("GPU out of memory"),
 	})
 
 	_, err := LoadTrainable("/path/to/model", WithBackend("broken"))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "GPU out of memory")
+	checkError(t, err)
+	checkContains(t, err.Error(), "GPU out of memory")
+}
+
+func TestTraining_LoadTrainable_Bad_NilModel(t *testing.T) {
+	resetBackends(t)
+
+	Register(&stubBackend{name: "metal", available: true, nilModel: true})
+
+	_, err := LoadTrainable("/path/to/model")
+	checkError(t, err)
+	checkContains(t, err.Error(), "returned a nil model")
 }
 
 func TestTraining_LoadTrainable_Good_ExplicitBackend(t *testing.T) {
@@ -96,9 +103,9 @@ func TestTraining_LoadTrainable_Good_ExplicitBackend(t *testing.T) {
 	Register(&trainableBackend{name: "rocm", available: true})
 
 	tm, err := LoadTrainable("/path/to/model", WithBackend("rocm"))
-	require.NoError(t, err)
-	require.NotNil(t, tm)
-	require.NoError(t, tm.Close())
+	checkNoError(t, err)
+	checkNotNil(t, tm)
+	checkNoError(t, tm.Close())
 }
 
 // --- TrainableModel interface compliance ---
@@ -112,68 +119,57 @@ func TestTraining_TrainableModel_Good_InterfaceCompliance(t *testing.T) {
 func TestTraining_LoadTrainable_Ugly_SkipsUnavailableBackend(t *testing.T) {
 	resetBackends(t)
 
-	// Preferred backend registered but unavailable; a fallback is available.
-	// Default() should skip the unavailable one and return the fallback.
 	Register(&trainableBackend{name: "unavailable", available: false})
 	Register(&trainableBackend{name: "fallback", available: true})
 
-	// LoadTrainable without explicit backend — Default() picks the available fallback.
 	tm, err := LoadTrainable("/path/to/model")
-	require.NoError(t, err)
-	require.NotNil(t, tm)
-	require.NoError(t, tm.Close())
+	checkNoError(t, err)
+	checkNotNil(t, tm)
+	checkNoError(t, tm.Close())
 }
 
 func TestTraining_DefaultLoRAConfig_Good_TargetKeysIndependent(t *testing.T) {
-	// Mutating the returned TargetKeys should not affect a subsequent call.
 	cfg1 := DefaultLoRAConfig()
 	cfg1.TargetKeys = append(cfg1.TargetKeys, "o_proj")
 
 	cfg2 := DefaultLoRAConfig()
-	assert.Equal(t, []string{"q_proj", "v_proj"}, cfg2.TargetKeys,
-		"DefaultLoRAConfig should return independent TargetKeys slices")
-	assert.Len(t, cfg1.TargetKeys, 3, "mutated copy should have 3 keys")
+	checkEqual(t, []string{"q_proj", "v_proj"}, cfg2.TargetKeys)
+	checkLen(t, cfg1.TargetKeys, 3)
 }
 
 // --- LoRAConfig Bad: zero/negative values are accepted at the config layer ---
 
 func TestTraining_LoRAConfig_Bad_ZeroRank(t *testing.T) {
-	// Rank=0 is accepted at the config layer — backends validate at load time.
 	cfg := LoRAConfig{Rank: 0, Alpha: 16, TargetKeys: []string{"q_proj"}}
-	assert.Equal(t, 0, cfg.Rank, "zero Rank should be stored as-is")
+	checkEqual(t, 0, cfg.Rank)
 }
 
 func TestTraining_LoRAConfig_Bad_NegativeRank(t *testing.T) {
-	// Negative Rank is accepted at the config layer — backends validate at load time.
 	cfg := LoRAConfig{Rank: -8, Alpha: 16, TargetKeys: []string{"q_proj"}}
-	assert.Equal(t, -8, cfg.Rank, "negative Rank should be stored as-is")
+	checkEqual(t, -8, cfg.Rank)
 }
 
 func TestTraining_LoRAConfig_Bad_ZeroAlpha(t *testing.T) {
-	// Alpha=0 disables the adapter scaling — accepted at config layer.
 	cfg := LoRAConfig{Rank: 8, Alpha: 0, TargetKeys: []string{"q_proj"}}
-	assert.InDelta(t, float32(0), cfg.Alpha, 0.0001, "zero Alpha should be stored as-is")
+	checkInDelta(t, float32(0), cfg.Alpha, 0.0001)
 }
 
 // --- LoRAConfig Ugly: atypical but valid configurations ---
 
 func TestTraining_LoRAConfig_Ugly_EmptyTargetKeys(t *testing.T) {
-	// Empty TargetKeys is accepted at the config layer — backends decide what to do.
 	cfg := LoRAConfig{Rank: 8, Alpha: 16, TargetKeys: []string{}}
-	assert.Empty(t, cfg.TargetKeys, "empty TargetKeys should be stored as-is")
+	checkEmpty(t, cfg.TargetKeys)
 }
 
 func TestTraining_LoRAConfig_Ugly_NilTargetKeys(t *testing.T) {
-	// Nil TargetKeys (zero value) is accepted at the config layer.
 	cfg := LoRAConfig{Rank: 8, Alpha: 16}
-	assert.Nil(t, cfg.TargetKeys, "nil TargetKeys should remain nil (zero value)")
+	checkNil(t, cfg.TargetKeys)
 }
 
 func TestTraining_LoRAConfig_Ugly_BFloat16WithHighRank(t *testing.T) {
-	// BFloat16=true with a high rank — valid mixed-precision config.
 	cfg := LoRAConfig{Rank: 64, Alpha: 128, TargetKeys: []string{"q_proj", "k_proj", "v_proj"}, BFloat16: true}
-	assert.Equal(t, 64, cfg.Rank)
-	assert.InDelta(t, float32(128), cfg.Alpha, 0.0001)
-	assert.True(t, cfg.BFloat16, "BFloat16 should be stored as-is")
-	assert.Len(t, cfg.TargetKeys, 3)
+	checkEqual(t, 64, cfg.Rank)
+	checkInDelta(t, float32(128), cfg.Alpha, 0.0001)
+	checkTrue(t, cfg.BFloat16)
+	checkLen(t, cfg.TargetKeys, 3)
 }

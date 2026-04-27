@@ -1,5 +1,7 @@
 package inference
 
+import "slices"
+
 // inference.GenerateConfig{MaxTokens: 256, Temperature: 0.7, TopK: 40}
 // inference.GenerateConfig{MaxTokens: 64, StopTokens: []int32{2}, RepeatPenalty: 1.1}
 type GenerateConfig struct {
@@ -12,11 +14,12 @@ type GenerateConfig struct {
 	ReturnLogits  bool // Return raw logits in ClassifyResult (default false)
 }
 
-// cfg := inference.DefaultGenerateConfig() // MaxTokens=256, Temperature=0.0 (greedy)
+// cfg := inference.DefaultGenerateConfig() // MaxTokens=256, Temperature=0.0 (greedy), RepeatPenalty=1.0
 func DefaultGenerateConfig() GenerateConfig {
 	return GenerateConfig{
-		MaxTokens:   256,
-		Temperature: 0.0, // greedy
+		MaxTokens:     256,
+		Temperature:   0.0, // greedy
+		RepeatPenalty: 1.0, // no penalty
 	}
 }
 
@@ -61,10 +64,10 @@ func WithTopP(p float32) GenerateOption {
 //	inference.WithStopTokens(2)       // EOS token only
 //	inference.WithStopTokens(2, 1, 0) // EOS + pad tokens
 func WithStopTokens(ids ...int32) GenerateOption {
-	return func(c *GenerateConfig) { c.StopTokens = ids }
+	return func(c *GenerateConfig) { c.StopTokens = slices.Clone(ids) }
 }
 
-// WithRepeatPenalty penalises repeated tokens. 0 = disabled, 1.0 = no penalty.
+// WithRepeatPenalty penalises repeated tokens. 1.0 = no penalty.
 //
 //	inference.WithRepeatPenalty(1.1) // mild repetition suppression
 //	inference.WithRepeatPenalty(1.5) // strong repetition suppression
@@ -83,7 +86,9 @@ func WithLogits() GenerateOption {
 func ApplyGenerateOpts(opts []GenerateOption) GenerateConfig {
 	cfg := DefaultGenerateConfig()
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	return cfg
 }
@@ -150,7 +155,9 @@ func ApplyLoadOpts(opts []LoadOption) LoadConfig {
 		GPULayers: -1, // default: full GPU offload
 	}
 	for _, opt := range opts {
-		opt(&cfg)
+		if opt != nil {
+			opt(&cfg)
+		}
 	}
 	return cfg
 }
