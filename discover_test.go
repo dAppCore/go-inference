@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"dappco.re/go/core"
+	core "dappco.re/go"
 )
 
 // --- test helpers for discover ---
@@ -144,6 +144,8 @@ func TestDiscover_Good_EmptyDir(t *testing.T) {
 func TestDiscover_Bad_NonexistentDir(t *testing.T) {
 	models := slices.Collect(Discover("/nonexistent/path/that/should/not/exist"))
 	checkEmpty(t, models)
+	checkLen(t, models, 0)
+	checkNil(t, models)
 }
 
 func TestDiscover_Bad_NoSafetensors(t *testing.T) {
@@ -313,7 +315,7 @@ func TestDiscover_Good_QuantizationConfigFallback(t *testing.T) {
 	checkEqual(t, 128, models[0].QuantGroup)
 }
 
-func TestDiscover_Good_RecursiveNestedModels(t *testing.T) {
+func TestDiscover_Good_RecursiveDeepModels(t *testing.T) {
 	base := t.TempDir()
 	createModelDir(t, core.Path(base, "models"), map[string]any{
 		"model_type": "parent",
@@ -329,7 +331,7 @@ func TestDiscover_Good_RecursiveNestedModels(t *testing.T) {
 	}, 1)
 
 	models := slices.Collect(Discover(base))
-	require.Len(t, models, 4)
+	checkLen(t, models, 4)
 
 	gotParent := false
 	gotNested := false
@@ -341,8 +343,8 @@ func TestDiscover_Good_RecursiveNestedModels(t *testing.T) {
 			gotNested = true
 		}
 	}
-	assert.True(t, gotParent, "nested model directories should be discovered")
-	assert.True(t, gotNested, "deeply nested model directories should be discovered")
+	checkTrue(t, gotParent)
+	checkTrue(t, gotNested)
 }
 
 func TestDiscover_Good_RecursiveEarlyBreak(t *testing.T) {
@@ -359,5 +361,5 @@ func TestDiscover_Good_RecursiveEarlyBreak(t *testing.T) {
 		count++
 		break
 	}
-	assert.Equal(t, 1, count, "breaking from Discover should stop further traversal immediately")
+	checkEqual(t, 1, count)
 }
