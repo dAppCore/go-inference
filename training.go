@@ -1,7 +1,7 @@
 package inference
 
 import (
-	"dappco.re/go/core"
+	core "dappco.re/go"
 )
 
 // inference.LoRAConfig{Rank: 16, Alpha: 32, TargetKeys: []string{"q_proj", "k_proj", "v_proj"}}

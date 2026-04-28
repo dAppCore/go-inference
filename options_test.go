@@ -89,6 +89,8 @@ func TestOptions_WithTemperature_Good(t *testing.T) {
 func TestOptions_WithTemperature_Bad(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithTemperature(-0.5)})
 	checkInDelta(t, float32(-0.5), cfg.Temperature, 0.0001)
+	checkEqual(t, DefaultGenerateConfig().MaxTokens, cfg.MaxTokens)
+	checkFalse(t, cfg.ReturnLogits)
 }
 
 // --- WithTopK ---
@@ -115,6 +117,8 @@ func TestOptions_WithTopK_Good(t *testing.T) {
 func TestOptions_WithTopK_Bad(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithTopK(-1)})
 	checkEqual(t, -1, cfg.TopK)
+	checkEqual(t, DefaultGenerateConfig().MaxTokens, cfg.MaxTokens)
+	checkFalse(t, cfg.ReturnLogits)
 }
 
 // --- WithTopP ---
@@ -141,11 +145,15 @@ func TestOptions_WithTopP_Good(t *testing.T) {
 func TestOptions_WithTopP_Bad(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithTopP(-0.1)})
 	checkInDelta(t, float32(-0.1), cfg.TopP, 0.0001)
+	checkEqual(t, DefaultGenerateConfig().MaxTokens, cfg.MaxTokens)
+	checkNil(t, cfg.StopTokens)
 }
 
 func TestOptions_WithTopP_Ugly(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithTopP(1.5)})
 	checkInDelta(t, float32(1.5), cfg.TopP, 0.0001)
+	checkEqual(t, DefaultGenerateConfig().MaxTokens, cfg.MaxTokens)
+	checkFalse(t, cfg.ReturnLogits)
 }
 
 // --- WithStopTokens ---
@@ -165,6 +173,8 @@ func TestOptions_WithStopTokens_Good(t *testing.T) {
 func TestOptions_WithStopTokens_Bad(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithStopTokens()})
 	checkNil(t, cfg.StopTokens)
+	checkEqual(t, DefaultGenerateConfig().MaxTokens, cfg.MaxTokens)
+	checkEqual(t, DefaultGenerateConfig().RepeatPenalty, cfg.RepeatPenalty)
 }
 
 func TestOptions_WithStopTokens_Ugly(t *testing.T) {
@@ -207,11 +217,15 @@ func TestOptions_WithRepeatPenalty_Good(t *testing.T) {
 func TestOptions_WithRepeatPenalty_Bad(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithRepeatPenalty(-1.0)})
 	checkInDelta(t, float32(-1.0), cfg.RepeatPenalty, 0.0001)
+	checkEqual(t, DefaultGenerateConfig().MaxTokens, cfg.MaxTokens)
+	checkNil(t, cfg.StopTokens)
 }
 
 func TestOptions_WithRepeatPenalty_Ugly(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithRepeatPenalty(10.0)})
 	checkInDelta(t, float32(10.0), cfg.RepeatPenalty, 0.0001)
+	checkEqual(t, DefaultGenerateConfig().Temperature, cfg.Temperature)
+	checkFalse(t, cfg.ReturnLogits)
 }
 
 // --- WithLogits ---
@@ -219,11 +233,15 @@ func TestOptions_WithRepeatPenalty_Ugly(t *testing.T) {
 func TestOptions_WithLogits_Good(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithLogits()})
 	checkTrue(t, cfg.ReturnLogits)
+	checkEqual(t, DefaultGenerateConfig().MaxTokens, cfg.MaxTokens)
+	checkEqual(t, DefaultGenerateConfig().RepeatPenalty, cfg.RepeatPenalty)
 }
 
 func TestOptions_WithLogits_Good_DefaultIsFalse(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(64)})
 	checkFalse(t, cfg.ReturnLogits)
+	checkEqual(t, 64, cfg.MaxTokens)
+	checkEqual(t, DefaultGenerateConfig().RepeatPenalty, cfg.RepeatPenalty)
 }
 
 // --- ApplyGenerateOpts ---
@@ -366,6 +384,8 @@ func TestOptions_WithBackend_Good(t *testing.T) {
 func TestOptions_WithBackend_Bad(t *testing.T) {
 	cfg := ApplyLoadOpts([]LoadOption{WithBackend("")})
 	checkEqual(t, "", cfg.Backend)
+	checkEqual(t, -1, cfg.GPULayers)
+	checkEqual(t, 0, cfg.ContextLen)
 }
 
 // --- WithContextLen ---
@@ -411,6 +431,8 @@ func TestOptions_WithGPULayers_Good(t *testing.T) {
 func TestOptions_WithGPULayers_Ugly(t *testing.T) {
 	cfg := ApplyLoadOpts([]LoadOption{WithGPULayers(0)})
 	checkEqual(t, 0, cfg.GPULayers)
+	checkEqual(t, "", cfg.Backend)
+	checkEqual(t, 0, cfg.ContextLen)
 }
 
 // --- WithParallelSlots ---
@@ -526,11 +548,15 @@ func TestOptions_WithAdapterPath_Good(t *testing.T) {
 func TestOptions_WithAdapterPath_Bad(t *testing.T) {
 	cfg := ApplyLoadOpts([]LoadOption{WithAdapterPath("")})
 	checkEqual(t, "", cfg.AdapterPath)
+	checkEqual(t, -1, cfg.GPULayers)
+	checkEqual(t, 0, cfg.ContextLen)
 }
 
 func TestOptions_WithAdapterPath_Good_DefaultIsEmpty(t *testing.T) {
 	cfg := ApplyLoadOpts(nil)
 	checkEqual(t, "", cfg.AdapterPath)
+	checkEqual(t, "", cfg.Backend)
+	checkEqual(t, -1, cfg.GPULayers)
 }
 
 func TestOptions_WithAdapterPath_Good_OtherFieldsUnchanged(t *testing.T) {

@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"slices"
 
-	"dappco.re/go/core"
+	core "dappco.re/go"
 )
 
 //	for m := range inference.Discover("/Volumes/Data/models") {

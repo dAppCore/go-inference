@@ -112,6 +112,9 @@ func TestTraining_LoadTrainable_Good_ExplicitBackend(t *testing.T) {
 
 func TestTraining_TrainableModel_Good_InterfaceCompliance(t *testing.T) {
 	var _ TrainableModel = (*stubTrainableModel)(nil)
+	model := &stubTrainableModel{}
+	checkEqual(t, 26, model.NumLayers())
+	checkNil(t, model.ApplyLoRA(DefaultLoRAConfig()))
 }
 
 // --- Ugly: edge cases ---
@@ -142,16 +145,22 @@ func TestTraining_DefaultLoRAConfig_Good_TargetKeysIndependent(t *testing.T) {
 func TestTraining_LoRAConfig_Bad_ZeroRank(t *testing.T) {
 	cfg := LoRAConfig{Rank: 0, Alpha: 16, TargetKeys: []string{"q_proj"}}
 	checkEqual(t, 0, cfg.Rank)
+	checkInDelta(t, float32(16), cfg.Alpha, 0.0001)
+	checkEqual(t, []string{"q_proj"}, cfg.TargetKeys)
 }
 
 func TestTraining_LoRAConfig_Bad_NegativeRank(t *testing.T) {
 	cfg := LoRAConfig{Rank: -8, Alpha: 16, TargetKeys: []string{"q_proj"}}
 	checkEqual(t, -8, cfg.Rank)
+	checkInDelta(t, float32(16), cfg.Alpha, 0.0001)
+	checkEqual(t, []string{"q_proj"}, cfg.TargetKeys)
 }
 
 func TestTraining_LoRAConfig_Bad_ZeroAlpha(t *testing.T) {
 	cfg := LoRAConfig{Rank: 8, Alpha: 0, TargetKeys: []string{"q_proj"}}
 	checkInDelta(t, float32(0), cfg.Alpha, 0.0001)
+	checkEqual(t, 8, cfg.Rank)
+	checkEqual(t, []string{"q_proj"}, cfg.TargetKeys)
 }
 
 // --- LoRAConfig Ugly: atypical but valid configurations ---
@@ -159,11 +168,15 @@ func TestTraining_LoRAConfig_Bad_ZeroAlpha(t *testing.T) {
 func TestTraining_LoRAConfig_Ugly_EmptyTargetKeys(t *testing.T) {
 	cfg := LoRAConfig{Rank: 8, Alpha: 16, TargetKeys: []string{}}
 	checkEmpty(t, cfg.TargetKeys)
+	checkEqual(t, 8, cfg.Rank)
+	checkInDelta(t, float32(16), cfg.Alpha, 0.0001)
 }
 
 func TestTraining_LoRAConfig_Ugly_NilTargetKeys(t *testing.T) {
 	cfg := LoRAConfig{Rank: 8, Alpha: 16}
 	checkNil(t, cfg.TargetKeys)
+	checkEqual(t, 8, cfg.Rank)
+	checkInDelta(t, float32(16), cfg.Alpha, 0.0001)
 }
 
 func TestTraining_LoRAConfig_Ugly_BFloat16WithHighRank(t *testing.T) {
