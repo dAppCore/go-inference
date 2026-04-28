@@ -67,7 +67,7 @@ import (
 	"slices"
 	"time"
 
-	"dappco.re/go/core"
+	core "dappco.re/go"
 )
 
 //	for tok := range m.Generate(ctx, prompt) {

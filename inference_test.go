@@ -6,7 +6,7 @@ import (
 	"sync" // Note: test-only
 	"testing"
 
-	"dappco.re/go/core"
+	core "dappco.re/go"
 )
 
 // --- test helpers ---
@@ -192,20 +192,6 @@ func TestInference_All_Good_SortedOrder(t *testing.T) {
 	checkEqual(t, []string{"alpha", "beta"}, names)
 }
 
-func TestInference_All_Good_SortedOrder(t *testing.T) {
-	resetBackends(t)
-
-	Register(&stubBackend{name: "beta", available: true})
-	Register(&stubBackend{name: "alpha", available: true})
-
-	var names []string
-	for name := range All() {
-		names = append(names, name)
-	}
-
-	assert.Equal(t, []string{"alpha", "beta"}, names)
-}
-
 func TestInference_All_Good_Empty(t *testing.T) {
 	resetBackends(t)
 
@@ -274,17 +260,6 @@ func TestInference_Default_Good_AlphabeticalFallback(t *testing.T) {
 	b, err := Default()
 	checkNoError(t, err)
 	checkEqual(t, "alpha", b.Name())
-}
-
-func TestInference_Default_Good_AlphabeticalFallback(t *testing.T) {
-	resetBackends(t)
-
-	Register(&stubBackend{name: "zeta", available: true})
-	Register(&stubBackend{name: "alpha", available: true})
-
-	b, err := Default()
-	require.NoError(t, err)
-	assert.Equal(t, "alpha", b.Name(), "fallback should be deterministic across non-preferred backends")
 }
 
 func TestInference_Default_Good_PriorityOrder(t *testing.T) {
@@ -510,6 +485,9 @@ func TestInference_LoadModel_Bad_BackendReturnsNilModel(t *testing.T) {
 func TestInference_InterfaceCompliance_Good(t *testing.T) {
 	var _ Backend = (*stubBackend)(nil)
 	var _ TextModel = (*stubTextModel)(nil)
+	backend := &stubBackend{name: "compile", available: true}
+	checkEqual(t, "compile", backend.Name())
+	checkTrue(t, backend.Available())
 }
 
 // --- AttentionSnapshot ---
@@ -533,6 +511,10 @@ func TestInference_AttentionSnapshot_Good(t *testing.T) {
 
 func TestInference_AttentionInspectorCompliance_Good(t *testing.T) {
 	var _ AttentionInspector = (*mockInspector)(nil)
+	inspector := &mockInspector{}
+	snap, err := inspector.InspectAttention(context.Background(), "hello")
+	checkNoError(t, err)
+	checkEqual(t, 28, snap.NumLayers)
 }
 
 type mockInspector struct{ stubTextModel }
