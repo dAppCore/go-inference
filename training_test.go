@@ -1,8 +1,9 @@
 package inference
 
 import (
-	"errors"
 	"testing"
+
+	core "dappco.re/go"
 )
 
 // --- DefaultLoRAConfig ---
@@ -48,8 +49,7 @@ func TestTraining_LoadTrainable_Good(t *testing.T) {
 
 	Register(&trainableBackend{name: "metal", available: true})
 
-	tm, err := LoadTrainable("/path/to/model")
-	checkNoError(t, err)
+	tm := resultTrainableModel(t, LoadTrainable("/path/to/model"))
 	checkNotNil(t, tm)
 	checkEqual(t, 26, tm.NumLayers())
 	checkNoError(t, tm.Close())
@@ -58,9 +58,9 @@ func TestTraining_LoadTrainable_Good(t *testing.T) {
 func TestTraining_LoadTrainable_Bad_NoBackends(t *testing.T) {
 	resetBackends(t)
 
-	_, err := LoadTrainable("/path/to/model")
-	checkError(t, err)
-	checkContains(t, err.Error(), "no backends registered")
+	result := LoadTrainable("/path/to/model")
+	checkResultError(t, result)
+	checkContains(t, result.Error(), "no backends registered")
 }
 
 func TestTraining_LoadTrainable_Bad_NotTrainable(t *testing.T) {
@@ -68,9 +68,9 @@ func TestTraining_LoadTrainable_Bad_NotTrainable(t *testing.T) {
 
 	Register(&stubBackend{name: "metal", available: true})
 
-	_, err := LoadTrainable("/path/to/model")
-	checkError(t, err)
-	checkContains(t, err.Error(), "does not support training")
+	result := LoadTrainable("/path/to/model")
+	checkResultError(t, result)
+	checkContains(t, result.Error(), "does not support training")
 }
 
 func TestTraining_LoadTrainable_Bad_LoadError(t *testing.T) {
@@ -79,12 +79,12 @@ func TestTraining_LoadTrainable_Bad_LoadError(t *testing.T) {
 	Register(&stubBackend{
 		name:      "broken",
 		available: true,
-		loadErr:   errors.New("GPU out of memory"),
+		loadErr:   core.E("test", "GPU out of memory", nil),
 	})
 
-	_, err := LoadTrainable("/path/to/model", WithBackend("broken"))
-	checkError(t, err)
-	checkContains(t, err.Error(), "GPU out of memory")
+	result := LoadTrainable("/path/to/model", WithBackend("broken"))
+	checkResultError(t, result)
+	checkContains(t, result.Error(), "GPU out of memory")
 }
 
 func TestTraining_LoadTrainable_Bad_NilModel(t *testing.T) {
@@ -92,9 +92,9 @@ func TestTraining_LoadTrainable_Bad_NilModel(t *testing.T) {
 
 	Register(&stubBackend{name: "metal", available: true, nilModel: true})
 
-	_, err := LoadTrainable("/path/to/model")
-	checkError(t, err)
-	checkContains(t, err.Error(), "returned a nil model")
+	result := LoadTrainable("/path/to/model")
+	checkResultError(t, result)
+	checkContains(t, result.Error(), "returned a nil model")
 }
 
 func TestTraining_LoadTrainable_Good_ExplicitBackend(t *testing.T) {
@@ -102,8 +102,7 @@ func TestTraining_LoadTrainable_Good_ExplicitBackend(t *testing.T) {
 
 	Register(&trainableBackend{name: "rocm", available: true})
 
-	tm, err := LoadTrainable("/path/to/model", WithBackend("rocm"))
-	checkNoError(t, err)
+	tm := resultTrainableModel(t, LoadTrainable("/path/to/model", WithBackend("rocm")))
 	checkNotNil(t, tm)
 	checkNoError(t, tm.Close())
 }
@@ -125,8 +124,7 @@ func TestTraining_LoadTrainable_Ugly_SkipsUnavailableBackend(t *testing.T) {
 	Register(&trainableBackend{name: "unavailable", available: false})
 	Register(&trainableBackend{name: "fallback", available: true})
 
-	tm, err := LoadTrainable("/path/to/model")
-	checkNoError(t, err)
+	tm := resultTrainableModel(t, LoadTrainable("/path/to/model"))
 	checkNotNil(t, tm)
 	checkNoError(t, tm.Close())
 }
@@ -185,4 +183,41 @@ func TestTraining_LoRAConfig_Ugly_BFloat16WithHighRank(t *testing.T) {
 	checkInDelta(t, float32(128), cfg.Alpha, 0.0001)
 	checkTrue(t, cfg.BFloat16)
 	checkLen(t, cfg.TargetKeys, 3)
+}
+
+func TestTraining_DefaultLoRAConfig_Bad(t *testing.T) {
+	cfg := DefaultLoRAConfig()
+	cfg.Rank = 0
+
+	core.AssertEqual(t, 0, cfg.Rank)
+	core.AssertEqual(t, float32(16), cfg.Alpha)
+	core.AssertEqual(t, []string{"q_proj", "v_proj"}, cfg.TargetKeys)
+}
+
+func TestTraining_DefaultLoRAConfig_Ugly(t *testing.T) {
+	cfg := DefaultLoRAConfig()
+	cfg.TargetKeys = append(cfg.TargetKeys, "k_proj")
+
+	core.AssertEqual(t, []string{"q_proj", "v_proj", "k_proj"}, cfg.TargetKeys)
+	core.AssertEqual(t, []string{"q_proj", "v_proj"}, DefaultLoRAConfig().TargetKeys)
+	core.AssertFalse(t, cfg.BFloat16)
+}
+
+func TestTraining_LoadTrainable_Bad(t *testing.T) {
+	resetBackends(t)
+	Register(&stubBackend{name: "metal", available: true})
+
+	result := LoadTrainable("/models/gemma3")
+	core.AssertFalse(t, result.OK)
+	core.AssertNotNil(t, result.Value)
+	core.AssertContains(t, result.Error(), "does not support training")
+}
+
+func TestTraining_LoadTrainable_Ugly(t *testing.T) {
+	resetBackends(t)
+	Register(&trainableBackend{name: "metal", available: true})
+
+	model := resultTrainableModel(t, LoadTrainable(""))
+	core.AssertNotNil(t, model)
+	core.AssertNoError(t, model.Close())
 }

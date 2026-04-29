@@ -2,6 +2,8 @@ package inference
 
 import (
 	"testing"
+
+	core "dappco.re/go"
 )
 
 // --- DefaultGenerateConfig stability ---
@@ -566,4 +568,164 @@ func TestOptions_WithAdapterPath_Good_OtherFieldsUnchanged(t *testing.T) {
 	checkEqual(t, -1, cfg.GPULayers)
 	checkEqual(t, 0, cfg.ParallelSlots)
 	checkEqual(t, "/some/path", cfg.AdapterPath)
+}
+
+func TestOptions_DefaultGenerateConfig_Bad(t *testing.T) {
+	cfg := DefaultGenerateConfig()
+	cfg.MaxTokens = 0
+
+	core.AssertEqual(t, 0, cfg.MaxTokens)
+	core.AssertEqual(t, float32(0), cfg.Temperature)
+	core.AssertEqual(t, float32(1), cfg.RepeatPenalty)
+}
+
+func TestOptions_DefaultGenerateConfig_Ugly(t *testing.T) {
+	cfg := DefaultGenerateConfig()
+	cfg.StopTokens = append(cfg.StopTokens, 1)
+
+	core.AssertEqual(t, []int32{1}, cfg.StopTokens)
+	core.AssertFalse(t, DefaultGenerateConfig().ReturnLogits)
+	core.AssertNil(t, DefaultGenerateConfig().StopTokens)
+}
+
+func TestOptions_WithMaxTokens_Ugly(t *testing.T) {
+	cfg := ApplyGenerateOpts([]GenerateOption{WithMaxTokens(1 << 20)})
+	def := DefaultGenerateConfig()
+
+	core.AssertEqual(t, 1<<20, cfg.MaxTokens)
+	core.AssertEqual(t, def.Temperature, cfg.Temperature)
+	core.AssertEqual(t, def.RepeatPenalty, cfg.RepeatPenalty)
+}
+
+func TestOptions_WithTemperature_Ugly(t *testing.T) {
+	cfg := ApplyGenerateOpts([]GenerateOption{WithTemperature(2.5)})
+	def := DefaultGenerateConfig()
+
+	core.AssertInDelta(t, 2.5, float64(cfg.Temperature), 0.0001)
+	core.AssertEqual(t, def.MaxTokens, cfg.MaxTokens)
+	core.AssertFalse(t, cfg.ReturnLogits)
+}
+
+func TestOptions_WithTopK_Ugly(t *testing.T) {
+	cfg := ApplyGenerateOpts([]GenerateOption{WithTopK(1 << 16)})
+	def := DefaultGenerateConfig()
+
+	core.AssertEqual(t, 1<<16, cfg.TopK)
+	core.AssertEqual(t, def.MaxTokens, cfg.MaxTokens)
+	core.AssertEqual(t, def.TopP, cfg.TopP)
+}
+
+func TestOptions_WithLogits_Bad(t *testing.T) {
+	cfg := ApplyGenerateOpts([]GenerateOption{WithLogits(), nil})
+	def := DefaultGenerateConfig()
+
+	core.AssertTrue(t, cfg.ReturnLogits)
+	core.AssertEqual(t, def.MaxTokens, cfg.MaxTokens)
+	core.AssertEqual(t, def.RepeatPenalty, cfg.RepeatPenalty)
+}
+
+func TestOptions_WithLogits_Ugly(t *testing.T) {
+	cfg := ApplyGenerateOpts([]GenerateOption{WithLogits(), WithLogits()})
+	def := DefaultGenerateConfig()
+
+	core.AssertTrue(t, cfg.ReturnLogits)
+	core.AssertEqual(t, def.TopK, cfg.TopK)
+	core.AssertNil(t, cfg.StopTokens)
+}
+
+func TestOptions_ApplyGenerateOpts_Bad(t *testing.T) {
+	cfg := ApplyGenerateOpts([]GenerateOption{nil, nil})
+	def := DefaultGenerateConfig()
+
+	core.AssertEqual(t, def, cfg)
+	core.AssertFalse(t, cfg.ReturnLogits)
+	core.AssertNil(t, cfg.StopTokens)
+}
+
+func TestOptions_ApplyLoadOpts_Good(t *testing.T) {
+	cfg := ApplyLoadOpts([]LoadOption{
+		WithBackend("metal"),
+		WithContextLen(4096),
+		WithGPULayers(24),
+		WithParallelSlots(2),
+		WithAdapterPath("adapters/domain"),
+	})
+
+	core.AssertEqual(t, "metal", cfg.Backend)
+	core.AssertEqual(t, 4096, cfg.ContextLen)
+	core.AssertEqual(t, 24, cfg.GPULayers)
+	core.AssertEqual(t, 2, cfg.ParallelSlots)
+	core.AssertEqual(t, "adapters/domain", cfg.AdapterPath)
+}
+
+func TestOptions_ApplyLoadOpts_Bad(t *testing.T) {
+	cfg := ApplyLoadOpts([]LoadOption{nil})
+	def := ApplyLoadOpts(nil)
+
+	core.AssertEqual(t, def, cfg)
+	core.AssertEqual(t, -1, cfg.GPULayers)
+	core.AssertEqual(t, "", cfg.Backend)
+}
+
+func TestOptions_WithBackend_Ugly(t *testing.T) {
+	cfg := ApplyLoadOpts([]LoadOption{WithBackend("metal"), WithBackend("rocm")})
+	def := ApplyLoadOpts(nil)
+
+	core.AssertEqual(t, "rocm", cfg.Backend)
+	core.AssertEqual(t, def.ContextLen, cfg.ContextLen)
+	core.AssertEqual(t, def.GPULayers, cfg.GPULayers)
+}
+
+func TestOptions_WithContextLen_Bad(t *testing.T) {
+	cfg := ApplyLoadOpts([]LoadOption{WithContextLen(0)})
+	def := ApplyLoadOpts(nil)
+
+	core.AssertEqual(t, 0, cfg.ContextLen)
+	core.AssertEqual(t, def.GPULayers, cfg.GPULayers)
+	core.AssertEqual(t, def.Backend, cfg.Backend)
+}
+
+func TestOptions_WithContextLen_Ugly(t *testing.T) {
+	cfg := ApplyLoadOpts([]LoadOption{WithContextLen(-4096)})
+	def := ApplyLoadOpts(nil)
+
+	core.AssertEqual(t, -4096, cfg.ContextLen)
+	core.AssertEqual(t, def.ParallelSlots, cfg.ParallelSlots)
+	core.AssertEqual(t, def.AdapterPath, cfg.AdapterPath)
+}
+
+func TestOptions_WithGPULayers_Bad(t *testing.T) {
+	cfg := ApplyLoadOpts([]LoadOption{WithGPULayers(-2)})
+	def := ApplyLoadOpts(nil)
+
+	core.AssertEqual(t, -2, cfg.GPULayers)
+	core.AssertEqual(t, def.ContextLen, cfg.ContextLen)
+	core.AssertEqual(t, def.AdapterPath, cfg.AdapterPath)
+}
+
+func TestOptions_WithParallelSlots_Bad(t *testing.T) {
+	cfg := ApplyLoadOpts([]LoadOption{WithParallelSlots(-1)})
+	def := ApplyLoadOpts(nil)
+
+	core.AssertEqual(t, -1, cfg.ParallelSlots)
+	core.AssertEqual(t, def.Backend, cfg.Backend)
+	core.AssertEqual(t, def.GPULayers, cfg.GPULayers)
+}
+
+func TestOptions_WithParallelSlots_Ugly(t *testing.T) {
+	cfg := ApplyLoadOpts([]LoadOption{WithParallelSlots(128)})
+	def := ApplyLoadOpts(nil)
+
+	core.AssertEqual(t, 128, cfg.ParallelSlots)
+	core.AssertEqual(t, def.ContextLen, cfg.ContextLen)
+	core.AssertEqual(t, def.AdapterPath, cfg.AdapterPath)
+}
+
+func TestOptions_WithAdapterPath_Ugly(t *testing.T) {
+	cfg := ApplyLoadOpts([]LoadOption{WithAdapterPath(""), WithAdapterPath("/tmp/adapter")})
+	def := ApplyLoadOpts(nil)
+
+	core.AssertEqual(t, "/tmp/adapter", cfg.AdapterPath)
+	core.AssertEqual(t, def.ContextLen, cfg.ContextLen)
+	core.AssertEqual(t, def.GPULayers, cfg.GPULayers)
 }
