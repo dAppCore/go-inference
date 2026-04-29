@@ -72,21 +72,28 @@ type TrainableModel interface {
 	NumLayers() int
 }
 
-// tm, err := inference.LoadTrainable("/models/gemma3-1b")
-// adapter := tm.ApplyLoRA(inference.DefaultLoRAConfig())
-func LoadTrainable(path string, opts ...LoadOption) (TrainableModel, error) {
-	model, err := LoadModel(path, opts...)
-	if err != nil {
-		return nil, err
+// r := inference.LoadTrainable("/models/gemma3-1b")
+// adapter := r.Value.(inference.TrainableModel).ApplyLoRA(inference.DefaultLoRAConfig())
+func LoadTrainable(path string, opts ...LoadOption) core.Result {
+	modelResult := LoadModel(path, opts...)
+	if !modelResult.OK {
+		return modelResult
+	}
+	model, ok := modelResult.Value.(TextModel)
+	if !ok {
+		return core.Fail(core.E("inference.LoadTrainable", "load returned a non-model value", nil))
 	}
 	if model == nil {
-		return nil, core.E("inference.LoadTrainable", "load returned a nil model", nil)
+		return core.Fail(core.E("inference.LoadTrainable", "load returned a nil model", nil))
 	}
 	modelType := model.ModelType()
 	tm, ok := model.(TrainableModel)
 	if !ok {
-		model.Close()
-		return nil, core.E("inference.LoadTrainable", "backend "+core.Sprintf("%q", modelType)+" does not support training", nil)
+		closeResult := core.ResultOf(nil, model.Close())
+		if !closeResult.OK {
+			return core.Fail(core.Wrap(closeResult.Value.(error), "inference.LoadTrainable", "close non-trainable model"))
+		}
+		return core.Fail(core.E("inference.LoadTrainable", "backend "+core.Sprintf("%q", modelType)+" does not support training", nil))
 	}
-	return tm, nil
+	return core.Ok(tm)
 }
