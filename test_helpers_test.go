@@ -3,8 +3,9 @@ package inference
 import (
 	"math"
 	"reflect"
-	"strings"
 	"testing"
+
+	core "dappco.re/go"
 )
 
 func checkNoError(t *testing.T, err error) {
@@ -19,6 +20,50 @@ func checkError(t *testing.T, err error) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
+}
+
+func checkResultOK(t *testing.T, result core.Result) {
+	t.Helper()
+	if !result.OK {
+		t.Fatalf("unexpected failure: %s", result.Error())
+	}
+}
+
+func checkResultError(t *testing.T, result core.Result) {
+	t.Helper()
+	if result.OK {
+		t.Fatalf("expected failure, got %v", result.Value)
+	}
+}
+
+func resultBackend(t *testing.T, result core.Result) Backend {
+	t.Helper()
+	checkResultOK(t, result)
+	backend, ok := result.Value.(Backend)
+	if !ok {
+		t.Fatalf("expected Backend, got %T", result.Value)
+	}
+	return backend
+}
+
+func resultTextModel(t *testing.T, result core.Result) TextModel {
+	t.Helper()
+	checkResultOK(t, result)
+	model, ok := result.Value.(TextModel)
+	if !ok {
+		t.Fatalf("expected TextModel, got %T", result.Value)
+	}
+	return model
+}
+
+func resultTrainableModel(t *testing.T, result core.Result) TrainableModel {
+	t.Helper()
+	checkResultOK(t, result)
+	model, ok := result.Value.(TrainableModel)
+	if !ok {
+		t.Fatalf("expected TrainableModel, got %T", result.Value)
+	}
+	return model
 }
 
 func checkEqual(t *testing.T, want, got any) {
@@ -186,7 +231,7 @@ func contains(container, item any) bool {
 	switch containerValue.Kind() {
 	case reflect.String:
 		itemString, ok := item.(string)
-		return ok && strings.Contains(containerValue.String(), itemString)
+		return ok && core.Contains(containerValue.String(), itemString)
 	case reflect.Map:
 		key := reflect.ValueOf(item)
 		if !key.IsValid() {

@@ -1,0 +1,37 @@
+# Woodpecker CI pipeline.
+# Server: ci.lthn.sh. Lint + sonar in parallel, both depend only on clone.
+# sonar_token is admin-scoped on the Woodpecker server.
+
+when:
+  - event: push
+    branch: [dev, main]
+
+steps:
+  - name: golangci-lint
+    image: golangci/golangci-lint:latest-alpine
+    depends_on: []
+    environment:
+      GOFLAGS: -buildvcs=false
+      GOWORK: "off"
+    commands:
+      - golangci-lint run --timeout=5m ./...
+
+  - name: go-test
+    image: golang:1.26-alpine
+    depends_on: []
+    environment:
+      GOFLAGS: -buildvcs=false
+      GOWORK: "off"
+      CGO_ENABLED: "1"
+    commands:
+      - apk add --no-cache git build-base
+      - go test -race -coverprofile=coverage.out -covermode=atomic -count=1 ./...
+  - name: sonar
+    image: sonarsource/sonar-scanner-cli:latest
+    depends_on: [go-test]
+    environment:
+      SONAR_HOST_URL: https://sonar.lthn.sh
+      SONAR_TOKEN:
+        from_secret: sonar_token
+    commands:
+      - sonar-scanner

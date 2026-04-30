@@ -67,7 +67,7 @@ import (
 	"slices"
 	"time"
 
-	"dappco.re/go/core"
+	core "dappco.re/go"
 )
 
 //	for tok := range m.Generate(ctx, prompt) {
@@ -314,17 +314,17 @@ func All() iter.Seq2[string, Backend] {
 
 // Default picks the first available backend in preference order: metal → rocm → llama_cpp → any.
 //
-//	b, err := inference.Default() // returns metal on Apple Silicon if available
-func Default() (Backend, error) {
+//	r := inference.Default() // r.Value is the backend when r.OK
+func Default() core.Result {
 	snap := snapshotBackends()
 	if len(snap) == 0 {
-		return nil, core.E("inference.Default", "no backends registered", nil)
+		return core.Fail(core.E("inference.Default", "no backends registered", nil))
 	}
 
 	// Platform preference order
 	for _, name := range preferredBackendOrder {
 		if b, ok := snap[name]; ok && b.Available() {
-			return b, nil
+			return core.Ok(b)
 		}
 	}
 	// Fall back to any available
@@ -333,43 +333,49 @@ func Default() (Backend, error) {
 			continue
 		}
 		if backend := snap[name]; backend.Available() {
-			return backend, nil
+			return core.Ok(backend)
 		}
 	}
-	return nil, core.E("inference.Default", "no backends available", nil)
+	return core.Fail(core.E("inference.Default", "no backends available", nil))
 }
 
-// m, err := inference.LoadModel("/models/gemma3-1b")
-// m, err := inference.LoadModel("/models/qwen3-4b", inference.WithBackend("rocm"), inference.WithContextLen(8192))
-func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
+// r := inference.LoadModel("/models/gemma3-1b")
+// r := inference.LoadModel("/models/qwen3-4b", inference.WithBackend("rocm"), inference.WithContextLen(8192))
+func LoadModel(path string, opts ...LoadOption) core.Result {
 	cfg := ApplyLoadOpts(opts)
 	if cfg.Backend != "" {
 		b, ok := Get(cfg.Backend)
 		if !ok {
-			return nil, core.E("inference.LoadModel", core.Sprintf("backend %q not registered", cfg.Backend), nil)
+			return core.Fail(core.E("inference.LoadModel", core.Sprintf("backend %q not registered", cfg.Backend), nil))
 		}
 		if !b.Available() {
-			return nil, core.E("inference.LoadModel", core.Sprintf("backend %q not available on this hardware", cfg.Backend), nil)
+			return core.Fail(core.E("inference.LoadModel", core.Sprintf("backend %q not available on this hardware", cfg.Backend), nil))
 		}
-		model, err := b.LoadModel(path, opts...)
-		if err != nil {
-			return nil, core.Wrap(err, "inference.LoadModel", core.Sprintf("backend %q failed to load model", cfg.Backend))
+		modelResult := core.ResultOf(b.LoadModel(path, opts...))
+		if !modelResult.OK {
+			return core.Fail(core.Wrap(modelResult.Value.(error), "inference.LoadModel", core.Sprintf("backend %q failed to load model", cfg.Backend)))
 		}
+		model := modelResult.Value
 		if model == nil {
-			return nil, core.E("inference.LoadModel", core.Sprintf("backend %q returned a nil model", cfg.Backend), nil)
+			return core.Fail(core.E("inference.LoadModel", core.Sprintf("backend %q returned a nil model", cfg.Backend), nil))
 		}
-		return model, nil
+		return core.Ok(model)
 	}
-	b, err := Default()
-	if err != nil {
-		return nil, err
+	defaultResult := Default()
+	if !defaultResult.OK {
+		return defaultResult
 	}
-	model, err := b.LoadModel(path, opts...)
-	if err != nil {
-		return nil, core.Wrap(err, "inference.LoadModel", core.Sprintf("backend %q failed to load model", b.Name()))
+	b, ok := defaultResult.Value.(Backend)
+	if !ok || b == nil {
+		return core.Fail(core.E("inference.LoadModel", "default backend result was not a backend", nil))
 	}
+	modelResult := core.ResultOf(b.LoadModel(path, opts...))
+	if !modelResult.OK {
+		return core.Fail(core.Wrap(modelResult.Value.(error), "inference.LoadModel", core.Sprintf("backend %q failed to load model", b.Name())))
+	}
+	model := modelResult.Value
 	if model == nil {
-		return nil, core.E("inference.LoadModel", core.Sprintf("backend %q returned a nil model", b.Name()), nil)
+		return core.Fail(core.E("inference.LoadModel", core.Sprintf("backend %q returned a nil model", b.Name()), nil))
 	}
-	return model, nil
+	return core.Ok(model)
 }
