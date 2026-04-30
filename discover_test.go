@@ -1,13 +1,10 @@
 package inference
 
 import (
-	"encoding/json" // Note: test-only — model config fixtures; intrinsic
-	"os"            // Note: test-only — filesystem fixtures; intrinsic
-	"path/filepath" // Note: test-only — IsAbs/Rel assertions; no core equivalent
 	"slices"
 	"testing"
 
-	"dappco.re/go/core"
+	core "dappco.re/go"
 )
 
 // --- test helpers for discover ---
@@ -18,21 +15,49 @@ import (
 func createModelDir(t *testing.T, dir string, config map[string]any, numSafetensors int) {
 	t.Helper()
 
-	checkNoError(t, os.MkdirAll(dir, 0o755))
+	checkResultOK(t, core.MkdirAll(dir, 0o755))
 
 	if config != nil {
-		data, err := json.Marshal(config)
-		checkNoError(t, err)
-		checkNoError(t, os.WriteFile(core.JoinPath(dir, "config.json"), data, 0o644))
+		data := []byte(core.JSONMarshalString(config))
+		checkResultOK(t, core.WriteFile(core.JoinPath(dir, "config.json"), data, 0o644))
 	}
 
 	for i := range numSafetensors {
 		fname := core.JoinPath(dir, core.Sprintf("model-%05d-of-%05d.safetensors", i+1, numSafetensors))
-		checkNoError(t, os.WriteFile(fname, []byte("fake"), 0o644))
+		checkResultOK(t, core.WriteFile(fname, []byte("fake"), 0o644))
 	}
 }
 
 // --- Discover ---
+
+func TestDiscover_Discover_Good(t *testing.T) {
+	base := t.TempDir()
+	createModelDir(t, core.JoinPath(base, "gemma3-1b"), map[string]any{"model_type": "gemma3"}, 2)
+
+	models := slices.Collect(Discover(base))
+	core.AssertLen(t, models, 1)
+	core.AssertEqual(t, "gemma3", models[0].ModelType)
+	core.AssertEqual(t, 2, models[0].NumFiles)
+}
+
+func TestDiscover_Discover_Bad(t *testing.T) {
+	base := t.TempDir()
+	createModelDir(t, core.JoinPath(base, "empty-model"), map[string]any{"model_type": "gemma3"}, 0)
+
+	models := slices.Collect(Discover(base))
+	core.AssertEmpty(t, models)
+	core.AssertEqual(t, 0, len(models))
+}
+
+func TestDiscover_Discover_Ugly(t *testing.T) {
+	base := t.TempDir()
+	createModelDir(t, core.JoinPath(base, "no-type"), map[string]any{"vocab_size": 32000}, 1)
+
+	models := slices.Collect(Discover(base))
+	core.AssertLen(t, models, 1)
+	core.AssertEqual(t, "", models[0].ModelType)
+	core.AssertEqual(t, 0, models[0].QuantBits)
+}
 
 func TestDiscover_Good_SingleModel(t *testing.T) {
 	base := t.TempDir()
@@ -48,7 +73,7 @@ func TestDiscover_Good_SingleModel(t *testing.T) {
 	checkEqual(t, 1, discovered.NumFiles)
 	checkEqual(t, 0, discovered.QuantBits)
 	checkEqual(t, 0, discovered.QuantGroup)
-	checkTrue(t, filepath.IsAbs(discovered.Path))
+	checkTrue(t, core.PathIsAbs(discovered.Path))
 	checkContains(t, discovered.Path, "gemma3-1b")
 }
 
@@ -144,17 +169,18 @@ func TestDiscover_Good_EmptyDir(t *testing.T) {
 func TestDiscover_Bad_NonexistentDir(t *testing.T) {
 	models := slices.Collect(Discover("/nonexistent/path/that/should/not/exist"))
 	checkEmpty(t, models)
+	checkLen(t, models, 0)
+	checkNil(t, models)
 }
 
 func TestDiscover_Bad_NoSafetensors(t *testing.T) {
 	base := t.TempDir()
 	dir := core.JoinPath(base, "incomplete")
 
-	checkNoError(t, os.MkdirAll(dir, 0o755))
+	checkResultOK(t, core.MkdirAll(dir, 0o755))
 	config := map[string]any{"model_type": "gemma3"}
-	data, err := json.Marshal(config)
-	checkNoError(t, err)
-	checkNoError(t, os.WriteFile(core.JoinPath(dir, "config.json"), data, 0o644))
+	data := []byte(core.JSONMarshalString(config))
+	checkResultOK(t, core.WriteFile(core.JoinPath(dir, "config.json"), data, 0o644))
 
 	models := slices.Collect(Discover(base))
 	checkEmpty(t, models)
@@ -164,8 +190,8 @@ func TestDiscover_Bad_NoConfig(t *testing.T) {
 	base := t.TempDir()
 	dir := core.JoinPath(base, "no-config")
 
-	checkNoError(t, os.MkdirAll(dir, 0o755))
-	checkNoError(t, os.WriteFile(core.JoinPath(dir, "model.safetensors"), []byte("fake"), 0o644))
+	checkResultOK(t, core.MkdirAll(dir, 0o755))
+	checkResultOK(t, core.WriteFile(core.JoinPath(dir, "model.safetensors"), []byte("fake"), 0o644))
 
 	models := slices.Collect(Discover(base))
 	checkEmpty(t, models)
@@ -175,9 +201,9 @@ func TestDiscover_Bad_InvalidJSON(t *testing.T) {
 	base := t.TempDir()
 	dir := core.JoinPath(base, "bad-json")
 
-	checkNoError(t, os.MkdirAll(dir, 0o755))
-	checkNoError(t, os.WriteFile(core.JoinPath(dir, "config.json"), []byte("{invalid}"), 0o644))
-	checkNoError(t, os.WriteFile(core.JoinPath(dir, "model.safetensors"), []byte("fake"), 0o644))
+	checkResultOK(t, core.MkdirAll(dir, 0o755))
+	checkResultOK(t, core.WriteFile(core.JoinPath(dir, "config.json"), []byte("{invalid}"), 0o644))
+	checkResultOK(t, core.WriteFile(core.JoinPath(dir, "model.safetensors"), []byte("fake"), 0o644))
 
 	models := slices.Collect(Discover(base))
 	checkLen(t, models, 1)
@@ -189,7 +215,7 @@ func TestDiscover_Bad_InvalidJSON(t *testing.T) {
 
 func TestDiscover_Ugly_SkipsRegularFiles(t *testing.T) {
 	base := t.TempDir()
-	checkNoError(t, os.WriteFile(core.JoinPath(base, "README.md"), []byte("hello"), 0o644))
+	checkResultOK(t, core.WriteFile(core.JoinPath(base, "README.md"), []byte("hello"), 0o644))
 
 	createModelDir(t, core.JoinPath(base, "real-model"), map[string]any{
 		"model_type": "gemma3",
@@ -276,7 +302,7 @@ func TestDiscover_Good_AbsolutePath(t *testing.T) {
 
 	models := slices.Collect(Discover(base))
 	checkLen(t, models, 1)
-	checkTrue(t, filepath.IsAbs(models[0].Path))
+	checkTrue(t, core.PathIsAbs(models[0].Path))
 }
 
 func TestDiscover_Good_RelativeBaseDir(t *testing.T) {
@@ -285,15 +311,17 @@ func TestDiscover_Good_RelativeBaseDir(t *testing.T) {
 		"model_type": "gemma3",
 	}, 1)
 
-	cwd, err := os.Getwd()
-	checkNoError(t, err)
+	cwdResult := core.Getwd()
+	checkResultOK(t, cwdResult)
+	cwd := cwdResult.Value.(string)
 
-	relBase, err := filepath.Rel(cwd, base)
-	checkNoError(t, err)
+	relBaseResult := core.PathRel(cwd, base)
+	checkResultOK(t, relBaseResult)
+	relBase := relBaseResult.Value.(string)
 
 	models := slices.Collect(Discover(relBase))
 	checkLen(t, models, 1)
-	checkTrue(t, filepath.IsAbs(models[0].Path))
+	checkTrue(t, core.PathIsAbs(models[0].Path))
 	checkEqual(t, "gemma3", models[0].ModelType)
 }
 
@@ -313,7 +341,7 @@ func TestDiscover_Good_QuantizationConfigFallback(t *testing.T) {
 	checkEqual(t, 128, models[0].QuantGroup)
 }
 
-func TestDiscover_Good_RecursiveNestedModels(t *testing.T) {
+func TestDiscover_Good_RecursiveDeepModels(t *testing.T) {
 	base := t.TempDir()
 	createModelDir(t, core.Path(base, "models"), map[string]any{
 		"model_type": "parent",
@@ -329,7 +357,7 @@ func TestDiscover_Good_RecursiveNestedModels(t *testing.T) {
 	}, 1)
 
 	models := slices.Collect(Discover(base))
-	require.Len(t, models, 4)
+	checkLen(t, models, 4)
 
 	gotParent := false
 	gotNested := false
@@ -341,8 +369,8 @@ func TestDiscover_Good_RecursiveNestedModels(t *testing.T) {
 			gotNested = true
 		}
 	}
-	assert.True(t, gotParent, "nested model directories should be discovered")
-	assert.True(t, gotNested, "deeply nested model directories should be discovered")
+	checkTrue(t, gotParent)
+	checkTrue(t, gotNested)
 }
 
 func TestDiscover_Good_RecursiveEarlyBreak(t *testing.T) {
@@ -359,5 +387,5 @@ func TestDiscover_Good_RecursiveEarlyBreak(t *testing.T) {
 		count++
 		break
 	}
-	assert.Equal(t, 1, count, "breaking from Discover should stop further traversal immediately")
+	checkEqual(t, 1, count)
 }
