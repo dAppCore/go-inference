@@ -1,3 +1,10 @@
 go 1.26.0
 
-use .
+// Workspace mode for development: pulls local sources from external/ submodules.
+//
+// CI: GOWORK=off uses go/go.mod tags for reproducible resolution.
+
+use (
+	./go
+	./external/go
+)
