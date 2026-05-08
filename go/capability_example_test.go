@@ -27,3 +27,17 @@ func ExampleAdapterModel() {
 	core.Println(identity.Format)
 	// Output: lora
 }
+
+func ExampleCapabilityReporter() {
+	model := &capabilityModel{}
+	report, ok := CapabilitiesOf(model)
+	if !ok {
+		return
+	}
+
+	core.Println(report.Runtime.Backend)
+	core.Println(report.Supports(CapabilityProbeEvents))
+	// Output:
+	// stub
+	// true
+}
