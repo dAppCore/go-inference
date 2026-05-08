@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"dappco.re/go/inference"
 )
@@ -123,6 +124,25 @@ func TestOpenAI_ThinkingExtractor_Good_CapturesQwenAndChannelMarkers(t *testing.
 	}
 	if extractor.Content() != gotVisible || extractor.Thinking() != gotThought {
 		t.Fatalf("extractor content/thought = %q/%q", extractor.Content(), extractor.Thinking())
+	}
+}
+
+func TestOpenAI_ThinkingExtractor_Ugly_IncompleteChannelMarkerDoesNotHang(t *testing.T) {
+	extractor := NewThinkingExtractor()
+	done := make(chan struct{})
+	go func() {
+		extractor.Process(inference.Token{Text: "<|channel>"})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Process() hung on incomplete channel marker")
+	}
+	visible, thought := extractor.Flush()
+	if visible != "<|channel>" || thought != "" {
+		t.Fatalf("Flush() = %q/%q", visible, thought)
 	}
 }
 

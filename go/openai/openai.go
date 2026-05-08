@@ -748,6 +748,14 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 			if idx >= 0 {
 				writeThought(e, thoughtDelta, e.pending[:idx])
 				e.pending = e.pending[idx:]
+				if e.consumeMarkerAtStart() {
+					continue
+				}
+				if !final {
+					break
+				}
+				writeThought(e, thoughtDelta, channelMarker)
+				e.pending = e.pending[len(channelMarker):]
 				continue
 			}
 			emit, keep := splitSafeSuffix(e.pending, []string{channelMarker}, final)
@@ -769,7 +777,14 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 			writeContent(e, contentDelta, e.pending[:idx])
 			e.pending = e.pending[idx:]
 			if start == channelMarker {
-				e.consumeMarkerAtStart()
+				if e.consumeMarkerAtStart() {
+					continue
+				}
+				if !final {
+					break
+				}
+				writeContent(e, contentDelta, channelMarker)
+				e.pending = e.pending[len(channelMarker):]
 				continue
 			}
 			e.inPaired = true
