@@ -92,6 +92,37 @@ type CapabilityReporter interface {
 	Capabilities() CapabilityReport
 }
 
+// RuntimeMemoryLimits is a backend-neutral request/response for runtime memory
+// caps. Zero request values mean "leave unchanged"; previous values are filled
+// by backends that can report them.
+type RuntimeMemoryLimits struct {
+	CacheLimitBytes          uint64 `json:"cache_limit_bytes,omitempty"`
+	MemoryLimitBytes         uint64 `json:"memory_limit_bytes,omitempty"`
+	PreviousCacheLimitBytes  uint64 `json:"previous_cache_limit_bytes,omitempty"`
+	PreviousMemoryLimitBytes uint64 `json:"previous_memory_limit_bytes,omitempty"`
+}
+
+// RuntimeMemoryLimiter is implemented by native runtimes that expose allocator
+// limits without requiring callers to import the concrete runtime package.
+type RuntimeMemoryLimiter interface {
+	SetRuntimeMemoryLimits(limits RuntimeMemoryLimits) RuntimeMemoryLimits
+}
+
+// SetRuntimeMemoryLimits applies memory limits to a registered backend when it
+// supports [RuntimeMemoryLimiter]. The boolean is false when the backend is not
+// registered or does not support this operation.
+func SetRuntimeMemoryLimits(backendName string, limits RuntimeMemoryLimits) (RuntimeMemoryLimits, bool) {
+	backend, ok := Get(backendName)
+	if !ok {
+		return RuntimeMemoryLimits{}, false
+	}
+	limiter, ok := backend.(RuntimeMemoryLimiter)
+	if !ok {
+		return RuntimeMemoryLimits{}, false
+	}
+	return limiter.SetRuntimeMemoryLimits(limits), true
+}
+
 // NewCapability creates a single capability entry.
 func NewCapability(id CapabilityID, group CapabilityGroup, status CapabilityStatus, detail string) Capability {
 	return Capability{ID: id, Group: group, Status: status, Detail: detail}
