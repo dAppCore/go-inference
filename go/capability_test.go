@@ -76,6 +76,18 @@ func (m *capabilityModel) TrainGRPO(context.Context, DatasetStream, GRPOConfig) 
 	return &TrainingResult{Metrics: TrainingMetrics{Step: 1}}, nil
 }
 
+func (m *capabilityModel) Capabilities() CapabilityReport {
+	return CapabilityReport{
+		Runtime:   RuntimeIdentity{Backend: "stub", NativeRuntime: true},
+		Available: true,
+		Capabilities: []Capability{
+			SupportedCapability(CapabilityGenerate, CapabilityGroupModel),
+			ExperimentalCapability(CapabilityProbeEvents, CapabilityGroupProbe, "test sink"),
+			PlannedCapability(CapabilityQuantization, CapabilityGroupRuntime, "not in stub"),
+		},
+	}
+}
+
 func TestCapabilityInterfaces(t *testing.T) {
 	model := &capabilityModel{stubTextModel: &stubTextModel{}}
 
@@ -96,6 +108,8 @@ func TestCapabilityInterfaces(t *testing.T) {
 	_, ok = any(model).(DistillTrainer)
 	checkTrue(t, ok)
 	_, ok = any(model).(GRPOTrainer)
+	checkTrue(t, ok)
+	_, ok = any(model).(CapabilityReporter)
 	checkTrue(t, ok)
 }
 
@@ -137,4 +151,85 @@ func TestCapability_StateAndProbe_Ugly_MinimalModel(t *testing.T) {
 
 	probeable.SetProbeSink(ProbeSinkFunc(func(ProbeEvent) {}))
 	checkNotNil(t, model.sink)
+}
+
+func TestCapability_ReportHelpers_Good(t *testing.T) {
+	report := CapabilityReport{
+		Capabilities: []Capability{
+			SupportedCapability(CapabilityGenerate, CapabilityGroupModel),
+			ExperimentalCapability(CapabilityProbeEvents, CapabilityGroupProbe, "research telemetry"),
+			PlannedCapability(CapabilityQuantization, CapabilityGroupRuntime, "future"),
+			UnsupportedCapability(CapabilityGRPO, CapabilityGroupTraining, "stub"),
+		},
+	}
+
+	checkTrue(t, report.Supports(CapabilityGenerate))
+	checkTrue(t, report.Supports(CapabilityProbeEvents))
+	checkFalse(t, report.Supports(CapabilityQuantization))
+	checkFalse(t, report.Supports(CapabilityGRPO))
+	checkEqual(t, []CapabilityID{CapabilityGenerate, CapabilityProbeEvents}, report.SupportedCapabilityIDs())
+	checkEqual(t, []CapabilityID{CapabilityGenerate, CapabilityGRPO, CapabilityProbeEvents, CapabilityQuantization}, report.CapabilityIDs())
+}
+
+func TestCapability_CapabilityClone_Ugly(t *testing.T) {
+	report := CapabilityReport{Capabilities: []Capability{{
+		ID:     CapabilityGenerate,
+		Group:  CapabilityGroupModel,
+		Status: CapabilityStatusSupported,
+		Labels: map[string]string{"backend": "stub"},
+	}}}
+
+	capability, ok := report.Capability(CapabilityGenerate)
+	checkTrue(t, ok)
+	capability.Labels["backend"] = "mutated"
+
+	again, ok := report.Capability(CapabilityGenerate)
+	checkTrue(t, ok)
+	checkEqual(t, "stub", again.Labels["backend"])
+}
+
+func TestCapability_CapabilitiesOfReporter_Good(t *testing.T) {
+	model := &capabilityModel{stubTextModel: &stubTextModel{}}
+
+	report, ok := CapabilitiesOf(model)
+
+	checkTrue(t, ok)
+	checkTrue(t, report.Available)
+	checkEqual(t, "stub", report.Runtime.Backend)
+	checkTrue(t, report.Supports(CapabilityGenerate))
+	checkTrue(t, report.Supports(CapabilityProbeEvents))
+}
+
+func TestCapability_TextModelCapabilities_Good(t *testing.T) {
+	model := &capabilityModel{stubTextModel: &stubTextModel{}}
+
+	report := TextModelCapabilities(RuntimeIdentity{Backend: "test"}, model)
+
+	checkEqual(t, "test", report.Runtime.Backend)
+	checkTrue(t, report.Supports(CapabilityGenerate))
+	checkTrue(t, report.Supports(CapabilityTokenizer))
+	checkTrue(t, report.Supports(CapabilityLoRAInference))
+	checkTrue(t, report.Supports(CapabilityStateBundle))
+	checkTrue(t, report.Supports(CapabilityBenchmark))
+	checkTrue(t, report.Supports(CapabilityLoRATraining))
+	checkTrue(t, report.Supports(CapabilityDistillation))
+	checkTrue(t, report.Supports(CapabilityGRPO))
+}
+
+func TestCapability_BackendCapabilities_BadUnavailable(t *testing.T) {
+	backend := &stubBackend{name: "gpu", available: false}
+
+	report, ok := CapabilitiesOf(backend)
+
+	checkTrue(t, ok)
+	checkFalse(t, report.Available)
+	checkEqual(t, "gpu", report.Runtime.Backend)
+	checkTrue(t, report.Supports(CapabilityModelLoad))
+}
+
+func TestCapability_CapabilitiesOfUnknown_Ugly(t *testing.T) {
+	report, ok := CapabilitiesOf(struct{}{})
+
+	checkFalse(t, ok)
+	checkEqual(t, CapabilityReport{}, report)
 }
