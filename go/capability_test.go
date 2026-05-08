@@ -233,3 +233,48 @@ func TestCapability_CapabilitiesOfUnknown_Ugly(t *testing.T) {
 	checkFalse(t, ok)
 	checkEqual(t, CapabilityReport{}, report)
 }
+
+type memoryLimitBackend struct {
+	stubBackend
+	seen RuntimeMemoryLimits
+}
+
+func (backend *memoryLimitBackend) SetRuntimeMemoryLimits(limits RuntimeMemoryLimits) RuntimeMemoryLimits {
+	backend.seen = limits
+	limits.PreviousCacheLimitBytes = 128
+	limits.PreviousMemoryLimitBytes = 256
+	return limits
+}
+
+func TestCapability_SetRuntimeMemoryLimits_Good(t *testing.T) {
+	resetBackends(t)
+	backend := &memoryLimitBackend{stubBackend: stubBackend{name: "metal", available: true}}
+	Register(backend)
+
+	applied, ok := SetRuntimeMemoryLimits("metal", RuntimeMemoryLimits{CacheLimitBytes: 1024, MemoryLimitBytes: 2048})
+
+	checkTrue(t, ok)
+	checkEqual(t, uint64(1024), backend.seen.CacheLimitBytes)
+	checkEqual(t, uint64(2048), backend.seen.MemoryLimitBytes)
+	checkEqual(t, uint64(128), applied.PreviousCacheLimitBytes)
+	checkEqual(t, uint64(256), applied.PreviousMemoryLimitBytes)
+}
+
+func TestCapability_SetRuntimeMemoryLimits_BadMissing(t *testing.T) {
+	resetBackends(t)
+
+	applied, ok := SetRuntimeMemoryLimits("metal", RuntimeMemoryLimits{CacheLimitBytes: 1024})
+
+	checkFalse(t, ok)
+	checkEqual(t, RuntimeMemoryLimits{}, applied)
+}
+
+func TestCapability_SetRuntimeMemoryLimits_UglyUnsupported(t *testing.T) {
+	resetBackends(t)
+	Register(&stubBackend{name: "plain", available: true})
+
+	applied, ok := SetRuntimeMemoryLimits("plain", RuntimeMemoryLimits{CacheLimitBytes: 1024})
+
+	checkFalse(t, ok)
+	checkEqual(t, RuntimeMemoryLimits{}, applied)
+}
