@@ -277,17 +277,27 @@ type DecodeOptimisationReport struct {
 // DecodeOptimisationResult mirrors the driver's speculative/prompt-lookup
 // decode result. Drivers populate the fields their algorithm produces.
 type DecodeOptimisationResult struct {
-	Text          string  `json:"text,omitempty"`
-	AcceptedDraft int     `json:"accepted_draft,omitempty"`
-	TotalDraft    int     `json:"total_draft,omitempty"`
-	AcceptanceRate float64 `json:"acceptance_rate,omitempty"`
+	Mode    string                    `json:"mode"`
+	Prompt  string                    `json:"prompt,omitempty"`
+	Text    string                    `json:"text,omitempty"`
+	Tokens  []int32                   `json:"tokens,omitempty"`
+	Metrics DecodeOptimisationMetrics `json:"metrics"`
 }
 
-// DecodeOptimisationMetrics summarises the speed-up vs baseline.
+// DecodeOptimisationMetrics summarises candidate acceptance and timing.
 type DecodeOptimisationMetrics struct {
-	Baseline      GenerationMetrics `json:"baseline,omitempty"`
-	Accelerated   GenerationMetrics `json:"accelerated,omitempty"`
-	Speedup       float64           `json:"speedup,omitempty"`
+	TargetTokens   int           `json:"target_tokens,omitempty"`
+	DraftTokens    int           `json:"draft_tokens,omitempty"`
+	LookupTokens   int           `json:"lookup_tokens,omitempty"`
+	AcceptedTokens int           `json:"accepted_tokens,omitempty"`
+	RejectedTokens int           `json:"rejected_tokens,omitempty"`
+	EmittedTokens  int           `json:"emitted_tokens,omitempty"`
+	AcceptanceRate float64       `json:"acceptance_rate,omitempty"`
+	TargetCalls    int           `json:"target_calls,omitempty"`
+	DraftCalls     int           `json:"draft_calls,omitempty"`
+	Duration       time.Duration `json:"duration,omitempty"`
+	TargetDuration time.Duration `json:"target_duration,omitempty"`
+	DraftDuration  time.Duration `json:"draft_duration,omitempty"`
 }
 
 // QualityReport contains small deterministic checks over generated text.
