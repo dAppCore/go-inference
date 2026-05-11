@@ -64,15 +64,32 @@ func DefaultConfig() Config {
 
 // Info mirrors a driver's model info — the fields bench consumers care about.
 type Info struct {
-	Architecture  string  `json:"architecture,omitempty"`
-	VocabSize     int     `json:"vocab_size,omitempty"`
-	NumLayers     int     `json:"num_layers,omitempty"`
-	HiddenSize    int     `json:"hidden_size,omitempty"`
-	QuantBits     int     `json:"quant_bits,omitempty"`
-	QuantGroup    int     `json:"quant_group,omitempty"`
-	ContextLength int     `json:"context_length,omitempty"`
-	AdapterPath   string  `json:"adapter_path,omitempty"`
-	AdapterHash   string  `json:"adapter_hash,omitempty"`
+	Architecture  string      `json:"architecture,omitempty"`
+	VocabSize     int         `json:"vocab_size,omitempty"`
+	NumLayers     int         `json:"num_layers,omitempty"`
+	HiddenSize    int         `json:"hidden_size,omitempty"`
+	QuantBits     int         `json:"quant_bits,omitempty"`
+	QuantGroup    int         `json:"quant_group,omitempty"`
+	ContextLength int         `json:"context_length,omitempty"`
+	Adapter       AdapterInfo `json:"adapter,omitempty"`
+}
+
+// AdapterInfo identifies a LoRA adapter participating in the bench run.
+// Mirrors the shape of go-mlx/lora.AdapterInfo but lives in bench to keep
+// the package driver-neutral.
+type AdapterInfo struct {
+	Name       string   `json:"name,omitempty"`
+	Path       string   `json:"path,omitempty"`
+	Hash       string   `json:"hash,omitempty"`
+	Rank       int      `json:"rank,omitempty"`
+	Alpha      float32  `json:"alpha,omitempty"`
+	Scale      float32  `json:"scale,omitempty"`
+	TargetKeys []string `json:"target_keys,omitempty"`
+}
+
+// IsEmpty reports whether the adapter info has no meaningful fields set.
+func (info AdapterInfo) IsEmpty() bool {
+	return info.Name == "" && info.Path == "" && info.Hash == "" && info.Rank == 0 && info.Alpha == 0 && info.Scale == 0 && len(info.TargetKeys) == 0
 }
 
 // GenerateOptions describes one generation request.
