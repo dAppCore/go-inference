@@ -19,10 +19,12 @@ const (
 	ProbeEventCachePressure  ProbeEventKind = "cache_pressure"
 	ProbeEventMemoryPressure ProbeEventKind = "memory_pressure"
 	ProbeEventTraining       ProbeEventKind = "training"
+	ProbeEventScheduler      ProbeEventKind = "scheduler"
 
 	ProbePhasePrefill  ProbePhase = "prefill"
 	ProbePhaseDecode   ProbePhase = "decode"
 	ProbePhaseTraining ProbePhase = "training"
+	ProbePhaseQueue    ProbePhase = "queue"
 )
 
 // ProbeEvent is the typed envelope for model-state observation.
@@ -41,6 +43,7 @@ type ProbeEvent struct {
 	Cache          *ProbeCachePressure   `json:"cache,omitempty"`
 	Memory         *ProbeMemoryPressure  `json:"memory,omitempty"`
 	Training       *ProbeTraining        `json:"training,omitempty"`
+	Scheduler      *ProbeScheduler       `json:"scheduler,omitempty"`
 }
 
 // ProbeToken records token-level stream state.
@@ -125,6 +128,17 @@ type ProbeTraining struct {
 	Step         int     `json:"step,omitempty"`
 	Loss         float64 `json:"loss,omitempty"`
 	LearningRate float64 `json:"learning_rate,omitempty"`
+}
+
+// ProbeScheduler records request-scheduler queue + latency events.
+type ProbeScheduler struct {
+	RequestID               string  `json:"request_id,omitempty"`
+	Event                   string  `json:"event,omitempty"`
+	QueueDepth              int     `json:"queue_depth,omitempty"`
+	QueueLatencyMillis      float64 `json:"queue_latency_millis,omitempty"`
+	FirstTokenLatencyMillis float64 `json:"first_token_latency_millis,omitempty"`
+	TotalLatencyMillis      float64 `json:"total_latency_millis,omitempty"`
+	Cancelled               bool    `json:"cancelled,omitempty"`
 }
 
 // ProbeSink receives typed probe events from model backends.
