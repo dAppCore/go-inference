@@ -6,6 +6,8 @@ import (
 	"context"
 	"maps"
 	"slices"
+
+	core "dappco.re/go"
 )
 
 // CapabilityGroup identifies the layer a capability belongs to.
@@ -36,30 +38,52 @@ const (
 type CapabilityID string
 
 const (
-	CapabilityModelLoad       CapabilityID = "model.load"
-	CapabilityGenerate        CapabilityID = "generate"
-	CapabilityChat            CapabilityID = "chat"
-	CapabilityClassify        CapabilityID = "classify"
-	CapabilityBatchGenerate   CapabilityID = "batch.generate"
-	CapabilityTokenizer       CapabilityID = "tokenizer"
-	CapabilityChatTemplate    CapabilityID = "chat.template"
-	CapabilityLoRAInference   CapabilityID = "lora.inference"
-	CapabilityLoRATraining    CapabilityID = "lora.training"
-	CapabilityStateBundle     CapabilityID = "state.bundle"
-	CapabilityKVSnapshot      CapabilityID = "kv.snapshot"
-	CapabilityPromptCache     CapabilityID = "prompt.cache"
-	CapabilityKVCachePlanning CapabilityID = "kv.cache.planning"
-	CapabilityMemoryPlanning  CapabilityID = "memory.planning"
-	CapabilityModelFit        CapabilityID = "model.fit"
-	CapabilityBenchmark       CapabilityID = "benchmark"
-	CapabilityEvaluation      CapabilityID = "evaluation"
-	CapabilityDistillation    CapabilityID = "distillation"
-	CapabilityGRPO            CapabilityID = "grpo"
-	CapabilityQuantization    CapabilityID = "quantization"
-	CapabilityModelMerge      CapabilityID = "model.merge"
-	CapabilityProbeEvents     CapabilityID = "probe.events"
-	CapabilityAttentionProbe  CapabilityID = "probe.attention"
-	CapabilityLogitProbe      CapabilityID = "probe.logits"
+	CapabilityModelLoad          CapabilityID = "model.load"
+	CapabilityGenerate           CapabilityID = "generate"
+	CapabilityChat               CapabilityID = "chat"
+	CapabilityClassify           CapabilityID = "classify"
+	CapabilityBatchGenerate      CapabilityID = "batch.generate"
+	CapabilityTokenizer          CapabilityID = "tokenizer"
+	CapabilityChatTemplate       CapabilityID = "chat.template"
+	CapabilityLoRAInference      CapabilityID = "lora.inference"
+	CapabilityLoRATraining       CapabilityID = "lora.training"
+	CapabilityStateBundle        CapabilityID = "state.bundle"
+	CapabilityKVSnapshot         CapabilityID = "kv.snapshot"
+	CapabilityPromptCache        CapabilityID = "prompt.cache"
+	CapabilityKVCachePlanning    CapabilityID = "kv.cache.planning"
+	CapabilityMemoryPlanning     CapabilityID = "memory.planning"
+	CapabilityModelFit           CapabilityID = "model.fit"
+	CapabilityBenchmark          CapabilityID = "benchmark"
+	CapabilityEvaluation         CapabilityID = "evaluation"
+	CapabilityDistillation       CapabilityID = "distillation"
+	CapabilityGRPO               CapabilityID = "grpo"
+	CapabilityQuantization       CapabilityID = "quantization"
+	CapabilityModelMerge         CapabilityID = "model.merge"
+	CapabilityProbeEvents        CapabilityID = "probe.events"
+	CapabilityAttentionProbe     CapabilityID = "probe.attention"
+	CapabilityLogitProbe         CapabilityID = "probe.logits"
+	CapabilityResponsesAPI       CapabilityID = "responses.api"
+	CapabilityAnthropicMessages  CapabilityID = "anthropic.messages"
+	CapabilityOllamaCompat       CapabilityID = "ollama.compat"
+	CapabilityEmbeddings         CapabilityID = "embeddings"
+	CapabilityRerank             CapabilityID = "rerank"
+	CapabilityScheduler          CapabilityID = "scheduler"
+	CapabilityRequestCancel      CapabilityID = "request.cancel"
+	CapabilityCacheBlocks        CapabilityID = "cache.blocks"
+	CapabilityCacheDisk          CapabilityID = "cache.disk"
+	CapabilityCacheWarm          CapabilityID = "cache.warm"
+	CapabilityToolParse          CapabilityID = "tool.parse"
+	CapabilityReasoningParse     CapabilityID = "reasoning.parse"
+	CapabilitySpeculativeDecode  CapabilityID = "speculative.decode"
+	CapabilityPromptLookupDecode CapabilityID = "prompt.lookup.decode"
+	CapabilityMoERouting         CapabilityID = "moe.routing"
+	CapabilityMoELazyExperts     CapabilityID = "moe.lazy_experts"
+	CapabilityJANGTQ             CapabilityID = "jangtq"
+	CapabilityCodebookVQ         CapabilityID = "codebook.vq"
+	CapabilityAgentMemory        CapabilityID = "agent.memory"
+	CapabilityStateWake          CapabilityID = "state.wake"
+	CapabilityStateSleep         CapabilityID = "state.sleep"
+	CapabilityStateFork          CapabilityID = "state.fork"
 )
 
 // Capability describes one backend feature without importing that backend.
@@ -69,6 +93,76 @@ type Capability struct {
 	Status CapabilityStatus  `json:"status"`
 	Detail string            `json:"detail,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
+}
+
+// FeatureRuntimeStatus records how far a backend has implemented a shared
+// algorithm beyond the coarse portable capability status.
+type FeatureRuntimeStatus string
+
+const (
+	// FeatureRuntimeNative means the backend has a native implementation.
+	FeatureRuntimeNative FeatureRuntimeStatus = "native"
+	// FeatureRuntimeExperimental means the backend implementation is usable but unstable.
+	FeatureRuntimeExperimental FeatureRuntimeStatus = "experimental"
+	// FeatureRuntimeMetadataOnly means metadata/planning support exists, but kernels or execution are pending.
+	FeatureRuntimeMetadataOnly FeatureRuntimeStatus = "metadata_only"
+	// FeatureRuntimePlanned means the feature is intentionally tracked but not implemented.
+	FeatureRuntimePlanned FeatureRuntimeStatus = "planned"
+)
+
+// AlgorithmProfile describes one backend-neutral algorithm or feature surface.
+// Backends can publish these profiles as labelled capabilities without leaking
+// their concrete runtime package.
+type AlgorithmProfile struct {
+	ID               CapabilityID         `json:"id"`
+	Group            CapabilityGroup      `json:"group"`
+	CapabilityStatus CapabilityStatus     `json:"capability_status"`
+	RuntimeStatus    FeatureRuntimeStatus `json:"runtime_status"`
+	Algorithm        string               `json:"algorithm,omitempty"`
+	Detail           string               `json:"detail,omitempty"`
+	Architectures    []string             `json:"architectures,omitempty"`
+	Requires         []CapabilityID       `json:"requires,omitempty"`
+	Provides         []string             `json:"provides,omitempty"`
+	Notes            []string             `json:"notes,omitempty"`
+}
+
+// Capability converts an algorithm profile into the portable report shape.
+func (profile AlgorithmProfile) Capability() Capability {
+	capability := NewCapability(profile.ID, profile.Group, profile.CapabilityStatus, profile.Detail)
+	labels := map[string]string{
+		"runtime_status": string(profile.RuntimeStatus),
+	}
+	if profile.Algorithm != "" {
+		labels["algorithm"] = profile.Algorithm
+	}
+	if len(profile.Architectures) > 0 {
+		labels["architectures"] = core.Join(",", profile.Architectures...)
+	}
+	if len(profile.Requires) > 0 {
+		labels["requires"] = capabilityIDLabel(profile.Requires)
+	}
+	if len(profile.Provides) > 0 {
+		labels["provides"] = core.Join(",", profile.Provides...)
+	}
+	capability.Labels = labels
+	return capability
+}
+
+// CloneAlgorithmProfile returns an independent copy of profile.
+func CloneAlgorithmProfile(profile AlgorithmProfile) AlgorithmProfile {
+	profile.Architectures = append([]string(nil), profile.Architectures...)
+	profile.Requires = append([]CapabilityID(nil), profile.Requires...)
+	profile.Provides = append([]string(nil), profile.Provides...)
+	profile.Notes = append([]string(nil), profile.Notes...)
+	return profile
+}
+
+func capabilityIDLabel(ids []CapabilityID) string {
+	values := make([]string, 0, len(ids))
+	for _, id := range ids {
+		values = append(values, string(id))
+	}
+	return core.Join(",", values...)
 }
 
 // CapabilityReport is the portable backend/model feature report consumed by
@@ -277,6 +371,30 @@ func TextModelCapabilities(runtime RuntimeIdentity, model TextModel) CapabilityR
 	if _, ok := model.(Evaluator); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityEvaluation, CapabilityGroupRuntime))
 	}
+	if _, ok := model.(SchedulerModel); ok {
+		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityScheduler, CapabilityGroupRuntime))
+	}
+	if _, ok := model.(CancellableModel); ok {
+		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityRequestCancel, CapabilityGroupRuntime))
+	}
+	if _, ok := model.(CacheService); ok {
+		report.Capabilities = append(report.Capabilities,
+			SupportedCapability(CapabilityCacheBlocks, CapabilityGroupRuntime),
+			SupportedCapability(CapabilityCacheWarm, CapabilityGroupRuntime),
+		)
+	}
+	if _, ok := model.(EmbeddingModel); ok {
+		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityEmbeddings, CapabilityGroupModel))
+	}
+	if _, ok := model.(RerankModel); ok {
+		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityRerank, CapabilityGroupModel))
+	}
+	if _, ok := model.(ReasoningParser); ok {
+		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityReasoningParse, CapabilityGroupModel))
+	}
+	if _, ok := model.(ToolParser); ok {
+		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityToolParse, CapabilityGroupModel))
+	}
 	if _, ok := model.(SFTTrainer); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityLoRATraining, CapabilityGroupTraining))
 	}
@@ -288,6 +406,16 @@ func TextModelCapabilities(runtime RuntimeIdentity, model TextModel) CapabilityR
 	}
 	if _, ok := model.(ModelFitPlanner); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityModelFit, CapabilityGroupRuntime))
+	}
+	if _, ok := model.(AgentMemorySession); ok {
+		report.Capabilities = append(report.Capabilities,
+			SupportedCapability(CapabilityAgentMemory, CapabilityGroupRuntime),
+			SupportedCapability(CapabilityStateWake, CapabilityGroupRuntime),
+			SupportedCapability(CapabilityStateSleep, CapabilityGroupRuntime),
+		)
+	}
+	if _, ok := model.(AgentMemoryForker); ok {
+		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityStateFork, CapabilityGroupRuntime))
 	}
 	return report
 }
