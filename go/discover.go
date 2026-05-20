@@ -13,11 +13,14 @@ import (
 //	    fmt.Printf("%s  arch=%s  quant=%dbit\n", m.Path, m.ModelType, m.QuantBits)
 //	}
 type DiscoveredModel struct {
-	Path       string // Absolute path to the model directory
-	ModelType  string // Architecture from config.json (e.g. "gemma3", "qwen3", "llama")
-	QuantBits  int    // Quantisation bits (0 if unquantised)
-	QuantGroup int    // Quantisation group size
-	NumFiles   int    // Number of safetensors weight files
+	Path        string // Absolute path to the model directory or GGUF file
+	ModelType   string // Architecture from config.json/GGUF metadata
+	QuantBits   int    // Quantisation bits (0 if unquantised or unknown)
+	QuantGroup  int    // Quantisation group size
+	QuantType   string // Quantisation type, when known (e.g. q4_k_m, q8_0)
+	QuantFamily string // Quantisation family, when known (e.g. q4, q8)
+	NumFiles    int    // Number of weight files
+	Format      string // safetensors or gguf when known
 }
 
 // A valid directory has config.json + at least one .safetensors file.
@@ -76,6 +79,7 @@ func probeModelDir(fsys *core.Fs, dir string) (DiscoveredModel, bool) {
 	model := DiscoveredModel{
 		Path:     absolutePath(dir),
 		NumFiles: numFiles,
+		Format:   "safetensors",
 	}
 
 	var probe struct {
