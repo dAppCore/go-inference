@@ -26,6 +26,7 @@ existing callers keep compiling.
 |------|-----|--------------|
 | `agent_memory.go` | [agent_memory.md](agent_memory.md) | Wake/Sleep/Fork lifecycle DTOs + `Session` + `Forker` interfaces |
 | `identity.go`     | [identity.md](identity.md)     | `ModelIdentity` / `TokenizerIdentity` / `AdapterIdentity` / `RuntimeIdentity` / `SamplerConfig` / `StateRef` / `Bundle` |
+| `project_seed.go` | [project_seed.md](project_seed.md) | Project seed URI planning, continuation modes, and wake compatibility checks |
 | `store.go`        | [store.md](store.md)        | `Store` / `Resolver` / `Writer` interfaces + `Chunk` / `ChunkRef` DTOs + `Resolve*` free fns + codec constants |
 | `memory.go`       | [memory.md](memory.md)       | `InMemoryStore` — in-process test/dev backend |
 | `filestore/store.go` | [filestore.md](filestore.md) | Append-only file-log durable backend |
@@ -69,6 +70,11 @@ A sleep produces a `Bundle` whose `KVRefs` / `ProbeRefs` /
 bundle, then reads each chunk back through the same Store. The two
 interfaces in `agent_memory.go` (`Session` + `Forker`) are the only
 runtime contracts; everything else is data.
+
+`project_seed.go` sits one level above those DTOs. It helps an app or agent
+runner build consistent project seed URIs, choose state-checkpoint versus
+summary-window continuation, and run compatibility checks before asking a
+backend to wake KV.
 
 ## Codec constants
 

@@ -7,7 +7,7 @@
 
 ## What this is
 
-A thin re-export layer. The identity types (`ModelIdentity`, `TokenizerIdentity`, etc.) and the `Bundle` envelope live in the `state` subpackage; this file aliases them into the parent `inference` package so consumers importing only `dappco.re/go/inference` see the common names.
+A thin re-export layer. The identity types (`ModelIdentity`, `TokenizerIdentity`, etc.), the `Bundle` envelope, and project-seed helpers live in the `state` subpackage; this file aliases them into the parent `inference` package so consumers importing only `dappco.re/go/inference` see the common names.
 
 Two real bits of code on top: `SamplerConfigFromGenerateConfig` + `GenerateConfigFromSamplerConfig`.
 
@@ -21,6 +21,7 @@ type RuntimeIdentity   = state.RuntimeIdentity
 type SamplerConfig     = state.SamplerConfig
 type StateRef          = state.StateRef
 type StateBundle       = state.Bundle
+type ProjectSeed       = state.ProjectSeed
 ```
 
 A consumer writes:
@@ -64,5 +65,6 @@ The `state` package was hoisted out so the wire shapes for state could be import
 ## Related
 
 - [../state/identity.md](../state/identity.md) — the real DTOs
+- [../state/project_seed.md](../state/project_seed.md) — project-seed helpers and wake compatibility checks
 - [options.md](options.md) — `GenerateConfig` / `GenerateOption`
 - [../state/agent_memory.md](../state/agent_memory.md) — bundles consume these identities at Sleep

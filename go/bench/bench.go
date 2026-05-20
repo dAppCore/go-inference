@@ -43,6 +43,7 @@ type Config struct {
 	MemvidKVBlockSize           int      `json:"memvid_kv_block_size,omitempty"`
 	MemvidKVPrefixTokens        int      `json:"memvid_kv_prefix_tokens,omitempty"`
 	MemvidKVBlockStorePath      string   `json:"memvid_kv_block_store_path,omitempty"`
+	SpeculativeDraftModelPath   string   `json:"speculative_draft_model_path,omitempty"`
 	SpeculativeDraftTokens      int      `json:"speculative_draft_tokens,omitempty"`
 	PromptLookupTokens          []int32  `json:"prompt_lookup_tokens,omitempty"`
 	QualityPrompts              []string `json:"quality_prompts,omitempty"`
@@ -124,9 +125,9 @@ func (c Config) GenerateOptions(sink any) GenerateOptions {
 
 // Generation is one model response plus the driver-reported metrics.
 type Generation struct {
-	Text    string             `json:"text,omitempty"`
-	Tokens  []int32            `json:"tokens,omitempty"`
-	Metrics GenerationMetrics  `json:"metrics"`
+	Text    string            `json:"text,omitempty"`
+	Tokens  []int32           `json:"tokens,omitempty"`
+	Metrics GenerationMetrics `json:"metrics"`
 }
 
 // GenerationMetrics is the bench-readable snapshot of generation timing
@@ -135,6 +136,7 @@ type Generation struct {
 type GenerationMetrics struct {
 	PromptTokens               int           `json:"prompt_tokens"`
 	GeneratedTokens            int           `json:"generated_tokens"`
+	FirstTokenDuration         time.Duration `json:"first_token_duration,omitempty"`
 	PrefillDuration            time.Duration `json:"prefill_duration"`
 	DecodeDuration             time.Duration `json:"decode_duration"`
 	TotalDuration              time.Duration `json:"total_duration"`
@@ -197,6 +199,7 @@ type GenerationSummary struct {
 	Runs                int                `json:"runs"`
 	PromptTokens        int                `json:"prompt_tokens"`
 	GeneratedTokens     int                `json:"generated_tokens"`
+	FirstTokenDuration  time.Duration      `json:"first_token_duration,omitempty"`
 	PrefillTokensPerSec float64            `json:"prefill_tokens_per_sec"`
 	DecodeTokensPerSec  float64            `json:"decode_tokens_per_sec"`
 	PrefillDuration     time.Duration      `json:"prefill_duration"`
@@ -285,10 +288,10 @@ type ProbeReport struct {
 // DecodeOptimisationReport records an optional decode-optimisation
 // comparison against the baseline generation path.
 type DecodeOptimisationReport struct {
-	Attempted bool                       `json:"attempted"`
-	Result    DecodeOptimisationResult   `json:"result,omitempty"`
-	Metrics   DecodeOptimisationMetrics  `json:"metrics,omitempty"`
-	Error     string                     `json:"error,omitempty"`
+	Attempted bool                      `json:"attempted"`
+	Result    DecodeOptimisationResult  `json:"result,omitempty"`
+	Metrics   DecodeOptimisationMetrics `json:"metrics,omitempty"`
+	Error     string                    `json:"error,omitempty"`
 }
 
 // DecodeOptimisationResult mirrors the driver's speculative/prompt-lookup
@@ -303,18 +306,21 @@ type DecodeOptimisationResult struct {
 
 // DecodeOptimisationMetrics summarises candidate acceptance and timing.
 type DecodeOptimisationMetrics struct {
-	TargetTokens   int           `json:"target_tokens,omitempty"`
-	DraftTokens    int           `json:"draft_tokens,omitempty"`
-	LookupTokens   int           `json:"lookup_tokens,omitempty"`
-	AcceptedTokens int           `json:"accepted_tokens,omitempty"`
-	RejectedTokens int           `json:"rejected_tokens,omitempty"`
-	EmittedTokens  int           `json:"emitted_tokens,omitempty"`
-	AcceptanceRate float64       `json:"acceptance_rate,omitempty"`
-	TargetCalls    int           `json:"target_calls,omitempty"`
-	DraftCalls     int           `json:"draft_calls,omitempty"`
-	Duration       time.Duration `json:"duration,omitempty"`
-	TargetDuration time.Duration `json:"target_duration,omitempty"`
-	DraftDuration  time.Duration `json:"draft_duration,omitempty"`
+	TargetTokens        int           `json:"target_tokens,omitempty"`
+	DraftTokens         int           `json:"draft_tokens,omitempty"`
+	LookupTokens        int           `json:"lookup_tokens,omitempty"`
+	AcceptedTokens      int           `json:"accepted_tokens,omitempty"`
+	RejectedTokens      int           `json:"rejected_tokens,omitempty"`
+	EmittedTokens       int           `json:"emitted_tokens,omitempty"`
+	AcceptanceRate      float64       `json:"acceptance_rate,omitempty"`
+	TargetCalls         int           `json:"target_calls,omitempty"`
+	DraftCalls          int           `json:"draft_calls,omitempty"`
+	Duration            time.Duration `json:"duration,omitempty"`
+	TargetDuration      time.Duration `json:"target_duration,omitempty"`
+	DraftDuration       time.Duration `json:"draft_duration,omitempty"`
+	VisibleTokensPerSec float64       `json:"visible_tokens_per_sec,omitempty"`
+	TargetTokensPerSec  float64       `json:"target_tokens_per_sec,omitempty"`
+	DraftTokensPerSec   float64       `json:"draft_tokens_per_sec,omitempty"`
 }
 
 // QualityReport contains small deterministic checks over generated text.
@@ -432,6 +438,7 @@ func configZero(cfg Config) bool {
 		cfg.MemvidKVBlockSize == 0 &&
 		cfg.MemvidKVPrefixTokens == 0 &&
 		cfg.MemvidKVBlockStorePath == "" &&
+		cfg.SpeculativeDraftModelPath == "" &&
 		cfg.SpeculativeDraftTokens == 0 &&
 		len(cfg.PromptLookupTokens) == 0 &&
 		len(cfg.QualityPrompts) == 0
@@ -440,7 +447,7 @@ func configZero(cfg Config) bool {
 func runGeneration(ctx context.Context, runner Runner, prompt string, opts GenerateOptions) (GenerationSample, error) {
 	start := time.Now()
 	generation, err := runner.Generate(ctx, prompt, opts)
-	elapsed := time.Since(start)
+	elapsed := NonZeroDuration(time.Since(start))
 	if err != nil {
 		return GenerationSample{}, err
 	}
@@ -459,10 +466,15 @@ func summarizeGenerations(samples []GenerationSample) GenerationSummary {
 		Samples: append([]GenerationSample(nil), samples...),
 	}
 	var prefillRateTotal, decodeRateTotal float64
+	firstTokenSamples := 0
 	for _, sample := range samples {
 		metrics := sample.Metrics
 		summary.PromptTokens += metrics.PromptTokens
 		summary.GeneratedTokens += metrics.GeneratedTokens
+		if metrics.FirstTokenDuration > 0 {
+			firstTokenSamples++
+			summary.FirstTokenDuration += metrics.FirstTokenDuration
+		}
 		summary.PrefillDuration += metrics.PrefillDuration
 		summary.DecodeDuration += metrics.DecodeDuration
 		if metrics.TotalDuration > 0 {
@@ -482,6 +494,9 @@ func summarizeGenerations(samples []GenerationSample) GenerationSummary {
 	if len(samples) > 0 {
 		summary.PrefillTokensPerSec = prefillRateTotal / float64(len(samples))
 		summary.DecodeTokensPerSec = decodeRateTotal / float64(len(samples))
+	}
+	if firstTokenSamples > 0 {
+		summary.FirstTokenDuration /= time.Duration(firstTokenSamples)
 	}
 	return summary
 }

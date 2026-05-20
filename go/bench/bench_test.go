@@ -50,6 +50,7 @@ func TestRun_AggregatesGenerationSummary_Good(t *testing.T) {
 			{
 				PromptTokens:        4,
 				GeneratedTokens:     6,
+				FirstTokenDuration:  12 * time.Millisecond,
 				PrefillDuration:     20 * time.Millisecond,
 				DecodeDuration:      30 * time.Millisecond,
 				TotalDuration:       50 * time.Millisecond,
@@ -61,6 +62,7 @@ func TestRun_AggregatesGenerationSummary_Good(t *testing.T) {
 			{
 				PromptTokens:        4,
 				GeneratedTokens:     8,
+				FirstTokenDuration:  18 * time.Millisecond,
 				PrefillDuration:     20 * time.Millisecond,
 				DecodeDuration:      40 * time.Millisecond,
 				TotalDuration:       60 * time.Millisecond,
@@ -98,6 +100,9 @@ func TestRun_AggregatesGenerationSummary_Good(t *testing.T) {
 	}
 	if summary.TotalDuration != 110*time.Millisecond {
 		t.Fatalf("total duration = %v, want 110ms", summary.TotalDuration)
+	}
+	if summary.FirstTokenDuration != 15*time.Millisecond {
+		t.Fatalf("first token duration = %v, want 15ms average", summary.FirstTokenDuration)
 	}
 	if len(summary.Samples) != 2 || summary.Samples[0].Text != "alpha" || summary.Samples[1].Text != "beta" {
 		t.Fatalf("samples = %+v", summary.Samples)
