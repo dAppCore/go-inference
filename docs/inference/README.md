@@ -16,6 +16,7 @@ Three categories:
 | **Options** | GenerateOption + LoadOption + With* | [options.md](options.md) |
 | **Extension** | Scheduler, Cache, Embedding, Rerank, ToolParse, ReasoningParse, ModelPackInspect | [contracts.md](contracts.md) |
 | **Static intro** | CapabilityReport / AlgorithmProfile / RuntimeMemoryLimits | [capability.md](capability.md) |
+| **Local setup** | MachineDiscoverer / TuningPlanner / model replace | [local_tuning.md](local_tuning.md) |
 | **Dynamic observe** | ProbeEvent / ProbeSink | [probe.md](probe.md) |
 | **Lifecycle** | Service + RegisterCore (Mantis #1336) | [service.md](service.md) |
 | **Training** | TrainableModel + Adapter + LoRAConfig | [training.md](training.md) |

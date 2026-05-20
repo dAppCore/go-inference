@@ -10,6 +10,10 @@ func qwenMarkers() []reasoningMarker {
 
 func gemmaMarkers() []reasoningMarker {
 	return append([]reasoningMarker{
+		{start: "<|channel>thought\n", ends: []string{"<channel|>"}, kind: "thinking"},
+		{start: "<|channel>thinking\n", ends: []string{"<channel|>"}, kind: "thinking"},
+		{start: "<|channel>reasoning\n", ends: []string{"<channel|>"}, kind: "reasoning"},
+		{start: "<|channel>analysis\n", ends: []string{"<channel|>"}, kind: "analysis"},
 		{start: "<start_of_turn>thinking\n", ends: []string{"<end_of_turn>"}, kind: "thinking"},
 		{start: "<start_of_turn>thought\n", ends: []string{"<end_of_turn>"}, kind: "thinking"},
 		{start: "<start_of_turn>analysis\n", ends: []string{"<end_of_turn>"}, kind: "analysis"},
