@@ -73,14 +73,32 @@ func discoverDir(fsys *core.Fs, dir string, yield func(DiscoveredModel) bool) bo
 // Accepts directories that contain config.json and at least one
 // .safetensors file. `entries` is the pre-read directory listing —
 // avoids the second readDir that countSafetensors used to do.
+//
+// Order matters: single pass over entries first to count safetensors
+// AND verify config.json exists. Only then read config.json. This
+// short-circuits the wasted disk Read for junk directories that have
+// neither — see Discover_NoModels_TenJunkDirs which used to pay one
+// fsys.Read per dir before this gate.
 func probeModelDir(fsys *core.Fs, dir string, entries []core.FsDirEntry) (DiscoveredModel, bool) {
-	config := fsys.Read(joinPath(dir, "config.json"))
-	if !config.OK {
+	numFiles := 0
+	hasConfig := false
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == "config.json" {
+			hasConfig = true
+		} else if core.HasSuffix(name, ".safetensors") {
+			numFiles++
+		}
+	}
+	if numFiles == 0 || !hasConfig {
 		return DiscoveredModel{}, false
 	}
 
-	numFiles := countSafetensors(entries)
-	if numFiles == 0 {
+	config := fsys.Read(joinPath(dir, "config.json"))
+	if !config.OK {
 		return DiscoveredModel{}, false
 	}
 
@@ -133,16 +151,6 @@ func readDir(fsys *core.Fs, dir string) ([]core.FsDirEntry, bool) {
 		return cmp.Compare(a.Name(), b.Name())
 	})
 	return entries, true
-}
-
-func countSafetensors(entries []core.FsDirEntry) int {
-	count := 0
-	for _, entry := range entries {
-		if !entry.IsDir() && core.HasSuffix(entry.Name(), ".safetensors") {
-			count++
-		}
-	}
-	return count
 }
 
 func absolutePath(dir string) string {
