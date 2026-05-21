@@ -12,6 +12,7 @@ package bench
 
 import (
 	"context"
+	"strconv"
 	"time"
 
 	core "dappco.re/go"
@@ -375,7 +376,7 @@ func Run(ctx context.Context, runner Runner, cfg Config) (*Report, error) {
 		report.ModelInfo = runner.Info(ctx)
 	}
 
-	var samples []GenerationSample
+	samples := make([]GenerationSample, 0, cfg.Runs)
 	for range cfg.Runs {
 		sample, err := runGeneration(ctx, runner, cfg.Prompt, cfg.GenerateOptions(nil))
 		if err != nil {
@@ -540,7 +541,9 @@ func summarizeGenerations(samples []GenerationSample) GenerationSummary {
 }
 
 func qualityChecks(samples []GenerationSample) []QualityCheck {
-	var checks []QualityCheck
+	// Pre-sized for the two fixed checks; strconv.Itoa skips the fmt
+	// formatter pipeline that Sprintf would walk.
+	checks := make([]QualityCheck, 0, 2)
 	nonEmpty := false
 	generatedTokens := 0
 	for _, sample := range samples {
@@ -558,7 +561,7 @@ func qualityChecks(samples []GenerationSample) []QualityCheck {
 		Name:   "generated_tokens",
 		Pass:   generatedTokens > 0,
 		Score:  boolScore(generatedTokens > 0),
-		Detail: core.Sprintf("%d", generatedTokens),
+		Detail: strconv.Itoa(generatedTokens),
 	})
 	return checks
 }
