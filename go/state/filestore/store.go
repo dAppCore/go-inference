@@ -237,12 +237,13 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 		return state.ChunkRef{}, core.NewError("state file store metadata is too large")
 	}
 
-	header := encodeRecordHeader(id, payloadSize, len(metaBytes))
+	var headerBuf [recordHeaderLen]byte
+	encodeRecordHeader(headerBuf[:], id, payloadSize, len(metaBytes))
 	offset := s.writeAt
 	if _, err := s.file.Seek(offset, stdio.SeekStart); err != nil {
 		return state.ChunkRef{}, core.E("state.filestore.Put", "seek to append offset", err)
 	}
-	if err := writeAll(s.file, header); err != nil {
+	if err := writeAll(s.file, headerBuf[:]); err != nil {
 		s.rollbackWriteLocked(offset)
 		return state.ChunkRef{}, core.E("state.filestore.Put", "write record header", err)
 	}
@@ -364,11 +365,11 @@ func (s *Store) resolveRefBytesLocked(ref state.ChunkRef) (state.Chunk, error) {
 		return state.Chunk{}, core.NewError("state file store frame offset is too large")
 	}
 	offset := int64(ref.FrameOffset)
-	header := make([]byte, recordHeaderLen)
-	if _, err := s.file.ReadAt(header, offset); err != nil {
+	var headerBuf [recordHeaderLen]byte
+	if _, err := s.file.ReadAt(headerBuf[:], offset); err != nil {
 		return state.Chunk{}, core.E("state.filestore.ResolveRefBytes", "read record header", err)
 	}
-	record, err := decodeRecordHeader(header)
+	record, err := decodeRecordHeader(headerBuf[:])
 	if err != nil {
 		return state.Chunk{}, err
 	}
@@ -423,11 +424,11 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		if offset+recordHeaderLen > size {
 			return core.NewError("state file store has truncated record header")
 		}
-		header := make([]byte, recordHeaderLen)
-		if _, err := s.file.ReadAt(header, offset); err != nil {
+		var headerBuf [recordHeaderLen]byte
+		if _, err := s.file.ReadAt(headerBuf[:], offset); err != nil {
 			return core.E("state.filestore.Open", "read record header", err)
 		}
-		record, err := decodeRecordHeader(header)
+		record, err := decodeRecordHeader(headerBuf[:])
 		if err != nil {
 			return err
 		}
@@ -523,20 +524,27 @@ type recordHeader struct {
 	metaSize    uint32
 }
 
-func encodeRecordHeader(chunkID int, payloadSize, metaSize int) []byte {
-	header := make([]byte, recordHeaderLen)
-	copy(header[:4], recordMagic[:])
-	binary.LittleEndian.PutUint64(header[4:12], uint64(chunkID))
-	binary.LittleEndian.PutUint64(header[12:20], uint64(payloadSize))
-	binary.LittleEndian.PutUint32(header[20:24], uint32(metaSize))
-	return header
+// encodeRecordHeader writes a record header into the caller-supplied
+// buffer (must be at least recordHeaderLen bytes). The previous shape
+// allocated a fresh []byte on every Put — header writes fire once per
+// chunk written, so the alloc compounded for every state save.
+func encodeRecordHeader(buf []byte, chunkID int, payloadSize, metaSize int) {
+	_ = buf[recordHeaderLen-1] // bounds-check hint
+	copy(buf[:4], recordMagic[:])
+	binary.LittleEndian.PutUint64(buf[4:12], uint64(chunkID))
+	binary.LittleEndian.PutUint64(buf[12:20], uint64(payloadSize))
+	binary.LittleEndian.PutUint32(buf[20:24], uint32(metaSize))
 }
 
 func decodeRecordHeader(header []byte) (recordHeader, error) {
 	if len(header) != recordHeaderLen {
 		return recordHeader{}, core.NewError("state file store record header has invalid length")
 	}
-	if string(header[:4]) != string(recordMagic[:]) {
+	// Byte-equal comparison — `string(header[:4]) != string(recordMagic[:])`
+	// allocates a fresh 4-byte string on every call. Direct byte compare
+	// is alloc-free.
+	if header[0] != recordMagic[0] || header[1] != recordMagic[1] ||
+		header[2] != recordMagic[2] || header[3] != recordMagic[3] {
 		return recordHeader{}, core.NewError("state file store record header is invalid")
 	}
 	return recordHeader{
