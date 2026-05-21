@@ -4,6 +4,7 @@ package inference
 
 import (
 	"context"
+	"strconv"
 
 	core "dappco.re/go"
 )
@@ -349,6 +350,17 @@ func sameAdapterIdentity(a, b AdapterIdentity) bool {
 }
 
 // CandidateID builds a stable readable ID when a planner has not supplied one.
+//
+// Hand-built via strconv.AppendInt + core.AsString — saves the fmt
+// formatter pipeline that Sprintf would walk for every tuning lookup.
 func CandidateID(workload TuningWorkload, cacheMode string, contextLength, batchSize int) string {
-	return core.Sprintf("%s:%s:ctx%d:batch%d", workload, cacheMode, contextLength, batchSize)
+	buf := make([]byte, 0, len(workload)+len(cacheMode)+32)
+	buf = append(buf, string(workload)...)
+	buf = append(buf, ':')
+	buf = append(buf, cacheMode...)
+	buf = append(buf, ':', 'c', 't', 'x')
+	buf = strconv.AppendInt(buf, int64(contextLength), 10)
+	buf = append(buf, ':', 'b', 'a', 't', 'c', 'h')
+	buf = strconv.AppendInt(buf, int64(batchSize), 10)
+	return core.AsString(buf)
 }
