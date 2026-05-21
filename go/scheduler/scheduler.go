@@ -14,6 +14,7 @@ package scheduler
 import (
 	"context"
 	"iter"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -395,11 +396,22 @@ func (m *Model) setErr(err error) {
 }
 
 func (m *Model) nextRequestID() string {
-	return core.Sprintf("%s-%d", m.requestIDPrefix, m.nextID.Add(1))
+	// Fires per scheduled request. Hand-built via strconv.AppendInt
+	// instead of Sprintf — Sprintf walks the fmt formatter pipeline
+	// (~2 allocs); AppendInt into a pre-sized buffer + AsString is 1.
+	id := m.nextID.Add(1)
+	buf := make([]byte, 0, len(m.requestIDPrefix)+21)
+	buf = append(buf, m.requestIDPrefix...)
+	buf = append(buf, '-')
+	buf = strconv.AppendUint(buf, id, 10)
+	return core.AsString(buf)
 }
 
 func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
-	opts := []inference.GenerateOption{}
+	// Pre-size to the maximum possible option count — Temperature is
+	// always set; the others are conditional. Saves the doubling-grow
+	// allocs that the append cascade would otherwise pay per Schedule.
+	opts := make([]inference.GenerateOption, 0, 7)
 	if cfg.MaxTokens > 0 {
 		opts = append(opts, inference.WithMaxTokens(cfg.MaxTokens))
 	}
@@ -423,7 +435,12 @@ func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
 }
 
 func cloneLabels(labels map[string]string) map[string]string {
-	out := map[string]string{}
+	if len(labels) == 0 {
+		// Preserve the original "empty/nil → fresh empty map" contract
+		// callers relied on, but skip the unnecessary make+copy.
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(labels))
 	for key, value := range labels {
 		out[key] = value
 	}
@@ -431,7 +448,9 @@ func cloneLabels(labels map[string]string) map[string]string {
 }
 
 func millisString(duration time.Duration) string {
-	return core.Sprintf("%.3f", millis(duration))
+	// Sprintf("%.3f") was 2 allocs; FormatFloat returns the result
+	// string directly without the formatter pipeline.
+	return strconv.FormatFloat(millis(duration), 'f', 3, 64)
 }
 
 func millis(duration time.Duration) float64 {
