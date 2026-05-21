@@ -93,6 +93,10 @@ func ResponseGenerateOptions(req ResponseRequest) ([]inference.GenerateOption, e
 		TopP:        req.TopP,
 		TopK:        req.TopK,
 		MaxTokens:   req.MaxOutputTokens,
+		// Pre-size — saves the append-grow cascade on every Responses
+		// API call. Twenty-turn requests previously paid ~4 grow allocs
+		// before reaching their final size.
+		Messages: make([]ChatMessage, 0, len(req.Input)),
 	}
 	for _, msg := range req.Input {
 		chatReq.Messages = append(chatReq.Messages, ChatMessage{Role: msg.Role, Content: msg.Content})
