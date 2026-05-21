@@ -62,17 +62,12 @@ func replaceAll(text, old, next string) string {
 	}
 }
 
+// indexString delegates to stdlib via core.Index. The previous
+// hand-rolled implementation was a naive O(N×M) byte-by-byte scan;
+// stdlib's strings.Index uses Rabin-Karp / SIMD-accelerated byte
+// search and runs O(N+M) for the multi-byte markers (`<think>`,
+// `<|channel>analysis\n`, etc.) that the thinking/reasoning parsers
+// scan against on every per-token Process call.
 func indexString(s, substr string) int {
-	if substr == "" {
-		return 0
-	}
-	if len(substr) > len(s) {
-		return -1
-	}
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
+	return core.Index(s, substr)
 }
