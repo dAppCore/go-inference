@@ -14,7 +14,8 @@ import (
 )
 
 const (
-	CodecFile = "memvid/file-log"
+	CodecFile       = "state/file-log"
+	CodecMemvidFile = "memvid/file-log"
 
 	fileMode        = 0o600
 	recordHeaderLen = 24
@@ -314,7 +315,7 @@ func (s *Store) ResolveRefBytes(ctx context.Context, ref state.ChunkRef) (state.
 	if !ref.HasFrameOffset {
 		return s.ResolveBytes(ctx, ref.ChunkID)
 	}
-	if ref.Codec != "" && ref.Codec != CodecFile {
+	if ref.Codec != "" && ref.Codec != CodecFile && ref.Codec != CodecMemvidFile {
 		return state.Chunk{}, core.NewError("state file store cannot resolve non-file chunk ref")
 	}
 	if ref.Segment != "" && ref.Segment != s.path {

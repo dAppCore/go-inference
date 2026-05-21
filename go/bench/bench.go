@@ -4,7 +4,7 @@
 //
 // Drivers (go-mlx, go-rocm, go-cuda, …) supply a Runner with
 // verb-shaped callbacks for each section of the bench (PromptCache,
-// MemvidKVBlockWarm, KVRestore, StateBundle, SpeculativeDecode,
+// StateKVBlockWarm, KVRestore, StateBundle, SpeculativeDecode,
 // PromptLookupDecode, ProbeOverhead). bench.Run orchestrates the
 // generation timing + calls each enabled callback + assembles the
 // final Report.
@@ -21,32 +21,40 @@ const ReportVersion = 1
 
 // Config controls the local benchmark/eval harness.
 type Config struct {
-	Model                       string   `json:"model,omitempty"`
-	ModelPath                   string   `json:"model_path,omitempty"`
-	Prompt                      string   `json:"prompt"`
-	CachePrompt                 string   `json:"cache_prompt,omitempty"`
-	MaxTokens                   int      `json:"max_tokens"`
-	Runs                        int      `json:"runs"`
-	Temperature                 float32  `json:"temperature"`
-	TopK                        int      `json:"top_k,omitempty"`
-	TopP                        float32  `json:"top_p,omitempty"`
-	MinP                        float32  `json:"min_p,omitempty"`
-	StopTokens                  []int32  `json:"stop_tokens,omitempty"`
-	RepeatPenalty               float32  `json:"repeat_penalty,omitempty"`
-	IncludePromptCache          bool     `json:"include_prompt_cache"`
-	IncludeKVRestore            bool     `json:"include_kv_restore"`
-	IncludeStateBundleRoundTrip bool     `json:"include_state_bundle_round_trip"`
-	IncludeProbeOverhead        bool     `json:"include_probe_overhead"`
-	IncludeMemvidKVBlockWarm    bool     `json:"include_memvid_kv_block_warm"`
-	IncludeSpeculativeDecode    bool     `json:"include_speculative_decode"`
-	IncludePromptLookupDecode   bool     `json:"include_prompt_lookup_decode"`
-	MemvidKVBlockSize           int      `json:"memvid_kv_block_size,omitempty"`
-	MemvidKVPrefixTokens        int      `json:"memvid_kv_prefix_tokens,omitempty"`
-	MemvidKVBlockStorePath      string   `json:"memvid_kv_block_store_path,omitempty"`
-	SpeculativeDraftModelPath   string   `json:"speculative_draft_model_path,omitempty"`
-	SpeculativeDraftTokens      int      `json:"speculative_draft_tokens,omitempty"`
-	PromptLookupTokens          []int32  `json:"prompt_lookup_tokens,omitempty"`
-	QualityPrompts              []string `json:"quality_prompts,omitempty"`
+	Model                       string  `json:"model,omitempty"`
+	ModelPath                   string  `json:"model_path,omitempty"`
+	Prompt                      string  `json:"prompt"`
+	CachePrompt                 string  `json:"cache_prompt,omitempty"`
+	MaxTokens                   int     `json:"max_tokens"`
+	Runs                        int     `json:"runs"`
+	Temperature                 float32 `json:"temperature"`
+	TopK                        int     `json:"top_k,omitempty"`
+	TopP                        float32 `json:"top_p,omitempty"`
+	MinP                        float32 `json:"min_p,omitempty"`
+	StopTokens                  []int32 `json:"stop_tokens,omitempty"`
+	RepeatPenalty               float32 `json:"repeat_penalty,omitempty"`
+	IncludePromptCache          bool    `json:"include_prompt_cache"`
+	IncludeKVRestore            bool    `json:"include_kv_restore"`
+	IncludeStateBundleRoundTrip bool    `json:"include_state_bundle_round_trip"`
+	IncludeProbeOverhead        bool    `json:"include_probe_overhead"`
+	IncludeStateKVBlockWarm     bool    `json:"include_state_kv_block_warm"`
+	// Deprecated: use IncludeStateKVBlockWarm. Kept for old Go callers only.
+	IncludeMemvidKVBlockWarm  bool   `json:"-"`
+	IncludeSpeculativeDecode  bool   `json:"include_speculative_decode"`
+	IncludePromptLookupDecode bool   `json:"include_prompt_lookup_decode"`
+	StateKVBlockSize          int    `json:"state_kv_block_size,omitempty"`
+	StateKVPrefixTokens       int    `json:"state_kv_prefix_tokens,omitempty"`
+	StateKVBlockStorePath     string `json:"state_kv_block_store_path,omitempty"`
+	// Deprecated: use StateKVBlockSize. Kept for old Go callers only.
+	MemvidKVBlockSize int `json:"-"`
+	// Deprecated: use StateKVPrefixTokens. Kept for old Go callers only.
+	MemvidKVPrefixTokens int `json:"-"`
+	// Deprecated: use StateKVBlockStorePath. Kept for old Go callers only.
+	MemvidKVBlockStorePath    string   `json:"-"`
+	SpeculativeDraftModelPath string   `json:"speculative_draft_model_path,omitempty"`
+	SpeculativeDraftTokens    int      `json:"speculative_draft_tokens,omitempty"`
+	PromptLookupTokens        []int32  `json:"prompt_lookup_tokens,omitempty"`
+	QualityPrompts            []string `json:"quality_prompts,omitempty"`
 }
 
 // DefaultConfig returns a short local benchmark suite suitable for a laptop.
@@ -159,24 +167,29 @@ type Runner struct {
 	Generate func(context.Context, string, GenerateOptions) (Generation, error)
 
 	BenchPromptCache        func(context.Context, Config, GenerationSummary) PromptCacheReport
-	BenchMemvidKVBlockWarm  func(context.Context, Config, GenerationSummary) MemvidKVBlockWarmReport
+	BenchStateKVBlockWarm   func(context.Context, Config, GenerationSummary) StateKVBlockWarmReport
 	BenchKVRestore          func(context.Context, Config) LatencyReport
 	BenchStateBundle        func(context.Context, Config, Info) StateBundleReport
 	BenchProbeOverhead      func(context.Context, Config, time.Duration) ProbeReport
 	BenchSpeculativeDecode  func(context.Context, Config) DecodeOptimisationReport
 	BenchPromptLookupDecode func(context.Context, Config) DecodeOptimisationReport
+
+	// Deprecated: use BenchStateKVBlockWarm.
+	BenchMemvidKVBlockWarm func(context.Context, Config, GenerationSummary) MemvidKVBlockWarmReport
 }
 
 // Report is the full benchmark result.
 type Report struct {
-	Version            int                      `json:"version"`
-	Model              string                   `json:"model,omitempty"`
-	ModelPath          string                   `json:"model_path,omitempty"`
-	ModelInfo          Info                     `json:"model_info"`
-	Config             Config                   `json:"config"`
-	Generation         GenerationSummary        `json:"generation"`
-	PromptCache        PromptCacheReport        `json:"prompt_cache"`
-	MemvidKVBlockWarm  MemvidKVBlockWarmReport  `json:"memvid_kv_block_warm"`
+	Version          int                    `json:"version"`
+	Model            string                 `json:"model,omitempty"`
+	ModelPath        string                 `json:"model_path,omitempty"`
+	ModelInfo        Info                   `json:"model_info"`
+	Config           Config                 `json:"config"`
+	Generation       GenerationSummary      `json:"generation"`
+	PromptCache      PromptCacheReport      `json:"prompt_cache"`
+	StateKVBlockWarm StateKVBlockWarmReport `json:"state_kv_block_warm"`
+	// Deprecated: use StateKVBlockWarm. Kept for old Go callers only.
+	MemvidKVBlockWarm  MemvidKVBlockWarmReport  `json:"-"`
 	KVRestore          LatencyReport            `json:"kv_restore"`
 	StateBundle        StateBundleReport        `json:"state_bundle"`
 	Probes             ProbeReport              `json:"probes"`
@@ -224,10 +237,9 @@ type PromptCacheReport struct {
 	Error           string            `json:"error,omitempty"`
 }
 
-// MemvidKVBlockWarmReport measures direct prompt-cache warmup from
-// memvid KV blocks (driver-specific feature; mlx provides one, others
-// may not).
-type MemvidKVBlockWarmReport struct {
+// StateKVBlockWarmReport measures direct prompt-cache warmup from durable
+// State KV blocks (driver-specific feature; mlx provides one, others may not).
+type StateKVBlockWarmReport struct {
 	Attempted                  bool              `json:"attempted"`
 	Source                     string            `json:"source,omitempty"`
 	BlockSize                  int               `json:"block_size,omitempty"`
@@ -254,6 +266,12 @@ type MemvidKVBlockWarmReport struct {
 	Metrics                    GenerationMetrics `json:"metrics,omitempty"`
 	Error                      string            `json:"error,omitempty"`
 }
+
+// MemvidKVBlockWarmReport measures direct prompt-cache warmup from old
+// memvid-named KV blocks.
+//
+// Deprecated: use StateKVBlockWarmReport.
+type MemvidKVBlockWarmReport = StateKVBlockWarmReport
 
 // LatencyReport records a best-effort latency measurement.
 type LatencyReport struct {
@@ -371,8 +389,12 @@ func Run(ctx context.Context, runner Runner, cfg Config) (*Report, error) {
 	if cfg.IncludePromptCache && runner.BenchPromptCache != nil {
 		report.PromptCache = runner.BenchPromptCache(ctx, cfg, report.Generation)
 	}
-	if cfg.IncludeMemvidKVBlockWarm && runner.BenchMemvidKVBlockWarm != nil {
-		report.MemvidKVBlockWarm = runner.BenchMemvidKVBlockWarm(ctx, cfg, report.Generation)
+	if cfg.IncludeStateKVBlockWarm && runner.BenchStateKVBlockWarm != nil {
+		report.StateKVBlockWarm = runner.BenchStateKVBlockWarm(ctx, cfg, report.Generation)
+		report.MemvidKVBlockWarm = report.StateKVBlockWarm
+	} else if cfg.IncludeStateKVBlockWarm && runner.BenchMemvidKVBlockWarm != nil {
+		report.StateKVBlockWarm = runner.BenchMemvidKVBlockWarm(ctx, cfg, report.Generation)
+		report.MemvidKVBlockWarm = report.StateKVBlockWarm
 	}
 	if cfg.IncludeKVRestore && runner.BenchKVRestore != nil {
 		report.KVRestore = runner.BenchKVRestore(ctx, cfg)
@@ -409,6 +431,18 @@ func normalizeConfig(cfg Config) Config {
 	if cfg.CachePrompt == "" {
 		cfg.CachePrompt = cfg.Prompt
 	}
+	if cfg.IncludeMemvidKVBlockWarm {
+		cfg.IncludeStateKVBlockWarm = true
+	}
+	if cfg.MemvidKVBlockSize != 0 && cfg.StateKVBlockSize == 0 {
+		cfg.StateKVBlockSize = cfg.MemvidKVBlockSize
+	}
+	if cfg.MemvidKVPrefixTokens != 0 && cfg.StateKVPrefixTokens == 0 {
+		cfg.StateKVPrefixTokens = cfg.MemvidKVPrefixTokens
+	}
+	if cfg.MemvidKVBlockStorePath != "" && cfg.StateKVBlockStorePath == "" {
+		cfg.StateKVBlockStorePath = cfg.MemvidKVBlockStorePath
+	}
 	cfg.StopTokens = append([]int32(nil), cfg.StopTokens...)
 	cfg.PromptLookupTokens = append([]int32(nil), cfg.PromptLookupTokens...)
 	cfg.QualityPrompts = append([]string(nil), cfg.QualityPrompts...)
@@ -432,9 +466,13 @@ func configZero(cfg Config) bool {
 		!cfg.IncludeKVRestore &&
 		!cfg.IncludeStateBundleRoundTrip &&
 		!cfg.IncludeProbeOverhead &&
+		!cfg.IncludeStateKVBlockWarm &&
 		!cfg.IncludeMemvidKVBlockWarm &&
 		!cfg.IncludeSpeculativeDecode &&
 		!cfg.IncludePromptLookupDecode &&
+		cfg.StateKVBlockSize == 0 &&
+		cfg.StateKVPrefixTokens == 0 &&
+		cfg.StateKVBlockStorePath == "" &&
 		cfg.MemvidKVBlockSize == 0 &&
 		cfg.MemvidKVPrefixTokens == 0 &&
 		cfg.MemvidKVBlockStorePath == "" &&
@@ -525,13 +563,13 @@ func qualityChecks(samples []GenerationSample) []QualityCheck {
 	return checks
 }
 
-// PopulateMemvidKVBlockWarmBench fills in the cross-cutting derived
-// fields (Speedup, BreakEvenQuestions, …) on a MemvidKVBlockWarmReport
+// PopulateStateKVBlockWarmBench fills in the cross-cutting derived
+// fields (Speedup, BreakEvenQuestions, ...) on a StateKVBlockWarmReport
 // once the driver-side capture/restore measurements are populated.
 //
-//	report := runner.BenchMemvidKVBlockWarm(ctx, cfg, baseline)
-//	bench.PopulateMemvidKVBlockWarmBench(&report, baseline)
-func PopulateMemvidKVBlockWarmBench(report *MemvidKVBlockWarmReport, baseline GenerationSummary) {
+//	report := runner.BenchStateKVBlockWarm(ctx, cfg, baseline)
+//	bench.PopulateStateKVBlockWarmBench(&report, baseline)
+func PopulateStateKVBlockWarmBench(report *StateKVBlockWarmReport, baseline GenerationSummary) {
 	if report == nil || !report.Attempted {
 		return
 	}
@@ -548,6 +586,14 @@ func PopulateMemvidKVBlockWarmBench(report *MemvidKVBlockWarmReport, baseline Ge
 	questions := ceilDuration(report.BuildDuration, saved)
 	report.BuildAmortizationQuestions = questions
 	report.BreakEvenQuestions = questions
+}
+
+// PopulateMemvidKVBlockWarmBench fills derived values for the old memvid-named
+// State block warm report.
+//
+// Deprecated: use PopulateStateKVBlockWarmBench.
+func PopulateMemvidKVBlockWarmBench(report *MemvidKVBlockWarmReport, baseline GenerationSummary) {
+	PopulateStateKVBlockWarmBench(report, baseline)
 }
 
 func ceilDuration(value, divisor time.Duration) int {

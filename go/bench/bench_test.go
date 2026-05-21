@@ -174,15 +174,15 @@ func TestRun_DispatchesVerbCallbacksWhenIncludeFlagsSet_Good(t *testing.T) {
 		generationMetrics: []GenerationMetrics{{GeneratedTokens: 1, TotalDuration: 5 * time.Millisecond}},
 	})
 	called := struct {
-		pc, mvkv, restore, bundle, probe, spec, lookup bool
+		pc, stateKV, restore, bundle, probe, spec, lookup bool
 	}{}
 	runner.BenchPromptCache = func(context.Context, Config, GenerationSummary) PromptCacheReport {
 		called.pc = true
 		return PromptCacheReport{Attempted: true, HitRate: 1}
 	}
-	runner.BenchMemvidKVBlockWarm = func(context.Context, Config, GenerationSummary) MemvidKVBlockWarmReport {
-		called.mvkv = true
-		return MemvidKVBlockWarmReport{Attempted: true, BlockSize: 128}
+	runner.BenchStateKVBlockWarm = func(context.Context, Config, GenerationSummary) StateKVBlockWarmReport {
+		called.stateKV = true
+		return StateKVBlockWarmReport{Attempted: true, BlockSize: 128}
 	}
 	runner.BenchKVRestore = func(context.Context, Config) LatencyReport {
 		called.restore = true
@@ -210,7 +210,7 @@ func TestRun_DispatchesVerbCallbacksWhenIncludeFlagsSet_Good(t *testing.T) {
 		MaxTokens:                   4,
 		Runs:                        1,
 		IncludePromptCache:          true,
-		IncludeMemvidKVBlockWarm:    true,
+		IncludeStateKVBlockWarm:     true,
 		IncludeKVRestore:            true,
 		IncludeStateBundleRoundTrip: true,
 		IncludeProbeOverhead:        true,
@@ -221,14 +221,17 @@ func TestRun_DispatchesVerbCallbacksWhenIncludeFlagsSet_Good(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if !called.pc || !called.mvkv || !called.restore || !called.bundle || !called.probe || !called.spec || !called.lookup {
+	if !called.pc || !called.stateKV || !called.restore || !called.bundle || !called.probe || !called.spec || !called.lookup {
 		t.Fatalf("verb callbacks not all called: %+v", called)
 	}
 	if !report.PromptCache.Attempted || report.PromptCache.HitRate != 1 {
 		t.Fatalf("PromptCache = %+v", report.PromptCache)
 	}
+	if !report.StateKVBlockWarm.Attempted || report.StateKVBlockWarm.BlockSize != 128 {
+		t.Fatalf("StateKVBlockWarm = %+v", report.StateKVBlockWarm)
+	}
 	if !report.MemvidKVBlockWarm.Attempted || report.MemvidKVBlockWarm.BlockSize != 128 {
-		t.Fatalf("MemvidKVBlockWarm = %+v", report.MemvidKVBlockWarm)
+		t.Fatalf("deprecated MemvidKVBlockWarm alias = %+v", report.MemvidKVBlockWarm)
 	}
 	if !report.KVRestore.Attempted || report.KVRestore.Duration != time.Millisecond {
 		t.Fatalf("KVRestore = %+v", report.KVRestore)
@@ -258,9 +261,9 @@ func TestRun_SkipsVerbCallbacksWhenIncludeFlagsFalse_Good(t *testing.T) {
 		t.Fatal("BenchPromptCache called when IncludePromptCache is false")
 		return PromptCacheReport{}
 	}
-	runner.BenchMemvidKVBlockWarm = func(context.Context, Config, GenerationSummary) MemvidKVBlockWarmReport {
-		t.Fatal("BenchMemvidKVBlockWarm called when IncludeMemvidKVBlockWarm is false")
-		return MemvidKVBlockWarmReport{}
+	runner.BenchStateKVBlockWarm = func(context.Context, Config, GenerationSummary) StateKVBlockWarmReport {
+		t.Fatal("BenchStateKVBlockWarm called when IncludeStateKVBlockWarm is false")
+		return StateKVBlockWarmReport{}
 	}
 	runner.BenchKVRestore = func(context.Context, Config) LatencyReport {
 		t.Fatal("BenchKVRestore called when IncludeKVRestore is false")
@@ -380,8 +383,8 @@ func TestNormalizeConfig_ClonesSlices_Good(t *testing.T) {
 	}
 }
 
-func TestPopulateMemvidKVBlockWarmBench_DerivesSpeedupAndBreakEven_Good(t *testing.T) {
-	report := MemvidKVBlockWarmReport{
+func TestPopulateStateKVBlockWarmBench_DerivesSpeedupAndBreakEven_Good(t *testing.T) {
+	report := StateKVBlockWarmReport{
 		Attempted:       true,
 		BuildDuration:   100 * time.Millisecond,
 		RestoreDuration: 10 * time.Millisecond,
@@ -391,7 +394,7 @@ func TestPopulateMemvidKVBlockWarmBench_DerivesSpeedupAndBreakEven_Good(t *testi
 		PrefillDuration: 50 * time.Millisecond,
 		PeakMemoryBytes: 2 << 20,
 	}
-	PopulateMemvidKVBlockWarmBench(&report, baseline)
+	PopulateStateKVBlockWarmBench(&report, baseline)
 	if report.BaselinePrefillDuration != 50*time.Millisecond {
 		t.Fatalf("BaselinePrefillDuration = %v", report.BaselinePrefillDuration)
 	}
@@ -409,25 +412,25 @@ func TestPopulateMemvidKVBlockWarmBench_DerivesSpeedupAndBreakEven_Good(t *testi
 	}
 }
 
-func TestPopulateMemvidKVBlockWarmBench_SkipsWhenNotAttempted_Ugly(t *testing.T) {
-	report := MemvidKVBlockWarmReport{
+func TestPopulateStateKVBlockWarmBench_SkipsWhenNotAttempted_Ugly(t *testing.T) {
+	report := StateKVBlockWarmReport{
 		BuildDuration:   100 * time.Millisecond,
 		RestoreDuration: 10 * time.Millisecond,
 	}
-	PopulateMemvidKVBlockWarmBench(&report, GenerationSummary{PrefillDuration: 50 * time.Millisecond})
+	PopulateStateKVBlockWarmBench(&report, GenerationSummary{PrefillDuration: 50 * time.Millisecond})
 	if report.BaselinePrefillDuration != 0 || report.RestoreSpeedup != 0 || report.BreakEvenQuestions != 0 {
 		t.Fatalf("expected no-op when Attempted is false, got %+v", report)
 	}
 }
 
-func TestPopulateMemvidKVBlockWarmBench_SkipsWhenSavedNonPositive_Ugly(t *testing.T) {
+func TestPopulateStateKVBlockWarmBench_SkipsWhenSavedNonPositive_Ugly(t *testing.T) {
 	// Restore took LONGER than baseline prefill — no speedup, no break-even.
-	report := MemvidKVBlockWarmReport{
+	report := StateKVBlockWarmReport{
 		Attempted:       true,
 		BuildDuration:   100 * time.Millisecond,
 		RestoreDuration: 80 * time.Millisecond,
 	}
-	PopulateMemvidKVBlockWarmBench(&report, GenerationSummary{PrefillDuration: 50 * time.Millisecond})
+	PopulateStateKVBlockWarmBench(&report, GenerationSummary{PrefillDuration: 50 * time.Millisecond})
 	if report.PrefillSavedPerQuestion != 0 || report.BreakEvenQuestions != 0 {
 		t.Fatalf("expected no break-even when restore is slower than baseline, got saved:%v break-even:%d", report.PrefillSavedPerQuestion, report.BreakEvenQuestions)
 	}
