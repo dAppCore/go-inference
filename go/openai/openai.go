@@ -8,6 +8,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 	"unicode"
@@ -623,7 +624,13 @@ func resultError(result core.Result) error {
 }
 
 func completionID() string {
-	return core.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+	// Fires once per chat-completion response. core.Sprintf was 2 allocs
+	// (fmt formatter scratch + result string); the append-into-prefix
+	// path is a single alloc backing the returned string via AsString.
+	buf := make([]byte, 0, 32) // "chatcmpl-" (9) + max int64 (20) + slack
+	buf = append(buf, "chatcmpl-"...)
+	buf = strconv.AppendInt(buf, time.Now().UnixNano(), 10)
+	return core.AsString(buf)
 }
 
 func isTokenLengthCapReached(maxTokens *int, generated int) bool {
