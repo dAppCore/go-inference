@@ -30,7 +30,7 @@ Three lifecycle verbs, four DTOs, two interfaces. Nothing else.
 | `SleepResult` | "I wrote N tokens across B blocks (R reused from parent), here is the new Ref." |
 
 `Store any` on both Wake/Sleep requests is the explicit escape hatch for
-backend-owned handles (memvid encoder, file log writer, S3 client) that
+backend-owned handles (State video encoder, file log writer, S3 client) that
 the JSON serialisation layer doesn't need to see.
 
 `Adapter` and `Runtime` are metadata fields, not dependency hooks. They let
@@ -81,7 +81,7 @@ without needing the `state` subpackage import.
 
 - `go-mlx` — Metal-backed `Session` + `Forker`. The reference
   implementation, with KV-block-level append, parent-prefix reuse, and
-  memvid `.mp4` packaging. See `go-mlx/docs/memory/agent_memory.md`.
+  State video `.mp4` packaging. See `go-mlx/docs/memory/agent_memory.md`.
 - `go-rocm` — planned mirror for AMD/ROCm.
 - `go-cuda` — planned mirror for NVIDIA/CUDA.
 
@@ -89,7 +89,7 @@ without needing the `state` subpackage import.
 
 Storage policy lives at the URI scheme, not in the contract.
 
-- `memvid://aurelius/meditations` — QR-video knowledge pack
+- `state://aurelius/meditations` — QR-video knowledge pack
 - `file:///var/lib/coreagent/bundles/abc123/` — local filestore
 - `s3://lethean-bundles/2026-05/agent-7/` — object storage
 - `memory://test/fixture-1` — in-memory test harness
@@ -112,8 +112,8 @@ events emitted during wake) rather than by this DTO.
   append observations, then sleep a child state or fall back to a text summary.
 - `go-ai/ai/book_state_demo.go` — teacher/student demo uses WakeResult →
   `BookState` (the demo's user-facing context shape)
-- `go-mlx/pkg/memvid` — memvid encoder/decoder is the canonical Store
-  implementation; bundles round-trip through this interface
+- `go-mlx/pkg/memvid` — deprecated compatibility path for older State video
+  encoder/decoder imports
 - `core/ide` (planned) — agent inspector panel reads bundle index for
   the "what's in my brain right now" UI
 

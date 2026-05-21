@@ -24,7 +24,7 @@ Plus the envelope:
 
 | Type | Role |
 |------|------|
-| `Bundle` (`StateBundle` alias) | the full state envelope a sleep emits — model + tokenizer + adapter + sampler + runtime + prompt hash + KV refs + probe refs + memvid refs + labels |
+| `Bundle` (`StateBundle` alias) | the full state envelope a sleep emits — model + tokenizer + adapter + sampler + runtime + prompt hash + KV refs + probe refs + State refs + labels |
 
 ## Why these are separate from `state/agent_memory.go`
 
@@ -38,9 +38,9 @@ Agent memory is about lifecycle (Wake/Sleep/Fork). Identity is about
 - A wake records which runtime produced the bundle so audit can trace
   divergent results back to "this bundle came from go-rocm vs go-mlx".
 
-`Bundle.KVRefs` / `ProbeRefs` / `MemvidRefs` are arrays of `StateRef`
+`Bundle.KVRefs` / `ProbeRefs` / `StateRefs` are arrays of `StateRef`
 because one bundle commonly fans out to multiple blobs — KV blocks are
-chunked, probes are per-layer, memvid frames are sequenced.
+chunked, probes are per-layer, State frames are sequenced.
 
 ## Why `ModelIdentity.Hash` is load-bearing
 

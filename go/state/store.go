@@ -10,11 +10,14 @@ import (
 	core "dappco.re/go"
 )
 
-var ErrChunkNotFound = core.NewError("memvid chunk not found")
+var ErrChunkNotFound = core.NewError("state chunk not found")
 
 const (
-	CodecMemory  = "memory/plaintext"
-	CodecQRVideo = "memvid/qr-video"
+	CodecMemory     = "memory/plaintext"
+	CodecStateVideo = "state/qr-video"
+	CodecQRVideo    = CodecStateVideo
+	// Deprecated: use CodecStateVideo.
+	CodecMemvidQRVideo = "memvid/qr-video"
 )
 
 type Store interface {
@@ -77,7 +80,7 @@ type ChunkNotFoundError struct {
 }
 
 func (e *ChunkNotFoundError) Error() string {
-	return core.Sprintf("memvid chunk %d not found", e.ID)
+	return core.Sprintf("state chunk %d not found", e.ID)
 }
 
 func (e *ChunkNotFoundError) Unwrap() error {
@@ -90,9 +93,9 @@ type URIChunkNotFoundError struct {
 
 func (e *URIChunkNotFoundError) Error() string {
 	if e.URI == "" {
-		return "memvid chunk URI not found"
+		return "state chunk URI not found"
 	}
-	return core.Sprintf("memvid chunk URI %q not found", e.URI)
+	return core.Sprintf("state chunk URI %q not found", e.URI)
 }
 
 func (e *URIChunkNotFoundError) Unwrap() error {

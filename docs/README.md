@@ -15,7 +15,7 @@
                     ┌──────────────┴────────────────┐
        you are here →   go-inference  (CONTRACT)    │   ← pure interfaces + wire types
                     │  • TextModel / Backend        │
-                    │  • state/ (memvid lifecycle)  │
+                    │  • state/ lifecycle  │
                     │  • openai/ anthropic/ ollama/ │
                     │  • capability / probe         │
                     └──┬─────────────┬──────────────┘
