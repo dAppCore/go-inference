@@ -75,7 +75,9 @@ func TestFileStore_Good_OpensLegacyStateHeader(t *testing.T) {
 	meta := []byte(core.JSONMarshalString(recordMeta{URI: "mlx://legacy/1"}))
 	payload := []byte("legacy payload")
 	data := append([]byte(nil), legacyFileMagic...)
-	data = append(data, encodeRecordHeader(1, len(payload), len(meta))...)
+	var hdrBuf [recordHeaderLen]byte
+	encodeRecordHeader(hdrBuf[:], 1, len(payload), len(meta))
+	data = append(data, hdrBuf[:]...)
 	data = append(data, meta...)
 	data = append(data, payload...)
 	if result := core.WriteFile(path, data, 0o600); !result.OK {
@@ -342,11 +344,11 @@ func TestFileStore_Bad_CorruptRecords(t *testing.T) {
 		},
 		{
 			name: "truncated-payload",
-			data: append(append(append([]byte(nil), fileMagic...), encodeRecordHeader(1, 4, 0)...), []byte{1, 2}...),
+			data: append(append(append([]byte(nil), fileMagic...), testHeader(1, 4, 0)...), []byte{1, 2}...),
 		},
 		{
 			name: "invalid-metadata",
-			data: append(append(append([]byte(nil), fileMagic...), encodeRecordHeader(1, 0, 1)...), []byte("{")...),
+			data: append(append(append([]byte(nil), fileMagic...), testHeader(1, 0, 1)...), []byte("{")...),
 		},
 	}
 	for _, tc := range cases {
@@ -379,4 +381,13 @@ func TestFileStore_Ugly_CancelledContext(t *testing.T) {
 	if _, err := store.Resolve(context.Background(), 1); !core.Is(err, state.ErrChunkNotFound) {
 		t.Fatalf("Resolve(after cancelled put) error = %v, want missing chunk", err)
 	}
+}
+
+// testHeader is a test-only wrapper that returns a fresh []byte built
+// via encodeRecordHeader's in-place API. Production callers should use
+// encodeRecordHeader directly with a stack-allocated [recordHeaderLen]byte.
+func testHeader(chunkID, payloadSize, metaSize int) []byte {
+	buf := make([]byte, recordHeaderLen)
+	encodeRecordHeader(buf, chunkID, payloadSize, metaSize)
+	return buf
 }
