@@ -45,13 +45,18 @@ type ChatCompletionRequest struct {
 type StopList []string
 
 func (s *StopList) UnmarshalJSON(data []byte) error {
-	if len(data) == 0 || string(data) == "null" {
+	// Hot path: this is called per OpenAI chat-completion request.
+	// Earlier shape did `string(data) == "null"` (full copy) and fed
+	// `string(data)` into JSONUnmarshalString which immediately did
+	// AsBytes back to []byte. We already have []byte here — skip both
+	// conversions.
+	if len(data) == 0 || isNullJSON(data) {
 		*s = nil
 		return nil
 	}
 	if data[0] == '[' {
 		var values []string
-		result := core.JSONUnmarshalString(string(data), &values)
+		result := core.JSONUnmarshal(data, &values)
 		if !result.OK {
 			return resultError(result)
 		}
@@ -59,12 +64,29 @@ func (s *StopList) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	var value string
-	result := core.JSONUnmarshalString(string(data), &value)
+	result := core.JSONUnmarshal(data, &value)
 	if !result.OK {
 		return resultError(result)
 	}
 	*s = []string{value}
 	return nil
+}
+
+// isNullJSON reports whether data is the JSON literal `null` (with
+// optional surrounding whitespace). Avoids the `string(data) == "null"`
+// alloc that bare comparison would force.
+func isNullJSON(data []byte) bool {
+	for len(data) > 0 && (data[0] == ' ' || data[0] == '\t' || data[0] == '\n' || data[0] == '\r') {
+		data = data[1:]
+	}
+	for len(data) > 0 {
+		last := data[len(data)-1]
+		if last != ' ' && last != '\t' && last != '\n' && last != '\r' {
+			break
+		}
+		data = data[:len(data)-1]
+	}
+	return len(data) == 4 && data[0] == 'n' && data[1] == 'u' && data[2] == 'l' && data[3] == 'l'
 }
 
 // ChatMessage is a single chat turn.
@@ -158,7 +180,9 @@ func DecodeRequest(body io.Reader) (ChatCompletionRequest, error) {
 		return ChatCompletionRequest{}, core.E("openai.DecodeRequest", "read request body", err)
 	}
 	var req ChatCompletionRequest
-	result := core.JSONUnmarshalString(string(data), &req)
+	// Direct []byte path — skips the redundant []byte→string→[]byte
+	// round-trip that JSONUnmarshalString(string(data), ...) would do.
+	result := core.JSONUnmarshal(data, &req)
 	if !result.OK {
 		return ChatCompletionRequest{}, resultError(result)
 	}
