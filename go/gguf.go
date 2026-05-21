@@ -201,9 +201,18 @@ func parseGGUFMetadata(path string) (map[string]any, int, error) {
 		return nil, 0, core.Errorf("inference: read gguf metadata count: %w", err)
 	}
 	metadataCount := binary.LittleEndian.Uint64(hdr[:8])
-	metadata := make(map[string]any, metadataCount)
+	// ReadGGUFInfo queries only seven well-known keys; a vocab-heavy
+	// header may carry hundreds of unrelated entries (every tokenizer
+	// config field, every BPE merge marker, etc.). Skipping the value
+	// reads and map inserts for keys we never query is the dominant
+	// alloc lift on model load — synthetic vocab-heavy benches go from
+	// ~600 allocs to a handful. The map is sized to "metadata count"
+	// only as an upper bound; the actual fill is just the keys we
+	// actually read.
+	metadata := make(map[string]any, 8)
+	var keyScratch []byte
 	for range metadataCount {
-		key, err := readGGUFString(file, hdr[:8])
+		keyView, err := readGGUFKeyView(file, hdr[:8], &keyScratch)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -211,6 +220,17 @@ func parseGGUFMetadata(path string) (map[string]any, int, error) {
 			return nil, 0, core.Errorf("inference: read gguf metadata type: %w", err)
 		}
 		valueType := binary.LittleEndian.Uint32(hdr[:4])
+		if !keyOfInterest(keyView) {
+			if err := skipGGUFValue(file, valueType, hdr[:8]); err != nil {
+				return nil, 0, err
+			}
+			continue
+		}
+		// Key needs to outlive the scratch buffer — core.Clone
+		// detaches the string from its backing memory so the next
+		// readGGUFKeyView call can reuse the buffer without
+		// invalidating map keys.
+		key := core.Clone(keyView)
 		value, err := readGGUFValue(file, valueType, hdr[:8])
 		if err != nil {
 			return nil, 0, err
@@ -218,6 +238,74 @@ func parseGGUFMetadata(path string) (map[string]any, int, error) {
 		metadata[key] = value
 	}
 	return metadata, int(tensorCount), nil
+}
+
+// keyOfInterest reports whether ReadGGUFInfo queries this metadata key.
+// Any other key is parsed past without touching the map — skipping the
+// value bytes via Seek and skipping the map insert eliminates two
+// allocs per uninteresting entry, which on real GGUF headers dominates
+// the metadata loop cost.
+func keyOfInterest(key string) bool {
+	switch key {
+	case "general.architecture", "general.file_type", "tokenizer.ggml.tokens":
+		return true
+	}
+	return core.HasSuffix(key, ".vocab_size") ||
+		core.HasSuffix(key, ".embedding_length") ||
+		core.HasSuffix(key, ".block_count") ||
+		core.HasSuffix(key, ".context_length")
+}
+
+// readGGUFKeyView reads the next key into a caller-owned reusable
+// buffer and returns a zero-copy string view aliasing it. The view is
+// valid only until the next readGGUFKeyView call; callers must clone
+// before storing the key for use beyond the parse loop body.
+func readGGUFKeyView(reader io.Reader, scratch []byte, keyBuf *[]byte) (string, error) {
+	if _, err := io.ReadFull(reader, scratch[:8]); err != nil {
+		return "", core.Errorf("inference: read gguf string length: %w", err)
+	}
+	length := binary.LittleEndian.Uint64(scratch[:8])
+	if uint64(cap(*keyBuf)) < length {
+		*keyBuf = make([]byte, length)
+	} else {
+		*keyBuf = (*keyBuf)[:length]
+	}
+	if _, err := io.ReadFull(reader, *keyBuf); err != nil {
+		return "", core.Errorf("inference: read gguf string: %w", err)
+	}
+	return core.AsString(*keyBuf), nil
+}
+
+// skipGGUFValue advances the reader past the value bytes for keys
+// ReadGGUFInfo doesn't query. The OS file is an io.Seeker so we skip
+// without allocating a byte buffer; if the underlying reader doesn't
+// support seeking we fall back to io.CopyN to io.Discard, which
+// streams bytes without retaining them.
+func skipGGUFValue(reader io.Reader, valueType uint32, scratch []byte) error {
+	switch valueType {
+	case ggufTypeString:
+		if _, err := io.ReadFull(reader, scratch[:8]); err != nil {
+			return core.Errorf("inference: read gguf string length: %w", err)
+		}
+		length := int64(binary.LittleEndian.Uint64(scratch[:8]))
+		if seeker, ok := reader.(io.Seeker); ok {
+			if _, err := seeker.Seek(length, io.SeekCurrent); err != nil {
+				return core.Errorf("inference: seek past gguf string value: %w", err)
+			}
+			return nil
+		}
+		if _, err := io.CopyN(io.Discard, reader, length); err != nil {
+			return core.Errorf("inference: discard gguf string value: %w", err)
+		}
+		return nil
+	case ggufTypeUint32:
+		if _, err := io.ReadFull(reader, scratch[:4]); err != nil {
+			return core.Errorf("inference: read gguf uint32 metadata: %w", err)
+		}
+		return nil
+	default:
+		return core.Errorf("inference: unsupported gguf metadata type: %d", valueType)
+	}
 }
 
 // readGGUFValue + readGGUFString accept a caller-owned scratch buffer
