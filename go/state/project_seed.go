@@ -273,19 +273,40 @@ func cleanURI(value string) string {
 }
 
 func joinURI(base string, parts ...string) string {
-	out := cleanURI(base)
+	// Walk parts once, sum lengths, then build into a Grow'd builder.
+	// Previous shape did out += "/" + part per part — O(N²) reallocs.
+	// Per-call cost matters: WakeRequest construction calls joinURI
+	// for entry/bundle/index URIs, each potentially with multiple
+	// parts.
+	cleanBase := cleanURI(base)
+	total := len(cleanBase)
+	cleaned := make([]string, 0, len(parts))
 	for _, part := range parts {
-		part = cleanURI(part)
-		if part == "" {
+		p := cleanURI(part)
+		if p == "" {
 			continue
 		}
-		if out == "" {
-			out = part
-			continue
+		if total > 0 {
+			total++ // separator
 		}
-		out += "/" + part
+		total += len(p)
+		cleaned = append(cleaned, p)
 	}
-	return out
+	if total == 0 {
+		return ""
+	}
+	builder := core.NewBuilder()
+	builder.Grow(total)
+	if cleanBase != "" {
+		builder.WriteString(cleanBase)
+	}
+	for _, p := range cleaned {
+		if builder.Len() > 0 {
+			builder.WriteByte('/')
+		}
+		builder.WriteString(p)
+	}
+	return builder.String()
 }
 
 func setProjectLabel(labels map[string]string, projectID string) {
