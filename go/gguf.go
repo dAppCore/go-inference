@@ -238,7 +238,12 @@ func readGGUFString(reader io.Reader) (string, error) {
 	if _, err := io.ReadFull(reader, buf); err != nil {
 		return "", core.Errorf("inference: read gguf string: %w", err)
 	}
-	return string(buf), nil
+	// buf is freshly-allocated and unreachable after this conversion —
+	// core.AsString skips the []byte→string copy. A typical GGUF
+	// metadata pass calls readGGUFString once per key + once per string
+	// value (architecture, tokenizer.ggml.tokens, etc.); large vocabs
+	// turn this into hundreds of KB of avoidable copies per load.
+	return core.AsString(buf), nil
 }
 
 func metadataString(metadata map[string]any, key string) string {
