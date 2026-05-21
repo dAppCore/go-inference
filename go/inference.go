@@ -63,7 +63,6 @@ package inference
 import (
 	"context"
 	"iter"
-	"maps"
 	"slices"
 	"time"
 
@@ -263,13 +262,6 @@ var (
 	}
 )
 
-func snapshotBackends() map[string]Backend {
-	backendsMu.RLock()
-	snap := maps.Clone(backends)
-	backendsMu.RUnlock()
-	return snap
-}
-
 // Register adds b to the global registry, overwriting any existing entry with the same name.
 //
 //	func init() { inference.Register(metal.NewBackend()) }
@@ -293,19 +285,57 @@ func Get(name string) (Backend, bool) {
 }
 
 // names := inference.List() // ["llama_cpp", "metal", "rocm"]
+//
+// Single-pass key copy under RLock — earlier shape did maps.Clone +
+// maps.Keys + slices.Sorted (~4 allocs + bucket cost). Direct slice
+// build is 1 alloc; empty registry returns nil (preserves the test
+// contract that callers can branch on).
 func List() []string {
-	return slices.Sorted(maps.Keys(snapshotBackends()))
+	backendsMu.RLock()
+	if len(backends) == 0 {
+		backendsMu.RUnlock()
+		return nil
+	}
+	names := make([]string, 0, len(backends))
+	for name := range backends {
+		names = append(names, name)
+	}
+	backendsMu.RUnlock()
+	slices.Sort(names)
+	return names
 }
 
 //	for name, b := range inference.All() {
 //	    fmt.Println(name, b.Available())
 //	}
+//
+// Builds a slice of (name, backend) pairs under RLock so the returned
+// iterator runs without holding any lock — single alloc for the pair
+// slice instead of the previous maps.Clone + maps.Keys + slices.Sorted
+// cascade.
 func All() iter.Seq2[string, Backend] {
-	snap := snapshotBackends()
-	names := slices.Sorted(maps.Keys(snap))
+	type entry struct {
+		name string
+		back Backend
+	}
+	backendsMu.RLock()
+	entries := make([]entry, 0, len(backends))
+	for name, b := range backends {
+		entries = append(entries, entry{name, b})
+	}
+	backendsMu.RUnlock()
+	slices.SortFunc(entries, func(a, b entry) int {
+		if a.name < b.name {
+			return -1
+		}
+		if a.name > b.name {
+			return 1
+		}
+		return 0
+	})
 	return func(yield func(string, Backend) bool) {
-		for _, name := range names {
-			if !yield(name, snap[name]) {
+		for _, e := range entries {
+			if !yield(e.name, e.back) {
 				return
 			}
 		}
@@ -315,25 +345,53 @@ func All() iter.Seq2[string, Backend] {
 // Default picks the first available backend in preference order: metal → rocm → llama_cpp → any.
 //
 //	r := inference.Default() // r.Value is the backend when r.OK
+//
+// Both preferred-order scan and fallback run against direct map
+// lookups under RLock — no clone, no Keys-iterator allocation. The
+// happy path (preferred backend available) is 0 allocs.
 func Default() core.Result {
-	snap := snapshotBackends()
-	if len(snap) == 0 {
+	backendsMu.RLock()
+	if len(backends) == 0 {
+		backendsMu.RUnlock()
 		return core.Fail(core.E("inference.Default", "no backends registered", nil))
 	}
 
-	// Platform preference order
+	// Platform preference order — direct map lookups, no clone.
 	for _, name := range preferredBackendOrder {
-		if b, ok := snap[name]; ok && b.Available() {
+		if b, ok := backends[name]; ok && b.Available() {
+			backendsMu.RUnlock()
 			return core.Ok(b)
 		}
 	}
-	// Fall back to any available
-	for _, name := range slices.Sorted(maps.Keys(snap)) {
-		if _, ok := preferredBackendSet[name]; ok {
+
+	// Fall back to any non-preferred backend, in sorted-name order.
+	// Snapshot (name, backend) pairs under RLock so Available() runs
+	// outside the lock — matches the prior defensive behaviour.
+	type entry struct {
+		name string
+		back Backend
+	}
+	var fallback []entry
+	for name, b := range backends {
+		if _, isPreferred := preferredBackendSet[name]; isPreferred {
 			continue
 		}
-		if backend := snap[name]; backend.Available() {
-			return core.Ok(backend)
+		fallback = append(fallback, entry{name, b})
+	}
+	backendsMu.RUnlock()
+
+	slices.SortFunc(fallback, func(a, b entry) int {
+		if a.name < b.name {
+			return -1
+		}
+		if a.name > b.name {
+			return 1
+		}
+		return 0
+	})
+	for _, e := range fallback {
+		if e.back.Available() {
+			return core.Ok(e.back)
 		}
 	}
 	return core.Fail(core.E("inference.Default", "no backends available", nil))
