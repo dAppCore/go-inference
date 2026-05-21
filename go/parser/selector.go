@@ -45,21 +45,17 @@ func Family(hint Hint) string {
 	}
 }
 
+// replaceAll delegates to core.Replace (strings.ReplaceAll). The
+// stdlib implementation pre-counts occurrences and allocates the
+// result buffer exactly once — same shape as the hand-rolled loop but
+// with byte-level optimisations the builder loop didn't reach. Old
+// shape was already 1-2 allocs; stdlib is the same with less code to
+// audit.
 func replaceAll(text, old, next string) string {
 	if old == "" {
 		return text
 	}
-	out := core.NewBuilder()
-	for {
-		idx := indexString(text, old)
-		if idx < 0 {
-			out.WriteString(text)
-			return out.String()
-		}
-		out.WriteString(text[:idx])
-		out.WriteString(next)
-		text = text[idx+len(old):]
-	}
+	return core.Replace(text, old, next)
 }
 
 // indexString delegates to stdlib via core.Index. The previous
