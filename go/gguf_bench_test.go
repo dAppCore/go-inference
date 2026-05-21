@@ -116,10 +116,11 @@ func BenchmarkGGUF_ReadString_Short(b *testing.B) {
 	header := make([]byte, 8)
 	binary.LittleEndian.PutUint64(header, uint64(len(payload)))
 	frame := append(header, payload...)
+	scratch := make([]byte, 8)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ggufSinkStr, ggufSinkErr = readGGUFString(bytes.NewReader(frame))
+		ggufSinkStr, ggufSinkErr = readGGUFString(bytes.NewReader(frame), scratch)
 	}
 }
 
@@ -129,9 +130,10 @@ func BenchmarkGGUF_ReadString_Long(b *testing.B) {
 	header := make([]byte, 8)
 	binary.LittleEndian.PutUint64(header, uint64(len(payload)))
 	frame := append(header, payload...)
+	scratch := make([]byte, 8)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ggufSinkStr, ggufSinkErr = readGGUFString(bytes.NewReader(frame))
+		ggufSinkStr, ggufSinkErr = readGGUFString(bytes.NewReader(frame), scratch)
 	}
 }

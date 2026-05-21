@@ -173,39 +173,45 @@ func parseGGUFMetadata(path string) (map[string]any, int, error) {
 	file := open.Value.(*core.OSFile)
 	defer file.Close()
 
-	var magic uint32
-	if err := binary.Read(file, binary.LittleEndian, &magic); err != nil {
+	// Header reads use binary.LittleEndian.UintX on a stack-allocated
+	// fixed-size buffer instead of binary.Read — binary.Read uses
+	// reflect and allocates per call (~1 alloc/value); the direct
+	// LittleEndian path is zero-alloc. The header loop fires once per
+	// metadata entry, so for a vocab-heavy GGUF that's hundreds of
+	// avoidable allocs per model load.
+	var hdr [8]byte
+
+	if _, err := io.ReadFull(file, hdr[:4]); err != nil {
 		return nil, 0, core.Errorf("inference: read gguf magic: %w", err)
 	}
-	if magic != ggufMagic {
+	if magic := binary.LittleEndian.Uint32(hdr[:4]); magic != ggufMagic {
 		return nil, 0, core.NewError("inference: invalid gguf magic")
 	}
-	var version uint32
-	if err := binary.Read(file, binary.LittleEndian, &version); err != nil {
+	if _, err := io.ReadFull(file, hdr[:4]); err != nil {
 		return nil, 0, core.Errorf("inference: read gguf version: %w", err)
 	}
-	if version != ggufVersion {
+	if version := binary.LittleEndian.Uint32(hdr[:4]); version != ggufVersion {
 		return nil, 0, core.Errorf("inference: unsupported gguf version: %d", version)
 	}
-	var tensorCount uint64
-	if err := binary.Read(file, binary.LittleEndian, &tensorCount); err != nil {
+	if _, err := io.ReadFull(file, hdr[:8]); err != nil {
 		return nil, 0, core.Errorf("inference: read gguf tensor count: %w", err)
 	}
-	var metadataCount uint64
-	if err := binary.Read(file, binary.LittleEndian, &metadataCount); err != nil {
+	tensorCount := binary.LittleEndian.Uint64(hdr[:8])
+	if _, err := io.ReadFull(file, hdr[:8]); err != nil {
 		return nil, 0, core.Errorf("inference: read gguf metadata count: %w", err)
 	}
+	metadataCount := binary.LittleEndian.Uint64(hdr[:8])
 	metadata := make(map[string]any, metadataCount)
 	for range metadataCount {
-		key, err := readGGUFString(file)
+		key, err := readGGUFString(file, hdr[:8])
 		if err != nil {
 			return nil, 0, err
 		}
-		var valueType uint32
-		if err := binary.Read(file, binary.LittleEndian, &valueType); err != nil {
+		if _, err := io.ReadFull(file, hdr[:4]); err != nil {
 			return nil, 0, core.Errorf("inference: read gguf metadata type: %w", err)
 		}
-		value, err := readGGUFValue(file, valueType)
+		valueType := binary.LittleEndian.Uint32(hdr[:4])
+		value, err := readGGUFValue(file, valueType, hdr[:8])
 		if err != nil {
 			return nil, 0, err
 		}
@@ -214,26 +220,28 @@ func parseGGUFMetadata(path string) (map[string]any, int, error) {
 	return metadata, int(tensorCount), nil
 }
 
-func readGGUFValue(reader io.Reader, valueType uint32) (any, error) {
+// readGGUFValue + readGGUFString accept a caller-owned scratch buffer
+// so the reflect-allocating binary.Read path stays out of the per-entry
+// inner loop. Callers pass hdr[:8] from the outer parse loop.
+func readGGUFValue(reader io.Reader, valueType uint32, scratch []byte) (any, error) {
 	switch valueType {
 	case ggufTypeString:
-		return readGGUFString(reader)
+		return readGGUFString(reader, scratch)
 	case ggufTypeUint32:
-		var value uint32
-		if err := binary.Read(reader, binary.LittleEndian, &value); err != nil {
+		if _, err := io.ReadFull(reader, scratch[:4]); err != nil {
 			return nil, core.Errorf("inference: read gguf uint32 metadata: %w", err)
 		}
-		return value, nil
+		return binary.LittleEndian.Uint32(scratch[:4]), nil
 	default:
 		return nil, core.Errorf("inference: unsupported gguf metadata type: %d", valueType)
 	}
 }
 
-func readGGUFString(reader io.Reader) (string, error) {
-	var length uint64
-	if err := binary.Read(reader, binary.LittleEndian, &length); err != nil {
+func readGGUFString(reader io.Reader, scratch []byte) (string, error) {
+	if _, err := io.ReadFull(reader, scratch[:8]); err != nil {
 		return "", core.Errorf("inference: read gguf string length: %w", err)
 	}
+	length := binary.LittleEndian.Uint64(scratch[:8])
 	buf := make([]byte, length)
 	if _, err := io.ReadFull(reader, buf); err != nil {
 		return "", core.Errorf("inference: read gguf string: %w", err)

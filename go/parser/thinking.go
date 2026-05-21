@@ -26,6 +26,7 @@ type Processor struct {
 	cfg            Config
 	mode           Mode
 	markers        []thinkingMarker
+	startSet       []string // cached marker.start values — invariant once markers is set
 	pending        string
 	inReasoning    bool
 	current        thinkingMarker
@@ -36,10 +37,16 @@ type Processor struct {
 
 //	p := parser.NewProcessor(parser.Config{Mode: parser.Capture}, hint)
 func NewProcessor(cfg Config, hint Hint) *Processor {
+	markers := markersForHint(hint)
+	startSet := make([]string, len(markers))
+	for i, m := range markers {
+		startSet[i] = m.start
+	}
 	return &Processor{
-		cfg:     cfg,
-		mode:    NormaliseMode(cfg.Mode),
-		markers: markersForHint(hint),
+		cfg:      cfg,
+		mode:     NormaliseMode(cfg.Mode),
+		markers:  markers,
+		startSet: startSet,
 	}
 }
 
@@ -158,7 +165,7 @@ func (p *Processor) drain(final bool) string {
 		}
 		keep := 0
 		if !final {
-			keep = longestSuffixPrefix(p.pending, p.startMarkers())
+			keep = longestSuffixPrefix(p.pending, p.startSet)
 		}
 		consume := len(p.pending) - keep
 		if consume > 0 {
@@ -184,14 +191,6 @@ func (p *Processor) findStart(text string) (int, thinkingMarker, bool) {
 		}
 	}
 	return best, marker, best >= 0
-}
-
-func (p *Processor) startMarkers() []string {
-	out := make([]string, len(p.markers))
-	for i, marker := range p.markers {
-		out[i] = marker.start
-	}
-	return out
 }
 
 func (p *Processor) addReasoning(text string) {
