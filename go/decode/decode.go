@@ -192,9 +192,27 @@ func PromptLookup(ctx context.Context, cfg PromptLookupConfig) (Result, error) {
 //
 //	text := decode.TokensText(result.Tokens)
 func TokensText(tokens []Token) string {
-	builder := core.NewBuilder()
+	// Pre-grow the builder using each token's actual length. Strings
+	// are immutable so reading len() is free; this saves the cascade
+	// of doubling allocs the builder would otherwise pay as it grows
+	// from 0 → final size. For 2048-token decodes that's ~10 allocs
+	// down to 1.
+	total := 0
 	for _, token := range tokens {
-		builder.WriteString(firstNonEmpty(token.Text, token.Value))
+		text := token.Text
+		if text == "" {
+			text = token.Value
+		}
+		total += len(text)
+	}
+	builder := core.NewBuilder()
+	builder.Grow(total)
+	for _, token := range tokens {
+		text := token.Text
+		if text == "" {
+			text = token.Value
+		}
+		builder.WriteString(text)
 	}
 	return builder.String()
 }
