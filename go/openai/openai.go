@@ -667,16 +667,20 @@ func firstStopSequenceCut(content string, stops []string) (int, bool) {
 	return best, true
 }
 
+// indexString delegates to core.Index (strings.Index — Rabin-Karp +
+// SIMD byte search). The earlier hand-rolled loop was O(N×M) per call
+// and fired multiple times per chat-completion (stop-sequence cut +
+// thinking-extractor per streaming chunk + channel-marker detection
+// on every delta).
+//
+// Returns -1 on empty needle to preserve the caller contract — the
+// stop-sequence + extractor paths treat empty as "no match" rather
+// than the strings.Index "match at 0" semantics.
 func indexString(s, needle string) int {
 	if needle == "" {
 		return -1
 	}
-	for i := 0; i+len(needle) <= len(s); i++ {
-		if s[i:i+len(needle)] == needle {
-			return i
-		}
-	}
-	return -1
+	return core.Index(s, needle)
 }
 
 type pairedMarker struct {
