@@ -184,7 +184,11 @@ func (s *Store) ResolveURI(ctx context.Context, uri string) (state.Chunk, error)
 }
 
 func (s *Store) Put(ctx context.Context, text string, opts state.PutOptions) (state.ChunkRef, error) {
-	return s.PutBytes(ctx, []byte(text), opts)
+	// PutBytes feeds data into a writer that copies it onto disk — the
+	// underlying io.Writer contract forbids retention or mutation, so
+	// AsBytes is safe here. Avoids the copy of `text` into a fresh
+	// []byte just to be discarded after the disk write.
+	return s.PutBytes(ctx, core.AsBytes(text), opts)
 }
 
 func (s *Store) PutBytes(ctx context.Context, data []byte, opts state.PutOptions) (state.ChunkRef, error) {
@@ -221,7 +225,14 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 		Tags:   opts.Tags,
 		Labels: opts.Labels,
 	}
-	metaBytes := []byte(core.JSONMarshalString(meta))
+	// Use JSONMarshal direct — JSONMarshalString → []byte cast did a
+	// roundtrip via two string conversions. JSONMarshal returns the
+	// freshly-allocated []byte we want for the write.
+	metaResult := core.JSONMarshal(meta)
+	if !metaResult.OK {
+		return state.ChunkRef{}, metaResult.Value.(error)
+	}
+	metaBytes := metaResult.Value.([]byte)
 	if uint64(len(metaBytes)) > uint64(^uint32(0)) {
 		return state.ChunkRef{}, core.NewError("state file store metadata is too large")
 	}
@@ -285,7 +296,11 @@ func (s *Store) resolveLocked(chunkID int) (state.Chunk, error) {
 	if err != nil {
 		return state.Chunk{}, err
 	}
-	chunk.Text = string(chunk.Data)
+	// chunk.Data is freshly allocated by ReadAt and unreachable here
+	// — handing it to AsString skips the payload-sized copy that
+	// string(chunk.Data) would do. Every Resolve text read benefits;
+	// payloads scale to KB+ for compressed state slices.
+	chunk.Text = core.AsString(chunk.Data)
 	chunk.Data = nil
 	return chunk, nil
 }
