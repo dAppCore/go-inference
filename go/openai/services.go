@@ -35,13 +35,17 @@ type EmbeddingRequest struct {
 type EmbeddingInput []string
 
 func (input *EmbeddingInput) UnmarshalJSON(data []byte) error {
-	if len(data) == 0 || string(data) == "null" {
+	// Direct []byte path — sister fix to StopList.UnmarshalJSON.
+	// Earlier shape did `string(data) == "null"` (full copy) and fed
+	// `string(data)` into JSONUnmarshalString which immediately did
+	// AsBytes back to []byte. Skip both.
+	if len(data) == 0 || isNullJSON(data) {
 		*input = nil
 		return nil
 	}
 	if data[0] == '[' {
 		var values []string
-		result := core.JSONUnmarshalString(string(data), &values)
+		result := core.JSONUnmarshal(data, &values)
 		if !result.OK {
 			return resultError(result)
 		}
@@ -49,7 +53,7 @@ func (input *EmbeddingInput) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	var value string
-	result := core.JSONUnmarshalString(string(data), &value)
+	result := core.JSONUnmarshal(data, &value)
 	if !result.OK {
 		return resultError(result)
 	}
@@ -376,7 +380,7 @@ func decodeServiceRequest(w http.ResponseWriter, r *http.Request, into any, scop
 		writeError(w, http.StatusBadRequest, "read request body failed", "body")
 		return false
 	}
-	result := core.JSONUnmarshalString(string(data), into)
+	result := core.JSONUnmarshal(data, into)
 	if !result.OK {
 		err := resultError(result)
 		message := "invalid request body"
