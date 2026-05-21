@@ -61,12 +61,12 @@ existing callers keep compiling.
              ▼                             │
    ┌─────────────────────────────────────────┐
    │  InMemoryStore  /  filestore.Store      │
-   │  memvid.FileStore  /  s3.Store (future) │
+   │  State video / object store (future) │
    └─────────────────────────────────────────┘
 ```
 
 A sleep produces a `Bundle` whose `KVRefs` / `ProbeRefs` /
-`MemvidRefs` point at chunks written to some `Store`. A wake reads the
+`StateRefs` point at chunks written to some `Store`. A wake reads the
 bundle, then reads each chunk back through the same Store. The two
 interfaces in `agent_memory.go` (`Session` + `Forker`) are the only
 runtime contracts; everything else is data.
@@ -80,8 +80,8 @@ backend to wake KV.
 
 ```go
 state.CodecMemory          = "memory/plaintext"   // InMemoryStore
-state.CodecQRVideo         = "memvid/qr-video"    // memvid .mp4
-filestore.CodecFile        = "memvid/file-log"    // append-only file
+state.CodecStateVideo         = "state/qr-video"    // State video .mp4
+filestore.CodecFile        = "state/file-log"    // append-only file
 ```
 
 A `ChunkRef` carries its codec so the wake side knows which decoder to

@@ -9,7 +9,7 @@
 
 A durable, single-file, append-only implementation of the `state.Store`
 interfaces. Designed as the on-disk canonical for CoreAgent bundles
-when memvid's QR-video packaging isn't required (most local-only
+when State video packaging isn't required (most local-only
 sessions). Each chunk is a self-describing record; the file as a whole
 forms a write-ahead-log style history.
 
@@ -38,11 +38,11 @@ many for the JSON-encoded metadata.
 ## Codec stamp
 
 ```go
-const CodecFile = "memvid/file-log"
+const CodecFile = "state/file-log"
 ```
 
 Bundles emitted by this store identify with `Codec: CodecFile` so a
-wake on a memvid-only build can detect-and-route or refuse-and-warn
+wake on a State-video-only build can detect-and-route or refuse-and-warn
 based on whether the file-log decoder is compiled in.
 
 ## Backward compatibility
@@ -81,20 +81,20 @@ the partial bytes are overwritten on the next Put.
 
 ## When to use
 
-- Local development without memvid encoder configured
+- Local development without a State video encoder configured
 - Single-machine CoreAgent that doesn't need portable .mp4 packs
 - Test fixtures that need on-disk durability between processes
 
 ## When NOT to use
 
-- Cross-machine bundle sharing → memvid (`.mp4`)
+- Cross-machine bundle sharing → State video (`.mp4`)
 - Object-storage backed bundles → S3 + custom resolver
-- Read-mostly cold storage → memvid (compression + scan-friendly)
+- Read-mostly cold storage → State video (compression + scan-friendly)
 
 ## Consumed by
 
 - `go-mlx/cmd/violet` — when configured with a local `bundles_dir`
 - `go-mlx/agent_memory.go` — preferred Store for the Wake/Sleep loop
-  when memvid output isn't requested
+  when State video output isn't requested
 - Test harnesses that need cross-test persistence (filestore lives,
   in-memory dies on process exit)
