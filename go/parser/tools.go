@@ -85,8 +85,17 @@ func parseToolPayload(payload string) ([]inference.ToolCall, error) {
 	if payload == "" {
 		return nil, nil
 	}
+	// Cheap shape check before reflection-decoding — a tool-call payload
+	// is always JSON. If the trimmed text doesn't start with '[' or '{',
+	// don't pay the encoding/json reflect walk just to discover that
+	// fact (the common no-tool-calls case the streaming parser feeds us
+	// is plain assistant prose).
+	first := payload[0]
+	if first != '[' && first != '{' {
+		return nil, nil
+	}
 	var list []parsedToolCall
-	if core.HasPrefix(payload, "[") {
+	if first == '[' {
 		result := core.JSONUnmarshalString(payload, &list)
 		if !result.OK {
 			return nil, resultError("parser.tool", result)
