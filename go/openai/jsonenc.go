@@ -31,30 +31,48 @@ import "strconv"
 //
 // Escapes: \" \\ \b \f \n \r \t for the mnemonic forms and \u00XX
 // for other bytes < 0x20. All other bytes pass through.
+//
+// The common case (no escapes — most chat content) goes through a
+// bulk-copy fast path: scan to find the first byte that needs
+// escaping, copy [pos, i) in one append, then emit the escape and
+// continue. For escape-free strings this collapses to a single
+// append(buf, s...). A char-by-char fallback handles strings with
+// mixed escapes.
 func appendJSONString(buf []byte, s string) []byte {
 	buf = append(buf, '"')
+	pos := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		switch {
-		case c == '"':
-			buf = append(buf, '\\', '"')
-		case c == '\\':
-			buf = append(buf, '\\', '\\')
-		case c == '\b':
-			buf = append(buf, '\\', 'b')
-		case c == '\f':
-			buf = append(buf, '\\', 'f')
-		case c == '\n':
-			buf = append(buf, '\\', 'n')
-		case c == '\r':
-			buf = append(buf, '\\', 'r')
-		case c == '\t':
-			buf = append(buf, '\\', 't')
-		case c < 0x20:
-			buf = append(buf, '\\', 'u', '0', '0', hexChar(c>>4), hexChar(c&0x0f))
-		default:
-			buf = append(buf, c)
+		// Fast path: byte requires no escaping — keep scanning.
+		if c >= 0x20 && c != '"' && c != '\\' {
+			continue
 		}
+		// Flush the run we've scanned past, then emit the escape.
+		if pos < i {
+			buf = append(buf, s[pos:i]...)
+		}
+		switch c {
+		case '"':
+			buf = append(buf, '\\', '"')
+		case '\\':
+			buf = append(buf, '\\', '\\')
+		case '\b':
+			buf = append(buf, '\\', 'b')
+		case '\f':
+			buf = append(buf, '\\', 'f')
+		case '\n':
+			buf = append(buf, '\\', 'n')
+		case '\r':
+			buf = append(buf, '\\', 'r')
+		case '\t':
+			buf = append(buf, '\\', 't')
+		default:
+			buf = append(buf, '\\', 'u', '0', '0', hexChar(c>>4), hexChar(c&0x0f))
+		}
+		pos = i + 1
+	}
+	if pos < len(s) {
+		buf = append(buf, s[pos:]...)
 	}
 	return append(buf, '"')
 }
