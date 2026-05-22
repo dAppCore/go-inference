@@ -314,7 +314,7 @@ func (m *Model) run(j *job) {
 	// the stream. Hoisting cloneLabels + millisString out of the
 	// per-token loop is the biggest streaming alloc lift — 256-token
 	// generates went from ~3 allocs/token to ~1.
-	labels := cloneLabels(j.req.Labels)
+	labels := cloneLabelsForWrite(j.req.Labels)
 	labels["queue_latency_ms"] = millisString(queueLatency)
 	firstToken := true
 	var firstLatency time.Duration
@@ -445,13 +445,27 @@ func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
 	}}
 }
 
+// cloneLabels returns an independent snapshot of labels. Empty inputs
+// return nil — callers that need a writable map for in-place mutation
+// (the run() loop) use cloneLabelsForWrite instead.
 func cloneLabels(labels map[string]string) map[string]string {
 	if len(labels) == 0 {
-		// Preserve the original "empty/nil → fresh empty map" contract
-		// callers relied on, but skip the unnecessary make+copy.
-		return map[string]string{}
+		return nil
 	}
 	out := make(map[string]string, len(labels))
+	for key, value := range labels {
+		out[key] = value
+	}
+	return out
+}
+
+// cloneLabelsForWrite mirrors cloneLabels but always returns a writable
+// map. Used by the run() loop which inserts queue_latency_ms and
+// first_token_latency_ms after construction.
+func cloneLabelsForWrite(labels map[string]string) map[string]string {
+	// Pre-size to len + 2 to cover the two metrics keys run() always
+	// inserts; avoids a rehash when the second key lands.
+	out := make(map[string]string, len(labels)+2)
 	for key, value := range labels {
 		out[key] = value
 	}
