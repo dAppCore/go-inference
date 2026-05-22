@@ -836,30 +836,56 @@ func appendJSONField(buf []byte, key, value string, first bool) []byte {
 // default also escapes <, >, & for HTML safety but the read path
 // does not, and the on-disk record is not consumed by HTML
 // contexts.
+//
+// The body walk batches runs of non-escape bytes into a single
+// append per span, so a typical URI / Title / Kind value (no
+// escapes) collapses to one append-string call rather than N
+// append-byte calls. encoding/json's own writer emits the no-
+// escape path the same way; the per-byte loop here was an artefact
+// of the original simple shape.
 func appendJSONString(buf []byte, s string) []byte {
 	buf = append(buf, '"')
+	start := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		switch {
-		case c == '"':
-			buf = append(buf, '\\', '"')
-		case c == '\\':
-			buf = append(buf, '\\', '\\')
-		case c == '\b':
-			buf = append(buf, '\\', 'b')
-		case c == '\f':
-			buf = append(buf, '\\', 'f')
-		case c == '\n':
-			buf = append(buf, '\\', 'n')
-		case c == '\r':
-			buf = append(buf, '\\', 'r')
-		case c == '\t':
-			buf = append(buf, '\\', 't')
-		case c < 0x20:
-			buf = append(buf, '\\', 'u', '0', '0', hexChar(c>>4), hexChar(c&0x0f))
-		default:
-			buf = append(buf, c)
+		// Fast-path predicate: any byte ≥ 0x20 that is neither '"'
+		// nor '\\' passes through verbatim. The boolean short-
+		// circuits left-to-right and the compiler emits two CMPs
+		// + AND, cheaper than the previous per-byte switch dispatch.
+		if c >= 0x20 && c != '"' && c != '\\' {
+			continue
 		}
+		// Flush the verbatim span up to but not including the
+		// escape byte. The span is empty on the first escape at
+		// position 0; append-zero-length is a no-op.
+		if start < i {
+			buf = append(buf, s[start:i]...)
+		}
+		switch c {
+		case '"':
+			buf = append(buf, '\\', '"')
+		case '\\':
+			buf = append(buf, '\\', '\\')
+		case '\b':
+			buf = append(buf, '\\', 'b')
+		case '\f':
+			buf = append(buf, '\\', 'f')
+		case '\n':
+			buf = append(buf, '\\', 'n')
+		case '\r':
+			buf = append(buf, '\\', 'r')
+		case '\t':
+			buf = append(buf, '\\', 't')
+		default:
+			// c < 0x20 and not one of the mnemonic escapes — emit
+			// \u00XX. Hex digits emitted lowercase to match the
+			// jsonUnescape reader and encoding/json output.
+			buf = append(buf, '\\', 'u', '0', '0', hexChar(c>>4), hexChar(c&0x0f))
+		}
+		start = i + 1
+	}
+	if start < len(s) {
+		buf = append(buf, s[start:]...)
 	}
 	return append(buf, '"')
 }
