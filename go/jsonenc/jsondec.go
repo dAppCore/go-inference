@@ -25,7 +25,10 @@
 
 package jsonenc
 
-import "errors"
+import (
+	"errors"
+	"strconv"
+)
 
 // ErrInvalidJSON is the sentinel returned for malformed input.
 // Call sites wrap into typed result errors as appropriate.
@@ -366,8 +369,7 @@ func SkipJSONValue(data []byte, i int) (int, error) {
 	case '[':
 		return skipJSONArray(data, i+1)
 	case '"':
-		_, next, err := ParseJSONString(data, i)
-		return next, err
+		return SkipJSONString(data, i)
 	case 't', 'f':
 		_, next, err := ParseJSONBool(data, i)
 		return next, err
@@ -378,6 +380,45 @@ func SkipJSONValue(data []byte, i int) (int, error) {
 		return i, ErrInvalidJSON
 	}
 	return skipJSONNumber(data, i)
+}
+
+// SkipJSONString walks a JSON string at data[i] (which must be '"')
+// and returns the index one past the closing '"'. Unlike
+// ParseJSONString it does NOT materialise a Go string — callers use
+// it when they only need to advance past the value (object-key
+// inside a SkipJSONValue path, ignored field, CountJSONArrayElements
+// prescan).
+//
+//	next, err := jsonenc.SkipJSONString(data, i)
+func SkipJSONString(data []byte, i int) (int, error) {
+	if i >= len(data) || data[i] != '"' {
+		return i, ErrInvalidJSON
+	}
+	for j := i + 1; j < len(data); j++ {
+		c := data[j]
+		if c == '"' {
+			return j + 1, nil
+		}
+		if c == '\\' {
+			// Escape — bump j past the escape body without decoding.
+			if j+1 >= len(data) {
+				return j, ErrInvalidJSON
+			}
+			if data[j+1] == 'u' {
+				if j+6 > len(data) {
+					return j, ErrInvalidJSON
+				}
+				j += 5
+				continue
+			}
+			j++
+			continue
+		}
+		if c < 0x20 {
+			return j, ErrInvalidJSON
+		}
+	}
+	return i, ErrInvalidJSON
 }
 
 // skipJSONObject skips through the object body at data[i:] starting
@@ -392,7 +433,7 @@ func skipJSONObject(data []byte, i int) (int, error) {
 		if i >= len(data) || data[i] != '"' {
 			return i, ErrInvalidJSON
 		}
-		_, next, err := ParseJSONString(data, i)
+		next, err := SkipJSONString(data, i)
 		if err != nil {
 			return next, err
 		}
@@ -491,4 +532,98 @@ func MatchArrayStart(data []byte, i int) (int, error) {
 		return i, ErrInvalidJSON
 	}
 	return i + 1, nil
+}
+
+// ParseJSONFloat32 walks a JSON number at data[i] and returns the
+// parsed float32 + the index one past the last byte. Accepts the
+// same shape encoding/json accepts for a float field (optional
+// leading '-', integer, optional fraction, optional exponent).
+//
+//	v, next, err := jsonenc.ParseJSONFloat32(data, i)
+func ParseJSONFloat32(data []byte, i int) (float32, int, error) {
+	start := i
+	if i < len(data) && data[i] == '-' {
+		i++
+	}
+	for i < len(data) {
+		c := data[i]
+		if (c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-' {
+			i++
+			continue
+		}
+		break
+	}
+	if i == start {
+		return 0, i, ErrInvalidJSON
+	}
+	// strconv.ParseFloat with bitSize 32 matches encoding/json's
+	// float32 decoder. The string conversion at the strconv boundary
+	// is unavoidable — pre-W11-B json.Unmarshal paid the same cost
+	// via its own internal walker; the hand-roll wins from skipping
+	// reflect overhead, not from defeating the stdlib's float parser.
+	v, err := strconv.ParseFloat(string(data[start:i]), 32)
+	if err != nil {
+		return 0, i, ErrInvalidJSON
+	}
+	return float32(v), i, nil
+}
+
+// ParseJSONFloat64 walks a JSON number at data[i] and returns the
+// parsed float64 + the index one past the last byte.
+func ParseJSONFloat64(data []byte, i int) (float64, int, error) {
+	start := i
+	if i < len(data) && data[i] == '-' {
+		i++
+	}
+	for i < len(data) {
+		c := data[i]
+		if (c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-' {
+			i++
+			continue
+		}
+		break
+	}
+	if i == start {
+		return 0, i, ErrInvalidJSON
+	}
+	v, err := strconv.ParseFloat(string(data[start:i]), 64)
+	if err != nil {
+		return 0, i, ErrInvalidJSON
+	}
+	return v, i, nil
+}
+
+// CountJSONArrayElements counts the elements in the JSON array body
+// starting at data[i] (just past the '['). Does NOT mutate the
+// caller's index — callers use the count only for slice pre-sizing.
+//
+// Walks each element via SkipJSONValue so it handles nested objects
+// / arrays / quoted strings (no naive comma-count footgun). Returns
+// 0 for a malformed body — the caller's subsequent parse re-reports
+// the malformedness.
+//
+//	count := jsonenc.CountJSONArrayElements(data, i)
+//	out := make([]T, 0, count)
+func CountJSONArrayElements(data []byte, i int) int {
+	i = SkipJSONWhitespace(data, i)
+	if i >= len(data) || data[i] == ']' {
+		return 0
+	}
+	count := 0
+	for {
+		next, err := SkipJSONValue(data, i)
+		if err != nil {
+			return count
+		}
+		count++
+		i = SkipJSONWhitespace(data, next)
+		if i >= len(data) {
+			return count
+		}
+		if data[i] == ',' {
+			i = SkipJSONWhitespace(data, i+1)
+			continue
+		}
+		return count
+	}
 }

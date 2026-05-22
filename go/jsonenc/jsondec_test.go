@@ -216,6 +216,68 @@ func TestMatchObjectAndArrayStart(t *testing.T) {
 	}
 }
 
+func TestSkipJSONString(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{`"abc"`, 5},
+		{`""`, 2},
+		{`"a\nb"`, 6},
+		{`"a\"b"`, 6},
+		{`"a\\b"`, 6},
+		{`"aÿb"`, 6}, // ÿ is 2 UTF-8 bytes inside the quotes
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			next, err := SkipJSONString([]byte(tc.in), 0)
+			if err != nil {
+				t.Fatalf("SkipJSONString(%s) error = %v", tc.in, err)
+			}
+			if next != tc.want {
+				t.Fatalf("got %d want %d", next, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseJSONFloat(t *testing.T) {
+	v, _, err := ParseJSONFloat32([]byte(`0.7`), 0)
+	if err != nil || v != 0.7 {
+		t.Fatalf("ParseJSONFloat32(0.7): v=%v err=%v", v, err)
+	}
+	v, _, err = ParseJSONFloat32([]byte(`-1.5e2`), 0)
+	if err != nil || v != -150 {
+		t.Fatalf("ParseJSONFloat32(-1.5e2): v=%v err=%v", v, err)
+	}
+	d, _, err := ParseJSONFloat64([]byte(`3.14`), 0)
+	if err != nil || d != 3.14 {
+		t.Fatalf("ParseJSONFloat64(3.14): d=%v err=%v", d, err)
+	}
+}
+
+func TestCountJSONArrayElements(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{`]`, 0},
+		{`1]`, 1},
+		{`1,2,3]`, 3},
+		{`"a","b"]`, 2},
+		{`{"x":1},{"y":2}]`, 2},
+		{`[1,2],[3]]`, 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := CountJSONArrayElements([]byte(tc.in), 0)
+			if got != tc.want {
+				t.Fatalf("got %d want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseJSONStringRaw(t *testing.T) {
 	b, next, err := ParseJSONStringRaw([]byte(`"hello"`), 0)
 	if err != nil || string(b) != "hello" || next != 7 {
