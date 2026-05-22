@@ -103,6 +103,153 @@ func TestJang_ValidatePackedTensorBadPackedLength(t *testing.T) {
 	}
 }
 
+// roundTripFixture builds a descriptor at the requested bit width with the
+// MXTQ routed-expert tensor name (the inferTensorRole route that picks up
+// RoutedExpertBits) and feeds it crafted values such that every group is
+// exercised. Returns descriptor + the values written in.
+func roundTripFixture(t *testing.T, bits int, elements int, groupSize int) (PackedTensorDescriptor, []uint8, []byte, []float32, []float32) {
+	t.Helper()
+	info := &Info{
+		Version:          2,
+		WeightFormat:     "mxtq",
+		Profile:          "JANGTQ",
+		Method:           "affine+mxtq",
+		GroupSize:        groupSize,
+		BitsDefault:      bits,
+		RoutedExpertBits: bits,
+	}
+	desc, err := NewPackedTensorDescriptor("model.layers.0.block_sparse_moe.experts.0.w1.weight", []uint64{uint64(elements)}, info)
+	if err != nil {
+		t.Fatalf("NewPackedTensorDescriptor(%d-bit): %v", bits, err)
+	}
+	maxValue := uint8((1 << bits) - 1)
+	values := make([]uint8, desc.Elements)
+	for i := range values {
+		// Walk the full 0..maxValue range so every nibble/lane is touched.
+		values[i] = uint8(i) & maxValue
+	}
+	packed, err := PackQuantizedValues(desc, values)
+	if err != nil {
+		t.Fatalf("PackQuantizedValues(%d-bit): %v", bits, err)
+	}
+	// Distinct per-group scale + bias so a regression that mis-indexes groups
+	// surfaces as a wrong magnitude, not a hidden silent identity.
+	scales := make([]float32, desc.ScaleCount)
+	biases := make([]float32, desc.BiasCount)
+	for i := range scales {
+		scales[i] = 0.25 + float32(i)*0.0625
+		biases[i] = -1 - float32(i)*0.5
+	}
+	return desc, values, packed, scales, biases
+}
+
+// expectedDequantize is the smallest possible reference dequant — pure
+// per-element arithmetic with the generic unpack walk used by upstream
+// before the W10-N specialisation. Used as the bit-exact oracle.
+func expectedDequantize(t *testing.T, values []uint8, scales, biases []float32, groupSize int) []float32 {
+	t.Helper()
+	out := make([]float32, len(values))
+	for i, v := range values {
+		group := i / groupSize
+		out[i] = float32(v)*scales[group] + biases[group]
+	}
+	return out
+}
+
+func TestJang_DequantizePackedTensor_RoundTrip_1bit(t *testing.T) {
+	// 4096 elements with groupSize=64 to exercise the multi-group dispatch.
+	desc, values, packed, scales, biases := roundTripFixture(t, 1, 4096, 64)
+	got, err := DequantizePackedTensor(desc, packed, scales, biases)
+	if err != nil {
+		t.Fatalf("DequantizePackedTensor(1-bit): %v", err)
+	}
+	want := expectedDequantize(t, values, scales, biases, desc.GroupSize)
+	assertBitExact(t, got, want)
+}
+
+func TestJang_DequantizePackedTensor_RoundTrip_2bit(t *testing.T) {
+	desc, values, packed, scales, biases := roundTripFixture(t, 2, 4096, 64)
+	got, err := DequantizePackedTensor(desc, packed, scales, biases)
+	if err != nil {
+		t.Fatalf("DequantizePackedTensor(2-bit): %v", err)
+	}
+	want := expectedDequantize(t, values, scales, biases, desc.GroupSize)
+	assertBitExact(t, got, want)
+}
+
+func TestJang_DequantizePackedTensor_RoundTrip_3bit(t *testing.T) {
+	// 3-bit hits the generic-walk default branch — the dequant must still
+	// be bit-exact against the pre-specialisation oracle.
+	desc, values, packed, scales, biases := roundTripFixture(t, 3, 4096, 64)
+	got, err := DequantizePackedTensor(desc, packed, scales, biases)
+	if err != nil {
+		t.Fatalf("DequantizePackedTensor(3-bit): %v", err)
+	}
+	want := expectedDequantize(t, values, scales, biases, desc.GroupSize)
+	assertBitExact(t, got, want)
+}
+
+func TestJang_DequantizePackedTensor_RoundTrip_4bit(t *testing.T) {
+	desc, values, packed, scales, biases := roundTripFixture(t, 4, 4096, 64)
+	got, err := DequantizePackedTensor(desc, packed, scales, biases)
+	if err != nil {
+		t.Fatalf("DequantizePackedTensor(4-bit): %v", err)
+	}
+	want := expectedDequantize(t, values, scales, biases, desc.GroupSize)
+	assertBitExact(t, got, want)
+}
+
+func TestJang_DequantizePackedTensor_RoundTrip_8bit(t *testing.T) {
+	desc, values, packed, scales, biases := roundTripFixture(t, 8, 4096, 64)
+	got, err := DequantizePackedTensor(desc, packed, scales, biases)
+	if err != nil {
+		t.Fatalf("DequantizePackedTensor(8-bit): %v", err)
+	}
+	want := expectedDequantize(t, values, scales, biases, desc.GroupSize)
+	assertBitExact(t, got, want)
+}
+
+// TestJang_DequantizePackedTensor_RoundTrip_2bit_ShortTail exercises the
+// case where the tensor's element count is NOT a multiple of groupSize,
+// so the final group runs short and the 2-bit suffix-drain path covers
+// the tail.
+func TestJang_DequantizePackedTensor_RoundTrip_2bit_ShortTail(t *testing.T) {
+	// 130 elements with groupSize=64 → 3 groups, last group has 2 elements.
+	desc, values, packed, scales, biases := roundTripFixture(t, 2, 130, 64)
+	got, err := DequantizePackedTensor(desc, packed, scales, biases)
+	if err != nil {
+		t.Fatalf("DequantizePackedTensor(2-bit short tail): %v", err)
+	}
+	want := expectedDequantize(t, values, scales, biases, desc.GroupSize)
+	assertBitExact(t, got, want)
+}
+
+// TestJang_DequantizePackedTensor_RoundTrip_2bit_GroupSize2 exercises the
+// case where groupSize < 4 — the 2-bit batched fast path can't fire on a
+// 4-elements-per-byte stride, so the per-element prefix path must cover
+// every element.
+func TestJang_DequantizePackedTensor_RoundTrip_2bit_GroupSize2(t *testing.T) {
+	desc, values, packed, scales, biases := roundTripFixture(t, 2, 32, 2)
+	got, err := DequantizePackedTensor(desc, packed, scales, biases)
+	if err != nil {
+		t.Fatalf("DequantizePackedTensor(2-bit groupSize=2): %v", err)
+	}
+	want := expectedDequantize(t, values, scales, biases, desc.GroupSize)
+	assertBitExact(t, got, want)
+}
+
+func assertBitExact(t *testing.T, got, want []float32) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("length = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("dequant[%d] = %v, want %v (delta=%v)", i, got[i], want[i], got[i]-want[i])
+		}
+	}
+}
+
 func TestJang_BuildPackedProfile_Good(t *testing.T) {
 	profile := BuildPackedProfile(testJANGTQInfo())
 	if profile == nil {
