@@ -40,8 +40,16 @@ type Model struct {
 	maxConcurrent   int
 	streamBuffer    int
 	requestIDPrefix string
-	probeSink       inference.ProbeSink
 	nextID          atomic.Uint64
+
+	// probeSink is read on every scheduler event (queued / start /
+	// first_token / cancel / cancelled / complete) and updated only
+	// via SetProbeSink. An atomic.Pointer lets emitProbe load the
+	// sink without contending m.mu — under burst dispatch we used to
+	// pay one mu.Lock per probe event per producer (4 events × 64
+	// producers = 256 lock acquisitions per bench iteration even
+	// when no sink was attached).
+	probeSink atomic.Pointer[probeSinkBox]
 
 	// active holds in-flight jobs keyed by request ID. sync.Map fits
 	// the access shape: CancelRequest's lookup is the contended
@@ -54,6 +62,13 @@ type Model struct {
 
 	mu      sync.Mutex
 	lastErr error
+}
+
+// probeSinkBox wraps the sink interface so it can be stored in an
+// atomic.Pointer (atomic.Value rejects nil-typed interface stores;
+// boxing avoids that constraint and keeps the load path branchless).
+type probeSinkBox struct {
+	sink inference.ProbeSink
 }
 
 type job struct {
@@ -91,7 +106,9 @@ func New(model inference.TextModel, cfg Config) *Model {
 		maxConcurrent:   maxConcurrent,
 		streamBuffer:    streamBuffer,
 		requestIDPrefix: prefix,
-		probeSink:       cfg.ProbeSink,
+	}
+	if cfg.ProbeSink != nil {
+		m.probeSink.Store(&probeSinkBox{sink: cfg.ProbeSink})
 	}
 	for worker := range maxConcurrent {
 		go m.worker(worker)
@@ -300,9 +317,11 @@ func (m *Model) SetProbeSink(sink inference.ProbeSink) {
 	if m == nil {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.probeSink = sink
+	if sink == nil {
+		m.probeSink.Store(nil)
+		return
+	}
+	m.probeSink.Store(&probeSinkBox{sink: sink})
 }
 
 func (m *Model) worker(_ int) {
@@ -375,13 +394,22 @@ func (m *Model) unregister(id string) {
 }
 
 func (m *Model) emitProbe(j *job, event string, queueLatency, firstTokenLatency time.Duration, cancelled bool) {
-	m.mu.Lock()
-	sink := m.probeSink
-	queueDepth := len(m.queue)
-	m.mu.Unlock()
-	if sink == nil || j == nil {
+	if j == nil {
 		return
 	}
+	// Lock-free fast path — burst-dispatch typically runs with no
+	// sink attached; the atomic load + nil check returns in nanoseconds
+	// and never contends the mutex that guards lastErr.
+	box := m.probeSink.Load()
+	if box == nil {
+		return
+	}
+	sink := box.sink
+	if sink == nil {
+		return
+	}
+	// Channel len is internally atomic — safe to read without a lock.
+	queueDepth := len(m.queue)
 	sink.EmitProbe(inference.ProbeEvent{
 		Kind:  inference.ProbeEventScheduler,
 		Phase: inference.ProbePhaseQueue,
