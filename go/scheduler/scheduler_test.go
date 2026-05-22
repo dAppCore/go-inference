@@ -340,8 +340,14 @@ func TestModel_ErrAndHelpers_Good(t *testing.T) {
 		StopTokens:    []int32{1, 2},
 		ReturnLogits:  true,
 	})
-	if len(opts) != 7 {
-		t.Fatalf("generateOptions len = %d, want 7", len(opts))
+	// generateOptions now returns a single fused option that applies the
+	// whole SamplerConfig in one closure — verify by applying and reading
+	// the resulting GenerateConfig.
+	applied := inference.ApplyGenerateOpts(opts)
+	if applied.MaxTokens != 4 || applied.Temperature != 0.25 || applied.TopK != 8 ||
+		applied.TopP != 0.9 || applied.RepeatPenalty != 1.1 || !applied.ReturnLogits ||
+		len(applied.StopTokens) != 2 || applied.StopTokens[0] != 1 || applied.StopTokens[1] != 2 {
+		t.Fatalf("generateOptions applied = %+v", applied)
 	}
 	labels := map[string]string{"a": "b"}
 	cloned := cloneLabels(labels)
