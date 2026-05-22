@@ -7,7 +7,10 @@
 
 package openai
 
-import "dappco.re/go/inference"
+import (
+	"dappco.re/go/inference"
+	"dappco.re/go/inference/jsonenc"
+)
 
 // appendRerankScore walks one inference.RerankScore into buf. The
 // contract carries Index / Score / Text / Labels with omitempty on
@@ -18,7 +21,7 @@ func appendRerankScore(buf []byte, score inference.RerankScore) []byte {
 	buf = append(buf, '{')
 	leading := false
 	if score.Index != 0 {
-		buf = appendIntField(buf, "index", score.Index, false)
+		buf = jsonenc.AppendIntField(buf, "index", score.Index, false)
 		leading = true
 	}
 	if score.Score != 0 {
@@ -26,11 +29,11 @@ func appendRerankScore(buf []byte, score inference.RerankScore) []byte {
 			buf = append(buf, ',')
 		}
 		buf = append(buf, '"', 's', 'c', 'o', 'r', 'e', '"', ':')
-		buf = appendFloat64(buf, score.Score)
+		buf = jsonenc.AppendFloat64(buf, score.Score)
 		leading = true
 	}
 	if score.Text != "" {
-		buf = appendStringField(buf, "text", score.Text, leading)
+		buf = jsonenc.AppendStringField(buf, "text", score.Text, leading)
 		leading = true
 	}
 	if len(score.Labels) > 0 {
@@ -44,9 +47,9 @@ func appendRerankScore(buf []byte, score inference.RerankScore) []byte {
 				buf = append(buf, ',')
 			}
 			labelFirst = false
-			buf = appendJSONString(buf, k)
+			buf = jsonenc.AppendJSONString(buf, k)
 			buf = append(buf, ':')
-			buf = appendJSONString(buf, v)
+			buf = jsonenc.AppendJSONString(buf, v)
 		}
 		buf = append(buf, '}')
 	}
@@ -58,8 +61,8 @@ func appendRerankScore(buf []byte, score inference.RerankScore) []byte {
 // inline skips the per-element reflect cost encoding/json pays.
 func appendRerankResponse(buf []byte, resp RerankResponse) []byte {
 	buf = append(buf, '{')
-	buf = appendStringField(buf, "object", resp.Object, false)
-	buf = appendStringField(buf, "model", resp.Model, true)
+	buf = jsonenc.AppendStringField(buf, "object", resp.Object, false)
+	buf = jsonenc.AppendStringField(buf, "model", resp.Model, true)
 	buf = append(buf, ',', '"', 'r', 'e', 's', 'u', 'l', 't', 's', '"', ':', '[')
 	for i, score := range resp.Results {
 		if i > 0 {

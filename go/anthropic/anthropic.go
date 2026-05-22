@@ -7,6 +7,7 @@ package anthropic
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/jsonenc"
 )
 
 // DefaultMessagesPath is the Anthropic-compatible Messages endpoint.
@@ -86,10 +87,10 @@ type MessageResponse struct {
 //	w.Write(buf)  // typical HTTP-emit shape.
 func AppendMessageResponse(buf []byte, r MessageResponse) []byte {
 	buf = append(buf, '{')
-	buf = appendStringField(buf, "id", r.ID, false)
-	buf = appendStringField(buf, "type", r.Type, true)
-	buf = appendStringField(buf, "role", r.Role, true)
-	buf = appendStringField(buf, "model", r.Model, true)
+	buf = jsonenc.AppendStringField(buf, "id", r.ID, false)
+	buf = jsonenc.AppendStringField(buf, "type", r.Type, true)
+	buf = jsonenc.AppendStringField(buf, "role", r.Role, true)
+	buf = jsonenc.AppendStringField(buf, "model", r.Model, true)
 	buf = append(buf, ',', '"', 'c', 'o', 'n', 't', 'e', 'n', 't', '"', ':', '[')
 	for i, b := range r.Content {
 		if i > 0 {
@@ -99,15 +100,15 @@ func AppendMessageResponse(buf []byte, r MessageResponse) []byte {
 	}
 	buf = append(buf, ']')
 	if r.StopReason != "" {
-		buf = appendStringField(buf, "stop_reason", r.StopReason, true)
+		buf = jsonenc.AppendStringField(buf, "stop_reason", r.StopReason, true)
 	}
 	if r.StopSequence != "" {
-		buf = appendStringField(buf, "stop_sequence", r.StopSequence, true)
+		buf = jsonenc.AppendStringField(buf, "stop_sequence", r.StopSequence, true)
 	}
 	// Usage object — always emitted (no omitempty on the field).
 	buf = append(buf, ',', '"', 'u', 's', 'a', 'g', 'e', '"', ':', '{')
-	buf = appendIntField(buf, "input_tokens", r.Usage.InputTokens, false)
-	buf = appendIntField(buf, "output_tokens", r.Usage.OutputTokens, true)
+	buf = jsonenc.AppendIntField(buf, "input_tokens", r.Usage.InputTokens, false)
+	buf = jsonenc.AppendIntField(buf, "output_tokens", r.Usage.OutputTokens, true)
 	return append(buf, '}', '}')
 }
 
@@ -157,9 +158,9 @@ func MessageResponseSize(r MessageResponse) int {
 // shapes share it.
 func appendContentBlock(buf []byte, b ContentBlock) []byte {
 	buf = append(buf, '{')
-	buf = appendStringField(buf, "type", b.Type, false)
+	buf = jsonenc.AppendStringField(buf, "type", b.Type, false)
 	if b.Text != "" {
-		buf = appendStringField(buf, "text", b.Text, true)
+		buf = jsonenc.AppendStringField(buf, "text", b.Text, true)
 	}
 	return append(buf, '}')
 }
@@ -168,7 +169,7 @@ func appendContentBlock(buf []byte, b ContentBlock) []byte {
 // role + content always emitted; content is an array of ContentBlocks.
 func appendMessage(buf []byte, m Message) []byte {
 	buf = append(buf, '{')
-	buf = appendStringField(buf, "role", m.Role, false)
+	buf = jsonenc.AppendStringField(buf, "role", m.Role, false)
 	buf = append(buf, ',', '"', 'c', 'o', 'n', 't', 'e', 'n', 't', '"', ':', '[')
 	for i, b := range m.Content {
 		if i > 0 {
@@ -200,9 +201,9 @@ func appendMessage(buf []byte, m Message) []byte {
 //	httpClient.Post(url, "application/json", bytes.NewReader(buf))
 func AppendMessageRequest(buf []byte, r MessageRequest) []byte {
 	buf = append(buf, '{')
-	buf = appendStringField(buf, "model", r.Model, false)
+	buf = jsonenc.AppendStringField(buf, "model", r.Model, false)
 	if r.System != "" {
-		buf = appendStringField(buf, "system", r.System, true)
+		buf = jsonenc.AppendStringField(buf, "system", r.System, true)
 	}
 	buf = append(buf, ',', '"', 'm', 'e', 's', 's', 'a', 'g', 'e', 's', '"', ':', '[')
 	for i, m := range r.Messages {
@@ -212,18 +213,18 @@ func AppendMessageRequest(buf []byte, r MessageRequest) []byte {
 		buf = appendMessage(buf, m)
 	}
 	buf = append(buf, ']')
-	buf = appendIntField(buf, "max_tokens", r.MaxTokens, true)
+	buf = jsonenc.AppendIntField(buf, "max_tokens", r.MaxTokens, true)
 	if r.Temperature != nil {
-		buf = appendFloat32Field(buf, "temperature", *r.Temperature, true)
+		buf = jsonenc.AppendFloat32Field(buf, "temperature", *r.Temperature, true)
 	}
 	if r.TopP != nil {
-		buf = appendFloat32Field(buf, "top_p", *r.TopP, true)
+		buf = jsonenc.AppendFloat32Field(buf, "top_p", *r.TopP, true)
 	}
 	if r.TopK != nil {
-		buf = appendIntField(buf, "top_k", *r.TopK, true)
+		buf = jsonenc.AppendIntField(buf, "top_k", *r.TopK, true)
 	}
 	if r.Stream {
-		buf = appendBoolField(buf, "stream", true, true)
+		buf = jsonenc.AppendBoolField(buf, "stream", true, true)
 	}
 	if len(r.StopSequences) > 0 {
 		buf = append(buf, ',', '"', 's', 't', 'o', 'p', '_', 's', 'e', 'q', 'u', 'e', 'n', 'c', 'e', 's', '"', ':', '[')
@@ -231,7 +232,7 @@ func AppendMessageRequest(buf []byte, r MessageRequest) []byte {
 			if i > 0 {
 				buf = append(buf, ',')
 			}
-			buf = appendJSONString(buf, s)
+			buf = jsonenc.AppendJSONString(buf, s)
 		}
 		buf = append(buf, ']')
 	}

@@ -18,6 +18,8 @@
 
 package openai
 
+import "dappco.re/go/inference/jsonenc"
+
 // appendChatMessageDelta walks the two-field ChatMessageDelta into buf.
 // Same shape and escape contract as ChatMessageDelta.MarshalJSON, but
 // without the buffer-allocation hop — the chunk encoders pull it
@@ -34,10 +36,10 @@ func appendChatMessageDelta(buf []byte, d ChatMessageDelta) []byte {
 	}
 	buf = append(buf, '{')
 	if d.Role != "" {
-		buf = appendStringField(buf, "role", d.Role, false)
-		buf = appendStringField(buf, "content", d.Content, true)
+		buf = jsonenc.AppendStringField(buf, "role", d.Role, false)
+		buf = jsonenc.AppendStringField(buf, "content", d.Content, true)
 	} else {
-		buf = appendStringField(buf, "content", d.Content, false)
+		buf = jsonenc.AppendStringField(buf, "content", d.Content, false)
 	}
 	return append(buf, '}')
 }
@@ -49,14 +51,14 @@ func appendChatMessageDelta(buf []byte, d ChatMessageDelta) []byte {
 // pivot on.
 func appendChatChunkChoice(buf []byte, choice ChatChunkChoice) []byte {
 	buf = append(buf, '{')
-	buf = appendIntField(buf, "index", choice.Index, false)
+	buf = jsonenc.AppendIntField(buf, "index", choice.Index, false)
 	buf = append(buf, ',', '"', 'd', 'e', 'l', 't', 'a', '"', ':')
 	buf = appendChatMessageDelta(buf, choice.Delta)
 	buf = append(buf, ',', '"', 'f', 'i', 'n', 'i', 's', 'h', '_', 'r', 'e', 'a', 's', 'o', 'n', '"', ':')
 	if choice.FinishReason == nil {
 		buf = append(buf, 'n', 'u', 'l', 'l')
 	} else {
-		buf = appendJSONString(buf, *choice.FinishReason)
+		buf = jsonenc.AppendJSONString(buf, *choice.FinishReason)
 	}
 	return append(buf, '}')
 }
@@ -67,10 +69,10 @@ func appendChatChunkChoice(buf []byte, choice ChatChunkChoice) []byte {
 // for the canonical tag set.
 func appendChatCompletionChunk(buf []byte, chunk ChatCompletionChunk) []byte {
 	buf = append(buf, '{')
-	buf = appendStringField(buf, "id", chunk.ID, false)
-	buf = appendStringField(buf, "object", chunk.Object, true)
-	buf = appendInt64Field(buf, "created", chunk.Created, true)
-	buf = appendStringField(buf, "model", chunk.Model, true)
+	buf = jsonenc.AppendStringField(buf, "id", chunk.ID, false)
+	buf = jsonenc.AppendStringField(buf, "object", chunk.Object, true)
+	buf = jsonenc.AppendInt64Field(buf, "created", chunk.Created, true)
+	buf = jsonenc.AppendStringField(buf, "model", chunk.Model, true)
 	buf = append(buf, ',', '"', 'c', 'h', 'o', 'i', 'c', 'e', 's', '"', ':', '[')
 	for i, choice := range chunk.Choices {
 		if i > 0 {
@@ -81,7 +83,7 @@ func appendChatCompletionChunk(buf []byte, chunk ChatCompletionChunk) []byte {
 	buf = append(buf, ']')
 	if chunk.Thought != nil {
 		buf = append(buf, ',', '"', 't', 'h', 'o', 'u', 'g', 'h', 't', '"', ':')
-		buf = appendJSONString(buf, *chunk.Thought)
+		buf = jsonenc.AppendJSONString(buf, *chunk.Thought)
 	}
 	return append(buf, '}')
 }
@@ -141,8 +143,8 @@ func chunkSSEFrameSize(chunk ChatCompletionChunk) int {
 // non-streaming response encoder for the assistant message body.
 func appendChatMessage(buf []byte, msg ChatMessage) []byte {
 	buf = append(buf, '{')
-	buf = appendStringField(buf, "role", msg.Role, false)
-	buf = appendStringField(buf, "content", msg.Content, true)
+	buf = jsonenc.AppendStringField(buf, "role", msg.Role, false)
+	buf = jsonenc.AppendStringField(buf, "content", msg.Content, true)
 	return append(buf, '}')
 }
 
@@ -150,10 +152,10 @@ func appendChatMessage(buf []byte, msg ChatMessage) []byte {
 // buf. Field order matches the struct: index, message, finish_reason.
 func appendChatChoice(buf []byte, choice ChatChoice) []byte {
 	buf = append(buf, '{')
-	buf = appendIntField(buf, "index", choice.Index, false)
+	buf = jsonenc.AppendIntField(buf, "index", choice.Index, false)
 	buf = append(buf, ',', '"', 'm', 'e', 's', 's', 'a', 'g', 'e', '"', ':')
 	buf = appendChatMessage(buf, choice.Message)
-	buf = appendStringField(buf, "finish_reason", choice.FinishReason, true)
+	buf = jsonenc.AppendStringField(buf, "finish_reason", choice.FinishReason, true)
 	return append(buf, '}')
 }
 
@@ -161,9 +163,9 @@ func appendChatChoice(buf []byte, choice ChatChoice) []byte {
 // canonical OpenAI order.
 func appendChatUsage(buf []byte, usage ChatUsage) []byte {
 	buf = append(buf, '{')
-	buf = appendIntField(buf, "prompt_tokens", usage.PromptTokens, false)
-	buf = appendIntField(buf, "completion_tokens", usage.CompletionTokens, true)
-	buf = appendIntField(buf, "total_tokens", usage.TotalTokens, true)
+	buf = jsonenc.AppendIntField(buf, "prompt_tokens", usage.PromptTokens, false)
+	buf = jsonenc.AppendIntField(buf, "completion_tokens", usage.CompletionTokens, true)
+	buf = jsonenc.AppendIntField(buf, "total_tokens", usage.TotalTokens, true)
 	return append(buf, '}')
 }
 
@@ -172,10 +174,10 @@ func appendChatUsage(buf []byte, usage ChatUsage) []byte {
 // the wire shape is byte-identical to encoding/json.Marshal output.
 func appendChatCompletionResponse(buf []byte, resp ChatCompletionResponse) []byte {
 	buf = append(buf, '{')
-	buf = appendStringField(buf, "id", resp.ID, false)
-	buf = appendStringField(buf, "object", resp.Object, true)
-	buf = appendInt64Field(buf, "created", resp.Created, true)
-	buf = appendStringField(buf, "model", resp.Model, true)
+	buf = jsonenc.AppendStringField(buf, "id", resp.ID, false)
+	buf = jsonenc.AppendStringField(buf, "object", resp.Object, true)
+	buf = jsonenc.AppendInt64Field(buf, "created", resp.Created, true)
+	buf = jsonenc.AppendStringField(buf, "model", resp.Model, true)
 	buf = append(buf, ',', '"', 'c', 'h', 'o', 'i', 'c', 'e', 's', '"', ':', '[')
 	for i, choice := range resp.Choices {
 		if i > 0 {
@@ -187,7 +189,7 @@ func appendChatCompletionResponse(buf []byte, resp ChatCompletionResponse) []byt
 	buf = appendChatUsage(buf, resp.Usage)
 	if resp.Thought != nil {
 		buf = append(buf, ',', '"', 't', 'h', 'o', 'u', 'g', 'h', 't', '"', ':')
-		buf = appendJSONString(buf, *resp.Thought)
+		buf = jsonenc.AppendJSONString(buf, *resp.Thought)
 	}
 	return append(buf, '}')
 }
@@ -198,14 +200,14 @@ func appendChatCompletionResponse(buf []byte, resp ChatCompletionResponse) []byt
 // reflect-walk per-element cost that encoding/json pays.
 func appendEmbeddingResponseDatum(buf []byte, datum EmbeddingResponseDatum) []byte {
 	buf = append(buf, '{')
-	buf = appendStringField(buf, "object", datum.Object, false)
-	buf = appendIntField(buf, "index", datum.Index, true)
+	buf = jsonenc.AppendStringField(buf, "object", datum.Object, false)
+	buf = jsonenc.AppendIntField(buf, "index", datum.Index, true)
 	buf = append(buf, ',', '"', 'e', 'm', 'b', 'e', 'd', 'd', 'i', 'n', 'g', '"', ':', '[')
 	for i, v := range datum.Embedding {
 		if i > 0 {
 			buf = append(buf, ',')
 		}
-		buf = appendFloat32(buf, v)
+		buf = jsonenc.AppendFloat32(buf, v)
 	}
 	return append(buf, ']', '}')
 }
@@ -215,8 +217,8 @@ func appendEmbeddingResponseDatum(buf []byte, datum EmbeddingResponseDatum) []by
 // OpenAI order.
 func appendEmbeddingUsage(buf []byte, prompt, total int) []byte {
 	buf = append(buf, '{')
-	buf = appendIntField(buf, "prompt_tokens", prompt, false)
-	buf = appendIntField(buf, "total_tokens", total, true)
+	buf = jsonenc.AppendIntField(buf, "prompt_tokens", prompt, false)
+	buf = jsonenc.AppendIntField(buf, "total_tokens", total, true)
 	return append(buf, '}')
 }
 
@@ -227,7 +229,7 @@ func appendEmbeddingUsage(buf []byte, prompt, total int) []byte {
 // no reflect.
 func appendEmbeddingResponse(buf []byte, resp EmbeddingResponse) []byte {
 	buf = append(buf, '{')
-	buf = appendStringField(buf, "object", resp.Object, false)
+	buf = jsonenc.AppendStringField(buf, "object", resp.Object, false)
 	buf = append(buf, ',', '"', 'd', 'a', 't', 'a', '"', ':', '[')
 	for i, datum := range resp.Data {
 		if i > 0 {
@@ -236,7 +238,7 @@ func appendEmbeddingResponse(buf []byte, resp EmbeddingResponse) []byte {
 		buf = appendEmbeddingResponseDatum(buf, datum)
 	}
 	buf = append(buf, ']')
-	buf = appendStringField(buf, "model", resp.Model, true)
+	buf = jsonenc.AppendStringField(buf, "model", resp.Model, true)
 	buf = append(buf, ',', '"', 'u', 's', 'a', 'g', 'e', '"', ':')
 	buf = appendEmbeddingUsage(buf, resp.Usage.PromptTokens, resp.Usage.TotalTokens)
 	return append(buf, '}')
