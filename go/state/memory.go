@@ -17,21 +17,21 @@ func NewInMemoryStore(chunks map[int]string) *InMemoryStore {
 }
 
 func NewInMemoryStoreWithManifest(chunks map[int]string, refs map[int]ChunkRef) *InMemoryStore {
+	// Single-pass over the seed map: populate text + default ref together so
+	// each id is visited once instead of twice. Refs override defaults below.
 	copyMap := make(map[int]string, len(chunks))
+	refMap := make(map[int]ChunkRef, len(chunks)+len(refs))
 	nextID := 1
 	for id, text := range chunks {
 		copyMap[id] = text
-		if id >= nextID {
-			nextID = id + 1
-		}
-	}
-	refMap := make(map[int]ChunkRef, len(copyMap))
-	for id := range copyMap {
 		refMap[id] = ChunkRef{
 			ChunkID:        id,
 			FrameOffset:    uint64(id),
 			HasFrameOffset: true,
 			Codec:          CodecMemory,
+		}
+		if id >= nextID {
+			nextID = id + 1
 		}
 	}
 	for id, ref := range refs {
