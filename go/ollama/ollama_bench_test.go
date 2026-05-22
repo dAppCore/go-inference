@@ -350,3 +350,66 @@ func BenchmarkOllama_NewGenerateResponse(b *testing.B) {
 		ollamaSinkGenerateResponse = NewGenerateResponse("qwen3", text, metrics)
 	}
 }
+
+// --- Append* fast-path encoders ---
+//
+// These bench the direct-entry hand-rolled encoders consumers on the
+// HTTP hot path should call (an in-tree serve handler reaching for
+// AppendChatResponse rather than core.JSONMarshalString). Each
+// bench is the consumer-facing measurement — the "real" win once
+// the proxy/serve handler lifts off encoding/json.
+//
+// The pre-sized-buffer benches reuse a backing scratch buffer
+// per-iteration to model the steady-state hot-loop case where the
+// caller keeps a per-connection emission buffer. The make-each-call
+// benches model the cold-path (one-shot non-streaming response).
+
+var ollamaSinkBuf []byte
+
+func BenchmarkOllama_AppendChatResponse_Streaming(b *testing.B) {
+	resp := NewChatResponse("qwen3", "tok", inference.GenerateMetrics{})
+	resp.Message.Role = ""
+	resp.Done = false
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ollamaSinkBuf = AppendChatResponse(make([]byte, 0, chatResponseSize(resp)), resp)
+	}
+}
+
+func BenchmarkOllama_AppendChatResponse_Final(b *testing.B) {
+	resp := NewChatResponse("qwen3", "The summary is concise.", inference.GenerateMetrics{PromptTokens: 200, GeneratedTokens: 32})
+	resp.TotalDuration = 1_500_000_000
+	resp.LoadDuration = 100_000_000
+	resp.PromptEvalDuration = 200_000_000
+	resp.EvalDuration = 1_200_000_000
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ollamaSinkBuf = AppendChatResponse(make([]byte, 0, chatResponseSize(resp)), resp)
+	}
+}
+
+func BenchmarkOllama_AppendGenerateResponse_Streaming(b *testing.B) {
+	resp := NewGenerateResponse("qwen3", "tok", inference.GenerateMetrics{})
+	resp.Done = false
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ollamaSinkBuf = AppendGenerateResponse(make([]byte, 0, generateResponseSize(resp)), resp)
+	}
+}
+
+func BenchmarkOllama_AppendGenerateResponse_Final(b *testing.B) {
+	resp := NewGenerateResponse("qwen3", "The summary is concise.", inference.GenerateMetrics{PromptTokens: 200, GeneratedTokens: 32})
+	resp.TotalDuration = 1_500_000_000
+	resp.LoadDuration = 100_000_000
+	resp.PromptEvalDuration = 200_000_000
+	resp.EvalDuration = 1_200_000_000
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ollamaSinkBuf = AppendGenerateResponse(make([]byte, 0, generateResponseSize(resp)), resp)
+	}
+}
+
