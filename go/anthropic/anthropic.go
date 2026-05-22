@@ -55,6 +55,114 @@ type MessageResponse struct {
 	Usage        Usage          `json:"usage"`
 }
 
+// AppendMessageResponse walks an Anthropic MessageResponse into the
+// caller-owned buf and returns the extended slice. Fires at the HTTP-
+// response-emit boundary on every non-streaming completion — callers
+// bypass the encoding/json reflect path (encoder state + grow-doubled
+// output buffer + per-nested-struct allocations) and pre-size the
+// buffer once via MessageResponseSize. Same caller-passes-buf shape
+// as state/filestore's encodeRecordMeta (W8-D) and openai's
+// appendChatCompletionResponse (W9-D).
+//
+// MarshalJSON is deliberately NOT implemented on MessageResponse: the
+// bench for core.JSONMarshalString shows that wrapping a flat struct
+// in a MarshalJSON method REGRESSES json.Marshal — encoding/json then
+// calls MarshalJSON, validates (compact) the returned bytes, then
+// copies them into its own grow-buffer. The hand-roll wins only when
+// the call site bypasses json.Marshal and calls this helper directly.
+//
+// Wire-compatible with json.Marshal across every branch:
+//   - Always emits id, type, role, model, content, usage.
+//   - stop_reason / stop_sequence: omitempty (string).
+//   - content: each ContentBlock emits type always, text only when
+//     non-empty (matches ContentBlock's `text,omitempty` tag).
+//   - usage: always emits input_tokens + output_tokens (no
+//     omitempty).
+//
+// Output round-trips through core.JSONUnmarshal back into a
+// MessageResponse — verified by the round-trip pinning test.
+//
+//	buf := AppendMessageResponse(make([]byte, 0, MessageResponseSize(resp)), resp)
+//	w.Write(buf)  // typical HTTP-emit shape.
+func AppendMessageResponse(buf []byte, r MessageResponse) []byte {
+	buf = append(buf, '{')
+	buf = appendStringField(buf, "id", r.ID, false)
+	buf = appendStringField(buf, "type", r.Type, true)
+	buf = appendStringField(buf, "role", r.Role, true)
+	buf = appendStringField(buf, "model", r.Model, true)
+	buf = append(buf, ',', '"', 'c', 'o', 'n', 't', 'e', 'n', 't', '"', ':', '[')
+	for i, b := range r.Content {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = appendContentBlock(buf, b)
+	}
+	buf = append(buf, ']')
+	if r.StopReason != "" {
+		buf = appendStringField(buf, "stop_reason", r.StopReason, true)
+	}
+	if r.StopSequence != "" {
+		buf = appendStringField(buf, "stop_sequence", r.StopSequence, true)
+	}
+	// Usage object — always emitted (no omitempty on the field).
+	buf = append(buf, ',', '"', 'u', 's', 'a', 'g', 'e', '"', ':', '{')
+	buf = appendIntField(buf, "input_tokens", r.Usage.InputTokens, false)
+	buf = appendIntField(buf, "output_tokens", r.Usage.OutputTokens, true)
+	return append(buf, '}', '}')
+}
+
+// MessageResponseSize estimates the backing-buffer size for one
+// MessageResponse so the caller's make([]byte, 0, ...) lands on a
+// memory class that fits the encoded body in a single allocation.
+// Returns a tight upper bound — ASCII key bytes plus the string-
+// value bodies. Worst-case escape doubling on text fields lets
+// append grow once at most.
+func MessageResponseSize(r MessageResponse) int {
+	// Per-field cost: ,"key":"value"
+	//   leading-comma (1) + "key" (len(key)+2) + : (1) + "value" (len(value)+2)
+	//   = 6 + len(key) + len(value)
+	// First field omits leading comma: 5 + len(key) + len(value).
+	size := 2 // outer braces
+	size += 5 + 2 + len(r.ID)     // "id":"…"
+	size += 6 + 4 + len(r.Type)   // ,"type":"…"
+	size += 6 + 4 + len(r.Role)   // ,"role":"…"
+	size += 6 + 5 + len(r.Model)  // ,"model":"…"
+	size += 6 + 7                 // ,"content":[]
+	for i, b := range r.Content {
+		size += 5 + 2 + 4 + len(b.Type) // {"type":"X"}
+		if b.Text != "" {
+			size += 6 + 4 + len(b.Text) // ,"text":"X"
+		}
+		size += 1 // closing brace }
+		if i > 0 {
+			size += 1 // , separator between blocks
+		}
+	}
+	if r.StopReason != "" {
+		size += 6 + 11 + len(r.StopReason) // ,"stop_reason":"X"
+	}
+	if r.StopSequence != "" {
+		size += 6 + 13 + len(r.StopSequence) // ,"stop_sequence":"X"
+	}
+	// ,"usage":{"input_tokens":N,"output_tokens":N}
+	// 9 ("usage":) + 2 (object braces) + 5+2+10+1+11+11+10+1+11 ≈ 60
+	size += 6 + 5 + 2 + 26 + 28
+	return size
+}
+
+// appendContentBlock encodes a single ContentBlock as JSON onto buf.
+// type is always emitted; text is omitted when empty (matches the
+// `text,omitempty` tag on the struct). Lifted out so
+// AppendMessageResponse and future content-array shapes share it.
+func appendContentBlock(buf []byte, b ContentBlock) []byte {
+	buf = append(buf, '{')
+	buf = appendStringField(buf, "type", b.Type, false)
+	if b.Text != "" {
+		buf = appendStringField(buf, "text", b.Text, true)
+	}
+	return append(buf, '}')
+}
+
 // InferenceMessages converts Anthropic messages into shared inference messages.
 func InferenceMessages(req MessageRequest) []inference.Message {
 	out := make([]inference.Message, 0, len(req.Messages)+1)

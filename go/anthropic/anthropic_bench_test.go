@@ -27,6 +27,7 @@ var (
 	anthropicSinkResult   core.Result
 	anthropicSinkString   string
 	anthropicSinkText     string
+	anthropicSinkBytes    []byte
 )
 
 // --- Fixture builders ---
@@ -112,6 +113,32 @@ func BenchmarkAnthropic_MarshalMessageResponse_Typical(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		anthropicSinkString = core.JSONMarshalString(resp)
+	}
+}
+
+// --- Hand-rolled AppendMessageResponse — bypasses json.Marshal
+// reflect path. Wins are visible when consumers reach for the helper
+// directly (HTTP-response-emit), not when measured via JSONMarshalString.
+// Per-W9-D pattern: caller pre-sizes the buffer once via the
+// MessageResponseSize estimator so encoding lands at 1 alloc.
+
+func BenchmarkAnthropic_AppendMessageResponse_Typical(b *testing.B) {
+	resp := buildAnthropicResponse()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		anthropicSinkBytes = AppendMessageResponse(make([]byte, 0, MessageResponseSize(resp)), resp)
+	}
+}
+
+func BenchmarkAnthropic_AppendMessageResponse_WithStopReason(b *testing.B) {
+	resp := buildAnthropicResponse()
+	resp.StopReason = "stop_sequence"
+	resp.StopSequence = "</response>"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		anthropicSinkBytes = AppendMessageResponse(make([]byte, 0, MessageResponseSize(resp)), resp)
 	}
 }
 
