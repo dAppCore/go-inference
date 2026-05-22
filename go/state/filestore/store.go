@@ -41,7 +41,6 @@ type fileIndexEntry struct {
 	ref         state.ChunkRef
 	payloadAt   int64
 	payloadSize int
-	meta        recordMeta
 }
 
 type recordMeta struct {
@@ -274,7 +273,6 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 		ref:         ref,
 		payloadAt:   offset + recordHeaderLen + int64(len(metaBytes)),
 		payloadSize: payloadSize,
-		meta:        meta,
 	}
 	if meta.URI != "" {
 		s.uriIndex[meta.URI] = id
