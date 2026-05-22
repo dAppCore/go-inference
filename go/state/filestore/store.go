@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	stdio "io"
 	"sync"
+	"unsafe"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/state"
@@ -280,13 +281,29 @@ func (s *Store) rollbackWriteLocked(offset int64) {
 }
 
 func (s *Store) resolveLocked(chunkID int) (state.Chunk, error) {
-	chunk, err := s.resolveBytesLocked(chunkID)
-	if err != nil {
-		return state.Chunk{}, err
+	entry, ok := s.index[chunkID]
+	if !ok {
+		return state.Chunk{}, &state.ChunkNotFoundError{ID: chunkID}
 	}
-	chunk.Text = string(chunk.Data)
-	chunk.Data = nil
-	return chunk, nil
+	payload := make([]byte, entry.payloadSize)
+	if _, err := s.file.ReadAt(payload, entry.payloadAt); err != nil {
+		return state.Chunk{}, core.E("state.filestore.Resolve", "read chunk payload", err)
+	}
+	return state.Chunk{
+		Ref:  entry.ref,
+		Text: bytesToString(payload),
+	}, nil
+}
+
+// bytesToString aliases a freshly-allocated byte buffer as a string without
+// copying. The caller MUST guarantee the buffer is not modified after the
+// alias is taken; in this package the caller allocates the buffer locally
+// for this single conversion, so the invariant is structural.
+func bytesToString(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
 func (s *Store) ResolveBytes(ctx context.Context, chunkID int) (state.Chunk, error) {
