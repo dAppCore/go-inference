@@ -628,6 +628,15 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 		_, _ = w.Write(buf)
 		return
 	}
+	if p, ok := payload.(Response); ok {
+		// Responses API non-streaming body — fires per served
+		// /v1/responses request. Same shape as ChatCompletionResponse
+		// (id/object/created/model/output/usage/thought) but with
+		// the Responses output-message envelope.
+		buf := appendResponse(make([]byte, 0, responseSize(p)), p)
+		_, _ = w.Write(buf)
+		return
+	}
 	result := core.JSONMarshal(payload)
 	if !result.OK {
 		_, _ = w.Write([]byte(`{}`))
