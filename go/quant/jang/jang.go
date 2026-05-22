@@ -481,6 +481,25 @@ func validateBits(bits int, name string) error {
 }
 
 func unpackValue(packed []byte, index, bits int) uint8 {
+	// Fast paths for the byte-aligned bit widths emitted by the JANG
+	// packers (1-bit binary, 2-bit JANGTQ routed-expert, 4-bit nibble
+	// JANG_4, 8-bit dense). These cover the overwhelming majority of
+	// real model-load dequant calls and bypass the generic walk loop,
+	// which fires hundreds of millions of times per tensor materialise.
+	switch bits {
+	case 8:
+		return packed[index]
+	case 4:
+		b := packed[index>>1]
+		if index&1 == 0 {
+			return b & 0x0F
+		}
+		return b >> 4
+	case 2:
+		return (packed[index>>2] >> uint((index&3)<<1)) & 0x03
+	case 1:
+		return (packed[index>>3] >> uint(index&7)) & 0x01
+	}
 	bitOffset := index * bits
 	remaining := bits
 	shiftOut := 0
