@@ -47,47 +47,17 @@ type StopList []string
 
 func (s *StopList) UnmarshalJSON(data []byte) error {
 	// Hot path: this is called per OpenAI chat-completion request.
-	// Earlier shape did `string(data) == "null"` (full copy) and fed
-	// `string(data)` into JSONUnmarshalString which immediately did
-	// AsBytes back to []byte. We already have []byte here — skip both
-	// conversions.
-	if len(data) == 0 || isNullJSON(data) {
-		*s = nil
-		return nil
+	// parseJSONStringList walks the variant string-or-array shape in
+	// a single pass — drops the recursive core.JSONUnmarshal that
+	// re-paid encoder-state + per-element string allocs on every
+	// call. Same wire contract: null -> nil, "X" -> []string{"X"},
+	// ["X","Y"] -> []string{"X","Y"}.
+	values, err := parseJSONStringList(data)
+	if err != nil {
+		return err
 	}
-	if data[0] == '[' {
-		var values []string
-		result := core.JSONUnmarshal(data, &values)
-		if !result.OK {
-			return resultError(result)
-		}
-		*s = values
-		return nil
-	}
-	var value string
-	result := core.JSONUnmarshal(data, &value)
-	if !result.OK {
-		return resultError(result)
-	}
-	*s = []string{value}
+	*s = values
 	return nil
-}
-
-// isNullJSON reports whether data is the JSON literal `null` (with
-// optional surrounding whitespace). Avoids the `string(data) == "null"`
-// alloc that bare comparison would force.
-func isNullJSON(data []byte) bool {
-	for len(data) > 0 && (data[0] == ' ' || data[0] == '\t' || data[0] == '\n' || data[0] == '\r') {
-		data = data[1:]
-	}
-	for len(data) > 0 {
-		last := data[len(data)-1]
-		if last != ' ' && last != '\t' && last != '\n' && last != '\r' {
-			break
-		}
-		data = data[:len(data)-1]
-	}
-	return len(data) == 4 && data[0] == 'n' && data[1] == 'u' && data[2] == 'l' && data[3] == 'l'
 }
 
 // ChatMessage is a single chat turn.
