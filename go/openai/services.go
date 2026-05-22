@@ -52,6 +52,13 @@ func (input *EmbeddingInput) UnmarshalJSON(data []byte) error {
 		*input = values
 		return nil
 	}
+	// Fast path: plain JSON string with no escapes — see StopList for
+	// rationale. Embedding inputs are typically tokeniser-prepped text
+	// without escape sequences in the bench shape.
+	if value, ok := simpleJSONString(data); ok {
+		*input = []string{value}
+		return nil
+	}
 	var value string
 	result := core.JSONUnmarshal(data, &value)
 	if !result.OK {
