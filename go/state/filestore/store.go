@@ -233,24 +233,13 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 		Tags:   opts.Tags,
 		Labels: opts.Labels,
 	}
-	// Empty-meta fast path — many code paths (KV snapshots, sentinel
-	// records, internal-only blobs) carry no PutOptions content. The
-	// JSON encoder still allocates ~5550 B + 4 allocs for an all-zero
-	// struct (encoder state + grow-doubled output). Shortcutting to
-	// the canonical "{}" slice skips encoding/json entirely on this
-	// path. Non-empty meta still routes through JSONMarshal below.
-	var metaBytes []byte
-	if recordMetaIsEmpty(&meta) {
-		metaBytes = emptyMetaBytes
-	} else {
-		// JSONMarshal returns a freshly-allocated []byte we own —
-		// suitable for direct writeAll into the file.
-		metaResult := core.JSONMarshal(meta)
-		if !metaResult.OK {
-			return state.ChunkRef{}, metaResult.Value.(error)
-		}
-		metaBytes = metaResult.Value.([]byte)
-	}
+	// encodeRecordMeta hand-rolls the recordMeta JSON into a single
+	// caller-allocated buffer — the encoding/json path allocates an
+	// encoder state machine + grow-doubled output buffer + per-tag
+	// key/value copies on every Put. The hand-roll lands at a single
+	// alloc per call regardless of tag count, and routes the all-
+	// empty case to the package-level emptyMetaBytes slice.
+	metaBytes := encodeRecordMeta(&meta)
 	if uint64(len(metaBytes)) > uint64(^uint32(0)) {
 		return state.ChunkRef{}, core.NewError("state file store metadata is too large")
 	}
@@ -621,6 +610,175 @@ func recordMetaIsEmpty(meta *recordMeta) bool {
 		meta.Track == "" &&
 		len(meta.Tags) == 0 &&
 		len(meta.Labels) == 0
+}
+
+// encodeRecordMeta hand-rolls the JSON for recordMeta into a single
+// caller-bound buffer.
+//
+// encoding/json.Marshal on recordMeta allocates an encoder state
+// machine + grow-doubled output buffer per call, plus ~2 extra
+// allocations per map entry (key copy + value copy). For an 8-tag
+// record the cost is ~22 allocs; the equivalent hand-roll lands
+// at a single buffer allocation.
+//
+// The output is valid JSON and parseable both by encoding/json
+// (round-trips into recordMeta) and by the store's extractRecordURI
+// walker. Field ordering follows recordMeta's struct declaration —
+// URI, Title, Kind, Track, Tags, Labels — and the omitempty
+// semantics match (zero-value strings, nil/empty maps, nil/empty
+// slices are elided). Tag-map keys are emitted in Go map iteration
+// order — JSON object key order is not semantically meaningful and
+// no read site depends on it.
+//
+//	buf := encodeRecordMeta(&meta)
+//	if uint64(len(buf)) > uint64(^uint32(0)) { /* too large */ }
+func encodeRecordMeta(meta *recordMeta) []byte {
+	if recordMetaIsEmpty(meta) {
+		return emptyMetaBytes
+	}
+	// Tight upper bound on output size:
+	//   {"uri":"<>","title":"<>","kind":"<>","track":"<>",
+	//    "tags":{"<>":"<>",...},"labels":["<>",...]}
+	// Each string value worst-case doubles with escapes; we under-
+	// commit and let append grow once if pathological. The typical
+	// case (ASCII alnum URIs / kinds) clears the heuristic cleanly.
+	size := 2 // braces
+	if meta.URI != "" {
+		size += 8 + len(meta.URI) // "uri":"...",
+	}
+	if meta.Title != "" {
+		size += 10 + len(meta.Title)
+	}
+	if meta.Kind != "" {
+		size += 9 + len(meta.Kind)
+	}
+	if meta.Track != "" {
+		size += 10 + len(meta.Track)
+	}
+	if len(meta.Tags) > 0 {
+		size += 10 // "tags":{},
+		for k, v := range meta.Tags {
+			size += 5 + len(k) + len(v) // "k":"v",
+		}
+	}
+	if len(meta.Labels) > 0 {
+		size += 12 // "labels":[],
+		for _, l := range meta.Labels {
+			size += 3 + len(l) // "l",
+		}
+	}
+
+	buf := make([]byte, 0, size)
+	buf = append(buf, '{')
+	first := true
+	if meta.URI != "" {
+		buf = appendJSONField(buf, "uri", meta.URI, first)
+		first = false
+	}
+	if meta.Title != "" {
+		buf = appendJSONField(buf, "title", meta.Title, first)
+		first = false
+	}
+	if meta.Kind != "" {
+		buf = appendJSONField(buf, "kind", meta.Kind, first)
+		first = false
+	}
+	if meta.Track != "" {
+		buf = appendJSONField(buf, "track", meta.Track, first)
+		first = false
+	}
+	if len(meta.Tags) > 0 {
+		if !first {
+			buf = append(buf, ',')
+		}
+		first = false
+		buf = append(buf, `"tags":{`...)
+		tagFirst := true
+		for k, v := range meta.Tags {
+			if !tagFirst {
+				buf = append(buf, ',')
+			}
+			tagFirst = false
+			buf = appendJSONString(buf, k)
+			buf = append(buf, ':')
+			buf = appendJSONString(buf, v)
+		}
+		buf = append(buf, '}')
+	}
+	if len(meta.Labels) > 0 {
+		if !first {
+			buf = append(buf, ',')
+		}
+		buf = append(buf, `"labels":[`...)
+		for i, l := range meta.Labels {
+			if i > 0 {
+				buf = append(buf, ',')
+			}
+			buf = appendJSONString(buf, l)
+		}
+		buf = append(buf, ']')
+	}
+	buf = append(buf, '}')
+	return buf
+}
+
+// appendJSONField appends a "key":"value" pair (prefixed by a comma
+// when not the first field) to buf. Key is ASCII-only and not
+// escaped — recordMeta keys are compile-time constants.
+func appendJSONField(buf []byte, key, value string, first bool) []byte {
+	if !first {
+		buf = append(buf, ',')
+	}
+	buf = append(buf, '"')
+	buf = append(buf, key...)
+	buf = append(buf, '"', ':')
+	return appendJSONString(buf, value)
+}
+
+// appendJSONString appends a JSON-encoded string to buf — opening
+// quote, escaped body, closing quote. Escapes match the subset
+// recognised by extractRecordURI's jsonUnescape walker: \" \\ \b
+// \f \n \r \t for the canonical mnemonic forms and \u00XX for
+// other control chars (< 0x20). All bytes ≥ 0x20 outside the
+// quote / backslash pair pass through verbatim — encoding/json's
+// default also escapes <, >, & for HTML safety but the read path
+// does not, and the on-disk record is not consumed by HTML
+// contexts.
+func appendJSONString(buf []byte, s string) []byte {
+	buf = append(buf, '"')
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '"':
+			buf = append(buf, '\\', '"')
+		case c == '\\':
+			buf = append(buf, '\\', '\\')
+		case c == '\b':
+			buf = append(buf, '\\', 'b')
+		case c == '\f':
+			buf = append(buf, '\\', 'f')
+		case c == '\n':
+			buf = append(buf, '\\', 'n')
+		case c == '\r':
+			buf = append(buf, '\\', 'r')
+		case c == '\t':
+			buf = append(buf, '\\', 't')
+		case c < 0x20:
+			buf = append(buf, '\\', 'u', '0', '0', hexChar(c>>4), hexChar(c&0x0f))
+		default:
+			buf = append(buf, c)
+		}
+	}
+	return append(buf, '"')
+}
+
+// hexChar returns the ASCII hex digit for the low nibble of v.
+func hexChar(v byte) byte {
+	v &= 0x0f
+	if v < 10 {
+		return '0' + v
+	}
+	return 'a' + (v - 10)
 }
 
 // extractRecordURI walks data as a top-level JSON object and returns
