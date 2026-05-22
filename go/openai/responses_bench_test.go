@@ -27,6 +27,7 @@ var (
 	responsesSinkOptions  []inference.GenerateOption
 	responsesSinkErr      error
 	responsesSinkString   string
+	responsesSinkBytes    []byte
 	responsesSinkResult   core.Result
 )
 
@@ -277,6 +278,70 @@ func BenchmarkResponses_MarshalStreamEvent_ThoughtDelta(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		responsesSinkString = core.JSONMarshalString(event)
+	}
+}
+
+// --- Hand-rolled encoders — wired into writeJSON fast-path + ---
+// available as direct call sites for downstream Responses producers.
+
+func BenchmarkResponses_AppendResponse_Typical(b *testing.B) {
+	resp := buildResponse()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		responsesSinkBytes = appendResponse(make([]byte, 0, responseSize(resp)), resp)
+	}
+}
+
+func BenchmarkResponses_AppendStreamEvent_Delta_ShortToken(b *testing.B) {
+	event := ResponseStreamEvent{
+		Type:  "response.output_text.delta",
+		Delta: "Answer",
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		responsesSinkBytes = appendResponseStreamEvent(make([]byte, 0, responseStreamEventSize(event)), event)
+	}
+}
+
+func BenchmarkResponses_AppendStreamEvent_Delta_LongToken(b *testing.B) {
+	delta := ""
+	for i := 0; i < 64; i++ {
+		delta += "fragment "
+	}
+	event := ResponseStreamEvent{
+		Type:  "response.output_text.delta",
+		Delta: delta,
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		responsesSinkBytes = appendResponseStreamEvent(make([]byte, 0, responseStreamEventSize(event)), event)
+	}
+}
+
+func BenchmarkResponses_AppendStreamEvent_Completed(b *testing.B) {
+	resp := buildResponse()
+	event := ResponseStreamEvent{Type: "response.completed", Response: &resp}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		responsesSinkBytes = appendResponseStreamEvent(make([]byte, 0, responseStreamEventSize(event)), event)
+	}
+}
+
+func BenchmarkResponses_AppendStreamEvent_ThoughtDelta(b *testing.B) {
+	thought := "Let me think through this step by step."
+	event := ResponseStreamEvent{
+		Type:    "response.thought.delta",
+		Delta:   "thinking",
+		Thought: &thought,
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		responsesSinkBytes = appendResponseStreamEvent(make([]byte, 0, responseStreamEventSize(event)), event)
 	}
 }
 

@@ -35,29 +35,15 @@ type EmbeddingRequest struct {
 type EmbeddingInput []string
 
 func (input *EmbeddingInput) UnmarshalJSON(data []byte) error {
-	// Direct []byte path — sister fix to StopList.UnmarshalJSON.
-	// Earlier shape did `string(data) == "null"` (full copy) and fed
-	// `string(data)` into JSONUnmarshalString which immediately did
-	// AsBytes back to []byte. Skip both.
-	if len(data) == 0 || isNullJSON(data) {
-		*input = nil
-		return nil
+	// Hot path — fires per embeddings request. parseJSONStringList
+	// walks the variant string-or-array shape in a single pass —
+	// drops the recursive core.JSONUnmarshal allocs (encoder state
+	// + per-element string).
+	values, err := parseJSONStringList(data)
+	if err != nil {
+		return err
 	}
-	if data[0] == '[' {
-		var values []string
-		result := core.JSONUnmarshal(data, &values)
-		if !result.OK {
-			return resultError(result)
-		}
-		*input = values
-		return nil
-	}
-	var value string
-	result := core.JSONUnmarshal(data, &value)
-	if !result.OK {
-		return resultError(result)
-	}
-	*input = []string{value}
+	*input = values
 	return nil
 }
 

@@ -31,6 +31,7 @@ var (
 	servicesSinkCacheStats      inference.CacheStats
 	servicesSinkErr             error
 	servicesSinkString          string
+	servicesSinkBytes           []byte
 	servicesSinkResult          core.Result
 )
 
@@ -155,6 +156,37 @@ func BenchmarkServices_MarshalEmbeddingResponse_20x1024(b *testing.B) {
 	}
 }
 
+// --- Hand-rolled embedding-response encoder — writeJSON fast path ---
+// Compares directly against the encoding/json reflect-walk path
+// above. Per-element float32 emission scales with vector dim.
+
+func BenchmarkServices_AppendEmbeddingResponse_1x384(b *testing.B) {
+	resp := buildEmbeddingResponse(1, 384)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		servicesSinkBytes = appendEmbeddingResponse(make([]byte, 0, embeddingResponseSize(resp)), resp)
+	}
+}
+
+func BenchmarkServices_AppendEmbeddingResponse_5x768(b *testing.B) {
+	resp := buildEmbeddingResponse(5, 768)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		servicesSinkBytes = appendEmbeddingResponse(make([]byte, 0, embeddingResponseSize(resp)), resp)
+	}
+}
+
+func BenchmarkServices_AppendEmbeddingResponse_20x1024(b *testing.B) {
+	resp := buildEmbeddingResponse(20, 1024)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		servicesSinkBytes = appendEmbeddingResponse(make([]byte, 0, embeddingResponseSize(resp)), resp)
+	}
+}
+
 // --- RerankRequest unmarshal ---
 
 func BenchmarkServices_UnmarshalRerankRequest_FewDocs(b *testing.B) {
@@ -208,6 +240,38 @@ func BenchmarkServices_MarshalRerankResponse_TwentyResults(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		servicesSinkString = core.JSONMarshalString(resp)
+	}
+}
+
+// --- Hand-rolled rerank-response encoder — writeJSON fast path ---
+
+func BenchmarkServices_AppendRerankResponse_FewResults(b *testing.B) {
+	resp := RerankResponse{
+		Object: "list",
+		Model:  "qwen3-rerank",
+		Results: []inference.RerankScore{
+			{Index: 0, Score: 0.91, Text: "alpha"},
+			{Index: 1, Score: 0.82, Text: "beta"},
+			{Index: 2, Score: 0.74, Text: "gamma"},
+		},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		servicesSinkBytes = appendRerankResponse(make([]byte, 0, rerankResponseSize(resp)), resp)
+	}
+}
+
+func BenchmarkServices_AppendRerankResponse_TwentyResults(b *testing.B) {
+	results := make([]inference.RerankScore, 20)
+	for i := range results {
+		results[i] = inference.RerankScore{Index: i, Score: 0.95 - float64(i)*0.04, Text: "document text fragment"}
+	}
+	resp := RerankResponse{Object: "list", Model: "qwen3-rerank", Results: results}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		servicesSinkBytes = appendRerankResponse(make([]byte, 0, rerankResponseSize(resp)), resp)
 	}
 }
 

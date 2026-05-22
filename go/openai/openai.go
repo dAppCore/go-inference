@@ -47,47 +47,17 @@ type StopList []string
 
 func (s *StopList) UnmarshalJSON(data []byte) error {
 	// Hot path: this is called per OpenAI chat-completion request.
-	// Earlier shape did `string(data) == "null"` (full copy) and fed
-	// `string(data)` into JSONUnmarshalString which immediately did
-	// AsBytes back to []byte. We already have []byte here — skip both
-	// conversions.
-	if len(data) == 0 || isNullJSON(data) {
-		*s = nil
-		return nil
+	// parseJSONStringList walks the variant string-or-array shape in
+	// a single pass — drops the recursive core.JSONUnmarshal that
+	// re-paid encoder-state + per-element string allocs on every
+	// call. Same wire contract: null -> nil, "X" -> []string{"X"},
+	// ["X","Y"] -> []string{"X","Y"}.
+	values, err := parseJSONStringList(data)
+	if err != nil {
+		return err
 	}
-	if data[0] == '[' {
-		var values []string
-		result := core.JSONUnmarshal(data, &values)
-		if !result.OK {
-			return resultError(result)
-		}
-		*s = values
-		return nil
-	}
-	var value string
-	result := core.JSONUnmarshal(data, &value)
-	if !result.OK {
-		return resultError(result)
-	}
-	*s = []string{value}
+	*s = values
 	return nil
-}
-
-// isNullJSON reports whether data is the JSON literal `null` (with
-// optional surrounding whitespace). Avoids the `string(data) == "null"`
-// alloc that bare comparison would force.
-func isNullJSON(data []byte) bool {
-	for len(data) > 0 && (data[0] == ' ' || data[0] == '\t' || data[0] == '\n' || data[0] == '\r') {
-		data = data[1:]
-	}
-	for len(data) > 0 {
-		last := data[len(data)-1]
-		if last != ' ' && last != '\t' && last != '\n' && last != '\r' {
-			break
-		}
-		data = data[:len(data)-1]
-	}
-	return len(data) == 4 && data[0] == 'n' && data[1] == 'u' && data[2] == 'l' && data[3] == 'l'
 }
 
 // ChatMessage is a single chat turn.
@@ -140,25 +110,49 @@ type ChatMessageDelta struct {
 	Content string `json:"content,omitempty"`
 }
 
+// MarshalJSON hand-rolls the OpenAI ChatMessageDelta shape into a
+// single caller-owned buffer. Fires per streamed SSE delta — the
+// reflect path through encoding/json + the intermediate *string
+// envelope structs together cost 4-5 allocs per call (encoder state,
+// grow-doubled output, two pointer-string copies, JSONMarshalString
+// AsString wrap). Hand-roll lands at 1 alloc for the typical
+// content-only case and the role-priming case.
+//
+// Wire-compatible cases (matches the previous behaviour):
+//   - Role == "" && Content == ""    -> {}
+//   - Role set                       -> {"role":"X","content":"Y"}  (priming emits both)
+//   - Content only                   -> {"content":"Y"}
+//
+// Empty case routes to the package-level emptyDeltaBytes — no alloc.
 func (d ChatMessageDelta) MarshalJSON() ([]byte, error) {
 	if d.Role == "" && d.Content == "" {
-		return []byte("{}"), nil
+		return emptyDeltaBytes, nil
 	}
-	payload := struct {
-		Role    *string `json:"role,omitempty"`
-		Content *string `json:"content,omitempty"`
-	}{}
+	// Tight upper bound — both branches emit two ASCII keys plus the
+	// quoted value bodies. Worst-case doubling on escape-heavy content
+	// lets append grow once.
+	size := 2 // braces
 	if d.Role != "" {
-		role := d.Role
-		content := d.Content
-		payload.Role = &role
-		payload.Content = &content
+		size += 9 + len(d.Role)      // "role":"...",
+		size += 11 + len(d.Content)  // "content":"..."
 	} else {
-		content := d.Content
-		payload.Content = &content
+		size += 11 + len(d.Content) // "content":"..."
 	}
-	return []byte(core.JSONMarshalString(payload)), nil
+	buf := make([]byte, 0, size)
+	buf = append(buf, '{')
+	if d.Role != "" {
+		buf = appendStringField(buf, "role", d.Role, false)
+		buf = appendStringField(buf, "content", d.Content, true)
+	} else {
+		buf = appendStringField(buf, "content", d.Content, false)
+	}
+	return append(buf, '}'), nil
 }
+
+// emptyDeltaBytes is the canonical "{}" slice returned for the
+// no-fields case — shared across every priming/closing chunk that
+// would otherwise allocate a fresh two-byte slice per call.
+var emptyDeltaBytes = []byte("{}")
 
 type ErrorResponse struct {
 	Error ErrorObject `json:"error"`
@@ -476,7 +470,14 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 	completionID := completionID()
 	flusher, _ := w.(http.Flusher)
 	writeChunk := func(chunk ChatCompletionChunk) {
-		_, _ = w.Write([]byte(core.Concat("data: ", core.JSONMarshalString(chunk), "\n\n")))
+		// Single-buffer SSE frame — the previous shape did
+		// JSONMarshalString (reflect path + grow-doubled scratch
+		// buffer) then Concat to wrap with "data: " / "\n\n" then
+		// []byte conversion. appendChatCompletionChunkSSE walks the
+		// chunk directly into a pre-sized buffer that already carries
+		// the SSE framing.
+		frame := appendChatCompletionChunkSSE(make([]byte, 0, chunkSSEFrameSize(chunk)), chunk)
+		_, _ = w.Write(frame)
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -578,7 +579,49 @@ func requestMessages(messages []ChatMessage) []inference.Message {
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = w.Write([]byte(core.JSONMarshalString(payload)))
+	// Hand-rolled fast path for the canonical non-streaming
+	// ChatCompletionResponse — fires once per served request and
+	// previously paid 2 allocs / 432 B through the reflect path.
+	// Encoding directly into a pre-sized buffer skips
+	// JSONMarshalString + the []byte(string) conversion.
+	if p, ok := payload.(ChatCompletionResponse); ok {
+		buf := appendChatCompletionResponse(make([]byte, 0, chatCompletionResponseSize(p)), p)
+		_, _ = w.Write(buf)
+		return
+	}
+	if p, ok := payload.(EmbeddingResponse); ok {
+		// Embedding responses scale with vector dimensionality —
+		// a 20-input × 1024-dim response is ~190 KB. The reflect
+		// path pays a per-element float32 marshal cost; the hand-
+		// rolled walk emits directly via strconv.AppendFloat.
+		buf := appendEmbeddingResponse(make([]byte, 0, embeddingResponseSize(p)), p)
+		_, _ = w.Write(buf)
+		return
+	}
+	if p, ok := payload.(Response); ok {
+		// Responses API non-streaming body — fires per served
+		// /v1/responses request. Same shape as ChatCompletionResponse
+		// (id/object/created/model/output/usage/thought) but with
+		// the Responses output-message envelope.
+		buf := appendResponse(make([]byte, 0, responseSize(p)), p)
+		_, _ = w.Write(buf)
+		return
+	}
+	if p, ok := payload.(RerankResponse); ok {
+		// Rerank results scale with the documents slice — walking
+		// inference.RerankScore inline skips the per-element reflect
+		// cost. Labels field is rarely set in practice; encoder
+		// handles both shapes.
+		buf := appendRerankResponse(make([]byte, 0, rerankResponseSize(p)), p)
+		_, _ = w.Write(buf)
+		return
+	}
+	result := core.JSONMarshal(payload)
+	if !result.OK {
+		_, _ = w.Write([]byte(`{}`))
+		return
+	}
+	_, _ = w.Write(result.Value.([]byte))
 }
 
 func writeError(w http.ResponseWriter, status int, message, param string) {
