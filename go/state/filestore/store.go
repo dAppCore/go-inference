@@ -233,30 +233,24 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 		Tags:   opts.Tags,
 		Labels: opts.Labels,
 	}
-	// encodeRecordMeta hand-rolls the recordMeta JSON into a single
-	// caller-allocated buffer — the encoding/json path allocates an
-	// encoder state machine + grow-doubled output buffer + per-tag
-	// key/value copies on every Put. The hand-roll lands at a single
-	// alloc per call regardless of tag count, and routes the all-
-	// empty case to the package-level emptyMetaBytes slice.
-	metaBytes := encodeRecordMeta(&meta)
-	if uint64(len(metaBytes)) > uint64(^uint32(0)) {
+	// encodeRecordHeaderMeta packs the 24-byte record header and
+	// the JSON-encoded recordMeta into a single allocation, so the
+	// previously stack-then-heap-escaped headerBuf and the JSON
+	// marshal output collapse to one buffer + one writeAll. The
+	// header's metaSize uint32 is patched after the meta is
+	// appended — single-pass build.
+	headerMeta := encodeRecordHeaderMeta(&meta, id, payloadSize)
+	metaSize := len(headerMeta) - recordHeaderLen
+	if uint64(metaSize) > uint64(^uint32(0)) {
 		return state.ChunkRef{}, core.NewError("state file store metadata is too large")
 	}
-
-	var headerBuf [recordHeaderLen]byte
-	encodeRecordHeader(headerBuf[:], id, payloadSize, len(metaBytes))
 	offset := s.writeAt
 	if _, err := s.file.Seek(offset, stdio.SeekStart); err != nil {
 		return state.ChunkRef{}, core.E("state.filestore.Put", "seek to append offset", err)
 	}
-	if err := writeAll(s.file, headerBuf[:]); err != nil {
+	if err := writeAll(s.file, headerMeta); err != nil {
 		s.rollbackWriteLocked(offset)
-		return state.ChunkRef{}, core.E("state.filestore.Put", "write record header", err)
-	}
-	if err := writeAll(s.file, metaBytes); err != nil {
-		s.rollbackWriteLocked(offset)
-		return state.ChunkRef{}, core.E("state.filestore.Put", "write record metadata", err)
+		return state.ChunkRef{}, core.E("state.filestore.Put", "write record header and metadata", err)
 	}
 	payloadWriter := &limitedPayloadWriter{
 		file:      s.file,
@@ -279,14 +273,14 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 	}
 	s.index[id] = fileIndexEntry{
 		ref:         ref,
-		payloadAt:   offset + recordHeaderLen + int64(len(metaBytes)),
+		payloadAt:   offset + recordHeaderLen + int64(metaSize),
 		payloadSize: payloadSize,
 	}
 	if meta.URI != "" {
 		s.uriIndex[meta.URI] = id
 	}
 	s.nextID++
-	s.writeAt += int64(recordHeaderLen + len(metaBytes) + payloadSize)
+	s.writeAt += int64(recordHeaderLen + metaSize + payloadSize)
 	return ref, nil
 }
 
@@ -612,16 +606,41 @@ func recordMetaIsEmpty(meta *recordMeta) bool {
 		len(meta.Labels) == 0
 }
 
-// encodeRecordMeta hand-rolls the JSON for recordMeta into a single
-// caller-bound buffer.
+// encodeRecordMeta hand-rolls the JSON for recordMeta into a fresh
+// single-allocation buffer. Thin wrapper over appendRecordMeta — kept
+// as the package-private "I want the meta bytes" entry point, used
+// by the round-trip test surface and any future caller that does
+// not also need the record header in the same buffer.
+//
+// PutBytesStream itself routes through encodeRecordHeaderMeta which
+// folds the meta append into the header buffer for a single alloc
+// covering both halves of the on-disk record prefix.
+//
+//	buf := encodeRecordMeta(&meta)
+//	if uint64(len(buf)) > uint64(^uint32(0)) { /* too large */ }
+func encodeRecordMeta(meta *recordMeta) []byte {
+	if recordMetaIsEmpty(meta) {
+		return emptyMetaBytes
+	}
+	buf := make([]byte, 0, recordMetaCapHint(meta))
+	return appendRecordMeta(buf, meta)
+}
+
+// encodeRecordHeaderMeta builds a single buffer containing the
+// record header (24 bytes) followed by the JSON-encoded recordMeta.
+// Folding both into one allocation eliminates the heap escape that
+// the previous [recordHeaderLen]byte stack array suffered when its
+// slice was handed to the *core.OSFile.Write interface, and
+// collapses two writeAll syscalls into one. The metaSize uint32
+// in the header is patched after the meta is appended — single-
+// pass build, no double walk over the meta fields.
 //
 // encoding/json.Marshal on recordMeta allocates an encoder state
-// machine + grow-doubled output buffer per call, plus ~2 extra
-// allocations per map entry (key copy + value copy). For an 8-tag
-// record the cost is ~22 allocs; the equivalent hand-roll lands
-// at a single buffer allocation.
+// machine + grow-doubled output buffer + per-tag key/value copies
+// on every Put. The hand-roll lands at a single buffer allocation
+// regardless of tag count.
 //
-// The output is valid JSON and parseable both by encoding/json
+// The meta portion is valid JSON, parseable by encoding/json
 // (round-trips into recordMeta) and by the store's extractRecordURI
 // walker. Field ordering follows recordMeta's struct declaration —
 // URI, Title, Kind, Track, Tags, Labels — and the omitempty
@@ -630,18 +649,26 @@ func recordMetaIsEmpty(meta *recordMeta) bool {
 // order — JSON object key order is not semantically meaningful and
 // no read site depends on it.
 //
-//	buf := encodeRecordMeta(&meta)
-//	if uint64(len(buf)) > uint64(^uint32(0)) { /* too large */ }
-func encodeRecordMeta(meta *recordMeta) []byte {
+//	buf := encodeRecordHeaderMeta(&meta, chunkID, payloadSize)
+//	writeAll(file, buf)
+func encodeRecordHeaderMeta(meta *recordMeta, chunkID, payloadSize int) []byte {
+	cap := recordHeaderLen + recordMetaCapHint(meta)
+	buf := make([]byte, recordHeaderLen, cap)
+	buf = appendRecordMeta(buf, meta)
+	metaSize := len(buf) - recordHeaderLen
+	encodeRecordHeader(buf[:recordHeaderLen], chunkID, payloadSize, metaSize)
+	return buf
+}
+
+// recordMetaCapHint returns a tight upper bound on the JSON byte
+// length of meta. Each string contributes its length plus framing
+// overhead; the typical ASCII shape (URIs, kinds, single-byte tag
+// values) clears the heuristic in one allocation. Pathological
+// escape-heavy inputs let append grow once.
+func recordMetaCapHint(meta *recordMeta) int {
 	if recordMetaIsEmpty(meta) {
-		return emptyMetaBytes
+		return 2
 	}
-	// Tight upper bound on output size:
-	//   {"uri":"<>","title":"<>","kind":"<>","track":"<>",
-	//    "tags":{"<>":"<>",...},"labels":["<>",...]}
-	// Each string value worst-case doubles with escapes; we under-
-	// commit and let append grow once if pathological. The typical
-	// case (ASCII alnum URIs / kinds) clears the heuristic cleanly.
 	size := 2 // braces
 	if meta.URI != "" {
 		size += 8 + len(meta.URI) // "uri":"...",
@@ -667,8 +694,18 @@ func encodeRecordMeta(meta *recordMeta) []byte {
 			size += 3 + len(l) // "l",
 		}
 	}
+	return size
+}
 
-	buf := make([]byte, 0, size)
+// appendRecordMeta appends the JSON encoding of meta to buf and
+// returns the extended slice. Walks the recordMeta struct in
+// declaration order, eliding empty fields to honour the omitempty
+// json tag semantics. Single-pass; no allocation beyond the
+// caller-supplied buf's eventual grow.
+func appendRecordMeta(buf []byte, meta *recordMeta) []byte {
+	if recordMetaIsEmpty(meta) {
+		return append(buf, '{', '}')
+	}
 	buf = append(buf, '{')
 	first := true
 	if meta.URI != "" {
@@ -718,8 +755,7 @@ func encodeRecordMeta(meta *recordMeta) []byte {
 		}
 		buf = append(buf, ']')
 	}
-	buf = append(buf, '}')
-	return buf
+	return append(buf, '}')
 }
 
 // appendJSONField appends a "key":"value" pair (prefixed by a comma
