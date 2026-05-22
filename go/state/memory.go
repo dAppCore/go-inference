@@ -17,37 +17,41 @@ func NewInMemoryStore(chunks map[int]string) *InMemoryStore {
 }
 
 func NewInMemoryStoreWithManifest(chunks map[int]string, refs map[int]ChunkRef) *InMemoryStore {
-	copyMap := make(map[int]string, len(chunks))
-	nextID := 1
-	for id, text := range chunks {
-		copyMap[id] = text
-		if id >= nextID {
-			nextID = id + 1
+	// Lazy-init the maps — Put/PutBytes already handle the nil-map case
+	// and the Resolve* paths only read via the comma-ok idiom (safe on
+	// nil). For the common empty-construct case (used in tests + cold
+	// boot) this drops 4 map allocations + the slice headers behind
+	// them. The chunk/ref maps stay sized to their input when populated.
+	store := &InMemoryStore{nextID: 1}
+	if len(chunks) > 0 {
+		store.chunks = make(map[int]string, len(chunks))
+		store.refs = make(map[int]ChunkRef, len(chunks))
+		for id, text := range chunks {
+			store.chunks[id] = text
+			if id >= store.nextID {
+				store.nextID = id + 1
+			}
+			store.refs[id] = ChunkRef{
+				ChunkID:        id,
+				FrameOffset:    uint64(id),
+				HasFrameOffset: true,
+				Codec:          CodecMemory,
+			}
 		}
 	}
-	refMap := make(map[int]ChunkRef, len(copyMap))
-	for id := range copyMap {
-		refMap[id] = ChunkRef{
-			ChunkID:        id,
-			FrameOffset:    uint64(id),
-			HasFrameOffset: true,
-			Codec:          CodecMemory,
+	if len(refs) > 0 {
+		if store.refs == nil {
+			store.refs = make(map[int]ChunkRef, len(refs))
+		}
+		for id, ref := range refs {
+			ref.ChunkID = id
+			store.refs[id] = ref
+			if id >= store.nextID {
+				store.nextID = id + 1
+			}
 		}
 	}
-	for id, ref := range refs {
-		ref.ChunkID = id
-		refMap[id] = ref
-		if id >= nextID {
-			nextID = id + 1
-		}
-	}
-	return &InMemoryStore{
-		chunks: copyMap,
-		data:   make(map[int][]byte),
-		refs:   refMap,
-		uris:   make(map[string]int),
-		nextID: nextID,
-	}
+	return store
 }
 
 func (s *InMemoryStore) Get(ctx context.Context, chunkID int) (string, error) {
