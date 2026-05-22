@@ -609,7 +609,22 @@ func requestMessages(messages []ChatMessage) []inference.Message {
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = w.Write([]byte(core.JSONMarshalString(payload)))
+	// Hand-rolled fast path for the canonical non-streaming
+	// ChatCompletionResponse — fires once per served request and
+	// previously paid 2 allocs / 432 B through the reflect path.
+	// Encoding directly into a pre-sized buffer skips
+	// JSONMarshalString + the []byte(string) conversion.
+	if p, ok := payload.(ChatCompletionResponse); ok {
+		buf := appendChatCompletionResponse(make([]byte, 0, chatCompletionResponseSize(p)), p)
+		_, _ = w.Write(buf)
+		return
+	}
+	result := core.JSONMarshal(payload)
+	if !result.OK {
+		_, _ = w.Write([]byte(`{}`))
+		return
+	}
+	_, _ = w.Write(result.Value.([]byte))
 }
 
 func writeError(w http.ResponseWriter, status int, message, param string) {

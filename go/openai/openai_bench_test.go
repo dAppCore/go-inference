@@ -356,6 +356,28 @@ func BenchmarkOpenAI_AppendChatCompletionChunkSSE_Final(b *testing.B) {
 
 // --- ChatCompletionResponse — non-streaming response marshal ---
 
+// AppendChatCompletionResponse — hand-rolled fast path used by
+// writeJSON for the canonical non-streaming response shape.
+func BenchmarkOpenAI_AppendChatCompletionResponse_Typical(b *testing.B) {
+	resp := ChatCompletionResponse{
+		ID:      "chatcmpl-bench",
+		Object:  "chat.completion",
+		Created: 1700000000,
+		Model:   "qwen3",
+		Choices: []ChatChoice{{
+			Index:        0,
+			Message:      ChatMessage{Role: "assistant", Content: "The summary is concise and faithful to the original text."},
+			FinishReason: "stop",
+		}},
+		Usage: ChatUsage{PromptTokens: 200, CompletionTokens: 32, TotalTokens: 232},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		openAISinkBytes = appendChatCompletionResponse(make([]byte, 0, chatCompletionResponseSize(resp)), resp)
+	}
+}
+
 func BenchmarkOpenAI_MarshalChatCompletionResponse_Typical(b *testing.B) {
 	resp := ChatCompletionResponse{
 		ID:      "chatcmpl-bench",
