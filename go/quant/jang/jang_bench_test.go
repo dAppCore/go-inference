@@ -381,3 +381,61 @@ func BenchmarkJang_DequantizePackedTensor_8bit_256(b *testing.B) {
 		jangSinkValues, jangSinkErr = DequantizePackedTensor(desc, packed, scales, biases)
 	}
 }
+
+// benchInfoBits returns a benchInfo where the routed-expert bits override
+// is set to the requested width. NewPackedTensorDescriptor routes a tensor
+// matching block_sparse_moe.experts to RoutedExpertBits, so we can exercise
+// any width in {1, 2, 3, 4, 8} through the same name.
+func benchInfoBits(bits int) *Info {
+	info := benchInfo()
+	info.RoutedExpertBits = bits
+	info.BitsDefault = bits
+	return info
+}
+
+func benchDequantize(b *testing.B, bits, elements int) {
+	desc, err := NewPackedTensorDescriptor("model.layers.0.block_sparse_moe.experts.0.w1.weight", []uint64{uint64(elements)}, benchInfoBits(bits))
+	if err != nil {
+		b.Fatal(err)
+	}
+	maxValue := uint8((1 << bits) - 1)
+	values := make([]uint8, desc.Elements)
+	for i := range values {
+		values[i] = uint8(i) & maxValue
+	}
+	packed, err := PackQuantizedValues(desc, values)
+	if err != nil {
+		b.Fatal(err)
+	}
+	scales := make([]float32, desc.ScaleCount)
+	biases := make([]float32, desc.BiasCount)
+	for i := range scales {
+		scales[i] = 0.0625
+		biases[i] = -2
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		jangSinkValues, jangSinkErr = DequantizePackedTensor(desc, packed, scales, biases)
+	}
+}
+
+func BenchmarkJang_DequantizePackedTensor_1bit_4096(b *testing.B) {
+	benchDequantize(b, 1, 4096)
+}
+
+func BenchmarkJang_DequantizePackedTensor_2bit_16384(b *testing.B) {
+	benchDequantize(b, 2, 16384)
+}
+
+func BenchmarkJang_DequantizePackedTensor_3bit_4096(b *testing.B) {
+	benchDequantize(b, 3, 4096)
+}
+
+func BenchmarkJang_DequantizePackedTensor_4bit_4096(b *testing.B) {
+	benchDequantize(b, 4, 4096)
+}
+
+func BenchmarkJang_DequantizePackedTensor_8bit_4096(b *testing.B) {
+	benchDequantize(b, 8, 4096)
+}
