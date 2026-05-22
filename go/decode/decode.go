@@ -205,6 +205,16 @@ func TokensText(tokens []Token) string {
 		}
 		total += len(text)
 	}
+	return tokensTextSized(tokens, total)
+}
+
+// tokensTextSized is TokensText with the total length pre-computed by
+// the caller. buildAcceptanceResult walks the token stream once during
+// the acceptance pass and already knows the rendered length when it
+// gets here, so the second len-summing walk is redundant. Exported
+// (lowercase) only so the inner loop can elide that walk; external
+// callers go through TokensText, which computes total itself.
+func tokensTextSized(tokens []Token, total int) string {
 	builder := core.NewBuilder()
 	builder.Grow(total)
 	for _, token := range tokens {
@@ -249,18 +259,30 @@ func buildAcceptanceResult(mode, prompt string, target, candidates []Token, maxT
 		limit = maxTokens
 	}
 	out := make([]Token, 0, limit)
+	// Track the rendered text length alongside the build loop so the
+	// TokensText pre-grow walk fuses with the acceptance pass — the
+	// previous shape walked the emitted tokens twice (once to build
+	// out, once inside TokensText to sum lengths). At 2048 tokens that
+	// halves the walk count over the slice.
+	totalText := 0
 	var accepted, rejected int
 	for i := 0; i < limit; i++ {
 		targetToken := target[i]
+		emitted := targetToken
 		if i < len(candidates) {
 			if TokenEqual(candidates[i], targetToken) {
-				out = append(out, cloneToken(candidates[i]))
+				emitted = candidates[i]
 				accepted++
-				continue
+			} else {
+				rejected++
 			}
-			rejected++
 		}
-		out = append(out, cloneToken(targetToken))
+		out = append(out, emitted)
+		text := emitted.Text
+		if text == "" {
+			text = emitted.Value
+		}
+		totalText += len(text)
 	}
 	attempted := accepted + rejected
 	metrics := Metrics{
@@ -274,7 +296,7 @@ func buildAcceptanceResult(mode, prompt string, target, candidates []Token, maxT
 	return Result{
 		Mode:    mode,
 		Prompt:  prompt,
-		Text:    TokensText(out),
+		Text:    tokensTextSized(out, totalText),
 		Tokens:  out,
 		Metrics: metrics,
 	}
@@ -287,10 +309,6 @@ func normaliseMaxTokens(values ...int) int {
 		}
 	}
 	return DefaultMaxTokens
-}
-
-func cloneToken(token Token) Token {
-	return Token{ID: token.ID, Value: token.Value, Text: token.Text}
 }
 
 // tokenSurface returns the token's surface form, preferring Text over
