@@ -243,6 +243,38 @@ func BenchmarkServices_MarshalRerankResponse_TwentyResults(b *testing.B) {
 	}
 }
 
+// --- Hand-rolled rerank-response encoder — writeJSON fast path ---
+
+func BenchmarkServices_AppendRerankResponse_FewResults(b *testing.B) {
+	resp := RerankResponse{
+		Object: "list",
+		Model:  "qwen3-rerank",
+		Results: []inference.RerankScore{
+			{Index: 0, Score: 0.91, Text: "alpha"},
+			{Index: 1, Score: 0.82, Text: "beta"},
+			{Index: 2, Score: 0.74, Text: "gamma"},
+		},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		servicesSinkBytes = appendRerankResponse(make([]byte, 0, rerankResponseSize(resp)), resp)
+	}
+}
+
+func BenchmarkServices_AppendRerankResponse_TwentyResults(b *testing.B) {
+	results := make([]inference.RerankScore, 20)
+	for i := range results {
+		results[i] = inference.RerankScore{Index: i, Score: 0.95 - float64(i)*0.04, Text: "document text fragment"}
+	}
+	resp := RerankResponse{Object: "list", Model: "qwen3-rerank", Results: results}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		servicesSinkBytes = appendRerankResponse(make([]byte, 0, rerankResponseSize(resp)), resp)
+	}
+}
+
 // --- CacheWarmRequest — KV cache prep request ingress ---
 
 func BenchmarkServices_UnmarshalCacheWarmRequest_Prompt(b *testing.B) {

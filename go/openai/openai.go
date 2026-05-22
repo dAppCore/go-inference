@@ -637,6 +637,15 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 		_, _ = w.Write(buf)
 		return
 	}
+	if p, ok := payload.(RerankResponse); ok {
+		// Rerank results scale with the documents slice — walking
+		// inference.RerankScore inline skips the per-element reflect
+		// cost. Labels field is rarely set in practice; encoder
+		// handles both shapes.
+		buf := appendRerankResponse(make([]byte, 0, rerankResponseSize(p)), p)
+		_, _ = w.Write(buf)
+		return
+	}
 	result := core.JSONMarshal(payload)
 	if !result.OK {
 		_, _ = w.Write([]byte(`{}`))
