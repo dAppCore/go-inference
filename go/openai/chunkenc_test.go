@@ -92,6 +92,79 @@ func TestChatCompletionChunk_MarshalJSON_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestChatCompletionResponse_AppendRoundTrip locks the hand-rolled
+// non-streaming response encoder against encoding/json. The wire
+// shape is consumed by every OpenAI-compatible client on the
+// non-streaming chat-completions endpoint.
+func TestChatCompletionResponse_AppendRoundTrip(t *testing.T) {
+	thought := "let me think"
+	cases := []struct {
+		name string
+		in   ChatCompletionResponse
+	}{
+		{"minimal", ChatCompletionResponse{
+			ID: "chatcmpl-x", Object: "chat.completion", Created: 1700000000, Model: "qwen3",
+			Choices: []ChatChoice{{
+				Index:        0,
+				Message:      ChatMessage{Role: "assistant", Content: "Hi"},
+				FinishReason: "stop",
+			}},
+			Usage: ChatUsage{PromptTokens: 3, CompletionTokens: 4, TotalTokens: 7},
+		}},
+		{"with-thought", ChatCompletionResponse{
+			ID: "chatcmpl-x", Object: "chat.completion", Created: 1700000000, Model: "qwen3",
+			Choices: []ChatChoice{{
+				Index:        0,
+				Message:      ChatMessage{Role: "assistant", Content: "Answer"},
+				FinishReason: "length",
+			}},
+			Usage:   ChatUsage{PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30},
+			Thought: &thought,
+		}},
+		{"escapes", ChatCompletionResponse{
+			ID: "chatcmpl-x", Object: "chat.completion", Created: 1700000000, Model: "qwen3",
+			Choices: []ChatChoice{{
+				Index:        0,
+				Message:      ChatMessage{Role: "assistant", Content: "quote \" backslash \\"},
+				FinishReason: "stop",
+			}},
+			Usage: ChatUsage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			encoded := appendChatCompletionResponse(nil, tc.in)
+			var back ChatCompletionResponse
+			if err := json.Unmarshal(encoded, &back); err != nil {
+				t.Fatalf("json.Unmarshal(%s) error = %v", encoded, err)
+			}
+			if back.ID != tc.in.ID || back.Object != tc.in.Object || back.Created != tc.in.Created || back.Model != tc.in.Model {
+				t.Fatalf("identity: got %+v, want %+v", back, tc.in)
+			}
+			if back.Usage != tc.in.Usage {
+				t.Fatalf("usage: got %+v, want %+v", back.Usage, tc.in.Usage)
+			}
+			if len(back.Choices) != len(tc.in.Choices) {
+				t.Fatalf("choices len = %d, want %d", len(back.Choices), len(tc.in.Choices))
+			}
+			for i := range tc.in.Choices {
+				if back.Choices[i].Index != tc.in.Choices[i].Index ||
+					back.Choices[i].Message.Role != tc.in.Choices[i].Message.Role ||
+					back.Choices[i].Message.Content != tc.in.Choices[i].Message.Content ||
+					back.Choices[i].FinishReason != tc.in.Choices[i].FinishReason {
+					t.Fatalf("choices[%d] mismatch: got %+v want %+v", i, back.Choices[i], tc.in.Choices[i])
+				}
+			}
+			if (back.Thought == nil) != (tc.in.Thought == nil) {
+				t.Fatalf("thought nil mismatch: got=%v want=%v", back.Thought, tc.in.Thought)
+			}
+			if back.Thought != nil && *back.Thought != *tc.in.Thought {
+				t.Fatalf("thought = %q, want %q", *back.Thought, *tc.in.Thought)
+			}
+		})
+	}
+}
+
 // TestChatCompletionChunk_SSEFrame verifies the SSE framing helper —
 // the streaming hot path embeds "data: " prefix + body + "\n\n" in
 // one buffer. Output must match what proxy clients parse as one SSE
