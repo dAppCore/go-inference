@@ -44,6 +44,13 @@ func (input *EmbeddingInput) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	if data[0] == '[' {
+		// Fast path: array of JSON strings with no escapes — sister
+		// optimisation. Embedding input arrays are typically tokeniser-
+		// prepped ASCII text without escape sequences.
+		if values, ok := simpleJSONStringArray(data); ok {
+			*input = values
+			return nil
+		}
 		var values []string
 		result := core.JSONUnmarshal(data, &values)
 		if !result.OK {
