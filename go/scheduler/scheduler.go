@@ -451,6 +451,12 @@ func (m *Model) nextRequestID() string {
 	return core.AsString(buf)
 }
 
+// schedTempZeroOpt is the cached WithTemperature(0) closure — the
+// burst-dispatch case where callers leave Sampler at its zero value
+// and we still want greedy decoding to be explicit. Caching the
+// closure here saves one heap allocation per Schedule in that path.
+var schedTempZeroOpt = inference.WithTemperature(0)
+
 func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
 	// Pre-size to the maximum possible option count — Temperature is
 	// always set; the others are conditional. Saves the doubling-grow
@@ -459,7 +465,11 @@ func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
 	if cfg.MaxTokens > 0 {
 		opts = append(opts, inference.WithMaxTokens(cfg.MaxTokens))
 	}
-	opts = append(opts, inference.WithTemperature(cfg.Temperature))
+	if cfg.Temperature == 0 {
+		opts = append(opts, schedTempZeroOpt)
+	} else {
+		opts = append(opts, inference.WithTemperature(cfg.Temperature))
+	}
 	if cfg.TopK > 0 {
 		opts = append(opts, inference.WithTopK(cfg.TopK))
 	}
