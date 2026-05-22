@@ -31,6 +31,7 @@ var (
 	servicesSinkCacheStats      inference.CacheStats
 	servicesSinkErr             error
 	servicesSinkString          string
+	servicesSinkBytes           []byte
 	servicesSinkResult          core.Result
 )
 
@@ -152,6 +153,37 @@ func BenchmarkServices_MarshalEmbeddingResponse_20x1024(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		servicesSinkString = core.JSONMarshalString(resp)
+	}
+}
+
+// --- Hand-rolled embedding-response encoder — writeJSON fast path ---
+// Compares directly against the encoding/json reflect-walk path
+// above. Per-element float32 emission scales with vector dim.
+
+func BenchmarkServices_AppendEmbeddingResponse_1x384(b *testing.B) {
+	resp := buildEmbeddingResponse(1, 384)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		servicesSinkBytes = appendEmbeddingResponse(make([]byte, 0, embeddingResponseSize(resp)), resp)
+	}
+}
+
+func BenchmarkServices_AppendEmbeddingResponse_5x768(b *testing.B) {
+	resp := buildEmbeddingResponse(5, 768)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		servicesSinkBytes = appendEmbeddingResponse(make([]byte, 0, embeddingResponseSize(resp)), resp)
+	}
+}
+
+func BenchmarkServices_AppendEmbeddingResponse_20x1024(b *testing.B) {
+	resp := buildEmbeddingResponse(20, 1024)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		servicesSinkBytes = appendEmbeddingResponse(make([]byte, 0, embeddingResponseSize(resp)), resp)
 	}
 }
 
