@@ -619,6 +619,15 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 		_, _ = w.Write(buf)
 		return
 	}
+	if p, ok := payload.(EmbeddingResponse); ok {
+		// Embedding responses scale with vector dimensionality —
+		// a 20-input × 1024-dim response is ~190 KB. The reflect
+		// path pays a per-element float32 marshal cost; the hand-
+		// rolled walk emits directly via strconv.AppendFloat.
+		buf := appendEmbeddingResponse(make([]byte, 0, embeddingResponseSize(p)), p)
+		_, _ = w.Write(buf)
+		return
+	}
 	result := core.JSONMarshal(payload)
 	if !result.OK {
 		_, _ = w.Write([]byte(`{}`))

@@ -192,6 +192,79 @@ func appendChatCompletionResponse(buf []byte, resp ChatCompletionResponse) []byt
 	return append(buf, '}')
 }
 
+// appendEmbeddingResponseDatum walks one embedding-response datum
+// (object, index, embedding vector) into buf. The embedding slice
+// is emitted directly via strconv.AppendFloat — avoids the
+// reflect-walk per-element cost that encoding/json pays.
+func appendEmbeddingResponseDatum(buf []byte, datum EmbeddingResponseDatum) []byte {
+	buf = append(buf, '{')
+	buf = appendStringField(buf, "object", datum.Object, false)
+	buf = appendIntField(buf, "index", datum.Index, true)
+	buf = append(buf, ',', '"', 'e', 'm', 'b', 'e', 'd', 'd', 'i', 'n', 'g', '"', ':', '[')
+	for i, v := range datum.Embedding {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = appendFloat32(buf, v)
+	}
+	return append(buf, ']', '}')
+}
+
+// appendEmbeddingUsage walks an inference.EmbeddingUsage into buf.
+// Two int fields — prompt_tokens, total_tokens — in canonical
+// OpenAI order.
+func appendEmbeddingUsage(buf []byte, prompt, total int) []byte {
+	buf = append(buf, '{')
+	buf = appendIntField(buf, "prompt_tokens", prompt, false)
+	buf = appendIntField(buf, "total_tokens", total, true)
+	return append(buf, '}')
+}
+
+// appendEmbeddingResponse walks the full EmbeddingResponse shape
+// into buf. The per-vector embedding fan-out is the load-bearing
+// cost (a 20×1024 response emits 20480 float32 values); the hand-
+// rolled walk keeps the per-element path on a single buffer with
+// no reflect.
+func appendEmbeddingResponse(buf []byte, resp EmbeddingResponse) []byte {
+	buf = append(buf, '{')
+	buf = appendStringField(buf, "object", resp.Object, false)
+	buf = append(buf, ',', '"', 'd', 'a', 't', 'a', '"', ':', '[')
+	for i, datum := range resp.Data {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = appendEmbeddingResponseDatum(buf, datum)
+	}
+	buf = append(buf, ']')
+	buf = appendStringField(buf, "model", resp.Model, true)
+	buf = append(buf, ',', '"', 'u', 's', 'a', 'g', 'e', '"', ':')
+	buf = appendEmbeddingUsage(buf, resp.Usage.PromptTokens, resp.Usage.TotalTokens)
+	return append(buf, '}')
+}
+
+// embeddingResponseSize estimates the backing-buffer size for one
+// EmbeddingResponse so the encoder allocates once. Each float32
+// emits at most ~12 ASCII chars under the 'g' format (sign + 7
+// significant digits + exponent + dot); empirical mean across the
+// embedding ranges (~ -1..+1) is ~7.9 chars + 1 separator. The
+// heuristic uses 9 — under-commits on the worst case (scientific-
+// notation values) and lets append grow once.
+func embeddingResponseSize(resp EmbeddingResponse) int {
+	size := 2 // braces
+	size += 11 + len(resp.Object)
+	size += 9 // "data":[]
+	for _, datum := range resp.Data {
+		size += 12 + len(datum.Object) // {"object":"X"
+		size += 11 + 20                // "index":N
+		size += 14                     // "embedding":[]
+		size += len(datum.Embedding) * 9
+		size += 2 // }
+	}
+	size += 10 + len(resp.Model)
+	size += 50 // "usage":{prompt_tokens:N,total_tokens:N}
+	return size
+}
+
 // chatCompletionResponseSize estimates the backing-buffer size for
 // one ChatCompletionResponse so the encoder allocates once.
 func chatCompletionResponseSize(resp ChatCompletionResponse) int {
