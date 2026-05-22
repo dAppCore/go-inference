@@ -447,6 +447,12 @@ func dequantizeBit2(out []float32, packed []byte, scales, biases []float32, grou
 
 // dequantizeBit1 walks the 1-bit-packed path with the unpack inlined.
 // Eight values per byte; mask + shift only.
+//
+// When the per-group walk lands on a byte boundary we batch 8 elements
+// per byte read — amortises the packed-slice load + bounds check across
+// all eight 1-bit lanes. JANGTQ-style groupSize=64 (== 8 bytes at
+// 1-bit) lands on a byte boundary at every group start. Single-element
+// prefix + suffix handle mid-byte starts and short-tail groups.
 func dequantizeBit1(out []float32, packed []byte, scales, biases []float32, groupSize int) {
 	for i := 0; i < len(out); {
 		group := i / groupSize
@@ -456,6 +462,25 @@ func dequantizeBit1(out []float32, packed []byte, scales, biases []float32, grou
 		}
 		scale := scales[group]
 		bias := biases[group]
+		// Drain prefix elements until i is byte-aligned (i&7 == 0).
+		for ; i < end && (i&7) != 0; i++ {
+			q := (packed[i>>3] >> uint(i&7)) & 0x01
+			out[i] = float32(q)*scale + bias
+		}
+		// Walk 8-at-a-time on byte-aligned boundaries.
+		for i+8 <= end {
+			b := packed[i>>3]
+			out[i] = float32(b&0x01)*scale + bias
+			out[i+1] = float32((b>>1)&0x01)*scale + bias
+			out[i+2] = float32((b>>2)&0x01)*scale + bias
+			out[i+3] = float32((b>>3)&0x01)*scale + bias
+			out[i+4] = float32((b>>4)&0x01)*scale + bias
+			out[i+5] = float32((b>>5)&0x01)*scale + bias
+			out[i+6] = float32((b>>6)&0x01)*scale + bias
+			out[i+7] = float32((b>>7)&0x01)*scale + bias
+			i += 8
+		}
+		// Drain suffix.
 		for ; i < end; i++ {
 			q := (packed[i>>3] >> uint(i&7)) & 0x01
 			out[i] = float32(q)*scale + bias
