@@ -283,3 +283,76 @@ func generateResponseSize(resp GenerateResponse) int {
 	}
 	return size
 }
+
+// appendModelTag walks one ModelTag into buf — used inline by
+// AppendTagsResponse. Three of the four fields carry omitempty
+// (Model, ModifiedAt, Size); Name is always emitted.
+func appendModelTag(buf []byte, tag ModelTag) []byte {
+	buf = append(buf, '{')
+	buf = appendStringField(buf, "name", tag.Name, false)
+	if tag.Model != "" {
+		buf = appendStringField(buf, "model", tag.Model, true)
+	}
+	if tag.ModifiedAt != "" {
+		buf = appendStringField(buf, "modified_at", tag.ModifiedAt, true)
+	}
+	if tag.Size != 0 {
+		buf = appendInt64Field(buf, "size", tag.Size, true)
+	}
+	return append(buf, '}')
+}
+
+// AppendTagsResponse walks a TagsResponse (/api/tags). Discovery
+// hot path — fires once per client startup (open-webui pings this
+// on every page load) and again on every model-list refresh.
+//
+// A nil Models slice emits as "models":null (matching encoding/json
+// semantics for nil-slice fields); an empty []ModelTag{} emits as
+// "models":[]. Downstream consumers (e.g. open-webui) treat both
+// forms as "no models served" interchangeably, but the wire shape
+// must remain consistent with the reflect-path output for proxy
+// pass-through.
+//
+//	buf := AppendTagsResponse(make([]byte, 0, tagsResponseSize(resp)), resp)
+func AppendTagsResponse(buf []byte, resp TagsResponse) []byte {
+	buf = append(buf, '{', '"', 'm', 'o', 'd', 'e', 'l', 's', '"', ':')
+	if resp.Models == nil {
+		return append(buf, 'n', 'u', 'l', 'l', '}')
+	}
+	buf = append(buf, '[')
+	for i, tag := range resp.Models {
+		if i > 0 {
+			buf = append(buf, ',')
+		}
+		buf = appendModelTag(buf, tag)
+	}
+	return append(buf, ']', '}')
+}
+
+// tagsResponseSize estimates the TagsResponse buffer. The
+// "models":null variant emits 17 bytes; the slice variant grows
+// per-tag.
+func tagsResponseSize(resp TagsResponse) int {
+	if resp.Models == nil {
+		return 17 // {"models":null}
+	}
+	size := 13 // {"models":[]}
+	for i, tag := range resp.Models {
+		if i > 0 {
+			size++
+		}
+		// {"name":"X" = 11 fixed + name
+		size += 11 + len(tag.Name)
+		if tag.Model != "" {
+			size += 11 + len(tag.Model)
+		}
+		if tag.ModifiedAt != "" {
+			size += 16 + len(tag.ModifiedAt)
+		}
+		if tag.Size != 0 {
+			size += 9 + 12 // "size":NNNNNNNNN
+		}
+		size++ // closing }
+	}
+	return size
+}

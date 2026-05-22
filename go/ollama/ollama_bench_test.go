@@ -413,3 +413,47 @@ func BenchmarkOllama_AppendGenerateResponse_Final(b *testing.B) {
 	}
 }
 
+func BenchmarkOllama_AppendTagsResponse_OneModel(b *testing.B) {
+	resp := TagsResponse{Models: []ModelTag{
+		{Name: "qwen3:latest", Model: "qwen3", ModifiedAt: "2026-05-21T10:00:00Z", Size: 4_500_000_000},
+	}}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ollamaSinkBuf = AppendTagsResponse(make([]byte, 0, tagsResponseSize(resp)), resp)
+	}
+}
+
+func BenchmarkOllama_AppendTagsResponse_FiveModels(b *testing.B) {
+	resp := TagsResponse{Models: []ModelTag{
+		{Name: "qwen3:latest", Model: "qwen3", Size: 4_500_000_000},
+		{Name: "gemma3:4b", Model: "gemma3", Size: 2_300_000_000},
+		{Name: "llama3:8b", Model: "llama3", Size: 4_700_000_000},
+		{Name: "qwen2.5:14b", Model: "qwen2.5", Size: 8_900_000_000},
+		{Name: "deepseek:7b", Model: "deepseek", Size: 4_100_000_000},
+	}}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ollamaSinkBuf = AppendTagsResponse(make([]byte, 0, tagsResponseSize(resp)), resp)
+	}
+}
+
+func BenchmarkOllama_AppendTagsResponse_TwentyModels(b *testing.B) {
+	models := make([]ModelTag, 20)
+	for i := range models {
+		models[i] = ModelTag{
+			Name:       "model-bench:tag",
+			Model:      "model-bench",
+			ModifiedAt: "2026-05-21T10:00:00Z",
+			Size:       int64(4_000_000_000 + i*100_000_000),
+		}
+	}
+	resp := TagsResponse{Models: models}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		ollamaSinkBuf = AppendTagsResponse(make([]byte, 0, tagsResponseSize(resp)), resp)
+	}
+}
+
