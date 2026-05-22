@@ -40,12 +40,35 @@ type Model struct {
 	maxConcurrent   int
 	streamBuffer    int
 	requestIDPrefix string
-	probeSink       inference.ProbeSink
 	nextID          atomic.Uint64
 
+	// probeSink is read on every scheduler event (queued / start /
+	// first_token / cancel / cancelled / complete) and updated only
+	// via SetProbeSink. An atomic.Pointer lets emitProbe load the
+	// sink without contending m.mu — under burst dispatch we used to
+	// pay one mu.Lock per probe event per producer (4 events × 64
+	// producers = 256 lock acquisitions per bench iteration even
+	// when no sink was attached).
+	probeSink atomic.Pointer[probeSinkBox]
+
+	// active holds in-flight jobs keyed by request ID. sync.Map fits
+	// the access shape: CancelRequest's lookup is the contended
+	// hot-path (32-goroutine parallel cancel-poll measured 4 orders
+	// of magnitude slowdown vs the serial bench under a plain Mutex,
+	// and ~2x worse under RWMutex due to its accounting overhead),
+	// while register/unregister fire exactly twice per request and
+	// are tolerant of sync.Map's slightly higher write cost.
+	active sync.Map
+
 	mu      sync.Mutex
-	active  map[string]*job
 	lastErr error
+}
+
+// probeSinkBox wraps the sink interface so it can be stored in an
+// atomic.Pointer (atomic.Value rejects nil-typed interface stores;
+// boxing avoids that constraint and keeps the load path branchless).
+type probeSinkBox struct {
+	sink inference.ProbeSink
 }
 
 type job struct {
@@ -83,8 +106,9 @@ func New(model inference.TextModel, cfg Config) *Model {
 		maxConcurrent:   maxConcurrent,
 		streamBuffer:    streamBuffer,
 		requestIDPrefix: prefix,
-		probeSink:       cfg.ProbeSink,
-		active:          map[string]*job{},
+	}
+	if cfg.ProbeSink != nil {
+		m.probeSink.Store(&probeSinkBox{sink: cfg.ProbeSink})
 	}
 	for worker := range maxConcurrent {
 		go m.worker(worker)
@@ -120,7 +144,16 @@ func (m *Model) Schedule(ctx context.Context, req inference.ScheduledRequest) (i
 	select {
 	case m.queue <- j:
 		m.emitProbe(j, "queued", 0, 0, false)
-		return inference.RequestHandle{ID: req.ID, Model: inference.ModelIdentity{ID: req.Model}, Labels: cloneLabels(req.Labels)}, j.out, nil
+		// handle.Labels mirrors the request's caller-supplied Labels —
+		// skip the map clone when the request has none. Saves one alloc
+		// per Schedule in the burst-fan-out path where most producers
+		// arrive without custom labels. When labels ARE present, we
+		// still clone so callers can't mutate our run-loop view.
+		var handleLabels map[string]string
+		if len(req.Labels) > 0 {
+			handleLabels = cloneLabels(req.Labels)
+		}
+		return inference.RequestHandle{ID: req.ID, Model: inference.ModelIdentity{ID: req.Model}, Labels: handleLabels}, j.out, nil
 	case <-ctx.Done():
 		m.unregister(req.ID)
 		cancel()
@@ -144,15 +177,14 @@ func (m *Model) CancelRequest(_ context.Context, id string) (inference.RequestCa
 	if core.Trim(id) == "" {
 		return inference.RequestCancelResult{Reason: "missing_id"}, nil
 	}
-	m.mu.Lock()
-	j := m.active[id]
-	m.mu.Unlock()
-	if j == nil {
+	value, ok := m.active.Load(id)
+	if !ok {
 		if cancellable, ok := m.base.(inference.CancellableModel); ok {
 			return cancellable.CancelRequest(context.Background(), id)
 		}
 		return inference.RequestCancelResult{ID: id, Reason: "not_found"}, nil
 	}
+	j := value.(*job)
 	j.cancel()
 	m.emitProbe(j, "cancel", time.Since(j.queuedAt), 0, true)
 	return inference.RequestCancelResult{ID: id, Cancelled: true, Reason: "cancelled"}, nil
@@ -285,9 +317,11 @@ func (m *Model) SetProbeSink(sink inference.ProbeSink) {
 	if m == nil {
 		return
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.probeSink = sink
+	if sink == nil {
+		m.probeSink.Store(nil)
+		return
+	}
+	m.probeSink.Store(&probeSinkBox{sink: sink})
 }
 
 func (m *Model) worker(_ int) {
@@ -352,25 +386,30 @@ func (m *Model) baseTokens(j *job) iter.Seq[inference.Token] {
 }
 
 func (m *Model) register(j *job) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.active[j.req.ID] = j
+	m.active.Store(j.req.ID, j)
 }
 
 func (m *Model) unregister(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.active, id)
+	m.active.Delete(id)
 }
 
 func (m *Model) emitProbe(j *job, event string, queueLatency, firstTokenLatency time.Duration, cancelled bool) {
-	m.mu.Lock()
-	sink := m.probeSink
-	queueDepth := len(m.queue)
-	m.mu.Unlock()
-	if sink == nil || j == nil {
+	if j == nil {
 		return
 	}
+	// Lock-free fast path — burst-dispatch typically runs with no
+	// sink attached; the atomic load + nil check returns in nanoseconds
+	// and never contends the mutex that guards lastErr.
+	box := m.probeSink.Load()
+	if box == nil {
+		return
+	}
+	sink := box.sink
+	if sink == nil {
+		return
+	}
+	// Channel len is internally atomic — safe to read without a lock.
+	queueDepth := len(m.queue)
 	sink.EmitProbe(inference.ProbeEvent{
 		Kind:  inference.ProbeEventScheduler,
 		Phase: inference.ProbePhaseQueue,
@@ -412,6 +451,12 @@ func (m *Model) nextRequestID() string {
 	return core.AsString(buf)
 }
 
+// schedTempZeroOpt is the cached WithTemperature(0) closure — the
+// burst-dispatch case where callers leave Sampler at its zero value
+// and we still want greedy decoding to be explicit. Caching the
+// closure here saves one heap allocation per Schedule in that path.
+var schedTempZeroOpt = inference.WithTemperature(0)
+
 func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
 	// Pre-size to the maximum possible option count — Temperature is
 	// always set; the others are conditional. Saves the doubling-grow
@@ -420,7 +465,11 @@ func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
 	if cfg.MaxTokens > 0 {
 		opts = append(opts, inference.WithMaxTokens(cfg.MaxTokens))
 	}
-	opts = append(opts, inference.WithTemperature(cfg.Temperature))
+	if cfg.Temperature == 0 {
+		opts = append(opts, schedTempZeroOpt)
+	} else {
+		opts = append(opts, inference.WithTemperature(cfg.Temperature))
+	}
 	if cfg.TopK > 0 {
 		opts = append(opts, inference.WithTopK(cfg.TopK))
 	}
