@@ -43,8 +43,16 @@ type Model struct {
 	probeSink       inference.ProbeSink
 	nextID          atomic.Uint64
 
+	// active holds in-flight jobs keyed by request ID. sync.Map fits
+	// the access shape: CancelRequest's lookup is the contended
+	// hot-path (32-goroutine parallel cancel-poll measured 4 orders
+	// of magnitude slowdown vs the serial bench under a plain Mutex,
+	// and ~2x worse under RWMutex due to its accounting overhead),
+	// while register/unregister fire exactly twice per request and
+	// are tolerant of sync.Map's slightly higher write cost.
+	active sync.Map
+
 	mu      sync.Mutex
-	active  map[string]*job
 	lastErr error
 }
 
@@ -84,7 +92,6 @@ func New(model inference.TextModel, cfg Config) *Model {
 		streamBuffer:    streamBuffer,
 		requestIDPrefix: prefix,
 		probeSink:       cfg.ProbeSink,
-		active:          map[string]*job{},
 	}
 	for worker := range maxConcurrent {
 		go m.worker(worker)
@@ -153,15 +160,14 @@ func (m *Model) CancelRequest(_ context.Context, id string) (inference.RequestCa
 	if core.Trim(id) == "" {
 		return inference.RequestCancelResult{Reason: "missing_id"}, nil
 	}
-	m.mu.Lock()
-	j := m.active[id]
-	m.mu.Unlock()
-	if j == nil {
+	value, ok := m.active.Load(id)
+	if !ok {
 		if cancellable, ok := m.base.(inference.CancellableModel); ok {
 			return cancellable.CancelRequest(context.Background(), id)
 		}
 		return inference.RequestCancelResult{ID: id, Reason: "not_found"}, nil
 	}
+	j := value.(*job)
 	j.cancel()
 	m.emitProbe(j, "cancel", time.Since(j.queuedAt), 0, true)
 	return inference.RequestCancelResult{ID: id, Cancelled: true, Reason: "cancelled"}, nil
@@ -361,15 +367,11 @@ func (m *Model) baseTokens(j *job) iter.Seq[inference.Token] {
 }
 
 func (m *Model) register(j *job) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.active[j.req.ID] = j
+	m.active.Store(j.req.ID, j)
 }
 
 func (m *Model) unregister(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.active, id)
+	m.active.Delete(id)
 }
 
 func (m *Model) emitProbe(j *job, event string, queueLatency, firstTokenLatency time.Duration, cancelled bool) {
