@@ -14,19 +14,19 @@ back via `Resolve` / `ResolveBytes` / `ResolveURI`.
 
 Five storage capabilities expressed as separate, narrow interfaces. A
 backend implements only what it can support — `Store.Get` for text,
-`BinaryResolver` for bytes, `URIResolver` for memvid-style URI lookup,
+`BinaryResolver` for bytes, `URIResolver` for State URI lookup,
 `Writer` / `BinaryWriter` / `BinaryStreamWriter` for the encode side.
 
 ## Codecs
 
 ```go
 CodecMemory  = "memory/plaintext"   // in-process test/dev store
-CodecQRVideo = "memvid/qr-video"    // QR-encoded MP4 cold storage
+CodecStateVideo = "state/qr-video"    // QR-encoded MP4 cold storage
 ```
 
 The codec field on a `ChunkRef` tells the wake side which decoder to
-spin up. Memvid is the production codec; in-memory is the test harness;
-filestore (raw file log) is a planned addition.
+spin up. State video is the portable `.mp4` codec; in-memory is the
+test harness; filestore is the raw local file log.
 
 ## Capability matrix
 
@@ -66,9 +66,9 @@ type Chunk struct {
 ```go
 type ChunkRef struct {
     ChunkID        int     // monotonic id within a bundle
-    FrameOffset    uint64  // for memvid: which video frame
+    FrameOffset    uint64  // for State video: which video frame
     HasFrameOffset bool    // distinguishes "frame 0" from "unset"
-    Codec          string  // memvid/qr-video, memory/plaintext, …
+    Codec          string  // state/qr-video, memory/plaintext, …
     Segment        string  // optional sub-segment id within the chunk
 }
 ```
@@ -106,7 +106,7 @@ parent's chunk identity while updating frame offsets.
 
 ## Why not one big Store interface
 
-Backends differ in what they can do. Memvid implements every interface.
+Backends differ in what they can do. A full State video store implements every interface.
 A test fixture might implement only `Store.Get`. The current `inference`
 package code does type-assertion probing rather than forcing every
 backend to stub out methods it can't actually perform — which means a
@@ -117,11 +117,11 @@ small backend can be 50 lines, not 500.
 - `state/memory.go` — `InMemoryStore`. Test fixture + dev workflow.
 - `state/filestore/store.go` — raw file log (planned canonical for
   CoreAgent on-disk bundles).
-- `go-mlx/pkg/memvid/filestore` — memvid-backed implementation.
+- `go-mlx/pkg/memvid/filestore` — deprecated compatibility path.
 
 ## Consumed by
 
 - `state/agent_memory.go` — Wake/Sleep/Fork hold a `Store any` and dial
   through these interfaces
-- `go-mlx/pkg/memvid` — encoder writes via `BinaryStreamWriter`, decoder
-  reads via `URIResolver`
+- `go-mlx/pkg/memvid` — deprecated compatibility import path for older
+  encoder/decoder callers

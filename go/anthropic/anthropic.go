@@ -4,7 +4,10 @@
 // shared inference contracts.
 package anthropic
 
-import "dappco.re/go/inference"
+import (
+	core "dappco.re/go"
+	"dappco.re/go/inference"
+)
 
 // DefaultMessagesPath is the Anthropic-compatible Messages endpoint.
 const DefaultMessagesPath = "/v1/messages"
@@ -99,11 +102,37 @@ func NewTextResponse(id, model, text string, metrics inference.GenerateMetrics) 
 }
 
 func blockText(blocks []ContentBlock) string {
-	out := ""
+	// Fast paths — common cases produce 0 or 1 string without
+	// touching the builder. Per-message hot path; InferenceMessages
+	// calls this once per Anthropic content array on every request.
+	if len(blocks) == 0 {
+		return ""
+	}
+	if len(blocks) == 1 {
+		b := blocks[0]
+		if b.Type == "" || b.Type == "text" {
+			return b.Text
+		}
+		return ""
+	}
+	// Multi-block: pre-sum then Grow the builder once. Previous shape
+	// (out += block.Text) was O(N²) — each += reallocated and copied
+	// the entire prefix.
+	total := 0
 	for _, block := range blocks {
 		if block.Type == "" || block.Type == "text" {
-			out += block.Text
+			total += len(block.Text)
 		}
 	}
-	return out
+	if total == 0 {
+		return ""
+	}
+	builder := core.NewBuilder()
+	builder.Grow(total)
+	for _, block := range blocks {
+		if block.Type == "" || block.Type == "text" {
+			builder.WriteString(block.Text)
+		}
+	}
+	return builder.String()
 }

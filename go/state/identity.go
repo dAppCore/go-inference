@@ -92,8 +92,10 @@ type Bundle struct {
 	GeneratedTokens int               `json:"generated_tokens,omitempty"`
 	KVRefs          []StateRef        `json:"kv_refs,omitempty"`
 	ProbeRefs       []StateRef        `json:"probe_refs,omitempty"`
-	MemvidRefs      []StateRef        `json:"memvid_refs,omitempty"`
-	Labels          map[string]string `json:"labels,omitempty"`
+	StateRefs       []StateRef        `json:"state_refs,omitempty"`
+	// Deprecated: use StateRefs.
+	MemvidRefs []StateRef        `json:"memvid_refs,omitempty"`
+	Labels     map[string]string `json:"labels,omitempty"`
 }
 
 // StateBundle keeps the previous package-level name available for callers

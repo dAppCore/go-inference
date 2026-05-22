@@ -74,7 +74,7 @@ These two endpoints are read-only meta queries, no inference work — making the
 
 ## What's not here
 
-- `/api/pull`, `/api/push`, `/api/copy`, `/api/delete` — model management. CoreAgent's model store has different semantics (memvid bundles vs Ollama tags). Not a wire-parity target.
+- `/api/pull`, `/api/push`, `/api/copy`, `/api/delete` — model management. CoreAgent's model store has different semantics (State bundles vs Ollama tags). Not a wire-parity target.
 - `/api/embeddings` — Ollama has it; CoreAgent serves embeddings via the OpenAI `/v1/embeddings` path instead.
 - HTTP handler. As with `anthropic.go`, the wire DTOs are in place; the handler is roadmap.
 

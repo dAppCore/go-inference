@@ -8,14 +8,14 @@ import (
 	"encoding/binary"
 	stdio "io"
 	"sync"
-	"unsafe"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/state"
 )
 
 const (
-	CodecFile = "memvid/file-log"
+	CodecFile       = "state/file-log"
+	CodecMemvidFile = "memvid/file-log"
 
 	fileMode        = 0o600
 	recordHeaderLen = 24
@@ -184,7 +184,11 @@ func (s *Store) ResolveURI(ctx context.Context, uri string) (state.Chunk, error)
 }
 
 func (s *Store) Put(ctx context.Context, text string, opts state.PutOptions) (state.ChunkRef, error) {
-	return s.PutBytes(ctx, []byte(text), opts)
+	// PutBytes feeds data into a writer that copies it onto disk — the
+	// underlying io.Writer contract forbids retention or mutation, so
+	// AsBytes is safe here. Avoids the copy of `text` into a fresh
+	// []byte just to be discarded after the disk write.
+	return s.PutBytes(ctx, core.AsBytes(text), opts)
 }
 
 func (s *Store) PutBytes(ctx context.Context, data []byte, opts state.PutOptions) (state.ChunkRef, error) {
@@ -221,17 +225,25 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 		Tags:   opts.Tags,
 		Labels: opts.Labels,
 	}
-	metaBytes := []byte(core.JSONMarshalString(meta))
+	// Use JSONMarshal direct — JSONMarshalString → []byte cast did a
+	// roundtrip via two string conversions. JSONMarshal returns the
+	// freshly-allocated []byte we want for the write.
+	metaResult := core.JSONMarshal(meta)
+	if !metaResult.OK {
+		return state.ChunkRef{}, metaResult.Value.(error)
+	}
+	metaBytes := metaResult.Value.([]byte)
 	if uint64(len(metaBytes)) > uint64(^uint32(0)) {
 		return state.ChunkRef{}, core.NewError("state file store metadata is too large")
 	}
 
-	header := encodeRecordHeader(id, payloadSize, len(metaBytes))
+	var headerBuf [recordHeaderLen]byte
+	encodeRecordHeader(headerBuf[:], id, payloadSize, len(metaBytes))
 	offset := s.writeAt
 	if _, err := s.file.Seek(offset, stdio.SeekStart); err != nil {
 		return state.ChunkRef{}, core.E("state.filestore.Put", "seek to append offset", err)
 	}
-	if err := writeAll(s.file, header); err != nil {
+	if err := writeAll(s.file, headerBuf[:]); err != nil {
 		s.rollbackWriteLocked(offset)
 		return state.ChunkRef{}, core.E("state.filestore.Put", "write record header", err)
 	}
@@ -281,29 +293,17 @@ func (s *Store) rollbackWriteLocked(offset int64) {
 }
 
 func (s *Store) resolveLocked(chunkID int) (state.Chunk, error) {
-	entry, ok := s.index[chunkID]
-	if !ok {
-		return state.Chunk{}, &state.ChunkNotFoundError{ID: chunkID}
+	chunk, err := s.resolveBytesLocked(chunkID)
+	if err != nil {
+		return state.Chunk{}, err
 	}
-	payload := make([]byte, entry.payloadSize)
-	if _, err := s.file.ReadAt(payload, entry.payloadAt); err != nil {
-		return state.Chunk{}, core.E("state.filestore.Resolve", "read chunk payload", err)
-	}
-	return state.Chunk{
-		Ref:  entry.ref,
-		Text: bytesToString(payload),
-	}, nil
-}
-
-// bytesToString aliases a freshly-allocated byte buffer as a string without
-// copying. The caller MUST guarantee the buffer is not modified after the
-// alias is taken; in this package the caller allocates the buffer locally
-// for this single conversion, so the invariant is structural.
-func bytesToString(b []byte) string {
-	if len(b) == 0 {
-		return ""
-	}
-	return unsafe.String(unsafe.SliceData(b), len(b))
+	// chunk.Data is freshly allocated by ReadAt and unreachable here
+	// — handing it to AsString skips the payload-sized copy that
+	// string(chunk.Data) would do. Every Resolve text read benefits;
+	// payloads scale to KB+ for compressed state slices.
+	chunk.Text = core.AsString(chunk.Data)
+	chunk.Data = nil
+	return chunk, nil
 }
 
 func (s *Store) ResolveBytes(ctx context.Context, chunkID int) (state.Chunk, error) {
@@ -331,7 +331,7 @@ func (s *Store) ResolveRefBytes(ctx context.Context, ref state.ChunkRef) (state.
 	if !ref.HasFrameOffset {
 		return s.ResolveBytes(ctx, ref.ChunkID)
 	}
-	if ref.Codec != "" && ref.Codec != CodecFile {
+	if ref.Codec != "" && ref.Codec != CodecFile && ref.Codec != CodecMemvidFile {
 		return state.Chunk{}, core.NewError("state file store cannot resolve non-file chunk ref")
 	}
 	if ref.Segment != "" && ref.Segment != s.path {
@@ -365,11 +365,11 @@ func (s *Store) resolveRefBytesLocked(ref state.ChunkRef) (state.Chunk, error) {
 		return state.Chunk{}, core.NewError("state file store frame offset is too large")
 	}
 	offset := int64(ref.FrameOffset)
-	header := make([]byte, recordHeaderLen)
-	if _, err := s.file.ReadAt(header, offset); err != nil {
+	var headerBuf [recordHeaderLen]byte
+	if _, err := s.file.ReadAt(headerBuf[:], offset); err != nil {
 		return state.Chunk{}, core.E("state.filestore.ResolveRefBytes", "read record header", err)
 	}
-	record, err := decodeRecordHeader(header)
+	record, err := decodeRecordHeader(headerBuf[:])
 	if err != nil {
 		return state.Chunk{}, err
 	}
@@ -416,11 +416,9 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		return err
 	}
 
-	// Reuse a stack-allocated header array (recordHeaderLen is fixed) and
-	// grow the meta buffer in place across records to avoid per-record
+	// Grow the meta buffer in place across records to avoid per-record
 	// allocations on large files. The buffer contents are decoded into
 	// stack-only locals before the next iteration overwrites them.
-	var headerArr [recordHeaderLen]byte
 	var metaBuf []byte
 	offset := headerLen
 	for offset < size {
@@ -430,10 +428,11 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		if offset+recordHeaderLen > size {
 			return core.NewError("state file store has truncated record header")
 		}
-		if _, err := s.file.ReadAt(headerArr[:], offset); err != nil {
+		var headerBuf [recordHeaderLen]byte
+		if _, err := s.file.ReadAt(headerBuf[:], offset); err != nil {
 			return core.E("state.filestore.Open", "read record header", err)
 		}
-		record, err := decodeRecordHeader(headerArr[:])
+		record, err := decodeRecordHeader(headerBuf[:])
 		if err != nil {
 			return err
 		}
@@ -535,20 +534,27 @@ type recordHeader struct {
 	metaSize    uint32
 }
 
-func encodeRecordHeader(chunkID int, payloadSize, metaSize int) []byte {
-	header := make([]byte, recordHeaderLen)
-	copy(header[:4], recordMagic[:])
-	binary.LittleEndian.PutUint64(header[4:12], uint64(chunkID))
-	binary.LittleEndian.PutUint64(header[12:20], uint64(payloadSize))
-	binary.LittleEndian.PutUint32(header[20:24], uint32(metaSize))
-	return header
+// encodeRecordHeader writes a record header into the caller-supplied
+// buffer (must be at least recordHeaderLen bytes). The previous shape
+// allocated a fresh []byte on every Put — header writes fire once per
+// chunk written, so the alloc compounded for every state save.
+func encodeRecordHeader(buf []byte, chunkID int, payloadSize, metaSize int) {
+	_ = buf[recordHeaderLen-1] // bounds-check hint
+	copy(buf[:4], recordMagic[:])
+	binary.LittleEndian.PutUint64(buf[4:12], uint64(chunkID))
+	binary.LittleEndian.PutUint64(buf[12:20], uint64(payloadSize))
+	binary.LittleEndian.PutUint32(buf[20:24], uint32(metaSize))
 }
 
 func decodeRecordHeader(header []byte) (recordHeader, error) {
 	if len(header) != recordHeaderLen {
 		return recordHeader{}, core.NewError("state file store record header has invalid length")
 	}
-	if string(header[:4]) != string(recordMagic[:]) {
+	// Byte-equal comparison — `string(header[:4]) != string(recordMagic[:])`
+	// allocates a fresh 4-byte string on every call. Direct byte compare
+	// is alloc-free.
+	if header[0] != recordMagic[0] || header[1] != recordMagic[1] ||
+		header[2] != recordMagic[2] || header[3] != recordMagic[3] {
 		return recordHeader{}, core.NewError("state file store record header is invalid")
 	}
 	return recordHeader{

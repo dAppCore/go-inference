@@ -15,7 +15,7 @@
                     ┌──────────────┴────────────────┐
        you are here →   go-inference  (CONTRACT)    │   ← pure interfaces + wire types
                     │  • TextModel / Backend        │
-                    │  • state/ (memvid lifecycle)  │
+                    │  • state/ lifecycle  │
                     │  • openai/ anthropic/ ollama/ │
                     │  • capability / probe         │
                     └──┬─────────────┬──────────────┘
@@ -43,6 +43,7 @@ docs/
 │   ├── contracts.md         — extension interfaces (Scheduler, Cache, Embed, Rerank, ToolParse, …)
 │   ├── options.md           — GenerateOption + LoadOption + With*
 │   ├── capability.md        — CapabilityReport + AlgorithmProfile + RuntimeMemoryLimiter
+│   ├── local_tuning.md      — MachineDiscoverer + TuningPlanner + model replace
 │   ├── probe.md             — ProbeEvent + ProbeSink
 │   ├── service.md           — Core ServiceRuntime registration (Mantis #1336)
 │   ├── training.md          — TrainableModel + Adapter + LoRAConfig
@@ -55,6 +56,7 @@ docs/
 │   ├── README.md            — package overview + mental model
 │   ├── agent_memory.md      — Wake / Sleep / Fork lifecycle
 │   ├── identity.md          — ModelIdentity / TokenizerIdentity / Adapter / Runtime / Sampler / Bundle
+│   ├── project_seed.md      — project seed URI planning + compatibility checks
 │   ├── store.md             — Store / Resolver / Writer interfaces
 │   ├── memory.md            — InMemoryStore
 │   └── filestore.md         — append-only file-backed store
@@ -77,8 +79,10 @@ docs/
 - **"What's the basic loop?"** → [`inference/inference.md`](inference/inference.md)
 - **"How do I add a backend?"** → [`inference/inference.md`](inference/inference.md) — Backend interface + Register pattern
 - **"How does agent memory work?"** → [`state/agent_memory.md`](state/agent_memory.md) — Wake/Sleep/Fork
+- **"How do project seeds reload safely?"** → [`state/project_seed.md`](state/project_seed.md) — project seed helpers + compatibility
 - **"How does OpenAI compatibility work?"** → [`openai/openai.md`](openai/openai.md)
 - **"What can a backend advertise?"** → [`inference/capability.md`](inference/capability.md)
+- **"How does local setup/autotune work?"** → [`inference/local_tuning.md`](inference/local_tuning.md)
 - **"How do I observe runtime?"** → [`inference/probe.md`](inference/probe.md)
 
 ## Legacy docs

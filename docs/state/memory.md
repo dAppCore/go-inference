@@ -11,7 +11,7 @@ The in-process reference implementation of every read and write
 interface in `state/store.go`. Maps `chunk_id → text|bytes` plus an
 optional `uri → chunk_id` index. Zero file I/O, zero network, zero
 codec — useful for tests, fixtures, and the "spike before wiring
-memvid" path.
+State path.
 
 ## Capabilities implemented
 
@@ -45,14 +45,14 @@ recreate the same store with both the text *and* the refs so chunk-id
 
 Every ref written by this store carries `Codec: state.CodecMemory` and
 `HasFrameOffset: true` with `FrameOffset == ChunkID`. The frame-offset
-mirror makes test fixtures behave the same as memvid bundles for code
+mirror makes test fixtures behave the same as State bundles for code
 that branches on frame addressing — the test path doesn't need a
 separate "I'm in fixture mode" flag.
 
 ## When NOT to use
 
 This store is not safe across goroutines without external locking. A
-production session uses memvid (file-backed, immutable) or filestore
+production session uses State video (file-backed, immutable) or filestore
 (append-only on disk) for durability. Use `InMemoryStore` for:
 
 - Unit tests against `Resolve` / `ResolveURI` / `Put`
@@ -63,6 +63,6 @@ production session uses memvid (file-backed, immutable) or filestore
 
 - `state/state_test.go` — round-trip + URI-resolution tests
 - `go-mlx/agent_memory_test.go` — runtime smoke tests against a known
-  in-memory store before reaching for memvid
+  in-memory store before reaching for State video
 - `go-ai/ai/book_state_demo_test.go` — bookstate fixtures point at
   in-memory chunks via `entry-uri memory://...`
