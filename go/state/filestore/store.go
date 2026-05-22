@@ -416,11 +416,11 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		return err
 	}
 
-	// Reuse a single header buffer (recordHeaderLen is fixed) and grow the
-	// meta buffer in place across records to avoid per-record allocations on
-	// large files. The buffer contents are decoded into stack-only locals
-	// before the next iteration overwrites them.
-	headerBuf := make([]byte, recordHeaderLen)
+	// Reuse a stack-allocated header array (recordHeaderLen is fixed) and
+	// grow the meta buffer in place across records to avoid per-record
+	// allocations on large files. The buffer contents are decoded into
+	// stack-only locals before the next iteration overwrites them.
+	var headerArr [recordHeaderLen]byte
 	var metaBuf []byte
 	offset := headerLen
 	for offset < size {
@@ -430,10 +430,10 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		if offset+recordHeaderLen > size {
 			return core.NewError("state file store has truncated record header")
 		}
-		if _, err := s.file.ReadAt(headerBuf, offset); err != nil {
+		if _, err := s.file.ReadAt(headerArr[:], offset); err != nil {
 			return core.E("state.filestore.Open", "read record header", err)
 		}
-		record, err := decodeRecordHeader(headerBuf)
+		record, err := decodeRecordHeader(headerArr[:])
 		if err != nil {
 			return err
 		}
