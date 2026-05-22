@@ -64,6 +64,16 @@ func (s *StopList) UnmarshalJSON(data []byte) error {
 		*s = values
 		return nil
 	}
+	// Fast path: plain JSON string with no escapes. Stop tokens are
+	// almost always short literals like "END" or "<|eot_id|>" — never
+	// containing backslash escapes — so the encoding/json reflect path
+	// is heavier than necessary. simpleJSONString returns the unquoted
+	// view (zero alloc) when applicable; otherwise we fall through to
+	// the encoding/json decode for the unusual case.
+	if value, ok := simpleJSONString(data); ok {
+		*s = []string{value}
+		return nil
+	}
 	var value string
 	result := core.JSONUnmarshal(data, &value)
 	if !result.OK {
@@ -71,6 +81,36 @@ func (s *StopList) UnmarshalJSON(data []byte) error {
 	}
 	*s = []string{value}
 	return nil
+}
+
+// simpleJSONString returns the unquoted body of data when data is a JSON
+// string with no escape sequences. The body is a copy (Go's bytes-to-
+// string conversion) — but it's a single alloc vs the multiple allocs
+// encoding/json pays for the same value. Returns ok=false when data
+// contains backslashes, is not double-quoted, or is otherwise non-
+// trivial; callers fall back to the full decoder in that case.
+func simpleJSONString(data []byte) (string, bool) {
+	// Trim ASCII whitespace.
+	for len(data) > 0 && (data[0] == ' ' || data[0] == '\t' || data[0] == '\n' || data[0] == '\r') {
+		data = data[1:]
+	}
+	for len(data) > 0 {
+		last := data[len(data)-1]
+		if last != ' ' && last != '\t' && last != '\n' && last != '\r' {
+			break
+		}
+		data = data[:len(data)-1]
+	}
+	if len(data) < 2 || data[0] != '"' || data[len(data)-1] != '"' {
+		return "", false
+	}
+	body := data[1 : len(data)-1]
+	for _, b := range body {
+		if b == '\\' || b < 0x20 {
+			return "", false
+		}
+	}
+	return string(body), true
 }
 
 // isNullJSON reports whether data is the JSON literal `null` (with
