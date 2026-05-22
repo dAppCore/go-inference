@@ -34,6 +34,16 @@ var (
 	// types like this share safely because the surface is read-only
 	// across writeAll → file.Write.
 	emptyMetaBytes = []byte("{}")
+
+	// errStoreClosed is the canonical post-Close error returned by
+	// every Resolve/Put gate. Sharing a single &core.Err{...} skips
+	// the per-call heap alloc that core.NewError("...") otherwise
+	// fires. The error is read-only after init — Err's Message field
+	// is set once here and never mutated; Error() is pure derivation.
+	// Callers compare via errors.Is(err, nil) or string-equality on
+	// .Error(), neither of which depends on pointer identity, so the
+	// sharing is safe across goroutines.
+	errStoreClosed = core.NewError("state file store is closed")
 )
 
 type Store struct {
@@ -175,7 +185,7 @@ func (s *Store) Resolve(ctx context.Context, chunkID int) (state.Chunk, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.file == nil {
-		return state.Chunk{}, core.NewError("state file store is closed")
+		return state.Chunk{}, errStoreClosed
 	}
 	return s.resolveLocked(chunkID)
 }
@@ -190,7 +200,7 @@ func (s *Store) ResolveURI(ctx context.Context, uri string) (state.Chunk, error)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.file == nil {
-		return state.Chunk{}, core.NewError("state file store is closed")
+		return state.Chunk{}, errStoreClosed
 	}
 	id, ok := s.uriIndex[uri]
 	if !ok {
@@ -229,7 +239,7 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.file == nil {
-		return state.ChunkRef{}, core.NewError("state file store is closed")
+		return state.ChunkRef{}, errStoreClosed
 	}
 
 	id := s.nextID
@@ -322,7 +332,7 @@ func (s *Store) ResolveBytes(ctx context.Context, chunkID int) (state.Chunk, err
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.file == nil {
-		return state.Chunk{}, core.NewError("state file store is closed")
+		return state.Chunk{}, errStoreClosed
 	}
 	return s.resolveBytesLocked(chunkID)
 }
@@ -346,7 +356,7 @@ func (s *Store) ResolveRefBytes(ctx context.Context, ref state.ChunkRef) (state.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.file == nil {
-		return state.Chunk{}, core.NewError("state file store is closed")
+		return state.Chunk{}, errStoreClosed
 	}
 	return s.resolveRefBytesLocked(ref)
 }
