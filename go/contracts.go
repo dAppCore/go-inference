@@ -36,6 +36,17 @@ type ScheduledRequest struct {
 }
 
 // ScheduledToken carries a streamed token plus request-local telemetry.
+//
+// Labels is shared across every token of a single request stream —
+// scheduler implementations build the map once at request start
+// (queue_latency_ms is added then; first_token_latency_ms lands on
+// the first token) and reuse the same map reference for the
+// remainder of the stream. Consumers MUST NOT mutate Labels and
+// MUST treat reads as point-in-time snapshots; reads concurrent
+// with the scheduler writing first_token_latency_ms on the first
+// emission are safe because the channel send happens-after the
+// write within the producer goroutine, but cross-stream mutation
+// would race other receivers of the same value.
 type ScheduledToken struct {
 	RequestID string            `json:"request_id,omitempty"`
 	Token     Token             `json:"token,omitempty"`
