@@ -140,25 +140,49 @@ type ChatMessageDelta struct {
 	Content string `json:"content,omitempty"`
 }
 
+// MarshalJSON hand-rolls the OpenAI ChatMessageDelta shape into a
+// single caller-owned buffer. Fires per streamed SSE delta — the
+// reflect path through encoding/json + the intermediate *string
+// envelope structs together cost 4-5 allocs per call (encoder state,
+// grow-doubled output, two pointer-string copies, JSONMarshalString
+// AsString wrap). Hand-roll lands at 1 alloc for the typical
+// content-only case and the role-priming case.
+//
+// Wire-compatible cases (matches the previous behaviour):
+//   - Role == "" && Content == ""    -> {}
+//   - Role set                       -> {"role":"X","content":"Y"}  (priming emits both)
+//   - Content only                   -> {"content":"Y"}
+//
+// Empty case routes to the package-level emptyDeltaBytes — no alloc.
 func (d ChatMessageDelta) MarshalJSON() ([]byte, error) {
 	if d.Role == "" && d.Content == "" {
-		return []byte("{}"), nil
+		return emptyDeltaBytes, nil
 	}
-	payload := struct {
-		Role    *string `json:"role,omitempty"`
-		Content *string `json:"content,omitempty"`
-	}{}
+	// Tight upper bound — both branches emit two ASCII keys plus the
+	// quoted value bodies. Worst-case doubling on escape-heavy content
+	// lets append grow once.
+	size := 2 // braces
 	if d.Role != "" {
-		role := d.Role
-		content := d.Content
-		payload.Role = &role
-		payload.Content = &content
+		size += 9 + len(d.Role)      // "role":"...",
+		size += 11 + len(d.Content)  // "content":"..."
 	} else {
-		content := d.Content
-		payload.Content = &content
+		size += 11 + len(d.Content) // "content":"..."
 	}
-	return []byte(core.JSONMarshalString(payload)), nil
+	buf := make([]byte, 0, size)
+	buf = append(buf, '{')
+	if d.Role != "" {
+		buf = appendStringField(buf, "role", d.Role, false)
+		buf = appendStringField(buf, "content", d.Content, true)
+	} else {
+		buf = appendStringField(buf, "content", d.Content, false)
+	}
+	return append(buf, '}'), nil
 }
+
+// emptyDeltaBytes is the canonical "{}" slice returned for the
+// no-fields case — shared across every priming/closing chunk that
+// would otherwise allocate a fresh two-byte slice per call.
+var emptyDeltaBytes = []byte("{}")
 
 type ErrorResponse struct {
 	Error ErrorObject `json:"error"`
