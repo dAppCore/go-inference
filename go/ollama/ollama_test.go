@@ -129,3 +129,32 @@ func TestOllama_AppendGenerateResponse_WireMatchesEncodingJSON(t *testing.T) {
 	}
 }
 
+// TestOllama_AppendTagsResponse_WireMatchesEncodingJSON pins the
+// /api/tags discovery encoder. Covers the nil-Models / empty-slice
+// difference encoding/json emits (null vs []) plus the per-tag
+// omitempty semantics on Model/ModifiedAt/Size.
+func TestOllama_AppendTagsResponse_WireMatchesEncodingJSON(t *testing.T) {
+	cases := []TagsResponse{
+		{},                       // nil Models -> "models":null
+		{Models: []ModelTag{}},   // empty slice -> "models":[]
+		{Models: []ModelTag{{Name: "qwen3:latest"}}},
+		{Models: []ModelTag{
+			{Name: "qwen3:latest", Model: "qwen3", ModifiedAt: "2026-05-21T10:00:00Z", Size: 4_500_000_000},
+		}},
+		{Models: []ModelTag{
+			{Name: "qwen3:latest", Model: "qwen3", Size: 4_500_000_000},
+			{Name: "gemma3:4b", Model: "gemma3", Size: 2_300_000_000},
+		}},
+	}
+	for _, resp := range cases {
+		got := AppendTagsResponse(nil, resp)
+		want, err := json.Marshal(resp)
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("wire drift:\n got = %s\nwant = %s", got, want)
+		}
+	}
+}
+
