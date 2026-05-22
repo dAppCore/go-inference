@@ -25,6 +25,13 @@ var (
 	fileMagic       = []byte("go-inference-state-file-log-v1\n")
 	legacyFileMagic = []byte("go-mlx-memvid-file-log-v1\n")
 	recordMagic     = [4]byte{'M', 'V', 'F', '1'}
+	// recordMagicU32 is the little-endian uint32 view of recordMagic,
+	// pre-computed once at init. decodeRecordHeader's magic check
+	// previously walked the 4-byte header byte-by-byte; rebuildIndex
+	// runs that check per record at 10k+ scale during cold Open, so
+	// folding the 4-way compare into one Uint32 read trims one ALU
+	// op per record.
+	recordMagicU32 = binary.LittleEndian.Uint32(recordMagic[:])
 
 	// emptyMetaBytes is the canonical empty-record-meta JSON blob.
 	// PutBytesStream shortcuts to this slice when no meta field is
@@ -615,11 +622,15 @@ func decodeRecordHeader(header []byte) (recordHeader, error) {
 	if len(header) != recordHeaderLen {
 		return recordHeader{}, core.NewError("state file store record header has invalid length")
 	}
-	// Byte-equal comparison — `string(header[:4]) != string(recordMagic[:])`
-	// allocates a fresh 4-byte string on every call. Direct byte compare
-	// is alloc-free.
-	if header[0] != recordMagic[0] || header[1] != recordMagic[1] ||
-		header[2] != recordMagic[2] || header[3] != recordMagic[3] {
+	// Magic-prefix check via a single Uint32 read against the
+	// pre-computed recordMagicU32 — one ALU op per record at the
+	// rebuildIndex 10k-scale cold Open, where the previous 4-byte
+	// branching compare emitted 4 cmpb + 3 brand merges. Folding
+	// the 32 bits into a single equality test also lets the
+	// compiler hoist the magic constant into an immediate operand.
+	// `string(header[:4]) != string(recordMagic[:])` would allocate
+	// a fresh 4-byte string on every call.
+	if binary.LittleEndian.Uint32(header[:4]) != recordMagicU32 {
 		return recordHeader{}, core.NewError("state file store record header is invalid")
 	}
 	return recordHeader{
