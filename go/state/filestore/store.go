@@ -72,6 +72,21 @@ type Store struct {
 	// embedded writer's remaining counter is single-owner during
 	// any one call.
 	payloadWriter limitedPayloadWriter
+	// headerMetaBuf is the per-Store scratch buffer that
+	// encodeRecordHeaderMeta builds the on-disk header + meta
+	// JSON into. The previous shape allocated a fresh buffer on
+	// every PutBytesStream (~49 B for the Kind-only common shape,
+	// up to a few hundred B for label-heavy meta). Reusing the
+	// buffer under mu skips the per-Put alloc; the slice header
+	// is single-owner during any one Put because the mutex above
+	// already serialises the entire write path.
+	//
+	// Lifetime: the buffer is read by writeAll(file, ...) before
+	// PutBytesStream returns, so its content is consumed before
+	// the next Put can reuse the storage. Length is reset to zero
+	// on entry to encodeRecordHeaderMeta so each Put builds
+	// fresh contents over the retained capacity.
+	headerMetaBuf []byte
 }
 
 type fileIndexEntry struct {
@@ -261,13 +276,13 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 		Tags:   opts.Tags,
 		Labels: opts.Labels,
 	}
-	// encodeRecordHeaderMeta packs the 24-byte record header and
-	// the JSON-encoded recordMeta into a single allocation, so the
-	// previously stack-then-heap-escaped headerBuf and the JSON
-	// marshal output collapse to one buffer + one writeAll. The
-	// header's metaSize uint32 is patched after the meta is
-	// appended — single-pass build.
-	headerMeta := encodeRecordHeaderMeta(&meta, id, payloadSize)
+	// buildHeaderMeta packs the 24-byte record header and
+	// the JSON-encoded recordMeta into the per-Store scratch
+	// buffer (s.headerMetaBuf). The previous shape allocated a
+	// fresh buffer per Put; reusing under mu skips that. The
+	// metaSize uint32 in the header is patched after the meta
+	// is appended — single-pass build.
+	headerMeta := s.buildHeaderMeta(&meta, id, payloadSize)
 	metaSize := len(headerMeta) - recordHeaderLen
 	if uint64(metaSize) > uint64(^uint32(0)) {
 		return state.ChunkRef{}, errMetadataTooLarge
@@ -638,9 +653,9 @@ func recordMetaIsEmpty(meta *recordMeta) bool {
 // by the round-trip test surface and any future caller that does
 // not also need the record header in the same buffer.
 //
-// PutBytesStream itself routes through encodeRecordHeaderMeta which
-// folds the meta append into the header buffer for a single alloc
-// covering both halves of the on-disk record prefix.
+// PutBytesStream itself routes through (*Store).buildHeaderMeta which
+// folds the meta append into the per-Store scratch buffer, dropping
+// the alloc entirely on the warm path.
 //
 //	buf := encodeRecordMeta(&meta)
 //	if uint64(len(buf)) > uint64(^uint32(0)) { /* too large */ }
@@ -652,18 +667,28 @@ func encodeRecordMeta(meta *recordMeta) []byte {
 	return appendRecordMeta(buf, meta)
 }
 
-// encodeRecordHeaderMeta builds a single buffer containing the
-// record header (24 bytes) followed by the JSON-encoded recordMeta.
-// Folding both into one allocation eliminates the heap escape that
-// the previous [recordHeaderLen]byte stack array suffered when its
-// slice was handed to the *core.OSFile.Write interface, and
-// collapses two writeAll syscalls into one. The metaSize uint32
-// in the header is patched after the meta is appended — single-
-// pass build, no double walk over the meta fields.
+// buildHeaderMeta builds the on-disk record header + JSON-encoded
+// recordMeta into the per-Store scratch buffer (s.headerMetaBuf),
+// returning a slice into that buffer. The previous shape allocated
+// a fresh buffer per Put — measurable on the state-checkpoint
+// fast path because Put fires per Save during a generation step
+// and per KV-snapshot during a session.
+//
+// PutBytesStream holds s.mu for the full record write, so the
+// scratch buffer is single-owner during any one Put; the next Put
+// reuses the underlying storage after the previous call's
+// writeAll consumed the bytes. encodeRecordHeader (called below)
+// is a pure-write helper — no further alloc beyond the slice
+// header reuse.
+//
+// The metaSize uint32 in the header is patched after the meta is
+// appended — single-pass build, no double walk over the meta
+// fields. The slice retains its growth across Puts so the typical
+// meta size + the cap hint converge after a handful of records.
 //
 // encoding/json.Marshal on recordMeta allocates an encoder state
 // machine + grow-doubled output buffer + per-tag key/value copies
-// on every Put. The hand-roll lands at a single buffer allocation
+// on every Put. The hand-roll lands at zero buffer allocations
 // regardless of tag count.
 //
 // The meta portion is valid JSON, parseable by encoding/json
@@ -675,15 +700,19 @@ func encodeRecordMeta(meta *recordMeta) []byte {
 // order — JSON object key order is not semantically meaningful and
 // no read site depends on it.
 //
-//	buf := encodeRecordHeaderMeta(&meta, chunkID, payloadSize)
-//	writeAll(file, buf)
-func encodeRecordHeaderMeta(meta *recordMeta, chunkID, payloadSize int) []byte {
-	cap := recordHeaderLen + recordMetaCapHint(meta)
-	buf := make([]byte, recordHeaderLen, cap)
-	buf = appendRecordMeta(buf, meta)
-	metaSize := len(buf) - recordHeaderLen
-	encodeRecordHeader(buf[:recordHeaderLen], chunkID, payloadSize, metaSize)
-	return buf
+//	buf := s.buildHeaderMeta(&meta, chunkID, payloadSize)
+//	writeAll(s.file, buf)
+func (s *Store) buildHeaderMeta(meta *recordMeta, chunkID, payloadSize int) []byte {
+	need := recordHeaderLen + recordMetaCapHint(meta)
+	if cap(s.headerMetaBuf) < need {
+		s.headerMetaBuf = make([]byte, recordHeaderLen, need)
+	} else {
+		s.headerMetaBuf = s.headerMetaBuf[:recordHeaderLen]
+	}
+	s.headerMetaBuf = appendRecordMeta(s.headerMetaBuf, meta)
+	metaSize := len(s.headerMetaBuf) - recordHeaderLen
+	encodeRecordHeader(s.headerMetaBuf[:recordHeaderLen], chunkID, payloadSize, metaSize)
+	return s.headerMetaBuf
 }
 
 // recordMetaCapHint returns a tight upper bound on the JSON byte
