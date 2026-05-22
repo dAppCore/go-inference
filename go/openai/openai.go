@@ -56,6 +56,14 @@ func (s *StopList) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	if data[0] == '[' {
+		// Fast path: array of JSON strings with no escapes — sister
+		// optimisation to simpleJSONString. Stop sequences are
+		// invariably short string literals without backslash escapes
+		// so the encoding/json reflect walk is heavier than necessary.
+		if values, ok := simpleJSONStringArray(data); ok {
+			*s = values
+			return nil
+		}
 		var values []string
 		result := core.JSONUnmarshal(data, &values)
 		if !result.OK {
@@ -81,6 +89,80 @@ func (s *StopList) UnmarshalJSON(data []byte) error {
 	}
 	*s = []string{value}
 	return nil
+}
+
+// simpleJSONStringArray parses a JSON array of escape-free string
+// literals. Returns ok=false when the body contains anything beyond
+// double-quoted ASCII strings + commas + whitespace; callers fall back
+// to encoding/json for the complex case.
+func simpleJSONStringArray(data []byte) ([]string, bool) {
+	// Trim ASCII whitespace and the surrounding brackets.
+	for len(data) > 0 && (data[0] == ' ' || data[0] == '\t' || data[0] == '\n' || data[0] == '\r') {
+		data = data[1:]
+	}
+	for len(data) > 0 {
+		last := data[len(data)-1]
+		if last != ' ' && last != '\t' && last != '\n' && last != '\r' {
+			break
+		}
+		data = data[:len(data)-1]
+	}
+	if len(data) < 2 || data[0] != '[' || data[len(data)-1] != ']' {
+		return nil, false
+	}
+	body := data[1 : len(data)-1]
+	// Empty array.
+	allWS := true
+	for _, b := range body {
+		if b != ' ' && b != '\t' && b != '\n' && b != '\r' {
+			allWS = false
+			break
+		}
+	}
+	if allWS {
+		return []string{}, true
+	}
+	// Walk: <string>[, <string>]* — each string is "<ASCII no escapes>".
+	// Allocate the output slice on first entry; arrays of stop tokens
+	// are tiny (typical bench shapes have 1-16 entries).
+	out := make([]string, 0, 4)
+	i := 0
+	for i < len(body) {
+		for i < len(body) && (body[i] == ' ' || body[i] == '\t' || body[i] == '\n' || body[i] == '\r') {
+			i++
+		}
+		if i >= len(body) || body[i] != '"' {
+			return nil, false
+		}
+		i++ // skip opening quote
+		start := i
+		for i < len(body) {
+			c := body[i]
+			if c == '"' {
+				break
+			}
+			if c == '\\' || c < 0x20 {
+				return nil, false
+			}
+			i++
+		}
+		if i >= len(body) {
+			return nil, false
+		}
+		out = append(out, string(body[start:i]))
+		i++ // skip closing quote
+		for i < len(body) && (body[i] == ' ' || body[i] == '\t' || body[i] == '\n' || body[i] == '\r') {
+			i++
+		}
+		if i >= len(body) {
+			break
+		}
+		if body[i] != ',' {
+			return nil, false
+		}
+		i++ // skip comma
+	}
+	return out, true
 }
 
 // simpleJSONString returns the unquoted body of data when data is a JSON
