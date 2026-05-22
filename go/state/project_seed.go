@@ -273,14 +273,16 @@ func cleanURI(value string) string {
 }
 
 func joinURI(base string, parts ...string) string {
-	// Walk parts once, sum lengths, then build into a Grow'd builder.
-	// Previous shape did out += "/" + part per part — O(N²) reallocs.
-	// Per-call cost matters: WakeRequest construction calls joinURI
-	// for entry/bundle/index URIs, each potentially with multiple
-	// parts.
+	// Walk parts twice — first to sum the exact final length, second to
+	// append into a pre-sized []byte buffer. cleanURI is alloc-free
+	// (string substring views), so the second walk is purely arithmetic
+	// + byte copies. The previous shape used core.NewBuilder() (heap
+	// pointer alloc) plus the Builder's internal buffer grow (second
+	// heap alloc); collapsing to a direct []byte buffer + core.AsString
+	// drops one heap alloc per call. The cleaned []string slot from the
+	// previous shape was stack-resident, so eliding it costs nothing.
 	cleanBase := cleanURI(base)
 	total := len(cleanBase)
-	cleaned := make([]string, 0, len(parts))
 	for _, part := range parts {
 		p := cleanURI(part)
 		if p == "" {
@@ -290,23 +292,25 @@ func joinURI(base string, parts ...string) string {
 			total++ // separator
 		}
 		total += len(p)
-		cleaned = append(cleaned, p)
 	}
 	if total == 0 {
 		return ""
 	}
-	builder := core.NewBuilder()
-	builder.Grow(total)
+	buf := make([]byte, 0, total)
 	if cleanBase != "" {
-		builder.WriteString(cleanBase)
+		buf = append(buf, cleanBase...)
 	}
-	for _, p := range cleaned {
-		if builder.Len() > 0 {
-			builder.WriteByte('/')
+	for _, part := range parts {
+		p := cleanURI(part)
+		if p == "" {
+			continue
 		}
-		builder.WriteString(p)
+		if len(buf) > 0 {
+			buf = append(buf, '/')
+		}
+		buf = append(buf, p...)
 	}
-	return builder.String()
+	return core.AsString(buf)
 }
 
 func setProjectLabel(labels map[string]string, projectID string) {
