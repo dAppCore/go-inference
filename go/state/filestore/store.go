@@ -44,6 +44,14 @@ type Store struct {
 	uriIndex map[string]int
 	nextID   int
 	writeAt  int64
+	// payloadWriter is the per-Store streaming bound writer reused
+	// across PutBytesStream calls. Holding it on the Store skips
+	// the &limitedPayloadWriter{...} alloc every Put paid for the
+	// closure dispatch (the writer escaped to heap once per call).
+	// The mutex above already serialises PutBytesStream so the
+	// embedded writer's remaining counter is single-owner during
+	// any one call.
+	payloadWriter limitedPayloadWriter
 }
 
 type fileIndexEntry struct {
@@ -252,15 +260,13 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 		s.rollbackWriteLocked(offset)
 		return state.ChunkRef{}, core.E("state.filestore.Put", "write record header and metadata", err)
 	}
-	payloadWriter := &limitedPayloadWriter{
-		file:      s.file,
-		remaining: payloadSize,
-	}
-	if err := write(payloadWriter); err != nil {
+	s.payloadWriter.file = s.file
+	s.payloadWriter.remaining = payloadSize
+	if err := write(&s.payloadWriter); err != nil {
 		s.rollbackWriteLocked(offset)
 		return state.ChunkRef{}, core.E("state.filestore.Put", "write record payload", err)
 	}
-	if payloadWriter.remaining != 0 {
+	if s.payloadWriter.remaining != 0 {
 		s.rollbackWriteLocked(offset)
 		return state.ChunkRef{}, core.NewError("state file store streamed payload is shorter than declared")
 	}
@@ -661,37 +667,38 @@ func encodeRecordHeaderMeta(meta *recordMeta, chunkID, payloadSize int) []byte {
 }
 
 // recordMetaCapHint returns a tight upper bound on the JSON byte
-// length of meta. Each string contributes its length plus framing
-// overhead; the typical ASCII shape (URIs, kinds, single-byte tag
-// values) clears the heuristic in one allocation. Pathological
-// escape-heavy inputs let append grow once.
+// length of meta. Each non-empty field contributes its raw byte
+// length plus framing overhead (the surrounding "key":"value",
+// pair, with a small slack so the heuristic clears the typical
+// ASCII shape in one allocation). Pathological escape-heavy inputs
+// (control chars, embedded quotes) let append grow once.
 func recordMetaCapHint(meta *recordMeta) int {
 	if recordMetaIsEmpty(meta) {
 		return 2
 	}
-	size := 2 // braces
+	size := 2 // outer braces
 	if meta.URI != "" {
-		size += 8 + len(meta.URI) // "uri":"...",
+		size += 10 + len(meta.URI) // `"uri":"<v>",` = 9 bytes + value, +1 slack
 	}
 	if meta.Title != "" {
-		size += 10 + len(meta.Title)
+		size += 12 + len(meta.Title) // `"title":"<v>",`
 	}
 	if meta.Kind != "" {
-		size += 9 + len(meta.Kind)
+		size += 11 + len(meta.Kind) // `"kind":"<v>",`
 	}
 	if meta.Track != "" {
-		size += 10 + len(meta.Track)
+		size += 12 + len(meta.Track) // `"track":"<v>",`
 	}
 	if len(meta.Tags) > 0 {
-		size += 10 // "tags":{},
+		size += 12 // `"tags":{...},`
 		for k, v := range meta.Tags {
-			size += 5 + len(k) + len(v) // "k":"v",
+			size += 6 + len(k) + len(v) // `"k":"v",`
 		}
 	}
 	if len(meta.Labels) > 0 {
-		size += 12 // "labels":[],
+		size += 14 // `"labels":[...],`
 		for _, l := range meta.Labels {
-			size += 3 + len(l) // "l",
+			size += 4 + len(l) // `"l",`
 		}
 	}
 	return size
