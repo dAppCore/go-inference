@@ -30,6 +30,8 @@ type WakeRequest struct {
 	EntryURI               string            `json:"entry_uri,omitempty"`
 	Model                  ModelIdentity     `json:"model,omitempty"`
 	Tokenizer              TokenizerIdentity `json:"tokenizer,omitempty"`
+	Adapter                AdapterIdentity   `json:"adapter,omitempty"`
+	Runtime                RuntimeIdentity   `json:"runtime,omitempty"`
 	SkipCompatibilityCheck bool              `json:"skip_compatibility_check,omitempty"`
 	Labels                 map[string]string `json:"labels,omitempty"`
 }
@@ -59,6 +61,8 @@ type SleepRequest struct {
 	Title             string            `json:"title,omitempty"`
 	Model             ModelIdentity     `json:"model,omitempty"`
 	Tokenizer         TokenizerIdentity `json:"tokenizer,omitempty"`
+	Adapter           AdapterIdentity   `json:"adapter,omitempty"`
+	Runtime           RuntimeIdentity   `json:"runtime,omitempty"`
 	ReuseParentPrefix bool              `json:"reuse_parent_prefix,omitempty"`
 	BlockSize         int               `json:"block_size,omitempty"`
 	Encoding          string            `json:"encoding,omitempty"`

@@ -15,6 +15,25 @@ type RuntimeIdentity = state.RuntimeIdentity
 type SamplerConfig = state.SamplerConfig
 type StateRef = state.StateRef
 type StateBundle = state.Bundle
+type ProjectSeedMode = state.ProjectSeedMode
+type ProjectSeedOptions = state.ProjectSeedOptions
+type ProjectSeed = state.ProjectSeed
+type ProjectSeedWakeOptions = state.ProjectSeedWakeOptions
+type ProjectSeedContinuationOptions = state.ProjectSeedContinuationOptions
+type ProjectSeedContinuationPlan = state.ProjectSeedContinuationPlan
+type WakeCompatibilityReport = state.WakeCompatibilityReport
+
+const (
+	ProjectSeedStateCheckpoint = state.ProjectSeedStateCheckpoint
+	ProjectSeedReuseCurrent    = state.ProjectSeedReuseCurrent
+	ProjectSeedSummaryWindow   = state.ProjectSeedSummaryWindow
+	ProjectSeedHybrid          = state.ProjectSeedHybrid
+)
+
+var (
+	NewProjectSeed         = state.NewProjectSeed
+	CheckWakeCompatibility = state.CheckWakeCompatibility
+)
 
 // SamplerConfigFromGenerateConfig converts generation options to portable
 // sampler metadata while preserving slice ownership.

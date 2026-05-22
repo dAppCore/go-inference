@@ -3,7 +3,6 @@ package inference
 import (
 	"cmp"
 	"iter"
-	"reflect"
 	"slices"
 
 	core "dappco.re/go"
@@ -41,15 +40,22 @@ func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 }
 
 func discoverDir(fsys *core.Fs, dir string, yield func(DiscoveredModel) bool) bool {
-	if m, ok := probeModelDir(fsys, dir); ok {
+	// Single readDir per directory — the entries feed both
+	// probeModelDir's safetensors count AND the recursion. Previously
+	// each directory was listed THREE times (probe → countSafetensors
+	// → discoverDir's own readDir), with each listing also paying
+	// reflect-based conversion. Now once, no reflect.
+	entries, ok := readDir(fsys, dir)
+	if !ok {
+		// We can still try to probe the directory even if listing
+		// fails — config.json read may succeed independently.
+		entries = nil
+	}
+
+	if m, ok := probeModelDir(fsys, dir, entries); ok {
 		if !yield(m) {
 			return false
 		}
-	}
-
-	entries, ok := readDir(fsys, dir)
-	if !ok {
-		return true
 	}
 
 	for _, entry := range entries {
@@ -64,15 +70,35 @@ func discoverDir(fsys *core.Fs, dir string, yield func(DiscoveredModel) bool) bo
 	return true
 }
 
-// Accepts directories that contain config.json and at least one .safetensors file.
-func probeModelDir(fsys *core.Fs, dir string) (DiscoveredModel, bool) {
-	config := fsys.Read(joinPath(dir, "config.json"))
-	if !config.OK {
+// Accepts directories that contain config.json and at least one
+// .safetensors file. `entries` is the pre-read directory listing —
+// avoids the second readDir that countSafetensors used to do.
+//
+// Order matters: single pass over entries first to count safetensors
+// AND verify config.json exists. Only then read config.json. This
+// short-circuits the wasted disk Read for junk directories that have
+// neither — see Discover_NoModels_TenJunkDirs which used to pay one
+// fsys.Read per dir before this gate.
+func probeModelDir(fsys *core.Fs, dir string, entries []core.FsDirEntry) (DiscoveredModel, bool) {
+	numFiles := 0
+	hasConfig := false
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name == "config.json" {
+			hasConfig = true
+		} else if core.HasSuffix(name, ".safetensors") {
+			numFiles++
+		}
+	}
+	if numFiles == 0 || !hasConfig {
 		return DiscoveredModel{}, false
 	}
 
-	numFiles, ok := countSafetensors(fsys, dir)
-	if !ok || numFiles == 0 {
+	config := fsys.Read(joinPath(dir, "config.json"))
+	if !config.OK {
 		return DiscoveredModel{}, false
 	}
 
@@ -107,59 +133,24 @@ func probeModelDir(fsys *core.Fs, dir string) (DiscoveredModel, bool) {
 	return model, true
 }
 
-type dirEntry interface {
-	Name() string
-	IsDir() bool
-}
-
-func readDir(fsys *core.Fs, dir string) ([]dirEntry, bool) {
+// readDir returns the directory's entries sorted by name. The result
+// is the raw []core.FsDirEntry from core.Fs.List — no reflect, no
+// adapter allocation.
+func readDir(fsys *core.Fs, dir string) ([]core.FsDirEntry, bool) {
 	result := fsys.List(dir)
 	if !result.OK {
 		return nil, false
 	}
 
-	entries, ok := dirEntries(result.Value)
+	entries, ok := result.Value.([]core.FsDirEntry)
 	if !ok {
 		return nil, false
 	}
 
-	slices.SortFunc(entries, func(a, b dirEntry) int {
+	slices.SortFunc(entries, func(a, b core.FsDirEntry) int {
 		return cmp.Compare(a.Name(), b.Name())
 	})
 	return entries, true
-}
-
-func dirEntries(value any) ([]dirEntry, bool) {
-	// core.Fs.List returns standard directory entries; adapt them locally.
-	slice := reflect.ValueOf(value)
-	if !slice.IsValid() || slice.Kind() != reflect.Slice {
-		return nil, false
-	}
-
-	entries := make([]dirEntry, 0, slice.Len())
-	for i := range slice.Len() {
-		entry, ok := slice.Index(i).Interface().(dirEntry)
-		if !ok {
-			return nil, false
-		}
-		entries = append(entries, entry)
-	}
-	return entries, true
-}
-
-func countSafetensors(fsys *core.Fs, dir string) (int, bool) {
-	entries, ok := readDir(fsys, dir)
-	if !ok {
-		return 0, false
-	}
-
-	count := 0
-	for _, entry := range entries {
-		if !entry.IsDir() && core.HasSuffix(entry.Name(), ".safetensors") {
-			count++
-		}
-	}
-	return count, true
 }
 
 func absolutePath(dir string) string {

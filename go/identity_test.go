@@ -129,6 +129,23 @@ func TestIdentity_StateBundle_Bad_EmptyAllowed(t *testing.T) {
 	checkEmpty(t, bundle.KVRefs)
 }
 
+func TestIdentity_ProjectSeedAliases_Good(t *testing.T) {
+	seed := NewProjectSeed(ProjectSeedOptions{BaseURI: "state://lthn/projects", ProjectID: "core/go-mlx"})
+	wake := seed.WakeRequest(ProjectSeedWakeOptions{
+		Model:     ModelIdentity{Hash: "model-a"},
+		Tokenizer: TokenizerIdentity{Hash: "tok-a"},
+	})
+
+	report := CheckWakeCompatibility(StateBundle{
+		Model:        ModelIdentity{Hash: "model-a"},
+		Tokenizer:    TokenizerIdentity{Hash: "tok-a"},
+		PromptTokens: 16,
+	}, wake)
+
+	checkEqual(t, "state://lthn/projects/core/go-mlx/seed", wake.EntryURI)
+	checkTrue(t, report.Compatible)
+}
+
 func TestIdentity_AdapterIdentity_Ugly_MetadataOnly(t *testing.T) {
 	adapter := AdapterIdentity{
 		Hash:          "sha256:abc",

@@ -45,34 +45,25 @@ func Family(hint Hint) string {
 	}
 }
 
+// replaceAll delegates to core.Replace (strings.ReplaceAll). The
+// stdlib implementation pre-counts occurrences and allocates the
+// result buffer exactly once — same shape as the hand-rolled loop but
+// with byte-level optimisations the builder loop didn't reach. Old
+// shape was already 1-2 allocs; stdlib is the same with less code to
+// audit.
 func replaceAll(text, old, next string) string {
 	if old == "" {
 		return text
 	}
-	out := core.NewBuilder()
-	for {
-		idx := indexString(text, old)
-		if idx < 0 {
-			out.WriteString(text)
-			return out.String()
-		}
-		out.WriteString(text[:idx])
-		out.WriteString(next)
-		text = text[idx+len(old):]
-	}
+	return core.Replace(text, old, next)
 }
 
+// indexString delegates to stdlib via core.Index. The previous
+// hand-rolled implementation was a naive O(N×M) byte-by-byte scan;
+// stdlib's strings.Index uses Rabin-Karp / SIMD-accelerated byte
+// search and runs O(N+M) for the multi-byte markers (`<think>`,
+// `<|channel>analysis\n`, etc.) that the thinking/reasoning parsers
+// scan against on every per-token Process call.
 func indexString(s, substr string) int {
-	if substr == "" {
-		return 0
-	}
-	if len(substr) > len(s) {
-		return -1
-	}
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
+	return core.Index(s, substr)
 }

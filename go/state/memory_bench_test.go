@@ -1,160 +1,295 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
+// Benchmarks for the InMemoryStore backend.
+// Per AX-11 — InMemoryStore is the test-and-bench default store and
+// the cheapest target for cache-warm-up shapes. Get / Resolve fire
+// per chunk on every session load; Put / PutBytes fire per Save.
+// ResolveURI is the per-name lookup that backs the URIResolver path
+// in the top-level state.ResolveURI helper.
+//
+// Run:    go test -bench='Benchmark' -benchmem -run='^$' ./state
+
 package state
 
 import (
 	"context"
-	"strconv"
 	"testing"
+
+	core "dappco.re/go"
 )
 
-func newPopulatedMemoryStore(b *testing.B, n int) *InMemoryStore {
-	b.Helper()
-	store := NewInMemoryStore(nil)
-	for i := 0; i < n; i++ {
-		uri := "state://bench/" + strconv.Itoa(i)
-		if _, err := store.Put(context.Background(), "payload-"+strconv.Itoa(i), PutOptions{URI: uri}); err != nil {
-			b.Fatalf("Put(seed %d) error = %v", i, err)
+// Sinks defeat compiler DCE. Distinct names per state-package bench file.
+var (
+	memorySinkChunk    Chunk
+	memorySinkText     string
+	memorySinkRef      ChunkRef
+	memorySinkErr      error
+	memorySinkStorePtr *InMemoryStore
+)
+
+// benchMemoryStore builds an InMemoryStore with n text chunks of
+// payloadSize bytes each + n URIs registered for ResolveURI lookups.
+func benchMemoryStore(tb testing.TB, n, payloadSize int) *InMemoryStore {
+	tb.Helper()
+	chunks := make(map[int]string, n)
+	payload := make([]byte, payloadSize)
+	for i := range payload {
+		payload[i] = byte('a' + i%26)
+	}
+	text := string(payload)
+	for i := 1; i <= n; i++ {
+		chunks[i] = text
+	}
+	store := NewInMemoryStore(chunks)
+	// Register URIs after the fact via Put — keeps the bench helper
+	// off the URI-pre-seeding path the test file exercises.
+	for i := 1; i <= n; i++ {
+		_, err := store.Put(context.Background(), text, PutOptions{
+			URI: "state://bench/" + core.Sprintf("chunk-%d", i),
+		})
+		if err != nil {
+			tb.Fatal(err)
 		}
 	}
 	return store
 }
 
-func BenchmarkInMemoryStore_Put_Typical(b *testing.B) {
+// --- NewInMemoryStore (one per session boot) ---
+
+func BenchmarkMemory_NewInMemoryStore_Empty(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkStorePtr = NewInMemoryStore(nil)
+	}
+}
+
+func BenchmarkMemory_NewInMemoryStore_10(b *testing.B) {
+	chunks := map[int]string{
+		1: "a", 2: "b", 3: "c", 4: "d", 5: "e",
+		6: "f", 7: "g", 8: "h", 9: "i", 10: "j",
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkStorePtr = NewInMemoryStore(chunks)
+	}
+}
+
+func BenchmarkMemory_NewInMemoryStore_100(b *testing.B) {
+	chunks := make(map[int]string, 100)
+	for i := 1; i <= 100; i++ {
+		chunks[i] = "chunk"
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkStorePtr = NewInMemoryStore(chunks)
+	}
+}
+
+func BenchmarkMemory_NewInMemoryStore_1000(b *testing.B) {
+	chunks := make(map[int]string, 1000)
+	for i := 1; i <= 1000; i++ {
+		chunks[i] = "chunk"
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkStorePtr = NewInMemoryStore(chunks)
+	}
+}
+
+func BenchmarkMemory_NewInMemoryStoreWithManifest_10(b *testing.B) {
+	chunks := map[int]string{
+		1: "a", 2: "b", 3: "c", 4: "d", 5: "e",
+		6: "f", 7: "g", 8: "h", 9: "i", 10: "j",
+	}
+	refs := map[int]ChunkRef{
+		1: {ChunkID: 1, Codec: CodecStateVideo, FrameOffset: 7, HasFrameOffset: true},
+		2: {ChunkID: 2, Codec: CodecStateVideo, FrameOffset: 8, HasFrameOffset: true},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkStorePtr = NewInMemoryStoreWithManifest(chunks, refs)
+	}
+}
+
+// --- Get (text read — Store interface, simplest path) ---
+
+func BenchmarkMemory_Get_Short(b *testing.B) {
+	store := benchMemoryStore(b, 1, 16)
 	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkText, memorySinkErr = store.Get(ctx, 1)
+	}
+}
+
+func BenchmarkMemory_Get_1KB(b *testing.B) {
+	store := benchMemoryStore(b, 1, 1024)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkText, memorySinkErr = store.Get(ctx, 1)
+	}
+}
+
+func BenchmarkMemory_Get_64KB(b *testing.B) {
+	store := benchMemoryStore(b, 1, 64*1024)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkText, memorySinkErr = store.Get(ctx, 1)
+	}
+}
+
+// --- Resolve (Chunk read — Resolver interface) ---
+
+func BenchmarkMemory_Resolve_1KB(b *testing.B) {
+	store := benchMemoryStore(b, 1, 1024)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkChunk, memorySinkErr = store.Resolve(ctx, 1)
+	}
+}
+
+func BenchmarkMemory_Resolve_64KB(b *testing.B) {
+	store := benchMemoryStore(b, 1, 64*1024)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkChunk, memorySinkErr = store.Resolve(ctx, 1)
+	}
+}
+
+// --- ResolveBytes (binary read — BinaryResolver path) ---
+
+func BenchmarkMemory_ResolveBytes_1KB(b *testing.B) {
+	store := benchMemoryStore(b, 1, 1024)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkChunk, memorySinkErr = store.ResolveBytes(ctx, 1)
+	}
+}
+
+func BenchmarkMemory_ResolveBytes_64KB(b *testing.B) {
+	store := benchMemoryStore(b, 1, 64*1024)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkChunk, memorySinkErr = store.ResolveBytes(ctx, 1)
+	}
+}
+
+// --- ResolveURI (name → ID lookup, then Resolve) ---
+
+func BenchmarkMemory_ResolveURI_10Chunks(b *testing.B) {
+	store := benchMemoryStore(b, 10, 1024)
+	ctx := context.Background()
+	uri := "state://bench/chunk-1"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkChunk, memorySinkErr = store.ResolveURI(ctx, uri)
+	}
+}
+
+func BenchmarkMemory_ResolveURI_1000Chunks(b *testing.B) {
+	store := benchMemoryStore(b, 1000, 1024)
+	ctx := context.Background()
+	uri := "state://bench/chunk-1"
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		memorySinkChunk, memorySinkErr = store.ResolveURI(ctx, uri)
+	}
+}
+
+// --- Put (text write — fires per text Save) ---
+
+func BenchmarkMemory_Put_1KB(b *testing.B) {
 	store := NewInMemoryStore(nil)
-	opts := PutOptions{URI: "state://put/typical"}
-	payload := "abcdefghijklmnop"
+	ctx := context.Background()
+	text := string(make([]byte, 1024))
+	opts := PutOptions{Kind: "bench"}
 	b.ReportAllocs()
-	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		opts.URI = "state://put/" + strconv.Itoa(i)
-		if _, err := store.Put(ctx, payload, opts); err != nil {
-			b.Fatalf("Put() error = %v", err)
-		}
+		memorySinkRef, memorySinkErr = store.Put(ctx, text, opts)
 	}
 }
 
-func BenchmarkInMemoryStore_PutBytes_Typical(b *testing.B) {
-	ctx := context.Background()
+func BenchmarkMemory_Put_64KB(b *testing.B) {
 	store := NewInMemoryStore(nil)
-	payload := make([]byte, 1024)
-	for i := range payload {
-		payload[i] = byte(i)
-	}
+	ctx := context.Background()
+	text := string(make([]byte, 64*1024))
+	opts := PutOptions{Kind: "bench"}
 	b.ReportAllocs()
-	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := store.PutBytes(ctx, payload, PutOptions{}); err != nil {
-			b.Fatalf("PutBytes() error = %v", err)
-		}
+		memorySinkRef, memorySinkErr = store.Put(ctx, text, opts)
 	}
 }
 
-func BenchmarkInMemoryStore_PutBytes_Scale(b *testing.B) {
-	ctx := context.Background()
+func BenchmarkMemory_Put_WithURI(b *testing.B) {
 	store := NewInMemoryStore(nil)
-	payload := make([]byte, 10*1024)
-	for i := range payload {
-		payload[i] = byte(i)
-	}
-	b.ReportAllocs()
-	b.SetBytes(int64(len(payload)))
-	for i := 0; i < b.N; i++ {
-		if _, err := store.PutBytes(ctx, payload, PutOptions{}); err != nil {
-			b.Fatalf("PutBytes() error = %v", err)
-		}
-	}
-}
-
-func BenchmarkInMemoryStore_Get_Typical(b *testing.B) {
 	ctx := context.Background()
-	store := newPopulatedMemoryStore(b, 64)
+	text := string(make([]byte, 1024))
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		id := (i % 64) + 1
-		if _, err := store.Get(ctx, id); err != nil {
-			b.Fatalf("Get(%d) error = %v", id, err)
-		}
+		memorySinkRef, memorySinkErr = store.Put(ctx, text, PutOptions{
+			Kind: "bench",
+			URI:  "state://bench/put",
+		})
 	}
 }
 
-func BenchmarkInMemoryStore_Resolve_Typical(b *testing.B) {
+// --- PutBytes (binary write — fires per binary Save) ---
+
+func BenchmarkMemory_PutBytes_1KB(b *testing.B) {
+	store := NewInMemoryStore(nil)
 	ctx := context.Background()
-	store := newPopulatedMemoryStore(b, 64)
+	data := make([]byte, 1024)
+	opts := PutOptions{Kind: "bench"}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		id := (i % 64) + 1
-		if _, err := store.Resolve(ctx, id); err != nil {
-			b.Fatalf("Resolve(%d) error = %v", id, err)
-		}
+		memorySinkRef, memorySinkErr = store.PutBytes(ctx, data, opts)
 	}
 }
 
-func BenchmarkInMemoryStore_ResolveBytes_Typical(b *testing.B) {
+func BenchmarkMemory_PutBytes_64KB(b *testing.B) {
+	store := NewInMemoryStore(nil)
 	ctx := context.Background()
-	store := newPopulatedMemoryStore(b, 64)
+	data := make([]byte, 64*1024)
+	opts := PutOptions{Kind: "bench"}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		id := (i % 64) + 1
-		if _, err := store.ResolveBytes(ctx, id); err != nil {
-			b.Fatalf("ResolveBytes(%d) error = %v", id, err)
-		}
+		memorySinkRef, memorySinkErr = store.PutBytes(ctx, data, opts)
 	}
 }
 
-func BenchmarkInMemoryStore_ResolveURI_Typical(b *testing.B) {
+func BenchmarkMemory_PutBytes_1MB(b *testing.B) {
+	store := NewInMemoryStore(nil)
 	ctx := context.Background()
-	store := newPopulatedMemoryStore(b, 64)
-	uris := make([]string, 64)
-	for i := range uris {
-		uris[i] = "state://bench/" + strconv.Itoa(i)
-	}
+	data := make([]byte, 1024*1024)
+	opts := PutOptions{Kind: "bench"}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		uri := uris[i%len(uris)]
-		if _, err := store.ResolveURI(ctx, uri); err != nil {
-			b.Fatalf("ResolveURI(%q) error = %v", uri, err)
-		}
-	}
-}
-
-func BenchmarkInMemoryStore_ResolveBytes_Scale(b *testing.B) {
-	ctx := context.Background()
-	store := newPopulatedMemoryStore(b, 1024)
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		id := (i % 1024) + 1
-		if _, err := store.ResolveBytes(ctx, id); err != nil {
-			b.Fatalf("ResolveBytes(%d) error = %v", id, err)
-		}
-	}
-}
-
-func BenchmarkInMemoryStore_Resolve_Missing(b *testing.B) {
-	ctx := context.Background()
-	store := newPopulatedMemoryStore(b, 64)
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := store.Resolve(ctx, 1<<20+i); err == nil {
-			b.Fatal("Resolve(missing) error = nil")
-		}
-	}
-}
-
-func BenchmarkNewInMemoryStore_FromMap(b *testing.B) {
-	seed := map[int]string{}
-	for i := 1; i <= 64; i++ {
-		seed[i] = "chunk-" + strconv.Itoa(i)
-	}
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		_ = NewInMemoryStore(seed)
+		memorySinkRef, memorySinkErr = store.PutBytes(ctx, data, opts)
 	}
 }

@@ -13,6 +13,7 @@ package eval
 import (
 	"context"
 	"math"
+	"strconv"
 	"time"
 
 	core "dappco.re/go"
@@ -235,7 +236,14 @@ func RunDataset(ctx context.Context, runner Runner, dataset Dataset, cfg Config)
 }
 
 func collectSamples(ctx context.Context, dataset Dataset, maxSamples int) ([]Sample, error) {
+	// Pre-allocate when maxSamples is known — saves the
+	// log2(maxSamples) doubling grows that append would otherwise pay.
+	// For the 0-hint case (unknown dataset size), let append handle
+	// growth as before.
 	var samples []Sample
+	if maxSamples > 0 {
+		samples = make([]Sample, 0, maxSamples)
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -326,11 +334,14 @@ func defaultQualityChecks(ctx QualityContext) []QualityCheck {
 	samples := len(ctx.Samples)
 	lossFinite := !math.IsNaN(ctx.Metrics.Loss) && !math.IsInf(ctx.Metrics.Loss, 0) && ctx.Metrics.Loss >= 0
 	pplFinite := !math.IsNaN(ctx.Metrics.Perplexity) && !math.IsInf(ctx.Metrics.Perplexity, 0) && ctx.Metrics.Perplexity >= 1
+	// strconv.Itoa / FormatFloat skip the fmt formatter pipeline that
+	// core.Sprintf would walk for every Detail string. Each Sprintf
+	// was 1-2 allocs; FormatX returns a single fresh string.
 	return []QualityCheck{
-		{Name: "samples_present", Pass: samples > 0, Score: boolScore(samples > 0), Detail: core.Sprintf("%d", samples)},
-		{Name: "token_coverage", Pass: ctx.Metrics.Tokens > 0, Score: boolScore(ctx.Metrics.Tokens > 0), Detail: core.Sprintf("%d", ctx.Metrics.Tokens)},
-		{Name: "loss_finite", Pass: lossFinite, Score: boolScore(lossFinite), Detail: core.Sprintf("%.6f", ctx.Metrics.Loss)},
-		{Name: "perplexity_finite", Pass: pplFinite, Score: boolScore(pplFinite), Detail: core.Sprintf("%.6f", ctx.Metrics.Perplexity)},
+		{Name: "samples_present", Pass: samples > 0, Score: boolScore(samples > 0), Detail: strconv.Itoa(samples)},
+		{Name: "token_coverage", Pass: ctx.Metrics.Tokens > 0, Score: boolScore(ctx.Metrics.Tokens > 0), Detail: strconv.Itoa(ctx.Metrics.Tokens)},
+		{Name: "loss_finite", Pass: lossFinite, Score: boolScore(lossFinite), Detail: strconv.FormatFloat(ctx.Metrics.Loss, 'f', 6, 64)},
+		{Name: "perplexity_finite", Pass: pplFinite, Score: boolScore(pplFinite), Detail: strconv.FormatFloat(ctx.Metrics.Perplexity, 'f', 6, 64)},
 	}
 }
 
@@ -354,11 +365,17 @@ func ResponseCoverageProbe() QualityProbe {
 					responseLike++
 				}
 			}
+			// Hand-build the "%d/%d" Detail without Sprintf — 1 alloc
+			// vs Sprintf's 2-3 (formatter scratch + result).
+			detail := make([]byte, 0, 16)
+			detail = strconv.AppendInt(detail, int64(responseLike), 10)
+			detail = append(detail, '/')
+			detail = strconv.AppendInt(detail, int64(samples), 10)
 			return QualityCheck{
 				Name:   "response_coverage",
 				Pass:   responseLike == samples,
 				Score:  fractionScore(responseLike, samples),
-				Detail: core.Sprintf("%d/%d", responseLike, samples),
+				Detail: core.AsString(detail),
 			}
 		},
 	}

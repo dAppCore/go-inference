@@ -3,6 +3,7 @@
 package parser
 
 import (
+	core "dappco.re/go"
 	"dappco.re/go/inference"
 )
 
@@ -31,9 +32,26 @@ func NewRegistry() *Registry {
 	}
 }
 
+// Default returns the process-wide built-in parser registry. Built
+// once via core.Once — every Processor / ForHint call shares the same
+// instance instead of rebuilding all 11 parsers + their marker
+// slices. The registry is read-only after construction (Register is
+// safe on bespoke Registries created via NewRegistry, not on the
+// shared default).
+//
 //	reg := parser.Default()
 //	out := reg.LookupHint(parser.Hint{Architecture: "qwen3"})
 func Default() *Registry {
+	defaultOnce.Do(func() { defaultRegistry = buildDefaultRegistry() })
+	return defaultRegistry
+}
+
+var (
+	defaultRegistry *Registry
+	defaultOnce     core.Once
+)
+
+func buildDefaultRegistry() *Registry {
 	registry := NewRegistry()
 	registry.Register(newBuiltinOutputParser("qwen", qwenMarkers()), "qwen", "qwen2", "qwen3")
 	registry.Register(newBuiltinOutputParser("gemma", gemmaMarkers()), "gemma", "gemma3", "gemma4", "gemma4_text")

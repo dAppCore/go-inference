@@ -8,6 +8,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 	"unicode"
@@ -45,13 +46,18 @@ type ChatCompletionRequest struct {
 type StopList []string
 
 func (s *StopList) UnmarshalJSON(data []byte) error {
-	if len(data) == 0 || string(data) == "null" {
+	// Hot path: this is called per OpenAI chat-completion request.
+	// Earlier shape did `string(data) == "null"` (full copy) and fed
+	// `string(data)` into JSONUnmarshalString which immediately did
+	// AsBytes back to []byte. We already have []byte here — skip both
+	// conversions.
+	if len(data) == 0 || isNullJSON(data) {
 		*s = nil
 		return nil
 	}
 	if data[0] == '[' {
 		var values []string
-		result := core.JSONUnmarshalString(string(data), &values)
+		result := core.JSONUnmarshal(data, &values)
 		if !result.OK {
 			return resultError(result)
 		}
@@ -59,12 +65,29 @@ func (s *StopList) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	var value string
-	result := core.JSONUnmarshalString(string(data), &value)
+	result := core.JSONUnmarshal(data, &value)
 	if !result.OK {
 		return resultError(result)
 	}
 	*s = []string{value}
 	return nil
+}
+
+// isNullJSON reports whether data is the JSON literal `null` (with
+// optional surrounding whitespace). Avoids the `string(data) == "null"`
+// alloc that bare comparison would force.
+func isNullJSON(data []byte) bool {
+	for len(data) > 0 && (data[0] == ' ' || data[0] == '\t' || data[0] == '\n' || data[0] == '\r') {
+		data = data[1:]
+	}
+	for len(data) > 0 {
+		last := data[len(data)-1]
+		if last != ' ' && last != '\t' && last != '\n' && last != '\r' {
+			break
+		}
+		data = data[:len(data)-1]
+	}
+	return len(data) == 4 && data[0] == 'n' && data[1] == 'u' && data[2] == 'l' && data[3] == 'l'
 }
 
 // ChatMessage is a single chat turn.
@@ -158,7 +181,9 @@ func DecodeRequest(body io.Reader) (ChatCompletionRequest, error) {
 		return ChatCompletionRequest{}, core.E("openai.DecodeRequest", "read request body", err)
 	}
 	var req ChatCompletionRequest
-	result := core.JSONUnmarshalString(string(data), &req)
+	// Direct []byte path — skips the redundant []byte→string→[]byte
+	// round-trip that JSONUnmarshalString(string(data), ...) would do.
+	result := core.JSONUnmarshal(data, &req)
 	if !result.OK {
 		return ChatCompletionRequest{}, resultError(result)
 	}
@@ -599,7 +624,13 @@ func resultError(result core.Result) error {
 }
 
 func completionID() string {
-	return core.Sprintf("chatcmpl-%d", time.Now().UnixNano())
+	// Fires once per chat-completion response. core.Sprintf was 2 allocs
+	// (fmt formatter scratch + result string); the append-into-prefix
+	// path is a single alloc backing the returned string via AsString.
+	buf := make([]byte, 0, 32) // "chatcmpl-" (9) + max int64 (20) + slack
+	buf = append(buf, "chatcmpl-"...)
+	buf = strconv.AppendInt(buf, time.Now().UnixNano(), 10)
+	return core.AsString(buf)
 }
 
 func isTokenLengthCapReached(maxTokens *int, generated int) bool {
@@ -636,16 +667,20 @@ func firstStopSequenceCut(content string, stops []string) (int, bool) {
 	return best, true
 }
 
+// indexString delegates to core.Index (strings.Index — Rabin-Karp +
+// SIMD byte search). The earlier hand-rolled loop was O(N×M) per call
+// and fired multiple times per chat-completion (stop-sequence cut +
+// thinking-extractor per streaming chunk + channel-marker detection
+// on every delta).
+//
+// Returns -1 on empty needle to preserve the caller contract — the
+// stop-sequence + extractor paths treat empty as "no match" rather
+// than the strings.Index "match at 0" semantics.
 func indexString(s, needle string) int {
 	if needle == "" {
 		return -1
 	}
-	for i := 0; i+len(needle) <= len(s); i++ {
-		if s[i:i+len(needle)] == needle {
-			return i
-		}
-	}
-	return -1
+	return core.Index(s, needle)
 }
 
 type pairedMarker struct {

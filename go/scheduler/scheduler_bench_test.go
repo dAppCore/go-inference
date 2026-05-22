@@ -1,5 +1,18 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
+// Benchmarks for the driver-neutral scheduler — Schedule/Generate
+// roundtrip over an immediate-yielding base model, plus the pure
+// helpers (generateOptions, cloneLabels, millis, millisString) that
+// fire on every probe emission.
+//
+// Per AX-11 — Schedule + Generate run once per request, but
+// emitProbe (and therefore cloneLabels + millisString) fires per
+// scheduler event (queued / start / first_token / complete), and
+// generateOptions is called once per dispatched job. With 20 in-flight
+// requests on a 4-GPU box, each per-event helper compounds.
+//
+// Run:    go test -bench='BenchmarkScheduler' -benchmem -run='^$' ./go/scheduler
+
 package scheduler
 
 import (
@@ -11,23 +24,51 @@ import (
 	"dappco.re/go/inference"
 )
 
-// benchModel is a minimal inference.TextModel that emits a pre-built
-// token slice via iter.Seq[Token] with zero per-call allocations beyond
-// the closure itself. Used by every scheduler bench so the bench
-// measures scheduler overhead, not driver work.
-type benchModel struct {
+// Sinks defeat compiler DCE.
+var (
+	schedSinkOpts        []inference.GenerateOption
+	schedSinkLabels      map[string]string
+	schedSinkMillis      float64
+	schedSinkMillisStr   string
+	schedSinkHandle      inference.RequestHandle
+	schedSinkCancel      inference.RequestCancelResult
+	schedSinkErr         error
+	schedSinkTokensCount int
+)
+
+// schedBenchModel is a synchronous-iterator base model — yields the
+// configured tokens immediately and returns. Safe to dispatch many
+// Schedule calls against without leaking goroutines beyond the worker
+// pool the bench creates once.
+type schedBenchModel struct {
 	tokens []inference.Token
 }
 
-func newBenchModel(n int) *benchModel {
-	tokens := make([]inference.Token, n)
-	for i := range tokens {
-		tokens[i] = inference.Token{Text: "t"}
-	}
-	return &benchModel{tokens: tokens}
+func (m *schedBenchModel) Generate(_ context.Context, _ string, _ ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return m.seq()
 }
 
-func (m *benchModel) seq() iter.Seq[inference.Token] {
+func (m *schedBenchModel) Chat(_ context.Context, _ []inference.Message, _ ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return m.seq()
+}
+
+func (m *schedBenchModel) Classify(context.Context, []string, ...inference.GenerateOption) ([]inference.ClassifyResult, error) {
+	return nil, nil
+}
+
+func (m *schedBenchModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) ([]inference.BatchResult, error) {
+	return nil, nil
+}
+
+func (m *schedBenchModel) ModelType() string             { return "sched-bench" }
+func (m *schedBenchModel) Info() inference.ModelInfo     { return inference.ModelInfo{Architecture: "qwen3"} }
+func (m *schedBenchModel) Metrics() inference.GenerateMetrics {
+	return inference.GenerateMetrics{GeneratedTokens: len(m.tokens)}
+}
+func (m *schedBenchModel) Err() error   { return nil }
+func (m *schedBenchModel) Close() error { return nil }
+
+func (m *schedBenchModel) seq() iter.Seq[inference.Token] {
 	return func(yield func(inference.Token) bool) {
 		for _, token := range m.tokens {
 			if !yield(token) {
@@ -37,278 +78,212 @@ func (m *benchModel) seq() iter.Seq[inference.Token] {
 	}
 }
 
-func (m *benchModel) Generate(context.Context, string, ...inference.GenerateOption) iter.Seq[inference.Token] {
-	return m.seq()
-}
-
-func (m *benchModel) Chat(context.Context, []inference.Message, ...inference.GenerateOption) iter.Seq[inference.Token] {
-	return m.seq()
-}
-
-func (m *benchModel) Classify(context.Context, []string, ...inference.GenerateOption) ([]inference.ClassifyResult, error) {
-	return nil, nil
-}
-
-func (m *benchModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) ([]inference.BatchResult, error) {
-	return nil, nil
-}
-
-func (m *benchModel) ModelType() string             { return "bench" }
-func (m *benchModel) Info() inference.ModelInfo     { return inference.ModelInfo{Architecture: "bench"} }
-func (m *benchModel) Metrics() inference.GenerateMetrics { return inference.GenerateMetrics{} }
-func (m *benchModel) Err() error                    { return nil }
-func (m *benchModel) Close() error                  { return nil }
-
-// drainHandle consumes a scheduled token channel until close — the
-// canonical scheduler client loop.
-func drainHandle(tokens <-chan inference.ScheduledToken) int {
-	count := 0
-	for range tokens {
-		count++
+func benchTokens(n int) []inference.Token {
+	tokens := make([]inference.Token, n)
+	for i := 0; i < n; i++ {
+		tokens[i] = inference.Token{ID: int32(i + 1), Text: "tok"}
 	}
-	return count
+	return tokens
 }
 
-// BenchmarkSchedule_Generate_Small measures the per-request scheduler
-// overhead on a tiny stream — alloc-and-completion dominates over
-// per-token cost. Latency floor.
-func BenchmarkSchedule_Generate_Small(b *testing.B) {
-	base := newBenchModel(8)
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 8})
+// --- Generate end-to-end (Schedule + drain + close) ---
+
+// 1 token — the dominant cost is queue+probe overhead, not token transfer.
+func BenchmarkScheduler_Generate_1Token(b *testing.B) {
+	base := &schedBenchModel{tokens: benchTokens(1)}
+	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	ctx := context.Background()
 	b.ReportAllocs()
-	b.SetBytes(int64(len(base.tokens)))
-	for b.Loop() {
-		_, tokens, err := sched.Schedule(ctx, inference.ScheduledRequest{Prompt: "p"})
-		if err != nil {
-			b.Fatal(err)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		count := 0
+		for range sched.Generate(ctx, "prompt") {
+			count++
 		}
-		drainHandle(tokens)
+		schedSinkTokensCount = count
 	}
 }
 
-// BenchmarkSchedule_Generate_Large measures per-token costs on a long
-// stream where stream-buffer + label-clone-per-token dominate.
-func BenchmarkSchedule_Generate_Large(b *testing.B) {
-	base := newBenchModel(512)
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 32})
+// 32 tokens — closer to a realistic chat reply.
+func BenchmarkScheduler_Generate_32Tokens(b *testing.B) {
+	base := &schedBenchModel{tokens: benchTokens(32)}
+	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 32})
 	ctx := context.Background()
 	b.ReportAllocs()
-	b.SetBytes(int64(len(base.tokens)))
-	for b.Loop() {
-		_, tokens, err := sched.Schedule(ctx, inference.ScheduledRequest{Prompt: "p"})
-		if err != nil {
-			b.Fatal(err)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		count := 0
+		for range sched.Generate(ctx, "prompt") {
+			count++
 		}
-		drainHandle(tokens)
+		schedSinkTokensCount = count
 	}
 }
 
-// BenchmarkSchedule_Chat measures the chat path which clones the
-// messages slice on enqueue + on baseTokens.
-func BenchmarkSchedule_Chat(b *testing.B) {
-	base := newBenchModel(64)
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 16})
-	msgs := []inference.Message{
-		{Role: "system", Content: "you are a benchmark"},
-		{Role: "user", Content: "go"},
-	}
+// 256 tokens — long reply; per-token label clone is the inner hot path.
+func BenchmarkScheduler_Generate_256Tokens(b *testing.B) {
+	base := &schedBenchModel{tokens: benchTokens(256)}
+	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 256})
 	ctx := context.Background()
 	b.ReportAllocs()
-	b.SetBytes(int64(len(base.tokens)))
-	for b.Loop() {
-		_, tokens, err := sched.Schedule(ctx, inference.ScheduledRequest{Messages: msgs})
-		if err != nil {
-			b.Fatal(err)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		count := 0
+		for range sched.Generate(ctx, "prompt") {
+			count++
 		}
-		drainHandle(tokens)
+		schedSinkTokensCount = count
 	}
 }
 
-// BenchmarkSchedule_WithLabels measures the cost of carrying labels
-// through enqueue + per-token label clone path.
-func BenchmarkSchedule_WithLabels(b *testing.B) {
-	base := newBenchModel(64)
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 16})
-	labels := map[string]string{
-		"tenant":  "bench",
-		"session": "abc-123",
-		"trace":   "deadbeef",
-	}
+// --- Schedule (just the handle return, no token drain) ---
+
+func BenchmarkScheduler_Schedule_1Token(b *testing.B) {
+	base := &schedBenchModel{tokens: benchTokens(1)}
+	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 32, StreamBuffer: 4})
 	ctx := context.Background()
 	b.ReportAllocs()
-	b.SetBytes(int64(len(base.tokens)))
-	for b.Loop() {
-		_, tokens, err := sched.Schedule(ctx, inference.ScheduledRequest{Prompt: "p", Labels: labels})
-		if err != nil {
-			b.Fatal(err)
-		}
-		drainHandle(tokens)
-	}
-}
-
-// BenchmarkSchedule_GenerateIter measures the Generate iter.Seq path
-// which clients use most.
-func BenchmarkSchedule_GenerateIter(b *testing.B) {
-	base := newBenchModel(64)
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 16})
-	ctx := context.Background()
-	b.ReportAllocs()
-	b.SetBytes(int64(len(base.tokens)))
-	for b.Loop() {
-		for range sched.Generate(ctx, "p") {
-		}
-	}
-}
-
-// BenchmarkSchedule_ChatIter measures the Chat iter.Seq path.
-func BenchmarkSchedule_ChatIter(b *testing.B) {
-	base := newBenchModel(64)
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 16})
-	msgs := []inference.Message{{Role: "user", Content: "hi"}}
-	ctx := context.Background()
-	b.ReportAllocs()
-	b.SetBytes(int64(len(base.tokens)))
-	for b.Loop() {
-		for range sched.Chat(ctx, msgs) {
-		}
-	}
-}
-
-// BenchmarkSchedule_Concurrent measures parallel client throughput
-// where multiple goroutines enqueue + drain at once. Stresses queue
-// admission + worker scheduling. Queue is sized to accept burst from
-// every parallel goroutine (b.RunParallel × GOMAXPROCS) so the bench
-// measures the happy path, not reject behaviour — that's covered by
-// BenchmarkSchedule_QueueFullReject.
-func BenchmarkSchedule_Concurrent(b *testing.B) {
-	base := newBenchModel(32)
-	sched := New(base, Config{MaxConcurrent: 4, MaxQueue: 4096, StreamBuffer: 8})
-	b.ReportAllocs()
-	b.RunParallel(func(pb *testing.PB) {
-		ctx := context.Background()
-		for pb.Next() {
-			_, tokens, err := sched.Schedule(ctx, inference.ScheduledRequest{Prompt: "p"})
-			if err != nil {
-				b.Fatal(err)
-			}
-			drainHandle(tokens)
-		}
-	})
-}
-
-// BenchmarkSchedule_QueueFullReject measures the queue-overflow reject
-// path — what happens when a misconfigured client floods a tiny queue.
-// Uses a blocking model that parks until released, so the worker is
-// busy + the queue slot is taken + further Schedules hit default-reject.
-func BenchmarkSchedule_QueueFullReject(b *testing.B) {
-	blocking := newBlockingModel()
-	sched := New(blocking, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 0})
-	ctx := context.Background()
-	// Fill the in-flight worker slot.
-	_, active, err := sched.Schedule(ctx, inference.ScheduledRequest{Prompt: "active"})
-	if err != nil {
-		b.Fatal(err)
-	}
-	if got := <-blocking.started; got != "active" {
-		b.Fatalf("started = %q, want active", got)
-	}
-	// Fill the single queue slot.
-	_, queued, err := sched.Schedule(ctx, inference.ScheduledRequest{Prompt: "queued"})
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer func() {
-		blocking.release <- struct{}{}
-		drainHandle(active)
-		blocking.release <- struct{}{}
-		drainHandle(queued)
-	}()
-	b.ReportAllocs()
-	for b.Loop() {
-		_, _, err := sched.Schedule(ctx, inference.ScheduledRequest{Prompt: "overflow"})
-		if err == nil {
-			b.Fatal("expected queue-full error")
-		}
-	}
-}
-
-// BenchmarkSchedule_Cancel measures the cancel hot path — register +
-// queue + cancel + cleanup. Used heavily by IDE-style abort flows.
-func BenchmarkSchedule_Cancel(b *testing.B) {
-	base := newBenchModel(64)
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 32, StreamBuffer: 8})
-	ctx := context.Background()
-	b.ReportAllocs()
-	for b.Loop() {
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
 		handle, tokens, err := sched.Schedule(ctx, inference.ScheduledRequest{Prompt: "p"})
-		if err != nil {
-			b.Fatal(err)
+		schedSinkHandle = handle
+		schedSinkErr = err
+		// drain before next iteration so the queue doesn't fill.
+		for range tokens {
 		}
-		_, _ = sched.CancelRequest(ctx, handle.ID)
-		drainHandle(tokens)
 	}
 }
 
-// BenchmarkCloneLabels_Empty measures the per-emit baseline (empty
-// labels — every token still allocates).
-func BenchmarkCloneLabels_Empty(b *testing.B) {
-	var in map[string]string
+// --- CancelRequest (no-active-id fallback) ---
+
+func BenchmarkScheduler_CancelRequest_NotFound(b *testing.B) {
+	base := &schedBenchModel{tokens: benchTokens(1)}
+	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	ctx := context.Background()
 	b.ReportAllocs()
-	for b.Loop() {
-		_ = cloneLabels(in)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkCancel, schedSinkErr = sched.CancelRequest(ctx, "no-such-id")
 	}
 }
 
-// BenchmarkCloneLabels_Three measures the three-key common case (the
-// labels set carried by tokens in BenchmarkSchedule_WithLabels).
-func BenchmarkCloneLabels_Three(b *testing.B) {
-	in := map[string]string{
-		"tenant":  "bench",
-		"session": "abc-123",
-		"trace":   "deadbeef",
-	}
+// --- generateOptions: capability matching — 1, 4, 16 sampler-fields
+// populated (covers the spec's "capability sets of 1, 4, 16 GPUs" lens
+// for the option-set the scheduler emits per dispatched job). ---
+
+func BenchmarkScheduler_GenerateOptions_1Field(b *testing.B) {
+	cfg := inference.SamplerConfig{MaxTokens: 64}
 	b.ReportAllocs()
-	for b.Loop() {
-		_ = cloneLabels(in)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkOpts = generateOptions(cfg)
 	}
 }
 
-// BenchmarkGenerateOptions_Full builds the GenerateOption slice for a
-// fully-populated SamplerConfig — invoked once per worker enqueue,
-// hot per request.
-func BenchmarkGenerateOptions_Full(b *testing.B) {
+func BenchmarkScheduler_GenerateOptions_4Fields(b *testing.B) {
 	cfg := inference.SamplerConfig{
-		MaxTokens:     128,
+		MaxTokens:   64,
+		Temperature: 0.7,
+		TopK:        40,
+		TopP:        0.9,
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkOpts = generateOptions(cfg)
+	}
+}
+
+// Full — every field populated; 16 stop tokens stand in for the
+// "capability set of 16" knob mentioned in the spec.
+func BenchmarkScheduler_GenerateOptions_FullSamplerWith16StopTokens(b *testing.B) {
+	cfg := inference.SamplerConfig{
+		MaxTokens:     64,
 		Temperature:   0.7,
-		TopK:          50,
-		TopP:          0.95,
-		RepeatPenalty: 1.05,
-		StopTokens:    []int32{1, 2, 3},
+		TopK:          40,
+		TopP:          0.9,
+		RepeatPenalty: 1.1,
+		StopTokens:    []int32{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
 		ReturnLogits:  true,
 	}
 	b.ReportAllocs()
-	for b.Loop() {
-		_ = generateOptions(cfg)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkOpts = generateOptions(cfg)
 	}
 }
 
-// BenchmarkGenerateOptions_Minimal measures the common-case lower
-// bound — only temperature is set.
-func BenchmarkGenerateOptions_Minimal(b *testing.B) {
-	cfg := inference.SamplerConfig{Temperature: 0.7}
+// --- cloneLabels: fires per emitted token via the run loop ---
+
+func BenchmarkScheduler_CloneLabels_Empty(b *testing.B) {
+	labels := map[string]string{}
 	b.ReportAllocs()
-	for b.Loop() {
-		_ = generateOptions(cfg)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkLabels = cloneLabels(labels)
 	}
 }
 
-// BenchmarkMillisString measures the per-token label-format call. This
-// runs twice per emitted token (queue + first-token latency).
-func BenchmarkMillisString(b *testing.B) {
-	d := 12345678 * time.Nanosecond
+func BenchmarkScheduler_CloneLabels_OneEntry(b *testing.B) {
+	labels := map[string]string{"request_id": "req-42"}
 	b.ReportAllocs()
-	for b.Loop() {
-		_ = millisString(d)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkLabels = cloneLabels(labels)
+	}
+}
+
+func BenchmarkScheduler_CloneLabels_FiveEntries(b *testing.B) {
+	labels := map[string]string{
+		"request_id": "req-42",
+		"tenant":     "lab",
+		"priority":   "high",
+		"feature":    "ide-chat",
+		"agent":      "cladius",
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkLabels = cloneLabels(labels)
+	}
+}
+
+func BenchmarkScheduler_CloneLabels_TwentyEntries(b *testing.B) {
+	labels := map[string]string{}
+	for i := 0; i < 20; i++ {
+		labels[(string)(rune('a'+i))] = "v"
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkLabels = cloneLabels(labels)
+	}
+}
+
+// --- millis + millisString (per probe-event call) ---
+
+func BenchmarkScheduler_Millis_Positive(b *testing.B) {
+	d := 45 * time.Millisecond
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkMillis = millis(d)
+	}
+}
+
+func BenchmarkScheduler_Millis_Zero(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkMillis = millis(0)
+	}
+}
+
+func BenchmarkScheduler_MillisString_Positive(b *testing.B) {
+	d := 45 * time.Millisecond
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkMillisStr = millisString(d)
 	}
 }

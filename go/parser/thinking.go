@@ -3,6 +3,8 @@
 package parser
 
 import (
+	"strings"
+
 	core "dappco.re/go"
 )
 
@@ -26,6 +28,7 @@ type Processor struct {
 	cfg            Config
 	mode           Mode
 	markers        []thinkingMarker
+	startSet       []string // cached marker.start values — invariant once markers is set
 	pending        string
 	inReasoning    bool
 	current        thinkingMarker
@@ -36,10 +39,16 @@ type Processor struct {
 
 //	p := parser.NewProcessor(parser.Config{Mode: parser.Capture}, hint)
 func NewProcessor(cfg Config, hint Hint) *Processor {
+	markers := markersForHint(hint)
+	startSet := make([]string, len(markers))
+	for i, m := range markers {
+		startSet[i] = m.start
+	}
 	return &Processor{
-		cfg:     cfg,
-		mode:    NormaliseMode(cfg.Mode),
-		markers: markersForHint(hint),
+		cfg:      cfg,
+		mode:     NormaliseMode(cfg.Mode),
+		markers:  markers,
+		startSet: startSet,
 	}
 }
 
@@ -125,7 +134,15 @@ func (p *Processor) Chunks() []Chunk {
 }
 
 func (p *Processor) drain(final bool) string {
-	out := core.NewBuilder()
+	if p.pending == "" {
+		return ""
+	}
+	// Lazy-init the builder. Per-token streaming hits drain on every
+	// token; the common no-marker path writes a single slice that can
+	// be returned directly without ever touching a builder. The builder
+	// only allocates when we cross a marker boundary mid-string and
+	// need to splice a visible prefix with a suffix later in the loop.
+	var out *strings.Builder
 	for p.pending != "" {
 		if p.inReasoning {
 			idx := indexString(p.pending, p.current.end)
@@ -150,7 +167,12 @@ func (p *Processor) drain(final bool) string {
 
 		idx, marker, ok := p.findStart(p.pending)
 		if ok {
-			out.WriteString(p.pending[:idx])
+			if idx > 0 {
+				if out == nil {
+					out = core.NewBuilder()
+				}
+				out.WriteString(p.pending[:idx])
+			}
 			p.pending = p.pending[idx+len(marker.start):]
 			p.current = marker
 			p.inReasoning = true
@@ -158,14 +180,27 @@ func (p *Processor) drain(final bool) string {
 		}
 		keep := 0
 		if !final {
-			keep = longestSuffixPrefix(p.pending, p.startMarkers())
+			keep = longestSuffixPrefix(p.pending, p.startSet)
 		}
 		consume := len(p.pending) - keep
-		if consume > 0 {
-			out.WriteString(p.pending[:consume])
-			p.pending = p.pending[consume:]
+		if consume == 0 {
+			break
 		}
+		if out == nil {
+			// Single-write path — return the slice directly without
+			// paying for a builder alloc. This is the streaming hot
+			// path: per-token Process call, no marker in pending,
+			// consume the visible bytes and return.
+			output := p.pending[:consume]
+			p.pending = p.pending[consume:]
+			return output
+		}
+		out.WriteString(p.pending[:consume])
+		p.pending = p.pending[consume:]
 		break
+	}
+	if out == nil {
+		return ""
 	}
 	return out.String()
 }
@@ -184,14 +219,6 @@ func (p *Processor) findStart(text string) (int, thinkingMarker, bool) {
 		}
 	}
 	return best, marker, best >= 0
-}
-
-func (p *Processor) startMarkers() []string {
-	out := make([]string, len(p.markers))
-	for i, marker := range p.markers {
-		out[i] = marker.start
-	}
-	return out
 }
 
 func (p *Processor) addReasoning(text string) {

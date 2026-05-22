@@ -24,14 +24,18 @@ Three lifecycle verbs, four DTOs, two interfaces. Nothing else.
 | Type | Role |
 |------|------|
 | `Ref` | URI-first identity for a durable state span — bundle + index + sampler/model identity + token/byte ranges. The thing you keep in your filesystem / DB / cold-storage index to point at one wake target. |
-| `WakeRequest` | "Restore prefix from this URI into this session." Carries the model + tokenizer identity for compatibility checking; `Store` is an opaque runtime handle (deliberately not JSON-serialised). |
+| `WakeRequest` | "Restore prefix from this URI into this session." Carries the model + tokenizer + adapter + runtime identity for compatibility checking; `Store` is an opaque runtime handle (deliberately not JSON-serialised). |
 | `WakeResult` | "I restored N prefix tokens from this bundle/index, B blocks, K block size." Returned by `Session.WakeState`. |
 | `SleepRequest` | "Persist the current session state to this URI, parented to that earlier URI." `ReuseParentPrefix` enables append-mode: a new bundle that shares prefix blocks with its parent — `O(delta)` writes, not full re-encode. |
 | `SleepResult` | "I wrote N tokens across B blocks (R reused from parent), here is the new Ref." |
 
 `Store any` on both Wake/Sleep requests is the explicit escape hatch for
-backend-owned handles (memvid encoder, file log writer, S3 client) that
+backend-owned handles (State video encoder, file log writer, S3 client) that
 the JSON serialisation layer doesn't need to see.
+
+`Adapter` and `Runtime` are metadata fields, not dependency hooks. They let
+orchestration decide whether waking a saved prefix is safe after adapter or
+runtime settings change; the concrete backend still owns the final restore.
 
 ## Interfaces
 
@@ -77,7 +81,7 @@ without needing the `state` subpackage import.
 
 - `go-mlx` — Metal-backed `Session` + `Forker`. The reference
   implementation, with KV-block-level append, parent-prefix reuse, and
-  memvid `.mp4` packaging. See `go-mlx/docs/memory/agent_memory.md`.
+  State video `.mp4` packaging. See `go-mlx/docs/memory/agent_memory.md`.
 - `go-rocm` — planned mirror for AMD/ROCm.
 - `go-cuda` — planned mirror for NVIDIA/CUDA.
 
@@ -85,7 +89,7 @@ without needing the `state` subpackage import.
 
 Storage policy lives at the URI scheme, not in the contract.
 
-- `memvid://aurelius/meditations` — QR-video knowledge pack
+- `state://aurelius/meditations` — QR-video knowledge pack
 - `file:///var/lib/coreagent/bundles/abc123/` — local filestore
 - `s3://lethean-bundles/2026-05/agent-7/` — object storage
 - `memory://test/fixture-1` — in-memory test harness
@@ -104,10 +108,12 @@ events emitted during wake) rather than by this DTO.
 ## Used by
 
 - `go-mlx/cmd/violet` — sidecar exposes Wake/Sleep/Fork over Unix socket
+- LTHN project seeds — app/CLI orchestration can wake a per-project context,
+  append observations, then sleep a child state or fall back to a text summary.
 - `go-ai/ai/book_state_demo.go` — teacher/student demo uses WakeResult →
   `BookState` (the demo's user-facing context shape)
-- `go-mlx/pkg/memvid` — memvid encoder/decoder is the canonical Store
-  implementation; bundles round-trip through this interface
+- `go-mlx/pkg/memvid` — deprecated compatibility path for older State video
+  encoder/decoder imports
 - `core/ide` (planned) — agent inspector panel reads bundle index for
   the "what's in my brain right now" UI
 
