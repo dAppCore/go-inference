@@ -500,7 +500,14 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 	completionID := completionID()
 	flusher, _ := w.(http.Flusher)
 	writeChunk := func(chunk ChatCompletionChunk) {
-		_, _ = w.Write([]byte(core.Concat("data: ", core.JSONMarshalString(chunk), "\n\n")))
+		// Single-buffer SSE frame — the previous shape did
+		// JSONMarshalString (reflect path + grow-doubled scratch
+		// buffer) then Concat to wrap with "data: " / "\n\n" then
+		// []byte conversion. appendChatCompletionChunkSSE walks the
+		// chunk directly into a pre-sized buffer that already carries
+		// the SSE framing.
+		frame := appendChatCompletionChunkSSE(make([]byte, 0, chunkSSEFrameSize(chunk)), chunk)
+		_, _ = w.Write(frame)
 		if flusher != nil {
 			flusher.Flush()
 		}

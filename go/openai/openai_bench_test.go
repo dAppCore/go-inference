@@ -303,6 +303,57 @@ func BenchmarkOpenAI_MarshalChatCompletionChunk_Final(b *testing.B) {
 	}
 }
 
+// --- Hand-rolled chunk-as-SSE-frame — the streaming hot path ---
+// Fires per token. The single-buffer frame builder replaces the
+// JSONMarshalString + Concat + []byte conversion three-allocation
+// chain that the streaming handler used pre-W9-D.
+
+func BenchmarkOpenAI_AppendChatCompletionChunkSSE_Priming(b *testing.B) {
+	chunk := ChatCompletionChunk{
+		ID:      "chatcmpl-bench",
+		Object:  "chat.completion.chunk",
+		Created: 1700000000,
+		Model:   "qwen3",
+		Choices: []ChatChunkChoice{{Index: 0, Delta: ChatMessageDelta{Role: "assistant"}}},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		openAISinkBytes = appendChatCompletionChunkSSE(make([]byte, 0, chunkSSEFrameSize(chunk)), chunk)
+	}
+}
+
+func BenchmarkOpenAI_AppendChatCompletionChunkSSE_Delta(b *testing.B) {
+	chunk := ChatCompletionChunk{
+		ID:      "chatcmpl-bench",
+		Object:  "chat.completion.chunk",
+		Created: 1700000000,
+		Model:   "qwen3",
+		Choices: []ChatChunkChoice{{Index: 0, Delta: ChatMessageDelta{Content: "Answer"}}},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		openAISinkBytes = appendChatCompletionChunkSSE(make([]byte, 0, chunkSSEFrameSize(chunk)), chunk)
+	}
+}
+
+func BenchmarkOpenAI_AppendChatCompletionChunkSSE_Final(b *testing.B) {
+	finish := "stop"
+	chunk := ChatCompletionChunk{
+		ID:      "chatcmpl-bench",
+		Object:  "chat.completion.chunk",
+		Created: 1700000000,
+		Model:   "qwen3",
+		Choices: []ChatChunkChoice{{Index: 0, Delta: ChatMessageDelta{}, FinishReason: &finish}},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		openAISinkBytes = appendChatCompletionChunkSSE(make([]byte, 0, chunkSSEFrameSize(chunk)), chunk)
+	}
+}
+
 // --- ChatCompletionResponse — non-streaming response marshal ---
 
 func BenchmarkOpenAI_MarshalChatCompletionResponse_Typical(b *testing.B) {
