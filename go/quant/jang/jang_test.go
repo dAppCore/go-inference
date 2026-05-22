@@ -238,6 +238,34 @@ func TestJang_DequantizePackedTensor_RoundTrip_2bit_GroupSize2(t *testing.T) {
 	assertBitExact(t, got, want)
 }
 
+// TestJang_DequantizePackedTensor_RoundTrip_4bit_ShortTail covers the
+// 4-bit prefix + suffix drains around the batched 2-per-byte fast path
+// when the final group is shorter than groupSize.
+func TestJang_DequantizePackedTensor_RoundTrip_4bit_ShortTail(t *testing.T) {
+	// 67 elements with groupSize=64 → last group has 3 elements; the
+	// 2-per-byte batched path takes 2 of them, the suffix drains the 1.
+	desc, values, packed, scales, biases := roundTripFixture(t, 4, 67, 64)
+	got, err := DequantizePackedTensor(desc, packed, scales, biases)
+	if err != nil {
+		t.Fatalf("DequantizePackedTensor(4-bit short tail): %v", err)
+	}
+	want := expectedDequantize(t, values, scales, biases, desc.GroupSize)
+	assertBitExact(t, got, want)
+}
+
+// TestJang_DequantizePackedTensor_RoundTrip_4bit_GroupSize1 covers the
+// degenerate case where groupSize=1, forcing every element into the
+// suffix-drain path (no batched stride can fire).
+func TestJang_DequantizePackedTensor_RoundTrip_4bit_GroupSize1(t *testing.T) {
+	desc, values, packed, scales, biases := roundTripFixture(t, 4, 16, 1)
+	got, err := DequantizePackedTensor(desc, packed, scales, biases)
+	if err != nil {
+		t.Fatalf("DequantizePackedTensor(4-bit groupSize=1): %v", err)
+	}
+	want := expectedDequantize(t, values, scales, biases, desc.GroupSize)
+	assertBitExact(t, got, want)
+}
+
 func assertBitExact(t *testing.T, got, want []float32) {
 	t.Helper()
 	if len(got) != len(want) {

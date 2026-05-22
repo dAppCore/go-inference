@@ -357,9 +357,19 @@ func dequantizeBit8(out []float32, packed []byte, scales, biases []float32, grou
 
 // dequantizeBit4 walks the 4-bit-nibble-packed path with the unpack
 // inlined. Two values per byte; low nibble for even indices, high
-// nibble for odd indices. The natural branch (rather than a branchless
-// bit-trick) avoids the Apple Silicon FCMPD-over-FMOV penalty observed
-// when bit-mux-style code regresses against direct if/else on M3.
+// nibble for odd indices.
+//
+// When the per-group walk lands on a byte boundary we batch 2 elements
+// per byte read — amortises the packed-slice load + bounds check across
+// both nibble lanes. JANGTQ-style groupSize=64 (== 32 bytes at 4-bit)
+// lands on a byte boundary at every group start, so the fast path
+// covers the full group body. Single-element prefix + suffix handle
+// the rare case where the row's start offset is mid-byte or the group
+// runs short at the tensor tail.
+//
+// The natural if/else for nibble select (rather than a branchless
+// bit-mux) avoids the Apple Silicon FCMPD-over-FMOV penalty observed
+// when bit-mux-style code regresses against direct branches on M3.
 func dequantizeBit4(out []float32, packed []byte, scales, biases []float32, groupSize int) {
 	for i := 0; i < len(out); {
 		group := i / groupSize
@@ -369,15 +379,27 @@ func dequantizeBit4(out []float32, packed []byte, scales, biases []float32, grou
 		}
 		scale := scales[group]
 		bias := biases[group]
+		// Drain prefix elements until i is byte-aligned (i&1 == 0).
+		if i&1 != 0 && i < end {
+			b := packed[i>>1]
+			out[i] = float32(b>>4)*scale + bias
+			i++
+		}
+		// Walk 2-at-a-time on byte-aligned boundaries.
+		for i+2 <= end {
+			b := packed[i>>1]
+			out[i] = float32(b&0x0F)*scale + bias
+			out[i+1] = float32(b>>4)*scale + bias
+			i += 2
+		}
+		// Drain suffix.
 		for ; i < end; i++ {
 			b := packed[i>>1]
-			var q uint8
 			if i&1 == 0 {
-				q = b & 0x0F
+				out[i] = float32(b&0x0F)*scale + bias
 			} else {
-				q = b >> 4
+				out[i] = float32(b>>4)*scale + bias
 			}
-			out[i] = float32(q)*scale + bias
 		}
 	}
 }
