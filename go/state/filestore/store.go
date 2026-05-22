@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	stdio "io"
 	"sync"
+	"unsafe"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/state"
@@ -280,13 +281,29 @@ func (s *Store) rollbackWriteLocked(offset int64) {
 }
 
 func (s *Store) resolveLocked(chunkID int) (state.Chunk, error) {
-	chunk, err := s.resolveBytesLocked(chunkID)
-	if err != nil {
-		return state.Chunk{}, err
+	entry, ok := s.index[chunkID]
+	if !ok {
+		return state.Chunk{}, &state.ChunkNotFoundError{ID: chunkID}
 	}
-	chunk.Text = string(chunk.Data)
-	chunk.Data = nil
-	return chunk, nil
+	payload := make([]byte, entry.payloadSize)
+	if _, err := s.file.ReadAt(payload, entry.payloadAt); err != nil {
+		return state.Chunk{}, core.E("state.filestore.Resolve", "read chunk payload", err)
+	}
+	return state.Chunk{
+		Ref:  entry.ref,
+		Text: bytesToString(payload),
+	}, nil
+}
+
+// bytesToString aliases a freshly-allocated byte buffer as a string without
+// copying. The caller MUST guarantee the buffer is not modified after the
+// alias is taken; in this package the caller allocates the buffer locally
+// for this single conversion, so the invariant is structural.
+func bytesToString(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return unsafe.String(unsafe.SliceData(b), len(b))
 }
 
 func (s *Store) ResolveBytes(ctx context.Context, chunkID int) (state.Chunk, error) {
@@ -399,6 +416,12 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		return err
 	}
 
+	// Reuse a stack-allocated header array (recordHeaderLen is fixed) and
+	// grow the meta buffer in place across records to avoid per-record
+	// allocations on large files. The buffer contents are decoded into
+	// stack-only locals before the next iteration overwrites them.
+	var headerArr [recordHeaderLen]byte
+	var metaBuf []byte
 	offset := headerLen
 	for offset < size {
 		if err := checkContext(ctx); err != nil {
@@ -407,11 +430,10 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		if offset+recordHeaderLen > size {
 			return core.NewError("state file store has truncated record header")
 		}
-		header := make([]byte, recordHeaderLen)
-		if _, err := s.file.ReadAt(header, offset); err != nil {
+		if _, err := s.file.ReadAt(headerArr[:], offset); err != nil {
 			return core.E("state.filestore.Open", "read record header", err)
 		}
-		record, err := decodeRecordHeader(header)
+		record, err := decodeRecordHeader(headerArr[:])
 		if err != nil {
 			return err
 		}
@@ -429,13 +451,19 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		if nextOffset > size {
 			return core.NewError("state file store has truncated record payload")
 		}
-		metaBytes := make([]byte, metaSize)
-		if _, err := s.file.ReadAt(metaBytes, metaAt); err != nil {
-			return core.E("state.filestore.Open", "read record metadata", err)
+		if cap(metaBuf) < metaSize {
+			metaBuf = make([]byte, metaSize)
+		} else {
+			metaBuf = metaBuf[:metaSize]
+		}
+		if metaSize > 0 {
+			if _, err := s.file.ReadAt(metaBuf, metaAt); err != nil {
+				return core.E("state.filestore.Open", "read record metadata", err)
+			}
 		}
 		var meta recordMeta
-		if len(metaBytes) > 0 {
-			result := core.JSONUnmarshal(metaBytes, &meta)
+		if metaSize > 0 {
+			result := core.JSONUnmarshal(metaBuf, &meta)
 			if !result.OK {
 				return core.E("state.filestore.Open", "parse record metadata", resultError(result))
 			}
