@@ -14,6 +14,7 @@ package scheduler
 import (
 	"context"
 	"iter"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -413,30 +414,35 @@ func (m *Model) nextRequestID() string {
 }
 
 func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
-	// Pre-size to the maximum possible option count — Temperature is
-	// always set; the others are conditional. Saves the doubling-grow
-	// allocs that the append cascade would otherwise pay per Schedule.
-	opts := make([]inference.GenerateOption, 0, 7)
-	if cfg.MaxTokens > 0 {
-		opts = append(opts, inference.WithMaxTokens(cfg.MaxTokens))
-	}
-	opts = append(opts, inference.WithTemperature(cfg.Temperature))
-	if cfg.TopK > 0 {
-		opts = append(opts, inference.WithTopK(cfg.TopK))
-	}
-	if cfg.TopP > 0 {
-		opts = append(opts, inference.WithTopP(cfg.TopP))
-	}
-	if cfg.RepeatPenalty > 0 {
-		opts = append(opts, inference.WithRepeatPenalty(cfg.RepeatPenalty))
-	}
-	if len(cfg.StopTokens) > 0 {
-		opts = append(opts, inference.WithStopTokens(cfg.StopTokens...))
-	}
-	if cfg.ReturnLogits {
-		opts = append(opts, inference.WithLogits())
-	}
-	return opts
+	// Fused option — one closure captures the SamplerConfig and applies
+	// every set field in a single pass. The previous append-cascade
+	// allocated 1..7 separate closures (one per `With*` call) plus the
+	// outer slice; the fused form allocates the slice + a single closure
+	// capturing the value-type SamplerConfig (slice fields kept by ref).
+	// Behaviour parity preserved: Temperature is always assigned (its
+	// "zero is valid" semantics are unchanged); the rest gate on the
+	// previous `> 0` / `len > 0` / bool conditions.
+	return []inference.GenerateOption{func(c *inference.GenerateConfig) {
+		if cfg.MaxTokens > 0 {
+			c.MaxTokens = cfg.MaxTokens
+		}
+		c.Temperature = cfg.Temperature
+		if cfg.TopK > 0 {
+			c.TopK = cfg.TopK
+		}
+		if cfg.TopP > 0 {
+			c.TopP = cfg.TopP
+		}
+		if cfg.RepeatPenalty > 0 {
+			c.RepeatPenalty = cfg.RepeatPenalty
+		}
+		if len(cfg.StopTokens) > 0 {
+			c.StopTokens = slices.Clone(cfg.StopTokens)
+		}
+		if cfg.ReturnLogits {
+			c.ReturnLogits = true
+		}
+	}}
 }
 
 func cloneLabels(labels map[string]string) map[string]string {
