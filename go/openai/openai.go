@@ -326,12 +326,20 @@ func GenerateOptions(req ChatCompletionRequest) ([]inference.GenerateOption, err
 	if err := ValidateRequest(req); err != nil {
 		return nil, err
 	}
-	return []inference.GenerateOption{
-		inference.WithTemperature(resolvedFloat(req.Temperature, DefaultTemperature)),
-		inference.WithTopP(resolvedFloat(req.TopP, DefaultTopP)),
-		inference.WithTopK(resolvedInt(req.TopK, DefaultTopK)),
-		inference.WithMaxTokens(resolvedInt(req.MaxTokens, DefaultMaxTokens)),
-	}, nil
+	// Fused option — one closure resolves all four fields against the
+	// adapter defaults in a single pass. The previous shape emitted four
+	// separate With* closures (one per field), each of which heap-
+	// allocated to capture its single argument.
+	temperature := resolvedFloat(req.Temperature, DefaultTemperature)
+	topP := resolvedFloat(req.TopP, DefaultTopP)
+	topK := resolvedInt(req.TopK, DefaultTopK)
+	maxTokens := resolvedInt(req.MaxTokens, DefaultMaxTokens)
+	return []inference.GenerateOption{func(c *inference.GenerateConfig) {
+		c.Temperature = temperature
+		c.TopP = topP
+		c.TopK = topK
+		c.MaxTokens = maxTokens
+	}}, nil
 }
 
 func resolvedFloat(value *float32, fallback float32) float32 {
