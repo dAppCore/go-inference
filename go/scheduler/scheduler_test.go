@@ -5,6 +5,7 @@ package scheduler
 import (
 	"context"
 	"iter"
+	"sync"
 	"testing"
 	"time"
 
@@ -63,14 +64,26 @@ func (m *blockingModel) Close() error                       { return nil }
 
 func TestModel_QueuesRequestsAndEmitsLatencyProbe_Good(t *testing.T) {
 	base := newBlockingModel()
-	var events []inference.ProbeEvent
+	var (
+		eventsMu sync.Mutex
+		events   []inference.ProbeEvent
+	)
+	snapshotEvents := func() []inference.ProbeEvent {
+		eventsMu.Lock()
+		defer eventsMu.Unlock()
+		out := make([]inference.ProbeEvent, len(events))
+		copy(out, events)
+		return out
+	}
 	scheduled := New(base, Config{
 		MaxConcurrent:   1,
 		MaxQueue:        1,
 		StreamBuffer:    1,
 		RequestIDPrefix: "test",
 		ProbeSink: inference.ProbeSinkFunc(func(event inference.ProbeEvent) {
+			eventsMu.Lock()
 			events = append(events, event)
+			eventsMu.Unlock()
 		}),
 	})
 
@@ -107,8 +120,9 @@ func TestModel_QueuesRequestsAndEmitsLatencyProbe_Good(t *testing.T) {
 	if secondToken.RequestID != second.ID || secondToken.Token.Text != "second" {
 		t.Fatalf("second token = %+v, want request %q text second", secondToken, second.ID)
 	}
-	if !hasSchedulerProbeEvent(events, "first_token") || !hasSchedulerProbeEvent(events, "complete") {
-		t.Fatalf("events = %+v, want first_token and complete scheduler probes", events)
+	snap := snapshotEvents()
+	if !hasSchedulerProbeEvent(snap, "first_token") || !hasSchedulerProbeEvent(snap, "complete") {
+		t.Fatalf("events = %+v, want first_token and complete scheduler probes", snap)
 	}
 }
 
