@@ -43,7 +43,17 @@ var (
 	// Callers compare via errors.Is(err, nil) or string-equality on
 	// .Error(), neither of which depends on pointer identity, so the
 	// sharing is safe across goroutines.
-	errStoreClosed = core.NewError("state file store is closed")
+	errStoreClosed           = core.NewError("state file store is closed")
+	errStoreNil              = core.NewError("state file store is nil")
+	errPayloadSizeInvalid    = core.NewError("state file store payload size is invalid")
+	errStreamWriterNil       = core.NewError("state file store stream writer is nil")
+	errMetadataTooLarge      = core.NewError("state file store metadata is too large")
+	errPayloadShort          = core.NewError("state file store streamed payload is shorter than declared")
+	errPayloadOversize       = core.NewError("state file store streamed payload is larger than declared")
+	errRefNonFileCodec       = core.NewError("state file store cannot resolve non-file chunk ref")
+	errRefSegmentMismatch    = core.NewError("state file store chunk ref segment mismatch")
+	errRefFrameOffsetTooBig  = core.NewError("state file store frame offset is too large")
+	errRefChunkIDMismatch    = core.NewError("state file store chunk ref id mismatch")
 )
 
 type Store struct {
@@ -228,13 +238,13 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 		return state.ChunkRef{}, err
 	}
 	if s == nil {
-		return state.ChunkRef{}, core.NewError("state file store is nil")
+		return state.ChunkRef{}, errStoreNil
 	}
 	if payloadSize < 0 {
-		return state.ChunkRef{}, core.NewError("state file store payload size is invalid")
+		return state.ChunkRef{}, errPayloadSizeInvalid
 	}
 	if write == nil {
-		return state.ChunkRef{}, core.NewError("state file store stream writer is nil")
+		return state.ChunkRef{}, errStreamWriterNil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -260,7 +270,7 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 	headerMeta := encodeRecordHeaderMeta(&meta, id, payloadSize)
 	metaSize := len(headerMeta) - recordHeaderLen
 	if uint64(metaSize) > uint64(^uint32(0)) {
-		return state.ChunkRef{}, core.NewError("state file store metadata is too large")
+		return state.ChunkRef{}, errMetadataTooLarge
 	}
 	offset := s.writeAt
 	if _, err := s.file.Seek(offset, stdio.SeekStart); err != nil {
@@ -278,7 +288,7 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 	}
 	if s.payloadWriter.remaining != 0 {
 		s.rollbackWriteLocked(offset)
-		return state.ChunkRef{}, core.NewError("state file store streamed payload is shorter than declared")
+		return state.ChunkRef{}, errPayloadShort
 	}
 	ref := state.ChunkRef{
 		ChunkID:        id,
@@ -348,10 +358,10 @@ func (s *Store) ResolveRefBytes(ctx context.Context, ref state.ChunkRef) (state.
 		return s.ResolveBytes(ctx, ref.ChunkID)
 	}
 	if ref.Codec != "" && ref.Codec != CodecFile && ref.Codec != CodecMemvidFile {
-		return state.Chunk{}, core.NewError("state file store cannot resolve non-file chunk ref")
+		return state.Chunk{}, errRefNonFileCodec
 	}
 	if ref.Segment != "" && ref.Segment != s.path {
-		return state.Chunk{}, core.NewError("state file store chunk ref segment mismatch")
+		return state.Chunk{}, errRefSegmentMismatch
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -378,7 +388,7 @@ func (s *Store) resolveBytesLocked(chunkID int) (state.Chunk, error) {
 
 func (s *Store) resolveRefBytesLocked(ref state.ChunkRef) (state.Chunk, error) {
 	if ref.FrameOffset > uint64(maxInt()) {
-		return state.Chunk{}, core.NewError("state file store frame offset is too large")
+		return state.Chunk{}, errRefFrameOffsetTooBig
 	}
 	offset := int64(ref.FrameOffset)
 	var headerBuf [recordHeaderLen]byte
@@ -394,7 +404,7 @@ func (s *Store) resolveRefBytesLocked(ref state.ChunkRef) (state.Chunk, error) {
 		return state.Chunk{}, err
 	}
 	if ref.ChunkID != 0 && id != ref.ChunkID {
-		return state.Chunk{}, core.NewError("state file store chunk ref id mismatch")
+		return state.Chunk{}, errRefChunkIDMismatch
 	}
 	metaSize, err := intFromUint64(uint64(record.metaSize), "metadata")
 	if err != nil {
@@ -1185,7 +1195,7 @@ type limitedPayloadWriter struct {
 
 func (w *limitedPayloadWriter) Write(data []byte) (int, error) {
 	if len(data) > w.remaining {
-		return 0, core.NewError("state file store streamed payload is larger than declared")
+		return 0, errPayloadOversize
 	}
 	n, err := w.file.Write(data)
 	w.remaining -= n
