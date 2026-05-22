@@ -319,7 +319,6 @@ type ModelReplacePlan struct {
 
 // PlanModelReplace returns a conservative state-reuse decision for model swaps.
 func PlanModelReplace(req ModelReplaceRequest) ModelReplacePlan {
-	reasons := []string{}
 	sameModel := sameModelIdentity(req.CurrentModel, req.NextModel)
 	sameRuntime := sameRuntimeIdentity(req.CurrentRuntime, req.NextRuntime)
 	sameAdapter := sameAdapterIdentity(req.CurrentAdapter, req.NextAdapter)
@@ -327,11 +326,22 @@ func PlanModelReplace(req ModelReplaceRequest) ModelReplacePlan {
 	case sameModel && sameRuntime && sameAdapter:
 		return ModelReplacePlan{Action: ModelReplaceReuseState, Compatible: true, Reasons: []string{"model, runtime, and adapter match"}}
 	case sameModel && sameAdapter:
+		// CheckpointState path: 0 or 1 reason. Pre-size the backing
+		// array so the append (when it fires) does not trigger an
+		// extra grow alloc; when sameRuntime keeps it empty the slice
+		// is still nil so json.Marshal honours omitempty correctly.
+		var reasons []string
 		if !sameRuntime {
+			reasons = make([]string, 0, 1)
 			reasons = append(reasons, "runtime or cache settings changed")
 		}
 		return ModelReplacePlan{Action: ModelReplaceCheckpointState, Compatible: true, Reasons: reasons}
 	default:
+		// SummaryWindow path: up to 2 reasons (model + adapter). The
+		// previous shape allocated `[]string{}` and then grew on each
+		// append — two allocs by the second append. Pre-sizing to 2
+		// drops the grow.
+		reasons := make([]string, 0, 2)
 		if !sameModel {
 			reasons = append(reasons, "model identity changed")
 		}
