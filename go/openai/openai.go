@@ -181,23 +181,82 @@ type ChatMessageDelta struct {
 }
 
 func (d ChatMessageDelta) MarshalJSON() ([]byte, error) {
+	// Hand-marshal — the inner anonymous-struct-with-string-pointers
+	// dance the previous shape used was paying for (a) pointer takes,
+	// (b) the encoding/json reflect walk, (c) the [] byte(string(...))
+	// round-trip. We need to emit the standard OpenAI delta payload:
+	//
+	//   {} | {"content":"..."} | {"role":"...","content":"..."}
+	//
+	// Role-only is structurally invalid (role priming always pairs with
+	// content, even if content is the empty string injected by the
+	// streamer), so we keep the same three cases the previous code
+	// covered.
 	if d.Role == "" && d.Content == "" {
 		return []byte("{}"), nil
 	}
-	payload := struct {
-		Role    *string `json:"role,omitempty"`
-		Content *string `json:"content,omitempty"`
-	}{}
+	// Size estimate — overhead is fixed JSON syntax + the two values.
+	// jsonStringLen returns the length the value will occupy when JSON-
+	// escaped; for typical OpenAI roles/content (ASCII without quotes)
+	// it equals len(s) + 2.
+	overhead := 2 // outer braces
 	if d.Role != "" {
-		role := d.Role
-		content := d.Content
-		payload.Role = &role
-		payload.Content = &content
+		overhead += len(`"role":`) + jsonStringLen(d.Role) + 1 // trailing comma when content also present
+		overhead += len(`"content":`) + jsonStringLen(d.Content)
 	} else {
-		content := d.Content
-		payload.Content = &content
+		overhead += len(`"content":`) + jsonStringLen(d.Content)
 	}
-	return []byte(core.JSONMarshalString(payload)), nil
+	buf := make([]byte, 0, overhead)
+	buf = append(buf, '{')
+	if d.Role != "" {
+		buf = append(buf, `"role":`...)
+		buf = appendJSONString(buf, d.Role)
+		buf = append(buf, ',', '"', 'c', 'o', 'n', 't', 'e', 'n', 't', '"', ':')
+		buf = appendJSONString(buf, d.Content)
+	} else {
+		buf = append(buf, `"content":`...)
+		buf = appendJSONString(buf, d.Content)
+	}
+	buf = append(buf, '}')
+	return buf, nil
+}
+
+// jsonStringLen returns the byte length s would occupy as a JSON string
+// (including the surrounding double quotes). Conservative — it sizes
+// for the worst case where every interior character is a single-byte
+// ASCII that doesn't need escaping. Callers that need exact sizing for
+// escape-bearing strings should grow the buffer reactively instead.
+func jsonStringLen(s string) int {
+	// Worst case: 2 quotes + escape budget. Six-byte \u00XX escape per
+	// control char, two-byte \X escape per quote/backslash. We assume
+	// ASCII-clean inputs (the OpenAI shape) and reserve a small slack
+	// for the rare escape — appendJSONString will fall through to
+	// encoding/json if it needs more.
+	return len(s) + 2
+}
+
+// appendJSONString appends s as a JSON string literal to buf. Returns
+// the grown buffer. Hand-encodes the common case (no control chars, no
+// quote, no backslash, no high-unicode); falls back to core.JSONMarshal
+// when an escape is needed.
+func appendJSONString(buf []byte, s string) []byte {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < 0x20 || c == '"' || c == '\\' {
+			// Fall back to encoding/json for the rare escape case.
+			result := core.JSONMarshal(s)
+			if !result.OK {
+				// Shouldn't happen — strings always marshal. Conservative
+				// empty-string emit on the impossible-path.
+				return append(buf, '"', '"')
+			}
+			return append(buf, result.Value.([]byte)...)
+		}
+	}
+	buf = append(buf, '"')
+	buf = append(buf, s...)
+	buf = append(buf, '"')
+	return buf
 }
 
 type ErrorResponse struct {
