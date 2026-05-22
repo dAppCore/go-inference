@@ -309,12 +309,174 @@ func DequantizePackedTensor(desc PackedTensorDescriptor, packed []byte, scales, 
 		return nil, core.NewError(core.Sprintf("jang: packed tensor %q is too large to dequantize on CPU", desc.Name))
 	}
 	out := make([]float32, int(desc.Elements))
-	for i := range out {
-		group := i / desc.GroupSize
-		q := unpackValue(packed, i, desc.Bits)
-		out[i] = float32(q)*scales[group] + biases[group]
+	groupSize := desc.GroupSize
+	// Dispatch by bit-width once outside the loop so the inner unpack
+	// becomes a single shift+mask the Go compiler can keep in registers,
+	// rather than paying the un-inlinable unpackValue call on every
+	// element. The dispatch also lets us hoist scale/bias per group —
+	// the original loop re-indexed scales[i/groupSize] + biases[i/groupSize]
+	// on every element, which is groupSize-1 redundant indexed reads + a
+	// division per group (with groupSize=64, that's a 64× reduction in
+	// per-element scale/bias work).
+	switch desc.Bits {
+	case 8:
+		dequantizeBit8(out, packed, scales, biases, groupSize)
+	case 4:
+		dequantizeBit4(out, packed, scales, biases, groupSize)
+	case 2:
+		dequantizeBit2(out, packed, scales, biases, groupSize)
+	case 1:
+		dequantizeBit1(out, packed, scales, biases, groupSize)
+	default:
+		// Generic walk for non-power-of-2 widths (3-bit and any future
+		// awkward width). Inline the bit-walk so we sidestep the
+		// fast-path switch in unpackValue — the outer dispatch already
+		// proved we won't hit a byte-aligned width here. Outer loop
+		// still hoists scale/bias per group.
+		dequantizeBitGeneric(out, packed, scales, biases, groupSize, desc.Bits)
 	}
 	return out, nil
+}
+
+// dequantizeBit8 walks the 8-bit-aligned packed path with the unpack
+// inlined. One byte per element, no shift required.
+func dequantizeBit8(out []float32, packed []byte, scales, biases []float32, groupSize int) {
+	for i := 0; i < len(out); {
+		group := i / groupSize
+		end := (group + 1) * groupSize
+		if end > len(out) {
+			end = len(out)
+		}
+		scale := scales[group]
+		bias := biases[group]
+		for ; i < end; i++ {
+			out[i] = float32(packed[i])*scale + bias
+		}
+	}
+}
+
+// dequantizeBit4 walks the 4-bit-nibble-packed path with the unpack
+// inlined. Two values per byte; low nibble for even indices, high
+// nibble for odd indices. The natural branch (rather than a branchless
+// bit-trick) avoids the Apple Silicon FCMPD-over-FMOV penalty observed
+// when bit-mux-style code regresses against direct if/else on M3.
+func dequantizeBit4(out []float32, packed []byte, scales, biases []float32, groupSize int) {
+	for i := 0; i < len(out); {
+		group := i / groupSize
+		end := (group + 1) * groupSize
+		if end > len(out) {
+			end = len(out)
+		}
+		scale := scales[group]
+		bias := biases[group]
+		for ; i < end; i++ {
+			b := packed[i>>1]
+			var q uint8
+			if i&1 == 0 {
+				q = b & 0x0F
+			} else {
+				q = b >> 4
+			}
+			out[i] = float32(q)*scale + bias
+		}
+	}
+}
+
+// dequantizeBit2 walks the 2-bit-packed path with the unpack inlined.
+// Four values per byte; the shift is `(i&3)<<1`. This is the dominant
+// MiniMax M2 routed-expert weight path.
+//
+// When the per-group walk lands on a byte boundary we batch 4 elements
+// per byte read — amortises the packed-slice load across the four 2-bit
+// lanes. The JANGTQ default groupSize=64 (16 bytes at 2-bit) lands on a
+// byte boundary at every group start, so the fast path covers the full
+// group body. Single-element prefix + suffix handles the (rare) case
+// where the group runs short at the tensor tail.
+func dequantizeBit2(out []float32, packed []byte, scales, biases []float32, groupSize int) {
+	for i := 0; i < len(out); {
+		group := i / groupSize
+		end := (group + 1) * groupSize
+		if end > len(out) {
+			end = len(out)
+		}
+		scale := scales[group]
+		bias := biases[group]
+		// Drain prefix elements until i is byte-aligned (i&3 == 0).
+		for ; i < end && (i&3) != 0; i++ {
+			q := (packed[i>>2] >> uint((i&3)<<1)) & 0x03
+			out[i] = float32(q)*scale + bias
+		}
+		// Walk 4-at-a-time on byte-aligned boundaries.
+		for i+4 <= end {
+			b := packed[i>>2]
+			out[i] = float32(b&0x03)*scale + bias
+			out[i+1] = float32((b>>2)&0x03)*scale + bias
+			out[i+2] = float32((b>>4)&0x03)*scale + bias
+			out[i+3] = float32((b>>6)&0x03)*scale + bias
+			i += 4
+		}
+		// Drain suffix.
+		for ; i < end; i++ {
+			q := (packed[i>>2] >> uint((i&3)<<1)) & 0x03
+			out[i] = float32(q)*scale + bias
+		}
+	}
+}
+
+// dequantizeBit1 walks the 1-bit-packed path with the unpack inlined.
+// Eight values per byte; mask + shift only.
+func dequantizeBit1(out []float32, packed []byte, scales, biases []float32, groupSize int) {
+	for i := 0; i < len(out); {
+		group := i / groupSize
+		end := (group + 1) * groupSize
+		if end > len(out) {
+			end = len(out)
+		}
+		scale := scales[group]
+		bias := biases[group]
+		for ; i < end; i++ {
+			q := (packed[i>>3] >> uint(i&7)) & 0x01
+			out[i] = float32(q)*scale + bias
+		}
+	}
+}
+
+// dequantizeBitGeneric walks any non-power-of-2 packed width (e.g. 3-bit)
+// with the bit-walk inlined directly. The outer DequantizePackedTensor
+// dispatch already proved we won't hit a byte-aligned width here, so we
+// skip the fast-path switch in unpackValue that would otherwise pay 4
+// extra comparisons per element.
+func dequantizeBitGeneric(out []float32, packed []byte, scales, biases []float32, groupSize, bits int) {
+	for i := 0; i < len(out); {
+		group := i / groupSize
+		end := (group + 1) * groupSize
+		if end > len(out) {
+			end = len(out)
+		}
+		scale := scales[group]
+		bias := biases[group]
+		for ; i < end; i++ {
+			bitOffset := i * bits
+			remaining := bits
+			shiftOut := 0
+			value := uint16(0)
+			for remaining > 0 {
+				byteIndex := bitOffset / 8
+				shiftIn := bitOffset % 8
+				take := remaining
+				if avail := 8 - shiftIn; avail < take {
+					take = avail
+				}
+				mask := uint16((1 << take) - 1)
+				chunk := (uint16(packed[byteIndex]) >> shiftIn) & mask
+				value |= chunk << shiftOut
+				remaining -= take
+				bitOffset += take
+				shiftOut += take
+			}
+			out[i] = float32(uint8(value))*scale + bias
+		}
+	}
 }
 
 //	packed, _ := jang.PackQuantizedValues(desc, values)
