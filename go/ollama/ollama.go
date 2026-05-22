@@ -106,21 +106,34 @@ func InferenceMessages(messages []Message) []inference.Message {
 }
 
 // GenerateOptions converts Ollama options into inference options.
+//
+// Fused option — one closure captures the whole Options value and
+// applies each set field in a single pass. The append cascade
+// previously allocated one closure per With* call (up to 4); the
+// fused form allocates the slice + a single closure capturing the
+// (value-type) Options struct.
+//
+// The empty-Options case (all zero-valued fields) returns nil so
+// callers paying inference.ApplyGenerateOpts skip a no-op closure
+// invocation and we avoid the slice+closure allocs.
 func GenerateOptions(options Options) []inference.GenerateOption {
-	opts := make([]inference.GenerateOption, 0, 4)
-	if options.NumPredict > 0 {
-		opts = append(opts, inference.WithMaxTokens(options.NumPredict))
+	if options.NumPredict <= 0 && options.Temperature == 0 && options.TopK <= 0 && options.TopP <= 0 {
+		return nil
 	}
-	if options.Temperature != 0 {
-		opts = append(opts, inference.WithTemperature(options.Temperature))
-	}
-	if options.TopK > 0 {
-		opts = append(opts, inference.WithTopK(options.TopK))
-	}
-	if options.TopP > 0 {
-		opts = append(opts, inference.WithTopP(options.TopP))
-	}
-	return opts
+	return []inference.GenerateOption{func(c *inference.GenerateConfig) {
+		if options.NumPredict > 0 {
+			c.MaxTokens = options.NumPredict
+		}
+		if options.Temperature != 0 {
+			c.Temperature = options.Temperature
+		}
+		if options.TopK > 0 {
+			c.TopK = options.TopK
+		}
+		if options.TopP > 0 {
+			c.TopP = options.TopP
+		}
+	}}
 }
 
 // NewChatResponse builds an Ollama chat response from metrics.
