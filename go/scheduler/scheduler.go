@@ -14,6 +14,7 @@ package scheduler
 import (
 	"context"
 	"iter"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -414,7 +415,15 @@ func (m *Model) setErr(err error) {
 }
 
 func (m *Model) nextRequestID() string {
-	return core.Sprintf("%s-%d", m.requestIDPrefix, m.nextID.Add(1))
+	// Hand-roll the "<prefix>-<seq>" format with strconv.AppendUint to
+	// skip fmt's per-call reflection and intermediate allocations. One
+	// alloc for the result string instead of three.
+	id := m.nextID.Add(1)
+	buf := make([]byte, 0, len(m.requestIDPrefix)+1+20)
+	buf = append(buf, m.requestIDPrefix...)
+	buf = append(buf, '-')
+	buf = strconv.AppendUint(buf, id, 10)
+	return string(buf)
 }
 
 func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
@@ -442,7 +451,10 @@ func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
 }
 
 func cloneLabels(labels map[string]string) map[string]string {
-	out := map[string]string{}
+	if len(labels) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(labels))
 	for key, value := range labels {
 		out[key] = value
 	}
