@@ -225,13 +225,23 @@ type TuningProfile struct {
 // workload-aware score. It deliberately stays transparent rather than claiming
 // a universal benchmark.
 func ScoreTuningMeasurements(workload TuningWorkload, m TuningMeasurements) TuningScore {
-	labels := map[string]string{}
+	// Labels map is lazy: most workloads emit zero label entries (Chat,
+	// Throughput, Default — and LongContext/AgentState/LowLatency when
+	// the optional measurements are missing). Eager-init then nil-out
+	// pays an empty-map alloc per call (~48 B/op) which escapes to heap
+	// because TuningScore returns the labels pointer. Lazy-init defers
+	// the alloc to the moment the first label key is written, and the
+	// no-label paths stay at zero heap allocs for the labels slot. When
+	// a label IS written, the map is pre-sized to the small upper bound
+	// for that workload to skip the default grow-from-empty.
+	var labels map[string]string
 	score := m.DecodeTokensPerSec
 	switch workload {
 	case TuningWorkloadLongContext:
 		score += m.PrefillTokensPerSec * 0.2
 		if m.PromptCacheHitRate > 0 {
 			score += m.PromptCacheHitRate * 100
+			labels = make(map[string]string, 1)
 			labels["prompt_cache"] = "enabled"
 		}
 	case TuningWorkloadAgentState:
@@ -239,10 +249,16 @@ func ScoreTuningMeasurements(workload TuningWorkload, m TuningMeasurements) Tuni
 		score += m.PromptCacheHitRate * 120
 		if m.KVRestoreMilliseconds > 0 {
 			score += 1000 / (m.KVRestoreMilliseconds + 1)
+			if labels == nil {
+				labels = make(map[string]string, 2)
+			}
 			labels["state_restore"] = "enabled"
 		}
 		if m.StateBundleMilliseconds > 0 {
 			score += 500 / (m.StateBundleMilliseconds + 1)
+			if labels == nil {
+				labels = make(map[string]string, 2)
+			}
 			labels["state_bundle"] = "enabled"
 		}
 	case TuningWorkloadThroughput:
@@ -250,6 +266,7 @@ func ScoreTuningMeasurements(workload TuningWorkload, m TuningMeasurements) Tuni
 	case TuningWorkloadLowLatency:
 		if m.FirstTokenMilliseconds > 0 {
 			score += 1000 / (m.FirstTokenMilliseconds + 1)
+			labels = make(map[string]string, 1)
 			labels["first_token"] = "measured"
 		}
 		if m.TotalMilliseconds > 0 {
@@ -257,9 +274,6 @@ func ScoreTuningMeasurements(workload TuningWorkload, m TuningMeasurements) Tuni
 		}
 	default:
 		score += m.PrefillTokensPerSec * 0.02
-	}
-	if len(labels) == 0 {
-		labels = nil
 	}
 	return TuningScore{
 		Workload:               workload,
