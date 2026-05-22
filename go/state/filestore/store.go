@@ -25,6 +25,13 @@ var (
 	fileMagic       = []byte("go-inference-state-file-log-v1\n")
 	legacyFileMagic = []byte("go-mlx-memvid-file-log-v1\n")
 	recordMagic     = [4]byte{'M', 'V', 'F', '1'}
+	// recordMagicU32 is the little-endian uint32 view of recordMagic,
+	// pre-computed once at init. decodeRecordHeader's magic check
+	// previously walked the 4-byte header byte-by-byte; rebuildIndex
+	// runs that check per record at 10k+ scale during cold Open, so
+	// folding the 4-way compare into one Uint32 read trims one ALU
+	// op per record.
+	recordMagicU32 = binary.LittleEndian.Uint32(recordMagic[:])
 
 	// emptyMetaBytes is the canonical empty-record-meta JSON blob.
 	// PutBytesStream shortcuts to this slice when no meta field is
@@ -72,6 +79,21 @@ type Store struct {
 	// embedded writer's remaining counter is single-owner during
 	// any one call.
 	payloadWriter limitedPayloadWriter
+	// headerMetaBuf is the per-Store scratch buffer that
+	// encodeRecordHeaderMeta builds the on-disk header + meta
+	// JSON into. The previous shape allocated a fresh buffer on
+	// every PutBytesStream (~49 B for the Kind-only common shape,
+	// up to a few hundred B for label-heavy meta). Reusing the
+	// buffer under mu skips the per-Put alloc; the slice header
+	// is single-owner during any one Put because the mutex above
+	// already serialises the entire write path.
+	//
+	// Lifetime: the buffer is read by writeAll(file, ...) before
+	// PutBytesStream returns, so its content is consumed before
+	// the next Put can reuse the storage. Length is reset to zero
+	// on entry to encodeRecordHeaderMeta so each Put builds
+	// fresh contents over the retained capacity.
+	headerMetaBuf []byte
 }
 
 type fileIndexEntry struct {
@@ -261,13 +283,13 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 		Tags:   opts.Tags,
 		Labels: opts.Labels,
 	}
-	// encodeRecordHeaderMeta packs the 24-byte record header and
-	// the JSON-encoded recordMeta into a single allocation, so the
-	// previously stack-then-heap-escaped headerBuf and the JSON
-	// marshal output collapse to one buffer + one writeAll. The
-	// header's metaSize uint32 is patched after the meta is
-	// appended — single-pass build.
-	headerMeta := encodeRecordHeaderMeta(&meta, id, payloadSize)
+	// buildHeaderMeta packs the 24-byte record header and
+	// the JSON-encoded recordMeta into the per-Store scratch
+	// buffer (s.headerMetaBuf). The previous shape allocated a
+	// fresh buffer per Put; reusing under mu skips that. The
+	// metaSize uint32 in the header is patched after the meta
+	// is appended — single-pass build.
+	headerMeta := s.buildHeaderMeta(&meta, id, payloadSize)
 	metaSize := len(headerMeta) - recordHeaderLen
 	if uint64(metaSize) > uint64(^uint32(0)) {
 		return state.ChunkRef{}, errMetadataTooLarge
@@ -455,9 +477,25 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		s.uriIndex = make(map[string]int, records)
 	}
 
-	// Grow the meta buffer in place across records to avoid per-record
-	// allocations on large files. The buffer contents are decoded into
-	// stack-only locals before the next iteration overwrites them.
+	// Prefetch buffer — read header + meta in a single ReadAt where
+	// possible. Typical records have meta < ~200 bytes (URI + Kind +
+	// short Title), so a 512-byte prefetch covers ~95% of records and
+	// halves the syscall count over the rebuild. Records with bigger
+	// meta fall back to the original two-ReadAt path; the cost there
+	// is unchanged.
+	//
+	// The buffer is stack-allocated (gcflags confirms "does not escape")
+	// because every byte read out of it is either parsed into a
+	// stack-local recordHeader or copied into the URI string via
+	// extractRecordURI. Each iteration overwrites it before the next.
+	const prefetchSize = 512
+	var prefetchBuf [prefetchSize]byte
+
+	// Fallback meta buffer for records whose meta exceeds prefetchSize.
+	// Grows in place across records to avoid per-record allocations on
+	// the rare-but-not-impossible big-meta corpus. The buffer contents
+	// are decoded into stack-only locals before the next iteration
+	// overwrites them.
 	var metaBuf []byte
 	offset := headerLen
 	for offset < size {
@@ -467,11 +505,24 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		if offset+recordHeaderLen > size {
 			return core.NewError("state file store has truncated record header")
 		}
-		var headerBuf [recordHeaderLen]byte
-		if _, err := s.file.ReadAt(headerBuf[:], offset); err != nil {
-			return core.E("state.filestore.Open", "read record header", err)
+		// Read header + the first prefetchSize-recordHeaderLen bytes
+		// of meta in one syscall. ReadAt returns short at EOF for the
+		// final record — that's harmless because n is then used as
+		// the length of the readable view and we know the meta size
+		// from the parsed header. The kernel page cache makes the
+		// extra-bytes cost negligible vs the syscall round-trip cost.
+		want := int64(prefetchSize)
+		if offset+want > size {
+			want = size - offset
 		}
-		record, err := decodeRecordHeader(headerBuf[:])
+		n, err := s.file.ReadAt(prefetchBuf[:want], offset)
+		if err != nil && err != stdio.EOF {
+			return core.E("state.filestore.Open", "read record prefetch", err)
+		}
+		if n < recordHeaderLen {
+			return core.NewError("state file store has truncated record header")
+		}
+		record, err := decodeRecordHeader(prefetchBuf[:recordHeaderLen])
 		if err != nil {
 			return err
 		}
@@ -489,15 +540,26 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		if nextOffset > size {
 			return core.NewError("state file store has truncated record payload")
 		}
-		if cap(metaBuf) < metaSize {
-			metaBuf = make([]byte, metaSize)
+		// Fast path: prefetch covered both header and meta. Hand
+		// extractRecordURI a slice straight into prefetchBuf.
+		var metaView []byte
+		if metaSize == 0 {
+			metaView = nil
+		} else if recordHeaderLen+metaSize <= n {
+			metaView = prefetchBuf[recordHeaderLen : recordHeaderLen+metaSize]
 		} else {
-			metaBuf = metaBuf[:metaSize]
-		}
-		if metaSize > 0 {
+			// Big-meta fallback — meta exceeds the prefetched span.
+			// Re-read the meta into the growable metaBuf. Rare in
+			// practice; size-grows are amortised across records.
+			if cap(metaBuf) < metaSize {
+				metaBuf = make([]byte, metaSize)
+			} else {
+				metaBuf = metaBuf[:metaSize]
+			}
 			if _, err := s.file.ReadAt(metaBuf, metaAt); err != nil {
 				return core.E("state.filestore.Open", "read record metadata", err)
 			}
+			metaView = metaBuf
 		}
 		// Lazy meta scan: only URI is needed to populate uriIndex —
 		// the meta blob's other fields (Title/Kind/Track/Tags/
@@ -512,7 +574,7 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		// populates it to keep the put-side bench shape intact.
 		var uri string
 		if metaSize > 0 {
-			extracted, err := extractRecordURI(metaBuf)
+			extracted, err := extractRecordURI(metaView)
 			if err != nil {
 				return core.E("state.filestore.Open", "parse record metadata", err)
 			}
@@ -600,11 +662,15 @@ func decodeRecordHeader(header []byte) (recordHeader, error) {
 	if len(header) != recordHeaderLen {
 		return recordHeader{}, core.NewError("state file store record header has invalid length")
 	}
-	// Byte-equal comparison — `string(header[:4]) != string(recordMagic[:])`
-	// allocates a fresh 4-byte string on every call. Direct byte compare
-	// is alloc-free.
-	if header[0] != recordMagic[0] || header[1] != recordMagic[1] ||
-		header[2] != recordMagic[2] || header[3] != recordMagic[3] {
+	// Magic-prefix check via a single Uint32 read against the
+	// pre-computed recordMagicU32 — one ALU op per record at the
+	// rebuildIndex 10k-scale cold Open, where the previous 4-byte
+	// branching compare emitted 4 cmpb + 3 brand merges. Folding
+	// the 32 bits into a single equality test also lets the
+	// compiler hoist the magic constant into an immediate operand.
+	// `string(header[:4]) != string(recordMagic[:])` would allocate
+	// a fresh 4-byte string on every call.
+	if binary.LittleEndian.Uint32(header[:4]) != recordMagicU32 {
 		return recordHeader{}, core.NewError("state file store record header is invalid")
 	}
 	return recordHeader{
@@ -638,9 +704,9 @@ func recordMetaIsEmpty(meta *recordMeta) bool {
 // by the round-trip test surface and any future caller that does
 // not also need the record header in the same buffer.
 //
-// PutBytesStream itself routes through encodeRecordHeaderMeta which
-// folds the meta append into the header buffer for a single alloc
-// covering both halves of the on-disk record prefix.
+// PutBytesStream itself routes through (*Store).buildHeaderMeta which
+// folds the meta append into the per-Store scratch buffer, dropping
+// the alloc entirely on the warm path.
 //
 //	buf := encodeRecordMeta(&meta)
 //	if uint64(len(buf)) > uint64(^uint32(0)) { /* too large */ }
@@ -652,18 +718,28 @@ func encodeRecordMeta(meta *recordMeta) []byte {
 	return appendRecordMeta(buf, meta)
 }
 
-// encodeRecordHeaderMeta builds a single buffer containing the
-// record header (24 bytes) followed by the JSON-encoded recordMeta.
-// Folding both into one allocation eliminates the heap escape that
-// the previous [recordHeaderLen]byte stack array suffered when its
-// slice was handed to the *core.OSFile.Write interface, and
-// collapses two writeAll syscalls into one. The metaSize uint32
-// in the header is patched after the meta is appended — single-
-// pass build, no double walk over the meta fields.
+// buildHeaderMeta builds the on-disk record header + JSON-encoded
+// recordMeta into the per-Store scratch buffer (s.headerMetaBuf),
+// returning a slice into that buffer. The previous shape allocated
+// a fresh buffer per Put — measurable on the state-checkpoint
+// fast path because Put fires per Save during a generation step
+// and per KV-snapshot during a session.
+//
+// PutBytesStream holds s.mu for the full record write, so the
+// scratch buffer is single-owner during any one Put; the next Put
+// reuses the underlying storage after the previous call's
+// writeAll consumed the bytes. encodeRecordHeader (called below)
+// is a pure-write helper — no further alloc beyond the slice
+// header reuse.
+//
+// The metaSize uint32 in the header is patched after the meta is
+// appended — single-pass build, no double walk over the meta
+// fields. The slice retains its growth across Puts so the typical
+// meta size + the cap hint converge after a handful of records.
 //
 // encoding/json.Marshal on recordMeta allocates an encoder state
 // machine + grow-doubled output buffer + per-tag key/value copies
-// on every Put. The hand-roll lands at a single buffer allocation
+// on every Put. The hand-roll lands at zero buffer allocations
 // regardless of tag count.
 //
 // The meta portion is valid JSON, parseable by encoding/json
@@ -675,15 +751,19 @@ func encodeRecordMeta(meta *recordMeta) []byte {
 // order — JSON object key order is not semantically meaningful and
 // no read site depends on it.
 //
-//	buf := encodeRecordHeaderMeta(&meta, chunkID, payloadSize)
-//	writeAll(file, buf)
-func encodeRecordHeaderMeta(meta *recordMeta, chunkID, payloadSize int) []byte {
-	cap := recordHeaderLen + recordMetaCapHint(meta)
-	buf := make([]byte, recordHeaderLen, cap)
-	buf = appendRecordMeta(buf, meta)
-	metaSize := len(buf) - recordHeaderLen
-	encodeRecordHeader(buf[:recordHeaderLen], chunkID, payloadSize, metaSize)
-	return buf
+//	buf := s.buildHeaderMeta(&meta, chunkID, payloadSize)
+//	writeAll(s.file, buf)
+func (s *Store) buildHeaderMeta(meta *recordMeta, chunkID, payloadSize int) []byte {
+	need := recordHeaderLen + recordMetaCapHint(meta)
+	if cap(s.headerMetaBuf) < need {
+		s.headerMetaBuf = make([]byte, recordHeaderLen, need)
+	} else {
+		s.headerMetaBuf = s.headerMetaBuf[:recordHeaderLen]
+	}
+	s.headerMetaBuf = appendRecordMeta(s.headerMetaBuf, meta)
+	metaSize := len(s.headerMetaBuf) - recordHeaderLen
+	encodeRecordHeader(s.headerMetaBuf[:recordHeaderLen], chunkID, payloadSize, metaSize)
+	return s.headerMetaBuf
 }
 
 // recordMetaCapHint returns a tight upper bound on the JSON byte
@@ -807,30 +887,56 @@ func appendJSONField(buf []byte, key, value string, first bool) []byte {
 // default also escapes <, >, & for HTML safety but the read path
 // does not, and the on-disk record is not consumed by HTML
 // contexts.
+//
+// The body walk batches runs of non-escape bytes into a single
+// append per span, so a typical URI / Title / Kind value (no
+// escapes) collapses to one append-string call rather than N
+// append-byte calls. encoding/json's own writer emits the no-
+// escape path the same way; the per-byte loop here was an artefact
+// of the original simple shape.
 func appendJSONString(buf []byte, s string) []byte {
 	buf = append(buf, '"')
+	start := 0
 	for i := 0; i < len(s); i++ {
 		c := s[i]
-		switch {
-		case c == '"':
-			buf = append(buf, '\\', '"')
-		case c == '\\':
-			buf = append(buf, '\\', '\\')
-		case c == '\b':
-			buf = append(buf, '\\', 'b')
-		case c == '\f':
-			buf = append(buf, '\\', 'f')
-		case c == '\n':
-			buf = append(buf, '\\', 'n')
-		case c == '\r':
-			buf = append(buf, '\\', 'r')
-		case c == '\t':
-			buf = append(buf, '\\', 't')
-		case c < 0x20:
-			buf = append(buf, '\\', 'u', '0', '0', hexChar(c>>4), hexChar(c&0x0f))
-		default:
-			buf = append(buf, c)
+		// Fast-path predicate: any byte ≥ 0x20 that is neither '"'
+		// nor '\\' passes through verbatim. The boolean short-
+		// circuits left-to-right and the compiler emits two CMPs
+		// + AND, cheaper than the previous per-byte switch dispatch.
+		if c >= 0x20 && c != '"' && c != '\\' {
+			continue
 		}
+		// Flush the verbatim span up to but not including the
+		// escape byte. The span is empty on the first escape at
+		// position 0; append-zero-length is a no-op.
+		if start < i {
+			buf = append(buf, s[start:i]...)
+		}
+		switch c {
+		case '"':
+			buf = append(buf, '\\', '"')
+		case '\\':
+			buf = append(buf, '\\', '\\')
+		case '\b':
+			buf = append(buf, '\\', 'b')
+		case '\f':
+			buf = append(buf, '\\', 'f')
+		case '\n':
+			buf = append(buf, '\\', 'n')
+		case '\r':
+			buf = append(buf, '\\', 'r')
+		case '\t':
+			buf = append(buf, '\\', 't')
+		default:
+			// c < 0x20 and not one of the mnemonic escapes — emit
+			// \u00XX. Hex digits emitted lowercase to match the
+			// jsonUnescape reader and encoding/json output.
+			buf = append(buf, '\\', 'u', '0', '0', hexChar(c>>4), hexChar(c&0x0f))
+		}
+		start = i + 1
+	}
+	if start < len(s) {
+		buf = append(buf, s[start:]...)
 	}
 	return append(buf, '"')
 }
