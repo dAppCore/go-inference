@@ -120,7 +120,16 @@ func (m *Model) Schedule(ctx context.Context, req inference.ScheduledRequest) (i
 	select {
 	case m.queue <- j:
 		m.emitProbe(j, "queued", 0, 0, false)
-		return inference.RequestHandle{ID: req.ID, Model: inference.ModelIdentity{ID: req.Model}, Labels: cloneLabels(req.Labels)}, j.out, nil
+		// handle.Labels mirrors the request's caller-supplied Labels —
+		// skip the map clone when the request has none. Saves one alloc
+		// per Schedule in the burst-fan-out path where most producers
+		// arrive without custom labels. When labels ARE present, we
+		// still clone so callers can't mutate our run-loop view.
+		var handleLabels map[string]string
+		if len(req.Labels) > 0 {
+			handleLabels = cloneLabels(req.Labels)
+		}
+		return inference.RequestHandle{ID: req.ID, Model: inference.ModelIdentity{ID: req.Model}, Labels: handleLabels}, j.out, nil
 	case <-ctx.Done():
 		m.unregister(req.ID)
 		cancel()
