@@ -305,18 +305,37 @@ func (m *Model) run(j *job) {
 	}
 	startedAt := time.Now()
 	m.emitProbe(j, "start", queueLatency, 0, false)
+	// queueLatency is fixed for the whole request; format once and
+	// reuse across every emitted token instead of paying a Sprintf per
+	// token. firstTokenLatencyMS materialises the moment we see the
+	// first token, then stays constant for the remainder of the stream.
+	queueLatencyMS := millisString(queueLatency)
+	firstTokenLatencyMS := ""
 	firstToken := true
+	requestLabelsCount := len(j.req.Labels)
 	for token := range m.baseTokens(j) {
 		firstLatency := time.Duration(0)
 		if firstToken {
 			firstLatency = time.Since(startedAt)
 			firstToken = false
 			m.emitProbe(j, "first_token", queueLatency, firstLatency, false)
+			if firstLatency > 0 {
+				firstTokenLatencyMS = millisString(firstLatency)
+			}
 		}
-		labels := cloneLabels(j.req.Labels)
-		labels["queue_latency_ms"] = millisString(queueLatency)
-		if firstLatency > 0 {
-			labels["first_token_latency_ms"] = millisString(firstLatency)
+		// Build the per-token label map with a known final size so the
+		// map grows without re-bucketing as we assign.
+		extra := 1
+		if firstTokenLatencyMS != "" {
+			extra = 2
+		}
+		labels := make(map[string]string, requestLabelsCount+extra)
+		for key, value := range j.req.Labels {
+			labels[key] = value
+		}
+		labels["queue_latency_ms"] = queueLatencyMS
+		if firstTokenLatencyMS != "" {
+			labels["first_token_latency_ms"] = firstTokenLatencyMS
 		}
 		select {
 		case <-j.ctx.Done():
