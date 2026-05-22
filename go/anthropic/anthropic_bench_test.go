@@ -142,6 +142,36 @@ func BenchmarkAnthropic_AppendMessageResponse_WithStopReason(b *testing.B) {
 	}
 }
 
+// --- Hand-rolled AppendMessageRequest — client-side request encode.
+// Outbound proxy / SDK path serialises one MessageRequest per turn.
+
+func BenchmarkAnthropic_AppendMessageRequest_SingleTurn(b *testing.B) {
+	req := buildAnthropicRequest(1)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		anthropicSinkBytes = AppendMessageRequest(make([]byte, 0, MessageRequestSize(req)), req)
+	}
+}
+
+func BenchmarkAnthropic_AppendMessageRequest_FiveTurn(b *testing.B) {
+	req := buildAnthropicRequest(5)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		anthropicSinkBytes = AppendMessageRequest(make([]byte, 0, MessageRequestSize(req)), req)
+	}
+}
+
+func BenchmarkAnthropic_AppendMessageRequest_TwentyTurn(b *testing.B) {
+	req := buildAnthropicRequest(20)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		anthropicSinkBytes = AppendMessageRequest(make([]byte, 0, MessageRequestSize(req)), req)
+	}
+}
+
 // --- JSON Unmarshal — fires at request entry ---
 
 func BenchmarkAnthropic_UnmarshalMessageRequest_SingleTurn(b *testing.B) {
