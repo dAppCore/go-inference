@@ -416,6 +416,19 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		return err
 	}
 
+	// Best-effort capacity hint — average observed record (24-byte
+	// header + ~60-byte meta + 64-byte payload at the bench scale)
+	// lands near 150 bytes. Overshoot is harmless: Go maps shrink
+	// lazily; undershoot triggers cascade rehash. The divisor is
+	// tuned to slot just under the typical record size so the initial
+	// bucket count covers the corpus without rehash. Open allocates
+	// fresh empty maps at entry so we can swap them out for sized
+	// versions in place.
+	if records := int((size - headerLen) / 128); records > 0 && len(s.index) == 0 {
+		s.index = make(map[int]fileIndexEntry, records)
+		s.uriIndex = make(map[string]int, records)
+	}
+
 	// Grow the meta buffer in place across records to avoid per-record
 	// allocations on large files. The buffer contents are decoded into
 	// stack-only locals before the next iteration overwrites them.
