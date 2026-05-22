@@ -14,6 +14,7 @@ package scheduler
 import (
 	"context"
 	"iter"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -305,18 +306,37 @@ func (m *Model) run(j *job) {
 	}
 	startedAt := time.Now()
 	m.emitProbe(j, "start", queueLatency, 0, false)
+	// queueLatency is fixed for the whole request; format once and
+	// reuse across every emitted token instead of paying a Sprintf per
+	// token. firstTokenLatencyMS materialises the moment we see the
+	// first token, then stays constant for the remainder of the stream.
+	queueLatencyMS := millisString(queueLatency)
+	firstTokenLatencyMS := ""
 	firstToken := true
+	requestLabelsCount := len(j.req.Labels)
 	for token := range m.baseTokens(j) {
 		firstLatency := time.Duration(0)
 		if firstToken {
 			firstLatency = time.Since(startedAt)
 			firstToken = false
 			m.emitProbe(j, "first_token", queueLatency, firstLatency, false)
+			if firstLatency > 0 {
+				firstTokenLatencyMS = millisString(firstLatency)
+			}
 		}
-		labels := cloneLabels(j.req.Labels)
-		labels["queue_latency_ms"] = millisString(queueLatency)
-		if firstLatency > 0 {
-			labels["first_token_latency_ms"] = millisString(firstLatency)
+		// Build the per-token label map with a known final size so the
+		// map grows without re-bucketing as we assign.
+		extra := 1
+		if firstTokenLatencyMS != "" {
+			extra = 2
+		}
+		labels := make(map[string]string, requestLabelsCount+extra)
+		for key, value := range j.req.Labels {
+			labels[key] = value
+		}
+		labels["queue_latency_ms"] = queueLatencyMS
+		if firstTokenLatencyMS != "" {
+			labels["first_token_latency_ms"] = firstTokenLatencyMS
 		}
 		select {
 		case <-j.ctx.Done():
@@ -395,7 +415,15 @@ func (m *Model) setErr(err error) {
 }
 
 func (m *Model) nextRequestID() string {
-	return core.Sprintf("%s-%d", m.requestIDPrefix, m.nextID.Add(1))
+	// Hand-roll the "<prefix>-<seq>" format with strconv.AppendUint to
+	// skip fmt's per-call reflection and intermediate allocations. One
+	// alloc for the result string instead of three.
+	id := m.nextID.Add(1)
+	buf := make([]byte, 0, len(m.requestIDPrefix)+1+20)
+	buf = append(buf, m.requestIDPrefix...)
+	buf = append(buf, '-')
+	buf = strconv.AppendUint(buf, id, 10)
+	return string(buf)
 }
 
 func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
@@ -423,7 +451,10 @@ func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
 }
 
 func cloneLabels(labels map[string]string) map[string]string {
-	out := map[string]string{}
+	if len(labels) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(labels))
 	for key, value := range labels {
 		out[key] = value
 	}

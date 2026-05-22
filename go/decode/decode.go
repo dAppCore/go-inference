@@ -193,8 +193,18 @@ func PromptLookup(ctx context.Context, cfg PromptLookupConfig) (Result, error) {
 //	text := decode.TokensText(result.Tokens)
 func TokensText(tokens []Token) string {
 	builder := core.NewBuilder()
-	for _, token := range tokens {
-		builder.WriteString(firstNonEmpty(token.Text, token.Value))
+	// Pre-size the builder to avoid reallocation as the result grows;
+	// most tokens fall back to Text first so use it for the estimate.
+	total := 0
+	for i := range tokens {
+		total += len(tokens[i].Text)
+		if tokens[i].Text == "" {
+			total += len(tokens[i].Value)
+		}
+	}
+	builder.Grow(total)
+	for i := range tokens {
+		builder.WriteString(tokenSurface(tokens[i]))
 	}
 	return builder.String()
 }
@@ -217,8 +227,8 @@ func TokenEqual(a, b Token) bool {
 	if a.ID != b.ID {
 		return false
 	}
-	aText := firstNonEmpty(a.Text, a.Value)
-	bText := firstNonEmpty(b.Text, b.Value)
+	aText := tokenSurface(a)
+	bText := tokenSurface(b)
 	if aText == "" || bText == "" {
 		return true
 	}
@@ -275,13 +285,39 @@ func cloneToken(token Token) Token {
 	return Token{ID: token.ID, Value: token.Value, Text: token.Text}
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if core.Trim(value) != "" {
-			return value
-		}
+// tokenSurface returns the token's surface form, preferring Text over
+// Value. Inlined two-arg path used by every accept/reject decision; the
+// previous variadic firstNonEmpty allocated a []string per call.
+func tokenSurface(t Token) string {
+	if hasNonSpace(t.Text) {
+		return t.Text
+	}
+	if hasNonSpace(t.Value) {
+		return t.Value
 	}
 	return ""
+}
+
+// hasNonSpace reports whether s contains any non-whitespace byte. Avoids
+// strings.TrimSpace's per-call string allocation when the input contains
+// leading or trailing whitespace. Falls back to core.Trim on multi-byte
+// input to preserve Unicode whitespace semantics.
+func hasNonSpace(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x80 {
+			// Multi-byte rune may include Unicode whitespace
+			// (NBSP, ideographic space, etc.); defer to core.Trim.
+			return core.Trim(s) != ""
+		}
+		switch c {
+		case ' ', '\t', '\n', '\v', '\f', '\r':
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func nonZeroDuration(d time.Duration) time.Duration {
