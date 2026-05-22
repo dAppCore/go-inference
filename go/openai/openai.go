@@ -15,6 +15,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/jsonenc"
 )
 
 const DefaultChatCompletionsPath = "/v1/chat/completions"
@@ -141,10 +142,10 @@ func (d ChatMessageDelta) MarshalJSON() ([]byte, error) {
 	buf := make([]byte, 0, size)
 	buf = append(buf, '{')
 	if d.Role != "" {
-		buf = appendStringField(buf, "role", d.Role, false)
-		buf = appendStringField(buf, "content", d.Content, true)
+		buf = jsonenc.AppendStringField(buf, "role", d.Role, false)
+		buf = jsonenc.AppendStringField(buf, "content", d.Content, true)
 	} else {
-		buf = appendStringField(buf, "content", d.Content, false)
+		buf = jsonenc.AppendStringField(buf, "content", d.Content, false)
 	}
 	return append(buf, '}'), nil
 }

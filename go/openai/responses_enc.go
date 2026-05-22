@@ -3,8 +3,8 @@
 // Hand-rolled encoders for the OpenAI Responses API wire shapes —
 // Response and ResponseStreamEvent. Same W9-D shape as the chat-
 // completions encoders: single-buffer emission, no reflect, the
-// shared appendStringField / appendIntField primitives from
-// jsonenc.go.
+// shared jsonenc.AppendStringField / jsonenc.AppendIntField
+// primitives from dappco.re/go/inference/jsonenc (W9-Z lift).
 //
 // Responses is the OpenAI v1/responses endpoint — the per-token
 // stream event encoder fires per generated text delta on the
@@ -14,12 +14,14 @@
 
 package openai
 
+import "dappco.re/go/inference/jsonenc"
+
 // appendResponseOutputText walks one ResponseOutputText into buf.
 // Two ASCII string fields in canonical order.
 func appendResponseOutputText(buf []byte, item ResponseOutputText) []byte {
 	buf = append(buf, '{')
-	buf = appendStringField(buf, "type", item.Type, false)
-	buf = appendStringField(buf, "text", item.Text, true)
+	buf = jsonenc.AppendStringField(buf, "type", item.Type, false)
+	buf = jsonenc.AppendStringField(buf, "text", item.Text, true)
 	return append(buf, '}')
 }
 
@@ -29,11 +31,11 @@ func appendResponseOutputMessage(buf []byte, msg ResponseOutputMessage) []byte {
 	buf = append(buf, '{')
 	leading := false
 	if msg.ID != "" {
-		buf = appendStringField(buf, "id", msg.ID, false)
+		buf = jsonenc.AppendStringField(buf, "id", msg.ID, false)
 		leading = true
 	}
-	buf = appendStringField(buf, "type", msg.Type, leading)
-	buf = appendStringField(buf, "role", msg.Role, true)
+	buf = jsonenc.AppendStringField(buf, "type", msg.Type, leading)
+	buf = jsonenc.AppendStringField(buf, "role", msg.Role, true)
 	buf = append(buf, ',', '"', 'c', 'o', 'n', 't', 'e', 'n', 't', '"', ':', '[')
 	for i, item := range msg.Content {
 		if i > 0 {
@@ -48,9 +50,9 @@ func appendResponseOutputMessage(buf []byte, msg ResponseOutputMessage) []byte {
 // fields — input_tokens, output_tokens, total_tokens.
 func appendResponseUsage(buf []byte, usage ResponseUsage) []byte {
 	buf = append(buf, '{')
-	buf = appendIntField(buf, "input_tokens", usage.InputTokens, false)
-	buf = appendIntField(buf, "output_tokens", usage.OutputTokens, true)
-	buf = appendIntField(buf, "total_tokens", usage.TotalTokens, true)
+	buf = jsonenc.AppendIntField(buf, "input_tokens", usage.InputTokens, false)
+	buf = jsonenc.AppendIntField(buf, "output_tokens", usage.OutputTokens, true)
+	buf = jsonenc.AppendIntField(buf, "total_tokens", usage.TotalTokens, true)
 	return append(buf, '}')
 }
 
@@ -59,10 +61,10 @@ func appendResponseUsage(buf []byte, usage ResponseUsage) []byte {
 // identical to encoding/json.Marshal output.
 func appendResponse(buf []byte, resp Response) []byte {
 	buf = append(buf, '{')
-	buf = appendStringField(buf, "id", resp.ID, false)
-	buf = appendStringField(buf, "object", resp.Object, true)
-	buf = appendInt64Field(buf, "created", resp.Created, true)
-	buf = appendStringField(buf, "model", resp.Model, true)
+	buf = jsonenc.AppendStringField(buf, "id", resp.ID, false)
+	buf = jsonenc.AppendStringField(buf, "object", resp.Object, true)
+	buf = jsonenc.AppendInt64Field(buf, "created", resp.Created, true)
+	buf = jsonenc.AppendStringField(buf, "model", resp.Model, true)
 	buf = append(buf, ',', '"', 'o', 'u', 't', 'p', 'u', 't', '"', ':', '[')
 	for i, msg := range resp.Output {
 		if i > 0 {
@@ -74,7 +76,7 @@ func appendResponse(buf []byte, resp Response) []byte {
 	buf = appendResponseUsage(buf, resp.Usage)
 	if resp.Thought != nil {
 		buf = append(buf, ',', '"', 't', 'h', 'o', 'u', 'g', 'h', 't', '"', ':')
-		buf = appendJSONString(buf, *resp.Thought)
+		buf = jsonenc.AppendJSONString(buf, *resp.Thought)
 	}
 	return append(buf, '}')
 }
@@ -114,17 +116,17 @@ func responseSize(resp Response) int {
 // omitempty — emit only the fields set on the event.
 func appendResponseStreamEvent(buf []byte, event ResponseStreamEvent) []byte {
 	buf = append(buf, '{')
-	buf = appendStringField(buf, "type", event.Type, false)
+	buf = jsonenc.AppendStringField(buf, "type", event.Type, false)
 	if event.Response != nil {
 		buf = append(buf, ',', '"', 'r', 'e', 's', 'p', 'o', 'n', 's', 'e', '"', ':')
 		buf = appendResponse(buf, *event.Response)
 	}
 	if event.Delta != "" {
-		buf = appendStringField(buf, "delta", event.Delta, true)
+		buf = jsonenc.AppendStringField(buf, "delta", event.Delta, true)
 	}
 	if event.Thought != nil {
 		buf = append(buf, ',', '"', 't', 'h', 'o', 'u', 'g', 'h', 't', '"', ':')
-		buf = appendJSONString(buf, *event.Thought)
+		buf = jsonenc.AppendJSONString(buf, *event.Thought)
 	}
 	return append(buf, '}')
 }
