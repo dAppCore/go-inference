@@ -34,8 +34,35 @@ import "strconv"
 //
 // Escapes: \" \\ \b \f \n \r \t for the mnemonic forms and \u00XX
 // for other bytes < 0x20. All other bytes pass through.
+//
+// Fast path: scan for any character requiring an escape. Anthropic
+// message bodies overwhelmingly contain neither — once a hot prefix
+// passes the scan, we copy the whole string verbatim in one append.
+// On the rare escape-bearing path we drop back to the byte-by-byte
+// walk starting from the first hit.
 func appendJSONString(buf []byte, s string) []byte {
 	buf = append(buf, '"')
+	// Scan for the first byte that needs escaping. \" \\ and any
+	// byte < 0x20 all require special handling; everything else
+	// passes through.
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '"' || c == '\\' || c < 0x20 {
+			// Bulk-copy the safe prefix, then walk the rest.
+			buf = append(buf, s[:i]...)
+			return appendJSONStringEscaped(buf, s[i:])
+		}
+	}
+	// No escapes — single bulk append covers the whole body.
+	buf = append(buf, s...)
+	return append(buf, '"')
+}
+
+// appendJSONStringEscaped completes a string already opened with `"`
+// and that has at least one byte requiring escape treatment in s[0].
+// Internal helper for appendJSONString — separated out to keep the
+// fast-path inlineable.
+func appendJSONStringEscaped(buf []byte, s string) []byte {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
