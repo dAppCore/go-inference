@@ -25,6 +25,15 @@ var (
 	fileMagic       = []byte("go-inference-state-file-log-v1\n")
 	legacyFileMagic = []byte("go-mlx-memvid-file-log-v1\n")
 	recordMagic     = [4]byte{'M', 'V', 'F', '1'}
+
+	// emptyMetaBytes is the canonical empty-record-meta JSON blob.
+	// PutBytesStream shortcuts to this slice when no meta field is
+	// populated, skipping core.JSONMarshal entirely — encoding/json
+	// allocates an encoder + grow-doubled output buffer per call
+	// (~5550 B / 4-9 allocs) even for an all-zero struct. Reference
+	// types like this share safely because the surface is read-only
+	// across writeAll → file.Write.
+	emptyMetaBytes = []byte("{}")
 )
 
 type Store struct {
@@ -224,14 +233,24 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 		Tags:   opts.Tags,
 		Labels: opts.Labels,
 	}
-	// Use JSONMarshal direct — JSONMarshalString → []byte cast did a
-	// roundtrip via two string conversions. JSONMarshal returns the
-	// freshly-allocated []byte we want for the write.
-	metaResult := core.JSONMarshal(meta)
-	if !metaResult.OK {
-		return state.ChunkRef{}, metaResult.Value.(error)
+	// Empty-meta fast path — many code paths (KV snapshots, sentinel
+	// records, internal-only blobs) carry no PutOptions content. The
+	// JSON encoder still allocates ~5550 B + 4 allocs for an all-zero
+	// struct (encoder state + grow-doubled output). Shortcutting to
+	// the canonical "{}" slice skips encoding/json entirely on this
+	// path. Non-empty meta still routes through JSONMarshal below.
+	var metaBytes []byte
+	if recordMetaIsEmpty(&meta) {
+		metaBytes = emptyMetaBytes
+	} else {
+		// JSONMarshal returns a freshly-allocated []byte we own —
+		// suitable for direct writeAll into the file.
+		metaResult := core.JSONMarshal(meta)
+		if !metaResult.OK {
+			return state.ChunkRef{}, metaResult.Value.(error)
+		}
+		metaBytes = metaResult.Value.([]byte)
 	}
-	metaBytes := metaResult.Value.([]byte)
 	if uint64(len(metaBytes)) > uint64(^uint32(0)) {
 		return state.ChunkRef{}, core.NewError("state file store metadata is too large")
 	}
@@ -584,6 +603,24 @@ func decodeRecordHeader(header []byte) (recordHeader, error) {
 		payloadSize: binary.LittleEndian.Uint64(header[12:20]),
 		metaSize:    binary.LittleEndian.Uint32(header[20:24]),
 	}, nil
+}
+
+// recordMetaIsEmpty reports whether the record meta has no
+// populated field — string fields all empty, Tags map nil or empty,
+// Labels slice nil or empty. The PutBytesStream fast path uses this
+// to short-circuit JSON marshalling on records that carry no caller
+// metadata (the common shape for KV snapshots and sentinel writes).
+//
+//	if recordMetaIsEmpty(&meta) {
+//	    metaBytes = emptyMetaBytes
+//	}
+func recordMetaIsEmpty(meta *recordMeta) bool {
+	return meta.URI == "" &&
+		meta.Title == "" &&
+		meta.Kind == "" &&
+		meta.Track == "" &&
+		len(meta.Tags) == 0 &&
+		len(meta.Labels) == 0
 }
 
 // extractRecordURI walks data as a top-level JSON object and returns

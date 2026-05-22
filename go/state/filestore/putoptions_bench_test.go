@@ -23,6 +23,29 @@ var (
 	fpoSinkErr error
 )
 
+// --- Empty meta fast path ---
+// Many code paths (KV snapshots, sentinel records, internal-only
+// blobs) write a record with no PutOptions content. The hand-rolled
+// fast path skips core.JSONMarshal entirely — its alloc shape is the
+// floor for what PutBytesStream can deliver on a streaming write.
+
+func BenchmarkFilestorePutOpts_Empty(b *testing.B) {
+	dir := b.TempDir()
+	store, err := Create(context.Background(), dir+"/empty.bin")
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	payload := make([]byte, 64)
+	opts := state.PutOptions{}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		fpoSinkRef, fpoSinkErr = store.PutBytes(ctx, payload, opts)
+	}
+}
+
 // --- Tag map size sweep ---
 // Memvid-style bundle saves carry 4-12 tags per chunk. The JSON
 // marshal walks every entry; the on-disk record carries the marshalled
