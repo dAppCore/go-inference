@@ -303,7 +303,80 @@ func BenchmarkOpenAI_MarshalChatCompletionChunk_Final(b *testing.B) {
 	}
 }
 
+// --- Hand-rolled chunk-as-SSE-frame — the streaming hot path ---
+// Fires per token. The single-buffer frame builder replaces the
+// JSONMarshalString + Concat + []byte conversion three-allocation
+// chain that the streaming handler used pre-W9-D.
+
+func BenchmarkOpenAI_AppendChatCompletionChunkSSE_Priming(b *testing.B) {
+	chunk := ChatCompletionChunk{
+		ID:      "chatcmpl-bench",
+		Object:  "chat.completion.chunk",
+		Created: 1700000000,
+		Model:   "qwen3",
+		Choices: []ChatChunkChoice{{Index: 0, Delta: ChatMessageDelta{Role: "assistant"}}},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		openAISinkBytes = appendChatCompletionChunkSSE(make([]byte, 0, chunkSSEFrameSize(chunk)), chunk)
+	}
+}
+
+func BenchmarkOpenAI_AppendChatCompletionChunkSSE_Delta(b *testing.B) {
+	chunk := ChatCompletionChunk{
+		ID:      "chatcmpl-bench",
+		Object:  "chat.completion.chunk",
+		Created: 1700000000,
+		Model:   "qwen3",
+		Choices: []ChatChunkChoice{{Index: 0, Delta: ChatMessageDelta{Content: "Answer"}}},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		openAISinkBytes = appendChatCompletionChunkSSE(make([]byte, 0, chunkSSEFrameSize(chunk)), chunk)
+	}
+}
+
+func BenchmarkOpenAI_AppendChatCompletionChunkSSE_Final(b *testing.B) {
+	finish := "stop"
+	chunk := ChatCompletionChunk{
+		ID:      "chatcmpl-bench",
+		Object:  "chat.completion.chunk",
+		Created: 1700000000,
+		Model:   "qwen3",
+		Choices: []ChatChunkChoice{{Index: 0, Delta: ChatMessageDelta{}, FinishReason: &finish}},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		openAISinkBytes = appendChatCompletionChunkSSE(make([]byte, 0, chunkSSEFrameSize(chunk)), chunk)
+	}
+}
+
 // --- ChatCompletionResponse — non-streaming response marshal ---
+
+// AppendChatCompletionResponse — hand-rolled fast path used by
+// writeJSON for the canonical non-streaming response shape.
+func BenchmarkOpenAI_AppendChatCompletionResponse_Typical(b *testing.B) {
+	resp := ChatCompletionResponse{
+		ID:      "chatcmpl-bench",
+		Object:  "chat.completion",
+		Created: 1700000000,
+		Model:   "qwen3",
+		Choices: []ChatChoice{{
+			Index:        0,
+			Message:      ChatMessage{Role: "assistant", Content: "The summary is concise and faithful to the original text."},
+			FinishReason: "stop",
+		}},
+		Usage: ChatUsage{PromptTokens: 200, CompletionTokens: 32, TotalTokens: 232},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		openAISinkBytes = appendChatCompletionResponse(make([]byte, 0, chatCompletionResponseSize(resp)), resp)
+	}
+}
 
 func BenchmarkOpenAI_MarshalChatCompletionResponse_Typical(b *testing.B) {
 	resp := ChatCompletionResponse{
