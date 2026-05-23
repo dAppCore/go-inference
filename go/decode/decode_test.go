@@ -12,14 +12,14 @@ import (
 func TestSpeculative_AcceptsAndRejectsDraftTokens_Good(t *testing.T) {
 	targetCalls := 0
 	draftCalls := 0
-	target := func(context.Context, string, GenerateConfig) (Generation, error) {
+	target := GeneratorFunc(func(context.Context, string, GenerateConfig) (Generation, error) {
 		targetCalls++
 		return Generation{Tokens: []Token{{ID: 1, Text: "A"}, {ID: 2, Text: "B"}, {ID: 4, Text: "D"}}}, nil
-	}
-	draft := func(context.Context, string, GenerateConfig) (Generation, error) {
+	})
+	draft := GeneratorFunc(func(context.Context, string, GenerateConfig) (Generation, error) {
 		draftCalls++
 		return Generation{Tokens: []Token{{ID: 1, Text: "A"}, {ID: 2, Text: "B"}, {ID: 3, Text: "C"}}}, nil
-	}
+	})
 
 	result, err := Speculative(context.Background(), SpeculativeConfig{
 		Prompt:         "p",
@@ -49,9 +49,9 @@ func TestSpeculative_AcceptsAndRejectsDraftTokens_Good(t *testing.T) {
 }
 
 func TestPromptLookup_AcceptsRepeatedContextTokens_Good(t *testing.T) {
-	target := func(context.Context, string, GenerateConfig) (Generation, error) {
+	target := GeneratorFunc(func(context.Context, string, GenerateConfig) (Generation, error) {
 		return Generation{Tokens: []Token{{ID: 10, Text: "go"}, {ID: 11, Text: "-"}, {ID: 12, Text: "mlx"}}}, nil
-	}
+	})
 
 	result, err := PromptLookup(context.Background(), PromptLookupConfig{
 		Prompt:         "go-mlx go-mlx",
@@ -80,7 +80,7 @@ func TestSpeculative_RequiresTargetAndDraft_Bad(t *testing.T) {
 	if _, err := Speculative(context.Background(), SpeculativeConfig{}); err == nil {
 		t.Fatal("Speculative(zero) error = nil, want missing-target")
 	}
-	dummy := func(context.Context, string, GenerateConfig) (Generation, error) { return Generation{}, nil }
+	dummy := GeneratorFunc(func(context.Context, string, GenerateConfig) (Generation, error) { return Generation{}, nil })
 	if _, err := Speculative(context.Background(), SpeculativeConfig{TargetGenerate: dummy}); err == nil {
 		t.Fatal("Speculative(target-only) error = nil, want missing-draft")
 	}
@@ -94,10 +94,10 @@ func TestPromptLookup_RequiresTarget_Bad(t *testing.T) {
 
 func TestSpeculative_PropagatesDraftError_Bad(t *testing.T) {
 	want := errors.New("draft boom")
-	target := func(context.Context, string, GenerateConfig) (Generation, error) {
+	target := GeneratorFunc(func(context.Context, string, GenerateConfig) (Generation, error) {
 		return Generation{Tokens: []Token{{ID: 1}}}, nil
-	}
-	draft := func(context.Context, string, GenerateConfig) (Generation, error) { return Generation{}, want }
+	})
+	draft := GeneratorFunc(func(context.Context, string, GenerateConfig) (Generation, error) { return Generation{}, want })
 	if _, err := Speculative(context.Background(), SpeculativeConfig{
 		Prompt: "p", MaxTokens: 4, TargetGenerate: target, DraftGenerate: draft,
 	}); err == nil {
@@ -107,10 +107,10 @@ func TestSpeculative_PropagatesDraftError_Bad(t *testing.T) {
 
 func TestSpeculative_PropagatesTargetError_Bad(t *testing.T) {
 	want := errors.New("target boom")
-	target := func(context.Context, string, GenerateConfig) (Generation, error) { return Generation{}, want }
-	draft := func(context.Context, string, GenerateConfig) (Generation, error) {
+	target := GeneratorFunc(func(context.Context, string, GenerateConfig) (Generation, error) { return Generation{}, want })
+	draft := GeneratorFunc(func(context.Context, string, GenerateConfig) (Generation, error) {
 		return Generation{Tokens: []Token{{ID: 1}}}, nil
-	}
+	})
 	if _, err := Speculative(context.Background(), SpeculativeConfig{
 		Prompt: "p", MaxTokens: 4, TargetGenerate: target, DraftGenerate: draft,
 	}); err == nil {
@@ -120,7 +120,7 @@ func TestSpeculative_PropagatesTargetError_Bad(t *testing.T) {
 
 func TestPromptLookup_PropagatesTargetError_Bad(t *testing.T) {
 	want := errors.New("target boom")
-	target := func(context.Context, string, GenerateConfig) (Generation, error) { return Generation{}, want }
+	target := GeneratorFunc(func(context.Context, string, GenerateConfig) (Generation, error) { return Generation{}, want })
 	if _, err := PromptLookup(context.Background(), PromptLookupConfig{
 		Prompt: "p", MaxTokens: 4, TargetGenerate: target,
 	}); err == nil {
@@ -129,9 +129,9 @@ func TestPromptLookup_PropagatesTargetError_Bad(t *testing.T) {
 }
 
 func TestSpeculative_NilContextDefaultsToBackground_Good(t *testing.T) {
-	target := func(context.Context, string, GenerateConfig) (Generation, error) {
+	target := GeneratorFunc(func(context.Context, string, GenerateConfig) (Generation, error) {
 		return Generation{Tokens: []Token{{ID: 1, Text: "x"}}}, nil
-	}
+	})
 	draft := target
 	if _, err := Speculative(nil, SpeculativeConfig{
 		Prompt: "p", MaxTokens: 1, TargetGenerate: target, DraftGenerate: draft,
@@ -141,9 +141,9 @@ func TestSpeculative_NilContextDefaultsToBackground_Good(t *testing.T) {
 }
 
 func TestPromptLookup_NilContextDefaultsToBackground_Good(t *testing.T) {
-	target := func(context.Context, string, GenerateConfig) (Generation, error) {
+	target := GeneratorFunc(func(context.Context, string, GenerateConfig) (Generation, error) {
 		return Generation{Tokens: []Token{{ID: 1, Text: "x"}}}, nil
-	}
+	})
 	if _, err := PromptLookup(nil, PromptLookupConfig{
 		Prompt: "p", MaxTokens: 1, TargetGenerate: target,
 	}); err != nil {
@@ -186,9 +186,9 @@ func TestCloneTokens_IndependentCopy_Good(t *testing.T) {
 }
 
 func TestSpeculative_MaxTokensClampsTargetWindow_Good(t *testing.T) {
-	target := func(context.Context, string, GenerateConfig) (Generation, error) {
+	target := GeneratorFunc(func(context.Context, string, GenerateConfig) (Generation, error) {
 		return Generation{Tokens: []Token{{ID: 1, Text: "A"}, {ID: 2, Text: "B"}, {ID: 3, Text: "C"}}}, nil
-	}
+	})
 	draft := target
 	result, err := Speculative(context.Background(), SpeculativeConfig{
 		Prompt: "p", MaxTokens: 2, TargetGenerate: target, DraftGenerate: draft,
@@ -203,13 +203,13 @@ func TestSpeculative_MaxTokensClampsTargetWindow_Good(t *testing.T) {
 
 func TestSpeculative_DraftTokensClampedToMaxTokens_Good(t *testing.T) {
 	var draftMax int
-	target := func(context.Context, string, GenerateConfig) (Generation, error) {
+	target := GeneratorFunc(func(context.Context, string, GenerateConfig) (Generation, error) {
 		return Generation{Tokens: []Token{{ID: 1}}}, nil
-	}
-	draft := func(_ context.Context, _ string, cfg GenerateConfig) (Generation, error) {
+	})
+	draft := GeneratorFunc(func(_ context.Context, _ string, cfg GenerateConfig) (Generation, error) {
 		draftMax = cfg.MaxTokens
 		return Generation{Tokens: []Token{{ID: 1}}}, nil
-	}
+	})
 	if _, err := Speculative(context.Background(), SpeculativeConfig{
 		Prompt: "p", MaxTokens: 4, DraftTokens: 99, TargetGenerate: target, DraftGenerate: draft,
 	}); err != nil {
