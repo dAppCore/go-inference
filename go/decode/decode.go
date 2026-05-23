@@ -131,10 +131,13 @@ func Speculative(ctx context.Context, cfg SpeculativeConfig) (Result, error) {
 		draftCfg.MaxTokens = maxTokens
 	}
 
+	// Single time.Now() for both the total-Duration anchor and the
+	// draft sub-window — the previous shape fired time.Now() twice
+	// back-to-back, which on Apple Silicon costs ~6 ns per call but
+	// adds nothing the second timestamp doesn't already capture.
 	start := time.Now()
-	draftStart := time.Now()
 	draft, err := cfg.DraftGenerate(ctx, cfg.Prompt, draftCfg)
-	draftDuration := nonZeroDuration(time.Since(draftStart))
+	draftDuration := nonZeroDuration(time.Since(start))
 	if err != nil {
 		return Result{}, err
 	}
@@ -170,10 +173,12 @@ func PromptLookup(ctx context.Context, cfg PromptLookupConfig) (Result, error) {
 	maxTokens := normaliseMaxTokens(cfg.MaxTokens, cfg.GenerateConfig.MaxTokens)
 	targetCfg := cfg.GenerateConfig
 	targetCfg.MaxTokens = maxTokens
+	// Single time.Now() — the previous shape fired back-to-back
+	// time.Now() into start + targetStart, but the target call is
+	// the only thing the duration spans, so they're the same anchor.
 	start := time.Now()
-	targetStart := time.Now()
 	target, err := cfg.TargetGenerate(ctx, cfg.Prompt, targetCfg)
-	targetDuration := nonZeroDuration(time.Since(targetStart))
+	targetDuration := nonZeroDuration(time.Since(start))
 	if err != nil {
 		return Result{}, err
 	}
@@ -196,12 +201,13 @@ func TokensText(tokens []Token) string {
 	// are immutable so reading len() is free; this saves the cascade
 	// of doubling allocs the builder would otherwise pay as it grows
 	// from 0 → final size. For 2048-token decodes that's ~10 allocs
-	// down to 1.
+	// down to 1. Index iteration avoids the per-iter 40-byte Token
+	// copy a range-value loop emits.
 	total := 0
-	for _, token := range tokens {
-		text := token.Text
+	for i := range tokens {
+		text := tokens[i].Text
 		if text == "" {
-			text = token.Value
+			text = tokens[i].Value
 		}
 		total += len(text)
 	}
@@ -217,10 +223,13 @@ func TokensText(tokens []Token) string {
 func tokensTextSized(tokens []Token, total int) string {
 	builder := core.NewBuilder()
 	builder.Grow(total)
-	for _, token := range tokens {
-		text := token.Text
+	// Index iteration avoids the per-iter 40-byte Token copy that a
+	// range-value loop emits; we only read two string headers from
+	// the slice slot, never the int32 ID.
+	for i := range tokens {
+		text := tokens[i].Text
 		if text == "" {
-			text = token.Value
+			text = tokens[i].Value
 		}
 		builder.WriteString(text)
 	}
@@ -258,7 +267,11 @@ func buildAcceptanceResult(mode, prompt string, target, candidates []Token, maxT
 	if maxTokens > 0 && maxTokens < limit {
 		limit = maxTokens
 	}
-	out := make([]Token, 0, limit)
+	// Pre-size + direct index assignment beats append on a known-N
+	// loop: the append cap-check + len-bump on every iteration is dead
+	// weight when we know we write exactly `limit` tokens. Saves the
+	// per-token slice-header bookkeeping over a 2048-token pass.
+	out := make([]Token, limit)
 	// Track the rendered text length alongside the build loop so the
 	// TokensText pre-grow walk fuses with the acceptance pass — the
 	// previous shape walked the emitted tokens twice (once to build
@@ -266,29 +279,38 @@ func buildAcceptanceResult(mode, prompt string, target, candidates []Token, maxT
 	// halves the walk count over the slice.
 	totalText := 0
 	var accepted, rejected int
+	candidateLen := len(candidates)
 	for i := 0; i < limit; i++ {
-		targetToken := target[i]
-		emitted := targetToken
-		if i < len(candidates) {
-			if TokenEqual(candidates[i], targetToken) {
-				emitted = candidates[i]
-				accepted++
-			} else {
+		// Write the emitted token directly into out[i] from whichever
+		// source slice owns it — avoids the intermediate `emitted`
+		// stack variable plus the speculative pre-load of
+		// `targetToken := target[i]`. Per token this saves two 40-byte
+		// struct copies (Token is 40 bytes on arm64 / amd64).
+		if i < candidateLen && TokenEqual(candidates[i], target[i]) {
+			out[i] = candidates[i]
+			accepted++
+			text := candidates[i].Text
+			if text == "" {
+				text = candidates[i].Value
+			}
+			totalText += len(text)
+		} else {
+			out[i] = target[i]
+			if i < candidateLen {
 				rejected++
 			}
+			text := target[i].Text
+			if text == "" {
+				text = target[i].Value
+			}
+			totalText += len(text)
 		}
-		out = append(out, emitted)
-		text := emitted.Text
-		if text == "" {
-			text = emitted.Value
-		}
-		totalText += len(text)
 	}
 	attempted := accepted + rejected
 	metrics := Metrics{
 		AcceptedTokens: accepted,
 		RejectedTokens: rejected,
-		EmittedTokens:  len(out),
+		EmittedTokens:  limit,
 	}
 	if attempted > 0 {
 		metrics.AcceptanceRate = float64(accepted) / float64(attempted)
