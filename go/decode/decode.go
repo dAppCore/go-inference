@@ -196,12 +196,13 @@ func TokensText(tokens []Token) string {
 	// are immutable so reading len() is free; this saves the cascade
 	// of doubling allocs the builder would otherwise pay as it grows
 	// from 0 → final size. For 2048-token decodes that's ~10 allocs
-	// down to 1.
+	// down to 1. Index iteration avoids the per-iter 40-byte Token
+	// copy a range-value loop emits.
 	total := 0
-	for _, token := range tokens {
-		text := token.Text
+	for i := range tokens {
+		text := tokens[i].Text
 		if text == "" {
-			text = token.Value
+			text = tokens[i].Value
 		}
 		total += len(text)
 	}
@@ -217,10 +218,13 @@ func TokensText(tokens []Token) string {
 func tokensTextSized(tokens []Token, total int) string {
 	builder := core.NewBuilder()
 	builder.Grow(total)
-	for _, token := range tokens {
-		text := token.Text
+	// Index iteration avoids the per-iter 40-byte Token copy that a
+	// range-value loop emits; we only read two string headers from
+	// the slice slot, never the int32 ID.
+	for i := range tokens {
+		text := tokens[i].Text
 		if text == "" {
-			text = token.Value
+			text = tokens[i].Value
 		}
 		builder.WriteString(text)
 	}
