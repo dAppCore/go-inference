@@ -131,10 +131,13 @@ func Speculative(ctx context.Context, cfg SpeculativeConfig) (Result, error) {
 		draftCfg.MaxTokens = maxTokens
 	}
 
+	// Single time.Now() for both the total-Duration anchor and the
+	// draft sub-window — the previous shape fired time.Now() twice
+	// back-to-back, which on Apple Silicon costs ~6 ns per call but
+	// adds nothing the second timestamp doesn't already capture.
 	start := time.Now()
-	draftStart := time.Now()
 	draft, err := cfg.DraftGenerate(ctx, cfg.Prompt, draftCfg)
-	draftDuration := nonZeroDuration(time.Since(draftStart))
+	draftDuration := nonZeroDuration(time.Since(start))
 	if err != nil {
 		return Result{}, err
 	}
@@ -170,10 +173,12 @@ func PromptLookup(ctx context.Context, cfg PromptLookupConfig) (Result, error) {
 	maxTokens := normaliseMaxTokens(cfg.MaxTokens, cfg.GenerateConfig.MaxTokens)
 	targetCfg := cfg.GenerateConfig
 	targetCfg.MaxTokens = maxTokens
+	// Single time.Now() — the previous shape fired back-to-back
+	// time.Now() into start + targetStart, but the target call is
+	// the only thing the duration spans, so they're the same anchor.
 	start := time.Now()
-	targetStart := time.Now()
 	target, err := cfg.TargetGenerate(ctx, cfg.Prompt, targetCfg)
-	targetDuration := nonZeroDuration(time.Since(targetStart))
+	targetDuration := nonZeroDuration(time.Since(start))
 	if err != nil {
 		return Result{}, err
 	}
