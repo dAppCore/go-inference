@@ -4,9 +4,11 @@
 // by speculative and prompt-lookup decode benchmarks.
 //
 // The acceptance algorithm is a generic accept/reject over token streams;
-// generation is delegated to caller-supplied GenerateFunc callbacks. The
-// package is shared by every backend driver (go-mlx, go-cuda, go-rocm)
-// that wants a portable speculative or prompt-lookup decode report.
+// generation is delegated to caller-supplied Generator implementations.
+// The package is shared by every backend driver (go-mlx, go-cuda,
+// go-rocm) that wants a portable speculative or prompt-lookup decode
+// report. Stateful drivers can implement Generator on a pooled struct;
+// func-style callers can wrap with GeneratorFunc.
 //
 //	result, err := decode.Speculative(ctx, decode.SpeculativeConfig{
 //	    Prompt: "Write a haiku.",
@@ -32,32 +34,58 @@ type Token struct {
 }
 
 // GenerateConfig is the per-call generation request passed to the
-// caller-supplied GenerateFunc. Only MaxTokens is consumed by decode;
-// drivers may carry extra context inside the closure.
+// caller-supplied Generator. Only MaxTokens is consumed by decode;
+// drivers may carry extra context inside their Generator implementation.
 type GenerateConfig struct {
 	MaxTokens int `json:"max_tokens"`
 }
 
-// Generation is the result the GenerateFunc returns to decode.
+// Generation is the result Generator.Generate returns to decode.
 type Generation struct {
 	Tokens []Token `json:"tokens,omitempty"`
 	Text   string  `json:"text,omitempty"`
 }
 
-// GenerateFunc is the model-side generation hook. decode supplies the
+// Generator is the model-side generation hook. decode supplies the
 // prompt + per-call config; the driver decides how to evaluate it.
-type GenerateFunc func(context.Context, string, GenerateConfig) (Generation, error)
+// Stateful drivers (e.g. a pooled *modelDecodeGenerator from go-mlx)
+// implement Generate directly — no per-call closure allocation.
+type Generator interface {
+	Generate(ctx context.Context, prompt string, cfg GenerateConfig) (Generation, error)
+}
+
+// GeneratorFunc adapts a plain function to the Generator interface.
+// Callers with a func value can wrap once and pass through; the wrap
+// itself is a value-typed conversion, not a heap allocation.
+//
+//	cfg.TargetGenerate = decode.GeneratorFunc(myFunc)
+type GeneratorFunc func(ctx context.Context, prompt string, cfg GenerateConfig) (Generation, error)
+
+// Generate dispatches the wrapped function. Method on a value receiver
+// so the conversion `GeneratorFunc(fn)` is interface-assignable without
+// taking the address of a temporary.
+func (f GeneratorFunc) Generate(ctx context.Context, prompt string, cfg GenerateConfig) (Generation, error) {
+	return f(ctx, prompt, cfg)
+}
+
+// GenerateFunc is the legacy func-type alias retained for callers that
+// declared variables of this type. New code should use Generator (the
+// interface) or GeneratorFunc (the func-to-interface adapter) instead.
+type GenerateFunc = GeneratorFunc
 
 // SpeculativeConfig configures the speculative-decode reference path.
 // Target + draft generators must both be supplied; decode compares their
-// outputs token-by-token to produce an acceptance report.
+// outputs token-by-token to produce an acceptance report. Generator is
+// an interface so stateful pooled implementations can avoid the
+// per-call closure allocation; func-style callers wrap with
+// GeneratorFunc.
 type SpeculativeConfig struct {
 	Prompt         string         `json:"prompt,omitempty"`
 	MaxTokens      int            `json:"max_tokens,omitempty"`
 	DraftTokens    int            `json:"draft_tokens,omitempty"`
 	GenerateConfig GenerateConfig `json:"generate_config,omitempty"`
-	TargetGenerate GenerateFunc   `json:"-"`
-	DraftGenerate  GenerateFunc   `json:"-"`
+	TargetGenerate Generator      `json:"-"`
+	DraftGenerate  Generator      `json:"-"`
 }
 
 // PromptLookupConfig configures prompt-lookup decoding over a caller-
@@ -67,7 +95,7 @@ type PromptLookupConfig struct {
 	Prompt         string         `json:"prompt,omitempty"`
 	MaxTokens      int            `json:"max_tokens,omitempty"`
 	GenerateConfig GenerateConfig `json:"generate_config,omitempty"`
-	TargetGenerate GenerateFunc   `json:"-"`
+	TargetGenerate Generator      `json:"-"`
 	LookupTokens   []Token        `json:"lookup_tokens,omitempty"`
 }
 
@@ -136,13 +164,13 @@ func Speculative(ctx context.Context, cfg SpeculativeConfig) (Result, error) {
 	// back-to-back, which on Apple Silicon costs ~6 ns per call but
 	// adds nothing the second timestamp doesn't already capture.
 	start := time.Now()
-	draft, err := cfg.DraftGenerate(ctx, cfg.Prompt, draftCfg)
+	draft, err := cfg.DraftGenerate.Generate(ctx, cfg.Prompt, draftCfg)
 	draftDuration := nonZeroDuration(time.Since(start))
 	if err != nil {
 		return Result{}, err
 	}
 	targetStart := time.Now()
-	target, err := cfg.TargetGenerate(ctx, cfg.Prompt, targetCfg)
+	target, err := cfg.TargetGenerate.Generate(ctx, cfg.Prompt, targetCfg)
 	targetDuration := nonZeroDuration(time.Since(targetStart))
 	if err != nil {
 		return Result{}, err
@@ -177,7 +205,7 @@ func PromptLookup(ctx context.Context, cfg PromptLookupConfig) (Result, error) {
 	// time.Now() into start + targetStart, but the target call is
 	// the only thing the duration spans, so they're the same anchor.
 	start := time.Now()
-	target, err := cfg.TargetGenerate(ctx, cfg.Prompt, targetCfg)
+	target, err := cfg.TargetGenerate.Generate(ctx, cfg.Prompt, targetCfg)
 	targetDuration := nonZeroDuration(time.Since(start))
 	if err != nil {
 		return Result{}, err
