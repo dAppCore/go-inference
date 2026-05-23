@@ -272,28 +272,30 @@ func buildAcceptanceResult(mode, prompt string, target, candidates []Token, maxT
 	var accepted, rejected int
 	candidateLen := len(candidates)
 	for i := 0; i < limit; i++ {
-		targetToken := target[i]
-		// Decision tree picks the source token in one place rather
-		// than the previous "init to target, maybe overwrite" pattern
-		// — eliminates the speculative struct copy on the accept
-		// branch (Token is 40 bytes; copying twice when the accept
-		// path will overwrite anyway is paid per token).
-		var emitted Token
-		if i < candidateLen && TokenEqual(candidates[i], targetToken) {
-			emitted = candidates[i]
+		// Write the emitted token directly into out[i] from whichever
+		// source slice owns it — avoids the intermediate `emitted`
+		// stack variable plus the speculative pre-load of
+		// `targetToken := target[i]`. Per token this saves two 40-byte
+		// struct copies (Token is 40 bytes on arm64 / amd64).
+		if i < candidateLen && TokenEqual(candidates[i], target[i]) {
+			out[i] = candidates[i]
 			accepted++
+			text := candidates[i].Text
+			if text == "" {
+				text = candidates[i].Value
+			}
+			totalText += len(text)
 		} else {
-			emitted = targetToken
+			out[i] = target[i]
 			if i < candidateLen {
 				rejected++
 			}
+			text := target[i].Text
+			if text == "" {
+				text = target[i].Value
+			}
+			totalText += len(text)
 		}
-		out[i] = emitted
-		text := emitted.Text
-		if text == "" {
-			text = emitted.Value
-		}
-		totalText += len(text)
 	}
 	attempted := accepted + rejected
 	metrics := Metrics{
