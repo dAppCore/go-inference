@@ -75,14 +75,17 @@ type GenerateFunc = GeneratorFunc
 
 // SpeculativeConfig configures the speculative-decode reference path.
 // Target + draft generators must both be supplied; decode compares their
-// outputs token-by-token to produce an acceptance report.
+// outputs token-by-token to produce an acceptance report. Generator is
+// an interface so stateful pooled implementations can avoid the
+// per-call closure allocation; func-style callers wrap with
+// GeneratorFunc.
 type SpeculativeConfig struct {
 	Prompt         string         `json:"prompt,omitempty"`
 	MaxTokens      int            `json:"max_tokens,omitempty"`
 	DraftTokens    int            `json:"draft_tokens,omitempty"`
 	GenerateConfig GenerateConfig `json:"generate_config,omitempty"`
-	TargetGenerate GenerateFunc   `json:"-"`
-	DraftGenerate  GenerateFunc   `json:"-"`
+	TargetGenerate Generator      `json:"-"`
+	DraftGenerate  Generator      `json:"-"`
 }
 
 // PromptLookupConfig configures prompt-lookup decoding over a caller-
@@ -92,7 +95,7 @@ type PromptLookupConfig struct {
 	Prompt         string         `json:"prompt,omitempty"`
 	MaxTokens      int            `json:"max_tokens,omitempty"`
 	GenerateConfig GenerateConfig `json:"generate_config,omitempty"`
-	TargetGenerate GenerateFunc   `json:"-"`
+	TargetGenerate Generator      `json:"-"`
 	LookupTokens   []Token        `json:"lookup_tokens,omitempty"`
 }
 
@@ -161,13 +164,13 @@ func Speculative(ctx context.Context, cfg SpeculativeConfig) (Result, error) {
 	// back-to-back, which on Apple Silicon costs ~6 ns per call but
 	// adds nothing the second timestamp doesn't already capture.
 	start := time.Now()
-	draft, err := cfg.DraftGenerate(ctx, cfg.Prompt, draftCfg)
+	draft, err := cfg.DraftGenerate.Generate(ctx, cfg.Prompt, draftCfg)
 	draftDuration := nonZeroDuration(time.Since(start))
 	if err != nil {
 		return Result{}, err
 	}
 	targetStart := time.Now()
-	target, err := cfg.TargetGenerate(ctx, cfg.Prompt, targetCfg)
+	target, err := cfg.TargetGenerate.Generate(ctx, cfg.Prompt, targetCfg)
 	targetDuration := nonZeroDuration(time.Since(targetStart))
 	if err != nil {
 		return Result{}, err
@@ -202,7 +205,7 @@ func PromptLookup(ctx context.Context, cfg PromptLookupConfig) (Result, error) {
 	// time.Now() into start + targetStart, but the target call is
 	// the only thing the duration spans, so they're the same anchor.
 	start := time.Now()
-	target, err := cfg.TargetGenerate(ctx, cfg.Prompt, targetCfg)
+	target, err := cfg.TargetGenerate.Generate(ctx, cfg.Prompt, targetCfg)
 	targetDuration := nonZeroDuration(time.Since(start))
 	if err != nil {
 		return Result{}, err
