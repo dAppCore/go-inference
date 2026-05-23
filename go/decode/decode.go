@@ -258,7 +258,11 @@ func buildAcceptanceResult(mode, prompt string, target, candidates []Token, maxT
 	if maxTokens > 0 && maxTokens < limit {
 		limit = maxTokens
 	}
-	out := make([]Token, 0, limit)
+	// Pre-size + direct index assignment beats append on a known-N
+	// loop: the append cap-check + len-bump on every iteration is dead
+	// weight when we know we write exactly `limit` tokens. Saves the
+	// per-token slice-header bookkeeping over a 2048-token pass.
+	out := make([]Token, limit)
 	// Track the rendered text length alongside the build loop so the
 	// TokensText pre-grow walk fuses with the acceptance pass — the
 	// previous shape walked the emitted tokens twice (once to build
@@ -266,18 +270,25 @@ func buildAcceptanceResult(mode, prompt string, target, candidates []Token, maxT
 	// halves the walk count over the slice.
 	totalText := 0
 	var accepted, rejected int
+	candidateLen := len(candidates)
 	for i := 0; i < limit; i++ {
 		targetToken := target[i]
-		emitted := targetToken
-		if i < len(candidates) {
-			if TokenEqual(candidates[i], targetToken) {
-				emitted = candidates[i]
-				accepted++
-			} else {
+		// Decision tree picks the source token in one place rather
+		// than the previous "init to target, maybe overwrite" pattern
+		// — eliminates the speculative struct copy on the accept
+		// branch (Token is 40 bytes; copying twice when the accept
+		// path will overwrite anyway is paid per token).
+		var emitted Token
+		if i < candidateLen && TokenEqual(candidates[i], targetToken) {
+			emitted = candidates[i]
+			accepted++
+		} else {
+			emitted = targetToken
+			if i < candidateLen {
 				rejected++
 			}
 		}
-		out = append(out, emitted)
+		out[i] = emitted
 		text := emitted.Text
 		if text == "" {
 			text = emitted.Value
@@ -288,7 +299,7 @@ func buildAcceptanceResult(mode, prompt string, target, candidates []Token, maxT
 	metrics := Metrics{
 		AcceptedTokens: accepted,
 		RejectedTokens: rejected,
-		EmittedTokens:  len(out),
+		EmittedTokens:  limit,
 	}
 	if attempted > 0 {
 		metrics.AcceptanceRate = float64(accepted) / float64(attempted)
