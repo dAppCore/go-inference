@@ -17,8 +17,10 @@ const (
 	CodecFile       = "state/file-log"
 	CodecMemvidFile = "memvid/file-log"
 
-	fileMode        = 0o600
-	recordHeaderLen = 24
+	fileMode              = 0o600
+	recordHeaderLen       = 24
+	indexHintRecordBytes  = 128
+	indexHintMaxFileBytes = 32 * 1024 * 1024
 )
 
 var (
@@ -654,6 +656,18 @@ func (s *Store) borrowPayloadLocked(payloadAt int64, payloadSize int) ([]byte, e
 	return s.mappedRegion[payloadAt:end], nil
 }
 
+func indexCapacityHint(size, headerLen int64) int {
+	recordBytes := size - headerLen
+	if recordBytes <= 0 || recordBytes > indexHintMaxFileBytes {
+		return 0
+	}
+	records := recordBytes / indexHintRecordBytes
+	if records <= 0 {
+		return 0
+	}
+	return int(records)
+}
+
 func (s *Store) rebuildIndex(ctx context.Context) error {
 	info, err := s.file.Stat()
 	if err != nil {
@@ -668,15 +682,11 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		return err
 	}
 
-	// Best-effort capacity hint — average observed record (24-byte
-	// header + ~60-byte meta + 64-byte payload at the bench scale)
-	// lands near 150 bytes. Overshoot is harmless: Go maps shrink
-	// lazily; undershoot triggers cascade rehash. The divisor is
-	// tuned to slot just under the typical record size so the initial
-	// bucket count covers the corpus without rehash. Open allocates
-	// fresh empty maps at entry so we can swap them out for sized
-	// versions in place.
-	if records := int((size - headerLen) / 128); records > 0 && len(s.index) == 0 {
+	// Best-effort capacity hint for small-record stores. Do not derive map
+	// capacity from arbitrarily large State files: packed KV containers can be
+	// hundreds of MiB with only a few records, and byte-size preallocation turns
+	// store-open into a large heap allocation before any payload is touched.
+	if records := indexCapacityHint(size, headerLen); records > 0 && len(s.index) == 0 {
 		s.index = make(map[int]fileIndexEntry, records)
 		s.uriIndex = make(map[string]int, records)
 	}

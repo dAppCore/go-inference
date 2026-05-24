@@ -145,6 +145,35 @@ func BenchmarkFilestoreCapacity_Open_10000Records(b *testing.B) {
 	}
 }
 
+func BenchmarkFilestoreCapacity_Open_SingleLargePayload(b *testing.B) {
+	dir := b.TempDir()
+	path := dir + "/single-large.bin"
+	{
+		store, err := Create(context.Background(), path)
+		if err != nil {
+			b.Fatal(err)
+		}
+		payload := make([]byte, indexHintMaxFileBytes+1)
+		if _, err := store.PutBytes(context.Background(), payload, state.PutOptions{
+			URI:  "mlx://bench/open-large",
+			Kind: "kv",
+		}); err != nil {
+			b.Fatal(err)
+		}
+		_ = store.Close()
+	}
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		s, err := Open(ctx, path)
+		if err != nil {
+			b.Fatal(err)
+		}
+		_ = s.Close()
+	}
+}
+
 // --- Open without URIs (no uriIndex population) ---
 // Faster path because the URI map stays empty. Confirms the URI map
 // writes dominate the rebuildIndex cost.

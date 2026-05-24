@@ -524,6 +524,18 @@ func TestFileStore_Ugly_CancelledContext(t *testing.T) {
 	}
 }
 
+func TestFileStore_Good_IndexCapacityHintSkipsLargePayloadStores(t *testing.T) {
+	if got := indexCapacityHint(int64(len(fileMagic))+1024*indexHintRecordBytes, int64(len(fileMagic))); got != 1024 {
+		t.Fatalf("small-record hint = %d, want 1024", got)
+	}
+	if got := indexCapacityHint(int64(len(fileMagic))+indexHintMaxFileBytes+1, int64(len(fileMagic))); got != 0 {
+		t.Fatalf("large-payload hint = %d, want 0", got)
+	}
+	if got := indexCapacityHint(int64(len(fileMagic)), int64(len(fileMagic))); got != 0 {
+		t.Fatalf("empty hint = %d, want 0", got)
+	}
+}
+
 // testHeader is a test-only wrapper that returns a fresh []byte built
 // via encodeRecordHeader's in-place API. Production callers should use
 // encodeRecordHeader directly with a stack-allocated [recordHeaderLen]byte.
