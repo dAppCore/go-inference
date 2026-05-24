@@ -300,6 +300,13 @@ func TestFileStore_Good_OpenRegionWithSegmentAlias(t *testing.T) {
 	if string(chunk.Data) != "second region payload" || chunk.Ref.FrameOffset != second.FrameOffset {
 		t.Fatalf("region chunk = %+v, want second payload at original frame offset", chunk)
 	}
+	borrowed, err := state.BorrowRefBytes(ctx, store, second)
+	if err != nil {
+		t.Fatalf("BorrowRefBytes(alias region) error = %v", err)
+	}
+	if string(borrowed.Data) != "second region payload" || borrowed.Ref.FrameOffset != second.FrameOffset {
+		t.Fatalf("borrowed region chunk = %+v, want second payload at original frame offset", borrowed)
+	}
 	byURI, err := state.ResolveURI(ctx, store, "mlx://region/first")
 	if err != nil {
 		t.Fatalf("ResolveURI(region) error = %v", err)
@@ -316,6 +323,9 @@ func TestFileStore_Good_OpenRegionWithSegmentAlias(t *testing.T) {
 	wrongRef.Segment = sourcePath + ".wrong"
 	if _, err := state.ResolveRefBytes(ctx, store, wrongRef); err == nil {
 		t.Fatal("ResolveRefBytes(wrong region segment) error = nil")
+	}
+	if _, err := state.BorrowRefBytes(ctx, store, wrongRef); err == nil {
+		t.Fatal("BorrowRefBytes(wrong region segment) error = nil")
 	}
 	if _, err := store.PutBytes(ctx, []byte("blocked"), state.PutOptions{}); err == nil {
 		t.Fatal("PutBytes(read-only region) error = nil")
