@@ -250,6 +250,78 @@ func TestFileStore_Good_OpenWithSegmentAlias(t *testing.T) {
 	}
 }
 
+func TestFileStore_Good_OpenRegionWithSegmentAlias(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	sourcePath := core.PathJoin(dir, "source.mvlog")
+	containerPath := core.PathJoin(dir, "session.kv")
+	source, err := Create(ctx, sourcePath)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	first, err := source.PutBytes(ctx, []byte("first region payload"), state.PutOptions{URI: "mlx://region/first"})
+	if err != nil {
+		t.Fatalf("PutBytes(first) error = %v", err)
+	}
+	second, err := source.PutBytes(ctx, []byte("second region payload"), state.PutOptions{URI: "mlx://region/second"})
+	if err != nil {
+		t.Fatalf("PutBytes(second) error = %v", err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	read := core.ReadFile(sourcePath)
+	if !read.OK {
+		t.Fatalf("ReadFile(source) error = %s", read.Error())
+	}
+	prefix := []byte("KVST-test-header")
+	suffix := []byte("not-state-log-tail")
+	sourceBytes := read.Value.([]byte)
+	container := append(append(append([]byte(nil), prefix...), sourceBytes...), suffix...)
+	if write := core.WriteFile(containerPath, container, 0o600); !write.OK {
+		t.Fatalf("WriteFile(container) error = %s", write.Error())
+	}
+
+	store, err := OpenRegionWithSegmentAlias(ctx, containerPath, int64(len(prefix)), int64(len(sourceBytes)), sourcePath)
+	if err != nil {
+		t.Fatalf("OpenRegionWithSegmentAlias() error = %v", err)
+	}
+	defer store.Close()
+	if store.Path() != containerPath {
+		t.Fatalf("Path() = %q, want container path", store.Path())
+	}
+	if store.ChunkCount() != 2 {
+		t.Fatalf("ChunkCount() = %d, want 2", store.ChunkCount())
+	}
+	chunk, err := state.ResolveRefBytes(ctx, store, second)
+	if err != nil {
+		t.Fatalf("ResolveRefBytes(alias region) error = %v", err)
+	}
+	if string(chunk.Data) != "second region payload" || chunk.Ref.FrameOffset != second.FrameOffset {
+		t.Fatalf("region chunk = %+v, want second payload at original frame offset", chunk)
+	}
+	byURI, err := state.ResolveURI(ctx, store, "mlx://region/first")
+	if err != nil {
+		t.Fatalf("ResolveURI(region) error = %v", err)
+	}
+	if byURI.Text != "first region payload" || byURI.Ref.FrameOffset != first.FrameOffset {
+		t.Fatalf("ResolveURI(region) = %+v, want first payload with relative offset", byURI)
+	}
+	physicalRef := second
+	physicalRef.Segment = containerPath
+	if _, err := state.ResolveRefBytes(ctx, store, physicalRef); err != nil {
+		t.Fatalf("ResolveRefBytes(physical region) error = %v", err)
+	}
+	wrongRef := second
+	wrongRef.Segment = sourcePath + ".wrong"
+	if _, err := state.ResolveRefBytes(ctx, store, wrongRef); err == nil {
+		t.Fatal("ResolveRefBytes(wrong region segment) error = nil")
+	}
+	if _, err := store.PutBytes(ctx, []byte("blocked"), state.PutOptions{}); err == nil {
+		t.Fatal("PutBytes(read-only region) error = nil")
+	}
+}
+
 func TestFileStore_Good_StreamPayload(t *testing.T) {
 	ctx := context.Background()
 	path := core.PathJoin(t.TempDir(), "stream.mvlog")

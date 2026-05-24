@@ -61,6 +61,8 @@ var (
 	errRefSegmentMismatch   = core.NewError("state file store chunk ref segment mismatch")
 	errRefFrameOffsetTooBig = core.NewError("state file store frame offset is too large")
 	errRefChunkIDMismatch   = core.NewError("state file store chunk ref id mismatch")
+	errStoreReadOnly        = core.NewError("state file store is read-only")
+	errRegionInvalid        = core.NewError("state file store region is invalid")
 )
 
 type Store struct {
@@ -68,6 +70,9 @@ type Store struct {
 	path     string
 	alias    string
 	file     *core.OSFile
+	baseAt   int64
+	region   int64
+	readOnly bool
 	index    map[int]fileIndexEntry
 	uriIndex map[string]int
 	nextID   int
@@ -156,14 +161,32 @@ func OpenWithSegmentAlias(ctx context.Context, path string, canonicalSegment str
 	return openWithSegmentAlias(ctx, path, core.Trim(canonicalSegment))
 }
 
+// OpenRegionWithSegmentAlias opens an append-only state log embedded inside a
+// larger file. Frame offsets remain relative to the embedded State payload,
+// while Segment validation accepts canonicalSegment for relocated refs.
+func OpenRegionWithSegmentAlias(ctx context.Context, path string, payloadOffset int64, payloadBytes int64, canonicalSegment string) (*Store, error) {
+	return openRegionWithSegmentAlias(ctx, path, payloadOffset, payloadBytes, core.Trim(canonicalSegment), true)
+}
+
 func openWithSegmentAlias(ctx context.Context, path string, canonicalSegment string) (*Store, error) {
+	return openRegionWithSegmentAlias(ctx, path, 0, 0, canonicalSegment, false)
+}
+
+func openRegionWithSegmentAlias(ctx context.Context, path string, payloadOffset int64, payloadBytes int64, canonicalSegment string, readOnly bool) (*Store, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	if core.Trim(path) == "" {
 		return nil, core.NewError("state file store path is required")
 	}
-	result := core.OpenFile(path, core.O_RDWR, fileMode)
+	if payloadOffset < 0 || payloadBytes < 0 {
+		return nil, errRegionInvalid
+	}
+	flags := core.O_RDWR
+	if readOnly {
+		flags = core.O_RDONLY
+	}
+	result := core.OpenFile(path, flags, fileMode)
 	if !result.OK {
 		return nil, core.E("state.filestore.Open", "open file", resultError(result))
 	}
@@ -172,6 +195,9 @@ func openWithSegmentAlias(ctx context.Context, path string, canonicalSegment str
 		path:     path,
 		alias:    canonicalSegment,
 		file:     file,
+		baseAt:   payloadOffset,
+		region:   payloadBytes,
+		readOnly: readOnly,
 		index:    make(map[int]fileIndexEntry),
 		uriIndex: make(map[string]int),
 		nextID:   1,
@@ -287,6 +313,9 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 	if s.file == nil {
 		return state.ChunkRef{}, errStoreClosed
 	}
+	if s.readOnly {
+		return state.ChunkRef{}, errStoreReadOnly
+	}
 
 	id := s.nextID
 	meta := recordMeta{
@@ -309,7 +338,11 @@ func (s *Store) PutBytesStream(ctx context.Context, payloadSize int, opts state.
 		return state.ChunkRef{}, errMetadataTooLarge
 	}
 	offset := s.writeAt
-	if _, err := s.file.Seek(offset, stdio.SeekStart); err != nil {
+	physicalOffset, err := s.physicalOffset(offset)
+	if err != nil {
+		return state.ChunkRef{}, err
+	}
+	if _, err := s.file.Seek(physicalOffset, stdio.SeekStart); err != nil {
 		return state.ChunkRef{}, core.E("state.filestore.Put", "seek to append offset", err)
 	}
 	if err := writeAll(s.file, headerMeta); err != nil {
@@ -350,8 +383,12 @@ func (s *Store) rollbackWriteLocked(offset int64) {
 	if s == nil || s.file == nil {
 		return
 	}
-	_ = s.file.Truncate(offset)
-	_, _ = s.file.Seek(offset, stdio.SeekStart)
+	physicalOffset, err := s.physicalOffset(offset)
+	if err != nil {
+		return
+	}
+	_ = s.file.Truncate(physicalOffset)
+	_, _ = s.file.Seek(physicalOffset, stdio.SeekStart)
 }
 
 func (s *Store) resolveLocked(chunkID int) (state.Chunk, error) {
@@ -427,8 +464,12 @@ func (s *Store) resolveRefBytesLocked(ref state.ChunkRef) (state.Chunk, error) {
 		return state.Chunk{}, errRefFrameOffsetTooBig
 	}
 	offset := int64(ref.FrameOffset)
+	physicalOffset, err := s.physicalOffset(offset)
+	if err != nil {
+		return state.Chunk{}, err
+	}
 	var headerBuf [recordHeaderLen]byte
-	if _, err := s.file.ReadAt(headerBuf[:], offset); err != nil {
+	if _, err := s.file.ReadAt(headerBuf[:], physicalOffset); err != nil {
 		return state.Chunk{}, core.E("state.filestore.ResolveRefBytes", "read record header", err)
 	}
 	record, err := decodeRecordHeader(headerBuf[:])
@@ -450,7 +491,7 @@ func (s *Store) resolveRefBytesLocked(ref state.ChunkRef) (state.Chunk, error) {
 	if err != nil {
 		return state.Chunk{}, err
 	}
-	payloadAt := offset + recordHeaderLen + int64(metaSize)
+	payloadAt := physicalOffset + recordHeaderLen + int64(metaSize)
 	payload := make([]byte, payloadSize)
 	if _, err := s.file.ReadAt(payload, payloadAt); err != nil {
 		return state.Chunk{}, core.E("state.filestore.ResolveRefBytes", "read chunk payload", err)
@@ -472,7 +513,10 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 	if err != nil {
 		return core.E("state.filestore.Open", "stat file", err)
 	}
-	size := info.Size()
+	size, err := s.regionSize(info.Size())
+	if err != nil {
+		return err
+	}
 	headerLen, err := s.detectHeaderLen(size)
 	if err != nil {
 		return err
@@ -529,7 +573,11 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		if offset+want > size {
 			want = size - offset
 		}
-		n, err := s.file.ReadAt(prefetchBuf[:want], offset)
+		physicalOffset, err := s.physicalOffset(offset)
+		if err != nil {
+			return err
+		}
+		n, err := s.file.ReadAt(prefetchBuf[:want], physicalOffset)
 		if err != nil && err != stdio.EOF {
 			return core.E("state.filestore.Open", "read record prefetch", err)
 		}
@@ -570,7 +618,11 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 			} else {
 				metaBuf = metaBuf[:metaSize]
 			}
-			if _, err := s.file.ReadAt(metaBuf, metaAt); err != nil {
+			metaPhysicalAt, err := s.physicalOffset(metaAt)
+			if err != nil {
+				return err
+			}
+			if _, err := s.file.ReadAt(metaBuf, metaPhysicalAt); err != nil {
 				return core.E("state.filestore.Open", "read record metadata", err)
 			}
 			metaView = metaBuf
@@ -607,7 +659,7 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 		}
 		s.index[id] = fileIndexEntry{
 			ref:         ref,
-			payloadAt:   payloadAt,
+			payloadAt:   s.baseAt + payloadAt,
 			payloadSize: payloadSize,
 		}
 		if uri != "" {
@@ -638,7 +690,7 @@ func (s *Store) detectHeaderLen(size int64) (int64, error) {
 		maxHeaderLen = int(size)
 	}
 	magic := make([]byte, maxHeaderLen)
-	if _, err := s.file.ReadAt(magic, 0); err != nil {
+	if _, err := s.file.ReadAt(magic, s.baseAt); err != nil {
 		return 0, core.E("state.filestore.Open", "read file header", err)
 	}
 	if hasMagicPrefix(magic, fileMagic) {
@@ -648,6 +700,33 @@ func (s *Store) detectHeaderLen(size int64) (int64, error) {
 		return int64(len(legacyFileMagic)), nil
 	}
 	return 0, core.NewError("state file store header is invalid")
+}
+
+func (s *Store) regionSize(fileSize int64) (int64, error) {
+	if s == nil || s.baseAt < 0 || s.region < 0 || s.baseAt > fileSize {
+		return 0, errRegionInvalid
+	}
+	available := fileSize - s.baseAt
+	if s.region == 0 {
+		return available, nil
+	}
+	if s.region > available {
+		return 0, errRegionInvalid
+	}
+	return s.region, nil
+}
+
+func (s *Store) physicalOffset(logOffset int64) (int64, error) {
+	if s == nil || logOffset < 0 {
+		return 0, errRegionInvalid
+	}
+	if s.region > 0 && logOffset > s.region {
+		return 0, errRegionInvalid
+	}
+	if s.baseAt > 0 && logOffset > (1<<63-1)-s.baseAt {
+		return 0, errRegionInvalid
+	}
+	return s.baseAt + logOffset, nil
 }
 
 func hasMagicPrefix(data, magic []byte) bool {
