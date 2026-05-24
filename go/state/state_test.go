@@ -72,6 +72,34 @@ func TestState_BinaryStore_Good(t *testing.T) {
 	}
 }
 
+func TestState_BorrowRefBytesFallback_Good(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	payload := []byte{4, 3, 2, 1}
+	ref, err := store.PutBytes(context.Background(), payload, PutOptions{})
+	if err != nil {
+		t.Fatalf("PutBytes() error = %v", err)
+	}
+
+	borrowed, err := BorrowRefBytes(context.Background(), store, ref)
+	if err != nil {
+		t.Fatalf("BorrowRefBytes() error = %v", err)
+	}
+	if borrowed.Ref.ChunkID != ref.ChunkID || len(borrowed.Data) != len(payload) || borrowed.Data[0] != 4 {
+		t.Fatalf("BorrowRefBytes() = %+v, want copied payload", borrowed)
+	}
+	if borrowed.Release != nil {
+		borrowed.Release()
+	}
+}
+
+func TestState_BorrowRefBytes_Bad(t *testing.T) {
+	_, err := BorrowRefBytes(context.Background(), nil, ChunkRef{ChunkID: 42})
+
+	if !core.Is(err, ErrChunkNotFound) {
+		t.Fatalf("BorrowRefBytes(nil) error = %v, want ErrChunkNotFound", err)
+	}
+}
+
 func TestState_WakeSleepForkContracts_Good(t *testing.T) {
 	model := fakeForker{}
 

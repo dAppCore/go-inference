@@ -44,6 +44,25 @@ type RefBinaryResolver interface {
 	ResolveRefBytes(ctx context.Context, ref ChunkRef) (Chunk, error)
 }
 
+// BorrowedChunk is a byte view borrowed from a store. Release is optional and
+// may be nil when the view is store-lifetime bound; callers must keep the
+// backing store open while retaining Data.
+type BorrowedChunk struct {
+	Ref     ChunkRef
+	Data    []byte
+	Release func()
+}
+
+// BinaryBorrower returns a borrowed byte view for a chunk ID.
+type BinaryBorrower interface {
+	BorrowBytes(ctx context.Context, chunkID int) (BorrowedChunk, error)
+}
+
+// RefBinaryBorrower returns a borrowed byte view for a full chunk ref.
+type RefBinaryBorrower interface {
+	BorrowRefBytes(ctx context.Context, ref ChunkRef) (BorrowedChunk, error)
+}
+
 type BinaryWriter interface {
 	PutBytes(ctx context.Context, data []byte, opts PutOptions) (ChunkRef, error)
 }
@@ -170,6 +189,42 @@ func ResolveRefBytes(ctx context.Context, store Store, ref ChunkRef) (Chunk, err
 		return Chunk{}, &ChunkNotFoundError{ID: ref.ChunkID}
 	}
 	return ResolveBytes(ctx, store, ref.ChunkID)
+}
+
+// BorrowBytes resolves a byte chunk and prefers store-native borrowed storage.
+func BorrowBytes(ctx context.Context, store Store, chunkID int) (BorrowedChunk, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if store == nil {
+		return BorrowedChunk{}, &ChunkNotFoundError{ID: chunkID}
+	}
+	if borrower, ok := store.(BinaryBorrower); ok {
+		return borrower.BorrowBytes(ctx, chunkID)
+	}
+	chunk, err := ResolveBytes(ctx, store, chunkID)
+	if err != nil {
+		return BorrowedChunk{}, err
+	}
+	return BorrowedChunk{Ref: chunk.Ref, Data: chunk.Data}, nil
+}
+
+// BorrowRefBytes resolves a byte chunk ref and prefers store-native borrowed
+// storage.
+func BorrowRefBytes(ctx context.Context, store Store, ref ChunkRef) (BorrowedChunk, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if store == nil {
+		return BorrowedChunk{}, &ChunkNotFoundError{ID: ref.ChunkID}
+	}
+	if borrower, ok := store.(RefBinaryBorrower); ok {
+		return borrower.BorrowRefBytes(ctx, ref)
+	}
+	if ref.ChunkID == 0 {
+		return BorrowedChunk{}, &ChunkNotFoundError{ID: ref.ChunkID}
+	}
+	return BorrowBytes(ctx, store, ref.ChunkID)
 }
 
 func ResolveURI(ctx context.Context, store Store, uri string) (Chunk, error) {

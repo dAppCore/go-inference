@@ -63,20 +63,23 @@ var (
 	errRefChunkIDMismatch   = core.NewError("state file store chunk ref id mismatch")
 	errStoreReadOnly        = core.NewError("state file store is read-only")
 	errRegionInvalid        = core.NewError("state file store region is invalid")
+	errMappedRegionInvalid  = core.NewError("state file store mapped region is invalid")
 )
 
 type Store struct {
-	mu       sync.Mutex
-	path     string
-	alias    string
-	file     *core.OSFile
-	baseAt   int64
-	region   int64
-	readOnly bool
-	index    map[int]fileIndexEntry
-	uriIndex map[string]int
-	nextID   int
-	writeAt  int64
+	mu           sync.Mutex
+	path         string
+	alias        string
+	file         *core.OSFile
+	baseAt       int64
+	region       int64
+	readOnly     bool
+	mapped       []byte
+	mappedRegion []byte
+	index        map[int]fileIndexEntry
+	uriIndex     map[string]int
+	nextID       int
+	writeAt      int64
 	// payloadWriter is the per-Store streaming bound writer reused
 	// across PutBytesStream calls. Holding it on the Store skips
 	// the &limitedPayloadWriter{...} alloc every Put paid for the
@@ -234,6 +237,7 @@ func (s *Store) Close() error {
 	if s.file == nil {
 		return nil
 	}
+	s.unmapRegionLocked()
 	file := s.file
 	s.file = nil
 	return file.Close()
@@ -420,6 +424,37 @@ func (s *Store) ResolveBytes(ctx context.Context, chunkID int) (state.Chunk, err
 	return s.resolveBytesLocked(chunkID)
 }
 
+func (s *Store) BorrowBytes(ctx context.Context, chunkID int) (state.BorrowedChunk, error) {
+	if err := checkContext(ctx); err != nil {
+		return state.BorrowedChunk{}, err
+	}
+	if s == nil {
+		return state.BorrowedChunk{}, &state.ChunkNotFoundError{ID: chunkID}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.file == nil {
+		return state.BorrowedChunk{}, errStoreClosed
+	}
+	entry, ok := s.index[chunkID]
+	if !ok {
+		return state.BorrowedChunk{}, &state.ChunkNotFoundError{ID: chunkID}
+	}
+	if s.readOnly {
+		payloadAt := entry.payloadAt - s.baseAt
+		data, err := s.borrowPayloadLocked(payloadAt, entry.payloadSize)
+		if err != nil {
+			return state.BorrowedChunk{}, err
+		}
+		return state.BorrowedChunk{Ref: entry.ref, Data: data}, nil
+	}
+	chunk, err := s.resolveBytesLocked(chunkID)
+	if err != nil {
+		return state.BorrowedChunk{}, err
+	}
+	return state.BorrowedChunk{Ref: chunk.Ref, Data: chunk.Data}, nil
+}
+
 func (s *Store) ResolveRefBytes(ctx context.Context, ref state.ChunkRef) (state.Chunk, error) {
 	if err := checkContext(ctx); err != nil {
 		return state.Chunk{}, err
@@ -442,6 +477,37 @@ func (s *Store) ResolveRefBytes(ctx context.Context, ref state.ChunkRef) (state.
 		return state.Chunk{}, errStoreClosed
 	}
 	return s.resolveRefBytesLocked(ref)
+}
+
+func (s *Store) BorrowRefBytes(ctx context.Context, ref state.ChunkRef) (state.BorrowedChunk, error) {
+	if err := checkContext(ctx); err != nil {
+		return state.BorrowedChunk{}, err
+	}
+	if s == nil {
+		return state.BorrowedChunk{}, &state.ChunkNotFoundError{ID: ref.ChunkID}
+	}
+	if !ref.HasFrameOffset {
+		return s.BorrowBytes(ctx, ref.ChunkID)
+	}
+	if ref.Codec != "" && ref.Codec != CodecFile && ref.Codec != CodecMemvidFile {
+		return state.BorrowedChunk{}, errRefNonFileCodec
+	}
+	if ref.Segment != "" && ref.Segment != s.path && ref.Segment != s.alias {
+		return state.BorrowedChunk{}, errRefSegmentMismatch
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.file == nil {
+		return state.BorrowedChunk{}, errStoreClosed
+	}
+	if !s.readOnly {
+		chunk, err := s.resolveRefBytesLocked(ref)
+		if err != nil {
+			return state.BorrowedChunk{}, err
+		}
+		return state.BorrowedChunk{Ref: chunk.Ref, Data: chunk.Data}, nil
+	}
+	return s.borrowRefBytesLocked(ref)
 }
 
 func (s *Store) resolveBytesLocked(chunkID int) (state.Chunk, error) {
@@ -506,6 +572,86 @@ func (s *Store) resolveRefBytesLocked(ref state.ChunkRef) (state.Chunk, error) {
 		},
 		Data: payload,
 	}, nil
+}
+
+func (s *Store) borrowRefBytesLocked(ref state.ChunkRef) (state.BorrowedChunk, error) {
+	if ref.FrameOffset > uint64(maxInt()) {
+		return state.BorrowedChunk{}, errRefFrameOffsetTooBig
+	}
+	offset := int64(ref.FrameOffset)
+	var headerView []byte
+	if err := s.ensureMappedRegionLocked(); err == nil {
+		if offset < 0 || offset+recordHeaderLen > int64(len(s.mappedRegion)) {
+			return state.BorrowedChunk{}, errRegionInvalid
+		}
+		headerView = s.mappedRegion[offset : offset+recordHeaderLen]
+	} else {
+		physicalOffset, perr := s.physicalOffset(offset)
+		if perr != nil {
+			return state.BorrowedChunk{}, perr
+		}
+		var headerBuf [recordHeaderLen]byte
+		if _, rerr := s.file.ReadAt(headerBuf[:], physicalOffset); rerr != nil {
+			return state.BorrowedChunk{}, core.E("state.filestore.BorrowRefBytes", "read record header", rerr)
+		}
+		headerView = headerBuf[:]
+	}
+	record, err := decodeRecordHeader(headerView)
+	if err != nil {
+		return state.BorrowedChunk{}, err
+	}
+	id, err := intFromUint64(record.chunkID, "chunk id")
+	if err != nil {
+		return state.BorrowedChunk{}, err
+	}
+	if ref.ChunkID != 0 && id != ref.ChunkID {
+		return state.BorrowedChunk{}, errRefChunkIDMismatch
+	}
+	metaSize, err := intFromUint64(uint64(record.metaSize), "metadata")
+	if err != nil {
+		return state.BorrowedChunk{}, err
+	}
+	payloadSize, err := intFromUint64(record.payloadSize, "payload")
+	if err != nil {
+		return state.BorrowedChunk{}, err
+	}
+	payloadAt := offset + recordHeaderLen + int64(metaSize)
+	data, err := s.borrowPayloadLocked(payloadAt, payloadSize)
+	if err != nil {
+		return state.BorrowedChunk{}, err
+	}
+	return state.BorrowedChunk{
+		Ref: state.ChunkRef{
+			ChunkID:        id,
+			FrameOffset:    ref.FrameOffset,
+			HasFrameOffset: true,
+			Codec:          CodecFile,
+			Segment:        s.path,
+		},
+		Data: data,
+	}, nil
+}
+
+func (s *Store) borrowPayloadLocked(payloadAt int64, payloadSize int) ([]byte, error) {
+	if payloadSize < 0 || payloadAt < 0 {
+		return nil, errRegionInvalid
+	}
+	if err := s.ensureMappedRegionLocked(); err != nil {
+		physicalAt, perr := s.physicalOffset(payloadAt)
+		if perr != nil {
+			return nil, perr
+		}
+		data := make([]byte, payloadSize)
+		if _, rerr := s.file.ReadAt(data, physicalAt); rerr != nil {
+			return nil, core.E("state.filestore.BorrowRefBytes", "read chunk payload", rerr)
+		}
+		return data, nil
+	}
+	end := payloadAt + int64(payloadSize)
+	if end < payloadAt || end > int64(len(s.mappedRegion)) {
+		return nil, errRegionInvalid
+	}
+	return s.mappedRegion[payloadAt:end], nil
 }
 
 func (s *Store) rebuildIndex(ctx context.Context) error {

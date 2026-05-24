@@ -65,6 +65,20 @@ func BenchmarkFilestoreRegion_ResolveRefBytes_64KB(b *testing.B) {
 	}
 }
 
+func BenchmarkFilestoreRegion_BorrowRefBytes_64KB(b *testing.B) {
+	store, refs := benchRegionStore(b, 1, 64*1024)
+	ctx := context.Background()
+	target := refs[0]
+	b.ReportAllocs()
+	b.SetBytes(64 * 1024)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		borrowed, err := state.BorrowRefBytes(ctx, store, target)
+		frSinkChunk = state.Chunk{Ref: borrowed.Ref, Data: borrowed.Data}
+		frSinkErr = err
+	}
+}
+
 func BenchmarkFilestoreRegion_ResolveRefBytes_1000Records(b *testing.B) {
 	store, refs := benchRegionStore(b, 1000, 64)
 	ctx := context.Background()
@@ -73,6 +87,19 @@ func BenchmarkFilestoreRegion_ResolveRefBytes_1000Records(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		frSinkChunk, frSinkErr = store.ResolveRefBytes(ctx, target)
+	}
+}
+
+func BenchmarkFilestoreRegion_BorrowRefBytes_1000Records(b *testing.B) {
+	store, refs := benchRegionStore(b, 1000, 64)
+	ctx := context.Background()
+	target := refs[500]
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		borrowed, err := state.BorrowRefBytes(ctx, store, target)
+		frSinkChunk = state.Chunk{Ref: borrowed.Ref, Data: borrowed.Data}
+		frSinkErr = err
 	}
 }
 
