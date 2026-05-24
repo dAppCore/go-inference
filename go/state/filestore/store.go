@@ -50,22 +50,23 @@ var (
 	// Callers compare via errors.Is(err, nil) or string-equality on
 	// .Error(), neither of which depends on pointer identity, so the
 	// sharing is safe across goroutines.
-	errStoreClosed           = core.NewError("state file store is closed")
-	errStoreNil              = core.NewError("state file store is nil")
-	errPayloadSizeInvalid    = core.NewError("state file store payload size is invalid")
-	errStreamWriterNil       = core.NewError("state file store stream writer is nil")
-	errMetadataTooLarge      = core.NewError("state file store metadata is too large")
-	errPayloadShort          = core.NewError("state file store streamed payload is shorter than declared")
-	errPayloadOversize       = core.NewError("state file store streamed payload is larger than declared")
-	errRefNonFileCodec       = core.NewError("state file store cannot resolve non-file chunk ref")
-	errRefSegmentMismatch    = core.NewError("state file store chunk ref segment mismatch")
-	errRefFrameOffsetTooBig  = core.NewError("state file store frame offset is too large")
-	errRefChunkIDMismatch    = core.NewError("state file store chunk ref id mismatch")
+	errStoreClosed          = core.NewError("state file store is closed")
+	errStoreNil             = core.NewError("state file store is nil")
+	errPayloadSizeInvalid   = core.NewError("state file store payload size is invalid")
+	errStreamWriterNil      = core.NewError("state file store stream writer is nil")
+	errMetadataTooLarge     = core.NewError("state file store metadata is too large")
+	errPayloadShort         = core.NewError("state file store streamed payload is shorter than declared")
+	errPayloadOversize      = core.NewError("state file store streamed payload is larger than declared")
+	errRefNonFileCodec      = core.NewError("state file store cannot resolve non-file chunk ref")
+	errRefSegmentMismatch   = core.NewError("state file store chunk ref segment mismatch")
+	errRefFrameOffsetTooBig = core.NewError("state file store frame offset is too large")
+	errRefChunkIDMismatch   = core.NewError("state file store chunk ref id mismatch")
 )
 
 type Store struct {
 	mu       sync.Mutex
 	path     string
+	alias    string
 	file     *core.OSFile
 	index    map[int]fileIndexEntry
 	uriIndex map[string]int
@@ -144,6 +145,18 @@ func Create(ctx context.Context, path string) (*Store, error) {
 // Open reopens an existing append-only state file store and rebuilds its
 // offset index without reading chunk payloads.
 func Open(ctx context.Context, path string) (*Store, error) {
+	return openWithSegmentAlias(ctx, path, "")
+}
+
+// OpenWithSegmentAlias reopens an existing append-only state file store and
+// permits refs whose Segment names canonicalSegment. This keeps relocation
+// explicit for container-mounted State files while preserving Open's strict
+// default segment validation.
+func OpenWithSegmentAlias(ctx context.Context, path string, canonicalSegment string) (*Store, error) {
+	return openWithSegmentAlias(ctx, path, core.Trim(canonicalSegment))
+}
+
+func openWithSegmentAlias(ctx context.Context, path string, canonicalSegment string) (*Store, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
@@ -157,6 +170,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	file := result.Value.(*core.OSFile)
 	store := &Store{
 		path:     path,
+		alias:    canonicalSegment,
 		file:     file,
 		index:    make(map[int]fileIndexEntry),
 		uriIndex: make(map[string]int),
@@ -382,7 +396,7 @@ func (s *Store) ResolveRefBytes(ctx context.Context, ref state.ChunkRef) (state.
 	if ref.Codec != "" && ref.Codec != CodecFile && ref.Codec != CodecMemvidFile {
 		return state.Chunk{}, errRefNonFileCodec
 	}
-	if ref.Segment != "" && ref.Segment != s.path {
+	if ref.Segment != "" && ref.Segment != s.path && ref.Segment != s.alias {
 		return state.Chunk{}, errRefSegmentMismatch
 	}
 	s.mu.Lock()

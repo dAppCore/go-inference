@@ -191,6 +191,65 @@ func TestFileStore_Good_ResolveRefBytesUsesFrameOffset(t *testing.T) {
 	}
 }
 
+func TestFileStore_Good_OpenWithSegmentAlias(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	sourcePath := core.PathJoin(dir, "source.mvlog")
+	relocatedPath := core.PathJoin(dir, "relocated.mvlog")
+	source, err := Create(ctx, sourcePath)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	ref, err := source.PutBytes(ctx, []byte("relocated payload"), state.PutOptions{})
+	if err != nil {
+		t.Fatalf("PutBytes() error = %v", err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	read := core.ReadFile(sourcePath)
+	if !read.OK {
+		t.Fatalf("ReadFile(source) error = %s", read.Error())
+	}
+	if write := core.WriteFile(relocatedPath, read.Value.([]byte), 0o600); !write.OK {
+		t.Fatalf("WriteFile(relocated) error = %s", write.Error())
+	}
+
+	strict, err := Open(ctx, relocatedPath)
+	if err != nil {
+		t.Fatalf("Open(relocated) error = %v", err)
+	}
+	if _, err := state.ResolveRefBytes(ctx, strict, ref); err == nil {
+		t.Fatal("strict ResolveRefBytes(source segment) error = nil")
+	}
+	if err := strict.Close(); err != nil {
+		t.Fatalf("strict Close() error = %v", err)
+	}
+
+	aliased, err := OpenWithSegmentAlias(ctx, relocatedPath, sourcePath)
+	if err != nil {
+		t.Fatalf("OpenWithSegmentAlias() error = %v", err)
+	}
+	defer aliased.Close()
+	chunk, err := state.ResolveRefBytes(ctx, aliased, ref)
+	if err != nil {
+		t.Fatalf("ResolveRefBytes(alias) error = %v", err)
+	}
+	if string(chunk.Data) != "relocated payload" {
+		t.Fatalf("alias payload = %q, want relocated payload", string(chunk.Data))
+	}
+	physicalRef := ref
+	physicalRef.Segment = relocatedPath
+	if _, err := state.ResolveRefBytes(ctx, aliased, physicalRef); err != nil {
+		t.Fatalf("ResolveRefBytes(physical segment) error = %v", err)
+	}
+	wrongRef := ref
+	wrongRef.Segment = sourcePath + ".wrong"
+	if _, err := state.ResolveRefBytes(ctx, aliased, wrongRef); err == nil {
+		t.Fatal("ResolveRefBytes(wrong segment) error = nil")
+	}
+}
+
 func TestFileStore_Good_StreamPayload(t *testing.T) {
 	ctx := context.Background()
 	path := core.PathJoin(t.TempDir(), "stream.mvlog")
