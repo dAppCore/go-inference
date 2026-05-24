@@ -493,6 +493,168 @@ func TestPack_Fingerprint_HexShape_Good(t *testing.T) {
 	}
 }
 
+func TestPack_Hash_Stable_Good(t *testing.T) {
+	// Same source dir hashed twice must return identical hex.
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-stable-")
+	defer core.RemoveAll(tempRoot)
+	srcDir := core.JoinPath(tempRoot, "src")
+	buildFixturePack(t, srcDir)
+
+	h1, r1 := pack.Hash(srcDir)
+	if !r1.OK {
+		t.Fatalf("Hash (#1): %v", r1.Value)
+	}
+	h2, r2 := pack.Hash(srcDir)
+	if !r2.OK {
+		t.Fatalf("Hash (#2): %v", r2.Value)
+	}
+	if h1 != h2 {
+		t.Fatalf("expected stable hash, got %s vs %s", h1, h2)
+	}
+	if len(h1) != 64 {
+		t.Fatalf("expected 64-char hex, got %d (%q)", len(h1), h1)
+	}
+}
+
+func TestPack_Hash_DistinguishesContent_Ugly(t *testing.T) {
+	// Pack A and Pack B share filenames but config.json differs.
+	// Hash must differ.
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-distinct-")
+	defer core.RemoveAll(tempRoot)
+	srcA := core.JoinPath(tempRoot, "a")
+	srcB := core.JoinPath(tempRoot, "b")
+	buildFixturePack(t, srcA)
+	buildFixturePack(t, srcB)
+
+	// Mutate B's config.json.
+	if wr := core.WriteFile(core.JoinPath(srcB, "config.json"),
+		[]byte(`{"model_type":"llama","hidden_size":4096}`), 0o644); !wr.OK {
+		t.Fatalf("rewrite B config.json: %v", wr.Value)
+	}
+
+	hA, ra := pack.Hash(srcA)
+	hB, rb := pack.Hash(srcB)
+	if !ra.OK || !rb.OK {
+		t.Fatalf("Hash A=%v B=%v", ra.Value, rb.Value)
+	}
+	if hA == hB {
+		t.Fatalf("expected different hashes for divergent config.json, both %s", hA)
+	}
+}
+
+func TestPack_Hash_SafetensorsSizeAffects_Ugly(t *testing.T) {
+	// Same JSON files but different *.safetensors size — hash must differ.
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-st-size-")
+	defer core.RemoveAll(tempRoot)
+	srcA := core.JoinPath(tempRoot, "a")
+	srcB := core.JoinPath(tempRoot, "b")
+	buildFixturePack(t, srcA)
+	buildFixturePack(t, srcB)
+
+	stPath := core.JoinPath(srcB, "model.safetensors")
+	rr := core.ReadFile(stPath)
+	if !rr.OK {
+		t.Fatalf("ReadFile B safetensors: %v", rr.Value)
+	}
+	larger := append(rr.Value.([]byte), make([]byte, 4096)...)
+	if wr := core.WriteFile(stPath, larger, 0o644); !wr.OK {
+		t.Fatalf("WriteFile B safetensors: %v", wr.Value)
+	}
+
+	hA, _ := pack.Hash(srcA)
+	hB, _ := pack.Hash(srcB)
+	if hA == hB {
+		t.Fatalf("expected different hashes for divergent safetensors size, both %s", hA)
+	}
+}
+
+func TestPack_Hash_OptionalFilesSkippedCleanly_Good(t *testing.T) {
+	// Pack A has chat_template.jinja; Pack B doesn't. Hash differs but
+	// neither errors out. Missing optional files are part of identity.
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-optional-")
+	defer core.RemoveAll(tempRoot)
+	srcA := core.JoinPath(tempRoot, "a")
+	srcB := core.JoinPath(tempRoot, "b")
+	buildFixturePack(t, srcA)
+
+	// Build B without chat_template.jinja by writing only the core 3 files.
+	if mr := core.MkdirAll(srcB, 0o755); !mr.OK {
+		t.Fatalf("MkdirAll: %v", mr.Value)
+	}
+	for _, name := range []string{"config.json", "tokenizer.json", "model.safetensors"} {
+		src := core.JoinPath(srcA, name)
+		dst := core.JoinPath(srcB, name)
+		rr := core.ReadFile(src)
+		if !rr.OK {
+			t.Fatalf("ReadFile %q: %v", name, rr.Value)
+		}
+		if wr := core.WriteFile(dst, rr.Value.([]byte), 0o644); !wr.OK {
+			t.Fatalf("WriteFile %q: %v", name, wr.Value)
+		}
+	}
+
+	hA, ra := pack.Hash(srcA)
+	hB, rb := pack.Hash(srcB)
+	if !ra.OK || !rb.OK {
+		t.Fatalf("Hash A=%v B=%v", ra.Value, rb.Value)
+	}
+	if hA == hB {
+		t.Fatalf("expected different hashes (A has chat_template, B doesn't), both %s", hA)
+	}
+}
+
+func TestPack_Hash_AutoPopulatedInPack_Good(t *testing.T) {
+	// Pack with empty Manifest.Model.Hash must auto-populate via Hash(srcDir).
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-autofill-")
+	defer core.RemoveAll(tempRoot)
+	srcDir := core.JoinPath(tempRoot, "src")
+	dest := core.JoinPath(tempRoot, "out.model")
+	buildFixturePack(t, srcDir)
+
+	m := sampleManifest()
+	m.Model.Hash = "" // explicit empty
+
+	if r := pack.Pack(srcDir, dest, pack.PackOptions{Manifest: m}); !r.OK {
+		t.Fatalf("Pack: %v", r.Value)
+	}
+
+	manifest, _, r := pack.Inspect(dest)
+	if !r.OK {
+		t.Fatalf("Inspect: %v", r.Value)
+	}
+	if manifest.Model.Hash == "" {
+		t.Fatalf("expected Manifest.Model.Hash auto-populated, was empty")
+	}
+	if len(manifest.Model.Hash) != 64 {
+		t.Errorf("expected 64-char hex hash, got %d (%q)", len(manifest.Model.Hash), manifest.Model.Hash)
+	}
+
+	expected, _ := pack.Hash(srcDir)
+	if manifest.Model.Hash != expected {
+		t.Errorf("Pack auto-hash != Hash(srcDir):\n  pack:    %s\n  helper:  %s", manifest.Model.Hash, expected)
+	}
+}
+
+func TestPack_Hash_RespectsCallerProvidedValue_Good(t *testing.T) {
+	// Pack with caller-set Manifest.Model.Hash must NOT overwrite.
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-respect-")
+	defer core.RemoveAll(tempRoot)
+	srcDir := core.JoinPath(tempRoot, "src")
+	dest := core.JoinPath(tempRoot, "out.model")
+	buildFixturePack(t, srcDir)
+
+	m := sampleManifest()
+	m.Model.Hash = "deadbeef-caller-provided"
+
+	if r := pack.Pack(srcDir, dest, pack.PackOptions{Manifest: m}); !r.OK {
+		t.Fatalf("Pack: %v", r.Value)
+	}
+	manifest, _, _ := pack.Inspect(dest)
+	if manifest.Model.Hash != "deadbeef-caller-provided" {
+		t.Errorf("Pack overwrote caller-provided Hash; got %q", manifest.Model.Hash)
+	}
+}
+
 // readBytes is a small test helper that reads a file via core.ReadFile.
 func readBytes(t *testing.T, path string) []byte {
 	t.Helper()

@@ -43,6 +43,16 @@ func Pack(srcDir, dest string, opts PackOptions) core.Result {
 	if manifest.Producer.Created == "" {
 		manifest.Producer.Created = time.Now().UTC().Format(time.RFC3339)
 	}
+	if manifest.Model.Hash == "" {
+		// Auto-populate the canonical pack hash so consumers never
+		// see a .model with an empty Model.Hash. Caller can pre-fill
+		// it to skip this step when a cached value is already known.
+		h, hr := Hash(srcDir)
+		if !hr.OK {
+			return hr
+		}
+		manifest.Model.Hash = h
+	}
 
 	tarBytes, tr := buildTar(srcDir)
 	if !tr.OK {
@@ -175,6 +185,96 @@ func Inspect(src string) (*Manifest, *inference.ModelPackInspection, core.Result
 		Capabilities: manifest.Capabilities,
 	}
 	return manifest, inspection, core.Ok(nil)
+}
+
+// Hash computes the canonical model-pack hash for an unwrapped pack
+// directory: SHA-256 of sorted content of the small metadata files
+// (config.json, tokenizer.json, chat_template.jinja, adapter_config.json)
+// concatenated with sorted file sizes of the *.safetensors blobs.
+//
+// Lightweight — doesn't read tensor bytes. Captures everything that
+// affects behaviour without forcing a full content scan. Mirrors the
+// shape inference.ModelPackInspector reads on the go-mlx side, so the
+// hash from a packed .model and the hash from re-running InspectModelPack
+// on the unwrapped dir agree byte-for-byte.
+//
+//	h, r := pack.Hash("/models/gemma-3-4b-it")
+//	if !r.OK { return r }
+//	manifest.Model.Hash = h
+//
+// Missing optional files (chat_template.jinja, adapter_config.json) are
+// simply skipped — their absence is part of the pack's identity.
+func Hash(srcDir string) (string, core.Result) {
+	if !dirExists(srcDir) {
+		return "", core.Fail(core.E("pack.Hash", core.Sprintf("srcDir %q is not a directory", srcDir), nil))
+	}
+
+	metaCandidates := []string{
+		"config.json",
+		"tokenizer.json",
+		"chat_template.jinja",
+		"adapter_config.json",
+	}
+	type metaFile struct {
+		name    string
+		content []byte
+	}
+	var metas []metaFile
+	fs := (&core.Fs{}).NewUnrestricted()
+	for _, name := range metaCandidates {
+		path := core.JoinPath(srcDir, name)
+		if !fs.IsFile(path) {
+			continue
+		}
+		rr := core.ReadFile(path)
+		if !rr.OK {
+			return "", rr
+		}
+		metas = append(metas, metaFile{name: name, content: rr.Value.([]byte)})
+	}
+	sort.Slice(metas, func(i, j int) bool { return metas[i].name < metas[j].name })
+
+	var safetensorSizes []int64
+	for e, err := range fs.WalkSeq(srcDir) {
+		if err != nil {
+			return "", core.Fail(core.E("pack.Hash", "walk failed", err))
+		}
+		if e.IsDir {
+			continue
+		}
+		if !core.HasSuffix(e.Path, ".safetensors") {
+			continue
+		}
+		statR := core.Stat(core.JoinPath(srcDir, e.Path))
+		if !statR.OK {
+			return "", statR
+		}
+		info, ok := statR.Value.(iofs.FileInfo)
+		if !ok {
+			return "", core.Fail(core.E("pack.Hash", core.Sprintf("unexpected Stat shape for %q", e.Path), nil))
+		}
+		safetensorSizes = append(safetensorSizes, info.Size())
+	}
+	sort.Slice(safetensorSizes, func(i, j int) bool { return safetensorSizes[i] < safetensorSizes[j] })
+
+	h := sha256.New()
+	for _, m := range metas {
+		h.Write([]byte(m.name))
+		h.Write([]byte{0})
+		h.Write(m.content)
+		h.Write([]byte{0})
+	}
+	h.Write([]byte("safetensors_sizes"))
+	h.Write([]byte{0})
+	var sizeBuf [8]byte
+	for _, sz := range safetensorSizes {
+		u := uint64(sz)
+		for i := 0; i < 8; i++ {
+			sizeBuf[i] = byte(u >> (8 * i))
+		}
+		h.Write(sizeBuf[:])
+	}
+	return hex.EncodeToString(h.Sum(nil)), core.Ok(nil)
 }
 
 // Fingerprint returns the SHA-256 hex digest of a Manifest's Identity
