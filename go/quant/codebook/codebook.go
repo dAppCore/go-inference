@@ -79,6 +79,14 @@ func ParseProfile(data []byte) (*Profile, error) {
 		IndexBits:    firstPositive(probe.IndexBits, 8),
 		Source:       firstNonEmpty(probe.Source, "codebook_config.json"),
 	}
+	// Pre-size to the exact tensor count so the append loop never
+	// re-grows. Production profiles carry one descriptor per quantised
+	// tensor — hundreds for Gemma/Qwen-class models — and the doubling
+	// cascade from cap=0 paid ~7 grows over 100 tensors plus discarded
+	// backing arrays.
+	if len(probe.Tensors) > 0 {
+		profile.Tensors = make([]TensorDescriptor, 0, len(probe.Tensors))
+	}
 	for _, tensor := range probe.Tensors {
 		local := profile
 		local.CodebookSize = firstPositive(tensor.CodebookSize, profile.CodebookSize)

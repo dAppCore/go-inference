@@ -346,3 +346,46 @@ func BenchmarkCodebook_NewTensorDescriptor_RejectUnaligned(b *testing.B) {
 	}
 	_ = core.Contains // keep the import resolved when reject paths don't fire
 }
+
+// AX-11: ParseProfile pre-sizes profile.Tensors to the exact descriptor
+// count from the JSON probe. Without it the cap=0 → grow cascade paid
+// log2(N) extra slice allocs + discarded backing arrays on every model
+// load — production profiles carry hundreds of tensors, so each save
+// is real bytes off the model-open critical path.
+func TestAllocBudget_Codebook_ParseProfile_TensorCount(t *testing.T) {
+	// 7-tensor profile (one transformer layer's attention + MLP).
+	// Cap=0 grow path would alloc at len=1,2,4,8 → 4 grows; pre-sized
+	// at cap=7 yields exactly 1 tensor slice alloc + 1 descriptor
+	// alloc per tensor.
+	data := []byte(`{
+		"type": "codebook",
+		"format": "vq",
+		"codebook_size": 4096,
+		"code_dim": 8,
+		"index_bits": 16,
+		"tensors": [
+			{"name": "model.layers.0.mlp.down_proj.weight", "shape": [4096, 4096]},
+			{"name": "model.layers.0.mlp.gate_proj.weight", "shape": [4096, 4096]},
+			{"name": "model.layers.0.mlp.up_proj.weight", "shape": [4096, 4096]},
+			{"name": "model.layers.0.self_attn.q_proj.weight", "shape": [4096, 4096]},
+			{"name": "model.layers.0.self_attn.k_proj.weight", "shape": [4096, 4096]},
+			{"name": "model.layers.0.self_attn.v_proj.weight", "shape": [4096, 4096]},
+			{"name": "model.layers.0.self_attn.o_proj.weight", "shape": [4096, 4096]}
+		]
+	}`)
+	avg := testing.AllocsPerRun(5, func() {
+		codebookSinkProfile, codebookSinkErr = ParseProfile(data)
+	})
+	// Floor measured 86 allocs on this 7-tensor profile (5 grows
+	// removed by pre-size). Leave a 2-alloc margin for stdlib JSON
+	// internals that may shift between Go versions.
+	const budget = 88.0
+	if avg > budget {
+		t.Fatalf("ParseProfile alloc budget exceeded: %.1f allocs/call (budget=%.0f)\n"+
+			"This is the model-load critical path. A regression here likely means\n"+
+			"the profile.Tensors pre-size was removed and the cap=0 doubling\n"+
+			"cascade is back.\n"+
+			"Profile: go test -bench=BenchmarkCodebook_ParseProfile_Large -benchmem -memprofile=/tmp/c.mem",
+			avg, budget)
+	}
+}
