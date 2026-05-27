@@ -123,7 +123,9 @@ func Benchmark_Reasoning_ParseText_NoSpan_Qwen(b *testing.B) {
 }
 
 // Edge case: unclosed reasoning span — exercises the
-// firstReasoningEnd < 0 branch.
+// firstReasoningEnd < 0 branch. The first-marker-unclosed path
+// short-circuits the builder (visible == text[:idx] slice, no copy)
+// — pinned by Test_Reasoning_ParseText_Unclosed_OneAlloc.
 func Benchmark_Reasoning_ParseText_Unclosed_Qwen(b *testing.B) {
 	text := "preamble <think>" + reasoningBenchWords(200)
 	markers := qwenMarkers()
@@ -131,6 +133,28 @@ func Benchmark_Reasoning_ParseText_Unclosed_Qwen(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		reasoningBenchResult = parseReasoningText(text, markers)
+	}
+}
+
+// Test_Reasoning_ParseText_Unclosed_OneAlloc locks the unclosed-first-
+// marker short-circuit: the visible text is a direct slice of the
+// input (no builder, no String() copy) and the single reasoning
+// segment is the only allocation. Adapter sites that see partial
+// flushes with an open `<think>` tag hit this branch on every flush.
+func Test_Reasoning_ParseText_Unclosed_OneAlloc(t *testing.T) {
+	text := "preamble <think>" + reasoningBenchWords(200)
+	markers := qwenMarkers()
+	allocs := testing.AllocsPerRun(50, func() {
+		reasoningBenchResult = parseReasoningText(text, markers)
+	})
+	if allocs > 1 {
+		t.Fatalf("expected <=1 alloc/op on unclosed-first-marker short-circuit, got %.2f", allocs)
+	}
+	if reasoningBenchResult.VisibleText != "preamble " {
+		t.Fatalf("expected VisibleText=='preamble ', got %q", reasoningBenchResult.VisibleText)
+	}
+	if len(reasoningBenchResult.Reasoning) != 1 {
+		t.Fatalf("expected exactly 1 reasoning segment, got %d", len(reasoningBenchResult.Reasoning))
 	}
 }
 

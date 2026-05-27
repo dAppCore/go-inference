@@ -17,6 +17,23 @@ func parseReasoningText(text string, markers []reasoningMarker) inference.Reason
 	if !ok {
 		return inference.ReasoningParseResult{VisibleText: text}
 	}
+	// Probe the closing marker BEFORE allocating the builder. The
+	// unclosed-first-marker case (model emitted `<think>...` then
+	// streaming cut off, or the partial-flush hit before the close
+	// tag landed) wants visible == text[:idx] — a direct slice into
+	// the input — and a single reasoning segment for the open span.
+	// The previous shape always allocated the builder + wrote
+	// text[:idx] into it + paid String() to extract the same bytes;
+	// the slice path drops two heap allocations on this hot edge.
+	afterStart := text[idx+len(marker.start):]
+	end, endSize := firstReasoningEnd(afterStart, marker.ends)
+	if end < 0 {
+		result := inference.ReasoningParseResult{VisibleText: text[:idx]}
+		if reasoning := trimReasoningText(afterStart); reasoning != "" {
+			result.Reasoning = []inference.ReasoningSegment{{Kind: marker.kind, Text: reasoning, StartToken: idx}}
+		}
+		return result
+	}
 	visible := core.NewBuilder()
 	segments := []inference.ReasoningSegment{}
 	pending := text
@@ -24,15 +41,6 @@ func parseReasoningText(text string, markers []reasoningMarker) inference.Reason
 	for {
 		visible.WriteString(pending[:idx])
 		tokenOffset += idx
-		afterStart := pending[idx+len(marker.start):]
-		end, endSize := firstReasoningEnd(afterStart, marker.ends)
-		if end < 0 {
-			reasoning := trimReasoningText(afterStart)
-			if reasoning != "" {
-				segments = append(segments, inference.ReasoningSegment{Kind: marker.kind, Text: reasoning, StartToken: tokenOffset})
-			}
-			break
-		}
 		reasoning := trimReasoningText(afterStart[:end])
 		if reasoning != "" {
 			segments = append(segments, inference.ReasoningSegment{Kind: marker.kind, Text: reasoning, StartToken: tokenOffset, EndToken: tokenOffset + end})
@@ -45,6 +53,15 @@ func parseReasoningText(text string, markers []reasoningMarker) inference.Reason
 		idx, marker, ok = findReasoningStart(pending, markers)
 		if !ok {
 			visible.WriteString(pending)
+			break
+		}
+		afterStart = pending[idx+len(marker.start):]
+		end, endSize = firstReasoningEnd(afterStart, marker.ends)
+		if end < 0 {
+			visible.WriteString(pending[:idx])
+			if reasoning := trimReasoningText(afterStart); reasoning != "" {
+				segments = append(segments, inference.ReasoningSegment{Kind: marker.kind, Text: reasoning, StartToken: tokenOffset + idx})
+			}
 			break
 		}
 	}
