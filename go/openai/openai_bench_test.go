@@ -570,3 +570,29 @@ func BenchmarkOpenAI_CompletionID(b *testing.B) {
 		openAISinkString = completionID()
 	}
 }
+
+// AX-11: alloc budget for ThinkingExtractor.Process on a plain non-
+// marker token — the streaming hot path. Every model that doesn't
+// emit reasoning markers hits this path on every token. The drain
+// builder pair is lazy-allocated so the no-thought channel doesn't
+// pay; a regression here scales per token (a thousand-token stream
+// pays 1000x).
+func TestAllocBudget_OpenAI_ThinkingExtractor_PlainToken(t *testing.T) {
+	tokens := []inference.Token{{Text: "Answer"}}
+	avg := testing.AllocsPerRun(5, func() {
+		extractor := NewThinkingExtractor()
+		openAISinkContent, openAISinkThought = extractor.Process(tokens[0])
+	})
+	// Floor: 1 alloc for &ThinkingExtractor{} + 1 for the lazy
+	// contentDelta builder (allocated only when first written). The
+	// no-thought channel adds zero — saves per-token bytes on plain
+	// streams.
+	const budget = 2.0
+	if avg > budget {
+		t.Fatalf("ThinkingExtractor.Process plain-token alloc budget exceeded: %.1f allocs/call (budget=%.0f)\n"+
+			"This is the per-token streaming hot path. A regression here scales\n"+
+			"per token — a 1000-token stream pays 1000x.\n"+
+			"Profile: go test -bench=BenchmarkOpenAI_ThinkingExtractor_Process_PlainTokenShort -benchmem -memprofile=/tmp/te.mem",
+			avg, budget)
+	}
+}
