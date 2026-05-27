@@ -23,8 +23,9 @@ type fixtureFile struct {
 // buildFixturePack writes a small but realistic Gemma-4-shaped pack into
 // dir — config.json + tokenizer.json + chat_template.jinja + a small
 // model.safetensors with a valid header. Tests use this as the round-trip
-// source.
-func buildFixturePack(t *testing.T, dir string, extras ...fixtureFile) {
+// source. Accepts testing.TB so benchmarks can reuse the same fixture
+// without copy-pasting the file list.
+func buildFixturePack(t testing.TB, dir string, extras ...fixtureFile) {
 	t.Helper()
 
 	if mr := core.MkdirAll(dir, 0o755); !mr.OK {
