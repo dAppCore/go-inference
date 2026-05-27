@@ -193,16 +193,34 @@ func absolutePath(dir string) string {
 }
 
 func joinPath(parts ...string) string {
-	return core.CleanPath(core.Join(pathSeparator(), parts...), pathSeparator())
+	sep := pathSeparator()
+	return core.CleanPath(core.Join(sep, parts...), sep)
 }
 
 func cleanPath(path string) string {
 	return core.CleanPath(path, pathSeparator())
 }
 
+// pathSeparator resolves the directory separator once per process and
+// caches the result. The previous shape hit core.Env("DS") on every
+// call — joinPath / cleanPath fire deep inside the discover walk
+// (one per directory entry, hundreds-to-thousands of calls per
+// scan), and Env walks a map fallback to os.Getenv when the key is
+// unset (the common case for "DS"). The override is set once at
+// process start (typically by tests) and never mutates, so sync.Once
+// is the natural fit.
 func pathSeparator() string {
-	if separator := core.Env("DS"); separator != "" {
-		return separator
-	}
-	return "/"
+	pathSeparatorOnce.Do(func() {
+		if separator := core.Env("DS"); separator != "" {
+			pathSeparatorCache = separator
+			return
+		}
+		pathSeparatorCache = "/"
+	})
+	return pathSeparatorCache
 }
+
+var (
+	pathSeparatorOnce  sync.Once
+	pathSeparatorCache string
+)
