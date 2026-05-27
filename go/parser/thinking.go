@@ -39,11 +39,12 @@ type Processor struct {
 
 //	p := parser.NewProcessor(parser.Config{Mode: parser.Capture}, hint)
 func NewProcessor(cfg Config, hint Hint) *Processor {
-	markers := markersForHint(hint)
-	startSet := make([]string, len(markers))
-	for i, m := range markers {
-		startSet[i] = m.start
-	}
+	// markersForHint + thinkingStartsForHint return cached views
+	// owned by the registry's builtinOutputParser. They are read-only
+	// after construction; sharing the headers avoids per-stream alloc
+	// of both the marker slice and the start-set slice (the previous
+	// shape paid both per NewProcessor call).
+	markers, startSet := markersAndStartsForHint(hint)
 	return &Processor{
 		cfg:      cfg,
 		mode:     NormaliseMode(cfg.Mode),
@@ -65,25 +66,21 @@ func NormaliseMode(mode Mode) Mode {
 }
 
 func markersForHint(hint Hint) []thinkingMarker {
+	markers, _ := markersAndStartsForHint(hint)
+	return markers
+}
+
+// markersAndStartsForHint returns the flattened thinkingMarker view and
+// the parallel start-set view for the resolved parser. Both slices are
+// owned by the parser instance held in the registry — callers must treat
+// them as read-only. Non-builtin parsers (custom registrations) fall back
+// to allocating fresh views, preserving the legacy shape for those paths.
+func markersAndStartsForHint(hint Hint) ([]thinkingMarker, []string) {
 	p, ok := ForHint(hint).(*builtinOutputParser)
 	if !ok || p == nil {
 		p = newBuiltinOutputParser("generic", genericMarkers())
 	}
-	markers := make([]thinkingMarker, 0, len(p.markers))
-	for _, m := range p.markers {
-		for _, end := range m.ends {
-			if m.start == "" || end == "" {
-				continue
-			}
-			markers = append(markers, thinkingMarker{
-				start:   m.start,
-				end:     end,
-				channel: m.kind,
-				model:   p.ParserID(),
-			})
-		}
-	}
-	return markers
+	return p.thinkingMarkers, p.thinkingStarts
 }
 
 //	visible := p.Process(piece)
