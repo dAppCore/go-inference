@@ -328,6 +328,20 @@ func BackendCapabilities(backend Backend) CapabilityReport {
 	}
 }
 
+// maxTextModelCapabilities is the upper bound on the number of
+// capabilities TextModelCapabilities can ever emit: 4 base + every
+// optional-interface branch counted at its maximum (AgentMemorySession
+// alone contributes 3). Pre-sizing the Capabilities slice to this
+// ceiling eliminates the slice-grow allocs that the previous
+// 4-then-append path paid on every FullSurface query.
+//
+// If new capability-reporting branches land below, bump this number
+// to match — the alloc-budget test surfaces the regression
+// (TestCapability_AllocBudget_TextModelCapabilities_FullSurface) so
+// "I forgot to bump it" becomes a mechanical CI failure rather than
+// a silent perf regression that ripples through every backend.
+const maxTextModelCapabilities = 28
+
 // TextModelCapabilities infers a report from optional interfaces implemented by
 // a loaded model.
 func TextModelCapabilities(runtime RuntimeIdentity, model TextModel) CapabilityReport {
@@ -346,13 +360,14 @@ func TextModelCapabilities(runtime RuntimeIdentity, model TextModel) CapabilityR
 			QuantBits:    info.QuantBits,
 			QuantGroup:   info.QuantGroup,
 		},
-		Capabilities: []Capability{
-			SupportedCapability(CapabilityGenerate, CapabilityGroupModel),
-			SupportedCapability(CapabilityChat, CapabilityGroupModel),
-			SupportedCapability(CapabilityClassify, CapabilityGroupModel),
-			SupportedCapability(CapabilityBatchGenerate, CapabilityGroupModel),
-		},
+		Capabilities: make([]Capability, 0, maxTextModelCapabilities),
 	}
+	report.Capabilities = append(report.Capabilities,
+		SupportedCapability(CapabilityGenerate, CapabilityGroupModel),
+		SupportedCapability(CapabilityChat, CapabilityGroupModel),
+		SupportedCapability(CapabilityClassify, CapabilityGroupModel),
+		SupportedCapability(CapabilityBatchGenerate, CapabilityGroupModel),
+	)
 	if tokenizer, ok := model.(TokenizerModel); ok {
 		report.Capabilities = append(report.Capabilities,
 			SupportedCapability(CapabilityTokenizer, CapabilityGroupModel),

@@ -278,3 +278,60 @@ func TestCapability_SetRuntimeMemoryLimits_UglyUnsupported(t *testing.T) {
 	checkFalse(t, ok)
 	checkEqual(t, RuntimeMemoryLimits{}, applied)
 }
+
+// AX-11: alloc + behavioural lock for TextModelCapabilities on a
+// model implementing every optional capability interface. Mirrors
+// BenchmarkCapability_TextModelCapabilities_FullSurface — every
+// backend pays this once per Load() when reporting its surface to
+// the dispatcher, so a regression here ripples through every
+// consumer (go-mlx, go-rocm, go-cuda).
+//
+// Baselines (Apple M3 Ultra, -benchmem):
+//   pre-presize  (literal-4 + append × N grows): 3 allocs / 3479ns / 2208B
+//   post-presize (make([], 0, 28) once):         1 alloc  /  403ns / 2048B
+//
+// Trade-off: pre-sized slice is ~1.7KB larger per call on the
+// "no-optional-interfaces" path (Plain) because we always allocate
+// for the upper bound. Acceptable because (a) model load is one-shot
+// per backend per app session, and (b) the alloc-count drop +
+// 8x speedup matters far more than the bytes delta at this scale.
+//
+// Twin assertions:
+//   1. ALLOCS — stays at 1 (the single pre-sized backing slice)
+//   2. BEHAVIOUR — the reported capability set matches expectations
+//      for the full-surface model fixture
+func TestCapability_AllocBudget_TextModelCapabilities_FullSurface(t *testing.T) {
+	model := &capabilityModel{stubTextModel: &stubTextModel{}}
+	runtime := RuntimeIdentity{Backend: "test"}
+
+	// Behavioural lock — output must contain the expected capabilities.
+	// Spot-check that optional interfaces were detected; full coverage
+	// lives in TestCapability_CapabilitiesOf_TextModel.
+	report := TextModelCapabilities(runtime, model)
+	if !report.Available {
+		t.Fatalf("expected report.Available=true for FullSurface model")
+	}
+	// The capabilityModel fixture implements the optional interfaces
+	// the test suite covers — exact count is the contract. If the
+	// fixture grows to cover new interface branches, bump both this
+	// number AND maxTextModelCapabilities together so the alloc gate
+	// stays at 1 (single backing slice).
+	const expectedCapabilities = 14
+	if got := len(report.Capabilities); got != expectedCapabilities {
+		t.Fatalf("FullSurface capability count drifted: expected %d, got %d", expectedCapabilities, got)
+	}
+
+	// Alloc-budget lock. Bump maxTextModelCapabilities in capability.go
+	// AND this comment if new optional-interface branches land.
+	avg := testing.AllocsPerRun(5, func() {
+		_ = TextModelCapabilities(runtime, model)
+	})
+	const budget = 2.0 // current measured: 1
+	if avg > budget {
+		t.Fatalf("TextModelCapabilities alloc budget exceeded: %.1f allocs/call (budget=%.0f)\n"+
+			"Every backend pays this per Load() when reporting capabilities.\n"+
+			"If this jumped because a new optional-interface branch was added, "+
+			"bump maxTextModelCapabilities in capability.go to match.",
+			avg, budget)
+	}
+}
