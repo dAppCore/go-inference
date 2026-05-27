@@ -204,3 +204,62 @@ func TestAllocBudget_ChunkEnc_AppendNoAllocs(t *testing.T) {
 		})
 	}
 }
+
+// TestChunkSSEFrameSize_NeverUnderCounts locks the safety property of
+// the SSE-frame size estimator: for every realistic chunk shape, the
+// estimate must be >= the actual emit length. Any under-count would
+// trigger a grow during appendChatCompletionChunkSSE, defeating the
+// whole point of pre-sizing the caller buffer.
+//
+// The estimator was tightened (W12) to drop the int64-worst-case
+// reserves on `created` (10 digits → year 2286) and `index` (≤4
+// digits → 9999 n-best), pulling the per-frame buffer from the 240/256
+// allocator size class down to the 192/208 class. This test guards
+// the tightening so a future "just shave one more byte" change can't
+// silently underflow.
+func TestChunkSSEFrameSize_NeverUnderCounts(t *testing.T) {
+	finish := "stop"
+	longContent := strings.Repeat("token-", 100)
+	longThought := strings.Repeat("reflection-", 50)
+	cases := []struct {
+		name  string
+		chunk ChatCompletionChunk
+	}{
+		{"priming", benchPrimingChunk()},
+		{"delta-short", benchDeltaChunk("e")},
+		{"delta-long", benchDeltaChunk(longContent)},
+		{"terminating", benchTerminatingChunk()},
+		{"finish-with-reason", ChatCompletionChunk{
+			ID: "x", Object: "y", Created: 1700000000, Model: "qwen3",
+			Choices: []ChatChunkChoice{{Index: 0, FinishReason: &finish}},
+		}},
+		{"large-index", ChatCompletionChunk{
+			ID: "x", Object: "y", Created: 1700000000, Model: "qwen3",
+			Choices: []ChatChunkChoice{{Index: 9999, Delta: ChatMessageDelta{Role: "assistant"}}},
+		}},
+		{"multi-choice", ChatCompletionChunk{
+			ID: "x", Object: "y", Created: 1700000000, Model: "qwen3",
+			Choices: []ChatChunkChoice{
+				{Index: 0, Delta: ChatMessageDelta{Content: "A"}},
+				{Index: 1, Delta: ChatMessageDelta{Content: "B"}},
+			},
+		}},
+		{"with-thought", ChatCompletionChunk{
+			ID: "x", Object: "y", Created: 1700000000, Model: "qwen3",
+			Choices: []ChatChunkChoice{{Index: 0, Delta: ChatMessageDelta{Content: "Hi"}}},
+			Thought: &longThought,
+		}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			actual := len(appendChatCompletionChunkSSE(nil, tc.chunk))
+			est := chunkSSEFrameSize(tc.chunk)
+			if est < actual {
+				t.Fatalf("chunkSSEFrameSize=%d under-counts actual emit=%d — "+
+					"the pre-sized buffer would force a grow on every frame",
+					est, actual)
+			}
+		})
+	}
+}
