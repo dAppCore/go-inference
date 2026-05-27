@@ -262,6 +262,36 @@ func BenchmarkOpenAI_ChatMessageDelta_Marshal_Empty(b *testing.B) {
 	}
 }
 
+// TestChatMessageDelta_Marshal_AllocBudget locks the no-escape hot path
+// at one allocation per call: the make([]byte, 0, size) for the output
+// buffer. A second alloc indicates the size estimate undersized and the
+// append-grow ran — happened twice historically because the envelope
+// math forgot the leading-comma + closing-quote bytes. Lock the budget
+// so future tweaks don't silently regress.
+func TestChatMessageDelta_Marshal_AllocBudget(t *testing.T) {
+	cases := []struct {
+		name  string
+		delta ChatMessageDelta
+		want  float64
+	}{
+		{"content-only", ChatMessageDelta{Content: "Answer"}, 1},
+		{"role-priming", ChatMessageDelta{Role: "assistant"}, 1},
+		{"both", ChatMessageDelta{Role: "assistant", Content: "Yes."}, 1},
+		{"empty", ChatMessageDelta{}, 0}, // returns shared emptyDeltaBytes
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			allocs := testing.AllocsPerRun(100, func() {
+				openAISinkBytes, openAISinkErr = c.delta.MarshalJSON()
+			})
+			if allocs != c.want {
+				t.Fatalf("%s: expected %.0f allocs/op, got %.2f", c.name, c.want, allocs)
+			}
+		})
+	}
+}
+
 // --- ChatCompletionChunk — full SSE frame marshal ---
 // What writeChunk runs once per streamed token plus the terminal frame.
 
