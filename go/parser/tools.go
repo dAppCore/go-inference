@@ -34,18 +34,31 @@ func parseToolText(text string) (inference.ToolParseResult, error) {
 			}
 			break
 		}
+		afterStart := pending[idx+len(marker.start):]
+		end := indexString(afterStart, marker.end)
+		if end < 0 {
+			// Unclosed tagged block — every byte of `pending` is plain
+			// visible content. If this is the first iteration (no
+			// builder yet AND no prior successful blocks), the whole
+			// `text` IS the visible string; return it directly without
+			// the builder.String() copy. Adapter sites that emit
+			// unclosed tool-call tags hit this branch — token streams
+			// where the model emits "<tool_call>{..." then continues
+			// generating prose without ever closing the tag, or where
+			// the parser sees a partial flush at end-of-stream.
+			if visible == nil {
+				return inference.ToolParseResult{VisibleText: text, Calls: nil}, nil
+			}
+			visible.WriteString(pending)
+			foundTagged = true
+			break
+		}
 		foundTagged = true
 		if visible == nil {
 			visible = core.NewBuilder()
 			visible.Grow(len(text))
 		}
 		visible.WriteString(pending[:idx])
-		afterStart := pending[idx+len(marker.start):]
-		end := indexString(afterStart, marker.end)
-		if end < 0 {
-			visible.WriteString(pending[idx:])
-			break
-		}
 		parsed, err := parseToolPayload(afterStart[:end])
 		if err != nil {
 			return inference.ToolParseResult{}, err

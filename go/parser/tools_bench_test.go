@@ -132,13 +132,38 @@ func Benchmark_Tools_ParseText_FiveCalls_Long(b *testing.B) {
 
 // Unclosed tagged tool-call exercises the `end < 0` branch — the
 // scan walks the whole payload looking for `</tool_call>` and falls
-// back to passthrough.
+// back to passthrough. The hot path now short-circuits with a direct
+// text return (no builder, no string copy) when the first marker has
+// no closing tag — pinned by Test_Tools_ParseText_Unclosed_ZeroAlloc.
 func Benchmark_Tools_ParseText_Unclosed(b *testing.B) {
 	text := `before <tool_call>{"name":"search","arguments":{"q":"core"}` + toolsBenchWords(64)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		toolsBenchResult, toolsBenchErr = parseToolText(text)
+	}
+}
+
+// Test_Tools_ParseText_Unclosed_ZeroAlloc locks the unclosed-marker
+// short-circuit: when the first tool_call tag in the stream never
+// closes, the parser must return the original text (the only valid
+// rendering) without allocating a builder or copying through it.
+// Adapter sites that emit `<tool_call>{...` then prose hit this
+// branch on every flush — historic shape paid 416 B / 2 allocs per
+// call, the short-circuit drops it to zero.
+func Test_Tools_ParseText_Unclosed_ZeroAlloc(t *testing.T) {
+	text := `before <tool_call>{"name":"search","arguments":{"q":"core"}` + toolsBenchWords(64)
+	allocs := testing.AllocsPerRun(50, func() {
+		toolsBenchResult, toolsBenchErr = parseToolText(text)
+	})
+	if allocs != 0 {
+		t.Fatalf("expected 0 allocs/op on unclosed-first-marker short-circuit, got %.2f", allocs)
+	}
+	if toolsBenchResult.VisibleText != text {
+		t.Fatalf("expected VisibleText=text on unclosed short-circuit; got len=%d want=%d", len(toolsBenchResult.VisibleText), len(text))
+	}
+	if toolsBenchResult.Calls != nil {
+		t.Fatalf("expected Calls==nil on unclosed short-circuit, got %d calls", len(toolsBenchResult.Calls))
 	}
 }
 
