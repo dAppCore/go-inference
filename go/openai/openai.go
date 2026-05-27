@@ -129,15 +129,20 @@ func (d ChatMessageDelta) MarshalJSON() ([]byte, error) {
 	if d.Role == "" && d.Content == "" {
 		return emptyDeltaBytes, nil
 	}
-	// Tight upper bound — both branches emit two ASCII keys plus the
-	// quoted value bodies. Worst-case doubling on escape-heavy content
-	// lets append grow once.
+	// Exact upper bound on the no-escape path — both branches emit the
+	// fixed key envelope plus the raw value bytes. AppendJSONString may
+	// double the value size when escapes fire; that's a one-time append
+	// grow on the escape-heavy path, not the streaming hot path.
+	//
+	// "role":"X" envelope         = 9 chars + len(value)
+	// "content":"X" envelope      = 12 chars + len(value)
+	// leading comma adds          = 1 char
 	size := 2 // braces
 	if d.Role != "" {
-		size += 9 + len(d.Role)      // "role":"...",
-		size += 11 + len(d.Content)  // "content":"..."
+		size += 9 + len(d.Role)      // "role":"X"
+		size += 1 + 12 + len(d.Content) // ,"content":"X"
 	} else {
-		size += 11 + len(d.Content) // "content":"..."
+		size += 12 + len(d.Content) // "content":"X"
 	}
 	buf := make([]byte, 0, size)
 	buf = append(buf, '{')
