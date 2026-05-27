@@ -86,3 +86,64 @@ func writeMinimalGGUFAt(t *testing.T, path string, metadata map[string]any) stri
 	checkResultOK(t, result)
 	return path
 }
+
+// AX-11: alloc + behavioural lock for ReadGGUFInfo on a vocab-heavy
+// header. Mirrors BenchmarkGGUF_ReadInfo_VocabHeavy's fixture shape
+// (5 real fields + 200 synthetic noise entries) so this gate catches
+// the same regressions the bench would surface, except mechanically
+// in `go test`.
+//
+// Baselines (Apple M3 Ultra, -benchmem):
+//   pre-bufio  (per-entry syscalls): 22 allocs / ~437µs
+//   post-bufio (one buffer fill):    23 allocs / ~23µs   ← current
+//
+// Alloc +1 is from bufio.Reader's internal buffer allocation; time
+// drops 18.7x because skipGGUFValue serves from buffered bytes
+// instead of one syscall per entry skipped. Net trade is clear: model
+// load is one-shot, not per-token.
+//
+// Twin assertions:
+//   1. ALLOCS — stays below ceiling (regression gate)
+//   2. OUTPUT — the parsed GGUFInfo matches expected values (behaviour gate)
+//
+// The output assertion is the TDD anchor — any refactor that produces
+// a different GGUFInfo for the same fixture fails loud BEFORE the
+// downstream backends (go-mlx, go-rocm) try to load the model and
+// see "context_length=0".
+func TestGGUF_AllocBudget_ReadInfo_VocabHeavy(t *testing.T) {
+	metadata := map[string]any{
+		"general.architecture":   "qwen3",
+		"general.file_type":      uint32(15),
+		"qwen3.block_count":      uint32(28),
+		"qwen3.context_length":   uint32(40960),
+		"qwen3.embedding_length": uint32(2048),
+	}
+	for i := 0; i < 200; i++ {
+		metadata[core.Sprintf("synthetic.meta.%d", i)] = core.Sprintf("value-payload-%d", i)
+	}
+	path := writeMinimalGGUF(t, metadata)
+
+	// Behavioural lock — output for this fixture is the contract every
+	// optimisation must preserve.
+	info, err := ReadGGUFInfo(path)
+	checkNoError(t, err)
+	checkEqual(t, "qwen3", info.Architecture)
+	checkEqual(t, 28, info.NumLayers)
+	checkEqual(t, 40960, info.ContextLength)
+	checkEqual(t, 2048, info.HiddenSize)
+	checkEqual(t, 4, info.QuantBits)
+	checkEqual(t, "q4_k_m", info.QuantType)
+
+	// Alloc-budget lock — set with deliberate headroom for stdlib drift.
+	// Ratchet DOWN when wins land; bumping UP needs a documented reason.
+	avg := testing.AllocsPerRun(5, func() {
+		_, _ = ReadGGUFInfo(path)
+	})
+	const budget = 25.0 // current measured: 22
+	if avg > budget {
+		t.Fatalf("ReadGGUFInfo alloc budget exceeded: %.1f allocs/call (budget=%.0f)\n"+
+			"Vocab-heavy headers are model-load hot path — every backend pays this per Load.\n"+
+			"Profile: go test -bench=BenchmarkGGUF_ReadInfo_VocabHeavy -benchmem -memprofile=/tmp/g.mem",
+			avg, budget)
+	}
+}
