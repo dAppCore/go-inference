@@ -203,9 +203,15 @@ func BuildPackedProfile(info *Info) *PackedProfile {
 	}
 	rb := roleBits(info)
 	minBits, maxBits := minMaxBits(rb)
+	// quantizationType + packedFormat each Lower(Concat(Profile, WeightFormat,
+	// Method)) — same 3 ASCII keyword lookups (jangtq / mxtq / jang) against
+	// the same input bag. Build the lowered fingerprint once and inline the
+	// classifier so BuildPackedProfile pays one Concat + one Lower instead
+	// of two of each (saved ~50 B + 2 allocs per BuildPackedProfile call).
+	fingerprint := core.Lower(core.Concat(info.Profile, " ", info.WeightFormat, " ", info.Method))
 	profile := &PackedProfile{
-		Type:          quantizationType(info),
-		Format:        packedFormat(info),
+		Type:          quantizationTypeFromFingerprint(fingerprint),
+		Format:        packedFormatFromFingerprint(fingerprint, info.WeightFormat),
 		Profile:       info.Profile,
 		Method:        info.Method,
 		GroupSize:     info.GroupSize,
@@ -222,6 +228,33 @@ func BuildPackedProfile(info *Info) *PackedProfile {
 		profile.Format = profile.Type
 	}
 	return profile
+}
+
+// quantizationTypeFromFingerprint + packedFormatFromFingerprint share the
+// pre-lowered "profile weight_format method" fingerprint that
+// BuildPackedProfile builds once per call. The standalone
+// quantizationType + packedFormat helpers below preserve the one-off
+// shape for callers outside the hot loop (currently none, but the
+// public API surface stays stable for downstream finalize() callers
+// that may surface).
+func quantizationTypeFromFingerprint(fingerprint string) string {
+	if core.Contains(fingerprint, "jangtq") || core.Contains(fingerprint, "mxtq") {
+		return "jangtq"
+	}
+	return "jang"
+}
+
+func packedFormatFromFingerprint(fingerprint, weightFormat string) string {
+	switch {
+	case core.Contains(fingerprint, "mxtq"):
+		return "mxtq"
+	case core.Contains(fingerprint, "jangtq"):
+		return "jangtq"
+	case core.Contains(fingerprint, "jang"):
+		return "jang"
+	default:
+		return core.Lower(weightFormat)
+	}
 }
 
 //	clone := jang.ClonePackedProfile(profile)
