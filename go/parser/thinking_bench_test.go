@@ -458,3 +458,82 @@ func Benchmark_Thinking_LongestSuffixPrefix_LongMarkerSet(b *testing.B) {
 		thinkingBenchKeep = longestSuffixPrefix(text, starts)
 	}
 }
+
+// AX-11: alloc budget for markersForHint. The flattened marker view +
+// its parallel start-set are cached on the builtin parser at registry
+// build time, so the per-stream resolve must not allocate either slice.
+// Family + NormaliseKey still allocate one transient string for the
+// arch+adapter concat — that's the budget here. A regression above this
+// means the per-stream view alloc has returned (each NewProcessor pays
+// it again, and each thousand-token response opens a stream).
+func TestAllocBudget_Thinking_MarkersForHint(t *testing.T) {
+	cases := []struct {
+		name string
+		hint Hint
+	}{
+		{"Qwen", Hint{Architecture: "qwen3"}},
+		{"Gemma", Hint{Architecture: "gemma4_text"}},
+		{"GPTOSS", Hint{Architecture: "gpt-oss"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			avg := testing.AllocsPerRun(5, func() {
+				thinkingBenchMarkers = markersForHint(tc.hint)
+			})
+			// Floor: 1 alloc for Family's core.Concat transient. Hints
+			// that carry a dash in the architecture name (gpt-oss) pay
+			// one extra for the NormaliseKey '-' → '_' replace before
+			// the family lookup. Both are Family-path constants — the
+			// markersForHint view itself is zero-alloc.
+			budget := 1.0
+			if tc.name == "GPTOSS" {
+				budget = 2.0
+			}
+			if avg > budget {
+				t.Fatalf("markersForHint(%s) alloc budget exceeded: %.1f allocs/call (budget=%.0f)\n"+
+					"This is per-stream build cost. A regression here re-allocates the\n"+
+					"flat thinkingMarker view + start-set on every NewProcessor call.\n"+
+					"Profile: go test -bench=Benchmark_Thinking_MarkersForHint_%s -benchmem -memprofile=/tmp/m.mem",
+					tc.name, avg, budget, tc.name)
+			}
+		})
+	}
+}
+
+// AX-11: alloc budget for NewProcessor. The marker + start-set views
+// come from the cached parser; the per-stream NewProcessor must only
+// allocate the Processor struct itself plus the Family-path transient.
+// Streaming responses open one Processor per request — a regression
+// scales per-request, not per-token.
+func TestAllocBudget_Thinking_NewProcessor(t *testing.T) {
+	cases := []struct {
+		name string
+		hint Hint
+	}{
+		{"Qwen", Hint{Architecture: "qwen3"}},
+		{"Gemma", Hint{Architecture: "gemma4_text"}},
+		{"GPTOSS", Hint{Architecture: "gpt-oss"}},
+	}
+	cfg := Config{Mode: Hide}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			avg := testing.AllocsPerRun(5, func() {
+				thinkingBenchProcessor = NewProcessor(cfg, tc.hint)
+			})
+			// Floor: 1 alloc for &Processor{} + 1 for Family's Concat
+			// transient. Architectures carrying a dash pay one extra
+			// for NormaliseKey's '-' → '_' replace.
+			budget := 2.0
+			if tc.name == "GPTOSS" {
+				budget = 3.0
+			}
+			if avg > budget {
+				t.Fatalf("NewProcessor(%s) alloc budget exceeded: %.1f allocs/call (budget=%.0f)\n"+
+					"This is per-stream open cost. A regression here means we re-built\n"+
+					"the marker view or start-set instead of sharing the registry copy.\n"+
+					"Profile: go test -bench=Benchmark_Thinking_NewProcessor_%s -benchmem -memprofile=/tmp/np.mem",
+					tc.name, avg, budget, tc.name)
+			}
+		})
+	}
+}
