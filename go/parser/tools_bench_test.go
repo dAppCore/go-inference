@@ -348,3 +348,36 @@ func Benchmark_Tools_NormaliseArgumentsJSON_Nil(b *testing.B) {
 		toolsBenchString = normaliseArgumentsJSON("", nil)
 	}
 }
+
+// AX-11: zero-alloc budget for parseToolText on plain prose. Every
+// assistant response that doesn't carry a tool-call passes through
+// this function; the no-call path must not pay for a builder copy of
+// the entire response (the previous shape allocated len(text) bytes
+// per call to a one-shot builder, only to return text verbatim).
+// Regression here scales per-response.
+func TestAllocBudget_Tools_ParseText_NoCalls(t *testing.T) {
+	cases := []struct {
+		name   string
+		tokens int
+	}{
+		{"Short", 32},
+		{"Mid", 256},
+		{"Long", 2048},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			text := toolsBenchWords(tc.tokens)
+			avg := testing.AllocsPerRun(5, func() {
+				toolsBenchResult, toolsBenchErr = parseToolText(text)
+			})
+			const budget = 0.0
+			if avg > budget {
+				t.Fatalf("parseToolText no-call %s alloc budget exceeded: %.1f allocs/call (budget=%.0f)\n"+
+					"This is the per-response common path. A regression here scales per-response —\n"+
+					"every assistant turn pays this.\n"+
+					"Profile: go test -bench=Benchmark_Tools_ParseText_NoCalls_%s -benchmem -memprofile=/tmp/t.mem",
+					tc.name, avg, budget, tc.name)
+			}
+		})
+	}
+}
