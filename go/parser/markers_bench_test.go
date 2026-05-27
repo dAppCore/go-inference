@@ -10,6 +10,11 @@
 // the underlying slice on every invocation — the hot loop the
 // consumer pays for short-lived parser construction.
 //
+// After the sync.Once cache landed, each builder hands back the same
+// shared backing slice on every invocation: 0 allocs / 0 B / ~1 ns each.
+// The Test_Markers_NoAllocs gate fails any future change that reintroduces
+// per-call slice construction.
+//
 // Run:    go test -bench='Benchmark_Markers' -benchmem -run='^$' ./go/parser
 
 package parser
@@ -52,5 +57,41 @@ func Benchmark_Markers_GPTOSS(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		markersBenchSet = gptOSSMarkers()
+	}
+}
+
+// Test_Markers_NoAllocs locks the sync.Once cache: each marker builder must
+// hand back the shared backing slice with zero allocations per call. If a
+// future change rebuilds the slice per call (e.g. dropping the cache, or
+// constructing inside the function and forgetting to memoise), this test
+// flips the regression visible immediately rather than waiting for a
+// bench re-sweep.
+func Test_Markers_NoAllocs(t *testing.T) {
+	// Warm the caches before measuring so the first-call sync.Once allocation
+	// is excluded from the steady-state per-call budget.
+	_ = genericMarkers()
+	_ = qwenMarkers()
+	_ = gemmaMarkers()
+	_ = gptOSSMarkers()
+
+	cases := []struct {
+		name string
+		call func() []reasoningMarker
+	}{
+		{"generic", genericMarkers},
+		{"qwen", qwenMarkers},
+		{"gemma", gemmaMarkers},
+		{"gptoss", gptOSSMarkers},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			allocs := testing.AllocsPerRun(100, func() {
+				markersBenchSet = c.call()
+			})
+			if allocs != 0 {
+				t.Fatalf("%s: expected 0 allocs/op after sync.Once cache, got %.2f", c.name, allocs)
+			}
+		})
 	}
 }
