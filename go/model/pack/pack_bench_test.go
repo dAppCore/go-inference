@@ -147,12 +147,12 @@ func TestAllocBudget_Pack_Hash_Typical(t *testing.T) {
 	avg := testing.AllocsPerRun(5, func() {
 		_, _ = pack.Hash(srcDir)
 	})
-	// Initial ceiling matches measured baseline (~116) + ~10% headroom.
-	// Ratchet DOWN as optimisations land — this gate is the regression
-	// floor, not a target. WalkSeq + per-file Stat dominate the alloc
-	// count today; if those move to cached/single-call patterns the
-	// ceiling drops.
-	const budget = 130.0
+	// Ceiling: 120 — current 112 (post sharedFs cache) + ~7% headroom.
+	// Was 116→130 pre-sharedFs. Ratchet DOWN as optimisations land.
+	// Remaining floor is OS file I/O (Stat, ReadFile, WalkSeq) — those
+	// are below this layer and need bigger architectural moves to cut
+	// further (mmap, single-syscall directory walk, etc).
+	const budget = 120.0
 	if avg > budget {
 		t.Fatalf("pack.Hash alloc budget exceeded: %.1f allocs/call (budget=%.0f)\n"+
 			"Hash runs on every Pack() — every backend pays this per model bundling op.\n"+

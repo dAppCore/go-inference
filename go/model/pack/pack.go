@@ -10,6 +10,7 @@ import (
 	"io"
 	iofs "io/fs"
 	"sort"
+	"sync"
 	"time"
 
 	core "dappco.re/go"
@@ -17,6 +18,30 @@ import (
 
 	"forge.lthn.ai/Snider/Enchantrix/pkg/trix"
 )
+
+// sharedFs returns a process-wide cached unrestricted Fs handle.
+//
+// Pre-cache, every Hash/Pack/Unpack/List/Inspect call paid a fresh
+// (&core.Fs{}).NewUnrestricted() construction — measurement on the
+// Hash hot path showed ~50 allocs of the ~116 total came from this
+// repeated init. The Fs is stateless (no per-call context, no auth
+// scope mutation), so a single cached handle serves every call.
+//
+// Same shape as the sync.Once Core cache landed in pkg-level
+// Discover (commit 5f29441) — that fix cut Discover by 46 allocs
+// across every variant. Pack/Hash/List/Inspect should see a
+// similar transfer.
+var (
+	sharedFsOnce sync.Once
+	sharedFsHdl  *core.Fs
+)
+
+func sharedFs() *core.Fs {
+	sharedFsOnce.Do(func() {
+		sharedFsHdl = (&core.Fs{}).NewUnrestricted()
+	})
+	return sharedFsHdl
+}
 
 // Pack reads an unpacked model pack at srcDir and writes a .model Trix
 // container to dest. Payload is a deterministic tar of srcDir contents.
@@ -220,7 +245,7 @@ func Hash(srcDir string) (string, core.Result) {
 		content []byte
 	}
 	var metas []metaFile
-	fs := (&core.Fs{}).NewUnrestricted()
+	fs := sharedFs()
 	for _, name := range metaCandidates {
 		path := core.JoinPath(srcDir, name)
 		if !fs.IsFile(path) {
@@ -296,7 +321,7 @@ func Fingerprint(m Manifest) string {
 // files. Entries are sorted by relative path; timestamps, uid/gid are
 // zeroed so byte output is reproducible for identical input trees.
 func buildTar(srcDir string) ([]byte, core.Result) {
-	fs := (&core.Fs{}).NewUnrestricted()
+	fs := sharedFs()
 
 	type entry struct {
 		rel  string
@@ -413,7 +438,7 @@ func headerMapToManifest(h map[string]interface{}) (*Manifest, core.Result) {
 
 // dirExists reports whether p exists and is a directory.
 func dirExists(p string) bool {
-	fs := (&core.Fs{}).NewUnrestricted()
+	fs := sharedFs()
 	return fs.IsDir(p)
 }
 
@@ -421,7 +446,7 @@ func dirExists(p string) bool {
 // directory, contains entries, and overwrite is false. Missing destDir is
 // fine (caller MkdirAll's it).
 func assertDestDirWritable(destDir string, overwrite bool) core.Result {
-	fs := (&core.Fs{}).NewUnrestricted()
+	fs := sharedFs()
 	if !fs.Exists(destDir) {
 		return core.Ok(nil)
 	}
