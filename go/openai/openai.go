@@ -739,6 +739,19 @@ var reasoningMarkers = []pairedMarker{
 	{start: "<reasoning>", end: "</reasoning>"},
 }
 
+// reasoningMarkerStarts is the per-package cached list of marker starts
+// passed to splitSafeSuffix from drain. Built once at package init so
+// every per-token Process call shares the same slice header instead of
+// re-allocating len(reasoningMarkers)+1 entries on every miss path.
+var reasoningMarkerStarts = func() []string {
+	out := make([]string, 0, len(reasoningMarkers)+1)
+	out = append(out, channelMarker)
+	for _, marker := range reasoningMarkers {
+		out = append(out, marker.start)
+	}
+	return out
+}()
+
 // ThinkingExtractor separates model-internal reasoning text from assistant
 // content.
 type ThinkingExtractor struct {
@@ -797,20 +810,28 @@ func (e *ThinkingExtractor) Thinking() string {
 }
 
 func (e *ThinkingExtractor) drain(final bool) (string, string) {
-	contentDelta := core.NewBuilder()
-	thoughtDelta := core.NewBuilder()
+	// Lazy-allocate the deltas. Per-token streaming on plain (non-
+	// reasoning) tokens only ever writes to contentDelta; the prior
+	// shape paid for both builders up front on every Process call.
+	var contentDelta, thoughtDelta *core.Builder
 	for e.pending != "" {
 		if e.inPaired {
 			idx := indexString(e.pending, e.pairedEnd)
 			if idx >= 0 {
-				writeThought(e, thoughtDelta, e.pending[:idx])
+				if idx > 0 {
+					thoughtDelta = ensureBuilder(thoughtDelta)
+					writeThought(e, thoughtDelta, e.pending[:idx])
+				}
 				e.pending = e.pending[idx+len(e.pairedEnd):]
 				e.inPaired = false
 				e.pairedEnd = ""
 				continue
 			}
-			emit, keep := splitSafeSuffix(e.pending, []string{e.pairedEnd}, final)
-			writeThought(e, thoughtDelta, emit)
+			emit, keep := splitSafeSuffixOne(e.pending, e.pairedEnd, final)
+			if emit != "" {
+				thoughtDelta = ensureBuilder(thoughtDelta)
+				writeThought(e, thoughtDelta, emit)
+			}
 			e.pending = keep
 			if keep != "" && !final {
 				break
@@ -825,7 +846,10 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 		if e.currentChannel == "thought" || e.currentChannel == "thinking" || e.currentChannel == "reasoning" {
 			idx := indexString(e.pending, channelMarker)
 			if idx >= 0 {
-				writeThought(e, thoughtDelta, e.pending[:idx])
+				if idx > 0 {
+					thoughtDelta = ensureBuilder(thoughtDelta)
+					writeThought(e, thoughtDelta, e.pending[:idx])
+				}
 				e.pending = e.pending[idx:]
 				if e.consumeMarkerAtStart() {
 					continue
@@ -833,12 +857,16 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 				if !final {
 					break
 				}
+				thoughtDelta = ensureBuilder(thoughtDelta)
 				writeThought(e, thoughtDelta, channelMarker)
 				e.pending = e.pending[len(channelMarker):]
 				continue
 			}
-			emit, keep := splitSafeSuffix(e.pending, []string{channelMarker}, final)
-			writeThought(e, thoughtDelta, emit)
+			emit, keep := splitSafeSuffixOne(e.pending, channelMarker, final)
+			if emit != "" {
+				thoughtDelta = ensureBuilder(thoughtDelta)
+				writeThought(e, thoughtDelta, emit)
+			}
 			e.pending = keep
 			if keep != "" && !final {
 				break
@@ -853,7 +881,10 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 			start = channelMarker
 		}
 		if idx >= 0 {
-			writeContent(e, contentDelta, e.pending[:idx])
+			if idx > 0 {
+				contentDelta = ensureBuilder(contentDelta)
+				writeContent(e, contentDelta, e.pending[:idx])
+			}
 			e.pending = e.pending[idx:]
 			if start == channelMarker {
 				if e.consumeMarkerAtStart() {
@@ -862,6 +893,7 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 				if !final {
 					break
 				}
+				contentDelta = ensureBuilder(contentDelta)
 				writeContent(e, contentDelta, channelMarker)
 				e.pending = e.pending[len(channelMarker):]
 				continue
@@ -872,13 +904,55 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 			continue
 		}
 		emit, keep := splitSafeSuffix(e.pending, markerStarts(), final)
-		writeContent(e, contentDelta, emit)
+		if emit != "" {
+			contentDelta = ensureBuilder(contentDelta)
+			writeContent(e, contentDelta, emit)
+		}
 		e.pending = keep
 		if keep != "" && !final {
 			break
 		}
 	}
-	return contentDelta.String(), thoughtDelta.String()
+	return builderString(contentDelta), builderString(thoughtDelta)
+}
+
+// ensureBuilder lazy-allocates a strings.Builder on first write. The
+// drain hot loop's plain-token path emits everything via contentDelta;
+// thoughtDelta only ever exists if a reasoning marker is in flight.
+func ensureBuilder(b *core.Builder) *core.Builder {
+	if b != nil {
+		return b
+	}
+	return core.NewBuilder()
+}
+
+// builderString returns the builder contents or "" if the builder was
+// never lazy-allocated (i.e. no writes to that channel this drain).
+func builderString(b *core.Builder) string {
+	if b == nil {
+		return ""
+	}
+	return b.String()
+}
+
+// splitSafeSuffixOne is the single-marker fast path of splitSafeSuffix.
+// Avoids the per-call []string{marker} slice alloc paid by the drain
+// loop's per-token hot-path branches.
+func splitSafeSuffixOne(s, marker string, final bool) (emit, keep string) {
+	if final {
+		return s, ""
+	}
+	maxN := min(len(s), len(marker)-1)
+	keepLen := 0
+	for n := 1; n <= maxN; n++ {
+		if s[len(s)-n:] == marker[:n] && n > keepLen {
+			keepLen = n
+		}
+	}
+	if keepLen == 0 {
+		return s, ""
+	}
+	return s[:len(s)-keepLen], s[len(s)-keepLen:]
 }
 
 func (e *ThinkingExtractor) consumeMarkerAtStart() bool {
@@ -970,13 +1044,11 @@ func pairedEndFor(start string) string {
 	return ""
 }
 
+// markerStarts returns the cached slice header — read-only after init.
+// Sharing the header across calls avoids the per-token alloc that the
+// previous shape paid on every miss path of drain.
 func markerStarts() []string {
-	out := make([]string, 0, len(reasoningMarkers)+1)
-	out = append(out, channelMarker)
-	for _, marker := range reasoningMarkers {
-		out = append(out, marker.start)
-	}
-	return out
+	return reasoningMarkerStarts
 }
 
 func splitSafeSuffix(s string, markers []string, final bool) (emit, keep string) {
