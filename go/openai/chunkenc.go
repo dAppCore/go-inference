@@ -103,34 +103,78 @@ func appendChatCompletionChunkSSE(buf []byte, chunk ChatCompletionChunk) []byte 
 }
 
 // chunkSSEFrameSize estimates the backing-buffer size for one SSE
-// frame so the streaming path allocates once. The estimate covers
-// the "data: " prefix + every fixed key + a one-byte ASCII assumption
-// for the variable fields + the trailing "\n\n". Pathological
-// escape-heavy content lets append grow once.
+// frame so the streaming path allocates once. The estimate is tight
+// for the typical priming / delta / terminal shape — Unix-second
+// timestamps (10 digits through year 2286) and small choice indices
+// (≤4 digits handles the practical n-best range) get hardcoded
+// reserves rather than the int64-worst-case 20-digit allowance, so
+// the per-frame alloc lands in the 192/208-byte size class for the
+// priming frame instead of the 240/256-byte class the previous
+// estimate produced. Pathological escape-heavy content (control
+// chars in the model output) still lets append grow once.
 func chunkSSEFrameSize(chunk ChatCompletionChunk) int {
-	// "data: " (6) + "{" (1) + closing "\n\n" (2)
-	size := 6 + 1 + 2
-	size += 7 + len(chunk.ID)          // "id":"...",
-	size += 11 + len(chunk.Object)     // "object":"...",
-	size += 12 + 20                    // "created":<int64>,
-	size += 10 + len(chunk.Model)      // "model":"...",
-	size += 12                         // "choices":[...]
-	for _, choice := range chunk.Choices {
-		size += 11 + 20                    // "index":N,
-		// delta = "delta":{...} — delta wire is 30+role+content bytes worst case
-		size += 9 + 32 + len(choice.Delta.Role) + len(choice.Delta.Content)
-		size += 19                         // ,"finish_reason":<null|"..">
+	// Envelope: `data: ` (6) + outer `{}` (2) + trailing `\n\n` (2)
+	size := 6 + 2 + 2
+	// `"id":"X"` — first field, no leading comma. 7 chars envelope
+	// (2 quotes for key + colon + 2 quotes for value) + key + value.
+	size += 5 + 2 + len(chunk.ID)
+	// `,"object":"X"` — leading comma + 5-char envelope + key + value.
+	size += 1 + 5 + 6 + len(chunk.Object)
+	// `,"created":<digits>` — leading comma + `"created":` (10) + 10
+	// digits (Unix seconds through year 2286). Sub-millisecond clocks
+	// that overflow get a one-time append grow.
+	size += 1 + 10 + 10
+	// `,"model":"X"` — leading comma + 5-char envelope + key + value.
+	size += 1 + 5 + 5 + len(chunk.Model)
+	// `,"choices":[` — leading comma + `"choices":[` = 12 chars. The
+	// matching `]` is added after the choices loop.
+	size += 12
+	for i, choice := range chunk.Choices {
+		// `,` between choices — every iteration past the first.
+		if i > 0 {
+			size++
+		}
+		// `{"index":N` — `{` + `"index":` (8) + 4 digits (covers up to
+		// 9999 indices, well past any n-best).
+		size += 1 + 8 + 4
+		// `,"delta":{...}` — leading comma + `"delta":` (8) + delta body.
+		// chatMessageDeltaSize matches appendChatMessageDelta's three
+		// branches (empty / content-only / role+content) so the reserve
+		// tracks the exact encoder output.
+		size += 1 + 8 + chatMessageDeltaSize(choice.Delta)
+		// `,"finish_reason":<value>` — leading comma + `"finish_reason":`
+		// (16) + `null` (4) or `"X"` (2 + len).
+		size += 1 + 16
 		if choice.FinishReason != nil {
-			size += len(*choice.FinishReason) + 2
+			size += 2 + len(*choice.FinishReason)
 		} else {
 			size += 4
 		}
-		size += 3                          // {} wrap + separator
+		// Per-choice closing `}`.
+		size++
 	}
+	// Closing `]` for the choices array.
+	size++
 	if chunk.Thought != nil {
-		size += 12 + len(*chunk.Thought)   // ,"thought":"..."
+		// `,"thought":"X"` — leading comma + `"thought":` (10) + `"X"`.
+		size += 1 + 10 + 2 + len(*chunk.Thought)
 	}
 	return size
+}
+
+// chatMessageDeltaSize returns the exact byte length of the
+// `{...}` body that appendChatMessageDelta will emit for d, so the
+// SSE frame estimator can pick the tight per-choice reserve rather
+// than the role-priming worst case. Matches the three branches in
+// appendChatMessageDelta: empty / content-only / role+content.
+func chatMessageDeltaSize(d ChatMessageDelta) int {
+	if d.Role == "" && d.Content == "" {
+		return 2 // {}
+	}
+	if d.Role == "" {
+		return 14 + len(d.Content) // {"content":"X"}
+	}
+	return 24 + len(d.Role) + len(d.Content) // {"role":"X","content":"Y"}
 }
 
 // Note: ChatCompletionChunk does NOT carry a MarshalJSON method.
