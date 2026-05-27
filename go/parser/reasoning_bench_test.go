@@ -260,3 +260,36 @@ func Benchmark_Reasoning_Trim_Long(b *testing.B) {
 		reasoningBenchText = trimReasoningText(text)
 	}
 }
+
+// AX-11: zero-alloc budget for parseReasoningText on no-span responses.
+// Every assistant response from a non-reasoning model (or a reasoning
+// model that didn't emit a marker this turn) hits this path; the
+// previous shape unconditionally allocated a strings.Builder + paid
+// a full text copy. Regression here scales per-response.
+func TestAllocBudget_Reasoning_ParseText_NoSpan(t *testing.T) {
+	cases := []struct {
+		name   string
+		tokens int
+	}{
+		{"Short", 32},
+		{"Mid", 256},
+		{"Long", 2048},
+	}
+	markers := qwenMarkers()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			text := reasoningBenchWords(tc.tokens)
+			avg := testing.AllocsPerRun(5, func() {
+				reasoningBenchResult = parseReasoningText(text, markers)
+			})
+			const budget = 0.0
+			if avg > budget {
+				t.Fatalf("parseReasoningText no-span %s alloc budget exceeded: %.1f allocs/call (budget=%.0f)\n"+
+					"This is the per-response common path. A regression here scales per response —\n"+
+					"every assistant turn from a non-reasoning model pays this.\n"+
+					"Profile: go test -bench=Benchmark_Reasoning_ParseText_NoSpan_Qwen -benchmem -memprofile=/tmp/r.mem",
+					tc.name, avg, budget)
+			}
+		})
+	}
+}
