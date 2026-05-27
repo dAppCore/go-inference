@@ -14,17 +14,31 @@ var toolBlockMarkers = []toolBlockMarker{
 }
 
 func parseToolText(text string) (inference.ToolParseResult, error) {
-	visible := core.NewBuilder()
-	calls := []inference.ToolCall{}
-	pending := text
-	foundTagged := false
+	// Lazy-build the visible builder + calls slice. The common no-call
+	// case (plain assistant prose with no tool markers) is one
+	// findToolBlockStart scan + return of the original string — no
+	// builder copy, no empty slice header, no fallback parse. The
+	// previous shape paid a full visible.WriteString(text) + .String()
+	// copy of the entire response on every no-call call.
+	var (
+		visible     *core.Builder
+		calls       []inference.ToolCall
+		foundTagged bool
+		pending     = text
+	)
 	for pending != "" {
 		idx, marker, ok := findToolBlockStart(pending)
 		if !ok {
-			visible.WriteString(pending)
+			if visible != nil {
+				visible.WriteString(pending)
+			}
 			break
 		}
 		foundTagged = true
+		if visible == nil {
+			visible = core.NewBuilder()
+			visible.Grow(len(text))
+		}
 		visible.WriteString(pending[:idx])
 		afterStart := pending[idx+len(marker.start):]
 		end := indexString(afterStart, marker.end)
@@ -44,6 +58,9 @@ func parseToolText(text string) (inference.ToolParseResult, error) {
 		if err == nil && len(parsed) > 0 {
 			return inference.ToolParseResult{VisibleText: "", Calls: parsed}, nil
 		}
+		// No tags found AND no JSON-shaped payload — the input is
+		// plain prose. Return it as-is; no builder copy needed.
+		return inference.ToolParseResult{VisibleText: text, Calls: nil}, nil
 	}
 	return inference.ToolParseResult{VisibleText: visible.String(), Calls: calls}, nil
 }
