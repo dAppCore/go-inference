@@ -8,16 +8,20 @@ import (
 )
 
 func parseReasoningText(text string, markers []reasoningMarker) inference.ReasoningParseResult {
+	// Fuse first findReasoningStart with the short-circuit probe — if
+	// it misses, return text verbatim with no builder alloc + no
+	// .String() copy. The previous shape always built the builder +
+	// wrote len(text) bytes + paid the .String() copy on every call;
+	// per-response cost on every non-reasoning response.
+	idx, marker, ok := findReasoningStart(text, markers)
+	if !ok {
+		return inference.ReasoningParseResult{VisibleText: text}
+	}
 	visible := core.NewBuilder()
 	segments := []inference.ReasoningSegment{}
 	pending := text
 	tokenOffset := 0
-	for pending != "" {
-		idx, marker, ok := findReasoningStart(pending, markers)
-		if !ok {
-			visible.WriteString(pending)
-			break
-		}
+	for {
 		visible.WriteString(pending[:idx])
 		tokenOffset += idx
 		afterStart := pending[idx+len(marker.start):]
@@ -35,6 +39,14 @@ func parseReasoningText(text string, markers []reasoningMarker) inference.Reason
 		}
 		pending = afterStart[end+endSize:]
 		tokenOffset += len(marker.start) + end + endSize
+		if pending == "" {
+			break
+		}
+		idx, marker, ok = findReasoningStart(pending, markers)
+		if !ok {
+			visible.WriteString(pending)
+			break
+		}
 	}
 	return inference.ReasoningParseResult{VisibleText: visible.String(), Reasoning: segments}
 }
