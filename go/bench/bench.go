@@ -385,7 +385,10 @@ func Run(ctx context.Context, runner Runner, cfg Config) (*Report, error) {
 		samples = append(samples, sample)
 	}
 	report.Generation = summarizeGenerations(samples)
-	report.Quality.Checks = append(report.Quality.Checks, qualityChecks(samples)...)
+	// report.Quality.Checks starts nil; qualityChecks already returns a
+	// pre-sized 2-element slice — assign instead of append+copy to skip
+	// the redundant append-into-nil grow.
+	report.Quality.Checks = qualityChecks(samples)
 
 	if cfg.IncludePromptCache && runner.BenchPromptCache != nil {
 		report.PromptCache = runner.BenchPromptCache(ctx, cfg, report.Generation)
