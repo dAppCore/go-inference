@@ -61,6 +61,36 @@ func Benchmark_Selector_NormaliseKey_Empty(b *testing.B) {
 	}
 }
 
+// Test_Selector_NormaliseKey_AllocBudget pins the fused-transform
+// shape: already-clean inputs (lowercase, no `-`/`.`) hit the
+// zero-alloc fast path; any transform writes one allocation for the
+// output buffer regardless of how many character substitutions fire.
+// Historical shape paid 3 allocs for `Qwen-3.5` (Lower + replaceAll('-')
+// + replaceAll('.')); the fused single-pass walker collapses to 1.
+func Test_Selector_NormaliseKey_AllocBudget(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  float64
+	}{
+		{"already-clean", "qwen3", 0},
+		{"empty", "", 0},
+		{"mixed-case", "Qwen3", 1},
+		{"needs-replace", "Qwen-3.5", 1},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			allocs := testing.AllocsPerRun(100, func() {
+				selectorBenchKey = NormaliseKey(c.input)
+			})
+			if allocs != c.want {
+				t.Fatalf("%s: expected %.0f allocs/op, got %.2f", c.name, c.want, allocs)
+			}
+		})
+	}
+}
+
 // --- Family: branch-heavy classifier called per LookupHint ---
 
 func Benchmark_Selector_Family_Qwen(b *testing.B) {
