@@ -4,9 +4,37 @@ import (
 	"cmp"
 	"iter"
 	"slices"
+	"sync"
 
 	core "dappco.re/go"
 )
+
+// discoverCore is a package-level Core handle reused across
+// Discover calls. Profiling (alpha.95 era) showed core.New() per
+// call burned ~51 allocs / ~13% of Discover's total cost — every
+// invocation spun up a fresh ServiceRuntime + Registry pair just
+// to get an Fs() handle, when the same Fs serves every call
+// identically. sync.Once initialises on first use so test code
+// that monkey-patches the global Core via core.New() before any
+// Discover call still sees a usable instance.
+//
+// Risk: this couples Discover to the package-level Core lifetime
+// (process-wide). Acceptable here because Fs() is stateless — no
+// per-call state, no cancellation, no auth scope. If Fs() ever
+// grows per-caller context, replace this with an option-pattern
+// override on Discover (`WithCore(c)`) without breaking the
+// existing zero-arg API.
+var (
+	discoverCoreOnce sync.Once
+	discoverCore     *core.Core
+)
+
+func sharedDiscoverCore() *core.Core {
+	discoverCoreOnce.Do(func() {
+		discoverCore = core.New()
+	})
+	return discoverCore
+}
 
 //	for m := range inference.Discover("/Volumes/Data/models") {
 //	    fmt.Printf("%s  arch=%s  quant=%dbit\n", m.Path, m.ModelType, m.QuantBits)
@@ -34,8 +62,7 @@ type DiscoveredModel struct {
 //	}
 func Discover(baseDir string) iter.Seq[DiscoveredModel] {
 	return func(yield func(DiscoveredModel) bool) {
-		c := core.New()
-		discoverDir(c.Fs(), absolutePath(baseDir), yield)
+		discoverDir(sharedDiscoverCore().Fs(), absolutePath(baseDir), yield)
 	}
 }
 
