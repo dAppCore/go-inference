@@ -182,6 +182,39 @@ func BenchmarkProbe_NewProbeBus_FourSinks(b *testing.B) {
 	}
 }
 
+// TestNewProbeBus_AllocBudget locks the pre-sized sinks slice: any
+// variadic call lands at exactly 2 allocations (bus struct + sinks
+// backing array) regardless of how many sinks are passed. Historic
+// shape used append-on-nil, paying grow doublings (1 → 2 → 4 → 8)
+// for every additional sink beyond the first — 4 sinks cost 4
+// allocations; the pre-sized make collapses that to 2.
+func TestNewProbeBus_AllocBudget(t *testing.T) {
+	s1 := ProbeSinkFunc(func(ProbeEvent) {})
+	s2 := ProbeSinkFunc(func(ProbeEvent) {})
+	s3 := ProbeSinkFunc(func(ProbeEvent) {})
+	s4 := ProbeSinkFunc(func(ProbeEvent) {})
+	cases := []struct {
+		name  string
+		sinks []ProbeSink
+		want  float64
+	}{
+		{"no-sinks", nil, 1},
+		{"one-sink", []ProbeSink{s1}, 2},
+		{"four-sinks", []ProbeSink{s1, s2, s3, s4}, 2},
+	}
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			allocs := testing.AllocsPerRun(100, func() {
+				probeBenchSinkBus = NewProbeBus(c.sinks...)
+			})
+			if allocs != c.want {
+				t.Fatalf("%s: expected %.0f allocs/op, got %.2f", c.name, c.want, allocs)
+			}
+		})
+	}
+}
+
 func BenchmarkProbe_ProbeBus_Add(b *testing.B) {
 	bus := NewProbeBus()
 	sink := ProbeSinkFunc(func(ProbeEvent) {})

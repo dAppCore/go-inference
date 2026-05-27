@@ -163,9 +163,29 @@ type ProbeBus struct {
 
 // NewProbeBus creates a probe fan-out bus.
 func NewProbeBus(sinks ...ProbeSink) *ProbeBus {
+	// Pre-size sinks to exactly len(sinks) when the caller passed any —
+	// the variadic Add pattern triggered grow doubling on every entry
+	// (nil → cap 1 → 2 → 4), costing 3 extra allocations for the
+	// 4-sink construction path. Pre-counting the non-nil sinks once
+	// drops the bus to a single backing-slice allocation.
 	bus := &ProbeBus{}
+	if len(sinks) == 0 {
+		return bus
+	}
+	live := 0
 	for _, sink := range sinks {
-		bus.Add(sink)
+		if sink != nil {
+			live++
+		}
+	}
+	if live == 0 {
+		return bus
+	}
+	bus.sinks = make([]ProbeSink, 0, live)
+	for _, sink := range sinks {
+		if sink != nil {
+			bus.sinks = append(bus.sinks, sink)
+		}
 	}
 	return bus
 }
