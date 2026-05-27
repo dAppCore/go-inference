@@ -564,19 +564,28 @@ func inferTensorRole(name string) TensorRole {
 }
 
 func bitsForRole(info *Info, role TensorRole) int {
+	return bitsForRoleWithFallback(info, role, ProfileBits(info.Profile))
+}
+
+// bitsForRoleWithFallback is bitsForRole with the profile-bit fallback
+// pre-resolved by the caller. Hoist sites (e.g. roleBits, which fires
+// six bitsForRole calls in a row) compute ProfileBits once and reuse
+// the result; the standalone bitsForRole still works for one-off
+// callers (NewPackedTensorDescriptor) by calling ProfileBits inline.
+func bitsForRoleWithFallback(info *Info, role TensorRole, profileBits int) int {
 	switch role {
 	case TensorRoleAttention:
-		return firstPositive(info.AttentionBits, info.BitsDefault, ProfileBits(info.Profile))
+		return firstPositive(info.AttentionBits, info.BitsDefault, profileBits)
 	case TensorRoleSharedExpert:
-		return firstPositive(info.SharedExpertBits, info.BitsDefault, ProfileBits(info.Profile))
+		return firstPositive(info.SharedExpertBits, info.BitsDefault, profileBits)
 	case TensorRoleRoutedExpert:
-		return firstPositive(info.RoutedExpertBits, info.BitsDefault, ProfileBits(info.Profile))
+		return firstPositive(info.RoutedExpertBits, info.BitsDefault, profileBits)
 	case TensorRoleEmbedTokens:
-		return firstPositive(info.EmbedTokensBits, info.BitsDefault, ProfileBits(info.Profile))
+		return firstPositive(info.EmbedTokensBits, info.BitsDefault, profileBits)
 	case TensorRoleLMHead:
-		return firstPositive(info.LMHeadBits, info.BitsDefault, ProfileBits(info.Profile))
+		return firstPositive(info.LMHeadBits, info.BitsDefault, profileBits)
 	default:
-		return firstPositive(info.BitsDefault, ProfileBits(info.Profile))
+		return firstPositive(info.BitsDefault, profileBits)
 	}
 }
 
@@ -592,9 +601,16 @@ func roleBits(info *Info) map[string]int {
 		TensorRoleEmbedTokens,
 		TensorRoleLMHead,
 	}
-	out := map[string]int{}
+	// Resolve ProfileBits(info.Profile) ONCE — the per-role bitsForRole
+	// previously called it inside firstPositive, so a six-role walk
+	// fired six core.Lower(info.Profile) string copies when the profile
+	// name contained any uppercase letter (e.g. "JANGTQ"). Hoist + pre-
+	// size the result map to len(roles) so the per-entry insert doesn't
+	// re-grow the bucket.
+	profileBits := ProfileBits(info.Profile)
+	out := make(map[string]int, len(roles))
 	for _, role := range roles {
-		if bits := bitsForRole(info, role); bits > 0 {
+		if bits := bitsForRoleWithFallback(info, role, profileBits); bits > 0 {
 			out[string(role)] = bits
 		}
 	}
