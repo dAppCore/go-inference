@@ -34,8 +34,21 @@ func parseReasoningText(text string, markers []reasoningMarker) inference.Reason
 		}
 		return result
 	}
+	// Pre-grow the visible builder to the first span's visible bound:
+	// text before the open marker (idx) plus everything after this
+	// span's close marker (len(text) - idx - len(marker.start) - end -
+	// endSize). For the dominant single-span shape that's exact; for
+	// multi-span it's a tight lower-ish estimate that still collapses
+	// the buffer-doubling cascade WriteString would otherwise pay
+	// (memprofile attributed ~65% of allocated bytes to that doubling)
+	// down to one backing-buffer alloc. A whole-len(text) grow would
+	// over-allocate ~10x when the reasoning span dominates the stream.
 	visible := core.NewBuilder()
-	segments := []inference.ReasoningSegment{}
+	visible.Grow(len(text) - len(marker.start) - end - endSize)
+	// Single span is the dominant shape (one `<think>…</think>` block
+	// then content); pre-size segments to cap 1 so the common case takes
+	// exactly one slice alloc rather than append's grow-from-zero.
+	segments := make([]inference.ReasoningSegment, 0, 1)
 	pending := text
 	tokenOffset := 0
 	for {
