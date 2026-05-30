@@ -450,42 +450,55 @@ func (m *Model) nextRequestID() string {
 	buf = strconv.AppendUint(buf, id, 10)
 	return core.AsString(buf)
 }
-
-// schedTempZeroOpt is the cached WithTemperature(0) closure — the
-// burst-dispatch case where callers leave Sampler at its zero value
-// and we still want greedy decoding to be explicit. Caching the
-// closure here saves one heap allocation per Schedule in that path.
-var schedTempZeroOpt = inference.WithTemperature(0)
+// schedGreedyOpts is the cached single-option slice for the zero-value
+// (greedy) sampler — the burst-dispatch case where callers leave
+// Sampler unset. The closure forces Temperature to 0 (explicit greedy)
+// and touches nothing else, so the base defaults survive. Caching the
+// whole slice keeps that hot path at zero per-call allocation. The
+// closure must never mutate cfg-derived state since it is shared.
+var schedGreedyOpts = []inference.GenerateOption{func(c *inference.GenerateConfig) { c.Temperature = 0 }}
 
 func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
-	// Pre-size to the maximum possible option count — Temperature is
-	// always set; the others are conditional. Saves the doubling-grow
-	// allocs that the append cascade would otherwise pay per Schedule.
-	opts := make([]inference.GenerateOption, 0, 7)
-	if cfg.MaxTokens > 0 {
-		opts = append(opts, inference.WithMaxTokens(cfg.MaxTokens))
+	// Zero-value sampler (greedy, no overrides) is the burst-dispatch
+	// default — serve it from the cached slice so it stays allocation-
+	// free, exactly the old schedTempZeroOpt fast path. SamplerConfig
+	// holds slice fields so it is not == comparable; check the fields
+	// the applier would act on.
+	if cfg.MaxTokens == 0 && cfg.Temperature == 0 && cfg.TopK == 0 &&
+		cfg.TopP == 0 && cfg.RepeatPenalty == 0 && len(cfg.StopTokens) == 0 &&
+		!cfg.ReturnLogits {
+		return schedGreedyOpts
 	}
-	if cfg.Temperature == 0 {
-		opts = append(opts, schedTempZeroOpt)
-	} else {
-		opts = append(opts, inference.WithTemperature(cfg.Temperature))
-	}
-	if cfg.TopK > 0 {
-		opts = append(opts, inference.WithTopK(cfg.TopK))
-	}
-	if cfg.TopP > 0 {
-		opts = append(opts, inference.WithTopP(cfg.TopP))
-	}
-	if cfg.RepeatPenalty > 0 {
-		opts = append(opts, inference.WithRepeatPenalty(cfg.RepeatPenalty))
-	}
-	if len(cfg.StopTokens) > 0 {
-		opts = append(opts, inference.WithStopTokens(cfg.StopTokens...))
-	}
-	if cfg.ReturnLogits {
-		opts = append(opts, inference.WithLogits())
-	}
-	return opts
+	// One closure capturing the whole SamplerConfig instead of up to
+	// seven separate WithX closures + a 7-cap slice. Each inference.WithX
+	// returns a fresh func value that captures one field — heap-allocated
+	// per call — so the previous shape paid 1-7 closure allocs plus the
+	// backing-array alloc on every Schedule. The single applier preserves
+	// the exact conditional semantics (only override a base default when
+	// the sampler carries a meaningful value; Temperature is always set so
+	// greedy/zero survives the base default), in one closure alloc + a
+	// len-1 slice. Fires once per scheduled request.
+	return []inference.GenerateOption{func(c *inference.GenerateConfig) {
+		if cfg.MaxTokens > 0 {
+			c.MaxTokens = cfg.MaxTokens
+		}
+		c.Temperature = cfg.Temperature
+		if cfg.TopK > 0 {
+			c.TopK = cfg.TopK
+		}
+		if cfg.TopP > 0 {
+			c.TopP = cfg.TopP
+		}
+		if cfg.RepeatPenalty > 0 {
+			c.RepeatPenalty = cfg.RepeatPenalty
+		}
+		if len(cfg.StopTokens) > 0 {
+			c.StopTokens = core.SliceClone(cfg.StopTokens)
+		}
+		if cfg.ReturnLogits {
+			c.ReturnLogits = true
+		}
+	}}
 }
 
 func cloneLabels(labels map[string]string) map[string]string {
