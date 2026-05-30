@@ -98,7 +98,7 @@ type parsedToolCall struct {
 	ID            string           `json:"id"`
 	Type          string           `json:"type"`
 	Name          string           `json:"name"`
-	Arguments     any              `json:"arguments"`
+	Arguments     core.RawMessage  `json:"arguments"`
 	ArgumentsJSON string           `json:"arguments_json"`
 	Function      *parsedFunction  `json:"function"`
 	ToolCalls     []parsedToolCall `json:"tool_calls"`
@@ -106,8 +106,8 @@ type parsedToolCall struct {
 }
 
 type parsedFunction struct {
-	Name      string `json:"name"`
-	Arguments any    `json:"arguments"`
+	Name      string          `json:"name"`
+	Arguments core.RawMessage `json:"arguments"`
 }
 
 func parseToolPayload(payload string) ([]inference.ToolCall, error) {
@@ -168,7 +168,7 @@ func convertParsedToolCall(parsed parsedToolCall) inference.ToolCall {
 		if parsed.Function.Name != "" {
 			name = parsed.Function.Name
 		}
-		if parsed.Function.Arguments != nil {
+		if len(parsed.Function.Arguments) > 0 {
 			args = parsed.Function.Arguments
 		}
 	}
@@ -184,17 +184,32 @@ func convertParsedToolCall(parsed parsedToolCall) inference.ToolCall {
 	}
 }
 
-func normaliseArgumentsJSON(existing string, args any) string {
+// normaliseArgumentsJSON resolves the arguments surface to its JSON
+// string. args arrives as a core.RawMessage (deferred-decode bytes)
+// rather than `any`, so the common object/array case is the raw bytes
+// verbatim — no map[string]any decode + no JSONMarshalString re-encode
+// round-trip. A JSON-string-encoded argument (`"{\"id\":7}"`) is
+// unquoted to its inner JSON; everything else is used as-is.
+func normaliseArgumentsJSON(existing string, args core.RawMessage) string {
 	if core.Trim(existing) != "" {
 		return core.Trim(existing)
 	}
-	if args == nil {
+	if len(args) == 0 {
 		return ""
 	}
-	if raw, ok := args.(string); ok {
-		return core.Trim(raw)
+	trimmed := core.Trim(string(args))
+	if trimmed == "" || trimmed == "null" {
+		return ""
 	}
-	return core.JSONMarshalString(args)
+	// A JSON string literal carries the arguments as an embedded JSON
+	// payload (`"{\"id\":7}"`); unquote it to surface the inner JSON.
+	if trimmed[0] == '"' {
+		var inner string
+		if result := core.JSONUnmarshalString(trimmed, &inner); result.OK {
+			return core.Trim(inner)
+		}
+	}
+	return trimmed
 }
 
 func resultError(scope string, result core.Result) error {
