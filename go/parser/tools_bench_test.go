@@ -303,7 +303,7 @@ func Benchmark_Tools_ParsePayload_ArgumentsAsString(b *testing.B) {
 // --- convertParsedToolCalls / convertParsedToolCall ---
 
 func Benchmark_Tools_ConvertParsedToolCall_SimpleName(b *testing.B) {
-	parsed := parsedToolCall{Name: "search", Arguments: map[string]any{"q": "core"}}
+	parsed := parsedToolCall{Name: "search", Arguments: core.RawMessage(`{"q":"core"}`)}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -315,7 +315,7 @@ func Benchmark_Tools_ConvertParsedToolCall_FromFunctionEnvelope(b *testing.B) {
 	parsed := parsedToolCall{
 		ID:       "c1",
 		Type:     "function",
-		Function: &parsedFunction{Name: "lookup", Arguments: map[string]any{"id": 7}},
+		Function: &parsedFunction{Name: "lookup", Arguments: core.RawMessage(`{"id":7}`)},
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -326,9 +326,9 @@ func Benchmark_Tools_ConvertParsedToolCall_FromFunctionEnvelope(b *testing.B) {
 
 func Benchmark_Tools_ConvertParsedToolCalls_Array(b *testing.B) {
 	input := []parsedToolCall{
-		{Name: "a", Arguments: map[string]any{"x": 1}},
-		{Name: "b", Arguments: map[string]any{"y": 2}},
-		{Name: "c", Arguments: map[string]any{"z": 3}},
+		{Name: "a", Arguments: core.RawMessage(`{"x":1}`)},
+		{Name: "b", Arguments: core.RawMessage(`{"y":2}`)},
+		{Name: "c", Arguments: core.RawMessage(`{"z":3}`)},
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -348,8 +348,8 @@ func Benchmark_Tools_NormaliseArgumentsJSON_ExistingJSON(b *testing.B) {
 	}
 }
 
-func Benchmark_Tools_NormaliseArgumentsJSON_FromMap(b *testing.B) {
-	args := map[string]any{"q": "core", "page": 3}
+func Benchmark_Tools_NormaliseArgumentsJSON_FromObject(b *testing.B) {
+	args := core.RawMessage(`{"q":"core","page":3}`)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -358,7 +358,7 @@ func Benchmark_Tools_NormaliseArgumentsJSON_FromMap(b *testing.B) {
 }
 
 func Benchmark_Tools_NormaliseArgumentsJSON_FromString(b *testing.B) {
-	args := any(`{"q":"core"}`)
+	args := core.RawMessage(`"{\"q\":\"core\"}"`)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
