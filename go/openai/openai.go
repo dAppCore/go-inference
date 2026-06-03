@@ -29,6 +29,15 @@ const (
 
 const channelMarker = "<|channel>"
 
+// channelCloseMarker terminates a reasoning channel in Gemma4's output
+// (`<|channel>thought…<channel|>answer`). Unlike the gpt-oss style — where
+// the next `<|channel>` OPEN implicitly ends the prior channel — Gemma4
+// emits an explicit close, after which the remaining tokens are the visible
+// answer. Recognising it switches the extractor back to the assistant
+// channel so the answer reaches content instead of being swallowed as
+// thinking.
+const channelCloseMarker = "<channel|>"
+
 // ChatCompletionRequest is the OpenAI-compatible request body.
 type ChatCompletionRequest struct {
 	Model       string        `json:"model"`
@@ -757,6 +766,13 @@ var reasoningMarkerStarts = func() []string {
 	return out
 }()
 
+// channelMarkers is the cached pair handed to splitSafeSuffix from the
+// in-thought-channel drain branch: a partial OPEN (<|channel>) or CLOSE
+// (<channel|>) straddling a token boundary must be held back, not
+// mis-emitted as thinking. Built once so the per-token path shares the
+// slice header instead of re-allocating on every miss.
+var channelMarkers = []string{channelMarker, channelCloseMarker}
+
 // ThinkingExtractor separates model-internal reasoning text from assistant
 // content.
 type ThinkingExtractor struct {
@@ -849,13 +865,29 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 		}
 
 		if e.currentChannel == "thought" || e.currentChannel == "thinking" || e.currentChannel == "reasoning" {
-			idx := indexString(e.pending, channelMarker)
+			// A reasoning channel ends one of two ways: gpt-oss opens the
+			// next channel (<|channel>name), Gemma4 emits an explicit close
+			// (<channel|>). Honour whichever marker appears first.
+			openIdx := indexString(e.pending, channelMarker)
+			closeIdx := indexString(e.pending, channelCloseMarker)
+			marker, idx := "", -1
+			if closeIdx >= 0 && (openIdx < 0 || closeIdx < openIdx) {
+				marker, idx = channelCloseMarker, closeIdx
+			} else if openIdx >= 0 {
+				marker, idx = channelMarker, openIdx
+			}
 			if idx >= 0 {
 				if idx > 0 {
 					thoughtDelta = ensureBuilder(thoughtDelta)
 					writeThought(e, thoughtDelta, e.pending[:idx])
 				}
 				e.pending = e.pending[idx:]
+				if marker == channelCloseMarker {
+					// Gemma4 close: drop it and treat the rest as the answer.
+					e.pending = e.pending[len(channelCloseMarker):]
+					e.currentChannel = "assistant"
+					continue
+				}
 				if e.consumeMarkerAtStart() {
 					continue
 				}
@@ -867,7 +899,7 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 				e.pending = e.pending[len(channelMarker):]
 				continue
 			}
-			emit, keep := splitSafeSuffixOne(e.pending, channelMarker, final)
+			emit, keep := splitSafeSuffix(e.pending, channelMarkers, final)
 			if emit != "" {
 				thoughtDelta = ensureBuilder(thoughtDelta)
 				writeThought(e, thoughtDelta, emit)
