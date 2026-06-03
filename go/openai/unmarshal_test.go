@@ -8,6 +8,23 @@ import (
 	"testing"
 )
 
+// TestUnmarshalChatCompletionRequest_ThinkingControls pins the hand-rolled
+// decoder for the reasoning toggle: reasoning_effort (top-level string) and
+// chat_template_kwargs.enable_thinking (nested object, vLLM/SGLang convention).
+func TestUnmarshalChatCompletionRequest_ThinkingControls(t *testing.T) {
+	in := `{"model":"m","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"none","chat_template_kwargs":{"foo":"bar","enable_thinking":false}}`
+	var req ChatCompletionRequest
+	if err := json.Unmarshal([]byte(in), &req); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if req.ReasoningEffort != "none" {
+		t.Fatalf("ReasoningEffort = %q, want %q", req.ReasoningEffort, "none")
+	}
+	if req.ChatTemplateKwargs == nil || req.ChatTemplateKwargs.EnableThinking == nil || *req.ChatTemplateKwargs.EnableThinking {
+		t.Fatalf("ChatTemplateKwargs.EnableThinking = %+v, want &false", req.ChatTemplateKwargs)
+	}
+}
+
 // TestUnmarshalChatCompletionRequest_DirectShapes pins the hand-rolled
 // decoder against direct JSON literals. Locks the per-field dispatch
 // — present / absent / null variants of every pointer field, the

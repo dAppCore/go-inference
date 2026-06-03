@@ -127,6 +127,23 @@ func (r *ChatCompletionRequest) unmarshalField(data []byte, i int, key []byte) (
 		k := int(v)
 		r.MaxTokens = &k
 		return next, nil
+	case "reasoning_effort":
+		s, next, err := jsonenc.ParseJSONString(data, i)
+		if err != nil {
+			return next, err
+		}
+		r.ReasoningEffort = s
+		return next, nil
+	case "chat_template_kwargs":
+		if jsonenc.IsJSONNull(data, i) {
+			return i + 4, nil
+		}
+		kw, next, err := parseChatTemplateKwargs(data, i)
+		if err != nil {
+			return next, err
+		}
+		r.ChatTemplateKwargs = kw
+		return next, nil
 	case "stream":
 		if jsonenc.IsJSONNull(data, i) {
 			return i + 4, nil
@@ -299,6 +316,66 @@ func (r *ResponseRequest) UnmarshalJSON(data []byte) error {
 			return nil
 		}
 		return jsonenc.ErrInvalidJSON
+	}
+}
+
+// parseChatTemplateKwargs walks a chat_template_kwargs object, capturing the
+// fields the runtime acts on (enable_thinking) and skipping the rest — mirrors
+// the single-pass object walk in UnmarshalJSON.
+func parseChatTemplateKwargs(data []byte, i int) (*ChatTemplateKwargs, int, error) {
+	i, err := jsonenc.MatchObjectStart(data, i)
+	if err != nil {
+		return nil, i, err
+	}
+	kw := &ChatTemplateKwargs{}
+	i = jsonenc.SkipJSONWhitespace(data, i)
+	if i < len(data) && data[i] == '}' {
+		return kw, i + 1, nil
+	}
+	for {
+		i = jsonenc.SkipJSONWhitespace(data, i)
+		if i >= len(data) || data[i] != '"' {
+			return nil, i, jsonenc.ErrInvalidJSON
+		}
+		key, next, err := jsonenc.ParseJSONStringRaw(data, i)
+		if err != nil {
+			return nil, next, err
+		}
+		i = jsonenc.SkipJSONWhitespace(data, next)
+		if i >= len(data) || data[i] != ':' {
+			return nil, i, jsonenc.ErrInvalidJSON
+		}
+		i = jsonenc.SkipJSONWhitespace(data, i+1)
+		if string(key) == "enable_thinking" {
+			if jsonenc.IsJSONNull(data, i) {
+				i += 4
+			} else {
+				v, n, err := jsonenc.ParseJSONBool(data, i)
+				if err != nil {
+					return nil, n, err
+				}
+				kw.EnableThinking = &v
+				i = n
+			}
+		} else {
+			n, err := jsonenc.SkipJSONValue(data, i)
+			if err != nil {
+				return nil, n, err
+			}
+			i = n
+		}
+		i = jsonenc.SkipJSONWhitespace(data, i)
+		if i >= len(data) {
+			return nil, i, jsonenc.ErrInvalidJSON
+		}
+		if data[i] == ',' {
+			i++
+			continue
+		}
+		if data[i] == '}' {
+			return kw, i + 1, nil
+		}
+		return nil, i, jsonenc.ErrInvalidJSON
 	}
 }
 

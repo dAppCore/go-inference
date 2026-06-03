@@ -12,6 +12,10 @@ type GenerateConfig struct {
 	StopTokens    []int32
 	RepeatPenalty float32
 	ReturnLogits  bool // Return raw logits in ClassifyResult (default false)
+	// EnableThinking toggles reasoning for models that support it (e.g. Gemma 4).
+	// nil = model default; &true = on; &false = off. Backends ignore it when the
+	// loaded architecture has no thinking mode.
+	EnableThinking *bool
 }
 
 // cfg := inference.DefaultGenerateConfig() // MaxTokens=256, Temperature=0.0 (greedy), RepeatPenalty=1.0
@@ -80,6 +84,15 @@ func WithRepeatPenalty(p float32) GenerateOption {
 //	inference.WithLogits() // enable logit capture for classification scoring
 func WithLogits() GenerateOption {
 	return func(c *GenerateConfig) { c.ReturnLogits = true }
+}
+
+// WithEnableThinking sets the reasoning toggle for thinking-capable models.
+// Pass nil for the model default, &true to force on, &false to force off.
+//
+//	off := false
+//	m.Chat(ctx, msgs, inference.WithEnableThinking(&off)) // disable Gemma 4 reasoning
+func WithEnableThinking(v *bool) GenerateOption {
+	return func(c *GenerateConfig) { c.EnableThinking = v }
 }
 
 // cfg := inference.ApplyGenerateOpts(opts) // used internally by backends
