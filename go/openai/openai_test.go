@@ -106,6 +106,51 @@ func TestOpenAI_GenerateOptions_Good_HonoursExplicitZero(t *testing.T) {
 	}
 }
 
+func TestOpenAI_GenerateOptions_Good_ThinkingOffViaChatTemplateKwargs(t *testing.T) {
+	off := false
+	req := ChatCompletionRequest{
+		Model:              "m",
+		Messages:           []ChatMessage{{Role: "user", Content: "hi"}},
+		ChatTemplateKwargs: &ChatTemplateKwargs{EnableThinking: &off},
+	}
+	opts, err := GenerateOptions(req)
+	if err != nil {
+		t.Fatalf("GenerateOptions() error = %v", err)
+	}
+	cfg := inference.ApplyGenerateOpts(opts)
+	if cfg.EnableThinking == nil || *cfg.EnableThinking {
+		t.Fatalf("EnableThinking = %v, want &false", cfg.EnableThinking)
+	}
+}
+
+func TestOpenAI_GenerateOptions_Good_ThinkingOffViaReasoningEffortNone(t *testing.T) {
+	req := ChatCompletionRequest{
+		Model:           "m",
+		Messages:        []ChatMessage{{Role: "user", Content: "hi"}},
+		ReasoningEffort: "none",
+	}
+	opts, err := GenerateOptions(req)
+	if err != nil {
+		t.Fatalf("GenerateOptions() error = %v", err)
+	}
+	cfg := inference.ApplyGenerateOpts(opts)
+	if cfg.EnableThinking == nil || *cfg.EnableThinking {
+		t.Fatalf("reasoning_effort=none → EnableThinking = %v, want &false", cfg.EnableThinking)
+	}
+}
+
+func TestOpenAI_GenerateOptions_Good_ThinkingDefaultLeavesNil(t *testing.T) {
+	req := ChatCompletionRequest{Model: "m", Messages: []ChatMessage{{Role: "user", Content: "hi"}}}
+	opts, err := GenerateOptions(req)
+	if err != nil {
+		t.Fatalf("GenerateOptions() error = %v", err)
+	}
+	cfg := inference.ApplyGenerateOpts(opts)
+	if cfg.EnableThinking != nil {
+		t.Fatalf("default → EnableThinking = %v, want nil (model default)", cfg.EnableThinking)
+	}
+}
+
 func TestOpenAI_ThinkingExtractor_Good_CapturesQwenAndChannelMarkers(t *testing.T) {
 	extractor := NewThinkingExtractor()
 

@@ -40,15 +40,24 @@ const channelCloseMarker = "<channel|>"
 
 // ChatCompletionRequest is the OpenAI-compatible request body.
 type ChatCompletionRequest struct {
-	Model       string        `json:"model"`
-	Messages    []ChatMessage `json:"messages"`
-	Temperature *float32      `json:"temperature,omitempty"`
-	TopP        *float32      `json:"top_p,omitempty"`
-	TopK        *int          `json:"top_k,omitempty"`
-	MaxTokens   *int          `json:"max_tokens,omitempty"`
-	Stream      bool          `json:"stream,omitempty"`
-	Stop        StopList      `json:"stop,omitempty"`
-	User        string        `json:"user,omitempty"`
+	Model              string              `json:"model"`
+	Messages           []ChatMessage       `json:"messages"`
+	Temperature        *float32            `json:"temperature,omitempty"`
+	TopP               *float32            `json:"top_p,omitempty"`
+	TopK               *int                `json:"top_k,omitempty"`
+	MaxTokens          *int                `json:"max_tokens,omitempty"`
+	Stream             bool                `json:"stream,omitempty"`
+	Stop               StopList            `json:"stop,omitempty"`
+	User               string              `json:"user,omitempty"`
+	ReasoningEffort    string              `json:"reasoning_effort,omitempty"`
+	ChatTemplateKwargs *ChatTemplateKwargs `json:"chat_template_kwargs,omitempty"`
+}
+
+// ChatTemplateKwargs carries chat-template parameters (the vLLM/SGLang
+// convention). Only fields the runtime acts on are modelled; unknown keys in
+// the object are skipped by the decoder.
+type ChatTemplateKwargs struct {
+	EnableThinking *bool `json:"enable_thinking,omitempty"`
 }
 
 // StopList accepts OpenAI stop sequences as either a JSON string or string
@@ -236,12 +245,30 @@ func GenerateOptions(req ChatCompletionRequest) ([]inference.GenerateOption, err
 	if err := ValidateRequest(req); err != nil {
 		return nil, err
 	}
-	return []inference.GenerateOption{
+	opts := []inference.GenerateOption{
 		inference.WithTemperature(resolvedFloat(req.Temperature, DefaultTemperature)),
 		inference.WithTopP(resolvedFloat(req.TopP, DefaultTopP)),
 		inference.WithTopK(resolvedInt(req.TopK, DefaultTopK)),
 		inference.WithMaxTokens(resolvedInt(req.MaxTokens, DefaultMaxTokens)),
-	}, nil
+	}
+	if et := req.thinkingOverride(); et != nil {
+		opts = append(opts, inference.WithEnableThinking(et))
+	}
+	return opts, nil
+}
+
+// thinkingOverride resolves an explicit reasoning toggle from the request:
+// chat_template_kwargs.enable_thinking (vLLM/SGLang convention) wins; otherwise
+// reasoning_effort=="none" disables thinking. nil = no override (model default).
+func (req ChatCompletionRequest) thinkingOverride() *bool {
+	if req.ChatTemplateKwargs != nil && req.ChatTemplateKwargs.EnableThinking != nil {
+		return req.ChatTemplateKwargs.EnableThinking
+	}
+	if core.Lower(core.Trim(req.ReasoningEffort)) == "none" {
+		off := false
+		return &off
+	}
+	return nil
 }
 
 func resolvedFloat(value *float32, fallback float32) float32 {
@@ -408,14 +435,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error(), "stop")
 		return
 	}
-	opts, err := GenerateOptions(ChatCompletionRequest{
-		Model:       req.Model,
-		Messages:    req.Messages,
-		Temperature: req.Temperature,
-		TopP:        req.TopP,
-		TopK:        req.TopK,
-		MaxTokens:   req.MaxTokens,
-	})
+	opts, err := GenerateOptions(req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error(), errorParam(err))
 		return
