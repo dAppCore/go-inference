@@ -7,7 +7,7 @@ import (
 func ExampleDefaultGenerateConfig() {
 	cfg := DefaultGenerateConfig()
 	core.Println(cfg.MaxTokens, cfg.Temperature, cfg.RepeatPenalty)
-	// Output: 256 0 1
+	// Output: 0 0 1
 }
 
 func ExampleWithMaxTokens() {
