@@ -18,10 +18,12 @@ type GenerateConfig struct {
 	EnableThinking *bool
 }
 
-// cfg := inference.DefaultGenerateConfig() // MaxTokens=256, Temperature=0.0 (greedy), RepeatPenalty=1.0
+// cfg := inference.DefaultGenerateConfig() // Temperature=0.0 (greedy), RepeatPenalty=1.0
 func DefaultGenerateConfig() GenerateConfig {
 	return GenerateConfig{
-		MaxTokens:     256,
+		// MaxTokens is deliberately NOT defaulted. It is a caller-supplied output
+		// cap; absent (0) the backend resolves it to the model's context at
+		// generation time. A fixed default truncates every generation at a guess.
 		Temperature:   0.0, // greedy
 		RepeatPenalty: 1.0, // no penalty
 	}

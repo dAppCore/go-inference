@@ -18,7 +18,7 @@ func TestOptions_DefaultGenerateConfig_Good_Idempotent(t *testing.T) {
 
 func TestOptions_DefaultGenerateConfig_Good(t *testing.T) {
 	cfg := DefaultGenerateConfig()
-	checkEqual(t, 256, cfg.MaxTokens)
+	checkEqual(t, 0, cfg.MaxTokens) // not defaulted — 0 resolves to the model's context at generate time
 	checkEqual(t, float32(0.0), cfg.Temperature)
 	checkEqual(t, 0, cfg.TopK)
 	checkEqual(t, float32(0.0), cfg.TopP)
