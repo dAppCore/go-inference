@@ -18,6 +18,8 @@
 package openai
 
 import (
+	core "dappco.re/go"
+
 	"dappco.re/go/inference/jsonenc"
 )
 
@@ -245,6 +247,29 @@ func parseChatMessage(data []byte, i int) (ChatMessage, int, error) {
 			msg.Role = s
 			i = vnext
 		case "content":
+			// Plain string stays on the zero-alloc fast path; a part
+			// array (multimodal content, #98) is the cold path — it
+			// carries base64 images, so the stdlib decode in
+			// applyContentParts is noise against the payload itself.
+			if i < len(data) && data[i] == '[' {
+				vnext, verr := jsonenc.SkipJSONValue(data, i)
+				if verr != nil {
+					return msg, vnext, verr
+				}
+				var parts []chatContentPart
+				if result := core.JSONUnmarshal(data[i:vnext], &parts); !result.OK {
+					return msg, vnext, resultError(result)
+				}
+				if perr := msg.applyContentParts(parts); perr != nil {
+					return msg, vnext, perr
+				}
+				i = vnext
+				break
+			}
+			if jsonenc.IsJSONNull(data, i) {
+				i += 4
+				break
+			}
 			s, vnext, verr := jsonenc.ParseJSONString(data, i)
 			if verr != nil {
 				return msg, vnext, verr
