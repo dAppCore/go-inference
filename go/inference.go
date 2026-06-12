@@ -86,6 +86,19 @@ type Token struct {
 type Message struct {
 	Role    string `json:"role"` // "system", "user", "assistant"
 	Content string `json:"content"`
+	// Images carries encoded image bytes (PNG/JPEG) attached to this turn,
+	// populated by the compat handlers from multimodal content parts. Only
+	// engines implementing VisionModel serve image turns; the handlers
+	// reject image requests against text-only models.
+	Images [][]byte `json:"images,omitempty"`
+}
+
+// VisionModel is the optional capability a TextModel implements when the
+// LOADED CHECKPOINT accepts image content — the family supporting vision
+// does not mean the snapshot shipped the tower, so this is a live probe,
+// not a static declaration.
+type VisionModel interface {
+	AcceptsImages() bool
 }
 
 // results, _ := m.Classify(ctx, []string{"positive", "negative"})

@@ -79,10 +79,14 @@ func (s *StopList) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ChatMessage is a single chat turn.
+// ChatMessage is a single chat turn. Content accepts both the plain-string
+// form and the OpenAI multimodal content-part array (text + image_url parts;
+// see UnmarshalJSON in content.go) — decoded images land in Images and never
+// round-trip into responses.
 type ChatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string   `json:"role"`
+	Content string   `json:"content"`
+	Images  [][]byte `json:"-"`
 }
 
 // ChatCompletionResponse is the non-streaming OpenAI-compatible response body.
@@ -423,7 +427,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	req, err := DecodeRequest(r.Body)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body", "body")
+		// Surface the parse detail — multimodal content errors (bad data:
+		// URL, oversized image, unsupported part type) are actionable for
+		// the caller, and a local engine's JSON errors carry no secrets.
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error(), "body")
 		return
 	}
 	if err := ValidateRequest(req); err != nil {
@@ -446,6 +453,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	messages := requestMessages(req.Messages)
+	if messagesCarryImages(messages) {
+		vision, ok := model.(inference.VisionModel)
+		if !ok || !vision.AcceptsImages() {
+			writeError(w, http.StatusBadRequest, "model does not accept image input", "messages")
+			return
+		}
+	}
 	if req.Stream {
 		h.serveStreaming(w, r, model, req, messages, stops, opts...)
 		return
@@ -606,9 +620,18 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 func requestMessages(messages []ChatMessage) []inference.Message {
 	out := make([]inference.Message, 0, len(messages))
 	for _, msg := range messages {
-		out = append(out, inference.Message{Role: msg.Role, Content: msg.Content})
+		out = append(out, inference.Message{Role: msg.Role, Content: msg.Content, Images: msg.Images})
 	}
 	return out
+}
+
+func messagesCarryImages(messages []inference.Message) bool {
+	for i := range messages {
+		if len(messages[i].Images) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
