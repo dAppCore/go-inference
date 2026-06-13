@@ -123,6 +123,42 @@ func TestOpenAI_GenerateOptions_Good_ThinkingOffViaChatTemplateKwargs(t *testing
 	}
 }
 
+func TestOpenAI_GenerateOptions_Good_ThinkingBudgetViaChatTemplateKwargs(t *testing.T) {
+	// Decode the budget off the wire (exercises the hand-rolled kwargs walker)
+	// then confirm it reaches the GenerateConfig.
+	req, err := DecodeRequest(strings.NewReader(
+		`{"model":"m","messages":[{"role":"user","content":"hi"}],"chat_template_kwargs":{"thinking_budget":256}}`))
+	if err != nil {
+		t.Fatalf("DecodeRequest() error = %v", err)
+	}
+	if req.ChatTemplateKwargs == nil || req.ChatTemplateKwargs.ThinkingBudget == nil || *req.ChatTemplateKwargs.ThinkingBudget != 256 {
+		t.Fatalf("decoded thinking_budget = %v, want 256", req.ChatTemplateKwargs)
+	}
+	opts, err := GenerateOptions(req)
+	if err != nil {
+		t.Fatalf("GenerateOptions() error = %v", err)
+	}
+	if cfg := inference.ApplyGenerateOpts(opts); cfg.ThinkingBudget != 256 {
+		t.Fatalf("ThinkingBudget = %d, want 256", cfg.ThinkingBudget)
+	}
+}
+
+func TestOpenAI_GenerateOptions_Good_ThinkingBudgetZeroIgnored(t *testing.T) {
+	zero := 0
+	req := ChatCompletionRequest{
+		Model:              "m",
+		Messages:           []ChatMessage{{Role: "user", Content: "hi"}},
+		ChatTemplateKwargs: &ChatTemplateKwargs{ThinkingBudget: &zero},
+	}
+	opts, err := GenerateOptions(req)
+	if err != nil {
+		t.Fatalf("GenerateOptions() error = %v", err)
+	}
+	if cfg := inference.ApplyGenerateOpts(opts); cfg.ThinkingBudget != 0 {
+		t.Fatalf("ThinkingBudget = %d, want 0 (zero is unlimited, no option emitted)", cfg.ThinkingBudget)
+	}
+}
+
 func TestOpenAI_GenerateOptions_Good_ThinkingOffViaReasoningEffortNone(t *testing.T) {
 	req := ChatCompletionRequest{
 		Model:           "m",
