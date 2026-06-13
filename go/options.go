@@ -16,6 +16,11 @@ type GenerateConfig struct {
 	// nil = model default; &true = on; &false = off. Backends ignore it when the
 	// loaded architecture has no thinking mode.
 	EnableThinking *bool
+	// ThinkingBudget caps tokens spent inside a reasoning model's thought
+	// channel; on overrun the backend forces the channel close so a visible
+	// answer is produced rather than the whole budget being spent reasoning.
+	// 0 = unlimited. Ignored by architectures with no thinking mode.
+	ThinkingBudget int
 }
 
 // cfg := inference.DefaultGenerateConfig() // Temperature=0.0 (greedy), RepeatPenalty=1.0
@@ -95,6 +100,13 @@ func WithLogits() GenerateOption {
 //	m.Chat(ctx, msgs, inference.WithEnableThinking(&off)) // disable Gemma 4 reasoning
 func WithEnableThinking(v *bool) GenerateOption {
 	return func(c *GenerateConfig) { c.EnableThinking = v }
+}
+
+// WithThinkingBudget caps tokens spent in the thought channel; 0 = unlimited.
+//
+//	m.Chat(ctx, msgs, inference.WithThinkingBudget(256)) // think briefly, then answer
+func WithThinkingBudget(tokens int) GenerateOption {
+	return func(c *GenerateConfig) { c.ThinkingBudget = tokens }
 }
 
 // cfg := inference.ApplyGenerateOpts(opts) // used internally by backends

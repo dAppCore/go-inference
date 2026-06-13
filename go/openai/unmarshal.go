@@ -371,7 +371,8 @@ func parseChatTemplateKwargs(data []byte, i int) (*ChatTemplateKwargs, int, erro
 			return nil, i, jsonenc.ErrInvalidJSON
 		}
 		i = jsonenc.SkipJSONWhitespace(data, i+1)
-		if string(key) == "enable_thinking" {
+		switch string(key) {
+		case "enable_thinking":
 			if jsonenc.IsJSONNull(data, i) {
 				i += 4
 			} else {
@@ -382,7 +383,19 @@ func parseChatTemplateKwargs(data []byte, i int) (*ChatTemplateKwargs, int, erro
 				kw.EnableThinking = &v
 				i = n
 			}
-		} else {
+		case "thinking_budget":
+			if jsonenc.IsJSONNull(data, i) {
+				i += 4
+			} else {
+				v, n, err := jsonenc.ParseJSONInt(data, i)
+				if err != nil {
+					return nil, n, err
+				}
+				budget := int(v)
+				kw.ThinkingBudget = &budget
+				i = n
+			}
+		default:
 			n, err := jsonenc.SkipJSONValue(data, i)
 			if err != nil {
 				return nil, n, err

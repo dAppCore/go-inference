@@ -58,6 +58,9 @@ type ChatCompletionRequest struct {
 // the object are skipped by the decoder.
 type ChatTemplateKwargs struct {
 	EnableThinking *bool `json:"enable_thinking,omitempty"`
+	// ThinkingBudget caps thought-channel tokens; the backend forces the
+	// channel close on overrun. 0/absent = unlimited.
+	ThinkingBudget *int `json:"thinking_budget,omitempty"`
 }
 
 // StopList accepts OpenAI stop sequences as either a JSON string or string
@@ -257,6 +260,9 @@ func GenerateOptions(req ChatCompletionRequest) ([]inference.GenerateOption, err
 	}
 	if et := req.thinkingOverride(); et != nil {
 		opts = append(opts, inference.WithEnableThinking(et))
+	}
+	if req.ChatTemplateKwargs != nil && req.ChatTemplateKwargs.ThinkingBudget != nil && *req.ChatTemplateKwargs.ThinkingBudget > 0 {
+		opts = append(opts, inference.WithThinkingBudget(*req.ChatTemplateKwargs.ThinkingBudget))
 	}
 	return opts, nil
 }
