@@ -107,10 +107,11 @@ func ClassifyCorpus(ctx context.Context, model inference.TextModel,
 		for i, p := range batch {
 			prompts[i] = core.Sprintf(cfg.promptTemplate, p.prompt)
 		}
-		results, err := model.Classify(ctx, prompts, inference.WithMaxTokens(1))
-		if err != nil {
-			return golog.E("ClassifyCorpus", "classify batch", err)
+		cr := model.Classify(ctx, prompts, inference.WithMaxTokens(1))
+		if !cr.OK {
+			return golog.E("ClassifyCorpus", "classify batch", core.NewError(cr.Error()))
 		}
+		results := cr.Value.([]inference.ClassifyResult)
 		if len(results) != len(batch) {
 			return golog.E(
 				"ClassifyCorpus",

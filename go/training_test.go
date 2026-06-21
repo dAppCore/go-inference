@@ -40,8 +40,8 @@ type trainableBackend struct {
 
 func (b *trainableBackend) Name() string    { return b.name }
 func (b *trainableBackend) Available() bool { return b.available }
-func (b *trainableBackend) LoadModel(_ string, _ ...LoadOption) (TextModel, error) {
-	return &stubTrainableModel{stubTextModel: stubTextModel{backend: b.name}}, nil
+func (b *trainableBackend) LoadModel(_ string, _ ...LoadOption) core.Result {
+	return core.Ok(TextModel(&stubTrainableModel{stubTextModel: stubTextModel{backend: b.name}}))
 }
 
 func TestTraining_LoadTrainable_Good(t *testing.T) {
@@ -52,7 +52,7 @@ func TestTraining_LoadTrainable_Good(t *testing.T) {
 	tm := resultTrainableModel(t, LoadTrainable("/path/to/model"))
 	checkNotNil(t, tm)
 	checkEqual(t, 26, tm.NumLayers())
-	checkNoError(t, tm.Close())
+	checkResultOK(t, tm.Close())
 }
 
 func TestTraining_LoadTrainable_Bad_NoBackends(t *testing.T) {
@@ -104,7 +104,7 @@ func TestTraining_LoadTrainable_Good_ExplicitBackend(t *testing.T) {
 
 	tm := resultTrainableModel(t, LoadTrainable("/path/to/model", WithBackend("rocm")))
 	checkNotNil(t, tm)
-	checkNoError(t, tm.Close())
+	checkResultOK(t, tm.Close())
 }
 
 // --- TrainableModel interface compliance ---
@@ -126,7 +126,7 @@ func TestTraining_LoadTrainable_Ugly_SkipsUnavailableBackend(t *testing.T) {
 
 	tm := resultTrainableModel(t, LoadTrainable("/path/to/model"))
 	checkNotNil(t, tm)
-	checkNoError(t, tm.Close())
+	checkResultOK(t, tm.Close())
 }
 
 func TestTraining_DefaultLoRAConfig_Good_TargetKeysIndependent(t *testing.T) {
@@ -219,5 +219,5 @@ func TestTraining_LoadTrainable_Ugly(t *testing.T) {
 
 	model := resultTrainableModel(t, LoadTrainable(""))
 	core.AssertNotNil(t, model)
-	core.AssertNoError(t, model.Close())
+	checkResultOK(t, model.Close())
 }

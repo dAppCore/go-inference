@@ -234,20 +234,24 @@ func (m *Model) Chat(ctx context.Context, messages []inference.Message, opts ...
 
 // Classify delegates classification to the wrapped model.
 //
-//	results, err := model.Classify(ctx, prompts)
-func (m *Model) Classify(ctx context.Context, prompts []string, opts ...inference.GenerateOption) ([]inference.ClassifyResult, error) {
+//	cr := model.Classify(ctx, prompts)
+//	if !cr.OK { return cr }
+//	results := cr.Value.([]inference.ClassifyResult)
+func (m *Model) Classify(ctx context.Context, prompts []string, opts ...inference.GenerateOption) core.Result {
 	if m == nil || m.base == nil {
-		return nil, core.NewError("scheduler: model is nil")
+		return core.Fail(core.E("scheduler.Classify", "model is nil", nil))
 	}
 	return m.base.Classify(ctx, prompts, opts...)
 }
 
 // BatchGenerate delegates batch generation to the wrapped model.
 //
-//	batches, err := model.BatchGenerate(ctx, prompts)
-func (m *Model) BatchGenerate(ctx context.Context, prompts []string, opts ...inference.GenerateOption) ([]inference.BatchResult, error) {
+//	br := model.BatchGenerate(ctx, prompts)
+//	if !br.OK { return br }
+//	batches := br.Value.([]inference.BatchResult)
+func (m *Model) BatchGenerate(ctx context.Context, prompts []string, opts ...inference.GenerateOption) core.Result {
 	if m == nil || m.base == nil {
-		return nil, core.NewError("scheduler: model is nil")
+		return core.Fail(core.E("scheduler.BatchGenerate", "model is nil", nil))
 	}
 	return m.base.BatchGenerate(ctx, prompts, opts...)
 }
@@ -282,30 +286,32 @@ func (m *Model) Metrics() inference.GenerateMetrics {
 	return m.base.Metrics()
 }
 
-// Err returns the most recent error from the scheduler or the wrapped model.
+// Err reports the most recent error from the scheduler or the wrapped model.
+// The Result is OK with a nil Value when there is no error.
 //
-//	if err := model.Err(); err != nil { … }
-func (m *Model) Err() error {
+//	if r := model.Err(); !r.OK { … }
+func (m *Model) Err() core.Result {
 	if m == nil {
-		return nil
+		return core.Ok(nil)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.lastErr != nil {
-		return m.lastErr
+		return core.Fail(m.lastErr)
 	}
 	if m.base == nil {
-		return nil
+		return core.Ok(nil)
 	}
 	return m.base.Err()
 }
 
-// Close releases the wrapped model.
+// Close releases the wrapped model. The Result is OK with a nil Value on
+// success, or a failure carrying the error.
 //
 //	model.Close()
-func (m *Model) Close() error {
+func (m *Model) Close() core.Result {
 	if m == nil || m.base == nil {
-		return nil
+		return core.Ok(nil)
 	}
 	return m.base.Close()
 }
@@ -370,8 +376,12 @@ func (m *Model) run(j *job) {
 		}:
 		}
 	}
-	if err := m.base.Err(); err != nil {
-		m.setErr(err)
+	if r := m.base.Err(); !r.OK {
+		if err, ok := r.Value.(error); ok {
+			m.setErr(err)
+		} else {
+			m.setErr(core.NewError(r.Error()))
+		}
 	}
 	m.emitProbe(j, "complete", queueLatency, 0, false)
 }
@@ -450,6 +460,7 @@ func (m *Model) nextRequestID() string {
 	buf = strconv.AppendUint(buf, id, 10)
 	return core.AsString(buf)
 }
+
 // schedGreedyOpts is the cached single-option slice for the zero-value
 // (greedy) sampler — the burst-dispatch case where callers leave
 // Sampler unset. The closure forces Temperature to 0 (explicit greedy)

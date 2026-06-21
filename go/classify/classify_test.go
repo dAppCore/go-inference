@@ -58,19 +58,19 @@ func (m *mockModel) Chat(_ context.Context, _ []inference.Message, _ ...inferenc
 	return func(yield func(inference.Token) bool) {}
 }
 
-func (m *mockModel) Classify(ctx context.Context, prompts []string, opts ...inference.GenerateOption) ([]inference.ClassifyResult, error) {
-	return m.classifyFunc(ctx, prompts, opts...)
+func (m *mockModel) Classify(ctx context.Context, prompts []string, opts ...inference.GenerateOption) core.Result {
+	return core.ResultOf(m.classifyFunc(ctx, prompts, opts...))
 }
 
-func (m *mockModel) BatchGenerate(_ context.Context, _ []string, _ ...inference.GenerateOption) ([]inference.BatchResult, error) {
-	return nil, nil
+func (m *mockModel) BatchGenerate(_ context.Context, _ []string, _ ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.BatchResult(nil))
 }
 
 func (m *mockModel) ModelType() string                  { return "mock" }
 func (m *mockModel) Info() inference.ModelInfo          { return inference.ModelInfo{} }
 func (m *mockModel) Metrics() inference.GenerateMetrics { return inference.GenerateMetrics{} }
-func (m *mockModel) Err() error                         { return nil }
-func (m *mockModel) Close() error                       { return nil }
+func (m *mockModel) Err() core.Result                   { return core.Ok(nil) }
+func (m *mockModel) Close() core.Result                 { return core.Ok(nil) }
 
 func TestClassifyCorpus_Basic(t *testing.T) {
 	model := &mockModel{

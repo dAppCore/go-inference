@@ -27,19 +27,19 @@ func (m *mockGenerateModel) Chat(_ context.Context, _ []inference.Message, _ ...
 	return func(yield func(inference.Token) bool) {}
 }
 
-func (m *mockGenerateModel) Classify(_ context.Context, _ []string, _ ...inference.GenerateOption) ([]inference.ClassifyResult, error) {
-	return nil, nil
+func (m *mockGenerateModel) Classify(_ context.Context, _ []string, _ ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.ClassifyResult(nil))
 }
 
-func (m *mockGenerateModel) BatchGenerate(_ context.Context, _ []string, _ ...inference.GenerateOption) ([]inference.BatchResult, error) {
-	return nil, nil
+func (m *mockGenerateModel) BatchGenerate(_ context.Context, _ []string, _ ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.BatchResult(nil))
 }
 
 func (m *mockGenerateModel) ModelType() string                  { return "mock" }
 func (m *mockGenerateModel) Info() inference.ModelInfo          { return inference.ModelInfo{} }
 func (m *mockGenerateModel) Metrics() inference.GenerateMetrics { return inference.GenerateMetrics{} }
-func (m *mockGenerateModel) Err() error                         { return m.genErr }
-func (m *mockGenerateModel) Close() error                       { return nil }
+func (m *mockGenerateModel) Err() core.Result                   { return core.ResultOf(nil, m.genErr) }
+func (m *mockGenerateModel) Close() core.Result                 { return core.Ok(nil) }
 
 // newMockArticleModel creates a mock that returns a fixed article token for any prompt.
 func newMockArticleModel(article string) *mockGenerateModel {

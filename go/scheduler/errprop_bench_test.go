@@ -43,19 +43,19 @@ func (m *errBaseModel) Chat(_ context.Context, _ []inference.Message, _ ...infer
 	return m.seq()
 }
 
-func (m *errBaseModel) Classify(context.Context, []string, ...inference.GenerateOption) ([]inference.ClassifyResult, error) {
-	return nil, m.err
+func (m *errBaseModel) Classify(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.ResultOf([]inference.ClassifyResult(nil), m.err)
 }
 
-func (m *errBaseModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) ([]inference.BatchResult, error) {
-	return nil, m.err
+func (m *errBaseModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.ResultOf([]inference.BatchResult(nil), m.err)
 }
 
 func (m *errBaseModel) ModelType() string                  { return "err-base" }
 func (m *errBaseModel) Info() inference.ModelInfo          { return inference.ModelInfo{} }
 func (m *errBaseModel) Metrics() inference.GenerateMetrics { return inference.GenerateMetrics{} }
-func (m *errBaseModel) Err() error                         { return m.err }
-func (m *errBaseModel) Close() error                       { return nil }
+func (m *errBaseModel) Err() core.Result                  { return core.ResultOf(nil, m.err) }
+func (m *errBaseModel) Close() core.Result                { return core.Ok(nil) }
 
 func (m *errBaseModel) seq() iter.Seq[inference.Token] {
 	return func(yield func(inference.Token) bool) {
@@ -109,7 +109,7 @@ func BenchmarkScheduler_ErrProp_Err_Nil(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		schedSinkErr = sched.Err()
+		schedSinkResult = sched.Err()
 	}
 }
 
@@ -127,13 +127,13 @@ func BenchmarkScheduler_ErrProp_Err_LastErrCached(b *testing.B) {
 	for range sched.Generate(context.Background(), "p") {
 		break
 	}
-	if sched.Err() == nil {
+	if sched.Err().OK {
 		b.Fatalf("expected lastErr to be set after nil-model Generate")
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		schedSinkErr = sched.Err()
+		schedSinkResult = sched.Err()
 	}
 }
 
@@ -146,7 +146,7 @@ func BenchmarkScheduler_ErrProp_Err_BaseErrFallback(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		schedSinkErr = sched.Err()
+		schedSinkResult = sched.Err()
 	}
 }
 

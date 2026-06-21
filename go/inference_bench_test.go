@@ -60,8 +60,8 @@ type inferenceBenchBackend struct {
 
 func (b *inferenceBenchBackend) Name() string    { return b.name }
 func (b *inferenceBenchBackend) Available() bool { return b.available }
-func (b *inferenceBenchBackend) LoadModel(_ string, _ ...LoadOption) (TextModel, error) {
-	return nil, nil
+func (b *inferenceBenchBackend) LoadModel(_ string, _ ...LoadOption) core.Result {
+	return core.Ok(nil)
 }
 
 // --- AttentionSnapshot.HasQueries (per-snapshot helper, pure scan) ---
