@@ -46,12 +46,12 @@ func (m *blockingModel) Chat(ctx context.Context, messages []inference.Message, 
 	return m.Generate(ctx, prompt, opts...)
 }
 
-func (m *blockingModel) Classify(context.Context, []string, ...inference.GenerateOption) ([]inference.ClassifyResult, error) {
-	return nil, nil
+func (m *blockingModel) Classify(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.ClassifyResult(nil))
 }
 
-func (m *blockingModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) ([]inference.BatchResult, error) {
-	return nil, nil
+func (m *blockingModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.BatchResult(nil))
 }
 
 func (m *blockingModel) ModelType() string { return "blocking" }
@@ -59,8 +59,8 @@ func (m *blockingModel) Info() inference.ModelInfo {
 	return inference.ModelInfo{Architecture: "qwen3"}
 }
 func (m *blockingModel) Metrics() inference.GenerateMetrics { return m.metrics }
-func (m *blockingModel) Err() error                         { return nil }
-func (m *blockingModel) Close() error                       { return nil }
+func (m *blockingModel) Err() core.Result                   { return core.Ok(nil) }
+func (m *blockingModel) Close() core.Result                 { return core.Ok(nil) }
 
 func TestModel_QueuesRequestsAndEmitsLatencyProbe_Good(t *testing.T) {
 	base := newBlockingModel()
@@ -200,14 +200,14 @@ func (m *immediateModel) Chat(_ context.Context, messages []inference.Message, _
 	return m.seq()
 }
 
-func (m *immediateModel) Classify(_ context.Context, prompts []string, _ ...inference.GenerateOption) ([]inference.ClassifyResult, error) {
+func (m *immediateModel) Classify(_ context.Context, prompts []string, _ ...inference.GenerateOption) core.Result {
 	m.classified = append([]string(nil), prompts...)
-	return []inference.ClassifyResult{{Token: inference.Token{Text: "ok"}}}, nil
+	return core.Ok([]inference.ClassifyResult{{Token: inference.Token{Text: "ok"}}})
 }
 
-func (m *immediateModel) BatchGenerate(_ context.Context, prompts []string, _ ...inference.GenerateOption) ([]inference.BatchResult, error) {
+func (m *immediateModel) BatchGenerate(_ context.Context, prompts []string, _ ...inference.GenerateOption) core.Result {
 	m.batchPrompts = append([]string(nil), prompts...)
-	return []inference.BatchResult{{Tokens: []inference.Token{{Text: "batch"}}}}, nil
+	return core.Ok([]inference.BatchResult{{Tokens: []inference.Token{{Text: "batch"}}}})
 }
 
 func (m *immediateModel) ModelType() string { return "immediate" }
@@ -220,8 +220,8 @@ func (m *immediateModel) Metrics() inference.GenerateMetrics {
 	}
 	return m.metrics
 }
-func (m *immediateModel) Err() error   { return m.err }
-func (m *immediateModel) Close() error { m.closed = true; return nil }
+func (m *immediateModel) Err() core.Result   { return core.ResultOf(nil, m.err) }
+func (m *immediateModel) Close() core.Result { m.closed = true; return core.Ok(nil) }
 
 func (m *immediateModel) CancelRequest(_ context.Context, id string) (inference.RequestCancelResult, error) {
 	m.cancelledID = id
@@ -257,17 +257,17 @@ func TestModel_GenerateChatAndDelegates_Good(t *testing.T) {
 	if len(chat) != 2 || len(base.lastMessages) != 1 || base.lastMessages[0].Content != "hi" {
 		t.Fatalf("chat = %v messages=%+v, want delegated chat", chat, base.lastMessages)
 	}
-	if results, err := scheduled.Classify(context.Background(), []string{"x"}); err != nil || len(results) != 1 || base.classified[0] != "x" {
-		t.Fatalf("Classify() = %+v/%v classified=%v", results, err, base.classified)
+	if cr := scheduled.Classify(context.Background(), []string{"x"}); !cr.OK || len(cr.Value.([]inference.ClassifyResult)) != 1 || base.classified[0] != "x" {
+		t.Fatalf("Classify() = %+v classified=%v", cr, base.classified)
 	}
-	if batches, err := scheduled.BatchGenerate(context.Background(), []string{"b"}); err != nil || len(batches) != 1 || base.batchPrompts[0] != "b" {
-		t.Fatalf("BatchGenerate() = %+v/%v prompts=%v", batches, err, base.batchPrompts)
+	if br := scheduled.BatchGenerate(context.Background(), []string{"b"}); !br.OK || len(br.Value.([]inference.BatchResult)) != 1 || base.batchPrompts[0] != "b" {
+		t.Fatalf("BatchGenerate() = %+v prompts=%v", br, base.batchPrompts)
 	}
 	if scheduled.ModelType() != "immediate" || scheduled.Info().Architecture != "qwen3" || scheduled.Metrics().GeneratedTokens != 2 {
 		t.Fatalf("model delegates = type %q info %+v metrics %+v", scheduled.ModelType(), scheduled.Info(), scheduled.Metrics())
 	}
-	if err := scheduled.Close(); err != nil || !base.closed {
-		t.Fatalf("Close() = %v closed=%v", err, base.closed)
+	if cr := scheduled.Close(); !cr.OK || !base.closed {
+		t.Fatalf("Close() = %+v closed=%v", cr, base.closed)
 	}
 }
 
@@ -279,25 +279,25 @@ func TestModel_NilAndErrorPaths_Bad(t *testing.T) {
 	if result, err := nilScheduler.CancelRequest(context.Background(), "x"); err != nil || result.Reason != "scheduler_nil" {
 		t.Fatalf("CancelRequest(nil scheduler) = %+v/%v", result, err)
 	}
-	if nilScheduler.Err() != nil || nilScheduler.Close() != nil {
-		t.Fatal("nil scheduler Err/Close should be nil")
+	if !nilScheduler.Err().OK || !nilScheduler.Close().OK {
+		t.Fatal("nil scheduler Err/Close should be OK")
 	}
 	nilScheduler.SetProbeSink(nil)
 	if nilScheduler.ModelType() != "" || nilScheduler.Info().Architecture != "" || nilScheduler.Metrics().GeneratedTokens != 0 {
 		t.Fatalf("nil scheduler delegates returned non-zero values")
 	}
-	if _, err := nilScheduler.Classify(context.Background(), []string{"x"}); err == nil {
-		t.Fatal("Classify(nil scheduler) error = nil")
+	if cr := nilScheduler.Classify(context.Background(), []string{"x"}); cr.OK {
+		t.Fatal("Classify(nil scheduler) should fail")
 	}
-	if _, err := nilScheduler.BatchGenerate(context.Background(), []string{"x"}); err == nil {
-		t.Fatal("BatchGenerate(nil scheduler) error = nil")
+	if br := nilScheduler.BatchGenerate(context.Background(), []string{"x"}); br.OK {
+		t.Fatal("BatchGenerate(nil scheduler) should fail")
 	}
 	var generated []inference.Token
 	for token := range nilScheduler.Generate(context.Background(), "prompt") {
 		generated = append(generated, token)
 	}
-	if len(generated) != 0 || nilScheduler.Err() != nil {
-		t.Fatalf("nil Generate tokens=%v err=%v, want no tokens and no stored nil-scheduler err", generated, nilScheduler.Err())
+	if len(generated) != 0 || !nilScheduler.Err().OK {
+		t.Fatalf("nil Generate tokens=%v err=%+v, want no tokens and no stored nil-scheduler err", generated, nilScheduler.Err())
 	}
 
 	scheduled := New(nil, Config{})
@@ -324,12 +324,12 @@ func TestModel_ErrAndHelpers_Good(t *testing.T) {
 	scheduled := New(base, Config{RequestIDPrefix: "req", MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 1})
 	for range scheduled.Generate(context.Background(), "prompt") {
 	}
-	if err := scheduled.Err(); err == nil || err.Error() != "base failed" {
-		t.Fatalf("Err() = %v, want base failed", err)
+	if r := scheduled.Err(); r.OK || r.Error() != "base failed" {
+		t.Fatalf("Err() = %+v, want base failed", r)
 	}
 	scheduled.setErr(core.NewError("stored failed"))
-	if err := scheduled.Err(); err == nil || err.Error() != "stored failed" {
-		t.Fatalf("stored Err() = %v, want stored failed", err)
+	if r := scheduled.Err(); r.OK || r.Error() != "stored failed" {
+		t.Fatalf("stored Err() = %+v, want stored failed", r)
 	}
 	opts := generateOptions(inference.SamplerConfig{
 		MaxTokens:     4,

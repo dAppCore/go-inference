@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference"
 )
 
@@ -118,19 +119,19 @@ func (m *mixedSizeBenchModel) Chat(_ context.Context, _ []inference.Message, _ .
 	}
 }
 
-func (m *mixedSizeBenchModel) Classify(context.Context, []string, ...inference.GenerateOption) ([]inference.ClassifyResult, error) {
-	return nil, nil
+func (m *mixedSizeBenchModel) Classify(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.ClassifyResult(nil))
 }
 
-func (m *mixedSizeBenchModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) ([]inference.BatchResult, error) {
-	return nil, nil
+func (m *mixedSizeBenchModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.BatchResult(nil))
 }
 
 func (m *mixedSizeBenchModel) ModelType() string                  { return "mixed-bench" }
 func (m *mixedSizeBenchModel) Info() inference.ModelInfo          { return inference.ModelInfo{} }
 func (m *mixedSizeBenchModel) Metrics() inference.GenerateMetrics { return inference.GenerateMetrics{} }
-func (m *mixedSizeBenchModel) Err() error                         { return nil }
-func (m *mixedSizeBenchModel) Close() error                       { return nil }
+func (m *mixedSizeBenchModel) Err() core.Result                  { return core.Ok(nil) }
+func (m *mixedSizeBenchModel) Close() core.Result                { return core.Ok(nil) }
 
 // --- Mixed Chat + Generate dispatch ---
 

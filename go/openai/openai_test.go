@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference"
 )
 
@@ -28,12 +29,12 @@ func (m *stubModel) Chat(context.Context, []inference.Message, ...inference.Gene
 	return m.seq()
 }
 
-func (m *stubModel) Classify(context.Context, []string, ...inference.GenerateOption) ([]inference.ClassifyResult, error) {
-	return nil, nil
+func (m *stubModel) Classify(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.ClassifyResult(nil))
 }
 
-func (m *stubModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) ([]inference.BatchResult, error) {
-	return nil, nil
+func (m *stubModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.BatchResult(nil))
 }
 
 func (m *stubModel) ModelType() string { return "stub" }
@@ -42,9 +43,9 @@ func (m *stubModel) Info() inference.ModelInfo { return inference.ModelInfo{Arch
 
 func (m *stubModel) Metrics() inference.GenerateMetrics { return m.metrics }
 
-func (m *stubModel) Err() error { return m.err }
+func (m *stubModel) Err() core.Result { return core.ResultOf(nil, m.err) }
 
-func (m *stubModel) Close() error { return nil }
+func (m *stubModel) Close() core.Result { return core.Ok(nil) }
 
 func (m *stubModel) seq() iter.Seq[inference.Token] {
 	return func(yield func(inference.Token) bool) {

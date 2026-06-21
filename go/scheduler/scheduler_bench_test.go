@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference"
 )
 
@@ -33,6 +34,7 @@ var (
 	schedSinkHandle      inference.RequestHandle
 	schedSinkCancel      inference.RequestCancelResult
 	schedSinkErr         error
+	schedSinkResult      core.Result
 	schedSinkTokensCount int
 )
 
@@ -52,12 +54,12 @@ func (m *schedBenchModel) Chat(_ context.Context, _ []inference.Message, _ ...in
 	return m.seq()
 }
 
-func (m *schedBenchModel) Classify(context.Context, []string, ...inference.GenerateOption) ([]inference.ClassifyResult, error) {
-	return nil, nil
+func (m *schedBenchModel) Classify(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.ClassifyResult(nil))
 }
 
-func (m *schedBenchModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) ([]inference.BatchResult, error) {
-	return nil, nil
+func (m *schedBenchModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.BatchResult(nil))
 }
 
 func (m *schedBenchModel) ModelType() string             { return "sched-bench" }
@@ -65,8 +67,8 @@ func (m *schedBenchModel) Info() inference.ModelInfo     { return inference.Mode
 func (m *schedBenchModel) Metrics() inference.GenerateMetrics {
 	return inference.GenerateMetrics{GeneratedTokens: len(m.tokens)}
 }
-func (m *schedBenchModel) Err() error   { return nil }
-func (m *schedBenchModel) Close() error { return nil }
+func (m *schedBenchModel) Err() core.Result   { return core.Ok(nil) }
+func (m *schedBenchModel) Close() core.Result { return core.Ok(nil) }
 
 func (m *schedBenchModel) seq() iter.Seq[inference.Token] {
 	return func(yield func(inference.Token) bool) {

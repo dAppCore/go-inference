@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference"
 )
 
@@ -53,19 +54,19 @@ func (m *cancellableBenchModel) Chat(ctx context.Context, _ []inference.Message,
 	return m.seq(ctx)
 }
 
-func (m *cancellableBenchModel) Classify(context.Context, []string, ...inference.GenerateOption) ([]inference.ClassifyResult, error) {
-	return nil, nil
+func (m *cancellableBenchModel) Classify(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.ClassifyResult(nil))
 }
 
-func (m *cancellableBenchModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) ([]inference.BatchResult, error) {
-	return nil, nil
+func (m *cancellableBenchModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.BatchResult(nil))
 }
 
 func (m *cancellableBenchModel) ModelType() string                  { return "cancellable-bench" }
 func (m *cancellableBenchModel) Info() inference.ModelInfo          { return inference.ModelInfo{} }
 func (m *cancellableBenchModel) Metrics() inference.GenerateMetrics { return inference.GenerateMetrics{} }
-func (m *cancellableBenchModel) Err() error                         { return nil }
-func (m *cancellableBenchModel) Close() error                       { return nil }
+func (m *cancellableBenchModel) Err() core.Result                  { return core.Ok(nil) }
+func (m *cancellableBenchModel) Close() core.Result                { return core.Ok(nil) }
 
 func (m *cancellableBenchModel) seq(ctx context.Context) iter.Seq[inference.Token] {
 	return func(yield func(inference.Token) bool) {

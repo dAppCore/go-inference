@@ -76,8 +76,8 @@ func collectGenerated(ctx context.Context, m inference.TextModel, prompt string)
 	for tok := range m.Generate(ctx, prompt, inference.WithMaxTokens(1), inference.WithTemperature(0.05)) {
 		sb.WriteString(tok.Text)
 	}
-	if err := m.Err(); err != nil {
-		return core.Fail(err)
+	if r := m.Err(); !r.OK {
+		return r
 	}
 	return core.Ok(core.Trim(core.Lower(sb.String())))
 }

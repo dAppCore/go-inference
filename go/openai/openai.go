@@ -483,8 +483,8 @@ func (h *Handler) serveNonStreaming(w http.ResponseWriter, r *http.Request, mode
 	visibleTail, thoughtTail := extractor.Flush()
 	_ = visibleTail
 	_ = thoughtTail
-	if err := model.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error(), "model")
+	if r := model.Err(); !r.OK {
+		writeError(w, http.StatusInternalServerError, r.Error(), "model")
 		return
 	}
 	metrics := model.Metrics()
@@ -600,7 +600,7 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 		}
 		writeChunk(chunk)
 	}
-	if err := model.Err(); err != nil {
+	if r := model.Err(); !r.OK {
 		finishReason = "error"
 	}
 	if finishReason != "error" && isTokenLengthCapReached(req.MaxTokens, model.Metrics().GeneratedTokens) {

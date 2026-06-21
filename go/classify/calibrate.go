@@ -147,10 +147,11 @@ func classifyAll(ctx context.Context, model inference.TextModel, prompts []strin
 		end := min(i+batchSize, len(prompts))
 		batch := prompts[i:end]
 
-		results, err := model.Classify(ctx, batch, inference.WithMaxTokens(1))
-		if err != nil {
-			return failResult(golog.E("classifyAll", core.Sprintf("classify batch [%d:%d]", i, end), err))
+		cr := model.Classify(ctx, batch, inference.WithMaxTokens(1))
+		if !cr.OK {
+			return failResult(golog.E("classifyAll", core.Sprintf("classify batch [%d:%d]", i, end), core.NewError(cr.Error())))
 		}
+		results := cr.Value.([]inference.ClassifyResult)
 
 		for j, r := range results {
 			domains[i+j] = mapTokenToDomain(r.Token.Text)

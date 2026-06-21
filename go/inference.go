@@ -16,14 +16,16 @@
 //
 // # Loading and generating
 //
-//	m, err := inference.LoadModel("/path/to/model/")
+//	r := inference.LoadModel("/path/to/model/")
+//	if !r.OK { log.Fatal(r.Error()) }
+//	m := r.Value.(inference.TextModel)
 //	defer m.Close()
 //
 //	ctx := context.Background()
 //	for tok := range m.Generate(ctx, "prompt", inference.WithMaxTokens(128)) {
 //	    fmt.Print(tok.Text)
 //	}
-//	if err := m.Err(); err != nil { log.Fatal(err) }
+//	if r := m.Err(); !r.OK { log.Fatal(r.Error()) }
 //
 // # Chat, classify, and batch generate
 //
@@ -38,10 +40,12 @@
 //	}
 //
 //	// Classify — single forward pass per prompt
-//	results, _ := m.Classify(ctx, prompts, inference.WithTemperature(0))
+//	cr := m.Classify(ctx, prompts, inference.WithTemperature(0))
+//	results := cr.Value.([]inference.ClassifyResult)
 //
 //	// Batch generate — parallel autoregressive decoding
-//	batched, _ := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(32))
+//	br := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(32))
+//	batched := br.Value.([]inference.BatchResult)
 //
 // # Generation options
 //
@@ -101,7 +105,8 @@ type VisionModel interface {
 	AcceptsImages() bool
 }
 
-// results, _ := m.Classify(ctx, []string{"positive", "negative"})
+// cr := m.Classify(ctx, []string{"positive", "negative"})
+// results := cr.Value.([]inference.ClassifyResult)
 // label := results[0].Token.Text  // sampled token at last position
 // logits := results[0].Logits     // only populated when WithLogits() is set
 type ClassifyResult struct {
@@ -109,7 +114,8 @@ type ClassifyResult struct {
 	Logits []float32 // Raw vocab-sized logits (only when WithLogits is set)
 }
 
-// batched, _ := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(64))
+// br := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(64))
+// batched := br.Value.([]inference.BatchResult)
 //
 //	for i, r := range batched {
 //	    if r.Err != nil { continue }
@@ -193,7 +199,7 @@ type TextModel interface {
 	//	for tok := range m.Generate(ctx, "The quick brown fox", inference.WithMaxTokens(64)) {
 	//	    fmt.Print(tok.Text)
 	//	}
-	//	if err := m.Err(); err != nil { return err }
+	//	if r := m.Err(); !r.OK { return r }
 	Generate(ctx context.Context, prompt string, opts ...GenerateOption) iter.Seq[Token]
 
 	// Chat streams tokens from a multi-turn conversation using the model's native template.
@@ -205,16 +211,22 @@ type TextModel interface {
 
 	// Classify runs batched prefill-only inference — fast path for classification tasks.
 	// Each prompt gets one forward pass; the token at the last position is sampled.
+	// The Result carries []ClassifyResult in Value when OK.
 	//
-	//	results, _ := m.Classify(ctx, []string{"positive review", "negative review"})
+	//	cr := m.Classify(ctx, []string{"positive review", "negative review"})
+	//	if !cr.OK { return cr }
+	//	results := cr.Value.([]inference.ClassifyResult)
 	//	label := results[0].Token.Text
-	Classify(ctx context.Context, prompts []string, opts ...GenerateOption) ([]ClassifyResult, error)
+	Classify(ctx context.Context, prompts []string, opts ...GenerateOption) core.Result
 
 	// BatchGenerate runs batched autoregressive generation up to MaxTokens per prompt.
+	// The Result carries []BatchResult in Value when OK.
 	//
-	//	results, _ := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(128))
+	//	br := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(128))
+	//	if !br.OK { return br }
+	//	results := br.Value.([]inference.BatchResult)
 	//	for i, r := range results { fmt.Println(i, r.Tokens) }
-	BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) ([]BatchResult, error)
+	BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) core.Result
 
 	// ModelType is the architecture string from config.json ("gemma3", "qwen3", "llama3").
 	//
@@ -233,17 +245,20 @@ type TextModel interface {
 	//	fmt.Printf("%.0f tok/s decode\n", m.Metrics().DecodeTokensPerSec)
 	Metrics() GenerateMetrics
 
-	// Err holds any error from the last Generate or Chat call.
+	// Err reports any error from the last Generate or Chat call.
 	// Check after the iterator stops to distinguish normal EOS from errors.
+	// The Result is OK with a nil Value on success, or a failure carrying
+	// the error otherwise.
 	//
 	//	for tok := range m.Generate(ctx, prompt) { ... }
-	//	if err := m.Err(); err != nil { return err }
-	Err() error
+	//	if r := m.Err(); !r.OK { return r }
+	Err() core.Result
 
-	// Close releases GPU memory, KV caches, and any subprocess.
+	// Close releases GPU memory, KV caches, and any subprocess. The Result
+	// is OK with a nil Value on success, or a failure carrying the error.
 	//
 	//	defer m.Close()
-	Close() error
+	Close() core.Result
 }
 
 // func init() { inference.Register(metal.NewBackend()) } // called from backend packages
@@ -253,10 +268,13 @@ type Backend interface {
 	//	b.Name() // "metal", "rocm", "llama_cpp"
 	Name() string
 
-	// LoadModel reads the model directory at path and returns a ready TextModel.
+	// LoadModel reads the model directory at path and returns a ready
+	// TextModel in the Result's Value when OK.
 	//
-	//	m, err := b.LoadModel("/models/gemma3-1b", inference.WithContextLen(4096))
-	LoadModel(path string, opts ...LoadOption) (TextModel, error)
+	//	r := b.LoadModel("/models/gemma3-1b", inference.WithContextLen(4096))
+	//	if !r.OK { return r }
+	//	m := r.Value.(inference.TextModel)
+	LoadModel(path string, opts ...LoadOption) core.Result
 
 	// Available reports whether the required hardware or driver is present at runtime.
 	//
@@ -422,7 +440,7 @@ func LoadModel(path string, opts ...LoadOption) core.Result {
 		if !b.Available() {
 			return core.Fail(core.E("inference.LoadModel", core.Sprintf("backend %q not available on this hardware", cfg.Backend), nil))
 		}
-		modelResult := core.ResultOf(b.LoadModel(path, opts...))
+		modelResult := b.LoadModel(path, opts...)
 		if !modelResult.OK {
 			return core.Fail(core.Wrap(modelResult.Value.(error), "inference.LoadModel", core.Sprintf("backend %q failed to load model", cfg.Backend)))
 		}
@@ -440,7 +458,7 @@ func LoadModel(path string, opts ...LoadOption) core.Result {
 	if !ok || b == nil {
 		return core.Fail(core.E("inference.LoadModel", "default backend result was not a backend", nil))
 	}
-	modelResult := core.ResultOf(b.LoadModel(path, opts...))
+	modelResult := b.LoadModel(path, opts...)
 	if !modelResult.OK {
 		return core.Fail(core.Wrap(modelResult.Value.(error), "inference.LoadModel", core.Sprintf("backend %q failed to load model", b.Name())))
 	}
