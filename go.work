@@ -5,6 +5,7 @@ go 1.26.2
 // CI: GOWORK=off uses go/go.mod tags for reproducible resolution.
 
 use (
-	./go
+	./external/go-i18n/go
 	./external/go
+	./go
 )
