@@ -2,3 +2,7 @@
 	path = external/go
 	url = https://github.com/dappcore/go.git
 	branch = dev
+[submodule "external/go-i18n"]
+	path = external/go-i18n
+	url = https://github.com/dappcore/go-i18n.git
+	branch = dev

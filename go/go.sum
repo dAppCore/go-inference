@@ -1,5 +1,6 @@
 dappco.re/go v0.10.4 h1:vir5AK8AkHbTxhPUT0et6Tc0P8i/i+gLInM0LRLt1EU=
 dappco.re/go v0.10.4/go.mod h1:xapr7fLK4/9Pu2iSCr4qZuIuatmtx1j56zS/oPDbGyQ=
+dappco.re/go/log v0.9.0 h1:9+OiBUDyUNvqZZ++XemcjJPCgypr+Yf/1e5OP3X2nrk=
 forge.lthn.ai/Snider/Enchantrix v0.0.5 h1:Yam0z+3AOvCUCHAMP68Ty8qHr2e4MMs7j2FjMM2JWc8=
 forge.lthn.ai/Snider/Enchantrix v0.0.5/go.mod h1:/YcjKMNpC4Ze/fz7zbTx3djN0CJmSM83YiR2KaMK6zQ=
 github.com/ProtonMail/go-crypto v1.3.0 h1:ILq8+Sf5If5DCpHQp4PbZdS1J7HDFRXz/+xKBiRGFrw=

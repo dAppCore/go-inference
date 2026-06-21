@@ -2,7 +2,11 @@ module dappco.re/go/inference
 
 go 1.26.0
 
-require dappco.re/go v0.10.4
+require (
+	dappco.re/go v0.10.4
+	dappco.re/go/i18n v0.10.0
+	dappco.re/go/log v0.9.0
+)
 
 require (
 	forge.lthn.ai/Snider/Enchantrix v0.0.5
