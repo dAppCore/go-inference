@@ -20,19 +20,19 @@ import (
 
 // Sinks defeat compiler DCE.
 var (
-	servicesSinkEmbedRequest    EmbeddingRequest
-	servicesSinkEmbedResponse   EmbeddingResponse
-	servicesSinkEmbeddingInput  EmbeddingInput
-	servicesSinkRerankRequest   RerankRequest
-	servicesSinkRerankResponse  RerankResponse
-	servicesSinkCacheWarmReq    CacheWarmRequest
-	servicesSinkCacheClearReq   CacheClearRequest
-	servicesSinkCancelReq       CancelRequest
-	servicesSinkCacheStats      inference.CacheStats
-	servicesSinkErr             error
-	servicesSinkString          string
-	servicesSinkBytes           []byte
-	servicesSinkResult          core.Result
+	servicesSinkEmbedRequest   EmbeddingRequest
+	servicesSinkEmbedResponse  EmbeddingResponse
+	servicesSinkEmbeddingInput EmbeddingInput
+	servicesSinkRerankRequest  RerankRequest
+	servicesSinkRerankResponse RerankResponse
+	servicesSinkCacheWarmReq   CacheWarmRequest
+	servicesSinkCacheClearReq  CacheClearRequest
+	servicesSinkCancelReq      CancelRequest
+	servicesSinkCacheStats     inference.CacheStats
+	servicesSinkErr            error
+	servicesSinkString         string
+	servicesSinkBytes          []byte
+	servicesSinkResult         core.Result
 )
 
 // --- Fixture builders ---

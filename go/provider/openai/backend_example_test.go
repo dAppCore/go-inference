@@ -9,7 +9,6 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	openaicompat "dappco.re/go/inference/openai"
 )
 
 func ExampleNewBackend() {
@@ -214,12 +213,12 @@ func ExampleModel_Capabilities() {
 
 func exampleOpenAIModel(content string) (*Model, func()) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(core.JSONMarshalString(openaicompat.ChatCompletionResponse{
+		_, _ = w.Write([]byte(core.JSONMarshalString(ChatCompletionResponse{
 			Model: "gpt",
-			Choices: []openaicompat.ChatChoice{{
-				Message: openaicompat.ChatMessage{Role: "assistant", Content: content},
+			Choices: []ChatChoice{{
+				Message: ChatMessage{Role: "assistant", Content: content},
 			}},
-			Usage: openaicompat.ChatUsage{PromptTokens: 1, CompletionTokens: 1},
+			Usage: ChatUsage{PromptTokens: 1, CompletionTokens: 1},
 		})))
 	}))
 	backend := NewBackend(Config{
