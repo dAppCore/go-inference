@@ -167,7 +167,7 @@ func workerProcessTask(cfg *WorkerConfig, task APITask) core.Result {
 		"worker_id": cfg.WorkerID,
 	})
 	if !claimResult.OK {
-		return core.Fail(core.E("ml.workerProcessTask", "claim", claimResult.Value.(error)))
+		return core.Fail(core.E("agent.workerProcessTask", "claim", claimResult.Value.(error)))
 	}
 
 	apiPatch(cfg, core.Sprintf("/api/lem/tasks/%d/status", task.ID), map[string]any{
@@ -189,7 +189,7 @@ func workerProcessTask(cfg *WorkerConfig, task APITask) core.Result {
 			"worker_id": cfg.WorkerID,
 			"status":    "abandoned",
 		})
-		return core.Fail(core.E("ml.workerProcessTask", "inference", inferResult.Value.(error)))
+		return core.Fail(core.E("agent.workerProcessTask", "inference", inferResult.Value.(error)))
 	}
 	response := inferResult.Value.(string)
 
@@ -205,7 +205,7 @@ func workerProcessTask(cfg *WorkerConfig, task APITask) core.Result {
 		"gen_time_ms":   int(genTime.Milliseconds()),
 	})
 	if !postResult.OK {
-		return core.Fail(core.E("ml.workerProcessTask", "submit result", postResult.Value.(error)))
+		return core.Fail(core.E("agent.workerProcessTask", "submit result", postResult.Value.(error)))
 	}
 
 	core.Print(nil, "  Completed: %d chars in %v", len(response), genTime.Round(time.Millisecond))
@@ -239,25 +239,25 @@ func workerInfer(cfg *WorkerConfig, task APITask) core.Result {
 
 	req, err := http.NewRequest("POST", cfg.InferURL+"/v1/chat/completions", core.NewBuffer(data))
 	if err != nil {
-		return core.Fail(core.E("ml.workerInfer", "create inference request", err))
+		return core.Fail(core.E("agent.workerInfer", "create inference request", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{Timeout: 5 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
-		return core.Fail(core.E("ml.workerInfer", "inference request", err))
+		return core.Fail(core.E("agent.workerInfer", "inference request", err))
 	}
 	defer resp.Body.Close()
 
 	rBody := readAll(resp.Body)
 	if !rBody.OK {
-		return core.Fail(core.E("ml.workerInfer", "read response", rBody.Value.(error)))
+		return core.Fail(core.E("agent.workerInfer", "read response", rBody.Value.(error)))
 	}
 	body := rBody.Value.([]byte)
 
 	if resp.StatusCode != 200 {
-		return core.Fail(core.E("ml.workerInfer", core.Sprintf("inference HTTP %d: %s", resp.StatusCode, truncStr(string(body), 200)), nil))
+		return core.Fail(core.E("agent.workerInfer", core.Sprintf("inference HTTP %d: %s", resp.StatusCode, truncStr(string(body), 200)), nil))
 	}
 
 	var chatResp struct {
@@ -268,16 +268,16 @@ func workerInfer(cfg *WorkerConfig, task APITask) core.Result {
 		} `json:"choices"`
 	}
 	if r := core.JSONUnmarshal(body, &chatResp); !r.OK {
-		return core.Fail(core.E("ml.workerInfer", "parse response", r.Value.(error)))
+		return core.Fail(core.E("agent.workerInfer", "parse response", r.Value.(error)))
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return core.Fail(core.E("ml.workerInfer", "no choices in response", nil))
+		return core.Fail(core.E("agent.workerInfer", "no choices in response", nil))
 	}
 
 	content := chatResp.Choices[0].Message.Content
 	if len(content) < 10 {
-		return core.Fail(core.E("ml.workerInfer", core.Sprintf("response too short: %d chars", len(content)), nil))
+		return core.Fail(core.E("agent.workerInfer", core.Sprintf("response too short: %d chars", len(content)), nil))
 	}
 
 	return core.Ok(content)
@@ -288,14 +288,14 @@ func workerInfer(cfg *WorkerConfig, task APITask) core.Result {
 func apiGet(cfg *WorkerConfig, path string) core.Result {
 	req, err := http.NewRequest("GET", cfg.APIBase+path, nil)
 	if err != nil {
-		return core.Fail(core.E("ml.apiGet", "create request", err))
+		return core.Fail(core.E("agent.apiGet", "create request", err))
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return core.Fail(core.E("ml.apiGet", "send request", err))
+		return core.Fail(core.E("agent.apiGet", "send request", err))
 	}
 	defer resp.Body.Close()
 
@@ -306,7 +306,7 @@ func apiGet(cfg *WorkerConfig, path string) core.Result {
 	body := rBody.Value.([]byte)
 
 	if resp.StatusCode >= 400 {
-		return core.Fail(core.E("ml.apiGet", core.Sprintf("HTTP %d: %s", resp.StatusCode, truncStr(string(body), 200)), nil))
+		return core.Fail(core.E("agent.apiGet", core.Sprintf("HTTP %d: %s", resp.StatusCode, truncStr(string(body), 200)), nil))
 	}
 
 	return core.Ok(body)
@@ -329,7 +329,7 @@ func apiRequest(cfg *WorkerConfig, method, path string, data map[string]any) cor
 
 	req, err := http.NewRequest(method, cfg.APIBase+path, core.NewBuffer(jsonData))
 	if err != nil {
-		return core.Fail(core.E("ml.apiRequest", "create request", err))
+		return core.Fail(core.E("agent.apiRequest", "create request", err))
 	}
 	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -337,7 +337,7 @@ func apiRequest(cfg *WorkerConfig, method, path string, data map[string]any) cor
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return core.Fail(core.E("ml.apiRequest", "send request", err))
+		return core.Fail(core.E("agent.apiRequest", "send request", err))
 	}
 	defer resp.Body.Close()
 
@@ -348,7 +348,7 @@ func apiRequest(cfg *WorkerConfig, method, path string, data map[string]any) cor
 	body := rBody.Value.([]byte)
 
 	if resp.StatusCode >= 400 {
-		return core.Fail(core.E("ml.apiRequest", core.Sprintf("HTTP %d: %s", resp.StatusCode, truncStr(string(body), 200)), nil))
+		return core.Fail(core.E("agent.apiRequest", core.Sprintf("HTTP %d: %s", resp.StatusCode, truncStr(string(body), 200)), nil))
 	}
 
 	return core.Ok(body)

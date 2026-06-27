@@ -11,7 +11,7 @@ import (
 // PushMetrics queries golden_set stats from DuckDB and writes them to InfluxDB
 // as golden_set_stats, golden_set_domain, and golden_set_voice measurements.
 //
-//	r := ml.PushMetrics(db, influx, os.Stdout)
+//	r := datapipe.PushMetrics(db, influx, os.Stdout)
 //	if !r.OK { return r }
 func PushMetrics(db *store.DuckDB, influx *InfluxClient, w io.Writer) core.Result {
 	// Overall stats.
@@ -22,7 +22,7 @@ func PushMetrics(db *store.DuckDB, influx *InfluxClient, w io.Writer) core.Resul
 			"coalesce(avg(gen_time), 0), coalesce(avg(char_count), 0) FROM golden_set",
 	).Scan(&total, &domains, &voices, &avgGenTime, &avgChars)
 	if err != nil {
-		return core.Fail(core.E("ml.PushMetrics", "query golden_set stats", err))
+		return core.Fail(core.E("datapipe.PushMetrics", "query golden_set stats", err))
 	}
 
 	if total == 0 {
@@ -46,7 +46,7 @@ func PushMetrics(db *store.DuckDB, influx *InfluxClient, w io.Writer) core.Resul
 		"SELECT domain, count(*) AS cnt, coalesce(avg(gen_time), 0) AS avg_gt FROM golden_set GROUP BY domain ORDER BY domain",
 	)
 	if err != nil {
-		return core.Fail(core.E("ml.PushMetrics", "query golden_set domains", err))
+		return core.Fail(core.E("datapipe.PushMetrics", "query golden_set domains", err))
 	}
 	defer domainRows.Close()
 
@@ -55,7 +55,7 @@ func PushMetrics(db *store.DuckDB, influx *InfluxClient, w io.Writer) core.Resul
 		var count int
 		var avgGT float64
 		if err := domainRows.Scan(&domain, &count, &avgGT); err != nil {
-			return core.Fail(core.E("ml.PushMetrics", "scan domain row", err))
+			return core.Fail(core.E("datapipe.PushMetrics", "scan domain row", err))
 		}
 		lines = append(lines, core.Sprintf(
 			"golden_set_domain,domain=%s count=%di,avg_gen_time=%.2f %d",
@@ -63,7 +63,7 @@ func PushMetrics(db *store.DuckDB, influx *InfluxClient, w io.Writer) core.Resul
 		))
 	}
 	if err := domainRows.Err(); err != nil {
-		return core.Fail(core.E("ml.PushMetrics", "iterate domain rows", err))
+		return core.Fail(core.E("datapipe.PushMetrics", "iterate domain rows", err))
 	}
 
 	// Per-voice breakdown.
@@ -71,7 +71,7 @@ func PushMetrics(db *store.DuckDB, influx *InfluxClient, w io.Writer) core.Resul
 		"SELECT voice, count(*) AS cnt, coalesce(avg(char_count), 0) AS avg_cc, coalesce(avg(gen_time), 0) AS avg_gt FROM golden_set GROUP BY voice ORDER BY voice",
 	)
 	if err != nil {
-		return core.Fail(core.E("ml.PushMetrics", "query golden_set voices", err))
+		return core.Fail(core.E("datapipe.PushMetrics", "query golden_set voices", err))
 	}
 	defer voiceRows.Close()
 
@@ -80,7 +80,7 @@ func PushMetrics(db *store.DuckDB, influx *InfluxClient, w io.Writer) core.Resul
 		var count int
 		var avgCC, avgGT float64
 		if err := voiceRows.Scan(&voice, &count, &avgCC, &avgGT); err != nil {
-			return core.Fail(core.E("ml.PushMetrics", "scan voice row", err))
+			return core.Fail(core.E("datapipe.PushMetrics", "scan voice row", err))
 		}
 		lines = append(lines, core.Sprintf(
 			"golden_set_voice,voice=%s count=%di,avg_chars=%.0f,avg_gen_time=%.2f %d",
@@ -88,12 +88,12 @@ func PushMetrics(db *store.DuckDB, influx *InfluxClient, w io.Writer) core.Resul
 		))
 	}
 	if err := voiceRows.Err(); err != nil {
-		return core.Fail(core.E("ml.PushMetrics", "iterate voice rows", err))
+		return core.Fail(core.E("datapipe.PushMetrics", "iterate voice rows", err))
 	}
 
 	// Write all points to InfluxDB.
 	if rWrite := influx.WriteLp(lines); !rWrite.OK {
-		return core.Fail(core.E("ml.PushMetrics", "write metrics to influxdb", rWrite.Value.(error)))
+		return core.Fail(core.E("datapipe.PushMetrics", "write metrics to influxdb", rWrite.Value.(error)))
 	}
 
 	core.Print(w, "Pushed %d points to InfluxDB", len(lines))

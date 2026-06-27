@@ -16,8 +16,8 @@ import (
 // argument to leave that limit untouched. Spec §2.2 — memory management
 // before loading.
 //
-//	ml.SetMLXMemoryLimits(4<<30, 32<<30) // 4 GB cache, 32 GB hard cap
-//	ml.SetMLXMemoryLimits(0, 96<<30)     // memory only
+//	serving.SetMLXMemoryLimits(4<<30, 32<<30) // 4 GB cache, 32 GB hard cap
+//	serving.SetMLXMemoryLimits(0, 96<<30)     // memory only
 func SetMLXMemoryLimits(cacheLimit, memoryLimit uint64) {
 	if cacheLimit == 0 && memoryLimit == 0 {
 		return
@@ -31,18 +31,18 @@ func SetMLXMemoryLimits(cacheLimit, memoryLimit uint64) {
 }
 
 // NewMLXBackend loads a model via go-inference's Metal backend and wraps it
-// in an InferenceAdapter for use as ml.Backend / ml.StreamingBackend.
+// in an InferenceAdapter for use as serving.Backend / serving.StreamingBackend.
 //
 // The application should import the concrete runtime package that registers
 // "metal" with go-inference. Load options (context length, parallel slots,
 // etc.) are forwarded directly to go-inference. Spec §2.2.
 //
 // Callers that need explicit Metal memory control should call
-// ml.SetMLXMemoryLimits before NewMLXBackend; between probes use
+// serving.SetMLXMemoryLimits before NewMLXBackend; between probes use
 // runtime.GC() to release unmanaged caches.
 //
-//	ml.SetMLXMemoryLimits(4<<30, 32<<30)
-//	r := ml.NewMLXBackend("/models/gemma3-1b",
+//	serving.SetMLXMemoryLimits(4<<30, 32<<30)
+//	r := serving.NewMLXBackend("/models/gemma3-1b",
 //	    inference.WithContextLen(8192),
 //	)
 func NewMLXBackend(modelPath string, loadOpts ...inference.LoadOption) core.Result {
@@ -52,13 +52,13 @@ func NewMLXBackend(modelPath string, loadOpts ...inference.LoadOption) core.Resu
 	result := inference.LoadModel(modelPath, opts...)
 	if !result.OK {
 		if err, ok := result.Value.(error); ok {
-			return core.Fail(core.E("ml.NewMLXBackend", "metal backend", err))
+			return core.Fail(core.E("serving.NewMLXBackend", "metal backend", err))
 		}
-		return core.Fail(core.E("ml.NewMLXBackend", "metal backend failed to load model", nil))
+		return core.Fail(core.E("serving.NewMLXBackend", "metal backend failed to load model", nil))
 	}
 	m, ok := result.Value.(inference.TextModel)
 	if !ok || m == nil {
-		return core.Fail(core.E("ml.NewMLXBackend", "metal backend returned non-TextModel value", nil))
+		return core.Fail(core.E("serving.NewMLXBackend", "metal backend returned non-TextModel value", nil))
 	}
 
 	info := m.Info()

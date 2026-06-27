@@ -100,9 +100,9 @@ func RunAgentLoop(cfg *AgentConfig) {
 
 // DiscoverCheckpoints lists all adapter directories and checkpoint files on M3 via SSH.
 //
-//	r := ml.DiscoverCheckpoints(cfg)
+//	r := agent.DiscoverCheckpoints(cfg)
 //	if !r.OK { return r }
-//	cps := r.Value.([]ml.Checkpoint)
+//	cps := r.Value.([]agent.Checkpoint)
 func DiscoverCheckpoints(cfg *AgentConfig) core.Result {
 	var checkpoints []Checkpoint
 	for cp, err := range DiscoverCheckpointsIter(cfg) {
@@ -125,7 +125,7 @@ func DiscoverCheckpointsIter(cfg *AgentConfig) iter.Seq2[Checkpoint, error] {
 		ctx := context.Background()
 		rOut := t.Run(ctx, core.Sprintf("ls -d %s/%s 2>/dev/null", cfg.M3AdapterBase, pattern))
 		if !rOut.OK {
-			yield(Checkpoint{}, core.E("ml.DiscoverCheckpointsIter", "list adapter dirs", rOut.Value.(error)))
+			yield(Checkpoint{}, core.E("agent.DiscoverCheckpointsIter", "list adapter dirs", rOut.Value.(error)))
 			return
 		}
 		out := rOut.Value.(string)
@@ -192,7 +192,7 @@ func DiscoverCheckpointsIter(cfg *AgentConfig) iter.Seq2[Checkpoint, error] {
 
 // GetScoredLabels returns all (run_id, label) pairs already scored in InfluxDB.
 //
-//	r := ml.GetScoredLabels(influx)
+//	r := agent.GetScoredLabels(influx)
 //	if !r.OK { return r }
 //	scored := r.Value.(map[[2]string]bool)
 func GetScoredLabels(influx *datapipe.InfluxClient) core.Result {
@@ -252,7 +252,7 @@ func isMLXNative(modelTag string) bool {
 
 // ProcessOne fetches, converts, scores, and pushes one checkpoint.
 //
-//	r := ml.ProcessOne(cfg, influx, cp)
+//	r := agent.ProcessOne(cfg, influx, cp)
 //	if !r.OK { return r }
 func ProcessOne(cfg *AgentConfig, influx *datapipe.InfluxClient, cp Checkpoint) core.Result {
 	core.Print(nil, repeatStr("=", LogSeparatorWidth))

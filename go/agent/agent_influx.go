@@ -103,7 +103,7 @@ func ScoreContentAndPush(ctx context.Context, judge *score.Judge, influx *datapi
 
 // PushCapabilitySummary pushes overall + per-category scores to InfluxDB.
 //
-//	r := ml.PushCapabilitySummary(influx, cp, results)
+//	r := agent.PushCapabilitySummary(influx, cp, results)
 //	if !r.OK { return r }
 func PushCapabilitySummary(influx *datapipe.InfluxClient, cp Checkpoint, results ProbeResult) core.Result {
 	var lines []string
@@ -140,7 +140,7 @@ func PushCapabilitySummary(influx *datapipe.InfluxClient, cp Checkpoint, results
 
 // PushCapabilityResults pushes all results (overall + categories + probes) in one batch.
 //
-//	r := ml.PushCapabilityResults(influx, cp, results)
+//	r := agent.PushCapabilityResults(influx, cp, results)
 //	if !r.OK { return r }
 func PushCapabilityResults(influx *datapipe.InfluxClient, cp Checkpoint, results ProbeResult) core.Result {
 	var lines []string

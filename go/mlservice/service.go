@@ -60,7 +60,7 @@ type Options struct {
 // Usage example:
 //
 //	core.New(
-//	    core.WithService(ml.NewService(ml.Options{})),
+//	    core.WithService(mlservice.NewService(mlservice.Options{})),
 //	)
 func NewService(opts Options) func(*core.Core) core.Result {
 	return func(c *core.Core) core.Result {
@@ -81,7 +81,7 @@ func NewService(opts Options) func(*core.Core) core.Result {
 
 // RegisterCore registers the ML service with default options on a Core runtime.
 //
-//	r := ml.RegisterCore(core.New())
+//	r := mlservice.RegisterCore(core.New())
 //	if !r.OK { return r }
 func RegisterCore(c *core.Core) core.Result {
 	return core.WithService(NewService(Options{}))(c)
@@ -181,16 +181,16 @@ func (s *Service) Engine() *score.Engine {
 
 // Generate generates text using the named backend (or default).
 //
-//	r := svc.Generate(ctx, "ollama", "hello", ml.DefaultGenOpts())
+//	r := svc.Generate(ctx, "ollama", "hello", mlservice.DefaultGenOpts())
 //	if !r.OK { return r }
-//	resp := r.Value.(ml.Result)
+//	resp := r.Value.(mlservice.Result)
 func (s *Service) Generate(ctx context.Context, backendName, prompt string, opts serving.GenOpts) core.Result {
 	b := s.Backend(backendName)
 	if b == nil {
 		b = s.DefaultBackend()
 	}
 	if b == nil {
-		return core.Fail(core.E("ml.Service.Generate", core.Sprintf("no backend available (requested: %q)", backendName), nil))
+		return core.Fail(core.E("mlservice.Service.Generate", core.Sprintf("no backend available (requested: %q)", backendName), nil))
 	}
 	return b.Generate(ctx, prompt, opts)
 }
@@ -199,10 +199,10 @@ func (s *Service) Generate(ctx context.Context, backendName, prompt string, opts
 //
 //	r := svc.ScoreResponses(ctx, responses)
 //	if !r.OK { return r }
-//	scores := r.Value.(map[string][]ml.PromptScore)
+//	scores := r.Value.(map[string][]mlservice.PromptScore)
 func (s *Service) ScoreResponses(ctx context.Context, responses []score.Response) core.Result {
 	if s.engine == nil {
-		return core.Fail(core.E("ml.Service.ScoreResponses", "scoring engine not configured (set JudgeURL and JudgeModel)", nil))
+		return core.Fail(core.E("mlservice.Service.ScoreResponses", "scoring engine not configured (set JudgeURL and JudgeModel)", nil))
 	}
 	return core.Ok(s.engine.ScoreAll(ctx, responses))
 }

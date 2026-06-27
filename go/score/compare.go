@@ -12,13 +12,13 @@ import (
 func RunCompare(oldPath, newPath string) core.Result {
 	oldResult := ReadScorerOutput(oldPath)
 	if !oldResult.OK {
-		return core.Fail(core.E("ml.RunCompare", "read old file", oldResult.Value.(error)))
+		return core.Fail(core.E("score.RunCompare", "read old file", oldResult.Value.(error)))
 	}
 	oldOutput := oldResult.Value.(*ScorerOutput)
 
 	newResult := ReadScorerOutput(newPath)
 	if !newResult.OK {
-		return core.Fail(core.E("ml.RunCompare", "read new file", newResult.Value.(error)))
+		return core.Fail(core.E("score.RunCompare", "read new file", newResult.Value.(error)))
 	}
 	newOutput := newResult.Value.(*ScorerOutput)
 

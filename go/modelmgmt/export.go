@@ -20,15 +20,15 @@ type TrainingExample struct {
 // ValidatePercentages checks that train+valid+test percentages sum to 100
 // and that none are negative.
 //
-//	r := ml.ValidatePercentages(80, 10, 10)
+//	r := modelmgmt.ValidatePercentages(80, 10, 10)
 //	if !r.OK { return r }
 func ValidatePercentages(trainPct, validPct, testPct int) core.Result {
 	if trainPct < 0 || validPct < 0 || testPct < 0 {
-		return core.Fail(core.E("ml.ValidatePercentages", core.Sprintf("percentages must be non-negative: train=%d, valid=%d, test=%d", trainPct, validPct, testPct), nil))
+		return core.Fail(core.E("modelmgmt.ValidatePercentages", core.Sprintf("percentages must be non-negative: train=%d, valid=%d, test=%d", trainPct, validPct, testPct), nil))
 	}
 	sum := trainPct + validPct + testPct
 	if sum != 100 {
-		return core.Fail(core.E("ml.ValidatePercentages", core.Sprintf("percentages must sum to 100, got %d (train=%d + valid=%d + test=%d)", sum, trainPct, validPct, testPct), nil))
+		return core.Fail(core.E("modelmgmt.ValidatePercentages", core.Sprintf("percentages must sum to 100, got %d (train=%d + valid=%d + test=%d)", sum, trainPct, validPct, testPct), nil))
 	}
 	return core.Ok(nil)
 }
@@ -78,12 +78,12 @@ func SplitData(responses []score.Response, trainPct, validPct, testPct int, seed
 // WriteTrainingJSONL writes responses in chat JSONL format suitable for
 // MLX LoRA fine-tuning.
 //
-//	r := ml.WriteTrainingJSONL("/data/train.jsonl", responses)
+//	r := modelmgmt.WriteTrainingJSONL("/data/train.jsonl", responses)
 //	if !r.OK { return r }
 func WriteTrainingJSONL(path string, responses []score.Response) core.Result {
 	f, err := coreio.Local.Create(path)
 	if err != nil {
-		return core.Fail(core.E("ml.WriteTrainingJSONL", core.Sprintf("create %s", path), err))
+		return core.Fail(core.E("modelmgmt.WriteTrainingJSONL", core.Sprintf("create %s", path), err))
 	}
 	defer f.Close()
 
@@ -99,10 +99,10 @@ func WriteTrainingJSONL(path string, responses []score.Response) core.Result {
 		}
 
 		if _, err := w.WriteString(core.JSONMarshalString(example)); err != nil {
-			return core.Fail(core.E("ml.WriteTrainingJSONL", "write line", err))
+			return core.Fail(core.E("modelmgmt.WriteTrainingJSONL", "write line", err))
 		}
 		if _, err := w.WriteString("\n"); err != nil {
-			return core.Fail(core.E("ml.WriteTrainingJSONL", "write newline", err))
+			return core.Fail(core.E("modelmgmt.WriteTrainingJSONL", "write newline", err))
 		}
 	}
 

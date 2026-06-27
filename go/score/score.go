@@ -52,10 +52,10 @@ func (e *Engine) ScoreHeuristic(response string) *HeuristicScores {
 //
 //	r := e.ScoreSemantic(ctx, prompt, response)
 //	if !r.OK { return r }
-//	scores := r.Value.(*ml.SemanticScores)
+//	scores := r.Value.(*score.SemanticScores)
 func (e *Engine) ScoreSemantic(ctx context.Context, prompt, response string) core.Result {
 	if e == nil || e.judge == nil {
-		return core.Fail(core.E("ml.Engine.ScoreSemantic", "semantic scoring requires a judge", nil))
+		return core.Fail(core.E("score.Engine.ScoreSemantic", "semantic scoring requires a judge", nil))
 	}
 	return e.judge.ScoreSemantic(ctx, prompt, response)
 }
@@ -64,10 +64,10 @@ func (e *Engine) ScoreSemantic(ctx context.Context, prompt, response string) cor
 //
 //	r := e.ScoreContent(ctx, probe, response)
 //	if !r.OK { return r }
-//	scores := r.Value.(*ml.ContentScores)
+//	scores := r.Value.(*score.ContentScores)
 func (e *Engine) ScoreContent(ctx context.Context, probe ContentProbe, response string) core.Result {
 	if e == nil || e.judge == nil {
-		return core.Fail(core.E("ml.Engine.ScoreContent", "content scoring requires a judge", nil))
+		return core.Fail(core.E("score.Engine.ScoreContent", "content scoring requires a judge", nil))
 	}
 	return e.judge.ScoreContent(ctx, probe, response)
 }
@@ -76,10 +76,10 @@ func (e *Engine) ScoreContent(ctx context.Context, probe ContentProbe, response 
 //
 //	r := e.ScoreCapability(ctx, prompt, expected, response)
 //	if !r.OK { return r }
-//	scores := r.Value.(*ml.CapabilityScores)
+//	scores := r.Value.(*score.CapabilityScores)
 func (e *Engine) ScoreCapability(ctx context.Context, prompt, expectedAnswer, response string) core.Result {
 	if e == nil || e.judge == nil {
-		return core.Fail(core.E("ml.Engine.ScoreCapability", "capability scoring requires a judge", nil))
+		return core.Fail(core.E("score.Engine.ScoreCapability", "capability scoring requires a judge", nil))
 	}
 	return e.judge.ScoreCapability(ctx, prompt, expectedAnswer, response)
 }
@@ -88,10 +88,10 @@ func (e *Engine) ScoreCapability(ctx context.Context, prompt, expectedAnswer, re
 //
 //	r := e.ScoreStandard(ctx, "truthfulqa", question, reference, response)
 //	if !r.OK { return r }
-//	scores := r.Value.(*ml.StandardScores)
+//	scores := r.Value.(*score.StandardScores)
 func (e *Engine) ScoreStandard(ctx context.Context, benchmark, question, reference, response string) core.Result {
 	if e == nil || e.judge == nil {
-		return core.Fail(core.E("ml.Engine.ScoreStandard", "standard scoring requires a judge", nil))
+		return core.Fail(core.E("score.Engine.ScoreStandard", "standard scoring requires a judge", nil))
 	}
 	return e.judge.ScoreStandard(ctx, benchmark, question, reference, response)
 }
@@ -302,12 +302,12 @@ func (e *Engine) String() string {
 // ScoreSemantic evaluates a response with the supplied judge using a
 // background context.
 //
-//	r := ml.ScoreSemantic(judge, prompt, response)
+//	r := score.ScoreSemantic(judge, prompt, response)
 //	if !r.OK { return r }
-//	scores := r.Value.(*ml.SemanticScores)
+//	scores := r.Value.(*score.SemanticScores)
 func ScoreSemantic(judge *Judge, prompt, response string) core.Result {
 	if judge == nil {
-		return core.Fail(core.E("ml.ScoreSemantic", "semantic scoring requires a judge", nil))
+		return core.Fail(core.E("score.ScoreSemantic", "semantic scoring requires a judge", nil))
 	}
 	return judge.ScoreSemantic(context.Background(), prompt, response)
 }
@@ -315,12 +315,12 @@ func ScoreSemantic(judge *Judge, prompt, response string) core.Result {
 // ScoreContent evaluates a content probe response with the supplied judge
 // using a background context.
 //
-//	r := ml.ScoreContent(judge, probe, response)
+//	r := score.ScoreContent(judge, probe, response)
 //	if !r.OK { return r }
-//	scores := r.Value.(*ml.ContentScores)
+//	scores := r.Value.(*score.ContentScores)
 func ScoreContent(judge *Judge, probe ContentProbe, response string) core.Result {
 	if judge == nil {
-		return core.Fail(core.E("ml.ScoreContent", "content scoring requires a judge", nil))
+		return core.Fail(core.E("score.ScoreContent", "content scoring requires a judge", nil))
 	}
 	return judge.ScoreContent(context.Background(), probe, response)
 }
@@ -328,12 +328,12 @@ func ScoreContent(judge *Judge, probe ContentProbe, response string) core.Result
 // ScoreCapability evaluates a capability probe response with the supplied
 // judge using a background context.
 //
-//	r := ml.ScoreCapability(judge, prompt, expected, response)
+//	r := score.ScoreCapability(judge, prompt, expected, response)
 //	if !r.OK { return r }
-//	scores := r.Value.(*ml.CapabilityScores)
+//	scores := r.Value.(*score.CapabilityScores)
 func ScoreCapability(judge *Judge, prompt, expectedAnswer, response string) core.Result {
 	if judge == nil {
-		return core.Fail(core.E("ml.ScoreCapability", "capability scoring requires a judge", nil))
+		return core.Fail(core.E("score.ScoreCapability", "capability scoring requires a judge", nil))
 	}
 	return judge.ScoreCapability(context.Background(), prompt, expectedAnswer, response)
 }
@@ -341,12 +341,12 @@ func ScoreCapability(judge *Judge, prompt, expectedAnswer, response string) core
 // ScoreStandard evaluates a benchmark response with the supplied judge using
 // a background context.
 //
-//	r := ml.ScoreStandard(judge, "truthfulqa", question, reference, response)
+//	r := score.ScoreStandard(judge, "truthfulqa", question, reference, response)
 //	if !r.OK { return r }
-//	scores := r.Value.(*ml.StandardScores)
+//	scores := r.Value.(*score.StandardScores)
 func ScoreStandard(judge *Judge, benchmark, question, reference, response string) core.Result {
 	if judge == nil {
-		return core.Fail(core.E("ml.ScoreStandard", "standard scoring requires a judge", nil))
+		return core.Fail(core.E("score.ScoreStandard", "standard scoring requires a judge", nil))
 	}
 	return judge.ScoreStandard(context.Background(), benchmark, question, reference, response)
 }

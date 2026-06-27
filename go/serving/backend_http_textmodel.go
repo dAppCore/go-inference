@@ -12,7 +12,7 @@ import (
 
 // HTTPTextModel wraps an HTTPBackend with CoreGo Result-returning helpers.
 // This enables cross-platform consistency — HTTP backends can be used anywhere
-// that expects a go-inference TextModel (e.g. go-ai, go-i18n).
+// that expects a go-inference TextModel (e.g. the serving stack, go-i18n).
 //
 // Generate and Chat yield the entire HTTP response as a single Token since
 // the OpenAI-compatible API returns complete responses (non-streaming).
@@ -57,7 +57,7 @@ func (m *HTTPTextModel) Chat(ctx context.Context, messages []inference.Message, 
 			Model:       m.http.Model(),
 		}
 
-		// ml.Message is now a type alias for inference.Message — no conversion needed.
+		// serving.Message is now a type alias for inference.Message — no conversion needed.
 		r := m.http.Chat(ctx, messages, genOpts)
 		if !r.OK {
 			m.lastErr = r.Value.(error)
@@ -70,7 +70,7 @@ func (m *HTTPTextModel) Chat(ctx context.Context, messages []inference.Message, 
 
 // Classify is not supported by HTTP backends. Returns an error.
 func (m *HTTPTextModel) Classify(_ context.Context, _ []string, _ ...inference.GenerateOption) core.Result {
-	return core.Fail(core.E("ml.HTTPTextModel.Classify", "classify not supported by HTTP backend", nil))
+	return core.Fail(core.E("serving.HTTPTextModel.Classify", "classify not supported by HTTP backend", nil))
 }
 
 // BatchGenerate processes multiple prompts sequentially via Generate.

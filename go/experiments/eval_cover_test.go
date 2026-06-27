@@ -27,7 +27,7 @@ type failStore struct {
 
 // PutFeedback fails when configured, otherwise delegates to the MemStore.
 //
-//	s.PutFeedback(eval.Feedback{ID: "fb-1", Target: "exp-1", Key: "k"})
+//	s.PutFeedback(experiments.Feedback{ID: "fb-1", Target: "exp-1", Key: "k"})
 func (s *failStore) PutFeedback(fb Feedback) core.Result {
 	s.feedbackCalls++
 	if s.failAfterNFeedbk > 0 {
@@ -44,7 +44,7 @@ func (s *failStore) PutFeedback(fb Feedback) core.Result {
 
 // PutExperiment fails when configured, otherwise delegates to the MemStore.
 //
-//	s.PutExperiment(eval.Experiment{ID: "exp-1", DatasetID: "ds"})
+//	s.PutExperiment(experiments.Experiment{ID: "exp-1", DatasetID: "ds"})
 func (s *failStore) PutExperiment(x Experiment) core.Result {
 	if s.failExperiment {
 		return core.Fail(core.E("failStore.PutExperiment", "forced failure", nil))
@@ -54,7 +54,7 @@ func (s *failStore) PutExperiment(x Experiment) core.Result {
 
 // UpdateExperiment fails when configured, otherwise delegates to the MemStore.
 //
-//	s.UpdateExperiment(eval.Experiment{ID: "exp-1", DatasetID: "ds"})
+//	s.UpdateExperiment(experiments.Experiment{ID: "exp-1", DatasetID: "ds"})
 func (s *failStore) UpdateExperiment(x Experiment) core.Result {
 	if s.failUpdate {
 		return core.Fail(core.E("failStore.UpdateExperiment", "forced failure", nil))

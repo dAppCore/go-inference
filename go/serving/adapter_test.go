@@ -269,7 +269,7 @@ func TestInferenceAdapterConvertOptsNewFieldsGoodScenario(t *core.T) {
 }
 
 func TestInferenceAdapterMessageAliasGoodScenario(t *core.T) {
-	// ml.Message and inference.Message are the same type — verify interchangeability.
+	// serving.Message and inference.Message are the same type — verify interchangeability.
 	mlMsg := Message{Role: "user", Content: "Hello"}
 	inferMsg := inference.Message{Role: "user", Content: "Hello"}
 	core.AssertEqual(t, mlMsg, inferMsg)

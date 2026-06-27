@@ -15,12 +15,12 @@ import (
 // dataset (the same example id may recur in different datasets); feedback is
 // keyed by id and listed by target.
 //
-//	var s eval.Store = eval.NewMemStore()
-//	s.PutDataset(eval.Dataset{ID: "ethics-probes"})
+//	var s eval.Store = experiments.NewMemStore()
+//	s.PutDataset(experiments.Dataset{ID: "ethics-probes"})
 type Store interface {
 	// PutDataset inserts or replaces a dataset by its id.
 	//
-	//	s.PutDataset(eval.Dataset{ID: "ethics-probes"})
+	//	s.PutDataset(experiments.Dataset{ID: "ethics-probes"})
 	PutDataset(d Dataset) core.Result
 
 	// GetDataset returns the dataset for id, or a failed Result when absent.
@@ -32,7 +32,7 @@ type Store interface {
 	// duplicate id within that dataset (callers add, they do not silently
 	// overwrite).
 	//
-	//	s.PutExample(eval.Example{ID: "ex-1", DatasetID: "ethics-probes"})
+	//	s.PutExample(experiments.Example{ID: "ex-1", DatasetID: "ethics-probes"})
 	PutExample(ex Example) core.Result
 
 	// ListExamples returns every example in datasetID, sorted by example id.
@@ -43,7 +43,7 @@ type Store interface {
 	// PutExperiment inserts an experiment by its id. A failed Result reports a
 	// duplicate id.
 	//
-	//	s.PutExperiment(eval.Experiment{ID: "exp-1", DatasetID: "ethics-probes"})
+	//	s.PutExperiment(experiments.Experiment{ID: "exp-1", DatasetID: "ethics-probes"})
 	PutExperiment(x Experiment) core.Result
 
 	// GetExperiment returns the experiment for id, or a failed Result when
@@ -56,7 +56,7 @@ type Store interface {
 	// status-transition counterpart to PutExperiment's insert. A failed Result
 	// reports an unknown id (update never creates).
 	//
-	//	s.UpdateExperiment(eval.Experiment{ID: "exp-1", DatasetID: "ethics-probes", Status: eval.StatusComplete})
+	//	s.UpdateExperiment(eval.Experiment{ID: "exp-1", DatasetID: "ethics-probes", Status: experiments.StatusComplete})
 	UpdateExperiment(x Experiment) core.Result
 
 	// ListExperiments returns every experiment over datasetID, sorted by id.
@@ -67,7 +67,7 @@ type Store interface {
 	// PutFeedback inserts a feedback row by its id. A failed Result reports a
 	// duplicate id.
 	//
-	//	s.PutFeedback(eval.Feedback{ID: "fb-1", Target: "exp-1", Key: "ethics", Score: 0.8})
+	//	s.PutFeedback(experiments.Feedback{ID: "fb-1", Target: "exp-1", Key: "ethics", Score: 0.8})
 	PutFeedback(fb Feedback) core.Result
 
 	// ListFeedback returns every feedback row for target, sorted by id. An
@@ -80,7 +80,7 @@ type Store interface {
 // MemStore is an in-memory, goroutine-safe Store — the default backing for an
 // Eval and the store used in tests.
 //
-//	s := eval.NewMemStore()
+//	s := experiments.NewMemStore()
 type MemStore struct {
 	mu          sync.RWMutex
 	datasets    map[string]Dataset
@@ -91,7 +91,7 @@ type MemStore struct {
 
 // NewMemStore returns an empty in-memory Store.
 //
-//	e := eval.NewWithStore(eval.NewMemStore())
+//	e := eval.NewWithStore(experiments.NewMemStore())
 func NewMemStore() *MemStore {
 	return &MemStore{
 		datasets:    map[string]Dataset{},
@@ -103,10 +103,10 @@ func NewMemStore() *MemStore {
 
 // PutDataset inserts or replaces d by its id.
 //
-//	s.PutDataset(eval.Dataset{ID: "ethics-probes"})
+//	s.PutDataset(experiments.Dataset{ID: "ethics-probes"})
 func (s *MemStore) PutDataset(d Dataset) core.Result {
 	if d.ID == "" {
-		return core.Fail(core.E("eval.MemStore.PutDataset", "dataset id is empty", nil))
+		return core.Fail(core.E("experiments.MemStore.PutDataset", "dataset id is empty", nil))
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -122,7 +122,7 @@ func (s *MemStore) GetDataset(id string) core.Result {
 	defer s.mu.RUnlock()
 	d, ok := s.datasets[id]
 	if !ok {
-		return core.Fail(core.E("eval.MemStore.GetDataset", core.Sprintf("no dataset with id %q", id), nil))
+		return core.Fail(core.E("experiments.MemStore.GetDataset", core.Sprintf("no dataset with id %q", id), nil))
 	}
 	return core.Ok(d)
 }
@@ -130,10 +130,10 @@ func (s *MemStore) GetDataset(id string) core.Result {
 // PutExample inserts ex under its dataset, rejecting a duplicate example id
 // within that dataset.
 //
-//	s.PutExample(eval.Example{ID: "ex-1", DatasetID: "ethics-probes"})
+//	s.PutExample(experiments.Example{ID: "ex-1", DatasetID: "ethics-probes"})
 func (s *MemStore) PutExample(ex Example) core.Result {
 	if ex.ID == "" {
-		return core.Fail(core.E("eval.MemStore.PutExample", "example id is empty", nil))
+		return core.Fail(core.E("experiments.MemStore.PutExample", "example id is empty", nil))
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -143,7 +143,7 @@ func (s *MemStore) PutExample(ex Example) core.Result {
 		s.examples[ex.DatasetID] = byID
 	}
 	if _, dup := byID[ex.ID]; dup {
-		return core.Fail(core.E("eval.MemStore.PutExample",
+		return core.Fail(core.E("experiments.MemStore.PutExample",
 			core.Sprintf("example %q already exists in dataset %q", ex.ID, ex.DatasetID), nil))
 	}
 	byID[ex.ID] = ex
@@ -167,15 +167,15 @@ func (s *MemStore) ListExamples(datasetID string) []Example {
 
 // PutExperiment inserts x by its id, rejecting a duplicate id.
 //
-//	s.PutExperiment(eval.Experiment{ID: "exp-1", DatasetID: "ethics-probes"})
+//	s.PutExperiment(experiments.Experiment{ID: "exp-1", DatasetID: "ethics-probes"})
 func (s *MemStore) PutExperiment(x Experiment) core.Result {
 	if x.ID == "" {
-		return core.Fail(core.E("eval.MemStore.PutExperiment", "experiment id is empty", nil))
+		return core.Fail(core.E("experiments.MemStore.PutExperiment", "experiment id is empty", nil))
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, dup := s.experiments[x.ID]; dup {
-		return core.Fail(core.E("eval.MemStore.PutExperiment",
+		return core.Fail(core.E("experiments.MemStore.PutExperiment",
 			core.Sprintf("experiment %q already exists", x.ID), nil))
 	}
 	s.experiments[x.ID] = x
@@ -190,7 +190,7 @@ func (s *MemStore) GetExperiment(id string) core.Result {
 	defer s.mu.RUnlock()
 	x, ok := s.experiments[id]
 	if !ok {
-		return core.Fail(core.E("eval.MemStore.GetExperiment", core.Sprintf("no experiment with id %q", id), nil))
+		return core.Fail(core.E("experiments.MemStore.GetExperiment", core.Sprintf("no experiment with id %q", id), nil))
 	}
 	return core.Ok(x)
 }
@@ -198,15 +198,15 @@ func (s *MemStore) GetExperiment(id string) core.Result {
 // UpdateExperiment replaces x in place by its id, rejecting an unknown id
 // (update never inserts — use PutExperiment to create).
 //
-//	s.UpdateExperiment(eval.Experiment{ID: "exp-1", DatasetID: "ethics-probes", Status: eval.StatusComplete})
+//	s.UpdateExperiment(eval.Experiment{ID: "exp-1", DatasetID: "ethics-probes", Status: experiments.StatusComplete})
 func (s *MemStore) UpdateExperiment(x Experiment) core.Result {
 	if x.ID == "" {
-		return core.Fail(core.E("eval.MemStore.UpdateExperiment", "experiment id is empty", nil))
+		return core.Fail(core.E("experiments.MemStore.UpdateExperiment", "experiment id is empty", nil))
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.experiments[x.ID]; !ok {
-		return core.Fail(core.E("eval.MemStore.UpdateExperiment",
+		return core.Fail(core.E("experiments.MemStore.UpdateExperiment",
 			core.Sprintf("no experiment with id %q", x.ID), nil))
 	}
 	s.experiments[x.ID] = x
@@ -231,15 +231,15 @@ func (s *MemStore) ListExperiments(datasetID string) []Experiment {
 
 // PutFeedback inserts fb by its id, rejecting a duplicate id.
 //
-//	s.PutFeedback(eval.Feedback{ID: "fb-1", Target: "exp-1", Key: "ethics", Score: 0.8})
+//	s.PutFeedback(experiments.Feedback{ID: "fb-1", Target: "exp-1", Key: "ethics", Score: 0.8})
 func (s *MemStore) PutFeedback(fb Feedback) core.Result {
 	if fb.ID == "" {
-		return core.Fail(core.E("eval.MemStore.PutFeedback", "feedback id is empty", nil))
+		return core.Fail(core.E("experiments.MemStore.PutFeedback", "feedback id is empty", nil))
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, dup := s.feedback[fb.ID]; dup {
-		return core.Fail(core.E("eval.MemStore.PutFeedback",
+		return core.Fail(core.E("experiments.MemStore.PutFeedback",
 			core.Sprintf("feedback %q already exists", fb.ID), nil))
 	}
 	s.feedback[fb.ID] = fb

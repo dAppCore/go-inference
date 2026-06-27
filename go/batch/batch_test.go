@@ -12,7 +12,7 @@ import (
 )
 
 // fakeCall is the deterministic stand-in for a real chat/embedding call
-// (go-ml's expansion pipeline or a remote provider). Index N returns the result
+// (an expansion pipeline or a remote provider). Index N returns the result
 // "r<N>" and usage {N, N, 2N}; any index in errOn fails with a typed error.
 // It records the maximum number of in-flight Do calls observed so a test can
 // assert the concurrency cap is never exceeded.

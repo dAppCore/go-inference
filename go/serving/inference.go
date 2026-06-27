@@ -7,7 +7,7 @@
 // Register as a CoreGo service:
 //
 //	core.New(
-//	    core.WithService(ml.NewService),
+//	    core.WithService(serving.NewService),
 //	)
 package serving
 
@@ -33,16 +33,16 @@ type Result struct {
 type Backend interface {
 	// Generate sends a single user prompt and returns the response.
 	//
-	//	r := b.Generate(ctx, "hello", ml.DefaultGenOpts())
+	//	r := b.Generate(ctx, "hello", serving.DefaultGenOpts())
 	//	if !r.OK { return r }
-	//	resp := r.Value.(ml.Result)
+	//	resp := r.Value.(serving.Result)
 	Generate(ctx context.Context, prompt string, opts GenOpts) core.Result
 
 	// Chat sends a multi-turn conversation and returns the response.
 	//
-	//	r := b.Chat(ctx, messages, ml.DefaultGenOpts())
+	//	r := b.Chat(ctx, messages, serving.DefaultGenOpts())
 	//	if !r.OK { return r }
-	//	resp := r.Value.(ml.Result)
+	//	resp := r.Value.(serving.Result)
 	Chat(ctx context.Context, messages []Message, opts GenOpts) core.Result
 
 	// Name returns the backend identifier (e.g. "http", "llama", "ollama").
@@ -65,7 +65,7 @@ type GenOpts struct {
 }
 
 // Message is a type alias for inference.Message, providing backward compatibility.
-// All callers continue using ml.Message — it is the same underlying type.
+// All callers continue using serving.Message — it is the same underlying type.
 type Message = inference.Message
 
 // TokenCallback receives each generated token as text. Return a non-nil

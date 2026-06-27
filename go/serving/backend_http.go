@@ -21,9 +21,9 @@ type HTTPBackend struct {
 
 // HTTPOption configures an HTTPBackend at construction time.
 //
-//	b := ml.NewHTTPBackend("http://localhost:11434", "llama3",
-//	    ml.WithHTTPClient(myClient),
-//	    ml.WithMedium(io.S3("models.lthn.io")),
+//	b := serving.NewHTTPBackend("http://localhost:11434", "llama3",
+//	    serving.WithHTTPClient(myClient),
+//	    serving.WithMedium(io.S3("models.lthn.io")),
 //	)
 type HTTPOption func(*HTTPBackend)
 
@@ -40,7 +40,7 @@ func WithHTTPClient(client *http.Client) HTTPOption {
 // GGUF blobs, streamed responses) can be loaded or staged from any
 // supported backend (local disk, S3, in-memory, etc.).
 //
-//	b := ml.NewHTTPBackend(url, model, ml.WithMedium(io.S3("models.lthn.io")))
+//	b := serving.NewHTTPBackend(url, model, serving.WithMedium(io.S3("models.lthn.io")))
 func WithMedium(medium coreio.Medium) HTTPOption {
 	return func(b *HTTPBackend) {
 		b.medium = medium
@@ -84,8 +84,8 @@ func (e *retryableError) Unwrap() error { return e.err }
 // Additional options configure the HTTP client, default max tokens, or an
 // io.Medium used for staging model artefacts.
 //
-//	b := ml.NewHTTPBackend("http://localhost:11434", "llama3")
-//	b := ml.NewHTTPBackend(url, model, ml.WithMedium(io.S3("models.lthn.io")))
+//	b := serving.NewHTTPBackend("http://localhost:11434", "llama3")
+//	b := serving.NewHTTPBackend(url, model, serving.WithMedium(io.S3("models.lthn.io")))
 func NewHTTPBackend(baseURL, model string, opts ...HTTPOption) *HTTPBackend {
 	b := &HTTPBackend{
 		baseURL: baseURL,
@@ -123,7 +123,7 @@ func (b *HTTPBackend) SetMaxTokens(n int) { b.maxTokens = n }
 // inference.TextModel. The path argument is ignored — HTTP backends talk to
 // a remote server which already has the model loaded. Spec §2.3.
 //
-//	backend := ml.NewHTTPBackend("http://localhost:11434", "llama2")
+//	backend := serving.NewHTTPBackend("http://localhost:11434", "llama2")
 //	result := backend.LoadModel("dummy")
 //	for tok := range model.Generate(ctx, "hello") {
 //	    fmt.Print(tok.Text)
@@ -134,9 +134,9 @@ func (b *HTTPBackend) LoadModel(_ string, _ ...inference.LoadOption) core.Result
 
 // Generate sends a single prompt and returns the response.
 //
-//	r := b.Generate(ctx, "hello", ml.DefaultGenOpts())
+//	r := b.Generate(ctx, "hello", serving.DefaultGenOpts())
 //	if !r.OK { return r }
-//	resp := r.Value.(ml.Result)
+//	resp := r.Value.(serving.Result)
 func (b *HTTPBackend) Generate(ctx context.Context, prompt string, opts GenOpts) core.Result {
 	return b.Chat(ctx, []Message{{Role: "user", Content: prompt}}, opts)
 }
@@ -144,9 +144,9 @@ func (b *HTTPBackend) Generate(ctx context.Context, prompt string, opts GenOpts)
 // Chat sends a multi-turn conversation and returns the response.
 // Retries up to 3 times with exponential backoff on transient failures.
 //
-//	r := b.Chat(ctx, messages, ml.DefaultGenOpts())
+//	r := b.Chat(ctx, messages, serving.DefaultGenOpts())
 //	if !r.OK { return r }
-//	resp := r.Value.(ml.Result)
+//	resp := r.Value.(serving.Result)
 func (b *HTTPBackend) Chat(ctx context.Context, messages []Message, opts GenOpts) core.Result {
 	model := b.model
 	if opts.Model != "" {
@@ -190,7 +190,7 @@ func (b *HTTPBackend) Chat(ctx context.Context, messages []Message, opts GenOpts
 		}
 	}
 
-	return core.Fail(core.E("ml.HTTPBackend.Chat", core.Sprintf("exhausted %d retries", maxAttempts), lastErr))
+	return core.Fail(core.E("serving.HTTPBackend.Chat", core.Sprintf("exhausted %d retries", maxAttempts), lastErr))
 }
 
 // doRequest sends a single HTTP request and parses the response.
@@ -203,36 +203,36 @@ func (b *HTTPBackend) doRequest(ctx context.Context, body []byte) core.Result {
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, core.NewBuffer(body))
 	if err != nil {
-		return core.Fail(core.E("ml.HTTPBackend.doRequest", "create request", err))
+		return core.Fail(core.E("serving.HTTPBackend.doRequest", "create request", err))
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
 	resp, err := b.httpClient.Do(httpReq)
 	if err != nil {
-		return core.Fail(&retryableError{core.E("ml.HTTPBackend.doRequest", "http request", err)})
+		return core.Fail(&retryableError{core.E("serving.HTTPBackend.doRequest", "http request", err)})
 	}
 	defer resp.Body.Close()
 
 	rBody := readAll(resp.Body)
 	if !rBody.OK {
-		return core.Fail(&retryableError{core.E("ml.HTTPBackend.doRequest", "read response", rBody.Value.(error))})
+		return core.Fail(&retryableError{core.E("serving.HTTPBackend.doRequest", "read response", rBody.Value.(error))})
 	}
 	respBody := rBody.Value.([]byte)
 
 	if resp.StatusCode >= 500 {
-		return core.Fail(&retryableError{core.E("ml.HTTPBackend.doRequest", core.Sprintf("server error %d: %s", resp.StatusCode, string(respBody)), nil)})
+		return core.Fail(&retryableError{core.E("serving.HTTPBackend.doRequest", core.Sprintf("server error %d: %s", resp.StatusCode, string(respBody)), nil)})
 	}
 	if resp.StatusCode != http.StatusOK {
-		return core.Fail(core.E("ml.HTTPBackend.doRequest", core.Sprintf("unexpected status %d: %s", resp.StatusCode, string(respBody)), nil))
+		return core.Fail(core.E("serving.HTTPBackend.doRequest", core.Sprintf("unexpected status %d: %s", resp.StatusCode, string(respBody)), nil))
 	}
 
 	var chatResp chatResponse
 	if r := core.JSONUnmarshal(respBody, &chatResp); !r.OK {
-		return core.Fail(core.E("ml.HTTPBackend.doRequest", "unmarshal response", r.Value.(error)))
+		return core.Fail(core.E("serving.HTTPBackend.doRequest", "unmarshal response", r.Value.(error)))
 	}
 
 	if len(chatResp.Choices) == 0 {
-		return core.Fail(core.E("ml.HTTPBackend.doRequest", "no choices in response", nil))
+		return core.Fail(core.E("serving.HTTPBackend.doRequest", "no choices in response", nil))
 	}
 
 	return core.Ok(chatResp.Choices[0].Message.Content)

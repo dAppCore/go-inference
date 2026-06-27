@@ -21,8 +21,8 @@ var (
 // GSM8K-style numeric extraction, 0.0 otherwise. Strings are compared after
 // trimming whitespace; numbers are compared within an epsilon of 0.01.
 //
-//	score := ml.ScoreExact("The answer is 42", "42")   // 1.0
-//	score := ml.ScoreExact("I don't know", "42")       // 0.0
+//	score := score.ScoreExact("The answer is 42", "42")   // 1.0
+//	score := score.ScoreExact("I don't know", "42")       // 0.0
 func ScoreExact(response, correctAnswer string) float64 {
 	std := scoreGSM8K(response, correctAnswer)
 	if std.Correct != nil && *std.Correct {

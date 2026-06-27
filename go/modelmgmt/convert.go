@@ -51,17 +51,17 @@ type SafetensorsData struct {
 func ReadSafetensors(path string) core.Result {
 	raw, err := coreio.Local.Read(path)
 	if err != nil {
-		return core.Fail(core.E("ml.ReadSafetensors", "read file", err))
+		return core.Fail(core.E("modelmgmt.ReadSafetensors", "read file", err))
 	}
 	data := []byte(raw)
 
 	if len(data) < 8 {
-		return core.Fail(core.E("ml.ReadSafetensors", "file too small", nil))
+		return core.Fail(core.E("modelmgmt.ReadSafetensors", "file too small", nil))
 	}
 
 	headerSize := int(binary.LittleEndian.Uint64(data[:8]))
 	if 8+headerSize > len(data) {
-		return core.Fail(core.E("ml.ReadSafetensors", core.Sprintf("invalid header size %d", headerSize), nil))
+		return core.Fail(core.E("modelmgmt.ReadSafetensors", core.Sprintf("invalid header size %d", headerSize), nil))
 	}
 
 	headerJSON := data[8 : 8+headerSize]
@@ -69,7 +69,7 @@ func ReadSafetensors(path string) core.Result {
 
 	var rawHeader map[string]SafetensorsTensorInfo
 	if r := core.JSONUnmarshalString(string(headerJSON), &rawHeader); !r.OK {
-		return core.Fail(core.E("ml.ReadSafetensors", "parse header", r.Value.(error)))
+		return core.Fail(core.E("modelmgmt.ReadSafetensors", "parse header", r.Value.(error)))
 	}
 	delete(rawHeader, "__metadata__")
 
@@ -146,7 +146,7 @@ func WriteSafetensors(path string, tensors map[string]SafetensorsTensorInfo, ten
 
 	f, err := coreio.Local.Create(path)
 	if err != nil {
-		return core.Fail(core.E("ml.WriteSafetensors", core.Sprintf("create %s", path), err))
+		return core.Fail(core.E("modelmgmt.WriteSafetensors", core.Sprintf("create %s", path), err))
 	}
 	defer f.Close()
 
@@ -172,12 +172,12 @@ func WriteSafetensors(path string, tensors map[string]SafetensorsTensorInfo, ten
 // ConvertMLXtoPEFT converts an MLX LoRA adapter to HuggingFace PEFT format.
 func ConvertMLXtoPEFT(safetensorsPath, configPath, outputDir, baseModelName string) core.Result {
 	if err := coreio.Local.EnsureDir(outputDir); err != nil {
-		return core.Fail(core.E("ml.ConvertMLXtoPEFT", "create output dir", err))
+		return core.Fail(core.E("modelmgmt.ConvertMLXtoPEFT", "create output dir", err))
 	}
 
 	safetensorsResult := ReadSafetensors(safetensorsPath)
 	if !safetensorsResult.OK {
-		return core.Fail(core.E("ml.ConvertMLXtoPEFT", "read safetensors", safetensorsResult.Value.(error)))
+		return core.Fail(core.E("modelmgmt.ConvertMLXtoPEFT", "read safetensors", safetensorsResult.Value.(error)))
 	}
 	loaded := safetensorsResult.Value.(SafetensorsData)
 	tensors := loaded.Tensors
@@ -210,12 +210,12 @@ func ConvertMLXtoPEFT(safetensorsPath, configPath, outputDir, baseModelName stri
 
 	outSafetensors := core.JoinPath(outputDir, "adapter_model.safetensors")
 	if result := WriteSafetensors(outSafetensors, peftTensors, peftData); !result.OK {
-		return core.Fail(core.E("ml.ConvertMLXtoPEFT", "write safetensors", result.Value.(error)))
+		return core.Fail(core.E("modelmgmt.ConvertMLXtoPEFT", "write safetensors", result.Value.(error)))
 	}
 
 	cfgData, err := coreio.Local.Read(configPath)
 	if err != nil {
-		return core.Fail(core.E("ml.ConvertMLXtoPEFT", "read config", err))
+		return core.Fail(core.E("modelmgmt.ConvertMLXtoPEFT", "read config", err))
 	}
 
 	var mlxConfig struct {
@@ -226,7 +226,7 @@ func ConvertMLXtoPEFT(safetensorsPath, configPath, outputDir, baseModelName stri
 		} `json:"lora_parameters"`
 	}
 	if r := core.JSONUnmarshalString(cfgData, &mlxConfig); !r.OK {
-		return core.Fail(core.E("ml.ConvertMLXtoPEFT", "parse config", r.Value.(error)))
+		return core.Fail(core.E("modelmgmt.ConvertMLXtoPEFT", "parse config", r.Value.(error)))
 	}
 
 	rank := mlxConfig.LoraParameters.Rank
@@ -274,7 +274,7 @@ func ConvertMLXtoPEFT(safetensorsPath, configPath, outputDir, baseModelName stri
 	}
 
 	if err := coreio.Local.Write(core.JoinPath(outputDir, "adapter_config.json"), core.JSONMarshalString(peftConfig)); err != nil {
-		return core.Fail(core.E("ml.ConvertMLXtoPEFT", "write adapter_config.json", err))
+		return core.Fail(core.E("modelmgmt.ConvertMLXtoPEFT", "write adapter_config.json", err))
 	}
 
 	core.Print(nil, "converted %d tensors, %d layers, target modules: %v",

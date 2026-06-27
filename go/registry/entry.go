@@ -1,7 +1,7 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-// Package registry is the model catalogue — the handoff seam between go-ml
-// (train/manage) and go-ai (serve). go-ml writes entries; go-ai reads them to
+// Package registry is the model catalogue — the handoff seam between the training side
+// and the serving side. The training side writes entries; the serving side reads them to
 // route requests and decide residency. It holds no model weights, only the
 // metadata placement and serving need.
 //
@@ -39,8 +39,8 @@ const (
 	StatusArchived Status = "archived"
 )
 
-// Capabilities advertises what a loaded model can do — read by go-ai's router
-// (go-ai §6.2) to match a request to a capable model.
+// Capabilities advertises what a loaded model can do — read by the serving router
+// to match a request to a capable model.
 //
 //	if req.NeedsTools && !e.Capabilities.Tools { skip }
 type Capabilities struct {

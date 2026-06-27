@@ -229,7 +229,11 @@ func TestRegistry_List_Good(t *testing.T) {
 	}
 
 	// Filter by capability.
-	r.Put(func() Entry { e := sampleEntry("no-tools", 1_000_000_000, "nt"); e.Capabilities.Tools = false; return e }())
+	r.Put(func() Entry {
+		e := sampleEntry("no-tools", 1_000_000_000, "nt")
+		e.Capabilities.Tools = false
+		return e
+	}())
 	tools := r.Filter(Filter{Tools: true})
 	if len(tools) != 2 {
 		t.Fatalf("tools filter: got %d, want 2", len(tools))
