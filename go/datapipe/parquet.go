@@ -25,7 +25,7 @@ func ExportParquet(trainingDir, outputDir string) core.Result {
 		outputDir = core.JoinPath(trainingDir, "parquet")
 	}
 	if err := coreio.Local.EnsureDir(outputDir); err != nil {
-		return core.Fail(core.E("ml.ExportParquet", "create output dir", err))
+		return core.Fail(core.E("datapipe.ExportParquet", "create output dir", err))
 	}
 
 	total := 0
@@ -37,7 +37,7 @@ func ExportParquet(trainingDir, outputDir string) core.Result {
 
 		result := ExportSplitParquet(jsonlPath, outputDir, split)
 		if !result.OK {
-			return core.Fail(core.E("ml.ExportParquet", core.Sprintf("export %s", split), result.Value.(error)))
+			return core.Fail(core.E("datapipe.ExportParquet", core.Sprintf("export %s", split), result.Value.(error)))
 		}
 		total += result.Value.(int)
 	}
@@ -50,7 +50,7 @@ func ExportParquet(trainingDir, outputDir string) core.Result {
 func ExportSplitParquet(jsonlPath, outputDir, split string) core.Result {
 	f, err := coreio.Local.Open(jsonlPath)
 	if err != nil {
-		return core.Fail(core.E("ml.ExportSplitParquet", core.Sprintf("open %s", jsonlPath), err))
+		return core.Fail(core.E("datapipe.ExportSplitParquet", core.Sprintf("open %s", jsonlPath), err))
 	}
 	defer f.Close()
 
@@ -99,7 +99,7 @@ func ExportSplitParquet(jsonlPath, outputDir, split string) core.Result {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return core.Fail(core.E("ml.ExportSplitParquet", core.Sprintf("scan %s", jsonlPath), err))
+		return core.Fail(core.E("datapipe.ExportSplitParquet", core.Sprintf("scan %s", jsonlPath), err))
 	}
 
 	if len(rows) == 0 {
@@ -110,7 +110,7 @@ func ExportSplitParquet(jsonlPath, outputDir, split string) core.Result {
 
 	out, err := coreio.Local.Create(outPath)
 	if err != nil {
-		return core.Fail(core.E("ml.ExportSplitParquet", core.Sprintf("create %s", outPath), err))
+		return core.Fail(core.E("datapipe.ExportSplitParquet", core.Sprintf("create %s", outPath), err))
 	}
 
 	writer := parquet.NewGenericWriter[ParquetRow](out,
@@ -119,16 +119,16 @@ func ExportSplitParquet(jsonlPath, outputDir, split string) core.Result {
 
 	if _, err := writer.Write(rows); err != nil {
 		out.Close()
-		return core.Fail(core.E("ml.ExportSplitParquet", "write parquet rows", err))
+		return core.Fail(core.E("datapipe.ExportSplitParquet", "write parquet rows", err))
 	}
 
 	if err := writer.Close(); err != nil {
 		out.Close()
-		return core.Fail(core.E("ml.ExportSplitParquet", "close parquet writer", err))
+		return core.Fail(core.E("datapipe.ExportSplitParquet", "close parquet writer", err))
 	}
 
 	if err := out.Close(); err != nil {
-		return core.Fail(core.E("ml.ExportSplitParquet", "close file", err))
+		return core.Fail(core.E("datapipe.ExportSplitParquet", "close file", err))
 	}
 
 	return core.Ok(len(rows))

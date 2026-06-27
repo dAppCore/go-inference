@@ -24,14 +24,14 @@ type ConsolidateConfig struct {
 // Consolidate pulls JSONL response files from M3 via SSH, merges them by idx,
 // deduplicates, and writes a single merged JSONL output.
 //
-//	r := ml.Consolidate(cfg, os.Stdout)
+//	r := modelmgmt.Consolidate(cfg, os.Stdout)
 //	if !r.OK { return r }
 func Consolidate(cfg ConsolidateConfig, w io.Writer) core.Result {
 	if cfg.OutputDir == "" {
 		cfg.OutputDir = "responses"
 	}
 	if err := coreio.Local.EnsureDir(cfg.OutputDir); err != nil {
-		return core.Fail(core.E("ml.Consolidate", "create output dir", err))
+		return core.Fail(core.E("modelmgmt.Consolidate", "create output dir", err))
 	}
 
 	// List remote files via SSH.
@@ -39,7 +39,7 @@ func Consolidate(cfg ConsolidateConfig, w io.Writer) core.Result {
 	listCmd := goexec.Command(context.Background(), "ssh", cfg.M3Host, core.Sprintf("ls %s/%s", cfg.RemoteDir, cfg.Pattern))
 	listResult := listCmd.Output()
 	if !listResult.OK {
-		return core.Fail(core.E("ml.Consolidate", "list remote files: "+listResult.Error(), nil))
+		return core.Fail(core.E("modelmgmt.Consolidate", "list remote files: "+listResult.Error(), nil))
 	}
 	listOutput, _ := listResult.Value.([]byte)
 
@@ -116,7 +116,7 @@ func Consolidate(cfg ConsolidateConfig, w io.Writer) core.Result {
 
 	out, err := coreio.Local.Create(mergedPath)
 	if err != nil {
-		return core.Fail(core.E("ml.Consolidate", "create merged file", err))
+		return core.Fail(core.E("modelmgmt.Consolidate", "create merged file", err))
 	}
 	defer out.Close()
 
@@ -126,7 +126,7 @@ func Consolidate(cfg ConsolidateConfig, w io.Writer) core.Result {
 		bw.WriteString("\n")
 	}
 	if err := bw.Flush(); err != nil {
-		return core.Fail(core.E("ml.Consolidate", "flush merged file", err))
+		return core.Fail(core.E("modelmgmt.Consolidate", "flush merged file", err))
 	}
 
 	core.Print(w, "")

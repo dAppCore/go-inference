@@ -13,13 +13,13 @@ import (
 // key. It aggregates separately from scoring keys so a failed example reads as
 // a recorded failure, never as a zero score (RFC.inference-stack §3.7).
 //
-//	if fb.Key == eval.KeyError { failures++ }
+//	if fb.Key == experiments.KeyError { failures++ }
 const KeyError = "error"
 
 // Target is the model under test in an experiment: given an example's inputs it
 // produces a single output string, or an error the runner records as a failure
-// for that example. go-ml's serving handoff (a go-mlx-loaded TextModel, or a
-// go-ai endpoint) satisfies this; tests fake it.
+// for that example. the serving handoff (a go-mlx-loaded TextModel, or a
+// provider endpoint) satisfies this; tests fake it.
 //
 //	out, err := target.Run(ctx, map[string]any{"prompt": "Is honesty always right?"})
 type Target interface {
@@ -49,18 +49,18 @@ type Evaluator interface {
 // marked StatusComplete, or StatusFailed when every example's target call
 // errored. AggregateFeedback then yields the mean score per key.
 //
-//	r := e.RunExperiment(ctx, "ethics-probes", target, []eval.Evaluator{exactMatch{}, lekScore{}})
+//	r := e.RunExperiment(ctx, "ethics-probes", target, []experiments.Evaluator{exactMatch{}, lekScore{}})
 //	expID := r.Value.(string)
 //	means := e.AggregateFeedback(expID).Value.(map[string]float64)
 func (e *Eval) RunExperiment(ctx context.Context, datasetID string, target Target, evaluators []Evaluator) core.Result {
 	if target == nil {
-		return core.Fail(core.E("eval.RunExperiment", "target is nil", nil))
+		return core.Fail(core.E("experiments.RunExperiment", "target is nil", nil))
 	}
 	if len(evaluators) == 0 {
-		return core.Fail(core.E("eval.RunExperiment", "no evaluators given", nil))
+		return core.Fail(core.E("experiments.RunExperiment", "no evaluators given", nil))
 	}
 	if d := e.store.GetDataset(datasetID); !d.OK {
-		return core.Fail(core.E("eval.RunExperiment",
+		return core.Fail(core.E("experiments.RunExperiment",
 			core.Sprintf("no dataset with id %q", datasetID), nil))
 	}
 
@@ -139,7 +139,7 @@ func (e *Eval) recordFailure(expID, exampleID, comment string) core.Result {
 // point is impossible (it was just created), so a status-write failure is
 // surfaced over the original result.
 //
-//	return e.finishExperiment(expID, eval.StatusComplete, core.Ok(expID))
+//	return e.finishExperiment(expID, experiments.StatusComplete, core.Ok(expID))
 func (e *Eval) finishExperiment(expID string, status ExperimentStatus, out core.Result) core.Result {
 	x := e.store.GetExperiment(expID)
 	if !x.OK {

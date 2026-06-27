@@ -8,7 +8,7 @@ import (
 )
 
 // CapabilityReportForBackend returns the shared inference capability report for
-// a go-ml backend without requiring callers to import a concrete runtime.
+// a serving backend without requiring callers to import a concrete runtime.
 func CapabilityReportForBackend(name string, backend serving.Backend) inference.CapabilityReport {
 	if backend == nil {
 		return inference.CapabilityReport{Runtime: inference.RuntimeIdentity{Backend: name}}

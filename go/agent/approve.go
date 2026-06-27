@@ -24,7 +24,7 @@ type ApproveConfig struct {
 // Each approved row is written as a chat-format JSONL line with user/assistant
 // messages.
 //
-//	r := ml.ApproveExpansions(db, cfg, os.Stdout)
+//	r := agent.ApproveExpansions(db, cfg, os.Stdout)
 //	if !r.OK { return r }
 func ApproveExpansions(db *store.DuckDB, cfg ApproveConfig, w io.Writer) core.Result {
 	rows, err := db.Conn().Query(`
@@ -37,13 +37,13 @@ func ApproveExpansions(db *store.DuckDB, cfg ApproveConfig, w io.Writer) core.Re
 		ORDER BY r.idx
 	`)
 	if err != nil {
-		return core.Fail(core.E("ml.ApproveExpansions", "query approved expansions", err))
+		return core.Fail(core.E("agent.ApproveExpansions", "query approved expansions", err))
 	}
 	defer rows.Close()
 
 	f, err := coreio.Local.Create(cfg.Output)
 	if err != nil {
-		return core.Fail(core.E("ml.ApproveExpansions", core.Sprintf("create output %s", cfg.Output), err))
+		return core.Fail(core.E("agent.ApproveExpansions", core.Sprintf("create output %s", cfg.Output), err))
 	}
 	defer f.Close()
 
@@ -56,7 +56,7 @@ func ApproveExpansions(db *store.DuckDB, cfg ApproveConfig, w io.Writer) core.Re
 		var seedID, region, domain, prompt, response, model string
 		var genTime, score float64
 		if err := rows.Scan(&idx, &seedID, &region, &domain, &prompt, &response, &genTime, &model, &score); err != nil {
-			return core.Fail(core.E("ml.ApproveExpansions", "scan approved row", err))
+			return core.Fail(core.E("agent.ApproveExpansions", "scan approved row", err))
 		}
 
 		example := modelmgmt.TrainingExample{
@@ -67,7 +67,7 @@ func ApproveExpansions(db *store.DuckDB, cfg ApproveConfig, w io.Writer) core.Re
 		}
 
 		if _, err := f.Write([]byte(core.Concat(core.JSONMarshalString(example), "\n"))); err != nil {
-			return core.Fail(core.E("ml.ApproveExpansions", "encode example", err))
+			return core.Fail(core.E("agent.ApproveExpansions", "encode example", err))
 		}
 
 		regionSet[region] = true
@@ -76,7 +76,7 @@ func ApproveExpansions(db *store.DuckDB, cfg ApproveConfig, w io.Writer) core.Re
 	}
 
 	if err := rows.Err(); err != nil {
-		return core.Fail(core.E("ml.ApproveExpansions", "iterate approved rows", err))
+		return core.Fail(core.E("agent.ApproveExpansions", "iterate approved rows", err))
 	}
 
 	core.Print(w, "Approved: %d responses (threshold: heuristic > 0)", count)

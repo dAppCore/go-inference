@@ -27,7 +27,7 @@ type ExpandOutput struct {
 func GetCompletedIDs(influx *datapipe.InfluxClient) core.Result {
 	rRows := influx.QuerySQL("SELECT DISTINCT seed_id FROM expansion_gen")
 	if !rRows.OK {
-		return core.Fail(core.E("ml.GetCompletedIDs", "query expansion_gen", rRows.Value.(error)))
+		return core.Fail(core.E("modelmgmt.GetCompletedIDs", "query expansion_gen", rRows.Value.(error)))
 	}
 	rows := rRows.Value.([]map[string]any)
 
@@ -94,7 +94,7 @@ func ExpandPrompts(ctx context.Context, backend serving.Backend, influx *datapip
 	outputPath := core.JoinPath(outputDir, core.Sprintf("expand-%s.jsonl", worker))
 	f, err := coreio.Local.Append(outputPath)
 	if err != nil {
-		return core.Fail(core.E("ml.ExpandPrompts", "open output file", err))
+		return core.Fail(core.E("modelmgmt.ExpandPrompts", "open output file", err))
 	}
 	defer f.Close()
 

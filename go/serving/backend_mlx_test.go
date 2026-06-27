@@ -161,7 +161,7 @@ func TestMLXBackendConvertOptsAllFieldsGoodScenario(t *core.T) {
 // the driver untouched (no panic, no side effects). Spec §2.2 — memory
 // management before loading.
 //
-//	ml.SetMLXMemoryLimits(0, 0) // no-op
+//	serving.SetMLXMemoryLimits(0, 0) // no-op
 func TestMLXBackend_SetMLXMemoryLimits_ZeroNoop_Good(t *core.T) {
 	cacheLimit := uint64(0)
 	memoryLimit := uint64(0)

@@ -43,7 +43,7 @@ type ModelWorkflowResult struct {
 	Labels    map[string]string
 }
 
-// ModelWorkflow delegates go-ml workflow orchestration to shared inference
+// ModelWorkflow delegates workflow orchestration to shared inference
 // contracts implemented by native or remote model backends.
 type ModelWorkflow struct {
 	model inference.TextModel
@@ -52,7 +52,7 @@ type ModelWorkflow struct {
 // NewModelWorkflow creates a workflow façade around an inference model.
 func NewModelWorkflow(model inference.TextModel) core.Result {
 	if model == nil {
-		return core.Fail(core.E("ml.NewModelWorkflow", "model is required", nil))
+		return core.Fail(core.E("agent.NewModelWorkflow", "model is required", nil))
 	}
 	return core.Ok(&ModelWorkflow{model: model})
 }
@@ -80,15 +80,15 @@ func (w *ModelWorkflow) Capabilities() inference.CapabilityReport {
 // Run executes one backend-neutral model workflow.
 func (w *ModelWorkflow) Run(ctx core.Context, request ModelWorkflowRequest) core.Result {
 	if w == nil || w.model == nil {
-		return core.Fail(core.E("ml.ModelWorkflow.Run", "model is required", nil))
+		return core.Fail(core.E("agent.ModelWorkflow.Run", "model is required", nil))
 	}
 	if request.Operation == "" {
-		return core.Fail(core.E("ml.ModelWorkflow.Run", "operation is required", nil))
+		return core.Fail(core.E("agent.ModelWorkflow.Run", "operation is required", nil))
 	}
 	if request.ProbeSink != nil {
 		probeable, ok := w.model.(inference.ProbeableModel)
 		if !ok {
-			return core.Fail(core.E("ml.ModelWorkflow.Run", "model does not support probe events", nil))
+			return core.Fail(core.E("agent.ModelWorkflow.Run", "model does not support probe events", nil))
 		}
 		probeable.SetProbeSink(request.ProbeSink)
 	}
@@ -105,21 +105,21 @@ func (w *ModelWorkflow) Run(ctx core.Context, request ModelWorkflowRequest) core
 	case ModelWorkflowGRPO:
 		return w.grpo(ctx, request)
 	default:
-		return core.Fail(core.E("ml.ModelWorkflow.Run", core.Sprintf("unsupported operation %q", request.Operation), nil))
+		return core.Fail(core.E("agent.ModelWorkflow.Run", core.Sprintf("unsupported operation %q", request.Operation), nil))
 	}
 }
 
 func (w *ModelWorkflow) evaluate(ctx core.Context, request ModelWorkflowRequest) core.Result {
 	if request.Dataset == nil {
-		return core.Fail(core.E("ml.ModelWorkflow.Evaluate", "dataset is required", nil))
+		return core.Fail(core.E("agent.ModelWorkflow.Evaluate", "dataset is required", nil))
 	}
 	evaluator, ok := w.model.(inference.Evaluator)
 	if !ok {
-		return core.Fail(core.E("ml.ModelWorkflow.Evaluate", "model does not support evaluation", nil))
+		return core.Fail(core.E("agent.ModelWorkflow.Evaluate", "model does not support evaluation", nil))
 	}
 	report, err := evaluator.Evaluate(ctx, request.Dataset, request.Eval)
 	if err != nil {
-		return core.Fail(core.E("ml.ModelWorkflow.Evaluate", "evaluate dataset", err))
+		return core.Fail(core.E("agent.ModelWorkflow.Evaluate", "evaluate dataset", err))
 	}
 	return core.Ok(ModelWorkflowResult{
 		Operation: request.Operation,
@@ -131,11 +131,11 @@ func (w *ModelWorkflow) evaluate(ctx core.Context, request ModelWorkflowRequest)
 func (w *ModelWorkflow) benchmark(ctx core.Context, request ModelWorkflowRequest) core.Result {
 	benchable, ok := w.model.(inference.BenchableModel)
 	if !ok {
-		return core.Fail(core.E("ml.ModelWorkflow.Benchmark", "model does not support benchmarking", nil))
+		return core.Fail(core.E("agent.ModelWorkflow.Benchmark", "model does not support benchmarking", nil))
 	}
 	report, err := benchable.Benchmark(ctx, request.Bench)
 	if err != nil {
-		return core.Fail(core.E("ml.ModelWorkflow.Benchmark", "benchmark model", err))
+		return core.Fail(core.E("agent.ModelWorkflow.Benchmark", "benchmark model", err))
 	}
 	return core.Ok(ModelWorkflowResult{
 		Operation: request.Operation,
@@ -146,15 +146,15 @@ func (w *ModelWorkflow) benchmark(ctx core.Context, request ModelWorkflowRequest
 
 func (w *ModelWorkflow) trainSFT(ctx core.Context, request ModelWorkflowRequest) core.Result {
 	if request.Dataset == nil {
-		return core.Fail(core.E("ml.ModelWorkflow.TrainSFT", "dataset is required", nil))
+		return core.Fail(core.E("agent.ModelWorkflow.TrainSFT", "dataset is required", nil))
 	}
 	trainer, ok := w.model.(inference.SFTTrainer)
 	if !ok {
-		return core.Fail(core.E("ml.ModelWorkflow.TrainSFT", "model does not support SFT training", nil))
+		return core.Fail(core.E("agent.ModelWorkflow.TrainSFT", "model does not support SFT training", nil))
 	}
 	report, err := trainer.TrainSFT(ctx, request.Dataset, request.Training)
 	if err != nil {
-		return core.Fail(core.E("ml.ModelWorkflow.TrainSFT", "train SFT", err))
+		return core.Fail(core.E("agent.ModelWorkflow.TrainSFT", "train SFT", err))
 	}
 	return core.Ok(ModelWorkflowResult{
 		Operation: request.Operation,
@@ -165,15 +165,15 @@ func (w *ModelWorkflow) trainSFT(ctx core.Context, request ModelWorkflowRequest)
 
 func (w *ModelWorkflow) distill(ctx core.Context, request ModelWorkflowRequest) core.Result {
 	if request.Dataset == nil {
-		return core.Fail(core.E("ml.ModelWorkflow.Distill", "dataset is required", nil))
+		return core.Fail(core.E("agent.ModelWorkflow.Distill", "dataset is required", nil))
 	}
 	trainer, ok := w.model.(inference.DistillTrainer)
 	if !ok {
-		return core.Fail(core.E("ml.ModelWorkflow.Distill", "model does not support distillation", nil))
+		return core.Fail(core.E("agent.ModelWorkflow.Distill", "model does not support distillation", nil))
 	}
 	report, err := trainer.Distill(ctx, request.Dataset, request.Distill)
 	if err != nil {
-		return core.Fail(core.E("ml.ModelWorkflow.Distill", "distill model", err))
+		return core.Fail(core.E("agent.ModelWorkflow.Distill", "distill model", err))
 	}
 	return core.Ok(ModelWorkflowResult{
 		Operation: request.Operation,
@@ -184,15 +184,15 @@ func (w *ModelWorkflow) distill(ctx core.Context, request ModelWorkflowRequest) 
 
 func (w *ModelWorkflow) grpo(ctx core.Context, request ModelWorkflowRequest) core.Result {
 	if request.Dataset == nil {
-		return core.Fail(core.E("ml.ModelWorkflow.GRPO", "dataset is required", nil))
+		return core.Fail(core.E("agent.ModelWorkflow.GRPO", "dataset is required", nil))
 	}
 	trainer, ok := w.model.(inference.GRPOTrainer)
 	if !ok {
-		return core.Fail(core.E("ml.ModelWorkflow.GRPO", "model does not support GRPO training", nil))
+		return core.Fail(core.E("agent.ModelWorkflow.GRPO", "model does not support GRPO training", nil))
 	}
 	report, err := trainer.TrainGRPO(ctx, request.Dataset, request.GRPO)
 	if err != nil {
-		return core.Fail(core.E("ml.ModelWorkflow.GRPO", "train GRPO", err))
+		return core.Fail(core.E("agent.ModelWorkflow.GRPO", "train GRPO", err))
 	}
 	return core.Ok(ModelWorkflowResult{
 		Operation: request.Operation,

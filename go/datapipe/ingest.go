@@ -58,10 +58,10 @@ var (
 // At least one of ContentFile, CapabilityFile, or TrainingLog must be set.
 func Ingest(influx *InfluxClient, cfg IngestConfig, w io.Writer) core.Result {
 	if cfg.ContentFile == "" && cfg.CapabilityFile == "" && cfg.TrainingLog == "" {
-		return core.Fail(core.E("ml.Ingest", "at least one of --content, --capability, or --training-log is required", nil))
+		return core.Fail(core.E("datapipe.Ingest", "at least one of --content, --capability, or --training-log is required", nil))
 	}
 	if cfg.Model == "" {
-		return core.Fail(core.E("ml.Ingest", "--model is required", nil))
+		return core.Fail(core.E("datapipe.Ingest", "--model is required", nil))
 	}
 	if cfg.RunID == "" {
 		cfg.RunID = cfg.Model
@@ -75,7 +75,7 @@ func Ingest(influx *InfluxClient, cfg IngestConfig, w io.Writer) core.Result {
 	if cfg.ContentFile != "" {
 		result := ingestContentScores(influx, cfg, w)
 		if !result.OK {
-			return core.Fail(core.E("ml.Ingest", "ingest content scores", result.Value.(error)))
+			return core.Fail(core.E("datapipe.Ingest", "ingest content scores", result.Value.(error)))
 		}
 		totalPoints += result.Value.(int)
 	}
@@ -83,7 +83,7 @@ func Ingest(influx *InfluxClient, cfg IngestConfig, w io.Writer) core.Result {
 	if cfg.CapabilityFile != "" {
 		result := ingestCapabilityScores(influx, cfg, w)
 		if !result.OK {
-			return core.Fail(core.E("ml.Ingest", "ingest capability scores", result.Value.(error)))
+			return core.Fail(core.E("datapipe.Ingest", "ingest capability scores", result.Value.(error)))
 		}
 		totalPoints += result.Value.(int)
 	}
@@ -91,7 +91,7 @@ func Ingest(influx *InfluxClient, cfg IngestConfig, w io.Writer) core.Result {
 	if cfg.TrainingLog != "" {
 		result := ingestTrainingLog(influx, cfg, w)
 		if !result.OK {
-			return core.Fail(core.E("ml.Ingest", "ingest training log", result.Value.(error)))
+			return core.Fail(core.E("datapipe.Ingest", "ingest training log", result.Value.(error)))
 		}
 		totalPoints += result.Value.(int)
 	}
@@ -105,7 +105,7 @@ func Ingest(influx *InfluxClient, cfg IngestConfig, w io.Writer) core.Result {
 func ingestContentScores(influx *InfluxClient, cfg IngestConfig, w io.Writer) core.Result {
 	f, err := coreio.Local.Open(cfg.ContentFile)
 	if err != nil {
-		return core.Fail(core.E("ml.ingestContentScores", core.Sprintf("open %s", cfg.ContentFile), err))
+		return core.Fail(core.E("datapipe.ingestContentScores", core.Sprintf("open %s", cfg.ContentFile), err))
 	}
 	defer f.Close()
 
@@ -125,7 +125,7 @@ func ingestContentScores(influx *InfluxClient, cfg IngestConfig, w io.Writer) co
 
 		var entry contentScoreLine
 		if r := core.JSONUnmarshalString(raw, &entry); !r.OK {
-			return core.Fail(core.E("ml.ingestContentScores", core.Sprintf("line %d: parse json", lineNum), r.Value.(error)))
+			return core.Fail(core.E("datapipe.ingestContentScores", core.Sprintf("line %d: parse json", lineNum), r.Value.(error)))
 		}
 
 		label := entry.Label
@@ -171,20 +171,20 @@ func ingestContentScores(influx *InfluxClient, cfg IngestConfig, w io.Writer) co
 		// Flush batch if needed.
 		if len(lines) >= cfg.BatchSize {
 			if rWrite := influx.WriteLp(lines); !rWrite.OK {
-				return core.Fail(core.E("ml.ingestContentScores", "write batch", rWrite.Value.(error)))
+				return core.Fail(core.E("datapipe.ingestContentScores", "write batch", rWrite.Value.(error)))
 			}
 			lines = lines[:0]
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return core.Fail(core.E("ml.ingestContentScores", core.Sprintf("scan %s", cfg.ContentFile), err))
+		return core.Fail(core.E("datapipe.ingestContentScores", core.Sprintf("scan %s", cfg.ContentFile), err))
 	}
 
 	// Flush remaining lines.
 	if len(lines) > 0 {
 		if rWrite := influx.WriteLp(lines); !rWrite.OK {
-			return core.Fail(core.E("ml.ingestContentScores", "write final batch", rWrite.Value.(error)))
+			return core.Fail(core.E("datapipe.ingestContentScores", "write final batch", rWrite.Value.(error)))
 		}
 	}
 
@@ -197,7 +197,7 @@ func ingestContentScores(influx *InfluxClient, cfg IngestConfig, w io.Writer) co
 func ingestCapabilityScores(influx *InfluxClient, cfg IngestConfig, w io.Writer) core.Result {
 	f, err := coreio.Local.Open(cfg.CapabilityFile)
 	if err != nil {
-		return core.Fail(core.E("ml.ingestCapabilityScores", core.Sprintf("open %s", cfg.CapabilityFile), err))
+		return core.Fail(core.E("datapipe.ingestCapabilityScores", core.Sprintf("open %s", cfg.CapabilityFile), err))
 	}
 	defer f.Close()
 
@@ -217,7 +217,7 @@ func ingestCapabilityScores(influx *InfluxClient, cfg IngestConfig, w io.Writer)
 
 		var entry capabilityScoreLine
 		if r := core.JSONUnmarshalString(raw, &entry); !r.OK {
-			return core.Fail(core.E("ml.ingestCapabilityScores", core.Sprintf("line %d: parse json", lineNum), r.Value.(error)))
+			return core.Fail(core.E("datapipe.ingestCapabilityScores", core.Sprintf("line %d: parse json", lineNum), r.Value.(error)))
 		}
 
 		label := entry.Label
@@ -251,20 +251,20 @@ func ingestCapabilityScores(influx *InfluxClient, cfg IngestConfig, w io.Writer)
 		// Flush batch if needed.
 		if len(lines) >= cfg.BatchSize {
 			if rWrite := influx.WriteLp(lines); !rWrite.OK {
-				return core.Fail(core.E("ml.ingestCapabilityScores", "write batch", rWrite.Value.(error)))
+				return core.Fail(core.E("datapipe.ingestCapabilityScores", "write batch", rWrite.Value.(error)))
 			}
 			lines = lines[:0]
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return core.Fail(core.E("ml.ingestCapabilityScores", core.Sprintf("scan %s", cfg.CapabilityFile), err))
+		return core.Fail(core.E("datapipe.ingestCapabilityScores", core.Sprintf("scan %s", cfg.CapabilityFile), err))
 	}
 
 	// Flush remaining lines.
 	if len(lines) > 0 {
 		if rWrite := influx.WriteLp(lines); !rWrite.OK {
-			return core.Fail(core.E("ml.ingestCapabilityScores", "write final batch", rWrite.Value.(error)))
+			return core.Fail(core.E("datapipe.ingestCapabilityScores", "write final batch", rWrite.Value.(error)))
 		}
 	}
 
@@ -277,7 +277,7 @@ func ingestCapabilityScores(influx *InfluxClient, cfg IngestConfig, w io.Writer)
 func ingestTrainingLog(influx *InfluxClient, cfg IngestConfig, w io.Writer) core.Result {
 	f, err := coreio.Local.Open(cfg.TrainingLog)
 	if err != nil {
-		return core.Fail(core.E("ml.ingestTrainingLog", core.Sprintf("open %s", cfg.TrainingLog), err))
+		return core.Fail(core.E("datapipe.ingestTrainingLog", core.Sprintf("open %s", cfg.TrainingLog), err))
 	}
 	defer f.Close()
 
@@ -326,20 +326,20 @@ func ingestTrainingLog(influx *InfluxClient, cfg IngestConfig, w io.Writer) core
 		// Flush batch if needed.
 		if len(lines) >= cfg.BatchSize {
 			if rWrite := influx.WriteLp(lines); !rWrite.OK {
-				return core.Fail(core.E("ml.ingestTrainingLog", "write batch", rWrite.Value.(error)))
+				return core.Fail(core.E("datapipe.ingestTrainingLog", "write batch", rWrite.Value.(error)))
 			}
 			lines = lines[:0]
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return core.Fail(core.E("ml.ingestTrainingLog", core.Sprintf("scan %s", cfg.TrainingLog), err))
+		return core.Fail(core.E("datapipe.ingestTrainingLog", core.Sprintf("scan %s", cfg.TrainingLog), err))
 	}
 
 	// Flush remaining lines.
 	if len(lines) > 0 {
 		if rWrite := influx.WriteLp(lines); !rWrite.OK {
-			return core.Fail(core.E("ml.ingestTrainingLog", "write final batch", rWrite.Value.(error)))
+			return core.Fail(core.E("datapipe.ingestTrainingLog", "write final batch", rWrite.Value.(error)))
 		}
 	}
 

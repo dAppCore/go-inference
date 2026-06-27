@@ -10,10 +10,10 @@ import (
 )
 
 // InferenceAdapter bridges a go-inference TextModel (iter.Seq[Token]) to the
-// ml.Backend and ml.StreamingBackend interfaces (string returns / TokenCallback).
+// serving.Backend and serving.StreamingBackend interfaces (string returns / TokenCallback).
 //
 // This is the key adapter for Phase 1: any go-inference backend (MLX Metal,
-// ROCm, llama.cpp) can be wrapped to satisfy go-ml's Backend contract.
+// ROCm, llama.cpp) can be wrapped to satisfy the serving.Backend contract.
 type InferenceAdapter struct {
 	model inference.TextModel
 	name  string
@@ -24,17 +24,17 @@ var _ Backend = (*InferenceAdapter)(nil)
 var _ StreamingBackend = (*InferenceAdapter)(nil)
 var _ inference.CapabilityReporter = (*InferenceAdapter)(nil)
 
-// NewInferenceAdapter wraps a go-inference TextModel as an ml.Backend and
-// ml.StreamingBackend. The name is used for Backend.Name() (e.g. "mlx").
+// NewInferenceAdapter wraps a go-inference TextModel as an serving.Backend and
+// serving.StreamingBackend. The name is used for Backend.Name() (e.g. "mlx").
 func NewInferenceAdapter(model inference.TextModel, name string) *InferenceAdapter {
 	return &InferenceAdapter{model: model, name: name}
 }
 
 // Generate collects all tokens from the model's iterator into a single string.
 //
-//	r := a.Generate(ctx, "hello", ml.DefaultGenOpts())
+//	r := a.Generate(ctx, "hello", serving.DefaultGenOpts())
 //	if !r.OK { return r }
-//	resp := r.Value.(ml.Result)
+//	resp := r.Value.(serving.Result)
 func (a *InferenceAdapter) Generate(ctx context.Context, prompt string, opts GenOpts) core.Result {
 	inferOpts := convertOpts(opts)
 	b := core.NewBuilder()
@@ -49,12 +49,12 @@ func (a *InferenceAdapter) Generate(ctx context.Context, prompt string, opts Gen
 }
 
 // Chat sends a multi-turn conversation to the underlying TextModel and collects
-// all tokens. Since ml.Message is now a type alias for inference.Message, no
+// all tokens. Since serving.Message is now a type alias for inference.Message, no
 // conversion is needed.
 //
-//	r := a.Chat(ctx, messages, ml.DefaultGenOpts())
+//	r := a.Chat(ctx, messages, serving.DefaultGenOpts())
 //	if !r.OK { return r }
-//	resp := r.Value.(ml.Result)
+//	resp := r.Value.(serving.Result)
 func (a *InferenceAdapter) Chat(ctx context.Context, messages []Message, opts GenOpts) core.Result {
 	inferOpts := convertOpts(opts)
 	b := core.NewBuilder()
@@ -104,7 +104,7 @@ func (a *InferenceAdapter) GenerateStream(ctx context.Context, prompt string, op
 }
 
 // ChatStream forwards each generated chat token's text to the callback.
-// Since ml.Message is now a type alias for inference.Message, no conversion
+// Since serving.Message is now a type alias for inference.Message, no conversion
 // is needed.
 //
 //	r := a.ChatStream(ctx, messages, opts, func(tok string) error { ... })
@@ -184,13 +184,13 @@ func (a *InferenceAdapter) Capabilities() inference.CapabilityReport {
 func (a *InferenceAdapter) InspectAttention(ctx context.Context, prompt string, opts ...inference.GenerateOption) core.Result {
 	inspector, ok := a.model.(inference.AttentionInspector)
 	if !ok {
-		return core.Fail(core.E("ml.InferenceAdapter.InspectAttention", core.Sprintf("backend %q does not support attention inspection", a.name), nil))
+		return core.Fail(core.E("serving.InferenceAdapter.InspectAttention", core.Sprintf("backend %q does not support attention inspection", a.name), nil))
 	}
 	snap, err := inspector.InspectAttention(ctx, prompt, opts...)
 	return core.ResultOf(snap, err)
 }
 
-// convertOpts maps ml.GenOpts to go-inference functional options.
+// convertOpts maps serving.GenOpts to go-inference functional options.
 func convertOpts(opts GenOpts) []inference.GenerateOption {
 	var out []inference.GenerateOption
 	if opts.Temperature != 0 {

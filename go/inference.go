@@ -1,7 +1,7 @@
 // Package inference defines shared interfaces for text generation backends.
 //
 // This package is the contract between GPU-specific backends (go-mlx, go-rocm)
-// and consumers (go-ml, go-ai, go-i18n). It has zero dependencies and compiles
+// and consumers (go-i18n and the serving/score layers). It has zero dependencies and compiles
 // on all platforms.
 //
 // # Backend registration

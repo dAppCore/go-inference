@@ -342,7 +342,7 @@ func TestLlamaBackendInterfaceComplianceGoodScenario(t *core.T) {
 // TestLlamaBackend_SetMaxTokens_Good — spec §2.4: SetMaxTokens forwards to
 // the internal HTTP client so subsequent generate calls carry max_tokens.
 //
-//	backend := ml.NewLlamaBackend(svc, opts)
+//	backend := serving.NewLlamaBackend(svc, opts)
 //	backend.SetMaxTokens(2048)
 func TestLlamaBackend_SetMaxTokens_Good(t *core.T) {
 	lb := &LlamaBackend{

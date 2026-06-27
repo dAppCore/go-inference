@@ -19,10 +19,10 @@ type regionRow struct {
 func PrintCoverage(db *store.DuckDB, w io.Writer) core.Result {
 	rows, result := db.QueryRows("SELECT count(*) AS total FROM seeds")
 	if !result.OK {
-		return core.Fail(core.E("ml.PrintCoverage", "count seeds", result.Value.(error)))
+		return core.Fail(core.E("score.PrintCoverage", "count seeds", result.Value.(error)))
 	}
 	if len(rows) == 0 {
-		return core.Fail(core.E("ml.PrintCoverage", "no seeds table found (run: core ml import-all first)", nil))
+		return core.Fail(core.E("score.PrintCoverage", "no seeds table found (run: core ml import-all first)", nil))
 	}
 	total := toInt(rows[0]["total"])
 
@@ -34,7 +34,7 @@ func PrintCoverage(db *store.DuckDB, w io.Writer) core.Result {
 	// Region distribution.
 	regionResult := queryRegionDistribution(db)
 	if !regionResult.OK {
-		return core.Fail(core.E("ml.PrintCoverage", "query regions", regionResult.Value.(error)))
+		return core.Fail(core.E("score.PrintCoverage", "query regions", regionResult.Value.(error)))
 	}
 	regionRows := regionResult.Value.([]regionRow)
 
@@ -127,7 +127,7 @@ func queryRegionDistribution(db *store.DuckDB) core.Result {
 		FROM seeds GROUP BY lang_group ORDER BY n ASC
 	`)
 	if !result.OK {
-		return core.Fail(core.E("ml.queryRegionDistribution", "query rows", result.Value.(error)))
+		return core.Fail(core.E("score.queryRegionDistribution", "query rows", result.Value.(error)))
 	}
 
 	regions := make([]regionRow, 0, len(rows))

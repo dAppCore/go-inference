@@ -10,7 +10,7 @@ import (
 )
 
 // Registry is the model catalogue. It wraps a Store with an alias index and the
-// resolution / filtering / device-fit queries go-ai consumes.
+// resolution / filtering / device-fit queries the registry consumers use.
 //
 //	r := registry.New()
 //	r.Put(registry.Entry{ID: "gemma-4-4b-it", Aliases: []string{"lemma"}})
@@ -182,8 +182,8 @@ func (r *Registry) Delete(id string) core.Result {
 
 // FitsDevice returns the entries whose memory footprint fits within budgetBytes,
 // largest-footprint-first (the biggest model a device can hold ranks first).
-// Entries with an unknown (zero) footprint never fit. This is what go-ai's
-// residency policy (go-ai §6.16) consumes to place models on a device.
+// Entries with an unknown (zero) footprint never fit. This is what the
+// residency policy consumes to place models on a device.
 //
 //	fits := r.FitsDevice(96 << 30) // models that fit a 96 GiB device
 func (r *Registry) FitsDevice(budgetBytes uint64) []Entry {

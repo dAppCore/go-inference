@@ -26,8 +26,8 @@ func refString(ex Example, field string) string {
 // 0 otherwise — the minimal correctness evaluator over the default "answer"
 // field (RFC.inference-stack §3.7).
 //
-//	ev := eval.ExactMatch()
-//	r := e.RunExperiment(ctx, "ethics-probes", target, []eval.Evaluator{ev})
+//	ev := experiments.ExactMatch()
+//	r := e.RunExperiment(ctx, "ethics-probes", target, []experiments.Evaluator{ev})
 func ExactMatch() Evaluator {
 	return ExactMatchOn(defaultReferenceField)
 }
@@ -35,7 +35,7 @@ func ExactMatch() Evaluator {
 // ExactMatchOn is ExactMatch reading the gold value from a named reference field
 // rather than "answer" — for datasets that label their reference differently.
 //
-//	ev := eval.ExactMatchOn("gold")
+//	ev := experiments.ExactMatchOn("gold")
 func ExactMatchOn(field string) Evaluator {
 	return exactMatchEval{field: field}
 }
@@ -50,7 +50,7 @@ type exactMatchEval struct {
 
 // Eval scores output against the example's reference answer.
 //
-//	key, score, comment := eval.ExactMatch().Eval(ex, "yes")
+//	key, score, comment := experiments.ExactMatch().Eval(ex, "yes")
 func (e exactMatchEval) Eval(example Example, output string) (string, float64, string) {
 	want := refString(example, e.field)
 	if want == output {
@@ -63,7 +63,7 @@ func (e exactMatchEval) Eval(example Example, output string) (string, float64, s
 // and 0 otherwise — a partial-credit evaluator for answers that need only appear
 // somewhere in the output. Reads the default "answer" field.
 //
-//	ev := eval.Contains()
+//	ev := experiments.Contains()
 func Contains() Evaluator {
 	return ContainsOn(defaultReferenceField)
 }
@@ -71,7 +71,7 @@ func Contains() Evaluator {
 // ContainsOn is Contains reading the substring from a named reference field
 // rather than "answer".
 //
-//	ev := eval.ContainsOn("needle")
+//	ev := experiments.ContainsOn("needle")
 func ContainsOn(field string) Evaluator {
 	return containsEval{field: field}
 }
@@ -87,7 +87,7 @@ type containsEval struct {
 // Eval scores whether output contains the example's reference substring. An
 // empty (or absent) substring is contained by every output, so it scores 1.
 //
-//	key, score, comment := eval.Contains().Eval(ex, "always be honest")
+//	key, score, comment := experiments.Contains().Eval(ex, "always be honest")
 func (e containsEval) Eval(example Example, output string) (string, float64, string) {
 	sub := refString(example, e.field)
 	if core.Contains(output, sub) {
@@ -101,9 +101,9 @@ func (e containsEval) Eval(example Example, output string) (string, float64, str
 // its compile error at construction rather than per-Eval. Uses the core regexp
 // primitive (core.Regex), not stdlib.
 //
-//	r := eval.Regexp(`\bhonest\b`)
+//	r := experiments.Regexp(`\bhonest\b`)
 //	if !r.OK { return r }
-//	ev := r.Value.(eval.Evaluator)
+//	ev := r.Value.(experiments.Evaluator)
 func Regexp(pattern string) core.Result {
 	rc := core.Regex(pattern)
 	if !rc.OK {
@@ -122,7 +122,7 @@ type regexpEval struct {
 
 // Eval scores whether output matches the compiled pattern.
 //
-//	key, score, comment := eval.Regexp(`\d+`).Value.(eval.Evaluator).Eval(ex, "build 42")
+//	key, score, comment := eval.Regexp(`\d+`).Value.(experiments.Evaluator).Eval(ex, "build 42")
 func (e regexpEval) Eval(_ Example, output string) (string, float64, string) {
 	if e.re.MatchString(output) {
 		return "regexp", 1, "match"
@@ -136,12 +136,12 @@ func (e regexpEval) Eval(_ Example, output string) (string, float64, string) {
 // otherwise — so the constructor returns a Result. Length is counted in runes,
 // not bytes (core.RuneCount).
 //
-//	r := eval.LengthScore(120)
+//	r := experiments.LengthScore(120)
 //	if !r.OK { return r }
-//	ev := r.Value.(eval.Evaluator)
+//	ev := r.Value.(experiments.Evaluator)
 func LengthScore(target int) core.Result {
 	if target <= 0 {
-		return core.Fail(core.E("eval.LengthScore",
+		return core.Fail(core.E("experiments.LengthScore",
 			core.Sprintf("target length must be positive, got %d", target), nil))
 	}
 	return core.Ok(Evaluator(lengthScoreEval{target: target}))
@@ -158,7 +158,7 @@ type lengthScoreEval struct {
 // Eval scores the output's rune length as a fraction of the target, clamped to
 // the 0..1 range.
 //
-//	key, score, comment := eval.LengthScore(10).Value.(eval.Evaluator).Eval(ex, "0123456789")
+//	key, score, comment := eval.LengthScore(10).Value.(experiments.Evaluator).Eval(ex, "0123456789")
 func (e lengthScoreEval) Eval(_ Example, output string) (string, float64, string) {
 	n := core.RuneCount(output)
 	score := float64(n) / float64(e.target)

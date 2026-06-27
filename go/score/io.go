@@ -19,7 +19,7 @@ import (
 func ReadResponses(path string) core.Result {
 	f, err := coreio.Local.Open(path)
 	if err != nil {
-		return core.Fail(core.E("ml.ReadResponses", core.Sprintf("open %s", path), err))
+		return core.Fail(core.E("score.ReadResponses", core.Sprintf("open %s", path), err))
 	}
 	defer f.Close()
 
@@ -37,13 +37,13 @@ func ReadResponses(path string) core.Result {
 
 		var resp Response
 		if rj := core.JSONUnmarshalString(line, &resp); !rj.OK {
-			return core.Fail(core.E("ml.ReadResponses", core.Sprintf("line %d", lineNum), rj.Value.(error)))
+			return core.Fail(core.E("score.ReadResponses", core.Sprintf("line %d", lineNum), rj.Value.(error)))
 		}
 		responses = append(responses, resp)
 	}
 
 	if err := scanner.Err(); err != nil {
-		return core.Fail(core.E("ml.ReadResponses", core.Sprintf("scan %s", path), err))
+		return core.Fail(core.E("score.ReadResponses", core.Sprintf("scan %s", path), err))
 	}
 
 	return core.Ok(responses)

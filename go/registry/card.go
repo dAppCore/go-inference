@@ -8,7 +8,7 @@ import core "dappco.re/go"
 // human-readable record of what a model is for, where it came from, how it
 // scored, and where it should not be used. The inference-stack spec places it on
 // the registry entry — "each registry entry carries or links a card: intended
-// use, provenance, eval results (go-ml 8-PAC), limitations"
+// use, provenance, eval results (8-PAC), limitations"
 // (RFC.inference-stack §3.4, §3.8).
 //
 //	card := registry.ModelCard{
@@ -21,7 +21,7 @@ import core "dappco.re/go"
 type ModelCard struct {
 	IntendedUse        string            `json:"intended_use,omitempty"`        // what the model is for, and the use it is not for
 	TrainingProvenance string            `json:"training_provenance,omitempty"` // base, adapters, data, run / checkpoint
-	EvalSummary        string            `json:"eval_summary,omitempty"`        // headline eval results (go-ml 8-PAC)
+	EvalSummary        string            `json:"eval_summary,omitempty"`        // headline eval results (8-PAC)
 	Limitations        string            `json:"limitations,omitempty"`         // known limits, risks, out-of-scope uses
 	Links              map[string]string `json:"links,omitempty"`               // named external references (weights, paper, licence)
 }

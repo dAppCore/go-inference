@@ -122,7 +122,7 @@ func (t *SSHTransport) Run(ctx context.Context, cmd string) core.Result {
 	c := goexec.Command(ctx, "ssh", args...)
 	result := c.CombinedOutput()
 	if !result.OK {
-		return core.Fail(core.E("ml.SSHTransport.Run", core.Sprintf("ssh %q: %s", cmd, result.Error()), nil))
+		return core.Fail(core.E("agent.SSHTransport.Run", core.Sprintf("ssh %q: %s", cmd, result.Error()), nil))
 	}
 	out, _ := result.Value.([]byte)
 	return core.Ok(string(out))
@@ -140,7 +140,7 @@ func (t *SSHTransport) CopyFrom(ctx context.Context, remote, local string) core.
 	c := goexec.Command(ctx, "scp", args...)
 	result := c.CombinedOutput()
 	if !result.OK {
-		return core.Fail(core.E("ml.SSHTransport.CopyFrom", core.Sprintf("scp %s: %s", remote, result.Error()), nil))
+		return core.Fail(core.E("agent.SSHTransport.CopyFrom", core.Sprintf("scp %s: %s", remote, result.Error()), nil))
 	}
 	return core.Ok(nil)
 }
@@ -156,7 +156,7 @@ func (t *SSHTransport) CopyTo(ctx context.Context, local, remote string) core.Re
 	c := goexec.Command(ctx, "scp", args...)
 	result := c.CombinedOutput()
 	if !result.OK {
-		return core.Fail(core.E("ml.SSHTransport.CopyTo", core.Sprintf("scp to %s: %s", remote, result.Error()), nil))
+		return core.Fail(core.E("agent.SSHTransport.CopyTo", core.Sprintf("scp to %s: %s", remote, result.Error()), nil))
 	}
 	return core.Ok(nil)
 }
@@ -164,7 +164,7 @@ func (t *SSHTransport) CopyTo(ctx context.Context, local, remote string) core.Re
 // SSHCommand executes a command on M3 via SSH.
 // Deprecated: Use AgentConfig.Transport.Run() instead.
 //
-//	r := ml.SSHCommand(cfg, "ls /tmp")
+//	r := agent.SSHCommand(cfg, "ls /tmp")
 //	if !r.OK { return r }
 //	out := r.Value.(string)
 func SSHCommand(cfg *AgentConfig, cmd string) core.Result {
@@ -174,7 +174,7 @@ func SSHCommand(cfg *AgentConfig, cmd string) core.Result {
 // SCPFrom copies a file from M3 to a local path.
 // Deprecated: Use AgentConfig.Transport.CopyFrom() instead.
 //
-//	r := ml.SCPFrom(cfg, "/remote/model.gguf", "/local/model.gguf")
+//	r := agent.SCPFrom(cfg, "/remote/model.gguf", "/local/model.gguf")
 //	if !r.OK { return r }
 func SCPFrom(cfg *AgentConfig, remotePath, localPath string) core.Result {
 	return cfg.transport().CopyFrom(context.Background(), remotePath, localPath)
@@ -183,7 +183,7 @@ func SCPFrom(cfg *AgentConfig, remotePath, localPath string) core.Result {
 // SCPTo copies a local file to M3.
 // Deprecated: Use AgentConfig.Transport.CopyTo() instead.
 //
-//	r := ml.SCPTo(cfg, "/local/adapter.safetensors", "/remote/adapter.safetensors")
+//	r := agent.SCPTo(cfg, "/local/adapter.safetensors", "/remote/adapter.safetensors")
 //	if !r.OK { return r }
 func SCPTo(cfg *AgentConfig, localPath, remotePath string) core.Result {
 	return cfg.transport().CopyTo(context.Background(), localPath, remotePath)

@@ -66,7 +66,7 @@ type probeRunnerResponse struct {
 func processMLXNative(cfg *AgentConfig, influx *datapipe.InfluxClient, cp Checkpoint) core.Result {
 	ollamaBase, ok := modelmgmt.OllamaBaseModelMap[cp.ModelTag]
 	if !ok {
-		return core.Fail(core.E("ml.processMLXNative", core.Sprintf("unknown Ollama model for tag %s", cp.ModelTag), nil))
+		return core.Fail(core.E("agent.processMLXNative", core.Sprintf("unknown Ollama model for tag %s", cp.ModelTag), nil))
 	}
 	hfBase := modelmgmt.HFBaseModelMap[cp.ModelTag]
 	if hfBase == "" {
@@ -94,20 +94,20 @@ func processMLXNative(cfg *AgentConfig, influx *datapipe.InfluxClient, cp Checkp
 	ctx := context.Background()
 	t := cfg.transport()
 	if r := t.CopyFrom(ctx, remoteSF, localSF); !r.OK {
-		return core.Fail(core.E("ml.processMLXNative", "scp safetensors", r.Value.(error)))
+		return core.Fail(core.E("agent.processMLXNative", "scp safetensors", r.Value.(error)))
 	}
 	if r := t.CopyFrom(ctx, remoteCfg, localCfg); !r.OK {
-		return core.Fail(core.E("ml.processMLXNative", "scp config", r.Value.(error)))
+		return core.Fail(core.E("agent.processMLXNative", "scp config", r.Value.(error)))
 	}
 
 	core.Print(nil, "Converting MLX → PEFT format...")
 	if result := modelmgmt.ConvertMLXtoPEFT(localSF, localCfg, peftDir, hfBase); !result.OK {
-		return core.Fail(core.E("ml.processMLXNative", "convert adapter", result.Value.(error)))
+		return core.Fail(core.E("agent.processMLXNative", "convert adapter", result.Value.(error)))
 	}
 
 	core.Print(nil, "Creating Ollama model %s (base: %s)...", tempModel, ollamaBase)
 	if result := modelmgmt.OllamaCreateModel(cfg.JudgeURL, tempModel, ollamaBase, peftDir); !result.OK {
-		return core.Fail(core.E("ml.processMLXNative", "ollama create", result.Value.(error)))
+		return core.Fail(core.E("agent.processMLXNative", "ollama create", result.Value.(error)))
 	}
 	core.Print(nil, "Ollama model %s ready", tempModel)
 	probeBackend := serving.NewHTTPBackend(cfg.JudgeURL, tempModel)
@@ -175,16 +175,16 @@ func processWithConversion(cfg *AgentConfig, influx *datapipe.InfluxClient, cp C
 	ctx := context.Background()
 	t := cfg.transport()
 	if r := t.CopyFrom(ctx, remoteSF, localSF); !r.OK {
-		return core.Fail(core.E("ml.processWithConversion", "scp safetensors", r.Value.(error)))
+		return core.Fail(core.E("agent.processWithConversion", "scp safetensors", r.Value.(error)))
 	}
 	if r := t.CopyFrom(ctx, remoteCfg, localCfg); !r.OK {
-		return core.Fail(core.E("ml.processWithConversion", "scp config", r.Value.(error)))
+		return core.Fail(core.E("agent.processWithConversion", "scp config", r.Value.(error)))
 	}
 
 	core.Print(nil, "Converting MLX to PEFT format...")
 	peftDir := core.JoinPath(cfg.WorkDir, core.Sprintf("peft_%07d", cp.Iteration))
 	if result := modelmgmt.ConvertMLXtoPEFT(localSF, localCfg, peftDir, cfg.BaseModel); !result.OK {
-		return core.Fail(core.E("ml.processWithConversion", "convert adapter", result.Value.(error)))
+		return core.Fail(core.E("agent.processWithConversion", "convert adapter", result.Value.(error)))
 	}
 
 	core.Print(nil, "Running %d capability probes...", len(capability.CapabilityProbes))

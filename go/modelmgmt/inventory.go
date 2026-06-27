@@ -25,7 +25,7 @@ type tableDetail struct {
 func PrintInventory(db *datapipe.DB, w io.Writer) core.Result {
 	rCounts := db.TableCounts()
 	if !rCounts.OK {
-		return core.Fail(core.E("ml.PrintInventory", "table counts", rCounts.Value.(error)))
+		return core.Fail(core.E("modelmgmt.PrintInventory", "table counts", rCounts.Value.(error)))
 	}
 	counts := rCounts.Value.(map[string]int)
 

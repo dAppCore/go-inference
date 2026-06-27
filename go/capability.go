@@ -174,7 +174,7 @@ func capabilityIDLabel(ids []CapabilityID) string {
 }
 
 // CapabilityReport is the portable backend/model feature report consumed by
-// go-ml, go-ai, and any package that must avoid backend-specific imports.
+// the serving and score layers and any package that must avoid backend-specific imports.
 type CapabilityReport struct {
 	Runtime       RuntimeIdentity   `json:"runtime"`
 	Model         ModelIdentity     `json:"model,omitempty"`

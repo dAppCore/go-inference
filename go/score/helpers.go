@@ -16,12 +16,12 @@ import (
 func ReadScorerOutput(path string) core.Result {
 	data, err := coreio.Local.Read(path)
 	if err != nil {
-		return core.Fail(core.E("ml.ReadScorerOutput", core.Sprintf("read %s", path), err))
+		return core.Fail(core.E("score.ReadScorerOutput", core.Sprintf("read %s", path), err))
 	}
 
 	var output ScorerOutput
 	if r := core.JSONUnmarshalString(data, &output); !r.OK {
-		return core.Fail(core.E("ml.ReadScorerOutput", core.Sprintf("unmarshal %s", path), r.Value.(error)))
+		return core.Fail(core.E("score.ReadScorerOutput", core.Sprintf("unmarshal %s", path), r.Value.(error)))
 	}
 
 	return core.Ok(&output)
@@ -34,11 +34,11 @@ func ReadScorerOutput(path string) core.Result {
 func WriteScores(path string, output *ScorerOutput) core.Result {
 	r := core.JSONMarshalIndent(output, "", "  ")
 	if !r.OK {
-		return core.Fail(core.E("ml.WriteScores", "marshal scores", r.Value.(error)))
+		return core.Fail(core.E("score.WriteScores", "marshal scores", r.Value.(error)))
 	}
 
 	if err := coreio.Local.Write(path, string(r.Value.([]byte))); err != nil {
-		return core.Fail(core.E("ml.WriteScores", core.Sprintf("write %s", path), err))
+		return core.Fail(core.E("score.WriteScores", core.Sprintf("write %s", path), err))
 	}
 
 	return core.Ok(nil)

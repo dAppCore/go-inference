@@ -16,34 +16,34 @@ type DB struct {
 // OpenDB opens a DuckDB database file in read-only mode to avoid locking
 // issues with the Python pipeline.
 //
-//	r := ml.OpenDB("/data/training.duckdb")
+//	r := datapipe.OpenDB("/data/training.duckdb")
 //	if !r.OK { return r }
-//	db := r.Value.(*ml.DB)
+//	db := r.Value.(*datapipe.DB)
 func OpenDB(path string) core.Result {
 	conn, err := sql.Open("duckdb", path+"?access_mode=READ_ONLY")
 	if err != nil {
-		return core.Fail(core.E("ml.OpenDB", core.Sprintf("open duckdb %s", path), err))
+		return core.Fail(core.E("datapipe.OpenDB", core.Sprintf("open duckdb %s", path), err))
 	}
 	if err := conn.Ping(); err != nil {
 		conn.Close()
-		return core.Fail(core.E("ml.OpenDB", core.Sprintf("ping duckdb %s", path), err))
+		return core.Fail(core.E("datapipe.OpenDB", core.Sprintf("ping duckdb %s", path), err))
 	}
 	return core.Ok(&DB{conn: conn, path: path})
 }
 
 // OpenDBReadWrite opens a DuckDB database in read-write mode.
 //
-//	r := ml.OpenDBReadWrite("/data/training.duckdb")
+//	r := datapipe.OpenDBReadWrite("/data/training.duckdb")
 //	if !r.OK { return r }
-//	db := r.Value.(*ml.DB)
+//	db := r.Value.(*datapipe.DB)
 func OpenDBReadWrite(path string) core.Result {
 	conn, err := sql.Open("duckdb", path)
 	if err != nil {
-		return core.Fail(core.E("ml.OpenDBReadWrite", core.Sprintf("open duckdb %s", path), err))
+		return core.Fail(core.E("datapipe.OpenDBReadWrite", core.Sprintf("open duckdb %s", path), err))
 	}
 	if err := conn.Ping(); err != nil {
 		conn.Close()
-		return core.Fail(core.E("ml.OpenDBReadWrite", core.Sprintf("ping duckdb %s", path), err))
+		return core.Fail(core.E("datapipe.OpenDBReadWrite", core.Sprintf("ping duckdb %s", path), err))
 	}
 	return core.Ok(&DB{conn: conn, path: path})
 }
@@ -108,7 +108,7 @@ type ExpansionPromptRow struct {
 //
 //	r := db.QueryGoldenSet(100)
 //	if !r.OK { return r }
-//	rows := r.Value.([]ml.GoldenSetRow)
+//	rows := r.Value.([]datapipe.GoldenSetRow)
 func (db *DB) QueryGoldenSet(minChars int) core.Result {
 	rows, err := db.conn.Query(
 		"SELECT idx, seed_id, domain, voice, prompt, response, gen_time, char_count "+
@@ -116,7 +116,7 @@ func (db *DB) QueryGoldenSet(minChars int) core.Result {
 		minChars,
 	)
 	if err != nil {
-		return core.Fail(core.E("ml.DB.QueryGoldenSet", "query golden_set", err))
+		return core.Fail(core.E("datapipe.DB.QueryGoldenSet", "query golden_set", err))
 	}
 	defer rows.Close()
 
@@ -125,7 +125,7 @@ func (db *DB) QueryGoldenSet(minChars int) core.Result {
 		var r GoldenSetRow
 		if err := rows.Scan(&r.Idx, &r.SeedID, &r.Domain, &r.Voice,
 			&r.Prompt, &r.Response, &r.GenTime, &r.CharCount); err != nil {
-			return core.Fail(core.E("ml.DB.QueryGoldenSet", "scan golden_set row", err))
+			return core.Fail(core.E("datapipe.DB.QueryGoldenSet", "scan golden_set row", err))
 		}
 		result = append(result, r)
 	}
@@ -141,7 +141,7 @@ func (db *DB) CountGoldenSet() core.Result {
 	var count int
 	err := db.conn.QueryRow("SELECT COUNT(*) FROM golden_set").Scan(&count)
 	if err != nil {
-		return core.Fail(core.E("ml.DB.CountGoldenSet", "count golden_set", err))
+		return core.Fail(core.E("datapipe.DB.CountGoldenSet", "count golden_set", err))
 	}
 	return core.Ok(count)
 }
@@ -150,7 +150,7 @@ func (db *DB) CountGoldenSet() core.Result {
 //
 //	r := db.QueryExpansionPrompts("pending", 50)
 //	if !r.OK { return r }
-//	rows := r.Value.([]ml.ExpansionPromptRow)
+//	rows := r.Value.([]datapipe.ExpansionPromptRow)
 func (db *DB) QueryExpansionPrompts(status string, limit int) core.Result {
 	query := "SELECT idx, seed_id, region, domain, language, prompt, prompt_en, priority, status " +
 		"FROM expansion_prompts"
@@ -168,7 +168,7 @@ func (db *DB) QueryExpansionPrompts(status string, limit int) core.Result {
 
 	rows, err := db.conn.Query(query, args...)
 	if err != nil {
-		return core.Fail(core.E("ml.DB.QueryExpansionPrompts", "query expansion_prompts", err))
+		return core.Fail(core.E("datapipe.DB.QueryExpansionPrompts", "query expansion_prompts", err))
 	}
 	defer rows.Close()
 
@@ -177,7 +177,7 @@ func (db *DB) QueryExpansionPrompts(status string, limit int) core.Result {
 		var r ExpansionPromptRow
 		if err := rows.Scan(&r.Idx, &r.SeedID, &r.Region, &r.Domain,
 			&r.Language, &r.Prompt, &r.PromptEn, &r.Priority, &r.Status); err != nil {
-			return core.Fail(core.E("ml.DB.QueryExpansionPrompts", "scan expansion_prompt row", err))
+			return core.Fail(core.E("datapipe.DB.QueryExpansionPrompts", "scan expansion_prompt row", err))
 		}
 		result = append(result, r)
 	}
@@ -192,10 +192,10 @@ func (db *DB) QueryExpansionPrompts(status string, limit int) core.Result {
 func (db *DB) CountExpansionPrompts() core.Result {
 	var total, pending int
 	if err := db.conn.QueryRow("SELECT COUNT(*) FROM expansion_prompts").Scan(&total); err != nil {
-		return core.Fail(core.E("ml.DB.CountExpansionPrompts", "count expansion_prompts", err))
+		return core.Fail(core.E("datapipe.DB.CountExpansionPrompts", "count expansion_prompts", err))
 	}
 	if err := db.conn.QueryRow("SELECT COUNT(*) FROM expansion_prompts WHERE status = 'pending'").Scan(&pending); err != nil {
-		return core.Fail(core.E("ml.DB.CountExpansionPrompts", "count pending expansion_prompts", err))
+		return core.Fail(core.E("datapipe.DB.CountExpansionPrompts", "count pending expansion_prompts", err))
 	}
 	return core.Ok([2]int{total, pending})
 }
@@ -207,7 +207,7 @@ func (db *DB) CountExpansionPrompts() core.Result {
 func (db *DB) UpdateExpansionStatus(idx int64, status string) core.Result {
 	_, err := db.conn.Exec("UPDATE expansion_prompts SET status = ? WHERE idx = ?", status, idx)
 	if err != nil {
-		return core.Fail(core.E("ml.DB.UpdateExpansionStatus", core.Sprintf("update expansion_prompt %d", idx), err))
+		return core.Fail(core.E("datapipe.DB.UpdateExpansionStatus", core.Sprintf("update expansion_prompt %d", idx), err))
 	}
 	return core.Ok(nil)
 }
@@ -220,13 +220,13 @@ func (db *DB) UpdateExpansionStatus(idx int64, status string) core.Result {
 func (db *DB) QueryRows(query string, args ...any) core.Result {
 	rows, err := db.conn.Query(query, args...)
 	if err != nil {
-		return core.Fail(core.E("ml.DB.QueryRows", "query", err))
+		return core.Fail(core.E("datapipe.DB.QueryRows", "query", err))
 	}
 	defer rows.Close()
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return core.Fail(core.E("ml.DB.QueryRows", "columns", err))
+		return core.Fail(core.E("datapipe.DB.QueryRows", "columns", err))
 	}
 
 	var result []map[string]any
@@ -237,7 +237,7 @@ func (db *DB) QueryRows(query string, args ...any) core.Result {
 			ptrs[i] = &values[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return core.Fail(core.E("ml.DB.QueryRows", "scan", err))
+			return core.Fail(core.E("datapipe.DB.QueryRows", "scan", err))
 		}
 		row := make(map[string]any, len(cols))
 		for i, col := range cols {
