@@ -11,6 +11,9 @@ use (
 	./external/go-rag/go
 	./external/go-ratelimit/go
 	./external/go-store/go
+	./external/go-ws/go
+	./external/go-process/go
+	./external/mcp/go
 	./external/go
 	./go
 )

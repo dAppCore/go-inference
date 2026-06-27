@@ -51,6 +51,10 @@ require (
 // dappco.re/go/ratelimit is supplied by the go.work `use` directive
 // (./external/go-ratelimit/go); it cannot be pinned here until it is published
 // under the proxy's expected tag scheme (ratelimit/vX.Y.Z).
+//
+// dappco.re/go/mcp and dappco.re/go/ws are likewise supplied by go.work
+// (./external/mcp/go, ./external/go-ws/go) for the core/mcp consolidation;
+// they cannot yet be pinned via the proxy at a version exposing pkg/mcp.
 
 require (
 	forge.lthn.ai/Snider/Enchantrix v0.0.5
