@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"context"
 	"net/http"
 	"runtime"
 	"time"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/serving"
 	coreio "dappco.re/go/io"
 )
 
@@ -213,10 +215,6 @@ func workerProcessTask(cfg *WorkerConfig, task APITask) core.Result {
 }
 
 func workerInfer(cfg *WorkerConfig, task APITask) core.Result {
-	messages := []map[string]string{
-		{"role": "user", "content": task.PromptText},
-	}
-
 	temp := 0.7
 	maxTokens := 2048
 	if task.Config != nil {
@@ -228,54 +226,18 @@ func workerInfer(cfg *WorkerConfig, task APITask) core.Result {
 		}
 	}
 
-	reqBody := map[string]any{
-		"model":       task.ModelName,
-		"messages":    messages,
-		"temperature": temp,
-		"max_tokens":  maxTokens,
+	// Use the shared serving.HTTPBackend (OpenAI-compatible /v1/chat/completions
+	// client) instead of a bespoke request — one OpenAI client across the stack.
+	backend := serving.NewHTTPBackend(cfg.InferURL, task.ModelName,
+		serving.WithHTTPClient(&http.Client{Timeout: 5 * time.Minute}))
+
+	r := backend.Generate(context.Background(), task.PromptText,
+		serving.GenOpts{Temperature: temp, MaxTokens: maxTokens, Model: task.ModelName})
+	if !r.OK {
+		return core.Fail(core.E("agent.workerInfer", "inference request", r.Value.(error)))
 	}
 
-	data := []byte(core.JSONMarshalString(reqBody))
-
-	req, err := http.NewRequest("POST", cfg.InferURL+"/v1/chat/completions", core.NewBuffer(data))
-	if err != nil {
-		return core.Fail(core.E("agent.workerInfer", "create inference request", err))
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 5 * time.Minute}
-	resp, err := client.Do(req)
-	if err != nil {
-		return core.Fail(core.E("agent.workerInfer", "inference request", err))
-	}
-	defer resp.Body.Close()
-
-	rBody := readAll(resp.Body)
-	if !rBody.OK {
-		return core.Fail(core.E("agent.workerInfer", "read response", rBody.Value.(error)))
-	}
-	body := rBody.Value.([]byte)
-
-	if resp.StatusCode != 200 {
-		return core.Fail(core.E("agent.workerInfer", core.Sprintf("inference HTTP %d: %s", resp.StatusCode, truncStr(string(body), 200)), nil))
-	}
-
-	var chatResp struct {
-		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
-		} `json:"choices"`
-	}
-	if r := core.JSONUnmarshal(body, &chatResp); !r.OK {
-		return core.Fail(core.E("agent.workerInfer", "parse response", r.Value.(error)))
-	}
-
-	if len(chatResp.Choices) == 0 {
-		return core.Fail(core.E("agent.workerInfer", "no choices in response", nil))
-	}
-
-	content := chatResp.Choices[0].Message.Content
+	content := r.Value.(serving.Result).Text
 	if len(content) < 10 {
 		return core.Fail(core.E("agent.workerInfer", core.Sprintf("response too short: %d chars", len(content)), nil))
 	}
