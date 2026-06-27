@@ -6,3 +6,19 @@
 	path = external/go-i18n
 	url = https://github.com/dappcore/go-i18n.git
 	branch = dev
+[submodule "external/go-io"]
+	path = external/go-io
+	url = https://github.com/dappcore/go-io.git
+	branch = dev
+[submodule "external/go-rag"]
+	path = external/go-rag
+	url = https://github.com/dappcore/go-rag.git
+	branch = dev
+[submodule "external/go-ratelimit"]
+	path = external/go-ratelimit
+	url = https://github.com/dappcore/go-ratelimit.git
+	branch = dev
+[submodule "external/api"]
+	path = external/api
+	url = https://github.com/dappcore/api.git
+	branch = dev
