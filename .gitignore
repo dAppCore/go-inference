@@ -2,3 +2,9 @@
 .core/
 .idea/
 .vscode/
+# build / test artefacts
+*.test
+*.out
+.DS_Store
+*.bak
+go.work.sum
