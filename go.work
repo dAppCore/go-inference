@@ -10,6 +10,7 @@ use (
 	./external/go-io/go
 	./external/go-rag/go
 	./external/go-ratelimit/go
+	./external/go-store/go
 	./external/go
 	./go
 )

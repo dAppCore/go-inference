@@ -22,3 +22,7 @@
 	path = external/api
 	url = https://github.com/dappcore/api.git
 	branch = dev
+[submodule "external/go-store"]
+	path = external/go-store
+	url = https://github.com/dappcore/go-store.git
+	branch = dev
