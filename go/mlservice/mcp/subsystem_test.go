@@ -7,11 +7,15 @@ import (
 	"dappco.re/go/inference"
 	mlpkg "dappco.re/go/inference/mlservice"
 	"dappco.re/go/inference/serving"
-	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	coremcp "dappco.re/go/mcp/pkg/mcp"
 )
 
-func newSDKServer() *mcpsdk.Server {
-	return mcpsdk.NewServer(&mcpsdk.Implementation{Name: "test", Version: "v0"}, nil)
+func newCoreMCPService() *coremcp.Service {
+	svc, err := coremcp.New(coremcp.Options{})
+	if err != nil {
+		panic(err)
+	}
+	return svc
 }
 
 func newMCPTestService() *mlpkg.Service {
@@ -77,8 +81,8 @@ func TestSubsystem_MLSubsystem_Name_Ugly(t *core.T) {
 
 func TestSubsystem_MLSubsystem_RegisterTools_Good(t *core.T) {
 	subsystem := NewMLSubsystem(nil)
-	server := newSDKServer()
-	core.AssertNotPanics(t, func() { subsystem.RegisterTools(server) })
+	svc := newCoreMCPService()
+	core.AssertNotPanics(t, func() { subsystem.RegisterTools(svc) })
 }
 
 func TestSubsystem_MLSubsystem_RegisterTools_Bad(t *core.T) {
@@ -90,28 +94,25 @@ func TestSubsystem_MLSubsystem_RegisterTools_Bad(t *core.T) {
 
 func TestSubsystem_MLSubsystem_RegisterTools_Ugly(t *core.T) {
 	subsystem := &MLSubsystem{}
-	server := newSDKServer()
-	core.AssertNotPanics(t, func() { subsystem.RegisterTools(server) })
+	svc := newCoreMCPService()
+	core.AssertNotPanics(t, func() { subsystem.RegisterTools(svc) })
 }
 
 func TestSubsystem_MLSubsystem_Shutdown_Good(t *core.T) {
 	subsystem := NewMLSubsystem(nil)
-	r := subsystem.Shutdown(context.Background())
-	core.AssertTrue(t, r.OK)
+	core.AssertNil(t, subsystem.Shutdown(context.Background()))
 	core.AssertEqual(t, "ml", subsystem.Name())
 }
 
 func TestSubsystem_MLSubsystem_Shutdown_Bad(t *core.T) {
 	subsystem := &MLSubsystem{}
-	r := subsystem.Shutdown(context.Background())
-	core.AssertTrue(t, r.OK)
+	core.AssertNil(t, subsystem.Shutdown(context.Background()))
 }
 
 func TestSubsystem_MLSubsystem_Shutdown_Ugly(t *core.T) {
 	subsystem := NewMLSubsystem(nil)
 	subsystem.logger = nil
-	r := subsystem.Shutdown(context.Background())
-	core.AssertTrue(t, r.OK)
+	core.AssertNil(t, subsystem.Shutdown(context.Background()))
 }
 
 func TestSubsystem_mlGenerate_Good(t *core.T) {

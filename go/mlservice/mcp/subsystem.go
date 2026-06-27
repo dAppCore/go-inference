@@ -12,6 +12,7 @@ import (
 	"dappco.re/go/inference/mlservice"
 	"dappco.re/go/inference/score"
 	"dappco.re/go/inference/serving"
+	coremcp "dappco.re/go/mcp/pkg/mcp"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -34,10 +35,13 @@ func NewMLSubsystem(svc *mlservice.Service) *MLSubsystem {
 // Name returns the subsystem identifier exposed to the MCP server.
 func (m *MLSubsystem) Name() string { return "ml" }
 
-// RegisterTools adds ML tools to the MCP server.
-// Usage example: subsystem.RegisterTools(server)
-func (m *MLSubsystem) RegisterTools(server *mcp.Server) {
-	mcp.AddTool(server, &mcp.Tool{
+// RegisterTools adds ML tools to the core/mcp service. It implements the
+// coremcp.Subsystem contract, so the ML tools register through the shared
+// MCP framework (dappco.re/go/mcp) rather than a bespoke server.
+func (m *MLSubsystem) RegisterTools(svc *coremcp.Service) {
+	server := svc.Server()
+
+	coremcp.AddToolRecorded(svc, server, "ml", &mcp.Tool{
 		Name:        "ml_generate",
 		Description: "Generate text via a configured ML inference backend.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input MLGenerateInput) (*mcp.CallToolResult, MLGenerateOutput, error) {
@@ -48,7 +52,7 @@ func (m *MLSubsystem) RegisterTools(server *mcp.Server) {
 		return nil, result.Value.(MLGenerateOutput), nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	coremcp.AddToolRecorded(svc, server, "ml", &mcp.Tool{
 		Name:        "ml_score",
 		Description: "Score a prompt/response pair using heuristic and LLM judge suites.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input MLScoreInput) (*mcp.CallToolResult, MLScoreOutput, error) {
@@ -59,7 +63,7 @@ func (m *MLSubsystem) RegisterTools(server *mcp.Server) {
 		return nil, result.Value.(MLScoreOutput), nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	coremcp.AddToolRecorded(svc, server, "ml", &mcp.Tool{
 		Name:        "ml_probe",
 		Description: "Run capability probes against an inference backend.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input MLProbeInput) (*mcp.CallToolResult, MLProbeOutput, error) {
@@ -70,7 +74,7 @@ func (m *MLSubsystem) RegisterTools(server *mcp.Server) {
 		return nil, result.Value.(MLProbeOutput), nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	coremcp.AddToolRecorded(svc, server, "ml", &mcp.Tool{
 		Name:        "ml_status",
 		Description: "Show training and generation progress from InfluxDB.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input MLStatusInput) (*mcp.CallToolResult, MLStatusOutput, error) {
@@ -81,7 +85,7 @@ func (m *MLSubsystem) RegisterTools(server *mcp.Server) {
 		return nil, result.Value.(MLStatusOutput), nil
 	})
 
-	mcp.AddTool(server, &mcp.Tool{
+	coremcp.AddToolRecorded(svc, server, "ml", &mcp.Tool{
 		Name:        "ml_backends",
 		Description: "List available inference backends and their status.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, input MLBackendsInput) (*mcp.CallToolResult, MLBackendsOutput, error) {
@@ -93,8 +97,14 @@ func (m *MLSubsystem) RegisterTools(server *mcp.Server) {
 	})
 }
 
-// Shutdown implements mcp.SubsystemWithShutdown.
-func (m *MLSubsystem) Shutdown(_ context.Context) core.Result { return core.Ok(nil) }
+// Shutdown implements coremcp.SubsystemWithShutdown.
+func (m *MLSubsystem) Shutdown(_ context.Context) error { return nil }
+
+// compile-time check: MLSubsystem satisfies the core/mcp subsystem contract.
+var (
+	_ coremcp.Subsystem             = (*MLSubsystem)(nil)
+	_ coremcp.SubsystemWithShutdown = (*MLSubsystem)(nil)
+)
 
 // --- Input/Output types ---
 
