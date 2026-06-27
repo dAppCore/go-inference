@@ -4,19 +4,21 @@ package serving
 
 import (
 	"context"
-	"dappco.re/go"
 	"net/http"
 	"net/http/httptest"
 
+	core "dappco.re/go"
+
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/provider/openai"
 )
 
 // newTestServer creates an httptest.Server that responds with the given content.
 func newTestServer(t *core.T, content string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := chatResponse{
-			Choices: []chatChoice{{Message: Message{Role: "assistant", Content: content}}},
+		resp := openai.ChatCompletionResponse{
+			Choices: []openai.ChatChoice{{Message: openai.ChatMessage{Role: "assistant", Content: content}}},
 		}
 		mustWriteJSONResponse(t, w, resp)
 	}))
@@ -26,15 +28,15 @@ func newTestServer(t *core.T, content string) *httptest.Server {
 func newTestServerMulti(t *core.T) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req chatRequest
+		var req openai.ChatCompletionRequest
 		mustReadJSONRequest(t, r, &req)
 		// Echo back the last message content with a prefix.
 		lastContent := ""
 		if len(req.Messages) > 0 {
 			lastContent = req.Messages[len(req.Messages)-1].Content
 		}
-		resp := chatResponse{
-			Choices: []chatChoice{{Message: Message{Role: "assistant", Content: "reply:" + lastContent}}},
+		resp := openai.ChatCompletionResponse{
+			Choices: []openai.ChatChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "reply:" + lastContent}}},
 		}
 		mustWriteJSONResponse(t, w, resp)
 	}))
@@ -59,15 +61,15 @@ func TestHTTPTextModel_Generate_Good(t *core.T) {
 
 func TestHTTPTextModel_Generate_WithOpts_Good(t *core.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req chatRequest
+		var req openai.ChatCompletionRequest
 		mustReadJSONRequest(t, r, &req)
 
 		// Verify that options are passed through.
-		core.AssertInDelta(t, 0.8, req.Temperature, 0.01)
-		core.AssertEqual(t, 100, req.MaxTokens)
+		core.AssertInDelta(t, 0.8, float64(*req.Temperature), 0.01)
+		core.AssertEqual(t, 100, *req.MaxTokens)
 
-		resp := chatResponse{
-			Choices: []chatChoice{{Message: Message{Role: "assistant", Content: "configured"}}},
+		resp := openai.ChatCompletionResponse{
+			Choices: []openai.ChatChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "configured"}}},
 		}
 		mustWriteJSONResponse(t, w, resp)
 	}))
@@ -192,8 +194,8 @@ func TestHTTPTextModel_BatchGenerate_PartialError_Bad(t *core.T) {
 			w.Write([]byte("error on second"))
 			return
 		}
-		resp := chatResponse{
-			Choices: []chatChoice{{Message: Message{Role: "assistant", Content: "ok"}}},
+		resp := openai.ChatCompletionResponse{
+			Choices: []openai.ChatChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "ok"}}},
 		}
 		mustWriteJSONResponse(t, w, resp)
 	}))
@@ -253,8 +255,8 @@ func TestHTTPTextModel_Err_ClearedOnSuccess_Good(t *core.T) {
 			w.Write([]byte("fail"))
 			return
 		}
-		resp := chatResponse{
-			Choices: []chatChoice{{Message: Message{Role: "assistant", Content: "ok"}}},
+		resp := openai.ChatCompletionResponse{
+			Choices: []openai.ChatChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "ok"}}},
 		}
 		mustWriteJSONResponse(t, w, resp)
 	}))

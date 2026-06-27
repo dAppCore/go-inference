@@ -4,11 +4,13 @@ package serving
 
 import (
 	"context"
-	"dappco.re/go"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+
+	core "dappco.re/go"
+	"dappco.re/go/inference/provider/openai"
 )
 
 // ---------------------------------------------------------------------------
@@ -25,9 +27,9 @@ func newMockLlamaServer(t *core.T, chatContent string) *httptest.Server {
 		case "/health":
 			w.WriteHeader(http.StatusOK)
 		case "/v1/chat/completions":
-			resp := chatResponse{
-				Choices: []chatChoice{
-					{Message: Message{Role: "assistant", Content: chatContent}},
+			resp := openai.ChatCompletionResponse{
+				Choices: []openai.ChatChoice{
+					{Message: openai.ChatMessage{Role: "assistant", Content: chatContent}},
 				},
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -283,7 +285,7 @@ func TestLlamaBackend_Generate_EmptyChoices_Ugly(t *core.T) {
 		case "/health":
 			w.WriteHeader(http.StatusOK)
 		case "/v1/chat/completions":
-			resp := chatResponse{Choices: []chatChoice{}}
+			resp := openai.ChatCompletionResponse{Choices: []openai.ChatChoice{}}
 			mustWriteJSONResponse(t, w, resp)
 		default:
 			http.NotFound(w, r)
@@ -306,14 +308,14 @@ func TestLlamaBackend_Generate_OptsForwarded_Good(t *core.T) {
 		case "/health":
 			w.WriteHeader(http.StatusOK)
 		case "/v1/chat/completions":
-			var req chatRequest
+			var req openai.ChatCompletionRequest
 			mustReadJSONRequest(t, r, &req)
 			// Verify opts were forwarded.
-			core.AssertInDelta(t, 0.7, req.Temperature, 0.01)
-			core.AssertEqual(t, 256, req.MaxTokens)
+			core.AssertInDelta(t, 0.7, float64(*req.Temperature), 0.01)
+			core.AssertEqual(t, 256, *req.MaxTokens)
 
-			resp := chatResponse{
-				Choices: []chatChoice{{Message: Message{Role: "assistant", Content: "ok"}}},
+			resp := openai.ChatCompletionResponse{
+				Choices: []openai.ChatChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "ok"}}},
 			}
 			mustWriteJSONResponse(t, w, resp)
 		default:

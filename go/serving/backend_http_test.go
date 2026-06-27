@@ -2,10 +2,12 @@ package serving
 
 import (
 	"context"
-	"dappco.re/go"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	core "dappco.re/go"
+	"dappco.re/go/inference/provider/openai"
 )
 
 func TestHTTPBackend_Generate_Good(t *testing.T) {
@@ -14,15 +16,15 @@ func TestHTTPBackend_Generate_Good(t *testing.T) {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
 
-		var req chatRequest
+		var req openai.ChatCompletionRequest
 		mustReadJSONRequest(t, r, &req)
 
 		if len(req.Messages) != 1 || req.Messages[0].Content != "hello" {
 			t.Errorf("unexpected messages: %+v", req.Messages)
 		}
 
-		resp := chatResponse{
-			Choices: []chatChoice{{Message: Message{Role: "assistant", Content: "world"}}},
+		resp := openai.ChatCompletionResponse{
+			Choices: []openai.ChatChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "world"}}},
 		}
 		mustWriteJSONResponse(t, w, resp)
 	}))
@@ -57,8 +59,8 @@ func TestHTTPBackend_Generate_Bad(t *testing.T) {
 
 func TestHTTPBackend_StopSequences_Good(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := chatResponse{
-			Choices: []chatChoice{{Message: Message{Role: "assistant", Content: "hello STOP world"}}},
+		resp := openai.ChatCompletionResponse{
+			Choices: []openai.ChatChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "hello STOP world"}}},
 		}
 		mustWriteJSONResponse(t, w, resp)
 	}))
@@ -84,8 +86,8 @@ func TestHTTPBackendRetryUglyScenario(t *testing.T) {
 			w.Write([]byte("internal error"))
 			return
 		}
-		resp := chatResponse{
-			Choices: []chatChoice{{Message: Message{Role: "assistant", Content: "recovered"}}},
+		resp := openai.ChatCompletionResponse{
+			Choices: []openai.ChatChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "recovered"}}},
 		}
 		mustWriteJSONResponse(t, w, resp)
 	}))
@@ -421,7 +423,7 @@ func TestBackendHttp_HTTPBackend_LoadModel_Ugly(t *core.T) {
 
 func TestBackendHttp_HTTPBackend_Generate_Good(t *core.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mustWriteJSONResponse(t, w, chatResponse{Choices: []chatChoice{{Message: Message{Role: "assistant", Content: "ok"}}}})
+		mustWriteJSONResponse(t, w, openai.ChatCompletionResponse{Choices: []openai.ChatChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "ok"}}}})
 	}))
 	defer srv.Close()
 	b := NewHTTPBackend(srv.URL, "model")
@@ -441,7 +443,7 @@ func TestBackendHttp_HTTPBackend_Generate_Bad(t *core.T) {
 
 func TestBackendHttp_HTTPBackend_Generate_Ugly(t *core.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mustWriteJSONResponse(t, w, chatResponse{Choices: []chatChoice{{Message: Message{Role: "assistant", Content: "cut STOP rest"}}}})
+		mustWriteJSONResponse(t, w, openai.ChatCompletionResponse{Choices: []openai.ChatChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "cut STOP rest"}}}})
 	}))
 	defer srv.Close()
 	b := NewHTTPBackend(srv.URL, "model")
@@ -453,7 +455,7 @@ func TestBackendHttp_HTTPBackend_Generate_Ugly(t *core.T) {
 
 func TestBackendHttp_HTTPBackend_Chat_Good(t *core.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mustWriteJSONResponse(t, w, chatResponse{Choices: []chatChoice{{Message: Message{Role: "assistant", Content: "chat"}}}})
+		mustWriteJSONResponse(t, w, openai.ChatCompletionResponse{Choices: []openai.ChatChoice{{Message: openai.ChatMessage{Role: "assistant", Content: "chat"}}}})
 	}))
 	defer srv.Close()
 	b := NewHTTPBackend(srv.URL, "model")
@@ -471,7 +473,7 @@ func TestBackendHttp_HTTPBackend_Chat_Bad(t *core.T) {
 
 func TestBackendHttp_HTTPBackend_Chat_Ugly(t *core.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mustWriteJSONResponse(t, w, chatResponse{})
+		mustWriteJSONResponse(t, w, openai.ChatCompletionResponse{})
 	}))
 	defer srv.Close()
 	b := NewHTTPBackend(srv.URL, "model")

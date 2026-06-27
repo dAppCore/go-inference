@@ -7,6 +7,7 @@ import (
 
 	"dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/provider/openai"
 	coreio "dappco.re/go/io"
 )
 
@@ -54,22 +55,14 @@ func WithHTTPMaxTokens(n int) HTTPOption {
 	}
 }
 
-// chatRequest is the request body for /v1/chat/completions.
-type chatRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Temperature float64   `json:"temperature"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
-}
-
-// chatChoice is a single completion choice.
-type chatChoice struct {
-	Message Message `json:"message"`
-}
-
-// chatResponse is the response from /v1/chat/completions.
-type chatResponse struct {
-	Choices []chatChoice `json:"choices"`
+// openaiMessages converts serving messages to the shared OpenAI wire type so
+// HTTPBackend and provider/openai encode requests through one codec.
+func openaiMessages(messages []Message) []openai.ChatMessage {
+	out := make([]openai.ChatMessage, len(messages))
+	for i, m := range messages {
+		out[i] = openai.ChatMessage{Role: m.Role, Content: m.Content, Images: m.Images}
+	}
+	return out
 }
 
 // retryableError marks errors that should be retried.
@@ -156,13 +149,15 @@ func (b *HTTPBackend) Chat(ctx context.Context, messages []Message, opts GenOpts
 	if opts.MaxTokens > 0 {
 		maxTokens = opts.MaxTokens
 	}
-	temp := opts.Temperature
+	temp := float32(opts.Temperature)
 
-	req := chatRequest{
+	req := openai.ChatCompletionRequest{
 		Model:       model,
-		Messages:    messages,
-		Temperature: temp,
-		MaxTokens:   maxTokens,
+		Messages:    openaiMessages(messages),
+		Temperature: &temp,
+	}
+	if maxTokens > 0 {
+		req.MaxTokens = &maxTokens
 	}
 
 	body := []byte(core.JSONMarshalString(req))
@@ -199,7 +194,7 @@ func (b *HTTPBackend) Chat(ctx context.Context, messages []Message, opts GenOpts
 //	if !r.OK { return r }
 //	text := r.Value.(string)
 func (b *HTTPBackend) doRequest(ctx context.Context, body []byte) core.Result {
-	url := b.baseURL + "/v1/chat/completions"
+	url := b.baseURL + openai.DefaultChatCompletionsPath
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, core.NewBuffer(body))
 	if err != nil {
@@ -226,7 +221,7 @@ func (b *HTTPBackend) doRequest(ctx context.Context, body []byte) core.Result {
 		return core.Fail(core.E("serving.HTTPBackend.doRequest", core.Sprintf("unexpected status %d: %s", resp.StatusCode, string(respBody)), nil))
 	}
 
-	var chatResp chatResponse
+	var chatResp openai.ChatCompletionResponse
 	if r := core.JSONUnmarshal(respBody, &chatResp); !r.OK {
 		return core.Fail(core.E("serving.HTTPBackend.doRequest", "unmarshal response", r.Value.(error)))
 	}
