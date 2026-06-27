@@ -4,7 +4,6 @@ package chathistory
 
 import (
 	"database/sql"
-	"encoding/json"
 	"io"
 	"time"
 
@@ -86,8 +85,8 @@ type JSONLTurn struct {
 	Ordinal     int             `json:"ordinal"`
 	Role        string          `json:"role"`
 	Content     string          `json:"content"`
-	ToolCalls   json.RawMessage `json:"tool_calls,omitempty"`
-	ToolResults json.RawMessage `json:"tool_results,omitempty"`
+	ToolCalls   core.RawMessage `json:"tool_calls,omitempty"`
+	ToolResults core.RawMessage `json:"tool_results,omitempty"`
 	CreatedAt   time.Time       `json:"created_at"`
 	TokensIn    int             `json:"tokens_in,omitempty"`
 	TokensOut   int             `json:"tokens_out,omitempty"`
@@ -189,10 +188,10 @@ func (h *History) ExportJSONL(dest string) error {
 				return core.E("chathistory.ExportJSONL", "scan turn", err)
 			}
 			if toolCalls.Valid {
-				t.ToolCalls = json.RawMessage(toolCalls.String)
+				t.ToolCalls = core.RawMessage(toolCalls.String)
 			}
 			if toolResults.Valid {
-				t.ToolResults = json.RawMessage(toolResults.String)
+				t.ToolResults = core.RawMessage(toolResults.String)
 			}
 			if tokensIn.Valid {
 				t.TokensIn = int(tokensIn.Int32)
