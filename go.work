@@ -5,7 +5,11 @@ go 1.26.2
 // CI: GOWORK=off uses go/go.mod tags for reproducible resolution.
 
 use (
+	./external/api/go
 	./external/go-i18n/go
+	./external/go-io/go
+	./external/go-rag/go
+	./external/go-ratelimit/go
 	./external/go
 	./go
 )
