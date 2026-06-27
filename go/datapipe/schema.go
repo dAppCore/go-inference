@@ -19,3 +19,7 @@ const (
 	TableCheckpointScores = "checkpoint_scores"
 	TableProbeResults     = "probe_results"
 )
+
+// TargetTotal is the target row count for the golden training set; metrics
+// and inventory report completion as a percentage of it.
+const TargetTotal = 15000

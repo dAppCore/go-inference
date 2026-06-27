@@ -107,16 +107,6 @@ func newStoreDuckDB(t testing.TB) *store.DuckDB {
 	return db
 }
 
-func seedGoldenStoreDB(t *core.T) *store.DuckDB {
-	t.Helper()
-	db := newStoreDuckDB(t)
-	requireResultOK(t, db.Exec(`CREATE TABLE golden_set (
-		idx INTEGER, seed_id VARCHAR, domain VARCHAR, voice VARCHAR,
-		gen_time DOUBLE, char_count INTEGER
-	)`))
-	return db
-}
-
 func toInt(v any) int {
 	switch n := v.(type) {
 	case int64:
