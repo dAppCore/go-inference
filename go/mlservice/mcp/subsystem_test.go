@@ -227,8 +227,10 @@ func TestSubsystem_mlBackends_Ugly(t *core.T) {
 }
 
 func TestSubsystem_capabilityIDStrings_Good(t *core.T) {
-	got := capabilityIDStrings(nil)
-	core.AssertEqual(t, 0, len(got))
+	got := capabilityIDStrings([]inference.CapabilityID{"chat", "generate"})
+	core.AssertEqual(t, 2, len(got))
+	core.AssertEqual(t, "chat", got[0])
+	core.AssertEqual(t, "generate", got[1])
 }
 
 func TestSubsystem_capabilityIDStrings_Bad(t *core.T) {
