@@ -456,4 +456,3 @@ func BenchmarkOllama_AppendTagsResponse_TwentyModels(b *testing.B) {
 		ollamaSinkBuf = AppendTagsResponse(make([]byte, 0, tagsResponseSize(resp)), resp)
 	}
 }
-

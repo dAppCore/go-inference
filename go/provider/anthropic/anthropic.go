@@ -123,12 +123,12 @@ func MessageResponseSize(r MessageResponse) int {
 	//   leading-comma (1) + "key" (len(key)+2) + : (1) + "value" (len(value)+2)
 	//   = 6 + len(key) + len(value)
 	// First field omits leading comma: 5 + len(key) + len(value).
-	size := 2 // outer braces
-	size += 5 + 2 + len(r.ID)     // "id":"…"
-	size += 6 + 4 + len(r.Type)   // ,"type":"…"
-	size += 6 + 4 + len(r.Role)   // ,"role":"…"
-	size += 6 + 5 + len(r.Model)  // ,"model":"…"
-	size += 6 + 7                 // ,"content":[]
+	size := 2                    // outer braces
+	size += 5 + 2 + len(r.ID)    // "id":"…"
+	size += 6 + 4 + len(r.Type)  // ,"type":"…"
+	size += 6 + 4 + len(r.Role)  // ,"role":"…"
+	size += 6 + 5 + len(r.Model) // ,"model":"…"
+	size += 6 + 7                // ,"content":[]
 	for i, b := range r.Content {
 		size += 5 + 2 + 4 + len(b.Type) // {"type":"X"}
 		if b.Text != "" {
@@ -189,16 +189,21 @@ func appendMessage(buf []byte, m Message) []byte {
 // count and slice depth.
 //
 // Wire-compatible with json.Marshal across every branch:
+//
 //   - model + messages + max_tokens always emitted (no omitempty).
+//
 //   - system: omitempty (string).
+//
 //   - temperature / top_p / top_k: omitempty (pointer); emitted as
 //     number only when non-nil.
+//
 //   - stream: omitempty (bool); emitted as true only when true.
+//
 //   - stop_sequences: omitempty (slice); emitted as JSON array of
 //     strings when len > 0.
 //
-//	buf := AppendMessageRequest(make([]byte, 0, MessageRequestSize(req)), req)
-//	httpClient.Post(url, "application/json", bytes.NewReader(buf))
+//     buf := AppendMessageRequest(make([]byte, 0, MessageRequestSize(req)), req)
+//     httpClient.Post(url, "application/json", bytes.NewReader(buf))
 func AppendMessageRequest(buf []byte, r MessageRequest) []byte {
 	buf = append(buf, '{')
 	buf = jsonenc.AppendStringField(buf, "model", r.Model, false)
@@ -248,7 +253,7 @@ func AppendMessageRequest(buf []byte, r MessageRequest) []byte {
 // MessageResponseSize. Pointer/bool/slice fields fold in only when
 // they would emit under the omitempty contract.
 func MessageRequestSize(r MessageRequest) int {
-	size := 2 // outer braces
+	size := 2                    // outer braces
 	size += 5 + 5 + len(r.Model) // "model":"…"
 	if r.System != "" {
 		size += 6 + 6 + len(r.System) // ,"system":"…"

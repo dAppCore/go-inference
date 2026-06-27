@@ -135,8 +135,8 @@ func TestOllama_AppendGenerateResponse_WireMatchesEncodingJSON(t *testing.T) {
 // omitempty semantics on Model/ModifiedAt/Size.
 func TestOllama_AppendTagsResponse_WireMatchesEncodingJSON(t *testing.T) {
 	cases := []TagsResponse{
-		{},                       // nil Models -> "models":null
-		{Models: []ModelTag{}},   // empty slice -> "models":[]
+		{},                     // nil Models -> "models":null
+		{Models: []ModelTag{}}, // empty slice -> "models":[]
 		{Models: []ModelTag{{Name: "qwen3:latest"}}},
 		{Models: []ModelTag{
 			{Name: "qwen3:latest", Model: "qwen3", ModifiedAt: "2026-05-21T10:00:00Z", Size: 4_500_000_000},
@@ -157,4 +157,3 @@ func TestOllama_AppendTagsResponse_WireMatchesEncodingJSON(t *testing.T) {
 		}
 	}
 }
-
