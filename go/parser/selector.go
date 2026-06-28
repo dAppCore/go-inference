@@ -6,7 +6,7 @@ import (
 	core "dappco.re/go"
 )
 
-//	key := parser.NormaliseKey("Qwen-3.5")  // "qwen_3_5"
+// key := parser.NormaliseKey("Qwen-3.5")  // "qwen_3_5"
 func NormaliseKey(value string) string {
 	value = core.Trim(value)
 	if value == "" {
@@ -52,35 +52,51 @@ func NormaliseKey(value string) string {
 	return string(buf)
 }
 
-//	family := parser.Family(parser.Hint{Architecture: "qwen3"})  // "qwen"
+// family := parser.Family(parser.Hint{Architecture: "qwen3"})  // "qwen"
 func Family(hint Hint) string {
 	arch := NormaliseKey(hint.Architecture)
 	adapter := NormaliseKey(hint.AdapterName)
-	combined := core.Concat(arch, " ", adapter)
+	// Scan arch and adapter separately rather than concatenating them.
+	// The old shape built `arch + " " + adapter` once per call (one
+	// string alloc on the per-stream LookupHint path) purely to run
+	// Contains over the pair. Because the separator is a space and no
+	// family needle below contains a space, a needle can never straddle
+	// the boundary — so Contains(arch+" "+adapter, n) is exactly
+	// Contains(arch, n) || Contains(adapter, n). familyContains encodes
+	// that, byte-identically, with zero allocation.
 	switch {
-	case core.Contains(combined, "qwen"):
+	case familyContains(arch, adapter, "qwen"):
 		return "qwen"
-	case core.Contains(combined, "gemma"):
+	case familyContains(arch, adapter, "gemma"):
 		return "gemma"
-	case core.Contains(combined, "minimax"):
+	case familyContains(arch, adapter, "minimax"):
 		return "minimax"
-	case core.Contains(combined, "deepseek"):
+	case familyContains(arch, adapter, "deepseek"):
 		return "deepseek_r1"
-	case core.Contains(combined, "gpt_oss"), core.Contains(combined, "gptoss"):
+	case familyContains(arch, adapter, "gpt_oss"), familyContains(arch, adapter, "gptoss"):
 		return "gpt_oss"
-	case core.Contains(combined, "mistral"), core.Contains(combined, "mixtral"):
+	case familyContains(arch, adapter, "mistral"), familyContains(arch, adapter, "mixtral"):
 		return "mistral"
-	case core.Contains(combined, "kimi"), core.Contains(combined, "moonshot"):
+	case familyContains(arch, adapter, "kimi"), familyContains(arch, adapter, "moonshot"):
 		return "kimi"
-	case core.Contains(combined, "glm"), core.Contains(combined, "chatglm"):
+	case familyContains(arch, adapter, "glm"), familyContains(arch, adapter, "chatglm"):
 		return "glm"
-	case core.Contains(combined, "hermes"):
+	case familyContains(arch, adapter, "hermes"):
 		return "hermes"
-	case core.Contains(combined, "granite"):
+	case familyContains(arch, adapter, "granite"):
 		return "granite"
 	default:
 		return "generic"
 	}
+}
+
+// familyContains reports whether needle occurs in either the architecture
+// or adapter key. It replaces a Concat-then-Contains over the joined pair;
+// the needle never contains the space separator the join would insert, so
+// the two are equivalent. A plain function (not a closure over arch/adapter)
+// keeps it allocation-free — a capturing closure would heap-escape.
+func familyContains(arch, adapter, needle string) bool {
+	return core.Contains(arch, needle) || core.Contains(adapter, needle)
 }
 
 // replaceAll delegates to core.Replace (strings.ReplaceAll). The
