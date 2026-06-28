@@ -244,7 +244,7 @@ func Hash(srcDir string) (string, core.Result) {
 		name    string
 		content []byte
 	}
-	var metas []metaFile
+	metas := make([]metaFile, 0, len(metaCandidates))
 	fs := sharedFs()
 	for _, name := range metaCandidates {
 		path := core.JoinPath(srcDir, name)
