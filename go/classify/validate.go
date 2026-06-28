@@ -50,24 +50,20 @@ func articlePrompt(noun string) string {
 
 func articlePromptForLang(lang, noun string) string {
 	noun = core.Trim(noun)
+	// Direct concatenation costs one allocation (the result string), whereas
+	// core.Sprintf additionally boxes noun into an interface{} for its
+	// variadic args on this per-validation path.
 	if isFrenchLanguage(lang) {
-		return core.Sprintf(
-			"Complete with the correct article (le/la/l'/les/du/au/aux/un/une/des): ___ %s. Answer with just the article:",
-			noun,
-		)
+		return "Complete with the correct article (le/la/l'/les/du/au/aux/un/une/des): ___ " + noun + ". Answer with just the article:"
 	}
-	return core.Sprintf(
-		"Complete with the correct article (a/an/the): ___ %s. Answer with just the article:",
-		noun,
-	)
+	return "Complete with the correct article (a/an/the): ___ " + noun + ". Answer with just the article:"
 }
 
 // irregularPrompt builds a fill-in-the-blank prompt for irregular verb prediction.
 func irregularPrompt(verb, tense string) string {
-	return core.Sprintf(
-		"What is the %s form of the verb '%s'? Answer with just the word:",
-		tense, verb,
-	)
+	// Direct concatenation avoids core.Sprintf's interface boxing of tense
+	// and verb on this per-validation path.
+	return "What is the " + tense + " form of the verb '" + verb + "'? Answer with just the word:"
 }
 
 // collectGenerated runs a single-token generation and returns the trimmed, lowercased output.

@@ -90,14 +90,20 @@ func ClassifyCorpus(ctx context.Context, model inference.TextModel,
 	start := time.Now()
 
 	scanner := bufio.NewScanner(input)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	// Start with a 64 KiB buffer and let the scanner grow on demand up to the
+	// 1 MiB max, rather than committing the full megabyte per call — typical
+	// JSONL records are far smaller, so the eager allocation is wasted bytes.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	type pending struct {
 		record map[string]any
 		prompt string
 	}
 
-	var batch []pending
+	// Presize to batchSize so the per-line appends never grow the slice
+	// (it is reset to [:0] after each flush, never exceeding batchSize).
+	// max(...,0) guards the degenerate non-positive batchSize configs.
+	batch := make([]pending, 0, max(cfg.batchSize, 0))
 
 	flush := func() error {
 		if len(batch) == 0 {
@@ -130,7 +136,12 @@ func ClassifyCorpus(ctx context.Context, model inference.TextModel,
 				return golog.E("ClassifyCorpus", "marshal output", mr.Value.(error))
 			}
 			line := mr.Value.([]byte)
-			core.Print(output, "%s", line)
+			// Write the marshalled bytes plus a newline directly: core.Print
+			// would route through fmt (a format+"\n" concat and a []byte→any box
+			// every record). AsString is zero-copy and safe — line is freshly
+			// marshalled and not referenced again.
+			core.WriteString(output, core.AsString(line))
+			core.WriteString(output, "\n")
 		}
 		batch = batch[:0]
 		return nil
