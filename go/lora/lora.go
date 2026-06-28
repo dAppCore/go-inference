@@ -34,6 +34,7 @@ package lora
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"sync"
 
@@ -170,10 +171,14 @@ type Loader interface {
 	Unload(ctx context.Context, id string) error
 }
 
-// entry is one registered adapter: its ref, its current ref-count (outstanding
-// Use leases), and whether it is currently resident on the base model.
+// entry is one registered adapter: its ref, the cached deterministic id, its
+// current ref-count (outstanding Use leases), and whether it is currently
+// resident on the base model. id is AdapterRef.ID() — a SHA-256 + hex of the
+// immutable Name+Path — computed once at Register so the hot name→id paths
+// (Acquire, IsResident, Pin) never re-hash.
 type entry struct {
 	ref      AdapterRef
+	id       string
 	refs     int
 	resident bool
 }
@@ -215,9 +220,10 @@ func (r *Registry) Register(ref AdapterRef) error {
 	if _, ok := r.byName[ref.Name]; ok {
 		return core.E("ai", "lora: adapter already registered: "+ref.Name, nil)
 	}
-	e := &entry{ref: ref}
+	id := ref.ID()
+	e := &entry{ref: ref, id: id}
 	r.byName[ref.Name] = e
-	r.byID[ref.ID()] = e
+	r.byID[id] = e
 	return nil
 }
 
@@ -235,7 +241,7 @@ func (r *Registry) Unregister(name string) error {
 		return core.E("ai", "lora: adapter in use, cannot unregister: "+name, nil)
 	}
 	delete(r.byName, name)
-	delete(r.byID, e.ref.ID())
+	delete(r.byID, e.id)
 	return nil
 }
 
@@ -263,7 +269,16 @@ func (r *Registry) List() []AdapterRef {
 	for _, e := range r.byName {
 		out = append(out, e.ref)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	slices.SortFunc(out, func(a, b AdapterRef) int {
+		switch {
+		case a.Name < b.Name:
+			return -1
+		case a.Name > b.Name:
+			return 1
+		default:
+			return 0
+		}
+	})
 	return out
 }
 
@@ -280,7 +295,7 @@ func (r *Registry) Acquire(name string) (string, error) {
 		return "", core.E("ai", "lora: unknown adapter: "+name, nil)
 	}
 	e.refs++
-	return e.ref.ID(), nil
+	return e.id, nil
 }
 
 // Release drops one ref for the adapter id. It clamps at zero, so an over-release
@@ -314,6 +329,21 @@ func (r *Registry) RefCount(id string) int {
 // ineligible for eviction).
 func (r *Registry) InUse(id string) bool {
 	return r.RefCount(id) > 0
+}
+
+// idByName resolves name to its cached deterministic id, with ok=false for an
+// unknown name. It lets the Pool's residency/pin paths get an id without
+// recomputing AdapterRef.ID() (a SHA-256 + hex) on every call.
+//
+//	id, ok := reg.idByName("a")
+func (r *Registry) idByName(name string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.byName[name]
+	if !ok {
+		return "", false
+	}
+	return e.id, true
 }
 
 // Config builds a Pool: the go-mlx Loader, the EvictionPolicy, and the Capacity
@@ -370,11 +400,10 @@ func (p *Pool) Register(ref AdapterRef) error { return p.reg.Register(ref) }
 //
 //	pool.Unregister("a")
 func (p *Pool) Unregister(name string) error {
-	ref, err := p.reg.Get(name)
-	if err != nil {
-		return err
+	id, ok := p.reg.idByName(name)
+	if !ok {
+		return core.E("ai", "lora: unknown adapter: "+name, nil)
 	}
-	id := ref.ID()
 
 	p.mu.Lock()
 	// Refuse before unloading if the adapter is in flight — keeps the catalogue
@@ -517,13 +546,12 @@ func (p *Pool) evictable() []string {
 //
 //	pool.Use(ctx, "a"); pool.Pin("a") // keep a resident
 func (p *Pool) Pin(name string) {
-	ref, err := p.reg.Get(name)
-	if err != nil {
+	id, ok := p.reg.idByName(name)
+	if !ok {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	id := ref.ID()
 	if p.resident[id] != "" {
 		p.pinned[id] = true
 	}
@@ -534,25 +562,25 @@ func (p *Pool) Pin(name string) {
 //
 //	pool.Unpin("a")
 func (p *Pool) Unpin(name string) {
-	ref, err := p.reg.Get(name)
-	if err != nil {
+	id, ok := p.reg.idByName(name)
+	if !ok {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.pinned, ref.ID())
+	delete(p.pinned, id)
 }
 
 // IsResident reports whether the adapter named is currently loaded on the base
 // model.
 func (p *Pool) IsResident(name string) bool {
-	ref, err := p.reg.Get(name)
-	if err != nil {
+	id, ok := p.reg.idByName(name)
+	if !ok {
 		return false
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.resident[ref.ID()] != ""
+	return p.resident[id] != ""
 }
 
 // Resident returns the names of the adapters currently loaded on the base model,
