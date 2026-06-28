@@ -79,7 +79,7 @@ func SeedInflux(db *store.DuckDB, influx *InfluxClient, cfg SeedInfluxConfig, w 
 
 		line := core.Sprintf(
 			"gold_gen,i=%s,w=migration,d=%s,v=%s seed_id=\"%s\",gen_time=%v,chars=%di",
-			EscapeLp(core.Sprintf("%d", idx)),
+			EscapeLp(core.Itoa(idx)),
 			EscapeLp(domain),
 			EscapeLp(voice),
 			escapedSeedID,

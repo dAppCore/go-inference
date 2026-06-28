@@ -56,7 +56,10 @@ func ExportSplitParquet(jsonlPath, outputDir, split string) core.Result {
 
 	var rows []ParquetRow
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	// 64 KiB initial buffer, grown on demand up to a 1 MiB max line. Avoids
+	// allocating a full 1 MiB up front on every call when lines are small
+	// (the common case) while still admitting lines up to 1 MiB.
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	for scanner.Scan() {
 		text := core.Trim(scanner.Text())

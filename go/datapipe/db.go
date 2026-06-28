@@ -229,13 +229,18 @@ func (db *DB) QueryRows(query string, args ...any) core.Result {
 		return core.Fail(core.E("datapipe.DB.QueryRows", "columns", err))
 	}
 
+	// Scan into one reusable backing pair: ptrs[i] always points at values[i],
+	// so the slices are identical every row. The per-row map below snapshots
+	// each value out before the next Scan overwrites it, so reuse is safe and
+	// keeps the result byte-identical while dropping two allocations per row.
+	values := make([]any, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range values {
+		ptrs[i] = &values[i]
+	}
+
 	var result []map[string]any
 	for rows.Next() {
-		values := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range values {
-			ptrs[i] = &values[i]
-		}
 		if err := rows.Scan(ptrs...); err != nil {
 			return core.Fail(core.E("datapipe.DB.QueryRows", "scan", err))
 		}

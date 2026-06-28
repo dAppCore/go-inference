@@ -129,9 +129,31 @@ func (c *InfluxClient) QuerySQL(sql string) core.Result {
 
 // EscapeLp escapes spaces, commas, and equals signs for InfluxDB line protocol
 // tag values.
+//
+//	EscapeLp("calm narrator")  // `calm\ narrator`
+//	EscapeLp("gemma4")         // "gemma4" (unchanged, no allocation)
 func EscapeLp(s string) string {
-	s = core.Replace(s, `,`, `\,`)
-	s = core.Replace(s, `=`, `\=`)
-	s = core.Replace(s, ` `, `\ `)
-	return s
+	// Fast path: most tag values carry none of the special characters, so
+	// return s unchanged with zero allocations.
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c == ',' || c == '=' || c == ' ' {
+			n++
+		}
+	}
+	if n == 0 {
+		return s
+	}
+	// One pass, one allocation sized to the exact escaped length — byte-for-byte
+	// identical to chaining three ReplaceAll calls (which allocate once each),
+	// since none of the inserted "\,", "\=", "\ " reintroduces a target byte.
+	var b core.Builder
+	b.Grow(len(s) + n)
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c == ',' || c == '=' || c == ' ' {
+			b.WriteByte('\\')
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
 }
