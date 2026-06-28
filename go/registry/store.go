@@ -3,7 +3,8 @@
 package registry
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"sync"
 
 	core "dappco.re/go"
@@ -90,7 +91,7 @@ func (s *MemStore) List() []Entry {
 		out = append(out, e)
 	}
 	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	slices.SortFunc(out, func(a, b Entry) int { return cmp.Compare(a.ID, b.ID) })
 	return out
 }
 
