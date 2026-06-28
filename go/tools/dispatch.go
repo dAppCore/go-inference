@@ -96,13 +96,19 @@ func Dispatch(ctx context.Context, calls []ToolCall, registry *Registry, paralle
 	var wg sync.WaitGroup
 	wg.Add(len(calls))
 	for i := range calls {
-		go func(i int) {
-			defer wg.Done()
-			results[i] = runOne(ctx, calls[i], registry)
-		}(i)
+		go dispatchOne(ctx, calls, results, registry, &wg, i)
 	}
 	wg.Wait()
 	return results
+}
+
+// dispatchOne is the parallel worker, hoisted out of Dispatch's loop. As a
+// package-level function it captures nothing, so launching it per call costs
+// no per-goroutine closure allocation: each goroutine's state arrives as
+// arguments and its result lands in its own slot (no lock needed).
+func dispatchOne(ctx context.Context, calls []ToolCall, results []ToolResult, registry *Registry, wg *sync.WaitGroup, i int) {
+	defer wg.Done()
+	results[i] = runOne(ctx, calls[i], registry)
 }
 
 // runOne resolves one call's executor and runs it, turning every failure mode —
