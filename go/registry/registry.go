@@ -3,7 +3,8 @@
 package registry
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"sync"
 
 	core "dappco.re/go"
@@ -84,8 +85,15 @@ func (r *Registry) Put(e Entry) core.Result {
 	defer r.mu.Unlock()
 
 	// Every name this entry claims (its id + aliases) must be free, or already
-	// owned by this same id (the update-in-place case).
-	for _, name := range append([]string{e.ID}, e.Aliases...) {
+	// owned by this same id (the update-in-place case). Check the id first, then
+	// each alias, without allocating a combined slice.
+	if n := normalise(e.ID); n != "" {
+		if owner, taken := r.aliases[n]; taken && owner != e.ID {
+			return core.Fail(core.E("registry.Put",
+				core.Sprintf("name %q already maps to entry %q", e.ID, owner), nil))
+		}
+	}
+	for _, name := range e.Aliases {
 		n := normalise(name)
 		if n == "" {
 			continue
@@ -206,11 +214,14 @@ func (r *Registry) FitsDeviceWith(budgetBytes uint64, f Filter) []Entry {
 		}
 		out = append(out, e)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].MemoryBytes != out[j].MemoryBytes {
-			return out[i].MemoryBytes > out[j].MemoryBytes
+	slices.SortFunc(out, func(a, b Entry) int {
+		if a.MemoryBytes != b.MemoryBytes {
+			if a.MemoryBytes > b.MemoryBytes {
+				return -1
+			}
+			return 1
 		}
-		return out[i].ID < out[j].ID
+		return cmp.Compare(a.ID, b.ID)
 	})
 	return out
 }
