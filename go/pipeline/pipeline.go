@@ -16,6 +16,12 @@ import (
 const correctiveInstruction = "Revise the previous answer to stay within policy: " +
 	"remove hostile, sycophantic, or unsafe content while keeping it helpful."
 
+// correctiveSteer is the system turn withCorrective prepends to a mediated
+// regeneration. It is invariant (correctiveInstruction is a constant) and is
+// only ever read, so it is built once at package load rather than rebuilt — with
+// its content slice — on every mediation.
+var correctiveSteer = chat.Message{Role: chat.System, Content: []chat.ContentBlock{chat.Text(correctiveInstruction)}}
+
 // Pipeline composes the serving-path collaborators. Construct the core five
 // seams with New (the optional stage seams are nil and skipped), or build a
 // fully-wired pipeline from the real packages with NewWired. It holds no
@@ -326,9 +332,8 @@ func (p *Pipeline) fit(req chat.Request) (chat.Request, error) {
 // prepended (RFC §6.18) — the steer for a mediated regeneration. The caller's
 // message slice is never mutated.
 func withCorrective(req chat.Request) chat.Request {
-	steer := chat.Message{Role: chat.System, Content: []chat.ContentBlock{chat.Text(correctiveInstruction)}}
 	msgs := make([]chat.Message, 0, len(req.Messages)+1)
-	msgs = append(msgs, steer)
+	msgs = append(msgs, correctiveSteer)
 	msgs = append(msgs, req.Messages...)
 	req.Messages = msgs
 	return req
