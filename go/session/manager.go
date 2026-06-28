@@ -114,7 +114,15 @@ func (m *Manager) Append(sessionID string, turn chat.Message) (string, error) {
 		return "", core.E("session", "append: "+sessionID, err)
 	}
 
-	sess.Turns = append(sess.Turns, turn)
+	// store.Get handed back an exactly-sized clone (cap == len), so a plain
+	// append would geometrically over-allocate just to add one turn. The final
+	// length is known (one more), so build the slice at exact size; Put re-clones
+	// it to exact size anyway, so the intermediate capacity is never observed.
+	n := len(sess.Turns)
+	turns := make([]chat.Message, n+1)
+	copy(turns, sess.Turns)
+	turns[n] = turn
+	sess.Turns = turns
 	sess.Updated = m.clock()
 	if err := m.store.Put(sess); err != nil {
 		return "", core.E("session", "append: put "+sessionID, err)
@@ -149,11 +157,14 @@ func (m *Manager) Continue(previousResponseID string) (Session, error) {
 	}
 
 	// Hand back the transcript as it stood at this response's position — a later
-	// response id sees more turns, an earlier one fewer.
+	// response id sees more turns, an earlier one fewer. store.Get already
+	// returned an isolated copy that only this call holds (the same copy Get
+	// hands straight back), so the truncating reslice touches private backing and
+	// no further clone is needed before returning it.
 	if pos.turnCount < len(sess.Turns) {
 		sess.Turns = sess.Turns[:pos.turnCount]
 	}
-	return sess.clone(), nil
+	return sess, nil
 }
 
 // Get returns the current session for id (a copy), or a typed error.
