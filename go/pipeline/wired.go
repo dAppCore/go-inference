@@ -242,16 +242,30 @@ func toDecision(d safety.Decision) Decision {
 // userTurns returns the latest user message's text and the prior user turns
 // (oldest→newest), the shape welfare.Detect reads.
 func userTurns(req chat.Request) (latest string, priors []string) {
+	// Count the user turns first so priors is sized exactly once: it holds every
+	// user turn except the last (which becomes latest). The single-turn case
+	// keeps priors nil — no allocation — and the multi-turn case presizes rather
+	// than growing geometrically (and re-slicing off a seeded empty head).
+	users := 0
+	for _, m := range req.Messages {
+		if m.Role == chat.User {
+			users++
+		}
+	}
+	if users > 1 {
+		priors = make([]string, 0, users-1)
+	}
+	seen := 0
 	for _, m := range req.Messages {
 		if m.Role != chat.User {
 			continue
 		}
-		priors = append(priors, latest)
-		latest = m.Text()
-	}
-	// priors accumulated one slot ahead of latest; drop the seeded empty head.
-	if len(priors) > 0 {
-		priors = priors[1:]
+		seen++
+		if seen == users {
+			latest = m.Text()
+		} else {
+			priors = append(priors, m.Text())
+		}
 	}
 	return latest, priors
 }
@@ -319,8 +333,13 @@ func (a *sessionAdapter) Load(req chat.Request) (chat.Request, error) {
 	}
 	// Prepend the stored transcript before the caller's new turns (0% replay,
 	// §6.10): the caller sends only what is new, the registry supplies the rest.
+	// One presized allocation for the combined transcript — the nested-append
+	// form grew twice (the stored turns, then again to fit the new ones).
 	if len(sess.Turns) > 0 {
-		req.Messages = append(append([]chat.Message{}, sess.Turns...), req.Messages...)
+		msgs := make([]chat.Message, 0, len(sess.Turns)+len(req.Messages))
+		msgs = append(msgs, sess.Turns...)
+		msgs = append(msgs, req.Messages...)
+		req.Messages = msgs
 	}
 	return req, nil
 }
