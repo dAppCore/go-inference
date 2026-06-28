@@ -213,7 +213,9 @@ type Assembler struct {
 //
 //	a := stream.NewAssembler()
 func NewAssembler() *Assembler {
-	return &Assembler{toolIdx: map[string]int{}}
+	// toolIdx is left nil and created lazily on the first tool call
+	// (ensureTool) — a pure-text stream never allocates the map at all.
+	return &Assembler{}
 }
 
 // Add folds one event into the running state. It returns a non-nil error only
@@ -284,6 +286,8 @@ func (a *Assembler) appendToolArgs(ev Event) {
 // first-seen order) if absent. A non-empty name fills a blank name without
 // overwriting one already set on the first delta.
 func (a *Assembler) ensureTool(id, name string) int {
+	// A read from a nil map is valid (yields the zero index, ok=false), so the
+	// lookup is safe before the map exists; only the write below needs it.
 	if i, ok := a.toolIdx[id]; ok {
 		if name != "" && a.tools[i].Name == "" {
 			a.tools[i].Name = name
@@ -292,6 +296,9 @@ func (a *Assembler) ensureTool(id, name string) int {
 	}
 	a.tools = append(a.tools, ToolCall{ID: id, Name: name})
 	i := len(a.tools) - 1
+	if a.toolIdx == nil {
+		a.toolIdx = make(map[string]int)
+	}
 	a.toolIdx[id] = i
 	return i
 }
@@ -333,12 +340,42 @@ func (a *Assembler) Result() Response {
 //	use(resp.Text, resp.ToolCalls, resp.Usage)
 func Collect(events []Event) (Response, error) {
 	a := NewAssembler()
+	a.presize(events)
 	for _, ev := range events {
 		if err := a.Add(ev); err != nil {
 			return a.Result(), err
 		}
 	}
 	return a.Result(), nil
+}
+
+// presize reserves exact capacity for the delta accumulators from the full
+// event sequence Collect holds, so the Add loop never grows them. Live
+// streaming (Add fed one event at a time) cannot do this — it has no length
+// hint — but the batch path knows every count up front. The counts are exact,
+// so no accumulator is over-allocated. Indexing events (not ranging by value)
+// avoids copying the large Event struct per element.
+func (a *Assembler) presize(events []Event) {
+	var nText, nReason, nRefuse int
+	for i := range events {
+		switch events[i].Kind {
+		case KindTextDelta:
+			nText++
+		case KindReasoningDelta:
+			nReason++
+		case KindRefusalDelta:
+			nRefuse++
+		}
+	}
+	if nText > 0 {
+		a.text = make([]string, 0, nText)
+	}
+	if nReason > 0 {
+		a.reason = make([]string, 0, nReason)
+	}
+	if nRefuse > 0 {
+		a.refuse = make([]string, 0, nRefuse)
+	}
 }
 
 // FromTokens builds the common unified event sequence from a plain token stream
