@@ -132,11 +132,18 @@ func (h *History) ExportJSONL(dest string) error {
 	}
 	defer convRows.Close()
 
+	// Scan-target scratch hoisted out of both loops. Scan takes the
+	// address of each target, which forces a heap escape; the scanned
+	// values are copied into the result structs before the next Scan
+	// runs, so one reused set across every row is byte-identical to
+	// per-row locals while dropping the per-row / per-turn escape allocs.
+	var title, modelID, baseModel, adapterID, tagsJSON sql.NullString
+	var toolCalls, toolResults, signal sql.NullString
+	var tokensIn, tokensOut sql.NullInt32
+
 	for convRows.Next() {
 		var c JSONLConversation
-		var title, modelID, baseModel, adapterID sql.NullString
 		var endedAt sql.NullTime
-		var tagsJSON sql.NullString
 		if err := convRows.Scan(
 			&c.ID, &c.UserID, &title, &c.StartedAt, &endedAt,
 			&modelID, &baseModel, &adapterID, &tagsJSON, &c.ConsentVersion,
@@ -175,10 +182,11 @@ func (h *History) ExportJSONL(dest string) error {
 			return core.E("chathistory.ExportJSONL", "query turns", err)
 		}
 		for turnRows.Next() {
-			var t JSONLTurn
-			var toolCalls, toolResults sql.NullString
-			var tokensIn, tokensOut sql.NullInt32
-			var signal sql.NullString
+			// Scan into the freshly-appended backing-array slot rather
+			// than a local JSONLTurn that would escape via Scan taking
+			// its address; the Null* targets reuse the hoisted scratch.
+			c.Turns = append(c.Turns, JSONLTurn{})
+			t := &c.Turns[len(c.Turns)-1]
 			if err := turnRows.Scan(
 				&t.ID, &t.Ordinal, &t.Role, &t.Content,
 				&toolCalls, &toolResults, &t.CreatedAt,
@@ -200,7 +208,6 @@ func (h *History) ExportJSONL(dest string) error {
 				t.TokensOut = int(tokensOut.Int32)
 			}
 			t.Signal = signal.String
-			c.Turns = append(c.Turns, t)
 		}
 		// turnRows.Next() returns false on both natural end-of-stream
 		// AND iterator error. Without Err() a mid-stream DB blip

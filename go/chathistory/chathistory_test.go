@@ -3,6 +3,9 @@
 package chathistory
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -82,6 +85,52 @@ func TestRoundtrip(t *testing.T) {
 	jsonlDest := filepath.Join(dir, "export.jsonl")
 	if err := h.ExportJSONL(jsonlDest); err != nil {
 		t.Fatalf("ExportJSONL: %v", err)
+	}
+
+	// Read the export back and verify content survived intact — guards
+	// the scan-into-slice / hoisted-scratch refactor against any stale
+	// reuse of the shared Null* scan targets across rows.
+	raw, err := os.ReadFile(jsonlDest)
+	if err != nil {
+		t.Fatalf("read jsonl: %v", err)
+	}
+	lines := bytes.Split(bytes.TrimRight(raw, "\n"), []byte{'\n'})
+	if len(lines) != 1 {
+		t.Fatalf("jsonl lines: got %d want 1", len(lines))
+	}
+	var got JSONLConversation
+	if err := json.Unmarshal(lines[0], &got); err != nil {
+		t.Fatalf("unmarshal jsonl: %v", err)
+	}
+	if got.Title != "evening vent" || got.ModelID != "lemer-lite" {
+		t.Fatalf("jsonl conv meta: got title=%q model=%q", got.Title, got.ModelID)
+	}
+	if len(got.Tags) != 2 || got.Tags[0] != "life" || got.Tags[1] != "vent" {
+		t.Fatalf("jsonl tags: got %v want [life vent]", got.Tags)
+	}
+	if len(got.Turns) != 4 {
+		t.Fatalf("jsonl turns: got %d want 4", len(got.Turns))
+	}
+	for i, want := range turns {
+		g := got.Turns[i]
+		if g.Ordinal != i || g.Role != want.Role || g.Content != want.Content {
+			t.Fatalf("jsonl turn[%d]: got {ord:%d role:%q content:%q} want {ord:%d role:%q content:%q}",
+				i, g.Ordinal, g.Role, g.Content, i, want.Role, want.Content)
+		}
+		if g.TokensIn != want.TokensIn || g.TokensOut != want.TokensOut {
+			t.Fatalf("jsonl turn[%d] tokens: got (%d,%d) want (%d,%d)",
+				i, g.TokensIn, g.TokensOut, want.TokensIn, want.TokensOut)
+		}
+	}
+	// turn[1] had its signal set to "liked"; the rest must stay empty —
+	// proves the reused signal scratch does not leak across rows.
+	if got.Turns[1].Signal != "liked" {
+		t.Fatalf("jsonl turn[1] signal: got %q want liked", got.Turns[1].Signal)
+	}
+	for _, i := range []int{0, 2, 3} {
+		if got.Turns[i].Signal != "" {
+			t.Fatalf("jsonl turn[%d] signal: got %q want empty (scratch leak?)", i, got.Turns[i].Signal)
+		}
 	}
 }
 
