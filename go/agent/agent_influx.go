@@ -20,9 +20,18 @@ type bufferEntry struct {
 	Timestamp  string      `json:"timestamp"`
 }
 
+// contentScoreDimensions is the fixed, ordered set of content-scoring
+// dimension names emitted to InfluxDB. Hoisted to package scope so it is
+// allocated once rather than per ScoreContentAndPush call. The order matches
+// the contentScoreValues array built per response.
+var contentScoreDimensions = []string{
+	"ccp_compliance", "truth_telling", "engagement",
+	"axiom_integration", "sovereignty_reasoning", "emotional_register",
+}
+
 // ScoreCapabilityAndPush judges each capability response via LLM and pushes scores to InfluxDB.
 func ScoreCapabilityAndPush(ctx context.Context, judge *score.Judge, influx *datapipe.InfluxClient, cp Checkpoint, responses []CapResponseEntry) {
-	var lines []string
+	lines := make([]string, 0, len(responses))
 
 	for i, cr := range responses {
 		rScore := judge.ScoreCapability(ctx, cr.Prompt, cr.Answer, cr.Response)
@@ -57,8 +66,10 @@ func ScoreCapabilityAndPush(ctx context.Context, judge *score.Judge, influx *dat
 
 // ScoreContentAndPush scores content responses via judge and pushes scores to InfluxDB.
 func ScoreContentAndPush(ctx context.Context, judge *score.Judge, influx *datapipe.InfluxClient, cp Checkpoint, runID string, responses []ContentResponse) {
-	dims := []string{"ccp_compliance", "truth_telling", "engagement", "axiom_integration", "sovereignty_reasoning", "emotional_register"}
-
+	// Reused across responses: WriteLp consumes the slice synchronously (it
+	// builds the request body before returning) and never retains it, so one
+	// backing array serves every per-response push instead of one make each.
+	lines := make([]string, 0, len(contentScoreDimensions))
 	for i, cr := range responses {
 		rScore := judge.ScoreContent(ctx, cr.Probe, cr.Response)
 		if !rScore.OK {
@@ -72,18 +83,21 @@ func ScoreContentAndPush(ctx context.Context, judge *score.Judge, influx *datapi
 			scores.CCPCompliance, scores.TruthTelling, scores.Engagement,
 			scores.AxiomIntegration, scores.SovereigntyReasoning, scores.EmotionalRegister)
 
-		scoreMap := map[string]int{
-			"ccp_compliance":        scores.CCPCompliance,
-			"truth_telling":         scores.TruthTelling,
-			"engagement":            scores.Engagement,
-			"axiom_integration":     scores.AxiomIntegration,
-			"sovereignty_reasoning": scores.SovereigntyReasoning,
-			"emotional_register":    scores.EmotionalRegister,
+		// Stack-resident array indexed in lockstep with contentScoreDimensions
+		// — replaces a per-response map[string]int (header + bucket + 6 int
+		// boxings). Order MUST match contentScoreDimensions.
+		vals := [...]int{
+			scores.CCPCompliance,
+			scores.TruthTelling,
+			scores.Engagement,
+			scores.AxiomIntegration,
+			scores.SovereigntyReasoning,
+			scores.EmotionalRegister,
 		}
 
-		var lines []string
-		for j, dim := range dims {
-			val := scoreMap[dim]
+		lines = lines[:0]
+		for j, dim := range contentScoreDimensions {
+			val := vals[j]
 			ts := (EpochBase + int64(cp.Iteration)*1000 + int64(i*10+j)) * 1_000_000_000
 			line := core.Sprintf(
 				MeasurementContentScore+",model=%s,run_id=%s,label=%s,dimension=%s,has_kernel=true score=%d,iteration=%di %d",
@@ -98,7 +112,7 @@ func ScoreContentAndPush(ctx context.Context, judge *score.Judge, influx *datapi
 		}
 	}
 
-	core.Print(nil, "Content scoring done for %s: %d probes x %d dimensions", cp.Label, len(responses), len(dims))
+	core.Print(nil, "Content scoring done for %s: %d probes x %d dimensions", cp.Label, len(responses), len(contentScoreDimensions))
 }
 
 // PushCapabilitySummary pushes overall + per-category scores to InfluxDB.
@@ -106,7 +120,8 @@ func ScoreContentAndPush(ctx context.Context, judge *score.Judge, influx *datapi
 //	r := agent.PushCapabilitySummary(influx, cp, results)
 //	if !r.OK { return r }
 func PushCapabilitySummary(influx *datapipe.InfluxClient, cp Checkpoint, results ProbeResult) core.Result {
-	var lines []string
+	// 1 overall line + one line per category.
+	lines := make([]string, 0, 1+len(results.ByCategory))
 
 	ts := (EpochBase + int64(cp.Iteration)*1000 + 0) * 1_000_000_000
 	lines = append(lines, core.Sprintf(
@@ -143,7 +158,8 @@ func PushCapabilitySummary(influx *datapipe.InfluxClient, cp Checkpoint, results
 //	r := agent.PushCapabilityResults(influx, cp, results)
 //	if !r.OK { return r }
 func PushCapabilityResults(influx *datapipe.InfluxClient, cp Checkpoint, results ProbeResult) core.Result {
-	var lines []string
+	// 1 overall line + one line per category + one line per probe.
+	lines := make([]string, 0, 1+len(results.ByCategory)+len(results.Probes))
 
 	ts := (EpochBase + int64(cp.Iteration)*1000 + 0) * 1_000_000_000
 	lines = append(lines, core.Sprintf(

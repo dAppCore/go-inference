@@ -215,7 +215,10 @@ func GetScoredLabels(influx *datapipe.InfluxClient) core.Result {
 
 // FindUnscored filters checkpoints to only unscored ones, sorted by (dirname, iteration).
 func FindUnscored(checkpoints []Checkpoint, scored map[[2]string]bool) []Checkpoint {
-	var unscored []Checkpoint
+	// unscored is a subset of checkpoints, so len(checkpoints) is a safe
+	// upper-bound capacity — one allocation instead of geometric regrowth
+	// (each regrow also recopies the large Checkpoint structs).
+	unscored := make([]Checkpoint, 0, len(checkpoints))
 	for c := range FindUnscoredIter(checkpoints, scored) {
 		unscored = append(unscored, c)
 	}

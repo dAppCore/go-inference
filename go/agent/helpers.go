@@ -11,11 +11,10 @@ func repeatStr(s string, count int) string {
 	if count <= 0 || s == "" {
 		return ""
 	}
-	b := core.NewBuilder()
-	for range count {
-		b.WriteString(s)
-	}
-	return b.String()
+	// core.Repeat (strings.Repeat) presizes the buffer to the exact final
+	// length — one allocation. The earlier Builder loop grew the buffer
+	// geometrically, costing several reallocs + a final copy.
+	return core.Repeat(s, count)
 }
 
 // userHomeDir returns the current user's home directory.

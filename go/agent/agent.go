@@ -171,7 +171,7 @@ func matchCheckpointTarget(checkpoints []Checkpoint, target string) (Checkpoint,
 		if target == cp.RemoteDir || target == cp.Dirname {
 			return cp, true
 		}
-		if target == core.Sprintf("%s/%s", cp.RemoteDir, cp.Filename) {
+		if equalsPathJoin(target, cp.RemoteDir, cp.Filename) {
 			return cp, true
 		}
 		if targetBase != "" && targetBase == core.PathBase(cp.RemoteDir) {
@@ -187,6 +187,17 @@ func matchCheckpointTarget(checkpoints []Checkpoint, target string) (Checkpoint,
 		return baseMatches[0], true
 	}
 	return Checkpoint{}, false
+}
+
+// equalsPathJoin reports whether target equals dir + "/" + file, comparing
+// in place so the per-checkpoint loop never allocates the joined string just
+// to throw it away. Equivalent to target == core.Sprintf("%s/%s", dir, file).
+func equalsPathJoin(target, dir, file string) bool {
+	n := len(dir)
+	return len(target) == n+1+len(file) &&
+		target[n] == '/' &&
+		target[:n] == dir &&
+		target[n+1:] == file
 }
 
 // ExecuteRemote runs a shell command on the remote training host. The
