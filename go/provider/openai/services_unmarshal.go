@@ -472,7 +472,9 @@ func parseInt32Array(data []byte, i int) ([]int32, int, error) {
 	if i < len(data) && data[i] == ']' {
 		return nil, i + 1, nil
 	}
-	var out []int32
+	// Pre-size from an exact element count (alloc-free scan) so the
+	// per-token append never re-grows the backing array.
+	out := make([]int32, 0, jsonenc.CountJSONArrayElements(data, i))
 	for {
 		n, next, err := jsonenc.ParseJSONInt(data, i)
 		if err != nil {
