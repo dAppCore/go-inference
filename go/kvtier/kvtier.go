@@ -30,8 +30,9 @@
 package kvtier
 
 import (
+	"cmp"
 	"context"
-	"sort"
+	"slices"
 	"sync"
 
 	core "dappco.re/go"
@@ -121,13 +122,20 @@ var (
 	ErrStore = core.E("ai", "kv store move failed", nil)
 )
 
-// entry is one tracked KV block: its size, current tier, pin state, and the
-// recency tick of its last touch (the LRU key — higher == more recent).
+// entry is one tracked KV block: its id (== its map key, carried so the planner
+// can build moves and sort demotion candidates without a parallel id slice), its
+// size, current tier, pin state, and the recency tick of its last touch (the LRU
+// key — higher == more recent). proj is transient scratch: planRebalance projects
+// each block's tier into it while building a plan, so a block demoted GPU→CPU can
+// be re-considered for CPU→Disk in the same pass — without copying the whole tier
+// map. It is meaningful only inside a single locked planRebalance call.
 type entry struct {
+	id     string
 	size   int64
-	tier   Tier
-	pinned bool
 	tick   uint64
+	tier   Tier
+	proj   Tier
+	pinned bool
 }
 
 // Manager runs one device's KV-cache tiering policy. Construct with New. Safe to
@@ -139,6 +147,13 @@ type Manager struct {
 	budget Budget
 	tick   uint64
 	blocks map[string]*entry
+	// Planning scratch, reused under mu so the per-token rebalance path allocates
+	// nothing after warmup. cand collects the LRU demotion candidates to sort;
+	// plan is the move plan handed to execute (Access prepends its promote hop into
+	// it). Neither is read or retained outside a locked planRebalance/rebalance/
+	// Access, so reusing the backing arrays across calls is safe.
+	cand []*entry
+	plan []plannedMove
 }
 
 // New builds a tiering manager over a per-tier byte Budget and an injected Store.
@@ -209,7 +224,7 @@ func (m *Manager) Put(ctx context.Context, b Block) error {
 		e.tick = m.tick
 		e.tier = TierGPU
 	} else {
-		m.blocks[b.ID] = &entry{size: size, tier: TierGPU, tick: m.tick}
+		m.blocks[b.ID] = &entry{id: b.ID, size: size, tier: TierGPU, tick: m.tick}
 	}
 
 	if err := m.rebalance(ctx); err != nil {
@@ -247,8 +262,9 @@ func (m *Manager) Access(ctx context.Context, blockID string) error {
 	// then build ONE atomic plan: the promote hop first, then any demotions it
 	// forces. Sharing a plan keeps promote+demote all-or-nothing.
 	e.tier = TierGPU
-	plan := append([]plannedMove{{id: blockID, from: from, to: TierGPU}}, m.planRebalance()...)
-	if err := m.execute(ctx, plan); err != nil {
+	m.plan = append(m.plan[:0], plannedMove{id: blockID, from: from, to: TierGPU})
+	m.plan = m.planRebalance(m.plan)
+	if err := m.execute(ctx, m.plan); err != nil {
 		e.tier = from // roll the in-memory promotion back; execute undid the rest.
 		return err
 	}
@@ -259,7 +275,8 @@ func (m *Manager) Access(ctx context.Context, blockID string) error {
 // every bounded tier (GPU, CPU) is within budget, cascading GPU→CPU→Disk. It is
 // the placement step after a Put marks a newcomer on the GPU. Caller holds mu.
 func (m *Manager) rebalance(ctx context.Context) error {
-	return m.execute(ctx, m.planRebalance())
+	m.plan = m.planRebalance(m.plan[:0])
+	return m.execute(ctx, m.plan)
 }
 
 // execute runs a move plan through the Store and only then commits the tier
@@ -286,48 +303,50 @@ func (m *Manager) execute(ctx context.Context, plan []plannedMove) error {
 
 // planRebalance walks GPU then CPU, and for each over-budget tier selects its
 // LRU unpinned blocks to demote one tier colder until the tier fits (or no more
-// unpinned blocks remain — pinned blocks are immovable backstops). The returned
-// plan is in execution order (coldest cascade resolved as we descend). Caller
-// holds mu.
-func (m *Manager) planRebalance() []plannedMove {
-	// Working copy of each block's projected tier as the plan is built, so a
-	// block demoted GPU→CPU can be re-considered for CPU→Disk in the same pass.
-	proj := make(map[string]Tier, len(m.blocks))
-	for id, e := range m.blocks {
-		proj[id] = e.tier
+// unpinned blocks remain — pinned blocks are immovable backstops). Demotion hops
+// are appended to plan (so Access can pass a slice already holding its promote
+// hop, sharing one buffer); the result is in execution order (coldest cascade
+// resolved as we descend). The projected tier is tracked on each entry's transient
+// proj field rather than a per-call map copy, and candidates use the reused m.cand
+// scratch — both keep the per-token path allocation-free. Caller holds mu.
+func (m *Manager) planRebalance(plan []plannedMove) []plannedMove {
+	// Seed each block's projected tier so a block demoted GPU→CPU can be
+	// re-considered for CPU→Disk in the same pass.
+	for _, e := range m.blocks {
+		e.proj = e.tier
 	}
 
-	var plan []plannedMove
-	for _, src := range []Tier{TierGPU, TierCPU} {
+	for _, src := range [2]Tier{TierGPU, TierCPU} {
 		dst := src + 1 // GPU→CPU, CPU→Disk
 		limit := m.limitOf(src)
 		// Bytes currently projected in src.
 		used := int64(0)
-		for id, t := range proj {
-			if t == src {
-				used += m.blocks[id].size
+		for _, e := range m.blocks {
+			if e.proj == src {
+				used += e.size
 			}
 		}
 		if used <= limit {
 			continue
 		}
 		// Candidates: unpinned blocks projected in src, LRU-first.
-		cands := make([]string, 0)
-		for id, t := range proj {
-			if t == src && !m.blocks[id].pinned {
-				cands = append(cands, id)
+		cand := m.cand[:0]
+		for _, e := range m.blocks {
+			if e.proj == src && !e.pinned {
+				cand = append(cand, e)
 			}
 		}
-		sort.Slice(cands, func(i, j int) bool {
-			return m.blocks[cands[i]].tick < m.blocks[cands[j]].tick
+		slices.SortFunc(cand, func(a, b *entry) int {
+			return cmp.Compare(a.tick, b.tick)
 		})
-		for _, id := range cands {
+		m.cand = cand
+		for _, e := range cand {
 			if used <= limit {
 				break
 			}
-			plan = append(plan, plannedMove{id: id, from: src, to: dst})
-			proj[id] = dst
-			used -= m.blocks[id].size
+			plan = append(plan, plannedMove{id: e.id, from: src, to: dst})
+			e.proj = dst
+			used -= e.size
 		}
 		// If still over budget after evicting every unpinned block, the pinned
 		// set legitimately holds the tier above budget — leave it (pinned wins).
@@ -430,13 +449,21 @@ func (m *Manager) IsResident(blockID string) bool {
 func (m *Manager) Resident(t Tier) []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	ids := make([]string, 0)
+	// Size the result exactly (one count pass, no alloc) so the returned slice is
+	// a single allocation with no geometric regrow.
+	n := 0
+	for _, e := range m.blocks {
+		if e.tier == t {
+			n++
+		}
+	}
+	ids := make([]string, 0, n)
 	for id, e := range m.blocks {
 		if e.tier == t {
 			ids = append(ids, id)
 		}
 	}
-	sort.Strings(ids)
+	slices.Sort(ids)
 	return ids
 }
 
