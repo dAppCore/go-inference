@@ -78,9 +78,23 @@ type Tree struct {
 //	tr := radix.New(radix.Config{MaxNodes: 4096})
 func New(cfg Config) *Tree {
 	return &Tree{
-		root:     &Node{children: map[int]*Node{}},
+		root:     &Node{},
 		maxNodes: cfg.MaxNodes,
 	}
+}
+
+// setChild attaches c under parent keyed by key, allocating the child map lazily
+// so a childless leaf carries no map at all — the dominant node shape in a
+// prefix cache, where most cached prefixes are terminal. Reading a nil map is
+// already safe (returns the zero child, ok==false); only a write needs the map
+// to exist. Caller holds mu.
+//
+//	setChild(parent, c.edge[0], c)
+func setChild(parent *Node, key int, c *Node) {
+	if parent.children == nil {
+		parent.children = make(map[int]*Node, 1)
+	}
+	parent.children[key] = c
 }
 
 // nextTick advances and returns the recency counter. Caller holds mu.
@@ -169,9 +183,11 @@ func (t *Tree) Insert(tokens []int, value any) *Node {
 		child, ok := cur.children[rest[0]]
 		if !ok {
 			// No child starts here — hang the whole remaining run as a new leaf.
-			leaf := &Node{edge: cloneTokens(rest), Value: value, children: map[int]*Node{}, parent: cur}
+			// A fresh leaf has no children, so its map is left nil (allocated
+			// lazily by a later setChild if it ever sprouts a branch).
+			leaf := &Node{edge: cloneTokens(rest), Value: value, parent: cur}
 			leaf.tick = t.nextTick()
-			cur.children[rest[0]] = leaf
+			setChild(cur, rest[0], leaf)
 			t.count++
 			return leaf
 		}
@@ -207,20 +223,25 @@ func (t *Tree) Insert(tokens []int, value any) *Node {
 //
 //	// edge [1,2,3,4] split at k=2 → shared [1,2] -> child [3,4]
 func (t *Tree) splitChild(parent, child *Node, k int) *Node {
+	// Edges are immutable once set — every edge write in this package replaces
+	// the whole slice (it is never indexed-assigned), so the split re-slices
+	// child's existing backing array instead of cloning it: shared takes the
+	// head [:k] (capped at k so it can never grow into child's tail) and child
+	// keeps the tail [k:]. No new token storage is allocated. shared.edge is
+	// taken before child.edge is retrimmed below.
 	shared := &Node{
-		edge:     cloneTokens(child.edge[:k]),
-		children: map[int]*Node{},
-		parent:   parent,
+		edge:   child.edge[:k:k],
+		parent: parent,
 	}
 	shared.tick = t.nextTick()
 
 	// Re-root the original child under shared with its edge trimmed by k.
-	child.edge = cloneTokens(child.edge[k:])
+	child.edge = child.edge[k:]
 	child.parent = shared
-	shared.children[child.edge[0]] = child
+	setChild(shared, child.edge[0], child)
 
 	// Replace child with shared in the parent's child map.
-	parent.children[shared.edge[0]] = shared
+	setChild(parent, shared.edge[0], shared)
 	t.count++ // one new internal node
 	return shared
 }
