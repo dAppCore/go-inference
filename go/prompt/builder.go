@@ -75,14 +75,36 @@ func (b *Builder) InputVariables(names ...string) *Builder {
 //
 //	tpl := prompt.NewBuilder().System("You are {{p}}.").InputVariables("p").Build()
 func (b *Builder) Build() Template {
-	parts := make([]string, 0, len(b.turns))
-	for _, tn := range b.turns {
-		parts = append(parts, tn.text)
-	}
 	return Template{
-		Body:      core.Join("\n\n", parts...),
+		Body:      b.joinTurns(),
 		InputVars: append([]string(nil), b.inputVars...),
 	}
+}
+
+// joinTurns concatenates the turn bodies with blank-line separators, writing
+// straight from b.turns into a pre-sized Builder. It mirrors core.Join's
+// length-pre-sizing but skips the intermediate []string Join would require —
+// b.turns is []turn, so feeding core.Join means first materialising a parallel
+// []string of the texts, an allocation this avoids.
+func (b *Builder) joinTurns() string {
+	switch len(b.turns) {
+	case 0:
+		return ""
+	case 1:
+		return b.turns[0].text
+	}
+	n := len("\n\n") * (len(b.turns) - 1)
+	for _, tn := range b.turns {
+		n += len(tn.text)
+	}
+	var sb core.Builder
+	sb.Grow(n)
+	sb.WriteString(b.turns[0].text)
+	for _, tn := range b.turns[1:] {
+		sb.WriteString("\n\n")
+		sb.WriteString(tn.text)
+	}
+	return sb.String()
 }
 
 // BuildMessages renders each turn's placeholders against vars and returns the
@@ -99,8 +121,11 @@ func (b *Builder) Build() Template {
 func (b *Builder) BuildMessages(vars map[string]string) ([]chat.Message, error) {
 	msgs := make([]chat.Message, 0, len(b.turns))
 	for _, tn := range b.turns {
-		tpl := Template{Body: tn.text, InputVars: b.varsFor(tn.text)}
-		content, err := tpl.Render(vars)
+		// Scan the turn's placeholders once and share the result between the
+		// per-turn variable narrowing and the render — renderTokens takes the
+		// scan as a parameter, so the turn is not scanned a second time.
+		tokens := placeholders(tn.text)
+		content, err := renderTokens(tn.text, tokens, b.varsFor(tokens), vars)
 		if err != nil {
 			return nil, err
 		}
@@ -113,17 +138,19 @@ func (b *Builder) BuildMessages(vars map[string]string) ([]chat.Message, error) 
 }
 
 // varsFor returns the declared input variables that actually appear in one
-// turn's text, so each turn is rendered against only the variables it uses —
-// a declared variable used by a different turn is not required here, but an
-// undeclared placeholder in this turn still errors via Render.
-func (b *Builder) varsFor(text string) []string {
-	used := placeholders(text)
+// turn, given that turn's already-scanned placeholder tokens, so each turn is
+// rendered against only the variables it uses — a declared variable used by a
+// different turn is not required here, but an undeclared placeholder in this
+// turn still errors via renderTokens. Taking the tokens (rather than the raw
+// text) lets BuildMessages scan each turn once and share the scan.
+func (b *Builder) varsFor(tokens []string) []string {
 	declared := make(map[string]bool, len(b.inputVars))
 	for _, name := range b.inputVars {
 		declared[name] = true
 	}
-	out := make([]string, 0, len(used))
-	for _, name := range used {
+	out := make([]string, 0, len(tokens))
+	for _, tok := range tokens {
+		name := tok[2 : len(tok)-2]
 		if declared[name] {
 			out = append(out, name)
 		}
