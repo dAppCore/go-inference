@@ -18,7 +18,11 @@
 // load_in_8bit, bnb_4bit_quant_type).
 package quant
 
-import core "dappco.re/go"
+import (
+	"strconv"
+
+	core "dappco.re/go"
+)
 
 // Method is the quantisation method a model was produced with. The string
 // values match the HuggingFace "quant_method" field verbatim.
@@ -312,6 +316,20 @@ func waScheme(wbits, abits int) string {
 	return "W" + core.Itoa(wbits) + "A" + core.Itoa(abits)
 }
 
+// intLen returns the count of decimal digits needed to render n. n is always
+// non-negative at its call sites (bit-width and group size), so it is used to
+// size the String() builder exactly — one allocation, no slack bytes.
+//
+//	intLen(128) == 3
+func intLen(n int) int {
+	l := 1
+	for n >= 10 {
+		n /= 10
+		l++
+	}
+	return l
+}
+
 // String renders a compact tag for logs and the registry: method, bit-width,
 // group size, and scheme — each part omitted when absent.
 //
@@ -321,21 +339,46 @@ func (qi QuantInfo) String() string {
 	if qi.Method == "" || qi.Method == MethodNone {
 		return string(MethodNone)
 	}
-	out := string(qi.Method)
-	if qi.Bits != 0 {
-		out += ":" + core.Itoa(qi.Bits) + "bit"
-	}
-	if qi.GroupSize > 0 {
-		out += ":g" + core.Itoa(qi.GroupSize)
-	}
 	// The scheme suffix carries non-redundant information only for
 	// compressed-tensors (the W/A split) and bitsandbytes (fp4/nf4). For the
 	// weight-only methods (GPTQ / AWQ) the W{bits}A16 is implied by bits, so it
 	// is omitted to keep the tag tight.
-	if qi.Scheme != "" && qi.Method != MethodGPTQ && qi.Method != MethodAWQ {
-		out += ":" + qi.Scheme
+	showScheme := qi.Scheme != "" && qi.Method != MethodGPTQ && qi.Method != MethodAWQ
+
+	// Sum the exact length first, then write once. The earlier `out += ...`
+	// chain allocated a fresh string for each appended part (3-4 allocs/call);
+	// a single exact-sized Builder produces the tag in one allocation — the
+	// inherent floor (the returned string itself) — with no slack bytes and no
+	// throwaway strconv temporaries.
+	n := len(qi.Method)
+	if qi.Bits != 0 {
+		n += 4 + intLen(qi.Bits) // ':' + digits + "bit"
 	}
-	return out
+	if qi.GroupSize > 0 {
+		n += 2 + intLen(qi.GroupSize) // ":g" + digits
+	}
+	if showScheme {
+		n += 1 + len(qi.Scheme) // ':' + scheme
+	}
+
+	var b core.Builder
+	b.Grow(n)
+	b.WriteString(string(qi.Method))
+	var scratch [20]byte // stack — holds the digits of an int64
+	if qi.Bits != 0 {
+		b.WriteByte(':')
+		b.Write(strconv.AppendInt(scratch[:0], int64(qi.Bits), 10))
+		b.WriteString("bit")
+	}
+	if qi.GroupSize > 0 {
+		b.WriteString(":g")
+		b.Write(strconv.AppendInt(scratch[:0], int64(qi.GroupSize), 10))
+	}
+	if showScheme {
+		b.WriteByte(':')
+		b.WriteString(qi.Scheme)
+	}
+	return b.String()
 }
 
 // --- small typed accessors over the decoded map[string]any ---
