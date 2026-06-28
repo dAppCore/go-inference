@@ -118,19 +118,31 @@ func MiddleOut(messages []chat.Message, counter Counter, window int) ([]chat.Mes
 	// [1, len(body)-1] — at least one recent turn kept, at least one middle turn
 	// elided (tail == len(body) would be "no elision", already ruled out as
 	// over-window).
+	//
+	// Every candidate is head + [placeholder] + tail; all but the one that fits
+	// are built only to be measured and discarded. So the loop reuses a single
+	// backing array (sized for the largest candidate) and a single placeholder
+	// content cell across iterations rather than allocating a fresh candidate each
+	// pass. The survivor is returned with its capacity clamped to its length, so
+	// it is byte-identical to a freshly built slice.
+	buf := make([]chat.Message, 0, len(head)+1+len(body))
+	cell := make([]chat.ContentBlock, 1)
 	for tail := len(body) - 1; tail >= 1; tail-- {
 		dropped := len(body) - tail
-		candidate := withElision(head, body[len(body)-tail:], dropped)
-		if counter.Count(candidate) <= window {
-			return candidate, true, nil
+		cell[0] = chat.Text(placeholderText(dropped))
+		buf = append(buf[:0], head...)
+		buf = append(buf, chat.Message{Role: PlaceholderRole, Content: cell})
+		buf = append(buf, body[len(body)-tail:]...)
+		if counter.Count(buf) <= window {
+			return buf[:len(buf):len(buf)], true, nil
 		}
 	}
 
 	// Maximal compression — head + placeholder + the single most-recent turn —
-	// still overflows. Return that smallest viable set as the best effort with
-	// the typed error, so the caller routes it elsewhere (§6.2).
-	best := withElision(head, body[len(body)-1:], len(body)-1)
-	return best, true, ErrCannotFit
+	// still overflows. buf already holds that smallest viable set from the final
+	// iteration (tail == 1); return it as the best effort with the typed error,
+	// so the caller routes it elsewhere (§6.2).
+	return buf[:len(buf):len(buf)], true, ErrCannotFit
 }
 
 // leadingHeadLen counts the leading run of protected turns — consecutive system
@@ -147,21 +159,6 @@ func leadingHeadLen(messages []chat.Message) int {
 		break
 	}
 	return n
-}
-
-// withElision builds head + [placeholder] + tail as a fresh slice, where the
-// placeholder is a single PlaceholderRole message — a chat.Message carrying one
-// text block — naming how many middle turns were dropped. dropped is always >= 1
-// here (the caller only elides a real span).
-func withElision(head, tail []chat.Message, dropped int) []chat.Message {
-	out := make([]chat.Message, 0, len(head)+1+len(tail))
-	out = append(out, head...)
-	out = append(out, chat.Message{
-		Role:    PlaceholderRole,
-		Content: []chat.ContentBlock{chat.Text(placeholderText(dropped))},
-	})
-	out = append(out, tail...)
-	return out
 }
 
 // placeholderText is the elision note dropped into the middle of the
