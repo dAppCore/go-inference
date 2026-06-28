@@ -36,6 +36,9 @@ var (
 	schedSinkErr         error
 	schedSinkResult      core.Result
 	schedSinkTokensCount int
+	schedSinkModelType   string
+	schedSinkInfo        inference.ModelInfo
+	schedSinkMetrics     inference.GenerateMetrics
 )
 
 // schedBenchModel is a synchronous-iterator base model — yields the
@@ -62,8 +65,10 @@ func (m *schedBenchModel) BatchGenerate(context.Context, []string, ...inference.
 	return core.Ok([]inference.BatchResult(nil))
 }
 
-func (m *schedBenchModel) ModelType() string             { return "sched-bench" }
-func (m *schedBenchModel) Info() inference.ModelInfo     { return inference.ModelInfo{Architecture: "qwen3"} }
+func (m *schedBenchModel) ModelType() string { return "sched-bench" }
+func (m *schedBenchModel) Info() inference.ModelInfo {
+	return inference.ModelInfo{Architecture: "qwen3"}
+}
 func (m *schedBenchModel) Metrics() inference.GenerateMetrics {
 	return inference.GenerateMetrics{GeneratedTokens: len(m.tokens)}
 }
@@ -166,6 +171,48 @@ func BenchmarkScheduler_CancelRequest_NotFound(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		schedSinkCancel, schedSinkErr = sched.CancelRequest(ctx, "no-such-id")
+	}
+}
+
+// --- Delegators (Classify / BatchGenerate / Info / Metrics / ModelType):
+// the scheduler wraps the base model with only a nil guard, so these
+// measure the scheduler-layer overhead on top of the base call. ---
+
+func BenchmarkScheduler_Classify(b *testing.B) {
+	base := &schedBenchModel{tokens: benchTokens(1)}
+	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	ctx := context.Background()
+	prompts := []string{"alpha", "beta", "gamma"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkResult = sched.Classify(ctx, prompts)
+	}
+}
+
+func BenchmarkScheduler_BatchGenerate(b *testing.B) {
+	base := &schedBenchModel{tokens: benchTokens(1)}
+	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	ctx := context.Background()
+	prompts := []string{"alpha", "beta", "gamma"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkResult = sched.BatchGenerate(ctx, prompts)
+	}
+}
+
+// Info / Metrics / ModelType are nil-guarded value passthroughs — one
+// bench proves the scheduler layer adds no allocation over the base read.
+func BenchmarkScheduler_Accessors_InfoMetricsModelType(b *testing.B) {
+	base := &schedBenchModel{tokens: benchTokens(1)}
+	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		schedSinkInfo = sched.Info()
+		schedSinkMetrics = sched.Metrics()
+		schedSinkModelType = sched.ModelType()
 	}
 }
 
