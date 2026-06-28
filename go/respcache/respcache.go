@@ -21,7 +21,7 @@
 package respcache
 
 import (
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -149,13 +149,22 @@ func (c *Cache) Set(req Request, out Completion, ttl time.Duration) {
 //
 //	k := respcache.Key(req)
 func Key(req Request) string {
-	// Copy the stop list before sorting so we never mutate the caller's slice.
-	// nil and empty both normalise to nil, so they share a key.
+	// Normalise the stop list to sorted order so the key is order-independent;
+	// nil and empty both normalise to nil, so they share a key. We copy before
+	// sorting so we never mutate the caller's slice — but an already-sorted list
+	// (notably the common single-element case) needs no copy, since it is then
+	// never mutated and only read by the marshaller. slices.Sort matches
+	// sort.Strings' ascending order, so the canonical bytes — and the key — are
+	// identical either way.
 	var stop []string
 	if len(req.Stop) > 0 {
-		stop = make([]string, len(req.Stop))
-		copy(stop, req.Stop)
-		sort.Strings(stop)
+		if slices.IsSorted(req.Stop) {
+			stop = req.Stop
+		} else {
+			stop = make([]string, len(req.Stop))
+			copy(stop, req.Stop)
+			slices.Sort(stop)
+		}
 	}
 
 	canonical := Request{
