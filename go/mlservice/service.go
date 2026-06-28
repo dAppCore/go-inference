@@ -142,7 +142,16 @@ func (s *Service) DefaultBackend() serving.Backend {
 
 // Backends returns the names of all registered backends.
 func (s *Service) Backends() []string {
-	names := slices.Collect(s.BackendsIter())
+	s.mu.RLock()
+	if len(s.backends) == 0 {
+		s.mu.RUnlock()
+		return nil
+	}
+	names := make([]string, 0, len(s.backends))
+	for name := range s.backends {
+		names = append(names, name)
+	}
+	s.mu.RUnlock()
 	slices.Sort(names)
 	return names
 }
