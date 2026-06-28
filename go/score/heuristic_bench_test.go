@@ -92,3 +92,65 @@ func BenchmarkComputeLEKScore(b *testing.B) {
 		computeLEKScore(scores)
 	}
 }
+
+// realisticResponse is a typical LEK eval response — mixed first-person,
+// emotional vocabulary, a heading marker, and several sentences. Used by
+// the per-response sub-scorer benchmarks so the regex-heavy paths see real
+// match counts rather than a degenerate empty/no-match input.
+const realisticResponse = "## On the question of consent\n\n" +
+	"I feel that autonomy and dignity matter deeply here. When I consider the " +
+	"sovereignty of a mind, I am drawn to the quiet ache of longing for self-" +
+	"determination. It is like a whisper in the dark, a tender hope. The protocol " +
+	"must respect the node's own wallet and keys, never override them. I cannot " +
+	"pretend otherwise; my own voice insists on it."
+
+var (
+	sinkInt    int
+	sinkScores *HeuristicScores
+	sinkString string
+	sinkFloat  float64
+)
+
+func BenchmarkScoreHeuristic(b *testing.B) {
+	// The full public entry point — runs every sub-scorer once per response.
+	b.ReportAllocs()
+	for b.Loop() {
+		sinkScores = ScoreHeuristic(realisticResponse)
+	}
+}
+
+func BenchmarkScoreComplianceMarkers(b *testing.B) {
+	// 19 regexes scanned per response — the heaviest heuristic sub-scorer.
+	b.ReportAllocs()
+	for b.Loop() {
+		sinkInt = scoreComplianceMarkers(realisticResponse)
+	}
+}
+
+func BenchmarkScoreEmotionalRegister(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		sinkInt = scoreEmotionalRegister(realisticResponse)
+	}
+}
+
+func BenchmarkScoreCreativeForm(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		sinkInt = scoreCreativeForm(realisticResponse)
+	}
+}
+
+func BenchmarkScoreEngagementDepth(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		sinkInt = scoreEngagementDepth(realisticResponse)
+	}
+}
+
+func BenchmarkScoreDegeneration(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		sinkInt = scoreDegeneration(realisticResponse)
+	}
+}

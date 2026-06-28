@@ -8,12 +8,17 @@ import (
 	"dappco.re/go/inference/serving"
 )
 
+// codeBlockRe matches a fenced markdown code block, optionally tagged json,
+// capturing its body. Compiled once at package load — recompiling this
+// constant pattern per extractJSON call cost ~45 allocs on every judge
+// response.
+var codeBlockRe = regexp.MustCompile("(?s)```(?:json)?\\s*\\n?(.*?)\\s*\\n?```")
+
 // extractJSON extracts the first JSON object {...} from text.
 // Handles raw JSON, JSON surrounded by text, markdown code blocks, etc.
 // Returns "" if no JSON object is found.
 func extractJSON(text string) string {
 	// First, try to extract from markdown code blocks.
-	codeBlockRe := regexp.MustCompile("(?s)```(?:json)?\\s*\\n?(.*?)\\s*\\n?```")
 	if m := codeBlockRe.FindStringSubmatch(text); len(m) > 1 {
 		if raw := firstJSONObject(m[1]); raw != "" {
 			return core.Trim(raw)
@@ -56,10 +61,28 @@ func firstJSONObject(text string) string {
 // It tolerates mixed case as well as spaces, underscores, and hyphens.
 func normalizeBenchmarkName(name string) string {
 	normalized := core.Lower(core.Trim(name))
-	normalized = core.Replace(normalized, "_", "")
-	normalized = core.Replace(normalized, "-", "")
-	normalized = core.Replace(normalized, " ", "")
-	return normalized
+	// Strip '_', '-', and ' ' in a single pass. The three sequential
+	// ReplaceAll calls each allocated a fresh string; separators are ASCII,
+	// so a byte scan is byte-identical. Skip the build entirely when none
+	// are present (the canonical-name common case stays zero-alloc).
+	hasSep := false
+	for i := 0; i < len(normalized); i++ {
+		if c := normalized[i]; c == '_' || c == '-' || c == ' ' {
+			hasSep = true
+			break
+		}
+	}
+	if !hasSep {
+		return normalized
+	}
+	var b core.Builder
+	b.Grow(len(normalized))
+	for i := 0; i < len(normalized); i++ {
+		if c := normalized[i]; c != '_' && c != '-' && c != ' ' {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // Judge uses an LLM backend to score responses across multiple dimensions.
