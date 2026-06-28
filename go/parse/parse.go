@@ -11,6 +11,8 @@
 package parse
 
 import (
+	"strconv"
+
 	core "dappco.re/go"
 	tools "dappco.re/go/inference/tools"
 )
@@ -52,6 +54,9 @@ func ParseGemma4ToolCalls(text string) (calls []tools.ToolCall, normalText strin
 		return calls, text, nil
 	}
 
+	// One ToolCall per match, count known — size once instead of regrowing the
+	// backing array call-by-call.
+	calls = make([]tools.ToolCall, 0, len(matches))
 	for _, m := range matches {
 		args := parseGemma4Args(m.args)
 		calls = append(calls, tools.ToolCall{
@@ -246,7 +251,14 @@ func parseGemma4Args(argsStr string) map[string]any {
 //	parseGemma4Array(`1, 2, 3`)            // []any{1, 2, 3}
 //	parseGemma4Array(`<|"|>a<|"|>, <|"|>b<|"|>`) // []any{"a", "b"}
 func parseGemma4Array(arrStr string) []any {
+	// Elements are comma-separated, so commas+1 is the exact element count for a
+	// flat array and a safe upper bound otherwise — size the slice once instead
+	// of regrowing it element-by-element. Guarded on commas>0 so empty and
+	// single-element bodies keep the zero-alloc empty-literal start.
 	items := []any{}
+	if commas := countByte(arrStr, ','); commas > 0 {
+		items = make([]any, 0, commas+1)
+	}
 	i := 0
 	n := len(arrStr)
 	dl := len(stringDelim)
@@ -338,15 +350,84 @@ func parseGemma4Value(valueStr string) any {
 // rejects non-number JSON (null, true, "quoted") so only genuine numbers are
 // treated as numeric — matching _parse_gemma4_value's int()/float() guard.
 //
+// isJSONNumber gates on the exact RFC 8259 number grammar that encoding/json's
+// scanner enforces, then strconv.ParseFloat does the very conversion json's
+// number decoder runs internally — so the result is byte-identical to decoding
+// into an `any`, without the decoder's per-call allocations on this per-value
+// hot path (it fires once per bare numeric argument).
+//
 //	parseNumber("1.5") // 1.5, true
 //	parseNumber("abc") // 0, false
 func parseNumber(s string) (float64, bool) {
-	var v any
-	if r := core.JSONUnmarshalString(s, &v); !r.OK {
+	if !isJSONNumber(s) {
 		return 0, false
 	}
-	f, ok := v.(float64)
-	return f, ok
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		// Grammar-valid but out of float64 range (e.g. 1e400): json's number
+		// decoder treats ParseFloat's error the same way — not a number.
+		return 0, false
+	}
+	return f, true
+}
+
+// isJSONNumber reports whether s is exactly one JSON number per RFC 8259 — the
+// grammar encoding/json's scanner accepts: an optional leading '-', an integer
+// part that is a lone 0 or 1-9 then digits (no leading zeros), an optional
+// '.'-fraction with at least one digit, and an optional e/E exponent. Gating
+// strconv.ParseFloat on it keeps parseNumber's accept set identical to
+// json.Unmarshal's (no leading '+', no "Inf"/"NaN", no hex, no bare ".5"/"1.").
+//
+//	isJSONNumber("-2.5e3") // true
+//	isJSONNumber("01")     // false (leading zero)
+func isJSONNumber(s string) bool {
+	n := len(s)
+	if n == 0 {
+		return false
+	}
+	i := 0
+	if s[i] == '-' {
+		i++
+	}
+	// Integer part: a lone 0, or 1-9 followed by any digits.
+	if i >= n {
+		return false
+	}
+	switch {
+	case s[i] == '0':
+		i++
+	case s[i] >= '1' && s[i] <= '9':
+		i++
+		for i < n && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+	default:
+		return false
+	}
+	// Optional fraction: '.' then at least one digit.
+	if i < n && s[i] == '.' {
+		i++
+		if i >= n || s[i] < '0' || s[i] > '9' {
+			return false
+		}
+		for i < n && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+	}
+	// Optional exponent: e/E, an optional sign, then at least one digit.
+	if i < n && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < n && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		if i >= n || s[i] < '0' || s[i] > '9' {
+			return false
+		}
+		for i < n && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+	}
+	return i == n
 }
 
 // skipBalanced consumes a {…} or […] region whose opener was already passed,
@@ -398,6 +479,20 @@ func indexFrom(s, sub string, from int) int {
 		return -1
 	}
 	return from + rel
+}
+
+// countByte returns how many times b occurs in s. A 0-alloc scan used to size
+// an array slice from its comma count before parsing.
+//
+//	countByte("a,b,c", ',') // 2
+func countByte(s string, b byte) int {
+	count := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			count++
+		}
+	}
+	return count
 }
 
 // isArgSep reports whether b separates entries/elements (space, comma, newline,
