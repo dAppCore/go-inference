@@ -113,6 +113,53 @@ func BenchmarkPack_Inspect_Typical(b *testing.B) {
 	}
 }
 
+// --- Pack ---
+
+// Pack on a typical fixture — buildTar + manifestToHeaderMap +
+// trix.Encode + WriteFile. The manifest carries a pre-filled
+// Model.Hash so this bench isolates the Pack-specific path rather
+// than re-measuring Hash (which has its own bench above). Pack runs
+// on every model bundling op for every backend.
+func BenchmarkPack_Pack_Typical(b *testing.B) {
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bench-pack-")
+	defer core.RemoveAll(tempRoot)
+	srcDir := core.JoinPath(tempRoot, "src")
+	dest := core.JoinPath(tempRoot, "out.model")
+	buildFixturePack(b, srcDir)
+	m := sampleManifest()
+	m.Model.Hash = "prefilled-to-isolate-pack-path-from-hash"
+	m.Producer.Created = "2026-01-01T00:00:00Z"
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		packBenchSinkResult = pack.Pack(srcDir, dest, pack.PackOptions{Manifest: m})
+	}
+}
+
+// --- Unpack ---
+
+// Unpack on a packed model — trix.Decode + extractTar (writes the
+// payload files back to disk). Overwrite is set so the destination
+// can be reused across iterations without per-iter dir churn.
+func BenchmarkPack_Unpack_Typical(b *testing.B) {
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bench-unpack-")
+	defer core.RemoveAll(tempRoot)
+	srcDir := core.JoinPath(tempRoot, "src")
+	dest := core.JoinPath(tempRoot, "out.model")
+	outDir := core.JoinPath(tempRoot, "out")
+	buildFixturePack(b, srcDir)
+	if r := pack.Pack(srcDir, dest, pack.PackOptions{Manifest: sampleManifest()}); !r.OK {
+		b.Fatalf("Pack setup: %v", r.Value)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		packBenchSinkResult = pack.Unpack(dest, outDir, pack.UnpackOptions{Overwrite: true})
+	}
+}
+
 // AX-11: alloc + behavioural budget gate for Hash on the typical
 // fixture. Hash runs on every Pack() call — a regression here
 // propagates to model save time + drives up Pack latency for every
