@@ -102,7 +102,9 @@ func CalibrateDomains(ctx context.Context, modelA, modelB inference.TextModel,
 		if agree {
 			stats.Agreed++
 		} else {
-			key := core.Sprintf("%s->%s", a, b)
+			// Concatenation (one allocation) instead of core.Sprintf, which
+			// boxes both labels for its variadic args on this per-disagreement path.
+			key := a + "->" + b
 			stats.ConfusionPairs[key]++
 		}
 		stats.ByDomainA[a]++
