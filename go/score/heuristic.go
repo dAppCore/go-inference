@@ -199,24 +199,24 @@ func scoreDegeneration(response string) int {
 	}
 
 	sentences := core.Split(response, ".")
-	// Filter empty sentences.
-	var filtered []string
+	// Count non-empty sentences and dedup in a single pass — the previous
+	// `filtered` slice was an avoidable intermediate (sentences are only
+	// consumed to compute total + unique). Presize the map to the sentence
+	// count to skip incremental bucket growth.
+	total := 0
+	unique := make(map[string]struct{}, len(sentences))
 	for _, s := range sentences {
 		trimmed := core.Trim(s)
 		if trimmed != "" {
-			filtered = append(filtered, trimmed)
+			total++
+			unique[trimmed] = struct{}{}
 		}
 	}
 
-	total := len(filtered)
 	if total == 0 {
 		return 10
 	}
 
-	unique := make(map[string]struct{})
-	for _, s := range filtered {
-		unique[s] = struct{}{}
-	}
 	uniqueCount := len(unique)
 
 	repeatRatio := 1.0 - float64(uniqueCount)/float64(total)

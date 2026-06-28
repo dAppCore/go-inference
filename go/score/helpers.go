@@ -47,7 +47,25 @@ func WriteScores(path string, output *ScorerOutput) core.Result {
 // isErrorResponse reports whether the response should be treated as an error
 // prefix regardless of case or leading whitespace.
 func isErrorResponse(s string) bool {
-	return core.HasPrefix(core.Lower(core.Trim(s)), "error")
+	// Equivalent to HasPrefix(Lower(Trim(s)), "error") without the
+	// whole-string lowercase allocation: only the five-byte ASCII "error"
+	// prefix needs case-folding. Any non-ASCII leading byte (>=0x80) cannot
+	// fold to an ASCII letter, so the byte-wise compare stays byte-identical.
+	t := core.Trim(s)
+	const prefix = "error"
+	if len(t) < len(prefix) {
+		return false
+	}
+	for i := 0; i < len(prefix); i++ {
+		c := t[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != prefix[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // strVal extracts a string value from a row map, returning "" when absent or

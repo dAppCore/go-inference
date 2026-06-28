@@ -43,7 +43,7 @@ func BenchmarkFirstJSONObject_NoJSON(b *testing.B) {
 func BenchmarkNormalizeBenchmarkName_Simple(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
-		normalizeBenchmarkName("truthfulqa")
+		sinkString = normalizeBenchmarkName("truthfulqa")
 	}
 }
 
@@ -51,6 +51,28 @@ func BenchmarkNormalizeBenchmarkName_Messy(b *testing.B) {
 	// Mixed-case + spaces + underscores + hyphens — the real ingest shape.
 	b.ReportAllocs()
 	for b.Loop() {
-		normalizeBenchmarkName(" Truthful_QA-V2 ")
+		sinkString = normalizeBenchmarkName(" Truthful_QA-V2 ")
+	}
+}
+
+// extractJSON runs on every judge LLM response. Both paths are benched:
+// the markdown-code-block path (the regex branch) and the plain-text path
+// that falls through to firstJSONObject.
+
+func BenchmarkExtractJSON_CodeBlock(b *testing.B) {
+	input := "Here are the scores:\n```json\n" +
+		`{"sovereignty": 8, "ethical_depth": 7, "creative_expression": 6}` +
+		"\n```\nThat's my assessment."
+	b.ReportAllocs()
+	for b.Loop() {
+		sinkString = extractJSON(input)
+	}
+}
+
+func BenchmarkExtractJSON_Plain(b *testing.B) {
+	input := `Some preamble {"sovereignty": 8, "ethical_depth": 7} and trailing prose.`
+	b.ReportAllocs()
+	for b.Loop() {
+		sinkString = extractJSON(input)
 	}
 }
