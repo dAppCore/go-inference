@@ -7,8 +7,8 @@ import core "dappco.re/go"
 // fprintf writes a formatted line to any io.Writer-shaped value, concentrating
 // the formatting in one place.
 func fprintf(w any, format string, args ...any) {
-	if f, ok := w.(interface{ Write([]byte) (int, error) }); ok {
-		_, _ = f.Write([]byte(core.Sprintf(format, args...)))
+	if cw, ok := w.(core.Writer); ok {
+		core.WriteString(cw, core.Sprintf(format, args...))
 	}
 }
 
@@ -18,5 +18,5 @@ func readAll(r any) core.Result {
 	if !result.OK {
 		return result
 	}
-	return core.Ok([]byte(result.Value.(string)))
+	return core.Ok(core.AsBytes(result.Value.(string)))
 }

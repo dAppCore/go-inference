@@ -114,18 +114,19 @@ func PrintStatus(influx *datapipe.InfluxClient, w io.Writer) core.Result {
 // (latest) row per model.
 func dedupeTraining(statusRows, lossRows []map[string]any) []trainingRow {
 	lossMap := make(map[string]float64)
-	lossSeenMap := make(map[string]bool)
 	for _, row := range lossRows {
 		model := strVal(row, "model")
-		if model == "" || lossSeenMap[model] {
+		if model == "" {
 			continue
 		}
-		lossSeenMap[model] = true
+		if _, ok := lossMap[model]; ok {
+			continue
+		}
 		lossMap[model] = floatVal(row, "loss")
 	}
 
 	seen := make(map[string]bool)
-	var rows []trainingRow
+	rows := make([]trainingRow, 0, len(statusRows))
 	for _, row := range statusRows {
 		model := strVal(row, "model")
 		if model == "" || seen[model] {
@@ -159,7 +160,7 @@ func dedupeTraining(statusRows, lossRows []map[string]any) []trainingRow {
 // dedupeGeneration deduplicates generation progress rows by worker.
 func dedupeGeneration(rows []map[string]any) []genRow {
 	seen := make(map[string]bool)
-	var result []genRow
+	result := make([]genRow, 0, len(rows))
 	for _, row := range rows {
 		worker := strVal(row, "worker")
 		if worker == "" || seen[worker] {
