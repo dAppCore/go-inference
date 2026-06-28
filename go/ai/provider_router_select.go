@@ -209,7 +209,9 @@ func orderCandidates(request SelectRequest, wanted []string, candidates []Endpoi
 // absent name is skipped and a repeated name is honoured once.
 func orderByExplicit(order []string, candidates []Endpoint) []Endpoint {
 	out := make([]Endpoint, 0, len(candidates))
-	seen := make(map[int]bool, len(candidates))
+	// Candidate positions are dense [0,len), so a bool slice covers the
+	// already-emitted set with one allocation instead of a map's two.
+	seen := make([]bool, len(candidates))
 	for _, name := range order {
 		name = core.Trim(name)
 		for index, endpoint := range candidates {
@@ -225,74 +227,94 @@ func orderByExplicit(order []string, candidates []Endpoint) []Endpoint {
 
 // sortCandidates ranks by the requested sort axis, with the original input
 // position as a deterministic tie-break so equal-cost endpoints keep their
-// declared order.
+// declared order. It sorts a slice of indices rather than the endpoints
+// themselves: a comparison sort is driven only by the comparator's sign, so
+// permuting [0..n) under the lifted comparator yields a byte-identical order
+// while keeping the tie-break a cheap int compare (the previous shape rebuilt
+// a string key via core.Concat on every comparison — O(N log N) allocations).
 func sortCandidates(request SelectRequest, wanted []string, candidates []Endpoint) []Endpoint {
-	out := make([]Endpoint, len(candidates))
-	copy(out, candidates)
-	indexOf := candidateIndex(candidates)
+	order := make([]int, len(candidates))
+	for i := range order {
+		order[i] = i
+	}
+	tie := tiePositions(candidates)
 
 	switch request.Preferences.Sort {
 	case SortByPrice:
-		core.SliceSortFunc(out, func(a, b Endpoint) bool {
-			pa, pb := highestPrice(a), highestPrice(b)
+		core.SliceSortFunc(order, func(a, b int) bool {
+			pa, pb := highestPrice(candidates[a]), highestPrice(candidates[b])
 			if pa != pb {
 				return pa < pb
 			}
-			return indexOf(a) < indexOf(b)
+			return tie[a] < tie[b]
 		})
 	case SortByLatency:
-		core.SliceSortFunc(out, func(a, b Endpoint) bool {
-			if a.Latency != b.Latency {
-				return a.Latency < b.Latency
+		core.SliceSortFunc(order, func(a, b int) bool {
+			if candidates[a].Latency != candidates[b].Latency {
+				return candidates[a].Latency < candidates[b].Latency
 			}
-			return indexOf(a) < indexOf(b)
+			return tie[a] < tie[b]
 		})
 	case SortByThroughput:
-		core.SliceSortFunc(out, func(a, b Endpoint) bool {
-			if a.Throughput != b.Throughput {
-				return a.Throughput > b.Throughput
+		core.SliceSortFunc(order, func(a, b int) bool {
+			if candidates[a].Throughput != candidates[b].Throughput {
+				return candidates[a].Throughput > candidates[b].Throughput
 			}
-			return indexOf(a) < indexOf(b)
+			return tie[a] < tie[b]
 		})
 	default:
-		core.SliceSortFunc(out, func(a, b Endpoint) bool {
-			if a.Local != b.Local {
-				return a.Local
+		core.SliceSortFunc(order, func(a, b int) bool {
+			ea, eb := candidates[a], candidates[b]
+			if ea.Local != eb.Local {
+				return ea.Local
 			}
-			if a.Free != b.Free {
-				return a.Free
+			if ea.Free != eb.Free {
+				return ea.Free
 			}
-			if ma, mb := modelRank(wanted, a.Model), modelRank(wanted, b.Model); ma != mb {
+			if ma, mb := modelRank(wanted, ea.Model), modelRank(wanted, eb.Model); ma != mb {
 				return ma < mb
 			}
-			return indexOf(a) < indexOf(b)
+			return tie[a] < tie[b]
 		})
+	}
+
+	out := make([]Endpoint, len(candidates))
+	for i, idx := range order {
+		out[i] = candidates[idx]
 	}
 	return out
 }
 
-// candidateIndex returns a lookup from the pre-sort position of each
-// endpoint, used as a stable tie-break inside the comparators.
-func candidateIndex(candidates []Endpoint) func(Endpoint) int {
-	positions := make(map[string]int, len(candidates))
-	for index, endpoint := range candidates {
-		key := endpointKey(endpoint)
-		if _, ok := positions[key]; !ok {
-			positions[key] = index
+// tiePositions returns, for each candidate, the input position of the first
+// candidate sharing its routing identity — the stable tie-break used by
+// sortCandidates so equal-cost endpoints keep their declared order, with
+// duplicates collapsing to their first occurrence. The previous shape built
+// this lookup from a map[string]int keyed on a concatenated string; comparing
+// the identity fields directly drops both the map and the per-key string, so
+// only the returned slice allocates.
+func tiePositions(candidates []Endpoint) []int {
+	positions := make([]int, len(candidates))
+	for i := range candidates {
+		positions[i] = i
+		for j := 0; j < i; j++ {
+			if sameEndpointKey(candidates[j], candidates[i]) {
+				positions[i] = j
+				break
+			}
 		}
 	}
-	return func(endpoint Endpoint) int {
-		if index, ok := positions[endpointKey(endpoint)]; ok {
-			return index
-		}
-		return len(candidates)
-	}
+	return positions
 }
 
-// endpointKey identifies an endpoint for tie-break lookups; provider plus
-// device plus quant is unique within a candidate pool.
-func endpointKey(endpoint Endpoint) string {
-	return core.Concat(core.Trim(endpoint.Provider), "|", core.Trim(endpoint.DeviceID), "|", core.Trim(endpoint.Quantisation), "|", core.Trim(endpoint.Model))
+// sameEndpointKey reports whether two endpoints share the routing identity
+// used for tie-breaks — provider plus device plus quant plus model, each
+// compared after trimming. core.Trim returns a substring, so this allocates
+// nothing.
+func sameEndpointKey(a, b Endpoint) bool {
+	return core.Trim(a.Provider) == core.Trim(b.Provider) &&
+		core.Trim(a.DeviceID) == core.Trim(b.DeviceID) &&
+		core.Trim(a.Quantisation) == core.Trim(b.Quantisation) &&
+		core.Trim(a.Model) == core.Trim(b.Model)
 }
 
 // modelRank returns the position of a model in the requested fallback order,
