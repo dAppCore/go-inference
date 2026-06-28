@@ -75,18 +75,32 @@ func fold(text string) string {
 	return out
 }
 
-// tokenise folds then splits on any non-[a-z] into whole-word tokens.
+// tokenise folds then splits on any non-[a-z] into whole-word tokens. Each
+// token is a sub-slice of the folded string, so the result slice is the only
+// allocation — no space-normalised byte copy, no intermediate string. This is
+// byte-identical to splitting a space-normalised copy on " ": every non-[a-z]
+// byte is exactly one separator, so empty tokens fall at the same indices
+// (load-bearing — selfReference counts them as window slots).
 func tokenise(text string) []string {
 	folded := fold(text)
-	b := make([]byte, len(folded))
+	// Size the result exactly — one token per separator (non-[a-z] byte) plus
+	// the trailing token — mirroring strings.Split's count-then-fill so the
+	// append loop never grows the backing array.
+	n := 1
 	for i := 0; i < len(folded); i++ {
-		if c := folded[i]; c >= 'a' && c <= 'z' {
-			b[i] = c
-		} else {
-			b[i] = ' '
+		if c := folded[i]; c < 'a' || c > 'z' {
+			n++
 		}
 	}
-	return core.Split(string(b), " ")
+	tokens := make([]string, 0, n)
+	start := 0
+	for i := 0; i < len(folded); i++ {
+		if c := folded[i]; c < 'a' || c > 'z' {
+			tokens = append(tokens, folded[start:i])
+			start = i + 1
+		}
+	}
+	return append(tokens, folded[start:])
 }
 
 // canonical folds a single catalogue term to letters-only canonical form.
