@@ -205,13 +205,39 @@ type Message struct {
 //	m := chat.Message{Content: []chat.ContentBlock{chat.Text("a"), img, chat.Text("b")}}
 //	m.Text() == "ab"
 func (m Message) Text() string {
-	parts := make([]string, 0, len(m.Content))
+	// Single pass to size the output: sum the text-block lengths and
+	// remember the first one. The common no-text and single-text cases
+	// then return without allocating, and the many-block case writes
+	// straight into one pre-sized Builder — the earlier []string + Join
+	// also allocated an intermediate slice for the parts.
+	var (
+		n     int
+		count int
+		first string
+	)
 	for _, b := range m.Content {
 		if b.Kind == KindText {
-			parts = append(parts, b.Text)
+			if count == 0 {
+				first = b.Text
+			}
+			n += len(b.Text)
+			count++
 		}
 	}
-	return core.Join("", parts...)
+	switch count {
+	case 0:
+		return ""
+	case 1:
+		return first
+	}
+	var sb core.Builder
+	sb.Grow(n)
+	for _, b := range m.Content {
+		if b.Kind == KindText {
+			sb.WriteString(b.Text)
+		}
+	}
+	return sb.String()
 }
 
 // UserText is the common single-text-message constructor.
@@ -271,11 +297,19 @@ type Request struct {
 //	chat.Request{Model: "a"}.PrimaryModel()              // "a"
 //	chat.Request{Models: []string{"x", "y"}}.PrimaryModel() // "x"
 func (r Request) PrimaryModel() string {
-	chain := r.FallbackChain()
-	if len(chain) == 0 {
-		return ""
+	// The primary is the first non-blank, trimmed entry scanning Model
+	// then Models in order — the head of FallbackChain. Compute it
+	// directly so routing's per-request lookup builds no chain slice (and
+	// core.Trim returns a sub-string, so this allocates nothing).
+	if m := core.Trim(r.Model); m != "" {
+		return m
 	}
-	return chain[0]
+	for _, raw := range r.Models {
+		if m := core.Trim(raw); m != "" {
+			return m
+		}
+	}
+	return ""
 }
 
 // FallbackChain is the ordered, de-duplicated list of models the router tries:
@@ -312,7 +346,7 @@ func (r Request) FallbackChain() []string {
 //
 //	if err := req.Validate(); err != nil { return err }
 func (r Request) Validate() error {
-	if len(r.FallbackChain()) == 0 {
+	if r.PrimaryModel() == "" {
 		return core.E("chat", "request needs a model or models list", nil)
 	}
 	if len(r.Messages) == 0 {
