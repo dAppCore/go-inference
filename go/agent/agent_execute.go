@@ -13,6 +13,11 @@ import (
 	coreio "dappco.re/go/io"
 )
 
+// checkpointNumRe extracts the numeric component of a checkpoint dir/file
+// name. Hoisted to a package var so the pattern compiles once at init rather
+// than on every DiscoverCheckpointsIter call.
+var checkpointNumRe = regexp.MustCompile(`(\d+)`)
+
 // RunAgentLoop is the main scoring agent loop.
 func RunAgentLoop(cfg *AgentConfig) {
 	core.Print(nil, repeatStr("=", LogSeparatorWidth))
@@ -130,8 +135,6 @@ func DiscoverCheckpointsIter(cfg *AgentConfig) iter.Seq2[Checkpoint, error] {
 		}
 		out := rOut.Value.(string)
 
-		iterRe := regexp.MustCompile(`(\d+)`)
-
 		var adapterDirs []string
 		for _, dirpath := range core.Split(core.Trim(out), "\n") {
 			if dirpath == "" {
@@ -164,7 +167,7 @@ func DiscoverCheckpointsIter(cfg *AgentConfig) iter.Seq2[Checkpoint, error] {
 				}
 				filename := fileBase(fp)
 
-				match := iterRe.FindStringSubmatch(filename)
+				match := checkpointNumRe.FindStringSubmatch(filename)
 				if len(match) < 2 {
 					continue
 				}
