@@ -155,9 +155,11 @@ func AdapterMeta(dirname string) (string, string, string) {
 			if variant == "" {
 				variant = "base"
 			}
-			short := fam.Short + "-" + variant
-			if variant == "base" {
-				short = fam.Short
+			short := fam.Short
+			if variant != "base" {
+				// Only build the concatenation when it is actually used;
+				// the "base" case discarded a freshly-allocated string.
+				short = fam.Short + "-" + variant
 			}
 			stem := core.Replace(name, "/", "-")
 			return fam.Tag, short, stem

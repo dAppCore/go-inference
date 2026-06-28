@@ -357,8 +357,9 @@ func ReadKeyFile() string {
 
 // SplitComma splits a comma-separated string into trimmed parts.
 func SplitComma(s string) []string {
-	var result []string
-	for _, part := range core.Split(s, ",") {
+	parts := core.Split(s, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
 		trimmed := core.Trim(part)
 		if len(trimmed) > 0 {
 			result = append(result, trimmed)

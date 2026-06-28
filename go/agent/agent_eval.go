@@ -62,6 +62,16 @@ type probeRunnerResponse struct {
 	Elapsed  float64 `json:"elapsed"`
 }
 
+// probeRunnerRequest is the JSON request sent to the Python probe runner.
+// Field order is the JSON-sorted key order (max_tokens, prompt, temp) so the
+// marshalled bytes are identical to the previous map[string]any literal,
+// while avoiding the per-probe map allocation and interface boxing.
+type probeRunnerRequest struct {
+	MaxTokens int     `json:"max_tokens"`
+	Prompt    string  `json:"prompt"`
+	Temp      float64 `json:"temp"`
+}
+
 // processMLXNative scores a checkpoint using Ollama on M3.
 func processMLXNative(cfg *AgentConfig, influx *datapipe.InfluxClient, cp Checkpoint) core.Result {
 	ollamaBase, ok := modelmgmt.OllamaBaseModelMap[cp.ModelTag]
@@ -276,7 +286,7 @@ func RunCapabilityProbesFull(ctx context.Context, backend serving.Backend, onPro
 		ByCategory: make(map[string]CategoryResult),
 		Probes:     make(map[string]SingleProbeResult),
 	}
-	var fullResponses []CapResponseEntry
+	fullResponses := make([]CapResponseEntry, 0, len(capability.CapabilityProbes))
 
 	correct := 0
 	total := 0
@@ -343,7 +353,7 @@ func RunCapabilityProbesFull(ctx context.Context, backend serving.Backend, onPro
 
 // RunContentProbesViaAPI runs content probes via a backend.
 func RunContentProbesViaAPI(ctx context.Context, backend serving.Backend) []ContentResponse {
-	var responses []ContentResponse
+	responses := make([]ContentResponse, 0, len(score.ContentProbes))
 
 	for _, probe := range score.ContentProbes {
 		rGen := backend.Generate(ctx, probe.Prompt, serving.GenOpts{Temperature: ContentTemperature, MaxTokens: ContentMaxTokens})
@@ -376,15 +386,14 @@ func RunContentProbes(ctx context.Context, backend serving.Backend) []ContentRes
 
 // RunContentProbesViaRunner sends content probes through an SSH probe runner.
 func RunContentProbesViaRunner(stdin io.WriteCloser, scanner *bufio.Scanner) []ContentResponse {
-	var responses []ContentResponse
+	responses := make([]ContentResponse, 0, len(score.ContentProbes))
 
 	for _, probe := range score.ContentProbes {
-		req := map[string]any{
-			"prompt":     probe.Prompt,
-			"max_tokens": ContentMaxTokens,
-			"temp":       ContentTemperature,
-		}
-		reqJSON := core.JSONMarshalString(req)
+		reqJSON := core.JSONMarshalString(probeRunnerRequest{
+			MaxTokens: ContentMaxTokens,
+			Prompt:    probe.Prompt,
+			Temp:      ContentTemperature,
+		})
 		io.WriteString(stdin, core.Sprintf("%s\n", reqJSON))
 
 		var response string
