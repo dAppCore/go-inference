@@ -110,7 +110,10 @@ func ingestContentScores(influx *InfluxClient, cfg IngestConfig, w io.Writer) co
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	// 64 KiB initial buffer, grown on demand up to a 1 MiB max line. Avoids
+	// allocating a full 1 MiB up front on every call when lines are small
+	// (the common case) while still admitting lines up to 1 MiB.
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	var lines []string
 	var totalPoints int
@@ -202,7 +205,10 @@ func ingestCapabilityScores(influx *InfluxClient, cfg IngestConfig, w io.Writer)
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	// 64 KiB initial buffer, grown on demand up to a 1 MiB max line. Avoids
+	// allocating a full 1 MiB up front on every call when lines are small
+	// (the common case) while still admitting lines up to 1 MiB.
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	var lines []string
 	var totalPoints int
@@ -282,7 +288,10 @@ func ingestTrainingLog(influx *InfluxClient, cfg IngestConfig, w io.Writer) core
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	// 64 KiB initial buffer, grown on demand up to a 1 MiB max line. Avoids
+	// allocating a full 1 MiB up front on every call when lines are small
+	// (the common case) while still admitting lines up to 1 MiB.
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	var lines []string
 	var totalPoints int
