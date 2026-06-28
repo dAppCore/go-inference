@@ -219,14 +219,24 @@ func dispatchPanel(ctx context.Context, prompt string, models []Model) []PanelRe
 	var wg sync.WaitGroup
 	wg.Add(len(models))
 	for i, m := range models {
-		go func(i int, m Model) {
-			defer wg.Done()
-			text, err := m.Run(ctx, prompt)
-			out[i] = PanelResponse{ModelID: m.ID(), Text: text, Err: err}
-		}(i, m)
+		go runPanelMember(ctx, &wg, prompt, out, i, m)
 	}
 	wg.Wait()
 	return out
+}
+
+// runPanelMember runs one panel model and records its response at out[i]
+// (RFC §6.9 step 3 — one survivor slot per member). It is lifted out of
+// dispatchPanel's loop as a non-capturing function taking every dependency as a
+// parameter, so each `go runPanelMember(...)` spawns no per-iteration closure
+// environment on the heap — the goroutine itself and the shared WaitGroup are
+// the only inherent allocations of the fan-out. out[i] is written by exactly one
+// goroutine and wg.Wait happens-before dispatchPanel reads out, so the slice
+// needs no lock.
+func runPanelMember(ctx context.Context, wg *sync.WaitGroup, prompt string, out []PanelResponse, i int, m Model) {
+	defer wg.Done()
+	text, err := m.Run(ctx, prompt)
+	out[i] = PanelResponse{ModelID: m.ID(), Text: text, Err: err}
 }
 
 // anySucceeded reports whether at least one panel member returned without error
@@ -244,22 +254,66 @@ func anySucceeded(panel []PanelResponse) bool {
 // prompt and the surviving panel responses (RFC §6.9 step 4). Failed members are
 // omitted from the synthesis text — the judge deliberates over answers, not
 // errors. Built with core string primitives only (no fmt/strings).
+//
+// One pre-sized core.Builder, not a per-member core.Concat: the old loop
+// re-copied the whole accumulated prompt on every survivor (O(n²) in panel size
+// and total text), one heap string per member. A single Grow to the exact final
+// length lets WriteString fill in place — one backing allocation, and
+// Builder.String() hands it back without a copy.
 func buildSynthesisPrompt(prompt string, panel []PanelResponse) string {
-	body := core.Concat(
-		"You are the judge in a multi-model deliberation. ",
-		"Synthesise the panel responses below into a single grounded answer, ",
-		"noting consensus, contradictions, partial coverage, unique insights, and blind spots.\n\n",
-		"Original prompt:\n", prompt, "\n\nPanel responses:\n",
-	)
+	// The fixed framing, folded to compile-time constants (literal + literal is
+	// a constant expression) so it costs no runtime concatenation. head/tail are
+	// the spans either side of the original prompt.
+	const head = "You are the judge in a multi-model deliberation. " +
+		"Synthesise the panel responses below into a single grounded answer, " +
+		"noting consensus, contradictions, partial coverage, unique insights, and blind spots.\n\n" +
+		"Original prompt:\n"
+	const tail = "\n\nPanel responses:\n"
+
+	// First pass: the exact final byte length, so the builder allocates its
+	// backing array once and never re-grows.
+	size := len(head) + len(prompt) + len(tail)
 	n := 0
 	for _, pr := range panel {
 		if pr.Err != nil {
 			continue // a failed member contributes nothing to deliberate over
 		}
 		n++
-		body = core.Concat(body,
-			"\n[", core.Itoa(n), "] ", pr.ModelID, ":\n", pr.Text, "\n",
-		)
+		// "\n[" + Itoa(n) + "] " + ModelID + ":\n" + Text + "\n"
+		size += 2 + decimalDigits(n) + 2 + len(pr.ModelID) + 2 + len(pr.Text) + 1
 	}
-	return body
+
+	var b core.Builder
+	b.Grow(size)
+	b.WriteString(head)
+	b.WriteString(prompt)
+	b.WriteString(tail)
+	n = 0
+	for _, pr := range panel {
+		if pr.Err != nil {
+			continue
+		}
+		n++
+		b.WriteString("\n[")
+		b.WriteString(core.Itoa(n))
+		b.WriteString("] ")
+		b.WriteString(pr.ModelID)
+		b.WriteString(":\n")
+		b.WriteString(pr.Text)
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// decimalDigits returns the number of decimal digits core.Itoa writes for n
+// (n >= 1 in the synthesis loop) — used to pre-size the builder exactly so its
+// backing array is allocated once. Pure arithmetic: no allocation, unlike
+// measuring len(core.Itoa(n)) which would format a throwaway string per member.
+func decimalDigits(n int) int {
+	d := 1
+	for n >= 10 {
+		d++
+		n /= 10
+	}
+	return d
 }
