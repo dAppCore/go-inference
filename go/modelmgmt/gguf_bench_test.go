@@ -10,7 +10,9 @@ import "testing"
 // hoisting if convert path is profiled hot.
 
 func BenchmarkMLXTensorToGGUF(b *testing.B) {
-	key := "layers.0.self_attn.q_proj.lora_a"
+	// Success path: the regex requires the "model." prefix, so this is the
+	// realistic per-tensor key seen during an MLX→GGUF conversion.
+	key := "model.layers.0.self_attn.q_proj.lora_a"
 	b.ReportAllocs()
 	for b.Loop() {
 		_ = MLXTensorToGGUF(key)

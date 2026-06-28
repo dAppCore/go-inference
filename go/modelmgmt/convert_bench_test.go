@@ -2,7 +2,68 @@
 
 package modelmgmt
 
-import "testing"
+import (
+	"testing"
+
+	core "dappco.re/go"
+)
+
+// benchSinkResult keeps benchmarked Results live so the optimiser cannot
+// elide the call under test.
+var benchSinkResult core.Result
+
+// benchAdapterFixture writes a realistic Gemma-3 LoRA adapter safetensors file
+// (34 layers × 7 modules × {lora_a,lora_b} = 476 tensors) and returns its path.
+// The header — not the tensor bytes — is what ReadSafetensors parses, so data
+// blobs are kept small while the tensor count stays realistic.
+func benchAdapterFixture(b *testing.B) (string, map[string]SafetensorsTensorInfo, map[string][]byte) {
+	b.Helper()
+	modules := []string{
+		"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
+		"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
+	}
+	tensors := make(map[string]SafetensorsTensorInfo, len(modules)*34*2)
+	data := make(map[string][]byte, len(modules)*34*2)
+	for layer := 0; layer < 34; layer++ {
+		for _, mod := range modules {
+			for _, ab := range []string{"lora_a", "lora_b"} {
+				key := core.Sprintf("model.layers.%d.%s.%s", layer, mod, ab)
+				tensors[key] = SafetensorsTensorInfo{Dtype: "F16", Shape: []int{8, 64}}
+				data[key] = make([]byte, 8*64*2)
+			}
+		}
+	}
+	path := core.JoinPath(b.TempDir(), "adapter_model.safetensors")
+	if r := WriteSafetensors(path, tensors, data); !r.OK {
+		b.Fatalf("write fixture: %s", r.Error())
+	}
+	return path, tensors, data
+}
+
+func BenchmarkReadSafetensors(b *testing.B) {
+	path, _, _ := benchAdapterFixture(b)
+	b.ReportAllocs()
+	for b.Loop() {
+		r := ReadSafetensors(path)
+		if !r.OK {
+			b.Fatalf("read: %s", r.Error())
+		}
+		benchSinkResult = r
+	}
+}
+
+func BenchmarkWriteSafetensors(b *testing.B) {
+	_, tensors, data := benchAdapterFixture(b)
+	path := core.JoinPath(b.TempDir(), "out.safetensors")
+	b.ReportAllocs()
+	for b.Loop() {
+		r := WriteSafetensors(path, tensors, data)
+		if !r.OK {
+			b.Fatalf("write: %s", r.Error())
+		}
+		benchSinkResult = r
+	}
+}
 
 // Per-tensor pack/unpack — hit hundreds-to-thousands of times during a
 // single LoRA conversion. RenameMLXKey allocates a regex-replaced string;

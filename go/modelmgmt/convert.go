@@ -13,19 +13,21 @@ import (
 )
 
 var (
-	loraARe  = regexp.MustCompile(`\.lora_a$`)
-	loraBRe  = regexp.MustCompile(`\.lora_b$`)
 	layerRe  = regexp.MustCompile(`layers\.(\d+)`)
 	moduleRe = regexp.MustCompile(`model\.layers\.\d+\.(.*?)\.lora_[ab]$`)
 )
 
-// RenameMLXKey converts an MLX tensor key to PEFT format.
+// RenameMLXKey converts an MLX tensor key to PEFT format. The lora_a/lora_b
+// suffixes are anchored literals, so a HasSuffix check replaces the regex
+// engine (which dominated allocations on this per-tensor path).
 func RenameMLXKey(mlxKey string) string {
-	key := mlxKey
-	key = loraARe.ReplaceAllString(key, ".lora_A.default.weight")
-	key = loraBRe.ReplaceAllString(key, ".lora_B.default.weight")
-	key = "base_model.model." + key
-	return key
+	if core.HasSuffix(mlxKey, ".lora_a") {
+		return "base_model.model." + mlxKey[:len(mlxKey)-len(".lora_a")] + ".lora_A.default.weight"
+	}
+	if core.HasSuffix(mlxKey, ".lora_b") {
+		return "base_model.model." + mlxKey[:len(mlxKey)-len(".lora_b")] + ".lora_B.default.weight"
+	}
+	return "base_model.model." + mlxKey
 }
 
 // SafetensorsHeader represents the header of a safetensors file.
@@ -73,12 +75,7 @@ func ReadSafetensors(path string) core.Result {
 	}
 	delete(rawHeader, "__metadata__")
 
-	tensors := make(map[string]SafetensorsTensorInfo)
-	for key, raw := range rawHeader {
-		tensors[key] = raw
-	}
-
-	return core.Ok(SafetensorsData{Tensors: tensors, Data: tensorData})
+	return core.Ok(SafetensorsData{Tensors: rawHeader, Data: tensorData})
 }
 
 // GetTensorData extracts raw bytes for a tensor from the data section.
@@ -128,7 +125,7 @@ func WriteSafetensors(path string, tensors map[string]SafetensorsTensorInfo, ten
 	keys := slices.Sorted(maps.Keys(tensors))
 
 	offset := 0
-	updatedTensors := make(map[string]SafetensorsTensorInfo)
+	updatedTensors := make(map[string]SafetensorsTensorInfo, len(tensors))
 	for _, k := range keys {
 		info := tensors[k]
 		data := tensorData[k]
@@ -137,12 +134,9 @@ func WriteSafetensors(path string, tensors map[string]SafetensorsTensorInfo, ten
 		offset += len(data)
 	}
 
-	headerMap := make(map[string]any)
-	for k, info := range updatedTensors {
-		headerMap[k] = info
-	}
-
-	headerJSON := []byte(core.JSONMarshalString(headerMap))
+	// updatedTensors marshals to identical JSON as a map[string]any copy
+	// (json sorts keys; struct values serialise the same boxed or not).
+	headerJSON := []byte(core.JSONMarshalString(updatedTensors))
 
 	f, err := coreio.Local.Create(path)
 	if err != nil {
@@ -184,8 +178,8 @@ func ConvertMLXtoPEFT(safetensorsPath, configPath, outputDir, baseModelName stri
 	tensorData := loaded.Data
 	core.Print(nil, "loaded %d tensors from %s", len(tensors), safetensorsPath)
 
-	peftTensors := make(map[string]SafetensorsTensorInfo)
-	peftData := make(map[string][]byte)
+	peftTensors := make(map[string]SafetensorsTensorInfo, len(tensors))
+	peftData := make(map[string][]byte, len(tensors))
 
 	for mlxKey, info := range tensors {
 		peftKey := RenameMLXKey(mlxKey)
