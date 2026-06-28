@@ -88,6 +88,10 @@ var gemma3ModuleMap = map[string]string{
 
 var mlxLoraKeyRe = regexp.MustCompile(`^model\.layers\.(\d+)\.(.*?)\.(lora_[ab])$`)
 
+// blkLayerRe extracts the layer number from a GGUF tensor name (e.g. "blk.5.").
+// Compiled once at package init; recompiling per call dominates allocations.
+var blkLayerRe = regexp.MustCompile(`blk\.(\d+)\.`)
+
 // MLXTensorToGGUF converts an MLX LoRA tensor name to GGUF LoRA tensor name.
 // Input:  "model.layers.0.self_attn.q_proj.lora_a"
 // Output: "blk.0.attn_q.weight.lora_a"
@@ -106,7 +110,7 @@ func MLXTensorToGGUF(mlxName string) core.Result {
 		return core.Fail(core.E("modelmgmt.MLXTensorToGGUF", core.Sprintf("unknown module %q in %s", module, mlxName), nil))
 	}
 
-	return core.Ok(core.Sprintf("blk.%s.%s.weight.%s", layerNum, ggufModule, loraSuffix))
+	return core.Ok("blk." + layerNum + "." + ggufModule + ".weight." + loraSuffix)
 }
 
 // SafetensorsDtypeToGGML maps safetensors dtype strings to GGML types.
@@ -159,7 +163,7 @@ func ConvertMLXtoGGUFLoRA(safetensorsPath, configPath, outputPath, architecture 
 	tensorData := loaded.Data
 	core.Print(nil, "loaded %d tensors from %s", len(tensors), safetensorsPath)
 
-	var ggufTensors []ggufTensor
+	ggufTensors := make([]ggufTensor, 0, len(tensors))
 	for mlxKey, info := range tensors {
 		ggufNameResult := MLXTensorToGGUF(mlxKey)
 		if !ggufNameResult.OK {
@@ -391,8 +395,7 @@ func GGUFModelBlobPath(ollamaModelsDir, modelName string) core.Result {
 
 // ParseLayerFromTensorName extracts the layer number from a GGUF tensor name.
 func ParseLayerFromTensorName(name string) core.Result {
-	re := regexp.MustCompile(`blk\.(\d+)\.`)
-	m := re.FindStringSubmatch(name)
+	m := blkLayerRe.FindStringSubmatch(name)
 	if m == nil {
 		return core.Fail(core.E("modelmgmt.ParseLayerFromTensorName", core.Sprintf("no layer number in %s", name), nil))
 	}

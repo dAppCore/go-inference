@@ -36,7 +36,7 @@ func ValidatePercentages(trainPct, validPct, testPct int) core.Result {
 // FilterResponses removes responses with empty content, "ERROR:" prefix,
 // or response length < 50 characters.
 func FilterResponses(responses []score.Response) []score.Response {
-	var filtered []score.Response
+	filtered := make([]score.Response, 0, len(responses))
 	for _, r := range responses {
 		if r.Response == "" {
 			continue
