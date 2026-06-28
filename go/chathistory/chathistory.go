@@ -300,11 +300,14 @@ func (h *History) RecentConversations(limit int) ([]ConversationSummary, error) 
 	defer rows.Close()
 	var out []ConversationSummary
 	for rows.Next() {
-		var c ConversationSummary
+		// Scan straight into out's backing array — a local
+		// `var c ConversationSummary` would escape to the heap every
+		// row because Scan takes the address of its fields.
+		out = append(out, ConversationSummary{})
+		c := &out[len(out)-1]
 		if err := rows.Scan(&c.ID, &c.Title, &c.StartedAt, &c.ModelID); err != nil {
 			return nil, core.E("chathistory.RecentConversations", "scan failed", err)
 		}
-		out = append(out, c)
 	}
 	return out, rows.Err()
 }
@@ -332,11 +335,15 @@ func (h *History) LoadTurns(conversationID string) ([]Turn, error) {
 	defer rows.Close()
 	var out []Turn
 	for rows.Next() {
-		var t Turn
+		// Scan straight into the slot in out's backing array. A local
+		// `var t Turn` would escape to the heap every row because Scan
+		// takes the address of its fields; appending the already-scanned
+		// slot avoids that per-row allocation.
+		out = append(out, Turn{})
+		t := &out[len(out)-1]
 		if err := rows.Scan(&t.Role, &t.Content, &t.Ordinal); err != nil {
 			return nil, core.E("chathistory.LoadTurns", "scan", err)
 		}
-		out = append(out, t)
 	}
 	// rows.Next() returns false on both natural end-of-stream AND
 	// iterator error; Err() distinguishes. Without this check a
