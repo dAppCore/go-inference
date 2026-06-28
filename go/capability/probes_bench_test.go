@@ -53,3 +53,39 @@ func BenchmarkStripThinkBlocks_OnlyThink(b *testing.B) {
 		StripThinkBlocks(response)
 	}
 }
+
+func BenchmarkProbeCategories(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		probeCategoriesSink = ProbeCategories()
+	}
+}
+
+func BenchmarkProbeDomains(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		probeDomainsSink = ProbeDomains()
+	}
+}
+
+// BenchmarkProbeChecksAll runs every probe Check against a realistic model
+// response — the per-sample scoring hot path. Each Check that compiles a
+// regex per call shows up here; a typical scoring run fires all 23 against
+// each of N model outputs.
+func BenchmarkProbeChecksAll(b *testing.B) {
+	response := "Let me work through this carefully. After reasoning about the " +
+		"problem, the final answer is 162 and the value of x = -12. The starter " +
+		"motor is the likely cause, and the answer is yes, you are facing south."
+	b.ReportAllocs()
+	for b.Loop() {
+		for i := range CapabilityProbes {
+			probeCheckSink = CapabilityProbes[i].Check(response)
+		}
+	}
+}
+
+var (
+	probeCategoriesSink []string
+	probeDomainsSink    []string
+	probeCheckSink      bool
+)
