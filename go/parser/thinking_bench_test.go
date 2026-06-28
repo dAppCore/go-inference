@@ -27,14 +27,14 @@ import (
 
 // Sinks defeat compiler DCE.
 var (
-	thinkingBenchResult     Result
-	thinkingBenchProcessor  *Processor
-	thinkingBenchText       string
-	thinkingBenchMode       Mode
-	thinkingBenchMarkers    []thinkingMarker
-	thinkingBenchKeep       int
-	thinkingBenchChunks     []Chunk
-	thinkingBenchReasoning  string
+	thinkingBenchResult    Result
+	thinkingBenchProcessor *Processor
+	thinkingBenchText      string
+	thinkingBenchMode      Mode
+	thinkingBenchMarkers   []thinkingMarker
+	thinkingBenchKeep      int
+	thinkingBenchChunks    []Chunk
+	thinkingBenchReasoning string
 )
 
 // thinkingBenchWords builds a synthetic prose stream of `tokens` words.
@@ -462,8 +462,10 @@ func Benchmark_Thinking_LongestSuffixPrefix_LongMarkerSet(b *testing.B) {
 // AX-11: alloc budget for markersForHint. The flattened marker view +
 // its parallel start-set are cached on the builtin parser at registry
 // build time, so the per-stream resolve must not allocate either slice.
-// Family + NormaliseKey still allocate one transient string for the
-// arch+adapter concat — that's the budget here. A regression above this
+// Family now scans the arch + adapter keys separately (no joined-string
+// Concat), so the resolve is fully zero-alloc for already-canonical
+// hints. The only residual is NormaliseKey's '-' → '_' rewrite, which a
+// dash-bearing arch name (gpt-oss) still pays. A regression above this
 // means the per-stream view alloc has returned (each NewProcessor pays
 // it again, and each thousand-token response opens a stream).
 func TestAllocBudget_Thinking_MarkersForHint(t *testing.T) {
@@ -480,14 +482,14 @@ func TestAllocBudget_Thinking_MarkersForHint(t *testing.T) {
 			avg := testing.AllocsPerRun(5, func() {
 				thinkingBenchMarkers = markersForHint(tc.hint)
 			})
-			// Floor: 1 alloc for Family's core.Concat transient. Hints
+			// Floor: 0 allocs; Family builds no Concat now. Hints
 			// that carry a dash in the architecture name (gpt-oss) pay
 			// one extra for the NormaliseKey '-' → '_' replace before
-			// the family lookup. Both are Family-path constants — the
+			// the family lookup. That dash replace is the lone cost — the
 			// markersForHint view itself is zero-alloc.
-			budget := 1.0
+			budget := 0.0
 			if tc.name == "GPTOSS" {
-				budget = 2.0
+				budget = 1.0
 			}
 			if avg > budget {
 				t.Fatalf("markersForHint(%s) alloc budget exceeded: %.1f allocs/call (budget=%.0f)\n"+
@@ -520,12 +522,12 @@ func TestAllocBudget_Thinking_NewProcessor(t *testing.T) {
 			avg := testing.AllocsPerRun(5, func() {
 				thinkingBenchProcessor = NewProcessor(cfg, tc.hint)
 			})
-			// Floor: 1 alloc for &Processor{} + 1 for Family's Concat
-			// transient. Architectures carrying a dash pay one extra
+			// Floor: 1 alloc for the &Processor{} struct. The Family
+			// Concat is gone. Architectures carrying a dash pay one extra
 			// for NormaliseKey's '-' → '_' replace.
-			budget := 2.0
+			budget := 1.0
 			if tc.name == "GPTOSS" {
-				budget = 3.0
+				budget = 2.0
 			}
 			if avg > budget {
 				t.Fatalf("NewProcessor(%s) alloc budget exceeded: %.1f allocs/call (budget=%.0f)\n"+

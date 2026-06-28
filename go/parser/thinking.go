@@ -8,8 +8,8 @@ import (
 	core "dappco.re/go"
 )
 
-//	result := parser.Filter(text, parser.Config{Mode: parser.Capture}, hint)
-//	visible := result.Text
+// result := parser.Filter(text, parser.Config{Mode: parser.Capture}, hint)
+// visible := result.Text
 func Filter(text string, cfg Config, hint Hint) Result {
 	processor := NewProcessor(cfg, hint)
 	builder := core.NewBuilder()
@@ -22,8 +22,8 @@ func Filter(text string, cfg Config, hint Hint) Result {
 	}
 }
 
-//	p := parser.NewProcessor(cfg, hint)
-//	visible := p.Process(piece) + p.Flush()
+// p := parser.NewProcessor(cfg, hint)
+// visible := p.Process(piece) + p.Flush()
 type Processor struct {
 	cfg            Config
 	mode           Mode
@@ -33,11 +33,19 @@ type Processor struct {
 	inReasoning    bool
 	current        thinkingMarker
 	reasoningParts []string
-	blockParts     []string
-	chunks         []Chunk
+	// blockStart marks where the current reasoning block begins in
+	// reasoningParts. The block's parts are reasoningParts[blockStart:] —
+	// emitReasoningBlock joins that window and advances blockStart to the
+	// new tail. The previous shape kept a parallel blockParts slice that
+	// received the same per-token append as reasoningParts; tracking an
+	// index instead drops that second slice and its per-token growth
+	// reallocations (the streaming hot path appends per token, so the
+	// duplicate slice doubled addReasoning's allocs).
+	blockStart int
+	chunks     []Chunk
 }
 
-//	p := parser.NewProcessor(parser.Config{Mode: parser.Capture}, hint)
+// p := parser.NewProcessor(parser.Config{Mode: parser.Capture}, hint)
 func NewProcessor(cfg Config, hint Hint) *Processor {
 	// markersForHint + thinkingStartsForHint return cached views
 	// owned by the registry's builtinOutputParser. They are read-only
@@ -53,7 +61,7 @@ func NewProcessor(cfg Config, hint Hint) *Processor {
 	}
 }
 
-//	mode := parser.NormaliseMode("")  // returns parser.Show
+// mode := parser.NormaliseMode("")  // returns parser.Show
 func NormaliseMode(mode Mode) Mode {
 	switch mode {
 	case "", Show:
@@ -83,7 +91,7 @@ func markersAndStartsForHint(hint Hint) ([]thinkingMarker, []string) {
 	return p.thinkingMarkers, p.thinkingStarts
 }
 
-//	visible := p.Process(piece)
+// visible := p.Process(piece)
 func (p *Processor) Process(text string) string {
 	if p.mode == Show || text == "" {
 		return text
@@ -92,7 +100,7 @@ func (p *Processor) Process(text string) string {
 	return p.drain(false)
 }
 
-//	tail := p.Flush()
+// tail := p.Flush()
 func (p *Processor) Flush() string {
 	if p.mode == Show {
 		return ""
@@ -117,12 +125,12 @@ func (p *Processor) Flush() string {
 	return out
 }
 
-//	reasoning := p.Reasoning()
+// reasoning := p.Reasoning()
 func (p *Processor) Reasoning() string {
 	return core.Join("", p.reasoningParts...)
 }
 
-//	chunks := p.Chunks()
+// chunks := p.Chunks()
 func (p *Processor) Chunks() []Chunk {
 	if len(p.chunks) == 0 {
 		return nil
@@ -223,12 +231,11 @@ func (p *Processor) addReasoning(text string) {
 		return
 	}
 	p.reasoningParts = append(p.reasoningParts, text)
-	p.blockParts = append(p.blockParts, text)
 }
 
 func (p *Processor) emitReasoningBlock() {
-	text := core.Join("", p.blockParts...)
-	p.blockParts = nil
+	text := core.Join("", p.reasoningParts[p.blockStart:]...)
+	p.blockStart = len(p.reasoningParts)
 	if text == "" {
 		return
 	}
