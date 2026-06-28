@@ -196,7 +196,19 @@ func (m *Model) CancelRequest(_ context.Context, id string) (inference.RequestCa
 //	for token := range model.Generate(ctx, prompt) { … }
 func (m *Model) Generate(ctx context.Context, prompt string, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
 	return func(yield func(inference.Token) bool) {
-		req := inference.ScheduledRequest{Prompt: prompt, Sampler: inference.SamplerConfigFromGenerateConfig(inference.ApplyGenerateOpts(opts))}
+		// Skip the opts→SamplerConfig conversion when the caller supplied
+		// none. ApplyGenerateOpts forces &cfg to escape (one heap alloc for
+		// the DefaultGenerateConfig it builds) and its RepeatPenalty:1.0
+		// default lands in req.Sampler, which then misses generateOptions'
+		// zero-value greedy cache and pays a closure + slice (two more
+		// allocs) in baseTokens. Leaving Sampler zero-valued routes the
+		// no-opts case through the same cached greedy path Schedule(zero
+		// request) already uses — byte-identical at the base because its
+		// DefaultGenerateConfig re-applies RepeatPenalty:1.0 either way.
+		req := inference.ScheduledRequest{Prompt: prompt}
+		if len(opts) > 0 {
+			req.Sampler = inference.SamplerConfigFromGenerateConfig(inference.ApplyGenerateOpts(opts))
+		}
 		_, tokens, err := m.Schedule(ctx, req)
 		if err != nil {
 			m.setErr(err)
@@ -217,7 +229,14 @@ func (m *Model) Generate(ctx context.Context, prompt string, opts ...inference.G
 //	for token := range model.Chat(ctx, messages) { … }
 func (m *Model) Chat(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
 	return func(yield func(inference.Token) bool) {
-		req := inference.ScheduledRequest{Messages: append([]inference.Message(nil), messages...), Sampler: inference.SamplerConfigFromGenerateConfig(inference.ApplyGenerateOpts(opts))}
+		// See Generate: the opts→SamplerConfig conversion is skipped when no
+		// opts are supplied so the no-opts case keeps generateOptions on its
+		// zero-value greedy cache (saves three allocs, byte-identical config
+		// at the base).
+		req := inference.ScheduledRequest{Messages: append([]inference.Message(nil), messages...)}
+		if len(opts) > 0 {
+			req.Sampler = inference.SamplerConfigFromGenerateConfig(inference.ApplyGenerateOpts(opts))
+		}
 		_, tokens, err := m.Schedule(ctx, req)
 		if err != nil {
 			m.setErr(err)
