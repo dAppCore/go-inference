@@ -28,6 +28,7 @@ package jsonenc
 import (
 	"errors"
 	"strconv"
+	"strings"
 )
 
 // ErrInvalidJSON is the sentinel returned for malformed input.
@@ -76,12 +77,12 @@ func ParseJSONStringList(data []byte) ([]string, error) {
 // parseJSONStringArray walks data from position i (just past the '[')
 // and returns the inner array of strings.
 func parseJSONStringArray(data []byte, i int) ([]string, error) {
-	out := []string(nil)
 	// Empty-array fast path.
 	j := SkipJSONWhitespace(data, i)
 	if j < len(data) && data[j] == ']' {
-		return out, nil
+		return nil, nil
 	}
+	out := make([]string, 0, CountJSONArrayElements(data, i))
 	for {
 		i = SkipJSONWhitespace(data, i)
 		if i >= len(data) {
@@ -176,60 +177,83 @@ func ParseJSONStringRaw(data []byte, i int) ([]byte, int, error) {
 
 // parseJSONStringEscaped is the slow path for strings containing
 // backslash escapes. Walks the remainder character-by-character,
-// emitting into a backing buffer with appended decoded bytes.
+// emitting decoded bytes into a strings.Builder.
+//
+// The Builder is sized once to the remaining raw length — the decoded
+// string can never exceed it, so there is no geometric regrowth — and
+// its String() hands the backing array straight to the result with no
+// second copy. The earlier make([]byte,0,n)+string(buf) shape paid a
+// heap buffer allocation AND a conversion copy (two allocs); this is
+// one allocation for the whole decode (AX-11).
 func parseJSONStringEscaped(data []byte, start, firstEscape int) (string, int, error) {
-	buf := make([]byte, 0, len(data)-start)
-	buf = append(buf, data[start:firstEscape]...)
+	var sb strings.Builder
+	sb.Grow(len(data) - start)
+	sb.Write(data[start:firstEscape])
 	for i := firstEscape; i < len(data); {
+		// Bulk-copy the run of plain bytes up to the next escape,
+		// closing quote, or control byte — only the escape
+		// replacements pay a per-byte write, so a long content body
+		// between sparse escapes copies in one Write rather than
+		// byte-by-byte.
+		runStart := i
+		for i < len(data) {
+			c := data[i]
+			if c == '"' || c == '\\' || c < 0x20 {
+				break
+			}
+			i++
+		}
+		if i > runStart {
+			sb.Write(data[runStart:i])
+		}
+		if i >= len(data) {
+			break
+		}
 		c := data[i]
 		if c == '"' {
-			return string(buf), i + 1, nil
-		}
-		if c == '\\' {
-			if i+1 >= len(data) {
-				return "", i, ErrInvalidJSON
-			}
-			esc := data[i+1]
-			switch esc {
-			case '"':
-				buf = append(buf, '"')
-			case '\\':
-				buf = append(buf, '\\')
-			case '/':
-				buf = append(buf, '/')
-			case 'b':
-				buf = append(buf, '\b')
-			case 'f':
-				buf = append(buf, '\f')
-			case 'n':
-				buf = append(buf, '\n')
-			case 'r':
-				buf = append(buf, '\r')
-			case 't':
-				buf = append(buf, '\t')
-			case 'u':
-				if i+6 > len(data) {
-					return "", i, ErrInvalidJSON
-				}
-				cp, ok := parseJSONUnicodeEscape(data[i+2 : i+6])
-				if !ok {
-					return "", i, ErrInvalidJSON
-				}
-				// UTF-8 encode the codepoint.
-				buf = appendUTF8(buf, cp)
-				i += 6
-				continue
-			default:
-				return "", i, ErrInvalidJSON
-			}
-			i += 2
-			continue
+			return sb.String(), i + 1, nil
 		}
 		if c < 0x20 {
 			return "", i, ErrInvalidJSON
 		}
-		buf = append(buf, c)
-		i++
+		// c == '\\' — decode one escape.
+		if i+1 >= len(data) {
+			return "", i, ErrInvalidJSON
+		}
+		esc := data[i+1]
+		switch esc {
+		case '"':
+			sb.WriteByte('"')
+		case '\\':
+			sb.WriteByte('\\')
+		case '/':
+			sb.WriteByte('/')
+		case 'b':
+			sb.WriteByte('\b')
+		case 'f':
+			sb.WriteByte('\f')
+		case 'n':
+			sb.WriteByte('\n')
+		case 'r':
+			sb.WriteByte('\r')
+		case 't':
+			sb.WriteByte('\t')
+		case 'u':
+			if i+6 > len(data) {
+				return "", i, ErrInvalidJSON
+			}
+			cp, ok := parseJSONUnicodeEscape(data[i+2 : i+6])
+			if !ok {
+				return "", i, ErrInvalidJSON
+			}
+			// UTF-8 encode the codepoint.
+			writeUTF8(&sb, cp)
+			i += 6
+			continue
+		default:
+			return "", i, ErrInvalidJSON
+		}
+		i += 2
 	}
 	return "", firstEscape, ErrInvalidJSON
 }
@@ -258,17 +282,26 @@ func parseJSONUnicodeEscape(hex []byte) (rune, bool) {
 	return cp, true
 }
 
-// appendUTF8 appends the UTF-8 encoding of cp to buf.
-func appendUTF8(buf []byte, cp rune) []byte {
+// writeUTF8 writes the UTF-8 encoding of cp to sb. Byte-for-byte
+// identical to the previous appendUTF8 — same nibble arithmetic and
+// the same (raw, un-paired) emission for surrogate-range code points;
+// only the sink changed from a []byte append to the Builder.
+func writeUTF8(sb *strings.Builder, cp rune) {
 	switch {
 	case cp < 0x80:
-		return append(buf, byte(cp))
+		sb.WriteByte(byte(cp))
 	case cp < 0x800:
-		return append(buf, byte(0xc0|cp>>6), byte(0x80|cp&0x3f))
+		sb.WriteByte(byte(0xc0 | cp>>6))
+		sb.WriteByte(byte(0x80 | cp&0x3f))
 	case cp < 0x10000:
-		return append(buf, byte(0xe0|cp>>12), byte(0x80|(cp>>6)&0x3f), byte(0x80|cp&0x3f))
+		sb.WriteByte(byte(0xe0 | cp>>12))
+		sb.WriteByte(byte(0x80 | (cp>>6)&0x3f))
+		sb.WriteByte(byte(0x80 | cp&0x3f))
 	default:
-		return append(buf, byte(0xf0|cp>>18), byte(0x80|(cp>>12)&0x3f), byte(0x80|(cp>>6)&0x3f), byte(0x80|cp&0x3f))
+		sb.WriteByte(byte(0xf0 | cp>>18))
+		sb.WriteByte(byte(0x80 | (cp>>12)&0x3f))
+		sb.WriteByte(byte(0x80 | (cp>>6)&0x3f))
+		sb.WriteByte(byte(0x80 | cp&0x3f))
 	}
 }
 

@@ -108,6 +108,39 @@ func TestParseJSONString_Escapes(t *testing.T) {
 	}
 }
 
+// TestParseJSONString_UnicodeEscape pins the \uXXXX decode path
+// (1/2/3-byte UTF-8 output) — previously uncovered, and the load-
+// bearing guard for the strings.Builder rewrite of the escape path.
+func TestParseJSONString_UnicodeEscape(t *testing.T) {
+	// bs is a single backslash, built from its code point so this
+	// source file contains no backslash-u literal (which the test
+	// harness would itself interpret). u("00e9") -> `é`.
+	bs := string(rune(92))
+	u := func(hex string) string { return bs + "u" + hex }
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"1byte", `"` + u("0041") + `"`, "A"},
+		{"2byte", `"` + u("00e9") + `"`, "é"},
+		{"3byte", `"` + u("20ac") + `"`, "€"},
+		{"interleaved", `"a` + u("00e9") + `b` + u("20ac") + `c"`, "aéb€c"},
+		{"back2back", `"` + u("0041") + u("0042") + `"`, "AB"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, err := ParseJSONString([]byte(tc.in), 0)
+			if err != nil {
+				t.Fatalf("ParseJSONString(%q) error = %v", tc.in, err)
+			}
+			if s != tc.want {
+				t.Fatalf("got %q want %q", s, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseJSONInt(t *testing.T) {
 	cases := []struct {
 		in   string
