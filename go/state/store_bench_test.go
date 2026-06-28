@@ -23,6 +23,7 @@ var (
 	storeSinkErr      error
 	storeSinkErrText  string
 	storeSinkChunkRef ChunkRef
+	storeSinkBorrowed BorrowedChunk
 )
 
 // --- Resolve (top-level dispatcher) ---
@@ -119,6 +120,51 @@ func BenchmarkStore_ResolveRefBytes_GetAdapter_1KB(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		storeSinkChunk, storeSinkErr = ResolveRefBytes(ctx, store, ref)
+	}
+}
+
+// --- BorrowBytes / BorrowRefBytes (borrowed-view dispatchers) ---
+// A store that implements BinaryBorrower / RefBinaryBorrower can hand
+// back a store-lifetime view; InMemoryStore does not, so these exercise
+// the ResolveBytes fallback (one owned copy) plus the nil-store guard.
+
+func BenchmarkStore_BorrowBytes_Fallback_1KB(b *testing.B) {
+	store := benchMemoryStore(b, 1, 1024)
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		storeSinkBorrowed, storeSinkErr = BorrowBytes(ctx, store, 1)
+	}
+}
+
+func BenchmarkStore_BorrowBytes_NilStore(b *testing.B) {
+	ctx := context.Background()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		storeSinkBorrowed, storeSinkErr = BorrowBytes(ctx, nil, 1)
+	}
+}
+
+func BenchmarkStore_BorrowRefBytes_Fallback_1KB(b *testing.B) {
+	store := benchMemoryStore(b, 1, 1024)
+	ctx := context.Background()
+	ref := ChunkRef{ChunkID: 1, FrameOffset: 1, HasFrameOffset: true, Codec: CodecMemory}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		storeSinkBorrowed, storeSinkErr = BorrowRefBytes(ctx, store, ref)
+	}
+}
+
+func BenchmarkStore_BorrowRefBytes_NilStore(b *testing.B) {
+	ctx := context.Background()
+	ref := ChunkRef{ChunkID: 42}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		storeSinkBorrowed, storeSinkErr = BorrowRefBytes(ctx, nil, ref)
 	}
 }
 
