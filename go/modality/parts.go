@@ -102,15 +102,39 @@ func Assemble(parts []ContentPart) Message {
 	if len(parts) == 0 {
 		return msg
 	}
-	text := make([]string, 0, len(parts))
+	// Retain every part in order, and in the same pass measure the text body
+	// (count + total length) so it can be concatenated straight into a
+	// pre-sized builder — no intermediate []string just to feed core.Join.
 	msg.Parts = make([]ContentPart, 0, len(parts))
+	nText, textLen := 0, 0
+	var firstText string
 	for _, p := range parts {
 		if p.Kind == KindText {
-			text = append(text, p.Text)
+			if nText == 0 {
+				firstText = p.Text
+			}
+			nText++
+			textLen += len(p.Text)
 		}
 		msg.Parts = append(msg.Parts, p)
 	}
-	msg.Text = core.Join("", text...)
+	switch nText {
+	case 0:
+		// No text parts: Text stays empty (matches core.Join of nothing).
+	case 1:
+		// Single text part: reference it directly, no copy (matches
+		// core.Join's single-element fast path).
+		msg.Text = firstText
+	default:
+		var b core.Builder
+		b.Grow(textLen)
+		for _, p := range parts {
+			if p.Kind == KindText {
+				b.WriteString(p.Text)
+			}
+		}
+		msg.Text = b.String()
+	}
 	return msg
 }
 
