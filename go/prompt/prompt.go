@@ -45,40 +45,53 @@ type Template struct {
 //	tpl := prompt.Template{Body: "Hi {{name}}", InputVars: []string{"name"}}
 //	out, err := tpl.Render(map[string]string{"name": "Nick"})  // "Hi Nick", nil
 func (t Template) Render(vars map[string]string) (string, error) {
-	found := placeholders(t.Body)
+	return renderTokens(t.Body, placeholders(t.Body), t.InputVars, vars)
+}
 
+// renderTokens substitutes the placeholder tokens in body with their values
+// from vars, validating against the declared inputVars — the shared core of
+// Template.Render and Builder.BuildMessages, taking the placeholder scan as a
+// parameter so a caller that already scanned body (BuildMessages) does not scan
+// it a second time. tokens are the distinct "{{name}}" placeholders found in
+// body, each a sub-slice of body that carries its own braces, so it serves
+// directly as the substitution needle with no "{{"+name+"}}" rebuild; inputVars
+// are the bare variable names the body is allowed to use.
+func renderTokens(body string, tokens, inputVars []string, vars map[string]string) (string, error) {
 	// Every placeholder in the body must be declared as an InputVar.
-	declared := make(map[string]bool, len(t.InputVars))
-	for _, name := range t.InputVars {
+	declared := make(map[string]bool, len(inputVars))
+	for _, name := range inputVars {
 		declared[name] = true
 	}
-	for _, name := range found {
+	for _, tok := range tokens {
+		name := tok[2 : len(tok)-2]
 		if !declared[name] {
 			return "", core.E("prompt", core.Concat("undeclared placeholder {{", name, "}} in template body"), nil)
 		}
 	}
 
 	// Every declared variable must be supplied.
-	for _, name := range t.InputVars {
+	for _, name := range inputVars {
 		if _, ok := vars[name]; !ok {
 			return "", core.E("prompt", core.Concat("missing required variable ", name), nil)
 		}
 	}
 
-	out := t.Body
-	for _, name := range found {
-		out = core.Replace(out, core.Concat("{{", name, "}}"), vars[name])
+	out := body
+	for _, tok := range tokens {
+		out = core.Replace(out, tok, vars[tok[2:len(tok)-2]])
 	}
 	return out, nil
 }
 
-// placeholders returns the distinct {{name}} variable names in body, in order
-// of first appearance. A {{ with no closing }} and an empty {{}} are literal
-// text, not placeholders.
+// placeholders returns the distinct {{name}} placeholder tokens in body, in
+// order of first appearance, each token a sub-slice of body that carries its
+// own braces — so it doubles as the substitution needle in renderTokens with no
+// per-token allocation. The bare variable name is token[2:len(token)-2]. A {{
+// with no closing }} and an empty {{}} are literal text, not placeholders.
 //
-//	placeholders("{{a}} and {{b}} and {{a}}")  // ["a", "b"]
+//	placeholders("{{a}} and {{b}} and {{a}}")  // ["{{a}}", "{{b}}"]
 func placeholders(body string) []string {
-	var names []string
+	var tokens []string
 	seen := make(map[string]bool)
 	rest := body
 	for {
@@ -92,6 +105,10 @@ func placeholders(body string) []string {
 			break // no closing braces anywhere — the remainder is literal
 		}
 		name := after[:close]
+		// token is the full "{{name}}" as a sub-slice of body (no copy); the
+		// dedup key stays the bare name, equivalent since name and token map
+		// one-to-one.
+		token := rest[open : open+2+close+2]
 		// Advance past this "{{" so a malformed token can't loop forever and a
 		// nested "{{" inside the name is reconsidered from its own start.
 		rest = after[close+2:]
@@ -100,8 +117,8 @@ func placeholders(body string) []string {
 		}
 		if !seen[name] {
 			seen[name] = true
-			names = append(names, name)
+			tokens = append(tokens, token)
 		}
 	}
-	return names
+	return tokens
 }
