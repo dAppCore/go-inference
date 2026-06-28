@@ -192,7 +192,34 @@ func (a *InferenceAdapter) InspectAttention(ctx context.Context, prompt string, 
 
 // convertOpts maps serving.GenOpts to go-inference functional options.
 func convertOpts(opts GenOpts) []inference.GenerateOption {
-	var out []inference.GenerateOption
+	// Count the active options first so the backing array is allocated once
+	// at the exact capacity, instead of paying append's geometric regrowth
+	// (nil→1→2→4→8) on every request. The With* closures remain — they are
+	// allocated inside the inference package's functional-options API.
+	n := 0
+	if opts.Temperature != 0 {
+		n++
+	}
+	if opts.MaxTokens != 0 {
+		n++
+	}
+	if opts.TopK > 0 {
+		n++
+	}
+	if opts.TopP > 0 {
+		n++
+	}
+	if opts.RepeatPenalty > 0 {
+		n++
+	}
+	if len(opts.StopTokens) > 0 {
+		n++
+	}
+	if n == 0 {
+		return nil
+	}
+
+	out := make([]inference.GenerateOption, 0, n)
 	if opts.Temperature != 0 {
 		out = append(out, inference.WithTemperature(float32(opts.Temperature)))
 	}

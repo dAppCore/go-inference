@@ -14,6 +14,7 @@ import (
 // HTTPBackend talks to an OpenAI-compatible chat completions API.
 type HTTPBackend struct {
 	baseURL    string
+	chatURL    string // precomputed baseURL + completions path (immutable)
 	model      string
 	maxTokens  int
 	httpClient *http.Client
@@ -82,6 +83,7 @@ func (e *retryableError) Unwrap() error { return e.err }
 func NewHTTPBackend(baseURL, model string, opts ...HTTPOption) *HTTPBackend {
 	b := &HTTPBackend{
 		baseURL: baseURL,
+		chatURL: baseURL + openai.DefaultChatCompletionsPath,
 		model:   model,
 		httpClient: &http.Client{
 			Timeout: 300 * time.Second,
@@ -160,7 +162,11 @@ func (b *HTTPBackend) Chat(ctx context.Context, messages []Message, opts GenOpts
 		req.MaxTokens = &maxTokens
 	}
 
-	body := []byte(core.JSONMarshalString(req))
+	// JSONMarshalString hands back a string view of a freshly-marshalled,
+	// single-owner buffer; AsBytes views it as []byte without re-copying the
+	// whole request body. The body is only ever read (by the HTTP transport),
+	// never mutated, so the zero-copy view is safe.
+	body := core.AsBytes(core.JSONMarshalString(req))
 
 	const maxAttempts = 3
 	var lastErr error
@@ -194,9 +200,9 @@ func (b *HTTPBackend) Chat(ctx context.Context, messages []Message, opts GenOpts
 //	if !r.OK { return r }
 //	text := r.Value.(string)
 func (b *HTTPBackend) doRequest(ctx context.Context, body []byte) core.Result {
-	url := b.baseURL + openai.DefaultChatCompletionsPath
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, core.NewBuffer(body))
+	// chatURL is precomputed at construction; baseURL never changes, so this
+	// avoids rebuilding the same string on every request.
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, b.chatURL, core.NewBuffer(body))
 	if err != nil {
 		return core.Fail(core.E("serving.HTTPBackend.doRequest", "create request", err))
 	}
