@@ -191,7 +191,10 @@ func parseChatMessageArray(data []byte, i int) ([]ChatMessage, int, error) {
 	if i < len(data) && data[i] == ']' {
 		return nil, i + 1, nil
 	}
-	var out []ChatMessage
+	// Pre-size from an exact element count (alloc-free scan) so the
+	// per-message append never re-grows. Twenty-turn requests previously
+	// paid the geometric 1,2,4,8,16,32 backing-array cascade here.
+	out := make([]ChatMessage, 0, jsonenc.CountJSONArrayElements(data, i))
 	for {
 		msg, next, err := parseChatMessage(data, i)
 		if err != nil {
@@ -528,7 +531,10 @@ func parseResponseInputMessageArray(data []byte, i int) ([]ResponseInputMessage,
 	if i < len(data) && data[i] == ']' {
 		return nil, i + 1, nil
 	}
-	var out []ResponseInputMessage
+	// Pre-size from an exact element count (alloc-free scan) so the
+	// per-message append never re-grows — same shape as
+	// parseChatMessageArray.
+	out := make([]ResponseInputMessage, 0, jsonenc.CountJSONArrayElements(data, i))
 	for {
 		msg, next, err := parseResponseInputMessage(data, i)
 		if err != nil {
