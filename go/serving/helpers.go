@@ -55,5 +55,9 @@ func readAll(r any) core.Result {
 	if !result.OK {
 		return result
 	}
-	return core.Ok([]byte(result.Value.(string)))
+	// core.ReadAll already owns a freshly-read buffer it exposed as a string;
+	// AsBytes returns a read-only view of it rather than copying the whole
+	// response body again. The only consumers (JSONUnmarshal, Sprintf) treat
+	// the bytes as read-only, so the zero-copy view is safe.
+	return core.Ok(core.AsBytes(result.Value.(string)))
 }
