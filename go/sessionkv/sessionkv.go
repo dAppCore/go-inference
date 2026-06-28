@@ -19,6 +19,7 @@ import (
 
 	core "dappco.re/go"
 	coreapi "dappco.re/go/api"
+	"dappco.re/go/inference/state"
 	"dappco.re/go/inference/state/filestore"
 	"github.com/gin-gonic/gin"
 )
@@ -93,15 +94,40 @@ func (h *Host) Describe() []coreapi.RouteDescription {
 	}
 }
 
+// statusResponse is the JSON body for GET /status. A typed struct avoids the
+// per-request gin.H map allocation (header + bucket + per-value interface
+// boxing); fields are declared in encoding/json's sorted-key order so the bytes
+// on the wire are byte-for-byte identical to the map it replaced.
+type statusResponse struct {
+	Chunks int    `json:"chunks"`
+	Codec  string `json:"codec"`
+	Open   bool   `json:"open"`
+	Path   string `json:"path"`
+}
+
 // status reports the store's location, codec, and chunk count — enough to
 // confirm the memory host is live and how much it holds, with no content.
 func (h *Host) status(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"open":   h.store != nil,
-		"path":   h.path,
-		"codec":  filestore.CodecFile,
-		"chunks": h.store.ChunkCount(),
+	c.JSON(http.StatusOK, statusResponse{
+		Chunks: h.store.ChunkCount(),
+		Codec:  filestore.CodecFile,
+		Open:   h.store != nil,
+		Path:   h.path,
 	})
+}
+
+// chunkRefResponse is the JSON body for a resolved chunk — its ref metadata
+// only, never content. A typed struct avoids the per-request gin.H map alloc.
+type chunkRefResponse struct {
+	Ref state.ChunkRef `json:"ref"`
+}
+
+// chunkError is the JSON body for the chunkRef error branches. ID is omitted
+// when unset (the bad-id 400), reproducing the gin.H maps it replaced
+// byte-for-byte while dropping their per-request map allocation.
+type chunkError struct {
+	Error string `json:"error"`
+	ID    int    `json:"id,omitempty"`
 }
 
 // chunkRef returns the metadata (ref) for one stored chunk — id, codec,
@@ -110,13 +136,13 @@ func (h *Host) status(c *gin.Context) {
 func (h *Host) chunkRef(c *gin.Context) {
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil || id < 1 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "chunk id must be a positive integer"})
+		c.JSON(http.StatusBadRequest, chunkError{Error: "chunk id must be a positive integer"})
 		return
 	}
 	chunk, rerr := h.store.Resolve(c.Request.Context(), id)
 	if rerr != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "chunk not found", "id": id})
+		c.JSON(http.StatusNotFound, chunkError{Error: "chunk not found", ID: id})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ref": chunk.Ref})
+	c.JSON(http.StatusOK, chunkRefResponse{Ref: chunk.Ref})
 }
