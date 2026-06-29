@@ -15,9 +15,10 @@
 package embed
 
 import (
+	"cmp"
 	"context"
 	"math"
-	"sort"
+	"slices"
 
 	core "dappco.re/go"
 )
@@ -104,11 +105,14 @@ func RerankTopK(ctx context.Context, reranker Reranker, query string, docs []str
 	}
 
 	// Highest score first; equal scores keep their original document order.
-	sort.SliceStable(scored, func(i, j int) bool {
-		if scored[i].Score != scored[j].Score {
-			return scored[i].Score > scored[j].Score
+	slices.SortStableFunc(scored, func(a, b Scored) int {
+		if a.Score != b.Score {
+			if a.Score > b.Score {
+				return -1
+			}
+			return 1
 		}
-		return scored[i].Index < scored[j].Index
+		return cmp.Compare(a.Index, b.Index)
 	})
 
 	if k > len(scored) {
