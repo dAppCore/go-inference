@@ -154,11 +154,41 @@ func (e *Engine) Run(ctx context.Context, requests []Request, stepper Stepper, o
 	// seqStore backs every admitted Seq from a single slab rather than one heap
 	// allocation per admit. Each request is admitted at most once, so
 	// len(requests) slots always suffice; the slab is never resliced, so the
-	// &seqStore[i] pointers handed into the running set stay stable. Only the
-	// per-seq token buffer (moved into the Result) is still allocated
-	// individually, because it becomes caller-owned output.
+	// &seqStore[i] pointers handed into the running set stay stable.
 	seqStore := make([]Seq, len(requests))
 	nextSeq := 0
+
+	// tokenSlab backs every admitted seq's token buffer from a single slab too,
+	// rather than one make per admit. Each admitted seq is carved a
+	// non-overlapping window tokenSlab[off:off:off+MaxNewTokens] (a 3-index slice
+	// whose cap is exactly its own MaxNewTokens), which is moved into the Result
+	// on retirement — caller-owned output, observably identical to a standalone
+	// make. Three properties make the shared backing safe:
+	//
+	//   - No window is ever written past its cap inside Run: a seq appends exactly
+	//     one token per step it produces and is retired the moment Generated
+	//     reaches MaxNewTokens, so len never exceeds the window cap and the append
+	//     never reallocates while decoding.
+	//   - No two Results alias the same region: off advances by MaxNewTokens per
+	//     admit, so the windows tile the slab end to end without overlap and each
+	//     window's spare capacity stops exactly where the next window begins.
+	//   - A caller mutating or appending one Result.Tokens cannot reach another:
+	//     the 3-index cap confines any in-place write to the window's own region,
+	//     and an append past it reallocates (copies out) rather than spilling into
+	//     the neighbour.
+	//
+	// The slab is sized at the sum of every positive MaxNewTokens — an upper bound
+	// on what any admission order can consume, since only requests with
+	// MaxNewTokens > 0 are ever admitted — so off can never run past the slab
+	// regardless of how the budget gate drains the running set.
+	slabTokens := 0
+	for i := range requests {
+		if requests[i].MaxNewTokens > 0 {
+			slabTokens += requests[i].MaxNewTokens
+		}
+	}
+	tokenSlab := make([]int, slabTokens)
+	slabOff := 0
 
 	// admit pulls from the front of the queue into the running set while both
 	// limits allow. A request that can never fit (oversize prompt) or needs no
@@ -199,15 +229,16 @@ func (e *Engine) Run(ctx context.Context, requests []Request, stepper Stepper, o
 			}
 
 			queue = queue[1:]
-			// Carve the Seq from the slab (stable pointer) and presize its token
-			// buffer to the request's hard cap (MaxNewTokens is > 0 here — the ≤ 0
-			// case is retired above), so the per-step append never reallocates as
-			// the sequence decodes. The buffer is moved into the Result on
-			// retirement.
+			// Carve the Seq from its slab (stable pointer) and the token buffer
+			// from the token slab as a window capped at the request's hard cap
+			// (MaxNewTokens is > 0 here — the ≤ 0 case is retired above), so the
+			// per-step append never reallocates as the sequence decodes. The
+			// window is moved into the Result on retirement.
 			s := &seqStore[nextSeq]
 			nextSeq++
 			s.Request = req
-			s.tokens = make([]int, 0, req.MaxNewTokens)
+			s.tokens = tokenSlab[slabOff : slabOff : slabOff+req.MaxNewTokens]
+			slabOff += req.MaxNewTokens
 			running = append(running, s)
 		}
 	}
