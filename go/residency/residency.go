@@ -27,7 +27,8 @@
 package residency
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"sync"
 
 	core "dappco.re/go"
@@ -238,7 +239,7 @@ func (s *policyState) planEviction(incoming int64) []string {
 			candidates = append(candidates, r)
 		}
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].tick < candidates[j].tick })
+	slices.SortFunc(candidates, func(a, b *resident) int { return cmp.Compare(a.tick, b.tick) })
 
 	pinnedBytes := int64(0)
 	pinnedCount := 0
@@ -294,7 +295,7 @@ func (m *Manager) Resident() []string {
 	for id := range m.s.models {
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
+	slices.Sort(ids)
 	return ids
 }
 
