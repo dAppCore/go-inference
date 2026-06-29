@@ -277,7 +277,7 @@ func (m *MLSubsystem) mlProbe(ctx context.Context, _ *mcp.CallToolRequest, input
 		probes = filtered
 	}
 
-	var results []MLProbeResultItem
+	results := make([]MLProbeResultItem, 0, len(probes))
 	for _, probe := range probes {
 		result := m.service.Generate(ctx, input.Backend, probe.Prompt, serving.GenOpts{Temperature: 0.7, MaxTokens: 2048})
 		respText := ""
