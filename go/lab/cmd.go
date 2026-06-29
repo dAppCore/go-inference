@@ -125,16 +125,25 @@ func newServeMux(authToken string) *http.ServeMux {
 	return mux
 }
 
+// Response bodies are fixed, so they are held as package-level byte slices to
+// avoid a per-request []byte conversion on the index/health endpoints (which
+// load balancers and liveness probes hit continuously). http.ResponseWriter.Write
+// copies the bytes, so the shared slices are never mutated.
+var (
+	indexBody   = []byte("the inference stack lab\n")
+	healthzBody = []byte(`{"status":"ok"}` + "\n")
+)
+
 func index(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("the inference stack lab\n"))
+	_, _ = w.Write(indexBody)
 }
 
 func healthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(`{"status":"ok"}` + "\n"))
+	_, _ = w.Write(healthzBody)
 }
 
 // ValidateBindAddress rejects remote binds unless --allow-remote is set.
@@ -164,15 +173,19 @@ func IsLoopbackBindAddress(addr string) bool {
 }
 
 func requireAuth(handler http.HandlerFunc, token string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if token == "" {
-			handler(w, r)
-			return
-		}
+	if token == "" {
+		return handler
+	}
 
+	// The expected header is fixed once the token is known, so build it (and the
+	// byte form the constant-time compare needs) at wrap time rather than on
+	// every request.
+	expected := core.Concat("Bearer ", token)
+	expectedBytes := []byte(expected)
+
+	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := core.Trim(r.Header.Get("Authorization"))
-		expected := core.Concat("Bearer ", token)
-		if len(authHeader) != len(expected) || subtle.ConstantTimeCompare([]byte(authHeader), []byte(expected)) != 1 {
+		if len(authHeader) != len(expected) || subtle.ConstantTimeCompare([]byte(authHeader), expectedBytes) != 1 {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
