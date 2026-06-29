@@ -143,10 +143,22 @@ func (e *Engine) Run(ctx context.Context, requests []Request, stepper Stepper, o
 		return nil, core.E("schedule", "nil stepper", nil)
 	}
 
-	queue := make([]Request, len(requests))
-	copy(queue, requests)
+	// The queue shares the caller's backing array: Run only advances its own
+	// slice header (queue = queue[1:]) and never writes a queue element, so the
+	// caller's requests slice is observably unchanged and no defensive copy is
+	// needed.
+	queue := requests
 	running := make([]*Seq, 0, e.cap)
 	results := make([]Result, 0, len(requests))
+
+	// seqStore backs every admitted Seq from a single slab rather than one heap
+	// allocation per admit. Each request is admitted at most once, so
+	// len(requests) slots always suffice; the slab is never resliced, so the
+	// &seqStore[i] pointers handed into the running set stay stable. Only the
+	// per-seq token buffer (moved into the Result) is still allocated
+	// individually, because it becomes caller-owned output.
+	seqStore := make([]Seq, len(requests))
+	nextSeq := 0
 
 	// admit pulls from the front of the queue into the running set while both
 	// limits allow. A request that can never fit (oversize prompt) or needs no
@@ -187,11 +199,16 @@ func (e *Engine) Run(ctx context.Context, requests []Request, stepper Stepper, o
 			}
 
 			queue = queue[1:]
-			// Presize the token buffer to the request's hard cap (MaxNewTokens is
-			// > 0 here — the ≤ 0 case is retired above), so the per-step append
-			// never reallocates as the sequence decodes. The buffer is moved into
-			// the Result on retirement.
-			running = append(running, &Seq{Request: req, tokens: make([]int, 0, req.MaxNewTokens)})
+			// Carve the Seq from the slab (stable pointer) and presize its token
+			// buffer to the request's hard cap (MaxNewTokens is > 0 here — the ≤ 0
+			// case is retired above), so the per-step append never reallocates as
+			// the sequence decodes. The buffer is moved into the Result on
+			// retirement.
+			s := &seqStore[nextSeq]
+			nextSeq++
+			s.Request = req
+			s.tokens = make([]int, 0, req.MaxNewTokens)
+			running = append(running, s)
 		}
 	}
 
