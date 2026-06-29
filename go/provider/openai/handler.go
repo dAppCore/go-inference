@@ -1,0 +1,350 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+// Handler serves the net/http chat-completions route (streaming and
+// non-streaming) plus its JSON response and error helpers.
+package openai
+
+import (
+	"net/http"
+	"strconv"
+	"time"
+
+	core "dappco.re/go"
+	"dappco.re/go/inference"
+)
+
+// Handler serves OpenAI-compatible chat completion requests.
+type Handler struct {
+	resolver Resolver
+}
+
+func NewHandler(resolver Resolver) *Handler {
+	return &Handler{resolver: resolver}
+}
+
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h == nil || h.resolver == nil {
+		writeError(w, http.StatusServiceUnavailable, "chat handler is not configured", "model")
+		return
+	}
+	if r == nil {
+		writeError(w, http.StatusBadRequest, "request is nil", "request")
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed", "method")
+		return
+	}
+	req, err := DecodeRequest(r.Body)
+	if err != nil {
+		// Surface the parse detail — multimodal content errors (bad data:
+		// URL, oversized image, unsupported part type) are actionable for
+		// the caller, and a local engine's JSON errors carry no secrets.
+		writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error(), "body")
+		return
+	}
+	if err := ValidateRequest(req); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), errorParam(err))
+		return
+	}
+	stops, err := NormalizeStopSequences(req.Stop)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), "stop")
+		return
+	}
+	opts, err := GenerateOptions(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error(), errorParam(err))
+		return
+	}
+	model, err := h.resolver.ResolveModel(r.Context(), req.Model)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error(), "model")
+		return
+	}
+	messages := requestMessages(req.Messages)
+	if messagesCarryImages(messages) {
+		vision, ok := model.(inference.VisionModel)
+		if !ok || !vision.AcceptsImages() {
+			writeError(w, http.StatusBadRequest, "model does not accept image input", "messages")
+			return
+		}
+	}
+	if req.Stream {
+		h.serveStreaming(w, r, model, req, messages, stops, opts...)
+		return
+	}
+	h.serveNonStreaming(w, r, model, req, messages, stops, opts...)
+}
+
+func (h *Handler) serveNonStreaming(w http.ResponseWriter, r *http.Request, model inference.TextModel, req ChatCompletionRequest, messages []inference.Message, stops []string, opts ...inference.GenerateOption) {
+	created := time.Now().Unix()
+	completionID := completionID()
+	extractor := NewThinkingExtractor()
+	for token := range model.Chat(r.Context(), messages, opts...) {
+		extractor.Process(token)
+	}
+	visibleTail, thoughtTail := extractor.Flush()
+	_ = visibleTail
+	_ = thoughtTail
+	if r := model.Err(); !r.OK {
+		writeError(w, http.StatusInternalServerError, r.Error(), "model")
+		return
+	}
+	metrics := model.Metrics()
+	content := TruncateAtStopSequence(extractor.Content(), stops)
+	finishReason := "stop"
+	if isTokenLengthCapReached(req.MaxTokens, metrics.GeneratedTokens) {
+		finishReason = "length"
+	}
+	response := ChatCompletionResponse{
+		ID:      completionID,
+		Object:  "chat.completion",
+		Created: created,
+		Model:   req.Model,
+		Choices: []ChatChoice{{
+			Index:        0,
+			Message:      ChatMessage{Role: "assistant", Content: content},
+			FinishReason: finishReason,
+		}},
+		Usage: ChatUsage{
+			PromptTokens:     metrics.PromptTokens,
+			CompletionTokens: metrics.GeneratedTokens,
+			TotalTokens:      metrics.PromptTokens + metrics.GeneratedTokens,
+		},
+	}
+	if thought := extractor.Thinking(); thought != "" {
+		response.Thought = &thought
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model inference.TextModel, req ChatCompletionRequest, messages []inference.Message, stops []string, opts ...inference.GenerateOption) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	created := time.Now().Unix()
+	completionID := completionID()
+	flusher, _ := w.(http.Flusher)
+	writeChunk := func(chunk ChatCompletionChunk) {
+		// Single-buffer SSE frame — the previous shape did
+		// JSONMarshalString (reflect path + grow-doubled scratch
+		// buffer) then Concat to wrap with "data: " / "\n\n" then
+		// []byte conversion. appendChatCompletionChunkSSE walks the
+		// chunk directly into a pre-sized buffer that already carries
+		// the SSE framing.
+		frame := appendChatCompletionChunkSSE(make([]byte, 0, chunkSSEFrameSize(chunk)), chunk)
+		_, _ = w.Write(frame)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	writeChunk(ChatCompletionChunk{
+		ID:      completionID,
+		Object:  "chat.completion.chunk",
+		Created: created,
+		Model:   req.Model,
+		Choices: []ChatChunkChoice{{
+			Index: 0,
+			Delta: ChatMessageDelta{Role: "assistant"},
+		}},
+	})
+
+	extractor := NewThinkingExtractor()
+	emittedContent := ""
+	finishReason := "stop"
+	for token := range model.Chat(r.Context(), messages, opts...) {
+		contentDelta, thoughtDelta := extractor.Process(token)
+		candidate := emittedContent + contentDelta
+		stopCut, stopHit := firstStopSequenceCut(candidate, stops)
+		if stopHit {
+			if stopCut <= len(emittedContent) {
+				contentDelta = ""
+			} else {
+				contentDelta = candidate[len(emittedContent):stopCut]
+			}
+		}
+		if contentDelta != "" || thoughtDelta != "" {
+			chunk := ChatCompletionChunk{
+				ID:      completionID,
+				Object:  "chat.completion.chunk",
+				Created: created,
+				Model:   req.Model,
+				Choices: []ChatChunkChoice{{
+					Index: 0,
+					Delta: ChatMessageDelta{Content: contentDelta},
+				}},
+			}
+			if thoughtDelta != "" {
+				chunk.Thought = &thoughtDelta
+			}
+			writeChunk(chunk)
+		}
+		if stopHit {
+			emittedContent = candidate[:stopCut]
+			break
+		}
+		emittedContent = candidate
+	}
+	if visibleTail, thoughtTail := extractor.Flush(); visibleTail != "" || thoughtTail != "" {
+		chunk := ChatCompletionChunk{
+			ID:      completionID,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   req.Model,
+			Choices: []ChatChunkChoice{{
+				Index: 0,
+				Delta: ChatMessageDelta{Content: visibleTail},
+			}},
+		}
+		if thoughtTail != "" {
+			chunk.Thought = &thoughtTail
+		}
+		writeChunk(chunk)
+	}
+	if r := model.Err(); !r.OK {
+		finishReason = "error"
+	}
+	if finishReason != "error" && isTokenLengthCapReached(req.MaxTokens, model.Metrics().GeneratedTokens) {
+		finishReason = "length"
+	}
+	writeChunk(ChatCompletionChunk{
+		ID:      completionID,
+		Object:  "chat.completion.chunk",
+		Created: created,
+		Model:   req.Model,
+		Choices: []ChatChunkChoice{{
+			Index:        0,
+			Delta:        ChatMessageDelta{},
+			FinishReason: &finishReason,
+		}},
+	})
+	_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	if flusher != nil {
+		flusher.Flush()
+	}
+}
+
+func requestMessages(messages []ChatMessage) []inference.Message {
+	out := make([]inference.Message, 0, len(messages))
+	for _, msg := range messages {
+		out = append(out, inference.Message{Role: msg.Role, Content: msg.Content, Images: msg.Images})
+	}
+	return out
+}
+
+func messagesCarryImages(messages []inference.Message) bool {
+	for i := range messages {
+		if len(messages[i].Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	// Hand-rolled fast path for the canonical non-streaming
+	// ChatCompletionResponse — fires once per served request and
+	// previously paid 2 allocs / 432 B through the reflect path.
+	// Encoding directly into a pre-sized buffer skips
+	// JSONMarshalString + the []byte(string) conversion.
+	if p, ok := payload.(ChatCompletionResponse); ok {
+		buf := appendChatCompletionResponse(make([]byte, 0, chatCompletionResponseSize(p)), p)
+		_, _ = w.Write(buf)
+		return
+	}
+	if p, ok := payload.(EmbeddingResponse); ok {
+		// Embedding responses scale with vector dimensionality —
+		// a 20-input × 1024-dim response is ~190 KB. The reflect
+		// path pays a per-element float32 marshal cost; the hand-
+		// rolled walk emits directly via strconv.AppendFloat.
+		buf := appendEmbeddingResponse(make([]byte, 0, embeddingResponseSize(p)), p)
+		_, _ = w.Write(buf)
+		return
+	}
+	if p, ok := payload.(Response); ok {
+		// Responses API non-streaming body — fires per served
+		// /v1/responses request. Same shape as ChatCompletionResponse
+		// (id/object/created/model/output/usage/thought) but with
+		// the Responses output-message envelope.
+		buf := appendResponse(make([]byte, 0, responseSize(p)), p)
+		_, _ = w.Write(buf)
+		return
+	}
+	if p, ok := payload.(RerankResponse); ok {
+		// Rerank results scale with the documents slice — walking
+		// inference.RerankScore inline skips the per-element reflect
+		// cost. Labels field is rarely set in practice; encoder
+		// handles both shapes.
+		buf := appendRerankResponse(make([]byte, 0, rerankResponseSize(p)), p)
+		_, _ = w.Write(buf)
+		return
+	}
+	result := core.JSONMarshal(payload)
+	if !result.OK {
+		_, _ = w.Write([]byte(`{}`))
+		return
+	}
+	_, _ = w.Write(result.Value.([]byte))
+}
+
+func writeError(w http.ResponseWriter, status int, message, param string) {
+	writeJSON(w, status, ErrorResponse{Error: ErrorObject{
+		Message: message,
+		Type:    "invalid_request_error",
+		Param:   param,
+		Code:    "invalid_request_error",
+	}})
+}
+
+type requestValidationError struct {
+	message string
+	param   string
+}
+
+func (e *requestValidationError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.message
+}
+
+func requestError(message, param string) error {
+	return &requestValidationError{message: message, param: param}
+}
+
+func errorParam(err error) string {
+	if validation, ok := err.(*requestValidationError); ok {
+		return validation.param
+	}
+	return ""
+}
+
+func resultError(result core.Result) error {
+	if result.OK {
+		return nil
+	}
+	if err, ok := result.Value.(error); ok {
+		return err
+	}
+	return core.E("openai.result", "unexpected failed result value", nil)
+}
+
+func completionID() string {
+	// Fires once per chat-completion response. core.Sprintf was 2 allocs
+	// (fmt formatter scratch + result string); the append-into-prefix
+	// path is a single alloc backing the returned string via AsString.
+	buf := make([]byte, 0, 32) // "chatcmpl-" (9) + max int64 (20) + slack
+	buf = append(buf, "chatcmpl-"...)
+	buf = strconv.AppendInt(buf, time.Now().UnixNano(), 10)
+	return core.AsString(buf)
+}
+
+func isTokenLengthCapReached(maxTokens *int, generated int) bool {
+	return maxTokens != nil && *maxTokens > 0 && generated >= *maxTokens
+}
