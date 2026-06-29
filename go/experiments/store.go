@@ -3,7 +3,8 @@
 package experiments
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"sync"
 
 	core "dappco.re/go"
@@ -161,7 +162,7 @@ func (s *MemStore) ListExamples(datasetID string) []Example {
 		out = append(out, ex)
 	}
 	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	slices.SortFunc(out, func(a, b Example) int { return cmp.Compare(a.ID, b.ID) })
 	return out
 }
 
@@ -225,7 +226,7 @@ func (s *MemStore) ListExperiments(datasetID string) []Experiment {
 		}
 	}
 	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	slices.SortFunc(out, func(a, b Experiment) int { return cmp.Compare(a.ID, b.ID) })
 	return out
 }
 
@@ -252,13 +253,13 @@ func (s *MemStore) PutFeedback(fb Feedback) core.Result {
 //	rows := s.ListFeedback("exp-1")
 func (s *MemStore) ListFeedback(target string) []Feedback {
 	s.mu.RLock()
-	out := make([]Feedback, 0)
+	out := make([]Feedback, 0, len(s.feedback))
 	for _, fb := range s.feedback {
 		if fb.Target == target {
 			out = append(out, fb)
 		}
 	}
 	s.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	slices.SortFunc(out, func(a, b Feedback) int { return cmp.Compare(a.ID, b.ID) })
 	return out
 }
