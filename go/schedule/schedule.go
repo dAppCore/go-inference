@@ -187,7 +187,11 @@ func (e *Engine) Run(ctx context.Context, requests []Request, stepper Stepper, o
 			}
 
 			queue = queue[1:]
-			running = append(running, &Seq{Request: req})
+			// Presize the token buffer to the request's hard cap (MaxNewTokens is
+			// > 0 here — the ≤ 0 case is retired above), so the per-step append
+			// never reallocates as the sequence decodes. The buffer is moved into
+			// the Result on retirement.
+			running = append(running, &Seq{Request: req, tokens: make([]int, 0, req.MaxNewTokens)})
 		}
 	}
 
