@@ -31,6 +31,33 @@ func ExampleAdapterInfo_IsEmpty() {
 	// false
 }
 
+// ExampleAdapterInfo_Identity projects an inspected adapter into the
+// portable state.AdapterIdentity shape a capability.AdapterModel or
+// state.CheckWakeCompatibility caller consumes. Name and Scale do not
+// appear on the far side — Identity is an identity projection, not a
+// lossless mirror.
+func ExampleAdapterInfo_Identity() {
+	info := AdapterInfo{
+		Name:       "my-lora",
+		Path:       "/models/my-lora",
+		Rank:       16,
+		Alpha:      32,
+		Scale:      2,
+		TargetKeys: []string{"self_attn.q_proj"},
+	}
+	id := info.Identity()
+	core.Println("path:", id.Path)
+	core.Println("rank:", id.Rank)
+	core.Println("alpha:", id.Alpha)
+	core.Println("targets:", id.TargetKeys)
+
+	// Output:
+	// path: /models/my-lora
+	// rank: 16
+	// alpha: 32
+	// targets: [self_attn.q_proj]
+}
+
 // ExampleInspectAdapter reads adapter_config.json from an adapter directory
 // and reports the LoRA identity. Here the config uses the canonical rank /
 // alpha fields and lists its targets under lora_layers (the mlx-lm spelling);
