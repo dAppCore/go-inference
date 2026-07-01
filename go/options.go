@@ -5,13 +5,20 @@ import "slices"
 // inference.GenerateConfig{MaxTokens: 256, Temperature: 0.7, TopK: 40}
 // inference.GenerateConfig{MaxTokens: 64, StopTokens: []int32{2}, RepeatPenalty: 1.1}
 type GenerateConfig struct {
-	MaxTokens     int
-	Temperature   float32
-	TopK          int
-	TopP          float32
-	StopTokens    []int32
-	RepeatPenalty float32
-	ReturnLogits  bool // Return raw logits in ClassifyResult (default false)
+	MaxTokens      int
+	Temperature    float32
+	TopK           int
+	TopP           float32
+	MinP           float32
+	Seed           uint64
+	SeedSet        bool
+	StopTokens     []int32
+	SuppressTokens []int32
+	// MinTokensBeforeStop masks stop tokens until at least this many tokens
+	// have been emitted, matching backends that avoid immediate turn closure.
+	MinTokensBeforeStop int
+	RepeatPenalty       float32
+	ReturnLogits        bool // Return raw logits in ClassifyResult (default false)
 	// EnableThinking toggles reasoning for models that support it (e.g. Gemma 4).
 	// nil = model default; &true = on; &false = off. Backends ignore it when the
 	// loaded architecture has no thinking mode.
@@ -70,12 +77,43 @@ func WithTopP(p float32) GenerateOption {
 	return func(c *GenerateConfig) { c.TopP = p }
 }
 
+// WithMinP sets minimum-probability sampling relative to the best token.
+//
+//	inference.WithMinP(0.05) // drop tokens below 5% of the top-token probability
+func WithMinP(p float32) GenerateOption {
+	return func(c *GenerateConfig) { c.MinP = p }
+}
+
+// WithSeed makes stochastic sampling reproducible for this request.
+//
+//	inference.WithSeed(42) // deterministic sampling for a fixed seed
+func WithSeed(seed uint64) GenerateOption {
+	return func(c *GenerateConfig) {
+		c.Seed = seed
+		c.SeedSet = true
+	}
+}
+
 // WithStopTokens halts generation as soon as any listed token ID is sampled.
 //
 //	inference.WithStopTokens(2)       // EOS token only
 //	inference.WithStopTokens(2, 1, 0) // EOS + pad tokens
 func WithStopTokens(ids ...int32) GenerateOption {
 	return func(c *GenerateConfig) { c.StopTokens = slices.Clone(ids) }
+}
+
+// WithSuppressTokens masks token IDs out of the sampling distribution.
+//
+//	inference.WithSuppressTokens(1, 2) // never emit these ids
+func WithSuppressTokens(ids ...int32) GenerateOption {
+	return func(c *GenerateConfig) { c.SuppressTokens = slices.Clone(ids) }
+}
+
+// WithMinTokensBeforeStop suppresses stop tokens until n tokens have been emitted.
+//
+//	inference.WithMinTokensBeforeStop(8) // force a short visible answer
+func WithMinTokensBeforeStop(n int) GenerateOption {
+	return func(c *GenerateConfig) { c.MinTokensBeforeStop = n }
 }
 
 // WithRepeatPenalty penalises repeated tokens. 1.0 = no penalty.

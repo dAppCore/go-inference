@@ -729,3 +729,53 @@ func TestOptions_WithAdapterPath_Ugly(t *testing.T) {
 	core.AssertEqual(t, def.ContextLen, cfg.ContextLen)
 	core.AssertEqual(t, def.GPULayers, cfg.GPULayers)
 }
+
+func TestOptions_WithMinP_Good(t *testing.T) {
+	tests := []struct {
+		name string
+		val  float32
+		want float32
+	}{
+		{"disabled", 0, 0},
+		{"typical", 0.05, 0.05},
+		{"aggressive", 0.2, 0.2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ApplyGenerateOpts([]GenerateOption{WithMinP(tt.val)})
+			checkEqual(t, tt.want, cfg.MinP)
+		})
+	}
+}
+
+func TestOptions_WithSeed_Good(t *testing.T) {
+	cfg := ApplyGenerateOpts([]GenerateOption{WithSeed(42)})
+	checkEqual(t, uint64(42), cfg.Seed)
+	checkEqual(t, true, cfg.SeedSet)
+	// Absent WithSeed, SeedSet stays false so backends keep non-deterministic sampling.
+	checkEqual(t, false, ApplyGenerateOpts(nil).SeedSet)
+}
+
+func TestOptions_WithSuppressTokens_Good(t *testing.T) {
+	cfg := ApplyGenerateOpts([]GenerateOption{WithSuppressTokens(1, 2, 3)})
+	checkEqual(t, 3, len(cfg.SuppressTokens))
+	checkEqual(t, int32(1), cfg.SuppressTokens[0])
+	checkEqual(t, int32(3), cfg.SuppressTokens[2])
+}
+
+func TestOptions_WithMinTokensBeforeStop_Good(t *testing.T) {
+	tests := []struct {
+		name string
+		val  int
+		want int
+	}{
+		{"disabled", 0, 0},
+		{"short-answer", 8, 8},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := ApplyGenerateOpts([]GenerateOption{WithMinTokensBeforeStop(tt.val)})
+			checkEqual(t, tt.want, cfg.MinTokensBeforeStop)
+		})
+	}
+}

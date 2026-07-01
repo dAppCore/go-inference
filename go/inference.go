@@ -148,6 +148,9 @@ type GenerateMetrics struct {
 	// Memory (Metal/GPU)
 	PeakMemoryBytes   uint64 // Peak GPU memory during this operation
 	ActiveMemoryBytes uint64 // Active GPU memory after operation
+
+	// Reasoning controls
+	ThinkingBudgetForced bool // ThinkingBudget forced the thought-channel close token
 }
 
 // info := model.Info()
