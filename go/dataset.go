@@ -6,12 +6,17 @@ import "context"
 
 // DatasetSample is a backend-neutral training or evaluation item.
 type DatasetSample struct {
-	Text      string            `json:"text,omitempty"`
-	Prompt    string            `json:"prompt,omitempty"`
-	Response  string            `json:"response,omitempty"`
-	Reasoning string            `json:"reasoning,omitempty"`
-	Messages  []Message         `json:"messages,omitempty"`
-	Labels    map[string]string `json:"labels,omitempty"`
+	Text      string    `json:"text,omitempty"`
+	Prompt    string    `json:"prompt,omitempty"`
+	Response  string    `json:"response,omitempty"`
+	Reasoning string    `json:"reasoning,omitempty"`
+	Messages  []Message `json:"messages,omitempty"`
+	// Format is the source-corpus row shape this sample was normalised from
+	// (e.g. "text", "openai_messages", "sharegpt", "prompt_response",
+	// "alpaca", "reasoning") — stamped by dataset.LoadJSONL (go/dataset).
+	// Empty for samples built directly rather than parsed from a corpus.
+	Format string            `json:"format,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // DatasetStream is the smallest pull-based dataset contract shared by
