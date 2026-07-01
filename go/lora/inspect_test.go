@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/state"
 )
 
 func equalStringSlices(a, b []string) bool {
@@ -73,6 +74,62 @@ func TestAdapterInfo_IsEmpty_Ugly(t *testing.T) {
 				t.Fatalf("AdapterInfo with only %s set reported IsEmpty() = true, want false: %+v", tc.name, info)
 			}
 		})
+	}
+}
+
+func TestAdapterInfo_Identity_Good(t *testing.T) {
+	// Good: Path/Hash/Rank/Alpha/TargetKeys carry straight across; Name and
+	// Scale are the deliberate identity-projection exclusions (see the
+	// Identity doc comment) and must not leak into the result.
+	info := AdapterInfo{
+		Name:       "my-lora",
+		Path:       "/models/my-lora",
+		Hash:       "deadbeef",
+		Rank:       16,
+		Alpha:      32,
+		Scale:      2,
+		TargetKeys: []string{"self_attn.q_proj", "self_attn.v_proj"},
+	}
+	want := state.AdapterIdentity{
+		Path:       "/models/my-lora",
+		Hash:       "deadbeef",
+		Rank:       16,
+		Alpha:      32,
+		TargetKeys: []string{"self_attn.q_proj", "self_attn.v_proj"},
+	}
+	got := info.Identity()
+	if got.Path != want.Path || got.Hash != want.Hash || got.Rank != want.Rank || got.Alpha != want.Alpha {
+		t.Fatalf("AdapterInfo.Identity() = %+v, want %+v", got, want)
+	}
+	if !equalStringSlices(got.TargetKeys, want.TargetKeys) {
+		t.Fatalf("AdapterInfo.Identity().TargetKeys = %v, want %v", got.TargetKeys, want.TargetKeys)
+	}
+	if got.Format != "" || got.BaseModelHash != "" || len(got.Labels) != 0 {
+		t.Fatalf("AdapterInfo.Identity() populated a field Identity never sets: %+v", got)
+	}
+}
+
+func TestAdapterInfo_Identity_Bad(t *testing.T) {
+	// Bad (degenerate input): the zero-value AdapterInfo projects to the
+	// zero-value AdapterIdentity — no field invents content from nothing.
+	// AdapterIdentity holds a slice and a map, so it is compared field by
+	// field rather than with == / !=.
+	var info AdapterInfo
+	got := info.Identity()
+	if got.Path != "" || got.Hash != "" || got.Rank != 0 || got.Alpha != 0 ||
+		got.Format != "" || got.BaseModelHash != "" || len(got.TargetKeys) != 0 || len(got.Labels) != 0 {
+		t.Fatalf("AdapterInfo{}.Identity() = %+v, want zero value", got)
+	}
+}
+
+func TestAdapterInfo_Identity_Ugly(t *testing.T) {
+	// Ugly: the returned TargetKeys is a defensive clone — mutating it must
+	// not reach back into the source AdapterInfo's backing array.
+	info := AdapterInfo{TargetKeys: []string{"q_proj"}}
+	got := info.Identity()
+	got.TargetKeys[0] = "mutated"
+	if info.TargetKeys[0] != "q_proj" {
+		t.Fatalf("AdapterInfo.Identity().TargetKeys aliases the source slice: source = %v", info.TargetKeys)
 	}
 }
 

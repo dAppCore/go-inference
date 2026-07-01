@@ -12,6 +12,7 @@ import (
 	"slices"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/state"
 )
 
 // errAdapterPathRequired is the sentinel returned by Inspect when the
@@ -42,6 +43,30 @@ type AdapterInfo struct {
 // IsEmpty reports whether the adapter info has no meaningful fields set.
 func (info AdapterInfo) IsEmpty() bool {
 	return info.Name == "" && info.Path == "" && info.Hash == "" && info.Rank == 0 && info.Alpha == 0 && info.Scale == 0 && len(info.TargetKeys) == 0
+}
+
+// Identity projects an inspected AdapterInfo into the portable,
+// engine-agnostic state.AdapterIdentity consumed by capability.AdapterModel,
+// ai/differential_loader, and state.CheckWakeCompatibility — the shapes any
+// engine (go-mlx, go-rocm, go-cpu) needs once it has inspected a LoRA
+// adapter with Inspect/InspectAdapter but must report or compare it in the
+// shared identity schema rather than this package's own AdapterInfo.
+//
+// Like Manifest.Identity() in model/pack, this is an identity projection,
+// not a lossless mirror: Name is a registry/display label rather than part
+// of content identity, and Scale is fully derived from Rank and Alpha (see
+// NormalizeAdapterConfig) — state.AdapterIdentity does not duplicate a
+// derivable field. Both are intentionally dropped.
+//
+//	id := info.Identity()
+func (info AdapterInfo) Identity() state.AdapterIdentity {
+	return state.AdapterIdentity{
+		Path:       info.Path,
+		Hash:       info.Hash,
+		Rank:       info.Rank,
+		Alpha:      info.Alpha,
+		TargetKeys: core.SliceClone(info.TargetKeys),
+	}
 }
 
 // InspectAdapter reads adapter_config.json and hashes adapter files.
