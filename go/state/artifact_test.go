@@ -106,6 +106,18 @@ func TestExportArtifact_Bad(t *testing.T) {
 	if writer.calls != 0 {
 		t.Fatalf("Put calls = %d, want 0 (Save failure must short-circuit before Put)", writer.calls)
 	}
+
+	// A Put failure (no Save configured) still returns the propagated
+	// error after Put was actually attempted.
+	putErr := core.NewError("put failed")
+	failingWriter := &fakeArtifactWriter{err: putErr}
+	_, err = ExportArtifact(context.Background(), "payload", ArtifactOptions{Store: failingWriter})
+	if !core.Is(err, putErr) {
+		t.Fatalf("Put failure error = %v, want %v", err, putErr)
+	}
+	if failingWriter.calls != 1 {
+		t.Fatalf("Put calls = %d, want 1 (Put itself must be attempted)", failingWriter.calls)
+	}
 }
 
 // TestExportArtifact_Ugly proves a cancelled context is rejected before any
@@ -117,6 +129,13 @@ func TestExportArtifact_Ugly(t *testing.T) {
 	cancel()
 	if _, err := ExportArtifact(ctx, "payload", ArtifactOptions{}); !core.Is(err, context.Canceled) {
 		t.Fatalf("cancelled ctx error = %v, want context.Canceled", err)
+	}
+
+	// A nil context is normalised to context.Background() rather than
+	// panicking on ctx.Done() — distinct from the cancelled-context case
+	// above.
+	if _, err := ExportArtifact(nil, "payload", ArtifactOptions{Model: "m"}); err != nil {
+		t.Fatalf("nil ctx error = %v, want normalised context", err)
 	}
 
 	record, err := ExportArtifact(context.Background(), "payload", ArtifactOptions{Model: "m", Kind: "k"})
@@ -137,5 +156,29 @@ func TestExportArtifact_Ugly(t *testing.T) {
 	}
 	if writer.calls != 0 {
 		t.Fatalf("Put calls = %d, want 0 (marshal failure must short-circuit before Put)", writer.calls)
+	}
+}
+
+// TestArtifactResultError_Good proves a successful Result yields no error,
+// and a failed Result carrying an error Value unwraps it verbatim.
+func TestArtifactResultError_Good(t *testing.T) {
+	if err := artifactResultError(core.Result{OK: true}); err != nil {
+		t.Fatalf("artifactResultError(OK) = %v, want nil", err)
+	}
+
+	inner := core.NewError("marshal boom")
+	if err := artifactResultError(core.Result{OK: false, Value: inner}); !core.Is(err, inner) {
+		t.Fatalf("artifactResultError(error value) = %v, want %v", err, inner)
+	}
+}
+
+// TestArtifactResultError_Bad proves the fallback sentinel is used when a
+// failed Result's Value isn't an error at all — a shape the production
+// call site in ExportArtifact never actually produces, but the helper
+// guards against regardless.
+func TestArtifactResultError_Bad(t *testing.T) {
+	err := artifactResultError(core.Result{OK: false, Value: "not an error"})
+	if !core.Is(err, errArtifactResultFailed) {
+		t.Fatalf("artifactResultError(non-error value) = %v, want errArtifactResultFailed", err)
 	}
 }
