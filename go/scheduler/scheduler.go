@@ -495,7 +495,7 @@ func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
 	// holds slice fields so it is not == comparable; check the fields
 	// the applier would act on.
 	if cfg.MaxTokens == 0 && cfg.Temperature == 0 && cfg.TopK == 0 &&
-		cfg.TopP == 0 && cfg.RepeatPenalty == 0 && len(cfg.StopTokens) == 0 &&
+		cfg.TopP == 0 && cfg.MinP == 0 && cfg.RepeatPenalty == 0 && len(cfg.StopTokens) == 0 &&
 		!cfg.ReturnLogits {
 		return schedGreedyOpts
 	}
@@ -518,6 +518,9 @@ func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
 		}
 		if cfg.TopP > 0 {
 			c.TopP = cfg.TopP
+		}
+		if cfg.MinP > 0 {
+			c.MinP = cfg.MinP
 		}
 		if cfg.RepeatPenalty > 0 {
 			c.RepeatPenalty = cfg.RepeatPenalty

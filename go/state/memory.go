@@ -124,6 +124,62 @@ func (s *InMemoryStore) ResolveBytes(ctx context.Context, chunkID int) (Chunk, e
 	return Chunk{Ref: ref, Text: text, Data: []byte(text)}, nil
 }
 
+// BorrowBytes returns a live view onto the store's own backing slice for
+// binary chunks (no defensive copy) — callers must not mutate Data unless
+// they intend the mutation to be visible to later Resolve/Borrow calls.
+// Text-only chunks still convert (a Go string cannot be borrowed byte-for-
+// byte without unsafe aliasing), so only PutBytes-originated chunks get the
+// zero-copy path.
+func (s *InMemoryStore) BorrowBytes(ctx context.Context, chunkID int) (BorrowedChunk, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return BorrowedChunk{}, ctx.Err()
+	default:
+	}
+	if s == nil {
+		return BorrowedChunk{}, &ChunkNotFoundError{ID: chunkID}
+	}
+	ref := s.refs[chunkID]
+	if ref.ChunkID != chunkID {
+		ref.ChunkID = chunkID
+	}
+	if data, ok := s.data[chunkID]; ok {
+		return BorrowedChunk{Ref: ref, Data: data}, nil
+	}
+	text, ok := s.chunks[chunkID]
+	if !ok {
+		return BorrowedChunk{}, &ChunkNotFoundError{ID: chunkID}
+	}
+	return BorrowedChunk{Ref: ref, Data: []byte(text)}, nil
+}
+
+// BorrowRefBytes resolves ref.ChunkID via BorrowBytes and overlays any
+// frame-offset/codec/segment carried on ref onto the returned Ref — mirrors
+// the overlay semantics MergeRef documents, without a data copy.
+func (s *InMemoryStore) BorrowRefBytes(ctx context.Context, ref ChunkRef) (BorrowedChunk, error) {
+	if ref.ChunkID == 0 {
+		return BorrowedChunk{}, &ChunkNotFoundError{ID: ref.ChunkID}
+	}
+	borrowed, err := s.BorrowBytes(ctx, ref.ChunkID)
+	if err != nil {
+		return BorrowedChunk{}, err
+	}
+	if ref.HasFrameOffset {
+		borrowed.Ref.FrameOffset = ref.FrameOffset
+		borrowed.Ref.HasFrameOffset = true
+	}
+	if ref.Codec != "" {
+		borrowed.Ref.Codec = ref.Codec
+	}
+	if ref.Segment != "" {
+		borrowed.Ref.Segment = ref.Segment
+	}
+	return borrowed, nil
+}
+
 func (s *InMemoryStore) ResolveURI(ctx context.Context, uri string) (Chunk, error) {
 	if ctx == nil {
 		ctx = context.Background()

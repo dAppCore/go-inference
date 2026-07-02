@@ -29,11 +29,13 @@ func TestResponses_ResponseMessages_Good(t *testing.T) {
 func TestResponses_ResponseGenerateOptions_Good(t *testing.T) {
 	maxTokens := 12
 	temperature := float32(0)
+	minP := float32(0.04)
 	req := ResponseRequest{
 		Model:           "qwen",
 		Input:           []ResponseInputMessage{{Role: "user", Content: "hi"}},
 		MaxOutputTokens: &maxTokens,
 		Temperature:     &temperature,
+		MinP:            &minP,
 	}
 
 	opts, err := ResponseGenerateOptions(req)
@@ -41,7 +43,7 @@ func TestResponses_ResponseGenerateOptions_Good(t *testing.T) {
 		t.Fatalf("ResponseGenerateOptions() error = %v", err)
 	}
 	cfg := inference.ApplyGenerateOpts(opts)
-	if cfg.MaxTokens != 12 || cfg.Temperature != 0 {
+	if cfg.MaxTokens != 12 || cfg.Temperature != 0 || cfg.MinP != 0.04 {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }

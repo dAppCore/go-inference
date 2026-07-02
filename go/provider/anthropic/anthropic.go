@@ -33,6 +33,7 @@ type MessageRequest struct {
 	MaxTokens     int       `json:"max_tokens"`
 	Temperature   *float32  `json:"temperature,omitempty"`
 	TopP          *float32  `json:"top_p,omitempty"`
+	MinP          *float32  `json:"min_p,omitempty"`
 	TopK          *int      `json:"top_k,omitempty"`
 	Stream        bool      `json:"stream,omitempty"`
 	StopSequences []string  `json:"stop_sequences,omitempty"`
@@ -194,7 +195,7 @@ func appendMessage(buf []byte, m Message) []byte {
 //
 //   - system: omitempty (string).
 //
-//   - temperature / top_p / top_k: omitempty (pointer); emitted as
+//   - temperature / top_p / min_p / top_k: omitempty (pointer); emitted as
 //     number only when non-nil.
 //
 //   - stream: omitempty (bool); emitted as true only when true.
@@ -224,6 +225,9 @@ func AppendMessageRequest(buf []byte, r MessageRequest) []byte {
 	}
 	if r.TopP != nil {
 		buf = jsonenc.AppendFloat32Field(buf, "top_p", *r.TopP, true)
+	}
+	if r.MinP != nil {
+		buf = jsonenc.AppendFloat32Field(buf, "min_p", *r.MinP, true)
 	}
 	if r.TopK != nil {
 		buf = jsonenc.AppendIntField(buf, "top_k", *r.TopK, true)
@@ -285,6 +289,9 @@ func MessageRequestSize(r MessageRequest) int {
 	if r.TopP != nil {
 		size += 6 + 5 + 24 // ,"top_p":F
 	}
+	if r.MinP != nil {
+		size += 6 + 5 + 24 // ,"min_p":F
+	}
 	if r.TopK != nil {
 		size += 6 + 5 + 20 // ,"top_k":N
 	}
@@ -317,7 +324,7 @@ func InferenceMessages(req MessageRequest) []inference.Message {
 
 // GenerateOptions converts Anthropic sampling fields into inference options.
 func GenerateOptions(req MessageRequest) []inference.GenerateOption {
-	opts := make([]inference.GenerateOption, 0, 4)
+	opts := make([]inference.GenerateOption, 0, 5)
 	if req.MaxTokens > 0 {
 		opts = append(opts, inference.WithMaxTokens(req.MaxTokens))
 	}
@@ -326,6 +333,9 @@ func GenerateOptions(req MessageRequest) []inference.GenerateOption {
 	}
 	if req.TopP != nil {
 		opts = append(opts, inference.WithTopP(*req.TopP))
+	}
+	if req.MinP != nil {
+		opts = append(opts, inference.WithMinP(*req.MinP))
 	}
 	if req.TopK != nil {
 		opts = append(opts, inference.WithTopK(*req.TopK))

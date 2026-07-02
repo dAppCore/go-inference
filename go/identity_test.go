@@ -10,6 +10,7 @@ func TestIdentity_SamplerConfigFromGenerateConfig_Good(t *testing.T) {
 		Temperature:   0.7,
 		TopK:          40,
 		TopP:          0.9,
+		MinP:          0.05,
 		StopTokens:    []int32{1, 2},
 		RepeatPenalty: 1.1,
 		ReturnLogits:  true,
@@ -22,6 +23,7 @@ func TestIdentity_SamplerConfigFromGenerateConfig_Good(t *testing.T) {
 	checkEqual(t, float32(0.7), sampler.Temperature)
 	checkEqual(t, 40, sampler.TopK)
 	checkEqual(t, float32(0.9), sampler.TopP)
+	checkEqual(t, float32(0.05), sampler.MinP)
 	checkEqual(t, float32(1.1), sampler.RepeatPenalty)
 	checkTrue(t, sampler.ReturnLogits)
 }
@@ -50,6 +52,7 @@ func TestIdentity_GenerateConfigFromSamplerConfig_Good(t *testing.T) {
 		Temperature:   0.2,
 		TopK:          8,
 		TopP:          0.5,
+		MinP:          0.03,
 		StopTokens:    []int32{3, 4},
 		RepeatPenalty: 1.2,
 		ReturnLogits:  true,
@@ -62,6 +65,7 @@ func TestIdentity_GenerateConfigFromSamplerConfig_Good(t *testing.T) {
 	checkEqual(t, float32(0.2), cfg.Temperature)
 	checkEqual(t, 8, cfg.TopK)
 	checkEqual(t, float32(0.5), cfg.TopP)
+	checkEqual(t, float32(0.03), cfg.MinP)
 	checkEqual(t, float32(1.2), cfg.RepeatPenalty)
 	checkTrue(t, cfg.ReturnLogits)
 }

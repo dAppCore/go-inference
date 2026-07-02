@@ -18,10 +18,10 @@ func TestOllama_InferenceMessages_Good(t *testing.T) {
 }
 
 func TestOllama_GenerateOptions_Good(t *testing.T) {
-	opts := GenerateOptions(Options{NumPredict: 12, Temperature: 0.4, TopK: 8, TopP: 0.7})
+	opts := GenerateOptions(Options{NumPredict: 12, Temperature: 0.4, TopK: 8, TopP: 0.7, MinP: 0.05})
 
 	cfg := inference.ApplyGenerateOpts(opts)
-	if cfg.MaxTokens != 12 || cfg.Temperature != 0.4 || cfg.TopK != 8 || cfg.TopP != 0.7 {
+	if cfg.MaxTokens != 12 || cfg.Temperature != 0.4 || cfg.TopK != 8 || cfg.TopP != 0.7 || cfg.MinP != 0.05 {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }

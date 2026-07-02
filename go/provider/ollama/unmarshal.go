@@ -325,6 +325,13 @@ func parseOptions(data []byte, i int) (Options, int, error) {
 			}
 			opts.TopP = v
 			i = vnext
+		case "min_p":
+			v, vnext, verr := jsonenc.ParseJSONFloat32(data, i)
+			if verr != nil {
+				return opts, vnext, verr
+			}
+			opts.MinP = v
+			i = vnext
 		case "num_predict":
 			n, vnext, verr := jsonenc.ParseJSONInt(data, i)
 			if verr != nil {

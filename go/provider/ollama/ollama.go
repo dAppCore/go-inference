@@ -24,6 +24,7 @@ type Options struct {
 	Temperature float32 `json:"temperature,omitempty"`
 	TopK        int     `json:"top_k,omitempty"`
 	TopP        float32 `json:"top_p,omitempty"`
+	MinP        float32 `json:"min_p,omitempty"`
 	NumPredict  int     `json:"num_predict,omitempty"`
 }
 
@@ -117,7 +118,7 @@ func InferenceMessages(messages []Message) []inference.Message {
 // callers paying inference.ApplyGenerateOpts skip a no-op closure
 // invocation and we avoid the slice+closure allocs.
 func GenerateOptions(options Options) []inference.GenerateOption {
-	if options.NumPredict <= 0 && options.Temperature == 0 && options.TopK <= 0 && options.TopP <= 0 {
+	if options.NumPredict <= 0 && options.Temperature == 0 && options.TopK <= 0 && options.TopP <= 0 && options.MinP <= 0 {
 		return nil
 	}
 	return []inference.GenerateOption{func(c *inference.GenerateConfig) {
@@ -132,6 +133,9 @@ func GenerateOptions(options Options) []inference.GenerateOption {
 		}
 		if options.TopP > 0 {
 			c.TopP = options.TopP
+		}
+		if options.MinP > 0 {
+			c.MinP = options.MinP
 		}
 	}}
 }

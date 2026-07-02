@@ -33,6 +33,7 @@ func TestUnmarshalChatCompletionRequest_ThinkingControls(t *testing.T) {
 func TestUnmarshalChatCompletionRequest_DirectShapes(t *testing.T) {
 	temp := float32(0.7)
 	topP := float32(0.95)
+	minP := float32(0.05)
 	topK := 64
 	maxTok := 1024
 	cases := []struct {
@@ -50,12 +51,13 @@ func TestUnmarshalChatCompletionRequest_DirectShapes(t *testing.T) {
 		},
 		{
 			name: "all-optional-fields-set",
-			in:   `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"temperature":0.7,"top_p":0.95,"top_k":64,"max_tokens":1024,"stream":true,"stop":["</s>"],"user":"u123"}`,
+			in:   `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"temperature":0.7,"top_p":0.95,"min_p":0.05,"top_k":64,"max_tokens":1024,"stream":true,"stop":["</s>"],"user":"u123"}`,
 			want: ChatCompletionRequest{
 				Model:       "gpt-4",
 				Messages:    []ChatMessage{{Role: "user", Content: "hi"}},
 				Temperature: &temp,
 				TopP:        &topP,
+				MinP:        &minP,
 				TopK:        &topK,
 				MaxTokens:   &maxTok,
 				Stream:      true,
@@ -74,7 +76,7 @@ func TestUnmarshalChatCompletionRequest_DirectShapes(t *testing.T) {
 		},
 		{
 			name: "pointer-fields-null-keeps-zero",
-			in:   `{"model":"gpt-4","messages":[],"temperature":null,"top_p":null,"top_k":null,"max_tokens":null,"stream":null}`,
+			in:   `{"model":"gpt-4","messages":[],"temperature":null,"top_p":null,"min_p":null,"top_k":null,"max_tokens":null,"stream":null}`,
 			want: ChatCompletionRequest{
 				Model: "gpt-4",
 			},
@@ -123,6 +125,7 @@ func TestUnmarshalChatCompletionRequest_DirectShapes(t *testing.T) {
 
 func TestUnmarshalResponseRequest_DirectShapes(t *testing.T) {
 	temp := float32(0.7)
+	minP := float32(0.04)
 	maxOut := 256
 	cases := []struct {
 		name string
@@ -139,12 +142,13 @@ func TestUnmarshalResponseRequest_DirectShapes(t *testing.T) {
 		},
 		{
 			name: "with-instructions-and-options",
-			in:   `{"model":"gpt-4","input":[{"role":"user","content":"hi"}],"instructions":"sys","temperature":0.7,"max_output_tokens":256,"stream":true}`,
+			in:   `{"model":"gpt-4","input":[{"role":"user","content":"hi"}],"instructions":"sys","temperature":0.7,"min_p":0.04,"max_output_tokens":256,"stream":true}`,
 			want: ResponseRequest{
 				Model:           "gpt-4",
 				Input:           []ResponseInputMessage{{Role: "user", Content: "hi"}},
 				Instructions:    "sys",
 				Temperature:     &temp,
+				MinP:            &minP,
 				MaxOutputTokens: &maxOut,
 				Stream:          true,
 			},

@@ -53,6 +53,9 @@ func ValidateRequest(req ChatCompletionRequest) error {
 	if req.TopP != nil && (*req.TopP < 0 || *req.TopP > 1) {
 		return requestError("top_p must be in [0, 1]", "top_p")
 	}
+	if req.MinP != nil && (*req.MinP < 0 || *req.MinP > 1) {
+		return requestError("min_p must be in [0, 1]", "min_p")
+	}
 	if req.TopK != nil && *req.TopK < 0 {
 		return requestError("top_k must be >= 0", "top_k")
 	}
@@ -70,6 +73,7 @@ func GenerateOptions(req ChatCompletionRequest) ([]inference.GenerateOption, err
 	opts := []inference.GenerateOption{
 		inference.WithTemperature(resolvedFloat(req.Temperature, DefaultTemperature)),
 		inference.WithTopP(resolvedFloat(req.TopP, DefaultTopP)),
+		inference.WithMinP(resolvedFloat(req.MinP, 0)),
 		inference.WithTopK(resolvedInt(req.TopK, DefaultTopK)),
 		inference.WithMaxTokens(resolvedInt(req.MaxTokens, DefaultMaxTokens)),
 	}

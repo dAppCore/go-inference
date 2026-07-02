@@ -336,6 +336,7 @@ func TestModel_ErrAndHelpers_Good(t *testing.T) {
 		Temperature:   0.25,
 		TopK:          8,
 		TopP:          0.9,
+		MinP:          0.05,
 		RepeatPenalty: 1.1,
 		StopTokens:    []int32{1, 2},
 		ReturnLogits:  true,
@@ -345,7 +346,7 @@ func TestModel_ErrAndHelpers_Good(t *testing.T) {
 	// the resulting GenerateConfig.
 	applied := inference.ApplyGenerateOpts(opts)
 	if applied.MaxTokens != 4 || applied.Temperature != 0.25 || applied.TopK != 8 ||
-		applied.TopP != 0.9 || applied.RepeatPenalty != 1.1 || !applied.ReturnLogits ||
+		applied.TopP != 0.9 || applied.MinP != 0.05 || applied.RepeatPenalty != 1.1 || !applied.ReturnLogits ||
 		len(applied.StopTokens) != 2 || applied.StopTokens[0] != 1 || applied.StopTokens[1] != 2 {
 		t.Fatalf("generateOptions applied = %+v", applied)
 	}

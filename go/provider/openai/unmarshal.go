@@ -7,7 +7,7 @@
 //
 // The single-pass walker per type lands at ~7-13 allocs for typical
 // shapes — predominantly the per-string clones the wire contract
-// already requires. Pointer fields (Temperature/TopP/TopK/MaxTokens)
+// already requires. Pointer fields (Temperature/TopP/MinP/TopK/MaxTokens)
 // take address of stack-allocated locals only when the field is
 // present and not null.
 //
@@ -106,6 +106,16 @@ func (r *ChatCompletionRequest) unmarshalField(data []byte, i int, key []byte) (
 			return next, err
 		}
 		r.TopP = &v
+		return next, nil
+	case "min_p":
+		if jsonenc.IsJSONNull(data, i) {
+			return i + 4, nil
+		}
+		v, next, err := jsonenc.ParseJSONFloat32(data, i)
+		if err != nil {
+			return next, err
+		}
+		r.MinP = &v
 		return next, nil
 	case "top_k":
 		if jsonenc.IsJSONNull(data, i) {
@@ -462,6 +472,16 @@ func (r *ResponseRequest) unmarshalField(data []byte, i int, key []byte) (int, e
 			return next, err
 		}
 		r.TopP = &v
+		return next, nil
+	case "min_p":
+		if jsonenc.IsJSONNull(data, i) {
+			return i + 4, nil
+		}
+		v, next, err := jsonenc.ParseJSONFloat32(data, i)
+		if err != nil {
+			return next, err
+		}
+		r.MinP = &v
 		return next, nil
 	case "top_k":
 		if jsonenc.IsJSONNull(data, i) {
