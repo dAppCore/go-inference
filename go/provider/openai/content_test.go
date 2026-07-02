@@ -32,7 +32,7 @@ func imageDataURL(payload string) string {
 
 // Plain-string content keeps its wire shape — the union decode must be
 // invisible to every existing client.
-func TestChatMessage_Unmarshal_StringContent_Good(t *testing.T) {
+func TestChatMessage_DecodeRequest_StringContent_Good(t *testing.T) {
 	req, err := DecodeRequest(strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hello"}]}`))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
@@ -44,7 +44,7 @@ func TestChatMessage_Unmarshal_StringContent_Good(t *testing.T) {
 
 // The multimodal array shape: text parts concatenate, image_url data: URLs
 // decode to raw bytes in part order.
-func TestChatMessage_Unmarshal_ContentParts_Good(t *testing.T) {
+func TestChatMessage_DecodeRequest_ContentParts_Good(t *testing.T) {
 	body := `{"model":"m","messages":[{"role":"user","content":[` +
 		`{"type":"text","text":"What is in"},` +
 		`{"type":"image_url","image_url":{"url":"` + imageDataURL("PNG-ONE") + `"}},` +
@@ -65,7 +65,7 @@ func TestChatMessage_Unmarshal_ContentParts_Good(t *testing.T) {
 
 // A local engine never fetches remote URLs out of a prompt, and malformed
 // payloads fail loudly at the door.
-func TestChatMessage_Unmarshal_ContentParts_Bad(t *testing.T) {
+func TestChatMessage_DecodeRequest_ContentParts_Bad(t *testing.T) {
 	cases := map[string]string{
 		"remote url":   `[{"type":"image_url","image_url":{"url":"https://example.com/cat.png"}}]`,
 		"no separator": `[{"type":"image_url","image_url":{"url":"data:image/png;base64"}}]`,

@@ -58,7 +58,7 @@ func TestRetry_Classify_Good(t *core.T) {
 	core.AssertEqual(t, ClassNone, Classify(200))
 }
 
-func TestRetry_Classify_Bad(t *core.T) {
+func TestRetry_Retryable_Bad(t *core.T) {
 	// Retryable classes per the RFC: rate-limited, provider-overloaded,
 	// timeout, bad-gateway, service-unavailable.
 	core.AssertTrue(t, Retryable(ClassRateLimited))

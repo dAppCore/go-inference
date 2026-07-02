@@ -44,7 +44,7 @@ func providerNames(endpoints []Endpoint) []string {
 	return core.SliceMap(endpoints, func(e Endpoint) string { return e.Provider })
 }
 
-func TestProviderRouter_Select_Good(t *testing.T) {
+func TestProviderRouter_SelectEndpoints_Good(t *testing.T) {
 	cases := []struct {
 		name      string
 		request   SelectRequest
@@ -151,7 +151,7 @@ func TestProviderRouter_Select_Good(t *testing.T) {
 	}
 }
 
-func TestProviderRouter_Select_Bad(t *testing.T) {
+func TestProviderRouter_SelectEndpoints_Bad(t *testing.T) {
 	cases := []struct {
 		name      string
 		request   SelectRequest
@@ -197,7 +197,7 @@ func TestProviderRouter_Select_Bad(t *testing.T) {
 	}
 }
 
-func TestProviderRouter_Select_Ugly(t *testing.T) {
+func TestProviderRouter_SelectEndpoints_Ugly(t *testing.T) {
 	t.Run("empty order falls back to default ordering", func(t *testing.T) {
 		result := SelectEndpoints(SelectRequest{
 			Model:       "gemma-4",

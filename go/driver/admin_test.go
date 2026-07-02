@@ -92,7 +92,7 @@ func TestAllowRepo_CorruptFile_Ugly(t *testing.T) {
 	}
 }
 
-func TestAdminCalls_RequireRunningEngine_Bad(t *testing.T) {
+func TestAdmin_DownloadModel_Bad(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	svc := &Service{}
 	if r := svc.DownloadModel(RuntimeMLX, "org/repo", "main"); r.OK {

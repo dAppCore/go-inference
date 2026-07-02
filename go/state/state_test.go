@@ -9,7 +9,7 @@ import (
 	core "dappco.re/go"
 )
 
-func TestState_InMemoryStore_Good(t *testing.T) {
+func TestState_NewInMemoryStore_Good(t *testing.T) {
 	store := NewInMemoryStore(map[int]string{7: "chunk seven"})
 
 	text, err := store.Get(context.Background(), 7)
@@ -28,7 +28,7 @@ func TestState_InMemoryStore_Good(t *testing.T) {
 	}
 }
 
-func TestState_InMemoryStore_Bad(t *testing.T) {
+func TestState_NewInMemoryStore_Bad(t *testing.T) {
 	store := NewInMemoryStore(nil)
 
 	_, err := store.Get(context.Background(), 42)
@@ -72,7 +72,7 @@ func TestState_BinaryStore_Good(t *testing.T) {
 	}
 }
 
-func TestState_BorrowRefBytesInMemoryView_Good(t *testing.T) {
+func TestState_BorrowRefBytes_Good(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	payload := []byte{4, 3, 2, 1}
 	ref, err := store.PutBytes(context.Background(), payload, PutOptions{})

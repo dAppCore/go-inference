@@ -9,10 +9,10 @@ import (
 	"testing"
 )
 
-// TestLoRA_Pool_Good covers the serving manager happy path: first Use loads the
+// TestLoRA_Use_Good covers the serving manager happy path: first Use loads the
 // adapter, a second Use of the same adapter is a resident hit (no reload), the
 // release closure drops the ref, and Resident reflects the working set.
-func TestLoRA_Pool_Good(t *testing.T) {
+func TestLoRA_Use_Good(t *testing.T) {
 	fl := &fakeLoader{}
 	p := NewPool(Config{Loader: fl, Policy: NewLRUEvictionPolicy(), Capacity: 2})
 	if err := p.Register(ref("alpha")); err != nil {
@@ -63,11 +63,11 @@ func TestLoRA_Pool_Good(t *testing.T) {
 	}
 }
 
-// TestLoRA_Pool_Bad covers admission and eviction at capacity: filling the pool
+// TestLoRA_Use_Bad covers admission and eviction at capacity: filling the pool
 // then using a third adapter evicts the LRU resident (and unloads it), a
 // referenced adapter is spared in favour of an unreferenced one, and a pinned
 // adapter is never evicted.
-func TestLoRA_Pool_Bad(t *testing.T) {
+func TestLoRA_Use_Bad(t *testing.T) {
 	fl := &fakeLoader{}
 	p := NewPool(Config{Loader: fl, Policy: NewLRUEvictionPolicy(), Capacity: 2})
 	for _, n := range []string{"a", "b", "c"} {

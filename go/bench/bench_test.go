@@ -454,7 +454,7 @@ func TestAdapterInfo_IsEmpty_GoodBad(t *testing.T) {
 	}
 }
 
-func TestConfigGenerateOptions_PassesProbeSinkThrough_Good(t *testing.T) {
+func TestGenerateOptions_PassesProbeSinkThrough_Good(t *testing.T) {
 	sentinel := struct{ tag string }{tag: "sink"}
 	cfg := Config{MaxTokens: 16, Temperature: 0.7, StopTokens: []int32{1}}
 	opts := cfg.GenerateOptions(sentinel)
@@ -467,7 +467,7 @@ func TestConfigGenerateOptions_PassesProbeSinkThrough_Good(t *testing.T) {
 	}
 }
 
-func TestConfigGenerateOptions_ClonesStopTokens_Good(t *testing.T) {
+func TestGenerateOptions_ClonesStopTokens_Good(t *testing.T) {
 	stops := []int32{1, 2, 3}
 	cfg := Config{MaxTokens: 1, StopTokens: stops}
 	opts := cfg.GenerateOptions(nil)

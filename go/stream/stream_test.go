@@ -228,7 +228,7 @@ func TestStream_FromTokens_Ugly(t *testing.T) {
 
 // --- Kind.String ---------------------------------------------------------
 
-func TestStream_KindString_Good(t *testing.T) {
+func TestStream_Kind_Good(t *testing.T) {
 	// A Kind formats as its own wire key — the stable contract value used in
 	// logs and metrics (§3.2). Spot-check the lifecycle and a delta kind.
 	if got := KindTextDelta.String(); got != "text-delta" {
@@ -242,7 +242,7 @@ func TestStream_KindString_Good(t *testing.T) {
 	}
 }
 
-func TestStream_KindString_Ugly(t *testing.T) {
+func TestStream_Kind_Ugly(t *testing.T) {
 	// String is a plain cast, so even an unknown/zero Kind round-trips its raw
 	// string value rather than panicking.
 	if got := Kind("").String(); got != "" {

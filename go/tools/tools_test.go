@@ -90,7 +90,7 @@ func TestTools_Choice_Ugly(t *core.T) {
 // ParseToolCalls
 // ---------------------------------------------------------------------------
 
-func TestTools_Parse_Good(t *core.T) {
+func TestTools_ParseToolCalls_Good(t *core.T) {
 	raw := `[
 	  {"id":"call_1","name":"search","arguments":"{\"q\":\"lethean\"}"},
 	  {"id":"call_2","name":"fetch","arguments":"{\"url\":\"https://lthn.ai\"}"}

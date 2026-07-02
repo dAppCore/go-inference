@@ -86,10 +86,10 @@ func TestCreds_Resolve_Ugly(t *core.T) {
 	core.AssertEqual(t, "", local.Secret)
 }
 
-// TestCreds_Policy_Good covers the per-key routing profile (RFC §6.17): an
+// TestCreds_Allows_Good covers the per-key routing profile (RFC §6.17): an
 // empty AllowedProviders means every provider is allowed, and a populated list
 // allows exactly its members.
-func TestCreds_Policy_Good(t *core.T) {
+func TestCreds_Allows_Good(t *core.T) {
 	// Empty AllowedProviders = all allowed (the unrestricted default key).
 	open := KeyPolicy{}
 	core.AssertTrue(t, open.Allows("openai"))
@@ -108,19 +108,19 @@ func TestCreds_Policy_Good(t *core.T) {
 	core.AssertTrue(t, p.ZDR)
 }
 
-// TestCreds_Policy_Bad covers denial: a provider outside a populated allow-list
+// TestCreds_Allows_Bad covers denial: a provider outside a populated allow-list
 // is denied.
-func TestCreds_Policy_Bad(t *core.T) {
+func TestCreds_Allows_Bad(t *core.T) {
 	p := KeyPolicy{AllowedProviders: []string{"local-metal"}}
 	core.AssertFalse(t, p.Allows("openai"))
 	core.AssertFalse(t, p.Allows("openrouter"))
 	core.AssertTrue(t, p.Allows("local-metal"))
 }
 
-// TestCreds_Policy_Ugly covers the edge cases: an empty provider is never
+// TestCreds_Allows_Ugly covers the edge cases: an empty provider is never
 // allowed even by a populated list, and the empty-list "all allowed" rule still
 // holds for the empty provider string (an empty list short-circuits to allow).
-func TestCreds_Policy_Ugly(t *core.T) {
+func TestCreds_Allows_Ugly(t *core.T) {
 	// A populated list denies the empty provider — there is no "" member.
 	p := KeyPolicy{AllowedProviders: []string{"openai"}}
 	core.AssertFalse(t, p.Allows(""))
@@ -130,10 +130,10 @@ func TestCreds_Policy_Ugly(t *core.T) {
 	core.AssertTrue(t, KeyPolicy{}.Allows(""))
 }
 
-// TestCreds_Redaction_Good proves the secret never appears in String() — the
+// TestCreds_String_Good proves the secret never appears in String() — the
 // redaction is the security guarantee (RFC §6.17: credentials are never
 // logged). String() shows the provider and a fixed mask, not the secret.
-func TestCreds_Redaction_Good(t *core.T) {
+func TestCreds_String_Good(t *core.T) {
 	c := Credential{Provider: "openai", Secret: "sk-supersecret-value"}
 	s := c.String()
 	core.AssertContains(t, s, "openai")
@@ -141,9 +141,9 @@ func TestCreds_Redaction_Good(t *core.T) {
 	core.AssertNotContains(t, s, "supersecret")
 }
 
-// TestCreds_Redaction_Bad proves a long secret is masked rather than partially
+// TestCreds_String_Bad proves a long secret is masked rather than partially
 // leaked — no substring of the raw secret survives into String().
-func TestCreds_Redaction_Bad(t *core.T) {
+func TestCreds_String_Bad(t *core.T) {
 	c := Credential{Provider: "openrouter", Secret: "abcdefghijklmnopqrstuvwxyz0123456789"}
 	s := c.String()
 	core.AssertNotContains(t, s, "abcdefgh")
@@ -152,10 +152,10 @@ func TestCreds_Redaction_Bad(t *core.T) {
 	core.AssertContains(t, s, "openrouter")
 }
 
-// TestCreds_Redaction_Ugly covers the empty-secret edge: a credential with no
+// TestCreds_String_Ugly covers the empty-secret edge: a credential with no
 // secret reads as empty/unset rather than as a masked value, so an empty
 // credential (a local provider's) is distinguishable from a real one.
-func TestCreds_Redaction_Ugly(t *core.T) {
+func TestCreds_String_Ugly(t *core.T) {
 	empty := Credential{Provider: "local-metal"}
 	s := empty.String()
 	core.AssertContains(t, s, "local-metal")
@@ -181,10 +181,10 @@ func TestCreds_HasSecret_Good(t *core.T) {
 	core.AssertFalse(t, got.HasSecret(), "a resolved local credential has no secret")
 }
 
-// TestCreds_Store_Bad covers the store's input guard: storing a credential with
+// TestCreds_Set_Bad covers the store's input guard: storing a credential with
 // an empty provider is rejected (an unkeyable credential is a bug), and the
 // rejection leaves nothing behind to resolve.
-func TestCreds_Store_Bad(t *core.T) {
+func TestCreds_Set_Bad(t *core.T) {
 	s := NewStore()
 	err := s.Set(Credential{Secret: "sk-orphan"}) // no provider
 	core.AssertError(t, err, "empty provider")
@@ -195,11 +195,11 @@ func TestCreds_Store_Bad(t *core.T) {
 	core.AssertError(t, r.Set(Credential{Secret: "sk-orphan"}))
 }
 
-// TestCreds_ResolverGet_Good covers the raw store read exposed on the Resolver:
+// TestCreds_Get_Good covers the raw store read exposed on the Resolver:
 // Get returns a stored credential and true, or the zero credential and false
 // for an absent provider — with no BYOK or local handling (that is Resolve's
 // job).
-func TestCreds_ResolverGet_Good(t *core.T) {
+func TestCreds_Get_Good(t *core.T) {
 	r := New()
 	core.AssertNoError(t, r.Set(Credential{Provider: "openai", Secret: "sk-stored"}))
 

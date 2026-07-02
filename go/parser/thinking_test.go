@@ -20,7 +20,7 @@ func TestThinking_FilterGemmaHide_Good(t *testing.T) {
 	}
 }
 
-func TestThinking_FilterShowPassthrough_Ugly(t *testing.T) {
+func TestThinking_Filter_Ugly(t *testing.T) {
 	raw := "<think>secret</think>visible"
 	got := Filter(raw, Config{Mode: Show}, Hint{Architecture: "qwen3"})
 	if got.Text != raw {
@@ -31,7 +31,7 @@ func TestThinking_FilterShowPassthrough_Ugly(t *testing.T) {
 	}
 }
 
-func TestThinking_ProcessorFlushesPartialAndOpenBlocks_Ugly(t *testing.T) {
+func TestThinking_Flush_Ugly(t *testing.T) {
 	var captured []Chunk
 	processor := NewProcessor(Config{
 		Mode: Capture,

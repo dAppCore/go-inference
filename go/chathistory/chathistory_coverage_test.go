@@ -27,9 +27,9 @@ func openTemp(t *testing.T) *History {
 	return h
 }
 
-// TestChatHistory_PathUserID_Good — the path + user-id getters return the
+// TestChatHistory_Path_Good — the path + user-id getters return the
 // archive's identity exactly as constructed, with no DB or disk needed.
-func TestChatHistory_PathUserID_Good(t *testing.T) {
+func TestChatHistory_Path_Good(t *testing.T) {
 	h := &History{path: "/x/chats.duckdb", userID: "snider"}
 	core.AssertEqual(t, "/x/chats.duckdb", h.Path())
 	core.AssertEqual(t, "snider", h.UserID())
@@ -71,9 +71,9 @@ func TestChatHistory_Open_Bad_NotADuckdbFile(t *testing.T) {
 	core.AssertTrue(t, err != nil)
 }
 
-// TestChatHistory_ClosedGuards_Bad — every method short-circuits on a nil
+// TestChatHistory_StartConversation_Bad — every method short-circuits on a nil
 // handle with a "history closed" error rather than dereferencing a nil db.
-func TestChatHistory_ClosedGuards_Bad(t *testing.T) {
+func TestChatHistory_StartConversation_Bad(t *testing.T) {
 	var h *History
 	dir := t.TempDir()
 
@@ -109,12 +109,12 @@ func TestChatHistory_ClosedGuards_Bad(t *testing.T) {
 	}
 }
 
-// TestChatHistory_ClosedDB_Ugly — once Close has released the file, further
+// TestChatHistory_CountConversations_Ugly — once Close has released the file, further
 // operations against the still-non-nil handle surface the driver's
 // closed-db error through the wrapped scope rather than panicking. Distinct
-// from ClosedGuards_Bad: here h.db is a real (but closed) *sql.DB, so these
+// from StartConversation_Bad: here h.db is a real (but closed) *sql.DB, so these
 // exercise the Exec/Query error branches, not the h==nil guard.
-func TestChatHistory_ClosedDB_Ugly(t *testing.T) {
+func TestChatHistory_CountConversations_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	h, err := Open("snider", filepath.Join(dir, "chats.duckdb"))
 	if err != nil {

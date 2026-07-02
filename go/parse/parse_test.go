@@ -25,7 +25,7 @@ func decode(t *testing.T, raw string) map[string]any {
 
 // --- Gemma 4 tool-call detector ---------------------------------------------
 
-func TestParse_Gemma4Tools_Good(t *testing.T) {
+func TestParse_ParseGemma4ToolCalls_Good(t *testing.T) {
 	// Single call, leading normal text, a string arg wrapped in <|"|> and a
 	// bare number arg. The text before the first tool-call token is normalText.
 	in := `Let me check.<|tool_call>call:get_weather{city: <|"|>Paris<|"|>, days: 3}<tool_call|>`

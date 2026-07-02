@@ -74,7 +74,7 @@ func (m *contractModel) ForkState(_ context.Context, req AgentMemoryWakeRequest)
 	return m, &AgentMemoryWakeResult{Entry: AgentMemoryRef{URI: req.EntryURI}, PrefixTokens: 8}, nil
 }
 
-func TestContracts_NewCapabilityIDs_Good(t *testing.T) {
+func TestContracts_CapabilityID_Good(t *testing.T) {
 	ids := []CapabilityID{
 		CapabilityResponsesAPI,
 		CapabilityAnthropicMessages,
@@ -112,7 +112,7 @@ func TestContracts_NewCapabilityIDs_Good(t *testing.T) {
 	}
 }
 
-func TestContracts_OptionalInterfaces_Good(t *testing.T) {
+func TestContracts_SchedulerModel_Good(t *testing.T) {
 	model := &contractModel{stubTextModel: &stubTextModel{}}
 
 	_, ok := any(model).(SchedulerModel)
@@ -168,7 +168,7 @@ func TestContracts_CacheService_Good(t *testing.T) {
 	checkEqual(t, 3, warmed.Blocks[0].TokenCount)
 }
 
-func TestContracts_EmbeddingAndRerank_Good(t *testing.T) {
+func TestContracts_EmbeddingModel_Good(t *testing.T) {
 	model := &contractModel{}
 
 	embeddings, err := any(model).(EmbeddingModel).Embed(context.Background(), EmbeddingRequest{Input: []string{"hello"}})
@@ -182,7 +182,7 @@ func TestContracts_EmbeddingAndRerank_Good(t *testing.T) {
 	checkEqual(t, "doc", reranked.Results[0].Text)
 }
 
-func TestContracts_Parsers_Good(t *testing.T) {
+func TestContracts_ReasoningParser_Good(t *testing.T) {
 	model := &contractModel{}
 
 	reasoning, err := any(model).(ReasoningParser).ParseReasoning(nil, "answer")

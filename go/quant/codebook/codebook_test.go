@@ -38,7 +38,7 @@ func TestCodebook_DescriptorValidatesAndMatVec_Good(t *testing.T) {
 	assertCloseSlice(t, got, []float32{9.5, 7}, 1e-5)
 }
 
-func TestCodebook_DescriptorRejectsUnalignedShape_Bad(t *testing.T) {
+func TestCodebook_CodeDim_Bad(t *testing.T) {
 	_, err := NewTensorDescriptor("bad.weight", []uint64{3, 3}, Profile{
 		Format:       FormatVQ,
 		CodebookSize: 16,
@@ -50,7 +50,7 @@ func TestCodebook_DescriptorRejectsUnalignedShape_Bad(t *testing.T) {
 	}
 }
 
-func TestCodebook_MatVecRejectsOutOfRangeCode_Bad(t *testing.T) {
+func TestCodebook_CodebookSize_Bad(t *testing.T) {
 	desc, err := NewTensorDescriptor("ok.weight", []uint64{1, 2}, Profile{
 		Format:       FormatVQ,
 		CodebookSize: 2,
@@ -418,7 +418,7 @@ func TestCodebook_ValidateTensorDescriptor_Bad(t *testing.T) {
 
 // --- MatVec (additional branch coverage) ---
 
-func TestCodebook_MatVecRejectsMisalignedInput_Bad(t *testing.T) {
+func TestCodebook_MatVec_Bad(t *testing.T) {
 	desc, err := NewTensorDescriptor("ok.weight", []uint64{2, 4}, Profile{
 		Format: FormatVQ, CodebookSize: 4, CodeDim: 2, IndexBits: 8,
 	})
@@ -434,7 +434,7 @@ func TestCodebook_MatVecRejectsMisalignedInput_Bad(t *testing.T) {
 	}
 }
 
-func TestCodebook_MatVecWithoutBias_Good(t *testing.T) {
+func TestCodebook_MatVec_Good(t *testing.T) {
 	desc, err := NewTensorDescriptor("ok.weight", []uint64{1, 3}, Profile{
 		Format: FormatVQ, CodebookSize: 3, CodeDim: 1, IndexBits: 8,
 	})

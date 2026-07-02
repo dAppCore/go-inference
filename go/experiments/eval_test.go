@@ -112,7 +112,7 @@ func TestEval_Examples_Bad(t *testing.T) {
 	}
 }
 
-func TestEval_Examples_Ugly(t *testing.T) {
+func TestEval_AddExample_Ugly(t *testing.T) {
 	e := newSeededEval(t)
 
 	// An example with an empty id is rejected.

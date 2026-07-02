@@ -182,7 +182,7 @@ func TestSpecCtl_Config_Good(t *testing.T) {
 
 // Bad: out-of-range config is clamped — Min<1 becomes 1, a tiny/zero Window
 // still yields a working EMA, and the controller is never dead.
-func TestSpecCtl_Config_Bad(t *testing.T) {
+func TestSpecCtl_New_Bad(t *testing.T) {
 	c := specctl.New(specctl.Controller{Min: 0, Max: 4, Window: 0})
 	if n := c.NextLength(); n != 4 {
 		t.Fatalf("clamped Min: cold-start NextLength = %d, want 4", n)

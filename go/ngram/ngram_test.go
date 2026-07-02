@@ -177,9 +177,9 @@ func TestNgram_Update_Good(t *testing.T) {
 	}
 }
 
-// TestNgram_Update_Bad covers DraftNext on an empty running context: with nothing
+// TestNgram_DraftNext_Bad covers DraftNext on an empty running context: with nothing
 // appended yet there is no context to draft from, so the result is empty.
-func TestNgram_Update_Bad(t *testing.T) {
+func TestNgram_DraftNext_Bad(t *testing.T) {
 	d := New(Config{MaxNgram: 3, MaxDraft: 4})
 
 	if got := d.DraftNext(); len(got) != 0 {

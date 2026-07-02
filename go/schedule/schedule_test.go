@@ -197,10 +197,10 @@ func TestSchedule_Admission_Good(t *testing.T) {
 	}
 }
 
-// TestSchedule_Admission_Bad: the token budget gates admission. Each running
+// TestSchedule_MaxBatchTokens_Bad: the token budget gates admission. Each running
 // seq costs prompt+generated tokens; a tight MaxBatchTokens forces serialised
 // admission so the running set is throttled below the concurrency cap.
-func TestSchedule_Admission_Bad(t *testing.T) {
+func TestSchedule_MaxBatchTokens_Bad(t *testing.T) {
 	// Cap allows 4 concurrent, but the byte budget only fits one 10-token
 	// prompt at a time → running set must stay at 1 despite the higher cap.
 	finish := map[string]int{"a": 1, "b": 1, "c": 1}
@@ -222,10 +222,10 @@ func TestSchedule_Admission_Bad(t *testing.T) {
 	}
 }
 
-// TestSchedule_Admission_Ugly: a request whose prompt alone exceeds
+// TestSchedule_MaxBatchTokens_Ugly: a request whose prompt alone exceeds
 // MaxBatchTokens is rejected with a typed error in its Result and never blocks
 // the loop — other requests still complete.
-func TestSchedule_Admission_Ugly(t *testing.T) {
+func TestSchedule_MaxBatchTokens_Ugly(t *testing.T) {
 	st := &fakeStepper{finishAfter: map[string]int{"ok": 1}}
 	reqs := []Request{
 		{ID: "whale", PromptTokens: 1000, MaxNewTokens: 4}, // oversize prompt

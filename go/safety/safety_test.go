@@ -121,9 +121,9 @@ func TestSafety_Disclosure_Good(t *core.T) {
 		"the original text survives marking")
 }
 
-// TestSafety_Disclosure_Bad — an unmarked response is not disclosed, and Mark
+// TestSafety_Mark_Bad — an unmarked response is not disclosed, and Mark
 // is idempotent: marking an already-marked response doesn't double-stamp it.
-func TestSafety_Disclosure_Bad(t *core.T) {
+func TestSafety_Mark_Bad(t *core.T) {
 	core.AssertFalse(t, IsDisclosed("just a bare answer"),
 		"an unmarked response is not disclosed")
 
@@ -132,10 +132,10 @@ func TestSafety_Disclosure_Bad(t *core.T) {
 	core.AssertEqual(t, once, twice, "marking is idempotent — no double stamp")
 }
 
-// TestSafety_Disclosure_Ugly — the empty corner: marking an empty string still
+// TestSafety_IsDisclosed_Ugly — the empty corner: marking an empty string still
 // yields a disclosed response (the marker alone), so a blank completion is never
 // silently undisclosed.
-func TestSafety_Disclosure_Ugly(t *core.T) {
+func TestSafety_IsDisclosed_Ugly(t *core.T) {
 	out := Mark("")
 	core.AssertTrue(t, IsDisclosed(out), "even an empty response is disclosed once marked")
 	core.AssertFalse(t, IsDisclosed(""), "a truly empty string is not disclosed")

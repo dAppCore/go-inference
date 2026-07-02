@@ -37,7 +37,7 @@ func TestProjectSeed_WakeRequest_Good(t *testing.T) {
 	}
 }
 
-func TestProjectSeed_PlanContinuationModes_Good(t *testing.T) {
+func TestProjectSeed_PlanContinuation_Good(t *testing.T) {
 	seed := NewProjectSeed(ProjectSeedOptions{BaseURI: "state://lthn/projects", ProjectID: "core/go-mlx"})
 	parent := WakeResult{
 		Entry:        Ref{URI: seed.EntryURI, BundleURI: seed.BundleURI, IndexURI: seed.IndexURI},
