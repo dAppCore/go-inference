@@ -100,3 +100,117 @@ func TestFileStore_Bad_InvalidInputs(t *testing.T) {
 		t.Fatalf("reopened ChunkCount() = %d after failed streams, want 0", reopened.ChunkCount())
 	}
 }
+
+func TestPutBytesStream_Bad_SeekError(t *testing.T) {
+	ctx := context.Background()
+	path := core.PathJoin(t.TempDir(), "seek-fail.mvlog")
+	store, err := Create(ctx, path)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	// Close the underlying OS file out from under the Store while the
+	// Store.file field stays non-nil, so PutBytesStream's own
+	// `s.file == nil` gate passes but the following Seek syscall
+	// fails deterministically on the closed descriptor.
+	if err := store.file.Close(); err != nil {
+		t.Fatalf("underlying Close() error = %v", err)
+	}
+	_, err = store.PutBytesStream(ctx, 1, state.PutOptions{}, func(w stdio.Writer) error {
+		_, err := w.Write([]byte("x"))
+		return err
+	})
+	if err == nil {
+		t.Fatal("PutBytesStream(closed fd) error = nil, want seek error")
+	}
+}
+
+func TestPutBytesStream_Bad_WriteHeaderError(t *testing.T) {
+	ctx := context.Background()
+	path := core.PathJoin(t.TempDir(), "write-header-fail.mvlog")
+	store, err := Create(ctx, path)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer store.file.Close()
+	// Swap in a read-only handle on the same path: Seek still
+	// succeeds (repositioning needs no write permission) but the
+	// following header+meta Write fails — this exercises both the
+	// writeAll-failure branch in PutBytesStream and rollbackWriteLocked's
+	// real Truncate/Seek body (as opposed to its early-return guards).
+	result := core.OpenFile(path, core.O_RDONLY, 0o600)
+	if !result.OK {
+		t.Fatalf("OpenFile(read-only) error = %s", result.Error())
+	}
+	readOnlyFile := result.Value.(*core.OSFile)
+	defer readOnlyFile.Close()
+	store.file = readOnlyFile
+
+	_, err = store.PutBytesStream(ctx, 1, state.PutOptions{}, func(w stdio.Writer) error {
+		_, err := w.Write([]byte("x"))
+		return err
+	})
+	if err == nil {
+		t.Fatal("PutBytesStream(read-only fd) error = nil, want write error")
+	}
+}
+
+func TestPutBytesStream_Bad_PhysicalOffsetError(t *testing.T) {
+	ctx := context.Background()
+	path := core.PathJoin(t.TempDir(), "region-write.mvlog")
+	if result := core.WriteFile(path, fileMagic, 0o600); !result.OK {
+		t.Fatalf("WriteFile() error = %s", result.Error())
+	}
+	result := core.OpenFile(path, core.O_RDWR, 0o600)
+	if !result.OK {
+		t.Fatalf("OpenFile() error = %s", result.Error())
+	}
+	file := result.Value.(*core.OSFile)
+	defer file.Close()
+	// A writable, region-bounded Store is unreachable through the
+	// public API — OpenRegionWithSegmentAlias always opens read-only —
+	// but PutBytesStream still defends s.writeAt against s.region.
+	// Construct that combination directly to exercise the guard.
+	s := &Store{
+		file:     file,
+		region:   4,
+		writeAt:  100,
+		index:    map[int]fileIndexEntry{},
+		uriIndex: map[string]int{},
+		nextID:   1,
+	}
+	_, err := s.PutBytesStream(ctx, 1, state.PutOptions{}, func(w stdio.Writer) error {
+		_, err := w.Write([]byte("x"))
+		return err
+	})
+	if err == nil {
+		t.Fatal("PutBytesStream(writeAt beyond region) error = nil")
+	}
+}
+
+func TestRollbackWriteLocked_Good_NilReceiver(t *testing.T) {
+	var s *Store
+	s.rollbackWriteLocked(0)
+}
+
+func TestRollbackWriteLocked_Good_NilFile(t *testing.T) {
+	s := &Store{}
+	s.rollbackWriteLocked(0)
+}
+
+func TestRollbackWriteLocked_Bad_PhysicalOffsetError(t *testing.T) {
+	ctx := context.Background()
+	path := core.PathJoin(t.TempDir(), "rollback-offset.mvlog")
+	store, err := Create(ctx, path)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer store.Close()
+	before := store.writeAt
+	// physicalOffset(-1) rejects before any Seek/Truncate is
+	// attempted — rollbackWriteLocked must return early rather than
+	// touch the file or any Store state.
+	store.rollbackWriteLocked(-1)
+	if store.writeAt != before {
+		t.Fatalf("writeAt changed after rollbackWriteLocked(-1): got %d, want %d", store.writeAt, before)
+	}
+}

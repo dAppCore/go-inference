@@ -10,8 +10,18 @@ import (
 	core "dappco.re/go"
 )
 
+// limitedPayloadWriter bounds a single record payload write to the
+// declared size. file is typed as the minimal stdio.Writer interface
+// (rather than the concrete *core.OSFile the Store always assigns in
+// production) purely as a test seam: it lets tests substitute a
+// synthetic writer to exercise the underlying-write-error and
+// short-write branches deterministically, which a real *os.File on a
+// regular file cannot be made to do hermetically (internal/poll
+// already loops file writes to completion). Behaviour is unchanged —
+// *core.OSFile satisfies stdio.Writer, so every production call site
+// is untouched.
 type limitedPayloadWriter struct {
-	file      *core.OSFile
+	file      stdio.Writer
 	remaining int
 }
 
