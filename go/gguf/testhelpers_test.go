@@ -8,7 +8,7 @@ import (
 
 	core "dappco.re/go"
 
-	"dappco.re/go/inference/modelmgmt"
+	"dappco.re/go/inference/safetensors"
 )
 
 // ggufMetaSpec describes one metadata key/value entry for writeTestGGUF.
@@ -105,7 +105,7 @@ func writeGGUFTestValue(t *testing.T, file *core.OSFile, valueType uint32, value
 		if err := binary.Write(file, binary.LittleEndian, uint32Value); err != nil {
 			t.Fatalf("write uint32: %v", err)
 		}
-	case ggufValueTypeFloat32:
+	case ValueTypeFloat32:
 		floatValue, ok := value.(float32)
 		if !ok {
 			t.Fatalf("write float32: got %T, want float32", value)
@@ -189,17 +189,17 @@ func writeMinimalExampleGGUF(path, architecture string) error {
 }
 
 // writeTestSafetensors writes a valid safetensors file at path via
-// modelmgmt.WriteSafetensors (F32 tensors only — the dtype
+// safetensors.WriteSafetensors (F32 tensors only — the dtype
 // QuantizeModelPack's test fixtures need).
 func writeTestSafetensors(t *testing.T, path string, tensors map[string][]float32, shapes map[string][]int) {
 	t.Helper()
-	info := make(map[string]modelmgmt.SafetensorsTensorInfo, len(tensors))
+	info := make(map[string]safetensors.SafetensorsTensorInfo, len(tensors))
 	data := make(map[string][]byte, len(tensors))
 	for name, values := range tensors {
-		info[name] = modelmgmt.SafetensorsTensorInfo{Dtype: "F32", Shape: shapes[name]}
-		data[name] = modelmgmt.EncodeFloat32(values)
+		info[name] = safetensors.SafetensorsTensorInfo{Dtype: "F32", Shape: shapes[name]}
+		data[name] = safetensors.EncodeFloat32(values)
 	}
-	if result := modelmgmt.WriteSafetensors(path, info, data); !result.OK {
+	if result := safetensors.WriteSafetensors(path, info, data); !result.OK {
 		t.Fatalf("write test safetensors: %v", result.Value)
 	}
 }
@@ -209,11 +209,11 @@ func writeTestSafetensors(t *testing.T, path string, tensors map[string][]float3
 // return value so runnable Example functions (which cannot take a
 // *testing.T) can use it.
 func writeMinimalExampleSafetensors(path, tensorName string, values []float32, shape []int) error {
-	info := map[string]modelmgmt.SafetensorsTensorInfo{
+	info := map[string]safetensors.SafetensorsTensorInfo{
 		tensorName: {Dtype: "F32", Shape: shape},
 	}
-	data := map[string][]byte{tensorName: modelmgmt.EncodeFloat32(values)}
-	if result := modelmgmt.WriteSafetensors(path, info, data); !result.OK {
+	data := map[string][]byte{tensorName: safetensors.EncodeFloat32(values)}
+	if result := safetensors.WriteSafetensors(path, info, data); !result.OK {
 		return quantizeGGUFResultError(result)
 	}
 	return nil

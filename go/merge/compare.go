@@ -8,7 +8,7 @@ import (
 
 	core "dappco.re/go"
 
-	"dappco.re/go/inference/modelmgmt"
+	"dappco.re/go/inference/safetensors"
 )
 
 // CompareStatus classifies one tensor when comparing a base model pack
@@ -206,11 +206,11 @@ func compareTensorEntries(name string, base, tuned tensorEntry) (TensorDelta, er
 		return delta, nil
 	}
 
-	baseValues, err := modelmgmt.DecodeFloat32(base.DType, base.Raw, delta.Elements)
+	baseValues, err := safetensors.DecodeFloat32(base.DType, base.Raw, delta.Elements)
 	if err != nil {
 		return TensorDelta{}, err
 	}
-	tunedValues, err := modelmgmt.DecodeFloat32(tuned.DType, tuned.Raw, delta.Elements)
+	tunedValues, err := safetensors.DecodeFloat32(tuned.DType, tuned.Raw, delta.Elements)
 	if err != nil {
 		return TensorDelta{}, err
 	}

@@ -9,11 +9,11 @@ import (
 
 	core "dappco.re/go"
 
-	"dappco.re/go/inference/modelmgmt"
+	"dappco.re/go/inference/safetensors"
 )
 
 // sourceIndex is the in-memory tensor set for one merge source, built by
-// reading every WeightFiles entry via modelmgmt.ReadSafetensors and unioning
+// reading every WeightFiles entry via safetensors.ReadSafetensors and unioning
 // the results. Unlike a chunked/offset-addressed index designed for multi-GB
 // sharded checkpoints, sourceIndex holds each tensor's full raw bytes in
 // memory — see the package doc for the tradeoff.
@@ -35,11 +35,11 @@ type tensorEntry struct {
 func indexWeightFiles(paths []string) (sourceIndex, error) {
 	index := sourceIndex{Tensors: make(map[string]tensorEntry)}
 	for _, path := range paths {
-		read := modelmgmt.ReadSafetensors(path)
+		read := safetensors.ReadSafetensors(path)
 		if !read.OK {
 			return sourceIndex{}, core.E("Packs", "read safetensors "+path, resultError(read))
 		}
-		data := read.Value.(modelmgmt.SafetensorsData)
+		data := read.Value.(safetensors.SafetensorsData)
 		for name, info := range data.Tensors {
 			if _, exists := index.Tensors[name]; exists {
 				return sourceIndex{}, core.NewError("merge: duplicate tensor across safetensors shards: " + name)
@@ -47,7 +47,7 @@ func indexWeightFiles(paths []string) (sourceIndex, error) {
 			index.Tensors[name] = tensorEntry{
 				DType: info.Dtype,
 				Shape: info.Shape,
-				Raw:   modelmgmt.GetTensorData(info, data.Data),
+				Raw:   safetensors.GetTensorData(info, data.Data),
 			}
 			index.Names = append(index.Names, name)
 		}
@@ -79,7 +79,7 @@ func writeMergedSafetensors(ctx context.Context, path string, indexes []sourceIn
 	}
 
 	base := indexes[0]
-	mergedInfo := make(map[string]modelmgmt.SafetensorsTensorInfo, len(base.Names))
+	mergedInfo := make(map[string]safetensors.SafetensorsTensorInfo, len(base.Names))
 	mergedData := make(map[string][]byte, len(base.Names))
 
 	for _, name := range base.Names {
@@ -102,7 +102,7 @@ func writeMergedSafetensors(ctx context.Context, path string, indexes []sourceIn
 			}
 			merged++
 		case allowMismatch:
-			outValues, err = modelmgmt.DecodeFloat32(baseEntry.DType, baseEntry.Raw, shapeElements(baseEntry.Shape))
+			outValues, err = safetensors.DecodeFloat32(baseEntry.DType, baseEntry.Raw, shapeElements(baseEntry.Shape))
 			if err != nil {
 				return 0, 0, nil, err
 			}
@@ -112,11 +112,11 @@ func writeMergedSafetensors(ctx context.Context, path string, indexes []sourceIn
 			return 0, 0, nil, core.NewError("merge: model merge tensor mismatch: " + name)
 		}
 
-		mergedInfo[name] = modelmgmt.SafetensorsTensorInfo{Dtype: "F32", Shape: baseEntry.Shape}
-		mergedData[name] = modelmgmt.EncodeFloat32(outValues)
+		mergedInfo[name] = safetensors.SafetensorsTensorInfo{Dtype: "F32", Shape: baseEntry.Shape}
+		mergedData[name] = safetensors.EncodeFloat32(outValues)
 	}
 
-	if result := modelmgmt.WriteSafetensors(path, mergedInfo, mergedData); !result.OK {
+	if result := safetensors.WriteSafetensors(path, mergedInfo, mergedData); !result.OK {
 		return 0, 0, nil, core.E("Packs", "write merged safetensors", resultError(result))
 	}
 	return merged, copied, skipped, nil
@@ -152,7 +152,7 @@ func gatherTensorEntries(indexes []sourceIndex, name string) ([]tensorEntry, boo
 func decodeAll(entries []tensorEntry) ([][]float32, error) {
 	values := make([][]float32, len(entries))
 	for i, entry := range entries {
-		decoded, err := modelmgmt.DecodeFloat32(entry.DType, entry.Raw, shapeElements(entry.Shape))
+		decoded, err := safetensors.DecodeFloat32(entry.DType, entry.Raw, shapeElements(entry.Shape))
 		if err != nil {
 			return nil, err
 		}

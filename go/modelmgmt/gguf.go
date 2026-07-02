@@ -2,8 +2,6 @@ package modelmgmt
 
 import (
 	"cmp"
-	"encoding/binary"
-	"io"
 	"math"
 	"regexp"
 	"slices"
@@ -11,6 +9,7 @@ import (
 
 	"dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/gguf"
 	coreio "dappco.re/go/io"
 )
 
@@ -39,41 +38,12 @@ func DiscoverModels(basePath string) []DiscoveredModel {
 	return inference.DiscoverModels(basePath)
 }
 
-// GGUF format constants.
-const (
-	ggufMagic     = 0x46554747 // "GGUF" little-endian
-	ggufVersion   = 3
-	ggufAlignment = 32
-)
-
-// GGUF metadata value types.
-const (
-	ggufTypeUint32  = 4
-	ggufTypeFloat32 = 6
-	ggufTypeString  = 8
-)
-
 // GGML tensor data types.
 const (
 	ggmlTypeF32  = 0
 	ggmlTypeF16  = 1
 	ggmlTypeBF16 = 30
 )
-
-// ggufMetadata is a key-value pair in the GGUF header.
-type ggufMetadata struct {
-	key       string
-	valueType uint32
-	value     any // string, uint32, or float32
-}
-
-// ggufTensor describes a tensor in the GGUF file.
-type ggufTensor struct {
-	name  string
-	dims  []uint64
-	dtype uint32 // ggmlType*
-	data  []byte
-}
 
 // gemma3ModuleMap maps HuggingFace module names to GGUF tensor names.
 var gemma3ModuleMap = map[string]string{
@@ -163,7 +133,7 @@ func ConvertMLXtoGGUFLoRA(safetensorsPath, configPath, outputPath, architecture 
 	tensorData := loaded.Data
 	core.Print(nil, "loaded %d tensors from %s", len(tensors), safetensorsPath)
 
-	ggufTensors := make([]ggufTensor, 0, len(tensors))
+	ggufTensors := make([]gguf.Tensor, 0, len(tensors))
 	for mlxKey, info := range tensors {
 		ggufNameResult := MLXTensorToGGUF(mlxKey)
 		if !ggufNameResult.OK {
@@ -189,142 +159,46 @@ func ConvertMLXtoGGUFLoRA(safetensorsPath, configPath, outputPath, architecture 
 			case "BF16":
 				data = TransposeBFloat16(data, rows, cols)
 			}
-			ggufTensors = append(ggufTensors, ggufTensor{
-				name:  ggufName,
-				dims:  []uint64{uint64(rows), uint64(cols)},
-				dtype: ggmlType,
-				data:  data,
+			ggufTensors = append(ggufTensors, gguf.Tensor{
+				Name:  ggufName,
+				Shape: []uint64{uint64(rows), uint64(cols)},
+				Type:  ggmlType,
+				Data:  data,
 			})
 		} else {
 			dims := make([]uint64, len(info.Shape))
 			for i, s := range info.Shape {
 				dims[i] = uint64(s)
 			}
-			ggufTensors = append(ggufTensors, ggufTensor{
-				name:  ggufName,
-				dims:  dims,
-				dtype: ggmlType,
-				data:  data,
+			ggufTensors = append(ggufTensors, gguf.Tensor{
+				Name:  ggufName,
+				Shape: dims,
+				Type:  ggmlType,
+				Data:  data,
 			})
 		}
 	}
 
-	slices.SortFunc(ggufTensors, func(a, b ggufTensor) int {
-		return cmp.Compare(a.name, b.name)
+	slices.SortFunc(ggufTensors, func(a, b gguf.Tensor) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 
-	metadata := []ggufMetadata{
-		{key: "general.type", valueType: ggufTypeString, value: "adapter"},
-		{key: "general.architecture", valueType: ggufTypeString, value: architecture},
-		{key: "adapter.type", valueType: ggufTypeString, value: "lora"},
-		{key: "adapter.lora.alpha", valueType: ggufTypeFloat32, value: loraAlpha},
+	metadata := []gguf.MetadataEntry{
+		{Key: "general.type", ValueType: gguf.ValueTypeString, Value: "adapter"},
+		{Key: "general.architecture", ValueType: gguf.ValueTypeString, Value: architecture},
+		{Key: "adapter.type", ValueType: gguf.ValueTypeString, Value: "lora"},
+		{Key: "adapter.lora.alpha", ValueType: gguf.ValueTypeFloat32, Value: loraAlpha},
 	}
 
-	if result := writeGGUF(outputPath, metadata, ggufTensors); !result.OK {
-		return core.Fail(core.E("modelmgmt.ConvertMLXtoGGUFLoRA", "write GGUF", result.Value.(error)))
+	// The gguf package's writer produces the same wire bytes the private
+	// writer here used to: identical header, offset scheme (32-byte
+	// alignment) and trailing data-section padding.
+	if err := gguf.WriteFile(outputPath, metadata, ggufTensors); err != nil {
+		return core.Fail(core.E("modelmgmt.ConvertMLXtoGGUFLoRA", "write GGUF", err))
 	}
 
 	core.Print(nil, "wrote GGUF LoRA: %s (%d tensors, alpha=%.0f)", outputPath, len(ggufTensors), loraAlpha)
 	return core.Ok(nil)
-}
-
-// writeGGUF writes a GGUF v3 file.
-func writeGGUF(path string, metadata []ggufMetadata, tensors []ggufTensor) core.Result {
-	f, err := coreio.Local.Create(path)
-	if err != nil {
-		return core.Fail(err)
-	}
-	defer f.Close()
-
-	w := &ggufWriter{f: f}
-
-	w.writeUint32(ggufMagic)
-	w.writeUint32(ggufVersion)
-	w.writeUint64(uint64(len(tensors)))
-	w.writeUint64(uint64(len(metadata)))
-
-	for _, kv := range metadata {
-		w.writeString(kv.key)
-		w.writeUint32(kv.valueType)
-		switch kv.valueType {
-		case ggufTypeString:
-			w.writeString(kv.value.(string))
-		case ggufTypeUint32:
-			w.writeUint32(kv.value.(uint32))
-		case ggufTypeFloat32:
-			w.writeFloat32(kv.value.(float32))
-		}
-	}
-
-	dataOffset := uint64(0)
-	for _, t := range tensors {
-		w.writeString(t.name)
-		w.writeUint32(uint32(len(t.dims)))
-		for _, d := range t.dims {
-			w.writeUint64(d)
-		}
-		w.writeUint32(t.dtype)
-		w.writeUint64(dataOffset)
-
-		dataOffset += uint64(len(t.data))
-		if rem := dataOffset % ggufAlignment; rem != 0 {
-			dataOffset += ggufAlignment - rem
-		}
-	}
-
-	pos := w.pos
-	if rem := pos % ggufAlignment; rem != 0 {
-		pad := ggufAlignment - rem
-		w.writeBytes(make([]byte, pad))
-	}
-
-	for _, t := range tensors {
-		w.writeBytes(t.data)
-		if rem := uint64(len(t.data)) % ggufAlignment; rem != 0 {
-			w.writeBytes(make([]byte, ggufAlignment-rem))
-		}
-	}
-
-	return core.ResultOf(nil, w.err)
-}
-
-// ggufWriter tracks position and accumulates errors.
-type ggufWriter struct {
-	f   io.WriteCloser
-	pos uint64
-	err error
-}
-
-func (w *ggufWriter) writeBytes(b []byte) {
-	if w.err != nil {
-		return
-	}
-	n, err := w.f.Write(b)
-	w.pos += uint64(n)
-	if err != nil {
-		w.err = err
-	}
-}
-
-func (w *ggufWriter) writeUint32(v uint32) {
-	b := make([]byte, 4)
-	binary.LittleEndian.PutUint32(b, v)
-	w.writeBytes(b)
-}
-
-func (w *ggufWriter) writeUint64(v uint64) {
-	b := make([]byte, 8)
-	binary.LittleEndian.PutUint64(b, v)
-	w.writeBytes(b)
-}
-
-func (w *ggufWriter) writeFloat32(v float32) {
-	w.writeUint32(math.Float32bits(v))
-}
-
-func (w *ggufWriter) writeString(s string) {
-	w.writeUint64(uint64(len(s)))
-	w.writeBytes([]byte(s))
 }
 
 // DetectArchFromConfig tries to infer the model architecture from adapter_config.json.

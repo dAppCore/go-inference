@@ -1,7 +1,6 @@
 package modelmgmt
 
 import (
-	"encoding/binary"
 	"maps"
 	"math"
 	"regexp"
@@ -9,6 +8,7 @@ import (
 	"strconv"
 
 	"dappco.re/go"
+	"dappco.re/go/inference/safetensors"
 	coreio "dappco.re/go/io"
 )
 
@@ -30,57 +30,31 @@ func RenameMLXKey(mlxKey string) string {
 	return "base_model.model." + mlxKey
 }
 
-// SafetensorsHeader represents the header of a safetensors file.
-type SafetensorsHeader struct {
-	Metadata map[string]string                `json:"__metadata__,omitempty"`
-	Tensors  map[string]SafetensorsTensorInfo `json:"-"`
-}
+// SafetensorsHeader re-exports safetensors.SafetensorsHeader so existing ml
+// consumers keep compiling — the codec itself lives in the safetensors
+// package (the format leaf), not here.
+type SafetensorsHeader = safetensors.SafetensorsHeader
 
-// SafetensorsTensorInfo describes a tensor's dtype, shape, and data location.
-type SafetensorsTensorInfo struct {
-	Dtype       string `json:"dtype"`
-	Shape       []int  `json:"shape"`
-	DataOffsets [2]int `json:"data_offsets"`
-}
+// SafetensorsTensorInfo re-exports safetensors.SafetensorsTensorInfo.
+type SafetensorsTensorInfo = safetensors.SafetensorsTensorInfo
 
-// SafetensorsData carries parsed safetensors metadata and tensor bytes.
-type SafetensorsData struct {
-	Tensors map[string]SafetensorsTensorInfo
-	Data    []byte
-}
+// SafetensorsData re-exports safetensors.SafetensorsData.
+type SafetensorsData = safetensors.SafetensorsData
 
-// ReadSafetensors reads a safetensors file and returns tensor info and raw data.
+// ReadSafetensors reads a safetensors file and returns tensor info and raw
+// data. Delegates to the safetensors format package.
+//
+//	r := modelmgmt.ReadSafetensors(path)
+//	if !r.OK { return r }
+//	data := r.Value.(modelmgmt.SafetensorsData)
 func ReadSafetensors(path string) core.Result {
-	raw, err := coreio.Local.Read(path)
-	if err != nil {
-		return core.Fail(core.E("modelmgmt.ReadSafetensors", "read file", err))
-	}
-	data := []byte(raw)
-
-	if len(data) < 8 {
-		return core.Fail(core.E("modelmgmt.ReadSafetensors", "file too small", nil))
-	}
-
-	headerSize := int(binary.LittleEndian.Uint64(data[:8]))
-	if 8+headerSize > len(data) {
-		return core.Fail(core.E("modelmgmt.ReadSafetensors", core.Sprintf("invalid header size %d", headerSize), nil))
-	}
-
-	headerJSON := data[8 : 8+headerSize]
-	tensorData := data[8+headerSize:]
-
-	var rawHeader map[string]SafetensorsTensorInfo
-	if r := core.JSONUnmarshalString(string(headerJSON), &rawHeader); !r.OK {
-		return core.Fail(core.E("modelmgmt.ReadSafetensors", "parse header", r.Value.(error)))
-	}
-	delete(rawHeader, "__metadata__")
-
-	return core.Ok(SafetensorsData{Tensors: rawHeader, Data: tensorData})
+	return safetensors.ReadSafetensors(path)
 }
 
 // GetTensorData extracts raw bytes for a tensor from the data section.
+// Delegates to the safetensors format package.
 func GetTensorData(info SafetensorsTensorInfo, allData []byte) []byte {
-	return allData[info.DataOffsets[0]:info.DataOffsets[1]]
+	return safetensors.GetTensorData(info, allData)
 }
 
 // TransposeFloat32 transposes a (rows, cols) float32 matrix to (cols, rows).
@@ -120,47 +94,13 @@ func TransposeBFloat16(data []byte, rows, cols int) []byte {
 	return TransposeFloat16(data, rows, cols)
 }
 
-// WriteSafetensors writes tensors to a safetensors file.
+// WriteSafetensors writes tensors to a safetensors file. Delegates to the
+// safetensors format package.
+//
+//	r := modelmgmt.WriteSafetensors(path, tensors, tensorData)
+//	if !r.OK { return r }
 func WriteSafetensors(path string, tensors map[string]SafetensorsTensorInfo, tensorData map[string][]byte) core.Result {
-	keys := slices.Sorted(maps.Keys(tensors))
-
-	offset := 0
-	updatedTensors := make(map[string]SafetensorsTensorInfo, len(tensors))
-	for _, k := range keys {
-		info := tensors[k]
-		data := tensorData[k]
-		info.DataOffsets = [2]int{offset, offset + len(data)}
-		updatedTensors[k] = info
-		offset += len(data)
-	}
-
-	// updatedTensors marshals to identical JSON as a map[string]any copy
-	// (json sorts keys; struct values serialise the same boxed or not).
-	headerJSON := []byte(core.JSONMarshalString(updatedTensors))
-
-	f, err := coreio.Local.Create(path)
-	if err != nil {
-		return core.Fail(core.E("modelmgmt.WriteSafetensors", core.Sprintf("create %s", path), err))
-	}
-	defer f.Close()
-
-	headerSizeBuf := make([]byte, 8)
-	binary.LittleEndian.PutUint64(headerSizeBuf, uint64(len(headerJSON)))
-
-	if _, err := f.Write(headerSizeBuf); err != nil {
-		return core.Fail(err)
-	}
-	if _, err := f.Write(headerJSON); err != nil {
-		return core.Fail(err)
-	}
-
-	for _, k := range keys {
-		if _, err := f.Write(tensorData[k]); err != nil {
-			return core.Fail(err)
-		}
-	}
-
-	return core.Ok(nil)
+	return safetensors.WriteSafetensors(path, tensors, tensorData)
 }
 
 // ConvertMLXtoPEFT converts an MLX LoRA adapter to HuggingFace PEFT format.

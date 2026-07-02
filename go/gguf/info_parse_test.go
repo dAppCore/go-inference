@@ -16,7 +16,7 @@ func TestInfoParse_parseGGUF_Good(t *testing.T) {
 		{Key: "general.architecture", ValueType: ValueTypeString, Value: "llama"},
 		{Key: "general.file_type", ValueType: ValueTypeUint32, Value: uint32(7)},
 		{Key: "general.is_test", ValueType: ggufValueTypeBool, Value: true},
-		{Key: "general.scale", ValueType: ggufValueTypeFloat32, Value: float32(1.5)},
+		{Key: "general.scale", ValueType: ValueTypeFloat32, Value: float32(1.5)},
 		{Key: "tokenizer.ggml.tokens", ValueType: ggufValueTypeArray, Value: ggufArraySpec{
 			ElementType: ValueTypeString,
 			Values:      []any{"a", "b", "c"},

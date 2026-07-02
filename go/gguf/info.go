@@ -45,6 +45,11 @@ var (
 	errGGUFStringTooLong = core.NewError("gguf: gguf string is unreasonably large")
 )
 
+// GGUF metadata value-type ids (the uint32 written before each metadata
+// value on the wire). The exported subset — ValueTypeUint32, ValueTypeFloat32,
+// ValueTypeString — names the types WriteFile accepts in a MetadataEntry.
+//
+//	entry := gguf.MetadataEntry{Key: "adapter.lora.alpha", ValueType: gguf.ValueTypeFloat32, Value: float32(16)}
 const (
 	ggufValueTypeUint8   = 0
 	ggufValueTypeInt8    = 1
@@ -52,7 +57,7 @@ const (
 	ggufValueTypeInt16   = 3
 	ValueTypeUint32      = 4
 	ggufValueTypeInt32   = 5
-	ggufValueTypeFloat32 = 6
+	ValueTypeFloat32     = 6
 	ggufValueTypeBool    = 7
 	ValueTypeString      = 8
 	ggufValueTypeArray   = 9
@@ -267,6 +272,18 @@ func ReadInfo(modelPath string) (Info, error) {
 	}
 
 	return info, nil
+}
+
+// ResolveFile resolves modelPath — either a .gguf file path (case-insensitive
+// suffix match) or a directory containing exactly one *.gguf — to the
+// concrete .gguf file path. A directory with zero or several candidates is
+// an error, mirroring ReadInfo's own resolution.
+//
+//	path, err := gguf.ResolveFile("/models/qwen3-4b")
+//	if err != nil { return err }
+//	info, err := gguf.ReadInfo(path)
+func ResolveFile(modelPath string) (string, error) {
+	return resolveGGUFFile(modelPath)
 }
 
 func resolveGGUFFile(modelPath string) (string, error) {

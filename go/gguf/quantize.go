@@ -8,7 +8,7 @@ import (
 
 	core "dappco.re/go"
 
-	"dappco.re/go/inference/modelmgmt"
+	"dappco.re/go/inference/safetensors"
 )
 
 // QuantizeFormat names the GGUF quantization format requested by the caller.
@@ -92,7 +92,14 @@ type denseSafetensor struct {
 	Data  []float32
 }
 
-type ggufQuantizedTensor struct {
+// Tensor is one tensor record for WriteFile: the GGUF tensor-directory name,
+// GGML tensor-type id, shape, and the already-encoded data bytes to place in
+// the file's data section. Offset is assigned by the writer (each tensor's
+// data starts at the next 32-byte-aligned offset) — caller-set values are
+// overwritten.
+//
+//	tensor := gguf.Tensor{Name: "blk.0.attn_q.weight", Type: gguf.TensorTypeQ8_0, Shape: []uint64{32}, Data: blocks}
+type Tensor struct {
 	Name   string
 	Type   uint32
 	Shape  []uint64
@@ -100,16 +107,30 @@ type ggufQuantizedTensor struct {
 	Data   []byte
 }
 
-type ggufMetadataEntry struct {
+// ggufQuantizedTensor is the historical package-internal name for Tensor,
+// kept as an alias so the quantise pipeline's tests read unchanged.
+type ggufQuantizedTensor = Tensor
+
+// MetadataEntry is one key/value pair written into a GGUF header by
+// WriteFile. ValueType names the wire type — ValueTypeString, ValueTypeUint32
+// or ValueTypeFloat32 — and Value must hold the matching Go type (uint32
+// entries also accept int).
+//
+//	entry := gguf.MetadataEntry{Key: "general.architecture", ValueType: gguf.ValueTypeString, Value: "gemma3"}
+type MetadataEntry struct {
 	Key       string
 	ValueType uint32
 	Value     any
 }
 
+// ggufMetadataEntry is the historical package-internal name for MetadataEntry,
+// kept as an alias so the quantise pipeline's tests read unchanged.
+type ggufMetadataEntry = MetadataEntry
+
 // QuantizeModelPack converts a dense safetensors model pack into a GGUF pack.
 //
 // Every source weight file is decoded fully into memory (via
-// modelmgmt.ReadSafetensors) rather than streamed — the same tradeoff the
+// safetensors.ReadSafetensors) rather than streamed — the same tradeoff the
 // merge package already makes for the pack sizes go-inference callers
 // quantise today. A chunked/streaming variant bounded to a fixed working
 // set for multi-GB sharded checkpoints is future work, not implemented
@@ -245,7 +266,7 @@ func ensureEmptyGGUFQuantizeDestination(output string) error {
 }
 
 // loadDenseSafetensors decodes every tensor in paths (in sorted-name order,
-// duplicates across shards rejected) to float32 via modelmgmt.ReadSafetensors.
+// duplicates across shards rejected) to float32 via safetensors.ReadSafetensors.
 func loadDenseSafetensors(paths []string) ([]denseSafetensor, error) {
 	if len(paths) == 0 {
 		return nil, core.NewError("gguf: no safetensors weight files available")
@@ -272,11 +293,11 @@ func loadDenseSafetensors(paths []string) ([]denseSafetensor, error) {
 // readDenseSafetensorsFile decodes every tensor in one safetensors file,
 // in sorted tensor-name order.
 func readDenseSafetensorsFile(path string) ([]denseSafetensor, error) {
-	read := modelmgmt.ReadSafetensors(path)
+	read := safetensors.ReadSafetensors(path)
 	if !read.OK {
 		return nil, core.E("QuantizeModelPack", "read safetensors "+path, quantizeGGUFResultError(read))
 	}
-	data := read.Value.(modelmgmt.SafetensorsData)
+	data := read.Value.(safetensors.SafetensorsData)
 
 	names := make([]string, 0, len(data.Tensors))
 	for name := range data.Tensors {
@@ -287,8 +308,8 @@ func readDenseSafetensorsFile(path string) ([]denseSafetensor, error) {
 	tensors := make([]denseSafetensor, 0, len(names))
 	for _, name := range names {
 		info := data.Tensors[name]
-		raw := modelmgmt.GetTensorData(info, data.Data)
-		values, err := modelmgmt.DecodeFloat32(info.Dtype, raw, safetensorsShapeElements(info.Shape))
+		raw := safetensors.GetTensorData(info, data.Data)
+		values, err := safetensors.DecodeFloat32(info.Dtype, raw, safetensorsShapeElements(info.Shape))
 		if err != nil {
 			return nil, core.E("QuantizeModelPack", "decode "+path+" tensor "+name, err)
 		}
@@ -312,8 +333,8 @@ func safetensorsShapeElements(shape []int) int {
 	return n
 }
 
-func quantizeGGUFTensors(ctx context.Context, tensors []denseSafetensor, format QuantizeFormat) ([]ggufQuantizedTensor, error) {
-	out := make([]ggufQuantizedTensor, 0, len(tensors))
+func quantizeGGUFTensors(ctx context.Context, tensors []denseSafetensor, format QuantizeFormat) ([]Tensor, error) {
+	out := make([]Tensor, 0, len(tensors))
 	for _, tensor := range tensors {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -327,16 +348,16 @@ func quantizeGGUFTensors(ctx context.Context, tensors []denseSafetensor, format 
 	return out, nil
 }
 
-func quantizeGGUFTensor(tensor denseSafetensor, format QuantizeFormat) (ggufQuantizedTensor, error) {
+func quantizeGGUFTensor(tensor denseSafetensor, format QuantizeFormat) (Tensor, error) {
 	tensorType, blockSize, _, err := ggufQuantizeLayout(format)
 	if err != nil {
-		return ggufQuantizedTensor{}, err
+		return Tensor{}, err
 	}
 	if len(tensor.Data)%blockSize != 0 {
-		return ggufQuantizedTensor{}, core.NewError(core.Sprintf("gguf: tensor %s has %d values, not divisible by GGUF block size %d", tensor.Name, len(tensor.Data), blockSize))
+		return Tensor{}, core.NewError(core.Sprintf("gguf: tensor %s has %d values, not divisible by GGUF block size %d", tensor.Name, len(tensor.Data), blockSize))
 	}
 	if len(tensor.Shape) == 0 || tensor.Shape[0]%uint64(blockSize) != 0 {
-		return ggufQuantizedTensor{}, core.NewError(core.Sprintf("gguf: tensor %s first dimension is not divisible by GGUF block size %d", tensor.Name, blockSize))
+		return Tensor{}, core.NewError(core.Sprintf("gguf: tensor %s first dimension is not divisible by GGUF block size %d", tensor.Name, blockSize))
 	}
 	var data []byte
 	switch format {
@@ -359,7 +380,7 @@ func quantizeGGUFTensor(tensor denseSafetensor, format QuantizeFormat) (ggufQuan
 	case QuantizeQ2_K:
 		data = quantizeQ2_K(tensor.Data)
 	}
-	return ggufQuantizedTensor{
+	return Tensor{
 		Name:  tensor.Name,
 		Type:  tensorType,
 		Shape: core.SliceClone(tensor.Shape),
