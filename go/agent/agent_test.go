@@ -4,6 +4,7 @@ package agent
 
 import (
 	"context"
+	"time"
 
 	core "dappco.re/go"
 	coreio "dappco.re/go/io"
@@ -18,6 +19,18 @@ import (
 // so the first matching key wins.
 type fakeTransport struct {
 	commands []fakeCmd
+
+	// copyFromCalls/copyToCalls count invocations; copyFromFailOn/copyToFailOn,
+	// when non-zero, make the call with that 1-indexed number fail instead of
+	// succeeding. This lets tests target e.g. the 2nd of two sequential
+	// CopyFrom calls (processMLXNative/processWithConversion each scp the
+	// safetensors file, then the adapter config) without a bespoke fake per
+	// scenario. Zero value never fails, so every existing caller keeps its
+	// current always-succeed behaviour.
+	copyFromCalls  int
+	copyFromFailOn int
+	copyToCalls    int
+	copyToFailOn   int
 }
 
 type fakeCmd struct {
@@ -41,8 +54,21 @@ func (f *fakeTransport) Run(_ context.Context, cmd string) core.Result {
 	return core.Fail(core.NewError(core.Concat("fakeTransport: no match for command: ", cmd)))
 }
 
-func (f *fakeTransport) CopyFrom(_ context.Context, _, _ string) core.Result { return core.Ok(nil) }
-func (f *fakeTransport) CopyTo(_ context.Context, _, _ string) core.Result   { return core.Ok(nil) }
+func (f *fakeTransport) CopyFrom(_ context.Context, _, _ string) core.Result {
+	f.copyFromCalls++
+	if f.copyFromFailOn != 0 && f.copyFromCalls == f.copyFromFailOn {
+		return core.Fail(core.NewError("fakeTransport: CopyFrom failed"))
+	}
+	return core.Ok(nil)
+}
+
+func (f *fakeTransport) CopyTo(_ context.Context, _, _ string) core.Result {
+	f.copyToCalls++
+	if f.copyToFailOn != 0 && f.copyToCalls == f.copyToFailOn {
+		return core.Fail(core.NewError("fakeTransport: CopyTo failed"))
+	}
+	return core.Ok(nil)
+}
 
 // contains is a small helper to avoid importing strings just for this.
 func contains(s, substr string) bool {
@@ -595,6 +621,15 @@ func TestAgent_Agent_Evaluate_Good(t *core.T) {
 	agent := NewAgent(nil)
 	err := agent.Evaluate(context.Background(), Checkpoint{})
 	assertResultError(t, err, "config")
+
+	// A configured agent resolves the Checkpoint target and reaches
+	// ProcessOne — the fake transport cannot produce a real adapter, so the
+	// eventual Result is still an error, but every statement between target
+	// resolution and ProcessOne's own dispatch now runs.
+	configured := NewAgent(&AgentConfig{Transport: newFakeTransport(), WorkDir: t.TempDir()})
+	got := configured.Evaluate(context.Background(), Checkpoint{ModelTag: "gemma-3-1b"})
+	core.AssertFalse(t, got.OK)
+	core.AssertNotContains(t, got.Error(), "unsupported target type")
 }
 
 func TestAgent_Agent_Evaluate_Bad(t *core.T) {
@@ -607,6 +642,156 @@ func TestAgent_Agent_Evaluate_Ugly(t *core.T) {
 	agent := NewAgent(&AgentConfig{})
 	err := agent.Evaluate(context.Background(), (*Checkpoint)(nil))
 	assertResultError(t, err, "nil checkpoint")
+}
+
+// =========================================================================
+// resolveCheckpointTarget / resolveCheckpointPath / matchCheckpointTarget /
+// equalsPathJoin — direct tests of Evaluate()'s target-resolution helpers.
+// =========================================================================
+
+func TestAgent_Agent_resolveCheckpointTarget_Good(t *core.T) {
+	agent := NewAgent(&AgentConfig{})
+
+	r := agent.resolveCheckpointTarget(context.Background(), Checkpoint{Label: "direct"})
+	requireResultOK(t, r)
+	core.AssertEqual(t, "direct", r.Value.(Checkpoint).Label)
+
+	r2 := agent.resolveCheckpointTarget(context.Background(), &Checkpoint{Label: "pointer"})
+	requireResultOK(t, r2)
+	core.AssertEqual(t, "pointer", r2.Value.(Checkpoint).Label)
+}
+
+func TestAgent_Agent_resolveCheckpointTarget_Bad(t *core.T) {
+	agent := NewAgent(&AgentConfig{})
+	r := agent.resolveCheckpointTarget(context.Background(), 3.14)
+	assertResultError(t, r, "unsupported")
+}
+
+func TestAgent_Agent_resolveCheckpointTarget_Ugly(t *core.T) {
+	// A string target delegates to resolveCheckpointPath rather than
+	// resolving directly.
+	agent := NewAgent(&AgentConfig{Transport: newFakeTransport()})
+	r := agent.resolveCheckpointTarget(context.Background(), "adapters-1b/adapter.safetensors")
+	requireResultOK(t, r)
+	core.AssertEqual(t, "adapters-1b", r.Value.(Checkpoint).Dirname)
+}
+
+func TestAgent_Agent_resolveCheckpointPath_Good(t *core.T) {
+	ft := newFakeTransport()
+	ft.On("ls -d /base/adapters-*", "/base/adapters-27b\n", nil)
+	ft.On("ls -d /base/adapters-27b/gemma-3-*", "", core.AnError)
+	ft.On("ls /base/adapters-27b/*_adapters.safetensors", "/base/adapters-27b/0001000_adapters.safetensors\n", nil)
+	agent := NewAgent(&AgentConfig{M3AdapterBase: "/base", Transport: ft})
+
+	// Exact match against a discovered checkpoint's RemoteDir wins over the
+	// path-derived fallback.
+	r := agent.resolveCheckpointPath(context.Background(), "/base/adapters-27b")
+	requireResultOK(t, r)
+	cp := r.Value.(Checkpoint)
+	core.AssertEqual(t, "/base/adapters-27b", cp.RemoteDir)
+	core.AssertEqual(t, 1000, cp.Iteration)
+}
+
+func TestAgent_Agent_resolveCheckpointPath_Bad(t *core.T) {
+	agent := NewAgent(&AgentConfig{})
+	r := agent.resolveCheckpointPath(context.Background(), "   ")
+	assertResultError(t, r, "empty checkpoint path")
+}
+
+func TestAgent_Agent_resolveCheckpointPath_Ugly(t *core.T) {
+	ft := newFakeTransport()
+	ft.On("ls -d /base/adapters-*", "/base/adapters-27b\n", nil)
+	ft.On("ls -d /base/adapters-27b/gemma-3-*", "", core.AnError)
+	ft.On("ls /base/adapters-27b/*_adapters.safetensors", "/base/adapters-27b/0001000_adapters.safetensors\n", nil)
+	agent := NewAgent(&AgentConfig{M3AdapterBase: "/base", Transport: ft})
+
+	// Target matches none of the discovered checkpoints, so resolution
+	// falls through to path-derived metadata instead of the discovery list.
+	r := agent.resolveCheckpointPath(context.Background(), "/base/adapters-99b/x_adapters.safetensors")
+	requireResultOK(t, r)
+	cp := r.Value.(Checkpoint)
+	core.AssertEqual(t, "adapters-99b", cp.Dirname)
+	core.AssertEqual(t, "x_adapters.safetensors", cp.Filename)
+
+	// A nil-cfg agent skips discovery entirely and still derives a checkpoint.
+	var bare Agent
+	r2 := bare.resolveCheckpointPath(context.Background(), "adapters-4b/x_adapters.safetensors")
+	requireResultOK(t, r2)
+	core.AssertEqual(t, "gemma-3-4b", r2.Value.(Checkpoint).ModelTag)
+
+	// An absolute path outside M3AdapterBase is not stripped, so the
+	// leading-"/" fallback reduces dirname to its basename.
+	var noBase Agent
+	r3 := noBase.resolveCheckpointPath(context.Background(), "/elsewhere/adapters-27b/x_adapters.safetensors")
+	requireResultOK(t, r3)
+	core.AssertEqual(t, "adapters-27b", r3.Value.(Checkpoint).Dirname)
+
+	// A dirname that reduces to exactly "adapters-" leaves AdapterMeta's
+	// label prefix and stem empty, exercising both fallback assignments.
+	r4 := noBase.resolveCheckpointPath(context.Background(), "adapters-")
+	requireResultOK(t, r4)
+	cp4 := r4.Value.(Checkpoint)
+	core.AssertEqual(t, "adapters-", cp4.Label)
+	core.AssertEqual(t, "adapters--capability-auto", cp4.RunID)
+}
+
+func TestAgent_matchCheckpointTarget_Good(t *core.T) {
+	checkpoints := []Checkpoint{
+		{RemoteDir: "/data/adapters-27b", Dirname: "adapters-27b"},
+		{RemoteDir: "/data/adapters-1b", Dirname: "adapters-1b"},
+	}
+	cp, ok := matchCheckpointTarget(checkpoints, "/data/adapters-1b")
+	core.AssertTrue(t, ok)
+	core.AssertEqual(t, "adapters-1b", cp.Dirname)
+
+	// Target equals RemoteDir + "/" + Filename exactly, but matches neither
+	// RemoteDir nor Dirname alone — the equalsPathJoin branch.
+	joined := []Checkpoint{{RemoteDir: "/data/adapters-4b", Filename: "0000200_adapters.safetensors", Dirname: "adapters-4b"}}
+	cp2, ok2 := matchCheckpointTarget(joined, "/data/adapters-4b/0000200_adapters.safetensors")
+	core.AssertTrue(t, ok2)
+	core.AssertEqual(t, "adapters-4b", cp2.Dirname)
+}
+
+func TestAgent_matchCheckpointTarget_Bad(t *core.T) {
+	checkpoints := []Checkpoint{{RemoteDir: "/data/adapters-27b", Dirname: "adapters-27b"}}
+	_, ok := matchCheckpointTarget(checkpoints, "/data/adapters-99b")
+	core.AssertFalse(t, ok)
+}
+
+func TestAgent_matchCheckpointTarget_Ugly(t *core.T) {
+	// Two checkpoints share a basename with neither an exact RemoteDir nor
+	// Dirname match — the ambiguous result is rejected even though
+	// candidates exist.
+	ambiguous := []Checkpoint{
+		{RemoteDir: "/a/nested/shared", Dirname: "something-else-a"},
+		{RemoteDir: "/b/other/shared", Dirname: "something-else-b"},
+	}
+	_, ok := matchCheckpointTarget(ambiguous, "shared")
+	core.AssertFalse(t, ok)
+
+	// A single unique basename match resolves even without an exact match —
+	// RemoteDir's basename misses, so the fallback checks Dirname's basename.
+	// Dirname is deliberately not itself equal to target (that would hit the
+	// exact-match branch instead), only its basename is.
+	unique := []Checkpoint{{RemoteDir: "/only/one/xyz", Dirname: "prefix/adapters-x"}}
+	cp, ok := matchCheckpointTarget(unique, "adapters-x")
+	core.AssertTrue(t, ok)
+	core.AssertEqual(t, "/only/one/xyz", cp.RemoteDir)
+}
+
+func TestAgent_equalsPathJoin_Good(t *core.T) {
+	core.AssertTrue(t, equalsPathJoin("dir/file.txt", "dir", "file.txt"))
+}
+
+func TestAgent_equalsPathJoin_Bad(t *core.T) {
+	core.AssertFalse(t, equalsPathJoin("short", "much/longer/dir", "file.txt"))
+}
+
+func TestAgent_equalsPathJoin_Ugly(t *core.T) {
+	// Same total length as "ab" + "/" + "c" but the separator position holds
+	// a different character, so the comparison must fail past the length
+	// check rather than short-circuiting on it.
+	core.AssertFalse(t, equalsPathJoin("abXc", "ab", "c"))
 }
 
 func TestAgent_Agent_ExecuteRemote_Good(t *core.T) {
@@ -629,6 +814,14 @@ func TestAgent_Agent_ExecuteRemote_Ugly(t *core.T) {
 	agent := NewAgent(&AgentConfig{})
 	r := agent.ExecuteRemote(context.Background(), "a", "b")
 	assertResultError(t, r, "expected")
+
+	// The 3-arg (host, port, command) form builds a one-shot SSHTransport
+	// from the agent's M3 credentials instead of using cfg.Transport.
+	threeArg := NewAgent(&AgentConfig{M3SSHKey: "/missing", M3User: "nobody"})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	r2 := threeArg.ExecuteRemote(ctx, "127.0.0.1", "1", "true")
+	assertResultError(t, r2)
 }
 
 func TestAgent_Agent_CollectMetrics_Good(t *core.T) {
