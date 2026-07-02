@@ -111,6 +111,17 @@ func TestChatCompletionResponse_AppendRoundTrip(t *testing.T) {
 			}},
 			Usage: ChatUsage{PromptTokens: 3, CompletionTokens: 4, TotalTokens: 7},
 		}},
+		{"multiple-choices", ChatCompletionResponse{
+			// 2+ choices exercises appendChatCompletionResponse's i>0
+			// comma-separator branch — every other case here carries
+			// exactly one choice.
+			ID: "chatcmpl-n", Object: "chat.completion", Created: 1700000000, Model: "qwen3",
+			Choices: []ChatChoice{
+				{Index: 0, Message: ChatMessage{Role: "assistant", Content: "first"}, FinishReason: "stop"},
+				{Index: 1, Message: ChatMessage{Role: "assistant", Content: "second"}, FinishReason: "stop"},
+			},
+			Usage: ChatUsage{PromptTokens: 3, CompletionTokens: 4, TotalTokens: 7},
+		}},
 		{"with-thought", ChatCompletionResponse{
 			ID: "chatcmpl-x", Object: "chat.completion", Created: 1700000000, Model: "qwen3",
 			Choices: []ChatChoice{{

@@ -34,6 +34,16 @@ func TestRerankResponse_AppendRoundTrip(t *testing.T) {
 				Labels: map[string]string{"locale": "en"},
 			}},
 		}},
+		{"with-multiple-labels", RerankResponse{
+			Object: "list", Model: "qwen3-rerank",
+			Results: []inference.RerankScore{{
+				Index: 0, Score: 0.95, Text: "x",
+				// 2+ labels exercises the comma-separator branch
+				// between label entries (appendRerankScore) and the
+				// per-label size-accumulation loop (rerankResponseSize).
+				Labels: map[string]string{"locale": "en", "tier": "hot"},
+			}},
+		}},
 		{"zero-score", RerankResponse{
 			Object: "list", Model: "qwen3-rerank",
 			Results: []inference.RerankScore{{Index: 0, Text: "match"}},
@@ -72,5 +82,50 @@ func TestRerankResponse_AppendRoundTrip(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRerankResponseSize_Good pins the size estimator against the
+// actual encoded length for a fully-populated result set (multiple
+// results, one with labels) — the single-allocation contract every
+// *Size estimator in this package exists to guarantee.
+func TestRerankResponseSize_Good(t *testing.T) {
+	resp := RerankResponse{
+		Object: "list", Model: "qwen3-rerank",
+		Results: []inference.RerankScore{
+			{Index: 0, Score: 0.91, Text: "alpha"},
+			{Index: 1, Score: 0.82, Text: "beta", Labels: map[string]string{"locale": "en", "tier": "hot"}},
+		},
+	}
+	buf := make([]byte, 0, rerankResponseSize(resp))
+	got := appendRerankResponse(buf, resp)
+	if len(got) > cap(buf) {
+		t.Fatalf("rerankResponseSize(%+v) = %d, actual encoded length %d exceeds capacity", resp, rerankResponseSize(resp), len(got))
+	}
+}
+
+// TestRerankResponseSize_Bad covers the empty-results floor.
+func TestRerankResponseSize_Bad(t *testing.T) {
+	resp := RerankResponse{Object: "list", Model: "qwen3-rerank"}
+	buf := make([]byte, 0, rerankResponseSize(resp))
+	got := appendRerankResponse(buf, resp)
+	if len(got) > cap(buf) {
+		t.Fatalf("rerankResponseSize(empty) = %d, actual encoded length %d exceeds capacity", rerankResponseSize(resp), len(got))
+	}
+}
+
+// TestRerankResponseSize_Ugly drives a zero-score, no-labels result
+// through the estimator — Score==0 and empty Labels both skip their
+// respective size-accumulation branches, the complement of the Good
+// case above.
+func TestRerankResponseSize_Ugly(t *testing.T) {
+	resp := RerankResponse{
+		Object: "list", Model: "qwen3-rerank",
+		Results: []inference.RerankScore{{Index: 0, Text: "match"}},
+	}
+	buf := make([]byte, 0, rerankResponseSize(resp))
+	got := appendRerankResponse(buf, resp)
+	if len(got) > cap(buf) {
+		t.Fatalf("rerankResponseSize(zero-score) = %d, actual encoded length %d exceeds capacity", rerankResponseSize(resp), len(got))
 	}
 }

@@ -4,6 +4,7 @@ package openai
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"dappco.re/go/inference"
@@ -38,6 +39,27 @@ func TestResponse_AppendRoundTrip(t *testing.T) {
 				Content: []ResponseOutputText{{Type: "output_text", Text: "quote \" tab\t"}},
 			}},
 			Usage: ResponseUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2},
+		}},
+		{"multiple-output-and-content", Response{
+			// 2+ Output messages exercises appendResponse's i>0
+			// comma-separator branch; 2+ Content items per message
+			// exercises appendResponseOutputMessage's own i>0 branch —
+			// every other case above carries exactly one of each.
+			ID: "resp_m", Object: "response", Created: 1700000000, Model: "qwen3",
+			Output: []ResponseOutputMessage{
+				{
+					Type: "message", Role: "assistant",
+					Content: []ResponseOutputText{
+						{Type: "output_text", Text: "part one"},
+						{Type: "output_text", Text: "part two"},
+					},
+				},
+				{
+					ID: "msg_2", Type: "message", Role: "assistant",
+					Content: []ResponseOutputText{{Type: "output_text", Text: "second message"}},
+				},
+			},
+			Usage: ResponseUsage{InputTokens: 5, OutputTokens: 6, TotalTokens: 11},
 		}},
 	}
 	for _, tc := range cases {
@@ -123,5 +145,96 @@ func TestResponseStreamEvent_AppendRoundTrip(t *testing.T) {
 				t.Fatalf("thought: got %q, want %q", *back.Thought, *tc.in.Thought)
 			}
 		})
+	}
+}
+
+// TestResponseSize_Good pins responseSize's single-allocation
+// contract for a fully-populated Response (multi-message output,
+// multi-part content, a thought).
+func TestResponseSize_Good(t *testing.T) {
+	thought := "let me think"
+	resp := Response{
+		ID: "resp_x", Object: "response", Created: 1700000000, Model: "qwen3",
+		Output: []ResponseOutputMessage{
+			{ID: "msg_1", Type: "message", Role: "assistant", Content: []ResponseOutputText{
+				{Type: "output_text", Text: "part one"},
+				{Type: "output_text", Text: "part two"},
+			}},
+			{Type: "message", Role: "assistant", Content: []ResponseOutputText{{Type: "output_text", Text: "second"}}},
+		},
+		Usage:   ResponseUsage{InputTokens: 5, OutputTokens: 6, TotalTokens: 11},
+		Thought: &thought,
+	}
+	buf := make([]byte, 0, responseSize(resp))
+	got := appendResponse(buf, resp)
+	if len(got) > cap(buf) {
+		t.Fatalf("responseSize(%+v) = %d, actual encoded length %d exceeds capacity", resp, responseSize(resp), len(got))
+	}
+}
+
+// TestResponseSize_Bad covers the empty-output floor (no messages, no
+// thought).
+func TestResponseSize_Bad(t *testing.T) {
+	resp := Response{ID: "resp_x", Object: "response", Created: 1700000000, Model: "qwen3"}
+	buf := make([]byte, 0, responseSize(resp))
+	got := appendResponse(buf, resp)
+	if len(got) > cap(buf) {
+		t.Fatalf("responseSize(empty) = %d, actual encoded length %d exceeds capacity", responseSize(resp), len(got))
+	}
+}
+
+// TestResponseSize_Ugly drives escape-heavy content through the
+// estimator — the estimate counts raw len(), not escaped length, so
+// this pins that append still produces correct, round-trippable
+// output even when the estimate under-counts.
+func TestResponseSize_Ugly(t *testing.T) {
+	resp := NewTextResponse("resp_x", "qwen3", strings.Repeat("\"quoted\"\n\t", 64), inference.GenerateMetrics{PromptTokens: 1, GeneratedTokens: 1})
+	buf := appendResponse(make([]byte, 0, responseSize(resp)), resp)
+	var back Response
+	if err := json.Unmarshal(buf, &back); err != nil {
+		t.Fatalf("Unmarshal(%s): %v", buf, err)
+	}
+	if back.Output[0].Content[0].Text != resp.Output[0].Content[0].Text {
+		t.Fatalf("round-trip mismatch: got %q, want %q", back.Output[0].Content[0].Text, resp.Output[0].Content[0].Text)
+	}
+}
+
+// TestResponseStreamEventSize_Good pins the estimator's single-
+// allocation contract for the "response.completed" shape — the
+// Response-embedding case the doc comment calls load-bearing.
+func TestResponseStreamEventSize_Good(t *testing.T) {
+	thought := "thinking"
+	resp := NewTextResponse("resp_x", "qwen3", "answer", inference.GenerateMetrics{PromptTokens: 3, GeneratedTokens: 4})
+	event := ResponseStreamEvent{Type: "response.completed", Response: &resp, Delta: "answer", Thought: &thought}
+	buf := make([]byte, 0, responseStreamEventSize(event))
+	got := appendResponseStreamEvent(buf, event)
+	if len(got) > cap(buf) {
+		t.Fatalf("responseStreamEventSize(%+v) = %d, actual encoded length %d exceeds capacity", event, responseStreamEventSize(event), len(got))
+	}
+}
+
+// TestResponseStreamEventSize_Bad covers the type-only floor (no
+// response, delta, or thought).
+func TestResponseStreamEventSize_Bad(t *testing.T) {
+	event := ResponseStreamEvent{Type: "response.started"}
+	buf := make([]byte, 0, responseStreamEventSize(event))
+	got := appendResponseStreamEvent(buf, event)
+	if len(got) > cap(buf) {
+		t.Fatalf("responseStreamEventSize(type-only) = %d, actual encoded length %d exceeds capacity", responseStreamEventSize(event), len(got))
+	}
+}
+
+// TestResponseStreamEventSize_Ugly drives an escape-heavy delta
+// through the estimator, mirroring TestResponseSize_Ugly's
+// round-trip-correctness-over-exact-size-match check.
+func TestResponseStreamEventSize_Ugly(t *testing.T) {
+	event := ResponseStreamEvent{Type: "response.output_text.delta", Delta: strings.Repeat("\"quoted\"\n\t", 64)}
+	buf := appendResponseStreamEvent(make([]byte, 0, responseStreamEventSize(event)), event)
+	var back ResponseStreamEvent
+	if err := json.Unmarshal(buf, &back); err != nil {
+		t.Fatalf("Unmarshal(%s): %v", buf, err)
+	}
+	if back.Delta != event.Delta {
+		t.Fatalf("round-trip mismatch: got %q, want %q", back.Delta, event.Delta)
 	}
 }

@@ -5,6 +5,7 @@ package openai
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"iter"
 	"net/http/httptest"
 	"strings"
@@ -80,6 +81,128 @@ func TestChatMessage_DecodeRequest_ContentParts_Bad(t *testing.T) {
 		if _, err := DecodeRequest(strings.NewReader(body)); err == nil {
 			t.Fatalf("%s: decode accepted bad content", name)
 		}
+	}
+}
+
+// TestChatMessage_DecodeRequest_ContentParts_Bad_TooManyImages covers
+// the maxImagesPerRequest cap — one part over the limit must be
+// rejected before decoding it.
+func TestChatMessage_DecodeRequest_ContentParts_Bad_TooManyImages(t *testing.T) {
+	url := imageDataURL("x")
+	var parts strings.Builder
+	for i := 0; i < maxImagesPerRequest+1; i++ {
+		if i > 0 {
+			parts.WriteByte(',')
+		}
+		parts.WriteString(`{"type":"image_url","image_url":{"url":"` + url + `"}}`)
+	}
+	body := `{"model":"m","messages":[{"role":"user","content":[` + parts.String() + `]}]}`
+
+	if _, err := DecodeRequest(strings.NewReader(body)); err == nil {
+		t.Fatal("DecodeRequest() accepted a content array over the per-request image cap")
+	}
+}
+
+// TestChatMessage_UnmarshalJSON_Good_Bad exercises ChatMessage's own
+// UnmarshalJSON directly via encoding/json.Unmarshal (rather than
+// through DecodeRequest/parseChatMessage — the hand-rolled top-level
+// walker in unmarshal.go never calls this method; it is a separate
+// json.Unmarshaler entry point for anything that decodes a ChatMessage
+// standalone, e.g. a container type outside this package's own
+// request shape).
+func TestChatMessage_UnmarshalJSON_Good_Bad(t *testing.T) {
+	var empty ChatMessage
+	if err := json.Unmarshal([]byte(`{"role":"user"}`), &empty); err != nil {
+		t.Fatalf("Unmarshal(no content field) error = %v", err)
+	}
+	if empty.Content != "" || empty.Images != nil {
+		t.Fatalf("Unmarshal(no content field) = %+v, want zero content/images", empty)
+	}
+
+	var nulled ChatMessage
+	if err := json.Unmarshal([]byte(`{"role":"user","content":null}`), &nulled); err != nil {
+		t.Fatalf("Unmarshal(content:null) error = %v", err)
+	}
+	if nulled.Content != "" {
+		t.Fatalf("Unmarshal(content:null) = %+v, want empty content", nulled)
+	}
+
+	var stringContent ChatMessage
+	if err := json.Unmarshal([]byte(`{"role":"user","content":"hello"}`), &stringContent); err != nil {
+		t.Fatalf("Unmarshal(string content) error = %v", err)
+	}
+	if stringContent.Content != "hello" {
+		t.Fatalf("Unmarshal(string content) = %+v, want content=hello", stringContent)
+	}
+
+	var arrayContent ChatMessage
+	in := `{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}`
+	if err := json.Unmarshal([]byte(in), &arrayContent); err != nil {
+		t.Fatalf("Unmarshal(array content) error = %v", err)
+	}
+	if arrayContent.Content != "a\nb" {
+		t.Fatalf("Unmarshal(array content) = %+v, want joined text", arrayContent)
+	}
+
+	cases := map[string]string{
+		// "42" is syntactically valid top-level JSON (so encoding/json's
+		// whole-document checkValid pass lets it through to our custom
+		// UnmarshalJSON), but is the wrong shape for the {role,content}
+		// wire struct this method decodes into.
+		"outer-wrong-shape":  `42`,
+		"content-wrong-type": `{"role":"user","content":42}`,
+		// Syntactically valid (42 is a legal JSON number), but
+		// chatContentPart.Type is a string field — the content-part
+		// array's own core.JSONUnmarshal call fails, distinct from the
+		// parseChatMessage hand-rolled walker's equivalent branch
+		// (unmarshal.go), which this method never calls.
+		"content-array-element-wrong-type": `{"role":"user","content":[{"type":42}]}`,
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			var msg ChatMessage
+			if err := json.Unmarshal([]byte(in), &msg); err == nil {
+				t.Fatalf("Unmarshal(%q) returned nil error", in)
+			}
+		})
+	}
+}
+
+// TestTrimJSONSpace_Good_Bad_Ugly pins the whitespace-skip contract
+// used ahead of ChatMessage's content-shape sniff.
+func TestTrimJSONSpace_Good_Bad_Ugly(t *testing.T) {
+	if got := trimJSONSpace([]byte(`  "x"`)); string(got) != `"x"` {
+		t.Fatalf("trimJSONSpace(leading spaces) = %q", got)
+	}
+	if got := trimJSONSpace([]byte("\t\n\r[1]")); string(got) != "[1]" {
+		t.Fatalf("trimJSONSpace(tab/newline/CR) = %q", got)
+	}
+	if got := trimJSONSpace(nil); got != nil {
+		t.Fatalf("trimJSONSpace(nil) = %v, want nil", got)
+	}
+	if got := trimJSONSpace([]byte("   ")); got != nil {
+		t.Fatalf("trimJSONSpace(all whitespace) = %v, want nil", got)
+	}
+}
+
+// TestDecodeImageDataURL_Bad_EmptyPayload covers the
+// decodes-to-zero-bytes rejection — a syntactically valid empty
+// base64 payload after the comma.
+func TestDecodeImageDataURL_Bad_EmptyPayload(t *testing.T) {
+	if _, err := decodeImageDataURL("data:image/png;base64,"); err == nil {
+		t.Fatal("decodeImageDataURL(empty payload) error = nil, want empty-payload rejection")
+	}
+}
+
+// TestDecodeImageDataURL_Ugly_OversizedPayloadRejectedBeforeDecoding
+// covers the pre-decode length guard — an ENCODED payload longer than
+// the cap must be rejected without ever calling into the base64
+// decoder (guards against a decode-bomb allocating the full decoded
+// size for a payload that was going to be rejected anyway).
+func TestDecodeImageDataURL_Ugly_OversizedPayloadRejectedBeforeDecoding(t *testing.T) {
+	oversized := "data:image/png;base64," + strings.Repeat("A", (maxDecodedImageBytes/3+1)*4+1)
+	if _, err := decodeImageDataURL(oversized); err == nil {
+		t.Fatal("decodeImageDataURL(oversized) error = nil, want cap rejection")
 	}
 }
 

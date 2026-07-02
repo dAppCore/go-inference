@@ -10,6 +10,83 @@ import (
 	"dappco.re/go/inference"
 )
 
+// erroringReader fails every Read — exercises DecodeRequest's
+// io.ReadAll error branch without any real network I/O.
+type erroringReader struct{}
+
+func (erroringReader) Read([]byte) (int, error) {
+	return 0, errRead
+}
+
+// TestOpenAI_DecodeRequest_Bad covers the nil-body, read-error, and
+// malformed-JSON rejections.
+func TestOpenAI_DecodeRequest_Bad(t *testing.T) {
+	if _, err := DecodeRequest(nil); err == nil {
+		t.Fatal("DecodeRequest(nil) error = nil, want request-body-nil failure")
+	}
+	if _, err := DecodeRequest(erroringReader{}); err == nil {
+		t.Fatal("DecodeRequest(erroring reader) error = nil, want read failure")
+	}
+	if _, err := DecodeRequest(strings.NewReader(`{`)); err == nil {
+		t.Fatal("DecodeRequest(malformed json) error = nil, want decode failure")
+	}
+}
+
+// TestOpenAI_ValidateRequest_Bad drives every rejection branch:
+// missing model, empty messages, an unrecognised role, and each
+// sampling-field out-of-range case.
+func TestOpenAI_ValidateRequest_Bad(t *testing.T) {
+	badTemp := float32(3)
+	badTopP := float32(-0.1)
+	badTopK := -1
+	badMaxTokens := -1
+	validMsgs := []ChatMessage{{Role: "user", Content: "hi"}}
+
+	cases := []struct {
+		name string
+		req  ChatCompletionRequest
+	}{
+		{"model-empty", ChatCompletionRequest{Messages: validMsgs}},
+		{"messages-empty", ChatCompletionRequest{Model: "m"}},
+		{"role-invalid", ChatCompletionRequest{Model: "m", Messages: []ChatMessage{{Role: "bogus", Content: "hi"}}}},
+		{"temperature-out-of-range", ChatCompletionRequest{Model: "m", Messages: validMsgs, Temperature: &badTemp}},
+		{"top_p-out-of-range", ChatCompletionRequest{Model: "m", Messages: validMsgs, TopP: &badTopP}},
+		{"top_k-negative", ChatCompletionRequest{Model: "m", Messages: validMsgs, TopK: &badTopK}},
+		{"max_tokens-negative", ChatCompletionRequest{Model: "m", Messages: validMsgs, MaxTokens: &badMaxTokens}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateRequest(tc.req); err == nil {
+				t.Fatalf("ValidateRequest(%+v) error = nil, want rejection", tc.req)
+			}
+		})
+	}
+}
+
+// TestOpenAI_ValidateRequest_Good covers every accepted role — the
+// Bad table only ever exercises "user"; the others (system, developer,
+// assistant, tool) share the same switch statement but need their own
+// hit to mark that case arm covered.
+func TestOpenAI_ValidateRequest_Good(t *testing.T) {
+	for _, role := range []string{"system", "developer", "user", "assistant", "tool"} {
+		t.Run(role, func(t *testing.T) {
+			req := ChatCompletionRequest{Model: "m", Messages: []ChatMessage{{Role: role, Content: "hi"}}}
+			if err := ValidateRequest(req); err != nil {
+				t.Fatalf("ValidateRequest(role=%s) error = %v", role, err)
+			}
+		})
+	}
+}
+
+// TestOpenAI_NormalizeStopSequences_Bad covers the empty-after-trim
+// rejection.
+func TestOpenAI_NormalizeStopSequences_Bad(t *testing.T) {
+	_, err := NormalizeStopSequences(StopList{"END", "   "})
+	if err == nil || !strings.Contains(err.Error(), "stop") {
+		t.Fatalf("NormalizeStopSequences() error = %v, want stop-sequence validation failure", err)
+	}
+}
+
 func TestOpenAI_DecodeRequest_Good_StopStringAndDefaults(t *testing.T) {
 	body := strings.NewReader(`{"model":"qwen","messages":[{"role":"user","content":"hi"}],"stop":"END"}`)
 
