@@ -5,6 +5,7 @@ package filestore
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	core "dappco.re/go"
@@ -281,5 +282,102 @@ func TestFileStore_Ugly_CancelledContext(t *testing.T) {
 	}
 	if _, err := store.Resolve(context.Background(), 1); !core.Is(err, state.ErrChunkNotFound) {
 		t.Fatalf("Resolve(after cancelled put) error = %v, want missing chunk", err)
+	}
+}
+
+func TestCreate_Bad_CancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := Create(ctx, core.PathJoin(t.TempDir(), "cancelled-create.mvlog")); !core.Is(err, context.Canceled) {
+		t.Fatalf("Create(cancelled) error = %v, want context.Canceled", err)
+	}
+}
+
+func TestCreate_Bad_MkdirAllParentComponentIsFile(t *testing.T) {
+	dir := t.TempDir()
+	blocker := core.PathJoin(dir, "blocker")
+	if result := core.WriteFile(blocker, []byte("not a directory"), 0o600); !result.OK {
+		t.Fatalf("WriteFile(blocker) error = %s", result.Error())
+	}
+	path := core.PathJoin(blocker, "sub", "store.mvlog")
+	if _, err := Create(context.Background(), path); err == nil {
+		t.Fatal("Create(parent component is a file) error = nil")
+	}
+}
+
+func TestCreate_Bad_PermissionBlockedParent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits do not apply on windows")
+	}
+	dir := t.TempDir()
+	blocked := core.PathJoin(dir, "blocked")
+	if result := core.MkdirAll(blocked, 0o755); !result.OK {
+		t.Fatalf("MkdirAll(blocked) error = %s", result.Error())
+	}
+	if result := core.Chmod(blocked, 0o500); !result.OK {
+		t.Fatalf("Chmod(blocked) error = %s", result.Error())
+	}
+	// Restore write permission so t.TempDir()'s own cleanup can remove
+	// the tree regardless of how the assertion below turns out.
+	defer core.Chmod(blocked, 0o755)
+
+	path := core.PathJoin(blocked, "sub", "store.mvlog")
+	_, err := Create(context.Background(), path)
+	if err == nil {
+		t.Skip("Create() succeeded despite a permission-blocked parent — likely running as root")
+	}
+}
+
+func TestCreate_Bad_PathIsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Create(context.Background(), dir); err == nil {
+		t.Fatal("Create(directory path) error = nil, want open-file error")
+	}
+}
+
+func TestOpen_Bad_NonExistentFile(t *testing.T) {
+	path := core.PathJoin(t.TempDir(), "does-not-exist.mvlog")
+	if _, err := Open(context.Background(), path); err == nil {
+		t.Fatal("Open(nonexistent) error = nil")
+	}
+}
+
+func TestOpenRegionWithSegmentAlias_Bad_CancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	path := core.PathJoin(t.TempDir(), "irrelevant.mvlog")
+	if _, err := OpenRegionWithSegmentAlias(ctx, path, 0, 0, ""); !core.Is(err, context.Canceled) {
+		t.Fatalf("OpenRegionWithSegmentAlias(cancelled) error = %v, want context.Canceled", err)
+	}
+}
+
+func TestOpenRegionWithSegmentAlias_Bad_NegativeOffsetOrBytes(t *testing.T) {
+	path := core.PathJoin(t.TempDir(), "irrelevant.mvlog")
+	if _, err := OpenRegionWithSegmentAlias(context.Background(), path, -1, 0, ""); err == nil {
+		t.Fatal("OpenRegionWithSegmentAlias(negative offset) error = nil")
+	}
+	if _, err := OpenRegionWithSegmentAlias(context.Background(), path, 0, -1, ""); err == nil {
+		t.Fatal("OpenRegionWithSegmentAlias(negative bytes) error = nil")
+	}
+}
+
+func TestStore_Path_Good_NilReceiver(t *testing.T) {
+	var store *Store
+	if got := store.Path(); got != "" {
+		t.Fatalf("Path() = %q, want empty", got)
+	}
+}
+
+func TestStore_ChunkCount_Good_NilReceiver(t *testing.T) {
+	var store *Store
+	if got := store.ChunkCount(); got != 0 {
+		t.Fatalf("ChunkCount() = %d, want 0", got)
+	}
+}
+
+func TestStore_Close_Good_NilReceiver(t *testing.T) {
+	var store *Store
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() = %v, want nil", err)
 	}
 }

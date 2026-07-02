@@ -106,3 +106,33 @@ func TestEncodeRecordMeta_RoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestDecodeRecordHeader_Good_RoundTripsEncodeRecordHeader(t *testing.T) {
+	var buf [recordHeaderLen]byte
+	encodeRecordHeader(buf[:], 7, 128, 12)
+	got, err := decodeRecordHeader(buf[:])
+	if err != nil {
+		t.Fatalf("decodeRecordHeader() error = %v", err)
+	}
+	if got.chunkID != 7 || got.payloadSize != 128 || got.metaSize != 12 {
+		t.Fatalf("decodeRecordHeader() = %+v, want {chunkID:7 payloadSize:128 metaSize:12}", got)
+	}
+}
+
+func TestDecodeRecordHeader_Bad_WrongLength(t *testing.T) {
+	if _, err := decodeRecordHeader(make([]byte, recordHeaderLen-1)); err == nil {
+		t.Fatal("decodeRecordHeader(short) error = nil")
+	}
+	if _, err := decodeRecordHeader(make([]byte, recordHeaderLen+1)); err == nil {
+		t.Fatal("decodeRecordHeader(long) error = nil")
+	}
+}
+
+func TestDecodeRecordHeader_Bad_InvalidMagic(t *testing.T) {
+	var buf [recordHeaderLen]byte
+	encodeRecordHeader(buf[:], 1, 1, 0)
+	buf[0] = 'X' // corrupt the magic prefix
+	if _, err := decodeRecordHeader(buf[:]); err == nil {
+		t.Fatal("decodeRecordHeader(bad magic) error = nil")
+	}
+}
