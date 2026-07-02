@@ -10,6 +10,38 @@ import (
 
 var errPackMetadataCopy = core.NewError("merge: model pack metadata copy failed")
 
+// SamePath reports whether a and b resolve to the same absolute path —
+// the guard engines use to refuse merging a pack onto itself. Exported
+// so drivers share one resolution rule instead of private copies.
+//
+//	if merge.SamePath(source.Root, outputRoot) { /* refuse */ }
+func SamePath(a, b string) bool { return samePath(a, b) }
+
+// SamePathResolved is the per-source-loop variant of SamePath where the
+// right-hand side is already absolute — saves a resolution per iteration.
+//
+//	absOut, _ := core.PathAbs(outputRoot).Value.(string)
+//	for _, s := range sources { if merge.SamePathResolved(s.Root, absOut) { /* refuse */ } }
+func SamePathResolved(a, absB string) bool { return samePathResolved(a, absB) }
+
+// CopyModelPackMetadata copies sourceRoot's metadata sidecars
+// (config.json, tokenizer files, chat templates — the .json/.model/.txt
+// set, minus weight-layout files and prior-merge provenance) into
+// outputRoot. A missing or unreadable source directory is not fatal:
+// the merge still produces valid weights without sibling metadata.
+//
+//	if err := merge.CopyModelPackMetadata(primary.Root, outputRoot); err != nil { return err }
+func CopyModelPackMetadata(sourceRoot, outputRoot string) error {
+	return copyModelPackMetadata(sourceRoot, outputRoot)
+}
+
+// HashFile streams path through SHA-256 and returns the hex digest —
+// the tokenizer-compatibility check engines run once per source pack.
+// Streamed, not whole-file-read: BPE merge tables run to several MB.
+//
+//	digest, err := merge.HashFile(core.PathJoin(root, "tokenizer.json"))
+func HashFile(path string) (string, error) { return hashFile(path) }
+
 // samePath reports whether a and b resolve to the same absolute path.
 func samePath(a, b string) bool {
 	absA := a
