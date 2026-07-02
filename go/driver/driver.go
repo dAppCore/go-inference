@@ -50,14 +50,22 @@ const (
 const driverGracePeriod = 10 * time.Second
 
 // Readiness + crash-restart policy.
-const (
+var (
 	// driverReadyTimeout bounds how long Serve waits for the driver to answer
 	// /v1/health after spawn. The driver eager-binds its listener before loading
 	// weights, so readiness here means "accepting requests" — the first inference
 	// triggers the lazy model load — and is reached well inside this window.
+	//
+	// A var (not const) purely so hermetic tests can shrink it to exercise the
+	// spawned-but-never-ready path without a real 30s wait; production code
+	// never assigns it, so live behaviour is unchanged.
 	driverReadyTimeout = 30 * time.Second
 	// readyPollInterval is the gap between /v1/health probes during the wait.
+	// Also a var for the same test-only reason as driverReadyTimeout.
 	readyPollInterval = 200 * time.Millisecond
+)
+
+const (
 	// maxRestarts is how many crash-restarts a runtime gets within restartWindow
 	// before the host gives up and leaves it down (restart-storm guard).
 	maxRestarts = 3
