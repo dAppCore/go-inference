@@ -70,14 +70,22 @@ const (
 type Logits [][][]float32
 
 // BatchConfig controls how a driver's tokenizer batches dataset samples
-// for distillation. Ported from go-mlx's mlx/dataset.BatchConfig, which
-// held exactly these four scalar fields and carried no engine dependency.
-type BatchConfig struct {
-	BatchSize       int  `json:"batch_size,omitempty"`
-	MaxSeqLen       int  `json:"max_seq_len,omitempty"`
-	SequencePacking bool `json:"sequence_packing,omitempty"`
-	NoEOS           bool `json:"no_eos,omitempty"`
-}
+// for distillation. An alias for dataset.BatchConfig: none of its four
+// fields (batch size, max sequence length, packing, EOS handling) are
+// distillation-specific — they are the same generic batch shape every
+// training/eval/distillation driver needs — so the canonical definition
+// lives in dataset and this name stays as a compatibility spelling within
+// this package. Every existing distill.BatchConfig{...} literal and the
+// Config.Batch field below keep working unchanged.
+//
+//	cfg := distill.BatchConfig{BatchSize: 8}
+type BatchConfig = dataset.BatchConfig
+
+// Compile-time proof BatchConfig is a genuine alias for dataset.BatchConfig
+// rather than a look-alike type that merely shares its fields — a value of
+// one only assigns to a variable of the other without conversion when both
+// names denote the identical type.
+var _ dataset.BatchConfig = BatchConfig{}
 
 // Config controls native knowledge distillation over dataset streams.
 // BatchLoss itself only consumes Temperature and Loss; the remaining
