@@ -63,6 +63,16 @@ func addServeCommand(c *core.Core, path string) core.Result {
 	})
 }
 
+// notifyServeContext returns a context cancelled on SIGINT/SIGTERM, plus its
+// stop function. Package-level so tests can substitute a context they
+// control directly (e.g. context.WithCancel) and drive shutdown by calling
+// cancel() instead of sending the test process a real OS signal. Default
+// behaviour is unchanged — production always gets the real signal.NotifyContext
+// wiring below.
+var notifyServeContext = func(parent context.Context) (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
+}
+
 // RunServe starts the lab dashboard HTTP server.
 func RunServe(options CommandOptions) core.Result {
 	if r := ValidateBindAddress(options.Bind, options.AllowRemote); !r.OK {
@@ -74,7 +84,7 @@ func RunServe(options CommandOptions) core.Result {
 		return r
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := notifyServeContext(context.Background())
 	defer stop()
 
 	server := &http.Server{
