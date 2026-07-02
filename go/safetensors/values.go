@@ -45,14 +45,14 @@ func DecodeFloat32(dtype string, raw []byte, elements int) ([]float32, error) {
 			return nil, errDecodeF16PayloadMismatch
 		}
 		for i := range values {
-			values[i] = float16ToFloat32(binary.LittleEndian.Uint16(raw[i*2:]))
+			values[i] = Float16ToFloat32(binary.LittleEndian.Uint16(raw[i*2:]))
 		}
 	case "BF16":
 		if len(raw) != elements*2 {
 			return nil, errDecodeBF16PayloadMismatch
 		}
 		for i := range values {
-			values[i] = bfloat16ToFloat32(binary.LittleEndian.Uint16(raw[i*2:]))
+			values[i] = BFloat16ToFloat32(binary.LittleEndian.Uint16(raw[i*2:]))
 		}
 	case "F64":
 		if len(raw) != elements*8 {
@@ -80,7 +80,9 @@ func EncodeFloat32(values []float32) []byte {
 }
 
 // float16ToFloat32 converts one IEEE 754 binary16 bit pattern to float32,
-// handling subnormals, infinities, and NaN.
+// handling subnormals, infinities, and NaN. The bit-twiddling engine behind
+// the exported Float16ToFloat32 — see that function for the documented,
+// tested public contract.
 func float16ToFloat32(bits uint16) float32 {
 	sign := uint32(bits>>15) & 0x1
 	exp := int((bits >> 10) & 0x1f)
@@ -105,9 +107,36 @@ func float16ToFloat32(bits uint16) float32 {
 	return math.Float32frombits((sign << 31) | (uint32(exp) << 23) | (frac << 13))
 }
 
+// Float16ToFloat32 converts one IEEE 754 binary16 (half precision) bit
+// pattern to float32, handling zero, subnormals, infinities, and NaN.
+// safetensors stores "F16" tensors in this format; DecodeFloat32 upcasts
+// every element of an "F16" tensor through this exact conversion, so
+// calling it directly reproduces DecodeFloat32's per-element math for a
+// single value (e.g. to inspect one weight without decoding a whole
+// tensor).
+//
+//	f := safetensors.Float16ToFloat32(0x3C00) // 1.0
+func Float16ToFloat32(bits uint16) float32 {
+	return float16ToFloat32(bits)
+}
+
 // bfloat16ToFloat32 converts one bfloat16 bit pattern to float32. bf16 is
 // defined as the high 16 bits of a float32, so the conversion is a widening
-// left-shift; math.Float32frombits keeps NaN payloads and Inf exact.
+// left-shift; math.Float32frombits keeps NaN payloads and Inf exact. The
+// engine behind the exported BFloat16ToFloat32 — see that function for the
+// documented, tested public contract.
 func bfloat16ToFloat32(bits uint16) float32 {
 	return math.Float32frombits(uint32(bits) << 16)
+}
+
+// BFloat16ToFloat32 converts one bfloat16 (brain float16) bit pattern to
+// float32. bf16 is defined as the high 16 bits of a float32, so the
+// conversion is an exact widening left-shift — no precision is gained or
+// lost, and NaN payloads / infinities survive unchanged. safetensors
+// stores "BF16" tensors in this format; DecodeFloat32 upcasts every
+// element of a "BF16" tensor through this exact conversion.
+//
+//	f := safetensors.BFloat16ToFloat32(0x3F80) // 1.0
+func BFloat16ToFloat32(bits uint16) float32 {
+	return bfloat16ToFloat32(bits)
 }

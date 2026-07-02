@@ -4,6 +4,7 @@ package safetensors
 
 import (
 	"encoding/binary"
+	"math"
 
 	core "dappco.re/go"
 )
@@ -108,4 +109,105 @@ func TestValues_EncodeFloat32_Ugly(t *core.T) {
 	decoded, err := DecodeFloat32("F32", raw, len(values))
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, values, decoded)
+}
+
+// --- Float16ToFloat32 ---
+
+// Good: ordinary positive and negative normal values decode exactly —
+// known-good IEEE 754 binary16 bit patterns, also exercised indirectly via
+// DecodeFloat32("F16", ...) above.
+func TestValues_Float16ToFloat32_Good(t *core.T) {
+	core.AssertEqual(t, float32(1), Float16ToFloat32(0x3C00))
+	core.AssertEqual(t, float32(-1), Float16ToFloat32(0xBC00))
+	core.AssertEqual(t, float32(2), Float16ToFloat32(0x4000))
+}
+
+// Bad: zero and negative zero both decode to a numerically-zero float32,
+// with the sign bit preserved — 0x8000 must not collapse to +0.0.
+func TestValues_Float16ToFloat32_Bad(t *core.T) {
+	pos := Float16ToFloat32(0x0000)
+	neg := Float16ToFloat32(0x8000)
+	core.AssertEqual(t, float32(0), pos)
+	core.AssertEqual(t, float32(0), neg)
+	if math.Signbit(float64(pos)) {
+		t.Fatalf("Float16ToFloat32(0x0000) = %v, want +0.0", pos)
+	}
+	if !math.Signbit(float64(neg)) {
+		t.Fatalf("Float16ToFloat32(0x8000) = %v, want -0.0", neg)
+	}
+}
+
+// Ugly: subnormals, infinities, and NaN — the bit-pattern families that
+// drive float16ToFloat32's non-default switch branches.
+func TestValues_Float16ToFloat32_Ugly(t *core.T) {
+	// Smallest positive/negative subnormal: +/-2^-24.
+	core.AssertInDelta(t, 5.960464477539063e-08, float64(Float16ToFloat32(0x0001)), 1e-15)
+	core.AssertInDelta(t, -5.960464477539063e-08, float64(Float16ToFloat32(0x8001)), 1e-15)
+
+	posInf := Float16ToFloat32(0x7C00)
+	negInf := Float16ToFloat32(0xFC00)
+	if !math.IsInf(float64(posInf), 1) {
+		t.Fatalf("Float16ToFloat32(0x7C00) = %v, want +Inf", posInf)
+	}
+	if !math.IsInf(float64(negInf), -1) {
+		t.Fatalf("Float16ToFloat32(0xFC00) = %v, want -Inf", negInf)
+	}
+
+	// NaN — exponent field all-ones (0x1F) with a non-zero fraction.
+	if got := Float16ToFloat32(0x7E00); !math.IsNaN(float64(got)) {
+		t.Fatalf("Float16ToFloat32(0x7E00) = %v, want NaN", got)
+	}
+}
+
+// --- BFloat16ToFloat32 ---
+
+// Good: ordinary positive and negative normal values decode exactly — bf16
+// is the top 16 bits of float32, so 1.0/-1.0 carry the same well-known
+// short bit patterns as their F32 encodings, truncated.
+func TestValues_BFloat16ToFloat32_Good(t *core.T) {
+	core.AssertEqual(t, float32(1), BFloat16ToFloat32(0x3F80))
+	core.AssertEqual(t, float32(-1), BFloat16ToFloat32(0xBF80))
+}
+
+// Bad: zero and negative zero both decode to a numerically-zero float32,
+// with the sign bit preserved through the widening shift.
+func TestValues_BFloat16ToFloat32_Bad(t *core.T) {
+	pos := BFloat16ToFloat32(0x0000)
+	neg := BFloat16ToFloat32(0x8000)
+	core.AssertEqual(t, float32(0), pos)
+	core.AssertEqual(t, float32(0), neg)
+	if math.Signbit(float64(pos)) {
+		t.Fatalf("BFloat16ToFloat32(0x0000) = %v, want +0.0", pos)
+	}
+	if !math.Signbit(float64(neg)) {
+		t.Fatalf("BFloat16ToFloat32(0x8000) = %v, want -0.0", neg)
+	}
+}
+
+// Ugly: subnormals, infinities, and NaN survive the widening shift exactly
+// — bf16 shares float32's 8-bit exponent field, so these bit patterns are
+// simultaneously subnormal/Inf/NaN in both formats.
+func TestValues_BFloat16ToFloat32_Ugly(t *core.T) {
+	// Smallest positive/negative bf16 "subnormal" (exponent field zero,
+	// non-zero mantissa) widens into a float32 that is subnormal too.
+	if got := BFloat16ToFloat32(0x0001); got <= 0 {
+		t.Fatalf("BFloat16ToFloat32(0x0001) = %v, want a tiny positive value", got)
+	}
+	if got := BFloat16ToFloat32(0x8001); got >= 0 {
+		t.Fatalf("BFloat16ToFloat32(0x8001) = %v, want a tiny negative value", got)
+	}
+
+	// Infinities: bf16 shares float32's exponent field, so its truncated
+	// Inf pattern (0x7F80/0xFF80) widens to an exact float32 Inf.
+	if got := BFloat16ToFloat32(0x7F80); !math.IsInf(float64(got), 1) {
+		t.Fatalf("BFloat16ToFloat32(0x7F80) = %v, want +Inf", got)
+	}
+	if got := BFloat16ToFloat32(0xFF80); !math.IsInf(float64(got), -1) {
+		t.Fatalf("BFloat16ToFloat32(0xFF80) = %v, want -Inf", got)
+	}
+
+	// NaN — exponent field all-ones with a non-zero mantissa.
+	if got := BFloat16ToFloat32(0x7FC0); !math.IsNaN(float64(got)) {
+		t.Fatalf("BFloat16ToFloat32(0x7FC0) = %v, want NaN", got)
+	}
 }
