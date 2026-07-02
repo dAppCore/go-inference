@@ -191,7 +191,7 @@ func TestBatch_Refill_NonMonotonic_Ugly(t *core.T) {
 	core.AssertEqual(t, float64(2), after, "tokens are left exactly as they were")
 }
 
-func TestBatch_TokenBucket_Bad(t *core.T) {
+func TestBatch_Wait_Bad(t *core.T) {
 	// A cancelled context unblocks a waiting bucket immediately with the context
 	// error, rather than sleeping out the full interval.
 	tb := NewTokenBucket(1, 1) // 1/s, burst 1
@@ -260,7 +260,7 @@ func TestBatch_RunOne_Cancelled_Bad(t *core.T) {
 	core.AssertEqual(t, int64(0), atomic.LoadInt64(&call.calls), "the Call is never reached")
 }
 
-func TestBatch_LimiterRefused_Ugly(t *core.T) {
+func TestBatch_Limiter_Refused_Ugly(t *core.T) {
 	// The limiter refuses every Wait (with a live context): runOne translates the
 	// throttle failure into a per-item typed error rather than dispatching, and
 	// the Call is never reached. The error names the throttle-wait stage.
@@ -284,7 +284,7 @@ func TestBatch_TokenBucket_Unlimited_Good(t *core.T) {
 	}
 }
 
-func TestBatch_TokenBucket_CancelDuringWait_Ugly(t *core.T) {
+func TestBatch_Wait_CancelDuringWait_Ugly(t *core.T) {
 	// A bucket whose burst is spent makes the next Wait sleep for the refill
 	// interval; cancelling the context during that sleep unblocks it with the
 	// context error rather than waiting the interval out.

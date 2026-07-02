@@ -298,7 +298,7 @@ func TestWired_Fusion_Good(t *core.T) {
 
 // --- Wired: a routing failure surfaces from the ai selector ----------------
 
-func TestWired_Route_Bad(t *core.T) {
+func TestWired_Router_Bad(t *core.T) {
 	backend := &recordingBackend{reply: chat.Response{Text: "unused"}}
 	// A non-empty pool that holds no endpoint for the requested model → the ai
 	// selector fails, and the failure surfaces through the router adapter.

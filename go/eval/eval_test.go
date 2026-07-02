@@ -50,17 +50,17 @@ func TestEval_RunDataset_Ugly(t *core.T) {
 
 // --- AdapterInfo.IsEmpty ----------------------------------------------------
 
-func TestEval_AdapterInfoIsEmpty_Good(t *core.T) {
+func TestEval_IsEmpty_Good(t *core.T) {
 	core.AssertTrue(t, AdapterInfo{}.IsEmpty())
 }
 
-func TestEval_AdapterInfoIsEmpty_Bad(t *core.T) {
+func TestEval_IsEmpty_Bad(t *core.T) {
 	core.AssertFalse(t, AdapterInfo{Name: "lora-1"}.IsEmpty())
 	core.AssertFalse(t, AdapterInfo{Rank: 8}.IsEmpty())
 	core.AssertFalse(t, AdapterInfo{Scale: 2.0}.IsEmpty())
 }
 
-func TestEval_AdapterInfoIsEmpty_Ugly(t *core.T) {
+func TestEval_IsEmpty_Ugly(t *core.T) {
 	// Only the slice field set — still not empty.
 	core.AssertFalse(t, AdapterInfo{TargetKeys: []string{"q_proj"}}.IsEmpty())
 }

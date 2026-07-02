@@ -104,9 +104,9 @@ func TestRespCache_Key_Ugly(t *testing.T) {
 
 // ---- Get / Set ---------------------------------------------------------
 
-// TestRespCache_GetSet_Good — a stored completion is returned on an identical
+// TestRespCache_Get_Good — a stored completion is returned on an identical
 // request with no inference, and the value round-trips intact.
-func TestRespCache_GetSet_Good(t *testing.T) {
+func TestRespCache_Get_Good(t *testing.T) {
 	c := New(nil)
 	req := sampleRequest()
 
@@ -133,9 +133,9 @@ func TestRespCache_GetSet_Good(t *testing.T) {
 	}
 }
 
-// TestRespCache_GetSet_Bad — a miss for a never-stored request, and a per-
+// TestRespCache_Get_Bad — a miss for a never-stored request, and a per-
 // request bypass that skips the cache on both read and write.
-func TestRespCache_GetSet_Bad(t *testing.T) {
+func TestRespCache_Get_Bad(t *testing.T) {
 	c := New(nil)
 	req := sampleRequest()
 	c.Set(req, Completion{Text: "cached"}, 0)
@@ -166,9 +166,9 @@ func TestRespCache_GetSet_Bad(t *testing.T) {
 	}
 }
 
-// TestRespCache_GetSet_Ugly — TTL expiry and overwrite. An expired entry is a
+// TestRespCache_Set_Ugly — TTL expiry and overwrite. An expired entry is a
 // miss; a re-Set overwrites the prior value.
-func TestRespCache_GetSet_Ugly(t *testing.T) {
+func TestRespCache_Set_Ugly(t *testing.T) {
 	now := time.Now()
 	clock := now
 	c := New(nil)

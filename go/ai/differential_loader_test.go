@@ -7,7 +7,7 @@ import (
 	"dappco.re/go/inference"
 )
 
-func TestDifferentialLoader_PlanAdapterReuse_Good(t *core.T) {
+func TestDifferentialLoader_DifferentialLoadReuseBaseAdapter_Good(t *core.T) {
 	result := PlanDifferentialLoad(DifferentialLoadRequest{
 		Base:    inference.ModelIdentity{Path: "/models/gemma4", Hash: "base"},
 		Adapter: inference.AdapterIdentity{Path: "/adapters/project.safetensors", Format: "lora"},
@@ -22,7 +22,7 @@ func TestDifferentialLoader_PlanAdapterReuse_Good(t *core.T) {
 	core.AssertEqual(t, "lthn", plan.Labels["project"])
 }
 
-func TestDifferentialLoader_PlanCompareWithRemoteFFN_Good(t *core.T) {
+func TestDifferentialLoader_DifferentialLoadCompareModels_Good(t *core.T) {
 	result := PlanDifferentialLoad(DifferentialLoadRequest{
 		Base:        inference.ModelIdentity{Path: "/models/base", Hash: "base"},
 		Tuned:       inference.ModelIdentity{Path: "/models/fine", Hash: "fine"},
@@ -44,14 +44,14 @@ func TestDifferentialLoader_PlanCompareWithRemoteFFN_Good(t *core.T) {
 	core.AssertFalse(t, plan.BaseSlice.HasComponent(inference.ModelComponentFFN))
 }
 
-func TestDifferentialLoader_MissingBase_Bad(t *core.T) {
+func TestDifferentialLoader_PlanDifferentialLoad_Bad(t *core.T) {
 	result := PlanDifferentialLoad(DifferentialLoadRequest{})
 
 	core.AssertFalse(t, result.OK)
 	core.AssertContains(t, result.Error(), "base model is required")
 }
 
-func TestDifferentialLoader_RemoteFFNMissingEndpoint_Ugly(t *core.T) {
+func TestDifferentialLoader_PlanDifferentialLoad_Ugly(t *core.T) {
 	result := PlanDifferentialLoad(DifferentialLoadRequest{
 		Base:        inference.ModelIdentity{Path: "/models/base", Hash: "base"},
 		PreferSplit: true,

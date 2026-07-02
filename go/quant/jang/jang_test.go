@@ -24,7 +24,7 @@ func testJANGTQInfo() *Info {
 	}
 }
 
-func TestJang_PackedTensorDescriptorMXTQRoutedExpert_Good(t *testing.T) {
+func TestJang_TensorRoleRoutedExpert_Good(t *testing.T) {
 	desc, err := NewPackedTensorDescriptor("model.layers.0.block_sparse_moe.experts.17.w1.weight", []uint64{2, 4}, testJANGTQInfo())
 	if err != nil {
 		t.Fatalf("NewPackedTensorDescriptor() error = %v", err)
@@ -44,7 +44,7 @@ func TestJang_PackedTensorDescriptorMXTQRoutedExpert_Good(t *testing.T) {
 	}
 }
 
-func TestJang_PackedTensorDescriptorAttentionUsesWideBits_Good(t *testing.T) {
+func TestJang_TensorRoleAttention_Good(t *testing.T) {
 	desc, err := NewPackedTensorDescriptor("model.layers.0.self_attn.q_proj.weight", []uint64{2, 4}, testJANGTQInfo())
 	if err != nil {
 		t.Fatalf("NewPackedTensorDescriptor() error = %v", err)

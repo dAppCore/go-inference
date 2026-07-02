@@ -62,7 +62,7 @@ func (m *blockingModel) Metrics() inference.GenerateMetrics { return m.metrics }
 func (m *blockingModel) Err() core.Result                   { return core.Ok(nil) }
 func (m *blockingModel) Close() core.Result                 { return core.Ok(nil) }
 
-func TestModel_QueuesRequestsAndEmitsLatencyProbe_Good(t *testing.T) {
+func TestModel_Schedule_Good(t *testing.T) {
 	base := newBlockingModel()
 	var (
 		eventsMu sync.Mutex
@@ -126,7 +126,7 @@ func TestModel_QueuesRequestsAndEmitsLatencyProbe_Good(t *testing.T) {
 	}
 }
 
-func TestModel_RejectsFullQueue_Bad(t *testing.T) {
+func TestModel_Schedule_Bad(t *testing.T) {
 	base := newBlockingModel()
 	scheduled := New(base, Config{MaxConcurrent: 1, MaxQueue: 1})
 
@@ -319,7 +319,7 @@ func TestModel_NilAndErrorPaths_Bad(t *testing.T) {
 	}
 }
 
-func TestModel_ErrAndHelpers_Good(t *testing.T) {
+func TestModel_generateOptions_Good(t *testing.T) {
 	base := &immediateModel{tokens: []inference.Token{{Text: "x"}}, err: core.NewError("base failed")}
 	scheduled := New(base, Config{RequestIDPrefix: "req", MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 1})
 	for range scheduled.Generate(context.Background(), "prompt") {

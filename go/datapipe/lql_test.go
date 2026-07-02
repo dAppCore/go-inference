@@ -4,7 +4,7 @@ package datapipe
 
 import core "dappco.re/go"
 
-func TestLQL_ParseUse_Good(t *core.T) {
+func TestLQL_LQLStatementUse_Good(t *core.T) {
 	stmt, err := ParseLQL(`USE "models/gemma4-ft.vindex"`)
 
 	core.AssertNoError(t, err)
@@ -12,7 +12,7 @@ func TestLQL_ParseUse_Good(t *core.T) {
 	core.AssertEqual(t, "models/gemma4-ft.vindex", stmt.Target)
 }
 
-func TestLQL_ParseWalk_Good(t *core.T) {
+func TestLQL_LQLStatementWalk_Good(t *core.T) {
 	stmt, err := ParseLQL(`WALK "operator project context" LIMIT 12`)
 
 	core.AssertNoError(t, err)
@@ -21,7 +21,7 @@ func TestLQL_ParseWalk_Good(t *core.T) {
 	core.AssertEqual(t, 12, stmt.Limit)
 }
 
-func TestLQL_ParseDiff_Good(t *core.T) {
+func TestLQL_LQLStatementDiff_Good(t *core.T) {
 	stmt, err := ParseLQL(`DIFF "base/gemma4" WITH "fine-tunes/project-gemma4" PATCH "findings.patch" LIMIT 8`)
 
 	core.AssertNoError(t, err)
@@ -32,7 +32,7 @@ func TestLQL_ParseDiff_Good(t *core.T) {
 	core.AssertEqual(t, 8, stmt.Limit)
 }
 
-func TestLQL_ParseTraceInfer_Good(t *core.T) {
+func TestLQL_LQLStatementTrace_Good(t *core.T) {
 	stmt, err := ParseLQL(`TRACE INFER "why did this fine tune prefer the operator name?"`)
 
 	core.AssertNoError(t, err)
@@ -41,21 +41,21 @@ func TestLQL_ParseTraceInfer_Good(t *core.T) {
 	core.AssertEqual(t, "why did this fine tune prefer the operator name?", stmt.Prompt)
 }
 
-func TestLQL_ParseEmpty_Bad(t *core.T) {
+func TestLQL_AssertError_Bad(t *core.T) {
 	_, err := ParseLQL(" ")
 
 	core.AssertError(t, err)
 	core.AssertContains(t, err.Error(), "empty")
 }
 
-func TestLQL_ParseUnknown_Bad(t *core.T) {
+func TestLQL_ParseLQL_Bad(t *core.T) {
 	_, err := ParseLQL("FLY model.layer[0]")
 
 	core.AssertError(t, err)
 	core.AssertContains(t, err.Error(), "unsupported")
 }
 
-func TestLQL_ParseScript_Ugly(t *core.T) {
+func TestLQL_ParseLQLScript_Ugly(t *core.T) {
 	statements, err := ParseLQLScript(`
 # research batch
 USE "base.vindex";

@@ -6,10 +6,10 @@ package lora
 
 import "testing"
 
-// TestLoRA_Registry_Good covers the adapter book-keeping: register then look up,
+// TestLoRA_NewRegistry_Good covers the adapter book-keeping: register then look up,
 // list is sorted, deterministic ids are stable for the same name+path, and
 // acquire/release ref-counting tracks in-flight use.
-func TestLoRA_Registry_Good(t *testing.T) {
+func TestLoRA_NewRegistry_Good(t *testing.T) {
 	r := NewRegistry()
 
 	a := ref("alpha")
@@ -79,10 +79,10 @@ func TestLoRA_Registry_Good(t *testing.T) {
 	}
 }
 
-// TestLoRA_Registry_Bad covers the error paths: re-registering a name, looking up
+// TestLoRA_NewRegistry_Bad covers the error paths: re-registering a name, looking up
 // / acquiring an unknown name, and unregistering an unknown name all return a
 // typed error rather than corrupting the registry.
-func TestLoRA_Registry_Bad(t *testing.T) {
+func TestLoRA_NewRegistry_Bad(t *testing.T) {
 	r := NewRegistry()
 	if err := r.Register(ref("alpha")); err != nil {
 		t.Fatalf("register alpha: %v", err)

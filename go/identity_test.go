@@ -133,7 +133,7 @@ func TestIdentity_StateBundle_Bad_EmptyAllowed(t *testing.T) {
 	checkEmpty(t, bundle.KVRefs)
 }
 
-func TestIdentity_ProjectSeedAliases_Good(t *testing.T) {
+func TestIdentity_NewProjectSeed_Good(t *testing.T) {
 	seed := NewProjectSeed(ProjectSeedOptions{BaseURI: "state://lthn/projects", ProjectID: "core/go-mlx"})
 	wake := seed.WakeRequest(ProjectSeedWakeOptions{
 		Model:     ModelIdentity{Hash: "model-a"},

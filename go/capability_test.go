@@ -188,7 +188,7 @@ func TestCapability_CapabilityClone_Ugly(t *testing.T) {
 	checkEqual(t, "stub", again.Labels["backend"])
 }
 
-func TestCapability_CapabilitiesOfReporter_Good(t *testing.T) {
+func TestCapability_CapabilitiesOf_Good(t *testing.T) {
 	model := &capabilityModel{stubTextModel: &stubTextModel{}}
 
 	report, ok := CapabilitiesOf(model)
@@ -227,7 +227,7 @@ func TestCapability_BackendCapabilities_BadUnavailable(t *testing.T) {
 	checkTrue(t, report.Supports(CapabilityModelLoad))
 }
 
-func TestCapability_CapabilitiesOfUnknown_Ugly(t *testing.T) {
+func TestCapability_CapabilitiesOf_Ugly(t *testing.T) {
 	report, ok := CapabilitiesOf(struct{}{})
 
 	checkFalse(t, ok)
@@ -287,8 +287,9 @@ func TestCapability_SetRuntimeMemoryLimits_UglyUnsupported(t *testing.T) {
 // consumer (go-mlx, go-rocm, go-cuda).
 //
 // Baselines (Apple M3 Ultra, -benchmem):
-//   pre-presize  (literal-4 + append × N grows): 3 allocs / 3479ns / 2208B
-//   post-presize (make([], 0, 28) once):         1 alloc  /  403ns / 2048B
+//
+//	pre-presize  (literal-4 + append × N grows): 3 allocs / 3479ns / 2208B
+//	post-presize (make([], 0, 28) once):         1 alloc  /  403ns / 2048B
 //
 // Trade-off: pre-sized slice is ~1.7KB larger per call on the
 // "no-optional-interfaces" path (Plain) because we always allocate
@@ -297,9 +298,9 @@ func TestCapability_SetRuntimeMemoryLimits_UglyUnsupported(t *testing.T) {
 // 8x speedup matters far more than the bytes delta at this scale.
 //
 // Twin assertions:
-//   1. ALLOCS — stays at 1 (the single pre-sized backing slice)
-//   2. BEHAVIOUR — the reported capability set matches expectations
-//      for the full-surface model fixture
+//  1. ALLOCS — stays at 1 (the single pre-sized backing slice)
+//  2. BEHAVIOUR — the reported capability set matches expectations
+//     for the full-surface model fixture
 func TestCapability_AllocBudget_TextModelCapabilities_FullSurface(t *testing.T) {
 	model := &capabilityModel{stubTextModel: &stubTextModel{}}
 	runtime := RuntimeIdentity{Backend: "test"}

@@ -43,9 +43,9 @@ func (f *flakyStore) Delete(id string) error {
 	return f.inner.Delete(id)
 }
 
-// TestSession_DefaultIDGen_Good — with no WithIDGen override the Manager mints a
+// TestSession_Open_Good — with no WithIDGen override the Manager mints a
 // non-empty random id for each opened session, and two opens never collide.
-func TestSession_DefaultIDGen_Good(t *core.T) {
+func TestSession_Open_Good(t *core.T) {
 	m := NewManager(NewMemoryStore()) // defaults: random id, core.Now clock
 
 	a := m.Open("lemma")

@@ -26,7 +26,7 @@ func TestOllama_GenerateOptions_Good(t *testing.T) {
 	}
 }
 
-func TestOllama_NewResponses_Good(t *testing.T) {
+func TestOllama_NewChatResponse_Good(t *testing.T) {
 	metrics := inference.GenerateMetrics{PromptTokens: 5, GeneratedTokens: 6}
 	chat := NewChatResponse("qwen", "ok", metrics)
 	generate := NewGenerateResponse("qwen", "ok", metrics)

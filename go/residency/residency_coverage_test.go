@@ -23,10 +23,10 @@ func TestResidency_Err_Good(t *testing.T) {
 	}
 }
 
-// TestResidency_NewNegativeCap_Ugly covers the ConcurrentCap < 0 clamp in New: a
+// TestResidency_New_Ugly covers the ConcurrentCap < 0 clamp in New: a
 // negative cap is nonsense config and is clamped to zero (never panics), which
 // then admits nothing — the same observable behaviour as an explicit zero cap.
-func TestResidency_NewNegativeCap_Ugly(t *testing.T) {
+func TestResidency_New_Ugly(t *testing.T) {
 	p := New(Policy{Device: "weird", BudgetBytes: gb(16), ConcurrentCap: -3})
 
 	d := p.Touch("x", gb(1))
@@ -38,10 +38,10 @@ func TestResidency_NewNegativeCap_Ugly(t *testing.T) {
 	}
 }
 
-// TestResidency_TouchNegativeSize_Ugly covers the sizeBytes < 0 clamp in Touch: a
+// TestResidency_IsResident_Ugly covers the sizeBytes < 0 clamp in Touch: a
 // negative size is nonsense and is clamped to zero, so the model is admitted as a
 // zero-byte resident (consuming no budget) rather than corrupting the byte total.
-func TestResidency_TouchNegativeSize_Ugly(t *testing.T) {
+func TestResidency_IsResident_Ugly(t *testing.T) {
 	p := New(Policy{Device: "local-gpu", BudgetBytes: gb(16), ConcurrentCap: 4})
 
 	d := p.Touch("negative", -gb(4))
@@ -63,11 +63,11 @@ func TestResidency_TouchNegativeSize_Ugly(t *testing.T) {
 	}
 }
 
-// TestResidency_WarmCapExceeded_Ugly covers the warm-loop cap guard
+// TestResidency_Resident_Ugly covers the warm-loop cap guard
 // (len(models) >= cap → continue): warm models past the concurrency cap are
 // skipped at construction rather than overflowing the resident set. With cap 1
 // only the first warm model is admitted; the second is dropped.
-func TestResidency_WarmCapExceeded_Ugly(t *testing.T) {
+func TestResidency_Resident_Ugly(t *testing.T) {
 	p := New(Policy{
 		Device:        "m3-ultra",
 		BudgetBytes:   gb(96),
@@ -89,12 +89,12 @@ func TestResidency_WarmCapExceeded_Ugly(t *testing.T) {
 	}
 }
 
-// TestResidency_WarmCumulativeOverflow_Ugly covers the warm-loop budget guard
+// TestResidency_WarmModel_Ugly covers the warm-loop budget guard
 // (used()+size > budget → continue): each warm model fits the budget on its own,
 // but together they exceed it. The cumulative check skips the one that would push
 // the resident set over budget, keeping the policy invariant (never hold more than
 // the device can budget for).
-func TestResidency_WarmCumulativeOverflow_Ugly(t *testing.T) {
+func TestResidency_WarmModel_Ugly(t *testing.T) {
 	p := New(Policy{
 		Device:        "tiny",
 		BudgetBytes:   gb(10),

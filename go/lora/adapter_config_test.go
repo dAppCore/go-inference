@@ -41,10 +41,10 @@ func TestParseAdapterConfig_BadInvalidJSON(t *testing.T) {
 	}
 }
 
-// TestNormalizeAdapterConfig_TargetPrecedence_Good covers the TargetKeys
+// TestParseAdapterConfig_TargetPrecedence_Good covers the TargetKeys
 // fallback chain: an explicit target_keys always wins, then target_modules
 // (PEFT), then lora_layers (mlx-lm) as the last resort.
-func TestNormalizeAdapterConfig_TargetPrecedence_Good(t *testing.T) {
+func TestParseAdapterConfig_TargetPrecedence_Good(t *testing.T) {
 	cfg, err := ParseAdapterConfig([]byte(`{
 		"target_keys":["explicit"],
 		"target_modules":["peft"],

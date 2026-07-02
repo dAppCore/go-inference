@@ -345,7 +345,7 @@ func TestPipeline_Complete_Ugly(t *core.T) {
 
 // --- Routing: empty endpoint set is an error -------------------------------
 
-func TestPipeline_Route_Bad(t *core.T) {
+func TestPipeline_Router_Bad(t *core.T) {
 	p, _, router, _, _, backend := fixture()
 	router.endpoints = nil // router selected nothing
 
@@ -358,7 +358,7 @@ func TestPipeline_Route_Bad(t *core.T) {
 
 // --- Fallback: first endpoint errors, second succeeds ----------------------
 
-func TestPipeline_Fallback_Good(t *core.T) {
+func TestPipeline_Backend_Good(t *core.T) {
 	p, cache, router, _, sink, backend := fixture()
 	router.endpoints = []Endpoint{{ID: "first"}, {ID: "second"}}
 	backend.byEndpoint["first"] = backendStep{err: core.E("backend", "first overloaded", nil)}
@@ -440,7 +440,7 @@ func TestPipeline_Guard_Ugly(t *core.T) {
 
 // --- Guard: output guard refuses (even after a regeneration) ---------------
 
-func TestPipeline_OutputGuard_Bad(t *core.T) {
+func TestPipeline_ErrOutputGuarded_Bad(t *core.T) {
 	p, _, _, guard, sink, backend := fixture()
 	// Output stays over-policy: mediate once, then a hard guard on the redo.
 	guard.out = []Decision{DecisionMediate, DecisionGuard}
@@ -600,7 +600,7 @@ func (b *cancelMidchainBackend) Complete(_ context.Context, ep Endpoint, _ chat.
 
 // --- Optional seams: full happy path with EVERY stage set ------------------
 
-func TestPipeline_AllStages_Good(t *core.T) {
+func TestPipeline_Tracer_Good(t *core.T) {
 	// All optional seams set; the request flows through every one and the
 	// invocation counts prove the order and that each ran exactly once.
 	p, _, _, _, sink, backend := fixture()

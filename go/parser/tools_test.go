@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestTools_TaggedAndJSONFallback_Good(t *testing.T) {
+func TestTools_ParseTools_Good(t *testing.T) {
 	p := ForHint(Hint{Architecture: "hermes3"})
 
 	tagged, err := p.ParseTools(nil, `before <tool_call>{"name":"search","arguments":{"q":"core"}}</tool_call> after`)

@@ -347,10 +347,10 @@ func TestKVTier_Cascade_Good(t *testing.T) {
 	}
 }
 
-// TestKVTier_Cascade_Bad covers Evict/Remove of a block in a middle tier and
+// TestKVTier_Remove_Bad covers Evict/Remove of a block in a middle tier and
 // the resulting freed budget: removing a CPU block frees CPU space so a later
 // demotion no longer cascades to Disk.
-func TestKVTier_Cascade_Bad(t *testing.T) {
+func TestKVTier_Remove_Bad(t *testing.T) {
 	fs := &fakeStore{}
 	m := New(Budget{GPU: mb(16), CPU: mb(16), Disk: mb(1024)}, fs)
 	ctx := context.Background()
@@ -395,10 +395,10 @@ func TestKVTier_Cascade_Bad(t *testing.T) {
 	}
 }
 
-// TestKVTier_Cascade_Ugly covers the Store failure path: when the injected store
+// TestKVTier_ErrStore_Ugly covers the Store failure path: when the injected store
 // fails mid-cascade the operation surfaces the error and the manager's
 // accounting is left unchanged (no partial placement).
-func TestKVTier_Cascade_Ugly(t *testing.T) {
+func TestKVTier_ErrStore_Ugly(t *testing.T) {
 	fs := &fakeStore{failOn: 1, failErr: core.E("test", "disk full", nil)}
 	m := New(Budget{GPU: mb(8), CPU: mb(8), Disk: mb(1024)}, fs)
 	ctx := context.Background()
@@ -568,9 +568,9 @@ func TestKVTier_Remove_StoreFail(t *testing.T) {
 
 // ---- small surface coverage --------------------------------------------
 
-// TestKVTier_Surface_Good exercises the remaining accessors and the Tier.String
+// TestKVTier_String_Good exercises the remaining accessors and the Tier.String
 // helper so the public surface is fully covered.
-func TestKVTier_Surface_Good(t *testing.T) {
+func TestKVTier_String_Good(t *testing.T) {
 	fs := &fakeStore{}
 	m := New(Budget{GPU: mb(16), CPU: mb(64), Disk: mb(1024)}, fs)
 	ctx := context.Background()

@@ -64,7 +64,7 @@ func (r *fakeReranker) Rerank(_ context.Context, _ string, docs []string) ([]Sco
 
 // --- EmbedBatched ---
 
-func TestEmbed_Batched_Good(t *core.T) {
+func TestEmbed_EmbedBatched_Good(t *core.T) {
 	e := &fakeEmbedder{}
 	texts := []string{"a", "bb", "ccc", "dddd", "eeeee"}
 
@@ -83,7 +83,7 @@ func TestEmbed_Batched_Good(t *core.T) {
 	core.AssertEqual(t, []string{"eeeee"}, e.batches[2])
 }
 
-func TestEmbed_Batched_Bad(t *core.T) {
+func TestEmbed_EmbedBatched_Bad(t *core.T) {
 	// A batch error surfaces — the whole call fails, no partial vectors.
 	e := &fakeEmbedder{failOn: "ccc"}
 	texts := []string{"a", "bb", "ccc", "dddd"}
@@ -101,7 +101,7 @@ func TestEmbed_Batched_Bad(t *core.T) {
 	core.AssertError(t, err)
 }
 
-func TestEmbed_Batched_Ugly(t *core.T) {
+func TestEmbed_EmbedBatched_Ugly(t *core.T) {
 	// Batch size larger than the input → one batch, all texts, order kept.
 	e := &fakeEmbedder{}
 	texts := []string{"x", "yy", "zzz"}
