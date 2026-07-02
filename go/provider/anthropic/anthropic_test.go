@@ -29,11 +29,12 @@ func TestAnthropic_InferenceMessages_Good(t *testing.T) {
 
 func TestAnthropic_GenerateOptions_Good(t *testing.T) {
 	temp := float32(0.2)
+	minP := float32(0.04)
 	topK := 4
-	opts := GenerateOptions(MessageRequest{MaxTokens: 9, Temperature: &temp, TopK: &topK})
+	opts := GenerateOptions(MessageRequest{MaxTokens: 9, Temperature: &temp, MinP: &minP, TopK: &topK})
 
 	cfg := inference.ApplyGenerateOpts(opts)
-	if cfg.MaxTokens != 9 || cfg.Temperature != 0.2 || cfg.TopK != 4 {
+	if cfg.MaxTokens != 9 || cfg.Temperature != 0.2 || cfg.MinP != 0.04 || cfg.TopK != 4 {
 		t.Fatalf("cfg = %+v", cfg)
 	}
 }

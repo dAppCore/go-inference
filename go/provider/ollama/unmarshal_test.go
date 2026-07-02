@@ -24,11 +24,11 @@ func TestUnmarshalChatRequest_DirectShapes(t *testing.T) {
 		},
 		{
 			name: "with-stream-and-options",
-			in:   `{"model":"qwen3","messages":[],"stream":true,"options":{"temperature":0.7,"top_k":64,"top_p":0.95,"num_predict":256}}`,
+			in:   `{"model":"qwen3","messages":[],"stream":true,"options":{"temperature":0.7,"top_k":64,"top_p":0.95,"min_p":0.05,"num_predict":256}}`,
 			want: ChatRequest{
 				Model:   "qwen3",
 				Stream:  true,
-				Options: Options{Temperature: 0.7, TopK: 64, TopP: 0.95, NumPredict: 256},
+				Options: Options{Temperature: 0.7, TopK: 64, TopP: 0.95, MinP: 0.05, NumPredict: 256},
 			},
 		},
 		{
@@ -69,12 +69,12 @@ func TestUnmarshalChatRequest_DirectShapes(t *testing.T) {
 }
 
 func TestUnmarshalGenerateRequest_DirectShapes(t *testing.T) {
-	in := `{"model":"qwen3","prompt":"hi","stream":true,"options":{"temperature":0.7,"top_p":0.9,"num_predict":128}}`
+	in := `{"model":"qwen3","prompt":"hi","stream":true,"options":{"temperature":0.7,"top_p":0.9,"min_p":0.04,"num_predict":128}}`
 	want := GenerateRequest{
 		Model:   "qwen3",
 		Prompt:  "hi",
 		Stream:  true,
-		Options: Options{Temperature: 0.7, TopP: 0.9, NumPredict: 128},
+		Options: Options{Temperature: 0.7, TopP: 0.9, MinP: 0.04, NumPredict: 128},
 	}
 	var got GenerateRequest
 	if err := json.Unmarshal([]byte(in), &got); err != nil {

@@ -25,13 +25,13 @@ import (
 
 // UnmarshalJSON walks the MessageRequest wire shape in a single pass.
 // Wire-compatible with json.Unmarshal across every branch:
-//   - model, system, messages, max_tokens, temperature, top_p,
+//   - model, system, messages, max_tokens, temperature, top_p, min_p,
 //     top_k, stream, stop_sequences — dispatched by exact key
 //     byte-compare.
 //   - Unknown keys SkipJSONValue past — matches encoding/json's
 //     default decoder behaviour (silent ignore unless DisallowUnknownFields
 //     is set, which this package does not).
-//   - Pointer fields (Temperature, TopP, TopK) point at heap copies
+//   - Pointer fields (Temperature, TopP, MinP, TopK) point at heap copies
 //     of the parsed value only when the field is present and not
 //     null — same as the reflect path.
 //   - StopSequences via jsonenc.ParseJSONStringList (string or
@@ -43,7 +43,7 @@ import (
 //   - One per non-empty Messages slice (pre-sized via prescanning the
 //     array length).
 //   - One per non-empty Content slice within each Message.
-//   - One per non-nil pointer field (Temperature, TopP, TopK).
+//   - One per non-nil pointer field (Temperature, TopP, MinP, TopK).
 func (r *MessageRequest) UnmarshalJSON(data []byte) error {
 	*r = MessageRequest{}
 	i, err := jsonenc.MatchObjectStart(data, 0)
@@ -142,6 +142,16 @@ func (r *MessageRequest) unmarshalField(data []byte, i int, key []byte) (int, er
 			return next, err
 		}
 		r.TopP = &v
+		return next, nil
+	case "min_p":
+		if jsonenc.IsJSONNull(data, i) {
+			return i + 4, nil
+		}
+		v, next, err := jsonenc.ParseJSONFloat32(data, i)
+		if err != nil {
+			return next, err
+		}
+		r.MinP = &v
 		return next, nil
 	case "top_k":
 		if jsonenc.IsJSONNull(data, i) {

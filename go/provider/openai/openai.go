@@ -21,6 +21,7 @@ type ChatCompletionRequest struct {
 	Messages           []ChatMessage       `json:"messages"`
 	Temperature        *float32            `json:"temperature,omitempty"`
 	TopP               *float32            `json:"top_p,omitempty"`
+	MinP               *float32            `json:"min_p,omitempty"`
 	TopK               *int                `json:"top_k,omitempty"`
 	MaxTokens          *int                `json:"max_tokens,omitempty"`
 	Stream             bool                `json:"stream,omitempty"`

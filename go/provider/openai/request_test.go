@@ -46,6 +46,7 @@ func TestOpenAI_GenerateOptions_Good_HonoursExplicitZero(t *testing.T) {
 		Messages:    []ChatMessage{{Role: "user", Content: "hi"}},
 		Temperature: &zeroFloat,
 		TopP:        &zeroFloat,
+		MinP:        &zeroFloat,
 		TopK:        &zeroInt,
 		MaxTokens:   &zeroInt,
 	}
@@ -55,8 +56,38 @@ func TestOpenAI_GenerateOptions_Good_HonoursExplicitZero(t *testing.T) {
 		t.Fatalf("GenerateOptions() error = %v", err)
 	}
 	cfg := inference.ApplyGenerateOpts(opts)
-	if cfg.Temperature != 0 || cfg.TopP != 0 || cfg.TopK != 0 || cfg.MaxTokens != 0 {
+	if cfg.Temperature != 0 || cfg.TopP != 0 || cfg.MinP != 0 || cfg.TopK != 0 || cfg.MaxTokens != 0 {
 		t.Fatalf("explicit zero options = %+v", cfg)
+	}
+}
+
+func TestOpenAI_GenerateOptions_Good_MinP(t *testing.T) {
+	minP := float32(0.05)
+	req := ChatCompletionRequest{
+		Model:    "qwen",
+		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+		MinP:     &minP,
+	}
+	opts, err := GenerateOptions(req)
+	if err != nil {
+		t.Fatalf("GenerateOptions() error = %v", err)
+	}
+	cfg := inference.ApplyGenerateOpts(opts)
+	if cfg.MinP != 0.05 {
+		t.Fatalf("MinP = %v, want 0.05", cfg.MinP)
+	}
+}
+
+func TestOpenAI_GenerateOptions_Bad_MinP(t *testing.T) {
+	minP := float32(1.1)
+	req := ChatCompletionRequest{
+		Model:    "qwen",
+		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+		MinP:     &minP,
+	}
+	_, err := GenerateOptions(req)
+	if err == nil || !strings.Contains(err.Error(), "min_p") {
+		t.Fatalf("GenerateOptions() error = %v, want min_p validation", err)
 	}
 }
 

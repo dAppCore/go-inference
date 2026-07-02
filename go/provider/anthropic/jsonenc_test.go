@@ -17,6 +17,7 @@ import (
 func TestAppendMessageRequest_RoundTrip(t *testing.T) {
 	temp := float32(0.7)
 	topP := float32(0.95)
+	minP := float32(0.05)
 	topK := 64
 	cases := []struct {
 		name string
@@ -39,6 +40,7 @@ func TestAppendMessageRequest_RoundTrip(t *testing.T) {
 				MaxTokens:     1024,
 				Temperature:   &temp,
 				TopP:          &topP,
+				MinP:          &minP,
 				TopK:          &topK,
 				Stream:        true,
 				StopSequences: []string{"</response>", "<|eot_id|>"},
@@ -104,6 +106,7 @@ func TestAppendMessageRequest_RoundTrip(t *testing.T) {
 func TestAppendMessageRequest_SizeBoundsFits(t *testing.T) {
 	temp := float32(0.7)
 	topP := float32(0.95)
+	minP := float32(0.05)
 	topK := 64
 	cases := []struct {
 		name string
@@ -121,6 +124,7 @@ func TestAppendMessageRequest_SizeBoundsFits(t *testing.T) {
 			MaxTokens:     1024,
 			Temperature:   &temp,
 			TopP:          &topP,
+			MinP:          &minP,
 			TopK:          &topK,
 			Stream:        true,
 			StopSequences: []string{"</response>", "<|eot_id|>", "STOP"},

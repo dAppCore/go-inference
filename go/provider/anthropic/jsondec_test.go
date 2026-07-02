@@ -15,6 +15,7 @@ import (
 func TestUnmarshalMessageRequest_DirectShapes(t *testing.T) {
 	temp := float32(0.7)
 	topP := float32(0.95)
+	minP := float32(0.05)
 	topK := 64
 	cases := []struct {
 		name string
@@ -32,7 +33,7 @@ func TestUnmarshalMessageRequest_DirectShapes(t *testing.T) {
 		},
 		{
 			name: "all-optional-fields-set",
-			in:   `{"model":"claude-3","system":"Be concise.","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"max_tokens":1024,"temperature":0.7,"top_p":0.95,"top_k":64,"stream":true,"stop_sequences":["</s>","<|eot|>"]}`,
+			in:   `{"model":"claude-3","system":"Be concise.","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"max_tokens":1024,"temperature":0.7,"top_p":0.95,"min_p":0.05,"top_k":64,"stream":true,"stop_sequences":["</s>","<|eot|>"]}`,
 			want: MessageRequest{
 				Model:         "claude-3",
 				System:        "Be concise.",
@@ -40,6 +41,7 @@ func TestUnmarshalMessageRequest_DirectShapes(t *testing.T) {
 				MaxTokens:     1024,
 				Temperature:   &temp,
 				TopP:          &topP,
+				MinP:          &minP,
 				TopK:          &topK,
 				Stream:        true,
 				StopSequences: []string{"</s>", "<|eot|>"},
@@ -47,7 +49,7 @@ func TestUnmarshalMessageRequest_DirectShapes(t *testing.T) {
 		},
 		{
 			name: "pointer-fields-null-keeps-zero-value",
-			in:   `{"model":"claude-3","messages":[],"max_tokens":256,"temperature":null,"top_p":null,"top_k":null,"stream":null}`,
+			in:   `{"model":"claude-3","messages":[],"max_tokens":256,"temperature":null,"top_p":null,"min_p":null,"top_k":null,"stream":null}`,
 			want: MessageRequest{
 				Model:     "claude-3",
 				MaxTokens: 256,

@@ -25,6 +25,7 @@ type ResponseRequest struct {
 	Instructions    string                 `json:"instructions,omitempty"`
 	Temperature     *float32               `json:"temperature,omitempty"`
 	TopP            *float32               `json:"top_p,omitempty"`
+	MinP            *float32               `json:"min_p,omitempty"`
 	TopK            *int                   `json:"top_k,omitempty"`
 	MaxOutputTokens *int                   `json:"max_output_tokens,omitempty"`
 	Stream          bool                   `json:"stream,omitempty"`
@@ -91,6 +92,7 @@ func ResponseGenerateOptions(req ResponseRequest) ([]inference.GenerateOption, e
 		Model:       req.Model,
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
+		MinP:        req.MinP,
 		TopK:        req.TopK,
 		MaxTokens:   req.MaxOutputTokens,
 		// Pre-size — saves the append-grow cascade on every Responses

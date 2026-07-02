@@ -72,7 +72,7 @@ func TestState_BinaryStore_Good(t *testing.T) {
 	}
 }
 
-func TestState_BorrowRefBytesFallback_Good(t *testing.T) {
+func TestState_BorrowRefBytesInMemoryView_Good(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	payload := []byte{4, 3, 2, 1}
 	ref, err := store.PutBytes(context.Background(), payload, PutOptions{})
@@ -85,10 +85,30 @@ func TestState_BorrowRefBytesFallback_Good(t *testing.T) {
 		t.Fatalf("BorrowRefBytes() error = %v", err)
 	}
 	if borrowed.Ref.ChunkID != ref.ChunkID || len(borrowed.Data) != len(payload) || borrowed.Data[0] != 4 {
-		t.Fatalf("BorrowRefBytes() = %+v, want copied payload", borrowed)
+		t.Fatalf("BorrowRefBytes() = %+v, want borrowed payload", borrowed)
 	}
 	if borrowed.Release != nil {
 		borrowed.Release()
+	}
+	borrowed.Data[2] = 99
+	again, err := BorrowRefBytes(context.Background(), store, ref)
+	if err != nil {
+		t.Fatalf("BorrowRefBytes(second) error = %v", err)
+	}
+	if again.Data[2] != 99 {
+		t.Fatalf("BorrowRefBytes() did not return an in-memory view = %v", again.Data)
+	}
+	resolved, err := ResolveBytes(context.Background(), store, ref.ChunkID)
+	if err != nil {
+		t.Fatalf("ResolveBytes(after borrow) error = %v", err)
+	}
+	resolved.Data[2] = 7
+	view, err := BorrowRefBytes(context.Background(), store, ref)
+	if err != nil {
+		t.Fatalf("BorrowRefBytes(third) error = %v", err)
+	}
+	if view.Data[2] != 99 {
+		t.Fatalf("ResolveBytes() mutated borrowed store view = %v", view.Data)
 	}
 }
 

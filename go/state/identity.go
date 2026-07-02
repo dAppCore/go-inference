@@ -61,6 +61,7 @@ type SamplerConfig struct {
 	Temperature   float32  `json:"temperature,omitempty"`
 	TopK          int      `json:"top_k,omitempty"`
 	TopP          float32  `json:"top_p,omitempty"`
+	MinP          float32  `json:"min_p,omitempty"`
 	RepeatPenalty float32  `json:"repeat_penalty,omitempty"`
 	StopTokens    []int32  `json:"stop_tokens,omitempty"`
 	StopSequences []string `json:"stop_sequences,omitempty"`
