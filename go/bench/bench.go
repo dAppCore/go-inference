@@ -16,6 +16,7 @@ import (
 	"time"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/lora"
 )
 
 const ReportVersion = 1
@@ -85,22 +86,10 @@ type Info struct {
 }
 
 // AdapterInfo identifies a LoRA adapter participating in the bench run.
-// Mirrors the shape of go-mlx/lora.AdapterInfo but lives in bench to keep
-// the package driver-neutral.
-type AdapterInfo struct {
-	Name       string   `json:"name,omitempty"`
-	Path       string   `json:"path,omitempty"`
-	Hash       string   `json:"hash,omitempty"`
-	Rank       int      `json:"rank,omitempty"`
-	Alpha      float32  `json:"alpha,omitempty"`
-	Scale      float32  `json:"scale,omitempty"`
-	TargetKeys []string `json:"target_keys,omitempty"`
-}
-
-// IsEmpty reports whether the adapter info has no meaningful fields set.
-func (info AdapterInfo) IsEmpty() bool {
-	return info.Name == "" && info.Path == "" && info.Hash == "" && info.Rank == 0 && info.Alpha == 0 && info.Scale == 0 && len(info.TargetKeys) == 0
-}
+// lora is the shared domain home for this identity (see lora.AdapterInfo)
+// — bench aliases it rather than keeping its own copy so the field set
+// and IsEmpty behaviour cannot drift between packages.
+type AdapterInfo = lora.AdapterInfo
 
 // GenerateOptions describes one generation request.
 type GenerateOptions struct {

@@ -3,9 +3,8 @@
 package train
 
 import (
-	"strconv"
-
 	core "dappco.re/go"
+	"dappco.re/go/inference/checkpoint"
 	"dappco.re/go/inference/eval"
 )
 
@@ -88,7 +87,10 @@ func NewCheckpointMetadata(path string, cfg Config, snapshot CheckpointSnapshot,
 	}
 }
 
-// SaveCheckpointMetadata writes checkpoint metadata beside an adapter package.
+// SaveCheckpointMetadata writes checkpoint metadata beside an adapter
+// package. The marshal-and-write mechanics are the shared checkpoint
+// engine (go/checkpoint); only the Version/Path defaulting and the
+// sidecar filename below are train's own.
 func SaveCheckpointMetadata(path string, meta CheckpointMetadata) error {
 	if path == "" {
 		return errCheckpointPath
@@ -99,21 +101,7 @@ func SaveCheckpointMetadata(path string, meta CheckpointMetadata) error {
 	if meta.Path == "" {
 		meta.Path = path
 	}
-	metadataPath := checkpointMetadataPath(path)
-	dir := core.PathDir(metadataPath)
-	if dir != "" && dir != "." {
-		if result := core.MkdirAll(dir, 0o755); !result.OK {
-			return core.E("CheckpointMetadata.Save", "ensure metadata dir", resultError(result))
-		}
-	}
-	data := core.JSONMarshalIndent(meta, "", "  ")
-	if !data.OK {
-		return core.E("CheckpointMetadata.Save", "marshal metadata", resultError(data))
-	}
-	if result := core.WriteFile(metadataPath, data.Value.([]byte), 0o600); !result.OK {
-		return core.E("CheckpointMetadata.Save", "write metadata", resultError(result))
-	}
-	return nil
+	return checkpoint.Save(checkpointMetadataPath(path), meta)
 }
 
 // LoadCheckpointMetadata reads checkpoint metadata written by SaveCheckpointMetadata.
@@ -121,18 +109,14 @@ func LoadCheckpointMetadata(path string) (*CheckpointMetadata, error) {
 	if path == "" {
 		return nil, errCheckpointPath
 	}
-	read := core.ReadFile(checkpointMetadataPath(path))
-	if !read.OK {
-		return nil, resultError(read)
-	}
-	var meta CheckpointMetadata
-	if result := core.JSONUnmarshal(read.Value.([]byte), &meta); !result.OK {
-		return nil, core.E("LoadCheckpointMetadata", "parse metadata", resultError(result))
+	meta, err := checkpoint.Load[CheckpointMetadata](checkpointMetadataPath(path))
+	if err != nil {
+		return nil, err
 	}
 	if meta.Version == 0 {
 		meta.Version = CheckpointMetadataVersion
 	}
-	return &meta, nil
+	return meta, nil
 }
 
 // LoadResumeMetadata reads checkpoint metadata for a resume path,
@@ -140,22 +124,14 @@ func LoadCheckpointMetadata(path string) (*CheckpointMetadata, error) {
 // own loop treats an absent resume checkpoint as "start fresh" rather
 // than an error.
 func LoadResumeMetadata(path string) (*CheckpointMetadata, error) {
-	read := core.ReadFile(checkpointMetadataPath(path))
-	if !read.OK {
-		err := resultError(read)
-		if core.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var meta CheckpointMetadata
-	if result := core.JSONUnmarshal(read.Value.([]byte), &meta); !result.OK {
-		return nil, core.E("LoadResumeMetadata", "parse metadata", resultError(result))
+	meta, err := checkpoint.LoadResume[CheckpointMetadata](checkpointMetadataPath(path))
+	if err != nil || meta == nil {
+		return meta, err
 	}
 	if meta.Version == 0 {
 		meta.Version = CheckpointMetadataVersion
 	}
-	return &meta, nil
+	return meta, nil
 }
 
 // checkpointMetadataPath places the sidecar beside a single adapter file
@@ -169,27 +145,11 @@ func checkpointMetadataPath(path string) string {
 	return core.PathJoin(path, "train_checkpoint.json")
 }
 
-// FormatStepDir builds the "step-NNNNNN" checkpoint dirname using
-// strconv.AppendInt with explicit zero padding, avoiding fmt's reflection
-// path on the per-checkpoint hot loop. Digit count is computed in place
-// instead of via a throwaway strconv.AppendInt(nil, ...) so the function
-// allocates exactly once — the returned string itself.
+// FormatStepDir builds the "step-NNNNNN" checkpoint dirname — delegates
+// to the shared checkpoint engine (go/checkpoint) so train's copy of the
+// zero-pad logic cannot drift from distill/grpo's.
 //
 //	dir := core.PathJoin(cfg.CheckpointDir, train.FormatStepDir(step))
 func FormatStepDir(step int) string {
-	const prefix = "step-"
-	const padTo = 6
-	buf := make([]byte, 0, len(prefix)+20)
-	buf = append(buf, prefix...)
-	if step >= 0 && step < 100000 {
-		digits := 1
-		for n := step / 10; n > 0; n /= 10 {
-			digits++
-		}
-		for i := digits; i < padTo; i++ {
-			buf = append(buf, '0')
-		}
-	}
-	buf = strconv.AppendInt(buf, int64(step), 10)
-	return string(buf)
+	return checkpoint.FormatStepDir(step)
 }
