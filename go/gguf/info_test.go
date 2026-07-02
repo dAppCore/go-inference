@@ -238,6 +238,39 @@ func TestInfo_resolveGGUFFile_Ugly(t *testing.T) {
 	}
 }
 
+func TestInfo_ResolveFile_Good(t *testing.T) {
+	dir := t.TempDir()
+	target := core.PathJoin(dir, "only.gguf")
+	if result := core.WriteFile(target, []byte("x"), 0o644); !result.OK {
+		t.Fatalf("write fixture: %v", result.Value)
+	}
+	got, err := ResolveFile(dir)
+	if err != nil {
+		t.Fatalf("ResolveFile(dir with one .gguf): %v", err)
+	}
+	if got != target {
+		t.Errorf("ResolveFile(dir) = %q, want %q", got, target)
+	}
+}
+
+func TestInfo_ResolveFile_Bad(t *testing.T) {
+	_, err := ResolveFile(t.TempDir())
+	if err != errGGUFNoFile {
+		t.Fatalf("ResolveFile(empty dir) error = %v, want errGGUFNoFile", err)
+	}
+}
+
+func TestInfo_ResolveFile_Ugly(t *testing.T) {
+	// A .gguf-suffixed path resolves to itself without touching the disk.
+	got, err := ResolveFile("/nonexistent/model.gguf")
+	if err != nil {
+		t.Fatalf("ResolveFile(.gguf path): %v", err)
+	}
+	if got != "/nonexistent/model.gguf" {
+		t.Errorf("ResolveFile(.gguf path) = %q, want the input path", got)
+	}
+}
+
 func TestInfo_architectureFromTransformersName_Good(t *testing.T) {
 	cases := []struct {
 		name string

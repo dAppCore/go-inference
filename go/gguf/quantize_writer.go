@@ -4,13 +4,14 @@ package gguf
 
 import (
 	"encoding/binary"
+	"math"
 	"sort"
 	"strconv"
 
 	core "dappco.re/go"
 )
 
-func ggufQuantizeMetadata(source Source, format QuantizeFormat, labels map[string]string) []ggufMetadataEntry {
+func ggufQuantizeMetadata(source Source, format QuantizeFormat, labels map[string]string) []MetadataEntry {
 	fileType := uint32(7)
 	quantizationType := string(QuantizeQ8_0)
 	if format == QuantizeQ4_0 {
@@ -39,7 +40,7 @@ func ggufQuantizeMetadata(source Source, format QuantizeFormat, labels map[strin
 		quantizationType = "q2_k"
 	}
 	architecture := source.Architecture
-	metadata := []ggufMetadataEntry{
+	metadata := []MetadataEntry{
 		{Key: "general.architecture", ValueType: ValueTypeString, Value: architecture},
 		{Key: "general.file_type", ValueType: ValueTypeUint32, Value: fileType},
 		{Key: "general.quantization_version", ValueType: ValueTypeUint32, Value: uint32(2)},
@@ -47,16 +48,16 @@ func ggufQuantizeMetadata(source Source, format QuantizeFormat, labels map[strin
 		{Key: "general.alignment", ValueType: ValueTypeUint32, Value: uint32(32)},
 	}
 	if source.VocabSize > 0 {
-		metadata = append(metadata, ggufMetadataEntry{Key: architecture + ".vocab_size", ValueType: ValueTypeUint32, Value: uint32(source.VocabSize)})
+		metadata = append(metadata, MetadataEntry{Key: architecture + ".vocab_size", ValueType: ValueTypeUint32, Value: uint32(source.VocabSize)})
 	}
 	if source.HiddenSize > 0 {
-		metadata = append(metadata, ggufMetadataEntry{Key: architecture + ".embedding_length", ValueType: ValueTypeUint32, Value: uint32(source.HiddenSize)})
+		metadata = append(metadata, MetadataEntry{Key: architecture + ".embedding_length", ValueType: ValueTypeUint32, Value: uint32(source.HiddenSize)})
 	}
 	if source.NumLayers > 0 {
-		metadata = append(metadata, ggufMetadataEntry{Key: architecture + ".block_count", ValueType: ValueTypeUint32, Value: uint32(source.NumLayers)})
+		metadata = append(metadata, MetadataEntry{Key: architecture + ".block_count", ValueType: ValueTypeUint32, Value: uint32(source.NumLayers)})
 	}
 	if source.ContextLength > 0 {
-		metadata = append(metadata, ggufMetadataEntry{Key: architecture + ".context_length", ValueType: ValueTypeUint32, Value: uint32(source.ContextLength)})
+		metadata = append(metadata, MetadataEntry{Key: architecture + ".context_length", ValueType: ValueTypeUint32, Value: uint32(source.ContextLength)})
 	}
 	if len(labels) > 0 {
 		keys := make([]string, 0, len(labels))
@@ -65,15 +66,29 @@ func ggufQuantizeMetadata(source Source, format QuantizeFormat, labels map[strin
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			metadata = append(metadata, ggufMetadataEntry{Key: "gguf.label." + key, ValueType: ValueTypeString, Value: labels[key]})
+			metadata = append(metadata, MetadataEntry{Key: "gguf.label." + key, ValueType: ValueTypeString, Value: labels[key]})
 		}
 	}
 	return metadata
 }
 
+// WriteFile writes metadata and tensors as a GGUF v3 file at path. Tensor
+// offsets are assigned by the writer — each tensor's data starts at the next
+// 32-byte-aligned offset and the data section's end is padded to the same
+// boundary, matching upstream gguf-py's writer (which pads every tensor,
+// including the last).
+//
+//	err := gguf.WriteFile(out, []gguf.MetadataEntry{
+//	    {Key: "general.architecture", ValueType: gguf.ValueTypeString, Value: "gemma3"},
+//	    {Key: "adapter.lora.alpha", ValueType: gguf.ValueTypeFloat32, Value: float32(16)},
+//	}, tensors)
+func WriteFile(path string, metadata []MetadataEntry, tensors []Tensor) error {
+	return writeQuantizedGGUF(path, metadata, tensors)
+}
+
 // writeQuantizedGGUF writes tensors (already quantised to GGUF block bytes)
 // and metadata as a GGUF v3 file at path.
-func writeQuantizedGGUF(path string, metadata []ggufMetadataEntry, tensors []ggufQuantizedTensor) error {
+func writeQuantizedGGUF(path string, metadata []MetadataEntry, tensors []Tensor) error {
 	created := core.Create(path)
 	if !created.OK {
 		return quantizeGGUFResultError(created)
@@ -98,10 +113,20 @@ func writeQuantizedGGUF(path string, metadata []ggufMetadataEntry, tensors []ggu
 		}
 		written = tensor.Offset + uint64(len(tensor.Data))
 	}
+	// Pad the data section's end to the alignment boundary. Upstream
+	// gguf-py pads after every tensor including the last, so a canonical
+	// GGUF file's length is 32-byte aligned; readers index tensor data by
+	// offset and never see the trailing zeros. Metadata-only files carry
+	// no data section and stay unpadded.
+	if len(tensors) > 0 {
+		if err := writePadding(file, alignPadding(written, 32)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func writeQuantizedGGUFHeader(file *core.OSFile, metadata []ggufMetadataEntry, tensors []ggufQuantizedTensor) error {
+func writeQuantizedGGUFHeader(file *core.OSFile, metadata []MetadataEntry, tensors []Tensor) error {
 	// Single 24-byte header: magic(4) + version(4) + tensorCount(8) + metadataCount(8).
 	// One write call replaces 4 reflect.Write calls.
 	var header [24]byte
@@ -132,7 +157,7 @@ func writeQuantizedGGUFHeader(file *core.OSFile, metadata []ggufMetadataEntry, t
 	return nil
 }
 
-func assignGGUFTensorOffsets(tensors []ggufQuantizedTensor, alignment uint64) {
+func assignGGUFTensorOffsets(tensors []Tensor, alignment uint64) {
 	var offset uint64
 	for i := range tensors {
 		offset += alignPadding(offset, alignment)
@@ -141,7 +166,7 @@ func assignGGUFTensorOffsets(tensors []ggufQuantizedTensor, alignment uint64) {
 	}
 }
 
-func writeGGUFMetadataEntry(file *core.OSFile, entry ggufMetadataEntry) error {
+func writeGGUFMetadataEntry(file *core.OSFile, entry MetadataEntry) error {
 	if err := writeGGUFStringValue(file, entry.Key); err != nil {
 		return err
 	}
@@ -176,12 +201,21 @@ func writeGGUFMetadataValue(file *core.OSFile, valueType uint32, value any) erro
 		binary.LittleEndian.PutUint32(buf[:], v)
 		_, err := file.Write(buf[:])
 		return err
+	case ValueTypeFloat32:
+		floatValue, ok := value.(float32)
+		if !ok {
+			return core.NewError("gguf: GGUF metadata value is not float32")
+		}
+		var buf [4]byte
+		binary.LittleEndian.PutUint32(buf[:], math.Float32bits(floatValue))
+		_, err := file.Write(buf[:])
+		return err
 	default:
 		return core.NewError("gguf: unsupported GGUF metadata write type " + strconv.FormatUint(uint64(valueType), 10))
 	}
 }
 
-func writeGGUFTensorInfo(file *core.OSFile, tensor ggufQuantizedTensor) error {
+func writeGGUFTensorInfo(file *core.OSFile, tensor Tensor) error {
 	if err := writeGGUFStringValue(file, tensor.Name); err != nil {
 		return err
 	}

@@ -154,6 +154,85 @@ func TestQuantizeWriter_writeQuantizedGGUF_Good(t *testing.T) {
 	}
 }
 
+func TestQuantizeWriter_WriteFile_Good(t *testing.T) {
+	// The public writer front door: string + uint32 + float32 metadata and
+	// one tensor, read back through this package's own parser. Also locks
+	// the canonical data-section shape — gguf-py pads every tensor
+	// including the last, so a data-carrying file's length is 32-aligned.
+	path := core.PathJoin(t.TempDir(), "written.gguf")
+	metadata := []MetadataEntry{
+		{Key: "general.architecture", ValueType: ValueTypeString, Value: "gemma3"},
+		{Key: "general.file_type", ValueType: ValueTypeUint32, Value: uint32(7)},
+		{Key: "adapter.lora.alpha", ValueType: ValueTypeFloat32, Value: float32(16)},
+	}
+	tensors := []Tensor{
+		{Name: "blk.0.weight", Type: TensorTypeQ8_0, Shape: []uint64{32}, Data: quantizeQ8_0(rampBlock(32))},
+	}
+
+	if err := WriteFile(path, metadata, tensors); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	parsedMeta, parsedTensors, err := parseGGUF(path)
+	if err != nil {
+		t.Fatalf("parseGGUF(written file): %v", err)
+	}
+	if parsedMeta["general.architecture"] != "gemma3" {
+		t.Errorf("architecture = %v, want gemma3", parsedMeta["general.architecture"])
+	}
+	if parsedMeta["adapter.lora.alpha"] != float32(16) {
+		t.Errorf("adapter.lora.alpha = %v, want float32 16", parsedMeta["adapter.lora.alpha"])
+	}
+	if len(parsedTensors) != 1 || parsedTensors[0].Name != "blk.0.weight" || parsedTensors[0].Type != TensorTypeQ8_0 {
+		t.Errorf("parsed tensors = %+v, want one blk.0.weight Q8_0 entry", parsedTensors)
+	}
+
+	stat := core.Stat(path)
+	if !stat.OK {
+		t.Fatalf("stat: %v", stat.Value)
+	}
+	if size := stat.Value.(core.FsFileInfo).Size(); size%32 != 0 {
+		t.Errorf("file size = %d, want a 32-byte-aligned length (trailing data-section padding)", size)
+	}
+}
+
+func TestQuantizeWriter_writeGGUFMetadataValue_Float32(t *testing.T) {
+	// Round-trip: a float32 metadata entry written by this package's writer
+	// must come back bit-exact through this package's own parser — the case
+	// modelmgmt's GGUF LoRA adapter (adapter.lora.alpha) depends on.
+	path := core.PathJoin(t.TempDir(), "float32.gguf")
+	metadata := []ggufMetadataEntry{
+		{Key: "general.architecture", ValueType: ValueTypeString, Value: "llama"},
+		{Key: "adapter.lora.alpha", ValueType: ValueTypeFloat32, Value: float32(16.5)},
+	}
+
+	if err := writeQuantizedGGUF(path, metadata, nil); err != nil {
+		t.Fatalf("writeQuantizedGGUF: %v", err)
+	}
+
+	parsed, _, err := parseGGUF(path)
+	if err != nil {
+		t.Fatalf("parseGGUF(written file): %v", err)
+	}
+	if got, ok := parsed["adapter.lora.alpha"].(float32); !ok || got != 16.5 {
+		t.Errorf("adapter.lora.alpha = %v (%T), want float32 16.5", parsed["adapter.lora.alpha"], parsed["adapter.lora.alpha"])
+	}
+}
+
+func TestQuantizeWriter_writeGGUFMetadataValue_Float32_Bad(t *testing.T) {
+	path := core.PathJoin(t.TempDir(), "value.bin")
+	created := core.Create(path)
+	if !created.OK {
+		t.Fatalf("create: %v", created.Value)
+	}
+	file := created.Value.(*core.OSFile)
+	defer file.Close()
+
+	if err := writeGGUFMetadataValue(file, ValueTypeFloat32, "not-a-float32"); err == nil {
+		t.Fatalf("writeGGUFMetadataValue(float32 type, string value): want error, got nil")
+	}
+}
+
 func TestQuantizeWriter_writeGGUFMetadataValue_Bad(t *testing.T) {
 	path := core.PathJoin(t.TempDir(), "value.bin")
 	created := core.Create(path)

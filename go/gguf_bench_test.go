@@ -4,14 +4,14 @@
 // Per AX-11 — ReadGGUFInfo is called once per model load; the
 // metadata loop fires once per metadata entry, of which a typical
 // GGUF has hundreds (every tensor name, vocab token, RoPE setting).
-// readGGUFString is the per-entry hot loop the consumer pays.
+// The per-entry string hot loop is benched in the gguf package
+// (BenchmarkInfoParse_readGGUFString_*), where the wire parser lives.
 //
 // Run:    go test -bench='BenchmarkGGUF' -benchmem -run='^$' .
 
 package inference
 
 import (
-	"bytes"
 	"encoding/binary"
 	"testing"
 
@@ -22,7 +22,6 @@ import (
 var (
 	ggufSinkInfo GGUFInfo
 	ggufSinkErr  error
-	ggufSinkStr  string
 )
 
 // writeBenchGGUF builds a synthetic GGUF with the requested metadata
@@ -43,9 +42,9 @@ func writeBenchGGUF(b *testing.B, metadata map[string]any) string {
 			b.Fatal(err)
 		}
 	}
-	mustWrite(uint32(0x46554747))   // magic
-	mustWrite(uint32(3))            // version
-	mustWrite(uint64(0))            // tensor count
+	mustWrite(uint32(0x46554747)) // magic
+	mustWrite(uint32(3))          // version
+	mustWrite(uint64(0))          // tensor count
 	mustWrite(uint64(len(metadata)))
 	for key, value := range metadata {
 		writeString(key)
@@ -71,10 +70,10 @@ func writeBenchGGUF(b *testing.B, metadata map[string]any) string {
 
 func BenchmarkGGUF_ReadInfo_Minimal(b *testing.B) {
 	path := writeBenchGGUF(b, map[string]any{
-		"general.architecture":  "qwen3",
-		"general.file_type":     uint32(15),
-		"qwen3.block_count":     uint32(28),
-		"qwen3.context_length":  uint32(40960),
+		"general.architecture":   "qwen3",
+		"general.file_type":      uint32(15),
+		"qwen3.block_count":      uint32(28),
+		"qwen3.context_length":   uint32(40960),
 		"qwen3.embedding_length": uint32(2048),
 	})
 	b.ReportAllocs()
@@ -109,31 +108,6 @@ func BenchmarkGGUF_ReadInfo_VocabHeavy(b *testing.B) {
 	}
 }
 
-// --- readGGUFString in isolation (per-entry hot loop) ---
-
-func BenchmarkGGUF_ReadString_Short(b *testing.B) {
-	payload := []byte("qwen3")
-	header := make([]byte, 8)
-	binary.LittleEndian.PutUint64(header, uint64(len(payload)))
-	frame := append(header, payload...)
-	scratch := make([]byte, 8)
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		ggufSinkStr, ggufSinkErr = readGGUFString(bytes.NewReader(frame), scratch)
-	}
-}
-
-func BenchmarkGGUF_ReadString_Long(b *testing.B) {
-	// Token strings can be up to a few hundred bytes (BPE merges).
-	payload := bytes.Repeat([]byte("abcdef"), 64) // 384 bytes
-	header := make([]byte, 8)
-	binary.LittleEndian.PutUint64(header, uint64(len(payload)))
-	frame := append(header, payload...)
-	scratch := make([]byte, 8)
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		ggufSinkStr, ggufSinkErr = readGGUFString(bytes.NewReader(frame), scratch)
-	}
-}
+// The two readGGUFString micro-benches that used to live here moved to
+// gguf/info_parse_bench_test.go together with the parser itself — the root
+// package no longer carries a private GGUF wire reader to bench.
