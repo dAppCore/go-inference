@@ -5,10 +5,10 @@ import (
 	"net/http"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/datapipe"
 	"dappco.re/go/inference/score"
 	"dappco.re/go/inference/serving"
 	coreio "dappco.re/go/io"
+	"dappco.re/go/store"
 )
 
 func capabilityJudge() *score.Judge {
@@ -33,9 +33,13 @@ func TestAgentInflux_ScoreCapabilityAndPush_Bad(t *core.T) {
 }
 
 func TestAgentInflux_ScoreCapabilityAndPush_Ugly(t *core.T) {
-	influx, rec := newFakeInflux(t, nil, 0)
-	ScoreCapabilityAndPush(context.Background(), capabilityJudge(), influx, sampleCheckpoint(), nil)
-	core.AssertEqual(t, 0, rec.writeCount())
+	// Judge scoring succeeds (so lines is non-empty) but the InfluxDB write
+	// itself fails — the push-failed print branch, distinct from the
+	// judge-error branch exercised by Bad.
+	influx, rec := newFakeInflux(t, nil, http.StatusInternalServerError)
+	responses := []CapResponseEntry{{ProbeID: "p1", Category: "math", Prompt: "2+2", Answer: "4", Response: "4"}}
+	ScoreCapabilityAndPush(context.Background(), capabilityJudge(), influx, sampleCheckpoint(), responses)
+	core.AssertEqual(t, 1, rec.writeCount())
 }
 
 func TestAgentInflux_ScoreContentAndPush_Good(t *core.T) {
@@ -52,9 +56,13 @@ func TestAgentInflux_ScoreContentAndPush_Bad(t *core.T) {
 }
 
 func TestAgentInflux_ScoreContentAndPush_Ugly(t *core.T) {
-	influx, rec := newFakeInflux(t, nil, 0)
-	ScoreContentAndPush(context.Background(), contentJudge(), influx, sampleCheckpoint(), "content-run", nil)
-	core.AssertEqual(t, 0, rec.writeCount())
+	// Judge scoring succeeds but the per-response InfluxDB write fails —
+	// the push-failed print branch, distinct from the judge-error branch
+	// exercised by Bad.
+	influx, rec := newFakeInflux(t, nil, http.StatusInternalServerError)
+	responses := []ContentResponse{{Probe: score.ContentProbes[0], Response: "answer"}}
+	ScoreContentAndPush(context.Background(), contentJudge(), influx, sampleCheckpoint(), "content-run", responses)
+	core.AssertEqual(t, 1, rec.writeCount())
 }
 
 func TestAgentInflux_PushCapabilitySummary_Good(t *core.T) {
@@ -116,6 +124,18 @@ func TestAgentInflux_PushCapabilityResultsDB_Ugly(t *core.T) {
 	core.RequireNoError(t, coreio.Local.EnsureDir(dir))
 	PushCapabilityResultsDB(dir, sampleCheckpoint(), sampleProbeResult())
 	core.AssertTrue(t, coreio.Local.IsDir(dir))
+
+	// A pre-existing checkpoint_scores table with an incompatible schema
+	// makes EnsureScoringTables's CREATE-IF-NOT-EXISTS a no-op, so the
+	// named-column INSERT fails against the mismatched table instead of
+	// writing successfully.
+	dbPath := core.JoinPath(t.TempDir(), "mismatched.duckdb")
+	setupDB, rOpen := store.OpenDuckDBReadWrite(dbPath)
+	requireResultOK(t, rOpen)
+	requireResultOK(t, setupDB.Exec("CREATE TABLE checkpoint_scores (model TEXT)"))
+	requireResultOK(t, setupDB.Close())
+
+	core.AssertNotPanics(t, func() { PushCapabilityResultsDB(dbPath, sampleCheckpoint(), sampleProbeResult()) })
 }
 
 func TestAgentInflux_BufferInfluxResult_Good(t *core.T) {
@@ -162,7 +182,24 @@ func TestAgentInflux_ReplayInfluxBuffer_Bad(t *core.T) {
 }
 
 func TestAgentInflux_ReplayInfluxBuffer_Ugly(t *core.T) {
+	// A buffer file with a blank line and a malformed JSON line alongside
+	// one valid entry: the blank line is skipped outright, the malformed
+	// line is preserved for a future replay attempt, and the valid entry
+	// is replayed and dropped. The missing-file case (the scenario this
+	// test previously covered) is already exercised by
+	// TestReplayInfluxBufferMissingFileGoodScenario in agent_test.go.
 	workDir := t.TempDir()
-	ReplayInfluxBuffer(workDir, datapipe.NewInfluxClient("http://127.0.0.1:1", "test"))
-	core.AssertFalse(t, coreio.Local.IsFile(core.JoinPath(workDir, InfluxBufferFile)))
+	cp := sampleCheckpoint()
+	validLine := core.JSONMarshalString(bufferEntry{Checkpoint: cp, Results: sampleProbeResult(), Timestamp: "2025-01-01T00:00:00Z"})
+	content := core.Concat(validLine, "\n\nnot-valid-json\n")
+	core.RequireNoError(t, coreio.Local.Write(core.JoinPath(workDir, InfluxBufferFile), content))
+
+	influx, rec := newFakeInflux(t, nil, 0)
+	ReplayInfluxBuffer(workDir, influx)
+
+	core.AssertEqual(t, 1, rec.writeCount())
+	remaining, err := coreio.Local.Read(core.JoinPath(workDir, InfluxBufferFile))
+	core.RequireNoError(t, err)
+	core.AssertContains(t, remaining, "not-valid-json")
+	core.AssertNotContains(t, remaining, cp.Label)
 }

@@ -72,6 +72,14 @@ func TestAgentSsh_SSHTransport_Run_Good(t *core.T) {
 	defer cancel()
 	r := transport.Run(ctx, "true")
 	assertResultError(t, r)
+
+	// A non-default port exercises the "-p" branch of sshPortArgs, which the
+	// default-port transport above never reaches.
+	portTransport := NewSSHTransport("127.0.0.1", "nobody", "/missing", WithPort("2222"), WithTimeout(time.Millisecond))
+	ctx2, cancel2 := context.WithTimeout(context.Background(), time.Second)
+	defer cancel2()
+	r2 := portTransport.Run(ctx2, "true")
+	assertResultError(t, r2)
 }
 
 func TestAgentSsh_SSHTransport_Run_Bad(t *core.T) {
@@ -94,6 +102,12 @@ func TestAgentSsh_SSHTransport_CopyFrom_Good(t *core.T) {
 	transport := NewSSHTransport("127.0.0.1", "nobody", "/missing", WithTimeout(time.Millisecond))
 	r := transport.CopyFrom(context.Background(), "/remote/file", core.JoinPath(t.TempDir(), "local"))
 	assertResultError(t, r)
+
+	// A non-default port exercises the "-P" branch of commonArgs, which the
+	// default-port transport above never reaches.
+	portTransport := NewSSHTransport("127.0.0.1", "nobody", "/missing", WithPort("2222"), WithTimeout(time.Millisecond))
+	r2 := portTransport.CopyFrom(context.Background(), "/remote/file", core.JoinPath(t.TempDir(), "local"))
+	assertResultError(t, r2)
 }
 
 func TestAgentSsh_SSHTransport_CopyFrom_Bad(t *core.T) {
@@ -216,6 +230,10 @@ func TestAgentSsh_IntEnvOr_Bad(t *core.T) {
 	t.Setenv("ML_TEST_INT_BAD", "not-number")
 	got := IntEnvOr("ML_TEST_INT_BAD", 3)
 	core.AssertEqual(t, 3, got)
+
+	// Unset entirely (empty core.Env read) short-circuits before strconv.Atoi.
+	got2 := IntEnvOr("ML_TEST_INT_UNSET", 9)
+	core.AssertEqual(t, 9, got2)
 }
 
 func TestAgentSsh_IntEnvOr_Ugly(t *core.T) {
@@ -241,4 +259,21 @@ func TestAgentSsh_ExpandHome_Ugly(t *core.T) {
 	core.AssertNotEmpty(t, stubName)
 	got := ExpandHome("/absolute/models")
 	core.AssertEqual(t, "/absolute/models", got)
+}
+
+func TestAgentSsh_fileBase_Good(t *core.T) {
+	got := fileBase("/data/adapters-27b/0001000_adapters.safetensors")
+	core.AssertEqual(t, "0001000_adapters.safetensors", got)
+}
+
+func TestAgentSsh_fileBase_Bad(t *core.T) {
+	got := fileBase("bare.safetensors")
+	core.AssertEqual(t, "bare.safetensors", got)
+}
+
+func TestAgentSsh_fileBase_Ugly(t *core.T) {
+	// Windows-style separators are normalised to "/" before basename
+	// extraction.
+	got := fileBase(`C:\data\adapters-27b\0001000_adapters.safetensors`)
+	core.AssertEqual(t, "0001000_adapters.safetensors", got)
 }

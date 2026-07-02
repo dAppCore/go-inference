@@ -94,14 +94,40 @@ func TestWorkflow_ModelWorkflow_Run_Good(t *core.T) {
 
 func TestWorkflow_ModelWorkflow_Run_Bad(t *core.T) {
 	workflow := mustModelWorkflow(t, &workflowTextOnlyModel{})
+	dataset := &workflowDataset{samples: []inference.DatasetSample{{Text: "one"}}}
 
 	result := workflow.Run(core.Background(), ModelWorkflowRequest{
 		Operation: ModelWorkflowEvaluate,
-		Dataset:   &workflowDataset{samples: []inference.DatasetSample{{Text: "one"}}},
+		Dataset:   dataset,
 	})
-
 	core.AssertFalse(t, result.OK)
 	core.AssertContains(t, result.Error(), "does not support evaluation")
+
+	// Every other operation rejects a model that implements none of the
+	// optional workflow interfaces, the same way Evaluate does above.
+	bench := workflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowBenchmark})
+	sft := workflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowTrainSFT, Dataset: dataset})
+	distill := workflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowDistill, Dataset: dataset})
+	grpo := workflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowGRPO, Dataset: dataset})
+
+	core.AssertFalse(t, bench.OK)
+	core.AssertContains(t, bench.Error(), "does not support benchmarking")
+	core.AssertFalse(t, sft.OK)
+	core.AssertContains(t, sft.Error(), "does not support SFT training")
+	core.AssertFalse(t, distill.OK)
+	core.AssertContains(t, distill.Error(), "does not support distillation")
+	core.AssertFalse(t, grpo.OK)
+	core.AssertContains(t, grpo.Error(), "does not support GRPO")
+
+	// A ProbeSink on a model that isn't ProbeableModel is rejected before
+	// the operation switch even runs.
+	probeRejected := workflow.Run(core.Background(), ModelWorkflowRequest{
+		Operation: ModelWorkflowEvaluate,
+		Dataset:   dataset,
+		ProbeSink: inference.ProbeSinkFunc(func(inference.ProbeEvent) {}),
+	})
+	core.AssertFalse(t, probeRejected.OK)
+	core.AssertContains(t, probeRejected.Error(), "does not support probe events")
 }
 
 func TestWorkflow_ModelWorkflow_Run_Ugly(t *core.T) {
@@ -109,11 +135,59 @@ func TestWorkflow_ModelWorkflow_Run_Ugly(t *core.T) {
 
 	missingOperation := workflow.Run(core.Background(), ModelWorkflowRequest{})
 	missingDataset := workflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowTrainSFT})
+	missingEvalDataset := workflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowEvaluate})
+	missingDistillDataset := workflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowDistill})
+	missingGRPODataset := workflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowGRPO})
+	unsupportedOp := workflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowOperation("unknown")})
 
 	core.AssertFalse(t, missingOperation.OK)
 	core.AssertContains(t, missingOperation.Error(), "operation is required")
 	core.AssertFalse(t, missingDataset.OK)
 	core.AssertContains(t, missingDataset.Error(), "dataset is required")
+	core.AssertFalse(t, missingEvalDataset.OK)
+	core.AssertContains(t, missingEvalDataset.Error(), "dataset is required")
+	core.AssertFalse(t, missingDistillDataset.OK)
+	core.AssertContains(t, missingDistillDataset.Error(), "dataset is required")
+	core.AssertFalse(t, missingGRPODataset.OK)
+	core.AssertContains(t, missingGRPODataset.Error(), "dataset is required")
+	core.AssertFalse(t, unsupportedOp.OK)
+	core.AssertContains(t, unsupportedOp.Error(), "unsupported operation")
+
+	// A nil model workflow (or nil receiver) is rejected before the
+	// operation switch runs at all.
+	var nilWorkflow *ModelWorkflow
+	nilResult := nilWorkflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowEvaluate})
+	core.AssertFalse(t, nilResult.OK)
+	core.AssertContains(t, nilResult.Error(), "model is required")
+
+	// Every operation wraps a real error surfaced by the underlying model
+	// rather than swallowing it.
+	dataset := &workflowDataset{samples: []inference.DatasetSample{{Text: "one"}}}
+	failing := &workflowModel{
+		evalErr:    core.NewError("eval boom"),
+		benchErr:   core.NewError("bench boom"),
+		sftErr:     core.NewError("sft boom"),
+		distillErr: core.NewError("distill boom"),
+		grpoErr:    core.NewError("grpo boom"),
+	}
+	failingWorkflow := mustModelWorkflow(t, failing)
+
+	evalFail := failingWorkflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowEvaluate, Dataset: dataset})
+	benchFail := failingWorkflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowBenchmark})
+	sftFail := failingWorkflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowTrainSFT, Dataset: dataset})
+	distillFail := failingWorkflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowDistill, Dataset: dataset})
+	grpoFail := failingWorkflow.Run(core.Background(), ModelWorkflowRequest{Operation: ModelWorkflowGRPO, Dataset: dataset})
+
+	core.AssertFalse(t, evalFail.OK)
+	core.AssertContains(t, evalFail.Error(), "evaluate dataset")
+	core.AssertFalse(t, benchFail.OK)
+	core.AssertContains(t, benchFail.Error(), "benchmark model")
+	core.AssertFalse(t, sftFail.OK)
+	core.AssertContains(t, sftFail.Error(), "train SFT")
+	core.AssertFalse(t, distillFail.OK)
+	core.AssertContains(t, distillFail.Error(), "distill model")
+	core.AssertFalse(t, grpoFail.OK)
+	core.AssertContains(t, grpoFail.Error(), "train GRPO")
 }
 
 func TestWorkflow_ModelWorkflow_Model_Good(t *core.T) {
@@ -235,6 +309,14 @@ type workflowModel struct {
 	sftCalls     int
 	distillCalls int
 	grpoCalls    int
+
+	// *Err, when set, is returned by the matching method instead of a
+	// zero-value report — exercises Run()'s per-operation error-wrapping.
+	evalErr    error
+	benchErr   error
+	sftErr     error
+	distillErr error
+	grpoErr    error
 }
 
 func (m *workflowModel) SetProbeSink(sink inference.ProbeSink) {
@@ -243,6 +325,9 @@ func (m *workflowModel) SetProbeSink(sink inference.ProbeSink) {
 
 func (m *workflowModel) Evaluate(_ core.Context, _ inference.DatasetStream, _ inference.EvalConfig) (*inference.EvalReport, error) {
 	m.evalCalls++
+	if m.evalErr != nil {
+		return nil, m.evalErr
+	}
 	if m.evalReport != nil {
 		return m.evalReport, nil
 	}
@@ -251,6 +336,9 @@ func (m *workflowModel) Evaluate(_ core.Context, _ inference.DatasetStream, _ in
 
 func (m *workflowModel) Benchmark(_ core.Context, _ inference.BenchConfig) (*inference.BenchReport, error) {
 	m.benchCalls++
+	if m.benchErr != nil {
+		return nil, m.benchErr
+	}
 	if m.benchReport != nil {
 		return m.benchReport, nil
 	}
@@ -259,6 +347,9 @@ func (m *workflowModel) Benchmark(_ core.Context, _ inference.BenchConfig) (*inf
 
 func (m *workflowModel) TrainSFT(_ core.Context, _ inference.DatasetStream, _ inference.TrainingConfig) (*inference.TrainingResult, error) {
 	m.sftCalls++
+	if m.sftErr != nil {
+		return nil, m.sftErr
+	}
 	if m.trainResult != nil {
 		return m.trainResult, nil
 	}
@@ -267,6 +358,9 @@ func (m *workflowModel) TrainSFT(_ core.Context, _ inference.DatasetStream, _ in
 
 func (m *workflowModel) Distill(_ core.Context, _ inference.DatasetStream, _ inference.DistillConfig) (*inference.TrainingResult, error) {
 	m.distillCalls++
+	if m.distillErr != nil {
+		return nil, m.distillErr
+	}
 	if m.trainResult != nil {
 		return m.trainResult, nil
 	}
@@ -275,6 +369,9 @@ func (m *workflowModel) Distill(_ core.Context, _ inference.DatasetStream, _ inf
 
 func (m *workflowModel) TrainGRPO(_ core.Context, _ inference.DatasetStream, _ inference.GRPOConfig) (*inference.TrainingResult, error) {
 	m.grpoCalls++
+	if m.grpoErr != nil {
+		return nil, m.grpoErr
+	}
 	if m.trainResult != nil {
 		return m.trainResult, nil
 	}
