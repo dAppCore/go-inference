@@ -833,3 +833,400 @@ func (l waitRecordLimiter) RecordUsage(model string, promptTokens, outputTokens 
 		l.inner.RecordUsage(model, promptTokens, outputTokens)
 	}
 }
+
+// stubRoundTripper injects a network-free HTTP failure — either
+// RoundTrip itself erroring (client.Do failing) or a canned Response
+// whose Body errors on Read. Both paths in doRequest are otherwise
+// unreachable without a real flaky socket.
+type stubRoundTripper struct {
+	err  error
+	resp *http.Response
+}
+
+func (rt stubRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	if rt.err != nil {
+		return nil, rt.err
+	}
+	return rt.resp, nil
+}
+
+// TestOpenai_Backend_LoadModel_Bad_NoDefaultModel covers the
+// modelID=="" branch — no explicit path AND no configured
+// DefaultModel.
+func TestOpenai_Backend_LoadModel_Bad_NoDefaultModel(t *testing.T) {
+	backend := NewBackend(Config{BaseURL: "https://api.example.test"})
+	result := backend.LoadModel("")
+
+	if result.OK || !core.Contains(result.Error(), "model id is required") {
+		t.Fatalf("LoadModel() = %#v, want model-id-required failure", result)
+	}
+}
+
+// TestOpenai_Backend_LoadModel_Bad_NoBaseURL covers the
+// BaseURL=="" branch — a resolved model id but no configured base URL.
+func TestOpenai_Backend_LoadModel_Bad_NoBaseURL(t *testing.T) {
+	backend := NewBackend(Config{DefaultModel: "gpt-test"})
+	result := backend.LoadModel("")
+
+	if result.OK || !core.Contains(result.Error(), "base URL is required") {
+		t.Fatalf("LoadModel() = %#v, want base-URL-required failure", result)
+	}
+}
+
+// TestOpenai_Model_Complete_Bad_NilBackend covers complete()'s own
+// nil-model/nil-backend guard, reached through the public Chat entry
+// point on a zero-value Model.
+func TestOpenai_Model_Complete_Bad_NilBackend(t *testing.T) {
+	model := &Model{}
+	for range model.Chat(context.Background(), []inference.Message{{Role: "user", Content: "hi"}}) {
+		t.Fatal("Chat() yielded a token for a backend-less model")
+	}
+	if errResult := model.Err(); errResult.OK || !core.Contains(errResult.Error(), "model is nil") {
+		t.Fatalf("Chat() Err() = %#v, want model-is-nil failure", errResult)
+	}
+}
+
+// TestOpenai_Model_Complete_Bad_ContextAssemblerError covers
+// contextMessages' own failure-propagation branch and complete()'s
+// pass-through of it.
+func TestOpenai_Model_Complete_Bad_ContextAssemblerError(t *testing.T) {
+	model, cleanup := newTestModel(t, "unused", http.StatusOK)
+	defer cleanup()
+	model.backend.cfg.ContextAssembler = ContextAssemblerFunc(func(context.Context, []inference.Message) core.Result {
+		return core.Fail(core.E("test", "assembler failed", nil))
+	})
+
+	for range model.Chat(context.Background(), []inference.Message{{Role: "user", Content: "hi"}}) {
+		t.Fatal("Chat() yielded a token despite a failing context assembler")
+	}
+	if errResult := model.Err(); errResult.OK || !core.Contains(errResult.Error(), "assembler failed") {
+		t.Fatalf("Chat() Err() = %#v, want assembler failure", errResult)
+	}
+}
+
+// TestOpenai_Model_ContextMessages_Ugly_EmptyAssembledText covers the
+// contextText=="" branch — the assembler succeeds but returns
+// whitespace-only text, which must not prepend an empty context
+// message.
+func TestOpenai_Model_ContextMessages_Ugly_EmptyAssembledText(t *testing.T) {
+	var gotMessages []inference.Message
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req, err := DecodeRequest(r.Body)
+		if err != nil {
+			t.Fatalf("DecodeRequest() error = %v", err)
+		}
+		gotMessages = openaiMessages2Inference(req.Messages)
+		_, _ = w.Write([]byte(core.JSONMarshalString(ChatCompletionResponse{
+			Model:   "gpt-test",
+			Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", Content: "ok"}}},
+		})))
+	}))
+	defer server.Close()
+
+	backend := NewBackend(Config{
+		BaseURL: server.URL, DefaultModel: "gpt-test", HTTPClient: server.Client(),
+		ContextAssembler: ContextAssemblerFunc(func(context.Context, []inference.Message) core.Result {
+			return core.Ok("   ")
+		}),
+	})
+	modelResult := backend.LoadModel("")
+	if !modelResult.OK {
+		t.Fatalf("LoadModel() error = %s", modelResult.Error())
+	}
+	model := modelResult.Value.(inference.TextModel)
+
+	for range model.Chat(context.Background(), []inference.Message{{Role: "user", Content: "hi"}}) {
+	}
+	if errResult := model.Err(); !errResult.OK {
+		t.Fatalf("Chat() Err() = %s", errResult.Error())
+	}
+	if len(gotMessages) != 1 || gotMessages[0].Role != "user" {
+		t.Fatalf("provider received %+v, want no synthesised context message", gotMessages)
+	}
+}
+
+// TestOpenai_Model_Complete_Bad_LimiterWaitError covers the
+// limiter.WaitForCapacity error-propagation branch.
+func TestOpenai_Model_Complete_Bad_LimiterWaitError(t *testing.T) {
+	model, cleanup := newTestModel(t, "unused", http.StatusOK)
+	defer cleanup()
+	model.backend.cfg.Limiter = waitErrLimiter{err: core.E("test", "quota exhausted", nil)}
+
+	for range model.Chat(context.Background(), []inference.Message{{Role: "user", Content: "hi"}}) {
+		t.Fatal("Chat() yielded a token despite a limiter rejection")
+	}
+	if errResult := model.Err(); errResult.OK || !core.Contains(errResult.Error(), "quota exhausted") {
+		t.Fatalf("Chat() Err() = %#v, want quota-exhausted failure", errResult)
+	}
+}
+
+type waitErrLimiter struct{ err error }
+
+func (l waitErrLimiter) WaitForCapacity(context.Context, string, int) error { return l.err }
+func (l waitErrLimiter) RecordUsage(string, int, int)                       {}
+
+// TestOpenai_Model_Complete_Ugly_TopPTopKThreaded covers the
+// cfg.TopP>0 / cfg.TopK>0 branches — both must thread onto the
+// outbound request when the caller supplies them.
+func TestOpenai_Model_Complete_Ugly_TopPTopKThreaded(t *testing.T) {
+	var gotTopP float32
+	var gotTopK int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		req, err := DecodeRequest(r.Body)
+		if err != nil {
+			t.Fatalf("DecodeRequest() error = %v", err)
+		}
+		if req.TopP != nil {
+			gotTopP = *req.TopP
+		}
+		if req.TopK != nil {
+			gotTopK = *req.TopK
+		}
+		_, _ = w.Write([]byte(core.JSONMarshalString(ChatCompletionResponse{
+			Model:   "gpt-test",
+			Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", Content: "ok"}}},
+		})))
+	}))
+	defer server.Close()
+
+	backend := NewBackend(Config{BaseURL: server.URL, DefaultModel: "gpt-test", HTTPClient: server.Client()})
+	modelResult := backend.LoadModel("")
+	if !modelResult.OK {
+		t.Fatalf("LoadModel() error = %s", modelResult.Error())
+	}
+	model := modelResult.Value.(inference.TextModel)
+
+	for range model.Chat(context.Background(), []inference.Message{{Role: "user", Content: "hi"}}, inference.WithTopP(0.9), inference.WithTopK(40)) {
+	}
+	if errResult := model.Err(); !errResult.OK {
+		t.Fatalf("Chat() Err() = %s", errResult.Error())
+	}
+	if gotTopP != 0.9 || gotTopK != 40 {
+		t.Fatalf("provider received top_p=%v top_k=%v, want 0.9/40", gotTopP, gotTopK)
+	}
+}
+
+// TestOpenai_Model_Complete_Bad_NoChoices covers the
+// len(response.Choices)==0 rejection.
+func TestOpenai_Model_Complete_Bad_NoChoices(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(core.JSONMarshalString(ChatCompletionResponse{Model: "gpt-test"})))
+	}))
+	defer server.Close()
+
+	backend := NewBackend(Config{BaseURL: server.URL, DefaultModel: "gpt-test", HTTPClient: server.Client()})
+	modelResult := backend.LoadModel("")
+	if !modelResult.OK {
+		t.Fatalf("LoadModel() error = %s", modelResult.Error())
+	}
+	model := modelResult.Value.(inference.TextModel)
+
+	for range model.Generate(context.Background(), "hi") {
+		t.Fatal("Generate() yielded a token for a choice-less response")
+	}
+	if errResult := model.Err(); errResult.OK || !core.Contains(errResult.Error(), "no choices") {
+		t.Fatalf("Generate() Err() = %#v, want no-choices failure", errResult)
+	}
+}
+
+// TestOpenai_Model_DoRequest_Bad_MalformedURL covers
+// http.NewRequestWithContext's own construction failure — a base URL
+// containing a raw control character.
+func TestOpenai_Model_DoRequest_Bad_MalformedURL(t *testing.T) {
+	backend := NewBackend(Config{BaseURL: "http://example.test/\x7f", DefaultModel: "gpt-test"})
+	modelResult := backend.LoadModel("")
+	if !modelResult.OK {
+		t.Fatalf("LoadModel() error = %s", modelResult.Error())
+	}
+	model := modelResult.Value.(inference.TextModel)
+
+	for range model.Generate(context.Background(), "hi") {
+		t.Fatal("Generate() yielded a token for a malformed URL")
+	}
+	if errResult := model.Err(); errResult.OK {
+		t.Fatal("Generate() Err() OK = true, want request-construction failure")
+	}
+}
+
+// TestOpenai_Model_DoRequest_Good_OrganisationAndProjectHeaders
+// covers the Organisation/Project header branches.
+func TestOpenai_Model_DoRequest_Good_OrganisationAndProjectHeaders(t *testing.T) {
+	var gotOrg, gotProject string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotOrg = r.Header.Get("OpenAI-Organization")
+		gotProject = r.Header.Get("OpenAI-Project")
+		_, _ = w.Write([]byte(core.JSONMarshalString(ChatCompletionResponse{
+			Model:   "gpt-test",
+			Choices: []ChatChoice{{Message: ChatMessage{Role: "assistant", Content: "ok"}}},
+		})))
+	}))
+	defer server.Close()
+
+	backend := NewBackend(Config{
+		BaseURL: server.URL, DefaultModel: "gpt-test", HTTPClient: server.Client(),
+		Organisation: "org-1", Project: "proj-1",
+	})
+	modelResult := backend.LoadModel("")
+	if !modelResult.OK {
+		t.Fatalf("LoadModel() error = %s", modelResult.Error())
+	}
+	model := modelResult.Value.(inference.TextModel)
+
+	for range model.Generate(context.Background(), "hi") {
+	}
+	if errResult := model.Err(); !errResult.OK {
+		t.Fatalf("Generate() Err() = %s", errResult.Error())
+	}
+	if gotOrg != "org-1" || gotProject != "proj-1" {
+		t.Fatalf("headers org=%q project=%q, want org-1/proj-1", gotOrg, gotProject)
+	}
+}
+
+// TestOpenai_Model_DoRequest_Bad_ClientDoFails covers the
+// m.client.Do error branch via a RoundTripper that fails outright —
+// hermetic (no real socket involved).
+func TestOpenai_Model_DoRequest_Bad_ClientDoFails(t *testing.T) {
+	backend := NewBackend(Config{
+		BaseURL: "http://unused.test", DefaultModel: "gpt-test",
+		HTTPClient: &http.Client{Transport: stubRoundTripper{err: core.E("test", "connection refused", nil)}},
+	})
+	modelResult := backend.LoadModel("")
+	if !modelResult.OK {
+		t.Fatalf("LoadModel() error = %s", modelResult.Error())
+	}
+	model := modelResult.Value.(inference.TextModel)
+
+	for range model.Generate(context.Background(), "hi") {
+		t.Fatal("Generate() yielded a token despite a transport failure")
+	}
+	if errResult := model.Err(); errResult.OK || !core.Contains(errResult.Error(), "connection refused") {
+		t.Fatalf("Generate() Err() = %#v, want transport failure", errResult)
+	}
+}
+
+// TestOpenai_Model_DoRequest_Bad_ResponseBodyReadFails covers the
+// io.ReadAll(resp.Body) error branch via a RoundTripper returning a
+// canned 200 response whose Body errors on Read.
+func TestOpenai_Model_DoRequest_Bad_ResponseBodyReadFails(t *testing.T) {
+	backend := NewBackend(Config{
+		BaseURL: "http://unused.test", DefaultModel: "gpt-test",
+		HTTPClient: &http.Client{Transport: stubRoundTripper{resp: &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       erroringReadCloser{},
+			Header:     make(http.Header),
+		}}},
+	})
+	modelResult := backend.LoadModel("")
+	if !modelResult.OK {
+		t.Fatalf("LoadModel() error = %s", modelResult.Error())
+	}
+	model := modelResult.Value.(inference.TextModel)
+
+	for range model.Generate(context.Background(), "hi") {
+		t.Fatal("Generate() yielded a token despite an unreadable response body")
+	}
+	if errResult := model.Err(); errResult.OK {
+		t.Fatal("Generate() Err() OK = true, want response-read failure")
+	}
+}
+
+// TestOpenai_Model_DoRequest_Bad_MalformedResponseBody covers the
+// core.JSONUnmarshalString decode-failure branch on a 200 response
+// whose body is not valid JSON.
+func TestOpenai_Model_DoRequest_Bad_MalformedResponseBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`not json`))
+	}))
+	defer server.Close()
+
+	backend := NewBackend(Config{BaseURL: server.URL, DefaultModel: "gpt-test", HTTPClient: server.Client()})
+	modelResult := backend.LoadModel("")
+	if !modelResult.OK {
+		t.Fatalf("LoadModel() error = %s", modelResult.Error())
+	}
+	model := modelResult.Value.(inference.TextModel)
+
+	for range model.Generate(context.Background(), "hi") {
+		t.Fatal("Generate() yielded a token for a malformed response body")
+	}
+	if errResult := model.Err(); errResult.OK || !core.Contains(errResult.Error(), "decode provider response") {
+		t.Fatalf("Generate() Err() = %#v, want decode failure", errResult)
+	}
+}
+
+// TestOpenai_Model_EstimateTokens_Good_CustomEstimator covers the
+// Config.EstimateTokens override branch.
+func TestOpenai_Model_EstimateTokens_Good_CustomEstimator(t *testing.T) {
+	var called bool
+	model := &Model{backend: NewBackend(Config{
+		EstimateTokens: func([]inference.Message, inference.GenerateConfig) int {
+			called = true
+			return 99
+		},
+	})}
+
+	if got := model.estimateTokens(nil, inference.GenerateConfig{}); got != 99 {
+		t.Fatalf("estimateTokens() = %d, want 99 from the custom estimator", got)
+	}
+	if !called {
+		t.Fatal("custom EstimateTokens was not invoked")
+	}
+}
+
+// TestOpenai_Model_EstimateTokens_Bad_FloorsAtOne covers the
+// estimate<1 floor for very short (or empty) content with no
+// MaxTokens contribution.
+func TestOpenai_Model_EstimateTokens_Bad_FloorsAtOne(t *testing.T) {
+	model := &Model{backend: NewBackend(Config{})}
+
+	if got := model.estimateTokens([]inference.Message{{Content: "hi"}}, inference.GenerateConfig{}); got != 1 {
+		t.Fatalf("estimateTokens() = %d, want floor of 1", got)
+	}
+}
+
+// TestOpenai_Model_SetResult_Ugly_NonErrorFailureValue drives
+// setResult directly with a hand-constructed core.Result whose Value
+// is not an error — production call sites never build one this way
+// (Model.Err() always stores a genuine error), but setResult must not
+// panic on it.
+func TestOpenai_Model_SetResult_Ugly_NonErrorFailureValue(t *testing.T) {
+	model := &Model{}
+	model.setResult(inference.GenerateMetrics{GeneratedTokens: 3}, core.Result{OK: false, Value: "not an error"})
+
+	if model.lastErr == nil {
+		t.Fatal("setResult(non-error Value) left lastErr nil, want the unexpected-value fallback error")
+	}
+}
+
+// TestOpenai_ProviderError_Ugly_NonJSONBody covers the non-JSON-body
+// fallback branch — a 5xx body that doesn't start with '{'.
+func TestOpenai_ProviderError_Ugly_NonJSONBody(t *testing.T) {
+	result := providerError(http.StatusBadGateway, "<html>Bad Gateway</html>")
+
+	if result.OK || !core.Contains(result.Error(), "Bad Gateway") {
+		t.Fatalf("providerError(non-JSON body) = %#v, want the raw body in the message", result)
+	}
+}
+
+// TestOpenai_ProviderError_Ugly_JSONBodyMissingMessage covers the
+// case where the body starts with '{' and parses as an ErrorResponse,
+// but Error.Message is empty — falls through to the raw-body message
+// rather than surfacing an empty reason.
+func TestOpenai_ProviderError_Ugly_JSONBodyMissingMessage(t *testing.T) {
+	result := providerError(http.StatusBadGateway, `{"error":{}}`)
+
+	if result.OK || !core.Contains(result.Error(), `{"error":{}}`) {
+		t.Fatalf("providerError(empty message) = %#v, want raw body fallback", result)
+	}
+}
+
+// openaiMessages2Inference is a tiny test-local inverse of
+// openaiMessages — converts decoded wire ChatMessages back into
+// inference.Message for assertions in this file.
+func openaiMessages2Inference(messages []ChatMessage) []inference.Message {
+	out := make([]inference.Message, 0, len(messages))
+	for _, msg := range messages {
+		out = append(out, inference.Message{Role: msg.Role, Content: msg.Content})
+	}
+	return out
+}

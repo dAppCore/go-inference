@@ -26,6 +26,30 @@ func TestOllama_GenerateOptions_Good(t *testing.T) {
 	}
 }
 
+// TestOllama_GenerateOptions_Bad covers the all-zero-Options fast
+// path — every field at its zero value must short-circuit to nil
+// rather than allocate a closure that would apply zero-valued
+// overrides on top of the caller's defaults.
+func TestOllama_GenerateOptions_Bad(t *testing.T) {
+	if opts := GenerateOptions(Options{}); opts != nil {
+		t.Fatalf("GenerateOptions(zero value) = %v, want nil", opts)
+	}
+
+	// Negative/zero-boundary fields (TopK/NumPredict <= 0, TopP/MinP <= 0)
+	// must also take the fast path — only strictly-positive TopK/TopP/MinP
+	// and strictly-nonzero Temperature/NumPredict thread through.
+	if opts := GenerateOptions(Options{TopK: -1, TopP: -0.1, MinP: -0.1, NumPredict: -1}); opts != nil {
+		t.Fatalf("GenerateOptions(negative fields) = %v, want nil", opts)
+	}
+
+	// MinP alone must thread even when every other field is at zero —
+	// pins the recently-added min_p option against silent regression.
+	cfg := inference.ApplyGenerateOpts(GenerateOptions(Options{MinP: 0.03}))
+	if cfg.MinP != 0.03 || cfg.MaxTokens != 0 || cfg.Temperature != 0 {
+		t.Fatalf("cfg = %+v, want only MinP set", cfg)
+	}
+}
+
 func TestOllama_NewChatResponse_Good(t *testing.T) {
 	metrics := inference.GenerateMetrics{PromptTokens: 5, GeneratedTokens: 6}
 	chat := NewChatResponse("qwen", "ok", metrics)

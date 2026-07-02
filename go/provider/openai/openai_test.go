@@ -4,6 +4,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"iter"
 	"net/http"
 	"net/http/httptest"
@@ -53,6 +54,46 @@ func (m *stubModel) seq() iter.Seq[inference.Token] {
 				return
 			}
 		}
+	}
+}
+
+// TestOpenAI_StopList_UnmarshalJSON_Good_Bad_Ugly drives StopList's own
+// json.Unmarshaler implementation directly via encoding/json.Unmarshal.
+// The request-decode hot path (ChatCompletionRequest.unmarshalField,
+// unmarshal.go) calls jsonenc.ParseJSONStringList directly on the
+// "stop" field's raw bytes rather than dispatching through this
+// method — see the package note on openai.go's StopList type — so
+// this method is otherwise unreachable from DecodeRequest. It remains
+// part of StopList's public contract (json.Unmarshaler) for any
+// consumer that decodes a StopList value on its own.
+func TestOpenAI_StopList_UnmarshalJSON_Good_Bad_Ugly(t *testing.T) {
+	var single StopList
+	if err := json.Unmarshal([]byte(`"END"`), &single); err != nil {
+		t.Fatalf("Unmarshal(string) error = %v", err)
+	}
+	if len(single) != 1 || single[0] != "END" {
+		t.Fatalf("Unmarshal(string) = %#v, want [END]", single)
+	}
+
+	var multi StopList
+	if err := json.Unmarshal([]byte(`["a","b"]`), &multi); err != nil {
+		t.Fatalf("Unmarshal(array) error = %v", err)
+	}
+	if len(multi) != 2 || multi[0] != "a" || multi[1] != "b" {
+		t.Fatalf("Unmarshal(array) = %#v, want [a b]", multi)
+	}
+
+	var nulled StopList
+	if err := json.Unmarshal([]byte(`null`), &nulled); err != nil {
+		t.Fatalf("Unmarshal(null) error = %v", err)
+	}
+	if nulled != nil {
+		t.Fatalf("Unmarshal(null) = %#v, want nil", nulled)
+	}
+
+	var bad StopList
+	if err := json.Unmarshal([]byte(`42`), &bad); err == nil {
+		t.Fatal("Unmarshal(42) returned nil error, want a shape rejection")
 	}
 }
 
