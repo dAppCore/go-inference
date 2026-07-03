@@ -28,10 +28,13 @@ type ggufTensorTypeDetailsInfo struct {
 }
 
 // ggufTensorTypeDetailsTable — direct lookup by tensorType id, replaces the
-// 35-case switch in the per-tensor hot path. IDs are bounded 0..39 with
-// gaps (4, 5, 36, 37 unused in current GGML); unused entries default to
-// the zero ggufTensorTypeDetailsInfo (Known=false, treated as unknown).
-var ggufTensorTypeDetailsTable = [40]ggufTensorTypeDetailsInfo{
+// 35-case switch in the per-tensor hot path. IDs are bounded 0..40 with
+// gaps (4, 5, 36, 37, 38 unused in current GGML — the last three are the
+// removed IQ4_NL_4_4/4_8/8_8 slots, which is why MXFP4/NVFP4 land at 39/40
+// here rather than the 38/39 the separate llama_ftype file-type enum uses
+// for the same quant families); unused entries default to the zero
+// ggufTensorTypeDetailsInfo (Known=false, treated as unknown).
+var ggufTensorTypeDetailsTable = [41]ggufTensorTypeDetailsInfo{
 	ggufTensorTypeF32:      {Name: "f32", DType: "float32", Bits: 32, Known: true},
 	ggufTensorTypeF16:      {Name: "f16", DType: "float16", Bits: 16, Known: true},
 	TensorTypeQ4_0:         {Name: "q4_0", DType: "ggml_q4_0", Bits: 4, BlockSize: 32, Quantized: true, Known: true},
