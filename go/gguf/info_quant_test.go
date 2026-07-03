@@ -41,6 +41,28 @@ func TestInfoQuant_ggufTensorTypeDetails_Bad(t *testing.T) {
 	}
 }
 
+// TestInfoQuant_ggufTensorTypeDetails_MXFP4NVFP4NotFileType_Good is a
+// self-contained regression pin for a confirmed past bug: the per-tensor
+// ggml_type IDs for MXFP4/NVFP4 (39/40 upstream — 36-38 are the removed
+// IQ4_NL_4_4/4_8/8_8 slots) were taken from the SEPARATE llama_ftype
+// file-type enum, which numbers the same quant families 38/39. The two
+// numberings collide-by-off-one for this pair: type id 38 in the PER-TENSOR
+// table must resolve to unknown (a removed slot), never to mxfp4 borrowed
+// from the file_type table.
+func TestInfoQuant_ggufTensorTypeDetails_MXFP4NVFP4NotFileType_Good(t *testing.T) {
+	if got := ggufTensorTypeDetails(38); got.Known {
+		t.Errorf("ggml_type 38 = %+v, want unknown (it is a removed IQ4_NL_8_8 slot, not mxfp4 — mxfp4 is llama_ftype 38, ggml_type 39)", got)
+	}
+	mxfp4 := ggufTensorTypeDetails(39)
+	if mxfp4.Name != "mxfp4" || mxfp4.BlockSize != 32 {
+		t.Errorf("ggml_type 39 = %+v, want mxfp4/block 32", mxfp4)
+	}
+	nvfp4 := ggufTensorTypeDetails(40)
+	if nvfp4.Name != "nvfp4" || nvfp4.BlockSize != 32 {
+		t.Errorf("ggml_type 40 = %+v, want nvfp4/block 32", nvfp4)
+	}
+}
+
 func TestInfoQuant_buildGGUFTensorInfos_Good(t *testing.T) {
 	tensors := []TensorInfo{
 		{Name: "t0", Type: TensorTypeQ4_0, Shape: []uint64{32, 4}},

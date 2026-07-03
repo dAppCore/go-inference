@@ -101,8 +101,8 @@ const (
 	ggufTensorTypeQ4_0_8_8 = 33
 	ggufTensorTypeTQ1_0    = 34
 	ggufTensorTypeTQ2_0    = 35
-	ggufTensorTypeMXFP4    = 38
-	ggufTensorTypeNVFP4    = 39
+	ggufTensorTypeMXFP4    = 39
+	ggufTensorTypeNVFP4    = 40
 )
 
 // Info summarises the metadata of a GGUF checkpoint.
