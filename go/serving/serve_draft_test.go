@@ -89,7 +89,7 @@ func TestResolveServeDraft_AutoDetects_Good(t *testing.T) {
 		t.Fatalf("mkdir assistant: %v", r.Value)
 	}
 	writeGemma4Pack(t, assistant)
-	det := resolveServeDraft(dir, "auto", true)
+	det := ResolveServeDraft(dir, "auto", true)
 	if det.Source != DraftSourceAssistantDir {
 		t.Fatalf("auto should run the ladder and find assistant/: %+v", det)
 	}

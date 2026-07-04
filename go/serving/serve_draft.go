@@ -106,10 +106,11 @@ func DetectGemma4DraftPath(modelPath, explicit string, opts DraftDetectOptions) 
 	return DraftDetection{}
 }
 
-// resolveServeDraft turns the serve flags into a drafter decision: "auto" (the
-// default) runs the reactive detection ladder, an explicit path forces the
-// drafter, and "" (or -draft-detect=false) stands the ladder down.
-func resolveServeDraft(modelPath, draftFlag string, detect bool) DraftDetection {
+// ResolveServeDraft turns the serve/generate flags into a drafter decision:
+// "auto" (the default) runs the reactive detection ladder, an explicit path
+// forces the drafter, and "" (or -draft-detect=false) stands the ladder down.
+// Shared by the serve and generate commands (both run the same ladder).
+func ResolveServeDraft(modelPath, draftFlag string, detect bool) DraftDetection {
 	explicit := ""
 	opts := DraftDetectOptions{Disabled: !detect}
 	switch trimmed := core.Trim(draftFlag); trimmed {

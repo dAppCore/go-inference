@@ -238,6 +238,23 @@ func (r *hotSwapResolver) reloadLoadOpts(newOpts []inference.LoadOption) []infer
 	return merged
 }
 
+// ReloadModel is the string-typed reload seam the admin subsystem drives: it
+// swaps in newPath and returns the previous + new active paths (never the
+// internal loadedModel, so the admin package need not import serving's private
+// types). It is Replace with the audit-facing shape /v1/admin/serve/reload wants.
+//
+//	prevPath, newPath, err := r.ReloadModel(toPath, opts)
+func (r *hotSwapResolver) ReloadModel(newPath string, newOpts []inference.LoadOption) (prevPath, newActive string, err error) {
+	prev, active, err := r.Replace(newPath, newOpts)
+	if err != nil {
+		return "", "", err
+	}
+	if prev != nil {
+		prevPath = prev.modelPath
+	}
+	return prevPath, active, nil
+}
+
 // CurrentPath returns the modelPath of the active model, or the initial path if
 // no load has happened yet. Used by handlers that render the active source
 // (e.g. /v1/admin/serve/status).

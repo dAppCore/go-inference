@@ -61,6 +61,8 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	switch args[0] {
 	case "serve":
 		return runServeCommand(ctx, args[1:], stdout, stderr)
+	case "generate":
+		return runGenerateCommand(ctx, args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return 0
@@ -77,6 +79,7 @@ func printUsage(w io.Writer) {
 	core.WriteString(w, "\n")
 	core.WriteString(w, "Run inference\n")
 	core.WriteString(w, "  serve               host OpenAI/Anthropic/Ollama HTTP API for a loaded model\n")
+	core.WriteString(w, "  generate            one-shot generate + decode tok/s (no serve; like-for-like bench)\n")
 	core.WriteString(w, "\n")
 	core.WriteString(w, "Examples\n")
 	core.WriteString(w, core.Sprintf("  %s serve --model ~/models/gemma-4-e2b-it-4bit         # OpenAI HTTP on :36911\n", name))
