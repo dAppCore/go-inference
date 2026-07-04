@@ -63,3 +63,11 @@ require (
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 )
+
+// Pure-Go Apple-GPU bindings brought in with engine/metal (the native/metal
+// engine). No cgo: tmc/apple drives Metal/Foundation/objc through purego's
+// dlopen/dlsym bridge. darwin && arm64 build tags gate the engine itself.
+require (
+	github.com/ebitengine/purego v0.10.1 // indirect
+	github.com/tmc/apple v0.6.12
+)
