@@ -1,0 +1,341 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+package serving
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"time"
+
+	core "dappco.re/go"
+	"dappco.re/go/inference"
+	openai "dappco.re/go/inference/provider/openai"
+	"dappco.re/go/inference/serving/compat"
+	"dappco.re/go/inference/state"
+	"dappco.re/go/inference/state/filestore"
+)
+
+// Resolver resolves an OpenAI-API `model` field to a loaded inference.TextModel
+// for the compatibility mux. It is the provider/openai.Resolver, re-exported so
+// serve callers depend on one package.
+type Resolver = openai.Resolver
+
+// ContinuityEnabler attaches the no-prompt-replay conversation loop to a freshly
+// loaded model, backed by store. It is injected by the composition root so the
+// serving library carries no engine coupling: an engine whose TextModel supports
+// continuity supplies an enabler; an engine that doesn't leaves it nil and serve
+// degrades to stateless with an honest notice. Errors degrade too — continuity
+// never blocks the serve from coming up.
+type ContinuityEnabler func(model inference.TextModel, store state.Store) error
+
+// ServeConfig is the declarative serve request: the model + listen surface plus
+// the reactive-drafter, tuned-profile, conversation-continuity and admin knobs
+// that lthn-mlx's serve command carried. RunServe turns it into the assembled
+// HTTP server. cmd/lem builds this from flags and calls RunServe — the serve
+// business logic (draft resolution, profile resolution, hot-swap, continuity)
+// lives here in the library, not in cmd/.
+type ServeConfig struct {
+	Addr        string                 // listen address (e.g. ":36911")
+	ModelPath   string                 // model to load; "" starts model-less (reload later)
+	LoadOptions []inference.LoadOption // context length, adapter, slots, … forwarded to the loader
+
+	// Reactive MTP drafter (Gemma 4 targets).
+	DraftPath     string // "auto" runs the ladder, "" disables, a path forces the drafter
+	DraftDetect   bool   // reactive detection for Gemma 4 targets
+	DraftBlock    int    // explicit MTP draft block; 0 = tuned profile or engine default
+	NoAutoProfile bool   // ignore tuned profiles
+	ProfileDir    string // tuned-profile directory (default ~/Lethean/data/tuning)
+	MachineHash   string // machine identity for profile matching; "" accepts hash-less profiles
+
+	KVCacheMode string // requested KV cache mode; wired when the engine exposes it
+	Native      bool   // no-cgo native path (the default go-inference metal engine already is)
+
+	// Conversation continuity.
+	StateConversations bool   // wake each chat from its slept state, no prompt replay
+	StateStorePath     string // state store file (default ~/Lethean/data/state/conversations.kv)
+
+	// HTTP + admin.
+	ReadTimeout     time.Duration
+	WriteTimeout    time.Duration
+	ShutdownTimeout time.Duration
+	AdminToken      string    // Bearer token for /v1/admin/*; "" leaves the subtree open
+	Log             io.Writer // boot notices + admin auth-deny audit (cmd passes os.Stderr)
+
+	// Injected engine seams (nil = use the registered-metal defaults / degrade).
+	Loader            ModelLoader       // overrides the default metal loader
+	SpeculativeLoader SpeculativeLoader // target+draft pair loader; nil = no speculative path
+	EnableContinuity  ContinuityEnabler // conversation-continuity attach; nil = stateless
+}
+
+// RunServe assembles and runs the serve command's server from cfg: it resolves
+// the reactive drafter, the tuned draft block, and conversation continuity, then
+// stages a hot-swap resolver and hosts the OpenAI/Anthropic/Ollama-compatible
+// HTTP API. It blocks until ctx is cancelled or the listener fails. This is the
+// serve business logic ported out of lthn-mlx's cmd/mlx so cmd/lem stays thin.
+func RunServe(ctx context.Context, cfg ServeConfig) error {
+	log := cfg.Log
+
+	// Reactive MTP pair resolution (the model declares, the serve reacts): an
+	// explicit --draft path wins; --draft="" disables; "auto" runs the ladder.
+	detection := resolveServeDraft(cfg.ModelPath, cfg.DraftPath, cfg.DraftDetect)
+	// A detected drafter is only armed when the registered engine exposes a
+	// speculative loader; otherwise degrade to plain autoregressive with an
+	// honest notice, faithful to lthn-mlx (a drafter that can't load never
+	// blocks the serve — it surfaces the failure rather than refusing to boot).
+	armDrafter := detection.Active() && cfg.SpeculativeLoader != nil
+	draftPathForResolver := ""
+	if armDrafter {
+		draftPathForResolver = detection.DraftPath
+	} else if detection.Active() {
+		printServe(log, "serve: drafter %s detected but this engine exposes no speculative path — serving plain autoregressive", detection.DraftPath)
+	}
+
+	resolvedBlock, blockNote := resolveServeDraftBlock(detection, cfg.ModelPath, cfg.DraftBlock, cfg.NoAutoProfile, cfg.ProfileDir, cfg.MachineHash)
+
+	hotSwap := newHotSwapResolver(cfg.ModelPath, draftPathForResolver, resolvedBlock, cfg.LoadOptions)
+	hotSwap.setLoader(cfg.Loader) // nil-safe: keeps the registered-metal default
+	hotSwap.setSpeculativeLoader(cfg.SpeculativeLoader)
+	// Reload symmetry: each /v1/admin/serve/reload re-runs the reactive ladder
+	// over the swapped-in target, honouring the boot --draft-detect choice.
+	hotSwap.setDraftDetect(DraftDetectOptions{Disabled: !cfg.DraftDetect})
+
+	if cfg.Native {
+		printServe(log, "serve: native no-cgo engine (the default go-inference metal path)")
+	}
+	if core.Trim(cfg.KVCacheMode) != "" {
+		printServe(log, "serve: -kv-cache %s requested; the registered engine loads its default cache mode (per-engine cache-mode selection lands with the engine load-config surface)", cfg.KVCacheMode)
+	}
+	if cfg.ModelPath == "" {
+		printServe(log, "serve: starting model-less — POST /v1/admin/serve/reload to load a model")
+	}
+
+	// Conversation continuity — on by default. Any failure here degrades to
+	// stateless serving with an honest notice; it never blocks the serve.
+	if cfg.StateConversations {
+		wireContinuity(ctx, cfg, hotSwap, log)
+	}
+
+	if armDrafter {
+		if notice := speculativeServeNotice(detection, resolvedBlock); notice != "" {
+			if blockNote != "" {
+				notice += " [" + blockNote + "]"
+			}
+			printServe(log, "serve: %s", notice)
+		}
+	}
+	printServe(log, "serve: listening on %s (model=%s)", cfg.Addr, cfg.ModelPath)
+
+	admin := compat.AdminConfig{
+		Health: func(_ context.Context) (compat.Health, error) {
+			// Report the currently-loaded model (post-reload), or no models when
+			// the driver started model-less and none has been loaded yet.
+			models := []string{}
+			if p := hotSwap.CurrentPath(); p != "" {
+				models = append(models, p)
+			}
+			return compat.Health{Status: "ok", Runtime: "go-inference", Models: models, Time: time.Now().Unix()}, nil
+		},
+	}
+
+	opts := []ServeOption{
+		WithAdminToken(cfg.AdminToken),
+		WithAdminConfig(admin),
+		WithAuditLog(log),
+	}
+	if cfg.ReadTimeout > 0 {
+		opts = append(opts, WithReadHeaderTimeout(cfg.ReadTimeout))
+	}
+	if cfg.WriteTimeout > 0 {
+		opts = append(opts, WithWriteTimeout(cfg.WriteTimeout))
+	}
+	if cfg.ShutdownTimeout > 0 {
+		opts = append(opts, WithShutdownTimeout(cfg.ShutdownTimeout))
+	}
+	return Serve(ctx, cfg.Addr, hotSwap.openaiResolver(), opts...)
+}
+
+// wireContinuity opens the conversation state store and registers the per-load
+// continuity hook. When no ContinuityEnabler is injected (the registered engine
+// exposes no continuity attach), or the store can't open, serve degrades to
+// stateless with an honest notice rather than failing.
+func wireContinuity(ctx context.Context, cfg ServeConfig, hotSwap *hotSwapResolver, log io.Writer) {
+	if cfg.EnableContinuity == nil {
+		printServe(log, "serve: conversation continuity unavailable on this engine — serving stateless")
+		return
+	}
+	storePath := core.Trim(cfg.StateStorePath)
+	if storePath == "" {
+		if homeR := core.UserHomeDir(); homeR.OK {
+			if home, ok := homeR.Value.(string); ok {
+				storePath = core.PathJoin(home, "Lethean", "data", "state", "conversations.kv")
+			}
+		}
+	}
+	var store *filestore.Store
+	if storePath != "" {
+		if opened, err := openOrCreateStateStore(ctx, storePath); err == nil {
+			store = opened
+		} else {
+			printServe(log, "serve: conversation state store %s: %v", storePath, err)
+		}
+	}
+	if store == nil {
+		printServe(log, "serve: conversation continuity unavailable — serving stateless")
+		return
+	}
+	enable := cfg.EnableContinuity
+	hotSwap.setOnLoad(func(model inference.TextModel) {
+		if err := enable(model, store); err != nil {
+			printServe(log, "serve: conversation continuity unavailable (stateless serving continues): %v", err)
+			return
+		}
+		printServe(log, "serve: conversation continuity ON — chats wake from %s, no prompt replay", storePath)
+	})
+}
+
+// openOrCreateStateStore opens an existing conversation state store or creates a
+// fresh one (with its parent directory) at path. Ported from lthn-mlx's serve
+// state wiring.
+func openOrCreateStateStore(ctx context.Context, path string) (*filestore.Store, error) {
+	if core.Stat(path).OK {
+		return filestore.Open(ctx, path)
+	}
+	if dir := core.PathDir(path); dir != "" {
+		if r := core.MkdirAll(dir, 0o755); !r.OK {
+			return nil, core.E("serving.openOrCreateStateStore", "mkdir store dir", r.Value.(error))
+		}
+	}
+	return filestore.Create(ctx, path)
+}
+
+// printServe writes a serve boot notice to w (nil silences it).
+func printServe(w io.Writer, format string, args ...any) {
+	if w == nil {
+		return
+	}
+	core.Print(w, format, args...)
+}
+
+// serveConfig holds the tunable knobs for Serve. Fields are declarative so the
+// call site reads as configuration, not procedure.
+type serveConfig struct {
+	readHeaderTimeout time.Duration
+	writeTimeout      time.Duration
+	shutdownTimeout   time.Duration
+	adminToken        string
+	adminHandler      http.Handler
+	admin             compat.AdminConfig
+	audit             io.Writer
+}
+
+// ServeOption tunes Serve. Unset options fall back to the serve defaults (30s
+// read-header, 5m write, 10s shutdown, no admin wall).
+type ServeOption func(*serveConfig)
+
+// WithReadHeaderTimeout sets the HTTP read-header timeout (default 30s).
+func WithReadHeaderTimeout(d time.Duration) ServeOption {
+	return func(c *serveConfig) { c.readHeaderTimeout = d }
+}
+
+// WithWriteTimeout sets the HTTP write timeout, which must cover a full
+// streaming response (default 5m).
+func WithWriteTimeout(d time.Duration) ServeOption {
+	return func(c *serveConfig) { c.writeTimeout = d }
+}
+
+// WithShutdownTimeout sets the graceful-shutdown deadline applied after the
+// context is cancelled (default 10s).
+func WithShutdownTimeout(d time.Duration) ServeOption {
+	return func(c *serveConfig) { c.shutdownTimeout = d }
+}
+
+// WithAdminToken raises the Bearer-auth wall on /v1/admin/*. An empty token (the
+// default) leaves the admin subtree open — pass a token whenever an admin
+// handler is mounted (see WithAdminHandler).
+func WithAdminToken(token string) ServeOption {
+	return func(c *serveConfig) { c.adminToken = token }
+}
+
+// WithAdminHandler mounts handler at the /v1/admin/ subtree (behind the Bearer
+// wall when WithAdminToken is set). The admin subsystem (reload / download / hf
+// / auth) supplies this; the foundation serve leaves it nil, so /v1/admin/* is a
+// guarded-but-empty subtree.
+func WithAdminHandler(handler http.Handler) ServeOption {
+	return func(c *serveConfig) { c.adminHandler = handler }
+}
+
+// WithAdminConfig supplies the host-owned health / wake / sleep callbacks for
+// the compatibility mux's /v1/health and /v1/runtime/* routes.
+func WithAdminConfig(admin compat.AdminConfig) ServeOption {
+	return func(c *serveConfig) { c.admin = admin }
+}
+
+// WithAuditLog directs admin auth-deny lines to w. nil (the default) silences
+// them. cmd/lem passes os.Stderr.
+func WithAuditLog(w io.Writer) ServeOption {
+	return func(c *serveConfig) { c.audit = w }
+}
+
+// Serve hosts the OpenAI / Anthropic / Ollama-compatible HTTP API for resolver
+// on addr and blocks until ctx is cancelled or the listener fails.
+//
+// It composes the compatibility mux (compat.NewMuxWithAdmin) at "/", mounts an
+// optional admin handler at "/v1/admin/", and — when an admin token is set —
+// wraps the whole tree in the Bearer wall so admin verbs require auth while
+// inference paths pass through. On ctx cancellation it drains in-flight requests
+// within the shutdown timeout. RunServe is the high-level entry; Serve is the
+// resolver-agnostic HTTP layer beneath it.
+//
+//	err := serving.Serve(ctx, ":36911", resolver, serving.WithAdminToken(tok))
+func Serve(ctx context.Context, addr string, resolver Resolver, opts ...ServeOption) error {
+	cfg := serveConfig{
+		readHeaderTimeout: 30 * time.Second,
+		writeTimeout:      5 * time.Minute,
+		shutdownTimeout:   10 * time.Second,
+	}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	// http.ServeMux uses longest-prefix match, so /v1/admin/ routes hit the
+	// admin handler and everything else falls through to the compat mux.
+	root := http.NewServeMux()
+	if cfg.adminHandler != nil {
+		root.Handle("/v1/admin/", cfg.adminHandler)
+	}
+	root.Handle("/", compat.NewMuxWithAdmin(resolver, cfg.admin))
+
+	// Bearer auth on /v1/admin/* only — mounted at the root so composition order
+	// can never leave an admin handler unauthenticated.
+	var handler http.Handler = root
+	if cfg.adminToken != "" {
+		handler = RequireBearerOnAdmin(root, cfg.adminToken, cfg.audit)
+	}
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: cfg.readHeaderTimeout,
+		WriteTimeout:      cfg.writeTimeout,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		err := srv.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			errCh <- err
+			return
+		}
+		errCh <- nil
+	}()
+
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.shutdownTimeout)
+		defer cancel()
+		return srv.Shutdown(shutdownCtx)
+	}
+}
