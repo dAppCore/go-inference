@@ -9,7 +9,6 @@ import (
 	"time"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference"
 	"dappco.re/go/inference/serving"
 )
 
@@ -111,15 +110,10 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		core.Print(stderr, "%s serve: fresh admin token generated at %s — reveal with `%s serve --print-admin-token`", cliName(), tokenPath, cliName())
 	}
 
-	loadOpts := []inference.LoadOption{}
-	if *contextLen > 0 {
-		loadOpts = append(loadOpts, inference.WithContextLen(*contextLen))
-	}
-
 	err = serving.RunServe(ctx, serving.ServeConfig{
 		Addr:               *addr,
 		ModelPath:          *modelPath,
-		LoadOptions:        loadOpts,
+		ContextLen:         *contextLen,
 		DraftPath:          *draftPath,
 		DraftDetect:        *draftDetect,
 		DraftBlock:         *draftBlock,

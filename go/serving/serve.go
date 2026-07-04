@@ -11,6 +11,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	openai "dappco.re/go/inference/provider/openai"
+	adminpkg "dappco.re/go/inference/serving/admin"
 	"dappco.re/go/inference/serving/compat"
 	"dappco.re/go/inference/state"
 	"dappco.re/go/inference/state/filestore"
@@ -38,7 +39,8 @@ type ContinuityEnabler func(model inference.TextModel, store state.Store) error
 type ServeConfig struct {
 	Addr        string                 // listen address (e.g. ":36911")
 	ModelPath   string                 // model to load; "" starts model-less (reload later)
-	LoadOptions []inference.LoadOption // context length, adapter, slots, … forwarded to the loader
+	ContextLen  int                    // context-length override (0 = model default); reported by /v1/admin/serve/status
+	LoadOptions []inference.LoadOption // adapter, slots, … forwarded to the loader (context is applied from ContextLen)
 
 	// Reactive MTP drafter (Gemma 4 targets).
 	DraftPath     string // "auto" runs the ladder, "" disables, a path forces the drafter
@@ -93,7 +95,11 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 
 	resolvedBlock, blockNote := resolveServeDraftBlock(detection, cfg.ModelPath, cfg.DraftBlock, cfg.NoAutoProfile, cfg.ProfileDir, cfg.MachineHash)
 
-	hotSwap := newHotSwapResolver(cfg.ModelPath, draftPathForResolver, resolvedBlock, cfg.LoadOptions)
+	loadOpts := append([]inference.LoadOption(nil), cfg.LoadOptions...)
+	if cfg.ContextLen > 0 {
+		loadOpts = append(loadOpts, inference.WithContextLen(cfg.ContextLen))
+	}
+	hotSwap := newHotSwapResolver(cfg.ModelPath, draftPathForResolver, resolvedBlock, loadOpts)
 	hotSwap.setLoader(cfg.Loader) // nil-safe: keeps the registered-metal default
 	hotSwap.setSpeculativeLoader(cfg.SpeculativeLoader)
 	// Reload symmetry: each /v1/admin/serve/reload re-runs the reactive ladder
@@ -138,8 +144,26 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 		},
 	}
 
+	// The /v1/admin/* control plane (machine identity, serve status, hot-swap
+	// reload) mounts behind the Bearer wall, driven by the same hot-swap
+	// resolver serving inference.
+	adminMux := adminpkg.NewMux(adminpkg.Config{
+		Reloader: hotSwap,
+		ServeStatus: adminpkg.ServeStatus{
+			ModelPath:    cfg.ModelPath,
+			Runtime:      "metal",
+			LoadedAtUnix: time.Now().Unix(),
+			Config: adminpkg.ServeStatusConfig{
+				ContextLength: cfg.ContextLen,
+				CacheMode:     cfg.KVCacheMode,
+			},
+		},
+		Log: log,
+	})
+
 	opts := []ServeOption{
 		WithAdminToken(cfg.AdminToken),
+		WithAdminHandler(adminMux),
 		WithAdminConfig(admin),
 		WithAuditLog(log),
 	}
