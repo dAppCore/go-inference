@@ -30,6 +30,21 @@ type cacheInfo struct {
 func (c cacheInfo) Mode() string      { return c.mode }
 func (c cacheInfo) Serves() StateKind { return c.serves }
 
+// kvCacheInfo is a KV-cache scheme value that also carries its per-element byte
+// width — the exact rational a memory planner sizes a KV cache from. It embeds
+// cacheInfo (identity + StateKVCache) and satisfies CacheWidth. A recurrent
+// holder stays a plain cacheInfo, so the width probe misses it: knownness and
+// sizing both key off this one capability, not a duplicated mode list.
+type kvCacheInfo struct {
+	cacheInfo
+	num, den uint64
+	roundUp  bool
+}
+
+func (k kvCacheInfo) KVBytesPerElement() (num, den uint64, roundUp bool) {
+	return k.num, k.den, k.roundUp
+}
+
 type quantInfo struct {
 	kind string
 	bits int
@@ -61,13 +76,27 @@ func init() {
 	RegisterMixer(mixerInfo{"softmax-hybrid", StateKVCache})
 
 	// KV-cache schemes the engine implements today (the KVCacheMode enum in
-	// pkg/metal/cache.go — "" maps to "default"). All hold a growing K/V cache.
-	for _, mode := range []string{"default", "fp16", "q8", "k-q8-v-q4", "paged", "fixed", "turboquant"} {
-		RegisterCache(cacheInfo{mode, StateKVCache})
+	// pkg/metal/cache.go — "" maps to "default"). All hold a growing K/V cache,
+	// and each carries its per-element byte width (CacheWidth): the exact
+	// rational a memory planner sizes a cache from. fp16/default/paged/fixed are
+	// full-precision (2 bytes/element); q8 is 1; k-q8-v-q4 is 3/4 truncated;
+	// turboquant is 7/16 rounded up (3.5 bits/element). The rounding is per
+	// format — k-q8-v-q4 truncates, the TurboQuant ring rounds up.
+	for _, kv := range []kvCacheInfo{
+		{cacheInfo{"default", StateKVCache}, 2, 1, false},
+		{cacheInfo{"fp16", StateKVCache}, 2, 1, false},
+		{cacheInfo{"q8", StateKVCache}, 1, 1, false},
+		{cacheInfo{"k-q8-v-q4", StateKVCache}, 3, 4, false},
+		{cacheInfo{"paged", StateKVCache}, 2, 1, false},
+		{cacheInfo{"fixed", StateKVCache}, 2, 1, false},
+		{cacheInfo{"turboquant", StateKVCache}, 7, 16, true},
+	} {
+		RegisterCache(kv)
 	}
 	// Recurrent-state holder for SSM / linear-attention mixers — registered so
-	// the contract exists; the first flash-linear-attention mixer task lands
-	// the compute.
+	// the contract exists; the first flash-linear-attention mixer task lands the
+	// compute. It holds no growing KV, so it carries no CacheWidth: the planner's
+	// width probe misses it and it is not a KV-cache mode.
 	RegisterCache(cacheInfo{"recurrent", StateRecurrent})
 
 	// Weight quant every engine implements today: group-affine. Bits 0 = the

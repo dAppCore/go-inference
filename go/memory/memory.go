@@ -16,6 +16,7 @@ import (
 	mp "dappco.re/go/inference/modelpack"
 	"dappco.re/go/inference/profile"
 	"dappco.re/go/inference/quant/jang"
+	"dappco.re/go/inference/scheme"
 )
 
 // GiB is the number of bytes in a gibibyte.
@@ -55,16 +56,27 @@ const (
 	KVCacheModeTurboQuant KVCacheMode = "turboquant"
 )
 
-// IsKnownKVCacheMode reports whether mode is part of the public KV-cache
-// mode contract. TurboQuant is a research mode; backends may still fail
-// closed until their native cache implementation exists.
+// builtinDefaultCacheMode is the scheme-registry name for KVCacheModeDefault.
+// The registry registers "default", never the empty string (scheme/builtin.go:
+// `"" maps to "default"`), so resolving a KVCacheMode through the registry maps
+// the empty (unset/default) mode to this name first.
+const builtinDefaultCacheMode = "default"
+
+// IsKnownKVCacheMode reports whether mode is part of the public KV-cache mode
+// contract. The scheme registry is the single authority: a mode is known when
+// it resolves to a registered cache scheme that holds a growing KV cache
+// (scheme.StateKVCache). The empty string is KVCacheModeDefault, which the
+// registry registers as "default", so an unset mode reads as known. A
+// recurrent-state holder serves StateRecurrent, not a KV cache, so it is
+// correctly not a KV-cache mode. TurboQuant is a research mode a backend may
+// fail closed on, yet it is a registered KV scheme and so is known.
 func IsKnownKVCacheMode(mode KVCacheMode) bool {
-	switch mode {
-	case KVCacheModeDefault, KVCacheModeFP16, KVCacheModeQ8, KVCacheModeKQ8VQ4, KVCacheModePaged, KVCacheModeTurboQuant:
-		return true
-	default:
-		return false
+	name := string(mode)
+	if name == "" {
+		name = builtinDefaultCacheMode
 	}
+	c, ok := scheme.CacheFor(name)
+	return ok && c.Serves() == scheme.StateKVCache
 }
 
 // ExpertResidencyMode names how routed MoE experts are kept resident.
@@ -632,20 +644,33 @@ func estimateKVCacheBytesWithProfile(plan Plan, input Input, mode KVCacheMode, p
 	return scaleKVElements(elements, mode)
 }
 
-// scaleKVElements maps the raw element count to bytes for the given
-// KV cache mode. Hoisted from estimateKVCacheBytes so NewPlan can
-// run the gating + shape compute once and call this twice instead.
+// scaleKVElements maps the raw element count to bytes for the given KV cache
+// mode. It resolves the mode through the scheme registry — the single authority
+// on a KV format's per-element byte cost — and applies its CacheWidth ratio: q8
+// 1/1, k-q8-v-q4 3/4 (truncated), turboquant 7/16 rounded up, fp16 / default /
+// paged / fixed 2/1. An unknown mode, or a registered scheme with no KV width (a
+// recurrent-state holder), keeps the planner's conservative fp16-equivalent
+// default of 2 bytes/element: NewPlan is a planning estimate, so the safe
+// over-estimate the pre-registry default lane produced is preserved exactly.
+// Hoisted from estimateKVCacheBytes so NewPlan runs the gating + shape compute
+// once and calls this twice instead.
 func scaleKVElements(elements uint64, mode KVCacheMode) uint64 {
-	switch mode {
-	case KVCacheModeKQ8VQ4:
-		return elements * 3 / 4
-	case KVCacheModeQ8:
-		return elements
-	case KVCacheModeTurboQuant:
-		return scaleElementsByByteRatioCeil(elements, 7, 16) // 3.5 bits per KV element.
-	default:
-		return elements * 2
+	name := string(mode)
+	if name == "" {
+		name = builtinDefaultCacheMode
 	}
+	if c, ok := scheme.CacheFor(name); ok {
+		if w, ok := c.(scheme.CacheWidth); ok {
+			num, den, roundUp := w.KVBytesPerElement()
+			if den != 0 {
+				if roundUp {
+					return scaleElementsByByteRatioCeil(elements, num, den)
+				}
+				return elements * num / den
+			}
+		}
+	}
+	return elements * 2
 }
 
 func scaleElementsByByteRatioCeil(elements, numerator, denominator uint64) uint64 {

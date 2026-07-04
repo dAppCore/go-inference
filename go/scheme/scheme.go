@@ -67,6 +67,28 @@ type CacheScheme interface {
 	Serves() StateKind // the state kind this scheme can hold
 }
 
+// CacheWidth is the capability a KV-cache scheme adds when its per-element
+// storage cost is a known exact rational — the byte ratio a memory planner
+// sizes a KV cache from, in place of a per-mode byte table. Registered
+// alongside the identity contract, so "what does this KV mode cost" is a
+// registry lookup, never a switch. A recurrent-state holder serves no growing
+// KV, carries no width, and the probe simply misses — exactly as fp16/paged
+// miss kv.CacheProvider in #261.
+//
+//	if w, ok := cacheScheme.(scheme.CacheWidth); ok {
+//	    num, den, roundUp := w.KVBytesPerElement() // 7, 16, true for turboquant
+//	}
+type CacheWidth interface {
+	CacheScheme
+	// KVBytesPerElement is the per-element KV storage cost as an exact rational
+	// num/den (bytes per element) plus whether a fractional remainder rounds up:
+	// fp16/default/paged/fixed 2/1, q8 1/1, k-q8-v-q4 3/4 (truncated), turboquant
+	// 7/16 rounded up (= 3.5 bits per element). num/den are neutral facts of the
+	// wire format; the rounding is the format's own (k-q8-v-q4 truncates, the
+	// TurboQuant ring rounds up), not a caller policy.
+	KVBytesPerElement() (num, den uint64, roundUp bool)
+}
+
 // QuantScheme is a weight-quantisation format — affine (mlx group-affine),
 // q4_0, mxfp4, nvfp4, autoround, … It loads packed weights, runs the packed
 // matmul, and (for the quantize verb) packs a dense weight. The contract here
