@@ -17,11 +17,10 @@ import (
 // decode session is arch-driven (it runs any Arch over the backend contract), not
 // model-specific, so it must be neutrally named — ArchSession, never <Model>Session. A
 // "Gemma4Session" (which once served even Mistral) is the regression this guards. Add an
-// entry only for a genuinely neutral session name, never a model-named one.
-// nativeSession is the engine's inference.SessionHandle adapter over ArchSession
-// (inference_session.go) — engine-named, arch-driven, not model-specific, so it
-// is a genuinely neutral session name the guard admits.
-var allowedSessionTypes = map[string]bool{"ArchSession": true, "nativeSession": true}
+// entry only for a genuinely neutral session name, never a model-named one. The
+// inference.SessionHandle adapter over ArchSession now lives in the shared
+// package engine (engine.SessionHandle), so pkg/native declares only ArchSession.
+var allowedSessionTypes = map[string]bool{"ArchSession": true}
 
 // TestSessionTypeNeutralName locks the ArchSession name the same way pkg/model's
 // TestArchTypesNeutralHome locks the arch declaration: it fails if pkg/native declares a
