@@ -86,7 +86,9 @@ go-mlx `native_model.go` probes optional interfaces (`nativeKVSnapshotter`,
   per the table above; `lem` compiles from go-inference alone. Only after the
   native feature port is finished (pkg/metal is still the parity oracle).
 - **Tier 4 — hip.** go-mlx becomes the quarantine sandbox; `engine/hip`
-  lands by audit-then-land. Unsupervised agents never edit go-inference.
+  lands by audit-then-land — and DOES reintroduce cgo (the no-cgo statement
+  above is per-engine: metal is pure Go, hip++ is not). Unsupervised agents
+  never edit go-inference.
 
 ## Spine + session file-level triage (2026-07-04, imports-verified)
 
