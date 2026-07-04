@@ -28,6 +28,17 @@ type GenerateConfig struct {
 	// answer is produced rather than the whole budget being spent reasoning.
 	// 0 = unlimited. Ignored by architectures with no thinking mode.
 	ThinkingBudget int
+	// Thinking is the resolved thought-channel processing policy (show, hide,
+	// or capture reasoning blocks). EnableThinking is the API-level on/off
+	// intent; serving layers resolve it into this policy for the engine. The
+	// zero value leaves the engine's default handling in place.
+	Thinking ThinkingConfig
+	// Engine trace + cache-hygiene knobs (engine-neutral operational
+	// controls; a backend without the facility ignores them).
+	TraceTokenPhases             bool // per-token coarse phase timing to the engine trace log
+	TraceTokenText               bool // include decoded token text in the trace (debug only)
+	GenerationClearCache         bool // drop device caches between generations
+	GenerationClearCacheInterval int  // clear every N tokens while generating; 0 = never
 }
 
 // cfg := inference.DefaultGenerateConfig() // Temperature=0.0 (greedy), RepeatPenalty=1.0
@@ -145,6 +156,14 @@ func WithEnableThinking(v *bool) GenerateOption {
 //	m.Chat(ctx, msgs, inference.WithThinkingBudget(256)) // think briefly, then answer
 func WithThinkingBudget(tokens int) GenerateOption {
 	return func(c *GenerateConfig) { c.ThinkingBudget = tokens }
+}
+
+// WithThinking sets the resolved thought-channel processing policy — what the
+// engine does with reasoning blocks (show, hide, or capture them).
+//
+//	m.Generate(ctx, prompt, inference.WithThinking(inference.ThinkingConfig{Mode: inference.ThinkingHide}))
+func WithThinking(cfg ThinkingConfig) GenerateOption {
+	return func(c *GenerateConfig) { c.Thinking = cfg }
 }
 
 // cfg := inference.ApplyGenerateOpts(opts) // used internally by backends

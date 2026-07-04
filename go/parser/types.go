@@ -7,6 +7,8 @@
 //	r := parser.ForHint(parser.Hint{Architecture: "qwen3"}).ParseReasoning(nil, text)
 package parser
 
+import "dappco.re/go/inference"
+
 //	hint := parser.Hint{Architecture: "qwen3", AdapterName: "lora-coder"}
 //	out := parser.ForHint(hint).ParseReasoning(nil, response)
 type Hint struct {
@@ -14,29 +16,27 @@ type Hint struct {
 	AdapterName  string
 }
 
+// The thinking trio (Config/Mode/Chunk) is declared in the inference root so
+// inference.GenerateConfig can carry a ThinkingConfig without an import cycle
+// (this package imports inference for Token and the parse-result contracts).
+// The aliases keep every parser.* consumer unchanged.
+//
 //	cfg := parser.Config{Mode: parser.Capture, Capture: func(c parser.Chunk) { log.Print(c.Text) }}
-type Config struct {
-	Mode    Mode        `json:"mode,omitempty"`
-	Capture func(Chunk) `json:"-"`
-}
+type Config = inference.ThinkingConfig
 
 //	parser.Show     // leave reasoning markers + content in the visible output
 //	parser.Hide     // strip recognised reasoning blocks from visible output
 //	parser.Capture  // strip from visible + emit blocks via Config.Capture
-type Mode string
+type Mode = inference.ThinkingMode
 
 const (
-	Show    Mode = "show"
-	Hide    Mode = "hide"
-	Capture Mode = "capture"
+	Show    = inference.ThinkingShow
+	Hide    = inference.ThinkingHide
+	Capture = inference.ThinkingCapture
 )
 
 //	chunk := parser.Chunk{Text: "let me think...", Channel: "thinking", Model: "qwen"}
-type Chunk struct {
-	Text    string `json:"text"`
-	Channel string `json:"channel,omitempty"`
-	Model   string `json:"model,omitempty"`
-}
+type Chunk = inference.ThinkingChunk
 
 //	result := parser.Filter(text, parser.Config{Mode: parser.Capture}, hint)
 //	visible := result.Text
