@@ -161,9 +161,10 @@ Wake/Sleep contracts).
 
 ## Open questions carried (not blockers for Tier 1)
 
-- `serving.Backend`/`GenOpts` root types are currently skeletal (empty
-  interfaces in `serving/inference.go`) — Tier 1 should firm them against the
-  reconciled config type rather than grow a second config surface.
+- ~~`serving.Backend`/`GenOpts` skeletal~~ CORRECTED: they were never
+  skeletal (a truncated read); the real gap was missing pass-throughs, now
+  landed — GenOpts carries MinP/Seed/EnableThinking/ThinkingBudget through
+  convertOpts to the reconciled config.
 - `cmd/mlx` CLI verbs reconcile with `cmd/lthn-model-pack` at Tier 3 (per map).
 - The daemon (`pkg/daemon` UDS/JSON-line) MIGRATE-UP lands beside serving —
   sequencing free between Tiers 1–3.
