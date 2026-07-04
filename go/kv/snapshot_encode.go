@@ -49,7 +49,7 @@ func (s *Snapshot) encodedSizeWithOptions(opts SaveOptions) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := validateKVSnapshotCompressedPayloads(s); err != nil {
+	if err := validateKVSnapshotLayerSchemes(s); err != nil {
 		return 0, err
 	}
 	version := effectiveVersion(s, encoding)
@@ -213,7 +213,7 @@ func (s *Snapshot) writeWithOptions(writer stdio.Writer, opts SaveOptions) error
 	if err != nil {
 		return err
 	}
-	if err := validateKVSnapshotCompressedPayloads(s); err != nil {
+	if err := validateKVSnapshotLayerSchemes(s); err != nil {
 		return err
 	}
 	version := effectiveVersion(s, encoding)
