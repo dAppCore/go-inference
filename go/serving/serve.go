@@ -78,7 +78,7 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 
 	// Reactive MTP pair resolution (the model declares, the serve reacts): an
 	// explicit --draft path wins; --draft="" disables; "auto" runs the ladder.
-	detection := resolveServeDraft(cfg.ModelPath, cfg.DraftPath, cfg.DraftDetect)
+	detection := ResolveServeDraft(cfg.ModelPath, cfg.DraftPath, cfg.DraftDetect)
 	// A detected drafter is only armed when the registered engine exposes a
 	// speculative loader; otherwise degrade to plain autoregressive with an
 	// honest notice, faithful to lthn-mlx (a drafter that can't load never
