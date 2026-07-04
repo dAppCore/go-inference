@@ -215,6 +215,18 @@ func convertOpts(opts GenOpts) []inference.GenerateOption {
 	if len(opts.StopTokens) > 0 {
 		n++
 	}
+	if opts.MinP > 0 {
+		n++
+	}
+	if opts.Seed != nil {
+		n++
+	}
+	if opts.EnableThinking != nil {
+		n++
+	}
+	if opts.ThinkingBudget > 0 {
+		n++
+	}
 	if n == 0 {
 		return nil
 	}
@@ -237,6 +249,18 @@ func convertOpts(opts GenOpts) []inference.GenerateOption {
 	}
 	if len(opts.StopTokens) > 0 {
 		out = append(out, inference.WithStopTokens(opts.StopTokens...))
+	}
+	if opts.MinP > 0 {
+		out = append(out, inference.WithMinP(float32(opts.MinP)))
+	}
+	if opts.Seed != nil {
+		out = append(out, inference.WithSeed(*opts.Seed))
+	}
+	if opts.EnableThinking != nil {
+		out = append(out, inference.WithEnableThinking(opts.EnableThinking))
+	}
+	if opts.ThinkingBudget > 0 {
+		out = append(out, inference.WithThinkingBudget(opts.ThinkingBudget))
 	}
 	// GenOpts.Model is ignored — the model is already loaded.
 	return out

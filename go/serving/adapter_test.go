@@ -574,3 +574,26 @@ func TestAdapter_InferenceAdapter_InspectAttention_Ugly(t *core.T) {
 	r := adapter.InspectAttention(context.Background(), "λ")
 	assertResultError(t, r, "does not support attention")
 }
+
+// TestInferenceAdapter_ConvertOptsReasoningControls_Good pins the GenOpts →
+// GenerateOption pass-through for the reasoning + sampling controls the
+// config reconcile added: EnableThinking, ThinkingBudget, MinP, Seed.
+func TestInferenceAdapter_ConvertOptsReasoningControls_Good(t *core.T) {
+	off := false
+	seed := uint64(42)
+	opts := convertOpts(GenOpts{MinP: 0.05, Seed: &seed, EnableThinking: &off, ThinkingBudget: 256})
+
+	cfg := inference.ApplyGenerateOpts(opts)
+	if cfg.MinP != 0.05 {
+		t.Fatalf("MinP = %v, want 0.05", cfg.MinP)
+	}
+	if !cfg.SeedSet || cfg.Seed != 42 {
+		t.Fatalf("Seed = %d set=%v, want 42 set", cfg.Seed, cfg.SeedSet)
+	}
+	if cfg.EnableThinking == nil || *cfg.EnableThinking {
+		t.Fatalf("EnableThinking = %v, want &false", cfg.EnableThinking)
+	}
+	if cfg.ThinkingBudget != 256 {
+		t.Fatalf("ThinkingBudget = %d, want 256", cfg.ThinkingBudget)
+	}
+}
