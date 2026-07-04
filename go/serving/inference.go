@@ -62,6 +62,14 @@ type GenOpts struct {
 	RepeatPenalty float64  // repetition penalty (0 = disabled, 1.0 = no penalty)
 	StopTokens    []int32  // token IDs that terminate generation early
 	StopSequences []string // literal substrings that terminate generation early
+	MinP          float64  // minimum-probability sampling relative to the top token (0 = disabled)
+	Seed          *uint64  // reproducible sampling seed (nil = engine default)
+	// EnableThinking toggles reasoning for thinking-capable models: nil =
+	// model default, &true = on, &false = off. Backends without a thinking
+	// mode ignore it.
+	EnableThinking *bool
+	// ThinkingBudget caps tokens spent in the thought channel; 0 = unlimited.
+	ThinkingBudget int
 }
 
 // Message is a type alias for inference.Message, providing backward compatibility.
