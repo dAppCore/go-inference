@@ -82,8 +82,12 @@ go-mlx `native_model.go` probes optional interfaces (`nativeKVSnapshotter`,
   tags inside the main module gate it. The scaffold hosts the registration
   shim contract-tested against `inference`.
 - **Tier 3 — payload move (cross-repo, gated on endgame step 1).** pkg/native
-  + pkg/model land in `engine/metal`; the go-mlx composition core dissolves
-  per the table above; `lem` compiles from go-inference alone. Only after the
+  lands in `engine/metal`. **pkg/model does NOT merge into engine/metal**
+  (Snider, 2026-07-04): the model architectures were deliberately decoupled
+  from the engine and stay a separate go-inference home (the `model/` family)
+  — engines consume the arch contracts, never own them. The go-mlx
+  composition core dissolves per the table above; `lem` compiles from
+  go-inference alone. Only after the
   native feature port is finished (pkg/metal is still the parity oracle).
 - **Tier 4 — hip.** go-mlx becomes the quarantine sandbox; `engine/hip`
   lands by audit-then-land — and DOES reintroduce cgo (the no-cgo statement
@@ -136,6 +140,24 @@ Dependency-ordered execution:
   contracts (#259 native implementation), `SessionHandle` re-homes as an
   inference capability, and session + sessionfake land speaking `kv.Snapshot`.
 - **Engine-side (never lifts):** spine lora_config/metal_convert, kvconv.
+
+## KV/state formats — the scheme registry is the registry
+
+Snider's question (2026-07-04): does KV have a registry like quants/mixers?
+**Yes — `go/scheme`**: three registries every engine shares (`RegisterQuant`,
+`RegisterCache`, `RegisterMixer`, plus dtypes), pure Go, driver attaches
+compute by registering a value that also satisfies its driver-side interface.
+`"turboquant"` is already a registered cache mode — TurboQuant is a KV DATA
+PROVIDER: a format that feeds `memory` or the `state` system, not an engine
+branch.
+
+The gap: `kv`/`state` encode-decode paths do not yet RESOLVE through
+`scheme.CacheFor` — kv/snapshot_dtype + state_store name formats directly.
+The wiring work: KV data providers (turboquant, q8, k-q8-v-q4…) plug in via
+the scheme registry; `memory` and `state`/filestore are the backends they
+feed. Conversation-state placement follows the same rule: the agent
+wake/sleep implementation lands as `state/agent` (it implements `state`'s
+Wake/Sleep contracts).
 
 ## Open questions carried (not blockers for Tier 1)
 
