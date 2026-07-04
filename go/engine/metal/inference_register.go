@@ -46,7 +46,7 @@ func (metalBackend) LoadModel(path string, opts ...inference.LoadOption) core.Re
 	if maxLen <= 0 {
 		maxLen = 4096
 	}
-	tm, err := LoadTokenModelDir(path, maxLen)
+	tm, err := LoadTokenModelDirWithConfig(path, maxLen, TokenModelLoadConfig{AdapterPath: cfg.AdapterPath})
 	if err != nil {
 		return core.Fail(core.E("native.metalBackend.LoadModel", "load token model", err))
 	}
