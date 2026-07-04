@@ -19,8 +19,10 @@ import (
 )
 
 var (
-	_ engine.TokenModel = (*NativeTokenModel)(nil)
-	_ engine.Session    = (*ArchSession)(nil)
+	_ engine.TokenModel   = (*NativeTokenModel)(nil)
+	_ engine.Session      = (*ArchSession)(nil)
+	_ engine.TrainerModel = (*NativeTokenModel)(nil)
+	_ engine.Trainer      = (*LoRATrainer)(nil)
 )
 
 // newNativeTextModel wraps a loaded no-cgo token model as the shared
@@ -62,4 +64,11 @@ func (m *NativeTokenModel) OpenEngineSession() (engine.Session, error) {
 		return nil, core.NewError("native.NativeTokenModel: token model does not open an ArchSession")
 	}
 	return sess, nil
+}
+
+// OpenTrainer opens a retained head-LoRA SFT trainer over this loaded model — the metal half of the
+// engine.TrainerModel seam. The returned engine.Trainer (a *LoRATrainer) owns a fresh frozen base
+// session and a zero-initialised head adapter; cfg supplies the LoRA rank/alpha and learning rate.
+func (m *NativeTokenModel) OpenTrainer(cfg inference.TrainingConfig) (engine.Trainer, error) {
+	return NewLoRATrainer(m, cfg)
 }
