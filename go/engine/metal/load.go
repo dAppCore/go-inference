@@ -56,6 +56,10 @@ func LoadDir(dir string, maxLen int) (*ArchSession, error) {
 type TokenModelLoadConfig struct {
 	PagedKVPageSize int
 	PagedKVPrealloc bool
+	// AdapterPath, when set, is a saved LoRA adapter directory (adapter.safetensors +
+	// adapter_config.json) applied at load so `serve --adapter <path>` generates through the adapted
+	// model. Honoured for the bf16 head adapter (LoRATrainer.Save); see lora_apply.go.
+	AdapterPath string
 }
 
 // LoadTokenModelDir loads any registered architecture's checkpoint directory as a model.TokenModel —
@@ -93,6 +97,10 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	arch := lm.Arch
 	backendOpts := nativeTokenModelBackendOptions(loadCfg)
 	if quantised(lm) {
+		if loadCfg.AdapterPath != "" {
+			_ = sb.Close()
+			return nil, core.NewError("native.LoadTokenModelDir: load-time adapter apply is only wired for bf16 models, not the quantised head")
+		}
 		gs, bits := lm.Embed.GroupSize, lm.Embed.Bits
 		g, qerr := loadedToQuant(lm, gs, bits)
 		if qerr != nil {
@@ -117,6 +125,14 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 		return tm, nil
 	}
 	g := loadedToBF16(lm)
+	if loadCfg.AdapterPath != "" {
+		// Apply the saved adapter before the head encoder binds the head weight: the fold clones the
+		// head (leaving the base mmap / tied embedding intact) so generation runs through the adapted head.
+		if aerr := applyAdapterToBF16Model(g, loadCfg.AdapterPath); aerr != nil {
+			_ = sb.Close()
+			return nil, core.E("native.LoadTokenModelDir", "apply adapter", aerr)
+		}
+	}
 	tm, terr := NewBF16TokenModel(g, arch, maxLen, backendOpts...)
 	if terr != nil {
 		_ = sb.Close()
