@@ -416,6 +416,83 @@ func TestMemory_IsKnownKVCacheMode_Ugly(t *testing.T) {
 	}
 }
 
+// TestMemory_IsKnownKVCacheMode_RegistryAuthoritative pins the registry-backed
+// edges the old hard-coded list could not express. "fixed" is a registered
+// StateKVCache scheme the pre-registry list omitted; with the scheme registry as
+// the single authority it now reads as a known KV-cache mode. "recurrent" is a
+// registered cache scheme too, but it serves StateRecurrent — a recurrent-state
+// holder, not a KV cache — so it is correctly NOT a known KV-cache mode.
+func TestMemory_IsKnownKVCacheMode_RegistryAuthoritative(t *testing.T) {
+	if !IsKnownKVCacheMode(KVCacheMode("fixed")) {
+		t.Fatal(`IsKnownKVCacheMode("fixed") = false, want true — a registered KV-cache scheme is a known mode`)
+	}
+	if IsKnownKVCacheMode(KVCacheMode("recurrent")) {
+		t.Fatal(`IsKnownKVCacheMode("recurrent") = true, want false — a recurrent-state holder is not a KV-cache mode`)
+	}
+}
+
+// TestMemory_ScaleKVElements_Good is the golden parity table for scaleKVElements
+// after the rewire through the scheme registry: each KV mode scales the raw
+// element count by the exact per-element byte arithmetic the pre-registry switch
+// produced. elements is divisible by 16 so every ratio lands on an integer — the
+// Good case pins the ratios, the Ugly case pins their rounding. "fixed" carries
+// no memory-package const but is a registered full-precision KV scheme, so it
+// sizes at 2:1 exactly like the default lane.
+func TestMemory_ScaleKVElements_Good(t *testing.T) {
+	const elements uint64 = 4096 // 16 | 4096, so every ratio is exact
+	cases := []struct {
+		name string
+		mode KVCacheMode
+		want uint64
+	}{
+		{"q8 1:1", KVCacheModeQ8, 4096},                  // elements
+		{"k-q8-v-q4 3:4", KVCacheModeKQ8VQ4, 3072},       // elements * 3 / 4
+		{"turboquant 7:16", KVCacheModeTurboQuant, 1792}, // ceil(elements*7/16); 4096*7/16 = 1792 exact
+		{"fp16 2:1", KVCacheModeFP16, 8192},              // elements * 2
+		{"default 2:1", KVCacheModeDefault, 8192},        // "" → "default" → elements * 2
+		{"paged 2:1", KVCacheModePaged, 8192},            // elements * 2 (was the switch default lane)
+		{"fixed 2:1", KVCacheMode("fixed"), 8192},        // registered full-precision KV scheme
+	}
+	for _, c := range cases {
+		if got := scaleKVElements(elements, c.mode); got != c.want {
+			t.Fatalf("%s: scaleKVElements(%d, %q) = %d, want %d", c.name, elements, c.mode, got, c.want)
+		}
+	}
+}
+
+// TestMemory_ScaleKVElements_Bad covers the unknown-mode lane: a mode the scheme
+// registry never registered has no width to probe, so the planner falls back to
+// the conservative fp16-equivalent 2 bytes/element — the same safe over-estimate
+// the pre-registry switch default produced, never a zero that would under-size a
+// plan.
+func TestMemory_ScaleKVElements_Bad(t *testing.T) {
+	const elements uint64 = 4096
+	if got := scaleKVElements(elements, KVCacheMode("not-a-real-mode")); got != elements*2 {
+		t.Fatalf("scaleKVElements(unknown mode) = %d, want %d (conservative 2:1 default)", got, elements*2)
+	}
+}
+
+// TestMemory_ScaleKVElements_Ugly pins the subtle parity detail the two
+// fractional modes carry: k-q8-v-q4 TRUNCATES its 3/4 ratio while TurboQuant
+// ROUNDS UP its 7/16 ratio — opposite rounding the width capability's roundUp
+// flag preserves exactly. It also pins the recurrent path: "recurrent" resolves
+// in the registry but carries no KV width, so the probe misses and it falls to
+// the 2:1 default lane rather than being sized as a KV storage format.
+func TestMemory_ScaleKVElements_Ugly(t *testing.T) {
+	// k-q8-v-q4 truncates: 6*3/4 = 4.5 → 4, never 5. Proves floor, not ceil.
+	if got := scaleKVElements(6, KVCacheModeKQ8VQ4); got != 4 {
+		t.Fatalf("scaleKVElements(6, k-q8-v-q4) = %d, want 4 (truncated 3/4, not rounded up)", got)
+	}
+	// turboquant rounds up: 33*7/16 = 14.4375 → 15, never 14. Proves ceil.
+	if got := scaleKVElements(33, KVCacheModeTurboQuant); got != 15 {
+		t.Fatalf("scaleKVElements(33, turboquant) = %d, want 15 (7/16 rounded up)", got)
+	}
+	// recurrent: registered, but StateRecurrent carries no KV width → 2:1 default.
+	if got := scaleKVElements(4096, KVCacheMode("recurrent")); got != 8192 {
+		t.Fatalf("scaleKVElements(recurrent) = %d, want 8192 (no KV width → 2:1 default)", got)
+	}
+}
+
 // TestMemory_NewPlan_Qwen2HintNote exercises the qwen2 branch of
 // applyArchitectureHints via the public NewPlan: a Qwen2 pack emits the native
 // decoder note and leaves the cache policy on its class baseline.

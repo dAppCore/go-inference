@@ -33,8 +33,14 @@ type CacheProvider interface {
 // turboQuantProvider owns the "turboquant" wire semantics: a layer captured
 // under the TurboQuant cache mode MUST carry its compressed payloads (the
 // float32 side slices alone cannot reconstruct the ring), and payloads are
-// meaningless under any other mode.
-type turboQuantProvider struct{}
+// meaningless under any other mode. It EMBEDS the registry's builtin turboquant
+// value so the per-element width (scheme.CacheWidth) the memory planner sizes
+// from is FORWARDED, not stripped, when this upgrade overwrites the stub —
+// turboquant's width stays single-sourced in scheme/builtin.go. Mode/Serves stay
+// explicit so a zero value (used by the ValidateLayer tests) is panic-safe.
+type turboQuantProvider struct {
+	scheme.CacheWidth // the builtin turboquant value; promotes KVBytesPerElement
+}
 
 func (turboQuantProvider) Mode() string             { return kvSnapshotTurboQuantCacheMode }
 func (turboQuantProvider) Serves() scheme.StateKind { return scheme.StateKVCache }
@@ -50,10 +56,16 @@ func (turboQuantProvider) ValidateLayer(layer *LayerSnapshot) error {
 }
 
 func init() {
-	// Upgrade the scheme registry's info stub for the modes this codec owns
-	// wire semantics for. RegisterCache overwrites by mode, so the richer
-	// value replaces the stub while every other mode keeps its stub.
-	scheme.RegisterCache(turboQuantProvider{})
+	// Upgrade the scheme registry's info stub for the modes this codec owns wire
+	// semantics for. RegisterCache overwrites by mode, so the richer value
+	// replaces the stub while every other mode keeps its stub — but it embeds the
+	// stub's CacheWidth so the planner's per-element width survives the overwrite.
+	base, ok := scheme.CacheFor(kvSnapshotTurboQuantCacheMode)
+	if !ok {
+		return
+	}
+	width, _ := base.(scheme.CacheWidth)
+	scheme.RegisterCache(turboQuantProvider{width})
 }
 
 // errUnknownCacheMode is raised when a layer names a cache mode the scheme
