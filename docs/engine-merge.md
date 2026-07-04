@@ -85,6 +85,43 @@ go-mlx `native_model.go` probes optional interfaces (`nativeKVSnapshotter`,
 - **Tier 4 — hip.** go-mlx becomes the quarantine sandbox; `engine/hip`
   lands by audit-then-land. Unsupervised agents never edit go-inference.
 
+## Spine + session file-level triage (2026-07-04, imports-verified)
+
+`spine` is not one disposition — it splits by file. Load-bearing find: **spine.go
+IS the GenerateConfig home** (root aliases `type GenerateConfig =
+spine.GenerateConfig`), so the "config reconcile" open call below and the spine
+lift are the same work item, not two.
+
+| spine file | mlx imports (non-test) | Wave |
+|---|---|---|
+| `prompt.go`, `token.go`, `tokenizer.go` | none | **A — lifted now** (partial `go/spine`) |
+| `spine.go` (GenerateConfig/Options + conversions) | probe | **B — the config reconcile** (vs `inference` GenerateOption; Cladius, not mechanical) |
+| `model_info.go` | bundle, lora, memory | **A-later** — after memory; bundle in flight, lora → `inference/lora.AdapterInfo` |
+| `lora_config.go`, `metal_convert.go` | pkg/metal, probe | **engine-side** — ride into `engine/metal` |
+
+| session file | mlx imports (non-test) | Blocked on |
+|---|---|---|
+| `defaults.go` | none | nothing |
+| `artifact.go` | artifact | artifact lift (itself: bundle + kv — unlocks when bundle lands) |
+| `agent_memory.go` | agent, bundle, kv, kvconv, spine | agent (→ memory), kvconv retirement (#259) |
+| `session.go` | agent, blockcache, bundle, kv, kvconv, **pkg/metal**, spine | all of the above + `SessionHandle` contract re-home |
+| `internal/sessionfake` | pkg/metal (`metal.KVSnapshot` field) | re-point to `kv.Snapshot` when session lifts |
+
+Dependency-ordered execution:
+
+- **Wave A (mechanical, agent-able):** bundle ✓in-flight · probe (leaf: core+coreio)
+  ✓in-flight · blockcache (already inference-native imports) ✓in-flight ·
+  spine prompt/token/tokenizer ✓in-flight · then artifact (after bundle) ·
+  then memory+profile chain (memory also drags `pack`, which has the
+  `model/pack` twin — RECONCILE gate before lifting) · then agent + spine
+  model_info (after memory).
+- **Wave B (reconcile, by hand):** spine.go GenerateConfig ↔ `inference`
+  options — one config type survives; engines convert inward. Then the
+  session package: kvconv dies against the new KV contracts (#259 native
+  implementation), `SessionHandle` re-homes as an inference capability, and
+  session + sessionfake land speaking `kv.Snapshot`.
+- **Engine-side (never lifts):** spine lora_config/metal_convert, kvconv.
+
 ## Open questions carried (not blockers for Tier 1)
 
 - `serving.Backend`/`GenOpts` root types are currently skeletal (empty
