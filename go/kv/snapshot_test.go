@@ -373,13 +373,13 @@ func TestKVSnapshot_EncodedTensorSize_GoodBadUgly(t *testing.T) {
 }
 
 // TestKVSnapshot_NilPredicates_Bad exercises the nil-snapshot guards that the
-// happy-path tests never reach: validateKVSnapshotCompressedPayloads
+// happy-path tests never reach: validateKVSnapshotLayerSchemes
 // (snapshot.go:1482), requiresNativeEncoding (1498), and
 // snapshotHasLayerNativeTensors (1518). cloneKVLayers(nil) covers the empty
 // guard at 1367.
 func TestKVSnapshot_NilPredicateGuards(t *testing.T) {
-	if err := validateKVSnapshotCompressedPayloads(nil); err == nil {
-		t.Fatal("validateKVSnapshotCompressedPayloads(nil) error = nil, want snapshot-nil error")
+	if err := validateKVSnapshotLayerSchemes(nil); err == nil {
+		t.Fatal("validateKVSnapshotLayerSchemes(nil) error = nil, want snapshot-nil error")
 	}
 	if requiresNativeEncoding(nil) {
 		t.Fatal("requiresNativeEncoding(nil) = true, want false")

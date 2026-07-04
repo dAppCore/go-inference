@@ -284,22 +284,6 @@ func normalizeSnapshot(snapshot *Snapshot) {
 	}
 }
 
-func validateKVSnapshotCompressedPayloads(snapshot *Snapshot) error {
-	if snapshot == nil {
-		return errSnapshotNil
-	}
-	for _, layer := range snapshot.Layers {
-		hasPayloads := len(layer.TurboQuantPayloads) > 0
-		if hasPayloads && layer.CacheMode != kvSnapshotTurboQuantCacheMode {
-			return errTurboQuantPayloadMode
-		}
-		if layer.CacheMode == kvSnapshotTurboQuantCacheMode && !hasPayloads {
-			return errTurboQuantPayloadMissing
-		}
-	}
-	return nil
-}
-
 func requiresNativeEncoding(snapshot *Snapshot) bool {
 	if snapshot == nil {
 		return false

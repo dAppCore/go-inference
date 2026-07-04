@@ -171,7 +171,7 @@ func parseKVSnapshotWithOptions(data []byte, opts LoadOptions) (*Snapshot, error
 	if reader.err != nil {
 		return nil, core.E("Load", "parse snapshot", reader.err)
 	}
-	if err := validateKVSnapshotCompressedPayloads(snapshot); err != nil {
+	if err := validateKVSnapshotLayerSchemes(snapshot); err != nil {
 		return nil, core.E("Load", "validate compressed KV payload metadata", err)
 	}
 	if snapshot.TokenOffset == 0 {
