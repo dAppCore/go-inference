@@ -116,10 +116,20 @@ Dependency-ordered execution:
   `model/pack` twin — RECONCILE gate before lifting) · then agent + spine
   model_info (after memory).
 - **Wave B (reconcile, by hand):** spine.go GenerateConfig ↔ `inference`
-  options — one config type survives; engines convert inward. Then the
-  session package: kvconv dies against the new KV contracts (#259 native
-  implementation), `SessionHandle` re-homes as an inference capability, and
-  session + sessionfake land speaking `kv.Snapshot`.
+  options — one config type survives; engines convert inward. **Root side
+  DONE:** 13 of spine's 18 fields were already field-identical;
+  `inference.GenerateConfig` grew the delta (Thinking policy, TraceTokenPhases,
+  TraceTokenText, GenerationClearCache/-Interval) + `WithThinking`. The
+  thinking trio (Config/Mode/Chunk) hoisted from `parser` into the root as
+  ThinkingConfig/ThinkingMode/ThinkingChunk — parser aliases them back, zero
+  consumer breakage — because parser imports the root (Token, parse results)
+  and the config could not reference parser without a cycle. EnableThinking
+  (API intent) and Thinking (resolved engine policy) coexist by design;
+  serving resolves the former into the latter. Remaining: ProbeSink joins
+  GenerateConfig once the probe lift merges; spine.go's conversions re-point
+  at Tier 3. Then the session package: kvconv dies against the new KV
+  contracts (#259 native implementation), `SessionHandle` re-homes as an
+  inference capability, and session + sessionfake land speaking `kv.Snapshot`.
 - **Engine-side (never lifts):** spine lora_config/metal_convert, kvconv.
 
 ## Open questions carried (not blockers for Tier 1)
