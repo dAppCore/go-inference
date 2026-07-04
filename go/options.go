@@ -1,6 +1,10 @@
 package inference
 
-import "slices"
+import (
+	"slices"
+
+	"dappco.re/go/inference/probe"
+)
 
 // inference.GenerateConfig{MaxTokens: 256, Temperature: 0.7, TopK: 40}
 // inference.GenerateConfig{MaxTokens: 64, StopTokens: []int32{2}, RepeatPenalty: 1.1}
@@ -39,6 +43,9 @@ type GenerateConfig struct {
 	TraceTokenText               bool // include decoded token text in the trace (debug only)
 	GenerationClearCache         bool // drop device caches between generations
 	GenerationClearCacheInterval int  // clear every N tokens while generating; 0 = never
+	// ProbeSink receives research-telemetry events emitted while generating
+	// (attention/logit probes). nil = probing off.
+	ProbeSink probe.Sink
 }
 
 // cfg := inference.DefaultGenerateConfig() // Temperature=0.0 (greedy), RepeatPenalty=1.0
