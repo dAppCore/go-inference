@@ -11,6 +11,24 @@ import (
 	"dappco.re/go/inference/generate"
 )
 
+// stringListFlag is a repeatable string flag: each occurrence appends, so
+// -image a.png -image b.png collects both paths. The zero value is an empty
+// list, which the usage dump renders with no default (matching the other
+// no-default flags).
+type stringListFlag []string
+
+func (s *stringListFlag) String() string {
+	if s == nil {
+		return ""
+	}
+	return core.Join(",", []string(*s)...)
+}
+
+func (s *stringListFlag) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
+
 // runGenerateCommand parses the generate flags and hands them to
 // generate.RunGenerate. Thin: flag parsing + one library call + exit mapping.
 // All generate business logic (load, warm, timed decode + tok/s, the durable
@@ -34,6 +52,10 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 	stateName := fs.String("state", "", "conversation state name: wake it from the store if present, generate, sleep it back — the no-prompt-replay turn loop")
 	stateStore := fs.String("state-store", "", "state store file (default ~/Lethean/data/state/agent.kv)")
 	rawState := fs.Bool("raw", false, "with -state: skip chat-framing and run the raw completion-loop turn (no template) — ignored without -state")
+	var images stringListFlag
+	fs.Var(&images, "image", "image input for a vision model: a local PNG/JPEG path or a base64 data: URL (repeatable) — gated on the model's vision capability, same as serve")
+	var audio stringListFlag
+	fs.Var(&audio, "audio", "audio input (repeatable) — reserved: no engine-neutral audio-input seam yet, so passing one errors (follow-up)")
 	fs.Usage = func() {
 		name := cliName()
 		core.WriteString(stderr, core.Sprintf("Usage: %s generate [flags] <model-path>\n", name))
@@ -69,24 +91,26 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 	}
 
 	err := generate.RunGenerate(ctx, generate.Config{
-		ModelPath:   fs.Arg(0),
-		Prompt:      *prompt,
-		MaxTokens:   *maxTokens,
-		Temp:        *temp,
-		Think:       *think,
-		ContextLen:  *contextLen,
-		DraftPath:   *draftPath,
-		DraftBlock:  *draftBlock,
-		KVCacheMode: *kvCacheMode,
-		KVStorage:   *kvStorage,
-		Pipeline:    *pipeline,
-		Native:      *nativeBackend,
-		Trace:       *tracePhases,
-		StateName:   *stateName,
-		StateStore:  *stateStore,
-		Raw:         *rawState,
-		Out:         stdout,
-		Log:         stderr,
+		ModelPath:    fs.Arg(0),
+		Prompt:       *prompt,
+		MaxTokens:    *maxTokens,
+		Temp:         *temp,
+		Think:        *think,
+		ContextLen:   *contextLen,
+		DraftPath:    *draftPath,
+		DraftBlock:   *draftBlock,
+		KVCacheMode:  *kvCacheMode,
+		KVStorage:    *kvStorage,
+		Pipeline:     *pipeline,
+		Native:       *nativeBackend,
+		Trace:        *tracePhases,
+		StateName:    *stateName,
+		StateStore:   *stateStore,
+		Raw:          *rawState,
+		ImageSources: images,
+		AudioSources: audio,
+		Out:          stdout,
+		Log:          stderr,
 	})
 	if err != nil {
 		core.Print(stderr, "%s generate: %v", cliName(), err)
