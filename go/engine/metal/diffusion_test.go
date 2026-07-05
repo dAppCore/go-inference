@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 )
 
@@ -872,10 +873,10 @@ func TestRunDiffusionGenerate_OrchestratesCanvases_Good(t *testing.T) {
 	if !prefilled {
 		t.Fatal("prefill was not called")
 	}
-	if !int32SlicesEqual(emitted, []int32{4, 5, 6, 7}) {
+	if !core.SliceEqual(emitted, []int32{4, 5, 6, 7}) {
 		t.Fatalf("emitted = %v, want [4 5 6 7]", emitted)
 	}
-	if len(commits) != 2 || !int32SlicesEqual(commits[0], []int32{4, 5, 6}) || !int32SlicesEqual(commits[1], []int32{7}) {
+	if len(commits) != 2 || !core.SliceEqual(commits[0], []int32{4, 5, 6}) || !core.SliceEqual(commits[1], []int32{7}) {
 		t.Fatalf("commits = %v, want [[4 5 6] [7]]", commits)
 	}
 	if len(truncates) != 4 || truncates[0] != 2 || truncates[1] != 2 || truncates[2] != 5 || truncates[3] != 5 {
@@ -905,7 +906,7 @@ func TestRunDiffusionGenerate_EmptyPromptRejected_Bad(t *testing.T) {
 func TestDiffusionInitialCanvas_DeterministicAndClamped_Good(t *testing.T) {
 	a := diffusionInitialCanvas(8, 16, 123, 0)
 	b := diffusionInitialCanvas(8, 16, 123, 0)
-	if !int32SlicesEqual(a, b) {
+	if !core.SliceEqual(a, b) {
 		t.Fatalf("initial canvas with same key differs: %v vs %v", a, b)
 	}
 	if len(a) != 8 {
@@ -920,22 +921,16 @@ func TestDiffusionInitialCanvas_DeterministicAndClamped_Good(t *testing.T) {
 
 func TestDiffusionKeepUntilStop_Good(t *testing.T) {
 	kept, stopped := diffusionKeepUntilStop([]int32{5, 6, 7, 8}, []int32{7, 9})
-	if !stopped || !int32SlicesEqual(kept, []int32{5, 6}) {
+	if !stopped || !core.SliceEqual(kept, []int32{5, 6}) {
 		t.Fatalf("kept/stopped = %v/%v, want [5 6]/true", kept, stopped)
 	}
 	kept, stopped = diffusionKeepUntilStop([]int32{5, 6}, []int32{7})
-	if stopped || !int32SlicesEqual(kept, []int32{5, 6}) {
+	if stopped || !core.SliceEqual(kept, []int32{5, 6}) {
 		t.Fatalf("kept/stopped = %v/%v, want unchanged/false", kept, stopped)
 	}
 }
 
-func TestDiffusionInt32SlicesEqualAndTokenInSet_Good(t *testing.T) {
-	if !int32SlicesEqual([]int32{1, 2}, []int32{1, 2}) {
-		t.Fatal("equal slices reported unequal")
-	}
-	if int32SlicesEqual([]int32{1, 2}, []int32{1, 3}) || int32SlicesEqual([]int32{1}, []int32{1, 2}) {
-		t.Fatal("unequal slices reported equal")
-	}
+func TestDiffusionTokenInSet_Good(t *testing.T) {
 	if !tokenInSet(106, []int32{1, 106}) {
 		t.Fatal("member not found")
 	}

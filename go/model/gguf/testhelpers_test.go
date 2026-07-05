@@ -151,7 +151,7 @@ func writeGGUFTestValue(t *testing.T, file *core.OSFile, valueType uint32, value
 func writeMinimalExampleGGUF(path, architecture string) error {
 	created := core.Create(path)
 	if !created.OK {
-		return quantizeGGUFResultError(created)
+		return created.Err()
 	}
 	file := created.Value.(*core.OSFile)
 	defer file.Close()
@@ -214,7 +214,7 @@ func writeMinimalExampleSafetensors(path, tensorName string, values []float32, s
 	}
 	data := map[string][]byte{tensorName: safetensors.EncodeFloat32(values)}
 	if result := safetensors.WriteSafetensors(path, info, data); !result.OK {
-		return quantizeGGUFResultError(result)
+		return result.Err()
 	}
 	return nil
 }

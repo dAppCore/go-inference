@@ -39,7 +39,7 @@ func LoadStateBlockBundle(ctx context.Context, store state.Store, uri string) (*
 	}
 	var bundle StateBlockBundle
 	if result := core.JSONUnmarshalString(chunk.Text, &bundle); !result.OK {
-		return nil, core.E("LoadStateBlockBundle", "parse bundle", ResultError(result))
+		return nil, core.E("LoadStateBlockBundle", "parse bundle", result.Err())
 	}
 	if err := ValidateStateBlockBundle(&bundle); err != nil {
 		return nil, err

@@ -1057,23 +1057,6 @@ func TestJang_CeilDivUint64_Ugly(t *testing.T) {
 	}
 }
 
-// --- firstPositive ---
-
-func TestJang_FirstPositive_Good(t *testing.T) {
-	if got := firstPositive(0, -4, 6, 9); got != 6 {
-		t.Fatalf("firstPositive() = %d, want 6", got)
-	}
-}
-
-func TestJang_FirstPositive_Ugly(t *testing.T) {
-	if got := firstPositive(0, -1, -2); got != 0 {
-		t.Fatalf("firstPositive() = %d, want 0", got)
-	}
-	if got := firstPositive(); got != 0 {
-		t.Fatalf("firstPositive() = %d, want 0 for no arguments", got)
-	}
-}
-
 // --- normaliseArchitecture ---
 
 func TestJang_NormaliseArchitecture_Good(t *testing.T) {

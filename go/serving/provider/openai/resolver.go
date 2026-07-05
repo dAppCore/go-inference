@@ -98,7 +98,7 @@ func (r *BackendResolver) ResolveModel(ctx context.Context, _ string) (inference
 	}
 	result := inference.LoadModel(r.ModelPath, opts...)
 	if !result.OK {
-		return nil, resultError(result)
+		return nil, result.Err()
 	}
 	model, ok := result.Value.(inference.TextModel)
 	if !ok || model == nil {

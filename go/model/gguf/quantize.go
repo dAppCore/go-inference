@@ -178,7 +178,7 @@ func QuantizeModelPack(ctx context.Context, opts QuantizeOptions) (*QuantizeResu
 		return nil, err
 	}
 	if result := core.MkdirAll(output, 0o755); !result.OK {
-		return nil, core.E("QuantizeModelPack", "create output directory", quantizeGGUFResultError(result))
+		return nil, core.E("QuantizeModelPack", "create output directory", result.Err())
 	}
 	if err := copyModelPackMetadata(source.Root, output); err != nil {
 		return nil, err
@@ -256,7 +256,7 @@ func ensureEmptyGGUFQuantizeDestination(output string) error {
 		if core.IsNotExist(stat.Value.(error)) {
 			return nil
 		}
-		return core.E("QuantizeModelPack", "inspect output path", quantizeGGUFResultError(stat))
+		return core.E("QuantizeModelPack", "inspect output path", stat.Err())
 	}
 	weights := append(core.PathGlob(core.PathJoin(output, "*.safetensors")), core.PathGlob(core.PathJoin(output, "*.gguf"))...)
 	if len(weights) > 0 {
@@ -295,7 +295,7 @@ func loadDenseSafetensors(paths []string) ([]denseSafetensor, error) {
 func readDenseSafetensorsFile(path string) ([]denseSafetensor, error) {
 	read := safetensors.ReadSafetensors(path)
 	if !read.OK {
-		return nil, core.E("QuantizeModelPack", "read safetensors "+path, quantizeGGUFResultError(read))
+		return nil, core.E("QuantizeModelPack", "read safetensors "+path, read.Err())
 	}
 	data := read.Value.(safetensors.SafetensorsData)
 
@@ -417,16 +417,6 @@ func ggufQuantizeLayout(format QuantizeFormat) (tensorType uint32, blockSize int
 	}
 }
 
-func quantizeGGUFResultError(result core.Result) error {
-	if result.OK {
-		return nil
-	}
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	return core.NewError("core result failed")
-}
-
 // ValidationSummary joins GGUF validation issue codes into a human-readable
 // string. Used by callers that report failures from the gguf validation path.
 //
@@ -511,10 +501,10 @@ func copyLocalFile(sourcePath, destinationPath string) error {
 	}
 	read := core.ReadFile(sourcePath)
 	if !read.OK {
-		return quantizeGGUFResultError(read)
+		return read.Err()
 	}
 	if result := core.WriteFile(destinationPath, read.Value.([]byte), 0o644); !result.OK {
-		return quantizeGGUFResultError(result)
+		return result.Err()
 	}
 	return nil
 }
@@ -528,20 +518,20 @@ func copyLocalFile(sourcePath, destinationPath string) error {
 func streamLocalFile(sourcePath, destinationPath string) error {
 	srcOpen := core.Open(sourcePath)
 	if !srcOpen.OK {
-		return quantizeGGUFResultError(srcOpen)
+		return srcOpen.Err()
 	}
 	src := srcOpen.Value.(*core.OSFile)
 	defer src.Close()
 	dstOpen := core.OpenFile(destinationPath, core.O_WRONLY|core.O_CREATE|core.O_TRUNC, 0o644)
 	if !dstOpen.OK {
-		return quantizeGGUFResultError(dstOpen)
+		return dstOpen.Err()
 	}
 	dst := dstOpen.Value.(*core.OSFile)
 	if result := core.Copy(dst, src); !result.OK {
 		// The copy already failed; close the partial destination best-effort
 		// and surface the copy error, not the close error.
 		dst.Close()
-		return quantizeGGUFResultError(result)
+		return result.Err()
 	}
 	if err := dst.Close(); err != nil {
 		return err

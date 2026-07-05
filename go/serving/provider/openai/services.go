@@ -368,7 +368,7 @@ func decodeServiceRequest(w http.ResponseWriter, r *http.Request, into any, scop
 	}
 	result := core.JSONUnmarshal(data, into)
 	if !result.OK {
-		err := resultError(result)
+		err := result.Err()
 		message := "invalid request body"
 		if err != nil && core.Trim(err.Error()) != "" {
 			message = core.Concat(scope, ": ", err.Error())

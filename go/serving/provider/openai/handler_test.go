@@ -343,22 +343,3 @@ func TestErrorParam_Good_Bad(t *testing.T) {
 		t.Fatalf("errorParam(generic error) = %q, want empty", got)
 	}
 }
-
-// TestResultError_Good_Bad_Ugly covers all three shapes: OK (nil),
-// failure carrying a genuine error, and failure carrying a
-// non-error Value (hand-constructed — production call sites never
-// build a Result this way, but the function must not panic on it).
-func TestResultError_Good_Bad_Ugly(t *testing.T) {
-	if err := resultError(core.Result{OK: true}); err != nil {
-		t.Fatalf("resultError(OK) = %v, want nil", err)
-	}
-
-	wrapped := core.E("test", "boom", nil)
-	if err := resultError(core.Result{OK: false, Value: wrapped}); err != wrapped {
-		t.Fatalf("resultError(error Value) = %v, want %v", err, wrapped)
-	}
-
-	if err := resultError(core.Result{OK: false, Value: "not an error"}); err == nil {
-		t.Fatal("resultError(non-error Value) = nil, want the unexpected-value fallback error")
-	}
-}

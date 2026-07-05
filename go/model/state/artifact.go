@@ -17,12 +17,6 @@ const ArtifactVersion = 1
 // the top of ExportArtifact does not allocate a fresh error on every call.
 var errArtifactPayloadNil = core.NewError("state: artifact payload is nil")
 
-// errArtifactResultFailed is the fallback sentinel returned by
-// artifactResultError when a core.Result reports !OK but its Value is not
-// an error. Hoisted to a package var to avoid allocating on this
-// rare-but-hot helper path.
-var errArtifactResultFailed = core.NewError("state: core result failed")
-
 // Artifact is a versioned, engine-supplied diagnostic or analysis
 // snapshot packaged for archival. Payload carries whatever
 // engine-specific structure the caller wants to preserve — KV-cache
@@ -105,7 +99,7 @@ func ExportArtifact(ctx context.Context, payload any, opts ArtifactOptions) (*Ar
 	if opts.Store != nil {
 		data := core.JSONMarshalIndent(record, "", "  ")
 		if !data.OK {
-			return nil, core.E("state.ExportArtifact", "marshal artifact", artifactResultError(data))
+			return nil, core.E("state.ExportArtifact", "marshal artifact", data.Err())
 		}
 		marshalled := data.Value.([]byte)
 		putOpts := opts.Put
@@ -119,14 +113,4 @@ func ExportArtifact(ctx context.Context, payload any, opts ArtifactOptions) (*Ar
 		record.ChunkRef = ref
 	}
 	return record, nil
-}
-
-func artifactResultError(result core.Result) error {
-	if result.OK {
-		return nil
-	}
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	return errArtifactResultFailed
 }

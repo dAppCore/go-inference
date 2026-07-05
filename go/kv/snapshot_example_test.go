@@ -93,15 +93,6 @@ func ExampleDropFloat32() {
 	// raw bytes kept: true
 }
 
-// ExampleResultError converts a failed core.Result into a Go error, the bridge
-// between the core.Result IO surface and the error-returning snapshot APIs.
-func ExampleResultError() {
-	err := ResultError(core.Result{Value: "disk full"})
-	core.Println("error:", err)
-	// Output:
-	// error: disk full
-}
-
 // ExampleHashSnapshot computes a stable content-addressed identifier for a
 // snapshot; the same snapshot always hashes to the same length-64 hex digest.
 func ExampleHashSnapshot() {

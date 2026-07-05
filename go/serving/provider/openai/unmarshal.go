@@ -271,7 +271,7 @@ func parseChatMessage(data []byte, i int) (ChatMessage, int, error) {
 				}
 				var parts []chatContentPart
 				if result := core.JSONUnmarshal(data[i:vnext], &parts); !result.OK {
-					return msg, vnext, resultError(result)
+					return msg, vnext, result.Err()
 				}
 				if perr := msg.applyContentParts(parts); perr != nil {
 					return msg, vnext, perr

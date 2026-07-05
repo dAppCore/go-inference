@@ -25,7 +25,7 @@ func DecodeRequest(body io.Reader) (ChatCompletionRequest, error) {
 	// round-trip that JSONUnmarshalString(string(data), ...) would do.
 	result := core.JSONUnmarshal(data, &req)
 	if !result.OK {
-		return ChatCompletionRequest{}, resultError(result)
+		return ChatCompletionRequest{}, result.Err()
 	}
 	return req, nil
 }

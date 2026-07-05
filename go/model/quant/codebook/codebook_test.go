@@ -574,36 +574,6 @@ func TestCodebook_ValidIndexBits_Bad(t *testing.T) {
 	}
 }
 
-func TestCodebook_FirstNonEmpty_Good(t *testing.T) {
-	if got := firstNonEmpty("", "second", "third"); got != "second" {
-		t.Fatalf("firstNonEmpty() = %q, want %q", got, "second")
-	}
-}
-
-func TestCodebook_FirstNonEmpty_Ugly(t *testing.T) {
-	if got := firstNonEmpty("", "", ""); got != "" {
-		t.Fatalf("firstNonEmpty() = %q, want empty string when nothing is set", got)
-	}
-	if got := firstNonEmpty(); got != "" {
-		t.Fatalf("firstNonEmpty() = %q, want empty string for no arguments", got)
-	}
-}
-
-func TestCodebook_FirstPositive_Good(t *testing.T) {
-	if got := firstPositive(0, -1, 7, 3); got != 7 {
-		t.Fatalf("firstPositive() = %d, want %d", got, 7)
-	}
-}
-
-func TestCodebook_FirstPositive_Ugly(t *testing.T) {
-	if got := firstPositive(0, -1, -2); got != 0 {
-		t.Fatalf("firstPositive() = %d, want 0 when nothing is positive", got)
-	}
-	if got := firstPositive(); got != 0 {
-		t.Fatalf("firstPositive() = %d, want 0 for no arguments", got)
-	}
-}
-
 // --- ParseProfile (additional branch coverage) ---
 
 func TestCodebook_ParseProfile_Bad(t *testing.T) {

@@ -32,7 +32,7 @@ func Load(path string) (*Snapshot, error) {
 func LoadWithOptions(path string, opts LoadOptions) (*Snapshot, error) {
 	read := core.ReadFile(path)
 	if !read.OK {
-		return nil, core.E("Load", "read snapshot", ResultError(read))
+		return nil, core.E("Load", "read snapshot", read.Err())
 	}
 	data, ok := read.Value.([]byte)
 	if !ok {

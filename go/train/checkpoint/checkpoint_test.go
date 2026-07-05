@@ -180,28 +180,3 @@ func TestCheckpoint_FormatStepDir_Ugly(t *testing.T) {
 		}
 	}
 }
-
-// --- resultError ---
-
-// Good: an OK result converts to a nil error.
-func TestCheckpoint_ResultError_Good(t *testing.T) {
-	if err := resultError(core.Result{OK: true}); err != nil {
-		t.Fatalf("resultError(OK) = %v, want nil", err)
-	}
-}
-
-// Bad: a failed result carrying an error Value returns that exact error.
-func TestCheckpoint_ResultError_Bad(t *testing.T) {
-	want := core.NewError("boom")
-	if err := resultError(core.Result{OK: false, Value: want}); err != want {
-		t.Fatalf("resultError(failed) = %v, want %v", err, want)
-	}
-}
-
-// Ugly: a failed result whose Value is not an error falls back to the
-// generic sentinel rather than panicking on the type assertion.
-func TestCheckpoint_ResultError_Ugly(t *testing.T) {
-	if err := resultError(core.Result{OK: false, Value: "not an error"}); err != errCoreResultFailed {
-		t.Fatalf("resultError(non-error value) = %v, want errCoreResultFailed", err)
-	}
-}
