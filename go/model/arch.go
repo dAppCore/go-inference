@@ -96,6 +96,7 @@ type Arch struct {
 	GlobalHeadDim, GlobalKVHeads               int       // full_attention head_dim / kv-head count (== HeadDim / KVHeads when the config draws no distinction)
 	Experts, TopK, ExpertFF                    int       // MoE dims (Experts == 0 → dense model); ExpertFF is the experts' intermediate size
 	MoEGating                                  MoEGating // router expert-scoring method the model DECLARES (empty → softmax); see MoEGating
+	FuseExpertGateUp                           bool      // model opts its MoE experts into the fused gate+up path — a separate-gate/up checkpoint gets ExpGateUp synthesised at load (~34% MoE speed, trades the weights' mmap zero-copy for a heap copy)
 	Eps                                        float32
 	AttnScale                                  float32   // attention SDPA scale the model DECLARES (the engine applies it, never assumes): e.g. 1.0 when a QK-norm IS the scaling, else 1/√headDim
 	EmbedScale                                 float32   // token-embedding multiplier the model DECLARES (gemma-family √hidden; llama-family 1.0); 0 = undeclared → backends fall back to √hidden

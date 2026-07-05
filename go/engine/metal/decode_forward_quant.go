@@ -19,6 +19,7 @@ import (
 type QuantWeight struct {
 	Packed, Scales, Biases []byte
 	GroupSize, Bits        int
+	resident               bool // synthesised heap buffer (e.g. the fused ExpGateUp), not a mapped-shard view → resident-copy, never shard-lookup
 	packedView             bufView
 	scalesView             bufView
 	biasesView             bufView
