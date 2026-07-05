@@ -5,7 +5,7 @@ package dataset_test
 import (
 	"fmt"
 
-	"dappco.re/go/inference/dataset"
+	"dappco.re/go/inference/train/dataset"
 )
 
 // ExampleBatchConfig shows the generic batch shape a driver's tokenizer

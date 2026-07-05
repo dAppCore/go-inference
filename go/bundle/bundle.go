@@ -18,7 +18,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/kv"
-	"dappco.re/go/inference/lora"
+	"dappco.re/go/inference/train/lora"
 	state "dappco.re/go/inference/state"
 )
 

@@ -23,9 +23,9 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/dataset"
 	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/eval"
+	"dappco.re/go/inference/train/dataset"
 )
 
 // SFTConfig configures native supervised LoRA fine-tuning. It embeds the shared

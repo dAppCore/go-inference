@@ -9,7 +9,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/tune"
+	"dappco.re/go/inference/train/tune"
 )
 
 // runTuneCommand parses the tune flags and hands them to tune.RunTune. Thin:

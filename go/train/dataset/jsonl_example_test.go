@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/dataset"
+	"dappco.re/go/inference/train/dataset"
 )
 
 // ExampleLoadJSONL ingests a small multi-shape JSONL corpus and reports the

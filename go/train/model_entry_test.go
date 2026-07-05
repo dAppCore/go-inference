@@ -16,8 +16,8 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/dataset"
 	"dappco.re/go/inference/engine"
+	"dappco.re/go/inference/train/dataset"
 )
 
 // fakeTextModel is a minimal inference.TextModel: Generate yields the prompt

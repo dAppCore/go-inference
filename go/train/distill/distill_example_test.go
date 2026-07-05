@@ -6,8 +6,8 @@ import (
 	"context"
 	"fmt"
 
-	"dappco.re/go/inference/dataset"
-	"dappco.re/go/inference/distill"
+	"dappco.re/go/inference/train/dataset"
+	"dappco.re/go/inference/train/distill"
 )
 
 // ExampleNewMemoryLogitCache stores and retrieves teacher logits for a

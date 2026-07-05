@@ -6,8 +6,8 @@ import (
 	"fmt"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/distill"
 	"dappco.re/go/inference/eval"
+	"dappco.re/go/inference/train/distill"
 )
 
 // ExampleNewCheckpointMetadata builds the portable checkpoint sidecar

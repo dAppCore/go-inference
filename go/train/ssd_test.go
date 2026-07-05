@@ -12,7 +12,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/dataset"
+	"dappco.re/go/inference/train/dataset"
 	coreio "dappco.re/go/io"
 )
 

@@ -5,8 +5,8 @@ package grpo_test
 import (
 	"fmt"
 
-	"dappco.re/go/inference/dataset"
-	"dappco.re/go/inference/grpo"
+	"dappco.re/go/inference/train/dataset"
+	"dappco.re/go/inference/train/grpo"
 )
 
 // ExampleSampleFromSFT extracts a reasoning prompt, reference answer, and

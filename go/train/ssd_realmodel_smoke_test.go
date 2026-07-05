@@ -12,8 +12,8 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/dataset"
 	"dappco.re/go/inference/train"
+	"dappco.re/go/inference/train/dataset"
 
 	_ "dappco.re/go/inference/engine/metal"  // registers the "metal" backend via init()
 	_ "dappco.re/go/inference/model/builtin" // registers the built-in arches
