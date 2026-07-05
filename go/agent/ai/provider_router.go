@@ -259,8 +259,8 @@ func (r *ProviderRouter) contextMessages(ctx context.Context, request ProviderCh
 		return core.Ok(providerContextState{messages: out})
 	}
 
-	role := firstNonEmpty(request.ContextRole, r.options.ContextRole, "system")
-	prefix := firstNonEmpty(request.ContextPrefix, r.options.ContextPrefix, "Context:\n")
+	role := core.FirstNonBlank(request.ContextRole, r.options.ContextRole, "system")
+	prefix := core.FirstNonBlank(request.ContextPrefix, r.options.ContextPrefix, "Context:\n")
 	contextMessage := inference.Message{
 		Role:    role,
 		Content: core.Concat(prefix, contextText),
@@ -321,13 +321,4 @@ func normaliseProviderRoute(route ProviderRoute, index int) ProviderRoute {
 func cloneProviderRoute(route ProviderRoute) ProviderRoute {
 	route.Labels = core.MapClone(route.Labels)
 	return route
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if core.Trim(value) != "" {
-			return value
-		}
-	}
-	return ""
 }

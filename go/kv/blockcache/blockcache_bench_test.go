@@ -308,21 +308,21 @@ func BenchmarkCloneCacheBlockRef_Typical(b *testing.B) {
 	}
 }
 
-// --- firstNonEmptyString — fires per blockRefs identity resolution ---
+// --- core.FirstNonBlank — fires per blockRefs identity resolution ---
 
-func BenchmarkFirstNonEmptyString_FirstHit(b *testing.B) {
+func BenchmarkFirstNonBlank_FirstHit(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		benchSinkString = firstNonEmptyString("sha256:model", "", "")
+		benchSinkString = core.FirstNonBlank("sha256:model", "", "")
 	}
 }
 
-func BenchmarkFirstNonEmptyString_LastHit(b *testing.B) {
+func BenchmarkFirstNonBlank_LastHit(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		benchSinkString = firstNonEmptyString("", "  ", "sha256:model")
+		benchSinkString = core.FirstNonBlank("", "  ", "sha256:model")
 	}
 }
 

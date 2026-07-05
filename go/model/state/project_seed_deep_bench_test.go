@@ -195,7 +195,7 @@ func BenchmarkProjectSeedDeep_PlanContinuation_CustomURIs(b *testing.B) {
 
 func BenchmarkProjectSeedDeep_PlanContinuation_WithParent(b *testing.B) {
 	// Parent ref provided — the sleepRequest assembly walks
-	// firstNonEmpty for entry/bundle/index URIs.
+	// core.FirstNonBlank for entry/bundle/index URIs.
 	seed := NewProjectSeed(ProjectSeedOptions{
 		BaseURI:   "state://lthn/projects",
 		ProjectID: "core/go-mlx",
@@ -221,7 +221,7 @@ func BenchmarkProjectSeedDeep_PlanContinuation_WithParent(b *testing.B) {
 
 // --- NewProjectSeed with mixed defaults ---
 // One or two URIs supplied, rest defaulted. Exercises the per-field
-// firstNonEmpty + joinURI fallback paths in the constructor.
+// core.FirstNonBlank + joinURI fallback paths in the constructor.
 
 func BenchmarkProjectSeedDeep_NewProjectSeed_PartialURIs(b *testing.B) {
 	b.ReportAllocs()

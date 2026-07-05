@@ -7,26 +7,6 @@ import (
 	"dappco.re/go/inference/model/bundle"
 )
 
-// firstNonEmpty returns the first non-empty string after trimming whitespace.
-//
-//	value := firstNonEmpty(primary, fallback)
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" && core.Trim(v) != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-// firstNonEmptyString is the legacy alias used through the agent_memory
-// code path; behaves identically to firstNonEmpty.
-//
-//	value := firstNonEmptyString(a, b)
-func firstNonEmptyString(values ...string) string {
-	return firstNonEmpty(values...)
-}
-
 // stateHash returns the SHA-256 hex of value via the bundle package
 // (canonical hashing helper for state-bundle metadata).
 //

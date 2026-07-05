@@ -128,7 +128,7 @@ func PlanWake(ctx context.Context, store state.Store, opts WakeOptions, info mem
 	if !ok {
 		return nil, errStateIndexEntryNotFound
 	}
-	bundleURI := firstNonEmptyString(entry.BundleURI, index.BundleURI)
+	bundleURI := core.FirstNonBlank(entry.BundleURI, index.BundleURI)
 	bundle, err := kv.LoadStateBlockBundle(ctx, store, bundleURI)
 	if err != nil {
 		return nil, err
@@ -213,7 +213,7 @@ func SleepBlockOptions(opts SleepOptions, bundleURI string) kv.StateBlockOptions
 		blockOpts.URI = bundleURI + "/blocks"
 	}
 	if blockOpts.Title == "" {
-		blockOpts.Title = firstNonEmptyString(opts.Title, "go-mlx State")
+		blockOpts.Title = core.FirstNonBlank(opts.Title, "go-mlx State")
 	}
 	labels := make([]string, len(blockOpts.Labels), len(blockOpts.Labels)+1)
 	copy(labels, blockOpts.Labels)

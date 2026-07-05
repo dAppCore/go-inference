@@ -20,7 +20,7 @@ func InferJANG(meta ModelMetadata) *jang.Info {
 	// returns jangNone in zero allocs. The JANGTQ branch needs only the
 	// QuantizationConfig group size — no haystack scan — so we skip the
 	// lowercase-buffer build entirely for those packs.
-	id := firstNonEmpty(meta.ID, meta.ModelID)
+	id := core.FirstNonBlank(meta.ID, meta.ModelID)
 	presence := inferJANGNeedlePresent(id, meta.Tags, meta.Files)
 	switch presence {
 	case jangNone:
@@ -46,7 +46,7 @@ func InferJANG(meta ModelMetadata) *jang.Info {
 		size += 1 + len(tag)
 	}
 	for _, file := range meta.Files {
-		// Upper bound — max(Name, RFilename). Avoids the firstNonEmpty
+		// Upper bound — max(Name, RFilename). Avoids the core.FirstNonBlank
 		// scan here while still preventing growslice in the append loop.
 		nameLen := max(len(file.RFilename), len(file.Name))
 		size += 1 + nameLen
