@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"testing"
 
-	"dappco.re/go/inference/kvtier"
+	"dappco.re/go/inference/kv/kvtier"
 )
 
 // noopStore is a zero-cost Store for benchmarks: the policy decides the moves,

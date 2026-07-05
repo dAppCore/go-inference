@@ -5,7 +5,7 @@ package memory_test
 import (
 	"testing"
 
-	"dappco.re/go/inference/memory"
+	"dappco.re/go/inference/kv/memory"
 	mp "dappco.re/go/inference/modelpack"
 )
 

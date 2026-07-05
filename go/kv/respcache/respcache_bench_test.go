@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"dappco.re/go/inference/respcache"
+	"dappco.re/go/inference/kv/respcache"
 )
 
 // benchRequest is the realistic "two-message chat with a stop list" used across

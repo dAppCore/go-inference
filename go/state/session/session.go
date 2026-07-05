@@ -8,7 +8,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/blockcache"
+	"dappco.re/go/inference/kv/blockcache"
 	"dappco.re/go/inference/bundle"
 	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/parser"
