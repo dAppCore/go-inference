@@ -387,8 +387,7 @@ type matMulF32SplitKParamsScratchKey struct {
 }
 
 type matMulF32SplitKParamsScratchPool struct {
-	mu    sync.Mutex
-	items []*matMulF32SplitKParamsScratch
+	core.Pool[*matMulF32SplitKParamsScratch]
 }
 
 func newMatMulF32SplitKParamsScratch(M, K, N, tilesN, tilesM, partitions, stride, partSize, kIterations int) (*matMulF32SplitKParamsScratch, error) {
@@ -422,28 +421,6 @@ func matMulF32SplitKParamsScratchPoolFor(M, K, N, tilesN, tilesM, partitions, st
 		return v.(*matMulF32SplitKParamsScratchPool)
 	}
 	return pool
-}
-
-func (p *matMulF32SplitKParamsScratchPool) Get() *matMulF32SplitKParamsScratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *matMulF32SplitKParamsScratchPool) Put(s *matMulF32SplitKParamsScratch) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 func getMatMulF32SplitKParamsScratch(M, K, N, tilesN, tilesM, partitions, stride, partSize, kIterations int) (*matMulF32SplitKParamsScratch, error) {
@@ -529,8 +506,7 @@ type matMulF32SplitKAccumScratchKey struct {
 }
 
 type matMulF32SplitKAccumScratchPool struct {
-	mu    sync.Mutex
-	items []*matMulF32SplitKAccumScratch
+	core.Pool[*matMulF32SplitKAccumScratch]
 }
 
 func newMatMulF32SplitKAccumScratch(M, N, partitions int) (*matMulF32SplitKAccumScratch, error) {
@@ -554,28 +530,6 @@ func matMulF32SplitKAccumScratchPoolFor(M, N, partitions int) *matMulF32SplitKAc
 		return v.(*matMulF32SplitKAccumScratchPool)
 	}
 	return pool
-}
-
-func (p *matMulF32SplitKAccumScratchPool) Get() *matMulF32SplitKAccumScratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *matMulF32SplitKAccumScratchPool) Put(s *matMulF32SplitKAccumScratch) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 func getMatMulF32SplitKAccumScratch(M, N, partitions int) (*matMulF32SplitKAccumScratch, error) {

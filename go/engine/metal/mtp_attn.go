@@ -34,8 +34,7 @@ type sdpaCausalBF16Scratch struct {
 var sdpaCausalBF16ScratchPools sync.Map
 
 type sdpaCausalBF16ScratchPool struct {
-	mu    sync.Mutex
-	items []*sdpaCausalBF16Scratch
+	core.Pool[*sdpaCausalBF16Scratch]
 }
 
 func sdpaCausalBF16ScratchPoolFor(key sdpaCausalBF16ScratchKey) *sdpaCausalBF16ScratchPool {
@@ -47,28 +46,6 @@ func sdpaCausalBF16ScratchPoolFor(key sdpaCausalBF16ScratchKey) *sdpaCausalBF16S
 		return v.(*sdpaCausalBF16ScratchPool)
 	}
 	return pool
-}
-
-func (p *sdpaCausalBF16ScratchPool) Get() *sdpaCausalBF16Scratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *sdpaCausalBF16ScratchPool) Put(s *sdpaCausalBF16Scratch) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 func sdpaCausalBF16ScratchReady(s *sdpaCausalBF16Scratch, key sdpaCausalBF16ScratchKey) bool {

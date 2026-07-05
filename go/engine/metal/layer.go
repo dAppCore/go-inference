@@ -26,8 +26,7 @@ type bf16GemvPlan struct {
 var decodeLayerResidualScratchPools sync.Map
 
 type decodeLayerResidualScratchPool struct {
-	mu    sync.Mutex
-	items []*decodeLayerResidualScratch
+	core.Pool[*decodeLayerResidualScratch]
 }
 
 func decodeLayerResidualScratchPoolFor(dModel int) *decodeLayerResidualScratchPool {
@@ -39,28 +38,6 @@ func decodeLayerResidualScratchPoolFor(dModel int) *decodeLayerResidualScratchPo
 		return v.(*decodeLayerResidualScratchPool)
 	}
 	return pool
-}
-
-func (p *decodeLayerResidualScratchPool) Get() *decodeLayerResidualScratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	sc := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return sc
-}
-
-func (p *decodeLayerResidualScratchPool) Put(sc *decodeLayerResidualScratch) {
-	if sc == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, sc)
-	p.mu.Unlock()
 }
 
 func newBF16GemvPlan(outDim, inDim int) (bf16GemvPlan, error) {

@@ -62,8 +62,7 @@ type moeExpertsScratchKey struct {
 var moeExpertsScratchPools sync.Map
 
 type moeExpertsScratchPool struct {
-	mu    sync.Mutex
-	items []*moeExpertsScratch
+	core.Pool[*moeExpertsScratch]
 }
 
 func newMoEExpertsScratch(dModel, dFF, topK int) (*moeExpertsScratch, error) {
@@ -98,28 +97,6 @@ func moeExpertsScratchPoolFor(dModel, dFF, topK int) *moeExpertsScratchPool {
 		return v.(*moeExpertsScratchPool)
 	}
 	return pool
-}
-
-func (p *moeExpertsScratchPool) Get() *moeExpertsScratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *moeExpertsScratchPool) Put(s *moeExpertsScratch) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 func getMoEExpertsScratch(dModel, dFF, topK int) (*moeExpertsScratch, error) {

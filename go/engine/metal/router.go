@@ -39,8 +39,7 @@ type routerDeviceScratchKey struct {
 }
 
 type routerDeviceScratchPool struct {
-	mu    sync.Mutex
-	items []*routerDeviceScratch
+	core.Pool[*routerDeviceScratch]
 }
 
 var routerDeviceScratchPools sync.Map
@@ -259,28 +258,6 @@ func putRouterDeviceScratch(s *routerDeviceScratch) {
 	if s != nil && s.x != nil && s.x.buf != nil && s.normedBuf != nil && s.scoresBuf != nil && s.idxBuf != nil && s.idxPtr != nil && s.weightBuf != nil && s.weightPtr != nil {
 		routerDeviceScratchPoolFor(s.dModelCapacity, s.numExpertsCapacity, s.topKCapacity).Put(s)
 	}
-}
-
-func (p *routerDeviceScratchPool) Get() *routerDeviceScratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *routerDeviceScratchPool) Put(s *routerDeviceScratch) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 // topKByScore returns the indices of the topK highest scores, highest first,
