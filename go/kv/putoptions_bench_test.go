@@ -28,7 +28,7 @@ import (
 	"context"
 	"testing"
 
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // --- Labels variations ---

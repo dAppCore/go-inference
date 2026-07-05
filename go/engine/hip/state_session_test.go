@@ -13,8 +13,8 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/state"
-	"dappco.re/go/inference/state/filestore"
+	"dappco.re/go/inference/model/state"
+	"dappco.re/go/inference/model/state/filestore"
 )
 
 func TestStateSession_Good_WakeStateReturnsRefs(t *testing.T) {

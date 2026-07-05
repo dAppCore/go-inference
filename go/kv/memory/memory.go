@@ -13,9 +13,9 @@ package memory
 import (
 	"time"
 
-	mp "dappco.re/go/inference/modelpack"
+	mp "dappco.re/go/inference/model/modelpack"
 	"dappco.re/go/inference/profile"
-	"dappco.re/go/inference/quant/jang"
+	"dappco.re/go/inference/model/quant/jang"
 	"dappco.re/go/inference/scheme"
 )
 

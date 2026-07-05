@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // TestStateStore_Snapshot_SaveState_Good writes a snapshot with SaveState and

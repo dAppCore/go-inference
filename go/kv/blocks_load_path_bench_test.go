@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // These benches cover the Load/restore surface the bench-coverage audit

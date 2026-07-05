@@ -2,7 +2,7 @@
 
 package model
 
-import "dappco.re/go/inference/safetensors"
+import "dappco.re/go/inference/model/safetensors"
 
 // infer.go is the engine's read-the-dimension-FROM-THE-WEIGHT-SHAPE rule, architecture-NEUTRAL: when a
 // config omits a dimension, the model reads it from the actual weight rather than guessing. Each arch

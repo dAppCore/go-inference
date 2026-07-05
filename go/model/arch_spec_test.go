@@ -5,7 +5,7 @@ package model
 import (
 	"testing"
 
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 type fakeArchConfig struct{}

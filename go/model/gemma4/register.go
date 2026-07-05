@@ -4,7 +4,7 @@ package gemma4
 
 import (
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // init registers gemma4's ArchSpec for the model_type ids the family declares, so the engine's reactive

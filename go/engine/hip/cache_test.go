@@ -11,7 +11,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/state"
+	"dappco.re/go/inference/model/state"
 )
 
 func TestCacheService_Good_WarmStatsClear(t *testing.T) {

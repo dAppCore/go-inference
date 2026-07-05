@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	state "dappco.re/go/inference/state"
-	filestore "dappco.re/go/inference/state/filestore"
+	state "dappco.re/go/inference/model/state"
+	filestore "dappco.re/go/inference/model/state/filestore"
 )
 
 func TestKVSnapshotBlocks_Good_SplitAndAssemble(t *testing.T) {

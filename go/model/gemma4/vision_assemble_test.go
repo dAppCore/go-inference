@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // TestAssembleVision builds a synthetic 2-layer SigLIP tower + projector and pins that AssembleVision

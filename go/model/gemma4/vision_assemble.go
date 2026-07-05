@@ -7,7 +7,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // vision_assemble.go is the gemma4 vision tower's loader output: it gathers the SigLIP tower's weights

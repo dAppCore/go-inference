@@ -8,7 +8,7 @@ import (
 	"bytes"
 
 	"dappco.re/go/inference/jsonenc"
-	"dappco.re/go/inference/state"
+	"dappco.re/go/inference/model/state"
 )
 
 var (

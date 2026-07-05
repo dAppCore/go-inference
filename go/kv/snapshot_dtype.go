@@ -7,7 +7,7 @@ import (
 	"math"
 	"unsafe"
 
-	sharedsafetensors "dappco.re/go/inference/safetensors"
+	sharedsafetensors "dappco.re/go/inference/model/safetensors"
 )
 
 func normalizeKVSnapshotTensorDType(dtype string) (string, int) {

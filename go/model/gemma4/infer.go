@@ -5,7 +5,7 @@ package gemma4
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // infer.go — gemma4's weight-shape inference. The SELECTION is gemma4's (which attention-typed layer,

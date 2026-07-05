@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // TestQwen3Arch verifies the dense qwen3 config→Arch: a standard GQA transformer, scale 1/sqrt(head_dim),

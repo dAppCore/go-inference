@@ -4,7 +4,7 @@ package model
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // arch_spec.go is the REACTIVE architecture contract: a model package declares itself once — its config

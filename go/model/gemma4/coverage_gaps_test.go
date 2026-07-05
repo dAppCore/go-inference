@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	coreio "dappco.re/go/io"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
+	coreio "dappco.re/go/io"
 )
 
 // mLinearStub is a non-nil model.Linear for the validateRequired / Tied direct-call branches —

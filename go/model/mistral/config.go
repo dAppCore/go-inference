@@ -14,7 +14,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // Config is the architecture-relevant subset of a Ministral-3 config.json. Real packs are the

@@ -4,7 +4,7 @@ package profile
 
 import (
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/quant/autoround"
+	"dappco.re/go/inference/model/quant/autoround"
 )
 
 // AlgorithmRuntimeStatus is the go-mlx implementation state for a shared runtime algorithm.

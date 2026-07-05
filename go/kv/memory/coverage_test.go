@@ -5,7 +5,7 @@ package memory
 import (
 	"testing"
 
-	mp "dappco.re/go/inference/modelpack"
+	mp "dappco.re/go/inference/model/modelpack"
 	"dappco.re/go/inference/profile"
 )
 

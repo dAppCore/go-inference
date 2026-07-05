@@ -27,7 +27,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // --- Single-snapshot full disk round-trip ---

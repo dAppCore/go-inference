@@ -8,9 +8,9 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	coreio "dappco.re/go/io"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
+	coreio "dappco.re/go/io"
 )
 
 // minimalGemma4Tensors builds a complete dense bf16 gemma4 tensor set for arch — just the required

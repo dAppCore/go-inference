@@ -7,7 +7,7 @@ import (
 	"errors"
 	"testing"
 
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // TestMiscCover_LayerLookupZeroFallback drives the `Layer == 0` positional

@@ -6,7 +6,7 @@ import (
 	"context"
 
 	core "dappco.re/go"
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // ExampleSnapshot_SaveStateBlocks_native saves a native-dtype snapshot to a

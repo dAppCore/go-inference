@@ -6,7 +6,7 @@ import (
 	"math"
 	"testing"
 
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // bf16Tensor builds a bf16 safetensors.Tensor from f32 values with the given shape.

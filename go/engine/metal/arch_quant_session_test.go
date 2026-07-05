@@ -13,7 +13,7 @@ import (
 	coreio "dappco.re/go/io"
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // quantizeProj and quantGemma4Tensors (this file's synthetic 4-bit gemma4 checkpoint builders) now

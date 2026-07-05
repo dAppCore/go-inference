@@ -16,8 +16,8 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/quant/codebook"
-	"dappco.re/go/inference/quant/jang"
+	"dappco.re/go/inference/model/quant/codebook"
+	"dappco.re/go/inference/model/quant/jang"
 	"dappco.re/go/inference/engine/hip/internal/gguf"
 	rocmmodel "dappco.re/go/inference/engine/hip/model"
 	modelgemma4 "dappco.re/go/inference/engine/hip/model/gemma4"

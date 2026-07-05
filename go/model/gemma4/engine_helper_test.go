@@ -4,7 +4,7 @@ package gemma4
 
 import (
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // gemma4Assemble runs the engine's generic assembler with gemma4's weight layout — gemma4 no longer

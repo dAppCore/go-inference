@@ -5,7 +5,7 @@ package gemma4
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 func AssembleDiffusion(weights map[string]safetensors.Tensor, cfg *Gemma4TextConfig) (*model.LoadedDiffusion, error) {

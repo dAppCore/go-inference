@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // TestBlocksLoad_LoadFromStateBlocks_Good loads a full snapshot from the

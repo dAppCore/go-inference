@@ -12,7 +12,7 @@ import (
 	coreio "dappco.re/go/io"
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // BenchmarkHeadEncoderQuant is the balloon-gone counterpart of BenchmarkLMHeadQuant: it drives the

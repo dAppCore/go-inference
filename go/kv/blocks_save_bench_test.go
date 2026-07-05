@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 func BenchmarkSaveStateBlocks_NativeLayerSingleHeadSlabThreeBlocks(b *testing.B) {

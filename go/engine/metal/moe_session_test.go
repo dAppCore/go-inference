@@ -14,7 +14,7 @@ import (
 	coreio "dappco.re/go/io"
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // moeQuantTensors builds a synthetic MIXED-PRECISION MoE gemma4 checkpoint (gemma4 26B-A4B

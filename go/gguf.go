@@ -8,7 +8,7 @@ import (
 	"slices"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/gguf"
+	"dappco.re/go/inference/model/gguf"
 )
 
 // GGUFInfo summarises GGUF metadata without requiring a concrete runtime.

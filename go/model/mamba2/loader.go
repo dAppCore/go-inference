@@ -6,7 +6,7 @@ import (
 	"math"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // loader.go builds a MambaModel from a checkpoint's safetensors. Mamba-2 weights do not fit the

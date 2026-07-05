@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model/qwen3"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 func mkMoEMLP(D, FF, nE, topK, seed int) *MoEMLP {

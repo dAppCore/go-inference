@@ -16,7 +16,7 @@ package memory
 import (
 	"testing"
 
-	mp "dappco.re/go/inference/modelpack"
+	mp "dappco.re/go/inference/model/modelpack"
 )
 
 // Sinks defeat compiler DCE.

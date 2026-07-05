@@ -27,7 +27,7 @@ import (
 	"context"
 	"testing"
 
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // --- Snapshot save/load early-reject ---

@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // TestBlocksCover_RangeBlocks_NilYield drives the nil-yield guard of

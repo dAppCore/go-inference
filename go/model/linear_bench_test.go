@@ -5,7 +5,7 @@ package model
 import (
 	"testing"
 
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // The LoadLinear benches baseline the per-weight load path (AX-11): the map lookups +
