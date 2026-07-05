@@ -69,6 +69,10 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runSFTCommand(ctx, args[1:], stdout, stderr)
 	case "tune":
 		return runTuneCommand(ctx, args[1:], stdout, stderr)
+	case "pack":
+		return runPackCommand(ctx, args[1:], stdout, stderr)
+	case "ebook":
+		return runEbookCommand(ctx, args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return 0
@@ -91,6 +95,10 @@ func printUsage(w io.Writer) {
 	core.WriteString(w, "  ssd                 self-distillation sampling: sample the frozen base, capture the trace\n")
 	core.WriteString(w, "  sft                 LoRA supervised fine-tuning through the engine trainer seam\n")
 	core.WriteString(w, "  tune                measure + persist the best MTP draft block as a serve profile\n")
+	core.WriteString(w, "\n")
+	core.WriteString(w, "Package\n")
+	core.WriteString(w, "  pack                build/inspect/list/extract .model containers (no weights loaded)\n")
+	core.WriteString(w, "  ebook               render a model directory as a valid EPUB3 (weights as base64 plates)\n")
 	core.WriteString(w, "\n")
 	core.WriteString(w, "Examples\n")
 	core.WriteString(w, core.Sprintf("  %s serve --model ~/models/gemma-4-e2b-it-4bit         # OpenAI HTTP on :36911\n", name))
