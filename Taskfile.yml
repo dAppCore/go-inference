@@ -65,3 +65,18 @@ tasks:
         env GOCACHE={{.GO_BUILD_CACHE}} go build -tags metal_runtime -trimpath
         -ldflags "{{.GO_DARWIN_LDFLAGS}}" -o bin/lem ./go/cmd/lem
       - 'echo "  lem -> bin/lem (needs build/dist/lib/*.metallib at runtime via MLX_METALLIB_PATH; run task metallib first)"'
+
+  build:embed:
+    desc: "Build a SELF-CONTAINED lem (bin/lem) with BOTH metallibs baked in (-tags embed_metallib) — runs from any path, no external MLX_METALLIB_PATH. Needs build/dist/lib/*.metallib (run task metallib first)."
+    cmds:
+      - |-
+        set -e
+        for m in mlx lthn_kernels; do
+          [ -f build/dist/lib/$m.metallib ] || { echo "missing build/dist/lib/$m.metallib — run: task metallib"; exit 1; }
+          gzip -9 -c build/dist/lib/$m.metallib > go/cmd/lem/$m.metallib.gz
+        done
+      - mkdir -p bin {{.GO_BUILD_CACHE}}
+      - >-
+        env GOCACHE={{.GO_BUILD_CACHE}} go build -tags "metal_runtime embed_metallib" -trimpath
+        -ldflags "{{.GO_DARWIN_LDFLAGS}}" -o bin/lem ./go/cmd/lem
+      - 'echo "  lem (self-contained): bin/lem — $(du -h bin/lem | cut -f1), embeds mlx + lthn_kernels metallibs; run from anywhere"'
