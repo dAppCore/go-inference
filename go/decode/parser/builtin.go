@@ -17,6 +17,27 @@ type builtinOutputParser struct {
 	// flatten loop per stream — see thinking.go markersForHint.
 	thinkingMarkers []thinkingMarker
 	thinkingStarts  []string
+	// terminators are the family's bare turn-end tokens — control text that is
+	// never visible content OUTSIDE a reasoning span (inside one, the span-end
+	// match consumes it first). gemma4 MLX snapshots ship <end_of_turn> as a
+	// PLAIN vocab token (absent from added_tokens), so the tokenizer cannot
+	// hide it and every reply carried a literal trailing "<end_of_turn>" until
+	// the Processor learnt to swallow it here.
+	terminators []string
+	// thinkingHoldback is thinkingStarts + terminators — the combined
+	// partial-suffix set the streaming Processor holds back on, prebuilt so
+	// NewProcessor stays alloc-free.
+	thinkingHoldback []string
+}
+
+// turnTerminators maps a builtin parser id to its bare turn-terminator tokens.
+// Only a family whose template ends the assistant turn with an in-vocab PLAIN
+// token needs one; span-end markers stay on the reasoningMarker ends.
+func turnTerminators(id string) []string {
+	if id == "gemma" {
+		return []string{"<end_of_turn>"}
+	}
+	return nil
 }
 
 func newBuiltinOutputParser(id string, markers []reasoningMarker) *builtinOutputParser {
@@ -49,11 +70,20 @@ func newBuiltinOutputParser(id string, markers []reasoningMarker) *builtinOutput
 			thinkingStarts = append(thinkingStarts, m.start)
 		}
 	}
+	terminators := turnTerminators(id)
+	holdback := thinkingStarts
+	if len(terminators) > 0 {
+		holdback = make([]string, 0, len(thinkingStarts)+len(terminators))
+		holdback = append(holdback, thinkingStarts...)
+		holdback = append(holdback, terminators...)
+	}
 	return &builtinOutputParser{
-		id:              id,
-		markers:         owned,
-		thinkingMarkers: thinkingMarkers,
-		thinkingStarts:  thinkingStarts,
+		id:               id,
+		markers:          owned,
+		thinkingMarkers:  thinkingMarkers,
+		thinkingStarts:   thinkingStarts,
+		terminators:      terminators,
+		thinkingHoldback: holdback,
 	}
 }
 

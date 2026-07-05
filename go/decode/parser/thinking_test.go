@@ -76,3 +76,62 @@ func TestThinking_NormaliseMode_Ugly(t *testing.T) {
 		t.Fatalf("NormaliseMode(capture) = %q, want capture", mode)
 	}
 }
+
+// TestThinking_GemmaTurnTerminatorSwallowed_Good pins the terminator contract:
+// gemma4 MLX snapshots ship <end_of_turn> as a PLAIN vocab token the tokenizer
+// cannot hide, so the Processor swallows the bare terminator from visible
+// output — replies must not end with a literal "<end_of_turn>".
+func TestThinking_GemmaTurnTerminatorSwallowed_Good(t *testing.T) {
+	got := Filter(
+		"the answer is 68.\n<end_of_turn>",
+		Config{Mode: Capture},
+		Hint{Architecture: "gemma4"},
+	)
+	if want := "the answer is 68.\n"; got.Text != want {
+		t.Fatalf("Text = %q, want %q", got.Text, want)
+	}
+}
+
+// TestThinking_GemmaTurnTerminatorSplitStream_Good pins the streaming shape:
+// the terminator arriving split across Process calls is held back (the
+// holdback set includes terminators) and swallowed once complete.
+func TestThinking_GemmaTurnTerminatorSplitStream_Good(t *testing.T) {
+	p := NewProcessor(Config{Mode: Capture}, Hint{Architecture: "gemma4"})
+	out := p.Process("done<end_of_")
+	out += p.Process("turn>")
+	out += p.Flush()
+	if out != "done" {
+		t.Fatalf("streamed = %q, want %q", out, "done")
+	}
+}
+
+// TestThinking_GemmaSpanEndStillWorks_Bad guards the span interplay: inside a
+// thinking span <end_of_turn> is the SPAN end and must close the span (not be
+// treated as a bare terminator), leaving the visible tail intact.
+func TestThinking_GemmaSpanEndStillWorks_Bad(t *testing.T) {
+	got := Filter(
+		"<start_of_turn>thinking\nplan<end_of_turn>final",
+		Config{Mode: Capture},
+		Hint{Architecture: "gemma4"},
+	)
+	if got.Text != "final" {
+		t.Fatalf("Text = %q, want final", got.Text)
+	}
+	if got.Reasoning != "plan" {
+		t.Fatalf("Reasoning = %q, want plan", got.Reasoning)
+	}
+}
+
+// TestThinking_TerminatorOtherFamiliesUntouched_Ugly pins the scope: families
+// without a turn terminator (qwen etc.) pass the literal text through — the
+// swallow is gemma-specific, not a blanket rewrite.
+func TestThinking_TerminatorOtherFamiliesUntouched_Ugly(t *testing.T) {
+	got := Filter(
+		"tail<end_of_turn>",
+		Config{Mode: Capture},
+		Hint{Architecture: "qwen3"},
+	)
+	if want := "tail<end_of_turn>"; got.Text != want {
+		t.Fatalf("Text = %q, want %q", got.Text, want)
+	}
+}
