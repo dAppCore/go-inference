@@ -32,8 +32,7 @@ type embedGatherScratch struct {
 }
 
 type embedGatherScratchPool struct {
-	mu    sync.Mutex
-	items []*embedGatherScratch
+	core.Pool[*embedGatherScratch]
 }
 
 func embedGatherScratchPoolFor(dModel int) *embedGatherScratchPool {
@@ -45,28 +44,6 @@ func embedGatherScratchPoolFor(dModel int) *embedGatherScratchPool {
 		return v.(*embedGatherScratchPool)
 	}
 	return pool
-}
-
-func (p *embedGatherScratchPool) Get() *embedGatherScratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *embedGatherScratchPool) Put(s *embedGatherScratch) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 func embedGatherScratchReady(s *embedGatherScratch, dModel int) bool {

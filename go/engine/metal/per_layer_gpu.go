@@ -20,8 +20,7 @@ type perLayerInputsGPUScratchKey struct {
 }
 
 type perLayerInputsGPUScratchPool struct {
-	mu    sync.Mutex
-	items []*perLayerInputsGPUScratch
+	core.Pool[*perLayerInputsGPUScratch]
 }
 
 var perLayerInputsGPUScratchPools sync.Map
@@ -129,28 +128,6 @@ func putPerLayerInputsGPUScratch(s *perLayerInputsGPUScratch) {
 	if s != nil && s.plDim > 0 && s.dModel > 0 && s.token != nil && s.emb != nil && s.pl != nil && s.pl.out != nil {
 		perLayerInputsGPUScratchPoolFor(s.plDim, s.dModel, s.projScale).Put(s)
 	}
-}
-
-func (p *perLayerInputsGPUScratchPool) Get() *perLayerInputsGPUScratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *perLayerInputsGPUScratchPool) Put(s *perLayerInputsGPUScratch) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 func (s *perLayerInputsGPUScratch) Close() {

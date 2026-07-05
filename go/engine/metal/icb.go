@@ -512,8 +512,7 @@ type attentionBlockICBScratchKey struct {
 }
 
 type attentionBlockICBScratchPool struct {
-	mu    sync.Mutex
-	items []*attentionBlockICBScratch
+	core.Pool[*attentionBlockICBScratch]
 }
 
 var attentionBlockICBScratchPools sync.Map
@@ -659,28 +658,6 @@ func putAttentionBlockICBScratch(s *attentionBlockICBScratch) {
 	if s != nil {
 		attentionBlockICBScratchPoolFor(s.dModel, s.qDim, s.nHeads, s.nKVHeads, s.headDim, s.kvLen).Put(s)
 	}
-}
-
-func (p *attentionBlockICBScratchPool) Get() *attentionBlockICBScratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *attentionBlockICBScratchPool) Put(s *attentionBlockICBScratch) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 func (s *attentionBlockICBScratch) Close() {

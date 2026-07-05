@@ -32,8 +32,7 @@ var (
 )
 
 type qmvScratchPool struct {
-	mu    sync.Mutex
-	items []any
+	core.Pool[any]
 }
 
 func qmvScratchPoolFor(pools *sync.Map, outDim, inDim int) *qmvScratchPool {
@@ -46,28 +45,6 @@ func qmvScratchPoolFor(pools *sync.Map, outDim, inDim int) *qmvScratchPool {
 		return v.(*qmvScratchPool)
 	}
 	return pool
-}
-
-func (p *qmvScratchPool) Get() any {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *qmvScratchPool) Put(s any) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 type qmvFloatScratch struct {

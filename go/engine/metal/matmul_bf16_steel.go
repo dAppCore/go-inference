@@ -46,8 +46,7 @@ type matMulBF16SteelScratchKey struct {
 }
 
 type matMulBF16SteelScratchPool struct {
-	mu    sync.Mutex
-	items []*matMulBF16SteelScratch
+	core.Pool[*matMulBF16SteelScratch]
 }
 
 func newMatMulBF16SteelScratch(M, K, N int) (*matMulBF16SteelScratch, error) {
@@ -82,28 +81,6 @@ func matMulBF16SteelScratchPoolFor(M, K, N int) *matMulBF16SteelScratchPool {
 		return v.(*matMulBF16SteelScratchPool)
 	}
 	return pool
-}
-
-func (p *matMulBF16SteelScratchPool) Get() *matMulBF16SteelScratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *matMulBF16SteelScratchPool) Put(s *matMulBF16SteelScratch) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 func getMatMulBF16SteelScratch(M, K, N int) (*matMulBF16SteelScratch, error) {
