@@ -8,7 +8,6 @@
 .DS_Store
 *.bak
 go.work.sum
-/dist/
 /build/
 *.air
 cmd/lem/*.metallib.gz
