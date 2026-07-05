@@ -46,6 +46,56 @@ func normalizeVisionImageFeatureConfig(cfg *VisionImageFeatureConfig) *VisionIma
 	return &out
 }
 
+// visionImageProcessorJSON is the image_processor slice of processor_config.json
+// (the audio feature_extractor is the audio lane's; see LoadAudioFeatureConfig).
+type visionImageProcessorJSON struct {
+	PatchSize         int32   `json:"patch_size"`
+	MaxSoftTokens     int32   `json:"max_soft_tokens"`
+	PoolingKernelSize int32   `json:"pooling_kernel_size"`
+	RescaleFactor     float64 `json:"rescale_factor"`
+	DoResize          bool    `json:"do_resize"`
+	DoConvertRGB      bool    `json:"do_convert_rgb"`
+}
+
+type visionProcessorConfig struct {
+	ImageProcessor *visionImageProcessorJSON `json:"image_processor"`
+}
+
+// LoadVisionImageFeatureConfig reads the image_processor section from the model
+// directory's processor_config.json — the preprocessing params (patch size,
+// soft-token budget, pooling, rescale) VisionImagePatches needs. Returns
+// (nil, nil) when the model ships no processor config or no image section
+// (text-only checkpoints; ProjectImage then falls back to the HF defaults).
+// Arch-neutral: reads the generic HF processor JSON via the core helpers, no
+// model/gemma4 import — the metal loader stays arch-free (mirrors
+// LoadAudioFeatureConfig).
+func LoadVisionImageFeatureConfig(modelPath string) (*VisionImageFeatureConfig, error) {
+	read := core.ReadFile(core.PathJoin(modelPath, "processor_config.json"))
+	if !read.OK {
+		return nil, nil
+	}
+	data, ok := read.Value.([]byte)
+	if !ok {
+		return nil, core.E("native.vision", "processor_config.json read returned non-byte data", nil)
+	}
+	var processor visionProcessorConfig
+	if r := core.JSONUnmarshal(data, &processor); !r.OK {
+		return nil, core.E("native.vision", "parse processor_config.json", nil)
+	}
+	if processor.ImageProcessor == nil {
+		return nil, nil
+	}
+	p := processor.ImageProcessor
+	return &VisionImageFeatureConfig{
+		PatchSize:         p.PatchSize,
+		MaxSoftTokens:     p.MaxSoftTokens,
+		PoolingKernelSize: p.PoolingKernelSize,
+		RescaleFactor:     p.RescaleFactor,
+		DoResize:          p.DoResize,
+		DoConvertRGB:      p.DoConvertRGB,
+	}, nil
+}
+
 // VisionImagePatches decodes PNG/JPEG bytes, applies the Gemma 4 image sizing
 // rule, rescales to [0,1], and returns pre-patchified BF16 rows
 // [numPatches, patchSize*patchSize*3] for VisionTower.

@@ -93,9 +93,20 @@ func (m *TextModel) Generate(ctx context.Context, prompt string, opts ...inferen
 }
 
 // Chat renders the multi-turn conversation with the gemma turn template and
-// streams the completion of a trailing model turn.
+// streams the completion of a trailing model turn. A turn carrying images routes
+// to the multimodal path when the loaded checkpoint has a vision tower; images
+// against a text-only model are rejected rather than silently dropped.
 func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
-	return m.stream(ctx, m.encode(formatChatTurns(messages)), inference.ApplyGenerateOpts(opts))
+	cfg := inference.ApplyGenerateOpts(opts)
+	if messagesHaveImages(messages) {
+		if v, ok := m.tm.(VisionTokenModel); ok && v.AcceptsImageInput() {
+			return m.chatMultimodal(ctx, messages, v, cfg)
+		}
+		return func(yield func(inference.Token) bool) {
+			m.setErr(core.NewError("engine.TextModel.Chat: model does not accept image input"))
+		}
+	}
+	return m.stream(ctx, m.encode(formatChatTurns(messages)), cfg)
 }
 
 func (m *TextModel) encode(prompt string) []int32 {
@@ -135,56 +146,59 @@ func (m *TextModel) stream(ctx context.Context, ids []int32, cfg inference.Gener
 			m.setErr(err)
 			return
 		}
-		maxNew := cfg.MaxTokens
-		if maxNew <= 0 {
-			maxNew = 256
-		}
-		if sess.Pos()+maxNew > m.maxLen {
-			maxNew = m.maxLen - sess.Pos()
-		}
-		if maxNew <= 0 {
-			m.setErr(core.NewError("engine.TextModel.Generate: no room to generate in the context window"))
-			return
-		}
-		stop := m.stopTokens(cfg)
-		count := 0
-		emit := func(id int32) bool {
-			if ctx.Err() != nil {
-				return false
-			}
-			count++
-			if !yield(inference.Token{ID: id, Text: m.decode(id)}) {
-				return false
-			}
-			return !tokenInSet(id, stop)
-		}
-		var gerr error
-		if cfg.Temperature > 0 || cfg.MinP > 0 || cfg.RepeatPenalty > 1 {
-			params := model.SampleParams{
-				Temperature:    cfg.Temperature,
-				TopK:           cfg.TopK,
-				TopP:           cfg.TopP,
-				MinP:           cfg.MinP,
-				RepeatPenalty:  cfg.RepeatPenalty,
-				SuppressTokens: cfg.SuppressTokens,
-			}
-			_, gerr = sess.GenerateSampledFromCacheEach(maxNew, stop, model.NewSampler(cfg.Seed), params, nil, emit)
-		} else {
-			// eosID -1: emit owns the stop decision (after yielding), so a stop
-			// token is always surfaced and generation is bounded by maxNew.
-			_, gerr = sess.GenerateFromCacheEach(maxNew, -1, emit)
-		}
-		m.setMetrics(len(ids), count, m.prefillSplit(start), start)
-		if gerr != nil {
-			m.setErr(gerr)
-			return
-		}
-		if cerr := ctx.Err(); cerr != nil {
-			m.setErr(cerr)
-			return
-		}
-		m.setOK()
+		m.decodeFromPrefilled(ctx, sess, len(ids), cfg, start, yield)
 	}
+}
+
+// decodeFromPrefilled runs the token budget over an ALREADY-prefilled session,
+// yielding decoded tokens up to the budget and honouring stop tokens after each
+// yield (so a stop token is still surfaced). It is the one decode loop shared by
+// the text path (PrefillTokens) and the multimodal path (PrefillTokenEmbeddings)
+// — the only difference upstream is how the prompt entered the KV cache.
+// promptLen is the prompt token count (metrics); start is when the whole
+// operation began.
+func (m *TextModel) decodeFromPrefilled(ctx context.Context, sess Session, promptLen int, cfg inference.GenerateConfig, start time.Time, yield func(inference.Token) bool) {
+	maxNew := cfg.MaxTokens
+	if maxNew <= 0 {
+		maxNew = 256
+	}
+	if sess.Pos()+maxNew > m.maxLen {
+		maxNew = m.maxLen - sess.Pos()
+	}
+	if maxNew <= 0 {
+		m.setErr(core.NewError("engine.TextModel.Generate: no room to generate in the context window"))
+		return
+	}
+	stop := m.stopTokens(cfg)
+	count := 0
+	emit := func(id int32) bool {
+		if ctx.Err() != nil {
+			return false
+		}
+		count++
+		if !yield(inference.Token{ID: id, Text: m.decode(id)}) {
+			return false
+		}
+		return !tokenInSet(id, stop)
+	}
+	var gerr error
+	if cfg.Temperature > 0 || cfg.MinP > 0 || cfg.RepeatPenalty > 1 {
+		_, gerr = sess.GenerateSampledFromCacheEach(maxNew, stop, model.NewSampler(cfg.Seed), modelSampleParams(cfg), nil, emit)
+	} else {
+		// eosID -1: emit owns the stop decision (after yielding), so a stop token
+		// is always surfaced and generation is bounded by maxNew.
+		_, gerr = sess.GenerateFromCacheEach(maxNew, -1, emit)
+	}
+	m.setMetrics(promptLen, count, m.prefillSplit(start), start)
+	if gerr != nil {
+		m.setErr(gerr)
+		return
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		m.setErr(cerr)
+		return
+	}
+	m.setOK()
 }
 
 // prefillSplit is a coarse prefill/decode duration split — the conformance
