@@ -60,6 +60,20 @@ type Session interface {
 	Close() error
 }
 
+// DecodePhaseTracer is the optional [Session] seam a concrete engine implements
+// to report where the per-token decode wall goes. When GenerateConfig
+// .TraceTokenPhases is set, [TextModel] begins a trace before decoding and folds
+// the returned budget into GenerateMetrics.DecodePhases. An engine without phase
+// timing simply does not implement it (the flag then leaves DecodePhases nil).
+type DecodePhaseTracer interface {
+	// BeginDecodePhaseTrace turns per-token phase timing on for the next
+	// generation on this session and returns a stop function that turns it off and
+	// returns the aggregate budget. The engine owns thread-safety; tracing is a
+	// single-flight diagnostic (a bench / one-shot generate), not a concurrent
+	// serving path.
+	BeginDecodePhaseTrace() func() inference.DecodePhaseBudget
+}
+
 // SessionHandle adapts a retained engine [Session] (+ the model's tokenizer,
 // reached through its parent [TextModel]) to inference.SessionHandle — the
 // engine-neutral persistent conversation-state surface state/session.Session

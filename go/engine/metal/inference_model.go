@@ -19,11 +19,24 @@ import (
 )
 
 var (
-	_ engine.TokenModel   = (*NativeTokenModel)(nil)
-	_ engine.Session      = (*ArchSession)(nil)
-	_ engine.TrainerModel = (*NativeTokenModel)(nil)
-	_ engine.Trainer      = (*LoRATrainer)(nil)
+	_ engine.TokenModel        = (*NativeTokenModel)(nil)
+	_ engine.Session           = (*ArchSession)(nil)
+	_ engine.TrainerModel      = (*NativeTokenModel)(nil)
+	_ engine.Trainer           = (*LoRATrainer)(nil)
+	_ engine.CacheModeReporter = (*NativeTokenModel)(nil)
+	_ engine.DecodePhaseTracer = (*ArchSession)(nil)
 )
+
+// SupportedCacheModes reports the one KV cache mode this no-cgo engine runs: its
+// own built-in cache, selected automatically (engine.CacheModeReporter). It
+// exposes no runtime selector for the go-mlx-era alternatives (fp16 / q8 /
+// kq8vq4 / turboquant) — those were pkg/metal load options that did not port —
+// so a -kv-cache override naming any other mode is not honoured. Reporting the
+// single real mode lets callers print an accurate note, and future engines that
+// do honour a selector list theirs here through the same seam.
+func (m *NativeTokenModel) SupportedCacheModes() []string {
+	return []string{"native"}
+}
 
 // newNativeTextModel wraps a loaded no-cgo token model as the shared
 // engine.TextModel (inference.TextModel + inference.SessionFactory). The

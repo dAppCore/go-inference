@@ -151,6 +151,64 @@ type GenerateMetrics struct {
 
 	// Reasoning controls
 	ThinkingBudgetForced bool // ThinkingBudget forced the thought-channel close token
+
+	// DecodePhases is the aggregate per-token decode timing split, populated only
+	// when GenerateConfig.TraceTokenPhases was set AND the active engine + decode
+	// path reported a budget. nil otherwise — an engine without phase timing (or a
+	// decode path that isn't instrumented) simply leaves it unset.
+	DecodePhases *DecodePhaseBudget `json:",omitempty"`
+}
+
+// DecodePhaseBudget is the aggregate per-token decode timing split from a traced
+// generation (GenerateConfig.TraceTokenPhases): where the average generated
+// token's wall goes between GPU-busy work (the host blocked on a GPU result) and
+// host-serial work (the GPU idle while the host encodes / samples / detokenises).
+// It is the structured, engine-neutral form of the perf campaign's process-global
+// pieceTiming counters, so `lem generate -trace` can print the budget through the
+// production metrics surface instead of a test-only hook.
+//
+//	if b := m.Metrics().DecodePhases; b != nil {
+//	    fmt.Printf("%.3f ms/token · GPU %.0f%%\n",
+//	        float64(b.TotalPerToken.Microseconds())/1000, 100*b.GPUFraction())
+//	}
+type DecodePhaseBudget struct {
+	Tokens        int                `json:",omitempty"` // tokens the aggregate is averaged over
+	TotalPerToken time.Duration      `json:",omitempty"` // average wall per token
+	GPUPerToken   time.Duration      `json:",omitempty"` // average time the host blocked on GPU results
+	Phases        []DecodePhaseShare `json:",omitempty"` // engine-named sub-splits (may be empty)
+}
+
+// DecodePhaseShare is one named slice of the per-token decode budget. Name is the
+// engine's own label for the phase (the metal engine reports its GPU pieces —
+// "PLE projection", "layer stack (ICB)", "head — norm + lm_head" — and the
+// chained-decode GPU span). GPU marks a phase as GPU-busy time versus host-serial.
+type DecodePhaseShare struct {
+	Name     string        `json:",omitempty"`
+	PerToken time.Duration `json:",omitempty"`
+	GPU      bool          `json:",omitempty"`
+}
+
+// HostPerToken is the average per-token host-serial time — the wall the GPU sat
+// idle (TotalPerToken - GPUPerToken). It is the headroom a deeper decode pipeline
+// could overlap; a large share is the signal the engine perf work chases. Clamped
+// to zero when GPU time somehow exceeds the measured wall (overlapping spans).
+func (b DecodePhaseBudget) HostPerToken() time.Duration {
+	if b.GPUPerToken >= b.TotalPerToken {
+		return 0
+	}
+	return b.TotalPerToken - b.GPUPerToken
+}
+
+// GPUFraction is GPUPerToken / TotalPerToken in [0,1] (0 when untimed).
+func (b DecodePhaseBudget) GPUFraction() float64 {
+	if b.TotalPerToken <= 0 {
+		return 0
+	}
+	f := float64(b.GPUPerToken) / float64(b.TotalPerToken)
+	if f > 1 {
+		return 1
+	}
+	return f
 }
 
 // info := model.Info()
