@@ -47,7 +47,7 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 	contextLen := fs.Int("context", 0, "context length override (0 = model default)")
 	kvCacheMode := fs.String("kv-cache", "", "KV cache mode (paged, fp16, q8, kq8vq4, turboquant; empty = load default)")
 	pipeline := fs.Bool("pipeline", true, "one-ahead pipelined decode (the engine default; false forces the chained serial loop, for A/B traces)")
-	kvStorage := fs.String("kv-storage", "", "retained KV storage dtype (fp16, bf16; empty = native fp32)")
+	kvStorage := fs.String("kv-storage", "", "KV snapshot encoding for -state sleeps (native, q8, float32; empty = native) — inert without -state")
 	tracePhases := fs.Bool("trace", false, "print the per-token decode time budget — GPU wait vs host-serial work")
 	nativeBackend := fs.Bool("native", false, "generate via the no-cgo native token-loop contract (the default go-inference metal engine already is)")
 	stateName := fs.String("state", "", "conversation state name: wake it from the store if present, generate, sleep it back — the no-prompt-replay turn loop")

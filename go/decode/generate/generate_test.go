@@ -8,6 +8,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/serving"
 )
 
@@ -43,14 +44,71 @@ func TestNoteCacheKnobs_HonouredMode_Bad(t *testing.T) {
 	}
 }
 
-// TestNoteCacheKnobs_Storage_Ugly pins the -kv-storage note: the engine honours
-// no storage-dtype override, so any value is reported ignored.
-func TestNoteCacheKnobs_Storage_Ugly(t *testing.T) {
+// TestNoteCacheKnobs_IgnoresStorage_Ugly pins that noteCacheKnobs is now
+// -kv-cache-only: -kv-storage is the snapshot-encoding knob resolved elsewhere,
+// so noteCacheKnobs stays silent about it even when set.
+func TestNoteCacheKnobs_IgnoresStorage_Ugly(t *testing.T) {
 	log := core.NewBuffer()
 	tm := capModel{report: inference.CapabilityReport{CacheModes: []string{"native"}}}
-	noteCacheKnobs(Config{KVStorage: "fp16", Log: log}, tm)
-	if out := log.String(); !core.Contains(out, "-kv-storage \"fp16\"") {
-		t.Fatalf("storage note = %q, want it to name fp16 as ignored", out)
+	noteCacheKnobs(Config{KVStorage: "q8", Log: log}, tm)
+	if out := log.String(); out != "" {
+		t.Fatalf("noteCacheKnobs spoke about -kv-storage: %q, want silence", out)
+	}
+}
+
+// TestKVStorageEncoding pins the flag → kv.Encoding resolution + classification:
+// native is recognised AND live-state-ready; q8/float32 are recognised but NOT
+// live-state-ready (they need the snapshot-codec follow-up, so they fall back to
+// native); an unknown value is neither and also falls back to native.
+func TestKVStorageEncoding(t *testing.T) {
+	cases := []struct {
+		raw        string
+		enc        kv.Encoding
+		recognised bool
+		liveReady  bool
+	}{
+		{"", kv.EncodingNative, true, true},
+		{"native", kv.EncodingNative, true, true},
+		{"Q8", kv.EncodingQ8, true, false},
+		{"float32", kv.KVSnapshotEncodingFloat32, true, false},
+		{"fp16", kv.EncodingNative, false, false}, // go-mlx-era vocabulary, not a real encoding here
+	}
+	for _, c := range cases {
+		enc, recognised, liveReady := kvStorageEncoding(c.raw)
+		if enc != c.enc || recognised != c.recognised || liveReady != c.liveReady {
+			t.Fatalf("kvStorageEncoding(%q) = (%q, %v, %v), want (%q, %v, %v)",
+				c.raw, enc, recognised, liveReady, c.enc, c.recognised, c.liveReady)
+		}
+	}
+}
+
+// TestNoteKVStorageInert_Good pins the stateless-path note: a set -kv-storage
+// value is reported inert (no KV persisted) so a bench user is not misled.
+func TestNoteKVStorageInert_Good(t *testing.T) {
+	log := core.NewBuffer()
+	noteKVStorageInert(Config{KVStorage: "q8", Log: log})
+	if out := log.String(); !core.Contains(out, "no effect here") {
+		t.Fatalf("inert note = %q, want it to state -kv-storage has no effect statelessly", out)
+	}
+}
+
+// TestNoteKVStorageInert_Bad pins the silence when the flag is unset.
+func TestNoteKVStorageInert_Bad(t *testing.T) {
+	log := core.NewBuffer()
+	noteKVStorageInert(Config{Log: log})
+	if out := log.String(); out != "" {
+		t.Fatalf("unset -kv-storage noted %q, want silence", out)
+	}
+}
+
+// TestNoteKVStorageInert_Ugly pins the unknown-value flag on the stateless path:
+// an unrecognised encoding is named alongside the inert note.
+func TestNoteKVStorageInert_Ugly(t *testing.T) {
+	log := core.NewBuffer()
+	noteKVStorageInert(Config{KVStorage: "fp16", Log: log})
+	out := log.String()
+	if !core.Contains(out, "not a known KV snapshot encoding") || !core.Contains(out, "no effect here") {
+		t.Fatalf("unknown+inert note = %q, want both the unknown flag and the inert note", out)
 	}
 }
 
