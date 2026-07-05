@@ -23,6 +23,7 @@ func init() {
 		// "" claims checkpoints that predate the model_type field — the legacy default
 		// this format shipped with.
 		ModelTypes:     []string{"gemma4_assistant", "gemma4_unified_assistant", ""},
+		Method:         model.MTPDraftModel, // gemma4 -assistant is a separate draft model
 		Parse:          ParseAssistantConfig,
 		GGUFArch:       assistantGGUFArch,
 		ParseGGUF:      AssistantConfigFromGGUF,

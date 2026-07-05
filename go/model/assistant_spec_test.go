@@ -116,3 +116,52 @@ func TestAssistantConfigLayerType(t *testing.T) {
 		t.Fatalf(`LayerType(-1) negative index = %q, want ""`, got)
 	}
 }
+
+// TestResolveMTPMethod covers the method default: an unset method resolves to
+// MTPDraftModel (the only shipped method, and what every legacy checkpoint uses),
+// while an explicitly-set method passes through unchanged.
+func TestResolveMTPMethod(t *testing.T) {
+	if got := resolveMTPMethod(""); got != MTPDraftModel {
+		t.Fatalf(`resolveMTPMethod("") = %q, want the default %q`, got, MTPDraftModel)
+	}
+	if got := resolveMTPMethod(MTPDraftModel); got != MTPDraftModel {
+		t.Fatalf("resolveMTPMethod(MTPDraftModel) = %q, want it unchanged", got)
+	}
+	if got := resolveMTPMethod(MTPMethod("eagle")); got != MTPMethod("eagle") {
+		t.Fatalf(`resolveMTPMethod("eagle") = %q, want a set method to pass through`, got)
+	}
+}
+
+// TestParseAssistantConfigStampsMTPMethod proves the MTP method is INFERRED FROM THE
+// MODEL: ParseAssistantConfig stamps the registered spec's Method onto the parsed
+// AssistantConfig, and a spec that leaves the method unset defaults to MTPDraftModel
+// (the separate-drafter method every current checkpoint uses).
+func TestParseAssistantConfigStampsMTPMethod(t *testing.T) {
+	RegisterAssistant(AssistantSpec{
+		ModelTypes: []string{"fake7_assistant"},
+		Method:     MTPMethod("eagle"),
+		Parse: func([]byte) (AssistantConfig, error) {
+			return AssistantConfig{ModelType: "fake7_assistant"}, nil
+		},
+	})
+	cfg, err := ParseAssistantConfig([]byte(`{"model_type":"fake7_assistant"}`))
+	if err != nil {
+		t.Fatalf("ParseAssistantConfig: %v", err)
+	}
+	if cfg.Method != MTPMethod("eagle") {
+		t.Fatalf("Method = %q, want the spec's declared %q inferred onto the config", cfg.Method, "eagle")
+	}
+	RegisterAssistant(AssistantSpec{
+		ModelTypes: []string{"fake8_assistant"},
+		Parse: func([]byte) (AssistantConfig, error) {
+			return AssistantConfig{ModelType: "fake8_assistant"}, nil
+		},
+	})
+	cfg, err = ParseAssistantConfig([]byte(`{"model_type":"fake8_assistant"}`))
+	if err != nil {
+		t.Fatalf("ParseAssistantConfig (no method): %v", err)
+	}
+	if cfg.Method != MTPDraftModel {
+		t.Fatalf("Method = %q, want the %q default when the spec declares none", cfg.Method, MTPDraftModel)
+	}
+}
