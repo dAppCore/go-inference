@@ -14,7 +14,7 @@ import (
 // button takes: spawn the real engine model-less via the driver, allowlist
 // a curated repo, kick the engine-side HF download, poll to done, verify
 // the weights landed. Green-unit-tests are a hypothesis; this exercises the
-// user path (a real ~0.8GB HuggingFace pull into ~/Lethean/data/models).
+// user path (a real ~0.8GB HuggingFace pull into ~/Lethean/lem/models).
 //
 // Gated: opt in with LEM_FIELD_DOWNLOAD=1 and point CORE_AI_DRIVER_DIR at a
 // built lthn-mlx (e.g. ~/Code/core/go-mlx/bin). The downloaded model is

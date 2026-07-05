@@ -18,14 +18,14 @@ import (
 // minted by lthn-mlx stays a drop-in secret for cmd/lem.
 const adminTokenPrefix = "lthn-mlx_"
 
-// AdminTokenPath returns ~/Lethean/data/admin.token — the canonical location
+// AdminTokenPath returns ~/Lethean/lem/admin.token — the canonical location
 // for the Bearer auth secret. Mode 0600 is enforced on write so other local
 // users can't read it. This is the same path lthn-mlx used, so cmd/lem is a
 // drop-in for any tool (lem.sh harness, launchd job) that reads the token file.
 //
 //	tok, _, _ := serving.EnsureAdminToken(serving.AdminTokenPath())
 func AdminTokenPath() string {
-	return core.PathJoin(core.Env("HOME"), "Lethean", "data", "admin.token")
+	return core.PathJoin(core.Env("HOME"), "Lethean", "lem", "admin.token")
 }
 
 // GenerateAdminToken returns a fresh opaque 256-bit token, base64url-encoded,

@@ -37,7 +37,7 @@ var _ coreapi.RouteGroup = (*Host)(nil)
 // first run and reopening it otherwise. The store is an append-only state
 // file-log (codec state/file-log).
 //
-//	host, err := sessionkv.Open(ctx, "/Users/me/Lethean/data/state/session.kv")
+//	host, err := sessionkv.Open(ctx, "/Users/me/Lethean/lem/state/session.kv")
 //	if err != nil {
 //		return err
 //	}

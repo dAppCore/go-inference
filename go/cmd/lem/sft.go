@@ -59,7 +59,7 @@ func runSFTCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 		core.WriteString(stderr, "Examples:\n")
 		core.WriteString(stderr, core.Sprintf("  %s sft --model ~/models/gemma-4-E2B-it-bf16 \\\n", name))
 		core.WriteString(stderr, "      --data train.jsonl --valid valid.jsonl \\\n")
-		core.WriteString(stderr, "      --rank 16 --epochs 2 --checkpoint-dir ~/Lethean/data/sft/run1\n")
+		core.WriteString(stderr, "      --rank 16 --epochs 2 --checkpoint-dir ~/Lethean/lem/sft/run1\n")
 	}
 	if err := fs.Parse(args); err != nil {
 		if core.Is(err, flag.ErrHelp) {

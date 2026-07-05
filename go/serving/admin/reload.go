@@ -16,7 +16,7 @@ import (
 // who can flip the model owns every subsequent /v1/chat/completions response.
 // The handler gates the verb before the swap:
 //
-//  1. Model NAME (basename) or a path that resolves under ~/Lethean/data/models/.
+//  1. Model NAME (basename) or a path that resolves under ~/Lethean/lem/models/.
 //  2. The resolved dir carries a .sha256 sidecar (integrity contract — refuse
 //     "whatever's on disk").
 //  3. Confirmation == the machine hash from /v1/admin/machine (confused-deputy
@@ -52,10 +52,10 @@ type ReloadResponse struct {
 // missing it — no hot-swap to unverified-integrity models.
 const shaManifestFilename = ".sha256"
 
-// standardModelDir returns ~/Lethean/data/models/ — the root reload + download
+// standardModelDir returns ~/Lethean/lem/models/ — the root reload + download
 // bound against.
 func standardModelDir() string {
-	return core.PathJoin(core.Env("HOME"), "Lethean", "data", "models")
+	return core.PathJoin(core.Env("HOME"), "Lethean", "lem", "models")
 }
 
 // reloadHandler answers POST /v1/admin/serve/reload against resolver. It

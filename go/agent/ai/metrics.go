@@ -48,7 +48,7 @@ func metricsDir() core.Result {
 	if home == "" {
 		return core.Fail(core.E("ai.metricsDir", "resolve metrics home directory", nil))
 	}
-	return core.Ok(core.JoinPath(home, ".core", "ai", "metrics"))
+	return core.Ok(core.JoinPath(home, "Lethean", "lem", "ai", "metrics"))
 }
 
 func metricsDirHomeEnv() string {

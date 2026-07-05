@@ -351,7 +351,7 @@ func TestDriver_Status_Bad(t *testing.T) {
 func TestDriver_Models_Good(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	modelsDir := core.PathJoin(home, "Lethean", "data", "models")
+	modelsDir := core.PathJoin(home, "Lethean", "lem", "models")
 	profilesDir := core.PathJoin(home, "Lethean", "conf", "models")
 	if r := core.MkdirAll(modelsDir, 0o755); !r.OK {
 		t.Fatalf("mkdir models: %v", r.Value)
@@ -745,7 +745,7 @@ func TestDriver_ListNames_Ugly(t *testing.T) {
 func TestDriver_ServePersistPath_Good(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	want := core.PathJoin(home, "Lethean", "data", "lthn-ai-serve.json")
+	want := core.PathJoin(home, "Lethean", "lem", "lthn-ai-serve.json")
 	if got := servePersistPath(); got != want {
 		t.Fatalf("servePersistPath = %q, want %q", got, want)
 	}

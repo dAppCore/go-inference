@@ -6,7 +6,7 @@ version: '3'
 #   patches/mlx/      — the 10 lthn patches applied ON TOP at build time (decode-replay,
 #                       MLX_METALLIB_PATH override, 512-dim sdpa_vector). Patch-not-vendor:
 #                       track upstream MLX + pull updates by bumping the pin + rebasing patches.
-#   build/dist/external/mlx.metallib          — MLX's own compiled kernels (steel_gemm, affine_qmv,
+#   build/dist/lib/mlx.metallib          — MLX's own compiled kernels (steel_gemm, affine_qmv,
 #                                    vv_*, rms, rope) the engine dispatches. Built by CMake.
 #   build/dist/lib/lthn_kernels.metallib — go-inference's OWN fused kernels (engine/metal/kernels/
 #                                    *.metal), loaded beside mlx.metallib.
@@ -16,7 +16,7 @@ vars:
   NCPU:
     sh: sysctl -n hw.ncpu
 env:
-  MLX_METALLIB_PATH: '{{.ROOT_DIR}}/build/dist/external/mlx.metallib'
+  MLX_METALLIB_PATH: '{{.ROOT_DIR}}/build/dist/lib/mlx.metallib'
 
 tasks:
   metallib:
@@ -26,7 +26,7 @@ tasks:
       - task: metallib:kernels
 
   metallib:mlx:
-    desc: "Build MLX's kernels (build/dist/external/mlx.metallib) from Apple MLX (external/mlx @ v0.31.2) + the lthn patches."
+    desc: "Build MLX's kernels (build/dist/lib/mlx.metallib) from Apple MLX (external/mlx @ v0.31.2) + the lthn patches."
     cmds:
       - mkdir -p build/dist/lib build
       - |-
@@ -38,10 +38,10 @@ tasks:
           -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_EXAMPLES=OFF \
           -DMLX_BUILD_PYTHON_BINDINGS=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0
         cmake --build build/mlx-metal --target mlx --parallel {{.NCPU}}
-        cp build/mlx-metal/mlx/backend/metal/kernels/mlx.metallib build/dist/external/mlx.metallib
+        cp build/mlx-metal/mlx/backend/metal/kernels/mlx.metallib build/dist/lib/mlx.metallib
         # restore external/mlx to pristine so the submodule stays clean in git status
         git -C external/mlx checkout -q -- . && git -C external/mlx clean -fdq
-        echo "  mlx.metallib: $(du -h build/dist/external/mlx.metallib | cut -f1) (Apple MLX $(git -C external/mlx describe --tags) + $(ls patches/mlx/*.patch | wc -l | tr -d ' ') lthn patches)"
+        echo "  mlx.metallib: $(du -h build/dist/lib/mlx.metallib | cut -f1) (Apple MLX $(git -C external/mlx describe --tags) + $(ls patches/mlx/*.patch | wc -l | tr -d ' ') lthn patches)"
 
   metallib:kernels:
     desc: "Compile go-inference's OWN Metal kernels (engine/metal/kernels/*.metal) into build/dist/lib/lthn_kernels.metallib (needs external/mlx headers)."

@@ -75,7 +75,7 @@ func NewLineProtocolSink(cfg LineProtocolConfig) *LineProtocolSink {
 //
 //	sink := probe.NewLineProtocolSink(probe.LineProtocolConfig{
 //		Model: "LEM-gemma3-1b", RunID: "gold-1",
-//		FilePath: "~/Lethean/data/sft/gold-1/metrics.lp",
+//		FilePath: "~/Lethean/lem/sft/gold-1/metrics.lp",
 //		Post: probe.NewInfluxPoster("http://localhost:8086/api/v2/write?org=lem&bucket=training", token),
 //	})
 func NewInfluxPoster(url, token string) func(body string) error {

@@ -81,7 +81,7 @@ func TestProvider_RegisterRoutes_Bad(t *testing.T) {
 func TestProvider_Models_Good(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	modelsDir := core.PathJoin(home, "Lethean", "data", "models")
+	modelsDir := core.PathJoin(home, "Lethean", "lem", "models")
 	if r := core.MkdirAll(modelsDir, 0o755); !r.OK {
 		t.Fatalf("mkdir: %v", r.Value)
 	}

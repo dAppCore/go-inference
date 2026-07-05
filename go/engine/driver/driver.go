@@ -233,13 +233,13 @@ type persistedServe struct {
 }
 
 // servePersistPath is where the last-served choice is recorded —
-// ~/Lethean/data/lthn-ai-serve.json. Empty when the home dir can't resolve.
+// ~/Lethean/lem/lthn-ai-serve.json. Empty when the home dir can't resolve.
 func servePersistPath() string {
 	home := core.UserHomeDir()
 	if !home.OK {
 		return ""
 	}
-	return core.PathJoin(home.Value.(string), "Lethean", "data", "lthn-ai-serve.json")
+	return core.PathJoin(home.Value.(string), "Lethean", "lem", "lthn-ai-serve.json")
 }
 
 // persistServe records the last successful serve. Best-effort: a write failure
@@ -408,7 +408,7 @@ func (s *Service) Status() []Served {
 }
 
 // Models lists what the host can serve: the model weights under
-// ~/Lethean/data/models and the serve profiles under ~/Lethean/conf/models.
+// ~/Lethean/lem/models and the serve profiles under ~/Lethean/conf/models.
 //
 //	r := svc.Models()
 //	if r.OK { cat := r.Value.(driver.Catalogue); _ = cat.Models }
@@ -419,7 +419,7 @@ func (s *Service) Models() core.Result {
 	}
 	root := home.Value.(string)
 	return core.Ok(Catalogue{
-		Models:   listNames(core.PathJoin(root, "Lethean", "data", "models")),
+		Models:   listNames(core.PathJoin(root, "Lethean", "lem", "models")),
 		Profiles: listNames(core.PathJoin(root, "Lethean", "conf", "models")),
 	})
 }

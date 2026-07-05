@@ -14,8 +14,8 @@ import (
 // Engine admin client — the driver-side counterpart of a running LEM
 // Engine's /v1/admin surface (model downloads today). The host app IS the
 // engine's operator: the download allowlist
-// (~/Lethean/data/allowed-models.json) and the Bearer token
-// (~/Lethean/data/admin.token) are engine-managed files the host curates
+// (~/Lethean/lem/allowed-models.json) and the Bearer token
+// (~/Lethean/lem/admin.token) are engine-managed files the host curates
 // and reads — writing a curated repo into the allowlist before requesting
 // its download is the intended operator path, not a policy bypass.
 
@@ -26,7 +26,7 @@ const adminHTTPTimeout = 30 * time.Second
 // DownloadJob mirrors the engine's admin download job JSON (go-mlx
 // adminDownloadJob): status pending → running → done | failed. BytesDone /
 // BytesTotal drive progress; DestPath is where the weights land
-// (~/Lethean/data/models/<org__name>/<revision>).
+// (~/Lethean/lem/models/<org__name>/<revision>).
 type DownloadJob struct {
 	ID         string `json:"id"`
 	Status     string `json:"status"`
@@ -40,7 +40,7 @@ type DownloadJob struct {
 }
 
 // CanonicalRepoDir mirrors the engine's canonicaliseRepoName: the directory
-// a downloaded repo lands under ~/Lethean/data/models. Used to match
+// a downloaded repo lands under ~/Lethean/lem/models. Used to match
 // catalogue scans against curated repos.
 //
 //	driver.CanonicalRepoDir("mlx-community/gemma-4-e2b-it-4bit")
@@ -50,11 +50,11 @@ func CanonicalRepoDir(repo string) string {
 }
 
 func allowedModelsPath() string {
-	return core.PathJoin(core.Env("HOME"), "Lethean", "data", "allowed-models.json")
+	return core.PathJoin(core.Env("HOME"), "Lethean", "lem", "allowed-models.json")
 }
 
 func adminTokenPath() string {
-	return core.PathJoin(core.Env("HOME"), "Lethean", "data", "admin.token")
+	return core.PathJoin(core.Env("HOME"), "Lethean", "lem", "admin.token")
 }
 
 // allowedModelsFile mirrors the engine's allowlist shape (go-mlx

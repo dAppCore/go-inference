@@ -18,10 +18,10 @@ import (
 // MTP draft block. Matches the key `lthn-mlx tune` / `lem tune` writes.
 const tuneDraftBlockLabel = "mtp_draft_block"
 
-// standardTuningProfileDir returns ~/Lethean/data/tuning — the canonical
+// standardTuningProfileDir returns ~/Lethean/lem/tuning — the canonical
 // directory tuned profiles are written to and resolved from.
 func standardTuningProfileDir() string {
-	return core.PathJoin(core.Env("HOME"), "Lethean", "data", "tuning")
+	return core.PathJoin(core.Env("HOME"), "Lethean", "lem", "tuning")
 }
 
 // resolveServeDraftBlock picks the draft block the MTP lane will run: an

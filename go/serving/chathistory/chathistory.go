@@ -16,7 +16,7 @@
 //
 // Storage convention: one .duckdb per user, conventionally at
 //
-//	~/Lethean/data/users/<user_id>/chats.duckdb
+//	~/Lethean/lem/users/<user_id>/chats.duckdb
 //
 // Open accepts an explicit path so test/dev contexts can override
 // without environment ceremony.
@@ -26,7 +26,7 @@
 //
 // Usage example:
 //
-//	h, err := chathistory.Open("snider", "/Users/snider/Lethean/data/users/snider/chats.duckdb")
+//	h, err := chathistory.Open("snider", "/Users/snider/Lethean/lem/users/snider/chats.duckdb")
 //	if err != nil { return err }
 //	defer h.Close()
 //
@@ -101,7 +101,7 @@ type NewTurn struct {
 // applying the initial schema if it doesn't already exist. The
 // caller owns the lifecycle and must Close when done.
 //
-//	h, err := chathistory.Open("snider", "/Users/snider/Lethean/data/users/snider/chats.duckdb")
+//	h, err := chathistory.Open("snider", "/Users/snider/Lethean/lem/users/snider/chats.duckdb")
 func Open(userID, path string) (*History, error) {
 	if core.Trim(userID) == "" {
 		return nil, core.E("chathistory.Open", "user id required", nil)

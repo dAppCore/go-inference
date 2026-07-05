@@ -47,7 +47,7 @@ type ServeConfig struct {
 	DraftDetect   bool   // reactive detection for Gemma 4 targets
 	DraftBlock    int    // explicit MTP draft block; 0 = tuned profile or engine default
 	NoAutoProfile bool   // ignore tuned profiles
-	ProfileDir    string // tuned-profile directory (default ~/Lethean/data/tuning)
+	ProfileDir    string // tuned-profile directory (default ~/Lethean/lem/tuning)
 	MachineHash   string // machine identity for profile matching; "" accepts hash-less profiles
 
 	KVCacheMode string // requested KV cache mode; wired when the engine exposes it
@@ -55,7 +55,7 @@ type ServeConfig struct {
 
 	// Conversation continuity.
 	StateConversations bool   // wake each chat from its slept state, no prompt replay
-	StateStorePath     string // state store file (default ~/Lethean/data/state/conversations.kv)
+	StateStorePath     string // state store file (default ~/Lethean/lem/state/conversations.kv)
 
 	// HTTP + admin.
 	ReadTimeout     time.Duration
@@ -142,6 +142,12 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 			}
 			return compat.Health{Status: "ok", Runtime: "go-inference", Models: models, Time: time.Now().Unix()}, nil
 		},
+		Models: func() []string {
+			if p := hotSwap.CurrentPath(); p != "" {
+				return []string{core.PathBase(p)}
+			}
+			return nil
+		},
 	}
 
 	// The /v1/admin/* control plane (machine identity, serve status, hot-swap
@@ -192,7 +198,7 @@ func wireContinuity(ctx context.Context, cfg ServeConfig, hotSwap *hotSwapResolv
 	if storePath == "" {
 		if homeR := core.UserHomeDir(); homeR.OK {
 			if home, ok := homeR.Value.(string); ok {
-				storePath = core.PathJoin(home, "Lethean", "data", "state", "conversations.kv")
+				storePath = core.PathJoin(home, "Lethean", "lem", "state", "conversations.kv")
 			}
 		}
 	}

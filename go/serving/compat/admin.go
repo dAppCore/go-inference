@@ -24,6 +24,9 @@ type AdminConfig struct {
 	Health func(context.Context) (Health, error)
 	Wake   func(context.Context) error
 	Sleep  func(context.Context) error
+	// Models returns the currently servable model IDs for GET /v1/models. The
+	// host supplies it (the serve knows its --model); nil yields an empty list.
+	Models func() []string
 }
 
 // Health is the small health payload served by the local compatibility mux.

@@ -130,8 +130,8 @@ func parseDraftBlocks(value string) ([]int, error) {
 	return blocks, nil
 }
 
-// standardTuningProfileDir is ~/Lethean/data/tuning — where tune would write and
+// standardTuningProfileDir is ~/Lethean/lem/tuning — where tune would write and
 // serve reads profiles (serving keeps its own unexported copy of this default).
 func standardTuningProfileDir() string {
-	return core.PathJoin(core.Env("HOME"), "Lethean", "data", "tuning")
+	return core.PathJoin(core.Env("HOME"), "Lethean", "lem", "tuning")
 }

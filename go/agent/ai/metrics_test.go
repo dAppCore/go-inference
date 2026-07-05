@@ -38,7 +38,7 @@ func withTempMetricsHome(t *testing.T) string {
 	t.Setenv("DIR_HOME", "")
 	t.Setenv("HOME", tempHome)
 
-	metricsPath := core.PathJoin(tempHome, ".core", "ai", "metrics")
+	metricsPath := core.PathJoin(tempHome, "Lethean", "lem", "ai", "metrics")
 	if err := coreio.Local.EnsureDir(metricsPath); err != nil {
 		t.Fatalf("create metrics dir: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestMetrics_ReadEvents_Bad_SkipsMalformedAndOldLines(t *testing.T) {
 	tempHome := withTempMetricsHome(t)
 
 	now := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
-	dir := core.JoinPath(tempHome, ".core", "ai", "metrics")
+	dir := core.JoinPath(tempHome, "Lethean", "lem", "ai", "metrics")
 	path := metricsFilePath(dir, now)
 
 	content := []byte(
@@ -175,7 +175,7 @@ func TestMetrics_readMetricsFile_Bad_ReturnsErrorOnOversizedLine(t *testing.T) {
 	tempHome := withTempMetricsHome(t)
 
 	now := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
-	dir := core.JoinPath(tempHome, ".core", "ai", "metrics")
+	dir := core.JoinPath(tempHome, "Lethean", "lem", "ai", "metrics")
 	path := metricsFilePath(dir, now)
 
 	oversized := []byte(repeatString("a", 1<<20+1))
