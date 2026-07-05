@@ -137,7 +137,7 @@ func (s *RemoteSource) ModelMetadata(ctx context.Context, modelID string) (Model
 func (s *RemoteSource) getJSON(ctx context.Context, target string, out any) error {
 	reqResult := core.NewHTTPRequestContext(ctx, "GET", target, nil)
 	if !reqResult.OK {
-		return core.E("RemoteSource", "build request", resultError(reqResult))
+		return core.E("RemoteSource", "build request", reqResult.Err())
 	}
 	req := reqResult.Value.(*core.Request)
 	req.Header.Set("Accept", "application/json")
@@ -155,7 +155,7 @@ func (s *RemoteSource) getJSON(ctx context.Context, target string, out any) erro
 	}
 	read := core.ReadAll(resp.Body)
 	if !read.OK {
-		return core.E("RemoteSource", "read response", resultError(read))
+		return core.E("RemoteSource", "read response", read.Err())
 	}
 	body, ok := read.Value.(string)
 	if !ok {
@@ -177,7 +177,7 @@ func (s *RemoteSource) getJSON(ctx context.Context, target string, out any) erro
 	// strings into the target via SetString. Saves the []byte(body) copy
 	// that would otherwise duplicate the whole response body on every call.
 	if result := core.JSONUnmarshalString(body, out); !result.OK {
-		return core.E("RemoteSource", "parse response", resultError(result))
+		return core.E("RemoteSource", "parse response", result.Err())
 	}
 	return nil
 }
@@ -269,25 +269,4 @@ func hasNonWhitespace(s string) bool {
 		}
 	}
 	return false
-}
-
-// firstPositive returns the first strictly-positive value, or 0 when none is.
-func firstPositive(values ...int) int {
-	for _, value := range values {
-		if value > 0 {
-			return value
-		}
-	}
-	return 0
-}
-
-// resultError adapts a failed core.Result's Value back to an error.
-func resultError(result core.Result) error {
-	if result.OK {
-		return nil
-	}
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	return core.NewError("core result failed")
 }

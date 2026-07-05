@@ -77,13 +77,3 @@ func intFromUint64(value uint64, label string) (int, error) {
 func maxInt() int {
 	return int(^uint(0) >> 1)
 }
-
-func resultError(result core.Result) error {
-	if result.OK {
-		return nil
-	}
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	return core.NewError("core result failed")
-}

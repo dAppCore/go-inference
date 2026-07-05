@@ -72,12 +72,12 @@ func ParseProfile(data []byte) (*Profile, error) {
 		return nil, result.Value.(error)
 	}
 	profile := Profile{
-		Type:         firstNonEmpty(probe.Type, Type),
-		Format:       firstNonEmpty(probe.Format, FormatVQ),
+		Type:         core.Coalesce(probe.Type, Type),
+		Format:       core.Coalesce(probe.Format, FormatVQ),
 		CodebookSize: probe.CodebookSize,
 		CodeDim:      probe.CodeDim,
-		IndexBits:    firstPositive(probe.IndexBits, 8),
-		Source:       firstNonEmpty(probe.Source, "codebook_config.json"),
+		IndexBits:    core.FirstPositive(probe.IndexBits, 8),
+		Source:       core.Coalesce(probe.Source, "codebook_config.json"),
 	}
 	// Pre-size to the exact tensor count so the append loop never
 	// re-grows. Production profiles carry one descriptor per quantised
@@ -89,15 +89,15 @@ func ParseProfile(data []byte) (*Profile, error) {
 	}
 	for _, tensor := range probe.Tensors {
 		local := profile
-		local.CodebookSize = firstPositive(tensor.CodebookSize, profile.CodebookSize)
-		local.CodeDim = firstPositive(tensor.CodeDim, profile.CodeDim)
-		local.IndexBits = firstPositive(tensor.IndexBits, profile.IndexBits)
+		local.CodebookSize = core.FirstPositive(tensor.CodebookSize, profile.CodebookSize)
+		local.CodeDim = core.FirstPositive(tensor.CodeDim, profile.CodeDim)
+		local.IndexBits = core.FirstPositive(tensor.IndexBits, profile.IndexBits)
 		desc, err := NewTensorDescriptor(tensor.Name, tensor.Shape, local)
 		if err != nil {
 			return nil, err
 		}
-		desc.CodesName = firstNonEmpty(tensor.CodesName, defaultCodesName(desc.Name))
-		desc.CodebookName = firstNonEmpty(tensor.CodebookName, defaultTableName(desc.Name))
+		desc.CodesName = core.Coalesce(tensor.CodesName, defaultCodesName(desc.Name))
+		desc.CodebookName = core.Coalesce(tensor.CodebookName, defaultTableName(desc.Name))
 		if len(tensor.CodesShape) > 0 {
 			desc.CodesShape = append([]uint64(nil), tensor.CodesShape...)
 		}
@@ -183,7 +183,7 @@ func ValidateProfile(profile Profile) error {
 	if profile.CodeDim <= 0 {
 		return core.NewError("codebook: code_dim must be positive")
 	}
-	if !validIndexBits(firstPositive(profile.IndexBits, 8)) {
+	if !validIndexBits(core.FirstPositive(profile.IndexBits, 8)) {
 		return core.NewError(core.Sprintf("codebook: unsupported index bits %d", profile.IndexBits))
 	}
 	for _, tensor := range profile.Tensors {
@@ -304,22 +304,4 @@ func defaultCodesName(name string) string {
 
 func defaultTableName(name string) string {
 	return name + ".codebook"
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func firstPositive(values ...int) int {
-	for _, value := range values {
-		if value > 0 {
-			return value
-		}
-	}
-	return 0
 }

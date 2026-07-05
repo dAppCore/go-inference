@@ -52,7 +52,7 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 		Content rawJSON `json:"content"`
 	}
 	if result := core.JSONUnmarshal(data, &wire); !result.OK {
-		return resultError(result)
+		return result.Err()
 	}
 	m.Role = wire.Role
 	m.Content = ""
@@ -66,14 +66,14 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	case '"':
 		var text string
 		if result := core.JSONUnmarshal(content, &text); !result.OK {
-			return resultError(result)
+			return result.Err()
 		}
 		m.Content = text
 		return nil
 	case '[':
 		var parts []chatContentPart
 		if result := core.JSONUnmarshal(content, &parts); !result.OK {
-			return resultError(result)
+			return result.Err()
 		}
 		return m.applyContentParts(parts)
 	default:
@@ -132,7 +132,7 @@ func decodeImageDataURL(url string) ([]byte, error) {
 	}
 	decoded := core.Base64Decode(payload)
 	if !decoded.OK {
-		return nil, core.E("openai.ChatMessage", "image base64 payload is invalid", resultError(decoded))
+		return nil, core.E("openai.ChatMessage", "image base64 payload is invalid", decoded.Err())
 	}
 	bytes, ok := decoded.Value.([]byte)
 	if !ok {

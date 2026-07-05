@@ -245,7 +245,7 @@ func ReadInfo(modelPath string) (Info, error) {
 	if quantization.Bits == 0 {
 		quantization.Bits = quantBits
 	}
-	quantization.GroupSize = firstPositive(config.quantGroup(), quantization.GroupSize, quantizationGroupFromTensorTypes(quantization.TensorTypes))
+	quantization.GroupSize = core.FirstPositive(config.quantGroup(), quantization.GroupSize, quantizationGroupFromTensorTypes(quantization.TensorTypes))
 	if quantBits == 0 {
 		quantBits = quantization.Bits
 	}
@@ -253,10 +253,10 @@ func ReadInfo(modelPath string) (Info, error) {
 	info := Info{
 		Path:             absolutePath,
 		Architecture:     architecture,
-		VocabSize:        firstPositive(config.vocabSize(), inferGGUFVocabSize(metadata, architecture)),
-		HiddenSize:       firstPositive(config.hiddenSize(), inferGGUFHiddenSize(metadata, architecture)),
+		VocabSize:        core.FirstPositive(config.vocabSize(), inferGGUFVocabSize(metadata, architecture)),
+		HiddenSize:       core.FirstPositive(config.hiddenSize(), inferGGUFHiddenSize(metadata, architecture)),
 		NumLayers:        config.numLayers(),
-		ContextLength:    firstPositive(config.contextLength(), inferGGUFContextLength(metadata, architecture)),
+		ContextLength:    core.FirstPositive(config.contextLength(), inferGGUFContextLength(metadata, architecture)),
 		QuantBits:        quantBits,
 		QuantGroup:       quantization.GroupSize,
 		QuantType:        quantization.Type,
@@ -512,17 +512,8 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func firstPositive(values ...int) int {
-	for _, value := range values {
-		if value > 0 {
-			return value
-		}
-	}
-	return 0
-}
-
 func inferGGUFVocabSize(metadata map[string]any, architecture string) int {
-	return firstPositive(
+	return core.FirstPositive(
 		metadataIntForSuffix(metadata, architecture, "vocab_size", "n_vocab"),
 		metadataArrayLen(metadata["tokenizer.ggml.tokens"]),
 	)

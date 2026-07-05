@@ -27,7 +27,6 @@ var (
 	errUnsupportedNativeDtype     = core.NewError("mlx: unsupported KV native tensor dtype")
 	errStateTokenBlockTokenCount  = core.NewError("mlx: State token block token count is invalid")
 	errNativeByteLenMismatch      = core.NewError("mlx: KV native tensor byte length mismatch")
-	errUnknownFilesystem          = core.NewError("unknown filesystem error")
 	errUnsupportedTensorEncoding  = core.NewError("mlx: unsupported KV tensor encoding")
 	errUnsupportedSnapshotVersion = core.NewError("mlx: unsupported KV snapshot version")
 	errUnsupportedNativeTensor    = core.NewError("mlx: unsupported KV snapshot native tensor dtype")
@@ -241,16 +240,6 @@ func DropFloat32(snapshot *Snapshot) {
 			}
 		}
 	}
-}
-
-func ResultError(result core.Result) error {
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	if text, ok := result.Value.(string); ok {
-		return core.NewError(text)
-	}
-	return errUnknownFilesystem
 }
 
 const defaultCacheBlockSize = 512

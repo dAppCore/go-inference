@@ -48,7 +48,6 @@ var (
 	errF16PayloadMismatch = core.NewError("F16 payload length does not match tensor shape")
 	errBF16PayloadMatch   = core.NewError("BF16 payload length does not match tensor shape")
 	errF64PayloadMismatch = core.NewError("F64 payload length does not match tensor shape")
-	errCoreResultFailed   = core.NewError("core result failed")
 )
 
 // HeaderEntry is one tensor entry in the safetensors JSON header.
@@ -135,7 +134,7 @@ func IndexFiles(paths []string) (Index, error) {
 func ReadIndex(path string) (Index, error) {
 	opened := core.Open(path)
 	if !opened.OK {
-		return Index{}, resultError(opened)
+		return Index{}, opened.Err()
 	}
 	file := opened.Value.(*core.OSFile)
 	defer file.Close()
@@ -230,7 +229,7 @@ func RefFromHeader(path, name string, entry HeaderEntry, dataStart int64) (Tenso
 func ReadRefValues(ref TensorRef) ([]float32, error) {
 	opened := core.Open(ref.Path)
 	if !opened.OK {
-		return nil, resultError(opened)
+		return nil, opened.Err()
 	}
 	file := opened.Value.(*core.OSFile)
 	defer file.Close()
@@ -322,7 +321,7 @@ func OpenReader(ref TensorRef) (TensorReader, error) {
 	}
 	opened := core.Open(ref.Path)
 	if !opened.OK {
-		return TensorReader{}, resultError(opened)
+		return TensorReader{}, opened.Err()
 	}
 	return TensorReader{
 		ref:             ref,
@@ -411,7 +410,7 @@ func (c *ShardCache) handle(path string) (*core.OSFile, error) {
 	}
 	opened := core.Open(path)
 	if !opened.OK {
-		return nil, resultError(opened)
+		return nil, opened.Err()
 	}
 	file := opened.Value.(*core.OSFile)
 	c.files[path] = file
@@ -574,7 +573,7 @@ func ReadRefRaw(ref TensorRef) ([]byte, error) {
 	}
 	opened := core.Open(ref.Path)
 	if !opened.OK {
-		return nil, resultError(opened)
+		return nil, opened.Err()
 	}
 	file := opened.Value.(*core.OSFile)
 	defer file.Close()
@@ -619,16 +618,6 @@ func (r TensorReader) ReadRaw() ([]byte, error) {
 		return nil, core.NewError("mlx: safetensors tensor byte length is invalid: " + r.ref.Name)
 	}
 	return readRefRawFrom(r.file, r.ref)
-}
-
-func resultError(result core.Result) error {
-	if result.OK {
-		return nil
-	}
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	return errCoreResultFailed
 }
 
 const defaultChunkElements = 1 << 20

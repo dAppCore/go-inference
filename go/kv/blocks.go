@@ -542,7 +542,7 @@ func LoadStateBlockWithOptions(ctx context.Context, store state.Store, ref State
 	}
 	var envelope kvSnapshotStateBlockEnvelope
 	if result := core.JSONUnmarshalString(chunk.Text, &envelope); !result.OK {
-		return Block{}, core.E("LoadFromStateBlocks", "parse block envelope", ResultError(result))
+		return Block{}, core.E("LoadFromStateBlocks", "parse block envelope", result.Err())
 	}
 	data, err := decodeKVSnapshotStateBlockEnvelope(envelope, ref.KVHash)
 	if err != nil {
@@ -601,7 +601,7 @@ func LoadStateBlockTokensWithOptions(ctx context.Context, store state.Store, ref
 	}
 	var envelope kvSnapshotStateBlockEnvelope
 	if result := core.JSONUnmarshalString(chunk.Text, &envelope); !result.OK {
-		return StateTokenBlock{}, core.E("LoadFromStateBlocks", "parse token block envelope", ResultError(result))
+		return StateTokenBlock{}, core.E("LoadFromStateBlocks", "parse token block envelope", result.Err())
 	}
 	data, err := decodeKVSnapshotStateBlockEnvelope(envelope, ref.KVHash)
 	if err != nil {
@@ -679,7 +679,7 @@ func decodeKVSnapshotStateBlockEnvelope(envelope kvSnapshotStateBlockEnvelope, e
 	}
 	decoded := core.Base64Decode(envelope.Data)
 	if !decoded.OK {
-		return nil, core.E("LoadFromStateBlocks", "decode block payload", ResultError(decoded))
+		return nil, core.E("LoadFromStateBlocks", "decode block payload", decoded.Err())
 	}
 	data, ok := decoded.Value.([]byte)
 	if !ok {

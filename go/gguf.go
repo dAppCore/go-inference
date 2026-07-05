@@ -81,7 +81,7 @@ func ReadGGUFInfo(modelPath string) (GGUFInfo, error) {
 	return GGUFInfo{
 		Path:          absolutePath,
 		Architecture:  architecture,
-		VocabSize:     firstPositiveInt(metadataInt(metadata, architecture+".vocab_size"), metadataInt(metadata, "tokenizer.ggml.tokens")),
+		VocabSize:     core.FirstPositive(metadataInt(metadata, architecture+".vocab_size"), metadataInt(metadata, "tokenizer.ggml.tokens")),
 		HiddenSize:    metadataInt(metadata, architecture+".embedding_length"),
 		NumLayers:     metadataInt(metadata, architecture+".block_count"),
 		ContextLength: metadataInt(metadata, architecture+".context_length"),
@@ -203,13 +203,4 @@ func ggufQuantisationFromMetadata(metadata map[string]any) (bits, group int, qua
 	default:
 		return 0, 0, "", ""
 	}
-}
-
-func firstPositiveInt(values ...int) int {
-	for _, value := range values {
-		if value > 0 {
-			return value
-		}
-	}
-	return 0
 }
