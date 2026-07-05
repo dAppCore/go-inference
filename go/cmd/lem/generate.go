@@ -9,6 +9,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/decode/generate"
+	native "dappco.re/go/inference/engine/metal"
 )
 
 // stringListFlag is a repeatable string flag: each occurrence appends, so
@@ -45,7 +46,7 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 	think := fs.Bool("think", false, "enable the thinking channel (off keeps the decode rate clean)")
 	contextLen := fs.Int("context", 0, "context length override (0 = model default)")
 	kvCacheMode := fs.String("kv-cache", "", "KV cache mode (paged, fp16, q8, kq8vq4, turboquant; empty = load default)")
-	pipeline := fs.Bool("pipeline", true, "one-ahead pipelined decode (false forces the serial loop, for A/B traces)")
+	pipeline := fs.Bool("pipeline", true, "one-ahead pipelined decode (the engine default; false forces the chained serial loop, for A/B traces)")
 	kvStorage := fs.String("kv-storage", "", "retained KV storage dtype (fp16, bf16; empty = native fp32)")
 	tracePhases := fs.Bool("trace", false, "print the per-token decode time budget — GPU wait vs host-serial work")
 	nativeBackend := fs.Bool("native", false, "generate via the no-cgo native token-loop contract (the default go-inference metal engine already is)")
@@ -90,6 +91,7 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 		return 2
 	}
 
+	native.SetPipelinedGPUDecode(*pipeline) // engine-level: -pipeline=false forces the chained serial loop
 	err := generate.RunGenerate(ctx, generate.Config{
 		ModelPath:    fs.Arg(0),
 		Prompt:       *prompt,
