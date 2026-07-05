@@ -68,20 +68,6 @@ func isErrorResponse(s string) bool {
 	return true
 }
 
-// strVal extracts a string value from a row map, returning "" when absent or
-// not a string.
-func strVal(row map[string]any, key string) string {
-	v, ok := row[key]
-	if !ok {
-		return ""
-	}
-	s, ok := v.(string)
-	if !ok {
-		return ""
-	}
-	return s
-}
-
 // toInt coerces a numeric any (int64/int32/float64) to int, returning 0 for
 // anything else.
 func toInt(v any) int {

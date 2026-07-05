@@ -60,7 +60,7 @@ func PrintCoverage(db *store.DuckDB, w io.Writer) core.Result {
 	`)
 	if result.OK {
 		for _, row := range topRows {
-			domain := strVal(row, "domain")
+			domain := core.MapString(row, "domain")
 			n := toInt(row["n"])
 			core.Print(w, "  %-40s %5d", domain, n)
 		}
@@ -75,7 +75,7 @@ func PrintCoverage(db *store.DuckDB, w io.Writer) core.Result {
 	`)
 	if result.OK {
 		for _, row := range bottomRows {
-			domain := strVal(row, "domain")
+			domain := core.MapString(row, "domain")
 			n := toInt(row["n"])
 			core.Print(w, "  %-40s %5d", domain, n)
 		}
@@ -133,7 +133,7 @@ func queryRegionDistribution(db *store.DuckDB) core.Result {
 	regions := make([]regionRow, 0, len(rows))
 	for _, row := range rows {
 		regions = append(regions, regionRow{
-			group:   strVal(row, "lang_group"),
+			group:   core.MapString(row, "lang_group"),
 			n:       toInt(row["n"]),
 			domains: toInt(row["domains"]),
 		})

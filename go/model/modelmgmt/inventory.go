@@ -109,7 +109,7 @@ func gatherDetails(db *datapipe.DB, counts map[string]int) map[string]*tableDeta
 			if len(rows) > 0 {
 				var parts []string
 				for _, row := range rows {
-					model := strVal(row, "source_model")
+					model := core.MapString(row, "source_model")
 					n := toInt(row["n"])
 					if model != "" {
 						parts = append(parts, core.Sprintf("%s:%d", model, n))
