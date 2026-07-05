@@ -26,7 +26,7 @@ func runSFTCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 	evalMaxTokens := fs.Int("eval-max-tokens", 200, "tokens per eval generation")
 	evalProbes := fs.Int("eval-probes", 4, "probes derived from --valid when --eval-prompts is absent")
 	evalTemp := fs.Float64("eval-temp", 0, "eval sampling temperature (0 = greedy)")
-	scoreCascade := fs.Bool("score-cascade", false, "score every eval pass (needs a scorer wired into go-inference — none yet, so this notes honestly and captures only)")
+	scoreCascade := fs.Bool("score-cascade", false, "score every eval pass with the LEK scorer and pick the best checkpoint by windowed composite")
 	scoreWindow := fs.Int("score-window", 3, "eval passes per windowed composite")
 	rank := fs.Int("rank", 16, "LoRA rank")
 	alpha := fs.Float64("alpha", 32, "LoRA alpha")
@@ -97,6 +97,7 @@ func runSFTCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 		CheckpointEvery: *checkpointEvery,
 		ScoreCascade:    *scoreCascade,
 		ScoreWindow:     *scoreWindow,
+		Score:           lekScoreFunc(),
 		Out:             stdout,
 		Log:             stderr,
 	})
