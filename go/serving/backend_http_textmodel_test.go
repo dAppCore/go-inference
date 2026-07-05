@@ -10,7 +10,7 @@ import (
 	core "dappco.re/go"
 
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/provider/openai"
+	"dappco.re/go/inference/serving/provider/openai"
 )
 
 // newTestServer creates an httptest.Server that responds with the given content.

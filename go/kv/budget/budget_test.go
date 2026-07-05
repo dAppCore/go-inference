@@ -4,7 +4,7 @@ package budget
 
 import (
 	core "dappco.re/go"
-	chat "dappco.re/go/inference/chat"
+	chat "dappco.re/go/inference/serving/chat"
 )
 
 // fakeCounter returns a fixed prompt total regardless of input — the real

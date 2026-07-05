@@ -11,7 +11,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/provider/openai"
+	"dappco.re/go/inference/serving/provider/openai"
 )
 
 // Package-level sinks defeat dead-code elimination so the benchmarked work

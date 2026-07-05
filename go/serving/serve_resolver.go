@@ -18,7 +18,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	openai "dappco.re/go/inference/provider/openai"
+	openai "dappco.re/go/inference/serving/provider/openai"
 )
 
 // ModelLoader loads a single model at path into an inference.TextModel. The

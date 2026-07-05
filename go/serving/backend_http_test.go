@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/provider/openai"
+	"dappco.re/go/inference/serving/provider/openai"
 )
 
 func TestHTTPBackend_Generate_Good(t *testing.T) {
