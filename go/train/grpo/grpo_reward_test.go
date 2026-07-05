@@ -5,7 +5,7 @@ package grpo
 import (
 	"testing"
 
-	"dappco.re/go/inference/dataset"
+	"dappco.re/go/inference/train/dataset"
 )
 
 // --- SampleFromSFT ---

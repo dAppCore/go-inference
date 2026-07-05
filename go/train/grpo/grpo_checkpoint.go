@@ -4,8 +4,8 @@ package grpo
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/checkpoint"
 	"dappco.re/go/inference/eval"
+	"dappco.re/go/inference/train/checkpoint"
 )
 
 // CheckpointMetadataVersion is the current schema version stamped into

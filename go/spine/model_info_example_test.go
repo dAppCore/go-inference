@@ -5,7 +5,7 @@ package spine_test
 import (
 	"fmt"
 
-	"dappco.re/go/inference/lora"
+	"dappco.re/go/inference/train/lora"
 	"dappco.re/go/inference/spine"
 )
 

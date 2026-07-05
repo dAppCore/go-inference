@@ -5,7 +5,7 @@ package grpo_test
 import (
 	"fmt"
 
-	"dappco.re/go/inference/grpo"
+	"dappco.re/go/inference/train/grpo"
 )
 
 // ExampleNormalizeConfig shows the defaults NormalizeConfig fills in for

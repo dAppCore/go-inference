@@ -7,7 +7,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/eval"
-	"dappco.re/go/inference/grpo"
+	"dappco.re/go/inference/train/grpo"
 )
 
 // ExampleNewCheckpointMetadata builds the portable checkpoint sidecar

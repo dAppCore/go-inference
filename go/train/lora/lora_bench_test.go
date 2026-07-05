@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"testing"
 
-	"dappco.re/go/inference/lora"
+	"dappco.re/go/inference/train/lora"
 )
 
 // Package sinks defeat dead-code elimination so the benchmarked work is real.

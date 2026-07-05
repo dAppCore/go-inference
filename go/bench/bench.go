@@ -16,7 +16,7 @@ import (
 	"time"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/lora"
+	"dappco.re/go/inference/train/lora"
 )
 
 const ReportVersion = 1

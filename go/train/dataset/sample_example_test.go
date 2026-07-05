@@ -5,7 +5,7 @@ package dataset_test
 import (
 	"fmt"
 
-	"dappco.re/go/inference/dataset"
+	"dappco.re/go/inference/train/dataset"
 )
 
 // ExampleNewSliceDataset shows the replayable in-memory dataset: iterate to

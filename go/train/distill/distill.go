@@ -34,7 +34,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/dataset"
+	"dappco.re/go/inference/train/dataset"
 )
 
 // Sentinel errors hoisted to package vars — each previously allocated a

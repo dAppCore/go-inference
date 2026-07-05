@@ -4,7 +4,7 @@ package grpo
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/dataset"
+	"dappco.re/go/inference/train/dataset"
 )
 
 // SampleFromSFT extracts a reasoning prompt and expected answer from a

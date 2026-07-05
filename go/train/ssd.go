@@ -26,7 +26,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/dataset"
+	"dappco.re/go/inference/train/dataset"
 )
 
 // defaultSSDTemperature is the frozen-base sampling temperature default;

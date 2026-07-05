@@ -5,7 +5,7 @@ package distill_test
 import (
 	"fmt"
 
-	"dappco.re/go/inference/distill"
+	"dappco.re/go/inference/train/distill"
 )
 
 // ExampleBatchLoss computes the KL-divergence distillation loss between a
