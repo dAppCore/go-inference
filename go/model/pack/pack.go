@@ -248,7 +248,7 @@ func Hash(srcDir string) (string, core.Result) {
 	fs := sharedFs()
 	for _, name := range metaCandidates {
 		path := core.JoinPath(srcDir, name)
-		if !fs.IsFile(path) {
+		if !fs.IsFile(path).OK {
 			continue
 		}
 		rr := core.ReadFile(path)
@@ -439,7 +439,7 @@ func headerMapToManifest(h map[string]interface{}) (*Manifest, core.Result) {
 // dirExists reports whether p exists and is a directory.
 func dirExists(p string) bool {
 	fs := sharedFs()
-	return fs.IsDir(p)
+	return fs.IsDir(p).OK
 }
 
 // assertDestDirWritable returns a failing Result if destDir exists, is a
@@ -447,10 +447,10 @@ func dirExists(p string) bool {
 // fine (caller MkdirAll's it).
 func assertDestDirWritable(destDir string, overwrite bool) core.Result {
 	fs := sharedFs()
-	if !fs.Exists(destDir) {
+	if !fs.Exists(destDir).OK {
 		return core.Ok(nil)
 	}
-	if !fs.IsDir(destDir) {
+	if !fs.IsDir(destDir).OK {
 		return core.Fail(core.E("pack.Unpack", core.Sprintf("destDir %q exists but is not a directory", destDir), nil))
 	}
 	if overwrite {

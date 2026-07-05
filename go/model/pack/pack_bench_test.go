@@ -40,7 +40,7 @@ var (
 // safetensors file. Mirrors what go-mlx + go-rocm load when probing
 // a local model.
 func BenchmarkPack_Hash_Typical(b *testing.B) {
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bench-hash-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bench-hash-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 	srcDir := core.JoinPath(tempRoot, "src")
 	buildFixturePack(b, srcDir)
@@ -73,7 +73,7 @@ func BenchmarkPack_Fingerprint_Typical(b *testing.B) {
 // List on a packed model — manifest decode + entry enumeration. Used
 // by lthn CLI's `pack list` verb and by inspector UIs.
 func BenchmarkPack_List_Typical(b *testing.B) {
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bench-list-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bench-list-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 	srcDir := core.JoinPath(tempRoot, "src")
 	dest := core.JoinPath(tempRoot, "out.model")
@@ -96,7 +96,7 @@ func BenchmarkPack_List_Typical(b *testing.B) {
 // Inspect on a packed model — manifest + structural inspection report.
 // Slightly more work than List (also builds the inspection report).
 func BenchmarkPack_Inspect_Typical(b *testing.B) {
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bench-inspect-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bench-inspect-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 	srcDir := core.JoinPath(tempRoot, "src")
 	dest := core.JoinPath(tempRoot, "out.model")
@@ -121,7 +121,7 @@ func BenchmarkPack_Inspect_Typical(b *testing.B) {
 // than re-measuring Hash (which has its own bench above). Pack runs
 // on every model bundling op for every backend.
 func BenchmarkPack_Pack_Typical(b *testing.B) {
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bench-pack-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bench-pack-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 	srcDir := core.JoinPath(tempRoot, "src")
 	dest := core.JoinPath(tempRoot, "out.model")
@@ -143,7 +143,7 @@ func BenchmarkPack_Pack_Typical(b *testing.B) {
 // payload files back to disk). Overwrite is set so the destination
 // can be reused across iterations without per-iter dir churn.
 func BenchmarkPack_Unpack_Typical(b *testing.B) {
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bench-unpack-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bench-unpack-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 	srcDir := core.JoinPath(tempRoot, "src")
 	dest := core.JoinPath(tempRoot, "out.model")
@@ -168,7 +168,7 @@ func BenchmarkPack_Unpack_Typical(b *testing.B) {
 // Baseline measurement (Apple M3 Ultra, -benchmem): set after first
 // run. The const below ratchets down as wins land.
 func TestAllocBudget_Pack_Hash_Typical(t *testing.T) {
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-budget-hash-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-budget-hash-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 	srcDir := core.JoinPath(tempRoot, "src")
 	buildFixturePack(t, srcDir)

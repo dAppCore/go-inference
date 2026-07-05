@@ -13,6 +13,9 @@ use (
 	./external/go-store/go
 	./external/go-ws/go
 	./external/go-process/go
+	./external/go-log/go
+	./external/go-proxy/go
+	./external/go-scm/go
 	./external/mcp/go
 	./external/go
 	./go
