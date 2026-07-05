@@ -24,10 +24,7 @@ type perLayerInputGateScratch struct {
 	hNextView, perLayerView                   cachedNoCopyBytesView
 	gate, gelu, multiplied, projected, normed metal.MTLBuffer
 	out                                       metal.MTLBuffer
-	outViewPtr                                uintptr
-	outViewLen                                int
-	outView                                   metal.MTLBuffer
-	outViewPinned                             *pinnedNoCopyBytes
+	noCopyOutputView
 }
 
 type perLayerInputGateScratchKey struct {
@@ -173,51 +170,6 @@ func (s *perLayerInputGateScratch) Close() {
 	s.closeOutputView()
 	s.gate, s.gelu, s.multiplied, s.projected, s.normed, s.out = nil, nil, nil, nil, nil, nil
 	s.dModel, s.pliDim = 0, 0
-}
-
-func (s *perLayerInputGateScratch) closeOutputView() {
-	if s == nil {
-		return
-	}
-	if s.outViewPinned != nil {
-		s.outViewPinned.Close()
-	}
-	s.outViewPtr = 0
-	s.outViewLen = 0
-	s.outView = nil
-	s.outViewPinned = nil
-}
-
-func (s *perLayerInputGateScratch) outputView(out []byte) (metal.MTLBuffer, bool) {
-	if s == nil || len(out) == 0 {
-		return nil, false
-	}
-	ptr := uintptr(unsafe.Pointer(&out[0]))
-	if s.outView != nil && s.outViewPtr == ptr && s.outViewLen == len(out) {
-		return s.outView, true
-	}
-	s.closeOutputView()
-	if buf, ok := registeredPinnedNoCopyBytes(out); ok {
-		s.outViewPtr = ptr
-		s.outViewLen = len(out)
-		s.outView = buf
-		s.outViewPinned = nil
-		return buf, true
-	}
-	buf, pinner, noCopy := residentNoCopyBytes(out)
-	if !noCopy {
-		if pinner != nil {
-			pinner.Unpin()
-		}
-		return nil, false
-	}
-	pinned := &pinnedNoCopyBytes{bytes: out, buf: buf, pinner: pinner}
-	runtime.SetFinalizer(pinned, (*pinnedNoCopyBytes).Close)
-	s.outViewPtr = ptr
-	s.outViewLen = len(out)
-	s.outView = buf
-	s.outViewPinned = pinned
-	return buf, true
 }
 
 func (s *perLayerInputGateScratch) inputBuffers(hNext, perLayerInput []byte) (metal.MTLBuffer, metal.MTLBuffer, error) {
