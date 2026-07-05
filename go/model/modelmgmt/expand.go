@@ -33,7 +33,7 @@ func GetCompletedIDs(influx *datapipe.InfluxClient) core.Result {
 
 	ids := make(map[string]bool, len(rows))
 	for _, row := range rows {
-		id := strVal(row, "seed_id")
+		id := core.MapString(row, "seed_id")
 		if id != "" {
 			ids[id] = true
 		}

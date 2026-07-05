@@ -115,7 +115,7 @@ func PrintStatus(influx *datapipe.InfluxClient, w io.Writer) core.Result {
 func dedupeTraining(statusRows, lossRows []map[string]any) []trainingRow {
 	lossMap := make(map[string]float64)
 	for _, row := range lossRows {
-		model := strVal(row, "model")
+		model := core.MapString(row, "model")
 		if model == "" {
 			continue
 		}
@@ -128,7 +128,7 @@ func dedupeTraining(statusRows, lossRows []map[string]any) []trainingRow {
 	seen := make(map[string]bool)
 	rows := make([]trainingRow, 0, len(statusRows))
 	for _, row := range statusRows {
-		model := strVal(row, "model")
+		model := core.MapString(row, "model")
 		if model == "" || seen[model] {
 			continue
 		}
@@ -136,7 +136,7 @@ func dedupeTraining(statusRows, lossRows []map[string]any) []trainingRow {
 
 		tr := trainingRow{
 			model:      model,
-			status:     strVal(row, "status"),
+			status:     core.MapString(row, "status"),
 			iteration:  intVal(row, "iteration"),
 			totalIters: intVal(row, "total_iters"),
 			pct:        floatVal(row, "pct"),
@@ -162,7 +162,7 @@ func dedupeGeneration(rows []map[string]any) []genRow {
 	seen := make(map[string]bool)
 	result := make([]genRow, 0, len(rows))
 	for _, row := range rows {
-		worker := strVal(row, "worker")
+		worker := core.MapString(row, "worker")
 		if worker == "" || seen[worker] {
 			continue
 		}
@@ -181,19 +181,6 @@ func dedupeGeneration(rows []map[string]any) []genRow {
 	})
 
 	return result
-}
-
-// strVal extracts a string value from a row map.
-func strVal(row map[string]any, key string) string {
-	v, ok := row[key]
-	if !ok {
-		return ""
-	}
-	s, ok := v.(string)
-	if !ok {
-		return ""
-	}
-	return s
 }
 
 // floatVal extracts a float64 value from a row map.
