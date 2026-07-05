@@ -14,7 +14,7 @@ import (
 	"fmt"
 
 	"dappco.re/go/inference"
-	prof "dappco.re/go/inference/profile"
+	prof "dappco.re/go/inference/eval/profile"
 )
 
 // LookupAlgorithmProfile resolves one capability ID to its built-in profile.

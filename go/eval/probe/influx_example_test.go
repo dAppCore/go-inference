@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/probe"
+	"dappco.re/go/inference/eval/probe"
 )
 
 // ExampleNewLineProtocolSink builds the v0-schema metrics sink and formats

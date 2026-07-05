@@ -8,7 +8,7 @@ import (
 
 	"dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/datapipe"
+	"dappco.re/go/inference/eval/datapipe"
 	coreio "dappco.re/go/io"
 	goexec "dappco.re/go/process/exec"
 )

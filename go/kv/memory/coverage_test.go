@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	mp "dappco.re/go/inference/model/modelpack"
-	"dappco.re/go/inference/profile"
+	"dappco.re/go/inference/eval/profile"
 )
 
 // TestMemory_KVWidthPerLayer_PackFallback covers the Pack branch of

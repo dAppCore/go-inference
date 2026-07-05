@@ -6,7 +6,7 @@ import (
 	"slices"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/datapipe"
+	"dappco.re/go/inference/eval/datapipe"
 )
 
 // trainingRow holds deduplicated training status + loss for a single model.

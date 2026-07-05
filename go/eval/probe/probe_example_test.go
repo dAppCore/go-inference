@@ -4,7 +4,7 @@ package probe_test
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/probe"
+	"dappco.re/go/inference/eval/probe"
 )
 
 // ExampleNewBus builds a fanout bus over a recorder and emits one event,

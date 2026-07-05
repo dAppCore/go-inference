@@ -3,7 +3,7 @@ package inference
 import (
 	"slices"
 
-	"dappco.re/go/inference/probe"
+	"dappco.re/go/inference/eval/probe"
 )
 
 // inference.GenerateConfig{MaxTokens: 256, Temperature: 0.7, TopK: 40}

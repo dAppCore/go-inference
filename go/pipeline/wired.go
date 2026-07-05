@@ -11,7 +11,7 @@ import (
 	"dappco.re/go/inference/kv/budget"
 	chat "dappco.re/go/inference/chat"
 	"dappco.re/go/inference/fusion"
-	"dappco.re/go/inference/obs"
+	"dappco.re/go/inference/eval/obs"
 	"dappco.re/go/inference/kv/respcache"
 	"dappco.re/go/inference/safety"
 	"dappco.re/go/inference/session"

@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/score"
+	"dappco.re/go/inference/eval/score"
 )
 
 // Dataset-shaping helpers run once per export over the whole response set —

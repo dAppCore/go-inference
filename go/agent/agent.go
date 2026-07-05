@@ -6,7 +6,7 @@ import (
 	"context"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/datapipe"
+	"dappco.re/go/inference/eval/datapipe"
 )
 
 // Agent orchestrates model evaluation and fleet training. It wraps the

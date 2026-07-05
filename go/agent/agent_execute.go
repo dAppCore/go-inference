@@ -9,7 +9,7 @@ import (
 	"time"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/datapipe"
+	"dappco.re/go/inference/eval/datapipe"
 	coreio "dappco.re/go/io"
 )
 

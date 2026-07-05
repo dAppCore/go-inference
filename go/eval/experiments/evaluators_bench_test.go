@@ -5,7 +5,7 @@ package experiments_test
 import (
 	"testing"
 
-	"dappco.re/go/inference/experiments"
+	"dappco.re/go/inference/eval/experiments"
 )
 
 // benchEvalExample is the (example, output) fixture the evaluator benchmarks

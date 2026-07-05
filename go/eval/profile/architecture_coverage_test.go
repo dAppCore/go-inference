@@ -5,7 +5,7 @@ package profile_test
 import (
 	"testing"
 
-	prof "dappco.re/go/inference/profile"
+	prof "dappco.re/go/inference/eval/profile"
 )
 
 // These tests close the residual statement-coverage gaps in architecture.go that

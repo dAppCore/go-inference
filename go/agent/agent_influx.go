@@ -7,8 +7,8 @@ import (
 	"time"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/datapipe"
-	"dappco.re/go/inference/score"
+	"dappco.re/go/inference/eval/datapipe"
+	"dappco.re/go/inference/eval/score"
 	coreio "dappco.re/go/io"
 	"dappco.re/go/store"
 )

@@ -12,7 +12,7 @@ package profile_test
 import (
 	"fmt"
 
-	prof "dappco.re/go/inference/profile"
+	prof "dappco.re/go/inference/eval/profile"
 )
 
 // A Gemma-4 multimodal wrapper whose text_config names its text tower resolves
