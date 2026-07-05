@@ -39,17 +39,73 @@ assert behavior directly against the symbol named by the test. A triplet named
 `TestOptions_WithMaxTokens_Bad` must invoke `WithMaxTokens` in its own body,
 not route through a dispatcher helper.
 
+## Writing Tests, Examples & Benchmarks
+
+Every source file ships three siblings — extend them, never create monolithic
+compliance files, versioned test files (`_v2`), or `ax7*` files:
+
+| Sibling of `foo.go` | Holds | Verified by |
+|---------------------|-------|-------------|
+| `foo_test.go` | one `Test<Symbol>_<Case>` per exported symbol per variant | `task test` |
+| `foo_example_test.go` | one `Example<Symbol>` per symbol, with an `// Output:` block | `task test` (runs + diffs the output) |
+| `foo_bench_test.go` | one `Benchmark<Symbol>` per hot symbol | `task bench` |
+
+**Tests — name the symbol, exercise it directly.** A test asserts against the
+symbol its name claims: `TestOptions_WithMaxTokens_Bad` must call
+`WithMaxTokens` in its own body, not route through a dispatcher/table helper.
+A test that never names its symbol is fake coverage the audit flags. Write the
+AX-7 triplet for each symbol — `_Good` (valid input, happy path), `_Bad`
+(invalid input is rejected), `_Ugly` (malformed / boundary / empty). Production
+functions that can fail return `core.Result`: the `_Good` test asserts `r.OK`
+then reads `r.Value`; the `_Bad`/`_Ugly` tests assert `!r.OK`.
+
+**Examples are compiled documentation.** `func ExampleWithMaxTokens()` ends with
+a `// Output:` block so `go test` runs and diffs it — a stale example fails the
+build. Print with `Println` from `dappco.re/go`, never `fmt.Println`.
+
+**Benchmarks measure the load path.** Shape:
+
+```go
+var sinkResult core.Result // package sink — stops the compiler eliding the call
+
+func BenchmarkDiscover(b *testing.B) {
+    dir := writeFixtureModel(b)     // setup OUTSIDE the timed loop
+    b.ReportAllocs()
+    b.ResetTimer()                  // discount the setup
+    for i := 0; i < b.N; i++ {
+        sinkResult = Discover(dir)  // assign to the sink so it can't be optimised away
+    }
+}
+```
+
+Read **B/op as hard as allocs/op** — the biggest wins (whole-slice clones,
+full-file reads) leave allocs/op flat while B/op screams. allocs/op is only
+trustworthy at steady state, so `task bench` runs `-benchtime=20x`; a cold
+3-iteration number is inflated by setup.
+
 ## Working Locally
 
-Use the same commands as the compliance brief before handing work back:
+Run the Taskfile gates before handing work back (portable lanes need no GPU;
+`*:metal` lanes need `task metallib` first):
+
+```sh
+task qa            # gofmt check + go vet + portable tests — the pre-handback gate
+task test          # portable suite (default tags, runs anywhere)
+task test:metal    # engine/metal suite (-tags metal_runtime; needs task metallib)
+task cover         # coverage.out + total — must clear the 95% codecov target
+task bench         # every benchmark with -benchmem (allocation regressions)
+```
+
+`codecov.yml` enforces **95%** on both the project and each patch, measured on
+the portable `task cover` profile (the surface a Linux CI compiles; engine/metal
+is Darwin-only and covered by `task test:metal`).
+
+For core/go idiom compliance specifically, the audit script is the work
+provider — a change is not complete until it reports `verdict: COMPLIANT` with
+every counter at zero:
 
 ```sh
 GOWORK=off go mod tidy
-GOWORK=off go vet ./...
-GOWORK=off go test -count=1 ./...
 gofmt -l .
 bash /Users/snider/Code/core/go/tests/cli/v090-upgrade/audit.sh .
 ```
-
-The audit script is the work provider for compliance tasks. A change is not
-complete until it reports `verdict: COMPLIANT` with every counter at zero.
