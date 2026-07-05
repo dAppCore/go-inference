@@ -9,8 +9,8 @@ package parser
 
 import "dappco.re/go/inference"
 
-//	hint := parser.Hint{Architecture: "qwen3", AdapterName: "lora-coder"}
-//	out := parser.ForHint(hint).ParseReasoning(nil, response)
+// hint := parser.Hint{Architecture: "qwen3", AdapterName: "lora-coder"}
+// out := parser.ForHint(hint).ParseReasoning(nil, response)
 type Hint struct {
 	Architecture string
 	AdapterName  string
@@ -24,9 +24,9 @@ type Hint struct {
 //	cfg := parser.Config{Mode: parser.Capture, Capture: func(c parser.Chunk) { log.Print(c.Text) }}
 type Config = inference.ThinkingConfig
 
-//	parser.Show     // leave reasoning markers + content in the visible output
-//	parser.Hide     // strip recognised reasoning blocks from visible output
-//	parser.Capture  // strip from visible + emit blocks via Config.Capture
+// parser.Show     // leave reasoning markers + content in the visible output
+// parser.Hide     // strip recognised reasoning blocks from visible output
+// parser.Capture  // strip from visible + emit blocks via Config.Capture
 type Mode = inference.ThinkingMode
 
 const (
@@ -35,11 +35,11 @@ const (
 	Capture = inference.ThinkingCapture
 )
 
-//	chunk := parser.Chunk{Text: "let me think...", Channel: "thinking", Model: "qwen"}
+// chunk := parser.Chunk{Text: "let me think...", Channel: "thinking", Model: "qwen"}
 type Chunk = inference.ThinkingChunk
 
-//	result := parser.Filter(text, parser.Config{Mode: parser.Capture}, hint)
-//	visible := result.Text
+// result := parser.Filter(text, parser.Config{Mode: parser.Capture}, hint)
+// visible := result.Text
 type Result struct {
 	Text      string  `json:"text"`
 	Reasoning string  `json:"reasoning,omitempty"`

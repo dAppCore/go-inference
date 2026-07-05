@@ -5,8 +5,8 @@ package parse_test
 import (
 	"testing"
 
-	parse "dappco.re/go/inference/parse"
 	tools "dappco.re/go/inference/agent/tools"
+	parse "dappco.re/go/inference/decode/parse"
 )
 
 // Package-level sinks defeat dead-code elimination: the compiler cannot prove

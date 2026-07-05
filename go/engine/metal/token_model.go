@@ -7,7 +7,7 @@ package native
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/tokenizer"
+	"dappco.re/go/inference/decode/tokenizer"
 )
 
 // NativeTokenModel binds the no-cgo decode backend + the embed/head bookend

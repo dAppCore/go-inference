@@ -6,7 +6,7 @@ import (
 	"unsafe"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/parser"
+	"dappco.re/go/inference/decode/parser"
 )
 
 // maxArchitectureNameBytes bounds the stack buffer used by

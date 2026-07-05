@@ -10,7 +10,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/internal/enginegate"
-	"dappco.re/go/inference/tokenizer"
+	"dappco.re/go/inference/decode/tokenizer"
 )
 
 const (

@@ -8,7 +8,7 @@ import (
 	"io"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/generate"
+	"dappco.re/go/inference/decode/generate"
 )
 
 // stringListFlag is a repeatable string flag: each occurrence appends, so

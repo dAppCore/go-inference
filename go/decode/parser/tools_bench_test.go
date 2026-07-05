@@ -22,14 +22,14 @@ import (
 
 // Sinks defeat compiler DCE.
 var (
-	toolsBenchResult   inference.ToolParseResult
-	toolsBenchErr      error
-	toolsBenchCalls    []inference.ToolCall
-	toolsBenchCall     inference.ToolCall
-	toolsBenchIdx      int
-	toolsBenchMarker   toolBlockMarker
-	toolsBenchOK       bool
-	toolsBenchString   string
+	toolsBenchResult inference.ToolParseResult
+	toolsBenchErr    error
+	toolsBenchCalls  []inference.ToolCall
+	toolsBenchCall   inference.ToolCall
+	toolsBenchIdx    int
+	toolsBenchMarker toolBlockMarker
+	toolsBenchOK     bool
+	toolsBenchString string
 )
 
 // toolsBenchWords builds a synthetic prose stream of `tokens` words.

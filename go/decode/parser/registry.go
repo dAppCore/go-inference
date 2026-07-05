@@ -7,23 +7,23 @@ import (
 	"dappco.re/go/inference"
 )
 
-//	type custom struct{ /* ... */ }
-//	func (custom) ParserID() string { return "custom" }
-//	// implement inference.ReasoningParser + inference.ToolParser
+// type custom struct{ /* ... */ }
+// func (custom) ParserID() string { return "custom" }
+// // implement inference.ReasoningParser + inference.ToolParser
 type OutputParser interface {
 	ParserID() string
 	inference.ReasoningParser
 	inference.ToolParser
 }
 
-//	reg := parser.NewRegistry()
-//	reg.Register(customParser, "custom", "custom-v2")
+// reg := parser.NewRegistry()
+// reg.Register(customParser, "custom", "custom-v2")
 type Registry struct {
 	parsers  map[string]OutputParser
 	fallback OutputParser
 }
 
-//	reg := parser.NewRegistry()
+// reg := parser.NewRegistry()
 func NewRegistry() *Registry {
 	generic := newBuiltinOutputParser("generic", genericMarkers())
 	return &Registry{
@@ -66,7 +66,7 @@ func buildDefaultRegistry() *Registry {
 	return registry
 }
 
-//	reg.Register(myParser, "alias1", "alias2")
+// reg.Register(myParser, "alias1", "alias2")
 func (registry *Registry) Register(parser OutputParser, aliases ...string) {
 	if registry == nil || parser == nil {
 		return
@@ -87,7 +87,7 @@ func (registry *Registry) Register(parser OutputParser, aliases ...string) {
 	}
 }
 
-//	if p, ok := reg.Lookup("qwen3"); ok { /* use p */ }
+// if p, ok := reg.Lookup("qwen3"); ok { /* use p */ }
 func (registry *Registry) Lookup(name string) (OutputParser, bool) {
 	if registry == nil {
 		return nil, false
@@ -96,7 +96,7 @@ func (registry *Registry) Lookup(name string) (OutputParser, bool) {
 	return parser, ok
 }
 
-//	p := reg.LookupHint(parser.Hint{Architecture: "qwen3"})
+// p := reg.LookupHint(parser.Hint{Architecture: "qwen3"})
 func (registry *Registry) LookupHint(hint Hint) OutputParser {
 	if registry == nil {
 		return Default().LookupHint(hint)
@@ -110,12 +110,12 @@ func (registry *Registry) LookupHint(hint Hint) OutputParser {
 	return newBuiltinOutputParser("generic", genericMarkers())
 }
 
-//	p := parser.ForHint(parser.Hint{Architecture: "qwen3"})
+// p := parser.ForHint(parser.Hint{Architecture: "qwen3"})
 func ForHint(hint Hint) OutputParser {
 	return Default().LookupHint(hint)
 }
 
-//	hint := parser.HintFromInference(model.Info())
+// hint := parser.HintFromInference(model.Info())
 func HintFromInference(info inference.ModelInfo) Hint {
 	return Hint{Architecture: info.Architecture}
 }

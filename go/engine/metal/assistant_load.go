@@ -12,7 +12,7 @@ import (
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/gguf"
 	"dappco.re/go/inference/model/safetensors"
-	"dappco.re/go/inference/tokenizer"
+	"dappco.re/go/inference/decode/tokenizer"
 	coreio "dappco.re/go/io"
 )
 

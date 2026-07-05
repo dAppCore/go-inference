@@ -15,9 +15,9 @@ import "testing"
 
 // Sinks defeat compiler DCE.
 var (
-	selectorBenchKey   string
-	selectorBenchFam   string
-	selectorBenchIdx   int
+	selectorBenchKey string
+	selectorBenchFam string
+	selectorBenchIdx int
 )
 
 // --- NormaliseKey: per-Lookup hot path ---

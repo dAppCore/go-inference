@@ -14,7 +14,7 @@ package ngram_test
 import (
 	"testing"
 
-	"dappco.re/go/inference/ngram"
+	"dappco.re/go/inference/decode/ngram"
 )
 
 // Sinks defeat dead-code elimination so the benchmarked work is not optimised

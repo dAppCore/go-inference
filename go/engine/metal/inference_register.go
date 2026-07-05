@@ -14,7 +14,7 @@ package native
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/tokenizer"
+	"dappco.re/go/inference/decode/tokenizer"
 )
 
 func init() { inference.Register(metalBackend{}) }
