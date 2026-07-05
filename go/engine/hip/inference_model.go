@@ -23,8 +23,8 @@ package hip
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/decode/tokenizer"
+	"dappco.re/go/inference/engine"
 )
 
 var _ engine.TokenModel = (*hipTokenModel)(nil)

@@ -13,8 +13,8 @@ package budget_test
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/serving/chat"
 	"dappco.re/go/inference/kv/budget"
+	"dappco.re/go/inference/serving/chat"
 )
 
 // Sinks defeat compiler dead-code elimination — every benchmarked call writes

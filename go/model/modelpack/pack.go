@@ -5,10 +5,10 @@ package modelpack
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/eval/profile"
 	"dappco.re/go/inference/model/quant/autoround"
 	"dappco.re/go/inference/model/quant/codebook"
 	"dappco.re/go/inference/model/quant/jang"
-	"dappco.re/go/inference/eval/profile"
 )
 
 // ModelPackFormat names the model weight container found in a pack.

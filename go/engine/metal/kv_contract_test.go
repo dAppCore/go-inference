@@ -11,9 +11,9 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/kv"
 	g4 "dappco.re/go/inference/model/gemma4"
-	"dappco.re/go/inference/decode/tokenizer"
 )
 
 // newKVContractTokenModel builds a hermetic bf16 NativeTokenModel with a tiny

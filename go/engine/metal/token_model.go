@@ -6,8 +6,8 @@ package native
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/decode/tokenizer"
+	"dappco.re/go/inference/model"
 )
 
 // NativeTokenModel binds the no-cgo decode backend + the embed/head bookend
@@ -47,8 +47,8 @@ type NativeTokenModel struct {
 	// resolved once — killing the per-token re-upload balloon. nil for an in-memory model (Head then
 	// uses the upload closure). Concurrency-safe (no shared mutable state), so the shared model can
 	// serve many request goroutines. Set by LoadGemma4TokenModelDir.
-	headEnc   *headEncoder
-	vision    *model.LoadedVision
+	headEnc *headEncoder
+	vision  *model.LoadedVision
 	// visionFeatureCfg is the image_processor preprocessing config (patch size,
 	// soft-token budget, pooling, rescale) read from processor_config.json at load
 	// time — ProjectImage needs it to patchify before the tower. nil for a
@@ -56,8 +56,8 @@ type NativeTokenModel struct {
 	visionFeatureCfg *VisionImageFeatureConfig
 	audio            *model.LoadedAudio
 	diffusion        *model.LoadedDiffusion
-	bf16      *BF16Model
-	quant     *QuantModel
+	bf16             *BF16Model
+	quant            *QuantModel
 	// tok is the optional text tokenizer, mirroring pkg/metal Model's held
 	// tokenizer. It is nil unless attached (AttachTokenizer): the decode model
 	// works in token-id space, so text↔ids is a serve-boundary concern the

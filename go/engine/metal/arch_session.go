@@ -12,8 +12,8 @@ import (
 	"unsafe"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/decode/tokenizer"
+	"dappco.re/go/inference/model"
 	"github.com/tmc/apple/metal"
 )
 

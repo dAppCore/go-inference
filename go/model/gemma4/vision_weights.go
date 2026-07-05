@@ -4,9 +4,9 @@ package gemma4
 
 import (
 	core "dappco.re/go"
+	"dappco.re/go/inference/eval/profile"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/safetensors"
-	"dappco.re/go/inference/eval/profile"
 )
 
 // vision_weights.go is the neutral front of the gemma4 vision-tower loader: it canonicalises the vision

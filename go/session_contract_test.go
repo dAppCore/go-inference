@@ -62,7 +62,7 @@ func (h *fakeSessionHandle) Fork(_ context.Context) (SessionHandle, error) {
 	return &fakeSessionHandle{prefilled: h.prefilled}, nil
 }
 
-func (h *fakeSessionHandle) Reset()      { h.reset = true }
+func (h *fakeSessionHandle) Reset()       { h.reset = true }
 func (h *fakeSessionHandle) Close() error { h.closed = true; return nil }
 func (h *fakeSessionHandle) Err() error   { return h.err }
 

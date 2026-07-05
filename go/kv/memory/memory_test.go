@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	mp "dappco.re/go/inference/model/modelpack"
 	"dappco.re/go/inference/eval/profile"
+	mp "dappco.re/go/inference/model/modelpack"
 )
 
 func hasNote(plan Plan, fragment string) bool {

@@ -6,10 +6,10 @@ package native
 
 import (
 	core "dappco.re/go"
+	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/gguf"
 	"dappco.re/go/inference/model/safetensors"
-	"dappco.re/go/inference/decode/tokenizer"
 	coreio "dappco.re/go/io"
 )
 

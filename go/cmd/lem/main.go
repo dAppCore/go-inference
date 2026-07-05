@@ -17,8 +17,8 @@ import (
 
 	core "dappco.re/go"
 
-	_ "dappco.re/go/inference/engine/metal"  // registers the no-cgo Apple "metal" backend via init() (darwin/arm64)
 	_ "dappco.re/go/inference/engine/hip"    // registers the ROCm/CUDA/CPU backend via init() (linux/amd64; no-op stub off-platform)
+	_ "dappco.re/go/inference/engine/metal"  // registers the no-cgo Apple "metal" backend via init() (darwin/arm64)
 	_ "dappco.re/go/inference/model/builtin" // registers the built-in arches (gemma3/gemma4/mistral/qwen3)
 )
 

@@ -13,8 +13,8 @@ import (
 	"iter"
 
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/eval/probe"
+	"dappco.re/go/inference/kv"
 )
 
 // Handle is a recording fake inference.SessionHandle. Zero value is usable;
