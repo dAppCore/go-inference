@@ -50,6 +50,6 @@
 	path = external/go-scm
 	url = https://github.com/dappcore/go-scm.git
 	branch = dev
-[submodule "lib/mlx"]
-	path = lib/mlx
+[submodule "external/mlx"]
+	path = external/mlx
 	url = https://github.com/ml-explore/mlx.git

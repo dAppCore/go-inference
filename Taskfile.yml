@@ -2,11 +2,11 @@
 version: '3'
 # go-inference build — the sovereign `lem` binary + its two Metal kernel libraries.
 # Since the go-mlx/go-rocm retirement, go-inference owns the whole metal build chain:
-#   lib/mlx           — Apple's canonical MLX (github.com/ml-explore/mlx) pinned at v0.31.2.
+#   external/mlx           — Apple's canonical MLX (github.com/ml-explore/mlx) pinned at v0.31.2.
 #   patches/mlx/      — the 10 lthn patches applied ON TOP at build time (decode-replay,
 #                       MLX_METALLIB_PATH override, 512-dim sdpa_vector). Patch-not-vendor:
 #                       track upstream MLX + pull updates by bumping the pin + rebasing patches.
-#   build/dist/lib/mlx.metallib          — MLX's own compiled kernels (steel_gemm, affine_qmv,
+#   build/dist/external/mlx.metallib          — MLX's own compiled kernels (steel_gemm, affine_qmv,
 #                                    vv_*, rms, rope) the engine dispatches. Built by CMake.
 #   build/dist/lib/lthn_kernels.metallib — go-inference's OWN fused kernels (engine/metal/kernels/
 #                                    *.metal), loaded beside mlx.metallib.
@@ -16,7 +16,7 @@ vars:
   NCPU:
     sh: sysctl -n hw.ncpu
 env:
-  MLX_METALLIB_PATH: '{{.ROOT_DIR}}/build/dist/lib/mlx.metallib'
+  MLX_METALLIB_PATH: '{{.ROOT_DIR}}/build/dist/external/mlx.metallib'
 
 tasks:
   metallib:
@@ -26,32 +26,32 @@ tasks:
       - task: metallib:kernels
 
   metallib:mlx:
-    desc: "Build MLX's kernels (build/dist/lib/mlx.metallib) from Apple MLX (lib/mlx @ v0.31.2) + the lthn patches."
+    desc: "Build MLX's kernels (build/dist/external/mlx.metallib) from Apple MLX (external/mlx @ v0.31.2) + the lthn patches."
     cmds:
       - mkdir -p build/dist/lib build
       - |-
         set -e
         # start from pristine pinned Apple MLX, apply the lthn patch set (absolute paths)
-        git -C lib/mlx checkout -q -- . && git -C lib/mlx clean -fdq
-        for p in "$PWD"/patches/mlx/*.patch; do git -C lib/mlx apply "$p"; done
-        cmake -S lib/mlx -B build/mlx-metal -DCMAKE_BUILD_TYPE=Release -DMLX_BUILD_METAL=ON \
+        git -C external/mlx checkout -q -- . && git -C external/mlx clean -fdq
+        for p in "$PWD"/patches/mlx/*.patch; do git -C external/mlx apply "$p"; done
+        cmake -S external/mlx -B build/mlx-metal -DCMAKE_BUILD_TYPE=Release -DMLX_BUILD_METAL=ON \
           -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_EXAMPLES=OFF \
           -DMLX_BUILD_PYTHON_BINDINGS=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0
         cmake --build build/mlx-metal --target mlx --parallel {{.NCPU}}
-        cp build/mlx-metal/mlx/backend/metal/kernels/mlx.metallib build/dist/lib/mlx.metallib
-        # restore lib/mlx to pristine so the submodule stays clean in git status
-        git -C lib/mlx checkout -q -- . && git -C lib/mlx clean -fdq
-        echo "  mlx.metallib: $(du -h build/dist/lib/mlx.metallib | cut -f1) (Apple MLX $(git -C lib/mlx describe --tags) + $(ls patches/mlx/*.patch | wc -l | tr -d ' ') lthn patches)"
+        cp build/mlx-metal/mlx/backend/metal/kernels/mlx.metallib build/dist/external/mlx.metallib
+        # restore external/mlx to pristine so the submodule stays clean in git status
+        git -C external/mlx checkout -q -- . && git -C external/mlx clean -fdq
+        echo "  mlx.metallib: $(du -h build/dist/external/mlx.metallib | cut -f1) (Apple MLX $(git -C external/mlx describe --tags) + $(ls patches/mlx/*.patch | wc -l | tr -d ' ') lthn patches)"
 
   metallib:kernels:
-    desc: "Compile go-inference's OWN Metal kernels (engine/metal/kernels/*.metal) into build/dist/lib/lthn_kernels.metallib (needs lib/mlx headers)."
+    desc: "Compile go-inference's OWN Metal kernels (engine/metal/kernels/*.metal) into build/dist/lib/lthn_kernels.metallib (needs external/mlx headers)."
     cmds:
       - mkdir -p build/dist/lib
       - |-
         set -e
         airdir="$(mktemp -d)"
         for m in go/engine/metal/kernels/*.metal; do
-          xcrun -sdk macosx metal -std=metal4.0 -I lib/mlx -c "$m" -o "$airdir/$(basename "${m%.metal}").air"
+          xcrun -sdk macosx metal -std=metal4.0 -I external/mlx -c "$m" -o "$airdir/$(basename "${m%.metal}").air"
         done
         xcrun -sdk macosx metallib "$airdir"/*.air -o build/dist/lib/lthn_kernels.metallib
         rm -rf "$airdir"
