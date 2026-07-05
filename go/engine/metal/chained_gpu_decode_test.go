@@ -1280,3 +1280,107 @@ func benchSampledCacheLogitsPLE(b *testing.B, gpuInputs, pipelined bool) {
 func BenchmarkSampledCacheLogitsPLEHost(b *testing.B) { benchSampledCacheLogitsPLE(b, false, false) }
 func BenchmarkSampledCacheLogitsPLEGpu(b *testing.B)  { benchSampledCacheLogitsPLE(b, true, false) }
 func BenchmarkSampledCacheLogitsPLEPipe(b *testing.B) { benchSampledCacheLogitsPLE(b, true, true) }
+
+// denseQuantModel is pleQuantModel WITHOUT the per-layer-input tower — the
+// 12B/31B shape. Exercises the non-PLE GPU next-inputs seam (embed gather
+// alone feeds the chain).
+func denseQuantModel(t testing.TB, numLayers, dFF, vocab, kvShared int) (*QuantModel, model.Arch) {
+	const dModel, nHeads, nKV, headDim = 128, 2, 1, 64
+	const gs, bits = 64, 4
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+		Quantization:      &model.QuantConfig{GroupSize: gs, Bits: bits},
+		NumKVSharedLayers: kvShared,
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	ts := quantGemma4Tensors(t, arch, gs, bits)
+	lm, err := model.Assemble(ts, arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	g, err := loadedToQuant(lm, gs, bits)
+	if err != nil {
+		t.Fatalf("loadedToQuant: %v", err)
+	}
+	if g.HasPLE() {
+		t.Fatal("fixture must NOT have the per-layer-input tower")
+	}
+	return g, arch
+}
+
+// TestDenseGPUDecodeSeamEngages pins that a non-PLE quant session gets the GPU
+// next-inputs seam (embed gather only) — the gate the 12B/31B chained/pipelined
+// decode rides. Without the seam the chain silently falls back to the host
+// loop and a parity test would compare host against host.
+func TestDenseGPUDecodeSeamEngages(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	g, arch := denseQuantModel(t, 3, 256, 32, 0)
+	sess, err := NewArchQuantSession(g, arch, 24)
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	if sess.state.icb == nil {
+		t.Fatal("dense fixture: ICB not recorded")
+	}
+	if sess.encNextInputsGPU == nil {
+		t.Fatal("dense fixture: GPU next-inputs seam NOT wired (chained/pipelined inactive)")
+	}
+	if sess.plScratchNew == nil {
+		t.Fatal("dense fixture: plScratchNew placeholder NOT set (chain gates fail)")
+	}
+}
+
+// TestDensePipelinedGPUDecodeMatchesHost is the non-PLE sibling of
+// TestPipelinedGPUDecodeMatchesChained: host loop, chained-GPU and pipelined
+// lanes must produce identical tokens on the dense (12B/31B-shaped) fixture.
+func TestDensePipelinedGPUDecodeMatchesHost(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	g, arch := denseQuantModel(t, 3, 256, 32, 0)
+	const maxLen = 24
+	prompt := []int32{1, 5, 3, 2}
+	const n = 12
+
+	run := func(host, pipe bool) []int32 {
+		oldChain := chainedGPUInputsDisabled
+		oldPipe := pipelinedGPUDecodeEnabled
+		defer func() {
+			chainedGPUInputsDisabled = oldChain
+			pipelinedGPUDecodeEnabled = oldPipe
+		}()
+		chainedGPUInputsDisabled = host
+		pipelinedGPUDecodeEnabled = pipe
+		sess, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("session (host=%v pipe=%v): %v", host, pipe, err)
+		}
+		gen, err := sess.Generate(prompt, n, -1)
+		if err != nil {
+			t.Fatalf("generate (host=%v pipe=%v): %v", host, pipe, err)
+		}
+		return gen
+	}
+
+	hostGen := run(true, false)
+	chainGen := run(false, false)
+	pipeGen := run(false, true)
+	if len(hostGen) != n {
+		t.Fatalf("host generated %d tokens, want %d", len(hostGen), n)
+	}
+	for i := range hostGen {
+		if chainGen[i] != hostGen[i] {
+			t.Fatalf("token %d: chained %d != host %d (chain=%v host=%v)", i, chainGen[i], hostGen[i], chainGen, hostGen)
+		}
+		if pipeGen[i] != hostGen[i] {
+			t.Fatalf("token %d: pipelined %d != host %d (pipe=%v host=%v)", i, pipeGen[i], hostGen[i], pipeGen, hostGen)
+		}
+	}
+	t.Logf("dense host/chained/pipelined identical: %v", hostGen)
+}

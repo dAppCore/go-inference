@@ -904,6 +904,26 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 					return encPerLayerInputsGPUObject(enc, gpso, tokenBuf, embOut, plePackedBuf, pleScalesBuf, pleBiasesBuf, 0, 0, 0, projWBuf, projWOff, pleNormBuf, sc, numLayers, pliDim, dModel, gs, bits, embScalePLE, arch.Eps)
 				}
 			}
+		} else if bits == 4 {
+			// GPU next-inputs seam, non-PLE dense (12B/31B): the only per-step input
+			// is the token's embedding, so the seam is the embed gather alone — no
+			// PLE stage, and the plGPUScratch the chain hands through is a zero-value
+			// placeholder the closure never reads (it exists to satisfy the chained/
+			// pipelined gates, which key on encNextInputsGPU + plScratchNew). This is
+			// what lets the submit-ahead decode engage beyond the E-family.
+			dModel := arch.Hidden
+			embedPackedBuf, embedScalesBuf, embedBiasesBuf := residentBytes(g.Embed), residentBytes(g.EmbedScales), residentBytes(g.EmbedBiases)
+			if embedPackedBuf != nil && embedScalesBuf != nil && embedBiasesBuf != nil {
+				sess.plScratchNew = func() *plGPUScratch { return &plGPUScratch{} }
+				sess.encNextInputsGPU = func(enc metal.MTLComputeCommandEncoderObject, tokenBuf, embOut metal.MTLBuffer, _ *plGPUScratch) error {
+					gpso, gerr := embedGatherPipeline()
+					if gerr != nil {
+						return gerr
+					}
+					encEmbedGatherQuantObject(enc, gpso, tokenBuf, embedPackedBuf, embedScalesBuf, embedBiasesBuf, embOut, 0, 0, 0, dModel, gs, bits, embedScale)
+					return nil
+				}
+			}
 		}
 		// gemma4 incremental ICB encode-bypass (E2B/E4B dense): record the decode stack once + replay
 		// it per Step/StepWithID instead of re-encoding every layer. The replay holds its OWN linear
