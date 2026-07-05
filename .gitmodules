@@ -53,3 +53,15 @@
 [submodule "external/mlx"]
 	path = external/mlx
 	url = https://github.com/ml-explore/mlx.git
+[submodule "external/go-container"]
+	path = external/go-container
+	url = https://github.com/dappcore/go-container.git
+	branch = dev
+[submodule "external/gui"]
+	path = external/gui
+	url = https://github.com/dappcore/gui.git
+	branch = dev
+[submodule "external/cli"]
+	path = external/cli
+	url = https://github.com/dappcore/cli.git
+	branch = dev
