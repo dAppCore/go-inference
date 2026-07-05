@@ -152,7 +152,7 @@ func sampleManifest() pack.Manifest {
 }
 
 func TestPack_Roundtrip_Good(t *testing.T) {
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-roundtrip-good-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-roundtrip-good-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 
 	srcDir := core.JoinPath(tempRoot, "src")
@@ -183,7 +183,7 @@ func TestPack_Roundtrip_Good(t *testing.T) {
 }
 
 func TestPack_Inspect_Good(t *testing.T) {
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-inspect-good-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-inspect-good-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 
 	srcDir := core.JoinPath(tempRoot, "src")
@@ -224,7 +224,7 @@ func TestPack_Inspect_Good(t *testing.T) {
 
 func TestPack_Roundtrip_Bad(t *testing.T) {
 	// Truncated .model file must return a failing Result, never panic.
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bad-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-bad-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 
 	srcDir := core.JoinPath(tempRoot, "src")
@@ -253,7 +253,7 @@ func TestPack_Roundtrip_Bad(t *testing.T) {
 func TestPack_Roundtrip_Ugly(t *testing.T) {
 	// Unusual but valid file names — spaces and unicode — must round-trip
 	// intact.
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-ugly-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-ugly-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 
 	srcDir := core.JoinPath(tempRoot, "src")
@@ -283,7 +283,7 @@ func TestPack_VindexOption_Bad(t *testing.T) {
 	// Seam-honesty: VindexBlob != nil must return an explicit
 	// "not yet implemented" failure so callers know the embedding seam
 	// exists but isn't wired.
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-vindex-bad-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-vindex-bad-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 
 	srcDir := core.JoinPath(tempRoot, "src")
@@ -301,7 +301,7 @@ func TestPack_VindexOption_Bad(t *testing.T) {
 }
 
 func TestPack_List_Good(t *testing.T) {
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-list-good-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-list-good-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 
 	srcDir := core.JoinPath(tempRoot, "src")
@@ -345,7 +345,7 @@ func TestPack_List_Good(t *testing.T) {
 }
 
 func TestPack_List_Bad(t *testing.T) {
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-list-bad-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-list-bad-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 
 	srcDir := core.JoinPath(tempRoot, "src")
@@ -371,7 +371,7 @@ func TestPack_Deterministic_Good(t *testing.T) {
 	// produce byte-identical .model output, twice in a row. The property
 	// `.model` is content-addressable depends on it: same input → same
 	// SHA-256 → cache hits, lineage chains, registry dedup all work.
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-deterministic-good-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-deterministic-good-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 
 	srcDir := core.JoinPath(tempRoot, "src")
@@ -496,7 +496,7 @@ func TestPack_Fingerprint_HexShape_Good(t *testing.T) {
 
 func TestPack_Hash_Stable_Good(t *testing.T) {
 	// Same source dir hashed twice must return identical hex.
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-stable-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-stable-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 	srcDir := core.JoinPath(tempRoot, "src")
 	buildFixturePack(t, srcDir)
@@ -520,7 +520,7 @@ func TestPack_Hash_Stable_Good(t *testing.T) {
 func TestPack_Hash_DistinguishesContent_Ugly(t *testing.T) {
 	// Pack A and Pack B share filenames but config.json differs.
 	// Hash must differ.
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-distinct-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-distinct-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 	srcA := core.JoinPath(tempRoot, "a")
 	srcB := core.JoinPath(tempRoot, "b")
@@ -545,7 +545,7 @@ func TestPack_Hash_DistinguishesContent_Ugly(t *testing.T) {
 
 func TestPack_Hash_SafetensorsSizeAffects_Ugly(t *testing.T) {
 	// Same JSON files but different *.safetensors size — hash must differ.
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-st-size-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-st-size-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 	srcA := core.JoinPath(tempRoot, "a")
 	srcB := core.JoinPath(tempRoot, "b")
@@ -572,7 +572,7 @@ func TestPack_Hash_SafetensorsSizeAffects_Ugly(t *testing.T) {
 func TestPack_Hash_OptionalFilesSkippedCleanly_Good(t *testing.T) {
 	// Pack A has chat_template.jinja; Pack B doesn't. Hash differs but
 	// neither errors out. Missing optional files are part of identity.
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-optional-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-optional-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 	srcA := core.JoinPath(tempRoot, "a")
 	srcB := core.JoinPath(tempRoot, "b")
@@ -606,7 +606,7 @@ func TestPack_Hash_OptionalFilesSkippedCleanly_Good(t *testing.T) {
 
 func TestPack_Hash_AutoPopulatedInPack_Good(t *testing.T) {
 	// Pack with empty Manifest.Model.Hash must auto-populate via Hash(srcDir).
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-autofill-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-autofill-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 	srcDir := core.JoinPath(tempRoot, "src")
 	dest := core.JoinPath(tempRoot, "out.model")
@@ -638,7 +638,7 @@ func TestPack_Hash_AutoPopulatedInPack_Good(t *testing.T) {
 
 func TestPack_Hash_RespectsCallerProvidedValue_Good(t *testing.T) {
 	// Pack with caller-set Manifest.Model.Hash must NOT overwrite.
-	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-respect-")
+	tempRoot := (&core.Fs{}).NewUnrestricted().TempDir("pack-hash-respect-").Value.(string)
 	defer core.RemoveAll(tempRoot)
 	srcDir := core.JoinPath(tempRoot, "src")
 	dest := core.JoinPath(tempRoot, "out.model")

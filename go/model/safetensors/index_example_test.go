@@ -21,7 +21,7 @@ var exampleFs = (&core.Fs{}).New("/")
 // mkTempDir returns a fresh temp directory for an example fixture. The
 // second return is the cleanup closure callers defer.
 func mkTempDir() (string, func()) {
-	dir := exampleFs.TempDir("safetensors-example")
+	dir := exampleFs.TempDir("safetensors-example").Value.(string)
 	return dir, func() { exampleFs.DeleteAll(dir) }
 }
 

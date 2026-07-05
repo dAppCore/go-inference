@@ -130,7 +130,7 @@ func DiscoverModels(basePath string) []DiscoveredModel {
 	}
 
 	models := slices.Collect(Discover(resolvedPath))
-	if err := core.PathWalkDir(resolvedPath, func(path string, entry fs.DirEntry, walkErr error) error {
+	if r := core.PathWalkDir(resolvedPath, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil || !entry.IsDir() {
 			return nil
 		}
@@ -144,7 +144,7 @@ func DiscoverModels(basePath string) []DiscoveredModel {
 		}
 		models = append(models, discoveredModelFromGGUF(info))
 		return nil
-	}); err != nil {
+	}); !r.OK {
 		return nil
 	}
 	slices.SortFunc(models, func(a, b DiscoveredModel) int {
