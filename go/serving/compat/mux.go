@@ -77,6 +77,7 @@ func NewMuxWithAdmin(resolver openaicompat.Resolver, admin AdminConfig) http.Han
 	mux.Handle(openaicompat.DefaultEmbeddingsPath, openaicompat.NewEmbeddingsHandler(resolver))
 	mux.Handle(openaicompat.DefaultRerankPath, openaicompat.NewRerankHandler(resolver))
 	mux.Handle(openaicompat.DefaultCapabilitiesPath, openaicompat.NewCapabilityHandler(resolver))
+	mux.Handle(openaicompat.DefaultModelsPath, openaicompat.NewModelsHandler(admin.Models))
 	mux.Handle(openaicompat.DefaultCacheStatsPath, openaicompat.NewCacheStatsHandler(resolver))
 	mux.Handle(openaicompat.DefaultCacheWarmPath, openaicompat.NewCacheWarmHandler(resolver))
 	mux.Handle(openaicompat.DefaultCacheClearPath, openaicompat.NewCacheClearHandler(resolver))

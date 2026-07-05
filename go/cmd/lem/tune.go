@@ -27,7 +27,7 @@ func runTuneCommand(ctx context.Context, args []string, stdout, stderr io.Writer
 	maxTokens := fs.Int("max-tokens", 256, "tokens per measurement run")
 	prompt := fs.String("prompt", "Write a detailed Go function that reverses a singly linked list, with inline comments on every step, then explain the pointer dance.", "measurement prompt")
 	workload := fs.String("workload", string(inference.TuningWorkloadChat), "workload the profile is scored + persisted under")
-	profileDir := fs.String("profile-dir", "", "tuned-profile directory (default ~/Lethean/data/tuning)")
+	profileDir := fs.String("profile-dir", "", "tuned-profile directory (default ~/Lethean/lem/tuning)")
 	jsonOut := fs.Bool("json", false, "emit JSONL tuning events instead of the text summary")
 	fs.Usage = func() {
 		name := cliName()

@@ -27,12 +27,12 @@ func (f *fakeReloader) ReloadModel(newPath string, _ []inference.LoadOption) (st
 }
 
 // seedModel writes a minimal verified model pack (config.json + .sha256 sidecar)
-// under a temp HOME's ~/Lethean/data/models/<name> and returns its path.
+// under a temp HOME's ~/Lethean/lem/models/<name> and returns its path.
 func seedModel(t *testing.T, name string) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	dir := core.PathJoin(home, "Lethean", "data", "models", name)
+	dir := core.PathJoin(home, "Lethean", "lem", "models", name)
 	if r := core.MkdirAll(dir, 0o755); !r.OK {
 		t.Fatalf("mkdir model dir: %v", r.Value)
 	}
@@ -106,7 +106,7 @@ func TestReloadHandler_WrongConfirm_Bad(t *testing.T) {
 func TestReloadHandler_NoManifest_Ugly(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	dir := core.PathJoin(home, "Lethean", "data", "models", "nomanifest")
+	dir := core.PathJoin(home, "Lethean", "lem", "models", "nomanifest")
 	if r := core.MkdirAll(dir, 0o755); !r.OK {
 		t.Fatalf("mkdir: %v", r.Value)
 	}

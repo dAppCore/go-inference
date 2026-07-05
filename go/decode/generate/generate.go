@@ -64,7 +64,7 @@ type Config struct {
 
 	// Durable -state turn loop.
 	StateName  string // conversation state name (wake → generate → sleep); "" = stateless one-shot
-	StateStore string // state store file (default ~/Lethean/data/state/agent.kv)
+	StateStore string // state store file (default ~/Lethean/lem/state/agent.kv)
 	Raw        bool   // with -state: skip chat-framing, run the raw completion-loop turn
 
 	LoadOptions []inference.LoadOption

@@ -50,7 +50,7 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 	tracePhases := fs.Bool("trace", false, "print the per-token decode time budget — GPU wait vs host-serial work")
 	nativeBackend := fs.Bool("native", false, "generate via the no-cgo native token-loop contract (the default go-inference metal engine already is)")
 	stateName := fs.String("state", "", "conversation state name: wake it from the store if present, generate, sleep it back — the no-prompt-replay turn loop")
-	stateStore := fs.String("state-store", "", "state store file (default ~/Lethean/data/state/agent.kv)")
+	stateStore := fs.String("state-store", "", "state store file (default ~/Lethean/lem/state/agent.kv)")
 	rawState := fs.Bool("raw", false, "with -state: skip chat-framing and run the raw completion-loop turn (no template) — ignored without -state")
 	var images stringListFlag
 	fs.Var(&images, "image", "image input for a vision model: a local PNG/JPEG path or a base64 data: URL (repeatable) — gated on the model's vision capability, same as serve")

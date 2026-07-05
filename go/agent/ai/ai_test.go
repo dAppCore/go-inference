@@ -13,7 +13,7 @@ func withTempHome(t *testing.T) {
 
 	tempHome := t.TempDir()
 
-	metricsPath := core.PathJoin(tempHome, ".core", "ai", "metrics")
+	metricsPath := core.PathJoin(tempHome, "Lethean", "lem", "ai", "metrics")
 	if err := coreio.Local.EnsureDir(metricsPath); err != nil {
 		t.Fatalf("create metrics dir: %v", err)
 	}
@@ -79,25 +79,25 @@ func TestMetricsDir_Good_HonoursEnvPrecedence(t *testing.T) {
 	t.Setenv("DIR_HOME", "/dir-home")
 
 	got := requireMetricsDir(t, metricsDir())
-	if want := core.JoinPath("/core-home", ".core", "ai", "metrics"); got != want {
+	if want := core.JoinPath("/core-home", "Lethean", "lem", "ai", "metrics"); got != want {
 		t.Fatalf("metricsDir() = %q, want %q", got, want)
 	}
 
 	t.Setenv("CORE_HOME", "")
 	got = requireMetricsDir(t, metricsDir())
-	if want := core.JoinPath("/home", ".core", "ai", "metrics"); got != want {
+	if want := core.JoinPath("/home", "Lethean", "lem", "ai", "metrics"); got != want {
 		t.Fatalf("metricsDir() with HOME = %q, want %q", got, want)
 	}
 
 	t.Setenv("HOME", "")
 	got = requireMetricsDir(t, metricsDir())
-	if want := core.JoinPath("/userprofile", ".core", "ai", "metrics"); got != want {
+	if want := core.JoinPath("/userprofile", "Lethean", "lem", "ai", "metrics"); got != want {
 		t.Fatalf("metricsDir() with USERPROFILE = %q, want %q", got, want)
 	}
 
 	t.Setenv("USERPROFILE", "")
 	got = requireMetricsDir(t, metricsDir())
-	if want := core.JoinPath("/dir-home", ".core", "ai", "metrics"); got != want {
+	if want := core.JoinPath("/dir-home", "Lethean", "lem", "ai", "metrics"); got != want {
 		t.Fatalf("metricsDir() with DIR_HOME = %q, want %q", got, want)
 	}
 }
