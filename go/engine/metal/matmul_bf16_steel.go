@@ -5,9 +5,7 @@
 package native
 
 import (
-	"runtime"
 	"sync"
-	"unsafe"
 
 	core "dappco.re/go"
 	"github.com/tmc/apple/metal"
@@ -30,15 +28,12 @@ var (
 )
 
 type matMulBF16SteelScratch struct {
-	M, K, N       int
-	a, out        *pinnedNoCopyBytes
-	aView         cachedNoCopyBytesView
-	params        *pinnedNoCopyBytes
-	paramsFilled  bool
-	outViewPtr    uintptr
-	outViewLen    int
-	outView       metal.MTLBuffer
-	outViewPinned *pinnedNoCopyBytes
+	M, K, N      int
+	a, out       *pinnedNoCopyBytes
+	aView        cachedNoCopyBytesView
+	params       *pinnedNoCopyBytes
+	paramsFilled bool
+	noCopyOutputView
 }
 
 type matMulBF16SteelScratchKey struct {
@@ -120,51 +115,6 @@ func (s *matMulBF16SteelScratch) Close() {
 	s.closeOutputView()
 	s.M, s.K, s.N = 0, 0, 0
 	s.paramsFilled = false
-}
-
-func (s *matMulBF16SteelScratch) closeOutputView() {
-	if s == nil {
-		return
-	}
-	if s.outViewPinned != nil {
-		s.outViewPinned.Close()
-	}
-	s.outViewPtr = 0
-	s.outViewLen = 0
-	s.outView = nil
-	s.outViewPinned = nil
-}
-
-func (s *matMulBF16SteelScratch) outputView(out []byte) (metal.MTLBuffer, bool) {
-	if s == nil || len(out) == 0 {
-		return nil, false
-	}
-	ptr := uintptr(unsafe.Pointer(&out[0]))
-	if s.outView != nil && s.outViewPtr == ptr && s.outViewLen == len(out) {
-		return s.outView, true
-	}
-	s.closeOutputView()
-	if buf, ok := registeredPinnedNoCopyBytes(out); ok {
-		s.outViewPtr = ptr
-		s.outViewLen = len(out)
-		s.outView = buf
-		s.outViewPinned = nil
-		return buf, true
-	}
-	buf, pinner, noCopy := residentNoCopyBytes(out)
-	if !noCopy {
-		if pinner != nil {
-			pinner.Unpin()
-		}
-		return nil, false
-	}
-	pinned := &pinnedNoCopyBytes{bytes: out, buf: buf, pinner: pinner}
-	runtime.SetFinalizer(pinned, (*pinnedNoCopyBytes).Close)
-	s.outViewPtr = ptr
-	s.outViewLen = len(out)
-	s.outView = buf
-	s.outViewPinned = pinned
-	return buf, true
 }
 
 func (s *matMulBF16SteelScratch) buffers(a []byte, t steelTiling) (metal.MTLBuffer, metal.MTLBuffer, metal.MTLBuffer, error) {

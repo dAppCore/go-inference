@@ -5,7 +5,6 @@
 package native
 
 import (
-	"runtime"
 	"sync"
 	"unsafe"
 
@@ -176,11 +175,8 @@ type qmvBF16Scratch struct {
 	inDim, outDim int
 	x, out        *pinnedNoCopyBytes
 	xView         cachedNoCopyBytesView
-	outViewPtr    uintptr
-	outViewLen    int
-	outView       metal.MTLBuffer
-	outViewPinned *pinnedNoCopyBytes
 	residentIDs   []objc.ID
+	noCopyOutputView
 }
 
 func newQMVBF16Scratch(outDim, inDim int) (*qmvBF16Scratch, error) {
@@ -232,51 +228,6 @@ func (s *qmvBF16Scratch) Close() {
 	}
 	s.closeOutputView()
 	s.inDim, s.outDim = 0, 0
-}
-
-func (s *qmvBF16Scratch) closeOutputView() {
-	if s == nil {
-		return
-	}
-	if s.outViewPinned != nil {
-		s.outViewPinned.Close()
-	}
-	s.outViewPtr = 0
-	s.outViewLen = 0
-	s.outView = nil
-	s.outViewPinned = nil
-}
-
-func (s *qmvBF16Scratch) outputView(out []byte) (metal.MTLBuffer, bool) {
-	if s == nil || len(out) == 0 {
-		return nil, false
-	}
-	ptr := uintptr(unsafe.Pointer(&out[0]))
-	if s.outView != nil && s.outViewPtr == ptr && s.outViewLen == len(out) {
-		return s.outView, true
-	}
-	s.closeOutputView()
-	if buf, ok := registeredPinnedNoCopyBytes(out); ok {
-		s.outViewPtr = ptr
-		s.outViewLen = len(out)
-		s.outView = buf
-		s.outViewPinned = nil
-		return buf, true
-	}
-	buf, pinner, noCopy := residentNoCopyBytes(out)
-	if !noCopy {
-		if pinner != nil {
-			pinner.Unpin()
-		}
-		return nil, false
-	}
-	pinned := &pinnedNoCopyBytes{bytes: out, buf: buf, pinner: pinner}
-	runtime.SetFinalizer(pinned, (*pinnedNoCopyBytes).Close)
-	s.outViewPtr = ptr
-	s.outViewLen = len(out)
-	s.outView = buf
-	s.outViewPinned = pinned
-	return buf, true
 }
 
 func (s *qmvBF16Scratch) buffers(x []byte) (metal.MTLBuffer, metal.MTLBuffer, error) {
