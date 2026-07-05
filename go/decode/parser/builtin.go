@@ -35,7 +35,7 @@ type builtinOutputParser struct {
 // token needs one; span-end markers stay on the reasoningMarker ends.
 func turnTerminators(id string) []string {
 	if id == "gemma" {
-		return []string{"<end_of_turn>"}
+		return []string{GemmaTurnTerminator}
 	}
 	return nil
 }

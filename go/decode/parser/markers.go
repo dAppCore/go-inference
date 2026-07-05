@@ -32,11 +32,13 @@ var (
 
 func genericMarkers() []reasoningMarker {
 	genericMarkersOnce.Do(func() {
-		genericMarkersCache = []reasoningMarker{
-			{start: "<thinking>", ends: []string{"</thinking>"}, kind: "thinking"},
-			{start: "<thought>", ends: []string{"</thought>"}, kind: "thinking"},
-			{start: "<reasoning>", ends: []string{"</reasoning>"}, kind: "reasoning"},
-			{start: "<analysis>", ends: []string{"</analysis>"}, kind: "analysis"},
+		// Derived from the authoritative grammar table (grammar.go); the
+		// generic set excludes <think> — that spelling is the qwen family's.
+		for _, m := range PairedReasoningMarkers() {
+			if m.Start == "<think>" {
+				continue
+			}
+			genericMarkersCache = append(genericMarkersCache, reasoningMarker{start: m.Start, ends: []string{m.End}, kind: m.Kind})
 		}
 	})
 	return genericMarkersCache
@@ -54,14 +56,14 @@ func qwenMarkers() []reasoningMarker {
 func gemmaMarkers() []reasoningMarker {
 	gemmaMarkersOnce.Do(func() {
 		gemmaMarkersCache = append([]reasoningMarker{
-			{start: "<|channel>thought\n", ends: []string{"<channel|>"}, kind: "thinking"},
-			{start: "<|channel>thinking\n", ends: []string{"<channel|>"}, kind: "thinking"},
-			{start: "<|channel>reasoning\n", ends: []string{"<channel|>"}, kind: "reasoning"},
-			{start: "<|channel>analysis\n", ends: []string{"<channel|>"}, kind: "analysis"},
-			{start: "<start_of_turn>thinking\n", ends: []string{"<end_of_turn>"}, kind: "thinking"},
-			{start: "<start_of_turn>thought\n", ends: []string{"<end_of_turn>"}, kind: "thinking"},
-			{start: "<start_of_turn>analysis\n", ends: []string{"<end_of_turn>"}, kind: "analysis"},
-			{start: "<start_of_turn>reasoning\n", ends: []string{"<end_of_turn>"}, kind: "reasoning"},
+			{start: ChannelOpenMarker + "thought\n", ends: []string{ChannelCloseMarker}, kind: "thinking"},
+			{start: ChannelOpenMarker + "thinking\n", ends: []string{ChannelCloseMarker}, kind: "thinking"},
+			{start: ChannelOpenMarker + "reasoning\n", ends: []string{ChannelCloseMarker}, kind: "reasoning"},
+			{start: ChannelOpenMarker + "analysis\n", ends: []string{ChannelCloseMarker}, kind: "analysis"},
+			{start: "<start_of_turn>thinking\n", ends: []string{GemmaTurnTerminator}, kind: "thinking"},
+			{start: "<start_of_turn>thought\n", ends: []string{GemmaTurnTerminator}, kind: "thinking"},
+			{start: "<start_of_turn>analysis\n", ends: []string{GemmaTurnTerminator}, kind: "analysis"},
+			{start: "<start_of_turn>reasoning\n", ends: []string{GemmaTurnTerminator}, kind: "reasoning"},
 		}, genericMarkers()...)
 	})
 	return gemmaMarkersCache
@@ -70,12 +72,12 @@ func gemmaMarkers() []reasoningMarker {
 func gptOSSMarkers() []reasoningMarker {
 	gptOSSMarkersOnce.Do(func() {
 		gptOSSMarkersCache = append([]reasoningMarker{
-			{start: "<|channel>analysis\n", ends: []string{"<|channel>final\n", "<|channel>assistant\n", "<|channel>assistant"}, kind: "analysis"},
-			{start: "<|channel>thought\n", ends: []string{"<|channel>final\n", "<|channel>assistant\n", "<|channel>assistant"}, kind: "thinking"},
-			{start: "<|channel>reasoning\n", ends: []string{"<|channel>final\n", "<|channel>assistant\n", "<|channel>assistant"}, kind: "reasoning"},
-			{start: "<|channel>analysis", ends: []string{"<|channel>final", "<|channel>assistant"}, kind: "analysis"},
-			{start: "<|channel>thought", ends: []string{"<|channel>final", "<|channel>assistant"}, kind: "thinking"},
-			{start: "<|channel>reasoning", ends: []string{"<|channel>final", "<|channel>assistant"}, kind: "reasoning"},
+			{start: ChannelOpenMarker + "analysis\n", ends: []string{ChannelOpenMarker + "final\n", ChannelOpenMarker + "assistant\n", ChannelOpenMarker + "assistant"}, kind: "analysis"},
+			{start: ChannelOpenMarker + "thought\n", ends: []string{ChannelOpenMarker + "final\n", ChannelOpenMarker + "assistant\n", ChannelOpenMarker + "assistant"}, kind: "thinking"},
+			{start: ChannelOpenMarker + "reasoning\n", ends: []string{ChannelOpenMarker + "final\n", ChannelOpenMarker + "assistant\n", ChannelOpenMarker + "assistant"}, kind: "reasoning"},
+			{start: ChannelOpenMarker + "analysis", ends: []string{ChannelOpenMarker + "final", ChannelOpenMarker + "assistant"}, kind: "analysis"},
+			{start: ChannelOpenMarker + "thought", ends: []string{ChannelOpenMarker + "final", ChannelOpenMarker + "assistant"}, kind: "thinking"},
+			{start: ChannelOpenMarker + "reasoning", ends: []string{ChannelOpenMarker + "final", ChannelOpenMarker + "assistant"}, kind: "reasoning"},
 		}, genericMarkers()...)
 	})
 	return gptOSSMarkersCache
