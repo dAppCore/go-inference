@@ -289,15 +289,3 @@ func TestJoinURI_Ugly(t *testing.T) {
 		t.Fatalf(`joinURI("", "", "") = %q, want ""`, got)
 	}
 }
-
-// TestFirstNonEmpty_Ugly covers the all-empty fallback, which every
-// sleepRequest call site avoids because the seed always carries a
-// non-empty EntryURI/BundleURI/IndexURI/Title to fall back to.
-func TestFirstNonEmpty_Ugly(t *testing.T) {
-	if got := firstNonEmpty("", "   ", ""); got != "" {
-		t.Fatalf(`firstNonEmpty("", "   ", "") = %q, want ""`, got)
-	}
-	if got := firstNonEmpty(); got != "" {
-		t.Fatalf("firstNonEmpty() = %q, want empty string", got)
-	}
-}

@@ -232,7 +232,7 @@ func ReadInfo(modelPath string) (Info, error) {
 	}
 
 	config, _ := readModelConfig(core.PathDir(ggufPath))
-	architecture := firstNonEmpty(
+	architecture := core.FirstNonBlank(
 		metadataString(metadata["general.architecture"]),
 		config.architecture(),
 	)
@@ -501,15 +501,6 @@ func metadataInt(value any) int {
 	default:
 		return 0
 	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if core.Trim(value) != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func inferGGUFVocabSize(metadata map[string]any, architecture string) int {

@@ -478,7 +478,7 @@ func kvSnapshotStateBlockPutOptions(block Block, opts StateBlockOptions, hash, k
 		copy(labels, opts.Labels)
 		labels = append(labels, "go-mlx", "kv-snapshot-block")
 	}
-	baseURI := firstNonEmpty(opts.URI, "mlx://kv-snapshot-blocks")
+	baseURI := core.FirstNonBlank(opts.URI, "mlx://kv-snapshot-blocks")
 	// Direct string concatenation skips the fmt.Sprintf parse + format
 	// state machinery on every per-block save (~SaveStateBlocks fires once
 	// per checkpointed block during prefill). Avoid materialising the

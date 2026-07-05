@@ -402,22 +402,6 @@ func TestKVSnapshot_LayerNativeTensorArms(t *testing.T) {
 	}
 }
 
-// TestKVSnapshot_FirstNonEmpty_GoodBadUgly covers firstNonEmpty: a real value
-// is returned (Good), all-empty inputs fall through to "" (snapshot.go:1466,
-// Bad), and a whitespace-only value is skipped in favour of a later real one
-// via the core.Trim branch (Ugly).
-func TestKVSnapshot_FirstNonEmpty_GoodBadUgly(t *testing.T) {
-	if got := firstNonEmpty("", "real"); got != "real" {
-		t.Fatalf("firstNonEmpty(empty, real) = %q, want \"real\"", got)
-	}
-	if got := firstNonEmpty("", ""); got != "" {
-		t.Fatalf("firstNonEmpty(all empty) = %q, want empty string", got)
-	}
-	if got := firstNonEmpty("   ", "kept"); got != "kept" {
-		t.Fatalf("firstNonEmpty(whitespace, kept) = %q, want \"kept\"", got)
-	}
-}
-
 // TestKVSnapshot_HashSnapshotNativeError_Bad drives HashSnapshot's
 // writeWithOptions error arm (snapshot.go:1546): a head carrying KeyBytes with
 // an empty dtype forces requiresNativeEncoding true, so HashSnapshot selects
