@@ -8,38 +8,6 @@ import (
 	"dappco.re/go/inference/model/bundle"
 )
 
-// --- firstNonEmpty / firstNonEmptyString ----------------------------------
-
-func TestHelpers_firstNonEmpty_Good(t *testing.T) {
-	if got := firstNonEmpty("primary", "fallback"); got != "primary" {
-		t.Fatalf("firstNonEmpty = %q, want first non-empty", got)
-	}
-	if got := firstNonEmpty("", "fallback"); got != "fallback" {
-		t.Fatalf("firstNonEmpty = %q, want fallback when first empty", got)
-	}
-}
-
-func TestHelpers_firstNonEmpty_Bad(t *testing.T) {
-	if got := firstNonEmpty(); got != "" {
-		t.Fatalf("firstNonEmpty() = %q, want empty for no args", got)
-	}
-	if got := firstNonEmpty("", "", ""); got != "" {
-		t.Fatalf("firstNonEmpty(all empty) = %q, want empty", got)
-	}
-}
-
-func TestHelpers_firstNonEmpty_Ugly(t *testing.T) {
-	// A whitespace-only string is treated as empty (Trim'd), so the
-	// later real value wins.
-	if got := firstNonEmpty("   ", "\t\n", "real"); got != "real" {
-		t.Fatalf("firstNonEmpty(whitespace…) = %q, want real", got)
-	}
-	// The legacy alias must behave identically.
-	if got := firstNonEmptyString("   ", "alias"); got != "alias" {
-		t.Fatalf("firstNonEmptyString(whitespace) = %q, want alias", got)
-	}
-}
-
 // --- stateHash ------------------------------------------------------------
 
 func TestHelpers_stateHash_Good(t *testing.T) {

@@ -160,14 +160,14 @@ func inferGGUFQuantization(metadata map[string]any, tensors []TensorInfo) Quanti
 	if fileTypePresent {
 		fileTypeName, fileTypeBits = ggufFileTypeQuantization(fileType)
 	}
-	explicitType := NormalizeQuantType(firstNonEmpty(
+	explicitType := NormalizeQuantType(core.FirstNonBlank(
 		metadataString(metadata["general.quantization_type"]),
 		metadataString(metadata["quantization.type"]),
 		metadataString(metadata["quantization.name"]),
 		metadataString(metadata["general.quantization"]),
 	))
 	majorityType, majorityBits, majorityGroup := majorityGGUFQuantizedTensorType(tensorTypes)
-	quantType := firstNonEmpty(explicitType, fileTypeName, majorityType)
+	quantType := core.FirstNonBlank(explicitType, fileTypeName, majorityType)
 	bits := core.FirstPositive(quantBitsFromTypeName(quantType), fileTypeBits, majorityBits)
 	family := quantFamilyForType(quantType)
 	if family == "" && majorityType != "" {

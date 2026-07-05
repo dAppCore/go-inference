@@ -164,10 +164,10 @@ func (s ProjectSeed) sleepRequest(opts ProjectSeedContinuationOptions) SleepRequ
 		EntryURI:          entryURI,
 		BundleURI:         bundleURI,
 		IndexURI:          indexURI,
-		ParentEntryURI:    firstNonEmpty(parent.URI, s.EntryURI),
-		ParentBundleURI:   firstNonEmpty(parent.BundleURI, s.BundleURI),
-		ParentIndexURI:    firstNonEmpty(parent.IndexURI, s.IndexURI),
-		Title:             firstNonEmpty(core.Trim(opts.Title), s.Title),
+		ParentEntryURI:    core.FirstNonBlank(parent.URI, s.EntryURI),
+		ParentBundleURI:   core.FirstNonBlank(parent.BundleURI, s.BundleURI),
+		ParentIndexURI:    core.FirstNonBlank(parent.IndexURI, s.IndexURI),
+		Title:             core.FirstNonBlank(core.Trim(opts.Title), s.Title),
 		Model:             opts.Model,
 		Tokenizer:         opts.Tokenizer,
 		Adapter:           opts.Adapter,
@@ -345,13 +345,4 @@ func cloneStringMap(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if core.Trim(value) != "" {
-			return value
-		}
-	}
-	return ""
 }

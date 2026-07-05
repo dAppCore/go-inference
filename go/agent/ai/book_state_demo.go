@@ -39,8 +39,8 @@ type BookState struct {
 // into the the inference stack demo context shape.
 func BookStateFromWakeResult(result inferstate.WakeResult) BookState {
 	state := BookStateFromRef(result.Entry)
-	state.BundleURI = firstNonEmpty(state.BundleURI, result.Bundle.URI)
-	state.IndexURI = firstNonEmpty(state.IndexURI, result.Index.URI)
+	state.BundleURI = core.FirstNonBlank(state.BundleURI, result.Bundle.URI)
+	state.IndexURI = core.FirstNonBlank(state.IndexURI, result.Index.URI)
 	state.PrefixTokens = positiveOr(state.PrefixTokens, result.PrefixTokens)
 	state.BundleTokens = result.BundleTokens
 	state.BlockSize = result.BlockSize

@@ -183,9 +183,9 @@ func NewStateIndex(bundle *kv.StateBlockBundle, opts StateIndexOptions) (*StateI
 	}
 	if len(index.Entries) == 0 {
 		index.Entries = []StateIndexEntry{{
-			URI:        firstNonEmpty(index.BundleURI, "mlx://kv/full"),
+			URI:        core.FirstNonBlank(index.BundleURI, "mlx://kv/full"),
 			BundleURI:  index.BundleURI,
-			Title:      firstNonEmpty(opts.Title, "full bundle"),
+			Title:      core.FirstNonBlank(opts.Title, "full bundle"),
 			TokenStart: 0,
 			TokenCount: bundle.TokenCount,
 		}}

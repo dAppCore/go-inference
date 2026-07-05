@@ -246,21 +246,6 @@ const defaultCacheBlockSize = 512
 
 const kvSnapshotTurboQuantCacheMode = "turboquant"
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		// Empty-string fast path skips the core.Trim call entirely
-		// — the State PutOptions hot path passes a literal default
-		// URI/Title as second arg, which is always non-empty.
-		if value == "" {
-			continue
-		}
-		if core.Trim(value) != "" {
-			return value
-		}
-	}
-	return ""
-}
-
 func normalizeSnapshot(snapshot *Snapshot) {
 	if snapshot == nil {
 		return
