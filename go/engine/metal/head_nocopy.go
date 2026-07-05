@@ -56,8 +56,7 @@ type headEncoder struct {
 }
 
 type headHiddenScratchPool struct {
-	mu    sync.Mutex
-	items []*headHiddenScratch
+	core.Pool[any]
 }
 
 type headGreedyScratch struct {
@@ -91,29 +90,6 @@ type headHiddenScratch struct {
 	n      int
 	pinned *pinnedNoCopyBytes
 	view   cachedNoCopyBytesView
-}
-
-func (p *headHiddenScratchPool) Get() any {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *headHiddenScratchPool) Put(v any) {
-	s, ok := v.(*headHiddenScratch)
-	if !ok || s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 type headTopKScratch struct {

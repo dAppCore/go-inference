@@ -40,8 +40,7 @@ type decodeLayerBatchedScratchKey struct {
 }
 
 type decodeLayerBatchedScratchPool struct {
-	mu    sync.Mutex
-	items []*decodeLayerBatchedScratch
+	core.Pool[*decodeLayerBatchedScratch]
 }
 
 type decodeLayerBatchedScratch struct {
@@ -133,28 +132,6 @@ func putDecodeLayerBatchedScratch(s *decodeLayerBatchedScratch) {
 	if s != nil && s.dModel > 0 && s.qDim > 0 && s.kvDim > 0 && s.nHeads > 0 && s.dFF > 0 && s.K > 0 {
 		decodeLayerBatchedScratchPoolFor(s.dModel, s.qDim, s.kvDim, s.nHeads, s.dFF, s.K).Put(s)
 	}
-}
-
-func (p *decodeLayerBatchedScratchPool) Get() *decodeLayerBatchedScratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *decodeLayerBatchedScratchPool) Put(s *decodeLayerBatchedScratch) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 // DecodeLayerBatchedKV runs one full decode layer (attention half + gemma MLP half, both residuals)
