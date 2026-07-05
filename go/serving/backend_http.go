@@ -7,7 +7,7 @@ import (
 
 	"dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/provider/openai"
+	"dappco.re/go/inference/serving/provider/openai"
 	coreio "dappco.re/go/io"
 )
 

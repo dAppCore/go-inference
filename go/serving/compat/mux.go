@@ -26,9 +26,9 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/decode/parser"
-	anthropiccompat "dappco.re/go/inference/provider/anthropic"
-	ollamacompat "dappco.re/go/inference/provider/ollama"
-	openaicompat "dappco.re/go/inference/provider/openai"
+	anthropiccompat "dappco.re/go/inference/serving/provider/anthropic"
+	ollamacompat "dappco.re/go/inference/serving/provider/ollama"
+	openaicompat "dappco.re/go/inference/serving/provider/openai"
 )
 
 // NewResolver returns a resolver that lazily loads modelPath through the

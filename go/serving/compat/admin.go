@@ -9,7 +9,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	openaicompat "dappco.re/go/inference/provider/openai"
+	openaicompat "dappco.re/go/inference/serving/provider/openai"
 )
 
 const (

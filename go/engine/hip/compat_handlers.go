@@ -13,9 +13,9 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/provider/anthropic"
-	"dappco.re/go/inference/provider/ollama"
-	openaicompat "dappco.re/go/inference/provider/openai"
+	"dappco.re/go/inference/serving/provider/anthropic"
+	"dappco.re/go/inference/serving/provider/ollama"
+	openaicompat "dappco.re/go/inference/serving/provider/openai"
 )
 
 // NewAnthropicMessagesHandler exposes Anthropic Messages over a caller-provided

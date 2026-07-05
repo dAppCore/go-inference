@@ -13,7 +13,7 @@ package budget_test
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/chat"
+	"dappco.re/go/inference/serving/chat"
 	"dappco.re/go/inference/kv/budget"
 )
 

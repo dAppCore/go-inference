@@ -20,7 +20,7 @@
 //	}
 package budget
 
-import chat "dappco.re/go/inference/chat"
+import chat "dappco.re/go/inference/serving/chat"
 
 // Counter returns the prompt-token total for messages under model's tokeniser
 // (go-mlx locally, the provider's encoding remotely). It is the only piece

@@ -10,7 +10,7 @@ import (
 	"strconv"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/provider/openai"
+	"dappco.re/go/inference/serving/provider/openai"
 )
 
 // ---------------------------------------------------------------------------

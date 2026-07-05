@@ -10,11 +10,11 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	openai "dappco.re/go/inference/provider/openai"
-	adminpkg "dappco.re/go/inference/serving/admin"
-	"dappco.re/go/inference/serving/compat"
 	"dappco.re/go/inference/model/state"
 	"dappco.re/go/inference/model/state/filestore"
+	adminpkg "dappco.re/go/inference/serving/admin"
+	"dappco.re/go/inference/serving/compat"
+	openai "dappco.re/go/inference/serving/provider/openai"
 )
 
 // Resolver resolves an OpenAI-API `model` field to a loaded inference.TextModel
