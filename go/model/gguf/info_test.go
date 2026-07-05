@@ -70,7 +70,7 @@ func TestInfo_ReadInfo_Good(t *testing.T) {
 	if info.QuantType != "q4_k_m" {
 		// general.file_type=15 resolves via ggufFileTypeQuantizationTable to
 		// "q4_k_m" and takes priority over the tensor-type majority vote
-		// ("q4_k") in inferGGUFQuantization's firstNonEmpty ordering.
+		// ("q4_k") in inferGGUFQuantization's core.FirstNonBlank ordering.
 		t.Errorf("QuantType = %q, want q4_k_m", info.QuantType)
 	}
 	if info.TensorCount != 2 {

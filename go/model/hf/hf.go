@@ -86,7 +86,7 @@ func NewRemoteSource(cfg RemoteConfig) *RemoteSource {
 	return &RemoteSource{
 		baseURL:   baseURL,
 		token:     cfg.Token,
-		userAgent: firstNonEmpty(cfg.UserAgent, "go-inference"),
+		userAgent: core.FirstNonBlank(cfg.UserAgent, "go-inference"),
 		authValue: authValue,
 		client:    client,
 	}
@@ -204,7 +204,7 @@ type ModelFile struct {
 
 // filename returns Name, falling back to RFilename.
 func (file ModelFile) filename() string {
-	return firstNonEmpty(file.Name, file.RFilename)
+	return core.FirstNonBlank(file.Name, file.RFilename)
 }
 
 // byteSize returns Size, falling back to SizeBytes.
@@ -242,31 +242,4 @@ type QuantizationConfig struct {
 	Bits      int    `json:"bits,omitempty"`
 	GroupSize int    `json:"group_size,omitempty"`
 	Type      string `json:"type,omitempty"`
-}
-
-// firstNonEmpty returns the first value that is non-empty once whitespace is
-// disregarded.
-func firstNonEmpty(values ...string) string {
-	// hasNonWhitespace avoids the core.Trim allocation that a Trim(v) != ""
-	// check would pay whenever the input has any leading/trailing
-	// whitespace — we only care whether the trimmed form is non-empty, not
-	// what it contains.
-	for _, value := range values {
-		if hasNonWhitespace(value) {
-			return value
-		}
-	}
-	return ""
-}
-
-// hasNonWhitespace reports whether s contains any non-whitespace byte. Pure
-// scan, no allocations.
-func hasNonWhitespace(s string) bool {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\v' && c != '\f' {
-			return true
-		}
-	}
-	return false
 }

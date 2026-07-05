@@ -283,9 +283,9 @@ func (service *Service) blockRefs(req inference.CacheWarmRequest, tokens []int32
 	if blockSize <= 0 {
 		blockSize = DefaultBlockSize
 	}
-	modelHash := firstNonEmptyString(service.cfg.ModelHash, req.Model.Hash, req.Model.ID)
-	adapterHash := firstNonEmptyString(service.cfg.AdapterHash, req.Adapter.Hash)
-	tokenizerHash := firstNonEmptyString(service.cfg.TokenizerHash, req.Labels["tokenizer_hash"])
+	modelHash := core.FirstNonBlank(service.cfg.ModelHash, req.Model.Hash, req.Model.ID)
+	adapterHash := core.FirstNonBlank(service.cfg.AdapterHash, req.Adapter.Hash)
+	tokenizerHash := core.FirstNonBlank(service.cfg.TokenizerHash, req.Labels["tokenizer_hash"])
 	refs := make([]inference.CacheBlockRef, 0, (len(tokens)+blockSize-1)/blockSize)
 	// Stream the SHA256 once across the cumulative prefix and emit a
 	// block ID at every boundary. sha256.Sum does not alter the hash
@@ -449,7 +449,7 @@ func (service *Service) compatibilityLabels(req inference.CacheWarmRequest) map[
 	labels := cloneBlockCacheLabelsExtra(req.Labels, 4)
 	labels["cache_mode"] = mode
 	labels["block_size"] = service.blockSizeLabel
-	labels["model_match"] = boolLabel(cacheIdentityMatches(service.cfg.ModelHash, firstNonEmptyString(req.Model.Hash, req.Model.ID)))
+	labels["model_match"] = boolLabel(cacheIdentityMatches(service.cfg.ModelHash, core.FirstNonBlank(req.Model.Hash, req.Model.ID)))
 	labels["adapter_match"] = boolLabel(cacheIdentityMatches(service.cfg.AdapterHash, req.Adapter.Hash))
 	labels["tokenizer_match"] = boolLabel(cacheIdentityMatches(service.cfg.TokenizerHash, req.Labels["tokenizer_hash"]))
 	return labels
@@ -843,15 +843,6 @@ func cacheBlockRefLess(a, b inference.CacheBlockRef) bool {
 		return a.TokenStart < b.TokenStart
 	}
 	return a.ID < b.ID
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		if core.Trim(value) != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func resultError(result core.Result) error {

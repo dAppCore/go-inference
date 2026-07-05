@@ -908,9 +908,6 @@ func TestBlockCacheHelpers_Good(t *testing.T) {
 	if boolLabel(true) != "true" || boolLabel(false) != "false" {
 		t.Fatal("boolLabel() returned unexpected text")
 	}
-	if got := firstNonEmptyString("", "  ", "value"); got != "value" {
-		t.Fatalf("firstNonEmptyString() = %q, want value", got)
-	}
 	labels := map[string]string{"a": "b"}
 	cloned := cloneBlockCacheLabels(labels)
 	cloned["a"] = "changed"

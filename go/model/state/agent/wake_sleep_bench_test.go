@@ -88,7 +88,7 @@ func BenchmarkWakeSleep_SleepURIs_OnlyEntry(b *testing.B) {
 }
 
 func BenchmarkWakeSleep_SleepURIs_EmptyDefaults(b *testing.B) {
-	// Nothing set — exercises the firstNonEmptyString fallback chain
+	// Nothing set — exercises the core.FirstNonBlank fallback chain
 	// and the default "mlx://state/latest" fall-through.
 	opts := SleepOptions{}
 	b.ReportAllocs()

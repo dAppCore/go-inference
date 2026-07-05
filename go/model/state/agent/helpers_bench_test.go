@@ -1,7 +1,7 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
 // Benchmarks for agent package small utilities. These helpers fire on
-// every wake/sleep round (firstNonEmpty inside loadIndex + SleepURIs,
+// every wake/sleep round (core.FirstNonBlank inside loadIndex + SleepURIs,
 // stateHash inside indexModel, cloneStringMap inside sleepEntryMeta).
 //
 // Per AX-11 — each individual call is sub-microsecond, but Sleep
@@ -16,6 +16,7 @@ package agent
 import (
 	"testing"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference/model/bundle"
 )
 
@@ -26,44 +27,35 @@ var (
 	helpersBenchSinkTok    bundle.Tokenizer
 )
 
-// --- firstNonEmpty — the trim+selectfirst loop. Fires inside
+// --- core.FirstNonBlank — the trim+selectfirst loop. Fires inside
 // loadIndex (one call per wake) and SleepURIs (3+ calls per sleep).
 
-func BenchmarkHelpers_FirstNonEmpty_FirstHit(b *testing.B) {
+func BenchmarkHelpers_FirstNonBlank_FirstHit(b *testing.B) {
 	values := []string{"primary", "", "tertiary"}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		helpersBenchSinkString = firstNonEmpty(values...)
+		helpersBenchSinkString = core.FirstNonBlank(values...)
 	}
 }
 
-func BenchmarkHelpers_FirstNonEmpty_LastHit(b *testing.B) {
+func BenchmarkHelpers_FirstNonBlank_LastHit(b *testing.B) {
 	// Two empty/whitespace candidates before the real value — worst case
 	// for the Trim loop.
 	values := []string{"", "   ", "tertiary"}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		helpersBenchSinkString = firstNonEmpty(values...)
+		helpersBenchSinkString = core.FirstNonBlank(values...)
 	}
 }
 
-func BenchmarkHelpers_FirstNonEmpty_AllEmpty(b *testing.B) {
+func BenchmarkHelpers_FirstNonBlank_AllEmpty(b *testing.B) {
 	values := []string{"", "   ", ""}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		helpersBenchSinkString = firstNonEmpty(values...)
-	}
-}
-
-func BenchmarkHelpers_FirstNonEmptyString_LegacyAlias(b *testing.B) {
-	values := []string{"", "fallback"}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		helpersBenchSinkString = firstNonEmptyString(values...)
+		helpersBenchSinkString = core.FirstNonBlank(values...)
 	}
 }
 
