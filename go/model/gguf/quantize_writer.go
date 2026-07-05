@@ -91,7 +91,7 @@ func WriteFile(path string, metadata []MetadataEntry, tensors []Tensor) error {
 func writeQuantizedGGUF(path string, metadata []MetadataEntry, tensors []Tensor) error {
 	created := core.Create(path)
 	if !created.OK {
-		return quantizeGGUFResultError(created)
+		return created.Err()
 	}
 	file := created.Value.(*core.OSFile)
 	defer file.Close()

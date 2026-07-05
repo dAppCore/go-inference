@@ -193,7 +193,7 @@ func RunDiffusionGenerate(ctx context.Context, cfg DiffusionGenerateConfig, eosT
 				cfg.OnStep(canvasIdx, step, res, time.Since(stepStart))
 			}
 
-			if prevGreedy != nil && int32SlicesEqual(res.Greedy, prevGreedy) {
+			if prevGreedy != nil && core.SliceEqual(res.Greedy, prevGreedy) {
 				stableRun++
 			} else {
 				stableRun = 0
@@ -285,18 +285,6 @@ func diffusionKeepUntilStop(canvas, stops []int32) ([]int32, bool) {
 		}
 	}
 	return canvas, false
-}
-
-func int32SlicesEqual(a, b []int32) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func tokenInSet(id int32, set []int32) bool {

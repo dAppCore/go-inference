@@ -43,7 +43,6 @@ var (
 	errBundleNil                = core.NewError("bundle: state bundle is nil")
 	errBundleKVHash             = core.NewError("bundle: state bundle KV hash mismatch")
 	errBundleNoSnapshot         = core.NewError("bundle: state bundle has no KV snapshot")
-	errCoreResultFailed         = core.NewError("core result failed")
 	errBundleUnsupportedVersion = core.NewError("bundle: unsupported state bundle version")
 	errBundleNeedsLoRA          = core.NewError("bundle: state bundle requires a LoRA adapter but model has none")
 	errBundleLayerMismatch      = core.NewError("bundle: state bundle model layer mismatch")
@@ -262,10 +261,10 @@ func (b *Bundle) Save(path string) error {
 	}
 	data := core.JSONMarshalIndent(b, "", "  ")
 	if !data.OK {
-		return core.E("bundle.Save", "marshal bundle", resultError(data))
+		return core.E("bundle.Save", "marshal bundle", data.Err())
 	}
 	if result := core.WriteFile(path, data.Value.([]byte), 0o600); !result.OK {
-		return core.E("bundle.Save", "write bundle", resultError(result))
+		return core.E("bundle.Save", "write bundle", result.Err())
 	}
 	return nil
 }
@@ -287,10 +286,10 @@ func (b *Bundle) SaveCompact(path string) error {
 	}
 	data := core.JSONMarshal(b)
 	if !data.OK {
-		return core.E("bundle.SaveCompact", "marshal bundle", resultError(data))
+		return core.E("bundle.SaveCompact", "marshal bundle", data.Err())
 	}
 	if result := core.WriteFile(path, data.Value.([]byte), 0o600); !result.OK {
-		return core.E("bundle.SaveCompact", "write bundle", resultError(result))
+		return core.E("bundle.SaveCompact", "write bundle", result.Err())
 	}
 	return nil
 }
@@ -301,7 +300,7 @@ func (b *Bundle) SaveCompact(path string) error {
 func Load(path string) (*Bundle, error) {
 	read := core.ReadFile(path)
 	if !read.OK {
-		return nil, core.E("bundle.Load", "read bundle", resultError(read))
+		return nil, core.E("bundle.Load", "read bundle", read.Err())
 	}
 	data, ok := read.Value.([]byte)
 	if !ok {
@@ -309,7 +308,7 @@ func Load(path string) (*Bundle, error) {
 	}
 	var b Bundle
 	if result := core.JSONUnmarshal(data, &b); !result.OK {
-		return nil, core.E("bundle.Load", "parse bundle", resultError(result))
+		return nil, core.E("bundle.Load", "parse bundle", result.Err())
 	}
 	if err := b.Validate(); err != nil {
 		return nil, err
@@ -497,7 +496,7 @@ const fileHashStreamThreshold = 32 * 1024
 func FileHash(path string) (string, error) {
 	opened := core.Open(path)
 	if !opened.OK {
-		return "", core.E("bundle.FileHash", "open file", resultError(opened))
+		return "", core.E("bundle.FileHash", "open file", opened.Err())
 	}
 	file, ok := opened.Value.(*core.OSFile)
 	if !ok {
@@ -521,7 +520,7 @@ func FileHash(path string) (string, error) {
 	}
 	hasher := sha256.New()
 	if r := core.Copy(hasher, file); !r.OK {
-		return "", core.E("bundle.FileHash", "stream into hasher", resultError(r))
+		return "", core.E("bundle.FileHash", "stream into hasher", r.Err())
 	}
 	// Stack-resident digest scratch defeats hash.Sum's nil-path
 	// 32-byte heap alloc; HexEncode still allocates the 64-byte
@@ -835,17 +834,4 @@ func cloneMeta(meta map[string]string) map[string]string {
 		return nil
 	}
 	return core.MapClone(meta)
-}
-
-func resultError(result core.Result) error {
-	if result.OK {
-		return nil
-	}
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	if text, ok := result.Value.(string); ok {
-		return core.NewError(text)
-	}
-	return errCoreResultFailed
 }

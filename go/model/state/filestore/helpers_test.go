@@ -177,27 +177,3 @@ func TestIntFromUint64_Bad_Overflow(t *testing.T) {
 		t.Fatal("intFromUint64(overflow) error = nil")
 	}
 }
-
-func TestResultError_Good_OKResult(t *testing.T) {
-	if err := resultError(core.Result{OK: true}); err != nil {
-		t.Fatalf("resultError(OK) = %v, want nil", err)
-	}
-}
-
-func TestResultError_Bad_ErrorValue(t *testing.T) {
-	want := core.NewError("boom")
-	err := resultError(core.Result{OK: false, Value: want})
-	if !core.Is(err, want) {
-		t.Fatalf("resultError(error value) = %v, want %v", err, want)
-	}
-}
-
-func TestResultError_Bad_NonErrorValue(t *testing.T) {
-	err := resultError(core.Result{OK: false, Value: "not an error"})
-	if err == nil {
-		t.Fatal("resultError(non-error value) = nil, want fallback error")
-	}
-	if err.Error() != "core result failed" {
-		t.Fatalf("resultError(non-error value) = %q, want %q", err.Error(), "core result failed")
-	}
-}

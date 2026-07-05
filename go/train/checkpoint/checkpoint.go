@@ -28,10 +28,6 @@ import (
 	core "dappco.re/go"
 )
 
-// errCoreResultFailed is the fallback sentinel returned by resultError
-// when a core.Result reports !OK but its Value is not an error.
-var errCoreResultFailed = core.NewError("core result failed")
-
 // Save marshals meta as indented JSON and writes it to sidecarPath,
 // creating sidecarPath's parent directory first if it does not already
 // exist. This is the write-side engine shared by every domain package's
@@ -45,15 +41,15 @@ func Save(sidecarPath string, meta any) error {
 	dir := core.PathDir(sidecarPath)
 	if dir != "" && dir != "." {
 		if result := core.MkdirAll(dir, 0o755); !result.OK {
-			return core.E("CheckpointMetadata.Save", "ensure metadata dir", resultError(result))
+			return core.E("CheckpointMetadata.Save", "ensure metadata dir", result.Err())
 		}
 	}
 	data := core.JSONMarshalIndent(meta, "", "  ")
 	if !data.OK {
-		return core.E("CheckpointMetadata.Save", "marshal metadata", resultError(data))
+		return core.E("CheckpointMetadata.Save", "marshal metadata", data.Err())
 	}
 	if result := core.WriteFile(sidecarPath, data.Value.([]byte), 0o600); !result.OK {
-		return core.E("CheckpointMetadata.Save", "write metadata", resultError(result))
+		return core.E("CheckpointMetadata.Save", "write metadata", result.Err())
 	}
 	return nil
 }
@@ -68,11 +64,11 @@ func Save(sidecarPath string, meta any) error {
 func Load[T any](sidecarPath string) (*T, error) {
 	read := core.ReadFile(sidecarPath)
 	if !read.OK {
-		return nil, resultError(read)
+		return nil, read.Err()
 	}
 	var meta T
 	if result := core.JSONUnmarshal(read.Value.([]byte), &meta); !result.OK {
-		return nil, core.E("LoadCheckpointMetadata", "parse metadata", resultError(result))
+		return nil, core.E("LoadCheckpointMetadata", "parse metadata", result.Err())
 	}
 	return &meta, nil
 }
@@ -88,7 +84,7 @@ func Load[T any](sidecarPath string) (*T, error) {
 func LoadResume[T any](sidecarPath string) (*T, error) {
 	read := core.ReadFile(sidecarPath)
 	if !read.OK {
-		err := resultError(read)
+		err := read.Err()
 		if core.IsNotExist(err) {
 			return nil, nil
 		}
@@ -96,7 +92,7 @@ func LoadResume[T any](sidecarPath string) (*T, error) {
 	}
 	var meta T
 	if result := core.JSONUnmarshal(read.Value.([]byte), &meta); !result.OK {
-		return nil, core.E("LoadResumeMetadata", "parse metadata", resultError(result))
+		return nil, core.E("LoadResumeMetadata", "parse metadata", result.Err())
 	}
 	return &meta, nil
 }
@@ -127,16 +123,4 @@ func FormatStepDir(step int) string {
 	}
 	buf = strconv.AppendInt(buf, int64(step), 10)
 	return string(buf)
-}
-
-// resultError converts a failed core.Result into an error: the Result's
-// own error Value when it carries one, otherwise errCoreResultFailed.
-func resultError(result core.Result) error {
-	if result.OK {
-		return nil
-	}
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	return errCoreResultFailed
 }

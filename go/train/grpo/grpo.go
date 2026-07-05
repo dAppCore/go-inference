@@ -47,11 +47,10 @@ import (
 // Sentinel errors hoisted to package vars — each previously allocated a
 // fresh core.NewError on the (rare but hot under churn) failure path.
 var (
-	errNoRollouts       = core.NewError("grpo: rollout group is empty")
-	errRewardNotFinite  = core.NewError("grpo: reward is not finite")
-	errLossNotFinite    = core.NewError("grpo: loss is not finite")
-	errCheckpointPath   = core.NewError("grpo: checkpoint metadata path is required")
-	errCoreResultFailed = core.NewError("core result failed")
+	errNoRollouts      = core.NewError("grpo: rollout group is empty")
+	errRewardNotFinite = core.NewError("grpo: reward is not finite")
+	errLossNotFinite   = core.NewError("grpo: loss is not finite")
+	errCheckpointPath  = core.NewError("grpo: checkpoint metadata path is required")
 )
 
 // Sample is a reasoning prompt extracted from an SFT/JSONL sample.
@@ -344,14 +343,4 @@ func snapshotRollouts(rollouts []Rollout) []Rollout {
 		}
 	}
 	return out
-}
-
-func resultError(result core.Result) error {
-	if result.OK {
-		return nil
-	}
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	return errCoreResultFailed
 }

@@ -37,7 +37,7 @@ func indexWeightFiles(paths []string) (sourceIndex, error) {
 	for _, path := range paths {
 		read := safetensors.ReadSafetensors(path)
 		if !read.OK {
-			return sourceIndex{}, core.E("Packs", "read safetensors "+path, resultError(read))
+			return sourceIndex{}, core.E("Packs", "read safetensors "+path, read.Err())
 		}
 		data := read.Value.(safetensors.SafetensorsData)
 		for name, info := range data.Tensors {
@@ -117,7 +117,7 @@ func writeMergedSafetensors(ctx context.Context, path string, indexes []sourceIn
 	}
 
 	if result := safetensors.WriteSafetensors(path, mergedInfo, mergedData); !result.OK {
-		return 0, 0, nil, core.E("Packs", "write merged safetensors", resultError(result))
+		return 0, 0, nil, core.E("Packs", "write merged safetensors", result.Err())
 	}
 	return merged, copied, skipped, nil
 }
@@ -139,7 +139,7 @@ func gatherTensorEntries(indexes []sourceIndex, name string) ([]tensorEntry, boo
 		}
 		if shape == nil {
 			shape = entry.Shape
-		} else if !sameIntSlice(shape, entry.Shape) {
+		} else if !core.SliceEqual(shape, entry.Shape) {
 			complete = false
 		}
 		entries = append(entries, entry)
@@ -274,10 +274,10 @@ func writeProvenance(path string, provenance Provenance) error {
 	provenance.SkippedTensors = sorted
 	data := core.JSONMarshal(provenance)
 	if !data.OK {
-		return core.E("Packs", "marshal merge provenance", resultError(data))
+		return core.E("Packs", "marshal merge provenance", data.Err())
 	}
 	if result := core.WriteFile(path, data.Value.([]byte), 0o644); !result.OK {
-		return core.E("Packs", "write merge provenance", resultError(result))
+		return core.E("Packs", "write merge provenance", result.Err())
 	}
 	return nil
 }

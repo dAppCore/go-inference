@@ -435,7 +435,7 @@ func LoadStateIndex(ctx context.Context, store state.Store, uri string) (*StateI
 	}
 	var index StateIndex
 	if result := core.JSONUnmarshalString(chunk.Text, &index); !result.OK {
-		return nil, core.E("LoadStateIndex", "parse State index", kv.ResultError(result))
+		return nil, core.E("LoadStateIndex", "parse State index", result.Err())
 	}
 	if err := index.Validate(); err != nil {
 		return nil, err

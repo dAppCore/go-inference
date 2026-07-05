@@ -72,7 +72,6 @@ var (
 	errOutputSameAsSource      = core.NewError("merge: merged output path must differ from source model path")
 	errOutputNotPackDir        = core.NewError("merge: merged output path must be a model-pack directory")
 	errOutputPathRequired      = core.NewError("merge: merged model output path is required")
-	errCoreResultFailed        = core.NewError("core result failed")
 )
 
 // Source identifies a local safetensors model pack participating in a merge
@@ -272,7 +271,7 @@ func prepare(ctx context.Context, opts Options) (prepared, error) {
 		return prepared{}, err
 	}
 	if result := core.MkdirAll(output, 0o755); !result.OK {
-		return prepared{}, core.E("Packs", "create merged model directory", resultError(result))
+		return prepared{}, core.E("Packs", "create merged model directory", result.Err())
 	}
 	if err := copyModelPackMetadata(sources[0].Root, output); err != nil {
 		return prepared{}, err
@@ -291,7 +290,7 @@ func ensureEmptyDestination(output string) error {
 		if core.IsNotExist(stat.Value.(error)) {
 			return nil
 		}
-		return core.E("Packs", "inspect output path", resultError(stat))
+		return core.E("Packs", "inspect output path", stat.Err())
 	}
 	if len(core.PathGlob(core.PathJoin(output, "*.safetensors"))) > 0 {
 		return errOutputHasWeights
@@ -365,7 +364,7 @@ func validateTensorIndexes(indexes []sourceIndex, allowMismatch bool) error {
 				return core.NewError("merge: model merge tensor missing from source: " + name)
 			}
 			baseRef := base.Tensors[name]
-			if !sameIntSlice(baseRef.Shape, ref.Shape) {
+			if !core.SliceEqual(baseRef.Shape, ref.Shape) {
 				if allowMismatch {
 					continue
 				}
@@ -403,18 +402,6 @@ func hasSuffixFold(s, suffix string) bool {
 	return true
 }
 
-func sameIntSlice(a, b []int) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 func clampFloat64(value, minValue, maxValue float64) float64 {
 	if value < minValue {
 		return minValue
@@ -423,16 +410,6 @@ func clampFloat64(value, minValue, maxValue float64) float64 {
 		return maxValue
 	}
 	return value
-}
-
-func resultError(result core.Result) error {
-	if result.OK {
-		return nil
-	}
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	return errCoreResultFailed
 }
 
 // equalFold is len-prefixed ASCII case-insensitive equality. Zero allocations.

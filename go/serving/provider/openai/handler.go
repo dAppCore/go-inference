@@ -325,16 +325,6 @@ func errorParam(err error) string {
 	return ""
 }
 
-func resultError(result core.Result) error {
-	if result.OK {
-		return nil
-	}
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	return core.E("openai.result", "unexpected failed result value", nil)
-}
-
 func completionID() string {
 	// Fires once per chat-completion response. core.Sprintf was 2 allocs
 	// (fmt formatter scratch + result string); the append-into-prefix

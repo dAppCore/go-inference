@@ -130,11 +130,11 @@ func Create(ctx context.Context, path string) (*Store, error) {
 		return nil, core.NewError("state file store path is required")
 	}
 	if result := core.MkdirAll(core.PathDir(path), 0o755); !result.OK {
-		return nil, core.E("state.filestore.Create", "create parent directory", resultError(result))
+		return nil, core.E("state.filestore.Create", "create parent directory", result.Err())
 	}
 	result := core.OpenFile(path, core.O_CREATE|core.O_TRUNC|core.O_RDWR, fileMode)
 	if !result.OK {
-		return nil, core.E("state.filestore.Create", "create file", resultError(result))
+		return nil, core.E("state.filestore.Create", "create file", result.Err())
 	}
 	file := result.Value.(*core.OSFile)
 	if err := writeAll(file, fileMagic); err != nil {
@@ -192,7 +192,7 @@ func openRegionWithSegmentAlias(ctx context.Context, path string, payloadOffset 
 	}
 	result := core.OpenFile(path, flags, fileMode)
 	if !result.OK {
-		return nil, core.E("state.filestore.Open", "open file", resultError(result))
+		return nil, core.E("state.filestore.Open", "open file", result.Err())
 	}
 	file := result.Value.(*core.OSFile)
 	store := &Store{

@@ -207,31 +207,6 @@ func TestSnapshot_Head_Ugly(t *testing.T) {
 	}
 }
 
-// TestSnapshot_ResultError_Good asserts ResultError passes an error value in a
-// Result straight through unchanged.
-func TestSnapshot_ResultError_Good(t *testing.T) {
-	sentinel := core.NewError("boom")
-	if got := ResultError(core.Result{Value: sentinel}); got != sentinel {
-		t.Fatalf("ResultError(error) = %v, want passthrough of %v", got, sentinel)
-	}
-}
-
-// TestSnapshot_ResultError_Bad asserts ResultError wraps a string value into an
-// error carrying that text.
-func TestSnapshot_ResultError_Bad(t *testing.T) {
-	if got := ResultError(core.Result{Value: "text failure"}); got == nil || got.Error() != "text failure" {
-		t.Fatalf("ResultError(string) = %v, want wrapped error", got)
-	}
-}
-
-// TestSnapshot_ResultError_Ugly asserts ResultError falls back to the unknown
-// filesystem sentinel when the Result value is neither an error nor a string.
-func TestSnapshot_ResultError_Ugly(t *testing.T) {
-	if got := ResultError(core.Result{Value: 42}); got == nil {
-		t.Fatal("ResultError(unknown type) = nil, want fallback error")
-	}
-}
-
 // TestKVSnapshot_EffectiveSeqLen_GoodBadUgly covers the three branches: a
 // populated SeqLen (Good), a nil snapshot (Bad), and a zero SeqLen that falls
 // back to the token count (Ugly).

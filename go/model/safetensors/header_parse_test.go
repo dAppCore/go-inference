@@ -886,23 +886,6 @@ func TestSkipObjectArray_Bad(t *testing.T) {
 	})
 }
 
-// TestBytesEqual_Mismatch covers bytesEqual's two false-returning arms
-// directly. The hot-loop caller only ever passes 12-byte spans (the
-// length is pre-checked to 12), so the length-mismatch arm is white-box
-// only; the byte-mismatch arm is reachable in production (a 12-byte
-// non-__metadata__ tensor name) and is asserted both ways.
-func TestBytesEqual_Mismatch(t *testing.T) {
-	if bytesEqual([]byte("abc"), []byte("abcd")) {
-		t.Error("bytesEqual(len mismatch) = true, want false")
-	}
-	if bytesEqual([]byte("__metadata__"), []byte("abcdefghijkl")) {
-		t.Error("bytesEqual(byte mismatch) = true, want false")
-	}
-	if !bytesEqual([]byte("__metadata__"), []byte("__metadata__")) {
-		t.Error("bytesEqual(equal) = false, want true")
-	}
-}
-
 // TestMaterialiseString_PlainArm covers materialiseString's !hasEsc arm,
 // which its sole caller (nameFromSpan) guards behind hasEsc == true and so
 // can never reach. Direct call keeps the no-escape string() conversion
