@@ -65,6 +65,9 @@ func TestConfigArchMoE(t *testing.T) {
 	if a.Experts != 16 || a.TopK != 4 || a.ExpertFF != 384 {
 		t.Fatalf("MoE dims: got Experts=%d TopK=%d ExpertFF=%d, want 16/4/384", a.Experts, a.TopK, a.ExpertFF)
 	}
+	if a.MoEGating != model.MoEGatingSoftmax {
+		t.Fatalf("MoE gating: got %q, want the inferred %q", a.MoEGating, model.MoEGatingSoftmax)
+	}
 	wantLayers := model.DeriveLayers(c.LayerTypes, 0)
 	for i := range wantLayers {
 		wantLayers[i].MoE = true
@@ -421,6 +424,9 @@ func TestConfigArchRealGemma4_31B_DenseGeometry(t *testing.T) {
 	}
 	if a.Experts != 0 || a.TopK != 0 || a.ExpertFF != 0 {
 		t.Fatalf("31B is dense: Experts=%d TopK=%d ExpertFF=%d, want all 0", a.Experts, a.TopK, a.ExpertFF)
+	}
+	if a.MoEGating != "" {
+		t.Fatalf("dense model declares no MoE gating: got %q, want empty", a.MoEGating)
 	}
 	if a.FF != 21504 {
 		t.Fatalf("FF = %d, want 21504 (the real 31B dense intermediate_size)", a.FF)

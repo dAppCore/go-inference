@@ -150,6 +150,7 @@ func (c Config) Arch() (model.Arch, error) {
 	}
 
 	experts, topK, expertFF := 0, 0, 0
+	var moeGating model.MoEGating
 	if c.EnableMoEBlock {
 		if c.NumExperts <= 0 || c.TopKExperts <= 0 {
 			return model.Arch{}, core.NewError("gemma4.Config.Arch: enable_moe_block set but num_experts / top_k_experts not declared")
@@ -162,6 +163,7 @@ func (c Config) Arch() (model.Arch, error) {
 		if expertFF == 0 {
 			expertFF = c.IntermediateSize // fall back to the dense FF when unspecified
 		}
+		moeGating = model.MoEGatingSoftmax // gemma4 MoE gates with softmax over the top-k selected experts
 	}
 
 	eps := c.RMSNormEps
@@ -228,6 +230,7 @@ func (c Config) Arch() (model.Arch, error) {
 		Experts:             experts,
 		TopK:                topK,
 		ExpertFF:            expertFF,
+		MoEGating:           moeGating,
 		Eps:                 eps,
 		AttnScale:           1,                                         // gemma4: the per-head QK-norm does the scaling, so SDPA scale is 1.0 (metal's gemma4AttentionScale), NOT 1/√headDim
 		EmbedScale:          float32(math.Sqrt(float64(c.HiddenSize))), // gemma-family √hidden token-embedding multiplier, declared so backends never assume it

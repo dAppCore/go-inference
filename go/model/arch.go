@@ -61,14 +61,41 @@ func (a Arch) HasMoE() bool {
 	return false
 }
 
+// MoEGating is the router's expert-scoring/combination method — the sparse-expert
+// analog of a dense FFN's fixed shape. INFERRED FROM THE MODEL: an arch's config
+// declares it and the engine applies it, never assumes (the same DECLARES discipline
+// as Arch.AttnScale / EmbedScale). Today the metal router ships softmax top-k; sigmoid
+// gating, top-k weight renormalisation (norm_topk_prob), routed-scaling, and always-on
+// shared experts — the deepseek / qwen3 / composed variants — each earn a value plus a
+// router branch as they land (model/composed/moe.go already implements softmax +
+// norm-topk + shared expert on the reference path).
+type MoEGating string
+
+const (
+	// MoEGatingSoftmax: softmax over the top-k selected experts' scores (optionally
+	// scaled per-expert). gemma4's MoE and the metal router's shipping path, and the
+	// default for any MoE arch whose config leaves the gating unset.
+	MoEGatingSoftmax MoEGating = "softmax"
+)
+
+// resolveMoEGating defaults an unset gating to MoEGatingSoftmax — the only router
+// variant the metal engine ships today, and gemma4's method.
+func resolveMoEGating(g MoEGating) MoEGating {
+	if g == "" {
+		return MoEGatingSoftmax
+	}
+	return g
+}
+
 // Arch is the full backend-agnostic decode declaration: the neutral transformer dims
 // + the arch-specific extras + the derived per-layer specs. Built from a model config;
 // consumed by a backend executor. (Dims are plain fields the loader fills from config;
 // the per-layer derivation is DeriveLayers.)
 type Arch struct {
-	Hidden, Heads, KVHeads, HeadDim, FF, Vocab int // HeadDim / KVHeads are the sliding/default geometry; full_attention layers use GlobalHeadDim / GlobalKVHeads
-	GlobalHeadDim, GlobalKVHeads               int // full_attention head_dim / kv-head count (== HeadDim / KVHeads when the config draws no distinction)
-	Experts, TopK, ExpertFF                    int // MoE dims (Experts == 0 → dense model); ExpertFF is the experts' intermediate size
+	Hidden, Heads, KVHeads, HeadDim, FF, Vocab int       // HeadDim / KVHeads are the sliding/default geometry; full_attention layers use GlobalHeadDim / GlobalKVHeads
+	GlobalHeadDim, GlobalKVHeads               int       // full_attention head_dim / kv-head count (== HeadDim / KVHeads when the config draws no distinction)
+	Experts, TopK, ExpertFF                    int       // MoE dims (Experts == 0 → dense model); ExpertFF is the experts' intermediate size
+	MoEGating                                  MoEGating // router expert-scoring method the model DECLARES (empty → softmax); see MoEGating
 	Eps                                        float32
 	AttnScale                                  float32   // attention SDPA scale the model DECLARES (the engine applies it, never assumes): e.g. 1.0 when a QK-norm IS the scaling, else 1/√headDim
 	EmbedScale                                 float32   // token-embedding multiplier the model DECLARES (gemma-family √hidden; llama-family 1.0); 0 = undeclared → backends fall back to √hidden
