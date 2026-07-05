@@ -272,26 +272,24 @@ func noteCacheKnobs(cfg Config, tm inference.TextModel) {
 }
 
 // kvStorageEncoding resolves the -kv-storage flag to a portable KV snapshot
-// kv.Encoding and classifies it. recognised is false for a value outside the
-// kv.Encoding set (the go-mlx-era fp16/bf16 storage-dtype vocabulary never mapped
-// to a distinct portable encoding here). liveStateReady is true only for native:
-// a live metal -state sleep captures raw bf16 KV tensors, and the q8 / float32
-// snapshot encoders need per-head float32 that the block-capture path does not
-// yet feed the quantiser (encoding a raw tensor as non-native fails with
-// errRawTensorNeedsNative). q8/float32 stay recognised but fall back to native
-// rather than hard-erroring the sleep, until the snapshot-codec follow-up lands.
-// The encodings live in the kv package — engine-neutral — so this validates
-// directly rather than through the engine capability seam.
-func kvStorageEncoding(raw string) (enc kv.Encoding, recognised, liveStateReady bool) {
+// kv.Encoding. recognised is false for a value outside the kv.Encoding set (the
+// go-mlx-era fp16/bf16 storage-dtype vocabulary never mapped to a distinct
+// portable encoding here); those fall back to native. All three real encodings
+// are produce-able from a live metal -state sleep — native keeps its fast
+// bf16-slab path, q8 quantises to int8+scale, float32 keeps exact tensors (the
+// block capture emits per-head float32 for the non-native ones). The encodings
+// live in the kv package — engine-neutral — so this validates directly rather
+// than through the engine capability seam.
+func kvStorageEncoding(raw string) (enc kv.Encoding, recognised bool) {
 	switch kv.Encoding(core.Lower(core.Trim(raw))) {
 	case "", kv.EncodingNative:
-		return kv.EncodingNative, true, true
+		return kv.EncodingNative, true
 	case kv.EncodingQ8:
-		return kv.EncodingQ8, true, false
+		return kv.EncodingQ8, true
 	case kv.KVSnapshotEncodingFloat32:
-		return kv.KVSnapshotEncodingFloat32, true, false
+		return kv.KVSnapshotEncodingFloat32, true
 	default:
-		return kv.EncodingNative, false, false
+		return kv.EncodingNative, false
 	}
 }
 
@@ -303,7 +301,7 @@ func noteKVStorageInert(cfg Config) {
 	if raw == "" {
 		return
 	}
-	if _, recognised, _ := kvStorageEncoding(raw); !recognised {
+	if _, recognised := kvStorageEncoding(raw); !recognised {
 		printNote(cfg.Log, "generate: -kv-storage %q is not a known KV snapshot encoding (native, q8, float32)", cfg.KVStorage)
 	}
 	printNote(cfg.Log, "generate: -kv-storage selects the -state snapshot encoding; this stateless run persists no KV, so it has no effect here")

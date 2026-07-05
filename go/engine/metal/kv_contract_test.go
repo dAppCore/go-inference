@@ -170,6 +170,102 @@ func TestNativeTokenModelCaptureKVChunksContinues(t *testing.T) {
 	}
 }
 
+// TestSessionStateBlockNonNativeEncodingRoundTrip is the #290 gate: a non-native
+// (RawKVOnly=false) block capture carries per-head float32 instead of the
+// layer-level raw bf16 slab, so a q8/float32 KV snapshot Save no longer fails
+// with errRawTensorNeedsNative and round-trips through Save→Load→Restore. float32
+// is lossless → the restored continuation is token-identical to the uninterrupted
+// run; q8 is lossy → it must round-trip without error and continue with in-range
+// tokens. This is the direct codec proof (the generate -state WAKE glue is a
+// separate, pre-existing gap; the block restore path itself is exercised here).
+func TestSessionStateBlockNonNativeEncodingRoundTrip(t *testing.T) {
+	requireNativeRuntime(t)
+	tm, tok := newKVContractTokenModel(t)
+	ctx := context.Background()
+	const prompt = "hello"
+	const maxNew = 5
+	ids := tok.Encode(prompt)
+
+	saved := kvContractOpenArchSession(t, tm, "nonnative-save")
+	defer func() { _ = saved.Close() }()
+	if err := saved.PrefillTokens(ids); err != nil {
+		t.Fatalf("PrefillTokens: %v", err)
+	}
+
+	// Capture on the NON-NATIVE path (RawKVOnly=false) — the q8/float32-destined
+	// block shape #290 wires. One block covers the short prompt.
+	var blocks []kv.Block
+	if err := saved.RangeKVBlocks(len(ids)+8, kv.CaptureOptions{RawKVOnly: false}, func(b kv.Block) (bool, error) {
+		blocks = append(blocks, b)
+		return true, nil
+	}); err != nil {
+		t.Fatalf("RangeKVBlocks: %v", err)
+	}
+	if len(blocks) != 1 || blocks[0].Snapshot == nil {
+		t.Fatalf("expected 1 non-nil block for a short prompt, got %d", len(blocks))
+	}
+	snap := blocks[0].Snapshot
+
+	// #290 shape: non-native capture carries per-head float32, NOT the layer-level
+	// raw slab (which could only encode as native).
+	for _, layer := range snap.Layers {
+		if len(layer.KeyBytes) != 0 || len(layer.ValueBytes) != 0 {
+			t.Fatalf("non-native block layer %d still carries the layer-level raw KV slab", layer.Layer)
+		}
+		if len(layer.Heads) == 0 {
+			t.Fatalf("non-native block layer %d has no per-head tensors to quantise", layer.Layer)
+		}
+	}
+
+	// Uninterrupted reference continuation.
+	cold := kvContractOpenArchSession(t, tm, "nonnative-cold")
+	defer func() { _ = cold.Close() }()
+	want, err := cold.Generate(ids, maxNew, -1)
+	if err != nil {
+		t.Fatalf("cold Generate: %v", err)
+	}
+
+	dir := t.TempDir()
+	roundTrip := func(enc kv.Encoding, name string) []int32 {
+		path := core.PathJoin(dir, name+".kv")
+		if err := snap.SaveWithOptions(path, kv.SaveOptions{KVEncoding: enc}); err != nil {
+			t.Fatalf("Save %s: %v", name, err)
+		}
+		loaded, err := kv.Load(path)
+		if err != nil {
+			t.Fatalf("Load %s: %v", name, err)
+		}
+		restored := kvContractOpenArchSession(t, tm, name+"-restore")
+		defer func() { _ = restored.Close() }()
+		if err := restored.RestoreFromKV(ctx, loaded); err != nil {
+			t.Fatalf("RestoreFromKV %s: %v", name, err)
+		}
+		got, err := restored.GenerateFromCache(maxNew, -1)
+		if err != nil {
+			t.Fatalf("GenerateFromCache %s: %v", name, err)
+		}
+		return got
+	}
+
+	// float32: lossless → token-identical continuation.
+	if gotF32 := roundTrip(kv.KVSnapshotEncodingFloat32, "float32"); !idsEqual(gotF32, want) {
+		t.Fatalf("float32 round-trip continuation = %v, want uninterrupted %v", gotF32, want)
+	}
+
+	// q8: the encoding that used to fail (errRawTensorNeedsNative). Lossy, so it
+	// must round-trip WITHOUT error and continue with in-range tokens.
+	gotQ8 := roundTrip(kv.EncodingQ8, "q8")
+	if len(gotQ8) != maxNew {
+		t.Fatalf("q8 continuation length = %d, want %d", len(gotQ8), maxNew)
+	}
+	for _, id := range gotQ8 {
+		if id < 0 || int(id) >= tm.arch.Vocab {
+			t.Fatalf("q8 continuation token %d out of vocab range", id)
+		}
+	}
+	t.Logf("#290: float32 round-trip token-identical; q8 round-trips + continues %v (lossy)", gotQ8)
+}
+
 // TestNativeTokenModelKVContractGuards covers the honest failure edges: the
 // string-prompt capture needs an attached tokenizer, and the ctx-shaped shims
 // reject a nil snapshot / empty prompt rather than pretending to succeed.

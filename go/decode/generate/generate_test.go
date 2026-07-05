@@ -56,28 +56,27 @@ func TestNoteCacheKnobs_IgnoresStorage_Ugly(t *testing.T) {
 	}
 }
 
-// TestKVStorageEncoding pins the flag → kv.Encoding resolution + classification:
-// native is recognised AND live-state-ready; q8/float32 are recognised but NOT
-// live-state-ready (they need the snapshot-codec follow-up, so they fall back to
-// native); an unknown value is neither and also falls back to native.
+// TestKVStorageEncoding pins the flag → kv.Encoding resolution: native/q8/float32
+// are recognised (all produce-able from a live -state sleep now that the block
+// capture emits per-head float32 for non-native encodings); an unknown value is
+// not recognised and falls back to native.
 func TestKVStorageEncoding(t *testing.T) {
 	cases := []struct {
 		raw        string
 		enc        kv.Encoding
 		recognised bool
-		liveReady  bool
 	}{
-		{"", kv.EncodingNative, true, true},
-		{"native", kv.EncodingNative, true, true},
-		{"Q8", kv.EncodingQ8, true, false},
-		{"float32", kv.KVSnapshotEncodingFloat32, true, false},
-		{"fp16", kv.EncodingNative, false, false}, // go-mlx-era vocabulary, not a real encoding here
+		{"", kv.EncodingNative, true},
+		{"native", kv.EncodingNative, true},
+		{"Q8", kv.EncodingQ8, true},
+		{"float32", kv.KVSnapshotEncodingFloat32, true},
+		{"fp16", kv.EncodingNative, false}, // go-mlx-era vocabulary, not a real encoding here
 	}
 	for _, c := range cases {
-		enc, recognised, liveReady := kvStorageEncoding(c.raw)
-		if enc != c.enc || recognised != c.recognised || liveReady != c.liveReady {
-			t.Fatalf("kvStorageEncoding(%q) = (%q, %v, %v), want (%q, %v, %v)",
-				c.raw, enc, recognised, liveReady, c.enc, c.recognised, c.liveReady)
+		enc, recognised := kvStorageEncoding(c.raw)
+		if enc != c.enc || recognised != c.recognised {
+			t.Fatalf("kvStorageEncoding(%q) = (%q, %v), want (%q, %v)",
+				c.raw, enc, recognised, c.enc, c.recognised)
 		}
 	}
 }

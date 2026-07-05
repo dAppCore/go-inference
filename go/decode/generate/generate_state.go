@@ -96,22 +96,17 @@ func runStateSession(ctx context.Context, cfg Config, storePath string, store *f
 	indexURI := entryURI + "/index"
 
 	// -kv-storage selects the portable KV snapshot encoding this sleep persists.
-	// native keeps the captured dtype (bf16); q8/float32 are recognised but need a
-	// snapshot-codec follow-up before a live metal sleep can produce them (the
-	// block capture feeds the quantiser raw bf16), so they fall back to native
-	// with an honest note rather than hard-erroring the sleep. Engine-neutral —
-	// the kv.Encoding set, defaulted to native by SleepBlockOptions.
-	kvEncoding, recognised, liveStateReady := kvStorageEncoding(cfg.KVStorage)
+	// native keeps the captured dtype (bf16, fast-slab restore); q8 quantises to
+	// symmetric int8 + scale (smaller store, lossy); float32 keeps exact tensors.
+	// An unrecognised value falls back to native with a note. Engine-neutral — the
+	// kv.Encoding set, defaulted to native by SleepBlockOptions.
+	kvEncoding, recognised := kvStorageEncoding(cfg.KVStorage)
 	if raw := core.Trim(cfg.KVStorage); raw != "" {
-		switch {
-		case !recognised:
+		if recognised {
+			printNote(cfg.Log, "generate: -state sleep stores KV as %q", string(kvEncoding))
+		} else {
 			printNote(cfg.Log, "generate: -kv-storage %q is not a known KV snapshot encoding (native, q8, float32); sleeping as native", cfg.KVStorage)
 			kvEncoding = kv.EncodingNative
-		case !liveStateReady:
-			printNote(cfg.Log, "generate: -kv-storage %q is not yet produce-able from a live -state sleep (the block capture emits raw bf16; q8/float32 need per-head float32 — a snapshot-codec follow-up); sleeping as native", cfg.KVStorage)
-			kvEncoding = kv.EncodingNative
-		default:
-			printNote(cfg.Log, "generate: -state sleep stores KV as %q", string(kvEncoding))
 		}
 	}
 
