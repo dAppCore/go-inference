@@ -2,23 +2,24 @@
 
 # state/ — durable model-state contracts
 
-**Package**: `dappco.re/go/inference/state`
+**Package**: `dappco.re/go/inference/model/state`
 
 ## What this package owns
 
 The portable, backend-neutral contracts for **storing live model state
 to a durable medium and restoring it later** — what the wider stack
 calls "agent memory" or "book state". Everything in here is interfaces
-and DTOs; no runtime code. Backends in `go-mlx`, `go-rocm` (planned),
-`go-cuda` (planned) implement these contracts; consumers in `go-ai`,
-`go-ml`, `core/api` use them.
+and DTOs; no runtime code. The in-repo engines (`engine/metal`,
+`engine/hip`) implement these contracts; consumers in `agent/`,
+`serving/` and `cmd/lem` use them. (go-mlx / go-rocm are retired; their
+proven state code lives here now.)
 
-This package was hoisted out of `dappco.re/go/inference` so the wire
-shapes for state — `Bundle`, `Ref`, `Wake/Sleep/Fork` — could be
-imported without dragging in the full backend-registry surface. The
-parent `inference` package re-exports the most common types as
-aliases (`inference.ModelIdentity = state.ModelIdentity` etc.) so
-existing callers keep compiling.
+This package was hoisted out of the root `dappco.re/go/inference` package
+so the wire shapes for state — `Bundle`, `Ref`, `Wake/Sleep/Fork` — could
+be imported without dragging in the full backend-registry surface. The
+parent `inference` package re-exports the most common types as aliases
+(`inference.ModelIdentity = state.ModelIdentity` etc.) so existing
+callers keep compiling.
 
 ## File map
 
@@ -79,9 +80,9 @@ backend to wake KV.
 ## Codec constants
 
 ```go
-state.CodecMemory          = "memory/plaintext"   // InMemoryStore
-state.CodecStateVideo         = "state/qr-video"    // State video .mp4
-filestore.CodecFile        = "state/file-log"    // append-only file
+state.CodecMemory     = "memory/plaintext"   // InMemoryStore
+state.CodecStateVideo = "state/qr-video"     // State video .mp4 (alias: CodecQRVideo)
+filestore.CodecFile   = "state/file-log"     // append-only file
 ```
 
 A `ChunkRef` carries its codec so the wake side knows which decoder to
@@ -97,10 +98,10 @@ Three forces pushed it out of `inference`:
    mention chunks; chunks want to mention bytes. Splitting state out
    gave a clean acyclic graph.
 
-2. **Cross-package re-use.** `core/api` wants to serialise bundles
-   over HTTP without importing the full backend surface. `core/ide`
-   wants to display bundle indexes without linking go-mlx. Both can
-   now `import "dappco.re/go/inference/state"` and get just the
+2. **Cross-package re-use.** `serving/` wants to serialise bundles
+   over HTTP without importing the full backend surface. A UI wants to
+   display bundle indexes without linking a GPU engine. Both can now
+   `import "dappco.re/go/inference/model/state"` and get just the
    shapes.
 
 3. **Lifecycle clarity.** Wake/Sleep/Fork are a small focused
@@ -114,7 +115,5 @@ Three forces pushed it out of `inference`:
   consumed by `Backend` / `TextModel`
 - [openai/services.md](../openai/services.md) — wire types that carry
   `ModelIdentity` in capability reports
-- `go-mlx/docs/memory/agent_memory.md` (planned) — the reference
-  Metal-backed Session implementation
-- `go-mlx/docs/memory/state_bundle.md` (planned) — bundle
-  encode/decode round-trip
+- `go/engine/metal` — the in-repo Metal-backed `Session` implementation
+- `go/model/state/session/` — the session + bundle encode/decode code

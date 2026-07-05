@@ -7,21 +7,23 @@
 
 ## What this is
 
-The portable shape for **"what does this backend / model support, at what maturity?"** — consumed by go-ml, go-ai, core/api, core/ide. Backends that implement `CapabilityReporter` answer; consumers branch on the report without importing backend-specific packages.
+The portable shape for **"what does this backend / model support, at what maturity?"** — consumed by `agent/`, `serving/` and `eval/`. Backends that implement `CapabilityReporter` answer; consumers branch on the report without importing backend-specific packages.
 
 Also hosts `RuntimeMemoryLimits` + `RuntimeMemoryLimiter` — the same lane for runtime allocator limits.
 
 ## Capability ID catalogue
 
-41 stable IDs grouped by lane:
+54 stable IDs grouped by lane:
 
-**Model / inference**: `model.load`, `generate`, `chat`, `classify`, `batch.generate`, `tokenizer`, `chat.template`, `lora.inference`, `lora.training`
+**Model / inference**: `model.load`, `generate`, `chat`, `classify`, `batch.generate`, `tokenizer`, `chat.template`, `lora.inference`, `lora.training`, `model.slice`
 
-**Runtime / cache / scheduling**: `state.bundle`, `kv.snapshot`, `prompt.cache`, `kv.cache.planning`, `memory.planning`, `model.fit`, `scheduler`, `request.cancel`, `cache.blocks`, `cache.disk`, `cache.warm`
+**Runtime / cache / scheduling**: `state.bundle`, `kv.snapshot`, `prompt.cache`, `kv.cache.planning`, `memory.planning`, `model.fit`, `runtime.discovery`, `runtime.autotune`, `model.replace`, `model.differential_load`, `model.split_inference`, `scheduler`, `request.cancel`, `cache.blocks`, `cache.disk`, `cache.warm`
 
 **Training / eval**: `benchmark`, `evaluation`, `distillation`, `grpo`, `quantization`, `model.merge`
 
 **Probe / research**: `probe.events`, `probe.attention`, `probe.logits`
+
+**Query**: `query.lql`, `query.vindex`
 
 **Wire / compat**: `responses.api`, `anthropic.messages`, `ollama.compat`, `embeddings`, `rerank`
 
@@ -32,8 +34,6 @@ Also hosts `RuntimeMemoryLimits` + `RuntimeMemoryLimiter` — the same lane for 
 **MoE / specialised quant**: `moe.routing`, `moe.lazy_experts`, `jangtq`, `codebook.vq`
 
 **Agent memory**: `agent.memory`, `state.wake`, `state.sleep`, `state.fork`
-
-Snippets of these mirror the parity targets from the 2026-05-09 vMLX gap report.
 
 ## Groups + status
 
@@ -56,7 +56,7 @@ type Capability struct {
 }
 ```
 
-Constructors short-cut the common shapes: `NewCapability(id, group, status, detail)` plus `SupportedCapability(id, group)`, `ExperimentalCapability(id, group, detail)`, `PlannedCapability(id, group, detail)`.
+Constructors short-cut the common shapes: `NewCapability(id, group, status, detail)` plus `SupportedCapability(id, group)`, `ExperimentalCapability(id, group, detail)`, `PlannedCapability(id, group, detail)`, and `UnsupportedCapability(id, group, detail)`. `Capability.Usable()` reports true for supported or experimental status.
 
 ## AlgorithmProfile
 
@@ -108,7 +108,7 @@ type CapabilityReporter interface {
 }
 ```
 
-Implemented by `Backend` (returns runtime-level capabilities) and by loaded `TextModel` instances (returns model-level capabilities). Consumers walk via type assertion — not every backend or model implements it.
+Implemented by `Backend` (returns runtime-level capabilities) and by loaded `TextModel` instances (returns model-level capabilities). Consumers walk via type assertion — not every backend or model implements it. `CapabilitiesOf(value)` does the assertion for you, falling back to `BackendCapabilities` / `TextModelCapabilities` when the value doesn't implement `CapabilityReporter`. The report exposes query helpers: `Supports(id)`, `Capability(id)`, `SupportedCapabilityIDs()`, `CapabilityIDs()`.
 
 ## RuntimeMemoryLimits + RuntimeMemoryLimiter
 
@@ -131,8 +131,7 @@ Zero request fields = "leave unchanged". Previous values report the prior caps s
 
 ## Consumed by
 
-- `go-mlx/register_metal.go` — exposes Metal allocator limits via `RuntimeMemoryLimiter`
-- `go-mlx/algorithm_profile.go` + `architecture_profile.go` — publish JANG/MoE/codebook profiles
-- `go-ml/capability.go` — `CapabilityReportForBackend(name, backend)` summarises a ml-side backend into the portable shape
-- `core/api` — surfaces reports over HTTP for `core/ide` to render the "what can I do" panel
-- `go-ai/providers/openai` — outbound provider exposes its capability fingerprint
+- `engine/metal` — exposes Metal allocator limits via `RuntimeMemoryLimiter` and publishes JANG/MoE/codebook `AlgorithmProfile`s
+- `engine/hip` — the AMD/ROCm engine's capability + memory-limit surface
+- `serving/` — surfaces reports over HTTP for consumers to render the "what can I do" panel
+- `agent/` + `eval/` — read the report to gate which scoring/eval features are available on the loaded model

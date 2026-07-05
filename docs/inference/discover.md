@@ -10,10 +10,15 @@
 A backend-neutral filesystem scan that yields one `DiscoveredModel` per model directory under a root. Used by:
 
 - CoreAgent / core/ide model picker UI
-- `core/lab` to enumerate available models
+- `lab/` to enumerate available models
 - Test harnesses that auto-find fixtures
 
-Detects both safetensors directories (`config.json` + `*.safetensors`) and GGUF files. Architecture + quantisation metadata extracted at scan time so callers don't have to load each model to decide whether it's interesting.
+Two entry points, with different coverage:
+
+- **`Discover(baseDir)`** (this file) — a **lazy** `iter.Seq[DiscoveredModel]` over **safetensors** model directories only (`config.json` + at least one `*.safetensors`). This is the function documented below.
+- **`DiscoverModels(basePath)`** (in [gguf.md](gguf.md) / `gguf.go`) — an **eager** `[]DiscoveredModel` that includes both safetensors dirs (via `Discover`) **and** GGUF files, sorted by path. Reach for this when you also need `.gguf` models.
+
+Architecture + quantisation metadata is extracted at scan time so callers don't have to load each model to decide whether it's interesting.
 
 ## DiscoveredModel
 
@@ -38,26 +43,19 @@ for m := range inference.Discover("/Volumes/Data/models") {
 }
 ```
 
-Returns `iter.Seq[DiscoveredModel]`. Iteration is lazy — caller can break early on first match. Sort order: alphabetical by path.
+Returns `iter.Seq[DiscoveredModel]`. Iteration is lazy — caller can break early on first match. It is a pre-order directory walk; siblings within each directory are visited in alphabetical name order.
 
-## What it inspects
+## What it inspects (safetensors directories)
 
-For safetensors directories:
-- `config.json` → `model_type`, `num_hidden_layers`, `vocab_size`, `quantization_config`
-- File count = count of `*.safetensors`
+- `config.json` → `model_type`, `quantization` / `quantization_config` (`bits`, `group_size`)
+- `NumFiles` = count of `*.safetensors` in the directory
+- `Format` is always `"safetensors"` for `Discover` results
 
-For GGUF files:
-- Magic + version header
-- Architecture metadata key
-- Quantisation type from tensor headers
+Detection is metadata-only — weight tensors are not loaded. (GGUF header parsing lives in `ReadGGUFInfo` / `DiscoverModels`; see [gguf.md](gguf.md).)
 
-Detection is metadata-only. Weight tensors are not loaded.
+## What it emits vs skips
 
-## What it skips
-
-- Hidden directories (`.git`, `.cache`)
-- Directories without `config.json` or matching `*.gguf`
-- Symlink loops (basic loop detection)
+A directory yields a `DiscoveredModel` only when it contains **both** `config.json` and at least one `*.safetensors` file. Every other directory is walked but produces nothing. There is no explicit hidden-directory or symlink-loop handling — directories that lack the two markers are simply passed over, and the walk recurses into every subdirectory it can list.
 
 ## Why a generator not a slice
 
@@ -65,6 +63,4 @@ Large model trees with 100+ models would cost noticeable RAM if returned all-at-
 
 ## Related
 
-- [gguf.md](gguf.md) — `GGUFInfo` for the richer single-file scan
-- `go-mlx/docs/model/model_pack.md` (planned) — full model-pack validation (uses Discover + Inspect)
-- `go-ml/docs/scoring/inventory.md` (planned) — inventory persistence
+- [gguf.md](gguf.md) — `GGUFInfo` + `ReadGGUFInfo` + `DiscoverModels` (the GGUF-aware scan)

@@ -1,15 +1,22 @@
 <!-- SPDX-Licence-Identifier: EUPL-1.2 -->
 
-# anthropic/anthropic.go — Messages API wire types
+# serving/provider/anthropic — Messages API native server
 
-**Package**: `dappco.re/go/inference/anthropic`
-**File**: `go/anthropic/anthropic.go`
+**Package**: `dappco.re/go/inference/serving/provider/anthropic`
+**Route**: `POST /v1/messages`
 
 ## What this is
 
-The Anthropic Messages API (`/v1/messages`) wire surface. Same pattern as `openai/openai.go` but for Anthropic-compatible SDKs — DTOs + translation to `inference.Message` + `inference.GenerateOption`. No HTTP handler yet; planned alongside the Responses handler.
+A **native** Anthropic Messages server: it decodes the Anthropic wire request,
+runs it against the LOCAL engine, and emits Anthropic-native output — a
+`MessageResponse` JSON body, or the Anthropic SSE event sequence when
+`stream: true`. Not a proxy to Anthropic's API.
 
-This is a parity item from the 2026-05-09 vMLX gap report: vMLX exposed Anthropic compatibility and CoreAgent needed the same surface for Claude-flavoured SDKs hitting local inference.
+The DTOs, translation, and wire encoders live in this package (`anthropic.go`,
+`anthropic_stream.go`). The HTTP handler is assembled in `serving/compat`
+(`mux.go`, `anthropicMessagesHandler` + `serveAnthropicMessageStream`) and
+mounted by `cmd/lem serve` (default `:36911`). Point a Claude-flavoured SDK at
+the route and it gets real local inference.
 
 ## Constants
 
@@ -17,7 +24,7 @@ This is a parity item from the 2026-05-09 vMLX gap report: vMLX exposed Anthropi
 const DefaultMessagesPath = "/v1/messages"
 ```
 
-## DTOs
+## DTOs (`anthropic.go`)
 
 ```go
 ContentBlock     // type + text — Anthropic's typed-block content model
@@ -27,12 +34,17 @@ Usage            // input_tokens + output_tokens
 MessageResponse  // id + type + role + model + content[] + stop_reason + stop_sequence + usage
 ```
 
+`MessageRequest` models: `model`, `system`, `messages`, `max_tokens`,
+`temperature`, `top_p`, `min_p`, `top_k`, `stream`, `stop_sequences`. `min_p` is
+the gemma4 sampling extension.
+
 Key differences from OpenAI:
 
-- `Message.Content` is `[]ContentBlock`, not a plain string — supports image / tool_use / tool_result block types out of the box.
+- `Message.Content` is `[]ContentBlock`, not a plain string.
 - `system` is a top-level field, not a message with role=system.
-- `Usage` uses `input_tokens` / `output_tokens` (vs OpenAI's `prompt_tokens` / `completion_tokens`).
-- Stop reason is named (`end_turn` / `max_tokens` / `stop_sequence` / `tool_use`), not a free string.
+- `Usage` uses `input_tokens` / `output_tokens` (vs OpenAI's `prompt_tokens` /
+  `completion_tokens`).
+- Stop reason is named (`end_turn` / `stop_sequence` / …), not a free string.
 
 ## InferenceMessages
 
@@ -40,9 +52,11 @@ Key differences from OpenAI:
 messages := anthropic.InferenceMessages(req)
 ```
 
-Flattens the typed-block content to plain text + builds the standard `inference.Message` slice. The Anthropic top-level `system` field becomes a leading system message in the inference slice — so the runtime sees one uniform message list regardless of API origin.
-
-`blockText` strips down to `type: "text"` blocks only; image/tool blocks are dropped at the translation boundary (no multi-modal support in the core runner yet).
+Flattens each message's typed-block content to plain text (`blockText`) and
+builds the `inference.Message` slice. The top-level `system` field becomes a
+leading system message, so the runtime sees one uniform message list regardless
+of API origin. `blockText` keeps only `type: "text"` (or untyped) blocks; other
+block types are dropped at the translation boundary.
 
 ## GenerateOptions
 
@@ -51,7 +65,9 @@ opts := anthropic.GenerateOptions(req)
 for tok := range model.Chat(ctx, messages, opts...) { ... }
 ```
 
-Same translation as the OpenAI sibling — sampler fields lowered to `inference.GenerateOption`. `MaxTokens` is required on the Anthropic side (no default); the translation only appends `WithMaxTokens` when `MaxTokens > 0`.
+Lowers the sampler fields to `[]inference.GenerateOption`. `max_tokens` has no
+default on the Anthropic side — `WithMaxTokens` is appended only when
+`max_tokens > 0`.
 
 ## NewTextResponse
 
@@ -59,21 +75,35 @@ Same translation as the OpenAI sibling — sampler fields lowered to `inference.
 resp := anthropic.NewTextResponse(requestID, modelName, text, metrics)
 ```
 
-Minimal response builder — single text content block + stop_reason="end_turn" + usage filled from the inference metrics. Same convenience as `openai.NewTextResponse`; lets a handler produce a valid Anthropic-shaped response in one line.
+Builds a `MessageResponse` with a single `text` content block,
+`stop_reason: "end_turn"`, and usage from the inference metrics. The
+non-streaming handler uses it directly.
 
-## What's not here
+## Wire encoders
 
-- Streaming. Anthropic's streaming format (`event: message_start`, etc.) is its own thing — not yet implemented.
-- Tool-use / tool-result blocks. The shape is in `ContentBlock` but the translation drops them. When tool-call parsing lands (per the parity plan), this will route through `inference.ToolParser`.
-- Vision blocks. Same reason as OpenAI Responses — multi-modal is out of scope for the core runner.
+`AppendMessageResponse` / `AppendMessageRequest` hand-roll the response and
+request JSON into a caller-owned buffer, staying off the `encoding/json` reflect
+path at the HTTP-emit and client-encode boundaries. `MessageResponseSize` /
+`MessageRequestSize` pre-size the buffer so the encode lands in one allocation.
 
-## Why a separate file from openai/
+## Streaming (`anthropic_stream.go`)
 
-Anthropic's wire shape is **different enough** that mashing them into one package would require option types or interface-based content blocks — both worse than just having two parallel files. The size budget is small (~110 lines).
+The streaming handler emits the full Anthropic SSE event sequence — Claude Code's
+parser requires all of it:
+
+```
+message_start → content_block_start → content_block_delta* →
+content_block_stop → message_delta → message_stop
+```
+
+(`ping` may interleave.) The `content_block_delta` events are the per-token hot
+path (`text_delta`); `message_delta` carries the terminal `stop_reason`
+(`end_turn`, or `stop_sequence` when a stop sequence matched) and the cumulative
+`output_tokens`. Each event payload is built by the `Append*Event` builders in
+this file. `MessageStopPayload` and `PingPayload` are the two fixed payloads.
 
 ## Related
 
-- [README.md](README.md) — package overview (planned)
-- [../openai/openai.md](../openai/openai.md) — the parallel OpenAI translation
-- [../inference/contracts.md](../inference/contracts.md) — `ToolParser` for future tool-use routing
-- `core/api` — mounts an Anthropic handler when configured (handler TBD)
+- [../openai/openai.md](../openai/openai.md) — the parallel OpenAI Chat Completions server
+- [../ollama/ollama.md](../ollama/ollama.md) — Ollama sibling
+- [../inference/inference.md](../inference/inference.md) — base `Message` + `GenerateOption` types

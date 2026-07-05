@@ -2,8 +2,8 @@
 
 # state/agent_memory.go — Wake / Sleep / Fork lifecycle
 
-**Package**: `dappco.re/go/inference/state`
-**File**: `go/state/agent_memory.go`
+**Package**: `dappco.re/go/inference/model/state`
+**File**: `go/model/state/agent_memory.go`
 **Aliased into**: `dappco.re/go/inference` (as `AgentMemory*` for the
 historical naming consumers expect)
 
@@ -17,7 +17,7 @@ from a bundle written earlier — possibly on a different machine, possibly
 much later, possibly from a knowledge-pack `.mp4` that was scanned in by
 phone camera.
 
-Three lifecycle verbs, four DTOs, two interfaces. Nothing else.
+Three lifecycle verbs, five DTOs, two interfaces. Nothing else.
 
 ## DTOs
 
@@ -79,11 +79,10 @@ without needing the `state` subpackage import.
 
 ## Where it's implemented
 
-- `go-mlx` — Metal-backed `Session` + `Forker`. The reference
+- `engine/metal` — Metal-backed `Session` + `Forker`. The reference
   implementation, with KV-block-level append, parent-prefix reuse, and
-  State video `.mp4` packaging. See `go-mlx/docs/memory/agent_memory.md`.
-- `go-rocm` — planned mirror for AMD/ROCm.
-- `go-cuda` — planned mirror for NVIDIA/CUDA.
+  State video `.mp4` packaging. (`go/engine/metal`, `go/model/state/session`.)
+- `engine/hip` — the AMD/ROCm mirror.
 
 ## Why URI-first
 
@@ -107,15 +106,14 @@ events emitted during wake) rather than by this DTO.
 
 ## Used by
 
-- `go-mlx/cmd/violet` — sidecar exposes Wake/Sleep/Fork over Unix socket
+- `cmd/lem` — the CLI's serve/ask paths wake and sleep session state
 - LTHN project seeds — app/CLI orchestration can wake a per-project context,
-  append observations, then sleep a child state or fall back to a text summary.
-- `go-ai/ai/book_state_demo.go` — teacher/student demo uses WakeResult →
+  append observations, then sleep a child state or fall back to a text summary
+  (see [project_seed.md](project_seed.md))
+- `agent/ai/book_state_demo.go` — teacher/student demo uses WakeResult →
   `BookState` (the demo's user-facing context shape)
-- `go-mlx/pkg/memvid` — deprecated compatibility path for older State video
-  encoder/decoder imports
-- `core/ide` (planned) — agent inspector panel reads bundle index for
-  the "what's in my brain right now" UI
+- a UI agent-inspector panel reads the bundle index for the "what's in my
+  brain right now" view
 
 ## Validated benchmark
 

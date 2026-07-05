@@ -1,158 +1,179 @@
 ---
 title: Backends
-description: How the backend registry works and how to implement a new inference backend.
+description: The in-tree GPU engines, how the backend registry works, and how to implement a new backend.
 ---
 
 # Backends
 
-go-inference uses a registry pattern to decouple consumers from GPU-specific implementations. Backends self-register at init time with build tags, so the right backend is available on each platform without any consumer-side configuration.
+go-inference uses a registry to decouple consumers from GPU-specific engines. Two engines live in this repository — `engine/metal` (Apple GPU) and `engine/hip` (AMD ROCm) — each gated by build tags so only the right one compiles on a given platform. A blank import registers the engine at `init` time; consumers program against the `Backend`/`TextModel` contract and never reference an engine's internals.
+
+## The in-tree engines
+
+### metal — Apple GPU, no cgo
+
+Path `engine/metal`, package clause `native`, build tag `//go:build darwin && arm64`. "Metal" names the Apple Metal API this engine drives — it is **not** go-mlx's cgo `pkg/metal` (deleted, never ported). Verified in `engine/metal/device.go`:
+
+- **No cgo, no mlx-c.** Kernels are dispatched from Go through the `github.com/tmc/apple` objc bridge (purego `objc_msgSend`).
+- Loads the **same compiled `mlx.metallib`** the reference MLX build ships, located via the `MLX_METALLIB_PATH` environment variable, plus an optional sibling `lthn_kernels.metallib` (go-inference's own fused kernels; absent ⇒ those ops fall back to composed primitives).
+- **The kernels are shared with MLX; the innovation is the encode path.** Decode and diffusion are fixed per-step command sequences, so the engine records the sequence once into an **Indirect Command Buffer (ICB)** and replays it per token — bypassing the host re-encode that dominates MLX's decode. A MoE arch falls back to the re-encode path (the ICB cannot host the router's host-side top-k).
+
+Registers as `"metal"`. Loads a reactive native token model (dense / MoE / PLE, bf16 or 4-bit) with the directory's tokenizer attached; `WithContextLen` sizes the KV cache (default 4096). It implements `VisionModel` (`AcceptsImages`) and exposes LoRA SFT training through the `engine.TrainerModel` / `engine.Trainer` seam (`OpenTrainer`), not the root `TrainableModel.ApplyLoRA` interface.
+
+### rocm — AMD ROCm
+
+Path `engine/hip`, package `hip`. The default `linux && amd64` build is native-first: it registers the ROCm backend, reads GGUF metadata, and drives the native HIP runtime — the old OpenAI-compatible `llama-server` subprocess path survives only behind the `rocm_legacy_server` build tag and is not built by default. Three variants of the backend exist by build tag:
+
+| Build tag | Behaviour |
+|-----------|-----------|
+| `linux && amd64 && !rocm_legacy_server` | native ROCm/HIP runtime (default) |
+| `!linux \|\| !amd64` | portable stub: `Available()` returns `false`, `LoadModel` fails cleanly |
+| `linux && amd64 && rocm_legacy_server` | legacy `llama-server` subprocess bridge |
+
+Registers as `"rocm"`. GGUF loading works; safetensors model-pack loading is **not yet available** in the current quarantine landing (blocked on a missing upstream package — the load fails with an explicit message rather than guessing).
+
+### About `llama_cpp`
+
+`llama_cpp` is still a slot in the preference order, but **no package in this repository registers it** as an `inference.Backend`. The serving layer provides `serving.HTTPBackend` (name `"http"`) and `serving.LlamaBackend` (name `"llama"`) that wrap an external llama.cpp HTTP server as a `TextModel` — but these are serving-level adapters, not registered inference backends.
+
+---
 
 ## Registry
 
-The registry is a package-level `map[string]Backend` protected by a `sync.RWMutex`.
+The registry is a package-level `map[string]Backend` guarded by a Core mutex.
 
 ### Registry functions
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `Register` | `Register(b Backend)` | Add a backend to the registry (called from `init()`) |
+| `Register` | `Register(b Backend)` | Add a backend (called from `init()`); overwrites an existing same-named entry |
 | `Get` | `Get(name string) (Backend, bool)` | Retrieve a backend by name |
-| `List` | `List() []string` | All registered backend names, sorted alphabetically |
-| `All` | `All() iter.Seq2[string, Backend]` | Iterator over all registered backends |
-| `Default` | `Default() (Backend, error)` | First available backend by platform preference |
-| `LoadModel` | `LoadModel(path string, opts ...LoadOption) (TextModel, error)` | Load via specified or default backend |
-| `LoadTrainable` | `LoadTrainable(path string, opts ...LoadOption) (TrainableModel, error)` | Load a training-capable model |
+| `List` | `List() []string` | All registered names, sorted alphabetically (nil when empty) |
+| `All` | `All() iter.Seq2[string, Backend]` | Iterator over all registered backends, name order |
+| `Default` | `Default() core.Result` | First available backend by preference order; Result's `Value` is the `Backend` |
+| `LoadModel` | `LoadModel(path string, opts ...LoadOption) core.Result` | Load via specified or default backend |
+| `LoadTrainable` | `LoadTrainable(path string, opts ...LoadOption) core.Result` | Load and assert `TrainableModel` |
+| `BackendDeviceInfo` | `BackendDeviceInfo(name string) (DeviceInfo, bool)` | Accelerator info for a `DeviceInfoProvider` backend |
+
+Fallible functions return `core.Result` — `OK bool` with the payload in `Value`, or the error in `Value` on failure.
 
 ### Platform preference
 
-`Default()` walks a priority list and returns the first available backend:
+`Default()` walks a fixed preference order and returns the first backend whose `Available()` is true:
 
 ```
-metal > rocm > llama_cpp > (any other registered backend)
+metal > rocm > llama_cpp > (any other registered available backend)
 ```
 
-Metal is preferred on Apple Silicon for direct GPU memory access. ROCm is preferred over llama.cpp on Linux because it avoids HTTP overhead. If none of the preferred backends are available, any registered backend that reports `Available() == true` is used.
-
-If no backends are registered at all, `Default()` returns:
-
-```
-inference: no backends registered (import a backend package)
-```
+Metal is preferred on Apple Silicon for direct GPU-memory access; ROCm is preferred on Linux. If none of the preferred backends are available, any registered backend reporting `Available() == true` is used. With nothing registered, `Default()` returns a failed Result (`no backends registered`); with backends registered but none available, `no backends available`.
 
 ### LoadModel routing
 
 `LoadModel` is the primary consumer entry point. It resolves the backend then delegates:
 
 ```go
-// Explicit backend
-m, err := inference.LoadModel("/path/to/model/", inference.WithBackend("rocm"))
+// Explicit backend (bypasses Default())
+r := inference.LoadModel("/models/model.gguf", inference.WithBackend("rocm"))
 
 // Auto-detect (uses Default())
-m, err := inference.LoadModel("/path/to/model/")
+r := inference.LoadModel("/models/gemma-4-e2b-it-4bit")
+if !r.OK {
+    log.Fatal(r.Error())
+}
+m := r.Value.(inference.TextModel)
 ```
 
-When `WithBackend()` is set, `LoadModel` looks up the named backend directly and returns an error if it is not registered or not available. When no backend is specified, it calls `Default()`.
-
-### Overwriting entries
-
-Registering a name that already exists silently overwrites the previous entry. This allows test code to replace backends without a separate de-registration step.
+When `WithBackend()` is set, `LoadModel` looks up the named backend directly and fails if it is not registered or not available. Otherwise it calls `Default()`.
 
 ---
 
-## How backends register
+## How engines register
 
-Backends call `inference.Register()` from an `init()` function guarded by build tags. This ensures the registration only compiles on the target platform:
+Each engine calls `inference.Register()` from an `init()` gated by its build tags, so registration only compiles on the target platform:
 
 ```go
-// file: register_metal.go in go-mlx
-//go:build darwin && arm64
-
-package metal
+// engine/metal/inference_register.go  —  //go:build darwin && arm64
+package native
 
 import "dappco.re/go/inference"
 
-func init() {
-    inference.Register(NewBackend())
-}
+func init() { inference.Register(metalBackend{}) }
 ```
 
 ```go
-// file: register_rocm.go in go-rocm
-//go:build linux && amd64
-
-package rocm
+// engine/hip/register_rocm.go  —  //go:build linux && amd64
+package hip
 
 import "dappco.re/go/inference"
 
-func init() {
-    inference.Register(NewBackend())
-}
+func init() { inference.Register(&rocmBackend{}) }
 ```
 
-The consumer imports the backend package with a blank import to trigger `init()`:
+The application blank-imports the engine to trigger `init()`:
 
 ```go
 import (
     "dappco.re/go/inference"
-    _ "forge.lthn.ai/core/go-mlx/metal"  // registers "metal" backend
+    _ "dappco.re/go/inference/engine/metal" // registers "metal" on darwin/arm64
+    _ "dappco.re/go/inference/engine/hip"   // registers "rocm" on linux/amd64
 )
 ```
 
-Because the import is guarded by build tags in the backend package, the blank import compiles to nothing on unsupported platforms.
+Because the engine package is guarded by build tags (with a portable stub for other platforms), the blank import stays satisfiable everywhere while only the matching engine compiles in.
 
 ---
 
 ## Implementing a new backend
 
-To add a new inference backend (e.g. for a new GPU runtime or inference server), implement the `Backend` interface and optionally `TrainableModel`.
+To add a new engine (a new GPU runtime or inference server), implement the `Backend` interface and, optionally, `TrainableModel` / `AttentionInspector` / `VisionModel` / `DeviceInfoProvider`.
 
 ### Step 1: Implement Backend
 
 ```go
 package mybackend
 
-import "dappco.re/go/inference"
+import (
+    core "dappco.re/go"
+    "dappco.re/go/inference"
+)
 
 type myBackend struct{}
 
-func NewBackend() inference.Backend {
-    return &myBackend{}
-}
+func NewBackend() inference.Backend { return &myBackend{} }
 
 func (b *myBackend) Name() string { return "mybackend" }
 
 func (b *myBackend) Available() bool {
-    // Check whether the runtime/hardware is present.
-    // Return false if the GPU driver is missing, the server is unreachable, etc.
-    return checkHardware()
+    return checkHardware() // false when the driver/hardware is absent
 }
 
-func (b *myBackend) LoadModel(path string, opts ...inference.LoadOption) (inference.TextModel, error) {
+func (b *myBackend) LoadModel(path string, opts ...inference.LoadOption) core.Result {
     cfg := inference.ApplyLoadOpts(opts)
-    // Load weights, allocate GPU memory, set up KV cache...
-    return &myModel{config: cfg}, nil
+    model, err := loadWeights(path, cfg) // allocate GPU memory, set up KV cache...
+    if err != nil {
+        return core.Fail(core.E("mybackend.LoadModel", "load weights", err))
+    }
+    return core.Ok(model)
 }
 ```
 
+`LoadModel` returns `core.Ok(model)` on success and `core.Fail(core.E(...))` on failure — never a `(TextModel, error)` tuple.
+
 ### Step 2: Implement TextModel
 
-Every method on the `TextModel` interface must be implemented. Key considerations:
-
-**Generate and Chat** must return `iter.Seq[Token]`. The iterator pattern gives the backend control over token production:
+Every method on the `TextModel` interface must be implemented. `Generate` and `Chat` return `iter.Seq[Token]`; `Classify`, `BatchGenerate`, `Err`, and `Close` return `core.Result`.
 
 ```go
 func (m *myModel) Generate(ctx context.Context, prompt string, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
     cfg := inference.ApplyGenerateOpts(opts)
     return func(yield func(inference.Token) bool) {
-        // Prefill the prompt...
-        for i := 0; i < cfg.MaxTokens; i++ {
+        for i := 0; cfg.MaxTokens == 0 || i < cfg.MaxTokens; i++ {
             if ctx.Err() != nil {
-                m.lastErr = ctx.Err()
+                m.lastErr = core.Fail(core.E("mybackend.Generate", "context", ctx.Err()))
                 return
             }
             tok := m.decodeNext()
             if !yield(tok) {
-                return // caller broke out of range loop
+                return // caller broke out of the range loop
             }
             if tok.ID == m.eosTokenID {
                 return
@@ -160,83 +181,42 @@ func (m *myModel) Generate(ctx context.Context, prompt string, opts ...inference
         }
     }
 }
+
+func (m *myModel) Err() core.Result { return m.lastErr } // OK Result on clean EOS
 ```
 
-**Err** stores the error from the last Generate/Chat call:
-
-```go
-func (m *myModel) Err() error { return m.lastErr }
-```
-
-**Chat** should apply the model's native chat template before calling Generate internally. Do not expose template logic to the consumer.
-
-**Classify** runs a single forward pass per prompt (no autoregressive loop). Only populate `ClassifyResult.Logits` when the config has `ReturnLogits == true`.
+- **Chat** applies the model's native chat template before decoding — do not expose template logic to the consumer.
+- **Classify** runs one forward pass per prompt (no autoregressive loop); populate `ClassifyResult.Logits` only when `cfg.ReturnLogits` is true. Return `core.Ok([]inference.ClassifyResult{...})`.
+- **BatchGenerate** returns `core.Ok([]inference.BatchResult{...})`; per-prompt failures go in `BatchResult.Err`, not the outer Result.
 
 ### Step 3: Register with build tags
 
-Create a registration file with appropriate build constraints:
-
 ```go
-// file: register.go
-//go:build linux && amd64
-
+// register.go  —  //go:build linux && amd64
 package mybackend
 
 import "dappco.re/go/inference"
 
-func init() {
-    inference.Register(NewBackend())
-}
+func init() { inference.Register(NewBackend()) }
 ```
 
 ### Step 4 (optional): Support training
 
-If your backend supports LoRA fine-tuning, have your model type also implement `TrainableModel`:
+The in-tree engines expose LoRA SFT through the **`engine.TrainerModel`** seam (in `dappco.re/go/inference/engine`): the loaded model implements `OpenTrainer(cfg inference.TrainingConfig) (engine.Trainer, error)`, and the returned `engine.Trainer` owns the frozen base, the trainable LoRA weights, and the optimiser state — a caller drives `Step`/`Save`. The trained tensors never cross the package boundary; only the on-disk adapter does.
 
 ```go
-func (m *myModel) ApplyLoRA(cfg inference.LoRAConfig) inference.Adapter {
-    // Inject LoRA layers into cfg.TargetKeys projections.
-    // Return an Adapter that wraps the trainable parameters.
-    return &myAdapter{params: loraParams}
+tr, ok := model.(engine.TrainerModel)
+if !ok { /* engine has no trainer */ }
+trainer, err := tr.OpenTrainer(inference.TrainingConfig{LoRA: inference.LoRAConfig{Rank: 8, Alpha: 16}})
+for step := 0; step < steps; step++ {
+    loss, _ := trainer.Step(batch) // one AdamW step
 }
-
-func (m *myModel) Encode(text string) []int32 {
-    return m.tokeniser.Encode(text)
-}
-
-func (m *myModel) Decode(ids []int32) string {
-    return m.tokeniser.Decode(ids)
-}
-
-func (m *myModel) NumLayers() int {
-    return m.config.NumLayers
-}
+_ = trainer.Save("/models/lora/domain-v1")
 ```
 
-The `Adapter` returned by `ApplyLoRA` must implement `TotalParams()` and `Save()`:
-
-```go
-type myAdapter struct {
-    params []trainableParam
-}
-
-func (a *myAdapter) TotalParams() int {
-    total := 0
-    for _, p := range a.params {
-        total += p.NumElements()
-    }
-    return total
-}
-
-func (a *myAdapter) Save(path string) error {
-    // Write adapter weights to safetensors format.
-    return writeSafetensors(path, a.params)
-}
-```
+The root package also defines an older capability interface, `TrainableModel` (`ApplyLoRA`/`Encode`/`Decode`/`NumLayers`) with an `Adapter` return, which `LoadTrainable` asserts — but no in-tree engine implements it today. Prefer the `engine.Trainer` seam.
 
 ### Step 5 (optional): Support attention inspection
-
-If your backend can extract attention vectors from the KV cache, implement `AttentionInspector`:
 
 ```go
 func (m *myModel) InspectAttention(ctx context.Context, prompt string, opts ...inference.GenerateOption) (*inference.AttentionSnapshot, error) {
@@ -246,7 +226,7 @@ func (m *myModel) InspectAttention(ctx context.Context, prompt string, opts ...i
         NumHeads:     m.numKVHeads,
         SeqLen:       seqLen,
         HeadDim:      m.headDim,
-        Keys:         keys,    // [layer][head] -> flat []float32
+        Keys:         keys, // [layer][head] → flat []float32
         Architecture: m.arch,
     }, nil
 }
@@ -256,22 +236,18 @@ func (m *myModel) InspectAttention(ctx context.Context, prompt string, opts ...i
 
 ## Model discovery
 
-`Discover` scans a directory for model directories, useful for building model selection UIs or inventory tools.
+`Discover` walks a directory tree for model directories — useful for model-selection UIs or inventory tools.
 
 ```go
 func Discover(baseDir string) iter.Seq[DiscoveredModel]
 ```
 
-A valid model directory must contain:
-- `config.json` — parsed for `model_type` and optional `quantization` fields
-- At least one `.safetensors` file
-
-The function scans one level deep (immediate subdirectories of `baseDir`). It also checks `baseDir` itself, so passing a direct model path works:
+A valid model directory contains `config.json` (parsed for `model_type` and optional quantisation fields) and at least one `.safetensors` file. The walk is **recursive** (every subdirectory under `baseDir`) and also probes `baseDir` itself, so a direct model path works. It is lazy — `break` stops the scan early.
 
 ```go
 // Scan a models directory
 for m := range inference.Discover("/path/to/models/") {
-    fmt.Printf("%s — %s (%d files)\n", m.Path, m.ModelType, m.NumFiles)
+    fmt.Printf("%s — %s (%d files, %s)\n", m.Path, m.ModelType, m.NumFiles, m.Format)
 }
 
 // Check a single model directory
@@ -282,16 +258,14 @@ for m := range inference.Discover("/path/to/models/gemma3-1b") {
 
 ---
 
-## Existing backends
+## Registered backends in this repository
 
-| Backend | Package | Platform | Registration |
-|---------|---------|----------|-------------|
-| `metal` | go-mlx | darwin/arm64 | `//go:build darwin && arm64` |
-| `rocm` | go-rocm | linux/amd64 | `//go:build linux && amd64` |
-| `llama_cpp` | go-ml | any (HTTP) | No build tags (wraps llama.cpp HTTP server) |
+| Backend | Package | Platform | Registration tag |
+|---------|---------|----------|------------------|
+| `metal` | `engine/metal` (package `native`) | darwin/arm64 | `//go:build darwin && arm64` |
+| `rocm`  | `engine/hip` (package `hip`)       | linux/amd64  | `//go:build linux && amd64` |
 
-**metal** — Native Apple Metal GPU inference via CGO bindings. Supports `TrainableModel` and `AttentionInspector`. Highest throughput on Apple Silicon.
+**metal** — no-cgo Apple GPU engine dispatching MLX's compiled Metal kernels via the objc runtime; ICB replay path for decode/diffusion. Implements `VisionModel`; trains via the `engine.Trainer` seam.
 
-**rocm** — AMD ROCm GPU inference via a managed `llama-server` subprocess. Direct GPU memory access without HTTP overhead.
-
-**llama_cpp** — Wraps an external llama.cpp HTTP server as a `TextModel`. Works on any platform. Registered in go-ml's `backend_http_textmodel.go`.
+**rocm** — native ROCm/HIP engine on Linux/amd64 (GGUF today; the legacy `llama-server` bridge is behind a build tag). A portable stub reports unavailable on all other platforms.
+</content>

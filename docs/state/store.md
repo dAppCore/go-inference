@@ -2,8 +2,8 @@
 
 # state/store.go — chunk-addressable storage interfaces
 
-**Package**: `dappco.re/go/inference/state`
-**File**: `go/state/store.go`
+**Package**: `dappco.re/go/inference/model/state`
+**File**: `go/model/state/store.go`
 
 ## What this is
 
@@ -36,7 +36,9 @@ test harness; filestore is the raw local file log.
 | `Resolver` | text + ref metadata | upgrades a Store with offset info |
 | `BinaryResolver` | bytes | for non-text bundles (KV blocks, attention snapshots) |
 | `RefBinaryResolver` | bytes via `ChunkRef` | lets the store choose chunk id OR frame offset OR segment hint |
-| `URIResolver` | bytes via `uri` | for stores that index by external URI rather than int id |
+| `URIResolver` | text/bytes via `uri` | for stores that index by external URI rather than int id |
+| `BinaryBorrower` | borrowed bytes by chunk id | zero-copy view into store-owned storage (`BorrowedChunk` + optional `Release`) |
+| `RefBinaryBorrower` | borrowed bytes via `ChunkRef` | borrow variant that resolves a full ref |
 
 | Interface | Write mode | Notes |
 |-----------|-----------|-------|
@@ -45,9 +47,11 @@ test harness; filestore is the raw local file log.
 | `BinaryStreamWriter` | bytes via callback | for large bundles where buffering the whole payload would OOM the encoder |
 
 The package-level free functions (`Resolve`, `ResolveBytes`,
-`ResolveRefBytes`, `ResolveURI`) take a generic `Store` and probe up to
-the richer interface via type assertion — so callers always get bytes if
-they ask for bytes, even when only text is implemented.
+`ResolveRefBytes`, `ResolveURI`, plus `BorrowBytes` / `BorrowRefBytes`)
+take a generic `Store` and probe up to the richer interface via type
+assertion — so callers always get bytes if they ask for bytes, even when
+only text is implemented, and get a borrowed view when the store supports
+one, falling back to a plain resolve otherwise.
 
 ## DTOs
 
@@ -114,14 +118,13 @@ small backend can be 50 lines, not 500.
 
 ## Implemented by
 
-- `state/memory.go` — `InMemoryStore`. Test fixture + dev workflow.
-- `state/filestore/store.go` — raw file log (planned canonical for
-  CoreAgent on-disk bundles).
-- `go-mlx/pkg/memvid/filestore` — deprecated compatibility path.
+- `model/state/memory.go` — `InMemoryStore`. Test fixture + dev workflow.
+- `model/state/filestore/store.go` — raw append-only file log (canonical
+  for CoreAgent on-disk bundles).
 
 ## Consumed by
 
-- `state/agent_memory.go` — Wake/Sleep/Fork hold a `Store any` and dial
-  through these interfaces
-- `go-mlx/pkg/memvid` — deprecated compatibility import path for older
-  encoder/decoder callers
+- `model/state/agent_memory.go` — Wake/Sleep/Fork hold a `Store any` and
+  dial through these interfaces
+- `model/state/session/` — the live session resolves KV/probe chunks
+  through these interfaces during wake
