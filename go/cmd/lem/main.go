@@ -63,6 +63,12 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runServeCommand(ctx, args[1:], stdout, stderr)
 	case "generate":
 		return runGenerateCommand(ctx, args[1:], stdout, stderr)
+	case "ssd":
+		return runSSDCommand(ctx, args[1:], stdout, stderr)
+	case "sft":
+		return runSFTCommand(ctx, args[1:], stdout, stderr)
+	case "tune":
+		return runTuneCommand(ctx, args[1:], stdout, stderr)
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return 0
@@ -80,6 +86,11 @@ func printUsage(w io.Writer) {
 	core.WriteString(w, "Run inference\n")
 	core.WriteString(w, "  serve               host OpenAI/Anthropic/Ollama HTTP API for a loaded model\n")
 	core.WriteString(w, "  generate            one-shot generate + decode tok/s (no serve; like-for-like bench)\n")
+	core.WriteString(w, "\n")
+	core.WriteString(w, "Train\n")
+	core.WriteString(w, "  ssd                 self-distillation sampling: sample the frozen base, capture the trace\n")
+	core.WriteString(w, "  sft                 LoRA supervised fine-tuning through the engine trainer seam\n")
+	core.WriteString(w, "  tune                measure + persist the best MTP draft block as a serve profile\n")
 	core.WriteString(w, "\n")
 	core.WriteString(w, "Examples\n")
 	core.WriteString(w, core.Sprintf("  %s serve --model ~/models/gemma-4-e2b-it-4bit         # OpenAI HTTP on :36911\n", name))
