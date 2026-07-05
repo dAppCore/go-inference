@@ -20,6 +20,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/serving"
 )
 
@@ -130,6 +131,7 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 	}
 	defer tm.Close()
 	noteCacheKnobs(cfg, tm)
+	noteKVStorageInert(cfg) // -kv-storage bites only on the -state sleep path
 
 	// Gate images on the model's neutral vision capability, exactly as serve's
 	// chat-completions handler does before prefill.
@@ -251,13 +253,14 @@ func tokPerSec(ms float64) float64 {
 	return 1000.0 / ms
 }
 
-// noteCacheKnobs prints an honest, capability-driven note for the -kv-cache /
-// -kv-storage overrides. The loaded engine reports which KV cache modes it
-// honours (inference.CapabilityReport.CacheModes), so a requested mode outside
-// that set is reported as ignored rather than silently dropped. The metal engine
-// reports a single native cache and honours no go-mlx-era selector (fp16 / q8 /
-// kq8vq4 / turboquant), so any override lands here naming what is supported; a
-// future engine that honours a selector lists it and only an unknown mode notes.
+// noteCacheKnobs prints an honest, capability-driven note for the -kv-cache
+// override — the LIVE decode cache. The loaded engine reports which KV cache
+// modes it honours (inference.CapabilityReport.CacheModes); the metal engine
+// runs a single native cache and honours no go-mlx-era live selector (fp16 / q8
+// / kq8vq4 / turboquant), so any override lands here naming what is supported. A
+// future engine that honours a live selector lists it and only an unknown mode
+// notes. -kv-storage is the SNAPSHOT-storage knob, resolved separately (it is
+// engine-neutral — the kv.Encoding set — and only bites on the -state path).
 func noteCacheKnobs(cfg Config, tm inference.TextModel) {
 	if req := core.Trim(cfg.KVCacheMode); req != "" {
 		modes := reportedCacheModes(tm)
@@ -266,9 +269,44 @@ func noteCacheKnobs(cfg Config, tm inference.TextModel) {
 				cfg.KVCacheMode, cacheModesSuffix(modes))
 		}
 	}
-	if req := core.Trim(cfg.KVStorage); req != "" {
-		printNote(cfg.Log, "generate: -kv-storage %q is not honoured by this engine; it runs its native KV storage dtype. Override ignored.", cfg.KVStorage)
+}
+
+// kvStorageEncoding resolves the -kv-storage flag to a portable KV snapshot
+// kv.Encoding and classifies it. recognised is false for a value outside the
+// kv.Encoding set (the go-mlx-era fp16/bf16 storage-dtype vocabulary never mapped
+// to a distinct portable encoding here). liveStateReady is true only for native:
+// a live metal -state sleep captures raw bf16 KV tensors, and the q8 / float32
+// snapshot encoders need per-head float32 that the block-capture path does not
+// yet feed the quantiser (encoding a raw tensor as non-native fails with
+// errRawTensorNeedsNative). q8/float32 stay recognised but fall back to native
+// rather than hard-erroring the sleep, until the snapshot-codec follow-up lands.
+// The encodings live in the kv package — engine-neutral — so this validates
+// directly rather than through the engine capability seam.
+func kvStorageEncoding(raw string) (enc kv.Encoding, recognised, liveStateReady bool) {
+	switch kv.Encoding(core.Lower(core.Trim(raw))) {
+	case "", kv.EncodingNative:
+		return kv.EncodingNative, true, true
+	case kv.EncodingQ8:
+		return kv.EncodingQ8, true, false
+	case kv.KVSnapshotEncodingFloat32:
+		return kv.KVSnapshotEncodingFloat32, true, false
+	default:
+		return kv.EncodingNative, false, false
 	}
+}
+
+// noteKVStorageInert reports that -kv-storage has no effect on a stateless run:
+// only the -state sleep path persists KV, so a bench/one-shot generate stores
+// nothing to encode. An unrecognised value is flagged here too.
+func noteKVStorageInert(cfg Config) {
+	raw := core.Trim(cfg.KVStorage)
+	if raw == "" {
+		return
+	}
+	if _, recognised, _ := kvStorageEncoding(raw); !recognised {
+		printNote(cfg.Log, "generate: -kv-storage %q is not a known KV snapshot encoding (native, q8, float32)", cfg.KVStorage)
+	}
+	printNote(cfg.Log, "generate: -kv-storage selects the -state snapshot encoding; this stateless run persists no KV, so it has no effect here")
 }
 
 // reportedCacheModes returns the KV cache modes the loaded model's engine

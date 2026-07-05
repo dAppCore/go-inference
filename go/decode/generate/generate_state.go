@@ -8,6 +8,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/model/spine"
 	"dappco.re/go/inference/model/state"
 	"dappco.re/go/inference/model/state/agent"
@@ -94,6 +95,26 @@ func runStateSession(ctx context.Context, cfg Config, storePath string, store *f
 	entryURI := "mlx://agent/" + name
 	indexURI := entryURI + "/index"
 
+	// -kv-storage selects the portable KV snapshot encoding this sleep persists.
+	// native keeps the captured dtype (bf16); q8/float32 are recognised but need a
+	// snapshot-codec follow-up before a live metal sleep can produce them (the
+	// block capture feeds the quantiser raw bf16), so they fall back to native
+	// with an honest note rather than hard-erroring the sleep. Engine-neutral —
+	// the kv.Encoding set, defaulted to native by SleepBlockOptions.
+	kvEncoding, recognised, liveStateReady := kvStorageEncoding(cfg.KVStorage)
+	if raw := core.Trim(cfg.KVStorage); raw != "" {
+		switch {
+		case !recognised:
+			printNote(cfg.Log, "generate: -kv-storage %q is not a known KV snapshot encoding (native, q8, float32); sleeping as native", cfg.KVStorage)
+			kvEncoding = kv.EncodingNative
+		case !liveStateReady:
+			printNote(cfg.Log, "generate: -kv-storage %q is not yet produce-able from a live -state sleep (the block capture emits raw bf16; q8/float32 need per-head float32 — a snapshot-codec follow-up); sleeping as native", cfg.KVStorage)
+			kvEncoding = kv.EncodingNative
+		default:
+			printNote(cfg.Log, "generate: -state sleep stores KV as %q", string(kvEncoding))
+		}
+	}
+
 	woke := false
 	var wakeDur, prefillDur time.Duration
 	var wakeReport *agent.WakeReport
@@ -148,7 +169,11 @@ func runStateSession(ctx context.Context, cfg Config, storePath string, store *f
 	}
 
 	start = time.Now()
-	sleepReport, err := sess.SleepAgentMemory(ctx, store, agent.SleepOptions{EntryURI: entryURI, Title: name})
+	sleepReport, err := sess.SleepAgentMemory(ctx, store, agent.SleepOptions{
+		EntryURI:     entryURI,
+		Title:        name,
+		BlockOptions: kv.StateBlockOptions{KVEncoding: kvEncoding},
+	})
 	if err != nil {
 		return core.E("generate.state", core.Sprintf("sleep %s", name), err)
 	}
