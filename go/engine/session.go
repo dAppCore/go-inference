@@ -296,6 +296,18 @@ func (s *SessionHandle) RangeKVBlocks(ctx context.Context, blockSize int, opts k
 	return nil
 }
 
+// RestoreKV is the durable-state alias for RestoreFromKV. The conversation-state
+// session (model/state/session) probes its wrapped handle for a
+// RestoreKV(ctx, *kv.Snapshot) method — its own nativeSessionRestorer seam, named
+// before the inference.KVRestorer contract settled on RestoreFromKV — to wake a
+// stored KV prefix (WakeAgentMemory's snapshot-restore strategy). Without this
+// alias the wrapper satisfied only inference.KVRestorer, so `lem generate -state`
+// wake fell through to "native model session does not support KV restore" for
+// every encoding. Delegating keeps one restore implementation behind both names.
+func (s *SessionHandle) RestoreKV(ctx context.Context, snapshot *kv.Snapshot) error {
+	return s.RestoreFromKV(ctx, snapshot)
+}
+
 // RestoreFromKV loads a portable kv.Snapshot into the retained cache so the next
 // generation continues from it (inference.KVRestorer). The engine consumes the
 // snapshot in kv.Snapshot terms directly (Session.RestoreFromKV).
