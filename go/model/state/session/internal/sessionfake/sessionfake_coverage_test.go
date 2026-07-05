@@ -9,8 +9,8 @@ import (
 	"testing"
 
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/eval/probe"
+	"dappco.re/go/inference/kv"
 )
 
 // Coverage tests for the recording fake. Every method here is exercised

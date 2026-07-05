@@ -13,10 +13,10 @@ package memory
 import (
 	"time"
 
-	mp "dappco.re/go/inference/model/modelpack"
-	"dappco.re/go/inference/eval/profile"
-	"dappco.re/go/inference/model/quant/jang"
 	"dappco.re/go/inference/engine/scheme"
+	"dappco.re/go/inference/eval/profile"
+	mp "dappco.re/go/inference/model/modelpack"
+	"dappco.re/go/inference/model/quant/jang"
 )
 
 // GiB is the number of bytes in a gibibyte.

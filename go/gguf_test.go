@@ -94,8 +94,9 @@ func writeMinimalGGUFAt(t *testing.T, path string, metadata map[string]any) stri
 // in `go test`.
 //
 // Baselines (Apple M3 Ultra, -benchmem):
-//   pre-bufio  (per-entry syscalls): 22 allocs / ~437µs
-//   post-bufio (one buffer fill):    23 allocs / ~23µs   ← current
+//
+//	pre-bufio  (per-entry syscalls): 22 allocs / ~437µs
+//	post-bufio (one buffer fill):    23 allocs / ~23µs   ← current
 //
 // Alloc +1 is from bufio.Reader's internal buffer allocation; time
 // drops 18.7x because skipGGUFValue serves from buffered bytes
@@ -103,8 +104,8 @@ func writeMinimalGGUFAt(t *testing.T, path string, metadata map[string]any) stri
 // load is one-shot, not per-token.
 //
 // Twin assertions:
-//   1. ALLOCS — stays below ceiling (regression gate)
-//   2. OUTPUT — the parsed GGUFInfo matches expected values (behaviour gate)
+//  1. ALLOCS — stays below ceiling (regression gate)
+//  2. OUTPUT — the parsed GGUFInfo matches expected values (behaviour gate)
 //
 // The output assertion is the TDD anchor — any refactor that produces
 // a different GGUFInfo for the same fixture fails loud BEFORE the

@@ -8,13 +8,13 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/decode/parser"
 	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/kv/blockcache"
 	"dappco.re/go/inference/model/bundle"
 	"dappco.re/go/inference/model/spine"
 	state "dappco.re/go/inference/model/state"
 	"dappco.re/go/inference/model/state/agent"
-	"dappco.re/go/inference/decode/parser"
 )
 
 // Constant validation errors hoisted to package vars — each previously

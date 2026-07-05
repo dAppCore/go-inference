@@ -397,8 +397,9 @@ func TestDiscover_Good_RecursiveEarlyBreak(t *testing.T) {
 // imports go-inference for Discover pays this per app boot).
 //
 // Baselines (Apple M3 Ultra, -benchmem, 10 junk dirs):
-//   alpha.95 (per-call core.New): 254 allocs / 26616 B
-//   sync.Once cached Core:        208 allocs / 24064 B  ← current
+//
+//	alpha.95 (per-call core.New): 254 allocs / 26616 B
+//	sync.Once cached Core:        208 allocs / 24064 B  ← current
 //
 // The ceiling is set with deliberate headroom — small drift from
 // stdlib internals across Go releases is acceptable; a fix that

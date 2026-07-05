@@ -14,9 +14,9 @@ package spine
 import (
 	"testing"
 
+	"dappco.re/go/inference/decode/parser"
 	"dappco.re/go/inference/kv/memory"
 	"dappco.re/go/inference/model/bundle"
-	"dappco.re/go/inference/decode/parser"
 	"dappco.re/go/inference/train/lora"
 )
 
