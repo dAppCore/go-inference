@@ -696,16 +696,25 @@ func nativeKVLayerBlockSnapshot(block SessionStateLayerBlock, tokenCount int, ra
 	valueSlab := make([]byte, len(block.ValueBytes))
 	nativeKVTokenRowsToLayerSlab(keySlab, block.KeyBytes, tokenCount, block.KVHeads, block.HeadDim)
 	nativeKVTokenRowsToLayerSlab(valueSlab, block.ValueBytes, tokenCount, block.KVHeads, block.HeadDim)
-	shape := []int32{1, int32(block.KVHeads), int32(tokenCount), int32(block.HeadDim)}
-	layer.KeyDType = nativeKVSnapshotDTypeBF16
-	layer.KeyBytes = keySlab
-	layer.KeyShape = append([]int32(nil), shape...)
-	layer.ValueDType = nativeKVSnapshotDTypeBF16
-	layer.ValueBytes = valueSlab
-	layer.ValueShape = append([]int32(nil), shape...)
-	if !rawOnly {
-		layer.Heads = nativeKVLayerSlabHeads(keySlab, valueSlab, tokenCount, block.KVHeads, block.HeadDim)
+	if rawOnly {
+		// Native (fast) path: keep the layer-level bf16 slab so restore reads it
+		// directly (nativeKVLayerSnapshotSlabs' raw branch).
+		shape := []int32{1, int32(block.KVHeads), int32(tokenCount), int32(block.HeadDim)}
+		layer.KeyDType = nativeKVSnapshotDTypeBF16
+		layer.KeyBytes = keySlab
+		layer.KeyShape = append([]int32(nil), shape...)
+		layer.ValueDType = nativeKVSnapshotDTypeBF16
+		layer.ValueBytes = valueSlab
+		layer.ValueShape = append([]int32(nil), shape...)
+		return layer, nil
 	}
+	// Non-native encoding (q8/float32): emit ONLY the per-head float32 tensors.
+	// The layer-level raw bf16 slab cannot encode as anything but native (the
+	// snapshot encoder rejects a raw tensor under q8/float32 with
+	// errRawTensorNeedsNative), while the per-head float32 quantises cleanly; and
+	// dropping the redundant bf16 copy makes the q8 store actually smaller. Restore
+	// falls to nativeKVHeadSnapshotSlabs when the layer-level slab is absent.
+	layer.Heads = nativeKVLayerSlabHeads(keySlab, valueSlab, tokenCount, block.KVHeads, block.HeadDim)
 	return layer, nil
 }
 
