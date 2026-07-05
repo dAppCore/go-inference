@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/experiments"
+	"dappco.re/go/inference/eval/experiments"
 )
 
 // Package-level sinks keep the compiler from eliminating the benchmarked calls.

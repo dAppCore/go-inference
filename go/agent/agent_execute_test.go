@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/datapipe"
+	"dappco.re/go/inference/eval/datapipe"
 )
 
 // runAgentLoopInfluxServer returns an httptest server that answers InfluxDB

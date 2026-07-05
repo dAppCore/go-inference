@@ -8,7 +8,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/safetensors"
-	"dappco.re/go/inference/profile"
+	"dappco.re/go/inference/eval/profile"
 )
 
 // audio_assemble.go is the pure-Go sibling of pkg/metal/model/gemma4/audio_encoder_load.go. It

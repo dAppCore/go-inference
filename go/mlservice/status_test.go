@@ -2,7 +2,7 @@ package mlservice
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/datapipe"
+	"dappco.re/go/inference/eval/datapipe"
 )
 
 func TestStatus_PrintStatus_Good(t *core.T) {

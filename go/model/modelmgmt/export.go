@@ -6,7 +6,7 @@ import (
 
 	"dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/score"
+	"dappco.re/go/inference/eval/score"
 	coreio "dappco.re/go/io"
 )
 

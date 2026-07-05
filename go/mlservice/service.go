@@ -9,7 +9,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/capability"
-	"dappco.re/go/inference/score"
+	"dappco.re/go/inference/eval/score"
 	"dappco.re/go/inference/serving"
 )
 

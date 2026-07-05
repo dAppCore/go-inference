@@ -19,7 +19,7 @@ import (
 	"testing"
 
 	"dappco.re/go/inference"
-	prof "dappco.re/go/inference/profile"
+	prof "dappco.re/go/inference/eval/profile"
 )
 
 // Sinks defeat compiler DCE.

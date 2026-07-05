@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/score"
+	"dappco.re/go/inference/eval/score"
 	"dappco.re/go/inference/serving"
 	coreio "dappco.re/go/io"
 	"dappco.re/go/store"

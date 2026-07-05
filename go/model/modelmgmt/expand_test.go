@@ -4,8 +4,8 @@ import (
 	"context"
 
 	"dappco.re/go"
-	"dappco.re/go/inference/datapipe"
-	"dappco.re/go/inference/score"
+	"dappco.re/go/inference/eval/datapipe"
+	"dappco.re/go/inference/eval/score"
 	"dappco.re/go/inference/serving"
 )
 

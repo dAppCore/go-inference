@@ -4,7 +4,7 @@ import (
 	"io"
 
 	"dappco.re/go"
-	"dappco.re/go/inference/datapipe"
+	"dappco.re/go/inference/eval/datapipe"
 )
 
 // tableOrder defines the canonical display order for inventory tables.

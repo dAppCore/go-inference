@@ -5,7 +5,7 @@ package profile_test
 import (
 	"testing"
 
-	"dappco.re/go/inference/profile"
+	"dappco.re/go/inference/eval/profile"
 )
 
 // TestResolve_ResolveArchitecture_Good pins the full config-probe →

@@ -14,7 +14,7 @@ package profile_test
 import (
 	"fmt"
 
-	prof "dappco.re/go/inference/profile"
+	prof "dappco.re/go/inference/eval/profile"
 )
 
 // NormalizeArchitecture canonicalises a model_type identifier to the stable id

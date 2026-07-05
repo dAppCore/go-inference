@@ -17,7 +17,7 @@ import (
 	"dappco.re/go/inference/model/state/agent"
 	"dappco.re/go/inference/model/state/session/internal/sessionfake"
 	"dappco.re/go/inference/parser"
-	"dappco.re/go/inference/probe"
+	"dappco.re/go/inference/eval/probe"
 )
 
 // Local inference.GenerateOption builders — the WithX functional options are
