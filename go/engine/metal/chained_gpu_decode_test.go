@@ -14,6 +14,7 @@ import (
 
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // pleQuantModel assembles a small e2b-shaped PLE quant model (4-bit main+PLE embedding, bf16 PLE
@@ -1383,4 +1384,119 @@ func TestDensePipelinedGPUDecodeMatchesHost(t *testing.T) {
 		}
 	}
 	t.Logf("dense host/chained/pipelined identical: %v", hostGen)
+}
+
+// qatPLEQuantModel is pleQuantModel with the QAT twist: the per-layer model
+// projection ships QUANTISED (own gs/bits) instead of bf16 — the shape of the
+// gemma-4-E2B/E4B-it-qat-4bit conversions.
+func qatPLEQuantModel(t testing.TB, numLayers, dFF, vocab, kvShared int) (*QuantModel, model.Arch) {
+	const dModel, nHeads, nKV, headDim = 128, 2, 1, 64
+	const pliDim, gs, bits = 64, 64, 4
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+		HiddenSizePerLayerInput: pliDim, VocabSizePerLayerInput: vocab,
+		Quantization:      &model.QuantConfig{GroupSize: gs, Bits: bits},
+		NumKVSharedLayers: kvShared,
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	ts := quantGemma4Tensors(t, arch, gs, bits)
+	addPLETensors(t, ts, arch, gs, bits)
+	// Replace the bf16 projection with a quantised one — the qat difference.
+	plDim := numLayers * pliDim
+	p, s, b := quantizeProj(t, plDim, dModel, gs, bits, 977)
+	delete(ts, "model.per_layer_model_projection.weight")
+	ts["model.per_layer_model_projection.weight"] = safetensors.Tensor{Dtype: "U32", Shape: []int{plDim, dModel * bits / 32}, Data: p}
+	ts["model.per_layer_model_projection.scales"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{plDim, dModel / gs}, Data: s}
+	ts["model.per_layer_model_projection.biases"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{plDim, dModel / gs}, Data: b}
+	lm, err := model.Assemble(ts, arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	g, err := loadedToQuant(lm, gs, bits)
+	if err != nil {
+		t.Fatalf("loadedToQuant: %v", err)
+	}
+	if !g.HasPLE() {
+		t.Fatal("fixture should have the per-layer-input tower")
+	}
+	if len(g.PerLayerModelProjScales) == 0 || g.PerLayerModelProjGS <= 0 {
+		t.Fatal("fixture projection must be quantised (the qat shape)")
+	}
+	return g, arch
+}
+
+// TestQATGPUDecodeSeamEngages pins that the qat shape (quantised PLE
+// projection) gets the GPU next-inputs seam — the gate the qat e2b/e4b
+// chained/pipelined decode rides.
+func TestQATGPUDecodeSeamEngages(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	g, arch := qatPLEQuantModel(t, 3, 256, 32, 0)
+	sess, err := NewArchQuantSession(g, arch, 24)
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	if sess.state.icb == nil {
+		t.Fatal("qat fixture: ICB not recorded")
+	}
+	if sess.encNextInputsGPU == nil {
+		t.Fatal("qat fixture: GPU next-inputs seam NOT wired (chained/pipelined inactive)")
+	}
+	if sess.plScratchNew == nil {
+		t.Fatal("qat fixture: plScratchNew NOT set (chain gates fail)")
+	}
+}
+
+// TestQATPipelinedGPUDecodeMatchesHost is the qat sibling of
+// TestDensePipelinedGPUDecodeMatchesHost: host loop, chained-GPU and pipelined
+// lanes must produce identical tokens on the quantised-projection PLE fixture.
+func TestQATPipelinedGPUDecodeMatchesHost(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	g, arch := qatPLEQuantModel(t, 3, 256, 32, 0)
+	const maxLen = 24
+	prompt := []int32{1, 5, 3, 2}
+	const n = 12
+
+	run := func(host, pipe bool) []int32 {
+		oldChain := chainedGPUInputsDisabled
+		oldPipe := pipelinedGPUDecodeEnabled
+		defer func() {
+			chainedGPUInputsDisabled = oldChain
+			pipelinedGPUDecodeEnabled = oldPipe
+		}()
+		chainedGPUInputsDisabled = host
+		pipelinedGPUDecodeEnabled = pipe
+		sess, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("session (host=%v pipe=%v): %v", host, pipe, err)
+		}
+		gen, err := sess.Generate(prompt, n, -1)
+		if err != nil {
+			t.Fatalf("generate (host=%v pipe=%v): %v", host, pipe, err)
+		}
+		return gen
+	}
+
+	hostGen := run(true, false)
+	chainGen := run(false, false)
+	pipeGen := run(false, true)
+	if len(hostGen) != n {
+		t.Fatalf("host generated %d tokens, want %d", len(hostGen), n)
+	}
+	for i := range hostGen {
+		if chainGen[i] != hostGen[i] {
+			t.Fatalf("token %d: chained %d != host %d (chain=%v host=%v)", i, chainGen[i], hostGen[i], chainGen, hostGen)
+		}
+		if pipeGen[i] != hostGen[i] {
+			t.Fatalf("token %d: pipelined %d != host %d (pipe=%v host=%v)", i, pipeGen[i], hostGen[i], pipeGen, hostGen)
+		}
+	}
+	t.Logf("qat host/chained/pipelined identical: %v", hostGen)
 }

@@ -904,6 +904,32 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 					return encPerLayerInputsGPUObject(enc, gpso, tokenBuf, embOut, plePackedBuf, pleScalesBuf, pleBiasesBuf, 0, 0, 0, projWBuf, projWOff, pleNormBuf, sc, numLayers, pliDim, dModel, gs, bits, embScalePLE, arch.Eps)
 				}
 			}
+			// GPU next-inputs seam, QAT shape: same PLE tower but the per-layer model
+			// projection ships QUANTISED (own gs/bits from the shapes) — the projection
+			// matvec runs as the standard steel qmv instead of the bf16 gemv. This is
+			// what lets qat e2b/e4b ride the chained/pipelined decode like the plain
+			// 4-bit conversions do.
+			if bits == 4 && len(g.EmbedPerLayerScales) > 0 && len(g.PerLayerModelProjScales) > 0 &&
+				g.PerLayerModelProjGS > 0 && g.PerLayerModelProjBits > 0 {
+				numLayers, pliDim, dModel := len(arch.Layer), arch.PerLayerInputHidden, arch.Hidden
+				plDim := numLayers * pliDim
+				embScalePLE := float32(math.Sqrt(float64(pliDim)))
+				projScale := float32(1.0 / math.Sqrt(float64(dModel)))
+				projGS, projBits := g.PerLayerModelProjGS, g.PerLayerModelProjBits
+				sess.plScratchNew = func() *plGPUScratch { return newPLGPUScratch(plDim, projScale) }
+				embedPackedBuf, embedScalesBuf, embedBiasesBuf := residentBytes(g.Embed), residentBytes(g.EmbedScales), residentBytes(g.EmbedBiases)
+				plePackedBuf, pleScalesBuf, pleBiasesBuf := residentBytes(g.EmbedPerLayer), residentBytes(g.EmbedPerLayerScales), residentBytes(g.EmbedPerLayerBiases)
+				pleNormBuf := residentBytes(g.PerLayerProjNormW)
+				projPackedBuf, projScalesBuf, projBiasesBuf := residentBytes(g.PerLayerModelProjW), residentBytes(g.PerLayerModelProjScales), residentBytes(g.PerLayerModelProjBiases)
+				sess.encNextInputsGPU = func(enc metal.MTLComputeCommandEncoderObject, tokenBuf, embOut metal.MTLBuffer, sc *plGPUScratch) error {
+					gpso, gerr := embedGatherPipeline()
+					if gerr != nil {
+						return gerr
+					}
+					encEmbedGatherQuantObject(enc, gpso, tokenBuf, embedPackedBuf, embedScalesBuf, embedBiasesBuf, embOut, 0, 0, 0, dModel, gs, bits, embedScale)
+					return encPerLayerInputsGPUQuantProjObject(enc, gpso, tokenBuf, embOut, plePackedBuf, pleScalesBuf, pleBiasesBuf, 0, 0, 0, projPackedBuf, projScalesBuf, projBiasesBuf, projGS, projBits, pleNormBuf, sc, numLayers, pliDim, dModel, gs, bits, embScalePLE, arch.Eps)
+				}
+			}
 		} else if bits == 4 {
 			// GPU next-inputs seam, non-PLE dense (12B/31B): the only per-step input
 			// is the token's embedding, so the seam is the embed gather alone — no
