@@ -45,8 +45,7 @@ type attentionBlockKVScratchKey struct {
 }
 
 type attentionBlockKVScratchPool struct {
-	mu    sync.Mutex
-	items []*attentionBlockKVScratch
+	core.Pool[*attentionBlockKVScratch]
 }
 
 var attentionBlockKVScratchPools sync.Map
@@ -94,28 +93,6 @@ func putAttentionBlockKVScratch(s *attentionBlockKVScratch) {
 	if s != nil && s.kBytes > 0 && s.vBytes > 0 && s.k != nil && s.v != nil {
 		attentionBlockKVScratchPoolFor(s.kBytes, s.vBytes).Put(s)
 	}
-}
-
-func (p *attentionBlockKVScratchPool) Get() *attentionBlockKVScratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *attentionBlockKVScratchPool) Put(s *attentionBlockKVScratch) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 func (s *attentionBlockKVScratch) Close() {
