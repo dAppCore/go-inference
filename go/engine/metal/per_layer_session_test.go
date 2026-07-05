@@ -10,10 +10,10 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	coreio "dappco.re/go/io"
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
 	"dappco.re/go/inference/model/safetensors"
+	coreio "dappco.re/go/io"
 )
 
 // addPLETensors adds the gemma4 per-layer-input tower tensors (E2B/E4B) to a quant checkpoint:

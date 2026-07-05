@@ -6,11 +6,11 @@ package native
 
 import (
 	core "dappco.re/go"
-	coreio "dappco.re/go/io"
-	"dappco.re/go/inference/model/gguf"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/gguf"
 	"dappco.re/go/inference/model/safetensors"
 	"dappco.re/go/inference/tokenizer"
+	coreio "dappco.re/go/io"
 )
 
 // ResolveAssistantGGUFDrafterFile reports whether path is a GGUF

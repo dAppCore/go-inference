@@ -5,7 +5,7 @@ package kv
 import (
 	"testing"
 
-	"dappco.re/go/inference/scheme"
+	"dappco.re/go/inference/engine/scheme"
 )
 
 func TestCacheProvider_TurboQuantRegistered_Good(t *testing.T) {

@@ -5,7 +5,7 @@ package model
 import (
 	"testing"
 
-	"dappco.re/go/inference/scheme"
+	"dappco.re/go/inference/engine/scheme"
 )
 
 // fakeQuant is a minimal QuantMatVec for exercising the (backend,kind) registry —

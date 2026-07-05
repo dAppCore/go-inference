@@ -10,10 +10,10 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	coreio "dappco.re/go/io"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/mistral"
 	"dappco.re/go/inference/model/safetensors"
+	coreio "dappco.re/go/io"
 )
 
 // mistralBF16Tensors builds a synthetic Ministral-3 bf16 checkpoint under the real multimodal

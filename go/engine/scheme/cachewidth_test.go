@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"dappco.re/go/inference/scheme"
+	"dappco.re/go/inference/engine/scheme"
 )
 
 // TestCacheWidth_KVModesCarryWidth_Good asserts every builtin KV-cache mode

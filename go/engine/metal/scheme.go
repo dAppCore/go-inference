@@ -6,7 +6,7 @@ package native
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/scheme"
+	"dappco.re/go/inference/engine/scheme"
 )
 
 // scheme.go is native's consumption of the shared pkg/scheme registries (R4 + R5): it registers the

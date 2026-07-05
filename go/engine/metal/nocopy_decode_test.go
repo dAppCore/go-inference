@@ -10,10 +10,10 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	coreio "dappco.re/go/io"
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
 	"dappco.re/go/inference/model/safetensors"
+	coreio "dappco.re/go/io"
 )
 
 // writeShardedCheckpoint writes a tensor set to dir as a 2-shard checkpoint (index.json + two

@@ -18,7 +18,7 @@ import (
 	"testing"
 
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/enginetest"
+	"dappco.re/go/inference/engine/enginetest"
 )
 
 // TestMetalEngineConformanceSessionHandle runs the enginetest.SessionHandle
