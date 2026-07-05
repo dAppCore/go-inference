@@ -87,3 +87,20 @@ func TestPieceTimingEnabledAccumulates(t *testing.T) {
 		t.Fatalf("ptEnd enabled pieceNs[1] = %d, want > 0", pieceNs[1])
 	}
 }
+
+// TestSetPipelinedGPUDecode pins the exported A/B knob: it writes the package
+// toggle the greedy chain gates read, and restores cleanly for the bracketed
+// serial-lane measurement pattern its doc comment shows.
+func TestSetPipelinedGPUDecode(t *testing.T) {
+	old := pipelinedGPUDecodeEnabled
+	defer func() { pipelinedGPUDecodeEnabled = old }()
+
+	SetPipelinedGPUDecode(false)
+	if pipelinedGPUDecodeEnabled {
+		t.Fatal("SetPipelinedGPUDecode(false) left the pipelined decode enabled")
+	}
+	SetPipelinedGPUDecode(true)
+	if !pipelinedGPUDecodeEnabled {
+		t.Fatal("SetPipelinedGPUDecode(true) left the pipelined decode disabled")
+	}
+}

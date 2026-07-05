@@ -49,6 +49,13 @@ var (
 	pipelinedGPUDecodeEnabled = true
 )
 
+// SetPipelinedGPUDecode flips the submit-ahead decode default for the process — the
+// engine-level knob behind `lem generate -pipeline=false` (A/B: chained serial loop vs
+// 1-ahead pipelined). Sessions read the toggle per Generate call, so it applies to
+// sessions already open. SetPipelinedGPUDecode(false); defer SetPipelinedGPUDecode(true)
+// brackets a serial-lane measurement.
+func SetPipelinedGPUDecode(on bool) { pipelinedGPUDecodeEnabled = on }
+
 func ptStart() time.Time {
 	if pieceTimingOn {
 		return time.Now()
