@@ -2,8 +2,8 @@
 
 # state/identity.go — portable identity DTOs
 
-**Package**: `dappco.re/go/inference/state`
-**File**: `go/state/identity.go`
+**Package**: `dappco.re/go/inference/model/state`
+**File**: `go/model/state/identity.go`
 **Aliased into**: `dappco.re/go/inference` (via `identity.go` —
 `inference.ModelIdentity` etc. are aliases of these types)
 
@@ -36,7 +36,8 @@ Agent memory is about lifecycle (Wake/Sleep/Fork). Identity is about
 - A wake refuses to restore an adapter-on bundle into an adapter-off
   session (`AdapterIdentity.Hash` differs).
 - A wake records which runtime produced the bundle so audit can trace
-  divergent results back to "this bundle came from go-rocm vs go-mlx".
+  divergent results back to "this bundle came from `engine/hip` vs
+  `engine/metal`".
 
 `Bundle.KVRefs` / `ProbeRefs` / `StateRefs` are arrays of `StateRef`
 because one bundle commonly fans out to multiple blobs — KV blocks are
@@ -71,11 +72,10 @@ choices, not the option-function chain.
 
 ## Used by
 
-- `state/agent_memory.go` — `Ref` carries `StateRefs []StateRef`
-- `state/store.go` — chunk metadata
-- `go-mlx/state_bundle.go` — bundle encode/decode
-- `go-mlx/kv_snapshot.go` — snapshot/restore stores Bundle alongside KV
-  blocks
-- `go-ml/agent_eval.go` — eval reports embed `ModelIdentity` +
-  `AdapterIdentity` for reproducibility
-- `core/api` benchmark surface — bench reports carry `RuntimeIdentity`
+- `model/state/agent_memory.go` — `Ref` carries `StateRefs []StateRef`
+- `model/state/store.go` — chunk metadata
+- `model/state/session/` — bundle encode/decode; snapshot/restore stores
+  Bundle alongside KV blocks
+- `agent/` — eval reports embed `ModelIdentity` + `AdapterIdentity` for
+  reproducibility
+- `eval/` benchmark surface — bench reports carry `RuntimeIdentity`

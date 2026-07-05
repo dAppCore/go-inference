@@ -7,7 +7,7 @@
 
 ## What this is
 
-The contract surface for **fine-tuning** — LoRA adapter management, gradient steps, save/load. Backends that can train implement `TrainableModel`; the rest don't. Same pattern as the inspection interfaces in `contracts.go` — opt-in via type assertion.
+The **low-level contract seam** for fine-tuning: attach a LoRA adapter, tokenise, and report layer count. Backends that can train implement `TrainableModel`; the rest don't. Same pattern as the inspection interfaces in `contracts.go` — opt-in via type assertion. The optimiser, gradient computation and tensor creation live in the backend package itself; the actual training pipelines (LoRA SFT, self-distillation, MTP tuning) run through the `train/` package and `cmd/lem sft` / `ssd` / `tune`, driving a model through this seam.
 
 ## LoRAConfig
 
@@ -22,33 +22,30 @@ type LoRAConfig struct {
 
 `DefaultLoRAConfig()` — Rank=8, Alpha=16, TargetKeys=["q_proj","v_proj"], BFloat16=false.
 
-Backends that don't honour `BFloat16` ignore the field (still emit a probe event so the caller knows).
-
 ## Adapter
 
 ```go
 type Adapter interface {
-    // implementation-defined methods; the concrete type is backend-specific
-    // (e.g. *metal.LoRAAdapter for go-mlx)
+    TotalParams() int        // sum of injected adapter weight elements
+    Save(path string) error  // persist adapter weights to a safetensors file
 }
 ```
 
-`Adapter` is intentionally **interface-empty** — the concrete type lives in each backend. Consumers hold an `Adapter` reference for save/load/swap but never inspect its methods directly. The backend exposes the operations through its `TrainableModel`.
+The concrete type lives in each backend; consumers hold an `Adapter` returned by `ApplyLoRA` to report parameter count and save weights.
 
 ## TrainableModel
 
 ```go
 type TrainableModel interface {
     TextModel
-    AttachAdapter(cfg LoRAConfig) (Adapter, error)
-    DetachAdapter() error
-    Step(ctx, batch) (StepResult, error)        // one optimiser step
-    SaveAdapter(path string) error
-    LoadAdapter(path string) error
+    ApplyLoRA(cfg LoRAConfig) Adapter  // inject LoRA into target projections
+    Encode(text string) []int32        // tokenise via the model's tokeniser
+    Decode(ids []int32) string         // detokenise
+    NumLayers() int                    // transformer depth (sizes per-layer LoRA)
 }
 ```
 
-(Exact method shapes are backend-defined; this file holds the umbrella interface signature.)
+`ApplyLoRA` returns the `Adapter`; the training loop in `train/` uses `Encode` / `Decode` to build batches and `NumLayers` to size per-layer matrices. Backend-specific training operations (optimisers, gradient computation, tensor creation) are provided by the backend package directly (e.g. `engine/metal` for Apple GPU, `engine/hip` for AMD).
 
 ## LoadTrainable
 
@@ -56,7 +53,7 @@ type TrainableModel interface {
 inference.LoadTrainable(path, opts...) core.Result
 ```
 
-Top-level helper — same pattern as `LoadModel` but typed to `TrainableModel`. Backends that don't support training return a "trainable not supported on backend X" error.
+Top-level helper — same pattern as `LoadModel` but typed to `TrainableModel`; on `r.OK` the `Value` is a `TrainableModel`. A model loaded from a backend that doesn't implement `TrainableModel` is closed and the Result fails with `backend %q does not support training` (where `%q` is the model type).
 
 ## Why training is a separate interface
 
@@ -64,15 +61,12 @@ Most callers never train — they want inference. Forcing every backend to stub 
 
 ## Implemented by
 
-- `go-mlx` — full training surface: SFT, LoRA, GRPO, distillation
-- `go-rocm` — planned mirror
-- `go-ml` does NOT implement TrainableModel — it consumes trainable models via go-mlx
+- `engine/metal` — the in-repo training surface (LoRA apply + tokenise + layer count) the `train/` pipelines drive
+- `engine/hip` — the AMD/ROCm mirror
 
 ## Related
 
 - [capability.md](capability.md) — `CapabilityLoRATraining`, `CapabilityDistillation`, `CapabilityGRPO`
-- `go-mlx/docs/training/sft.md` (planned) — reference SFT implementation
-- `go-mlx/docs/training/lora_adapter.md` (planned) — LoRA Adapter concrete shape
-- `go-mlx/docs/training/grpo.md` (planned) — reasoning training loop
-- `go-mlx/docs/training/distill.md` (planned) — teacher/student distillation
+- [dataset.md](dataset.md) — `DatasetStream` + the `TrainingConfig` / `DistillConfig` / `GRPOConfig` envelopes the pipelines consume
+- `go/train/` — the SFT / self-distillation / MTP-tune implementations (`cmd/lem sft`, `ssd`, `tune`)
 - [../state/identity.md](../state/identity.md) — `AdapterIdentity` portable identity

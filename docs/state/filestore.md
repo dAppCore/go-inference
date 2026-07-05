@@ -2,8 +2,8 @@
 
 # state/filestore — append-only file-backed state store
 
-**Package**: `dappco.re/go/inference/state/filestore`
-**File**: `go/state/filestore/store.go`
+**Package**: `dappco.re/go/inference/model/state/filestore`
+**File**: `go/model/state/filestore/store.go`
 
 ## What this is
 
@@ -16,19 +16,20 @@ forms a write-ahead-log style history.
 ## File format
 
 ```
-+--------------------------+
-| MAGIC: "go-inference-..." | 31 bytes (or legacy go-mlx 25 bytes)
-+--------------------------+
-| Record 1                 |
-|  - magic "MVF1"  (4)     |
-|  - chunk_id     (8)      |
-|  - payload size (8)      |
-|  - meta size    (4)      |
-|  - payload bytes ...     |
-|  - meta JSON bytes ...   |
-+--------------------------+
-| Record 2 ...             |
-+--------------------------+
++-----------------------------------+
+| FILE MAGIC                        |  "go-inference-state-file-log-v1\n" (31 bytes)
+|                                   |  legacy: "go-mlx-memvid-file-log-v1\n" (26 bytes)
++-----------------------------------+
+| Record 1                          |
+|  - magic "MVF1"  (4)              |
+|  - chunk_id     (8)               |
+|  - payload size (8)               |
+|  - meta size    (4)               |
+|  - payload bytes ...              |
+|  - meta JSON bytes ...            |
++-----------------------------------+
+| Record 2 ...                      |
++-----------------------------------+
 ```
 
 `recordHeaderLen = 24` (4 + 8 + 8 + 4). The full record header tells
@@ -58,6 +59,9 @@ round-trip without rewrite. New writes always use the
 filestore.Create(ctx, path) (*Store, error)     // new file
 filestore.Open(ctx, path)   (*Store, error)     // read existing, rebuild index in RAM
 ```
+
+(`OpenWithSegmentAlias` and `OpenRegionWithSegmentAlias` handle relocated
+or region-embedded State files — see the source.)
 
 Once open, `*Store` satisfies `state.Store` + `state.Resolver` +
 `state.URIResolver` + `state.Writer` + `state.BinaryWriter`. Index is
@@ -93,8 +97,8 @@ the partial bytes are overwritten on the next Put.
 
 ## Consumed by
 
-- `go-mlx/cmd/violet` — when configured with a local `bundles_dir`
-- `go-mlx/agent_memory.go` — preferred Store for the Wake/Sleep loop
+- `cmd/lem` — when configured with a local bundles directory
+- `model/state/session/` — preferred Store for the Wake/Sleep loop
   when State video output isn't requested
 - Test harnesses that need cross-test persistence (filestore lives,
   in-memory dies on process exit)

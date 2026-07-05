@@ -7,7 +7,7 @@
 
 ## What this is
 
-A thin re-export layer. The identity types (`ModelIdentity`, `TokenizerIdentity`, etc.), the `Bundle` envelope, and project-seed helpers live in the `state` subpackage; this file aliases them into the parent `inference` package so consumers importing only `dappco.re/go/inference` see the common names.
+A thin re-export layer. The identity types (`ModelIdentity`, `TokenizerIdentity`, etc.), the `Bundle` envelope, and the project-seed helpers live in the `dappco.re/go/inference/model/state` subpackage; this file aliases them into the parent `inference` package so consumers importing only `dappco.re/go/inference` see the common names.
 
 Two real bits of code on top: `SamplerConfigFromGenerateConfig` + `GenerateConfigFromSamplerConfig`.
 
@@ -24,6 +24,8 @@ type StateBundle       = state.Bundle
 type ProjectSeed       = state.ProjectSeed
 ```
 
+The project-seed surface is re-exported in full: the `ProjectSeedMode`, `ProjectSeedOptions`, `ProjectSeedWakeOptions`, `ProjectSeedContinuationOptions`, `ProjectSeedContinuationPlan` and `WakeCompatibilityReport` types, the `ProjectSeedStateCheckpoint` / `ProjectSeedReuseCurrent` / `ProjectSeedSummaryWindow` / `ProjectSeedHybrid` constants, and the `NewProjectSeed` / `CheckWakeCompatibility` functions (`var` aliases). See [../state/project_seed.md](../state/project_seed.md).
+
 A consumer writes:
 
 ```go
@@ -35,7 +37,7 @@ func report(c inference.CapabilityReport) {
 }
 ```
 
-— and never needs to import `inference/state` directly.
+— and never needs to import `inference/model/state` directly.
 
 ## SamplerConfigFromGenerateConfig
 

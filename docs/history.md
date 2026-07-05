@@ -1,10 +1,20 @@
 # Project History — go-inference
 
-## Origin
+> **Where it is now:** go-inference is **the** sovereign inference repo for the
+> Core Go ecosystem — engines, serving, training, the `lem` binary, and the GUI
+> all live here. go-mlx and go-rocm are retired. The sections below trace the
+> journey: the repo began (Feb 2026) as a tiny zero-dependency *contract* package
+> shared by separate backend repos, and consolidated (2026) into the single
+> repository it is today. Read the early "Origin"/"Phase" sections as history of
+> the shared-contract era, and the "Consolidation" section for what happened
+> since. Current design lives in [README](../README.md),
+> [architecture.md](architecture.md), and [engine-merge.md](engine-merge.md).
+
+## Origin (the shared-contract era)
 
 `go-inference` was created on 19 February 2026 to solve a dependency inversion problem in the Core Go ecosystem.
 
-`go-mlx` (Apple Metal inference on darwin/arm64) and `go-rocm` (AMD ROCm inference on linux/amd64) both needed to expose the same `TextModel` interface so that `go-ml` and `go-ai` could treat them interchangeably. The two backends cannot import each other — each carries platform-specific CGO or subprocess dependencies that would break cross-platform compilation.
+`go-mlx` (Apple Metal inference on darwin/arm64) and `go-rocm` (AMD ROCm inference on linux/amd64) both needed to expose the same `TextModel` interface so that `go-ml` and `go-ai` could treat them interchangeably. The two backends cannot import each other — each carries platform-specific CGO or subprocess dependencies that would break cross-platform compilation. (Both backend repos were later retired and their engines pulled into this repo — see **Consolidation** below.)
 
 Three options were considered:
 
@@ -86,35 +96,54 @@ All three backends migrated to implement `inference.TextModel` and register via 
 - **go-rocm** (`register_rocm.go`, linux/amd64): `rocmBackend{}` spawns and manages a `llama-server` subprocess. 5,794 LOC. Build-tagged `linux && amd64`.
 - **go-ml** (`adapter.go`, `backend_http_textmodel.go`): Two-way bridge. `adapter.go` (118 LOC) wraps `inference.TextModel` into `go-ml`'s internal `Backend`/`StreamingBackend` interfaces. `backend_http_textmodel.go` (135 LOC) provides the reverse: wraps an HTTP llama.cpp server as `inference.TextModel`. `backend_mlx.go` collapsed from 253 to 35 LOC after migration.
 
-### Phase 3 — Extended Interfaces (deferred)
+### Phase 3 — Extended Interfaces (superseded)
 
-Two interfaces are specified but not yet implemented, pending concrete consumer demand:
+The original plan deferred two speculative interfaces (`BatchModel`,
+`StatsModel`) until multiple consumers demanded them, each to be added by
+updating go-mlx and go-rocm in lockstep. That coordination model no longer
+applies — the backends are retired and both engines now live in this repo, so a
+new capability is added as an optional interface here and the in-repo engines opt
+in directly. The specific interface sketches are left to the current design docs
+rather than pinned in history.
 
-**BatchModel** — For throughput-sensitive batch classification (e.g. `go-i18n` processing 5,000 sentences per second):
+## Consolidation — go-inference becomes the sovereign repo (2026)
 
-```go
-type BatchModel interface {
-    TextModel
-    BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) iter.Seq2[int, Token]
-}
-```
+The shared-contract package grew into the whole inference stack. go-mlx (Apple
+Metal) and go-rocm (AMD ROCm) were **retired**, and everything they carried was
+brought into go-inference:
 
-Note: the current `BatchGenerate` on `TextModel` collects all tokens before returning. A streaming `BatchModel` with `iter.Seq2` would reduce peak memory for large batches.
+- **Engines in-repo.** `engine/metal` is the Apple GPU engine — **no cgo**; it
+  drives the Apple GPU API through pure-Go `tmc/apple` bindings and dispatches
+  Apple MLX's compiled kernels plus go-inference's own fused `lthn_` kernels
+  (`engine/metal/kernels/*.metal`). `engine/hip` is the AMD engine (linux/amd64,
+  ROCm) and does carry cgo — no-cgo is a per-engine property, not a repo-wide
+  rule. go-mlx's `pkg/metal` (the cgo engine) was **deleted, never ported**;
+  `pkg/native` became `engine/metal`.
+- **Model architectures stayed decoupled** from the engine — they live in the
+  `model/` family (gemma3, gemma4, mistral, qwen3, …), which engines consume but
+  never own.
+- **Serving, training, and tooling consolidated here**: the
+  OpenAI/Anthropic/Ollama HTTP servers (`serving/`), LoRA SFT + self-distillation
+  + MTP tuning (`train/`), the `lem` binary (`cmd/lem`), and the LEM desktop GUI
+  (`gui/`).
+- **The Metal build chain moved in** too: `external/mlx` (Apple MLX pinned at
+  v0.31.2) plus the lthn patch set in `patches/mlx/`, built by `task metallib`
+  and optionally baked into a self-contained binary by `task build:embed`. See
+  [build.md](build.md).
+- **Go 1.26**, workspace-mode development against `external/` submodules, and the
+  core house rules (`core.E` errors, `core.Result`, core I/O wrappers) — no
+  longer the stdlib-only contract of the origin era.
 
-**StatsModel** — For dashboard and monitoring integrations:
-
-```go
-type StatsModel interface {
-    TextModel
-    Stats() GenerateStats
-}
-```
-
-Where `GenerateStats` aggregates `GenerateMetrics` across multiple calls (rolling averages, peak values, histograms).
-
-Neither interface will be added until at least two consumers have a concrete need. The pattern for adding them is: define the interface in this package, update go-mlx and go-rocm to implement it, update go-ml's adapter, then update consumers.
+The design that reconciled go-mlx's composition core into serving's shape is
+recorded in [engine-merge.md](engine-merge.md). The endgame is captured in one
+line: **you only need go-inference** — one repo, and with `task build:embed` one
+self-contained binary.
 
 ## Known Limitations
+
+> These describe the original shared-contract layer (the `inference` package
+> itself). Some still hold for the contract; the engine and serving behaviour is
+> documented in [architecture.md](architecture.md) and [backends.md](backends.md).
 
 **Metrics on CPU backends** — `GenerateMetrics.PeakMemoryBytes` and `ActiveMemoryBytes` are zero for CPU-only backends. There is no protocol for backends to report CPU RAM usage; this was considered unnecessary at the time of design.
 
@@ -128,10 +157,18 @@ Neither interface will be added until at least two consumers have a concrete nee
 
 **`ParallelSlots` ignored by Metal** — Apple Metal manages concurrency internally. `WithParallelSlots` is accepted by `go-mlx` but has no effect. This is documented in `options.go` but not enforced.
 
-## Future Considerations
+## Future Considerations (origin-era — mostly overtaken by consolidation)
 
-- A `StatsModel` interface, when two consumers require aggregated metrics.
-- A streaming `BatchModel` with `iter.Seq2[int, Token]` for high-throughput classification.
-- Licence headers on all source files (currently absent, tracked informally).
-- A formal `CHANGELOG.md` if the package grows beyond its current single-package scope.
-- Consideration of `errors.Is`/`errors.As` sentinel errors (e.g. `ErrNoBackend`, `ErrBackendUnavailable`) to allow consumers to handle specific failure modes without string matching.
+These were the forward-looking notes from the shared-contract era. Most have been
+overtaken by the consolidation:
+
+- Licence headers — now present: every `.go` file carries
+  `// SPDX-Licence-Identifier: EUPL-1.2`.
+- Single-package scope — long gone; the repo is now the full stack (see
+  **Consolidation**).
+- Error handling — production code now uses `core.E(...)` / `core.Result` rather
+  than `fmt.Errorf` string matching, so the sentinel-error idea is moot.
+
+The genuinely open contract questions (streaming batch, aggregated stats) now
+follow the in-repo optional-interface pattern rather than a cross-repo rollout —
+see [architecture.md](architecture.md).

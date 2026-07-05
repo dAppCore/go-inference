@@ -7,7 +7,7 @@
 
 ## What this is
 
-A minimal GGUF (llama.cpp model format) metadata parser. Reads the header + key-value section without loading tensors — same intent as the safetensors path in `discover.go`. Used by Discover, by `model_pack.go` validation in go-mlx, and by the core/ide model picker.
+The discovery-side GGUF (llama.cpp model format) metadata mapping. `ReadGGUFInfo` reads the header + a *subset* of the key-value section without loading tensors — same intent as the safetensors path in `discover.go`. The wire parsing itself is delegated to the sibling `dappco.re/go/inference/model/gguf` package (`gguf.ResolveFile`, `gguf.MetadataSubset`); this file owns only the narrow `GGUFInfo` field mapping and the fixed `general.file_type` → quantisation table.
 
 ## GGUFInfo
 
@@ -15,56 +15,55 @@ A minimal GGUF (llama.cpp model format) metadata parser. Reads the header + key-
 type GGUFInfo struct {
     Path             string
     Architecture     string
-    QuantType        string  // q4_k_m, q8_0, f16, …
-    QuantFamily      string  // q4, q8, f16
+    VocabSize        int
+    HiddenSize       int
+    NumLayers        int
+    ContextLength    int
     QuantBits        int
     QuantGroup       int
-    ContextLength    int
-    NumLayers        int
-    HiddenSize       int
-    VocabSize        int
-    ChatTemplate     string
-    NumTensors       int
-    HeaderBytes      int64
-    FileBytes        int64
-    Metadata         map[string]any
+    QuantType        string  // q4_k_m, q8_0, f16, …
+    QuantFamily      string  // q4, q8, f16
+    TensorCount      int
+    MetadataCount    int
+    ValidationIssues []GGUFValidationIssue
 }
 ```
 
-Maps cleanly onto `ModelIdentity` + `TokenizerIdentity.ChatTemplate`.
+`GGUFInfo.Valid()` reports true when no `ValidationIssues` carry `GGUFValidationError` severity. `GGUFValidationIssue` = `{Severity, Code, Message, Tensor}`; severity is `GGUFValidationWarning` or `GGUFValidationError`. The identity fields map cleanly onto `ModelIdentity`.
 
-## GGUF format constants
+## Quantisation mapping
 
-```go
-ggufMagic      = 0x46554747   // "GGUF" little-endian
-ggufVersion    = 3
-ggufTypeUint32 = 4
-ggufTypeString = 8
-```
+`general.file_type` is folded onto the discovery quant fields via a fixed table (deliberately simpler than the `model/gguf` package's per-tensor-type inference):
 
-The parser handles v2 + v3 files. v1 is rare in the wild; not supported.
+| file_type | bits | group | type | family |
+|-----------|------|-------|------|--------|
+| 0 | 32 | 0 | f32 | f32 |
+| 1 | 16 | 0 | f16 | f16 |
+| 7 | 8 | 32 | q8_0 | q8 |
+| 15 | 4 | 32 | q4_k_m | q4 |
+| other | 0 | 0 | "" | "" |
 
 ## Public API
 
 ```go
-info, err := inference.ReadGGUFInfo("/models/foo.gguf")
-infos     := inference.ScanGGUF(io.Reader)   // for streaming scenarios
+info, err := inference.ReadGGUFInfo("/models/foo.gguf")   // one file → GGUFInfo
+models    := inference.DiscoverModels("/models")          // dir → []DiscoveredModel (safetensors + GGUF)
 ```
 
-## What it parses
+`DiscoverModels` combines `Discover` (safetensors) with a GGUF walk: any directory holding exactly one `*.gguf` is read via `ReadGGUFInfo` and folded into a `DiscoveredModel` with `Format: "gguf"`; results are sorted by path. A `.gguf` file passed directly (not a directory) yields a single-element slice.
 
-Header → key-value section. Stops as soon as the architecture + quant + chat template are known. Tensor headers are scanned only when `NumTensors` is requested (default off — the scan is bounded to the metadata section).
+## What it reads
 
-## Why a local parser instead of llama-cpp-go binding
+Only the handful of discovery keys are decoded — `general.architecture`, `general.file_type`, and the `*.vocab_size` / `*.embedding_length` / `*.block_count` / `*.context_length` / `tokenizer.ggml.tokens` keys. Every other metadata entry's value bytes are skipped in place inside `gguf.MetadataSubset`, keeping this cheap enough for per-directory discovery sweeps.
 
-Three reasons:
+## Why the mapping lives here (not in a llama-cpp binding)
 
-1. **No CGO.** `inference` is zero-deps; pulling in a llama-cpp binding violates the package contract.
-2. **Smaller surface.** We only need metadata, not inference — the parser is ~285 lines.
-3. **Cross-platform.** The same code compiles on every platform; backend-specific GGUF use (loading tensors) lives in the backend.
+- **No CGO.** The wire reader is pure-Go (`model/gguf`), not a llama-cpp cgo binding.
+- **Narrow, pinned surface.** The `GGUFInfo` mapping + the fixed quantisation table are the discovery contract downstream backends were built against — kept stable by this package's alloc-budget and behaviour tests.
+- **Cross-platform.** The same code compiles on every platform; backend-specific GGUF use (loading tensors) lives in the engines.
 
 ## Related
 
-- [discover.md](discover.md) — `Discover()` uses this for `.gguf` files
-- `go-mlx/docs/model/gguf_info.md` (planned) — backend-specific GGUF tensor load
-- `go-mlx/docs/model/gguf_quantize.md` (planned) — write-side GGUF quantisation
+- [discover.md](discover.md) — `Discover()` (safetensors) vs `DiscoverModels()` (safetensors + GGUF)
+- `go/model/gguf/` — the actual GGUF wire reader (`ResolveFile`, `MetadataSubset`)
+- `go/model/quant/` — quantisation used when engines load GGUF tensors

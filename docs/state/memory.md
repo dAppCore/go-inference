@@ -2,16 +2,16 @@
 
 # state/memory.go — InMemoryStore
 
-**Package**: `dappco.re/go/inference/state`
-**File**: `go/state/memory.go`
+**Package**: `dappco.re/go/inference/model/state`
+**File**: `go/model/state/memory.go`
 
 ## What this is
 
-The in-process reference implementation of every read and write
-interface in `state/store.go`. Maps `chunk_id → text|bytes` plus an
+The in-process reference implementation of the read and write
+interfaces in `state/store.go`. Maps `chunk_id → text|bytes` plus an
 optional `uri → chunk_id` index. Zero file I/O, zero network, zero
-codec — useful for tests, fixtures, and the "spike before wiring
-State path.
+codec — useful for tests, fixtures, and spiking the wake/sleep loop
+before wiring a durable store.
 
 ## Capabilities implemented
 
@@ -61,8 +61,8 @@ production session uses State video (file-backed, immutable) or filestore
 
 ## Consumed by
 
-- `state/state_test.go` — round-trip + URI-resolution tests
-- `go-mlx/agent_memory_test.go` — runtime smoke tests against a known
+- `model/state/state_test.go` — round-trip + URI-resolution tests
+- `model/state/session/` tests — runtime smoke tests against a known
   in-memory store before reaching for State video
-- `go-ai/ai/book_state_demo_test.go` — bookstate fixtures point at
+- `agent/ai/book_state_demo_test.go` — bookstate fixtures point at
   in-memory chunks via `entry-uri memory://...`

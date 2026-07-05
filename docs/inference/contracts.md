@@ -58,8 +58,8 @@ type AgentMemoryForker       = state.Forker
 ```
 
 Importing `dappco.re/go/inference` gives you the memory lifecycle
-shape without needing a separate `inference/state` import. The state
-package owns the real types; this file just re-exports them.
+shape without needing a separate `inference/model/state` import. The
+state package owns the real types; this file just re-exports them.
 
 ## How a consumer probes capabilities
 
@@ -83,12 +83,12 @@ if embed, ok := m.(inference.EmbeddingModel); ok {
 
 ## How a backend opts in
 
-In go-mlx (example):
+In `engine/metal` (example):
 
 ```go
-// metaladapter already implements TextModel
+// the native text model already implements TextModel
 // — add Schedule to also implement SchedulerModel:
-func (a *metaladapter) Schedule(ctx, req) (RequestHandle, <-chan ScheduledToken, error) {
+func (m *nativeTextModel) Schedule(ctx, req) (RequestHandle, <-chan ScheduledToken, error) {
     // …
 }
 ```
@@ -100,11 +100,11 @@ they have.
 
 ## Why type-assertion not method-set
 
-Different backends are at different stages. go-mlx may have
-SchedulerModel before go-rocm; go-rocm may ship CacheService earlier
-than go-mlx. Forcing every backend to stub out every interface would
-make TextModel a 50-method monster and silently degrade — type
-assertion lets each backend grow at its own pace and the consumer
+Different engines are at different stages. `engine/metal` may have
+SchedulerModel before `engine/hip`; `engine/hip` may ship CacheService
+earlier than `engine/metal`. Forcing every backend to stub out every
+interface would make TextModel a 50-method monster and silently degrade
+— type assertion lets each engine grow at its own pace and the consumer
 explicitly handles the "not available" path.
 
 ## Related

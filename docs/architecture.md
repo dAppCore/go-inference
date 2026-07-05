@@ -2,57 +2,85 @@
 
 ## Purpose
 
-`go-inference` is the shared interface contract for text generation backends in the Core Go ecosystem. It defines the types that GPU-specific backends implement and consumers depend on, without itself importing any backend or consumer code.
+`go-inference` is the sovereign local-inference repository for the Core Go ecosystem. It is the single home for everything needed to run a local model: the shared contract (`TextModel`, `Backend`, and supporting types), the GPU compute engines that implement it, the serving layer that exposes them over HTTP, and the `lem` binary that ties it together.
 
-Module path: `dappco.re/go/inference`
+Historically this was a contract-only package that GPU backends in separate repositories (`go-mlx`, `go-rocm`) implemented. Those repositories are retired: their engines have been migrated in-tree as `engine/metal` and `engine/hip`, and the `lem` binary now compiles from `go-inference` alone.
 
-## Design Philosophy
+Module path: `dappco.re/go/inference` · Go 1.26 · Licence EUPL-1.2.
 
-### Zero Dependencies
+## Dependencies
 
-The package imports only the Go standard library (`context`, `fmt`, `iter`, `sync`, `time`, `encoding/json`, `os`, `path/filepath`). The sole exception is `testify` in the test tree.
+The package is **not** stdlib-only. It consumes the Core externals and a handful of third-party libraries:
 
-This is a deliberate constraint. The package sits at the base of a dependency graph where:
+- `dappco.re/go` (core) — the `core.Result`, `core.E`, `core.Fs`, and process primitives used throughout.
+- `dappco.re/go/api`, `dappco.re/go/cli`, `dappco.re/go/log`, `dappco.re/go/process` — Core service surface.
+- `github.com/gin-gonic/gin`, `github.com/google/uuid`, `github.com/modelcontextprotocol/go-sdk` — serving + MCP.
+- `github.com/marcboeker/go-duckdb/v2`, `github.com/parquet-go/parquet-go` — dataset/eval storage.
 
-- `go-mlx` pulls in CGO bindings against Apple's Metal framework
-- `go-rocm` spawns a `llama-server` subprocess with AMD ROCm libraries
-- `go-ml` links DuckDB and Parquet
+Errors are constructed with `core.E(...)` (never `fmt.Errorf`); fallible calls return `core.Result` rather than `(T, error)` (see below). Externals are wired through the `go.work` workspace and `external/<dep>` submodules — there are no `replace` directives.
 
-None of those concerns belong in the interface layer. A backend can import `go-inference`; `go-inference` cannot import a backend. A consumer can import `go-inference`; `go-inference` cannot import a consumer.
+## The core.Result contract
 
-### Minimal Interface Surface
+Fallible operations across this package return `core.Result`, not the Go `(T, error)` tuple. A `Result` carries `OK bool` and `Value any`; on failure `Value` holds the error.
 
-New methods are only added when two or more existing consumers need them. The interfaces are deliberately narrow. Broader capability is achieved through additional interfaces (`BatchModel`, `StatsModel`) that embed `TextModel`, not through extending `TextModel` itself.
-
-### Platform Agnostic
-
-No build tags, no `//go:build` constraints, no `CGO_ENABLED` requirements appear in this package. It compiles cleanly on macOS, Linux, and Windows regardless of GPU availability.
-
-## Ecosystem Position
-
-```
-go-inference (this package)  ← defines TextModel, Backend, Token, Message
-      |
-      |──────── implemented by ──────────────────────────────
-      |                                                      |
- go-mlx                                                 go-rocm
- (darwin/arm64, Metal GPU)                     (linux/amd64, AMD ROCm)
-      |                                                      |
-      └───────────────── consumed by ────────────────────────┘
-                              |
-                           go-ml
-                    (scoring engine, llama.cpp HTTP)
-                              |
-                           go-ai
-                     (MCP hub, 30+ tools)
-                              |
-                          go-i18n
-                   (domain classification via Gemma3-1B)
+```go
+r := inference.LoadModel("/models/gemma-4-e2b-it-4bit")
+if !r.OK {
+    log.Fatal(r.Error())
+}
+m := r.Value.(inference.TextModel)
+defer m.Close()
 ```
 
-`go-ml` also provides a reverse adapter (`backend_http_textmodel.go`) that wraps an HTTP llama.cpp server as a `TextModel`, giving a third backend path without Metal or ROCm.
+`Generate` and `Chat` still return `iter.Seq[Token]` (a range-over-function iterator cannot carry a Result inline); the trailing error is retrieved with `m.Err()`, which itself returns a `core.Result` that is OK on clean end-of-sequence.
 
-## Core Types
+## Repository layout
+
+```
+go/                         module root — package inference (the contract)
+├── inference.go            TextModel, Backend, registry, LoadModel()
+├── options.go              GenerateConfig, LoadConfig, functional options
+├── training.go             TrainableModel, Adapter, LoRAConfig, LoadTrainable()
+├── discover.go             Discover() filesystem/GGUF scan
+├── device.go               DeviceInfo, DeviceInfoProvider, BackendDeviceInfo()
+├── capability.go           CapabilityReport + algorithm profiles
+├── identity.go             re-export aliases from model/state
+├── engine/
+│   ├── metal/              Apple-GPU engine (package native, darwin/arm64, NO cgo)
+│   └── hip/                AMD ROCm engine (package hip, linux/amd64)
+├── serving/                OpenAI/Anthropic/Ollama HTTP servers over the engine
+├── model/                  arch definitions + model/state (identity, agent memory)
+├── kv/ decode/ train/ eval/ agent/ safety/ welfare/   supporting libraries
+└── cmd/lem/                the lem binary (serve/generate/ssd/sft/tune/pack/ebook)
+gui/                        desktop GUI (repo root, separate module surface)
+external/<dep>/             Core external dependencies as workspace submodules
+```
+
+## Engines
+
+Two GPU engines live in-tree and register themselves against the contract via `init()`. See [Backends](backends.md) for the full detail.
+
+### engine/metal — Apple GPU (darwin/arm64)
+
+Package clause `native`, path `engine/metal`. "Metal" names the Apple Metal API this engine drives; it is **not** go-mlx's cgo `pkg/metal` (deleted, never ported). Key facts, verified in `engine/metal/device.go`:
+
+- **No cgo.** It dispatches the compiled MLX Metal kernels directly from Go through the `github.com/tmc/apple` objc bridge (purego `objc_msgSend`), gated by `//go:build darwin && arm64`.
+- It loads the **same** compiled `mlx.metallib` the reference MLX build ships, located via `MLX_METALLIB_PATH`, plus an optional sibling `lthn_kernels.metallib` of go-inference's own fused kernels (absent ⇒ those ops fall back to composed primitives).
+- The kernels are shared with MLX; the **innovation is the encode path.** Because decode and diffusion are fixed per-step command sequences, the engine records the sequence once into an **Indirect Command Buffer (ICB)** and replays it per token, bypassing the host-side re-encode that dominates MLX's decode. A MoE arch falls back to the re-encode path (the ICB cannot host the router's host-side top-k).
+
+Registers as backend `"metal"` when imported: `_ "dappco.re/go/inference/engine/metal"`.
+
+### engine/hip — AMD ROCm (linux/amd64)
+
+Package `hip`, path `engine/hip`. Native-first ROCm/HIP engine (the old `llama-server` subprocess bridge survives only behind the `rocm_legacy_server` build tag and is not built by default). Three build-tag variants of the backend exist: the native runtime (`linux && amd64 && !rocm_legacy_server`), a portable stub that reports `Available() == false` (`!linux || !amd64`), and the legacy server path. GGUF loading works; safetensors model-pack loading is not yet available in the current quarantine landing. Registers as backend `"rocm"` when imported: `_ "dappco.re/go/inference/engine/hip"`.
+
+## Serving and the lem binary
+
+`serving/` exposes a loaded engine over OpenAI-, Anthropic-, and Ollama-compatible HTTP (the multiplexer is `serving/compat/mux.go`). `serving.NewMLXBackend` loads a model through the Metal backend (`inference.LoadModel(..., WithBackend("metal"))`) and wraps it as a `serving.Backend`. Note the serving layer also carries `HTTPBackend` (name `"http"`) and `LlamaBackend` (name `"llama"`) adapters that wrap an external llama.cpp HTTP server as a `TextModel` — these are serving-level adapters, not registered `inference.Backend`s.
+
+`cmd/lem` is Lethean's sovereign inference binary. Its subcommands are thin flag-parsing wrappers over the `serving` and training libraries: `serve`, `generate`, `ssd`, `sft`, `tune`, `pack`, `ebook`. `main.go` blank-imports `engine/metal` and `model/builtin` to register the Apple backend and the built-in arches. Built with `-tags embed_metallib`, `lem` bakes both gzipped metallibs into the binary and extracts them to a content-addressed cache at start, setting `MLX_METALLIB_PATH` — so the shipped binary runs from any path with nothing external to resolve.
+
+## Core types
 
 ### Token
 
@@ -69,12 +97,13 @@ The atomic unit of streaming output. `ID` is the vocabulary index; `Text` is the
 
 ```go
 type Message struct {
-    Role    string `json:"role"`    // "system", "user", "assistant"
-    Content string `json:"content"`
+    Role    string   `json:"role"`    // "system", "user", "assistant"
+    Content string   `json:"content"`
+    Images  [][]byte `json:"images,omitempty"` // encoded image bytes for vision turns
 }
 ```
 
-A single turn in a multi-turn conversation. JSON tags are present for serialisation through MCP tool payloads and API responses.
+A single turn in a multi-turn conversation. `Images` carries PNG/JPEG bytes attached by the compat handlers from multimodal content parts; only engines implementing `VisionModel` serve image turns.
 
 ### ClassifyResult
 
@@ -85,7 +114,7 @@ type ClassifyResult struct {
 }
 ```
 
-Output from a single prefill-only forward pass. `Logits` is populated only when `WithLogits()` is set; it is empty by default to avoid allocating vocab-sized float arrays for every classification call.
+Output from a single prefill-only forward pass. `Logits` is populated only when `WithLogits()` is set; it is `nil` by default to avoid allocating vocab-sized float arrays for every classification call.
 
 ### BatchResult
 
@@ -102,19 +131,20 @@ Per-prompt result from `BatchGenerate`. `Err` carries per-prompt failures (conte
 
 ```go
 type GenerateMetrics struct {
-    PromptTokens        int
-    GeneratedTokens     int
-    PrefillDuration     time.Duration
-    DecodeDuration      time.Duration
-    TotalDuration       time.Duration
-    PrefillTokensPerSec float64
-    DecodeTokensPerSec  float64
-    PeakMemoryBytes     uint64
-    ActiveMemoryBytes   uint64
+    PromptTokens         int
+    GeneratedTokens      int
+    PrefillDuration      time.Duration
+    DecodeDuration       time.Duration
+    TotalDuration        time.Duration
+    PrefillTokensPerSec  float64
+    DecodeTokensPerSec   float64
+    PeakMemoryBytes      uint64
+    ActiveMemoryBytes    uint64
+    ThinkingBudgetForced bool
 }
 ```
 
-Performance data for the most recent inference operation. Retrieved via `TextModel.Metrics()` after an iterator is exhausted or a batch call returns. `PeakMemoryBytes` and `ActiveMemoryBytes` are GPU-specific; CPU-only backends may leave them at zero.
+Performance data for the most recent inference operation, retrieved via `TextModel.Metrics()`. `PeakMemoryBytes`/`ActiveMemoryBytes` are GPU-specific. `ThinkingBudgetForced` reports whether a reasoning model's thought channel was force-closed by `ThinkingBudget`.
 
 ### ModelInfo
 
@@ -135,175 +165,143 @@ Static metadata about a loaded model. `QuantBits` is zero for unquantised (FP16/
 
 ```go
 type AttentionSnapshot struct {
-    NumLayers    int
-    NumHeads     int           // num_kv_heads (may differ from query heads in GQA)
-    SeqLen       int           // number of tokens in the prompt
-    HeadDim      int
-    Keys         [][][]float32 // [layer][head] → flat float32 of len seq_len*head_dim
-    Architecture string
+    NumLayers     int           `json:"num_layers"`
+    NumHeads      int           `json:"num_heads"`       // num_kv_heads (may differ from query heads in GQA)
+    SeqLen        int           `json:"seq_len"`
+    HeadDim       int           `json:"head_dim"`
+    NumQueryHeads int           `json:"num_query_heads"` // 0 = Q not available
+    Keys          [][][]float32 `json:"keys"`            // [layer][head] → flat float32 of len seq_len*head_dim
+    Queries       [][][]float32 `json:"queries"`         // [layer][head] → flat float32 (nil if K-only)
+    Architecture  string        `json:"architecture"`
 }
+
+func (s *AttentionSnapshot) HasQueries() bool
 ```
 
-Post-RoPE K vectors extracted from the KV cache after a single prefill pass. The `Keys` tensor is indexed `[layer][head][position*head_dim]` — each head's K vectors are flattened into a single slice of length `SeqLen * HeadDim`.
+Post-RoPE Q and/or K vectors extracted from the KV cache after a single prefill pass. `Keys` is indexed `[layer][head][position*head_dim]`. For GQA models (`num_kv_heads < num_query_heads`), `NumHeads` reflects the KV head count; `NumQueryHeads` is non-zero only when query vectors are captured. Consumed by LEM's Q/K Bone Orientation analysis — pure Go CPU math, no GPU dependency.
 
-This type is consumed by LEM's Q/K Bone Orientation analysis engine, which computes coherence, cross-layer alignment, head entropy, phase-lock, and joint collapse metrics from the raw K tensors. The analysis is pure Go CPU math — no GPU dependencies.
-
-For GQA models (e.g. Gemma3 where `num_kv_heads < num_query_heads`), `NumHeads` reflects the KV head count. Single-head layers use position-wise differentiation rather than pairwise head comparison.
-
-## Optional Interfaces
-
-### AttentionInspector
-
-```go
-type AttentionInspector interface {
-    InspectAttention(ctx context.Context, prompt string, opts ...GenerateOption) (*AttentionSnapshot, error)
-}
-```
-
-Backends may implement `AttentionInspector` to expose attention-level data for Q/K Bone Orientation analysis. This is an optional interface — consumers discover it via type assertion:
-
-```go
-if inspector, ok := model.(AttentionInspector); ok {
-    snap, err := inspector.InspectAttention(ctx, prompt)
-    // analyse snap.Keys
-}
-```
-
-Following rule 3 of the stability contract: new capability is expressed as separate interfaces, not by extending `TextModel`. Backends that don't support attention inspection (HTTP, llama.cpp subprocess) are unaffected.
-
-**Implementations:**
-- `go-mlx` — Extracts post-RoPE K vectors from Metal KV cache after prefill (native GPU memory read)
-- `go-ml` — `InferenceAdapter.InspectAttention()` delegates via type assertion to the underlying `TextModel`
-
-## TextModel Interface
+## TextModel interface
 
 ```go
 type TextModel interface {
     Generate(ctx context.Context, prompt string, opts ...GenerateOption) iter.Seq[Token]
     Chat(ctx context.Context, messages []Message, opts ...GenerateOption) iter.Seq[Token]
-    Classify(ctx context.Context, prompts []string, opts ...GenerateOption) ([]ClassifyResult, error)
-    BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) ([]BatchResult, error)
+    Classify(ctx context.Context, prompts []string, opts ...GenerateOption) core.Result
+    BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) core.Result
     ModelType() string
     Info() ModelInfo
     Metrics() GenerateMetrics
-    Err() error
-    Close() error
+    Err() core.Result
+    Close() core.Result
 }
 ```
 
 Key design decisions:
 
-**`context.Context` on streaming methods** — Required for HTTP handler cancellation, request timeouts, and graceful shutdown. The context is checked by backends at token boundaries.
+**`context.Context` on streaming methods** — required for HTTP handler cancellation, request timeouts, and graceful shutdown. Checked by engines at token boundaries.
 
-**`iter.Seq[Token]` return type** — Go 1.23+ range-over-function iterators. The caller ranges over the sequence; the backend controls token production. The iterator pattern avoids channel overhead and lets the backend use direct memory access to GPU buffers.
+**`iter.Seq[Token]` return type** — Go 1.23+ range-over-function iterators. The caller ranges over the sequence; the engine controls token production, using direct GPU-buffer access without channel overhead.
 
-**`Err() error`** — `iter.Seq` cannot carry errors alongside values. Following the `database/sql` `Row.Err()` pattern, the error from the most recent `Generate` or `Chat` call is stored internally and retrieved with `Err()` after the iterator finishes. End-of-sequence (EOS token) sets no error; context cancellation and OOM both set one.
+**`Err() core.Result`** — `iter.Seq` cannot carry errors alongside values. Following the `database/sql` `Row.Err()` pattern, the error from the most recent `Generate`/`Chat` is stored internally and returned here. Clean end-of-sequence returns an OK Result; cancellation and OOM return a failure.
 
-**`Chat()` on the model** — Chat templates differ across architectures (Gemma3, Qwen3, Llama3 all use distinct formats). Placing template application in the backend means consumers receive already-formatted input regardless of model family. If templates lived in consumers, every consumer would need to duplicate model-specific formatting logic.
+**`Classify` and `BatchGenerate` return `core.Result`** — the payload (`[]ClassifyResult` / `[]BatchResult`) is carried in `Value` when OK. `Classify` is prefill-only (single forward pass, no autoregressive loop) — the fast path for domain labelling. `BatchGenerate` runs full autoregressive decoding across prompts.
 
-**`Classify()` and `BatchGenerate()`** — Two distinct batch operations with different performance characteristics. `Classify` is prefill-only (single forward pass, no autoregressive loop); it is the fast path for domain labelling in `go-i18n`. `BatchGenerate` runs full autoregressive decoding across multiple prompts in parallel.
+**`Chat()` on the model** — chat templates differ across architectures (Gemma, Qwen3, Llama all use distinct formats). Applying the template in the engine means consumers receive already-formatted input regardless of family.
 
-**`Info()` and `Metrics()`** — Separated from `Generate`/`Chat` because they serve different call sites. `Info()` is called once after load; `Metrics()` is called after each inference operation for performance monitoring.
+### Optional capabilities
 
-## Backend Interface
+Extra capability is expressed through separate interfaces, discovered by type assertion — never by widening `TextModel`:
+
+- `VisionModel { AcceptsImages() bool }` — a live probe of whether the loaded checkpoint accepts image turns (a vision-capable family may ship a snapshot without the tower). Implemented by the metal engine.
+- `AttentionInspector { InspectAttention(...) (*AttentionSnapshot, error) }` — Q/K extraction for Bone Orientation analysis. Defined and forwarded by `serving.InferenceAdapter`; not implemented by an in-tree engine yet.
+- Training uses the `engine.TrainerModel` / `engine.Trainer` seam (`OpenTrainer`), not the root `TrainableModel.ApplyLoRA` interface — see [Interfaces](interfaces.md).
+
+## Backend interface
 
 ```go
 type Backend interface {
     Name() string
-    LoadModel(path string, opts ...LoadOption) (TextModel, error)
+    LoadModel(path string, opts ...LoadOption) core.Result
     Available() bool
 }
 ```
 
-**`Name()`** — Returns the registry key: `"metal"`, `"rocm"`, or `"llama_cpp"`. This is the string passed to `WithBackend()` by consumers.
+**`Name()`** — the registry key: `"metal"` or `"rocm"` today. This is the string passed to `WithBackend()`.
 
-**`LoadModel()`** — Accepts a filesystem path to a model directory (containing `config.json` and `.safetensors` weight files) and returns a ready-to-use `TextModel`. The model directory format follows the HuggingFace safetensors layout.
+**`LoadModel()`** — reads a model directory (safetensors: `config.json` + `.safetensors`; or a GGUF file for ROCm) and returns a ready `TextModel` in the Result's `Value` when OK.
 
-**`Available()`** — Reports whether the backend can run on the current hardware. This allows a backend to be registered unconditionally (e.g. in a shared binary) while still reporting false on platforms where its GPU runtime is absent. `Default()` skips unavailable backends.
+**`Available()`** — reports whether the engine can run on the current hardware. A backend registers unconditionally (its build tag governs whether it compiles in at all) while still reporting `false` when the GPU runtime is absent; `Default()` skips unavailable backends.
 
-## Backend Registry
+A backend that can describe its accelerator without loading a model also implements `DeviceInfoProvider { DeviceInfo() DeviceInfo }`, reachable via `inference.BackendDeviceInfo("metal")`.
 
-The registry is a package-level `map[string]Backend` protected by a `sync.RWMutex`. It supports concurrent reads and exclusive writes.
+## Backend registry
 
-```go
-var (
-    backendsMu sync.RWMutex
-    backends   = map[string]Backend{}
-)
-```
+The registry is a package-level `map[string]Backend` guarded by a Core mutex (`core.New().Lock("inference.backends").Mutex`).
 
-**Registration** — Backends call `inference.Register(b Backend)` from their `init()` function. The `init()` is guarded by a build tag so it only compiles on the target platform:
+**Registration** — engines call `inference.Register(b)` from an `init()` gated by the engine's build tags:
 
 ```go
-// In go-mlx: register_metal.go
-//go:build darwin && arm64
-
+// engine/metal (darwin && arm64)
 func init() { inference.Register(metalBackend{}) }
-```
 
-```go
-// In go-rocm: register_rocm.go
-//go:build linux && amd64
-
+// engine/hip (linux && amd64)
 func init() { inference.Register(&rocmBackend{}) }
 ```
 
-Registering a name that already exists silently overwrites the previous entry. This allows test code to replace backends without a separate de-registration step.
+Registering a name that already exists overwrites the previous entry — test code can swap backends without a de-registration step.
 
-**Discovery** — `Get(name)` performs a direct map lookup. `List()` returns all registered names (order undefined). `Default()` walks a priority list:
+**Discovery** — `Get(name) (Backend, bool)` is a direct lookup. `List() []string` returns registered names sorted alphabetically. `All() iter.Seq2[string, Backend]` iterates them. `Default() core.Result` walks the preference order `metal → rocm → llama_cpp`, returning the first available backend; if none of those are available it falls back to any registered available backend, and fails with `no backends registered` / `no backends available` otherwise. (`llama_cpp` remains a preference slot; no package in this repo registers it.)
 
-```go
-for _, name := range []string{"metal", "rocm", "llama_cpp"} {
-    if b, ok := backends[name]; ok && b.Available() {
-        return b, nil
-    }
-}
-// Fall back to any registered available backend.
-```
-
-The priority order encodes hardware preference: Metal (Apple Silicon) delivers the highest throughput for on-device inference on macOS; ROCm is preferred over llama.cpp's HTTP server on Linux because it provides direct GPU memory access without HTTP overhead.
-
-**`LoadModel()` routing** — The top-level `LoadModel()` function is the primary consumer entry point:
+**`LoadModel()` routing** — the top-level entry point:
 
 ```go
-func LoadModel(path string, opts ...LoadOption) (TextModel, error) {
+func LoadModel(path string, opts ...LoadOption) core.Result {
     cfg := ApplyLoadOpts(opts)
     if cfg.Backend != "" {
-        b, ok := Get(cfg.Backend)
-        // ... validate and use explicit backend
+        // Get(cfg.Backend) → validate registered + Available() → b.LoadModel(...)
     }
-    b, err := Default()
-    // ... use auto-selected backend
+    // else Default() → b.LoadModel(...)
 }
 ```
 
-Passing `WithBackend("rocm")` bypasses `Default()` entirely. This is the mechanism used in cross-platform binaries or tests that need to pin a specific backend.
+`WithBackend("rocm")` pins a specific backend and bypasses `Default()`.
 
-## Functional Options
+## Functional options
 
-Generation and loading are configured through two independent option types, both following the standard Go functional options pattern.
+Two independent option types, both the standard Go functional-options pattern.
 
-### GenerateConfig and GenerateOption
+### GenerateConfig / GenerateOption
 
 ```go
 type GenerateConfig struct {
-    MaxTokens     int
-    Temperature   float32
-    TopK          int
-    TopP          float32
-    StopTokens    []int32
-    RepeatPenalty float32
-    ReturnLogits  bool
+    MaxTokens      int
+    Temperature    float32
+    TopK           int
+    TopP           float32
+    MinP           float32
+    Seed           uint64
+    SeedSet        bool
+    StopTokens     []int32
+    SuppressTokens []int32
+    MinTokensBeforeStop int
+    RepeatPenalty  float32
+    ReturnLogits   bool
+    EnableThinking *bool          // nil = model default
+    ThinkingBudget int            // 0 = unlimited
+    Thinking       ThinkingConfig // resolved thought-channel policy
+    // trace + cache-hygiene + probe knobs (engine-neutral):
+    TraceTokenPhases, TraceTokenText           bool
+    GenerationClearCache                        bool
+    GenerationClearCacheInterval                int
+    ProbeSink                                   probe.Sink
 }
 ```
 
-Defaults (from `DefaultGenerateConfig()`): `MaxTokens=256`, `Temperature=0.0` (greedy), `RepeatPenalty=1.0` (no penalty), all others zero/disabled.
+`DefaultGenerateConfig()` sets `Temperature=0.0` (greedy) and `RepeatPenalty=1.0` (no penalty); everything else is the zero value. **`MaxTokens` is deliberately not defaulted** — absent (0) the engine resolves it to the model's context at generation time; a fixed default would truncate every generation at a guess.
 
-`ApplyGenerateOpts(opts []GenerateOption) GenerateConfig` is called by backends at the start of each inference operation. Options are applied in order; the last write wins for scalar fields.
+`ApplyGenerateOpts(opts) GenerateConfig` starts from the defaults and applies options in order (last write wins for scalars). See [Types](types.md) for the full `With*` list.
 
-`WithLogits()` is a flag rather than a value option because logit arrays are vocab-sized (256,128 floats for Gemma3) and should only be allocated when explicitly requested.
-
-### LoadConfig and LoadOption
+### LoadConfig / LoadOption
 
 ```go
 type LoadConfig struct {
@@ -311,36 +309,42 @@ type LoadConfig struct {
     ContextLen    int
     GPULayers     int
     ParallelSlots int
+    AdapterPath   string
 }
 ```
 
-Default `GPULayers` is `-1`, meaning full GPU offload. `0` forces CPU-only inference. Positive values specify a layer count for partial offload (relevant to ROCm and llama.cpp; Metal always does full offload).
+`ApplyLoadOpts` defaults `GPULayers` to `-1` (full GPU offload); `0` forces CPU-only; positive values request partial offload (ROCm/llama.cpp; Metal always does full offload). `AdapterPath` injects a LoRA adapter at load time without fusing it into the base weights.
 
-`ParallelSlots` controls the number of concurrent inference slots the backend allocates. Higher values allow parallel `Generate`/`Chat` calls at the cost of increased VRAM usage. `0` defers to the backend's own default.
+## Model discovery
 
-## Model Discovery
+```go
+func Discover(baseDir string) iter.Seq[DiscoveredModel]
+```
 
-`Discover(baseDir string) ([]DiscoveredModel, error)` scans one level of a directory tree for model directories. A valid model directory must contain both `config.json` and at least one `.safetensors` file.
+`Discover` walks the directory tree under `baseDir` **recursively** (not one level), yielding every directory that contains `config.json` plus at least one `.safetensors` file. It also probes `baseDir` itself, so a direct model path works. The walk is lazy — a caller can `break` out of the range early.
 
 ```go
 type DiscoveredModel struct {
-    Path      string
-    ModelType string
-    QuantBits int
-    QuantGroup int
-    NumFiles   int
+    Path        string // always absolute
+    ModelType   string // model_type from config.json / GGUF metadata
+    QuantBits   int
+    QuantGroup  int
+    QuantType   string // e.g. q4_k_m, q8_0 (when known)
+    QuantFamily string // e.g. q4, q8 (when known)
+    NumFiles    int
+    Format      string // "safetensors" or "gguf" (when known)
 }
 ```
 
-`Path` is always an absolute filesystem path. `ModelType` is read from `config.json`'s `model_type` field. Invalid JSON in `config.json` is silently tolerated — the directory is included with an empty `ModelType`.
+`ModelType` is read from `config.json`'s `model_type` field (or GGUF metadata). Invalid JSON is tolerated — the directory is still yielded with an empty `ModelType`.
 
-`Discover` also checks whether `baseDir` itself is a model directory and, if so, prepends it to the result so that direct-path usage (`Discover("/models/gemma3-1b")`) works without nesting.
+## Stability contract
 
-## Stability Contract
+The root `inference` package is the shared contract every engine, the serving layer, and consumers depend on. Rules governing its evolution:
 
-This package is the shared contract. Every method signature change here requires coordinated updates to go-mlx, go-rocm, and go-ml. The following rules govern interface evolution:
-
-1. Existing method signatures are never changed. Rename or remove nothing from `TextModel` or `Backend`.
-2. New methods are only added when two or more consumers have a concrete need.
-3. New capability is expressed as separate interfaces (`BatchModel`, `StatsModel`) that embed `TextModel`, allowing consumers to opt in with a type assertion.
+1. Existing method signatures on `TextModel` and `Backend` are not changed.
+2. New methods are added only when two or more call sites have a concrete need.
+3. New capability is expressed as **separate optional interfaces** (`VisionModel`, `AttentionInspector`, `TrainableModel`, `DeviceInfoProvider`) discovered by type assertion — never by widening `TextModel`.
 4. `GenerateConfig` and `LoadConfig` may gain new fields with zero-value defaults; this is backwards compatible.
+</content>
+</invoke>

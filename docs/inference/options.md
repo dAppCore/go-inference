@@ -18,29 +18,49 @@ Each is `func(*Config)`; backends call `ApplyGenerateOpts(opts)` / `ApplyLoadOpt
 
 ```go
 type GenerateConfig struct {
-    MaxTokens     int
-    Temperature   float32
-    TopK          int
-    TopP          float32
-    StopTokens    []int32
-    RepeatPenalty float32
-    ReturnLogits  bool
+    MaxTokens           int
+    Temperature         float32
+    TopK                int
+    TopP                float32
+    MinP                float32
+    Seed                uint64
+    SeedSet             bool
+    StopTokens          []int32
+    SuppressTokens      []int32
+    MinTokensBeforeStop int
+    RepeatPenalty       float32
+    ReturnLogits        bool     // raw logits in ClassifyResult (default false)
+    EnableThinking      *bool    // nil = model default; &true on; &false off
+    ThinkingBudget      int      // cap thought-channel tokens; 0 = unlimited
+    Thinking            ThinkingConfig  // resolved show/hide/capture policy
+    TraceTokenPhases    bool
+    TraceTokenText      bool
+    GenerationClearCache         bool
+    GenerationClearCacheInterval int
+    ProbeSink           probe.Sink // eval/probe telemetry sink; nil = off
 }
 ```
 
-`DefaultGenerateConfig()` — MaxTokens=256, Temperature=0.0 (greedy), RepeatPenalty=1.0, everything else zero.
+`DefaultGenerateConfig()` — Temperature=0.0 (greedy), RepeatPenalty=1.0, everything else zero. **MaxTokens is deliberately NOT defaulted**: absent (0) the backend resolves it to the model's context at generation time; a fixed default would truncate every generation at a guess.
 
 ## With* generators
 
 | Function | Tunes | Typical |
 |----------|-------|---------|
-| `WithMaxTokens(n)` | output cap | 64 short, 256 medium, 2048 long-form |
+| `WithMaxTokens(n)` | output cap | 128 short, 2048 long-form (0 = model context) |
 | `WithTemperature(t)` | randomness | 0.0 greedy, 0.7 balanced, 1.5 high-variance |
 | `WithTopK(k)` | top-k filter | 40 typical, 0 disabled |
 | `WithTopP(p)` | nucleus | 0.9 typical, 0 disabled |
+| `WithMinP(p)` | min-prob relative to top | 0.05 typical, 0 disabled |
+| `WithSeed(seed)` | reproducible sampling | sets Seed + SeedSet |
 | `WithStopTokens(ids…)` | early halt | EOS id (model-specific) |
+| `WithSuppressTokens(ids…)` | mask ids out of sampling | never emit these ids |
+| `WithMinTokensBeforeStop(n)` | delay stop tokens | force a short visible answer |
 | `WithRepeatPenalty(p)` | repetition guard | 1.0 off, 1.1 mild, 1.5 strong |
-| `WithLogits()` | capture logits | off by default — doubles classify memory |
+| `WithLogits()` | capture logits | off by default — populates `ClassifyResult.Logits` |
+| `WithEnableThinking(*bool)` | reasoning toggle | nil default, &true on, &false off |
+| `WithThinkingBudget(n)` | cap thought tokens | 0 unlimited; on overrun forces a visible answer |
+| `WithThinking(cfg)` | thought-channel policy | `ThinkingConfig{Mode: ThinkingShow\|ThinkingHide\|ThinkingCapture}` |
 
 ## LoadConfig
 

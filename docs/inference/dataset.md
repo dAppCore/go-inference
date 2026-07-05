@@ -7,7 +7,7 @@
 
 ## What this is
 
-The smallest possible pull-based dataset contract shared by training, evaluation, distillation, and reasoning rollouts. One sample at a time, optional reset, optional length. Backends and consumers agree on this shape so a dataset assembled in go-ml flows directly into go-mlx training without conversion.
+The smallest pull-based dataset contract shared by training, evaluation, distillation, and reasoning rollouts. One sample at a time, optional reset. Every package agrees on this shape so a dataset assembled in `eval/datapipe` flows directly into a `train/` loop without conversion.
 
 ## DatasetSample
 
@@ -18,11 +18,12 @@ type DatasetSample struct {
     Response  string             // assistant response (SFT target)
     Reasoning string             // chain-of-thought (GRPO, distillation)
     Messages  []Message          // multi-turn conversation
+    Format    string             // source-corpus row shape it was normalised from
     Labels    map[string]string  // routing / filtering metadata
 }
 ```
 
-A sample carries whichever fields the task needs. SFT samples populate Prompt + Response. GRPO samples add Reasoning. Eval samples often only use Messages.
+A sample carries whichever fields the task needs. SFT samples populate Prompt + Response. GRPO samples add Reasoning. Eval samples often only use Messages. `Format` records the source row shape (`"text"`, `"openai_messages"`, `"sharegpt"`, `"prompt_response"`, `"alpaca"`, `"reasoning"`) — stamped by `train/dataset.LoadJSONL`, empty for samples built directly.
 
 ## DatasetStream
 
@@ -44,13 +45,17 @@ type DatasetResetter interface {
 
 Optional. Streams that wrap an in-memory list or a seekable file implement Reset so training loops can run multiple epochs. Streaming-only sources (HF datasets streaming mode) don't.
 
-## DatasetSized
+## Eval / bench / training envelope
 
-Optional. Streams that know their length up-front report it for progress UI / cosine LR schedules.
+`dataset.go` no longer holds only the stream contract — it also carries the backend-neutral **config + report DTOs** the training and eval pipelines exchange (all plain JSON-tagged structs):
 
-## DatasetConfig (planned umbrella)
+- **Batching**: `LossMask`, `Batch` (token IDs + attention/loss masks + samples)
+- **Evaluation**: `EvalConfig`, `EvalMetrics`, `QualityProbe`, `QualityProbeResult`, `EvalReport`, and the `Evaluator` interface (`Evaluate(ctx, DatasetStream, EvalConfig) (*EvalReport, error)`)
+- **Benchmark**: `BenchConfig`, `BenchReport`
+- **Memory planning**: `MemoryPlan`, `ModelFitReport`
+- **Training**: `TrainingConfig`, `TrainingMetrics`, `TrainingResult`, `DistillConfig` (embeds `TrainingConfig`), `GRPOConfig` (embeds `TrainingConfig`)
 
-The capability surface in `capability.go` mentions `CapabilityEvaluation` + `CapabilityDistillation` + `CapabilityGRPO`. Each consumes a DatasetStream. The eval/bench/distill/grpo config DTOs live in the consuming packages (go-mlx, go-ml) rather than here — this file is just the stream contract.
+These are wire-stable shapes; the loops that produce and consume them live in `train/` and `eval/`.
 
 ## Why one interface for everything
 
@@ -58,21 +63,17 @@ The temptation is to have `TrainingDataset`, `EvalDataset`, `DistillDataset` —
 
 ## Implemented by
 
-- `go-mlx/dataset_stream.go` — in-process iterator over MLX-format files
-- `go-ml/ingest.go` — DuckDB / Parquet ingestion → DatasetStream
-- `go-mlx/cmd/violet` — wraps an HTTP-streamed dataset
+- `train/dataset/` — JSONL / corpus ingestion → `DatasetStream` (`LoadJSONL` stamps `DatasetSample.Format`)
+- `eval/datapipe/` — evaluation data pipelines
 - test fixtures via in-memory slice wrappers
 
 ## Consumed by
 
-- `go-mlx/sft.go` — supervised fine-tuning loop
-- `go-mlx/grpo.go` — reasoning training loop
-- `go-mlx/distill.go` — teacher/student distillation
-- `go-mlx/eval.go` — evaluation runner
-- `go-ml/agent_eval.go` — scoring engine eval
+- `train/` — `sft.go` (supervised fine-tuning), `ssd.go` (self-distillation), `grpo/`, `distill/`
+- `eval/` — evaluation + benchmark runners
+- `agent/` — scoring/eval agent loop
 
 ## Related
 
-- [training.md](training.md) — TrainableModel consumes DatasetStream in Step
-- `go-mlx/docs/training/dataset_stream.md` (planned) — reference iterator
-- `go-ml/docs/scoring/ingest.md` (planned) — go-ml's dataset assembly path
+- [training.md](training.md) — `TrainableModel`; the `train/` pipelines drive it over a `DatasetStream`
+- `go/train/dataset/` — the reference JSONL loader

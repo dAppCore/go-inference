@@ -7,7 +7,7 @@
 
 ## What this is
 
-The portable shape for **runtime telemetry events** that backends emit during a session. Probes are the "what's happening inside the model right now" signal — used by go-ml's scoring engine, the core/ide attention inspector, and the eval/bench pipelines.
+The portable shape for **runtime telemetry events** that backends emit during a session. Probes are the "what's happening inside the model right now" signal — used by the `agent/` scoring loop, an attention-inspector UI, and the `eval/` bench pipelines.
 
 A backend implements `ProbeSink` to receive probes, or emits via package-injected sink for in-process subscribers. No transport policy in this file — just the DTOs.
 
@@ -24,6 +24,7 @@ ProbeEventResidual       // residual-stream magnitude
 ProbeEventCachePressure  // KV cache fill / eviction
 ProbeEventMemoryPressure // GPU allocator state
 ProbeEventTraining       // SFT/LoRA/GRPO step events
+ProbeEventScheduler      // request-scheduler queue + latency events
 ```
 
 ## Phases
@@ -32,6 +33,7 @@ ProbeEventTraining       // SFT/LoRA/GRPO step events
 ProbePhasePrefill   // initial prompt forward pass
 ProbePhaseDecode    // autoregressive generation
 ProbePhaseTraining  // SFT/LoRA/GRPO loop
+ProbePhaseQueue     // request queued in the scheduler
 ```
 
 ## Event payload
@@ -46,20 +48,28 @@ type ProbeSink interface {
 }
 ```
 
-Implemented by:
+`ProbeSinkFunc` adapts a plain `func(ProbeEvent)` to a sink; `ProbeBus`
+(`NewProbeBus(sinks...)` / `Add`) fans one event out to zero or more
+sinks. Implemented by:
 
-- `go-ml/agent_eval.go` — collects probes into eval reports
-- `core/api` SSE handler — streams probes to core/ide
+- `agent/` — collects probes into eval reports
+- `serving/` SSE handler — streams probes to consumers
 - in-process test fixtures that just accumulate events
 
 A backend with no `ProbeSink` injected emits to a no-op default.
 
+> Note: `GenerateConfig.ProbeSink` (see [options.md](options.md)) is a
+> separate, narrower interface — `probe.Sink` from
+> `dappco.re/go/inference/eval/probe` — used to attach a telemetry sink
+> to a single generation call. The `ProbeSink` / `ProbeEvent` DTOs here
+> are the portable event shapes.
+
 ## Why a separate file
 
-Probes are an extension surface, not a core capability. A minimal backend (CPU llama fallback) emits nothing but still satisfies TextModel. A research-grade backend (go-mlx with attention inspection + MoE routing) emits dozens of events per generated token. The shape is portable so consumers don't pin to one backend.
+Probes are an extension surface, not a core capability. A minimal backend (CPU llama fallback) emits nothing but still satisfies TextModel. A research-grade backend (`engine/metal` with attention inspection + MoE routing) emits dozens of events per generated token. The shape is portable so consumers don't pin to one backend.
 
 ## Related
 
 - [capability.md](capability.md) — `CapabilityProbeEvents` / `CapabilityAttentionProbe` / `CapabilityLogitProbe`
-- `go-mlx/docs/observability/probe.md` (planned) — backend wiring
-- `go-ml/docs/agent/agent_eval.md` (planned) — probe collection in eval
+- [options.md](options.md) — `GenerateConfig.ProbeSink` (the per-call `eval/probe.Sink`)
+- `engine/metal` — the in-repo backend that emits these events

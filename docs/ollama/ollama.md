@@ -1,15 +1,23 @@
 <!-- SPDX-Licence-Identifier: EUPL-1.2 -->
 
-# ollama/ollama.go — Ollama-compatible wire types
+# serving/provider/ollama — Ollama-compatible native server
 
-**Package**: `dappco.re/go/inference/ollama`
-**File**: `go/ollama/ollama.go`
+**Package**: `dappco.re/go/inference/serving/provider/ollama`
+**Routes**: `/api/chat`, `/api/generate`, `/api/tags`, `/api/show`
 
 ## What this is
 
-The Ollama-compatible API wire surface — DTOs for `/api/chat`, `/api/generate`, `/api/tags`, `/api/show` plus translation to `inference.Message` + `inference.GenerateOption`. Same pattern as the OpenAI and Anthropic sibling packages.
+A **native** Ollama-compatible server — DTOs, translation, and (assembled in
+`serving/compat`) the HTTP handlers for `/api/chat`, `/api/generate`,
+`/api/tags`, and `/api/show`. It decodes the Ollama wire request and serves it
+from the LOCAL engine, emitting Ollama-native JSON or the Ollama NDJSON stream.
+Not a proxy to a real Ollama daemon.
 
-Used by tools and IDE plugins that talk to Ollama natively (Continue, Cody, Cline, the Codex `ollama` profile) — when this surface is mounted by core/api, those tools find a local model server transparent to "is this real Ollama or core?"
+Tools and IDE plugins that speak Ollama natively (Continue, Cody, Cline, and the
+like) find a local model server transparent to "is this real Ollama or not?" The
+routes are mounted by `serving/compat` (`mux.go`) and served by `cmd/lem serve`
+(default `:36911` — Lethean's own port, so an Ollama install on `11434` never
+collides).
 
 ## Paths
 
@@ -24,7 +32,7 @@ DefaultShowPath     = "/api/show"
 
 ```go
 Message              // role + content (plain string, unlike Anthropic's typed blocks)
-Options              // temperature + top_k + top_p + num_predict
+Options              // temperature + top_k + top_p + min_p + num_predict
 ChatRequest          // model + messages + stream + options
 GenerateRequest      // model + prompt + stream + options
 ChatResponse         // model + message + done + prompt_eval_count + eval_count + durations (nanos)
@@ -35,10 +43,12 @@ ShowRequest          // model
 ShowResponse         // license + modelfile + parameters + template + details
 ```
 
-Two response timing peculiarities to know:
+`Options` carries `min_p` alongside the standard Ollama sampler set — the gemma4
+sampling extension. Two response timing peculiarities:
 
 - Durations are **int64 nanoseconds**, not floats / seconds.
-- `prompt_eval_count` = prompt tokens, `eval_count` = generated tokens (different field names from OpenAI / Anthropic).
+- `prompt_eval_count` = prompt tokens, `eval_count` = generated tokens (different
+  field names from OpenAI / Anthropic).
 
 ## InferenceMessages
 
@@ -46,16 +56,17 @@ Two response timing peculiarities to know:
 messages := ollama.InferenceMessages(req.Messages)
 ```
 
-Straight 1:1 map. Ollama's message shape matches `inference.Message` directly so the conversion is a slice rebuild.
+Straight 1:1 map — Ollama's message shape matches `inference.Message` directly.
 
 ## GenerateOptions
 
 ```go
 opts := ollama.GenerateOptions(req.Options)
-for tok := range model.Chat(ctx, messages, opts...) { ... }
 ```
 
-Translates Ollama's sampler set. `num_predict` becomes `WithMaxTokens` — the Ollama name reflects its llama.cpp lineage.
+Translates Ollama's sampler set into one fused `GenerateOption`. `num_predict`
+becomes `WithMaxTokens` (the name reflects its llama.cpp lineage). An all-zero
+`Options` returns nil so callers skip a no-op option pass.
 
 ## NewChatResponse + NewGenerateResponse
 
@@ -64,31 +75,48 @@ chatResp := ollama.NewChatResponse(modelName, text, metrics)
 genResp  := ollama.NewGenerateResponse(modelName, text, metrics)
 ```
 
-Convenience builders. `Done: true` always set — they produce single-shot responses, not streaming chunks. Streaming responses build per-chunk shapes inline at the handler.
+Convenience builders for the terminal frame. `Done: true` is always set — these
+are the single-shot / stream-summary shapes, filled with `prompt_eval_count` and
+`eval_count` from the metrics. Responses carry the visible answer only; any
+reasoning channel is stripped (the Ollama wire has no separate thought field).
+
+## Streaming
+
+Both `/api/chat` and `/api/generate` stream **NDJSON** (`application/x-ndjson`):
+one JSON object per generated token with `done: false`, then a terminal summary
+frame carrying `done: true` and the metric counters. The per-token frames are
+built by hand-rolled encoders (in `serving/compat`) to stay off the reflect path.
 
 ## /api/tags + /api/show
 
-`TagsResponse` mirrors the model picker — backends that implement model listing can serve this from their inventory. `ShowResponse` carries Ollama's "model details" payload (license / template / parameters) which map onto `ModelIdentity` + `TokenizerIdentity.ChatTemplate`.
-
-These two endpoints are read-only meta queries, no inference work — making them easy to satisfy from a backend's `Discover()` + `Inspect()` results.
+`/api/tags` lists the resolver's model names as `ModelTag` entries. `/api/show`
+returns the model's `details` — `architecture`, `model_type`, and (when known)
+`quantization` — derived from the model's `Info()`. Both are read-only meta
+queries with no inference work.
 
 ## What's not here
 
-- `/api/pull`, `/api/push`, `/api/copy`, `/api/delete` — model management. CoreAgent's model store has different semantics (State bundles vs Ollama tags). Not a wire-parity target.
-- `/api/embeddings` — Ollama has it; CoreAgent serves embeddings via the OpenAI `/v1/embeddings` path instead.
-- HTTP handler. As with `anthropic.go`, the wire DTOs are in place; the handler is roadmap.
+- `/api/pull`, `/api/push`, `/api/copy`, `/api/delete` — model management. The
+  model store has different semantics (State bundles vs Ollama tags); not a
+  wire-parity target.
+- `/api/embeddings` — embeddings are served via the OpenAI `/v1/embeddings` path
+  instead.
 
-## Why three sibling files, not one mega-package
+## Why three sibling packages, not one mega-package
 
-The temptation is a single `wire` package with `wire.OpenAIChat`, `wire.AnthropicMessages`, `wire.OllamaChat`. We resist for three reasons:
+A single `wire` package with `wire.OpenAIChat` / `wire.AnthropicMessages` /
+`wire.OllamaChat` was resisted for three reasons:
 
-1. **Naming friction** — `wire.MessageRequest` is ambiguous; `anthropic.MessageRequest` isn't.
-2. **Import economy** — a server that only exposes the OpenAI surface shouldn't compile Anthropic + Ollama into its binary.
-3. **Independent evolution** — each upstream API changes on its own clock; isolated packages let us track each without cross-touch.
+1. **Naming friction** — `wire.MessageRequest` is ambiguous; `ollama.ChatRequest`
+   isn't.
+2. **Import economy** — a server exposing only the Ollama surface shouldn't
+   compile the OpenAI + Anthropic packages into its binary.
+3. **Independent evolution** — each upstream API changes on its own clock;
+   isolated packages track each without cross-touch.
 
 ## Related
 
 - [../openai/openai.md](../openai/openai.md) — OpenAI sibling
 - [../anthropic/anthropic.md](../anthropic/anthropic.md) — Anthropic sibling
 - [../inference/inference.md](../inference/inference.md) — base `Message` + `GenerateOption` types
-- [../inference/capability.md](../inference/capability.md) — `CapabilityOllamaCompat` declares this surface
+- [../inference/capability.md](../inference/capability.md) — capability report covering the Ollama surface

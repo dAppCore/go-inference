@@ -5,6 +5,19 @@ composition into serving's shape, or the reverse."* Companion to that map;
 this document lives in the receiving repo because go-inference owns the merge
 design. Written 2026-07-04, after the Tier-0 contract diff below.
 
+> **Current state (read this first).** Since this design was written, the merge
+> has landed in the shape below: **go-mlx and go-rocm are retired**, and both
+> engines live in this repo — `engine/metal` (the no-cgo Apple engine, the
+> `pkg/native` payload re-homed) with its registration shim
+> (`engine/metal/inference_register.go`) and native decode path, and
+> `engine/hip` (the AMD engine, which does carry cgo). The model architectures
+> stayed decoupled in the `model/` family, exactly as Tier 3 called for. This
+> document is kept as the **design record** of how the reconciliation was
+> executed — the tables below name go-mlx's `pkg/metal` / composition-core types
+> because they describe the *source* of the merge, not current go-inference
+> packages. For the current shape see [README](../README.md) and
+> [architecture.md](architecture.md).
+
 ## The call: serving's shape wins
 
 The `inference` contract layer is the boundary. Engines are self-registering

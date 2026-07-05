@@ -2,8 +2,8 @@
 
 # state/project_seed.go — project-seed workflow helpers
 
-**Package**: `dappco.re/go/inference/state`
-**File**: `go/state/project_seed.go`
+**Package**: `dappco.re/go/inference/model/state`
+**File**: `go/model/state/project_seed.go`
 **Aliased into**: `dappco.re/go/inference`
 
 ## What this is
@@ -14,27 +14,28 @@ load models or write bytes. They produce consistent `WakeRequest` and
 fall back to summary text, and compare a saved `Bundle` with a wake request
 before a runtime tries to restore KV.
 
-The concrete runtime still owns wake/sleep. go-mlx restores KV blocks on Metal;
-go-rocm and future drivers can implement the same `Session` and `Forker`
-contracts without copying app policy.
+The concrete runtime still owns wake/sleep. `engine/metal` restores KV blocks
+on Apple GPU; `engine/hip` and future engines can implement the same `Session`
+and `Forker` contracts without copying app policy.
 
 ## ProjectSeed
 
-`NewProjectSeed` normalises the URI set for a project:
+`NewProjectSeed` normalises the URI set for a project (defaulting `BaseURI` to
+`state://projects` and `ProjectID` to `default` when unset):
 
 ```go
 seed := state.NewProjectSeed(state.ProjectSeedOptions{
     BaseURI:   "state://lthn/projects",
-    ProjectID: "core/go-mlx",
+    ProjectID: "core/go-inference",
 })
 ```
 
 The default seed entry becomes:
 
 ```text
-state://lthn/projects/core/go-mlx/seed
-state://lthn/projects/core/go-mlx/seed/bundle
-state://lthn/projects/core/go-mlx/seed/index
+state://lthn/projects/core/go-inference/seed
+state://lthn/projects/core/go-inference/seed/bundle
+state://lthn/projects/core/go-inference/seed/index
 ```
 
 `seed.WakeRequest(...)` carries model, tokenizer, adapter, runtime, and labels

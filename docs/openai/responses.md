@@ -1,40 +1,61 @@
 <!-- SPDX-Licence-Identifier: EUPL-1.2 -->
 
-# openai/responses.go — Responses API wire shapes
+# serving/provider/openai/responses.go — Responses API surface
 
-**Package**: `dappco.re/go/inference/openai`
-**File**: `go/openai/responses.go`
+**Package**: `dappco.re/go/inference/serving/provider/openai`
+**File**: `go/serving/provider/openai/responses.go`
+**Route**: `POST /v1/responses`
 
 ## What this is
 
-The OpenAI **Responses API** (`/v1/responses`) wire types — a newer, more structured alternative to Chat Completions that treats inputs as typed items and outputs as typed messages. Same translation pattern as Chat Completions: DTOs + `inference.Message` adapter + `inference.GenerateOption` builder.
+The OpenAI **Responses API** (`/v1/responses`) wire types and translation. Same
+pattern as Chat Completions — DTOs + an `inference.Message` adapter + a
+`GenerateOption` builder. This file holds the DTOs and translation; the HTTP
+handler is assembled in `serving/compat` (`mux.go`, `openAIResponsesHandler`)
+over these types and mounted by `cmd/lem serve` alongside the other routes.
 
-This is a parity item from the 2026-05-09 vMLX gap report; vMLX exposed `/v1/responses` and CoreAgent needed the same surface for SDK compatibility.
+This is a **minimal** Responses shape, not the full typed-item variant of
+OpenAI's API: input items are plain `{role, content}` messages, and
+`instructions` maps to a leading system message. There are no typed multimodal
+input items, tool-result items, or server-side previous-response state.
 
 ## DTOs
 
 ```go
-ResponseInputMessage   // structured input item (text / image / tool result / …)
-ResponseRequest        // model + input items + sampler + tools + reasoning hints
-ResponseOutputText     // typed text segment
-ResponseOutputMessage  // typed assistant message with output_text array
-ResponseUsage          // input_tokens + output_tokens + reasoning_tokens
-Response               // non-streaming response (id + model + output[] + usage)
-ResponseStreamEvent    // streaming event (event_type + payload)
+ResponseInputMessage   // {role, content} input item
+ResponseRequest        // model + input[] + instructions + sampler + stream + stop
+ResponseOutputText     // {type:"output_text", text}
+ResponseOutputMessage  // typed assistant message with a content[] of output_text
+ResponseUsage          // input_tokens + output_tokens + total_tokens
+Response               // non-streaming body (id + object + created + model + output[] + usage + thought?)
+ResponseStreamEvent    // streaming event (type + response? + delta + thought?)
 ```
 
-The Responses API distinguishes **visible text** from **reasoning text** at the wire level — `ResponseUsage.ReasoningTokens` is its own count. This pairs cleanly with the `ReasoningParser` interface in `contracts.go` — backends that emit reasoning channels feed them through as separate output items.
+`ResponseRequest` models:
+
+```
+model, input[], instructions, temperature, top_p, min_p, top_k,
+max_output_tokens, stream, stop, user
+```
+
+`min_p` is the gemma4 sampling extension. Note `max_output_tokens` (the Responses
+name) maps to the same cap as chat's `max_tokens`.
+
+Reasoning is surfaced as an optional `thought` string on `Response` /
+`ResponseStreamEvent` — not as a separate token count. `ResponseUsage` carries
+`input_tokens` / `output_tokens` / `total_tokens` only.
 
 ## Translation
 
 ```go
-messages := openai.ResponseMessages(req)          // flatten input items to inference.Message
-opts, err := openai.ResponseGenerateOptions(req)  // sampler → GenerateOption
+messages   := openai.ResponseMessages(req)          // input items → inference.Message
+opts, err  := openai.ResponseGenerateOptions(req)   // sampler → GenerateOption
 ```
 
-`ResponseMessages` walks `req.Input[]`, extracting text content and converting role + content per item. Tool-result items map to `Role: "tool"` messages.
-
-`ResponseGenerateOptions` follows the same logic as `GenerateOptions` in `openai.go` — the Responses API and Chat Completions accept the same sampler set.
+`ResponseMessages` prepends `instructions` as a `system` message, then maps each
+`input` item to an `inference.Message`. `ResponseGenerateOptions` folds the
+request into a `ChatCompletionRequest` and reuses `GenerateOptions`, so the
+Responses and Chat Completions surfaces share one sampler-translation path.
 
 ## NewTextResponse
 
@@ -42,26 +63,30 @@ opts, err := openai.ResponseGenerateOptions(req)  // sampler → GenerateOption
 resp := openai.NewTextResponse(requestID, modelName, text, metrics)
 ```
 
-The minimal builder — produces a complete `Response` with one output message containing one text segment. Used by the handler to serialise the simple non-streaming path. Streaming responses build `ResponseStreamEvent` chunks instead.
+The minimal builder — produces a complete `Response` with one output message
+containing one `output_text` segment, plus usage filled from the inference
+metrics. The non-streaming handler uses it directly.
+
+## Handler behaviour (in `serving/compat`)
+
+- **Non-streaming** — collects tokens, splits reasoning from the visible answer,
+  truncates at any stop sequence, and returns a `Response`. A non-empty reasoning
+  channel is attached as `thought`.
+- **Streaming** — emits `response.created`, then `response.output_text.delta`
+  per visible-text delta, then `response.completed` (carrying the full
+  `Response`), then `data: [DONE]`. A generation error emits `response.error`.
+  Reasoning extraction runs through `decode/parser`'s processor.
 
 ## Why Responses vs Chat Completions
 
-OpenAI introduced Responses because Chat Completions can't cleanly express:
-
-- Multi-modal inputs (image + text in the same turn)
-- Tool-call results as typed input items, not assistant turns
-- Reasoning tokens billed separately from output tokens
-- Server-side state (response references the previous response)
-
-Local CoreAgent inference benefits from the same shape — reasoning channels are first-class, tool results flow without role abuse, server-state can be tied to wake/sleep bundles.
-
-## Where the handler lives
-
-The Responses HTTP handler is currently not in this file (the Chat Completions handler in `openai.go` is the only HTTP entry). A Responses-specific handler is on the parity-plan roadmap; the DTOs are in place so once the handler lands, the SDK side already compiles.
+OpenAI introduced Responses to express things Chat Completions can't cleanly —
+typed inputs, tool results as input items, server-side state. This local
+implementation adopts the route and the response envelope; the input side stays
+minimal (role/content messages + instructions) until a typed-item consumer needs
+more.
 
 ## Related
 
 - [openai.md](openai.md) — Chat Completions counterpart
-- [services.md](services.md) — embeddings/rerank/cache/cancel handlers
-- [../inference/contracts.md](../inference/contracts.md) — `ReasoningParser` for emitting reasoning channels
-- `go-mlx/docs/inference/thinking.md` (planned) — reasoning parser implementation
+- [services.md](services.md) — embeddings / rerank / cache / cancel handlers
+- [../inference/contracts.md](../inference/contracts.md) — the reasoning parser contract behind the `thought` split

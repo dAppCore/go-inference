@@ -18,11 +18,11 @@ Canonical pattern across the rest of the Go canon:
 core.New(core.WithService(somepkg.Register))   // somepkg.Register is the registration fn
 ```
 
-But `inference.Register(b Backend)` already exists — the init-time backend-registration call that every native driver uses:
+But `inference.Register(b Backend)` already exists — the init-time backend-registration call that every in-repo engine uses:
 
 ```go
-// in go-mlx/register_metal.go
-func init() { inference.Register(&metalbackend{}) }
+// in engine/metal/inference_register.go
+func init() { inference.Register(metalBackend{}) }
 ```
 
 Renaming would break every backend. So this package exposes the canonical Core registration as **`RegisterCore(c *core.Core) core.Result`** instead, leaving the existing `Register(Backend)` untouched. Both names share a package; both keep their established consumers.

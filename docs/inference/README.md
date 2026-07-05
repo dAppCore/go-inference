@@ -6,7 +6,7 @@
 
 ## What this package owns
 
-The **central contract** that every other tetrad repo speaks. Pure interfaces, DTOs, registries, and option types. Zero CGO. Zero platform branches. Compiles everywhere.
+The **central contract** every backend and consumer in this repo speaks. Pure interfaces, DTOs, registries, and option types — the contract files import only `dappco.re/go` plus sibling `inference/*` subpackages, no CGO and no platform branches, so this package compiles everywhere. Backends (`engine/metal`, `engine/hip`) live in-repo behind build tags and register themselves at init time; go-mlx and go-rocm are retired and their proven code has migrated here — go-inference is now the sovereign inference repo.
 
 Three categories:
 
@@ -52,10 +52,12 @@ Optionally:
 
 ## Sibling packages
 
-- [../state/](../state/README.md) — durable state DTOs + Wake/Sleep/Fork lifecycle
+- [../state/](../state/README.md) — durable state DTOs + Wake/Sleep/Fork lifecycle (package `dappco.re/go/inference/model/state`)
 - [../openai/](../openai/README.md) — OpenAI wire types + HTTP handlers
 - [../anthropic/](../anthropic/anthropic.md) — Anthropic Messages wire types
 - [../ollama/](../ollama/ollama.md) — Ollama-compatible wire types
+
+The compat handlers themselves are served from `serving/` (`serving/compat`, `serving/provider/*`).
 
 ## Stability rules
 
@@ -70,21 +72,22 @@ This package is the shared contract. Changes here cascade to every backend and c
 
 - UK English in code, comments, docs (colour, organisation, licence, serialise)
 - SPDX header on every new file: `// SPDX-Licence-Identifier: EUPL-1.2`
-- Zero external dependencies — stdlib + `dappco.re/go` only (testify in tests)
-- Error strings start lowercase, end without punctuation: `"backend %q not registered"`
+- The root contract files depend only on `dappco.re/go` (core) plus sibling `inference/*` subpackages — no third-party imports, no CGO. (The wider module vendors serving/data-plane deps such as gin, duckdb and parquet; those live in `serving/`, `eval/` and `cmd/`, not the contract.)
+- Errors go through `core.E(...)` / `core.Result`, not `fmt.Errorf`; messages start lowercase and end without punctuation: `"backend %q not registered"`
 - Test triplets: `_Good` / `_Bad` / `_Ugly`
 - Conventional commits scoped to `inference`, `state`, `openai`, `anthropic`, `ollama`, `options`, `discover`
 - Co-Author trailer: `Co-Authored-By: Virgil <virgil@lethean.io>`
 
 ## Who imports this
 
-| Module | Why |
-|--------|-----|
-| `dappco.re/go/mlx` | implements Backend + TextModel for Apple Metal |
-| `dappco.re/go/rocm` (planned) | implements Backend + TextModel for AMD ROCm |
-| `dappco.re/go/cuda` (planned) | implements Backend + TextModel for NVIDIA CUDA |
-| `dappco.re/go/ml` | wraps Backend + TextModel into scoring/eval engine, adds HTTP/llama backends |
-| `dappco.re/go/ai` | provider router, outbound OpenAI provider, BookState demo |
-| `dappco.re/go/i18n` | TextModel for domain classification |
-| `dappco.re/go/api` | mounts OpenAI / Anthropic / Ollama handlers |
-| `dappco.re/go/ide` | reads CapabilityReport + bundle index for model picker |
+Everything is in-repo now — these are packages under `dappco.re/go/inference`, not separate modules:
+
+| Package | Why |
+|---------|-----|
+| `engine/metal` | implements Backend + TextModel for Apple GPU (no-cgo, `darwin && arm64`); registers backend `"metal"` at init |
+| `engine/hip` | implements Backend + TextModel for AMD ROCm/HIP (`linux && amd64`) |
+| `serving/` | mounts the OpenAI / Anthropic / Ollama compat handlers and the HTTP/llama fallback backend |
+| `agent/` | wraps Backend + TextModel into the scoring/eval agent loop |
+| `eval/` | benchmark + evaluation runners over `DatasetStream` |
+| `cmd/lem` | the CLI: `serve`, `ask`, `sft`, `ssd`, `tune`, `pack` |
+| `model/` | GGUF / safetensors loaders + quantisation feeding the backends |
