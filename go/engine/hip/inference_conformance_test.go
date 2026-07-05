@@ -32,7 +32,7 @@ import (
 	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/engine/enginetest"
 	"dappco.re/go/inference/kv"
-	"dappco.re/go/inference/tokenizer"
+	"dappco.re/go/inference/decode/tokenizer"
 )
 
 const (

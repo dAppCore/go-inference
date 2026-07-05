@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/tokenizer"
+	"dappco.re/go/inference/decode/tokenizer"
 )
 
 // train_trainer_smoke_test.go is THE receipt for the train seam: a full SFT round trip on a real

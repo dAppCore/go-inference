@@ -5,7 +5,7 @@ package spine
 import (
 	"testing"
 
-	"dappco.re/go/inference/parser"
+	"dappco.re/go/inference/decode/parser"
 	"dappco.re/go/inference/train/lora"
 )
 

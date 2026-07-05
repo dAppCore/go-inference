@@ -6,7 +6,7 @@ package hip
 
 import (
 	"dappco.re/go/inference"
-	outputparser "dappco.re/go/inference/parser"
+	outputparser "dappco.re/go/inference/decode/parser"
 )
 
 // ParserRegistry provides architecture-aware reasoning and tool parsing.

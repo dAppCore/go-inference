@@ -19,7 +19,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/tokenizer"
+	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/train/dataset"
 	coreio "dappco.re/go/io"
 )

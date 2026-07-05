@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"dappco.re/go/inference/specctl"
+	"dappco.re/go/inference/decode/specctl"
 )
 
 // approx reports whether a and b are within a small epsilon — accept-rate maths

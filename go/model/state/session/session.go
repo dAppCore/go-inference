@@ -14,7 +14,7 @@ import (
 	"dappco.re/go/inference/model/spine"
 	state "dappco.re/go/inference/model/state"
 	"dappco.re/go/inference/model/state/agent"
-	"dappco.re/go/inference/parser"
+	"dappco.re/go/inference/decode/parser"
 )
 
 // Constant validation errors hoisted to package vars — each previously

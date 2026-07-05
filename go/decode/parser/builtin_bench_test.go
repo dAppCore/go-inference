@@ -27,11 +27,11 @@ import (
 
 // Sinks defeat compiler DCE.
 var (
-	builtinBenchParser   *builtinOutputParser
-	builtinBenchID       string
-	builtinBenchReason   inference.ReasoningParseResult
-	builtinBenchTools    inference.ToolParseResult
-	builtinBenchErr      error
+	builtinBenchParser *builtinOutputParser
+	builtinBenchID     string
+	builtinBenchReason inference.ReasoningParseResult
+	builtinBenchTools  inference.ToolParseResult
+	builtinBenchErr    error
 )
 
 // Roughly one English word ≈ one token for fixture-generation purposes —
@@ -122,10 +122,10 @@ func Benchmark_Builtin_ParserID_NilReceiver(b *testing.B) {
 //   gpt-oss — multi-end markers (the worst-case findReasoningStart fan-out)
 
 var builtinBenchArchitectures = []struct {
-	id      string
-	parser  *builtinOutputParser
-	start   string
-	end     string
+	id     string
+	parser *builtinOutputParser
+	start  string
+	end    string
 }{
 	{"qwen", newBuiltinOutputParser("qwen", qwenMarkers()), "<think>", "</think>"},
 	{"gemma", newBuiltinOutputParser("gemma", gemmaMarkers()), "<start_of_turn>thinking\n", "<end_of_turn>"},

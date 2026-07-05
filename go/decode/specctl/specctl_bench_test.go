@@ -11,7 +11,7 @@ package specctl_test
 import (
 	"testing"
 
-	"dappco.re/go/inference/specctl"
+	"dappco.re/go/inference/decode/specctl"
 )
 
 // Package sinks defeat dead-code elimination.

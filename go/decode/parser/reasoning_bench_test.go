@@ -26,13 +26,13 @@ import (
 
 // Sinks defeat compiler DCE.
 var (
-	reasoningBenchResult   inference.ReasoningParseResult
-	reasoningBenchIdx      int
-	reasoningBenchMarker   reasoningMarker
-	reasoningBenchOK       bool
-	reasoningBenchEndIdx   int
-	reasoningBenchEndSize  int
-	reasoningBenchText     string
+	reasoningBenchResult  inference.ReasoningParseResult
+	reasoningBenchIdx     int
+	reasoningBenchMarker  reasoningMarker
+	reasoningBenchOK      bool
+	reasoningBenchEndIdx  int
+	reasoningBenchEndSize int
+	reasoningBenchText    string
 )
 
 // reasoningBenchWords builds a synthetic prose stream of approx

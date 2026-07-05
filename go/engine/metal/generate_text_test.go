@@ -10,7 +10,7 @@ import (
 
 	core "dappco.re/go"
 	g4 "dappco.re/go/inference/model/gemma4"
-	"dappco.re/go/inference/tokenizer"
+	"dappco.re/go/inference/decode/tokenizer"
 )
 
 // a tiny BPE tokenizer (max id 101 via the specials) — Encode/Decode work, no model load.

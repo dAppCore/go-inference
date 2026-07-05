@@ -16,7 +16,7 @@ import (
 	memvid "dappco.re/go/inference/model/state"
 	"dappco.re/go/inference/model/state/agent"
 	"dappco.re/go/inference/model/state/session/internal/sessionfake"
-	"dappco.re/go/inference/parser"
+	"dappco.re/go/inference/decode/parser"
 	"dappco.re/go/inference/eval/probe"
 )
 
