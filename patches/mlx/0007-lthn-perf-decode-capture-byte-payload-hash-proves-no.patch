@@ -1,0 +1,51 @@
+From 08a2ba39833e93d53852fe422080c96556ab29b2 Mon Sep 17 00:00:00 2001
+From: Snider <snider@host.uk.com>
+Date: Tue, 16 Jun 2026 18:15:40 +0100
+Subject: [PATCH 07/10] =?UTF-8?q?lthn(perf):=20decode-capture=20byte-paylo?=
+ =?UTF-8?q?ad=20hash=20=E2=80=94=20proves=20no=20frozen=20per-token=20scal?=
+ =?UTF-8?q?ars=20+=20reveals=20the=202-token=20structural=20cycle?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+bytesHash (FNV over all inline setBytes payloads per CB) is IDENTICAL across decode tokens => RoPE offset etc. are buffer-driven, not baked host scalars; the two-update replay plan (input-token + offset buffer CONTENT) is sufficient. Also surfaced: decode = 2 CBs/token, a 47-cmd CB byte-identical every token + a small CB alternating 28/27 cmds every other token (intrinsic, present in serial too) — replay must record the cycle + alternate.
+
+Co-Authored-By: Virgil <virgil@lethean.io>
+---
+ mlx/backend/metal/device.cpp | 16 ++++++++++++++--
+ 1 file changed, 14 insertions(+), 2 deletions(-)
+
+diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
+index f298d234..2a978bf2 100644
+--- a/mlx/backend/metal/device.cpp
++++ b/mlx/backend/metal/device.cpp
+@@ -524,12 +524,24 @@ void CommandEncoder::end_encoding() {
+     lthn_rec_flush_cur();
+     if (!lthn_rec_cmds.empty()) {
+       size_t binds = 0, byteSets = 0;
++      uint64_t bytesHash = 1469598103934665603ULL; // FNV-1a over ALL inline-byte payloads
+       for (auto& c : lthn_rec_cmds) {
+         binds += c.buffers.size();
+         byteSets += c.bytes.size();
++        for (auto& by : c.bytes) {
++          for (uint8_t bb : by.first) {
++            bytesHash ^= bb;
++            bytesHash *= 1099511628211ULL;
++          }
++        }
+       }
+-      std::fprintf(stderr, "[decode-rec] cmds=%zu binds=%zu byteSets=%zu\n",
+-                   lthn_rec_cmds.size(), binds, byteSets);
++      // If bytesHash VARIES across consecutive decode tokens, some position-
++      // dependent value (prime suspect: RoPE offset) is frozen as a host setBytes
++      // scalar — replay must patch it, not just update the input+offset buffers.
++      std::fprintf(stderr,
++                   "[decode-rec] cmds=%zu binds=%zu byteSets=%zu bytesHash=0x%016llx\n",
++                   lthn_rec_cmds.size(), binds, byteSets,
++                   (unsigned long long)bytesHash);
+       lthn_rec_cmds.clear();
+     }
+   }
+-- 
+2.50.1 (Apple Git-155)
+
