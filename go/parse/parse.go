@@ -14,7 +14,7 @@ import (
 	"strconv"
 
 	core "dappco.re/go"
-	tools "dappco.re/go/inference/tools"
+	tools "dappco.re/go/inference/agent/tools"
 )
 
 // Gemma 4 tool-call special tokens, byte-for-byte from SGLang's

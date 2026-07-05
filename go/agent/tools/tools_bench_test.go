@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"dappco.re/go/inference/tools"
+	"dappco.re/go/inference/agent/tools"
 )
 
 // AX-11 allocation baselines for the tool-calling orchestration surface
