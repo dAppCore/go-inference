@@ -5,7 +5,6 @@
 package native
 
 import (
-	"runtime"
 	"sync"
 	"unsafe"
 
@@ -23,12 +22,9 @@ var (
 )
 
 type embedGatherScratch struct {
-	dModel        int
-	token, out    *pinnedNoCopyBytes
-	outViewPtr    uintptr
-	outViewLen    int
-	outView       metal.MTLBuffer
-	outViewPinned *pinnedNoCopyBytes
+	dModel     int
+	token, out *pinnedNoCopyBytes
+	noCopyOutputView
 }
 
 type embedGatherScratchPool struct {
@@ -107,51 +103,6 @@ func (s *embedGatherScratch) Close() {
 	}
 	s.closeOutputView()
 	s.dModel = 0
-}
-
-func (s *embedGatherScratch) closeOutputView() {
-	if s == nil {
-		return
-	}
-	if s.outViewPinned != nil {
-		s.outViewPinned.Close()
-	}
-	s.outViewPtr = 0
-	s.outViewLen = 0
-	s.outView = nil
-	s.outViewPinned = nil
-}
-
-func (s *embedGatherScratch) outputView(out []byte) (metal.MTLBuffer, bool) {
-	if s == nil || len(out) == 0 {
-		return nil, false
-	}
-	ptr := uintptr(unsafe.Pointer(&out[0]))
-	if s.outView != nil && s.outViewPtr == ptr && s.outViewLen == len(out) {
-		return s.outView, true
-	}
-	s.closeOutputView()
-	if buf, ok := registeredPinnedNoCopyBytes(out); ok {
-		s.outViewPtr = ptr
-		s.outViewLen = len(out)
-		s.outView = buf
-		s.outViewPinned = nil
-		return buf, true
-	}
-	buf, pinner, noCopy := residentNoCopyBytes(out)
-	if !noCopy {
-		if pinner != nil {
-			pinner.Unpin()
-		}
-		return nil, false
-	}
-	pinned := &pinnedNoCopyBytes{bytes: out, buf: buf, pinner: pinner}
-	runtime.SetFinalizer(pinned, (*pinnedNoCopyBytes).Close)
-	s.outViewPtr = ptr
-	s.outViewLen = len(out)
-	s.outView = buf
-	s.outViewPinned = pinned
-	return buf, true
 }
 
 func (s *embedGatherScratch) buffers(tokenID int32, dModel int) (metal.MTLBuffer, metal.MTLBuffer, error) {
