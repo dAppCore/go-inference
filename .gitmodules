@@ -65,3 +65,15 @@
 	path = external/cli
 	url = https://github.com/dappcore/cli.git
 	branch = dev
+[submodule "external/rocm-hip"]
+	path = external/rocm-hip
+	url = https://github.com/ROCm/HIP.git
+	branch = release/rocm-rel-7.2
+[submodule "external/rocm-clr"]
+	path = external/rocm-clr
+	url = https://github.com/ROCm/clr.git
+	branch = release/rocm-rel-7.2
+[submodule "external/rocr-runtime"]
+	path = external/rocr-runtime
+	url = https://github.com/ROCm/ROCR-Runtime.git
+	branch = release/rocm-rel-7.2
