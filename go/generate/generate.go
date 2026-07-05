@@ -34,6 +34,20 @@ type Config struct {
 	Think      bool
 	ContextLen int
 
+	// ImageSources are --image inputs threaded through the neutral multimodal
+	// path, each a local file path or a base64 "data:" URL (the same shapes
+	// serve accepts). They attach to the user turn as inference.Message.Images
+	// and are gated on the model's inference.VisionModel capability, exactly as
+	// serve's chat-completions handler carries image content parts. Only the
+	// stateless one-shot path carries images; -state turns reject them (the
+	// durable session prefills text prompts only).
+	ImageSources []string
+	// AudioSources are --audio inputs. There is no engine-neutral audio-input
+	// seam yet (inference.Message carries Images, not audio), so a non-empty
+	// value is rejected honestly rather than silently dropped — audio input is
+	// a follow-up once the engine exposes the seam.
+	AudioSources []string
+
 	// Reactive MTP drafter (Gemma 4 targets) — same ladder as serve.
 	DraftPath  string // "auto" runs the ladder, "" disables, a path forces the drafter
 	DraftBlock int    // explicit MTP draft block; 0 = engine default
@@ -78,7 +92,19 @@ func RunGenerate(ctx context.Context, cfg Config) error {
 		printNote(cfg.Log, "generate: native no-cgo token loop (the default go-inference metal engine already is native)")
 	}
 
+	// Audio input has no engine-neutral seam yet (inference.Message carries
+	// Images, not audio): reject rather than silently drop it, so the caller
+	// never gets a text-only answer that quietly ignored their audio.
+	if len(cfg.AudioSources) > 0 {
+		return core.E("generate.RunGenerate", "audio input is not yet exposed on the engine-neutral path — image input is wired, audio is a follow-up", nil)
+	}
+
 	if cfg.StateName != "" {
+		// The durable -state turn loop prefills text prompts through the spine
+		// session, which has no image seam; reject rather than drop the images.
+		if len(cfg.ImageSources) > 0 {
+			return core.E("generate.RunGenerate", "image input is not supported with -state yet — use stateless generate for vision (the durable session prefills text prompts only)", nil)
+		}
 		return runStateTurn(ctx, cfg, loadOpts)
 	}
 	return runBasicGenerate(ctx, cfg, loadOpts)
@@ -96,14 +122,27 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 			det.DraftPath, det.Note, resolvedDraftBlock(cfg.DraftBlock))
 	}
 
+	// Resolve --image sources to raw bytes BEFORE loading the model, so a bad
+	// path or malformed data: URL fails fast without paying the load cost.
+	images, err := resolveImageInputs(cfg.ImageSources)
+	if err != nil {
+		return core.E("generate.RunGenerate", "image input", err)
+	}
+
 	tm, err := loadTextModel(cfg.ModelPath, loadOpts...)
 	if err != nil {
 		return core.E("generate.RunGenerate", "load", err)
 	}
 	defer tm.Close()
 
+	// Gate images on the model's neutral vision capability, exactly as serve's
+	// chat-completions handler does before prefill.
+	if err := requireVision(tm, images); err != nil {
+		return core.E("generate.RunGenerate", "vision", err)
+	}
+
 	off := !cfg.Think
-	msgs := []inference.Message{{Role: "user", Content: cfg.Prompt}}
+	msgs := []inference.Message{{Role: "user", Content: cfg.Prompt, Images: images}}
 	genOpts := func(limit int) []inference.GenerateOption {
 		opts := []inference.GenerateOption{
 			inference.WithMaxTokens(limit),
