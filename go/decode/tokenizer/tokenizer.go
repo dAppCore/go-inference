@@ -8,6 +8,7 @@ import (
 
 	"dappco.re/go"
 
+	"dappco.re/go/inference/decode/parser"
 	coreio "dappco.re/go/io"
 )
 
@@ -822,12 +823,13 @@ func indexBytePrefix(s string) int {
 
 // channelOpenMarker and channelCloseMarker are Gemma 4's reasoning-channel
 // delimiters (gpt-oss uses <|channel> as well). Unlike BOS/EOS/turn, these are
-// content-bearing control tokens: the reasoning parser
-// (go-inference parser/markers.go) needs them in the decoded stream to split
-// the thinking span from the visible answer, so DecodeToken keeps them.
+// content-bearing control tokens: the reasoning parser needs them in the
+// decoded stream to split the thinking span from the visible answer, so
+// DecodeToken keeps them. The strings are owned by the marker grammar
+// (decode/parser grammar.go) — one source for all three consumers.
 const (
-	channelOpenMarker  = "<|channel>"
-	channelCloseMarker = "<channel|>"
+	channelOpenMarker  = parser.ChannelOpenMarker
+	channelCloseMarker = parser.ChannelCloseMarker
 )
 
 // DecodeToken converts a single token ID to text for streaming.

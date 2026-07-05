@@ -9,37 +9,28 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/decode/parser"
 )
 
-const channelMarker = "<|channel>"
+// The marker grammar — channel open/close, the gemma turn terminator, and the
+// explicit paired reasoning spans — is owned by decode/parser (grammar.go) and
+// consumed here, so a grammar fix lands once for both streaming engines. The
+// local aliases keep this file's hot paths reading as before.
+const (
+	channelMarker = parser.ChannelOpenMarker
+	// channelCloseMarker terminates a reasoning channel in Gemma4's output
+	// (`<|channel>thought…<channel|>answer`). Unlike the gpt-oss style — where
+	// the next `<|channel>` OPEN implicitly ends the prior channel — Gemma4
+	// emits an explicit close, after which the remaining tokens are the
+	// visible answer.
+	channelCloseMarker = parser.ChannelCloseMarker
+	// turnTerminator is gemma4's turn-end token — a PLAIN vocab token in MLX
+	// snapshots, so its literal text reaches the extractor and the assistant
+	// lane swallows it (the id still stops generation upstream).
+	turnTerminator = parser.GemmaTurnTerminator
+)
 
-// channelCloseMarker terminates a reasoning channel in Gemma4's output
-// (`<|channel>thought…<channel|>answer`). Unlike the gpt-oss style — where
-// the next `<|channel>` OPEN implicitly ends the prior channel — Gemma4
-// emits an explicit close, after which the remaining tokens are the visible
-// answer. Recognising it switches the extractor back to the assistant
-// channel so the answer reaches content instead of being swallowed as
-// thinking.
-const channelCloseMarker = "<channel|>"
-
-// turnTerminator is gemma4's turn-end token. MLX gemma4 snapshots ship it as a
-// PLAIN vocab token (absent from tokenizer.json added_tokens), so the decode
-// layer cannot hide it and its literal text reaches the extractor; it is never
-// visible content, so the assistant lane swallows it (the id still stops
-// generation upstream).
-const turnTerminator = "<end_of_turn>"
-
-type pairedMarker struct {
-	start string
-	end   string
-}
-
-var reasoningMarkers = []pairedMarker{
-	{start: "<think>", end: "</think>"},
-	{start: "<thinking>", end: "</thinking>"},
-	{start: "<thought>", end: "</thought>"},
-	{start: "<reasoning>", end: "</reasoning>"},
-}
+var reasoningMarkers = parser.PairedReasoningMarkers()
 
 // reasoningMarkerStarts is the per-package cached list of marker starts
 // passed to splitSafeSuffix from drain. Built once at package init so
@@ -49,7 +40,7 @@ var reasoningMarkerStarts = func() []string {
 	out := make([]string, 0, len(reasoningMarkers)+2)
 	out = append(out, channelMarker, turnTerminator)
 	for _, marker := range reasoningMarkers {
-		out = append(out, marker.start)
+		out = append(out, marker.Start)
 	}
 	return out
 }()
@@ -92,7 +83,7 @@ func (e *ThinkingExtractor) Flush() (contentDelta, thoughtDelta string) {
 	if e.pending == "" {
 		return contentDelta, thoughtDelta
 	}
-	if e.inPaired || e.currentChannel == "thought" || e.currentChannel == "thinking" || e.currentChannel == "reasoning" {
+	if e.inPaired || parser.IsReasoningChannel(e.currentChannel) {
 		thoughtDelta += e.pending
 		e.thinking += e.pending
 	} else {
@@ -152,7 +143,7 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 			continue
 		}
 
-		if e.currentChannel == "thought" || e.currentChannel == "thinking" || e.currentChannel == "reasoning" {
+		if parser.IsReasoningChannel(e.currentChannel) {
 			// A reasoning channel ends one of two ways: gpt-oss opens the
 			// next channel (<|channel>name), Gemma4 emits an explicit close
 			// (<channel|>). Honour whichever marker appears first.
@@ -293,10 +284,10 @@ func splitSafeSuffixOne(s, marker string, final bool) (emit, keep string) {
 func (e *ThinkingExtractor) consumeMarkerAtStart() bool {
 	if !core.HasPrefix(e.pending, channelMarker) {
 		for _, marker := range reasoningMarkers {
-			if core.HasPrefix(e.pending, marker.start) {
+			if core.HasPrefix(e.pending, marker.Start) {
 				e.inPaired = true
-				e.pairedEnd = marker.end
-				e.pending = e.pending[len(marker.start):]
+				e.pairedEnd = marker.End
+				e.pending = e.pending[len(marker.Start):]
 				return true
 			}
 		}
@@ -358,13 +349,13 @@ func earliestReasoningStart(s string) (string, int) {
 	best := -1
 	bestStart := ""
 	for _, marker := range reasoningMarkers {
-		idx := indexString(s, marker.start)
+		idx := indexString(s, marker.Start)
 		if idx < 0 {
 			continue
 		}
 		if best < 0 || idx < best {
 			best = idx
-			bestStart = marker.start
+			bestStart = marker.Start
 		}
 	}
 	return bestStart, best
@@ -372,8 +363,8 @@ func earliestReasoningStart(s string) (string, int) {
 
 func pairedEndFor(start string) string {
 	for _, marker := range reasoningMarkers {
-		if marker.start == start {
-			return marker.end
+		if marker.Start == start {
+			return marker.End
 		}
 	}
 	return ""
