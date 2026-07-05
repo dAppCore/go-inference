@@ -80,3 +80,43 @@ tasks:
         env GOCACHE={{.GO_BUILD_CACHE}} go build -tags "metal_runtime embed_metallib" -trimpath
         -ldflags "{{.GO_DARWIN_LDFLAGS}}" -o bin/lem ./go/cmd/lem
       - 'echo "  lem (self-contained): bin/lem — $(du -h bin/lem | cut -f1), embeds mlx + lthn_kernels metallibs; run from anywhere"'
+
+  # --- Test / coverage / benchmark ------------------------------------------
+  # The portable lanes (test, cover) compile under the default build tags, so
+  # they run on any OS — engine/metal (darwin/arm64, //go:build metal_runtime)
+  # is excluded there and exercised by the *:metal lanes below. cover writes the
+  # profile codecov.yml consumes (95% target). See AGENTS.md for how to WRITE
+  # the {file}_test.go / _example_test.go / _bench_test.go each source ships.
+
+  test:
+    desc: "Run the portable Go test suite (default tags — no GPU, runs anywhere; the CI + codecov lane)."
+    dir: go
+    cmds:
+      - go test -count=1 ./...
+
+  test:metal:
+    desc: "Run the Darwin engine test suite (-tags metal_runtime). Needs build/dist/lib/*.metallib — run task metallib first."
+    dir: go
+    cmds:
+      - go test -tags metal_runtime -count=1 ./...
+
+  cover:
+    desc: "Portable coverage -> coverage.out (the profile codecov.yml reads; 95% target). Prints the total on the last line."
+    dir: go
+    cmds:
+      - go test -count=1 -covermode=atomic -coverprofile={{.ROOT_DIR}}/coverage.out ./...
+      - go tool cover -func={{.ROOT_DIR}}/coverage.out | tail -1
+
+  bench:
+    desc: "Run every benchmark with allocation stats (the lethean-perf instrument: -benchmem, 20x for steady-state allocs/op). Metal benches need build/dist/lib/*.metallib (task metallib)."
+    dir: go
+    cmds:
+      - go test -tags metal_runtime -run='^$' -bench=. -benchmem -benchtime=20x ./...
+
+  qa:
+    desc: "Pre-handback gate: gofmt check + vet + portable tests."
+    dir: go
+    cmds:
+      - test -z "$(gofmt -l .)"
+      - go vet ./...
+      - go test -count=1 ./...
