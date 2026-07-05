@@ -22,6 +22,13 @@ const channelMarker = "<|channel>"
 // thinking.
 const channelCloseMarker = "<channel|>"
 
+// turnTerminator is gemma4's turn-end token. MLX gemma4 snapshots ship it as a
+// PLAIN vocab token (absent from tokenizer.json added_tokens), so the decode
+// layer cannot hide it and its literal text reaches the extractor; it is never
+// visible content, so the assistant lane swallows it (the id still stops
+// generation upstream).
+const turnTerminator = "<end_of_turn>"
+
 type pairedMarker struct {
 	start string
 	end   string
@@ -39,8 +46,8 @@ var reasoningMarkers = []pairedMarker{
 // every per-token Process call shares the same slice header instead of
 // re-allocating len(reasoningMarkers)+1 entries on every miss path.
 var reasoningMarkerStarts = func() []string {
-	out := make([]string, 0, len(reasoningMarkers)+1)
-	out = append(out, channelMarker)
+	out := make([]string, 0, len(reasoningMarkers)+2)
+	out = append(out, channelMarker, turnTerminator)
 	for _, marker := range reasoningMarkers {
 		out = append(out, marker.start)
 	}
@@ -197,6 +204,16 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 		if channelIdx >= 0 && (idx < 0 || channelIdx < idx) {
 			idx = channelIdx
 			start = channelMarker
+		}
+		if termIdx := indexString(e.pending, turnTerminator); termIdx >= 0 && (idx < 0 || termIdx < idx) {
+			// Bare turn terminator in the assistant lane: emit the visible
+			// prefix, swallow the terminator — its text is never content.
+			if termIdx > 0 {
+				contentDelta = ensureBuilder(contentDelta)
+				writeContent(e, contentDelta, e.pending[:termIdx])
+			}
+			e.pending = e.pending[termIdx+len(turnTerminator):]
+			continue
 		}
 		if idx >= 0 {
 			if idx > 0 {

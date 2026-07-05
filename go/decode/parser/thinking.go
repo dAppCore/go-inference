@@ -29,6 +29,8 @@ type Processor struct {
 	mode           Mode
 	markers        []thinkingMarker
 	startSet       []string // cached marker.start values — invariant once markers is set
+	terminators    []string // bare turn-end tokens swallowed from visible output (gemma <end_of_turn>)
+	holdbackSet    []string // startSet + terminators — the streaming partial-suffix set
 	pending        string
 	inReasoning    bool
 	current        thinkingMarker
@@ -52,12 +54,14 @@ func NewProcessor(cfg Config, hint Hint) *Processor {
 	// after construction; sharing the headers avoids per-stream alloc
 	// of both the marker slice and the start-set slice (the previous
 	// shape paid both per NewProcessor call).
-	markers, startSet := markersAndStartsForHint(hint)
+	markers, startSet, terminators, holdback := markersStartsTerminatorsForHint(hint)
 	return &Processor{
-		cfg:      cfg,
-		mode:     NormaliseMode(cfg.Mode),
-		markers:  markers,
-		startSet: startSet,
+		cfg:         cfg,
+		mode:        NormaliseMode(cfg.Mode),
+		markers:     markers,
+		startSet:    startSet,
+		terminators: terminators,
+		holdbackSet: holdback,
 	}
 }
 
@@ -84,11 +88,19 @@ func markersForHint(hint Hint) []thinkingMarker {
 // them as read-only. Non-builtin parsers (custom registrations) fall back
 // to allocating fresh views, preserving the legacy shape for those paths.
 func markersAndStartsForHint(hint Hint) ([]thinkingMarker, []string) {
+	markers, starts, _, _ := markersStartsTerminatorsForHint(hint)
+	return markers, starts
+}
+
+// markersStartsTerminatorsForHint is markersAndStartsForHint plus the family's
+// bare turn terminators and the combined streaming holdback set (all four are
+// registry-owned read-only views).
+func markersStartsTerminatorsForHint(hint Hint) ([]thinkingMarker, []string, []string, []string) {
 	p, ok := ForHint(hint).(*builtinOutputParser)
 	if !ok || p == nil {
 		p = newBuiltinOutputParser("generic", genericMarkers())
 	}
-	return p.thinkingMarkers, p.thinkingStarts
+	return p.thinkingMarkers, p.thinkingStarts, p.terminators, p.thinkingHoldback
 }
 
 // visible := p.Process(piece)
@@ -171,6 +183,19 @@ func (p *Processor) drain(final bool) string {
 		}
 
 		idx, marker, ok := p.findStart(p.pending)
+		tidx, tlen := p.findTerminator(p.pending)
+		if tlen > 0 && (!ok || tidx < idx) {
+			// A bare turn terminator outside any span: emit the visible prefix,
+			// swallow the terminator itself — its text is never content.
+			if tidx > 0 {
+				if out == nil {
+					out = core.NewBuilder()
+				}
+				out.WriteString(p.pending[:tidx])
+			}
+			p.pending = p.pending[tidx+tlen:]
+			continue
+		}
 		if ok {
 			if idx > 0 {
 				if out == nil {
@@ -185,7 +210,7 @@ func (p *Processor) drain(final bool) string {
 		}
 		keep := 0
 		if !final {
-			keep = longestSuffixPrefix(p.pending, p.startSet)
+			keep = longestSuffixPrefix(p.pending, p.holdbackSet)
 		}
 		consume := len(p.pending) - keep
 		if consume == 0 {
@@ -208,6 +233,22 @@ func (p *Processor) drain(final bool) string {
 		return ""
 	}
 	return out.String()
+}
+
+// findTerminator returns the earliest bare turn-terminator occurrence in text
+// as (index, length), or (-1, 0) when none of the family's terminators appear.
+func (p *Processor) findTerminator(text string) (int, int) {
+	best, size := -1, 0
+	for _, term := range p.terminators {
+		idx := indexString(text, term)
+		if idx < 0 {
+			continue
+		}
+		if best < 0 || idx < best {
+			best, size = idx, len(term)
+		}
+	}
+	return best, size
 }
 
 func (p *Processor) findStart(text string) (int, thinkingMarker, bool) {

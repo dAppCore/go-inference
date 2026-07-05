@@ -340,3 +340,57 @@ func TestThinking_Utf8Rune_Direct(t *testing.T) {
 		t.Fatalf("utf8Rune(a) = %q, %d, want a, 1", r, size)
 	}
 }
+
+// TestThinkingExtractorSwallowsTurnTerminator pins the assistant-lane
+// terminator contract: gemma4 MLX snapshots ship <end_of_turn> as a PLAIN
+// vocab token the decode layer cannot hide, so its literal text reaches the
+// extractor — it must never land in content.
+func TestThinkingExtractorSwallowsTurnTerminator(t *testing.T) {
+	e := NewThinkingExtractor()
+	content, thought := e.Process(inference.Token{Text: "the answer is 68.\n<end_of_turn>"})
+	fc, ft := e.Flush()
+	content += fc
+	thought += ft
+	if want := "the answer is 68.\n"; content != want {
+		t.Fatalf("content = %q, want %q", content, want)
+	}
+	if thought != "" {
+		t.Fatalf("thought = %q, want empty", thought)
+	}
+}
+
+// TestThinkingExtractorTurnTerminatorSplitAcrossTokens pins the streaming
+// shape: a terminator arriving split across Process calls is held back (it is
+// in the marker-starts holdback set) and swallowed once complete.
+func TestThinkingExtractorTurnTerminatorSplitAcrossTokens(t *testing.T) {
+	e := NewThinkingExtractor()
+	var content string
+	for _, piece := range []string{"done", "<end_of_", "turn>"} {
+		c, _ := e.Process(inference.Token{Text: piece})
+		content += c
+	}
+	fc, _ := e.Flush()
+	content += fc
+	if content != "done" {
+		t.Fatalf("content = %q, want %q", content, "done")
+	}
+}
+
+// TestThinkingExtractorTerminatorAfterChannelClose pins the interplay with the
+// gemma4 thought channel: thought is captured, the close switches back to the
+// assistant lane, and the trailing terminator still never reaches content.
+func TestThinkingExtractorTerminatorAfterChannelClose(t *testing.T) {
+	e := NewThinkingExtractor()
+	content, thought := e.Process(inference.Token{Text: "<|channel>thought\nplan<channel|>final<end_of_turn>"})
+	fc, ft := e.Flush()
+	content += fc
+	thought += ft
+	if content != "final" {
+		t.Fatalf("content = %q, want %q", content, "final")
+	}
+	if thought != "\nplan" {
+		// The extractor's channel contract keeps the newline after the channel
+		// name in the thought text; only the content lane matters here.
+		t.Fatalf("thought = %q, want %q", thought, "\nplan")
+	}
+}

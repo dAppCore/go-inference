@@ -116,7 +116,23 @@ func (m *TextModel) encode(prompt string) []int32 {
 	return m.tok.Encode(prompt)
 }
 
+// decode is the STREAMING per-token decode: DecodeToken keeps the SentencePiece
+// ▁ word boundary as a leading space (so concatenated stream chunks reassemble
+// "hello world", not "helloworld") and preserves the gemma4 channel markers the
+// ThinkingExtractor parses, while other specials stay invisible. DecodeOne is
+// NOT this contract — it mirrors Decode-of-one and strips the boundary space,
+// which is right only for a standalone label (see decodeLabel).
 func (m *TextModel) decode(id int32) string {
+	if m == nil || m.tok == nil {
+		return ""
+	}
+	return m.tok.DecodeToken(id)
+}
+
+// decodeLabel decodes ONE token standalone — Decode([]int32{id}) semantics, the
+// boundary space stripped ("▁positive" → "positive"). Classification results
+// want the clean label; the stream loop must use decode instead.
+func (m *TextModel) decodeLabel(id int32) string {
 	if m == nil || m.tok == nil {
 		return ""
 	}
@@ -176,10 +192,19 @@ func (m *TextModel) decodeFromPrefilled(ctx context.Context, sess Session, promp
 			return false
 		}
 		count++
-		if !yield(inference.Token{ID: id, Text: m.decode(id)}) {
+		inStop := tokenInSet(id, stop)
+		text := m.decode(id)
+		if inStop {
+			// A terminator's text is never content: gemma4 MLX snapshots ship
+			// <end_of_turn> as a PLAIN vocab token (not in added_tokens), so
+			// DecodeToken can't hide it — without this, every reply ended with
+			// a literal "<end_of_turn>". The id still surfaces for trackers.
+			text = ""
+		}
+		if !yield(inference.Token{ID: id, Text: text}) {
 			return false
 		}
-		return !tokenInSet(id, stop)
+		return !inStop
 	}
 	var gerr error
 	if cfg.Temperature > 0 || cfg.MinP > 0 || cfg.RepeatPenalty > 1 {
@@ -240,7 +265,7 @@ func (m *TextModel) Classify(ctx context.Context, prompts []string, opts ...infe
 		if gerr != nil || !seen {
 			return core.Fail(core.E("engine.TextModel.Classify", "sample boundary token", gerr))
 		}
-		results[i] = inference.ClassifyResult{Token: inference.Token{ID: got, Text: m.decode(got)}}
+		results[i] = inference.ClassifyResult{Token: inference.Token{ID: got, Text: m.decodeLabel(got)}}
 	}
 	return core.Ok(results)
 }

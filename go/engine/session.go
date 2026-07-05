@@ -195,10 +195,15 @@ func (s *SessionHandle) Generate(ctx context.Context, cfg inference.GenerateConf
 			if ctx.Err() != nil {
 				return false
 			}
-			if yield != nil && !yield(inference.Token{ID: id, Text: s.model.decode(id)}) {
+			inStop := tokenInSet(id, stop)
+			text := s.model.decode(id)
+			if inStop {
+				text = "" // terminator text is never content (see TextModel.decodeFromPrefilled)
+			}
+			if yield != nil && !yield(inference.Token{ID: id, Text: text}) {
 				return false
 			}
-			return !tokenInSet(id, stop)
+			return !inStop
 		}
 		var (
 			out  []int32
