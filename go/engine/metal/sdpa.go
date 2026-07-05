@@ -5,7 +5,6 @@
 package native
 
 import (
-	"runtime"
 	"sync"
 	"unsafe"
 
@@ -38,10 +37,7 @@ type sdpaBF16Scratch struct {
 	qView, kView, vView              cachedNoCopyBytesView
 	p2PartialBytes, p2SumBytes       int
 	p2Partials, p2Sums, p2Maxs       metal.MTLBuffer
-	outViewPtr                       uintptr
-	outViewLen                       int
-	outView                          metal.MTLBuffer
-	outViewPinned                    *pinnedNoCopyBytes
+	noCopyOutputView
 }
 
 type sdpaBF16ScratchKey struct {
@@ -150,51 +146,6 @@ func (s *sdpaBF16Scratch) Close() {
 	s.qBytes, s.kBytes, s.vBytes, s.outBytes = 0, 0, 0, 0
 	s.p2Partials, s.p2Sums, s.p2Maxs = nil, nil, nil
 	s.p2PartialBytes, s.p2SumBytes = 0, 0
-}
-
-func (s *sdpaBF16Scratch) closeOutputView() {
-	if s == nil {
-		return
-	}
-	if s.outViewPinned != nil {
-		s.outViewPinned.Close()
-	}
-	s.outViewPtr = 0
-	s.outViewLen = 0
-	s.outView = nil
-	s.outViewPinned = nil
-}
-
-func (s *sdpaBF16Scratch) outputView(out []byte) (metal.MTLBuffer, bool) {
-	if s == nil || len(out) == 0 {
-		return nil, false
-	}
-	ptr := uintptr(unsafe.Pointer(&out[0]))
-	if s.outView != nil && s.outViewPtr == ptr && s.outViewLen == len(out) {
-		return s.outView, true
-	}
-	s.closeOutputView()
-	if buf, ok := registeredPinnedNoCopyBytes(out); ok {
-		s.outViewPtr = ptr
-		s.outViewLen = len(out)
-		s.outView = buf
-		s.outViewPinned = nil
-		return buf, true
-	}
-	buf, pinner, noCopy := residentNoCopyBytes(out)
-	if !noCopy {
-		if pinner != nil {
-			pinner.Unpin()
-		}
-		return nil, false
-	}
-	pinned := &pinnedNoCopyBytes{bytes: out, buf: buf, pinner: pinner}
-	runtime.SetFinalizer(pinned, (*pinnedNoCopyBytes).Close)
-	s.outViewPtr = ptr
-	s.outViewLen = len(out)
-	s.outView = buf
-	s.outViewPinned = pinned
-	return buf, true
 }
 
 func (s *sdpaBF16Scratch) buffers(qb, kb, vb []byte) (metal.MTLBuffer, metal.MTLBuffer, metal.MTLBuffer, metal.MTLBuffer, error) {
