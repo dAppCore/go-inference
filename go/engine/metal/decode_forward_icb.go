@@ -40,8 +40,7 @@ type decodeForwardICBCoreScratchKey struct {
 }
 
 type decodeForwardICBCoreScratchPool struct {
-	mu    sync.Mutex
-	items []*decodeForwardICBCoreScratch
+	core.Pool[*decodeForwardICBCoreScratch]
 }
 
 var decodeForwardICBCoreScratchPools sync.Map
@@ -264,28 +263,6 @@ func putDecodeForwardICBCoreScratch(s *decodeForwardICBCoreScratch) {
 	if s != nil {
 		decodeForwardICBCoreScratchPoolFor(s.dModel, s.qDim, s.kvDim, s.dFF, s.nLayers).Put(s)
 	}
-}
-
-func (p *decodeForwardICBCoreScratchPool) Get() *decodeForwardICBCoreScratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *decodeForwardICBCoreScratchPool) Put(s *decodeForwardICBCoreScratch) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 // decodeForwardICBCore is the backend-agnostic cache-grow ICB recorder + replay:

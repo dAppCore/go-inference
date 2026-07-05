@@ -49,8 +49,7 @@ type sdpaBF16ScratchKey struct {
 }
 
 type sdpaBF16ScratchPool struct {
-	mu    sync.Mutex
-	items []*sdpaBF16Scratch
+	core.Pool[*sdpaBF16Scratch]
 }
 
 func sdpaBF16ScratchPoolFor(key sdpaBF16ScratchKey) *sdpaBF16ScratchPool {
@@ -62,28 +61,6 @@ func sdpaBF16ScratchPoolFor(key sdpaBF16ScratchKey) *sdpaBF16ScratchPool {
 		return v.(*sdpaBF16ScratchPool)
 	}
 	return pool
-}
-
-func (p *sdpaBF16ScratchPool) Get() *sdpaBF16Scratch {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.items)
-	if n == 0 {
-		return nil
-	}
-	s := p.items[n-1]
-	p.items[n-1] = nil
-	p.items = p.items[:n-1]
-	return s
-}
-
-func (p *sdpaBF16ScratchPool) Put(s *sdpaBF16Scratch) {
-	if s == nil {
-		return
-	}
-	p.mu.Lock()
-	p.items = append(p.items, s)
-	p.mu.Unlock()
 }
 
 func sdpaBF16ScratchReady(s *sdpaBF16Scratch, key sdpaBF16ScratchKey) bool {
