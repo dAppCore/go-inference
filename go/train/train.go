@@ -1,44 +1,40 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-// Package train provides engine-agnostic supervised fine-tuning (SFT)
-// checkpoint bookkeeping and a hooks-based SSD (self-distillation) code
-// benchmark harness — shared by every inference driver (go-mlx, go-rocm,
-// go-cpu, ...).
+// Package train provides the engine-neutral LEM training orchestration —
+// the SSD (self-distillation) sampling pipeline, the LoRA supervised
+// fine-tuning (SFT) loop, checkpoint bookkeeping, the score cascade, and
+// the hooks-based SSD code benchmark harness — shared by every inference
+// driver (go-mlx, go-rocm, go-cpu, ...).
 //
-// It is the engine-agnostic half of what was previously go-mlx-only
-// (go-mlx/go/train, ~2968 LOC across sft.go, sft_epoch.go, sft_batch.go,
-// sft_checkpoint.go, score_cascade.go, dataset_stream.go, capture.go,
-// val.go, ssd.go, ssd_eval.go): the checkpoint-sidecar shape, config
-// normalisation, and the LiveCodeBench-style pass@k benchmark harness all
-// operate on plain Go values and injected function hooks — never an MLX
-// array, a live tokenizer, or a model handle — so they belong here where
-// every driver can share them.
+// It is the port of go-mlx's train orchestration onto the engine-neutral
+// seams (#270): what was previously threaded through go-mlx's own
+// *spine.Tokenizer, metal.LoRAAdapter, and metal.AdamW is re-expressed
+// against the neutral primitives:
 //
-// The bulk of go-mlx's train package is deliberately NOT ported here — it
-// is threaded through go-mlx's own *spine.Tokenizer, metal.LoRAAdapter,
-// metal.AdamW, and mlx/dataset types, or through the lem-scorer
-// (mlx/pkg/score — a large, separate, phonetics/cmudict-backed subsystem
-// with no go-inference home of its own) — genuinely engine-bound:
+//   - SSD (ssd.go / ssd_model.go / capture.go): sampling rides
+//     inference.TextModel.Generate and the neutral inference.DatasetStream;
+//     the kernel prefix rides the inference.PromptCacheWarmer capability.
+//     SSD never trains — it captures + scores each self-output at birth
+//     and STOPS at the trace.
+//   - SFT (sft.go / sft_model.go): the LoRA epoch loop drives the neutral
+//     [engine.Trainer] seam (Step/StepAccumulated/Loss/Save) instead of a
+//     metal adapter + optimiser — the trainable weights + optimiser state
+//     never cross the boundary, only the on-disk adapter does.
+//   - score_cascade.go: the quality cascade rides an injected [ScoreFunc]
+//     hook rather than go-mlx's concrete lem-scorer (mlx/pkg/score, an
+//     11-file phonetics/cmudict subsystem with no go-inference home yet) —
+//     the cascade machinery (windowed composite, sidecar, best checkpoint)
+//     is scorer-neutral; a driver that has a scorer supplies it.
 //
-//   - sft_epoch.go / sft_batch.go / dataset_stream.go: the LoRA epoch
-//     loop, gradient accumulation, and sequence-packed batch building all
-//     tokenize against a real *spine.Tokenizer and step a real
-//     metal.LoRAAdapter / metal.AdamW.
-//   - score_cascade.go: the eval-time quality cascade calls
-//     mlx/pkg/score.ScorePair — that package carries no Metal/gemma4
-//     dependency of its own, but porting an 11-file phonetics/cmudict
-//     scorer is a separate, dedicated task, not a drive-by here.
-//   - val.go / capture.go: validation-by-generation and generation
-//     capture both operate on SFTEvalResult rows produced by the (not
-//     ported) eval loop's own m.Generate calls — a capture/validation
-//     helper with no epoch loop to call it would be dead code here.
-//   - ssd.go: RunSSD's sampling pipeline embeds the full (engine-bound)
-//     SFTConfig, drives model-specific LoRA normalisation
-//     (profile.IsGemma4TargetArchitecture / gemma4.NormalizeLoRA), and
-//     rides the same unported score cascade — engine-bound end to end.
+// The Model-bound entries (RunSSDModel / RunSFTModel) and the cmd-facing
+// runners (RunSSDCommand / RunSFTCommand) live here rather than in package
+// inference: the pipeline lives here and package inference cannot import
+// train or engine (both import inference — the reverse would cycle), so the
+// functions that wire a loaded model into the pipeline are train-package
+// functions. cmd/lem {ssd,sft} are thin flag-parsing over the runners.
 //
-// A driver's own (engine-bound) training loop calls this package's
-// checkpoint helpers at its own checkpoint cadence:
+// A driver's own training loop can still call this package's checkpoint
+// helpers directly at its own checkpoint cadence:
 //
 //	meta := train.NewCheckpointMetadata(path, cfg, snapshot, epoch)
 //	if err := train.SaveCheckpointMetadata(path, meta); err != nil {

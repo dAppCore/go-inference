@@ -48,6 +48,7 @@ type TextModel struct {
 var (
 	_ inference.TextModel      = (*TextModel)(nil)
 	_ inference.SessionFactory = (*TextModel)(nil)
+	_ TrainerModel             = (*TextModel)(nil)
 )
 
 // NewTextModel wraps a loaded engine TokenModel as an inference.TextModel. tok
@@ -65,6 +66,25 @@ func (m *TextModel) openSession() (Session, error) {
 		return nil, core.NewError("engine.TextModel: model is not initialised")
 	}
 	return m.tm.OpenEngineSession()
+}
+
+// OpenTrainer opens a retained LoRA SFT [Trainer] over the loaded model when the
+// underlying engine [TokenModel] supports training ([TrainerModel]) — the forward
+// that makes the head-LoRA train seam reachable through the neutral
+// inference.LoadModel surface, so a training driver (dappco.re/go/inference/train)
+// never needs the concrete engine type. Returns a clear error when the engine has
+// no trainer, exactly as probing an unsupported capability should.
+//
+//	tr, err := loaded.(engine.TrainerModel).OpenTrainer(inference.TrainingConfig{...})
+func (m *TextModel) OpenTrainer(cfg inference.TrainingConfig) (Trainer, error) {
+	if m == nil || m.tm == nil {
+		return nil, core.NewError("engine.TextModel: model is not initialised")
+	}
+	tm, ok := m.tm.(TrainerModel)
+	if !ok {
+		return nil, core.NewError("engine.TextModel: engine does not support training")
+	}
+	return tm.OpenTrainer(cfg)
 }
 
 // Generate streams tokens for a raw prompt (no chat template — Chat applies one).
