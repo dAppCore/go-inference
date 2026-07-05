@@ -42,6 +42,10 @@ type SSDCommandConfig struct {
 	RepetitionPenalty float64
 	FilterShortest    float64
 	ScoreSamples      bool
+	// Score is the driver-supplied scorer hook. The cascade machinery is
+	// scorer-neutral; the binary that owns the model injects a concrete
+	// scorer here. Nil leaves sampling-phase scoring off (capture-only).
+	Score ScoreFunc
 
 	Out io.Writer // summary
 	Log io.Writer // notices
@@ -74,12 +78,13 @@ func RunSSDCommand(ctx context.Context, cfg SSDCommandConfig) error {
 	}
 	defer model.Close()
 
-	// The lem-scorer (go-mlx mlx/pkg/score, phonetics/cmudict) has no
-	// go-inference home yet, so sampling-phase scoring is unavailable here —
-	// honest note, then proceed with capture-only (the capture IS the
-	// deliverable; scoring later over the captured trace is archaeology).
-	if cfg.ScoreSamples {
-		printNote(cfg.Log, "ssd: --score-samples requested but no scorer is wired into go-inference yet; capturing the trace without birth-scores (score the captures later)")
+	// Sampling-phase scoring runs when the driver supplies a Score hook. When
+	// --score-samples was asked for without one, note it honestly and proceed
+	// capture-only (the capture IS the deliverable; scoring later over the
+	// captured trace is archaeology).
+	scoreSamples := cfg.ScoreSamples && cfg.Score != nil
+	if cfg.ScoreSamples && cfg.Score == nil {
+		printNote(cfg.Log, "ssd: --score-samples requested but no scorer was supplied; capturing the trace without birth-scores (score the captures later)")
 	}
 
 	ssdCfg := SSDConfig{
@@ -92,11 +97,10 @@ func RunSSDCommand(ctx context.Context, cfg SSDCommandConfig) error {
 		FilterShortestPercent: float32(cfg.FilterShortest),
 		CheckpointDir:         cfg.CheckpointDir,
 		KernelPrefix:          kernel,
-		// ScoreSamples stays false — no Score hook is available (see the note
-		// above); RunSSD would no-op the cascade regardless.
+		ScoreSamples:          scoreSamples,
 	}
 
-	result, err := RunSSDModel(ctx, model, ds, ssdCfg, nil)
+	result, err := RunSSDModel(ctx, model, ds, ssdCfg, cfg.Score)
 	if err != nil {
 		return core.E("train.RunSSDCommand", "self-distillation", err)
 	}
@@ -137,6 +141,10 @@ type SFTCommandConfig struct {
 	CheckpointEvery int
 	ScoreCascade    bool
 	ScoreWindow     int
+	// Score is the driver-supplied scorer hook. The cascade machinery is
+	// scorer-neutral; the binary that owns the model injects a concrete
+	// scorer here. Nil leaves the cascade off (eval captures, no scores).
+	Score ScoreFunc
 
 	Out io.Writer // summary
 	Log io.Writer // notices
@@ -196,15 +204,17 @@ func RunSFTCommand(ctx context.Context, cfg SFTCommandConfig) error {
 			EvalTemperature:           float32(cfg.EvalTemp),
 			ResumePath:                cfg.ResumePath,
 		},
-		LoRA:        inference.LoRAConfig{Rank: cfg.Rank, Alpha: float32(cfg.Alpha)},
-		SavePath:    save,
-		Merge:       cfg.Merge,
-		ScoreWindow: cfg.ScoreWindow,
-		// ScoreCascade needs a scorer hook; none is wired into go-inference yet
-		// (see RunSSDCommand's note), so the cascade stays off. Capture is on.
+		LoRA:         inference.LoRAConfig{Rank: cfg.Rank, Alpha: float32(cfg.Alpha)},
+		SavePath:     save,
+		Merge:        cfg.Merge,
+		ScoreCascade: cfg.ScoreCascade,
+		ScoreWindow:  cfg.ScoreWindow,
+		// Score is the driver-supplied hook (nil disables the cascade — RunSFT
+		// gates on ScoreCascade && Score != nil regardless).
+		Score: cfg.Score,
 	}
-	if cfg.ScoreCascade {
-		printNote(cfg.Log, "sft: --score-cascade requested but no scorer is wired into go-inference yet; eval generations are captured but not scored")
+	if cfg.ScoreCascade && cfg.Score == nil {
+		printNote(cfg.Log, "sft: --score-cascade requested but no scorer was supplied; eval generations are captured but not scored")
 	}
 	if cfg.Packing {
 		printNote(cfg.Log, "sft: --packing has no effect on the head-LoRA trainer (it trains one sequence per row); ignored")

@@ -1,0 +1,158 @@
+;; CMU Pronouncing Dictionary starter — ~150 common English words
+;; Format: WORD  PH1 PH2 ... PHn  (phonemes ARPAbet, stress 0/1/2 on vowels)
+;; Public domain. Reference: cmusphinx.github.io/cmudict
+;;
+;; This starter file is a placeholder for the full CMU dictionary
+;; (~134,000 entries, ~3MB). To swap in the full dict: download
+;; cmudict.dict from CMU Sphinx, place it at cmudict.txt in this
+;; directory, and the loader picks it up via the same path.
+;;
+;; Coverage chosen to exercise rhyme/syllable/meter detection in tests
+;; without needing the full corpus. Includes common rhyme groups
+;; (cat/bat/hat, run/sun/fun, blue/true/who, peace/cease).
+A  AH0
+AN  AE1 N
+AND  AH0 N D
+ANY  EH1 N IY0
+ARE  AA1 R
+AT  AE1 T
+BAD  B AE1 D
+BAG  B AE1 G
+BAT  B AE1 T
+BE  B IY1
+BED  B EH1 D
+BEE  B IY1
+BEEN  B IH1 N
+BIG  B IH1 G
+BLUE  B L UW1
+BOOK  B UH1 K
+BOY  B OY1
+BROTHER  B R AH1 DH ER0
+BUT  B AH1 T
+BY  B AY1
+CAR  K AA1 R
+CAT  K AE1 T
+CHILD  CH AY1 L D
+CHINA  CH AY1 N AH0
+CITY  S IH1 T IY0
+COME  K AH1 M
+DAD  D AE1 D
+DAY  D EY1
+DEATH  D EH1 TH
+DO  D UW1
+DOG  D AO1 G
+DOWN  D AW1 N
+EARTH  ER1 TH
+END  EH1 N D
+EVERY  EH1 V R IY0
+EYE  AY1
+EYES  AY1 Z
+FAMILY  F AE1 M AH0 L IY0
+FATHER  F AA1 DH ER0
+FEAR  F IH1 R
+FIRE  F AY1 ER0
+FOG  F AO1 G
+FOOD  F UW1 D
+FOR  F AO1 R
+FROG  F R AO1 G
+FROM  F R AH1 M
+FUN  F AH1 N
+GIRL  G ER1 L
+GO  G OW1
+GOOD  G UH1 D
+GOT  G AA1 T
+GUN  G AH1 N
+HAD  HH AE1 D
+HAS  HH AE1 Z
+HAT  HH AE1 T
+HAVE  HH AE1 V
+HE  HH IY1
+HER  HH ER0
+HERE  HH IY1 R
+HIM  HH IH1 M
+HIS  HH IH1 Z
+HOME  HH OW1 M
+HOPE  HH OW1 P
+HOUSE  HH AW1 S
+HOW  HH AW1
+I  AY1
+IF  IH1 F
+IN  IH0 N
+IS  IH1 Z
+IT  IH1 T
+JOY  JH OY1
+LIFE  L AY1 F
+LIGHT  L AY1 T
+LIKE  L AY1 K
+LOG  L AO1 G
+LOOK  L UH1 K
+LOVE  L AH1 V
+MAN  M AE1 N
+MAT  M AE1 T
+ME  M IY1
+MIGHT  M AY1 T
+MOON  M UW1 N
+MORE  M AO1 R
+MORNING  M AO1 R N IH0 NG
+MOTHER  M AH1 DH ER0
+MY  M AY1
+NEW  N UW1
+NIGHT  N AY1 T
+NO  N OW1
+NOT  N AA1 T
+NOW  N AW1
+OF  AH1 V
+ON  AA1 N
+ONE  W AH1 N
+OR  AO1 R
+OUT  AW1 T
+PEACE  P IY1 S
+PIANO  P IY0 AE1 N OW0
+RAIN  R EY1 N
+RAT  R AE1 T
+RUN  R AH1 N
+SAD  S AE1 D
+SAT  S AE1 T
+SAY  S EY1
+SEA  S IY1
+SEE  S IY1
+SHE  SH IY1
+SISTER  S IH1 S T ER0
+SKY  S K AY1
+SO  S OW1
+SOME  S AH1 M
+SORROW  S AO1 R OW0
+SOUL  S OW1 L
+STAR  S T AA1 R
+SUN  S AH1 N
+TAIWAN  T AY1 W AA0 N
+THAT  DH AE1 T
+THE  DH AH0
+THEM  DH EH1 M
+THEY  DH EY1
+THIS  DH IH1 S
+TIME  T AY1 M
+TO  T UW1
+TODAY  T AH0 D EY1
+TREE  T R IY1
+TRUE  T R UW1
+TWO  T UW1
+UP  AH1 P
+WAR  W AO1 R
+WAS  W AH1 Z
+WATER  W AO1 T ER0
+WE  W IY1
+WERE  W ER1
+WHAT  W AH1 T
+WHEN  W EH1 N
+WHERE  W EH1 R
+WHITE  W AY1 T
+WHO  HH UW1
+WHY  W AY1
+WILL  W IH1 L
+WITH  W IH1 DH
+WORLD  W ER1 L D
+YEAR  Y IH1 R
+YES  Y EH1 S
+YOU  Y UW1
+YOUR  Y AO1 R

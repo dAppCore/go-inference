@@ -28,7 +28,7 @@ func runSSDCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 	sampleMinP := fs.Float64("sample-min-p", 0, "sampling min-p")
 	repPenalty := fs.Float64("rep-penalty", 1.0, "repetition penalty over self-samples")
 	filterShortest := fs.Float64("filter-shortest", 10, "drop the shortest N%% of self-samples before the trace (0 keeps all)")
-	scoreSamples := fs.Bool("score-samples", false, "score every self-sample at birth (needs a scorer wired into go-inference — none yet, so this is a no-op that notes honestly)")
+	scoreSamples := fs.Bool("score-samples", false, "score every self-sample at birth with the LEK scorer (writes birth-scores alongside the captured trace)")
 	checkpointDir := fs.String("checkpoint-dir", "", "output dir for the scored trace — ssd-captures.jsonl")
 	contextLen := fs.Int("context", 0, "model context override; 0 uses the model default")
 	fs.Usage = func() {
@@ -71,6 +71,7 @@ func runSSDCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 		RepetitionPenalty: *repPenalty,
 		FilterShortest:    *filterShortest,
 		ScoreSamples:      *scoreSamples,
+		Score:             lekScoreFunc(),
 		Out:               stdout,
 		Log:               stderr,
 	})
