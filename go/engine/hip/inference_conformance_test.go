@@ -30,7 +30,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/engine"
-	"dappco.re/go/inference/enginetest"
+	"dappco.re/go/inference/engine/enginetest"
 	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/tokenizer"
 )

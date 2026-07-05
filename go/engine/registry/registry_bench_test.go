@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"testing"
 
-	registry "dappco.re/go/inference/registry"
+	registry "dappco.re/go/inference/engine/registry"
 )
 
 // Package sinks keep the compiler from eliminating the benchmarked work.

@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"dappco.re/go/inference/kv"
-	"dappco.re/go/inference/scheme"
+	"dappco.re/go/inference/engine/scheme"
 )
 
 // A KV data format plugs in through the scheme registry: resolve the layer's

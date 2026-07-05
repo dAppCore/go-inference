@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/capability"
+	"dappco.re/go/inference/engine/capability"
 	"dappco.re/go/inference/eval/datapipe"
 	"dappco.re/go/inference/model/modelmgmt"
 	"dappco.re/go/inference/eval/score"

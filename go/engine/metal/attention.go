@@ -11,7 +11,7 @@ import (
 	"unsafe"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/scheme"
+	"dappco.re/go/inference/engine/scheme"
 	"github.com/tmc/apple/kernel"
 	"github.com/tmc/apple/metal"
 )

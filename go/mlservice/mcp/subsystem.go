@@ -7,7 +7,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/capability"
+	"dappco.re/go/inference/engine/capability"
 	"dappco.re/go/inference/eval/datapipe"
 	"dappco.re/go/inference/mlservice"
 	"dappco.re/go/inference/eval/score"

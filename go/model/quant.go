@@ -20,7 +20,7 @@ package model
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/scheme"
+	"dappco.re/go/inference/engine/scheme"
 )
 
 // QuantMatVec is the backend-agnostic quant decode projection: out = x @ Wᵀ for a

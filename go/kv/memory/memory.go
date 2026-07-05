@@ -16,7 +16,7 @@ import (
 	mp "dappco.re/go/inference/model/modelpack"
 	"dappco.re/go/inference/eval/profile"
 	"dappco.re/go/inference/model/quant/jang"
-	"dappco.re/go/inference/scheme"
+	"dappco.re/go/inference/engine/scheme"
 )
 
 // GiB is the number of bytes in a gibibyte.

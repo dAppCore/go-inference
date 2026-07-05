@@ -7,7 +7,7 @@ package native
 import (
 	"testing"
 
-	"dappco.re/go/inference/scheme"
+	"dappco.re/go/inference/engine/scheme"
 )
 
 // TestNativeSchemeConsumption gates R4/R5: native registers the gemma4 sequence-mixer + KV-cache

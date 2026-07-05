@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/capability"
+	"dappco.re/go/inference/engine/capability"
 	"dappco.re/go/inference/eval/score"
 	"dappco.re/go/inference/serving"
 )

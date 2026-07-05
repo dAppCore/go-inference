@@ -1714,7 +1714,7 @@ func recordArchICB(
 					setRope(ck, kProj, kCaches[li], kvOf(li), li) // -> kCache @ row pos (rebound/token)
 					kRopeIdx[li] = opIdx - 1
 				}
-				cv := emitNB()                                                             // 2nd consumer of `normed` (q barriered it) — overlap
+				cv := emitNB()                                                                   // 2nd consumer of `normed` (q barriered it) — overlap
 				recInputProj(cv, li, inBuf, anwBufs[li], normed, vCaches[li], 0, vProjIdxOf(li)) // -> vCache @ row pos (rebound/token); K==V layers project via wK
 				vIdx[li] = opIdx - 1
 				if valueNormOnes != nil { // gemma4 value-norm on the new V row (per head; rebound/token)

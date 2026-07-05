@@ -4,7 +4,7 @@ package kv
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/scheme"
+	"dappco.re/go/inference/engine/scheme"
 )
 
 // KV data providers — the scheme-registry wiring for per-layer cache formats

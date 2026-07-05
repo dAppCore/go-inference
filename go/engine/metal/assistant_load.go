@@ -9,11 +9,11 @@ import (
 	"sync"
 
 	core "dappco.re/go"
-	coreio "dappco.re/go/io"
-	"dappco.re/go/inference/model/gguf"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/gguf"
 	"dappco.re/go/inference/model/safetensors"
 	"dappco.re/go/inference/tokenizer"
+	coreio "dappco.re/go/io"
 )
 
 const nativeAssistantLogitsFloor = -3.4028234663852886e38
