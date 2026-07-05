@@ -9,10 +9,10 @@ import (
 	"sync"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/gguf"
 	"dappco.re/go/inference/model/safetensors"
-	"dappco.re/go/inference/decode/tokenizer"
 	coreio "dappco.re/go/io"
 )
 
@@ -57,6 +57,21 @@ type AssistantModel struct {
 type AssistantPair struct {
 	TargetArch model.Arch
 	Assistant  *AssistantModel
+}
+
+// Method reports the speculative-decode method inferred from the drafter (see
+// model.MTPMethod), so the decode driver dispatches on the method rather than
+// assuming the separate draft-model path. An unstamped config (e.g. a GGUF load
+// that has not carried the field) defaults to model.MTPDraftModel — the only
+// method shipped today.
+func (pair *AssistantPair) Method() model.MTPMethod {
+	if pair == nil || pair.Assistant == nil {
+		return model.MTPDraftModel
+	}
+	if m := pair.Assistant.Config.Method; m != "" {
+		return m
+	}
+	return model.MTPDraftModel
 }
 
 // AssistantDraftStepResult is one native assistant proposal from a target

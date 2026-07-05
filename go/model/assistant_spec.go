@@ -16,12 +16,40 @@ import (
 // never keys on a model name: it probes model_type / general.architecture and dispatches to
 // whatever spec claimed it. gemma4's -assistant checkpoints are the shipping example.
 
+// MTPMethod is the speculative-decode method a drafter uses. It is INFERRED FROM
+// THE MTP MODEL — the drafter's registered AssistantSpec declares it, and
+// ParseAssistantConfig stamps it onto the AssistantConfig — so the decode path
+// dispatches on the method instead of assuming one. Today only the separate
+// draft-model method ships; EAGLE-style feature drafters, Medusa-style parallel
+// heads, in-model MTP heads, and n-gram / prompt-lookup each earn their own
+// constant plus a decode branch as they land.
+type MTPMethod string
+
+const (
+	// MTPDraftModel: a standalone assistant model proposes tokens the target
+	// verifies — it projects [token embed ⊕ target hidden] through its own small
+	// decode stack while sharing the target's KV streams. gemma4's -assistant
+	// checkpoints are this method, and it is the default for any drafter whose
+	// spec leaves the method unset (every checkpoint predating this field).
+	MTPDraftModel MTPMethod = "draft-model"
+)
+
+// resolveMTPMethod defaults an unset method to MTPDraftModel — the only method
+// shipped today and the one every legacy checkpoint uses.
+func resolveMTPMethod(m MTPMethod) MTPMethod {
+	if m == "" {
+		return MTPDraftModel
+	}
+	return m
+}
+
 // AssistantConfig is one attached drafter's parsed, validated declaration, backend-agnostic:
 // the drafter's own decode Arch plus the target-attachment dims the pairing validation needs.
 // Produced by a registered AssistantSpec parser; consumed blind by a backend's assistant
-// loader.
+// loader. Method carries the speculative method inferred from the drafter (see MTPMethod).
 type AssistantConfig struct {
 	ModelType         string
+	Method            MTPMethod    // speculative method inferred from the drafter (default MTPDraftModel)
 	BackboneHidden    int          // the TARGET hidden size the drafter's input projection consumes
 	NumCentroids      int          // ordered-embedding head: centroid count (0 = plain LM head)
 	CentroidTopK      int          // ordered-embedding head: intermediate top-K
@@ -52,6 +80,7 @@ func (c AssistantConfig) LayerType(idx int) string {
 // vocabHint carries the embed-derived vocab for exports that omit vocab_size).
 type AssistantSpec struct {
 	ModelTypes     []string
+	Method         MTPMethod // speculative method this arch's drafters use (empty = MTPDraftModel)
 	Parse          func(data []byte) (AssistantConfig, error)
 	GGUFArch       string
 	ParseGGUF      func(meta map[string]any, vocabHint int) (AssistantConfig, error)
@@ -104,5 +133,10 @@ func ParseAssistantConfig(data []byte) (AssistantConfig, error) {
 	if !ok {
 		return AssistantConfig{}, core.NewError("assistant config declares no registered model_type: " + probe.ModelType)
 	}
-	return spec.Parse(data)
+	cfg, err := spec.Parse(data)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Method = resolveMTPMethod(spec.Method)
+	return cfg, nil
 }
