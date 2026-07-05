@@ -46,11 +46,11 @@ func WriteSubset(ctx context.Context, path string, refs []TensorRef) error {
 
 	parent := core.PathDir(path)
 	if result := core.MkdirAll(parent, 0o755); !result.OK {
-		return resultError(result)
+		return result.Err()
 	}
 	created := core.OpenFile(path, core.O_CREATE|core.O_WRONLY|core.O_TRUNC, 0o644)
 	if !created.OK {
-		return resultError(created)
+		return created.Err()
 	}
 	file := created.Value.(*core.OSFile)
 	defer file.Close()
@@ -253,7 +253,7 @@ func writeRefRawChunksScratch(ctx context.Context, out *core.OSFile, ref TensorR
 	}
 	opened := core.Open(ref.Path)
 	if !opened.OK {
-		return scratch, resultError(opened)
+		return scratch, opened.Err()
 	}
 	in := opened.Value.(*core.OSFile)
 	defer in.Close()

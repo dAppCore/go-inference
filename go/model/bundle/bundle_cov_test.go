@@ -331,22 +331,3 @@ func TestBundle_joinChunkRefs(t *testing.T) {
 		t.Fatalf("joinChunkRefs(a,b) = %v, want [1 2 3]", got)
 	}
 }
-
-// TestBundle_resultError covers every branch of the resultError adapter: an
-// OK result maps to nil, an error value passes through, a string value wraps
-// into a new error, and any other value yields the generic fallback error.
-func TestBundle_resultError(t *testing.T) {
-	if err := resultError(core.Result{OK: true}); err != nil {
-		t.Fatalf("resultError(OK) = %v, want nil", err)
-	}
-	wrapped := core.NewError("boom")
-	if err := resultError(core.Result{Value: wrapped, OK: false}); err != wrapped {
-		t.Fatalf("resultError(error value) = %v, want the wrapped error", err)
-	}
-	if err := resultError(core.Result{Value: "text failure", OK: false}); err == nil || !strings.Contains(err.Error(), "text failure") {
-		t.Fatalf("resultError(string value) = %v, want NewError(text)", err)
-	}
-	if err := resultError(core.Result{Value: 42, OK: false}); err == nil {
-		t.Fatal("resultError(other value) = nil, want generic fallback error")
-	}
-}

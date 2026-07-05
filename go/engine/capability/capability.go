@@ -3,6 +3,7 @@
 package capability
 
 import (
+	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/serving"
 )
@@ -19,7 +20,7 @@ func CapabilityReportForBackend(name string, backend serving.Backend) inference.
 			return fallbackCapabilityReport(name, backend)
 		}
 		if report.Runtime.Backend == "" {
-			report.Runtime.Backend = firstNonEmptyString(name, backend.Name())
+			report.Runtime.Backend = core.Coalesce(name, backend.Name())
 		}
 		return report
 	}
@@ -27,7 +28,7 @@ func CapabilityReportForBackend(name string, backend serving.Backend) inference.
 }
 
 func fallbackCapabilityReport(name string, backend serving.Backend) inference.CapabilityReport {
-	backendName := firstNonEmptyString(name, backend.Name())
+	backendName := core.Coalesce(name, backend.Name())
 	return inference.CapabilityReport{
 		Runtime:   inference.RuntimeIdentity{Backend: backendName},
 		Available: backend.Available(),
@@ -36,13 +37,4 @@ func fallbackCapabilityReport(name string, backend serving.Backend) inference.Ca
 			inference.SupportedCapability(inference.CapabilityChat, inference.CapabilityGroupModel),
 		},
 	}
-}
-
-func firstNonEmptyString(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }

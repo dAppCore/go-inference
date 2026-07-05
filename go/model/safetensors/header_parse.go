@@ -79,7 +79,7 @@ func parseHeaderInto(path string, data []byte, dataStart int64, idx *Index, shap
 		if !ok {
 			return errHeaderKeyNotString
 		}
-		isMetadata := !hasEsc && end-start == 12 && bytesEqual(data[start:end], _metadataKey)
+		isMetadata := !hasEsc && end-start == 12 && core.SliceEqual(data[start:end], _metadataKey)
 		p.skipWS()
 		if !p.expect(':') {
 			return errHeaderMissingColon
@@ -130,21 +130,6 @@ func nameFromSpan(arena string, data []byte, start, end int, hasEsc bool) string
 // _metadataKey is the literal bytes "__metadata__" — pre-stored to
 // avoid an allocation on the bytes comparison in the hot loop.
 var _metadataKey = []byte("__metadata__")
-
-// bytesEqual is a tiny inlined equality check that avoids the
-// bytes.Equal import (and its NaN-style fast-paths) for a known small
-// span.
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
 
 // materialiseString converts a previously-peeked string span into a
 // string. The common case (no backslash escapes) is a single

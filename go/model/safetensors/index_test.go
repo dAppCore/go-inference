@@ -1393,27 +1393,6 @@ func TestSafetensors_WriteRefFloat32Chunks_Ugly(t *testing.T) {
 	}
 }
 
-// --- Residual coverage: resultError ---
-//
-// resultError's non-error Value branch is only reachable by handing it a
-// failed Result whose Value is not an error.
-
-func TestSafetensors_ResultError(t *testing.T) {
-	// OK result → nil error.
-	if err := resultError(core.Result{OK: true}); err != nil {
-		t.Errorf("resultError(OK) = %v, want nil", err)
-	}
-	// Failed result carrying an error Value → that error is returned.
-	sentinel := core.NewError("boom")
-	if err := resultError(core.Result{OK: false, Value: sentinel}); err != sentinel {
-		t.Errorf("resultError(err Value) = %v, want the sentinel", err)
-	}
-	// Failed result whose Value is NOT an error → the generic fallback.
-	if err := resultError(core.Result{OK: false, Value: "not an error"}); err != errCoreResultFailed {
-		t.Errorf("resultError(non-error Value) = %v, want errCoreResultFailed", err)
-	}
-}
-
 // --- ParseHeaderRefs (the shared header-bytes → Index walker, exercised
 // directly without re-opening a file — the entry pkg/metal callers use
 // once they have already read + length-validated the header blob) ---

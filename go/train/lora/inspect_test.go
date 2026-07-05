@@ -432,27 +432,6 @@ func TestAdapterConfigPathPrecomputed_TrailingSlashCollapse_Ugly(t *testing.T) {
 	}
 }
 
-func TestResultError_Branches_GoodBadUgly(t *testing.T) {
-	// resultError unwraps a core.Result into a plain error for core.E
-	// chaining. Three branches, all reachable with synthetic Results — no
-	// fault injection needed:
-	//   Good: an OK result has no error.
-	//   Bad:  a failed result carrying an error returns that error.
-	//   Ugly: a failed result whose Value is NOT an error falls back to the
-	//         errResultFailed sentinel (the defensive path).
-	if err := resultError(core.Ok([]byte("data"))); err != nil {
-		t.Fatalf("resultError(Ok) = %v, want nil", err)
-	}
-	sentinel := core.NewError("boom")
-	if err := resultError(core.Fail(sentinel)); err != sentinel {
-		t.Fatalf("resultError(Fail(err)) = %v, want the wrapped error", err)
-	}
-	nonError := core.Result{Value: "a bare string, not an error", OK: false}
-	if err := resultError(nonError); err != errResultFailed {
-		t.Fatalf("resultError(non-error failure) = %v, want errResultFailed fallback", err)
-	}
-}
-
 func writeTestLoRAAdapter(t *testing.T, config string) string {
 	t.Helper()
 	dir := t.TempDir()

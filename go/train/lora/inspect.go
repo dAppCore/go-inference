@@ -20,10 +20,6 @@ import (
 // guard does not allocate on every Inspect call.
 var errAdapterPathRequired = core.NewError("lora: adapter path is required")
 
-// errResultFailed is the fallback sentinel returned by resultError when
-// a core.Result reports !OK but its Value is not an error.
-var errResultFailed = core.NewError("core result failed")
-
 // AdapterInfo is the reproducible identity for an inspected LoRA adapter:
 // its adapter_config.json metadata plus a content hash over the config and
 // weight files. Complements AdapterRef — AdapterRef.ID() is a cheap
@@ -92,7 +88,7 @@ func Inspect(path string, identityPath string) (AdapterInfo, error) {
 	configPath := adapterConfigPathPrecomputed(path, isSafetensors)
 	read := core.ReadFile(configPath)
 	if !read.OK {
-		return AdapterInfo{}, core.E("lora.Inspect", "read adapter_config.json", resultError(read))
+		return AdapterInfo{}, core.E("lora.Inspect", "read adapter_config.json", read.Err())
 	}
 	// Cache the type assertion: read.Value is consumed once by the JSON
 	// unmarshal and once by hashAdapter — both expect []byte. The
@@ -304,14 +300,4 @@ func streamHashWeightFile(path string, hasher *hashWriter) ([32]byte, bool) {
 	var sum [32]byte
 	copy(sum[:], hasher.h.Sum(nil))
 	return sum, true
-}
-
-func resultError(result core.Result) error {
-	if result.OK {
-		return nil
-	}
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	return errResultFailed
 }

@@ -21,11 +21,11 @@ func InspectLocalMetadata(path string) (ModelMetadata, string, error) {
 	root := ResolveLocalMetadataRoot(path)
 	read := core.ReadFile(core.PathJoin(root, "config.json"))
 	if !read.OK {
-		return ModelMetadata{}, root, core.E("hf.InspectLocalMetadata", "read local config.json", resultError(read))
+		return ModelMetadata{}, root, core.E("hf.InspectLocalMetadata", "read local config.json", read.Err())
 	}
 	var config ModelConfig
 	if result := core.JSONUnmarshal(read.Value.([]byte), &config); !result.OK {
-		return ModelMetadata{}, root, core.E("hf.InspectLocalMetadata", "parse local config.json", resultError(result))
+		return ModelMetadata{}, root, core.E("hf.InspectLocalMetadata", "parse local config.json", result.Err())
 	}
 	files := LocalModelFiles(root)
 	info, _ := jang.ReadConfig(root)

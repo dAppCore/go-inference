@@ -66,7 +66,7 @@ func InferJANG(meta ModelMetadata) *jang.Info {
 	info := &jang.Info{
 		Profile:     profile,
 		GroupSize:   jangGroupSize(meta),
-		BitsDefault: firstPositive(jang.ProfileBits(profile), 0),
+		BitsDefault: core.FirstPositive(jang.ProfileBits(profile), 0),
 	}
 	info.Packed = jang.BuildPackedProfile(info)
 	return info

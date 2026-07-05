@@ -148,7 +148,7 @@ func LoadFromStateWithOptions(ctx context.Context, store state.Store, ref state.
 	}
 	var envelope kvSnapshotStateEnvelope
 	if result := core.JSONUnmarshalString(chunk.Text, &envelope); !result.OK {
-		return nil, core.E("LoadFromState", "parse State envelope", ResultError(result))
+		return nil, core.E("LoadFromState", "parse State envelope", result.Err())
 	}
 	data, err := decodeKVSnapshotStateEnvelope(envelope)
 	if err != nil {
@@ -185,7 +185,7 @@ func decodeKVSnapshotStateEnvelope(envelope kvSnapshotStateEnvelope) ([]byte, er
 	}
 	decoded := core.Base64Decode(envelope.Data)
 	if !decoded.OK {
-		return nil, core.E("LoadFromState", "decode State KV payload", ResultError(decoded))
+		return nil, core.E("LoadFromState", "decode State KV payload", decoded.Err())
 	}
 	data, ok := decoded.Value.([]byte)
 	if !ok {

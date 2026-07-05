@@ -221,18 +221,6 @@ func TestMerge_HasSuffixFold_Ugly(t *core.T) {
 	core.AssertFalse(t, hasSuffixFold("st", ".safetensors"))
 }
 
-func TestMerge_SameIntSlice_Good(t *core.T) {
-	core.AssertTrue(t, sameIntSlice([]int{1, 2, 3}, []int{1, 2, 3}))
-}
-
-func TestMerge_SameIntSlice_Bad(t *core.T) {
-	core.AssertFalse(t, sameIntSlice([]int{1, 2}, []int{1, 2, 3}))
-}
-
-func TestMerge_SameIntSlice_Ugly(t *core.T) {
-	core.AssertFalse(t, sameIntSlice([]int{1, 2, 3}, []int{1, 2, 4}))
-}
-
 func TestMerge_ClampFloat64_Good(t *core.T) {
 	core.AssertEqual(t, 0.5, clampFloat64(0.5, -1, 1))
 }
@@ -243,19 +231,6 @@ func TestMerge_ClampFloat64_Bad(t *core.T) {
 
 func TestMerge_ClampFloat64_Ugly(t *core.T) {
 	core.AssertEqual(t, -1.0, clampFloat64(-5, -1, 1))
-}
-
-func TestMerge_ResultError_Good(t *core.T) {
-	core.AssertNil(t, resultError(core.Ok("value")))
-}
-
-func TestMerge_ResultError_Bad(t *core.T) {
-	sentinel := core.NewError("boom")
-	core.AssertSame(t, sentinel, resultError(core.Fail(sentinel)))
-}
-
-func TestMerge_ResultError_Ugly(t *core.T) {
-	core.AssertSame(t, errCoreResultFailed, resultError(core.Result{}))
 }
 
 func TestMerge_EqualFold_Good(t *core.T) {

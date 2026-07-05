@@ -4,8 +4,6 @@ package train
 
 import (
 	"testing"
-
-	core "dappco.re/go"
 )
 
 // --- NormalizeConfig ---
@@ -71,30 +69,5 @@ func TestEffectiveBatchSize_Bad(t *testing.T) {
 func TestEffectiveBatchSize_Ugly(t *testing.T) {
 	if got := EffectiveBatchSize(Config{BatchSize: 4, GradientAccumulationSteps: -3}); got != 4 {
 		t.Fatalf("EffectiveBatchSize(negative accum) = %d, want 4 (accum floored to 1)", got)
-	}
-}
-
-// --- resultError ---
-
-// Good: an OK result reports a nil error.
-func TestResultError_Good(t *testing.T) {
-	if err := resultError(core.Result{OK: true}); err != nil {
-		t.Fatalf("resultError(OK) = %v, want nil", err)
-	}
-}
-
-// Bad: a failed result carrying a real error value returns it unchanged.
-func TestResultError_Bad(t *testing.T) {
-	want := core.NewError("boom")
-	if err := resultError(core.Result{OK: false, Value: want}); err != want {
-		t.Fatalf("resultError(failed) = %v, want %v", err, want)
-	}
-}
-
-// Ugly: a failed result whose Value is not an error falls back to the
-// generic sentinel rather than panicking on the type assertion.
-func TestResultError_Ugly(t *testing.T) {
-	if err := resultError(core.Result{OK: false, Value: "not an error"}); err != errCoreResultFailed {
-		t.Fatalf("resultError(non-error value) = %v, want errCoreResultFailed", err)
 	}
 }

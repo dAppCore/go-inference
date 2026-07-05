@@ -145,7 +145,7 @@ func ParseConfig(data []byte) (*Info, error) {
 		Profile:            probe.Profile,
 		Method:             probe.Quantization.Method,
 		GroupSize:          probe.Quantization.GroupSize,
-		BitsDefault:        firstPositive(probe.Quantization.BitsDefault, probe.MXTQBits.RoutedExpert, ProfileBits(probe.Profile)),
+		BitsDefault:        core.FirstPositive(probe.Quantization.BitsDefault, probe.MXTQBits.RoutedExpert, ProfileBits(probe.Profile)),
 		AttentionBits:      probe.MXTQBits.Attention,
 		SharedExpertBits:   probe.MXTQBits.SharedExpert,
 		RoutedExpertBits:   probe.MXTQBits.RoutedExpert,
@@ -608,17 +608,17 @@ func bitsForRole(info *Info, role TensorRole) int {
 func bitsForRoleWithFallback(info *Info, role TensorRole, profileBits int) int {
 	switch role {
 	case TensorRoleAttention:
-		return firstPositive(info.AttentionBits, info.BitsDefault, profileBits)
+		return core.FirstPositive(info.AttentionBits, info.BitsDefault, profileBits)
 	case TensorRoleSharedExpert:
-		return firstPositive(info.SharedExpertBits, info.BitsDefault, profileBits)
+		return core.FirstPositive(info.SharedExpertBits, info.BitsDefault, profileBits)
 	case TensorRoleRoutedExpert:
-		return firstPositive(info.RoutedExpertBits, info.BitsDefault, profileBits)
+		return core.FirstPositive(info.RoutedExpertBits, info.BitsDefault, profileBits)
 	case TensorRoleEmbedTokens:
-		return firstPositive(info.EmbedTokensBits, info.BitsDefault, profileBits)
+		return core.FirstPositive(info.EmbedTokensBits, info.BitsDefault, profileBits)
 	case TensorRoleLMHead:
-		return firstPositive(info.LMHeadBits, info.BitsDefault, profileBits)
+		return core.FirstPositive(info.LMHeadBits, info.BitsDefault, profileBits)
 	default:
-		return firstPositive(info.BitsDefault, profileBits)
+		return core.FirstPositive(info.BitsDefault, profileBits)
 	}
 }
 
@@ -823,15 +823,6 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
-}
-
-func firstPositive(values ...int) int {
-	for _, value := range values {
-		if value > 0 {
-			return value
-		}
-	}
-	return 0
 }
 
 func normaliseArchitecture(value string) string {

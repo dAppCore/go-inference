@@ -58,10 +58,7 @@ import (
 
 // Sentinel errors hoisted to package vars — each previously allocated a
 // fresh core.NewError on the (rare but hot under churn) failure path.
-var (
-	errCheckpointPath   = core.NewError("mlx: SFT checkpoint metadata path is required")
-	errCoreResultFailed = core.NewError("core result failed")
-)
+var errCheckpointPath = core.NewError("mlx: SFT checkpoint metadata path is required")
 
 // Config is the checkpoint- and schedule-relevant engine-agnostic subset
 // of go-mlx's SFTConfig. The LoRA adapter config (spine.LoRAConfig) and
@@ -125,14 +122,4 @@ func EffectiveBatchSize(cfg Config) int {
 		gradAccum = 1
 	}
 	return batchSize * gradAccum
-}
-
-func resultError(result core.Result) error {
-	if result.OK {
-		return nil
-	}
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	return errCoreResultFailed
 }

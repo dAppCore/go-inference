@@ -27,7 +27,7 @@ func (s *Snapshot) SaveWithOptions(path string, opts SaveOptions) error {
 		return err
 	}
 	if result := core.WriteFile(path, data, 0o600); !result.OK {
-		return core.E("Snapshot.Save", "write snapshot", ResultError(result))
+		return core.E("Snapshot.Save", "write snapshot", result.Err())
 	}
 	return nil
 }

@@ -8,8 +8,6 @@ import (
 	core "dappco.re/go"
 )
 
-var errPackMetadataCopy = core.NewError("merge: model pack metadata copy failed")
-
 // SamePath reports whether a and b resolve to the same absolute path —
 // the guard engines use to refuse merging a pack onto itself. Exported
 // so drivers share one resolution rule instead of private copies.
@@ -132,35 +130,25 @@ func isModelWeightMetadataCopySkip(name string) bool {
 func copyModelPackLocalFile(sourcePath, destinationPath string) error {
 	srcOpen := core.Open(sourcePath)
 	if !srcOpen.OK {
-		return modelPackCopyResultError(srcOpen)
+		return srcOpen.Err()
 	}
 	src := srcOpen.Value.(*core.OSFile)
 	defer src.Close()
 	dstOpen := core.OpenFile(destinationPath, core.O_WRONLY|core.O_CREATE|core.O_TRUNC, 0o644)
 	if !dstOpen.OK {
-		return modelPackCopyResultError(dstOpen)
+		return dstOpen.Err()
 	}
 	dst := dstOpen.Value.(*core.OSFile)
 	if result := core.Copy(dst, src); !result.OK {
 		// The copy already failed; close the partial destination on a
 		// best-effort basis and surface the copy error, not the close error.
 		dst.Close()
-		return modelPackCopyResultError(result)
+		return result.Err()
 	}
 	if err := dst.Close(); err != nil {
 		return err
 	}
 	return nil
-}
-
-func modelPackCopyResultError(result core.Result) error {
-	if result.OK {
-		return nil
-	}
-	if err, ok := result.Value.(error); ok {
-		return err
-	}
-	return errPackMetadataCopy
 }
 
 // hashFile streams path through a SHA-256 hasher instead of reading it
@@ -169,13 +157,13 @@ func modelPackCopyResultError(result core.Result) error {
 func hashFile(path string) (string, error) {
 	open := core.Open(path)
 	if !open.OK {
-		return "", resultError(open)
+		return "", open.Err()
 	}
 	file := open.Value.(*core.OSFile)
 	defer file.Close()
 	hasher := sha256.New()
 	if result := core.Copy(hasher, file); !result.OK {
-		return "", resultError(result)
+		return "", result.Err()
 	}
 	return core.HexEncode(hasher.Sum(nil)), nil
 }

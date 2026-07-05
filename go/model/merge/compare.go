@@ -183,7 +183,7 @@ func validateComparePack(label string, source Source) error {
 // compareTensorEntries decodes base and tuned to float32 (when shape and
 // dtype agree) and computes per-tensor distance statistics.
 func compareTensorEntries(name string, base, tuned tensorEntry) (TensorDelta, error) {
-	shapeMatch := sameIntSlice(base.Shape, tuned.Shape)
+	shapeMatch := core.SliceEqual(base.Shape, tuned.Shape)
 	baseShapeClone := cloneIntSlice(base.Shape)
 	tunedShapeClone := cloneIntSlice(tuned.Shape)
 	delta := TensorDelta{
