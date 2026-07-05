@@ -389,25 +389,7 @@ func BenchmarkMoEBlockQuantAfterRouterLargeLocalTop1Of2(b *testing.B) {
 }
 
 func fusedGateUpQuantForBench(gate, up QuantWeight, numExperts, expertDFF, dModel, groupSize, bits int) QuantWeight {
-	gatePacked := expertDFF * dModel * bits / 8
-	gateScale := expertDFF * (dModel / groupSize) * bf16Size
-	fuse := func(a, b []byte, perExpert int) []byte {
-		out := make([]byte, 0, len(a)+len(b))
-		for e := 0; e < numExperts; e++ {
-			start := e * perExpert
-			end := start + perExpert
-			out = append(out, a[start:end]...)
-			out = append(out, b[start:end]...)
-		}
-		return out
-	}
-	return QuantWeight{
-		Packed:    fuse(gate.Packed, up.Packed, gatePacked),
-		Scales:    fuse(gate.Scales, up.Scales, gateScale),
-		Biases:    fuse(gate.Biases, up.Biases, gateScale),
-		GroupSize: groupSize,
-		Bits:      bits,
-	}
+	return fuseExpertGateUpQuant(gate, up, numExperts, expertDFF, dModel, groupSize, bits)
 }
 
 func withQuantViewsForBench(w MoEQuantLayerWeights) MoEQuantLayerWeights {

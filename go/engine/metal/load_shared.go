@@ -55,7 +55,7 @@ func loadedToQuant(m *model.LoadedModel, gs, bits int) (*QuantModel, error) {
 		ql.PerLayerGate, ql.PerLayerProjection = qw(L.PerLayerGate), qw(L.PerLayerProjection)
 		ql.PostPerLayerInputNormW = L.PostPerLayerInputNorm
 		if L.MoE != nil {
-			ql.MoE = moeToQuant(L.MoE, m.Arch.Experts, m.Arch.TopK, m.Arch.ExpertFF, m.Arch.Hidden)
+			ql.MoE = moeToQuant(L.MoE, m.Arch.Experts, m.Arch.TopK, m.Arch.ExpertFF, m.Arch.Hidden, m.Arch.FuseExpertGateUp)
 		} else {
 			ql.MLPNormW, ql.PostFFNormW = L.MLPNorm, L.PostFFNorm
 			ql.Gate, ql.Up, ql.Down = qw(L.Gate), qw(L.Up), qw(L.Down)
@@ -71,7 +71,7 @@ func loadedToQuant(m *model.LoadedModel, gs, bits int) (*QuantModel, error) {
 // per-component quant geometry (experts vs local MLP vs router) is read from each weight's own
 // shape — gemma4 26B-A4B keeps the experts 4-bit while the local MLP + router are 8-bit — and the
 // router norm is pre-folded by RootSize (matching metal's cached Router.ScaleScaled).
-func moeToQuant(e *model.LoadedMoE, experts, topK, expertFF, dModel int) *MoEQuantLayerWeights {
+func moeToQuant(e *model.LoadedMoE, experts, topK, expertFF, dModel int, fuseGateUp bool) *MoEQuantLayerWeights {
 	q := &MoEQuantLayerWeights{
 		NumExperts: experts, TopK: topK, ExpertDFF: expertFF,
 		PreFFNormW: e.PreFFNorm, PreFFNorm2W: e.PreFFNorm2,
@@ -98,7 +98,44 @@ func moeToQuant(e *model.LoadedMoE, experts, topK, expertFF, dModel int) *MoEQua
 	if e.Router != nil {
 		q.RouterGroupSize, q.RouterBits = e.Router.GroupSize, e.Router.Bits
 	}
+	// Engage the fused gate+up expert path when the model DECLARES it (Arch.FuseExpertGateUp,
+	// e.g. gemma4): a checkpoint that ships SEPARATE gate_proj/up_proj (gemma4 26B-A4B does)
+	// gets the concatenated ExpGateUp synthesised here so moeBlockQuantAfterRouter takes the
+	// fusedExperts path (~34% faster than gate+up as two barriered dispatches). No-op when the
+	// checkpoint already ships gate_up_proj, or when either half is absent. This MATERIALISES
+	// the fused expert weights on the heap — trading the separate weights' safetensors mmap
+	// zero-copy for the fused-path speed — which is why it is opt-in per model, not automatic.
+	if fuseGateUp && len(q.ExpGateUp.Packed) == 0 && len(q.ExpGate.Packed) > 0 && len(q.ExpUp.Packed) > 0 {
+		q.ExpGateUp = fuseExpertGateUpQuant(q.ExpGate, q.ExpUp, experts, expertFF, dModel, q.ExpertGroupSize, q.ExpertBits)
+		q.ExpGate, q.ExpUp = QuantWeight{}, QuantWeight{}
+	}
 	return q
+}
+
+// fuseExpertGateUpQuant concatenates separate quantised expert gate + up projections into
+// the single [gate‖up]-per-expert ExpGateUp weight the fused MoE kernel expects (the layout
+// a natively-fused switch_glu.gate_up_proj checkpoint ships). Per expert it lays gate's
+// packed / scales / biases ahead of up's. Materialises a new heap buffer; see moeToQuant.
+func fuseExpertGateUpQuant(gate, up QuantWeight, numExperts, expertDFF, dModel, groupSize, bits int) QuantWeight {
+	gatePacked := expertDFF * dModel * bits / 8
+	gateScale := expertDFF * (dModel / groupSize) * bf16Size
+	fuse := func(a, b []byte, perExpert int) []byte {
+		out := make([]byte, 0, len(a)+len(b))
+		for e := 0; e < numExperts; e++ {
+			start := e * perExpert
+			out = append(out, a[start:start+perExpert]...)
+			out = append(out, b[start:start+perExpert]...)
+		}
+		return out
+	}
+	return QuantWeight{
+		Packed:    fuse(gate.Packed, up.Packed, gatePacked),
+		Scales:    fuse(gate.Scales, up.Scales, gateScale),
+		Biases:    fuse(gate.Biases, up.Biases, gateScale),
+		GroupSize: groupSize,
+		Bits:      bits,
+		resident:  true, // a synthesised heap concat, not a mmap'd shard view (see viewQuantWeight)
+	}
 }
 
 // qw maps a shared model.Linear to the native quant-weight triple (packed codes + bf16 scales +

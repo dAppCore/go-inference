@@ -283,8 +283,17 @@ func TestLoadGemma4QuantMoEFusedGateUpMatchesSplitExperts(t *testing.T) {
 			if len(moe.ExpGate.Packed) != 0 || len(moe.ExpUp.Packed) != 0 {
 				t.Fatalf("%s copied fused gate_up into split gate/up buffers (gate=%d up=%d)", name, len(moe.ExpGate.Packed), len(moe.ExpUp.Packed))
 			}
-		} else if len(moe.ExpGate.Packed) == 0 || len(moe.ExpUp.Packed) == 0 {
-			t.Fatalf("%s did not populate split expert gate/up weights from MoE tensors", name)
+		} else {
+			// gemma4 declares FuseExpertGateUp, so a split-gate/up checkpoint gets ExpGateUp
+			// SYNTHESISED at load (a fresh heap concat, not aliasing an original weight) and the
+			// split halves dropped — the same fused route the native gate_up_proj checkpoint takes.
+			// The decode-parity check below then proves the synthesis matches the native layout.
+			if len(moe.ExpGateUp.Packed) == 0 {
+				t.Fatalf("%s did not synthesise ExpGateUp for the split checkpoint", name)
+			}
+			if len(moe.ExpGate.Packed) != 0 || len(moe.ExpUp.Packed) != 0 {
+				t.Fatalf("%s left split gate/up populated after synthesising ExpGateUp (gate=%d up=%d)", name, len(moe.ExpGate.Packed), len(moe.ExpUp.Packed))
+			}
 		}
 		sess, err := NewArchQuantSession(qm, arch, maxLen)
 		if err != nil {

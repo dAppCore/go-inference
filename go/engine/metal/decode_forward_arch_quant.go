@@ -299,6 +299,12 @@ func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLay
 		if len(qw.Packed) == 0 {
 			return qw
 		}
+		if qw.resident { // synthesised weight (the fused ExpGateUp) is a heap buffer, not a mapped-shard view — resident-copy it
+			qw.packedView = bufView{buf: residentBytes(qw.Packed)}
+			qw.scalesView = bufView{buf: residentBytes(qw.Scales)}
+			qw.biasesView = bufView{buf: residentBytes(qw.Biases)}
+			return qw
+		}
 		qw.packedView = view4(qw.Packed)
 		qw.scalesView = view(qw.Scales)
 		qw.biasesView = view(qw.Biases)
