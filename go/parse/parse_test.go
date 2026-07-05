@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	tools "dappco.re/go/inference/tools"
+	tools "dappco.re/go/inference/agent/tools"
 )
 
 // decode turns a ToolCall.Arguments JSON string back into a map so assertions

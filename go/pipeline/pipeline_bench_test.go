@@ -22,7 +22,7 @@ import (
 	"context"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/ai"
+	"dappco.re/go/inference/agent/ai"
 	"dappco.re/go/inference/kv/budget"
 	chat "dappco.re/go/inference/chat"
 	"dappco.re/go/inference/kv/respcache"
