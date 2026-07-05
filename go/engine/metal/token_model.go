@@ -49,8 +49,13 @@ type NativeTokenModel struct {
 	// serve many request goroutines. Set by LoadGemma4TokenModelDir.
 	headEnc   *headEncoder
 	vision    *model.LoadedVision
-	audio     *model.LoadedAudio
-	diffusion *model.LoadedDiffusion
+	// visionFeatureCfg is the image_processor preprocessing config (patch size,
+	// soft-token budget, pooling, rescale) read from processor_config.json at load
+	// time — ProjectImage needs it to patchify before the tower. nil for a
+	// text-only checkpoint (ProjectImage then falls back to the HF defaults).
+	visionFeatureCfg *VisionImageFeatureConfig
+	audio            *model.LoadedAudio
+	diffusion        *model.LoadedDiffusion
 	bf16      *BF16Model
 	quant     *QuantModel
 	// tok is the optional text tokenizer, mirroring pkg/metal Model's held
@@ -112,6 +117,38 @@ func (m *NativeTokenModel) Tokenizer() *tokenizer.Tokenizer {
 
 func (m *NativeTokenModel) AcceptsImageInput() bool {
 	return m != nil && m.vision != nil
+}
+
+// ProjectImage preprocesses one raw PNG/JPEG image (aspect-preserving resize onto
+// the patch budget, rescale, patchify) and runs it through the vision tower,
+// returning the projected soft-token feature bytes and the soft-token count. It
+// is the per-image half of the engine.VisionTokenModel contract the neutral
+// engine.TextModel.Chat drives — a self-contained bridge from image bytes to
+// tower features, using the feature config retained at load time (HF defaults
+// when the checkpoint shipped no processor config).
+func (m *NativeTokenModel) ProjectImage(image []byte) ([]byte, int, error) {
+	if m == nil {
+		return nil, 0, core.NewError("native.NativeTokenModel.ProjectImage: nil model")
+	}
+	if !m.AcceptsImageInput() {
+		return nil, 0, core.NewError("native.NativeTokenModel.ProjectImage: model has no vision tower")
+	}
+	cfg := m.visionFeatureCfg
+	if cfg == nil {
+		cfg = &VisionImageFeatureConfig{} // VisionImagePatches normalises to HF defaults
+	}
+	patches, softTokens, err := VisionImagePatches(image, cfg)
+	if err != nil {
+		return nil, 0, core.E("native.vision", "preprocess image", err)
+	}
+	if softTokens <= 0 {
+		return nil, 0, core.NewError("native.NativeTokenModel.ProjectImage: image produced no soft tokens")
+	}
+	features, err := m.ProjectImageFeatures(patches)
+	if err != nil {
+		return nil, 0, core.E("native.vision", "project", err)
+	}
+	return features, softTokens, nil
 }
 
 func (m *NativeTokenModel) ImagePlaceholderTokenID() int32 {
