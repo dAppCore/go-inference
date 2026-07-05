@@ -8,11 +8,11 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/ai"
-	"dappco.re/go/inference/budget"
+	"dappco.re/go/inference/kv/budget"
 	chat "dappco.re/go/inference/chat"
 	"dappco.re/go/inference/fusion"
 	"dappco.re/go/inference/obs"
-	"dappco.re/go/inference/respcache"
+	"dappco.re/go/inference/kv/respcache"
 	"dappco.re/go/inference/safety"
 	"dappco.re/go/inference/session"
 	"dappco.re/go/inference/transform"

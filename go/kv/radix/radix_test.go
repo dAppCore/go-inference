@@ -5,7 +5,7 @@ package radix_test
 import (
 	"testing"
 
-	"dappco.re/go/inference/radix"
+	"dappco.re/go/inference/kv/radix"
 )
 
 // --- helpers ---------------------------------------------------------------

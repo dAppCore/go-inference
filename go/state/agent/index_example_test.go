@@ -8,7 +8,7 @@ import (
 
 	pkgbundle "dappco.re/go/inference/bundle"
 	"dappco.re/go/inference/kv"
-	"dappco.re/go/inference/memory"
+	"dappco.re/go/inference/kv/memory"
 	state "dappco.re/go/inference/state"
 )
 

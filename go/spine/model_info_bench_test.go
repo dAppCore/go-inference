@@ -16,7 +16,7 @@ import (
 
 	"dappco.re/go/inference/bundle"
 	"dappco.re/go/inference/train/lora"
-	"dappco.re/go/inference/memory"
+	"dappco.re/go/inference/kv/memory"
 	"dappco.re/go/inference/parser"
 )
 

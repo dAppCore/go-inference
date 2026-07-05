@@ -4,7 +4,7 @@ package memory_test
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/memory"
+	"dappco.re/go/inference/kv/memory"
 )
 
 // Runnable examples for the public memory-planner API. Each invokes the real
