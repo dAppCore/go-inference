@@ -11,75 +11,26 @@ import (
 	"testing"
 )
 
+// Landing note: this package descends from go-rocm's top-level engine, where
+// go-inference was a vendored submodule at external/go-inference/go. It now
+// lives IN go-inference as engine/hip, so the two sibling boundary tests that
+// stat'd "../../../external/go-inference/go" (go-inference-as-submodule) no
+// longer have a coherent target — go-inference does not vendor itself. One was
+// a silent no-op (all roots absent), the other hard-fatal'd; both are removed.
+// The engine-import boundary for the shared contract (AX-8: a lib never imports
+// its consumers) is go-inference's own concern, guarded repo-wide rather than by
+// a single leaf engine. What survives is the guard that genuinely belongs to
+// this package: engine/hip must not reach up into the workflow/agent layer.
 func TestImportBoundary_NoForbiddenRuntimeImports_Good(t *testing.T) {
 	scanImportBoundary(t, ".", forbiddenWorkflowRuntimeImports(), nil)
 }
 
-func TestImportBoundary_HigherLevelPackagesDoNotImportROCm_Good(t *testing.T) {
-	// Quarantine landing note: paths rebased for pkg/hip's new home
-	// (go-mlx/go/pkg/hip, three levels below the worktree root, versus
-	// go-rocm's original go/ one level below its repo root) — see the
-	// landing commit body. go-ai and go-ml are deprecated (go-inference is
-	// the one that matters now); their paths are left as the original
-	// go-rocm-relative form and silently skip via the os.IsNotExist guard
-	// below.
-	roots := []string{
-		"../../../external/go-inference/go",
-		"../../go-ai",
-		"../../go-ml",
-	}
-	for _, root := range roots {
-		if _, err := os.Stat(root); err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			t.Fatalf("stat %s: %v", root, err)
-		}
-		scanImportBoundary(t, root, forbiddenROCmRuntimeImports(), map[string]bool{
-			"external": true,
-			"vendor":   true,
-		})
-	}
-}
-
-func TestImportBoundary_SharedContractsDoNotImportRuntimeOrWorkflowPackages_Good(t *testing.T) {
-	// Quarantine landing note: rebased for pkg/hip's new home — see the
-	// landing commit body and the sibling TestImportBoundary_HigherLevel...
-	// note above.
-	//
-	// The go-inference walk enforces only the engine-import boundary (a lib
-	// never imports its consumers): go-rocm and go-mlx spellings. The
-	// workflow list (rag, ratelimit, …) is go-rocm-era policy from when
-	// go-inference was a thin contract surface; go-inference's ai/ package
-	// now legitimately builds on dappco.re/go/rag, and its internal layering
-	// is guarded by its own suite, not by this consumer.
-	root := "../../../external/go-inference/go"
-	if _, err := os.Stat(root); err != nil {
-		t.Fatalf("stat %s: %v", root, err)
-	}
-	forbidden := append(forbiddenROCmRuntimeImports(),
-		"dappco.re/go/mlx",
-		"forge.lthn.ai/core/go-mlx",
-		"forge.lthn.sh/core/go-mlx",
-		"github.com/dappcore/go-mlx",
-	)
-	scanImportBoundary(t, root, forbidden, map[string]bool{
-		"external": true,
-		"vendor":   true,
-	})
-}
-
 func forbiddenWorkflowRuntimeImports() []string {
-	// Quarantine landing note: dappco.re/go/mlx (+ its forge.lthn.ai,
-	// forge.lthn.sh, and github.com/dappcore mirror spellings) dropped from
-	// this list — see the landing commit body. This test's guard against
-	// TestImportBoundary_NoForbiddenRuntimeImports_Good predates pkg/hip's
-	// relocation, when go-rocm and go-mlx were separate sibling repos and
-	// any go-mlx import from go-rocm's code was necessarily an unwanted
-	// foreign coupling. Now that this package's own home IS
-	// dappco.re/go/inference/engine/hip, its self-imports (e.g.
-	// dappco.re/go/inference/engine/hip/internal/gguf) legitimately start with
-	// dappco.re/go/mlx and are not a boundary violation.
+	// go-rocm (dappco.re/go/rocm + mirrors) is intentionally absent: it is this
+	// engine's legitimate cgo backend. dappco.re/go/mlx is likewise absent —
+	// engine/hip's own sub-packages (dappco.re/go/inference/engine/hip/...) are
+	// not foreign couplings. The guard is the workflow/agent layer above the
+	// engine: an engine builds contracts, it does not consume the fleet.
 	return []string{
 		"dappco.re/go/ai",
 		"dappco.re/go/api",
@@ -98,15 +49,6 @@ func forbiddenWorkflowRuntimeImports() []string {
 		"github.com/dappcore/go-ml",
 		"github.com/dappcore/go-rag",
 		"github.com/dappcore/go-ratelimit",
-	}
-}
-
-func forbiddenROCmRuntimeImports() []string {
-	return []string{
-		"dappco.re/go/rocm",
-		"forge.lthn.ai/core/go-rocm",
-		"forge.lthn.sh/core/go-rocm",
-		"github.com/dappcore/go-rocm",
 	}
 }
 
