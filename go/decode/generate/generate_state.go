@@ -61,6 +61,7 @@ func runStateTurn(ctx context.Context, cfg Config, loadOpts []inference.LoadOpti
 		return core.E("generate.state", "load", err)
 	}
 	defer tm.Close()
+	noteCacheKnobs(cfg, tm)
 
 	sm, ok := tm.(sessionModel)
 	if !ok {

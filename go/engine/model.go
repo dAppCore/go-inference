@@ -185,6 +185,15 @@ func (m *TextModel) decodeFromPrefilled(ctx context.Context, sess Session, promp
 		m.setErr(core.NewError("engine.TextModel.Generate: no room to generate in the context window"))
 		return
 	}
+	// When the caller asked for a decode phase trace and the concrete engine
+	// session can produce one, begin it before decoding and fold the aggregate
+	// budget into metrics after — the neutral surface behind `generate -trace`.
+	var stopTrace func() inference.DecodePhaseBudget
+	if cfg.TraceTokenPhases {
+		if tracer, ok := sess.(DecodePhaseTracer); ok {
+			stopTrace = tracer.BeginDecodePhaseTrace()
+		}
+	}
 	stop := m.stopTokens(cfg)
 	count := 0
 	emit := func(id int32) bool {
@@ -215,6 +224,12 @@ func (m *TextModel) decodeFromPrefilled(ctx context.Context, sess Session, promp
 		_, gerr = sess.GenerateFromCacheEach(maxNew, -1, emit)
 	}
 	m.setMetrics(promptLen, count, m.prefillSplit(start), start)
+	if stopTrace != nil {
+		budget := stopTrace()
+		if budget.Tokens > 0 {
+			m.setDecodePhases(&budget)
+		}
+	}
 	if gerr != nil {
 		m.setErr(gerr)
 		return
@@ -309,6 +324,30 @@ func (m *TextModel) ModelType() string { return m.modelType }
 
 func (m *TextModel) Info() inference.ModelInfo { return m.info }
 
+// CacheModeReporter is the optional seam a concrete engine [TokenModel]
+// implements to declare which KV cache modes it honours as a load-time selector.
+// An engine that runs a single automatic cache returns the descriptive name of
+// that one mode (or nil); a future engine that honours fp16/q8/paged/… lists them
+// so callers can validate a requested `-kv-cache` mode against real support.
+type CacheModeReporter interface {
+	SupportedCacheModes() []string
+}
+
+// Capabilities reports the loaded model's feature surface (inference
+// .CapabilityReporter), starting from the interface-inferred base set and adding
+// the concrete engine's supported KV cache modes when it declares them. This is
+// the engine-agnostic seam `generate` consults to print an accurate `-kv-cache`
+// note instead of a blanket "seam not yet exposed".
+func (m *TextModel) Capabilities() inference.CapabilityReport {
+	report := inference.TextModelCapabilities(inference.RuntimeIdentity{}, m)
+	if m != nil && m.tm != nil {
+		if reporter, ok := m.tm.(CacheModeReporter); ok {
+			report.CacheModes = reporter.SupportedCacheModes()
+		}
+	}
+	return report
+}
+
 func (m *TextModel) Metrics() inference.GenerateMetrics {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -353,6 +392,15 @@ func (m *TextModel) setErr(err error) {
 func (m *TextModel) setOK() {
 	m.mu.Lock()
 	m.lastErr = core.Ok(nil)
+	m.mu.Unlock()
+}
+
+// setDecodePhases attaches a traced decode phase budget to the last metrics.
+// Called after setMetrics (which builds a fresh GenerateMetrics), so the budget
+// rides the same metrics snapshot the caller reads via Metrics().
+func (m *TextModel) setDecodePhases(budget *inference.DecodePhaseBudget) {
+	m.mu.Lock()
+	m.lastMetrics.DecodePhases = budget
 	m.mu.Unlock()
 }
 

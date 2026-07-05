@@ -79,15 +79,10 @@ func RunGenerate(ctx context.Context, cfg Config) error {
 	if cfg.ContextLen > 0 {
 		loadOpts = append(loadOpts, inference.WithContextLen(cfg.ContextLen))
 	}
-	// KV-cache mode / storage dtype have no inference.LoadOption on the current
-	// engine/metal; note honestly and load the engine default (the seam lights
-	// these up when it arrives — matching the serve degradation).
-	if core.Trim(cfg.KVCacheMode) != "" {
-		printNote(cfg.Log, "generate: -kv-cache %s requested; the engine loads its default cache mode (per-engine cache-mode seam not yet exposed)", cfg.KVCacheMode)
-	}
-	if core.Trim(cfg.KVStorage) != "" {
-		printNote(cfg.Log, "generate: -kv-storage %s requested; the engine loads its default KV storage dtype (seam not yet exposed)", cfg.KVStorage)
-	}
+	// KV-cache mode / storage dtype overrides are validated against the loaded
+	// engine's reported capabilities (noteCacheKnobs, once the model is loaded)
+	// rather than blanket-noted here — the note then names what the engine
+	// actually honours instead of guessing.
 	if cfg.Native {
 		printNote(cfg.Log, "generate: native no-cgo token loop (the default go-inference metal engine already is native)")
 	}
@@ -134,6 +129,7 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 		return core.E("generate.RunGenerate", "load", err)
 	}
 	defer tm.Close()
+	noteCacheKnobs(cfg, tm)
 
 	// Gate images on the model's neutral vision capability, exactly as serve's
 	// chat-completions handler does before prefill.
@@ -149,17 +145,14 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 			inference.WithEnableThinking(&off),
 			inference.WithTemperature(float32(cfg.Temp)),
 		}
-		// -trace enables the engine's coarse per-token phase timing to its trace
-		// log. The structured per-token phase-budget TABLE lthn-mlx printed reads
-		// mlx.Metrics.TokenPhases, which go-inference's inference.GenerateMetrics
-		// does not expose — that surface is a separate engine seam. Honest note.
+		// -trace turns on the engine's per-token phase timing. The engine folds the
+		// aggregate GPU-busy / host-serial split into inference.GenerateMetrics
+		// .DecodePhases (populated only if the active decode path is instrumented),
+		// which printDecodePhaseBudget renders after the run.
 		if cfg.Trace {
 			opts = append(opts, inference.GenerateOption(func(c *inference.GenerateConfig) { c.TraceTokenPhases = true }))
 		}
 		return opts
-	}
-	if cfg.Trace {
-		printNote(cfg.Log, "generate: -trace enables coarse per-token phase timing to the engine trace log; the structured phase-budget table needs a TokenPhases metrics surface (engine seam not yet exposed)")
 	}
 
 	// run generates up to limit tokens, timing prefill (start → first token)
@@ -202,7 +195,110 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 		float64(n)/(prefill+decode).Seconds(),
 	))
 	printMTPMetrics(cfg.Out, tm)
+	if cfg.Trace {
+		if budget := tm.Metrics().DecodePhases; budget != nil && budget.Tokens > 0 {
+			printDecodePhaseBudget(cfg.Out, budget)
+		} else {
+			printNote(cfg.Log, "generate: -trace: the active decode path reported no phase budget — this engine instruments its greedy GPU decode tail; a path without phase timing leaves the budget empty")
+		}
+	}
 	return nil
+}
+
+// printDecodePhaseBudget renders the traced per-token decode budget: the GPU-busy
+// vs host-serial split (the host-serial share is the GPU-idle wall a deeper
+// pipeline could overlap — the perf headroom) and each engine-named phase's
+// share. It is the go-inference equivalent of lthn-mlx's phase-budget table,
+// reading the neutral inference.DecodePhaseBudget instead of test-only globals.
+func printDecodePhaseBudget(out io.Writer, budget *inference.DecodePhaseBudget) {
+	total := msPerToken(budget.TotalPerToken)
+	gpu := msPerToken(budget.GPUPerToken)
+	host := msPerToken(budget.HostPerToken())
+	core.WriteString(out, core.Sprintf("\ndecode phase budget — %d tokens · %.3f ms/token · %.1f tok/s\n",
+		budget.Tokens, total, tokPerSec(total)))
+	core.WriteString(out, core.Sprintf("  GPU busy    %8.3f ms  %5.1f%%\n", gpu, 100*budget.GPUFraction()))
+	ceiling := "n/a"
+	if gpu > 0 {
+		ceiling = core.Sprintf("%.1f", 1000.0/gpu)
+	}
+	core.WriteString(out, core.Sprintf("  host serial %8.3f ms  %5.1f%%   <- GPU idle; tok/s ceiling if zeroed: %s\n",
+		host, 100*(1-budget.GPUFraction()), ceiling))
+	for _, phase := range budget.Phases {
+		ms := msPerToken(phase.PerToken)
+		if ms < 0.001 {
+			continue
+		}
+		lane := "host"
+		if phase.GPU {
+			lane = "GPU"
+		}
+		pct := 0.0
+		if budget.TotalPerToken > 0 {
+			pct = 100 * float64(phase.PerToken) / float64(budget.TotalPerToken)
+		}
+		core.WriteString(out, core.Sprintf("    %-24s %8.3f ms  %5.1f%%  (%s)\n", phase.Name, ms, pct, lane))
+	}
+}
+
+// msPerToken renders a per-token duration in milliseconds.
+func msPerToken(d time.Duration) float64 { return float64(d.Microseconds()) / 1000.0 }
+
+// tokPerSec is tokens/sec from a per-token millisecond figure (0 when untimed).
+func tokPerSec(ms float64) float64 {
+	if ms <= 0 {
+		return 0
+	}
+	return 1000.0 / ms
+}
+
+// noteCacheKnobs prints an honest, capability-driven note for the -kv-cache /
+// -kv-storage overrides. The loaded engine reports which KV cache modes it
+// honours (inference.CapabilityReport.CacheModes), so a requested mode outside
+// that set is reported as ignored rather than silently dropped. The metal engine
+// reports a single native cache and honours no go-mlx-era selector (fp16 / q8 /
+// kq8vq4 / turboquant), so any override lands here naming what is supported; a
+// future engine that honours a selector lists it and only an unknown mode notes.
+func noteCacheKnobs(cfg Config, tm inference.TextModel) {
+	if req := core.Trim(cfg.KVCacheMode); req != "" {
+		modes := reportedCacheModes(tm)
+		if !cacheModeHonoured(modes, req) {
+			printNote(cfg.Log, "generate: -kv-cache %q is not honoured by this engine%s; it runs its built-in KV cache. Override ignored.",
+				cfg.KVCacheMode, cacheModesSuffix(modes))
+		}
+	}
+	if req := core.Trim(cfg.KVStorage); req != "" {
+		printNote(cfg.Log, "generate: -kv-storage %q is not honoured by this engine; it runs its native KV storage dtype. Override ignored.", cfg.KVStorage)
+	}
+}
+
+// reportedCacheModes returns the KV cache modes the loaded model's engine
+// declares through the capability seam (nil when the model reports none).
+func reportedCacheModes(tm inference.TextModel) []string {
+	report, ok := inference.CapabilitiesOf(tm)
+	if !ok {
+		return nil
+	}
+	return report.CacheModes
+}
+
+// cacheModeHonoured reports whether want is one of the engine's declared cache
+// modes (case-insensitive). An empty list means the engine declares no
+// selectable mode, so nothing is honoured.
+func cacheModeHonoured(modes []string, want string) bool {
+	for _, mode := range modes {
+		if core.Lower(mode) == core.Lower(want) {
+			return true
+		}
+	}
+	return false
+}
+
+// cacheModesSuffix renders the supported-modes hint for the note ("" when none).
+func cacheModesSuffix(modes []string) string {
+	if len(modes) == 0 {
+		return ""
+	}
+	return core.Sprintf(" (this engine supports: %s)", core.Join(", ", modes...))
 }
 
 // resolvedDraftBlock reports the block the MTP lane would run for a flag value
