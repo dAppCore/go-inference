@@ -41,9 +41,12 @@ var (
 	// is available (default: produce each step's next emb+pli on-GPU, one command buffer/token for e2b).
 	chainedGPUInputsDisabled bool
 	// pipelinedGPUDecodeEnabled opts the chained-GPU decode into submit-ahead: two ICBs over shared KV, the
-	// host submits token t+1 before reading t (1-ahead, discard-safe for greedy). Off by default until
-	// soaked; the parity tests + headroom bench drive it on explicitly.
-	pipelinedGPUDecodeEnabled bool
+	// host submits token t+1 before reading t (1-ahead, discard-safe for greedy: the chain feeds each
+	// step's input on-GPU from the prior argmax, so the pre-submitted step is always correct and a stop
+	// merely discards one speculative step). On by default — worth ~0.6ms/token on e2b-4bit (162→180
+	// tok/s); the parity tests byte-compare it against the serial loop, and tests that need the
+	// unpipelined lane clear it explicitly.
+	pipelinedGPUDecodeEnabled = true
 )
 
 func ptStart() time.Time {

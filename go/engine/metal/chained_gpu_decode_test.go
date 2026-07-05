@@ -438,7 +438,7 @@ func TestPipelinedGPUDecodeMatchesChained(t *testing.T) {
 			}
 
 			pipelinedGPUDecodeEnabled = true
-			defer func() { pipelinedGPUDecodeEnabled = false }()
+			defer func() { pipelinedGPUDecodeEnabled = true }()
 			sessP, err := NewArchQuantSession(g, arch, maxLen)
 			if err != nil {
 				t.Fatalf("pipelined session: %v", err)
@@ -623,7 +623,7 @@ func TestPipelinedGPUDecodeSecondTurn(t *testing.T) {
 	}
 	chain := twoTurns(false)
 	pipe := twoTurns(true)
-	pipelinedGPUDecodeEnabled = false
+	pipelinedGPUDecodeEnabled = true
 
 	if len(pipe) != len(chain) {
 		t.Fatalf("count: pipelined %d vs chained %d", len(pipe), len(chain))
@@ -670,7 +670,7 @@ func TestPipelinedGPUDecodeKVShared(t *testing.T) {
 	}
 
 	pipelinedGPUDecodeEnabled = true
-	defer func() { pipelinedGPUDecodeEnabled = false }()
+	defer func() { pipelinedGPUDecodeEnabled = true }()
 	sessP, err := NewArchQuantSession(g, arch, maxLen)
 	if err != nil {
 		t.Fatalf("pipelined session: %v", err)
@@ -1139,7 +1139,7 @@ func benchChainedDecodePLE(b *testing.B, gpuInputs, pipelined bool) {
 	prompt := []int32{1, 5, 3, 7, 2, 9}
 	chainedGPUInputsDisabled = !gpuInputs
 	pipelinedGPUDecodeEnabled = pipelined
-	defer func() { chainedGPUInputsDisabled = false; pipelinedGPUDecodeEnabled = false }()
+	defer func() { chainedGPUInputsDisabled = false; pipelinedGPUDecodeEnabled = true }()
 	b.SetBytes(int64(N))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -1176,7 +1176,7 @@ func benchCacheLogitsPLE(b *testing.B, gpuInputs, pipelined bool) {
 	prompt := []int32{1, 5, 3, 7, 2, 9}
 	chainedGPUInputsDisabled = !gpuInputs
 	pipelinedGPUDecodeEnabled = pipelined
-	defer func() { chainedGPUInputsDisabled = false; pipelinedGPUDecodeEnabled = false }()
+	defer func() { chainedGPUInputsDisabled = false; pipelinedGPUDecodeEnabled = true }()
 	b.SetBytes(int64(N))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -1216,7 +1216,7 @@ func benchSampledChainedDecodePLE(b *testing.B, gpuInputs, pipelined bool) {
 	params := model.SampleParams{Temperature: 0.9, TopK: 8, TopP: 0.85}
 	chainedGPUInputsDisabled = !gpuInputs
 	pipelinedGPUDecodeEnabled = pipelined
-	defer func() { chainedGPUInputsDisabled = false; pipelinedGPUDecodeEnabled = false }()
+	defer func() { chainedGPUInputsDisabled = false; pipelinedGPUDecodeEnabled = true }()
 	b.SetBytes(int64(N))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -1251,7 +1251,7 @@ func benchSampledCacheLogitsPLE(b *testing.B, gpuInputs, pipelined bool) {
 	params := model.SampleParams{Temperature: 0.9, TopK: 8, TopP: 0.85}
 	chainedGPUInputsDisabled = !gpuInputs
 	pipelinedGPUDecodeEnabled = pipelined
-	defer func() { chainedGPUInputsDisabled = false; pipelinedGPUDecodeEnabled = false }()
+	defer func() { chainedGPUInputsDisabled = false; pipelinedGPUDecodeEnabled = true }()
 	b.SetBytes(int64(N))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

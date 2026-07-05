@@ -93,7 +93,7 @@ func TestRealE2BChainedGPUParityAndSpeed(t *testing.T) {
 	chainTok, chainTps, chainGPU := run("chained-GPU", false, false)
 	pipeTok, pipeTps, pipeGPU := run("pipelined", false, true)
 	chainedGPUInputsDisabled = false
-	pipelinedGPUDecodeEnabled = false
+	pipelinedGPUDecodeEnabled = true
 
 	eq := func(a, b []int32) bool {
 		if len(a) != len(b) {
@@ -144,7 +144,7 @@ func TestRealE2BChainedGPUParityAndSpeed(t *testing.T) {
 	// the headroom a finer recorded-barrier schedule could reclaim in the layer stack.
 	allBarriersOffForTest = true
 	pipelinedGPUDecodeEnabled = true
-	defer func() { allBarriersOffForTest = false; pipelinedGPUDecodeEnabled = false }()
+	defer func() { allBarriersOffForTest = false; pipelinedGPUDecodeEnabled = true }()
 	sbar := newSess()
 	if err := sbar.PrefillTokens(prompt); err != nil {
 		t.Fatalf("nobarrier prefill: %v", err)
@@ -162,7 +162,7 @@ func TestRealE2BChainedGPUParityAndSpeed(t *testing.T) {
 	wallNb := time.Since(tnb)
 	pieceTimingOn = false
 	allBarriersOffForTest = false
-	pipelinedGPUDecodeEnabled = false
+	pipelinedGPUDecodeEnabled = true
 	nbGpuPerTok := float64(chainedGPUSpanNs) / 1e6 / float64(N)
 	barGpuPerTok := per(pieceNs[1]) // barriered layer-stack per token (reference)
 	t.Logf("barrier ceiling: pipelined no-barrier per-token GPU %.3fms (wall %.1f tok/s) vs barriered layer-stack %.3fms — barrier cost headroom",
@@ -172,7 +172,7 @@ func TestRealE2BChainedGPUParityAndSpeed(t *testing.T) {
 	// a fused FFN megakernel could reclaim. The delta vs the full-barriered pipeline scopes piece-(A).
 	ffnBarriersOffForTest = true
 	pipelinedGPUDecodeEnabled = true
-	defer func() { ffnBarriersOffForTest = false; pipelinedGPUDecodeEnabled = false }()
+	defer func() { ffnBarriersOffForTest = false; pipelinedGPUDecodeEnabled = true }()
 	sffn := newSess()
 	if err := sffn.PrefillTokens(prompt); err != nil {
 		t.Fatalf("ffn-probe prefill: %v", err)
@@ -190,7 +190,7 @@ func TestRealE2BChainedGPUParityAndSpeed(t *testing.T) {
 	wallFfn := time.Since(tffn)
 	pieceTimingOn = false
 	ffnBarriersOffForTest = false
-	pipelinedGPUDecodeEnabled = false
+	pipelinedGPUDecodeEnabled = true
 	ffnGpuPerTok := float64(chainedGPUSpanNs) / 1e6 / float64(N)
 	fullPipeGpuPerTok := (pipeGPU / 100.0) * 1000.0 / pipeTps // full-barriered pipelined GPU ms/token
 	t.Logf("FFN-fusion ceiling: drop gate/gelu/down barriers -> per-token GPU %.3fms (%.1f tok/s) vs full %.3fms — fused-FFN reclaim %.3fms/token (~%.0f tok/s if realised)",
@@ -202,7 +202,7 @@ func TestRealE2BChainedGPUParityAndSpeed(t *testing.T) {
 	// reclaim the barrier headroom while staying token-correct. Measure GPU span + tok/s + parity vs host.
 	fineGrainedReplay = true
 	pipelinedGPUDecodeEnabled = true
-	defer func() { fineGrainedReplay = false; pipelinedGPUDecodeEnabled = false }()
+	defer func() { fineGrainedReplay = false; pipelinedGPUDecodeEnabled = true }()
 	sfg := newSess()
 	if err := sfg.PrefillTokens(prompt); err != nil {
 		t.Fatalf("fine-grained prefill: %v", err)
@@ -217,7 +217,7 @@ func TestRealE2BChainedGPUParityAndSpeed(t *testing.T) {
 	wallFg := time.Since(tfg)
 	pieceTimingOn = false
 	fineGrainedReplay = false
-	pipelinedGPUDecodeEnabled = false
+	pipelinedGPUDecodeEnabled = true
 	if err != nil {
 		t.Fatalf("fine-grained generate: %v", err)
 	}
@@ -357,7 +357,7 @@ func TestRealE2BWithinLayerOpCost(t *testing.T) {
 	}
 	wall := time.Since(t0)
 	pieceTimingOn = false
-	pipelinedGPUDecodeEnabled = false
+	pipelinedGPUDecodeEnabled = true
 	gpuBusy := float64(chainedGPUSpanNs) / float64(wall.Nanoseconds()) * 100
 	t.Logf("decode (tg%d): %.1f tok/s (%.2f ms/token, gpu-busy %.0f%%)", N, float64(N)/wall.Seconds(), wall.Seconds()*1000/float64(N), gpuBusy)
 
