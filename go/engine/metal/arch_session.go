@@ -2814,6 +2814,12 @@ func (s *ArchSession) sampleVocabBF16(logits []byte, vocab int, sampler *model.S
 		sampler.Draw()
 		return next, nil
 	}
+	if hostTopKSamplePreferred(params, vocab) {
+		// TopK>1 at real vocab: one-pass host candidate select + the shared
+		// candidate sampler — the fast lane the GPU selection rungs decline to
+		// (head_host_topk.go carries the measurements).
+		return sampleHostTopKBF16(logits, vocab, sampler, params)
+	}
 	rankFilter := sampleRankPrefixPreferred(params, vocab)
 	s.sampleScaled = nil
 	temp := params.Temperature
@@ -3432,7 +3438,11 @@ func (s *ArchSession) sampleTopKParamsEligible(params model.SampleParams) bool {
 	if params.TopK <= 0 || params.TopK > headSampleTopKMaxK {
 		return false
 	}
-	return true
+	// Large-vocab TopK selection is faster on the HOST (see head_host_topk.go):
+	// the GPU selection kernels are value-dependent and lose by 4-20x at real
+	// vocab sizes, so this lane declines and the ladder falls through to the
+	// logits+host-select fallback.
+	return !hostTopKSamplePreferred(params, s.arch.Vocab)
 }
 
 func (s *ArchSession) sampleTopKTokenParamsEligible(params model.SampleParams) bool {
@@ -3440,6 +3450,9 @@ func (s *ArchSession) sampleTopKTokenParamsEligible(params model.SampleParams) b
 		return false
 	}
 	if params.TopK <= 0 || params.TopK > headSampleTopKMaxK {
+		return false
+	}
+	if hostTopKSamplePreferred(params, s.arch.Vocab) { // see head_host_topk.go
 		return false
 	}
 	return s.headEnc.topKSampleUsable(params.TopK)
@@ -3455,6 +3468,9 @@ func (s *ArchSession) sampleLogitsTokenParamsEligible(params model.SampleParams)
 	if params.TopK == 0 && params.TopP > 0 && params.TopP < 1 && !logitsSampleTopPOnlyFullVocab(params, s.arch.Vocab) {
 		return false
 	}
+	if hostTopKSamplePreferred(params, s.arch.Vocab) { // TopK>1: the kernel's k-selection is the 33ms case; TopK==0 full-vocab stays (fast)
+		return false
+	}
 	return s.headEnc.logitsSampleUsable()
 }
 
@@ -3466,6 +3482,9 @@ func (s *ArchSession) retainedLogitsSampleParamsEligible(params model.SamplePara
 		return false
 	}
 	if params.TopK == 0 && params.TopP > 0 && params.TopP < 1 && !logitsSampleTopPOnlyFullVocab(params, s.arch.Vocab) {
+		return false
+	}
+	if hostTopKSamplePreferred(params, s.arch.Vocab) { // TopK>1: kernel k-selection is the slow case (head_host_topk.go)
 		return false
 	}
 	return s.headEnc.logitsBufferSampleUsable()
