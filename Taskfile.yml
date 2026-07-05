@@ -1,0 +1,67 @@
+---
+version: '3'
+# go-inference build — the sovereign `lem` binary + its two Metal kernel libraries.
+# Since the go-mlx/go-rocm retirement, go-inference owns the whole metal build chain:
+#   lib/mlx           — Apple's canonical MLX (github.com/ml-explore/mlx) pinned at v0.31.2.
+#   patches/mlx/      — the 10 lthn patches applied ON TOP at build time (decode-replay,
+#                       MLX_METALLIB_PATH override, 512-dim sdpa_vector). Patch-not-vendor:
+#                       track upstream MLX + pull updates by bumping the pin + rebasing patches.
+#   dist/lib/mlx.metallib          — MLX's own compiled kernels (steel_gemm, affine_qmv,
+#                                    vv_*, rms, rope) the engine dispatches. Built by CMake.
+#   dist/lib/lthn_kernels.metallib — go-inference's OWN fused kernels (engine/metal/kernels/
+#                                    *.metal), loaded beside mlx.metallib.
+vars:
+  GO_BUILD_CACHE: '{{default "/private/tmp/lem-dev/gocache" .GOCACHE}}'
+  GO_DARWIN_LDFLAGS: '-extldflags=-mmacosx-version-min=26.0'
+  NCPU:
+    sh: sysctl -n hw.ncpu
+env:
+  MLX_METALLIB_PATH: '{{.ROOT_DIR}}/dist/lib/mlx.metallib'
+
+tasks:
+  metallib:
+    desc: "Build BOTH Metal libraries into dist/lib (mlx.metallib + lthn_kernels.metallib)."
+    cmds:
+      - task: metallib:mlx
+      - task: metallib:kernels
+
+  metallib:mlx:
+    desc: "Build MLX's kernels (dist/lib/mlx.metallib) from Apple MLX (lib/mlx @ v0.31.2) + the lthn patches."
+    cmds:
+      - mkdir -p dist/lib build
+      - |-
+        set -e
+        # start from pristine pinned Apple MLX, apply the lthn patch set (absolute paths)
+        git -C lib/mlx checkout -q -- . && git -C lib/mlx clean -fdq
+        for p in "$PWD"/patches/mlx/*.patch; do git -C lib/mlx apply "$p"; done
+        cmake -S lib/mlx -B build/mlx-metal -DCMAKE_BUILD_TYPE=Release -DMLX_BUILD_METAL=ON \
+          -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_EXAMPLES=OFF \
+          -DMLX_BUILD_PYTHON_BINDINGS=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0
+        cmake --build build/mlx-metal --target mlx --parallel {{.NCPU}}
+        cp build/mlx-metal/mlx/backend/metal/kernels/mlx.metallib dist/lib/mlx.metallib
+        # restore lib/mlx to pristine so the submodule stays clean in git status
+        git -C lib/mlx checkout -q -- . && git -C lib/mlx clean -fdq
+        echo "  mlx.metallib: $(du -h dist/lib/mlx.metallib | cut -f1) (Apple MLX $(git -C lib/mlx describe --tags) + $(ls patches/mlx/*.patch | wc -l | tr -d ' ') lthn patches)"
+
+  metallib:kernels:
+    desc: "Compile go-inference's OWN Metal kernels (engine/metal/kernels/*.metal) into dist/lib/lthn_kernels.metallib (needs lib/mlx headers)."
+    cmds:
+      - mkdir -p dist/lib
+      - |-
+        set -e
+        airdir="$(mktemp -d)"
+        for m in go/engine/metal/kernels/*.metal; do
+          xcrun -sdk macosx metal -std=metal4.0 -I lib/mlx -c "$m" -o "$airdir/$(basename "${m%.metal}").air"
+        done
+        xcrun -sdk macosx metallib "$airdir"/*.air -o dist/lib/lthn_kernels.metallib
+        rm -rf "$airdir"
+        echo "  lthn_kernels.metallib: $(ls -1 go/engine/metal/kernels/*.metal | wc -l | tr -d ' ') kernel(s) -> dist/lib/lthn_kernels.metallib"
+
+  build:
+    desc: "Build the sovereign lem binary (engine/metal, -tags metal_runtime) to bin/lem."
+    cmds:
+      - mkdir -p bin {{.GO_BUILD_CACHE}}
+      - >-
+        env GOCACHE={{.GO_BUILD_CACHE}} go build -tags metal_runtime -trimpath
+        -ldflags "{{.GO_DARWIN_LDFLAGS}}" -o bin/lem ./go/cmd/lem
+      - 'echo "  lem -> bin/lem (needs dist/lib/*.metallib at runtime via MLX_METALLIB_PATH; run task metallib first)"'

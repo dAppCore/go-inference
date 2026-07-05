@@ -1,0 +1,209 @@
+From 541b5a36bd9a6b03f0ad1030ae119e3f945d4b66 Mon Sep 17 00:00:00 2001
+From: Snider <snider@host.uk.com>
+Date: Tue, 16 Jun 2026 19:00:02 +0100
+Subject: [PATCH 10/10] =?UTF-8?q?lthn(perf):=20decode=20replay=20WORKS=20e?=
+ =?UTF-8?q?nd-to-end=20=E2=80=94=20programmatic=20arm=20+=20correct=20cros?=
+ =?UTF-8?q?s-thread=20replay?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two fixes made record/replay run on-GPU: (1) recording state is GLOBAL not thread_local (MLX encodes on the stream's thread, not the control thread that arms it); recording armed by capture-env OR programmatic step-capture. (2) replay enqueues onto the stream's scheduler thread (get_command_encoder is per-thread) and ensures that thread has an encoder via idempotent new_stream (Metal buffers are device-global). Verified: a tiny Add captured as a 2-CB step, pinned, replayed — byte-exact output, no MLX tape-walk.
+
+Co-Authored-By: Virgil <virgil@lethean.io>
+---
+ mlx/backend/metal/device.cpp | 106 +++++++++++++++++++++--------------
+ 1 file changed, 64 insertions(+), 42 deletions(-)
+
+diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
+index c9447bce..0ee2f8e5 100644
+--- a/mlx/backend/metal/device.cpp
++++ b/mlx/backend/metal/device.cpp
+@@ -3,6 +3,7 @@
+ #include <cstdint>
+ #include <cstdio>
+ #include <cstdlib>
++#include <future>
+ #include <sstream>
+ #include <tuple>
+ #include <utility>
+@@ -18,6 +19,7 @@
+ #include "mlx/backend/metal/device.h"
+ #include "mlx/backend/metal/metal.h"
+ #include "mlx/backend/metal/utils.h"
++#include "mlx/scheduler.h"
+ #include "mlx/utils.h"
+ 
+ namespace std {
+@@ -327,9 +329,13 @@ inline bool lthn_capture_env() {
+   }();
+   return on;
+ }
+-thread_local std::vector<LthnRecCmd> lthn_rec_cmds;
+-thread_local LthnRecCmd lthn_rec_cur;
+-thread_local bool lthn_rec_cur_open = false;
++// NOTE: global, NOT thread_local — MLX encodes command buffers on the stream's
++// own thread, not the control thread that arms recording. The decode control
++// flow is sequential (arm -> eval-waits -> finalize), so a single decode stream
++// needs no lock; concurrent multi-stream recording is not supported (nor needed).
++std::vector<LthnRecCmd> lthn_rec_cmds;
++LthnRecCmd lthn_rec_cur;
++bool lthn_rec_cur_open = false;
+ inline void lthn_rec_flush_cur() {
+   if (lthn_rec_cur_open) {
+     lthn_rec_cmds.push_back(std::move(lthn_rec_cur));
+@@ -337,20 +343,23 @@ inline void lthn_rec_flush_cur() {
+     lthn_rec_cur_open = false;
+   }
+ }
+-thread_local bool lthn_pending_barrier = false;
++bool lthn_pending_barrier = false;
+ // The finalised replay program — one decode step's full command stream — and a
+-// guard so re-issuing it doesn't recursively re-record.
+-thread_local std::vector<LthnRecCmd> lthn_replay_program;
+-thread_local bool lthn_decode_replaying = false;
++// guard so re-issuing it doesn't recursively re-record. Global (see note above).
++std::vector<LthnRecCmd> lthn_replay_program;
++bool lthn_decode_replaying = false;
+ // Step-level capture: a decode step spans multiple command buffers (12B = 2: a
+ // 47-cmd CB + a 27/28-cmd CB). While capturing, end_encoding appends each
+ // finished CB to lthn_step_program in order, building the whole step's program.
+-thread_local std::vector<std::vector<LthnRecCmd>> lthn_step_program;
+-thread_local bool lthn_step_capturing = false;
++std::vector<std::vector<LthnRecCmd>> lthn_step_program;
++bool lthn_step_capturing = false;
++// Recording is on for the env diagnostic OR while a step is being captured
++// programmatically (the decode driver) — but never while replaying.
++inline bool lthn_rec_on() { return lthn_capture_env() || lthn_step_capturing; }
+ } // namespace
+ 
+ bool lthn_decode_recording() {
+-  return lthn_capture_env() && !lthn_decode_replaying;
++  return lthn_rec_on() && !lthn_decode_replaying;
+ }
+ void lthn_decode_rec_pipeline(MTL::ComputePipelineState* kernel) {
+   lthn_rec_flush_cur(); // a new pipeline-set begins a new command
+@@ -435,35 +444,48 @@ size_t lthn_decode_step_end() {
+ // The step's buffers must still be valid — the caller pins them; per-token state
+ // (input token, cache offset) is written into those pinned buffers before replay.
+ void lthn_decode_replay_step(Stream s) {
+-  auto& enc = get_command_encoder(s);
+-  lthn_decode_replaying = true;
+-  for (auto& cb : lthn_step_program) {
+-    auto* raw = enc.lthn_raw_encoder();
+-    for (auto& c : cb) {
+-      if (c.barrier_before) {
+-        raw->memoryBarrier(MTL::BarrierScopeBuffers);
+-      }
+-      raw->setComputePipelineState(c.pipeline);
+-      for (auto& b : c.buffers) {
+-        raw->setBuffer(std::get<0>(b), std::get<1>(b), std::get<2>(b));
+-      }
+-      for (auto& by : c.bytes) {
+-        raw->setBytes(by.first.data(), by.first.size(), by.second);
+-      }
+-      for (auto& tg : c.tgmem) {
+-        raw->setThreadgroupMemoryLength(tg.first, tg.second);
+-      }
+-      if (c.threadgroups) {
+-        raw->dispatchThreadgroups(c.grid, c.group);
+-      } else {
+-        raw->dispatchThreads(c.grid, c.group);
++  // The encode must run on the STREAM's own thread (that's where its command
++  // encoder lives — calling get_command_encoder from the control thread throws
++  // "no Stream in current thread"). Enqueue the re-issue there and block on it.
++  std::promise<void> done;
++  auto fut = done.get_future();
++  mlx::core::scheduler::enqueue(s, [s, &done]() {
++    // Ensure THIS scheduler thread has s's command encoder (idempotent
++    // try_emplace; Metal buffers are device-global, so a fresh encoder here can
++    // still bind the recorded step's pinned buffers).
++    mlx::core::gpu::new_stream(s);
++    auto& enc = get_command_encoder(s);
++    lthn_decode_replaying = true;
++    for (auto& cb : lthn_step_program) {
++      auto* raw = enc.lthn_raw_encoder();
++      for (auto& c : cb) {
++        if (c.barrier_before) {
++          raw->memoryBarrier(MTL::BarrierScopeBuffers);
++        }
++        raw->setComputePipelineState(c.pipeline);
++        for (auto& b : c.buffers) {
++          raw->setBuffer(std::get<0>(b), std::get<1>(b), std::get<2>(b));
++        }
++        for (auto& by : c.bytes) {
++          raw->setBytes(by.first.data(), by.first.size(), by.second);
++        }
++        for (auto& tg : c.tgmem) {
++          raw->setThreadgroupMemoryLength(tg.first, tg.second);
++        }
++        if (c.threadgroups) {
++          raw->dispatchThreadgroups(c.grid, c.group);
++        } else {
++          raw->dispatchThreads(c.grid, c.group);
++        }
+       }
++      enc.end_encoding();
++      enc.commit();
+     }
+-    enc.end_encoding();
+-    enc.commit();
+-  }
+-  enc.synchronize();
+-  lthn_decode_replaying = false;
++    enc.synchronize();
++    lthn_decode_replaying = false;
++    done.set_value();
++  });
++  fut.wait();
+ }
+ 
+ void CommandEncoder::set_buffer(
+@@ -474,7 +496,7 @@ void CommandEncoder::set_buffer(
+   // buffers
+   all_inputs_.insert((void*)buf);
+   all_outputs_.insert((void*)buf);
+-  if (lthn_capture_env() && lthn_rec_cur_open) {
++  if (lthn_rec_on() && lthn_rec_cur_open) {
+     lthn_rec_cur.buffers.emplace_back(buf, offset, idx);
+   }
+   get_command_encoder()->setBuffer(buf, offset, idx);
+@@ -491,7 +513,7 @@ void CommandEncoder::set_input_array(
+   needs_barrier_ =
+       needs_barrier_ | (prev_outputs_.find(r_buf) != prev_outputs_.end());
+   auto a_buf = static_cast<const MTL::Buffer*>(a.buffer().ptr());
+-  if (lthn_capture_env() && lthn_rec_cur_open) {
++  if (lthn_rec_on() && lthn_rec_cur_open) {
+     lthn_rec_cur.buffers.emplace_back(a_buf, a.offset() + offset, idx);
+   }
+   get_command_encoder()->setBuffer(a_buf, a.offset() + offset, idx);
+@@ -532,7 +554,7 @@ void CommandEncoder::maybeInsertBarrier() {
+   if (needs_barrier_) {
+     get_command_encoder()->memoryBarrier(MTL::BarrierScopeBuffers);
+     needs_barrier_ = false;
+-    if (lthn_capture_env()) {
++    if (lthn_rec_on()) {
+       lthn_pending_barrier = true;
+     }
+     prev_outputs_ = std::move(next_outputs_);
+@@ -547,7 +569,7 @@ void CommandEncoder::dispatch_threadgroups(
+     MTL::Size group_dims) {
+   maybeInsertBarrier();
+   buffer_ops_++;
+-  if (lthn_capture_env() && lthn_rec_cur_open) {
++  if (lthn_rec_on() && lthn_rec_cur_open) {
+     lthn_rec_cur.grid = grid_dims;
+     lthn_rec_cur.group = group_dims;
+     lthn_rec_cur.threadgroups = true;
+@@ -563,7 +585,7 @@ void CommandEncoder::dispatch_threads(
+     MTL::Size group_dims) {
+   maybeInsertBarrier();
+   buffer_ops_++;
+-  if (lthn_capture_env() && lthn_rec_cur_open) {
++  if (lthn_rec_on() && lthn_rec_cur_open) {
+     lthn_rec_cur.grid = grid_dims;
+     lthn_rec_cur.group = group_dims;
+     lthn_rec_cur.threadgroups = false;
+-- 
+2.50.1 (Apple Git-155)
+
