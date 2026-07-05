@@ -10,7 +10,7 @@ import (
 	"strconv"
 
 	core "dappco.re/go"
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // SaveStateBlocks stores each KV block as a separate State chunk and returns a

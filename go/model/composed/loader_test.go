@@ -6,7 +6,7 @@ import (
 	"math"
 	"testing"
 
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 func bf16T(vals []float32, shape ...int) safetensors.Tensor {

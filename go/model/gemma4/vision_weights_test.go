@@ -5,7 +5,7 @@ package gemma4
 import (
 	"testing"
 
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // TestCanonicalGemma4VisionWeightName pins the canonicalisation: the vision_tower./vision_model. prefix

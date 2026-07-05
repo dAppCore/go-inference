@@ -2,7 +2,7 @@
 
 package model
 
-import "dappco.re/go/inference/safetensors"
+import "dappco.re/go/inference/model/safetensors"
 
 // Linear is a backend-agnostic linear weight: bf16-dense OR affine-quantised, the choice
 // made PER WEIGHT by the presence of a ".scales" tensor — mirroring the metal model

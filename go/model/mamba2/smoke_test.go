@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // TestMamba2RealCheckpointSmoke is the cross-engine correctness gate: load a REAL HF Mamba2ForCausalLM

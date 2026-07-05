@@ -5,7 +5,7 @@ package model
 import (
 	"testing"
 
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // TestLoadLinear_QuantAgnostic is the R2 proof: one load path, the format decided per weight

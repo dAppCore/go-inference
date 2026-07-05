@@ -8,7 +8,7 @@ import (
 	"testing"
 	"unsafe"
 
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 func TestShardBuffersEmptyWeightIsOptional(t *testing.T) {

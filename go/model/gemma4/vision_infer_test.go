@@ -5,7 +5,7 @@ package gemma4
 import (
 	"testing"
 
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // TestInferGemma4VisionConfig pins the shape-derived dims: hidden_size + patch_size from the

@@ -13,7 +13,7 @@ import (
 	coreio "dappco.re/go/io"
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 func mustEncode(t *testing.T, tensors map[string]safetensors.Tensor) []byte {

@@ -14,7 +14,7 @@ import (
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
 	"dappco.re/go/inference/model/mistral"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 func requireNativeRuntime(t testing.TB) {

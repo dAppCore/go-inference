@@ -5,7 +5,7 @@ package inference
 import (
 	"slices"
 
-	"dappco.re/go/inference/state"
+	"dappco.re/go/inference/model/state"
 )
 
 type ModelIdentity = state.ModelIdentity

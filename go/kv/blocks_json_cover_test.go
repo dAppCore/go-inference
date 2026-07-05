@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // putJSONBlock stores a JSON-base64 block envelope wrapping payload and returns

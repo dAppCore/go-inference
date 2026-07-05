@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/state"
+	"dappco.re/go/inference/model/state"
 	"github.com/gin-gonic/gin"
 )
 

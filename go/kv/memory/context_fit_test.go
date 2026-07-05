@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/kv/memory"
-	mp "dappco.re/go/inference/modelpack"
+	mp "dappco.re/go/inference/model/modelpack"
 )
 
 // TestMemory_NewPlan_ContextDerivedFromMemory proves the plan derives context

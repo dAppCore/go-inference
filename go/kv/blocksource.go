@@ -6,7 +6,7 @@ import (
 	"context"
 
 	core "dappco.re/go"
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // blocksource.go: streaming durable State KV blocks as portable [Block]s

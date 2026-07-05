@@ -8,11 +8,11 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/spine"
-	"dappco.re/go/inference/state"
-	"dappco.re/go/inference/state/agent"
-	"dappco.re/go/inference/state/filestore"
-	"dappco.re/go/inference/state/session"
+	"dappco.re/go/inference/model/spine"
+	"dappco.re/go/inference/model/state"
+	"dappco.re/go/inference/model/state/agent"
+	"dappco.re/go/inference/model/state/filestore"
+	"dappco.re/go/inference/model/state/session"
 )
 
 // sessionModel is the session-capable model the -state turn loop needs: the

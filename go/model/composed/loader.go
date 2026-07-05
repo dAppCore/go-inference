@@ -7,7 +7,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/qwen3"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // loader.go builds a ComposedModel from a hybrid checkpoint (Qwen 3.6), the native port of metal's

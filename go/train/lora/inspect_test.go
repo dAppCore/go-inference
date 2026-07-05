@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/state"
+	"dappco.re/go/inference/model/state"
 )
 
 func equalStringSlices(a, b []string) bool {

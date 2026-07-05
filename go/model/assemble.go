@@ -4,7 +4,7 @@ package model
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // assemble.go is the engine's generic weight assembler: ONE arch.Layer-driven loop that maps a tensor

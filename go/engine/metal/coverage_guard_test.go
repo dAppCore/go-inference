@@ -14,7 +14,7 @@ import (
 	coreio "dappco.re/go/io"
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 	"dappco.re/go/inference/tokenizer"
 	"github.com/tmc/apple/metal"
 )

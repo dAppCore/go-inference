@@ -10,7 +10,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/kv"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 const nativeKVSnapshotDTypeBF16 = "bfloat16"

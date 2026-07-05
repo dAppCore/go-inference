@@ -9,7 +9,7 @@ import (
 	"unsafe"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 	"github.com/tmc/apple/kernel"
 	"github.com/tmc/apple/metal"
 )

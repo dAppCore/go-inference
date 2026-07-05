@@ -3,7 +3,7 @@
 package gemma4
 
 import (
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 	"dappco.re/go/inference/profile"
 )
 

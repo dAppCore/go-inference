@@ -12,7 +12,7 @@ import (
 	"slices"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/state"
+	"dappco.re/go/inference/model/state"
 )
 
 // errAdapterPathRequired is the sentinel returned by Inspect when the

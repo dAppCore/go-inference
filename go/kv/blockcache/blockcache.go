@@ -16,7 +16,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 const (

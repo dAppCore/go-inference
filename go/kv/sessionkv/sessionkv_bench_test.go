@@ -10,7 +10,7 @@ import (
 
 	core "dappco.re/go"
 	coreapi "dappco.re/go/api"
-	"dappco.re/go/inference/state"
+	"dappco.re/go/inference/model/state"
 	"github.com/gin-gonic/gin"
 )
 

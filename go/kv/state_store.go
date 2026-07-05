@@ -7,7 +7,7 @@ import (
 	"maps"
 
 	core "dappco.re/go"
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 const (

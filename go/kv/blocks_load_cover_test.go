@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // cloneBundleShallow copies a bundle and its block slice so a test can mutate

@@ -5,7 +5,7 @@ package inference
 import (
 	"context"
 
-	"dappco.re/go/inference/state"
+	"dappco.re/go/inference/model/state"
 )
 
 // RequestHandle identifies an in-flight generation request without requiring

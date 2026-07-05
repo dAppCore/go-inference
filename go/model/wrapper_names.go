@@ -4,7 +4,7 @@ package model
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // NormalizeWrapperNames makes every "language_model."-prefixed tensor (the multimodal wrapper layout

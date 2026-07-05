@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // stateBlockSourceFixture saves the canonical 4-token / 2-block test snapshot

@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // TestBlocksSave_Snapshot_SaveStateBlocks_Good saves the four-token fixture as a

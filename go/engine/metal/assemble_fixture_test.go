@@ -7,7 +7,7 @@ package native
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // gemma4Tensors builds the full named bf16 tensor set for arch, each tensor filled with a

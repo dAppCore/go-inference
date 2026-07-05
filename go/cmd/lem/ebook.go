@@ -8,7 +8,7 @@ import (
 	"io"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/modelmgmt"
+	"dappco.re/go/inference/model/modelmgmt"
 	coreio "dappco.re/go/io"
 )
 

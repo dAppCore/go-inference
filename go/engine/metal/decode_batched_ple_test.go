@@ -8,7 +8,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // addPLETensorsBF16 mints a DENSE (bf16) per-layer-input tower for a synthetic

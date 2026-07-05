@@ -6,7 +6,7 @@ import (
 	"math"
 	"testing"
 
-	"dappco.re/go/inference/safetensors"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 func audioBF16Tensor(shape ...int) safetensors.Tensor {

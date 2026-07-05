@@ -6,7 +6,7 @@ import (
 	"context"
 
 	core "dappco.re/go"
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // exampleNativeLayerSnapshot builds a 4-token, 2-head snapshot whose K/V live

@@ -6,7 +6,7 @@ import (
 	"context"
 
 	core "dappco.re/go"
-	state "dappco.re/go/inference/state"
+	state "dappco.re/go/inference/model/state"
 )
 
 // ExampleSnapshot_SaveState writes a KV snapshot to a State cold store as a

@@ -4,8 +4,8 @@ package model
 
 import (
 	core "dappco.re/go"
+	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
-	"dappco.re/go/inference/safetensors"
 )
 
 // load.go is the engine's single REACTIVE loader: read a checkpoint dir, probe model_type, and react to
