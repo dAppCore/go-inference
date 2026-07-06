@@ -206,3 +206,49 @@ func TestRealE2BAssistantFusedDraftParity(t *testing.T) {
 		}
 	}
 }
+
+// TestRealBF16VerifyGreedyRowsParity pins the batched K-row verify head (all
+// rows' lm_head+argmax chains in one command buffer) against the per-row
+// greedy loop: identical tokens for identical hiddens. The batched forward
+// must also engage on the bf16 arch (the quant lanes decline to sequential —
+// tracked in #278's verify-lane reclaim map).
+func TestRealBF16VerifyGreedyRowsParity(t *testing.T) {
+	requireNativeRuntime(t)
+	targetDir := enginegate.HFModelPath(t, "mlx-community/gemma-4-E2B-it-bf16")
+	target, err := LoadDir(targetDir, 4096)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	defer func() { _ = target.Close() }()
+	prompt := realE2BAssistantPrompt(t, targetDir)
+	if err := target.prepareAssistantPrompt(prompt); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	draft := []int32{506, 8134, 529, 506, 8134, 529}
+	posBefore := target.pos
+	hiddens, batched, err := target.verifyBatchedHiddens(draft)
+	if err != nil {
+		t.Fatalf("verifyBatchedHiddens: %v", err)
+	}
+	if !batched {
+		t.Fatal("bf16 arch did not take the batched verify forward")
+	}
+	out := make([]int32, len(hiddens))
+	ok, err := target.greedyRowsFromHiddensInPool(hiddens, nil, out)
+	if err != nil || !ok {
+		t.Fatalf("greedyRowsFromHiddensInPool: ok=%v err=%v", ok, err)
+	}
+	for i, h := range hiddens {
+		want, gerr := target.greedyFromHiddenInPool(h, nil)
+		if gerr != nil {
+			t.Fatalf("per-row greedy: %v", gerr)
+		}
+		if out[i] != want {
+			t.Fatalf("row %d: batched greedy %d != per-row %d", i, out[i], want)
+		}
+	}
+	target.pos = posBefore
+	if err := target.truncateSpeculativeKV(target.pos); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+}

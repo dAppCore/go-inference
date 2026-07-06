@@ -146,16 +146,21 @@ type ArchSession struct {
 	mtpVerifyHiddenPinned *pinnedNoCopyBytes
 	mtpVerifyHiddenRows   [][]byte
 	mtpVerifyRows         []int32
-	nextInputToken        metal.MTLBuffer
-	nextInputTokenPtr     *int32
-	nextInputTokenPinned  *pinnedNoCopyBytes
-	nextInputEmb          metal.MTLBuffer
-	nextInputEmbPtr       *byte
-	nextInputEmbPinned    *pinnedNoCopyBytes
-	nextInputEmbHost      []byte
-	nextInputPLEHost      []byte
-	nextInputPLScratch    *plGPUScratch
-	gpuTailPLScratch      [2]*plGPUScratch
+	// mtpVerifyGreedyRowsBuf holds the verify hiddens for the batched K-row
+	// greedy head (one command buffer for all rows) — grown on demand,
+	// explicit-copy each verify (pooled Go rows must never back a cached
+	// resident buffer).
+	mtpVerifyGreedyRowsBuf metal.MTLBuffer
+	nextInputToken         metal.MTLBuffer
+	nextInputTokenPtr      *int32
+	nextInputTokenPinned   *pinnedNoCopyBytes
+	nextInputEmb           metal.MTLBuffer
+	nextInputEmbPtr        *byte
+	nextInputEmbPinned     *pinnedNoCopyBytes
+	nextInputEmbHost       []byte
+	nextInputPLEHost       []byte
+	nextInputPLScratch     *plGPUScratch
+	gpuTailPLScratch       [2]*plGPUScratch
 }
 
 // Close releases a directory-loaded session's memory-mapped checkpoint. It is safe on a session
@@ -214,6 +219,7 @@ func (s *ArchSession) closeSessionOwnedScratch() {
 	}
 	s.mtpVerifyHiddenRows = nil
 	s.mtpVerifyRows = nil
+	s.mtpVerifyGreedyRowsBuf = nil
 
 	s.nextInputToken = nil
 	s.nextInputTokenPtr = nil

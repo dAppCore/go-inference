@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"math"
 	"sync"
+	"unsafe"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/decode/tokenizer"
@@ -15,6 +16,7 @@ import (
 	"dappco.re/go/inference/model/gguf"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
+	"github.com/tmc/apple/metal"
 )
 
 const nativeAssistantLogitsFloor = -3.4028234663852886e38
@@ -1988,6 +1990,11 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 	if len(hiddens) != len(draftTokens) {
 		return nil, nil, core.NewError("native.assistant verify target rows are incomplete")
 	}
+	if ok, gerr := s.greedyRowsFromHiddensInPool(hiddens, suppress, rows); gerr != nil {
+		return nil, nil, gerr
+	} else if ok {
+		return rows, hiddens, nil
+	}
 	for i, hidden := range hiddens {
 		token, err := s.greedyFromHiddenInPool(hidden, suppress)
 		if err != nil {
@@ -1996,6 +2003,35 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 		rows[i] = token
 	}
 	return rows, hiddens, nil
+}
+
+// greedyRowsFromHiddensInPool runs the verify head over all K rows in ONE
+// command buffer (headEncoder.greedyRowsBufferInPool) instead of a per-row
+// commit+wait — the loop's ~2ms/row was mostly synchronisation. The rows copy
+// into a session-owned buffer first: the hiddens are pooled scratch rows, so
+// a pointer-keyed resident wrap would go stale between verifies. ok=false
+// (head not direct-greedy capable, or odd row sizes) defers to the caller's
+// per-row fallback, byte-identically.
+func (s *ArchSession) greedyRowsFromHiddensInPool(hiddens [][]byte, suppress []int32, out []int32) (bool, error) {
+	if !s.canUseDirectHeadGreedy() || len(hiddens) == 0 {
+		return false, nil
+	}
+	rowBytes := s.arch.Hidden * bf16Size
+	need := len(hiddens) * rowBytes
+	if s.mtpVerifyGreedyRowsBuf == nil || int(bufferLengthFast(s.mtpVerifyGreedyRowsBuf)) < need {
+		s.mtpVerifyGreedyRowsBuf = device.NewBufferWithLengthOptions(uint(need), metal.MTLResourceStorageModeShared)
+		if s.mtpVerifyGreedyRowsBuf == nil {
+			return false, nil
+		}
+	}
+	dst := unsafe.Slice((*byte)(s.mtpVerifyGreedyRowsBuf.Contents()), need)
+	for i, hidden := range hiddens {
+		if len(hidden) != rowBytes {
+			return false, nil
+		}
+		copy(dst[i*rowBytes:(i+1)*rowBytes], hidden)
+	}
+	return s.headEnc.greedyRowsBufferInPool(s.mtpVerifyGreedyRowsBuf, uint(rowBytes), len(hiddens), suppress, out)
 }
 
 func (s *ArchSession) verifyAssistantDraftHiddens(draftTokens []int32) ([][]byte, error) {
