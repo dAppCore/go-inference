@@ -63,5 +63,6 @@ func (metalBackend) LoadModel(path string, opts ...inference.LoadOption) core.Re
 		return core.Fail(core.E("native.metalBackend.LoadModel", "load tokenizer", terr))
 	}
 	ntm.AttachTokenizer(tok)
+	ntm.declaredStops = loadGenerationConfigStops(path)
 	return core.Ok(newNativeTextModel(ntm, "gemma4"))
 }

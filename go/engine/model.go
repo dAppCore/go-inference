@@ -88,6 +88,15 @@ func (m *TextModel) turnTokens() TurnTokens {
 	return m.turns
 }
 
+// StopTokenDeclarer is the optional [TokenModel] capability for checkpoints
+// that declare their stop set (generation_config.json eos_token_id — gemma4
+// declares [<eos>, <turn|>, <|tool_response>]). [TextModel] folds the declared
+// ids into every generation's stop set, so a tuned model's turn and tool
+// boundaries terminate decoding exactly as the reference stack does.
+type StopTokenDeclarer interface {
+	DeclaredStopTokens() []int32
+}
+
 // NewTextModel wraps a loaded engine TokenModel as an inference.TextModel. tok
 // is the model's tokenizer (text↔ids is the serve boundary the model carries
 // once loaded); info + maxLen are the engine-built model metadata + context
@@ -144,7 +153,7 @@ func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts
 			m.setErr(core.NewError("engine.TextModel.Chat: model does not accept image input"))
 		}
 	}
-	return m.stream(ctx, m.encode(formatChatTurns(m.turnTokens(), messages)), cfg)
+	return m.stream(ctx, m.encode(formatChatPrompt(m.turnTokens(), messages, cfg.EnableThinking)), cfg)
 }
 
 // FormatChatPrompt renders a fresh multi-turn prompt with the model's turn
@@ -155,7 +164,7 @@ func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts
 // "<|turn>user\nhi<turn|>\n<|turn>model\n" on a gemma4 checkpoint
 // (<start_of_turn> spelling on gemma3-era vocabs).
 func (m *TextModel) FormatChatPrompt(messages []inference.Message) string {
-	return formatChatTurns(m.turnTokens(), messages)
+	return formatChatPrompt(m.turnTokens(), messages, nil)
 }
 
 // FormatChatContinuation renders a woken-session turn with no replay of the
@@ -449,6 +458,16 @@ func (m *TextModel) stopTokens(cfg inference.GenerateConfig) []int32 {
 			stop = append(stop, id)
 		}
 	}
+	// A checkpoint-declared stop set (generation_config eos_token_id) outranks
+	// the derived defaults — gemma4 adds <|tool_response>, stopping the model
+	// before it hallucinates a tool's output.
+	if d, ok := m.tm.(StopTokenDeclarer); ok {
+		for _, id := range d.DeclaredStopTokens() {
+			if id >= 0 && !tokenInSet(id, stop) {
+				stop = append(stop, id)
+			}
+		}
+	}
 	return stop
 }
 
@@ -494,6 +513,47 @@ func formatChatTurns(turns TurnTokens, messages []inference.Message) string {
 	}
 	out.WriteString(turns.Open + "model\n")
 	return out.String()
+}
+
+// formatChatPrompt renders the full chat prompt: on the gemma4 dialect a
+// leading system turn carries the thinking marker and/or a first system
+// message, matching the checkpoint's chat_template.jinja byte-for-byte —
+//
+//	thinking only:  <|turn>system\n<|think|>\n<turn|>\n<|turn>user\n…
+//	system+think:   <|turn>system\n<|think|>\nCONTENT<turn|>\n<|turn>user\n…
+//	system only:    <|turn>system\nCONTENT<turn|>\n<|turn>user\n…
+//
+// The trained template is the thinking SWITCH: the <|think|> line in the first
+// system turn is how a request turns reasoning on. Legacy-dialect models have
+// no system-turn concept — system messages keep rendering as user turns and
+// the prompt is exactly formatChatTurns.
+func formatChatPrompt(turns TurnTokens, messages []inference.Message, enableThinking *bool) string {
+	if turns.Open != "<|turn>" {
+		return formatChatTurns(turns, messages)
+	}
+	thinking := enableThinking != nil && *enableThinking
+	sysFirst := len(messages) > 0 && chatSystemRole(messages[0].Role)
+	if !thinking && !sysFirst {
+		return formatChatTurns(turns, messages)
+	}
+	var out strings.Builder
+	out.WriteString(turns.Open + "system\n")
+	if thinking {
+		out.WriteString("<|think|>\n")
+	}
+	rest := messages
+	if sysFirst {
+		out.WriteString(strings.TrimSpace(messages[0].Content))
+		rest = messages[1:]
+	}
+	out.WriteString(turns.Close + "\n")
+	return out.String() + formatChatTurns(turns, rest)
+}
+
+// chatSystemRole reports whether role opens the leading system turn on the
+// gemma4 template (its jinja accepts both spellings).
+func chatSystemRole(role string) bool {
+	return role == "system" || role == "developer"
 }
 
 func chatTurnRole(role string) string {

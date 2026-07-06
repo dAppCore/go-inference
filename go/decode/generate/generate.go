@@ -123,20 +123,18 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 	}
 
 	// Reactive MTP pair resolution — same ladder as serve. A detected drafter
-	// arms the speculative lane only when the engine exposes a loader AND the
-	// request is greedy (temp 0) AND carries no images: the MTP verify is
-	// greedy-exact (byte-identical to plain decode at temp 0), so a sampled
-	// request would need the sampled verify lane, and images route through a
-	// multimodal prefill the MTP loop does not carry. Every miss degrades to
-	// plain autoregressive with an honest notice.
+	// arms the speculative lane when the engine exposes a loader AND the request
+	// carries no images (an image turn routes through a multimodal prefill the
+	// MTP loop does not carry). Greedy requests ride the greedy-exact verify
+	// (byte-identical to plain decode at temp 0); sampled requests ride the
+	// sampled verify lane, where the target's sampler decides every committed
+	// token. Every miss degrades to plain autoregressive with an honest notice.
 	var tm inference.TextModel
 	if det := serving.ResolveServeDraft(cfg.ModelPath, cfg.DraftPath, true); det.Active() {
 		block := resolvedDraftBlock(cfg.DraftBlock)
 		switch {
 		case cfg.SpeculativeLoader == nil:
 			printNote(cfg.Log, "generate: drafter %s (%s) detected but this engine exposes no speculative path — generating plain autoregressive (block %d would apply)", det.DraftPath, det.Note, block)
-		case cfg.Temp != 0:
-			printNote(cfg.Log, "generate: drafter %s detected but -temp %g is not greedy — the MTP verify is greedy-exact; generating plain autoregressive (use -temp 0 for the speculative lane)", det.DraftPath, cfg.Temp)
 		case len(images) > 0:
 			printNote(cfg.Log, "generate: drafter %s detected but image input routes through the multimodal prefill the MTP loop does not carry — generating plain autoregressive", det.DraftPath)
 		default:
@@ -167,12 +165,14 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 		return core.E("generate.RunGenerate", "vision", err)
 	}
 
-	off := !cfg.Think
+	think := cfg.Think
 	msgs := []inference.Message{{Role: "user", Content: cfg.Prompt, Images: images}}
 	genOpts := func(limit int) []inference.GenerateOption {
 		opts := []inference.GenerateOption{
 			inference.WithMaxTokens(limit),
-			inference.WithEnableThinking(&off),
+			// enable semantics: -think renders the gemma4 <|think|> system prelude;
+			// the default keeps it off so the decode rate stays clean.
+			inference.WithEnableThinking(&think),
 			inference.WithTemperature(float32(cfg.Temp)),
 		}
 		// -trace turns on the engine's per-token phase timing. The engine folds the

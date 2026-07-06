@@ -30,6 +30,9 @@ type NativeTokenModel struct {
 	// bf16 models leave these at zero, matching inference.ModelInfo's unquantised convention.
 	quantBits  int
 	quantGroup int
+	// declaredStops is the checkpoint's generation_config eos_token_id set
+	// (engine.StopTokenDeclarer) — nil when the checkpoint declares none.
+	declaredStops []int32
 	// openSession builds a fresh persistent-cache decode session (ArchSession /
 	// ArchQuantSession) — the incremental O(1)/token path model.Generate prefers
 	// over the whole-sequence NativeBackend.DecodeForward. It takes the model's shardBuffers so the

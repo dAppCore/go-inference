@@ -1082,3 +1082,85 @@ func TestModel_TextModel_StopTokens_TurnClose(t *testing.T) {
 		t.Fatalf("legacy vocab stop set %v gained id 106 without a <turn|> token", got)
 	}
 }
+
+// TestModel_FormatChatPrompt_ThinkPrelude pins the gemma4 thinking switch:
+// enabled thinking renders the <|turn>system\n<|think|>\n prelude the
+// checkpoint's chat_template.jinja injects — the trained mechanism a request
+// turns reasoning on with (byte-for-byte the HF apply_chat_template render).
+func TestModel_FormatChatPrompt_ThinkPrelude(t *testing.T) {
+	turns := TurnTokens{Open: "<|turn>", Close: "<turn|>"}
+	on := true
+	got := formatChatPrompt(turns, []inference.Message{{Role: "user", Content: "Hi"}}, &on)
+	want := "<|turn>system\n<|think|>\n<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"
+	if got != want {
+		t.Fatalf("thinking prelude = %q, want %q", got, want)
+	}
+}
+
+// TestModel_FormatChatPrompt_SystemTurn pins the first-system-message framing:
+// gemma4 renders it as the leading <|turn>system turn (with the think marker
+// first when thinking is on), never as a user turn.
+func TestModel_FormatChatPrompt_SystemTurn(t *testing.T) {
+	turns := TurnTokens{Open: "<|turn>", Close: "<turn|>"}
+	msgs := []inference.Message{{Role: "system", Content: "Be terse."}, {Role: "user", Content: "Hi"}}
+	if got, want := formatChatPrompt(turns, msgs, nil),
+		"<|turn>system\nBe terse.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"; got != want {
+		t.Fatalf("system turn = %q, want %q", got, want)
+	}
+	on := true
+	if got, want := formatChatPrompt(turns, msgs, &on),
+		"<|turn>system\n<|think|>\nBe terse.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"; got != want {
+		t.Fatalf("system+think turn = %q, want %q", got, want)
+	}
+}
+
+// TestModel_FormatChatPrompt_NoPreludeDefault pins the default paths: thinking
+// unset (or off) with no system message renders the plain turn history on
+// gemma4, and the legacy dialect NEVER gains a system turn or think marker
+// (gemma3-era templates have neither).
+func TestModel_FormatChatPrompt_NoPreludeDefault(t *testing.T) {
+	gemma4 := TurnTokens{Open: "<|turn>", Close: "<turn|>"}
+	msgs := []inference.Message{{Role: "user", Content: "Hi"}}
+	off := false
+	if got, want := formatChatPrompt(gemma4, msgs, &off), formatChatTurns(gemma4, msgs); got != want {
+		t.Fatalf("thinking-off prompt = %q, want the plain turns %q", got, want)
+	}
+	legacy := TurnTokens{Open: "<start_of_turn>", Close: "<end_of_turn>"}
+	on := true
+	sysMsgs := []inference.Message{{Role: "system", Content: "S"}, {Role: "user", Content: "Hi"}}
+	if got, want := formatChatPrompt(legacy, sysMsgs, &on), formatChatTurns(legacy, sysMsgs); got != want {
+		t.Fatalf("legacy prompt = %q, want the plain turns %q (no system/think concept)", got, want)
+	}
+}
+
+// stopDeclarerTokenModel is a fake TokenModel that declares a checkpoint stop
+// set (engine.StopTokenDeclarer), for the stop-fold test.
+type stopDeclarerTokenModel struct {
+	TokenModel
+	stops []int32
+}
+
+func (s stopDeclarerTokenModel) DeclaredStopTokens() []int32 { return s.stops }
+
+// TestModel_TextModel_StopTokens_Declared pins the generation_config fold: a
+// TokenModel declaring its checkpoint stop set contributes every id exactly
+// once alongside the derived <eos> + turn-close defaults.
+func TestModel_TextModel_StopTokens_Declared(t *testing.T) {
+	tok := newGemma4FixtureTokenizer(t)
+	m := NewTextModel(stopDeclarerTokenModel{stops: []int32{2, 106, 50}}, tok, "gemma4", inference.ModelInfo{}, 8)
+	stop := m.stopTokens(inference.GenerateConfig{})
+	for _, id := range []int32{2, 106, 50} {
+		if !tokenInSet(id, stop) {
+			t.Fatalf("stop set %v missing declared id %d", stop, id)
+		}
+	}
+	seen := 0
+	for _, id := range stop {
+		if id == 106 {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("stop set %v holds id 106 %d times, want exactly once", stop, seen)
+	}
+}
