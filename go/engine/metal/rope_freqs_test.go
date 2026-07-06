@@ -44,6 +44,36 @@ func plainRopeInvFreqs(base float64, rotaryDim int) []float32 {
 	return f
 }
 
+// TestRopeFreqs_RoPEFreqsBF16_Bad exercises RoPEFreqsBF16's shape/spectrum guards: a bad x
+// length, an out-of-range/odd rotaryDim, and an invFreqs length that doesn't match rotaryDim/2.
+func TestRopeFreqs_RoPEFreqsBF16_Bad(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const batch, nHeads, headDim, rotaryDim = 1, 8, 64, 32
+	validX := toBF16Bytes(syntheticFloat32(batch*nHeads*headDim, 5))
+	validFreqs := plainRopeInvFreqs(10000, rotaryDim)
+
+	cases := []struct {
+		name      string
+		x         []byte
+		rotaryDim int
+		invFreqs  []float32
+	}{
+		{"x length mismatch", []byte{0, 0}, rotaryDim, validFreqs},
+		{"rotaryDim odd", validX, rotaryDim + 1, validFreqs},
+		{"rotaryDim exceeds headDim", validX, headDim + 2, plainRopeInvFreqs(10000, headDim+2)},
+		{"rotaryDim zero", validX, 0, nil},
+		{"invFreqs length mismatch", validX, rotaryDim, validFreqs[:len(validFreqs)-1]},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := RoPEFreqsBF16(c.x, batch, nHeads, headDim, c.rotaryDim, c.invFreqs, 1, 7, false); err == nil {
+				t.Fatalf("RoPEFreqsBF16(%s): expected an error, got none", c.name)
+			}
+		})
+	}
+}
+
 func TestRoPEFreqsBF16AllocationBudget(t *testing.T) {
 	requireNativeRuntime(t)
 
@@ -66,7 +96,9 @@ func TestRoPEFreqsBF16AllocationBudget(t *testing.T) {
 	}
 }
 
-func TestRoPEFreqsBF16IntoUsesCallerBacking(t *testing.T) {
+// TestRopeFreqs_RoPEFreqsBF16Into_Good proves RoPEFreqsBF16Into returns caller-owned output
+// backing and matches the allocating wrapper byte-for-byte.
+func TestRopeFreqs_RoPEFreqsBF16Into_Good(t *testing.T) {
 	requireNativeRuntime(t)
 
 	const batch, nHeads, headDim, rotaryDim = 1, 8, 64, 32
@@ -96,10 +128,48 @@ func TestRoPEFreqsBF16IntoUsesCallerBacking(t *testing.T) {
 	}
 }
 
-// TestRoPEFreqsBF16_EqualsBase_Good proves the freqs path is correct: handed the
+// TestRopeFreqs_RoPEFreqsBF16Into_Bad mirrors RoPEFreqsBF16's spectrum guard through the
+// caller-output entry point.
+func TestRopeFreqs_RoPEFreqsBF16Into_Bad(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const batch, nHeads, headDim, rotaryDim = 1, 8, 64, 32
+	x := toBF16Bytes(syntheticFloat32(batch*nHeads*headDim, 5))
+	out := make([]byte, len(x))
+	badFreqs := plainRopeInvFreqs(10000, rotaryDim)[:rotaryDim/2-1]
+	if _, err := RoPEFreqsBF16Into(out, x, batch, nHeads, headDim, rotaryDim, badFreqs, 1, 7, false); err == nil {
+		t.Fatal("expected RoPEFreqsBF16Into to reject an invFreqs length mismatch")
+	}
+}
+
+// TestRopeFreqs_RoPEFreqsBF16Into_Ugly proves the too-small-capacity path: when cap(out) is
+// smaller than len(x), RoPEFreqsBF16Into must allocate fresh storage rather than write out of
+// bounds, and still return the correct rotation.
+func TestRopeFreqs_RoPEFreqsBF16Into_Ugly(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const batch, nHeads, headDim, rotaryDim = 1, 8, 64, 32
+	x := toBF16Bytes(syntheticFloat32(batch*nHeads*headDim, 5))
+	invFreqs := plainRopeInvFreqs(10000, rotaryDim)
+	want, err := RoPEFreqsBF16(x, batch, nHeads, headDim, rotaryDim, invFreqs, 1, 7, false)
+	if err != nil {
+		t.Fatalf("RoPEFreqsBF16 reference: %v", err)
+	}
+
+	tooSmall := make([]byte, 1)
+	got, err := RoPEFreqsBF16Into(tooSmall, x, batch, nHeads, headDim, rotaryDim, invFreqs, 1, 7, false)
+	if err != nil {
+		t.Fatalf("RoPEFreqsBF16Into (undersized out): %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("RoPEFreqsBF16Into (undersized out) output differs from allocating wrapper")
+	}
+}
+
+// TestRopeFreqs_RoPEFreqsBF16_Good proves the freqs path is correct: handed the
 // plain-rope spectrum, rope_single_freqs reproduces rope_single — full rotary and
 // partial — so the freqs ABI + the inv_freq=1/period reciprocal are right.
-func TestRoPEFreqsBF16_EqualsBase_Good(t *testing.T) {
+func TestRopeFreqs_RoPEFreqsBF16_Good(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
 	}
@@ -132,9 +202,10 @@ func TestRoPEFreqsBF16_EqualsBase_Good(t *testing.T) {
 	ropeClose(t, gotPart, wantPart, 2e-2, "partial rotary")
 }
 
-// TestRoPEFreqsBF16_NonPlainDiffers_Good proves the frequency buffer is actually
-// consumed: a non-plain spectrum produces a different rotation than the base rope.
-func TestRoPEFreqsBF16_NonPlainDiffers_Good(t *testing.T) {
+// TestRopeFreqs_RoPEFreqsBF16_Ugly proves the frequency buffer is actually consumed even at the
+// edge where it's tempting to no-op: a non-plain (perturbed) spectrum must still produce a
+// different rotation than the base rope, not silently fall back to it.
+func TestRopeFreqs_RoPEFreqsBF16_Ugly(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
 	}

@@ -46,7 +46,9 @@ func requireSDPAPagedKernel(t *testing.T) {
 	}
 }
 
-func TestSDPAPagedBF16MatchesContiguousReference(t *testing.T) {
+// TestSdpaPaged_SDPAPagedBF16_Good proves paged (non-contiguous per-page) attention matches the
+// contiguous SDPA reference once the pages are concatenated host-side.
+func TestSdpaPaged_SDPAPagedBF16_Good(t *testing.T) {
 	requireSDPAPagedKernel(t)
 
 	const nHeads, nKVHeads, headDim = 4, 2, 64
@@ -76,7 +78,72 @@ func TestSDPAPagedBF16MatchesContiguousReference(t *testing.T) {
 	}
 }
 
-func TestSDPAPagedBF16IntoUsesCallerBacking(t *testing.T) {
+// TestSdpaPaged_SDPAPagedBF16_Bad exercises sdpaPagedValidate's guards: bad GQA ratio, a query
+// length mismatch, mismatched key/value page counts, and a page byte length that doesn't align
+// to nKVHeads*headDim.
+func TestSdpaPaged_SDPAPagedBF16_Bad(t *testing.T) {
+	requireSDPAPagedKernel(t)
+
+	const nHeads, nKVHeads, headDim = 4, 2, 64
+	scale := float32(0.125)
+	validQ := toBF16Bytes(syntheticFloat32(nHeads*headDim, 3))
+	page := toBF16Bytes(syntheticFloat32(nKVHeads*3*headDim, 5))
+
+	t.Run("GQA ratio invalid", func(t *testing.T) {
+		if _, err := SDPAPagedBF16(validQ, [][]byte{page}, [][]byte{page}, 5, nKVHeads, headDim, scale); err == nil {
+			t.Fatal("expected SDPAPagedBF16 to reject nHeads not a multiple of nKVHeads")
+		}
+	})
+	t.Run("query length mismatch", func(t *testing.T) {
+		if _, err := SDPAPagedBF16(validQ[:len(validQ)-2], [][]byte{page}, [][]byte{page}, nHeads, nKVHeads, headDim, scale); err == nil {
+			t.Fatal("expected SDPAPagedBF16 to reject a query length mismatch")
+		}
+	})
+	t.Run("no pages", func(t *testing.T) {
+		if _, err := SDPAPagedBF16(validQ, nil, nil, nHeads, nKVHeads, headDim, scale); err == nil {
+			t.Fatal("expected SDPAPagedBF16 to reject empty key/value pages")
+		}
+	})
+	t.Run("key/value page count mismatch", func(t *testing.T) {
+		if _, err := SDPAPagedBF16(validQ, [][]byte{page, page}, [][]byte{page}, nHeads, nKVHeads, headDim, scale); err == nil {
+			t.Fatal("expected SDPAPagedBF16 to reject mismatched key/value page counts")
+		}
+	})
+	t.Run("page byte length not aligned", func(t *testing.T) {
+		misaligned := page[:len(page)-1]
+		if _, err := SDPAPagedBF16(validQ, [][]byte{misaligned}, [][]byte{misaligned}, nHeads, nKVHeads, headDim, scale); err == nil {
+			t.Fatal("expected SDPAPagedBF16 to reject a page byte length that doesn't align to nKVHeads*headDim")
+		}
+	})
+}
+
+// TestSdpaPaged_SDPAPagedBF16_Ugly pins the MQA edge (nKVHeads=1, a wide GQA ratio) with a
+// single one-row page — the minimal paged-cache shape — still matching contiguous SDPA.
+func TestSdpaPaged_SDPAPagedBF16_Ugly(t *testing.T) {
+	requireSDPAPagedKernel(t)
+
+	const nHeads, nKVHeads, headDim = 8, 1, 64
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	q := toBF16Bytes(syntheticFloat32(nHeads*headDim, 17))
+	kPages := [][]byte{toBF16Bytes(syntheticFloat32(nKVHeads*1*headDim, 19))}
+	vPages := [][]byte{toBF16Bytes(syntheticFloat32(nKVHeads*1*headDim, 23))}
+
+	got, err := SDPAPagedBF16(q, kPages, vPages, nHeads, nKVHeads, headDim, scale)
+	if err != nil {
+		t.Fatalf("SDPAPagedBF16 (MQA, single 1-row page): %v", err)
+	}
+	want, err := SDPA(q, kPages[0], vPages[0], 1, nHeads, nKVHeads, headDim, 1, scale)
+	if err != nil {
+		t.Fatalf("SDPA reference: %v", err)
+	}
+	if cos := cosineBF16(got, want); cos < 0.999 {
+		t.Fatalf("MQA single-row-page SDPA cosine = %.6f vs contiguous reference", cos)
+	}
+}
+
+// TestSdpaPaged_SDPAPagedBF16Into_Good proves SDPAPagedBF16Into returns caller-owned output
+// backing and actually writes real attention output (not left untouched).
+func TestSdpaPaged_SDPAPagedBF16Into_Good(t *testing.T) {
 	requireSDPAPagedKernel(t)
 
 	const nHeads, nKVHeads, headDim = 4, 2, 64
@@ -102,6 +169,47 @@ func TestSDPAPagedBF16IntoUsesCallerBacking(t *testing.T) {
 	}
 	if bytes.Equal(out, make([]byte, len(out))) {
 		t.Fatal("SDPAPagedBF16Into left caller output untouched")
+	}
+}
+
+// TestSdpaPaged_SDPAPagedBF16Into_Bad mirrors SDPAPagedBF16's page-count guard through the
+// caller-output entry point.
+func TestSdpaPaged_SDPAPagedBF16Into_Bad(t *testing.T) {
+	requireSDPAPagedKernel(t)
+
+	const nHeads, nKVHeads, headDim = 4, 2, 64
+	q := toBF16Bytes(syntheticFloat32(nHeads*headDim, 3))
+	page := toBF16Bytes(syntheticFloat32(nKVHeads*3*headDim, 5))
+	out := make([]byte, nHeads*headDim*bf16Size)
+
+	if _, err := SDPAPagedBF16Into(out, q, [][]byte{page, page}, [][]byte{page}, nHeads, nKVHeads, headDim, 0.125); err == nil {
+		t.Fatal("expected SDPAPagedBF16Into to reject mismatched key/value page counts")
+	}
+}
+
+// TestSdpaPaged_SDPAPagedBF16Into_Ugly proves the too-small-capacity path: when cap(out) is
+// smaller than the required nHeads*headDim*2 bytes, SDPAPagedBF16Into must allocate fresh
+// storage rather than write out of bounds, and still match the contiguous reference.
+func TestSdpaPaged_SDPAPagedBF16Into_Ugly(t *testing.T) {
+	requireSDPAPagedKernel(t)
+
+	const nHeads, nKVHeads, headDim = 4, 2, 64
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	q := toBF16Bytes(syntheticFloat32(nHeads*headDim, 3))
+	kPages := [][]byte{toBF16Bytes(syntheticFloat32(nKVHeads*3*headDim, 5))}
+	vPages := [][]byte{toBF16Bytes(syntheticFloat32(nKVHeads*3*headDim, 11))}
+	want, err := SDPAPagedBF16(q, kPages, vPages, nHeads, nKVHeads, headDim, scale)
+	if err != nil {
+		t.Fatalf("SDPAPagedBF16 reference: %v", err)
+	}
+
+	tooSmall := make([]byte, 1)
+	got, err := SDPAPagedBF16Into(tooSmall, q, kPages, vPages, nHeads, nKVHeads, headDim, scale)
+	if err != nil {
+		t.Fatalf("SDPAPagedBF16Into (undersized out): %v", err)
+	}
+	if cos := cosineBF16(got, want); cos < 0.999 {
+		t.Fatalf("SDPAPagedBF16Into (undersized out) cosine = %.6f vs allocating wrapper", cos)
 	}
 }
 
