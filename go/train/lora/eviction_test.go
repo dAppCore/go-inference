@@ -6,10 +6,11 @@ package lora
 
 import "testing"
 
-// TestLoRA_SelectVictim_Good covers the LRU policy in isolation: the least-recently
-// marked id is the victim, re-marking moves an id to most-recent so a different
-// id becomes LRU, and removing an id drops it from tracking.
-func TestLoRA_SelectVictim_Good(t *testing.T) {
+// TestEviction_NewLRUEvictionPolicy_Good covers the LRU policy in isolation: the
+// least-recently marked id is the victim, re-marking moves an id to
+// most-recent so a different id becomes LRU, and removing an id drops it from
+// tracking.
+func TestEviction_NewLRUEvictionPolicy_Good(t *testing.T) {
 	p := NewLRUEvictionPolicy()
 
 	p.MarkUsed("a")
@@ -42,10 +43,10 @@ func TestLoRA_SelectVictim_Good(t *testing.T) {
 	}
 }
 
-// TestLoRA_SelectVictim_Bad covers selection when nothing matches: an empty
-// candidate set and a candidate set with no tracked ids both report ok=false
-// rather than inventing a victim.
-func TestLoRA_SelectVictim_Bad(t *testing.T) {
+// TestEviction_NewLRUEvictionPolicy_Bad covers selection when nothing matches: an
+// empty candidate set and a candidate set with no tracked ids both report
+// ok=false rather than inventing a victim.
+func TestEviction_NewLRUEvictionPolicy_Bad(t *testing.T) {
 	p := NewLRUEvictionPolicy()
 	p.MarkUsed("a")
 
@@ -60,10 +61,10 @@ func TestLoRA_SelectVictim_Bad(t *testing.T) {
 	}
 }
 
-// TestLoRA_SelectVictim_Ugly covers degenerate calls: marking/removing the empty id
-// is a harmless no-op, and a candidate that was never marked but appears as the
-// only option is still not a tracked victim.
-func TestLoRA_SelectVictim_Ugly(t *testing.T) {
+// TestEviction_NewLRUEvictionPolicy_Ugly covers degenerate calls: marking/removing
+// the empty id is a harmless no-op, and a candidate that was never marked but
+// appears as the only option is still not a tracked victim.
+func TestEviction_NewLRUEvictionPolicy_Ugly(t *testing.T) {
 	p := NewLRUEvictionPolicy()
 
 	// Empty id is ignored (mirrors SGLang's None handling) — no panic.

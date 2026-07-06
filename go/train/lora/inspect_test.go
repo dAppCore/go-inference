@@ -23,7 +23,7 @@ func equalStringSlices(a, b []string) bool {
 	return true
 }
 
-func TestAdapterInfo_IsEmpty_Good(t *testing.T) {
+func TestInspect_AdapterInfo_IsEmpty_Good(t *testing.T) {
 	// Good: the zero-value AdapterInfo (no inference adapter attached) is
 	// the canonical "empty" case IsEmpty exists to recognise.
 	var info AdapterInfo
@@ -32,7 +32,7 @@ func TestAdapterInfo_IsEmpty_Good(t *testing.T) {
 	}
 }
 
-func TestAdapterInfo_IsEmpty_Bad(t *testing.T) {
+func TestInspect_AdapterInfo_IsEmpty_Bad(t *testing.T) {
 	// Bad (for the empty predicate): a fully populated adapter identity is
 	// emphatically not empty.
 	info := AdapterInfo{
@@ -49,7 +49,7 @@ func TestAdapterInfo_IsEmpty_Bad(t *testing.T) {
 	}
 }
 
-func TestAdapterInfo_IsEmpty_Ugly(t *testing.T) {
+func TestInspect_AdapterInfo_IsEmpty_Ugly(t *testing.T) {
 	// Ugly: prove that setting ANY single field on an otherwise-zero
 	// AdapterInfo flips IsEmpty to false. This is the assertion that earns
 	// its keep — it catches a field being dropped from the AND chain. One
@@ -77,7 +77,7 @@ func TestAdapterInfo_IsEmpty_Ugly(t *testing.T) {
 	}
 }
 
-func TestAdapterInfo_Identity_Good(t *testing.T) {
+func TestInspect_AdapterInfo_Identity_Good(t *testing.T) {
 	// Good: Path/Hash/Rank/Alpha/TargetKeys carry straight across; Name and
 	// Scale are the deliberate identity-projection exclusions (see the
 	// Identity doc comment) and must not leak into the result.
@@ -109,7 +109,7 @@ func TestAdapterInfo_Identity_Good(t *testing.T) {
 	}
 }
 
-func TestAdapterInfo_Identity_Bad(t *testing.T) {
+func TestInspect_AdapterInfo_Identity_Bad(t *testing.T) {
 	// Bad (degenerate input): the zero-value AdapterInfo projects to the
 	// zero-value AdapterIdentity — no field invents content from nothing.
 	// AdapterIdentity holds a slice and a map, so it is compared field by
@@ -122,7 +122,7 @@ func TestAdapterInfo_Identity_Bad(t *testing.T) {
 	}
 }
 
-func TestAdapterInfo_Identity_Ugly(t *testing.T) {
+func TestInspect_AdapterInfo_Identity_Ugly(t *testing.T) {
 	// Ugly: the returned TargetKeys is a defensive clone — mutating it must
 	// not reach back into the source AdapterInfo's backing array.
 	info := AdapterInfo{TargetKeys: []string{"q_proj"}}
@@ -178,7 +178,7 @@ func TestInspectAdapter_LargeShardStreamingHash_Good(t *testing.T) {
 	}
 }
 
-func TestInspectAdapter_ReadsMetadataAndHashes_Good(t *testing.T) {
+func TestInspect_InspectAdapter_Good(t *testing.T) {
 	dir := writeTestLoRAAdapter(t, `{"rank":16,"alpha":32,"lora_layers":["self_attn.q_proj","self_attn.v_proj"]}`)
 
 	info, err := InspectAdapter(dir)
@@ -196,7 +196,7 @@ func TestInspectAdapter_ReadsMetadataAndHashes_Good(t *testing.T) {
 	}
 }
 
-func TestInspectAdapter_MissingConfig_Bad(t *testing.T) {
+func TestInspect_InspectAdapter_Bad(t *testing.T) {
 	dir := t.TempDir()
 	if result := core.WriteFile(core.PathJoin(dir, "adapter.safetensors"), []byte("stub"), 0o600); !result.OK {
 		t.Fatalf("WriteFile: %s", result.Error())
@@ -208,7 +208,7 @@ func TestInspectAdapter_MissingConfig_Bad(t *testing.T) {
 	}
 }
 
-func TestInspectAdapter_SafetensorsPath_Ugly(t *testing.T) {
+func TestInspect_InspectAdapter_Ugly(t *testing.T) {
 	dir := writeTestLoRAAdapter(t, `{"r":4,"lora_alpha":8,"target_modules":["q_proj"]}`)
 	path := core.PathJoin(dir, "adapter.safetensors")
 
@@ -281,7 +281,7 @@ func TestInspectAdapter_MalformedConfig_Bad(t *testing.T) {
 	}
 }
 
-func TestInspectAdapter_EmptyPath_Bad(t *testing.T) {
+func TestInspect_Inspect_Bad(t *testing.T) {
 	// Bad: an empty adapter path is the guard at the top of Inspect — it
 	// returns the shared errAdapterPathRequired sentinel before touching the
 	// filesystem. InspectAdapter forwards path as both arguments, so the
@@ -291,6 +291,50 @@ func TestInspectAdapter_EmptyPath_Bad(t *testing.T) {
 	}
 	if _, err := Inspect("", "/some/identity"); err != errAdapterPathRequired {
 		t.Fatalf("Inspect(\"\", identity) error = %v, want errAdapterPathRequired", err)
+	}
+}
+
+// TestInspect_Inspect_Good covers the two-argument identity split: path is
+// where Inspect reads from disk, identityPath is the user-facing label it
+// records — the two may legitimately differ (an adapter staged from a
+// Medium under a temp path but reported under its original name).
+func TestInspect_Inspect_Good(t *testing.T) {
+	dir := writeTestLoRAAdapter(t, `{"rank":8,"alpha":16,"target_modules":["q_proj"]}`)
+	const identityPath = "/adapters/original/support-tone"
+
+	info, err := Inspect(dir, identityPath)
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if info.Path != identityPath || info.Name != core.PathBase(identityPath) {
+		t.Fatalf("adapter identity = %+v, want name/path derived from identityPath %q", info, identityPath)
+	}
+	if info.Rank != 8 || info.Alpha != 16 || info.Hash == "" {
+		t.Fatalf("adapter metadata = %+v, want rank/alpha/hash read from the real path", info)
+	}
+}
+
+// TestInspect_Inspect_Ugly covers the split's edge: identityPath is a pure
+// label — Inspect never touches it on disk, and the content Hash depends only
+// on path (and its bytes), so two calls over the same real dir with different
+// identityPath values must agree on Hash while still reporting distinct
+// Name/Path.
+func TestInspect_Inspect_Ugly(t *testing.T) {
+	dir := writeTestLoRAAdapter(t, `{"rank":8,"alpha":16,"target_modules":["q_proj"]}`)
+
+	direct, err := InspectAdapter(dir)
+	if err != nil {
+		t.Fatalf("InspectAdapter() error = %v", err)
+	}
+	relabelled, err := Inspect(dir, "/this/identity/path/never/existed/on/disk")
+	if err != nil {
+		t.Fatalf("Inspect() error = %v", err)
+	}
+	if relabelled.Hash != direct.Hash {
+		t.Fatalf("Hash = %q, want %q (content hash must not depend on identityPath)", relabelled.Hash, direct.Hash)
+	}
+	if relabelled.Path == direct.Path {
+		t.Fatalf("Path = %q, want it to reflect the distinct identityPath, not path", relabelled.Path)
 	}
 }
 

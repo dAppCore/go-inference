@@ -23,6 +23,17 @@ func ExampleParseAdapterConfig() {
 	// [q_proj v_proj]
 }
 
+// ExampleNormalizeAdapterConfig shows the PEFT alias chain applied directly
+// to an AdapterConfig value: R aliases to Rank, LoRAAlpha aliases to Alpha,
+// and Scale derives from the two — without inventing a rank the caller never
+// supplied.
+func ExampleNormalizeAdapterConfig() {
+	cfg := NormalizeAdapterConfig(AdapterConfig{R: 4, LoRAAlpha: 12})
+	core.Println(cfg.Rank, cfg.Alpha, cfg.Scale)
+	// Output:
+	// 4 12 3
+}
+
 // ExampleNormalizeAdapterConfigForLoad shows the engine-load defaulting
 // applied to an adapter_config.json that omits rank and alpha entirely: the
 // loader gets a usable rank/alpha/scale rather than failing on missing
