@@ -718,24 +718,35 @@ func serveAnthropicMessageStream(w http.ResponseWriter, ctx context.Context, mod
 			flusher.Flush()
 		}
 	}
+	// The text block (index 0) opens lazily on the first visible delta, so a turn
+	// that is purely a tool call emits no empty text block and its tool_use lands
+	// at index 0 (matching the Anthropic API). writeDelta opens it on demand.
+	textBlockOpen := false
 	writeDelta := func(text string) {
+		if !textBlockOpen {
+			writeEventBytes("content_block_start", func(b []byte) []byte {
+				return anthropiccompat.AppendContentBlockStartEvent(b, 0)
+			})
+			textBlockOpen = true
+		}
 		writeEventBytes("content_block_delta", func(b []byte) []byte {
 			return anthropiccompat.AppendContentBlockDeltaEvent(b, 0, text)
 		})
 	}
 	// Full Anthropic streaming sequence — Claude Code's parser requires it:
-	// message_start (wrapped) → content_block_start → content_block_delta* →
-	// content_block_stop → message_delta (usage) → message_stop. Text block is
-	// index 0; input_tokens is unknown until generation finishes, so
-	// message_start opens at 0 and the cumulative output lands in message_delta.
+	// message_start → [content_block_start(text) content_block_delta*
+	// content_block_stop] → [content_block_start(tool_use) input_json_delta
+	// content_block_stop]* → message_delta (stop_reason + usage) → message_stop.
 	writeEventBytes("message_start", func(b []byte) []byte {
 		return anthropiccompat.AppendMessageStartEvent(b, anthropiccompat.MessageResponse{ID: messageID, Type: "message", Role: "assistant", Model: req.Model})
 	})
-	writeEventBytes("content_block_start", func(b []byte) []byte {
-		return anthropiccompat.AppendContentBlockStartEvent(b, 0)
-	})
 	processor := parser.NewProcessor(parser.Config{Mode: parser.Capture}, parser.HintFromInference(model.Info()))
 	stopReason := "end_turn"
+	// raw accumulates every processed delta so a <|tool_call> span can be lifted
+	// into tool_use blocks after generation; once the open marker appears the
+	// stream stops emitting text deltas (inTool) and buffers the call instead.
+	rawOut := core.NewBuilder()
+	inTool := false
 	// emittedBuf accumulates the cumulative output only so the stop-sequence
 	// scan can see across the token boundary (a stop string split between two
 	// tokens). When the request carries no stop sequences (the common case)
@@ -754,10 +765,22 @@ func serveAnthropicMessageStream(w http.ResponseWriter, ctx context.Context, mod
 	emittedBuf := core.NewBuilder()
 	streamErr := forEachCompatToken(ctx, model, messageID, req.Model, "", messages, opts, func(token inference.Token) bool {
 		delta := processor.Process(token.Text)
-		if !hasStops {
-			if delta != "" {
-				writeDelta(delta)
+		if delta == "" {
+			return true
+		}
+		rawOut.WriteString(delta)
+		if inTool {
+			return true // buffering a tool call — lifted into tool_use blocks below
+		}
+		if core.Contains(rawOut.String(), parser.ToolCallOpenMarker) {
+			inTool = true
+			if idx := core.Index(delta, parser.ToolCallOpenMarker); idx > 0 {
+				writeDelta(delta[:idx]) // flush any prose that led this delta
 			}
+			return true
+		}
+		if !hasStops {
+			writeDelta(delta)
 			return true
 		}
 		prevLen := emittedBuf.Len()
@@ -787,11 +810,49 @@ func serveAnthropicMessageStream(w http.ResponseWriter, ctx context.Context, mod
 		core.Warn("openai anthropic stream: generation error", "err", streamErr)
 	}
 	if tail := processor.Flush(); tail != "" {
-		writeDelta(tail)
+		rawOut.WriteString(tail)
+		if !inTool {
+			writeDelta(tail)
+		}
 	}
-	writeEventBytes("content_block_stop", func(b []byte) []byte {
-		return anthropiccompat.AppendContentBlockStopEvent(b, 0)
-	})
+	if textBlockOpen {
+		writeEventBytes("content_block_stop", func(b []byte) []byte {
+			return anthropiccompat.AppendContentBlockStopEvent(b, 0)
+		})
+	}
+	// Lift any <|tool_call> spans into tool_use blocks — content_block_start
+	// (tool_use) → input_json_delta (the whole arguments object) →
+	// content_block_stop — indexed after the text block, or at 0 for a pure
+	// tool-call turn. stop_reason flips to tool_use so Claude Code runs the tools.
+	switch calls, _ := parser.ParseGemmaToolCalls(rawOut.String()); {
+	case len(calls) > 0:
+		stopReason = "tool_use"
+		toolIndex := 0
+		if textBlockOpen {
+			toolIndex = 1
+		}
+		for i, c := range calls {
+			idx, id, name, args := toolIndex+i, idWithPrefix("toolu"), c.Name, c.ArgumentsJSON
+			writeEventBytes("content_block_start", func(b []byte) []byte {
+				return anthropiccompat.AppendContentBlockStartToolUseEvent(b, idx, id, name)
+			})
+			writeEventBytes("content_block_delta", func(b []byte) []byte {
+				return anthropiccompat.AppendInputJSONDeltaEvent(b, idx, args)
+			})
+			writeEventBytes("content_block_stop", func(b []byte) []byte {
+				return anthropiccompat.AppendContentBlockStopEvent(b, idx)
+			})
+		}
+	case !textBlockOpen:
+		// Empty completion — emit a well-formed empty text block so the sequence
+		// still carries one content block.
+		writeEventBytes("content_block_start", func(b []byte) []byte {
+			return anthropiccompat.AppendContentBlockStartEvent(b, 0)
+		})
+		writeEventBytes("content_block_stop", func(b []byte) []byte {
+			return anthropiccompat.AppendContentBlockStopEvent(b, 0)
+		})
+	}
 	generatedTokens := model.Metrics().GeneratedTokens
 	writeEventBytes("message_delta", func(b []byte) []byte {
 		return anthropiccompat.AppendMessageDeltaEvent(b, stopReason, "", generatedTokens)
