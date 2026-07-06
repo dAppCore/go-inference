@@ -34,7 +34,11 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
+      # go-inference is dev-canonical (main is the stale release branch), so the
+      # tracker scans dev's go.mod even when dispatched/scheduled from main.
       - uses: actions/checkout@v4
+        with:
+          ref: dev
 
       - uses: dAppCore/build/actions/deps@dev
         with:
