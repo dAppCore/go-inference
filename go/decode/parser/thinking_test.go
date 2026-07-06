@@ -31,7 +31,7 @@ func TestThinking_Filter_Ugly(t *testing.T) {
 	}
 }
 
-func TestThinking_Flush_Ugly(t *testing.T) {
+func TestThinking_Processor_Flush_Ugly(t *testing.T) {
 	var captured []Chunk
 	processor := NewProcessor(Config{
 		Mode: Capture,
@@ -77,11 +77,11 @@ func TestThinking_NormaliseMode_Ugly(t *testing.T) {
 	}
 }
 
-// TestThinking_GemmaTurnTerminatorSwallowed_Good pins the terminator contract:
-// gemma4 MLX snapshots ship <end_of_turn> as a PLAIN vocab token the tokenizer
-// cannot hide, so the Processor swallows the bare terminator from visible
-// output — replies must not end with a literal "<end_of_turn>".
-func TestThinking_GemmaTurnTerminatorSwallowed_Good(t *testing.T) {
+// TestThinking_Filter_Good pins the terminator contract: gemma4 MLX
+// snapshots ship <end_of_turn> as a PLAIN vocab token the tokenizer cannot
+// hide, so Filter swallows the bare terminator from visible output —
+// replies must not end with a literal "<end_of_turn>".
+func TestThinking_Filter_Good(t *testing.T) {
 	got := Filter(
 		"the answer is 68.\n<end_of_turn>",
 		Config{Mode: Capture},
@@ -92,10 +92,10 @@ func TestThinking_GemmaTurnTerminatorSwallowed_Good(t *testing.T) {
 	}
 }
 
-// TestThinking_GemmaTurnTerminatorSplitStream_Good pins the streaming shape:
-// the terminator arriving split across Process calls is held back (the
-// holdback set includes terminators) and swallowed once complete.
-func TestThinking_GemmaTurnTerminatorSplitStream_Good(t *testing.T) {
+// TestThinking_Processor_Process_Ugly pins the streaming shape: the
+// terminator arriving split across Process calls is held back (the holdback
+// set includes terminators) and swallowed once complete.
+func TestThinking_Processor_Process_Ugly(t *testing.T) {
 	p := NewProcessor(Config{Mode: Capture}, Hint{Architecture: "gemma4"})
 	out := p.Process("done<end_of_")
 	out += p.Process("turn>")
@@ -122,10 +122,10 @@ func TestThinking_GemmaSpanEndStillWorks_Bad(t *testing.T) {
 	}
 }
 
-// TestThinking_TerminatorOtherFamiliesUntouched_Ugly pins the scope: families
-// without a turn terminator (qwen etc.) pass the literal text through — the
-// swallow is gemma-specific, not a blanket rewrite.
-func TestThinking_TerminatorOtherFamiliesUntouched_Ugly(t *testing.T) {
+// TestThinking_Filter_Bad pins the scope: families without a turn terminator
+// (qwen etc.) pass the literal text through — the swallow is gemma-specific,
+// not a blanket rewrite.
+func TestThinking_Filter_Bad(t *testing.T) {
 	got := Filter(
 		"tail<end_of_turn>",
 		Config{Mode: Capture},
@@ -133,5 +133,169 @@ func TestThinking_TerminatorOtherFamiliesUntouched_Ugly(t *testing.T) {
 	)
 	if want := "tail<end_of_turn>"; got.Text != want {
 		t.Fatalf("Text = %q, want %q", got.Text, want)
+	}
+}
+
+// TestThinking_NewProcessor_Good pins normal construction: the mode
+// normalises and the returned Processor is immediately usable.
+func TestThinking_NewProcessor_Good(t *testing.T) {
+	p := NewProcessor(Config{Mode: Hide}, Hint{Architecture: "qwen3"})
+	if p == nil {
+		t.Fatal("NewProcessor() = nil")
+	}
+	if text := p.Process("<think>plan</think>answer"); text != "answer" {
+		t.Fatalf("Process() = %q, want answer", text)
+	}
+}
+
+// TestThinking_NewProcessor_Bad pins the mode-normalisation guard: an
+// unrecognised Config.Mode falls back to Show rather than a broken state.
+func TestThinking_NewProcessor_Bad(t *testing.T) {
+	p := NewProcessor(Config{Mode: "not-a-mode"}, Hint{Architecture: "qwen3"})
+	if text := p.Process("<think>plan</think>answer"); text != "<think>plan</think>answer" {
+		t.Fatalf("Process() = %q, want raw passthrough under the Show fallback", text)
+	}
+}
+
+// TestThinking_NewProcessor_Ugly pins the unknown-architecture edge: a hint
+// with no matching family still returns a working Processor over the
+// generic marker set, never nil or a panic. Generic excludes the qwen-only
+// <think> spelling (genericMarkers), so the case uses <reasoning> instead.
+func TestThinking_NewProcessor_Ugly(t *testing.T) {
+	p := NewProcessor(Config{Mode: Hide}, Hint{Architecture: "not-a-real-arch"})
+	if text := p.Process("<reasoning>plan</reasoning>answer"); text != "answer" {
+		t.Fatalf("Process() with unknown architecture = %q, want the generic marker set to still apply", text)
+	}
+}
+
+// TestThinking_NormaliseMode_Good pins the explicit-mode passthrough cases.
+func TestThinking_NormaliseMode_Good(t *testing.T) {
+	if mode := NormaliseMode(Hide); mode != Hide {
+		t.Fatalf("NormaliseMode(Hide) = %q, want Hide", mode)
+	}
+	if mode := NormaliseMode(Show); mode != Show {
+		t.Fatalf("NormaliseMode(Show) = %q, want Show", mode)
+	}
+}
+
+// TestThinking_NormaliseMode_Bad pins the default-empty case: an unset
+// Config.Mode normalises to Show, matching DefaultGenerateConfig's zero
+// value rather than an error.
+func TestThinking_NormaliseMode_Bad(t *testing.T) {
+	var mode Mode
+	if got := NormaliseMode(mode); got != Show {
+		t.Fatalf("NormaliseMode(zero) = %q, want Show", got)
+	}
+}
+
+// TestThinking_Processor_Process_Good pins the plain no-marker path: text
+// with no reasoning span passes straight through in Show mode.
+func TestThinking_Processor_Process_Good(t *testing.T) {
+	p := NewProcessor(Config{Mode: Show}, Hint{Architecture: "qwen3"})
+	if text := p.Process("plain answer, no markers"); text != "plain answer, no markers" {
+		t.Fatalf("Process() = %q, want unchanged passthrough", text)
+	}
+}
+
+// TestThinking_Processor_Process_Bad pins the Hide-mode span: reasoning
+// text between markers never reaches Process's return value.
+func TestThinking_Processor_Process_Bad(t *testing.T) {
+	p := NewProcessor(Config{Mode: Hide}, Hint{Architecture: "qwen3"})
+	if text := p.Process("<think>secret plan</think>answer"); text != "answer" {
+		t.Fatalf("Process() = %q, want reasoning span hidden", text)
+	}
+}
+
+// TestThinking_Processor_Flush_Good pins the plain-flush path: nothing
+// pending, nothing open — Flush returns empty.
+func TestThinking_Processor_Flush_Good(t *testing.T) {
+	p := NewProcessor(Config{Mode: Hide}, Hint{Architecture: "qwen3"})
+	p.Process("<think>plan</think>answer")
+	if text := p.Flush(); text != "" {
+		t.Fatalf("Flush() = %q, want empty with nothing pending", text)
+	}
+}
+
+// TestThinking_Processor_Flush_Bad pins the mid-span close: Flush finalises
+// an open reasoning block (final=true) rather than holding it back.
+func TestThinking_Processor_Flush_Bad(t *testing.T) {
+	p := NewProcessor(Config{Mode: Capture}, Hint{Architecture: "qwen3"})
+	p.Process("<think>unterminated plan")
+	if text := p.Flush(); text != "" {
+		t.Fatalf("Flush() = %q, want no visible text for an unterminated reasoning span", text)
+	}
+	if p.Reasoning() != "unterminated plan" {
+		t.Fatalf("Reasoning() = %q, want the span content captured at flush", p.Reasoning())
+	}
+}
+
+// TestThinking_Processor_Reasoning_Good pins the accumulation contract:
+// every hidden reasoning span joins into one string.
+func TestThinking_Processor_Reasoning_Good(t *testing.T) {
+	p := NewProcessor(Config{Mode: Hide}, Hint{Architecture: "qwen3"})
+	p.Process("<think>first</think>mid<think>second</think>tail")
+	if got := p.Reasoning(); got != "firstsecond" {
+		t.Fatalf("Reasoning() = %q, want firstsecond", got)
+	}
+}
+
+// TestThinking_Processor_Reasoning_Bad pins the empty case: a Processor
+// that never saw a reasoning span reports an empty Reasoning(), not nil
+// dereferenced or a placeholder.
+func TestThinking_Processor_Reasoning_Bad(t *testing.T) {
+	p := NewProcessor(Config{Mode: Hide}, Hint{Architecture: "qwen3"})
+	p.Process("no reasoning here")
+	if got := p.Reasoning(); got != "" {
+		t.Fatalf("Reasoning() = %q, want empty", got)
+	}
+}
+
+// TestThinking_Processor_Reasoning_Ugly pins the holdback edge: a trailing
+// byte that could be the start of the span-end marker is held back from
+// Reasoning() until a later call confirms it either way — streaming must
+// never commit an ambiguous partial match.
+func TestThinking_Processor_Reasoning_Ugly(t *testing.T) {
+	p := NewProcessor(Config{Mode: Hide}, Hint{Architecture: "qwen3"})
+	p.Process("<think>plan<")
+	if got := p.Reasoning(); got != "plan" {
+		t.Fatalf("Reasoning() with an ambiguous trailing byte held back = %q, want plan", got)
+	}
+	p.Process("/think>tail")
+	if got := p.Reasoning(); got != "plan" {
+		t.Fatalf("Reasoning() once the marker resolves = %q, want plan", got)
+	}
+}
+
+// TestThinking_Processor_Chunks_Good pins the per-span chunk record: each
+// closed reasoning span emits one Chunk carrying its channel and model.
+func TestThinking_Processor_Chunks_Good(t *testing.T) {
+	p := NewProcessor(Config{Mode: Hide}, Hint{Architecture: "qwen3"})
+	p.Process("<think>plan</think>answer")
+	chunks := p.Chunks()
+	if len(chunks) != 1 || chunks[0].Text != "plan" || chunks[0].Channel != "thinking" {
+		t.Fatalf("Chunks() = %+v, want one thinking chunk with Text=plan", chunks)
+	}
+}
+
+// TestThinking_Processor_Chunks_Bad pins the empty case: no reasoning span
+// seen means Chunks() returns nil, not an empty-but-allocated slice.
+func TestThinking_Processor_Chunks_Bad(t *testing.T) {
+	p := NewProcessor(Config{Mode: Hide}, Hint{Architecture: "qwen3"})
+	p.Process("plain text")
+	if chunks := p.Chunks(); chunks != nil {
+		t.Fatalf("Chunks() = %+v, want nil", chunks)
+	}
+}
+
+// TestThinking_Processor_Chunks_Ugly pins the defensive-copy contract: the
+// slice Chunks() returns is a snapshot — mutating it must not corrupt the
+// Processor's internal state seen by a later call.
+func TestThinking_Processor_Chunks_Ugly(t *testing.T) {
+	p := NewProcessor(Config{Mode: Hide}, Hint{Architecture: "qwen3"})
+	p.Process("<think>plan</think>answer")
+	chunks := p.Chunks()
+	chunks[0].Text = "mutated"
+	if got := p.Chunks(); got[0].Text != "plan" {
+		t.Fatalf("Chunks() after external mutation = %+v, want the original plan text intact", got)
 	}
 }
