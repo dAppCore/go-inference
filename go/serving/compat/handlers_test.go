@@ -193,3 +193,72 @@ func TestOllamaGenerateHandler_Streaming_Good(t *testing.T) {
 		t.Fatalf("stream /api/generate body = %s, want NDJSON response frames", body)
 	}
 }
+
+// TestAnthropicMessagesHandler_HappyPath_Good pins the non-streaming /v1/messages
+// path: a valid Anthropic request resolves the model, runs Chat, and returns 200
+// with the model's visible text.
+func TestAnthropicMessagesHandler_HappyPath_Good(t *testing.T) {
+	rec := do(t, http.MethodPost, "/v1/messages", `{"model":"test-model","max_tokens":128,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /v1/messages = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !core.Contains(rec.Body.String(), "Hello world") {
+		t.Fatalf("/v1/messages body = %s, want the model's visible text", rec.Body.String())
+	}
+}
+
+// TestAnthropicMessagesHandler_MissingModel_Bad pins the model-required guard
+// (400 before any resolve/decode-of-model).
+func TestAnthropicMessagesHandler_MissingModel_Bad(t *testing.T) {
+	rec := do(t, http.MethodPost, "/v1/messages", `{"max_tokens":128,"messages":[]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /v1/messages no model = %d, want 400", rec.Code)
+	}
+}
+
+// TestAnthropicMessagesHandler_Streaming_Good pins the streaming /v1/messages
+// path: stream:true emits SSE event frames carrying the content.
+func TestAnthropicMessagesHandler_Streaming_Good(t *testing.T) {
+	rec := do(t, http.MethodPost, "/v1/messages", `{"model":"test-model","max_tokens":128,"stream":true,"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stream /v1/messages = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !core.Contains(body, "event:") || !core.Contains(body, "Hello") {
+		t.Fatalf("stream /v1/messages body = %s, want SSE event frames with content", body)
+	}
+}
+
+// TestOpenAIResponsesHandler_HappyPath_Good pins the non-streaming /v1/responses
+// path: a valid request returns 200 with the model's visible text in the
+// response output.
+func TestOpenAIResponsesHandler_HappyPath_Good(t *testing.T) {
+	rec := do(t, http.MethodPost, "/v1/responses", `{"model":"test-model","input":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /v1/responses = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !core.Contains(rec.Body.String(), "Hello world") {
+		t.Fatalf("/v1/responses body = %s, want the model's visible text", rec.Body.String())
+	}
+}
+
+// TestOpenAIResponsesHandler_MissingModel_Bad pins the model-required guard (400).
+func TestOpenAIResponsesHandler_MissingModel_Bad(t *testing.T) {
+	rec := do(t, http.MethodPost, "/v1/responses", `{"input":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /v1/responses no model = %d, want 400", rec.Code)
+	}
+}
+
+// TestOpenAIResponsesHandler_Streaming_Good pins the streaming /v1/responses
+// path: stream:true emits SSE data frames carrying the response delta.
+func TestOpenAIResponsesHandler_Streaming_Good(t *testing.T) {
+	rec := do(t, http.MethodPost, "/v1/responses", `{"model":"test-model","stream":true,"input":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stream /v1/responses = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !core.Contains(body, "data:") || !core.Contains(body, "Hello") {
+		t.Fatalf("stream /v1/responses body = %s, want SSE data frames with content", body)
+	}
+}
