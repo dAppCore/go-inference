@@ -45,8 +45,9 @@ func mustWriteJSONResponse(t testing.TB, w io.Writer, v any) {
 
 func newStoreDuckDB(t testing.TB) *store.DuckDB {
 	t.Helper()
-	db, err := store.OpenDuckDBReadWrite(core.JoinPath(t.TempDir(), "store.duckdb"))
-	requireResultOK(t, err)
+	rOpen := store.OpenDuckDBReadWrite(core.JoinPath(t.TempDir(), "store.duckdb"))
+	requireResultOK(t, rOpen)
+	db := rOpen.Value.(*store.DuckDB)
 	t.Cleanup(func() { _ = db.Close() })
 	return db
 }

@@ -213,11 +213,12 @@ func PushCapabilityResultsDB(dbPath string, cp Checkpoint, results ProbeResult) 
 		return
 	}
 
-	db, rOpen := store.OpenDuckDBReadWrite(dbPath)
+	rOpen := store.OpenDuckDBReadWrite(dbPath)
 	if !rOpen.OK {
 		core.Print(nil, "DuckDB dual-write: open failed: %v", rOpen.Error())
 		return
 	}
+	db := rOpen.Value.(*store.DuckDB)
 	defer func() { _ = db.Close() }()
 
 	db.EnsureScoringTables()

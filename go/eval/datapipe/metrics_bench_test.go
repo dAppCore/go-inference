@@ -31,8 +31,9 @@ func seedStoreGolden(b *testing.B, rows int) *store.DuckDB {
 
 func newStoreDuckDBB(b *testing.B) *store.DuckDB {
 	b.Helper()
-	db, err := store.OpenDuckDBReadWrite(core.JoinPath(b.TempDir(), "store.duckdb"))
-	requireResultOK(b, err)
+	rOpen := store.OpenDuckDBReadWrite(core.JoinPath(b.TempDir(), "store.duckdb"))
+	requireResultOK(b, rOpen)
+	db := rOpen.Value.(*store.DuckDB)
 	b.Cleanup(func() { _ = db.Close() })
 	return db
 }

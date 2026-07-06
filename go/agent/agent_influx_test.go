@@ -130,8 +130,9 @@ func TestAgentInflux_PushCapabilityResultsDB_Ugly(t *core.T) {
 	// named-column INSERT fails against the mismatched table instead of
 	// writing successfully.
 	dbPath := core.JoinPath(t.TempDir(), "mismatched.duckdb")
-	setupDB, rOpen := store.OpenDuckDBReadWrite(dbPath)
+	rOpen := store.OpenDuckDBReadWrite(dbPath)
 	requireResultOK(t, rOpen)
+	setupDB := rOpen.Value.(*store.DuckDB)
 	requireResultOK(t, setupDB.Exec("CREATE TABLE checkpoint_scores (model TEXT)"))
 	requireResultOK(t, setupDB.Close())
 
