@@ -85,6 +85,12 @@ func (m *AssistantModel) proportionalInvFreqs(headDim, rotaryDim int, foldedBase
 type AssistantPair struct {
 	TargetArch model.Arch
 	Assistant  *AssistantModel
+
+	// fused is the single-command-buffer drafter step (assistant_draft_fused.go),
+	// built lazily on the first draft block; nil after a failed build means the
+	// geometry is unsupported and the legacy per-op step stays in charge.
+	fused     *assistantFusedDraft
+	fusedInit bool
 }
 
 // Method reports the speculative-decode method inferred from the drafter (see
@@ -1101,6 +1107,12 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 	} else {
 		tokens = target.mtpDraftTokenScratch(maxDraftTokens)
 	}
+	fused := pair.fusedDraft()
+	if fused != nil {
+		if err := fused.loadKV(targetKVs); err != nil {
+			fused = nil
+		}
+	}
 	for len(tokens) < maxDraftTokens {
 		tokenEmbedding, err := target.embedID(currentToken)
 		if err != nil {
@@ -1109,24 +1121,41 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 		if len(tokenEmbedding) != pair.TargetArch.Hidden*bf16Size {
 			return AssistantDraftBlockResult{}, core.NewError(core.Sprintf("native.assistant draft block target token embedding bytes = %d, want %d", len(tokenEmbedding), pair.TargetArch.Hidden*bf16Size))
 		}
-		projectedOut := target.mtpProjectionScratch(pair.Assistant.Arch.Hidden * bf16Size)
-		projected, err := pair.Assistant.DraftInputProjectionInto(projectedOut, tokenEmbedding, currentHidden)
-		if err != nil {
-			return AssistantDraftBlockResult{}, err
-		}
 		normedOut := target.mtpDraftScratch(&target.mtpDraftNormed, pair.Assistant.Arch.Hidden*bf16Size)
 		hiddenOut := target.mtpDraftScratch(&target.mtpDraftHidden, pair.TargetArch.Hidden*bf16Size)
 		logitsOut := target.mtpDraftScratch(&target.mtpDraftLogits, pair.Assistant.Arch.Vocab*bf16Size)
 		logitScores := target.mtpDraftLogitScoreScratch(pair.Assistant.NumCentroids)
 		logitSelected := target.mtpDraftLogitSelectedScratch(pair.Assistant.CentroidIntermediateTopK)
-		target.mtpDraftLayerScratch.usePinnedBacking()
-		step, err := pair.draftStepFromProjectedIntoWithSuppress(projected, targetKVs, normedOut, hiddenOut, logitsOut, logitScores, logitSelected, &target.mtpDraftLayerScratch, suppress)
-		if err != nil {
-			return AssistantDraftBlockResult{}, err
+		var stepToken int32
+		if fused != nil {
+			normed, nextHidden, ferr := fused.step(tokenEmbedding, currentHidden, normedOut, hiddenOut)
+			if ferr != nil {
+				return AssistantDraftBlockResult{}, ferr
+			}
+			logits, lerr := pair.Assistant.draftLogitsIntoScratch(logitsOut, normed, logitScores, logitSelected)
+			if lerr != nil {
+				return AssistantDraftBlockResult{}, lerr
+			}
+			tok, gerr := pair.Assistant.draftGreedyTokenWithSuppress(logits, suppress)
+			if gerr != nil {
+				return AssistantDraftBlockResult{}, gerr
+			}
+			stepToken, currentHidden = tok, nextHidden
+		} else {
+			projectedOut := target.mtpProjectionScratch(pair.Assistant.Arch.Hidden * bf16Size)
+			projected, perr := pair.Assistant.DraftInputProjectionInto(projectedOut, tokenEmbedding, currentHidden)
+			if perr != nil {
+				return AssistantDraftBlockResult{}, perr
+			}
+			target.mtpDraftLayerScratch.usePinnedBacking()
+			step, serr := pair.draftStepFromProjectedIntoWithSuppress(projected, targetKVs, normedOut, hiddenOut, logitsOut, logitScores, logitSelected, &target.mtpDraftLayerScratch, suppress)
+			if serr != nil {
+				return AssistantDraftBlockResult{}, serr
+			}
+			stepToken, currentHidden = step.Token, step.Hidden
 		}
-		tokens = append(tokens, step.Token)
-		currentToken = step.Token
-		currentHidden = step.Hidden
+		tokens = append(tokens, stepToken)
+		currentToken = stepToken
 	}
 	if !copyTokens {
 		target.mtpDraftTokens = tokens
@@ -1168,6 +1197,12 @@ func (pair *AssistantPair) draftBlockSampledFromSessionWithSuppress(target *Arch
 	} else {
 		tokens = target.mtpDraftTokenScratch(maxDraftTokens)
 	}
+	fused := pair.fusedDraft()
+	if fused != nil {
+		if err := fused.loadKV(targetKVs); err != nil {
+			fused = nil
+		}
+	}
 	for len(tokens) < maxDraftTokens {
 		tokenEmbedding, err := target.embedID(currentToken)
 		if err != nil {
@@ -1176,31 +1211,48 @@ func (pair *AssistantPair) draftBlockSampledFromSessionWithSuppress(target *Arch
 		if len(tokenEmbedding) != pair.TargetArch.Hidden*bf16Size {
 			return AssistantDraftBlockResult{}, core.NewError(core.Sprintf("native.assistant sampled draft block target token embedding bytes = %d, want %d", len(tokenEmbedding), pair.TargetArch.Hidden*bf16Size))
 		}
-		projectedOut := target.mtpProjectionScratch(pair.Assistant.Arch.Hidden * bf16Size)
-		projected, err := pair.Assistant.DraftInputProjectionInto(projectedOut, tokenEmbedding, currentHidden)
-		if err != nil {
-			return AssistantDraftBlockResult{}, err
-		}
 		normedOut := target.mtpDraftScratch(&target.mtpDraftNormed, pair.Assistant.Arch.Hidden*bf16Size)
 		hiddenOut := target.mtpDraftScratch(&target.mtpDraftHidden, pair.TargetArch.Hidden*bf16Size)
 		logitsOut := target.mtpDraftScratch(&target.mtpDraftLogits, pair.Assistant.Arch.Vocab*bf16Size)
 		logitScores := target.mtpDraftLogitScoreScratch(pair.Assistant.NumCentroids)
 		logitSelected := target.mtpDraftLogitSelectedScratch(pair.Assistant.CentroidIntermediateTopK)
-		target.mtpDraftLayerScratch.usePinnedBacking()
-		step, err := pair.draftStepFromProjectedIntoWithSuppress(projected, targetKVs, normedOut, hiddenOut, logitsOut, logitScores, logitSelected, &target.mtpDraftLayerScratch, params.SuppressTokens)
-		if err != nil {
-			return AssistantDraftBlockResult{}, err
-		}
 		// drafts are ALWAYS the drafter's argmax — the reference
 		// (SinglePositionMultiTokenCandidateGenerator) drafts greedily at every
 		// temperature and leaves sampling entirely to the TARGET's verify side.
 		// Sampling the drafter at the request temperature (the previous behaviour)
 		// makes proposals random draws the sampled target almost never matches —
-		// acceptance collapsed to 0% live. step.Token is that argmax (suppression
-		// already applied).
-		currentToken = step.Token
+		// acceptance collapsed to 0% live. The step token is that argmax
+		// (suppression already applied).
+		var stepToken int32
+		if fused != nil {
+			normed, nextHidden, ferr := fused.step(tokenEmbedding, currentHidden, normedOut, hiddenOut)
+			if ferr != nil {
+				return AssistantDraftBlockResult{}, ferr
+			}
+			logits, lerr := pair.Assistant.draftLogitsIntoScratch(logitsOut, normed, logitScores, logitSelected)
+			if lerr != nil {
+				return AssistantDraftBlockResult{}, lerr
+			}
+			tok, gerr := pair.Assistant.draftGreedyTokenWithSuppress(logits, params.SuppressTokens)
+			if gerr != nil {
+				return AssistantDraftBlockResult{}, gerr
+			}
+			stepToken, currentHidden = tok, nextHidden
+		} else {
+			projectedOut := target.mtpProjectionScratch(pair.Assistant.Arch.Hidden * bf16Size)
+			projected, perr := pair.Assistant.DraftInputProjectionInto(projectedOut, tokenEmbedding, currentHidden)
+			if perr != nil {
+				return AssistantDraftBlockResult{}, perr
+			}
+			target.mtpDraftLayerScratch.usePinnedBacking()
+			step, serr := pair.draftStepFromProjectedIntoWithSuppress(projected, targetKVs, normedOut, hiddenOut, logitsOut, logitScores, logitSelected, &target.mtpDraftLayerScratch, params.SuppressTokens)
+			if serr != nil {
+				return AssistantDraftBlockResult{}, serr
+			}
+			stepToken, currentHidden = step.Token, step.Hidden
+		}
+		currentToken = stepToken
 		tokens = append(tokens, currentToken)
-		currentHidden = step.Hidden
 	}
 	if !copyTokens {
 		target.mtpDraftTokens = tokens
