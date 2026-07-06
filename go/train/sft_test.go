@@ -69,10 +69,10 @@ func sftDataset(n int) inference.DatasetStream {
 	return dataset.NewSliceDataset(samples)
 }
 
-// TestRunSFT_StepsCheckpointsAndSaves drives four samples at batch=1/accum=1 and
+// TestSft_RunSFT_Good drives four samples at batch=1/accum=1 and
 // asserts four optimiser steps, two checkpoints (every 2 steps), eval captures,
 // and a saved final adapter.
-func TestRunSFT_StepsCheckpointsAndSaves(t *testing.T) {
+func TestSft_RunSFT_Good(t *testing.T) {
 	dir := t.TempDir()
 	trainer := &fakeTrainer{}
 	cfg := SFTConfig{
@@ -133,9 +133,9 @@ func TestRunSFT_GradAccumOneStepPerAccumWindow(t *testing.T) {
 	}
 }
 
-// TestRunSFT_MultiEpochResetsDataset asserts a two-epoch run replays the dataset
+// TestSft_RunSFT_Ugly asserts a two-epoch run replays the dataset
 // (SliceDataset implements Reset) — 2 samples × 2 epochs = 4 processed.
-func TestRunSFT_MultiEpochResetsDataset(t *testing.T) {
+func TestSft_RunSFT_Ugly(t *testing.T) {
 	trainer := &fakeTrainer{}
 	cfg := SFTConfig{Config: Config{BatchSize: 1, GradientAccumulationSteps: 1, Epochs: 2}}
 	result, err := RunSFT(context.Background(), trainer, runeEncode, nil, sftDataset(2), cfg)
@@ -161,10 +161,66 @@ func TestRunSFT_EmptyDatasetErrors(t *testing.T) {
 	}
 }
 
-// TestRunSFT_NilTrainerErrors asserts a nil trainer is rejected up front.
-func TestRunSFT_NilTrainerErrors(t *testing.T) {
+// TestSft_RunSFT_Bad asserts a nil trainer is rejected up front.
+func TestSft_RunSFT_Bad(t *testing.T) {
 	_, err := RunSFT(context.Background(), nil, runeEncode, nil, sftDataset(1), SFTConfig{})
 	if err == nil {
 		t.Fatalf("expected an error for a nil trainer")
+	}
+}
+
+// --- SFTResult.Metrics ---
+
+// Good: a populated result reports every field straight through, with
+// EffectiveBatchSize derived from the config.
+func TestSft_SFTResult_Metrics_Good(t *testing.T) {
+	result := &SFTResult{
+		Steps:       4,
+		Epochs:      2,
+		Samples:     16,
+		LastLoss:    0.25,
+		Checkpoints: []string{"step-1", "step-2"},
+		Evaluations: []SFTEvalResult{{Step: 2, Prompt: "p", Text: "t"}},
+	}
+	cfg := SFTConfig{Config: Config{BatchSize: 4, GradientAccumulationSteps: 2, LearningRate: 1e-4}}
+
+	m := result.Metrics(cfg)
+	if m.Steps != 4 || m.Epochs != 2 || m.Samples != 16 || m.LastLoss != 0.25 {
+		t.Fatalf("run scalars = %+v, want steps 4 epochs 2 samples 16 loss 0.25", m)
+	}
+	if m.LearningRate != 1e-4 || m.BatchSize != 4 || m.EffectiveBatchSize != 8 {
+		t.Fatalf("cfg passthrough = %+v, want lr 1e-4 batch 4 effective 8", m)
+	}
+	if m.CheckpointCount != 2 || m.EvaluationCount != 1 {
+		t.Fatalf("counts = %+v, want checkpoints 2 evaluations 1", m)
+	}
+}
+
+// Bad: a nil *SFTResult (the degenerate "never ran" receiver) still returns a
+// well-formed summary — the cfg-derived fields only — rather than panicking.
+func TestSft_SFTResult_Metrics_Bad(t *testing.T) {
+	var result *SFTResult
+	cfg := SFTConfig{Config: Config{BatchSize: 2, GradientAccumulationSteps: 4}}
+
+	m := result.Metrics(cfg)
+	if m.BatchSize != 2 || m.EffectiveBatchSize != 8 {
+		t.Fatalf("nil-receiver cfg passthrough = %+v, want batch 2 effective 8", m)
+	}
+	if m.Steps != 0 || m.Samples != 0 || m.CheckpointCount != 0 {
+		t.Fatalf("nil-receiver run scalars = %+v, want all zero", m)
+	}
+}
+
+// Ugly: OptimizerSteps falls back to Steps when never set (the pre-#-tracking
+// degenerate case), and a zero LearningRate in cfg is normalised to the
+// package default rather than reported as 0.
+func TestSft_SFTResult_Metrics_Ugly(t *testing.T) {
+	result := &SFTResult{Steps: 5}
+	m := result.Metrics(SFTConfig{})
+	if m.OptimizerSteps != 5 {
+		t.Fatalf("OptimizerSteps = %d, want 5 (fallback to Steps)", m.OptimizerSteps)
+	}
+	if m.LearningRate != 1e-5 {
+		t.Fatalf("LearningRate = %v, want normalised default 1e-5", m.LearningRate)
 	}
 }
