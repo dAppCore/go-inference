@@ -380,4 +380,10 @@ type Response struct {
 	Text         string    `json:"text,omitempty"`
 	FinishReason string    `json:"finish_reason,omitempty"`
 	Usage        any       `json:"usage,omitempty"`
+	// Metadata carries per-turn side-channel data that rides alongside the
+	// response without altering the text — the scorer-aside read (the
+	// lem-scorer, keyed "score"), and, once the decode return surfaces it, the
+	// turn embedding. String-keyed to match the request-side Metadata; values
+	// may be JSON. Nil when nothing rode along.
+	Metadata map[string]string `json:"metadata,omitempty"`
 }

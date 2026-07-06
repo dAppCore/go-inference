@@ -163,6 +163,19 @@ type Policy interface {
 	Do(ctx context.Context, fn func() error) error
 }
 
+// Scorer runs the non-LLM lem-scorer (eval/score/lek — sycophancy, LEK,
+// hostility, grammar imprint, and the prompt→response differential/authority)
+// aside a completed turn, returning the score bundle to merge into
+// chat.Response.Metadata. It RIDES ALONGSIDE the response: unlike the Guard
+// (§6.18), it never blocks, mediates, or alters the text — it only records, so
+// the read persists with the turn (into the session and the cache below). A nil
+// Scorer records nothing, and an empty return leaves the response untouched.
+// The bundle is string-keyed to fit the metadata map; the concrete adapter
+// JSON-encodes the score under the "score" key.
+type Scorer interface {
+	Score(req chat.Request, resp chat.Response) map[string]string
+}
+
 // --- Typed errors ----------------------------------------------------------
 //
 // Sentinels so callers branch on the failure class with core.Is / errors.Is.
