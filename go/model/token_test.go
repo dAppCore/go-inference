@@ -895,3 +895,236 @@ func TestGenerate_StepwiseEOS(t *testing.T) {
 		t.Fatalf("stepwise eos count = %v, want %v", got, want)
 	}
 }
+
+// TestToken_Generate_Good covers the ordinary greedy whole-sequence loop: each generated
+// token is re-embedded and fed into the next decode step (the counterModel's count only
+// stays clean if Generate does this correctly).
+func TestToken_Generate_Good(t *testing.T) {
+	m := counterModel{vocab: 16, dModel: 4}
+	got, err := Generate(m, []int32{0}, 4, -1)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if want := []int32{1, 2, 3, 4}; !idsEqual(got, want) {
+		t.Fatalf("Generate = %v, want %v", got, want)
+	}
+}
+
+// TestToken_Generate_Bad covers the three input-validation guards: a nil model, an empty
+// prompt, and maxNew<=0 are each a clean error before any decode runs.
+func TestToken_Generate_Bad(t *testing.T) {
+	m := counterModel{vocab: 8, dModel: 2}
+	if _, err := Generate(nil, []int32{0}, 4, -1); err == nil {
+		t.Fatal("Generate(nil model): expected an error")
+	}
+	if _, err := Generate(m, nil, 4, -1); err == nil {
+		t.Fatal("Generate(empty prompt): expected an error")
+	}
+	if _, err := Generate(m, []int32{0}, 0, -1); err == nil {
+		t.Fatal("Generate(maxNew<=0): expected an error")
+	}
+}
+
+// TestToken_Generate_Ugly covers the eos-disabled AND the eos-mid-generation edges
+// together: eos<0 runs the full maxNew with no early stop, while a reachable eos ends
+// generation the instant it's produced, even with a much larger maxNew budget.
+func TestToken_Generate_Ugly(t *testing.T) {
+	m := counterModel{vocab: 16, dModel: 4}
+	noEOS, err := Generate(m, []int32{0}, 3, -1)
+	if err != nil {
+		t.Fatalf("Generate(eos disabled): %v", err)
+	}
+	if want := []int32{1, 2, 3}; !idsEqual(noEOS, want) {
+		t.Fatalf("Generate(eos disabled) = %v, want %v (full maxNew budget)", noEOS, want)
+	}
+	stopped, err := Generate(m, []int32{0}, 100, 3)
+	if err != nil {
+		t.Fatalf("Generate(eos=3): %v", err)
+	}
+	if want := []int32{1, 2, 3}; !idsEqual(stopped, want) {
+		t.Fatalf("Generate(eos=3) = %v, want early stop at %v despite maxNew=100", stopped, want)
+	}
+}
+
+// TestToken_GenerateSampled_Good covers zero-temperature sampling: it must reproduce the
+// greedy sequence exactly (the documented fallback), proving the sampler's temp<=0 path
+// is truly deterministic.
+func TestToken_GenerateSampled_Good(t *testing.T) {
+	m := counterModel{vocab: 16, dModel: 4}
+	greedy, err := Generate(m, []int32{0}, 5, -1)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	sampled, err := GenerateSampled(m, NewSampler(9), SampleParams{Temperature: 0}, []int32{0}, 5, -1)
+	if err != nil {
+		t.Fatalf("GenerateSampled: %v", err)
+	}
+	if !idsEqual(greedy, sampled) {
+		t.Fatalf("GenerateSampled(temp=0) = %v, want greedy %v", sampled, greedy)
+	}
+}
+
+// TestToken_GenerateSampled_Bad covers the nil-sampler guard: GenerateSampled requires a
+// *Sampler (unlike greedy Generate, which needs none).
+func TestToken_GenerateSampled_Bad(t *testing.T) {
+	m := counterModel{vocab: 8, dModel: 2}
+	if _, err := GenerateSampled(m, nil, SampleParams{}, []int32{0}, 4, -1); err == nil {
+		t.Fatal("GenerateSampled(nil sampler): expected an error")
+	}
+}
+
+// TestToken_GenerateSampled_Ugly covers the eos-reached case: eos>=0 folds into a
+// single-element stop-token set AND clears MinTokensBeforeStop (so an eos request never
+// gets suppressed by a stale MinTokensBeforeStop), stopping generation the moment eos is
+// produced.
+func TestToken_GenerateSampled_Ugly(t *testing.T) {
+	m := counterModel{vocab: 16, dModel: 4}
+	got, err := GenerateSampled(m, NewSampler(1), SampleParams{Temperature: 0, MinTokensBeforeStop: 50}, []int32{0}, 100, 3)
+	if err != nil {
+		t.Fatalf("GenerateSampled: %v", err)
+	}
+	if want := []int32{1, 2, 3}; !idsEqual(got, want) {
+		t.Fatalf("GenerateSampled(eos=3) = %v, want early stop at %v (MinTokensBeforeStop must not suppress eos itself)", got, want)
+	}
+}
+
+// TestToken_GenerateSampledWithStopTokens_Good covers the multi-stop-token set: greedy
+// generation stops the instant ANY of the declared stop tokens is produced.
+func TestToken_GenerateSampledWithStopTokens_Good(t *testing.T) {
+	m := counterModel{vocab: 16, dModel: 4}
+	got, err := GenerateSampledWithStopTokens(m, NewSampler(1), SampleParams{Temperature: 0}, []int32{0}, 10, []int32{4, 2})
+	if err != nil {
+		t.Fatalf("GenerateSampledWithStopTokens: %v", err)
+	}
+	if want := []int32{1, 2}; !idsEqual(got, want) {
+		t.Fatalf("GenerateSampledWithStopTokens = %v, want %v (stops at the first matching stop token, 2)", got, want)
+	}
+}
+
+// TestToken_GenerateSampledWithStopTokens_Bad covers the nil-sampler guard shared with
+// GenerateSampled.
+func TestToken_GenerateSampledWithStopTokens_Bad(t *testing.T) {
+	m := counterModel{vocab: 8, dModel: 2}
+	if _, err := GenerateSampledWithStopTokens(m, nil, SampleParams{}, []int32{0}, 4, []int32{1}); err == nil {
+		t.Fatal("GenerateSampledWithStopTokens(nil sampler): expected an error")
+	}
+}
+
+// TestToken_GenerateSampledWithStopTokens_Ugly covers an empty stop-token set: it must
+// behave exactly like no stop tokens at all (run the full maxNew), not error or stop
+// immediately on a zero-length slice.
+func TestToken_GenerateSampledWithStopTokens_Ugly(t *testing.T) {
+	m := counterModel{vocab: 16, dModel: 4}
+	got, err := GenerateSampledWithStopTokens(m, NewSampler(1), SampleParams{Temperature: 0}, []int32{0}, 3, []int32{})
+	if err != nil {
+		t.Fatalf("GenerateSampledWithStopTokens(empty stop set): %v", err)
+	}
+	if want := []int32{1, 2, 3}; !idsEqual(got, want) {
+		t.Fatalf("GenerateSampledWithStopTokens(empty stop set) = %v, want the full maxNew %v", got, want)
+	}
+}
+
+// TestToken_GenerateSampledWithStopTokensTransform_Good covers the committed-token
+// transform: the TRANSFORMED id (not the sampled one) is what gets returned AND fed into
+// the next decode step.
+func TestToken_GenerateSampledWithStopTokensTransform_Good(t *testing.T) {
+	var stepped []int32
+	m := idSessionModel{counterModel: counterModel{vocab: 16, dModel: 4}, ids: &stepped}
+	got, err := GenerateSampledWithStopTokensTransform(m, NewSampler(1), SampleParams{Temperature: 0}, []int32{0}, 2, nil, func(id int32) int32 {
+		if id == 1 {
+			return 9
+		}
+		return id
+	})
+	if err != nil {
+		t.Fatalf("GenerateSampledWithStopTokensTransform: %v", err)
+	}
+	if want := []int32{9, 10}; !idsEqual(got, want) {
+		t.Fatalf("GenerateSampledWithStopTokensTransform = %v, want %v (transformed 1→9, then counting from 9)", got, want)
+	}
+}
+
+// TestToken_GenerateSampledWithStopTokensTransform_Bad covers a nil transform: it must
+// behave identically to GenerateSampledWithStopTokens (the transform is optional).
+func TestToken_GenerateSampledWithStopTokensTransform_Bad(t *testing.T) {
+	m := counterModel{vocab: 16, dModel: 4}
+	withNilTransform, err := GenerateSampledWithStopTokensTransform(m, NewSampler(2), SampleParams{Temperature: 0}, []int32{0}, 3, nil, nil)
+	if err != nil {
+		t.Fatalf("GenerateSampledWithStopTokensTransform(nil transform): %v", err)
+	}
+	plain, err := GenerateSampledWithStopTokens(m, NewSampler(2), SampleParams{Temperature: 0}, []int32{0}, 3, nil)
+	if err != nil {
+		t.Fatalf("GenerateSampledWithStopTokens: %v", err)
+	}
+	if !idsEqual(withNilTransform, plain) {
+		t.Fatalf("nil-transform result %v != the no-transform sibling %v", withNilTransform, plain)
+	}
+}
+
+// TestToken_GenerateSampledWithStopTokensTransform_Ugly covers a transform that maps a
+// generated token onto a DECLARED STOP token: the transform runs BEFORE the stop check,
+// so generation stops on the transformed id even though the sampler never produced it
+// directly.
+func TestToken_GenerateSampledWithStopTokensTransform_Ugly(t *testing.T) {
+	m := counterModel{vocab: 16, dModel: 4}
+	got, err := GenerateSampledWithStopTokensTransform(m, NewSampler(1), SampleParams{Temperature: 0}, []int32{0}, 10, []int32{5}, func(id int32) int32 {
+		if id == 2 {
+			return 5 // remap the 2nd generated token onto the stop id
+		}
+		return id
+	})
+	if err != nil {
+		t.Fatalf("GenerateSampledWithStopTokensTransform: %v", err)
+	}
+	if want := []int32{1, 5}; !idsEqual(got, want) {
+		t.Fatalf("GenerateSampledWithStopTokensTransform = %v, want %v (stops on the TRANSFORMED id)", got, want)
+	}
+}
+
+// TestToken_GenerateSampledWithStopTokensTransformEach_Good covers the streaming sibling:
+// yield receives each committed token as it is produced, and returning true throughout
+// lets generation run to completion with the SAME tokens the batch path returns.
+func TestToken_GenerateSampledWithStopTokensTransformEach_Good(t *testing.T) {
+	m := counterModel{vocab: 16, dModel: 4}
+	var streamed []int32
+	got, err := GenerateSampledWithStopTokensTransformEach(m, NewSampler(1), SampleParams{Temperature: 0}, []int32{0}, 3, nil, nil, func(id int32) bool {
+		streamed = append(streamed, id)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("GenerateSampledWithStopTokensTransformEach: %v", err)
+	}
+	if !idsEqual(got, streamed) {
+		t.Fatalf("batch result %v != streamed tokens %v", got, streamed)
+	}
+	if want := []int32{1, 2, 3}; !idsEqual(got, want) {
+		t.Fatalf("GenerateSampledWithStopTokensTransformEach = %v, want %v", got, want)
+	}
+}
+
+// TestToken_GenerateSampledWithStopTokensTransformEach_Bad covers the nil-sampler guard
+// shared by the whole GenerateSampled* family.
+func TestToken_GenerateSampledWithStopTokensTransformEach_Bad(t *testing.T) {
+	m := counterModel{vocab: 8, dModel: 2}
+	if _, err := GenerateSampledWithStopTokensTransformEach(m, nil, SampleParams{}, []int32{0}, 4, nil, nil, nil); err == nil {
+		t.Fatal("GenerateSampledWithStopTokensTransformEach(nil sampler): expected an error")
+	}
+}
+
+// TestToken_GenerateSampledWithStopTokensTransformEach_Ugly covers yield returning FALSE
+// mid-generation: it must end generation EARLY (fewer tokens than maxNew), the same
+// early-out a cancelled streaming consumer relies on.
+func TestToken_GenerateSampledWithStopTokensTransformEach_Ugly(t *testing.T) {
+	m := counterModel{vocab: 16, dModel: 4}
+	seen := 0
+	got, err := GenerateSampledWithStopTokensTransformEach(m, NewSampler(1), SampleParams{Temperature: 0}, []int32{0}, 10, nil, nil, func(id int32) bool {
+		seen++
+		return seen < 2 // stop after the second committed token
+	})
+	if err != nil {
+		t.Fatalf("GenerateSampledWithStopTokensTransformEach: %v", err)
+	}
+	if want := []int32{1, 2}; !idsEqual(got, want) {
+		t.Fatalf("GenerateSampledWithStopTokensTransformEach(yield stops early) = %v, want %v", got, want)
+	}
+}
