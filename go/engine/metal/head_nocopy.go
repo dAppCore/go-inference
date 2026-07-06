@@ -54,6 +54,39 @@ type headEncoder struct {
 	greedyScratch   sync.Pool
 	topKScratch     sync.Pool
 	hiddenScratch   headHiddenScratchPool
+	// greedyRowsScratch pools the K-row direct-greedy buffers (normed rows,
+	// per-row tile bests, out tokens) for the fused verify head.
+	greedyRowsScratch sync.Pool
+}
+
+// headGreedyRowsScratch is one K-row fused-greedy invocation's GPU scratch.
+type headGreedyRowsScratch struct {
+	kCap, tileCap, dModelCap                   int
+	normed, tileValues, tileIndices, outTokens metal.MTLBuffer
+}
+
+func (h *headEncoder) getGreedyRowsScratch(k, tileCount int) *headGreedyRowsScratch {
+	if v := h.greedyRowsScratch.Get(); v != nil {
+		s := v.(*headGreedyRowsScratch)
+		if s.kCap >= k && s.tileCap >= tileCount && s.dModelCap >= h.dModel {
+			return s
+		}
+	}
+	s := &headGreedyRowsScratch{kCap: k, tileCap: tileCount, dModelCap: h.dModel}
+	s.normed = device.NewBufferWithLengthOptions(uint(k*h.dModel*bf16Size), metal.MTLResourceStorageModeShared)
+	s.tileValues = device.NewBufferWithLengthOptions(uint(k*tileCount*4), metal.MTLResourceStorageModeShared)
+	s.tileIndices = device.NewBufferWithLengthOptions(uint(k*tileCount*4), metal.MTLResourceStorageModeShared)
+	s.outTokens = device.NewBufferWithLengthOptions(uint(k*4), metal.MTLResourceStorageModeShared)
+	if s.normed == nil || s.tileValues == nil || s.tileIndices == nil || s.outTokens == nil {
+		return nil
+	}
+	return s
+}
+
+func (h *headEncoder) putGreedyRowsScratch(s *headGreedyRowsScratch) {
+	if s != nil && s.normed != nil && s.tileValues != nil && s.tileIndices != nil && s.outTokens != nil {
+		h.greedyRowsScratch.Put(s)
+	}
 }
 
 type headHiddenScratchPool struct {
@@ -1514,6 +1547,15 @@ func (h *headEncoder) greedyRowsBufferInPool(rowsBuf metal.MTLBuffer, rowStride 
 	if !h.hiddenBufferOffsetInRange(rowsBuf, uint(k-1)*rowStride) {
 		return false, core.NewError("native.headEncoder.greedyRows: rows exceed the hidden buffer")
 	}
+	// bf16 heads with no suppression take the fused K-row kernel: one weight
+	// pass scores every vocab tile against all K rows (the per-row path re-read
+	// the full lm_head weight K times — its dominant cost). Falls through to
+	// the per-row encodes when the kernel is unavailable (older metallib).
+	if !h.quant && len(suppress) == 0 && k > 1 && k <= 8 && int(rowStride) == h.dModel*bf16Size {
+		if handled, err := h.greedyRowsFusedInPool(rowsBuf, k, out); handled || err != nil {
+			return handled && err == nil, err
+		}
+	}
 	cb := commandBufferFast(queue)
 	enc := computeCommandEncoderFast(cb)
 	scratches := make([]*headGreedyScratch, 0, k)
@@ -1545,5 +1587,53 @@ func (h *headEncoder) greedyRowsBufferInPool(rowsBuf metal.MTLBuffer, rowStride 
 		out[i] = token
 	}
 	release()
+	return true, nil
+}
+
+// greedyRowsFusedInPool runs the K-row fused greedy head: one RMSNorm over
+// all K rows, ONE weight-pass lm_head+argmax kernel scoring every vocab tile
+// against all K rows, and K per-row tile merges — all in a single command
+// buffer. handled=false defers to the per-row encodes (kernel missing from an
+// older metallib).
+func (h *headEncoder) greedyRowsFusedInPool(rowsBuf metal.MTLBuffer, k int, out []int32) (handled bool, err error) {
+	if _, perr := bf16LMHeadArgmaxTilesRowsPipeline(); perr != nil {
+		return false, nil
+	}
+	tileCount := (h.vocab + bf16LMHeadArgmaxRowsPerTile - 1) / bf16LMHeadArgmaxRowsPerTile
+	s := h.getGreedyRowsScratch(k, tileCount)
+	if s == nil {
+		return false, nil
+	}
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	fail := func(ferr error) (bool, error) {
+		endEncodingFast(enc)
+		h.putGreedyRowsScratch(s)
+		return true, ferr
+	}
+	if ferr := encRMSNormRowsBF16(enc, rowsBuf, h.finalNorm.buf, s.normed, 0, h.finalNorm.off, 0, k, h.dModel, h.eps); ferr != nil {
+		return fail(ferr)
+	}
+	if ferr := encBF16LMHeadArgmaxTilesRowsBF16(enc, s.normed, h.weight.buf, s.tileValues, s.tileIndices, nil, 0, h.weight.off, h.dModel, h.vocab, 0, k, tileCount); ferr != nil {
+		return fail(ferr)
+	}
+	for r := range k {
+		if ferr := encArgmaxMergeF32At(enc, s.tileValues, s.tileIndices, s.outTokens, uint(r*tileCount)*4, uint(r*tileCount)*4, uint(r)*4, tileCount); ferr != nil {
+			return fail(ferr)
+		}
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	toks := unsafe.Slice((*int32)(s.outTokens.Contents()), k)
+	for i := range k {
+		token := toks[i]
+		if token < 0 || int(token) >= h.vocab {
+			h.putGreedyRowsScratch(s)
+			return true, core.NewError(core.Sprintf("native.headEncoder.greedyRowsFused: row %d argmax returned invalid token %d for vocab %d", i, token, h.vocab))
+		}
+		out[i] = token
+	}
+	h.putGreedyRowsScratch(s)
 	return true, nil
 }
