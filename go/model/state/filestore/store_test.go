@@ -100,7 +100,7 @@ func TestFileStore_Good_OpensLegacyStateHeader(t *testing.T) {
 	}
 }
 
-func TestFileStore_Good_OpenWithSegmentAlias(t *testing.T) {
+func TestStore_OpenWithSegmentAlias_Good(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	sourcePath := core.PathJoin(dir, "source.mvlog")
@@ -159,7 +159,7 @@ func TestFileStore_Good_OpenWithSegmentAlias(t *testing.T) {
 	}
 }
 
-func TestFileStore_Good_OpenRegionWithSegmentAlias(t *testing.T) {
+func TestStore_OpenRegionWithSegmentAlias_Good(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	sourcePath := core.PathJoin(dir, "source.mvlog")
@@ -238,6 +238,92 @@ func TestFileStore_Good_OpenRegionWithSegmentAlias(t *testing.T) {
 	}
 	if _, err := store.PutBytes(ctx, []byte("blocked"), state.PutOptions{}); err == nil {
 		t.Fatal("PutBytes(read-only region) error = nil")
+	}
+}
+
+func TestStore_Create_Good(t *testing.T) {
+	ctx := context.Background()
+	path := core.PathJoin(t.TempDir(), "create-good.mvlog")
+	store, err := Create(ctx, path)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer store.Close()
+	if store.Path() != path || store.ChunkCount() != 0 {
+		t.Fatalf("Create() = path %q count %d, want %q and 0", store.Path(), store.ChunkCount(), path)
+	}
+}
+
+func TestStore_Create_Ugly(t *testing.T) {
+	ctx := context.Background()
+	path := core.PathJoin(t.TempDir(), "create-truncate.mvlog")
+	first, err := Create(ctx, path)
+	if err != nil {
+		t.Fatalf("Create(first) error = %v", err)
+	}
+	if _, err := first.PutBytes(ctx, []byte("stale"), state.PutOptions{}); err != nil {
+		t.Fatalf("PutBytes() error = %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	// Re-Create on an existing path must truncate the prior contents
+	// rather than append to or preserve them.
+	second, err := Create(ctx, path)
+	if err != nil {
+		t.Fatalf("Create(second) error = %v", err)
+	}
+	defer second.Close()
+	if second.ChunkCount() != 0 {
+		t.Fatalf("Create(existing path) ChunkCount() = %d, want 0 after truncation", second.ChunkCount())
+	}
+}
+
+func TestStore_Open_Good(t *testing.T) {
+	ctx := context.Background()
+	path := core.PathJoin(t.TempDir(), "open-good.mvlog")
+	store, err := Create(ctx, path)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := store.PutBytes(ctx, []byte("hi"), state.PutOptions{}); err != nil {
+		t.Fatalf("PutBytes() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	reopened, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer reopened.Close()
+	if reopened.ChunkCount() != 1 {
+		t.Fatalf("Open() ChunkCount() = %d, want 1", reopened.ChunkCount())
+	}
+}
+
+func TestStore_Open_Ugly(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Open(context.Background(), dir); err == nil {
+		t.Fatal("Open(directory path) error = nil, want open-file error")
+	}
+}
+
+func TestStore_OpenWithSegmentAlias_Bad(t *testing.T) {
+	path := core.PathJoin(t.TempDir(), "openwithalias-missing.mvlog")
+	if _, err := OpenWithSegmentAlias(context.Background(), path, "alias"); err == nil {
+		t.Fatal("OpenWithSegmentAlias(nonexistent) error = nil")
+	}
+}
+
+func TestStore_OpenWithSegmentAlias_Ugly(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	path := core.PathJoin(t.TempDir(), "openwithalias-cancelled.mvlog")
+	if _, err := OpenWithSegmentAlias(ctx, path, "alias"); !core.Is(err, context.Canceled) {
+		t.Fatalf("OpenWithSegmentAlias(cancelled) error = %v, want context.Canceled", err)
 	}
 }
 
@@ -328,21 +414,21 @@ func TestCreate_Bad_PermissionBlockedParent(t *testing.T) {
 	}
 }
 
-func TestCreate_Bad_PathIsDirectory(t *testing.T) {
+func TestStore_Create_Bad(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := Create(context.Background(), dir); err == nil {
 		t.Fatal("Create(directory path) error = nil, want open-file error")
 	}
 }
 
-func TestOpen_Bad_NonExistentFile(t *testing.T) {
+func TestStore_Open_Bad(t *testing.T) {
 	path := core.PathJoin(t.TempDir(), "does-not-exist.mvlog")
 	if _, err := Open(context.Background(), path); err == nil {
 		t.Fatal("Open(nonexistent) error = nil")
 	}
 }
 
-func TestOpenRegionWithSegmentAlias_Bad_CancelledContext(t *testing.T) {
+func TestStore_OpenRegionWithSegmentAlias_Ugly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	path := core.PathJoin(t.TempDir(), "irrelevant.mvlog")
@@ -351,7 +437,7 @@ func TestOpenRegionWithSegmentAlias_Bad_CancelledContext(t *testing.T) {
 	}
 }
 
-func TestOpenRegionWithSegmentAlias_Bad_NegativeOffsetOrBytes(t *testing.T) {
+func TestStore_OpenRegionWithSegmentAlias_Bad(t *testing.T) {
 	path := core.PathJoin(t.TempDir(), "irrelevant.mvlog")
 	if _, err := OpenRegionWithSegmentAlias(context.Background(), path, -1, 0, ""); err == nil {
 		t.Fatal("OpenRegionWithSegmentAlias(negative offset) error = nil")
@@ -361,23 +447,107 @@ func TestOpenRegionWithSegmentAlias_Bad_NegativeOffsetOrBytes(t *testing.T) {
 	}
 }
 
-func TestStore_Path_Good_NilReceiver(t *testing.T) {
+func TestStore_Path_Good(t *testing.T) {
 	var store *Store
 	if got := store.Path(); got != "" {
 		t.Fatalf("Path() = %q, want empty", got)
 	}
 }
 
-func TestStore_ChunkCount_Good_NilReceiver(t *testing.T) {
+func TestStore_Path_Bad(t *testing.T) {
+	// A non-nil but zero-value Store (never through Create/Open) has no
+	// path set — Path() must return the empty zero value, not panic.
+	s := &Store{}
+	if got := s.Path(); got != "" {
+		t.Fatalf("Path() = %q, want empty for zero-value store", got)
+	}
+}
+
+func TestStore_Path_Ugly(t *testing.T) {
+	ctx := context.Background()
+	path := core.PathJoin(t.TempDir(), "path-after-close.mvlog")
+	store, err := Create(ctx, path)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	// Close() does not clear the path field — the store's identity
+	// survives its own lifecycle end.
+	if got := store.Path(); got != path {
+		t.Fatalf("Path() after Close() = %q, want %q", got, path)
+	}
+}
+
+func TestStore_ChunkCount_Good(t *testing.T) {
 	var store *Store
 	if got := store.ChunkCount(); got != 0 {
 		t.Fatalf("ChunkCount() = %d, want 0", got)
 	}
 }
 
-func TestStore_Close_Good_NilReceiver(t *testing.T) {
+func TestStore_ChunkCount_Bad(t *testing.T) {
+	s := &Store{}
+	if got := s.ChunkCount(); got != 0 {
+		t.Fatalf("ChunkCount() = %d, want 0 for uninitialised index", got)
+	}
+}
+
+func TestStore_ChunkCount_Ugly(t *testing.T) {
+	ctx := context.Background()
+	store, err := Create(ctx, core.PathJoin(t.TempDir(), "chunkcount-after-close.mvlog"))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := store.PutBytes(ctx, []byte("x"), state.PutOptions{}); err != nil {
+		t.Fatalf("PutBytes() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	// The index is not cleared by Close() — ChunkCount() keeps reporting
+	// the state as of the last write.
+	if got := store.ChunkCount(); got != 1 {
+		t.Fatalf("ChunkCount() after Close() = %d, want 1", got)
+	}
+}
+
+func TestStore_Close_Good(t *testing.T) {
 	var store *Store
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close() = %v, want nil", err)
+	}
+}
+
+func TestStore_Close_Bad(t *testing.T) {
+	ctx := context.Background()
+	store, err := Create(ctx, core.PathJoin(t.TempDir(), "close-bad.mvlog"))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	// Close the underlying OS file out from under the Store while
+	// store.file stays non-nil, so Store.Close() proceeds to call
+	// file.Close() a second time and surfaces the OS-level error.
+	if err := store.file.Close(); err != nil {
+		t.Fatalf("underlying Close() error = %v", err)
+	}
+	if err := store.Close(); err == nil {
+		t.Fatal("Close(already-closed fd) error = nil, want close error")
+	}
+}
+
+func TestStore_Close_Ugly(t *testing.T) {
+	store, err := Create(context.Background(), core.PathJoin(t.TempDir(), "close-idempotent.mvlog"))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	// A second Close() on an already-closed store is a no-op success,
+	// not an error — idempotent by design.
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close(second) error = %v, want nil", err)
 	}
 }
