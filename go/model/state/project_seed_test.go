@@ -37,6 +37,40 @@ func TestProjectSeed_WakeRequest_Good(t *testing.T) {
 	}
 }
 
+// TestProjectSeed_WakeRequest_Bad proves a surprising corner of
+// setProjectLabel: it only ever writes into an already-non-nil Labels
+// map, so a seed with no Labels of its own, given no caller Labels
+// either, ends up with wake.Labels == nil — NOT a map containing
+// project_id, which the happy-path Good test might otherwise imply.
+func TestProjectSeed_WakeRequest_Bad(t *testing.T) {
+	seed := NewProjectSeed(ProjectSeedOptions{ProjectID: "core/go-mlx"})
+
+	wake := seed.WakeRequest(ProjectSeedWakeOptions{})
+
+	if wake.Labels != nil {
+		t.Fatalf("wake.Labels = %+v, want nil when neither seed nor caller supplied labels", wake.Labels)
+	}
+	if wake.Store != nil {
+		t.Fatalf("wake.Store = %v, want nil passthrough for zero-value opts", wake.Store)
+	}
+}
+
+// TestProjectSeed_WakeRequest_Ugly proves label precedence: when the
+// caller's own Labels already sets project_id, setProjectLabel's
+// only-if-absent guard leaves the caller's value untouched rather than
+// overwriting it with the seed's ProjectID.
+func TestProjectSeed_WakeRequest_Ugly(t *testing.T) {
+	seed := NewProjectSeed(ProjectSeedOptions{ProjectID: "core/go-mlx"})
+
+	wake := seed.WakeRequest(ProjectSeedWakeOptions{
+		Labels: map[string]string{"project_id": "caller-override"},
+	})
+
+	if wake.Labels["project_id"] != "caller-override" {
+		t.Fatalf("wake.Labels[project_id] = %q, want the caller's explicit override preserved", wake.Labels["project_id"])
+	}
+}
+
 func TestProjectSeed_PlanContinuation_Good(t *testing.T) {
 	seed := NewProjectSeed(ProjectSeedOptions{BaseURI: "state://lthn/projects", ProjectID: "core/go-mlx"})
 	parent := WakeResult{
@@ -78,7 +112,23 @@ func TestProjectSeed_PlanContinuation_Good(t *testing.T) {
 	}
 }
 
-func TestWakeCompatibility_GoodBadUgly(t *testing.T) {
+// TestProjectSeed_PlanContinuation_Bad feeds an unrecognised Mode value —
+// the switch's default arm coerces it to state-checkpoint persistence
+// rather than propagating the garbage mode or erroring.
+func TestProjectSeed_PlanContinuation_Bad(t *testing.T) {
+	seed := NewProjectSeed(ProjectSeedOptions{BaseURI: "state://lthn/projects", ProjectID: "core/go-mlx"})
+
+	garbage := seed.PlanContinuation(ProjectSeedContinuationOptions{Mode: ProjectSeedMode("not-a-real-mode")})
+
+	if garbage.Mode != ProjectSeedStateCheckpoint || !garbage.PersistState {
+		t.Fatalf("garbage-mode plan = %+v, want the unknown mode coerced to state-checkpoint persistence", garbage)
+	}
+}
+
+// TestProjectSeed_CheckWakeCompatibility_Good proves a wake request that
+// only differs from the bundle in a warning-only field (runtime backend)
+// stays compatible.
+func TestProjectSeed_CheckWakeCompatibility_Good(t *testing.T) {
 	bundle := Bundle{
 		Model:        ModelIdentity{Hash: "model-a", Architecture: "gemma4_text", NumLayers: 28, QuantBits: 4, ContextLength: 4096},
 		Tokenizer:    TokenizerIdentity{Hash: "tok-a", ChatTemplate: "chat-a"},
@@ -100,11 +150,27 @@ func TestWakeCompatibility_GoodBadUgly(t *testing.T) {
 	if len(report.Warnings) == 0 || report.Warnings[0] != "runtime_backend_changed" {
 		t.Fatalf("warnings = %+v, want runtime backend warning", report.Warnings)
 	}
+}
 
-	req.Tokenizer.Hash = "tok-b"
-	req.Adapter = AdapterIdentity{}
-	req.Model.ContextLength = 1024
-	report = CheckWakeCompatibility(bundle, req)
+// TestProjectSeed_CheckWakeCompatibility_Bad drives two independently
+// incompatible requests: one blocked by tokenizer/adapter/context
+// mismatches, the other by model-identity mismatches.
+func TestProjectSeed_CheckWakeCompatibility_Bad(t *testing.T) {
+	bundle := Bundle{
+		Model:        ModelIdentity{Hash: "model-a", Architecture: "gemma4_text", NumLayers: 28, QuantBits: 4, ContextLength: 4096},
+		Tokenizer:    TokenizerIdentity{Hash: "tok-a", ChatTemplate: "chat-a"},
+		Adapter:      AdapterIdentity{Hash: "adapter-a", Rank: 8},
+		Runtime:      RuntimeIdentity{Backend: "metal", CacheMode: "paged-q8"},
+		PromptTokens: 2048,
+	}
+
+	req := WakeRequest{
+		Model:     ModelIdentity{Hash: "model-a", Architecture: "gemma4_text", NumLayers: 28, QuantBits: 4, ContextLength: 1024},
+		Tokenizer: TokenizerIdentity{Hash: "tok-b", ChatTemplate: "chat-a"},
+		Adapter:   AdapterIdentity{},
+		Runtime:   RuntimeIdentity{Backend: "metal", CacheMode: "paged-q8"},
+	}
+	report := CheckWakeCompatibility(bundle, req)
 	if report.Compatible || !report.SummaryRequired {
 		t.Fatalf("incompatible report = %+v, want summary fallback", report)
 	}
@@ -112,13 +178,13 @@ func TestWakeCompatibility_GoodBadUgly(t *testing.T) {
 		t.Fatalf("reasons = %+v, want tokenizer, adapter, and context blockers", report.Reasons)
 	}
 
-	req = WakeRequest{
+	modelReq := WakeRequest{
 		Model:     ModelIdentity{Hash: "model-b", Architecture: "qwen3", NumLayers: 28, QuantBits: 8, ContextLength: 8192},
 		Tokenizer: TokenizerIdentity{Hash: "tok-a", ChatTemplate: "chat-a"},
 		Adapter:   AdapterIdentity{Hash: "adapter-a", Rank: 8},
 		Runtime:   RuntimeIdentity{Backend: "metal", CacheMode: "paged-q8"},
 	}
-	report = CheckWakeCompatibility(bundle, req)
+	report = CheckWakeCompatibility(bundle, modelReq)
 	if report.Compatible || !report.SummaryRequired {
 		t.Fatalf("model-incompatible report = %+v, want summary fallback", report)
 	}
@@ -127,11 +193,24 @@ func TestWakeCompatibility_GoodBadUgly(t *testing.T) {
 			t.Fatalf("reasons = %+v, want %s", report.Reasons, want)
 		}
 	}
+}
 
-	req.SkipCompatibilityCheck = true
-	report = CheckWakeCompatibility(bundle, req)
+// TestProjectSeed_CheckWakeCompatibility_Ugly proves SkipCompatibilityCheck
+// short-circuits the entire evaluation — a model-hash mismatch that would
+// otherwise block wake is never even inspected, let alone reported.
+func TestProjectSeed_CheckWakeCompatibility_Ugly(t *testing.T) {
+	bundle := Bundle{Model: ModelIdentity{Hash: "model-a"}}
+	req := WakeRequest{
+		Model:                  ModelIdentity{Hash: "model-b"},
+		SkipCompatibilityCheck: true,
+	}
+
+	report := CheckWakeCompatibility(bundle, req)
 	if !report.Compatible || len(report.Warnings) == 0 || report.Warnings[0] != "compatibility_check_skipped" {
-		t.Fatalf("skip report = %+v, want forced compatibility warning", report)
+		t.Fatalf("skip report = %+v, want forced compatibility warning even though the model hash mismatches", report)
+	}
+	if len(report.Reasons) != 0 {
+		t.Fatalf("skip report reasons = %+v, want no reasons evaluated at all", report.Reasons)
 	}
 }
 
@@ -144,9 +223,49 @@ func stringSliceContains(values []string, want string) bool {
 	return false
 }
 
-// TestProjectSeed_NewProjectSeed_Ugly proves both ends of the default
-// derivation: every field omitted falls back to package defaults, and
-// every field supplied is used verbatim with no derivation at all.
+// TestProjectSeed_NewProjectSeed_Good proves every explicit field is used
+// verbatim, with no derivation at all, when the caller supplies all of
+// them.
+func TestProjectSeed_NewProjectSeed_Good(t *testing.T) {
+	explicit := NewProjectSeed(ProjectSeedOptions{
+		BaseURI:   "state://lthn/projects",
+		ProjectID: "core/go-mlx",
+		EntryURI:  "state://custom/entry",
+		BundleURI: "state://custom/entry/bundle",
+		IndexURI:  "state://custom/entry/index",
+		Title:     "custom title",
+	})
+	if explicit.EntryURI != "state://custom/entry" || explicit.BundleURI != "state://custom/entry/bundle" || explicit.IndexURI != "state://custom/entry/index" || explicit.Title != "custom title" {
+		t.Fatalf("explicit seed = %+v, want caller URIs preserved verbatim", explicit)
+	}
+}
+
+// TestProjectSeed_NewProjectSeed_Bad feeds untrimmed, slash-padded input
+// and proves cleanURI/Trim normalise it rather than baking the mess into
+// the derived seed.
+func TestProjectSeed_NewProjectSeed_Bad(t *testing.T) {
+	seed := NewProjectSeed(ProjectSeedOptions{
+		BaseURI:   "  /state://lthn/projects/  ",
+		ProjectID: "/core/go-mlx/",
+		Title:     "  messy title  ",
+	})
+	if seed.BaseURI != "state://lthn/projects" {
+		t.Fatalf("seed.BaseURI = %q, want trimmed and unslashed", seed.BaseURI)
+	}
+	if seed.ProjectID != "core/go-mlx" {
+		t.Fatalf("seed.ProjectID = %q, want unslashed", seed.ProjectID)
+	}
+	if seed.Title != "messy title" {
+		t.Fatalf("seed.Title = %q, want trimmed", seed.Title)
+	}
+	if seed.EntryURI != "state://lthn/projects/core/go-mlx/seed" {
+		t.Fatalf("seed.EntryURI = %q, want derived from the cleaned base/project", seed.EntryURI)
+	}
+}
+
+// TestProjectSeed_NewProjectSeed_Ugly proves the degenerate all-defaults
+// case: every field omitted falls back to package defaults, cascading
+// through every derived URI.
 func TestProjectSeed_NewProjectSeed_Ugly(t *testing.T) {
 	seed := NewProjectSeed(ProjectSeedOptions{})
 	if seed.BaseURI != "state://projects" || seed.ProjectID != "default" {
@@ -158,17 +277,8 @@ func TestProjectSeed_NewProjectSeed_Ugly(t *testing.T) {
 	if seed.EntryURI != "state://projects/default/seed" {
 		t.Fatalf("seed.EntryURI = %q, want derived from defaults", seed.EntryURI)
 	}
-
-	explicit := NewProjectSeed(ProjectSeedOptions{
-		BaseURI:   "state://lthn/projects",
-		ProjectID: "core/go-mlx",
-		EntryURI:  "state://custom/entry",
-		BundleURI: "state://custom/entry/bundle",
-		IndexURI:  "state://custom/entry/index",
-		Title:     "custom title",
-	})
-	if explicit.EntryURI != "state://custom/entry" || explicit.BundleURI != "state://custom/entry/bundle" || explicit.IndexURI != "state://custom/entry/index" || explicit.Title != "custom title" {
-		t.Fatalf("explicit seed = %+v, want caller URIs preserved verbatim", explicit)
+	if seed.BundleURI != seed.EntryURI+"/bundle" || seed.IndexURI != seed.EntryURI+"/index" {
+		t.Fatalf("seed bundle/index = %+v, want derived from EntryURI", seed)
 	}
 }
 
