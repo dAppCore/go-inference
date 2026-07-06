@@ -44,6 +44,7 @@ type Pipeline struct {
 	Fitter   Fitter   // context fit / middle-out transform (§6.13, §6.11)
 	Fuser    Fuser    // multi-model deliberation (§6.9)
 	Policy   Policy   // per-call retry backoff (§6.7)
+	Scorer   Scorer   // lem-scorer aside → chat.Response.Metadata (§6.6-adjacent)
 }
 
 // New wires the core serving path over its five required collaborators
@@ -149,6 +150,12 @@ func (p *Pipeline) complete(ctx context.Context, req chat.Request, handle any) (
 	if err != nil {
 		return chat.Response{}, err
 	}
+
+	// 8.5. Scorer-aside — record the lem-scorer read onto the response metadata
+	// (§6.6-adjacent). It rides alongside; it never blocks or alters the text.
+	// Done before usage / session-append / cache so the score persists with the
+	// turn and a later cached replay carries it.
+	resp = p.score(req, resp)
 
 	// 9. Account, append the turn, cache, return (§6.6, §6.10, §6.11).
 	if p.UsageSink != nil {
@@ -313,6 +320,27 @@ func (p *Pipeline) appendSession(req chat.Request, resp chat.Response) error {
 		return core.E("pipeline", "session append", err)
 	}
 	return nil
+}
+
+// score runs the scorer-aside (no-op without a Scorer), merging the returned
+// bundle into the response metadata. It never replaces existing metadata keys
+// beyond the scorer's own, and an empty bundle leaves resp untouched — the
+// score rides alongside the turn, it does not alter the text.
+func (p *Pipeline) score(req chat.Request, resp chat.Response) chat.Response {
+	if p.Scorer == nil {
+		return resp
+	}
+	bundle := p.Scorer.Score(req, resp)
+	if len(bundle) == 0 {
+		return resp
+	}
+	if resp.Metadata == nil {
+		resp.Metadata = make(map[string]string, len(bundle))
+	}
+	for k, v := range bundle {
+		resp.Metadata[k] = v
+	}
+	return resp
 }
 
 // fit applies the context-fit transform (no-op without a Fitter), returning the

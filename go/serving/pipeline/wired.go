@@ -79,6 +79,12 @@ type Wiring struct {
 	// panel + judge config.
 	Fusion      fusion.Config
 	WantsFusion func(req chat.Request) bool
+
+	// Score enables the scorer-aside (the lem-scorer, eval/score/lek): when true,
+	// each completed turn is scored (sycophancy / LEK / hostility / imprint +
+	// the prompt→response differential) and the read is attached to
+	// chat.Response.Metadata under "score" (§6.6-adjacent). False records nothing.
+	Score bool
 }
 
 // NewWired builds a *Pipeline from the real packages, mapping each concrete
@@ -119,6 +125,9 @@ func NewWired(w Wiring) *Pipeline {
 	}
 	if w.WantsFusion != nil {
 		p.Fuser = &fuserAdapter{cfg: w.Fusion, wants: w.WantsFusion}
+	}
+	if w.Score {
+		p.Scorer = scorerAdapter{}
 	}
 	return p
 }
