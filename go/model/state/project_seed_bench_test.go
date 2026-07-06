@@ -26,7 +26,7 @@ var (
 // reflects the real per-entry map cost, not collision dedup.
 func labelsMap(n int) map[string]string {
 	out := make(map[string]string, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out[labelsKey(i)] = labelsValue(i)
 	}
 	return out

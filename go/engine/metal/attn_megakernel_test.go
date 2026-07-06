@@ -73,7 +73,7 @@ func TestAttnMegakernel(t *testing.T) {
 	vCacheF := syntheticFloat32(maxLen*kvDim, 8)
 	kCache, vCache := toBF16Bytes(kCacheF), toBF16Bytes(vCacheF)
 	invFreqs := make([]float32, hd2)
-	for d := 0; d < hd2; d++ {
+	for d := range hd2 {
 		invFreqs[d] = float32(1.0 / math.Pow(float64(base), float64(2*d)/float64(headDim)))
 	}
 
@@ -81,7 +81,7 @@ func TestAttnMegakernel(t *testing.T) {
 	rb := func(b []byte, i int) float32 { return bf16ToF32(b[i*2], b[i*2+1]) }
 	matvec := func(w []byte, xv []float32, o, inDim int) float32 { // fp32 accum, bf16 weights, fp32 x
 		acc := float32(0)
-		for k := 0; k < inDim; k++ {
+		for k := range inDim {
 			acc += rb(w, o*inDim+k) * xv[k]
 		}
 		return acc
@@ -89,12 +89,12 @@ func TestAttnMegakernel(t *testing.T) {
 	bf := func(v float32) float32 { b := f32ToBF16(v); return bf16ToF32(byte(b), byte(b>>8)) } // round to bf16
 	// RMSNorm
 	var ss float32
-	for k := 0; k < dModel; k++ {
+	for k := range dModel {
 		ss += rb(x, k) * rb(x, k)
 	}
 	rms := float32(1.0 / math.Sqrt(float64(ss/float32(dModel)+eps)))
 	normed := make([]float32, dModel)
-	for i := 0; i < dModel; i++ {
+	for i := range dModel {
 		normed[i] = bf(rb(x, i) * rms * rb(nw, i))
 	}
 	// QKV + RoPE
@@ -106,16 +106,16 @@ func TestAttnMegakernel(t *testing.T) {
 		c, s := float32(math.Cos(ang)), float32(math.Sin(ang))
 		return a0*c - a1*s, a0*s + a1*c
 	}
-	for h := 0; h < nHeads; h++ {
-		for d := 0; d < hd2; d++ {
+	for h := range nHeads {
+		for d := range hd2 {
 			q0 := matvec(wQ, normed, h*headDim+d, dModel)
 			q1 := matvec(wQ, normed, h*headDim+d+hd2, dModel)
 			r0, r1 := rope(q0, q1, d)
 			qr[h*headDim+d], qr[h*headDim+d+hd2] = bf(r0), bf(r1)
 		}
 	}
-	for hk := 0; hk < nKVHeads; hk++ {
-		for d := 0; d < hd2; d++ {
+	for hk := range nKVHeads {
+		for d := range hd2 {
 			k0 := matvec(wK, normed, hk*headDim+d, dModel)
 			k1 := matvec(wK, normed, hk*headDim+d+hd2, dModel)
 			r0, r1 := rope(k0, k1, d)
@@ -131,18 +131,18 @@ func TestAttnMegakernel(t *testing.T) {
 		kc[i] = rb(kCache, i)
 		vc[i] = rb(vCache, i)
 	}
-	for i := 0; i < kvDim; i++ {
+	for i := range kvDim {
 		kc[pos*kvDim+i] = kRow[i]
 		vc[pos*kvDim+i] = vRow[i]
 	}
 	// SDPA
 	attn := make([]float32, qDim)
-	for h := 0; h < nHeads; h++ {
+	for h := range nHeads {
 		kvh := (h / gqa) * headDim
 		m := float32(-3e38)
-		for j := 0; j < kvLen; j++ {
+		for j := range kvLen {
 			var dot float32
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				dot += qr[h*headDim+d] * kc[j*kvDim+kvh+d]
 			}
 			if dot*scale > m {
@@ -151,24 +151,24 @@ func TestAttnMegakernel(t *testing.T) {
 		}
 		var denom float32
 		acc := make([]float32, headDim)
-		for j := 0; j < kvLen; j++ {
+		for j := range kvLen {
 			var dot float32
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				dot += qr[h*headDim+d] * kc[j*kvDim+kvh+d]
 			}
 			p := float32(math.Exp(float64(dot*scale - m)))
 			denom += p
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				acc[d] += p * vc[j*kvDim+kvh+d]
 			}
 		}
-		for d := 0; d < headDim; d++ {
+		for d := range headDim {
 			attn[h*headDim+d] = bf(acc[d] / denom)
 		}
 	}
 	// O + residual
 	refOut := make([]byte, dModel*bf16Size)
-	for i := 0; i < dModel; i++ {
+	for i := range dModel {
 		h := f32ToBF16(rb(x, i) + matvec(wO, attn, i, qDim))
 		refOut[i*2], refOut[i*2+1] = byte(h), byte(h>>8)
 	}

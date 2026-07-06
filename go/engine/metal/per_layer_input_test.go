@@ -250,7 +250,7 @@ func TestPerLayerInputGateScratchInputBuffersUseCallerBackingAfterWarmup(t *test
 	defer scratch.Close()
 
 	var hBuf, perLayerBuf metal.MTLBuffer
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		var err error
 		hBuf, perLayerBuf, err = scratch.inputBuffers(hNext, perLayerInput)
 		if err != nil {

@@ -3,6 +3,7 @@
 package model
 
 import (
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -368,12 +369,7 @@ func LoRASafeTarget(architecture, target string) bool {
 		return false
 	}
 	target = strings.TrimSpace(target)
-	for _, safe := range policy.SafeTargets {
-		if safe == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(policy.SafeTargets, target)
 }
 
 func LoRAExtendedTarget(architecture, target string) bool {
@@ -382,12 +378,7 @@ func LoRAExtendedTarget(architecture, target string) bool {
 		return false
 	}
 	target = strings.TrimSpace(target)
-	for _, extended := range policy.ExtendedTargets {
-		if extended == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(policy.ExtendedTargets, target)
 }
 
 func LoRACanonicalTarget(architecture, target string) (string, bool) {

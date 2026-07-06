@@ -34,7 +34,7 @@ func TestEmbedTokensQuant4BitFastPath(t *testing.T) {
 		pRow := packed[int(tok)*rowPacked : (int(tok)+1)*rowPacked]
 		sRow := scales[int(tok)*rowSB : (int(tok)+1)*rowSB]
 		bRow := biases[int(tok)*rowSB : (int(tok)+1)*rowSB]
-		for c := 0; c < dModel; c++ {
+		for c := range dModel {
 			code := extractAffineCode(pRow, c*bits, bits)
 			g := c / groupSize
 			s := bf16ToF32(sRow[g*bf16Size], sRow[g*bf16Size+1])

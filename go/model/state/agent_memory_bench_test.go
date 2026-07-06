@@ -47,7 +47,7 @@ func BenchmarkAgentMemory_Ref_Construct_Labels_10(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		labels := make(map[string]string, 10)
-		for j := 0; j < 10; j++ {
+		for j := range 10 {
 			labels[benchKey(j)] = benchValue(j)
 		}
 		agentMemorySinkRef = Ref{
@@ -63,7 +63,7 @@ func BenchmarkAgentMemory_Ref_Construct_Labels_100(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		labels := make(map[string]string, 100)
-		for j := 0; j < 100; j++ {
+		for j := range 100 {
 			labels[benchKey(j)] = benchValue(j)
 		}
 		agentMemorySinkRef = Ref{
@@ -79,7 +79,7 @@ func BenchmarkAgentMemory_Ref_Construct_Labels_1000(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		labels := make(map[string]string, 1000)
-		for j := 0; j < 1000; j++ {
+		for j := range 1000 {
 			labels[benchKey(j)] = benchValue(j)
 		}
 		agentMemorySinkRef = Ref{
@@ -97,7 +97,7 @@ func BenchmarkAgentMemory_Ref_StateRefs_10(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		refs := make([]StateRef, 0, 10)
-		for j := 0; j < 10; j++ {
+		for j := range 10 {
 			refs = append(refs, StateRef{
 				Kind:      "kv",
 				URI:       "state://kv/block",
@@ -113,7 +113,7 @@ func BenchmarkAgentMemory_Ref_StateRefs_100(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		refs := make([]StateRef, 0, 100)
-		for j := 0; j < 100; j++ {
+		for j := range 100 {
 			refs = append(refs, StateRef{
 				Kind:      "kv",
 				URI:       "state://kv/block",
@@ -129,7 +129,7 @@ func BenchmarkAgentMemory_Ref_StateRefs_1000(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		refs := make([]StateRef, 0, 1000)
-		for j := 0; j < 1000; j++ {
+		for j := range 1000 {
 			refs = append(refs, StateRef{
 				Kind:      "kv",
 				URI:       "state://kv/block",

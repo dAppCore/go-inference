@@ -19,23 +19,23 @@ import (
 type fakeCall struct {
 	errOn   map[int]bool  // indices that return an error
 	delay   time.Duration // per-call work, so concurrency overlaps
-	live    int64         // current in-flight (atomic)
-	maxLive int64         // high-water mark of live (atomic)
-	calls   int64         // total Do invocations (atomic)
+	live    atomic.Int64  // current in-flight (atomic)
+	maxLive atomic.Int64  // high-water mark of live (atomic)
+	calls   atomic.Int64  // total Do invocations (atomic)
 }
 
 // Do satisfies Call. It bumps the live counter, sleeps for delay so concurrent
 // calls genuinely overlap, then returns a deterministic result or a typed error.
 func (f *fakeCall) Do(ctx context.Context, index int, request any) (any, Usage, error) {
-	atomic.AddInt64(&f.calls, 1)
-	now := atomic.AddInt64(&f.live, 1)
+	f.calls.Add(1)
+	now := f.live.Add(1)
 	for {
-		hi := atomic.LoadInt64(&f.maxLive)
-		if now <= hi || atomic.CompareAndSwapInt64(&f.maxLive, hi, now) {
+		hi := f.maxLive.Load()
+		if now <= hi || f.maxLive.CompareAndSwap(hi, now) {
 			break
 		}
 	}
-	defer atomic.AddInt64(&f.live, -1)
+	defer f.live.Add(-1)
 
 	if f.delay > 0 {
 		select {
@@ -56,11 +56,11 @@ func (f *fakeCall) Do(ctx context.Context, index int, request any) (any, Usage, 
 // assert every dispatched item was throttled.
 type countingLimiter struct {
 	inner Limiter
-	waits int64
+	waits atomic.Int64
 }
 
 func (c *countingLimiter) Wait(ctx context.Context) error {
-	atomic.AddInt64(&c.waits, 1)
+	c.waits.Add(1)
 	return c.inner.Wait(ctx)
 }
 
@@ -109,7 +109,7 @@ func TestBatch_Run_Ugly(t *core.T) {
 	empty := Run(context.Background(), nil, Options{Concurrency: 4, Call: call})
 	core.AssertEqual(t, 0, len(empty.Items), "empty batch yields no results")
 	core.AssertEqual(t, 0, empty.Usage.TotalTokens, "empty batch has zero usage")
-	core.AssertEqual(t, int64(0), atomic.LoadInt64(&call.calls), "empty batch never dispatches")
+	core.AssertEqual(t, int64(0), call.calls.Load(), "empty batch never dispatches")
 
 	// nil Call — every item fails closed with an error, no panic.
 	nilOut := Run(context.Background(), []any{"x", "y"}, Options{Concurrency: 2})
@@ -126,9 +126,9 @@ func TestBatch_Concurrency_Good(t *core.T) {
 	out := Run(context.Background(), reqs, Options{Concurrency: 2, Call: call})
 
 	core.AssertEqual(t, 10, len(out.Items))
-	core.AssertTrue(t, atomic.LoadInt64(&call.maxLive) <= 2,
+	core.AssertTrue(t, call.maxLive.Load() <= 2,
 		"observed concurrency must never exceed the cap of 2")
-	core.AssertTrue(t, atomic.LoadInt64(&call.maxLive) >= 2,
+	core.AssertTrue(t, call.maxLive.Load() >= 2,
 		"with 10 slow items the cap should actually be reached")
 }
 
@@ -140,7 +140,7 @@ func TestBatch_Concurrency_Bad(t *core.T) {
 	out := Run(context.Background(), reqs, Options{Concurrency: 0, Call: call})
 
 	core.AssertEqual(t, 6, len(out.Items))
-	core.AssertTrue(t, atomic.LoadInt64(&call.maxLive) <= 1,
+	core.AssertTrue(t, call.maxLive.Load() <= 1,
 		"a zero/negative cap clamps to serial, never unbounded")
 }
 
@@ -152,9 +152,9 @@ func TestBatch_Concurrency_Ugly(t *core.T) {
 	out := Run(context.Background(), reqs, Options{Concurrency: 100, Call: call})
 
 	core.AssertEqual(t, 3, len(out.Items))
-	core.AssertTrue(t, atomic.LoadInt64(&call.maxLive) <= 3,
+	core.AssertTrue(t, call.maxLive.Load() <= 3,
 		"can't run more in parallel than there are items")
-	core.AssertEqual(t, int64(3), atomic.LoadInt64(&call.calls), "each item dispatched exactly once")
+	core.AssertEqual(t, int64(3), call.calls.Load(), "each item dispatched exactly once")
 }
 
 func TestBatch_Limiter_Good(t *core.T) {
@@ -169,7 +169,7 @@ func TestBatch_Limiter_Good(t *core.T) {
 	elapsed := time.Since(start)
 
 	core.AssertEqual(t, 4, len(out.Items))
-	core.AssertEqual(t, int64(4), atomic.LoadInt64(&lim.waits), "every item is throttled through the limiter")
+	core.AssertEqual(t, int64(4), lim.waits.Load(), "every item is throttled through the limiter")
 	core.AssertTrue(t, elapsed >= 12*time.Millisecond,
 		"rate limiting serialises the burst — 4 tokens at 200/s can't all fire instantly")
 }
@@ -234,7 +234,7 @@ func TestBatch_Cancelled_Bad(t *core.T) {
 
 	out := Run(ctx, []any{"a", "b", "c"}, Options{Concurrency: 1, Call: call})
 	core.AssertEqual(t, 3, len(out.Items), "every request still yields a result slot")
-	core.AssertEqual(t, int64(0), atomic.LoadInt64(&call.calls),
+	core.AssertEqual(t, int64(0), call.calls.Load(),
 		"a cancelled batch never dispatches the Call")
 	core.AssertEqual(t, 0, out.Usage.TotalTokens, "a cancelled batch has zero usage")
 	for _, it := range out.Items {
@@ -257,7 +257,7 @@ func TestBatch_RunOne_Cancelled_Bad(t *core.T) {
 	core.AssertError(t, got.Err, "cancelled")
 	core.AssertContains(t, got.Err.Error(), "item 7 cancelled", "the error names the cancelled item")
 	core.AssertNil(t, got.Result, "a cancelled item has no result")
-	core.AssertEqual(t, int64(0), atomic.LoadInt64(&call.calls), "the Call is never reached")
+	core.AssertEqual(t, int64(0), call.calls.Load(), "the Call is never reached")
 }
 
 func TestBatch_Limiter_Refused_Ugly(t *core.T) {
@@ -271,7 +271,7 @@ func TestBatch_Limiter_Refused_Ugly(t *core.T) {
 	core.AssertEqual(t, 2, len(out.Items))
 	core.AssertContains(t, out.Items[0].Err.Error(), "throttle wait", "a refused throttle fails the item")
 	core.AssertContains(t, out.Items[1].Err.Error(), "throttle wait", "a refused throttle fails the item")
-	core.AssertEqual(t, int64(0), atomic.LoadInt64(&call.calls),
+	core.AssertEqual(t, int64(0), call.calls.Load(),
 		"a refused throttle never dispatches the Call")
 }
 
@@ -279,7 +279,7 @@ func TestBatch_TokenBucket_Unlimited_Good(t *core.T) {
 	// A rate of zero means "no rate limit": every Wait returns at once (the
 	// interval==0 fast path), so a burst clamps to at least 1 and never blocks.
 	tb := NewTokenBucket(0, 0) // rate 0 → unlimited; burst 0 → clamped to 1
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		core.AssertNil(t, tb.Wait(context.Background()), "unlimited bucket never blocks")
 	}
 }

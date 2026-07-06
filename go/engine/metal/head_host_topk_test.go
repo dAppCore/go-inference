@@ -44,11 +44,11 @@ func TestHostTopKCandidatesBF16(t *testing.T) {
 
 	// reference: decode the SAME bf16 values, sort ids by value desc, take k
 	dec := make([]float32, vocab)
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		dec[i] = bf16ToF32(logits[i*bf16Size], logits[i*bf16Size+1])
 	}
 	ref := make([]int32, 0, vocab)
-	for i := int32(0); i < vocab; i++ {
+	for i := range int32(vocab) {
 		if !tokenSuppressed(int(i), suppress) {
 			ref = append(ref, i)
 		}

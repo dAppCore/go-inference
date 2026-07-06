@@ -3,6 +3,7 @@
 package model
 
 import (
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -84,9 +85,7 @@ func (plan SequenceMixerSubpathPlan) Clone() SequenceMixerSubpathPlan {
 		Subpaths:   make(map[int]string, len(plan.Subpaths)),
 		Ambiguous:  make(map[int][]string, len(plan.Ambiguous)),
 	}
-	for layer, subpath := range plan.Subpaths {
-		out.Subpaths[layer] = subpath
-	}
+	maps.Copy(out.Subpaths, plan.Subpaths)
 	for layer, ambiguous := range plan.Ambiguous {
 		out.Ambiguous[layer] = append([]string(nil), ambiguous...)
 	}
@@ -689,8 +688,8 @@ func DiscoverSequenceMixerSubpaths(names []string, numLayers int) SequenceMixerS
 
 func SequenceMixerWeightNameCandidates(name string) []string {
 	candidates := []string{name}
-	if strings.HasPrefix(name, "model.") {
-		suffix := strings.TrimPrefix(name, "model.")
+	if after, ok := strings.CutPrefix(name, "model."); ok {
+		suffix := after
 		return append(candidates,
 			"language_model."+name,
 			"language_model.model."+suffix,

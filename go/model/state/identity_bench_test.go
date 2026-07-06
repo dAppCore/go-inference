@@ -216,7 +216,7 @@ func BenchmarkIdentity_Bundle_Construct_KVRefs_10(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		kv := make([]StateRef, 0, 10)
-		for j := 0; j < 10; j++ {
+		for range 10 {
 			kv = append(kv, StateRef{Kind: "kv", URI: "state://kv/blocks", SizeBytes: 65536})
 		}
 		identitySinkBundle = Bundle{
@@ -237,7 +237,7 @@ func BenchmarkIdentity_Bundle_Construct_KVRefs_100(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		kv := make([]StateRef, 0, 100)
-		for j := 0; j < 100; j++ {
+		for range 100 {
 			kv = append(kv, StateRef{Kind: "kv", URI: "state://kv/blocks", SizeBytes: 65536})
 		}
 		identitySinkBundle = Bundle{
@@ -258,7 +258,7 @@ func BenchmarkIdentity_Bundle_Construct_KVRefs_1000(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		kv := make([]StateRef, 0, 1000)
-		for j := 0; j < 1000; j++ {
+		for range 1000 {
 			kv = append(kv, StateRef{Kind: "kv", URI: "state://kv/blocks", SizeBytes: 65536})
 		}
 		identitySinkBundle = Bundle{

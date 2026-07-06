@@ -30,12 +30,12 @@ func TestWKV7L1ClosedForm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WKV7F32: %v", err)
 	}
-	for h := 0; h < H; h++ {
+	for h := range H {
 		var rk float64
-		for i := 0; i < K; i++ {
+		for i := range K {
 			rk += float64(r[h*K+i]) * float64(k[h*K+i])
 		}
-		for j := 0; j < V; j++ {
+		for j := range V {
 			want := rk * float64(v[h*V+j])
 			if got := float64(o[h*V+j]); math.Abs(got-want) > 1e-4*(1+math.Abs(want)) {
 				t.Errorf("o[%d,%d] = %v, closed form (r·k)·v = %v", h, j, got, want)

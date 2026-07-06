@@ -200,12 +200,9 @@ func QuantizeWeights(weights []float32, cfg QuantizeConfig) (QuantizedWeights, e
 		Scales:      make([]float32, groups),
 		ZeroPoints:  make([]float32, groups),
 	}
-	for group := 0; group < groups; group++ {
+	for group := range groups {
 		start := group * cfg.GroupSize
-		end := start + cfg.GroupSize
-		if end > len(weights) {
-			end = len(weights)
-		}
+		end := min(start+cfg.GroupSize, len(weights))
 		scale, zero := quantParams(weights[start:end], cfg)
 		out.Scales[group] = scale
 		out.ZeroPoints[group] = zero

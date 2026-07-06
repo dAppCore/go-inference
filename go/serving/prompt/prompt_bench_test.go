@@ -160,7 +160,7 @@ func BenchmarkMemoryStore_Get(b *core.B) {
 
 func BenchmarkMemoryStore_Latest(b *core.B) {
 	s := NewMemoryStore()
-	for v := 0; v < 5; v++ {
+	for range 5 {
 		_, _ = s.Put(Template{ID: "greet", Body: benchBody, InputVars: benchInputVars})
 	}
 	b.ReportAllocs()
@@ -172,7 +172,7 @@ func BenchmarkMemoryStore_Latest(b *core.B) {
 
 func BenchmarkMemoryStore_List(b *core.B) {
 	s := NewMemoryStore()
-	for v := 0; v < 5; v++ {
+	for range 5 {
 		_, _ = s.Put(Template{ID: "greet", Body: benchBody, InputVars: benchInputVars})
 	}
 	b.ReportAllocs()

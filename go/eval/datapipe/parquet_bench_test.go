@@ -12,7 +12,7 @@ import (
 func buildChatJSONLFixture(b *testing.B, lines int) string {
 	b.Helper()
 	var sb core.Builder
-	for i := 0; i < lines; i++ {
+	for range lines {
 		sb.WriteString(`{"messages":[`)
 		sb.WriteString(`{"role":"system","content":"You are a calm philosophical assistant."},`)
 		sb.WriteString(`{"role":"user","content":"Explain the moral imperative of consciousness."},`)

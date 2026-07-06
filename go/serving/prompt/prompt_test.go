@@ -284,7 +284,7 @@ func TestPrompt_Store_Ugly(t *core.T) {
 	conc := NewMemoryStore()
 	const n = 50
 	done := make(chan struct{})
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			_, _ = conc.Put(Template{ID: "hot", Body: "x"})
 			_, _ = conc.List("hot")
@@ -292,7 +292,7 @@ func TestPrompt_Store_Ugly(t *core.T) {
 			done <- struct{}{}
 		}()
 	}
-	for i := 0; i < n; i++ {
+	for range n {
 		<-done
 	}
 	all, err = conc.List("hot")

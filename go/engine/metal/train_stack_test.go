@@ -41,7 +41,7 @@ func TestStackedSFTReducesLoss(t *testing.T) {
 	oHead := opt(vocab * dModel)
 
 	var first, last float32
-	for s := 0; s < steps; s++ {
+	for s := range steps {
 		// forward, saving each layer's input (the residual stream).
 		h0 := x
 		h1, err := MLPBlockForwardF32(h0, layers[0].normW, layers[0].wGate, layers[0].wUp, layers[0].wDown, M, dModel, dFF, eps)

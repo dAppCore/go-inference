@@ -48,8 +48,8 @@ func seqToHeadMajor(seqMajor []byte, nKV, headDim, L int) []byte {
 	kvDim := nKV * headDim
 	hm := make([]byte, nKV*L*headDim*bf16Size)
 	rb := headDim * bf16Size
-	for h := 0; h < nKV; h++ {
-		for i := 0; i < L; i++ {
+	for h := range nKV {
+		for i := range L {
 			src := (i*kvDim + h*headDim) * bf16Size
 			dst := ((h*L + i) * headDim) * bf16Size
 			copy(hm[dst:dst+rb], seqMajor[src:src+rb])

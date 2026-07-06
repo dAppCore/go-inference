@@ -240,7 +240,7 @@ func (c *PagedKVCache) appendToPage(page int, k, v []byte, srcLen, start, take i
 
 func copyPagedKVTokens(dst []byte, dstSpan, dstStart int, src []byte, srcSpan, srcStart, take, nKVHeads, headDim int) {
 	headBytes := headDim * bf16Size
-	for h := 0; h < nKVHeads; h++ {
+	for h := range nKVHeads {
 		dstOff := (h*dstSpan + dstStart) * headBytes
 		srcOff := (h*srcSpan + srcStart) * headBytes
 		copy(dst[dstOff:dstOff+take*headBytes], src[srcOff:srcOff+take*headBytes])
@@ -289,7 +289,7 @@ func (c *PagedKVCache) trimFirstPage(tokens int) {
 
 func movePagedKVTokensToFront(page []byte, span, start, count, nKVHeads, headDim int) {
 	headBytes := headDim * bf16Size
-	for h := 0; h < nKVHeads; h++ {
+	for h := range nKVHeads {
 		base := h * span * headBytes
 		src := base + start*headBytes
 		dst := base

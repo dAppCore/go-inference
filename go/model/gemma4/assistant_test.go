@@ -266,7 +266,7 @@ func TestAssistantConfigFromGGUFDefaults(t *testing.T) {
 		t.Fatalf("BackboneHidden = %d, want 256 (fallback to embedding_length)", cfg.BackboneHidden)
 	}
 	// pattern absent → 1 → every layer full_attention.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if got := cfg.LayerType(i); got != "full_attention" {
 			t.Fatalf("LayerType(%d) = %q, want full_attention (pattern defaults to 1)", i, got)
 		}

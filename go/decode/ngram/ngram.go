@@ -65,14 +65,8 @@ type Drafter struct {
 //
 //	d := ngram.New(ngram.Config{MaxNgram: 3, MaxDraft: 4})
 func New(cfg Config) *Drafter {
-	n := cfg.MaxNgram
-	if n < 1 {
-		n = 1
-	}
-	k := cfg.MaxDraft
-	if k < 1 {
-		k = 1
-	}
+	n := max(cfg.MaxNgram, 1)
+	k := max(cfg.MaxDraft, 1)
 	return &Drafter{maxNgram: n, maxDraft: k}
 }
 
@@ -102,10 +96,7 @@ func lookup(context []int, maxNgram, maxDraft int) []int {
 
 	// Cap the suffix length to what the context can actually hold while still
 	// leaving room for an earlier occurrence (suffix can be at most L-1 long).
-	maxN := maxNgram
-	if maxN > L-1 {
-		maxN = L - 1
-	}
+	maxN := min(maxNgram, L-1)
 
 	// Longest suffix first: a longer match is the more specific prediction.
 	for n := maxN; n >= 1; n-- {
@@ -124,10 +115,7 @@ func lookup(context []int, maxNgram, maxDraft int) []int {
 			// least one token always follows the match — propose up to maxDraft of
 			// them, clamped to what the context holds.
 			from := i + n
-			end := from + maxDraft
-			if end > L {
-				end = L
-			}
+			end := min(from+maxDraft, L)
 			out := make([]int, end-from)
 			copy(out, context[from:end])
 			return out
@@ -140,7 +128,7 @@ func lookup(context []int, maxNgram, maxDraft int) []int {
 // context[suffixStart:suffixStart+n]. Caller guarantees both windows are in
 // range. Pulled out so the scan reads as "find where the suffix occurred".
 func matchAt(context []int, i, suffixStart, n int) bool {
-	for j := 0; j < n; j++ {
+	for j := range n {
 		if context[i+j] != context[suffixStart+j] {
 			return false
 		}

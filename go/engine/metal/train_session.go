@@ -75,9 +75,9 @@ func (s *ArchSession) ForwardCaptureHiddens(ids []int32) (embeds [][]byte, perLa
 		return nil, nil, core.NewError("native.ForwardCaptureHiddens: capture count mismatch (per-layer capture not wired?)")
 	}
 	perLayerOut = make([][]byte, N)
-	for l := 0; l < N; l++ {
+	for l := range N {
 		buf := make([]byte, T*rowBytes)
-		for t := 0; t < T; t++ {
+		for t := range T {
 			copy(buf[t*rowBytes:(t+1)*rowBytes], capturedLayerHiddens[t*N+l])
 		}
 		perLayerOut[l] = buf
@@ -90,7 +90,7 @@ func (s *ArchSession) forwardCaptureHiddensICB(ids []int32, T, N int) (embeds []
 	s.pos = 0
 	embeds = make([][]byte, T)
 	perLayerOut = make([][]byte, N)
-	for l := 0; l < N; l++ {
+	for l := range N {
 		perLayerOut[l] = make([]byte, T*rowBytes)
 	}
 	var embedSlab []byte
@@ -128,7 +128,7 @@ func (s *ArchSession) forwardCaptureHiddensICB(ids []int32, T, N int) (embeds []
 		if len(layers) != N {
 			return nil, nil, core.NewError("native.ForwardCaptureHiddens: ICB capture count mismatch")
 		}
-		for l := 0; l < N; l++ {
+		for l := range N {
 			if len(layers[l]) != rowBytes {
 				return nil, nil, core.NewError("native.ForwardCaptureHiddens: ICB capture row size mismatch")
 			}

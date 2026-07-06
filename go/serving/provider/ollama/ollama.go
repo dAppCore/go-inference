@@ -33,7 +33,7 @@ type ChatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
 	Stream   bool      `json:"stream,omitempty"`
-	Options  Options   `json:"options,omitempty"`
+	Options  Options   `json:"options"`
 }
 
 // GenerateRequest is the Ollama prompt-generation request shape.
@@ -41,7 +41,7 @@ type GenerateRequest struct {
 	Model   string  `json:"model"`
 	Prompt  string  `json:"prompt"`
 	Stream  bool    `json:"stream,omitempty"`
-	Options Options `json:"options,omitempty"`
+	Options Options `json:"options"`
 }
 
 // ChatResponse is the Ollama chat response shape.

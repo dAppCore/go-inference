@@ -84,7 +84,6 @@ func Test_Markers_NoAllocs(t *testing.T) {
 		{"gptoss", gptOSSMarkers},
 	}
 	for _, c := range cases {
-		c := c
 		t.Run(c.name, func(t *testing.T) {
 			allocs := testing.AllocsPerRun(100, func() {
 				markersBenchSet = c.call()

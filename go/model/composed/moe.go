@@ -26,21 +26,21 @@ type MoEMLP struct {
 func swigluExpert(xt []float32, e MoEExpert, D int) []float32 {
 	FF := len(e.Gate) / D
 	h := make([]float64, FF)
-	for f := 0; f < FF; f++ {
+	for f := range FF {
 		gr := e.Gate[f*D : f*D+D]
 		ur := e.Up[f*D : f*D+D]
 		var g, u float64
-		for d := 0; d < D; d++ {
+		for d := range D {
 			g += float64(xt[d]) * float64(gr[d])
 			u += float64(xt[d]) * float64(ur[d])
 		}
 		h[f] = silu(g) * u
 	}
 	out := make([]float32, D)
-	for d := 0; d < D; d++ {
+	for d := range D {
 		dr := e.Down[d*FF : d*FF+FF]
 		var acc float64
-		for f := 0; f < FF; f++ {
+		for f := range FF {
 			acc += h[f] * float64(dr[f])
 		}
 		out[d] = float32(acc)
@@ -52,14 +52,14 @@ func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 	nE := len(m.Experts)
 	out := make([]float32, L*D)
 	probs := make([]float64, nE)
-	for t := 0; t < L; t++ {
+	for t := range L {
 		xt := x[t*D : (t+1)*D]
 		// router logits → softmax numerators (the denominator cancels in the top-k renormalisation).
 		maxL := math.Inf(-1)
-		for e := 0; e < nE; e++ {
+		for e := range nE {
 			rr := m.Router[e*D : e*D+D]
 			var acc float64
-			for d := 0; d < D; d++ {
+			for d := range D {
 				acc += float64(xt[d]) * float64(rr[d])
 			}
 			probs[e] = acc
@@ -67,7 +67,7 @@ func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 				maxL = acc
 			}
 		}
-		for e := 0; e < nE; e++ {
+		for e := range nE {
 			probs[e] = math.Exp(probs[e] - maxL)
 		}
 		idx := topKIndices(probs, m.TopK)
@@ -79,13 +79,13 @@ func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 		for _, e := range idx {
 			w := probs[e] / sumW // renormalise the selected softmax probs to sum 1
 			eo := swigluExpert(xt, m.Experts[e], D)
-			for d := 0; d < D; d++ {
+			for d := range D {
 				ot[d] += float32(w * float64(eo[d]))
 			}
 		}
 		if m.Shared != nil {
 			so := swigluExpert(xt, *m.Shared, D)
-			for d := 0; d < D; d++ {
+			for d := range D {
 				ot[d] += so[d]
 			}
 		}

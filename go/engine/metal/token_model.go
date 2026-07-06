@@ -188,7 +188,7 @@ func nativeVisionPlaceholderBlock(begin, token, end string, softTokens int) stri
 	var b core.Builder
 	b.Grow(len(begin) + len(end) + softTokens*len(token))
 	b.WriteString(begin)
-	for i := 0; i < softTokens; i++ {
+	for range softTokens {
 		b.WriteString(token)
 	}
 	b.WriteString(end)
@@ -263,7 +263,7 @@ func (m *NativeTokenModel) AudioPlaceholderBlock(softTokens int) string {
 	var b core.Builder
 	b.Grow(len(cfg.AudioBeginToken) + len(cfg.AudioEndToken) + softTokens*len(cfg.AudioToken))
 	b.WriteString(cfg.AudioBeginToken)
-	for i := 0; i < softTokens; i++ {
+	for range softTokens {
 		b.WriteString(cfg.AudioToken)
 	}
 	b.WriteString(cfg.AudioEndToken)
@@ -565,7 +565,7 @@ func nativeAudioProjector(rows []float32, projector model.LoadedAudioLinear, inp
 	}
 	L := len(rows) / inputDim
 	normed := append([]float32(nil), rows...)
-	for i := 0; i < L; i++ {
+	for i := range L {
 		rmsNormVec(normed[i*inputDim:i*inputDim+inputDim], nil, eps)
 	}
 	if projector.Weight == nil {
@@ -580,7 +580,7 @@ func nativeAudioProjector(rows []float32, projector model.LoadedAudioLinear, inp
 		}
 		in := f32ToBf16Slice(normed)
 		out := make([]byte, L*projector.OutDim*bf16Size)
-		for r := 0; r < L; r++ {
+		for r := range L {
 			rowOut := out[r*projector.OutDim*bf16Size : (r+1)*projector.OutDim*bf16Size]
 			rowIn := in[r*inputDim*bf16Size : (r+1)*inputDim*bf16Size]
 			if _, err := QMVBF16Into(rowOut, rowIn, projector.Weight, projector.Scales, projector.Biases, projector.OutDim, inputDim, projector.GroupSize, projector.Bits); err != nil {

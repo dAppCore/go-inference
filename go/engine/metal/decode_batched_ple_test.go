@@ -35,7 +35,7 @@ func addPLETensorsBF16(t testing.TB, ts map[string]safetensors.Tensor, arch mode
 	mk("model.embed_tokens_per_layer.weight", []int{vocabPLI, plDim})
 	mk("model.per_layer_model_projection.weight", []int{plDim, dModel})
 	mk("model.per_layer_projection_norm.weight", []int{pliDim})
-	for i := 0; i < numLayers; i++ {
+	for i := range numLayers {
 		p := core.Sprintf("model.layers.%d", i)
 		mk(p+".per_layer_input_gate.weight", []int{pliDim, dModel})
 		mk(p+".per_layer_projection.weight", []int{dModel, pliDim})

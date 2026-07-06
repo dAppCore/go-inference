@@ -473,7 +473,7 @@ func addMinimalVisionTensors(ts map[string]safetensors.Tensor, hidden, layers in
 		return safetensors.Tensor{Dtype: "BF16", Shape: []int{out, in}, Data: make([]byte, out*in*2)}
 	}
 	ts["vision_tower.embeddings.patch_embedding.weight"] = mat(hidden, 588)
-	for i := 0; i < layers; i++ {
+	for i := range layers {
 		p := core.Sprintf("vision_tower.encoder.layers.%d", i)
 		for _, n := range []string{".input_layernorm", ".post_attention_layernorm", ".pre_feedforward_layernorm", ".post_feedforward_layernorm", ".self_attn.q_norm", ".self_attn.k_norm"} {
 			ts[p+n+".weight"] = bf(hidden)

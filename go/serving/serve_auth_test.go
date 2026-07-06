@@ -331,7 +331,7 @@ func TestServeAuth_GenerateAdminToken_Bad(t *testing.T) {
 // the edge that matters for a secret minted once per boot forever after.
 func TestServeAuth_GenerateAdminToken_Ugly(t *testing.T) {
 	seen := make(map[string]bool, 100)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		tok, err := GenerateAdminToken()
 		if err != nil {
 			t.Fatalf("GenerateAdminToken: %v", err)

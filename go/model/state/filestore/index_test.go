@@ -6,6 +6,7 @@ package filestore
 import (
 	"context"
 	"encoding/binary"
+	"maps"
 	"math"
 	"testing"
 	"time"
@@ -120,13 +121,9 @@ func TestFileStore_Good_RebuildIndexPreservesIndexShape(t *testing.T) {
 	// Snapshot the live index built by Put for later comparison.
 	store.mu.Lock()
 	putIndex := make(map[int]fileIndexEntry, len(store.index))
-	for id, entry := range store.index {
-		putIndex[id] = entry
-	}
+	maps.Copy(putIndex, store.index)
 	putURIIndex := make(map[string]int, len(store.uriIndex))
-	for uri, id := range store.uriIndex {
-		putURIIndex[uri] = id
-	}
+	maps.Copy(putURIIndex, store.uriIndex)
 	putNextID := store.nextID
 	putWriteAt := store.writeAt
 	store.mu.Unlock()

@@ -50,7 +50,7 @@ func benchProbeResult() ProbeResult {
 
 func benchCheckpoints(n int) []Checkpoint {
 	cps := make([]Checkpoint, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		cps = append(cps, Checkpoint{
 			RemoteDir: "/models/adapters-1b/run",
 			Filename:  "0000010_adapters.safetensors",

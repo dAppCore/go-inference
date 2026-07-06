@@ -294,10 +294,7 @@ func (p *Processor) emitReasoningBlock() {
 func longestSuffixPrefix(text string, markers []string) int {
 	best := 0
 	for _, marker := range markers {
-		max := len(marker) - 1
-		if max > len(text) {
-			max = len(text)
-		}
+		max := min(len(marker)-1, len(text))
 		for size := max; size > best; size-- {
 			if core.HasPrefix(marker, text[len(text)-size:]) {
 				best = size

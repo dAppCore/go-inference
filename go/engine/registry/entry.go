@@ -95,9 +95,9 @@ type Entry struct {
 	Format        Format       `json:"format,omitempty"`         // safetensors / gguf / peft
 	MemoryBytes   uint64       `json:"memory_bytes,omitempty"`   // resident memory footprint
 	DeviceFit     []string     `json:"device_fit,omitempty"`     // device / runtime ids that can hold it
-	Lineage       Lineage      `json:"lineage,omitempty"`        // adapter / base / provenance
-	Capabilities  Capabilities `json:"capabilities,omitempty"`   // tools / vision / grammar / streaming
-	Source        Source       `json:"source,omitempty"`         // local path or remote provider
+	Lineage       Lineage      `json:"lineage"`                  // adapter / base / provenance
+	Capabilities  Capabilities `json:"capabilities"`             // tools / vision / grammar / streaming
+	Source        Source       `json:"source"`                   // local path or remote provider
 	Status        Status       `json:"status,omitempty"`         // draft / ready / archived
 	Card          *ModelCard   `json:"card,omitempty"`           // EU AI Act model card (intended use, provenance, eval, limitations)
 }

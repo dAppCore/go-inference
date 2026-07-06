@@ -65,15 +65,12 @@ func TestQ4ICBvsReencodePerLayer(t *testing.T) {
 	// ICB replay per-layer (the suspect) — fresh ICB caches, same token, same pos
 	_, icbLayers := s.state.icb.stepBodyCapture(emb, 0, pli)
 
-	n := len(reLayers)
-	if len(icbLayers) < n {
-		n = len(icbLayers)
-	}
+	n := min(len(icbLayers), len(reLayers))
 	if n == 0 {
 		t.Fatalf("no per-layer captures: reencode=%d icb=%d", len(reLayers), len(icbLayers))
 	}
 	worst, worstL := 2.0, -1
-	for L := 0; L < n; L++ {
+	for L := range n {
 		c := cosineBF16(reLayers[L], icbLayers[L])
 		owns := s.state.specs[L].OwnsCache()
 		at := "sliding"

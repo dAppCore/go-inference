@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"io"
 	"io/fs"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -449,9 +450,7 @@ func applyROCmPortableAttentionConfigLabels(labels map[string]string, cfg rocmMo
 	if labels == nil {
 		return
 	}
-	for key, value := range rocmPortableAttentionConfigLabels(cfg) {
-		labels[key] = value
-	}
+	maps.Copy(labels, rocmPortableAttentionConfigLabels(cfg))
 	layerTypes := rocmConfigLayerTypes(cfg)
 	if len(layerTypes) > 0 {
 		labels["attention_layer_types"] = strings.Join(layerTypes, ",")
@@ -637,7 +636,7 @@ func mergeROCmPortableSafetensorsLabels(labels map[string]string, tensors []nati
 	}
 	dtypes := map[string]bool{}
 	if existing := labels["safetensors_dtypes"]; existing != "" {
-		for _, part := range strings.Split(existing, ",") {
+		for part := range strings.SplitSeq(existing, ",") {
 			if part != "" {
 				dtypes[part] = true
 			}
@@ -999,8 +998,8 @@ func NormalizeDenseLayerType(value string) string {
 
 func DenseWeightNameCandidates(name string) []string {
 	candidates := []string{name}
-	if strings.HasPrefix(name, "model.") {
-		suffix := strings.TrimPrefix(name, "model.")
+	if after, ok := strings.CutPrefix(name, "model."); ok {
+		suffix := after
 		return append(candidates,
 			"language_model."+name,
 			"language_model.model."+suffix,

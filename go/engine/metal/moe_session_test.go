@@ -5,6 +5,7 @@
 package native
 
 import (
+	"maps"
 	"math"
 	"os"
 	"testing"
@@ -100,7 +101,7 @@ func fuseMoEGateUpTensorPair(t *testing.T, ts map[string]safetensors.Tensor, gat
 		}
 		rowBytes := len(gate.Data) / gate.Shape[0]
 		fused := make([]byte, 0, len(gate.Data)+len(up.Data))
-		for e := 0; e < experts; e++ {
+		for e := range experts {
 			start := e * expertFF * rowBytes
 			end := start + expertFF*rowBytes
 			fused = append(fused, gate.Data[start:end]...)
@@ -125,7 +126,7 @@ func TestLoadGemma4QuantMoE(t *testing.T) {
 	const maxLen, n = 16, 4
 	// mixed precision: default 4-bit, local MLP + router 8-bit (the 26B-A4B QAT pattern).
 	quant := &model.QuantConfig{GroupSize: 64, Bits: 4, Overrides: map[string]model.ModuleQuant{}}
-	for i := 0; i < numLayers; i++ {
+	for i := range numLayers {
 		for _, m := range []string{"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "router.proj"} {
 			quant.Overrides[core.Sprintf("model.layers.%d.%s", i, m)] = model.ModuleQuant{GroupSize: 64, Bits: 8}
 		}
@@ -238,7 +239,7 @@ func TestLoadGemma4QuantMoEFusedGateUpMatchesSplitExperts(t *testing.T) {
 	const dFF, expertDFF, numExperts, topK, numLayers = 128, 64, 4, 2, 1
 	const maxLen = 8
 	quant := &model.QuantConfig{GroupSize: 64, Bits: 4, Overrides: map[string]model.ModuleQuant{}}
-	for i := 0; i < numLayers; i++ {
+	for i := range numLayers {
 		for _, m := range []string{"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "router.proj"} {
 			quant.Overrides[core.Sprintf("model.layers.%d.%s", i, m)] = model.ModuleQuant{GroupSize: 64, Bits: 8}
 		}
@@ -501,11 +502,9 @@ func alignedSafetensorsBlob(t *testing.T, tensors map[string]safetensors.Tensor,
 		}
 		return uintptr(unsafe.Pointer(&tensor.Data[0])) - uintptr(unsafe.Pointer(&blob[0]))
 	}
-	for pad := 0; pad < 32; pad++ {
+	for pad := range 32 {
 		candidate := make(map[string]safetensors.Tensor, len(tensors)+1)
-		for name, tensor := range tensors {
-			candidate[name] = tensor
-		}
+		maps.Copy(candidate, tensors)
 		if pad > 0 {
 			candidate["000_alignment_pad"] = safetensors.Tensor{Dtype: "U8", Shape: []int{pad}, Data: make([]byte, pad)}
 		}

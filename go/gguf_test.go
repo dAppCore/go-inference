@@ -119,7 +119,7 @@ func TestGGUF_AllocBudget_ReadInfo_VocabHeavy(t *testing.T) {
 		"qwen3.context_length":   uint32(40960),
 		"qwen3.embedding_length": uint32(2048),
 	}
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		metadata[core.Sprintf("synthetic.meta.%d", i)] = core.Sprintf("value-payload-%d", i)
 	}
 	path := writeMinimalGGUF(t, metadata)

@@ -4,6 +4,7 @@ package model
 
 import (
 	"strconv"
+	"strings"
 
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/engine/hip/internal/registry"
@@ -58,7 +59,7 @@ type TokenizerRoute struct {
 	RequiredFiles          []string                    `json:"required_files,omitempty"`
 	OptionalFiles          []string                    `json:"optional_files,omitempty"`
 	Capabilities           []inference.CapabilityID    `json:"capabilities,omitempty"`
-	Tokenizer              inference.TokenizerIdentity `json:"tokenizer,omitempty"`
+	Tokenizer              inference.TokenizerIdentity `json:"tokenizer"`
 	Labels                 map[string]string           `json:"labels,omitempty"`
 }
 
@@ -526,9 +527,10 @@ func joinNonEmptyStrings(values []string, sep string) string {
 	if len(out) == 0 {
 		return ""
 	}
-	result := out[0]
+	var result strings.Builder
+	result.WriteString(out[0])
 	for _, value := range out[1:] {
-		result += sep + value
+		result.WriteString(sep + value)
 	}
-	return result
+	return result.String()
 }

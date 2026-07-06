@@ -47,7 +47,7 @@ func testUnpack5BitLSB(packed []byte, count int) []int {
 	bitBuf := uint64(0)
 	bitCount := 0
 	byteIdx := 0
-	for i := 0; i < count; i++ {
+	for i := range count {
 		for bitCount < 5 {
 			bitBuf |= uint64(packed[byteIdx]) << bitCount
 			byteIdx++
@@ -127,10 +127,10 @@ func testDequantQ8_0(data []byte) []float32 {
 	const blockBytes = 34
 	nBlocks := len(data) / blockBytes
 	out := make([]float32, 0, nBlocks*32)
-	for b := 0; b < nBlocks; b++ {
+	for b := range nBlocks {
 		block := data[b*blockBytes:]
 		scale := testFloat16Decode(binary.LittleEndian.Uint16(block[0:2]))
-		for i := 0; i < 32; i++ {
+		for i := range 32 {
 			out = append(out, scale*float32(int8(block[2+i])))
 		}
 	}
@@ -170,14 +170,14 @@ func testDequantQ4_0(data []byte) []float32 {
 	const blockBytes = 18
 	nBlocks := len(data) / blockBytes
 	out := make([]float32, 0, nBlocks*32)
-	for b := 0; b < nBlocks; b++ {
+	for b := range nBlocks {
 		block := data[b*blockBytes:]
 		scale := testFloat16Decode(binary.LittleEndian.Uint16(block[0:2]))
 		packed := block[2:18]
-		for i := 0; i < 16; i++ {
+		for i := range 16 {
 			out = append(out, scale*(float32(packed[i]&0xF)-8))
 		}
-		for i := 0; i < 16; i++ {
+		for i := range 16 {
 			out = append(out, scale*(float32(packed[i]>>4)-8))
 		}
 	}
@@ -214,7 +214,7 @@ func testDequantQ5_0(data []byte) []float32 {
 	const blockBytes = 24
 	nBlocks := len(data) / blockBytes
 	out := make([]float32, 0, nBlocks*32)
-	for b := 0; b < nBlocks; b++ {
+	for b := range nBlocks {
 		block := data[b*blockBytes:]
 		scale := testFloat16Decode(binary.LittleEndian.Uint16(block[0:2]))
 		minVal := testFloat16Decode(binary.LittleEndian.Uint16(block[2:4]))
@@ -263,12 +263,12 @@ func testDequantQ4_K(data []byte) []float32 {
 	const blockBytes = 144
 	nBlocks := len(data) / blockBytes
 	out := make([]float32, 0, nBlocks*qkBlockSize)
-	for b := 0; b < nBlocks; b++ {
+	for b := range nBlocks {
 		block := data[b*blockBytes:]
 		d := testFloat16Decode(binary.LittleEndian.Uint16(block[0:2]))
 		dmin := testFloat16Decode(binary.LittleEndian.Uint16(block[2:4]))
 		quants := block[16:144]
-		for j := 0; j < qkBlockSize; j++ {
+		for j := range qkBlockSize {
 			var q byte
 			if j%2 == 0 {
 				q = quants[j/2] & 0xF
@@ -321,7 +321,7 @@ func testDequantQ5_K(data []byte) []float32 {
 	const blockBytes = 176
 	nBlocks := len(data) / blockBytes
 	out := make([]float32, 0, nBlocks*qkBlockSize)
-	for b := 0; b < nBlocks; b++ {
+	for b := range nBlocks {
 		block := data[b*blockBytes:]
 		d := testFloat16Decode(binary.LittleEndian.Uint16(block[0:2]))
 		dmin := testFloat16Decode(binary.LittleEndian.Uint16(block[2:4]))
@@ -364,7 +364,7 @@ func testDequantQ6_K(data []byte) []float32 {
 	const blockBytes = 210
 	nBlocks := len(data) / blockBytes
 	out := make([]float32, 0, nBlocks*qkBlockSize)
-	for b := 0; b < nBlocks; b++ {
+	for b := range nBlocks {
 		block := data[b*blockBytes:]
 		ql := block[0:128]
 		qh := block[128:192]
@@ -372,7 +372,7 @@ func testDequantQ6_K(data []byte) []float32 {
 		d := testFloat16Decode(binary.LittleEndian.Uint16(block[208:210]))
 		var levels [qkBlockSize]byte
 		for n := 0; n < qkBlockSize; n += 128 {
-			for l := 0; l < 32; l++ {
+			for l := range 32 {
 				q1 := ql[n/2+l] & 0xF
 				q3 := ql[n/2+l] >> 4
 				q2 := ql[n/2+l+32] & 0xF
@@ -384,7 +384,7 @@ func testDequantQ6_K(data []byte) []float32 {
 				levels[n+l+96] = q4 | (((qhByte >> 6) & 0x3) << 4)
 			}
 		}
-		for i := 0; i < qkBlockSize; i++ {
+		for i := range qkBlockSize {
 			sub := i / 16
 			scale := int8(scales[sub])
 			out = append(out, d*float32(scale)*(float32(levels[i])-32))
@@ -425,14 +425,14 @@ func testDequantQ3_K(data []byte) []float32 {
 	const blockBytes = 110
 	nBlocks := len(data) / blockBytes
 	out := make([]float32, 0, nBlocks*qkBlockSize)
-	for b := 0; b < nBlocks; b++ {
+	for b := range nBlocks {
 		block := data[b*blockBytes:]
 		hmask := block[0:32]
 		qs := block[32:96]
 		var packedScales [12]byte
 		copy(packedScales[:], block[96:108])
 		d := testFloat16Decode(binary.LittleEndian.Uint16(block[108:110]))
-		for i := 0; i < qkBlockSize; i++ {
+		for i := range qkBlockSize {
 			is := i / 16
 			l := i % 16
 			bitIndex := is / 2
@@ -487,13 +487,13 @@ func testDequantQ2_K(data []byte) []float32 {
 	const blockBytes = 84
 	nBlocks := len(data) / blockBytes
 	out := make([]float32, 0, nBlocks*qkBlockSize)
-	for b := 0; b < nBlocks; b++ {
+	for b := range nBlocks {
 		block := data[b*blockBytes:]
 		scales := block[0:16]
 		qs := block[16:80]
 		d := testFloat16Decode(binary.LittleEndian.Uint16(block[80:82]))
 		dmin := testFloat16Decode(binary.LittleEndian.Uint16(block[82:84]))
-		for i := 0; i < qkBlockSize; i++ {
+		for i := range qkBlockSize {
 			sub := i / 16
 			scEnc := scales[sub] & 0xF
 			mnEnc := scales[sub] >> 4
@@ -559,14 +559,14 @@ func testDequantQ8_K(data []byte) ([]float32, []int16) {
 	nBlocks := len(data) / blockBytes
 	out := make([]float32, 0, nBlocks*qkBlockSize)
 	var bsums []int16
-	for b := 0; b < nBlocks; b++ {
+	for b := range nBlocks {
 		block := data[b*blockBytes:]
 		d := math.Float32frombits(binary.LittleEndian.Uint32(block[0:4]))
 		qs := block[4:260]
-		for i := 0; i < qkBlockSize; i++ {
+		for i := range qkBlockSize {
 			out = append(out, d*float32(int8(qs[i])))
 		}
-		for sb := 0; sb < qkSubBlocks; sb++ {
+		for sb := range qkSubBlocks {
 			bsums = append(bsums, int16(binary.LittleEndian.Uint16(block[260+sb*2:262+sb*2])))
 		}
 	}
@@ -587,9 +587,9 @@ func TestQuantizeKernels_QuantizeQ8_K_Good(t *testing.T) {
 		}
 	}
 	// bsums[sb] must equal the sum of the 16 signed quants in that group.
-	for sb := 0; sb < qkSubBlocks; sb++ {
+	for sb := range qkSubBlocks {
 		var want int16
-		for j := 0; j < 16; j++ {
+		for j := range 16 {
 			idx := sb*16 + j
 			d := math.Float32frombits(binary.LittleEndian.Uint32(data[0:4]))
 			q := int16(math.Round(float64(decoded[idx] / d)))

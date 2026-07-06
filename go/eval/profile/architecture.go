@@ -3,6 +3,8 @@
 package profile
 
 import (
+	"maps"
+	"slices"
 	"unsafe"
 
 	core "dappco.re/go"
@@ -285,12 +287,7 @@ func SafeLoRATarget(architecture, key string) bool {
 	if !ok {
 		return false
 	}
-	for _, extended := range ref.LoRAExtendedTargets {
-		if path == extended {
-			return false
-		}
-	}
-	return true
+	return !slices.Contains(ref.LoRAExtendedTargets, path)
 }
 
 // CanonicalWeightName canonicalises a checkpoint weight name for an
@@ -751,9 +748,7 @@ func cloneStringMap(in map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
+	maps.Copy(out, in)
 	return out
 }
 

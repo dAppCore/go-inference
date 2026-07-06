@@ -335,7 +335,7 @@ func TestChatHistory_RecentConversations_Good_UserFilter(t *testing.T) {
 // limit<=0 default branch).
 func TestChatHistory_RecentConversations_Good_DefaultLimit(t *testing.T) {
 	h := openTemp(t)
-	for i := 0; i < 12; i++ {
+	for i := range 12 {
 		if _, err := h.StartConversation(NewConversation{ModelID: "lemer-lite"}); err != nil {
 			t.Fatalf("StartConversation[%d]: %v", i, err)
 		}

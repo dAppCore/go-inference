@@ -51,7 +51,7 @@ func buildResponseRequest(turns int) ResponseRequest {
 		Stream:          true,
 		Stop:            StopList{"<|im_end|>"},
 	}
-	for i := 0; i < turns; i++ {
+	for i := range turns {
 		if i%2 == 0 {
 			req.Input = append(req.Input, ResponseInputMessage{Role: "user", Content: "Summarise the paragraph in one sentence."})
 		} else {
@@ -243,7 +243,7 @@ func BenchmarkResponses_MarshalStreamEvent_Delta_ShortToken(b *testing.B) {
 
 func BenchmarkResponses_MarshalStreamEvent_Delta_LongToken(b *testing.B) {
 	delta := ""
-	for i := 0; i < 64; i++ {
+	for range 64 {
 		delta += "fragment "
 	}
 	event := ResponseStreamEvent{
@@ -307,7 +307,7 @@ func BenchmarkResponses_AppendStreamEvent_Delta_ShortToken(b *testing.B) {
 
 func BenchmarkResponses_AppendStreamEvent_Delta_LongToken(b *testing.B) {
 	delta := ""
-	for i := 0; i < 64; i++ {
+	for range 64 {
 		delta += "fragment "
 	}
 	event := ResponseStreamEvent{

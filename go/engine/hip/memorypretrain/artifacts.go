@@ -14,11 +14,11 @@ type MemoryPretrainingArtifactConfig struct {
 	CorpusPath          string               `json:"corpus_path,omitempty"`
 	RouterPath          string               `json:"router_path,omitempty"`
 	FFNMemoryPath       string               `json:"ffn_memory_path,omitempty"`
-	Build               BuildConfig          `json:"build,omitempty"`
-	FFNMemory           FFNMemoryConfig      `json:"ffn_memory,omitempty"`
+	Build               BuildConfig          `json:"build"`
+	FFNMemory           FFNMemoryConfig      `json:"ffn_memory"`
 	ClusterIDInputPath  string               `json:"cluster_id_input_path,omitempty"`
 	ClusterIDOutputPath string               `json:"cluster_id_output_path,omitempty"`
-	ClusterIDJSONL      ClusterIDJSONLConfig `json:"cluster_id_jsonl,omitempty"`
+	ClusterIDJSONL      ClusterIDJSONLConfig `json:"cluster_id_jsonl"`
 }
 
 // MemoryPretrainingArtifacts contains the in-memory artifacts built by the

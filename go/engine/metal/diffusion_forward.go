@@ -104,7 +104,7 @@ func DiffusionDenoiseForwardBF16(g *BF16Model, diffusion *model.LoadedDiffusion,
 		head = g.Embed
 	}
 	logits := make([]byte, L*vocab*bf16Size)
-	for i := 0; i < L; i++ {
+	for i := range L {
 		row := h[i*dModel*bf16Size : (i+1)*dModel*bf16Size]
 		out, err := LMHeadBF16(row, g.FinalNorm, head, dModel, vocab, arch.Eps, arch.SoftCap)
 		if err != nil {
@@ -205,7 +205,7 @@ func DiffusionDenoiseForwardQuant(g *QuantModel, diffusion *model.LoadedDiffusio
 	headWeight := QuantWeight{Packed: head, Scales: scales, Biases: biases, GroupSize: g.GroupSize, Bits: g.Bits}
 	headGS, headBits := quantWeightGeometryForShape(headWeight, vocab, dModel, g.GroupSize, g.Bits)
 	logits := make([]byte, L*vocab*bf16Size)
-	for i := 0; i < L; i++ {
+	for i := range L {
 		row := h[i*dModel*bf16Size : (i+1)*dModel*bf16Size]
 		out, err := LMHeadQuant(row, g.FinalNorm, head, scales, biases, dModel, vocab, headGS, headBits, arch.Eps, arch.SoftCap)
 		if err != nil {
@@ -517,7 +517,7 @@ func diffusionMoERowsBF16(h []byte, w MoELayerWeights, rows, dModel, dFF int, ep
 		return nil, core.NewError("native.DiffusionDenoiseForwardBF16: MoE input size mismatch")
 	}
 	out := make([]byte, len(h))
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		row := h[r*dModel*bf16Size : (r+1)*dModel*bf16Size]
 		got, err := MoEBlockBF16(row, w, dModel, dFF, eps)
 		if err != nil {
@@ -566,7 +566,7 @@ func diffusionMoERowsQuant(h []byte, w MoEQuantLayerWeights, rows, dModel, dFF i
 		return nil, core.NewError("native.DiffusionDenoiseForwardQuant: MoE input size mismatch")
 	}
 	out := make([]byte, len(h))
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		row := h[r*dModel*bf16Size : (r+1)*dModel*bf16Size]
 		got, err := MoEBlockQuant(row, w, dModel, dFF, eps)
 		if err != nil {
@@ -609,7 +609,7 @@ func diffusionMatRowsQuant(w QuantWeight, x []byte, rows, outDim, inDim, groupSi
 		return MatRowsBF16(w.Packed, x, rows, outDim, inDim)
 	}
 	groupSize, bits = quantWeightGeometryForShape(w, outDim, inDim, groupSize, bits)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		src := x[r*inDim*bf16Size : (r+1)*inDim*bf16Size]
 		dst := out[r*outDim*bf16Size : (r+1)*outDim*bf16Size]
 		row, err := QMVBF16Into(dst, src, w.Packed, w.Scales, w.Biases, outDim, inDim, groupSize, bits)
@@ -685,7 +685,7 @@ func diffusionApplyQuantPLE(h []byte, w QuantizedLayerWeights, ple []byte, rows,
 	out := make([]byte, len(h))
 	plDimBytes := numLayers * pliDim * bf16Size
 	pliBytes := pliDim * bf16Size
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		hRow := h[r*dModel*bf16Size : (r+1)*dModel*bf16Size]
 		pliOff := r*plDimBytes + layer*pliBytes
 		pli := ple[pliOff : pliOff+pliBytes]
@@ -711,7 +711,7 @@ func diffusionApplyBF16PLE(h []byte, w DecodeLayerWeights, ple []byte, rows, dMo
 	out := make([]byte, len(h))
 	plDimBytes := numLayers * pliDim * bf16Size
 	pliBytes := pliDim * bf16Size
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		hRow := h[r*dModel*bf16Size : (r+1)*dModel*bf16Size]
 		pliOff := r*plDimBytes + layer*pliBytes
 		pli := ple[pliOff : pliOff+pliBytes]
@@ -788,7 +788,7 @@ func diffusionRopeRowsBF16(rows []byte, seq, heads, headDim, rotaryDim int, base
 		return nil, core.NewError("native.DiffusionDenoiseForwardBF16: rope row size mismatch")
 	}
 	out := make([]byte, len(rows))
-	for i := 0; i < seq; i++ {
+	for i := range seq {
 		row := rows[i*rowBytes : (i+1)*rowBytes]
 		roped, err := RoPEDimsBF16(row, 1, heads, headDim, rotaryDim, base, scale, offset+i, false)
 		if err != nil {
@@ -801,8 +801,8 @@ func diffusionRopeRowsBF16(rows []byte, seq, heads, headDim, rotaryDim int, base
 
 func diffusionRowsToHeadMajorBF16(rows []byte, seq, heads, headDim int) []byte {
 	out := make([]byte, len(rows))
-	for t := 0; t < seq; t++ {
-		for h := 0; h < heads; h++ {
+	for t := range seq {
+		for h := range heads {
 			src := (t*heads + h) * headDim * bf16Size
 			dst := (h*seq + t) * headDim * bf16Size
 			copy(out[dst:dst+headDim*bf16Size], rows[src:src+headDim*bf16Size])
@@ -813,8 +813,8 @@ func diffusionRowsToHeadMajorBF16(rows []byte, seq, heads, headDim int) []byte {
 
 func diffusionHeadMajorToRowsBF16(headMajor []byte, seq, heads, headDim int) []byte {
 	out := make([]byte, len(headMajor))
-	for h := 0; h < heads; h++ {
-		for t := 0; t < seq; t++ {
+	for h := range heads {
+		for t := range seq {
 			src := (h*seq + t) * headDim * bf16Size
 			dst := (t*heads + h) * headDim * bf16Size
 			copy(out[dst:dst+headDim*bf16Size], headMajor[src:src+headDim*bf16Size])
@@ -828,7 +828,7 @@ func diffusionConcatPrefixCanvasHeadMajor(prefixRows, canvasRows []byte, prefixL
 	out := make([]byte, heads*keyLen*headDim*bf16Size)
 	prefixHM := diffusionRowsToHeadMajorBF16(prefixRows, prefixLen, heads, headDim)
 	canvasHM := diffusionRowsToHeadMajorBF16(canvasRows, canvasLen, heads, headDim)
-	for h := 0; h < heads; h++ {
+	for h := range heads {
 		dst := h * keyLen * headDim * bf16Size
 		pb := prefixLen * headDim * bf16Size
 		cb := canvasLen * headDim * bf16Size
@@ -851,8 +851,8 @@ func diffusionMulLayerScalarBF16(h, scalar []byte, rows, dModel int) ([]byte, er
 		}
 	case dModel * bf16Size:
 		s := bf16ToF32Slice(scalar)
-		for r := 0; r < rows; r++ {
-			for d := 0; d < dModel; d++ {
+		for r := range rows {
+			for d := range dModel {
 				vals[r*dModel+d] *= s[d]
 			}
 		}

@@ -54,18 +54,18 @@ func GatedDeltaRuleF32(q, k, v, beta, alpha, prior []float32, L, H, D int, scale
 	kn := make([]float64, D)   // L2-normalised key
 	read := make([]float64, D) // read at the key
 	be := make([]float64, D)   // β · error
-	for t := 0; t < L; t++ {
-		for h := 0; h < H; h++ {
+	for t := range L {
+		for h := range H {
 			sBase := h * D * D
 			row := t*H*D + h*D
 			// L2-normalise k_t (over D).
 			var ss float64
-			for i := 0; i < D; i++ {
+			for i := range D {
 				kv := float64(k[row+i])
 				ss += kv * kv
 			}
 			inv := 1.0 / math.Sqrt(ss+float64(normEps))
-			for i := 0; i < D; i++ {
+			for i := range D {
 				kn[i] = float64(k[row+i]) * inv
 			}
 			a := float64(alpha[t*H+h])
@@ -76,33 +76,33 @@ func GatedDeltaRuleF32(q, k, v, beta, alpha, prior []float32, L, H, D int, scale
 				state[idx] = float32(a * float64(state[idx]))
 			}
 			// read[vv] = Σ_kk k̂[kk] · S[kk,vv]   (decayed state)
-			for vv := 0; vv < D; vv++ {
+			for vv := range D {
 				read[vv] = 0
 			}
-			for kk := 0; kk < D; kk++ {
+			for kk := range D {
 				knk := kn[kk]
 				sr := sBase + kk*D
-				for vv := 0; vv < D; vv++ {
+				for vv := range D {
 					read[vv] += knk * float64(state[sr+vv])
 				}
 			}
 			// be[vv] = β · (v[vv] − read[vv])
-			for vv := 0; vv < D; vv++ {
+			for vv := range D {
 				be[vv] = bta * (float64(v[row+vv]) - read[vv])
 			}
 			// write: S[kk,vv] += k̂[kk] · be[vv]
-			for kk := 0; kk < D; kk++ {
+			for kk := range D {
 				knk := kn[kk]
 				sr := sBase + kk*D
-				for vv := 0; vv < D; vv++ {
+				for vv := range D {
 					state[sr+vv] = float32(float64(state[sr+vv]) + knk*be[vv])
 				}
 			}
 			// o[vv] = Σ_kk (scale·q[kk]) · S_new[kk,vv]
 			sc := float64(scale)
-			for vv := 0; vv < D; vv++ {
+			for vv := range D {
 				var acc float64
-				for kk := 0; kk < D; kk++ {
+				for kk := range D {
 					acc += sc * float64(q[row+kk]) * float64(state[sBase+kk*D+vv])
 				}
 				o[row+vv] = float32(acc)

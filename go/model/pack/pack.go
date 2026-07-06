@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"io"
 	iofs "io/fs"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -280,7 +281,7 @@ func Hash(srcDir string) (string, core.Result) {
 		}
 		safetensorSizes = append(safetensorSizes, info.Size())
 	}
-	sort.Slice(safetensorSizes, func(i, j int) bool { return safetensorSizes[i] < safetensorSizes[j] })
+	slices.Sort(safetensorSizes)
 
 	h := sha256.New()
 	for _, m := range metas {
@@ -294,7 +295,7 @@ func Hash(srcDir string) (string, core.Result) {
 	var sizeBuf [8]byte
 	for _, sz := range safetensorSizes {
 		u := uint64(sz)
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			sizeBuf[i] = byte(u >> (8 * i))
 		}
 		h.Write(sizeBuf[:])
@@ -408,13 +409,13 @@ func extractTar(payload []byte, destDir string) core.Result {
 
 // manifestToHeaderMap marshals a Manifest to JSON and back into a
 // map[string]interface{} suitable for trix.Trix.Header.
-func manifestToHeaderMap(m Manifest) (map[string]interface{}, core.Result) {
+func manifestToHeaderMap(m Manifest) (map[string]any, core.Result) {
 	jr := core.JSONMarshal(m)
 	if !jr.OK {
 		return nil, jr
 	}
 	data := jr.Value.([]byte)
-	var out map[string]interface{}
+	var out map[string]any
 	if ur := core.JSONUnmarshal(data, &out); !ur.OK {
 		return nil, ur
 	}
@@ -423,7 +424,7 @@ func manifestToHeaderMap(m Manifest) (map[string]interface{}, core.Result) {
 
 // headerMapToManifest is the inverse — marshals the Trix header map back
 // to JSON, then unmarshals into a typed Manifest.
-func headerMapToManifest(h map[string]interface{}) (*Manifest, core.Result) {
+func headerMapToManifest(h map[string]any) (*Manifest, core.Result) {
 	jr := core.JSONMarshal(h)
 	if !jr.OK {
 		return nil, jr
@@ -473,12 +474,7 @@ func safeRelPath(p string) bool {
 		return false
 	}
 	// Reject any ".." segment — guards against tar slip vulnerabilities.
-	for _, seg := range splitSegments(p) {
-		if seg == ".." {
-			return false
-		}
-	}
-	return true
+	return !slices.Contains(splitSegments(p), "..")
 }
 
 // splitSegments splits a slash-separated path into its segments without

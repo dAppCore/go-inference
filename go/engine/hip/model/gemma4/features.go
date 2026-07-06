@@ -18,9 +18,9 @@ type Features struct {
 	TopKExperts  int               `json:"top_k_experts,omitempty"`
 	Vision       bool              `json:"vision,omitempty"`
 	Audio        bool              `json:"audio,omitempty"`
-	Attention    AttentionClass    `json:"attention,omitempty"`
-	Quantization QuantizationClass `json:"quantization,omitempty"`
-	Structure    StructurePlan     `json:"structure,omitempty"`
+	Attention    AttentionClass    `json:"attention"`
+	Quantization QuantizationClass `json:"quantization"`
+	Structure    StructurePlan     `json:"structure"`
 }
 
 // AttentionClass is the attention topology Gemma-4 declares from config.

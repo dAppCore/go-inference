@@ -8,6 +8,8 @@
 package jang
 
 import (
+	"maps"
+
 	core "dappco.re/go"
 )
 
@@ -27,7 +29,7 @@ type Info struct {
 	SourceName         string         `json:"source_name,omitempty"`
 	SourceOrg          string         `json:"source_org,omitempty"`
 	SourceArchitecture string         `json:"source_architecture,omitempty"`
-	Capabilities       Capabilities   `json:"capabilities,omitempty"`
+	Capabilities       Capabilities   `json:"capabilities"`
 	Packed             *PackedProfile `json:"packed,omitempty"`
 }
 
@@ -376,10 +378,7 @@ func DequantizePackedTensor(desc PackedTensorDescriptor, packed []byte, scales, 
 func dequantizeBit8(out []float32, packed []byte, scales, biases []float32, groupSize int) {
 	for i := 0; i < len(out); {
 		group := i / groupSize
-		end := (group + 1) * groupSize
-		if end > len(out) {
-			end = len(out)
-		}
+		end := min((group+1)*groupSize, len(out))
 		scale := scales[group]
 		bias := biases[group]
 		for ; i < end; i++ {
@@ -406,10 +405,7 @@ func dequantizeBit8(out []float32, packed []byte, scales, biases []float32, grou
 func dequantizeBit4(out []float32, packed []byte, scales, biases []float32, groupSize int) {
 	for i := 0; i < len(out); {
 		group := i / groupSize
-		end := (group + 1) * groupSize
-		if end > len(out) {
-			end = len(out)
-		}
+		end := min((group+1)*groupSize, len(out))
 		scale := scales[group]
 		bias := biases[group]
 		// Drain prefix elements until i is byte-aligned (i&1 == 0).
@@ -450,10 +446,7 @@ func dequantizeBit4(out []float32, packed []byte, scales, biases []float32, grou
 func dequantizeBit2(out []float32, packed []byte, scales, biases []float32, groupSize int) {
 	for i := 0; i < len(out); {
 		group := i / groupSize
-		end := (group + 1) * groupSize
-		if end > len(out) {
-			end = len(out)
-		}
+		end := min((group+1)*groupSize, len(out))
 		scale := scales[group]
 		bias := biases[group]
 		// Drain prefix elements until i is byte-aligned (i&3 == 0).
@@ -489,10 +482,7 @@ func dequantizeBit2(out []float32, packed []byte, scales, biases []float32, grou
 func dequantizeBit1(out []float32, packed []byte, scales, biases []float32, groupSize int) {
 	for i := 0; i < len(out); {
 		group := i / groupSize
-		end := (group + 1) * groupSize
-		if end > len(out) {
-			end = len(out)
-		}
+		end := min((group+1)*groupSize, len(out))
 		scale := scales[group]
 		bias := biases[group]
 		// Drain prefix elements until i is byte-aligned (i&7 == 0).
@@ -529,10 +519,7 @@ func dequantizeBit1(out []float32, packed []byte, scales, biases []float32, grou
 func dequantizeBitGeneric(out []float32, packed []byte, scales, biases []float32, groupSize, bits int) {
 	for i := 0; i < len(out); {
 		group := i / groupSize
-		end := (group + 1) * groupSize
-		if end > len(out) {
-			end = len(out)
-		}
+		end := min((group+1)*groupSize, len(out))
 		scale := scales[group]
 		bias := biases[group]
 		for ; i < end; i++ {
@@ -797,9 +784,7 @@ func cloneRoleBits(rb map[string]int) map[string]int {
 		return nil
 	}
 	cloned := make(map[string]int, len(rb))
-	for key, value := range rb {
-		cloned[key] = value
-	}
+	maps.Copy(cloned, rb)
 	return cloned
 }
 

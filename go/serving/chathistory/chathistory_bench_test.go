@@ -46,7 +46,7 @@ func seedConversation(b *testing.B, h *chathistory.History, n int) string {
 	if err != nil {
 		b.Fatalf("StartConversation: %v", err)
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		role := "user"
 		if i%2 == 1 {
 			role = "assistant"
@@ -114,7 +114,7 @@ func BenchmarkStartConversation(b *testing.B) {
 // path over an archive of 20 conversations, newest 10 returned.
 func BenchmarkRecentConversations(b *testing.B) {
 	h := newBenchHistory(b)
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		seedConversation(b, h, 2)
 	}
 	b.ReportAllocs()
@@ -128,7 +128,7 @@ func BenchmarkRecentConversations(b *testing.B) {
 // several multi-turn conversations, written to a fresh dest each time.
 func BenchmarkExportJSONL(b *testing.B) {
 	h := newBenchHistory(b)
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		seedConversation(b, h, 8)
 	}
 	dest := filepath.Join(b.TempDir(), "export.jsonl")

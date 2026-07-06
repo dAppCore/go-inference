@@ -104,13 +104,7 @@ func BuildCacheLayout(layerTypes []string, sharedLayers int) ([]int, []int) {
 	if sharedLayers < 0 {
 		sharedLayers = 0
 	}
-	firstShared := len(layerTypes) - sharedLayers
-	if firstShared < 0 {
-		firstShared = 0
-	}
-	if firstShared > len(layerTypes) {
-		firstShared = len(layerTypes)
-	}
+	firstShared := min(max(len(layerTypes)-sharedLayers, 0), len(layerTypes))
 	latestByType := map[string]int{}
 	nextCacheIndex := 0
 	for index, layerType := range layerTypes {

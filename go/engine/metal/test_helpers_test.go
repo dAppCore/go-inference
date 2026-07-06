@@ -31,7 +31,7 @@ func forceNativeGC() {
 	debug.FreeOSMemory()
 }
 
-func configJSONWithModelType(t testing.TB, cfg interface{}, modelType string) []byte {
+func configJSONWithModelType(t testing.TB, cfg any, modelType string) []byte {
 	t.Helper()
 	js := core.JSONMarshal(cfg)
 	if !js.OK {
@@ -164,12 +164,12 @@ func packAffineQuant(f []float32, outDim, inDim, groupSize, bits int) (packed, s
 	packed = make([]byte, outDim*rowPacked)
 	scales = make([]byte, outDim*rowSB)
 	biases = make([]byte, outDim*rowSB)
-	for r := 0; r < outDim; r++ {
+	for r := range outDim {
 		row := f[r*inDim : (r+1)*inDim]
 		pRow := packed[r*rowPacked : (r+1)*rowPacked]
 		sRow := scales[r*rowSB : (r+1)*rowSB]
 		bRow := biases[r*rowSB : (r+1)*rowSB]
-		for g := 0; g < groupsPerRow; g++ {
+		for g := range groupsPerRow {
 			group := row[g*groupSize : (g+1)*groupSize]
 			lo, hi := group[0], group[0]
 			for _, v := range group[1:] {
@@ -193,11 +193,8 @@ func packAffineQuant(f []float32, outDim, inDim, groupSize, bits int) (packed, s
 			scaleR, biasR := bf16ToF32(byte(sh), byte(sh>>8)), bf16ToF32(byte(bh), byte(bh>>8))
 			sRow[g*bf16Size], sRow[g*bf16Size+1] = byte(sh), byte(sh>>8)
 			bRow[g*bf16Size], bRow[g*bf16Size+1] = byte(bh), byte(bh>>8)
-			for c := 0; c < groupSize; c++ {
-				code := uint32(math.Round(float64((group[c] - biasR) / scaleR)))
-				if code > maxCode {
-					code = maxCode
-				}
+			for c := range groupSize {
+				code := min(uint32(math.Round(float64((group[c]-biasR)/scaleR))), maxCode)
 				setAffineCode(pRow, (g*groupSize+c)*bits, bits, code)
 			}
 		}
@@ -212,10 +209,7 @@ func setAffineCode(p []byte, bitOff, bits int, code uint32) {
 	for got := 0; got < bits; {
 		bi := (bitOff + got) / 8
 		off := (bitOff + got) % 8
-		take := 8 - off
-		if take > bits-got {
-			take = bits - got
-		}
+		take := min(8-off, bits-got)
 		mask := byte((1<<uint(take))-1) << uint(off)
 		shifted := byte((code >> uint(got)) << uint(off))
 		p[bi] = (p[bi] &^ mask) | (shifted & mask)
@@ -473,7 +467,7 @@ func mistralTensorFixture(tb testing.TB, dModel, nHeads, nKVHeads, headDim, dFF,
 	qDim, kvDim := nHeads*headDim, nKVHeads*headDim
 	mk("language_model.model.embed_tokens.weight", vocab*dModel)
 	mk("language_model.model.norm.weight", dModel)
-	for i := 0; i < nLayers; i++ {
+	for i := range nLayers {
 		p := core.Sprintf("language_model.model.layers.%d", i)
 		mk(p+".input_layernorm.weight", dModel)
 		mk(p+".post_attention_layernorm.weight", dModel)

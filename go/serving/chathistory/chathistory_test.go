@@ -148,7 +148,7 @@ func TestWriteTurnAutoIncrement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StartConversation: %v", err)
 	}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if _, err := h.WriteTurn(convID, NewTurn{Role: "user", Content: "msg"}); err != nil {
 			t.Fatalf("WriteTurn[%d]: %v", i, err)
 		}

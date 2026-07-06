@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"slices"
 	"time"
 
 	core "dappco.re/go"
@@ -88,10 +89,8 @@ func AllowRepo(repo string) core.Result {
 			}
 		}
 	}
-	for _, a := range f.Repos {
-		if a == repo {
-			return core.Ok(f.Repos)
-		}
+	if slices.Contains(f.Repos, repo) {
+		return core.Ok(f.Repos)
 	}
 	f.Repos = append(f.Repos, repo)
 	encoded := core.JSONMarshalIndent(f, "", "  ")

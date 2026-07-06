@@ -1896,7 +1896,7 @@ func (s *ArchSession) pleSlabFor(ids []int32, embs [][]byte) ([]byte, error) {
 		}
 		// the closure returns token i's [numLayers × pliDim] tensor (and may reuse its
 		// scratch across calls) — scatter each layer's slice to its layer-major home.
-		for li := 0; li < numLayers; li++ {
+		for li := range numLayers {
 			copy(pleSlab[(li*len(ids)+i)*pliBytes:(li*len(ids)+i+1)*pliBytes], pli[li*pliBytes:(li+1)*pliBytes])
 		}
 	}
@@ -2144,7 +2144,7 @@ func (s *ArchSession) mtpVerifyHiddenRowsScratch(k, rowBytes int) ([][]byte, boo
 	} else {
 		s.mtpVerifyHiddenRows = s.mtpVerifyHiddenRows[:k]
 	}
-	for i := 0; i < k; i++ {
+	for i := range k {
 		s.mtpVerifyHiddenRows[i] = s.mtpVerifyHiddenPinned.bytes[i*rowBytes : (i+1)*rowBytes]
 	}
 	return s.mtpVerifyHiddenRows, true
@@ -2517,7 +2517,7 @@ func (s *ArchSession) sampleTopKCandidatesFromLogits(logits []byte, params model
 	}
 	penaltyPos := 0
 	count := 0
-	for id := 0; id < vocab; id++ {
+	for id := range vocab {
 		if tokenSuppressed(id, params.SuppressTokens) {
 			continue
 		}
@@ -2711,7 +2711,7 @@ func sampleSmallVocabBF16(logits []byte, vocab int, sampler *model.Sampler, para
 	var order [headSampleTopKMaxK]int
 	maxL := float32(math.Inf(-1))
 	allowed := 0
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		if tokenSuppressed(i, params.SuppressTokens) {
 			scaled[i] = float32(math.Inf(-1))
 			continue
@@ -2727,13 +2727,13 @@ func sampleSmallVocabBF16(logits []byte, vocab int, sampler *model.Sampler, para
 		return 0, core.NewError("native.sampleSmallVocabBF16: all tokens are suppressed")
 	}
 	var sum float32
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		e := float32(math.Exp(float64(scaled[i] - maxL)))
 		probs[i] = e
 		sum += e
 		order[i] = i
 	}
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		probs[i] /= sum
 	}
 	for i := 1; i < vocab; i++ {
@@ -2831,14 +2831,14 @@ func (s *ArchSession) sampleVocabBF16(logits []byte, vocab int, sampler *model.S
 	allowed := 0
 	if noSuppress {
 		allowed = vocab
-		for i := 0; i < vocab; i++ {
+		for i := range vocab {
 			v := bf16ToF32(logits[i*bf16Size], logits[i*bf16Size+1]) / temp
 			if v > maxL {
 				maxL = v
 			}
 		}
 	} else {
-		for i := 0; i < vocab; i++ {
+		for i := range vocab {
 			if tokenSuppressed(i, params.SuppressTokens) {
 				continue
 			}
@@ -2866,14 +2866,14 @@ func (s *ArchSession) sampleVocabBF16(logits []byte, vocab int, sampler *model.S
 	} else {
 		s.sampleOrder = s.sampleOrder[:vocab]
 	}
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		s.sampleOrder[i] = int32(i)
 	}
 	if noSuppress {
 		probTotal := sampleVocabBF16WeightTotalNoSuppress(logits, vocab, temp, maxL)
 		keep := rankSampleOrderPrefixLogitsNoSuppress(s.sampleOrder, logits, probTotal, params, temp, maxL)
 		var ksum float32
-		for i := 0; i < keep; i++ {
+		for i := range keep {
 			ksum += sampleVocabBF16IDWeightNoSuppress(logits, s.sampleOrder[i], temp, maxL)
 		}
 		if ksum == 0 {
@@ -2881,7 +2881,7 @@ func (s *ArchSession) sampleVocabBF16(logits []byte, vocab int, sampler *model.S
 		}
 		target := sampler.Draw() * ksum
 		var acc float32
-		for i := 0; i < keep; i++ {
+		for i := range keep {
 			acc += sampleVocabBF16IDWeightNoSuppress(logits, s.sampleOrder[i], temp, maxL)
 			if acc >= target {
 				return s.sampleOrder[i], nil
@@ -2892,7 +2892,7 @@ func (s *ArchSession) sampleVocabBF16(logits []byte, vocab int, sampler *model.S
 	probTotal := sampleVocabBF16WeightTotal(logits, vocab, params, temp, maxL)
 	keep := rankSampleOrderPrefixLogits(s.sampleOrder, logits, probTotal, params, temp, maxL)
 	var ksum float32
-	for i := 0; i < keep; i++ {
+	for i := range keep {
 		ksum += sampleVocabBF16IDWeight(logits, s.sampleOrder[i], params, temp, maxL)
 	}
 	if ksum == 0 {
@@ -2900,7 +2900,7 @@ func (s *ArchSession) sampleVocabBF16(logits []byte, vocab int, sampler *model.S
 	}
 	target := sampler.Draw() * ksum
 	var acc float32
-	for i := 0; i < keep; i++ {
+	for i := range keep {
 		acc += sampleVocabBF16IDWeight(logits, s.sampleOrder[i], params, temp, maxL)
 		if acc >= target {
 			return s.sampleOrder[i], nil
@@ -2911,7 +2911,7 @@ func (s *ArchSession) sampleVocabBF16(logits []byte, vocab int, sampler *model.S
 
 func sampleVocabBF16InVocabOrderStreamingNoSuppress(logits []byte, vocab int, sampler *model.Sampler, temp, maxL float32) (int32, error) {
 	var sum float32
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		v := bf16ToF32(logits[i*bf16Size], logits[i*bf16Size+1]) / temp
 		sum += float32(math.Exp(float64(v - maxL)))
 	}
@@ -2920,7 +2920,7 @@ func sampleVocabBF16InVocabOrderStreamingNoSuppress(logits []byte, vocab int, sa
 	}
 	target := sampler.Draw() * sum
 	var acc float32
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		v := bf16ToF32(logits[i*bf16Size], logits[i*bf16Size+1]) / temp
 		acc += float32(math.Exp(float64(v - maxL)))
 		if acc >= target {
@@ -2932,7 +2932,7 @@ func sampleVocabBF16InVocabOrderStreamingNoSuppress(logits []byte, vocab int, sa
 
 func sampleVocabBF16InVocabOrderStreaming(logits []byte, vocab int, sampler *model.Sampler, params model.SampleParams, temp, maxL float32) (int32, error) {
 	var sum float32
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		if tokenSuppressed(i, params.SuppressTokens) {
 			continue
 		}
@@ -2944,7 +2944,7 @@ func sampleVocabBF16InVocabOrderStreaming(logits []byte, vocab int, sampler *mod
 	}
 	target := sampler.Draw() * sum
 	var acc float32
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		e := float32(0)
 		if !tokenSuppressed(i, params.SuppressTokens) {
 			v := bf16ToF32(logits[i*bf16Size], logits[i*bf16Size+1]) / temp
@@ -2960,7 +2960,7 @@ func sampleVocabBF16InVocabOrderStreaming(logits []byte, vocab int, sampler *mod
 
 func sampleVocabBF16WeightTotal(logits []byte, vocab int, params model.SampleParams, temp, maxL float32) float32 {
 	var sum float32
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		sum += sampleVocabBF16IDWeight(logits, int32(i), params, temp, maxL)
 	}
 	return sum
@@ -2968,7 +2968,7 @@ func sampleVocabBF16WeightTotal(logits []byte, vocab int, params model.SamplePar
 
 func sampleVocabBF16WeightTotalNoSuppress(logits []byte, vocab int, temp, maxL float32) float32 {
 	var sum float32
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		sum += sampleVocabBF16IDWeightNoSuppress(logits, int32(i), temp, maxL)
 	}
 	return sum
@@ -5522,12 +5522,7 @@ func (s *ArchSession) appendKnownResidentIDs(startPos int, promptIDs, gen []int3
 }
 
 func nativeTokenInSet(id int32, tokens []int32) bool {
-	for _, token := range tokens {
-		if id == token {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(tokens, id)
 }
 
 func nativeAppendSuppressionTokens(base, extra []int32) []int32 {

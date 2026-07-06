@@ -87,7 +87,7 @@ func TestSoftmaxF32LoopedAxis(t *testing.T) {
 	want := hostSoftmaxF32(x, rows, ax)
 	assertFloat32Near(t, "SoftmaxF32 looped axis", got, want, 1e-5)
 
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		sum := float32(0)
 		for _, v := range got[r*ax : (r+1)*ax] {
 			sum += v
@@ -100,7 +100,7 @@ func TestSoftmaxF32LoopedAxis(t *testing.T) {
 
 func hostSoftmaxF32(in []float32, rows, axisSize int) []float32 {
 	out := make([]float32, len(in))
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		row := in[r*axisSize : (r+1)*axisSize]
 		maxV := row[0]
 		for _, v := range row[1:] {

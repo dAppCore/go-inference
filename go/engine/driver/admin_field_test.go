@@ -48,7 +48,7 @@ func TestDownloadLane_FieldExercise(t *testing.T) {
 	// The engine may still be binding — retry the kickoff briefly, exactly
 	// like EngineService.DownloadCurated does.
 	var kick core.Result
-	for attempt := 0; attempt < 30; attempt++ {
+	for range 30 {
 		kick = svc.DownloadModel(RuntimeMLX, repo, "main")
 		if kick.OK {
 			break

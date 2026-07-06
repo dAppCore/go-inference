@@ -116,10 +116,7 @@ type Engine struct {
 //
 //	e := schedule.New(schedule.Scheduler{MaxConcurrency: 8, MaxBatchTokens: 8192})
 func New(cfg Scheduler) *Engine {
-	capN := cfg.MaxConcurrency
-	if capN < 1 {
-		capN = 1
-	}
+	capN := max(cfg.MaxConcurrency, 1)
 	return &Engine{cap: capN, maxTokens: cfg.MaxBatchTokens}
 }
 

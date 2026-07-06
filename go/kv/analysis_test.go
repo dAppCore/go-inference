@@ -323,7 +323,7 @@ func referenceStridedDifferentiation(flat []float32, seqLen, headDim, stride int
 	for src := 0; src < seqLen; src += stride {
 		v := make([]float64, headDim)
 		var sum float64
-		for k := 0; k < headDim; k++ {
+		for k := range headDim {
 			v[k] = float64(flat[src*headDim+k])
 			sum += v[k] * v[k]
 		}
@@ -338,10 +338,10 @@ func referenceStridedDifferentiation(flat []float32, seqLen, headDim, stride int
 	n := len(normed)
 	var total float64
 	pairs := 0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		for j := i + 1; j < n; j++ {
 			var dot float64
-			for k := 0; k < headDim; k++ {
+			for k := range headDim {
 				dot += normed[i][k] * normed[j][k]
 			}
 			total += dot

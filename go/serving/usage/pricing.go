@@ -43,10 +43,7 @@ func Cost(u Usage, p Pricing) float64 {
 		return 0
 	}
 
-	uncachedPrompt := u.PromptTokens - u.CachedTokens
-	if uncachedPrompt < 0 {
-		uncachedPrompt = 0
-	}
+	uncachedPrompt := max(u.PromptTokens-u.CachedTokens, 0)
 
 	return perK(uncachedPrompt, p.PromptPer1K) +
 		perK(u.CachedTokens, p.CacheReadPer1K) +

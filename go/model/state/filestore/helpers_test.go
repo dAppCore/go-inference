@@ -67,10 +67,7 @@ type collectingWriter struct {
 
 func (w *collectingWriter) Write(data []byte) (int, error) {
 	w.calls++
-	n := len(data)
-	if n > 3 {
-		n = 3
-	}
+	n := min(len(data), 3)
 	*w.dst = append(*w.dst, data[:n]...)
 	return n, nil
 }

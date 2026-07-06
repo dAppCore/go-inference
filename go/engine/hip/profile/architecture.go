@@ -3,6 +3,7 @@
 package profile
 
 import (
+	"slices"
 	"strings"
 
 	"dappco.re/go/inference"
@@ -444,12 +445,7 @@ func KnownArchitectureProfileID(id string) bool {
 	if _, ok := registeredArchitectureProfileForArchitecture(id); ok {
 		return true
 	}
-	for _, profileID := range builtinArchitectureProfileIDs {
-		if id == profileID {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(builtinArchitectureProfileIDs, id)
 }
 
 func SupportedNativeArchitecture(architecture string) bool {
@@ -933,10 +929,8 @@ func architectureProfileLookupKeys(value string) []string {
 		if key == "" {
 			return
 		}
-		for _, existing := range keys {
-			if existing == key {
-				return
-			}
+		if slices.Contains(keys, key) {
+			return
 		}
 		keys = append(keys, key)
 	}

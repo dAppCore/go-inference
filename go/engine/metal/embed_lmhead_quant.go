@@ -95,11 +95,11 @@ func embedTokenQuantRowInto(emb, pRow, sRow, bRow []byte, dModel, groupSize, bit
 		// 4-bit fast path: nibbles are byte-aligned (no bit-spanning), and the affine params are
 		// per-group — hoist their bf16ToF32 out of the inner loop (they change per group, not per
 		// element). Byte-identical to the general path: same code value, same (s·code+b)·scale order.
-		for g := 0; g < groups; g++ {
+		for g := range groups {
 			s := bf16ToF32(sRow[g*bf16Size], sRow[g*bf16Size+1])
 			b := bf16ToF32(bRow[g*bf16Size], bRow[g*bf16Size+1])
 			base := g * groupSize
-			for j := 0; j < groupSize; j++ {
+			for j := range groupSize {
 				c := base + j
 				var code float32
 				if c&1 == 0 {
@@ -114,7 +114,7 @@ func embedTokenQuantRowInto(emb, pRow, sRow, bRow []byte, dModel, groupSize, bit
 		}
 		return
 	}
-	for c := 0; c < dModel; c++ {
+	for c := range dModel {
 		// affine codes are bit-packed LSB-first contiguous, spanning byte boundaries for 5/6-bit.
 		code := extractAffineCode(pRow, c*bits, bits)
 		g := c / groupSize
@@ -135,10 +135,7 @@ func extractAffineCode(p []byte, bitOff, bits int) uint32 {
 	for got := 0; got < bits; {
 		bi := (bitOff + got) / 8
 		off := (bitOff + got) % 8
-		take := 8 - off
-		if take > bits-got {
-			take = bits - got
-		}
+		take := min(8-off, bits-got)
 		chunk := (uint32(p[bi]) >> uint(off)) & ((1 << uint(take)) - 1)
 		v |= chunk << uint(got)
 		got += take
@@ -233,7 +230,7 @@ func LMHeadQuantInto(out []byte, hidden, finalNormW, packed, scales, biases []by
 		return nil, encErr
 	}
 	if softCap > 0 {
-		for i := 0; i < vocab; i++ {
+		for i := range vocab {
 			v := bf16ToF32(out[i*bf16Size], out[i*bf16Size+1])
 			h := f32ToBF16(softCap * float32(math.Tanh(float64(v/softCap))))
 			out[i*bf16Size] = byte(h)

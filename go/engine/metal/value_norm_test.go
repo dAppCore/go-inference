@@ -40,9 +40,9 @@ func archValueNormRef(t *testing.T, layers []DecodeLayerWeights, inputs [][]byte
 		vC[li] = make([]byte, maxLen*rowBytes)
 	}
 	out := make([][]byte, T)
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		x := inputs[tok]
-		for li := 0; li < nL; li++ {
+		for li := range nL {
 			w := layers[li]
 			normed := must(RMSNormBF16(x, w.AttnNormW, 1, dModel, eps))
 			q := must(MatVecBF16(w.WQ, normed, qDim, dModel))
@@ -121,7 +121,7 @@ func TestValueNorm(t *testing.T) {
 		t.Fatalf("DecodeForwardArch valueNorm: %v", err)
 	}
 	want := archValueNormRef(t, layers, inputs, dModel, nHeads, nKV, headDim, dFF, maxLen, base, scale, eps, true, false)
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("value-norm forward vs ref tok%d", tok), got[tok], want[tok])
 	}
 
@@ -174,12 +174,12 @@ func TestAttentionKEqV(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeForwardArch K==V (no v_proj): %v", err)
 	}
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("K==V vs explicit v=k tok%d", tok), gotKEqV[tok], wantExplicit[tok])
 	}
 
 	want := archValueNormRef(t, keqv, inputs, dModel, nHeads, nKV, headDim, dFF, maxLen, base, scale, eps, true, true)
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("K==V vs oracle tok%d", tok), gotKEqV[tok], want[tok])
 	}
 	t.Logf("gemma4 K==V: no-v_proj forward (V via wK, value-normed) ≡ explicit v_proj=k_proj ≡ composed reference — the 12B/31B attention_k_eq_v path is correct, no model load")

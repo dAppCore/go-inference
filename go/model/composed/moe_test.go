@@ -33,9 +33,9 @@ func TestMoEFullMixture(t *testing.T) {
 
 	logits := make([]float64, nE)
 	maxL := math.Inf(-1)
-	for e := 0; e < nE; e++ {
+	for e := range nE {
 		var acc float64
-		for d := 0; d < D; d++ {
+		for d := range D {
 			acc += float64(x[d]) * float64(m.Router[e*D+d])
 		}
 		logits[e] = acc
@@ -49,18 +49,18 @@ func TestMoEFullMixture(t *testing.T) {
 		sum += logits[e]
 	}
 	want := make([]float64, D)
-	for e := 0; e < nE; e++ {
+	for e := range nE {
 		w := logits[e] / sum
 		eo := swigluExpert(x, m.Experts[e], D)
-		for d := 0; d < D; d++ {
+		for d := range D {
 			want[d] += w * float64(eo[d])
 		}
 	}
 	so := swigluExpert(x, *m.Shared, D)
-	for d := 0; d < D; d++ {
+	for d := range D {
 		want[d] += float64(so[d])
 	}
-	for d := 0; d < D; d++ {
+	for d := range D {
 		if math.Abs(float64(got[d])-want[d]) > 1e-4*(1+math.Abs(want[d])) {
 			t.Errorf("out[%d] = %v, want %v (full softmax mixture + shared)", d, got[d], want[d])
 		}
@@ -107,9 +107,9 @@ func TestMoETruncatedMixture(t *testing.T) {
 
 	// independent router logits.
 	logits := make([]float64, nE)
-	for e := 0; e < nE; e++ {
+	for e := range nE {
 		var acc float64
-		for d := 0; d < D; d++ {
+		for d := range D {
 			acc += float64(x[d]) * float64(m.Router[e*D+d])
 		}
 		logits[e] = acc
@@ -127,7 +127,7 @@ func TestMoETruncatedMixture(t *testing.T) {
 	// precondition: the seeds must separate the 2nd- and 3rd-ranked experts, else a
 	// wrong-selection bug could hide inside the tolerance.
 	third := -1
-	for e := 0; e < nE; e++ {
+	for e := range nE {
 		if e != best && e != second && (third < 0 || logits[e] > logits[third]) {
 			third = e
 		}
@@ -146,15 +146,15 @@ func TestMoETruncatedMixture(t *testing.T) {
 		w float64
 	}{{best, wb / sum}, {second, ws / sum}} {
 		eo := swigluExpert(x, m.Experts[sel.e], D)
-		for d := 0; d < D; d++ {
+		for d := range D {
 			want[d] += sel.w * float64(eo[d])
 		}
 	}
 	so := swigluExpert(x, *m.Shared, D)
-	for d := 0; d < D; d++ {
+	for d := range D {
 		want[d] += float64(so[d])
 	}
-	for d := 0; d < D; d++ {
+	for d := range D {
 		if math.Abs(float64(got[d])-want[d]) > 1e-4*(1+math.Abs(want[d])) {
 			t.Errorf("out[%d] = %v, want %v (top-2-of-4 renormalised mixture + shared)", d, got[d], want[d])
 		}
@@ -179,7 +179,7 @@ func TestComposedMoEDecodeEqualsPrefill(t *testing.T) {
 	dec := NewSession(m)
 	for t0, tok := range tokens {
 		h, _ := dec.Forward([]int32{tok})
-		for i := 0; i < D; i++ {
+		for i := range D {
 			if h[i] != prefill[t0*D+i] {
 				t.Fatalf("token %d hidden[%d] = %v != prefill %v (MoE decode diverged)", t0, i, h[i], prefill[t0*D+i])
 			}
@@ -199,7 +199,7 @@ func TestLoadComposedMoE(t *testing.T) {
 		"model.norm.weight":         bf16T(syn(D, 2), D),
 		"lm_head.weight":            bf16T(syn(vocab*D, 3), vocab, D),
 	}
-	for i := 0; i < nLayers; i++ {
+	for i := range nLayers {
 		lp := "model.layers." + itoa(i) + "."
 		ts[lp+"input_layernorm.weight"] = bf16T(syn(D, i*200+1), D)
 		ts[lp+"post_attention_layernorm.weight"] = bf16T(syn(D, i*200+2), D)
@@ -218,7 +218,7 @@ func TestLoadComposedMoE(t *testing.T) {
 		// MoE MLP
 		mp := lp + "mlp."
 		ts[mp+"gate.weight"] = bf16T(syn(nE*D, i*200+30), nE, D)
-		for e := 0; e < nE; e++ {
+		for e := range nE {
 			ep := mp + "experts." + itoa(e) + "."
 			ts[ep+"gate_proj.weight"] = bf16T(syn(moeFF*D, i*200+e*5+40), moeFF, D)
 			ts[ep+"up_proj.weight"] = bf16T(syn(moeFF*D, i*200+e*5+41), moeFF, D)

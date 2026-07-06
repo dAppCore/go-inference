@@ -39,7 +39,7 @@ var (
 // user/assistant.
 func buildOllamaMessages(turns int) []Message {
 	out := make([]Message, 0, turns)
-	for i := 0; i < turns; i++ {
+	for i := range turns {
 		if i%2 == 0 {
 			out = append(out, Message{Role: "user", Content: "Summarise the paragraph in one sentence."})
 		} else {

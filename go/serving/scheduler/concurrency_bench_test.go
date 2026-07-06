@@ -130,7 +130,7 @@ func benchScheduleBurst(b *testing.B, workers int, tokens int) {
 	for i := 0; i < b.N; i++ {
 		var wg sync.WaitGroup
 		wg.Add(workers)
-		for j := 0; j < workers; j++ {
+		for range workers {
 			go func() {
 				defer wg.Done()
 				_, stream, err := sched.Schedule(ctx, inference.ScheduledRequest{Prompt: "p"})

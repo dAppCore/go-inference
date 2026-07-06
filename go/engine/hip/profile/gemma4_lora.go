@@ -2,6 +2,8 @@
 
 package profile
 
+import "slices"
+
 import "strings"
 
 // LoRATargetPolicy describes the loader-neutral adapter target policy a model
@@ -281,12 +283,7 @@ func containsString(values []string, target string) bool {
 	if target == "" {
 		return false
 	}
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, target)
 }
 
 func loRATargetListMatches(values []string, paths map[string]string, target, path string) bool {

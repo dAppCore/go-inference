@@ -18,7 +18,7 @@ type Gemma4DeclaredFeatures struct {
 	TopKExperts int                  `json:"top_k_experts,omitempty"`
 	Vision      bool                 `json:"vision,omitempty"`
 	Audio       bool                 `json:"audio,omitempty"`
-	Attention   Gemma4AttentionClass `json:"attention,omitempty"`
+	Attention   Gemma4AttentionClass `json:"attention"`
 }
 
 type Gemma4AttentionClass struct {

@@ -361,16 +361,14 @@ func TestWeightSync_Current_Good(t *testing.T) {
 
 	// Concurrent readers race-free against Begin/End churn.
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 50 {
+		wg.Go(func() {
 			co.Begin()
 			_ = co.Current()
 			_ = co.Pending()
 			_ = co.InFlight()
 			co.End()
-		}()
+		})
 	}
 	wg.Wait()
 	if got := co.InFlight(); got != 0 {

@@ -63,7 +63,7 @@ func Parse(blob []byte) (map[string]Tensor, error) {
 		return nil, core.NewError("safetensors.Parse: blob shorter than the 8-byte header length")
 	}
 	var hdrLen uint64
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		hdrLen |= uint64(blob[i]) << (8 * uint(i))
 	}
 	dataStart := 8 + int(hdrLen)
@@ -176,7 +176,7 @@ func Encode(tensors map[string]Tensor) ([]byte, error) {
 	hdrBytes := hj.Value.([]byte)
 	out := make([]byte, 8+len(hdrBytes)+len(data))
 	n := uint64(len(hdrBytes))
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		out[i] = byte(n >> (8 * uint(i)))
 	}
 	copy(out[8:], hdrBytes)

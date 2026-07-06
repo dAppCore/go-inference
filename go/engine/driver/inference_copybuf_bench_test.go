@@ -64,10 +64,7 @@ func (r *benchZeroReader) Read(p []byte) (int, error) {
 	if r.remaining <= 0 {
 		return 0, io.EOF
 	}
-	n := len(p)
-	if n > r.remaining {
-		n = r.remaining
-	}
+	n := min(len(p), r.remaining)
 	r.remaining -= n
 	return n, nil
 }

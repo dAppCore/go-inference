@@ -52,7 +52,7 @@ func (benchLenCtr) Count(messages []chat.Message) int {
 func benchConvo(pairs int) []chat.Message {
 	out := make([]chat.Message, 0, 1+2*pairs)
 	out = append(out, msg(chat.System, "You are a helpful assistant. Answer concisely and cite the relevant subsystem when you can."))
-	for i := 0; i < pairs; i++ {
+	for i := range pairs {
 		out = append(out, msg(chat.User, "Question "+core.Itoa(i)+": how does the router decide which endpoint should serve this particular request?"))
 		out = append(out, msg(chat.Assistant, "Answer "+core.Itoa(i)+": it scores each endpoint by free context window and current load, then places the request on the best fit."))
 	}

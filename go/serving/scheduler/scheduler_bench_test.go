@@ -87,7 +87,7 @@ func (m *schedBenchModel) seq() iter.Seq[inference.Token] {
 
 func benchTokens(n int) []inference.Token {
 	tokens := make([]inference.Token, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		tokens[i] = inference.Token{ID: int32(i + 1), Text: "tok"}
 	}
 	return tokens
@@ -299,7 +299,7 @@ func BenchmarkScheduler_CloneLabels_FiveEntries(b *testing.B) {
 
 func BenchmarkScheduler_CloneLabels_TwentyEntries(b *testing.B) {
 	labels := map[string]string{}
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		labels[(string)(rune('a'+i))] = "v"
 	}
 	b.ReportAllocs()

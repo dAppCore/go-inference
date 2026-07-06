@@ -39,7 +39,7 @@ func benchRegisterPreferred(b *testing.B, custom int) {
 	Register(&inferenceBenchBackend{name: "metal", available: true})
 	Register(&inferenceBenchBackend{name: "rocm", available: true})
 	Register(&inferenceBenchBackend{name: "llama_cpp", available: true})
-	for i := 0; i < custom; i++ {
+	for i := range custom {
 		Register(&inferenceBenchBackend{
 			name:      core.Sprintf("custom_%d", i),
 			available: i%2 == 0,

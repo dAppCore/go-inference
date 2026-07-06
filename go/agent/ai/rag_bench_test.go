@@ -44,7 +44,7 @@ func benchTaskInfoLong() TaskInfo {
 
 func benchUserMessages(n int) []inference.Message {
 	out := make([]inference.Message, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		out = append(out, inference.Message{Role: "system", Content: "context"})
 		out = append(out, inference.Message{Role: "assistant", Content: "assistant response"})
 	}

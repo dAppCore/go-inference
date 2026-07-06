@@ -58,7 +58,7 @@ func TestTrainStepReducesLoss(t *testing.T) {
 	opt := NewAdamW(vocab*d, 0.1, 0.0)
 
 	var first, last float32
-	for s := 0; s < steps; s++ {
+	for s := range steps {
 		logits, err := MatMulF32NT(x, w, rows, d, vocab) // [rows,vocab]
 		if err != nil {
 			t.Fatalf("forward step %d: %v", s, err)

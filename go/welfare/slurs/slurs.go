@@ -120,10 +120,7 @@ func canonical(term string) string {
 // the three tokens before it. Reclaiming use, not a welfare trigger. A directed
 // "you are a …" has no first-person marker in-window, so it still triggers.
 func selfReference(tokens []string, i int) bool {
-	lo := i - 3
-	if lo < 0 {
-		lo = 0
-	}
+	lo := max(i-3, 0)
 	for _, t := range tokens[lo:i] {
 		if t == "i" || t == "im" || t == "myself" {
 			return true

@@ -131,7 +131,7 @@ func TestProviderRouter_SelectEndpoints_Good(t *testing.T) {
 		},
 		{
 			name:      "allow_fallbacks false keeps only the primary route",
-			request:   SelectRequest{Model: "gemma-4", Preferences: ProviderPreferences{AllowFallbacks: boolPtr(false)}},
+			request:   SelectRequest{Model: "gemma-4", Preferences: ProviderPreferences{AllowFallbacks: new(false)}},
 			endpoints: fixtureEndpoints(),
 			want:      []string{"local-gpu"},
 		},
@@ -300,7 +300,8 @@ func paidOnlyEndpoints() []Endpoint {
 	}
 }
 
-func boolPtr(v bool) *bool { return &v }
+//go:fix inline
+func boolPtr(v bool) *bool { return new(v) }
 
 func sliceEqual(a, b []string) bool {
 	if len(a) != len(b) {

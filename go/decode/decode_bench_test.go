@@ -35,7 +35,7 @@ var (
 // in the typical hot path).
 func buildDecodeTokens(n int) []Token {
 	tokens := make([]Token, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		tokens[i] = Token{ID: int32(i + 1), Text: "tok"}
 	}
 	return tokens
@@ -46,7 +46,7 @@ func buildDecodeTokens(n int) []Token {
 // buildAcceptanceResult.
 func buildDecodeTokensSkewed(n int) []Token {
 	tokens := make([]Token, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		id := int32(i + 1)
 		if i%4 == 3 {
 			id = -id

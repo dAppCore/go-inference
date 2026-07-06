@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -25,74 +26,74 @@ type JSONLDataset struct {
 }
 
 type rocmJSONLRecord struct {
-	Text                  string                 `json:"text"`
-	Prompt                string                 `json:"prompt"`
-	Response              string                 `json:"response"`
-	Completion            string                 `json:"completion"`
-	Instruction           string                 `json:"instruction"`
-	Input                 string                 `json:"input"`
-	Output                string                 `json:"output"`
-	Problem               string                 `json:"problem"`
-	Question              string                 `json:"question"`
-	Thinking              string                 `json:"thinking"`
-	Reasoning             string                 `json:"reasoning"`
-	Solution              string                 `json:"solution"`
-	Answer                string                 `json:"answer"`
-	Messages              []rocmMessageRecord    `json:"messages"`
-	Conversations         []rocmShareGPTRecord   `json:"conversations"`
-	Labels                map[string]string      `json:"labels"`
-	TargetTokenID         any                    `json:"target_token_id"`
-	StudentLogits         any                    `json:"student_logits"`
-	TeacherLogits         any                    `json:"teacher_logits"`
-	Reward                any                    `json:"reward"`
-	Rewards               any                    `json:"rewards"`
-	Advantage             any                    `json:"advantage"`
-	Advantages            any                    `json:"advantages"`
-	Logprob               any                    `json:"logprob"`
-	Logprobs              any                    `json:"logprobs"`
-	PolicyLogprob         any                    `json:"policy_logprob"`
-	PolicyLogprobs        any                    `json:"policy_logprobs"`
-	CurrentLogprob        any                    `json:"current_logprob"`
-	CurrentLogprobs       any                    `json:"current_logprobs"`
-	CurrentPolicyLogprob  any                    `json:"current_policy_logprob"`
-	CurrentPolicyLogprobs any                    `json:"current_policy_logprobs"`
-	OldLogprob            any                    `json:"old_logprob"`
-	OldLogprobs           any                    `json:"old_logprobs"`
-	OldPolicyLogprob      any                    `json:"old_policy_logprob"`
-	OldPolicyLogprobs     any                    `json:"old_policy_logprobs"`
-	ReferenceLogprob      any                    `json:"reference_logprob"`
-	ReferenceLogprobs     any                    `json:"reference_logprobs"`
-	RefLogprob            any                    `json:"ref_logprob"`
-	RefLogprobs           any                    `json:"ref_logprobs"`
-	PolicyClipRange       any                    `json:"policy_clip_range"`
-	ClipRange             any                    `json:"clip_range"`
-	ClipEpsilon           any                    `json:"clip_epsilon"`
-	GRPOClipRange         any                    `json:"grpo_clip_range"`
-	PolicyWeight          any                    `json:"policy_weight"`
-	PolicyWeights         any                    `json:"policy_weights"`
-	LossWeight            any                    `json:"loss_weight"`
-	LossWeights           any                    `json:"loss_weights"`
-	PolicyMask            any                    `json:"policy_mask"`
-	PolicyMasks           any                    `json:"policy_masks"`
-	LossMask              any                    `json:"loss_mask"`
-	LossMasks             any                    `json:"loss_masks"`
-	ResponseMask          any                    `json:"response_mask"`
-	ResponseMasks         any                    `json:"response_masks"`
-	ActionMask            any                    `json:"action_mask"`
-	ActionMasks           any                    `json:"action_masks"`
-	TokenMask             any                    `json:"token_mask"`
-	TokenMasks            any                    `json:"token_masks"`
-	GroupID               any                    `json:"group_id"`
-	PromptID              any                    `json:"prompt_id"`
-	QueryID               any                    `json:"query_id"`
-	RolloutID             any                    `json:"rollout_id"`
-	SampleID              any                    `json:"sample_id"`
-	TrajectoryID          any                    `json:"trajectory_id"`
-	TurnID                any                    `json:"turn_id"`
-	CompletionID          any                    `json:"completion_id"`
-	EpisodeID             any                    `json:"episode_id"`
-	Meta                  map[string]string      `json:"meta"`
-	Raw                   map[string]interface{} `json:"-"`
+	Text                  string               `json:"text"`
+	Prompt                string               `json:"prompt"`
+	Response              string               `json:"response"`
+	Completion            string               `json:"completion"`
+	Instruction           string               `json:"instruction"`
+	Input                 string               `json:"input"`
+	Output                string               `json:"output"`
+	Problem               string               `json:"problem"`
+	Question              string               `json:"question"`
+	Thinking              string               `json:"thinking"`
+	Reasoning             string               `json:"reasoning"`
+	Solution              string               `json:"solution"`
+	Answer                string               `json:"answer"`
+	Messages              []rocmMessageRecord  `json:"messages"`
+	Conversations         []rocmShareGPTRecord `json:"conversations"`
+	Labels                map[string]string    `json:"labels"`
+	TargetTokenID         any                  `json:"target_token_id"`
+	StudentLogits         any                  `json:"student_logits"`
+	TeacherLogits         any                  `json:"teacher_logits"`
+	Reward                any                  `json:"reward"`
+	Rewards               any                  `json:"rewards"`
+	Advantage             any                  `json:"advantage"`
+	Advantages            any                  `json:"advantages"`
+	Logprob               any                  `json:"logprob"`
+	Logprobs              any                  `json:"logprobs"`
+	PolicyLogprob         any                  `json:"policy_logprob"`
+	PolicyLogprobs        any                  `json:"policy_logprobs"`
+	CurrentLogprob        any                  `json:"current_logprob"`
+	CurrentLogprobs       any                  `json:"current_logprobs"`
+	CurrentPolicyLogprob  any                  `json:"current_policy_logprob"`
+	CurrentPolicyLogprobs any                  `json:"current_policy_logprobs"`
+	OldLogprob            any                  `json:"old_logprob"`
+	OldLogprobs           any                  `json:"old_logprobs"`
+	OldPolicyLogprob      any                  `json:"old_policy_logprob"`
+	OldPolicyLogprobs     any                  `json:"old_policy_logprobs"`
+	ReferenceLogprob      any                  `json:"reference_logprob"`
+	ReferenceLogprobs     any                  `json:"reference_logprobs"`
+	RefLogprob            any                  `json:"ref_logprob"`
+	RefLogprobs           any                  `json:"ref_logprobs"`
+	PolicyClipRange       any                  `json:"policy_clip_range"`
+	ClipRange             any                  `json:"clip_range"`
+	ClipEpsilon           any                  `json:"clip_epsilon"`
+	GRPOClipRange         any                  `json:"grpo_clip_range"`
+	PolicyWeight          any                  `json:"policy_weight"`
+	PolicyWeights         any                  `json:"policy_weights"`
+	LossWeight            any                  `json:"loss_weight"`
+	LossWeights           any                  `json:"loss_weights"`
+	PolicyMask            any                  `json:"policy_mask"`
+	PolicyMasks           any                  `json:"policy_masks"`
+	LossMask              any                  `json:"loss_mask"`
+	LossMasks             any                  `json:"loss_masks"`
+	ResponseMask          any                  `json:"response_mask"`
+	ResponseMasks         any                  `json:"response_masks"`
+	ActionMask            any                  `json:"action_mask"`
+	ActionMasks           any                  `json:"action_masks"`
+	TokenMask             any                  `json:"token_mask"`
+	TokenMasks            any                  `json:"token_masks"`
+	GroupID               any                  `json:"group_id"`
+	PromptID              any                  `json:"prompt_id"`
+	QueryID               any                  `json:"query_id"`
+	RolloutID             any                  `json:"rollout_id"`
+	SampleID              any                  `json:"sample_id"`
+	TrajectoryID          any                  `json:"trajectory_id"`
+	TurnID                any                  `json:"turn_id"`
+	CompletionID          any                  `json:"completion_id"`
+	EpisodeID             any                  `json:"episode_id"`
+	Meta                  map[string]string    `json:"meta"`
+	Raw                   map[string]any       `json:"-"`
 }
 
 type rocmMessageRecord struct {
@@ -479,8 +480,8 @@ func messagesDatasetSample(messages []inference.Message, labels map[string]strin
 		return inference.DatasetSample{}, false
 	}
 	assistantIdx := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if normalizeDatasetRole(messages[i].Role) == "assistant" {
+	for i, message := range slices.Backward(messages) {
+		if normalizeDatasetRole(message.Role) == "assistant" {
 			assistantIdx = i
 			break
 		}

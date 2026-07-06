@@ -95,7 +95,7 @@ func TestRealSessionProjectionLoRASFT(t *testing.T) {
 	optA, optB := NewAdamW(rank*dFF, 0.02, 0.0), NewAdamW(dModel*rank, 0.02, 0.0)
 
 	var first, last float32
-	for s := 0; s < steps; s++ {
+	for s := range steps {
 		// effective down-proj = Wdown + scaling·(B·A).
 		ba, err := MatMulF32(bL, aL, dModel, rank, dFF) // [dModel,dFF]
 		if err != nil {

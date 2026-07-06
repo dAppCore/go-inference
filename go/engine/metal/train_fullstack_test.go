@@ -59,13 +59,13 @@ func TestFullStackLayerLoRASFT(t *testing.T) {
 	}
 
 	var first, last float32
-	for step := 0; step < steps; step++ {
+	for step := range steps {
 		// forward, saving each layer's input h and its attention-block output a.
 		hs := make([][]float32, nL+1)
 		as := make([][]float32, nL)
 		effs := make([][]float32, nL)
 		hs[0] = x
-		for l := 0; l < nL; l++ {
+		for l := range nL {
 			a, err := MultiHeadAttnBlockForwardF32(hs[l], layers[l].aNorm, layers[l].wQ, layers[l].wK, layers[l].wV, layers[l].wO, T, dModel, H, Hkv, headDim, headDim, base, scale, eps, true)
 			if err != nil {
 				t.Fatalf("attn fwd L%d: %v", l, err)

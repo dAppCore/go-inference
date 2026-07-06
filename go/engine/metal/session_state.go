@@ -126,10 +126,7 @@ func (s *ArchSession) RestoreState(data []byte) error {
 			if off+2*n > len(data) {
 				return core.NewError("native.RestoreState: truncated snapshot")
 			}
-			tokens := pos
-			if tokens > rows {
-				tokens = rows
-			}
+			tokens := min(pos, rows)
 			if err := cache.loadLinearSnapshot(data[off:off+n], data[off+n:off+2*n], tokens); err != nil {
 				return err
 			}

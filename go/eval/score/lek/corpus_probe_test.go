@@ -236,13 +236,10 @@ func (s *probeStats) emitOutliers(t *testing.T) {
 		sort.Slice(entries, func(i, j int) bool {
 			return entries[i].value > entries[j].value
 		})
-		top := 5
-		if len(entries) < top {
-			top = len(entries)
-		}
+		top := min(len(entries), 5)
 		b := core.NewBuilder()
 		b.WriteString(n + " top: ")
-		for i := 0; i < top; i++ {
+		for i := range top {
 			if i > 0 {
 				b.WriteString(" | ")
 			}

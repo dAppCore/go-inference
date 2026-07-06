@@ -86,10 +86,10 @@ func transposeVisionPatchConvChannelsFirst(t safetensors.Tensor) []byte {
 	}
 	hidden, channels, patchH, patchW := shape[0], shape[1], shape[2], shape[3]
 	out := make([]byte, len(t.Data))
-	for h := 0; h < hidden; h++ {
-		for y := 0; y < patchH; y++ {
-			for x := 0; x < patchW; x++ {
-				for c := 0; c < channels; c++ {
+	for h := range hidden {
+		for y := range patchH {
+			for x := range patchW {
+				for c := range channels {
 					src := (((h*channels+c)*patchH+y)*patchW + x) * elem
 					dst := (((h*patchH+y)*patchW+x)*channels + c) * elem
 					copy(out[dst:dst+elem], t.Data[src:src+elem])

@@ -6,6 +6,7 @@ package native
 
 import (
 	"runtime"
+	"slices"
 	"sync"
 	"unsafe"
 
@@ -691,12 +692,7 @@ func (s *headTopKScratch) historyBuffer(ids []int32) metal.MTLBuffer {
 }
 
 func tokenSuppressed(id int, suppress []int32) bool {
-	for _, sid := range suppress {
-		if sid == int32(id) {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(suppress, int32(id))
 }
 
 func greedyBF16Suppressed(logits []byte, vocab int, suppress []int32) (int32, error) {
@@ -708,7 +704,7 @@ func greedyBF16Suppressed(logits []byte, vocab int, suppress []int32) (int32, er
 	}
 	best := -1
 	var bestV float32
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		if tokenSuppressed(i, suppress) {
 			continue
 		}

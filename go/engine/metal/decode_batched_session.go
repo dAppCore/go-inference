@@ -214,7 +214,7 @@ func (s *denseBatchScratch) rows(k, dModel int) (inRows, outRows, offBuf []metal
 		s.rowBytes = rowBytes
 	}
 	offsets := unsafe.Slice((*int32)(s.offPacked.Contents()), k)
-	for i := 0; i < k; i++ {
+	for i := range k {
 		s.inRows[i] = s.inPacked
 		s.outRows[i] = s.outPacked
 		s.offBuf[i] = s.offPacked
@@ -545,7 +545,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		inputViews = s.denseBatch.inputViewsFor(K)
 	}
 	usingDirectInputRows := false
-	for i := 0; i < K; i++ {
+	for i := range K {
 		*offPtr[i] = int32(basePos + i)
 		if directInputs {
 			if buf, direct := inputViews[i].buffer(embs[i]); direct {
@@ -567,7 +567,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		directOutputRows, directOutputOff = s.denseBatch.directOutputRowsFor(K)
 		outputViews := s.denseBatch.outputViewsFor(K)
 		usingDirectOutputRows = true
-		for i := 0; i < K; i++ {
+		for i := range K {
 			if cap(dstRows[i]) < rowBytes {
 				usingDirectOutputRows = false
 				break
@@ -687,7 +687,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				}
 			} else {
 				// per-row rms into the norm slab (layer inputs may be non-contiguous direct views)
-				for i := 0; i < K; i++ {
+				for i := range K {
 					if err = encRMSNormRowsBF16(enc, readRows[i], anw.buf, attnNormSlab, readOff[i], anw.off, uint(i*rowBytes), 1, s.dModel, s.eps); err != nil {
 						endEncodingFast(enc)
 						return nil, false, err
@@ -831,10 +831,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			}
 			if deferredRing {
 				kSt, vSt := s.denseBatch.layerStage(ownIdx, len(s.specs), K, foldKVDimMax)
-				ringLive := basePos
-				if ringLive > slideW {
-					ringLive = slideW
-				}
+				ringLive := min(basePos, slideW)
 				if err = encSDPAMultiQRing(enc, qSlab, s.lb[ownIdx].kCache, s.lb[ownIdx].vCache, kSt, vSt, attnSlab,
 					s.nHeads, lkv, lhd, K, slideW, basePos%slideW, ringLive,
 					int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale); err != nil {
@@ -864,7 +861,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					return nil, false, err
 				}
 			} else {
-				for i := 0; i < K; i++ {
+				for i := range K {
 					// h row i = x row i + postAttnNorm(Wo·attn row i) — attnNormSlab is free as scratch
 					if err = encResidualMaybeNormAt(enc, readRows[i], readOff[i], attnOutSlab, uint(i*rowBytes), attnNormSlab, hSlab, uint(i*rowBytes), s.lb[li].postAttnNorm, s.dModel, s.eps); err != nil {
 						endEncodingFast(enc)
@@ -958,7 +955,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					return nil, false, err
 				}
 			} else {
-				for i := 0; i < K; i++ {
+				for i := range K {
 					outBuf, outOff := outRows[i], rowOff[i]
 					if directLastOut && li == len(s.specs)-1 && i == K-1 {
 						outBuf, outOff = lastOutBuf, 0
@@ -994,10 +991,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		}
 		landRows := K - r0
 		slotBase := (basePos + r0) % p.slideW
-		run1 := p.slideW - slotBase
-		if run1 > landRows {
-			run1 = landRows
-		}
+		run1 := min(p.slideW-slotBase, landRows)
 		if err = encCopyBF16Contig(enc, kSt, s.lb[p.li].kCache, uint(r0*p.kvDim*bf16Size), uint(slotBase*p.kvDim*bf16Size), run1*p.kvDim); err != nil {
 			endEncodingFast(enc)
 			return nil, false, err
@@ -1054,7 +1048,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		} else {
 			out = make([][]byte, K)
 		}
-		for i := 0; i < K; i++ {
+		for i := range K {
 			if usingDirectOutputRows {
 				out[i] = out[i][:rowBytes]
 				continue
@@ -1330,7 +1324,7 @@ func (s *ArchSession) encodePackedGreedyRowsInto(rows metal.MTLBuffer, rowOff []
 	}
 	cb := commandBufferFast(queue)
 	enc := computeCommandEncoderFast(cb)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		scratch, ok, err := s.headEnc.encodeGreedyAt(enc, rows, rowOff[i], nil)
 		if err != nil || !ok {
 			endEncodingFast(enc)

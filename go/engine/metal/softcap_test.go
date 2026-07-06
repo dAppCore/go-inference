@@ -45,7 +45,7 @@ func TestHeadSoftcapArgmaxIdentity(t *testing.T) {
 	}
 	var applyNs, skipNs time.Duration
 	const N = 48
-	for i := 0; i < N; i++ {
+	for i := range N {
 		t0 := time.Now()
 		la, e := sess.head(hidden, false) // apply softcap
 		applyNs += time.Since(t0)

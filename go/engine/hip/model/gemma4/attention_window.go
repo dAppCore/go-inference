@@ -56,13 +56,7 @@ func CachedAttentionWindows(queryLen, keyLen, offset, keyStart, window int) []At
 				start = windowStart
 			}
 		}
-		end := queryPos + 1
-		if end > keyEnd {
-			end = keyEnd
-		}
-		if end < start {
-			end = start
-		}
+		end := max(min(queryPos+1, keyEnd), start)
 		ranges[query] = AttentionWindowRange{
 			QueryPosition: queryPos,
 			KeyStart:      start,
@@ -81,7 +75,7 @@ func CachedAttentionAllowed(queryLen, keyLen, offset, keyStart, window int) []bo
 	}
 	allowed := make([]bool, queryLen*keyLen)
 	for query, visible := range ranges {
-		for key := 0; key < keyLen; key++ {
+		for key := range keyLen {
 			keyPos := keyStart + key
 			allowed[query*keyLen+key] = keyPos >= visible.KeyStart && keyPos < visible.KeyEnd
 		}
@@ -127,7 +121,7 @@ func FixedSingleTokenCausalAllowed(capacity, offset int) []bool {
 		return nil
 	}
 	allowed := make([]bool, capacity)
-	for key := 0; key < capacity; key++ {
+	for key := range capacity {
 		allowed[key] = key >= window.KeyStart && key < window.KeyEnd
 	}
 	return allowed

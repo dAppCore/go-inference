@@ -204,10 +204,7 @@ func phoneticDistanceFromCodes(ap, as, bp, bs string) float64 {
 	best := 1.0
 	for _, x := range [2]string{ap, as} {
 		for _, y := range [2]string{bp, bs} {
-			maxLen := len(x)
-			if len(y) > maxLen {
-				maxLen = len(y)
-			}
+			maxLen := max(len(y), len(x))
 			if maxLen == 0 {
 				continue
 			}
@@ -251,10 +248,7 @@ func phoneticDistanceFromCodesB(a, b *metaphoneCodeB) float64 {
 	best := 1.0
 	for _, x := range [2][]byte{ap, as} {
 		for _, y := range [2][]byte{bp, bs} {
-			maxLen := len(x)
-			if len(y) > maxLen {
-				maxLen = len(y)
-			}
+			maxLen := max(len(y), len(x))
 			if maxLen == 0 {
 				continue
 			}

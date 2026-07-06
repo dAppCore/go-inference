@@ -28,19 +28,19 @@ type WakeRequest struct {
 	Store                  any               `json:"-"`
 	IndexURI               string            `json:"index_uri,omitempty"`
 	EntryURI               string            `json:"entry_uri,omitempty"`
-	Model                  ModelIdentity     `json:"model,omitempty"`
-	Tokenizer              TokenizerIdentity `json:"tokenizer,omitempty"`
-	Adapter                AdapterIdentity   `json:"adapter,omitempty"`
-	Runtime                RuntimeIdentity   `json:"runtime,omitempty"`
+	Model                  ModelIdentity     `json:"model"`
+	Tokenizer              TokenizerIdentity `json:"tokenizer"`
+	Adapter                AdapterIdentity   `json:"adapter"`
+	Runtime                RuntimeIdentity   `json:"runtime"`
 	SkipCompatibilityCheck bool              `json:"skip_compatibility_check,omitempty"`
 	Labels                 map[string]string `json:"labels,omitempty"`
 }
 
 // WakeResult reports the durable prefix restored into a session.
 type WakeResult struct {
-	Entry        Ref               `json:"entry,omitempty"`
-	Bundle       StateRef          `json:"bundle,omitempty"`
-	Index        StateRef          `json:"index,omitempty"`
+	Entry        Ref               `json:"entry"`
+	Bundle       StateRef          `json:"bundle"`
+	Index        StateRef          `json:"index"`
 	PrefixTokens int               `json:"prefix_tokens,omitempty"`
 	BundleTokens int               `json:"bundle_tokens,omitempty"`
 	BlockSize    int               `json:"block_size,omitempty"`
@@ -59,10 +59,10 @@ type SleepRequest struct {
 	ParentBundleURI   string            `json:"parent_bundle_uri,omitempty"`
 	ParentIndexURI    string            `json:"parent_index_uri,omitempty"`
 	Title             string            `json:"title,omitempty"`
-	Model             ModelIdentity     `json:"model,omitempty"`
-	Tokenizer         TokenizerIdentity `json:"tokenizer,omitempty"`
-	Adapter           AdapterIdentity   `json:"adapter,omitempty"`
-	Runtime           RuntimeIdentity   `json:"runtime,omitempty"`
+	Model             ModelIdentity     `json:"model"`
+	Tokenizer         TokenizerIdentity `json:"tokenizer"`
+	Adapter           AdapterIdentity   `json:"adapter"`
+	Runtime           RuntimeIdentity   `json:"runtime"`
 	ReuseParentPrefix bool              `json:"reuse_parent_prefix,omitempty"`
 	BlockSize         int               `json:"block_size,omitempty"`
 	Encoding          string            `json:"encoding,omitempty"`
@@ -72,10 +72,10 @@ type SleepRequest struct {
 
 // SleepResult reports the durable state written by a session.
 type SleepResult struct {
-	Entry         Ref               `json:"entry,omitempty"`
-	Parent        Ref               `json:"parent,omitempty"`
-	Bundle        StateRef          `json:"bundle,omitempty"`
-	Index         StateRef          `json:"index,omitempty"`
+	Entry         Ref               `json:"entry"`
+	Parent        Ref               `json:"parent"`
+	Bundle        StateRef          `json:"bundle"`
+	Index         StateRef          `json:"index"`
 	TokenCount    int               `json:"token_count,omitempty"`
 	BlockSize     int               `json:"block_size,omitempty"`
 	BlocksWritten int               `json:"blocks_written,omitempty"`

@@ -78,7 +78,7 @@ func TestLayerMegakernel(t *testing.T) {
 	kCache := toBF16Bytes(syntheticFloat32(maxLen*kvDim, 7))
 	vCache := toBF16Bytes(syntheticFloat32(maxLen*kvDim, 8))
 	invFreqs := make([]float32, hd2)
-	for d := 0; d < hd2; d++ {
+	for d := range hd2 {
 		invFreqs[d] = float32(1.0 / math.Pow(float64(base), float64(2*d)/float64(headDim)))
 	}
 
@@ -87,19 +87,19 @@ func TestLayerMegakernel(t *testing.T) {
 	bf := func(v float32) float32 { h := f32ToBF16(v); return bf16ToF32(byte(h), byte(h>>8)) }
 	mv := func(w []byte, xv []float32, o, inDim int) float32 {
 		acc := float32(0)
-		for k := 0; k < inDim; k++ {
+		for k := range inDim {
 			acc += rb(w, o*inDim+k) * xv[k]
 		}
 		return acc
 	}
 	// attention: normed → QKV+RoPE → cache → SDPA → h = x + Wo·attn
 	var ss float32
-	for k := 0; k < dModel; k++ {
+	for k := range dModel {
 		ss += rb(x, k) * rb(x, k)
 	}
 	rms := float32(1.0 / math.Sqrt(float64(ss/float32(dModel)+eps)))
 	normed := make([]float32, dModel)
-	for i := 0; i < dModel; i++ {
+	for i := range dModel {
 		normed[i] = bf(rb(x, i) * rms * rb(nw, i))
 	}
 	rope := func(a0, a1 float32, d int) (float32, float32) {
@@ -108,8 +108,8 @@ func TestLayerMegakernel(t *testing.T) {
 		return a0*c - a1*s, a0*s + a1*c
 	}
 	qr := make([]float32, qDim)
-	for hh := 0; hh < nHeads; hh++ {
-		for d := 0; d < hd2; d++ {
+	for hh := range nHeads {
+		for d := range hd2 {
 			r0, r1 := rope(mv(wQ, normed, hh*headDim+d, dModel), mv(wQ, normed, hh*headDim+d+hd2, dModel), d)
 			qr[hh*headDim+d], qr[hh*headDim+d+hd2] = bf(r0), bf(r1)
 		}
@@ -119,8 +119,8 @@ func TestLayerMegakernel(t *testing.T) {
 	for i := range kc {
 		kc[i], vc[i] = rb(kCache, i), rb(vCache, i)
 	}
-	for hk := 0; hk < nKVHeads; hk++ {
-		for d := 0; d < hd2; d++ {
+	for hk := range nKVHeads {
+		for d := range hd2 {
 			r0, r1 := rope(mv(wK, normed, hk*headDim+d, dModel), mv(wK, normed, hk*headDim+d+hd2, dModel), d)
 			kc[pos*kvDim+hk*headDim+d], kc[pos*kvDim+hk*headDim+d+hd2] = bf(r0), bf(r1)
 			vc[pos*kvDim+hk*headDim+d] = bf(mv(wV, normed, hk*headDim+d, dModel))
@@ -128,12 +128,12 @@ func TestLayerMegakernel(t *testing.T) {
 		}
 	}
 	attn := make([]float32, qDim)
-	for hh := 0; hh < nHeads; hh++ {
+	for hh := range nHeads {
 		kvh := (hh / gqa) * headDim
 		m := float32(-3e38)
-		for j := 0; j < kvLen; j++ {
+		for j := range kvLen {
 			var dot float32
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				dot += qr[hh*headDim+d] * kc[j*kvDim+kvh+d]
 			}
 			if dot*scale > m {
@@ -142,37 +142,37 @@ func TestLayerMegakernel(t *testing.T) {
 		}
 		var denom float32
 		acc := make([]float32, headDim)
-		for j := 0; j < kvLen; j++ {
+		for j := range kvLen {
 			var dot float32
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				dot += qr[hh*headDim+d] * kc[j*kvDim+kvh+d]
 			}
 			p := float32(math.Exp(float64(dot*scale - m)))
 			denom += p
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				acc[d] += p * vc[j*kvDim+kvh+d]
 			}
 		}
-		for d := 0; d < headDim; d++ {
+		for d := range headDim {
 			attn[hh*headDim+d] = bf(acc[d] / denom)
 		}
 	}
 	h := make([]float32, dModel)
-	for i := 0; i < dModel; i++ {
+	for i := range dModel {
 		h[i] = bf(rb(x, i) + mv(wO, attn, i, qDim))
 	}
 	// FFN: mlpNormed = RMSNorm(h) → gate/up → gelu·mul → down → out = h + down
 	var ssh float32
-	for k := 0; k < dModel; k++ {
+	for k := range dModel {
 		ssh += h[k] * h[k]
 	}
 	rmsh := float32(1.0 / math.Sqrt(float64(ssh/float32(dModel)+eps)))
 	mlpNormed := make([]float32, dModel)
-	for i := 0; i < dModel; i++ {
+	for i := range dModel {
 		mlpNormed[i] = bf(h[i] * rmsh * rb(mnw, i))
 	}
 	gated := make([]float32, dFF)
-	for i := 0; i < dFF; i++ {
+	for i := range dFF {
 		g := bf(mv(wG, mlpNormed, i, dModel))
 		u := bf(mv(wU, mlpNormed, i, dModel))
 		inner := g + 0.044715*(g*g*g)
@@ -180,7 +180,7 @@ func TestLayerMegakernel(t *testing.T) {
 		gated[i] = bf(0.5 * g * (1.0 + tnh) * u)
 	}
 	refOut := make([]byte, dModel*bf16Size)
-	for i := 0; i < dModel; i++ {
+	for i := range dModel {
 		o := f32ToBF16(h[i] + mv(wD, gated, i, dFF))
 		refOut[i*2], refOut[i*2+1] = byte(o), byte(o>>8)
 	}

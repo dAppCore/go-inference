@@ -5,6 +5,7 @@
 package native
 
 import (
+	"maps"
 	"sort"
 	"testing"
 
@@ -44,9 +45,7 @@ func snapshotPSOCaches() psoCaches {
 		mu.Lock()
 		defer mu.Unlock()
 		out := make(map[string]metal.MTLComputePipelineState, len(m))
-		for k, v := range m {
-			out[k] = v
-		}
+		maps.Copy(out, m)
 		return out
 	}
 	return psoCaches{

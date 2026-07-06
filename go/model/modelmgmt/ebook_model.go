@@ -255,10 +255,7 @@ func weightChapters(files []weightFile, chapterChars int) []Chapter {
 		f := &files[i]
 		part := 0
 		for off := 0; off < len(f.b64); off += chapterChars {
-			end := off + chapterChars
-			if end > len(f.b64) {
-				end = len(f.b64)
-			}
+			end := min(off+chapterChars, len(f.b64))
 			part++
 			plate++
 			var b core.Builder

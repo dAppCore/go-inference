@@ -186,17 +186,11 @@ func (s *Store) rebuildIndex(ctx context.Context) error {
 }
 
 func (s *Store) detectHeaderLen(size int64) (int64, error) {
-	minHeaderLen := len(fileMagic)
-	if len(legacyFileMagic) < minHeaderLen {
-		minHeaderLen = len(legacyFileMagic)
-	}
+	minHeaderLen := min(len(legacyFileMagic), len(fileMagic))
 	if size < int64(minHeaderLen) {
 		return 0, core.NewError("state file store is missing header")
 	}
-	maxHeaderLen := len(fileMagic)
-	if len(legacyFileMagic) > maxHeaderLen {
-		maxHeaderLen = len(legacyFileMagic)
-	}
+	maxHeaderLen := max(len(legacyFileMagic), len(fileMagic))
 	if size < int64(maxHeaderLen) {
 		maxHeaderLen = int(size)
 	}

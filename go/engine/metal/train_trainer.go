@@ -165,7 +165,7 @@ func (t *LoRATrainer) seqGrads(ids []int32) (loss float32, dA, dB []float32, err
 	rows := tokens - 1
 	normedPred := normed[:rows*t.dModel]
 	targets := make([]int32, rows)
-	for i := 0; i < rows; i++ {
+	for i := range rows {
 		targets[i] = ids[i+1]
 	}
 	xA, delta, err := LoRAForwardF32(normedPred, t.a, t.b, rows, t.dModel, t.vocab, t.rank, t.scaling)
@@ -294,7 +294,7 @@ func (t *LoRATrainer) Loss(batch inference.Batch) (float64, error) {
 		rows := tokens - 1
 		normedPred := normed[:rows*t.dModel]
 		targets := make([]int32, rows)
-		for i := 0; i < rows; i++ {
+		for i := range rows {
 			targets[i] = ids[i+1]
 		}
 		_, delta, err := LoRAForwardF32(normedPred, t.a, t.b, rows, t.dModel, t.vocab, t.rank, t.scaling)

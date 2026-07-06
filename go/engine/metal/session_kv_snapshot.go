@@ -298,7 +298,7 @@ func restoreNativeKVLayerSlabs(scope string, view sessionStateLayerView, start, 
 			return core.NewError(scope + ": layer exceeds cache rows")
 		}
 	}
-	for token := 0; token < tokenCount; token++ {
+	for token := range tokenCount {
 		slot := start + token
 		if view.maxSize > 0 && position > view.cacheRows {
 			slot %= view.cacheRows
@@ -574,7 +574,7 @@ func nativeKVLayerSlabPrefix(src []byte, seqLen, tokenCount, heads, headDim int)
 		return nil, core.NewError("native.RestoreKVBlocks: layer slab prefix size mismatch")
 	}
 	out := make([]byte, heads*tokenCount*rowBytes)
-	for head := 0; head < heads; head++ {
+	for head := range heads {
 		srcStart := head * seqLen * rowBytes
 		srcEnd := srcStart + tokenCount*rowBytes
 		dstStart := head * tokenCount * rowBytes
@@ -607,7 +607,7 @@ func (s *ArchSession) validateKVBlockTrustedPrefix(source KVBlockSource, trusted
 	if len(source.CachedIDs) < trustedPrefix {
 		return core.NewError("native.RestoreKVBlocks: trusted prefix source ids missing")
 	}
-	for i := 0; i < trustedPrefix; i++ {
+	for i := range trustedPrefix {
 		if s.cachedIDs[i] != source.CachedIDs[i] {
 			return core.NewError("native.RestoreKVBlocks: trusted prefix ids mismatch")
 		}
@@ -1227,7 +1227,7 @@ func nativeKVLayerSlabHeads(keySlab, valueSlab []byte, tokenCount, heads, headDi
 	}
 	headBytes := tokenCount * headDim * bf16Size
 	out := make([]kv.HeadSnapshot, heads)
-	for head := 0; head < heads; head++ {
+	for head := range heads {
 		off := head * headBytes
 		out[head] = kv.HeadSnapshot{
 			Key:   bf16ToF32Slice(keySlab[off : off+headBytes]),
@@ -1240,8 +1240,8 @@ func nativeKVLayerSlabHeads(keySlab, valueSlab []byte, tokenCount, heads, headDi
 func nativeKVTokenRowsToLayerSlab(dst, src []byte, tokenCount, heads, headDim int) {
 	rowBytes := heads * headDim * bf16Size
 	headBytes := headDim * bf16Size
-	for head := 0; head < heads; head++ {
-		for token := 0; token < tokenCount; token++ {
+	for head := range heads {
+		for token := range tokenCount {
 			srcOff := token*rowBytes + head*headBytes
 			dstOff := (head*tokenCount + token) * headBytes
 			copy(dst[dstOff:dstOff+headBytes], src[srcOff:srcOff+headBytes])
@@ -1252,8 +1252,8 @@ func nativeKVTokenRowsToLayerSlab(dst, src []byte, tokenCount, heads, headDim in
 func nativeKVLayerSlabToTokenRows(dst, src []byte, tokenCount, heads, headDim int) {
 	rowBytes := heads * headDim * bf16Size
 	headBytes := headDim * bf16Size
-	for token := 0; token < tokenCount; token++ {
-		for head := 0; head < heads; head++ {
+	for token := range tokenCount {
+		for head := range heads {
 			srcOff := (head*tokenCount + token) * headBytes
 			dstOff := token*rowBytes + head*headBytes
 			copy(dst[dstOff:dstOff+headBytes], src[srcOff:srcOff+headBytes])

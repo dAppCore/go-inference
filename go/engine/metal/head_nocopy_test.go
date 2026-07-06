@@ -419,7 +419,7 @@ func TestOwnedQuantHeadFusedTopKMatchesFullHead(t *testing.T) {
 		v  float32
 	}
 	want := make([]candidate, 0, vocab)
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		if tokenSuppressed(i, suppress) {
 			continue
 		}
@@ -442,7 +442,7 @@ func TestOwnedQuantHeadFusedTopKMatchesFullHead(t *testing.T) {
 	if len(gotIDs) != topK || len(gotLogits) != topK*bf16Size {
 		t.Fatalf("candidate lengths: ids=%d logits=%d, want %d/%d", len(gotIDs), len(gotLogits), topK, topK*bf16Size)
 	}
-	for i := 0; i < topK; i++ {
+	for i := range topK {
 		if gotIDs[i] != want[i].id {
 			t.Fatalf("topK[%d] id=%d, want %d (got %v want top=%v)", i, gotIDs[i], want[i].id, gotIDs, want[:topK])
 		}
@@ -495,7 +495,7 @@ func TestOwnedQuantHeadDirectGreedyMatchesContractFixture(t *testing.T) {
 			t.Fatalf("prefill stepID(%d): %v", id, err)
 		}
 	}
-	for i := 0; i < maxNew; i++ {
+	for i := range maxNew {
 		logits, err := head.encode(hidden, true)
 		if err != nil {
 			t.Fatalf("owned quant full logits at generated step %d: %v", i, err)

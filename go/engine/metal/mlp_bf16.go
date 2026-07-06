@@ -61,7 +61,7 @@ func bf16ConstBytes(n int, v float32) []byte {
 	}
 	h := f32ToBF16(v)
 	out := make([]byte, n*bf16Size)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out[i*2] = byte(h)
 		out[i*2+1] = byte(h >> 8)
 	}

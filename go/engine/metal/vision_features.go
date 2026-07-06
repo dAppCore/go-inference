@@ -285,15 +285,15 @@ func patchifyVisionPixelsBF16(pixels []float32, h, w, patch int32) []byte {
 	patchDim := p * p * 3
 	out := make([]byte, gridH*gridW*patchDim*bf16Size)
 	row := 0
-	for gy := 0; gy < gridH; gy++ {
-		for gx := 0; gx < gridW; gx++ {
+	for gy := range gridH {
+		for gx := range gridW {
 			col := 0
-			for py := 0; py < p; py++ {
+			for py := range p {
 				y := gy*p + py
-				for px := 0; px < p; px++ {
+				for px := range p {
 					x := gx*p + px
 					src := (y*int(w) + x) * 3
-					for c := 0; c < 3; c++ {
+					for c := range 3 {
 						hh := f32ToBF16(pixels[src+c])
 						dst := (row*patchDim + col) * bf16Size
 						out[dst], out[dst+1] = byte(hh), byte(hh>>8)
@@ -338,16 +338,10 @@ func visionResamplePass(src, dst []float64, inLen, outLen, lines, channels int, 
 	}
 	support := 2.0 * filterScale
 	weights := make([]float64, 0, int(support)*2+3)
-	for out := 0; out < outLen; out++ {
+	for out := range outLen {
 		center := (float64(out) + 0.5) * scale
-		xmin := int(center - support + 0.5)
-		if xmin < 0 {
-			xmin = 0
-		}
-		xmax := int(center + support + 0.5)
-		if xmax > inLen {
-			xmax = inLen
-		}
+		xmin := max(int(center-support+0.5), 0)
+		xmax := min(int(center+support+0.5), inLen)
 		weights = weights[:0]
 		sum := 0.0
 		for x := xmin; x < xmax; x++ {
@@ -360,8 +354,8 @@ func visionResamplePass(src, dst []float64, inLen, outLen, lines, channels int, 
 				weights[i] /= sum
 			}
 		}
-		for line := 0; line < lines; line++ {
-			for c := 0; c < channels; c++ {
+		for line := range lines {
+			for c := range channels {
 				acc := 0.0
 				for k, wgt := range weights {
 					var at int

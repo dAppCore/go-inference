@@ -711,7 +711,7 @@ func BenchmarkArchSessionSampleHistoryFresh(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		history := make([]int32, 0, maxNew)
-		for j := 0; j < maxNew; j++ {
+		for j := range maxNew {
 			history = append(history, int32(i+j))
 		}
 		if len(history) != maxNew {
@@ -725,7 +725,7 @@ func BenchmarkArchSessionSampleHistoryScratch(b *testing.B) {
 	const maxNew = 8
 	sess := &ArchSession{}
 	history := sess.sampleHistoryScratch(maxNew)
-	for j := 0; j < maxNew; j++ {
+	for j := range maxNew {
 		history = append(history, int32(j))
 	}
 	sess.sampleHistory = history
@@ -734,7 +734,7 @@ func BenchmarkArchSessionSampleHistoryScratch(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		history = sess.sampleHistoryScratch(maxNew)
-		for j := 0; j < maxNew; j++ {
+		for j := range maxNew {
 			history = append(history, int32(i+j))
 		}
 		sess.sampleHistory = history

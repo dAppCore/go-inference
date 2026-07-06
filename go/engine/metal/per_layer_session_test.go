@@ -42,7 +42,7 @@ func addPLETensors(t testing.TB, ts map[string]safetensors.Tensor, arch model.Ar
 	mkQuant("model.embed_tokens_per_layer", vocabPLI, plDim)
 	mkBF16("model.per_layer_model_projection.weight", plDim*dModel)
 	mkBF16("model.per_layer_projection_norm.weight", pliDim)
-	for i := 0; i < numLayers; i++ {
+	for i := range numLayers {
 		p := core.Sprintf("model.layers.%d", i)
 		mkQuant(p+".per_layer_input_gate", pliDim, dModel)
 		mkQuant(p+".per_layer_projection", dModel, pliDim)

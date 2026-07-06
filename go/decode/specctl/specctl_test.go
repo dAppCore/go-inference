@@ -22,7 +22,7 @@ func TestSpecCtl_Record_Good(t *testing.T) {
 	c := specctl.New(specctl.Controller{Min: 1, Max: 8, Window: 4})
 
 	// Every proposed token accepted → rate climbs to 1.0.
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		c.Record(8, 8)
 	}
 	if r := c.AcceptRate(); !approx(r, 1.0) {
@@ -30,7 +30,7 @@ func TestSpecCtl_Record_Good(t *testing.T) {
 	}
 
 	// Now nothing accepted → rate decays toward 0.0.
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		c.Record(8, 0)
 	}
 	if r := c.AcceptRate(); r > 0.01 {
@@ -39,7 +39,7 @@ func TestSpecCtl_Record_Good(t *testing.T) {
 
 	// A partial sample sits strictly between the extremes.
 	c.Reset()
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		c.Record(4, 2)
 	}
 	if r := c.AcceptRate(); r <= 0.4 || r >= 0.6 {
@@ -50,7 +50,7 @@ func TestSpecCtl_Record_Good(t *testing.T) {
 // Bad: proposed==0 is a no-op — it must not move the rate or divide by zero.
 func TestSpecCtl_Record_Bad(t *testing.T) {
 	c := specctl.New(specctl.Controller{Min: 1, Max: 8, Window: 4})
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		c.Record(4, 4) // establish rate 1.0
 	}
 	before := c.AcceptRate()
@@ -68,7 +68,7 @@ func TestSpecCtl_Record_Ugly(t *testing.T) {
 	c := specctl.New(specctl.Controller{Min: 1, Max: 8, Window: 4})
 
 	// accepted far exceeds proposed → treated as a full-accept sample, rate ≤ 1.
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		c.Record(4, 999)
 	}
 	if r := c.AcceptRate(); r > 1.0 || !approx(r, 1.0) {
@@ -76,7 +76,7 @@ func TestSpecCtl_Record_Ugly(t *testing.T) {
 	}
 
 	// Negative accepted is floored to zero → behaves as a full-reject sample.
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		c.Record(4, -7)
 	}
 	if r := c.AcceptRate(); r < 0 || r > 0.01 {
@@ -85,7 +85,7 @@ func TestSpecCtl_Record_Ugly(t *testing.T) {
 
 	// Negative proposed is non-positive → no-op (same guard as zero).
 	c.Reset()
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		c.Record(4, 4)
 	}
 	before := c.AcceptRate()
@@ -101,7 +101,7 @@ func TestSpecCtl_Record_Ugly(t *testing.T) {
 // and a mid rate lands somewhere strictly between.
 func TestSpecCtl_NextLength_Good(t *testing.T) {
 	hi := specctl.New(specctl.Controller{Min: 1, Max: 8, Window: 4})
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		hi.Record(8, 8)
 	}
 	if n := hi.NextLength(); n != 8 {
@@ -109,7 +109,7 @@ func TestSpecCtl_NextLength_Good(t *testing.T) {
 	}
 
 	lo := specctl.New(specctl.Controller{Min: 1, Max: 8, Window: 4})
-	for i := 0; i < 300; i++ {
+	for range 300 {
 		lo.Record(8, 0)
 	}
 	if n := lo.NextLength(); n != 1 {
@@ -117,7 +117,7 @@ func TestSpecCtl_NextLength_Good(t *testing.T) {
 	}
 
 	mid := specctl.New(specctl.Controller{Min: 2, Max: 10, Window: 4})
-	for i := 0; i < 300; i++ {
+	for range 300 {
 		mid.Record(10, 5) // ~0.5 accept rate
 	}
 	n := mid.NextLength()
@@ -143,7 +143,7 @@ func TestSpecCtl_NextLength_Bad(t *testing.T) {
 func TestSpecCtl_NextLength_Ugly(t *testing.T) {
 	c := specctl.New(specctl.Controller{Min: 3, Max: 9, Window: 4})
 	// Hammer it with mixed feedback and assert the bound holds at every step.
-	for i := 0; i < 500; i++ {
+	for i := range 500 {
 		if i%3 == 0 {
 			c.Record(9, 9)
 		} else {
@@ -156,7 +156,7 @@ func TestSpecCtl_NextLength_Ugly(t *testing.T) {
 
 	// Degenerate range: Min==Max → the only legal length is that value.
 	flat := specctl.New(specctl.Controller{Min: 5, Max: 5, Window: 4})
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		flat.Record(5, 2)
 		if n := flat.NextLength(); n != 5 {
 			t.Fatalf("flat range: NextLength = %d, want 5", n)
@@ -172,7 +172,7 @@ func TestSpecCtl_Config_Good(t *testing.T) {
 	if n := c.NextLength(); n != 16 {
 		t.Fatalf("config: cold-start NextLength = %d, want 16 (Max)", n)
 	}
-	for i := 0; i < 400; i++ {
+	for range 400 {
 		c.Record(16, 0)
 	}
 	if n := c.NextLength(); n != 2 {
@@ -187,7 +187,7 @@ func TestSpecCtl_New_Bad(t *testing.T) {
 	if n := c.NextLength(); n != 4 {
 		t.Fatalf("clamped Min: cold-start NextLength = %d, want 4", n)
 	}
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		c.Record(4, 0)
 	}
 	if n := c.NextLength(); n != 1 {
@@ -210,7 +210,7 @@ func TestSpecCtl_Config_Ugly(t *testing.T) {
 		t.Fatalf("inverted range: NextLength = %d, want >= Min(8)", n)
 	}
 	// With Max repaired to >= Min, the range is non-empty and the bound holds.
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		c.Record(8, 0)
 	}
 	n := c.NextLength()
@@ -229,7 +229,7 @@ func TestSpecCtl_Config_Ugly(t *testing.T) {
 // Reset returns the accept rate to the cold-start default so NextLength is Max again.
 func TestSpecCtl_Reset(t *testing.T) {
 	c := specctl.New(specctl.Controller{Min: 1, Max: 8, Window: 4})
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		c.Record(8, 0) // drive rate down
 	}
 	if n := c.NextLength(); n != 1 {
@@ -251,16 +251,14 @@ func TestSpecCtl_Reset(t *testing.T) {
 func TestSpecCtl_Concurrent(t *testing.T) {
 	c := specctl.New(specctl.Controller{Min: 1, Max: 8, Window: 8})
 	var wg sync.WaitGroup
-	for g := 0; g < 8; g++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := 0; i < 1000; i++ {
+	for range 8 {
+		wg.Go(func() {
+			for i := range 1000 {
 				c.Record(8, i%9)
 				_ = c.NextLength()
 				_ = c.AcceptRate()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if n := c.NextLength(); n < 1 || n > 8 {

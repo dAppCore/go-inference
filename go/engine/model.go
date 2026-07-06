@@ -5,6 +5,8 @@ package engine
 import (
 	"context"
 	"iter"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -441,12 +443,12 @@ func (m *TextModel) setMetrics(promptTokens, generated int, total time.Duration,
 // turns, a trailing open model turn to complete). Kept minimal: the serve path
 // drives the same template pkg/model/gemma4/chat registers.
 func formatChatTurns(messages []inference.Message) string {
-	out := ""
+	var out strings.Builder
 	for _, msg := range messages {
-		out += "<start_of_turn>" + chatTurnRole(msg.Role) + "\n" + msg.Content + "<end_of_turn>\n"
+		out.WriteString("<start_of_turn>" + chatTurnRole(msg.Role) + "\n" + msg.Content + "<end_of_turn>\n")
 	}
-	out += "<start_of_turn>model\n"
-	return out
+	out.WriteString("<start_of_turn>model\n")
+	return out.String()
 }
 
 func chatTurnRole(role string) string {
@@ -458,10 +460,5 @@ func chatTurnRole(role string) string {
 
 // tokenInSet reports whether id is one of the stop tokens.
 func tokenInSet(id int32, set []int32) bool {
-	for _, s := range set {
-		if id == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(set, id)
 }

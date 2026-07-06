@@ -64,7 +64,7 @@ func TestSessionKVCacheByteIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewArchSession: %v", err)
 	}
-	for tk := 0; tk < T; tk++ {
+	for tk := range T {
 		h, err := sess.Step(inputs[tk]) // step the embedding over the resident cache, advancing pos
 		if err != nil {
 			t.Fatalf("session Step %d: %v", tk, err)

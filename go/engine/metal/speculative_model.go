@@ -19,6 +19,8 @@ package native
 import (
 	"context"
 	"iter"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -255,12 +257,7 @@ func (m *speculativeModel) setErr(err error) {
 // speculativeTokenInSet reports whether id is one of set — the terminator check
 // the sink uses to blank a stop token's text.
 func speculativeTokenInSet(id int32, set []int32) bool {
-	for _, s := range set {
-		if id == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(set, id)
 }
 
 // formatSpeculativeChatTurns renders the gemma turn template, byte-identical to
@@ -268,11 +265,11 @@ func speculativeTokenInSet(id int32, set []int32) bool {
 // "<start_of_turn>ROLE\nCONTENT<end_of_turn>\n", then a trailing open model turn
 // to complete. Kept here because package native cannot reach engine's copy.
 func formatSpeculativeChatTurns(messages []inference.Message) string {
-	out := ""
+	var out strings.Builder
 	for _, msg := range messages {
-		out += "<start_of_turn>" + speculativeChatRole(msg.Role) + "\n" + msg.Content + "<end_of_turn>\n"
+		out.WriteString("<start_of_turn>" + speculativeChatRole(msg.Role) + "\n" + msg.Content + "<end_of_turn>\n")
 	}
-	return out + "<start_of_turn>model\n"
+	return out.String() + "<start_of_turn>model\n"
 }
 
 func speculativeChatRole(role string) string {

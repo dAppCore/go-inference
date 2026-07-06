@@ -153,13 +153,11 @@ func MTPDecodeEach(target, draft *ArchSession, promptIDs []int32, maxNew, eosID,
 		// stepping its own cache; quality is irrelevant to correctness. We stop drafting early if the
 		// committed sequence would already reach maxNew — no point proposing tokens we can't emit.
 		room := maxNew - len(res.Tokens) // tokens still emittable INCLUDING t0
-		nDraft := k
-		if nDraft > room-1 { // -1: t0 itself occupies one emit slot
-			nDraft = room - 1
-		}
-		if nDraft < 0 {
-			nDraft = 0
-		}
+		nDraft := max(
+			// -1: t0 itself occupies one emit slot
+			min(k,
+
+				room-1), 0)
 		verifyIDs = verifyIDs[:1]
 		verifyIDs[0] = t0
 		drafts := verifyIDs[1:1]
@@ -409,13 +407,7 @@ func MTPDecodeSampledEach(target, draft *ArchSession, promptIDs []int32, maxNew 
 		}
 
 		room := maxNew - len(res.Tokens)
-		nDraft := k
-		if nDraft > room-1 {
-			nDraft = room - 1
-		}
-		if nDraft < 0 {
-			nDraft = 0
-		}
+		nDraft := max(min(k, room-1), 0)
 		verifyIDs = verifyIDs[:1]
 		verifyIDs[0] = t0
 		drafts := verifyIDs[1:1]

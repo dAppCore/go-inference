@@ -221,13 +221,13 @@ func DecodeForwardQuant(
 		msc := coreScratch.msc
 		sc := coreScratch.step
 
-		for t := 0; t < T; t++ {
+		for t := range T {
 			sc.seed(t, inputs[t])
 
 			cb := commandBufferFast(queue)
 			enc := computeCommandEncoderFast(cb)
 			in, out := sc.xA, sc.xB
-			for li := 0; li < nLayers; li++ {
+			for li := range nLayers {
 				l := lb[li]
 				if encErr = encAttnHalfKV(enc, in, l.kCache, l.vCache, sc.offBuf, sc.hBuf, bufView{buf: l.anw}, bufView{buf: l.pan}, bufView{buf: l.qn}, bufView{buf: l.kn}, nil, asc, projs[li], dModel, nHeads, nKVHeads, headDim, t, 0, headDim, base, scale, eps, nil); encErr != nil {
 					endEncodingFast(enc)

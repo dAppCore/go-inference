@@ -40,7 +40,7 @@ func TestLEK_lekEngagementDepth_HeadingAndLength(t *testing.T) {
 	// heading marker, an ethical-framework term, and tech-depth terms.
 	body := "## Sovereignty notes\n"
 	body += "We discuss the encryption protocol and the wallet key and the node mesh. "
-	for i := 0; i < 420; i++ {
+	for range 420 {
 		body += "word "
 	}
 	got := lekEngagementDepth(body)

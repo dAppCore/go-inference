@@ -91,7 +91,7 @@ func TestRebindProbeICBWritesEachReplayRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rebindProbeICB: %v", err)
 	}
-	for row := 0; row < nRows; row++ {
+	for row := range nRows {
 		for i := range want {
 			if got[row*outDim+i] != want[i] {
 				t.Fatalf("rebind row %d value %d = %v, want %v", row, i, got[row*outDim+i], want[i])

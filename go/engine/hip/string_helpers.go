@@ -2,6 +2,10 @@
 
 package hip
 
+import "maps"
+
+import "strings"
+
 func firstNonEmptyString(values ...string) string {
 	for _, value := range values {
 		if value != "" {
@@ -16,9 +20,7 @@ func cloneStringMap(in map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
+	maps.Copy(out, in)
 	return out
 }
 
@@ -27,9 +29,7 @@ func mergeStringMaps(left, right map[string]string) map[string]string {
 	if out == nil {
 		out = map[string]string{}
 	}
-	for key, value := range right {
-		out[key] = value
-	}
+	maps.Copy(out, right)
 	return out
 }
 
@@ -43,9 +43,10 @@ func joinNonEmptyStrings(values []string, sep string) string {
 	if len(out) == 0 {
 		return ""
 	}
-	result := out[0]
+	var result strings.Builder
+	result.WriteString(out[0])
 	for _, value := range out[1:] {
-		result += sep + value
+		result.WriteString(sep + value)
 	}
-	return result
+	return result.String()
 }

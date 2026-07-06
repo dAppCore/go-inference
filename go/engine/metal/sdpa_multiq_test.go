@@ -94,7 +94,7 @@ func TestSdpaMultiq_encSDPAMultiQCausal_Good(t *testing.T) {
 	rowBytes := nHeads * headDim * bf16Size
 	got := append([]byte(nil), unsafe.Slice((*byte)(outBuf.Contents()), kRows*rowBytes)...)
 
-	for s := 0; s < kRows; s++ {
+	for s := range kRows {
 		n := nBase + s + 1 // causal limit: key i valid iff i <= nTotal-kRows+s = nBase+s
 		qRow := sharedBytes(qFull[s*rowBytes : (s+1)*rowBytes])
 		rowOut := scratchBF16(nHeads * headDim)

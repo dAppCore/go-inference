@@ -39,9 +39,9 @@ func LinearBackwardF32(dy, x, w []float32, M, K, N int) (dx, dw []float32, err e
 	}
 	// dW = dyᵀ[N,M] · x[M,K] → [N,K]  (nn GEMM: contract over M). Transpose dy host-side first.
 	dyT := make([]float32, N*M)
-	for m := 0; m < M; m++ {
+	for m := range M {
 		row := dy[m*N : (m+1)*N]
-		for n := 0; n < N; n++ {
+		for n := range N {
 			dyT[n*M+m] = row[n]
 		}
 	}
@@ -67,19 +67,19 @@ func RMSNormBackwardF32(dy, x, g []float32, rows, n int, eps float32) (dx, dg []
 	}
 	dx = make([]float32, rows*n)
 	dg = make([]float32, n)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		xr, dyr, dxr := x[r*n:(r+1)*n], dy[r*n:(r+1)*n], dx[r*n:(r+1)*n]
 		var ss float64
-		for i := 0; i < n; i++ {
+		for i := range n {
 			ss += float64(xr[i]) * float64(xr[i])
 		}
 		rms := math.Sqrt(ss/float64(n) + float64(eps))
 		var dot float64 // Σ_k g_k·dy_k·x_k
-		for k := 0; k < n; k++ {
+		for k := range n {
 			dot += float64(g[k]) * float64(dyr[k]) * float64(xr[k])
 		}
 		coef := dot / (float64(n) * rms * rms * rms)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			dxr[i] = float32(float64(g[i])*float64(dyr[i])/rms - float64(xr[i])*coef)
 			dg[i] += float32(float64(dyr[i]) * float64(xr[i]) / rms)
 		}
@@ -113,7 +113,7 @@ func GeluGateMulBackwardF32(dgated, gate, up []float32, n int) (dgate, dup []flo
 	}
 	dgate = make([]float32, n)
 	dup = make([]float32, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		z := float64(gate[i])
 		u := geluC * (z + geluA*z*z*z)
 		th := math.Tanh(u)
@@ -129,14 +129,14 @@ func GeluGateMulBackwardF32(dgated, gate, up []float32, n int) (dgate, dup []flo
 // rows (the backward recomputes this to feed the projection VJPs).
 func rmsNormForwardF32(h, g []float32, rows, n int, eps float32) []float32 {
 	out := make([]float32, rows*n)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		hr, or := h[r*n:(r+1)*n], out[r*n:(r+1)*n]
 		var ss float64
-		for i := 0; i < n; i++ {
+		for i := range n {
 			ss += float64(hr[i]) * float64(hr[i])
 		}
 		rms := math.Sqrt(ss/float64(n) + float64(eps))
-		for i := 0; i < n; i++ {
+		for i := range n {
 			or[i] = float32(float64(g[i]) * float64(hr[i]) / rms)
 		}
 	}
@@ -258,13 +258,13 @@ func SoftmaxBackwardF32(dy, y []float32, rows, n int) (dx []float32, err error) 
 		return nil, core.NewError("native.SoftmaxBackwardF32: dy and y must be [rows,n]")
 	}
 	dx = make([]float32, rows*n)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		yr, dyr, dxr := y[r*n:(r+1)*n], dy[r*n:(r+1)*n], dx[r*n:(r+1)*n]
 		var dot float64 // Σ_j y_j·dy_j
-		for j := 0; j < n; j++ {
+		for j := range n {
 			dot += float64(yr[j]) * float64(dyr[j])
 		}
-		for i := 0; i < n; i++ {
+		for i := range n {
 			dxr[i] = float32(float64(yr[i]) * (float64(dyr[i]) - dot))
 		}
 	}
@@ -288,9 +288,9 @@ func RoPEBackwardF32(dy []float32, pos, nHeads, headDim, rotaryDim int, base flo
 	dx := make([]float32, len(dy))
 	copy(dx, dy) // dims ≥ rotaryDim pass through unchanged (partial rotary)
 	h := rotaryDim / 2
-	for head := 0; head < nHeads; head++ {
+	for head := range nHeads {
 		off := head * headDim
-		for j := 0; j < h; j++ {
+		for j := range h {
 			invFreq := math.Pow(float64(base), -2*float64(j)/float64(rotaryDim))
 			ang := float64(pos) * invFreq
 			c, s := math.Cos(ang), math.Sin(ang)
@@ -321,7 +321,7 @@ func AttnSingleHeadBackwardF32(dOut, q, k, v []float32, L, d int, scale float32,
 		return nil, nil, nil, err
 	}
 	p := make([]float32, L*L)
-	for i := 0; i < L; i++ {
+	for i := range L {
 		row := s[i*L : (i+1)*L]
 		mx := float32(math.Inf(-1))
 		lim := L - 1
@@ -335,7 +335,7 @@ func AttnSingleHeadBackwardF32(dOut, q, k, v []float32, L, d int, scale float32,
 			}
 		}
 		var sum float64
-		for j := 0; j < L; j++ {
+		for j := range L {
 			if j > lim {
 				p[i*L+j] = 0
 				continue
@@ -385,9 +385,9 @@ func ropeForwardF32(x []float32, pos, nHeads, headDim, rotaryDim int, base float
 	y := make([]float32, len(x))
 	copy(y, x)
 	h := rotaryDim / 2
-	for head := 0; head < nHeads; head++ {
+	for head := range nHeads {
 		off := head * headDim
-		for j := 0; j < h; j++ {
+		for j := range h {
 			invFreq := math.Pow(float64(base), -2*float64(j)/float64(rotaryDim))
 			ang := float64(pos) * invFreq
 			c, s := math.Cos(ang), math.Sin(ang)
@@ -407,7 +407,7 @@ func sdpaForwardSingleHeadF32(q, k, v []float32, L, d int, scale float32, causal
 		return nil, err
 	}
 	p := make([]float32, L*L)
-	for i := 0; i < L; i++ {
+	for i := range L {
 		lim := L - 1
 		if causal {
 			lim = i
@@ -448,7 +448,7 @@ func QKNormBackwardF32(dy, x, normW []float32, L, H, d int, eps float32) (dx, dN
 // gatherHeadF32 extracts head h (width d) from a head-major [L, nHeads·d] tensor into [L, d].
 func gatherHeadF32(x []float32, L, nHeads, d, h int) []float32 {
 	out := make([]float32, L*d)
-	for i := 0; i < L; i++ {
+	for i := range L {
 		copy(out[i*d:(i+1)*d], x[i*nHeads*d+h*d:i*nHeads*d+(h+1)*d])
 	}
 	return out
@@ -457,8 +457,8 @@ func gatherHeadF32(x []float32, L, nHeads, d, h int) []float32 {
 // scatterAddHeadF32 adds a per-head [L,d] gradient back into head h of a [L, nHeads·d] tensor (ADD, so
 // GQA's several query heads accumulate into their shared kv head).
 func scatterAddHeadF32(dst, src []float32, L, nHeads, d, h int) {
-	for i := 0; i < L; i++ {
-		for j := 0; j < d; j++ {
+	for i := range L {
+		for j := range d {
 			dst[i*nHeads*d+h*d+j] += src[i*d+j]
 		}
 	}
@@ -480,7 +480,7 @@ func MultiHeadAttnBackwardF32(dOut, q, k, v []float32, L, H, Hkv, d int, scale f
 	dQ = make([]float32, L*H*d)
 	dK = make([]float32, L*Hkv*d)
 	dV = make([]float32, L*Hkv*d)
-	for h := 0; h < H; h++ {
+	for h := range H {
 		hk := h / gqa
 		qh := gatherHeadF32(q, L, H, d, h)
 		kh := gatherHeadF32(k, L, Hkv, d, hk)
@@ -502,7 +502,7 @@ func MultiHeadAttnBackwardF32(dOut, q, k, v []float32, L, H, Hkv, d int, scale f
 func multiHeadSDPAForwardF32(q, k, v []float32, L, H, Hkv, d int, scale float32, causal bool) ([]float32, error) {
 	gqa := H / Hkv
 	out := make([]float32, L*H*d)
-	for h := 0; h < H; h++ {
+	for h := range H {
 		hk := h / gqa
 		oh, err := sdpaForwardSingleHeadF32(gatherHeadF32(q, L, H, d, h), gatherHeadF32(k, L, Hkv, d, hk), gatherHeadF32(v, L, Hkv, d, hk), L, d, scale, causal)
 		if err != nil {
@@ -533,7 +533,7 @@ func MultiHeadAttnBlockForwardF32(h, normW, wQ, wK, wV, wO []float32, L, dModel,
 		return nil, err
 	}
 	qr, kr := make([]float32, L*qDim), make([]float32, L*kvDim)
-	for i := 0; i < L; i++ {
+	for i := range L {
 		copy(qr[i*qDim:(i+1)*qDim], ropeForwardF32(q[i*qDim:(i+1)*qDim], i, H, d, rotaryDim, base))
 		copy(kr[i*kvDim:(i+1)*kvDim], ropeForwardF32(k[i*kvDim:(i+1)*kvDim], i, Hkv, d, rotaryDim, base))
 	}
@@ -580,7 +580,7 @@ func MultiHeadAttnBlockBackwardF32(dout, h, normW, wQ, wK, wV, wO []float32, L, 
 		return nil, err
 	}
 	qr, kr := make([]float32, L*qDim), make([]float32, L*kvDim)
-	for i := 0; i < L; i++ { // per-position RoPE, all heads in the row at once
+	for i := range L { // per-position RoPE, all heads in the row at once
 		copy(qr[i*qDim:(i+1)*qDim], ropeForwardF32(q[i*qDim:(i+1)*qDim], i, H, d, rotaryDim, base))
 		copy(kr[i*kvDim:(i+1)*kvDim], ropeForwardF32(k[i*kvDim:(i+1)*kvDim], i, Hkv, d, rotaryDim, base))
 	}
@@ -598,7 +598,7 @@ func MultiHeadAttnBlockBackwardF32(dout, h, normW, wQ, wK, wV, wO []float32, L, 
 		return nil, err
 	}
 	dq, dk := make([]float32, L*qDim), make([]float32, L*kvDim)
-	for i := 0; i < L; i++ {
+	for i := range L {
 		drq, e1 := RoPEBackwardF32(dqr[i*qDim:(i+1)*qDim], i, H, d, rotaryDim, base)
 		if e1 != nil {
 			return nil, e1
@@ -673,7 +673,7 @@ func AttnBlockBackwardF32(dout, h, normW, wQ, wK, wV, wO []float32, L, dModel, d
 	}
 	qr := make([]float32, L*d)
 	kr := make([]float32, L*d)
-	for i := 0; i < L; i++ {
+	for i := range L {
 		copy(qr[i*d:(i+1)*d], ropeForwardF32(q[i*d:(i+1)*d], i, 1, d, rotaryDim, base))
 		copy(kr[i*d:(i+1)*d], ropeForwardF32(k[i*d:(i+1)*d], i, 1, d, rotaryDim, base))
 	}
@@ -694,7 +694,7 @@ func AttnBlockBackwardF32(dout, h, normW, wQ, wK, wV, wO []float32, L, dModel, d
 	// RoPE backward per row → gradient w.r.t. the pre-rope q,k.
 	dq := make([]float32, L*d)
 	dk := make([]float32, L*d)
-	for i := 0; i < L; i++ {
+	for i := range L {
 		drq, e1 := RoPEBackwardF32(dqr[i*d:(i+1)*d], i, 1, d, rotaryDim, base)
 		if e1 != nil {
 			return nil, e1

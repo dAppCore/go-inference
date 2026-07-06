@@ -20,7 +20,7 @@ func benchTensors(n int) map[string]Tensor {
 		"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
 		"input_layernorm", "post_attention_layernorm",
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		name := "model.layers." + strconv.Itoa(i/len(parts)) + "." + parts[i%len(parts)] + ".weight"
 		// 64 bf16 elements = 128 bytes; shape [8,8] so ∏shape×dtype validates.
 		data := make([]byte, 128)

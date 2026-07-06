@@ -250,7 +250,7 @@ func TestSortCandidates_DuplicateIdentityTieBreak(t *testing.T) {
 	req := SelectRequest{Model: "m", Preferences: ProviderPreferences{Sort: SortByLatency}}
 
 	var first []string
-	for run := 0; run < 8; run++ {
+	for run := range 8 {
 		res := SelectEndpoints(req, pool)
 		if !res.OK {
 			t.Fatalf("SelectEndpoints: %s", res.Error())

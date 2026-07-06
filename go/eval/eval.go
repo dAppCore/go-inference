@@ -60,7 +60,7 @@ type Info struct {
 	QuantBits     int         `json:"quant_bits,omitempty"`
 	QuantGroup    int         `json:"quant_group,omitempty"`
 	ContextLength int         `json:"context_length,omitempty"`
-	Adapter       AdapterInfo `json:"adapter,omitempty"`
+	Adapter       AdapterInfo `json:"adapter"`
 }
 
 // Config controls dataset-native perplexity and small quality probes.
@@ -106,7 +106,7 @@ type Metrics struct {
 type Report struct {
 	Version   int           `json:"version"`
 	ModelInfo Info          `json:"model_info"`
-	Adapter   AdapterInfo   `json:"adapter,omitempty"`
+	Adapter   AdapterInfo   `json:"adapter"`
 	Config    Config        `json:"config"`
 	Metrics   Metrics       `json:"metrics"`
 	Quality   QualityReport `json:"quality"`

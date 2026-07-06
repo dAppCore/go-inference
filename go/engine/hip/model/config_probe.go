@@ -39,10 +39,10 @@ type ConfigProbe struct {
 	ModelType              string                         `json:"model_type,omitempty"`
 	TextTowerModelType     string                         `json:"text_tower_model_type,omitempty"`
 	Architectures          []string                       `json:"architectures,omitempty"`
-	ArchitectureResolution profile.ArchitectureResolution `json:"architecture_resolution,omitempty"`
-	LoaderRoute            LoaderRoute                    `json:"loader_route,omitempty"`
-	RuntimeContractRoute   RuntimeContractRoute           `json:"runtime_contract_route,omitempty"`
-	SequenceMixer          SequenceMixerConfigProbe       `json:"sequence_mixer,omitempty"`
+	ArchitectureResolution profile.ArchitectureResolution `json:"architecture_resolution"`
+	LoaderRoute            LoaderRoute                    `json:"loader_route"`
+	RuntimeContractRoute   RuntimeContractRoute           `json:"runtime_contract_route"`
+	SequenceMixer          SequenceMixerConfigProbe       `json:"sequence_mixer"`
 	Registered             bool                           `json:"registered,omitempty"`
 	AttachedOnly           bool                           `json:"attached_only,omitempty"`
 	Standalone             bool                           `json:"standalone,omitempty"`

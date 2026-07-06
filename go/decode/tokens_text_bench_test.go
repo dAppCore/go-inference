@@ -30,7 +30,7 @@ import (
 // per-token cost.
 func buildDecodeTokensMixedTextValue(n int) []Token {
 	tokens := make([]Token, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if i%2 == 0 {
 			tokens[i] = Token{ID: int32(i + 1), Text: "tok"}
 		} else {
@@ -46,7 +46,7 @@ func buildDecodeTokensMixedTextValue(n int) []Token {
 // the tokenSurface Text-empty fallthrough.
 func buildDecodeTokensAllValueOnly(n int) []Token {
 	tokens := make([]Token, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		tokens[i] = Token{ID: int32(i + 1), Value: "tok"}
 	}
 	return tokens
@@ -59,7 +59,7 @@ func buildDecodeTokensAllValueOnly(n int) []Token {
 // content (markdown, structured output).
 func buildDecodeTokensWhitespaceOnly(n int) []Token {
 	tokens := make([]Token, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		tokens[i] = Token{ID: int32(i + 1), Text: "   \t\n"}
 	}
 	return tokens
@@ -71,7 +71,7 @@ func buildDecodeTokensWhitespaceOnly(n int) []Token {
 // reliable way to see that path's cost in isolation.
 func buildDecodeTokensUnicodeWhitespace(n int) []Token {
 	tokens := make([]Token, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		tokens[i] = Token{ID: int32(i + 1), Text: "  "}
 	}
 	return tokens
@@ -84,10 +84,10 @@ func buildDecodeTokensUnicodeWhitespace(n int) []Token {
 func buildDecodeTokensVariableLength(n int) []Token {
 	lengths := []int{1, 4, 16, 64}
 	tokens := make([]Token, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		size := lengths[i%len(lengths)]
 		buf := make([]byte, size)
-		for j := 0; j < size; j++ {
+		for j := range size {
 			buf[j] = byte('a' + (i % 26))
 		}
 		tokens[i] = Token{ID: int32(i + 1), Text: string(buf)}

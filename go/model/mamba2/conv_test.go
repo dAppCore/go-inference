@@ -24,10 +24,10 @@ func TestCausalConv1dKnown(t *testing.T) {
 		}
 		return float64(in[t*convDim+ch])
 	}
-	for ch := 0; ch < convDim; ch++ {
+	for ch := range convDim {
 		w0, w1, w2 := float64(w[ch*K+0]), float64(w[ch*K+1]), float64(w[ch*K+2])
 		bb := float64(bias[ch])
-		for tt := 0; tt < L; tt++ {
+		for tt := range L {
 			want := bb + w0*x(tt-2, ch) + w1*x(tt-1, ch) + w2*x(tt, ch)
 			if got := float64(out[tt*convDim+ch]); math.Abs(got-want) > 1e-4*(1+math.Abs(want)) {
 				t.Errorf("out[%d,%d] = %v, want %v", tt, ch, got, want)

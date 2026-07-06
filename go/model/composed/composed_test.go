@@ -70,7 +70,7 @@ func TestComposedDecodeEqualsPrefill(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode step %d: %v", t0, err)
 		}
-		for i := 0; i < D; i++ {
+		for i := range D {
 			if h[i] != prefill[t0*D+i] {
 				t.Fatalf("token %d hidden[%d] = %v != prefill %v (composed decode diverged)", t0, i, h[i], prefill[t0*D+i])
 			}

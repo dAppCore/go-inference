@@ -39,7 +39,7 @@ type LossMask struct {
 type Batch struct {
 	TokenIDs      [][]int32         `json:"token_ids,omitempty"`
 	AttentionMask [][]float32       `json:"attention_mask,omitempty"`
-	LossMask      LossMask          `json:"loss_mask,omitempty"`
+	LossMask      LossMask          `json:"loss_mask"`
 	Samples       []DatasetSample   `json:"samples,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 }
@@ -77,9 +77,9 @@ type QualityProbeResult struct {
 
 // EvalReport is the portable output of dataset evaluation.
 type EvalReport struct {
-	Model   ModelIdentity        `json:"model,omitempty"`
-	Adapter AdapterIdentity      `json:"adapter,omitempty"`
-	Metrics EvalMetrics          `json:"metrics,omitempty"`
+	Model   ModelIdentity        `json:"model"`
+	Adapter AdapterIdentity      `json:"adapter"`
+	Metrics EvalMetrics          `json:"metrics"`
 	Probes  []QualityProbeResult `json:"probes,omitempty"`
 	Labels  map[string]string    `json:"labels,omitempty"`
 }
@@ -94,8 +94,8 @@ type BenchConfig struct {
 
 // BenchReport records fast local benchmark counters.
 type BenchReport struct {
-	Model                 ModelIdentity     `json:"model,omitempty"`
-	Adapter               AdapterIdentity   `json:"adapter,omitempty"`
+	Model                 ModelIdentity     `json:"model"`
+	Adapter               AdapterIdentity   `json:"adapter"`
 	PromptTokens          int               `json:"prompt_tokens,omitempty"`
 	GeneratedTokens       int               `json:"generated_tokens,omitempty"`
 	PrefillTokensPerSec   float64           `json:"prefill_tokens_per_sec,omitempty"`
@@ -122,9 +122,9 @@ type MemoryPlan struct {
 
 // ModelFitReport records whether a model is expected to fit a machine.
 type ModelFitReport struct {
-	Model          ModelIdentity `json:"model,omitempty"`
+	Model          ModelIdentity `json:"model"`
 	Fits           bool          `json:"fits,omitempty"`
-	MemoryPlan     MemoryPlan    `json:"memory_plan,omitempty"`
+	MemoryPlan     MemoryPlan    `json:"memory_plan"`
 	ArchitectureOK bool          `json:"architecture_ok,omitempty"`
 	QuantizationOK bool          `json:"quantization_ok,omitempty"`
 	Notes          []string      `json:"notes,omitempty"`
@@ -136,7 +136,7 @@ type TrainingConfig struct {
 	BatchSize            int               `json:"batch_size,omitempty"`
 	GradientAccumulation int               `json:"gradient_accumulation,omitempty"`
 	LearningRate         float64           `json:"learning_rate,omitempty"`
-	LoRA                 LoRAConfig        `json:"lora,omitempty"`
+	LoRA                 LoRAConfig        `json:"lora"`
 	Labels               map[string]string `json:"labels,omitempty"`
 }
 
@@ -152,9 +152,9 @@ type TrainingMetrics struct {
 
 // TrainingResult is the portable output of a training run.
 type TrainingResult struct {
-	Model       ModelIdentity     `json:"model,omitempty"`
-	Adapter     AdapterIdentity   `json:"adapter,omitempty"`
-	Metrics     TrainingMetrics   `json:"metrics,omitempty"`
+	Model       ModelIdentity     `json:"model"`
+	Adapter     AdapterIdentity   `json:"adapter"`
+	Metrics     TrainingMetrics   `json:"metrics"`
 	Checkpoints []StateRef        `json:"checkpoints,omitempty"`
 	Labels      map[string]string `json:"labels,omitempty"`
 }

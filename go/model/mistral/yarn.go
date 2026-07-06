@@ -33,7 +33,7 @@ func YaRNInvFreqs(base, factor, betaFast, betaSlow float64, origMaxPos, dim int)
 		factor = 1
 	}
 	low, high := yarnCorrectionRange(betaFast, betaSlow, base, origMaxPos, dim)
-	for i := 0; i < half; i++ {
+	for i := range half {
 		extra := math.Pow(base, -float64(2*i)/float64(dim)) // standard RoPE inv-freq
 		inter := extra / factor                             // interpolated (context-stretched)
 		ramp := yarnRamp(low, high, i)                      // 0 at/below low → 1 at/above high

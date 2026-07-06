@@ -4,6 +4,7 @@ package model
 
 import (
 	"math"
+	"slices"
 	"sort"
 
 	core "dappco.re/go"
@@ -34,7 +35,7 @@ func greedySuppressed(logits []byte, vocab int, suppress []int32) (int32, error)
 		return 0, core.NewError("model.Greedy: logits must be vocab bf16 bytes")
 	}
 	best, bestV := -1, float32(math.Inf(-1))
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		if tokenSuppressed(int32(i), suppress) {
 			continue
 		}
@@ -161,7 +162,7 @@ func (s *Sampler) sampleMapped(logits []byte, ids []int32, vocab int, p SamplePa
 	// temperature-scaled logits + their max (for a stable softmax).
 	maxL := float32(math.Inf(-1))
 	allowed := 0
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		id := int32(i)
 		if ids != nil {
 			id = ids[i]
@@ -179,7 +180,7 @@ func (s *Sampler) sampleMapped(logits []byte, ids []int32, vocab int, p SamplePa
 		return 0, core.NewError("model.Sample: all tokens are suppressed")
 	}
 	var sum float32
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		id := int32(i)
 		if ids != nil {
 			id = ids[i]
@@ -277,7 +278,7 @@ func (s *Sampler) sampleMappedInVocabOrder(probs []float32, ids []int32, vocab i
 	}
 	target := s.next() * sum
 	var acc float32
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		acc += probs[i]
 		if acc >= target {
 			if ids != nil {
@@ -293,12 +294,7 @@ func (s *Sampler) sampleMappedInVocabOrder(probs []float32, ids []int32, vocab i
 }
 
 func tokenSuppressed(id int32, suppress []int32) bool {
-	for _, token := range suppress {
-		if id == token {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(suppress, id)
 }
 
 func greedyMappedSuppressed(logits []byte, ids []int32, suppress []int32) (int32, error) {
@@ -319,7 +315,7 @@ func greedyMappedSuppressed(logits []byte, ids []int32, suppress []int32) (int32
 
 func topMappedSuppressed(logits []byte, ids []int32, vocab int, suppress []int32) (int32, error) {
 	best, bestV := -1, float32(math.Inf(-1))
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		id := int32(i)
 		if ids != nil {
 			id = ids[i]
@@ -356,7 +352,7 @@ func applyRepeatPenaltyBF16(logits []byte, vocab int, history []int32, penalty f
 	if len(ids) == 0 {
 		return logits, nil
 	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	slices.Sort(ids)
 	out := make([]byte, len(logits))
 	copy(out, logits)
 	var prev int32

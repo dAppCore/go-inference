@@ -15,7 +15,7 @@ func quantMoEExpertsFixture(tb testing.TB, numExperts, dModel, dFF, groupSize, b
 	tb.Helper()
 	buildBatched := func(outDim, inDim, saltBase int) QuantWeight {
 		var packed, scales, biases []byte
-		for e := 0; e < numExperts; e++ {
+		for e := range numExperts {
 			p, s, b := quantizeProj(tb, outDim, inDim, groupSize, bits, saltBase+e*7)
 			packed, scales, biases = append(packed, p...), append(scales, s...), append(biases, b...)
 		}
@@ -43,7 +43,7 @@ func TestMoEExpertsQuant(t *testing.T) {
 	// batch each expert's [outDim × inDim] quant weight into one tensor (the SwitchGLU layout).
 	buildBatched := func(outDim, inDim, saltBase int) QuantWeight {
 		var p, s, b []byte
-		for e := 0; e < numExperts; e++ {
+		for e := range numExperts {
 			pe, se, be := quantizeProj(t, outDim, inDim, gs, bits, saltBase+e*7)
 			p, s, b = append(p, pe...), append(s, se...), append(b, be...)
 		}
@@ -106,7 +106,7 @@ func TestMoEExpertsQuantBindsWholeBatchedExpertTensors(t *testing.T) {
 	const numExperts, topK, dModel, dFF, gs, bits = 4, 2, 64, 128, 32, 4
 	buildBatched := func(outDim, inDim, saltBase int) QuantWeight {
 		var p, s, b []byte
-		for e := 0; e < numExperts; e++ {
+		for e := range numExperts {
 			pe, se, be := quantizeProj(t, outDim, inDim, gs, bits, saltBase+e*7)
 			p, s, b = append(p, pe...), append(s, se...), append(b, be...)
 		}
@@ -253,7 +253,7 @@ func TestMoEExpertsQuantFusedGateUpMatchesSplitExperts(t *testing.T) {
 	const numExperts, topK, dModel, dFF, gs, bits = 4, 2, 64, 128, 32, 4
 	buildBatched := func(outDim, inDim, saltBase int) QuantWeight {
 		var p, s, b []byte
-		for e := 0; e < numExperts; e++ {
+		for e := range numExperts {
 			pe, se, be := quantizeProj(t, outDim, inDim, gs, bits, saltBase+e*7)
 			p, s, b = append(p, pe...), append(s, se...), append(b, be...)
 		}
@@ -1258,13 +1258,13 @@ func TestMoERouterQuant(t *testing.T) {
 
 	// independent selection: the topK highest scores by max-scan must equal idx as a set.
 	sc := make([]float32, numExperts)
-	for e := 0; e < numExperts; e++ {
+	for e := range numExperts {
 		sc[e] = bf16ToF32(scoresB[e*bf16Size], scoresB[e*bf16Size+1])
 	}
 	used := map[int32]bool{}
-	for n := 0; n < topK; n++ {
+	for range topK {
 		best, bv := int32(-1), float32(-1e30)
-		for e := 0; e < numExperts; e++ {
+		for e := range numExperts {
 			if !used[int32(e)] && sc[e] > bv {
 				best, bv = int32(e), sc[e]
 			}
@@ -1301,7 +1301,7 @@ func TestMoEBlockQuant(t *testing.T) {
 	}
 	batched := func(outDim, inDim, saltBase int) QuantWeight {
 		var p, s, b []byte
-		for e := 0; e < numExperts; e++ {
+		for e := range numExperts {
 			pe, se, be := quantizeProj(t, outDim, inDim, gs, bits, saltBase+e*7)
 			p, s, b = append(p, pe...), append(s, se...), append(b, be...)
 		}

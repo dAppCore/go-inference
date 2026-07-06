@@ -12,7 +12,7 @@ import (
 // a concrete scheduler implementation.
 type RequestHandle struct {
 	ID     string            `json:"id,omitempty"`
-	Model  ModelIdentity     `json:"model,omitempty"`
+	Model  ModelIdentity     `json:"model"`
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
@@ -31,7 +31,7 @@ type ScheduledRequest struct {
 	Model    string            `json:"model,omitempty"`
 	Prompt   string            `json:"prompt,omitempty"`
 	Messages []Message         `json:"messages,omitempty"`
-	Sampler  SamplerConfig     `json:"sampler,omitempty"`
+	Sampler  SamplerConfig     `json:"sampler"`
 	Labels   map[string]string `json:"labels,omitempty"`
 }
 
@@ -49,8 +49,8 @@ type ScheduledRequest struct {
 // would race other receivers of the same value.
 type ScheduledToken struct {
 	RequestID string            `json:"request_id,omitempty"`
-	Token     Token             `json:"token,omitempty"`
-	Metrics   GenerateMetrics   `json:"metrics,omitempty"`
+	Token     Token             `json:"token"`
+	Metrics   GenerateMetrics   `json:"metrics"`
 	Labels    map[string]string `json:"labels,omitempty"`
 }
 
@@ -95,8 +95,8 @@ type CacheStats struct {
 
 // CacheWarmRequest asks a runtime to prepare cache blocks for a prompt.
 type CacheWarmRequest struct {
-	Model   ModelIdentity     `json:"model,omitempty"`
-	Adapter AdapterIdentity   `json:"adapter,omitempty"`
+	Model   ModelIdentity     `json:"model"`
+	Adapter AdapterIdentity   `json:"adapter"`
 	Prompt  string            `json:"prompt,omitempty"`
 	Tokens  []int32           `json:"tokens,omitempty"`
 	Mode    string            `json:"mode,omitempty"`
@@ -106,7 +106,7 @@ type CacheWarmRequest struct {
 // CacheWarmResult reports which cache blocks are available after warming.
 type CacheWarmResult struct {
 	Blocks []CacheBlockRef   `json:"blocks,omitempty"`
-	Stats  CacheStats        `json:"stats,omitempty"`
+	Stats  CacheStats        `json:"stats"`
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
@@ -133,9 +133,9 @@ type EmbeddingUsage struct {
 
 // EmbeddingResult is the portable output of an embedding model.
 type EmbeddingResult struct {
-	Model   ModelIdentity     `json:"model,omitempty"`
+	Model   ModelIdentity     `json:"model"`
 	Vectors [][]float32       `json:"vectors,omitempty"`
-	Usage   EmbeddingUsage    `json:"usage,omitempty"`
+	Usage   EmbeddingUsage    `json:"usage"`
 	Labels  map[string]string `json:"labels,omitempty"`
 }
 
@@ -163,7 +163,7 @@ type RerankScore struct {
 
 // RerankResult is the portable output of a rerank request.
 type RerankResult struct {
-	Model   ModelIdentity     `json:"model,omitempty"`
+	Model   ModelIdentity     `json:"model"`
 	Results []RerankScore     `json:"results,omitempty"`
 	Labels  map[string]string `json:"labels,omitempty"`
 }
@@ -219,8 +219,8 @@ type ToolParser interface {
 type ModelPackInspection struct {
 	Path         string            `json:"path,omitempty"`
 	Format       string            `json:"format,omitempty"`
-	Model        ModelIdentity     `json:"model,omitempty"`
-	Tokenizer    TokenizerIdentity `json:"tokenizer,omitempty"`
+	Model        ModelIdentity     `json:"model"`
+	Tokenizer    TokenizerIdentity `json:"tokenizer"`
 	Supported    bool              `json:"supported,omitempty"`
 	Capabilities []Capability      `json:"capabilities,omitempty"`
 	Notes        []string          `json:"notes,omitempty"`

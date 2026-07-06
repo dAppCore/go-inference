@@ -41,8 +41,8 @@ func audioContextSizeOf(cfg AudioConfig) int {
 func audioBlockContextF32(x []float32, T, H, D, nB, chunk, past, future int) []float32 {
 	ctx := chunk + past + future
 	out := make([]float32, nB*ctx*H*D)
-	for b := 0; b < nB; b++ {
-		for c := 0; c < ctx; c++ {
+	for b := range nB {
+		for c := range ctx {
 			// padded index = b*chunk + c; original time = padded - past.
 			it := b*chunk + c - past
 			if it < 0 || it >= T {
@@ -65,12 +65,12 @@ func audioRelShiftF32(x []float32, H, nB, chunk, P, ctx int) []float32 {
 
 func audioRelShiftF32Into(out, x []float32, H, nB, chunk, P, ctx int) {
 	padP := ctx + 1
-	for h := 0; h < H; h++ {
-		for b := 0; b < nB; b++ {
+	for h := range H {
+		for b := range nB {
 			// folded[i*padP + p] = x[h,b,i,p] (p<P), else 0; then out[i,c] = folded[i*ctx + c].
 			base := ((h*nB + b) * chunk)
-			for i := 0; i < chunk; i++ {
-				for c := 0; c < ctx; c++ {
+			for i := range chunk {
+				for c := range ctx {
 					fi := i*ctx + c // index into the folded chunk·(ctx+1) stream
 					row, col := fi/padP, fi%padP
 					var v float32
@@ -88,10 +88,10 @@ func audioRelShiftF32Into(out, x []float32, H, nB, chunk, P, ctx int) {
 // kv=blk·chunk-past+j iff both in-sequence and kv∈[q-past, q+future]. Port of blockedMask.
 func audioBlockedMask(seqLen, nB, chunk, ctx, past, future int) []bool {
 	m := make([]bool, nB*chunk*ctx)
-	for b := 0; b < nB; b++ {
-		for i := 0; i < chunk; i++ {
+	for b := range nB {
+		for i := range chunk {
 			q := b*chunk + i
-			for j := 0; j < ctx; j++ {
+			for j := range ctx {
 				kv := b*chunk - past + j
 				if q < seqLen && kv >= 0 && kv < seqLen && kv >= q-past && kv <= q+future {
 					m[(b*chunk+i)*ctx+j] = true
@@ -181,7 +181,7 @@ func audioAttentionCore(qf, kf, vf []float32, w *AudioAttentionWeights, cfg Audi
 
 	// q *= QScalePerDim[d] (per-dim, broadcast over T and heads); k *= KScale.
 	for i := 0; i < T*H; i++ {
-		for d := 0; d < D; d++ {
+		for d := range D {
 			qf[i*D+d] *= w.QScalePerDim[d]
 		}
 	}
@@ -218,11 +218,11 @@ func audioAttentionCore(qf, kf, vf []float32, w *AudioAttentionWeights, cfg Audi
 	masked := make([]float32, chunk*ctx)
 	probs := make([]float32, chunk*ctx)
 	blockOut := make([]float32, chunk*D)
-	for h := 0; h < H; h++ {
+	for h := range H {
 		// gather this head's blocked q [nB·chunk, D], context k/v [nB,ctx,D].
 		clear(qh)
-		for b := 0; b < nB; b++ {
-			for i := 0; i < chunk; i++ {
+		for b := range nB {
+			for i := range chunk {
 				t := b*chunk + i
 				if t < T {
 					copy(qh[(b*chunk+i)*D:(b*chunk+i)*D+D], qf[(t*H+h)*D:(t*H+h)*D+D])
@@ -240,8 +240,8 @@ func audioAttentionCore(qf, kf, vf []float32, w *AudioAttentionWeights, cfg Audi
 		}
 		audioRelShiftF32Into(bdShift, bd, 1, nB, chunk, w.PosCount, ctx) // treat as [1,nB,chunk,P]→[1,nB,chunk,ctx]
 
-		for b := 0; b < nB; b++ {
-			for c := 0; c < ctx; c++ {
+		for b := range nB {
+			for c := range ctx {
 				copy(kh[c*D:c*D+D], kc[((b*ctx+c)*H+h)*D:((b*ctx+c)*H+h)*D+D])
 				copy(vh[c*D:c*D+D], vc[((b*ctx+c)*H+h)*D:((b*ctx+c)*H+h)*D+D])
 			}
@@ -253,16 +253,16 @@ func audioAttentionCore(qf, kf, vf []float32, w *AudioAttentionWeights, cfg Audi
 			// soft-cap = LogitCap·tanh(logits/LogitCap), tanh via the GPU kernel (host math.Tanh is NOT
 			// byte-identical to v_Tanhfloat32). MulScalar/Add are single f32 ops → byte-identical host-side.
 			invCap := float32(1) / cfg.LogitCap
-			for i := 0; i < chunk; i++ {
-				for j := 0; j < ctx; j++ {
+			for i := range chunk {
+				for j := range ctx {
 					scaled[i*ctx+j] = (ac[i*ctx+j] + bdShift[(b*chunk+i)*ctx+j]) * invCap
 				}
 			}
 			if err := RunUnaryInto("v_Tanhfloat32float32", scaled, capped); err != nil {
 				return nil, err
 			}
-			for i := 0; i < chunk; i++ {
-				for j := 0; j < ctx; j++ {
+			for i := range chunk {
+				for j := range ctx {
 					s := capped[i*ctx+j] * cfg.LogitCap
 					if !mask[(b*chunk+i)*ctx+j] {
 						s = cfg.InvalidLogit
@@ -277,7 +277,7 @@ func audioAttentionCore(qf, kf, vf []float32, w *AudioAttentionWeights, cfg Audi
 			if err != nil {
 				return nil, err
 			}
-			for i := 0; i < chunk; i++ {
+			for i := range chunk {
 				copy(merged[((b*chunk+i)*hd)+h*D:((b*chunk+i)*hd)+h*D+D], blockOut[i*D:i*D+D])
 			}
 		}

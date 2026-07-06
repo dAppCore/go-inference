@@ -74,18 +74,9 @@ type Adaptive struct {
 //
 //	c := specctl.New(specctl.Controller{Min: 1, Max: 8, Window: 8})
 func New(cfg Controller) *Adaptive {
-	minLen := cfg.Min
-	if minLen < 1 {
-		minLen = 1
-	}
-	maxLen := cfg.Max
-	if maxLen < minLen {
-		maxLen = minLen
-	}
-	window := cfg.Window
-	if window < 1 {
-		window = 1
-	}
+	minLen := max(cfg.Min, 1)
+	maxLen := max(cfg.Max, minLen)
+	window := max(cfg.Window, 1)
 	return &Adaptive{
 		min:   minLen,
 		max:   maxLen,

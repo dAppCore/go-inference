@@ -105,10 +105,10 @@ func AudioPositionTable(count, hidden int) []float32 {
 	half := hidden / 2
 	logIncrement := math.Log(10000.0) / float64(maxInt(half-1, 1))
 	vals := make([]float32, count*hidden)
-	for p := 0; p < count; p++ {
+	for p := range count {
 		position := float64(count - 1 - p)
 		row := p * hidden
-		for i := 0; i < half; i++ {
+		for i := range half {
 			scaled := position * math.Exp(float64(i)*-logIncrement)
 			vals[row+i] = float32(math.Sin(scaled))
 			vals[row+half+i] = float32(math.Cos(scaled))

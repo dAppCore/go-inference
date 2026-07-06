@@ -28,7 +28,7 @@ func CrossEntropyBackwardF32(logits []float32, targets []int32, rows, vocab int)
 	dLogits := make([]float32, rows*vocab)
 	var lossSum float64
 	inv := 1.0 / float64(rows)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		lr := logits[r*vocab : (r+1)*vocab]
 		dr := dLogits[r*vocab : (r+1)*vocab]
 		mx := lr[0]
@@ -47,7 +47,7 @@ func CrossEntropyBackwardF32(logits []float32, targets []int32, rows, vocab int)
 			return 0, nil, core.NewError("native.CrossEntropyBackwardF32: target out of range")
 		}
 		lossSum += logSum - float64(lr[t]) // −log softmax[t]
-		for i := 0; i < vocab; i++ {
+		for i := range vocab {
 			p := math.Exp(float64(lr[i]-mx)) / sum
 			g := p
 			if i == t {

@@ -562,7 +562,7 @@ func TestDriver_HandleExit_Ugly(t *testing.T) {
 		RuntimeMLX: {Runtime: RuntimeMLX, ProcessID: "crashy", Model: "m", Running: true},
 	}, everReady: map[string]bool{RuntimeMLX: true}, restartLog: map[string][]time.Time{}}
 
-	for i := 0; i < maxRestarts; i++ {
+	for range maxRestarts {
 		s.handleExit("crashy")
 	}
 	if got := len(s.restartLog[RuntimeMLX]); got != maxRestarts {
@@ -602,7 +602,7 @@ func TestDriver_TrackedByPID_Bad(t *testing.T) {
 
 func TestDriver_AllowRestart_Good(t *testing.T) {
 	s := &Service{restartLog: map[string][]time.Time{}}
-	for i := 0; i < maxRestarts; i++ {
+	for i := range maxRestarts {
 		if !s.allowRestart(RuntimeMLX) {
 			t.Fatalf("allowRestart refused call %d, want it allowed within budget", i+1)
 		}
@@ -614,7 +614,7 @@ func TestDriver_AllowRestart_Good(t *testing.T) {
 
 func TestDriver_AllowRestart_Bad(t *testing.T) {
 	s := &Service{restartLog: map[string][]time.Time{}}
-	for i := 0; i < maxRestarts; i++ {
+	for range maxRestarts {
 		s.allowRestart(RuntimeMLX)
 	}
 	if s.allowRestart(RuntimeMLX) {

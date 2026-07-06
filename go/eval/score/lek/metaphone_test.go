@@ -219,7 +219,7 @@ func TestMetaphone_DoubleMetaphone_DeterministicStable_Good(t *testing.T) {
 	if !ok {
 		t.Fatalf("first call ok=false")
 	}
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		pb, sb, ok := DoubleMetaphone(word)
 		if !ok || pa != pb || sa != sb {
 			t.Errorf("call %d: %s,%s,%v (want %s,%s,true)", i, pb, sb, ok, pa, sa)

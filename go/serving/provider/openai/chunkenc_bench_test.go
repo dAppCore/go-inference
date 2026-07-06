@@ -251,7 +251,6 @@ func TestChunkSSEFrameSize_NeverUnderCounts(t *testing.T) {
 		}},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			actual := len(appendChatCompletionChunkSSE(nil, tc.chunk))
 			est := chunkSSEFrameSize(tc.chunk)

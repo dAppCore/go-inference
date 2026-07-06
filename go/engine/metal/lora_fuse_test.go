@@ -39,7 +39,7 @@ func TestFuseLoRAIntoModel(t *testing.T) {
 		t.Fatalf("BA: %v", err)
 	}
 	want := make([]byte, len(baseWDown))
-	for i := 0; i < dModel*dFF; i++ {
+	for i := range dModel * dFF {
 		v := f32ToBF16(bf16ToF32(baseWDown[2*i], baseWDown[2*i+1]) + scaling*ba[i])
 		want[2*i], want[2*i+1] = byte(v), byte(v>>8)
 	}

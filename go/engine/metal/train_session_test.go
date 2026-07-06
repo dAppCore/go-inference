@@ -91,7 +91,7 @@ func TestForwardCaptureHiddens(t *testing.T) {
 		return math.Sqrt(num / den)
 	}
 	embF32 := make([]float32, T*dModel)
-	for tk := 0; tk < T; tk++ {
+	for tk := range T {
 		copy(embF32[tk*dModel:(tk+1)*dModel], bf16ToF32Slice(embeds[tk]))
 	}
 	H, Hkv, d2 := nHeads, nKV, headDim

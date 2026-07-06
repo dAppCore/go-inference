@@ -3,6 +3,8 @@
 package autoround
 
 import (
+	"maps"
+
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/safetensors"
 )
@@ -108,9 +110,7 @@ func ClonePackInfo(info *PackInfo) *PackInfo {
 	cloned := *info
 	if len(info.LayerOverrides) > 0 {
 		cloned.LayerOverrides = make(map[string]LayerConfig, len(info.LayerOverrides))
-		for key, value := range info.LayerOverrides {
-			cloned.LayerOverrides[key] = value
-		}
+		maps.Copy(cloned.LayerOverrides, info.LayerOverrides)
 	}
 	if len(info.Tensors) > 0 {
 		cloned.Tensors = make([]PackTensor, len(info.Tensors))

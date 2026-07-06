@@ -21,24 +21,24 @@ type ROCmModelRoutePlan struct {
 	Contract                 string                         `json:"contract,omitempty"`
 	Architecture             string                         `json:"architecture,omitempty"`
 	Family                   string                         `json:"family,omitempty"`
-	Model                    inference.ModelIdentity        `json:"model,omitempty"`
-	EngineFeatures           ROCmEngineFeatures             `json:"engine_features,omitempty"`
-	FeatureRoute             ROCmModelFeatureRoute          `json:"feature_route,omitempty"`
-	TokenizerRoute           ROCmModelTokenizerRoute        `json:"tokenizer_route,omitempty"`
-	LoRAAdapterRoute         ROCmLoRAAdapterRoute           `json:"lora_adapter_route,omitempty"`
-	MultimodalProcessorRoute ROCmMultimodalProcessorRoute   `json:"multimodal_processor_route,omitempty"`
-	DiffusionSamplerRoute    ROCmDiffusionSamplerRoute      `json:"diffusion_sampler_route,omitempty"`
-	StateContextRoute        ROCmStateContextRoute          `json:"state_context_route,omitempty"`
-	AttachedDrafterRoute     ROCmAttachedDrafterRoute       `json:"attached_drafter_route,omitempty"`
-	LoadStatus               ROCmModelLoadStatus            `json:"load_status,omitempty"`
-	CacheRoute               rocmmodel.CacheRoute           `json:"cache_route,omitempty"`
-	CacheProfile             rocmmodel.CacheProfile         `json:"cache_profile,omitempty"`
-	LoaderRoute              ROCmModelLoaderRoute           `json:"loader_route,omitempty"`
-	QuantLoaderRoute         ROCmQuantLoaderRoute           `json:"quant_loader_route,omitempty"`
+	Model                    inference.ModelIdentity        `json:"model"`
+	EngineFeatures           ROCmEngineFeatures             `json:"engine_features"`
+	FeatureRoute             ROCmModelFeatureRoute          `json:"feature_route"`
+	TokenizerRoute           ROCmModelTokenizerRoute        `json:"tokenizer_route"`
+	LoRAAdapterRoute         ROCmLoRAAdapterRoute           `json:"lora_adapter_route"`
+	MultimodalProcessorRoute ROCmMultimodalProcessorRoute   `json:"multimodal_processor_route"`
+	DiffusionSamplerRoute    ROCmDiffusionSamplerRoute      `json:"diffusion_sampler_route"`
+	StateContextRoute        ROCmStateContextRoute          `json:"state_context_route"`
+	AttachedDrafterRoute     ROCmAttachedDrafterRoute       `json:"attached_drafter_route"`
+	LoadStatus               ROCmModelLoadStatus            `json:"load_status"`
+	CacheRoute               rocmmodel.CacheRoute           `json:"cache_route"`
+	CacheProfile             rocmmodel.CacheProfile         `json:"cache_profile"`
+	LoaderRoute              ROCmModelLoaderRoute           `json:"loader_route"`
+	QuantLoaderRoute         ROCmQuantLoaderRoute           `json:"quant_loader_route"`
 	SequenceMixerRoutes      []ROCmSequenceMixerLoaderRoute `json:"sequence_mixer_loader_routes,omitempty"`
-	RuntimeContractRoute     ROCmModelRuntimeContractRoute  `json:"runtime_contract_route,omitempty"`
-	RuntimeGatePlan          rocmmodel.RuntimeGatePlan      `json:"runtime_gate_plan,omitempty"`
-	RuntimeAuthorPlan        rocmmodel.RuntimeAuthorPlan    `json:"runtime_author_plan,omitempty"`
+	RuntimeContractRoute     ROCmModelRuntimeContractRoute  `json:"runtime_contract_route"`
+	RuntimeGatePlan          rocmmodel.RuntimeGatePlan      `json:"runtime_gate_plan"`
+	RuntimeAuthorPlan        rocmmodel.RuntimeAuthorPlan    `json:"runtime_author_plan"`
 	Labels                   map[string]string              `json:"labels,omitempty"`
 }
 

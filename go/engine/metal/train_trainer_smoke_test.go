@@ -103,7 +103,7 @@ func TestLoRATrainerHeadSFTSmokeE2B(t *testing.T) {
 	}
 	const steps = 40
 	var lossLast float64
-	for s := 0; s < steps; s++ {
+	for s := range steps {
 		l, serr := trainer.Step(batch)
 		if serr != nil {
 			t.Fatalf("step %d: %v", s, serr)

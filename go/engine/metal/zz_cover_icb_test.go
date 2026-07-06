@@ -5,6 +5,7 @@
 package native
 
 import (
+	"maps"
 	"sort"
 	"testing"
 
@@ -32,9 +33,7 @@ func icbCacheSnapshot() map[string]metal.MTLComputePipelineState {
 	icbPSOMu.Lock()
 	defer icbPSOMu.Unlock()
 	out := make(map[string]metal.MTLComputePipelineState, len(icbPSOCache))
-	for k, v := range icbPSOCache {
-		out[k] = v
-	}
+	maps.Copy(out, icbPSOCache)
 	return out
 }
 
@@ -83,9 +82,7 @@ func withICBKeyEvicted(t *testing.T, snap map[string]metal.MTLComputePipelineSta
 	library, customLibrary = oldLib, oldCustom
 	icbPSOMu.Lock()
 	icbPSOCache = make(map[string]metal.MTLComputePipelineState, len(snap))
-	for k, v := range snap {
-		icbPSOCache[k] = v
-	}
+	maps.Copy(icbPSOCache, snap)
 	icbPSOMu.Unlock()
 
 	if err == nil {

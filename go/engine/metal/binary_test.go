@@ -77,7 +77,7 @@ func TestBinaryByteScratchBuffersUseCallerBacking(t *testing.T) {
 	defer scratch.Close()
 
 	var aBuf, bBuf metal.MTLBuffer
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		aBuf, bBuf, _, err = scratch.buffers(a, b)
 		if err != nil {
 			t.Fatalf("scratch.buffers warmup %d: %v", i, err)

@@ -52,10 +52,10 @@ func softplus(v float64) float64 { // log(1+e^v), numerically stable
 // matNT computes out[M,N] = in[M,K] @ w[N,K]ᵀ (the Linear y = x·Wᵀ), f32 host.
 func matNT(in, w []float32, M, K, N int) []float32 {
 	out := make([]float32, M*N)
-	for m := 0; m < M; m++ {
-		for n := 0; n < N; n++ {
+	for m := range M {
+		for n := range N {
 			var acc float64
-			for k := 0; k < K; k++ {
+			for k := range K {
 				acc += float64(in[m*K+k]) * float64(w[n*K+k])
 			}
 			out[m*N+n] = float32(acc)
@@ -88,7 +88,7 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 	z := make([]float32, L*dInner)
 	xBC := make([]float32, L*convDim)
 	dtRaw := make([]float32, L*H)
-	for t := 0; t < L; t++ {
+	for t := range L {
 		row := proj[t*projDim:]
 		copy(z[t*dInner:(t+1)*dInner], row[0:dInner])
 		copy(xBC[t*convDim:(t+1)*convDim], row[dInner:dInner+convDim])
@@ -109,10 +109,10 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 	bHeads := make([]float32, L*H*N) // [L,H,N]
 	cHeads := make([]float32, L*H*N)
 	headsPerGroup := H / G
-	for t := 0; t < L; t++ {
+	for t := range L {
 		crow := convOut[t*convDim:]
 		copy(xHeads[t*dInner:(t+1)*dInner], crow[0:dInner]) // dInner == H*P, same layout
-		for h := 0; h < H; h++ {
+		for h := range H {
 			g := h / headsPerGroup
 			copy(bHeads[(t*H+h)*N:(t*H+h+1)*N], crow[dInner+g*N:dInner+g*N+N])
 			copy(cHeads[(t*H+h)*N:(t*H+h+1)*N], crow[dInner+groupDim+g*N:dInner+groupDim+g*N+N])
@@ -121,8 +121,8 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 
 	// dt = softplus(dt + dt_bias) ; A = -exp(A_log)
 	dt := make([]float32, L*H)
-	for t := 0; t < L; t++ {
-		for h := 0; h < H; h++ {
+	for t := range L {
+		for h := range H {
 			v := float64(dtRaw[t*H+h])
 			if w.DtBias != nil {
 				v += float64(w.DtBias[h])
@@ -131,7 +131,7 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 		}
 	}
 	a := make([]float32, H)
-	for h := 0; h < H; h++ {
+	for h := range H {
 		a[h] = float32(-math.Exp(float64(w.ALog[h])))
 	}
 
@@ -146,17 +146,17 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 	// inflates the activations ~5× and corrupts the logit distribution (confirmed against the HF smoke).
 	gated := make([]float32, L*dInner)
 	g := make([]float64, dInner)
-	for t := 0; t < L; t++ {
+	for t := range L {
 		yr := y[t*dInner : (t+1)*dInner]
 		zr := z[t*dInner : (t+1)*dInner]
 		var ss float64
-		for i := 0; i < dInner; i++ {
+		for i := range dInner {
 			gi := float64(yr[i]) * silu(float64(zr[i]))
 			g[i] = gi
 			ss += gi * gi
 		}
 		rms := math.Sqrt(ss/float64(dInner) + float64(cfg.Eps))
-		for i := 0; i < dInner; i++ {
+		for i := range dInner {
 			normed := g[i] / rms
 			if w.Norm != nil {
 				normed *= float64(w.Norm[i])

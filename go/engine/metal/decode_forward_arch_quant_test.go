@@ -74,7 +74,7 @@ func TestDecodeForwardArchQuant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeForwardQuant: %v", err)
 	}
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("quant all-owner vs DecodeForwardQuant tok%d", tok), gotArch[tok], ref[tok])
 	}
 

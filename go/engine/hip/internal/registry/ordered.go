@@ -2,6 +2,8 @@
 
 package registry
 
+import "maps"
+
 import "sync"
 
 // Ordered stores keyed extension registrations in first-registration order.
@@ -66,9 +68,7 @@ func (registry *Ordered[K, V]) Snapshot() ([]K, map[K]V) {
 	defer registry.mu.RUnlock()
 	order := append([]K(nil), registry.order...)
 	values := make(map[K]V, len(registry.values))
-	for key, value := range registry.values {
-		values[key] = value
-	}
+	maps.Copy(values, registry.values)
 	return order, values
 }
 
@@ -78,7 +78,5 @@ func (registry *Ordered[K, V]) Restore(order []K, values map[K]V) {
 	defer registry.mu.Unlock()
 	registry.order = append([]K(nil), order...)
 	registry.values = make(map[K]V, len(values))
-	for key, value := range values {
-		registry.values[key] = value
-	}
+	maps.Copy(registry.values, values)
 }

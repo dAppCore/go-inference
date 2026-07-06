@@ -388,10 +388,7 @@ func acquireBlockCacheHasher(model, adapter, tokenizer, mode string) *blockCache
 	scratch := blockCacheHasherPool.Get().(*blockCacheHasher)
 	scratch.h.Reset()
 	headerLen := 16 + len(model) + len(adapter) + len(tokenizer) + len(mode)
-	capacity := blockCacheTokenBatch * 4
-	if headerLen > capacity {
-		capacity = headerLen
-	}
+	capacity := max(headerLen, blockCacheTokenBatch*4)
 	if cap(scratch.buf) < capacity {
 		scratch.buf = make([]byte, 0, capacity)
 	}

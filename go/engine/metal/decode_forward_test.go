@@ -49,9 +49,9 @@ func TestDecodeForward(t *testing.T) {
 		vC[l] = make([]byte, maxLen*kvDim*bf16Size)
 	}
 	ref := make([][]byte, T)
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		x := inputs[tok]
-		for l := 0; l < nLayers; l++ {
+		for l := range nLayers {
 			w := layers[l]
 			var err error
 			x, err = DecodeStepKV(x, w.AttnNormW, w.WQ, w.WK, w.WV, w.WO, kC[l], vC[l], w.MLPNormW, w.WGate, w.WUp, w.WDown, dModel, nHeads, nKV, headDim, maxLen, dFF, tok, base, scale, eps)
@@ -69,7 +69,7 @@ func TestDecodeForward(t *testing.T) {
 	if len(got) != T {
 		t.Fatalf("DecodeForward returned %d outputs, want %d", len(got), T)
 	}
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, "DecodeForward token", got[tok], ref[tok])
 	}
 	t.Logf("DecodeForward(%d layers × %d tokens, GQA %d/%d, growing cache): byte-identical to stepped DecodeStepKV", nLayers, T, nHeads, nKV)
@@ -321,7 +321,7 @@ func TestDecodeForwardICB(t *testing.T) {
 		if len(got) != T {
 			t.Fatalf("DecodeForwardICB returned %d outputs, want %d", len(got), T)
 		}
-		for tok := 0; tok < T; tok++ {
+		for tok := range T {
 			eqBytes(t, core.Sprintf("DecodeForwardICB L%d tok%d", nLayers, tok), got[tok], ref[tok])
 		}
 		t.Logf("DecodeForwardICB(%d layers × %d tokens, growing cache): byte-identical to re-encode DecodeForward — cache-grow ICB holds", nLayers, T)
@@ -587,7 +587,7 @@ func TestDecodeForwardICBRealScale(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeForwardICB: %v", err)
 	}
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("E2B-scale tok%d", tok), got[tok], ref[tok])
 	}
 

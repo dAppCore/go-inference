@@ -17,7 +17,7 @@ import (
 func hostGeluMul(gate, up []byte) []byte {
 	n := len(gate) / bf16Size
 	out := make([]byte, n*bf16Size)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		g := bf16ToF32(gate[i*bf16Size], gate[i*bf16Size+1])
 		u := bf16ToF32(up[i*bf16Size], up[i*bf16Size+1])
 		inner := g + float32(0.044715)*(g*g*g)

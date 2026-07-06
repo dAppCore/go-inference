@@ -35,7 +35,7 @@ import (
 // every emitted token is a target clone rather than a candidate clone.
 func buildDecodeTokensAllReject(n int) []Token {
 	tokens := make([]Token, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		tokens[i] = Token{ID: -int32(i + 1), Text: "tok"}
 	}
 	return tokens

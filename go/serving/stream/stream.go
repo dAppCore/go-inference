@@ -148,7 +148,7 @@ type Event struct {
 	Annotation *Annotation `json:"annotation,omitempty"`
 
 	// Usage carries the trailing accounting frame for a KindUsage event (§6.6).
-	Usage Usage `json:"usage,omitempty"`
+	Usage Usage `json:"usage"`
 
 	// Err carries the failure for a KindError / KindResponseFailed event
 	// (§6.7).

@@ -22,14 +22,14 @@ func BenchmarkShardBufferResidentRangeEviction(b *testing.B) {
 	ends := []uintptr{shardBase + uintptr(len(shard))}
 	shardKeys := make([]uintptr, entries)
 	otherKeys := make([]uintptr, entries)
-	for i := 0; i < entries; i++ {
+	for i := range entries {
 		shardKeys[i] = shardBase + uintptr(i)
 		otherKeys[i] = otherBase + uintptr(i)
 	}
 
 	residentBufMu.Lock()
 	residentBufs = make(map[uintptr]residentBuf, entries*2)
-	for i := 0; i < entries; i++ {
+	for i := range entries {
 		residentBufs[shardKeys[i]] = residentBuf{pin: shard[i : i+1]}
 		residentBufs[otherKeys[i]] = residentBuf{pin: other[i : i+1]}
 	}
@@ -42,7 +42,7 @@ func BenchmarkShardBufferResidentRangeEviction(b *testing.B) {
 
 		b.StopTimer()
 		residentBufMu.Lock()
-		for j := 0; j < entries; j++ {
+		for j := range entries {
 			residentBufs[shardKeys[j]] = residentBuf{pin: shard[j : j+1]}
 			residentBufs[otherKeys[j]] = residentBuf{pin: other[j : j+1]}
 		}

@@ -22,6 +22,7 @@
 package lek
 
 import (
+	"slices"
 	"sync"
 
 	core "dappco.re/go"
@@ -357,14 +358,7 @@ func (e *enc) at(start, sliceLen int, possibles ...string) bool {
 		return false
 	}
 	sub := e.word[start : start+sliceLen]
-	for _, p := range possibles {
-		// string(sub) == p is special-cased by the compiler — no
-		// allocation, just a byte-wise compare against the constant.
-		if string(sub) == p {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(possibles, string(sub))
 }
 
 // charAt returns the byte at position i, or 0 when out of bounds. The
@@ -390,7 +384,7 @@ func (e *enc) isVowelAt(i int) bool {
 // or any K subsumes the WITZ marker (which begins with W), so the scan
 // only needs a single pass checking W, K, and the CZ digraph.
 func detectSlavoGermanic(word []byte) bool {
-	for i := 0; i < len(word); i++ {
+	for i := range word {
 		c := word[i]
 		if c == 'W' || c == 'K' {
 			return true

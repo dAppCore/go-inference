@@ -49,9 +49,9 @@ func TestRope_RoPE_Ugly(t *testing.T) {
 	if float32SliceEqual(got, x) {
 		t.Fatal("RoPE at a nonzero offset returned the input unchanged — rotation did not run")
 	}
-	for h := 0; h < nHeads; h++ {
+	for h := range nHeads {
 		var normIn, normOut float64
-		for d := 0; d < headDim; d++ {
+		for d := range headDim {
 			i := h*headDim + d
 			normIn += float64(x[i]) * float64(x[i])
 			normOut += float64(got[i]) * float64(got[i])

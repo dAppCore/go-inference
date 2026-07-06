@@ -280,7 +280,7 @@ func TestDecodeForwardArchICB(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: DecodeForwardArch: %v", name, err)
 		}
-		for tok := 0; tok < T; tok++ {
+		for tok := range T {
 			eqBytes(t, core.Sprintf("%s tok%d", name, tok), got[tok], want[tok])
 		}
 	}
@@ -376,7 +376,7 @@ func TestDecodeForwardArchICBNorms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeForwardArch norms: %v", err)
 	}
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("bf16 ICB-norms vs re-encode tok%d", tok), gotICB[tok], want[tok])
 	}
 
@@ -409,7 +409,7 @@ func TestDecodeForwardArchICBNorms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeForwardArchQuant norms: %v", err)
 	}
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("quant ICB-norms vs re-encode tok%d", tok), gotQICB[tok], wantQ[tok])
 	}
 
@@ -455,7 +455,7 @@ func TestDecodeForwardArchICBMixedHeadDimFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeForwardArch: %v", err)
 	}
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("bf16 mixed-head-dim ICB (fallback) vs re-encode tok%d", tok), gotICB[tok], want[tok])
 	}
 
@@ -474,7 +474,7 @@ func TestDecodeForwardArchICBMixedHeadDimFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeForwardArchQuant: %v", err)
 	}
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("quant mixed-head-dim ICB (fallback) vs re-encode tok%d", tok), gotQ[tok], wantQ[tok])
 	}
 }
@@ -534,7 +534,7 @@ func TestDecodeForwardArchICBHeteroDFF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bf16 hetero re-encode: %v", err)
 	}
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("bf16 hetero-dFF tok%d", tok), gotBF[tok], wantBF[tok])
 	}
 
@@ -552,7 +552,7 @@ func TestDecodeForwardArchICBHeteroDFF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quant hetero re-encode: %v", err)
 	}
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("quant hetero-dFF tok%d", tok), gotQ[tok], wantQ[tok])
 	}
 
@@ -599,7 +599,7 @@ func TestDecodeForwardArchICBMixedKEqV(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeForwardArch mixed K==V: %v", err)
 	}
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("mixed-keqv tok%d", tok), got[tok], want[tok])
 	}
 	t.Logf("arch ICB mixed K==V (sliding-with-V + global-without-V) ≡ re-encode oracle byte-for-byte over %d tokens", T)

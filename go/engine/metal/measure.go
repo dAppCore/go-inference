@@ -33,7 +33,7 @@ func attentionReEncode(x, normWeight, wQ, wO, kCache, vCache []byte, dModel, nHe
 		attnOut, outBuf := scratchBF16(dModel), scratchBF16(dModel)
 		_ = outBuf
 
-		for r := 0; r < reps; r++ {
+		for range reps {
 			cb := queue.CommandBuffer()
 			enc := cb.ComputeCommandEncoder()
 			if encErr = encRMSNormBF16(enc, xBuf, nwBuf, normed, 0, dModel, eps); encErr != nil {
@@ -95,7 +95,7 @@ func layerReEncode(
 		down, outBuf := scratchBF16(dModel), scratchBF16(dModel)
 		_ = outBuf
 
-		for r := 0; r < reps; r++ {
+		for range reps {
 			cb := queue.CommandBuffer()
 			enc := cb.ComputeCommandEncoder()
 			if encErr = encRMSNormBF16(enc, xBuf, anwBuf, attnNormed, 0, dModel, eps); encErr != nil {

@@ -24,7 +24,7 @@ func benchAdapterFixture(b *testing.B) (string, map[string]SafetensorsTensorInfo
 	}
 	tensors := make(map[string]SafetensorsTensorInfo, len(modules)*34*2)
 	data := make(map[string][]byte, len(modules)*34*2)
-	for layer := 0; layer < 34; layer++ {
+	for layer := range 34 {
 		for _, mod := range modules {
 			for _, ab := range []string{"lora_a", "lora_b"} {
 				key := core.Sprintf("model.layers.%d.%s.%s", layer, mod, ab)

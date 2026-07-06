@@ -34,7 +34,7 @@ func TestLoadMambaModel(t *testing.T) {
 		"backbone.embeddings.weight": bf16Tensor(syn(vocab*D, 1), vocab, D),
 		"backbone.norm_f.weight":     bf16Tensor(syn(D, 2), D),
 	}
-	for li := 0; li < nLayers; li++ {
+	for li := range nLayers {
 		mp := "backbone.layers." + itoa(li) + ".mixer."
 		ts["backbone.layers."+itoa(li)+".norm.weight"] = bf16Tensor(syn(D, li*7+3), D)
 		ts[mp+"in_proj.weight"] = bf16Tensor(syn(projOut*D, li*7+4), projOut, D)

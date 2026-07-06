@@ -45,15 +45,12 @@ func dispatchProfile(nDispatch, vecLen int) (encode, run time.Duration, gpuSec f
 	}
 	withAutoreleasePool(func() {
 		a, b, o := scratchBF16(vecLen), scratchBF16(vecLen), scratchBF16(vecLen)
-		group := uint(256)
-		if uint(vecLen) < group {
-			group = uint(vecLen)
-		}
+		group := min(uint(vecLen), uint(256))
 		cb := queue.CommandBuffer()
 		enc := cb.ComputeCommandEncoder()
 		enc.SetComputePipelineState(pso)
 		tEnc := time.Now()
-		for i := 0; i < nDispatch; i++ {
+		for range nDispatch {
 			enc.SetBufferWithOffsetAtIndex(a, 0, 0)
 			enc.SetBufferWithOffsetAtIndex(b, 0, 1)
 			enc.SetBufferWithOffsetAtIndex(o, 0, 2)
@@ -104,7 +101,7 @@ func rebindCostProbe(M int) (time.Duration, error) {
 		c0.SetKernelBufferOffsetAtIndex(o, 0, 2)
 		c0.SetKernelBufferOffsetAtIndex(cntB, 0, 3)
 		t0 := time.Now()
-		for i := 0; i < M; i++ {
+		for i := range M {
 			c0.SetKernelBufferOffsetAtIndex(o, uint((i%8)*64*bf16Size), 2)
 		}
 		dur = time.Since(t0)
@@ -150,7 +147,7 @@ func qmvBF16Profile(outDim, inDim, groupSize, nDispatch int) (gpuSec float64, we
 		cb := queue.CommandBuffer()
 		enc := cb.ComputeCommandEncoder()
 		enc.SetComputePipelineState(pso)
-		for i := 0; i < nDispatch; i++ {
+		for range nDispatch {
 			enc.SetBufferWithOffsetAtIndex(wBuf, 0, 0)
 			enc.SetBufferWithOffsetAtIndex(sBuf, 0, 1)
 			enc.SetBufferWithOffsetAtIndex(bBuf, 0, 2)
@@ -187,7 +184,7 @@ func gemvProfile(outDim, inDim, nDispatch int) (gpuSec float64, weightBytes int,
 		mat, vec, out := scratchBF16(outDim*inDim), scratchBF16(inDim), scratchBF16(outDim)
 		cb := queue.CommandBuffer()
 		enc := cb.ComputeCommandEncoder()
-		for i := 0; i < nDispatch; i++ {
+		for range nDispatch {
 			if e := encGemvBF16(enc, mat, vec, out, outDim, inDim); e != nil {
 				err = e
 				enc.EndEncoding()

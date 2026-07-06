@@ -4,6 +4,7 @@ package dataset
 
 import (
 	"bufio"
+	"slices"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
@@ -313,8 +314,8 @@ func MessagesToSample(messages []inference.Message, format string) (Sample, bool
 	// un-normalised roles ("gpt", "bot", "MODEL") so the public contract
 	// is unchanged.
 	assistantIdx := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		role := messages[i].Role
+	for i, message := range slices.Backward(messages) {
+		role := message.Role
 		if role == "assistant" || NormaliseRole(role) == "assistant" {
 			assistantIdx = i
 			break

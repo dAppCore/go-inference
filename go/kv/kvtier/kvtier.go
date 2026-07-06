@@ -205,10 +205,7 @@ type plannedMove struct {
 //
 //	if err := m.Put(ctx, kvtier.Block{ID: "seq:l0", SizeBytes: 8 << 20}); err != nil { … }
 func (m *Manager) Put(ctx context.Context, b Block) error {
-	size := b.SizeBytes
-	if size < 0 {
-		size = 0
-	}
+	size := max(b.SizeBytes, 0)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -358,8 +355,8 @@ func (m *Manager) planRebalance(plan []plannedMove) []plannedMove {
 // reverse order, on a best-effort basis (the in-memory tiers were not committed,
 // so only the Store side needs undoing). Caller holds mu.
 func (m *Manager) rollback(ctx context.Context, applied []plannedMove) {
-	for i := len(applied) - 1; i >= 0; i-- {
-		p := applied[i]
+	for _, p := range slices.Backward(applied) {
+
 		_ = m.store.Move(ctx, p.id, p.to, p.from)
 	}
 }

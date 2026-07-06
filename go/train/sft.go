@@ -20,6 +20,7 @@ package train
 
 import (
 	"context"
+	"strings"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
@@ -354,11 +355,11 @@ func sftTokenise(encode EncodeFunc, sample dataset.Sample, maxSeqLen int) []int3
 // messages when present, else prompt+response, else the raw text.
 func sftSampleText(sample dataset.Sample) string {
 	if len(sample.Messages) > 0 {
-		text := ""
+		var text strings.Builder
 		for _, m := range sample.Messages {
-			text += m.Role + ": " + m.Content + "\n"
+			text.WriteString(m.Role + ": " + m.Content + "\n")
 		}
-		return text
+		return text.String()
 	}
 	if sample.Prompt != "" && sample.Response != "" {
 		return core.Concat(sample.Prompt, "\n", sample.Response)

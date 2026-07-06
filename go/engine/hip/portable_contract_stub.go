@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"maps"
 	"math"
 	"os"
 	"strconv"
@@ -274,7 +275,7 @@ type SimpleSelfDistillationConfig struct {
 	RepetitionPenalty float32                  `json:"repetition_penalty,omitempty"`
 	FilterShortestPct float32                  `json:"filter_shortest_percent,omitempty"`
 	DecodeTemperature float32                  `json:"decode_temperature,omitempty"`
-	SFT               inference.TrainingConfig `json:"sft,omitempty"`
+	SFT               inference.TrainingConfig `json:"sft"`
 }
 
 // SimpleSelfDistillationRunner supplies the generation step for portable CLI
@@ -929,8 +930,6 @@ func clonePortableSSDMeta(src map[string]string) map[string]string {
 		return nil
 	}
 	dst := make(map[string]string, len(src))
-	for key, value := range src {
-		dst[key] = value
-	}
+	maps.Copy(dst, src)
 	return dst
 }

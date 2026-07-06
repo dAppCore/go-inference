@@ -3,6 +3,7 @@
 package model
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 
@@ -94,12 +95,7 @@ func (plan RuntimeAuthorPlan) Clone() RuntimeAuthorPlan {
 }
 
 func (plan RuntimeAuthorPlan) HasCapability(id RuntimeAuthorCapabilityID) bool {
-	for _, capabilityID := range plan.CapabilityIDs {
-		if capabilityID == id {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(plan.CapabilityIDs, id)
 }
 
 func RuntimeAuthorPlanForIdentity(path string, identity inference.ModelIdentity) (RuntimeAuthorPlan, bool) {

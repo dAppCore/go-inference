@@ -52,7 +52,7 @@ func buildAnthropicRequest(turns int) MessageRequest {
 	user := "Please summarise the following short paragraph for me in one sentence."
 	assistant := "The summary is concise and faithful to the original text. " +
 		"It preserves the principal claim and the supporting detail without padding."
-	for i := 0; i < turns; i++ {
+	for i := range turns {
 		role := "user"
 		text := user
 		if i%2 == 1 {

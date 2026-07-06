@@ -45,9 +45,9 @@ func TestDiffusionBlockLocalCanvasMaskData_Geometry_Good(t *testing.T) {
 		t.Fatalf("shape = %v, want [%d 1 %d %d]", shape, B, L, keyLen)
 	}
 	negInf := float32(math.Inf(-1))
-	for b := 0; b < B; b++ {
-		for i := 0; i < L; i++ {
-			for j := 0; j < keyLen; j++ {
+	for b := range B {
+		for i := range L {
+			for j := range keyLen {
 				got := values[b*L*keyLen+i*keyLen+j]
 				inContext := j >= offset-window && j < offset
 				inCanvas := j >= offset && j < offset+L
@@ -152,7 +152,7 @@ func TestDiffusionDenoiseForwardBF16_UsesPrefixMask_Good(t *testing.T) {
 	globalMask := make([]float32, qLen*keyLen)
 	localAll := make([]float32, qLen*keyLen)
 	localBlocked := append([]float32(nil), localAll...)
-	for i := 0; i < qLen; i++ {
+	for i := range qLen {
 		localBlocked[i*keyLen] = float32(math.Inf(-1))
 	}
 
@@ -499,8 +499,8 @@ func TestDiffusionSessionDenoiseMasksUseResidentPrefixSpans_Good(t *testing.T) {
 		t.Fatalf("local mask length = %d, want %d", len(localMask), wantLocalLen)
 	}
 	negInf := float32(math.Inf(-1))
-	for row := 0; row < canvasLen; row++ {
-		for col := 0; col < slidingPrefix+canvasLen; col++ {
+	for row := range canvasLen {
+		for col := range slidingPrefix + canvasLen {
 			got := localMask[row*(slidingPrefix+canvasLen)+col]
 			want := float32(0)
 			if col == 0 {
@@ -650,17 +650,17 @@ func diffusionIdentityBF16(rows, cols int) []byte {
 func diffusionSDPAReference(q, k, v []byte, qLen, keyLen, nHeads, nKVHeads, headDim int, scale float32, mask []float32) []byte {
 	grp := nHeads / nKVHeads
 	out := make([]byte, nHeads*qLen*headDim*bf16Size)
-	for h := 0; h < nHeads; h++ {
+	for h := range nHeads {
 		kvh := h / grp
 		qh := bf16HeadF32(q, h, qLen, headDim)
 		kh := bf16HeadF32(k, kvh, keyLen, headDim)
 		vh := bf16HeadF32(v, kvh, keyLen, headDim)
-		for i := 0; i < qLen; i++ {
+		for i := range qLen {
 			scores := make([]float32, keyLen)
 			maxScore := float32(math.Inf(-1))
-			for j := 0; j < keyLen; j++ {
+			for j := range keyLen {
 				var dot float32
-				for d := 0; d < headDim; d++ {
+				for d := range headDim {
 					dot += qh[i*headDim+d] * kh[j*headDim+d]
 				}
 				score := dot * scale
@@ -678,9 +678,9 @@ func diffusionSDPAReference(q, k, v []byte, qLen, keyLen, nHeads, nKVHeads, head
 				denom += scores[j]
 			}
 			base := (h*qLen + i) * headDim * bf16Size
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				var sum float32
-				for j := 0; j < keyLen; j++ {
+				for j := range keyLen {
 					sum += scores[j] / denom * vh[j*headDim+d]
 				}
 				b := f32ToBF16(sum)
@@ -1145,7 +1145,7 @@ func TestDiffusionEncodeLogitsBF16_RejectsBadShapes_Bad(t *testing.T) {
 func diffusionEncodeLogitsReference(logits, embed []float32, rows, vocab, dModel int) []byte {
 	out := make([]float32, rows*dModel)
 	scale := float32(math.Sqrt(float64(dModel)))
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		row := logits[r*vocab : (r+1)*vocab]
 		maxLogit := row[0]
 		for _, v := range row[1:] {
@@ -1160,9 +1160,9 @@ func diffusionEncodeLogitsReference(logits, embed []float32, rows, vocab, dModel
 			probs[i] = p
 			denom += p
 		}
-		for d := 0; d < dModel; d++ {
+		for d := range dModel {
 			var sum float32
-			for v := 0; v < vocab; v++ {
+			for v := range vocab {
 				sum += (probs[v] / denom) * embed[v*dModel+d]
 			}
 			out[r*dModel+d] = sum * scale
@@ -1175,11 +1175,11 @@ func diffusionDequant4RowsReference(packed, scales, biases []byte, rows, cols, g
 	out := make([]float32, rows*cols)
 	rowPacked := cols / 2
 	rowSB := (cols / groupSize) * bf16Size
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		pRow := packed[r*rowPacked : (r+1)*rowPacked]
 		sRow := scales[r*rowSB : (r+1)*rowSB]
 		bRow := biases[r*rowSB : (r+1)*rowSB]
-		for c := 0; c < cols; c++ {
+		for c := range cols {
 			group := c / groupSize
 			scale := bf16ToF32(sRow[group*bf16Size], sRow[group*bf16Size+1])
 			bias := bf16ToF32(bRow[group*bf16Size], bRow[group*bf16Size+1])

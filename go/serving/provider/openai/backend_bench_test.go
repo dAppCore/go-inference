@@ -32,7 +32,7 @@ var (
 
 func benchMessages(n int) []inference.Message {
 	out := make([]inference.Message, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		role := "user"
 		if i%2 == 1 {
 			role = "assistant"

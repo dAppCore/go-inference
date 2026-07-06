@@ -44,7 +44,7 @@ func benchStoreWithURIs(tb testing.TB, n, payloadSize int) (*Store, []string) {
 		payload[i] = byte('a' + i%26)
 	}
 	uris := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		uri := "mlx://bench/uri-" + strconv.Itoa(i)
 		_, err := store.PutBytes(context.Background(), payload, state.PutOptions{
 			URI:  uri,
@@ -173,7 +173,7 @@ func BenchmarkFilestoreURI_HitAfterReopen(b *testing.B) {
 	}
 	payload := make([]byte, 256)
 	uri := "mlx://bench/reopen-50"
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		thisURI := "mlx://bench/reopen-" + strconv.Itoa(i)
 		if _, err := store.PutBytes(context.Background(), payload, state.PutOptions{
 			URI:  thisURI,
@@ -211,7 +211,7 @@ func BenchmarkFilestoreURI_Open_100Chunks(b *testing.B) {
 			b.Fatal(err)
 		}
 		payload := make([]byte, 64)
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			if _, err := store.PutBytes(context.Background(), payload, state.PutOptions{
 				URI:  "mlx://bench/open-" + strconv.Itoa(i),
 				Kind: "bench",
@@ -242,7 +242,7 @@ func BenchmarkFilestoreURI_Open_1000Chunks(b *testing.B) {
 			b.Fatal(err)
 		}
 		payload := make([]byte, 64)
-		for i := 0; i < 1000; i++ {
+		for i := range 1000 {
 			if _, err := store.PutBytes(context.Background(), payload, state.PutOptions{
 				URI:  "mlx://bench/open-" + strconv.Itoa(i),
 				Kind: "bench",

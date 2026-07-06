@@ -47,7 +47,7 @@ func benchEvent() Event {
 
 func benchEventSlice(n int) []Event {
 	events := make([]Event, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		events[i] = Event{
 			Type:    "agent.task.completed",
 			Repo:    "core/the inference stack",
@@ -139,7 +139,7 @@ func BenchmarkMetrics_cloneEvent_WithData(b *testing.B) {
 // renders. Cost scales with file count (per-day) + event count.
 func BenchmarkMetrics_ReadEvents_LastDay(b *testing.B) {
 	benchSetupMetricsHome(b)
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		Record(benchEvent())
 	}
 	since := time.Now().Add(-24 * time.Hour)

@@ -39,7 +39,7 @@ func mistralBF16Tensors(t *testing.T, dModel, nHeads, nKV, headDim, dFF, vocab, 
 	qDim, kvDim := nHeads*headDim, nKV*headDim
 	mk("language_model.model.embed_tokens.weight", vocab, dModel)
 	mk("language_model.model.norm.weight", dModel)
-	for i := 0; i < numLayers; i++ {
+	for i := range numLayers {
 		p := core.Sprintf("language_model.model.layers.%d", i)
 		mk(p+".input_layernorm.weight", dModel)
 		mk(p+".post_attention_layernorm.weight", dModel)

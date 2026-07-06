@@ -61,7 +61,7 @@ func TestSample(t *testing.T) {
 
 	// reproducible: two samplers, same seed, identical sequences.
 	a, b := NewSampler(42), NewSampler(42)
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		ta, _ := a.Sample(spreadLogits, vocab, SampleParams{Temperature: 1})
 		tb, _ := b.Sample(spreadLogits, vocab, SampleParams{Temperature: 1})
 		if ta != tb {
@@ -72,7 +72,7 @@ func TestSample(t *testing.T) {
 	// the RNG must advance (a single seed gives a VARYING sequence, not one repeated token).
 	s := NewSampler(7)
 	seen := map[int32]int{}
-	for i := 0; i < 64; i++ {
+	for range 64 {
 		tok, _ := s.Sample(spreadLogits, vocab, SampleParams{Temperature: 1.5})
 		seen[tok]++
 	}
@@ -86,7 +86,7 @@ func TestSample(t *testing.T) {
 	peakLogits := bf16Bytes(peak)
 	ps := NewSampler(3)
 	hits := 0
-	for i := 0; i < 200; i++ {
+	for range 200 {
 		if tok, _ := ps.Sample(peakLogits, vocab, SampleParams{Temperature: 1}); tok == 5 {
 			hits++
 		}
@@ -97,7 +97,7 @@ func TestSample(t *testing.T) {
 
 	// top-k = 1 → always the argmax, regardless of temperature.
 	ks := NewSampler(9)
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		if tok, _ := ks.Sample(spreadLogits, vocab, SampleParams{Temperature: 2, TopK: 1}); tok != argmax {
 			t.Fatalf("top-k=1 draw %d returned %d, want argmax %d", i, tok, argmax)
 		}
@@ -105,7 +105,7 @@ func TestSample(t *testing.T) {
 
 	// tiny top-p → nucleus is just the top token → argmax.
 	pp := NewSampler(11)
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		if tok, _ := pp.Sample(spreadLogits, vocab, SampleParams{Temperature: 1, TopP: 0.001}); tok != argmax {
 			t.Fatalf("top-p=0.001 draw %d returned %d, want argmax %d", i, tok, argmax)
 		}
@@ -114,7 +114,7 @@ func TestSample(t *testing.T) {
 	// min-p masks tokens below a fraction of the top token probability, even
 	// when no temperature transform is requested.
 	minPLogits := bf16Bytes([]float32{-100, 50, -100, -100})
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		if tok, _ := NewSampler(uint64(i+1)).Sample(minPLogits, 4, SampleParams{MinP: 0.1}); tok != 1 {
 			t.Fatalf("min-p draw %d returned %d, want dominant token 1", i, tok)
 		}
@@ -134,7 +134,7 @@ func TestSampleCandidatesMatchesFullTopKWindow(t *testing.T) {
 	fullSampler := NewSampler(123)
 	candidateSampler := NewSampler(123)
 	params := SampleParams{Temperature: 0.8, TopK: 3}
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		want, err := fullSampler.Sample(full, len(fullVals), params)
 		if err != nil {
 			t.Fatalf("full sample %d: %v", i, err)
@@ -161,7 +161,7 @@ func TestSampleCandidatesMatchesFullTopKTopPWindow(t *testing.T) {
 	fullSampler := NewSampler(456)
 	candidateSampler := NewSampler(456)
 	params := SampleParams{Temperature: 1, TopK: 3, TopP: 0.5}
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		want, err := fullSampler.Sample(full, len(fullVals), params)
 		if err != nil {
 			t.Fatalf("full sample %d: %v", i, err)
@@ -354,7 +354,7 @@ func TestSample_NewSampler_Ugly(t *testing.T) {
 // gives the SAME sequence of Draw() calls (no other state perturbs it).
 func TestSample_Sampler_Draw_Good(t *testing.T) {
 	a, b := NewSampler(7), NewSampler(7)
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		if av, bv := a.Draw(), b.Draw(); av != bv {
 			t.Fatalf("draw %d diverged: %v vs %v (same seed)", i, av, bv)
 		}
@@ -365,7 +365,7 @@ func TestSample_Sampler_Draw_Good(t *testing.T) {
 // including 0 but never reaching 1.
 func TestSample_Sampler_Draw_Bad(t *testing.T) {
 	s := NewSampler(3)
-	for i := 0; i < 256; i++ {
+	for range 256 {
 		if v := s.Draw(); v < 0 || v >= 1 {
 			t.Fatalf("Draw() = %v, want a value in [0,1)", v)
 		}
@@ -379,7 +379,7 @@ func TestSample_Sampler_Draw_Ugly(t *testing.T) {
 	s := NewSampler(5)
 	first := s.Draw()
 	seenDifferent := false
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		if s.Draw() != first {
 			seenDifferent = true
 			break
@@ -399,7 +399,7 @@ func TestSample_Sampler_Sample_Good(t *testing.T) {
 	logits := bf16Bytes(peak)
 	s := NewSampler(11)
 	hits := 0
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		if tok, err := s.Sample(logits, vocab, SampleParams{Temperature: 1}); err != nil {
 			t.Fatalf("Sample: %v", err)
 		} else if tok == 3 {

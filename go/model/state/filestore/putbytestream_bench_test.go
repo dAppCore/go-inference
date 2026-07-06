@@ -137,7 +137,7 @@ func BenchmarkFilestoreStream_Chunked_4x16KB(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		fsSinkRef, fsSinkErr = store.PutBytesStream(ctx, 4*len(chunk), opts, func(w stdio.Writer) error {
-			for j := 0; j < 4; j++ {
+			for range 4 {
 				if _, err := w.Write(chunk); err != nil {
 					return err
 				}
@@ -162,7 +162,7 @@ func BenchmarkFilestoreStream_Chunked_16x4KB(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		fsSinkRef, fsSinkErr = store.PutBytesStream(ctx, 16*len(chunk), opts, func(w stdio.Writer) error {
-			for j := 0; j < 16; j++ {
+			for range 16 {
 				if _, err := w.Write(chunk); err != nil {
 					return err
 				}

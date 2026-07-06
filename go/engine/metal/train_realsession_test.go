@@ -75,7 +75,7 @@ func TestRealSessionHeadLoRASFT(t *testing.T) {
 	optA, optB := NewAdamW(rank*dModel, 0.05, 0.0), NewAdamW(vocab*rank, 0.05, 0.0)
 
 	var first, last float32
-	for s := 0; s < steps; s++ {
+	for s := range steps {
 		xA, delta, err := LoRAForwardF32(normed, a, b, T, dModel, vocab, rank, scaling)
 		if err != nil {
 			t.Fatalf("lora fwd %d: %v", s, err)

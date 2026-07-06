@@ -92,7 +92,7 @@ func BenchmarkRegistry_Get(b *testing.B) {
 // BenchmarkRegistry_List measures the sorted snapshot of all registered refs.
 func BenchmarkRegistry_List(b *testing.B) {
 	r := lora.NewRegistry()
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		_ = r.Register(benchRef(i))
 	}
 	b.ReportAllocs()
@@ -156,7 +156,7 @@ func BenchmarkPool_IsResident(b *testing.B) {
 func BenchmarkPool_Resident(b *testing.B) {
 	p := lora.NewPool(lora.Config{Loader: benchNoopLoader{}, Policy: lora.NewLRUEvictionPolicy(), Capacity: 8})
 	ctx := context.Background()
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		_ = p.Register(benchRef(i))
 		_, rel, _ := p.Use(ctx, "support-tone-"+strconv.Itoa(i))
 		rel()
