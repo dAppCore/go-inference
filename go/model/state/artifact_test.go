@@ -31,10 +31,10 @@ func (w *fakeArtifactWriter) Put(_ context.Context, text string, opts PutOptions
 	return w.ref, nil
 }
 
-// TestExportArtifact_Good proves the happy path: the local-save hook runs,
-// the record carries every metadata field, Put.Kind defaults from Kind, and
-// the returned ChunkRef is backfilled from the Writer.
-func TestExportArtifact_Good(t *testing.T) {
+// TestArtifact_ExportArtifact_Good proves the happy path: the local-save
+// hook runs, the record carries every metadata field, Put.Kind defaults
+// from Kind, and the returned ChunkRef is backfilled from the Writer.
+func TestArtifact_ExportArtifact_Good(t *testing.T) {
 	var saveCalls int
 	var savedPath string
 	writer := &fakeArtifactWriter{ref: ChunkRef{ChunkID: 9, Codec: "test/codec"}}
@@ -86,9 +86,10 @@ func TestExportArtifact_Good(t *testing.T) {
 	}
 }
 
-// TestExportArtifact_Bad proves a nil payload is rejected up front, and a
-// failing local-save hook short-circuits before the Writer is ever touched.
-func TestExportArtifact_Bad(t *testing.T) {
+// TestArtifact_ExportArtifact_Bad proves a nil payload is rejected up
+// front, and a failing local-save hook short-circuits before the Writer is
+// ever touched.
+func TestArtifact_ExportArtifact_Bad(t *testing.T) {
 	if _, err := ExportArtifact(context.Background(), nil, ArtifactOptions{}); err == nil {
 		t.Fatal("nil payload: want error, got nil")
 	}
@@ -120,11 +121,11 @@ func TestExportArtifact_Bad(t *testing.T) {
 	}
 }
 
-// TestExportArtifact_Ugly proves a cancelled context is rejected before any
-// work happens, a nil Store still returns a fully populated Artifact with a
-// zero ChunkRef, and an unmarshalable payload surfaces a wrapped marshal
-// error without reaching the Writer.
-func TestExportArtifact_Ugly(t *testing.T) {
+// TestArtifact_ExportArtifact_Ugly proves a cancelled context is rejected
+// before any work happens, a nil Store still returns a fully populated
+// Artifact with a zero ChunkRef, and an unmarshalable payload surfaces a
+// wrapped marshal error without reaching the Writer.
+func TestArtifact_ExportArtifact_Ugly(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if _, err := ExportArtifact(ctx, "payload", ArtifactOptions{}); !core.Is(err, context.Canceled) {
