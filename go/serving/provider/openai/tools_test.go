@@ -60,6 +60,26 @@ func TestChatCompletionRequest_DecodesTools(t *testing.T) {
 	}
 }
 
+// TestChatMessageDelta_ToolCallsMarshal pins that a streaming delta carrying
+// tool_calls marshals through the reflect path (index + id + function), while an
+// empty delta stays the zero-alloc {}.
+func TestChatMessageDelta_ToolCallsMarshal(t *testing.T) {
+	d := ChatMessageDelta{ToolCalls: []ToolCallDelta{{
+		Index: 0, ID: "call_1", Type: "function", Function: &ToolCallFunctionDelta{Name: "get_weather"},
+	}}}
+	b, err := d.MarshalJSON()
+	if err != nil {
+		t.Fatalf("MarshalJSON: %v", err)
+	}
+	s := string(b)
+	if !core.Contains(s, `"tool_calls"`) || !core.Contains(s, `"get_weather"`) || !core.Contains(s, `"index":0`) {
+		t.Fatalf("tool_calls delta = %s, want the indexed call", s)
+	}
+	if got, _ := (ChatMessageDelta{}).MarshalJSON(); string(got) != "{}" {
+		t.Fatalf("empty delta = %s, want {}", got)
+	}
+}
+
 // TestChatResponseHasToolCalls pins the writeJSON routing predicate.
 func TestChatResponseHasToolCalls(t *testing.T) {
 	with := ChatCompletionResponse{Choices: []ChatChoice{{Message: ChatMessage{ToolCalls: []ToolCall{{ID: "x"}}}}}}

@@ -156,6 +156,17 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 			flusher.Flush()
 		}
 	}
+	// writeChunkReflect frames a chunk via the reflect encoder (which honours
+	// ChatMessageDelta.MarshalJSON's tool_calls path). Only the rare tool_calls
+	// chunks use it; the hot content path stays on the hand-rolled writeChunk.
+	writeChunkReflect := func(chunk ChatCompletionChunk) {
+		frame := append([]byte("data: "), core.AsBytes(core.JSONMarshalString(chunk))...)
+		frame = append(frame, '\n', '\n')
+		_, _ = w.Write(frame)
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
 	writeChunk(ChatCompletionChunk{
 		ID:      completionID,
 		Object:  "chat.completion.chunk",
@@ -169,10 +180,29 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 
 	extractor := NewThinkingExtractor()
 	emittedContent := ""
+	inTool := false
 	finishReason := "stop"
 	for token := range model.Chat(r.Context(), messages, opts...) {
 		contentDelta, thoughtDelta := extractor.Process(token)
 		candidate := emittedContent + contentDelta
+		if inTool {
+			emittedContent = candidate // buffering the tool-call span, lifted below
+			continue
+		}
+		if idx := core.Index(candidate, parser.ToolCallOpenMarker); idx >= 0 {
+			inTool = true
+			if idx > len(emittedContent) {
+				writeChunk(ChatCompletionChunk{
+					ID:      completionID,
+					Object:  "chat.completion.chunk",
+					Created: created,
+					Model:   req.Model,
+					Choices: []ChatChunkChoice{{Index: 0, Delta: ChatMessageDelta{Content: candidate[len(emittedContent):idx]}}},
+				})
+			}
+			emittedContent = candidate
+			continue
+		}
 		stopCut, stopHit := firstStopSequenceCut(candidate, stops)
 		if stopHit {
 			if stopCut <= len(emittedContent) {
@@ -203,7 +233,11 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 		}
 		emittedContent = candidate
 	}
-	if visibleTail, thoughtTail := extractor.Flush(); visibleTail != "" || thoughtTail != "" {
+	visibleTail, thoughtTail := extractor.Flush()
+	if visibleTail != "" {
+		emittedContent += visibleTail
+	}
+	if !inTool && (visibleTail != "" || thoughtTail != "") {
 		chunk := ChatCompletionChunk{
 			ID:      completionID,
 			Object:  "chat.completion.chunk",
@@ -224,6 +258,36 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 	}
 	if finishReason != "error" && isTokenLengthCapReached(req.MaxTokens, model.Metrics().GeneratedTokens) {
 		finishReason = "length"
+	}
+	// Lift any buffered <|tool_call> span into streamed tool_calls deltas — per
+	// call an opening chunk (id + name) then an arguments chunk, each indexed so
+	// the client assembles them. finish_reason flips to tool_calls. These rare
+	// chunks go through the reflect writer (the hand-rolled path is text-only).
+	if finishReason != "error" {
+		if calls, _ := parser.ParseGemmaToolCalls(emittedContent); len(calls) > 0 {
+			finishReason = "tool_calls"
+			for i, c := range calls {
+				id := toolCallID()
+				writeChunkReflect(ChatCompletionChunk{
+					ID:      completionID,
+					Object:  "chat.completion.chunk",
+					Created: created,
+					Model:   req.Model,
+					Choices: []ChatChunkChoice{{Index: 0, Delta: ChatMessageDelta{ToolCalls: []ToolCallDelta{{
+						Index: i, ID: id, Type: "function", Function: &ToolCallFunctionDelta{Name: c.Name},
+					}}}}},
+				})
+				writeChunkReflect(ChatCompletionChunk{
+					ID:      completionID,
+					Object:  "chat.completion.chunk",
+					Created: created,
+					Model:   req.Model,
+					Choices: []ChatChunkChoice{{Index: 0, Delta: ChatMessageDelta{ToolCalls: []ToolCallDelta{{
+						Index: i, Function: &ToolCallFunctionDelta{Arguments: c.ArgumentsJSON},
+					}}}}},
+				})
+			}
+		}
 	}
 	writeChunk(ChatCompletionChunk{
 		ID:      completionID,

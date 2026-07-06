@@ -4,7 +4,10 @@
 // OpenAI-compatible chat completions wire format.
 package openai
 
-import "dappco.re/go/inference/jsonenc"
+import (
+	core "dappco.re/go"
+	"dappco.re/go/inference/jsonenc"
+)
 
 const DefaultChatCompletionsPath = "/v1/chat/completions"
 
@@ -151,8 +154,25 @@ type ChatChunkChoice struct {
 }
 
 type ChatMessageDelta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string          `json:"role,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	ToolCalls []ToolCallDelta `json:"tool_calls,omitempty"`
+}
+
+// ToolCallDelta is one streamed tool_call fragment in a chat.completion.chunk
+// delta — the OpenAI shape carries an index so the client assembles calls across
+// chunks (name + id arrive first, arguments stream after).
+type ToolCallDelta struct {
+	Index    int                    `json:"index"`
+	ID       string                 `json:"id,omitempty"`
+	Type     string                 `json:"type,omitempty"`
+	Function *ToolCallFunctionDelta `json:"function,omitempty"`
+}
+
+// ToolCallFunctionDelta streams a call's name and/or an arguments fragment.
+type ToolCallFunctionDelta struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 // MarshalJSON hand-rolls the OpenAI ChatMessageDelta shape into a
@@ -170,8 +190,19 @@ type ChatMessageDelta struct {
 //
 // Empty case routes to the package-level emptyDeltaBytes — no alloc.
 func (d ChatMessageDelta) MarshalJSON() ([]byte, error) {
-	if d.Role == "" && d.Content == "" {
+	if d.Role == "" && d.Content == "" && len(d.ToolCalls) == 0 {
 		return emptyDeltaBytes, nil
+	}
+	if len(d.ToolCalls) > 0 {
+		// tool_calls deltas are the rare agentic path — reflect-encode via an
+		// alias (no MarshalJSON) so role/content/tool_calls render from tags,
+		// keeping the hand-rolled fast path below text-only.
+		type alias ChatMessageDelta
+		res := core.JSONMarshal(alias(d))
+		if !res.OK {
+			return nil, res.Err()
+		}
+		return res.Value.([]byte), nil
 	}
 	// Exact upper bound on the no-escape path — both branches emit the
 	// fixed key envelope plus the raw value bytes. AppendJSONString may
