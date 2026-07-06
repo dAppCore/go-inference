@@ -9,11 +9,12 @@
 // no speculative path" — because nothing turned the pair into a TextModel a
 // SpeculativeLoader could hand back. LoadSpeculativePair is that loader.
 //
-// Greedy-exact: the target verify accepts exactly the tokens it would have
-// argmax-produced, so at temperature 0 the speculative output is byte-identical
-// to the plain decode — only faster (one target weight-read verifies a block of
-// drafted tokens). That is why the generate wiring routes to it only for greedy
-// requests: a sampled request would need the sampled verify lane (a follow-up).
+// Two verify lanes: at temperature 0 the greedy-exact verify accepts exactly
+// the tokens the target would have argmax-produced (byte-identical to plain
+// decode, only faster); at temperature > 0 the sampled verify lane lets the
+// TARGET's sampler decide every committed token, with drafts only affecting
+// acceptance — so a sampled request through the pair is a true sampled
+// generation.
 package native
 
 import (
@@ -28,6 +29,7 @@ import (
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/engine"
+	"dappco.re/go/inference/model"
 )
 
 // speculativeModel adapts a target ArchSession + drafter AssistantPair to
@@ -44,6 +46,10 @@ type speculativeModel struct {
 	modelType  string
 	draftBlock int
 	turns      engine.TurnTokens
+	// declaredStops is the target checkpoint's generation_config eos set,
+	// mirrored from the plain path so a speculative serve terminates turns
+	// identically.
+	declaredStops []int32
 
 	mu          sync.Mutex
 	lastErr     error
@@ -86,12 +92,13 @@ func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...i
 		return nil, core.E("native.LoadSpeculativePair", "load tokenizer", err)
 	}
 	return &speculativeModel{
-		target:     target,
-		pair:       pair,
-		tok:        tok,
-		modelType:  "gemma4",
-		draftBlock: draftBlock,
-		turns:      engine.DetectTurnTokens(tok),
+		target:        target,
+		pair:          pair,
+		tok:           tok,
+		modelType:     "gemma4",
+		draftBlock:    draftBlock,
+		turns:         engine.DetectTurnTokens(tok),
+		declaredStops: loadGenerationConfigStops(targetPath),
 		info: inference.ModelInfo{
 			Architecture: "gemma4",
 			VocabSize:    pair.TargetArch.Vocab,
@@ -140,9 +147,15 @@ func (m *speculativeModel) speculate(ctx context.Context, ids []int32, cfg infer
 			stop = append(stop, eos)
 		}
 		// Mirror the plain engine path: the turn-close marker terminates an
-		// assistant turn on chat-tuned checkpoints (gemma4 <turn|>).
+		// assistant turn on chat-tuned checkpoints (gemma4 <turn|>), and the
+		// checkpoint's declared generation_config stops join it.
 		if id, ok := m.tok.TokenID(m.turns.Close); ok && !speculativeTokenInSet(id, stop) {
 			stop = append(stop, id)
+		}
+		for _, id := range m.declaredStops {
+			if id >= 0 && !speculativeTokenInSet(id, stop) {
+				stop = append(stop, id)
+			}
 		}
 		sink := func(id int32) bool {
 			if ctx.Err() != nil {
@@ -162,8 +175,20 @@ func (m *speculativeModel) speculate(ctx context.Context, ids []int32, cfg infer
 			// only covers <eos>, so the sink owns the turn-close (<turn|>) stop.
 			return !inStop
 		}
-		res, err := m.pair.GenerateFromSessionEach(m.target, ids, maxNew, int(eos), m.draftBlock, cfg.SuppressTokens, sink)
-		m.record(res, len(ids), time.Since(start), err)
+		var (
+			res  AssistantGenerateResult
+			gerr error
+		)
+		if cfg.Temperature > 0 || cfg.MinP > 0 || cfg.RepeatPenalty > 1 {
+			// The sampled verify lane: the target's sampler decides every committed
+			// token (drafts only affect acceptance), so a temp>0 request through
+			// the pair is a true sampled generation — not a silent greedy decode.
+			res, gerr = m.pair.GenerateSampledFromSessionEach(m.target, ids, maxNew, stop,
+				model.NewSampler(cfg.Seed), speculativeSampleParams(cfg), m.draftBlock, sink)
+		} else {
+			res, gerr = m.pair.GenerateFromSessionEach(m.target, ids, maxNew, int(eos), m.draftBlock, cfg.SuppressTokens, sink)
+		}
+		m.record(res, len(ids), time.Since(start), gerr)
 	}
 }
 
@@ -292,4 +317,17 @@ func speculativeChatRole(role string) string {
 		return "model"
 	}
 	return "user"
+}
+
+// speculativeSampleParams mirrors the plain engine path's SampleParams mapping
+// so sampling behaviour through the pair is identical to plain decode.
+func speculativeSampleParams(cfg inference.GenerateConfig) model.SampleParams {
+	return model.SampleParams{
+		Temperature:    cfg.Temperature,
+		TopK:           cfg.TopK,
+		TopP:           cfg.TopP,
+		MinP:           cfg.MinP,
+		RepeatPenalty:  cfg.RepeatPenalty,
+		SuppressTokens: cfg.SuppressTokens,
+	}
 }

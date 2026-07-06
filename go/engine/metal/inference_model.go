@@ -24,6 +24,7 @@ var (
 	_ engine.TrainerModel      = (*NativeTokenModel)(nil)
 	_ engine.Trainer           = (*LoRATrainer)(nil)
 	_ engine.CacheModeReporter = (*NativeTokenModel)(nil)
+	_ engine.StopTokenDeclarer = (*NativeTokenModel)(nil)
 	_ engine.DecodePhaseTracer = (*ArchSession)(nil)
 )
 
