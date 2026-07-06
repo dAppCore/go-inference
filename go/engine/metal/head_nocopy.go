@@ -1499,3 +1499,51 @@ func (h *headEncoder) readTopKCandidatesInto(scratch *headTopKScratch, topK int,
 	}
 	return outLogits[:valid*bf16Size], outIDs, true, nil
 }
+
+// greedyRowsBufferInPool encodes K fused lm_head+argmax chains — one per
+// hidden row at rowStride intervals inside rowsBuf — into a SINGLE command
+// buffer with a single wait, writing the argmax token ids into out. The MTP
+// verify previously ran this per row (norm+head+argmax+commit+wait each,
+// ~2ms/row of mostly synchronisation); one buffer collapses the tax to one
+// wait. ok=false defers to the caller's per-row fallback (direct greedy not
+// usable for this head).
+func (h *headEncoder) greedyRowsBufferInPool(rowsBuf metal.MTLBuffer, rowStride uint, k int, suppress []int32, out []int32) (bool, error) {
+	if h == nil || rowsBuf == nil || k <= 0 || len(out) < k {
+		return false, core.NewError("native.headEncoder.greedyRows: invalid batch")
+	}
+	if !h.hiddenBufferOffsetInRange(rowsBuf, uint(k-1)*rowStride) {
+		return false, core.NewError("native.headEncoder.greedyRows: rows exceed the hidden buffer")
+	}
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	scratches := make([]*headGreedyScratch, 0, k)
+	release := func() {
+		for _, s := range scratches {
+			h.putGreedyScratch(s)
+		}
+	}
+	for i := range k {
+		scratch, ok, err := h.encodeGreedyAt(enc, rowsBuf, uint(i)*rowStride, suppress)
+		if scratch != nil {
+			scratches = append(scratches, scratch)
+		}
+		if err != nil || !ok {
+			endEncodingFast(enc)
+			release()
+			return false, err
+		}
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	for i, scratch := range scratches {
+		token := scratch.token()
+		if token < 0 || int(token) >= h.vocab {
+			release()
+			return false, core.NewError(core.Sprintf("native.headEncoder.greedyRows: row %d argmax returned invalid token %d for vocab %d", i, token, h.vocab))
+		}
+		out[i] = token
+	}
+	release()
+	return true, nil
+}
