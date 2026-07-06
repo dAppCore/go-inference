@@ -81,6 +81,13 @@ tasks:
         -ldflags "{{.GO_DARWIN_LDFLAGS}}" -o bin/lem ./go/cmd/lem
       - 'echo "  lem (self-contained): bin/lem — $(du -h bin/lem | cut -f1), embeds mlx + lthn_kernels metallibs; run from anywhere"'
 
+  build:native:
+    desc: "Build lem to bin/lem for the host platform WITHOUT the metal engine (CGO for the duckdb store) — the linux/windows/arm build. One binary; the GPU backend loads its kernel sidecar at runtime."
+    cmds:
+      - mkdir -p bin {{.GO_BUILD_CACHE}}
+      - env GOCACHE={{.GO_BUILD_CACHE}} CGO_ENABLED=1 go build -trimpath -o bin/lem{{if eq OS "windows"}}.exe{{end}} ./go/cmd/lem
+      - 'echo "  lem -> bin/lem"'
+
   # --- Test / coverage / benchmark ------------------------------------------
   # The portable lanes (test, cover) compile under the default build tags, so
   # they run on any OS — engine/metal (darwin/arm64, //go:build metal_runtime)
