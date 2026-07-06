@@ -424,7 +424,12 @@ func TestBackendLlama_LlamaBackend_LoadModel_Good(t *core.T) {
 
 func TestBackendLlama_LlamaBackend_LoadModel_Bad(t *core.T) {
 	var b LlamaBackend
-	assertResultError(t, b.LoadModel(""), "HTTP shim")
+	r := b.LoadModel("")
+	assertResultError(t, r, "HTTP shim")
+	core.AssertNil(t, b.http)
+	if _, ok := r.Value.(error); !ok {
+		t.Fatalf("Result.Value = %#v, want an error", r.Value)
+	}
 }
 
 func TestBackendLlama_LlamaBackend_LoadModel_Ugly(t *core.T) {
