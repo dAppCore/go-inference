@@ -1164,3 +1164,25 @@ func TestModel_TextModel_StopTokens_Declared(t *testing.T) {
 		t.Fatalf("stop set %v holds id 106 %d times, want exactly once", stop, seen)
 	}
 }
+
+// TestModel_TextModel_NilReceiverGuards pins that every read-only accessor
+// tolerates a nil *TextModel the way Close and Capabilities already do —
+// zero values (or a clear failure Result from Err), never a panic.
+func TestModel_TextModel_NilReceiverGuards(t *testing.T) {
+	var m *TextModel
+	if got := m.ModelType(); got != "" {
+		t.Fatalf("nil ModelType = %q, want empty", got)
+	}
+	if got := m.Info(); got != (inference.ModelInfo{}) {
+		t.Fatalf("nil Info = %+v, want zero", got)
+	}
+	if got := m.Metrics(); got.GeneratedTokens != 0 || got.PromptTokens != 0 {
+		t.Fatalf("nil Metrics = %+v, want zero", got)
+	}
+	if r := m.Err(); r.OK {
+		t.Fatal("nil Err should report a failure Result")
+	}
+	if s := m.NewSession(); s != nil {
+		t.Fatal("nil NewSession should return nil")
+	}
+}
