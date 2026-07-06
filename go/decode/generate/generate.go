@@ -52,6 +52,11 @@ type Config struct {
 	// Reactive MTP drafter (Gemma 4 targets) — same ladder as serve.
 	DraftPath  string // "auto" runs the ladder, "" disables, a path forces the drafter
 	DraftBlock int    // explicit MTP draft block; 0 = engine default
+	// SpeculativeLoader loads a target+drafter pair as one speculative
+	// inference.TextModel. Injected by the composition root (cmd/lem →
+	// native.LoadSpeculativePair) so this package stays engine-neutral; nil
+	// leaves generate on the plain path with the "no speculative path" note.
+	SpeculativeLoader serving.SpeculativeLoader
 
 	// Engine knobs preserved for the drop-in flag surface. These have no
 	// inference.LoadOption seam on the current engine/metal, so RunGenerate
@@ -109,25 +114,48 @@ func RunGenerate(ctx context.Context, cfg Config) error {
 // runBasicGenerate loads the model, warms the kernels, then times a prefill +
 // decode run and reports decode-only tok/s (comparable to llama-bench's tg).
 func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.LoadOption) error {
-	// Reactive MTP pair resolution — same ladder as serve. A detected drafter
-	// only engages when the engine exposes a speculative loader; the current
-	// engine/metal doesn't, so a detected drafter degrades to plain decode with
-	// an honest notice (faithful to lthn-mlx's own degradation).
-	if det := serving.ResolveServeDraft(cfg.ModelPath, cfg.DraftPath, true); det.Active() {
-		printNote(cfg.Log, "generate: drafter %s (%s) detected but this engine exposes no speculative path — generating plain autoregressive (block %d would apply)",
-			det.DraftPath, det.Note, resolvedDraftBlock(cfg.DraftBlock))
-	}
-
 	// Resolve --image sources to raw bytes BEFORE loading the model, so a bad
-	// path or malformed data: URL fails fast without paying the load cost.
+	// path or malformed data: URL fails fast without paying the load cost. It is
+	// also the gate on arming the speculative lane below.
 	images, err := resolveImageInputs(cfg.ImageSources)
 	if err != nil {
 		return core.E("generate.RunGenerate", "image input", err)
 	}
 
-	tm, err := loadTextModel(cfg.ModelPath, loadOpts...)
-	if err != nil {
-		return core.E("generate.RunGenerate", "load", err)
+	// Reactive MTP pair resolution — same ladder as serve. A detected drafter
+	// arms the speculative lane only when the engine exposes a loader AND the
+	// request is greedy (temp 0) AND carries no images: the MTP verify is
+	// greedy-exact (byte-identical to plain decode at temp 0), so a sampled
+	// request would need the sampled verify lane, and images route through a
+	// multimodal prefill the MTP loop does not carry. Every miss degrades to
+	// plain autoregressive with an honest notice.
+	var tm inference.TextModel
+	if det := serving.ResolveServeDraft(cfg.ModelPath, cfg.DraftPath, true); det.Active() {
+		block := resolvedDraftBlock(cfg.DraftBlock)
+		switch {
+		case cfg.SpeculativeLoader == nil:
+			printNote(cfg.Log, "generate: drafter %s (%s) detected but this engine exposes no speculative path — generating plain autoregressive (block %d would apply)", det.DraftPath, det.Note, block)
+		case cfg.Temp != 0:
+			printNote(cfg.Log, "generate: drafter %s detected but -temp %g is not greedy — the MTP verify is greedy-exact; generating plain autoregressive (use -temp 0 for the speculative lane)", det.DraftPath, cfg.Temp)
+		case len(images) > 0:
+			printNote(cfg.Log, "generate: drafter %s detected but image input routes through the multimodal prefill the MTP loop does not carry — generating plain autoregressive", det.DraftPath)
+		default:
+			sm, serr := cfg.SpeculativeLoader(cfg.ModelPath, det.DraftPath, block, loadOpts...)
+			if serr != nil {
+				printNote(cfg.Log, "generate: drafter %s detected but the speculative pair failed to load (%v) — generating plain autoregressive", det.DraftPath, serr)
+			} else {
+				printNote(cfg.Log, "generate: MTP speculative lane armed — drafter %s, block %d", det.DraftPath, block)
+				tm = sm
+			}
+		}
+	}
+
+	if tm == nil {
+		plain, lerr := loadTextModel(cfg.ModelPath, loadOpts...)
+		if lerr != nil {
+			return core.E("generate.RunGenerate", "load", lerr)
+		}
+		tm = plain
 	}
 	defer tm.Close()
 	noteCacheKnobs(cfg, tm)
