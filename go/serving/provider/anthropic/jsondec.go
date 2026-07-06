@@ -460,6 +460,30 @@ func parseContentBlockArray(data []byte, i int) ([]ContentBlock, int, error) {
 	}
 }
 
+// parseToolResultContent reads a tool_result "content" value — a bare string or
+// an array of content blocks (Anthropic accepts both). An array renders through
+// blockText; a null/other value yields empty content. The result is the tool
+// output the <|tool_response> render feeds back to the model.
+func parseToolResultContent(data []byte, i int) (string, int, error) {
+	i = jsonenc.SkipJSONWhitespace(data, i)
+	if i >= len(data) {
+		return "", i, jsonenc.ErrInvalidJSON
+	}
+	switch data[i] {
+	case '"':
+		return jsonenc.ParseJSONString(data, i)
+	case '[':
+		blocks, next, err := parseContentBlockArray(data, i)
+		if err != nil {
+			return "", next, err
+		}
+		return blockText(blocks), next, nil
+	default:
+		next, err := jsonenc.SkipJSONValue(data, i)
+		return "", next, err
+	}
+}
+
 // parseContentBlock walks a single ContentBlock object at data[i].
 func parseContentBlock(data []byte, i int) (ContentBlock, int, error) {
 	var block ContentBlock
@@ -495,6 +519,24 @@ func parseContentBlock(data []byte, i int) (ContentBlock, int, error) {
 			i = vnext
 		case "text":
 			s, vnext, verr := jsonenc.ParseJSONString(data, i)
+			if verr != nil {
+				return block, vnext, verr
+			}
+			block.Text = s
+			i = vnext
+		case "tool_use_id":
+			// tool_result -> the id of the tool_use it answers.
+			s, vnext, verr := jsonenc.ParseJSONString(data, i)
+			if verr != nil {
+				return block, vnext, verr
+			}
+			block.ToolUseID = s
+			i = vnext
+		case "content":
+			// tool_result content: a bare string, or an array of text blocks
+			// (Anthropic allows both). Either way it lands in Text as the tool
+			// output the <|tool_response> render feeds back to the model.
+			s, vnext, verr := parseToolResultContent(data, i)
 			if verr != nil {
 				return block, vnext, verr
 			}

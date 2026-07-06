@@ -17,11 +17,12 @@ const DefaultMessagesPath = "/v1/messages"
 // "tool_use" block (the model's function call) carries ID/Name/Input. The
 // tool_use fields are omitempty so a text block stays byte-identical to before.
 type ContentBlock struct {
-	Type  string         `json:"type"`
-	Text  string         `json:"text,omitempty"`
-	ID    string         `json:"id,omitempty"`
-	Name  string         `json:"name,omitempty"`
-	Input map[string]any `json:"input,omitempty"`
+	Type      string         `json:"type"`
+	Text      string         `json:"text,omitempty"`
+	ID        string         `json:"id,omitempty"`
+	Name      string         `json:"name,omitempty"`
+	Input     map[string]any `json:"input,omitempty"`
+	ToolUseID string         `json:"tool_use_id,omitempty"` // tool_result -> the tool_use it answers
 }
 
 // ToolUseBlock builds one Anthropic tool_use content block from a parsed call.
@@ -409,37 +410,35 @@ func NewTextResponse(id, model, text string, metrics inference.GenerateMetrics) 
 }
 
 func blockText(blocks []ContentBlock) string {
-	// Fast paths — common cases produce 0 or 1 string without
-	// touching the builder. Per-message hot path; InferenceMessages
-	// calls this once per Anthropic content array on every request.
+	// Fast paths — the dominant all-text case produces 0 or 1 string without
+	// touching the builder. Per-message hot path; InferenceMessages calls this
+	// once per Anthropic content array on every request.
 	if len(blocks) == 0 {
 		return ""
 	}
 	if len(blocks) == 1 {
-		b := blocks[0]
-		if b.Type == "" || b.Type == "text" {
-			return b.Text
-		}
-		return ""
-	}
-	// Multi-block: pre-sum then Grow the builder once. Previous shape
-	// (out += block.Text) was O(N²) — each += reallocated and copied
-	// the entire prefix.
-	total := 0
-	for _, block := range blocks {
-		if block.Type == "" || block.Type == "text" {
-			total += len(block.Text)
-		}
-	}
-	if total == 0 {
-		return ""
+		return renderBlock(blocks[0])
 	}
 	builder := core.NewBuilder()
-	builder.Grow(total)
 	for _, block := range blocks {
-		if block.Type == "" || block.Type == "text" {
-			builder.WriteString(block.Text)
-		}
+		builder.WriteString(renderBlock(block))
 	}
 	return builder.String()
+}
+
+// renderBlock turns one content block into prompt text. A text block is its
+// text; a tool_result becomes a <|tool_response> span carrying the tool output
+// (the channel Gemma 4 expects after a call, so it reads the result and
+// answers). tool_use blocks in prior turns contribute nothing — the model
+// already holds that context in its retained KV state, so history is not
+// re-rendered.
+func renderBlock(b ContentBlock) string {
+	switch b.Type {
+	case "", "text":
+		return b.Text
+	case "tool_result":
+		return "<|tool_response>" + b.Text + "<tool_response|>"
+	default:
+		return ""
+	}
 }
