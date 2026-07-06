@@ -27,6 +27,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/decode/tokenizer"
+	"dappco.re/go/inference/engine"
 )
 
 // speculativeModel adapts a target ArchSession + drafter AssistantPair to
@@ -42,6 +43,7 @@ type speculativeModel struct {
 	info       inference.ModelInfo
 	modelType  string
 	draftBlock int
+	turns      engine.TurnTokens
 
 	mu          sync.Mutex
 	lastErr     error
@@ -89,6 +91,7 @@ func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...i
 		tok:        tok,
 		modelType:  "gemma4",
 		draftBlock: draftBlock,
+		turns:      engine.DetectTurnTokens(tok),
 		info: inference.ModelInfo{
 			Architecture: "gemma4",
 			VocabSize:    pair.TargetArch.Vocab,
@@ -104,10 +107,10 @@ func (m *speculativeModel) Generate(ctx context.Context, prompt string, opts ...
 }
 
 // Chat streams the speculative completion of a multi-turn conversation, framed
-// with the gemma turn template (byte-identical to the plain engine path's
+// with the model's turn template (byte-identical to the plain engine path's
 // formatChatTurns — a trailing open model turn to complete).
 func (m *speculativeModel) Chat(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
-	return m.speculate(ctx, m.tok.Encode(formatSpeculativeChatTurns(messages)), inference.ApplyGenerateOpts(opts))
+	return m.speculate(ctx, m.tok.Encode(formatSpeculativeChatTurns(m.turns, messages)), inference.ApplyGenerateOpts(opts))
 }
 
 // speculate runs the AssistantPair MTP loop over the target session, decoding
@@ -136,18 +139,28 @@ func (m *speculativeModel) speculate(ctx context.Context, ids []int32, cfg infer
 		if eos >= 0 {
 			stop = append(stop, eos)
 		}
+		// Mirror the plain engine path: the turn-close marker terminates an
+		// assistant turn on chat-tuned checkpoints (gemma4 <turn|>).
+		if id, ok := m.tok.TokenID(m.turns.Close); ok && !speculativeTokenInSet(id, stop) {
+			stop = append(stop, id)
+		}
 		sink := func(id int32) bool {
 			if ctx.Err() != nil {
 				return false
 			}
 			text := m.tok.DecodeToken(id)
-			if speculativeTokenInSet(id, stop) {
-				// A terminator's text is never content — gemma4 ships
-				// <end_of_turn> as a plain vocab token, so blank it (the id
-				// still surfaces for trackers), mirroring the plain decode path.
+			inStop := speculativeTokenInSet(id, stop)
+			if inStop {
+				// A terminator's text is never content — blank it (the id still
+				// surfaces for trackers), mirroring the plain decode path.
 				text = ""
 			}
-			return yield(inference.Token{ID: id, Text: text})
+			if !yield(inference.Token{ID: id, Text: text}) {
+				return false
+			}
+			// A stop token ends the turn: the eosID plumbed into the pair loop
+			// only covers <eos>, so the sink owns the turn-close (<turn|>) stop.
+			return !inStop
 		}
 		res, err := m.pair.GenerateFromSessionEach(m.target, ids, maxNew, int(eos), m.draftBlock, cfg.SuppressTokens, sink)
 		m.record(res, len(ids), time.Since(start), err)
@@ -260,16 +273,18 @@ func speculativeTokenInSet(id int32, set []int32) bool {
 	return slices.Contains(set, id)
 }
 
-// formatSpeculativeChatTurns renders the gemma turn template, byte-identical to
-// the engine package's formatChatTurns (which is unexported there): each turn as
-// "<start_of_turn>ROLE\nCONTENT<end_of_turn>\n", then a trailing open model turn
-// to complete. Kept here because package native cannot reach engine's copy.
-func formatSpeculativeChatTurns(messages []inference.Message) string {
+// formatSpeculativeChatTurns renders the model's turn template, byte-identical
+// to the engine package's formatChatTurns (which is unexported there): each
+// turn as OPEN+ROLE+"\n"+CONTENT+CLOSE+"\n" in the detected marker dialect
+// (gemma4 <|turn>/<turn|>; legacy <start_of_turn>), then a trailing open model
+// turn to complete. Kept here because package native cannot reach engine's
+// copy.
+func formatSpeculativeChatTurns(turns engine.TurnTokens, messages []inference.Message) string {
 	var out strings.Builder
 	for _, msg := range messages {
-		out.WriteString("<start_of_turn>" + speculativeChatRole(msg.Role) + "\n" + msg.Content + "<end_of_turn>\n")
+		out.WriteString(turns.Open + speculativeChatRole(msg.Role) + "\n" + msg.Content + turns.Close + "\n")
 	}
-	return out.String() + "<start_of_turn>model\n"
+	return out.String() + turns.Open + "model\n"
 }
 
 func speculativeChatRole(role string) string {
