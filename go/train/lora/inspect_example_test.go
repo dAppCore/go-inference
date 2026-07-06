@@ -86,6 +86,32 @@ func ExampleInspectAdapter() {
 	// targets: [self_attn.q_proj self_attn.v_proj]
 }
 
+// ExampleInspect shows the two-argument identity split: the adapter is
+// staged under a temp path, but the reported identity uses the caller's
+// original path — the shape a Medium-staged adapter needs so its reported
+// Name/Path survive the staging round-trip.
+func ExampleInspect() {
+	stagedDir := core.MkdirTemp("", "lora-inspect-staged-*").Value.(string)
+	defer core.RemoveAll(stagedDir)
+	core.WriteFile(core.PathJoin(stagedDir, "adapter_config.json"),
+		[]byte(`{"rank":8,"alpha":16,"target_modules":["q_proj"]}`), 0o600)
+	core.WriteFile(core.PathJoin(stagedDir, "adapter.safetensors"), []byte("synthetic-weights"), 0o600)
+
+	info, err := Inspect(stagedDir, "/adapters/original/support-tone")
+	if err != nil {
+		core.Println("error:", err)
+		return
+	}
+	core.Println("name:", info.Name)
+	core.Println("path:", info.Path)
+	core.Println("rank:", info.Rank)
+
+	// Output:
+	// name: support-tone
+	// path: /adapters/original/support-tone
+	// rank: 8
+}
+
 // ExampleInspectAdapter_aliases shows the metadata-alias normalisation
 // Inspect applies: a PEFT-style config (r / lora_alpha / target_modules) is
 // read into the same canonical AdapterInfo as the mlx-lm spelling, so a
