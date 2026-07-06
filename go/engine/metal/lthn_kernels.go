@@ -558,10 +558,29 @@ var (
 	logitsSampleBF16PSO          metal.MTLComputePipelineState
 	logitsSampleBF16PSOErr       error
 
-	bf16LMHeadArgmaxTilesRowsPSOOnce sync.Once
-	bf16LMHeadArgmaxTilesRowsPSO     metal.MTLComputePipelineState
-	bf16LMHeadArgmaxTilesRowsPSOErr  error
+	bf16LMHeadArgmaxTilesRowsPSOMu    sync.Mutex
+	bf16LMHeadArgmaxTilesRowsPSOCache = map[int]metal.MTLComputePipelineState{}
+
+	argmaxMergeRowsF32PSOOnce sync.Once
+	argmaxMergeRowsF32PSO     metal.MTLComputePipelineState
+	argmaxMergeRowsF32PSOErr  error
 )
+
+func argmaxMergeRowsF32Pipeline() (metal.MTLComputePipelineState, error) {
+	argmaxMergeRowsF32PSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			argmaxMergeRowsF32PSOErr = core.NewError("native.argmaxMergeRowsF32Pipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_argmax_merge_rows_f32")
+		if fn == nil || fn.GetID() == 0 {
+			argmaxMergeRowsF32PSOErr = core.NewError("native.argmaxMergeRowsF32Pipeline: kernel lthn_argmax_merge_rows_f32 not found")
+			return
+		}
+		argmaxMergeRowsF32PSO, argmaxMergeRowsF32PSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return argmaxMergeRowsF32PSO, argmaxMergeRowsF32PSOErr
+}
 
 func bf16LMHeadArgmaxTilesPipeline() (metal.MTLComputePipelineState, error) {
 	bf16LMHeadArgmaxTilesPSOOnce.Do(func() {
@@ -611,20 +630,37 @@ func argmaxMergeF32Pipeline() (metal.MTLComputePipelineState, error) {
 	return argmaxMergeF32PSO, argmaxMergeF32PSOErr
 }
 
-func bf16LMHeadArgmaxTilesRowsPipeline() (metal.MTLComputePipelineState, error) {
-	bf16LMHeadArgmaxTilesRowsPSOOnce.Do(func() {
-		if customLibrary == nil || customLibrary.GetID() == 0 {
-			bf16LMHeadArgmaxTilesRowsPSOErr = core.NewError("native.bf16LMHeadArgmaxTilesRowsPipeline: custom library unavailable")
-			return
+// bf16LMHeadArgmaxTilesRowsPipeline builds (and caches) the K-row direct
+// greedy kernel SPECIALISED for k via function constant 10 — the row loop
+// fully unrolls at pipeline build, keeping the K accumulators in registers (a
+// runtime bound stack-allocated them and cost 5x bandwidth).
+func bf16LMHeadArgmaxTilesRowsPipeline(k int) (metal.MTLComputePipelineState, error) {
+	bf16LMHeadArgmaxTilesRowsPSOMu.Lock()
+	defer bf16LMHeadArgmaxTilesRowsPSOMu.Unlock()
+	if pso, ok := bf16LMHeadArgmaxTilesRowsPSOCache[k]; ok {
+		if pso == nil {
+			return nil, core.NewError("native.bf16LMHeadArgmaxTilesRowsPipeline: kernel unavailable")
 		}
-		fn := customLibrary.NewFunctionWithName("lthn_bf16_lm_head_argmax_tiles_rows_bf16")
-		if fn == nil || fn.GetID() == 0 {
-			bf16LMHeadArgmaxTilesRowsPSOErr = core.NewError("native.bf16LMHeadArgmaxTilesRowsPipeline: kernel lthn_bf16_lm_head_argmax_tiles_rows_bf16 not found")
-			return
-		}
-		bf16LMHeadArgmaxTilesRowsPSO, bf16LMHeadArgmaxTilesRowsPSOErr = device.NewComputePipelineStateWithFunctionError(fn)
-	})
-	return bf16LMHeadArgmaxTilesRowsPSO, bf16LMHeadArgmaxTilesRowsPSOErr
+		return pso, nil
+	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		return nil, core.NewError("native.bf16LMHeadArgmaxTilesRowsPipeline: custom library unavailable")
+	}
+	fc := metal.NewMTLFunctionConstantValues()
+	kk := uint32(k)
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&kk), metal.MTLDataTypeUInt, 10)
+	fn, err := customLibrary.NewFunctionWithNameConstantValuesError("lthn_bf16_lm_head_argmax_tiles_rows_bf16", fc)
+	if err != nil || fn == nil || fn.GetID() == 0 {
+		bf16LMHeadArgmaxTilesRowsPSOCache[k] = nil
+		return nil, core.E("native.bf16LMHeadArgmaxTilesRowsPipeline", "specialise k", err)
+	}
+	pso, perr := device.NewComputePipelineStateWithFunctionError(fn)
+	if perr != nil {
+		bf16LMHeadArgmaxTilesRowsPSOCache[k] = nil
+		return nil, perr
+	}
+	bf16LMHeadArgmaxTilesRowsPSOCache[k] = pso
+	return pso, nil
 }
 
 func bf16LMHeadCandidatesPipeline() (metal.MTLComputePipelineState, error) {
@@ -957,7 +993,7 @@ func encBF16LMHeadArgmaxTilesRowsBF16(
 	if dModel <= 0 || vocab <= 0 || k <= 0 || k > 8 {
 		return core.NewError("native.encBF16LMHeadArgmaxTilesRowsBF16: invalid batch geometry")
 	}
-	pso, err := bf16LMHeadArgmaxTilesRowsPipeline()
+	pso, err := bf16LMHeadArgmaxTilesRowsPipeline(k)
 	if err != nil {
 		return err
 	}
@@ -973,11 +1009,32 @@ func encBF16LMHeadArgmaxTilesRowsBF16(
 	}
 	setBuf(enc, suppress, 0, 6)
 	setEncInt32(enc, int32(suppressCount), 7)
-	setEncInt32(enc, int32(k), 8)
-	setEncInt32(enc, int32(tileCount), 9)
+	setEncInt32(enc, int32(tileCount), 8)
 	dispatchThreadgroups(enc,
 		metal.MTLSize{Width: uint(tileCount), Height: 1, Depth: 1},
 		metal.MTLSize{Width: 32, Height: bf16LMHeadArgmaxRowsPerTile, Depth: 1},
+	)
+	return nil
+}
+
+// encArgmaxMergeRowsF32 merges all K rows' tile slices to out[0..k) in ONE
+// dispatch (one threadgroup per row) — the K-row head's merge stage.
+func encArgmaxMergeRowsF32(enc metal.MTLComputeCommandEncoder, values, indices, out metal.MTLBuffer, n, k int) error {
+	if n <= 0 || k <= 0 {
+		return core.NewError("native.encArgmaxMergeRowsF32: n and k must be > 0")
+	}
+	pso, err := argmaxMergeRowsF32Pipeline()
+	if err != nil {
+		return err
+	}
+	setPSO(enc, pso)
+	setBuf(enc, values, 0, 0)
+	setBuf(enc, indices, 0, 1)
+	setBuf(enc, out, 0, 2)
+	setEncInt32(enc, int32(n), 3)
+	dispatchThreadgroups(enc,
+		metal.MTLSize{Width: uint(k), Height: 1, Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
 	)
 	return nil
 }
