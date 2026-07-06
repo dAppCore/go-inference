@@ -4,6 +4,8 @@ package safetensors
 
 import (
 	"testing"
+
+	core "dappco.re/go"
 )
 
 // blob builds a safetensors byte stream from a header JSON string + the data section
@@ -20,10 +22,10 @@ func blob(header string, data []byte) []byte {
 	return out
 }
 
-// TestParse reads a well-formed two-tensor blob: the names, dtypes, shapes and the
-// sub-sliced data must all come back correct, and the reserved __metadata__ key is
-// skipped (not returned as a tensor).
-func TestParse(t *testing.T) {
+// TestSafetensors_Parse_Good reads a well-formed two-tensor blob: the names, dtypes,
+// shapes and the sub-sliced data must all come back correct, and the reserved
+// __metadata__ key is skipped (not returned as a tensor).
+func TestSafetensors_Parse_Good(t *testing.T) {
 	data := make([]byte, 20)
 	for i := range data {
 		data[i] = byte(i + 1) // 1..20, so a sub-slice mistake is visible
@@ -59,9 +61,10 @@ func TestParse(t *testing.T) {
 	t.Logf("parse: 2 tensors (BF16 [2,3] + F32 [2]) names/dtypes/shapes/data correct, __metadata__ skipped")
 }
 
-// TestParseErrors rejects malformed blobs: too short, bad header length, unknown dtype,
-// a byte span that disagrees with dtype × shape, and out-of-range offsets.
-func TestParseErrors(t *testing.T) {
+// TestSafetensors_Parse_Bad rejects malformed blobs: too short, bad header length,
+// unknown dtype, a byte span that disagrees with dtype × shape, and out-of-range
+// offsets.
+func TestSafetensors_Parse_Bad(t *testing.T) {
 	d := func(n int) []byte { return make([]byte, n) }
 	cases := []struct {
 		name string
@@ -90,9 +93,9 @@ func keys(m map[string]Tensor) []string {
 	return out
 }
 
-// TestEncodeRoundTrip checks Encode is the inverse of Parse: tensors → blob → tensors
-// recovers every dtype, shape and the exact bytes.
-func TestEncodeRoundTrip(t *testing.T) {
+// TestSafetensors_Encode_Good checks Encode is the inverse of Parse: tensors → blob →
+// tensors recovers every dtype, shape and the exact bytes.
+func TestSafetensors_Encode_Good(t *testing.T) {
 	in := map[string]Tensor{
 		"w":     {Dtype: "BF16", Shape: []int{2, 3}, Data: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}},
 		"norm":  {Dtype: "F32", Shape: []int{2}, Data: []byte{13, 14, 15, 16, 17, 18, 19, 20}},
@@ -131,8 +134,114 @@ func TestEncodeRoundTrip(t *testing.T) {
 			}
 		}
 	}
+	t.Logf("encode: tensors → blob → tensors round-trips dtypes/shapes/bytes")
+}
+
+// TestSafetensors_Encode_Bad rejects a tensor whose byte span disagrees with its
+// declared dtype × shape — the same structural check Parse enforces on the way in.
+func TestSafetensors_Encode_Bad(t *testing.T) {
 	if _, err := Encode(map[string]Tensor{"x": {Dtype: "BF16", Shape: []int{2}, Data: []byte{1, 2}}}); err == nil {
 		t.Fatal("expected Encode to reject a byte span != dtype×shape")
 	}
-	t.Logf("encode: tensors → blob → tensors round-trips dtypes/shapes/bytes; bad-size rejected")
+}
+
+// TestSafetensors_Encode_Ugly encodes a nil-Shape scalar (Encode must normalise it to
+// an empty, non-nil shape) and confirms it round-trips through Parse as rank-0.
+func TestSafetensors_Encode_Ugly(t *testing.T) {
+	in := map[string]Tensor{"scalar": {Dtype: "F32", Shape: nil, Data: []byte{0, 0, 128, 63}}}
+	blob, err := Encode(in)
+	if err != nil {
+		t.Fatalf("Encode(nil shape): %v", err)
+	}
+	out, err := Parse(blob)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got, ok := out["scalar"]
+	if !ok {
+		t.Fatal("scalar missing after round-trip")
+	}
+	if len(got.Shape) != 0 {
+		t.Fatalf("Shape = %v, want empty (rank-0)", got.Shape)
+	}
+	if len(got.Data) != 4 || got.Data[3] != 63 {
+		t.Fatalf("Data = %v, want [0 0 128 63]", got.Data)
+	}
+}
+
+// TestSafetensors_Parse_Ugly parses a zero-dimensional (scalar) tensor: shape []
+// makes the element count the empty-product 1, so a 1-byte dtype has a 1-byte span.
+func TestSafetensors_Parse_Ugly(t *testing.T) {
+	ts, err := Parse(blob(`{"s":{"dtype":"U8","shape":[],"data_offsets":[0,1]}}`, []byte{42}))
+	if err != nil {
+		t.Fatalf("Parse scalar: %v", err)
+	}
+	s, ok := ts["s"]
+	if !ok {
+		t.Fatal("scalar tensor s missing")
+	}
+	if len(s.Shape) != 0 || len(s.Data) != 1 || s.Data[0] != 42 {
+		t.Fatalf("scalar: shape %v data %v, want rank-0 and [42]", s.Shape, s.Data)
+	}
+}
+
+// TestSafetensors_Load_Good writes a safetensors file via Encode and confirms Load
+// reads it back with the same dtype, shape and bytes.
+func TestSafetensors_Load_Good(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/model.safetensors"
+	in := map[string]Tensor{"weight": {Dtype: "F32", Shape: []int{2}, Data: []byte{0, 0, 128, 63, 0, 0, 0, 64}}}
+	blob, err := Encode(in)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if result := core.WriteFile(path, blob, 0o644); !result.OK {
+		t.Fatalf("WriteFile: %v", result.Value)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	w, ok := got["weight"]
+	if !ok {
+		t.Fatal("weight missing after Load")
+	}
+	if w.Dtype != "F32" || len(w.Shape) != 1 || w.Shape[0] != 2 {
+		t.Fatalf("weight dtype/shape = %s %v, want F32 [2]", w.Dtype, w.Shape)
+	}
+	if len(w.Data) != 8 || w.Data[3] != 63 {
+		t.Fatalf("weight data = %v, want the encoded 8 bytes", w.Data)
+	}
+}
+
+// TestSafetensors_Load_Bad confirms a missing file surfaces an error rather than a
+// zero-value tensor map.
+func TestSafetensors_Load_Bad(t *testing.T) {
+	if _, err := Load(core.PathJoin(t.TempDir(), "missing.safetensors")); err == nil {
+		t.Fatal("Load(missing file) error = nil")
+	}
+}
+
+// TestSafetensors_Load_Ugly loads a file holding only a __metadata__ block (no real
+// tensors) — the smallest legal safetensors file — and confirms it comes back empty,
+// not an error.
+func TestSafetensors_Load_Ugly(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/meta_only.safetensors"
+	header := []byte(`{"__metadata__":{"format":"pt"}}`)
+	buf := make([]byte, 8+len(header))
+	for i := 0; i < 8; i++ {
+		buf[i] = byte(len(header) >> (8 * uint(i)))
+	}
+	copy(buf[8:], header)
+	if result := core.WriteFile(path, buf, 0o644); !result.OK {
+		t.Fatalf("WriteFile: %v", result.Value)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(metadata only): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Load(metadata only) = %v, want empty", got)
+	}
 }

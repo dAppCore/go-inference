@@ -1215,6 +1215,479 @@ func TestSafetensors_NewFileReader_Ugly(t *testing.T) {
 	}
 }
 
+// --- ShardCache (NewShardCache / Reader / ReadRefValues / ReadRefRaw / Close) ---
+
+// TestSafetensors_NewShardCache_Good confirms the returned cache is
+// immediately usable: Reader opens the shard once and the read matches the
+// package-level ReadRefValues for the same ref.
+func TestSafetensors_NewShardCache_Good(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2, 3}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	ref := index.Tensors["weight"]
+
+	cache := NewShardCache()
+	defer cache.Close()
+	reader, err := cache.Reader(ref)
+	if err != nil {
+		t.Fatalf("cache.Reader: %v", err)
+	}
+	got, err := reader.ReadValues()
+	if err != nil {
+		t.Fatalf("reader.ReadValues: %v", err)
+	}
+	want, err := ReadRefValues(ref)
+	if err != nil {
+		t.Fatalf("ReadRefValues: %v", err)
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[2] != want[2] {
+		t.Fatalf("cache read = %v, want %v", got, want)
+	}
+}
+
+// TestSafetensors_NewShardCache_Bad drives a fresh cache's Reader with a ref
+// pointing at a path that does not exist — the constructor itself takes no
+// arguments and cannot fail, so "bad" input surfaces the first time the
+// returned cache is asked to open something.
+func TestSafetensors_NewShardCache_Bad(t *testing.T) {
+	cache := NewShardCache()
+	defer cache.Close()
+	ref := TensorRef{Name: "x", Path: core.PathJoin(t.TempDir(), "missing.safetensors"), DType: "F32", Elements: 1, ByteLen: 4}
+	if _, err := cache.Reader(ref); err == nil {
+		t.Fatal("cache.Reader(missing file) error = nil")
+	}
+}
+
+// TestSafetensors_NewShardCache_Ugly confirms Close on a freshly-constructed,
+// never-used cache is a safe no-op — the degenerate lifecycle a caller's
+// deferred cleanup hits whenever the load fails before any ref is read.
+func TestSafetensors_NewShardCache_Ugly(t *testing.T) {
+	cache := NewShardCache()
+	cache.Close() // must not panic on an empty cache
+}
+
+// TestSafetensors_ShardCache_Reader_Good opens two refs from the SAME shard
+// through one cache and confirms both read correctly and the shard handle is
+// reused (exactly one cached entry) rather than reopened per ref.
+func TestSafetensors_ShardCache_Reader_Good(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"a": {1, 2}, "b": {3, 4, 5}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	cache := NewShardCache()
+	defer cache.Close()
+
+	ra, err := cache.Reader(index.Tensors["a"])
+	if err != nil {
+		t.Fatalf("cache.Reader(a): %v", err)
+	}
+	rb, err := cache.Reader(index.Tensors["b"])
+	if err != nil {
+		t.Fatalf("cache.Reader(b): %v", err)
+	}
+	gotA, err := ra.ReadValues()
+	if err != nil {
+		t.Fatalf("a.ReadValues: %v", err)
+	}
+	gotB, err := rb.ReadValues()
+	if err != nil {
+		t.Fatalf("b.ReadValues: %v", err)
+	}
+	if len(gotA) != 2 || gotA[0] != 1 || gotA[1] != 2 {
+		t.Errorf("a = %v, want [1 2]", gotA)
+	}
+	if len(gotB) != 3 || gotB[2] != 5 {
+		t.Errorf("b = %v, want [3 4 5]", gotB)
+	}
+	if len(cache.files) != 1 {
+		t.Fatalf("cache.files has %d entries, want 1 (one shard, reused)", len(cache.files))
+	}
+}
+
+// TestSafetensors_ShardCache_Reader_Bad confirms a ref whose shard file does
+// not exist surfaces the open error and leaves nothing cached.
+func TestSafetensors_ShardCache_Reader_Bad(t *testing.T) {
+	cache := NewShardCache()
+	defer cache.Close()
+	ref := TensorRef{Name: "x", Path: core.PathJoin(t.TempDir(), "missing.safetensors"), DType: "F32", Elements: 1, ByteLen: 4}
+	if _, err := cache.Reader(ref); err == nil {
+		t.Fatal("cache.Reader(missing file) error = nil")
+	}
+	if len(cache.files) != 0 {
+		t.Fatalf("cache.files has %d entries after a failed open, want 0", len(cache.files))
+	}
+}
+
+// TestSafetensors_ShardCache_Reader_Ugly drives an unsupported dtype against
+// an otherwise-valid shard: handle() succeeds and caches the shard (the
+// file genuinely opens), but NewFileReader then rejects the dtype — so the
+// cache is left holding a handle for a ref that never got a usable reader.
+func TestSafetensors_ShardCache_Reader_Ugly(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {1}})
+	ref := TensorRef{Name: "weight", Path: path, DType: "I32", Elements: 1, ByteLen: 4}
+
+	cache := NewShardCache()
+	defer cache.Close()
+	if _, err := cache.Reader(ref); err == nil {
+		t.Fatal("cache.Reader(unsupported dtype) error = nil")
+	}
+	// The shard itself opened fine before the dtype check failed, so it IS
+	// cached — a subsequent ref on the same path reuses that handle.
+	if len(cache.files) != 1 {
+		t.Fatalf("cache.files has %d entries, want 1 (shard opened before the dtype rejection)", len(cache.files))
+	}
+}
+
+// TestSafetensors_ShardCache_ReadRefValues_Good confirms the cache-bound
+// read is byte-identical to the package-level ReadRefValues for the same ref.
+func TestSafetensors_ShardCache_ReadRefValues_Good(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {4, 5, 6}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	ref := index.Tensors["weight"]
+
+	cache := NewShardCache()
+	defer cache.Close()
+	got, err := cache.ReadRefValues(ref)
+	if err != nil {
+		t.Fatalf("cache.ReadRefValues: %v", err)
+	}
+	want, err := ReadRefValues(ref)
+	if err != nil {
+		t.Fatalf("ReadRefValues: %v", err)
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[2] != want[2] {
+		t.Fatalf("cache.ReadRefValues = %v, want %v", got, want)
+	}
+}
+
+// TestSafetensors_ShardCache_ReadRefValues_Bad confirms a missing shard path
+// surfaces the open error through the cache.
+func TestSafetensors_ShardCache_ReadRefValues_Bad(t *testing.T) {
+	cache := NewShardCache()
+	defer cache.Close()
+	ref := TensorRef{Name: "x", Path: core.PathJoin(t.TempDir(), "missing.safetensors"), DType: "F32", Elements: 1, ByteLen: 4}
+	if _, err := cache.ReadRefValues(ref); err == nil {
+		t.Fatal("cache.ReadRefValues(missing file) error = nil")
+	}
+}
+
+// TestSafetensors_ShardCache_ReadRefValues_Ugly reads the SAME ref twice
+// through one cache — the second read must reuse the cached handle and
+// return values identical to the first, proving reuse does not corrupt
+// subsequent reads.
+func TestSafetensors_ShardCache_ReadRefValues_Ugly(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {7, 8}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	ref := index.Tensors["weight"]
+
+	cache := NewShardCache()
+	defer cache.Close()
+	first, err := cache.ReadRefValues(ref)
+	if err != nil {
+		t.Fatalf("cache.ReadRefValues (1st): %v", err)
+	}
+	second, err := cache.ReadRefValues(ref)
+	if err != nil {
+		t.Fatalf("cache.ReadRefValues (2nd): %v", err)
+	}
+	if len(first) != len(second) || first[0] != second[0] || first[1] != second[1] {
+		t.Fatalf("repeat read = %v, first read = %v, want equal", second, first)
+	}
+}
+
+// TestSafetensors_ShardCache_ReadRefRaw_Good confirms the cache-bound raw
+// read is byte-identical to the package-level ReadRefRaw for the same ref.
+func TestSafetensors_ShardCache_ReadRefRaw_Good(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	ref := index.Tensors["weight"]
+
+	cache := NewShardCache()
+	defer cache.Close()
+	got, err := cache.ReadRefRaw(ref)
+	if err != nil {
+		t.Fatalf("cache.ReadRefRaw: %v", err)
+	}
+	want, err := ReadRefRaw(ref)
+	if err != nil {
+		t.Fatalf("ReadRefRaw: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("cache.ReadRefRaw = %v, want %v", got, want)
+	}
+}
+
+// TestSafetensors_ShardCache_ReadRefRaw_Bad confirms both failure paths: a
+// negative ByteLen is rejected before any file open, and a valid ByteLen
+// against a missing shard surfaces the handle-open error.
+func TestSafetensors_ShardCache_ReadRefRaw_Bad(t *testing.T) {
+	t.Run("negative_byte_len", func(t *testing.T) {
+		cache := NewShardCache()
+		defer cache.Close()
+		ref := TensorRef{Name: "x", Path: "irrelevant", ByteLen: -1}
+		if _, err := cache.ReadRefRaw(ref); err == nil {
+			t.Fatal("cache.ReadRefRaw(negative ByteLen) error = nil")
+		}
+	})
+	t.Run("missing_shard", func(t *testing.T) {
+		cache := NewShardCache()
+		defer cache.Close()
+		ref := TensorRef{Name: "x", Path: core.PathJoin(t.TempDir(), "missing.safetensors"), ByteLen: 4}
+		if _, err := cache.ReadRefRaw(ref); err == nil {
+			t.Fatal("cache.ReadRefRaw(missing shard) error = nil")
+		}
+	})
+}
+
+// TestSafetensors_ShardCache_ReadRefRaw_Ugly confirms a ref claiming more
+// bytes than the shard holds surfaces a truncation error.
+func TestSafetensors_ShardCache_ReadRefRaw_Ugly(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	ref := index.Tensors["weight"]
+	ref.ByteLen += 1024 // demand past EOF
+
+	cache := NewShardCache()
+	defer cache.Close()
+	if _, err := cache.ReadRefRaw(ref); err == nil {
+		t.Fatal("cache.ReadRefRaw(truncated) error = nil")
+	}
+}
+
+// TestSafetensors_ShardCache_Close_Good confirms Close releases every cached
+// handle and clears the map, so the cache holds nothing after Close.
+func TestSafetensors_ShardCache_Close_Good(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {1}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	cache := NewShardCache()
+	if _, err := cache.Reader(index.Tensors["weight"]); err != nil {
+		t.Fatalf("cache.Reader: %v", err)
+	}
+	if len(cache.files) != 1 {
+		t.Fatalf("cache.files has %d entries before Close, want 1", len(cache.files))
+	}
+	cache.Close()
+	if len(cache.files) != 0 {
+		t.Fatalf("cache.files has %d entries after Close, want 0", len(cache.files))
+	}
+}
+
+// TestSafetensors_ShardCache_Close_Bad confirms Close on a cache that only
+// ever saw a failed open (nothing cached) closes zero handles without error.
+func TestSafetensors_ShardCache_Close_Bad(t *testing.T) {
+	cache := NewShardCache()
+	ref := TensorRef{Name: "x", Path: core.PathJoin(t.TempDir(), "missing.safetensors"), DType: "F32", Elements: 1, ByteLen: 4}
+	if _, err := cache.Reader(ref); err == nil {
+		t.Fatal("cache.Reader(missing file) error = nil")
+	}
+	if len(cache.files) != 0 {
+		t.Fatalf("cache.files has %d entries, want 0", len(cache.files))
+	}
+	cache.Close() // must not panic closing an empty map
+}
+
+// TestSafetensors_ShardCache_Close_Ugly confirms calling Close twice is
+// safe — the second call iterates the already-cleared map and does nothing.
+func TestSafetensors_ShardCache_Close_Ugly(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {1}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	cache := NewShardCache()
+	if _, err := cache.Reader(index.Tensors["weight"]); err != nil {
+		t.Fatalf("cache.Reader: %v", err)
+	}
+	cache.Close()
+	cache.Close() // second close must not panic
+}
+
+// --- TensorReader.ReadValues / TensorReader.ReadRaw (open-handle equivalents) ---
+
+// TestSafetensors_TensorReader_ReadValues_Good confirms the open-handle read
+// is byte-identical to the package-level ReadRefValues for the same ref.
+func TestSafetensors_TensorReader_ReadValues_Good(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2, 3, 4}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	ref := index.Tensors["weight"]
+	reader, err := OpenReader(ref)
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer reader.Close()
+
+	got, err := reader.ReadValues()
+	if err != nil {
+		t.Fatalf("reader.ReadValues: %v", err)
+	}
+	want, err := ReadRefValues(ref)
+	if err != nil {
+		t.Fatalf("ReadRefValues: %v", err)
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[3] != want[3] {
+		t.Fatalf("reader.ReadValues = %v, want %v", got, want)
+	}
+}
+
+// TestSafetensors_TensorReader_ReadValues_Bad closes the reader's handle
+// before reading — the ReadAt over the closed file must surface an error
+// rather than panicking or returning stale data.
+func TestSafetensors_TensorReader_ReadValues_Bad(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	reader, err := OpenReader(index.Tensors["weight"])
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	reader.Close() // release the handle before reading
+	if _, err := reader.ReadValues(); err == nil {
+		t.Fatal("reader.ReadValues (closed handle) error = nil")
+	}
+}
+
+// TestSafetensors_TensorReader_ReadValues_Ugly reads the smallest non-empty
+// payload — a single-element tensor.
+func TestSafetensors_TensorReader_ReadValues_Ugly(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "single.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"scalar": {9.5}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	reader, err := OpenReader(index.Tensors["scalar"])
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer reader.Close()
+
+	got, err := reader.ReadValues()
+	if err != nil {
+		t.Fatalf("reader.ReadValues: %v", err)
+	}
+	if len(got) != 1 || got[0] != 9.5 {
+		t.Fatalf("reader.ReadValues = %v, want [9.5]", got)
+	}
+}
+
+// TestSafetensors_TensorReader_ReadRaw_Good confirms the open-handle raw
+// read is byte-identical to the package-level ReadRefRaw for the same ref.
+func TestSafetensors_TensorReader_ReadRaw_Good(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	ref := index.Tensors["weight"]
+	reader, err := OpenReader(ref)
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer reader.Close()
+
+	got, err := reader.ReadRaw()
+	if err != nil {
+		t.Fatalf("reader.ReadRaw: %v", err)
+	}
+	want, err := ReadRefRaw(ref)
+	if err != nil {
+		t.Fatalf("ReadRefRaw: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("reader.ReadRaw = %v, want %v", got, want)
+	}
+}
+
+// TestSafetensors_TensorReader_ReadRaw_Bad confirms a negative ByteLen on
+// the bound ref is rejected before any read is attempted.
+func TestSafetensors_TensorReader_ReadRaw_Bad(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {1}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	reader, err := OpenReader(index.Tensors["weight"])
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer reader.Close()
+	reader.ref.ByteLen = -1 // corrupt the bound ref's length after opening
+	if _, err := reader.ReadRaw(); err == nil {
+		t.Fatal("reader.ReadRaw(negative ByteLen) error = nil")
+	}
+}
+
+// TestSafetensors_TensorReader_ReadRaw_Ugly confirms a ref claiming more
+// bytes than the shard holds surfaces a truncation error.
+func TestSafetensors_TensorReader_ReadRaw_Ugly(t *testing.T) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "dense.safetensors")
+	writeF32Safetensors(t, path, map[string][]float32{"weight": {1, 2}})
+	index, err := ReadIndex(path)
+	if err != nil {
+		t.Fatalf("ReadIndex: %v", err)
+	}
+	reader, err := OpenReader(index.Tensors["weight"])
+	if err != nil {
+		t.Fatalf("OpenReader: %v", err)
+	}
+	defer reader.Close()
+	reader.ref.ByteLen += 1024 // demand past EOF
+	if _, err := reader.ReadRaw(); err == nil {
+		t.Fatal("reader.ReadRaw(truncated) error = nil")
+	}
+}
+
 // --- IndexFiles ---
 
 func TestSafetensors_IndexFiles_Good(t *testing.T) {
