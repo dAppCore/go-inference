@@ -12,13 +12,31 @@ import (
 	coreprocess "dappco.re/go/process"
 )
 
-func TestCanonicalRepoDir_Good(t *testing.T) {
+func TestAdmin_CanonicalRepoDir_Good(t *testing.T) {
 	if got := CanonicalRepoDir("mlx-community/gemma-4-e2b-it-4bit"); got != "mlx-community__gemma-4-e2b-it-4bit" {
 		t.Fatalf("CanonicalRepoDir = %q, want the engine's org__name form", got)
 	}
 }
 
-func TestAllowRepo_CreatesAppendsAndIdempotent_Good(t *testing.T) {
+// TestAdmin_CanonicalRepoDir_Bad covers a repo with no "/" separator at all —
+// core.Replace is a no-op then, so the input passes through unchanged rather
+// than erroring (CanonicalRepoDir never validates its input).
+func TestAdmin_CanonicalRepoDir_Bad(t *testing.T) {
+	if got := CanonicalRepoDir("no-slash-here"); got != "no-slash-here" {
+		t.Fatalf("CanonicalRepoDir(no separator) = %q, want the input unchanged", got)
+	}
+}
+
+// TestAdmin_CanonicalRepoDir_Ugly covers a repo with more than one "/" —
+// every separator is replaced, matching the engine's canonicaliseRepoName
+// which does a global replace too.
+func TestAdmin_CanonicalRepoDir_Ugly(t *testing.T) {
+	if got := CanonicalRepoDir("org/sub/name"); got != "org__sub__name" {
+		t.Fatalf("CanonicalRepoDir(nested path) = %q, want every separator replaced", got)
+	}
+}
+
+func TestAdmin_AllowRepo_Good(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	if r := AllowRepo("mlx-community/gemma-3-1b-it-4bit"); !r.OK {
@@ -48,7 +66,7 @@ func TestAllowRepo_CreatesAppendsAndIdempotent_Good(t *testing.T) {
 	}
 }
 
-func TestAllowRepo_PreservesExistingEngineFile_Good(t *testing.T) {
+func TestAdmin_AllowRepo_PreservesExistingEngineFile_Good(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	path := allowedModelsPath()
 	if r := core.MkdirAll(core.PathDir(path), 0o755); !r.OK {
@@ -69,14 +87,14 @@ func TestAllowRepo_PreservesExistingEngineFile_Good(t *testing.T) {
 	}
 }
 
-func TestAllowRepo_EmptyRepo_Bad(t *testing.T) {
+func TestAdmin_AllowRepo_Bad(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	if r := AllowRepo("  "); r.OK {
 		t.Fatal("AllowRepo(blank) succeeded, want refusal")
 	}
 }
 
-func TestAllowRepo_CorruptFile_Ugly(t *testing.T) {
+func TestAdmin_AllowRepo_Ugly(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	path := allowedModelsPath()
 	if r := core.MkdirAll(core.PathDir(path), 0o755); !r.OK {
@@ -92,12 +110,39 @@ func TestAllowRepo_CorruptFile_Ugly(t *testing.T) {
 	}
 }
 
-func TestAdmin_DownloadModel_Bad(t *testing.T) {
+// TestAdmin_Service_DownloadModel_Bad covers the input-validation refusal —
+// a blank repo is rejected before any engine lookup happens.
+func TestAdmin_Service_DownloadModel_Bad(t *testing.T) {
+	svc := &Service{}
+	if r := svc.DownloadModel(RuntimeMLX, "  ", "main"); r.OK {
+		t.Fatal("DownloadModel(blank repo) succeeded, want refusal")
+	}
+}
+
+// TestAdmin_Service_DownloadModel_Ugly covers the environmental edge: a
+// well-formed request against a runtime with no running engine tracked.
+func TestAdmin_Service_DownloadModel_Ugly(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	svc := &Service{}
 	if r := svc.DownloadModel(RuntimeMLX, "org/repo", "main"); r.OK {
 		t.Fatal("DownloadModel with no running engine succeeded, want refusal")
 	}
+}
+
+// TestAdmin_Service_DownloadJobStatus_Bad covers the input-validation
+// refusal — a blank job id is rejected before any engine lookup happens.
+func TestAdmin_Service_DownloadJobStatus_Bad(t *testing.T) {
+	svc := &Service{}
+	if r := svc.DownloadJobStatus(RuntimeMLX, "  "); r.OK {
+		t.Fatal("DownloadJobStatus(blank job id) succeeded, want refusal")
+	}
+}
+
+// TestAdmin_Service_DownloadJobStatus_Ugly covers the environmental edge: a
+// well-formed poll against a runtime with no running engine tracked.
+func TestAdmin_Service_DownloadJobStatus_Ugly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	svc := &Service{}
 	if r := svc.DownloadJobStatus(RuntimeMLX, "job-1"); r.OK {
 		t.Fatal("DownloadJobStatus with no running engine succeeded, want refusal")
 	}
@@ -243,12 +288,11 @@ func TestAdmin_AdminRoundTrip_Ugly(t *testing.T) {
 	}
 }
 
-// TestAdmin_DownloadModel_Good walks the full authenticated path: allowlist
-// is irrelevant here (that's the engine's own job), but the driver-side
-// plumbing — resolve the running engine's address, default the revision,
-// authenticate, decode the reply — all has to line up, and DownloadJobStatus
-// against the same fake engine proves the polling half too.
-func TestAdmin_DownloadModel_Good(t *testing.T) {
+// TestAdmin_Service_DownloadModel_Good walks the full authenticated path:
+// allowlist is irrelevant here (that's the engine's own job), but the
+// driver-side plumbing — resolve the running engine's address, default the
+// revision, authenticate, decode the reply — all has to line up.
+func TestAdmin_Service_DownloadModel_Good(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	seedAdminToken(t, "tok")
 
@@ -278,12 +322,33 @@ func TestAdmin_DownloadModel_Good(t *testing.T) {
 	if !core.Contains(string(gotBody), `"revision":"main"`) {
 		t.Fatalf("DownloadModel request body = %s, want the defaulted revision", gotBody)
 	}
+}
 
-	r2 := s.DownloadJobStatus(RuntimeMLX, "job-9")
-	if !r2.OK {
-		t.Fatalf("DownloadJobStatus failed: %v", r2.Value)
+// TestAdmin_Service_DownloadJobStatus_Good polls a job by id against a fake
+// engine and confirms the decoded status snapshot comes back intact.
+func TestAdmin_Service_DownloadJobStatus_Good(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	seedAdminToken(t, "tok")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"job-9","status":"done","dest_path":"/models/org__repo"}`))
+	}))
+	t.Cleanup(srv.Close)
+	addr := core.TrimPrefix(srv.URL, "http://")
+
+	proc := benchProcSvc(t)
+	pid := benchSleepProc(t, proc)
+	s := &Service{proc: proc, served: map[string]*Served{
+		RuntimeMLX: {Runtime: RuntimeMLX, ProcessID: pid, Addr: addr, Running: true},
+	}}
+
+	r := s.DownloadJobStatus(RuntimeMLX, "job-9")
+	if !r.OK {
+		t.Fatalf("DownloadJobStatus failed: %v", r.Value)
 	}
-	if job2, ok := r2.Value.(DownloadJob); !ok || job2.ID != "job-9" {
-		t.Fatalf("DownloadJobStatus job = %+v, want job-9", r2.Value)
+	job, ok := r.Value.(DownloadJob)
+	if !ok || job.ID != "job-9" || job.Status != "done" {
+		t.Fatalf("DownloadJobStatus job = %+v, want job-9 done", r.Value)
 	}
 }
