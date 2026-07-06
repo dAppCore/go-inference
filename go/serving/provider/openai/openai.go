@@ -29,6 +29,46 @@ type ChatCompletionRequest struct {
 	User               string              `json:"user,omitempty"`
 	ReasoningEffort    string              `json:"reasoning_effort,omitempty"`
 	ChatTemplateKwargs *ChatTemplateKwargs `json:"chat_template_kwargs,omitempty"`
+	Tools              []Tool              `json:"tools,omitempty"`
+}
+
+// Tool is one OpenAI function-calling tool declaration.
+type Tool struct {
+	Type     string       `json:"type"` // "function"
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction is a tool's name, description, and JSON-schema parameters.
+type ToolFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  ToolParameters `json:"parameters"`
+}
+
+// ToolParameters is the JSON-schema object describing a function's arguments.
+type ToolParameters struct {
+	Type       string                  `json:"type"`
+	Properties map[string]ToolProperty `json:"properties,omitempty"`
+	Required   []string                `json:"required,omitempty"`
+}
+
+// ToolProperty is one parameter's schema (type + description).
+type ToolProperty struct {
+	Type        string `json:"type"`
+	Description string `json:"description,omitempty"`
+}
+
+// ToolCall is one call the model emitted, in the OpenAI response shape.
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"` // "function"
+	Function ToolCallFunction `json:"function"`
+}
+
+// ToolCallFunction is a call's name + JSON-string arguments.
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // ChatTemplateKwargs carries chat-template parameters (the vLLM/SGLang
@@ -65,9 +105,10 @@ func (s *StopList) UnmarshalJSON(data []byte) error {
 // see UnmarshalJSON in content.go) — decoded images land in Images and never
 // round-trip into responses.
 type ChatMessage struct {
-	Role    string   `json:"role"`
-	Content string   `json:"content"`
-	Images  [][]byte `json:"-"`
+	Role      string     `json:"role"`
+	Content   string     `json:"content"`
+	Images    [][]byte   `json:"-"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // assistant response: the model's function calls
 }
 
 // ChatCompletionResponse is the non-streaming OpenAI-compatible response body.

@@ -87,6 +87,22 @@ func (r *ChatCompletionRequest) unmarshalField(data []byte, i int, key []byte) (
 		}
 		r.Messages = msgs
 		return next, nil
+	case "tools":
+		// Tools carry a nested schema and only appear on agentic requests (off
+		// the hot chat path), so capture the span and reflect-decode just this
+		// field rather than hand-rolling the tree — the fast path still owns
+		// model / messages / sampling.
+		if jsonenc.IsJSONNull(data, i) {
+			return i + 4, nil
+		}
+		next, err := jsonenc.SkipJSONValue(data, i)
+		if err != nil {
+			return next, err
+		}
+		if res := core.JSONUnmarshal(data[i:next], &r.Tools); !res.OK {
+			return next, res.Err()
+		}
+		return next, nil
 	case "temperature":
 		if jsonenc.IsJSONNull(data, i) {
 			return i + 4, nil

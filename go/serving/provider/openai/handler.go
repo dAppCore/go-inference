@@ -11,6 +11,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/decode/parser"
 )
 
 // Handler serves OpenAI-compatible chat completion requests.
@@ -63,7 +64,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error(), "model")
 		return
 	}
-	messages := requestMessages(req.Messages)
+	messages := requestMessages(req.Messages, req.Tools)
 	if messagesCarryImages(messages) {
 		vision, ok := model.(inference.VisionModel)
 		if !ok || !vision.AcceptsImages() {
@@ -98,6 +99,19 @@ func (h *Handler) serveNonStreaming(w http.ResponseWriter, r *http.Request, mode
 	if isTokenLengthCapReached(req.MaxTokens, metrics.GeneratedTokens) {
 		finishReason = "length"
 	}
+	// A turn that emitted <|tool_call> spans returns tool_calls +
+	// finish_reason:"tool_calls" — the shape Codex/OpenAI clients read to run the
+	// tools and reply with a role:"tool" message. Any leading prose stays as
+	// content.
+	message := ChatMessage{Role: "assistant", Content: content}
+	if calls, clean := parser.ParseGemmaToolCalls(content); len(calls) > 0 {
+		message.Content = core.Trim(clean)
+		message.ToolCalls = make([]ToolCall, len(calls))
+		for i, c := range calls {
+			message.ToolCalls[i] = ToolCall{ID: toolCallID(), Type: "function", Function: ToolCallFunction{Name: c.Name, Arguments: c.ArgumentsJSON}}
+		}
+		finishReason = "tool_calls"
+	}
 	response := ChatCompletionResponse{
 		ID:      completionID,
 		Object:  "chat.completion",
@@ -105,7 +119,7 @@ func (h *Handler) serveNonStreaming(w http.ResponseWriter, r *http.Request, mode
 		Model:   req.Model,
 		Choices: []ChatChoice{{
 			Index:        0,
-			Message:      ChatMessage{Role: "assistant", Content: content},
+			Message:      message,
 			FinishReason: finishReason,
 		}},
 		Usage: ChatUsage{
@@ -228,12 +242,63 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 	}
 }
 
-func requestMessages(messages []ChatMessage) []inference.Message {
-	out := make([]inference.Message, 0, len(messages))
+func requestMessages(messages []ChatMessage, tools []Tool) []inference.Message {
+	out := make([]inference.Message, 0, len(messages)+1)
+	if decl := renderOpenAITools(tools); decl != "" {
+		out = append(out, inference.Message{Role: "system", Content: decl})
+	}
 	for _, msg := range messages {
-		out = append(out, inference.Message{Role: msg.Role, Content: msg.Content, Images: msg.Images})
+		out = append(out, inference.Message{Role: msg.Role, Content: openAIMessageContent(msg), Images: msg.Images})
 	}
 	return out
+}
+
+// renderOpenAITools converts OpenAI function declarations to the neutral shape
+// and renders them into Gemma 4's tool syntax via the shared renderer.
+func renderOpenAITools(tools []Tool) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	decls := make([]parser.ToolDecl, len(tools))
+	for i, t := range tools {
+		props := make(map[string]parser.ToolParam, len(t.Function.Parameters.Properties))
+		for name, p := range t.Function.Parameters.Properties {
+			props[name] = parser.ToolParam{Type: p.Type, Description: p.Description}
+		}
+		decls[i] = parser.ToolDecl{
+			Name:        t.Function.Name,
+			Description: t.Function.Description,
+			Properties:  props,
+			Required:    t.Function.Parameters.Required,
+		}
+	}
+	return parser.RenderGemmaToolDeclarations(decls)
+}
+
+// openAIMessageContent renders one message's content. A role:"tool" message (a
+// tool result) becomes a <|tool_response> span the model reads to continue — the
+// model holds the original call in its retained KV state, so no history is
+// re-rendered.
+func openAIMessageContent(msg ChatMessage) string {
+	if msg.Role == "tool" {
+		return "<|tool_response>" + msg.Content + "<tool_response|>"
+	}
+	return msg.Content
+}
+
+// chatResponseHasToolCalls reports whether the response carries tool_calls, so
+// writeJSON routes it through reflect (the hand-rolled fast path models only the
+// text shape; agentic responses are rare enough to afford reflect).
+func chatResponseHasToolCalls(r ChatCompletionResponse) bool {
+	return len(r.Choices) > 0 && len(r.Choices[0].Message.ToolCalls) > 0
+}
+
+// toolCallID mints an OpenAI-style tool-call id (call_<nanos>).
+func toolCallID() string {
+	buf := make([]byte, 0, 25) // "call_" (5) + max int64 (20)
+	buf = append(buf, "call_"...)
+	buf = strconv.AppendInt(buf, time.Now().UnixNano(), 10)
+	return string(buf)
 }
 
 func messagesCarryImages(messages []inference.Message) bool {
@@ -253,7 +318,7 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	// previously paid 2 allocs / 432 B through the reflect path.
 	// Encoding directly into a pre-sized buffer skips
 	// JSONMarshalString + the []byte(string) conversion.
-	if p, ok := payload.(ChatCompletionResponse); ok {
+	if p, ok := payload.(ChatCompletionResponse); ok && !chatResponseHasToolCalls(p) {
 		buf := appendChatCompletionResponse(make([]byte, 0, chatCompletionResponseSize(p)), p)
 		_, _ = w.Write(buf)
 		return
