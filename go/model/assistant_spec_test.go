@@ -165,3 +165,174 @@ func TestParseAssistantConfigStampsMTPMethod(t *testing.T) {
 		t.Fatalf("Method = %q, want the %q default when the spec declares none", cfg.Method, MTPDraftModel)
 	}
 }
+
+// TestAssistantSpec_RegisterAssistant_Good covers the ordinary registration: every
+// declared ModelTypes alias AND the "gguf:"-prefixed GGUFArch resolve to the same spec.
+func TestAssistantSpec_RegisterAssistant_Good(t *testing.T) {
+	RegisterAssistant(AssistantSpec{
+		ModelTypes: []string{"good10_assistant"},
+		GGUFArch:   "good10-assistant",
+	})
+	if _, ok := LookupAssistant("good10_assistant"); !ok {
+		t.Fatal("LookupAssistant(good10_assistant): not found after registration")
+	}
+	if _, ok := LookupAssistantGGUF("good10-assistant"); !ok {
+		t.Fatal(`LookupAssistantGGUF("good10-assistant"): not found after registration`)
+	}
+}
+
+// TestAssistantSpec_RegisterAssistant_Bad covers a spec that declares NO GGUFArch: the
+// "gguf:" namespace must gain no entry at all (unlike ModelTypes, GGUFArch registration
+// is conditional on it being set).
+func TestAssistantSpec_RegisterAssistant_Bad(t *testing.T) {
+	RegisterAssistant(AssistantSpec{ModelTypes: []string{"bad10_assistant"}})
+	if _, ok := LookupAssistantGGUF("bad10_assistant"); ok {
+		t.Fatal("LookupAssistantGGUF must not match a bare ModelTypes id (it is not GGUFArch)")
+	}
+}
+
+// TestAssistantSpec_RegisterAssistant_Ugly covers re-registration: the registry is Open
+// (overwrite), so registering the SAME model_type twice replaces the prior spec.
+func TestAssistantSpec_RegisterAssistant_Ugly(t *testing.T) {
+	RegisterAssistant(AssistantSpec{ModelTypes: []string{"ugly10_assistant"}, Method: MTPMethod("first")})
+	RegisterAssistant(AssistantSpec{ModelTypes: []string{"ugly10_assistant"}, Method: MTPMethod("second")})
+	spec, ok := LookupAssistant("ugly10_assistant")
+	if !ok {
+		t.Fatal("LookupAssistant(ugly10_assistant): not found after re-registration")
+	}
+	if spec.Method != MTPMethod("second") {
+		t.Fatalf("re-registration did not overwrite: Method = %q, want %q", spec.Method, "second")
+	}
+}
+
+// TestAssistantSpec_LookupAssistant_Good covers a registered config.json model_type
+// resolving to its exact spec.
+func TestAssistantSpec_LookupAssistant_Good(t *testing.T) {
+	RegisterAssistant(AssistantSpec{
+		ModelTypes: []string{"lookup-good-assistant"},
+		Parse:      func([]byte) (AssistantConfig, error) { return AssistantConfig{BackboneHidden: 7}, nil },
+	})
+	spec, ok := LookupAssistant("lookup-good-assistant")
+	if !ok {
+		t.Fatal("LookupAssistant(lookup-good-assistant): not found")
+	}
+	cfg, err := spec.Parse(nil)
+	if err != nil || cfg.BackboneHidden != 7 {
+		t.Fatalf("resolved spec.Parse = (%+v, %v), want BackboneHidden=7", cfg, err)
+	}
+}
+
+// TestAssistantSpec_LookupAssistant_Bad covers an unregistered model_type: ok=false and
+// a zero AssistantSpec.
+func TestAssistantSpec_LookupAssistant_Bad(t *testing.T) {
+	spec, ok := LookupAssistant("never-registered-assistant-xyz")
+	if ok {
+		t.Fatal("LookupAssistant(never-registered-assistant-xyz) = found, want ok=false")
+	}
+	if spec.Parse != nil {
+		t.Fatal("LookupAssistant miss should return the zero AssistantSpec")
+	}
+}
+
+// TestAssistantSpec_LookupAssistant_Ugly covers a NUL-prefixed sentinel model_type that
+// no spec ever claims: LookupAssistant must miss (unlike "" itself, which
+// TestRegisterAssistantEmptyModelTypeClaimsLegacy shows CAN resolve once a spec
+// deliberately claims it — the empty string is not universally unregistrable, only a
+// truly never-claimed id is).
+func TestAssistantSpec_LookupAssistant_Ugly(t *testing.T) {
+	if _, ok := LookupAssistant("\x00-sentinel-never-registered"); ok {
+		t.Fatal("a NUL-prefixed sentinel model_type must never resolve")
+	}
+}
+
+// TestAssistantSpec_LookupAssistantGGUF_Good covers a registered GGUFArch resolving
+// under its "gguf:" prefix.
+func TestAssistantSpec_LookupAssistantGGUF_Good(t *testing.T) {
+	RegisterAssistant(AssistantSpec{ModelTypes: []string{"gguf-good-assistant"}, GGUFArch: "gguf-good-arch"})
+	if _, ok := LookupAssistantGGUF("gguf-good-arch"); !ok {
+		t.Fatal("LookupAssistantGGUF(gguf-good-arch): not found")
+	}
+}
+
+// TestAssistantSpec_LookupAssistantGGUF_Bad covers an unregistered GGUF
+// general.architecture: ok=false.
+func TestAssistantSpec_LookupAssistantGGUF_Bad(t *testing.T) {
+	if _, ok := LookupAssistantGGUF("never-registered-gguf-arch-xyz"); ok {
+		t.Fatal("LookupAssistantGGUF(never-registered-gguf-arch-xyz) = found, want ok=false")
+	}
+}
+
+// TestAssistantSpec_LookupAssistantGGUF_Ugly covers namespace isolation: a ModelTypes id
+// must NOT be resolvable through LookupAssistantGGUF even when an identically-spelled
+// GGUFArch was never registered — the "gguf:" prefix is a genuinely separate keyspace.
+func TestAssistantSpec_LookupAssistantGGUF_Ugly(t *testing.T) {
+	RegisterAssistant(AssistantSpec{ModelTypes: []string{"shared-name-assistant"}})
+	if _, ok := LookupAssistantGGUF("shared-name-assistant"); ok {
+		t.Fatal("LookupAssistantGGUF must not match a bare ModelTypes id sharing its GGUFArch's spelling")
+	}
+}
+
+// TestAssistantSpec_ParseAssistantConfig_Good covers the ordinary probe-then-dispatch: a
+// declared model_type routes to its registered spec's Parse.
+func TestAssistantSpec_ParseAssistantConfig_Good(t *testing.T) {
+	RegisterAssistant(AssistantSpec{
+		ModelTypes: []string{"parse-good-assistant"},
+		Parse:      func([]byte) (AssistantConfig, error) { return AssistantConfig{BackboneHidden: 99}, nil },
+	})
+	cfg, err := ParseAssistantConfig([]byte(`{"model_type":"parse-good-assistant"}`))
+	if err != nil {
+		t.Fatalf("ParseAssistantConfig: %v", err)
+	}
+	if cfg.BackboneHidden != 99 {
+		t.Fatalf("BackboneHidden = %d, want 99 (dispatched to the registered spec)", cfg.BackboneHidden)
+	}
+}
+
+// TestAssistantSpec_ParseAssistantConfig_Bad covers an undeclared/unregistered
+// model_type: a clean error, before any backend-specific parsing runs.
+func TestAssistantSpec_ParseAssistantConfig_Bad(t *testing.T) {
+	if _, err := ParseAssistantConfig([]byte(`{"model_type":"never-registered-parse-bad"}`)); err == nil {
+		t.Fatal("ParseAssistantConfig with an unregistered model_type: expected an error")
+	}
+}
+
+// TestAssistantSpec_ParseAssistantConfig_Ugly covers malformed probe JSON itself: a
+// clean error rather than a panic deep in json.Unmarshal.
+func TestAssistantSpec_ParseAssistantConfig_Ugly(t *testing.T) {
+	if _, err := ParseAssistantConfig([]byte(`{not json at all`)); err == nil {
+		t.Fatal("ParseAssistantConfig with malformed JSON: expected an error")
+	}
+}
+
+// TestAssistantSpec_AssistantConfig_LayerType_Good covers the declared-entry win: an
+// explicit non-blank LayerTypes entry is returned as-is.
+func TestAssistantSpec_AssistantConfig_LayerType_Good(t *testing.T) {
+	c := AssistantConfig{LayerTypes: []string{"sliding_attention"}}
+	if got := c.LayerType(0); got != "sliding_attention" {
+		t.Fatalf("LayerType(0) = %q, want the declared %q", got, "sliding_attention")
+	}
+}
+
+// TestAssistantSpec_AssistantConfig_LayerType_Bad covers the declared-blank fallback: an
+// index within LayerTypes whose entry is "" falls back to the Arch layer's own TypeName.
+func TestAssistantSpec_AssistantConfig_LayerType_Bad(t *testing.T) {
+	c := AssistantConfig{
+		LayerTypes: []string{""},
+		Arch:       Arch{Layer: []LayerSpec{{Attention: GlobalAttention}}},
+	}
+	if got := c.LayerType(0); got != "full_attention" {
+		t.Fatalf("LayerType(0) blank declared entry = %q, want the Arch fallback %q", got, "full_attention")
+	}
+}
+
+// TestAssistantSpec_AssistantConfig_LayerType_Ugly covers both out-of-range directions
+// (past the end AND negative): LayerType must return "" rather than index out of range.
+func TestAssistantSpec_AssistantConfig_LayerType_Ugly(t *testing.T) {
+	c := AssistantConfig{LayerTypes: []string{"sliding_attention"}}
+	if got := c.LayerType(50); got != "" {
+		t.Fatalf("LayerType(50) out of range = %q, want empty", got)
+	}
+	if got := c.LayerType(-3); got != "" {
+		t.Fatalf("LayerType(-3) negative index = %q, want empty", got)
+	}
+}

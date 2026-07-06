@@ -285,6 +285,186 @@ func TestSampleCandidatesTopKOneAvoidsScratchAndAdvancesRNG(t *testing.T) {
 	}
 }
 
+// TestSample_Greedy_Good covers the ordinary argmax: the highest-logit index wins.
+func TestSample_Greedy_Good(t *testing.T) {
+	logits := bf16Bytes([]float32{0.1, 0.9, 0.4})
+	got, err := Greedy(logits, 3)
+	if err != nil {
+		t.Fatalf("Greedy: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("Greedy = %d, want 1 (the max)", got)
+	}
+}
+
+// TestSample_Greedy_Bad covers a length mismatch: logits that aren't exactly vocab bf16
+// bytes is a clean error, never an out-of-range read.
+func TestSample_Greedy_Bad(t *testing.T) {
+	logits := bf16Bytes([]float32{0.1, 0.9, 0.4})
+	if _, err := Greedy(logits, 4); err == nil {
+		t.Fatal("Greedy with a vocab/length mismatch: expected an error")
+	}
+}
+
+// TestSample_Greedy_Ugly covers a tie at the maximum: the LOWEST index wins, a
+// deterministic tie-break (never the last-seen or a random pick).
+func TestSample_Greedy_Ugly(t *testing.T) {
+	logits := bf16Bytes([]float32{0.5, 0.1, 0.5, 0.2})
+	got, err := Greedy(logits, 4)
+	if err != nil {
+		t.Fatalf("Greedy: %v", err)
+	}
+	if got != 0 {
+		t.Fatalf("Greedy(tie) = %d, want the lowest tied index 0", got)
+	}
+}
+
+// TestSample_NewSampler_Good covers the ordinary construction: NewSampler seeds the
+// Sampler's RNG state directly from its argument, and no scratch is pre-allocated (grown
+// lazily on first Sample).
+func TestSample_NewSampler_Good(t *testing.T) {
+	s := NewSampler(42)
+	if s.state != 42 {
+		t.Fatalf("NewSampler(42).state = %d, want 42", s.state)
+	}
+	if cap(s.probs) != 0 || cap(s.scaled) != 0 || cap(s.order) != 0 {
+		t.Fatalf("NewSampler pre-allocated scratch: probs=%d scaled=%d order=%d", cap(s.probs), cap(s.scaled), cap(s.order))
+	}
+}
+
+// TestSample_NewSampler_Bad covers the degenerate seed 0: a valid, distinct sampler
+// state, not special-cased into some other default.
+func TestSample_NewSampler_Bad(t *testing.T) {
+	s := NewSampler(0)
+	if s.state != 0 {
+		t.Fatalf("NewSampler(0).state = %d, want 0 (no hidden re-seeding)", s.state)
+	}
+}
+
+// TestSample_NewSampler_Ugly covers two DIFFERENT seeds: they must diverge (a sampler's
+// identity is its seed), proven by the first Draw() differing.
+func TestSample_NewSampler_Ugly(t *testing.T) {
+	a, b := NewSampler(1), NewSampler(2)
+	if a.Draw() == b.Draw() {
+		t.Fatal("two samplers seeded differently drew the same first value — seeds not distinguishing state")
+	}
+}
+
+// TestSample_Sampler_Draw_Good covers the ordinary reproducible draw: the same seed
+// gives the SAME sequence of Draw() calls (no other state perturbs it).
+func TestSample_Sampler_Draw_Good(t *testing.T) {
+	a, b := NewSampler(7), NewSampler(7)
+	for i := 0; i < 8; i++ {
+		if av, bv := a.Draw(), b.Draw(); av != bv {
+			t.Fatalf("draw %d diverged: %v vs %v (same seed)", i, av, bv)
+		}
+	}
+}
+
+// TestSample_Sampler_Draw_Bad covers the value range: every draw must land in [0,1),
+// including 0 but never reaching 1.
+func TestSample_Sampler_Draw_Bad(t *testing.T) {
+	s := NewSampler(3)
+	for i := 0; i < 256; i++ {
+		if v := s.Draw(); v < 0 || v >= 1 {
+			t.Fatalf("Draw() = %v, want a value in [0,1)", v)
+		}
+	}
+}
+
+// TestSample_Sampler_Draw_Ugly covers the RNG-advance guarantee: Draw() is NOT
+// idempotent — consecutive calls on the same Sampler must (almost always) differ, or a
+// generation loop would draw one repeated value forever.
+func TestSample_Sampler_Draw_Ugly(t *testing.T) {
+	s := NewSampler(5)
+	first := s.Draw()
+	seenDifferent := false
+	for i := 0; i < 8; i++ {
+		if s.Draw() != first {
+			seenDifferent = true
+			break
+		}
+	}
+	if !seenDifferent {
+		t.Fatal("Draw() returned the same value 9 times in a row — RNG state not advancing")
+	}
+}
+
+// TestSample_Sampler_Sample_Good covers the ordinary stochastic pick: a peaked
+// distribution lands on the peak the overwhelming majority of the time.
+func TestSample_Sampler_Sample_Good(t *testing.T) {
+	const vocab = 8
+	peak := make([]float32, vocab)
+	peak[3] = 30
+	logits := bf16Bytes(peak)
+	s := NewSampler(11)
+	hits := 0
+	for i := 0; i < 100; i++ {
+		if tok, err := s.Sample(logits, vocab, SampleParams{Temperature: 1}); err != nil {
+			t.Fatalf("Sample: %v", err)
+		} else if tok == 3 {
+			hits++
+		}
+	}
+	if hits < 95 {
+		t.Fatalf("peaked Sample hit the peak only %d/100 times", hits)
+	}
+}
+
+// TestSample_Sampler_Sample_Bad covers a length mismatch between logits and vocab: a
+// clean error rather than an out-of-range read.
+func TestSample_Sampler_Sample_Bad(t *testing.T) {
+	logits := bf16Bytes([]float32{0.1, 0.2, 0.3})
+	if _, err := NewSampler(1).Sample(logits, 4, SampleParams{Temperature: 1}); err == nil {
+		t.Fatal("Sample with a vocab/length mismatch: expected an error")
+	}
+}
+
+// TestSample_Sampler_Sample_Ugly covers every token suppressed: Sample must error rather
+// than silently returning a suppressed id or panicking on an empty distribution.
+func TestSample_Sampler_Sample_Ugly(t *testing.T) {
+	logits := bf16Bytes([]float32{0.1, 0.2, 0.3})
+	suppressAll := []int32{0, 1, 2}
+	if _, err := NewSampler(1).Sample(logits, 3, SampleParams{Temperature: 1, SuppressTokens: suppressAll}); err == nil {
+		t.Fatal("Sample with every token suppressed: expected an error")
+	}
+	if _, err := NewSampler(1).Sample(logits, 3, SampleParams{Temperature: 0, SuppressTokens: suppressAll}); err == nil {
+		t.Fatal("Sample (greedy path) with every token suppressed: expected an error")
+	}
+}
+
+// TestSample_Sampler_SampleCandidates_Good covers the ordinary candidate-window pick: a
+// dominant candidate wins under greedy (temp<=0) selection.
+func TestSample_Sampler_SampleCandidates_Good(t *testing.T) {
+	candidates := bf16Bytes([]float32{0.1, 5.0, 0.2})
+	ids := []int32{10, 11, 12}
+	got, err := NewSampler(1).SampleCandidates(candidates, ids, SampleParams{Temperature: 0})
+	if err != nil {
+		t.Fatalf("SampleCandidates: %v", err)
+	}
+	if got != 11 {
+		t.Fatalf("SampleCandidates = %d, want the dominant candidate id 11", got)
+	}
+}
+
+// TestSample_Sampler_SampleCandidates_Bad covers the empty-candidates call: a clean
+// error, since there is nothing to pick from.
+func TestSample_Sampler_SampleCandidates_Bad(t *testing.T) {
+	if _, err := NewSampler(1).SampleCandidates(nil, nil, SampleParams{}); err == nil {
+		t.Fatal("SampleCandidates with no candidates: expected an error")
+	}
+}
+
+// TestSample_Sampler_SampleCandidates_Ugly covers a logits/ids length mismatch: a clean
+// error rather than indexing past the shorter slice.
+func TestSample_Sampler_SampleCandidates_Ugly(t *testing.T) {
+	candidates := bf16Bytes([]float32{0.1, 0.2})
+	ids := []int32{1, 2, 3} // one more id than logits values
+	if _, err := NewSampler(1).SampleCandidates(candidates, ids, SampleParams{}); err == nil {
+		t.Fatal("SampleCandidates with logits/ids length mismatch: expected an error")
+	}
+}
+
 var sampleBenchSink int32
 
 func BenchmarkSamplerTopKOneCold(b *testing.B) {
