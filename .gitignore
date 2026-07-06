@@ -11,3 +11,6 @@ go.work.sum
 /build/
 *.air
 cmd/lem/*.metallib.gz
+
+# compiled lem binary (build artefact — built via Taskfile/go build)
+go/lem
