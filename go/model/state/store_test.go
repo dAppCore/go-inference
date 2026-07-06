@@ -1,10 +1,10 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
 // Tests for the package-level Store dispatchers in store.go — the
-// nil-ctx/nil-store guards and interface-probe fallback branches that
-// state_test.go's native-Resolver-path tests never reach, plus the
-// error formatters (ChunkNotFoundError / URIChunkNotFoundError) and
-// MergeRef, none of which any non-benchmark test previously exercised.
+// nil-ctx/nil-store guards, the interface-probe fallback branches, the
+// pass-through-vs-sanitise asymmetry each dispatcher has on its resolver
+// error path, plus the error formatters (ChunkNotFoundError /
+// URIChunkNotFoundError) and MergeRef.
 
 package state
 
@@ -73,9 +73,94 @@ func (s storeRefBinaryOnly) ResolveRefBytes(_ context.Context, ref ChunkRef) (Ch
 	return chunk, nil
 }
 
+// storeDirtyResolver implements Store.Get + Resolver and always returns a
+// non-zero Chunk ALONGSIDE a non-nil error — used to prove whether a
+// dispatcher passes the resolver's return value through verbatim or
+// sanitises it to the zero value on error.
+type storeDirtyResolver struct {
+	err error
+}
+
+func (s storeDirtyResolver) Get(_ context.Context, _ int) (string, error) {
+	return "unused", nil
+}
+
+func (s storeDirtyResolver) Resolve(_ context.Context, chunkID int) (Chunk, error) {
+	return Chunk{Ref: ChunkRef{ChunkID: chunkID}, Text: "dirty"}, s.err
+}
+
+// storeDirtyBinaryResolver implements BinaryResolver and always returns a
+// non-zero Chunk alongside a non-nil error.
+type storeDirtyBinaryResolver struct {
+	err error
+}
+
+func (s storeDirtyBinaryResolver) Get(_ context.Context, _ int) (string, error) {
+	return "unused", nil
+}
+
+func (s storeDirtyBinaryResolver) ResolveBytes(_ context.Context, chunkID int) (Chunk, error) {
+	return Chunk{Ref: ChunkRef{ChunkID: chunkID}, Data: []byte("dirty")}, s.err
+}
+
+// storeDirtyRefBinaryResolver implements RefBinaryResolver and always
+// returns a non-zero Chunk alongside a non-nil error.
+type storeDirtyRefBinaryResolver struct {
+	err error
+}
+
+func (s storeDirtyRefBinaryResolver) Get(_ context.Context, _ int) (string, error) {
+	return "unused", nil
+}
+
+func (s storeDirtyRefBinaryResolver) ResolveRefBytes(_ context.Context, ref ChunkRef) (Chunk, error) {
+	return Chunk{Ref: ref, Data: []byte("dirty")}, s.err
+}
+
+// storeDirtyBinaryBorrower implements BinaryBorrower and always returns a
+// non-zero BorrowedChunk alongside a non-nil error.
+type storeDirtyBinaryBorrower struct {
+	err error
+}
+
+func (s storeDirtyBinaryBorrower) Get(_ context.Context, _ int) (string, error) {
+	return "unused", nil
+}
+
+func (s storeDirtyBinaryBorrower) BorrowBytes(_ context.Context, chunkID int) (BorrowedChunk, error) {
+	return BorrowedChunk{Ref: ChunkRef{ChunkID: chunkID}, Data: []byte("dirty")}, s.err
+}
+
+// storeDirtyURIResolver implements URIResolver and always returns a
+// non-zero Chunk alongside a non-nil error.
+type storeDirtyURIResolver struct {
+	err error
+}
+
+func (s storeDirtyURIResolver) Get(_ context.Context, _ int) (string, error) {
+	return "unused", nil
+}
+
+func (s storeDirtyURIResolver) ResolveURI(_ context.Context, uri string) (Chunk, error) {
+	return Chunk{Ref: ChunkRef{Segment: uri}, Text: "dirty"}, s.err
+}
+
+// storeRefBorrowerErr implements RefBinaryBorrower and always fails.
+type storeRefBorrowerErr struct {
+	err error
+}
+
+func (s storeRefBorrowerErr) Get(_ context.Context, _ int) (string, error) {
+	return "unused", nil
+}
+
+func (s storeRefBorrowerErr) BorrowRefBytes(_ context.Context, ref ChunkRef) (BorrowedChunk, error) {
+	return BorrowedChunk{}, s.err
+}
+
 // --- Resolve ---------------------------------------------------------------
 
-func TestResolve_Good(t *testing.T) {
+func TestStore_Resolve_Good(t *testing.T) {
 	// A nil context is normalised to context.Background() rather than
 	// panicking.
 	store := NewInMemoryStore(map[int]string{1: "hello"})
@@ -98,7 +183,7 @@ func TestResolve_Good(t *testing.T) {
 	}
 }
 
-func TestResolve_Bad(t *testing.T) {
+func TestStore_Resolve_Bad(t *testing.T) {
 	// A nil store is rejected without dereferencing.
 	if _, err := Resolve(context.Background(), nil, 5); !core.Is(err, ErrChunkNotFound) {
 		t.Fatalf("Resolve(nil store) error = %v, want ErrChunkNotFound", err)
@@ -111,9 +196,24 @@ func TestResolve_Bad(t *testing.T) {
 	}
 }
 
+// TestStore_Resolve_Ugly proves Resolve's Resolver-interface branch passes
+// the resolver's return value through verbatim — unlike ResolveBytes and
+// ResolveRefBytes below, it does not sanitise a non-zero chunk to the zero
+// value when the resolver also returns an error.
+func TestStore_Resolve_Ugly(t *testing.T) {
+	resolveErr := core.NewError("dirty resolve")
+	chunk, err := Resolve(context.Background(), storeDirtyResolver{err: resolveErr}, 3)
+	if !core.Is(err, resolveErr) {
+		t.Fatalf("Resolve(dirty resolver) error = %v, want %v", err, resolveErr)
+	}
+	if chunk.Ref.ChunkID != 3 || chunk.Text != "dirty" {
+		t.Fatalf("Resolve(dirty resolver) = %+v, want the resolver's chunk passed through unsanitised", chunk)
+	}
+}
+
 // --- ResolveBytes ------------------------------------------------------------
 
-func TestResolveBytes_Good(t *testing.T) {
+func TestStore_ResolveBytes_Good(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	ref, err := store.PutBytes(context.Background(), []byte{1, 2, 3}, PutOptions{})
 	if err != nil {
@@ -144,7 +244,7 @@ func TestResolveBytes_Good(t *testing.T) {
 	}
 }
 
-func TestResolveBytes_Bad(t *testing.T) {
+func TestStore_ResolveBytes_Bad(t *testing.T) {
 	if _, err := ResolveBytes(context.Background(), nil, 1); !core.Is(err, ErrChunkNotFound) {
 		t.Fatalf("ResolveBytes(nil store) error = %v, want ErrChunkNotFound", err)
 	}
@@ -163,9 +263,23 @@ func TestResolveBytes_Bad(t *testing.T) {
 	}
 }
 
+// TestStore_ResolveBytes_Ugly proves the opposite of Resolve's pass-through:
+// ResolveBytes sanitises a dirty BinaryResolver return to the zero Chunk on
+// error rather than leaking the resolver's partial payload.
+func TestStore_ResolveBytes_Ugly(t *testing.T) {
+	resolveErr := core.NewError("dirty resolve bytes")
+	chunk, err := ResolveBytes(context.Background(), storeDirtyBinaryResolver{err: resolveErr}, 3)
+	if !core.Is(err, resolveErr) {
+		t.Fatalf("ResolveBytes(dirty resolver) error = %v, want %v", err, resolveErr)
+	}
+	if chunk.Ref != (ChunkRef{}) || chunk.Text != "" || chunk.Data != nil {
+		t.Fatalf("ResolveBytes(dirty resolver) = %+v, want zero Chunk on error", chunk)
+	}
+}
+
 // --- ResolveRefBytes ---------------------------------------------------------
 
-func TestResolveRefBytes_Good(t *testing.T) {
+func TestStore_ResolveRefBytes_Good(t *testing.T) {
 	if _, err := ResolveRefBytes(nil, NewInMemoryStore(map[int]string{1: "x"}), ChunkRef{ChunkID: 1}); err != nil {
 		t.Fatalf("ResolveRefBytes(nil ctx) error = %v", err)
 	}
@@ -196,7 +310,7 @@ func TestResolveRefBytes_Good(t *testing.T) {
 	}
 }
 
-func TestResolveRefBytes_Bad(t *testing.T) {
+func TestStore_ResolveRefBytes_Bad(t *testing.T) {
 	if _, err := ResolveRefBytes(context.Background(), nil, ChunkRef{ChunkID: 1}); !core.Is(err, ErrChunkNotFound) {
 		t.Fatalf("ResolveRefBytes(nil store) error = %v, want ErrChunkNotFound", err)
 	}
@@ -213,9 +327,22 @@ func TestResolveRefBytes_Bad(t *testing.T) {
 	}
 }
 
+// TestStore_ResolveRefBytes_Ugly mirrors ResolveBytes' sanitise-on-error
+// behaviour: a dirty RefBinaryResolver return is zeroed rather than leaked.
+func TestStore_ResolveRefBytes_Ugly(t *testing.T) {
+	refErr := core.NewError("dirty resolve ref bytes")
+	chunk, err := ResolveRefBytes(context.Background(), storeDirtyRefBinaryResolver{err: refErr}, ChunkRef{ChunkID: 3})
+	if !core.Is(err, refErr) {
+		t.Fatalf("ResolveRefBytes(dirty resolver) error = %v, want %v", err, refErr)
+	}
+	if chunk.Ref != (ChunkRef{}) || chunk.Text != "" || chunk.Data != nil {
+		t.Fatalf("ResolveRefBytes(dirty resolver) = %+v, want zero Chunk on error", chunk)
+	}
+}
+
 // --- BorrowBytes ---------------------------------------------------------
 
-func TestBorrowBytes_Good(t *testing.T) {
+func TestStore_BorrowBytes_Good(t *testing.T) {
 	if _, err := BorrowBytes(nil, NewInMemoryStore(map[int]string{1: "x"}), 1); err != nil {
 		t.Fatalf("BorrowBytes(nil ctx) error = %v", err)
 	}
@@ -245,7 +372,7 @@ func TestBorrowBytes_Good(t *testing.T) {
 	}
 }
 
-func TestBorrowBytes_Bad(t *testing.T) {
+func TestStore_BorrowBytes_Bad(t *testing.T) {
 	if _, err := BorrowBytes(context.Background(), nil, 1); !core.Is(err, ErrChunkNotFound) {
 		t.Fatalf("BorrowBytes(nil store) error = %v, want ErrChunkNotFound", err)
 	}
@@ -256,9 +383,24 @@ func TestBorrowBytes_Bad(t *testing.T) {
 	}
 }
 
+// TestStore_BorrowBytes_Ugly proves the BinaryBorrower branch passes a
+// dirty return through verbatim — the opposite of ResolveBytes' sanitising
+// behaviour, because BorrowBytes forwards the borrower's tuple directly
+// instead of re-wrapping it.
+func TestStore_BorrowBytes_Ugly(t *testing.T) {
+	borrowErr := core.NewError("dirty borrow bytes")
+	borrowed, err := BorrowBytes(context.Background(), storeDirtyBinaryBorrower{err: borrowErr}, 5)
+	if !core.Is(err, borrowErr) {
+		t.Fatalf("BorrowBytes(dirty borrower) error = %v, want %v", err, borrowErr)
+	}
+	if borrowed.Ref.ChunkID != 5 || string(borrowed.Data) != "dirty" {
+		t.Fatalf("BorrowBytes(dirty borrower) = %+v, want the borrower's chunk passed through unsanitised", borrowed)
+	}
+}
+
 // --- BorrowRefBytes ---------------------------------------------------------
 
-func TestBorrowRefBytes_Good(t *testing.T) {
+func TestStore_BorrowRefBytes_Good(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	ref, err := store.PutBytes(context.Background(), []byte("x"), PutOptions{})
 	if err != nil {
@@ -279,7 +421,21 @@ func TestBorrowRefBytes_Good(t *testing.T) {
 	}
 }
 
-func TestBorrowRefBytes_Ugly(t *testing.T) {
+// TestStore_BorrowRefBytes_Bad proves the nil-store guard fires before the
+// ref is even inspected, and a failing RefBinaryBorrower propagates its
+// error through verbatim (the pass-through branch, mirroring BorrowBytes).
+func TestStore_BorrowRefBytes_Bad(t *testing.T) {
+	if _, err := BorrowRefBytes(context.Background(), nil, ChunkRef{ChunkID: 9}); !core.Is(err, ErrChunkNotFound) {
+		t.Fatalf("BorrowRefBytes(nil store) error = %v, want ErrChunkNotFound", err)
+	}
+
+	borrowErr := core.NewError("ref borrower failed")
+	if _, err := BorrowRefBytes(context.Background(), storeRefBorrowerErr{err: borrowErr}, ChunkRef{ChunkID: 1}); !core.Is(err, borrowErr) {
+		t.Fatalf("BorrowRefBytes(borrower error) error = %v, want %v", err, borrowErr)
+	}
+}
+
+func TestStore_BorrowRefBytes_Ugly(t *testing.T) {
 	// Zero ChunkID with no RefBinaryBorrower is rejected before any
 	// delegate lookup runs.
 	if _, err := BorrowRefBytes(context.Background(), storeGetErr{text: "x"}, ChunkRef{ChunkID: 0}); !core.Is(err, ErrChunkNotFound) {
@@ -289,7 +445,7 @@ func TestBorrowRefBytes_Ugly(t *testing.T) {
 
 // --- ResolveURI ------------------------------------------------------------
 
-func TestResolveURI_Good(t *testing.T) {
+func TestStore_ResolveURI_Good(t *testing.T) {
 	store := NewInMemoryStore(nil)
 	if _, err := store.Put(context.Background(), "hi", PutOptions{URI: "state://x/1"}); err != nil {
 		t.Fatalf("Put() error = %v", err)
@@ -299,7 +455,7 @@ func TestResolveURI_Good(t *testing.T) {
 	}
 }
 
-func TestResolveURI_Bad(t *testing.T) {
+func TestStore_ResolveURI_Bad(t *testing.T) {
 	if _, err := ResolveURI(context.Background(), nil, "state://x"); !core.Is(err, ErrChunkNotFound) {
 		t.Fatalf("ResolveURI(nil store) error = %v, want ErrChunkNotFound", err)
 	}
@@ -316,9 +472,23 @@ func TestResolveURI_Bad(t *testing.T) {
 	}
 }
 
+// TestStore_ResolveURI_Ugly proves the URIResolver branch passes its return
+// value through verbatim (like Resolve, unlike ResolveBytes/ResolveRefBytes)
+// — a dirty non-zero chunk survives alongside a resolver error.
+func TestStore_ResolveURI_Ugly(t *testing.T) {
+	uriErr := core.NewError("dirty resolve uri")
+	chunk, err := ResolveURI(context.Background(), storeDirtyURIResolver{err: uriErr}, "state://dirty")
+	if !core.Is(err, uriErr) {
+		t.Fatalf("ResolveURI(dirty resolver) error = %v, want %v", err, uriErr)
+	}
+	if chunk.Ref.Segment != "state://dirty" || chunk.Text != "dirty" {
+		t.Fatalf("ResolveURI(dirty resolver) = %+v, want the resolver's chunk passed through unsanitised", chunk)
+	}
+}
+
 // --- MergeRef ---------------------------------------------------------------
 
-func TestMergeRef_Good(t *testing.T) {
+func TestStore_MergeRef_Good(t *testing.T) {
 	base := ChunkRef{ChunkID: 7, FrameOffset: 7, HasFrameOffset: true, Codec: CodecMemory, Segment: "epoch-1"}
 	overlay := ChunkRef{ChunkID: 9, FrameOffset: 42, HasFrameOffset: true, Codec: CodecStateVideo, Segment: "epoch-3"}
 
@@ -327,7 +497,20 @@ func TestMergeRef_Good(t *testing.T) {
 	}
 }
 
-func TestMergeRef_Ugly(t *testing.T) {
+// TestStore_MergeRef_Bad feeds MergeRef an internally-inconsistent overlay —
+// HasFrameOffset false but FrameOffset non-zero — and proves the flag, not
+// the stray numeric value, gates the merge: base's FrameOffset survives.
+func TestStore_MergeRef_Bad(t *testing.T) {
+	base := ChunkRef{ChunkID: 7, FrameOffset: 7, HasFrameOffset: true}
+	overlay := ChunkRef{FrameOffset: 999, HasFrameOffset: false}
+
+	merged := MergeRef(base, overlay)
+	if merged.FrameOffset != base.FrameOffset || !merged.HasFrameOffset {
+		t.Fatalf("MergeRef(inconsistent overlay) = %+v, want base FrameOffset preserved when HasFrameOffset is false", merged)
+	}
+}
+
+func TestStore_MergeRef_Ugly(t *testing.T) {
 	base := ChunkRef{ChunkID: 7, FrameOffset: 7, HasFrameOffset: true, Codec: CodecMemory, Segment: "epoch-1"}
 
 	// An empty overlay changes nothing — base.ChunkID is non-zero so the
@@ -356,29 +539,110 @@ func TestMergeRef_Ugly(t *testing.T) {
 	}
 }
 
-// --- ChunkNotFoundError / URIChunkNotFoundError -----------------------------
+// --- ChunkNotFoundError ------------------------------------------------------
 
-func TestChunkNotFoundError_Error(t *testing.T) {
+func TestStore_ChunkNotFoundError_Error_Good(t *testing.T) {
 	err := &ChunkNotFoundError{ID: 42}
 	if got := err.Error(); got != "state chunk 42 not found" {
 		t.Fatalf("Error() = %q, want %q", got, "state chunk 42 not found")
 	}
-	if !core.Is(err, ErrChunkNotFound) {
-		t.Fatalf("Is(ErrChunkNotFound) = false, want true")
+}
+
+// TestStore_ChunkNotFoundError_Error_Bad feeds the degenerate zero ID —
+// still formats cleanly, no special-cased message.
+func TestStore_ChunkNotFoundError_Error_Bad(t *testing.T) {
+	err := &ChunkNotFoundError{}
+	if got := err.Error(); got != "state chunk 0 not found" {
+		t.Fatalf("Error() (zero ID) = %q, want %q", got, "state chunk 0 not found")
 	}
 }
 
-func TestURIChunkNotFoundError_Error(t *testing.T) {
-	empty := &URIChunkNotFoundError{}
-	if got := empty.Error(); got != "state chunk URI not found" {
+// TestStore_ChunkNotFoundError_Error_Ugly feeds a negative ID — an
+// out-of-domain value the type never validates against, formatted as-is.
+func TestStore_ChunkNotFoundError_Error_Ugly(t *testing.T) {
+	err := &ChunkNotFoundError{ID: -1}
+	if got := err.Error(); got != "state chunk -1 not found" {
+		t.Fatalf("Error() (negative ID) = %q, want %q", got, "state chunk -1 not found")
+	}
+}
+
+func TestStore_ChunkNotFoundError_Unwrap_Good(t *testing.T) {
+	err := &ChunkNotFoundError{ID: 1}
+	if unwrapped := err.Unwrap(); unwrapped != ErrChunkNotFound {
+		t.Fatalf("Unwrap() = %v, want ErrChunkNotFound", unwrapped)
+	}
+}
+
+// TestStore_ChunkNotFoundError_Unwrap_Bad calls Unwrap on a nil receiver —
+// the method never dereferences its fields, so it must still return the
+// sentinel rather than panicking.
+func TestStore_ChunkNotFoundError_Unwrap_Bad(t *testing.T) {
+	var err *ChunkNotFoundError
+	if unwrapped := err.Unwrap(); unwrapped != ErrChunkNotFound {
+		t.Fatalf("Unwrap(nil receiver) = %v, want ErrChunkNotFound", unwrapped)
+	}
+}
+
+// TestStore_ChunkNotFoundError_Unwrap_Ugly proves the Unwrap chain survives
+// interface type-erasure — errors.Is (via core.Is) still walks through to
+// the sentinel once the concrete *ChunkNotFoundError is boxed as `error`.
+func TestStore_ChunkNotFoundError_Unwrap_Ugly(t *testing.T) {
+	var boxed error = &ChunkNotFoundError{ID: 5}
+	if !core.Is(boxed, ErrChunkNotFound) {
+		t.Fatalf("core.Is(boxed ChunkNotFoundError, ErrChunkNotFound) = false, want true")
+	}
+}
+
+// --- URIChunkNotFoundError ---------------------------------------------------
+
+func TestStore_URIChunkNotFoundError_Error_Good(t *testing.T) {
+	err := &URIChunkNotFoundError{URI: "state://missing"}
+	if got := err.Error(); got != `state chunk URI "state://missing" not found` {
+		t.Fatalf("Error() = %q, want %q", got, `state chunk URI "state://missing" not found`)
+	}
+}
+
+// TestStore_URIChunkNotFoundError_Error_Bad feeds the empty-URI branch,
+// which formats a distinct message rather than an empty quoted string.
+func TestStore_URIChunkNotFoundError_Error_Bad(t *testing.T) {
+	err := &URIChunkNotFoundError{}
+	if got := err.Error(); got != "state chunk URI not found" {
 		t.Fatalf("Error() (empty URI) = %q, want %q", got, "state chunk URI not found")
 	}
+}
 
-	withURI := &URIChunkNotFoundError{URI: "state://missing"}
-	if got := withURI.Error(); got != `state chunk URI "state://missing" not found` {
-		t.Fatalf("Error() (with URI) = %q, want %q", got, `state chunk URI "state://missing" not found`)
+// TestStore_URIChunkNotFoundError_Error_Ugly feeds a URI containing a
+// double quote, proving %q escapes it rather than corrupting the message.
+func TestStore_URIChunkNotFoundError_Error_Ugly(t *testing.T) {
+	err := &URIChunkNotFoundError{URI: `state://"quoted"`}
+	want := `state chunk URI "state://\"quoted\"" not found`
+	if got := err.Error(); got != want {
+		t.Fatalf("Error() (quoted URI) = %q, want %q", got, want)
 	}
-	if !core.Is(withURI, ErrChunkNotFound) {
-		t.Fatalf("Is(ErrChunkNotFound) = false, want true")
+}
+
+func TestStore_URIChunkNotFoundError_Unwrap_Good(t *testing.T) {
+	err := &URIChunkNotFoundError{URI: "state://x"}
+	if unwrapped := err.Unwrap(); unwrapped != ErrChunkNotFound {
+		t.Fatalf("Unwrap() = %v, want ErrChunkNotFound", unwrapped)
+	}
+}
+
+// TestStore_URIChunkNotFoundError_Unwrap_Bad calls Unwrap on a nil
+// receiver — no field dereference occurs, so it must still return the
+// sentinel.
+func TestStore_URIChunkNotFoundError_Unwrap_Bad(t *testing.T) {
+	var err *URIChunkNotFoundError
+	if unwrapped := err.Unwrap(); unwrapped != ErrChunkNotFound {
+		t.Fatalf("Unwrap(nil receiver) = %v, want ErrChunkNotFound", unwrapped)
+	}
+}
+
+// TestStore_URIChunkNotFoundError_Unwrap_Ugly proves the Unwrap chain
+// survives interface type-erasure, mirroring ChunkNotFoundError's case.
+func TestStore_URIChunkNotFoundError_Unwrap_Ugly(t *testing.T) {
+	var boxed error = &URIChunkNotFoundError{URI: "state://x"}
+	if !core.Is(boxed, ErrChunkNotFound) {
+		t.Fatalf("core.Is(boxed URIChunkNotFoundError, ErrChunkNotFound) = false, want true")
 	}
 }
