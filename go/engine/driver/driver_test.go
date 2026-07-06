@@ -30,6 +30,20 @@ func TestDriver_NewService_Good(t *testing.T) {
 	}
 }
 
+// TestDriver_NewService_Bad proves NewService gives each call its own
+// tracking maps — mutating one Service's served set must never leak into a
+// second Service built from the same process supervisor.
+func TestDriver_NewService_Bad(t *testing.T) {
+	proc := benchProcSvc(t)
+	first := NewService(proc, nil)
+	second := NewService(proc, nil)
+
+	first.served[RuntimeMLX] = &Served{Runtime: RuntimeMLX}
+	if _, ok := second.served[RuntimeMLX]; ok {
+		t.Fatal("NewService shared the served map across two instances built from the same proc")
+	}
+}
+
 // TestDriver_NewService_Ugly covers a ServiceRuntime whose Core is nil (never
 // registered against a Core app) — NewService must skip RegisterAction
 // rather than panic dereferencing a nil Core.
@@ -48,7 +62,7 @@ func TestDriver_NewService_Ugly(t *testing.T) {
 
 // --- Serve ---
 
-func TestDriver_Serve_Good(t *testing.T) {
+func TestDriver_Service_Serve_Good(t *testing.T) {
 	newHealthyDriver(t, RuntimeMLX)
 	addr := newHealthServer(t, true)
 	proc := benchProcSvc(t)
@@ -77,7 +91,7 @@ func TestDriver_Serve_Good(t *testing.T) {
 	}
 }
 
-func TestDriver_Serve_Bad(t *testing.T) {
+func TestDriver_Service_Serve_Bad(t *testing.T) {
 	svc := &Service{served: map[string]*Served{}, everReady: map[string]bool{}, restartLog: map[string][]time.Time{}}
 	r := svc.Serve(ServeRequest{Runtime: "bogus"})
 	if r.OK {
@@ -91,7 +105,7 @@ func TestDriver_Serve_Bad(t *testing.T) {
 // TestDriver_Serve_Ugly covers the spawned-but-never-ready path: the process
 // starts fine but nothing answers /v1/health, so Serve must time out and
 // fail even though the driver stays tracked.
-func TestDriver_Serve_Ugly(t *testing.T) {
+func TestDriver_Service_Serve_Ugly(t *testing.T) {
 	newHealthyDriver(t, RuntimeMLX)
 	shrinkReadyWait(t, 300*time.Millisecond, 50*time.Millisecond)
 	addr := freeDeadAddr(t)
@@ -233,7 +247,7 @@ func TestDriver_SwapOrPass_Ugly(t *testing.T) {
 
 // --- Stop ---
 
-func TestDriver_Stop_Good(t *testing.T) {
+func TestDriver_Service_Stop_Good(t *testing.T) {
 	proc := benchProcSvc(t)
 	pid := benchSleepProc(t, proc)
 	s := &Service{proc: proc, served: map[string]*Served{
@@ -258,7 +272,7 @@ func TestDriver_Stop_Good(t *testing.T) {
 	}
 }
 
-func TestDriver_Stop_Bad(t *testing.T) {
+func TestDriver_Service_Stop_Bad(t *testing.T) {
 	s := &Service{served: map[string]*Served{}}
 	r := s.Stop(RuntimeMLX)
 	if r.OK {
@@ -272,7 +286,7 @@ func TestDriver_Stop_Bad(t *testing.T) {
 // TestDriver_Stop_Ugly covers stopping a runtime whose tracked process has
 // already exited on its own — Kill on an already-dead process must still be
 // treated as a successful stop, not surfaced as an error.
-func TestDriver_Stop_Ugly(t *testing.T) {
+func TestDriver_Service_Stop_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	quick := core.PathJoin(dir, "quick")
 	if r := core.WriteFile(quick, []byte("#!/bin/sh\nexit 0\n"), 0o755); !r.OK {
@@ -298,7 +312,7 @@ func TestDriver_Stop_Ugly(t *testing.T) {
 
 // --- Status ---
 
-func TestDriver_Status_Good(t *testing.T) {
+func TestDriver_Service_Status_Good(t *testing.T) {
 	proc := benchProcSvc(t)
 	pid := benchSleepProc(t, proc)
 	s := &Service{proc: proc, served: map[string]*Served{
@@ -317,7 +331,7 @@ func TestDriver_Status_Good(t *testing.T) {
 // TestDriver_Status_Bad covers a stale tracked entry whose process exited on
 // its own — Status must correct both Running and Ready rather than trusting
 // the last-known snapshot.
-func TestDriver_Status_Bad(t *testing.T) {
+func TestDriver_Service_Status_Bad(t *testing.T) {
 	dir := t.TempDir()
 	quick := core.PathJoin(dir, "quick")
 	if r := core.WriteFile(quick, []byte("#!/bin/sh\nexit 0\n"), 0o755); !r.OK {
@@ -346,9 +360,50 @@ func TestDriver_Status_Bad(t *testing.T) {
 	}
 }
 
+// TestDriver_Service_Status_Ugly covers independence across entries: a live
+// runtime and a stale (already-exited) one tracked together must each be
+// corrected on their own — the live entry must not be dragged down by the
+// stale one, and vice versa.
+func TestDriver_Service_Status_Ugly(t *testing.T) {
+	dir := t.TempDir()
+	quick := core.PathJoin(dir, "quick")
+	if r := core.WriteFile(quick, []byte("#!/bin/sh\nexit 0\n"), 0o755); !r.OK {
+		t.Fatalf("write quick-exit script: %v", r.Value)
+	}
+	proc := benchProcSvc(t)
+	sr := proc.StartWithOptions(core.Background(), coreprocess.RunOptions{Command: quick, Detach: true, KillGroup: true})
+	if !sr.OK {
+		t.Fatalf("spawn quick-exit script: %v", sr.Value)
+	}
+	stale := sr.Value.(*coreprocess.Process)
+	_ = proc.Wait(stale.ID)
+	livePID := benchSleepProc(t, proc)
+
+	s := &Service{proc: proc, served: map[string]*Served{
+		RuntimeMLX:  {Runtime: RuntimeMLX, ProcessID: stale.ID, Running: true, Ready: true},
+		RuntimeCUDA: {Runtime: RuntimeCUDA, ProcessID: livePID, Running: true, Ready: true},
+	}}
+	out := s.Status()
+	if len(out) != 2 {
+		t.Fatalf("Status() returned %d entries, want 2", len(out))
+	}
+	for _, sv := range out {
+		switch sv.Runtime {
+		case RuntimeMLX:
+			if sv.Running || sv.Ready {
+				t.Fatalf("Status() left the stale mlx entry = %+v, want Running=false, Ready=false", sv)
+			}
+		case RuntimeCUDA:
+			if !sv.Running || !sv.Ready {
+				t.Fatalf("Status() dragged the live cuda entry down = %+v, want it untouched", sv)
+			}
+		}
+	}
+}
+
 // --- Models ---
 
-func TestDriver_Models_Good(t *testing.T) {
+func TestDriver_Service_Models_Good(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	modelsDir := core.PathJoin(home, "Lethean", "lem", "models")
@@ -383,12 +438,28 @@ func TestDriver_Models_Good(t *testing.T) {
 	}
 }
 
-func TestDriver_Models_Bad(t *testing.T) {
+func TestDriver_Service_Models_Bad(t *testing.T) {
 	t.Setenv("HOME", "")
 	svc := &Service{}
 	r := svc.Models()
 	if r.OK {
 		t.Fatal("Models succeeded with no resolvable home directory, want failure")
+	}
+}
+
+// TestDriver_Service_Models_Ugly covers a resolvable home with neither the
+// models nor the profiles directory present — an empty catalogue is a valid
+// answer, never an error (listNames treats a missing dir as "nothing here").
+func TestDriver_Service_Models_Ugly(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	svc := &Service{}
+	r := svc.Models()
+	if !r.OK {
+		t.Fatalf("Models failed over a resolvable home with no populated dirs: %v", r.Value)
+	}
+	cat := r.Value.(Catalogue)
+	if len(cat.Models) != 0 || len(cat.Profiles) != 0 {
+		t.Fatalf("Catalogue = %+v, want both empty when neither dir exists", cat)
 	}
 }
 
@@ -790,7 +861,7 @@ func TestDriver_PersistServe_Bad(t *testing.T) {
 
 // --- LastServed ---
 
-func TestDriver_LastServed_Good(t *testing.T) {
+func TestDriver_Service_LastServed_Good(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	persistServe(persistedServe{Runtime: RuntimeCUDA, Model: "org/model", Profile: "p1"})
@@ -805,7 +876,7 @@ func TestDriver_LastServed_Good(t *testing.T) {
 	}
 }
 
-func TestDriver_LastServed_Bad(t *testing.T) {
+func TestDriver_Service_LastServed_Bad(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // resolves fine, but nothing was ever persisted
 	svc := &Service{}
 	if _, ok := svc.LastServed(); ok {
@@ -813,7 +884,7 @@ func TestDriver_LastServed_Bad(t *testing.T) {
 	}
 }
 
-func TestDriver_LastServed_Ugly(t *testing.T) {
+func TestDriver_Service_LastServed_Ugly(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	path := servePersistPath()
