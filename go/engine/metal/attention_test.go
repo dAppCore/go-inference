@@ -10,7 +10,9 @@ import (
 	"unsafe"
 )
 
-func TestAttentionBlockMatchesComposedPrimitives(t *testing.T) {
+// TestAttention_AttentionBlock_Good proves the fused on-device attention block (rmsnorm ->
+// wQ -> rope -> sdpa -> wO -> residual) equals the same maths run as separate proven primitives.
+func TestAttention_AttentionBlock_Good(t *testing.T) {
 	requireNativeRuntime(t)
 
 	const dModel, nHeads, nKV, headDim, kvLen = 64, 1, 1, 64, 2
@@ -56,7 +58,93 @@ func TestAttentionBlockMatchesComposedPrimitives(t *testing.T) {
 	}
 }
 
-func TestAttentionBlockIntoReusesOutputBackingAndBypassesScratchOutput(t *testing.T) {
+// TestAttention_AttentionBlock_Bad exercises every dimension guard attentionBlockInto validates
+// before it touches the GPU.
+func TestAttention_AttentionBlock_Bad(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const dModel, nHeads, nKV, headDim, kvLen = 64, 1, 1, 64, 2
+	const base, scale, offset, eps = float32(10000), float32(0.125), 1, float32(1e-5)
+	qDim := nHeads * headDim
+	validX := toBF16Bytes(syntheticFloat32(dModel, 3))
+	validNormW := toBF16Bytes(syntheticFloat32(dModel, 5))
+	validWQ := toBF16Bytes(syntheticFloat32(qDim*dModel, 7))
+	validWO := toBF16Bytes(syntheticFloat32(dModel*qDim, 11))
+	validK := toBF16Bytes(syntheticFloat32(nKV*kvLen*headDim, 13))
+	validV := toBF16Bytes(syntheticFloat32(nKV*kvLen*headDim, 17))
+
+	cases := []struct {
+		name                   string
+		x, normW, wQ, wO, k, v []byte
+	}{
+		{"x length mismatch", validX[:len(validX)-2], validNormW, validWQ, validWO, validK, validV},
+		{"normWeight length mismatch", validX, validNormW[:len(validNormW)-2], validWQ, validWO, validK, validV},
+		{"wQ length mismatch", validX, validNormW, validWQ[:len(validWQ)-2], validWO, validK, validV},
+		{"wO length mismatch", validX, validNormW, validWQ, validWO[:len(validWO)-2], validK, validV},
+		{"kCache length mismatch", validX, validNormW, validWQ, validWO, validK[:len(validK)-2], validV},
+		{"vCache length mismatch", validX, validNormW, validWQ, validWO, validK, validV[:len(validV)-2]},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if _, err := AttentionBlock(c.x, c.normW, c.wQ, c.wO, c.k, c.v, dModel, nHeads, nKV, headDim, kvLen, base, scale, offset, eps); err == nil {
+				t.Fatalf("AttentionBlock(%s): expected an error, got none", c.name)
+			}
+		})
+	}
+}
+
+// TestAttention_AttentionBlock_Ugly extends the composed-primitives proof past the trivial
+// nHeads==nKVHeads==1 base case to real GQA (nHeads>nKVHeads), a longer cache, and a nonzero
+// offset — the shape the decode path actually runs.
+func TestAttention_AttentionBlock_Ugly(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const dModel, nHeads, nKV, headDim, kvLen = 64, 4, 2, 64, 5
+	const base, scale, offset, eps = float32(10000), float32(0.125), 3, float32(1e-5)
+	qDim := nHeads * headDim
+	x := toBF16Bytes(syntheticFloat32(dModel, 3))
+	normW := toBF16Bytes(syntheticFloat32(dModel, 5))
+	wQ := toBF16Bytes(syntheticFloat32(qDim*dModel, 7))
+	wO := toBF16Bytes(syntheticFloat32(dModel*qDim, 11))
+	kCache := toBF16Bytes(syntheticFloat32(nKV*kvLen*headDim, 13))
+	vCache := toBF16Bytes(syntheticFloat32(nKV*kvLen*headDim, 17))
+
+	got, err := AttentionBlock(x, normW, wQ, wO, kCache, vCache, dModel, nHeads, nKV, headDim, kvLen, base, scale, offset, eps)
+	if err != nil {
+		t.Fatalf("AttentionBlock: %v", err)
+	}
+	normed, err := RMSNormBF16(x, normW, 1, dModel, eps)
+	if err != nil {
+		t.Fatalf("RMSNormBF16: %v", err)
+	}
+	q, err := MatVecBF16(wQ, normed, qDim, dModel)
+	if err != nil {
+		t.Fatalf("MatVecBF16 q: %v", err)
+	}
+	qr, err := RoPEBF16(q, 1, nHeads, headDim, base, scale, offset, false)
+	if err != nil {
+		t.Fatalf("RoPEBF16: %v", err)
+	}
+	attn, err := SDPA(qr, kCache, vCache, 1, nHeads, nKV, headDim, kvLen, scale)
+	if err != nil {
+		t.Fatalf("SDPA: %v", err)
+	}
+	attnOut, err := MatVecBF16(wO, attn, dModel, qDim)
+	if err != nil {
+		t.Fatalf("MatVecBF16 o: %v", err)
+	}
+	want, err := AddBF16(x, attnOut)
+	if err != nil {
+		t.Fatalf("AddBF16: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("AttentionBlock (GQA) = %v, want composed primitives %v", bf16Floats(got), bf16Floats(want))
+	}
+}
+
+// TestAttention_AttentionBlockInto_Good proves AttentionBlockInto reuses caller-owned output
+// backing and bypasses the pooled scratch output.
+func TestAttention_AttentionBlockInto_Good(t *testing.T) {
 	requireNativeRuntime(t)
 
 	const dModel, nHeads, nKV, headDim, kvLen = 64, 1, 1, 64, 4
@@ -96,6 +184,55 @@ func TestAttentionBlockIntoReusesOutputBackingAndBypassesScratchOutput(t *testin
 	if !bytes.Equal(scratch.out.bytes, sentinel) {
 		t.Fatal("AttentionBlockInto wrote through pooled scratch output instead of caller output")
 	}
+}
+
+// TestAttention_AttentionBlockInto_Bad mirrors AttentionBlock's dimension guards through the
+// caller-output entry point.
+func TestAttention_AttentionBlockInto_Bad(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const dModel, nHeads, nKV, headDim, kvLen = 64, 1, 1, 64, 2
+	const base, scale, offset, eps = float32(10000), float32(0.125), 1, float32(1e-5)
+	qDim := nHeads * headDim
+	x := toBF16Bytes(syntheticFloat32(dModel, 3))
+	normW := toBF16Bytes(syntheticFloat32(dModel, 5))
+	wQ := toBF16Bytes(syntheticFloat32(qDim*dModel, 7))
+	wO := toBF16Bytes(syntheticFloat32(dModel*qDim, 11))
+	kCache := toBF16Bytes(syntheticFloat32(nKV*kvLen*headDim, 13))
+	vCache := toBF16Bytes(syntheticFloat32(nKV*kvLen*headDim, 17))
+	out := make([]byte, dModel*bf16Size)
+
+	if _, err := AttentionBlockInto(out, x[:len(x)-2], normW, wQ, wO, kCache, vCache, dModel, nHeads, nKV, headDim, kvLen, base, scale, offset, eps); err == nil {
+		t.Fatal("expected AttentionBlockInto to reject an x length mismatch")
+	}
+	if _, err := AttentionBlockInto(out, x, normW, wQ, wO, kCache[:len(kCache)-2], vCache, dModel, nHeads, nKV, headDim, kvLen, base, scale, offset, eps); err == nil {
+		t.Fatal("expected AttentionBlockInto to reject a kCache length mismatch")
+	}
+}
+
+// TestAttention_AttentionBlockInto_Ugly proves the too-small-capacity path: when cap(out) is
+// smaller than dModel*2 bytes, AttentionBlockInto must allocate fresh storage rather than write
+// out of bounds, and still return the correct residual output.
+func TestAttention_AttentionBlockInto_Ugly(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const dModel, nHeads, nKV, headDim, kvLen = 64, 1, 1, 64, 4
+	const base, scale, offset, eps = float32(10000), float32(0.125), 1, float32(1e-5)
+	layer := decodeLayerFixture(dModel, nHeads, nKV, headDim, 128, 3)
+	x := toBF16Bytes(syntheticFloat32(dModel, 5))
+	kCache := toBF16Bytes(syntheticFloat32(nKV*kvLen*headDim, 7))
+	vCache := toBF16Bytes(syntheticFloat32(nKV*kvLen*headDim, 11))
+	want, err := AttentionBlock(x, layer.AttnNormW, layer.WQ, layer.WO, kCache, vCache, dModel, nHeads, nKV, headDim, kvLen, base, scale, offset, eps)
+	if err != nil {
+		t.Fatalf("AttentionBlock reference: %v", err)
+	}
+
+	tooSmall := make([]byte, 1)
+	got, err := AttentionBlockInto(tooSmall, x, layer.AttnNormW, layer.WQ, layer.WO, kCache, vCache, dModel, nHeads, nKV, headDim, kvLen, base, scale, offset, eps)
+	if err != nil {
+		t.Fatalf("AttentionBlockInto (undersized out): %v", err)
+	}
+	eqBytes(t, "AttentionBlockInto (undersized out)", got, want)
 }
 
 func TestAttentionBlockKeepsFixedWeightsResident(t *testing.T) {
