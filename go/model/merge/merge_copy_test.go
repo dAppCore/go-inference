@@ -29,6 +29,15 @@ func TestMergeCopy_SamePathResolved_Bad(t *core.T) {
 	core.AssertFalse(t, SamePathResolved(t.TempDir(), t.TempDir()))
 }
 
+func TestMergeCopy_SamePathResolved_Ugly(t *core.T) {
+	// a carries dot-segments and must still be resolved via core.PathAbs
+	// even though absB is assumed already absolute — SamePathResolved only
+	// skips the resolution work on the right-hand side.
+	abs := t.TempDir()
+	rel := core.PathJoin(abs, ".", "sub", "..")
+	core.AssertTrue(t, SamePathResolved(rel, abs))
+}
+
 func TestMergeCopy_CopyModelPackMetadata_Good(t *core.T) {
 	src := t.TempDir()
 	dst := t.TempDir()
