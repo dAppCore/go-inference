@@ -93,26 +93,30 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 
 	native.SetPipelinedGPUDecode(*pipeline) // engine-level: -pipeline=false forces the chained serial loop
 	err := generate.RunGenerate(ctx, generate.Config{
-		ModelPath:    fs.Arg(0),
-		Prompt:       *prompt,
-		MaxTokens:    *maxTokens,
-		Temp:         *temp,
-		Think:        *think,
-		ContextLen:   *contextLen,
-		DraftPath:    *draftPath,
-		DraftBlock:   *draftBlock,
-		KVCacheMode:  *kvCacheMode,
-		KVStorage:    *kvStorage,
-		Pipeline:     *pipeline,
-		Native:       *nativeBackend,
-		Trace:        *tracePhases,
-		StateName:    *stateName,
-		StateStore:   *stateStore,
-		Raw:          *rawState,
-		ImageSources: images,
-		AudioSources: audio,
-		Out:          stdout,
-		Log:          stderr,
+		ModelPath:  fs.Arg(0),
+		Prompt:     *prompt,
+		MaxTokens:  *maxTokens,
+		Temp:       *temp,
+		Think:      *think,
+		ContextLen: *contextLen,
+		DraftPath:  *draftPath,
+		DraftBlock: *draftBlock,
+		// Inject the metal engine's speculative loader so a detected drafter arms
+		// the MTP lane instead of degrading to plain — the composition root is the
+		// one place that may import the engine (keeps decode/generate neutral).
+		SpeculativeLoader: native.LoadSpeculativePair,
+		KVCacheMode:       *kvCacheMode,
+		KVStorage:         *kvStorage,
+		Pipeline:          *pipeline,
+		Native:            *nativeBackend,
+		Trace:             *tracePhases,
+		StateName:         *stateName,
+		StateStore:        *stateStore,
+		Raw:               *rawState,
+		ImageSources:      images,
+		AudioSources:      audio,
+		Out:               stdout,
+		Log:               stderr,
 	})
 	if err != nil {
 		core.Print(stderr, "%s generate: %v", cliName(), err)
