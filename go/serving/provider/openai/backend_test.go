@@ -259,7 +259,7 @@ func TestOpenAI_Register_Good_AddsBackendToInferenceRegistry(t *testing.T) {
 	}
 }
 
-func TestOpenai_ContextAssemblerFunc_AssembleContext_Good(t *testing.T) {
+func TestBackend_ContextAssemblerFunc_AssembleContext_Good(t *testing.T) {
 	assembler := ContextAssemblerFunc(func(context.Context, []inference.Message) core.Result {
 		return core.Ok("retrieved context")
 	})
@@ -270,7 +270,7 @@ func TestOpenai_ContextAssemblerFunc_AssembleContext_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_ContextAssemblerFunc_AssembleContext_Bad(t *testing.T) {
+func TestBackend_ContextAssemblerFunc_AssembleContext_Bad(t *testing.T) {
 	var assembler ContextAssemblerFunc
 	result := assembler.AssembleContext(context.Background(), nil)
 
@@ -279,7 +279,7 @@ func TestOpenai_ContextAssemblerFunc_AssembleContext_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_ContextAssemblerFunc_AssembleContext_Ugly(t *testing.T) {
+func TestBackend_ContextAssemblerFunc_AssembleContext_Ugly(t *testing.T) {
 	assembler := ContextAssemblerFunc(func(context.Context, []inference.Message) core.Result {
 		return core.Fail(core.E("test.assembler", "failed", nil))
 	})
@@ -290,7 +290,7 @@ func TestOpenai_ContextAssemblerFunc_AssembleContext_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_NewBackend_Good(t *testing.T) {
+func TestBackend_NewBackend_Good(t *testing.T) {
 	backend := NewBackend(Config{Name: "provider", BaseURL: "https://api.example.test/", DefaultModel: "gpt"})
 
 	if backend == nil || backend.Name() != "provider" {
@@ -301,7 +301,7 @@ func TestOpenai_NewBackend_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_NewBackend_Bad(t *testing.T) {
+func TestBackend_NewBackend_Bad(t *testing.T) {
 	backend := NewBackend(Config{})
 
 	if backend == nil || backend.Name() != defaultProviderName {
@@ -312,7 +312,7 @@ func TestOpenai_NewBackend_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_NewBackend_Ugly(t *testing.T) {
+func TestBackend_NewBackend_Ugly(t *testing.T) {
 	backend := NewBackend(Config{Name: "  ", BaseURL: "https://api.example.test///", DefaultModel: "gpt"})
 
 	if backend.Name() != defaultProviderName {
@@ -323,7 +323,7 @@ func TestOpenai_NewBackend_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Register_Good(t *testing.T) {
+func TestBackend_Register_Good(t *testing.T) {
 	name := "openai-register-good-" + t.Name()
 	backend := Register(Config{Name: name, BaseURL: "https://api.example.test", DefaultModel: "gpt"})
 	got, ok := inference.Get(name)
@@ -333,7 +333,7 @@ func TestOpenai_Register_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Register_Bad(t *testing.T) {
+func TestBackend_Register_Bad(t *testing.T) {
 	name := "openai-register-bad-" + t.Name()
 	backend := Register(Config{Name: name})
 
@@ -345,7 +345,7 @@ func TestOpenai_Register_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Register_Ugly(t *testing.T) {
+func TestBackend_Register_Ugly(t *testing.T) {
 	name := "openai-register-ugly-" + t.Name()
 	first := Register(Config{Name: name, BaseURL: "https://first.example", DefaultModel: "first"})
 	second := Register(Config{Name: name, BaseURL: "https://second.example", DefaultModel: "second"})
@@ -356,7 +356,7 @@ func TestOpenai_Register_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Backend_Name_Good(t *testing.T) {
+func TestBackend_Name_Good(t *testing.T) {
 	backend := NewBackend(Config{Name: "openai-test"})
 
 	if got := backend.Name(); got != "openai-test" {
@@ -364,7 +364,7 @@ func TestOpenai_Backend_Name_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Backend_Name_Bad(t *testing.T) {
+func TestBackend_Name_Bad(t *testing.T) {
 	var backend *Backend
 
 	if got := backend.Name(); got != defaultProviderName {
@@ -372,7 +372,7 @@ func TestOpenai_Backend_Name_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Backend_Name_Ugly(t *testing.T) {
+func TestBackend_Name_Ugly(t *testing.T) {
 	backend := NewBackend(Config{Name: ""})
 
 	if got := backend.Name(); got != defaultProviderName {
@@ -380,7 +380,7 @@ func TestOpenai_Backend_Name_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Backend_Available_Good(t *testing.T) {
+func TestBackend_Available_Good(t *testing.T) {
 	backend := NewBackend(Config{BaseURL: "https://api.example.test", DefaultModel: "gpt"})
 
 	if !backend.Available() {
@@ -388,7 +388,7 @@ func TestOpenai_Backend_Available_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Backend_Available_Bad(t *testing.T) {
+func TestBackend_Available_Bad(t *testing.T) {
 	backend := NewBackend(Config{BaseURL: "https://api.example.test"})
 
 	if backend.Available() {
@@ -396,7 +396,7 @@ func TestOpenai_Backend_Available_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Backend_Available_Ugly(t *testing.T) {
+func TestBackend_Available_Ugly(t *testing.T) {
 	var backend *Backend
 
 	if backend.Available() {
@@ -404,7 +404,7 @@ func TestOpenai_Backend_Available_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Backend_LoadModel_Good(t *testing.T) {
+func TestBackend_LoadModel_Good(t *testing.T) {
 	backend := NewBackend(Config{BaseURL: "https://api.example.test", DefaultModel: "gpt"})
 	result := backend.LoadModel("")
 
@@ -416,7 +416,7 @@ func TestOpenai_Backend_LoadModel_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Backend_LoadModel_Bad(t *testing.T) {
+func TestBackend_LoadModel_Bad(t *testing.T) {
 	var backend *Backend
 	result := backend.LoadModel("gpt")
 
@@ -425,7 +425,7 @@ func TestOpenai_Backend_LoadModel_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Backend_LoadModel_Ugly(t *testing.T) {
+func TestBackend_LoadModel_Ugly(t *testing.T) {
 	backend := NewBackend(Config{BaseURL: "https://api.example.test", DefaultModel: "fallback"})
 	result := backend.LoadModel("override")
 
@@ -437,7 +437,7 @@ func TestOpenai_Backend_LoadModel_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Backend_Capabilities_Good(t *testing.T) {
+func TestBackend_Capabilities_Good(t *testing.T) {
 	backend := NewBackend(Config{Name: "cap", BaseURL: "https://api.example.test", DefaultModel: "gpt"})
 	report := backend.Capabilities()
 
@@ -446,7 +446,7 @@ func TestOpenai_Backend_Capabilities_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Backend_Capabilities_Bad(t *testing.T) {
+func TestBackend_Capabilities_Bad(t *testing.T) {
 	var backend *Backend
 	report := backend.Capabilities()
 
@@ -455,7 +455,7 @@ func TestOpenai_Backend_Capabilities_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Backend_Capabilities_Ugly(t *testing.T) {
+func TestBackend_Capabilities_Ugly(t *testing.T) {
 	backend := NewBackend(Config{Name: "labels", BaseURL: "https://api.example.test/", DefaultModel: "gpt"})
 	report := backend.Capabilities()
 
@@ -464,7 +464,7 @@ func TestOpenai_Backend_Capabilities_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Generate_Good(t *testing.T) {
+func TestBackend_Model_Generate_Good(t *testing.T) {
 	model, cleanup := newTestModel(t, "generated text", http.StatusOK)
 	defer cleanup()
 
@@ -481,7 +481,7 @@ func TestOpenai_Model_Generate_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Generate_Bad(t *testing.T) {
+func TestBackend_Model_Generate_Bad(t *testing.T) {
 	model, cleanup := newTestModel(t, "rate limited", http.StatusTooManyRequests)
 	defer cleanup()
 
@@ -494,7 +494,7 @@ func TestOpenai_Model_Generate_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Generate_Ugly(t *testing.T) {
+func TestBackend_Model_Generate_Ugly(t *testing.T) {
 	model, cleanup := newTestModel(t, "", http.StatusOK)
 	defer cleanup()
 
@@ -508,7 +508,7 @@ func TestOpenai_Model_Generate_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Chat_Good(t *testing.T) {
+func TestBackend_Model_Chat_Good(t *testing.T) {
 	model, cleanup := newTestModel(t, "chat text", http.StatusOK)
 	defer cleanup()
 
@@ -522,7 +522,7 @@ func TestOpenai_Model_Chat_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Chat_Bad(t *testing.T) {
+func TestBackend_Model_Chat_Bad(t *testing.T) {
 	model, cleanup := newTestModel(t, "bad", http.StatusInternalServerError)
 	defer cleanup()
 
@@ -534,7 +534,7 @@ func TestOpenai_Model_Chat_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Chat_Ugly(t *testing.T) {
+func TestBackend_Model_Chat_Ugly(t *testing.T) {
 	model, cleanup := newTestModel(t, "context chat", http.StatusOK)
 	defer cleanup()
 	model.backend.cfg.ContextAssembler = ContextAssemblerFunc(func(context.Context, []inference.Message) core.Result {
@@ -549,7 +549,7 @@ func TestOpenai_Model_Chat_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Classify_Good(t *testing.T) {
+func TestBackend_Model_Classify_Good(t *testing.T) {
 	model := &Model{}
 	result := model.Classify(context.Background(), []string{"prompt"})
 
@@ -558,7 +558,7 @@ func TestOpenai_Model_Classify_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Classify_Bad(t *testing.T) {
+func TestBackend_Model_Classify_Bad(t *testing.T) {
 	var model *Model
 	result := model.Classify(context.Background(), nil)
 
@@ -567,7 +567,7 @@ func TestOpenai_Model_Classify_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Classify_Ugly(t *testing.T) {
+func TestBackend_Model_Classify_Ugly(t *testing.T) {
 	model := &Model{}
 	result := model.Classify(context.Background(), []string{"a", "b"}, inference.WithMaxTokens(1))
 
@@ -576,7 +576,7 @@ func TestOpenai_Model_Classify_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_BatchGenerate_Good(t *testing.T) {
+func TestBackend_Model_BatchGenerate_Good(t *testing.T) {
 	model, cleanup := newTestModel(t, "batch", http.StatusOK)
 	defer cleanup()
 	result := model.BatchGenerate(context.Background(), []string{"a", "b"})
@@ -589,7 +589,7 @@ func TestOpenai_Model_BatchGenerate_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_BatchGenerate_Bad(t *testing.T) {
+func TestBackend_Model_BatchGenerate_Bad(t *testing.T) {
 	model, cleanup := newTestModel(t, "bad", http.StatusBadGateway)
 	defer cleanup()
 	result := model.BatchGenerate(context.Background(), []string{"a"})
@@ -602,7 +602,7 @@ func TestOpenai_Model_BatchGenerate_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_BatchGenerate_Ugly(t *testing.T) {
+func TestBackend_Model_BatchGenerate_Ugly(t *testing.T) {
 	model, cleanup := newTestModel(t, "unused", http.StatusOK)
 	defer cleanup()
 	result := model.BatchGenerate(context.Background(), nil)
@@ -612,7 +612,7 @@ func TestOpenai_Model_BatchGenerate_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_ModelType_Good(t *testing.T) {
+func TestBackend_Model_ModelType_Good(t *testing.T) {
 	model := &Model{}
 
 	if got := model.ModelType(); got != "openai-compatible" {
@@ -620,7 +620,7 @@ func TestOpenai_Model_ModelType_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_ModelType_Bad(t *testing.T) {
+func TestBackend_Model_ModelType_Bad(t *testing.T) {
 	var model *Model
 
 	if got := model.ModelType(); got == "" {
@@ -628,7 +628,7 @@ func TestOpenai_Model_ModelType_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_ModelType_Ugly(t *testing.T) {
+func TestBackend_Model_ModelType_Ugly(t *testing.T) {
 	model := &Model{modelID: "custom"}
 
 	if got := model.ModelType(); !core.Contains(got, "openai") {
@@ -636,7 +636,7 @@ func TestOpenai_Model_ModelType_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Info_Good(t *testing.T) {
+func TestBackend_Model_Info_Good(t *testing.T) {
 	model := &Model{}
 	info := model.Info()
 
@@ -645,7 +645,7 @@ func TestOpenai_Model_Info_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Info_Bad(t *testing.T) {
+func TestBackend_Model_Info_Bad(t *testing.T) {
 	var model *Model
 	info := model.Info()
 
@@ -654,7 +654,7 @@ func TestOpenai_Model_Info_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Info_Ugly(t *testing.T) {
+func TestBackend_Model_Info_Ugly(t *testing.T) {
 	model := &Model{modelID: "gpt-test"}
 	info := model.Info()
 
@@ -663,7 +663,7 @@ func TestOpenai_Model_Info_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Metrics_Good(t *testing.T) {
+func TestBackend_Model_Metrics_Good(t *testing.T) {
 	model := &Model{metrics: inference.GenerateMetrics{PromptTokens: 3, GeneratedTokens: 2}}
 	metrics := model.Metrics()
 
@@ -672,7 +672,7 @@ func TestOpenai_Model_Metrics_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Metrics_Bad(t *testing.T) {
+func TestBackend_Model_Metrics_Bad(t *testing.T) {
 	model := &Model{}
 	metrics := model.Metrics()
 
@@ -681,7 +681,7 @@ func TestOpenai_Model_Metrics_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Metrics_Ugly(t *testing.T) {
+func TestBackend_Model_Metrics_Ugly(t *testing.T) {
 	model := &Model{}
 	model.setResult(inference.GenerateMetrics{GeneratedTokens: 7}, core.Ok(nil))
 	metrics := model.Metrics()
@@ -691,7 +691,7 @@ func TestOpenai_Model_Metrics_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Err_Good(t *testing.T) {
+func TestBackend_Model_Err_Good(t *testing.T) {
 	model := &Model{}
 	result := model.Err()
 
@@ -700,7 +700,7 @@ func TestOpenai_Model_Err_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Err_Bad(t *testing.T) {
+func TestBackend_Model_Err_Bad(t *testing.T) {
 	model := &Model{lastErr: core.E("test", "failed", nil)}
 	result := model.Err()
 
@@ -709,7 +709,7 @@ func TestOpenai_Model_Err_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Err_Ugly(t *testing.T) {
+func TestBackend_Model_Err_Ugly(t *testing.T) {
 	model := &Model{}
 	model.setResult(inference.GenerateMetrics{}, core.Fail(core.E("test", "set failure", nil)))
 	result := model.Err()
@@ -719,7 +719,7 @@ func TestOpenai_Model_Err_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Close_Good(t *testing.T) {
+func TestBackend_Model_Close_Good(t *testing.T) {
 	model := &Model{}
 	result := model.Close()
 
@@ -728,7 +728,7 @@ func TestOpenai_Model_Close_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Close_Bad(t *testing.T) {
+func TestBackend_Model_Close_Bad(t *testing.T) {
 	var model *Model
 	result := model.Close()
 
@@ -737,7 +737,7 @@ func TestOpenai_Model_Close_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Close_Ugly(t *testing.T) {
+func TestBackend_Model_Close_Ugly(t *testing.T) {
 	model := &Model{lastErr: core.AnError}
 	result := model.Close()
 
@@ -746,7 +746,7 @@ func TestOpenai_Model_Close_Ugly(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Capabilities_Good(t *testing.T) {
+func TestBackend_Model_Capabilities_Good(t *testing.T) {
 	backend := NewBackend(Config{Name: "cap", BaseURL: "https://api.example.test", DefaultModel: "gpt"})
 	model := &Model{backend: backend, modelID: "gpt"}
 	report := model.Capabilities()
@@ -756,7 +756,7 @@ func TestOpenai_Model_Capabilities_Good(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Capabilities_Bad(t *testing.T) {
+func TestBackend_Model_Capabilities_Bad(t *testing.T) {
 	var model *Model
 	report := model.Capabilities()
 
@@ -765,7 +765,7 @@ func TestOpenai_Model_Capabilities_Bad(t *testing.T) {
 	}
 }
 
-func TestOpenai_Model_Capabilities_Ugly(t *testing.T) {
+func TestBackend_Model_Capabilities_Ugly(t *testing.T) {
 	backend := NewBackend(Config{Name: "cap", BaseURL: "https://api.example.test/", DefaultModel: "gpt"})
 	model := &Model{backend: backend, modelID: "gpt"}
 	report := model.Capabilities()

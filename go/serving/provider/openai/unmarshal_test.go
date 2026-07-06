@@ -209,13 +209,13 @@ func TestUnmarshalChatCompletionRequest_InvalidShapes(t *testing.T) {
 // the single jsonenc.ErrInvalidJSON sentinel, so failures assert
 // identity against it.
 
-// TestUnmarshal_ChatCompletionRequest_Bad drives every malformed-
-// shape branch in ChatCompletionRequest.UnmarshalJSON/unmarshalField
-// not already reached by DirectShapes/InvalidShapes/ThinkingControls:
-// a non-object top level, a malformed key, structural EOF/trailing-
-// garbage at every loop boundary, and a wrong-typed value for each
-// field.
-func TestUnmarshal_ChatCompletionRequest_Bad(t *testing.T) {
+// TestUnmarshal_ChatCompletionRequest_UnmarshalJSON_Bad drives every
+// malformed-shape branch in ChatCompletionRequest.UnmarshalJSON/
+// unmarshalField not already reached by
+// DirectShapes/InvalidShapes/ThinkingControls: a non-object top level,
+// a malformed key, structural EOF/trailing-garbage at every loop
+// boundary, and a wrong-typed value for each field.
+func TestUnmarshal_ChatCompletionRequest_UnmarshalJSON_Bad(t *testing.T) {
 	cases := []struct{ name, in string }{
 		{"not-an-object", `42`},
 		{"non-string-key", `{1:"x"}`},
@@ -249,11 +249,11 @@ func TestUnmarshal_ChatCompletionRequest_Bad(t *testing.T) {
 	}
 }
 
-// TestUnmarshal_ChatCompletionRequest_Good covers the empty-object
-// fast path and "chat_template_kwargs":null — neither exercised by
-// DirectShapes (which nulls every other pointer field but not this
-// one).
-func TestUnmarshal_ChatCompletionRequest_Good(t *testing.T) {
+// TestUnmarshal_ChatCompletionRequest_UnmarshalJSON_Good covers the
+// empty-object fast path and "chat_template_kwargs":null — neither
+// exercised by DirectShapes (which nulls every other pointer field
+// but not this one).
+func TestUnmarshal_ChatCompletionRequest_UnmarshalJSON_Good(t *testing.T) {
 	var empty ChatCompletionRequest
 	if err := empty.UnmarshalJSON([]byte(`{}`)); err != nil || !reflect.DeepEqual(empty, ChatCompletionRequest{}) {
 		t.Fatalf("UnmarshalJSON(%q) = %+v, err = %v", `{}`, empty, err)
@@ -266,6 +266,22 @@ func TestUnmarshal_ChatCompletionRequest_Good(t *testing.T) {
 	}
 	if kwargsNull.ChatTemplateKwargs != nil {
 		t.Fatalf("UnmarshalJSON(%q) ChatTemplateKwargs = %+v, want nil", in, kwargsNull.ChatTemplateKwargs)
+	}
+}
+
+// TestUnmarshal_ChatCompletionRequest_UnmarshalJSON_Ugly covers a
+// duplicate key — the hand-rolled walker does not reject repeated
+// keys, it simply dispatches every key it sees in document order, so
+// the last occurrence wins (matching encoding/json's own behaviour
+// for duplicate object keys).
+func TestUnmarshal_ChatCompletionRequest_UnmarshalJSON_Ugly(t *testing.T) {
+	var req ChatCompletionRequest
+	in := `{"model":"first","model":"second"}`
+	if err := req.UnmarshalJSON([]byte(in)); err != nil {
+		t.Fatalf("UnmarshalJSON(%q) error = %v", in, err)
+	}
+	if req.Model != "second" {
+		t.Fatalf("UnmarshalJSON(duplicate key) Model = %q, want the last occurrence to win", req.Model)
 	}
 }
 
@@ -369,7 +385,7 @@ func TestUnmarshal_ParseChatMessage_Good(t *testing.T) {
 
 // TestUnmarshal_ResponseRequest_Bad mirrors TestUnmarshal_ChatCompletionRequest_Bad
 // for the Responses API request shape.
-func TestUnmarshal_ResponseRequest_Bad(t *testing.T) {
+func TestUnmarshal_ResponseRequest_UnmarshalJSON_Bad(t *testing.T) {
 	cases := []struct{ name, in string }{
 		{"not-an-object", `42`},
 		{"non-string-key", `{1:"x"}`},
@@ -401,11 +417,11 @@ func TestUnmarshal_ResponseRequest_Bad(t *testing.T) {
 	}
 }
 
-// TestUnmarshal_ResponseRequest_Good covers the empty-object fast
-// path and every null-pointer-field variant (temperature/top_p/
-// min_p/top_k/max_output_tokens/stream) in one pass — the existing
-// DirectShapes table never nulls any of them.
-func TestUnmarshal_ResponseRequest_Good(t *testing.T) {
+// TestUnmarshal_ResponseRequest_UnmarshalJSON_Good covers the
+// empty-object fast path and every null-pointer-field variant
+// (temperature/top_p/min_p/top_k/max_output_tokens/stream) in one
+// pass — the existing DirectShapes table never nulls any of them.
+func TestUnmarshal_ResponseRequest_UnmarshalJSON_Good(t *testing.T) {
 	var empty ResponseRequest
 	if err := empty.UnmarshalJSON([]byte(`{}`)); err != nil || !reflect.DeepEqual(empty, ResponseRequest{}) {
 		t.Fatalf("UnmarshalJSON(%q) = %+v, err = %v", `{}`, empty, err)
@@ -434,6 +450,20 @@ func TestUnmarshal_ResponseRequest_Good(t *testing.T) {
 	want := ResponseRequest{Model: "m", TopP: &topP, TopK: &topK, User: "u1"}
 	if !reflect.DeepEqual(withOptions, want) {
 		t.Fatalf("UnmarshalJSON(%q) = %+v, want %+v", in, withOptions, want)
+	}
+}
+
+// TestUnmarshal_ResponseRequest_UnmarshalJSON_Ugly covers a duplicate
+// key — the hand-rolled walker dispatches every key it sees in
+// document order with no de-duplication, so the last occurrence wins.
+func TestUnmarshal_ResponseRequest_UnmarshalJSON_Ugly(t *testing.T) {
+	var req ResponseRequest
+	in := `{"model":"first","model":"second"}`
+	if err := req.UnmarshalJSON([]byte(in)); err != nil {
+		t.Fatalf("UnmarshalJSON(%q) error = %v", in, err)
+	}
+	if req.Model != "second" {
+		t.Fatalf("UnmarshalJSON(duplicate key) Model = %q, want the last occurrence to win", req.Model)
 	}
 }
 

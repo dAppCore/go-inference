@@ -57,7 +57,7 @@ func (m *stubModel) seq() iter.Seq[inference.Token] {
 	}
 }
 
-// TestOpenAI_StopList_UnmarshalJSON_Good_Bad_Ugly drives StopList's own
+// TestOpenai_StopList_UnmarshalJSON_Good drives StopList's own
 // json.Unmarshaler implementation directly via encoding/json.Unmarshal.
 // The request-decode hot path (ChatCompletionRequest.unmarshalField,
 // unmarshal.go) calls jsonenc.ParseJSONStringList directly on the
@@ -66,7 +66,7 @@ func (m *stubModel) seq() iter.Seq[inference.Token] {
 // this method is otherwise unreachable from DecodeRequest. It remains
 // part of StopList's public contract (json.Unmarshaler) for any
 // consumer that decodes a StopList value on its own.
-func TestOpenAI_StopList_UnmarshalJSON_Good_Bad_Ugly(t *testing.T) {
+func TestOpenai_StopList_UnmarshalJSON_Good(t *testing.T) {
 	var single StopList
 	if err := json.Unmarshal([]byte(`"END"`), &single); err != nil {
 		t.Fatalf("Unmarshal(string) error = %v", err)
@@ -82,7 +82,21 @@ func TestOpenAI_StopList_UnmarshalJSON_Good_Bad_Ugly(t *testing.T) {
 	if len(multi) != 2 || multi[0] != "a" || multi[1] != "b" {
 		t.Fatalf("Unmarshal(array) = %#v, want [a b]", multi)
 	}
+}
 
+// TestOpenai_StopList_UnmarshalJSON_Bad covers the shape-rejection
+// branch — a bare JSON number is neither a string nor an array.
+func TestOpenai_StopList_UnmarshalJSON_Bad(t *testing.T) {
+	var bad StopList
+	if err := json.Unmarshal([]byte(`42`), &bad); err == nil {
+		t.Fatal("Unmarshal(42) returned nil error, want a shape rejection")
+	}
+}
+
+// TestOpenai_StopList_UnmarshalJSON_Ugly covers the JSON null literal —
+// it decodes to a nil StopList without an error, distinct from an
+// empty array.
+func TestOpenai_StopList_UnmarshalJSON_Ugly(t *testing.T) {
 	var nulled StopList
 	if err := json.Unmarshal([]byte(`null`), &nulled); err != nil {
 		t.Fatalf("Unmarshal(null) error = %v", err)
@@ -90,10 +104,47 @@ func TestOpenAI_StopList_UnmarshalJSON_Good_Bad_Ugly(t *testing.T) {
 	if nulled != nil {
 		t.Fatalf("Unmarshal(null) = %#v, want nil", nulled)
 	}
+}
 
-	var bad StopList
-	if err := json.Unmarshal([]byte(`42`), &bad); err == nil {
-		t.Fatal("Unmarshal(42) returned nil error, want a shape rejection")
+// TestOpenai_ChatMessageDelta_MarshalJSON_Good covers the hand-rolled
+// fast path's three text shapes — empty (shared emptyDeltaBytes),
+// content-only, and role+content priming. TestChatMessageDelta_MarshalJSON_RoundTrip
+// (jsonenc_test.go) drives the same encoder harder, including escape
+// handling and a round-trip back through encoding/json.
+func TestOpenai_ChatMessageDelta_MarshalJSON_Good(t *testing.T) {
+	if got, err := (ChatMessageDelta{}).MarshalJSON(); err != nil || string(got) != "{}" {
+		t.Fatalf("MarshalJSON(empty) = %s, err=%v, want {}", got, err)
+	}
+	if got, err := (ChatMessageDelta{Content: "hi"}).MarshalJSON(); err != nil || string(got) != `{"content":"hi"}` {
+		t.Fatalf("MarshalJSON(content-only) = %s, err=%v", got, err)
+	}
+	if got, err := (ChatMessageDelta{Role: "assistant", Content: "hi"}).MarshalJSON(); err != nil ||
+		string(got) != `{"role":"assistant","content":"hi"}` {
+		t.Fatalf("MarshalJSON(role+content) = %s, err=%v", got, err)
+	}
+}
+
+// TestOpenai_ChatMessageDelta_MarshalJSON_Ugly covers the rare
+// tool_calls path — it routes through the reflect-encode alias branch
+// rather than the hand-rolled text-only fast path above.
+//
+// The sibling error branch (core.JSONMarshal failing on the ToolCalls
+// alias) has no reachable trigger through this package's public API:
+// every field the alias walks (strings, ints, a *ToolCallFunctionDelta
+// of strings) always marshals via encoding/json — there is no
+// unsupported type, NaN, or cycle a caller can construct. Adjudicated
+// as an untestable defensive branch rather than faked.
+func TestOpenai_ChatMessageDelta_MarshalJSON_Ugly(t *testing.T) {
+	delta := ChatMessageDelta{ToolCalls: []ToolCallDelta{{
+		Index: 0, ID: "call_1", Type: "function", Function: &ToolCallFunctionDelta{Name: "get_weather"},
+	}}}
+
+	got, err := delta.MarshalJSON()
+	if err != nil {
+		t.Fatalf("MarshalJSON(tool_calls) error = %v", err)
+	}
+	if !core.Contains(string(got), `"tool_calls"`) || !core.Contains(string(got), `"get_weather"`) {
+		t.Fatalf("MarshalJSON(tool_calls) = %s, want the reflect-encoded tool call", got)
 	}
 }
 
