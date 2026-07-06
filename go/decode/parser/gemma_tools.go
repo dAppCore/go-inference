@@ -177,42 +177,37 @@ func parseGemmaCallSpan(span string) (inference.ToolCall, bool) {
 	}, true
 }
 
-// gemmaArgsToJSON turns the comma-separated key:value argument list into a JSON
-// object. A value wrapped in <|"|> is a string (JSON-escaped); a bare value is a
-// number / boolean / null when it parses as one, else it is treated as a string
-// — mirroring the cast in the gemma4 function-calling reference.
+// gemmaArgsToJSON turns a tool-call's {ARGS} body into a JSON object, recursing
+// into nested {objects} and [arrays]. A value wrapped in <|"|> is a string
+// (JSON-escaped, so an embedded comma or brace can't break the structure); a
+// bare value is a number / boolean / null when it parses as one, else a string
+// — mirroring the cast in the gemma4 function-calling reference. inner is the
+// already-unwrapped object body (the outer braces stripped by the caller).
 func gemmaArgsToJSON(inner string) string {
+	obj, _ := gemmaObjectBody(inner, 0)
+	return string(obj)
+}
+
+// gemmaObjectBody parses key:value pairs from s[i] into a JSON object, stopping
+// at a closing '}' (consumed) or end of input. Nested values recurse via
+// gemmaValue. Returns the JSON object and the index just past the body.
+func gemmaObjectBody(s string, i int) ([]byte, int) {
 	buf := []byte{'{'}
 	first := true
-	rest := core.Trim(inner)
-	for rest != "" {
-		colon := indexString(rest, ":")
+	for {
+		i = gemmaSkipSep(s, i)
+		if i >= len(s) || s[i] == '}' {
+			if i < len(s) {
+				i++ // consume '}'
+			}
+			break
+		}
+		colon := gemmaIndexByte(s, i, ':')
 		if colon < 0 {
 			break
 		}
-		key := core.Trim(rest[:colon])
-		rest = core.Trim(rest[colon+1:])
-		var valJSON []byte
-		if core.HasPrefix(rest, ToolArgQuoteMarker) {
-			rest = rest[len(ToolArgQuoteMarker):]
-			end := indexString(rest, ToolArgQuoteMarker)
-			if end < 0 {
-				valJSON = jsonenc.AppendJSONString(nil, rest)
-				rest = ""
-			} else {
-				valJSON = jsonenc.AppendJSONString(nil, rest[:end])
-				rest = rest[end+len(ToolArgQuoteMarker):]
-			}
-		} else {
-			comma := indexString(rest, ",")
-			if comma < 0 {
-				valJSON = bareArgToJSON(core.Trim(rest))
-				rest = ""
-			} else {
-				valJSON = bareArgToJSON(core.Trim(rest[:comma]))
-				rest = rest[comma+1:]
-			}
-		}
+		key := core.Trim(s[i:colon])
+		val, next := gemmaValue(s, colon+1)
 		if key != "" {
 			if !first {
 				buf = append(buf, ',')
@@ -220,14 +215,93 @@ func gemmaArgsToJSON(inner string) string {
 			first = false
 			buf = jsonenc.AppendJSONString(buf, key)
 			buf = append(buf, ':')
-			buf = append(buf, valJSON...)
+			buf = append(buf, val...)
 		}
-		rest = core.Trim(rest)
-		if core.HasPrefix(rest, ",") {
-			rest = core.Trim(rest[1:])
+		i = next
+	}
+	return append(buf, '}'), i
+}
+
+// gemmaArrayBody parses comma-separated values from s[i] into a JSON array,
+// stopping at ']' (consumed) or end. Returns the array and the index past it.
+func gemmaArrayBody(s string, i int) ([]byte, int) {
+	buf := []byte{'['}
+	first := true
+	for {
+		i = gemmaSkipSep(s, i)
+		if i >= len(s) || s[i] == ']' {
+			if i < len(s) {
+				i++ // consume ']'
+			}
+			break
+		}
+		val, next := gemmaValue(s, i)
+		if !first {
+			buf = append(buf, ',')
+		}
+		first = false
+		buf = append(buf, val...)
+		i = next
+	}
+	return append(buf, ']'), i
+}
+
+// gemmaValue parses one value at s[i] — a <|"|>-delimited string, a {nested
+// object}, an [array], or a bare scalar — returning its JSON bytes and the index
+// just past the value.
+func gemmaValue(s string, i int) ([]byte, int) {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	if i >= len(s) {
+		return []byte("null"), i
+	}
+	if core.HasPrefix(s[i:], ToolArgQuoteMarker) {
+		j := i + len(ToolArgQuoteMarker)
+		end := gemmaIndexStr(s, j, ToolArgQuoteMarker)
+		if end < 0 {
+			return jsonenc.AppendJSONString(nil, s[j:]), len(s)
+		}
+		return jsonenc.AppendJSONString(nil, s[j:end]), end + len(ToolArgQuoteMarker)
+	}
+	switch s[i] {
+	case '{':
+		return gemmaObjectBody(s, i+1)
+	case '[':
+		return gemmaArrayBody(s, i+1)
+	}
+	// Bare scalar — runs to the next separator or closing bracket.
+	j := i
+	for j < len(s) && s[j] != ',' && s[j] != '}' && s[j] != ']' {
+		j++
+	}
+	return bareArgToJSON(core.Trim(s[i:j])), j
+}
+
+// gemmaSkipSep skips whitespace and leading separator commas.
+func gemmaSkipSep(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == ',') {
+		i++
+	}
+	return i
+}
+
+// gemmaIndexByte returns the index of byte b in s at or after i, or -1.
+func gemmaIndexByte(s string, i int, b byte) int {
+	for ; i < len(s); i++ {
+		if s[i] == b {
+			return i
 		}
 	}
-	return string(append(buf, '}'))
+	return -1
+}
+
+// gemmaIndexStr returns the index of sub in s at or after i, or -1.
+func gemmaIndexStr(s string, i int, sub string) int {
+	if idx := indexString(s[i:], sub); idx >= 0 {
+		return i + idx
+	}
+	return -1
 }
 
 // bareArgToJSON renders an unquoted argument value: a JSON literal when it is one

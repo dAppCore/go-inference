@@ -55,6 +55,29 @@ func TestParseGemmaToolCalls_NoCall(t *testing.T) {
 	}
 }
 
+// TestParseGemmaToolCalls_NestedArgs pins the recursive arg parse: nested
+// {objects}, [arrays], arrays-of-objects, and a <|"|>-quoted value carrying a
+// comma inside a nested object all round-trip to structured JSON (not a
+// stringified blob with leaked markers).
+func TestParseGemmaToolCalls_NestedArgs(t *testing.T) {
+	q := ToolArgQuoteMarker
+	cases := []struct{ inner, want string }{
+		{"filter:{status:" + q + "open" + q + "}", `{"filter":{"status":"open"}}`},
+		{"tags:[" + q + "a" + q + "," + q + "b" + q + "]", `{"tags":["a","b"]}`},
+		{"items:[{id:1},{id:2}]", `{"items":[{"id":1},{"id":2}]}`},
+		{"loc:{lat:1.5,label:" + q + "x,y" + q + "}", `{"loc":{"lat":1.5,"label":"x,y"}}`},
+	}
+	for _, c := range cases {
+		calls, _ := ParseGemmaToolCalls(ToolCallOpenMarker + "call:f{" + c.inner + "}" + ToolCallCloseMarker)
+		if len(calls) != 1 {
+			t.Fatalf("%q: no call parsed", c.inner)
+		}
+		if calls[0].ArgumentsJSON != c.want {
+			t.Fatalf("nested args for %q =\n got %q\nwant %q", c.inner, calls[0].ArgumentsJSON, c.want)
+		}
+	}
+}
+
 // TestRenderGemmaToolDeclarations pins the shared renderer against the exact
 // declaration in the gemma4 function-calling reference — the format the model
 // was trained on, so both providers must produce it byte-for-byte.
