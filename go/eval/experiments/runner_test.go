@@ -94,7 +94,7 @@ func seedRunnerEval(t *testing.T) (*Eval, *fakeTarget) {
 	return e, tgt
 }
 
-func TestEval_RunExperiment_Good(t *testing.T) {
+func TestRunner_Eval_RunExperiment_Good(t *testing.T) {
 	e, tgt := seedRunnerEval(t)
 
 	// Run two evaluators across every example.
@@ -149,7 +149,7 @@ func TestEval_RunExperiment_Good(t *testing.T) {
 	}
 }
 
-func TestEval_RunExperiment_Bad(t *testing.T) {
+func TestRunner_Eval_RunExperiment_Bad(t *testing.T) {
 	e, tgt := seedRunnerEval(t)
 
 	// An unknown dataset is rejected before any evaluation runs.
@@ -171,7 +171,7 @@ func TestEval_RunExperiment_Bad(t *testing.T) {
 	}
 }
 
-func TestEval_RunExperiment_Ugly(t *testing.T) {
+func TestRunner_Eval_RunExperiment_Ugly(t *testing.T) {
 	e := New()
 	if r := e.PutDataset(Dataset{ID: "ds"}); !r.OK {
 		t.Fatalf("seed dataset: %v", r.Error())
@@ -343,5 +343,196 @@ func TestEval_Runner_Aggregate_Ugly(t *testing.T) {
 	// The experiment is marked failed when every example failed.
 	if got := e.GetExperiment(expID).Value.(Experiment).Status; got != StatusFailed {
 		t.Errorf("all-failed status: got %q, want %q", got, StatusFailed)
+	}
+}
+
+// failStore wraps a MemStore and can be told to fail specific operations, to
+// drive the Eval façade and runner's store-rejection branches the in-memory
+// store never exercises on its own (a feedback write that fails mid-run, an
+// experiment update that fails on finish, a vanished experiment at finish time).
+//
+//	s := &failStore{MemStore: NewMemStore(), failFeedback: true}
+type failStore struct {
+	*MemStore
+	failFeedback     bool // PutFeedback returns a failed Result
+	failExperiment   bool // PutExperiment returns a failed Result
+	failUpdate       bool // UpdateExperiment returns a failed Result
+	missExperiment   bool // GetExperiment always reports absent
+	failAfterNFeedbk int  // succeed this many PutFeedback calls, then fail (0 = honour failFeedback)
+	feedbackCalls    int  // PutFeedback calls seen so far
+}
+
+// PutFeedback fails when configured, otherwise delegates to the MemStore.
+//
+//	s.PutFeedback(experiments.Feedback{ID: "fb-1", Target: "exp-1", Key: "k"})
+func (s *failStore) PutFeedback(fb Feedback) core.Result {
+	s.feedbackCalls++
+	if s.failAfterNFeedbk > 0 {
+		if s.feedbackCalls > s.failAfterNFeedbk {
+			return core.Fail(core.E("failStore.PutFeedback", "forced failure", nil))
+		}
+		return s.MemStore.PutFeedback(fb)
+	}
+	if s.failFeedback {
+		return core.Fail(core.E("failStore.PutFeedback", "forced failure", nil))
+	}
+	return s.MemStore.PutFeedback(fb)
+}
+
+// PutExperiment fails when configured, otherwise delegates to the MemStore.
+//
+//	s.PutExperiment(experiments.Experiment{ID: "exp-1", DatasetID: "ds"})
+func (s *failStore) PutExperiment(x Experiment) core.Result {
+	if s.failExperiment {
+		return core.Fail(core.E("failStore.PutExperiment", "forced failure", nil))
+	}
+	return s.MemStore.PutExperiment(x)
+}
+
+// UpdateExperiment fails when configured, otherwise delegates to the MemStore.
+//
+//	s.UpdateExperiment(experiments.Experiment{ID: "exp-1", DatasetID: "ds"})
+func (s *failStore) UpdateExperiment(x Experiment) core.Result {
+	if s.failUpdate {
+		return core.Fail(core.E("failStore.UpdateExperiment", "forced failure", nil))
+	}
+	return s.MemStore.UpdateExperiment(x)
+}
+
+// GetExperiment reports absent when missExperiment is set, otherwise delegates.
+//
+//	s.GetExperiment("exp-1")
+func (s *failStore) GetExperiment(id string) core.Result {
+	if s.missExperiment {
+		return core.Fail(core.E("failStore.GetExperiment", "forced miss", nil))
+	}
+	return s.MemStore.GetExperiment(id)
+}
+
+// seedFailEval builds an Eval over a failStore with one dataset and the given
+// example ids, so runner tests can pick exactly which store op blows up.
+//
+//	e, s := seedFailEval(t, &failStore{...}, "ex-1", "ex-2")
+func seedFailEval(t *testing.T, s *failStore, exampleIDs ...string) *Eval {
+	t.Helper()
+	e := NewWithStore(s)
+	if r := e.PutDataset(Dataset{ID: "ds", Name: "ds"}); !r.OK {
+		t.Fatalf("seed dataset: %v", r.Error())
+	}
+	for _, id := range exampleIDs {
+		ex := Example{ID: id, DatasetID: "ds",
+			Inputs:    map[string]any{"id": id},
+			Reference: map[string]any{"answer": "x"}}
+		if r := e.AddExample(ex); !r.OK {
+			t.Fatalf("add %s: %v", id, r.Error())
+		}
+	}
+	return e
+}
+
+func TestEval_RunExperiment_CreateFails(t *testing.T) {
+	// A dataset that exists but a store that rejects the experiment insert: the
+	// run must surface the CreateExperiment failure before any example is touched.
+	s := &failStore{MemStore: NewMemStore(), failExperiment: true}
+	e := seedFailEval(t, s, "ex-1")
+	tgt := &fakeTarget{out: map[string]string{"ex-1": "x"}}
+
+	r := e.RunExperiment(context.Background(), "ds", tgt, []Evaluator{exactMatch{}})
+	if r.OK {
+		t.Fatalf("run should fail when the experiment cannot be created, got %+v", r.Value)
+	}
+	if len(tgt.called) != 0 {
+		t.Fatalf("no example should run when create fails, got %d calls", len(tgt.called))
+	}
+}
+
+func TestEval_RunExperiment_FeedbackWriteFails(t *testing.T) {
+	// The experiment is created (first PutFeedback call would be a score row), but
+	// the store rejects that feedback write. The run must stop and the experiment
+	// is finished as failed via finishExperiment.
+	s := &failStore{MemStore: NewMemStore(), failFeedback: true}
+	e := seedFailEval(t, s, "ex-1")
+	tgt := &fakeTarget{out: map[string]string{"ex-1": "x"}}
+
+	r := e.RunExperiment(context.Background(), "ds", tgt, []Evaluator{exactMatch{}})
+	if r.OK {
+		t.Fatalf("run should fail when a feedback write is rejected, got %+v", r.Value)
+	}
+	// The target was still invoked for the example before the write was rejected.
+	if len(tgt.called) != 1 {
+		t.Fatalf("target calls: got %d, want 1", len(tgt.called))
+	}
+}
+
+func TestEval_RunExperiment_RecordFailureWriteFails(t *testing.T) {
+	// The target errors on the only example, so the runner takes the recordFailure
+	// path; the store then rejects that failure-row write. The run surfaces the
+	// failure and the experiment is finished as failed.
+	s := &failStore{MemStore: NewMemStore(), failFeedback: true}
+	e := seedFailEval(t, s, "ex-1")
+	tgt := &fakeTarget{errOn: map[string]bool{"ex-1": true}}
+
+	r := e.RunExperiment(context.Background(), "ds", tgt, []Evaluator{exactMatch{}})
+	if r.OK {
+		t.Fatalf("run should fail when the failure row cannot be written, got %+v", r.Value)
+	}
+}
+
+func TestEval_RunExperiment_EmptyKeyWriteFails(t *testing.T) {
+	// An evaluator returns an empty key, sending the runner down recordFailure;
+	// the store rejects that write, so the run fails through finishExperiment.
+	s := &failStore{MemStore: NewMemStore(), failFeedback: true}
+	e := seedFailEval(t, s, "ex-1")
+	tgt := &fakeTarget{out: map[string]string{"ex-1": "x"}}
+
+	r := e.RunExperiment(context.Background(), "ds", tgt, []Evaluator{erroringEvaluator{}})
+	if r.OK {
+		t.Fatalf("run should fail when the empty-key failure row is rejected, got %+v", r.Value)
+	}
+}
+
+func TestEval_RunExperiment_FinishUpdateFails(t *testing.T) {
+	// Everything scores, but the terminal status write (UpdateExperiment) is
+	// rejected: finishExperiment must surface that error over the otherwise-good
+	// experiment id.
+	s := &failStore{MemStore: NewMemStore(), failUpdate: true}
+	e := seedFailEval(t, s, "ex-1")
+	tgt := &fakeTarget{out: map[string]string{"ex-1": "x"}}
+
+	r := e.RunExperiment(context.Background(), "ds", tgt, []Evaluator{exactMatch{}})
+	if r.OK {
+		t.Fatalf("run should fail when the finishing status write is rejected, got %+v", r.Value)
+	}
+}
+
+func TestEval_RunExperiment_FinishExperimentVanished(t *testing.T) {
+	// finishExperiment can't find the experiment (a store that reports it absent):
+	// it returns the run's own result unchanged rather than inventing an error.
+	// The successful run id therefore still comes back.
+	s := &failStore{MemStore: NewMemStore(), missExperiment: true}
+	e := seedFailEval(t, s, "ex-1")
+	tgt := &fakeTarget{out: map[string]string{"ex-1": "x"}}
+
+	r := e.RunExperiment(context.Background(), "ds", tgt, []Evaluator{exactMatch{}})
+	if !r.OK {
+		t.Fatalf("run should still return its id when finish can't re-read the experiment: %v", r.Error())
+	}
+	if r.Value.(string) == "" {
+		t.Fatalf("expected a non-empty experiment id")
+	}
+}
+
+func TestEval_RunExperiment_SecondFeedbackWriteFails(t *testing.T) {
+	// First evaluator's feedback row writes fine, the second is rejected: the
+	// per-evaluator RecordFeedback failure inside the loop is surfaced and the
+	// experiment is finished as failed.
+	s := &failStore{MemStore: NewMemStore(), failAfterNFeedbk: 1}
+	e := seedFailEval(t, s, "ex-1")
+	tgt := &fakeTarget{out: map[string]string{"ex-1": "x"}}
+
+	r := e.RunExperiment(context.Background(), "ds", tgt,
+		[]Evaluator{exactMatch{}, lengthScore{}})
+	if r.OK {
+		t.Fatalf("run should fail when the second feedback write is rejected, got %+v", r.Value)
 	}
 }

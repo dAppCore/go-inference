@@ -17,7 +17,7 @@ func refExample(id, answer string) Example {
 	}
 }
 
-func TestEval_ExactMatch_Good(t *testing.T) {
+func TestEvaluators_ExactMatch_Good(t *testing.T) {
 	ev := ExactMatch()
 
 	// An output equal to the reference answer scores 1 under the exact_match key.
@@ -31,16 +31,9 @@ func TestEval_ExactMatch_Good(t *testing.T) {
 	if comment == "" {
 		t.Errorf("a hit should carry a comment")
 	}
-
-	// A non-default reference field can be named at construction time.
-	ev2 := ExactMatchOn("gold")
-	ex := Example{ID: "ex-2", DatasetID: "ds", Reference: map[string]any{"gold": "42"}}
-	if k, s, _ := ev2.Eval(ex, "42"); k != "exact_match" || s != 1 {
-		t.Errorf("custom reference field: got (%q,%v), want (exact_match,1)", k, s)
-	}
 }
 
-func TestEval_ExactMatch_Bad(t *testing.T) {
+func TestEvaluators_ExactMatch_Bad(t *testing.T) {
 	ev := ExactMatch()
 
 	// A differing output scores 0 but still reports the metric key (a miss is a
@@ -54,7 +47,7 @@ func TestEval_ExactMatch_Bad(t *testing.T) {
 	}
 }
 
-func TestEval_ExactMatch_Ugly(t *testing.T) {
+func TestEvaluators_ExactMatch_Ugly(t *testing.T) {
 	ev := ExactMatch()
 
 	// A reference with no answer field present: the gold value is the empty
@@ -78,7 +71,35 @@ func TestEval_ExactMatch_Ugly(t *testing.T) {
 	}
 }
 
-func TestEval_Contains_Good(t *testing.T) {
+func TestEvaluators_ExactMatchOn_Good(t *testing.T) {
+	// A non-default reference field can be named at construction time.
+	ev := ExactMatchOn("gold")
+	ex := Example{ID: "ex-2", DatasetID: "ds", Reference: map[string]any{"gold": "42"}}
+	if k, s, _ := ev.Eval(ex, "42"); k != "exact_match" || s != 1 {
+		t.Errorf("custom reference field: got (%q,%v), want (exact_match,1)", k, s)
+	}
+}
+
+func TestEvaluators_ExactMatchOn_Bad(t *testing.T) {
+	ev := ExactMatchOn("gold")
+	ex := Example{ID: "ex-2", DatasetID: "ds", Reference: map[string]any{"gold": "42"}}
+	if _, s, _ := ev.Eval(ex, "43"); s != 0 {
+		t.Errorf("mismatched output: got %v, want 0", s)
+	}
+}
+
+func TestEvaluators_ExactMatchOn_Ugly(t *testing.T) {
+	// A field name that names no key in the reference reads as the empty gold
+	// value, same as the default-field evaluator — an absent custom field is
+	// never a panic.
+	ev := ExactMatchOn("missing")
+	ex := Example{ID: "ex-2", DatasetID: "ds", Reference: map[string]any{"gold": "42"}}
+	if _, s, _ := ev.Eval(ex, ""); s != 1 {
+		t.Errorf("absent custom field vs empty output: got %v, want 1", s)
+	}
+}
+
+func TestEvaluators_Contains_Good(t *testing.T) {
 	ev := Contains()
 
 	// Output that contains the reference substring scores 1.
@@ -92,16 +113,9 @@ func TestEval_Contains_Good(t *testing.T) {
 	if comment == "" {
 		t.Errorf("a hit should carry a comment")
 	}
-
-	// The substring field is configurable.
-	ev2 := ContainsOn("needle")
-	ex := Example{ID: "ex-2", DatasetID: "ds", Reference: map[string]any{"needle": "cat"}}
-	if _, s, _ := ev2.Eval(ex, "the cat sat"); s != 1 {
-		t.Errorf("custom field: got %v, want 1", s)
-	}
 }
 
-func TestEval_Contains_Bad(t *testing.T) {
+func TestEvaluators_Contains_Bad(t *testing.T) {
 	ev := Contains()
 
 	// Output missing the substring scores 0 with the metric key intact.
@@ -114,7 +128,7 @@ func TestEval_Contains_Bad(t *testing.T) {
 	}
 }
 
-func TestEval_Contains_Ugly(t *testing.T) {
+func TestEvaluators_Contains_Ugly(t *testing.T) {
 	ev := Contains()
 
 	// An empty reference substring is vacuously contained by any output — every
@@ -134,7 +148,34 @@ func TestEval_Contains_Ugly(t *testing.T) {
 	}
 }
 
-func TestEval_Regexp_Good(t *testing.T) {
+func TestEvaluators_ContainsOn_Good(t *testing.T) {
+	// The substring field is configurable.
+	ev := ContainsOn("needle")
+	ex := Example{ID: "ex-2", DatasetID: "ds", Reference: map[string]any{"needle": "cat"}}
+	if _, s, _ := ev.Eval(ex, "the cat sat"); s != 1 {
+		t.Errorf("custom field: got %v, want 1", s)
+	}
+}
+
+func TestEvaluators_ContainsOn_Bad(t *testing.T) {
+	ev := ContainsOn("needle")
+	ex := Example{ID: "ex-2", DatasetID: "ds", Reference: map[string]any{"needle": "cat"}}
+	if _, s, _ := ev.Eval(ex, "the dog sat"); s != 0 {
+		t.Errorf("missing needle: got %v, want 0", s)
+	}
+}
+
+func TestEvaluators_ContainsOn_Ugly(t *testing.T) {
+	// A custom field name absent from the reference reads as an empty
+	// substring — vacuously contained by any output, never a panic.
+	ev := ContainsOn("missing")
+	ex := Example{ID: "ex-2", DatasetID: "ds", Reference: map[string]any{"needle": "cat"}}
+	if _, s, _ := ev.Eval(ex, "anything"); s != 1 {
+		t.Errorf("absent custom field: got %v, want 1", s)
+	}
+}
+
+func TestEvaluators_Regexp_Good(t *testing.T) {
 	r := Regexp(`\d+`)
 	if !r.OK {
 		t.Fatalf("compile pattern: %v", r.Error())
@@ -154,7 +195,7 @@ func TestEval_Regexp_Good(t *testing.T) {
 	}
 }
 
-func TestEval_Regexp_Bad(t *testing.T) {
+func TestEvaluators_Regexp_Bad(t *testing.T) {
 	r := Regexp(`\d+`)
 	if !r.OK {
 		t.Fatalf("compile pattern: %v", r.Error())
@@ -171,7 +212,7 @@ func TestEval_Regexp_Bad(t *testing.T) {
 	}
 }
 
-func TestEval_Regexp_Ugly(t *testing.T) {
+func TestEvaluators_Regexp_Ugly(t *testing.T) {
 	// An invalid pattern is rejected at construction — the compile error surfaces
 	// as a failed Result, not a panic and not a per-Eval surprise.
 	bad := Regexp(`(unclosed`)
@@ -197,7 +238,7 @@ func TestEval_Regexp_Ugly(t *testing.T) {
 	}
 }
 
-func TestEval_LengthScore_Good(t *testing.T) {
+func TestEvaluators_LengthScore_Good(t *testing.T) {
 	// Target length 10: an output of exactly 10 runes scores 1.
 	r := LengthScore(10)
 	if !r.OK {
@@ -222,7 +263,7 @@ func TestEval_LengthScore_Good(t *testing.T) {
 	}
 }
 
-func TestEval_LengthScore_Bad(t *testing.T) {
+func TestEvaluators_LengthScore_Bad(t *testing.T) {
 	// A non-positive target is a caller error — there is no length to normalise
 	// against.
 	if r := LengthScore(0); r.OK {
@@ -233,7 +274,7 @@ func TestEval_LengthScore_Bad(t *testing.T) {
 	}
 }
 
-func TestEval_LengthScore_Ugly(t *testing.T) {
+func TestEvaluators_LengthScore_Ugly(t *testing.T) {
 	r := LengthScore(4)
 	if !r.OK {
 		t.Fatalf("construct: %v", r.Error())
