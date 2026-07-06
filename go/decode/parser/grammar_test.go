@@ -4,10 +4,10 @@ package parser
 
 import "testing"
 
-// TestPairedReasoningMarkers_Good pins the authoritative span table: every
+// TestGrammar_PairedReasoningMarkers_Good pins the authoritative span table: every
 // entry has a start, an end and a kind, and the qwen <think> spelling is
 // present (the derived generic set excludes it; the extractor consumes all).
-func TestPairedReasoningMarkers_Good(t *testing.T) {
+func TestGrammar_PairedReasoningMarkers_Good(t *testing.T) {
 	markers := PairedReasoningMarkers()
 	if len(markers) == 0 {
 		t.Fatal("empty marker table")
@@ -26,10 +26,10 @@ func TestPairedReasoningMarkers_Good(t *testing.T) {
 	}
 }
 
-// TestPairedReasoningMarkers_Bad pins the derived-view consistency: every
+// TestGrammar_PairedReasoningMarkers_Bad pins the derived-view consistency: every
 // generic Processor marker start exists in the authoritative table (a drift
 // here means the two engines' grammars split again — the bug this file kills).
-func TestPairedReasoningMarkers_Bad(t *testing.T) {
+func TestGrammar_PairedReasoningMarkers_Bad(t *testing.T) {
 	table := map[string]string{}
 	for _, m := range PairedReasoningMarkers() {
 		table[m.Start] = m.End
@@ -45,9 +45,27 @@ func TestPairedReasoningMarkers_Bad(t *testing.T) {
 	}
 }
 
-// TestIsReasoningChannel_Good pins the reasoning channel names, including
+// TestGrammar_PairedReasoningMarkers_Ugly pins the shared-view contract: the
+// doc comment on PairedReasoningMarkers promises a package-owned view, not a
+// defensive copy — two calls must return the same backing array, so a caller
+// that (wrongly) mutates one sees it reflected on the other.
+func TestGrammar_PairedReasoningMarkers_Ugly(t *testing.T) {
+	first := PairedReasoningMarkers()
+	second := PairedReasoningMarkers()
+	if len(first) == 0 || len(second) == 0 {
+		t.Fatal("empty marker table")
+	}
+	original := first[0].Kind
+	first[0].Kind = "mutated-by-test"
+	if second[0].Kind != "mutated-by-test" {
+		t.Fatal("PairedReasoningMarkers must return the shared backing array, not a copy")
+	}
+	first[0].Kind = original // restore — the slice is package-global state
+}
+
+// TestGrammar_IsReasoningChannel_Good pins the reasoning channel names, including
 // gpt-oss harmony's analysis channel.
-func TestIsReasoningChannel_Good(t *testing.T) {
+func TestGrammar_IsReasoningChannel_Good(t *testing.T) {
 	for _, name := range []string{"thought", "thinking", "reasoning", "analysis"} {
 		if !IsReasoningChannel(name) {
 			t.Fatalf("%q should be a reasoning channel", name)
@@ -55,9 +73,9 @@ func TestIsReasoningChannel_Good(t *testing.T) {
 	}
 }
 
-// TestIsReasoningChannel_Bad pins the content channels: final/assistant (and
+// TestGrammar_IsReasoningChannel_Bad pins the content channels: final/assistant (and
 // anything unrecognised) stay visible.
-func TestIsReasoningChannel_Bad(t *testing.T) {
+func TestGrammar_IsReasoningChannel_Bad(t *testing.T) {
 	for _, name := range []string{"final", "assistant", "commentary", ""} {
 		if IsReasoningChannel(name) {
 			t.Fatalf("%q must not be a reasoning channel", name)
@@ -65,9 +83,9 @@ func TestIsReasoningChannel_Bad(t *testing.T) {
 	}
 }
 
-// TestIsReasoningChannel_Ugly pins case sensitivity: the extractor lowercases
+// TestGrammar_IsReasoningChannel_Ugly pins case sensitivity: the extractor lowercases
 // channel names before classification, so the grammar matches lowercase only.
-func TestIsReasoningChannel_Ugly(t *testing.T) {
+func TestGrammar_IsReasoningChannel_Ugly(t *testing.T) {
 	if IsReasoningChannel("Thought") {
 		t.Fatal("classification is lowercase-only; callers lowercase first")
 	}
