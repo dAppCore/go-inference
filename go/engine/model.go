@@ -109,6 +109,28 @@ func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts
 	return m.stream(ctx, m.encode(formatChatTurns(messages)), cfg)
 }
 
+// FormatChatPrompt renders a fresh multi-turn prompt with the gemma turn
+// template — byte-identical to the serve path's framing (Chat above encodes the
+// same formatChatTurns output). The durable -state loop calls this to open a
+// fresh session so a stateful first turn is framed exactly like a stateless
+// serve request: FormatChatPrompt([{user, "hi"}]) ->
+// "<start_of_turn>user\nhi<end_of_turn>\n<start_of_turn>model\n".
+func (m *TextModel) FormatChatPrompt(messages []inference.Message) string {
+	return formatChatTurns(messages)
+}
+
+// FormatChatContinuation renders a woken-session turn with no replay of the
+// retained history: it closes the model turn the restored KV prefix ends on
+// (the prior answer, left open when generation stopped), appends the new user
+// turn, and reopens the assistant header. The leading <end_of_turn>\n is the
+// close — FormatChatContinuation([{user, "and now?"}]) ->
+// "<end_of_turn>\n<start_of_turn>user\nand now?<end_of_turn>\n<start_of_turn>model\n"
+// — so the model resumes on a well-formed turn boundary rather than the raw
+// prompt bleeding into its own open turn.
+func (m *TextModel) FormatChatContinuation(messages []inference.Message) string {
+	return "<end_of_turn>\n" + formatChatTurns(messages)
+}
+
 func (m *TextModel) encode(prompt string) []int32 {
 	if m == nil || m.tok == nil {
 		return nil

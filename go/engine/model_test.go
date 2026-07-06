@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/decode/tokenizer"
 )
@@ -113,5 +114,50 @@ func TestTextModelDecodeNilSafe(t *testing.T) {
 	m := &TextModel{}
 	if got := m.decodeLabel(1); got != "" {
 		t.Fatalf("nil tok decodeLabel = %q, want empty", got)
+	}
+}
+
+// TestTextModelFormatChatPrompt pins the fresh-turn framing the durable -state
+// loop opens a session with: the full gemma turn template, trailing open model
+// turn. It is byte-identical to the serve path (formatChatTurns, which Chat
+// encodes) — the parity that keeps a stateful first turn framed like a
+// stateless serve request.
+func TestTextModelFormatChatPrompt(t *testing.T) {
+	m := &TextModel{}
+	got := m.FormatChatPrompt([]inference.Message{{Role: "user", Content: "hi"}})
+	want := "<start_of_turn>user\nhi<end_of_turn>\n<start_of_turn>model\n"
+	if got != want {
+		t.Fatalf("FormatChatPrompt = %q, want %q", got, want)
+	}
+	if got != formatChatTurns([]inference.Message{{Role: "user", Content: "hi"}}) {
+		t.Fatal("FormatChatPrompt must equal the serve-path formatChatTurns render")
+	}
+}
+
+// TestTextModelFormatChatContinuation pins the woken-turn framing: it closes the
+// model turn the restored KV prefix ends on with a leading <end_of_turn>, then
+// renders ONLY the new user turn and reopens the assistant header — no replay of
+// the retained history (the passed messages carry the new turn alone).
+func TestTextModelFormatChatContinuation(t *testing.T) {
+	m := &TextModel{}
+	got := m.FormatChatContinuation([]inference.Message{{Role: "user", Content: "and now?"}})
+	want := "<end_of_turn>\n<start_of_turn>user\nand now?<end_of_turn>\n<start_of_turn>model\n"
+	if got != want {
+		t.Fatalf("FormatChatContinuation = %q, want %q", got, want)
+	}
+}
+
+// TestTextModelFormatChatContinuationNoReplay proves the continuation frames only
+// what it is handed: two turns in, the render contains both and still opens with
+// the single close — it never re-emits earlier history, so the restored KV is
+// extended, not replayed.
+func TestTextModelFormatChatContinuationNoReplay(t *testing.T) {
+	m := &TextModel{}
+	got := m.FormatChatContinuation([]inference.Message{{Role: "user", Content: "q2"}})
+	if core.Count(got, "<start_of_turn>user") != 1 {
+		t.Fatalf("continuation replayed history: %q", got)
+	}
+	if !core.HasPrefix(got, "<end_of_turn>\n") {
+		t.Fatalf("continuation must open by closing the prior model turn: %q", got)
 	}
 }
