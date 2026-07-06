@@ -5,6 +5,7 @@
 package native
 
 import (
+	"math"
 	"slices"
 
 	g4 "dappco.re/go/inference/model/gemma4"
@@ -3509,4 +3510,36 @@ func nativeAssistantSessionKVRowsForTest(tokens, kvHeads, headDim int, seed byte
 		}
 	}
 	return out
+}
+
+// TestAssistantModel_ProportionalInvFreqs pins the full_attention draft-rope
+// spectrum against the target decode's proportionalRopePeriods: the same
+// raw-theta recovery from the arch's folded base, inverse values on the
+// rotated angles, zeros (identity) beyond them, and the lazy cache returning
+// the built slice. The draft Q must rope with this spectrum over the FULL
+// head dim — the contiguous-block pairing misroped the drafter's
+// full_attention layer and collapsed live MTP acceptance to ~5%.
+func TestAssistantModel_ProportionalInvFreqs(t *testing.T) {
+	const headDim, rotaryDim = 512, 128
+	folded := float32(math.Pow(1e6, float64(rotaryDim)/float64(headDim)))
+	m := &AssistantModel{}
+	inv := m.proportionalInvFreqs(headDim, rotaryDim, folded)
+	if len(inv) != headDim/2 {
+		t.Fatalf("len = %d, want %d", len(inv), headDim/2)
+	}
+	periods := globalRopePeriodsFromFolded(headDim, rotaryDim, folded)
+	for i := range rotaryDim / 2 {
+		got := float64(inv[i]) * float64(periods[i])
+		if got < 0.999 || got > 1.001 {
+			t.Fatalf("angle %d: invFreq*period = %v, want 1 (invFreq %v period %v)", i, got, inv[i], periods[i])
+		}
+	}
+	for i := rotaryDim / 2; i < headDim/2; i++ {
+		if inv[i] != 0 {
+			t.Fatalf("angle %d beyond the rotated set: invFreq = %v, want 0 (identity)", i, inv[i])
+		}
+	}
+	if &inv[0] != &m.proportionalInvFreqs(headDim, rotaryDim, folded)[0] {
+		t.Fatal("second call rebuilt the spectrum, want the cached slice")
+	}
 }

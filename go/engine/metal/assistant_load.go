@@ -6,6 +6,7 @@ package native
 
 import (
 	"encoding/binary"
+	"math"
 	"sync"
 
 	core "dappco.re/go"
@@ -49,6 +50,33 @@ type AssistantModel struct {
 
 	mapping *safetensors.DirMapping
 	gguf    *gguf.TensorMapping
+
+	// propInvFreqs caches the proportional partial-rotary inverse-frequency
+	// spectrum for the full_attention draft layers (len headDim/2, zeros beyond
+	// the rotated angles). Lazily built by proportionalInvFreqs — geometry is
+	// fixed per checkpoint, and a benign double-build writes the same values.
+	propInvFreqs []float32
+}
+
+// proportionalInvFreqs returns the inverse-frequency spectrum for a gemma4
+// proportional partial-rotary layer over the FULL headDim. foldedBase is the
+// ARCH-DERIVED theta (config.go pre-folds raw^(rotaryDim/headDim) for the
+// base-derived kernels), so the raw theta is recovered first; angles beyond
+// rotaryDim/2 are 0 (period +Inf — identity), matching the target decode's
+// globalRopeFreqs spectrum (proportionalRopePeriods) and the HF/mlx-lm
+// reference.
+func (m *AssistantModel) proportionalInvFreqs(headDim, rotaryDim int, foldedBase float32) []float32 {
+	half := headDim / 2
+	if len(m.propInvFreqs) == half {
+		return m.propInvFreqs
+	}
+	rawBase := math.Pow(float64(foldedBase), float64(headDim)/float64(rotaryDim))
+	f := make([]float32, half)
+	for i := range rotaryDim / 2 {
+		f[i] = float32(math.Pow(rawBase, -float64(2*i)/float64(headDim)))
+	}
+	m.propInvFreqs = f
+	return f
 }
 
 // AssistantPair is a native target-architecture plus assistant drafter
@@ -2341,6 +2369,22 @@ func nativeAssistantRoPEInto(out []byte, q []byte, m *AssistantModel, layer mode
 		return out, nil
 	}
 	base := nativeAssistantLayerRopeBase(m, layer)
+	if rotaryDim < headDim {
+		// gemma4 proportional partial rotary (full_attention): the trained pairing
+		// rotates (d, d+headDim/2) over the FULL head with identity beyond the
+		// rotated angles — the same spectrum the target decode ropes its global K
+		// with (globalRopeFreqs / proportionalRopePeriods), so the drafter's Q stays
+		// aligned with the shared K cache. The contiguous-block path below pairs
+		// (d, d+rotaryDim/2) inside the first rotaryDim dims — a different rotation
+		// that misroped the drafter's full_attention layer and cut live MTP
+		// acceptance to ~5%.
+		invFreqs := m.proportionalInvFreqs(headDim, rotaryDim, base)
+		out, err := RoPEFreqsBF16Into(out, q, 1, nHeads, headDim, headDim, invFreqs, scale, offset, false)
+		if err != nil {
+			return nil, core.E("native.assistant draft attention", "q_rope", err)
+		}
+		return out, nil
+	}
 	out, err := RoPEDimsBF16Into(out, q, 1, nHeads, headDim, rotaryDim, base, scale, offset, false)
 	if err != nil {
 		return nil, core.E("native.assistant draft attention", "q_rope", err)
