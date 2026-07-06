@@ -165,3 +165,31 @@ func TestOpenAIResponsesHandler_MethodRejection_Bad(t *testing.T) {
 		t.Fatalf("GET /v1/responses = %d, want 405", rec.Code)
 	}
 }
+
+// TestOllamaChatHandler_Streaming_Good pins the streaming /api/chat path: with
+// stream:true the handler emits per-token NDJSON frames carrying the content and
+// a terminating done frame (the wire format locked in mux_test.go, driven end to
+// end through the handler).
+func TestOllamaChatHandler_Streaming_Good(t *testing.T) {
+	rec := do(t, http.MethodPost, "/api/chat", `{"model":"test-model","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stream /api/chat = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !core.Contains(body, "Hello") || !core.Contains(body, `"done"`) {
+		t.Fatalf("stream /api/chat body = %s, want NDJSON content frames + a done frame", body)
+	}
+}
+
+// TestOllamaGenerateHandler_Streaming_Good pins the streaming /api/generate path:
+// stream:true emits per-token NDJSON response frames.
+func TestOllamaGenerateHandler_Streaming_Good(t *testing.T) {
+	rec := do(t, http.MethodPost, "/api/generate", `{"model":"test-model","prompt":"hi","stream":true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stream /api/generate = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !core.Contains(body, "Hello") || !core.Contains(body, `"response"`) {
+		t.Fatalf("stream /api/generate body = %s, want NDJSON response frames", body)
+	}
+}
