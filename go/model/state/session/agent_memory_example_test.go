@@ -158,45 +158,168 @@ func ExampleSession_Wake_foldedPrefill() {
 	// prefilled tokens: 2
 }
 
-// ExampleSession_Fork forks a slept session — the fork starts from the same
-// retained state and carries the parent's agent-memory linkage, so its next
-// sleep records the parent as its lineage.
-func ExampleSession_Fork() {
+// ExampleSession_WakeAgentMemory restores a session from a durable indexed
+// KV prefix written by an earlier SleepAgentMemory.
+func ExampleSession_WakeAgentMemory() {
 	ctx := context.Background()
 	store := memvid.NewInMemoryStore(nil)
-	info := spine.ModelInfo{Architecture: "gemma4_text", NumLayers: 1, QuantBits: 4, ContextLength: 8}
+	info := spine.ModelInfo{Architecture: "gemma4_text", NumLayers: 1}
 
-	parentNative := &sessionfake.Handle{
-		KV:     sessionfake.TestKVSnapshot(),
-		Forked: &sessionfake.Handle{KV: sessionfake.TestKVSnapshot()},
-	}
-	parent := New(parentNative, info, nil)
-	parentSleep, err := parent.Sleep(ctx, store, agent.SleepOptions{
-		EntryURI:     "mlx://agent/parent",
-		BlockOptions: kv.StateBlockOptions{BlockSize: 1},
-	})
+	asleep := New(&sessionfake.Handle{KV: sessionfake.TestKVSnapshot()}, info, nil)
+	sleep, err := asleep.SleepAgentMemory(ctx, store, agent.SleepOptions{EntryURI: "mlx://agent/wake-example"})
 	if err != nil {
-		fmt.Println("parent sleep error:", err)
+		fmt.Println("sleep error:", err)
 		return
 	}
 
-	forked, err := parent.Fork()
+	awake := New(&sessionfake.Handle{}, info, nil)
+	report, err := awake.WakeAgentMemory(ctx, store, agent.WakeOptions{IndexURI: sleep.IndexURI, EntryURI: sleep.EntryURI})
 	if err != nil {
-		fmt.Println("fork error:", err)
-		return
-	}
-	childSleep, err := forked.Sleep(ctx, store, agent.SleepOptions{
-		EntryURI:     "mlx://agent/child",
-		BlockOptions: kv.StateBlockOptions{BlockSize: 1},
-	})
-	if err != nil {
-		fmt.Println("child sleep error:", err)
+		fmt.Println("wake error:", err)
 		return
 	}
 
-	fmt.Println("child entry:", childSleep.EntryURI)
-	fmt.Println("inherited parent:", childSleep.ParentEntryURI == parentSleep.EntryURI)
+	fmt.Println("strategy:", report.RestoreStrategy)
 	// Output:
-	// child entry: mlx://agent/child
-	// inherited parent: true
+	// strategy: kv-blocks
+}
+
+// ExampleSession_WakeState implements the backend-neutral go-inference
+// agent-memory contract over an ordinary state.Store.
+func ExampleSession_WakeState() {
+	ctx := context.Background()
+	store := memvid.NewInMemoryStore(nil)
+	info := spine.ModelInfo{Architecture: "gemma4_text", NumLayers: 1}
+
+	asleep := New(&sessionfake.Handle{KV: sessionfake.TestKVSnapshot()}, info, nil)
+	sleep, err := asleep.SleepAgentMemory(ctx, store, agent.SleepOptions{EntryURI: "mlx://agent/wakestate-example"})
+	if err != nil {
+		fmt.Println("sleep error:", err)
+		return
+	}
+
+	awake := New(&sessionfake.Handle{}, info, nil)
+	result, err := awake.WakeState(ctx, inference.AgentMemoryWakeRequest{Store: store, IndexURI: sleep.IndexURI, EntryURI: sleep.EntryURI})
+	if err != nil {
+		fmt.Println("wake error:", err)
+		return
+	}
+
+	fmt.Println("entry:", result.Entry.URI)
+	// Output:
+	// entry: mlx://agent/wakestate-example
+}
+
+// ExampleSession_SleepAgentMemory streams the session's retained KV state
+// to durable storage and writes a bundle manifest plus wake index.
+func ExampleSession_SleepAgentMemory() {
+	sess := New(&sessionfake.Handle{KV: sessionfake.TestKVSnapshot()}, spine.ModelInfo{}, nil)
+	store := memvid.NewInMemoryStore(nil)
+
+	report, err := sess.SleepAgentMemory(context.Background(), store, agent.SleepOptions{EntryURI: "mlx://agent/sleep-example"})
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	fmt.Println("entry:", report.EntryURI)
+	fmt.Println("tokens:", report.TokenCount)
+	// Output:
+	// entry: mlx://agent/sleep-example
+	// tokens: 2
+}
+
+// ExampleSession_SleepState implements the backend-neutral go-inference
+// agent-memory contract over an ordinary state.Writer.
+func ExampleSession_SleepState() {
+	sess := New(&sessionfake.Handle{KV: sessionfake.TestKVSnapshot()}, spine.ModelInfo{}, nil)
+	store := memvid.NewInMemoryStore(nil)
+
+	result, err := sess.SleepState(context.Background(), inference.AgentMemorySleepRequest{Store: store, EntryURI: "mlx://agent/sleepstate-example"})
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	fmt.Println("entry:", result.Entry.URI)
+	// Output:
+	// entry: mlx://agent/sleepstate-example
+}
+
+// ExampleSession_AppendAndSleepAgentMemory appends new prompt material and
+// then streams the resulting state to durable storage without generating a
+// reply.
+func ExampleSession_AppendAndSleepAgentMemory() {
+	native := &sessionfake.Handle{KV: sessionfake.TestKVSnapshot()}
+	sess := New(native, spine.ModelInfo{}, nil)
+	store := memvid.NewInMemoryStore(nil)
+
+	report, err := sess.AppendAndSleepAgentMemory(context.Background(), "observation", store, agent.SleepOptions{EntryURI: "mlx://agent/append-example"})
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	fmt.Println("appended:", native.AppendPromptSeen)
+	fmt.Println("entry:", report.EntryURI)
+	// Output:
+	// appended: observation
+	// entry: mlx://agent/append-example
+}
+
+// ExampleSession_GenerateAndSleepAgentMemory generates a reply from the
+// retained state and streams the post-answer KV state to durable storage in
+// one call.
+func ExampleSession_GenerateAndSleepAgentMemory() {
+	sess := New(&sessionfake.Handle{
+		KV:     sessionfake.TestKVSnapshot(),
+		Tokens: []inference.Token{{ID: 1, Text: "hello"}},
+	}, spine.ModelInfo{}, nil)
+	store := memvid.NewInMemoryStore(nil)
+
+	text, report, err := sess.GenerateAndSleepAgentMemory(context.Background(), store, agent.SleepOptions{EntryURI: "mlx://agent/gen-example"})
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	fmt.Println("reply:", text)
+	fmt.Println("entry:", report.EntryURI)
+	// Output:
+	// reply: hello
+	// entry: mlx://agent/gen-example
+}
+
+// ExampleWakeOptionsFromInference maps a go-inference wake request onto
+// agent wake options — the shared shape Model.ForkState builds on.
+func ExampleWakeOptionsFromInference() {
+	req := inference.AgentMemoryWakeRequest{
+		IndexURI: "mlx://index",
+		EntryURI: "mlx://entry",
+	}
+
+	opts := WakeOptionsFromInference(req)
+
+	fmt.Println("index:", opts.IndexURI)
+	fmt.Println("entry:", opts.EntryURI)
+	// Output:
+	// index: mlx://index
+	// entry: mlx://entry
+}
+
+// ExampleToInferenceWakeResult maps a wake report onto the go-inference
+// result shape — the shared shape Model.ForkState builds on.
+func ExampleToInferenceWakeResult() {
+	report := &agent.WakeReport{
+		EntryURI:     "mlx://entry",
+		PrefixTokens: 4,
+	}
+
+	result := ToInferenceWakeResult(report)
+
+	fmt.Println("entry:", result.Entry.URI)
+	fmt.Println("prefix tokens:", result.PrefixTokens)
+	// Output:
+	// entry: mlx://entry
+	// prefix tokens: 4
 }
