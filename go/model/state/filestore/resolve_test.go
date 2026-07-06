@@ -103,7 +103,7 @@ func TestFileStore_Good_ResolveRefBytesUsesFrameOffset(t *testing.T) {
 	}
 }
 
-func TestFileStore_Bad_MissingChunk(t *testing.T) {
+func TestResolve_Store_Get_Bad(t *testing.T) {
 	store, err := Create(context.Background(), core.PathJoin(t.TempDir(), "empty.mvlog"))
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -117,7 +117,7 @@ func TestFileStore_Bad_MissingChunk(t *testing.T) {
 	}
 }
 
-func TestGet_Good_ExistingChunk(t *testing.T) {
+func TestResolve_Store_Get_Good(t *testing.T) {
 	ctx := context.Background()
 	store, err := Create(ctx, core.PathJoin(t.TempDir(), "get-existing.mvlog"))
 	if err != nil {
@@ -136,6 +136,14 @@ func TestGet_Good_ExistingChunk(t *testing.T) {
 	}
 }
 
+func TestResolve_Store_Get_Ugly(t *testing.T) {
+	// Get delegates straight to Resolve, whose nil-receiver guard is
+	// what actually rejects this call — Get itself has no separate check.
+	if _, err := (*Store)(nil).Get(context.Background(), 1); !core.Is(err, state.ErrChunkNotFound) {
+		t.Fatalf("Get(nil store) error = %v, want ErrChunkNotFound", err)
+	}
+}
+
 func TestResolve_Bad_CancelledContext(t *testing.T) {
 	store, err := Create(context.Background(), core.PathJoin(t.TempDir(), "resolve-cancelled.mvlog"))
 	if err != nil {
@@ -149,13 +157,46 @@ func TestResolve_Bad_CancelledContext(t *testing.T) {
 	}
 }
 
-func TestResolve_Bad_NilStore(t *testing.T) {
+func TestResolve_Store_Resolve_Good(t *testing.T) {
+	ctx := context.Background()
+	store, err := Create(ctx, core.PathJoin(t.TempDir(), "resolve-good.mvlog"))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer store.Close()
+	ref, err := store.PutBytes(ctx, []byte("hello"), state.PutOptions{})
+	if err != nil {
+		t.Fatalf("PutBytes() error = %v", err)
+	}
+	chunk, err := store.Resolve(ctx, ref.ChunkID)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if chunk.Text != "hello" || chunk.Ref.ChunkID != ref.ChunkID {
+		t.Fatalf("Resolve() = %+v, want hello chunk %d", chunk, ref.ChunkID)
+	}
+}
+
+func TestResolve_Store_Resolve_Bad(t *testing.T) {
 	if _, err := (*Store)(nil).Resolve(context.Background(), 1); !core.Is(err, state.ErrChunkNotFound) {
 		t.Fatalf("Resolve(nil store) error = %v, want ErrChunkNotFound", err)
 	}
 }
 
-func TestResolveURI_Bad_CancelledContext(t *testing.T) {
+func TestResolve_Store_Resolve_Ugly(t *testing.T) {
+	store, err := Create(context.Background(), core.PathJoin(t.TempDir(), "resolve-ugly-closed.mvlog"))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := store.Resolve(context.Background(), 1); err == nil {
+		t.Fatal("Resolve(closed store) error = nil")
+	}
+}
+
+func TestResolve_Store_ResolveURI_Ugly(t *testing.T) {
 	store, err := Create(context.Background(), core.PathJoin(t.TempDir(), "resolveuri-cancelled.mvlog"))
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -174,7 +215,26 @@ func TestResolveURI_Bad_NilStore(t *testing.T) {
 	}
 }
 
-func TestResolveURI_Bad_NotFoundOnOpenStore(t *testing.T) {
+func TestResolve_Store_ResolveURI_Good(t *testing.T) {
+	ctx := context.Background()
+	store, err := Create(ctx, core.PathJoin(t.TempDir(), "resolveuri-good.mvlog"))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer store.Close()
+	if _, err := store.Put(ctx, "hello", state.PutOptions{URI: "mlx://present"}); err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	chunk, err := store.ResolveURI(ctx, "mlx://present")
+	if err != nil {
+		t.Fatalf("ResolveURI() error = %v", err)
+	}
+	if chunk.Text != "hello" {
+		t.Fatalf("ResolveURI() = %+v, want hello chunk", chunk)
+	}
+}
+
+func TestResolve_Store_ResolveURI_Bad(t *testing.T) {
 	ctx := context.Background()
 	store, err := Create(ctx, core.PathJoin(t.TempDir(), "resolveuri-miss.mvlog"))
 	if err != nil {
@@ -189,7 +249,7 @@ func TestResolveURI_Bad_NotFoundOnOpenStore(t *testing.T) {
 	}
 }
 
-func TestResolveBytes_Bad_CancelledContext(t *testing.T) {
+func TestResolve_Store_ResolveBytes_Bad(t *testing.T) {
 	store, err := Create(context.Background(), core.PathJoin(t.TempDir(), "resolvebytes-cancelled.mvlog"))
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -202,7 +262,27 @@ func TestResolveBytes_Bad_CancelledContext(t *testing.T) {
 	}
 }
 
-func TestResolveBytesLocked_Bad_ReadAtError(t *testing.T) {
+func TestResolve_Store_ResolveBytes_Good(t *testing.T) {
+	ctx := context.Background()
+	store, err := Create(ctx, core.PathJoin(t.TempDir(), "resolvebytes-good.mvlog"))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer store.Close()
+	ref, err := store.PutBytes(ctx, []byte("hello"), state.PutOptions{})
+	if err != nil {
+		t.Fatalf("PutBytes() error = %v", err)
+	}
+	chunk, err := store.ResolveBytes(ctx, ref.ChunkID)
+	if err != nil {
+		t.Fatalf("ResolveBytes() error = %v", err)
+	}
+	if string(chunk.Data) != "hello" || chunk.Text != "" {
+		t.Fatalf("ResolveBytes() = %+v, want raw hello bytes with no decoded Text", chunk)
+	}
+}
+
+func TestResolve_Store_ResolveBytes_Ugly(t *testing.T) {
 	ctx := context.Background()
 	store, err := Create(ctx, core.PathJoin(t.TempDir(), "poke-index.mvlog"))
 	if err != nil {
@@ -228,7 +308,7 @@ func TestResolveBytesLocked_Bad_ReadAtError(t *testing.T) {
 	}
 }
 
-func TestBorrowBytes_Good_WritableStore(t *testing.T) {
+func TestResolve_Store_BorrowBytes_Good(t *testing.T) {
 	ctx := context.Background()
 	store, err := Create(ctx, core.PathJoin(t.TempDir(), "borrow-writable.mvlog"))
 	if err != nil {
@@ -310,7 +390,7 @@ func TestBorrowBytes_Bad_ClosedStore(t *testing.T) {
 	}
 }
 
-func TestBorrowBytes_Bad_MissingChunk(t *testing.T) {
+func TestResolve_Store_BorrowBytes_Bad(t *testing.T) {
 	store, err := Create(context.Background(), core.PathJoin(t.TempDir(), "borrow-missing.mvlog"))
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -321,7 +401,7 @@ func TestBorrowBytes_Bad_MissingChunk(t *testing.T) {
 	}
 }
 
-func TestBorrowBytes_Bad_BorrowPayloadLockedError(t *testing.T) {
+func TestResolve_Store_BorrowBytes_Ugly(t *testing.T) {
 	ctx := context.Background()
 	path := core.PathJoin(t.TempDir(), "borrow-payload-error.mvlog")
 	source, err := Create(ctx, path)
@@ -352,7 +432,7 @@ func TestBorrowBytes_Bad_BorrowPayloadLockedError(t *testing.T) {
 	}
 }
 
-func TestResolveRefBytes_Good_DelegatesWhenNoFrameOffset(t *testing.T) {
+func TestResolve_Store_ResolveRefBytes_Good(t *testing.T) {
 	ctx := context.Background()
 	store, err := Create(ctx, core.PathJoin(t.TempDir(), "delegate-resolveref.mvlog"))
 	if err != nil {
@@ -391,7 +471,7 @@ func TestResolveRefBytes_Bad_NilStore(t *testing.T) {
 	}
 }
 
-func TestResolveRefBytes_Bad_NonFileCodec(t *testing.T) {
+func TestResolve_Store_ResolveRefBytes_Bad(t *testing.T) {
 	store, err := Create(context.Background(), core.PathJoin(t.TempDir(), "resolveref-badcodec.mvlog"))
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -403,7 +483,7 @@ func TestResolveRefBytes_Bad_NonFileCodec(t *testing.T) {
 	}
 }
 
-func TestResolveRefBytes_Bad_ClosedStore(t *testing.T) {
+func TestResolve_Store_ResolveRefBytes_Ugly(t *testing.T) {
 	store, err := Create(context.Background(), core.PathJoin(t.TempDir(), "resolveref-closed.mvlog"))
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -418,7 +498,7 @@ func TestResolveRefBytes_Bad_ClosedStore(t *testing.T) {
 	}
 }
 
-func TestBorrowRefBytes_Good_DelegatesWhenNoFrameOffset(t *testing.T) {
+func TestResolve_Store_BorrowRefBytes_Good(t *testing.T) {
 	ctx := context.Background()
 	store, err := Create(ctx, core.PathJoin(t.TempDir(), "delegate-borrowref.mvlog"))
 	if err != nil {
@@ -498,7 +578,7 @@ func TestBorrowRefBytes_Bad_NilStore(t *testing.T) {
 	}
 }
 
-func TestBorrowRefBytes_Bad_NonFileCodec(t *testing.T) {
+func TestResolve_Store_BorrowRefBytes_Bad(t *testing.T) {
 	store, err := Create(context.Background(), core.PathJoin(t.TempDir(), "borrowref-badcodec.mvlog"))
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -510,7 +590,7 @@ func TestBorrowRefBytes_Bad_NonFileCodec(t *testing.T) {
 	}
 }
 
-func TestBorrowRefBytes_Bad_ClosedStore(t *testing.T) {
+func TestResolve_Store_BorrowRefBytes_Ugly(t *testing.T) {
 	store, err := Create(context.Background(), core.PathJoin(t.TempDir(), "borrowref-closed.mvlog"))
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
