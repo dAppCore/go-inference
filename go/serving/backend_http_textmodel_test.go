@@ -393,12 +393,18 @@ func TestBackendHttpTextmodel_HTTPTextModel_Classify_Good(t *core.T) {
 
 func TestBackendHttpTextmodel_HTTPTextModel_Classify_Bad(t *core.T) {
 	model := NewHTTPTextModel(NewHTTPBackend("", ""))
-	assertResultError(t, model.Classify(context.Background(), nil))
+	r := model.Classify(context.Background(), nil)
+	assertResultError(t, r)
+	core.AssertNil(t, model.lastErr) // Classify never touches lastErr — it always fails unconditionally
 }
 
 func TestBackendHttpTextmodel_HTTPTextModel_Classify_Ugly(t *core.T) {
 	model := NewHTTPTextModel(NewHTTPBackend("http://127.0.0.1", "model"))
-	assertResultError(t, model.Classify(context.Background(), []string{}), "classify")
+	r := model.Classify(context.Background(), []string{})
+	assertResultError(t, r, "classify not supported by HTTP backend")
+	if _, ok := r.Value.(error); !ok {
+		t.Fatalf("Result.Value = %#v, want an error", r.Value)
+	}
 }
 
 func TestBackendHttpTextmodel_HTTPTextModel_BatchGenerate_Good(t *core.T) {
