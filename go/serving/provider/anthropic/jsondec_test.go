@@ -131,6 +131,50 @@ func TestUnmarshalMessageRequest_InvalidShapes(t *testing.T) {
 	}
 }
 
+// TestJsondec_MessageRequest_UnmarshalJSON_Good pins a direct method call
+// (rather than via encoding/json.Unmarshal) against a typical request.
+func TestJsondec_MessageRequest_UnmarshalJSON_Good(t *testing.T) {
+	var req MessageRequest
+	data := []byte(`{"model":"gemma-4","system":"Be concise.","messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],"max_tokens":128,"stream":true}`)
+	if err := req.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if req.Model != "gemma-4" || req.System != "Be concise." || req.MaxTokens != 128 || !req.Stream {
+		t.Fatalf("req = %+v", req)
+	}
+	if len(req.Messages) != 1 || req.Messages[0].Content[0].Text != "hi" {
+		t.Fatalf("req.Messages = %+v", req.Messages)
+	}
+}
+
+// TestJsondec_MessageRequest_UnmarshalJSON_Bad pins a non-numeric top_k
+// value rejected cleanly (distinct decode branch from the invalid-shapes
+// table above).
+func TestJsondec_MessageRequest_UnmarshalJSON_Bad(t *testing.T) {
+	var req MessageRequest
+	err := req.UnmarshalJSON([]byte(`{"model":"x","max_tokens":1,"messages":[],"top_k":"nope"}`))
+	if err == nil {
+		t.Fatalf("UnmarshalJSON with a non-numeric top_k returned nil error")
+	}
+}
+
+// TestJsondec_MessageRequest_UnmarshalJSON_Ugly pins the "tools" field's
+// reflect-fallback decode path — the one branch of MessageRequest.UnmarshalJSON
+// that doesn't hand-roll its own walker.
+func TestJsondec_MessageRequest_UnmarshalJSON_Ugly(t *testing.T) {
+	var req MessageRequest
+	data := []byte(`{"model":"x","max_tokens":5,"messages":[],"tools":[{"name":"get_weather","input_schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}]}`)
+	if err := req.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if len(req.Tools) != 1 || req.Tools[0].Name != "get_weather" {
+		t.Fatalf("req.Tools = %+v, want one get_weather tool (reflect-decoded nested schema)", req.Tools)
+	}
+	if req.Tools[0].InputSchema.Type != "object" || len(req.Tools[0].InputSchema.Required) != 1 {
+		t.Fatalf("req.Tools[0].InputSchema = %+v", req.Tools[0].InputSchema)
+	}
+}
+
 // TestUnmarshalMessageResponse_DirectShapes pins the response decoder.
 func TestUnmarshalMessageResponse_DirectShapes(t *testing.T) {
 	in := `{"id":"msg_1","type":"message","role":"assistant","model":"claude-3","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`
@@ -149,5 +193,46 @@ func TestUnmarshalMessageResponse_DirectShapes(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got:  %+v\nwant: %+v", got, want)
+	}
+}
+
+// TestJsondec_MessageResponse_UnmarshalJSON_Good pins a direct method call
+// against a typical response.
+func TestJsondec_MessageResponse_UnmarshalJSON_Good(t *testing.T) {
+	var resp MessageResponse
+	data := []byte(`{"id":"msg_1","type":"message","role":"assistant","model":"gemma-4","content":[{"type":"text","text":"hi"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}`)
+	if err := resp.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if resp.ID != "msg_1" || resp.StopReason != "end_turn" || resp.Usage.InputTokens != 3 {
+		t.Fatalf("resp = %+v", resp)
+	}
+}
+
+// TestJsondec_MessageResponse_UnmarshalJSON_Bad pins a non-object usage
+// value rejected cleanly.
+func TestJsondec_MessageResponse_UnmarshalJSON_Bad(t *testing.T) {
+	var resp MessageResponse
+	err := resp.UnmarshalJSON([]byte(`{"id":"msg_1","usage":"not-an-object"}`))
+	if err == nil {
+		t.Fatalf("UnmarshalJSON with a non-object usage returned nil error")
+	}
+}
+
+// TestJsondec_MessageResponse_UnmarshalJSON_Ugly pins a content array
+// holding a tool_use block (nested input decode) alongside an explicit
+// null stop_sequence.
+func TestJsondec_MessageResponse_UnmarshalJSON_Ugly(t *testing.T) {
+	var resp MessageResponse
+	data := []byte(`{"id":"msg_2","type":"message","role":"assistant","model":"gemma-4","content":[{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"Paris"}}],"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}`)
+	if err := resp.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if resp.StopSequence != "" {
+		t.Fatalf("resp.StopSequence = %q, want empty for explicit null", resp.StopSequence)
+	}
+	block := resp.Content[0]
+	if block.Type != "tool_use" || block.Name != "get_weather" || block.Input["city"] != "Paris" {
+		t.Fatalf("resp.Content[0] = %+v", block)
 	}
 }
