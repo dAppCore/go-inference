@@ -41,6 +41,7 @@ type TextModel struct {
 	modelType string
 	info      inference.ModelInfo
 	maxLen    int
+	turns     TurnTokens
 
 	mu          sync.Mutex
 	lastErr     core.Result
@@ -53,12 +54,47 @@ var (
 	_ TrainerModel             = (*TextModel)(nil)
 )
 
+// TurnTokens is the chat-turn marker dialect the loaded checkpoint was tuned
+// on. Gemma 4 RENAMED the turn markers to <|turn>/<turn|> (reusing gemma3's
+// token ids 105/106 under new spellings — <start_of_turn> is no longer in its
+// vocab and tokenises as plain text); gemma3-era checkpoints keep
+// <start_of_turn>/<end_of_turn>. Rendering the wrong dialect ships the turn
+// structure as literal text: ~17 junk prompt tokens per turn pair, the reply
+// polluted with a literal "<end_of_turn>" string, and measurable instruction
+// damage (off-template E2B mangles "reverse 'sovereign'").
+type TurnTokens struct {
+	Open  string // opens a turn, followed by the role and \n
+	Close string // closes a turn
+}
+
+// DetectTurnTokens picks the chat-turn dialect from the tokenizer's vocab: a
+// checkpoint that carries <|turn> as a token is gemma4-templated; anything
+// else keeps the legacy <start_of_turn> template.
+func DetectTurnTokens(tok *tokenizer.Tokenizer) TurnTokens {
+	if tok != nil {
+		if _, ok := tok.TokenID("<|turn>"); ok {
+			return TurnTokens{Open: "<|turn>", Close: "<turn|>"}
+		}
+	}
+	return TurnTokens{Open: "<start_of_turn>", Close: "<end_of_turn>"}
+}
+
+// turnTokens is the model's detected turn dialect, defaulting a zero-value
+// TextModel (no tokenizer seen) to the legacy template.
+func (m *TextModel) turnTokens() TurnTokens {
+	if m == nil || m.turns.Open == "" {
+		return TurnTokens{Open: "<start_of_turn>", Close: "<end_of_turn>"}
+	}
+	return m.turns
+}
+
 // NewTextModel wraps a loaded engine TokenModel as an inference.TextModel. tok
 // is the model's tokenizer (text↔ids is the serve boundary the model carries
 // once loaded); info + maxLen are the engine-built model metadata + context
-// window; modelType is the architecture selector reported by ModelType.
+// window; modelType is the architecture selector reported by ModelType. The
+// chat-turn dialect is detected from the tokenizer's vocab.
 func NewTextModel(tm TokenModel, tok *tokenizer.Tokenizer, modelType string, info inference.ModelInfo, maxLen int) *TextModel {
-	return &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, lastErr: core.Ok(nil)}
+	return &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, turns: DetectTurnTokens(tok), lastErr: core.Ok(nil)}
 }
 
 // openSession opens a fresh incremental decode session as the engine [Session]
@@ -108,29 +144,31 @@ func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts
 			m.setErr(core.NewError("engine.TextModel.Chat: model does not accept image input"))
 		}
 	}
-	return m.stream(ctx, m.encode(formatChatTurns(messages)), cfg)
+	return m.stream(ctx, m.encode(formatChatTurns(m.turnTokens(), messages)), cfg)
 }
 
-// FormatChatPrompt renders a fresh multi-turn prompt with the gemma turn
+// FormatChatPrompt renders a fresh multi-turn prompt with the model's turn
 // template — byte-identical to the serve path's framing (Chat above encodes the
 // same formatChatTurns output). The durable -state loop calls this to open a
 // fresh session so a stateful first turn is framed exactly like a stateless
 // serve request: FormatChatPrompt([{user, "hi"}]) ->
-// "<start_of_turn>user\nhi<end_of_turn>\n<start_of_turn>model\n".
+// "<|turn>user\nhi<turn|>\n<|turn>model\n" on a gemma4 checkpoint
+// (<start_of_turn> spelling on gemma3-era vocabs).
 func (m *TextModel) FormatChatPrompt(messages []inference.Message) string {
-	return formatChatTurns(messages)
+	return formatChatTurns(m.turnTokens(), messages)
 }
 
 // FormatChatContinuation renders a woken-session turn with no replay of the
 // retained history: it closes the model turn the restored KV prefix ends on
 // (the prior answer, left open when generation stopped), appends the new user
-// turn, and reopens the assistant header. The leading <end_of_turn>\n is the
+// turn, and reopens the assistant header. The leading turn-close + \n is the
 // close — FormatChatContinuation([{user, "and now?"}]) ->
-// "<end_of_turn>\n<start_of_turn>user\nand now?<end_of_turn>\n<start_of_turn>model\n"
-// — so the model resumes on a well-formed turn boundary rather than the raw
-// prompt bleeding into its own open turn.
+// "<turn|>\n<|turn>user\nand now?<turn|>\n<|turn>model\n" on gemma4 — so the
+// model resumes on a well-formed turn boundary rather than the raw prompt
+// bleeding into its own open turn.
 func (m *TextModel) FormatChatContinuation(messages []inference.Message) string {
-	return "<end_of_turn>\n" + formatChatTurns(messages)
+	turns := m.turnTokens()
+	return turns.Close + "\n" + formatChatTurns(turns, messages)
 }
 
 func (m *TextModel) encode(prompt string) []int32 {
@@ -403,6 +441,13 @@ func (m *TextModel) stopTokens(cfg inference.GenerateConfig) []int32 {
 		if eos := m.tok.EOS(); eos >= 0 {
 			stop = append(stop, eos)
 		}
+		// The turn-close marker ends an assistant turn on chat-tuned checkpoints
+		// (gemma4 declares <turn|> in its generation_config eos set; tuned models
+		// emit it instead of <eos>). Without it a chat reply never terminates and
+		// generation runs to the token budget.
+		if id, ok := m.tok.TokenID(m.turnTokens().Close); ok && !tokenInSet(id, stop) {
+			stop = append(stop, id)
+		}
 	}
 	return stop
 }
@@ -439,15 +484,15 @@ func (m *TextModel) setMetrics(promptTokens, generated int, total time.Duration,
 	m.mu.Unlock()
 }
 
-// formatChatTurns renders messages with the gemma turn template (user/model
-// turns, a trailing open model turn to complete). Kept minimal: the serve path
-// drives the same template pkg/model/gemma4/chat registers.
-func formatChatTurns(messages []inference.Message) string {
+// formatChatTurns renders messages with the model's turn template (user/model
+// turns in the detected marker dialect, a trailing open model turn to
+// complete).
+func formatChatTurns(turns TurnTokens, messages []inference.Message) string {
 	var out strings.Builder
 	for _, msg := range messages {
-		out.WriteString("<start_of_turn>" + chatTurnRole(msg.Role) + "\n" + msg.Content + "<end_of_turn>\n")
+		out.WriteString(turns.Open + chatTurnRole(msg.Role) + "\n" + msg.Content + turns.Close + "\n")
 	}
-	out.WriteString("<start_of_turn>model\n")
+	out.WriteString(turns.Open + "model\n")
 	return out.String()
 }
 

@@ -231,7 +231,7 @@ func sessionParserControlToken(text string) bool {
 		return false
 	}
 	// Every control marker begins with '<'. A single byte-scan for the
-	// opening angle prunes the entire 14-pattern probe set on the dominant
+	// opening angle prunes the entire 16-pattern probe set on the dominant
 	// "ordinary token text" path. Tokens flow through this function once
 	// per emitted token during GenerateStream — the cheaper miss matters.
 	open := core.Index(text, "<")
@@ -243,6 +243,8 @@ func sessionParserControlToken(text string) bool {
 	tail := text[open:]
 	return core.Contains(tail, "<|channel>") ||
 		core.Contains(tail, "<channel|>") ||
+		core.Contains(tail, "<|turn>") ||
+		core.Contains(tail, "<turn|>") ||
 		core.Contains(tail, "<start_of_turn>") ||
 		core.Contains(tail, "<end_of_turn>") ||
 		core.Contains(tail, "<think>") ||

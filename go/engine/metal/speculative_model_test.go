@@ -8,20 +8,23 @@ import (
 	"testing"
 
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/engine"
 )
 
 // TestFormatSpeculativeChatTurns pins that the speculative model's chat framing
-// is byte-identical to the plain engine path's gemma turn template: each turn as
-// "<start_of_turn>ROLE\nCONTENT<end_of_turn>\n", then a trailing open model turn.
-// Divergence here would give the drafter a different prompt shape than the plain
-// path, so keep it locked.
+// is byte-identical to the plain engine path's turn template in BOTH marker
+// dialects (gemma4 <|turn>/<turn|>; legacy <start_of_turn>), with a trailing
+// open model turn. Divergence here would give the drafter a different prompt
+// shape than the plain path, so keep it locked.
 func TestFormatSpeculativeChatTurns(t *testing.T) {
-	got := formatSpeculativeChatTurns([]inference.Message{{Role: "user", Content: "hi"}})
-	want := "<start_of_turn>user\nhi<end_of_turn>\n<start_of_turn>model\n"
+	gemma4 := engine.TurnTokens{Open: "<|turn>", Close: "<turn|>"}
+	got := formatSpeculativeChatTurns(gemma4, []inference.Message{{Role: "user", Content: "hi"}})
+	want := "<|turn>user\nhi<turn|>\n<|turn>model\n"
 	if got != want {
 		t.Fatalf("formatSpeculativeChatTurns = %q, want %q", got, want)
 	}
-	multi := formatSpeculativeChatTurns([]inference.Message{
+	legacy := engine.TurnTokens{Open: "<start_of_turn>", Close: "<end_of_turn>"}
+	multi := formatSpeculativeChatTurns(legacy, []inference.Message{
 		{Role: "user", Content: "q"},
 		{Role: "assistant", Content: "a"},
 		{Role: "user", Content: "q2"},

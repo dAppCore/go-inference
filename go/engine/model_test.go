@@ -465,7 +465,7 @@ func TestModel_TextModel_FormatChatPrompt_Good(t *testing.T) {
 	if got != want {
 		t.Fatalf("FormatChatPrompt = %q, want %q", got, want)
 	}
-	if got != formatChatTurns([]inference.Message{{Role: "user", Content: "hi"}}) {
+	if got != formatChatTurns(m.turnTokens(), []inference.Message{{Role: "user", Content: "hi"}}) {
 		t.Fatal("FormatChatPrompt must equal the serve-path formatChatTurns render")
 	}
 }
@@ -986,5 +986,99 @@ func TestPrefillSplit(t *testing.T) {
 	start := time.Now()
 	if d := m.prefillSplit(start); d < 0 {
 		t.Fatalf("prefillSplit = %v, want >= 0", d)
+	}
+}
+
+// gemma4FixtureTokenizerJSON is fixtureTokenizerJSON plus the gemma4 turn
+// markers (<|turn>/<turn|> — gemma4 renamed the turn tokens and dropped
+// <start_of_turn> from its vocab), so dialect detection + framing run the
+// production LoadTokenizer path.
+const gemma4FixtureTokenizerJSON = `{
+  "model": {
+    "type": "BPE",
+    "vocab": {"z": 42},
+    "merges": []
+  },
+  "added_tokens": [
+    {"id": 1, "content": "<bos>", "special": true},
+    {"id": 2, "content": "<eos>", "special": true},
+    {"id": 105, "content": "<|turn>", "special": true},
+    {"id": 106, "content": "<turn|>", "special": true}
+  ]
+}`
+
+func newGemma4FixtureTokenizer(t *testing.T) *tokenizer.Tokenizer {
+	t.Helper()
+	dir := t.TempDir()
+	path := core.JoinPath(dir, "tokenizer.json")
+	if err := coreio.Local.Write(path, gemma4FixtureTokenizerJSON); err != nil {
+		t.Fatalf("write gemma4 fixture tokenizer: %v", err)
+	}
+	tok, err := tokenizer.LoadTokenizer(path)
+	if err != nil {
+		t.Fatalf("load gemma4 fixture tokenizer: %v", err)
+	}
+	return tok
+}
+
+// TestModel_DetectTurnTokens_Good pins the gemma4 dialect pick: a vocab
+// carrying <|turn> selects the renamed turn markers.
+func TestModel_DetectTurnTokens_Good(t *testing.T) {
+	turns := DetectTurnTokens(newGemma4FixtureTokenizer(t))
+	if turns.Open != "<|turn>" || turns.Close != "<turn|>" {
+		t.Fatalf("gemma4 vocab detected %+v, want <|turn>/<turn|>", turns)
+	}
+}
+
+// TestModel_DetectTurnTokens_Bad pins the legacy fallback: a vocab without
+// <|turn> keeps the <start_of_turn> template.
+func TestModel_DetectTurnTokens_Bad(t *testing.T) {
+	turns := DetectTurnTokens(newFixtureTokenizer(t))
+	if turns.Open != "<start_of_turn>" || turns.Close != "<end_of_turn>" {
+		t.Fatalf("legacy vocab detected %+v, want <start_of_turn>/<end_of_turn>", turns)
+	}
+}
+
+// TestModel_DetectTurnTokens_Ugly pins the nil-tokenizer edge: detection
+// degrades to the legacy template rather than empty markers.
+func TestModel_DetectTurnTokens_Ugly(t *testing.T) {
+	turns := DetectTurnTokens(nil)
+	if turns.Open != "<start_of_turn>" || turns.Close != "<end_of_turn>" {
+		t.Fatalf("nil tokenizer detected %+v, want the legacy template", turns)
+	}
+}
+
+// TestModel_TextModel_FormatChatPrompt_Gemma4Dialect pins the framing a
+// gemma4-vocab model serves with: the renamed markers, byte-for-byte the
+// template the checkpoint was tuned on (rendering <start_of_turn> against a
+// gemma4 vocab tokenises as plain text and measurably damages replies).
+func TestModel_TextModel_FormatChatPrompt_Gemma4Dialect(t *testing.T) {
+	m := NewTextModel(nil, newGemma4FixtureTokenizer(t), "gemma4", inference.ModelInfo{}, 8)
+	got := m.FormatChatPrompt([]inference.Message{{Role: "user", Content: "hi"}})
+	want := "<|turn>user\nhi<turn|>\n<|turn>model\n"
+	if got != want {
+		t.Fatalf("FormatChatPrompt = %q, want %q", got, want)
+	}
+	if cont := m.FormatChatContinuation([]inference.Message{{Role: "user", Content: "go"}}); cont != "<turn|>\n<|turn>user\ngo<turn|>\n<|turn>model\n" {
+		t.Fatalf("FormatChatContinuation = %q, want the <turn|>-closed continuation", cont)
+	}
+}
+
+// TestModel_TextModel_StopTokens_TurnClose pins the stop set: the model's
+// turn-close id joins <eos> (gemma4 tuned models end assistant turns with
+// <turn|>, not <eos> — without it a chat reply runs to the token budget).
+func TestModel_TextModel_StopTokens_TurnClose(t *testing.T) {
+	tok := newGemma4FixtureTokenizer(t)
+	m := NewTextModel(nil, tok, "gemma4", inference.ModelInfo{}, 8)
+	stop := m.stopTokens(inference.GenerateConfig{})
+	if !tokenInSet(106, stop) {
+		t.Fatalf("stop set %v missing the <turn|> id 106", stop)
+	}
+	if !tokenInSet(tok.EOS(), stop) {
+		t.Fatalf("stop set %v missing the <eos> id", stop)
+	}
+	legacy := NewTextModel(nil, newFixtureTokenizer(t), "x", inference.ModelInfo{}, 8)
+	if got := legacy.stopTokens(inference.GenerateConfig{}); tokenInSet(106, got) {
+		t.Fatalf("legacy vocab stop set %v gained id 106 without a <turn|> token", got)
 	}
 }
