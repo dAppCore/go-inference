@@ -11,29 +11,100 @@ import (
 	"time"
 
 	core "dappco.re/go"
+	coreprovider "dappco.re/go/api/pkg/provider"
 	ratelimit "dappco.re/go/ratelimit"
 	"github.com/gin-gonic/gin"
 )
 
+// --- NewInferenceProvider ---
+
+func TestInference_NewInferenceProvider_Good(t *testing.T) {
+	svc := &Service{}
+	p := NewInferenceProvider(svc)
+	if p == nil || p.svc != svc {
+		t.Fatalf("NewInferenceProvider = %+v, want it wrapping the given Service", p)
+	}
+}
+
+// TestInference_NewInferenceProvider_Bad proves NewInferenceProvider always
+// allocates a fresh wrapper — two calls never alias the same *InferenceProvider.
+func TestInference_NewInferenceProvider_Bad(t *testing.T) {
+	first := NewInferenceProvider(&Service{})
+	second := NewInferenceProvider(&Service{})
+	if first == second {
+		t.Fatal("NewInferenceProvider returned the same *InferenceProvider instance across two calls")
+	}
+}
+
+// TestInference_NewInferenceProvider_Ugly covers the intended aliasing edge:
+// two providers wrapping the SAME underlying Service must share it.
+func TestInference_NewInferenceProvider_Ugly(t *testing.T) {
+	svc := &Service{}
+	first := NewInferenceProvider(svc)
+	second := NewInferenceProvider(svc)
+	if first.svc != second.svc {
+		t.Fatal("NewInferenceProvider wrapping the same Service produced providers pointing at different services")
+	}
+}
+
 // --- Name / BasePath ---
 
-func TestInference_Name_Good(t *testing.T) {
+func TestInference_InferenceProvider_Name_Good(t *testing.T) {
 	p := NewInferenceProvider(nil)
 	if got := p.Name(); got != "inference" {
 		t.Fatalf("Name() = %q, want %q", got, "inference")
 	}
 }
 
-func TestInference_BasePath_Good(t *testing.T) {
+// TestInference_InferenceProvider_Name_Bad covers a nil receiver — Name()
+// never touches p, so it must still answer the constant rather than panic.
+func TestInference_InferenceProvider_Name_Bad(t *testing.T) {
+	var p *InferenceProvider
+	if got := p.Name(); got != "inference" {
+		t.Fatalf("Name() on a nil *InferenceProvider = %q, want %q", got, "inference")
+	}
+}
+
+// TestInference_InferenceProvider_Name_Ugly proves Name() is idempotent
+// regardless of the wrapped Service's state.
+func TestInference_InferenceProvider_Name_Ugly(t *testing.T) {
+	p := NewInferenceProvider(&Service{served: map[string]*Served{}})
+	first, second := p.Name(), p.Name()
+	if first != second || first != "inference" {
+		t.Fatalf("Name() = (%q, %q), want both calls to answer %q", first, second, "inference")
+	}
+}
+
+func TestInference_InferenceProvider_BasePath_Good(t *testing.T) {
 	p := NewInferenceProvider(nil)
 	if got := p.BasePath(); got != "/v1" {
 		t.Fatalf("BasePath() = %q, want %q", got, "/v1")
 	}
 }
 
+// TestInference_InferenceProvider_BasePath_Bad covers a nil receiver —
+// BasePath() never touches p, so it must still answer the constant rather
+// than panic.
+func TestInference_InferenceProvider_BasePath_Bad(t *testing.T) {
+	var p *InferenceProvider
+	if got := p.BasePath(); got != "/v1" {
+		t.Fatalf("BasePath() on a nil *InferenceProvider = %q, want %q", got, "/v1")
+	}
+}
+
+// TestInference_InferenceProvider_BasePath_Ugly proves BasePath() is
+// idempotent regardless of the wrapped Service's state.
+func TestInference_InferenceProvider_BasePath_Ugly(t *testing.T) {
+	p := NewInferenceProvider(&Service{served: map[string]*Served{}})
+	first, second := p.BasePath(), p.BasePath()
+	if first != second || first != "/v1" {
+		t.Fatalf("BasePath() = (%q, %q), want both calls to answer %q", first, second, "/v1")
+	}
+}
+
 // --- RegisterRoutes ---
 
-func TestInference_RegisterRoutes_Good(t *testing.T) {
+func TestInference_InferenceProvider_RegisterRoutes_Good(t *testing.T) {
 	p := NewInferenceProvider(nil)
 	engine := gin.New()
 	grp := engine.Group(p.BasePath())
@@ -58,15 +129,33 @@ func TestInference_RegisterRoutes_Good(t *testing.T) {
 	}
 }
 
-// TestInference_RegisterRoutes_Bad covers the nil-receiver guard — a nil
-// InferenceProvider must be a safe no-op, not a panic.
-func TestInference_RegisterRoutes_Bad(t *testing.T) {
+// TestInference_InferenceProvider_RegisterRoutes_Bad covers the nil-receiver
+// guard — a nil InferenceProvider must be a safe no-op, not a panic.
+func TestInference_InferenceProvider_RegisterRoutes_Bad(t *testing.T) {
 	engine := gin.New()
 	grp := engine.Group("/v1")
 	var p *InferenceProvider
 	p.RegisterRoutes(grp)
 	if len(engine.Routes()) != 0 {
 		t.Fatalf("RegisterRoutes on a nil provider registered %d routes, want 0", len(engine.Routes()))
+	}
+}
+
+// TestInference_InferenceProvider_RegisterRoutes_Ugly covers the nil-group
+// guard on an otherwise-valid provider — a nil *gin.RouterGroup must be a
+// safe no-op too.
+func TestInference_InferenceProvider_RegisterRoutes_Ugly(t *testing.T) {
+	p := NewInferenceProvider(&Service{served: map[string]*Served{}})
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("RegisterRoutes(nil) panicked: %v", r)
+			}
+		}()
+		p.RegisterRoutes(nil)
+	}()
+	if got := p.Name(); got != "inference" {
+		t.Fatalf("Name() after RegisterRoutes(nil) = %q, want %q", got, "inference")
 	}
 }
 
@@ -231,7 +320,7 @@ func TestInference_Forward_Bad(t *testing.T) {
 
 // --- Target ---
 
-func TestInference_Target_Good(t *testing.T) {
+func TestInference_Service_Target_Good(t *testing.T) {
 	proc := benchProcSvc(t)
 	pid := benchSleepProc(t, proc)
 	s := &Service{proc: proc, served: map[string]*Served{
@@ -243,7 +332,7 @@ func TestInference_Target_Good(t *testing.T) {
 	}
 }
 
-func TestInference_Target_Bad(t *testing.T) {
+func TestInference_Service_Target_Bad(t *testing.T) {
 	s := &Service{served: map[string]*Served{}}
 	if _, _, ok := s.Target(); ok {
 		t.Fatal("Target() ok=true with nothing served")
@@ -254,7 +343,7 @@ func TestInference_Target_Bad(t *testing.T) {
 // cuda) and the model-less fallback key (the runtime name substitutes for an
 // empty Model) together: mlx is tracked but not ready, cuda is ready and
 // model-less.
-func TestInference_Target_Ugly(t *testing.T) {
+func TestInference_Service_Target_Ugly(t *testing.T) {
 	proc := benchProcSvc(t)
 	mlxPID := benchSleepProc(t, proc)
 	cudaPID := benchSleepProc(t, proc)
@@ -270,14 +359,14 @@ func TestInference_Target_Ugly(t *testing.T) {
 
 // --- WaitCapacity ---
 
-func TestInference_WaitCapacity_Good(t *testing.T) {
+func TestInference_Service_WaitCapacity_Good(t *testing.T) {
 	s := &Service{}
 	if err := s.WaitCapacity(context.Background(), "any-model", 100); err != nil {
 		t.Fatalf("WaitCapacity with no limiter = %v, want nil (no-op)", err)
 	}
 }
 
-func TestInference_WaitCapacity_Bad(t *testing.T) {
+func TestInference_Service_WaitCapacity_Bad(t *testing.T) {
 	rl, err := ratelimit.New()
 	if err != nil {
 		t.Fatalf("ratelimit.New: %v", err)
@@ -291,7 +380,7 @@ func TestInference_WaitCapacity_Bad(t *testing.T) {
 // TestInference_WaitCapacity_Ugly exercises the real limiter's allow path for
 // a model with no configured quota (unlimited by policy) — it must return
 // immediately rather than blocking on the limiter's retry timer.
-func TestInference_WaitCapacity_Ugly(t *testing.T) {
+func TestInference_Service_WaitCapacity_Ugly(t *testing.T) {
 	rl, err := ratelimit.New()
 	if err != nil {
 		t.Fatalf("ratelimit.New: %v", err)
@@ -309,7 +398,7 @@ func TestInference_WaitCapacity_Ugly(t *testing.T) {
 
 // --- Record ---
 
-func TestInference_Record_Good(t *testing.T) {
+func TestInference_Service_Record_Good(t *testing.T) {
 	rl, err := ratelimit.New()
 	if err != nil {
 		t.Fatalf("ratelimit.New: %v", err)
@@ -323,7 +412,7 @@ func TestInference_Record_Good(t *testing.T) {
 	}
 }
 
-func TestInference_Record_Bad(t *testing.T) {
+func TestInference_Service_Record_Bad(t *testing.T) {
 	s := &Service{} // no limiter configured
 	s.Record("org/model", 10, 20)
 	if s.limiter != nil {
@@ -333,7 +422,7 @@ func TestInference_Record_Bad(t *testing.T) {
 
 // TestInference_Record_Ugly proves repeated calls accumulate rather than
 // overwrite the model's usage history.
-func TestInference_Record_Ugly(t *testing.T) {
+func TestInference_Service_Record_Ugly(t *testing.T) {
 	rl, err := ratelimit.New()
 	if err != nil {
 		t.Fatalf("ratelimit.New: %v", err)
@@ -346,4 +435,80 @@ func TestInference_Record_Ugly(t *testing.T) {
 	if stats == nil || len(stats.Requests) != 2 || len(stats.Tokens) != 2 {
 		t.Fatalf("RateLimiter.State[org/model] = %+v, want two accumulated usage entries", stats)
 	}
+}
+
+// --- Describe ---
+
+// TestInference_InferenceProvider_Describe_Good verifies the gated inference
+// route group is OpenAPI-describable and surfaces every route it registers,
+// so the core/api engine can mount it into the generated spec.
+func TestInference_InferenceProvider_Describe_Good(t *testing.T) {
+	var _ coreprovider.Describable = (*InferenceProvider)(nil)
+
+	p := NewInferenceProvider(nil)
+	want := map[string]bool{
+		http.MethodPost + " /chat/completions": false,
+		http.MethodPost + " /completions":      false,
+		http.MethodPost + " /messages":         false,
+		http.MethodGet + " /models":            false,
+	}
+	descriptions := p.Describe()
+	if len(descriptions) == 0 {
+		t.Fatal("Describe returned no route descriptions")
+	}
+	for _, desc := range descriptions {
+		key := desc.Method + " " + desc.Path
+		if _, ok := want[key]; ok {
+			want[key] = true
+		}
+	}
+	for key, seen := range want {
+		if !seen {
+			t.Fatalf("expected route description for %s", key)
+		}
+	}
+}
+
+// TestInference_InferenceProvider_Describe_Bad covers a nil receiver —
+// Describe() builds its descriptions from static data only, never touching
+// p, so it must still answer the full route list rather than panic.
+func TestInference_InferenceProvider_Describe_Bad(t *testing.T) {
+	var p *InferenceProvider
+	descriptions := p.Describe()
+	if len(descriptions) != 4 {
+		t.Fatalf("Describe() on a nil *InferenceProvider returned %d descriptions, want 4", len(descriptions))
+	}
+}
+
+// TestInference_InferenceProvider_Describe_Ugly checks the /chat/completions
+// route's request-body schema requires both "model" and "messages" — the
+// detail the SDK generators rely on, not just the route list.
+func TestInference_InferenceProvider_Describe_Ugly(t *testing.T) {
+	p := NewInferenceProvider(nil)
+	for _, desc := range p.Describe() {
+		if desc.Method != http.MethodPost || desc.Path != "/chat/completions" {
+			continue
+		}
+		body := desc.RequestBody
+		if body == nil {
+			t.Fatal("/chat/completions RequestBody is nil, want a map schema")
+		}
+		required, ok := body["required"].([]string)
+		if !ok {
+			t.Fatalf("/chat/completions RequestBody required = %T, want []string", body["required"])
+		}
+		want := map[string]bool{"model": false, "messages": false}
+		for _, r := range required {
+			if _, ok := want[r]; ok {
+				want[r] = true
+			}
+		}
+		for field, seen := range want {
+			if !seen {
+				t.Fatalf("/chat/completions RequestBody required list missing %q", field)
+			}
+		}
+		return
+	}
+	t.Fatal("Describe() did not include the /chat/completions route")
 }
