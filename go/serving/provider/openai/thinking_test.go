@@ -94,24 +94,180 @@ func TestOpenAI_ThinkingExtractor_Ugly_Gemma4ChannelCloseSplitAcrossTokens(t *te
 	}
 }
 
-// TestOpenAI_ThinkingExtractor_Bad_NilReceiver pins the nil-receiver
-// guard on every exported method — a caller holding a *ThinkingExtractor
-// obtained from a failed constructor path must get safe zero values,
-// never a panic.
-func TestOpenAI_ThinkingExtractor_Bad_NilReceiver(t *testing.T) {
-	var e *ThinkingExtractor
+// The four tests below pin the nil-receiver guard on every exported
+// method individually — a caller holding a *ThinkingExtractor obtained
+// from a failed constructor path must get safe zero values, never a
+// panic. (Previously one combined test; split so each method has its
+// own named Bad case per the package's per-symbol test convention.)
 
+func TestThinking_ThinkingExtractor_Process_Bad(t *testing.T) {
+	var e *ThinkingExtractor
 	if content, thought := e.Process(inference.Token{Text: "x"}); content != "" || thought != "" {
 		t.Fatalf("nil.Process() = %q, %q, want empty/empty", content, thought)
 	}
+}
+
+func TestThinking_ThinkingExtractor_Flush_Bad(t *testing.T) {
+	var e *ThinkingExtractor
 	if content, thought := e.Flush(); content != "" || thought != "" {
 		t.Fatalf("nil.Flush() = %q, %q, want empty/empty", content, thought)
 	}
+}
+
+func TestThinking_ThinkingExtractor_Content_Bad(t *testing.T) {
+	var e *ThinkingExtractor
 	if got := e.Content(); got != "" {
 		t.Fatalf("nil.Content() = %q, want empty", got)
 	}
+}
+
+func TestThinking_ThinkingExtractor_Thinking_Bad(t *testing.T) {
+	var e *ThinkingExtractor
 	if got := e.Thinking(); got != "" {
 		t.Fatalf("nil.Thinking() = %q, want empty", got)
+	}
+}
+
+// TestThinking_NewThinkingExtractor_Good covers the plain construction
+// path — a fresh extractor starts in the assistant (non-reasoning)
+// channel, so ordinary content passes straight through.
+func TestThinking_NewThinkingExtractor_Good(t *testing.T) {
+	extractor := NewThinkingExtractor()
+	if extractor == nil {
+		t.Fatal("NewThinkingExtractor() = nil")
+	}
+	content, thought := extractor.Process(inference.Token{Text: "hello"})
+	if content != "hello" || thought != "" {
+		t.Fatalf("Process() = %q/%q, want plain content in the initial assistant channel", content, thought)
+	}
+}
+
+// TestThinking_NewThinkingExtractor_Bad covers isolation — two
+// independently constructed extractors must not share state.
+func TestThinking_NewThinkingExtractor_Bad(t *testing.T) {
+	first := NewThinkingExtractor()
+	second := NewThinkingExtractor()
+	first.Process(inference.Token{Text: "first"})
+
+	if content, _ := second.Process(inference.Token{Text: "second"}); content != "second" {
+		t.Fatalf("second extractor content = %q, want isolated from the first", content)
+	}
+	if first.Content() == second.Content() {
+		t.Fatalf("extractors share content: %q", first.Content())
+	}
+}
+
+// TestThinking_NewThinkingExtractor_Ugly covers the zero-activity
+// edge — flushing a fresh extractor that never received a Process
+// call returns empty/empty rather than panicking on unset fields.
+func TestThinking_NewThinkingExtractor_Ugly(t *testing.T) {
+	extractor := NewThinkingExtractor()
+
+	content, thought := extractor.Flush()
+	if content != "" || thought != "" {
+		t.Fatalf("Flush() on a fresh extractor = %q/%q, want empty/empty", content, thought)
+	}
+}
+
+// TestThinking_ThinkingExtractor_Process_Good covers the plain pass-
+// through path — content with no reasoning markers streams straight
+// to the content channel.
+func TestThinking_ThinkingExtractor_Process_Good(t *testing.T) {
+	extractor := NewThinkingExtractor()
+
+	content, thought := extractor.Process(inference.Token{Text: "plain answer"})
+	if content != "plain answer" || thought != "" {
+		t.Fatalf("Process() = %q/%q, want plain content only", content, thought)
+	}
+}
+
+// TestThinking_ThinkingExtractor_Process_Ugly covers an empty-text
+// token — a no-op that must not disturb already-accumulated state.
+func TestThinking_ThinkingExtractor_Process_Ugly(t *testing.T) {
+	extractor := NewThinkingExtractor()
+	extractor.Process(inference.Token{Text: "so far"})
+
+	content, thought := extractor.Process(inference.Token{Text: ""})
+	if content != "" || thought != "" {
+		t.Fatalf("Process(empty text) = %q/%q, want no new output", content, thought)
+	}
+	if extractor.Content() != "so far" {
+		t.Fatalf("Content() = %q, want prior state undisturbed", extractor.Content())
+	}
+}
+
+// TestThinking_ThinkingExtractor_Flush_Good covers the held-back-
+// partial-marker tail — a suffix that could still become a reasoning
+// marker, but with no more input coming, Flush must surface it as
+// literal content.
+func TestThinking_ThinkingExtractor_Flush_Good(t *testing.T) {
+	extractor := NewThinkingExtractor()
+	extractor.Process(inference.Token{Text: "hello <thi"})
+
+	content, thought := extractor.Flush()
+	if content != "<thi" || thought != "" {
+		t.Fatalf("Flush() = %q/%q, want the held-back partial marker as literal content", content, thought)
+	}
+}
+
+// TestThinking_ThinkingExtractor_Flush_Ugly covers flushing a held-back
+// partial close-marker suffix while inPaired — "</thi" could still
+// become "</think>", so Process holds it rather than emitting it, and
+// Flush must surface it as thought text (not content) once there is no
+// more input coming.
+func TestThinking_ThinkingExtractor_Flush_Ugly(t *testing.T) {
+	extractor := NewThinkingExtractor()
+	extractor.Process(inference.Token{Text: "<think>hidden</thi"})
+
+	content, thought := extractor.Flush()
+	if content != "" || thought != "</thi" {
+		t.Fatalf("Flush() = %q/%q, want the held-back partial marker to surface as thought text", content, thought)
+	}
+}
+
+// TestThinking_ThinkingExtractor_Content_Good covers plain accumulation
+// across multiple Process calls.
+func TestThinking_ThinkingExtractor_Content_Good(t *testing.T) {
+	extractor := NewThinkingExtractor()
+	extractor.Process(inference.Token{Text: "hello "})
+	extractor.Process(inference.Token{Text: "world"})
+
+	if got := extractor.Content(); got != "hello world" {
+		t.Fatalf("Content() = %q, want %q", got, "hello world")
+	}
+}
+
+// TestThinking_ThinkingExtractor_Content_Ugly covers exclusion — a
+// thought span embedded in the stream must not appear in Content(),
+// only in Thinking().
+func TestThinking_ThinkingExtractor_Content_Ugly(t *testing.T) {
+	extractor := NewThinkingExtractor()
+	extractor.Process(inference.Token{Text: "before <think>hidden</think> after"})
+
+	if got := extractor.Content(); got != "before  after" {
+		t.Fatalf("Content() = %q, want the thought span excluded", got)
+	}
+}
+
+// TestThinking_ThinkingExtractor_Thinking_Good covers plain
+// accumulation of a single thought span.
+func TestThinking_ThinkingExtractor_Thinking_Good(t *testing.T) {
+	extractor := NewThinkingExtractor()
+	extractor.Process(inference.Token{Text: "<think>plan</think>answer"})
+
+	if got := extractor.Thinking(); got != "plan" {
+		t.Fatalf("Thinking() = %q, want %q", got, "plan")
+	}
+}
+
+// TestThinking_ThinkingExtractor_Thinking_Ugly covers exclusion — the
+// visible content around a thought span must not appear in Thinking().
+func TestThinking_ThinkingExtractor_Thinking_Ugly(t *testing.T) {
+	extractor := NewThinkingExtractor()
+	extractor.Process(inference.Token{Text: "before <think>hidden</think> after"})
+
+	if got := extractor.Thinking(); got != "hidden" {
+		t.Fatalf("Thinking() = %q, want only the thought span", got)
 	}
 }
 

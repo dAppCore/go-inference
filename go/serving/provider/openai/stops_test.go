@@ -66,3 +66,13 @@ func TestStops_TruncateAtStopSequence_Bad(t *testing.T) {
 		t.Fatalf("TruncateAtStopSequence() = %q, want unmodified content", got)
 	}
 }
+
+// TestStops_TruncateAtStopSequence_Ugly covers the boundary case where
+// the stop sequence starts at position 0 — the cut collapses content
+// to an empty string rather than off-by-one into a 1-byte result.
+func TestStops_TruncateAtStopSequence_Ugly(t *testing.T) {
+	got := TruncateAtStopSequence("END trailing text", []string{"END"})
+	if got != "" {
+		t.Fatalf("TruncateAtStopSequence() = %q, want empty string for a leading stop sequence", got)
+	}
+}
