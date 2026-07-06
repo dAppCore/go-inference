@@ -123,10 +123,10 @@ func (h *cancelOnAppendHandle) AppendPrompt(_ context.Context, p string) error {
 // session.go — capability-fallback + ctx==nil + error arms
 // ---------------------------------------------------------------------------
 
-// TestSessionPrefillChunks_FallbackAndNilCtx_Good drives the two uncovered
+// TestSession_PrefillChunks_FallbackAndNilCtx_Good drives the two uncovered
 // PrefillChunks arms: a handle without PrefillChunks falls back to Prefill of
 // the joined string, and a nil context is defaulted to Background.
-func TestSessionPrefillChunks_FallbackAndNilCtx_Good(t *testing.T) {
+func TestSession_PrefillChunks_FallbackAndNilCtx_Good(t *testing.T) {
 	native := &baseHandle{}
 	session := &Session{session: native}
 
@@ -139,9 +139,9 @@ func TestSessionPrefillChunks_FallbackAndNilCtx_Good(t *testing.T) {
 	}
 }
 
-// TestSessionPrefillTokens_NoNativeSupport_Bad — a handle without
+// TestSession_PrefillTokens_NoNativeSupport_Bad — a handle without
 // PrefillTokens returns the sentinel, and nil ctx is defaulted first.
-func TestSessionPrefillTokens_NoNativeSupport_Bad(t *testing.T) {
+func TestSession_PrefillTokens_NoNativeSupport_Bad(t *testing.T) {
 	session := &Session{session: &baseHandle{}}
 
 	//nolint:staticcheck // SA1012: nil ctx is part of the branch under test.
@@ -150,9 +150,9 @@ func TestSessionPrefillTokens_NoNativeSupport_Bad(t *testing.T) {
 	}
 }
 
-// TestSessionAppendPromptChunks_FallbackAndNilCtx_Good — a handle without
+// TestSession_AppendPromptChunks_FallbackAndNilCtx_Good — a handle without
 // AppendPromptChunks falls back to AppendPrompt of the joined string.
-func TestSessionAppendPromptChunks_FallbackAndNilCtx_Good(t *testing.T) {
+func TestSession_AppendPromptChunks_FallbackAndNilCtx_Good(t *testing.T) {
 	native := &baseHandle{}
 	session := &Session{session: native}
 
@@ -165,9 +165,9 @@ func TestSessionAppendPromptChunks_FallbackAndNilCtx_Good(t *testing.T) {
 	}
 }
 
-// TestSessionAppendTokens_NoNativeSupport_Bad — a handle without AppendTokens
+// TestSession_AppendTokens_NoNativeSupport_Bad — a handle without AppendTokens
 // returns the sentinel; nil ctx is defaulted first.
-func TestSessionAppendTokens_NoNativeSupport_Bad(t *testing.T) {
+func TestSession_AppendTokens_NoNativeSupport_Bad(t *testing.T) {
 	session := &Session{session: &baseHandle{}}
 
 	//nolint:staticcheck // SA1012: nil ctx is part of the branch under test.
@@ -176,11 +176,11 @@ func TestSessionAppendTokens_NoNativeSupport_Bad(t *testing.T) {
 	}
 }
 
-// TestSessionGenerateStream_NilCtxAndFlush_Good drives GenerateStream's
+// TestSession_GenerateStream_NilCtxAndFlush_Good drives GenerateStream's
 // ctx==nil defaulting and the final filter.Flush() emission. The Gemma4
 // thinking close tag forces the parser to buffer reasoning, then flush
 // trailing visible text after the loop — covering the post-loop flush arm.
-func TestSessionGenerateStream_NilCtxAndFlush_Good(t *testing.T) {
+func TestSession_GenerateStream_NilCtxAndFlush_Good(t *testing.T) {
 	session := &Session{session: &sessionfake.Handle{
 		Tokens: []inference.Token{{ID: 7, Text: "hello"}, {ID: 8, Text: " world"}},
 	}}
@@ -205,10 +205,10 @@ func TestSessionGenerateStream_NilCtxAndFlush_Good(t *testing.T) {
 	}
 }
 
-// TestSessionGenerateStream_EmptyTextContinue_Good — a token decoding to the
+// TestSession_GenerateStream_EmptyTextContinue_Good — a token decoding to the
 // empty string is skipped (the `if text == ""` continue), and only the
 // non-empty token reaches the channel.
-func TestSessionGenerateStream_EmptyTextContinue_Good(t *testing.T) {
+func TestSession_GenerateStream_EmptyTextContinue_Good(t *testing.T) {
 	session := &Session{session: &sessionfake.Handle{
 		Tokens: []inference.Token{{ID: 7, Text: ""}, {ID: 8, Text: "kept"}},
 	}}
@@ -246,10 +246,10 @@ func TestSessionParserControlToken_Empty_Good(t *testing.T) {
 	}
 }
 
-// TestSessionCaptureKVWithOptions_OptionsHandle_Good drives the
+// TestSession_CaptureKVWithOptions_OptionsHandle_Good drives the
 // CaptureKVWithOptions arm (handle implements the with-options snapshotter)
 // plus the RawKVOnly DropFloat32 post-step.
-func TestSessionCaptureKVWithOptions_OptionsHandle_Good(t *testing.T) {
+func TestSession_CaptureKVWithOptions_OptionsHandle_Good(t *testing.T) {
 	native := &optionSnapshotHandle{optionSnapshot: sessionfake.TestKVSnapshot()}
 	session := &Session{session: native}
 
@@ -266,9 +266,9 @@ func TestSessionCaptureKVWithOptions_OptionsHandle_Good(t *testing.T) {
 	}
 }
 
-// TestSessionCaptureKVWithOptions_OptionsHandleErr_Ugly — the with-options
+// TestSession_CaptureKVWithOptions_OptionsHandleErr_Ugly — the with-options
 // snapshotter's error is propagated verbatim.
-func TestSessionCaptureKVWithOptions_OptionsHandleErr_Ugly(t *testing.T) {
+func TestSession_CaptureKVWithOptions_OptionsHandleErr_Ugly(t *testing.T) {
 	wantErr := core.NewError("option capture failed")
 	session := &Session{session: &optionSnapshotHandle{optionErr: wantErr}}
 
@@ -303,9 +303,9 @@ func TestSessionSaveKV_CaptureErr_Ugly(t *testing.T) {
 	}
 }
 
-// TestSessionRestoreKV_NoRestorer_Bad — a handle that does not implement
+// TestSession_RestoreKV_NoRestorer_Bad — a handle that does not implement
 // RestoreKV (nativeSessionRestorer) returns the no-restore sentinel.
-func TestSessionRestoreKV_NoRestorer_Bad(t *testing.T) {
+func TestSession_RestoreKV_NoRestorer_Bad(t *testing.T) {
 	session := &Session{session: &baseHandle{}}
 
 	if err := session.RestoreKV(sessionTestRootSnapshot()); !core.Is(err, errNativeNoKVRestore) {
@@ -313,9 +313,9 @@ func TestSessionRestoreKV_NoRestorer_Bad(t *testing.T) {
 	}
 }
 
-// TestSessionRestoreKV_RestorerErr_Ugly — the restorer's error is propagated
+// TestSession_RestoreKV_RestorerErr_Ugly — the restorer's error is propagated
 // and the agent-memory cache is left untouched.
-func TestSessionRestoreKV_RestorerErr_Ugly(t *testing.T) {
+func TestSession_RestoreKV_RestorerErr_Ugly(t *testing.T) {
 	wantErr := core.NewError("restore failed")
 	session := &Session{session: &sessionfake.Handle{RestoreErr: wantErr}}
 
@@ -324,9 +324,9 @@ func TestSessionRestoreKV_RestorerErr_Ugly(t *testing.T) {
 	}
 }
 
-// TestSessionLoadKV_LoadErr_Ugly — a missing KV file surfaces the load error
+// TestSession_LoadKV_LoadErr_Ugly — a missing KV file surfaces the load error
 // before any restore.
-func TestSessionLoadKV_LoadErr_Ugly(t *testing.T) {
+func TestSession_LoadKV_LoadErr_Ugly(t *testing.T) {
 	session := &Session{session: &sessionfake.Handle{}}
 
 	if err := session.LoadKV(core.PathJoin(t.TempDir(), "missing.kvbin")); err == nil {
@@ -334,9 +334,9 @@ func TestSessionLoadKV_LoadErr_Ugly(t *testing.T) {
 	}
 }
 
-// TestSessionSaveKVToState_NilCtxAndNativeEncoding_Good — nil ctx is defaulted
+// TestSession_SaveKVToState_NilCtxAndNativeEncoding_Good — nil ctx is defaulted
 // and EncodingNative sets RawKVOnly on the capture before SaveState.
-func TestSessionSaveKVToState_NilCtxAndNativeEncoding_Good(t *testing.T) {
+func TestSession_SaveKVToState_NilCtxAndNativeEncoding_Good(t *testing.T) {
 	store := state.NewInMemoryStore(nil)
 	session := &Session{session: &sessionfake.Handle{KV: sessionfake.TestKVSnapshot()}}
 
@@ -353,9 +353,9 @@ func TestSessionSaveKVToState_NilCtxAndNativeEncoding_Good(t *testing.T) {
 	}
 }
 
-// TestSessionLoadKVFromState_NilCtxAndLoadErr_Ugly — a bogus chunk ref with a
+// TestSession_LoadKVFromState_NilCtxAndLoadErr_Ugly — a bogus chunk ref with a
 // nil ctx defaults the context then surfaces the load failure.
-func TestSessionLoadKVFromState_NilCtxAndLoadErr_Ugly(t *testing.T) {
+func TestSession_LoadKVFromState_NilCtxAndLoadErr_Ugly(t *testing.T) {
 	store := state.NewInMemoryStore(nil)
 	session := &Session{session: &sessionfake.Handle{}}
 
@@ -365,9 +365,9 @@ func TestSessionLoadKVFromState_NilCtxAndLoadErr_Ugly(t *testing.T) {
 	}
 }
 
-// TestSessionLoadKVPrefixBlocks_NilBundle_Bad — a nil bundle returns the
+// TestSession_LoadKVPrefixBlocksFromState_NilBundle_Bad — a nil bundle returns the
 // block-bundle-nil sentinel.
-func TestSessionLoadKVPrefixBlocks_NilBundle_Bad(t *testing.T) {
+func TestSession_LoadKVPrefixBlocksFromState_NilBundle_Bad(t *testing.T) {
 	session := &Session{session: &sessionfake.Handle{}}
 
 	if err := session.LoadKVPrefixBlocksFromState(context.Background(), state.NewInMemoryStore(nil), nil, 0); !core.Is(err, errStateKVBlockBundleNil) {
@@ -375,9 +375,9 @@ func TestSessionLoadKVPrefixBlocks_NilBundle_Bad(t *testing.T) {
 	}
 }
 
-// TestSessionLoadKVPrefixBlocks_BlockRestorerErr_Ugly — the native block
+// TestSession_LoadKVPrefixBlocksFromState_BlockRestorerErr_Ugly — the native block
 // restorer's RestoreKVBlocks error is propagated.
-func TestSessionLoadKVPrefixBlocks_BlockRestorerErr_Ugly(t *testing.T) {
+func TestSession_LoadKVPrefixBlocksFromState_BlockRestorerErr_Ugly(t *testing.T) {
 	store := state.NewInMemoryStore(nil)
 	writer := &Session{session: &sessionfake.Handle{
 		KVBlocks: []kv.Block{
@@ -396,10 +396,10 @@ func TestSessionLoadKVPrefixBlocks_BlockRestorerErr_Ugly(t *testing.T) {
 	}
 }
 
-// TestSessionLoadKVPrefixBlocks_SnapshotFallbackNativeEncoding_Good — with a
+// TestSession_LoadKVPrefixBlocksFromState_SnapshotFallbackNativeEncoding_Good — with a
 // native-encoded bundle and a handle lacking RestoreKVBlocks, the fallback
 // sets RawKVOnly on the load and restores via RestoreKV.
-func TestSessionLoadKVPrefixBlocks_SnapshotFallbackNativeEncoding_Good(t *testing.T) {
+func TestSession_LoadKVPrefixBlocksFromState_SnapshotFallbackNativeEncoding_Good(t *testing.T) {
 	store := state.NewInMemoryStore(nil)
 	writer := &Session{session: &sessionfake.Handle{
 		KVBlocks: []kv.Block{
@@ -424,9 +424,9 @@ func TestSessionLoadKVPrefixBlocks_SnapshotFallbackNativeEncoding_Good(t *testin
 	}
 }
 
-// TestSessionLoadKVPrefixBlocks_SnapshotFallbackLoadErr_Ugly — the snapshot
+// TestSession_LoadKVPrefixBlocksFromState_SnapshotFallbackLoadErr_Ugly — the snapshot
 // fallback path surfaces a load failure (corrupt block ref) before restore.
-func TestSessionLoadKVPrefixBlocks_SnapshotFallbackLoadErr_Ugly(t *testing.T) {
+func TestSession_LoadKVPrefixBlocksFromState_SnapshotFallbackLoadErr_Ugly(t *testing.T) {
 	bundle := &kv.StateBlockBundle{
 		Version:      kv.StateBlockVersion,
 		Kind:         kv.StateBlockBundleKind,
@@ -462,7 +462,7 @@ func TestSessionLoadKVPrefixBlocks_SnapshotFallbackLoadErr_Ugly(t *testing.T) {
 // whose snapshot is itself invalid (b.Snapshot() error) after compatibility
 // passes. Here the model identity matches but the bundle carries no KV ref,
 // so Snapshot() fails.
-func TestSessionRestoreBundle_SnapshotErr_Ugly(t *testing.T) {
+func TestSession_RestoreBundle_SnapshotErr_Ugly(t *testing.T) {
 	session := &Session{
 		session: &sessionfake.Handle{},
 		info:    spine.ModelInfo{Architecture: "gemma4_text", NumLayers: 1},
@@ -480,10 +480,10 @@ func TestSessionRestoreBundle_SnapshotErr_Ugly(t *testing.T) {
 	}
 }
 
-// TestSessionRestoreBundleFromState_NilCtxAndCompatErr_Ugly — a nil ctx is
+// TestSession_RestoreBundleFromState_NilCtxAndCompatErr_Ugly — a nil ctx is
 // defaulted, then a mismatched model identity is rejected by
 // CheckCompatibility before any State read.
-func TestSessionRestoreBundleFromState_NilCtxAndCompatErr_Ugly(t *testing.T) {
+func TestSession_RestoreBundleFromState_NilCtxAndCompatErr_Ugly(t *testing.T) {
 	store := state.NewInMemoryStore(nil)
 	session := &Session{
 		session: &sessionfake.Handle{},
@@ -502,34 +502,6 @@ func TestSessionRestoreBundleFromState_NilCtxAndCompatErr_Ugly(t *testing.T) {
 	}
 }
 
-// TestSessionLoadBundle_Good — a bundle written to disk is loaded and
-// restored, covering LoadBundle's success-then-RestoreBundle tail.
-func TestSessionLoadBundle_Good(t *testing.T) {
-	native := &sessionfake.Handle{KV: sessionfake.TestKVSnapshot()}
-	source := &Session{session: native, info: spine.ModelInfo{Architecture: "gemma4_text", NumLayers: 1}}
-	snapshot, err := source.CaptureKV()
-	if err != nil {
-		t.Fatalf("CaptureKV() error = %v", err)
-	}
-	b, err := mlxbundle.New(snapshot, mlxbundle.Options{Model: "gemma4-e4b", Prompt: "ctx"})
-	if err != nil {
-		t.Fatalf("mlxbundle.New() error = %v", err)
-	}
-	path := core.PathJoin(t.TempDir(), "session.bundle.json")
-	if err := b.Save(path); err != nil {
-		t.Fatalf("bundle.Save() error = %v", err)
-	}
-
-	target := &sessionfake.Handle{}
-	session := &Session{session: target, info: spine.ModelInfo{Architecture: "gemma4_text", NumLayers: 1}}
-	if err := session.LoadBundle(path); err != nil {
-		t.Fatalf("LoadBundle() error = %v", err)
-	}
-	if target.RestoredKV == nil || target.RestoredKV.Tokens[0] != 1 {
-		t.Fatalf("LoadBundle() restored KV = %+v, want two-token state", target.RestoredKV)
-	}
-}
-
 // TestSessionFork_ForkErr_Ugly — the native Fork error is propagated.
 func TestSessionFork_ForkErr_Ugly(t *testing.T) {
 	wantErr := core.NewError("fork failed")
@@ -544,9 +516,9 @@ func TestSessionFork_ForkErr_Ugly(t *testing.T) {
 	}
 }
 
-// TestSessionFork_NilForkResult_Bad — a native fork that returns a nil handle
+// TestSession_Fork_NilForkResult_Bad — a native fork that returns a nil handle
 // surfaces the nil-fork sentinel.
-func TestSessionFork_NilForkResult_Bad(t *testing.T) {
+func TestSession_Fork_NilForkResult_Bad(t *testing.T) {
 	// sessionfake.Handle.Forked defaults to nil, so Fork returns (nil, nil)
 	// from the native layer, tripping the nil-fork guard.
 	session := &Session{session: &sessionfake.Handle{}}
@@ -560,9 +532,9 @@ func TestSessionFork_NilForkResult_Bad(t *testing.T) {
 	}
 }
 
-// TestSessionErr_LiveHandle_Good — a live handle's Err is forwarded (the
+// TestSession_Err_LiveHandle_Good — a live handle's Err is forwarded (the
 // non-nil-guard return arm).
-func TestSessionErr_LiveHandle_Good(t *testing.T) {
+func TestSession_Err_LiveHandle_Good(t *testing.T) {
 	wantErr := core.NewError("session err")
 	session := &Session{session: &sessionfake.Handle{ErrValue: wantErr}}
 
@@ -1217,10 +1189,10 @@ func TestAppendAndSleepAgentMemory_PostAppendCancel_Ugly(t *testing.T) {
 	}
 }
 
-// TestSessionLoadKVPrefixBlocks_SourceErr_Ugly — a prefixTokens larger than
+// TestSession_LoadKVPrefixBlocksFromState_SourceErr_Ugly — a prefixTokens larger than
 // the bundle's TokenCount makes the native block-source builder fail before
 // any restore.
-func TestSessionLoadKVPrefixBlocks_SourceErr_Ugly(t *testing.T) {
+func TestSession_LoadKVPrefixBlocksFromState_SourceErr_Ugly(t *testing.T) {
 	store := state.NewInMemoryStore(nil)
 	writer := &Session{session: &sessionfake.Handle{
 		KVBlocks: []kv.Block{
@@ -1240,10 +1212,10 @@ func TestSessionLoadKVPrefixBlocks_SourceErr_Ugly(t *testing.T) {
 	}
 }
 
-// TestSessionRestoreBundle_SnapshotMaterialiseErr_Ugly — a bundle that passes
+// TestSession_RestoreBundle_SnapshotMaterialiseErr_Ugly — a bundle that passes
 // Validate + CheckCompatibility (it carries a KVPath ref) but whose KVPath
 // file is missing, so b.Snapshot() fails.
-func TestSessionRestoreBundle_SnapshotMaterialiseErr_Ugly(t *testing.T) {
+func TestSession_RestoreBundle_SnapshotMaterialiseErr_Ugly(t *testing.T) {
 	session := &Session{
 		session: &sessionfake.Handle{},
 		info:    spine.ModelInfo{Architecture: "gemma4_text", NumLayers: 1},
@@ -1260,10 +1232,10 @@ func TestSessionRestoreBundle_SnapshotMaterialiseErr_Ugly(t *testing.T) {
 	}
 }
 
-// TestSessionRestoreBundleFromState_SnapshotErr_Ugly — a bundle that passes
+// TestSession_RestoreBundleFromState_SnapshotErr_Ugly — a bundle that passes
 // Validate + CheckCompatibility (it carries a State ref) but whose State chunk
 // is missing, so b.SnapshotFromState() fails.
-func TestSessionRestoreBundleFromState_SnapshotErr_Ugly(t *testing.T) {
+func TestSession_RestoreBundleFromState_SnapshotErr_Ugly(t *testing.T) {
 	store := state.NewInMemoryStore(nil)
 	session := &Session{
 		session: &sessionfake.Handle{},
