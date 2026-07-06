@@ -85,6 +85,38 @@ func AppendContentBlockStopEvent(buf []byte, index int) []byte {
 	return append(buf, '}')
 }
 
+// AppendContentBlockStartToolUseEvent opens a tool_use content block at index —
+// the model called a function. The input starts as an empty object; the
+// arguments arrive as input_json_delta events the client assembles:
+//
+//	{"type":"content_block_start","index":N,"content_block":{"type":"tool_use","id":"…","name":"…","input":{}}}
+func AppendContentBlockStartToolUseEvent(buf []byte, index int, id, name string) []byte {
+	buf = append(buf, '{')
+	buf = jsonenc.AppendStringField(buf, "type", "content_block_start", false)
+	buf = jsonenc.AppendIntField(buf, "index", index, true)
+	buf = append(buf, `,"content_block":{`...)
+	buf = jsonenc.AppendStringField(buf, "type", "tool_use", false)
+	buf = jsonenc.AppendStringField(buf, "id", id, true)
+	buf = jsonenc.AppendStringField(buf, "name", name, true)
+	buf = append(buf, `,"input":{}}`...)
+	return append(buf, '}')
+}
+
+// AppendInputJSONDeltaEvent emits one tool_use arguments delta — the partial (or,
+// as this engine sends it, whole) JSON of the call's input object. Claude Code
+// concatenates the partial_json fragments and parses the result:
+//
+//	{"type":"content_block_delta","index":N,"delta":{"type":"input_json_delta","partial_json":"…"}}
+func AppendInputJSONDeltaEvent(buf []byte, index int, partialJSON string) []byte {
+	buf = append(buf, '{')
+	buf = jsonenc.AppendStringField(buf, "type", "content_block_delta", false)
+	buf = jsonenc.AppendIntField(buf, "index", index, true)
+	buf = append(buf, `,"delta":{`...)
+	buf = jsonenc.AppendStringField(buf, "type", "input_json_delta", false)
+	buf = jsonenc.AppendStringField(buf, "partial_json", partialJSON, true)
+	return append(buf, '}', '}')
+}
+
 // AppendMessageDeltaEvent emits the `message_delta` payload — the penultimate
 // event carrying the terminal stop_reason + cumulative output usage:
 //
