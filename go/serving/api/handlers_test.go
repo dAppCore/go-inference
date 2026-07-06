@@ -3,14 +3,12 @@
 package api
 
 import (
-	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference"
 	"dappco.re/go/inference/eval/score/lek"
 	"github.com/gin-gonic/gin"
 )
@@ -19,23 +17,8 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
-// fakeEmbedder is a deterministic inference.EmbeddingModel for the
-// /embeddings/text path — returns its fixed vector for any input.
-type fakeEmbedder struct{ vec []float32 }
-
-func (f fakeEmbedder) Embed(_ context.Context, _ inference.EmbeddingRequest) (*inference.EmbeddingResult, error) {
-	return &inference.EmbeddingResult{Vectors: [][]float32{f.vec}}, nil
-}
-
-// errEmbedder models an embedding model that fails at inference time.
-type errEmbedder struct{}
-
-func (errEmbedder) Embed(_ context.Context, _ inference.EmbeddingRequest) (*inference.EmbeddingResult, error) {
-	return nil, core.E("api.errEmbedder.Embed", "model unavailable", nil)
-}
-
 // TestHandlers_Good drives every endpoint on its happy path and asserts the
-// live scoring/embedding behaviour (not the old not-implemented stubs).
+// live scoring behaviour (not the old not-implemented stubs).
 func TestHandlers_Good(t *testing.T) {
 	router := setupTestRouter()
 
@@ -142,40 +125,6 @@ func TestHandlers_ScoreSession_Bad(t *testing.T) {
 	}
 }
 
-// TestHandlers_EmbedText covers both arms of the model-gated endpoint: 503
-// without an injected model, a real vector with one.
-func TestHandlers_EmbedText(t *testing.T) {
-	// No embedder -> 503 no_embedding_model.
-	rec := performRequestBody(setupTestRouter(), http.MethodPost, "/v1/embeddings/text", `{"text":"hello"}`)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("embeddings/text (no model): status %d, body %s", rec.Code, rec.Body.String())
-	}
-	if !core.Contains(rec.Body.String(), "no_embedding_model") {
-		t.Fatalf("embeddings/text (no model): want no_embedding_model, got %s", rec.Body.String())
-	}
-
-	// Injected embedder -> the vector flows through.
-	router := setupTestRouter(WithEmbedder(fakeEmbedder{vec: []float32{0.1, 0.2, 0.3}}))
-	rec = performRequestBody(router, http.MethodPost, "/v1/embeddings/text", `{"text":"hello","model":"lemma"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("embeddings/text (model): status %d, body %s", rec.Code, rec.Body.String())
-	}
-	var te EmbeddingResponse
-	if r := core.JSONUnmarshal(rec.Body.Bytes(), &te); !r.OK {
-		t.Fatalf("embeddings/text decode: %v", r.Error())
-	}
-	if te.Object != "embedding" || te.Dimensions != 3 || te.Model != "lemma" {
-		t.Fatalf("embeddings/text: want 3-dim embedding for lemma, got %+v", te)
-	}
-
-	// Embedder that fails at inference time -> 500 embedding_failed.
-	router = setupTestRouter(WithEmbedder(errEmbedder{}))
-	rec = performRequestBody(router, http.MethodPost, "/v1/embeddings/text", `{"text":"hello"}`)
-	if rec.Code != http.StatusInternalServerError || !core.Contains(rec.Body.String(), "embedding_failed") {
-		t.Fatalf("embeddings/text (model error): status %d, body %s", rec.Code, rec.Body.String())
-	}
-}
-
 // TestHandlers_Bad rejects wrong methods (route not found) and malformed /
 // empty bodies (400).
 func TestHandlers_Bad(t *testing.T) {
@@ -183,7 +132,6 @@ func TestHandlers_Bad(t *testing.T) {
 
 	// Wrong method for each route -> 404.
 	for _, tt := range []struct{ method, path string }{
-		{http.MethodGet, "/v1/embeddings/text"},
 		{http.MethodGet, "/v1/embeddings/behavioural"},
 		{http.MethodPut, "/v1/score/content"},
 		{http.MethodPut, "/v1/score/imprint"},
@@ -196,7 +144,7 @@ func TestHandlers_Bad(t *testing.T) {
 	}
 
 	// Empty / no-text bodies -> 400 invalid_request.
-	for _, path := range []string{"/v1/score/content", "/v1/score/imprint", "/v1/embeddings/behavioural", "/v1/embeddings/text"} {
+	for _, path := range []string{"/v1/score/content", "/v1/score/imprint", "/v1/embeddings/behavioural"} {
 		rec := performRequestBody(router, http.MethodPost, path, `{}`)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s empty body: status %d, want 400 (body %s)", path, rec.Code, rec.Body.String())
@@ -207,7 +155,6 @@ func TestHandlers_Bad(t *testing.T) {
 // TestHandlers_Ugly asserts no handler panics on a nil context.
 func TestHandlers_Ugly(t *testing.T) {
 	for _, handler := range []func(*AIProvider, *gin.Context){
-		func(p *AIProvider, c *gin.Context) { p.embedText(c) },
 		func(p *AIProvider, c *gin.Context) { p.embedBehavioural(c) },
 		func(p *AIProvider, c *gin.Context) { p.scoreContent(c) },
 		func(p *AIProvider, c *gin.Context) { p.scoreImprint(c) },
@@ -261,7 +208,7 @@ func TestHandlers_Edges(t *testing.T) {
 
 	// Malformed JSON -> 400 invalid_request (bind error branch) on every
 	// body-parsing endpoint.
-	for _, path := range []string{"/v1/score/content", "/v1/score/imprint", "/v1/score/session", "/v1/embeddings/behavioural", "/v1/embeddings/text"} {
+	for _, path := range []string{"/v1/score/content", "/v1/score/imprint", "/v1/score/session", "/v1/embeddings/behavioural"} {
 		rec := performRequestBody(router, http.MethodPost, path, `{"text":`)
 		if rec.Code != http.StatusBadRequest || !core.Contains(rec.Body.String(), "invalid_request") {
 			t.Fatalf("%s malformed body: status %d, body %s", path, rec.Code, rec.Body.String())
@@ -282,8 +229,8 @@ func TestHandlers_Edges(t *testing.T) {
 	}
 }
 
-func setupTestRouter(opts ...Option) *gin.Engine {
-	provider := NewProvider(opts...)
+func setupTestRouter() *gin.Engine {
+	provider := NewProvider()
 	router := gin.New()
 	provider.RegisterRoutes(router.Group(provider.BasePath()))
 	return router

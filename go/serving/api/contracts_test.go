@@ -77,13 +77,3 @@ func TestScoreRequest_text(t *testing.T) {
 		})
 	}
 }
-
-// TestTextEmbeddingRequest_text pins the text/input alias fallback.
-func TestTextEmbeddingRequest_text(t *testing.T) {
-	if got := (TextEmbeddingRequest{Text: "a", Input: "b"}).text(); got != "a" {
-		t.Fatalf("text field should win: got %q", got)
-	}
-	if got := (TextEmbeddingRequest{Input: "b"}).text(); got != "b" {
-		t.Fatalf("input alias should apply: got %q", got)
-	}
-}
