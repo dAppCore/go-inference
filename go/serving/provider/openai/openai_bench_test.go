@@ -577,7 +577,7 @@ func BenchmarkOpenAI_RequestMessages_SingleTurn(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = requestMessages(messages)
+		_ = requestMessages(messages, nil)
 	}
 }
 
@@ -587,7 +587,7 @@ func BenchmarkOpenAI_RequestMessages_TwentyTurn(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = requestMessages(messages)
+		_ = requestMessages(messages, nil)
 	}
 }
 

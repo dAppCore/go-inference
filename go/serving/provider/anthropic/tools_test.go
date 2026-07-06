@@ -51,21 +51,6 @@ func TestRenderToolDeclarations_MultiTool(t *testing.T) {
 	}
 }
 
-// TestGemmaSchemaType pins the JSON-schema -> Gemma uppercase type mapping,
-// including the empty default and the unknown-type passthrough.
-func TestGemmaSchemaType(t *testing.T) {
-	cases := map[string]string{
-		"string": "STRING", "integer": "INTEGER", "number": "NUMBER",
-		"boolean": "BOOLEAN", "object": "OBJECT", "array": "ARRAY",
-		"": "STRING", "geo": "GEO",
-	}
-	for in, want := range cases {
-		if got := gemmaSchemaType(in); got != want {
-			t.Fatalf("gemmaSchemaType(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 func countSubstr(s, sub string) int {
 	n := 0
 	for i := 0; i+len(sub) <= len(s); i++ {

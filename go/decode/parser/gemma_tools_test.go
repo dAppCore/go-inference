@@ -54,3 +54,44 @@ func TestParseGemmaToolCalls_NoCall(t *testing.T) {
 		t.Fatalf("visible = %q, want the input unchanged", visible)
 	}
 }
+
+// TestRenderGemmaToolDeclarations pins the shared renderer against the exact
+// declaration in the gemma4 function-calling reference — the format the model
+// was trained on, so both providers must produce it byte-for-byte.
+func TestRenderGemmaToolDeclarations(t *testing.T) {
+	tools := []ToolDecl{{
+		Name:        "get_current_temperature",
+		Description: "Gets the current temperature for a given location.",
+		Properties: map[string]ToolParam{
+			"location": {Type: "string", Description: "The city name, e.g. San Francisco"},
+		},
+		Required: []string{"location"},
+	}}
+	q := ToolArgQuoteMarker
+	want := "<|tool>declaration:get_current_temperature{description:" + q +
+		"Gets the current temperature for a given location." + q +
+		",parameters:{properties:{location:{description:" + q +
+		"The city name, e.g. San Francisco" + q + ",type:" + q + "STRING" + q + "} }," +
+		"required:[" + q + "location" + q + "],type:" + q + "OBJECT" + q + "} }<tool|>"
+	if got := RenderGemmaToolDeclarations(tools); got != want {
+		t.Fatalf("RenderGemmaToolDeclarations mismatch:\n got: %s\nwant: %s", got, want)
+	}
+	if RenderGemmaToolDeclarations(nil) != "" {
+		t.Fatal("no tools should render empty")
+	}
+}
+
+// TestGemmaSchemaType pins the JSON-schema -> Gemma uppercase type mapping,
+// including the empty default and the unknown-type passthrough.
+func TestGemmaSchemaType(t *testing.T) {
+	cases := map[string]string{
+		"string": "STRING", "integer": "INTEGER", "number": "NUMBER",
+		"boolean": "BOOLEAN", "object": "OBJECT", "array": "ARRAY",
+		"": "STRING", "geo": "GEO",
+	}
+	for in, want := range cases {
+		if got := gemmaSchemaType(in); got != want {
+			t.Fatalf("gemmaSchemaType(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
