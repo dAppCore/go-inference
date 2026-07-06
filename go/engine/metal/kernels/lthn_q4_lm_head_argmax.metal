@@ -1139,3 +1139,73 @@ kernel void lthn_logits_sample_bf16(
   }
   out[0] = fallback;
 }
+
+// K-row BF16 direct greedy. Scores each tile's vocab rows against K normed
+// hidden rows in ONE weight pass — the MTP verify head previously re-read the
+// full lm_head weight once per row, which was its dominant cost after the
+// per-row synchronisation was batched away. Per-row tile bests write strided
+// as values/indices[r * tile_count + tile]; scores round to bf16 before
+// comparison exactly as the single-row kernel, so each row's selected token
+// matches model.Greedy over the full BF16 logits row.
+constant constexpr uint lthn_bf16_lm_head_max_batch_rows = 8;
+
+kernel void lthn_bf16_lm_head_argmax_tiles_rows_bf16(
+    device const bfloat* x       [[buffer(0)]],
+    device const bfloat* weight  [[buffer(1)]],
+    device float*        values  [[buffer(2)]],
+    device int*          indices [[buffer(3)]],
+    constant int&        d_model [[buffer(4)]],
+    constant int&        vocab   [[buffer(5)]],
+    device const int*    suppress [[buffer(6)]],
+    constant int&        suppress_count [[buffer(7)]],
+    constant int&        k       [[buffer(8)]],
+    constant int&        tile_count [[buffer(9)]],
+    uint tile [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint row_in_tile [[simdgroup_index_in_threadgroup]]) {
+  if (d_model <= 0 || vocab <= 0 || k <= 0 || uint(k) > lthn_bf16_lm_head_max_batch_rows) return;
+
+  uint row = tile * lthn_bf16_lm_head_rows_per_tile + row_in_tile;
+  float partial[lthn_bf16_lm_head_max_batch_rows];
+  for (uint r = 0; r < lthn_bf16_lm_head_max_batch_rows; ++r) partial[r] = 0.0f;
+  if (row < uint(vocab)) {
+    for (uint col = lane; col < uint(d_model); col += 32u) {
+      float w = float(weight[row * uint(d_model) + col]);
+      for (uint r = 0; r < uint(k); ++r) {
+        partial[r] += float(x[r * uint(d_model) + col]) * w;
+      }
+    }
+  }
+
+  threadgroup float tile_values[lthn_bf16_lm_head_max_batch_rows][lthn_bf16_lm_head_rows_per_tile];
+  threadgroup int tile_indices[lthn_bf16_lm_head_rows_per_tile];
+  bool masked = true;
+  if (lane == 0u) {
+    masked = row >= uint(vocab) || lthn_lm_head_row_suppressed(row, suppress, suppress_count);
+    tile_indices[row_in_tile] = (row < uint(vocab)) ? int(row) : -1;
+  }
+  for (uint r = 0; r < uint(k); ++r) {
+    float score = simd_sum(partial[r]);
+    if (lane == 0u) {
+      tile_values[r][row_in_tile] = !masked ? float(bfloat(score)) : -INFINITY;
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  if (row_in_tile == 0u && lane == 0u) {
+    for (uint r = 0; r < uint(k); ++r) {
+      float best = -INFINITY;
+      int best_idx = -1;
+      for (uint i = 0; i < lthn_bf16_lm_head_rows_per_tile; i++) {
+        float v = tile_values[r][i];
+        int idx = tile_indices[i];
+        if (idx >= 0 && (v > best || (v == best && (best_idx < 0 || idx < best_idx)))) {
+          best = v;
+          best_idx = idx;
+        }
+      }
+      values[r * uint(tile_count) + tile] = best;
+      indices[r * uint(tile_count) + tile] = best_idx;
+    }
+  }
+}

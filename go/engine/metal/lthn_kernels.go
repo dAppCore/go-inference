@@ -557,6 +557,10 @@ var (
 	logitsSampleBF16PSOOnce      sync.Once
 	logitsSampleBF16PSO          metal.MTLComputePipelineState
 	logitsSampleBF16PSOErr       error
+
+	bf16LMHeadArgmaxTilesRowsPSOOnce sync.Once
+	bf16LMHeadArgmaxTilesRowsPSO     metal.MTLComputePipelineState
+	bf16LMHeadArgmaxTilesRowsPSOErr  error
 )
 
 func bf16LMHeadArgmaxTilesPipeline() (metal.MTLComputePipelineState, error) {
@@ -605,6 +609,22 @@ func argmaxMergeF32Pipeline() (metal.MTLComputePipelineState, error) {
 		argmaxMergeF32PSO, argmaxMergeF32PSOErr = device.NewComputePipelineStateWithFunctionError(fn)
 	})
 	return argmaxMergeF32PSO, argmaxMergeF32PSOErr
+}
+
+func bf16LMHeadArgmaxTilesRowsPipeline() (metal.MTLComputePipelineState, error) {
+	bf16LMHeadArgmaxTilesRowsPSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			bf16LMHeadArgmaxTilesRowsPSOErr = core.NewError("native.bf16LMHeadArgmaxTilesRowsPipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_bf16_lm_head_argmax_tiles_rows_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			bf16LMHeadArgmaxTilesRowsPSOErr = core.NewError("native.bf16LMHeadArgmaxTilesRowsPipeline: kernel lthn_bf16_lm_head_argmax_tiles_rows_bf16 not found")
+			return
+		}
+		bf16LMHeadArgmaxTilesRowsPSO, bf16LMHeadArgmaxTilesRowsPSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return bf16LMHeadArgmaxTilesRowsPSO, bf16LMHeadArgmaxTilesRowsPSOErr
 }
 
 func bf16LMHeadCandidatesPipeline() (metal.MTLComputePipelineState, error) {
@@ -916,6 +936,67 @@ func encArgmaxMergeF32(enc metal.MTLComputeCommandEncoder, values, indices, out 
 	setBuf(enc, values, 0, 0)
 	setBuf(enc, indices, 0, 1)
 	setBuf(enc, out, 0, 2)
+	setEncInt32(enc, int32(n), 3)
+	dispatchThreads(enc,
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+	)
+	return nil
+}
+
+// encBF16LMHeadArgmaxTilesRowsBF16 encodes the K-row direct-greedy head: one
+// weight pass scores every tile's vocab rows against all K normed hidden rows
+// ([k × dModel] in x), per-row tile bests landing strided at
+// values/indices[r*tileCount + tile].
+func encBF16LMHeadArgmaxTilesRowsBF16(
+	enc metal.MTLComputeCommandEncoder,
+	x, weight, tileValues, tileIndices, suppress metal.MTLBuffer,
+	xOff, weightOff uint,
+	dModel, vocab, suppressCount, k, tileCount int,
+) error {
+	if dModel <= 0 || vocab <= 0 || k <= 0 || k > 8 {
+		return core.NewError("native.encBF16LMHeadArgmaxTilesRowsBF16: invalid batch geometry")
+	}
+	pso, err := bf16LMHeadArgmaxTilesRowsPipeline()
+	if err != nil {
+		return err
+	}
+	setPSO(enc, pso)
+	setBuf(enc, x, xOff, 0)
+	setBuf(enc, weight, weightOff, 1)
+	setBuf(enc, tileValues, 0, 2)
+	setBuf(enc, tileIndices, 0, 3)
+	setEncInt32(enc, int32(dModel), 4)
+	setEncInt32(enc, int32(vocab), 5)
+	if suppress == nil {
+		suppress = x
+	}
+	setBuf(enc, suppress, 0, 6)
+	setEncInt32(enc, int32(suppressCount), 7)
+	setEncInt32(enc, int32(k), 8)
+	setEncInt32(enc, int32(tileCount), 9)
+	dispatchThreadgroups(enc,
+		metal.MTLSize{Width: uint(tileCount), Height: 1, Depth: 1},
+		metal.MTLSize{Width: 32, Height: bf16LMHeadArgmaxRowsPerTile, Depth: 1},
+	)
+	return nil
+}
+
+// encArgmaxMergeF32At is encArgmaxMergeF32 with byte offsets into the tile
+// values/indices/out buffers — the K-row head merges each row's tile slice in
+// place inside the same command buffer.
+func encArgmaxMergeF32At(enc metal.MTLComputeCommandEncoder, values, indices, out metal.MTLBuffer, valOff, idxOff, outOff uint, n int) error {
+	if n <= 0 {
+		return core.NewError("native.encArgmaxMergeF32At: n must be > 0")
+	}
+	pso, err := argmaxMergeF32Pipeline()
+	if err != nil {
+		return err
+	}
+	setPSO(enc, pso)
+	setBuf(enc, values, valOff, 0)
+	setBuf(enc, indices, idxOff, 1)
+	setBuf(enc, out, outOff, 2)
 	setEncInt32(enc, int32(n), 3)
 	dispatchThreads(enc,
 		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
