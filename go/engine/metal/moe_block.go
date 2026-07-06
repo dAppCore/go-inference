@@ -466,10 +466,7 @@ func newMoEBlockBF16Scratch(dModel, dFF, expertDFF, topK int) (*moeBlockBF16Scra
 		idx.Close()
 		return nil, err
 	}
-	scratchDFF := dFF
-	if expertDFF > scratchDFF {
-		scratchDFF = expertDFF
-	}
+	scratchDFF := max(expertDFF, dFF)
 	return &moeBlockBF16Scratch{
 		dModel:       dModel,
 		dFF:          dFF,
@@ -939,10 +936,7 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 			sink.setBuf(scalar, scalarOffset, 1)
 			sink.setBuf(out, 0, 2)
 			sink.setI32(int32(n), 3)
-			group := uint(256)
-			if uint(n) < group {
-				group = uint(n)
-			}
+			group := min(uint(n), uint(256))
 			sink.dispatchThreads(
 				metal.MTLSize{Width: uint(n), Height: 1, Depth: 1},
 				metal.MTLSize{Width: group, Height: 1, Depth: 1},
@@ -961,7 +955,7 @@ func moeBlockBF16AfterRouterWithBufferPooled(h []byte, hBuf metal.MTLBuffer, out
 		}
 		emitLocalDownGemv(localDown, msc.gated, scratch.localOut)
 		emitRMS(inputBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
-		for i := 0; i < topK; i++ {
+		for i := range topK {
 			e := int(idx[i])
 			gateOff, downOff := uint(e*gateSz), uint(e*downSz)
 			emitExpertInGemv(expertGate, scratch.expertIn, msc.gate, gateOff)
@@ -1891,10 +1885,7 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 			sink.setBuf(scalar, scalarOffset, 1)
 			sink.setBuf(out, 0, 2)
 			sink.setI32(int32(n), 3)
-			group := uint(256)
-			if uint(n) < group {
-				group = uint(n)
-			}
+			group := min(uint(n), uint(256))
 			sink.dispatchThreads(
 				metal.MTLSize{Width: uint(n), Height: 1, Depth: 1},
 				metal.MTLSize{Width: group, Height: 1, Depth: 1},
@@ -1917,7 +1908,7 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 			emitQ(localDownPSO, localDownPacked.buf, localDownScales.buf, localDownBiases.buf, msc.gated, scratch.localOut, localDownPacked.off, localDownScales.off, localDownBiases.off, 0, dFF, dModel)
 		}
 		emitRMS(inputBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
-		for i := 0; i < topK; i++ {
+		for i := range topK {
 			if useGatherExperts {
 				if fusedExperts {
 					emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expGateUpPacked.buf, expGateUpScales.buf, expGateUpBiases.buf, scratch.expertIn, msc.gate, expGateUpPacked.off, expGateUpScales.off, expGateUpBiases.off, i, dModel, expertDFF, expGateUpGroupSize, expGateUpBits, 0)

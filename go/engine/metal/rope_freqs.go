@@ -344,7 +344,7 @@ func uploadRopePeriods(invFreqs []float32) metal.MTLBuffer {
 func proportionalRopePeriods(headDim, rotaryDim int, base float32) []float32 {
 	half, rot := headDim/2, rotaryDim/2
 	p := make([]float32, half)
-	for i := 0; i < half; i++ {
+	for i := range half {
 		if i < rot {
 			p[i] = float32(math.Pow(float64(base), float64(2*i)/float64(headDim)))
 		} else {

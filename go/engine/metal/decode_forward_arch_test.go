@@ -38,9 +38,9 @@ func archShareRef(t *testing.T, layers []DecodeLayerWeights, specs []model.Layer
 		}
 	}
 	out := make([][]byte, T)
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		x := inputs[tok]
-		for li := 0; li < nLayers; li++ {
+		for li := range nLayers {
 			w := layers[li]
 			normed := must(RMSNormBF16(x, w.AttnNormW, 1, dModel, eps))
 			qr := must(RoPEBF16(must(MatVecBF16(w.WQ, normed, qDim, dModel)), 1, nHeads, headDim, base, scale, tok, false))
@@ -114,7 +114,7 @@ func TestDecodeForwardArch(t *testing.T) {
 		t.Fatalf("DecodeForwardArch all-owner: %v", err)
 	}
 	refOwn := archShareRef(t, layers, specsOwn, inputs, dModel, nHeads, nKV, headDim, dFF, maxLen, 0, base, scale, eps)
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("all-owner vs DecodeForward tok%d", tok), gotOwn[tok], ref0[tok])
 		eqBytes(t, core.Sprintf("all-owner vs ref tok%d", tok), gotOwn[tok], refOwn[tok])
 	}
@@ -133,7 +133,7 @@ func TestDecodeForwardArch(t *testing.T) {
 		t.Fatalf("DecodeForwardArch share: %v", err)
 	}
 	refShare := archShareRef(t, layers2, specsShare, inputs, dModel, nHeads, nKV, headDim, dFF, maxLen, 0, base, scale, eps)
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("KV-share vs ref tok%d", tok), gotShare[tok], refShare[tok])
 	}
 
@@ -160,7 +160,7 @@ func TestDecodeForwardArch(t *testing.T) {
 		t.Fatalf("DecodeForwardArch sliding: %v", err)
 	}
 	refSlide := archShareRef(t, layers, specsSlide, in2, dModel, nHeads, nKV, headDim, dFF, maxLen2, W, base, scale, eps)
-	for tok := 0; tok < T2; tok++ {
+	for tok := range T2 {
 		eqBytes(t, core.Sprintf("sliding vs windowed ref tok%d", tok), gotSlide[tok], refSlide[tok])
 	}
 	// the window must actually clip: full-attention on the same weights differs at a
@@ -510,7 +510,7 @@ func TestDecodeForwardArchMoE(t *testing.T) {
 		t.Fatalf("DecodeForwardArch MoE: %v", err)
 	}
 	ref := archShareRef(t, layers, specs, inputs, dModel, nHeads, nKV, headDim, dFF, maxLen, 0, base, scale, eps)
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("MoE-layer arch vs ref tok%d", tok), got[tok], ref[tok])
 	}
 

@@ -52,7 +52,7 @@ func TestDecodeLayerBatchedKV(t *testing.T) {
 	kSeq := append([]byte(nil), kCache0...)
 	vSeq := append([]byte(nil), vCache0...)
 	seqOut := make([]byte, K*rowBytes)
-	for i := 0; i < K; i++ {
+	for i := range K {
 		h, err := DecodeStepKV(xs[i*rowBytes:(i+1)*rowBytes], attnNormW, wQ, wK, wV, wO, kSeq, vSeq, mlpNormW, wGate, wUp, wDown,
 			dModel, nHeads, nKVHeads, headDim, maxLen, dFF, basePos+i, base, scale, eps)
 		if err != nil {

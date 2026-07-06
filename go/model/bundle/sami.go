@@ -77,13 +77,7 @@ func SAMIFromKV(snapshot *kv.Snapshot, analysis *kv.Analysis, opts SAMIOptions) 
 	// is keyLen == valueLen == alignLen == numLayers — in that case the
 	// tail loop runs zero iterations and the prefix loop has no per-
 	// iteration bounds-check branches against the analysis slices.
-	inBounds := min(keyLen, numLayers)
-	if valueLen < inBounds {
-		inBounds = valueLen
-	}
-	if alignLen < inBounds {
-		inBounds = alignLen
-	}
+	inBounds := min(alignLen, min(valueLen, min(keyLen, numLayers)))
 	for layer := range inBounds {
 		k := clampUnit(layerKey[layer])
 		v := clampUnit(layerValue[layer])

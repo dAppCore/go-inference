@@ -203,7 +203,6 @@ func TestNewProbeBus_AllocBudget(t *testing.T) {
 		{"four-sinks", []ProbeSink{s1, s2, s3, s4}, 2},
 	}
 	for _, c := range cases {
-		c := c
 		t.Run(c.name, func(t *testing.T) {
 			allocs := testing.AllocsPerRun(100, func() {
 				probeBenchSinkBus = NewProbeBus(c.sinks...)

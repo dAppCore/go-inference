@@ -2,6 +2,8 @@
 
 package state
 
+import "slices"
+
 import "testing"
 
 func TestProjectSeed_WakeRequest_Good(t *testing.T) {
@@ -215,12 +217,7 @@ func TestProjectSeed_CheckWakeCompatibility_Ugly(t *testing.T) {
 }
 
 func stringSliceContains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, want)
 }
 
 // TestProjectSeed_NewProjectSeed_Good proves every explicit field is used

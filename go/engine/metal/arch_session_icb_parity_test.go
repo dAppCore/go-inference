@@ -608,7 +608,7 @@ func TestArchQuantSessionICBParity_PerLayerHiddenCosine(t *testing.T) {
 	if len(reLayers) != numLayers || len(icbLayers) != numLayers {
 		t.Fatalf("per-layer capture count: reencode=%d icb=%d want %d", len(reLayers), len(icbLayers), numLayers)
 	}
-	for L := 0; L < numLayers; L++ {
+	for L := range numLayers {
 		c := cosineBF16(reLayers[L], icbLayers[L])
 		if c < 0.9999 {
 			at := "sliding"
@@ -732,7 +732,7 @@ func TestArchQuantSessionICBParity_PerLayerKVHeads(t *testing.T) {
 	if len(reLayers) != numLayers || len(icbLayers) != numLayers {
 		t.Fatalf("per-layer capture count: reencode=%d icb=%d want %d", len(reLayers), len(icbLayers), numLayers)
 	}
-	for L := 0; L < numLayers; L++ {
+	for L := range numLayers {
 		if c := cosineBF16(reLayers[L], icbLayers[L]); c < 0.9999 {
 			at := "sliding"
 			if sc.state.specs[L].Attention == model.GlobalAttention {

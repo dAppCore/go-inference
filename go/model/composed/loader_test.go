@@ -44,7 +44,7 @@ func mkHybridCheckpoint() (map[string]safetensors.Tensor, []byte) {
 		"model.norm.weight":         bf16T(syn(D, 2), D),
 		"lm_head.weight":            bf16T(syn(vocab*D, 3), vocab, D),
 	}
-	for i := 0; i < nLayers; i++ {
+	for i := range nLayers {
 		lp := "model.layers." + itoa(i) + "."
 		ts[lp+"input_layernorm.weight"] = bf16T(syn(D, i*100+1), D)
 		ts[lp+"post_attention_layernorm.weight"] = bf16T(syn(D, i*100+2), D)

@@ -142,16 +142,10 @@ func (a Arch) MaxKVHeads() int {
 func DeriveLayers(layerTypes []string, numKVShared int) []LayerSpec {
 	n := len(layerTypes)
 	specs := make([]LayerSpec, n)
-	firstShared := n - numKVShared
-	if firstShared < 0 {
-		firstShared = 0
-	}
-	if firstShared > n {
-		firstShared = n
-	}
+	firstShared := min(max(n-numKVShared, 0), n)
 	latestByType := map[AttentionType]int{}
 	nextCache := 0
-	for i := 0; i < n; i++ {
+	for i := range n {
 		at := GlobalAttention
 		if layerTypes[i] == "sliding_attention" {
 			at = SlidingAttention

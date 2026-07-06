@@ -229,10 +229,7 @@ func encMulScalarBF16(enc metal.MTLComputeCommandEncoder, in, scalar, out metal.
 	sink.setBuf(scalar, scalarOffset, 1)
 	sink.setBuf(out, 0, 2)
 	sink.setI32(int32(n), 3)
-	group := uint(256)
-	if uint(n) < group {
-		group = uint(n)
-	}
+	group := min(uint(n), uint(256))
 	sink.dispatchThreads(
 		metal.MTLSize{Width: uint(n), Height: 1, Depth: 1},
 		metal.MTLSize{Width: group, Height: 1, Depth: 1},
@@ -257,10 +254,7 @@ func encMulScalarBF16Object(enc metal.MTLComputeCommandEncoderObject, in, scalar
 	sink.setBuf(scalar, scalarOffset, 1)
 	sink.setBuf(out, 0, 2)
 	sink.setI32(int32(n), 3)
-	group := uint(256)
-	if uint(n) < group {
-		group = uint(n)
-	}
+	group := min(uint(n), uint(256))
 	sink.dispatchThreads(
 		metal.MTLSize{Width: uint(n), Height: 1, Depth: 1},
 		metal.MTLSize{Width: group, Height: 1, Depth: 1},
@@ -835,10 +829,7 @@ func logitsSampleBF16Usable(vocab int) bool {
 }
 
 func q4LMHeadTopKCandidateCount(vocab, topK int) int {
-	perTile := topK
-	if q4LMHeadTopKRowsPerTile < perTile {
-		perTile = q4LMHeadTopKRowsPerTile
-	}
+	perTile := min(q4LMHeadTopKRowsPerTile, topK)
 	tileCount := (vocab + q4LMHeadTopKRowsPerTile - 1) / q4LMHeadTopKRowsPerTile
 	return tileCount * perTile
 }
@@ -1040,10 +1031,7 @@ func encBF16LogitsCandidatesBF16(
 	setBuf(enc, suppress, 0, 4)
 	setEncInt32(enc, int32(suppressCount), 5)
 	setEncFloat32(enc, softCap, 6)
-	group := uint(256)
-	if uint(vocab) < group {
-		group = uint(vocab)
-	}
+	group := min(uint(vocab), uint(256))
 	dispatchThreads(enc,
 		metal.MTLSize{Width: uint(vocab), Height: 1, Depth: 1},
 		metal.MTLSize{Width: group, Height: 1, Depth: 1},

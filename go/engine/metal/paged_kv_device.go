@@ -236,7 +236,7 @@ func (c *devicePagedKVCache) loadLinearSnapshot(kRows, vRows []byte, tokens int)
 	}
 	c.length = 0
 	c.offset = 0
-	for pos := 0; pos < tokens; pos++ {
+	for pos := range tokens {
 		_, _, rowOff, err := c.slot(pos)
 		if err != nil {
 			return err
@@ -317,7 +317,7 @@ func (c *devicePagedKVCache) state() (keys, values []metal.MTLBuffer, lens, kHea
 	kSeq = c.kSeqStrides[:n]
 	vHead = c.vHeadStrides[:n]
 	vSeq = c.vSeqStrides[:n]
-	for i := 0; i < n; i++ {
+	for i := range n {
 		keys[i] = c.kPages[i]
 		values[i] = c.vPages[i]
 		lens[i] = c.pageLens[i]

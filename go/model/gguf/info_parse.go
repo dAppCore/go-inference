@@ -354,10 +354,7 @@ func skipGGUFString(reader io.Reader, scratch []byte) error {
 		return errGGUFStringTooLong
 	}
 	for length > 0 {
-		n := uint64(len(scratch))
-		if n > length {
-			n = length
-		}
+		n := min(uint64(len(scratch)), length)
 		if _, err := io.ReadFull(reader, scratch[:n]); err != nil {
 			return err
 		}

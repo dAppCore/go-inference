@@ -96,7 +96,7 @@ func TestRoPEDimsPartial(t *testing.T) {
 		t.Fatalf("partial RoPEDimsBF16: %v", err)
 	}
 	rowB, rotB := headDim*bf16Size, rotaryDim*bf16Size
-	for h := 0; h < nHeads; h++ {
+	for h := range nHeads {
 		head := x[h*rowB : (h+1)*rowB]
 		// the rotated block must equal a full RoPE of just the first rotaryDim as its own head.
 		subRoped, err := RoPEBF16(head[:rotB], 1, 1, rotaryDim, base, scale, offset, false)

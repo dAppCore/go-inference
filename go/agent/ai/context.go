@@ -4,6 +4,7 @@ package ai
 
 import (
 	"context"
+	"slices"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
@@ -38,9 +39,9 @@ func (a RAGContextAssembler) AssembleContext(_ context.Context, messages []infer
 }
 
 func lastUserMessage(messages []inference.Message) string {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if core.Lower(core.Trim(messages[i].Role)) == "user" {
-			return core.Trim(messages[i].Content)
+	for _, message := range slices.Backward(messages) {
+		if core.Lower(core.Trim(message.Role)) == "user" {
+			return core.Trim(message.Content)
 		}
 	}
 	return ""

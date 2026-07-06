@@ -91,7 +91,7 @@ func TestLoRASFTReducesLoss(t *testing.T) {
 		t.Fatal(err)
 	}
 	var first, last float32
-	for s := 0; s < steps; s++ {
+	for s := range steps {
 		xA, delta, err := LoRAForwardF32(x, a, b, rows, d, vocab, rank, scaling)
 		if err != nil {
 			t.Fatalf("lora forward %d: %v", s, err)

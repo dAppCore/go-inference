@@ -180,7 +180,7 @@ func gatherQMVBF16ByExpertIndexInto(out []byte, x []byte, idx []int32, w QuantWe
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
 		sink := encSink{enc}
-		for i := 0; i < topK; i++ {
+		for i := range topK {
 			emitGatherQMVBF16Steel(sink, pso, meta, xBuf, wBuf.buf, wBuf.off, sBuf.buf, sBuf.off, bBuf.buf, bBuf.off, idxBuf, uint(i*4), outBuf, uint(i*outDim*bf16Size), outDim, inDim, groupSize, bits, 0)
 		}
 		endEncodingFast(enc)

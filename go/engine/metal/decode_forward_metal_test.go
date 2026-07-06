@@ -47,9 +47,9 @@ func quantRefForward(t *testing.T, ql []QuantizedLayerWeights, inputs [][]byte, 
 		return b
 	}
 	out := make([][]byte, T)
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		x := inputs[tok]
-		for l := 0; l < nLayers; l++ {
+		for l := range nLayers {
 			w := ql[l]
 			// attention half
 			normed := must(RMSNormBF16(x, w.AttnNormW, 1, dModel, eps))
@@ -101,7 +101,7 @@ func TestDecodeForwardQuant(t *testing.T) {
 		t.Fatalf("DecodeForwardQuant: %v", err)
 	}
 	ref := quantRefForward(t, ql, inputs, dModel, nHeads, nKV, headDim, dFF, maxLen, base, scale, eps)
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("DecodeForwardQuant tok%d", tok), got[tok], ref[tok])
 	}
 	t.Logf("DecodeForwardQuant(%d layers × %d tokens, 4-bit gs%d, GQA %d/%d, growing cache): byte-identical to composed proven ops — whole 4-bit decode off mlx-c", nLayers, T, gs, nHeads, nKV)
@@ -142,7 +142,7 @@ func TestDecodeForwardICBQuant(t *testing.T) {
 		if err != nil {
 			t.Fatalf("DecodeForwardICBQuant (%d layers): %v", nLayers, err)
 		}
-		for tok := 0; tok < T; tok++ {
+		for tok := range T {
 			eqBytes(t, core.Sprintf("DecodeForwardICBQuant L%d tok%d", nLayers, tok), got[tok], ref[tok])
 		}
 		t.Logf("DecodeForwardICBQuant(%d layers × %d tokens, 4-bit, growing cache): byte-identical to re-encode DecodeForwardQuant — both levers stacked, off mlx-c", nLayers, T)

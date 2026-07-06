@@ -52,12 +52,12 @@ func BenchmarkVerifyBatchedVsSequential(b *testing.B) {
 		for n := 0; n < b.N; n++ {
 			withAutoreleasePool(func() {
 				st := build()
-				for i := 0; i < prefix; i++ {
+				for i := range prefix {
 					if _, err := st.stepToken(embs[i], i); err != nil {
 						b.Fatal(err)
 					}
 				}
-				for i := 0; i < K; i++ {
+				for i := range K {
 					if _, err := st.stepToken(embs[prefix+i], prefix+i); err != nil {
 						b.Fatal(err)
 					}
@@ -70,7 +70,7 @@ func BenchmarkVerifyBatchedVsSequential(b *testing.B) {
 		for n := 0; n < b.N; n++ {
 			withAutoreleasePool(func() {
 				st := build()
-				for i := 0; i < prefix; i++ {
+				for i := range prefix {
 					if _, err := st.stepToken(embs[i], i); err != nil {
 						b.Fatal(err)
 					}

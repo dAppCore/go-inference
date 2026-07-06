@@ -518,7 +518,7 @@ func estimateSSDCodeBenchmarkPassAtK(total, correct, k int) float64 {
 		return 1
 	}
 	fail := 1.0
-	for i := 0; i < k; i++ {
+	for i := range k {
 		fail *= float64(total-correct-i) / float64(total-i)
 	}
 	return 1 - fail

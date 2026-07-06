@@ -20,14 +20,14 @@ func TestGPURoundTripLatency(t *testing.T) {
 	}
 	a := make([]byte, 256*bf16Size)
 	b := make([]byte, 256*bf16Size)
-	for i := 0; i < 50; i++ { // warmup (shader compile, queue warm)
+	for range 50 { // warmup (shader compile, queue warm)
 		if _, err := AddBF16(a, b); err != nil {
 			t.Fatal(err)
 		}
 	}
 	const N = 2000
 	start := time.Now()
-	for i := 0; i < N; i++ {
+	for range N {
 		if _, err := AddBF16(a, b); err != nil {
 			t.Fatal(err)
 		}

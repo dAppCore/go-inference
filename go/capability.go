@@ -177,9 +177,9 @@ func capabilityIDLabel(ids []CapabilityID) string {
 // the serving and score layers and any package that must avoid backend-specific imports.
 type CapabilityReport struct {
 	Runtime       RuntimeIdentity   `json:"runtime"`
-	Model         ModelIdentity     `json:"model,omitempty"`
-	Tokenizer     TokenizerIdentity `json:"tokenizer,omitempty"`
-	Adapter       AdapterIdentity   `json:"adapter,omitempty"`
+	Model         ModelIdentity     `json:"model"`
+	Tokenizer     TokenizerIdentity `json:"tokenizer"`
+	Adapter       AdapterIdentity   `json:"adapter"`
 	Available     bool              `json:"available"`
 	Architectures []string          `json:"architectures,omitempty"`
 	Quantizations []string          `json:"quantizations,omitempty"`

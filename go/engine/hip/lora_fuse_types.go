@@ -11,7 +11,7 @@ type LoRAFuseOptions struct {
 	AdapterPath  string                    `json:"adapter_path"`
 	OutputPath   string                    `json:"output_path"`
 	Architecture string                    `json:"architecture,omitempty"`
-	Adapter      inference.AdapterIdentity `json:"adapter,omitempty"`
+	Adapter      inference.AdapterIdentity `json:"adapter"`
 	Labels       map[string]string         `json:"labels,omitempty"`
 }
 
@@ -19,7 +19,7 @@ type LoRAFuseResult struct {
 	OutputPath      string                    `json:"output_path"`
 	WeightFiles     []string                  `json:"weight_files,omitempty"`
 	ProvenancePath  string                    `json:"provenance_path,omitempty"`
-	Adapter         inference.AdapterIdentity `json:"adapter,omitempty"`
+	Adapter         inference.AdapterIdentity `json:"adapter"`
 	FusedWeights    int                       `json:"fused_weights"`
 	FusedWeightKeys []string                  `json:"fused_weight_keys,omitempty"`
 	FusedLayers     []string                  `json:"fused_layers,omitempty"`
@@ -31,7 +31,7 @@ type LoRAFuseProvenance struct {
 	SourcePath      string                    `json:"source_path"`
 	OutputPath      string                    `json:"output_path"`
 	WeightFiles     []string                  `json:"weight_files,omitempty"`
-	Adapter         inference.AdapterIdentity `json:"adapter,omitempty"`
+	Adapter         inference.AdapterIdentity `json:"adapter"`
 	FusedWeightKeys []string                  `json:"fused_weight_keys,omitempty"`
 	FusedLayers     []string                  `json:"fused_layers,omitempty"`
 	Labels          map[string]string         `json:"labels,omitempty"`

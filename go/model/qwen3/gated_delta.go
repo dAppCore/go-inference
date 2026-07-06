@@ -61,10 +61,10 @@ func projMatMul(x, w []float32, M, K, N int) ([]float32, error) {
 
 func matNT(in, w []float32, M, K, N int) []float32 {
 	out := make([]float32, M*N)
-	for m := 0; m < M; m++ {
-		for n := 0; n < N; n++ {
+	for m := range M {
+		for n := range N {
 			var acc float64
-			for k := 0; k < K; k++ {
+			for k := range K {
 				acc += float64(in[m*K+k]) * float64(w[n*K+k])
 			}
 			out[m*N+n] = float32(acc)
@@ -113,9 +113,9 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 	q := make([]float32, L*VH*HD)
 	k := make([]float32, L*VH*HD)
 	v := make([]float32, L*VH*HD)
-	for t := 0; t < L; t++ {
+	for t := range L {
 		base := t * convDim
-		for vh := 0; vh < VH; vh++ {
+		for vh := range VH {
 			kh := vh / rep
 			copy(q[(t*VH+vh)*HD:(t*VH+vh+1)*HD], convOut[base+kh*HD:base+kh*HD+HD])
 			copy(k[(t*VH+vh)*HD:(t*VH+vh+1)*HD], convOut[base+qDim+kh*HD:base+qDim+kh*HD+HD])
@@ -124,12 +124,12 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 	}
 	for row := 0; row < L*VH; row++ { // l2-normalise q over HD (kernel l2-norms k itself)
 		var ss float64
-		for i := 0; i < HD; i++ {
+		for i := range HD {
 			qv := float64(q[row*HD+i])
 			ss += qv * qv
 		}
 		inv := float32(1.0 / math.Sqrt(ss+1e-6))
-		for i := 0; i < HD; i++ {
+		for i := range HD {
 			q[row*HD+i] *= inv
 		}
 	}
@@ -166,12 +166,12 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 	gated := make([]float32, L*vDim)
 	for row := 0; row < L*VH; row++ {
 		var ss float64
-		for i := 0; i < HD; i++ {
+		for i := range HD {
 			ov := float64(o[row*HD+i])
 			ss += ov * ov
 		}
 		rms := math.Sqrt(ss/float64(HD) + float64(cfg.Eps))
-		for i := 0; i < HD; i++ {
+		for i := range HD {
 			normed := float64(o[row*HD+i]) / rms * float64(w.Norm[i])
 			gated[row*HD+i] = float32(normed * gdSilu(float64(zProj[row*HD+i])))
 		}

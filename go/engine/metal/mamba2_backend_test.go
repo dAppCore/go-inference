@@ -35,10 +35,10 @@ func TestMamba2DeviceProjMatchesReference(t *testing.T) {
 	if len(dev) != M*N {
 		t.Fatalf("len %d, want %d", len(dev), M*N)
 	}
-	for m := 0; m < M; m++ {
-		for n := 0; n < N; n++ {
+	for m := range M {
+		for n := range N {
 			var acc float64
-			for k := 0; k < K; k++ {
+			for k := range K {
 				acc += float64(x[m*K+k]) * float64(w[n*K+k])
 			}
 			if got := float64(dev[m*N+n]); math.Abs(got-acc) > 1e-3*(1+math.Abs(acc)) {

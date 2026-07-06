@@ -19,7 +19,7 @@ func concatHeadMajorKVPages(pages [][]byte, nKVHeads, headDim int) ([]byte, int)
 		total += len(page) / (nKVHeads * headDim * bf16Size)
 	}
 	out := make([]byte, nKVHeads*total*headDim*bf16Size)
-	for h := 0; h < nKVHeads; h++ {
+	for h := range nKVHeads {
 		pos := 0
 		for _, page := range pages {
 			pageLen := len(page) / (nKVHeads * headDim * bf16Size)
@@ -334,7 +334,7 @@ func compactSeqMajorPagesToHeadMajor(pages [][]byte, lens []int, nKVHeads, headD
 	}
 	out := make([]byte, nKVHeads*total*headDim*bf16Size)
 	headBytes := headDim * bf16Size
-	for h := 0; h < nKVHeads; h++ {
+	for h := range nKVHeads {
 		pos := 0
 		for i, page := range pages {
 			for t := 0; t < lens[i]; t++ {

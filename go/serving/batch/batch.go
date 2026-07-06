@@ -145,13 +145,13 @@ func RunAsCompleted(ctx context.Context, requests []any, opts Options) <-chan It
 // RunAsCompleted build on it — the only difference is whether the caller
 // reorders the stream into input slots.
 func dispatch(ctx context.Context, requests []any, opts Options) <-chan ItemResult {
-	cap := opts.Concurrency
-	if cap < 1 {
-		cap = 1 // a non-positive cap is serial, never unbounded
-	}
-	if cap > len(requests) {
-		cap = len(requests) // no point in more workers than work
-	}
+	cap := min(
+		// a non-positive cap is serial, never unbounded
+		max(opts.Concurrency,
+
+			1),
+		// no point in more workers than work
+		len(requests))
 
 	feed := make(chan int)
 	out := make(chan ItemResult, len(requests))

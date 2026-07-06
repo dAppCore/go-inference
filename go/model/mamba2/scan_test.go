@@ -30,12 +30,12 @@ func TestSSDScanL1ClosedForm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SSDScanF32: %v", err)
 	}
-	for h := 0; h < H; h++ {
+	for h := range H {
 		var bc float64
-		for n := 0; n < N; n++ {
+		for n := range N {
 			bc += float64(b[h*N+n]) * float64(c[h*N+n])
 		}
-		for p := 0; p < P; p++ {
+		for p := range P {
 			xtp := float64(x[h*P+p])
 			want := float64(dt[h])*xtp*bc + float64(d[h])*xtp
 			if got := float64(y[h*P+p]); math.Abs(got-want) > 1e-4*(1+math.Abs(want)) {

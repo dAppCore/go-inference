@@ -270,7 +270,7 @@ func (e *AudioFeatureExtractor) Extract(samples []float32) ([]float32, []bool, i
 		for m := 0; m < int(cfg.FeatureSize); m++ {
 			acc := 0.0
 			filter := e.melFilters[m]
-			for b := 0; b < bins; b++ {
+			for b := range bins {
 				if filter[b] != 0 {
 					acc += cmplx.Abs(spectrum[b]) * filter[b]
 				}
@@ -370,7 +370,7 @@ func audioRFFT(frame []float64, spectrum []complex128) {
 		half := size >> 1
 		step := -2 * math.Pi / float64(size)
 		for start := 0; start < n; start += size {
-			for k := 0; k < half; k++ {
+			for k := range half {
 				angle := step * float64(k)
 				w := cmplx.Rect(1, angle)
 				even := spectrum[start+k]

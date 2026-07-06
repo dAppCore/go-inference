@@ -20,6 +20,7 @@
 package creds
 
 import (
+	"slices"
 	"sync"
 
 	core "dappco.re/go"
@@ -162,10 +163,5 @@ func (p KeyPolicy) Allows(provider string) bool {
 	if len(p.AllowedProviders) == 0 {
 		return true
 	}
-	for _, a := range p.AllowedProviders {
-		if a == provider {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(p.AllowedProviders, provider)
 }

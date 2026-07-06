@@ -12,7 +12,7 @@ type ArchitectureResolution struct {
 	ModelType          string              `json:"model_type,omitempty"`
 	TextTowerModelType string              `json:"text_tower_model_type,omitempty"`
 	Architectures      []string            `json:"architectures,omitempty"`
-	Profile            ArchitectureProfile `json:"profile,omitempty"`
+	Profile            ArchitectureProfile `json:"profile"`
 }
 
 func (resolution ArchitectureResolution) Matched() bool {

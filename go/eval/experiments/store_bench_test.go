@@ -55,7 +55,7 @@ func splitFor(i int) experiments.Split {
 func benchStore(n int) *experiments.MemStore {
 	s := experiments.NewMemStore()
 	s.PutDataset(experiments.Dataset{ID: "ds", Name: "ds"})
-	for i := 0; i < n; i++ {
+	for i := range n {
 		s.PutExample(experiments.Example{
 			ID: core.Sprintf("ex-%04d", i), DatasetID: "ds",
 			Inputs:    map[string]any{"prompt": "Is honesty always right?"},

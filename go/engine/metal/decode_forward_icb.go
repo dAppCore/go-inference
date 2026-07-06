@@ -437,7 +437,7 @@ func decodeForwardICBCore(
 		log2base := float32(math.Log2(float64(base)))
 		var finalOutCmd metal.MTLIndirectComputeCommand
 
-		for li := 0; li < nLayers; li++ {
+		for li := range nLayers {
 			opBase := opsPerLayer * li
 			inBuf, outBuf := ping[li%2], ping[(li+1)%2]
 			hBuf := hBufs[li]
@@ -535,11 +535,11 @@ func decodeForwardICBCore(
 		waitUntilCompletedFast(optCb)
 
 		rowBytes := kvDim * bf16Size
-		for t := 0; t < T; t++ {
+		for t := range T {
 			*offPtr = int32(t)
 			*nPtr = int32(t + 1)
 			rowOff := uint(t * rowBytes)
-			for li := 0; li < nLayers; li++ {
+			for li := range nLayers {
 				// advance this token's cache-write row on the two recorded commands
 				setICBKernelBuffer(kRopeCmd[li], kCaches[li], rowOff, 1)
 				setICBKernelBuffer(vCmd[li], vCaches[li], rowOff, vOutBind)

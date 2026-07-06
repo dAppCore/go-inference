@@ -37,14 +37,14 @@ type MambaModel struct {
 // rmsNormRowsPlain RMS-norms each of the `rows` rows of x [rows, d] by the shared plain weight w [d].
 func rmsNormRowsPlain(x, w []float32, rows, d int, eps float32) []float32 {
 	out := make([]float32, rows*d)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		xr := x[r*d : (r+1)*d]
 		var ss float64
-		for i := 0; i < d; i++ {
+		for i := range d {
 			ss += float64(xr[i]) * float64(xr[i])
 		}
 		rms := math.Sqrt(ss/float64(d) + float64(eps))
-		for i := 0; i < d; i++ {
+		for i := range d {
 			v := float64(xr[i]) / rms
 			if w != nil {
 				v *= float64(w[i])

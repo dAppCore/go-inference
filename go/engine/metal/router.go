@@ -7,6 +7,7 @@ package native
 import (
 	"math"
 	"runtime"
+	"slices"
 	"sync"
 	"unsafe"
 
@@ -274,7 +275,7 @@ func topKByScoreInto(scores []float32, topK int, out []int32) []int32 {
 	} else {
 		out = out[:topK]
 	}
-	for slot := 0; slot < topK; slot++ {
+	for slot := range topK {
 		best := -1
 		for i, score := range scores {
 			if selectedExpert(out[:slot], int32(i)) {
@@ -290,12 +291,7 @@ func topKByScoreInto(scores []float32, topK int, out []int32) []int32 {
 }
 
 func selectedExpert(selected []int32, expert int32) bool {
-	for _, v := range selected {
-		if v == expert {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(selected, expert)
 }
 
 // softmaxAt returns softmax over the scores at idx (max-subtracted for stability),
@@ -572,7 +568,7 @@ func routerSelectWithScratch(scoresB, perExpertScale []byte, numExperts, topK in
 	} else {
 		scores = make([]float32, numExperts)
 	}
-	for e := 0; e < numExperts; e++ {
+	for e := range numExperts {
 		scores[e] = bf16ToF32(scoresB[e*bf16Size], scoresB[e*bf16Size+1])
 	}
 	var idx []int32

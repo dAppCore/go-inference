@@ -218,7 +218,7 @@ func TestAudioAttention_AudioBlockContextF32_Good(t *testing.T) {
 	ctx := chunk + past + future
 	nB := (T + chunk - 1) / chunk
 	x := make([]float32, T*H*D)
-	for t := 0; t < T; t++ {
+	for t := range T {
 		x[t*D+0], x[t*D+1] = float32(t+1), float32(-(t + 1))
 	}
 	out := audioBlockContextF32(x, T, H, D, nB, chunk, past, future)
@@ -245,7 +245,7 @@ func TestAudioAttention_AudioBlockedMask_Bad(t *testing.T) {
 	// block 1 (queries 2..3), the LAST block only has query index 0 in-sequence (seqLen=3);
 	// query index 1 (t=3) is past the sequence end and must be masked at every key.
 	base := (1*chunk + 1) * ctx
-	for j := 0; j < ctx; j++ {
+	for j := range ctx {
 		if mask[base+j] {
 			t.Fatalf("mask[block=1][query=1(out-of-seq)][%d] = true, want false (query beyond seqLen)", j)
 		}

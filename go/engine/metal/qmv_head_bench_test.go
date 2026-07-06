@@ -41,12 +41,12 @@ func TestHeadQMVTiming(t *testing.T) {
 			cb.Commit()
 			cb.WaitUntilCompleted()
 		}
-		for i := 0; i < 20; i++ { // warmup
+		for range 20 { // warmup
 			run()
 		}
 		const N = 100
 		start := time.Now()
-		for i := 0; i < N; i++ {
+		for range N {
 			run()
 		}
 		per = time.Since(start) / N

@@ -200,7 +200,7 @@ func TestICBRebindOffset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rebindProbeICB: %v", err)
 	}
-	for r := 0; r < nRows; r++ {
+	for r := range nRows {
 		row := got[r*outDim : (r+1)*outDim]
 		for i := range want {
 			if row[i] != want[i] {
@@ -357,7 +357,7 @@ func TestDecodeTokenParity(t *testing.T) {
 
 	// oracle: nLayers applications of the proven DecodeLayer, output feeding input
 	ref := x
-	for i := 0; i < nLayers; i++ {
+	for i := range nLayers {
 		var err error
 		ref, err = DecodeLayer(ref, anw, wQ, wO, kC, vC, mnw, wG, wU, wD, dModel, nHeads, nKV, headDim, kvLen, dFF, base, scale, offset, eps)
 		if err != nil {

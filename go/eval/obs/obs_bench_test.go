@@ -62,7 +62,7 @@ func BenchmarkRunTree_StartFinish(b *testing.B) {
 func BenchmarkRunTree_MeanByKey(b *testing.B) {
 	tree := NewRunTree(benchIDGen(), benchClock())
 	root := tree.StartRun("chat", nil)
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		tree.Record(Feedback{RunID: root.ID, Key: benchKeyFor(i), Score: float64(i%10) / 10})
 	}
 	b.ReportAllocs()

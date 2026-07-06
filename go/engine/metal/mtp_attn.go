@@ -131,7 +131,7 @@ func SDPACausalBF16Into(out, q, k, v []byte, H, Hkv, qL, kL, D int, scale float3
 	scores := scratch.scores
 	probs := scratch.probs
 	oh := scratch.headOut
-	for h := 0; h < H; h++ {
+	for h := range H {
 		hk := h / gqa
 		qh := qf[h*qL*D : (h+1)*qL*D]   // [qL, D]
 		kh := kf[hk*kL*D : (hk+1)*kL*D] // [kL, D]
@@ -143,9 +143,9 @@ func SDPACausalBF16Into(out, q, k, v []byte, H, Hkv, qL, kL, D int, scale float3
 		if err != nil {
 			return nil, err
 		}
-		for i := 0; i < qL; i++ {
+		for i := range qL {
 			lim := kL - qL + i
-			for j := 0; j < kL; j++ {
+			for j := range kL {
 				if j <= lim {
 					scores[i*kL+j] *= scale
 				} else {

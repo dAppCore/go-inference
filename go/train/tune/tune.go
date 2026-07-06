@@ -21,6 +21,7 @@ package tune
 import (
 	"context"
 	"io"
+	"slices"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
@@ -91,12 +92,7 @@ func draftFlag(v string) string {
 
 // validWorkload reports whether workload is one of the standard set.
 func validWorkload(workload inference.TuningWorkload) bool {
-	for _, w := range inference.DefaultTuningWorkloads() {
-		if w == workload {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(inference.DefaultTuningWorkloads(), workload)
 }
 
 // parseDraftBlocks parses --depths into draft blocks, bounded to the MTP block

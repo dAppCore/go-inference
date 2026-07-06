@@ -8,7 +8,7 @@ package hip
 type ROCmNativeModelLoaderRegistration struct {
 	Architecture  string               `json:"architecture,omitempty"`
 	Loader        string               `json:"loader,omitempty"`
-	Route         ROCmModelLoaderRoute `json:"route,omitempty"`
+	Route         ROCmModelLoaderRoute `json:"route"`
 	Registered    bool                 `json:"registered,omitempty"`
 	NativeRuntime bool                 `json:"native_runtime,omitempty"`
 	Standalone    bool                 `json:"standalone,omitempty"`

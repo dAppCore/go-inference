@@ -38,7 +38,7 @@ var (
 // good enough for the parser scan cost which is bytes-driven.
 func builtinBenchText(tokens int) string {
 	out := core.NewBuilder()
-	for i := 0; i < tokens; i++ {
+	for range tokens {
 		out.WriteString("word ")
 	}
 	return out.String()
@@ -48,13 +48,7 @@ func builtinBenchText(tokens int) string {
 // `tokens` words wrapped with a <think>...</think> span covering the
 // requested fraction of the stream. spanFraction is 0.10, 0.50, 0.90.
 func builtinBenchReasoningStream(tokens int, spanFraction float64, startMarker, endMarker string) string {
-	span := int(float64(tokens) * spanFraction)
-	if span < 1 {
-		span = 1
-	}
-	if span > tokens {
-		span = tokens
-	}
+	span := min(max(int(float64(tokens)*spanFraction), 1), tokens)
 	pre := (tokens - span) / 2
 	post := tokens - span - pre
 	out := core.NewBuilder()
@@ -209,7 +203,7 @@ func Benchmark_Builtin_ParseTools_FiveCalls(b *testing.B) {
 	parser := newBuiltinOutputParser("hermes", genericMarkers())
 	out := core.NewBuilder()
 	out.WriteString("preamble text ")
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		out.WriteString(`<tool_call>{"name":"search","arguments":{"q":"core","page":`)
 		out.WriteString(core.Sprintf("%d", i))
 		out.WriteString(`}}</tool_call> `)

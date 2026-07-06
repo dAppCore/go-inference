@@ -37,15 +37,15 @@ type LQLStatement struct {
 	Tuned     string                  `json:"tuned,omitempty"`
 	Patch     string                  `json:"patch,omitempty"`
 	Limit     int                     `json:"limit,omitempty"`
-	Model     inference.ModelIdentity `json:"model,omitempty"`
+	Model     inference.ModelIdentity `json:"model"`
 	Labels    map[string]string       `json:"labels,omitempty"`
 }
 
 // LQLResult is the generic result shape for research backends that execute
 // model-structure queries.
 type LQLResult struct {
-	Statement LQLStatement            `json:"statement,omitempty"`
-	Model     inference.ModelIdentity `json:"model,omitempty"`
+	Statement LQLStatement            `json:"statement"`
+	Model     inference.ModelIdentity `json:"model"`
 	Rows      []map[string]any        `json:"rows,omitempty"`
 	Text      string                  `json:"text,omitempty"`
 	Labels    map[string]string       `json:"labels,omitempty"`

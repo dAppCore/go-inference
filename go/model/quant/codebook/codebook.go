@@ -232,10 +232,10 @@ func MatVec(desc TensorDescriptor, input []float32, codes []uint32, codebook []f
 	}
 	rows := len(input) / inDim
 	out := make([]float32, rows*outDim)
-	for row := 0; row < rows; row++ {
-		for outCol := 0; outCol < outDim; outCol++ {
+	for row := range rows {
+		for outCol := range outDim {
 			sum := float32(0)
-			for inCol := 0; inCol < inDim; inCol++ {
+			for inCol := range inDim {
 				weightIndex := outCol*inDim + inCol
 				codeIndex := weightIndex / desc.CodeDim
 				codeOffset := weightIndex % desc.CodeDim

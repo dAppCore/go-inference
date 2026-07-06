@@ -68,7 +68,7 @@ func TestBlockForwardGatedNormReference(t *testing.T) {
 	z := make([]float32, L*dInner)
 	xBC := make([]float32, L*convDim)
 	dtRaw := make([]float32, L*H)
-	for tt := 0; tt < L; tt++ {
+	for tt := range L {
 		row := proj[tt*projDim:]
 		copy(z[tt*dInner:(tt+1)*dInner], row[0:dInner])
 		copy(xBC[tt*convDim:(tt+1)*convDim], row[dInner:dInner+convDim])
@@ -85,10 +85,10 @@ func TestBlockForwardGatedNormReference(t *testing.T) {
 	bHeads := make([]float32, L*H*N)
 	cHeads := make([]float32, L*H*N)
 	headsPerGroup := H / G
-	for tt := 0; tt < L; tt++ {
+	for tt := range L {
 		crow := convOut[tt*convDim:]
 		copy(xHeads[tt*dInner:(tt+1)*dInner], crow[0:dInner])
-		for h := 0; h < H; h++ {
+		for h := range H {
 			g := h / headsPerGroup
 			copy(bHeads[(tt*H+h)*N:(tt*H+h+1)*N], crow[dInner+g*N:dInner+g*N+N])
 			copy(cHeads[(tt*H+h)*N:(tt*H+h+1)*N], crow[dInner+G*N+g*N:dInner+G*N+g*N+N])
@@ -99,7 +99,7 @@ func TestBlockForwardGatedNormReference(t *testing.T) {
 		dt[i] = float32(softplus(float64(dtRaw[i]) + float64(w.DtBias[i%H])))
 	}
 	a := make([]float32, H)
-	for h := 0; h < H; h++ {
+	for h := range H {
 		a[h] = float32(-math.Exp(float64(w.ALog[h])))
 	}
 	y, _, err := SSDScanF32(xHeads, dt, a, bHeads, cHeads, w.D, nil, L, H, P, N)
@@ -108,15 +108,15 @@ func TestBlockForwardGatedNormReference(t *testing.T) {
 	}
 	// gate BEFORE norm — the documented correct order.
 	gated := make([]float32, L*dInner)
-	for tt := 0; tt < L; tt++ {
+	for tt := range L {
 		g := make([]float64, dInner)
 		var ss float64
-		for i := 0; i < dInner; i++ {
+		for i := range dInner {
 			g[i] = float64(y[tt*dInner+i]) * silu(float64(z[tt*dInner+i]))
 			ss += g[i] * g[i]
 		}
 		rms := math.Sqrt(ss/float64(dInner) + float64(cfg.Eps))
-		for i := 0; i < dInner; i++ {
+		for i := range dInner {
 			gated[tt*dInner+i] = float32(g[i] / rms * float64(w.Norm[i]))
 		}
 	}

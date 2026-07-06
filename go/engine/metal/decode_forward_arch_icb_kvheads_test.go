@@ -62,7 +62,7 @@ func TestDecodeForwardArchICBQuantPerLayerKVHeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeForwardArchQuant: %v", err)
 	}
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("per-layer-kvHeads tok%d", tok), got[tok], want[tok])
 	}
 	t.Logf("non-uniform kvHeads (sliding GQA kv=%d / global MQA kv=%d): ICB replay ≡ DecodeForwardArchQuant byte-for-byte — the 12B/31B mix records correctly", slidingKV, globalKV)

@@ -404,7 +404,7 @@ func TestDevicePagedKVCacheLinearSnapshotRoundTrip(t *testing.T) {
 	defer cache.Close()
 	wantK := make([]byte, maxLen*kvBytes)
 	wantV := make([]byte, maxLen*kvBytes)
-	for pos := 0; pos < 3; pos++ {
+	for pos := range 3 {
 		kRow := toBF16Bytes(syntheticFloat32(nKVHeads*headDim, 503+pos))
 		vRow := toBF16Bytes(syntheticFloat32(nKVHeads*headDim, 607+pos))
 		copy(wantK[pos*kvBytes:(pos+1)*kvBytes], kRow)
@@ -460,7 +460,7 @@ func TestDevicePagedKVCacheTruncateShrinksVisiblePages(t *testing.T) {
 		t.Fatalf("newDevicePagedKVCache: %v", err)
 	}
 	defer cache.Close()
-	for pos := 0; pos < maxLen; pos++ {
+	for pos := range maxLen {
 		if _, _, _, err := cache.slot(pos); err != nil {
 			t.Fatalf("slot %d: %v", pos, err)
 		}
@@ -532,7 +532,7 @@ func compactPagedKVStatePages(pages [][]byte, lens []int, nKVHeads, headDim int)
 	}
 	out := make([]byte, nKVHeads*total*headDim*bf16Size)
 	headBytes := headDim * bf16Size
-	for h := 0; h < nKVHeads; h++ {
+	for h := range nKVHeads {
 		pos := 0
 		for i, page := range pages {
 			pageLen := lens[i]

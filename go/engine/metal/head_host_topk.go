@@ -54,7 +54,7 @@ func hostTopKCandidatesBF16(logits []byte, vocab, k int, suppress []int32, vals 
 	n := 0
 	minVal := float32(0)
 	minIdx := 0
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		v := bf16ToF32(logits[i*bf16Size], logits[i*bf16Size+1])
 		if n == k && v <= minVal {
 			continue

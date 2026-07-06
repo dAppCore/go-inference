@@ -2,6 +2,8 @@
 
 package model
 
+import "slices"
+
 import core "dappco.re/go"
 
 // The token-loop contract — the rung above Backend that turns a backend's
@@ -149,12 +151,7 @@ func stopSet(tokens []int32) func(int32) bool {
 		return nil
 	}
 	return func(id int32) bool {
-		for _, token := range tokens {
-			if id == token {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(tokens, id)
 	}
 }
 

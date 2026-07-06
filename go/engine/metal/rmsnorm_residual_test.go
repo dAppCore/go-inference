@@ -117,7 +117,7 @@ func TestRMSNormResidualScratchBuffersUseCallerBacking(t *testing.T) {
 	defer scratch.Close()
 
 	var xBuf, resBuf metal.MTLBuffer
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		xBuf, resBuf, _, err = scratch.buffers(x, res)
 		if err != nil {
 			t.Fatalf("scratch.buffers warmup %d: %v", i, err)

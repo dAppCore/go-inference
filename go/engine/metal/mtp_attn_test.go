@@ -29,15 +29,15 @@ func sdpaCausalBF16Reference(q, k, v []byte, H, Hkv, qL, kL, D int, scale float3
 	gqa := H / Hkv
 	out := make([]byte, H*qL*D*bf16Size)
 	bf16At := func(b []byte, i int) float64 { return float64(bf16ToF32(b[i*2], b[i*2+1])) }
-	for h := 0; h < H; h++ {
+	for h := range H {
 		hk := h / gqa
-		for i := 0; i < qL; i++ {
+		for i := range qL {
 			lim := kL - qL + i
 			scores := make([]float64, lim+1)
 			maxS := math.Inf(-1)
 			for j := 0; j <= lim; j++ {
 				var dot float64
-				for d := 0; d < D; d++ {
+				for d := range D {
 					dot += bf16At(q, (h*qL+i)*D+d) * bf16At(k, (hk*kL+j)*D+d)
 				}
 				scores[j] = dot * float64(scale)
@@ -50,7 +50,7 @@ func sdpaCausalBF16Reference(q, k, v []byte, H, Hkv, qL, kL, D int, scale float3
 				scores[j] = math.Exp(scores[j] - maxS)
 				denom += scores[j]
 			}
-			for d := 0; d < D; d++ {
+			for d := range D {
 				var acc float64
 				for j := 0; j <= lim; j++ {
 					acc += scores[j] / denom * bf16At(v, (hk*kL+j)*D+d)

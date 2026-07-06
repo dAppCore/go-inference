@@ -44,17 +44,17 @@ func SSDScanF32(x, dt, a, b, c, d, prior []float32, L, H, P, N int) (y, state []
 	if prior != nil {
 		copy(state, prior)
 	}
-	for t := 0; t < L; t++ {
-		for h := 0; h < H; h++ {
+	for t := range L {
+		for h := range H {
 			dth := float64(dt[t*H+h])
 			dA := math.Exp(dth * float64(a[h])) // scalar decay for this head this step
 			bRow := b[t*H*N+h*N : t*H*N+h*N+N]
 			cRow := c[t*H*N+h*N : t*H*N+h*N+N]
-			for p := 0; p < P; p++ {
+			for p := range P {
 				xtp := float64(x[t*H*P+h*P+p])
 				base := h*P*N + p*N
 				var yp float64
-				for n := 0; n < N; n++ {
+				for n := range N {
 					st := float64(state[base+n])*dA + xtp*dth*float64(bRow[n]) // decay + (Δ·B)⊗x
 					state[base+n] = float32(st)
 					yp += st * float64(cRow[n]) // state @ C

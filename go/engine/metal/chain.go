@@ -96,10 +96,7 @@ func encodeUnary(enc metal.MTLComputeCommandEncoder, name string, in, out metal.
 	setBuf(enc, out, 0, 1)
 	cnt := uint32(n)
 	enc.SetBytesLengthAtIndex(unsafe.Slice((*byte)(unsafe.Pointer(&cnt)), 4), 4, 2)
-	group := uint(256)
-	if uint(n) < group {
-		group = uint(n)
-	}
+	group := min(uint(n), uint(256))
 	dispatchThreads(enc,
 		metal.MTLSize{Width: uint(n), Height: 1, Depth: 1},
 		metal.MTLSize{Width: group, Height: 1, Depth: 1},
@@ -119,10 +116,7 @@ func encodeBinary(enc metal.MTLComputeCommandEncoder, name string, a, b, out met
 	setBuf(enc, b, 0, 1)
 	setBuf(enc, out, 0, 2)
 	setEncInt32(enc, int32(n), 3)
-	group := uint(256)
-	if uint(n) < group {
-		group = uint(n)
-	}
+	group := min(uint(n), uint(256))
 	dispatchThreads(enc,
 		metal.MTLSize{Width: uint(n), Height: 1, Depth: 1},
 		metal.MTLSize{Width: group, Height: 1, Depth: 1},

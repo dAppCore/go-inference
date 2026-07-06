@@ -84,7 +84,7 @@ func audioActivate(v []float32, act string) {
 // (nil ⇒ no scale) — the host sibling of RMSNormBF16, reusing rmsNormVec from vision.go.
 func rmsRowsHost(m, w []float32, rows, axis int, eps float32) []float32 {
 	o := make([]float32, len(m))
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		copy(o[r*axis:r*axis+axis], m[r*axis:r*axis+axis])
 		rmsNormVec(o[r*axis:r*axis+axis], w, eps)
 	}
@@ -303,7 +303,7 @@ type AudioLightConvWeights struct {
 func sliceColsBF16(b []byte, rows, cols, c0, c1 int) []byte {
 	w := (c1 - c0) * bf16Size
 	out := make([]byte, rows*w)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		copy(out[r*w:r*w+w], b[(r*cols+c0)*bf16Size:(r*cols+c1)*bf16Size])
 	}
 	return out
@@ -315,10 +315,10 @@ func sliceColsBF16(b []byte, rows, cols, c0, c1 int) []byte {
 func depthwiseConv1dBF16(in, dw []byte, L, ch, K int) []byte {
 	inF, dwF := bf16ToF32Slice(in), bf16ToF32Slice(dw)
 	out := make([]byte, L*ch*bf16Size)
-	for t := 0; t < L; t++ {
-		for c := 0; c < ch; c++ {
+	for t := range L {
+		for c := range ch {
 			var acc float32
-			for k := 0; k < K; k++ {
+			for k := range K {
 				if src := t - (K - 1) + k; src >= 0 {
 					acc += inF[src*ch+c] * dwF[c*K+k]
 				}

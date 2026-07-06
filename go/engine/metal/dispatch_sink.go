@@ -253,10 +253,7 @@ func emitUnary[S dispatchSink](sink S, pso metal.MTLComputePipelineState, in, ou
 	sink.setBuf(in, 0, 0)
 	sink.setBuf(out, 0, 1)
 	sink.setI32(int32(n), 2)
-	group := uint(256)
-	if uint(n) < group {
-		group = uint(n)
-	}
+	group := min(uint(n), uint(256))
 	sink.dispatchThreads(
 		metal.MTLSize{Width: uint(n), Height: 1, Depth: 1},
 		metal.MTLSize{Width: group, Height: 1, Depth: 1},
@@ -274,10 +271,7 @@ func emitBinary[S dispatchSink](sink S, pso metal.MTLComputePipelineState, a met
 	sink.setBuf(b, bOff, 1)
 	sink.setBuf(out, oOff, 2)
 	sink.setI32(int32(n), 3)
-	g := uint(256)
-	if uint(n) < g {
-		g = uint(n)
-	}
+	g := min(uint(n), uint(256))
 	sink.dispatchThreads(metal.MTLSize{Width: uint(n), Height: 1, Depth: 1}, metal.MTLSize{Width: g, Height: 1, Depth: 1})
 }
 

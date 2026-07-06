@@ -14,6 +14,7 @@ package scheduler
 import (
 	"context"
 	"iter"
+	"maps"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -88,14 +89,8 @@ func New(model inference.TextModel, cfg Config) *Model {
 	if maxConcurrent <= 0 {
 		maxConcurrent = 1
 	}
-	maxQueue := cfg.MaxQueue
-	if maxQueue < 0 {
-		maxQueue = 0
-	}
-	streamBuffer := cfg.StreamBuffer
-	if streamBuffer < 0 {
-		streamBuffer = 0
-	}
+	maxQueue := max(cfg.MaxQueue, 0)
+	streamBuffer := max(cfg.StreamBuffer, 0)
 	prefix := core.Trim(cfg.RequestIDPrefix)
 	if prefix == "" {
 		prefix = "scheduler"
@@ -541,9 +536,7 @@ func cloneLabels(labels map[string]string) map[string]string {
 		return map[string]string{}
 	}
 	out := make(map[string]string, len(labels))
-	for key, value := range labels {
-		out[key] = value
-	}
+	maps.Copy(out, labels)
 	return out
 }
 

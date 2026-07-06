@@ -45,8 +45,8 @@ func WKV7F32(r, w, k, v, a, b, prior []float32, L, H, K, V int) (o, state []floa
 		copy(state, prior)
 	}
 	sa := make([]float64, V) // Sa[v], reused per (t,h)
-	for t := 0; t < L; t++ {
-		for h := 0; h < H; h++ {
+	for t := range L {
+		for h := range H {
 			sBase := h * K * V
 			kBase := t*H*K + h*K // r/w/k/a/b row [t,h,:]
 			vBase := t*H*V + h*V // v/o row [t,h,:]
@@ -55,27 +55,27 @@ func WKV7F32(r, w, k, v, a, b, prior []float32, L, H, K, V int) (o, state []floa
 			for vv := range sa {
 				sa[vv] = 0
 			}
-			for kk := 0; kk < K; kk++ {
+			for kk := range K {
 				ak := float64(a[kBase+kk])
 				row := sBase + kk*V
-				for vv := 0; vv < V; vv++ {
+				for vv := range V {
 					sa[vv] += ak * float64(state[row+vv])
 				}
 			}
 			// S[kk,vv] = exp(w[kk])·S_old[kk,vv] + b[kk]·Sa[vv] + k[kk]·v[vv]
-			for kk := 0; kk < K; kk++ {
+			for kk := range K {
 				ew := math.Exp(float64(w[kBase+kk]))
 				bk := float64(b[kBase+kk])
 				kv := float64(k[kBase+kk])
 				row := sBase + kk*V
-				for vv := 0; vv < V; vv++ {
+				for vv := range V {
 					state[row+vv] = float32(ew*float64(state[row+vv]) + bk*sa[vv] + kv*float64(v[vBase+vv]))
 				}
 			}
 			// o[vv] = Σ_kk r[kk] · S_new[kk,vv]
-			for vv := 0; vv < V; vv++ {
+			for vv := range V {
 				var acc float64
-				for kk := 0; kk < K; kk++ {
+				for kk := range K {
 					acc += float64(r[kBase+kk]) * float64(state[sBase+kk*V+vv])
 				}
 				o[vBase+vv] = float32(acc)

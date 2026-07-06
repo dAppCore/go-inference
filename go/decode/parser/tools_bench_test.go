@@ -35,7 +35,7 @@ var (
 // toolsBenchWords builds a synthetic prose stream of `tokens` words.
 func toolsBenchWords(tokens int) string {
 	out := core.NewBuilder()
-	for i := 0; i < tokens; i++ {
+	for range tokens {
 		out.WriteString("word ")
 	}
 	return out.String()
@@ -46,7 +46,7 @@ func toolsBenchWords(tokens int) string {
 func toolsBenchStreamWithCalls(tokens, n int) string {
 	pre := tokens / (n + 1)
 	out := core.NewBuilder()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out.WriteString(toolsBenchWords(pre))
 		out.WriteString(`<tool_call>{"name":"search","arguments":{"q":"core","page":`)
 		out.WriteString(core.Sprintf("%d", i))

@@ -3,6 +3,8 @@
 package hip
 
 import (
+	"maps"
+	"slices"
 	"sync"
 
 	rocmmodel "dappco.re/go/inference/engine/hip/model"
@@ -110,9 +112,7 @@ func ROCmRuntimeGateSnapshot() map[ROCmRuntimeGateID]bool {
 	rocmRuntimeGateMu.RLock()
 	defer rocmRuntimeGateMu.RUnlock()
 	out := make(map[ROCmRuntimeGateID]bool, len(rocmRuntimeGateStates))
-	for gate, enabled := range rocmRuntimeGateStates {
-		out[gate] = enabled
-	}
+	maps.Copy(out, rocmRuntimeGateStates)
 	return out
 }
 
@@ -169,8 +169,8 @@ func ApplyROCmRuntimeFeaturesForModel(model any) func() {
 		}
 	}
 	return func() {
-		for i := len(restores) - 1; i >= 0; i-- {
-			restores[i]()
+		for _, restore := range slices.Backward(restores) {
+			restore()
 		}
 	}
 }
@@ -207,8 +207,8 @@ func ApplyROCmRuntimeGates(gates []ROCmRuntimeGateID) func() {
 		restores = append(restores, SetROCmRuntimeGate(gate, true))
 	}
 	return func() {
-		for i := len(restores) - 1; i >= 0; i-- {
-			restores[i]()
+		for _, restore := range slices.Backward(restores) {
+			restore()
 		}
 	}
 }

@@ -109,7 +109,7 @@ func TestAttnMixerSingleTokenClosedForm(t *testing.T) {
 		copy(expanded[hd*HD:hd*HD+HD], v[(hd/rep)*HD:(hd/rep)*HD+HD])
 	}
 	want := matNT(expanded, w.OProj, 1, cfg.Heads*HD, D)
-	for i := 0; i < D; i++ {
+	for i := range D {
 		if got[i] != want[i] {
 			t.Fatalf("out[%d] = %v, want %v (single-token closed form: softmax(1 key)=1 → out = OProj·GQA(V))", i, got[i], want[i])
 		}
@@ -131,13 +131,13 @@ func TestAttnMixerDecodeEqualsPrefill(t *testing.T) {
 		t.Fatalf("prefill: %v", err)
 	}
 	var st any
-	for t0 := 0; t0 < L; t0++ {
+	for t0 := range L {
 		o, next, err := m.Forward(h[t0*D:(t0+1)*D], 1, D, st)
 		if err != nil {
 			t.Fatalf("decode %d: %v", t0, err)
 		}
 		st = next
-		for i := 0; i < D; i++ {
+		for i := range D {
 			if o[i] != full[t0*D+i] {
 				t.Fatalf("token %d out[%d] = %v != prefill %v (KV cache diverged)", t0, i, o[i], full[t0*D+i])
 			}
@@ -183,7 +183,7 @@ func TestHybridDecodeEqualsPrefill(t *testing.T) {
 		if err != nil {
 			t.Fatalf("decode %d: %v", t0, err)
 		}
-		for i := 0; i < D; i++ {
+		for i := range D {
 			if h[i] != prefill[t0*D+i] {
 				t.Fatalf("token %d hidden[%d] = %v != prefill %v (hybrid decode diverged)", t0, i, h[i], prefill[t0*D+i])
 			}

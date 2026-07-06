@@ -73,7 +73,7 @@ func TestGemma4LayerScalar(t *testing.T) {
 	if bytes.Equal(hNone, hTwo) {
 		t.Fatal("layer_scalar = 2 had no effect on the hidden")
 	}
-	for i := 0; i < dModel; i++ {
+	for i := range dModel {
 		a := bf16ToF32(hNone[i*bf16Size], hNone[i*bf16Size+1])
 		b := bf16ToF32(hTwo[i*bf16Size], hTwo[i*bf16Size+1])
 		if b != 2*a {

@@ -56,7 +56,7 @@ type evalBatchShape struct {
 // response_coverage doesn't short-circuit.
 func buildEvalSamples(n int) []evalSampleShape {
 	samples := make([]evalSampleShape, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		samples[i] = evalSampleShape{
 			Text:     "What is the capital of Lethean?",
 			Response: "The capital is in the network.",

@@ -39,7 +39,7 @@ func makeBenchModelDir(b *testing.B, dir string, config map[string]any, shards i
 			b.Fatal(r.Value)
 		}
 	}
-	for i := 0; i < shards; i++ {
+	for i := range shards {
 		name := core.Sprintf("model-%05d-of-%05d.safetensors", i+1, shards)
 		if r := core.WriteFile(core.JoinPath(dir, name), []byte("weights"), 0o644); !r.OK {
 			b.Fatal(r.Value)
@@ -97,7 +97,7 @@ func BenchmarkDiscover_NestedTree(b *testing.B) {
 // must still stat every entry.
 func BenchmarkDiscover_NoModels_TenJunkDirs(b *testing.B) {
 	base := b.TempDir()
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		dir := core.JoinPath(base, core.Sprintf("junk-%d", i))
 		if r := core.MkdirAll(dir, 0o755); !r.OK {
 			b.Fatal(r.Value)

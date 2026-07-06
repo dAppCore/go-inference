@@ -66,10 +66,7 @@ func BuildCalibrationPlan(samples []CalibrationSample, cfg CalibrationConfig) (C
 	if len(samples) == 0 {
 		return plan, nil
 	}
-	limit := cfg.NSamples
-	if limit > len(samples) {
-		limit = len(samples)
-	}
+	limit := min(cfg.NSamples, len(samples))
 	plan.Truncated = limit < len(samples)
 	plan.Samples = make([]CalibrationSample, 0, limit)
 	for _, sample := range samples[:limit] {

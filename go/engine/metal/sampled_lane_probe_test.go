@@ -117,7 +117,7 @@ func TestSampledTopKLaneMicroAB(t *testing.T) {
 			commitCommandBufferFast(cb)
 			waitUntilCompletedFast(cb)
 			t0 := time.Now()
-			for i := 0; i < iters; i++ {
+			for range iters {
 				cb := commandBufferFast(queue)
 				enc := computeCommandEncoderFast(cb)
 				if err := encode(enc, hb); err != nil {
@@ -270,7 +270,7 @@ func TestSampledHostSamplerCost(t *testing.T) {
 	const iters = 20
 	t0 := time.Now()
 	var logits []byte
-	for i := 0; i < iters; i++ {
+	for range iters {
 		var lerr error
 		logits, lerr = sess.headLogitsScratch(hidden, false)
 		if lerr != nil {
@@ -289,7 +289,7 @@ func TestSampledHostSamplerCost(t *testing.T) {
 		{"host topp0.95 only", model.SampleParams{Temperature: 0.8, TopP: 0.95}},
 	} {
 		t1 := time.Now()
-		for i := 0; i < iters; i++ {
+		for range iters {
 			if _, serr := sess.sampleVocabBF16(logits, sess.arch.Vocab, sampler, tc.params); serr != nil {
 				t.Fatalf("%s: %v", tc.name, serr)
 			}

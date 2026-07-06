@@ -123,7 +123,7 @@ func BenchmarkFilestoreCapacity_Open_10000Records(b *testing.B) {
 			b.Fatal(err)
 		}
 		payload := make([]byte, 64)
-		for i := 0; i < 10000; i++ {
+		for i := range 10000 {
 			if _, err := store.PutBytes(context.Background(), payload, state.PutOptions{
 				URI:  "mlx://bench/open-" + strconv.Itoa(i),
 				Kind: "bench",
@@ -188,7 +188,7 @@ func BenchmarkFilestoreCapacity_Open_NoURIs_1000(b *testing.B) {
 		}
 		payload := make([]byte, 64)
 		opts := state.PutOptions{Kind: "bench"}
-		for i := 0; i < 1000; i++ {
+		for range 1000 {
 			if _, err := store.PutBytes(context.Background(), payload, opts); err != nil {
 				b.Fatal(err)
 			}

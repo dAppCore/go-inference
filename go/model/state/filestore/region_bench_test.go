@@ -112,7 +112,7 @@ func BenchmarkFilestoreRegion_Open_10000Records(b *testing.B) {
 			b.Fatal(err)
 		}
 		payload := make([]byte, 64)
-		for i := 0; i < 10000; i++ {
+		for i := range 10000 {
 			if _, err := store.PutBytes(context.Background(), payload, state.PutOptions{
 				URI:  "mlx://bench/region-open-" + strconv.Itoa(i),
 				Kind: "bench",

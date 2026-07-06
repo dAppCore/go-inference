@@ -226,7 +226,7 @@ func TestQMVBF16ScratchBuffersUseCallerBacking(t *testing.T) {
 	defer scratch.Close()
 
 	var xBuf metal.MTLBuffer
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		xBuf, _, err = scratch.buffers(x)
 		if err != nil {
 			t.Fatalf("scratch.buffers warmup %d: %v", i, err)
@@ -333,7 +333,7 @@ func TestQMVFloatScratchBuffersUseCallerBacking(t *testing.T) {
 	defer scratch.Close()
 
 	var xBuf metal.MTLBuffer
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		xBuf, _, err = scratch.buffers(x)
 		if err != nil {
 			t.Fatalf("scratch.buffers warmup %d: %v", i, err)

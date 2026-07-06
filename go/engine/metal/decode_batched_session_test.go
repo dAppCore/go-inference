@@ -56,12 +56,12 @@ func TestStepTokensBatchedDense(t *testing.T) {
 	var seqOut [][]byte
 	withAutoreleasePool(func() {
 		st := build()
-		for i := 0; i < prefix; i++ {
+		for i := range prefix {
 			if _, err := st.stepToken(embs[i], i); err != nil {
 				t.Fatalf("prefill stepToken %d: %v", i, err)
 			}
 		}
-		for i := 0; i < K; i++ {
+		for i := range K {
 			h, err := st.stepToken(embs[prefix+i], prefix+i)
 			if err != nil {
 				t.Fatalf("seq stepToken %d: %v", prefix+i, err)
@@ -75,7 +75,7 @@ func TestStepTokensBatchedDense(t *testing.T) {
 	var ok bool
 	withAutoreleasePool(func() {
 		st := build()
-		for i := 0; i < prefix; i++ {
+		for i := range prefix {
 			if _, err := st.stepToken(embs[i], i); err != nil {
 				t.Fatalf("batched prefill stepToken %d: %v", i, err)
 			}
@@ -92,7 +92,7 @@ func TestStepTokensBatchedDense(t *testing.T) {
 	if len(batOut) != K {
 		t.Fatalf("batched returned %d rows, want %d", len(batOut), K)
 	}
-	for i := 0; i < K; i++ {
+	for i := range K {
 		eqBytes(t, core.Sprintf("batched session row %d vs stepToken", i), batOut[i], seqOut[i])
 	}
 }
@@ -259,12 +259,12 @@ func TestStepTokensBatchedDenseSyncsLinearCacheAfterPagedStep(t *testing.T) {
 	var seqOut [][]byte
 	withAutoreleasePool(func() {
 		st := build()
-		for i := 0; i < prefix+1; i++ {
+		for i := range prefix + 1 {
 			if _, err := st.stepToken(embs[i], i); err != nil {
 				t.Fatalf("seq prefix stepToken %d: %v", i, err)
 			}
 		}
-		for i := 0; i < K; i++ {
+		for i := range K {
 			pos := prefix + 1 + i
 			h, err := st.stepToken(embs[pos], pos)
 			if err != nil {
@@ -297,7 +297,7 @@ func TestStepTokensBatchedDenseSyncsLinearCacheAfterPagedStep(t *testing.T) {
 	if !ok {
 		t.Fatal("stepTokensBatchedDense after paged step reported !ok")
 	}
-	for i := 0; i < K; i++ {
+	for i := range K {
 		eqBytes(t, core.Sprintf("batched after paged row %d vs stepToken", i), batOut[i], seqOut[i])
 	}
 }

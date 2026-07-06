@@ -3,6 +3,7 @@
 package hip
 
 import (
+	"slices"
 	"strings"
 
 	modelgemma4 "dappco.re/go/inference/engine/hip/model/gemma4"
@@ -43,12 +44,7 @@ func ROCmLoRASafeTarget(architecture, target string) bool {
 	if !ok {
 		return false
 	}
-	for _, extended := range policy.ExtendedTargets {
-		if path == extended {
-			return false
-		}
-	}
-	return true
+	return !slices.Contains(policy.ExtendedTargets, path)
 }
 
 func ROCmLoRAExtendedTarget(architecture, target string) bool {
@@ -60,12 +56,7 @@ func ROCmLoRAExtendedTarget(architecture, target string) bool {
 	if !ok {
 		return false
 	}
-	for _, extended := range policy.ExtendedTargets {
-		if path == extended {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(policy.ExtendedTargets, path)
 }
 
 func ROCmLoRACanonicalTarget(architecture, target string) (string, bool) {

@@ -83,7 +83,7 @@ func top5(v []float32) ([]int, []float32) {
 	}
 	ids := make([]int, 5)
 	vals := make([]float32, 5)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		ids[i] = idx[i]
 		vals[i] = v[idx[i]]
 	}

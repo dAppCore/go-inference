@@ -3,6 +3,7 @@ package ai
 
 import (
 	"cmp"
+	"maps"
 	// Note: AX-6 — goio is structurally required for the stream interface returned by coreio append handles.
 	goio "io"
 	"slices"
@@ -303,10 +304,8 @@ func nestedHasSensitive(value any) bool {
 	case map[string]any:
 		return needsMetricsSanitization(typed)
 	case []any:
-		for _, item := range typed {
-			if nestedHasSensitive(item) {
-				return true
-			}
+		if slices.ContainsFunc(typed, nestedHasSensitive) {
+			return true
 		}
 	}
 	return false
@@ -357,9 +356,7 @@ func Summary(events []Event) map[string]any {
 
 func cloneCounts(counts map[string]int) map[string]int {
 	cloned := make(map[string]int, len(counts))
-	for key, count := range counts {
-		cloned[key] = count
-	}
+	maps.Copy(cloned, counts)
 	return cloned
 }
 

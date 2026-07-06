@@ -413,10 +413,7 @@ func (m *Model) estimateTokens(messages []inference.Message, cfg inference.Gener
 	for _, msg := range messages {
 		totalRunes += core.RuneCount(msg.Content)
 	}
-	estimate := totalRunes / 4
-	if estimate < 1 {
-		estimate = 1
-	}
+	estimate := max(totalRunes/4, 1)
 	if cfg.MaxTokens > 0 {
 		estimate += cfg.MaxTokens
 	}

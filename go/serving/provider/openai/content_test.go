@@ -90,7 +90,7 @@ func TestChatMessage_DecodeRequest_ContentParts_Bad(t *testing.T) {
 func TestChatMessage_DecodeRequest_ContentParts_Bad_TooManyImages(t *testing.T) {
 	url := imageDataURL("x")
 	var parts strings.Builder
-	for i := 0; i < maxImagesPerRequest+1; i++ {
+	for i := range maxImagesPerRequest + 1 {
 		if i > 0 {
 			parts.WriteByte(',')
 		}

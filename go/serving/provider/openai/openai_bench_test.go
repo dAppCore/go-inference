@@ -59,7 +59,7 @@ func buildOpenAITurnsBody(turns int) string {
 	out.WriteString(`{"role":"system","content":"You are a helpful assistant."}`)
 	user := `,{"role":"user","content":"How many tokens does this paragraph contain when measured against the GPT-2 tokeniser?"}`
 	assistant := `,{"role":"assistant","content":"That depends on the precise tokeniser implementation but is approximately 32."}`
-	for i := 0; i < turns; i++ {
+	for i := range turns {
 		if i%2 == 0 {
 			out.WriteString(user)
 		} else {
@@ -87,7 +87,7 @@ func buildChatRequest(turns int) ChatCompletionRequest {
 		Stop:        StopList{"<|im_end|>", "<|eot_id|>"},
 	}
 	req.Messages = append(req.Messages, ChatMessage{Role: "system", Content: "You are a helpful assistant."})
-	for i := 0; i < turns; i++ {
+	for i := range turns {
 		if i%2 == 0 {
 			req.Messages = append(req.Messages, ChatMessage{Role: "user", Content: "Summarise the paragraph in one sentence."})
 		} else {
@@ -280,7 +280,6 @@ func TestChatMessageDelta_Marshal_AllocBudget(t *testing.T) {
 		{"empty", ChatMessageDelta{}, 0}, // returns shared emptyDeltaBytes
 	}
 	for _, c := range cases {
-		c := c
 		t.Run(c.name, func(t *testing.T) {
 			allocs := testing.AllocsPerRun(100, func() {
 				openAISinkBytes, openAISinkErr = c.delta.MarshalJSON()

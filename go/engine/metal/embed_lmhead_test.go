@@ -15,7 +15,7 @@ import (
 // argmaxBF16 returns the index of the largest of n bf16 logits.
 func argmaxBF16(logits []byte, n int) int {
 	best, bestV := 0, float32(math.Inf(-1))
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if v := bf16ToF32(logits[i*bf16Size], logits[i*bf16Size+1]); v > bestV {
 			best, bestV = i, v
 		}
@@ -33,8 +33,8 @@ func TestEmbedTokens(t *testing.T) {
 	const vocab, dModel = 50, 256
 	scale := float32(math.Sqrt(float64(dModel)))
 	tbl := make([]float32, vocab*dModel)
-	for k := 0; k < vocab; k++ {
-		for j := 0; j < dModel; j++ {
+	for k := range vocab {
+		for j := range dModel {
 			tbl[k*dModel+j] = float32((k*7+j)%17-8) * 0.05 // distinct per (row,col)
 		}
 	}
@@ -51,7 +51,7 @@ func TestEmbedTokens(t *testing.T) {
 	rowBytes := dModel * bf16Size
 	for i, tok := range ids {
 		row := table[int(tok)*rowBytes : (int(tok)+1)*rowBytes]
-		for j := 0; j < dModel; j++ {
+		for j := range dModel {
 			want := f32ToBF16(bf16ToF32(row[j*bf16Size], row[j*bf16Size+1]) * scale)
 			lo, hi := got[i][j*bf16Size], got[i][j*bf16Size+1]
 			if lo != byte(want) || hi != byte(want>>8) {
@@ -115,7 +115,7 @@ func TestLMHead(t *testing.T) {
 		t.Fatalf("LMHeadBF16 cap: %v", err)
 	}
 	wantCap := make([]byte, len(refRaw))
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		v := bf16ToF32(refRaw[i*bf16Size], refRaw[i*bf16Size+1])
 		h := f32ToBF16(softCap * float32(math.Tanh(float64(v/softCap))))
 		wantCap[i*bf16Size] = byte(h)
@@ -123,7 +123,7 @@ func TestLMHead(t *testing.T) {
 	}
 	eqBytes(t, "LMHead cap == softcap formula", gotCap, wantCap)
 
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		v := bf16ToF32(gotCap[i*bf16Size], gotCap[i*bf16Size+1])
 		if v > softCap || v < -softCap {
 			t.Fatalf("capped logit %d = %.4f exceeds ±%.0f", i, v, softCap)

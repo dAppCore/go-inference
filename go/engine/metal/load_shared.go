@@ -121,7 +121,7 @@ func fuseExpertGateUpQuant(gate, up QuantWeight, numExperts, expertDFF, dModel, 
 	gateScale := expertDFF * (dModel / groupSize) * bf16Size
 	fuse := func(a, b []byte, perExpert int) []byte {
 		out := make([]byte, 0, len(a)+len(b))
-		for e := 0; e < numExperts; e++ {
+		for e := range numExperts {
 			start := e * perExpert
 			out = append(out, a[start:start+perExpert]...)
 			out = append(out, b[start:start+perExpert]...)

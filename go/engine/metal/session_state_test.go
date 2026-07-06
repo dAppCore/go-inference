@@ -136,7 +136,7 @@ func emptySessionStateBlob(pos, layers, cachedIDs int) []byte {
 	binary.LittleEndian.PutUint32(blob[4:], uint32(pos))
 	binary.LittleEndian.PutUint32(blob[8:], uint32(layers))
 	binary.LittleEndian.PutUint32(blob[12:], uint32(cachedIDs))
-	for i := 0; i < cachedIDs; i++ {
+	for i := range cachedIDs {
 		binary.LittleEndian.PutUint32(blob[16+4*i:], uint32(i+1))
 	}
 	return blob
@@ -1732,7 +1732,7 @@ func firstTokensFromLayerSlab(t testing.TB, src []byte, seqLen, tokenCount, head
 		t.Fatalf("layer slab bytes = %d, want %d", len(src), heads*seqLen*rowBytes)
 	}
 	out := make([]byte, heads*tokenCount*rowBytes)
-	for head := 0; head < heads; head++ {
+	for head := range heads {
 		srcStart := head * seqLen * rowBytes
 		srcEnd := srcStart + tokenCount*rowBytes
 		dstStart := head * tokenCount * rowBytes

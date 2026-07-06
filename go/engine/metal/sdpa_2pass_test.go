@@ -34,12 +34,12 @@ func TestSDPA2PassMatchesReference(t *testing.T) {
 	// --- host float reference: straight online softmax over bf16-rounded inputs ---
 	rb := func(s []byte, i int) float32 { return bf16ToF32(s[i*2], s[i*2+1]) }
 	ref := make([]byte, b*nHeads*headDim*2)
-	for h := 0; h < nHeads; h++ {
+	for h := range nHeads {
 		kvh := h / gqa
 		m := float32(-3e38)
-		for j := 0; j < kvLen; j++ {
+		for j := range kvLen {
 			var dot float32
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				dot += rb(qb, h*headDim+d) * rb(kb, (kvh*kvLen+j)*headDim+d)
 			}
 			if dot*scale > m {
@@ -48,18 +48,18 @@ func TestSDPA2PassMatchesReference(t *testing.T) {
 		}
 		var denom float32
 		acc := make([]float32, headDim)
-		for j := 0; j < kvLen; j++ {
+		for j := range kvLen {
 			var dot float32
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				dot += rb(qb, h*headDim+d) * rb(kb, (kvh*kvLen+j)*headDim+d)
 			}
 			p := float32(math.Exp(float64(dot*scale - m)))
 			denom += p
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				acc[d] += p * rb(vb, (kvh*kvLen+j)*headDim+d)
 			}
 		}
-		for d := 0; d < headDim; d++ {
+		for d := range headDim {
 			o := f32ToBF16(acc[d] / denom)
 			ref[(h*headDim+d)*2], ref[(h*headDim+d)*2+1] = byte(o), byte(o>>8)
 		}

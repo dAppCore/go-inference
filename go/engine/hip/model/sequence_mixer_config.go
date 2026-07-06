@@ -27,7 +27,7 @@ type SequenceMixerConfigProbe struct {
 	PlanError   string                   `json:"plan_error,omitempty"`
 	Composed    bool                     `json:"composed,omitempty"`
 	Layers      []SequenceMixerLayerPlan `json:"layers,omitempty"`
-	Cache       SequenceMixerCachePlan   `json:"cache,omitempty"`
+	Cache       SequenceMixerCachePlan   `json:"cache"`
 }
 
 func (probe SequenceMixerConfigProbe) Clone() SequenceMixerConfigProbe {

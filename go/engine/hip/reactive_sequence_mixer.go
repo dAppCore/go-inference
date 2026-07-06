@@ -4,6 +4,7 @@ package hip
 
 import (
 	"context"
+	"maps"
 	"strings"
 
 	core "dappco.re/go"
@@ -135,9 +136,7 @@ func baseReactiveSequenceMixerReport(modelPath string, inspection *inference.Mod
 	var model inference.ModelIdentity
 	if inspection != nil {
 		model = inspection.Model
-		for key, value := range inspection.Labels {
-			labels[key] = value
-		}
+		maps.Copy(labels, inspection.Labels)
 		if inspection.Supported {
 			labels["model_pack_supported"] = "true"
 		} else {

@@ -27,7 +27,7 @@ type ROCmArchitectureResolution struct {
 	ModelType          string                  `json:"model_type,omitempty"`
 	TextTowerModelType string                  `json:"text_tower_model_type,omitempty"`
 	Architectures      []string                `json:"architectures,omitempty"`
-	Profile            ROCmArchitectureProfile `json:"profile,omitempty"`
+	Profile            ROCmArchitectureProfile `json:"profile"`
 }
 
 func (resolution ROCmArchitectureResolution) Matched() bool {

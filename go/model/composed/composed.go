@@ -65,10 +65,10 @@ func silu(v float64) float64 { return v / (1 + math.Exp(-v)) }
 // matNT computes out[M,N] = in[M,K] @ w[N,K]ᵀ (the Linear y = x·Wᵀ), f32 host.
 func matNT(in, w []float32, M, K, N int) []float32 {
 	out := make([]float32, M*N)
-	for m := 0; m < M; m++ {
-		for n := 0; n < N; n++ {
+	for m := range M {
+		for n := range N {
 			var acc float64
-			for k := 0; k < K; k++ {
+			for k := range K {
 				acc += float64(in[m*K+k]) * float64(w[n*K+k])
 			}
 			out[m*N+n] = float32(acc)
@@ -80,14 +80,14 @@ func matNT(in, w []float32, M, K, N int) []float32 {
 // rmsNormRowsPlain RMS-norms each of the `rows` rows of x [rows,d] by the shared plain weight w [d].
 func rmsNormRowsPlain(x, w []float32, rows, d int, eps float32) []float32 {
 	out := make([]float32, rows*d)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		xr := x[r*d : (r+1)*d]
 		var ss float64
-		for i := 0; i < d; i++ {
+		for i := range d {
 			ss += float64(xr[i]) * float64(xr[i])
 		}
 		rms := math.Sqrt(ss/float64(d) + float64(eps))
-		for i := 0; i < d; i++ {
+		for i := range d {
 			out[r*d+i] = float32(float64(xr[i]) / rms * float64(w[i]))
 		}
 	}

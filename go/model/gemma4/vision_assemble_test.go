@@ -20,7 +20,7 @@ func TestAssembleVision(t *testing.T) {
 	}
 	const H, layers = 64, 2
 	w := map[string]safetensors.Tensor{"patch_embedding.weight": mk(H, 588)} // hidden 64, patchDim 588 → patch 14
-	for i := 0; i < layers; i++ {
+	for i := range layers {
 		p := core.Sprintf("encoder.layers.%d", i)
 		for _, n := range []string{".input_layernorm", ".post_attention_layernorm", ".pre_feedforward_layernorm", ".post_feedforward_layernorm", ".self_attn.q_norm", ".self_attn.k_norm"} {
 			w[p+n+".weight"] = vec(H)

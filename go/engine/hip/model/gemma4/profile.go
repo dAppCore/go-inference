@@ -5,6 +5,8 @@
 package gemma4
 
 import (
+	"maps"
+
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/engine/hip/model"
 	rocmprofile "dappco.re/go/inference/engine/hip/profile"
@@ -102,9 +104,7 @@ func cloneStringMap(values map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(values))
-	for key, value := range values {
-		out[key] = value
-	}
+	maps.Copy(out, values)
 	return out
 }
 

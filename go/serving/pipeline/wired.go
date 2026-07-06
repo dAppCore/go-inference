@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	core "dappco.re/go"
@@ -371,9 +372,9 @@ func (a *sessionAdapter) Append(req chat.Request, resp chat.Response) error {
 
 // lastUser returns the most-recent user message of the request, if any.
 func lastUser(req chat.Request) (chat.Message, bool) {
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].Role == chat.User {
-			return req.Messages[i], true
+	for _, v := range slices.Backward(req.Messages) {
+		if v.Role == chat.User {
+			return v, true
 		}
 	}
 	return chat.Message{}, false

@@ -594,7 +594,7 @@ func quantMoELayerWeightsGuard(t testing.TB, numExperts, topK, dModel, dFF, expe
 	}
 	batched := func(outDim, inDim, saltBase int) QuantWeight {
 		var packed, scales, biases []byte
-		for e := 0; e < numExperts; e++ {
+		for e := range numExperts {
 			w := quantWeightFixture(t, outDim, inDim, groupSize, bits, saltBase+e*7)
 			packed = append(packed, w.Packed...)
 			scales = append(scales, w.Scales...)

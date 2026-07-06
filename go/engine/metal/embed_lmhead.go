@@ -53,7 +53,7 @@ func embedTokenBF16Into(dst, table []byte, tok int32, vocab, dModel int, scale f
 		return nil, core.NewError("native.EmbedTokensBF16: token id out of range")
 	}
 	row := table[int(tok)*rowBytes : (int(tok)+1)*rowBytes]
-	for j := 0; j < dModel; j++ {
+	for j := range dModel {
 		v := bf16ToF32(row[j*bf16Size], row[j*bf16Size+1]) * scale
 		h := f32ToBF16(v)
 		dst[j*bf16Size] = byte(h)
@@ -144,7 +144,7 @@ func LMHeadBF16Into(out []byte, hidden, finalNormW, outWeight []byte, dModel, vo
 		return nil, encErr
 	}
 	if softCap > 0 {
-		for i := 0; i < vocab; i++ {
+		for i := range vocab {
 			v := bf16ToF32(out[i*bf16Size], out[i*bf16Size+1])
 			capped := softCap * float32(math.Tanh(float64(v/softCap)))
 			h := f32ToBF16(capped)

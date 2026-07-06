@@ -56,7 +56,7 @@ func benchEntry(i int) registry.Entry {
 func benchRegistry(tb testing.TB) *registry.Registry {
 	tb.Helper()
 	r := registry.New()
-	for i := 0; i < benchN; i++ {
+	for i := range benchN {
 		if pr := r.Put(benchEntry(i)); !pr.OK {
 			tb.Fatalf("seed put %d: %v", i, pr.Error())
 		}
@@ -178,7 +178,7 @@ func BenchmarkRegistry_GetCard(b *testing.B) {
 
 func BenchmarkMemStore_List(b *testing.B) {
 	s := registry.NewMemStore()
-	for i := 0; i < benchN; i++ {
+	for i := range benchN {
 		if pr := s.Put(benchEntry(i)); !pr.OK {
 			b.Fatalf("seed put %d: %v", i, pr.Error())
 		}

@@ -231,8 +231,8 @@ func transposeF32(m []float32, rows, cols int) []float32 {
 }
 
 func transposeF32Into(out, m []float32, rows, cols int) {
-	for r := 0; r < rows; r++ {
-		for c := 0; c < cols; c++ {
+	for r := range rows {
+		for c := range cols {
 			out[c*rows+r] = m[r*cols+c]
 		}
 	}
@@ -263,12 +263,12 @@ func VisionSDPA(q, k, v []byte, L, nHeads, nKVHeads, headDim int, scale float32)
 	out := make([]byte, nHeads*L*headDim*bf16Size)
 	scratch := getVisionSDPAScratch(L, nHeads, nKVHeads, headDim)
 	defer putVisionSDPAScratch(scratch)
-	for kvh := 0; kvh < nKVHeads; kvh++ {
+	for kvh := range nKVHeads {
 		off := kvh * L * headDim
 		bf16HeadF32Into(scratch.k[off:off+L*headDim], k, kvh, L, headDim)
 		bf16HeadF32Into(scratch.v[off:off+L*headDim], v, kvh, L, headDim)
 	}
-	for h := 0; h < nHeads; h++ {
+	for h := range nHeads {
 		kvh := h / grp
 		qOff := h * L * headDim
 		kvOff := kvh * L * headDim
@@ -348,7 +348,7 @@ func rmsNormVec(v, w []float32, eps float32) {
 // Lifted from metal's gemma4VisionRotatePart + gemma4Vision2DRoPETables (the 2-D vision RoPE).
 func ropePartRotate(out, part []float32, coord float64, invFreq []float64, m int) {
 	half := m / 2
-	for d := 0; d < m; d++ {
+	for d := range m {
 		angle := coord * invFreq[d%half]
 		c, s := float32(math.Cos(angle)), float32(math.Sin(angle))
 		var rot float32
@@ -375,13 +375,13 @@ func vision2DRoPEHeadMajor(x []float32, L, N, headDim, gridH, gridW int, base fl
 	if doRoPE {
 		half := rotatedPerDim / 2
 		invFreq = make([]float64, half)
-		for i := 0; i < half; i++ {
+		for i := range half {
 			invFreq[i] = 1.0 / math.Pow(float64(base), float64(2*i)/float64(rotatedPerDim))
 		}
 	}
-	for pos := 0; pos < L; pos++ {
+	for pos := range L {
 		cx, cy := float64(pos%gridW), float64(pos/gridW)
-		for h := 0; h < N; h++ {
+		for h := range N {
 			in := x[(pos*N+h)*headDim : (pos*N+h)*headDim+headDim]
 			o := out[(h*L+pos)*headDim : (h*L+pos)*headDim+headDim]
 			if !doRoPE {
@@ -414,8 +414,8 @@ func qkNormRoPEHeadMajor(proj, normW []byte, L, N, headDim, gridH, gridW int, ba
 func vNormHeadMajor(proj []byte, L, N, headDim int, eps float32) []byte {
 	f := bf16ToF32Slice(proj) // [L, N, headDim]
 	out := make([]float32, N*L*headDim)
-	for pos := 0; pos < L; pos++ {
-		for h := 0; h < N; h++ {
+	for pos := range L {
+		for h := range N {
 			v := f[(pos*N+h)*headDim : (pos*N+h)*headDim+headDim]
 			rmsNormVec(v, nil, eps)
 			copy(out[(h*L+pos)*headDim:(h*L+pos)*headDim+headDim], v)
@@ -470,7 +470,7 @@ func visionAttention(normed []byte, w *VisionLayerWeights, cfg VisionConfig) ([]
 	af := bf16ToF32Slice(attn)
 	tok := make([]float32, L*qDim)
 	for h := 0; h < cfg.NumHeads; h++ {
-		for pos := 0; pos < L; pos++ {
+		for pos := range L {
 			copy(tok[(pos*cfg.NumHeads+h)*cfg.HeadDim:(pos*cfg.NumHeads+h)*cfg.HeadDim+cfg.HeadDim],
 				af[(h*L+pos)*cfg.HeadDim:(h*L+pos)*cfg.HeadDim+cfg.HeadDim])
 		}
@@ -618,12 +618,12 @@ func visionPooler(hidden []byte, gridH, gridW, H, k int, embScale float32) []byt
 	case k > 1 && gridH%k == 0 && gridW%k == 0 && L == gridH*gridW:
 		rows, cols := gridH/k, gridW/k
 		pooled = make([]float32, rows*cols*H)
-		for y := 0; y < rows; y++ {
-			for x := 0; x < cols; x++ {
-				for hh := 0; hh < H; hh++ {
+		for y := range rows {
+			for x := range cols {
+				for hh := range H {
 					var acc float32
-					for dy := 0; dy < k; dy++ {
-						for dx := 0; dx < k; dx++ {
+					for dy := range k {
+						for dx := range k {
 							acc += f[((y*k+dy)*gridW+(x*k+dx))*H+hh]
 						}
 					}
@@ -634,8 +634,8 @@ func visionPooler(hidden []byte, gridH, gridW, H, k int, embScale float32) []byt
 	case k > 1 && L%(k*k) == 0:
 		outLen := L / (k * k)
 		pooled = make([]float32, outLen*H)
-		for o := 0; o < outLen; o++ {
-			for hh := 0; hh < H; hh++ {
+		for o := range outLen {
+			for hh := range H {
 				var acc float32
 				for g := 0; g < k*k; g++ {
 					acc += f[(o*k*k+g)*H+hh]
@@ -660,7 +660,7 @@ func visionStandardize(pooled, stdBias, stdScale []byte, H int) []byte {
 	}
 	f, b, s := bf16ToF32Slice(pooled), bf16ToF32Slice(stdBias), bf16ToF32Slice(stdScale)
 	for r := 0; r < len(f)/H; r++ {
-		for hh := 0; hh < H; hh++ {
+		for hh := range H {
 			f[r*H+hh] = (f[r*H+hh] - b[hh]) * s[hh]
 		}
 	}
@@ -672,7 +672,7 @@ func visionStandardize(pooled, stdBias, stdScale []byte, H int) []byte {
 func visionProjector(rows []byte, w *VisionProjectorWeights, H int) ([]byte, error) {
 	L := len(rows) / (H * bf16Size)
 	f := bf16ToF32Slice(rows)
-	for i := 0; i < L; i++ {
+	for i := range L {
 		rmsNormVec(f[i*H:i*H+H], nil, w.Eps)
 	}
 	normed := f32ToBf16Slice(f)
@@ -704,7 +704,7 @@ func visionProjectorLinearRows(in []byte, w VisionProjectorLinear, rows, inDim i
 			return nil, core.NewError("native.VisionProjector: quant " + label + " missing biases")
 		}
 		out := make([]byte, rows*w.OutDim*bf16Size)
-		for r := 0; r < rows; r++ {
+		for r := range rows {
 			rowIn := in[r*inDim*bf16Size : (r+1)*inDim*bf16Size]
 			rowOut := out[r*w.OutDim*bf16Size : (r+1)*w.OutDim*bf16Size]
 			if _, err := QMVBF16Into(rowOut, rowIn, w.Weight, w.Scales, w.Biases, w.OutDim, inDim, w.GroupSize, w.Bits); err != nil {
@@ -740,7 +740,7 @@ func addVisionLinearBiasRows(out, bias []byte, rows, outDim int, label string) (
 	}
 	b := bf16ToF32Slice(bias)
 	f := bf16ToF32Slice(out)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		row := f[r*outDim : (r+1)*outDim]
 		for c := range row {
 			row[c] += b[c]
@@ -761,8 +761,8 @@ func visionPositionEmbeddings(table []byte, L, hidden, gridH, gridW, slots int) 
 				return nil, core.NewError("native.VisionTower: split position embeddings shorter than grid")
 			}
 			out := make([]byte, L*rowBytes)
-			for y := 0; y < gridH; y++ {
-				for x := 0; x < gridW; x++ {
+			for y := range gridH {
+				for x := range gridW {
 					pos := y*gridW + x
 					if pos >= L {
 						break
@@ -770,7 +770,7 @@ func visionPositionEmbeddings(table []byte, L, hidden, gridH, gridW, slots int) 
 					xBase := x * rowBytes
 					yBase := (slots + y) * rowBytes
 					dst := pos * rowBytes
-					for h := 0; h < hidden; h++ {
+					for h := range hidden {
 						xi := xBase + h*bf16Size
 						yi := yBase + h*bf16Size
 						v := bf16ToF32(table[xi], table[xi+1]) + bf16ToF32(table[yi], table[yi+1])
@@ -806,16 +806,16 @@ func visionPatchConvEmbedNHWC(pixels []float32, weight []byte, height, width, ch
 	}
 	out := make([]byte, gridH*gridW*hidden*bf16Size)
 	row := 0
-	for gy := 0; gy < gridH; gy++ {
-		for gx := 0; gx < gridW; gx++ {
-			for h := 0; h < hidden; h++ {
+	for gy := range gridH {
+		for gx := range gridW {
+			for h := range hidden {
 				var acc float32
 				wBase := h * patchDim * bf16Size
-				for py := 0; py < patch; py++ {
+				for py := range patch {
 					y := gy*patch + py
-					for px := 0; px < patch; px++ {
+					for px := range patch {
 						x := gx*patch + px
-						for c := 0; c < channels; c++ {
+						for c := range channels {
 							pix := pixels[(y*width+x)*channels+c]
 							wi := wBase + ((py*patch+px)*channels+c)*bf16Size
 							acc += (pix - 0.5) * 2 * bf16ToF32(weight[wi], weight[wi+1])

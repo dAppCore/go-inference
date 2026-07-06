@@ -24,7 +24,7 @@ func moeExpertsRef(t *testing.T, x []byte, idx []int32, weights, gateW, upW, dow
 		return b
 	}
 	var acc []byte
-	for i := 0; i < topK; i++ {
+	for i := range topK {
 		e := int(idx[i])
 		gate := must(MatVecBF16(gateW[e*gateSz:(e+1)*gateSz], x, dFF, dModel))
 		up := must(MatVecBF16(upW[e*gateSz:(e+1)*gateSz], x, dFF, dModel))

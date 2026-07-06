@@ -116,7 +116,7 @@ type BookStateAskResponse struct {
 
 	StudentAnswer string               `json:"student_answer,omitempty"`
 	TeacherAnswer string               `json:"teacher_answer"`
-	Student       ProviderChatResponse `json:"student,omitempty"`
+	Student       ProviderChatResponse `json:"student"`
 	Teacher       ProviderChatResponse `json:"teacher"`
 
 	CreatedAtUnix int64 `json:"created_at_unix"`

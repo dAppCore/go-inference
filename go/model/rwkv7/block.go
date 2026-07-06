@@ -38,10 +38,10 @@ func (c BlockConfig) hv() int { return c.NumHeads * c.ValueDim }
 // matNT computes out[M,N] = in[M,K] @ w[N,K]ᵀ (the Linear y = x·Wᵀ), f32 host.
 func matNT(in, w []float32, M, K, N int) []float32 {
 	out := make([]float32, M*N)
-	for m := 0; m < M; m++ {
-		for n := 0; n < N; n++ {
+	for m := range M {
+		for n := range N {
 			var acc float64
-			for k := 0; k < K; k++ {
+			for k := range K {
 				acc += float64(in[m*K+k]) * float64(w[n*K+k])
 			}
 			out[m*N+n] = float32(acc)

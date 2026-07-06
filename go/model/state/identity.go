@@ -83,11 +83,11 @@ type StateRef struct {
 type Bundle struct {
 	Version         string            `json:"version,omitempty"`
 	CreatedAtUnix   int64             `json:"created_at_unix,omitempty"`
-	Model           ModelIdentity     `json:"model,omitempty"`
-	Tokenizer       TokenizerIdentity `json:"tokenizer,omitempty"`
-	Adapter         AdapterIdentity   `json:"adapter,omitempty"`
-	Sampler         SamplerConfig     `json:"sampler,omitempty"`
-	Runtime         RuntimeIdentity   `json:"runtime,omitempty"`
+	Model           ModelIdentity     `json:"model"`
+	Tokenizer       TokenizerIdentity `json:"tokenizer"`
+	Adapter         AdapterIdentity   `json:"adapter"`
+	Sampler         SamplerConfig     `json:"sampler"`
+	Runtime         RuntimeIdentity   `json:"runtime"`
 	PromptHash      string            `json:"prompt_hash,omitempty"`
 	PromptTokens    int               `json:"prompt_tokens,omitempty"`
 	GeneratedTokens int               `json:"generated_tokens,omitempty"`

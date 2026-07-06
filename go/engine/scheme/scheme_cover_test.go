@@ -2,6 +2,8 @@
 
 package scheme
 
+import "slices"
+
 import "testing"
 
 // StateKind.String renders every state for logs and error messages: the two
@@ -55,12 +57,7 @@ func TestQuantForMiss_Bad(t *testing.T) {
 // rather than equal to a fixed slice (registration order/length is shared state).
 func TestCatalogueListers_Good(t *testing.T) {
 	contains := func(names []string, want string) bool {
-		for _, n := range names {
-			if n == want {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(names, want)
 	}
 
 	mixers := MixerKinds()

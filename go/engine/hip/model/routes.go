@@ -20,21 +20,21 @@ type RouteSet struct {
 	Contract                 string                     `json:"contract,omitempty"`
 	Architecture             string                     `json:"architecture,omitempty"`
 	Family                   string                     `json:"family,omitempty"`
-	Model                    inference.ModelIdentity    `json:"model,omitempty"`
-	FeatureRoute             FeatureRoute               `json:"feature_route,omitempty"`
-	CacheRoute               CacheRoute                 `json:"cache_route,omitempty"`
-	LoaderRoute              LoaderRoute                `json:"loader_route,omitempty"`
-	TokenizerRoute           TokenizerRoute             `json:"tokenizer_route,omitempty"`
-	LoRAAdapterRoute         LoRAAdapterRoute           `json:"lora_adapter_route,omitempty"`
-	MultimodalProcessorRoute MultimodalProcessorRoute   `json:"multimodal_processor_route,omitempty"`
-	DiffusionSamplerRoute    DiffusionSamplerRoute      `json:"diffusion_sampler_route,omitempty"`
-	StateContextRoute        StateContextRoute          `json:"state_context_route,omitempty"`
-	AttachedDrafterRoute     AttachedDrafterRoute       `json:"attached_drafter_route,omitempty"`
-	QuantLoaderRoute         QuantLoaderRoute           `json:"quant_loader_route,omitempty"`
+	Model                    inference.ModelIdentity    `json:"model"`
+	FeatureRoute             FeatureRoute               `json:"feature_route"`
+	CacheRoute               CacheRoute                 `json:"cache_route"`
+	LoaderRoute              LoaderRoute                `json:"loader_route"`
+	TokenizerRoute           TokenizerRoute             `json:"tokenizer_route"`
+	LoRAAdapterRoute         LoRAAdapterRoute           `json:"lora_adapter_route"`
+	MultimodalProcessorRoute MultimodalProcessorRoute   `json:"multimodal_processor_route"`
+	DiffusionSamplerRoute    DiffusionSamplerRoute      `json:"diffusion_sampler_route"`
+	StateContextRoute        StateContextRoute          `json:"state_context_route"`
+	AttachedDrafterRoute     AttachedDrafterRoute       `json:"attached_drafter_route"`
+	QuantLoaderRoute         QuantLoaderRoute           `json:"quant_loader_route"`
 	SequenceMixerRoutes      []SequenceMixerLoaderRoute `json:"sequence_mixer_loader_routes,omitempty"`
-	RuntimeContractRoute     RuntimeContractRoute       `json:"runtime_contract_route,omitempty"`
-	RuntimeGatePlan          RuntimeGatePlan            `json:"runtime_gate_plan,omitempty"`
-	RuntimeAuthorPlan        RuntimeAuthorPlan          `json:"runtime_author_plan,omitempty"`
+	RuntimeContractRoute     RuntimeContractRoute       `json:"runtime_contract_route"`
+	RuntimeGatePlan          RuntimeGatePlan            `json:"runtime_gate_plan"`
+	RuntimeAuthorPlan        RuntimeAuthorPlan          `json:"runtime_author_plan"`
 	Labels                   map[string]string          `json:"labels,omitempty"`
 }
 

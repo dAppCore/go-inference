@@ -21,10 +21,10 @@ import (
 // refMatmul: out[L,N] = in[L,K] @ Wᵀ, W row-major [N,K].
 func refMatmul(in, w []float32, L, N, K int) []float32 {
 	out := make([]float32, L*N)
-	for r := 0; r < L; r++ {
-		for n := 0; n < N; n++ {
+	for r := range L {
+		for n := range N {
 			var acc float32
-			for k := 0; k < K; k++ {
+			for k := range K {
 				acc += in[r*K+k] * w[n*K+k]
 			}
 			out[r*N+n] = acc
@@ -52,7 +52,7 @@ func refRMS(v, w []float32, eps float32) []float32 {
 
 func refRMSRows(m, w []float32, rows, axis int, eps float32) []float32 {
 	o := make([]float32, len(m))
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		copy(o[r*axis:r*axis+axis], refRMS(m[r*axis:r*axis+axis], w, eps))
 	}
 	return o
@@ -67,12 +67,12 @@ func refRoPE2D(x []float32, L, N, headDim, gridW int, base float32) []float32 {
 	rp := 2 * (headDim / 4)
 	half := rp / 2
 	inv := make([]float64, half)
-	for i := 0; i < half; i++ {
+	for i := range half {
 		inv[i] = 1.0 / math.Pow(float64(base), float64(2*i)/float64(rp))
 	}
 	o := make([]float32, N*L*headDim)
 	part := func(out, in []float32, coord float64) {
-		for d := 0; d < rp; d++ {
+		for d := range rp {
 			a := coord * inv[d%half]
 			c, s := float32(math.Cos(a)), float32(math.Sin(a))
 			var rot float32
@@ -84,9 +84,9 @@ func refRoPE2D(x []float32, L, N, headDim, gridW int, base float32) []float32 {
 			out[d] = in[d]*c + rot*s
 		}
 	}
-	for pos := 0; pos < L; pos++ {
+	for pos := range L {
 		cx, cy := float64(pos%gridW), float64(pos/gridW)
-		for h := 0; h < N; h++ {
+		for h := range N {
 			in := x[(pos*N+h)*headDim : (pos*N+h)*headDim+headDim]
 			out := o[(h*L+pos)*headDim : (h*L+pos)*headDim+headDim]
 			part(out[0:rp], in[0:rp], cx)
@@ -102,14 +102,14 @@ func refRoPE2D(x []float32, L, N, headDim, gridW int, base float32) []float32 {
 // refAttention: full non-causal attention, q/k/v head-major [N,L,d], scale applied to scores.
 func refAttention(q, k, v []float32, N, L, headDim int, scale float32) []float32 {
 	out := make([]float32, N*L*headDim)
-	for h := 0; h < N; h++ {
+	for h := range N {
 		qh, kh, vh := q[h*L*headDim:], k[h*L*headDim:], v[h*L*headDim:]
-		for i := 0; i < L; i++ {
+		for i := range L {
 			sc := make([]float32, L)
 			mx := float32(math.Inf(-1))
-			for j := 0; j < L; j++ {
+			for j := range L {
 				var s float32
-				for d := 0; d < headDim; d++ {
+				for d := range headDim {
 					s += qh[i*headDim+d] * kh[j*headDim+d]
 				}
 				sc[j] = s * scale
@@ -122,9 +122,9 @@ func refAttention(q, k, v []float32, N, L, headDim int, scale float32) []float32
 				sc[j] = float32(math.Exp(float64(sc[j] - mx)))
 				sum += sc[j]
 			}
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				var acc float32
-				for j := 0; j < L; j++ {
+				for j := range L {
 					acc += sc[j] / sum * vh[j*headDim+d]
 				}
 				out[(h*L+i)*headDim+d] = acc
@@ -167,7 +167,7 @@ func matRowsBF16Fixture(L, outDim, inDim int) ([]byte, []byte) {
 func matRowsBF16LoopedMatVecReference(tb testing.TB, w, in []byte, L, outDim, inDim int) []byte {
 	tb.Helper()
 	out := make([]byte, L*outDim*bf16Size)
-	for r := 0; r < L; r++ {
+	for r := range L {
 		row, err := MatVecBF16(w, in[r*inDim*bf16Size:(r+1)*inDim*bf16Size], outDim, inDim)
 		if err != nil {
 			tb.Fatalf("MatVecBF16 row %d: %v", r, err)
@@ -313,7 +313,7 @@ func visionSDPAWithKernelSoftmax(t *testing.T, q, k, v []byte, L, nHeads, nKVHea
 	}
 	grp := nHeads / nKVHeads
 	out := make([]byte, nHeads*L*headDim*bf16Size)
-	for h := 0; h < nHeads; h++ {
+	for h := range nHeads {
 		kvh := h / grp
 		qh := bf16HeadF32(q, h, L, headDim)
 		kh := bf16HeadF32(k, kvh, L, headDim)
@@ -436,8 +436,8 @@ func TestVisionEncoderLayer(t *testing.T) {
 	headRMS := func(m, wt []float32) []float32 { return refRMSRows(m, wt, L*nHeads, headDim, eps) }
 	transHead := func(m []float32) []float32 { // [L,N,d] → [N,L,d]
 		o := make([]float32, len(m))
-		for pos := 0; pos < L; pos++ {
-			for h := 0; h < nHeads; h++ {
+		for pos := range L {
+			for h := range nHeads {
 				copy(o[(h*L+pos)*headDim:(h*L+pos)*headDim+headDim], m[(pos*nHeads+h)*headDim:(pos*nHeads+h)*headDim+headDim])
 			}
 		}
@@ -449,8 +449,8 @@ func TestVisionEncoderLayer(t *testing.T) {
 	v := transHead(headRMS(refMatmul(normed, w(7, qDim*hidden), L, qDim, hidden), nil))
 	attn := refAttention(q, k, v, nHeads, L, headDim, 1.0) // scale 1.0 — the actual value
 	tok := make([]float32, L*qDim)
-	for h := 0; h < nHeads; h++ {
-		for i := 0; i < L; i++ {
+	for h := range nHeads {
+		for i := range L {
 			copy(tok[(i*nHeads+h)*headDim:(i*nHeads+h)*headDim+headDim], attn[(h*L+i)*headDim:(h*L+i)*headDim+headDim])
 		}
 	}
@@ -487,8 +487,8 @@ func refEncoderLayer(x []float32, ws map[int][]float32, L, hidden, nHeads, headD
 	headRMS := func(m, wt []float32) []float32 { return refRMSRows(m, wt, L*nHeads, headDim, eps) }
 	transHead := func(m []float32) []float32 {
 		o := make([]float32, len(m))
-		for pos := 0; pos < L; pos++ {
-			for h := 0; h < nHeads; h++ {
+		for pos := range L {
+			for h := range nHeads {
 				copy(o[(h*L+pos)*headDim:(h*L+pos)*headDim+headDim], m[(pos*nHeads+h)*headDim:(pos*nHeads+h)*headDim+headDim])
 			}
 		}
@@ -500,8 +500,8 @@ func refEncoderLayer(x []float32, ws map[int][]float32, L, hidden, nHeads, headD
 	v := transHead(headRMS(refMatmul(normed, ws[7], L, qDim, hidden), nil))
 	attn := refAttention(q, k, v, nHeads, L, headDim, 1.0)
 	tok := make([]float32, L*qDim)
-	for h := 0; h < nHeads; h++ {
-		for i := 0; i < L; i++ {
+	for h := range nHeads {
+		for i := range L {
 			copy(tok[(i*nHeads+h)*headDim:(i*nHeads+h)*headDim+headDim], attn[(h*L+i)*headDim:(h*L+i)*headDim+headDim])
 		}
 	}
@@ -558,12 +558,12 @@ func TestVisionTower(t *testing.T) {
 	embScale := float32(math.Sqrt(float64(hidden)))
 	np := rows * cols
 	pooled := make([]float32, np*hidden)
-	for y := 0; y < rows; y++ {
-		for x := 0; x < cols; x++ {
-			for hh := 0; hh < hidden; hh++ {
+	for y := range rows {
+		for x := range cols {
+			for hh := range hidden {
 				var acc float32
-				for dy := 0; dy < poolK; dy++ {
-					for dx := 0; dx < poolK; dx++ {
+				for dy := range poolK {
+					for dx := range poolK {
 						acc += h[((y*poolK+dy)*gridW+(x*poolK+dx))*hidden+hh]
 					}
 				}

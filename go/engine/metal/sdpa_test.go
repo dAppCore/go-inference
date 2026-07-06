@@ -49,13 +49,13 @@ func sdpaBF16Reference(q, k, v []byte, nHeads, nKVHeads, headDim, kvLen int, sca
 	gqa := nHeads / nKVHeads
 	out := make([]byte, nHeads*headDim*bf16Size)
 	bf16At := func(b []byte, i int) float64 { return float64(bf16ToF32(b[i*2], b[i*2+1])) }
-	for h := 0; h < nHeads; h++ {
+	for h := range nHeads {
 		hk := h / gqa
 		scores := make([]float64, kvLen)
 		maxS := math.Inf(-1)
-		for j := 0; j < kvLen; j++ {
+		for j := range kvLen {
 			var dot float64
-			for d := 0; d < headDim; d++ {
+			for d := range headDim {
 				dot += bf16At(q, h*headDim+d) * bf16At(k, (hk*kvLen+j)*headDim+d)
 			}
 			scores[j] = dot * float64(scale)
@@ -68,9 +68,9 @@ func sdpaBF16Reference(q, k, v []byte, nHeads, nKVHeads, headDim, kvLen int, sca
 			scores[j] = math.Exp(scores[j] - maxS)
 			denom += scores[j]
 		}
-		for d := 0; d < headDim; d++ {
+		for d := range headDim {
 			var acc float64
-			for j := 0; j < kvLen; j++ {
+			for j := range kvLen {
 				acc += scores[j] / denom * bf16At(v, (hk*kvLen+j)*headDim+d)
 			}
 			b := f32ToBF16(float32(acc))
@@ -152,7 +152,7 @@ func TestSDPABF16ScratchBuffersUseCallerBackingAfterWarmup(t *testing.T) {
 	}
 	defer putSDPABF16Scratch(scratch)
 	var qBuf, kBuf, vBuf metal.MTLBuffer
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		qBuf, kBuf, vBuf, _, err = scratch.buffers(q, k, v)
 		if err != nil {
 			t.Fatalf("SDPA scratch buffers: %v", err)

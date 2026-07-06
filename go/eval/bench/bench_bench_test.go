@@ -36,7 +36,7 @@ var (
 // timing + token counts — same shape Run captures from a real driver.
 func buildBenchSamples(n int) []GenerationSample {
 	samples := make([]GenerationSample, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		samples[i] = GenerationSample{
 			Prompt: "Write one precise sentence about local inference.",
 			Text:   "Local inference keeps tokens on-device.",

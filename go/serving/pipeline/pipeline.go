@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"context"
+	"maps"
 
 	core "dappco.re/go"
 	chat "dappco.re/go/inference/serving/chat"
@@ -337,9 +338,7 @@ func (p *Pipeline) score(req chat.Request, resp chat.Response) chat.Response {
 	if resp.Metadata == nil {
 		resp.Metadata = make(map[string]string, len(bundle))
 	}
-	for k, v := range bundle {
-		resp.Metadata[k] = v
-	}
+	maps.Copy(resp.Metadata, bundle)
 	return resp
 }
 

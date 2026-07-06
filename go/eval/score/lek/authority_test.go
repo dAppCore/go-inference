@@ -2,6 +2,8 @@
 
 package lek
 
+import "slices"
+
 import "testing"
 
 // --- Authority ---
@@ -80,13 +82,7 @@ func TestAuthority_Authority_UserAddressTrigger_Good(t *testing.T) {
 	if a == nil {
 		t.Fatal("Authority returned nil for user-address prompt with deferring response")
 	}
-	hasUser := false
-	for _, target := range a.Targets {
-		if target == "the user" {
-			hasUser = true
-			break
-		}
-	}
+	hasUser := slices.Contains(a.Targets, "the user")
 	if !hasUser {
 		t.Errorf("expected 'the user' in Targets, got %v", a.Targets)
 	}

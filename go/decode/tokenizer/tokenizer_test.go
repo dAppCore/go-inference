@@ -1639,7 +1639,7 @@ func TestTokenizer_StoreBPETokens_ExistingKeyUpdated_Good(t *testing.T) {
 func TestTokenizer_StoreBPETokens_LRUEviction_Ugly(t *testing.T) {
 	tok := &Tokenizer{}
 	// Fill exactly to the limit.
-	for i := 0; i < tokenizerBPECacheLimit; i++ {
+	for i := range tokenizerBPECacheLimit {
 		tok.storeBPETokens(core.Sprintf("k%d", i), []int32{int32(i)})
 	}
 	if len(tok.bpeCacheOrder) != tokenizerBPECacheLimit {

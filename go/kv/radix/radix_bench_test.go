@@ -28,12 +28,12 @@ func corpus(groups, perGroup, prefixLen, tailLen int) [][]int {
 	var s lcg = 0x9e3779b97f4a7c15
 	keys := make([][]int, 0, groups*perGroup)
 	uniq := 0
-	for g := 0; g < groups; g++ {
+	for range groups {
 		prefix := make([]int, prefixLen)
 		for i := range prefix {
 			prefix[i] = s.next() & 0xffff
 		}
-		for p := 0; p < perGroup; p++ {
+		for range perGroup {
 			k := make([]int, 0, prefixLen+tailLen)
 			k = append(k, prefix...)
 			uniq++

@@ -35,7 +35,7 @@ func TestNoCopyMmapGPURead(t *testing.T) {
 	n := syscall.Getpagesize() / bf16Size
 	data := make([]byte, n*bf16Size)
 	addend := make([]byte, n*bf16Size)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		d := f32ToBF16(float32((i%17)-8) * 0.25) // clean finite bf16
 		a := f32ToBF16(float32((i%5)+1) * 0.5)
 		data[i*bf16Size], data[i*bf16Size+1] = byte(d), byte(d>>8)

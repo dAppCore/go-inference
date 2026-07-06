@@ -46,7 +46,7 @@ func diffusionEncoderScalars(weights map[string]safetensors.Tensor, numLayers in
 		return nil
 	}
 	scalars := make([][]byte, numLayers)
-	for i := 0; i < numLayers; i++ {
+	for i := range numLayers {
 		base := core.Sprintf("model.encoder.language_model.layers.%d.layer_scalar", i)
 		scalars[i] = diffusionWeight(weights, base, base+".weight")
 	}

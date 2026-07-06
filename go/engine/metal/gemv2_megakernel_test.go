@@ -47,9 +47,9 @@ func bf16BytesToF32(b []byte) []float32 {
 // hostGemvBF16 mirrors the megakernel's per-output f32-accumulate-then-round-bf16, same k order.
 func hostGemvBF16(wF32, xF32 []float32, outDim, inDim int) []byte {
 	out := make([]byte, outDim*bf16Size)
-	for o := 0; o < outDim; o++ {
+	for o := range outDim {
 		var acc float32
-		for k := 0; k < inDim; k++ {
+		for k := range inDim {
 			acc += wF32[o*inDim+k] * xF32[k]
 		}
 		h := f32ToBF16(acc)

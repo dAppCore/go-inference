@@ -7,6 +7,7 @@ package native
 import (
 	"context"
 	"math"
+	"slices"
 	"sort"
 	"time"
 
@@ -288,12 +289,7 @@ func diffusionKeepUntilStop(canvas, stops []int32) ([]int32, bool) {
 }
 
 func tokenInSet(id int32, set []int32) bool {
-	for _, s := range set {
-		if id == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(set, id)
 }
 
 func diffusionGlobalCanvasMaskData(batch, canvasLen, keyLen int) ([]float32, []int) {
@@ -310,16 +306,13 @@ func diffusionBlockLocalCanvasMaskData(batch, canvasLen, keyLen, offset, window 
 		return nil, shape
 	}
 	negInf := float32(math.Inf(-1))
-	contextStart := offset - window
-	if contextStart < 0 {
-		contextStart = 0
-	}
+	contextStart := max(offset-window, 0)
 	data := make([]float32, batch*canvasLen*keyLen)
-	for b := 0; b < batch; b++ {
+	for b := range batch {
 		base := b * canvasLen * keyLen
-		for i := 0; i < canvasLen; i++ {
+		for i := range canvasLen {
 			row := base + i*keyLen
-			for j := 0; j < keyLen; j++ {
+			for j := range keyLen {
 				inContext := j >= contextStart && j < offset
 				inCanvas := j >= offset && j < offset+canvasLen
 				if !inContext && !inCanvas {
@@ -454,11 +447,11 @@ func dequantizeAffineRowsF32(packed, scales, biases []byte, rows, cols, groupSiz
 		return nil, core.NewError("native.dequantizeAffineRowsF32: packed/scales/biases size mismatch")
 	}
 	out := make([]float32, rows*cols)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		pRow := packed[r*rowPacked : (r+1)*rowPacked]
 		sRow := scales[r*rowSB : (r+1)*rowSB]
 		bRow := biases[r*rowSB : (r+1)*rowSB]
-		for c := 0; c < cols; c++ {
+		for c := range cols {
 			g := c / groupSize
 			scale := bf16ToF32(sRow[g*bf16Size], sRow[g*bf16Size+1])
 			bias := bf16ToF32(bRow[g*bf16Size], bRow[g*bf16Size+1])
@@ -524,7 +517,7 @@ func diffusionSampleDenoiseStep(logits []byte, canvas []int32, vocab, dModel int
 	greedyIDs := make([]int32, L)
 	entropies := make([]float32, L)
 	var entropySum float32
-	for i := 0; i < L; i++ {
+	for i := range L {
 		rowBytes := shaped[i*vocab*bf16Size : (i+1)*vocab*bf16Size]
 		id, err := categoricalSampler.Sample(rowBytes, vocab, model.SampleParams{Temperature: 1})
 		if err != nil {

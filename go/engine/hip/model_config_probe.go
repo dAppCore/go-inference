@@ -21,11 +21,11 @@ type ROCmModelConfigProbe struct {
 	ModelType                string                        `json:"model_type,omitempty"`
 	TextTowerModelType       string                        `json:"text_tower_model_type,omitempty"`
 	Architectures            []string                      `json:"architectures,omitempty"`
-	ArchitectureResolution   ROCmArchitectureResolution    `json:"architecture_resolution,omitempty"`
-	LoaderRoute              ROCmModelLoaderRoute          `json:"loader_route,omitempty"`
-	RuntimeContractRoute     ROCmModelRuntimeContractRoute `json:"runtime_contract_route,omitempty"`
+	ArchitectureResolution   ROCmArchitectureResolution    `json:"architecture_resolution"`
+	LoaderRoute              ROCmModelLoaderRoute          `json:"loader_route"`
+	RuntimeContractRoute     ROCmModelRuntimeContractRoute `json:"runtime_contract_route"`
 	SequenceMixerLayers      []SequenceMixerLayerPlan      `json:"sequence_mixer_layers,omitempty"`
-	SequenceMixerCache       SequenceMixerCachePlan        `json:"sequence_mixer_cache,omitempty"`
+	SequenceMixerCache       SequenceMixerCachePlan        `json:"sequence_mixer_cache"`
 	SequenceMixerLayerTypes  []string                      `json:"sequence_mixer_layer_types,omitempty"`
 	SequenceMixerLayerSource string                        `json:"sequence_mixer_layer_source,omitempty"`
 	SequenceMixerPlanStatus  string                        `json:"sequence_mixer_plan_status,omitempty"`

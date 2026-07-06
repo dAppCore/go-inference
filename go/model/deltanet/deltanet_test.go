@@ -32,17 +32,17 @@ func TestGatedDeltaL1ClosedForm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GatedDeltaRuleF32: %v", err)
 	}
-	for h := 0; h < H; h++ {
+	for h := range H {
 		var ss float64
-		for i := 0; i < D; i++ {
+		for i := range D {
 			ss += float64(k[h*D+i]) * float64(k[h*D+i])
 		}
 		inv := 1.0 / math.Sqrt(ss+testEps)
 		var qk float64 // q · k̂
-		for i := 0; i < D; i++ {
+		for i := range D {
 			qk += float64(q[h*D+i]) * float64(k[h*D+i]) * inv
 		}
-		for j := 0; j < D; j++ {
+		for j := range D {
 			want := float64(beta[h]) * float64(scale) * qk * float64(v[h*D+j])
 			if got := float64(o[h*D+j]); math.Abs(got-want) > 1e-4*(1+math.Abs(want)) {
 				t.Errorf("o[%d,%d] = %v, closed form β·scale·(q·k̂)·v = %v", h, j, got, want)

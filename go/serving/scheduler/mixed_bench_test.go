@@ -178,7 +178,7 @@ func BenchmarkScheduler_Mixed_LabelCounts_0_5_20_Generate_32Tokens(b *testing.B)
 	sched := New(base, Config{MaxConcurrent: 4, MaxQueue: 16, StreamBuffer: 32})
 	ctx := context.Background()
 	bigLabels := map[string]string{}
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		bigLabels[string(rune('a'+i))] = "v"
 	}
 	medLabels := map[string]string{
@@ -226,7 +226,7 @@ func BenchmarkScheduler_Mixed_Sustained_64RequestsPerOp_32Tokens(b *testing.B) {
 		var wg sync.WaitGroup
 		wg.Add(burstSize)
 		var total atomic.Int64
-		for j := 0; j < burstSize; j++ {
+		for range burstSize {
 			go func() {
 				defer wg.Done()
 				_, tokens, err := sched.Schedule(ctx, inference.ScheduledRequest{Prompt: "p"})

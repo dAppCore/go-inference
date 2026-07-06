@@ -631,10 +631,7 @@ func matMulF32NTIntoPublic(out, a, b []float32, M, K, N int, directOutput bool) 
 
 func matMulF32NTInto(out, a, b []float32, M, K, N int, directOutput bool) error {
 	dtm, dtn, dtk := (M+15)/16, (N+15)/16, K/16
-	maxMN := M
-	if N > maxMN {
-		maxMN = N
-	}
+	maxMN := max(N, M)
 	// Case 1 (matmul.cpp): !use_nax && batch==1 && _tm·_tn ≤ threshold && _tk ≥ 8 && K ≥ max(M,N).
 	// threshold is device-dependent: 1024 (small device 'g'/'p' — this Mac, confirmed by the nn
 	// tiling) / 2048 ('s'/'d'). relK's _tm·_tn is far below either, so the audio tower is unaffected;
@@ -715,13 +712,7 @@ func matMulF32SplitKNTInto(out, a, b []float32, M, K, N int, directOutput bool) 
 		bn = 16
 	}
 	ptm, ptn, ptk := (M+31)/32, (N+31)/32, K/16
-	partitions := nextPow2(ptk / (ptm * ptn))
-	if partitions < 2 {
-		partitions = 2
-	}
-	if partitions > 32 {
-		partitions = 32
-	}
+	partitions := min(max(nextPow2(ptk/(ptm*ptn)), 2), 32)
 	stride := M * N
 	kIters := (K / bk) / partitions
 	partSize := kIters * bk

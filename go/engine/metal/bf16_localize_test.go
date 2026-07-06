@@ -69,12 +69,9 @@ func TestBF16VsQ4PerLayer(t *testing.T) {
 
 		t.Logf("pos %d: embCos=%.4f finalHidCos=%.4f", i, cosineBF16(eB, eQ), cosineBF16(hB, hQ))
 		if i == captureStep {
-			n := len(lB)
-			if len(lQ) < n {
-				n = len(lQ)
-			}
+			n := min(len(lQ), len(lB))
 			worst, worstL := 2.0, -1
-			for L := 0; L < n; L++ {
+			for L := range n {
 				c := cosineBF16(lB[L], lQ[L])
 				t.Logf("  L%2d bf16-vs-q4 cosine=%.4f", L, c)
 				if c < worst {

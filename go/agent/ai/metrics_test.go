@@ -113,11 +113,8 @@ func TestMetrics_Record_Good_SerializesConcurrentWrites(t *testing.T) {
 
 	var wg sync.WaitGroup
 	errCh := make(chan core.Result, workers)
-	for i := 0; i < workers; i++ {
-		i := i
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for i := range workers {
+		wg.Go(func() {
 			errCh <- Record(Event{
 				Type:      "scan",
 				AgentID:   "agent-1",
@@ -127,7 +124,7 @@ func TestMetrics_Record_Good_SerializesConcurrentWrites(t *testing.T) {
 					"sequence": i,
 				},
 			})
-		}()
+		})
 	}
 	wg.Wait()
 	close(errCh)

@@ -14,7 +14,7 @@ func blob(header string, data []byte) []byte {
 	h := []byte(header)
 	out := make([]byte, 8+len(h)+len(data))
 	n := uint64(len(h))
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		out[i] = byte(n >> (8 * uint(i)))
 	}
 	copy(out[8:], h)
@@ -230,7 +230,7 @@ func TestSafetensors_Load_Ugly(t *testing.T) {
 	path := dir + "/meta_only.safetensors"
 	header := []byte(`{"__metadata__":{"format":"pt"}}`)
 	buf := make([]byte, 8+len(header))
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		buf[i] = byte(len(header) >> (8 * uint(i)))
 	}
 	copy(buf[8:], header)

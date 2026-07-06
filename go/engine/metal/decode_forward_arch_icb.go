@@ -1142,7 +1142,7 @@ func recordArchICB(
 	kvOf := func(li int) int { return kvHeadsOf(specs[li], nKVHeads) }
 	kvdOf := func(li int) int { return kvOf(li) * hdOf(li) }
 	maxHd, maxKv := headDim, nKVHeads
-	for li := 0; li < nLayers; li++ {
+	for li := range nLayers {
 		if h := hdOf(li); h > maxHd {
 			maxHd = h
 		}
@@ -1161,7 +1161,7 @@ func recordArchICB(
 		return dFF
 	}
 	maxDFF := dFF
-	for li := 0; li < nLayers; li++ {
+	for li := range nLayers {
 		if l := lffOf(li); l > maxDFF {
 			maxDFF = l
 		}
@@ -1200,7 +1200,7 @@ func recordArchICB(
 	}
 	// per-hd SDPA PSO (gemma4 global 512 vs sliding 256 head dim) — one per distinct hd, picked per layer.
 	sdpaPSOByHd := make(map[int]metal.MTLComputePipelineState)
-	for li := 0; li < nLayers; li++ {
+	for li := range nLayers {
 		hd := hdOf(li)
 		if _, ok := sdpaPSOByHd[hd]; !ok {
 			pso, e := sdpaVectorPipelineICBForHeadDim(hd)
@@ -1341,7 +1341,7 @@ func recordArchICB(
 			}
 			return s
 		}
-		for li := 0; li < nLayers; li++ {
+		for li := range nLayers {
 			hdAxisOf(hdOf(li))
 			sdpaStrideOf(hdOf(li), kvOf(li))
 			gqaOf(kvOf(li))
@@ -1365,7 +1365,7 @@ func recordArchICB(
 			}
 			return b
 		}
-		for li := 0; li < nLayers; li++ {
+		for li := range nLayers {
 			ffCntOf(lffOf(li))
 		}
 		// fused QK-norm+rope per-layer params: ropeParamsOf mirrors setRope's per-layer base/rotDim/freqs
@@ -1399,7 +1399,7 @@ func recordArchICB(
 		useFreqs0B, useFreqs1B := scalarI32(0), scalarI32(1)
 		qkDummyPeriodsB := qkRopeDummyBuf()
 		if useFusedQKRope {
-			for li := 0; li < nLayers; li++ {
+			for li := range nLayers {
 				_, _, rd := ropeParamsOf(li)
 				rotDimBufOf(rd)
 			}
@@ -1674,7 +1674,7 @@ func recordArchICB(
 			}
 		}
 
-		for li := 0; li < nLayers; li++ {
+		for li := range nLayers {
 			owns := specs[li].OwnsCache()
 			ownerIdx := specs[li].KVShareFrom
 			sliding := specs[li].Attention == model.SlidingAttention
@@ -1875,7 +1875,7 @@ func recordArchICB(
 		}
 		rowBytesByLayer := sc.rowBytes[:nLayers]
 		cacheRowsByLayer := sc.cacheRows[:nLayers]
-		for li := 0; li < nLayers; li++ {
+		for li := range nLayers {
 			rowBytesByLayer[li] = kvdOf(li) * bf16Size
 			cacheRowsByLayer[li] = 0
 			if specs[li].OwnsCache() && kCaches[li] != nil {

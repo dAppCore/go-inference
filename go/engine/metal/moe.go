@@ -18,7 +18,7 @@ import (
 // column for the weighted expert combine.
 func scalarFillBF16(val []byte, n int) []byte {
 	out := make([]byte, n*bf16Size)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		out[i*bf16Size] = val[0]
 		out[i*bf16Size+1] = val[1]
 	}
@@ -322,7 +322,7 @@ func moeExpertsInto(out []byte, x []byte, idx []int32, weights, gateW, upW, down
 
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-		for i := 0; i < topK; i++ {
+		for i := range topK {
 			e := int(idx[i])
 			gateOff, downOff := uint(e*gateSz), uint(e*downSz)
 			if encErr = encGemvBF16To(enc, gateBuf, xBuf, msc.gate, gateOff, 0, dFF, dModel); encErr != nil {
@@ -451,7 +451,7 @@ func moeExpertsQuantInto(out []byte, x []byte, idx []int32, weights []byte, gate
 
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-		for i := 0; i < topK; i++ {
+		for i := range topK {
 			e := int(idx[i])
 			gatePackedOff, gateScaleOff := uint(e*gatePacked), uint(e*gateScale)
 			downPackedOff, downScaleOff := uint(e*downPacked), uint(e*downScale)
@@ -575,7 +575,7 @@ func moeExpertsQuantFusedGateUpInto(out []byte, x []byte, idx []int32, weights [
 
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-		for i := 0; i < topK; i++ {
+		for i := range topK {
 			e := int(idx[i])
 			gatePackedOff, gateScaleOff := uint(e*2*gatePacked), uint(e*2*gateScale)
 			upPackedOff, upScaleOff := gatePackedOff+uint(gatePacked), gateScaleOff+uint(gateScale)

@@ -140,7 +140,7 @@ func AudioSubsampleF32(features []byte, w *AudioSubsampleWeights, cfg AudioSubsa
 func sliceColsF32(x []float32, rows, cols, c0, c1 int) []float32 {
 	w := c1 - c0
 	out := make([]float32, rows*w)
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		copy(out[r*w:r*w+w], x[r*cols+c0:r*cols+c1])
 	}
 	return out
@@ -150,10 +150,10 @@ func sliceColsF32(x []float32, rows, cols, c0, c1 int) []float32 {
 // depthwiseConv1dBF16, matching metal.Conv1d(f32). out[t,c] = Σ_k in[t-(K-1)+k, c]·dw[c,k].
 func depthwiseConv1dF32(in, dw []float32, L, ch, K int) []float32 {
 	out := make([]float32, L*ch)
-	for t := 0; t < L; t++ {
-		for c := 0; c < ch; c++ {
+	for t := range L {
+		for c := range ch {
 			var acc float32
-			for k := 0; k < K; k++ {
+			for k := range K {
 				if src := t - (K - 1) + k; src >= 0 {
 					acc += in[src*ch+c] * dw[c*K+k]
 				}

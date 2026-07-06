@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -100,12 +101,7 @@ func isROCmGemma4FamilyConfig(modelPath string) bool {
 }
 
 func anyROCmGemma4DraftDetectArchitecture(values []string) bool {
-	for _, value := range values {
-		if isROCmGemma4DraftDetectArchitecture(value) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(values, isROCmGemma4DraftDetectArchitecture)
 }
 
 func isROCmGemma4DraftDetectArchitecture(value string) bool {

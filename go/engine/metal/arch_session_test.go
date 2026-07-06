@@ -1134,7 +1134,7 @@ func sampleBF16VocabOrderForTest(logits []byte, vocab int, params model.SamplePa
 	}
 	maxV := float32(math.Inf(-1))
 	allowed := 0
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		if tokenSuppressed(i, params.SuppressTokens) {
 			continue
 		}
@@ -1148,7 +1148,7 @@ func sampleBF16VocabOrderForTest(logits []byte, vocab int, params model.SamplePa
 		return 0, fmt.Errorf("all tokens suppressed")
 	}
 	var sum float32
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		if tokenSuppressed(i, params.SuppressTokens) {
 			continue
 		}
@@ -1162,7 +1162,7 @@ func sampleBF16VocabOrderForTest(logits []byte, vocab int, params model.SamplePa
 	target := draw * sum
 	var acc float32
 	fallback := int32(-1)
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		if tokenSuppressed(i, params.SuppressTokens) {
 			continue
 		}
@@ -1206,7 +1206,7 @@ func TestArchSessionSampleTopKCandidatesFromLogitsMatchesFullSampler(t *testing.
 	}
 	fullSampler := model.NewSampler(123)
 	candidateSampler := model.NewSampler(123)
-	for i := 0; i < 32; i++ {
+	for i := range 32 {
 		want, err := fullSampler.Sample(logits, len(vals), params)
 		if err != nil {
 			t.Fatalf("full sample %d: %v", i, err)
@@ -1600,7 +1600,7 @@ func TestArchSessionGenerateWithSuppression(t *testing.T) {
 	}
 	const survivor int32 = 7
 	suppress := make([]int32, 0, vocab-1)
-	for id := int32(0); id < vocab; id++ {
+	for id := range int32(vocab) {
 		if id != survivor {
 			suppress = append(suppress, id)
 		}
@@ -1673,7 +1673,7 @@ func TestArchSessionGenerateSampledEachStopsAndCachesFinalToken(t *testing.T) {
 	}
 	const survivor int32 = 7
 	suppress := make([]int32, 0, vocab-1)
-	for id := int32(0); id < vocab; id++ {
+	for id := range int32(vocab) {
 		if id != survivor {
 			suppress = append(suppress, id)
 		}
@@ -1707,7 +1707,7 @@ func TestArchSessionGenerateSampledOneShotEachStopsWithoutCachingFinalToken(t *t
 	}
 	const survivor int32 = 7
 	suppress := make([]int32, 0, vocab-1)
-	for id := int32(0); id < vocab; id++ {
+	for id := range int32(vocab) {
 		if id != survivor {
 			suppress = append(suppress, id)
 		}
@@ -3929,7 +3929,7 @@ func TestHeadEncoderSampleTopKCandidatesMatchesFullHead(t *testing.T) {
 				v  float32
 			}
 			want := make([]candidate, 0, vocab)
-			for i := 0; i < vocab; i++ {
+			for i := range vocab {
 				if int32(i) == suppress[0] {
 					continue
 				}
@@ -3951,7 +3951,7 @@ func TestHeadEncoderSampleTopKCandidatesMatchesFullHead(t *testing.T) {
 			if len(gotIDs) != topK || len(gotLogits) != topK*bf16Size {
 				t.Fatalf("candidate lengths: ids=%d logits=%d, want %d/%d", len(gotIDs), len(gotLogits), topK, topK*bf16Size)
 			}
-			for i := 0; i < topK; i++ {
+			for i := range topK {
 				if gotIDs[i] != want[i].id {
 					t.Fatalf("topK[%d] id=%d, want %d (got %v want top=%v)", i, gotIDs[i], want[i].id, gotIDs, want[:topK])
 				}
@@ -4011,7 +4011,7 @@ func TestHeadEncoderQuantSampleTopKCandidatesMatchesFullHead(t *testing.T) {
 		v  float32
 	}
 	want := make([]candidate, 0, vocab)
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		if int32(i) == suppress[0] || int32(i) == suppress[1] {
 			continue
 		}
@@ -4033,7 +4033,7 @@ func TestHeadEncoderQuantSampleTopKCandidatesMatchesFullHead(t *testing.T) {
 	if len(gotIDs) != topK || len(gotLogits) != topK*bf16Size {
 		t.Fatalf("candidate lengths: ids=%d logits=%d, want %d/%d", len(gotIDs), len(gotLogits), topK, topK*bf16Size)
 	}
-	for i := 0; i < topK; i++ {
+	for i := range topK {
 		if gotIDs[i] != want[i].id {
 			t.Fatalf("topK[%d] id=%d, want %d (got %v want top=%v)", i, gotIDs[i], want[i].id, gotIDs, want[:topK])
 		}

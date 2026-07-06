@@ -58,10 +58,7 @@ type Pool struct {
 //
 //	pool := lora.NewPool(cfg)
 func NewPool(cfg Config) *Pool {
-	capN := cfg.Capacity
-	if capN < 0 {
-		capN = 0
-	}
+	capN := max(cfg.Capacity, 0)
 	return &Pool{
 		reg:      NewRegistry(),
 		loader:   cfg.Loader,

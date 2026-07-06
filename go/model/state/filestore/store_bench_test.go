@@ -43,7 +43,7 @@ func benchStore(tb testing.TB, n, payloadSize int) (*Store, []state.ChunkRef) {
 		payload[i] = byte('a' + i%26)
 	}
 	refs := make([]state.ChunkRef, 0, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		ref, err := store.PutBytes(context.Background(), payload, state.PutOptions{
 			Kind:  "bench",
 			Title: core.Sprintf("chunk-%d", i),

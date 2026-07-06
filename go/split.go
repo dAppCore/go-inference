@@ -62,8 +62,8 @@ const (
 type ModelSliceRequest struct {
 	Preset     ModelSlicePreset  `json:"preset,omitempty"`
 	Components []ModelComponent  `json:"components,omitempty"`
-	Model      ModelIdentity     `json:"model,omitempty"`
-	Adapter    AdapterIdentity   `json:"adapter,omitempty"`
+	Model      ModelIdentity     `json:"model"`
+	Adapter    AdapterIdentity   `json:"adapter"`
 	OutputPath string            `json:"output_path,omitempty"`
 	Labels     map[string]string `json:"labels,omitempty"`
 }
@@ -76,8 +76,8 @@ type ModelSlicePlan struct {
 	Components         []ModelComponent  `json:"components,omitempty"`
 	SourcePath         string            `json:"source_path,omitempty"`
 	OutputPath         string            `json:"output_path,omitempty"`
-	Model              ModelIdentity     `json:"model,omitempty"`
-	Adapter            AdapterIdentity   `json:"adapter,omitempty"`
+	Model              ModelIdentity     `json:"model"`
+	Adapter            AdapterIdentity   `json:"adapter"`
 	AttentionLocal     bool              `json:"attention_local,omitempty"`
 	FFNRemoteCandidate bool              `json:"ffn_remote_candidate,omitempty"`
 	Notes              []string          `json:"notes,omitempty"`
@@ -139,9 +139,9 @@ type SplitEndpoint struct {
 // embeddings, and FFN/expert work across local and remote workers.
 type SplitInferencePlan struct {
 	Mode       SplitInferenceMode `json:"mode,omitempty"`
-	Model      ModelIdentity      `json:"model,omitempty"`
-	Adapter    AdapterIdentity    `json:"adapter,omitempty"`
-	LocalSlice ModelSlicePlan     `json:"local_slice,omitempty"`
+	Model      ModelIdentity      `json:"model"`
+	Adapter    AdapterIdentity    `json:"adapter"`
+	LocalSlice ModelSlicePlan     `json:"local_slice"`
 	Endpoints  []SplitEndpoint    `json:"endpoints,omitempty"`
 	Labels     map[string]string  `json:"labels,omitempty"`
 }
@@ -154,8 +154,8 @@ type SplitPlanner interface {
 
 // SplitInferenceRequest asks a backend to plan a split-inference topology.
 type SplitInferenceRequest struct {
-	Model       ModelIdentity      `json:"model,omitempty"`
-	Adapter     AdapterIdentity    `json:"adapter,omitempty"`
+	Model       ModelIdentity      `json:"model"`
+	Adapter     AdapterIdentity    `json:"adapter"`
 	LocalPreset ModelSlicePreset   `json:"local_preset,omitempty"`
 	Mode        SplitInferenceMode `json:"mode,omitempty"`
 	Endpoints   []SplitEndpoint    `json:"endpoints,omitempty"`

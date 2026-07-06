@@ -65,7 +65,7 @@ func GenerateBF16(g *BF16Model, arch model.Arch, promptIDs []int32, maxNew, maxL
 
 		// prefill the prompt over the growing cache; keep the last token's hidden state.
 		var hidden []byte
-		for p := 0; p < len(promptIDs); p++ {
+		for p := range promptIDs {
 			if hidden, genErr = step(promptIDs[p], p); genErr != nil {
 				return
 			}

@@ -217,13 +217,11 @@ func TestObs_Feedback_Ugly(t *core.T) {
 	// MemorySink is safe under concurrent writers.
 	sink := NewMemorySink()
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 50 {
+		wg.Go(func() {
 			sink.Run(Run{ID: "x"})
 			sink.Feedback(Feedback{RunID: "x", Score: 1})
-		}()
+		})
 	}
 	wg.Wait()
 	core.AssertEqual(t, 50, len(sink.Runs()))

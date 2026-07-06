@@ -81,7 +81,7 @@ func (tm *MambaTokenModel) DecodeForward(inputs [][]byte) ([][]byte, error) {
 		return nil, err
 	}
 	res := make([][]byte, L)
-	for t := 0; t < L; t++ {
+	for t := range L {
 		res[t] = f32ToBF16Bytes(out[t*D : (t+1)*D])
 	}
 	return res, nil

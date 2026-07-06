@@ -48,7 +48,7 @@ func TestNativeBackend(t *testing.T) {
 	}
 
 	eq := func(name string, got, want [][]byte) {
-		for tok := 0; tok < T; tok++ {
+		for tok := range T {
 			eqBytes(t, core.Sprintf("%s tok%d", name, tok), got[tok], want[tok])
 		}
 	}

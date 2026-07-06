@@ -105,8 +105,8 @@ func unwrapWeightName(name string, wrapperPrefixes []string) string {
 
 func trimOneWeightWrapper(name string, wrapperPrefixes []string) (string, bool) {
 	for _, prefix := range wrapperPrefixes {
-		if strings.HasPrefix(name, prefix) {
-			return strings.TrimPrefix(name, prefix), true
+		if after, ok := strings.CutPrefix(name, prefix); ok {
+			return after, true
 		}
 	}
 	return name, false

@@ -38,7 +38,7 @@ func DiffusionSDPA(q, k, v []byte, qLen, keyLen, nHeads, nKVHeads, headDim int, 
 
 	grp := nHeads / nKVHeads
 	out := make([]byte, nHeads*qLen*headDim*bf16Size)
-	for h := 0; h < nHeads; h++ {
+	for h := range nHeads {
 		kvh := h / grp
 		qh := bf16HeadF32(q, h, qLen, headDim)
 		kh := bf16HeadF32(k, kvh, keyLen, headDim)

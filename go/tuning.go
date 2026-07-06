@@ -74,8 +74,8 @@ type MachineDiscoveryRequest struct {
 // MachineDiscoveryReport is the UI-facing summary of a local backend plus any
 // models and candidate settings discovered cheaply.
 type MachineDiscoveryReport struct {
-	Runtime      RuntimeIdentity   `json:"runtime,omitempty"`
-	Device       MachineDeviceInfo `json:"device,omitempty"`
+	Runtime      RuntimeIdentity   `json:"runtime"`
+	Device       MachineDeviceInfo `json:"device"`
 	Available    bool              `json:"available"`
 	Capabilities []Capability      `json:"capabilities,omitempty"`
 	CacheModes   []string          `json:"cache_modes,omitempty"`
@@ -99,12 +99,12 @@ type TuningBudget struct {
 // TuningPlanRequest asks a backend to turn known hardware/model facts into
 // candidate settings. It is intentionally metadata-only.
 type TuningPlanRequest struct {
-	Runtime   RuntimeIdentity   `json:"runtime,omitempty"`
-	Device    MachineDeviceInfo `json:"device,omitempty"`
-	Model     ModelIdentity     `json:"model,omitempty"`
-	Adapter   AdapterIdentity   `json:"adapter,omitempty"`
+	Runtime   RuntimeIdentity   `json:"runtime"`
+	Device    MachineDeviceInfo `json:"device"`
+	Model     ModelIdentity     `json:"model"`
+	Adapter   AdapterIdentity   `json:"adapter"`
 	Workloads []TuningWorkload  `json:"workloads,omitempty"`
-	Budget    TuningBudget      `json:"budget,omitempty"`
+	Budget    TuningBudget      `json:"budget"`
 	Labels    map[string]string `json:"labels,omitempty"`
 }
 
@@ -112,9 +112,9 @@ type TuningPlanRequest struct {
 type TuningCandidate struct {
 	ID                   string            `json:"id,omitempty"`
 	Workload             TuningWorkload    `json:"workload,omitempty"`
-	Model                ModelIdentity     `json:"model,omitempty"`
-	Adapter              AdapterIdentity   `json:"adapter,omitempty"`
-	Runtime              RuntimeIdentity   `json:"runtime,omitempty"`
+	Model                ModelIdentity     `json:"model"`
+	Adapter              AdapterIdentity   `json:"adapter"`
+	Runtime              RuntimeIdentity   `json:"runtime"`
 	ContextLength        int               `json:"context_length,omitempty"`
 	ParallelSlots        int               `json:"parallel_slots,omitempty"`
 	PromptCache          bool              `json:"prompt_cache,omitempty"`
@@ -133,10 +133,10 @@ type TuningCandidate struct {
 
 // TuningPlan is a compact set of candidates and per-workload recommendations.
 type TuningPlan struct {
-	Runtime     RuntimeIdentity           `json:"runtime,omitempty"`
-	Device      MachineDeviceInfo         `json:"device,omitempty"`
-	Model       ModelIdentity             `json:"model,omitempty"`
-	Adapter     AdapterIdentity           `json:"adapter,omitempty"`
+	Runtime     RuntimeIdentity           `json:"runtime"`
+	Device      MachineDeviceInfo         `json:"device"`
+	Model       ModelIdentity             `json:"model"`
+	Adapter     AdapterIdentity           `json:"adapter"`
 	Workloads   []TuningWorkload          `json:"workloads,omitempty"`
 	Candidates  []TuningCandidate         `json:"candidates,omitempty"`
 	Recommended map[TuningWorkload]string `json:"recommended,omitempty"`
@@ -178,9 +178,9 @@ type TuningScore struct {
 
 // TuningResult is emitted after each candidate finishes or fails.
 type TuningResult struct {
-	Candidate    TuningCandidate    `json:"candidate,omitempty"`
-	Measurements TuningMeasurements `json:"measurements,omitempty"`
-	Score        TuningScore        `json:"score,omitempty"`
+	Candidate    TuningCandidate    `json:"candidate"`
+	Measurements TuningMeasurements `json:"measurements"`
+	Score        TuningScore        `json:"score"`
 	Error        string             `json:"error,omitempty"`
 	Labels       map[string]string  `json:"labels,omitempty"`
 }
@@ -197,7 +197,7 @@ const (
 // TuningEvent lets UIs update as each candidate starts and finishes.
 type TuningEvent struct {
 	Kind      TuningEventKind   `json:"kind"`
-	Candidate TuningCandidate   `json:"candidate,omitempty"`
+	Candidate TuningCandidate   `json:"candidate"`
 	Result    *TuningResult     `json:"result,omitempty"`
 	Labels    map[string]string `json:"labels,omitempty"`
 }
@@ -205,18 +205,18 @@ type TuningEvent struct {
 // TuningProfileKey identifies a persisted winner for one machine/model/workload.
 type TuningProfileKey struct {
 	MachineHash string          `json:"machine_hash,omitempty"`
-	Runtime     RuntimeIdentity `json:"runtime,omitempty"`
-	Model       ModelIdentity   `json:"model,omitempty"`
-	Adapter     AdapterIdentity `json:"adapter,omitempty"`
+	Runtime     RuntimeIdentity `json:"runtime"`
+	Model       ModelIdentity   `json:"model"`
+	Adapter     AdapterIdentity `json:"adapter"`
 	Workload    TuningWorkload  `json:"workload,omitempty"`
 }
 
 // TuningProfile stores a proven candidate for later fast reloads.
 type TuningProfile struct {
-	Key           TuningProfileKey   `json:"key,omitempty"`
-	Candidate     TuningCandidate    `json:"candidate,omitempty"`
-	Measurements  TuningMeasurements `json:"measurements,omitempty"`
-	Score         TuningScore        `json:"score,omitempty"`
+	Key           TuningProfileKey   `json:"key"`
+	Candidate     TuningCandidate    `json:"candidate"`
+	Measurements  TuningMeasurements `json:"measurements"`
+	Score         TuningScore        `json:"score"`
 	CreatedAtUnix int64              `json:"created_at_unix,omitempty"`
 	Labels        map[string]string  `json:"labels,omitempty"`
 }
@@ -301,12 +301,12 @@ const (
 // ModelReplaceRequest compares the current runtime/model/adapter against the
 // requested replacement.
 type ModelReplaceRequest struct {
-	CurrentModel   ModelIdentity   `json:"current_model,omitempty"`
-	NextModel      ModelIdentity   `json:"next_model,omitempty"`
-	CurrentRuntime RuntimeIdentity `json:"current_runtime,omitempty"`
-	NextRuntime    RuntimeIdentity `json:"next_runtime,omitempty"`
-	CurrentAdapter AdapterIdentity `json:"current_adapter,omitempty"`
-	NextAdapter    AdapterIdentity `json:"next_adapter,omitempty"`
+	CurrentModel   ModelIdentity   `json:"current_model"`
+	NextModel      ModelIdentity   `json:"next_model"`
+	CurrentRuntime RuntimeIdentity `json:"current_runtime"`
+	NextRuntime    RuntimeIdentity `json:"next_runtime"`
+	CurrentAdapter AdapterIdentity `json:"current_adapter"`
+	NextAdapter    AdapterIdentity `json:"next_adapter"`
 }
 
 // ModelReplacePlan tells the UI whether state can be reused directly or should

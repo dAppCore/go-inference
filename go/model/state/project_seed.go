@@ -2,6 +2,8 @@
 
 package state
 
+import "maps"
+
 import core "dappco.re/go"
 
 type ProjectSeedMode string
@@ -37,10 +39,10 @@ type ProjectSeed struct {
 
 type ProjectSeedWakeOptions struct {
 	Store     any               `json:"-"`
-	Model     ModelIdentity     `json:"model,omitempty"`
-	Tokenizer TokenizerIdentity `json:"tokenizer,omitempty"`
-	Adapter   AdapterIdentity   `json:"adapter,omitempty"`
-	Runtime   RuntimeIdentity   `json:"runtime,omitempty"`
+	Model     ModelIdentity     `json:"model"`
+	Tokenizer TokenizerIdentity `json:"tokenizer"`
+	Adapter   AdapterIdentity   `json:"adapter"`
+	Runtime   RuntimeIdentity   `json:"runtime"`
 	Labels    map[string]string `json:"labels,omitempty"`
 }
 
@@ -51,11 +53,11 @@ type ProjectSeedContinuationOptions struct {
 	BundleURI string            `json:"bundle_uri,omitempty"`
 	IndexURI  string            `json:"index_uri,omitempty"`
 	Title     string            `json:"title,omitempty"`
-	Parent    WakeResult        `json:"parent,omitempty"`
-	Model     ModelIdentity     `json:"model,omitempty"`
-	Tokenizer TokenizerIdentity `json:"tokenizer,omitempty"`
-	Adapter   AdapterIdentity   `json:"adapter,omitempty"`
-	Runtime   RuntimeIdentity   `json:"runtime,omitempty"`
+	Parent    WakeResult        `json:"parent"`
+	Model     ModelIdentity     `json:"model"`
+	Tokenizer TokenizerIdentity `json:"tokenizer"`
+	Adapter   AdapterIdentity   `json:"adapter"`
+	Runtime   RuntimeIdentity   `json:"runtime"`
 	BlockSize int               `json:"block_size,omitempty"`
 	Encoding  string            `json:"encoding,omitempty"`
 	Labels    map[string]string `json:"labels,omitempty"`
@@ -64,7 +66,7 @@ type ProjectSeedContinuationOptions struct {
 
 type ProjectSeedContinuationPlan struct {
 	Mode             ProjectSeedMode `json:"mode,omitempty"`
-	Sleep            SleepRequest    `json:"sleep,omitempty"`
+	Sleep            SleepRequest    `json:"sleep"`
 	PersistState     bool            `json:"persist_state,omitempty"`
 	NeedsSummary     bool            `json:"needs_summary,omitempty"`
 	ReuseCurrentSeed bool            `json:"reuse_current_seed,omitempty"`
@@ -327,12 +329,8 @@ func mergeStringMaps(left, right map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(left)+len(right)+1)
-	for key, value := range left {
-		out[key] = value
-	}
-	for key, value := range right {
-		out[key] = value
-	}
+	maps.Copy(out, left)
+	maps.Copy(out, right)
 	return out
 }
 
@@ -341,8 +339,6 @@ func cloneStringMap(in map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
+	maps.Copy(out, in)
 	return out
 }

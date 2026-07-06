@@ -50,7 +50,7 @@ func BenchmarkMapTokenToDomain(b *testing.B) {
 func BenchmarkClassifyCorpus(b *testing.B) {
 	// 16 realistic JSONL records → two default-size (8) batches per run.
 	var sb core.Builder
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		sb.WriteString(`{"seed_id":"`)
 		sb.WriteString(core.Sprintf("%d", i))
 		sb.WriteString(`","domain":"general","prompt":"Delete the file and rebuild the project"}` + "\n")

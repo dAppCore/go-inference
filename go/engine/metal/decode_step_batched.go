@@ -227,13 +227,13 @@ func DecodeLayerBatchedKVInto(
 				directOut = true
 			}
 		}
-		for i := 0; i < K; i++ {
+		for i := range K {
 			sc.offBuf[i] = scalarI32(int32(basePos + i))
 		}
 
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-		for i := 0; i < K; i++ {
+		for i := range K {
 			xOff := uint(i * rowBytes)
 			// attention half: project q/k/v from row i, write k/v into the cache at row basePos+i,
 			// attend [0..basePos+i] (single-query, the exact per-token kernel) → h.

@@ -97,7 +97,7 @@ func BenchmarkGGUF_ReadInfo_VocabHeavy(b *testing.B) {
 	}
 	// 200 synthetic metadata string entries — proxy for tokeniser
 	// configuration + vocab marker strings.
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		metadata[core.Sprintf("synthetic.meta.%d", i)] = core.Sprintf("value-payload-%d", i)
 	}
 	path := writeBenchGGUF(b, metadata)

@@ -82,7 +82,7 @@ type Info struct {
 	QuantBits     int         `json:"quant_bits,omitempty"`
 	QuantGroup    int         `json:"quant_group,omitempty"`
 	ContextLength int         `json:"context_length,omitempty"`
-	Adapter       AdapterInfo `json:"adapter,omitempty"`
+	Adapter       AdapterInfo `json:"adapter"`
 }
 
 // AdapterInfo identifies a LoRA adapter participating in the bench run.
@@ -223,7 +223,7 @@ type PromptCacheReport struct {
 	MissTokens      int               `json:"miss_tokens,omitempty"`
 	WarmDuration    time.Duration     `json:"warm_duration,omitempty"`
 	RestoreDuration time.Duration     `json:"restore_duration,omitempty"`
-	Metrics         GenerationMetrics `json:"metrics,omitempty"`
+	Metrics         GenerationMetrics `json:"metrics"`
 	Error           string            `json:"error,omitempty"`
 }
 
@@ -253,7 +253,7 @@ type StateKVBlockWarmReport struct {
 	BreakEvenQuestions         int               `json:"break_even_questions,omitempty"`
 	RestoreSpeedup             float64           `json:"restore_speedup,omitempty"`
 	MemoryPeakBytes            uint64            `json:"memory_peak_bytes,omitempty"`
-	Metrics                    GenerationMetrics `json:"metrics,omitempty"`
+	Metrics                    GenerationMetrics `json:"metrics"`
 	Error                      string            `json:"error,omitempty"`
 }
 
@@ -288,7 +288,7 @@ type ProbeReport struct {
 	KindCounts    map[string]int    `json:"kind_counts,omitempty"`
 	Duration      time.Duration     `json:"duration,omitempty"`
 	OverheadRatio float64           `json:"overhead_ratio,omitempty"`
-	Metrics       GenerationMetrics `json:"metrics,omitempty"`
+	Metrics       GenerationMetrics `json:"metrics"`
 	Error         string            `json:"error,omitempty"`
 	Events        []any             `json:"events,omitempty"`
 }
@@ -297,8 +297,8 @@ type ProbeReport struct {
 // comparison against the baseline generation path.
 type DecodeOptimisationReport struct {
 	Attempted bool                      `json:"attempted"`
-	Result    DecodeOptimisationResult  `json:"result,omitempty"`
-	Metrics   DecodeOptimisationMetrics `json:"metrics,omitempty"`
+	Result    DecodeOptimisationResult  `json:"result"`
+	Metrics   DecodeOptimisationMetrics `json:"metrics"`
 	Error     string                    `json:"error,omitempty"`
 }
 

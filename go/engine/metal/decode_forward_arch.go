@@ -597,13 +597,7 @@ func (s *archDecodeState) reloadDevicePagedKVFromLinear(position int) error {
 			return core.NewError("native.archDecodeState.reloadDevicePagedKVFromLinear: cache size mismatch")
 		}
 		rows := cacheBytes / rowBytes
-		tokens := position
-		if tokens > rows {
-			tokens = rows
-		}
-		if tokens < 0 {
-			tokens = 0
-		}
+		tokens := max(min(position, rows), 0)
 		s.lb[li].cacheKVContents()
 		if err := cache.loadLinearSnapshot(unsafe.Slice(s.lb[li].kCachePtr, cacheBytes), unsafe.Slice(s.lb[li].vCachePtr, cacheBytes), tokens); err != nil {
 			return err
@@ -668,10 +662,7 @@ func (s *archDecodeState) syncLinearKVFromDevicePaged(position int) error {
 		if position > cache.length {
 			return core.NewError("native.archDecodeState.syncLinearKVFromDevicePaged: page cache shorter than position")
 		}
-		start := cache.linearSynced
-		if start > position {
-			start = position
-		}
+		start := min(cache.linearSynced, position)
 		if start == position {
 			continue
 		}
@@ -1096,7 +1087,7 @@ func newArchDecodeState(specs []model.LayerSpec, lb []archLayerBufs, moeWeights 
 // Debug-path only (the readback forces a commit+wait).
 func bufMaxAbsNaN(buf metal.MTLBuffer, dModel int) (maxAbs float32, bad int) {
 	b := unsafe.Slice((*byte)(buf.Contents()), dModel*bf16Size)
-	for i := 0; i < dModel; i++ {
+	for i := range dModel {
 		v := bf16ToF32(b[i*bf16Size], b[i*bf16Size+1])
 		if v != v || v > 3.0e38 || v < -3.0e38 { // NaN or Inf-scale
 			bad++

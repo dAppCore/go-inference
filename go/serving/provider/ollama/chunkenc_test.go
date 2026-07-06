@@ -157,7 +157,7 @@ func TestChunkenc_tagsResponseSize_Bad(t *testing.T) {
 // through the same round-trip contract as the other Ugly cases.
 func TestChunkenc_tagsResponseSize_Ugly(t *testing.T) {
 	var resp TagsResponse
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		resp.Models = append(resp.Models, ModelTag{
 			Name:       "モデル:latest",
 			Model:      "モデル",

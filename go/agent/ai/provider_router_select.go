@@ -296,7 +296,7 @@ func tiePositions(candidates []Endpoint) []int {
 	positions := make([]int, len(candidates))
 	for i := range candidates {
 		positions[i] = i
-		for j := 0; j < i; j++ {
+		for j := range i {
 			if sameEndpointKey(candidates[j], candidates[i]) {
 				positions[i] = j
 				break

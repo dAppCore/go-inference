@@ -184,7 +184,7 @@ func TestLayerNormBF16LoopedAxis(t *testing.T) {
 
 func hostLayerNormF32(x, weight, bias []float32, rows, axisSize int, eps float32) []float32 {
 	out := make([]float32, len(x))
-	for r := 0; r < rows; r++ {
+	for r := range rows {
 		row := x[r*axisSize : (r+1)*axisSize]
 		var mean float64
 		for _, v := range row {

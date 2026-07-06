@@ -33,22 +33,22 @@ func Conv2dBF16(in, weight []byte, N, H, W, inC, outC, kh, kw, strideH, strideW,
 		}
 		return o
 	}
-	for n := 0; n < N; n++ {
-		for oh := 0; oh < outH; oh++ {
-			for ow := 0; ow < outW; ow++ {
-				for oc := 0; oc < outC; oc++ {
+	for n := range N {
+		for oh := range outH {
+			for ow := range outW {
+				for oc := range outC {
 					var acc float32
-					for r := 0; r < kh; r++ {
+					for r := range kh {
 						ih := oh*strideH - padH + r
 						if ih < 0 || ih >= H {
 							continue
 						}
-						for c := 0; c < kw; c++ {
+						for c := range kw {
 							iw := ow*strideW - padW + c
 							if iw < 0 || iw >= W {
 								continue
 							}
-							for ic := 0; ic < inC; ic++ {
+							for ic := range inC {
 								acc += inF[idx(n, N, ih, H, iw, W, ic, inC)] * wF[idx(oc, outC, r, kh, c, kw, ic, inC)]
 							}
 						}
@@ -79,18 +79,18 @@ func Conv2dF32(in, weight []float32, N, H, W, inC, outC, kh, kw, strideH, stride
 	outW := (W+2*padW-kw)/strideW + 1
 	K := kh * kw * inC
 	out := make([]float32, N*outH*outW*outC)
-	for n := 0; n < N; n++ {
+	for n := range N {
 		// unfold: [outH·outW, kh·kw·inC], K index = (r·kw + c)·inC + ic.
 		unfolded := make([]float32, outH*outW*K)
-		for oh := 0; oh < outH; oh++ {
-			for ow := 0; ow < outW; ow++ {
+		for oh := range outH {
+			for ow := range outW {
 				m := oh*outW + ow
-				for r := 0; r < kh; r++ {
+				for r := range kh {
 					ih := oh*strideH - padH + r
 					if ih < 0 || ih >= H {
 						continue
 					}
-					for c := 0; c < kw; c++ {
+					for c := range kw {
 						iw := ow*strideW - padW + c
 						if iw < 0 || iw >= W {
 							continue

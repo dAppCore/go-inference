@@ -31,8 +31,8 @@ type Profile struct {
 	Family       string                  `json:"family,omitempty"`
 	Architecture string                  `json:"architecture,omitempty"`
 	Registry     string                  `json:"registry,omitempty"`
-	Model        inference.ModelIdentity `json:"model,omitempty"`
-	RouteSet     RouteSet                `json:"route_set,omitempty"`
+	Model        inference.ModelIdentity `json:"model"`
+	RouteSet     RouteSet                `json:"route_set"`
 	Labels       map[string]string       `json:"labels,omitempty"`
 }
 

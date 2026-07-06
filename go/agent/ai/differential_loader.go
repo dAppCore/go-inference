@@ -20,9 +20,9 @@ const (
 // DifferentialLoadRequest captures the model relationship the inference stack needs to
 // reason about without importing a concrete backend.
 type DifferentialLoadRequest struct {
-	Base        inference.ModelIdentity      `json:"base,omitempty"`
-	Tuned       inference.ModelIdentity      `json:"tuned,omitempty"`
-	Adapter     inference.AdapterIdentity    `json:"adapter,omitempty"`
+	Base        inference.ModelIdentity      `json:"base"`
+	Tuned       inference.ModelIdentity      `json:"tuned"`
+	Adapter     inference.AdapterIdentity    `json:"adapter"`
 	PreferSplit bool                         `json:"prefer_split,omitempty"`
 	SplitMode   inference.SplitInferenceMode `json:"split_mode,omitempty"`
 	Endpoints   []inference.SplitEndpoint    `json:"endpoints,omitempty"`
@@ -33,11 +33,11 @@ type DifferentialLoadRequest struct {
 // loading base and fine-tuned models for comparison.
 type DifferentialLoadPlan struct {
 	Action     DifferentialLoadAction        `json:"action"`
-	Base       inference.ModelIdentity       `json:"base,omitempty"`
-	Tuned      inference.ModelIdentity       `json:"tuned,omitempty"`
-	Adapter    inference.AdapterIdentity     `json:"adapter,omitempty"`
-	BaseSlice  inference.ModelSlicePlan      `json:"base_slice,omitempty"`
-	TunedSlice inference.ModelSlicePlan      `json:"tuned_slice,omitempty"`
+	Base       inference.ModelIdentity       `json:"base"`
+	Tuned      inference.ModelIdentity       `json:"tuned"`
+	Adapter    inference.AdapterIdentity     `json:"adapter"`
+	BaseSlice  inference.ModelSlicePlan      `json:"base_slice"`
+	TunedSlice inference.ModelSlicePlan      `json:"tuned_slice"`
 	Split      *inference.SplitInferencePlan `json:"split,omitempty"`
 	Compare    bool                          `json:"compare,omitempty"`
 	Labels     map[string]string             `json:"labels,omitempty"`

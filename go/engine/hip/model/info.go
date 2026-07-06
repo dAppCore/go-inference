@@ -31,8 +31,8 @@ type ModelInfoReport struct {
 	Source       string                  `json:"source,omitempty"`
 	Path         string                  `json:"path,omitempty"`
 	Architecture string                  `json:"architecture,omitempty"`
-	Info         inference.ModelInfo     `json:"info,omitempty"`
-	Identity     inference.ModelIdentity `json:"identity,omitempty"`
+	Info         inference.ModelInfo     `json:"info"`
+	Identity     inference.ModelIdentity `json:"identity"`
 	Labels       map[string]string       `json:"labels,omitempty"`
 }
 

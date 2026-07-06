@@ -41,13 +41,13 @@ func CausalConv1dF32(in, weight, bias, prior []float32, L, convDim, K int) (out,
 		return float64(in[(r-pad)*convDim+ch])
 	}
 	out = make([]float32, L*convDim)
-	for t := 0; t < L; t++ {
-		for ch := 0; ch < convDim; ch++ {
+	for t := range L {
+		for ch := range convDim {
 			acc := 0.0
 			if bias != nil {
 				acc = float64(bias[ch])
 			}
-			for k := 0; k < K; k++ {
+			for k := range K {
 				acc += float64(weight[ch*K+k]) * get(t+k, ch) // weight[K-1] hits padded[t+K-1] = current input
 			}
 			out[t*convDim+ch] = float32(acc)
@@ -55,8 +55,8 @@ func CausalConv1dF32(in, weight, bias, prior []float32, L, convDim, K int) (out,
 	}
 	// the next chunk's ring = the last K-1 inputs = padded rows [L .. L+pad-1].
 	newState = make([]float32, pad*convDim)
-	for r := 0; r < pad; r++ {
-		for ch := 0; ch < convDim; ch++ {
+	for r := range pad {
+		for ch := range convDim {
 			newState[r*convDim+ch] = float32(get(L+r, ch))
 		}
 	}

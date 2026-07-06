@@ -79,7 +79,6 @@ func Test_Selector_NormaliseKey_AllocBudget(t *testing.T) {
 		{"needs-replace", "Qwen-3.5", 1},
 	}
 	for _, c := range cases {
-		c := c
 		t.Run(c.name, func(t *testing.T) {
 			allocs := testing.AllocsPerRun(100, func() {
 				selectorBenchKey = NormaliseKey(c.input)
@@ -196,7 +195,7 @@ func Benchmark_Selector_IndexString_HitEarly(b *testing.B) {
 func Benchmark_Selector_IndexString_HitLate(b *testing.B) {
 	// 256 bytes of filler + the substring at the tail.
 	filler := ""
-	for i := 0; i < 64; i++ {
+	for range 64 {
 		filler += "word"
 	}
 	text := filler + "<think>"
@@ -210,7 +209,7 @@ func Benchmark_Selector_IndexString_HitLate(b *testing.B) {
 
 func Benchmark_Selector_IndexString_Miss(b *testing.B) {
 	filler := ""
-	for i := 0; i < 64; i++ {
+	for range 64 {
 		filler += "word"
 	}
 	text := filler
@@ -246,7 +245,7 @@ func Benchmark_Selector_IndexString_SubstrLongerThanText(b *testing.B) {
 // for a marker that never appears.
 func Benchmark_Selector_IndexString_Miss_2048bytes(b *testing.B) {
 	filler := ""
-	for i := 0; i < 512; i++ {
+	for range 512 {
 		filler += "word"
 	}
 	text := filler

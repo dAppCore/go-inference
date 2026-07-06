@@ -3,6 +3,7 @@ package inference
 import (
 	"context"
 	"iter"
+	"maps"
 	"slices"
 	"sync" // Note: test-only
 	"testing"
@@ -169,10 +170,7 @@ func TestInference_All_Good(t *testing.T) {
 	Register(&stubBackend{name: "a", available: true})
 	Register(&stubBackend{name: "b", available: true})
 
-	found := map[string]Backend{}
-	for name, b := range All() {
-		found[name] = b
-	}
+	found := maps.Collect(All())
 
 	checkLen(t, found, 2)
 	checkContains(t, found, "a")

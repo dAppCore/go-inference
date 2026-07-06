@@ -75,10 +75,7 @@ func NewFFNMemoryBank(cfg FFNMemoryConfig) (*FFNMemoryBank, error) {
 		for levelID := range cfg.MemoryLevels {
 			tokens := cfg.FFNMemoryTokens[levelID]
 			if cfg.LinearRampMemories {
-				tokens = int(math.Floor(2 * float64(tokens) * float64(layerID+1) / float64(cfg.Layers)))
-				if tokens < 1 {
-					tokens = 1
-				}
+				tokens = max(int(math.Floor(2*float64(tokens)*float64(layerID+1)/float64(cfg.Layers))), 1)
 			}
 			clusters := cfg.NumClusters[levelID]
 			totalClusters := clusters + cfg.AddedGenericSize

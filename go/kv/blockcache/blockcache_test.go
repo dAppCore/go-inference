@@ -506,13 +506,13 @@ func TestBlockcache_Service_WarmCache_Good(t *testing.T) {
 
 		var wg sync.WaitGroup
 		errs := make(chan error, goroutines*iterations)
-		for g := 0; g < goroutines; g++ {
+		for g := range goroutines {
 			wg.Add(1)
 			go func(g int) {
 				defer wg.Done()
 				service := New(cfg)
 				tokens := tokenSets[g]
-				for it := 0; it < iterations; it++ {
+				for range iterations {
 					result, err := service.WarmCache(context.Background(), inference.CacheWarmRequest{Tokens: tokens})
 					if err != nil {
 						errs <- core.NewError("WarmCache error in goroutine")
@@ -833,7 +833,7 @@ func TestBlockcache_HashModelParts_Ugly(t *testing.T) {
 	}
 	// A large, mixed argument list must not panic and must stay 64-char hex.
 	big := make([]any, 0, 1024)
-	for i := 0; i < 512; i++ {
+	for i := range 512 {
 		big = append(big, i, "part")
 	}
 	if got := HashModelParts(big...); len(got) != 64 {

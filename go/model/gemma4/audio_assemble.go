@@ -188,10 +188,10 @@ func audioConv2dToOHWI(t safetensors.Tensor) ([]byte, error) {
 		return nil, core.NewError("gemma4.AssembleAudio: conv2d byte length mismatch")
 	}
 	out := make([]byte, len(t.Data))
-	for oc := 0; oc < outC; oc++ {
-		for ic := 0; ic < inC; ic++ {
-			for y := 0; y < kh; y++ {
-				for x := 0; x < kw; x++ {
+	for oc := range outC {
+		for ic := range inC {
+			for y := range kh {
+				for x := range kw {
 					src := (((oc*inC+ic)*kh+y)*kw + x) * 2
 					dst := (((oc*kh+y)*kw+x)*inC + ic) * 2
 					copy(out[dst:dst+2], t.Data[src:src+2])
@@ -214,8 +214,8 @@ func audioDepthwiseToNLC(t safetensors.Tensor) ([]byte, error) {
 	case t.Shape[1] == 1:
 		k := t.Shape[2]
 		out := make([]byte, ch*k*2)
-		for c := 0; c < ch; c++ {
-			for i := 0; i < k; i++ {
+		for c := range ch {
+			for i := range k {
 				src := ((c*t.Shape[1]+0)*k + i) * 2
 				dst := (c*k + i) * 2
 				copy(out[dst:dst+2], t.Data[src:src+2])
@@ -225,8 +225,8 @@ func audioDepthwiseToNLC(t safetensors.Tensor) ([]byte, error) {
 	case t.Shape[2] == 1:
 		k := t.Shape[1]
 		out := make([]byte, ch*k*2)
-		for c := 0; c < ch; c++ {
-			for i := 0; i < k; i++ {
+		for c := range ch {
+			for i := range k {
 				src := ((c*k+i)*t.Shape[2] + 0) * 2
 				dst := (c*k + i) * 2
 				copy(out[dst:dst+2], t.Data[src:src+2])
@@ -258,10 +258,10 @@ func audioPositionTable(count, hidden int) []float32 {
 	half := hidden / 2
 	logIncrement := math.Log(10000.0) / float64(max(half-1, 1))
 	vals := make([]float32, count*hidden)
-	for p := 0; p < count; p++ {
+	for p := range count {
 		position := float64(count - 1 - p)
 		row := p * hidden
-		for i := 0; i < half; i++ {
+		for i := range half {
 			scaled := position * math.Exp(float64(i)*-logIncrement)
 			vals[row+i] = float32(math.Sin(scaled))
 			vals[row+half+i] = float32(math.Cos(scaled))

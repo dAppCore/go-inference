@@ -83,7 +83,7 @@ type SpeculativeConfig struct {
 	Prompt         string         `json:"prompt,omitempty"`
 	MaxTokens      int            `json:"max_tokens,omitempty"`
 	DraftTokens    int            `json:"draft_tokens,omitempty"`
-	GenerateConfig GenerateConfig `json:"generate_config,omitempty"`
+	GenerateConfig GenerateConfig `json:"generate_config"`
 	TargetGenerate Generator      `json:"-"`
 	DraftGenerate  Generator      `json:"-"`
 }
@@ -94,7 +94,7 @@ type SpeculativeConfig struct {
 type PromptLookupConfig struct {
 	Prompt         string         `json:"prompt,omitempty"`
 	MaxTokens      int            `json:"max_tokens,omitempty"`
-	GenerateConfig GenerateConfig `json:"generate_config,omitempty"`
+	GenerateConfig GenerateConfig `json:"generate_config"`
 	TargetGenerate Generator      `json:"-"`
 	LookupTokens   []Token        `json:"lookup_tokens,omitempty"`
 }

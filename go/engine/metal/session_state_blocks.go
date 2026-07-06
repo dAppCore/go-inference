@@ -196,7 +196,7 @@ func (s *ArchSession) RangeStateBlocksFrom(startToken, blockSize int, yield func
 		return err
 	}
 	layers := s.stateBlockLayerScratch(len(views))
-	for i := 0; i < blockCount; i++ {
+	for i := range blockCount {
 		block, err := fillStateBlockFromBoundaries(firstBlock+i, boundaries, s.pos, views, layers)
 		if err != nil {
 			return err
@@ -319,7 +319,7 @@ func (s *ArchSession) validateStateBlockTrustedPrefix(source SessionStateBlockSo
 	if len(s.cachedIDs) < trustedPrefix {
 		return core.NewError("native.RestoreStateBlocks: trusted prefix resident ids missing")
 	}
-	for i := 0; i < trustedPrefix; i++ {
+	for i := range trustedPrefix {
 		if s.cachedIDs[i] != source.CachedIDs[i] {
 			return core.NewError("native.RestoreStateBlocks: trusted prefix ids mismatch")
 		}
@@ -355,10 +355,7 @@ func fillStateBlock(index, blockSize, blockCount, position int, views []sessionS
 	if start >= position {
 		return SessionStateBlock{}, core.NewError("native.StateBlockSource.Load: block start outside position")
 	}
-	end := start + blockSize
-	if end > position {
-		end = position
-	}
+	end := min(start+blockSize, position)
 	return fillStateBlockSpan(index, start, end, position, views, layers)
 }
 
@@ -431,7 +428,7 @@ func stateBlockLayerBytes(view sessionStateLayerView, start, tokenCount, positio
 	}
 	keyBytes := make([]byte, n)
 	valueBytes := make([]byte, n)
-	for t := 0; t < tokenCount; t++ {
+	for t := range tokenCount {
 		slot := (start + t) % view.cacheRows
 		src := slot * view.rowBytes
 		dst := t * view.rowBytes
@@ -538,7 +535,7 @@ func restoreStateBlockLayer(view sessionStateLayerView, start, tokenCount, posit
 	if start < position-view.cacheRows {
 		return core.NewError("native.RestoreStateBlocks: block starts before sliding cache window")
 	}
-	for t := 0; t < tokenCount; t++ {
+	for t := range tokenCount {
 		slot := (start + t) % view.cacheRows
 		dst := slot * view.rowBytes
 		src := t * view.rowBytes
@@ -696,10 +693,7 @@ func (s *ArchSession) reloadPagedStateLayerViews(position int, views []sessionSt
 		if cache == nil {
 			continue
 		}
-		tokens := position
-		if tokens > views[i].cacheRows {
-			tokens = views[i].cacheRows
-		}
+		tokens := min(position, views[i].cacheRows)
 		if err := cache.loadLinearSnapshot(views[i].keyBytes, views[i].valueBytes, tokens); err != nil {
 			return err
 		}

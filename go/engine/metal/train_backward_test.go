@@ -72,13 +72,13 @@ func TestRMSNormBackwardF32(t *testing.T) {
 
 	forward := func(x, g []float32) []float32 {
 		y := make([]float32, rows*n)
-		for r := 0; r < rows; r++ {
+		for r := range rows {
 			var ss float64
-			for i := 0; i < n; i++ {
+			for i := range n {
 				ss += float64(x[r*n+i]) * float64(x[r*n+i])
 			}
 			rms := math.Sqrt(ss/float64(n) + float64(eps))
-			for i := 0; i < n; i++ {
+			for i := range n {
 				y[r*n+i] = float32(float64(g[i]) * float64(x[r*n+i]) / rms)
 			}
 		}
@@ -127,7 +127,7 @@ func TestGeluGateMulBackwardF32(t *testing.T) {
 
 	loss := func(gate, up []float32) float64 {
 		var s float64
-		for i := 0; i < n; i++ {
+		for i := range n {
 			s += geluTanh(float64(gate[i])) * float64(up[i]) * float64(dgated[i])
 		}
 		return s
@@ -244,7 +244,7 @@ func TestSoftmaxBackwardF32(t *testing.T) {
 
 	softmax := func(x []float32) []float32 {
 		y := make([]float32, rows*n)
-		for r := 0; r < rows; r++ {
+		for r := range rows {
 			xr, yr := x[r*n:(r+1)*n], y[r*n:(r+1)*n]
 			mx := xr[0]
 			for _, v := range xr {
@@ -305,9 +305,9 @@ func TestRoPEBackwardF32(t *testing.T) {
 	forward := func(x []float32) []float32 {
 		y := make([]float32, len(x))
 		copy(y, x)
-		for head := 0; head < nHeads; head++ {
+		for head := range nHeads {
 			off := head * headDim
-			for j := 0; j < h; j++ {
+			for j := range h {
 				invFreq := math.Pow(float64(base), -2*float64(j)/float64(rotaryDim))
 				ang := float64(pos) * invFreq
 				c, s := math.Cos(ang), math.Sin(ang)
@@ -364,7 +364,7 @@ func TestAttnSingleHeadBackwardF32(t *testing.T) {
 			t.Fatal(err)
 		}
 		p := make([]float32, L*L)
-		for i := 0; i < L; i++ {
+		for i := range L {
 			mx := float32(math.Inf(-1))
 			for j := 0; j <= i; j++ {
 				s[i*L+j] *= scale
@@ -454,7 +454,7 @@ func TestAttnBlockBackwardF32(t *testing.T) {
 		}
 		qr := make([]float32, L*d)
 		kr := make([]float32, L*d)
-		for i := 0; i < L; i++ {
+		for i := range L {
 			copy(qr[i*d:(i+1)*d], ropeForwardF32(q[i*d:(i+1)*d], i, 1, d, rotaryDim, base))
 			copy(kr[i*d:(i+1)*d], ropeForwardF32(k[i*d:(i+1)*d], i, 1, d, rotaryDim, base))
 		}
@@ -536,7 +536,7 @@ func TestMultiHeadAttnBackwardF32(t *testing.T) {
 	}
 	loss := func() float64 {
 		var s float64
-		for h := 0; h < H; h++ {
+		for h := range H {
 			hk := h / gqa
 			o := headSDPA(gatherHeadF32(q, L, H, d, h), gatherHeadF32(k, L, Hkv, d, hk), gatherHeadF32(v, L, Hkv, d, hk))
 			doh := gatherHeadF32(dOut, L, H, d, h)
@@ -582,14 +582,14 @@ func TestQKNormBackwardF32(t *testing.T) {
 
 	forward := func(x, normW []float32) []float32 {
 		y := make([]float32, L*H*d)
-		for hr := 0; hr < L*H; hr++ { // each head-row is one d-vector
+		for hr := range L * H { // each head-row is one d-vector
 			xr := x[hr*d : (hr+1)*d]
 			var ss float64
-			for i := 0; i < d; i++ {
+			for i := range d {
 				ss += float64(xr[i]) * float64(xr[i])
 			}
 			rms := math.Sqrt(ss/float64(d) + float64(eps))
-			for i := 0; i < d; i++ {
+			for i := range d {
 				y[hr*d+i] = float32(float64(normW[i]) * float64(xr[i]) / rms)
 			}
 		}
@@ -658,7 +658,7 @@ func TestMultiHeadAttnBlockBackwardF32(t *testing.T) {
 			t.Fatal(err)
 		}
 		qr, kr := make([]float32, L*qDim), make([]float32, L*kvDim)
-		for i := 0; i < L; i++ {
+		for i := range L {
 			copy(qr[i*qDim:(i+1)*qDim], ropeForwardF32(q[i*qDim:(i+1)*qDim], i, H, d, rotaryDim, base))
 			copy(kr[i*kvDim:(i+1)*kvDim], ropeForwardF32(k[i*kvDim:(i+1)*kvDim], i, Hkv, d, rotaryDim, base))
 		}

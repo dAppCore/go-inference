@@ -281,7 +281,7 @@ func TestJsonl_JSONLDataset_Next_Ugly(t *testing.T) {
 	if _, ok, _ := ds.Next(); !ok {
 		t.Fatal("first Next() ok = false, want the single record")
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		got, ok, err := ds.Next()
 		if ok || err != nil {
 			t.Fatalf("Next() past end #%d = ok %v err %v, want false,nil", i, ok, err)

@@ -382,7 +382,7 @@ func TestRealE2BWithinLayerOpCost(t *testing.T) {
 	// time ONE ICB op (range [op,op+1)) as its own command buffer; min over iters = the cleanest GPU span.
 	timeOp := func(op uint, iters int) float64 {
 		minNs := math.MaxFloat64
-		for i := 0; i < iters; i++ {
+		for range iters {
 			var ns float64
 			withAutoreleasePool(func() {
 				cb := queue.CommandBuffer()

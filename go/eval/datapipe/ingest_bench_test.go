@@ -43,7 +43,7 @@ func BenchmarkToFloat64_String(b *testing.B) {
 func buildContentScoresFixture(b *testing.B, lines int) string {
 	b.Helper()
 	var sb core.Builder
-	for i := 0; i < lines; i++ {
+	for i := range lines {
 		sb.WriteString(`{"label":"gemma4-lek@`)
 		sb.WriteString(core.Itoa(i))
 		sb.WriteString(`","aggregates":{"clarity":8.5,"depth":7.25,"tone":9.0,"accuracy":6.75},`)
@@ -59,7 +59,7 @@ func buildContentScoresFixture(b *testing.B, lines int) string {
 func buildCapabilityScoresFixture(b *testing.B, lines int) string {
 	b.Helper()
 	var sb core.Builder
-	for i := 0; i < lines; i++ {
+	for i := range lines {
 		sb.WriteString(`{"label":"gemma4-lek@`)
 		sb.WriteString(core.Itoa(i))
 		sb.WriteString(`","accuracy":0.85,"correct":85,"total":100,`)
@@ -75,7 +75,7 @@ func buildCapabilityScoresFixture(b *testing.B, lines int) string {
 func buildTrainingLogFixture(b *testing.B, lines int) string {
 	b.Helper()
 	var sb core.Builder
-	for i := 0; i < lines; i++ {
+	for i := range lines {
 		sb.WriteString("Iter ")
 		sb.WriteString(core.Itoa(i))
 		sb.WriteString(": Train loss 0.523, Learning Rate 1.0e-05, It/sec 2.15, Tokens/sec 30.42\n")

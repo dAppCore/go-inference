@@ -5,6 +5,8 @@
 package native
 
 import (
+	"slices"
+
 	g4 "dappco.re/go/inference/model/gemma4"
 	"encoding/binary"
 	"sort"
@@ -2643,8 +2645,8 @@ func TestAssistantDraftGreedyTokenSuppressesIDs(t *testing.T) {
 func nativeAssistantProjectionFixture(out, in int) []float32 {
 	weights := make([]float32, out*in)
 	palette := []float32{-0.5, -0.25, 0, 0.25, 0.5}
-	for o := 0; o < out; o++ {
-		for k := 0; k < in; k++ {
+	for o := range out {
+		for k := range in {
 			weights[o*in+k] = palette[(o*3+k*2)%len(palette)]
 		}
 	}
@@ -2654,10 +2656,10 @@ func nativeAssistantProjectionFixture(out, in int) []float32 {
 func nativeAssistantMatMulBF16NTReference(a, w []byte, m, k, n int) []float32 {
 	af, wf := bf16Floats(a), bf16Floats(w)
 	out := make([]float32, m*n)
-	for row := 0; row < m; row++ {
-		for col := 0; col < n; col++ {
+	for row := range m {
+		for col := range n {
 			var sum float32
-			for inner := 0; inner < k; inner++ {
+			for inner := range k {
 				sum += af[row*k+inner] * wf[col*k+inner]
 			}
 			h := f32ToBF16(sum)
@@ -2688,7 +2690,7 @@ func nativeAssistantWrongToken(want int32) int32 {
 
 func nativeAssistantQuantEmbeddingFixture(vocab, dModel, groupSize int) ([]byte, []byte, []byte) {
 	packed := make([]byte, vocab*dModel/2)
-	for row := 0; row < vocab; row++ {
+	for row := range vocab {
 		for col := 0; col < dModel; col += 2 {
 			lo := byte((row + col) & 0x0F)
 			hi := byte((row + col + 1) & 0x0F)
@@ -2878,7 +2880,7 @@ func nativeAssistantTinyTensors(includeOrdered bool) map[string]safetensors.Tens
 		bf("masked_embedding.centroids.weight", 2, 4)
 		tensors["masked_embedding.token_ordering"] = safetensors.Tensor{Dtype: "I64", Shape: []int{8}, Data: make([]byte, 8*8)}
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		p := core.Sprintf("model.layers.%d", i)
 		bf(p+".input_layernorm.weight", 4)
 		bf(p+".post_attention_layernorm.weight", 4)
@@ -3082,7 +3084,7 @@ func nativeAssistantGGUFNameForTest(t *testing.T, hf string) string {
 		"ffn_down.weight",
 		"layer_output_scale.weight",
 	}
-	for layer := 0; layer < 4; layer++ {
+	for layer := range 4 {
 		for _, leaf := range leaves {
 			name := core.Sprintf("blk.%d.%s", layer, leaf)
 			mapped := g4.AssistantGGUFWeightName(name)
@@ -3283,9 +3285,9 @@ func nativeAssistantPromptWhoseFirstTargetTokenIsNot(t testing.TB, mk func() *Ar
 func nativeAssistantPromptWithAcceptedFirstDraft(t testing.TB, pair *AssistantPair, mk func() *ArchSession) []int32 {
 	t.Helper()
 	const fixtureVocab = 8
-	for a := int32(0); a < fixtureVocab; a++ {
-		for b := int32(0); b < fixtureVocab; b++ {
-			for c := int32(0); c < fixtureVocab; c++ {
+	for a := range int32(fixtureVocab) {
+		for b := range int32(fixtureVocab) {
+			for c := range int32(fixtureVocab) {
 				prompt := []int32{a, b, c}
 				target := mk()
 				if err := target.prepareAssistantPrompt(prompt); err != nil {
@@ -3403,13 +3405,7 @@ func nativeAssistantPromptWhoseTargetTokensAvoid(t testing.TB, mk func() *ArchSe
 		if err != nil {
 			t.Fatalf("reference Generate(%v): %v", prompt, err)
 		}
-		avoids := true
-		for _, id := range got {
-			if id == excluded {
-				avoids = false
-				break
-			}
-		}
+		avoids := !slices.Contains(got, excluded)
 		if avoids {
 			return prompt
 		}
@@ -3421,9 +3417,9 @@ func nativeAssistantPromptWhoseTargetTokensAvoid(t testing.TB, mk func() *ArchSe
 func nativeAssistantPromptWhoseTargetTokensStartThenAvoid(t testing.TB, mk func() *ArchSession, first, excluded int32, maxNew int) []int32 {
 	t.Helper()
 	const fixtureVocab = 8
-	for a := int32(0); a < fixtureVocab; a++ {
-		for b := int32(0); b < fixtureVocab; b++ {
-			for c := int32(0); c < fixtureVocab; c++ {
+	for a := range int32(fixtureVocab) {
+		for b := range int32(fixtureVocab) {
+			for c := range int32(fixtureVocab) {
 				prompt := []int32{a, b, c}
 				got, err := mk().Generate(prompt, maxNew, -1)
 				if err != nil {
@@ -3432,13 +3428,7 @@ func nativeAssistantPromptWhoseTargetTokensStartThenAvoid(t testing.TB, mk func(
 				if len(got) == 0 || got[0] != first {
 					continue
 				}
-				avoids := true
-				for _, id := range got[1:] {
-					if id == excluded {
-						avoids = false
-						break
-					}
-				}
+				avoids := !slices.Contains(got[1:], excluded)
 				if avoids {
 					return prompt
 				}
@@ -3465,7 +3455,7 @@ func nativeAssistantSampledVerifierRejectFixture(t testing.TB, mk func() *ArchSe
 			t.Fatalf("reference Generate(%v): %v", prompt, err)
 		}
 		for seed := uint64(1); seed <= 64; seed++ {
-			for draft := int32(0); draft < 8; draft++ {
+			for draft := range int32(8) {
 				probe := mk()
 				if err := probe.PrefillTokens(prompt); err != nil {
 					t.Fatalf("PrefillTokens(%v): %v", prompt, err)
@@ -3502,8 +3492,8 @@ func nativeAssistantSessionTargetArchForTest() model.Arch {
 
 func nativeAssistantSessionRowsForTest(rows, rowBytes int, seed byte) []byte {
 	out := make([]byte, rows*rowBytes)
-	for row := 0; row < rows; row++ {
-		for col := 0; col < rowBytes; col++ {
+	for row := range rows {
+		for col := range rowBytes {
 			out[row*rowBytes+col] = seed + byte(row+col)
 		}
 	}
@@ -3513,8 +3503,8 @@ func nativeAssistantSessionRowsForTest(rows, rowBytes int, seed byte) []byte {
 func nativeAssistantSessionKVRowsForTest(tokens, kvHeads, headDim int, seed byte) []byte {
 	rowBytes := kvHeads * headDim * bf16Size
 	out := make([]byte, tokens*rowBytes)
-	for token := 0; token < tokens; token++ {
-		for head := 0; head < kvHeads; head++ {
+	for token := range tokens {
+		for head := range kvHeads {
 			out[token*rowBytes+head*headDim*bf16Size] = seed + byte(token*0x10+head)
 		}
 	}

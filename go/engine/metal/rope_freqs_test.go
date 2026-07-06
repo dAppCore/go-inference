@@ -259,7 +259,7 @@ func TestGlobalRopePeriodsFromFolded_MatchesRawSpectrum_Good(t *testing.T) {
 	if len(got) != headDim/2 || len(want) != headDim/2 {
 		t.Fatalf("period length = %d/%d, want %d", len(got), len(want), headDim/2)
 	}
-	for i := 0; i < rotaryDim/2; i++ {
+	for i := range rotaryDim / 2 {
 		exact := float32(math.Pow(rawBase, float64(2*i)/float64(headDim)))
 		if rel := math.Abs(float64(got[i]-exact)) / float64(exact); rel > 1e-5 {
 			t.Fatalf("period[%d] = %g, want %g (rel %.2e) — folded base leaked into the raw spectrum", i, got[i], exact, rel)

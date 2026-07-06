@@ -122,14 +122,8 @@ type policyState struct {
 //
 //	p := residency.New(residency.Policy{Device: "local-gpu", BudgetBytes: 16<<30, ConcurrentCap: 4})
 func New(cfg Policy) *Manager {
-	budget := cfg.BudgetBytes
-	if budget < 0 {
-		budget = 0
-	}
-	capN := cfg.ConcurrentCap
-	if capN < 0 {
-		capN = 0
-	}
+	budget := max(cfg.BudgetBytes, 0)
+	capN := max(cfg.ConcurrentCap, 0)
 	m := &Manager{policyState{
 		budget: budget,
 		cap:    capN,

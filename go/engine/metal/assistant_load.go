@@ -1497,10 +1497,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 	lowAcceptStreak := 0
 	for len(result.Tokens) < maxNew && !stopped {
 		remaining := maxNew - len(result.Tokens)
-		blockSize := draftTokens
-		if blockSize > remaining {
-			blockSize = remaining
-		}
+		blockSize := min(draftTokens, remaining)
 		draft, err := pair.draftBlockFromSessionWithSuppress(target, lastToken, blockSize, false, suppress)
 		if err != nil {
 			return result, err
@@ -1634,10 +1631,7 @@ func (pair *AssistantPair) GenerateSampledFromSessionEach(target *ArchSession, p
 	defer func() { target.sampleHistory = finalHistory }()
 	for len(result.Tokens) < maxNew && !stopped {
 		remaining := maxNew - len(result.Tokens)
-		blockSize := draftTokens
-		if blockSize > remaining {
-			blockSize = remaining
-		}
+		blockSize := min(draftTokens, remaining)
 		pickParams := target.mtpSamplePickParams(params, stopTokens, len(result.Tokens))
 		draft, err := pair.draftBlockSampledFromSessionWithSuppress(target, lastToken, blockSize, false, pickParams, draftSampler)
 		if err != nil {
@@ -2079,10 +2073,7 @@ func (m *AssistantModel) draftAttentionIntoScratch(out []byte, layerIdx int, hid
 	// position_ids = input_ids.shape[1]-1, never advanced across draft steps) — NOT the
 	// KV capture-window start. Offset+Length-1 equals it for both stream types (full:
 	// 0+pos-1; sliding: windowStart+count-1).
-	qPos := targetKV.Offset + targetKV.Length - 1
-	if qPos < 0 {
-		qPos = 0
-	}
+	qPos := max(targetKV.Offset+targetKV.Length-1, 0)
 	q, err = nativeAssistantRoPEInto(scratch.bytes(assistantDraftScratchAttnQRope, qBytes), q, m, layer, nHeads, headDim, qPos)
 	if err != nil {
 		return nil, err
@@ -2474,7 +2465,7 @@ func (m *AssistantModel) draftLogitsIntoScratch(out []byte, hiddenStates []byte,
 	} else {
 		out = out[:outLen]
 	}
-	for tokenID := 0; tokenID < vocab; tokenID++ {
+	for tokenID := range vocab {
 		sum := nativeAssistantDotBF16Row(hiddenStates, embed.Data, tokenID, hidden)
 		h := f32ToBF16(sum)
 		off := tokenID * bf16Size
@@ -2521,7 +2512,7 @@ func (m *AssistantModel) draftOrderedLogitsIntoScratch(out []byte, hiddenStates 
 	} else {
 		scores = scores[:numCentroids]
 	}
-	for c := 0; c < numCentroids; c++ {
+	for c := range numCentroids {
 		scores[c] = nativeAssistantDotBF16Row(hiddenStates, centroids.Data, c, hidden)
 	}
 	selected = nativeAssistantTopKInto(selected, scores, topK)
@@ -2533,12 +2524,12 @@ func (m *AssistantModel) draftOrderedLogitsIntoScratch(out []byte, hiddenStates 
 		out = out[:outLen]
 	}
 	floor := f32ToBF16(nativeAssistantLogitsFloor)
-	for i := 0; i < vocab; i++ {
+	for i := range vocab {
 		out[i*bf16Size] = byte(floor)
 		out[i*bf16Size+1] = byte(floor >> 8)
 	}
 	for _, centroid := range selected {
-		for pos := 0; pos < vocabPerCentroid; pos++ {
+		for pos := range vocabPerCentroid {
 			tokenID, err := nativeAssistantOrderingToken(ordering, centroid, pos, vocabPerCentroid)
 			if err != nil {
 				return nil, err
@@ -2684,7 +2675,7 @@ func nativeAssistantOrderingToken(t safetensors.Tensor, centroid, pos, vocabPerC
 func nativeAssistantDotBF16Row(vec, rows []byte, row, cols int) float32 {
 	base := row * cols * bf16Size
 	var sum float32
-	for i := 0; i < cols; i++ {
+	for i := range cols {
 		vo := i * bf16Size
 		wo := base + i*bf16Size
 		sum += bf16ToF32(vec[vo], vec[vo+1]) * bf16ToF32(rows[wo], rows[wo+1])
@@ -2737,7 +2728,7 @@ func (m *AssistantModel) draftGreedyTokenWithSuppress(logits []byte, suppressed 
 	}
 	var bestID int32 = -1
 	var best float32
-	for id := 0; id < vocab; id++ {
+	for id := range vocab {
 		if nativeAssistantSuppressed(int32(id), suppressed) {
 			continue
 		}

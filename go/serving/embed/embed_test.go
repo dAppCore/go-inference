@@ -4,6 +4,7 @@ package embed
 
 import (
 	"context"
+	"slices"
 
 	core "dappco.re/go"
 )
@@ -30,10 +31,8 @@ func (e *fakeEmbedder) Embed(_ context.Context, texts []string) ([][]float32, er
 		return nil, e.err
 	}
 	if e.failOn != "" {
-		for _, t := range texts {
-			if t == e.failOn {
-				return nil, core.E("embed", "fake batch failure", nil)
-			}
+		if slices.Contains(texts, e.failOn) {
+			return nil, core.E("embed", "fake batch failure", nil)
 		}
 	}
 

@@ -71,10 +71,7 @@ func EmbedBatched(ctx context.Context, embedder Embedder, texts []string, batchS
 
 	out := make([][]float32, 0, len(texts))
 	for start := 0; start < len(texts); start += batchSize {
-		end := start + batchSize
-		if end > len(texts) {
-			end = len(texts)
-		}
+		end := min(start+batchSize, len(texts))
 		vecs, err := embedder.Embed(ctx, texts[start:end])
 		if err != nil {
 			return nil, core.E("embed", "embed batched: batch failed", err)

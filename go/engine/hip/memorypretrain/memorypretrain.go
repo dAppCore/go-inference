@@ -7,6 +7,7 @@ package memorypretrain
 
 import (
 	"context"
+	"maps"
 	"math"
 	"slices"
 
@@ -381,10 +382,7 @@ func (bank *Bank) buildNode(parent int, depth int, blockIDs []int) int {
 }
 
 func (bank *Bank) kmeans(blockIDs []int) [][]int {
-	k := bank.Config.BranchingFactor
-	if k > len(blockIDs) {
-		k = len(blockIDs)
-	}
+	k := min(bank.Config.BranchingFactor, len(blockIDs))
 	centroids := initialCentroids(bank.Blocks, blockIDs, k)
 	assignments := make([]int, len(blockIDs))
 	for i := range assignments {
@@ -526,9 +524,7 @@ func cloneMap(values map[string]string) map[string]string {
 		return nil
 	}
 	out := make(map[string]string, len(values))
-	for key, value := range values {
-		out[key] = value
-	}
+	maps.Copy(out, values)
 	return out
 }
 

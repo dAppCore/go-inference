@@ -4,6 +4,7 @@ package fusion
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -22,7 +23,7 @@ type fakeModel struct {
 	reply string
 
 	mu      sync.Mutex
-	calls   int32 // how many times Run was invoked (atomic — parallel panel)
+	calls   atomic.Int32 // how many times Run was invoked (atomic — parallel panel)
 	prompts []string
 }
 
@@ -32,7 +33,7 @@ type fakeModel struct {
 //	m := &fakeModel{id: "gemma-31b", reply: "the sky is blue"}
 //	out, _ := m.Run(context.Background(), "why is the sky blue?")
 func (m *fakeModel) Run(_ context.Context, prompt string) (string, error) {
-	atomic.AddInt32(&m.calls, 1)
+	m.calls.Add(1)
 	m.mu.Lock()
 	m.prompts = append(m.prompts, prompt)
 	m.mu.Unlock()
@@ -42,7 +43,7 @@ func (m *fakeModel) Run(_ context.Context, prompt string) (string, error) {
 func (m *fakeModel) ID() string { return m.id }
 
 func (m *fakeModel) callCount() int {
-	return int(atomic.LoadInt32(&m.calls))
+	return int(m.calls.Load())
 }
 
 func (m *fakeModel) lastPrompt() string {
@@ -175,7 +176,7 @@ func TestFusion_Run_Good_ParallelDispatch(t *testing.T) {
 	}
 
 	panel := make([]Model, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		panel[i] = &barrierModel{id: idFor(i), enter: bar, reply: "ok"}
 	}
 	judge := &fakeModel{id: "judge", reply: "final"}
@@ -189,7 +190,7 @@ func TestFusion_Run_Good_ParallelDispatch(t *testing.T) {
 	}()
 
 	// Wait for every member to have started concurrently, then release them.
-	for i := 0; i < n; i++ {
+	for range n {
 		<-started
 	}
 	close(release)
@@ -466,10 +467,5 @@ func panelIDs(prs []PanelResponse) []string {
 }
 
 func contains(haystack []string, needle string) bool {
-	for _, h := range haystack {
-		if h == needle {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(haystack, needle)
 }

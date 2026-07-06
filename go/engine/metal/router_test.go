@@ -93,7 +93,7 @@ func TestMoERouterDeviceTopKAllocationBudget(t *testing.T) {
 	normW := toBF16Bytes(syntheticFloat32(dModel, 17))
 	routerW := toBF16Bytes(syntheticFloat32(numExperts*dModel, 43))
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, _, err := MoERouter(x, normW, routerW, scale, numExperts, topK, dModel, 1e-5); err != nil {
 			t.Fatalf("MoERouter warm %d: %v", i, err)
 		}
@@ -121,7 +121,7 @@ func TestMoERouterQuantDeviceTopKAllocationBudget(t *testing.T) {
 	normW := toBF16Bytes(syntheticFloat32(dModel, 17))
 	routerW := quantWeightFixture(t, numExperts, dModel, groupSize, bits, 43)
 	scale := toBF16Bytes([]float32{1.0, 0.5, 2.0, 0.25, 1.5, 0.75, 3.0, 0.1})
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, _, err := MoERouterQuant(x, normW, routerW, scale, numExperts, topK, dModel, groupSize, bits, 1e-5); err != nil {
 			t.Fatalf("MoERouterQuant warm %d: %v", i, err)
 		}
@@ -245,9 +245,9 @@ func routerRef(t *testing.T, x, normWScaled, routerW, perExpertScale []byte, num
 	// genuine top-k by repeated max-scan; strict > resolves ties to the lower index.
 	used := make([]bool, numExperts)
 	sel := make([]int, 0, topK)
-	for k := 0; k < topK; k++ {
+	for range topK {
 		best := -1
-		for e := 0; e < numExperts; e++ {
+		for e := range numExperts {
 			if used[e] {
 				continue
 			}
@@ -442,7 +442,7 @@ func TestMoERouterHostSelectScratchReusesNormAndScoreBuffers(t *testing.T) {
 	var idxPtr unsafe.Pointer
 	var weightPtr unsafe.Pointer
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		gotIdx, gotWeights, err := moeRouterBF16HostSelectWithScratch(x, normWScaled, routerW, scale, numExperts, topK, dModel, eps, scratch)
 		if err != nil {
 			t.Fatalf("moeRouterBF16HostSelectWithScratch %d: %v", i, err)
@@ -600,7 +600,7 @@ func TestMoERouterQuantHostSelectScratchReusesNormAndScoreBuffers(t *testing.T) 
 	var idxPtr unsafe.Pointer
 	var weightPtr unsafe.Pointer
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		gotIdx, gotWeights, err := moeRouterQuantHostSelectWithScratch(x, normWScaled, bufView{}, routerW, scale, numExperts, topK, dModel, groupSize, bits, eps, scratch)
 		if err != nil {
 			t.Fatalf("moeRouterQuantHostSelectWithScratch %d: %v", i, err)

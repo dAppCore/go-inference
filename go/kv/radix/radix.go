@@ -107,10 +107,7 @@ func (t *Tree) nextTick() uint64 {
 //
 //	commonPrefix([]int{1, 2, 9}, []int{1, 2, 3}) == 2
 func commonPrefix(a, b []int) int {
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
+	n := min(len(b), len(a))
 	i := 0
 	for i < n && a[i] == b[i] {
 		i++

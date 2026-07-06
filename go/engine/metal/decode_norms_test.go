@@ -45,9 +45,9 @@ func archDenseNormRef(t *testing.T, layers []DecodeLayerWeights, inputs [][]byte
 		vC[li] = make([]byte, maxLen*rowBytes)
 	}
 	out := make([][]byte, T)
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		x := inputs[tok]
-		for li := 0; li < nL; li++ {
+		for li := range nL {
 			w := layers[li]
 			normed := must(RMSNormBF16(x, w.AttnNormW, 1, dModel, eps))
 			q := must(MatVecBF16(w.WQ, normed, qDim, dModel))
@@ -118,7 +118,7 @@ func TestDecodePostNorms(t *testing.T) {
 		t.Fatalf("DecodeForwardArch with post-norms: %v", err)
 	}
 	want := archDenseNormRef(t, layers, inputs, dModel, nHeads, nKV, headDim, dFF, maxLen, base, scale, eps)
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("post-norm forward vs ref tok%d", tok), got[tok], want[tok])
 	}
 
@@ -180,7 +180,7 @@ func TestDecodeQKNorm(t *testing.T) {
 		t.Fatalf("DecodeForwardArch with QK-norm: %v", err)
 	}
 	want := archDenseNormRef(t, layers, inputs, dModel, nHeads, nKV, headDim, dFF, maxLen, base, scale, eps)
-	for tok := 0; tok < T; tok++ {
+	for tok := range T {
 		eqBytes(t, core.Sprintf("QK-norm forward vs ref tok%d", tok), got[tok], want[tok])
 	}
 

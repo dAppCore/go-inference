@@ -178,10 +178,10 @@ func ggufDequantizeQ8_0ToF16(raw []byte, elements uint64) ([]byte, error) {
 	}
 	out := make([]byte, int(elements)*2)
 	blocks := elements / 32
-	for b := uint64(0); b < blocks; b++ {
+	for b := range blocks {
 		block := raw[b*34 : b*34+34]
 		scale := ggufFloat16ToFloat32(binary.LittleEndian.Uint16(block[:2]))
-		for i := 0; i < 32; i++ {
+		for i := range 32 {
 			value := float32(int8(block[2+i])) * scale
 			off := int((b*32 + uint64(i)) * 2)
 			binary.LittleEndian.PutUint16(out[off:off+2], ggufFloat32ToFloat16(value))
@@ -199,11 +199,11 @@ func ggufDequantizeQ4_0ToF16(raw []byte, elements uint64) ([]byte, error) {
 	}
 	out := make([]byte, int(elements)*2)
 	blocks := elements / 32
-	for b := uint64(0); b < blocks; b++ {
+	for b := range blocks {
 		block := raw[b*18 : b*18+18]
 		scale := ggufFloat16ToFloat32(binary.LittleEndian.Uint16(block[:2]))
 		qs := block[2:]
-		for i := 0; i < 16; i++ {
+		for i := range 16 {
 			packed := qs[i]
 			lo := (int(packed&0x0f) - 8)
 			hi := (int(packed>>4) - 8)

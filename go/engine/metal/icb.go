@@ -270,7 +270,7 @@ func rebindProbeICB(mat, vec []float32, outDim, inDim, nRows int) ([]float32, er
 
 		resident := []metal.MTLResource{matBuf, vecBuf, outBuf, inB, outDimB, ldB, bndB, bshB, vsB, msB}
 		residentIDs := resourceIDsForFastUse(nil, resident)
-		for r := 0; r < nRows; r++ {
+		for r := range nRows {
 			// the only per-replay change: advance the output row (4 bytes/f32)
 			setICBKernelBuffer(c0, outBuf, uint(r*outDim*4), 3)
 			cb := commandBufferFast(queue)
@@ -836,10 +836,7 @@ func (s *attentionBlockICBScratch) record(
 	setICBKernelBuffer(c, s.attnOut, 0, 1)
 	setICBKernelBuffer(c, s.out.buf, 0, 2)
 	setICBKernelBuffer(c, addCntB, 0, 3)
-	addGroup := uint(256)
-	if uint(s.dModel) < addGroup {
-		addGroup = uint(s.dModel)
-	}
+	addGroup := min(uint(s.dModel), uint(256))
 	concurrentDispatchThreads(c, metal.MTLSize{Width: uint(s.dModel), Height: 1, Depth: 1}, metal.MTLSize{Width: addGroup, Height: 1, Depth: 1})
 
 	s.normID, s.wqID, s.woID = normID, wqID, woID

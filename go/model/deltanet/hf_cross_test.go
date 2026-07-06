@@ -34,12 +34,12 @@ func TestGatedDeltaVsHFReference(t *testing.T) {
 	qn := make([]float32, len(ref.Q))
 	for row := 0; row < L*H; row++ {
 		var ss float64
-		for i := 0; i < D; i++ {
+		for i := range D {
 			qv := float64(ref.Q[row*D+i])
 			ss += qv * qv
 		}
 		inv := 1.0 / math.Sqrt(ss+1e-6)
-		for i := 0; i < D; i++ {
+		for i := range D {
 			qn[row*D+i] = float32(float64(ref.Q[row*D+i]) * inv)
 		}
 	}

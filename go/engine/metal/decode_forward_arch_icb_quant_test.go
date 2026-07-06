@@ -210,7 +210,7 @@ func TestDecodeForwardArchICBQuant(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: DecodeForwardArchQuant: %v", name, err)
 		}
-		for tok := 0; tok < T; tok++ {
+		for tok := range T {
 			eqBytes(t, core.Sprintf("%s tok%d", name, tok), got[tok], want[tok])
 		}
 	}
@@ -229,7 +229,7 @@ func TestDecodeForwardArchICBQuant(t *testing.T) {
 		if err != nil {
 			t.Fatalf("DecodeForwardICBQuant: %v", err)
 		}
-		for tok := 0; tok < 4; tok++ {
+		for tok := range 4 {
 			eqBytes(t, core.Sprintf("all-owner vs DecodeForwardICBQuant tok%d", tok), gotArch[tok], gotPlain[tok])
 		}
 	}

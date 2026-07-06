@@ -56,7 +56,7 @@ func isErrorResponse(s string) bool {
 	if len(t) < len(prefix) {
 		return false
 	}
-	for i := 0; i < len(prefix); i++ {
+	for i := range len(prefix) {
 		c := t[i]
 		if c >= 'A' && c <= 'Z' {
 			c += 'a' - 'A'

@@ -411,7 +411,7 @@ func TestDiscover_Good_RecursiveEarlyBreak(t *testing.T) {
 // so the bench output and this gate stay aligned.
 func TestDiscover_AllocBudget_NoModels_TenJunkDirs(t *testing.T) {
 	base := t.TempDir()
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		dir := core.Path(base, core.Sprintf("junk-%d", i))
 		checkResultOK(t, core.MkdirAll(dir, 0o755))
 		checkResultOK(t, core.WriteFile(core.Path(dir, "README.md"), []byte("not a model"), 0o644))

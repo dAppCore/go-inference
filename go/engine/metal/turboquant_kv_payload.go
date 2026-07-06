@@ -132,7 +132,7 @@ func (codec nativeTurboQuantKVCodec) outlierChannels(headDim int32) int32 {
 		return 0
 	}
 	var count int32
-	for channel := int32(0); channel < headDim; channel++ {
+	for channel := range headDim {
 		if codec.OutlierMask[channel/8]&(1<<uint(channel%8)) != 0 {
 			count++
 		}
@@ -767,10 +767,10 @@ func (payload nativeTurboQuantKVPagePayload) decodeBaseBF16PrefixIntoLayout(keys
 
 	vectorCount := int(layout.Shape.Batch) * int(layout.Shape.Heads)
 	heads := int(layout.Shape.Heads)
-	for vector := 0; vector < vectorCount; vector++ {
+	for vector := range vectorCount {
 		batch := vector / heads
 		head := vector - batch*heads
-		for token := 0; token < tokenCount; token++ {
+		for token := range tokenCount {
 			idx := vector*pageTokens + token
 			start := (vector*totalSeqLen + tokenStart + token) * headDim * bf16Size
 			if tokenRows {

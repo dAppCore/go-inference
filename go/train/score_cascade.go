@@ -154,10 +154,7 @@ func (c *scoreCascade) compositeAt(step int) float64 {
 	if end < 0 {
 		return 0
 	}
-	start := end - c.window + 1
-	if start < 0 {
-		start = 0
-	}
+	start := max(end-c.window+1, 0)
 	sum := 0.0
 	for i := start; i <= end; i++ {
 		sum += c.perStep[i].Mean

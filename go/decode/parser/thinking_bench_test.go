@@ -40,7 +40,7 @@ var (
 // thinkingBenchWords builds a synthetic prose stream of `tokens` words.
 func thinkingBenchWords(tokens int) string {
 	out := core.NewBuilder()
-	for i := 0; i < tokens; i++ {
+	for range tokens {
 		out.WriteString("word ")
 	}
 	return out.String()
@@ -68,13 +68,7 @@ func thinkingBenchTokens(text string) []string {
 // thinkingBenchStream wraps a span of words inside the marker pair,
 // span covering `spanFraction` of the total.
 func thinkingBenchStream(tokens int, spanFraction float64, startMarker, endMarker string) string {
-	span := int(float64(tokens) * spanFraction)
-	if span < 1 {
-		span = 1
-	}
-	if span > tokens {
-		span = tokens
-	}
+	span := min(max(int(float64(tokens)*spanFraction), 1), tokens)
 	pre := (tokens - span) / 2
 	post := tokens - span - pre
 	out := core.NewBuilder()
