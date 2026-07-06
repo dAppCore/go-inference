@@ -12,7 +12,7 @@ import (
 // --- NewCheckpointMetadata ---
 
 // Good: every input field lands in the expected output field.
-func TestNewCheckpointMetadata_Good(t *testing.T) {
+func TestTrainCheckpoint_NewCheckpointMetadata_Good(t *testing.T) {
 	cfg := Config{
 		BatchSize:                 4,
 		GradientAccumulationSteps: 2,
@@ -61,7 +61,7 @@ func TestNewCheckpointMetadata_Good(t *testing.T) {
 // Bad: every input at its zero value still produces a well-formed
 // metadata value (NormalizeConfig backfills LearningRate/EvalMaxTokens)
 // rather than panicking or leaving zero-poisoned fields.
-func TestNewCheckpointMetadata_Bad(t *testing.T) {
+func TestTrainCheckpoint_NewCheckpointMetadata_Bad(t *testing.T) {
 	meta := NewCheckpointMetadata("", Config{}, CheckpointSnapshot{}, 0)
 	if meta.Version != CheckpointMetadataVersion {
 		t.Errorf("Version = %d, want %d even for zero-value input", meta.Version, CheckpointMetadataVersion)
@@ -78,7 +78,7 @@ func TestNewCheckpointMetadata_Bad(t *testing.T) {
 // OptimizerStep reports the step count as the optimizer step (the
 // degenerate equal-clock case) — plus EvalPrompts is defensively cloned,
 // not aliased from the caller's Config.
-func TestNewCheckpointMetadata_Ugly(t *testing.T) {
+func TestTrainCheckpoint_NewCheckpointMetadata_Ugly(t *testing.T) {
 	prompts := []string{"p1", "p2"}
 	cfg := Config{EvalPrompts: prompts}
 	meta := NewCheckpointMetadata("ckpt", cfg, CheckpointSnapshot{Step: 9}, 2)
@@ -97,7 +97,7 @@ func TestNewCheckpointMetadata_Ugly(t *testing.T) {
 // --- SaveCheckpointMetadata ---
 
 // Good: Save writes a readable JSON sidecar under <path>/train_checkpoint.json.
-func TestSaveCheckpointMetadata_Good(t *testing.T) {
+func TestTrainCheckpoint_SaveCheckpointMetadata_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "step-1")
 	meta := CheckpointMetadata{Step: 1, Loss: 0.25}
@@ -112,7 +112,7 @@ func TestSaveCheckpointMetadata_Good(t *testing.T) {
 }
 
 // Bad: an empty path is rejected before any file-system work happens.
-func TestSaveCheckpointMetadata_Bad(t *testing.T) {
+func TestTrainCheckpoint_SaveCheckpointMetadata_Bad(t *testing.T) {
 	if err := SaveCheckpointMetadata("", CheckpointMetadata{}); err != errCheckpointPath {
 		t.Fatalf("SaveCheckpointMetadata(\"\") error = %v, want errCheckpointPath", err)
 	}
@@ -122,7 +122,7 @@ func TestSaveCheckpointMetadata_Bad(t *testing.T) {
 // writing, and a .safetensors-suffixed path places the sidecar beside the
 // file (in its parent dir) rather than treating the file path itself as a
 // directory to write into.
-func TestSaveCheckpointMetadata_Ugly(t *testing.T) {
+func TestTrainCheckpoint_SaveCheckpointMetadata_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "nested", "deeper", "step-2")
 	if err := SaveCheckpointMetadata(path, CheckpointMetadata{}); err != nil {
@@ -149,7 +149,7 @@ func TestSaveCheckpointMetadata_Ugly(t *testing.T) {
 // --- LoadCheckpointMetadata ---
 
 // Good: Load round-trips exactly what Save wrote.
-func TestLoadCheckpointMetadata_Good(t *testing.T) {
+func TestTrainCheckpoint_LoadCheckpointMetadata_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "step-5")
 	want := CheckpointMetadata{Step: 5, Epoch: 2, Loss: 1.5, LearningRate: 1e-4}
@@ -167,7 +167,7 @@ func TestLoadCheckpointMetadata_Good(t *testing.T) {
 
 // Bad: an empty path is rejected, and a path with no sidecar file is a
 // hard error (unlike LoadResumeMetadata's soft-missing-file semantics).
-func TestLoadCheckpointMetadata_Bad(t *testing.T) {
+func TestTrainCheckpoint_LoadCheckpointMetadata_Bad(t *testing.T) {
 	if _, err := LoadCheckpointMetadata(""); err != errCheckpointPath {
 		t.Fatalf("LoadCheckpointMetadata(\"\") error = %v, want errCheckpointPath", err)
 	}
@@ -179,7 +179,7 @@ func TestLoadCheckpointMetadata_Bad(t *testing.T) {
 
 // Ugly: a sidecar written with Version 0 (bypassing Save) is backfilled
 // to CheckpointMetadataVersion on load.
-func TestLoadCheckpointMetadata_Ugly(t *testing.T) {
+func TestTrainCheckpoint_LoadCheckpointMetadata_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "step-9")
 	raw := core.JSONMarshalIndent(CheckpointMetadata{Step: 9}, "", "  ")
@@ -204,7 +204,7 @@ func TestLoadCheckpointMetadata_Ugly(t *testing.T) {
 // --- LoadResumeMetadata ---
 
 // Good: Load reads back a checkpoint saved for resume.
-func TestLoadResumeMetadata_Good(t *testing.T) {
+func TestTrainCheckpoint_LoadResumeMetadata_Good(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "resume")
 	if err := SaveCheckpointMetadata(path, CheckpointMetadata{Step: 3}); err != nil {
@@ -220,7 +220,7 @@ func TestLoadResumeMetadata_Good(t *testing.T) {
 }
 
 // Bad: a corrupt sidecar is a real parse error, not swallowed.
-func TestLoadResumeMetadata_Bad(t *testing.T) {
+func TestTrainCheckpoint_LoadResumeMetadata_Bad(t *testing.T) {
 	dir := t.TempDir()
 	path := core.PathJoin(dir, "corrupt")
 	if result := core.MkdirAll(path, 0o755); !result.OK {
@@ -236,7 +236,7 @@ func TestLoadResumeMetadata_Bad(t *testing.T) {
 
 // Ugly: a resume path with no sidecar at all (first run, nothing to
 // resume from) returns (nil, nil) rather than an error.
-func TestLoadResumeMetadata_Ugly(t *testing.T) {
+func TestTrainCheckpoint_LoadResumeMetadata_Ugly(t *testing.T) {
 	dir := t.TempDir()
 	got, err := LoadResumeMetadata(core.PathJoin(dir, "never-saved"))
 	if err != nil {
@@ -278,7 +278,7 @@ func TestCheckpointMetadataPath_Ugly(t *testing.T) {
 // --- FormatStepDir ---
 
 // Good: a typical step number is zero-padded to six digits.
-func TestFormatStepDir_Good(t *testing.T) {
+func TestTrainCheckpoint_FormatStepDir_Good(t *testing.T) {
 	if got := FormatStepDir(42); got != "step-000042" {
 		t.Fatalf("FormatStepDir(42) = %q, want step-000042", got)
 	}
@@ -286,7 +286,7 @@ func TestFormatStepDir_Good(t *testing.T) {
 
 // Bad: a negative step does not panic and produces a deterministic,
 // un-padded result.
-func TestFormatStepDir_Bad(t *testing.T) {
+func TestTrainCheckpoint_FormatStepDir_Bad(t *testing.T) {
 	if got := FormatStepDir(-1); got != "step--1" {
 		t.Fatalf("FormatStepDir(-1) = %q, want step--1", got)
 	}
@@ -294,7 +294,7 @@ func TestFormatStepDir_Bad(t *testing.T) {
 
 // Ugly: boundary step values — zero, the largest still-padded value, and
 // the first value past the padding width.
-func TestFormatStepDir_Ugly(t *testing.T) {
+func TestTrainCheckpoint_FormatStepDir_Ugly(t *testing.T) {
 	cases := map[int]string{
 		0:      "step-000000",
 		99999:  "step-099999",
