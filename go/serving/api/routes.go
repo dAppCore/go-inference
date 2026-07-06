@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	goapi "dappco.re/go/api"
+	coreprovider "dappco.re/go/api/pkg/provider"
 	"dappco.re/go/inference/serving"
 	"dappco.re/go/inference/serving/mlservice"
 	"github.com/gin-gonic/gin"
@@ -41,6 +42,47 @@ func (r *Routes) RegisterRoutes(rg *gin.RouterGroup) {
 // Channels declares WebSocket channels for ML events.
 func (r *Routes) Channels() []string {
 	return []string{"ml.generate", "ml.status"}
+}
+
+var _ coreprovider.Describable = (*Routes)(nil)
+
+// Describe implements coreprovider.Describable so the ML routes appear in the
+// OpenAPI document when core/api mounts the group — which is what lets the SDK
+// generators emit a typed client for them.
+func (r *Routes) Describe() []goapi.RouteDescription {
+	return []goapi.RouteDescription{
+		{
+			Method:      http.MethodGet,
+			Path:        "/backends",
+			Summary:     "List inference backends",
+			Description: "Lists every registered inference backend with its availability.",
+			Tags:        []string{"ml"},
+		},
+		{
+			Method:      http.MethodGet,
+			Path:        "/status",
+			Summary:     "ML service status",
+			Description: "Reports whether the ML service is ready, its backends, and whether a judge is configured.",
+			Tags:        []string{"ml"},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/generate",
+			Summary:     "Generate text",
+			Description: "Runs text generation against a backend (defaults to the primary when backend is empty).",
+			Tags:        []string{"ml"},
+			RequestBody: map[string]any{
+				"type":     "object",
+				"required": []string{"prompt"},
+				"properties": map[string]any{
+					"prompt":      map[string]any{"type": "string"},
+					"backend":     map[string]any{"type": "string"},
+					"temperature": map[string]any{"type": "number"},
+					"max_tokens":  map[string]any{"type": "integer"},
+				},
+			},
+		},
+	}
 }
 
 // backendInfo describes a registered inference backend.
