@@ -6,9 +6,8 @@ go 1.26.2
 
 use (
 	./external/api/go
-	./external/go
-	./external/gui/go
 	./external/cli/go
+	./external/go
 	./external/go-container/go
 	./external/go-i18n/go
 	./external/go-io/go
@@ -20,6 +19,7 @@ use (
 	./external/go-scm/go
 	./external/go-store/go
 	./external/go-ws/go
+	./external/gui/go
 	./external/mcp/go
 	./go
 	./gui
