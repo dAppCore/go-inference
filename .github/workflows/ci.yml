@@ -1,0 +1,39 @@
+# Portable CI for go-inference — the default-tag (no-GPU) test + coverage lane.
+# go-inference is a Metal/CGO project; the FULL lem build (engine/metal, the
+# metallibs) needs macOS 26 / Metal 4 and lives in build.yml on a self-hosted
+# runner. This lane runs the portable suite (Taskfile `test`/`cover`) on any OS.
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Portable test + coverage
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: "off"          # resolve deps from go/go.mod tags, not the workspace
+      CGO_ENABLED: "1"       # go/ links duckdb (go-duckdb/v2 ships prebuilt linux libs)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Portable tests + coverage (default tags — engine/metal excluded)
+        working-directory: go
+        run: go test -count=1 -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: go/coverage.out
+          flags: portable
+          fail_ci_if_error: false
