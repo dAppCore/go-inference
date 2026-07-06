@@ -389,10 +389,24 @@ func TestPool_Unpin_Good(t *testing.T) {
 }
 
 // TestPool_Unpin_Bad covers unpinning a name the Pool has never registered:
-// a no-op, no panic.
+// a no-op that must not disturb an unrelated adapter's real pin.
 func TestPool_Unpin_Bad(t *testing.T) {
-	p := NewPool(Config{Loader: &fakeLoader{}, Policy: NewLRUEvictionPolicy(), Capacity: 2})
-	p.Unpin("nobody")
+	ctx := context.Background()
+	p := NewPool(Config{Loader: &fakeLoader{}, Policy: NewLRUEvictionPolicy(), Capacity: 1})
+	for _, n := range []string{"a", "b"} {
+		if err := p.Register(ref(n)); err != nil {
+			t.Fatalf("register %s: %v", n, err)
+		}
+	}
+	_, ra, _ := p.Use(ctx, "a")
+	ra()
+	p.Pin("a")
+
+	p.Unpin("nobody") // unknown name: must not disturb a's pin
+
+	if _, _, err := p.Use(ctx, "b"); !IsCannotAdmit(err) {
+		t.Fatalf("unpinning an unknown name must not unpin a; want CannotAdmit, got %v", err)
+	}
 }
 
 // TestPool_Unpin_Ugly covers unpinning an adapter that was never pinned in
