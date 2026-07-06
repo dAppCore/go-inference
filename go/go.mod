@@ -8,7 +8,7 @@ require (
 	dappco.re/go/cgo v0.11.2
 	dappco.re/go/cli v0.11.1
 	dappco.re/go/i18n v0.12.1
-	dappco.re/go/io v0.13.1
+	dappco.re/go/io v0.14.0
 	dappco.re/go/log v0.13.1
 	dappco.re/go/mcp v0.19.1
 	dappco.re/go/process v0.16.1
