@@ -158,3 +158,51 @@ func TestNativeAssistantRoPEProportionalPairsFullHead(t *testing.T) {
 		t.Fatalf("dim 400 (beyond the rotated angles) changed to %.4f, want identity", got)
 	}
 }
+
+// TestRealE2BAssistantFusedDraftParity pins the fused single-command-buffer
+// drafter step against the legacy per-op path: same prepared session, same
+// prompt, both paths must draft the SAME token sequence (same kernels, same
+// order, same operands — the fusion only removes per-op synchronisation).
+func TestRealE2BAssistantFusedDraftParity(t *testing.T) {
+	requireNativeRuntime(t)
+	targetDir := enginegate.HFModelPath(t, "mlx-community/gemma-4-e2b-it-4bit")
+	assistantDir := enginegate.HFModelPath(t, "mlx-community/gemma-4-E2B-it-assistant-bf16")
+	target, err := LoadDir(targetDir, 4096)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	defer func() { _ = target.Close() }()
+	pair, err := LoadAssistantPairDirs(targetDir, assistantDir)
+	if err != nil {
+		t.Fatalf("LoadAssistantPairDirs: %v", err)
+	}
+	defer pair.Close()
+
+	prompt := realE2BAssistantPrompt(t, targetDir)
+	if err := target.prepareAssistantPrompt(prompt); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	last := prompt[len(prompt)-1]
+
+	SetAssistantFusedDraft(false)
+	slow, err := pair.draftBlockFromSession(target, last, 8, true)
+	SetAssistantFusedDraft(true)
+	if err != nil {
+		t.Fatalf("legacy draft block: %v", err)
+	}
+	fast, err := pair.draftBlockFromSession(target, last, 8, true)
+	if err != nil {
+		t.Fatalf("fused draft block: %v", err)
+	}
+	if pair.fused == nil {
+		t.Fatal("fused drafter did not build for the real E2B assistant")
+	}
+	if len(slow.Tokens) != len(fast.Tokens) {
+		t.Fatalf("token counts differ: legacy %d fused %d", len(slow.Tokens), len(fast.Tokens))
+	}
+	for i := range slow.Tokens {
+		if slow.Tokens[i] != fast.Tokens[i] {
+			t.Fatalf("draft %d differs: legacy %d fused %d (legacy %v fused %v)", i, slow.Tokens[i], fast.Tokens[i], slow.Tokens, fast.Tokens)
+		}
+	}
+}
