@@ -10,7 +10,7 @@ import (
 	"dappco.re/go/inference"
 )
 
-func TestResolver_ResolverFunc_Good(t *testing.T) {
+func TestResolver_ResolverFunc_ResolveModel_Good(t *testing.T) {
 	model := &stubModel{}
 	fn := ResolverFunc(func(ctx context.Context, name string) (inference.TextModel, error) {
 		if name != "qwen" {
@@ -25,13 +25,94 @@ func TestResolver_ResolverFunc_Good(t *testing.T) {
 	}
 }
 
-// TestResolver_ResolverFunc_Bad covers the nil-function guard — a
-// zero-value ResolverFunc must fail loudly rather than panic on call.
-func TestResolver_ResolverFunc_Bad(t *testing.T) {
+// TestResolver_ResolverFunc_ResolveModel_Bad covers the nil-function
+// guard — a zero-value ResolverFunc must fail loudly rather than panic
+// on call.
+func TestResolver_ResolverFunc_ResolveModel_Bad(t *testing.T) {
 	var fn ResolverFunc
 	got, err := fn.ResolveModel(context.Background(), "qwen")
 	if got != nil || err == nil || !core.Contains(err.Error(), "resolver is nil") {
 		t.Fatalf("ResolveModel() = %v, %v, want nil-resolver error", got, err)
+	}
+}
+
+// TestResolver_ResolverFunc_ResolveModel_Ugly covers pass-through
+// fidelity — ResolverFunc must not paper over an underlying func that
+// itself returns a nil model with a nil error (an ill-behaved but
+// legal implementation).
+func TestResolver_ResolverFunc_ResolveModel_Ugly(t *testing.T) {
+	fn := ResolverFunc(func(context.Context, string) (inference.TextModel, error) {
+		return nil, nil
+	})
+
+	got, err := fn.ResolveModel(context.Background(), "qwen")
+	if got != nil || err != nil {
+		t.Fatalf("ResolveModel() = %v, %v, want the (nil, nil) passed straight through", got, err)
+	}
+}
+
+// TestResolver_NewStaticResolver_Good covers the normal construction
+// path — keys are lower-cased and trimmed so lookups are
+// case/whitespace-insensitive.
+func TestResolver_NewStaticResolver_Good(t *testing.T) {
+	model := &stubModel{}
+	resolver := NewStaticResolver(map[string]inference.TextModel{" Qwen3 ": model})
+
+	got, err := resolver.ResolveModel(context.Background(), "qwen3")
+	if err != nil || got != model {
+		t.Fatalf("ResolveModel() = %v, %v, want model under the normalised key", got, err)
+	}
+}
+
+// TestResolver_NewStaticResolver_Bad covers a nil input map — the
+// resolver must construct with an empty, non-nil model set rather
+// than panic on the very first lookup.
+func TestResolver_NewStaticResolver_Bad(t *testing.T) {
+	resolver := NewStaticResolver(nil)
+
+	if resolver == nil || resolver.models == nil {
+		t.Fatalf("NewStaticResolver(nil) = %#v, want a resolver with an empty model map", resolver)
+	}
+	if _, err := resolver.ResolveModel(context.Background(), "anything"); err == nil {
+		t.Fatal("ResolveModel() on an empty resolver = nil error, want not-found")
+	}
+}
+
+// TestResolver_NewStaticResolver_Ugly covers key collision after
+// normalisation — two input keys that only differ by case/whitespace
+// collapse to the same slot, and the map-iteration-order winner is
+// whichever the caller passed last for that slot.
+func TestResolver_NewStaticResolver_Ugly(t *testing.T) {
+	only := &stubModel{}
+	resolver := NewStaticResolver(map[string]inference.TextModel{"qwen": only})
+
+	got, err := resolver.ResolveModel(context.Background(), " QWEN ")
+	if err != nil || got != only {
+		t.Fatalf("ResolveModel(padded, differently-cased name) = %v, %v, want the single collapsed entry", got, err)
+	}
+}
+
+// TestResolver_StaticResolver_ResolveModel_Good drives the plain
+// success path directly (as opposed to indirectly through a handler).
+func TestResolver_StaticResolver_ResolveModel_Good(t *testing.T) {
+	model := &stubModel{}
+	resolver := NewStaticResolver(map[string]inference.TextModel{"qwen": model})
+
+	got, err := resolver.ResolveModel(context.Background(), "qwen")
+	if err != nil || got != model {
+		t.Fatalf("ResolveModel() = %v, %v, want model", got, err)
+	}
+}
+
+// TestResolver_StaticResolver_ResolveModel_Ugly covers the not-found
+// shape distinctly from Bad's guard branches — a resolver holding
+// other models but not the requested name.
+func TestResolver_StaticResolver_ResolveModel_Ugly(t *testing.T) {
+	resolver := NewStaticResolver(map[string]inference.TextModel{"qwen": &stubModel{}})
+
+	got, err := resolver.ResolveModel(context.Background(), "missing")
+	if got != nil || err == nil || !core.Contains(err.Error(), `"missing" not found`) {
+		t.Fatalf("ResolveModel(missing) = %v, %v, want a not-found error naming the model", got, err)
 	}
 }
 
@@ -74,6 +155,32 @@ func TestResolver_NewBackendResolver_Good(t *testing.T) {
 	}
 	if len(r.LoadOptions) != 1 {
 		t.Fatalf("LoadOptions = %d, want 1", len(r.LoadOptions))
+	}
+}
+
+// TestResolver_NewBackendResolver_Bad covers construction with no
+// backend name, no model path, and no load options — every field
+// must settle on its empty zero value rather than panic.
+func TestResolver_NewBackendResolver_Bad(t *testing.T) {
+	r := NewBackendResolver("", "")
+
+	if r.BackendName != "" || r.ModelPath != "" || len(r.LoadOptions) != 0 {
+		t.Fatalf("NewBackendResolver(\"\", \"\") = %+v, want all-empty fields", r)
+	}
+}
+
+// TestResolver_NewBackendResolver_Ugly covers LoadOptions' defensive
+// copy — mutating the caller's slice after construction must not
+// affect the resolver's stored options.
+func TestResolver_NewBackendResolver_Ugly(t *testing.T) {
+	opts := []inference.LoadOption{inference.WithContextLen(1024)}
+	r := NewBackendResolver("backend", "/models/x", opts...)
+
+	opts[0] = inference.WithContextLen(2048)
+	opts = append(opts, inference.WithContextLen(4096))
+
+	if len(r.LoadOptions) != 1 {
+		t.Fatalf("LoadOptions = %d, want the original single option (defensive copy)", len(r.LoadOptions))
 	}
 }
 
@@ -151,9 +258,10 @@ func TestResolver_StaticResolver_ResolveModel_Bad_CancelledContext(t *testing.T)
 	}
 }
 
-// TestResolver_StaticResolver_ResolveModel_Bad_NilReceiver covers the
-// nil-receiver guard.
-func TestResolver_StaticResolver_ResolveModel_Bad_NilReceiver(t *testing.T) {
+// TestResolver_StaticResolver_ResolveModel_Bad covers the nil-receiver
+// guard (the cancelled-context guard is covered separately by
+// TestResolver_StaticResolver_ResolveModel_Bad_CancelledContext).
+func TestResolver_StaticResolver_ResolveModel_Bad(t *testing.T) {
 	var resolver *StaticResolver
 
 	if _, err := resolver.ResolveModel(context.Background(), "qwen"); err == nil || !core.Contains(err.Error(), "resolver is nil") {

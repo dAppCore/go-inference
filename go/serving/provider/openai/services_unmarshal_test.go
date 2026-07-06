@@ -10,28 +10,10 @@ import (
 	"dappco.re/go/inference/jsonenc"
 )
 
-// TestUnmarshal_EmbeddingInput_Good_Bad exercises EmbeddingInput's own
-// UnmarshalJSON directly (as a distinct entry point from
-// EmbeddingRequest — anything that decodes an EmbeddingInput value
-// standalone, e.g. via encoding/json on a container type, invokes
-// this method rather than EmbeddingRequest.unmarshalField's inlined
-// ParseJSONStringList call).
-func TestUnmarshal_EmbeddingInput_Good_Bad(t *testing.T) {
-	var single EmbeddingInput
-	if err := single.UnmarshalJSON([]byte(`"hello"`)); err != nil || !reflect.DeepEqual(single, EmbeddingInput{"hello"}) {
-		t.Fatalf("UnmarshalJSON(single) = %v, err = %v", single, err)
-	}
-
-	var many EmbeddingInput
-	if err := many.UnmarshalJSON([]byte(`["a","b"]`)); err != nil || !reflect.DeepEqual(many, EmbeddingInput{"a", "b"}) {
-		t.Fatalf("UnmarshalJSON(array) = %v, err = %v", many, err)
-	}
-
-	var bad EmbeddingInput
-	if err := bad.UnmarshalJSON([]byte(`42`)); err == nil {
-		t.Fatal("UnmarshalJSON(42) returned nil error, want rejection of a bare number")
-	}
-}
+// EmbeddingInput.UnmarshalJSON is exercised directly in
+// services_test.go (TestServices_EmbeddingInput_UnmarshalJSON_*) —
+// EmbeddingInput is declared in services.go, so its dedicated tests
+// live in that file's test scope rather than here.
 
 func TestUnmarshalEmbeddingRequest_DirectShapes(t *testing.T) {
 	dim := 1024
@@ -179,9 +161,9 @@ func TestUnmarshalCancelRequest_DirectShapes(t *testing.T) {
 // before our hand-rolled walker ever runs. Every error resolves to
 // jsonenc.ErrInvalidJSON, so failures assert identity against it.
 
-// TestUnmarshal_EmbeddingRequest_Bad drives every malformed-shape
-// branch in EmbeddingRequest.UnmarshalJSON/unmarshalField.
-func TestUnmarshal_EmbeddingRequest_Bad(t *testing.T) {
+// TestServicesUnmarshal_EmbeddingRequest_UnmarshalJSON_Bad drives every
+// malformed-shape branch in EmbeddingRequest.UnmarshalJSON/unmarshalField.
+func TestServicesUnmarshal_EmbeddingRequest_UnmarshalJSON_Bad(t *testing.T) {
 	cases := []struct{ name, in string }{
 		{"not-an-object", `42`},
 		{"non-string-key", `{1:"x"}`},
@@ -207,10 +189,10 @@ func TestUnmarshal_EmbeddingRequest_Bad(t *testing.T) {
 	}
 }
 
-// TestUnmarshal_EmbeddingRequest_Good covers the empty-object fast
-// path, dimensions/normalize null handling, and an unknown field
-// skipped ahead of a known one.
-func TestUnmarshal_EmbeddingRequest_Good(t *testing.T) {
+// TestServicesUnmarshal_EmbeddingRequest_UnmarshalJSON_Good covers the
+// empty-object fast path, dimensions/normalize null handling, and an
+// unknown field skipped ahead of a known one.
+func TestServicesUnmarshal_EmbeddingRequest_UnmarshalJSON_Good(t *testing.T) {
 	var empty EmbeddingRequest
 	if err := empty.UnmarshalJSON([]byte(`{}`)); err != nil || !reflect.DeepEqual(empty, EmbeddingRequest{}) {
 		t.Fatalf("UnmarshalJSON(%q) = %+v, err = %v", `{}`, empty, err)
@@ -236,9 +218,23 @@ func TestUnmarshal_EmbeddingRequest_Good(t *testing.T) {
 	}
 }
 
-// TestUnmarshal_RerankRequest_Bad drives every malformed-shape branch
-// in RerankRequest.UnmarshalJSON/unmarshalField.
-func TestUnmarshal_RerankRequest_Bad(t *testing.T) {
+// TestServicesUnmarshal_EmbeddingRequest_UnmarshalJSON_Ugly covers a
+// duplicate key — the hand-rolled walker does not de-duplicate, so
+// the last occurrence wins.
+func TestServicesUnmarshal_EmbeddingRequest_UnmarshalJSON_Ugly(t *testing.T) {
+	var got EmbeddingRequest
+	in := `{"model":"first","model":"second"}`
+	if err := got.UnmarshalJSON([]byte(in)); err != nil {
+		t.Fatalf("UnmarshalJSON(%q) error = %v", in, err)
+	}
+	if got.Model != "second" {
+		t.Fatalf("UnmarshalJSON(duplicate key) Model = %q, want the last occurrence to win", got.Model)
+	}
+}
+
+// TestServicesUnmarshal_RerankRequest_UnmarshalJSON_Bad drives every
+// malformed-shape branch in RerankRequest.UnmarshalJSON/unmarshalField.
+func TestServicesUnmarshal_RerankRequest_UnmarshalJSON_Bad(t *testing.T) {
 	cases := []struct{ name, in string }{
 		{"not-an-object", `42`},
 		{"non-string-key", `{1:"x"}`},
@@ -262,9 +258,10 @@ func TestUnmarshal_RerankRequest_Bad(t *testing.T) {
 	}
 }
 
-// TestUnmarshal_RerankRequest_Good covers the empty-object fast path
-// and an unknown field skipped ahead of a known one.
-func TestUnmarshal_RerankRequest_Good(t *testing.T) {
+// TestServicesUnmarshal_RerankRequest_UnmarshalJSON_Good covers the
+// empty-object fast path and an unknown field skipped ahead of a
+// known one.
+func TestServicesUnmarshal_RerankRequest_UnmarshalJSON_Good(t *testing.T) {
 	var empty RerankRequest
 	if err := empty.UnmarshalJSON([]byte(`{}`)); err != nil || !reflect.DeepEqual(empty, RerankRequest{}) {
 		t.Fatalf("UnmarshalJSON(%q) = %+v, err = %v", `{}`, empty, err)
@@ -281,11 +278,24 @@ func TestUnmarshal_RerankRequest_Good(t *testing.T) {
 	}
 }
 
-// TestUnmarshal_CancelRequest_Bad drives every malformed-shape branch
-// in CancelRequest.UnmarshalJSON, including its own default-arm
-// malformed-value path (CancelRequest inlines its field switch rather
-// than using a separate unmarshalField method).
-func TestUnmarshal_CancelRequest_Bad(t *testing.T) {
+// TestServicesUnmarshal_RerankRequest_UnmarshalJSON_Ugly covers a
+// duplicate key — the last occurrence wins.
+func TestServicesUnmarshal_RerankRequest_UnmarshalJSON_Ugly(t *testing.T) {
+	var got RerankRequest
+	in := `{"model":"first","model":"second"}`
+	if err := got.UnmarshalJSON([]byte(in)); err != nil {
+		t.Fatalf("UnmarshalJSON(%q) error = %v", in, err)
+	}
+	if got.Model != "second" {
+		t.Fatalf("UnmarshalJSON(duplicate key) Model = %q, want the last occurrence to win", got.Model)
+	}
+}
+
+// TestServicesUnmarshal_CancelRequest_UnmarshalJSON_Bad drives every
+// malformed-shape branch in CancelRequest.UnmarshalJSON, including its
+// own default-arm malformed-value path (CancelRequest inlines its
+// field switch rather than using a separate unmarshalField method).
+func TestServicesUnmarshal_CancelRequest_UnmarshalJSON_Bad(t *testing.T) {
 	cases := []struct{ name, in string }{
 		{"not-an-object", `42`},
 		{"non-string-key", `{1:"x"}`},
@@ -307,9 +317,10 @@ func TestUnmarshal_CancelRequest_Bad(t *testing.T) {
 	}
 }
 
-// TestUnmarshal_CancelRequest_Good covers the empty-object fast path
-// and an unknown field skipped ahead of model/id.
-func TestUnmarshal_CancelRequest_Good(t *testing.T) {
+// TestServicesUnmarshal_CancelRequest_UnmarshalJSON_Good covers the
+// empty-object fast path and an unknown field skipped ahead of
+// model/id.
+func TestServicesUnmarshal_CancelRequest_UnmarshalJSON_Good(t *testing.T) {
 	var empty CancelRequest
 	if err := empty.UnmarshalJSON([]byte(`{}`)); err != nil || empty != (CancelRequest{}) {
 		t.Fatalf("UnmarshalJSON(%q) = %+v, err = %v", `{}`, empty, err)
@@ -325,9 +336,22 @@ func TestUnmarshal_CancelRequest_Good(t *testing.T) {
 	}
 }
 
-// TestUnmarshal_CacheClearRequest_Bad drives every malformed-shape
-// branch in CacheClearRequest.UnmarshalJSON.
-func TestUnmarshal_CacheClearRequest_Bad(t *testing.T) {
+// TestServicesUnmarshal_CancelRequest_UnmarshalJSON_Ugly covers a
+// duplicate key — the last occurrence wins.
+func TestServicesUnmarshal_CancelRequest_UnmarshalJSON_Ugly(t *testing.T) {
+	var got CancelRequest
+	in := `{"id":"first","id":"second"}`
+	if err := got.UnmarshalJSON([]byte(in)); err != nil {
+		t.Fatalf("UnmarshalJSON(%q) error = %v", in, err)
+	}
+	if got.ID != "second" {
+		t.Fatalf("UnmarshalJSON(duplicate key) ID = %q, want the last occurrence to win", got.ID)
+	}
+}
+
+// TestServicesUnmarshal_CacheClearRequest_UnmarshalJSON_Bad drives
+// every malformed-shape branch in CacheClearRequest.UnmarshalJSON.
+func TestServicesUnmarshal_CacheClearRequest_UnmarshalJSON_Bad(t *testing.T) {
 	cases := []struct{ name, in string }{
 		{"not-an-object", `42`},
 		{"non-string-key", `{1:"x"}`},
@@ -349,9 +373,10 @@ func TestUnmarshal_CacheClearRequest_Bad(t *testing.T) {
 	}
 }
 
-// TestUnmarshal_CacheClearRequest_Good covers the empty-object fast
-// path and an unknown field skipped ahead of model/labels.
-func TestUnmarshal_CacheClearRequest_Good(t *testing.T) {
+// TestServicesUnmarshal_CacheClearRequest_UnmarshalJSON_Good covers
+// the empty-object fast path and an unknown field skipped ahead of
+// model/labels.
+func TestServicesUnmarshal_CacheClearRequest_UnmarshalJSON_Good(t *testing.T) {
 	var empty CacheClearRequest
 	if err := empty.UnmarshalJSON([]byte(`{}`)); err != nil || !reflect.DeepEqual(empty, CacheClearRequest{}) {
 		t.Fatalf("UnmarshalJSON(%q) = %+v, err = %v", `{}`, empty, err)
@@ -368,9 +393,22 @@ func TestUnmarshal_CacheClearRequest_Good(t *testing.T) {
 	}
 }
 
-// TestUnmarshal_CacheWarmRequest_Bad drives every malformed-shape
-// branch in CacheWarmRequest.UnmarshalJSON.
-func TestUnmarshal_CacheWarmRequest_Bad(t *testing.T) {
+// TestServicesUnmarshal_CacheClearRequest_UnmarshalJSON_Ugly covers a
+// duplicate key — the last occurrence wins.
+func TestServicesUnmarshal_CacheClearRequest_UnmarshalJSON_Ugly(t *testing.T) {
+	var got CacheClearRequest
+	in := `{"model":"first","model":"second"}`
+	if err := got.UnmarshalJSON([]byte(in)); err != nil {
+		t.Fatalf("UnmarshalJSON(%q) error = %v", in, err)
+	}
+	if got.Model != "second" {
+		t.Fatalf("UnmarshalJSON(duplicate key) Model = %q, want the last occurrence to win", got.Model)
+	}
+}
+
+// TestServicesUnmarshal_CacheWarmRequest_UnmarshalJSON_Bad drives
+// every malformed-shape branch in CacheWarmRequest.UnmarshalJSON.
+func TestServicesUnmarshal_CacheWarmRequest_UnmarshalJSON_Bad(t *testing.T) {
 	cases := []struct{ name, in string }{
 		{"not-an-object", `42`},
 		{"non-string-key", `{1:"x"}`},
@@ -396,9 +434,10 @@ func TestUnmarshal_CacheWarmRequest_Bad(t *testing.T) {
 	}
 }
 
-// TestUnmarshal_CacheWarmRequest_Good covers the empty-object fast
-// path and an unknown field skipped ahead of the known ones.
-func TestUnmarshal_CacheWarmRequest_Good(t *testing.T) {
+// TestServicesUnmarshal_CacheWarmRequest_UnmarshalJSON_Good covers the
+// empty-object fast path and an unknown field skipped ahead of the
+// known ones.
+func TestServicesUnmarshal_CacheWarmRequest_UnmarshalJSON_Good(t *testing.T) {
 	var empty CacheWarmRequest
 	if err := empty.UnmarshalJSON([]byte(`{}`)); err != nil || !reflect.DeepEqual(empty, CacheWarmRequest{}) {
 		t.Fatalf("UnmarshalJSON(%q) = %+v, err = %v", `{}`, empty, err)
@@ -412,6 +451,19 @@ func TestUnmarshal_CacheWarmRequest_Good(t *testing.T) {
 	want := CacheWarmRequest{Model: "m", Prompt: "hi"}
 	if !reflect.DeepEqual(withUnknown, want) {
 		t.Fatalf("UnmarshalJSON(%q) = %+v, want %+v", in, withUnknown, want)
+	}
+}
+
+// TestServicesUnmarshal_CacheWarmRequest_UnmarshalJSON_Ugly covers a
+// duplicate key — the last occurrence wins.
+func TestServicesUnmarshal_CacheWarmRequest_UnmarshalJSON_Ugly(t *testing.T) {
+	var got CacheWarmRequest
+	in := `{"model":"first","model":"second"}`
+	if err := got.UnmarshalJSON([]byte(in)); err != nil {
+		t.Fatalf("UnmarshalJSON(%q) error = %v", in, err)
+	}
+	if got.Model != "second" {
+		t.Fatalf("UnmarshalJSON(duplicate key) Model = %q, want the last occurrence to win", got.Model)
 	}
 }
 

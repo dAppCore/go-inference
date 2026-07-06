@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -562,5 +563,577 @@ func TestOpenAI_QueryModel_Bad(t *testing.T) {
 	}
 	if got := queryModel(&http.Request{URL: nil}); got != "" {
 		t.Fatalf("queryModel(nil URL) = %q, want empty", got)
+	}
+}
+
+// --- EmbeddingInput.UnmarshalJSON ---
+
+func TestServices_EmbeddingInput_UnmarshalJSON_Good(t *testing.T) {
+	var single EmbeddingInput
+	if err := single.UnmarshalJSON([]byte(`"hello"`)); err != nil || !reflect.DeepEqual(single, EmbeddingInput{"hello"}) {
+		t.Fatalf("UnmarshalJSON(single) = %v, err = %v", single, err)
+	}
+
+	var many EmbeddingInput
+	if err := many.UnmarshalJSON([]byte(`["a","b"]`)); err != nil || !reflect.DeepEqual(many, EmbeddingInput{"a", "b"}) {
+		t.Fatalf("UnmarshalJSON(array) = %v, err = %v", many, err)
+	}
+}
+
+// TestServices_EmbeddingInput_UnmarshalJSON_Bad covers rejection of a
+// bare JSON number — EmbeddingInput only accepts a string or an array
+// of strings.
+func TestServices_EmbeddingInput_UnmarshalJSON_Bad(t *testing.T) {
+	var bad EmbeddingInput
+	if err := bad.UnmarshalJSON([]byte(`42`)); err == nil {
+		t.Fatal("UnmarshalJSON(42) returned nil error, want rejection of a bare number")
+	}
+}
+
+// TestServices_EmbeddingInput_UnmarshalJSON_Ugly covers the JSON null
+// literal — it decodes to a nil EmbeddingInput without an error,
+// distinct from an empty array.
+func TestServices_EmbeddingInput_UnmarshalJSON_Ugly(t *testing.T) {
+	input := EmbeddingInput{"stale"}
+	if err := input.UnmarshalJSON([]byte(`null`)); err != nil || input != nil {
+		t.Fatalf("UnmarshalJSON(null) = %v, err = %v, want nil input and no error", input, err)
+	}
+}
+
+// --- NewEmbeddingsHandler / EmbeddingsHandler.ServeHTTP ---
+
+func TestServices_NewEmbeddingsHandler_Good(t *testing.T) {
+	resolver := NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}})
+	rec := httptest.NewRecorder()
+
+	NewEmbeddingsHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultEmbeddingsPath, strings.NewReader(`{"model":"qwen","input":"hi"}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through the wired resolver", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServices_NewEmbeddingsHandler_Bad covers a nil resolver — the
+// constructor must not panic, and the resulting handler must reject
+// every request with 503 (proving the nil actually reached the
+// handler rather than being swapped for a default).
+func TestServices_NewEmbeddingsHandler_Bad(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	NewEmbeddingsHandler(nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultEmbeddingsPath, strings.NewReader(`{"model":"qwen","input":"hi"}`)))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a nil resolver", rec.Code)
+	}
+}
+
+// TestServices_NewEmbeddingsHandler_Ugly covers construction with a
+// functional ResolverFunc adapter rather than *StaticResolver.
+func TestServices_NewEmbeddingsHandler_Ugly(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	resolver := ResolverFunc(func(context.Context, string) (inference.TextModel, error) { return model, nil })
+	rec := httptest.NewRecorder()
+
+	NewEmbeddingsHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultEmbeddingsPath, strings.NewReader(`{"model":"qwen","input":"hi"}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through a functional Resolver", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServices_EmbeddingsHandler_ServeHTTP_Good(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	handler := NewEmbeddingsHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultEmbeddingsPath, strings.NewReader(`{"model":"qwen","input":["one","two"]}`)))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"object":"list"`) {
+		t.Fatalf("status = %d body=%s, want 200 embedding list", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServices_EmbeddingsHandler_ServeHTTP_Bad covers the method-
+// rejection branch.
+func TestServices_EmbeddingsHandler_ServeHTTP_Bad(t *testing.T) {
+	handler := NewEmbeddingsHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultEmbeddingsPath, nil))
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+// TestServices_EmbeddingsHandler_ServeHTTP_Ugly covers the empty-input
+// rejection — a present but empty input array.
+func TestServices_EmbeddingsHandler_ServeHTTP_Ugly(t *testing.T) {
+	handler := NewEmbeddingsHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultEmbeddingsPath, strings.NewReader(`{"model":"qwen","input":[]}`)))
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"param":"input"`) {
+		t.Fatalf("status = %d body=%s, want 400 param=input", rec.Code, rec.Body.String())
+	}
+}
+
+// --- NewRerankHandler / RerankHandler.ServeHTTP ---
+
+func TestServices_NewRerankHandler_Good(t *testing.T) {
+	resolver := NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}})
+	rec := httptest.NewRecorder()
+
+	NewRerankHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultRerankPath, strings.NewReader(`{"model":"qwen","query":"q","documents":["a","b"]}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through the wired resolver", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServices_NewRerankHandler_Bad covers a nil resolver.
+func TestServices_NewRerankHandler_Bad(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	NewRerankHandler(nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultRerankPath, strings.NewReader(`{"model":"qwen","query":"q","documents":["a"]}`)))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a nil resolver", rec.Code)
+	}
+}
+
+// TestServices_NewRerankHandler_Ugly covers construction with a
+// functional ResolverFunc adapter.
+func TestServices_NewRerankHandler_Ugly(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	resolver := ResolverFunc(func(context.Context, string) (inference.TextModel, error) { return model, nil })
+	rec := httptest.NewRecorder()
+
+	NewRerankHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultRerankPath, strings.NewReader(`{"model":"qwen","query":"q","documents":["a","b"]}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through a functional Resolver", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServices_RerankHandler_ServeHTTP_Good(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	handler := NewRerankHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultRerankPath, strings.NewReader(`{"model":"qwen","query":"core","documents":["a","b"]}`)))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"index":1`) {
+		t.Fatalf("status = %d body=%s, want 200 rerank results", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServices_RerankHandler_ServeHTTP_Bad covers the method-rejection
+// branch.
+func TestServices_RerankHandler_ServeHTTP_Bad(t *testing.T) {
+	handler := NewRerankHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultRerankPath, nil))
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+// TestServices_RerankHandler_ServeHTTP_Ugly covers the empty-documents
+// rejection.
+func TestServices_RerankHandler_ServeHTTP_Ugly(t *testing.T) {
+	handler := NewRerankHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultRerankPath, strings.NewReader(`{"model":"qwen","query":"q","documents":[]}`)))
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"param":"documents"`) {
+		t.Fatalf("status = %d body=%s, want 400 param=documents", rec.Code, rec.Body.String())
+	}
+}
+
+// --- NewCapabilityHandler / CapabilityHandler.ServeHTTP ---
+
+func TestServices_NewCapabilityHandler_Good(t *testing.T) {
+	resolver := NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}})
+	rec := httptest.NewRecorder()
+
+	NewCapabilityHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCapabilitiesPath+"?model=qwen", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through the wired resolver", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServices_NewCapabilityHandler_Bad covers a nil resolver.
+func TestServices_NewCapabilityHandler_Bad(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	NewCapabilityHandler(nil).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCapabilitiesPath+"?model=qwen", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a nil resolver", rec.Code)
+	}
+}
+
+// TestServices_NewCapabilityHandler_Ugly covers construction with a
+// functional ResolverFunc adapter.
+func TestServices_NewCapabilityHandler_Ugly(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	resolver := ResolverFunc(func(context.Context, string) (inference.TextModel, error) { return model, nil })
+	rec := httptest.NewRecorder()
+
+	NewCapabilityHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCapabilitiesPath+"?model=qwen", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through a functional Resolver", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServices_CapabilityHandler_ServeHTTP_Good(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	handler := NewCapabilityHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCapabilitiesPath+"?model=qwen", nil))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"embeddings"`) {
+		t.Fatalf("status = %d body=%s, want 200 fallback capability report", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServices_CapabilityHandler_ServeHTTP_Bad covers the missing-
+// model-parameter rejection.
+func TestServices_CapabilityHandler_ServeHTTP_Bad(t *testing.T) {
+	handler := NewCapabilityHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCapabilitiesPath, nil))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+// TestServices_CapabilityHandler_ServeHTTP_Ugly covers the
+// inference.CapabilityReporter fast path, distinct from Good's
+// TextModelCapabilities fallback.
+func TestServices_CapabilityHandler_ServeHTTP_Ugly(t *testing.T) {
+	handler := NewCapabilityHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &capabilityStubModel{}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCapabilitiesPath+"?model=qwen", nil))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"capability-stub"`) {
+		t.Fatalf("status = %d body=%s, want reporter-sourced capabilities", rec.Code, rec.Body.String())
+	}
+}
+
+// --- NewCacheStatsHandler / CacheStatsHandler.ServeHTTP ---
+
+func TestServices_NewCacheStatsHandler_Good(t *testing.T) {
+	resolver := NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}})
+	rec := httptest.NewRecorder()
+
+	NewCacheStatsHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCacheStatsPath+"?model=qwen", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through the wired resolver", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServices_NewCacheStatsHandler_Bad covers a nil resolver.
+func TestServices_NewCacheStatsHandler_Bad(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	NewCacheStatsHandler(nil).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCacheStatsPath+"?model=qwen", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a nil resolver", rec.Code)
+	}
+}
+
+// TestServices_NewCacheStatsHandler_Ugly covers construction with a
+// functional ResolverFunc adapter.
+func TestServices_NewCacheStatsHandler_Ugly(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	resolver := ResolverFunc(func(context.Context, string) (inference.TextModel, error) { return model, nil })
+	rec := httptest.NewRecorder()
+
+	NewCacheStatsHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCacheStatsPath+"?model=qwen", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through a functional Resolver", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServices_CacheStatsHandler_ServeHTTP_Good(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	handler := NewCacheStatsHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCacheStatsPath+"?model=qwen", nil))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"hit_rate":0.9`) {
+		t.Fatalf("status = %d body=%s, want 200 cache stats", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServices_CacheStatsHandler_ServeHTTP_Bad covers the method-
+// rejection branch.
+func TestServices_CacheStatsHandler_ServeHTTP_Bad(t *testing.T) {
+	handler := NewCacheStatsHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCacheStatsPath, nil))
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+// TestServices_CacheStatsHandler_ServeHTTP_Ugly covers the
+// unsupported-interface rejection — a model that isn't a
+// inference.CacheService.
+func TestServices_CacheStatsHandler_ServeHTTP_Ugly(t *testing.T) {
+	handler := NewCacheStatsHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &stubModel{}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCacheStatsPath+"?model=qwen", nil))
+
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Code)
+	}
+}
+
+// --- NewCacheWarmHandler / CacheWarmHandler.ServeHTTP ---
+
+func TestServices_NewCacheWarmHandler_Good(t *testing.T) {
+	resolver := NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}})
+	rec := httptest.NewRecorder()
+
+	NewCacheWarmHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCacheWarmPath, strings.NewReader(`{"model":"qwen","tokens":[1,2,3]}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through the wired resolver", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServices_NewCacheWarmHandler_Bad covers a nil resolver.
+func TestServices_NewCacheWarmHandler_Bad(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	NewCacheWarmHandler(nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCacheWarmPath, strings.NewReader(`{"model":"qwen"}`)))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a nil resolver", rec.Code)
+	}
+}
+
+// TestServices_NewCacheWarmHandler_Ugly covers construction with a
+// functional ResolverFunc adapter.
+func TestServices_NewCacheWarmHandler_Ugly(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	resolver := ResolverFunc(func(context.Context, string) (inference.TextModel, error) { return model, nil })
+	rec := httptest.NewRecorder()
+
+	NewCacheWarmHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCacheWarmPath, strings.NewReader(`{"model":"qwen","tokens":[1,2,3]}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through a functional Resolver", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServices_CacheWarmHandler_ServeHTTP_Good(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	handler := NewCacheWarmHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCacheWarmPath, strings.NewReader(`{"model":"qwen","tokens":[1,2,3]}`)))
+
+	if rec.Code != http.StatusOK || model.warmed.Model.ID != "qwen" || len(model.warmed.Tokens) != 3 {
+		t.Fatalf("status = %d body=%s warmed=%+v, want 200 with the warmed request recorded", rec.Code, rec.Body.String(), model.warmed)
+	}
+}
+
+// TestServices_CacheWarmHandler_ServeHTTP_Bad covers the method-
+// rejection branch.
+func TestServices_CacheWarmHandler_ServeHTTP_Bad(t *testing.T) {
+	handler := NewCacheWarmHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCacheWarmPath, nil))
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+// TestServices_CacheWarmHandler_ServeHTTP_Ugly covers the malformed-
+// body rejection.
+func TestServices_CacheWarmHandler_ServeHTTP_Ugly(t *testing.T) {
+	handler := NewCacheWarmHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCacheWarmPath, strings.NewReader(`{`)))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+// --- NewCacheClearHandler / CacheClearHandler.ServeHTTP ---
+
+func TestServices_NewCacheClearHandler_Good(t *testing.T) {
+	resolver := NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}})
+	rec := httptest.NewRecorder()
+
+	NewCacheClearHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCacheClearPath, strings.NewReader(`{"model":"qwen"}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through the wired resolver", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServices_NewCacheClearHandler_Bad covers a nil resolver.
+func TestServices_NewCacheClearHandler_Bad(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	NewCacheClearHandler(nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCacheClearPath, strings.NewReader(`{"model":"qwen"}`)))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a nil resolver", rec.Code)
+	}
+}
+
+// TestServices_NewCacheClearHandler_Ugly covers construction with a
+// functional ResolverFunc adapter.
+func TestServices_NewCacheClearHandler_Ugly(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	resolver := ResolverFunc(func(context.Context, string) (inference.TextModel, error) { return model, nil })
+	rec := httptest.NewRecorder()
+
+	NewCacheClearHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCacheClearPath, strings.NewReader(`{"model":"qwen"}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through a functional Resolver", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServices_CacheClearHandler_ServeHTTP_Good(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	handler := NewCacheClearHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCacheClearPath, strings.NewReader(`{"model":"qwen","labels":{"adapter":"none"}}`)))
+
+	if rec.Code != http.StatusOK || !model.cleared {
+		t.Fatalf("status = %d body=%s cleared=%v, want 200 with cache cleared", rec.Code, rec.Body.String(), model.cleared)
+	}
+}
+
+// TestServices_CacheClearHandler_ServeHTTP_Bad covers the method-
+// rejection branch.
+func TestServices_CacheClearHandler_ServeHTTP_Bad(t *testing.T) {
+	handler := NewCacheClearHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCacheClearPath, nil))
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+// TestServices_CacheClearHandler_ServeHTTP_Ugly covers the
+// ClearCache()-error-propagation branch.
+func TestServices_CacheClearHandler_ServeHTTP_Ugly(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}, err: core.E("test", "clear failed", nil)}
+	handler := NewCacheClearHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCacheClearPath, strings.NewReader(`{"model":"qwen"}`)))
+
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "clear failed") {
+		t.Fatalf("status = %d body=%s, want 500 clear failed", rec.Code, rec.Body.String())
+	}
+}
+
+// --- NewCancelHandler / CancelHandler.ServeHTTP ---
+
+func TestServices_NewCancelHandler_Good(t *testing.T) {
+	resolver := NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}})
+	rec := httptest.NewRecorder()
+
+	NewCancelHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCancelPath, strings.NewReader(`{"model":"qwen","id":"r1"}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through the wired resolver", rec.Code, rec.Body.String())
+	}
+}
+
+// TestServices_NewCancelHandler_Bad covers a nil resolver.
+func TestServices_NewCancelHandler_Bad(t *testing.T) {
+	rec := httptest.NewRecorder()
+
+	NewCancelHandler(nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCancelPath, strings.NewReader(`{"model":"qwen","id":"r1"}`)))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 for a nil resolver", rec.Code)
+	}
+}
+
+// TestServices_NewCancelHandler_Ugly covers construction with a
+// functional ResolverFunc adapter.
+func TestServices_NewCancelHandler_Ugly(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	resolver := ResolverFunc(func(context.Context, string) (inference.TextModel, error) { return model, nil })
+	rec := httptest.NewRecorder()
+
+	NewCancelHandler(resolver).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCancelPath, strings.NewReader(`{"model":"qwen","id":"r1"}`)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 through a functional Resolver", rec.Code, rec.Body.String())
+	}
+}
+
+func TestServices_CancelHandler_ServeHTTP_Good(t *testing.T) {
+	model := &serviceModel{stubModel: &stubModel{}}
+	handler := NewCancelHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCancelPath, strings.NewReader(`{"model":"qwen","id":"req_1"}`)))
+
+	if rec.Code != http.StatusOK || model.cancelled != "req_1" {
+		t.Fatalf("status = %d body=%s cancelled=%q, want 200 with the request cancelled", rec.Code, rec.Body.String(), model.cancelled)
+	}
+}
+
+// TestServices_CancelHandler_ServeHTTP_Bad covers the method-rejection
+// branch.
+func TestServices_CancelHandler_ServeHTTP_Bad(t *testing.T) {
+	handler := NewCancelHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCancelPath, nil))
+
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+// TestServices_CancelHandler_ServeHTTP_Ugly covers the id-required
+// rejection.
+func TestServices_CancelHandler_ServeHTTP_Ugly(t *testing.T) {
+	handler := NewCancelHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &serviceModel{stubModel: &stubModel{}}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultCancelPath, strings.NewReader(`{"model":"qwen"}`)))
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"param":"id"`) {
+		t.Fatalf("status = %d body=%s, want 400 param=id", rec.Code, rec.Body.String())
 	}
 }
