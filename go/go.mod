@@ -4,7 +4,7 @@ go 1.26.2
 
 require (
 	dappco.re/go v0.11.0
-	dappco.re/go/api v0.17.1
+	dappco.re/go/api v0.18.0
 	dappco.re/go/cgo v0.11.2
 	dappco.re/go/cli v0.11.1
 	dappco.re/go/i18n v0.12.1
@@ -14,7 +14,7 @@ require (
 	dappco.re/go/process v0.16.1
 	dappco.re/go/rag v0.15.1
 	dappco.re/go/ratelimit v0.12.1
-	dappco.re/go/store v0.13.1
+	dappco.re/go/store v0.14.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/google/uuid v1.6.0
 	github.com/marcboeker/go-duckdb/v2 v2.4.3
@@ -100,7 +100,6 @@ require (
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/mailru/easyjson v0.9.2 // indirect
-	github.com/marcboeker/go-duckdb v1.8.5 // indirect
 	github.com/marcboeker/go-duckdb/arrowmapping v0.0.21 // indirect
 	github.com/marcboeker/go-duckdb/mapping v0.0.21 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
