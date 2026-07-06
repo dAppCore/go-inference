@@ -1329,14 +1329,21 @@ func (s *ArchSession) boundaryNormedHiddenInto(out []byte) ([]byte, error) {
 	if len(s.retainedHidden) != s.arch.Hidden*bf16Size {
 		return nil, core.NewError("native.ArchSession.BoundaryNormedHidden: no retained prefill state")
 	}
-	// retainedHidden is ALREADY the post-final-norm boundary hidden — the decode step
-	// norms before the head, and the head (BoundaryLogits) consumes it with no further
-	// norm. Re-norming here double-applied the final norm (outlier dims with trained
-	// gains ~30 blew up ~30×), which poisoned the hidden half of every MTP draft input
-	// and collapsed draft acceptance to ~0 — the cross-engine parity instrument
-	// (pkg/metal/model/gemma4 TestAssistantDraftParityNativeVsMetal) caught it: the
-	// probe equalled RMSNorm(metal's healthy seed)·w exactly. Copy, never re-norm.
+	// retainedHidden is the decode step's head-input vector: on the arch paths a
+	// unit-RMS hidden WITHOUT the final-norm gain (the head consumes it gain-folded;
+	// greedy argmax is scale-invariant, so logits stay correct either way). The MTP
+	// drafter, however, was trained on the reference boundary hidden — HF
+	// hidden_states[-1] = x̂ ⊙ (1+norm_w) — so export the FULL final RMSNorm: the
+	// rms() divides out whatever scalar the step retained (exact regardless of that
+	// path's internal scaling) and the gain restores the trained per-dim magnitudes.
+	// Without the gain the drafter's hidden half sat ~37× low against the trained
+	// pre_projection weights and every draft went target-blind (live MTP acceptance
+	// ~5%, HF-parity showed sum|ours| 214 vs reference 7958 with per-dim ratio
+	// tracking (1+norm_w)).
 	n := s.arch.Hidden * bf16Size
+	if len(s.finalNorm) == n {
+		return RMSNormBF16Into(out, s.retainedHidden, s.finalNorm, 1, s.arch.Hidden, s.arch.Eps)
+	}
 	if cap(out) < n {
 		out = make([]byte, n)
 	}
