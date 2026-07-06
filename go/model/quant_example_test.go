@@ -31,3 +31,13 @@ func ExampleBackendQuant() {
 	// 4
 	// false
 }
+
+// ExampleRegisterBackendQuant shows a backend's init()-time self-registration: it
+// records its quant compute keyed by its own name plus the scheme's Kind(), returning a
+// core.Result so a registration mistake (never happens today — Set on this registry
+// cannot fail) is still visible through the ordinary error-handling shape.
+func ExampleRegisterBackendQuant() {
+	r := RegisterBackendQuant("example-native", fakeQuant{kind: "affine", bits: 4, tag: 0x7})
+	core.Println(r.OK)
+	// Output: true
+}

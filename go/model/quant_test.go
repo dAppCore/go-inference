@@ -129,3 +129,83 @@ func TestBkKey(t *testing.T) {
 		t.Fatalf("bkKey = %q, want %q", got, "metal/q4_0")
 	}
 }
+
+// TestQuant_RegisterBackendQuant_Good covers the ordinary registration: it reports OK,
+// and the registered impl resolves through BackendQuant at its (backend,kind) key.
+func TestQuant_RegisterBackendQuant_Good(t *testing.T) {
+	r := RegisterBackendQuant("regtest-good", fakeQuant{kind: "affine", bits: 4, tag: 0x11})
+	if !r.OK {
+		t.Fatalf("RegisterBackendQuant: %s", r.Error())
+	}
+	q, ok := BackendQuant("regtest-good", "affine")
+	if !ok || q.Kind() != "affine" {
+		t.Fatalf("BackendQuant after registration = (%v,%v), want the registered impl", q, ok)
+	}
+}
+
+// TestQuant_RegisterBackendQuant_Bad covers re-registration under the SAME (backend,kind)
+// key: the registry is Open, so it still reports OK (never rejects a re-registration) and
+// the new impl replaces the old.
+func TestQuant_RegisterBackendQuant_Bad(t *testing.T) {
+	if r := RegisterBackendQuant("regtest-bad", fakeQuant{kind: "affine", bits: 4, tag: 0x01}); !r.OK {
+		t.Fatalf("first RegisterBackendQuant: %s", r.Error())
+	}
+	r := RegisterBackendQuant("regtest-bad", fakeQuant{kind: "affine", bits: 4, tag: 0x02})
+	if !r.OK {
+		t.Fatalf("re-RegisterBackendQuant must still report OK (Open registry): %s", r.Error())
+	}
+	q, _ := BackendQuant("regtest-bad", "affine")
+	out, _ := q.MatVec(nil, nil, nil, nil, 1, 1, 0, 4)
+	if out[0] != 0x02 {
+		t.Fatalf("re-registration did not overwrite: tag %#x, want 0x02", out[0])
+	}
+}
+
+// TestQuant_RegisterBackendQuant_Ugly covers registering DIFFERENT kinds under the SAME
+// backend name: each occupies its own (backend,kind) slot, so the second registration
+// must not clobber the first.
+func TestQuant_RegisterBackendQuant_Ugly(t *testing.T) {
+	if r := RegisterBackendQuant("regtest-ugly", fakeQuant{kind: "affine", bits: 4, tag: 0xa}); !r.OK {
+		t.Fatalf("register affine: %s", r.Error())
+	}
+	if r := RegisterBackendQuant("regtest-ugly", fakeQuant{kind: "q4_0", bits: 4, tag: 0xb}); !r.OK {
+		t.Fatalf("register q4_0: %s", r.Error())
+	}
+	qa, ok := BackendQuant("regtest-ugly", "affine")
+	if !ok || qa.Kind() != "affine" {
+		t.Fatalf("BackendQuant(regtest-ugly,affine) = (%v,%v), want the affine impl still present", qa, ok)
+	}
+	qb, ok := BackendQuant("regtest-ugly", "q4_0")
+	if !ok || qb.Kind() != "q4_0" {
+		t.Fatalf("BackendQuant(regtest-ugly,q4_0) = (%v,%v), want the q4_0 impl", qb, ok)
+	}
+}
+
+// TestQuant_BackendQuant_Good covers the ordinary resolve: a registered (backend,kind)
+// returns its exact impl.
+func TestQuant_BackendQuant_Good(t *testing.T) {
+	RegisterBackendQuant("resolvetest-good", fakeQuant{kind: "affine", bits: 8, tag: 0x9})
+	q, ok := BackendQuant("resolvetest-good", "affine")
+	if !ok {
+		t.Fatal("BackendQuant: not found after registration")
+	}
+	if q.Bits() != 8 {
+		t.Fatalf("BackendQuant.Bits() = %d, want 8", q.Bits())
+	}
+}
+
+// TestQuant_BackendQuant_Bad covers an unregistered backend entirely: ok=false, nil impl.
+func TestQuant_BackendQuant_Bad(t *testing.T) {
+	if q, ok := BackendQuant("never-registered-backend", "affine"); ok || q != nil {
+		t.Fatalf("BackendQuant(unregistered backend) = (%v,%v), want (nil,false)", q, ok)
+	}
+}
+
+// TestQuant_BackendQuant_Ugly covers a REGISTERED backend but an unregistered kind on
+// it: the (backend,kind) composite key means partial matches still miss.
+func TestQuant_BackendQuant_Ugly(t *testing.T) {
+	RegisterBackendQuant("resolvetest-ugly", fakeQuant{kind: "affine", bits: 4})
+	if q, ok := BackendQuant("resolvetest-ugly", "never-registered-kind"); ok || q != nil {
+		t.Fatalf("BackendQuant(registered backend, unregistered kind) = (%v,%v), want (nil,false)", q, ok)
+	}
+}
