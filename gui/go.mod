@@ -1,14 +1,21 @@
 module dappco.re/go/inference/gui
 
-go 1.26.0
+go 1.26.2
 
 require (
-	dappco.re/go v0.10.4
+	dappco.re/go v0.11.0
 	github.com/wailsapp/wails/v3 v3.0.0-alpha.96
 	golang.org/x/sys v0.43.0
 )
 
 require (
+	dappco.re/go/io v0.14.0 // indirect
+	forge.lthn.ai/Snider/Enchantrix v0.0.5 // indirect
+	github.com/tmc/apple v0.6.12 // indirect
+)
+
+require (
+	dappco.re/go/container v0.11.0
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
