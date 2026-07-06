@@ -64,6 +64,28 @@ func (r TextEmbeddingRequest) text() string {
 	return r.Input
 }
 
+// SessionTurn is one turn of a conversation as it comes back from session
+// history — a role ("user" / "assistant") and its text. It mirrors the shape of
+// session.Session.Turns / chathistory turns so a caller can score stored
+// history without reshaping it.
+type SessionTurn struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// SessionScoreRequest is the body for POST /score/session — a conversation's
+// turns to score after the fact.
+type SessionScoreRequest struct {
+	Turns []SessionTurn `json:"turns"`
+}
+
+// SessionScoreResponse returns one DiffResult per assistant turn, each scored
+// against the user turn that preceded it — the same (prompt, response) pairing
+// the live pipeline scorer applies, run retroactively over history.
+type SessionScoreResponse struct {
+	Scores []lek.DiffResult `json:"scores"`
+}
+
 // behaviouralVector lays the grammar imprint out as a fixed-order float
 // vector — the behavioural fingerprint in embedding form, stable across calls
 // so two vectors are directly comparable. Order follows the ImprintScores

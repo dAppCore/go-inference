@@ -47,7 +47,7 @@ func ExampleAIProvider_RegisterRoutes() {
 
 	core.Println(len(router.Routes()))
 	// Output:
-	// 6
+	// 7
 }
 
 func ExampleAIProvider_Describe() {
@@ -57,6 +57,6 @@ func ExampleAIProvider_Describe() {
 	core.Println(len(descriptions))
 	core.Println(descriptions[0].Summary)
 	// Output:
-	// 6
+	// 7
 	// Create a text embedding
 }

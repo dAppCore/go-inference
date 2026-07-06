@@ -125,6 +125,37 @@ func (p *AIProvider) scoreImprint(c *gin.Context) {
 	c.JSON(http.StatusOK, ImprintResponse{Imprint: lek.Imprint(text)})
 }
 
+// scoreSession runs the scorer after the fact over a conversation's turns from
+// session history: each assistant turn is scored against the user turn that
+// preceded it — the same lek.ScorePair pairing the live pipeline applies, so a
+// turn scored live and re-scored here is identical. Stateless: the caller
+// supplies the turns it loaded from history, so this needs no store binding.
+func (p *AIProvider) scoreSession(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	var req SessionScoreRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		respondError(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if len(req.Turns) == 0 {
+		respondError(c, http.StatusBadRequest, "invalid_request", "turns is required")
+		return
+	}
+	scores := make([]lek.DiffResult, 0, len(req.Turns))
+	lastUser := ""
+	for _, turn := range req.Turns {
+		switch turn.Role {
+		case "user":
+			lastUser = turn.Content
+		case "assistant":
+			scores = append(scores, lek.ScorePair(lastUser, turn.Content))
+		}
+	}
+	c.JSON(http.StatusOK, SessionScoreResponse{Scores: scores})
+}
+
 // getScore retrieves a stored score result. Still awaiting the persistence
 // backend decision — see architectureDecisionTODO.
 func (p *AIProvider) getScore(c *gin.Context) {

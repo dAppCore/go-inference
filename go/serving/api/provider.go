@@ -73,6 +73,7 @@ func (p *AIProvider) RegisterRoutes(rg *gin.RouterGroup) {
 	rg.POST("/embeddings/behavioural", p.embedBehavioural)
 	rg.POST("/score/content", p.scoreContent)
 	rg.POST("/score/imprint", p.scoreImprint)
+	rg.POST("/score/session", p.scoreSession)
 	rg.GET("/score/:id", p.getScore)
 	rg.GET("/health", p.health)
 }
@@ -144,6 +145,33 @@ func (p *AIProvider) Describe() []coreapi.RouteDescription {
 			Response: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{"imprint": map[string]any{"type": "object"}},
+			},
+		},
+		{
+			Method:      http.MethodPost,
+			Path:        "/score/session",
+			Summary:     "Score session history",
+			Description: "Runs the lem-scorer after the fact over a conversation's turns: each assistant turn is scored against the preceding user turn (the same pairing the live pipeline applies). Stateless — the caller supplies the turns loaded from session history. No model required.",
+			Tags:        []string{"ai", "scoring"},
+			RequestBody: map[string]any{
+				"type":     "object",
+				"required": []string{"turns"},
+				"properties": map[string]any{
+					"turns": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"role":    map[string]any{"type": "string"},
+								"content": map[string]any{"type": "string"},
+							},
+						},
+					},
+				},
+			},
+			Response: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"scores": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}},
 			},
 		},
 		{
