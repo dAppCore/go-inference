@@ -5,7 +5,6 @@ package api
 import (
 	"net/http"
 
-	"dappco.re/go/inference"
 	"dappco.re/go/inference/eval/score/lek"
 	"github.com/gin-gonic/gin"
 )
@@ -13,48 +12,6 @@ import (
 // architectureDecisionTODO flags the one surface still awaiting a design call:
 // where scored results are persisted (the getScore retrieval path).
 const architectureDecisionTODO = "architectural-decision-needed: score-persistence backend (go-store KV) not yet selected"
-
-// embedText returns a neural text-embedding vector from the injected
-// embedding model. Reports 503 when the provider was built without one
-// (WithEmbedder), keeping the model-free scoring endpoints usable regardless.
-func (p *AIProvider) embedText(c *gin.Context) {
-	if c == nil {
-		return
-	}
-	var req TextEmbeddingRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		respondError(c, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	text := req.text()
-	if text == "" {
-		respondError(c, http.StatusBadRequest, "invalid_request", "text is required")
-		return
-	}
-	if p == nil || p.embedder == nil {
-		respondError(c, http.StatusServiceUnavailable, "no_embedding_model", "no embedding model is configured for this provider")
-		return
-	}
-	result, err := p.embedder.Embed(c.Request.Context(), inference.EmbeddingRequest{
-		Model:     req.Model,
-		Input:     []string{text},
-		Normalize: true,
-	})
-	if err != nil {
-		respondError(c, http.StatusInternalServerError, "embedding_failed", err.Error())
-		return
-	}
-	var vec []float32
-	if result != nil && len(result.Vectors) > 0 {
-		vec = result.Vectors[0]
-	}
-	c.JSON(http.StatusOK, EmbeddingResponse{
-		Object:     "embedding",
-		Embedding:  vec,
-		Dimensions: len(vec),
-		Model:      req.Model,
-	})
-}
 
 // embedBehavioural returns the grammar imprint as a behavioural fingerprint
 // vector. The imprint IS the behavioural embedding — a fixed-order projection

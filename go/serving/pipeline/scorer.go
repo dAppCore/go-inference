@@ -13,11 +13,8 @@ import (
 // response) with lek.ScorePair so the metadata carries the cross-text
 // differential + authority signal — sycophancy relative to the prompt, not the
 // response in isolation. Pure and non-blocking: it reads the turn and returns a
-// bundle, it never touches the response text.
-//
-// The neural turn embedding is deliberately absent here: it rides from the
-// decode return (serving.Result), not from a second model — until decode
-// surfaces it, only the semantic score is recorded.
+// bundle, it never touches the response text. Model-free — the score is derived
+// entirely from the text.
 type scorerAdapter struct{}
 
 // Score implements Scorer. It JSON-encodes the DiffResult under the "score"

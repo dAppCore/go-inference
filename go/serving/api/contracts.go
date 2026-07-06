@@ -37,31 +37,14 @@ type ImprintResponse struct {
 	Imprint *lek.ImprintScores `json:"imprint"`
 }
 
-// EmbeddingResponse is the vector output of both embedding endpoints — the
-// neural vector from /embeddings/text and the grammar-imprint vector from
-// /embeddings/behavioural. Object distinguishes the two ("embedding" vs
-// "behavioural_embedding"); Dimensions is len(Embedding).
+// EmbeddingResponse is the vector output of POST /embeddings/behavioural — the
+// grammar-imprint vector (the behavioural fingerprint). Object is
+// "behavioural_embedding"; Dimensions is len(Embedding). Model-free, derived
+// entirely from the lem-scorer imprint.
 type EmbeddingResponse struct {
 	Object     string    `json:"object"`
 	Embedding  []float32 `json:"embedding"`
 	Dimensions int       `json:"dimensions"`
-	Model      string    `json:"model,omitempty"`
-}
-
-// TextEmbeddingRequest is the body for POST /embeddings/text. Text is the
-// primary field; Input is accepted as the OpenAI-style alias.
-type TextEmbeddingRequest struct {
-	Text  string `json:"text,omitempty"`
-	Input string `json:"input,omitempty"`
-	Model string `json:"model,omitempty"`
-}
-
-// text returns the input text, accepting either the text or input field.
-func (r TextEmbeddingRequest) text() string {
-	if r.Text != "" {
-		return r.Text
-	}
-	return r.Input
 }
 
 // SessionTurn is one turn of a conversation as it comes back from session
@@ -113,8 +96,8 @@ func behaviouralVector(s *lek.ImprintScores) []float32 {
 	}
 }
 
-// embeddingSchema is the OpenAPI response schema shared by both embedding
-// endpoints (an object carrying the vector, its length, and the model name).
+// embeddingSchema is the OpenAPI response schema for /embeddings/behavioural
+// (an object carrying the vector and its length).
 func embeddingSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
@@ -122,7 +105,6 @@ func embeddingSchema() map[string]any {
 			"object":     map[string]any{"type": "string"},
 			"embedding":  map[string]any{"type": "array", "items": map[string]any{"type": "number"}},
 			"dimensions": map[string]any{"type": "integer"},
-			"model":      map[string]any{"type": "string"},
 		},
 	}
 }
