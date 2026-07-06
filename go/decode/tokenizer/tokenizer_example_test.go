@@ -4,6 +4,20 @@ package tokenizer
 
 import core "dappco.re/go"
 
+func ExampleIndexIn() {
+	core.Println(IndexIn("hello world", "world"))
+	core.Println(IndexIn("hello world", "xyz"))
+	// Output:
+	// 6
+	// -1
+}
+
+func ExampleNewForDecode() {
+	tok := NewForDecode(map[int32]string{5: "he", 6: "ll", 3: "o"})
+	core.Println(tok.Decode([]int32{5, 6, 3}))
+	// Output: hello
+}
+
 func ExampleLoadTokenizer() {
 	tok, cleanup := mustExampleTokenizer()
 	defer cleanup()
@@ -34,6 +48,14 @@ func ExampleTokenizer_DecodeToken() {
 
 	core.Println(tok.DecodeToken(5), tok.DecodeToken(7))
 	// Output: he  h
+}
+
+func ExampleTokenizer_DecodeOne() {
+	tok, cleanup := mustExampleTokenizer()
+	defer cleanup()
+
+	core.Println(tok.DecodeOne(5), tok.DecodeOne(7))
+	// Output: he h
 }
 
 func ExampleTokenizer_BOSToken() {
