@@ -11,10 +11,10 @@ import (
 	"dappco.re/go/inference/model/state/session/internal/sessionfake"
 )
 
-// TestArtifact_ExportArtifacts_Good captures the retained KV state and
+// TestArtifact_Session_ExportArtifacts_Good captures the retained KV state and
 // exports it as an in-memory artifact record (empty Options.KVPath keeps
 // the export off disk).
-func TestArtifact_ExportArtifacts_Good(t *testing.T) {
+func TestArtifact_Session_ExportArtifacts_Good(t *testing.T) {
 	native := &sessionfake.Handle{KV: sessionfake.TestKVSnapshot()}
 	session := &Session{session: native}
 
@@ -43,10 +43,10 @@ func TestArtifact_ExportArtifacts_Good(t *testing.T) {
 	}
 }
 
-// TestArtifact_ExportArtifacts_WritesKVPath_Good exercises the KVPath
+// TestArtifact_Session_ExportArtifacts_WritesKVPath_Good exercises the KVPath
 // branch — the capture is additionally persisted to disk and the path is
 // echoed back on the record.
-func TestArtifact_ExportArtifacts_WritesKVPath_Good(t *testing.T) {
+func TestArtifact_Session_ExportArtifacts_WritesKVPath_Good(t *testing.T) {
 	native := &sessionfake.Handle{KV: sessionfake.TestKVSnapshot()}
 	session := &Session{session: native}
 	path := core.PathJoin(t.TempDir(), "artifact.kvbin")
@@ -71,9 +71,9 @@ func TestArtifact_ExportArtifacts_WritesKVPath_Good(t *testing.T) {
 	}
 }
 
-// TestArtifact_ExportArtifacts_Bad — a nil session cannot capture state,
+// TestArtifact_Session_ExportArtifacts_Bad — a nil session cannot capture state,
 // so the export fails before it reaches the artifact package.
-func TestArtifact_ExportArtifacts_Bad(t *testing.T) {
+func TestArtifact_Session_ExportArtifacts_Bad(t *testing.T) {
 	var session *Session
 
 	record, err := session.ExportArtifacts(artifact.Options{Model: "gemma4-1b"})
@@ -86,9 +86,9 @@ func TestArtifact_ExportArtifacts_Bad(t *testing.T) {
 	}
 }
 
-// TestArtifact_ExportArtifacts_Ugly — the native capture fails, and the
+// TestArtifact_Session_ExportArtifacts_Ugly — the native capture fails, and the
 // error propagates out of ExportArtifacts untouched.
-func TestArtifact_ExportArtifacts_Ugly(t *testing.T) {
+func TestArtifact_Session_ExportArtifacts_Ugly(t *testing.T) {
 	wantErr := core.NewError("capture exploded")
 	session := &Session{session: &sessionfake.Handle{
 		KV:         sessionfake.TestKVSnapshot(),
