@@ -381,8 +381,12 @@ func (m *TextModel) BatchGenerate(ctx context.Context, prompts []string, opts ..
 }
 
 // NewSession opens a fresh persistent conversation session over the loaded
-// model, or nil when a session cannot be opened (SessionFactory).
+// model, or nil when a session cannot be opened (SessionFactory) — including
+// on a nil receiver, mirroring the other capability probes.
 func (m *TextModel) NewSession() inference.SessionHandle {
+	if m == nil {
+		return nil
+	}
 	sess, err := m.openSession()
 	if err != nil {
 		m.setErr(err)
@@ -391,9 +395,22 @@ func (m *TextModel) NewSession() inference.SessionHandle {
 	return NewSessionHandle(m, sess)
 }
 
-func (m *TextModel) ModelType() string { return m.modelType }
+// ModelType reports the architecture selector; empty on a nil receiver, like
+// Close/Capabilities tolerate one.
+func (m *TextModel) ModelType() string {
+	if m == nil {
+		return ""
+	}
+	return m.modelType
+}
 
-func (m *TextModel) Info() inference.ModelInfo { return m.info }
+// Info reports the loaded model's neutral metadata; zero on a nil receiver.
+func (m *TextModel) Info() inference.ModelInfo {
+	if m == nil {
+		return inference.ModelInfo{}
+	}
+	return m.info
+}
 
 // CacheModeReporter is the optional seam a concrete engine [TokenModel]
 // implements to declare which KV cache modes it honours as a load-time selector.
@@ -419,13 +436,23 @@ func (m *TextModel) Capabilities() inference.CapabilityReport {
 	return report
 }
 
+// Metrics reports the last generate run's token/timing counters; zero on a
+// nil receiver.
 func (m *TextModel) Metrics() inference.GenerateMetrics {
+	if m == nil {
+		return inference.GenerateMetrics{}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lastMetrics
 }
 
+// Err reports the last run's error state; an uninitialised-model failure on a
+// nil receiver rather than a panic.
 func (m *TextModel) Err() core.Result {
+	if m == nil {
+		return core.Fail(core.NewError("engine.TextModel: model is not initialised"))
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lastErr
