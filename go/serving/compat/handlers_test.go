@@ -12,6 +12,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	ollamacompat "dappco.re/go/inference/serving/provider/ollama"
 	openaicompat "dappco.re/go/inference/serving/provider/openai"
 )
 
@@ -135,6 +136,24 @@ func TestOllamaGenerateHandler_UnknownModel_Bad(t *testing.T) {
 	}
 }
 
+// TestOllamaGenerateHandler_MethodRejection_Bad pins the /api/generate method
+// gate (POST-only) — a GET is 405 before any body work.
+func TestOllamaGenerateHandler_MethodRejection_Bad(t *testing.T) {
+	rec := do(t, http.MethodGet, "/api/generate", "")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /api/generate = %d, want 405", rec.Code)
+	}
+}
+
+// TestOllamaGenerateHandler_BadBody_Ugly pins that a malformed JSON body is a
+// 400, not a panic or a 500.
+func TestOllamaGenerateHandler_BadBody_Ugly(t *testing.T) {
+	rec := do(t, http.MethodPost, "/api/generate", "{not json")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /api/generate malformed = %d, want 400", rec.Code)
+	}
+}
+
 // TestOllamaShowHandler_Good pins /api/show: it reports the resolved model's
 // architecture + model_type from Info without running a decode.
 func TestOllamaShowHandler_Good(t *testing.T) {
@@ -148,6 +167,23 @@ func TestOllamaShowHandler_Good(t *testing.T) {
 	}
 }
 
+// TestOllamaShowHandler_MethodRejection_Bad pins the /api/show method gate
+// (POST-only) — a GET is 405 before any model work.
+func TestOllamaShowHandler_MethodRejection_Bad(t *testing.T) {
+	rec := do(t, http.MethodGet, "/api/show", "")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /api/show = %d, want 405", rec.Code)
+	}
+}
+
+// TestOllamaShowHandler_BadBody_Ugly pins that a malformed JSON body is a 400.
+func TestOllamaShowHandler_BadBody_Ugly(t *testing.T) {
+	rec := do(t, http.MethodPost, "/api/show", "{not json")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /api/show malformed = %d, want 400", rec.Code)
+	}
+}
+
 // TestAnthropicMessagesHandler_MethodRejection_Bad pins the /v1/messages method
 // gate (POST-only) — a GET is 405 before any model work.
 func TestAnthropicMessagesHandler_MethodRejection_Bad(t *testing.T) {
@@ -157,12 +193,30 @@ func TestAnthropicMessagesHandler_MethodRejection_Bad(t *testing.T) {
 	}
 }
 
+// TestAnthropicMessagesHandler_BadBody_Ugly pins that a malformed JSON body
+// is a 400, not a panic or a 500.
+func TestAnthropicMessagesHandler_BadBody_Ugly(t *testing.T) {
+	rec := do(t, http.MethodPost, "/v1/messages", "{not json")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /v1/messages malformed = %d, want 400", rec.Code)
+	}
+}
+
 // TestOpenAIResponsesHandler_MethodRejection_Bad pins the /v1/responses method
 // gate (POST-only).
 func TestOpenAIResponsesHandler_MethodRejection_Bad(t *testing.T) {
 	rec := do(t, http.MethodGet, "/v1/responses", "")
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("GET /v1/responses = %d, want 405", rec.Code)
+	}
+}
+
+// TestOpenAIResponsesHandler_BadBody_Ugly pins that a malformed JSON body is
+// a 400, not a panic or a 500.
+func TestOpenAIResponsesHandler_BadBody_Ugly(t *testing.T) {
+	rec := do(t, http.MethodPost, "/v1/responses", "{not json")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /v1/responses malformed = %d, want 400", rec.Code)
 	}
 }
 
@@ -247,6 +301,56 @@ func TestOpenAIResponsesHandler_MissingModel_Bad(t *testing.T) {
 	rec := do(t, http.MethodPost, "/v1/responses", `{"input":[{"role":"user","content":"hi"}]}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("POST /v1/responses no model = %d, want 400", rec.Code)
+	}
+}
+
+// TestOllamaTagsHandler_MethodRejection_Bad pins the /api/tags method gate
+// (GET-only) — a POST is 405 before any model listing.
+func TestOllamaTagsHandler_MethodRejection_Bad(t *testing.T) {
+	rec := do(t, http.MethodPost, ollamacompat.DefaultTagsPath, "")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /api/tags = %d, want 405", rec.Code)
+	}
+}
+
+// TestOllamaTagsHandler_NoModelNames_Good pins /api/tags against the plain
+// StaticResolver testMux() uses: it doesn't advertise a model list (no
+// ModelNames() method), so tags comes back empty rather than erroring.
+func TestOllamaTagsHandler_NoModelNames_Good(t *testing.T) {
+	rec := do(t, http.MethodGet, ollamacompat.DefaultTagsPath, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/tags = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if got, want := rec.Body.String(), `{"models":[]}`; got != want {
+		t.Fatalf("/api/tags body = %s, want %s", got, want)
+	}
+}
+
+// namedStaticResolver pairs a StaticResolver with a ModelNames() listing —
+// /api/tags only reports models for a resolver that advertises its own names.
+type namedStaticResolver struct {
+	*openaicompat.StaticResolver
+	names []string
+}
+
+func (r *namedStaticResolver) ModelNames() []string { return r.names }
+
+// TestOllamaTagsHandler_HappyPath_Good pins /api/tags: it lists a
+// name-advertising resolver's known models as Ollama tag entries, without
+// touching the model itself (no Generate/Chat call).
+func TestOllamaTagsHandler_HappyPath_Good(t *testing.T) {
+	resolver := &namedStaticResolver{
+		StaticResolver: openaicompat.NewStaticResolver(map[string]inference.TextModel{"test-model": newFakeTextModel()}),
+		names:          []string{"test-model"},
+	}
+	mux := NewMux(resolver)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, ollamacompat.DefaultTagsPath, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/tags = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !core.Contains(rec.Body.String(), "test-model") {
+		t.Fatalf("/api/tags body = %s, want the resolver's known model name", rec.Body.String())
 	}
 }
 
