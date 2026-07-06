@@ -10,6 +10,7 @@ import (
 	"time"
 
 	core "dappco.re/go"
+	coreprovider "dappco.re/go/api/pkg/provider"
 	"github.com/gin-gonic/gin"
 )
 
@@ -23,6 +24,28 @@ func TestProvider_NewProvider_Good(t *testing.T) {
 	}
 }
 
+// TestProvider_NewProvider_Bad proves NewProvider always allocates a fresh
+// wrapper — two calls never alias the same *Provider.
+func TestProvider_NewProvider_Bad(t *testing.T) {
+	first := NewProvider(&Service{})
+	second := NewProvider(&Service{})
+	if first == second {
+		t.Fatal("NewProvider returned the same *Provider instance across two calls")
+	}
+}
+
+// TestProvider_NewProvider_Ugly covers the intended aliasing edge: two
+// providers wrapping the SAME underlying Service must share it (the wrapper
+// is thin — it never copies the Service it's given).
+func TestProvider_NewProvider_Ugly(t *testing.T) {
+	svc := &Service{}
+	first := NewProvider(svc)
+	second := NewProvider(svc)
+	if first.svc != second.svc {
+		t.Fatal("NewProvider wrapping the same Service produced providers pointing at different services")
+	}
+}
+
 func TestProvider_Name_Good(t *testing.T) {
 	p := NewProvider(nil)
 	if got := p.Name(); got != "driver" {
@@ -30,10 +53,48 @@ func TestProvider_Name_Good(t *testing.T) {
 	}
 }
 
+// TestProvider_Name_Bad covers a nil receiver — Name() never touches p, so it
+// must still answer the constant rather than panic.
+func TestProvider_Name_Bad(t *testing.T) {
+	var p *Provider
+	if got := p.Name(); got != "driver" {
+		t.Fatalf("Name() on a nil *Provider = %q, want %q", got, "driver")
+	}
+}
+
+// TestProvider_Name_Ugly proves Name() is idempotent regardless of the
+// wrapped Service's state.
+func TestProvider_Name_Ugly(t *testing.T) {
+	p := NewProvider(&Service{served: map[string]*Served{}})
+	first, second := p.Name(), p.Name()
+	if first != second || first != "driver" {
+		t.Fatalf("Name() = (%q, %q), want both calls to answer %q", first, second, "driver")
+	}
+}
+
 func TestProvider_BasePath_Good(t *testing.T) {
 	p := NewProvider(nil)
 	if got := p.BasePath(); got != "/v1/driver" {
 		t.Fatalf("BasePath() = %q, want %q", got, "/v1/driver")
+	}
+}
+
+// TestProvider_BasePath_Bad covers a nil receiver — BasePath() never touches
+// p, so it must still answer the constant rather than panic.
+func TestProvider_BasePath_Bad(t *testing.T) {
+	var p *Provider
+	if got := p.BasePath(); got != "/v1/driver" {
+		t.Fatalf("BasePath() on a nil *Provider = %q, want %q", got, "/v1/driver")
+	}
+}
+
+// TestProvider_BasePath_Ugly proves BasePath() is idempotent regardless of
+// the wrapped Service's state.
+func TestProvider_BasePath_Ugly(t *testing.T) {
+	p := NewProvider(&Service{served: map[string]*Served{}})
+	first, second := p.BasePath(), p.BasePath()
+	if first != second || first != "/v1/driver" {
+		t.Fatalf("BasePath() = (%q, %q), want both calls to answer %q", first, second, "/v1/driver")
 	}
 }
 
@@ -73,6 +134,23 @@ func TestProvider_RegisterRoutes_Bad(t *testing.T) {
 	p.RegisterRoutes(grp)
 	if len(engine.Routes()) != 0 {
 		t.Fatalf("RegisterRoutes on a nil provider registered %d routes, want 0", len(engine.Routes()))
+	}
+}
+
+// TestProvider_RegisterRoutes_Ugly covers the nil-group guard on an
+// otherwise-valid provider — a nil *gin.RouterGroup must be a safe no-op too.
+func TestProvider_RegisterRoutes_Ugly(t *testing.T) {
+	p := NewProvider(&Service{served: map[string]*Served{}})
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("RegisterRoutes(nil) panicked: %v", r)
+			}
+		}()
+		p.RegisterRoutes(nil)
+	}()
+	if got := p.Name(); got != "driver" {
+		t.Fatalf("Name() after RegisterRoutes(nil) = %q, want %q", got, "driver")
 	}
 }
 
@@ -245,4 +323,74 @@ func TestProvider_Fail_Good(t *testing.T) {
 	if got["OK"] != false || got["error"] != "boom" {
 		t.Fatalf("fail(\"boom\") = %+v, want {OK:false, error:\"boom\"}", got)
 	}
+}
+
+// --- Describe ---
+
+// TestProvider_Describe_Good verifies the driver-orchestration route group is
+// OpenAPI-describable and surfaces every route it registers, so the core/api
+// engine mounts it into the generated spec (and the SDK generators emit a typed
+// client for it).
+func TestProvider_Describe_Good(t *testing.T) {
+	var _ coreprovider.Describable = (*Provider)(nil)
+
+	p := NewProvider(nil)
+	want := map[string]bool{
+		http.MethodGet + " /models": false,
+		http.MethodPost + " /serve": false,
+		http.MethodGet + " /status": false,
+		http.MethodPost + " /stop":  false,
+	}
+	descriptions := p.Describe()
+	if len(descriptions) == 0 {
+		t.Fatal("Describe returned no route descriptions")
+	}
+	for _, desc := range descriptions {
+		if _, ok := want[desc.Method+" "+desc.Path]; ok {
+			want[desc.Method+" "+desc.Path] = true
+		}
+	}
+	for key, seen := range want {
+		if !seen {
+			t.Fatalf("expected route description for %s", key)
+		}
+	}
+}
+
+// TestProvider_Describe_Bad covers a nil receiver — Describe() builds its
+// descriptions from static data only, never touching p, so it must still
+// answer the full route list rather than panic.
+func TestProvider_Describe_Bad(t *testing.T) {
+	var p *Provider
+	descriptions := p.Describe()
+	if len(descriptions) != 4 {
+		t.Fatalf("Describe() on a nil *Provider returned %d descriptions, want 4", len(descriptions))
+	}
+}
+
+// TestProvider_Describe_Ugly checks the /serve route's request-body schema
+// carries the full ServeRequest field set — the detail the SDK generators
+// rely on to emit a typed client, not just the route list.
+func TestProvider_Describe_Ugly(t *testing.T) {
+	p := NewProvider(nil)
+	for _, desc := range p.Describe() {
+		if desc.Method != http.MethodPost || desc.Path != "/serve" {
+			continue
+		}
+		body := desc.RequestBody
+		if body == nil {
+			t.Fatal("/serve RequestBody is nil, want a map schema")
+		}
+		props, ok := body["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("/serve RequestBody properties = %T, want a map", body["properties"])
+		}
+		for _, field := range []string{"model", "profile", "runtime", "addr", "context", "noAutoProfile"} {
+			if _, ok := props[field]; !ok {
+				t.Fatalf("/serve RequestBody schema missing field %q", field)
+			}
+		}
+		return
+	}
+	t.Fatal("Describe() did not include the /serve route")
 }
