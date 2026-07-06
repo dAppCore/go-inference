@@ -781,3 +781,215 @@ func ExampleTensorReader_Close() {
 	// Output:
 	// closed
 }
+
+// ExampleNewShardCache opens two tensors from the SAME shard through one cache — the
+// shard is opened once and the handle is reused for every ref in that file.
+func ExampleNewShardCache() {
+	path, cleanup, err := twoTensorFile()
+	if err != nil {
+		fmt.Println("fixture:", err)
+		return
+	}
+	defer cleanup()
+
+	index, err := safetensors.ReadIndex(path)
+	if err != nil {
+		fmt.Println("read index:", err)
+		return
+	}
+	cache := safetensors.NewShardCache()
+	defer cache.Close()
+
+	reader, err := cache.Reader(index.Tensors["alpha"])
+	if err != nil {
+		fmt.Println("cache reader:", err)
+		return
+	}
+	values, err := reader.ReadValues()
+	if err != nil {
+		fmt.Println("read values:", err)
+		return
+	}
+	fmt.Println(values)
+	// Output:
+	// [1 2 3]
+}
+
+// ExampleShardCache_Reader returns a TensorReader bound to a cache-owned handle — the
+// caller reads through the reader exactly as it would one opened by OpenReader.
+func ExampleShardCache_Reader() {
+	path, cleanup, err := twoTensorFile()
+	if err != nil {
+		fmt.Println("fixture:", err)
+		return
+	}
+	defer cleanup()
+
+	index, err := safetensors.ReadIndex(path)
+	if err != nil {
+		fmt.Println("read index:", err)
+		return
+	}
+	cache := safetensors.NewShardCache()
+	defer cache.Close()
+
+	reader, err := cache.Reader(index.Tensors["beta"])
+	if err != nil {
+		fmt.Println("cache reader:", err)
+		return
+	}
+	chunk, err := reader.ReadFloat32Chunk(0, 2)
+	if err != nil {
+		fmt.Println("read chunk:", err)
+		return
+	}
+	fmt.Println(chunk)
+	// Output:
+	// [4 5]
+}
+
+// ExampleShardCache_ReadRefValues is the ref-in/values-out shape over a cache-owned
+// handle — byte-identical to the package-level ReadRefValues for callers that don't
+// want to hold a TensorReader.
+func ExampleShardCache_ReadRefValues() {
+	path, cleanup, err := twoTensorFile()
+	if err != nil {
+		fmt.Println("fixture:", err)
+		return
+	}
+	defer cleanup()
+
+	index, err := safetensors.ReadIndex(path)
+	if err != nil {
+		fmt.Println("read index:", err)
+		return
+	}
+	cache := safetensors.NewShardCache()
+	defer cache.Close()
+
+	values, err := cache.ReadRefValues(index.Tensors["alpha"])
+	if err != nil {
+		fmt.Println("cache read values:", err)
+		return
+	}
+	fmt.Println(values)
+	// Output:
+	// [1 2 3]
+}
+
+// ExampleShardCache_ReadRefRaw reads a ref's raw payload over a cache-owned handle —
+// byte-identical to the package-level ReadRefRaw.
+func ExampleShardCache_ReadRefRaw() {
+	path, cleanup, err := twoTensorFile()
+	if err != nil {
+		fmt.Println("fixture:", err)
+		return
+	}
+	defer cleanup()
+
+	index, err := safetensors.ReadIndex(path)
+	if err != nil {
+		fmt.Println("read index:", err)
+		return
+	}
+	cache := safetensors.NewShardCache()
+	defer cache.Close()
+
+	raw, err := cache.ReadRefRaw(index.Tensors["beta"])
+	if err != nil {
+		fmt.Println("cache read raw:", err)
+		return
+	}
+	fmt.Printf("%d raw bytes\n", len(raw))
+	// Output:
+	// 8 raw bytes
+}
+
+// ExampleShardCache_Close releases every handle the cache opened. It is safe to call on
+// an empty (never-used) cache, so it is the natural deferred cleanup right after
+// NewShardCache.
+func ExampleShardCache_Close() {
+	path, cleanup, err := twoTensorFile()
+	if err != nil {
+		fmt.Println("fixture:", err)
+		return
+	}
+	defer cleanup()
+
+	index, err := safetensors.ReadIndex(path)
+	if err != nil {
+		fmt.Println("read index:", err)
+		return
+	}
+	cache := safetensors.NewShardCache()
+	if _, err := cache.Reader(index.Tensors["alpha"]); err != nil {
+		fmt.Println("cache reader:", err)
+		return
+	}
+	cache.Close()
+	fmt.Println("closed")
+	// Output:
+	// closed
+}
+
+// ExampleTensorReader_ReadValues reads and decodes the bound ref's full payload over
+// the reader's own shard handle — the open-handle equivalent of ReadRefValues.
+func ExampleTensorReader_ReadValues() {
+	path, cleanup, err := twoTensorFile()
+	if err != nil {
+		fmt.Println("fixture:", err)
+		return
+	}
+	defer cleanup()
+
+	index, err := safetensors.ReadIndex(path)
+	if err != nil {
+		fmt.Println("read index:", err)
+		return
+	}
+	reader, err := safetensors.OpenReader(index.Tensors["beta"])
+	if err != nil {
+		fmt.Println("open reader:", err)
+		return
+	}
+	defer reader.Close()
+	values, err := reader.ReadValues()
+	if err != nil {
+		fmt.Println("read values:", err)
+		return
+	}
+	fmt.Println(values)
+	// Output:
+	// [4 5]
+}
+
+// ExampleTensorReader_ReadRaw reads the bound ref's raw payload over the reader's own
+// shard handle — the open-handle equivalent of ReadRefRaw.
+func ExampleTensorReader_ReadRaw() {
+	path, cleanup, err := twoTensorFile()
+	if err != nil {
+		fmt.Println("fixture:", err)
+		return
+	}
+	defer cleanup()
+
+	index, err := safetensors.ReadIndex(path)
+	if err != nil {
+		fmt.Println("read index:", err)
+		return
+	}
+	reader, err := safetensors.OpenReader(index.Tensors["alpha"])
+	if err != nil {
+		fmt.Println("open reader:", err)
+		return
+	}
+	defer reader.Close()
+	raw, err := reader.ReadRaw()
+	if err != nil {
+		fmt.Println("read raw:", err)
+		return
+	}
+	fmt.Printf("%d raw bytes\n", len(raw))
+	// Output:
+	// 12 raw bytes
+}
