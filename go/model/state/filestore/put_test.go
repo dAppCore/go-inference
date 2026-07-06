@@ -12,7 +12,95 @@ import (
 	state "dappco.re/go/inference/model/state"
 )
 
-func TestFileStore_Good_StreamPayload(t *testing.T) {
+func TestPut_Store_Put_Good(t *testing.T) {
+	ctx := context.Background()
+	store, err := Create(ctx, core.PathJoin(t.TempDir(), "put-good.mvlog"))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer store.Close()
+	ref, err := store.Put(ctx, "hello", state.PutOptions{URI: "mlx://put/1"})
+	if err != nil {
+		t.Fatalf("Put() error = %v", err)
+	}
+	if ref.ChunkID != 1 {
+		t.Fatalf("Put() ref = %+v, want ChunkID 1", ref)
+	}
+	got, err := store.Get(ctx, ref.ChunkID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got != "hello" {
+		t.Fatalf("Get() = %q, want %q", got, "hello")
+	}
+}
+
+func TestPut_Store_Put_Bad(t *testing.T) {
+	if _, err := (*Store)(nil).Put(context.Background(), "x", state.PutOptions{}); !core.Is(err, errStoreNil) {
+		t.Fatalf("Put(nil store) error = %v, want errStoreNil", err)
+	}
+}
+
+func TestPut_Store_Put_Ugly(t *testing.T) {
+	store, err := Create(context.Background(), core.PathJoin(t.TempDir(), "put-ugly-closed.mvlog"))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if _, err := store.Put(context.Background(), "x", state.PutOptions{}); err == nil {
+		t.Fatal("Put(closed store) error = nil")
+	}
+}
+
+func TestPut_Store_PutBytes_Good(t *testing.T) {
+	ctx := context.Background()
+	store, err := Create(ctx, core.PathJoin(t.TempDir(), "putbytes-good.mvlog"))
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer store.Close()
+	ref, err := store.PutBytes(ctx, []byte("payload"), state.PutOptions{URI: "mlx://putbytes/1"})
+	if err != nil {
+		t.Fatalf("PutBytes() error = %v", err)
+	}
+	chunk, err := store.ResolveBytes(ctx, ref.ChunkID)
+	if err != nil {
+		t.Fatalf("ResolveBytes() error = %v", err)
+	}
+	if string(chunk.Data) != "payload" {
+		t.Fatalf("ResolveBytes() = %+v, want payload bytes", chunk)
+	}
+}
+
+func TestPut_Store_PutBytes_Bad(t *testing.T) {
+	if _, err := (*Store)(nil).PutBytes(context.Background(), []byte("x"), state.PutOptions{}); !core.Is(err, errStoreNil) {
+		t.Fatalf("PutBytes(nil store) error = %v, want errStoreNil", err)
+	}
+}
+
+func TestPut_Store_PutBytes_Ugly(t *testing.T) {
+	ctx := context.Background()
+	path := core.PathJoin(t.TempDir(), "putbytes-ugly-readonly.mvlog")
+	source, err := Create(ctx, path)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	store, err := OpenRegionWithSegmentAlias(ctx, path, 0, 0, "")
+	if err != nil {
+		t.Fatalf("OpenRegionWithSegmentAlias() error = %v", err)
+	}
+	defer store.Close()
+	if _, err := store.PutBytes(ctx, []byte("x"), state.PutOptions{}); !core.Is(err, errStoreReadOnly) {
+		t.Fatalf("PutBytes(read-only store) error = %v, want errStoreReadOnly", err)
+	}
+}
+
+func TestPut_Store_PutBytesStream_Good(t *testing.T) {
 	ctx := context.Background()
 	path := core.PathJoin(t.TempDir(), "stream.mvlog")
 	store, err := Create(ctx, path)
@@ -101,7 +189,7 @@ func TestFileStore_Bad_InvalidInputs(t *testing.T) {
 	}
 }
 
-func TestPutBytesStream_Bad_SeekError(t *testing.T) {
+func TestPut_Store_PutBytesStream_Bad(t *testing.T) {
 	ctx := context.Background()
 	path := core.PathJoin(t.TempDir(), "seek-fail.mvlog")
 	store, err := Create(ctx, path)
@@ -154,7 +242,7 @@ func TestPutBytesStream_Bad_WriteHeaderError(t *testing.T) {
 	}
 }
 
-func TestPutBytesStream_Bad_PhysicalOffsetError(t *testing.T) {
+func TestPut_Store_PutBytesStream_Ugly(t *testing.T) {
 	ctx := context.Background()
 	path := core.PathJoin(t.TempDir(), "region-write.mvlog")
 	if result := core.WriteFile(path, fileMagic, 0o600); !result.OK {
@@ -189,12 +277,25 @@ func TestPutBytesStream_Bad_PhysicalOffsetError(t *testing.T) {
 
 func TestRollbackWriteLocked_Good_NilReceiver(t *testing.T) {
 	var s *Store
+	// Must return immediately without touching any field or panicking —
+	// there is no receiver to dereference.
 	s.rollbackWriteLocked(0)
+	if s != nil {
+		t.Fatalf("nil receiver became non-nil: %v", s)
+	}
 }
 
 func TestRollbackWriteLocked_Good_NilFile(t *testing.T) {
 	s := &Store{}
 	s.rollbackWriteLocked(0)
+	// A Store with no open file must be left untouched: no Truncate/Seek
+	// attempted, no field mutated by the early-return guard.
+	if s.file != nil {
+		t.Fatalf("rollbackWriteLocked(nil file) set s.file = %v, want nil", s.file)
+	}
+	if s.writeAt != 0 {
+		t.Fatalf("rollbackWriteLocked(nil file) set s.writeAt = %d, want 0", s.writeAt)
+	}
 }
 
 func TestRollbackWriteLocked_Bad_PhysicalOffsetError(t *testing.T) {
