@@ -60,6 +60,32 @@ func ExampleSaveCheckpointMetadata() {
 	// loss: 0.9
 }
 
+// ExampleLoadCheckpointMetadata reads back a sidecar written by
+// SaveCheckpointMetadata — the shape a driver's --resume flag loads to
+// recover reproducible run state.
+func ExampleLoadCheckpointMetadata() {
+	baseResult := core.MkdirTemp("", "train-example-*")
+	if !baseResult.OK {
+		panic("tempdir failed")
+	}
+	dir := baseResult.Value.(string)
+	defer core.RemoveAll(dir)
+	path := core.PathJoin(dir, "step-7")
+
+	if err := train.SaveCheckpointMetadata(path, train.CheckpointMetadata{Step: 7, Epoch: 2}); err != nil {
+		panic(err)
+	}
+	meta, err := train.LoadCheckpointMetadata(path)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("step:", meta.Step)
+	fmt.Println("epoch:", meta.Epoch)
+	// Output:
+	// step: 7
+	// epoch: 2
+}
+
 // ExampleLoadResumeMetadata shows the soft-missing-file semantics a
 // driver's own loop relies on for --resume: a path that was never saved
 // yields (nil, nil), not an error, so a first run treats it as "start

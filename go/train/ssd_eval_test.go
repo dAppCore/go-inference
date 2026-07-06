@@ -28,7 +28,7 @@ func boolToCodeBenchmarkPassedTests(pass bool, total int) int {
 // sample is sampled NRepeat times with per-repeat seeds, candidates are
 // post-processed and executed, the report aggregates pass@k, and the JSON report
 // is written to OutputPath. The runner is pure hooks — no model, no Metal.
-func TestRunSSDCodeBenchmark_Good(t *testing.T) {
+func TestSsdEval_RunSSDCodeBenchmark_Good(t *testing.T) {
 	outputPath := core.PathJoin(t.TempDir(), "reports", "lcb.json")
 	var prompts []string
 	var configs []inference.GenerateConfig
@@ -107,7 +107,7 @@ func TestRunSSDCodeBenchmark_Good(t *testing.T) {
 // TestRunSSDCodeBenchmark_Bad asserts the missing-hook rejections (no
 // Generate, no RunTests) and the empty-samples rejection — the benchmark needs
 // both hooks and at least one task.
-func TestRunSSDCodeBenchmark_Bad(t *testing.T) {
+func TestSsdEval_RunSSDCodeBenchmark_Bad(t *testing.T) {
 	if _, err := RunSSDCodeBenchmark(context.Background(), SSDCodeBenchmarkRunner{}, nil, SSDCodeBenchmarkConfig{}); err == nil {
 		t.Fatal("RunSSDCodeBenchmark() error = nil, want missing Generate")
 	}
@@ -131,7 +131,7 @@ func TestRunSSDCodeBenchmark_Bad(t *testing.T) {
 // an unset config floors NRepeat to 1 and the generate budget to the SSD
 // default, and a 10-repeat run estimates pass@5 (and per-difficulty) while
 // omitting pass@10.
-func TestRunSSDCodeBenchmark_Ugly(t *testing.T) {
+func TestSsdEval_RunSSDCodeBenchmark_Ugly(t *testing.T) {
 	t.Run("Defaults", func(t *testing.T) {
 		report, err := RunSSDCodeBenchmark(context.Background(), SSDCodeBenchmarkRunner{
 			Generate: func(context.Context, string, inference.GenerateConfig) (string, error) { return "solution", nil },
@@ -268,7 +268,7 @@ func TestRunSSDCodeBenchmark_RepeatLevelCancellation(t *testing.T) {
 // native samples, merging the prompt/starter-code, the public+private tests, and
 // the metadata. Two distinct row shapes (full record + minimal id/prompt/test)
 // both load.
-func TestLoadSSDCodeBenchmarkJSONL_Good(t *testing.T) {
+func TestSsdEval_LoadSSDCodeBenchmarkJSONL_Good(t *testing.T) {
 	raw := `{"question_id":"q1","question_content":"Write add.","starter_code":"def add(a,b):\n    pass","entry_point":"def add(a,b):\n    pass","is_stdin":false,"contest_date":"2025-03-01","public_test_cases":["assert add(1, 2) == 3"],"private_test_cases":["assert add(-1, 1) == 0"],"difficulty":"easy","platform":"leetcode"}`
 	raw += "\n"
 	raw += `{"id":"q2","prompt":"Write sub.","test":"assert sub(3, 1) == 2"}`
@@ -294,7 +294,7 @@ func TestLoadSSDCodeBenchmarkJSONL_Good(t *testing.T) {
 // TestLoadSSDCodeBenchmarkJSONL_Bad asserts the loud failures: malformed
 // JSON on a line errors with the line number, and an all-blank / no-prompt input
 // produces the no-samples error rather than an empty success.
-func TestLoadSSDCodeBenchmarkJSONL_Bad(t *testing.T) {
+func TestSsdEval_LoadSSDCodeBenchmarkJSONL_Bad(t *testing.T) {
 	if _, err := LoadSSDCodeBenchmarkJSONL(`{not valid json`); err == nil {
 		t.Fatal("LoadSSDCodeBenchmarkJSONL(malformed) error = nil, want parse failure")
 	}
@@ -307,7 +307,7 @@ func TestLoadSSDCodeBenchmarkJSONL_Bad(t *testing.T) {
 
 // TestLoadSSDCodeBenchmarkJSONL_Ugly asserts blank and whitespace-only
 // lines are skipped, so a file padded with empty lines still loads its real rows.
-func TestLoadSSDCodeBenchmarkJSONL_Ugly(t *testing.T) {
+func TestSsdEval_LoadSSDCodeBenchmarkJSONL_Ugly(t *testing.T) {
 	raw := "\n   \n" + `{"id":"q","prompt":"Write identity.","tests":["assert f(1) == 1"]}` + "\n\n"
 	samples, err := LoadSSDCodeBenchmarkJSONL(raw)
 	if err != nil {
@@ -322,7 +322,7 @@ func TestLoadSSDCodeBenchmarkJSONL_Ugly(t *testing.T) {
 
 // TestLoadSSDCodeBenchmarkJSONLFile_Good loads tasks from a JSONL file
 // path written to a temp dir.
-func TestLoadSSDCodeBenchmarkJSONLFile_Good(t *testing.T) {
+func TestSsdEval_LoadSSDCodeBenchmarkJSONLFile_Good(t *testing.T) {
 	path := core.PathJoin(t.TempDir(), "lcb.jsonl")
 	write := core.WriteFile(path, []byte(`{"id":"q","prompt":"Write identity.","tests":["assert f(1) == 1"]}`+"\n"), 0o644)
 	if !write.OK {
@@ -339,7 +339,7 @@ func TestLoadSSDCodeBenchmarkJSONLFile_Good(t *testing.T) {
 
 // TestLoadSSDCodeBenchmarkJSONLFile_Bad asserts a missing file path
 // surfaces the read error rather than returning empty samples.
-func TestLoadSSDCodeBenchmarkJSONLFile_Bad(t *testing.T) {
+func TestSsdEval_LoadSSDCodeBenchmarkJSONLFile_Bad(t *testing.T) {
 	if _, err := LoadSSDCodeBenchmarkJSONLFile(core.PathJoin(t.TempDir(), "does-not-exist.jsonl")); err == nil {
 		t.Fatal("LoadSSDCodeBenchmarkJSONLFile(missing) error = nil, want read failure")
 	}
@@ -348,7 +348,7 @@ func TestLoadSSDCodeBenchmarkJSONLFile_Bad(t *testing.T) {
 // TestLoadSSDCodeBenchmarkJSONLFile_Ugly asserts a file that exists but
 // holds only blank lines surfaces the no-samples error (the file read succeeds,
 // but parsing yields nothing).
-func TestLoadSSDCodeBenchmarkJSONLFile_Ugly(t *testing.T) {
+func TestSsdEval_LoadSSDCodeBenchmarkJSONLFile_Ugly(t *testing.T) {
 	path := core.PathJoin(t.TempDir(), "blank.jsonl")
 	if w := core.WriteFile(path, []byte("\n   \n\n"), 0o644); !w.OK {
 		t.Fatalf("WriteFile() error = %v", w.Value)
@@ -362,7 +362,7 @@ func TestLoadSSDCodeBenchmarkJSONLFile_Ugly(t *testing.T) {
 
 // TestLoadSSDLiveCodeBenchV6JSONL_Good parses then filters to the v6
 // contest-date window (Feb–May 2025), keeping only the in-window rows.
-func TestLoadSSDLiveCodeBenchV6JSONL_Good(t *testing.T) {
+func TestSsdEval_LoadSSDLiveCodeBenchV6JSONL_Good(t *testing.T) {
 	raw := `{"id":"jan","prompt":"old","contest_date":"2025-01-31"}`
 	raw += "\n"
 	raw += `{"id":"feb","prompt":"first v6","contest_date":"2025-02-01","difficulty":"easy"}`
@@ -386,7 +386,7 @@ func TestLoadSSDLiveCodeBenchV6JSONL_Good(t *testing.T) {
 // TestLoadSSDLiveCodeBenchV6JSONL_Bad asserts an input whose rows all
 // fall outside the v6 window yields the empty-subset error — a v6 load with no
 // v6 tasks is a failure, not a silent empty set.
-func TestLoadSSDLiveCodeBenchV6JSONL_Bad(t *testing.T) {
+func TestSsdEval_LoadSSDLiveCodeBenchV6JSONL_Bad(t *testing.T) {
 	if _, err := LoadSSDLiveCodeBenchV6JSONL(`{"id":"old","prompt":"old","contest_date":"2025-01-01"}`); err == nil {
 		t.Fatal("LoadSSDLiveCodeBenchV6JSONL(out-of-window) error = nil, want empty v6 subset")
 	}
@@ -399,7 +399,7 @@ func TestLoadSSDLiveCodeBenchV6JSONL_Bad(t *testing.T) {
 // TestLoadSSDLiveCodeBenchV6JSONL_Ugly asserts the window boundaries are
 // half-open [2025-02-01, 2025-06-01): the first instant is in, the upper bound
 // instant is out. A row with no contest_date is treated as out-of-window.
-func TestLoadSSDLiveCodeBenchV6JSONL_Ugly(t *testing.T) {
+func TestSsdEval_LoadSSDLiveCodeBenchV6JSONL_Ugly(t *testing.T) {
 	// Lower bound included, upper bound excluded, missing date excluded.
 	raw := `{"id":"lower","prompt":"in","contest_date":"2025-02-01"}` + "\n" +
 		`{"id":"upper","prompt":"out","contest_date":"2025-06-01"}` + "\n" +
@@ -417,7 +417,7 @@ func TestLoadSSDLiveCodeBenchV6JSONL_Ugly(t *testing.T) {
 
 // TestLoadSSDLiveCodeBenchV6JSONLFile_Good loads the v6 subset from a
 // file path.
-func TestLoadSSDLiveCodeBenchV6JSONLFile_Good(t *testing.T) {
+func TestSsdEval_LoadSSDLiveCodeBenchV6JSONLFile_Good(t *testing.T) {
 	path := core.PathJoin(t.TempDir(), "lcb-v6.jsonl")
 	write := core.WriteFile(path, []byte(`{"id":"q","prompt":"Write identity.","contest_date":"2025-03-15","tests":["assert f(1) == 1"]}`+"\n"), 0o644)
 	if !write.OK {
@@ -434,7 +434,7 @@ func TestLoadSSDLiveCodeBenchV6JSONLFile_Good(t *testing.T) {
 
 // TestLoadSSDLiveCodeBenchV6JSONLFile_Bad asserts a missing file path
 // surfaces the read error.
-func TestLoadSSDLiveCodeBenchV6JSONLFile_Bad(t *testing.T) {
+func TestSsdEval_LoadSSDLiveCodeBenchV6JSONLFile_Bad(t *testing.T) {
 	if _, err := LoadSSDLiveCodeBenchV6JSONLFile(core.PathJoin(t.TempDir(), "missing-v6.jsonl")); err == nil {
 		t.Fatal("LoadSSDLiveCodeBenchV6JSONLFile(missing) error = nil, want read failure")
 	}
@@ -443,7 +443,7 @@ func TestLoadSSDLiveCodeBenchV6JSONLFile_Bad(t *testing.T) {
 // TestLoadSSDLiveCodeBenchV6JSONLFile_Ugly asserts a file whose rows are
 // all outside the v6 window surfaces the empty-subset error after a successful
 // read.
-func TestLoadSSDLiveCodeBenchV6JSONLFile_Ugly(t *testing.T) {
+func TestSsdEval_LoadSSDLiveCodeBenchV6JSONLFile_Ugly(t *testing.T) {
 	path := core.PathJoin(t.TempDir(), "out-of-window.jsonl")
 	if w := core.WriteFile(path, []byte(`{"id":"old","prompt":"old","contest_date":"2024-12-31"}`+"\n"), 0o644); !w.OK {
 		t.Fatalf("WriteFile() error = %v", w.Value)
@@ -458,7 +458,7 @@ func TestLoadSSDLiveCodeBenchV6JSONLFile_Ugly(t *testing.T) {
 // TestFilterSSDLiveCodeBenchV6Samples_Good keeps only the samples whose
 // contest_date meta falls in the v6 window, dropping the rest and cloning the
 // survivors.
-func TestFilterSSDLiveCodeBenchV6Samples_Good(t *testing.T) {
+func TestSsdEval_FilterSSDLiveCodeBenchV6Samples_Good(t *testing.T) {
 	in := []SSDCodeBenchmarkSample{
 		{ID: "jan", Meta: map[string]string{"contest_date": "2025-01-15"}},
 		{ID: "mar", Meta: map[string]string{"contest_date": "2025-03-15"}},
@@ -479,7 +479,7 @@ func TestFilterSSDLiveCodeBenchV6Samples_Good(t *testing.T) {
 // TestFilterSSDLiveCodeBenchV6Samples_Bad asserts samples with no
 // contest_date (or an out-of-window one) are all dropped, yielding an empty
 // (non-nil) slice rather than passing them through.
-func TestFilterSSDLiveCodeBenchV6Samples_Bad(t *testing.T) {
+func TestSsdEval_FilterSSDLiveCodeBenchV6Samples_Bad(t *testing.T) {
 	in := []SSDCodeBenchmarkSample{
 		{ID: "nodate"},
 		{ID: "old", Meta: map[string]string{"contest_date": "2024-01-01"}},
@@ -494,7 +494,7 @@ func TestFilterSSDLiveCodeBenchV6Samples_Bad(t *testing.T) {
 // TestFilterSSDLiveCodeBenchV6Samples_Ugly asserts the empty input case
 // returns an empty result without panicking, and that a whitespace-padded
 // contest_date is trimmed before the window comparison.
-func TestFilterSSDLiveCodeBenchV6Samples_Ugly(t *testing.T) {
+func TestSsdEval_FilterSSDLiveCodeBenchV6Samples_Ugly(t *testing.T) {
 	if kept := FilterSSDLiveCodeBenchV6Samples(nil); len(kept) != 0 {
 		t.Fatalf("filtered nil = %+v, want empty", kept)
 	}
@@ -510,7 +510,7 @@ func TestFilterSSDLiveCodeBenchV6Samples_Ugly(t *testing.T) {
 // TestFormatSSDLiveCodeBenchPrompt_Good asserts both prompt shapes: a
 // stdin task gets the stdin/stdout framing, and a function task with an entry
 // point gets the starter-code framing.
-func TestFormatSSDLiveCodeBenchPrompt_Good(t *testing.T) {
+func TestSsdEval_FormatSSDLiveCodeBenchPrompt_Good(t *testing.T) {
 	stdinPrompt := FormatSSDLiveCodeBenchPrompt(SSDCodeBenchmarkSample{
 		Prompt: "Add two numbers.",
 		Meta:   map[string]string{"is_stdin": "true"},
@@ -529,7 +529,7 @@ func TestFormatSSDLiveCodeBenchPrompt_Good(t *testing.T) {
 
 // TestFormatSSDLiveCodeBenchPrompt_Bad asserts an empty prompt yields an
 // empty string — there is nothing to frame.
-func TestFormatSSDLiveCodeBenchPrompt_Bad(t *testing.T) {
+func TestSsdEval_FormatSSDLiveCodeBenchPrompt_Bad(t *testing.T) {
 	if got := FormatSSDLiveCodeBenchPrompt(SSDCodeBenchmarkSample{Meta: map[string]string{"is_stdin": "true"}}); got != "" {
 		t.Fatalf("empty-prompt format = %q, want empty string", got)
 	}
@@ -541,7 +541,7 @@ func TestFormatSSDLiveCodeBenchPrompt_Bad(t *testing.T) {
 // TestFormatSSDLiveCodeBenchPrompt_Ugly asserts the fallbacks: a nil
 // meta and an is_stdin=false sample with no entry point both fall back to the
 // default stdin/stdout framing rather than emitting a broken starter block.
-func TestFormatSSDLiveCodeBenchPrompt_Ugly(t *testing.T) {
+func TestSsdEval_FormatSSDLiveCodeBenchPrompt_Ugly(t *testing.T) {
 	noMeta := FormatSSDLiveCodeBenchPrompt(SSDCodeBenchmarkSample{Prompt: "Solve it."})
 	if !strings.Contains(noMeta, "stdin") || !strings.Contains(noMeta, "Solve it.") {
 		t.Fatalf("nil-meta prompt = %q, want default stdin framing", noMeta)
@@ -560,7 +560,7 @@ func TestFormatSSDLiveCodeBenchPrompt_Ugly(t *testing.T) {
 // TestSSDPostProcessCode_Good extracts the LAST fenced code block and
 // applies the LiveCodeBench cleanup (strips <code> tags and the python fence
 // marker), ignoring earlier non-final fences.
-func TestSSDPostProcessCode_Good(t *testing.T) {
+func TestSsdEval_SSDPostProcessCode_Good(t *testing.T) {
 	response := "analysis\n```go\nnot this\n```\nfinal\n```python\n<code>def add(a, b):\n    return a + b</code>\n```\n"
 	code, ok := SSDPostProcessCode(response)
 	if !ok {
@@ -573,7 +573,7 @@ func TestSSDPostProcessCode_Good(t *testing.T) {
 
 // TestSSDPostProcessCode_Bad asserts a response with no fenced code
 // returns ("", false) — there is no candidate to extract.
-func TestSSDPostProcessCode_Bad(t *testing.T) {
+func TestSsdEval_SSDPostProcessCode_Bad(t *testing.T) {
 	if code, ok := SSDPostProcessCode("no fenced code"); ok || code != "" {
 		t.Fatalf("missing fence = %q/%t, want empty false", code, ok)
 	}
@@ -586,7 +586,7 @@ func TestSSDPostProcessCode_Bad(t *testing.T) {
 // TestSSDPostProcessCode_Ugly asserts an empty fenced block extracts as
 // an empty-but-present body (ok=true): the fence existed, even if its content is
 // blank after cleanup.
-func TestSSDPostProcessCode_Ugly(t *testing.T) {
+func TestSsdEval_SSDPostProcessCode_Ugly(t *testing.T) {
 	code, ok := SSDPostProcessCode("```python\n```")
 	if !ok {
 		t.Fatal("SSDPostProcessCode(empty fence) ok = false, want true (the fence was present)")
