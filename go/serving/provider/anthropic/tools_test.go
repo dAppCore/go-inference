@@ -4,11 +4,11 @@ package anthropic
 
 import "testing"
 
-// TestRenderToolDeclarations_MatchesGemmaDoc pins the renderer against the exact
+// TestTools_RenderToolDeclarations_Good pins the renderer against the exact
 // declaration in reference/gemma/capabilities-text-function-calling-gemma4.md —
 // the format Gemma 4 was trained on. Divergence here means the model may not
 // recognise the tool, so this string is the contract.
-func TestRenderToolDeclarations_MatchesGemmaDoc(t *testing.T) {
+func TestTools_RenderToolDeclarations_Good(t *testing.T) {
 	tools := []Tool{{
 		Name:        "get_current_temperature",
 		Description: "Gets the current temperature for a given location.",
@@ -31,16 +31,17 @@ func TestRenderToolDeclarations_MatchesGemmaDoc(t *testing.T) {
 	}
 }
 
-// TestRenderToolDeclarations_Empty pins that no tools render to no prompt text.
-func TestRenderToolDeclarations_Empty(t *testing.T) {
+// TestTools_RenderToolDeclarations_Bad pins that no tools render to no prompt
+// text (the edge/invalid-ish input this API accepts rather than rejecting).
+func TestTools_RenderToolDeclarations_Bad(t *testing.T) {
 	if got := RenderToolDeclarations(nil); got != "" {
 		t.Fatalf("empty tools = %q, want empty", got)
 	}
 }
 
-// TestRenderToolDeclarations_MultiTool pins that multiple tools each get their
-// own <|tool>…<tool|> block.
-func TestRenderToolDeclarations_MultiTool(t *testing.T) {
+// TestTools_RenderToolDeclarations_Ugly pins that multiple tools each get
+// their own <|tool>…<tool|> block.
+func TestTools_RenderToolDeclarations_Ugly(t *testing.T) {
 	tools := []Tool{
 		{Name: "a", InputSchema: ToolInputSchema{Type: "object"}},
 		{Name: "b", InputSchema: ToolInputSchema{Type: "object"}},
