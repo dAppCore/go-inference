@@ -4,9 +4,9 @@ package parser
 
 import "testing"
 
-// TestParseGemmaToolCalls_DocExample pins the reference call from the gemma4
-// function-calling doc: one string argument, no leftover visible text.
-func TestParseGemmaToolCalls_DocExample(t *testing.T) {
+// TestGemmaTools_ParseGemmaToolCalls_Good pins the reference call from the
+// gemma4 function-calling doc: one string argument, no leftover visible text.
+func TestGemmaTools_ParseGemmaToolCalls_Good(t *testing.T) {
 	text := ToolCallOpenMarker + "call:get_current_temperature{location:" +
 		ToolArgQuoteMarker + "London" + ToolArgQuoteMarker + "}" + ToolCallCloseMarker
 	calls, visible := ParseGemmaToolCalls(text)
@@ -43,9 +43,9 @@ func TestParseGemmaToolCalls_MixedArgs(t *testing.T) {
 	}
 }
 
-// TestParseGemmaToolCalls_NoCall pins the fast path: plain prose returns
-// unchanged with no calls.
-func TestParseGemmaToolCalls_NoCall(t *testing.T) {
+// TestGemmaTools_ParseGemmaToolCalls_Bad pins the fast path: plain prose
+// returns unchanged with no calls.
+func TestGemmaTools_ParseGemmaToolCalls_Bad(t *testing.T) {
 	calls, visible := ParseGemmaToolCalls("just a normal answer")
 	if calls != nil {
 		t.Fatalf("calls = %v, want nil", calls)
@@ -55,11 +55,11 @@ func TestParseGemmaToolCalls_NoCall(t *testing.T) {
 	}
 }
 
-// TestParseGemmaToolCalls_NestedArgs pins the recursive arg parse: nested
+// TestGemmaTools_ParseGemmaToolCalls_Ugly pins the recursive arg parse: nested
 // {objects}, [arrays], arrays-of-objects, and a <|"|>-quoted value carrying a
 // comma inside a nested object all round-trip to structured JSON (not a
 // stringified blob with leaked markers).
-func TestParseGemmaToolCalls_NestedArgs(t *testing.T) {
+func TestGemmaTools_ParseGemmaToolCalls_Ugly(t *testing.T) {
 	q := ToolArgQuoteMarker
 	cases := []struct{ inner, want string }{
 		{"filter:{status:" + q + "open" + q + "}", `{"filter":{"status":"open"}}`},
@@ -78,10 +78,11 @@ func TestParseGemmaToolCalls_NestedArgs(t *testing.T) {
 	}
 }
 
-// TestRenderGemmaToolDeclarations pins the shared renderer against the exact
-// declaration in the gemma4 function-calling reference — the format the model
-// was trained on, so both providers must produce it byte-for-byte.
-func TestRenderGemmaToolDeclarations(t *testing.T) {
+// TestGemmaTools_RenderGemmaToolDeclarations_Good pins the shared renderer
+// against the exact declaration in the gemma4 function-calling reference —
+// the format the model was trained on, so both providers must produce it
+// byte-for-byte.
+func TestGemmaTools_RenderGemmaToolDeclarations_Good(t *testing.T) {
 	tools := []ToolDecl{{
 		Name:        "get_current_temperature",
 		Description: "Gets the current temperature for a given location.",
@@ -99,8 +100,49 @@ func TestRenderGemmaToolDeclarations(t *testing.T) {
 	if got := RenderGemmaToolDeclarations(tools); got != want {
 		t.Fatalf("RenderGemmaToolDeclarations mismatch:\n got: %s\nwant: %s", got, want)
 	}
+}
+
+// TestGemmaTools_RenderGemmaToolDeclarations_Bad pins the empty-input guard:
+// no tools renders an empty string, not an empty declaration block.
+func TestGemmaTools_RenderGemmaToolDeclarations_Bad(t *testing.T) {
 	if RenderGemmaToolDeclarations(nil) != "" {
 		t.Fatal("no tools should render empty")
+	}
+	if RenderGemmaToolDeclarations([]ToolDecl{}) != "" {
+		t.Fatal("an empty (non-nil) tool slice should also render empty")
+	}
+}
+
+// TestGemmaTools_RenderGemmaToolDeclarations_Ugly pins the multi-tool,
+// multi-property, no-required-fields edge: property order is sorted
+// (deterministic prompt) and multiple tools concatenate one block per tool.
+func TestGemmaTools_RenderGemmaToolDeclarations_Ugly(t *testing.T) {
+	tools := []ToolDecl{
+		{
+			Name:        "list_files",
+			Description: "Lists files in a directory.",
+			Properties: map[string]ToolParam{
+				"zpath":    {Type: "string", Description: "directory path"},
+				"apattern": {Type: "string", Description: "glob filter"},
+			},
+			// no Required — the [] must render empty, not omitted.
+		},
+		{
+			Name:        "now",
+			Description: "Returns the current time.",
+			Properties:  map[string]ToolParam{},
+		},
+	}
+	got := RenderGemmaToolDeclarations(tools)
+	q := ToolArgQuoteMarker
+	firstBlock := "<|tool>declaration:list_files{description:" + q + "Lists files in a directory." + q +
+		",parameters:{properties:{apattern:{description:" + q + "glob filter" + q + ",type:" + q + "STRING" + q + "} ," +
+		"zpath:{description:" + q + "directory path" + q + ",type:" + q + "STRING" + q + "} }," +
+		"required:[],type:" + q + "OBJECT" + q + "} }<tool|>"
+	secondBlock := "<|tool>declaration:now{description:" + q + "Returns the current time." + q +
+		",parameters:{properties:{},required:[],type:" + q + "OBJECT" + q + "} }<tool|>"
+	if want := firstBlock + secondBlock; got != want {
+		t.Fatalf("multi-tool render mismatch:\n got: %s\nwant: %s", got, want)
 	}
 }
 
@@ -119,12 +161,11 @@ func TestGemmaSchemaType(t *testing.T) {
 	}
 }
 
-// TestRenderGemmaToolCall pins that RenderGemmaToolCall is the inverse of
-// ParseGemmaToolCalls — it re-emits a prior call in gemma4's wire form (string
-// args wrapped in the quote marker, numbers/bools bare, keys sorted) so a
-// stateless client replaying history keeps the call context (#300).
-func TestRenderGemmaToolCall(t *testing.T) {
-	// Good: mixed string/number/bool args, and the render re-parses to one call.
+// TestGemmaTools_RenderGemmaToolCall_Good pins that RenderGemmaToolCall is
+// the inverse of ParseGemmaToolCalls — mixed string/number/bool args render
+// in gemma4's wire form (string wrapped in the quote marker, numbers/bools
+// bare, keys sorted) and the render re-parses to the original call (#300).
+func TestGemmaTools_RenderGemmaToolCall_Good(t *testing.T) {
 	got := RenderGemmaToolCall("get_weather", `{"city":"Paris","days":5,"metric":true}`)
 	want := `<|tool_call>call:get_weather{city:<|"|>Paris<|"|>,days:5,metric:true}<tool_call|>`
 	if got != want {
@@ -133,13 +174,25 @@ func TestRenderGemmaToolCall(t *testing.T) {
 	if calls, _ := ParseGemmaToolCalls(got); len(calls) != 1 || calls[0].Name != "get_weather" {
 		t.Fatalf("re-parse = %+v, want one get_weather call", calls)
 	}
-	// Bad: empty arguments render an empty {} body, not a dropped call.
+}
+
+// TestGemmaTools_RenderGemmaToolCall_Bad pins the malformed/empty-arguments
+// guard: an empty (or non-JSON) arguments string renders an empty {} body,
+// not a dropped call.
+func TestGemmaTools_RenderGemmaToolCall_Bad(t *testing.T) {
 	if got := RenderGemmaToolCall("now", ""); got != "<|tool_call>call:now{}<tool_call|>" {
 		t.Fatalf("empty-args render = %q, want the {} call span", got)
 	}
-	// Ugly: nested object + array args recurse.
-	got = RenderGemmaToolCall("search", `{"filter":{"lang":"go"},"tags":["a","b"]}`)
-	want = `<|tool_call>call:search{filter:{lang:<|"|>go<|"|>},tags:[<|"|>a<|"|>,<|"|>b<|"|>]}<tool_call|>`
+	if got := RenderGemmaToolCall("now", "not json"); got != "<|tool_call>call:now{}<tool_call|>" {
+		t.Fatalf("malformed-args render = %q, want the {} call span", got)
+	}
+}
+
+// TestGemmaTools_RenderGemmaToolCall_Ugly pins the recursive edge: nested
+// object + array args recurse rather than stringifying the whole payload.
+func TestGemmaTools_RenderGemmaToolCall_Ugly(t *testing.T) {
+	got := RenderGemmaToolCall("search", `{"filter":{"lang":"go"},"tags":["a","b"]}`)
+	want := `<|tool_call>call:search{filter:{lang:<|"|>go<|"|>},tags:[<|"|>a<|"|>,<|"|>b<|"|>]}<tool_call|>`
 	if got != want {
 		t.Fatalf("nested render = %q, want %q", got, want)
 	}
