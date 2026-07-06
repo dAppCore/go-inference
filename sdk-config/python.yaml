@@ -1,0 +1,5 @@
+generatorName: python
+additionalProperties:
+  packageName: lem_sdk
+  projectName: lem-sdk
+  packageVersion: "0.1.0"

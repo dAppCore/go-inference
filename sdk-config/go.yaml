@@ -1,0 +1,5 @@
+generatorName: go
+additionalProperties:
+  packageName: lemsdk
+  isGoSubmodule: true
+  withGoMod: true

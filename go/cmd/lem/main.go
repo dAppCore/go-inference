@@ -72,6 +72,8 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runTuneCommand(ctx, args[1:], stdout, stderr)
 	case "pack":
 		return runPackCommand(ctx, args[1:], stdout, stderr)
+	case "spec":
+		return runSpecCommand(ctx, args[1:], stdout, stderr)
 	case "ebook":
 		return runEbookCommand(ctx, args[1:], stdout, stderr)
 	case "-h", "--help", "help":
@@ -100,6 +102,9 @@ func printUsage(w io.Writer) {
 	core.WriteString(w, "Package\n")
 	core.WriteString(w, "  pack                build/inspect/list/extract .model containers (no weights loaded)\n")
 	core.WriteString(w, "  ebook               render a model directory as a valid EPUB3 (weights as base64 plates)\n")
+	core.WriteString(w, "\n")
+	core.WriteString(w, "API\n")
+	core.WriteString(w, "  spec                export the OpenAPI document for lem's HTTP surface (feeds SDK generation)\n")
 	core.WriteString(w, "\n")
 	core.WriteString(w, "Examples\n")
 	core.WriteString(w, core.Sprintf("  %s serve --model ~/models/gemma-4-e2b-it-4bit         # OpenAI HTTP on :36911\n", name))

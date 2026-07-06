@@ -120,3 +120,39 @@ tasks:
       - test -z "$(gofmt -l .)"
       - go vet ./...
       - go test -count=1 ./...
+
+  # --- SDK generation -------------------------------------------------------
+  # lem's whole HTTP surface is a core/api definition: every route group
+  # (serving/api AIProvider + ml Routes, engine/driver Provider +
+  # InferenceProvider, kv/sessionkv) implements Describable, so `lem spec` emits
+  # one complete OpenAPI 3.1 document and openapi-generator turns it into typed
+  # clients — SDKs for free, no hand-written client code. Regenerate whenever a
+  # route or a request/response schema changes. Output lands under build/sdk/
+  # (gitignored): the spec + one client dir per sdk-config/<lang>.yaml.
+
+  sdk:spec:
+    desc: "Export lem's OpenAPI 3.1 document to build/sdk/openapi.json (the machine-readable API definition the SDKs generate from)."
+    cmds:
+      - mkdir -p build/sdk
+      - go run ./go/cmd/lem spec -o build/sdk/openapi.json
+
+  sdk:
+    desc: "Generate typed client SDKs from lem's OpenAPI spec into build/sdk/<lang>/. Add a language by dropping a sdk-config/<lang>.yaml. Needs openapi-generator-cli."
+    deps: [sdk:spec]
+    cmds:
+      - |-
+        set -e
+        command -v openapi-generator-cli >/dev/null || { echo "openapi-generator-cli not found — install it (brew install openapi-generator) or: npx @openapitools/openapi-generator-cli@7.22.0"; exit 1; }
+        # openapi-generator runs a JAR, so it needs a JRE. brew's openjdk is
+        # keg-only (not on PATH), so point at it when the system java is absent.
+        if ! java -version >/dev/null 2>&1; then
+          JH="$(brew --prefix openjdk 2>/dev/null)"
+          [ -x "$JH/bin/java" ] && { export JAVA_HOME="$JH"; export PATH="$JH/bin:$PATH"; }
+        fi
+        java -version >/dev/null 2>&1 || { echo "no Java runtime for openapi-generator — brew install openjdk"; exit 1; }
+        for cfg in sdk-config/*.yaml; do
+          lang="$(basename "${cfg%.yaml}")"
+          echo "Generating ${lang} SDK -> build/sdk/${lang}"
+          openapi-generator-cli generate -i build/sdk/openapi.json -c "${cfg}" -o "build/sdk/${lang}" >/dev/null
+        done
+      - 'echo "  SDKs -> build/sdk/<lang>/ ($(ls sdk-config/*.yaml | wc -l | tr -d " ") languages; spec: build/sdk/openapi.json)"'
