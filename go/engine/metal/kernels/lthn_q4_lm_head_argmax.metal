@@ -287,6 +287,52 @@ kernel void lthn_argmax_merge_f32(
   out[0] = best_idx;
 }
 
+// K-row merge: one threadgroup per row r reduces its tile slice
+// values/indices[r*n .. r*n+n) to out[r] — the K-row head's K merges in a
+// single dispatch (K sequential single-row merges each paid a full dispatch
+// over the ~32k tile entries).
+kernel void lthn_argmax_merge_rows_f32(
+    device const float* values  [[buffer(0)]],
+    device const int*   indices [[buffer(1)]],
+    device int*         out     [[buffer(2)]],
+    constant int&       n       [[buffer(3)]],
+    uint r    [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]]) {
+  if (n <= 0 || lane >= 32) return;
+  device const float* row_values = values + r * uint(n);
+  device const int* row_indices = indices + r * uint(n);
+
+  float local_best = -INFINITY;
+  int local_idx = -1;
+  for (uint i = lane; i < uint(n); i += 32u) {
+    float v = row_values[i];
+    int idx = row_indices[i];
+    if (idx >= 0 && (v > local_best || (v == local_best && (local_idx < 0 || idx < local_idx)))) {
+      local_best = v;
+      local_idx = idx;
+    }
+  }
+
+  threadgroup float lane_values[32];
+  threadgroup int lane_indices[32];
+  lane_values[lane] = local_best;
+  lane_indices[lane] = local_idx;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  if (lane != 0) return;
+  float best = -INFINITY;
+  int best_idx = -1;
+  for (uint i = 0; i < 32u; i++) {
+    float v = lane_values[i];
+    int idx = lane_indices[i];
+    if (idx >= 0 && (v > best || (v == best && (best_idx < 0 || idx < best_idx)))) {
+      best = v;
+      best_idx = idx;
+    }
+  }
+  out[r] = best_idx;
+}
+
 // Sampling top-k stage for a BF16 resident head. It emits one candidate per
 // vocab row (kept on GPU) after final RMSNorm + optional sampling soft-cap.
 // The generic lthn_topk_merge_f32 stage then keeps only K values for the host.
@@ -1142,12 +1188,14 @@ kernel void lthn_logits_sample_bf16(
 
 // K-row BF16 direct greedy. Scores each tile's vocab rows against K normed
 // hidden rows in ONE weight pass — the MTP verify head previously re-read the
-// full lm_head weight once per row, which was its dominant cost after the
-// per-row synchronisation was batched away. Per-row tile bests write strided
-// as values/indices[r * tile_count + tile]; scores round to bf16 before
-// comparison exactly as the single-row kernel, so each row's selected token
-// matches model.Greedy over the full BF16 logits row.
+// full lm_head weight once per row. K arrives as a function constant so the
+// row loop fully unrolls and the accumulators live in registers (a runtime
+// bound left the array stack-allocated, stalling the load pipeline at ~82GB/s
+// — the first cut of this kernel). Weight and hidden rows read as bfloat4.
+// Per-row tile bests write strided as values/indices[r * tile_count + tile];
+// scores round to bf16 before comparison exactly as the single-row kernel.
 constant constexpr uint lthn_bf16_lm_head_max_batch_rows = 8;
+constant uint lthn_lm_head_rows_k [[function_constant(10)]];
 
 kernel void lthn_bf16_lm_head_argmax_tiles_rows_bf16(
     device const bfloat* x       [[buffer(0)]],
@@ -1158,20 +1206,39 @@ kernel void lthn_bf16_lm_head_argmax_tiles_rows_bf16(
     constant int&        vocab   [[buffer(5)]],
     device const int*    suppress [[buffer(6)]],
     constant int&        suppress_count [[buffer(7)]],
-    constant int&        k       [[buffer(8)]],
-    constant int&        tile_count [[buffer(9)]],
+    constant int&        tile_count [[buffer(8)]],
     uint tile [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_simdgroup]],
     uint row_in_tile [[simdgroup_index_in_threadgroup]]) {
-  if (d_model <= 0 || vocab <= 0 || k <= 0 || uint(k) > lthn_bf16_lm_head_max_batch_rows) return;
+  if (d_model <= 0 || vocab <= 0) return;
+  const uint k = min(lthn_lm_head_rows_k, lthn_bf16_lm_head_max_batch_rows);
 
   uint row = tile * lthn_bf16_lm_head_rows_per_tile + row_in_tile;
   float partial[lthn_bf16_lm_head_max_batch_rows];
   for (uint r = 0; r < lthn_bf16_lm_head_max_batch_rows; ++r) partial[r] = 0.0f;
+
   if (row < uint(vocab)) {
-    for (uint col = lane; col < uint(d_model); col += 32u) {
+    const uint d4 = uint(d_model) / 4u;
+    device const bfloat4* w4 = reinterpret_cast<device const bfloat4*>(weight + row * uint(d_model));
+    uint c = lane;
+    for (; c + 32u < d4; c += 64u) {
+      float4 w0 = float4(w4[c]);
+      float4 w1 = float4(w4[c + 32u]);
+      for (uint r = 0; r < k; ++r) {
+        device const bfloat4* xr = reinterpret_cast<device const bfloat4*>(x + r * uint(d_model));
+        partial[r] += dot(float4(xr[c]), w0) + dot(float4(xr[c + 32u]), w1);
+      }
+    }
+    for (; c < d4; c += 32u) {
+      float4 w = float4(w4[c]);
+      for (uint r = 0; r < k; ++r) {
+        float4 xv = float4(reinterpret_cast<device const bfloat4*>(x + r * uint(d_model))[c]);
+        partial[r] += dot(xv, w);
+      }
+    }
+    for (uint col = d4 * 4u + lane; col < uint(d_model); col += 32u) {
       float w = float(weight[row * uint(d_model) + col]);
-      for (uint r = 0; r < uint(k); ++r) {
+      for (uint r = 0; r < k; ++r) {
         partial[r] += float(x[r * uint(d_model) + col]) * w;
       }
     }
@@ -1184,7 +1251,7 @@ kernel void lthn_bf16_lm_head_argmax_tiles_rows_bf16(
     masked = row >= uint(vocab) || lthn_lm_head_row_suppressed(row, suppress, suppress_count);
     tile_indices[row_in_tile] = (row < uint(vocab)) ? int(row) : -1;
   }
-  for (uint r = 0; r < uint(k); ++r) {
+  for (uint r = 0; r < k; ++r) {
     float score = simd_sum(partial[r]);
     if (lane == 0u) {
       tile_values[r][row_in_tile] = !masked ? float(bfloat(score)) : -INFINITY;
@@ -1193,7 +1260,7 @@ kernel void lthn_bf16_lm_head_argmax_tiles_rows_bf16(
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
   if (row_in_tile == 0u && lane == 0u) {
-    for (uint r = 0; r < uint(k); ++r) {
+    for (uint r = 0; r < k; ++r) {
       float best = -INFINITY;
       int best_idx = -1;
       for (uint i = 0; i < lthn_bf16_lm_head_rows_per_tile; i++) {

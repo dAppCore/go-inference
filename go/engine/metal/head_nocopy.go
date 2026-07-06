@@ -1596,7 +1596,7 @@ func (h *headEncoder) greedyRowsBufferInPool(rowsBuf metal.MTLBuffer, rowStride 
 // buffer. handled=false defers to the per-row encodes (kernel missing from an
 // older metallib).
 func (h *headEncoder) greedyRowsFusedInPool(rowsBuf metal.MTLBuffer, k int, out []int32) (handled bool, err error) {
-	if _, perr := bf16LMHeadArgmaxTilesRowsPipeline(); perr != nil {
+	if _, perr := bf16LMHeadArgmaxTilesRowsPipeline(k); perr != nil {
 		return false, nil
 	}
 	tileCount := (h.vocab + bf16LMHeadArgmaxRowsPerTile - 1) / bf16LMHeadArgmaxRowsPerTile
@@ -1617,10 +1617,8 @@ func (h *headEncoder) greedyRowsFusedInPool(rowsBuf metal.MTLBuffer, k int, out 
 	if ferr := encBF16LMHeadArgmaxTilesRowsBF16(enc, s.normed, h.weight.buf, s.tileValues, s.tileIndices, nil, 0, h.weight.off, h.dModel, h.vocab, 0, k, tileCount); ferr != nil {
 		return fail(ferr)
 	}
-	for r := range k {
-		if ferr := encArgmaxMergeF32At(enc, s.tileValues, s.tileIndices, s.outTokens, uint(r*tileCount)*4, uint(r*tileCount)*4, uint(r)*4, tileCount); ferr != nil {
-			return fail(ferr)
-		}
+	if ferr := encArgmaxMergeRowsF32(enc, s.tileValues, s.tileIndices, s.outTokens, tileCount, k); ferr != nil {
+		return fail(ferr)
 	}
 	endEncodingFast(enc)
 	commitCommandBufferFast(cb)
