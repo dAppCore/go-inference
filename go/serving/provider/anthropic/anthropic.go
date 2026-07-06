@@ -7,6 +7,7 @@ package anthropic
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/decode/parser"
 	"dappco.re/go/inference/jsonenc"
 )
 
@@ -428,16 +429,18 @@ func blockText(blocks []ContentBlock) string {
 
 // renderBlock turns one content block into prompt text. A text block is its
 // text; a tool_result becomes a <|tool_response> span carrying the tool output
-// (the channel Gemma 4 expects after a call, so it reads the result and
-// answers). tool_use blocks in prior turns contribute nothing — the model
-// already holds that context in its retained KV state, so history is not
-// re-rendered.
+// (the channel Gemma 4 expects after a call). A prior tool_use call re-renders
+// as its <|tool_call> span so a STATELESS client that replays full history keeps
+// the call context a following tool_result answers — under KV continuity the
+// client sends minimal history, so prior turns aren't reached here anyway.
 func renderBlock(b ContentBlock) string {
 	switch b.Type {
 	case "", "text":
 		return b.Text
 	case "tool_result":
 		return "<|tool_response>" + b.Text + "<tool_response|>"
+	case "tool_use":
+		return parser.RenderGemmaToolCall(b.Name, string(core.AsBytes(core.JSONMarshalString(b.Input))))
 	default:
 		return ""
 	}

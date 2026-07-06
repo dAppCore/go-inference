@@ -14,12 +14,23 @@ func TestRenderBlock_ToolResult(t *testing.T) {
 	}
 }
 
-// TestRenderBlock_ToolUseContributesNothing pins that a tool_use block from prior
-// turns renders no prompt text — the model holds that context in its KV state, so
-// history is not re-rendered.
-func TestRenderBlock_ToolUseContributesNothing(t *testing.T) {
-	if got := renderBlock(ContentBlock{Type: "tool_use", Name: "get_weather"}); got != "" {
-		t.Fatalf("tool_use render = %q, want empty (no history re-render)", got)
+// TestRenderBlock_ToolUse_Good pins that a prior-turn tool_use block re-renders
+// as its gemma4 <|tool_call> span (string args wrapped in the arg-quote marker,
+// numbers bare), so a stateless client replaying full history keeps the call
+// context a following tool_result answers (#300).
+func TestRenderBlock_ToolUse_Good(t *testing.T) {
+	blk := ContentBlock{Type: "tool_use", ID: "toolu_1", Name: "get_weather", Input: map[string]any{"city": "Paris", "days": float64(5)}}
+	want := "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>,days:5}<tool_call|>"
+	if got := renderBlock(blk); got != want {
+		t.Fatalf("tool_use render = %q, want %q", got, want)
+	}
+}
+
+// TestRenderBlock_ToolUse_Bad pins that a tool_use with no arguments renders an
+// empty arg body rather than dropping the call.
+func TestRenderBlock_ToolUse_Bad(t *testing.T) {
+	if got := renderBlock(ContentBlock{Type: "tool_use", Name: "now"}); got != "<|tool_call>call:now{}<tool_call|>" {
+		t.Fatalf("empty-arg tool_use render = %q, want the {} call span", got)
 	}
 }
 
@@ -58,6 +69,24 @@ func TestMessageRequest_DecodesToolResultBlockContent(t *testing.T) {
 	}
 	if got := req.Messages[0].Content[0].Text; got != "cloudy" {
 		t.Fatalf("array tool_result content = %q, want cloudy", got)
+	}
+}
+
+// TestMessageRequest_DecodesToolUse pins the decoder now lifts a prior-turn
+// tool_use block's name + input (previously skipped), so a replayed history can
+// re-render the call for a stateless client (#300).
+func TestMessageRequest_DecodesToolUse(t *testing.T) {
+	data := []byte(`{"model":"x","max_tokens":10,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"Paris","days":5}}]}]}`)
+	var req MessageRequest
+	if err := req.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	block := req.Messages[0].Content[0]
+	if block.Type != "tool_use" || block.Name != "get_weather" {
+		t.Fatalf("tool_use decode = type/name %q/%q, want tool_use/get_weather", block.Type, block.Name)
+	}
+	if block.Input["city"] != "Paris" || block.Input["days"] != float64(5) {
+		t.Fatalf("tool_use input = %+v, want city=Paris days=5", block.Input)
 	}
 }
 

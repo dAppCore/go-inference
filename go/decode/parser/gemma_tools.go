@@ -92,6 +92,89 @@ func RenderGemmaToolDeclarations(tools []ToolDecl) string {
 	return b.String()
 }
 
+// RenderGemmaToolCall renders a prior assistant tool call back into the gemma4
+// wire form the model both emits and reads —
+// <|tool_call>call:NAME{args}<tool_call|> — so a STATELESS client that replays
+// full conversation history (rather than relying on server-side KV continuity)
+// still carries the call context that a following tool_result answers. It is the
+// exact inverse of ParseGemmaToolCalls' gemmaArgsToJSON: string values wrap in
+// ToolArgQuoteMarker, scalars stay bare, objects/arrays recurse. argumentsJSON is
+// the call's arguments as a JSON object; malformed/empty yields "{}".
+func RenderGemmaToolCall(name, argumentsJSON string) string {
+	var args map[string]any
+	if core.Trim(argumentsJSON) != "" {
+		if res := core.JSONUnmarshal([]byte(argumentsJSON), &args); !res.OK {
+			args = nil
+		}
+	}
+	b := core.NewBuilder()
+	b.WriteString(ToolCallOpenMarker)
+	b.WriteString("call:")
+	b.WriteString(name)
+	b.WriteString(renderGemmaObject(args))
+	b.WriteString(ToolCallCloseMarker)
+	return b.String()
+}
+
+// renderGemmaObject renders a decoded JSON object as a gemma tool-arg body
+// {k:v,…}; keys are sorted so the render is deterministic.
+func renderGemmaObject(m map[string]any) string {
+	b := core.NewBuilder()
+	b.WriteString("{")
+	names := make([]string, 0, len(m))
+	for k := range m {
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	for i, k := range names {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(k)
+		b.WriteString(":")
+		b.WriteString(renderGemmaValue(m[k]))
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+// renderGemmaArray renders a decoded JSON array as a gemma [v,…] body.
+func renderGemmaArray(a []any) string {
+	b := core.NewBuilder()
+	b.WriteString("[")
+	for i, v := range a {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(renderGemmaValue(v))
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
+// renderGemmaValue renders one decoded JSON value in gemma tool-arg form: a
+// string wraps in ToolArgQuoteMarker; an object/array recurses; a number/bool/
+// null renders as its bare scalar (identical to the gemma form).
+func renderGemmaValue(v any) string {
+	switch t := v.(type) {
+	case string:
+		return ToolArgQuoteMarker + t + ToolArgQuoteMarker
+	case map[string]any:
+		return renderGemmaObject(t)
+	case []any:
+		return renderGemmaArray(t)
+	case float64:
+		return strconv.FormatFloat(t, 'g', -1, 64)
+	case bool:
+		if t {
+			return "true"
+		}
+		return "false"
+	default: // nil or an unexpected type
+		return "null"
+	}
+}
+
 // gemmaSchemaType maps a JSON-schema type name to Gemma 4's uppercase form
 // (string -> STRING, …); an unknown type upper-cases as-is, empty -> STRING.
 func gemmaSchemaType(t string) string {

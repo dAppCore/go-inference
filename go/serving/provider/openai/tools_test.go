@@ -43,6 +43,20 @@ func TestOpenAIMessageContent_ToolRole(t *testing.T) {
 	}
 }
 
+// TestOpenAIMessageContent_ToolCalls pins that a prior assistant turn's tool_calls
+// re-render as their <|tool_call> spans, so a stateless client replaying full
+// history keeps the call context a following tool result answers (#300).
+func TestOpenAIMessageContent_ToolCalls(t *testing.T) {
+	msg := ChatMessage{Role: "assistant", ToolCalls: []ToolCall{{
+		ID: "call_1", Type: "function",
+		Function: ToolCallFunction{Name: "get_weather", Arguments: `{"city":"Paris","days":5}`},
+	}}}
+	want := "<|tool_call>call:get_weather{city:<|\"|>Paris<|\"|>,days:5}<tool_call|>"
+	if got := openAIMessageContent(msg); got != want {
+		t.Fatalf("assistant tool_calls render = %q, want %q", got, want)
+	}
+}
+
 // TestChatCompletionRequest_DecodesTools pins the hand-rolled decoder lifts the
 // nested tools array.
 func TestChatCompletionRequest_DecodesTools(t *testing.T) {
