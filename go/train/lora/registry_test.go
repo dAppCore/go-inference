@@ -307,10 +307,21 @@ func TestRegistry_Release_Good(t *testing.T) {
 }
 
 // TestRegistry_Release_Bad covers releasing an id the registry has never
-// seen: a harmless no-op rather than a panic.
+// seen: a harmless no-op that must not disturb an unrelated adapter's
+// ref-count.
 func TestRegistry_Release_Bad(t *testing.T) {
 	r := NewRegistry()
+	if err := r.Register(ref("alpha")); err != nil {
+		t.Fatalf("register alpha: %v", err)
+	}
+	id, err := r.Acquire("alpha")
+	if err != nil {
+		t.Fatalf("acquire alpha: %v", err)
+	}
 	r.Release("never-seen")
+	if got := r.RefCount(id); got != 1 {
+		t.Fatalf("releasing an unknown id must not affect alpha's refcount, got %d", got)
+	}
 }
 
 // TestRegistry_Release_Ugly covers the over-release clamp: releasing more
