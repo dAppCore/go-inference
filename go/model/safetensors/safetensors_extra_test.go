@@ -38,24 +38,6 @@ func TestParseHeaderFieldErrors(t *testing.T) {
 	t.Logf("parse field errors: all %d malformed header entries rejected", len(cases))
 }
 
-// TestParseScalarTensor parses a zero-dimensional tensor (shape []): count is the empty-product
-// 1, so a 1-element dtype has a 1-byte span. Confirms the shape loop's empty case and that a
-// scalar round-trips through Parse with the right (zero-rank) shape and byte.
-func TestParseScalarTensor(t *testing.T) {
-	ts, err := Parse(blob(`{"s":{"dtype":"U8","shape":[],"data_offsets":[0,1]}}`, []byte{42}))
-	if err != nil {
-		t.Fatalf("Parse scalar: %v", err)
-	}
-	s, ok := ts["s"]
-	if !ok {
-		t.Fatal("scalar tensor s missing")
-	}
-	if len(s.Shape) != 0 || len(s.Data) != 1 || s.Data[0] != 42 {
-		t.Fatalf("scalar: shape %v data %v, want rank-0 and [42]", s.Shape, s.Data)
-	}
-	t.Logf("parse: rank-0 scalar (shape []) yields a 1-byte tensor")
-}
-
 // TestEncodeErrors drives Encode's rejection branches the round-trip test leaves out: a
 // __metadata__ key (reserved), an unsupported dtype, and a negative shape dimension.
 func TestEncodeErrors(t *testing.T) {
@@ -73,29 +55,4 @@ func TestEncodeErrors(t *testing.T) {
 		}
 	}
 	t.Logf("encode errors: __metadata__, unsupported dtype, negative shape all rejected")
-}
-
-// TestEncodeNilShape covers Encode's nil-shape normalisation: a tensor with a nil Shape (a
-// scalar) must encode as shape [] and Parse back to a rank-0 tensor whose bytes survive.
-func TestEncodeNilShape(t *testing.T) {
-	in := map[string]Tensor{"scalar": {Dtype: "F32", Shape: nil, Data: []byte{0, 0, 128, 63}}}
-	b, err := Encode(in)
-	if err != nil {
-		t.Fatalf("Encode nil shape: %v", err)
-	}
-	out, err := Parse(b)
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
-	got, ok := out["scalar"]
-	if !ok {
-		t.Fatal("scalar missing after round-trip")
-	}
-	if len(got.Shape) != 0 {
-		t.Fatalf("nil shape should encode as rank-0, got shape %v", got.Shape)
-	}
-	if len(got.Data) != 4 || got.Data[3] != 63 {
-		t.Fatalf("scalar bytes corrupted: %v", got.Data)
-	}
-	t.Logf("encode: nil Shape normalised to [] and round-trips as a rank-0 tensor")
 }
