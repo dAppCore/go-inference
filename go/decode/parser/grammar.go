@@ -23,6 +23,18 @@ const (
 	// added_tokens), so no decode layer can hide it — both streaming engines
 	// swallow the bare terminator from visible output.
 	GemmaTurnTerminator = "<end_of_turn>"
+
+	// ToolCallOpenMarker / ToolCallCloseMarker wrap a gemma4 function call the
+	// model emits — <|tool_call>call:NAME{arg:<|"|>val<|"|>}<tool_call|>. Like
+	// the channel delimiters (and unlike bare terminators) DecodeToken keeps
+	// them, so the tool parser sees the whole span instead of a bare, ambiguous
+	// "call:NAME{…}" that could collide with prose.
+	ToolCallOpenMarker  = "<|tool_call>"
+	ToolCallCloseMarker = "<tool_call|>"
+	// ToolArgQuoteMarker is gemma4's string-value delimiter inside a call's
+	// arguments (a single vocab token, not a literal quote), so a value carrying
+	// a comma or brace doesn't break the argument scan.
+	ToolArgQuoteMarker = "<|\"|>"
 )
 
 // PairedMarker is an explicit open/close reasoning span (`<think>…</think>`).

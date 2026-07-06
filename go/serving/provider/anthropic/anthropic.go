@@ -13,10 +13,47 @@ import (
 // DefaultMessagesPath is the Anthropic-compatible Messages endpoint.
 const DefaultMessagesPath = "/v1/messages"
 
-// ContentBlock is the text block shape used by Anthropic Messages.
+// ContentBlock is one Anthropic content block. A "text" block carries Text; a
+// "tool_use" block (the model's function call) carries ID/Name/Input. The
+// tool_use fields are omitempty so a text block stays byte-identical to before.
 type ContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type  string         `json:"type"`
+	Text  string         `json:"text,omitempty"`
+	ID    string         `json:"id,omitempty"`
+	Name  string         `json:"name,omitempty"`
+	Input map[string]any `json:"input,omitempty"`
+}
+
+// ToolUseBlock builds one Anthropic tool_use content block from a parsed call.
+// argumentsJSON (the model's arguments as a JSON object string) is decoded into
+// the block's input object; a malformed/empty arguments string yields an empty
+// object rather than dropping the block.
+func ToolUseBlock(id, name, argumentsJSON string) ContentBlock {
+	input := map[string]any{}
+	if argumentsJSON != "" {
+		if res := core.JSONUnmarshal([]byte(argumentsJSON), &input); !res.OK {
+			input = map[string]any{}
+		}
+	}
+	return ContentBlock{Type: "tool_use", ID: id, Name: name, Input: input}
+}
+
+// NewToolUseResponse builds the non-streaming response for a turn that ended in
+// tool calls: the tool_use blocks and stop_reason:"tool_use", the shape Claude
+// Code reads to run the tools and send back tool_result.
+func NewToolUseResponse(id, model string, blocks []ContentBlock, metrics inference.GenerateMetrics) MessageResponse {
+	return MessageResponse{
+		ID:         id,
+		Type:       "message",
+		Role:       "assistant",
+		Model:      model,
+		Content:    blocks,
+		StopReason: "tool_use",
+		Usage: Usage{
+			InputTokens:  metrics.PromptTokens,
+			OutputTokens: metrics.GeneratedTokens,
+		},
+	}
 }
 
 // Message is one Anthropic chat turn.

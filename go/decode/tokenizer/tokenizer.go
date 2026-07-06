@@ -830,6 +830,13 @@ func indexBytePrefix(s string) int {
 const (
 	channelOpenMarker  = parser.ChannelOpenMarker
 	channelCloseMarker = parser.ChannelCloseMarker
+	// The tool-call delimiters are content-bearing the same way: the tool parser
+	// needs the whole <|tool_call>…<tool_call|> span (and the <|"|> argument
+	// quotes) in the decoded stream to lift a structured call, so DecodeToken
+	// keeps them too.
+	toolCallOpenMarker  = parser.ToolCallOpenMarker
+	toolCallCloseMarker = parser.ToolCallCloseMarker
+	toolArgQuoteMarker  = parser.ToolArgQuoteMarker
 )
 
 // DecodeToken converts a single token ID to text for streaming.
@@ -847,7 +854,8 @@ func (t *Tokenizer) DecodeToken(id int32) string {
 		// Preserve the delimiters so the parser strips the whole span instead of
 		// leaking a bare "thought" line into the reply; other specials stay
 		// invisible — they terminate generation and never reach the content.
-		if text == channelOpenMarker || text == channelCloseMarker {
+		if text == channelOpenMarker || text == channelCloseMarker ||
+			text == toolCallOpenMarker || text == toolCallCloseMarker || text == toolArgQuoteMarker {
 			return text
 		}
 		return ""

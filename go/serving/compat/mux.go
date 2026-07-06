@@ -670,6 +670,20 @@ func (h *anthropicMessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	visible, _ := parseOpenAIModelOutput(model, tokens, openAITokensText(tokens))
+	// A turn that emitted <|tool_call> spans returns tool_use blocks +
+	// stop_reason:"tool_use" — the shape Claude Code reads to run the tools and
+	// reply with tool_result. Any leading prose becomes a text block first.
+	if calls, clean := parser.ParseGemmaToolCalls(visible); len(calls) > 0 {
+		var blocks []anthropiccompat.ContentBlock
+		if clean = core.Trim(clean); clean != "" {
+			blocks = append(blocks, anthropiccompat.ContentBlock{Type: "text", Text: clean})
+		}
+		for _, c := range calls {
+			blocks = append(blocks, anthropiccompat.ToolUseBlock(idWithPrefix("toolu"), c.Name, c.ArgumentsJSON))
+		}
+		writeOpenAIJSON(w, http.StatusOK, anthropiccompat.NewToolUseResponse(anthropicMessageID(), req.Model, blocks, model.Metrics()))
+		return
+	}
 	response := anthropiccompat.NewTextResponse(anthropicMessageID(), req.Model, openaicompat.TruncateAtStopSequence(visible, stops), model.Metrics())
 	writeOpenAIJSON(w, http.StatusOK, response)
 }
