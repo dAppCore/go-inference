@@ -37,6 +37,7 @@ type MessageRequest struct {
 	TopK          *int      `json:"top_k,omitempty"`
 	Stream        bool      `json:"stream,omitempty"`
 	StopSequences []string  `json:"stop_sequences,omitempty"`
+	Tools         []Tool    `json:"tools,omitempty"`
 }
 
 // Usage records Anthropic-style token accounting.
@@ -311,10 +312,21 @@ func MessageRequestSize(r MessageRequest) int {
 }
 
 // InferenceMessages converts Anthropic messages into shared inference messages.
+// When the request carries tools, their Gemma 4 declarations are appended to the
+// system turn (the placement the model was trained on) so it can answer with a
+// <|tool_call> — see RenderToolDeclarations.
 func InferenceMessages(req MessageRequest) []inference.Message {
 	out := make([]inference.Message, 0, len(req.Messages)+1)
-	if req.System != "" {
-		out = append(out, inference.Message{Role: "system", Content: req.System})
+	system := req.System
+	if decl := RenderToolDeclarations(req.Tools); decl != "" {
+		if system != "" {
+			system += "\n" + decl
+		} else {
+			system = decl
+		}
+	}
+	if system != "" {
+		out = append(out, inference.Message{Role: "system", Content: system})
 	}
 	for _, msg := range req.Messages {
 		out = append(out, inference.Message{Role: msg.Role, Content: blockText(msg.Content)})

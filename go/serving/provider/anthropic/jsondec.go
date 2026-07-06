@@ -20,6 +20,7 @@
 package anthropic
 
 import (
+	core "dappco.re/go"
 	"dappco.re/go/inference/jsonenc"
 )
 
@@ -116,6 +117,23 @@ func (r *MessageRequest) unmarshalField(data []byte, i int, key []byte) (int, er
 		}
 		r.Messages = msgs
 		return next, nil
+	case "tools":
+		// Tools carry a nested schema (array → object → input_schema → properties
+		// map) that is rare (only agentic requests) and off the hot chat path, so
+		// rather than hand-roll the whole tree we capture its span and reflect-
+		// decode just this field. The hand-rolled fast path still owns model /
+		// messages / sampling — the per-request cost that actually multiplies.
+		if jsonenc.IsJSONNull(data, i) {
+			return i + 4, nil
+		}
+		end, err := jsonenc.SkipJSONValue(data, i)
+		if err != nil {
+			return end, err
+		}
+		if res := core.JSONUnmarshal(data[i:end], &r.Tools); !res.OK {
+			return end, res.Err()
+		}
+		return end, nil
 	case "max_tokens":
 		n, next, err := jsonenc.ParseJSONInt(data, i)
 		if err != nil {
