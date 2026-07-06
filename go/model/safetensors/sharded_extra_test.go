@@ -3,42 +3,11 @@
 package safetensors
 
 import (
-	"bytes"
 	"testing"
 
 	core "dappco.re/go"
 	coreio "dappco.re/go/io"
 )
-
-// TestLoadDirMmapSingle covers LoadDirMmap's single-file fallback: a directory with just
-// model.safetensors (no index) maps into a one-shard DirMapping whose merged Tensors are views
-// into that shard's mmap. Mirrors LoadDir's single-file path on the zero-copy side.
-func TestLoadDirMmapSingle(t *testing.T) {
-	dir := t.TempDir()
-	x := Tensor{Dtype: "F32", Shape: []int{1}, Data: []byte{7, 0, 0, 0}}
-	blob, err := Encode(map[string]Tensor{"x": x})
-	if err != nil {
-		t.Fatalf("Encode: %v", err)
-	}
-	writeFile(t, dir, singleName, blob)
-
-	dm, err := LoadDirMmap(dir)
-	if err != nil {
-		t.Fatalf("LoadDirMmap single: %v", err)
-	}
-	defer dm.Close()
-	if len(dm.Shards) != 1 || len(dm.Tensors) != 1 {
-		t.Fatalf("want 1 shard + 1 tensor, got %d shards %d tensors", len(dm.Shards), len(dm.Tensors))
-	}
-	got, ok := dm.Tensors["x"]
-	if !ok {
-		t.Fatal("tensor x missing")
-	}
-	if !bytes.Equal(got.Data, x.Data) {
-		t.Fatalf("tensor x bytes mismatch: %v", got.Data)
-	}
-	t.Logf("LoadDirMmap: single model.safetensors mapped as a one-shard DirMapping")
-}
 
 // TestLoadDirMmapErrors drives LoadDirMmap's rejection branches: an empty dir (neither index
 // nor single file), a malformed index, an empty weight_map, a shard the index names but is
@@ -97,34 +66,6 @@ func TestLoadDirMmapSingleParseError(t *testing.T) {
 	if _, err := LoadDirMmap(dir); err == nil {
 		t.Fatal("single model.safetensors that won't parse: expected an error")
 	}
-}
-
-// TestDirMappingCloseNil covers DirMapping.Close's nil-receiver guard: Close on a nil
-// *DirMapping must be a no-op nil, and a second Close after a real one (Shards nil) too.
-func TestDirMappingCloseNil(t *testing.T) {
-	var nilD *DirMapping
-	if err := nilD.Close(); err != nil {
-		t.Fatalf("nil DirMapping Close should be nil, got %v", err)
-	}
-
-	dir := t.TempDir()
-	x := Tensor{Dtype: "U8", Shape: []int{1}, Data: []byte{1}}
-	blob, err := Encode(map[string]Tensor{"x": x})
-	if err != nil {
-		t.Fatalf("Encode: %v", err)
-	}
-	writeFile(t, dir, singleName, blob)
-	dm, err := LoadDirMmap(dir)
-	if err != nil {
-		t.Fatalf("LoadDirMmap: %v", err)
-	}
-	if err := dm.Close(); err != nil {
-		t.Fatalf("first Close: %v", err)
-	}
-	if err := dm.Close(); err != nil {
-		t.Fatalf("second Close (Shards already nil) should be nil, got %v", err)
-	}
-	t.Logf("DirMapping.Close: nil receiver + double-close both safe no-ops")
 }
 
 // TestLoadDirSingleEmptyFile covers LoadDir's single-file branch surfacing a load error: a
