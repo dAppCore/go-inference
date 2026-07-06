@@ -1,11 +1,12 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
 // Tests for the chat-completions net/http route and its JSON
-// response/error helpers. The happy-path non-streaming and streaming
-// cases live in openai_test.go (TestOpenAI_Handler_Good_*); this file
-// covers Handler.ServeHTTP's early-return branches, serveStreaming's
-// stop/thought/error/length-cap branches, and the small error/result
-// helpers at the bottom of handler.go.
+// response/error helpers. The richer thought/tool-call/streaming
+// integration scenarios live in openai_test.go (TestOpenAI_Handler_Good_*);
+// this file covers NewHandler, ServeHTTP's canonical success/reject
+// shapes and early-return branches, serveStreaming's stop/thought/
+// error/length-cap branches, and the small error/result helpers at the
+// bottom of handler.go.
 package openai
 
 import (
@@ -19,6 +20,86 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 )
+
+// TestHandler_NewHandler_Good covers the plain construction path — the
+// returned handler is wired to the given resolver and serves through it.
+func TestHandler_NewHandler_Good(t *testing.T) {
+	resolver := NewStaticResolver(map[string]inference.TextModel{"qwen": &stubModel{}})
+	handler := NewHandler(resolver)
+
+	if handler == nil || handler.resolver == nil {
+		t.Fatalf("NewHandler() = %#v, want a handler wired to the given resolver", handler)
+	}
+}
+
+// TestHandler_NewHandler_Bad covers a nil resolver — NewHandler must
+// still return a non-nil *Handler (ServeHTTP's own nil-resolver guard
+// is what turns that into a 503, not a construction-time panic).
+func TestHandler_NewHandler_Bad(t *testing.T) {
+	handler := NewHandler(nil)
+
+	if handler == nil || handler.resolver != nil {
+		t.Fatalf("NewHandler(nil) = %#v, want a handler with a nil resolver, not a nil handler", handler)
+	}
+}
+
+// TestHandler_NewHandler_Ugly covers that NewHandler accepts any
+// Resolver implementation — not just *StaticResolver — by wiring
+// through a functional ResolverFunc adapter.
+func TestHandler_NewHandler_Ugly(t *testing.T) {
+	called := false
+	handler := NewHandler(ResolverFunc(func(context.Context, string) (inference.TextModel, error) {
+		called = true
+		return &stubModel{}, nil
+	}))
+
+	if _, err := handler.resolver.ResolveModel(context.Background(), "anything"); err != nil || !called {
+		t.Fatalf("NewHandler() with a functional Resolver did not wire it through: err=%v called=%v", err, called)
+	}
+}
+
+// TestHandler_ServeHTTP_Good drives the canonical non-streaming success
+// path end-to-end — the richer thought/tool-call/streaming shapes are
+// covered in openai_test.go (TestOpenAI_Handler_Good_*).
+func TestHandler_ServeHTTP_Good(t *testing.T) {
+	model := &stubModel{
+		tokens:  []inference.Token{{Text: "hello"}},
+		metrics: inference.GenerateMetrics{PromptTokens: 1, GeneratedTokens: 1},
+	}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"qwen","messages":[{"role":"user","content":"hi"}]}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"content":"hello"`) || !strings.Contains(rec.Body.String(), `"finish_reason":"stop"`) {
+		t.Fatalf("body = %s, want hello content with stop finish reason", rec.Body.String())
+	}
+}
+
+// TestHandler_ServeHTTP_Ugly covers the non-streaming tool_calls path —
+// a model whose output carries a <|tool_call> span must flip
+// finish_reason to "tool_calls" and populate ChatMessage.ToolCalls,
+// rather than surfacing the raw gemma tool-call markup as content.
+func TestHandler_ServeHTTP_Ugly(t *testing.T) {
+	model := &stubModel{tokens: []inference.Token{{Text: "<|tool_call>call:get_weather{}<tool_call|>"}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"qwen","messages":[{"role":"user","content":"weather?"}]}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	bodyText := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.Contains(bodyText, `"finish_reason":"tool_calls"`) {
+		t.Fatalf("status = %d body=%s, want 200 finish_reason=tool_calls", rec.Code, bodyText)
+	}
+	if !strings.Contains(bodyText, `"name":"get_weather"`) {
+		t.Fatalf("body=%s, want the parsed tool call", bodyText)
+	}
+}
 
 // TestHandler_ServeHTTP_Bad drives every early-return branch in
 // Handler.ServeHTTP ahead of model resolution.

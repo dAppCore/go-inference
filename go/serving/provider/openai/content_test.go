@@ -103,14 +103,14 @@ func TestChatMessage_DecodeRequest_ContentParts_Bad_TooManyImages(t *testing.T) 
 	}
 }
 
-// TestChatMessage_UnmarshalJSON_Good_Bad exercises ChatMessage's own
-// UnmarshalJSON directly via encoding/json.Unmarshal (rather than
+// TestContent_ChatMessage_UnmarshalJSON_Good exercises ChatMessage's
+// own UnmarshalJSON directly via encoding/json.Unmarshal (rather than
 // through DecodeRequest/parseChatMessage — the hand-rolled top-level
 // walker in unmarshal.go never calls this method; it is a separate
 // json.Unmarshaler entry point for anything that decodes a ChatMessage
 // standalone, e.g. a container type outside this package's own
 // request shape).
-func TestChatMessage_UnmarshalJSON_Good_Bad(t *testing.T) {
+func TestContent_ChatMessage_UnmarshalJSON_Good(t *testing.T) {
 	var empty ChatMessage
 	if err := json.Unmarshal([]byte(`{"role":"user"}`), &empty); err != nil {
 		t.Fatalf("Unmarshal(no content field) error = %v", err)
@@ -134,16 +134,12 @@ func TestChatMessage_UnmarshalJSON_Good_Bad(t *testing.T) {
 	if stringContent.Content != "hello" {
 		t.Fatalf("Unmarshal(string content) = %+v, want content=hello", stringContent)
 	}
+}
 
-	var arrayContent ChatMessage
-	in := `{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}`
-	if err := json.Unmarshal([]byte(in), &arrayContent); err != nil {
-		t.Fatalf("Unmarshal(array content) error = %v", err)
-	}
-	if arrayContent.Content != "a\nb" {
-		t.Fatalf("Unmarshal(array content) = %+v, want joined text", arrayContent)
-	}
-
+// TestContent_ChatMessage_UnmarshalJSON_Bad drives the shape-rejection
+// branches — a non-object outer document, and a content field of the
+// wrong JSON type at both the top level and inside a content-part array.
+func TestContent_ChatMessage_UnmarshalJSON_Bad(t *testing.T) {
 	cases := map[string]string{
 		// "42" is syntactically valid top-level JSON (so encoding/json's
 		// whole-document checkValid pass lets it through to our custom
@@ -165,6 +161,20 @@ func TestChatMessage_UnmarshalJSON_Good_Bad(t *testing.T) {
 				t.Fatalf("Unmarshal(%q) returned nil error", in)
 			}
 		})
+	}
+}
+
+// TestContent_ChatMessage_UnmarshalJSON_Ugly covers the multimodal
+// content-part array shape — multiple text parts join with a newline
+// rather than concatenating flush.
+func TestContent_ChatMessage_UnmarshalJSON_Ugly(t *testing.T) {
+	var arrayContent ChatMessage
+	in := `{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]}`
+	if err := json.Unmarshal([]byte(in), &arrayContent); err != nil {
+		t.Fatalf("Unmarshal(array content) error = %v", err)
+	}
+	if arrayContent.Content != "a\nb" {
+		t.Fatalf("Unmarshal(array content) = %+v, want joined text", arrayContent)
 	}
 }
 

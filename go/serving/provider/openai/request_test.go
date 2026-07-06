@@ -18,9 +18,9 @@ func (erroringReader) Read([]byte) (int, error) {
 	return 0, errRead
 }
 
-// TestOpenAI_DecodeRequest_Bad covers the nil-body, read-error, and
+// TestRequest_DecodeRequest_Bad covers the nil-body, read-error, and
 // malformed-JSON rejections.
-func TestOpenAI_DecodeRequest_Bad(t *testing.T) {
+func TestRequest_DecodeRequest_Bad(t *testing.T) {
 	if _, err := DecodeRequest(nil); err == nil {
 		t.Fatal("DecodeRequest(nil) error = nil, want request-body-nil failure")
 	}
@@ -32,10 +32,23 @@ func TestOpenAI_DecodeRequest_Bad(t *testing.T) {
 	}
 }
 
-// TestOpenAI_ValidateRequest_Bad drives every rejection branch:
+// TestRequest_DecodeRequest_Ugly covers forward-compatibility — an
+// unrecognised top-level field must be skipped rather than rejected,
+// so a newer client sending a field this adapter doesn't model yet
+// still decodes.
+func TestRequest_DecodeRequest_Ugly(t *testing.T) {
+	body := strings.NewReader(`{"model":"qwen","messages":[{"role":"user","content":"hi"}],"unknown_field":{"nested":true}}`)
+
+	req, err := DecodeRequest(body)
+	if err != nil || req.Model != "qwen" || len(req.Messages) != 1 {
+		t.Fatalf("DecodeRequest(unknown field) = %+v, err=%v, want the unknown field skipped", req, err)
+	}
+}
+
+// TestRequest_ValidateRequest_Bad drives every rejection branch:
 // missing model, empty messages, an unrecognised role, and each
 // sampling-field out-of-range case.
-func TestOpenAI_ValidateRequest_Bad(t *testing.T) {
+func TestRequest_ValidateRequest_Bad(t *testing.T) {
 	badTemp := float32(3)
 	badTopP := float32(-0.1)
 	badTopK := -1
@@ -63,11 +76,11 @@ func TestOpenAI_ValidateRequest_Bad(t *testing.T) {
 	}
 }
 
-// TestOpenAI_ValidateRequest_Good covers every accepted role — the
+// TestRequest_ValidateRequest_Good covers every accepted role — the
 // Bad table only ever exercises "user"; the others (system, developer,
 // assistant, tool) share the same switch statement but need their own
 // hit to mark that case arm covered.
-func TestOpenAI_ValidateRequest_Good(t *testing.T) {
+func TestRequest_ValidateRequest_Good(t *testing.T) {
 	for _, role := range []string{"system", "developer", "user", "assistant", "tool"} {
 		t.Run(role, func(t *testing.T) {
 			req := ChatCompletionRequest{Model: "m", Messages: []ChatMessage{{Role: role, Content: "hi"}}}
@@ -78,16 +91,49 @@ func TestOpenAI_ValidateRequest_Good(t *testing.T) {
 	}
 }
 
-// TestOpenAI_NormalizeStopSequences_Bad covers the empty-after-trim
+// TestRequest_ValidateRequest_Ugly covers normalisation — a padded
+// model name and a padded, mixed-case role must still be accepted
+// (core.Trim/core.Lower run before the required-field and role checks).
+func TestRequest_ValidateRequest_Ugly(t *testing.T) {
+	req := ChatCompletionRequest{Model: "  m  ", Messages: []ChatMessage{{Role: "  User  ", Content: "hi"}}}
+
+	if err := ValidateRequest(req); err != nil {
+		t.Fatalf("ValidateRequest(padded model, mixed-case role) error = %v, want normalised acceptance", err)
+	}
+}
+
+// TestRequest_NormalizeStopSequences_Good covers the plain trimming
+// path across multiple stop entries.
+func TestRequest_NormalizeStopSequences_Good(t *testing.T) {
+	stops, err := NormalizeStopSequences(StopList{" END ", "STOP"})
+	if err != nil {
+		t.Fatalf("NormalizeStopSequences() error = %v", err)
+	}
+	if len(stops) != 2 || stops[0] != "END" || stops[1] != "STOP" {
+		t.Fatalf("stops = %#v, want trimmed [END STOP]", stops)
+	}
+}
+
+// TestRequest_NormalizeStopSequences_Bad covers the empty-after-trim
 // rejection.
-func TestOpenAI_NormalizeStopSequences_Bad(t *testing.T) {
+func TestRequest_NormalizeStopSequences_Bad(t *testing.T) {
 	_, err := NormalizeStopSequences(StopList{"END", "   "})
 	if err == nil || !strings.Contains(err.Error(), "stop") {
 		t.Fatalf("NormalizeStopSequences() error = %v, want stop-sequence validation failure", err)
 	}
 }
 
-func TestOpenAI_DecodeRequest_Good_StopStringAndDefaults(t *testing.T) {
+// TestRequest_NormalizeStopSequences_Ugly covers the empty-input fast
+// path — no stop sequences configured returns nil, nil rather than an
+// allocated empty slice.
+func TestRequest_NormalizeStopSequences_Ugly(t *testing.T) {
+	stops, err := NormalizeStopSequences(nil)
+	if err != nil || stops != nil {
+		t.Fatalf("NormalizeStopSequences(nil) = %#v, err=%v, want nil, nil", stops, err)
+	}
+}
+
+func TestRequest_DecodeRequest_Good(t *testing.T) {
 	body := strings.NewReader(`{"model":"qwen","messages":[{"role":"user","content":"hi"}],"stop":"END"}`)
 
 	req, err := DecodeRequest(body)
@@ -115,7 +161,10 @@ func TestOpenAI_DecodeRequest_Good_StopStringAndDefaults(t *testing.T) {
 	}
 }
 
-func TestOpenAI_GenerateOptions_Good_HonoursExplicitZero(t *testing.T) {
+// TestRequest_GenerateOptions_Good is the canonical explicit-zero
+// case; the other TestOpenAI_GenerateOptions_Good_* variants below
+// cover additional sampling-field and thinking-control branches.
+func TestRequest_GenerateOptions_Good(t *testing.T) {
 	zeroFloat := float32(0)
 	zeroInt := 0
 	req := ChatCompletionRequest{
@@ -155,7 +204,11 @@ func TestOpenAI_GenerateOptions_Good_MinP(t *testing.T) {
 	}
 }
 
-func TestOpenAI_GenerateOptions_Bad_MinP(t *testing.T) {
+// TestRequest_GenerateOptions_Bad is the canonical validation-failure
+// case (out-of-range min_p); TestOpenAI_ValidateRequest_Bad already
+// drives ValidateRequest's other rejection branches, all of which
+// GenerateOptions delegates to before building options.
+func TestRequest_GenerateOptions_Bad(t *testing.T) {
 	minP := float32(1.1)
 	req := ChatCompletionRequest{
 		Model:    "qwen",
@@ -165,6 +218,28 @@ func TestOpenAI_GenerateOptions_Bad_MinP(t *testing.T) {
 	_, err := GenerateOptions(req)
 	if err == nil || !strings.Contains(err.Error(), "min_p") {
 		t.Fatalf("GenerateOptions() error = %v, want min_p validation", err)
+	}
+}
+
+// TestRequest_GenerateOptions_Ugly covers thinkingOverride's own
+// precedence rule — chat_template_kwargs.enable_thinking must win over
+// a conflicting reasoning_effort=="none", not the other way round.
+func TestRequest_GenerateOptions_Ugly(t *testing.T) {
+	on := true
+	req := ChatCompletionRequest{
+		Model:              "m",
+		Messages:           []ChatMessage{{Role: "user", Content: "hi"}},
+		ReasoningEffort:    "none",
+		ChatTemplateKwargs: &ChatTemplateKwargs{EnableThinking: &on},
+	}
+
+	opts, err := GenerateOptions(req)
+	if err != nil {
+		t.Fatalf("GenerateOptions() error = %v", err)
+	}
+	cfg := inference.ApplyGenerateOpts(opts)
+	if cfg.EnableThinking == nil || !*cfg.EnableThinking {
+		t.Fatalf("EnableThinking = %v, want chat_template_kwargs to win over reasoning_effort=none", cfg.EnableThinking)
 	}
 }
 
