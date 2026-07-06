@@ -347,6 +347,18 @@ func openAIMessageContent(msg ChatMessage) string {
 	if msg.Role == "tool" {
 		return "<|tool_response>" + msg.Content + "<tool_response|>"
 	}
+	// A prior assistant turn that made tool calls: re-render each call into its
+	// <|tool_call> span so a STATELESS client replaying full history keeps the
+	// call context a following tool result answers. Under KV continuity the
+	// client sends minimal history, so old turns don't reach here.
+	if len(msg.ToolCalls) > 0 {
+		b := core.NewBuilder()
+		b.WriteString(msg.Content)
+		for _, tc := range msg.ToolCalls {
+			b.WriteString(parser.RenderGemmaToolCall(tc.Function.Name, tc.Function.Arguments))
+		}
+		return b.String()
+	}
 	return msg.Content
 }
 

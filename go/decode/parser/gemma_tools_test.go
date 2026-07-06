@@ -118,3 +118,29 @@ func TestGemmaSchemaType(t *testing.T) {
 		}
 	}
 }
+
+// TestRenderGemmaToolCall pins that RenderGemmaToolCall is the inverse of
+// ParseGemmaToolCalls — it re-emits a prior call in gemma4's wire form (string
+// args wrapped in the quote marker, numbers/bools bare, keys sorted) so a
+// stateless client replaying history keeps the call context (#300).
+func TestRenderGemmaToolCall(t *testing.T) {
+	// Good: mixed string/number/bool args, and the render re-parses to one call.
+	got := RenderGemmaToolCall("get_weather", `{"city":"Paris","days":5,"metric":true}`)
+	want := `<|tool_call>call:get_weather{city:<|"|>Paris<|"|>,days:5,metric:true}<tool_call|>`
+	if got != want {
+		t.Fatalf("render = %q, want %q", got, want)
+	}
+	if calls, _ := ParseGemmaToolCalls(got); len(calls) != 1 || calls[0].Name != "get_weather" {
+		t.Fatalf("re-parse = %+v, want one get_weather call", calls)
+	}
+	// Bad: empty arguments render an empty {} body, not a dropped call.
+	if got := RenderGemmaToolCall("now", ""); got != "<|tool_call>call:now{}<tool_call|>" {
+		t.Fatalf("empty-args render = %q, want the {} call span", got)
+	}
+	// Ugly: nested object + array args recurse.
+	got = RenderGemmaToolCall("search", `{"filter":{"lang":"go"},"tags":["a","b"]}`)
+	want = `<|tool_call>call:search{filter:{lang:<|"|>go<|"|>},tags:[<|"|>a<|"|>,<|"|>b<|"|>]}<tool_call|>`
+	if got != want {
+		t.Fatalf("nested render = %q, want %q", got, want)
+	}
+}

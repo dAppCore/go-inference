@@ -542,6 +542,27 @@ func parseContentBlock(data []byte, i int) (ContentBlock, int, error) {
 			}
 			block.Text = s
 			i = vnext
+		case "name":
+			// tool_use -> the called function's name.
+			s, vnext, verr := jsonenc.ParseJSONString(data, i)
+			if verr != nil {
+				return block, vnext, verr
+			}
+			block.Name = s
+			i = vnext
+		case "input":
+			// tool_use -> the call's arguments object. Decoded (id/name/input) so a
+			// stateless client replaying full history can re-render the prior call.
+			start := i
+			vnext, verr := jsonenc.SkipJSONValue(data, i)
+			if verr != nil {
+				return block, vnext, verr
+			}
+			m := map[string]any{}
+			if res := core.JSONUnmarshal(data[start:vnext], &m); res.OK {
+				block.Input = m
+			}
+			i = vnext
 		default:
 			vnext, verr := jsonenc.SkipJSONValue(data, i)
 			if verr != nil {
