@@ -135,3 +135,83 @@ func TestDimHelpers(t *testing.T) {
 		t.Fatalf("firstDim([4,7]) = %d, want 4", got)
 	}
 }
+
+// TestLinear_LoadLinear_Good covers the ordinary quantised load: OutDim from the shape,
+// Kind/GroupSize/Bits derived from the scales tensor.
+func TestLinear_LoadLinear_Good(t *testing.T) {
+	const out, in = 4, 64
+	mk := func(shape ...int) safetensors.Tensor {
+		n := 1
+		for _, d := range shape {
+			n *= d
+		}
+		return safetensors.Tensor{Shape: shape, Data: make([]byte, n)}
+	}
+	t2 := map[string]safetensors.Tensor{
+		"w.weight": mk(out, in*4/32), "w.scales": mk(out, in/32), "w.biases": mk(out, in/32),
+	}
+	l := LoadLinear(t2, "w", in, "affine")
+	if l == nil || l.OutDim != out || !l.Quantised() || l.GroupSize != 32 || l.Bits != 4 {
+		t.Fatalf("LoadLinear = %+v, want a quantised 4-bit/group-32 weight of OutDim %d", l, out)
+	}
+}
+
+// TestLinear_LoadLinear_Bad covers the absent-weight case: an optional weight not in the
+// checkpoint loads as nil, the caller's "feature absent" signal.
+func TestLinear_LoadLinear_Bad(t *testing.T) {
+	if l := LoadLinear(map[string]safetensors.Tensor{}, "missing", 64, "affine"); l != nil {
+		t.Fatalf("LoadLinear(absent) = %+v, want nil", l)
+	}
+}
+
+// TestLinear_LoadLinear_Ugly covers a present .scales tensor with EMPTY data (len(s.Data)
+// == 0): LoadLinear must treat this as "not quantised" (dense bf16), the guard in the
+// ok && len(s.Data) > 0 check — a subtly different edge from .scales absent entirely.
+func TestLinear_LoadLinear_Ugly(t *testing.T) {
+	const out, in = 4, 64
+	t2 := map[string]safetensors.Tensor{
+		"w.weight": {Shape: []int{out, in}, Data: make([]byte, out*in)},
+		"w.scales": {Shape: []int{out, in / 32}, Data: []byte{}}, // present but empty
+	}
+	l := LoadLinear(t2, "w", in, "affine")
+	if l == nil {
+		t.Fatal("LoadLinear returned nil for a present weight")
+	}
+	if l.Quantised() {
+		t.Fatalf("LoadLinear with empty .scales data should NOT be quantised: %+v", l)
+	}
+}
+
+// TestLinear_Linear_Quantised_Good covers the quantised weight: Scales set AND Kind set
+// both required for Quantised() to report true.
+func TestLinear_Linear_Quantised_Good(t *testing.T) {
+	l := &Linear{Scales: []byte{1}, Kind: "affine"}
+	if !l.Quantised() {
+		t.Fatal("Quantised() = false with Scales+Kind both set, want true")
+	}
+}
+
+// TestLinear_Linear_Quantised_Bad covers the dense bf16 weight: no Scales and no Kind
+// means Quantised() reports false.
+func TestLinear_Linear_Quantised_Bad(t *testing.T) {
+	l := &Linear{Weight: []byte{1, 2}}
+	if l.Quantised() {
+		t.Fatal("Quantised() = true with no Scales/Kind, want false")
+	}
+}
+
+// TestLinear_Linear_Quantised_Ugly covers a nil receiver AND a half-set weight (Scales
+// without Kind, or Kind without Scales): Quantised must not panic on nil, and must
+// require BOTH fields, not just one.
+func TestLinear_Linear_Quantised_Ugly(t *testing.T) {
+	var nilLin *Linear
+	if nilLin.Quantised() {
+		t.Fatal("Quantised() on a nil *Linear = true, want false")
+	}
+	if (&Linear{Scales: []byte{1}}).Quantised() {
+		t.Fatal("Quantised() with Scales but no Kind = true, want false (both required)")
+	}
+	if (&Linear{Kind: "affine"}).Quantised() {
+		t.Fatal("Quantised() with Kind but no Scales = true, want false (both required)")
+	}
+}

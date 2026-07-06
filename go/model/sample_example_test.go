@@ -32,3 +32,36 @@ func ExampleSampler_Sample() {
 	core.Println(id >= 0) // a valid token id drawn from the kept nucleus
 	// Output: true
 }
+
+// ExampleNewSampler shows construction: a Sampler seeded for reproducible draws — the
+// SAME seed always yields the SAME sequence of Sample/Draw calls.
+func ExampleNewSampler() {
+	a := NewSampler(42)
+	b := NewSampler(42)
+	core.Println(a.Draw() == b.Draw()) // same seed, same first draw
+	// Output: true
+}
+
+// ExampleSampler_Draw shows the raw uniform-in-[0,1) stream a backend can consume
+// directly (e.g. to keep a sampling reduction on-device) — the same RNG stream Sample
+// itself draws from.
+func ExampleSampler_Draw() {
+	s := NewSampler(1)
+	v := s.Draw()
+	core.Println(v >= 0 && v < 1)
+	// Output: true
+}
+
+// ExampleSampler_SampleCandidates shows sampling over a PRESELECTED candidate set: the
+// returned token is one of ids, letting a backend keep vocab-wide ranking on-device and
+// read back only the candidate window.
+func ExampleSampler_SampleCandidates() {
+	candidates := bf16Bytes([]float32{0.1, 5.0, 0.2})
+	ids := []int32{10, 11, 12}
+	got, err := NewSampler(1).SampleCandidates(candidates, ids, SampleParams{Temperature: 0})
+	if err != nil {
+		return
+	}
+	core.Println(got) // greedy: the dominant candidate's id
+	// Output: 11
+}
