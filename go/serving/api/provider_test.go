@@ -133,7 +133,7 @@ func TestProvider_NewProvider_Ugly(t *core.T) {
 	descriptions := provider.Describe()
 	got := len(descriptions)
 
-	core.AssertEqual(t, 6, got)
+	core.AssertEqual(t, 7, got)
 	core.AssertEqual(t, "ai", provider.Name())
 }
 
@@ -227,7 +227,7 @@ func TestProvider_AIProvider_Describe_Good(t *core.T) {
 	descriptions := provider.Describe()
 	first := descriptions[0]
 
-	core.AssertLen(t, descriptions, 6)
+	core.AssertLen(t, descriptions, 7)
 	core.AssertEqual(t, http.MethodPost, first.Method)
 }
 
@@ -236,14 +236,14 @@ func TestProvider_AIProvider_Describe_Bad(t *core.T) {
 	descriptions := provider.Describe()
 	got := len(descriptions)
 
-	core.AssertEqual(t, 6, got)
-	core.AssertEqual(t, "/health", descriptions[5].Path)
+	core.AssertEqual(t, 7, got)
+	core.AssertEqual(t, "/health", descriptions[6].Path)
 }
 
 func TestProvider_AIProvider_Describe_Ugly(t *core.T) {
 	provider := NewProvider()
 	descriptions := provider.Describe()
-	health := descriptions[5]
+	health := descriptions[6]
 
 	core.AssertEqual(t, http.MethodGet, health.Method)
 	core.AssertEqual(t, "/health", health.Path)
