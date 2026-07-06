@@ -33,9 +33,10 @@ func assertTensor(t *testing.T, m map[string]Tensor, name string, want Tensor) {
 	}
 }
 
-// TestLoadDirSharded proves the two-shard merge: an index.json maps tensors across two shard
-// files, and LoadDir returns the union with each tensor's bytes intact from its own shard.
-func TestLoadDirSharded(t *testing.T) {
+// TestSafetensors_LoadDir_Good proves the two-shard merge: an index.json maps tensors
+// across two shard files, and LoadDir returns the union with each tensor's bytes intact
+// from its own shard.
+func TestSafetensors_LoadDir_Good(t *testing.T) {
 	dir := t.TempDir()
 	a := Tensor{Dtype: "F32", Shape: []int{2}, Data: []byte{1, 0, 0, 0, 2, 0, 0, 0}}
 	b := Tensor{Dtype: "U8", Shape: []int{3}, Data: []byte{9, 8, 7}}
@@ -88,9 +89,9 @@ func TestLoadDirSingle(t *testing.T) {
 	t.Logf("single: model.safetensors loaded without an index")
 }
 
-// TestLoadDirErrors checks the rejections: empty dir, malformed/empty index, a shard the index
-// names but is missing, and a tensor the index names but its shard lacks.
-func TestLoadDirErrors(t *testing.T) {
+// TestSafetensors_LoadDir_Bad checks the rejections: empty dir, malformed/empty index, a
+// shard the index names but is missing, and a tensor the index names but its shard lacks.
+func TestSafetensors_LoadDir_Bad(t *testing.T) {
 	if _, err := LoadDir(t.TempDir()); err == nil {
 		t.Fatal("empty dir: expected an error")
 	}
@@ -124,4 +125,153 @@ func TestLoadDirErrors(t *testing.T) {
 		t.Fatal("malformed index json: expected an error")
 	}
 	t.Logf("rejections: empty dir, missing shard, absent tensor, empty/malformed index all error")
+}
+
+// TestSafetensors_LoadDir_Ugly confirms the index always wins: a directory holding BOTH
+// an index.json and a stray model.safetensors (that the index doesn't reference) loads
+// via the sharded path, not the single-file fallback.
+func TestSafetensors_LoadDir_Ugly(t *testing.T) {
+	dir := t.TempDir()
+	a := Tensor{Dtype: "F32", Shape: []int{1}, Data: []byte{1, 0, 0, 0}}
+	blobA, err := Encode(map[string]Tensor{"a": a})
+	if err != nil {
+		t.Fatalf("Encode shard: %v", err)
+	}
+	writeFile(t, dir, "shard.safetensors", blobA)
+	writeFile(t, dir, indexName, []byte(`{"weight_map":{"a":"shard.safetensors"}}`))
+	// A stray single-file that the index does not mention.
+	strayBlob, err := Encode(map[string]Tensor{"stray": {Dtype: "U8", Shape: []int{1}, Data: []byte{9}}})
+	if err != nil {
+		t.Fatalf("Encode stray: %v", err)
+	}
+	writeFile(t, dir, singleName, strayBlob)
+
+	got, err := LoadDir(dir)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d tensors, want 1 (index path only, stray single-file ignored)", len(got))
+	}
+	assertTensor(t, got, "a", a)
+}
+
+// --- LoadDirMmap ---
+
+// TestSafetensors_LoadDirMmap_Good covers the sharded layout: two shard files + an
+// index.json, mapped and merged so each tensor's bytes match its source shard.
+func TestSafetensors_LoadDirMmap_Good(t *testing.T) {
+	dir := t.TempDir()
+	a := Tensor{Dtype: "F32", Shape: []int{2}, Data: []byte{1, 0, 0, 0, 2, 0, 0, 0}}
+	b := Tensor{Dtype: "U8", Shape: []int{3}, Data: []byte{9, 8, 7}}
+	blob1, err := Encode(map[string]Tensor{"a": a})
+	if err != nil {
+		t.Fatalf("Encode shard1: %v", err)
+	}
+	blob2, err := Encode(map[string]Tensor{"b": b})
+	if err != nil {
+		t.Fatalf("Encode shard2: %v", err)
+	}
+	writeFile(t, dir, "model-00001-of-00002.safetensors", blob1)
+	writeFile(t, dir, "model-00002-of-00002.safetensors", blob2)
+	writeFile(t, dir, indexName, []byte(`{"weight_map":{
+		"a":"model-00001-of-00002.safetensors",
+		"b":"model-00002-of-00002.safetensors"}}`))
+
+	dm, err := LoadDirMmap(dir)
+	if err != nil {
+		t.Fatalf("LoadDirMmap: %v", err)
+	}
+	defer dm.Close()
+	if len(dm.Shards) != 2 || len(dm.Tensors) != 2 {
+		t.Fatalf("want 2 shards + 2 tensors, got %d shards %d tensors", len(dm.Shards), len(dm.Tensors))
+	}
+	assertTensor(t, dm.Tensors, "a", a)
+	assertTensor(t, dm.Tensors, "b", b)
+}
+
+// TestSafetensors_LoadDirMmap_Bad confirms an empty directory (neither an index nor a
+// single model.safetensors) is rejected.
+func TestSafetensors_LoadDirMmap_Bad(t *testing.T) {
+	if _, err := LoadDirMmap(t.TempDir()); err == nil {
+		t.Fatal("LoadDirMmap(empty dir) error = nil")
+	}
+}
+
+// TestSafetensors_LoadDirMmap_Ugly covers the single-file fallback: a directory holding
+// just model.safetensors (no index) maps into a one-shard DirMapping.
+func TestSafetensors_LoadDirMmap_Ugly(t *testing.T) {
+	dir := t.TempDir()
+	x := Tensor{Dtype: "F32", Shape: []int{1}, Data: []byte{7, 0, 0, 0}}
+	blob, err := Encode(map[string]Tensor{"x": x})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	writeFile(t, dir, singleName, blob)
+
+	dm, err := LoadDirMmap(dir)
+	if err != nil {
+		t.Fatalf("LoadDirMmap single: %v", err)
+	}
+	defer dm.Close()
+	if len(dm.Shards) != 1 || len(dm.Tensors) != 1 {
+		t.Fatalf("want 1 shard + 1 tensor, got %d shards %d tensors", len(dm.Shards), len(dm.Tensors))
+	}
+	assertTensor(t, dm.Tensors, "x", x)
+}
+
+// --- DirMapping.Close ---
+
+// TestSafetensors_DirMapping_Close_Good confirms Close unmaps every shard and clears
+// both Shards and Tensors, so a stale reference cannot be read after Close.
+func TestSafetensors_DirMapping_Close_Good(t *testing.T) {
+	dir := t.TempDir()
+	x := Tensor{Dtype: "U8", Shape: []int{1}, Data: []byte{1}}
+	blob, err := Encode(map[string]Tensor{"x": x})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	writeFile(t, dir, singleName, blob)
+	dm, err := LoadDirMmap(dir)
+	if err != nil {
+		t.Fatalf("LoadDirMmap: %v", err)
+	}
+	if err := dm.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if dm.Shards != nil || dm.Tensors != nil {
+		t.Fatalf("Shards/Tensors not cleared after Close: %v %v", dm.Shards, dm.Tensors)
+	}
+}
+
+// NOTE: DirMapping.Close's error path (a shard whose underlying munmap fails) needs a
+// real misaligned-mmap syscall fault to trigger — see TestDirMappingCloseShardError in
+// safetensors_mmap_fault_test.go (//go:build unix). This file stays portable (the !unix
+// Mapping.Close never errors), so that Bad-input case is covered there, not here.
+
+// TestSafetensors_DirMapping_Close_Ugly confirms Close on a nil *DirMapping, and a
+// second Close after a real one, are both safe no-ops.
+func TestSafetensors_DirMapping_Close_Ugly(t *testing.T) {
+	var nilD *DirMapping
+	if err := nilD.Close(); err != nil {
+		t.Fatalf("nil DirMapping Close: %v, want nil", err)
+	}
+
+	dir := t.TempDir()
+	x := Tensor{Dtype: "U8", Shape: []int{1}, Data: []byte{1}}
+	blob, err := Encode(map[string]Tensor{"x": x})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	writeFile(t, dir, singleName, blob)
+	dm, err := LoadDirMmap(dir)
+	if err != nil {
+		t.Fatalf("LoadDirMmap: %v", err)
+	}
+	if err := dm.Close(); err != nil {
+		t.Fatalf("first Close: %v", err)
+	}
+	if err := dm.Close(); err != nil {
+		t.Fatalf("second Close: %v, want nil", err)
+	}
 }
