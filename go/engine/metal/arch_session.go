@@ -4229,60 +4229,82 @@ func (s *ArchSession) discardLiveLink(link pendingLiveLink) {
 	s.headEnc.putGreedyScratch(link.scratch)
 }
 
-// generateSubmitAheadLinks runs the chained live decode with ONE speculative link in flight:
-// token N+1's command buffer commits while N executes — its input is N's on-GPU embed, so no
-// host value is needed — and the host encode overlaps the GPU. A stop with a speculative link
-// in flight unwinds it (wait, position back one, paged-KV truncate). A declined link here is
-// a structural fault, not a fallback case: its tail never wrote xA, so a further link would
-// compute on stale input.
+// liveSubmitAheadDepth is how many speculative chained links stay committed while the
+// oldest executes. Depth 1 by receipt (#341 phase 4): with the correct encode-before-
+// wait ordering, depth 2 measured 154.2 tok/s vs depth 1's 152.9 on the real 26B —
+// inside the run-to-run wobble band — with the host/sync gap pinned at 0.18 ms/token
+// either way. One queued link already lets the GPU start the next command buffer the
+// instant the current completes; the residual gap is cb-to-cb scheduling latency that
+// no queue depth removes, while every extra depth discards one more speculative
+// token's GPU work at a stop. Greedy chaining keeps any depth correct-by-construction
+// (a stop is a pure position/counter rewind, ring-safe — the identity tests cover the
+// wrapped-ring rollback shape), so this stays a documented tunable.
+const liveSubmitAheadDepth = 1
+
+// generateSubmitAheadLinks runs the chained live decode with up to liveSubmitAheadDepth
+// speculative links in flight: each link's command buffer commits while older links
+// execute — its input is the previous link's on-GPU embed, so no host value is needed —
+// and the host encode overlaps the GPU. A stop with speculative links in flight unwinds
+// them (wait, position back by the queue length, one paged-KV truncate). A declined link
+// here is a structural fault, not a fallback case: its tail never wrote xA, so a further
+// link would compute on stale input.
 func (s *ArchSession) generateSubmitAheadLinks(gen []int32, maxNew, eosID int, suppress []int32, sc *plGPUScratch, yield func(int32) bool) ([]int32, bool, error) {
-	pending, ok, err := s.stepGreedyLiveCommit(suppress, sc)
-	if err != nil {
-		return gen, false, err
+	queue := make([]pendingLiveLink, 0, liveSubmitAheadDepth)
+	discardQueue := func() {
+		for _, link := range queue {
+			s.discardLiveLink(link)
+		}
+		queue = queue[:0]
 	}
-	if !ok {
-		return gen, false, core.NewError("native.ArchSession.generateSubmitAheadLinks: chain declined mid-stream")
+	push := func() error {
+		link, ok, err := s.stepGreedyLiveCommit(suppress, sc)
+		if err != nil {
+			discardQueue()
+			return err
+		}
+		if !ok {
+			discardQueue()
+			return core.NewError("native.ArchSession.generateSubmitAheadLinks: chain declined mid-stream")
+		}
+		queue = append(queue, link)
+		return nil
 	}
-	for {
-		var next pendingLiveLink
-		haveNext := false
-		if len(gen)+1 < maxNew {
-			var nok bool
-			if next, nok, err = s.stepGreedyLiveCommit(suppress, sc); err != nil {
-				s.discardLiveLink(pending)
+	for len(queue) < liveSubmitAheadDepth && len(gen)+len(queue) < maxNew {
+		if err := push(); err != nil {
+			return gen, false, err
+		}
+	}
+	for len(queue) > 0 {
+		// Commit the NEXT link before waiting the oldest: the host encode overlaps
+		// the queued links' GPU execution (waiting first would idle the GPU through
+		// every encode — measured 132.5 vs 155.0 tok/s on the real 26B).
+		if len(gen)+len(queue) < maxNew {
+			if err := push(); err != nil {
 				return gen, false, err
 			}
-			if !nok {
-				s.discardLiveLink(pending)
-				return gen, false, core.NewError("native.ArchSession.generateSubmitAheadLinks: chain declined mid-stream")
-			}
-			haveNext = true
 		}
+		pending := queue[0]
+		queue = queue[1:]
 		tok, werr := s.waitLiveLink(pending)
 		if werr != nil {
-			if haveNext {
-				s.discardLiveLink(next)
-			}
+			discardQueue()
 			return gen, false, werr
 		}
 		gen = append(gen, tok)
 		stop := (yield != nil && !yield(tok)) || (eosID >= 0 && int(tok) == eosID)
 		if stop {
-			if haveNext {
-				// unwind the speculative link: its step cached one token past the stop.
-				s.discardLiveLink(next)
-				s.pos--
+			if n := len(queue); n > 0 {
+				// unwind the speculative links: their steps cached tokens past the stop.
+				discardQueue()
+				s.pos -= n
 				if terr := s.state.truncateDevicePagedKV(s.pos); terr != nil {
 					return gen, true, terr
 				}
 			}
 			return gen, true, nil
 		}
-		if !haveNext {
-			return gen, false, nil // token budget reached with pending as the last wanted link
-		}
-		pending = next
 	}
+	return gen, false, nil // token budget reached
 }
 
 // stepGreedyLiveCommit encodes + COMMITS one chained live link without waiting (the
