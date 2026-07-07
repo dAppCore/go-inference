@@ -89,6 +89,7 @@ func TestRealMoE26BHostProfile(t *testing.T) {
 	t.Logf("chained live links: %d (0 = the chained live lane did not engage)", chainedLiveLinks.Load())
 	t.Logf("lean gather dispatches: %d (0 = the fc-specialised gather lane did not engage — #280)", leanGatherDispatches.Load())
 	t.Logf("fused router dispatches: %d (0 = the single-dispatch router did not engage — #340)", routerFusedDispatches.Load())
+	t.Logf("sdpa single-cell dispatches: %d (0 = the P1-final fast path did not engage — #340)", sdpaSingleCellDispatches.Load())
 	// cb GPU span vs wall: the residual host/sync gap a submit-ahead pipeline could overlap;
 	// span minus the profiler's kernel-sum is the intra-cb bubble tax a concurrent pass chases.
 	t.Logf("cb GPU span %.2f ms/token vs wall %.2f — host/sync gap %.2f ms/token",

@@ -13,6 +13,16 @@ typedef bfloat bf16;
 // carried the online softmax across pages through shared scratch, serialising the whole chain
 // per layer at one scalar thread per head). Pass 2 merges the per-page partials per head with
 // the standard log-sum-exp combine and writes the bf16 output.
+//
+// SINGLE-CELL fast path (#340): when the whole visible cache is one split window of one page
+// (cellCount == 1), pass 2's log-sum-exp merge of ONE cell is an identity rescale — M is the
+// cell's own max, w = exp(0) = 1, denom = the cell's own sum — so the final row is exactly
+// bf16(acc[i]/S). lthn_sdpa_paged_p1_final_bf16 applies that division at store and the host
+// skips pass 2 entirely (one dispatch per layer per token saved at short context). Same body,
+// template-selected tail, so the arithmetic — and the output bytes — cannot drift from the
+// two-pass path. A separate host_name (not a function constant) so a STALE metallib fails the
+// pipeline lookup loudly and the host falls back to two passes, instead of silently running a
+// kernel without the branch.
 
 struct PagedSDPAP1Dims {
   uint nHeads;
@@ -40,17 +50,22 @@ constant constexpr uint kPagedMaxPerLane = 16;
 // runs 256 threads per head instead of 32.
 constant constexpr uint kPagedSimdGroups = 8;
 
-[[kernel]] void lthn_sdpa_paged_p1_bf16(
-    const device bf16* q      [[buffer(0)]],
-    const device bf16* kPage  [[buffer(1)]],
-    const device bf16* vPage  [[buffer(2)]],
-    device float*      maxs   [[buffer(3)]],  // [nHeads * cellCount]
-    device float*      sums   [[buffer(4)]],  // [nHeads * cellCount]
-    device float*      acc    [[buffer(5)]],  // [nHeads * cellCount * headDim]
-    const constant PagedSDPAP1Dims& D [[buffer(6)]],
-    uint tgid [[threadgroup_position_in_grid]],
-    uint sg   [[simdgroup_index_in_threadgroup]],
-    uint lane [[thread_index_in_simdgroup]]) {
+template <bool WRITE_FINAL>
+METAL_FUNC void lthn_sdpa_paged_p1_body(
+    const device bf16* q,
+    const device bf16* kPage,
+    const device bf16* vPage,
+    device float* maxs,
+    device float* sums,
+    device float* acc,
+    device bf16* outFinal,
+    const constant PagedSDPAP1Dims& D,
+    threadgroup float* tgM,
+    threadgroup float* tgS,
+    threadgroup float* tgO,
+    uint tgid,
+    uint sg,
+    uint lane) {
   // grid = nHeads × splits, linearised on x (head-major): every split window is an
   // independent threadgroup so the depth parallelism GROWS with context instead of
   // serialising inside 8 simdgroups (16 TGs total was the #339 droop: 12.4 ms/token of
@@ -124,9 +139,6 @@ constant constexpr uint kPagedSimdGroups = 8;
   }
 
   // merge the simdgroup partials in threadgroup memory (log-sum-exp).
-  threadgroup float tgM[kPagedSimdGroups];
-  threadgroup float tgS[kPagedSimdGroups];
-  threadgroup float tgO[kPagedSimdGroups * 512]; // headDim <= 512
   if (lane == 0) {
     tgM[sg] = m;
     tgS[sg] = s;
@@ -160,6 +172,18 @@ constant constexpr uint kPagedSimdGroups = 8;
     }
   }
 
+  if (WRITE_FINAL) {
+    // Single cell: pass 2 would compute w = exp(M - M) = 1 and denom = S, then
+    // bf16(of[i]/S) — the identical operands and the identical one division, so
+    // the bytes match the two-pass path exactly (of[] round-trips pass 2's float
+    // scratch losslessly).
+    device bf16* oh = outFinal + h * D.headDim + lane * per;
+    for (uint i = 0; i < per; i++) {
+      oh[i] = S > 0.0f ? bf16(of[i] / S) : bf16(0.0f);
+    }
+    return;
+  }
+
   const uint cell = h * D.cellCount + D.cellBase + split;
   if (lane == 0) {
     maxs[cell] = M;
@@ -169,6 +193,41 @@ constant constexpr uint kPagedSimdGroups = 8;
   for (uint i = 0; i < per; i++) {
     a[i] = of[i];
   }
+}
+
+[[kernel]] void lthn_sdpa_paged_p1_bf16(
+    const device bf16* q      [[buffer(0)]],
+    const device bf16* kPage  [[buffer(1)]],
+    const device bf16* vPage  [[buffer(2)]],
+    device float*      maxs   [[buffer(3)]],  // [nHeads * cellCount]
+    device float*      sums   [[buffer(4)]],  // [nHeads * cellCount]
+    device float*      acc    [[buffer(5)]],  // [nHeads * cellCount * headDim]
+    const constant PagedSDPAP1Dims& D [[buffer(6)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint sg   [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float tgM[kPagedSimdGroups];
+  threadgroup float tgS[kPagedSimdGroups];
+  threadgroup float tgO[kPagedSimdGroups * 512]; // headDim <= 512
+  lthn_sdpa_paged_p1_body<false>(
+      q, kPage, vPage, maxs, sums, acc, (device bf16*)acc, D, tgM, tgS, tgO, tgid, sg, lane);
+}
+
+[[kernel]] void lthn_sdpa_paged_p1_final_bf16(
+    const device bf16* q      [[buffer(0)]],
+    const device bf16* kPage  [[buffer(1)]],
+    const device bf16* vPage  [[buffer(2)]],
+    device bf16*       out    [[buffer(3)]],  // [nHeads * headDim]
+    const constant PagedSDPAP1Dims& D [[buffer(4)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint sg   [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float tgM[kPagedSimdGroups];
+  threadgroup float tgS[kPagedSimdGroups];
+  threadgroup float tgO[kPagedSimdGroups * 512]; // headDim <= 512
+  lthn_sdpa_paged_p1_body<true>(
+      q, kPage, vPage, (device float*)out, (device float*)out, (device float*)out, out, D,
+      tgM, tgS, tgO, tgid, sg, lane);
 }
 
 struct PagedSDPAP2Dims {

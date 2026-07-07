@@ -7,11 +7,17 @@ package native
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	core "dappco.re/go"
 	"github.com/tmc/apple/metal"
 )
+
+// sdpaSingleCellDispatches counts paged-SDPA decodes that ran the single-cell
+// P1-final fast path (pass 2 skipped, #340). Engagement counter for the A/B
+// tests — a compare that never engaged the lane proves nothing.
+var sdpaSingleCellDispatches atomic.Int64
 
 type sdpaPagedP1Params struct {
 	NHeads      uint32
@@ -60,6 +66,10 @@ var (
 	sdpaPagedP2PSOOnce sync.Once
 	sdpaPagedP2PSO     metal.MTLComputePipelineState
 	sdpaPagedP2PSOErr  error
+
+	sdpaPagedP1FinalPSOOnce sync.Once
+	sdpaPagedP1FinalPSO     metal.MTLComputePipelineState
+	sdpaPagedP1FinalPSOErr  error
 )
 
 func newSDPAPagedDecodeScratch(nHeads, headDim int) (*sdpaPagedDecodeScratch, error) {
@@ -119,6 +129,27 @@ func sdpaPagedP1Pipeline() (metal.MTLComputePipelineState, error) {
 		sdpaPagedP1PSO, sdpaPagedP1PSOErr = device.NewComputePipelineStateWithFunctionError(fn)
 	})
 	return sdpaPagedP1PSO, sdpaPagedP1PSOErr
+}
+
+// sdpaPagedP1FinalPipeline resolves the single-cell P1 variant — the same pass-1
+// body with the final normalise applied at store (see the kernel's fast-path
+// notes). A separate host_name, deliberately: a STALE metallib fails this lookup
+// and the plan falls back to two passes, rather than silently running a kernel
+// without the branch.
+func sdpaPagedP1FinalPipeline() (metal.MTLComputePipelineState, error) {
+	sdpaPagedP1FinalPSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			sdpaPagedP1FinalPSOErr = core.NewError("native.sdpaPagedP1FinalPipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_sdpa_paged_p1_final_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			sdpaPagedP1FinalPSOErr = core.NewError("native.sdpaPagedP1FinalPipeline: kernel lthn_sdpa_paged_p1_final_bf16 not found")
+			return
+		}
+		sdpaPagedP1FinalPSO, sdpaPagedP1FinalPSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return sdpaPagedP1FinalPSO, sdpaPagedP1FinalPSOErr
 }
 
 func sdpaPagedP2Pipeline() (metal.MTLComputePipelineState, error) {
@@ -198,9 +229,14 @@ type sdpaPagedDecodePlan struct {
 	vHead, vSeq          []int
 	scratch              *sdpaPagedDecodeScratch
 	p1PSO, p2PSO         metal.MTLComputePipelineState
-	nHeads, nKVHeads     int
-	headDim, cellCount   int
-	scale                float32
+	// p1FinalPSO drives the single-cell fast path: pass 1 writes the final
+	// normalised row directly and emitP2 no-ops. Set only when cellCount == 1
+	// and the variant kernel resolved (see singleCell).
+	p1FinalPSO         metal.MTLComputePipelineState
+	singleCell         bool
+	nHeads, nKVHeads   int
+	headDim, cellCount int
+	scale              float32
 }
 
 func buildSDPAPagedDecodePlan(
@@ -266,6 +302,17 @@ func buildSDPAPagedDecodePlan(
 	if err != nil {
 		return sdpaPagedDecodePlan{}, err
 	}
+	// Single-cell fast path (#340): the whole visible cache is one split window of
+	// one page, so pass 2's merge of one cell is an identity rescale — pass 1
+	// writes the final row and pass 2 is skipped. Falls back to two passes when
+	// the variant kernel is missing (stale metallib) or levered off.
+	var p1FinalPSO metal.MTLComputePipelineState
+	singleCell := false
+	if cellCount == 1 && !sdpaSingleCellDisabled {
+		if pso, ferr := sdpaPagedP1FinalPipeline(); ferr == nil {
+			p1FinalPSO, singleCell = pso, true
+		}
+	}
 	// returned BY VALUE (borrowed slices only): the callers hold it as a local, so it stays
 	// on the stack — the sampled-retained allocation budgets count every per-layer alloc.
 	return sdpaPagedDecodePlan{
@@ -273,14 +320,52 @@ func buildSDPAPagedDecodePlan(
 		keyPages: keyPages, valuePages: valuePages, pageLens: pageLens,
 		kHead: keyHeadStrides, kSeq: keySeqStrides, vHead: valueHeadStrides, vSeq: valueSeqStrides,
 		scratch: scratch, p1PSO: p1PSO, p2PSO: p2PSO,
+		p1FinalPSO: p1FinalPSO, singleCell: singleCell,
 		nHeads: nHeads, nKVHeads: nKVHeads, headDim: headDim, cellCount: cellCount,
 		scale: scale,
 	}, nil
 }
 
 // emitP1s encodes pass 1: one dispatch per page, nHeads × splits threadgroups, each writing
-// its OWN (head, cell) partial — every dispatch independent of the others.
+// its OWN (head, cell) partial — every dispatch independent of the others. On a single-cell
+// plan the one dispatch runs the P1-final variant instead, writing the normalised row
+// straight to out (emitP2 then no-ops).
 func (p *sdpaPagedDecodePlan) emitP1s(enc metal.MTLComputeCommandEncoder) {
+	if p.singleCell {
+		for i := range p.keyPages {
+			if p.pageLens[i] <= 0 {
+				continue // empty page: zero cells (see the plan validation)
+			}
+			sdpaSingleCellDispatches.Add(1)
+			params := sdpaPagedP1Params{
+				NHeads:      uint32(p.nHeads),
+				NKVHeads:    uint32(p.nKVHeads),
+				HeadDim:     uint32(p.headDim),
+				PageLen:     uint32(p.pageLens[i]),
+				KHeadStride: uint32(p.kHead[i]),
+				KSeqStride:  uint32(p.kSeq[i]),
+				VHeadStride: uint32(p.vHead[i]),
+				VSeqStride:  uint32(p.vSeq[i]),
+				SplitRows:   uint32(sdpaPagedSplitRows),
+				Splits:      1,
+				CellBase:    0,
+				CellCount:   1,
+				Scale:       p.scale,
+			}
+			setPSO(enc, p.p1FinalPSO)
+			setBuf(enc, p.q, 0, 0)
+			setBuf(enc, p.keyPages[i], 0, 1)
+			setBuf(enc, p.valuePages[i], 0, 2)
+			setBuf(enc, p.out, 0, 3)
+			setBytes(enc, unsafe.Pointer(&params), uint(unsafe.Sizeof(params)), 4)
+			dispatchThreadgroups(enc,
+				metal.MTLSize{Width: uint(p.nHeads), Height: 1, Depth: 1},
+				metal.MTLSize{Width: 256, Height: 1, Depth: 1}, // 8 simdgroups split the window rows
+			)
+			return
+		}
+		return
+	}
 	cellBase := 0
 	for i := range p.keyPages {
 		if p.pageLens[i] <= 0 {
@@ -318,8 +403,12 @@ func (p *sdpaPagedDecodePlan) emitP1s(enc metal.MTLComputeCommandEncoder) {
 	}
 }
 
-// emitP2 encodes pass 2: the per-head merge across every partial cell.
+// emitP2 encodes pass 2: the per-head merge across every partial cell. A
+// single-cell plan already wrote the final row in pass 1 — nothing to merge.
 func (p *sdpaPagedDecodePlan) emitP2(enc metal.MTLComputeCommandEncoder) {
+	if p.singleCell {
+		return
+	}
 	p2 := sdpaPagedP2Params{HeadDim: uint32(p.headDim), CellCount: uint32(p.cellCount)}
 	setPSO(enc, p.p2PSO)
 	setBuf(enc, p.scratch.maxs, 0, 0)
