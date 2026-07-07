@@ -724,27 +724,29 @@ func TestJsondec_CountJSONArrayElements_Ugly(t *testing.T) {
 // 0xFFFF) — codepoints above the Basic Multilingual Plane only reach
 // JSON via a UTF-16 surrogate pair, which this package does not
 // combine. Documented here rather than left silently uncovered.
-func TestJsondec_writeUTF8_FourByte(t *testing.T) {
+// writeUTF8's domain is cp <= 0xFFFF — the 4-hex escape is its only producer, and the
+// supplementary-plane branch was deleted as unreachable (#327). The ceiling and the
+// documented raw surrogate emission are the real contract.
+func TestJsondec_writeUTF8_CeilingAndSurrogate(t *testing.T) {
 	var sb strings.Builder
-	writeUTF8(&sb, 0x1F600) // U+1F600 GRINNING FACE
-	got := sb.String()
-	want := "\U0001F600"
-	if got != want {
-		t.Fatalf("got %q want %q", got, want)
+	writeUTF8(&sb, 0xFFFF) // the 4-hex ceiling: 3-byte emission
+	if got, want := sb.String(), "\xef\xbf\xbf"; got != want {
+		t.Fatalf("ceiling: got %q want %q", got, want)
+	}
+	sb.Reset()
+	writeUTF8(&sb, 0xD83D) // surrogate-range: raw un-paired 3-byte emission by design
+	if got, want := sb.String(), "\xed\xa0\xbd"; got != want {
+		t.Fatalf("surrogate: got %q want %q", got, want)
 	}
 }
 
-// TestJsondec_parseJSONUnicodeEscape_WrongLength directly exercises
-// the defensive len(hex)!=4 guard (the internal helper is unexported
-// so this test lives in-package). Also unreachable via any exported
-// entry point: ParseJSONString always slices exactly 4 bytes
-// (data[i+2:i+6]) before calling, having already bounds-checked
-// i+6<=len(data). Documented rather than left silently uncovered.
-func TestJsondec_parseJSONUnicodeEscape_WrongLength(t *testing.T) {
-	if _, ok := parseJSONUnicodeEscape([]byte("041")); ok {
-		t.Fatalf("expected ok=false for a 3-byte hex slice")
+// parseJSONUnicodeEscape's contract: exactly the 4 bytes after \u (the single call site
+// slices data[i+2 : i+6]); the defensive length guard was deleted as unreachable (#327).
+func TestJsondec_parseJSONUnicodeEscape_HexValidation(t *testing.T) {
+	if cp, ok := parseJSONUnicodeEscape([]byte("0041")); !ok || cp != 'A' {
+		t.Fatalf("expected U+0041, got %U ok=%v", cp, ok)
 	}
-	if _, ok := parseJSONUnicodeEscape([]byte("00410")); ok {
-		t.Fatalf("expected ok=false for a 5-byte hex slice")
+	if _, ok := parseJSONUnicodeEscape([]byte("00G1")); ok {
+		t.Fatal("expected ok=false for a non-hex digit")
 	}
 }
