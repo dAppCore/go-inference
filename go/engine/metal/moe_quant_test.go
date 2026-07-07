@@ -875,7 +875,7 @@ func TestMoEBlockQuantWithBufferOutputWritesDirectlyToProvidedBuffer(t *testing.
 	}
 	defer out.Close()
 
-	if err := moeBlockQuantWithBufferOutputInPool(h, hBuf, out.buf, w, dModel, dFF, eps); err != nil {
+	if err := moeBlockQuantWithBufferOutputInPool(h, hBuf, out.buf, w, dModel, dFF, eps, nil); err != nil {
 		t.Fatalf("moeBlockQuantWithBufferOutputInPool: %v", err)
 	}
 	if cosineBF16(out.bytes, want) < 0.9999 {
@@ -1066,7 +1066,7 @@ func TestMoEBlockQuantAfterRouterDeviceIndexBufferMatchesHostIndex(t *testing.T)
 	}
 	idxBytes := unsafe.Slice((*byte)(unsafe.Pointer(&idx[0])), len(idx)*4)
 	idxBuf := sharedBytes(idxBytes)
-	got, err := moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h, nil, nil, nil, idx, idxBuf, weights, nil, w, dModel, dFF, eps, false, false)
+	got, err := moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h, nil, nil, nil, idx, idxBuf, weights, nil, w, dModel, dFF, eps, false, false, nil)
 	if err != nil {
 		t.Fatalf("moeBlockQuantAfterRouter device index: %v", err)
 	}
@@ -1097,7 +1097,7 @@ func TestMoEBlockQuantAfterRouterDeviceBuffersDoNotNeedHostRouterViews(t *testin
 	idxBytes := unsafe.Slice((*byte)(unsafe.Pointer(&idx[0])), len(idx)*4)
 	idxBuf := sharedBytes(idxBytes)
 	weightBuf := sharedBytes(weights)
-	got, err := moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h, nil, nil, nil, nil, idxBuf, nil, weightBuf, w, dModel, dFF, eps, false, false)
+	got, err := moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h, nil, nil, nil, nil, idxBuf, nil, weightBuf, w, dModel, dFF, eps, false, false, nil)
 	if err != nil {
 		t.Fatalf("moeBlockQuantAfterRouter device buffers without host views: %v", err)
 	}
@@ -1136,7 +1136,7 @@ func TestMoEBlockQuantDeviceRouterBuffersChainWithoutHostViews(t *testing.T) {
 		t.Fatal("expected device top-k router to be usable")
 	}
 	defer putRouterDeviceScratch(routerScratch)
-	got, err := moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h, nil, nil, nil, nil, routerScratch.idxBuf, nil, weightBuf, w, dModel, dFF, eps, false, false)
+	got, err := moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h, nil, nil, nil, nil, routerScratch.idxBuf, nil, weightBuf, w, dModel, dFF, eps, false, false, nil)
 	if err != nil {
 		t.Fatalf("moeBlockQuantAfterRouter device route buffers: %v", err)
 	}

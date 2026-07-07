@@ -712,7 +712,12 @@ func moeRouterQuantDeviceTopKWithBufferPooled(x []byte, xBuf metal.MTLBuffer, no
 	if !routerTopKUsable(numExperts, topK) {
 		return nil, nil, nil, nil, false, nil
 	}
-	if len(x) != dModel*bf16Size {
+	// x may be nil when xBuf carries the hidden (the decode loop's no-wait handoff — the
+	// input fallback below never fires with a buffer supplied).
+	if xBuf == nil && x == nil {
+		return nil, nil, nil, nil, true, core.NewError("native.MoERouterQuant: x bytes or xBuf required")
+	}
+	if x != nil && len(x) != dModel*bf16Size {
 		return nil, nil, nil, nil, true, core.NewError("native.MoERouterQuant: x must be dModel bf16 bytes")
 	}
 	if len(normWScaled) != dModel*bf16Size {
