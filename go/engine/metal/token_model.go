@@ -646,8 +646,15 @@ func (m *NativeTokenModel) UsesFixedSlidingCache() bool {
 	return m != nil && m.NativeBackend != nil && m.arch.SlidingWindow > 0
 }
 
-// NeedsThoughtChannelSuppressor mirrors the Gemma-4 large-variant prompt rule
-// from the model topology: large variants declare at least 16 query heads.
+// NeedsThoughtChannelSuppressor declares the engine.ThoughtSuppressorDeclarer
+// capability: whether this checkpoint's own chat template pre-closes an empty
+// <|channel>thought\n<channel|> on the generation cue when thinking is off.
+// The gemma4 large variants (12B/26B/31B) ship that branch in their
+// chat_template.jinja; E2B/E4B do not. Google ships no config flag for it, so
+// query-head count is the only config signal that separates the two template
+// families — E2B/E4B declare 8 heads, 12B/26B/31B declare 16 (verified against
+// the shipped config.json + jinja of each) — and the geometry proxy stays the
+// implementation detail here, behind the declared capability.
 func (m *NativeTokenModel) NeedsThoughtChannelSuppressor() bool {
 	return m != nil && m.NativeBackend != nil && m.arch.Heads >= largeVariantAttentionHeads
 }

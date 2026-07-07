@@ -117,7 +117,7 @@ func (m *TextModel) chatMultimodal(ctx context.Context, messages []inference.Mes
 			rendered[i].Content = prefix.String() + msg.Content
 		}
 
-		ids := m.encode(formatChatPrompt(m.turnTokens(), rendered, cfg.EnableThinking))
+		ids := m.encode(formatChatPrompt(m.turnTokens(), rendered, cfg.EnableThinking, m.thoughtSuppressor))
 		if len(ids) == 0 {
 			m.setErr(core.NewError("engine.TextModel.Chat: empty prompt after tokenisation"))
 			return

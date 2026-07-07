@@ -42,6 +42,10 @@ type TextModel struct {
 	info      inference.ModelInfo
 	maxLen    int
 	turns     TurnTokens
+	// thoughtSuppressor mirrors the model's ThoughtSuppressorDeclarer
+	// capability: render the pre-closed empty thought channel on thinking-off
+	// generation cues, exactly as the checkpoint's own template does.
+	thoughtSuppressor bool
 
 	mu          sync.Mutex
 	lastErr     core.Result
@@ -97,13 +101,36 @@ type StopTokenDeclarer interface {
 	DeclaredStopTokens() []int32
 }
 
+// ThoughtSuppressorDeclarer is the optional [TokenModel] capability for
+// checkpoints whose shipped chat template pre-closes an empty thought channel
+// on the generation cue when thinking is off. The gemma4 large variants
+// (12B/26B/31B) carry this branch in their own chat_template.jinja —
+//
+//	{{- '<|turn>model\n' -}}
+//	{%- if not enable_thinking | default(false) -%}
+//	    {{- '<|channel>thought\n<channel|>' -}}
+//	{%- endif -%}
+//
+// — while the E2B/E4B templates do not. Without the pre-closed channel a
+// large variant intermittently opens a ghost thought channel it was told not
+// to use and the visible answer goes missing. The model package owns the
+// family knowledge and DECLARES the capability; [TextModel] only renders what
+// is declared, so the engine never infers template behaviour from geometry.
+type ThoughtSuppressorDeclarer interface {
+	NeedsThoughtChannelSuppressor() bool
+}
+
 // NewTextModel wraps a loaded engine TokenModel as an inference.TextModel. tok
 // is the model's tokenizer (text↔ids is the serve boundary the model carries
 // once loaded); info + maxLen are the engine-built model metadata + context
 // window; modelType is the architecture selector reported by ModelType. The
 // chat-turn dialect is detected from the tokenizer's vocab.
 func NewTextModel(tm TokenModel, tok *tokenizer.Tokenizer, modelType string, info inference.ModelInfo, maxLen int) *TextModel {
-	return &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, turns: DetectTurnTokens(tok), lastErr: core.Ok(nil)}
+	suppressor := false
+	if d, ok := tm.(ThoughtSuppressorDeclarer); ok {
+		suppressor = d.NeedsThoughtChannelSuppressor()
+	}
+	return &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, turns: DetectTurnTokens(tok), thoughtSuppressor: suppressor, lastErr: core.Ok(nil)}
 }
 
 // openSession opens a fresh incremental decode session as the engine [Session]
@@ -153,7 +180,7 @@ func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts
 			m.setErr(core.NewError("engine.TextModel.Chat: model does not accept image input"))
 		}
 	}
-	return m.stream(ctx, m.encode(formatChatPrompt(m.turnTokens(), messages, cfg.EnableThinking)), cfg)
+	return m.stream(ctx, m.encode(formatChatPrompt(m.turnTokens(), messages, cfg.EnableThinking, m.thoughtSuppressor)), cfg)
 }
 
 // FormatChatPrompt renders a fresh multi-turn prompt with the model's turn
@@ -162,9 +189,11 @@ func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts
 // fresh session so a stateful first turn is framed exactly like a stateless
 // serve request: FormatChatPrompt([{user, "hi"}]) ->
 // "<|turn>user\nhi<turn|>\n<|turn>model\n" on a gemma4 checkpoint
-// (<start_of_turn> spelling on gemma3-era vocabs).
+// (<start_of_turn> spelling on gemma3-era vocabs; a thought-suppressor
+// checkpoint additionally pre-closes the empty thought channel, exactly as the
+// stateless serve request would).
 func (m *TextModel) FormatChatPrompt(messages []inference.Message) string {
-	return formatChatPrompt(m.turnTokens(), messages, nil)
+	return formatChatPrompt(m.turnTokens(), messages, nil, m.thoughtSuppressor)
 }
 
 // FormatChatContinuation renders a woken-session turn with no replay of the
@@ -554,14 +583,23 @@ func formatChatTurns(turns TurnTokens, messages []inference.Message) string {
 // system turn is how a request turns reasoning on. Legacy-dialect models have
 // no system-turn concept — system messages keep rendering as user turns and
 // the prompt is exactly formatChatTurns.
-func formatChatPrompt(turns TurnTokens, messages []inference.Message, enableThinking *bool) string {
+//
+// ghostSuppressor is the model's [ThoughtSuppressorDeclarer] capability: with
+// thinking off, a declaring checkpoint's template ends the generation cue as
+// <|turn>model\n<|channel>thought\n<channel|> — the pre-closed empty thought
+// channel that stops a large variant ghosting one of its own.
+func formatChatPrompt(turns TurnTokens, messages []inference.Message, enableThinking *bool, ghostSuppressor bool) string {
 	if turns.Open != "<|turn>" {
 		return formatChatTurns(turns, messages)
 	}
 	thinking := enableThinking != nil && *enableThinking
+	suffix := ""
+	if !thinking && ghostSuppressor {
+		suffix = "<|channel>thought\n<channel|>"
+	}
 	sysFirst := len(messages) > 0 && chatSystemRole(messages[0].Role)
 	if !thinking && !sysFirst {
-		return formatChatTurns(turns, messages)
+		return formatChatTurns(turns, messages) + suffix
 	}
 	var out strings.Builder
 	out.WriteString(turns.Open + "system\n")
@@ -574,7 +612,7 @@ func formatChatPrompt(turns TurnTokens, messages []inference.Message, enableThin
 		rest = messages[1:]
 	}
 	out.WriteString(turns.Close + "\n")
-	return out.String() + formatChatTurns(turns, rest)
+	return out.String() + formatChatTurns(turns, rest) + suffix
 }
 
 // chatSystemRole reports whether role opens the leading system turn on the

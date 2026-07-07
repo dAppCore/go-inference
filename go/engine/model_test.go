@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -1090,7 +1091,7 @@ func TestModel_TextModel_StopTokens_TurnClose(t *testing.T) {
 func TestModel_FormatChatPrompt_ThinkPrelude(t *testing.T) {
 	turns := TurnTokens{Open: "<|turn>", Close: "<turn|>"}
 	on := true
-	got := formatChatPrompt(turns, []inference.Message{{Role: "user", Content: "Hi"}}, &on)
+	got := formatChatPrompt(turns, []inference.Message{{Role: "user", Content: "Hi"}}, &on, false)
 	want := "<|turn>system\n<|think|>\n<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"
 	if got != want {
 		t.Fatalf("thinking prelude = %q, want %q", got, want)
@@ -1103,12 +1104,12 @@ func TestModel_FormatChatPrompt_ThinkPrelude(t *testing.T) {
 func TestModel_FormatChatPrompt_SystemTurn(t *testing.T) {
 	turns := TurnTokens{Open: "<|turn>", Close: "<turn|>"}
 	msgs := []inference.Message{{Role: "system", Content: "Be terse."}, {Role: "user", Content: "Hi"}}
-	if got, want := formatChatPrompt(turns, msgs, nil),
+	if got, want := formatChatPrompt(turns, msgs, nil, false),
 		"<|turn>system\nBe terse.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"; got != want {
 		t.Fatalf("system turn = %q, want %q", got, want)
 	}
 	on := true
-	if got, want := formatChatPrompt(turns, msgs, &on),
+	if got, want := formatChatPrompt(turns, msgs, &on, false),
 		"<|turn>system\n<|think|>\nBe terse.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"; got != want {
 		t.Fatalf("system+think turn = %q, want %q", got, want)
 	}
@@ -1122,14 +1123,77 @@ func TestModel_FormatChatPrompt_NoPreludeDefault(t *testing.T) {
 	gemma4 := TurnTokens{Open: "<|turn>", Close: "<turn|>"}
 	msgs := []inference.Message{{Role: "user", Content: "Hi"}}
 	off := false
-	if got, want := formatChatPrompt(gemma4, msgs, &off), formatChatTurns(gemma4, msgs); got != want {
+	if got, want := formatChatPrompt(gemma4, msgs, &off, false), formatChatTurns(gemma4, msgs); got != want {
 		t.Fatalf("thinking-off prompt = %q, want the plain turns %q", got, want)
 	}
 	legacy := TurnTokens{Open: "<start_of_turn>", Close: "<end_of_turn>"}
 	on := true
 	sysMsgs := []inference.Message{{Role: "system", Content: "S"}, {Role: "user", Content: "Hi"}}
-	if got, want := formatChatPrompt(legacy, sysMsgs, &on), formatChatTurns(legacy, sysMsgs); got != want {
+	if got, want := formatChatPrompt(legacy, sysMsgs, &on, false), formatChatTurns(legacy, sysMsgs); got != want {
 		t.Fatalf("legacy prompt = %q, want the plain turns %q (no system/think concept)", got, want)
+	}
+	if got, want := formatChatPrompt(legacy, sysMsgs, nil, true), formatChatTurns(legacy, sysMsgs); got != want {
+		t.Fatalf("legacy suppressor prompt = %q, want the plain turns %q (legacy vocabs have no channel markers)", got, want)
+	}
+}
+
+// TestModel_FormatChatPrompt_GhostSuppressor pins the large-variant generation
+// cue: with thinking off, a ThoughtSuppressorDeclarer checkpoint's template
+// pre-closes an empty thought channel after the trailing model turn —
+// byte-for-byte the 12B/26B/31B chat_template.jinja branch
+// `{%- if not enable_thinking -%}{{- '<|channel>thought\n<channel|>' -}}` —
+// and with thinking ON the suffix must NOT render.
+func TestModel_FormatChatPrompt_GhostSuppressor(t *testing.T) {
+	turns := TurnTokens{Open: "<|turn>", Close: "<turn|>"}
+	msgs := []inference.Message{{Role: "user", Content: "Hi"}}
+	want := "<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+	if got := formatChatPrompt(turns, msgs, nil, true); got != want {
+		t.Fatalf("suppressor thinking-off = %q, want %q", got, want)
+	}
+	off := false
+	if got := formatChatPrompt(turns, msgs, &off, true); got != want {
+		t.Fatalf("suppressor explicit-off = %q, want %q", got, want)
+	}
+	sysMsgs := []inference.Message{{Role: "system", Content: "Be terse."}, {Role: "user", Content: "Hi"}}
+	wantSys := "<|turn>system\nBe terse.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
+	if got := formatChatPrompt(turns, sysMsgs, nil, true); got != wantSys {
+		t.Fatalf("suppressor system-turn = %q, want %q", got, wantSys)
+	}
+	on := true
+	if got, want := formatChatPrompt(turns, msgs, &on, true),
+		"<|turn>system\n<|think|>\n<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"; got != want {
+		t.Fatalf("suppressor thinking-on = %q, want no pre-closed channel %q", got, want)
+	}
+}
+
+// thoughtSuppressorTokenModel is a fake TokenModel that declares the
+// pre-closed-thought-channel template capability
+// (engine.ThoughtSuppressorDeclarer), for the capability-fold test.
+type thoughtSuppressorTokenModel struct {
+	TokenModel
+	suppressor bool
+}
+
+func (s thoughtSuppressorTokenModel) NeedsThoughtChannelSuppressor() bool { return s.suppressor }
+
+// TestModel_NewTextModel_ThoughtSuppressorDeclared pins the capability fold: a
+// TokenModel declaring the thought-channel suppressor renders the pre-closed
+// channel through TextModel.FormatChatPrompt, a non-declaring one (or a
+// declarer answering false) renders the plain generation cue.
+func TestModel_NewTextModel_ThoughtSuppressorDeclared(t *testing.T) {
+	tok := newGemma4FixtureTokenizer(t)
+	msgs := []inference.Message{{Role: "user", Content: "Hi"}}
+	declared := NewTextModel(thoughtSuppressorTokenModel{suppressor: true}, tok, "x", inference.ModelInfo{}, 8)
+	if got := declared.FormatChatPrompt(msgs); !strings.HasSuffix(got, "<|turn>model\n<|channel>thought\n<channel|>") {
+		t.Fatalf("declared suppressor prompt = %q, want the pre-closed thought channel suffix", got)
+	}
+	small := NewTextModel(thoughtSuppressorTokenModel{suppressor: false}, tok, "x", inference.ModelInfo{}, 8)
+	if got := small.FormatChatPrompt(msgs); !strings.HasSuffix(got, "<|turn>model\n") {
+		t.Fatalf("false-declarer prompt = %q, want the plain generation cue", got)
+	}
+	undeclared := NewTextModel(nil, tok, "x", inference.ModelInfo{}, 8)
+	if got := undeclared.FormatChatPrompt(msgs); !strings.HasSuffix(got, "<|turn>model\n") {
+		t.Fatalf("undeclared prompt = %q, want the plain generation cue", got)
 	}
 }
 
