@@ -865,8 +865,14 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			// the per-query causal cap computed in-kernel) — needs the direct/no-evict landing
 			// AND every row below the 2-pass knee, so each row's bytes match the per-row
 			// single-query kernel exactly (the same routing the sequential oracle takes).
+			// The knee guards the SMALL-K case only: with few threadgroups a long kv serialises
+			// inside one TG and the per-row 2-pass re-parallelises it. At prompt scale K×heads
+			// threadgroups saturate the GPU regardless, so the single-pass multiQ stays fastest
+			// at any kv — the per-row 2-pass loop it replaces ran K dispatch pairs per global
+			// layer (~173ms per 512-row chunk at basePos 512). Token-identity tier past the knee
+			// (the per-row oracle would have routed 2-pass there), same tier as the fold's qmm.
 			useMultiQ := !sdpaMultiQDisabledForTest && (slideW == 0 || basePos+K <= slideW) &&
-				basePos+K < sdpa2PassMinKV && gpuHasSDPAMultiQ(lhd)
+				(basePos+K < sdpa2PassMinKV || K >= steelGEMMMinRows) && gpuHasSDPAMultiQ(lhd)
 			if batchedRope {
 				if err = encQKNormRopeRows(enc, qSlab, s.lb[li].qNorm.buf, qSlab, 0, s.lb[li].qNorm.off, 0, qDim, qDim, offBuf[0], layerRopeFreqs, K, s.nHeads, lhd, rotDim, rbase, s.scale, s.eps); err != nil {
 					endEncodingFast(enc)
