@@ -241,7 +241,10 @@ func recordArchICBQuant(
 	}
 	for li := range qlayers {
 		ql := qlayers[li]
-		if ql.GroupSize == 0 || ql.Bits == 0 {
+		// Affine geometry is required only when a projection actually carries sidecars: an
+		// all-dense layer (recordArchICBBF16 wraps bf16 weights as sidecar-less QuantWeights)
+		// has no groupSize/bits to demand — every weight dispatches through the dense gemv.
+		if (ql.GroupSize == 0 || ql.Bits == 0) && quantizedLayerHasAffine(ql) {
 			return nil, core.NewError("native.recordArchICBQuant: GroupSize/Bits unset")
 		}
 		if len(ql.AttnNormW) != dModel*bf16Size || len(ql.MLPNormW) != dModel*bf16Size {
@@ -285,6 +288,33 @@ func recordArchICBQuant(
 		if err != nil {
 			return nil, err
 		}
+	}
+	// V-projection output bind index: prepareStepRebind re-points THIS binding at the KV cache
+	// row each token, so it must match the recorded op's output slot — the qmv binds out at 4
+	// (wq/scales/biases=0/1/2, x=3), the dense gemv at 3 (mat=0, vec=1). Derived from the owner
+	// layers' actual V weight (K when V rides the k-proj, gemma4 K==V); one global index serves
+	// every layer, so a dense/quant mix across owners cannot be recorded.
+	vOutBind := uint(0)
+	for li := range qlayers {
+		if !specs[li].OwnsCache() {
+			continue
+		}
+		w := qlayers[li].V
+		if len(w.Packed) == 0 {
+			w = qlayers[li].K
+		}
+		b := uint(4)
+		if len(w.Scales) == 0 && len(w.Biases) == 0 {
+			b = 3
+		}
+		if vOutBind == 0 {
+			vOutBind = b
+		} else if vOutBind != b {
+			return nil, core.NewError("native.recordArchICBQuant: dense and quantised V projections mixed across owner layers — one vOutBind serves the whole replay")
+		}
+	}
+	if vOutBind == 0 {
+		vOutBind = 4
 	}
 
 	// qmv ICB pipelines, one per distinct (outDim,inDim,groupSize,bits) shape
@@ -528,9 +558,18 @@ func recordArchICBQuant(
 		if pleRuntime != nil {
 			kPLIDim, nPLIDim := scalarI32(int32(pliDim)), scalarI32(int32(pliDim))
 			pleResident := append(setup.pleResident, kPLIDim, nPLIDim)
+			appendPLEResident := func(w qmvWeight) { // dense PLE weights (bf16 recorder) carry no scales/biases
+				pleResident = append(pleResident, w.wq.buf)
+				if w.scales.buf != nil {
+					pleResident = append(pleResident, w.scales.buf)
+				}
+				if w.biases.buf != nil {
+					pleResident = append(pleResident, w.biases.buf)
+				}
+			}
 			for li := range pleLB {
-				pleResident = append(pleResident, pleLB[li].gate.wq.buf, pleLB[li].gate.scales.buf, pleLB[li].gate.biases.buf)
-				pleResident = append(pleResident, pleLB[li].proj.wq.buf, pleLB[li].proj.scales.buf, pleLB[li].proj.biases.buf)
+				appendPLEResident(pleLB[li].gate)
+				appendPLEResident(pleLB[li].proj)
 			}
 			setup.pleResident = pleResident
 			plePlan = &archICBPLEPlan{
@@ -653,12 +692,21 @@ func recordArchICBQuant(
 			}
 			return projV
 		}
-		r, coreErr = recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, plePlan, recordProj, recordFusedRMSProj, 4, valueNormOnes, vProjIdxOf, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, lFF, rope, scale, eps)
+		r, coreErr = recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, plePlan, recordProj, recordFusedRMSProj, vOutBind, valueNormOnes, vProjIdxOf, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, lFF, rope, scale, eps)
 	})
 	if coreErr != nil {
 		return nil, coreErr
 	}
 	return r, nil
+}
+
+// quantizedLayerHasAffine reports whether any projection in the layer carries affine sidecars
+// (scales) — i.e. actually needs a groupSize/bits geometry to decode. An all-dense layer (the
+// bf16 arch ICB recorder wraps bf16 weights as sidecar-less QuantWeights) returns false.
+func quantizedLayerHasAffine(ql QuantizedLayerWeights) bool {
+	return len(ql.Q.Scales) > 0 || len(ql.K.Scales) > 0 || len(ql.V.Scales) > 0 || len(ql.O.Scales) > 0 ||
+		len(ql.Gate.Scales) > 0 || len(ql.Up.Scales) > 0 || len(ql.Down.Scales) > 0 ||
+		len(ql.PerLayerGate.Scales) > 0 || len(ql.PerLayerProjection.Scales) > 0
 }
 
 // DecodeForwardArchICBQuant is the batch quant arch ICB: record the stack once + replay it

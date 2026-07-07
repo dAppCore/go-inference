@@ -81,6 +81,13 @@ func newBatchedPLEBF16FixtureShared(t testing.TB, kvShared int) *ArchSession {
 		t.Fatalf("NewArchSession: %v", err)
 	}
 	t.Cleanup(func() { sess.Close() })
+	// bf16 sessions record the arch ICB now (recordArchICBBF16) and route SHORT appends
+	// (≤ batchedDenseICBMaxRows) to the chained replay lane — which would decline this
+	// suite's 8-token prompts. THIS suite pins the batched-dense prefill body itself (the
+	// prompt-scale lane on recorded-ICB sessions, and the whole lane for non-eligible
+	// ones), so force the stepToken/batched pair; the ICB lane has its own parity gate
+	// (TestArchSessionICBParityBF16*).
+	sess.state.icb = nil
 	return sess
 }
 

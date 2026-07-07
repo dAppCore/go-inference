@@ -740,6 +740,56 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 				}
 			}
 		}
+		// bf16 incremental ICB encode-bypass — the quant constructor's block with the bf16
+		// recorder (recordArchICBBF16): record the decode stack once + replay it per Step/
+		// StepWithID instead of re-encoding every layer every token. The replay holds its OWN
+		// linear/ring caches; the PLE runtime wraps the session's perLayerInput closure.
+		if sess.icbEligible() {
+			var pleRuntime *archDecodePLEInputs
+			if g.HasPLE() {
+				pleRuntime = &archDecodePLEInputs{compute: sess.perLayerInput}
+			}
+			kCaches := make([]metal.MTLBuffer, len(arch.Layer))
+			vCaches := make([]metal.MTLBuffer, len(arch.Layer))
+			for li := range arch.Layer {
+				if arch.Layer[li].OwnsCache() { // per-layer cache — global layers' rows are wider
+					cacheLen := maxLen
+					if arch.SlidingWindow > 0 && arch.SlidingWindow < maxLen && arch.Layer[li].Attention != model.GlobalAttention {
+						// Bounded ring — sliding owners need SlidingWindow rows, not maxLen
+						// (archICBReplay.prepareStepRebind ring-rebinds off the buffer length).
+						cacheLen = arch.SlidingWindow
+					}
+					cacheBytes := uint(cacheLen * kvHeadsOf(arch.Layer[li], arch.KVHeads) * headDimOf(arch.Layer[li], arch.HeadDim) * bf16Size)
+					kCaches[li] = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
+					vCaches[li] = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
+				}
+			}
+			rope := icbRope{
+				base: arch.RopeBase, localBase: arch.RopeLocalBase,
+				rotaryDim: arch.RotaryDim, rotaryDimLocal: arch.RotaryDimLocal,
+				globalHeadDim: state.globalHeadDim,
+				globalFreqs:   state.globalRopeFreqs, freqs: state.ropeFreqs,
+			}
+			rep, rerr := recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm)
+			if rerr != nil {
+				buildErr = rerr
+				return
+			}
+			sess.state.icb = rep
+			// Recorder for a PEER ICB sharing these KV caches (own ping0/pleInput) — the submit-ahead
+			// decode keeps two in flight over the same KV. Lazily invoked; most sessions never pipeline.
+			sess.recordPeerICB = func() (*archICBReplay, error) {
+				return recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm)
+			}
+			if pipelinedGPUDecodeEnabled {
+				peer, perr := sess.recordPeerICB()
+				if perr != nil {
+					buildErr = perr
+					return
+				}
+				sess.icbPeer = peer
+			}
+		}
 	})
 	if buildErr != nil {
 		return nil, buildErr
@@ -4297,7 +4347,7 @@ func (s *ArchSession) generateSubmitAheadLinks(gen []int32, maxNew, eosID int, s
 				// unwind the speculative links: their steps cached tokens past the stop.
 				discardQueue()
 				s.pos -= n
-				if terr := s.state.truncateDevicePagedKV(s.pos); terr != nil {
+				if terr := s.truncateSpeculativeKV(s.pos); terr != nil {
 					return gen, true, terr
 				}
 			}
