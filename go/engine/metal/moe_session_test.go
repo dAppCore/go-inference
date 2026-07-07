@@ -296,6 +296,87 @@ func TestLoadGemma4QuantMoEConcurrentMatchesSerial(t *testing.T) {
 	t.Logf("concurrent MoE pass ≡ serial over %d tokens (%v)", len(serial), serial)
 }
 
+// TestLoadGemma4QuantMoESubmitAheadMatchesSerial pins the submit-ahead chained decode (one
+// speculative command buffer in flight) to the wait-each-link decode token for token — and,
+// via an EOS stop mid-stream plus a continuation, proves the speculative link's rollback
+// (position back one, paged-KV truncate) leaves the session state identical.
+func TestLoadGemma4QuantMoESubmitAheadMatchesSerial(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, nKV, headDim, vocab = 64, 2, 1, 64, 32
+	const dFF, expertDFF, numExperts, topK, numLayers = 128, 64, 4, 2, 2
+	const maxLen, n = 24, 8
+	quant := &model.QuantConfig{GroupSize: 64, Bits: 4, Overrides: map[string]model.ModuleQuant{}}
+	for i := range numLayers {
+		for _, m := range []string{"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "router.proj"} {
+			quant.Overrides[core.Sprintf("model.layers.%d.%s", i, m)] = model.ModuleQuant{GroupSize: 64, Bits: 8}
+		}
+	}
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+		EnableMoEBlock: true, NumExperts: numExperts, TopKExperts: topK, MoEIntermediateSize: expertDFF,
+		Quantization: quant,
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	ts := moeQuantTensors(t, arch, quant)
+	prompt := []int32{1, 5, 3}
+
+	session := func() *ArchSession {
+		t.Helper()
+		lm, aerr := model.Assemble(ts, arch, model.StandardWeightNames())
+		if aerr != nil {
+			t.Fatalf("model.Assemble: %v", aerr)
+		}
+		g, qerr := loadedToQuant(lm, quant.GroupSize, quant.Bits)
+		if qerr != nil {
+			t.Fatalf("loadedToQuant: %v", qerr)
+		}
+		sess, serr := NewArchQuantSession(g, arch, maxLen)
+		if serr != nil {
+			t.Fatalf("NewArchQuantSession: %v", serr)
+		}
+		return sess
+	}
+	run := func(disable bool, eosID int) ([]int32, []int32) {
+		t.Helper()
+		liveSubmitAheadDisabled = disable
+		defer func() { liveSubmitAheadDisabled = false }()
+		sess := session()
+		first, gerr := sess.Generate(prompt, n, eosID)
+		if gerr != nil {
+			t.Fatalf("Generate (disable=%v): %v", disable, gerr)
+		}
+		second, cerr := sess.GenerateFromCache(3, -1)
+		if cerr != nil {
+			t.Fatalf("GenerateFromCache (disable=%v): %v", disable, cerr)
+		}
+		return first, second
+	}
+
+	// full-budget run: identical streams and continuations.
+	sf, ss := run(true, -1)
+	cf, cs := run(false, -1)
+	if !idsEqual(cf, sf) || !idsEqual(cs, ss) {
+		t.Fatalf("submit-ahead diverged: gen %v vs %v, continuation %v vs %v", cf, sf, cs, ss)
+	}
+	// EOS mid-stream: the speculative link's rollback must leave the continuation identical.
+	if len(sf) < 3 {
+		t.Fatalf("stream too short to pick a mid-stream eos: %v", sf)
+	}
+	eos := int(sf[2])
+	ef, es := run(true, eos)
+	af, as := run(false, eos)
+	if !idsEqual(af, ef) || !idsEqual(as, es) {
+		t.Fatalf("submit-ahead EOS rollback diverged: gen %v vs %v, continuation %v vs %v", af, ef, as, es)
+	}
+	t.Logf("submit-ahead ≡ serial: full %v + cont %v; eos-stop %v + cont %v (rollback clean)", sf, ss, ef, es)
+}
+
 func TestLoadGemma4QuantMoEFusedGateUpMatchesSplitExperts(t *testing.T) {
 	requireNativeRuntime(t)
 

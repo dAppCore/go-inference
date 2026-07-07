@@ -4158,8 +4158,10 @@ var chainedLiveLinks atomic.Int64
 
 // generateChainedLiveTail runs the chained live decode for archs the ICB cannot record (MoE):
 // each token is ONE command buffer — stepToken + head argmax + the next token's embed gather —
-// with the wait its only sync and 4 bytes its only readback. A declined link finishes that
-// token with the serial head and re-primes the chain with a host embed.
+// with the wait its only sync and 4 bytes its only readback. Once a probe link chains, the
+// SUBMIT-AHEAD inner loop takes over (one speculative command buffer in flight, host encode
+// overlapping the GPU). A declined link finishes that token with the serial head and re-primes
+// the chain with a host embed.
 func (s *ArchSession) generateChainedLiveTail(gen []int32, maxNew, eosID int, suppress []int32, yield func(int32) bool, stop bool) ([]int32, error) {
 	sc := s.plScratchNew()
 	emb, err := s.embedID(gen[len(gen)-1])
@@ -4167,6 +4169,11 @@ func (s *ArchSession) generateChainedLiveTail(gen []int32, maxNew, eosID int, su
 		return nil, err
 	}
 	copyInput := true
+	// Submit-ahead is safe only when a speculative link's KV write can be unwound: linear
+	// caches truncate cleanly, but a RING cache's write may already have clobbered the
+	// window's oldest row.
+	submitAhead := !liveSubmitAheadDisabled &&
+		(s.state.slidingWindow <= 0 || s.state.slidingWindow >= s.state.maxLen)
 	for !stop && len(gen) < maxNew {
 		prev := gen[len(gen)-1]
 		tok, hidden, ok, serr := s.stepGreedyLiveInPool(prev, emb, copyInput, suppress, sc)
@@ -4184,11 +4191,20 @@ func (s *ArchSession) generateChainedLiveTail(gen []int32, maxNew, eosID int, su
 				return nil, serr
 			}
 			copyInput = true
-		} else {
-			emb, copyInput = nil, false
+			gen = append(gen, tok)
+			stop = (yield != nil && !yield(tok)) || (eosID >= 0 && int(tok) == eosID)
+			continue
 		}
+		emb, copyInput = nil, false
 		gen = append(gen, tok)
 		stop = (yield != nil && !yield(tok)) || (eosID >= 0 && int(tok) == eosID)
+		if submitAhead && !stop && len(gen) < maxNew {
+			// The probe link chained, so xA holds the next input on-GPU — enter the
+			// pipelined steady state. It exits only at stop or the token budget.
+			if gen, stop, serr = s.generateSubmitAheadLinks(gen, maxNew, eosID, suppress, sc, yield); serr != nil {
+				return nil, serr
+			}
+		}
 	}
 	// Cache the last produced token (each chain link steps prev, not the freshly produced
 	// token) and retain its hidden as the session boundary — the serial loop's semantics.
@@ -4198,6 +4214,146 @@ func (s *ArchSession) generateChainedLiveTail(gen []int32, maxNew, eosID int, su
 	}
 	s.rememberRetainedHidden(hidden)
 	return gen, nil
+}
+
+// pendingLiveLink is one submit-ahead chained link in flight: the committed command buffer
+// and the head scratch whose token it will produce.
+type pendingLiveLink struct {
+	cb      metal.MTLCommandBufferObject
+	scratch *headGreedyScratch
+}
+
+func (s *ArchSession) discardLiveLink(link pendingLiveLink) {
+	waitUntilCompletedFast(link.cb)
+	s.headEnc.putGreedyScratch(link.scratch)
+}
+
+// generateSubmitAheadLinks runs the chained live decode with ONE speculative link in flight:
+// token N+1's command buffer commits while N executes — its input is N's on-GPU embed, so no
+// host value is needed — and the host encode overlaps the GPU. A stop with a speculative link
+// in flight unwinds it (wait, position back one, paged-KV truncate). A declined link here is
+// a structural fault, not a fallback case: its tail never wrote xA, so a further link would
+// compute on stale input.
+func (s *ArchSession) generateSubmitAheadLinks(gen []int32, maxNew, eosID int, suppress []int32, sc *plGPUScratch, yield func(int32) bool) ([]int32, bool, error) {
+	pending, ok, err := s.stepGreedyLiveCommit(suppress, sc)
+	if err != nil {
+		return gen, false, err
+	}
+	if !ok {
+		return gen, false, core.NewError("native.ArchSession.generateSubmitAheadLinks: chain declined mid-stream")
+	}
+	for {
+		var next pendingLiveLink
+		haveNext := false
+		if len(gen)+1 < maxNew {
+			var nok bool
+			if next, nok, err = s.stepGreedyLiveCommit(suppress, sc); err != nil {
+				s.discardLiveLink(pending)
+				return gen, false, err
+			}
+			if !nok {
+				s.discardLiveLink(pending)
+				return gen, false, core.NewError("native.ArchSession.generateSubmitAheadLinks: chain declined mid-stream")
+			}
+			haveNext = true
+		}
+		tok, werr := s.waitLiveLink(pending)
+		if werr != nil {
+			if haveNext {
+				s.discardLiveLink(next)
+			}
+			return gen, false, werr
+		}
+		gen = append(gen, tok)
+		stop := (yield != nil && !yield(tok)) || (eosID >= 0 && int(tok) == eosID)
+		if stop {
+			if haveNext {
+				// unwind the speculative link: its step cached one token past the stop.
+				s.discardLiveLink(next)
+				s.pos--
+				if terr := s.state.truncateDevicePagedKV(s.pos); terr != nil {
+					return gen, true, terr
+				}
+			}
+			return gen, true, nil
+		}
+		if !haveNext {
+			return gen, false, nil // token budget reached with pending as the last wanted link
+		}
+		pending = next
+	}
+}
+
+// stepGreedyLiveCommit encodes + COMMITS one chained live link without waiting (the
+// submit-ahead pipeline's producer): input comes from the previous link's on-GPU embed
+// (copyInput=false), so no host token value is needed. ok=false means the chain declined —
+// the step still ran and cached its token, and the command buffer has been waited.
+func (s *ArchSession) stepGreedyLiveCommit(suppress []int32, sc *plGPUScratch) (pendingLiveLink, bool, error) {
+	var scratch *headGreedyScratch
+	chained := false
+	s.state.chainTail = func(enc metal.MTLComputeCommandEncoderObject, hiddenBuf metal.MTLBuffer) error {
+		sc2, gok, gerr := s.headEnc.encodeGreedy(enc, hiddenBuf, suppress)
+		if gerr != nil {
+			return gerr
+		}
+		if !gok {
+			return nil
+		}
+		if nerr := s.encNextInputsGPU(enc, sc2.outToken, s.state.xA, sc); nerr != nil {
+			s.headEnc.putGreedyScratch(sc2)
+			return nerr
+		}
+		scratch = sc2
+		chained = true
+		return nil
+	}
+	s.state.chainSkipWait = true
+	s.state.chainPendingCB = metal.MTLCommandBufferObject{}
+	// NO autorelease pool here: the command buffer is autoreleased, and a pool scoped to this
+	// call would drain and FREE it before the caller's wait (the committed cb then hangs the
+	// wait forever). The generate loop's outer pool owns the lifetime; the wait happens well
+	// inside it.
+	_, err := s.state.stepTokenResultWithInputInto(nil, s.pos, false, false, nil)
+	s.state.chainTail = nil
+	s.state.chainSkipWait = false
+	cb := s.state.chainPendingCB
+	s.state.chainPendingCB = metal.MTLCommandBufferObject{}
+	if err != nil {
+		if cb.GetID() != 0 {
+			waitUntilCompletedFast(cb) // never leave a committed cb dangling
+		}
+		if scratch != nil {
+			s.headEnc.putGreedyScratch(scratch)
+		}
+		return pendingLiveLink{}, false, err
+	}
+	s.pos++
+	if !chained || cb.GetID() == 0 {
+		if cb.GetID() != 0 {
+			waitUntilCompletedFast(cb)
+		}
+		if scratch != nil {
+			s.headEnc.putGreedyScratch(scratch)
+		}
+		return pendingLiveLink{}, false, nil
+	}
+	chainedLiveLinks.Add(1)
+	return pendingLiveLink{cb: cb, scratch: scratch}, true, nil
+}
+
+// waitLiveLink completes one submit-ahead link: wait, read the 4-byte token, recycle the
+// head scratch.
+func (s *ArchSession) waitLiveLink(link pendingLiveLink) (int32, error) {
+	waitUntilCompletedFast(link.cb)
+	if pieceTimingOn {
+		chainedGPUSpanNs += int64(float64(link.cb.GPUEndTime()-link.cb.GPUStartTime()) * 1e9)
+	}
+	token := link.scratch.token()
+	s.headEnc.putGreedyScratch(link.scratch)
+	if token < 0 || int(token) >= s.arch.Vocab {
+		return 0, core.NewError("native.ArchSession.waitLiveLink: invalid token")
+	}
+	return token, nil
 }
 
 // headGreedyOrLogits argmaxes the next token from `hidden`: the GPU direct-argmax head when available,
