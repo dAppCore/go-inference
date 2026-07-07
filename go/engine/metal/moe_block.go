@@ -1525,6 +1525,196 @@ func emitFFNMega[S dispatchSink](sink S, pso metal.MTLComputePipelineState, x me
 	)
 }
 
+// encMoEBlockQuantDevice encodes the WHOLE MoE block — device router top-K, the local MLP, the
+// gathered expert MLPs and the norm/combine tail — into the CALLER's live encoder: zero command
+// buffers, zero waits, zero host bytes. This is the fully-encoded decode lane (26B-A4B): the
+// break-out flow it replaces cost ~3 command buffers per layer per token. handled=false declines
+// (non-gather geometry, missing kernels, mega-local, host-only shapes) to the proven break-out
+// path, byte-identically. The caller owns BOTH scratches' single-flight lifetime (session-owned;
+// recycling across layers/tokens is GPU-GPU in commit order) and pre-validated the router
+// geometry (routerTopKUsable + quantMoEDeviceRouterBuffersUsable).
+//
+// The device-relevant prelude is deliberately a sibling of moeBlockQuantAfterRouterWith
+// DeviceIndexBufferPooled's — keep the two in step when weight layouts change.
+func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, routerScratch *routerDeviceScratch, scratch *moeBlockBF16Scratch, hBuf, outputBuf metal.MTLBuffer, w MoEQuantLayerWeights, dModel, dFF int, eps float32) (bool, error) {
+	expertDFF, numExperts, topK := w.ExpertDFF, w.NumExperts, w.TopK
+	size := dModel * bf16Size
+	if hBuf == nil || outputBuf == nil || routerScratch == nil || scratch == nil || topK <= 0 || dModel == 0 || dFF == 0 || expertDFF == 0 {
+		return false, nil
+	}
+	if len(w.PreFFNormW) != size || len(w.PreFFNorm2W) != size || len(w.PostFFNorm1W) != size || len(w.PostFFNorm2W) != size || len(w.PostFFNormW) != size {
+		return false, nil
+	}
+	localGatePacked, localGateScales, localGateBiases, localGateGroupSize, localGateBits, err := quantWeightViewsForShape("native.encMoEBlockQuantDevice: local gate", w.LocalGate, dFF, dModel, w.LocalGroupSize, w.LocalBits)
+	if err != nil {
+		return false, nil
+	}
+	localUpPacked, localUpScales, localUpBiases, localUpGroupSize, localUpBits, err := quantWeightViewsForShape("native.encMoEBlockQuantDevice: local up", w.LocalUp, dFF, dModel, w.LocalGroupSize, w.LocalBits)
+	if err != nil {
+		return false, nil
+	}
+	localDownPacked, localDownScales, localDownBiases, localDownGroupSize, localDownBits, err := quantWeightViewsForShape("native.encMoEBlockQuantDevice: local down", w.LocalDown, dModel, dFF, w.LocalGroupSize, w.LocalBits)
+	if err != nil {
+		return false, nil
+	}
+	// (the break-out path may run the local MLP through the megakernel; this lane always
+	// encodes the qmv trio instead — the megakernel's arrive counter is a host write, and
+	// three chained qmvs inside the live encoder still beat a broken-out mega dispatch)
+	fusedExperts := len(w.ExpGateUp.Packed) > 0
+	var expGateUpPacked, expGateUpScales, expGateUpBiases bufView
+	var expGatePacked, expGateScales, expGateBiases bufView
+	var expUpPacked, expUpScales, expUpBiases bufView
+	var expDownPacked, expDownScales, expDownBiases bufView
+	var expGateGroupSize, expGateBits, expUpGroupSize, expUpBits, expGateUpGroupSize, expGateUpBits, expDownGroupSize, expDownBits int
+	if fusedExperts {
+		expGateUpPacked, expGateUpScales, expGateUpBiases, expGateUpGroupSize, expGateUpBits, err = quantWeightViewsForShape("native.encMoEBlockQuantDevice: expert gate_up", w.ExpGateUp, numExperts*2*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
+		if err != nil {
+			return false, nil
+		}
+	} else {
+		expGatePacked, expGateScales, expGateBiases, expGateGroupSize, expGateBits, err = quantWeightViewsForShape("native.encMoEBlockQuantDevice: expert gate", w.ExpGate, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
+		if err != nil {
+			return false, nil
+		}
+		expUpPacked, expUpScales, expUpBiases, expUpGroupSize, expUpBits, err = quantWeightViewsForShape("native.encMoEBlockQuantDevice: expert up", w.ExpUp, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
+		if err != nil {
+			return false, nil
+		}
+	}
+	expDownPacked, expDownScales, expDownBiases, expDownGroupSize, expDownBits, err = quantWeightViewsForShape("native.encMoEBlockQuantDevice: expert down", w.ExpDown, numExperts*dModel, expertDFF, w.ExpertGroupSize, w.ExpertBits)
+	if err != nil {
+		return false, nil
+	}
+	if expDownBits != 4 {
+		return false, nil
+	}
+	inGroup, inBits, inRows := expGateGroupSize, expGateBits, expertDFF
+	if fusedExperts {
+		if expGateUpBits != 4 {
+			return false, nil
+		}
+		inGroup, inBits, inRows = expGateUpGroupSize, expGateUpBits, 2*expertDFF
+	} else if expGateBits != 4 || expUpBits != 4 || expGateGroupSize != expUpGroupSize {
+		return false, nil
+	}
+	gatherExpertInPSO, err := gatherQMVBF16SteelPipeline(expertDFF, dModel, inGroup, inBits)
+	if err != nil {
+		return false, nil
+	}
+	gatherExpertDownPSO, err := gatherQMVBF16SteelPipeline(dModel, expertDFF, expDownGroupSize, expDownBits)
+	if err != nil {
+		return false, nil
+	}
+	gatherExpertInMeta, err := gatherQMVBF16Metadata(numExperts, expertDFF, dModel, inGroup, inBits, inRows)
+	if err != nil {
+		return false, nil
+	}
+	gatherExpertDownMeta, err := gatherQMVBF16Metadata(numExperts, dModel, expertDFF, expDownGroupSize, expDownBits, dModel)
+	if err != nil {
+		return false, nil
+	}
+	localGatePSO, err := pipelineFor(qmvBF16KernelName(dFF, dModel, localGateGroupSize, localGateBits))
+	if err != nil {
+		return false, nil
+	}
+	localUpPSO, err := pipelineFor(qmvBF16KernelName(dFF, dModel, localUpGroupSize, localUpBits))
+	if err != nil {
+		return false, nil
+	}
+	localDownPSO, err := pipelineFor(qmvBF16KernelName(dModel, dFF, localDownGroupSize, localDownBits))
+	if err != nil {
+		return false, nil
+	}
+	rmsPSO, err := pipelineFor(rmsKernelBF16(dModel))
+	if err != nil {
+		return false, nil
+	}
+	rmsTG := rmsThreadgroup(dModel, rmsPSO)
+	addPSO, err := pipelineFor("vv_Addbfloat16")
+	if err != nil {
+		return false, nil
+	}
+	if !gpuHasGeluKernel() {
+		return false, nil
+	}
+	geluPSO, err := geluPipeline()
+	if err != nil {
+		return false, nil
+	}
+	scalePSO, err := bf16MulScalarPipeline()
+	if err != nil {
+		return false, nil
+	}
+	pre1Buf := bf16WeightView(w.PreFFNormW, w.preFFNormView)
+	pre2Buf := bf16WeightView(w.PreFFNorm2W, w.preFFNorm2View)
+	post1Buf := bf16WeightView(w.PostFFNorm1W, w.postFFNorm1View)
+	post2Buf := bf16WeightView(w.PostFFNorm2W, w.postFFNorm2View)
+	postBuf := bf16WeightView(w.PostFFNormW, w.postFFNormView)
+
+	// stage 1: the device router — idx/weights land in routerScratch on device.
+	if rerr := encMoERouterQuantTopK(enc, routerScratch, hBuf, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps); rerr != nil {
+		return false, nil
+	}
+	routeIdxBuf, weightsBuf := routerScratch.idxBuf, routerScratch.weightBuf
+	msc := scratch.mlp
+	sink := encSink{enc}
+
+	// stage 2: the block body — the break-out run()'s device subset, same kernels, same order.
+	emitRMS := func(x, weight, out metal.MTLBuffer, wOff uint) {
+		emitRMSNorm(sink, rmsPSO, x, weight, out, wOff, dModel, eps, rmsTG)
+	}
+	emitQ := func(pso metal.MTLComputePipelineState, wq, scales, biases bufView, x, out metal.MTLBuffer, inDim, outDim int) {
+		emitQMV(sink, pso, wq.buf, wq.off, scales.buf, scales.off, biases.buf, biases.off, x, out, 0, inDim, outDim)
+	}
+	emitGatherQ := func(pso metal.MTLComputePipelineState, meta *gatherQMVBF16Meta, wq, scales, biases bufView, x, out metal.MTLBuffer, route, inDim, outDim, groupSize, bits, rowBase int) {
+		emitGatherQMVBF16Steel(sink, pso, meta, x, wq.buf, wq.off, scales.buf, scales.off, biases.buf, biases.off, routeIdxBuf, uint(route*4), out, 0, outDim, inDim, groupSize, bits, rowBase)
+	}
+	emitScaleAt := func(in metal.MTLBuffer, scalarOff uint, out metal.MTLBuffer, n int) {
+		sink.setPSO(scalePSO)
+		sink.setBuf(in, 0, 0)
+		sink.setBuf(weightsBuf, scalarOff, 1)
+		sink.setBuf(out, 0, 2)
+		sink.setI32(int32(n), 3)
+		group := min(uint(n), uint(256))
+		sink.dispatchThreads(
+			metal.MTLSize{Width: uint(n), Height: 1, Depth: 1},
+			metal.MTLSize{Width: group, Height: 1, Depth: 1},
+		)
+	}
+	emitAdd := func(a, b, out metal.MTLBuffer) {
+		emitBinary(sink, addPSO, a, 0, b, 0, out, 0, dModel)
+	}
+	emitRMS(hBuf, pre1Buf.buf, scratch.localIn, pre1Buf.off)
+	emitQ(localGatePSO, localGatePacked, localGateScales, localGateBiases, scratch.localIn, msc.gate, dModel, dFF)
+	emitQ(localUpPSO, localUpPacked, localUpScales, localUpBiases, scratch.localIn, msc.up, dModel, dFF)
+	emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
+	emitQ(localDownPSO, localDownPacked, localDownScales, localDownBiases, msc.gated, scratch.localOut, dFF, dModel)
+	emitRMS(hBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
+	for i := range topK {
+		if fusedExperts {
+			emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expGateUpPacked, expGateUpScales, expGateUpBiases, scratch.expertIn, msc.gate, i, dModel, expertDFF, expGateUpGroupSize, expGateUpBits, 0)
+			emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expGateUpPacked, expGateUpScales, expGateUpBiases, scratch.expertIn, msc.up, i, dModel, expertDFF, expGateUpGroupSize, expGateUpBits, expertDFF)
+		} else {
+			emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expGatePacked, expGateScales, expGateBiases, scratch.expertIn, msc.gate, i, dModel, expertDFF, expGateGroupSize, expGateBits, 0)
+			emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expUpPacked, expUpScales, expUpBiases, scratch.expertIn, msc.up, i, dModel, expertDFF, expUpGroupSize, expUpBits, 0)
+		}
+		emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, expertDFF)
+		emitGatherQ(gatherExpertDownPSO, gatherExpertDownMeta, expDownPacked, expDownScales, expDownBiases, msc.gated, msc.down, i, expertDFF, dModel, expDownGroupSize, expDownBits, 0)
+		if i == 0 {
+			emitScaleAt(msc.down, uint(i*bf16Size), scratch.expertAcc, dModel)
+		} else {
+			emitScaleAt(msc.down, uint(i*bf16Size), scratch.expertScaled, dModel)
+			emitAdd(scratch.expertAcc, scratch.expertScaled, scratch.expertAcc)
+		}
+	}
+	emitRMS(scratch.localOut, post1Buf.buf, scratch.localNormed, post1Buf.off)
+	emitRMS(scratch.expertAcc, post2Buf.buf, scratch.expertNormed, post2Buf.off)
+	emitAdd(scratch.localNormed, scratch.expertNormed, scratch.combined)
+	emitRMS(scratch.combined, postBuf.buf, scratch.ffResidual, postBuf.off)
+	emitAdd(hBuf, scratch.ffResidual, outputBuf)
+	return true, nil
+}
+
 func quantWeightViewsForShape(fn string, w QuantWeight, outDim, inDim, groupSize, bits int) (bufView, bufView, bufView, int, int, error) {
 	groupSize, bits = quantWeightGeometryForShape(w, outDim, inDim, groupSize, bits)
 	if groupSize <= 0 || bits <= 0 || inDim%groupSize != 0 {
