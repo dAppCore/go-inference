@@ -93,6 +93,60 @@ template <typename T, int group_size, int bits>
       w, scales, biases, x, y, in_vec_size, out_vec_size, tid, simd_gid, simd_lid);
 }
 
+#include "lthn_gelu_qmv_impl.h"
+
+// lthn_gather_qmv_gelu — the routed experts' DOWN gather with the MLP gate
+// fused into its x-load (#341 phase 1): each route reads its expert's gate/up
+// activation rows and computes gelu(gate)·up at load, byte-identical to the
+// chain's gated buffer (lthn_gelu_qmv_impl.h), so the expert gelu dispatch and
+// its barrier disappear. Same fc prologue as lthn_gather_qmv; gate and up ride
+// the same lhs indexing.
+template <typename T, int group_size, int bits>
+[[kernel]] void lthn_gather_qmv_gelu(
+    const device uint32_t* w [[buffer(0)]],
+    const device T* scales [[buffer(1)]],
+    const device T* biases [[buffer(2)]],
+    const device T* gate [[buffer(3)]],
+    const device T* up [[buffer(4)]],
+    const device uint32_t* lhs_indices [[buffer(5)]],
+    const device uint32_t* rhs_indices [[buffer(6)]],
+    device T* y [[buffer(7)]],
+    const constant int& in_vec_size [[buffer(8)]],
+    const constant int& out_vec_size [[buffer(9)]],
+    uint3 tid [[threadgroup_position_in_grid]],
+    uint simd_gid [[simdgroup_index_in_threadgroup]],
+    uint simd_lid [[thread_index_in_simdgroup]]) {
+  const int64_t w_idx = rhs_indices[tid.z];
+  w += w_idx * lthn_gather_expert_rows * (int64_t(in_vec_size) * bits / 32);
+  const int64_t sb_stride = int64_t(lthn_gather_expert_rows) * (in_vec_size / group_size);
+  scales += w_idx * sb_stride;
+  biases += w_idx * sb_stride;
+  if (lthn_gather_batched_x) {
+    const int64_t xo = int64_t(lhs_indices[tid.z]) * in_vec_size;
+    gate += xo;
+    up += xo;
+  }
+  y += tid.z * out_vec_size;
+  qmv_gelu_impl<T, group_size, bits>(
+      w, scales, biases, gate, up, y, in_vec_size, out_vec_size, tid, simd_gid, simd_lid);
+}
+
+#define instantiate_lthn_gather_qmv_gelu(group_size, bits)                          \
+  template [[host_name("lthn_gather_qmv_gelu_bfloat16_t_gs_" #group_size           \
+                       "_b_" #bits)]] [[kernel]] void                              \
+  lthn_gather_qmv_gelu<bfloat16_t, group_size, bits>(                              \
+      const device uint32_t*, const device bfloat16_t*, const device bfloat16_t*,  \
+      const device bfloat16_t*, const device bfloat16_t*, const device uint32_t*,  \
+      const device uint32_t*, device bfloat16_t*,                                  \
+      const constant int&, const constant int&, uint3, uint, uint);
+
+instantiate_lthn_gather_qmv_gelu(32, 4)
+instantiate_lthn_gather_qmv_gelu(32, 8)
+instantiate_lthn_gather_qmv_gelu(64, 4)
+instantiate_lthn_gather_qmv_gelu(64, 8)
+instantiate_lthn_gather_qmv_gelu(128, 4)
+instantiate_lthn_gather_qmv_gelu(128, 8)
+
 #define instantiate_lthn_gather_qmv(group_size, bits)                              \
   template [[host_name("lthn_gather_qmv_fast_bfloat16_t_gs_" #group_size           \
                        "_b_" #bits)]] [[kernel]] void                              \
