@@ -237,6 +237,30 @@ func bf16MulScalarPipeline() (metal.MTLComputePipelineState, error) {
 	return bf16MulScalarPSO, bf16MulScalarPSOErr
 }
 
+var (
+	moeWeightedSumPSOOnce sync.Once
+	moeWeightedSumPSO     metal.MTLComputePipelineState
+	moeWeightedSumPSOErr  error
+)
+
+// moeWeightedSumPipeline builds (once) the fused MoE expert-combine kernel — the per-route
+// scale + add chain (2·topK − 1 dispatches per layer) as one dispatch, byte-identical rounding.
+func moeWeightedSumPipeline() (metal.MTLComputePipelineState, error) {
+	moeWeightedSumPSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			moeWeightedSumPSOErr = core.NewError("native.moeWeightedSumPipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_moe_weighted_sum_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			moeWeightedSumPSOErr = core.NewError("native.moeWeightedSumPipeline: kernel lthn_moe_weighted_sum_bf16 not found")
+			return
+		}
+		moeWeightedSumPSO, moeWeightedSumPSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return moeWeightedSumPSO, moeWeightedSumPSOErr
+}
+
 func encMulScalarBF16(enc metal.MTLComputeCommandEncoder, in, scalar, out metal.MTLBuffer, scalarOffset uint, n int) error {
 	if n < 0 {
 		return core.NewError("native.encMulScalarBF16: n must be >= 0")

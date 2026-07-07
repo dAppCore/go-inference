@@ -9,6 +9,8 @@ import (
 	"os"
 	"testing"
 	"unsafe"
+
+	"github.com/tmc/apple/metal"
 )
 
 func quantMoEExpertsFixture(tb testing.TB, numExperts, dModel, dFF, groupSize, bits int) (QuantWeight, QuantWeight, QuantWeight) {
@@ -1088,6 +1090,68 @@ func TestGatherQMVBF16ByExpertIndexWidthSweep(t *testing.T) {
 		}
 	}
 	t.Logf("expert gather matches sliced qmv byte-for-byte at every affine width")
+}
+
+// TestMoEWeightedSumMatchesScaleAddChain proves the fused expert combine byte-identical to
+// the per-route scale + add chain it replaces (bf16 round after each multiply AND each add
+// — the chain's exact rounding points).
+func TestMoEWeightedSumMatchesScaleAddChain(t *testing.T) {
+	requireNativeRuntime(t)
+	if _, err := moeWeightedSumPipeline(); err != nil {
+		t.Skipf("weighted-sum kernel unavailable: %v", err)
+	}
+	const dModel, topK = 96, 4
+	rows := toBF16Bytes(syntheticFloat32(topK*dModel, 61))
+	weights := toBF16Bytes([]float32{0.42, -0.17, 0.91, 0.05})
+
+	// reference: the chain — scale route 0, then scale+add each further route.
+	want, err := MulScalarBF16(rows[:dModel*bf16Size], weights[0:bf16Size])
+	if err != nil {
+		t.Fatalf("MulScalarBF16 route 0: %v", err)
+	}
+	for r := 1; r < topK; r++ {
+		scaled, serr := MulScalarBF16(rows[r*dModel*bf16Size:(r+1)*dModel*bf16Size], weights[r*bf16Size:(r+1)*bf16Size])
+		if serr != nil {
+			t.Fatalf("MulScalarBF16 route %d: %v", r, serr)
+		}
+		if want, err = AddBF16(want, scaled); err != nil {
+			t.Fatalf("AddBF16 route %d: %v", r, err)
+		}
+	}
+
+	pso, err := moeWeightedSumPipeline()
+	if err != nil {
+		t.Fatalf("moeWeightedSumPipeline: %v", err)
+	}
+	rowsBuf := device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&rows[0]), uint(len(rows)), metal.MTLResourceStorageModeShared)
+	weightsBuf := device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&weights[0]), uint(len(weights)), metal.MTLResourceStorageModeShared)
+	outBuf := device.NewBufferWithLengthOptions(uint(dModel*bf16Size), metal.MTLResourceStorageModeShared)
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	sink := encSink{enc}
+	sink.setPSO(pso)
+	sink.setBuf(rowsBuf, 0, 0)
+	sink.setBuf(weightsBuf, 0, 1)
+	sink.setBuf(outBuf, 0, 2)
+	sink.setI32(int32(dModel), 3)
+	sink.setI32(int32(topK), 4)
+	sink.dispatchThreads(
+		metal.MTLSize{Width: uint(dModel), Height: 1, Depth: 1},
+		metal.MTLSize{Width: uint(dModel), Height: 1, Depth: 1},
+	)
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	got := append([]byte(nil), unsafe.Slice((*byte)(outBuf.Contents()), dModel*bf16Size)...)
+	if !bytes.Equal(got, want) {
+		for i := 0; i+1 < len(got); i += 2 {
+			if got[i] != want[i] || got[i+1] != want[i+1] {
+				t.Logf("first diff at elem %d: got % x (%.9g) want % x (%.9g)", i/2, got[i:i+2], bf16ToF32(got[i], got[i+1]), want[i:i+2], bf16ToF32(want[i], want[i+1]))
+				break
+			}
+		}
+		t.Fatalf("fused weighted sum != scale+add chain (cosine=%.7f)", cosineBF16(got, want))
+	}
 }
 
 // TestQuantMoEDeviceRouterBuffersUsableWidthSweep pins the device MoE lane's admission gate open at
