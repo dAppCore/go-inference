@@ -1839,12 +1839,28 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 		emitBinary(sink, geluPSO, scratch.expertGateAll, 0, scratch.expertUpAll, 0, scratch.expertGatedAll, 0, topK*expertDFF)
 		emitGatherQMVAllRoutes(sink, gatherExpertDownPSO, downAllMeta, downKeyBatched, scratch.expertGatedAll, 0, expDownPacked.buf, expDownPacked.off, expDownScales.buf, expDownScales.off, expDownBiases.buf, expDownBiases.off, scratch.routeIota, routeIdxBuf, 0, scratch.expertDownAll, 0, dModel, expertDFF, expDownGroupSize, expDownBits, 0, topK)
 		seam("moe.tail")
-		for i := range topK {
-			if i == 0 {
-				emitScaleFromAt(scratch.expertDownAll, uint(i*dModel*bf16Size), uint(i*bf16Size), scratch.expertAcc, dModel)
-			} else {
-				emitScaleFromAt(scratch.expertDownAll, uint(i*dModel*bf16Size), uint(i*bf16Size), scratch.expertScaled, dModel)
-				emitAdd(scratch.expertAcc, scratch.expertScaled, scratch.expertAcc)
+		// combine the routes: acc = Σ_r w_r · down_r — one fused dispatch (byte-identical
+		// rounding to the scale+add chain it replaces); the chain stays as the fallback.
+		if wsumPSO, werr := moeWeightedSumPipeline(); werr == nil {
+			sink.setPSO(wsumPSO)
+			sink.setBuf(scratch.expertDownAll, 0, 0)
+			sink.setBuf(weightsBuf, 0, 1)
+			sink.setBuf(scratch.expertAcc, 0, 2)
+			sink.setI32(int32(dModel), 3)
+			sink.setI32(int32(topK), 4)
+			group := min(uint(dModel), uint(256))
+			sink.dispatchThreads(
+				metal.MTLSize{Width: uint(dModel), Height: 1, Depth: 1},
+				metal.MTLSize{Width: group, Height: 1, Depth: 1},
+			)
+		} else {
+			for i := range topK {
+				if i == 0 {
+					emitScaleFromAt(scratch.expertDownAll, uint(i*dModel*bf16Size), uint(i*bf16Size), scratch.expertAcc, dModel)
+				} else {
+					emitScaleFromAt(scratch.expertDownAll, uint(i*dModel*bf16Size), uint(i*bf16Size), scratch.expertScaled, dModel)
+					emitAdd(scratch.expertAcc, scratch.expertScaled, scratch.expertAcc)
+				}
 			}
 		}
 	} else {
