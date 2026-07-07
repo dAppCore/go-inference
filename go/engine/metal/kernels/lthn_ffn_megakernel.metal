@@ -14,7 +14,21 @@ using namespace metal;
 
 typedef bfloat bf16;
 
-// 4-bit affine dequant gemv for ONE output row over a PLAIN bf16 input. One 32-lane simdgroup owns
+// Affine quant width, specialised at PSO build (function constant 0): 4 = nibble codes (the
+// original), 8 = byte codes. Defaults to 4 when built without constants so the unspecialised
+// function IS the historical 4-bit kernel. The width branch below is compile-time-dead per PSO.
+constant uint lthn_ffn_mega_bits_fc [[function_constant(0)]];
+constant uint lthn_ffn_mega_bits = is_function_constant_defined(lthn_ffn_mega_bits_fc) ? lthn_ffn_mega_bits_fc : 4u;
+
+static inline float qcode_at(const device uint8_t* prow, uint k) {
+  if (lthn_ffn_mega_bits == 8u) {
+    return float(prow[k]);
+  }
+  const uint8_t pb = prow[k >> 1];
+  return (k & 1u) == 0u ? float(pb & 0x0F) : float(pb >> 4);
+}
+
+// Affine dequant gemv for ONE output row over a PLAIN bf16 input. One 32-lane simdgroup owns
 // the row; each lane accumulates k=lane,lane+32,... and simd_sum combines the reduction.
 static inline float qgemv_row_simd(const device uint8_t* prow, const device bf16* srow, const device bf16* brow,
                                    const device bf16* x, uint inDim, uint groupSize, uint lane) {
@@ -23,9 +37,7 @@ static inline float qgemv_row_simd(const device uint8_t* prow, const device bf16
     const uint g = k / groupSize;
     const float s = float(srow[g]);
     const float b = float(brow[g]);
-    const uint8_t pb = prow[k >> 1];
-    const float code = (k & 1u) == 0u ? float(pb & 0x0F) : float(pb >> 4);
-    partial += (s * code + b) * float(x[k]);
+    partial += (s * qcode_at(prow, k) + b) * float(x[k]);
   }
   return simd_sum(partial);
 }
@@ -40,10 +52,8 @@ static inline float qgemv_row_atomic_x_simd(const device uint8_t* prow, const de
     const uint g = k / groupSize;
     const float s = float(srow[g]);
     const float b = float(brow[g]);
-    const uint8_t pb = prow[k >> 1];
-    const float code = (k & 1u) == 0u ? float(pb & 0x0F) : float(pb >> 4);
     const bf16 xv = as_type<bf16>(ushort(atomic_load_explicit(&x[k], memory_order_relaxed)));
-    partial += (s * code + b) * float(xv);
+    partial += (s * qcode_at(prow, k) + b) * float(xv);
   }
   return simd_sum(partial);
 }
@@ -95,9 +105,9 @@ static inline void grid_barrier(device atomic_uint* arrive, uint numTG, uint lid
   const uint simdgroupsPerTG = tgSize / 32u;
   const uint row0 = tg_pos * simdgroupsPerTG + simd_gid;
   const uint rowStride = numTG * simdgroupsPerTG;
-  const uint rowPackedH = hidden / 2;       // gate/up rows reduce over hidden
+  const uint rowPackedH = (hidden * lthn_ffn_mega_bits) / 8u; // gate/up rows reduce over hidden
   const uint rowSBH = hidden / groupSize;
-  const uint rowPackedF = ff / 2;           // down rows reduce over ff
+  const uint rowPackedF = (ff * lthn_ffn_mega_bits) / 8u;     // down rows reduce over ff
   const uint rowSBF = ff / groupSize;
 
   // Stage 1: gated[i] = gelu(qgemv(Wg,x)_i) · qgemv(Wu,x)_i  (written atomically for the cross-TG handoff)

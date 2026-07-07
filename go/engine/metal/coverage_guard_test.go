@@ -91,9 +91,9 @@ func resetNativePipelineCachesForCoverage() {
 	geluPSO = nil
 	geluPSOErr = nil
 
-	ffnMegaPSOOnce = sync.Once{}
-	ffnMegaPSO = nil
-	ffnMegaPSOErr = nil
+	ffnMegaBitsPSOMu.Lock()
+	ffnMegaBitsPSOCache = map[int]metal.MTLComputePipelineState{}
+	ffnMegaBitsPSOMu.Unlock()
 }
 
 type failingProjector struct {
