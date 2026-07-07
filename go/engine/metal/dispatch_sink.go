@@ -457,6 +457,29 @@ func emitQMVAt[S dispatchSink](sink S, pso metal.MTLComputePipelineState, wq met
 	sink.dispatchThreadgroups(metal.MTLSize{Width: 1, Height: nTgp, Depth: 1}, metal.MTLSize{Width: bk, Height: 2, Depth: 1})
 }
 
+// emitQMMT records MLX's quantised GEMM (out[M,N] = x[M,K] @ dequant(w[N,K])ᵀ, affine qmm_t
+// kernel) through any sink — the BATCHED sibling of emitQMV, one weight pass for all M rows
+// (the quant prompt-prefill fold). Binding ABI copied from mlx/backend/metal/quantized.cpp
+// qmm(): w=0, scales=1, biases=2, x=3, out=4, K=5, N=6, M=7 (batch_0 skips the stride block);
+// grid ((N+31)/32, (M+31)/32) threadgroups of (32, 2, 2). x/out bind at byte offsets so rows
+// living inside shared slabs dispatch in place.
+func emitQMMT[S dispatchSink](sink S, pso metal.MTLComputePipelineState, wq metal.MTLBuffer, wqOff uint, scales metal.MTLBuffer, scalesOff uint, biases metal.MTLBuffer, biasesOff uint, x metal.MTLBuffer, xOff uint, out metal.MTLBuffer, outOff uint, m, n, k int) {
+	sink.setPSO(pso)
+	sink.setBuf(wq, wqOff, 0)
+	sink.setBuf(scales, scalesOff, 1)
+	sink.setBuf(biases, biasesOff, 2)
+	sink.setBuf(x, xOff, 3)
+	sink.setBuf(out, outOff, 4)
+	sink.setI32(int32(k), 5) // K
+	sink.setI32(int32(n), 6) // N
+	sink.setI32(int32(m), 7) // M
+	const bm, bn = 32, 32
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: uint((n + bn - 1) / bn), Height: uint((m + bm - 1) / bm), Depth: 1},
+		metal.MTLSize{Width: 32, Height: 2, Depth: 2},
+	)
+}
+
 // emitRMSQMV records the fused BF16 input RMSNorm + quant QMV fast kernel through any sink:
 // wq/scales/biases=0/1/2, x=3, out=4, K=5, N=6, normW=7, eps=8. The kernel uses the same
 // qmv-fast threadgroup geometry as emitQMV, but folds the norm into the projection prologue.

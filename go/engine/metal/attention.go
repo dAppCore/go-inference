@@ -664,6 +664,29 @@ func encQMVBF16At(enc metal.MTLComputeCommandEncoder, wq, scales, biases, x, out
 	return nil
 }
 
+// qmmTKernelName builds MLX's transposed quantised-GEMM kernel name for the affine mode at
+// gs/bits — the batched sibling of qmvBF16KernelName. aligned keys the N%32 template variant;
+// batch_0 = one 2-D x (the prompt fold's case; the strides block is skipped by that variant).
+func qmmTKernelName(outDim, groupSize, bits int) string {
+	aligned := "false"
+	if outDim%32 == 0 {
+		aligned = "true"
+	}
+	return core.Sprintf("affine_qmm_t_bfloat16_t_gs_%d_b_%d_alN_%s_batch_0", groupSize, bits, aligned)
+}
+
+// encQMMTBF16At encodes out[M,N] = x[M,K] @ dequant(w[N,K])ᵀ — MLX's affine qmm_t, the ONE
+// weight pass scoring all M rows (the quant prompt-prefill fold; the per-row qmv re-read the
+// weights M times). x rows are contiguous [M,K] bf16 at xOff; out rows [M,N] bf16 at outOff.
+func encQMMTBF16At(enc metal.MTLComputeCommandEncoder, wq, scales, biases, x, out metal.MTLBuffer, wqOff, scalesOff, biasesOff, xOff, outOff uint, m, outDim, inDim, groupSize, bits int) error {
+	pso, err := pipelineFor(qmmTKernelName(outDim, groupSize, bits))
+	if err != nil {
+		return err
+	}
+	emitQMMT(encSink{enc}, pso, wq, wqOff, scales, scalesOff, biases, biasesOff, x, xOff, out, outOff, m, outDim, inDim)
+	return nil
+}
+
 // encRoPEBF16 encodes single-token bf16 RoPE over x (b=1, nHeads, 1, headDim) at
 // the position in offBuf into enc. offBuf holds one int32.
 func encRoPEBF16(enc metal.MTLComputeCommandEncoder, x, out, offBuf metal.MTLBuffer, nHeads, headDim, rotaryDim int, base, scale float32) error {
