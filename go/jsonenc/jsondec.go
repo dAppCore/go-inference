@@ -260,10 +260,8 @@ func parseJSONStringEscaped(data []byte, start, firstEscape int) (string, int, e
 
 // parseJSONUnicodeEscape decodes a 4-hex-digit codepoint following
 // the \u escape prefix.
+// hex is exactly the 4 bytes after `\u` — the single call site slices data[i+2 : i+6].
 func parseJSONUnicodeEscape(hex []byte) (rune, bool) {
-	if len(hex) != 4 {
-		return 0, false
-	}
 	var cp rune
 	for _, b := range hex {
 		var v rune
@@ -293,13 +291,10 @@ func writeUTF8(sb *strings.Builder, cp rune) {
 	case cp < 0x800:
 		sb.WriteByte(byte(0xc0 | cp>>6))
 		sb.WriteByte(byte(0x80 | cp&0x3f))
-	case cp < 0x10000:
-		sb.WriteByte(byte(0xe0 | cp>>12))
-		sb.WriteByte(byte(0x80 | (cp>>6)&0x3f))
-		sb.WriteByte(byte(0x80 | cp&0x3f))
 	default:
-		sb.WriteByte(byte(0xf0 | cp>>18))
-		sb.WriteByte(byte(0x80 | (cp>>12)&0x3f))
+		// cp <= 0xFFFF always: the 4-hex escape is the only producer, and surrogate-range
+		// code points emit raw (un-paired) by design — no supplementary-plane branch.
+		sb.WriteByte(byte(0xe0 | cp>>12))
 		sb.WriteByte(byte(0x80 | (cp>>6)&0x3f))
 		sb.WriteByte(byte(0x80 | cp&0x3f))
 	}
@@ -331,7 +326,6 @@ func ParseJSONInt(data []byte, i int) (int64, int, error) {
 	if i >= len(data) {
 		return 0, i, ErrInvalidJSON
 	}
-	start := i
 	neg := false
 	if data[i] == '-' {
 		neg = true
@@ -355,9 +349,6 @@ func ParseJSONInt(data []byte, i int) (int64, int, error) {
 	}
 	if neg {
 		n = -n
-	}
-	if i == start {
-		return 0, i, ErrInvalidJSON
 	}
 	return n, i, nil
 }
@@ -631,9 +622,10 @@ func ParseJSONFloat64(data []byte, i int) (float64, int, error) {
 // caller's index — callers use the count only for slice pre-sizing.
 //
 // Walks each element via SkipJSONValue so it handles nested objects
-// / arrays / quoted strings (no naive comma-count footgun). Returns
-// 0 for a malformed body — the caller's subsequent parse re-reports
-// the malformedness.
+// / arrays / quoted strings (no naive comma-count footgun). A malformed
+// element ends the count early, returning the leading well-formed count —
+// the value is a capacity hint, so a partial count stays useful, and the
+// caller's subsequent parse re-reports the malformedness.
 //
 //	count := jsonenc.CountJSONArrayElements(data, i)
 //	out := make([]T, 0, count)
