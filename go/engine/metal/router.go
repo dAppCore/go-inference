@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	core "dappco.re/go"
@@ -837,13 +838,68 @@ func routerTopKUsable(numExperts, topK int) bool {
 	return err == nil
 }
 
+// routerFusedDispatches counts routers that ran the single-dispatch fused kernel
+// instead of the 3-dispatch chain (#340). Engagement counter for the A/B tests —
+// a compare that never engaged the lane proves nothing.
+var routerFusedDispatches atomic.Int64
+
+type routerFusedKey struct {
+	groupSize, bits, topK int
+}
+
+var (
+	routerFusedPSOMu    sync.Mutex
+	routerFusedPSOCache = map[routerFusedKey]metal.MTLComputePipelineState{}
+)
+
+// routerFusedPipeline resolves (and caches, including failures) the fused router
+// kernel for a quant geometry: top-k bakes as the shared lthn_router_topk_k
+// function constant on the group_size/bits template instance. A miss — custom
+// library absent, or a gs/bits pair outside the instantiated set — caches nil so
+// the caller falls back to the 3-dispatch chain without re-probing.
+func routerFusedPipeline(groupSize, bits, topK int) (metal.MTLComputePipelineState, bool) {
+	if topK <= 0 || topK > routerTopKMaxK {
+		return nil, false
+	}
+	key := routerFusedKey{groupSize: groupSize, bits: bits, topK: topK}
+	routerFusedPSOMu.Lock()
+	defer routerFusedPSOMu.Unlock()
+	if pso, ok := routerFusedPSOCache[key]; ok {
+		return pso, pso != nil
+	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		routerFusedPSOCache[key] = nil
+		return nil, false
+	}
+	name := core.Sprintf("lthn_moe_router_fused_bfloat16_t_gs_%d_b_%d", groupSize, bits)
+	fc := metal.NewMTLFunctionConstantValues()
+	kk := uint32(topK)
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&kk), metal.MTLDataTypeUInt, 0)
+	fn, err := customLibrary.NewFunctionWithNameConstantValuesError(name, fc)
+	if err != nil || fn == nil || fn.GetID() == 0 {
+		routerFusedPSOCache[key] = nil
+		return nil, false
+	}
+	pso, perr := device.NewComputePipelineStateWithFunctionError(fn)
+	if perr != nil {
+		routerFusedPSOCache[key] = nil
+		return nil, false
+	}
+	routerFusedPSOCache[key] = pso
+	return pso, true
+}
+
 // routerEncodePlan holds the router's resolved PSOs + weight views so the three stages can
 // emit independently — the serial path runs them back to back; the concurrent MoE pass
-// interleaves them with the local/expert stages between dependency barriers.
+// interleaves them with the local/expert stages between dependency barriers. When the
+// fused single-dispatch router is available (fusedPSO non-nil) emitFused replaces all
+// three stages.
 type routerEncodePlan struct {
 	scratch                  *routerDeviceScratch
 	inputBuf                 metal.MTLBuffer
 	rmsPSO, qmvPSO, topkPSO  metal.MTLComputePipelineState
+	fusedPSO                 metal.MTLComputePipelineState
+	fusedTG                  uint
 	normBuf                  bufView
 	wBuf, scalesBuf, biasBuf bufView
 	scaleBuf                 metal.MTLBuffer
@@ -881,7 +937,53 @@ func buildRouterEncodePlan(scratch *routerDeviceScratch, inputBuf metal.MTLBuffe
 	} else {
 		p.scaleBuf = scratch.scoresBuf
 	}
+	// The fused single-dispatch router (#340): launched at the rms single-row
+	// kernel's own threadgroup shape so its phase-1 reduction tree — and
+	// therefore the routing decision — is byte-identical to the chain. Only the
+	// single-row rms shape qualifies, and the pipeline must admit that many
+	// threads per threadgroup (register pressure from the qmv phase can cap it).
+	if dModel <= rmsLoopedLimit {
+		if pso, ok := routerFusedPipeline(groupSize, bits, topK); ok {
+			tg := rmsThreadgroup(dModel, pso)
+			if uint(pso.MaxTotalThreadsPerThreadgroup()) >= uint(tg) {
+				p.fusedPSO, p.fusedTG = pso, uint(tg)
+			}
+		}
+	}
 	return p, nil
+}
+
+// emitFused encodes the whole router as ONE dispatch when the fused kernel is
+// available AND opted in (routerFusedEnabled — off by the 125.3-vs-140.6 tok/s
+// receipt), returning whether it engaged — the caller falls back to the
+// emitRMS/emitQMV/emitTopK chain on false. Same scratch, same output buffers,
+// byte-identical routing (see the kernel's replication notes).
+func (p *routerEncodePlan) emitFused(sink encSink) bool {
+	if p.fusedPSO == nil || !routerFusedEnabled {
+		return false
+	}
+	routerFusedDispatches.Add(1)
+	sink.setPSO(p.fusedPSO)
+	sink.setBuf(p.inputBuf, 0, 0)
+	sink.setBuf(p.normBuf.buf, p.normBuf.off, 1)
+	sink.setBuf(p.scratch.normedBuf, 0, 2)
+	sink.setBuf(p.wBuf.buf, p.wBuf.off, 3)
+	sink.setBuf(p.scalesBuf.buf, p.scalesBuf.off, 4)
+	sink.setBuf(p.biasBuf.buf, p.biasBuf.off, 5)
+	sink.setBuf(p.scratch.scoresBuf, 0, 6)
+	sink.setBuf(p.scaleBuf, p.scaleOff, 7)
+	sink.setBuf(p.scratch.idxBuf, 0, 8)
+	sink.setBuf(p.scratch.weightBuf, 0, 9)
+	sink.setF32(p.eps, 10)
+	sink.setI32(int32(p.dModel), 11)
+	sink.setI32(int32(p.numExperts), 12)
+	sink.setI32(p.scaleFlag, 13)
+	sink.setI32(int32(p.topK), 14)
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: 1, Height: 1, Depth: 1},
+		metal.MTLSize{Width: p.fusedTG, Height: 1, Depth: 1},
+	)
+	return true
 }
 
 func (p *routerEncodePlan) emitRMS(sink encSink) {
