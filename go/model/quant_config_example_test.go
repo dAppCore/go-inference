@@ -14,7 +14,7 @@ func ExampleQuantConfig_UnmarshalJSON() {
 	if err := q.UnmarshalJSON(data); err != nil {
 		return
 	}
-	core.Println(q.Bits)                                  // the block-level default
+	core.Println(q.Bits)                                         // the block-level default
 	core.Println(q.Overrides["model.layers.0.mlp.experts"].Bits) // the stripped per-module override
 	// Output:
 	// 4

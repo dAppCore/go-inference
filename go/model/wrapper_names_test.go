@@ -15,7 +15,7 @@ import (
 func TestWrapperNames_NormalizeWrapperNames_Good(t *testing.T) {
 	in := map[string]safetensors.Tensor{
 		"language_model.model.embed_tokens.weight": {Shape: []int{4, 4}},
-		"vision_tower.patch_embed.weight":           {Shape: []int{4, 4}},
+		"vision_tower.patch_embed.weight":          {Shape: []int{4, 4}},
 	}
 	out := NormalizeWrapperNames(in)
 	if _, ok := out["language_model.model.embed_tokens.weight"]; !ok {

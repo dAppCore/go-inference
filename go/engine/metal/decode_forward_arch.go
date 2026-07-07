@@ -277,7 +277,7 @@ type archDecodeState struct {
 	// immediately — no wait, no host readback — leaving the committed cb in chainPendingCB.
 	// The submit-ahead decode uses this to encode token N+1 while N still runs; the caller
 	// owns the wait.
-	chainSkipWait bool
+	chainSkipWait  bool
 	chainPendingCB metal.MTLCommandBufferObject
 
 	// icb, when non-nil, is the recorded arch ICB the session replays per token (the encode-bypass)

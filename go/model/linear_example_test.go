@@ -13,7 +13,7 @@ import (
 // the checkpoint holds no weight at all under that prefix.
 func ExampleLoadLinear() {
 	tensors := map[string]safetensors.Tensor{
-		"w.weight": {Shape: []int{4, 8}, Data: make([]byte, 4*8/8)},  // 4-bit packed
+		"w.weight": {Shape: []int{4, 8}, Data: make([]byte, 4*8/8)}, // 4-bit packed
 		"w.scales": {Shape: []int{4, 2}, Data: make([]byte, 4*2)},
 	}
 	l := LoadLinear(tensors, "w", 64, "affine")
