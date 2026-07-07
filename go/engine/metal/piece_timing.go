@@ -43,6 +43,11 @@ var (
 	// moeConcurrentDisabled forces the serial (single-encoder) MoE block encode even when the
 	// concurrent-pass lane's gates hold. Test/bench hook for serial-vs-concurrent byte compares.
 	moeConcurrentDisabled bool
+	// leanGatherDisabled forces the MoE all-routes gather through MLX's affine_gather_qmv
+	// binding path (14 buffers + 6 scalars) even when the lean fc-specialised
+	// lthn_gather_qmv kernel is available (7 buffers + 2 scalars, #280). Test/bench hook
+	// for lean-vs-MLX byte compares.
+	leanGatherDisabled bool
 	// stepGreedyChainDisabled forces the serial greedy+stepID decode loop (default: chain the prior
 	// token's stepBody with the next token's head+argmax in one command buffer). Test/bench hook.
 	stepGreedyChainDisabled bool
