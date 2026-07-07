@@ -4169,11 +4169,12 @@ func (s *ArchSession) generateChainedLiveTail(gen []int32, maxNew, eosID int, su
 		return nil, err
 	}
 	copyInput := true
-	// Submit-ahead is safe only when a speculative link's KV write can be unwound: linear
-	// caches truncate cleanly, but a RING cache's write may already have clobbered the
-	// window's oldest row.
-	submitAhead := !liveSubmitAheadDisabled &&
-		(s.state.slidingWindow <= 0 || s.state.slidingWindow >= s.state.maxLen)
+	// Submit-ahead unwinds cleanly on EVERY paged shape. Linear caches truncate by rewind;
+	// ring caches are safe for the ONE-token speculation too: the speculative write lands in
+	// exactly the slot the position's redo (or the next real token) rewrites BEFORE its own
+	// SDPA reads it, the row it clobbered sits outside every future window, and the ring
+	// truncate is a pure counter rewind (devicePagedKVCache.truncate).
+	submitAhead := !liveSubmitAheadDisabled
 	for !stop && len(gen) < maxNew {
 		prev := gen[len(gen)-1]
 		tok, hidden, ok, serr := s.stepGreedyLiveInPool(prev, emb, copyInput, suppress, sc)
