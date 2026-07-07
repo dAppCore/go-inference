@@ -262,6 +262,10 @@ type archDecodeState struct {
 	// hidden and logs the per-token worst max-abs + NaN layer — the decode-degradation probe.
 	trace bool
 
+	// gpuProf, when armed (tests only — nil in production), splits stepToken's per-token encoder
+	// at the attn/moe family seams with timestamp counter sampling: the per-family GPU time table.
+	gpuProf *gpuCounterProfiler
+
 	// icb, when non-nil, is the recorded arch ICB the session replays per token (the encode-bypass)
 	// instead of re-encoding via stepToken. Set at session build when icbEligible (no MoE, no trace,
 	// uniform head geometry + simple uniform rope — the ICB core's assumptions). It holds its OWN
@@ -1183,7 +1187,12 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 		}
 	}
 	cb := commandBufferFast(queue)
-	enc := computeCommandEncoderFast(cb)
+	var enc metal.MTLComputeCommandEncoderObject
+	if s.gpuProf != nil {
+		enc = s.gpuProf.encoderFor(cb, "attn")
+	} else {
+		enc = computeCommandEncoderFast(cb)
+	}
 	s.resetDevicePagedAttentionScratch()
 	in, out := inputBuf, s.xB
 	if inputBuf != s.xA {
@@ -1192,6 +1201,9 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 	var trWorstAbs float32
 	trWorstLayer, trFirstBad, trBadLayers := -1, -1, 0
 	for li := 0; li < len(s.specs); li++ {
+		if li > 0 {
+			enc = s.profSeam(cb, enc, "attn")
+		}
 		// per-attention-type head geometry (gemma4 full layers use the larger global head_dim);
 		// the SDPA scale stays s.scale — the model DECLARED it (gemma4 1.0, not 1/√headDim).
 		lhd, lkv := headDimOf(s.specs[li], s.headDim), kvHeadsOf(s.specs[li], s.nKVHeads)
@@ -1241,6 +1253,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			moeQ = s.moeQuant[li]
 		}
 		if moeW := s.moeWeights[li]; moeQ != nil || moeW != nil {
+			enc = s.profSeam(cb, enc, "moe.router")
 			// Fully-encoded lane first (session-owned scratches, device router + gathered
 			// experts): the WHOLE block encodes into the LIVE encoder — no command-buffer
 			// break at all. Declines fall to the break-out flow below.
@@ -1259,7 +1272,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 						return nil, err
 					}
 				}
-				handledMoE, err = encMoEBlockQuantDevice(enc, s.moeRouterOwnedScratch, s.moeOwnedScratch, s.hBuf, out, *moeQ, s.dModel, s.dFF, s.eps)
+				enc, handledMoE, err = encMoEBlockQuantDevice(enc, cb, s.gpuProf, s.moeRouterOwnedScratch, s.moeOwnedScratch, s.hBuf, out, *moeQ, s.dModel, s.dFF, s.eps)
 				if err != nil {
 					endEncodingFast(enc)
 					return nil, err

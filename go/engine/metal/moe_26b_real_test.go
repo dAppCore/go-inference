@@ -6,6 +6,7 @@ package native
 
 import (
 	"os"
+	"sort"
 	"testing"
 	"time"
 )
@@ -62,6 +63,83 @@ func TestRealMoE26BHostProfile(t *testing.T) {
 	wall := time.Since(t0)
 	t.Logf("real 26B-A4B MoE decode (tg%d): %.1f tok/s (%.2f ms/token) — run under -cpuprofile; low cgocall ⇒ host-bound",
 		N, float64(N)/wall.Seconds(), wall.Seconds()*1000/float64(N))
+}
+
+// TestRealMoE26BFamilyGPUProfile splits the decode's per-token encoder at the attn/moe family
+// seams with timestamp counter sampling and prints where the GPU milliseconds go — the ranked
+// table that picks the next cut. (The b8-mega experiment proved this lane is not
+// dispatch-count-bound: cuts must chase kernel time, and this is the instrument for that.)
+func TestRealMoE26BFamilyGPUProfile(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	if os.Getenv("LEM_REAL_MOE") == "" {
+		t.Skip("set LEM_REAL_MOE=1 to run the real 26B-A4B GPU family profile (loads ~15GB)")
+	}
+	dir := resolveMoE26BDir(t)
+	const maxLen, warmup, N = 320, 4, 8
+
+	lm, dm, err := loadRegistered(dir)
+	if err != nil {
+		t.Fatalf("loadRegistered: %v", err)
+	}
+	defer func() { _ = dm.Close() }()
+	sb, err := buildShardBuffers(dm)
+	if err != nil {
+		t.Fatalf("buildShardBuffers: %v", err)
+	}
+	defer func() { _ = sb.Close() }()
+	qm, err := loadedToQuant(lm, lm.Embed.GroupSize, lm.Embed.Bits)
+	if err != nil {
+		t.Fatalf("loadedToQuant: %v", err)
+	}
+	sess, err := newArchQuantSessionShards(qm, lm.Arch, maxLen, sb)
+	if err != nil {
+		t.Fatalf("newArchQuantSessionShards: %v", err)
+	}
+	prompt := []int32{2, 1000, 2500, 4000, 8000, 16000}
+	if err := sess.PrefillTokens(prompt); err != nil {
+		t.Fatalf("prefill: %v", err)
+	}
+	if _, err := sess.GenerateFromCache(warmup, -1); err != nil {
+		t.Fatalf("warmup: %v", err)
+	}
+
+	// 5 sampled encoders per layer per token (attn, moe.router, moe.local, moe.expert,
+	// moe.tail) + slack for the first encoder.
+	prof, err := newGPUCounterProfiler((5*len(lm.Arch.Layer) + 4) * N)
+	if err != nil {
+		t.Skipf("timestamp counter sampling unavailable: %v", err)
+	}
+	sess.state.gpuProf = prof
+	t0 := time.Now()
+	_, genErr := sess.GenerateFromCache(N, -1)
+	wall := time.Since(t0)
+	sess.state.gpuProf = nil
+	if genErr != nil {
+		t.Fatalf("profiled generate: %v", genErr)
+	}
+	spans, err := prof.spans()
+	if err != nil {
+		t.Fatalf("spans: %v", err)
+	}
+	var total uint64
+	labels := make([]string, 0, len(spans))
+	for label, ns := range spans {
+		total += ns
+		labels = append(labels, label)
+	}
+	if total == 0 {
+		t.Fatal("counter sampling resolved zero GPU time")
+	}
+	sort.Slice(labels, func(i, j int) bool { return spans[labels[i]] > spans[labels[j]] })
+	for _, label := range labels {
+		ns := spans[label]
+		t.Logf("%-11s %7.2f ms/token  %5.1f%% of sampled GPU", label,
+			float64(ns)/1e6/float64(N), 100*float64(ns)/float64(total))
+	}
+	t.Logf("sampled %d encoders over tg%d; sampled GPU %.2f ms/token; wall %.2f ms/token",
+		prof.sampled(), N, float64(total)/1e6/float64(N), wall.Seconds()*1000/float64(N))
 }
 
 func resolveMoE26BDir(t *testing.T) string {

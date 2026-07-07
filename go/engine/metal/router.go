@@ -445,7 +445,7 @@ func moeRouterBF16DeviceTopKNoCopyWithBufferPooled(x []byte, xBuf metal.MTLBuffe
 	if err != nil {
 		return nil, nil, nil, nil, true, err
 	}
-	topKPSO, err := routerTopKPipeline()
+	topKPSO, err := routerTopKPipelineK(topK)
 	if err != nil {
 		return nil, nil, nil, nil, true, err
 	}
@@ -502,9 +502,10 @@ func moeRouterBF16DeviceTopKNoCopyWithBufferPooled(x []byte, xBuf metal.MTLBuffe
 		sink.setI32(int32(numExperts), 4)
 		sink.setI32(int32(topK), 5)
 		sink.setI32(scaleFlag, 6)
+		// the kernel is a single 32-lane simdgroup (lane >= 32 exits immediately)
 		sink.dispatchThreads(
-			metal.MTLSize{Width: 256, Height: 1, Depth: 1},
-			metal.MTLSize{Width: 256, Height: 1, Depth: 1},
+			metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+			metal.MTLSize{Width: 32, Height: 1, Depth: 1},
 		)
 		endEncodingFast(enc)
 		commitCommandBufferFast(cb)
@@ -743,7 +744,7 @@ func moeRouterQuantDeviceTopKWithBufferPooled(x []byte, xBuf metal.MTLBuffer, no
 	if err != nil {
 		return nil, nil, nil, nil, true, err
 	}
-	routerPSO, err := routerTopKPipeline()
+	routerPSO, err := routerTopKPipelineK(topK)
 	if err != nil {
 		return nil, nil, nil, nil, true, err
 	}
@@ -802,9 +803,10 @@ func moeRouterQuantDeviceTopKWithBufferPooled(x []byte, xBuf metal.MTLBuffer, no
 		sink.setI32(int32(numExperts), 4)
 		sink.setI32(int32(topK), 5)
 		sink.setI32(scaleFlag, 6)
+		// the kernel is a single 32-lane simdgroup (lane >= 32 exits immediately)
 		sink.dispatchThreads(
-			metal.MTLSize{Width: 256, Height: 1, Depth: 1},
-			metal.MTLSize{Width: 256, Height: 1, Depth: 1},
+			metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+			metal.MTLSize{Width: 32, Height: 1, Depth: 1},
 		)
 		endEncodingFast(enc)
 		commitCommandBufferFast(cb)
@@ -831,7 +833,7 @@ func routerTopKUsable(numExperts, topK int) bool {
 	if topK <= 0 || topK > numExperts || topK > routerTopKMaxK {
 		return false
 	}
-	_, err := routerTopKPipeline()
+	_, err := routerTopKPipelineK(topK)
 	return err == nil
 }
 
@@ -840,19 +842,19 @@ func routerTopKUsable(numExperts, topK int) bool {
 // the fully-encoded MoE decode's first stage. Results land in scratch.idxBuf/weightBuf on
 // device. The caller pre-validated geometry (routerTopKUsable + the weight shape) and owns the
 // scratch's single-flight lifetime.
-func encMoERouterQuantTopK(enc metal.MTLComputeCommandEncoderObject, scratch *routerDeviceScratch, inputBuf metal.MTLBuffer, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32) error {
+func encMoERouterQuantTopK(enc metal.MTLComputeCommandEncoderObject, cb metal.MTLCommandBufferObject, prof *gpuCounterProfiler, scratch *routerDeviceScratch, inputBuf metal.MTLBuffer, normWScaled []byte, normView bufView, routerProj QuantWeight, perExpertScale []byte, perExpertScaleView bufView, numExperts, topK, dModel, groupSize, bits int, eps float32) (metal.MTLComputeCommandEncoderObject, error) {
 	groupSize, bits = quantWeightGeometryForShape(routerProj, numExperts, dModel, groupSize, bits)
 	rmsPSO, err := pipelineFor(rmsKernelBF16(dModel))
 	if err != nil {
-		return err
+		return enc, err
 	}
 	qmvPSO, err := pipelineFor(qmvBF16KernelName(numExperts, dModel, groupSize, bits))
 	if err != nil {
-		return err
+		return enc, err
 	}
-	routerPSO, err := routerTopKPipeline()
+	routerPSO, err := routerTopKPipelineK(topK)
 	if err != nil {
-		return err
+		return enc, err
 	}
 	normBuf := bf16WeightView(normWScaled, normView)
 	wBuf, scalesBuf, biasesBuf := quantWeightViews(routerProj)
@@ -863,7 +865,17 @@ func encMoERouterQuantTopK(enc metal.MTLComputeCommandEncoderObject, scratch *ro
 		scaleBuf, scaleOff = scaleView.buf, scaleView.off
 	}
 	sink := encSink{enc}
+	seam := func(label string) {
+		if prof == nil {
+			return
+		}
+		endEncodingFast(enc)
+		enc = prof.encoderFor(cb, label)
+		sink = encSink{enc}
+	}
+	seam("router.rms")
 	emitRMSNorm(sink, rmsPSO, inputBuf, normBuf.buf, scratch.normedBuf, normBuf.off, dModel, eps, rmsThreadgroup(dModel, rmsPSO))
+	seam("router.qmv")
 	emitQMV(sink, qmvPSO, wBuf.buf, wBuf.off, scalesBuf.buf, scalesBuf.off, biasesBuf.buf, biasesBuf.off, scratch.normedBuf, scratch.scoresBuf, 0, dModel, numExperts)
 	if scaleBuf == nil {
 		scaleBuf = scratch.scoresBuf
@@ -872,6 +884,7 @@ func encMoERouterQuantTopK(enc metal.MTLComputeCommandEncoderObject, scratch *ro
 	if perExpertScale != nil {
 		scaleFlag = 1
 	}
+	seam("router.topk")
 	sink.setPSO(routerPSO)
 	sink.setBuf(scratch.scoresBuf, 0, 0)
 	sink.setBuf(scaleBuf, scaleOff, 1)
@@ -880,11 +893,12 @@ func encMoERouterQuantTopK(enc metal.MTLComputeCommandEncoderObject, scratch *ro
 	sink.setI32(int32(numExperts), 4)
 	sink.setI32(int32(topK), 5)
 	sink.setI32(scaleFlag, 6)
+	// the kernel is a single 32-lane simdgroup (lane >= 32 exits immediately)
 	sink.dispatchThreads(
-		metal.MTLSize{Width: 256, Height: 1, Depth: 1},
-		metal.MTLSize{Width: 256, Height: 1, Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
 	)
-	return nil
+	return enc, nil
 }
 
 func copyRouterTopKOutput(scratch *routerDeviceScratch, topK int) ([]int32, []byte) {

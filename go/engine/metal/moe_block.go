@@ -1596,26 +1596,26 @@ func emitFFNMega[S dispatchSink](sink S, pso metal.MTLComputePipelineState, x me
 //
 // The device-relevant prelude is deliberately a sibling of moeBlockQuantAfterRouterWith
 // DeviceIndexBufferPooled's — keep the two in step when weight layouts change.
-func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, routerScratch *routerDeviceScratch, scratch *moeBlockBF16Scratch, hBuf, outputBuf metal.MTLBuffer, w MoEQuantLayerWeights, dModel, dFF int, eps float32) (bool, error) {
+func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.MTLCommandBufferObject, prof *gpuCounterProfiler, routerScratch *routerDeviceScratch, scratch *moeBlockBF16Scratch, hBuf, outputBuf metal.MTLBuffer, w MoEQuantLayerWeights, dModel, dFF int, eps float32) (metal.MTLComputeCommandEncoderObject, bool, error) {
 	expertDFF, numExperts, topK := w.ExpertDFF, w.NumExperts, w.TopK
 	size := dModel * bf16Size
 	if hBuf == nil || outputBuf == nil || routerScratch == nil || scratch == nil || topK <= 0 || dModel == 0 || dFF == 0 || expertDFF == 0 {
-		return false, nil
+		return enc, false, nil
 	}
 	if len(w.PreFFNormW) != size || len(w.PreFFNorm2W) != size || len(w.PostFFNorm1W) != size || len(w.PostFFNorm2W) != size || len(w.PostFFNormW) != size {
-		return false, nil
+		return enc, false, nil
 	}
 	localGatePacked, localGateScales, localGateBiases, localGateGroupSize, localGateBits, err := quantWeightViewsForShape("native.encMoEBlockQuantDevice: local gate", w.LocalGate, dFF, dModel, w.LocalGroupSize, w.LocalBits)
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	localUpPacked, localUpScales, localUpBiases, localUpGroupSize, localUpBits, err := quantWeightViewsForShape("native.encMoEBlockQuantDevice: local up", w.LocalUp, dFF, dModel, w.LocalGroupSize, w.LocalBits)
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	localDownPacked, localDownScales, localDownBiases, localDownGroupSize, localDownBits, err := quantWeightViewsForShape("native.encMoEBlockQuantDevice: local down", w.LocalDown, dModel, dFF, w.LocalGroupSize, w.LocalBits)
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	// (the break-out path may run the local MLP through the megakernel; this lane always
 	// encodes the qmv trio instead — the megakernel's arrive counter is a host write, and
@@ -1629,82 +1629,82 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, routerScra
 	if fusedExperts {
 		expGateUpPacked, expGateUpScales, expGateUpBiases, expGateUpGroupSize, expGateUpBits, err = quantWeightViewsForShape("native.encMoEBlockQuantDevice: expert gate_up", w.ExpGateUp, numExperts*2*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
 		if err != nil {
-			return false, nil
+			return enc, false, nil
 		}
 	} else {
 		expGatePacked, expGateScales, expGateBiases, expGateGroupSize, expGateBits, err = quantWeightViewsForShape("native.encMoEBlockQuantDevice: expert gate", w.ExpGate, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
 		if err != nil {
-			return false, nil
+			return enc, false, nil
 		}
 		expUpPacked, expUpScales, expUpBiases, expUpGroupSize, expUpBits, err = quantWeightViewsForShape("native.encMoEBlockQuantDevice: expert up", w.ExpUp, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
 		if err != nil {
-			return false, nil
+			return enc, false, nil
 		}
 	}
 	expDownPacked, expDownScales, expDownBiases, expDownGroupSize, expDownBits, err = quantWeightViewsForShape("native.encMoEBlockQuantDevice: expert down", w.ExpDown, numExperts*dModel, expertDFF, w.ExpertGroupSize, w.ExpertBits)
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	if !affineBitsSupported(expDownBits) {
-		return false, nil
+		return enc, false, nil
 	}
 	inGroup, inBits, inRows := expGateGroupSize, expGateBits, expertDFF
 	if fusedExperts {
 		if !affineBitsSupported(expGateUpBits) {
-			return false, nil
+			return enc, false, nil
 		}
 		inGroup, inBits, inRows = expGateUpGroupSize, expGateUpBits, 2*expertDFF
 	} else if !affineBitsSupported(expGateBits) || expGateBits != expUpBits || expGateGroupSize != expUpGroupSize {
 		// gate + up share one gather PSO — width and group size must agree between them.
-		return false, nil
+		return enc, false, nil
 	}
 	gatherExpertInPSO, err := gatherQMVBF16SteelPipeline(expertDFF, dModel, inGroup, inBits)
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	gatherExpertDownPSO, err := gatherQMVBF16SteelPipeline(dModel, expertDFF, expDownGroupSize, expDownBits)
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	gatherExpertInMeta, err := gatherQMVBF16Metadata(numExperts, expertDFF, dModel, inGroup, inBits, inRows)
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	gatherExpertDownMeta, err := gatherQMVBF16Metadata(numExperts, dModel, expertDFF, expDownGroupSize, expDownBits, dModel)
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	localGatePSO, err := pipelineFor(qmvBF16KernelName(dFF, dModel, localGateGroupSize, localGateBits))
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	localUpPSO, err := pipelineFor(qmvBF16KernelName(dFF, dModel, localUpGroupSize, localUpBits))
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	localDownPSO, err := pipelineFor(qmvBF16KernelName(dModel, dFF, localDownGroupSize, localDownBits))
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	rmsPSO, err := pipelineFor(rmsKernelBF16(dModel))
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	rmsTG := rmsThreadgroup(dModel, rmsPSO)
 	addPSO, err := pipelineFor("vv_Addbfloat16")
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	if !gpuHasGeluKernel() {
-		return false, nil
+		return enc, false, nil
 	}
 	geluPSO, err := geluPipeline()
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	scalePSO, err := bf16MulScalarPipeline()
 	if err != nil {
-		return false, nil
+		return enc, false, nil
 	}
 	pre1Buf := bf16WeightView(w.PreFFNormW, w.preFFNormView)
 	pre2Buf := bf16WeightView(w.PreFFNorm2W, w.preFFNorm2View)
@@ -1713,12 +1713,24 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, routerScra
 	postBuf := bf16WeightView(w.PostFFNormW, w.postFFNormView)
 
 	// stage 1: the device router — idx/weights land in routerScratch on device.
-	if rerr := encMoERouterQuantTopK(enc, routerScratch, hBuf, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps); rerr != nil {
-		return false, nil
+	var rerr error
+	if enc, rerr = encMoERouterQuantTopK(enc, cb, prof, routerScratch, hBuf, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps); rerr != nil {
+		return enc, false, nil
 	}
 	routeIdxBuf, weightsBuf := routerScratch.idxBuf, routerScratch.weightBuf
 	msc := scratch.mlp
 	sink := encSink{enc}
+	// seam splits the live encoder at a stage boundary when the GPU profiler is armed (tests
+	// only — prof nil in production): enc AND sink are rebuilt so every emit closure below
+	// follows the new encoder.
+	seam := func(label string) {
+		if prof == nil {
+			return
+		}
+		endEncodingFast(enc)
+		enc = prof.encoderFor(cb, label)
+		sink = encSink{enc}
+	}
 
 	// stage 2: the block body — the break-out run()'s device subset, same kernels, same order.
 	emitRMS := func(x, weight, out metal.MTLBuffer, wOff uint) {
@@ -1757,6 +1769,7 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, routerScra
 	emitAdd := func(a, b, out metal.MTLBuffer) {
 		emitBinary(sink, addPSO, a, 0, b, 0, out, 0, dModel)
 	}
+	seam("moe.local")
 	emitRMS(hBuf, pre1Buf.buf, scratch.localIn, pre1Buf.off)
 	// local MLP: the FFN megakernel when its geometry holds — its grid barrier needs the
 	// arrive counter zeroed per dispatch, which the break-out path did with a HOST write;
@@ -1791,6 +1804,7 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, routerScra
 		emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
 		emitQ(localDownPSO, localDownPacked, localDownScales, localDownBiases, msc.gated, scratch.localOut, dFF, dModel)
 	}
+	seam("moe.expert")
 	emitRMS(hBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
 	// expert MLPs, ALL routes per dispatch: the MLX gather batch dimension carries every
 	// selected expert (grid.z = topK, rhs = the router's device idxBuf), collapsing the
@@ -1824,6 +1838,7 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, routerScra
 		}
 		emitBinary(sink, geluPSO, scratch.expertGateAll, 0, scratch.expertUpAll, 0, scratch.expertGatedAll, 0, topK*expertDFF)
 		emitGatherQMVAllRoutes(sink, gatherExpertDownPSO, downAllMeta, downKeyBatched, scratch.expertGatedAll, 0, expDownPacked.buf, expDownPacked.off, expDownScales.buf, expDownScales.off, expDownBiases.buf, expDownBiases.off, scratch.routeIota, routeIdxBuf, 0, scratch.expertDownAll, 0, dModel, expertDFF, expDownGroupSize, expDownBits, 0, topK)
+		seam("moe.tail")
 		for i := range topK {
 			if i == 0 {
 				emitScaleFromAt(scratch.expertDownAll, uint(i*dModel*bf16Size), uint(i*bf16Size), scratch.expertAcc, dModel)
@@ -1856,7 +1871,7 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, routerScra
 	emitAdd(scratch.localNormed, scratch.expertNormed, scratch.combined)
 	emitRMS(scratch.combined, postBuf.buf, scratch.ffResidual, postBuf.off)
 	emitAdd(hBuf, scratch.ffResidual, outputBuf)
-	return true, nil
+	return enc, true, nil
 }
 
 func quantWeightViewsForShape(fn string, w QuantWeight, outDim, inDim, groupSize, bits int) (bufView, bufView, bufView, int, int, error) {
