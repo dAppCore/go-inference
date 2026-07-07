@@ -37,7 +37,7 @@ func ExampleResponseGenerateOptions() {
 	cfg := inference.ApplyGenerateOpts(opts)
 	core.Println(cfg.MaxTokens)
 	// Output:
-	// 2048
+	// 8192
 }
 
 func ExampleNewTextResponse() {
