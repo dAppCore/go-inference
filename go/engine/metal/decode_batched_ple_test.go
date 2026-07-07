@@ -96,7 +96,13 @@ func newBatchedPLEBF16FixtureShared(t testing.TB, kvShared int) *ArchSession {
 // row offsets — the batched contract stays byte-identity with stepToken.
 func TestPrefillRetainedTokensBatchedDenseEngagesPLEAndMatchesSequential(t *testing.T) {
 	requireNativeRuntime(t)
-	batchedPLEParity(t, newBatchedPLEBF16Fixture(t), newBatchedPLEBF16Fixture(t))
+	control, candidate := newBatchedPLEBF16Fixture(t), newBatchedPLEBF16Fixture(t)
+	// The name's claim is executable: the fixture must actually carry the PLE
+	// tower, or the parity below silently degrades to a dense-lane test.
+	if candidate.arch.PerLayerInputHidden == 0 {
+		t.Fatal("fixture lost its per-layer-input tower — this parity no longer exercises PLE")
+	}
+	batchedPLEParity(t, control, candidate)
 }
 
 // TestPrefillRetainedTokensBatchedDenseEngagesSharedKVAndMatchesSequential extends the
@@ -106,7 +112,20 @@ func TestPrefillRetainedTokensBatchedDenseEngagesPLEAndMatchesSequential(t *test
 // per-row SDPA length cap plus Metal's hazard ordering — proven here by byte-identity.
 func TestPrefillRetainedTokensBatchedDenseEngagesSharedKVAndMatchesSequential(t *testing.T) {
 	requireNativeRuntime(t)
-	batchedPLEParity(t, newBatchedPLEBF16FixtureShared(t, 2), newBatchedPLEBF16FixtureShared(t, 2))
+	control, candidate := newBatchedPLEBF16FixtureShared(t, 2), newBatchedPLEBF16FixtureShared(t, 2)
+	// The name's claim is executable: at least one layer must read an owner's
+	// cache (KVShareFrom != own index), or the parity below silently degrades
+	// to an unshared test.
+	shared := 0
+	for i, l := range candidate.arch.Layer {
+		if l.KVShareFrom != i {
+			shared++
+		}
+	}
+	if shared == 0 {
+		t.Fatal("fixture lost its shared-KV tail — this parity no longer exercises KV sharing")
+	}
+	batchedPLEParity(t, control, candidate)
 }
 
 // TestPrefillPromptRetainedInPoolBatchesLiveBoundaryAppend pins the multi-turn

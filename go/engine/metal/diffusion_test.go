@@ -752,12 +752,16 @@ func TestWithDiffusionEncoderScalarsQuant_SwapsAndRestores_Good(t *testing.T) {
 	eqBytes(t, "quant restored encoder scalar 1", diffusion.EncoderLayerScalars[1], encoder1)
 }
 
-func TestWithDiffusionEncoderScalars_CountMismatchRunsUnswapped_Ugly(t *testing.T) {
+func TestWithDiffusionEncoderScalarsBF16_CountMismatchRunsUnswapped_Ugly(t *testing.T) {
 	decoder0 := toBF16Bytes([]float32{1})
 	g := &BF16Model{Layers: []DecodeLayerWeights{{LayerScalarW: decoder0}}}
 	withDiffusionEncoderScalarsBF16(g, nil, func() {
 		eqBytes(t, "bf16 mismatch scalar", g.Layers[0].LayerScalarW, decoder0)
 	})
+}
+
+func TestWithDiffusionEncoderScalarsQuant_CountMismatchRunsUnswapped_Ugly(t *testing.T) {
+	decoder0 := toBF16Bytes([]float32{1})
 	q := &QuantModel{Layers: []QuantizedLayerWeights{{LayerScalarW: decoder0}}}
 	withDiffusionEncoderScalarsQuant(q, &model.LoadedDiffusion{}, func() {
 		eqBytes(t, "quant mismatch scalar", q.Layers[0].LayerScalarW, decoder0)
