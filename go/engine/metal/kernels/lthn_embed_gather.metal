@@ -4,9 +4,13 @@
 // bf16((scale_g·code_c + bias_g)·embedScale), the token id read from a GPU buffer (the LM-head argmax
 // output). This is the seam that lets the chained decode step produce the NEXT step's input embedding
 // without a host round-trip — so token t's step can submit before t's token is read back (the
-// submit-ahead pipeline). 4-bit affine, byte-aligned nibbles (matches embedTokenQuantRow's 4-bit path).
+// submit-ahead pipeline). Affine codes are bit-packed LSB-first contiguous (MLX's packing — the 4-bit
+// nibble-low-first layout generalised), spanning byte boundaries for 3/5/6-bit; the unpack mirrors the
+// host extractAffineCode oracle bit for bit, so for 4-bit the code values (and therefore the bf16
+// output bytes) are identical to the old nibble read. A spanning code never ends past its row's last
+// byte, so the second byte is read only when the width demands it — never out of bounds.
 // ABI: token(0) packed(1) scales(2) biases(3) out(4) dModel(5) groupSize(6) embedScale(7) rowPacked(8)
-//      rowSB(9). One thread per output element.
+//      rowSB(9) bits(10). One thread per output element.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -23,6 +27,7 @@ typedef bfloat bfloat16_t;
     const constant float& embedScale [[buffer(7)]],
     const constant int& rowPacked [[buffer(8)]],
     const constant int& rowSB [[buffer(9)]],
+    const constant int& bits [[buffer(10)]],
     uint c [[thread_position_in_grid]]) {
   if (int(c) >= dModel) {
     return;
@@ -31,7 +36,13 @@ typedef bfloat bfloat16_t;
   const int g = int(c) / groupSize;
   const float s = float(scales[tok * rowSB + g]);
   const float b = float(biases[tok * rowSB + g]);
-  const uint8_t packByte = packed[tok * rowPacked + int(c) / 2];
-  const float code = (c & 1u) == 0u ? float(packByte & 0x0F) : float(packByte >> 4);
+  const int bitOff = int(c) * bits;
+  const int byteIdx = tok * rowPacked + (bitOff >> 3);
+  const int shift = bitOff & 7;
+  uint v = uint(packed[byteIdx]) >> shift;
+  if (shift + bits > 8) {
+    v |= uint(packed[byteIdx + 1]) << (8u - uint(shift));
+  }
+  const float code = float(v & ((1u << uint(bits)) - 1u));
   out[c] = static_cast<bfloat16_t>((s * code + b) * embedScale);
 }
