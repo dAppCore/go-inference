@@ -365,33 +365,48 @@ func (c *devicePagedKVCache) resetAttentionScratchCursor() {
 // (a silent gate regression reads as zero, not as a perf blur).
 var attnConcurrentPasses atomic.Int64
 
+// concEncoderCarries counts passes that CONTINUED on an incoming concurrent
+// encoder instead of closing it and reopening (#341 phase 1.5): the hop-tax
+// bench measured every encoder end+open seam at ~4.7µs and every serial-tracked
+// hop at 7.0µs vs the barrier idiom's 4.13µs, so carrying one concurrent
+// encoder across the attn pass, the MoE pass and the per-layer scalar removes
+// ~4 seams per layer per token. Engagement counter for the A/B tests.
+var concEncoderCarries atomic.Int64
+
+// encConc marks enc as an OPEN CONCURRENT encoder carried from a previous pass
+// (#341 phase 1.5): the pass then joins it behind one buffer barrier instead of
+// paying an encoder seam, and returns encConc=true itself when it leaves its
+// own concurrent encoder open for the next pass to carry. A false return means
+// enc is a plain serial encoder (hazard-tracked), exactly the pre-carry
+// contract.
 func encAttnHalfKVPaged(
 	enc metal.MTLComputeCommandEncoderObject,
 	cb metal.MTLCommandBufferObject,
 	prof *gpuCounterProfiler,
+	encConc bool,
 	x metal.MTLBuffer, cache *devicePagedKVCache, offBuf, h metal.MTLBuffer, offOff uint,
 	attnNormW, postAttnNorm, qNorm, kNorm bufView, valueNorm metal.MTLBuffer,
 	sc attnScratch, proj projector,
 	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, eps float32,
 	ropeFreqs metal.MTLBuffer,
-) (metal.MTLComputeCommandEncoderObject, error) {
+) (metal.MTLComputeCommandEncoderObject, bool, error) {
 	if slideW > 0 {
 		if cache == nil {
-			return enc, core.NewError("native.encAttnHalfKVPaged: sliding window requires ring pages")
+			return enc, encConc, core.NewError("native.encAttnHalfKVPaged: sliding window requires ring pages")
 		}
 		if !cache.ring {
 			// The builder skips ring pages when the window covers the whole cache
 			// (max pos = maxSize-1 < slideW ⇒ the mask can never clip): the window is
 			// inert here, so attend fully. A window that CAN clip still requires ring.
 			if cache.maxSize > slideW {
-				return enc, core.NewError("native.encAttnHalfKVPaged: sliding window requires ring pages")
+				return enc, encConc, core.NewError("native.encAttnHalfKVPaged: sliding window requires ring pages")
 			}
 			slideW = 0
 		}
 	}
 	kPage, vPage, rowOff, err := cache.slot(pos)
 	if err != nil {
-		return enc, err
+		return enc, encConc, err
 	}
 	// one interface value per encoder: the Object struct is not pointer-shaped, so every
 	// implicit conversion at an interface-taking call would allocate — 13 boxes per layer
@@ -404,15 +419,15 @@ func encAttnHalfKVPaged(
 	// plan failure must decline BEFORE any dispatch is encoded.
 	keyPages, valuePages, pageLens, kHead, kSeq, vHead, vSeq, err := cache.state()
 	if err != nil {
-		return enc, err
+		return enc, encConc, err
 	}
 	pagedScratch, err := cache.attentionScratch(nHeads)
 	if err != nil {
-		return enc, err
+		return enc, encConc, err
 	}
 	sdpaPlan, err := buildSDPAPagedDecodePlan(sc.q, keyPages, valuePages, pageLens, kHead, kSeq, vHead, vSeq, sc.attn, pagedScratch, nHeads, nKVHeads, headDim, scale)
 	if err != nil {
-		return enc, err
+		return enc, encConc, err
 	}
 
 	// ---- concurrent pass: the q/k/v projections all read the same normed row, their
@@ -423,23 +438,31 @@ func encAttnHalfKVPaged(
 	// rms+rope fallback keeps the serial path), and never under the profiler's seams.
 	if prof == nil && !attnConcurrentDisabled && fusedQKRope && (kNorm.buf == nil || fusedKRope) {
 		attnConcurrentPasses.Add(1)
-		endEncodingFast(enc)
-		enc = concurrentComputeEncoderFast(cb)
-		encI = metal.MTLComputeCommandEncoder(enc)
+		if encConc && !encCarryDisabled {
+			// Carry the previous pass's open concurrent encoder: one buffer barrier
+			// orders its writes ahead of this pass's reads, no encoder seam paid.
+			concEncoderCarries.Add(1)
+			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+			encI = metal.MTLComputeCommandEncoder(enc)
+		} else {
+			endEncodingFast(enc)
+			enc = concurrentComputeEncoderFast(cb)
+			encI = metal.MTLComputeCommandEncoder(enc)
+		}
 		// stage 1: the shared input norm
 		if err := encRMSNormBF16(encI, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
 			endEncodingFast(enc)
-			return computeCommandEncoderFast(cb), err
+			return computeCommandEncoderFast(cb), false, err
 		}
 		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
 		// stage 2: q ∥ k ∥ v projections
 		if err := proj.project(encI, sc.normed, sc.q, 0, projQ); err != nil {
 			endEncodingFast(enc)
-			return computeCommandEncoderFast(cb), err
+			return computeCommandEncoderFast(cb), false, err
 		}
 		if err := proj.project(encI, sc.normed, kPage, rowOff, projK); err != nil {
 			endEncodingFast(enc)
-			return computeCommandEncoderFast(cb), err
+			return computeCommandEncoderFast(cb), false, err
 		}
 		vIdx := projV
 		if !proj.hasV() {
@@ -447,24 +470,24 @@ func encAttnHalfKVPaged(
 		}
 		if err := proj.project(encI, sc.normed, vPage, rowOff, vIdx); err != nil {
 			endEncodingFast(enc)
-			return computeCommandEncoderFast(cb), err
+			return computeCommandEncoderFast(cb), false, err
 		}
 		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
 		// stage 3: q rope ∥ k rope ∥ v norm
 		if err := encQKNormRopeAt(encI, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale, eps); err != nil {
 			endEncodingFast(enc)
-			return computeCommandEncoderFast(cb), err
+			return computeCommandEncoderFast(cb), false, err
 		}
 		if kNorm.buf != nil {
 			if err := encQKNormRopeAt(encI, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
 				endEncodingFast(enc)
-				return computeCommandEncoderFast(cb), err
+				return computeCommandEncoderFast(cb), false, err
 			}
 		}
 		if valueNorm != nil {
 			if err := encRMSNormRowsBF16(encI, vPage, valueNorm, vPage, rowOff, 0, rowOff, nKVHeads, headDim, eps); err != nil {
 				endEncodingFast(enc)
-				return computeCommandEncoderFast(cb), err
+				return computeCommandEncoderFast(cb), false, err
 			}
 		}
 		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
@@ -477,19 +500,32 @@ func encAttnHalfKVPaged(
 		// stage 6: output projection
 		if err := proj.project(encI, sc.attn, sc.attnOut, 0, projO); err != nil {
 			endEncodingFast(enc)
-			return computeCommandEncoderFast(cb), err
+			return computeCommandEncoderFast(cb), false, err
 		}
 		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
 		// stage 7: residual (+ post-attention norm)
 		if err := encResidualMaybeNorm(encI, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps); err != nil {
 			endEncodingFast(enc)
-			return computeCommandEncoderFast(cb), err
+			return computeCommandEncoderFast(cb), false, err
 		}
-		endEncodingFast(enc)
-		return computeCommandEncoderFast(cb), nil
+		if encCarryDisabled {
+			endEncodingFast(enc)
+			return computeCommandEncoderFast(cb), false, nil
+		}
+		// Leave the concurrent encoder OPEN — the caller carries it into the next
+		// pass (a barrier at that pass's entry orders this pass's writes).
+		return enc, true, nil
 	}
 
 	// ---- serial path (hazard tracking orders every edge) ----
+	// A carried concurrent encoder has no hazard tracking — the serial fallback
+	// must close it and reopen a tracked serial encoder before dispatching.
+	if encConc {
+		endEncodingFast(enc)
+		enc = computeCommandEncoderFast(cb)
+		encI = metal.MTLComputeCommandEncoder(enc)
+		encConc = false
+	}
 	// Under the profiler the attention half splits at its family seams — proj
 	// (norm + q/k/v projections + ropes) | sdpa (both passes) | tail (o-proj +
 	// residual) — so the ranked table can tell weight-read time from attention
@@ -500,40 +536,40 @@ func encAttnHalfKVPaged(
 		encI = metal.MTLComputeCommandEncoder(enc)
 	}
 	if err := encRMSNormBF16(encI, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
-		return enc, err
+		return enc, false, err
 	}
 	if err := proj.project(encI, sc.normed, sc.q, 0, projQ); err != nil {
-		return enc, err
+		return enc, false, err
 	}
 	if fusedQKRope {
 		if err := encQKNormRopeAt(encI, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale, eps); err != nil {
-			return enc, err
+			return enc, false, err
 		}
 	} else {
 		if qNorm.buf != nil {
 			if err := encRMSNormRowsBF16(encI, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, nHeads, headDim, eps); err != nil {
-				return enc, err
+				return enc, false, err
 			}
 		}
 		if err := encRopeDecodeAt(encI, sc.q, sc.q, 0, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale); err != nil {
-			return enc, err
+			return enc, false, err
 		}
 	}
 	if err := proj.project(encI, sc.normed, kPage, rowOff, projK); err != nil {
-		return enc, err
+		return enc, false, err
 	}
 	if fusedKRope {
 		if err := encQKNormRopeAt(encI, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
-			return enc, err
+			return enc, false, err
 		}
 	} else {
 		if kNorm.buf != nil {
 			if err := encRMSNormRowsBF16(encI, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, nKVHeads, headDim, eps); err != nil {
-				return enc, err
+				return enc, false, err
 			}
 		}
 		if err := encRopeDecodeAt(encI, kPage, kPage, rowOff, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale); err != nil {
-			return enc, err
+			return enc, false, err
 		}
 	}
 	vIdx := projV
@@ -541,11 +577,11 @@ func encAttnHalfKVPaged(
 		vIdx = projK
 	}
 	if err := proj.project(encI, sc.normed, vPage, rowOff, vIdx); err != nil {
-		return enc, err
+		return enc, false, err
 	}
 	if valueNorm != nil {
 		if err := encRMSNormRowsBF16(encI, vPage, valueNorm, vPage, rowOff, 0, rowOff, nKVHeads, headDim, eps); err != nil {
-			return enc, err
+			return enc, false, err
 		}
 	}
 	if prof != nil {
@@ -561,9 +597,9 @@ func encAttnHalfKVPaged(
 		encI = metal.MTLComputeCommandEncoder(enc)
 	}
 	if err := proj.project(encI, sc.attn, sc.attnOut, 0, projO); err != nil {
-		return enc, err
+		return enc, false, err
 	}
-	return enc, encResidualMaybeNorm(encI, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps)
+	return enc, false, encResidualMaybeNorm(encI, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps)
 }
 
 func encAttnHalfSharedPaged(

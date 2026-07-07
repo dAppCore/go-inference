@@ -48,6 +48,11 @@ var (
 	// lthn_gather_qmv kernel is available (7 buffers + 2 scalars, #280). Test/bench hook
 	// for lean-vs-MLX byte compares.
 	leanGatherDisabled bool
+	// encCarryDisabled forces every concurrent pass to close its encoder and
+	// reopen a serial one on exit (the pre-#341 shape) instead of carrying the
+	// open concurrent encoder into the next pass. Test/bench hook for
+	// carried-vs-seamed byte compares.
+	encCarryDisabled bool
 	// sdpaSingleCellDisabled forces the paged decode SDPA through both passes even
 	// when the plan has a single partial cell (one split window of one page) and
 	// pass 1 could write the final row directly (#340). Test/bench hook for
