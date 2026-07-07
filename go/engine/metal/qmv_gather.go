@@ -114,8 +114,8 @@ func emitGatherQMVBF16Steel(sink encSink, pso metal.MTLComputePipelineState, met
 }
 
 type gatherQMVAllRoutesMetaKey struct {
-	numExperts, outDim, inDim, groupSize, bits, expertRows, routes int
-	batchedX                                                       bool
+	numExperts, outDim, inDim, groupSize, bits, expertRows, routes, xRows int
+	batchedX                                                              bool
 }
 
 var gatherQMVAllRoutesMetas sync.Map
@@ -125,24 +125,26 @@ var gatherQMVAllRoutesMetas sync.Map
 // batchedX=false shares one x row across routes (the gate/up projections — lhs stride 0);
 // batchedX=true indexes x as [routes × inDim] (the down projection reading each route's
 // gated row — lhs iota, stride 1).
-func gatherQMVAllRoutesMetadata(numExperts, outDim, inDim, groupSize, bits, expertRows, routes int, batchedX bool) (*gatherQMVBF16Meta, error) {
+func gatherQMVAllRoutesMetadata(numExperts, outDim, inDim, groupSize, bits, expertRows, routes, xRows int, batchedX bool) (*gatherQMVBF16Meta, error) {
 	rowPackedBytes := inDim * bits / 8
 	if rowPackedBytes%4 != 0 {
 		return nil, core.NewError("native.gatherQMVAllRoutesMetadata: packed row must be uint32 aligned")
 	}
 	rowPackedU32 := inDim * bits / 32
 	groups := inDim / groupSize
-	key := gatherQMVAllRoutesMetaKey{numExperts: numExperts, outDim: outDim, inDim: inDim, groupSize: groupSize, bits: bits, expertRows: expertRows, routes: routes, batchedX: batchedX}
+	key := gatherQMVAllRoutesMetaKey{numExperts: numExperts, outDim: outDim, inDim: inDim, groupSize: groupSize, bits: bits, expertRows: expertRows, routes: routes, xRows: xRows, batchedX: batchedX}
 	if v, ok := gatherQMVAllRoutesMetas.Load(key); ok {
 		return v.(*gatherQMVBF16Meta), nil
 	}
 	xShape := []int32{1, int32(inDim)}
 	xStrides := []int64{int64(inDim), 1}
 	if batchedX {
-		// x = [routes, 1, inDim] with batch ndims 1: the kernel resolves the lhs index
+		// x = [xRows, 1, inDim] with batch ndims 1: the kernel resolves the lhs index
 		// against the LEADING batch dim (offset = lhs_value · strides[0]), then the
-		// trailing (M, K) pair addresses the row.
-		xShape = []int32{int32(routes), 1, int32(inDim)}
+		// trailing (M, K) pair addresses the row. The decode's down-projection uses
+		// xRows == routes (identity lhs); the batched prefill's gate/up use xRows == K
+		// tokens with a pair->token lhs map.
+		xShape = []int32{int32(xRows), 1, int32(inDim)}
 		xStrides = []int64{int64(inDim), int64(inDim), 1}
 	}
 	wShape := [...]int32{int32(numExperts), int32(expertRows), int32(rowPackedU32)}

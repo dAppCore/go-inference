@@ -1805,11 +1805,11 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 		if fusedExperts {
 			inGroupSize, inBitsSel, inRowsSel = expGateUpGroupSize, expGateUpBits, 2*expertDFF
 		}
-		inKeyShared = gatherQMVAllRoutesMetaKey{numExperts: numExperts, outDim: expertDFF, inDim: dModel, groupSize: inGroupSize, bits: inBitsSel, expertRows: inRowsSel, routes: topK, batchedX: false}
-		downKeyBatched = gatherQMVAllRoutesMetaKey{numExperts: numExperts, outDim: dModel, inDim: expertDFF, groupSize: expDownGroupSize, bits: expDownBits, expertRows: dModel, routes: topK, batchedX: true}
-		if inAllMeta, err = gatherQMVAllRoutesMetadata(numExperts, expertDFF, dModel, inGroupSize, inBitsSel, inRowsSel, topK, false); err != nil {
+		inKeyShared = gatherQMVAllRoutesMetaKey{numExperts: numExperts, outDim: expertDFF, inDim: dModel, groupSize: inGroupSize, bits: inBitsSel, expertRows: inRowsSel, routes: topK, xRows: 1, batchedX: false}
+		downKeyBatched = gatherQMVAllRoutesMetaKey{numExperts: numExperts, outDim: dModel, inDim: expertDFF, groupSize: expDownGroupSize, bits: expDownBits, expertRows: dModel, routes: topK, xRows: topK, batchedX: true}
+		if inAllMeta, err = gatherQMVAllRoutesMetadata(numExperts, expertDFF, dModel, inGroupSize, inBitsSel, inRowsSel, topK, 1, false); err != nil {
 			allRoutes = false
-		} else if downAllMeta, err = gatherQMVAllRoutesMetadata(numExperts, dModel, expertDFF, expDownGroupSize, expDownBits, dModel, topK, true); err != nil {
+		} else if downAllMeta, err = gatherQMVAllRoutesMetadata(numExperts, dModel, expertDFF, expDownGroupSize, expDownBits, dModel, topK, topK, true); err != nil {
 			allRoutes = false
 		}
 	}
