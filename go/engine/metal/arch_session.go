@@ -756,15 +756,18 @@ func NewArchQuantSession(g *QuantModel, arch model.Arch, maxLen int) (*ArchSessi
 }
 
 // newArchQuantSessionShards is NewArchQuantSession with an optional zero-copy weight source.
-// sb is kept alive on the session (the host-side embed/head read mmap views of g.Embed / g.LMHead),
-// BUT the per-layer 4-bit weights are deliberately built via the COPY path (buildQuantArchLayerBufs
-// is passed nil): binding the per-layer quant weights as no-copy views into the shared shard buffer
-// produces NaN once a SECOND decode layer reads the first layer's output — a cross-layer hazard
-// specific to the 4-bit affine_qmv reading the aliased shard buffer in a multi-layer command buffer
-// (the bf16 gemv path and a single quant layer are byte-identical no-copy; isolated/repeated quant
-// qmv over the shard buffer is byte-identical too — it is purely the cross-layer multi-bind case).
-// Until that is understood the quant layer weights stay copies (no balloon — they are built ONCE),
-// while the bf16 path and the per-token head (a single dispatch, split (d)) take the zero-copy win.
+// sb is kept alive on the session and the per-layer quant weights DO bind as no-copy shard views
+// (buildQuantArchLayerBufs receives sb; the live loaders pass a real one).
+//
+// History, because a stale version of this comment mis-guided sessions for months: an earlier
+// build quarantined the quant layers onto the copy path over a "cross-layer NaN" that looked like
+// an aliasing hazard. The actual root cause was FILE OFFSET ALIGNMENT — safetensors gives no
+// alignment guarantee (e2b-4bit's data section starts at 8+header = ≡2 mod 4, so roughly half the
+// U32 packed tensors land 4-byte-misaligned), and binding a misaligned offset as `device const
+// uint*` reads garbage. "One layer fine, many layers NaN" was just per-tensor offset parity.
+// The cure lives in bufForAligned: an aligned tensor binds as a no-copy view, a misaligned one
+// falls back to a private copy of JUST that tensor (mustBufFor4 enforces the packed-U32 rule).
+// There is no aliasing hazard; do not re-quarantine.
 func newArchQuantSessionShards(g *QuantModel, arch model.Arch, maxLen int, sb *shardBuffers) (*ArchSession, error) {
 	return newArchQuantSessionShardsWithHead(g, arch, maxLen, sb, nil)
 }
