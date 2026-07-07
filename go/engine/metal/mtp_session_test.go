@@ -664,6 +664,11 @@ func TestMTPVerifyBatchedSlidingRingWrapStagedFoldEngages(t *testing.T) {
 	run := func(disableFold bool) ([]int32, int64, *ArchSession) {
 		t.Helper()
 		sess := mk()
+		// Pins the STAGED attention-fold lane. bf16 sessions record the arch ICB now, and
+		// small-batch verify on an ICB session deliberately keeps the per-row interleave
+		// (the byte contract with the chained lane — see stepTokensBatchedDense) with the
+		// folds off — so exercise the fold on the non-ICB lane it serves.
+		sess.state.icb = nil
 		if err := sess.PrefillTokens(mtpWordedPromptIDs()); err != nil {
 			t.Fatalf("PrefillTokens: %v", err)
 		}

@@ -46,3 +46,25 @@ typedef bfloat bfloat16_t;
   const float code = float(v & ((1u << uint(bits)) - 1u));
   out[c] = static_cast<bfloat16_t>((s * code + b) * embedScale);
 }
+
+// lthn_embed_gather_row_bf16 — the DENSE sibling: gather one token's bf16 embedding row,
+// out[c] = bf16(float(table[tok·width + c]) · scale). Same seam (token id read from a GPU
+// buffer, no host round-trip), bf16 table instead of affine codes — the bf16 checkpoints'
+// main-embed and PLE gathers (host twin embedTokenBF16Into: widen → f32 multiply → RNE
+// round; the MSL bfloat cast rounds to nearest-even, so the output bytes are identical).
+// Row offsets are LONG: a PLE table (vocabPLI × numLayers·pliDim) can exceed 2^31 elements
+// (e4b: 262144 × 8960), which would wrap 32-bit indexing.
+// ABI: token(0) table(1) out(2) width(3) scale(4). One thread per output element.
+[[kernel]] void lthn_embed_gather_row_bf16(
+    const device int* token [[buffer(0)]],
+    const device bfloat16_t* table [[buffer(1)]],
+    device bfloat16_t* out [[buffer(2)]],
+    const constant int& width [[buffer(3)]],
+    const constant float& scale [[buffer(4)]],
+    uint c [[thread_position_in_grid]]) {
+  if (int(c) >= width) {
+    return;
+  }
+  const long tok = long(token[0]);
+  out[c] = static_cast<bfloat16_t>(float(table[tok * long(width) + long(c)]) * scale);
+}

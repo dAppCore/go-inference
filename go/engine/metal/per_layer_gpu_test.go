@@ -415,3 +415,120 @@ func TestSessionNextInputsGPUPLEReadbackUsesPinnedNoCopyBacking(t *testing.T) {
 		t.Fatal("next-input PLE readback does not use the pinned Go backing")
 	}
 }
+
+// TestSessionNextInputsGPUParityBF16 is the bf16 twin of TestSessionNextInputsGPUParity: a
+// full-bf16 E-family session must wire the GPU next-inputs seam (bf16 row-gather main embed +
+// encPerLayerInputsGPUBF16Object PLE), and nextInputsGPU must reproduce the host s.embed +
+// s.perLayerInput closures — the gate that lets bf16 checkpoints (the LoRA/SFT training base)
+// ride the chained/pipelined decode.
+func TestSessionNextInputsGPUParityBF16(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 64, 256, 32
+	const numLayers, pliDim = 2, 64
+	const maxLen = 16
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+		HiddenSizePerLayerInput: pliDim, VocabSizePerLayerInput: vocab,
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	ts := bf16Gemma4TensorsVaried(t, arch)
+	addPLETensorsBF16(t, ts, arch)
+	lm, err := model.Assemble(ts, arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	g := loadedToBF16(lm)
+	if !g.HasPLE() {
+		t.Fatal("fixture should have the per-layer-input tower")
+	}
+	sess, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession: %v", err)
+	}
+	if sess.encNextInputsGPU == nil || sess.plScratchNew == nil {
+		t.Fatal("expected the GPU next-inputs seam wired for a full-bf16 E-family session")
+	}
+	for _, tok := range []int32{1, 5, 17, 31} {
+		gotEmb, gotPli, ok, err := sess.nextInputsGPU(tok)
+		if err != nil {
+			t.Fatalf("tok %d: nextInputsGPU: %v", tok, err)
+		}
+		if !ok {
+			t.Fatalf("tok %d: nextInputsGPU ok=false on a wired session", tok)
+		}
+		wantEmb, err := sess.embed(tok)
+		if err != nil {
+			t.Fatalf("tok %d: host embed: %v", tok, err)
+		}
+		if !bytes.Equal(gotEmb, wantEmb) {
+			t.Fatalf("tok %d: GPU bf16 embed row differs from host embedTokenBF16Into — the row-gather kernel must be byte-identical (same widen->mul->RNE rounding)", tok)
+		}
+		wantPli, err := sess.perLayerInput(tok, wantEmb)
+		if err != nil {
+			t.Fatalf("tok %d: host perLayerInput: %v", tok, err)
+		}
+		if cos := cosineBF16(gotPli, wantPli); cos < 0.9999 {
+			t.Fatalf("tok %d: GPU pli cosine=%.6f vs host s.perLayerInput", tok, cos)
+		}
+	}
+	t.Logf("bf16 session GPU next-inputs (emb+pli) matches host s.embed + s.perLayerInput")
+}
+
+// TestSessionNextInputsGPUParityBF16Dense pins the DENSE bf16 seam (12B/31B shape, no PLE):
+// the seam is the bf16 row-gather alone with a zero-value plGPUScratch placeholder, and the
+// gathered embedding must be byte-identical to the host s.embed.
+func TestSessionNextInputsGPUParityBF16Dense(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 64, 256, 32
+	const numLayers = 2
+	const maxLen = 16
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	ts := bf16Gemma4TensorsVaried(t, arch)
+	lm, err := model.Assemble(ts, arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	g := loadedToBF16(lm)
+	if g.HasPLE() {
+		t.Fatal("dense fixture must not have the per-layer-input tower")
+	}
+	sess, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession: %v", err)
+	}
+	if sess.encNextInputsGPU == nil || sess.plScratchNew == nil {
+		t.Fatal("expected the dense bf16 GPU next-inputs seam wired (embed gather alone)")
+	}
+	for _, tok := range []int32{1, 5, 17, 31} {
+		gotEmb, _, ok, err := sess.nextInputsGPU(tok)
+		if err != nil {
+			t.Fatalf("tok %d: nextInputsGPU: %v", tok, err)
+		}
+		if !ok {
+			t.Fatalf("tok %d: nextInputsGPU ok=false on a wired session", tok)
+		}
+		wantEmb, err := sess.embed(tok)
+		if err != nil {
+			t.Fatalf("tok %d: host embed: %v", tok, err)
+		}
+		if !bytes.Equal(gotEmb, wantEmb) {
+			t.Fatalf("tok %d: dense GPU bf16 embed row differs from host embedTokenBF16Into", tok)
+		}
+	}
+	t.Logf("dense bf16 session GPU next-inputs (embed row) byte-matches host s.embed")
+}

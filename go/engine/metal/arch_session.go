@@ -739,6 +739,51 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 					return perLayerInputsBatchIntoSlab(batchScratch, g.EmbedPerLayer, pleProjView, g.PerLayerProjNormW, ids, embs, slab, arch.PerLayerInputVocab, len(arch.Layer), arch.PerLayerInputHidden, arch.Hidden, arch.Eps)
 				}
 			}
+			// GPU next-inputs seam (full-bf16 E-family): produce the next step's emb+pli on-GPU
+			// from a token-id buffer (no host round-trip) — the chained/pipelined decode's gate.
+			// Both tables are dense bf16, so the gather is the bf16 row kernel; the projection is
+			// the same resident bf16 gemv the host closure dispatches (byte-identity preserved).
+			embedTableBuf := residentBytes(g.Embed)
+			pleTableBuf := residentBytes(g.EmbedPerLayer)
+			pleNormBuf := residentBytes(g.PerLayerProjNormW)
+			projWBuf, projWOff := pleProjView.buf, pleProjView.off
+			if projWBuf == nil {
+				projWBuf = residentBytes(g.PerLayerModelProjW)
+				projWOff = 0
+			}
+			if embedTableBuf != nil && pleTableBuf != nil && pleNormBuf != nil && projWBuf != nil {
+				numLayers, pliDim, dModel := len(arch.Layer), arch.PerLayerInputHidden, arch.Hidden
+				plDim := numLayers * pliDim
+				embScalePLE := float32(math.Sqrt(float64(pliDim)))
+				projScale := float32(1.0 / math.Sqrt(float64(dModel)))
+				sess.plScratchNew = func() *plGPUScratch { return newPLGPUScratch(plDim, projScale) }
+				sess.encNextInputsGPU = func(enc metal.MTLComputeCommandEncoderObject, tokenBuf, embOut metal.MTLBuffer, sc *plGPUScratch) error {
+					gpso, gerr := embedGatherRowBF16Pipeline()
+					if gerr != nil {
+						return gerr
+					}
+					encEmbedGatherRowBF16Object(enc, gpso, tokenBuf, embedTableBuf, embOut, 0, 0, dModel, embedScale)
+					return encPerLayerInputsGPUBF16Object(enc, gpso, tokenBuf, embOut, pleTableBuf, 0, projWBuf, projWOff, pleNormBuf, sc, numLayers, pliDim, dModel, embScalePLE, arch.Eps)
+				}
+			}
+		} else {
+			// GPU next-inputs seam, non-PLE dense bf16 (12B/31B): the only per-step input is the
+			// token's embedding, so the seam is the bf16 row-gather alone — the zero-value
+			// plGPUScratch placeholder satisfies the chained/pipelined gates, exactly as on the
+			// quant constructor's dense seam.
+			dModel := arch.Hidden
+			embedTableBuf := residentBytes(g.Embed)
+			if embedTableBuf != nil {
+				sess.plScratchNew = func() *plGPUScratch { return &plGPUScratch{} }
+				sess.encNextInputsGPU = func(enc metal.MTLComputeCommandEncoderObject, tokenBuf, embOut metal.MTLBuffer, _ *plGPUScratch) error {
+					gpso, gerr := embedGatherRowBF16Pipeline()
+					if gerr != nil {
+						return gerr
+					}
+					encEmbedGatherRowBF16Object(enc, gpso, tokenBuf, embedTableBuf, embOut, 0, 0, dModel, embedScale)
+					return nil
+				}
+			}
 		}
 		// bf16 incremental ICB encode-bypass — the quant constructor's block with the bf16
 		// recorder (recordArchICBBF16): record the decode stack once + replay it per Step/

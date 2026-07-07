@@ -906,6 +906,10 @@ func TestNativeGenerationValidationCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewArchSession embed: %v", err)
 	}
+	// Instruments the HOST embed closure — bf16 sessions ride the GPU next-inputs seam
+	// now (no host embed call to fail), so force the host lane this guard covers.
+	sess.state.icb = nil
+	sess.encNextInputsGPU = nil
 	origEmbed := sess.embed
 	calls := 0
 	sess.embed = func(id int32) ([]byte, error) {
@@ -2015,6 +2019,10 @@ func TestNativeLoaderSessionCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewArchSession generate closures: %v", err)
 	}
+	// Instruments the HOST embed closure — the bf16 GPU next-inputs seam embeds on-GPU
+	// (no host embed call to fail), so force the host lane this guard covers.
+	sess.state.icb = nil
+	sess.encNextInputsGPU = nil
 	sess.embed = func(int32) ([]byte, error) { return nil, core.NewError("embed failed") }
 	_, err = sess.Generate([]int32{1}, 1, -1)
 	expectErr(t, "Generate embed error", err)
@@ -2023,6 +2031,10 @@ func TestNativeLoaderSessionCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewArchSession PLI generate closures: %v", err)
 	}
+	// Instruments the HOST perLayerInput closure — the GPU-inputs lane never consults it
+	// on this dense fixture, so force the host lane this guard covers.
+	sess.state.icb = nil
+	sess.encNextInputsGPU = nil
 	sess.perLayerInput = func(int32, []byte) ([]byte, error) { return nil, core.NewError("pli failed") }
 	_, err = sess.Generate([]int32{1}, 1, -1)
 	expectErr(t, "Generate PLI error", err)

@@ -268,6 +268,34 @@ func encPerLayerInputsGPUObject(enc metal.MTLComputeCommandEncoderObject, embedG
 	return encScaleBF16Object(enc, sc.combined, sc.combineScaleBuf, sc.out, 0, sc.combineScaleBytes[:], plDim)
 }
 
+// encPerLayerInputsGPUBF16Object is encPerLayerInputsGPUObject for the FULL-bf16
+// shape (bf16 checkpoints, the LoRA/SFT training base): the per-layer embedding
+// table is dense bf16, so op (1) is the bf16 row-gather (lthn_embed_gather_row_bf16,
+// byte-tracking the host embedTokenBF16Into) instead of the affine dequant-gather.
+// The other five ops — projection gemv, scale, per-layer RMS norm, combine add,
+// final scale — are byte-identical to the quant-embed lane.
+func encPerLayerInputsGPUBF16Object(enc metal.MTLComputeCommandEncoderObject, gatherPSO metal.MTLComputePipelineState,
+	tokenBuf, embBuf metal.MTLBuffer,
+	embedTable metal.MTLBuffer, embedTableOff uint,
+	projW metal.MTLBuffer, projWOff uint, projNormW metal.MTLBuffer,
+	sc *plGPUScratch, numLayers, pliDim, dModel int, embScale float32, eps float32) error {
+	plDim := numLayers * pliDim
+	encEmbedGatherRowBF16Object(enc, gatherPSO, tokenBuf, embedTable, sc.perLayer, embedTableOff, 0, plDim, embScale)
+	if err := encGemvBF16ToObject(enc, projW, embBuf, sc.projected, projWOff, 0, plDim, dModel); err != nil {
+		return err
+	}
+	if err := encScaleBF16Object(enc, sc.projected, sc.projScaleBuf, sc.scaled, 0, sc.projScaleBytes[:], plDim); err != nil {
+		return err
+	}
+	if err := encRMSNormRowsBF16Object(enc, sc.scaled, projNormW, sc.projNormed, 0, 0, 0, numLayers, pliDim, eps); err != nil {
+		return err
+	}
+	if err := encAddBF16Object(enc, sc.projNormed, sc.perLayer, sc.combined, plDim); err != nil {
+		return err
+	}
+	return encScaleBF16Object(enc, sc.combined, sc.combineScaleBuf, sc.out, 0, sc.combineScaleBytes[:], plDim)
+}
+
 // encPerLayerInputsGPUQuantProjObject is encPerLayerInputsGPUObject for the QAT
 // shape: the per-layer model projection ships QUANTISED (qat e2b/e4b: 4-bit
 // affine with its own gs/bits, read from the shapes), so the projection matvec

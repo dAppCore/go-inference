@@ -147,6 +147,10 @@ func TestSessionStateSnapshotCacheViewsUseCachedContentsPointers(t *testing.T) {
 
 	t.Run("layer buffers", func(t *testing.T) {
 		s := newSessionStateFixture(t)
+		// Pins the NON-ICB session's view aliasing (paged snapshot / lb caches); the
+		// "icb replay" subtest below covers the ICB views. bf16 sessions record the
+		// arch ICB now, so force the lane this subtest is about.
+		s.state.icb = nil
 		li := firstOwnedCacheLayer(t, s)
 		if s.state.lb[li].kCachePtr == nil || s.state.lb[li].vCachePtr == nil {
 			t.Fatal("layer KV cache contents pointers were not cached at construction")
@@ -1528,6 +1532,12 @@ func TestSessionStateBlocksRestorePromptCacheEntry(t *testing.T) {
 	}
 
 	restored := newSessionStateFixture(t)
+	// Counts HOST head-closure calls below — the host decode lane's cached-logits flow.
+	// bf16 sessions record the arch ICB + GPU next-inputs seam now, which fuse the head
+	// device-side (the closure never fires); force the host lane BEFORE the restore so
+	// it populates the host-lane caches too.
+	restored.state.icb = nil
+	restored.encNextInputsGPU = nil
 	if err := restored.RestoreStateBlocks(source); err != nil {
 		t.Fatalf("RestoreStateBlocks: %v", err)
 	}
@@ -2994,6 +3004,12 @@ func TestSessionStateRestoresPromptCacheEntry(t *testing.T) {
 	}
 
 	b := newSessionStateFixture(t)
+	// Counts HOST head-closure calls below — the host decode lane's cached-logits flow.
+	// bf16 sessions record the arch ICB + GPU next-inputs seam now, which fuse the head
+	// device-side (the closure never fires); force the host lane BEFORE RestoreState so
+	// the restore populates the host-lane caches too.
+	b.state.icb = nil
+	b.encNextInputsGPU = nil
 	if err := b.RestoreState(blob); err != nil {
 		t.Fatalf("RestoreState: %v", err)
 	}
