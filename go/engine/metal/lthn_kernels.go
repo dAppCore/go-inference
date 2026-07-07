@@ -27,10 +27,6 @@ var (
 	geluPSOOnce sync.Once
 	geluPSO     metal.MTLComputePipelineState
 	geluPSOErr  error
-
-	ffnMegaPSOOnce sync.Once
-	ffnMegaPSO     metal.MTLComputePipelineState
-	ffnMegaPSOErr  error
 )
 
 // geluPipeline builds (once) the fused gelu pipeline from the custom kernels library.
@@ -57,19 +53,48 @@ const (
 )
 
 func ffnMegaPipeline() (metal.MTLComputePipelineState, error) {
-	ffnMegaPSOOnce.Do(func() {
-		if customLibrary == nil || customLibrary.GetID() == 0 {
-			ffnMegaPSOErr = core.NewError("native.ffnMegaPipeline: custom library unavailable")
-			return
+	return ffnMegaPipelineBits(4)
+}
+
+var (
+	ffnMegaBitsPSOMu    sync.Mutex
+	ffnMegaBitsPSOCache = map[int]metal.MTLComputePipelineState{}
+)
+
+// ffnMegaPipelineBits builds (and caches) the FFN megakernel specialised for an affine quant
+// width via function constant 0 (4 = nibble codes, 8 = byte codes). Declaring the constant
+// makes EVERY build require specialisation (Metal refuses the unspecialised function), so the
+// 4-bit path routes through here too.
+func ffnMegaPipelineBits(bits int) (metal.MTLComputePipelineState, error) {
+	if bits != 4 && bits != 8 {
+		return nil, core.NewError("native.ffnMegaPipelineBits: unsupported quant width")
+	}
+	ffnMegaBitsPSOMu.Lock()
+	defer ffnMegaBitsPSOMu.Unlock()
+	if pso, ok := ffnMegaBitsPSOCache[bits]; ok {
+		if pso == nil {
+			return nil, core.NewError("native.ffnMegaPipelineBits: kernel unavailable")
 		}
-		fn := customLibrary.NewFunctionWithName("lthn_ffn_megakernel")
-		if fn == nil || fn.GetID() == 0 {
-			ffnMegaPSOErr = core.NewError("native.ffnMegaPipeline: kernel lthn_ffn_megakernel not found")
-			return
-		}
-		ffnMegaPSO, ffnMegaPSOErr = device.NewComputePipelineStateWithFunctionError(fn)
-	})
-	return ffnMegaPSO, ffnMegaPSOErr
+		return pso, nil
+	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		return nil, core.NewError("native.ffnMegaPipelineBits: custom library unavailable")
+	}
+	fc := metal.NewMTLFunctionConstantValues()
+	bb := uint32(bits)
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&bb), metal.MTLDataTypeUInt, 0)
+	fn, err := customLibrary.NewFunctionWithNameConstantValuesError("lthn_ffn_megakernel", fc)
+	if err != nil || fn == nil || fn.GetID() == 0 {
+		ffnMegaBitsPSOCache[bits] = nil
+		return nil, core.E("native.ffnMegaPipelineBits", "specialise bits", err)
+	}
+	pso, perr := device.NewComputePipelineStateWithFunctionError(fn)
+	if perr != nil {
+		ffnMegaBitsPSOCache[bits] = nil
+		return nil, perr
+	}
+	ffnMegaBitsPSOCache[bits] = pso
+	return pso, nil
 }
 
 var (

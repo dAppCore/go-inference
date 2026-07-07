@@ -1542,10 +1542,21 @@ func moeArriveZeroBuffer() metal.MTLBuffer {
 	return moeArriveZeroBuf
 }
 
-func ffnMegaSupported(gate, up, down quantMLPProjView, dModel, dFF int) bool {
-	return gate.bits == 4 && up.bits == 4 && down.bits == 4 &&
+// ffnMegaKernelCompatible is the KERNEL truth: the widths the megakernel is specialised for
+// (4/8-bit byte-aligned codes via ffnMegaPipelineBits, parity-proven at both) with all three
+// projections agreeing so one PSO serves the dispatch.
+func ffnMegaKernelCompatible(gate, up, down quantMLPProjView, dModel, dFF int) bool {
+	return (gate.bits == 4 || gate.bits == 8) && up.bits == gate.bits && down.bits == gate.bits &&
 		gate.groupSize == up.groupSize && gate.groupSize == down.groupSize &&
 		gate.groupSize > 0 && dModel%gate.groupSize == 0 && dFF%gate.groupSize == 0
+}
+
+// ffnMegaSupported is the ROUTING policy: 8-bit stays unrouted by receipt — on the 26B-A4B's
+// b8 local MLP the mega measured 26.9 tok/s vs the qmv trio's 51.9 on the fully-encoded decode
+// (#338); its per-byte scalar gemv loses to the steel qmv far more than the 4->1 dispatch
+// saving returns. Route a new width only with a geometry receipt that says otherwise.
+func ffnMegaSupported(gate, up, down quantMLPProjView, dModel, dFF int) bool {
+	return gate.bits == 4 && ffnMegaKernelCompatible(gate, up, down, dModel, dFF)
 }
 
 func emitFFNMega[S dispatchSink](sink S, pso metal.MTLComputePipelineState, x metal.MTLBuffer, xOff uint, gate, up, down quantMLPProjView, gated, out metal.MTLBuffer, outOff uint, arrive metal.MTLBuffer, dModel, dFF int) {
@@ -1758,7 +1769,7 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, routerScra
 	megaLocal := ffnMegaDefaultGeometry(dModel, dFF) && ffnMegaSupported(localGateViewQ, localUpViewQ, localDownViewQ, dModel, dFF)
 	var localMegaPSO metal.MTLComputePipelineState
 	if megaLocal {
-		if localMegaPSO, err = ffnMegaPipeline(); err != nil {
+		if localMegaPSO, err = ffnMegaPipelineBits(localGateViewQ.bits); err != nil {
 			megaLocal = false
 		}
 	}
@@ -2011,7 +2022,7 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 	useLocalMega := ffnMegaDefaultGeometry(dModel, dFF) && ffnMegaSupported(localGateView, localUpView, localDownView, dModel, dFF)
 	var localMegaPSO metal.MTLComputePipelineState
 	if useLocalMega {
-		localMegaPSO, err = ffnMegaPipeline()
+		localMegaPSO, err = ffnMegaPipelineBits(localGateView.bits)
 		if err != nil {
 			useLocalMega = false
 		}
@@ -2443,7 +2454,16 @@ func mlpTransformQuantMegaWithViewsInto(out []byte, x []byte, gate, up, down qua
 	if !ffnMegaSupported(gate, up, down, dModel, dFF) {
 		return nil, false, nil
 	}
-	pso, err := ffnMegaPipeline()
+	return mlpTransformQuantMegaRun(out, x, gate, up, down, dModel, dFF, useCallerOut)
+}
+
+// mlpTransformQuantMegaRun executes the megakernel for any KERNEL-compatible width, bypassing
+// the routing receipt in ffnMegaSupported — the width parity tests drive 8-bit through here.
+func mlpTransformQuantMegaRun(out []byte, x []byte, gate, up, down quantMLPProjView, dModel, dFF int, useCallerOut bool) ([]byte, bool, error) {
+	if !ffnMegaKernelCompatible(gate, up, down, dModel, dFF) {
+		return nil, false, nil
+	}
+	pso, err := ffnMegaPipelineBits(gate.bits)
 	if err != nil {
 		return nil, false, nil
 	}

@@ -480,6 +480,45 @@ func TestMLPTransformQuantMegaMatchesTransform(t *testing.T) {
 	}
 }
 
+// TestMLPTransformQuantMegaMatchesTransform8Bit is the byte-code twin of the test above: the
+// megakernel specialised for 8-bit affine weights (function constant, ffnMegaPipelineBits) must
+// track the composed trio+gelu path at the same bar. 8-bit is kernel-capable but UNROUTED
+// (ffnMegaSupported carries the receipt: it measured slower than the trio on the 26B decode),
+// so the test drives the kernel through mlpTransformQuantMegaRun directly.
+func TestMLPTransformQuantMegaMatchesTransform8Bit(t *testing.T) {
+	requireNativeRuntime(t)
+	resetResidentBufsForTest()
+	defer resetResidentBufsForTest()
+	if _, err := ffnMegaPipelineBits(8); err != nil {
+		t.Skipf("8-bit ffn megakernel unavailable: %v", err)
+	}
+
+	const dModel, dFF, groupSize, bits = 256, 512, 64, 8
+	x := toBF16Bytes(syntheticFloat32(dModel, 37))
+	gate := quantWeightFixture(t, dFF, dModel, groupSize, bits, 3)
+	up := quantWeightFixture(t, dFF, dModel, groupSize, bits, 31)
+	down := quantWeightFixture(t, dModel, dFF, groupSize, bits, 37)
+
+	want, err := mlpTransformQuantComposed(x, gate, up, down, dModel, dFF, groupSize, bits)
+	if err != nil {
+		t.Fatalf("mlpTransformQuantComposed: %v", err)
+	}
+	gateView, upView, downView, err := mlpTransformQuantViews("test.mega8", gate, up, down, dModel, dFF, groupSize, bits)
+	if err != nil {
+		t.Fatalf("mlpTransformQuantViews: %v", err)
+	}
+	got, ok, err := mlpTransformQuantMegaRun(nil, x, gateView, upView, downView, dModel, dFF, false)
+	if err != nil {
+		t.Fatalf("mlpTransformQuantMegaRun: %v", err)
+	}
+	if !ok {
+		t.Fatal("mlpTransformQuantMegaRun declined an 8-bit kernel-compatible geometry")
+	}
+	if cosineBF16(got, want) < 0.9999 {
+		t.Fatalf("8-bit megakernel != composed quant path: cosine %.6f", cosineBF16(got, want))
+	}
+}
+
 func TestMLPTransformQuantMegaAllocationBudget(t *testing.T) {
 	requireNativeRuntime(t)
 	resetResidentBufsForTest()
