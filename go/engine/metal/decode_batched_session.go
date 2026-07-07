@@ -390,10 +390,24 @@ var batchedRopeDisabledForTest bool
 var batchedEpilogueDisabledForTest bool
 
 // batchedDenseICBMaxRows caps the batch width the dense body accepts on a recorded-ICB session
-// (where it runs over the replay's own caches, per-row interleave only). MTP verify and
-// accept-commit blocks are ≤ draft block+1; the prompt prefill (hundreds of rows) keeps the
-// replay's pipelined lane.
+// when the FOLD cannot engage (per-row interleave only — right for MTP verify and accept-commit
+// blocks, ≤ draft block+1, and hopeless at prompt scale). With the fold available the cap lifts:
+// prompt prefill runs the batched projections over the replay's caches.
 const batchedDenseICBMaxRows = 16
+
+// projectRowsRequired encodes a fold projection through the projector's batched dispatch and
+// hard-errors on a mid-fold decline — the fold pre-checked rowsCapable, so a decline here would
+// leave the layer half-encoded (a silent wrong-bytes hazard, never a fallback point).
+func projectRowsRequired(proj projector, enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, inOff, outOff uint, rows int, p projIndex) error {
+	handled, err := proj.projectRows(enc, in, out, inOff, outOff, rows, p)
+	if err != nil {
+		return err
+	}
+	if !handled {
+		return core.NewError("native.stepTokensBatchedDense: fold projection declined mid-encode")
+	}
+	return nil
+}
 
 // encBatchedRowEpilogue encodes row i's gemma4 tail for layer li — the per-layer-input gate (PLE,
 // when the arch has one and the caller supplied the K-token slab) and the per-layer output scalar —
@@ -449,25 +463,54 @@ func (s *archDecodeState) encBatchedEpilogueRows(enc metal.MTLComputeCommandEnco
 		if len(pl.postNorm) != s.dModel*bf16Size {
 			return core.NewError("native.stepTokensBatchedDense: PLE post norm size mismatch")
 		}
-		if len(pl.gate.Packed) != s.pliDim*s.dModel*bf16Size || len(pl.proj.Packed) != s.dModel*s.pliDim*bf16Size {
-			return core.NewError("native.stepTokensBatchedDense: PLE bf16 weight size mismatch")
-		}
-		if err := encGemvBF16BatchedAt(enc, residentBytes(pl.gate.Packed), outBuf, gateSlab, 0, outBase, 0, s.pliDim, s.dModel, rows); err != nil {
-			return err
-		}
-		// the layer's K per-token PLE slices are contiguous in the layer-major slab
-		pliBase := uint(li * rows * s.pliDim * bf16Size)
-		if err := encGeluGateMulFusedTo(enc, gateSlab, pleSlabBuf, multSlab, 0, pliBase, 0, rows*s.pliDim); err != nil {
-			return err
-		}
-		if err := encGemvBF16BatchedAt(enc, residentBytes(pl.proj.Packed), multSlab, projSlab, 0, 0, 0, s.dModel, s.pliDim, rows); err != nil {
-			return err
-		}
-		if err := encRMSNormRowsBF16(enc, projSlab, residentBytes(pl.postNorm), normSlab, 0, 0, 0, rows, s.dModel, s.eps); err != nil {
-			return err
-		}
-		if err := encAddBF16To(enc, outBuf, normSlab, outBuf, outBase, 0, outBase, rows*s.dModel); err != nil {
-			return err
+		if pl.bits == 0 { // bf16 PLE gate (the quant path sets bits 4/8 ⇒ the qmm)
+			if len(pl.gate.Packed) != s.pliDim*s.dModel*bf16Size || len(pl.proj.Packed) != s.dModel*s.pliDim*bf16Size {
+				return core.NewError("native.stepTokensBatchedDense: PLE bf16 weight size mismatch")
+			}
+			if err := encGemvBF16BatchedAt(enc, residentBytes(pl.gate.Packed), outBuf, gateSlab, 0, outBase, 0, s.pliDim, s.dModel, rows); err != nil {
+				return err
+			}
+			// the layer's K per-token PLE slices are contiguous in the layer-major slab
+			pliBase := uint(li * rows * s.pliDim * bf16Size)
+			if err := encGeluGateMulFusedTo(enc, gateSlab, pleSlabBuf, multSlab, 0, pliBase, 0, rows*s.pliDim); err != nil {
+				return err
+			}
+			if err := encGemvBF16BatchedAt(enc, residentBytes(pl.proj.Packed), multSlab, projSlab, 0, 0, 0, s.dModel, s.pliDim, rows); err != nil {
+				return err
+			}
+			if err := encRMSNormRowsBF16(enc, projSlab, residentBytes(pl.postNorm), normSlab, 0, 0, 0, rows, s.dModel, s.eps); err != nil {
+				return err
+			}
+			if err := encAddBF16To(enc, outBuf, normSlab, outBuf, outBase, 0, outBase, rows*s.dModel); err != nil {
+				return err
+			}
+		} else {
+			gateGroupSize, gateBits, err := validatePerLayerInputGateQuantWeight("gate", pl.gate, s.pliDim, s.dModel, pl.groupSize, pl.bits)
+			if err != nil {
+				return err
+			}
+			projGroupSize, projBits, err := validatePerLayerInputGateQuantWeight("projection", pl.proj, s.dModel, s.pliDim, pl.groupSize, pl.bits)
+			if err != nil {
+				return err
+			}
+			gatePacked, gateScales, gateBiases := quantWeightViews(pl.gate)
+			projPacked, projScales, projBiases := quantWeightViews(pl.proj)
+			if err := encQMMTBF16At(enc, gatePacked.buf, gateScales.buf, gateBiases.buf, outBuf, gateSlab, gatePacked.off, gateScales.off, gateBiases.off, outBase, 0, rows, s.pliDim, s.dModel, gateGroupSize, gateBits); err != nil {
+				return err
+			}
+			pliBase := uint(li * rows * s.pliDim * bf16Size)
+			if err := encGeluGateMulFusedTo(enc, gateSlab, pleSlabBuf, multSlab, 0, pliBase, 0, rows*s.pliDim); err != nil {
+				return err
+			}
+			if err := encQMMTBF16At(enc, projPacked.buf, projScales.buf, projBiases.buf, multSlab, projSlab, projPacked.off, projScales.off, projBiases.off, 0, 0, rows, s.dModel, s.pliDim, projGroupSize, projBits); err != nil {
+				return err
+			}
+			if err := encRMSNormRowsBF16(enc, projSlab, residentBytes(pl.postNorm), normSlab, 0, 0, 0, rows, s.dModel, s.eps); err != nil {
+				return err
+			}
+			if err := encAddBF16To(enc, outBuf, normSlab, outBuf, outBase, 0, outBase, rows*s.dModel); err != nil {
+				return err
+			}
 		}
 	}
 	if s.lb[li].layerScalar != nil { // gemma4 per-layer output scalar, all rows in one dispatch
@@ -497,7 +540,13 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	// and accept-commit blocks — the prompt prefill keeps the replay's own pipelined lane.
 	var icbK, icbV []metal.MTLBuffer
 	if s.icb != nil {
-		if K > batchedDenseICBMaxRows ||
+		// Small batches (MTP verify / accept-commit / short turn-appends) stay on the per-row
+		// interleave — byte-identical to the replay's chained lane, which keeps the save/restore
+		// contract exact (a RESTORED session's appends run chained; the live session must write
+		// the same bytes). Prompt-scale batches take the qmm fold (token-identity tier) — both
+		// the live and the restored session route those identically by size.
+		foldable := !batchedMLPFoldDisabledForTest && K > batchedDenseICBMaxRows && gpuHasGeluKernel()
+		if (K > batchedDenseICBMaxRows && !foldable) ||
 			len(s.icb.kCaches) < len(s.specs) || len(s.icb.vCaches) < len(s.specs) || len(s.icb.cacheRows) < len(s.specs) {
 			return nil, false, nil
 		}
@@ -645,16 +694,17 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			return nil, false, err
 		}
 	}
-	// MLP fold (bf16 layers, K>1): the attn halves write hPacked so all K rows are alive at once,
-	// then the layer's MLP runs as ONE rms-rows + three batched gemvs + one fused gelu — the layer's
-	// gate/up/down weights swept once instead of K times. Quant layers (and metallib-less runs) keep
-	// the per-row interleave; both produce byte-identical rows (a batched gemv's z-slices run the
-	// single-row tile loop unchanged, and the residual's offset-keyed kernel selection matches the
-	// per-row path row for row).
+	// MLP fold (rows-capable layers, K>1): the attn halves write hPacked so all K rows are alive
+	// at once, then the layer's MLP runs as ONE rms-rows + three batched projections + one fused
+	// gelu — the layer's gate/up/down weights swept once instead of K times. The projection is the
+	// projector's OWN batched dispatch (projectRows): bf16 → batched gemv (byte-identical per row
+	// — its z-slices run the single-row tile loop unchanged), quant → MLX qmm_t (token-identity
+	// tier: simdgroup-MMA accumulation order, one weight pass — the prompt-prefill reclaim).
+	// Metallib-less runs / unfoldable geometry keep the proven per-row interleave.
 	foldDFFMax, foldQDimMax, foldKVDimMax := 0, 0, 0
-	if icbK == nil && !batchedMLPFoldDisabledForTest && K > 1 && gpuHasGeluKernel() {
+	if (icbK == nil || K > batchedDenseICBMaxRows) && !batchedMLPFoldDisabledForTest && K > 1 && gpuHasGeluKernel() {
 		for li := range s.specs {
-			if _, isBF16 := s.lb[li].proj.(bf16Projector); !isBF16 {
+			if !s.lb[li].proj.rowsCapable() {
 				continue
 			}
 			lff := s.dFF
@@ -704,8 +754,13 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		if s.lb[li].dFF > 0 {
 			lff = s.lb[li].dFF
 		}
-		bproj, foldMLP := s.lb[li].proj.(bf16Projector)
-		foldMLP = foldMLP && hSlab != nil
+		proj := s.lb[li].proj
+		foldMLP := hSlab != nil && proj.rowsCapable()
+		// recorded-ICB sessions: the replay's caches are the live set for every read AND write
+		layerK, layerV := s.lb[li].kCache, s.lb[li].vCache
+		if icbK != nil {
+			layerK, layerV = icbK[li], icbV[li]
+		}
 		// attention fold: the Q/K/V/O projections batch across the K rows too (grid Z, each weight
 		// read once), while the ordered per-row tail — fused per-head norm+rope, value norm, SDPA
 		// capped at the row's own live length — keeps the exact sequential cache semantics: only
@@ -750,13 +805,17 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					}
 				}
 			}
-			if err = encGemvBF16BatchedAt(enc, bproj.wQ.buf, attnNormSlab, qSlab, bproj.wQ.off, 0, 0, qDim, s.dModel, K); err != nil {
+			if err = projectRowsRequired(proj, enc, attnNormSlab, qSlab, 0, 0, K, projQ); err != nil {
 				endEncodingFast(enc)
 				return nil, false, err
 			}
 			ownIdx := li
 			if !ownsCache {
 				ownIdx = s.specs[li].KVShareFrom
+			}
+			ownerK, ownerV := s.lb[ownIdx].kCache, s.lb[ownIdx].vCache
+			if icbK != nil {
+				ownerK, ownerV = icbK[ownIdx], icbV[ownIdx]
 			}
 			// batched rope: the K per-row fused norm+rope dispatches fold into one (grid Y carries
 			// the row, positions from the packed offsets buffer). Q always; the K landing + value
@@ -781,22 +840,22 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				}
 			}
 			if ownsCache {
-				kDst, vDst, dstOff := s.lb[li].kCache, s.lb[li].vCache, uint(basePos*kvDim*bf16Size)
+				kDst, vDst, dstOff := layerK, layerV, uint(basePos*kvDim*bf16Size)
 				if deferredRing {
 					kDst, vDst = s.denseBatch.layerStage(li, len(s.specs), K, foldKVDimMax)
 					dstOff = 0
 				} else if staged {
 					kDst, vDst, dstOff = kStage, vStage, 0
 				}
-				if err = encGemvBF16BatchedAt(enc, bproj.wK.buf, attnNormSlab, kDst, bproj.wK.off, 0, dstOff, kvDim, s.dModel, K); err != nil {
+				if err = projectRowsRequired(proj, enc, attnNormSlab, kDst, 0, dstOff, K, projK); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
 				}
-				vW := bproj.wV
-				if !bproj.hasV() {
-					vW = bproj.wK // gemma4 K==V layers: V is the k-proj output, value-normed
+				vIdx := projV
+				if !proj.hasV() {
+					vIdx = projK // gemma4 K==V layers: V is the k-proj output, value-normed
 				}
-				if err = encGemvBF16BatchedAt(enc, vW.buf, attnNormSlab, vDst, vW.off, 0, dstOff, kvDim, s.dModel, K); err != nil {
+				if err = projectRowsRequired(proj, enc, attnNormSlab, vDst, 0, dstOff, K, vIdx); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
 				}
@@ -830,12 +889,12 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					}
 				} else if ownsCache && !staged {
 					kvBase := uint(basePos * kvDim * bf16Size)
-					if err = encQKNormRopeRows(enc, s.lb[li].kCache, s.lb[li].kNorm.buf, s.lb[li].kCache, kvBase, s.lb[li].kNorm.off, kvBase, kvDim, kvDim, offBuf[0], layerRopeFreqs, K, lkv, lhd, rotDim, rbase, s.scale, s.eps); err != nil {
+					if err = encQKNormRopeRows(enc, layerK, s.lb[li].kNorm.buf, layerK, kvBase, s.lb[li].kNorm.off, kvBase, kvDim, kvDim, offBuf[0], layerRopeFreqs, K, lkv, lhd, rotDim, rbase, s.scale, s.eps); err != nil {
 						endEncodingFast(enc)
 						return nil, false, err
 					}
 					if s.valueNormOnes != nil {
-						if err = encRMSNormRowsBF16(enc, s.lb[li].vCache, s.valueNormOnes, s.lb[li].vCache, kvBase, 0, kvBase, K*lkv, lhd, s.eps); err != nil {
+						if err = encRMSNormRowsBF16(enc, layerV, s.valueNormOnes, layerV, kvBase, 0, kvBase, K*lkv, lhd, s.eps); err != nil {
 							endEncodingFast(enc)
 							return nil, false, err
 						}
@@ -861,16 +920,16 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				}
 				if ownsCache && (staged || !batchedRope) {
 					kvRow := uint(slot * kvDim * bf16Size)
-					kSrc, vSrc, srcOff := s.lb[li].kCache, s.lb[li].vCache, kvRow
+					kSrc, vSrc, srcOff := layerK, layerV, kvRow
 					if staged {
 						kSrc, vSrc, srcOff = kStage, vStage, uint(i*kvDim*bf16Size)
 					}
-					if err = encQKNormRopeAt(enc, kSrc, s.lb[li].kNorm.buf, s.lb[li].kCache, srcOff, s.lb[li].kNorm.off, kvRow, offBuf[i], offOff[i], layerRopeFreqs, lkv, lhd, rotDim, rbase, s.scale, s.eps); err != nil {
+					if err = encQKNormRopeAt(enc, kSrc, s.lb[li].kNorm.buf, layerK, srcOff, s.lb[li].kNorm.off, kvRow, offBuf[i], offOff[i], layerRopeFreqs, lkv, lhd, rotDim, rbase, s.scale, s.eps); err != nil {
 						endEncodingFast(enc)
 						return nil, false, err
 					}
 					if s.valueNormOnes != nil {
-						if err = encRMSNormRowsBF16(enc, vSrc, s.valueNormOnes, s.lb[li].vCache, srcOff, 0, kvRow, lkv, lhd, s.eps); err != nil {
+						if err = encRMSNormRowsBF16(enc, vSrc, s.valueNormOnes, layerV, srcOff, 0, kvRow, lkv, lhd, s.eps); err != nil {
 							endEncodingFast(enc)
 							return nil, false, err
 						}
@@ -879,7 +938,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				if useMultiQ {
 					continue // the K SDPAs run as one multi-query dispatch after every landing
 				}
-				if err = encSDPADecodeAt(enc, s.asc, qSlab, qRow, s.lb[ownIdx].kCache, s.lb[ownIdx].vCache, attnSlab, qRow, s.nHeads, lkv, lhd, n,
+				if err = encSDPADecodeAt(enc, s.asc, qSlab, qRow, ownerK, ownerV, attnSlab, qRow, s.nHeads, lkv, lhd, n,
 					int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale, 0); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
@@ -888,7 +947,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			if deferredRing {
 				kSt, vSt := s.denseBatch.layerStage(ownIdx, len(s.specs), K, foldKVDimMax)
 				ringLive := min(basePos, slideW)
-				if err = encSDPAMultiQRing(enc, qSlab, s.lb[ownIdx].kCache, s.lb[ownIdx].vCache, kSt, vSt, attnSlab,
+				if err = encSDPAMultiQRing(enc, qSlab, ownerK, ownerV, kSt, vSt, attnSlab,
 					s.nHeads, lkv, lhd, K, slideW, basePos%slideW, ringLive,
 					int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale); err != nil {
 					endEncodingFast(enc)
@@ -899,14 +958,14 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					pendingLandings = append(pendingLandings, ringLanding{li: li, kvDim: kvDim, slideW: slideW})
 				}
 			} else if useMultiQ {
-				if err = encSDPAMultiQCausal(enc, qSlab, s.lb[ownIdx].kCache, s.lb[ownIdx].vCache, attnSlab, s.nHeads, lkv, lhd, K, basePos+K,
+				if err = encSDPAMultiQCausal(enc, qSlab, ownerK, ownerV, attnSlab, s.nHeads, lkv, lhd, K, basePos+K,
 					int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
 				}
 			}
 			enc = trace.checkpoint(enc, "attn.o+resid")
-			if err = encGemvBF16BatchedAt(enc, bproj.wO.buf, attnSlab, attnOutSlab, bproj.wO.off, 0, 0, s.dModel, qDim, K); err != nil {
+			if err = projectRowsRequired(proj, enc, attnSlab, attnOutSlab, 0, 0, K, projO); err != nil {
 				endEncodingFast(enc)
 				return nil, false, err
 			}
@@ -936,11 +995,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				hTarget, hOff = hSlab, uint(i*rowBytes)
 			}
 			if ownsCache {
-				kC, vC := s.lb[li].kCache, s.lb[li].vCache
-				if icbK != nil { // recorded-ICB sessions: the replay's caches are the live set
-					kC, vC = icbK[li], icbV[li]
-				}
-				if err = encAttnHalfKVInputAt(enc, readRows[i], readOff[i], kC, vC, offBuf[i], hTarget, hOff, offOff[i],
+				if err = encAttnHalfKVInputAt(enc, readRows[i], readOff[i], layerK, layerV, offBuf[i], hTarget, hOff, offOff[i],
 					s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj,
 					s.dModel, s.nHeads, lkv, lhd, basePos+i, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); err != nil {
 					endEncodingFast(enc)
@@ -990,11 +1045,11 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				endEncodingFast(enc)
 				return nil, false, err
 			}
-			if err = encGemvBF16BatchedAt(enc, bproj.wGate.buf, mlpNormSlab, gateSlab, bproj.wGate.off, 0, 0, lff, s.dModel, K); err != nil {
+			if err = projectRowsRequired(proj, enc, mlpNormSlab, gateSlab, 0, 0, K, projGate); err != nil {
 				endEncodingFast(enc)
 				return nil, false, err
 			}
-			if err = encGemvBF16BatchedAt(enc, bproj.wUp.buf, mlpNormSlab, upSlab, bproj.wUp.off, 0, 0, lff, s.dModel, K); err != nil {
+			if err = projectRowsRequired(proj, enc, mlpNormSlab, upSlab, 0, 0, K, projUp); err != nil {
 				endEncodingFast(enc)
 				return nil, false, err
 			}
@@ -1002,7 +1057,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				endEncodingFast(enc)
 				return nil, false, err
 			}
-			if err = encGemvBF16BatchedAt(enc, bproj.wDown.buf, gatedSlab, downSlab, bproj.wDown.off, 0, 0, s.dModel, lff, K); err != nil {
+			if err = projectRowsRequired(proj, enc, gatedSlab, downSlab, 0, 0, K, projDown); err != nil {
 				endEncodingFast(enc)
 				return nil, false, err
 			}
@@ -1051,6 +1106,10 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	enc = trace.checkpoint(enc, "landings")
 	for _, p := range pendingLandings {
 		kSt, vSt := s.denseBatch.layerKStage[p.li], s.denseBatch.layerVStage[p.li]
+		landK, landV := s.lb[p.li].kCache, s.lb[p.li].vCache
+		if icbK != nil { // recorded-ICB sessions: land into the replay's ring
+			landK, landV = icbK[p.li], icbV[p.li]
+		}
 		r0 := 0
 		if K > p.slideW {
 			r0 = K - p.slideW
@@ -1058,20 +1117,20 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		landRows := K - r0
 		slotBase := (basePos + r0) % p.slideW
 		run1 := min(p.slideW-slotBase, landRows)
-		if err = encCopyBF16Contig(enc, kSt, s.lb[p.li].kCache, uint(r0*p.kvDim*bf16Size), uint(slotBase*p.kvDim*bf16Size), run1*p.kvDim); err != nil {
+		if err = encCopyBF16Contig(enc, kSt, landK, uint(r0*p.kvDim*bf16Size), uint(slotBase*p.kvDim*bf16Size), run1*p.kvDim); err != nil {
 			endEncodingFast(enc)
 			return nil, false, err
 		}
-		if err = encCopyBF16Contig(enc, vSt, s.lb[p.li].vCache, uint(r0*p.kvDim*bf16Size), uint(slotBase*p.kvDim*bf16Size), run1*p.kvDim); err != nil {
+		if err = encCopyBF16Contig(enc, vSt, landV, uint(r0*p.kvDim*bf16Size), uint(slotBase*p.kvDim*bf16Size), run1*p.kvDim); err != nil {
 			endEncodingFast(enc)
 			return nil, false, err
 		}
 		if landRows > run1 {
-			if err = encCopyBF16Contig(enc, kSt, s.lb[p.li].kCache, uint((r0+run1)*p.kvDim*bf16Size), 0, (landRows-run1)*p.kvDim); err != nil {
+			if err = encCopyBF16Contig(enc, kSt, landK, uint((r0+run1)*p.kvDim*bf16Size), 0, (landRows-run1)*p.kvDim); err != nil {
 				endEncodingFast(enc)
 				return nil, false, err
 			}
-			if err = encCopyBF16Contig(enc, vSt, s.lb[p.li].vCache, uint((r0+run1)*p.kvDim*bf16Size), 0, (landRows-run1)*p.kvDim); err != nil {
+			if err = encCopyBF16Contig(enc, vSt, landV, uint((r0+run1)*p.kvDim*bf16Size), 0, (landRows-run1)*p.kvDim); err != nil {
 				endEncodingFast(enc)
 				return nil, false, err
 			}
@@ -1094,8 +1153,10 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		}
 	}
 	reloadStart := time.Now()
-	if err := s.reloadDevicePagedKVFromLinear(basePos + K); err != nil {
-		return nil, false, err
+	if icbK == nil { // ICB sessions decode over the replay's caches; the paged pool stays bypassed
+		if err := s.reloadDevicePagedKVFromLinear(basePos + K); err != nil {
+			return nil, false, err
+		}
 	}
 	hostSpan("reloadKV", reloadStart, K)
 

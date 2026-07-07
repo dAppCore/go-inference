@@ -43,6 +43,9 @@ type projector interface {
 	// projector (or this weight's geometry) has no batched kernel — the caller keeps
 	// its per-row path.
 	projectRows(enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, inOff, outOff uint, rows int, p projIndex) (bool, error)
+	// rowsCapable reports whether EVERY present projection has a batched dispatch —
+	// the fold's upfront eligibility probe (slab sizing happens before any encode).
+	rowsCapable() bool
 	// hasV reports whether a distinct V projection weight exists. gemma4 K==V layers
 	// (12B/31B: attention_k_eq_v) carry NO v_proj — V is the k-proj output (pre-knorm/
 	// rope) value-normed — so the decode projects V via wK; hasV()==false signals that.
@@ -89,6 +92,8 @@ func (b bf16Projector) projectRows(enc metal.MTLComputeCommandEncoder, in, out m
 	}
 	return true, encGemvBF16BatchedAt(enc, w.buf, in, out, w.off, inOff, outOff, outDim, inDim, rows)
 }
+
+func (b bf16Projector) rowsCapable() bool { return true } // batched gemv covers every dim
 
 func (b bf16Projector) project(enc metal.MTLComputeCommandEncoder, vec, out metal.MTLBuffer, outOff uint, p projIndex) error {
 	switch p {
@@ -176,6 +181,29 @@ func (m qmvProjector) projectRows(enc metal.MTLComputeCommandEncoder, in, out me
 		return false, nil // older metallib without this gs/bits variant — per-row fallback
 	}
 	return true, encQMMTBF16At(enc, w.wq.buf, w.scales.buf, w.biases.buf, in, out, w.wq.off, w.scales.off, w.biases.off, inOff, outOff, rows, outDim, inDim, gs, bits)
+}
+
+func (m qmvProjector) rowsCapable() bool {
+	for p := projQ; p <= projDown; p++ {
+		w, outDim, inDim, _ := m.weightDims(p)
+		if !w.present() {
+			continue // absent V (K==V layers) / MoE-owned MLP weights: not this fold's problem
+		}
+		if w.dense() {
+			continue // batched gemv covers the odd bf16 weight in a mixed pack
+		}
+		gs, bits := m.groupSize, m.bits
+		if w.bits > 0 {
+			gs, bits = w.gs, w.bits
+		}
+		if inDim <= 0 || gs <= 0 || inDim%gs != 0 {
+			return false
+		}
+		if _, err := pipelineFor(qmmTKernelName(outDim, gs, bits)); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (m qmvProjector) project(enc metal.MTLComputeCommandEncoder, vec, out metal.MTLBuffer, outOff uint, p projIndex) error {
