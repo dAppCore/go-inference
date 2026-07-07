@@ -48,6 +48,11 @@ var (
 	// lthn_gather_qmv kernel is available (7 buffers + 2 scalars, #280). Test/bench hook
 	// for lean-vs-MLX byte compares.
 	leanGatherDisabled bool
+	// sdpaSingleCellDisabled forces the paged decode SDPA through both passes even
+	// when the plan has a single partial cell (one split window of one page) and
+	// pass 1 could write the final row directly (#340). Test/bench hook for
+	// fast-path-vs-two-pass byte compares.
+	sdpaSingleCellDisabled bool
 	// routerFusedEnabled opts the MoE router into the single-dispatch fused kernel
 	// (rms→qmv→topk, byte-identical to the chain — see lthn_moe_router_fused.metal).
 	// OFF by receipt: the fusion serialises the 128×dModel score projection onto ONE
