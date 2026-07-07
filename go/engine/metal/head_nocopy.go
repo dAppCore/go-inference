@@ -5,6 +5,7 @@
 package native
 
 import (
+	"os"
 	"runtime"
 	"slices"
 	"sync"
@@ -862,6 +863,11 @@ func (h *headEncoder) greedyBufferAtInPool(hiddenBuf metal.MTLBuffer, hiddenOff 
 	commitCommandBufferFast(cb)
 	waitUntilCompletedFast(cb)
 	token = scratch.token()
+	if (token < 0 || int(token) >= h.vocab) && argmaxDebugEnabled() {
+		diag := h.argmaxInvalidDiag(scratch, hiddenBuf, hiddenOff)
+		h.putGreedyScratch(scratch)
+		return 0, true, core.NewError(core.Sprintf("native.headEncoder.greedy: direct argmax returned invalid token %d for vocab %d%s", token, h.vocab, diag))
+	}
 	h.putGreedyScratch(scratch)
 	if !ok {
 		return 0, false, nil
@@ -870,6 +876,116 @@ func (h *headEncoder) greedyBufferAtInPool(hiddenBuf metal.MTLBuffer, hiddenOff 
 		return 0, true, core.NewError(core.Sprintf("native.headEncoder.greedy: direct argmax returned invalid token %d for vocab %d", token, h.vocab))
 	}
 	return token, true, nil
+}
+
+// argmaxDebugEnabled gates the invalid-token forensic dump (the ~52K long-context
+// corruption hunt): when the direct argmax returns an out-of-range token, dump per-stage
+// NaN counts and extrema (hidden → normed → logits → tiles) so a failing run localises
+// which stage the garbage entered at. Enable with LTHN_DEBUG_ARGMAX=1.
+func argmaxDebugEnabled() bool { return os.Getenv("LTHN_DEBUG_ARGMAX") != "" }
+
+// bf16NaNScanBytes counts bf16 NaNs in a host byte slice, reporting the first NaN's
+// element index (-1 when none) — the host-side sibling of bf16BufStats.
+func bf16NaNScanBytes(b []byte) (count, firstIdx int) {
+	firstIdx = -1
+	for i := 0; i+1 < len(b); i += 2 {
+		h := uint16(b[i]) | uint16(b[i+1])<<8
+		if h&0x7F80 == 0x7F80 && h&0x007F != 0 {
+			if firstIdx < 0 {
+				firstIdx = i / 2
+			}
+			count++
+		}
+	}
+	return count, firstIdx
+}
+
+// bf16BufStats scans n bf16 elements at a buffer offset: NaN/±Inf counts, finite min/max,
+// and the first NaN's element index (-1 when none).
+func bf16BufStats(buf metal.MTLBuffer, off uint, n int) (nan, inf int, minV, maxV float32, firstNaN int) {
+	firstNaN = -1
+	if buf == nil || n <= 0 {
+		return 0, 0, 0, 0, -1
+	}
+	b := unsafe.Slice((*byte)(unsafe.Add(buf.Contents(), uintptr(off))), n*bf16Size)
+	first := true
+	for i := 0; i < n; i++ {
+		h := uint16(b[i*2]) | uint16(b[i*2+1])<<8
+		if h&0x7F80 == 0x7F80 {
+			if h&0x007F != 0 {
+				nan++
+				if firstNaN < 0 {
+					firstNaN = i
+				}
+			} else {
+				inf++
+			}
+			continue
+		}
+		v := bf16ToF32(b[i*2], b[i*2+1])
+		if first {
+			minV, maxV, first = v, v, false
+			continue
+		}
+		if v < minV {
+			minV = v
+		}
+		if v > maxV {
+			maxV = v
+		}
+	}
+	return nan, inf, minV, maxV, firstNaN
+}
+
+// argmaxInvalidDiag reads the greedy scratch's shared-storage stages after an invalid
+// direct-argmax token and reports where the garbage entered: the input hidden, the
+// RMS-normed hidden, the (quant-path) logits, and the per-tile argmax values/indices.
+func (h *headEncoder) argmaxInvalidDiag(scratch *headGreedyScratch, hiddenBuf metal.MTLBuffer, hiddenOff uint) string {
+	rowsPerTile := bf16LMHeadArgmaxRowsPerTile
+	if h.quant {
+		rowsPerTile = bf16LogitsArgmaxRowsPerTile
+	}
+	tileCount := (h.vocab + rowsPerTile - 1) / rowsPerTile
+	hn, hi, hmin, hmax, hf := bf16BufStats(hiddenBuf, hiddenOff, h.dModel)
+	nn, ni, nmin, nmax, nf := bf16BufStats(scratch.normed, 0, h.dModel)
+	d := core.Sprintf("\n  argmax-diag: hidden NaN=%d Inf=%d min=%.4g max=%.4g firstNaN=%d\n  normed NaN=%d Inf=%d min=%.4g max=%.4g firstNaN=%d",
+		hn, hi, hmin, hmax, hf, nn, ni, nmin, nmax, nf)
+	if h.quant && scratch.logits != nil {
+		ln, li, lmin, lmax, lf := bf16BufStats(scratch.logits, 0, h.vocab)
+		d += core.Sprintf("\n  logits NaN=%d Inf=%d min=%.4g max=%.4g firstNaN=%d", ln, li, lmin, lmax, lf)
+	}
+	if scratch.tileValues != nil && scratch.tileIndices != nil {
+		tv := unsafe.Slice((*float32)(scratch.tileValues.Contents()), tileCount)
+		ti := unsafe.Slice((*int32)(scratch.tileIndices.Contents()), tileCount)
+		tnan, tneg := 0, 0
+		var tmin, tmax float32
+		firstBad := -1
+		for i := 0; i < tileCount; i++ {
+			v := tv[i]
+			if v != v {
+				tnan++
+				if firstBad < 0 {
+					firstBad = i
+				}
+				continue
+			}
+			if i == 0 || v < tmin {
+				tmin = v
+			}
+			if i == 0 || v > tmax {
+				tmax = v
+			}
+			if ti[i] < 0 || int(ti[i]) >= h.vocab {
+				tneg++
+				if firstBad < 0 {
+					firstBad = i
+				}
+			}
+		}
+		d += core.Sprintf("\n  tiles=%d NaN=%d badIdx=%d min=%.4g max=%.4g firstBad=%d  tile0=(%.4g,%d) tileLast=(%.4g,%d)",
+			tileCount, tnan, tneg, tmin, tmax, firstBad, tv[0], ti[0], tv[tileCount-1], ti[tileCount-1])
+	}
+	return d
 }
 
 func (h *headEncoder) logitsSampleUsable() bool {

@@ -475,6 +475,15 @@ func (s *ArchSession) stepIDRetainedGPUInputsInPool(id int32) ([]byte, bool, err
 		} else {
 			s.rememberRetainedHiddenFrom(s.state.icb.lastOutPtr)
 		}
+		if argmaxDebugEnabled() {
+			icb := s.state.icb
+			en, ei, emin, emax, ef := bf16BufStats(icb.ping0, 0, s.arch.Hidden)
+			plDim := len(s.arch.Layer) * s.arch.PerLayerInputHidden
+			pn, pi, pmin, pmax, pf := bf16BufStats(icb.pleInput, 0, plDim)
+			hc, hf := bf16NaNScanBytes(s.retainedHidden)
+			nativeTraceLog(core.Sprintf("argmax-diag: last-prefill step pos=%d directOut=%v  ping0 NaN=%d Inf=%d min=%.4g max=%.4g first=%d  pleInput NaN=%d Inf=%d min=%.4g max=%.4g first=%d  retainedHidden NaN=%d first=%d\n",
+				s.pos-1, directOut, en, ei, emin, emax, ef, pn, pi, pmin, pmax, pf, hc, hf))
+		}
 	})
 	if err != nil {
 		return nil, true, err
