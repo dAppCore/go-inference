@@ -63,6 +63,7 @@ func TestRealMoE26BHostProfile(t *testing.T) {
 	wall := time.Since(t0)
 	t.Logf("real 26B-A4B MoE decode (tg%d): %.1f tok/s (%.2f ms/token) — run under -cpuprofile; low cgocall ⇒ host-bound",
 		N, float64(N)/wall.Seconds(), wall.Seconds()*1000/float64(N))
+	t.Logf("chained live links: %d (0 = the chained live lane did not engage)", chainedLiveLinks.Load())
 }
 
 // TestRealMoE26BFamilyGPUProfile splits the decode's per-token encoder at the attn/moe family

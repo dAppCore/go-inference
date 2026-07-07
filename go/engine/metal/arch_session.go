@@ -8,6 +8,7 @@ import (
 	"math"
 	"reflect"
 	"slices"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -4096,6 +4097,109 @@ func (s *ArchSession) stepGreedyInPool(id int32, emb []byte, suppress []int32) (
 	return token, hidden, true, nil
 }
 
+// stepGreedyLiveInPool is stepGreedyInPool for the LIVE-ENCODER (non-ICB) decode: stepToken's
+// chainTail hook encodes the head argmax + the next token's input production (encNextInputsGPU
+// into xA) into the step's OWN command buffer — one cb and one wait per token, no host embed or
+// argmax between. ok=false with hidden non-nil means the chain declined this token (cb break /
+// head decline): the step still ran and cached the token, and hidden carries the valid host
+// readback for a serial head fallback. When chained, the host readback is CLOBBERED by the
+// next-input write (see the chainTail hook) and is not returned.
+func (s *ArchSession) stepGreedyLiveInPool(id int32, emb []byte, copyInput bool, suppress []int32, sc *plGPUScratch) (token int32, hidden []byte, ok bool, err error) {
+	if copyInput && emb == nil {
+		if emb, err = s.embedID(id); err != nil {
+			return 0, nil, false, err
+		}
+	}
+	var scratch *headGreedyScratch
+	chained := false
+	s.state.chainTail = func(enc metal.MTLComputeCommandEncoderObject, hiddenBuf metal.MTLBuffer) error {
+		sc2, gok, gerr := s.headEnc.encodeGreedy(enc, hiddenBuf, suppress)
+		if gerr != nil {
+			return gerr
+		}
+		if !gok {
+			return nil // head declined: the step completes normally, the caller falls back
+		}
+		if nerr := s.encNextInputsGPU(enc, sc2.outToken, s.state.xA, sc); nerr != nil {
+			s.headEnc.putGreedyScratch(sc2)
+			return nerr
+		}
+		scratch = sc2
+		chained = true
+		return nil
+	}
+	var res []byte
+	withAutoreleasePool(func() {
+		res, err = s.state.stepTokenResultWithInputInto(emb, s.pos, true, copyInput, nil)
+	})
+	s.state.chainTail = nil
+	if err != nil {
+		if scratch != nil {
+			s.headEnc.putGreedyScratch(scratch)
+		}
+		return 0, nil, false, err
+	}
+	s.pos++
+	if !chained {
+		return 0, res, false, nil
+	}
+	token = scratch.token()
+	s.headEnc.putGreedyScratch(scratch)
+	if token < 0 || int(token) >= s.arch.Vocab {
+		return 0, nil, true, core.NewError("native.ArchSession.stepGreedyLiveInPool: invalid token")
+	}
+	chainedLiveLinks.Add(1)
+	return token, nil, true, nil
+}
+
+// chainedLiveLinks counts successfully chained live-decode links — the engagement receipt
+// (a gate regression that silently drops the lane shows up as zero here, not as a perf blur).
+var chainedLiveLinks atomic.Int64
+
+// generateChainedLiveTail runs the chained live decode for archs the ICB cannot record (MoE):
+// each token is ONE command buffer — stepToken + head argmax + the next token's embed gather —
+// with the wait its only sync and 4 bytes its only readback. A declined link finishes that
+// token with the serial head and re-primes the chain with a host embed.
+func (s *ArchSession) generateChainedLiveTail(gen []int32, maxNew, eosID int, suppress []int32, yield func(int32) bool, stop bool) ([]int32, error) {
+	sc := s.plScratchNew()
+	emb, err := s.embedID(gen[len(gen)-1])
+	if err != nil {
+		return nil, err
+	}
+	copyInput := true
+	for !stop && len(gen) < maxNew {
+		prev := gen[len(gen)-1]
+		tok, hidden, ok, serr := s.stepGreedyLiveInPool(prev, emb, copyInput, suppress, sc)
+		if serr != nil {
+			return nil, serr
+		}
+		if !ok {
+			// The step ran (prev is cached, position advanced) but the head never encoded:
+			// argmax the returned hidden serially and hand the next link a host embed.
+			if tok, serr = s.headGreedyOrLogits(hidden, suppress, nil, nil, false); serr != nil {
+				return nil, serr
+			}
+			s.rememberRetainedHidden(hidden)
+			if emb, serr = s.embedID(tok); serr != nil {
+				return nil, serr
+			}
+			copyInput = true
+		} else {
+			emb, copyInput = nil, false
+		}
+		gen = append(gen, tok)
+		stop = (yield != nil && !yield(tok)) || (eosID >= 0 && int(tok) == eosID)
+	}
+	// Cache the last produced token (each chain link steps prev, not the freshly produced
+	// token) and retain its hidden as the session boundary — the serial loop's semantics.
+	hidden, err := s.stepIDRetainedInPool(gen[len(gen)-1])
+	if err != nil {
+		return nil, err
+	}
+	s.rememberRetainedHidden(hidden)
+	return gen, nil
+}
+
 // headGreedyOrLogits argmaxes the next token from `hidden`: the GPU direct-argmax head when available,
 // else the logits path (with the first-token firstLogits/cacheFirstLogits boundary honoured when isFirst).
 func (s *ArchSession) headGreedyOrLogits(hidden []byte, suppress []int32, firstLogits []byte, cacheFirstLogits func([]byte), isFirst bool) (int32, error) {
@@ -4165,6 +4269,17 @@ func (s *ArchSession) generateFromHiddenInPool(hidden []byte, maxNew, eosID int,
 			return s.generatePipelinedGPUTail(gen, maxNew, eosID, suppress, yield, stop)
 		}
 		return s.generateChainedGPUTail(gen, maxNew, eosID, suppress, yield, stop)
+	}
+
+	// Chained live decode: the archs the ICB cannot record (MoE) chain step + head argmax +
+	// next-embed through stepToken's chainTail hook instead — the same one-cb-per-token shape,
+	// re-encoded live each token. PLE archs need the per-layer tensor produced per token too
+	// (the ICB chain's plumbing), so they stay on their existing lanes.
+	if s.encNextInputsGPU != nil && s.plScratchNew != nil && s.state.icb == nil && s.headEnc != nil &&
+		s.canUseDirectHeadGreedy() && len(s.state.ple) == 0 &&
+		!stepGreedyChainDisabled && !chainedGPUInputsDisabled && transform == nil &&
+		s.state.gpuProf == nil && !s.state.trace && layerSpanProbeForTest == nil && !captureLayerHiddens {
+		return s.generateChainedLiveTail(gen, maxNew, eosID, suppress, yield, stop)
 	}
 
 	for !stop && len(gen) < maxNew {
