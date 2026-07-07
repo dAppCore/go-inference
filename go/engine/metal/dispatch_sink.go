@@ -571,6 +571,23 @@ func emitEmbedGatherQuantAt[S dispatchSink](sink S, pso metal.MTLComputePipeline
 	)
 }
 
+// emitEmbedGatherRowBF16 records the GPU row-gather of a DENSE bf16 embedding: the token in
+// tokenBuf selects a [width] bf16 row of table, each element × scale (lthn_embed_gather_row_bf16;
+// byte-identical to the host embedTokenBF16Into). Binding ABI: token=0, table=1, out=2, width=3,
+// scale=4. The bf16 checkpoints' seam sibling of emitEmbedGatherQuant.
+func emitEmbedGatherRowBF16[S dispatchSink](sink S, pso metal.MTLComputePipelineState, tokenBuf, table, out metal.MTLBuffer, tableOff, outOff uint, width int, scale float32) {
+	sink.setPSO(pso)
+	sink.setBuf(tokenBuf, 0, 0)
+	sink.setBuf(table, tableOff, 1)
+	sink.setBuf(out, outOff, 2)
+	sink.setI32(int32(width), 3)
+	sink.setF32(scale, 4)
+	sink.dispatchThreads(
+		metal.MTLSize{Width: uint(width), Height: 1, Depth: 1},
+		metal.MTLSize{Width: uint(elemGroupTG(width)), Height: 1, Depth: 1},
+	)
+}
+
 // emitGemv records a bf16 tiled gemv (out = mat @ vec, mat row-major outDim×inDim) through any sink:
 // mat=0, vec=1, out=3, K=4, N=5, ld=6, then the single-gemv batch params (batch_ndim=1@9, batch_shape=1
 // @10, vec/mat batch strides=0@11/@12), grid ceil(outDim/(bm·sm·tm)) of (32, bn, bm) threads. The body

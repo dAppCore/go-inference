@@ -229,10 +229,12 @@ func TestGenerateCachedExactPromptUsesCachedLogits(t *testing.T) {
 
 	warm := newSessionStateFixture(t)
 	// This test counts HOST head-closure calls to pin the cached-logits flow of the
-	// host decode lane. bf16 sessions record the arch ICB now and decode through the
-	// device headEnc (the host closure never fires) — force the host lane; the ICB
-	// lane's cached-generate behaviour is covered by the ICB parity suite.
+	// host decode lane. bf16 sessions record the arch ICB + GPU next-inputs seam now
+	// and decode through the device headEnc (the host closure never fires) — force
+	// the host lane; the ICB lane's cached-generate behaviour is covered by the ICB
+	// parity suite.
 	warm.state.icb = nil
+	warm.encNextInputsGPU = nil
 	if _, err := warm.GenerateCached(prompt, 3, -1); err != nil {
 		t.Fatalf("warm GenerateCached: %v", err)
 	}
@@ -672,6 +674,11 @@ func TestWarmPromptCacheExactPromptStoresHiddenLogits(t *testing.T) {
 	prompt := []int32{1, 2, 3, 4, 5}
 
 	warm := newSessionStateFixture(t)
+	// Counts HOST head-closure calls — the host decode lane's cached-logits flow (see
+	// TestGenerateCachedExactPromptUsesCachedLogits); bf16 sessions fuse the head
+	// device-side now, so force the host lane.
+	warm.state.icb = nil
+	warm.encNextInputsGPU = nil
 	if err := warm.WarmPromptCache(prompt); err != nil {
 		t.Fatalf("WarmPromptCache: %v", err)
 	}

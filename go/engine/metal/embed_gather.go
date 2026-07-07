@@ -145,6 +145,39 @@ func encEmbedGatherQuantObject(enc metal.MTLComputeCommandEncoderObject, pso met
 	emitEmbedGatherQuant(encObjectSink{enc}, pso, tokenBuf, packed, scales, biases, out, packedOff, scalesOff, biasesOff, dModel, groupSize, bits, embedScale)
 }
 
+var (
+	embedGatherRowBF16PSOMu sync.Mutex
+	embedGatherRowBF16PSO   metal.MTLComputePipelineState
+	embedGatherRowBF16Err   error
+	embedGatherRowBF16Once  sync.Once
+)
+
+func embedGatherRowBF16Pipeline() (metal.MTLComputePipelineState, error) {
+	embedGatherRowBF16Once.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			embedGatherRowBF16Err = core.NewError("native.embedGatherRowBF16Pipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_embed_gather_row_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			embedGatherRowBF16Err = core.NewError("native.embedGatherRowBF16Pipeline: kernel lthn_embed_gather_row_bf16 not found")
+			return
+		}
+		embedGatherRowBF16PSO, embedGatherRowBF16Err = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	embedGatherRowBF16PSOMu.Lock()
+	defer embedGatherRowBF16PSOMu.Unlock()
+	return embedGatherRowBF16PSO, embedGatherRowBF16Err
+}
+
+// encEmbedGatherRowBF16Object encodes the DENSE bf16 row-gather of the token in `tokenBuf` into
+// `out` (width bf16, each element × scale) — the bf16 checkpoints' sibling of
+// encEmbedGatherQuantObject, byte-tracking the host embedTokenBF16Into. The seam the chained
+// decode needs to produce the NEXT step's input embedding (and PLE row) without a host round-trip.
+func encEmbedGatherRowBF16Object(enc metal.MTLComputeCommandEncoderObject, pso metal.MTLComputePipelineState, tokenBuf, table, out metal.MTLBuffer, tableOff, outOff uint, width int, scale float32) {
+	emitEmbedGatherRowBF16(encObjectSink{enc}, pso, tokenBuf, table, out, tableOff, outOff, width, scale)
+}
+
 func elemGroupTG(n int) int {
 	if n < 256 {
 		return n
