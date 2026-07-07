@@ -230,8 +230,14 @@ func buildSDPAPagedDecodePlan(
 		if keyPages[i] == nil || keyPages[i].GetID() == 0 || valuePages[i] == nil || valuePages[i].GetID() == 0 {
 			return sdpaPagedDecodePlan{}, core.NewError("native.encSDPAPagedDecodeStrided: nil page buffer")
 		}
-		if pageLens[i] <= 0 || keyHeadStrides[i] <= 0 || keySeqStrides[i] <= 0 || valueHeadStrides[i] <= 0 || valueSeqStrides[i] <= 0 {
-			return sdpaPagedDecodePlan{}, core.NewError("native.encSDPAPagedDecodeStrided: page lengths and strides must be > 0")
+		if pageLens[i] <= 0 {
+			// allocated-but-unwritten pages are a legitimate cache state (slot() allocates
+			// eagerly up to the written page; a ring's prefill sync fills only the visible
+			// rows): they contribute zero cells and pass 1 skips them.
+			continue
+		}
+		if keyHeadStrides[i] <= 0 || keySeqStrides[i] <= 0 || valueHeadStrides[i] <= 0 || valueSeqStrides[i] <= 0 {
+			return sdpaPagedDecodePlan{}, core.NewError("native.encSDPAPagedDecodeStrided: page strides must be > 0")
 		}
 	}
 	// the lane slicing owns headDim/32 dims per lane — every shipped head dim (64,
@@ -245,7 +251,9 @@ func buildSDPAPagedDecodePlan(
 	// position ~3500; split windows keep the whole GPU busy at any depth).
 	cellCount := 0
 	for i := range keyPages {
-		cellCount += (pageLens[i] + sdpaPagedSplitRows - 1) / sdpaPagedSplitRows
+		if pageLens[i] > 0 {
+			cellCount += (pageLens[i] + sdpaPagedSplitRows - 1) / sdpaPagedSplitRows
+		}
 	}
 	if err := scratch.ensure(nHeads, headDim, cellCount); err != nil {
 		return sdpaPagedDecodePlan{}, err
@@ -275,6 +283,9 @@ func buildSDPAPagedDecodePlan(
 func (p *sdpaPagedDecodePlan) emitP1s(enc metal.MTLComputeCommandEncoder) {
 	cellBase := 0
 	for i := range p.keyPages {
+		if p.pageLens[i] <= 0 {
+			continue // empty page: zero cells (see the plan validation)
+		}
 		splits := (p.pageLens[i] + sdpaPagedSplitRows - 1) / sdpaPagedSplitRows
 		params := sdpaPagedP1Params{
 			NHeads:      uint32(p.nHeads),
