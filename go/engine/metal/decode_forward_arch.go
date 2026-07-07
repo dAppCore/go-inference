@@ -250,8 +250,12 @@ type archDecodeState struct {
 	// moeOwnedScratch is the state's OWN MoE block scratch (lazily built at the first quant MoE
 	// layer): single-flight by construction, so the fully-device MoE path can recycle it across
 	// layers without a per-layer completion wait — the queue's commit order is the only
-	// synchroniser (the pooled path must wait, because pools cross sessions).
-	moeOwnedScratch *moeBlockBF16Scratch
+	// synchroniser (the pooled path must wait, because pools cross sessions). Only long-lived
+	// SESSION states own one (moeScratchOwnable, set by the session builders): a standalone
+	// forward's state dies per call, so owning would re-allocate the scratch every forward —
+	// it keeps the per-layer pool round-trip and its wait instead.
+	moeScratchOwnable bool
+	moeOwnedScratch   *moeBlockBF16Scratch
 
 	// trace (LTHN_NATIVE_TRACE): when set, stepToken flushes + reads back each layer's output
 	// hidden and logs the per-token worst max-abs + NaN layer — the decode-degradation probe.
@@ -1247,7 +1251,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			commitCommandBufferFast(cb)
 			var err error
 			if moeQ != nil && quantMoEDeviceRouterBuffersUsable(*moeQ, s.dModel) && routerTopKUsable(moeQ.NumExperts, moeQ.TopK) {
-				if s.moeOwnedScratch == nil {
+				if s.moeScratchOwnable && s.moeOwnedScratch == nil {
 					s.moeOwnedScratch, err = getMoEBlockBF16Scratch(s.dModel, s.dFF, moeQ.ExpertDFF, moeQ.TopK)
 					if err != nil {
 						return nil, err

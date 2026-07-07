@@ -804,6 +804,7 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 		moeWeights := make([]*MoELayerWeights, len(arch.Layer)) // bf16 MoE unused on the quant path
 		state := newArchDecodeState(arch.Layer, lb, moeWeights, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, arch.FF, arch.SlidingWindow, arch.RotaryDim, arch.RotaryDimLocal, arch.RopeBase, arch.RopeLocalBase, attnScale, arch.Eps, arch.ValueNorm, maxLen)
 		state.moeQuant = moeQuant
+		state.moeScratchOwnable = true // long-lived session: own the MoE scratch, decode wait-free
 		if err := state.initDevicePagedKVWithPrealloc(cfg.pagedKVPageSize, cfg.pagedKVPrealloc); err != nil {
 			buildErr = err
 			return
