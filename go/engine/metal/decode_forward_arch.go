@@ -1020,8 +1020,11 @@ func quantPLELayers(fn string, qlayers []QuantizedLayerWeights, dModel, pliDim, 
 	ple := make([]pleLayer, len(qlayers))
 	for li := range qlayers {
 		w := qlayers[li]
-		if !quantWeightBytesOK(w.PerLayerGate, pliDim, dModel, groupSize, bits) ||
-			!quantWeightBytesOK(w.PerLayerProjection, dModel, pliDim, groupSize, bits) ||
+		// dense-or-quant per weight: a sidecar-less PLE gate/projection is a dense bf16 matrix
+		// (the bf16 arch ICB recorder wraps bf16 weights as sidecar-less QuantWeights), so it
+		// validates by byte size alone — no affine geometry to require.
+		if !quantWeightProjectionShapeOK(w.PerLayerGate, pliDim, dModel, groupSize, bits) ||
+			!quantWeightProjectionShapeOK(w.PerLayerProjection, dModel, pliDim, groupSize, bits) ||
 			len(w.PostPerLayerInputNormW) != dModel*bf16Size {
 			return nil, core.NewError(core.Sprintf("%s: PLE quant layer %d weight size mismatch", fn, li))
 		}

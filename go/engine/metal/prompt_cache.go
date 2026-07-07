@@ -83,7 +83,7 @@ func (s *ArchSession) generateCached(promptIDs []int32, maxNew, eosID int, suppr
 		if hidden := s.cachedPromptHiddenFor(promptIDs); hidden != nil {
 			logits := s.cachedPromptLogitsFor(promptIDs)
 			s.pos = lcp // roll back over any generated tail; prompt K/V rows stay resident
-			if err := s.state.truncateDevicePagedKV(s.pos); err != nil {
+			if err := s.truncateSpeculativeKV(s.pos); err != nil {
 				return nil, err
 			}
 			gen, err := s.generateFromHiddenSuppressedEach(hidden, maxNew, eosID, logits, suppress, transform, yield)
@@ -100,7 +100,7 @@ func (s *ArchSession) generateCached(promptIDs []int32, maxNew, eosID int, suppr
 		}
 		if logits := s.cachedPromptLogitsFor(promptIDs); logits != nil {
 			s.pos = lcp // roll back over any generated tail; prompt K/V rows stay resident
-			if err := s.state.truncateDevicePagedKV(s.pos); err != nil {
+			if err := s.truncateSpeculativeKV(s.pos); err != nil {
 				return nil, err
 			}
 			var gen []int32
@@ -122,7 +122,7 @@ func (s *ArchSession) generateCached(promptIDs []int32, maxNew, eosID int, suppr
 		lcp = len(promptIDs) - 1
 	}
 	s.pos = lcp // roll the resident cache back to the shared prefix; its K/V rows are reused as-is
-	if err := s.state.truncateDevicePagedKV(s.pos); err != nil {
+	if err := s.truncateSpeculativeKV(s.pos); err != nil {
 		return nil, err
 	}
 	gen, err := s.generateWithYield(promptIDs[lcp:], maxNew, eosID, promptIDs, suppress, transform, yield)
@@ -158,7 +158,7 @@ func (s *ArchSession) generateCachedSampled(promptIDs []int32, maxNew int, stopT
 	if lcp == len(promptIDs) {
 		if logits := s.cachedPromptLogitsForSampledReplay(promptIDs, params); logits != nil {
 			s.pos = lcp
-			if err := s.state.truncateDevicePagedKV(s.pos); err != nil {
+			if err := s.truncateSpeculativeKV(s.pos); err != nil {
 				return nil, err
 			}
 			var gen []int32
@@ -179,7 +179,7 @@ func (s *ArchSession) generateCachedSampled(promptIDs []int32, maxNew int, stopT
 		}
 		if hidden := s.cachedPromptHiddenFor(promptIDs); hidden != nil {
 			s.pos = lcp
-			if err := s.state.truncateDevicePagedKV(s.pos); err != nil {
+			if err := s.truncateSpeculativeKV(s.pos); err != nil {
 				return nil, err
 			}
 			var gen []int32
@@ -201,7 +201,7 @@ func (s *ArchSession) generateCachedSampled(promptIDs []int32, maxNew int, stopT
 		lcp = len(promptIDs) - 1
 	}
 	s.pos = lcp
-	if err := s.state.truncateDevicePagedKV(s.pos); err != nil {
+	if err := s.truncateSpeculativeKV(s.pos); err != nil {
 		return nil, err
 	}
 	var gen []int32
@@ -247,7 +247,7 @@ func (s *ArchSession) ClearPromptCache() {
 		return
 	}
 	s.pos = 0
-	_ = s.state.truncateDevicePagedKV(s.pos)
+	_ = s.truncateSpeculativeKV(s.pos)
 	s.cachedIDs = nil
 	s.clearCachedPromptHidden()
 	s.resetRetainedHidden()
@@ -263,7 +263,7 @@ func (s *ArchSession) WarmPromptCache(ids []int32) error {
 		return core.NewError("native.WarmPromptCache: empty prompt")
 	}
 	s.pos = 0
-	if err := s.state.truncateDevicePagedKV(s.pos); err != nil {
+	if err := s.truncateSpeculativeKV(s.pos); err != nil {
 		return err
 	}
 	s.resetCachedPromptEntry()
@@ -273,7 +273,7 @@ func (s *ArchSession) WarmPromptCache(ids []int32) error {
 	hidden, logits, err := s.prefillPromptCacheEntry(ids)
 	if err != nil {
 		s.pos = 0
-		_ = s.state.truncateDevicePagedKV(s.pos)
+		_ = s.truncateSpeculativeKV(s.pos)
 		s.cachedIDs = resident[:0]
 		s.resetCachedPromptEntry()
 		s.resetRetainedHidden()
@@ -304,14 +304,14 @@ func (s *ArchSession) CompactCache(keep int) error {
 	}
 	kept := s.cachedIDs[len(s.cachedIDs)-keep:]
 	s.pos = 0
-	if err := s.state.truncateDevicePagedKV(s.pos); err != nil {
+	if err := s.truncateSpeculativeKV(s.pos); err != nil {
 		return err
 	}
 	s.clearCachedPromptHidden()
 	s.cachedIDs = nil
 	if err := s.prefillCachedIDs(kept); err != nil {
 		s.pos = 0
-		_ = s.state.truncateDevicePagedKV(s.pos)
+		_ = s.truncateSpeculativeKV(s.pos)
 		s.resetRetainedHidden()
 		return err
 	}

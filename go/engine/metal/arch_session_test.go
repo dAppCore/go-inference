@@ -259,6 +259,10 @@ func TestArchSessionPrefillTokensPopulatesDevicePagedKV(t *testing.T) {
 		t.Fatalf("NewArchSession: %v", err)
 	}
 	defer sess.Close()
+	// Pins the HOST prefill lane's paged-KV population (still the live lane for
+	// MoE/trace sessions). bf16 sessions record the arch ICB now, whose prefill
+	// writes the replay's own caches and leaves the paged KV empty by design.
+	sess.state.icb = nil
 	prompt := []int32{1, 2, 3, 4, 5}
 	if err := sess.PrefillTokens(prompt); err != nil {
 		t.Fatalf("PrefillTokens: %v", err)
@@ -2210,6 +2214,10 @@ func TestArchSessionGenerateSampledTopKOneAvoidsTopKScratch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewArchSession: %v", err)
 	}
+	// Pins the HOST sampled-token lane's TopK=1 contract (exactly one RNG draw, no
+	// TopK scratch). bf16 sessions record the arch ICB now and sample through the
+	// candidates lane, whose draw accounting is its own contract — force the host lane.
+	sess.state.icb = nil
 	params := model.SampleParams{Temperature: 1, TopK: 1, TopP: 0.75, MinP: 0.05, SuppressTokens: []int32{2, 7}}
 	if !sess.sampleTopKTokenParamsEligible(params) {
 		t.Skip("device TopK sampled-token path unavailable")
@@ -2923,6 +2931,10 @@ func TestArchSessionStepSampleTopKCandidatesICBMatchesSerial(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("serial unpenalized sampleTopKCandidatesFromHiddenInPool ok=%v err=%v", ok, err)
 	}
+	// snapshot: the returned slices alias the session's reusable candidate scratch, which the
+	// next sample call overwrites — comparing without copying compares a buffer with itself.
+	unpenalizedLogits = append([]byte(nil), unpenalizedLogits...)
+	unpenalizedIDs = append([]int32(nil), unpenalizedIDs...)
 	history := append([]int32(nil), unpenalizedIDs...)
 	wantLogits, wantIDs, ok = nil, nil, false
 	wantLogits, wantIDs, ok, err = serial.sampleTopKCandidatesFromHiddenWithHistoryInPool(serialHidden, params, history)

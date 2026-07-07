@@ -10,8 +10,10 @@ import (
 	"testing"
 	"unsafe"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // TestArchQuantSessionICBParity proves the incremental ICB encode-bypass (Phase B) is
@@ -743,4 +745,202 @@ func TestArchQuantSessionICBParity_PerLayerKVHeads(t *testing.T) {
 		}
 	}
 	t.Logf("non-uniform kvHeads session: ICB replay ≡ stepToken across %d tokens AND per-layer hidden cosine ≥ 0.9999 (sliding kv=%d / global kv=%d) — the recorder is byte-correct; 12B/31B can take the fast path", n, arch.KVHeads, arch.GlobalKVHeads)
+}
+
+// bf16Gemma4TensorsVaried builds a full bf16 gemma4 tensor set with VARIED synthetic values
+// (per-tensor salted ramp, the addPLETensorsBF16 pattern) — the constant-fill gemma4Tensors
+// fixture detects mis-wiring but degenerates every projection to a rank-1 map, which is too
+// weak for ICB-vs-host numeric parity. Shapes mirror gemma4Tensors (per-layer head dim aware).
+func bf16Gemma4TensorsVaried(t testing.TB, arch model.Arch) map[string]safetensors.Tensor {
+	t.Helper()
+	ts := map[string]safetensors.Tensor{}
+	salt := 3
+	mk := func(name string, shape ...int) {
+		elems := 1
+		for _, d := range shape {
+			elems *= d
+		}
+		f := make([]float32, elems)
+		for i := range f {
+			f[i] = float32((i*salt+11)%79-39) * 0.02
+		}
+		ts[name] = safetensors.Tensor{Dtype: "BF16", Shape: shape, Data: toBF16Bytes(f)}
+		salt++
+	}
+	dModel, dFF, vocab := arch.Hidden, arch.FF, arch.Vocab
+	mk("model.embed_tokens.weight", vocab, dModel)
+	mk("model.norm.weight", dModel)
+	for i := range arch.Layer {
+		p := core.Sprintf("model.layers.%d", i)
+		lhd := headDimOf(arch.Layer[i], arch.HeadDim)
+		lkv := kvHeadsOf(arch.Layer[i], arch.KVHeads)
+		qDim, kvDim := arch.Heads*lhd, lkv*lhd
+		mk(p+".input_layernorm.weight", dModel)
+		mk(p+".self_attn.q_proj.weight", qDim, dModel)
+		mk(p+".self_attn.k_proj.weight", kvDim, dModel)
+		mk(p+".self_attn.v_proj.weight", kvDim, dModel)
+		mk(p+".self_attn.o_proj.weight", dModel, qDim)
+		mk(p+".self_attn.q_norm.weight", lhd)
+		mk(p+".self_attn.k_norm.weight", lhd)
+		mk(p+".post_attention_layernorm.weight", dModel)
+		mk(p+".pre_feedforward_layernorm.weight", dModel)
+		mk(p+".post_feedforward_layernorm.weight", dModel)
+		mk(p+".mlp.gate_proj.weight", dFF, dModel)
+		mk(p+".mlp.up_proj.weight", dFF, dModel)
+		mk(p+".mlp.down_proj.weight", dModel, dFF)
+	}
+	return ts
+}
+
+// archSessionICBParityBF16 is the shared bf16 parity body: assemble the varied bf16 tensors,
+// open one session with the recorded ICB (asserting it actually recorded — the parity is
+// meaningless otherwise) and one with the ICB force-disabled (stepToken re-encode), and
+// require Generate to match token-for-token.
+func archSessionICBParityBF16(t *testing.T, ts map[string]safetensors.Tensor, arch model.Arch, maxLen, n int, wantPLE bool, label string) {
+	t.Helper()
+	lm, err := model.Assemble(ts, arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("model.Assemble: %v", err)
+	}
+	g := loadedToBF16(lm)
+	if g.HasPLE() != wantPLE {
+		t.Fatalf("fixture PLE=%v, want %v — the parity would exercise the wrong lane", g.HasPLE(), wantPLE)
+	}
+	prompt := []int32{1, 5, 3, 2}
+
+	sessICB, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession (ICB): %v", err)
+	}
+	if sessICB.state.icb == nil {
+		t.Fatalf("expected the %s bf16 session to record the arch ICB (recordArchICBBF16) — the parity check is meaningless if the ICB path is not exercised", label)
+	}
+	genICB, err := sessICB.Generate(prompt, n, -1)
+	if err != nil {
+		t.Fatalf("Generate (ICB): %v", err)
+	}
+
+	sessHost, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession (host): %v", err)
+	}
+	sessHost.state.icb = nil // force the stepToken host re-encode path
+	genHost, err := sessHost.Generate(prompt, n, -1)
+	if err != nil {
+		t.Fatalf("Generate (host): %v", err)
+	}
+
+	if len(genICB) != len(genHost) || len(genICB) != n {
+		t.Fatalf("token count: ICB %d, host %d, want %d", len(genICB), len(genHost), n)
+	}
+	for i := range genICB {
+		if genICB[i] != genHost[i] {
+			t.Fatalf("token %d: ICB %d != host %d — the %s bf16 ICB replay is NOT byte-identical to stepToken", i, genICB[i], genHost[i], label)
+		}
+	}
+}
+
+// TestArchSessionICBParityBF16 proves the bf16 incremental ICB encode-bypass (recordArchICBBF16,
+// the dense-weight ride on the quant recorder) is byte-identical to the stepToken host-encode
+// path on the uniform E2B-shaped PLE arch — the bf16 twin of TestArchQuantSessionICBParity, and
+// the gate that flips the bf16 lane (the LoRA/SFT training base) onto the arch fast path.
+func TestArchSessionICBParityBF16(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 64, 256, 32
+	const numLayers, pliDim = 2, 64
+	const maxLen, n = 16, 6
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+		HiddenSizePerLayerInput: pliDim, VocabSizePerLayerInput: vocab,
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	ts := bf16Gemma4TensorsVaried(t, arch)
+	addPLETensorsBF16(t, ts, arch)
+	archSessionICBParityBF16(t, ts, arch, maxLen, n, true, "uniform E2B-shaped PLE")
+}
+
+// TestArchSessionICBParityBF16_KVSharedPerLayerRope is the bf16 parity on the REAL E2B/E4B
+// shape: a KV-shared tail layer (no own k/v weights — V rides the owner's projection in the
+// recorder) + sliding/global layers on DIFFERENT rope thetas + the PLE tower. This is the
+// checkpoint shape LoRA/SFT trains on, so the bf16 ICB must hold byte-identity here.
+func TestArchSessionICBParityBF16_KVSharedPerLayerRope(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 64, 256, 32
+	const numLayers, pliDim = 3, 64
+	const kvShared = 1
+	const maxLen, n = 16, 6
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+		HiddenSizePerLayerInput: pliDim, VocabSizePerLayerInput: vocab,
+		NumKVSharedLayers: kvShared,
+		SlidingWindow:     8,
+		LayerTypes:        []string{"sliding_attention", "full_attention", "sliding_attention"},
+		RopeParameters: map[string]g4.RopeParam{
+			"sliding_attention": {RopeTheta: 10000},
+			"full_attention":    {RopeTheta: 1000000},
+		},
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	sharer := -1
+	for i := range arch.Layer {
+		if !arch.Layer[i].OwnsCache() {
+			sharer = i
+			break
+		}
+	}
+	if sharer < 0 {
+		t.Fatal("fixture must have a KV-shared (non-owner) layer to exercise the sharer ICB path")
+	}
+	if arch.RopeLocalBase == arch.RopeBase {
+		t.Fatalf("fixture must have localBase != base to exercise per-layer rope (both %v)", arch.RopeBase)
+	}
+	ts := bf16Gemma4TensorsVaried(t, arch)
+	addPLETensorsBF16(t, ts, arch)
+	archSessionICBParityBF16(t, ts, arch, maxLen, n, true, "KV-shared per-layer-rope E-family")
+}
+
+// TestArchSessionICBParityBF16_PerLayerHeadDim is the bf16 parity on the dense 12B/31B shape:
+// NO PLE tower, a sliding layer (head_dim 64) + a WIDER global layer (head_dim 128) on
+// different rope thetas — the mixed geometry the whole-seq batch DecodeForwardArchICB must
+// fall back on, but the session recorder records per-layer. Pins that bf16 dense checkpoints
+// (12B/31B) take the session ICB fast path byte-identically.
+func TestArchSessionICBParityBF16_PerLayerHeadDim(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, nKV, headDim, globalHeadDim, dFF, vocab = 256, 2, 1, 64, 128, 256, 32
+	const numLayers = 2
+	const maxLen, n = 16, 6
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, GlobalHeadDim: globalHeadDim,
+		VocabSize: vocab, RMSNormEps: 1e-6,
+		SlidingWindow: 8,
+		LayerTypes:    []string{"sliding_attention", "full_attention"},
+		RopeParameters: map[string]g4.RopeParam{
+			"sliding_attention": {RopeTheta: 10000},
+			"full_attention":    {RopeTheta: 1000000},
+		},
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	if arch.GlobalHeadDim == arch.HeadDim {
+		t.Fatalf("fixture must have globalHeadDim != headDim to exercise per-layer head dim (both %d)", arch.HeadDim)
+	}
+	ts := bf16Gemma4TensorsVaried(t, arch)
+	archSessionICBParityBF16(t, ts, arch, maxLen, n, false, "dense per-layer-head-dim")
 }

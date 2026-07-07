@@ -979,7 +979,7 @@ func (s *ArchSession) restoreKVBlockMetadata(cachedIDs, generated []int32, logit
 		return core.NewError("native.RestoreKV: cached ids exceed position")
 	}
 	s.pos = position
-	if err := s.state.truncateDevicePagedKV(s.pos); err != nil {
+	if err := s.truncateSpeculativeKV(s.pos); err != nil {
 		return err
 	}
 	s.cachedIDs = append(s.cachedIDs[:0], cachedIDs...)

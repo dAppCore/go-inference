@@ -1933,6 +1933,43 @@ func decodeForwardArchICBCore(
 	return outputs, err
 }
 
+// recordArchICBBF16 records the bf16 arch ICB and returns the held *archICBReplay — the bf16
+// sibling of recordArchICBQuant, for the ArchSession (record once at open, stepBody per token).
+// It rides the QUANT recorder with every projection wrapped as a sidecar-less QuantWeight
+// (dense bf16 bytes, no scales/biases): the recorder's mkW/psoFor/setQMV already dispatch
+// sidecar-less weights through the tiled bf16 gemv (the pack-level-fusion contract on
+// QuantWeight), so the per-layer head-dim, K==V, MatFormer-DFF and PLE handling are shared
+// rather than forked — and the recorder derives vOutBind=3 (gemv out) from the dense V.
+// Unlike the whole-seq batch DecodeForwardArchICB below, this therefore records gemma4's
+// MIXED head-dim (wider global layers) fine. Caches + the PLE runtime are parameters exactly
+// as in the quant recorder; a nil WV (gemma4 K==V) wraps to a nil Packed ⇒ V rides the k-proj.
+func recordArchICBBF16(
+	layers []DecodeLayerWeights, specs []model.LayerSpec,
+	kCaches, vCaches []metal.MTLBuffer,
+	pleRuntime *archDecodePLEInputs, pliDim int,
+	dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow int,
+	rope icbRope, scale, eps float32, valueNorm bool,
+) (*archICBReplay, error) {
+	qlayers := make([]QuantizedLayerWeights, len(layers))
+	dense := func(b []byte) QuantWeight { return QuantWeight{Packed: b} }
+	for li := range layers {
+		w := layers[li]
+		qlayers[li] = QuantizedLayerWeights{
+			AttnNormW: w.AttnNormW, MLPNormW: w.MLPNormW,
+			Q: dense(w.WQ), K: dense(w.WK), V: dense(w.WV), O: dense(w.WO),
+			Gate: dense(w.WGate), Up: dense(w.WUp), Down: dense(w.WDown),
+			DFF:           w.DFF,
+			PostAttnNormW: w.PostAttnNormW, PostFFNormW: w.PostFFNormW,
+			QNormW: w.QNormW, KNormW: w.KNormW,
+			LayerScalarW:           w.LayerScalarW,
+			PerLayerGate:           dense(w.PerLayerGate),
+			PerLayerProjection:     dense(w.PerLayerProjection),
+			PostPerLayerInputNormW: w.PostPerLayerInputNormW,
+		}
+	}
+	return recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, 0, 0, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, rope, scale, eps, valueNorm)
+}
+
 // DecodeForwardArchICB is the bf16 ARCH-driven cache-grow ICB: the encode-bypass replay
 // of DecodeForwardArch (KV-share + sliding-window), recorded once and replayed per token.
 // It builds a gemv recorder + the per-layer weight/cache buffers (caches for OWNER layers

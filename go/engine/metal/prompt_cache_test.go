@@ -228,6 +228,11 @@ func TestGenerateCachedExactPromptUsesCachedLogits(t *testing.T) {
 	prompt := []int32{1, 2, 3, 4, 5}
 
 	warm := newSessionStateFixture(t)
+	// This test counts HOST head-closure calls to pin the cached-logits flow of the
+	// host decode lane. bf16 sessions record the arch ICB now and decode through the
+	// device headEnc (the host closure never fires) — force the host lane; the ICB
+	// lane's cached-generate behaviour is covered by the ICB parity suite.
+	warm.state.icb = nil
 	if _, err := warm.GenerateCached(prompt, 3, -1); err != nil {
 		t.Fatalf("warm GenerateCached: %v", err)
 	}
