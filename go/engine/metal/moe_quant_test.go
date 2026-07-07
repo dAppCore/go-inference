@@ -1154,6 +1154,77 @@ func TestMoEWeightedSumMatchesScaleAddChain(t *testing.T) {
 	}
 }
 
+// TestMoECombineNormsMatchesChain proves the fused norm/combine tail byte-identical to the
+// five-kernel chain it replaces: rms(xL)·w1 + rms(xE)·w2, rms'd again and added to the
+// residual — every rounding point (rms output double-round, vv_Add) preserved.
+func TestMoECombineNormsMatchesChain(t *testing.T) {
+	requireNativeRuntime(t)
+	if _, err := moeCombineNormsPipeline(); err != nil {
+		t.Skipf("combine-norms kernel unavailable: %v", err)
+	}
+	const dModel = 96
+	const eps = float32(1e-6)
+	xL := toBF16Bytes(syntheticFloat32(dModel, 71))
+	xE := toBF16Bytes(syntheticFloat32(dModel, 73))
+	h := toBF16Bytes(syntheticFloat32(dModel, 79))
+	w1 := toBF16Bytes(syntheticFloat32(dModel, 83))
+	w2 := toBF16Bytes(syntheticFloat32(dModel, 89))
+	w3 := toBF16Bytes(syntheticFloat32(dModel, 97))
+
+	must := func(b []byte, err error) []byte {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("reference op: %v", err)
+		}
+		return b
+	}
+	combined := must(AddBF16(
+		must(RMSNormBF16(xL, w1, 1, dModel, eps)),
+		must(RMSNormBF16(xE, w2, 1, dModel, eps)),
+	))
+	want := must(AddBF16(h, must(RMSNormBF16(combined, w3, 1, dModel, eps))))
+
+	pso, err := moeCombineNormsPipeline()
+	if err != nil {
+		t.Fatalf("moeCombineNormsPipeline: %v", err)
+	}
+	buf := func(b []byte) metal.MTLBuffer {
+		return device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&b[0]), uint(len(b)), metal.MTLResourceStorageModeShared)
+	}
+	outBuf := device.NewBufferWithLengthOptions(uint(dModel*bf16Size), metal.MTLResourceStorageModeShared)
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	sink := encSink{enc}
+	sink.setPSO(pso)
+	sink.setBuf(buf(xL), 0, 0)
+	sink.setBuf(buf(w1), 0, 1)
+	sink.setBuf(buf(xE), 0, 2)
+	sink.setBuf(buf(w2), 0, 3)
+	sink.setBuf(buf(w3), 0, 4)
+	sink.setBuf(buf(h), 0, 5)
+	sink.setBuf(outBuf, 0, 6)
+	sink.setF32(eps, 7)
+	sink.setI32(int32(dModel), 8)
+	tg := uint(rmsSimdSize * ((((dModel + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
+	sink.dispatchThreads(
+		metal.MTLSize{Width: tg, Height: 1, Depth: 1},
+		metal.MTLSize{Width: tg, Height: 1, Depth: 1},
+	)
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	got := append([]byte(nil), unsafe.Slice((*byte)(outBuf.Contents()), dModel*bf16Size)...)
+	if !bytes.Equal(got, want) {
+		for i := 0; i+1 < len(got); i += 2 {
+			if got[i] != want[i] || got[i+1] != want[i+1] {
+				t.Logf("first diff at elem %d: got % x (%.9g) want % x (%.9g)", i/2, got[i:i+2], bf16ToF32(got[i], got[i+1]), want[i:i+2], bf16ToF32(want[i], want[i+1]))
+				break
+			}
+		}
+		t.Fatalf("fused combine norms != five-kernel chain (cosine=%.7f)", cosineBF16(got, want))
+	}
+}
+
 // TestQuantMoEDeviceRouterBuffersUsableWidthSweep pins the device MoE lane's admission gate open at
 // every affine width — a non-4-bit expert quant (e.g. an 8-bit MoE snapshot) must take the fast
 // device lane, not silently fall to the host path.

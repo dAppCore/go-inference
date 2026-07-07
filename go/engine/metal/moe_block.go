@@ -1882,11 +1882,39 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 			}
 		}
 	}
-	emitRMS(scratch.localOut, post1Buf.buf, scratch.localNormed, post1Buf.off)
-	emitRMS(scratch.expertAcc, post2Buf.buf, scratch.expertNormed, post2Buf.off)
-	emitAdd(scratch.localNormed, scratch.expertNormed, scratch.combined)
-	emitRMS(scratch.combined, postBuf.buf, scratch.ffResidual, postBuf.off)
-	emitAdd(hBuf, scratch.ffResidual, outputBuf)
+	// The norm/combine tail — out = h + rms(rms(local)·w1 + rms(expert)·w2)·w3 — as ONE
+	// fused dispatch (byte-identical rounding to the chain; single-row rms only), with the
+	// five-kernel chain as the fallback for unavailable PSO / looped-rms widths.
+	fusedTail := false
+	if dModel <= rmsLoopedLimit {
+		if fusedPSO, ferr := moeCombineNormsPipeline(); ferr == nil {
+			tg := uint(rmsSimdSize * ((((dModel + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
+			if tg <= fusedPSO.MaxTotalThreadsPerThreadgroup() {
+				sink.setPSO(fusedPSO)
+				sink.setBuf(scratch.localOut, 0, 0)
+				sink.setBuf(post1Buf.buf, post1Buf.off, 1)
+				sink.setBuf(scratch.expertAcc, 0, 2)
+				sink.setBuf(post2Buf.buf, post2Buf.off, 3)
+				sink.setBuf(postBuf.buf, postBuf.off, 4)
+				sink.setBuf(hBuf, 0, 5)
+				sink.setBuf(outputBuf, 0, 6)
+				sink.setF32(eps, 7)
+				sink.setI32(int32(dModel), 8)
+				sink.dispatchThreads(
+					metal.MTLSize{Width: tg, Height: 1, Depth: 1},
+					metal.MTLSize{Width: tg, Height: 1, Depth: 1},
+				)
+				fusedTail = true
+			}
+		}
+	}
+	if !fusedTail {
+		emitRMS(scratch.localOut, post1Buf.buf, scratch.localNormed, post1Buf.off)
+		emitRMS(scratch.expertAcc, post2Buf.buf, scratch.expertNormed, post2Buf.off)
+		emitAdd(scratch.localNormed, scratch.expertNormed, scratch.combined)
+		emitRMS(scratch.combined, postBuf.buf, scratch.ffResidual, postBuf.off)
+		emitAdd(hBuf, scratch.ffResidual, outputBuf)
+	}
 	return enc, true, nil
 }
 
