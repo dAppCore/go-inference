@@ -185,11 +185,11 @@ func newHeadEncoder(sb *shardBuffers, finalNormW, weight, scales, biases []byte,
 		groupSize: groupSize, bits: bits, dModel: dModel, vocab: vocab, eps: eps, softCap: softCap,
 	}
 	if quant {
-		// Fully upload-once owned buffers — weight + scales + biases AND the final norm. A no-copy
-		// view of the shard mmap (whether the 4-bit qmv weight OR the bf16 norm) reads garbage once
-		// the session's copy-path quant LAYER buffers coexist (the same in-session aliasing issue
-		// that keeps the layer weights on the copy path). Uploading the head's few tensors once
-		// sidesteps it entirely AND still kills the per-token balloon (one upload, not one per token).
+		// Upload-once owned buffers — weight + scales + biases AND the final norm: a handful of
+		// tensors, one upload, no per-token balloon. (An older version of this comment blamed an
+		// "in-session aliasing issue" — that ghost was safetensors OFFSET ALIGNMENT, solved by
+		// bufForAligned's per-tensor fallback; the upload here stays because it is simply the
+		// cheapest correct shape for four tensors, not because views are hazardous.)
 		if len(finalNormW) == 0 || len(weight) == 0 || len(scales) == 0 || len(biases) == 0 {
 			return nil, nil
 		}
@@ -209,12 +209,16 @@ func newHeadEncoder(sb *shardBuffers, finalNormW, weight, scales, biases []byte,
 		h.initSoftcapBuffers()
 		return h, nil
 	}
-	// bf16: no-copy shard views (the gemv reads the shard buffer reliably in-session).
+	// bf16: no-copy shard views. The direct-head kernels read the weight as bfloat4 (the K-row
+	// verify head's unroll), so the view demands 8-byte alignment — safetensors guarantees NONE
+	// (measured: 248/281 bf16 tensors in e2b-bf16 sit ≡2/4/6 mod 8; the tied embedding only
+	// escapes by being the file's first tensor). A misaligned weight falls back to a private
+	// copy of just that tensor inside bufForAligned rather than feeding the vec loads garbage.
 	fn, err := sb.bufFor(finalNormW)
 	if err != nil || fn.buf == nil {
 		return nil, nil
 	}
-	w, err := sb.bufFor(weight)
+	w, err := sb.bufForAligned(weight, 8)
 	if err != nil || w.buf == nil {
 		return nil, nil
 	}
