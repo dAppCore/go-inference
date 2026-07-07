@@ -1493,6 +1493,20 @@ func ffnMegaDefaultGeometry(dModel, dFF int) bool {
 	return dModel >= 256 && dFF >= 512
 }
 
+var (
+	moeArriveZeroOnce sync.Once
+	moeArriveZeroBuf  metal.MTLBuffer
+)
+
+// moeArriveZeroBuffer returns a shared 4-byte zero buffer — the copy source that resets the FFN
+// megakernel's grid-barrier arrive counter INSIDE the encoder (no host write, no wait).
+func moeArriveZeroBuffer() metal.MTLBuffer {
+	moeArriveZeroOnce.Do(func() {
+		moeArriveZeroBuf = device.NewBufferWithLengthOptions(4, metal.MTLResourceStorageModeShared)
+	})
+	return moeArriveZeroBuf
+}
+
 func ffnMegaSupported(gate, up, down quantMLPProjView, dModel, dFF int) bool {
 	return gate.bits == 4 && up.bits == 4 && down.bits == 4 &&
 		gate.groupSize == up.groupSize && gate.groupSize == down.groupSize &&
@@ -1685,10 +1699,39 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, routerScra
 		emitBinary(sink, addPSO, a, 0, b, 0, out, 0, dModel)
 	}
 	emitRMS(hBuf, pre1Buf.buf, scratch.localIn, pre1Buf.off)
-	emitQ(localGatePSO, localGatePacked, localGateScales, localGateBiases, scratch.localIn, msc.gate, dModel, dFF)
-	emitQ(localUpPSO, localUpPacked, localUpScales, localUpBiases, scratch.localIn, msc.up, dModel, dFF)
-	emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
-	emitQ(localDownPSO, localDownPacked, localDownScales, localDownBiases, msc.gated, scratch.localOut, dFF, dModel)
+	// local MLP: the FFN megakernel when its geometry holds — its grid barrier needs the
+	// arrive counter zeroed per dispatch, which the break-out path did with a HOST write;
+	// here a 2-element bf16 copy from a device zero buffer resets it INSIDE the encoder
+	// (hazard-ordered before the mega's atomics), keeping the whole lane host-free. The
+	// qmv trio stays as the fallback for unsupported geometry.
+	localGateViewQ := quantMLPProjView{packed: localGatePacked, scales: localGateScales, biases: localGateBiases, groupSize: localGateGroupSize, bits: localGateBits}
+	localUpViewQ := quantMLPProjView{packed: localUpPacked, scales: localUpScales, biases: localUpBiases, groupSize: localUpGroupSize, bits: localUpBits}
+	localDownViewQ := quantMLPProjView{packed: localDownPacked, scales: localDownScales, biases: localDownBiases, groupSize: localDownGroupSize, bits: localDownBits}
+	megaLocal := ffnMegaDefaultGeometry(dModel, dFF) && ffnMegaSupported(localGateViewQ, localUpViewQ, localDownViewQ, dModel, dFF)
+	var localMegaPSO metal.MTLComputePipelineState
+	if megaLocal {
+		if localMegaPSO, err = ffnMegaPipeline(); err != nil {
+			megaLocal = false
+		}
+	}
+	if megaLocal {
+		if err = scratch.ensureLocalMegaScratch(); err != nil {
+			megaLocal = false
+		}
+	}
+	if megaLocal {
+		if cerr := encCopyBF16Contig(enc, moeArriveZeroBuffer(), scratch.localMegaArrive, 0, 0, 2); cerr != nil {
+			megaLocal = false
+		}
+	}
+	if megaLocal {
+		emitFFNMega(sink, localMegaPSO, scratch.localIn, 0, localGateViewQ, localUpViewQ, localDownViewQ, scratch.localMegaGated, scratch.localOut, 0, scratch.localMegaArrive, dModel, dFF)
+	} else {
+		emitQ(localGatePSO, localGatePacked, localGateScales, localGateBiases, scratch.localIn, msc.gate, dModel, dFF)
+		emitQ(localUpPSO, localUpPacked, localUpScales, localUpBiases, scratch.localIn, msc.up, dModel, dFF)
+		emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
+		emitQ(localDownPSO, localDownPacked, localDownScales, localDownBiases, msc.gated, scratch.localOut, dFF, dModel)
+	}
 	emitRMS(hBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
 	for i := range topK {
 		if fusedExperts {
