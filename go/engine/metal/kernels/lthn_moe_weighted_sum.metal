@@ -20,12 +20,16 @@ kernel void lthn_moe_weighted_sum_bf16(
     device bfloat*       out     [[buffer(2)]],  // [n]
     constant int&        n       [[buffer(3)]],
     constant int&        top_k   [[buffer(4)]],
-    uint i [[thread_position_in_grid]]) {
+    uint2 pos [[thread_position_in_grid]]) {
+  const uint i = pos.x;
   if (i >= uint(n) || top_k <= 0) return;
-  bfloat acc = bfloat(float(rows[i]) * float(weights[0]));
+  // batched rows: grid y selects the token (decode dispatches height 1 = row 0); the route
+  // rows are token-major [row][top_k][n] and the weights [row][top_k].
+  const uint base = pos.y * uint(top_k);
+  bfloat acc = bfloat(float(rows[base * uint(n) + i]) * float(weights[base]));
   for (int r = 1; r < top_k; r++) {
-    const bfloat scaled = bfloat(float(rows[uint(r) * uint(n) + i]) * float(weights[r]));
+    const bfloat scaled = bfloat(float(rows[(base + uint(r)) * uint(n) + i]) * float(weights[base + uint(r)]));
     acc = bfloat(float(acc) + float(scaled));
   }
-  out[i] = acc;
+  out[pos.y * uint(n) + i] = acc;
 }

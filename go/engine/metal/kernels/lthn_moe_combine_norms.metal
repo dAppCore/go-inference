@@ -27,11 +27,19 @@ kernel void lthn_moe_combine_norms_bf16(
     device bfloat*       out [[buffer(6)]],
     constant float&      eps [[buffer(7)]],
     constant uint&  axis_size [[buffer(8)]],
+    uint tgid [[threadgroup_position_in_grid]],
     uint lid [[thread_position_in_threadgroup]],
     uint simd_lane_id [[thread_index_in_simdgroup]],
     uint simd_group_id [[simdgroup_index_in_threadgroup]]) {
   constexpr int N_READS = 4;
   constexpr int SIMD_SIZE = 32;
+  // batched rows: each threadgroup owns one token row (decode dispatches one threadgroup =
+  // row 0; the batched tail dispatches rows*tg threads). The norm weights are shared.
+  const uint row_off = tgid * axis_size;
+  xL += row_off;
+  xE += row_off;
+  h += row_off;
+  out += row_off;
 
   threadgroup float inv_shared[2];
   threadgroup float sumsL[SIMD_SIZE];

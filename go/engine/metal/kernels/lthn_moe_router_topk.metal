@@ -23,9 +23,16 @@ kernel void lthn_moe_router_topk_bf16(
     constant int&        num_experts      [[buffer(4)]],
     constant int&        top_k            [[buffer(5)]],
     constant int&        has_scale        [[buffer(6)]],
+    uint tgid [[threadgroup_position_in_grid]],
     uint lane [[thread_index_in_threadgroup]]) {
   const int K = int(lthn_router_topk_k);
   if (K <= 0 || K > 32 || K > num_experts || K != top_k || lane >= 32) return;
+  // batched rows: each 32-lane threadgroup owns one score row (decode dispatches one
+  // threadgroup = row 0; the batched router dispatches rows*32 threads).
+  const uint row = tgid;
+  scores += row * uint(num_experts);
+  top_indices += row * uint(K);
+  top_weights += row * uint(K);
 
   float local_values[32];
   uint local_indices[32];
