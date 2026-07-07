@@ -1215,6 +1215,19 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 	var trWorstAbs float32
 	trWorstLayer, trFirstBad, trBadLayers := -1, -1, 0
 	cbBroken := false // a mid-token cb swap (MoE break-out / test probes) invalidates chainTail
+	// encConc: enc is an OPEN CONCURRENT encoder carried between passes (#341
+	// phase 1.5) — the attn pass, the MoE block and the per-layer scalar ride ONE
+	// encoder per layer stack with barriers at the true edges instead of paying
+	// ~4 encoder seams per layer. Serial-only stages normalise it back first.
+	encConc := false
+	toSerial := func() {
+		if !encConc {
+			return
+		}
+		endEncodingFast(enc)
+		enc = computeCommandEncoderFast(cb)
+		encConc = false
+	}
 	for li := 0; li < len(s.specs); li++ {
 		if li > 0 {
 			enc = s.profSeam(cb, enc, "attn")
@@ -1236,15 +1249,19 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 		if s.specs[li].OwnsCache() {
 			if cache := s.layerPagedKV(li); cache != nil {
 				var aerr error
-				if enc, aerr = encAttnHalfKVPaged(enc, cb, s.gpuProf, in, cache, s.offBuf, s.hBuf, 0, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); aerr != nil {
+				if enc, encConc, aerr = encAttnHalfKVPaged(enc, cb, s.gpuProf, encConc, in, cache, s.offBuf, s.hBuf, 0, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); aerr != nil {
 					endEncodingFast(enc)
 					return nil, aerr
 				}
-			} else if err := encAttnHalfKV(enc, in, s.lb[li].kCache, s.lb[li].vCache, s.offBuf, s.hBuf, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); err != nil {
-				endEncodingFast(enc)
-				return nil, err
+			} else {
+				toSerial() // the plain KV attention half is a serial emitter
+				if err := encAttnHalfKV(enc, in, s.lb[li].kCache, s.lb[li].vCache, s.offBuf, s.hBuf, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); err != nil {
+					endEncodingFast(enc)
+					return nil, err
+				}
 			}
 		} else {
+			toSerial() // the shared-KV attention halves are serial emitters
 			own := s.specs[li].KVShareFrom
 			if cache := s.layerPagedKV(own); cache != nil {
 				if err := encAttnHalfSharedPaged(enc, in, cache, s.offBuf, s.hBuf, 0, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); err != nil {
@@ -1258,6 +1275,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 		}
 		if captureLayerHiddens { // post-attention hidden (x + Wo·attn) — isolates attention from MLP
 			endEncodingFast(enc)
+			encConc = false
 			commitCommandBufferFast(cb)
 			waitUntilCompletedFast(cb)
 			capturedAttnHiddens = append(capturedAttnHiddens, append([]byte(nil), s.bufferBytes(s.hBuf, s.dModel*bf16Size)...))
@@ -1289,7 +1307,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 						return nil, err
 					}
 				}
-				enc, handledMoE, err = encMoEBlockQuantDevice(enc, cb, s.gpuProf, s.moeRouterOwnedScratch, s.moeOwnedScratch, s.hBuf, out, *moeQ, s.dModel, s.dFF, s.eps)
+				enc, encConc, handledMoE, err = encMoEBlockQuantDevice(enc, cb, s.gpuProf, encConc, s.moeRouterOwnedScratch, s.moeOwnedScratch, s.hBuf, out, *moeQ, s.dModel, s.dFF, s.eps)
 				if err != nil {
 					endEncodingFast(enc)
 					return nil, err
@@ -1304,6 +1322,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 				// AND host-read h here: two full GPU round-trips per MoE layer × ~48 layers was
 				// the 26B decode running at a sixth of its cgo rate.
 				endEncodingFast(enc)
+				encConc = false
 				commitCommandBufferFast(cb)
 				var err error
 				if moeQ != nil && quantMoEDeviceRouterBuffersUsable(*moeQ, s.dModel) && routerTopKUsable(moeQ.NumExperts, moeQ.TopK) {
@@ -1332,6 +1351,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 				cbBroken = true
 			}
 		} else {
+			toSerial()   // the dense MLP half is a serial emitter
 			lff := s.dFF // per-layer FFN width (gemma4 E2B/E4B); falls back to the arch default
 			if s.lb[li].dFF > 0 {
 				lff = s.lb[li].dFF
@@ -1345,6 +1365,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 		// The per-token PLE tensor is pinned once at step entry, and each layer binds its pliDim row
 		// by byte offset. Applied to the layer output before the per-layer scalar.
 		if len(s.ple) > li && len(s.ple[li].postNorm) > 0 {
+			toSerial() // the PLE gate helpers are multi-dispatch serial emitters
 			pl := s.ple[li]
 			if len(pl.postNorm) != s.dModel*bf16Size {
 				endEncodingFast(enc)
@@ -1382,6 +1403,11 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 		}
 		// gemma4 per-layer output scalar: multiply the layer's hidden before the next layer.
 		if s.lb[li].layerScalar != nil {
+			if encConc {
+				// single kernel — rides the carried concurrent encoder behind a barrier
+				// (the next pass's entry barrier orders ITS writes in turn).
+				memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+			}
 			if err := encMulBF16(enc, out, s.lb[li].layerScalar, out, s.dModel); err != nil {
 				endEncodingFast(enc)
 				return nil, err
@@ -1389,6 +1415,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 		}
 		if layerSpanProbeForTest != nil { // probe-only per-layer GPU spans (test hook, nil in production)
 			endEncodingFast(enc)
+			encConc = false
 			commitCommandBufferFast(cb)
 			waitUntilCompletedFast(cb)
 			layerSpanProbeForTest[li] += int64(float64(cb.GPUEndTime()-cb.GPUStartTime()) * 1e9)
@@ -1398,6 +1425,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 		}
 		if s.trace { // per-layer diagnostic: flush, read this layer's output hidden, accumulate
 			endEncodingFast(enc)
+			encConc = false
 			commitCommandBufferFast(cb)
 			waitUntilCompletedFast(cb)
 			ma, bad := bufMaxAbsNaN(out, s.dModel)
@@ -1416,6 +1444,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 		}
 		if captureLayerHiddens { // cross-engine per-layer diff: store this layer's output hidden
 			endEncodingFast(enc)
+			encConc = false
 			commitCommandBufferFast(cb)
 			waitUntilCompletedFast(cb)
 			capturedLayerHiddens = append(capturedLayerHiddens, append([]byte(nil), s.bufferBytes(out, s.dModel*bf16Size)...))
@@ -1429,6 +1458,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			in, out = out, in
 		}
 	}
+	toSerial() // the chain tail and everything after expect the tracked serial encoder
 	if s.chainTail != nil && !cbBroken {
 		// The tail encodes the head argmax + the NEXT token's input production into THIS
 		// command buffer; the commit + wait below stay the token's single sync. When the

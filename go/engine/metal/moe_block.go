@@ -1609,26 +1609,33 @@ func emitFFNMega[S dispatchSink](sink S, pso metal.MTLComputePipelineState, x me
 //
 // The device-relevant prelude is deliberately a sibling of moeBlockQuantAfterRouterWith
 // DeviceIndexBufferPooled's — keep the two in step when weight layouts change.
-func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.MTLCommandBufferObject, prof *gpuCounterProfiler, routerScratch *routerDeviceScratch, scratch *moeBlockBF16Scratch, hBuf, outputBuf metal.MTLBuffer, w MoEQuantLayerWeights, dModel, dFF int, eps float32) (metal.MTLComputeCommandEncoderObject, bool, error) {
+// encConc marks enc as an OPEN CONCURRENT encoder carried from the previous
+// pass (#341 phase 1.5): the concurrent fork joins it behind one buffer barrier
+// instead of paying an encoder seam, and returns encConc=true itself when it
+// leaves its encoder open for the next pass. Declines return enc untouched
+// with the caller's encConc passed through; the serial path always normalises
+// to a tracked serial encoder first (a carried concurrent encoder has no
+// hazard tracking).
+func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.MTLCommandBufferObject, prof *gpuCounterProfiler, encConc bool, routerScratch *routerDeviceScratch, scratch *moeBlockBF16Scratch, hBuf, outputBuf metal.MTLBuffer, w MoEQuantLayerWeights, dModel, dFF int, eps float32) (metal.MTLComputeCommandEncoderObject, bool, bool, error) {
 	expertDFF, numExperts, topK := w.ExpertDFF, w.NumExperts, w.TopK
 	size := dModel * bf16Size
 	if hBuf == nil || outputBuf == nil || routerScratch == nil || scratch == nil || topK <= 0 || dModel == 0 || dFF == 0 || expertDFF == 0 {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	if len(w.PreFFNormW) != size || len(w.PreFFNorm2W) != size || len(w.PostFFNorm1W) != size || len(w.PostFFNorm2W) != size || len(w.PostFFNormW) != size {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	localGatePacked, localGateScales, localGateBiases, localGateGroupSize, localGateBits, err := quantWeightViewsForShape("native.encMoEBlockQuantDevice: local gate", w.LocalGate, dFF, dModel, w.LocalGroupSize, w.LocalBits)
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	localUpPacked, localUpScales, localUpBiases, localUpGroupSize, localUpBits, err := quantWeightViewsForShape("native.encMoEBlockQuantDevice: local up", w.LocalUp, dFF, dModel, w.LocalGroupSize, w.LocalBits)
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	localDownPacked, localDownScales, localDownBiases, localDownGroupSize, localDownBits, err := quantWeightViewsForShape("native.encMoEBlockQuantDevice: local down", w.LocalDown, dModel, dFF, w.LocalGroupSize, w.LocalBits)
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	// (the break-out path may run the local MLP through the megakernel; this lane always
 	// encodes the qmv trio instead — the megakernel's arrive counter is a host write, and
@@ -1642,82 +1649,82 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 	if fusedExperts {
 		expGateUpPacked, expGateUpScales, expGateUpBiases, expGateUpGroupSize, expGateUpBits, err = quantWeightViewsForShape("native.encMoEBlockQuantDevice: expert gate_up", w.ExpGateUp, numExperts*2*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
 		if err != nil {
-			return enc, false, nil
+			return enc, encConc, false, nil
 		}
 	} else {
 		expGatePacked, expGateScales, expGateBiases, expGateGroupSize, expGateBits, err = quantWeightViewsForShape("native.encMoEBlockQuantDevice: expert gate", w.ExpGate, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
 		if err != nil {
-			return enc, false, nil
+			return enc, encConc, false, nil
 		}
 		expUpPacked, expUpScales, expUpBiases, expUpGroupSize, expUpBits, err = quantWeightViewsForShape("native.encMoEBlockQuantDevice: expert up", w.ExpUp, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
 		if err != nil {
-			return enc, false, nil
+			return enc, encConc, false, nil
 		}
 	}
 	expDownPacked, expDownScales, expDownBiases, expDownGroupSize, expDownBits, err = quantWeightViewsForShape("native.encMoEBlockQuantDevice: expert down", w.ExpDown, numExperts*dModel, expertDFF, w.ExpertGroupSize, w.ExpertBits)
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	if !affineBitsSupported(expDownBits) {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	inGroup, inBits, inRows := expGateGroupSize, expGateBits, expertDFF
 	if fusedExperts {
 		if !affineBitsSupported(expGateUpBits) {
-			return enc, false, nil
+			return enc, encConc, false, nil
 		}
 		inGroup, inBits, inRows = expGateUpGroupSize, expGateUpBits, 2*expertDFF
 	} else if !affineBitsSupported(expGateBits) || expGateBits != expUpBits || expGateGroupSize != expUpGroupSize {
 		// gate + up share one gather PSO — width and group size must agree between them.
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	gatherExpertInPSO, err := gatherQMVBF16SteelPipeline(expertDFF, dModel, inGroup, inBits)
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	gatherExpertDownPSO, err := gatherQMVBF16SteelPipeline(dModel, expertDFF, expDownGroupSize, expDownBits)
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	gatherExpertInMeta, err := gatherQMVBF16Metadata(numExperts, expertDFF, dModel, inGroup, inBits, inRows)
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	gatherExpertDownMeta, err := gatherQMVBF16Metadata(numExperts, dModel, expertDFF, expDownGroupSize, expDownBits, dModel)
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	localGatePSO, err := pipelineFor(qmvBF16KernelName(dFF, dModel, localGateGroupSize, localGateBits))
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	localUpPSO, err := pipelineFor(qmvBF16KernelName(dFF, dModel, localUpGroupSize, localUpBits))
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	localDownPSO, err := pipelineFor(qmvBF16KernelName(dModel, dFF, localDownGroupSize, localDownBits))
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	rmsPSO, err := pipelineFor(rmsKernelBF16(dModel))
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	rmsTG := rmsThreadgroup(dModel, rmsPSO)
 	addPSO, err := pipelineFor("vv_Addbfloat16")
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	if !gpuHasGeluKernel() {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	geluPSO, err := geluPipeline()
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	scalePSO, err := bf16MulScalarPipeline()
 	if err != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	pre1Buf := bf16WeightView(w.PreFFNormW, w.preFFNormView)
 	pre2Buf := bf16WeightView(w.PreFFNorm2W, w.preFFNorm2View)
@@ -1730,7 +1737,7 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 	// with the local/expert stages between dependency barriers).
 	routerPlan, rerr := buildRouterEncodePlan(routerScratch, hBuf, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
 	if rerr != nil {
-		return enc, false, nil
+		return enc, encConc, false, nil
 	}
 	routeIdxBuf, weightsBuf := routerScratch.idxBuf, routerScratch.weightBuf
 	msc := scratch.mlp
@@ -1884,9 +1891,17 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 	// serial path's; only the schedule differs.
 	if prof == nil && !moeConcurrentDisabled && !megaLocal && allRoutes && wsumErr == nil && combineOK {
 		moeConcurrentBlocks.Add(1)
-		endEncodingFast(enc)
-		enc = concurrentComputeEncoderFast(cb)
-		sink = encSink{enc}
+		if encConc && !encCarryDisabled {
+			// Carry the attention pass's open concurrent encoder: one buffer barrier
+			// orders its writes ahead of this block's reads, no encoder seam paid.
+			concEncoderCarries.Add(1)
+			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+			sink = encSink{enc}
+		} else {
+			endEncodingFast(enc)
+			enc = concurrentComputeEncoderFast(cb)
+			sink = encSink{enc}
+		}
 		barrier := func() { memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers) }
 		// stage 1: router ∥ the two local input norms (all read hBuf only). The fused
 		// single-dispatch router runs its whole rms→qmv→topk here, overlapping the
@@ -1927,13 +1942,25 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 		barrier()
 		// stage 8: the fused norm/combine tail -> residual out
 		emitCombineNorms()
-		endEncodingFast(enc)
-		enc = computeCommandEncoderFast(cb)
-		sink = encSink{enc}
-		return enc, true, nil
+		if encCarryDisabled {
+			endEncodingFast(enc)
+			enc = computeCommandEncoderFast(cb)
+			return enc, false, true, nil
+		}
+		// Leave the concurrent encoder OPEN — the caller carries it into the next
+		// pass (a barrier at that pass's entry orders this block's writes).
+		return enc, true, true, nil
 	}
 
 	// ---- serial path: the single-encoder order (hazard tracking serialises every edge) ----
+	// A carried concurrent encoder has no hazard tracking — close it and reopen a
+	// tracked serial encoder (the emit closures follow sink) before dispatching.
+	if encConc {
+		endEncodingFast(enc)
+		enc = computeCommandEncoderFast(cb)
+		sink = encSink{enc}
+		encConc = false
+	}
 	if routerPlan.fusedPSO != nil && routerFusedEnabled {
 		seam("router.fused")
 		routerPlan.emitFused(sink)
@@ -2014,7 +2041,7 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 		emitRMS(scratch.combined, postBuf.buf, scratch.ffResidual, postBuf.off)
 		emitAdd(hBuf, scratch.ffResidual, outputBuf)
 	}
-	return enc, true, nil
+	return enc, false, true, nil
 }
 
 func quantWeightViewsForShape(fn string, w QuantWeight, outDim, inDim, groupSize, bits int) (bufView, bufView, bufView, int, int, error) {

@@ -150,7 +150,7 @@ func TestDevicePagedKVAttentionHalfMatchesContiguousStep(t *testing.T) {
 
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-		if enc, err = encAttnHalfKVPaged(enc, cb, nil, residentBytes(x), cache, scalarI32(int32(pos)), outBuf, 0, attnNorm, bufView{}, bufView{}, bufView{}, nil, *sc, proj, dModel, nHeads, nKVHeads, headDim, pos, 0, headDim, base, scale, eps, nil); err != nil {
+		if enc, _, err = encAttnHalfKVPaged(enc, cb, nil, false, residentBytes(x), cache, scalarI32(int32(pos)), outBuf, 0, attnNorm, bufView{}, bufView{}, bufView{}, nil, *sc, proj, dModel, nHeads, nKVHeads, headDim, pos, 0, headDim, base, scale, eps, nil); err != nil {
 			endEncodingFast(enc)
 			t.Fatalf("encAttnHalfKVPaged pos %d: %v", pos, err)
 		}
@@ -348,7 +348,7 @@ func TestDevicePagedKVSharedAttentionMatchesLinearShared(t *testing.T) {
 		}
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-		if enc, err = encAttnHalfKVPaged(enc, cb, nil, residentBytes(x), cache, scalarI32(int32(i)), ownerOut, 0, ownerNorm, bufView{}, bufView{}, bufView{}, nil, *ownerScratch, ownerProj, dModel, nHeads, nKVHeads, headDim, i, 0, headDim, base, scale, eps, nil); err != nil {
+		if enc, _, err = encAttnHalfKVPaged(enc, cb, nil, false, residentBytes(x), cache, scalarI32(int32(i)), ownerOut, 0, ownerNorm, bufView{}, bufView{}, bufView{}, nil, *ownerScratch, ownerProj, dModel, nHeads, nKVHeads, headDim, i, 0, headDim, base, scale, eps, nil); err != nil {
 			endEncodingFast(enc)
 			t.Fatalf("encAttnHalfKVPaged owner pos %d: %v", i, err)
 		}
