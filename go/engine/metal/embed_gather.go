@@ -152,10 +152,10 @@ func elemGroupTG(n int) int {
 	return 256
 }
 
-// gatherBitsSupported reports whether the GPU dequant-gather decodes this affine width — the
+// affineBitsSupported reports whether the GPU dequant-gather decodes this affine width — the
 // kernel's generic LSB-first unpack covers every width MLX's quantiser emits. Keyed here (not
 // hard-coded at call sites) so the GPU seams widen with the kernel, not with folklore.
-func gatherBitsSupported(bits int) bool {
+func affineBitsSupported(bits int) bool {
 	switch bits {
 	case 2, 3, 4, 5, 6, 8:
 		return true
@@ -173,7 +173,7 @@ func EmbedGatherQuantBF16Into(out []byte, tokenID int32, packed, scales, biases 
 	if err := ensureInit(); err != nil {
 		return nil, err
 	}
-	if !gatherBitsSupported(bits) {
+	if !affineBitsSupported(bits) {
 		return nil, core.NewError("native.EmbedGatherQuantBF16: unsupported affine width")
 	}
 	pso, err := embedGatherPipeline()
