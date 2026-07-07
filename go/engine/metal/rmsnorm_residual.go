@@ -153,11 +153,18 @@ func rmsNormResidualPipeline() (metal.MTLComputePipelineState, error) {
 // encoder-level form of RMSNormResidualBF16, for the re-encode decode path to stay LOCKSTEP with the ICB's
 // setRMSResidual (same kernel, so the two paths are byte-equal). wOff offsets the weight binding.
 func encRMSNormResidualBF16(enc metal.MTLComputeCommandEncoder, x, weight, res, out metal.MTLBuffer, wOff uint, axisSize int, eps float32) error {
+	return encRMSNormResidualBF16At(enc, x, weight, res, out, 0, wOff, 0, 0, axisSize, eps)
+}
+
+// encRMSNormResidualBF16At is encRMSNormResidualBF16 with the branch input, residual and output
+// bound at byte offsets — the SAME fused pipeline, for batched rows living at offsets inside
+// shared K-row buffers (bit-identical per row to the offset-0 sequential encode).
+func encRMSNormResidualBF16At(enc metal.MTLComputeCommandEncoder, x, weight, res, out metal.MTLBuffer, xOff, wOff, resOff, outOff uint, axisSize int, eps float32) error {
 	pso, err := rmsNormResidualPipeline()
 	if err != nil {
 		return err
 	}
-	emitRMSNormResidual(encSink{enc}, pso, x, weight, res, out, wOff, axisSize, eps, rmsThreadgroup(axisSize, pso))
+	emitRMSNormResidualAt(encSink{enc}, pso, x, weight, res, out, xOff, wOff, resOff, outOff, axisSize, eps, rmsThreadgroup(axisSize, pso))
 	return nil
 }
 

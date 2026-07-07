@@ -231,10 +231,11 @@ func encResidualMaybeNormAt(enc metal.MTLComputeCommandEncoder, x metal.MTLBuffe
 		return encAddBF16To(enc, x, v, out, xOff, vOff, outOff, dModel)
 	}
 	// Lockstep with the ICB's setRMSResidual: when the custom library is present the ICB fuses
-	// out = res + rms(branch) into one kernel, so the re-encode must use the SAME fused kernel to stay
-	// byte-equal (the ICB-vs-re-encode parity tests). Same gpuHasGeluKernel gate as the recorder.
-	if xOff == 0 && vOff == 0 && outOff == 0 && gpuHasGeluKernel() {
-		return encRMSNormResidualBF16(enc, v, norm.buf, x, out, norm.off, dModel, eps)
+	// out = res + rms(branch) into one kernel, so the re-encode must use the SAME fused kernel to
+	// stay byte-equal (the ICB-vs-re-encode parity tests) — bound at the row's offsets when it
+	// lives inside a shared K-row buffer. Same gpuHasGeluKernel gate as the recorder.
+	if gpuHasGeluKernel() {
+		return encRMSNormResidualBF16At(enc, v, norm.buf, x, out, vOff, norm.off, xOff, outOff, dModel, eps)
 	}
 	if vOff == 0 {
 		if err := encRMSNormBF16(enc, v, norm.buf, scratch, norm.off, dModel, eps); err != nil {
@@ -302,11 +303,10 @@ func encAttnHalfKVInputAt(
 		}
 	}
 	rowOff := uint(slot * kvDim * bf16Size) // byte offset of this token's cache ring slot
-	if xOff == 0 {
-		if err := encRMSNormBF16(enc, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
-			return err
-		}
-	} else if err := encRMSNormRowsBF16(enc, x, attnNormW.buf, sc.normed, xOff, attnNormW.off, 0, 1, dModel, eps); err != nil {
+	// entry rms via the size-specialised single-row kernel at the row's offset — the batched
+	// interleave's rows must norm bit-identically to the sequential step (the generic rows
+	// kernel reduces in a different order and drifts the whole layer by ulps).
+	if err := encRMSNormBF16At(enc, x, attnNormW.buf, sc.normed, xOff, attnNormW.off, 0, dModel, eps); err != nil {
 		return err
 	}
 	// query: project, (gemma4 per-head QK-norm), rotate IN PLACE (so partial rotary's tail keeps the projected value)

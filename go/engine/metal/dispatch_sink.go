@@ -134,10 +134,18 @@ func (s fastICBSink) dispatchThreadgroups(grid, group metal.MTLSize) {
 // and carries its own tg. This is the ONE body behind both encRMSNormBF16 (live, encSink) and the ICB
 // recorder's setRMS (icbSink); byte-parity with the re-encode path is gated by the ICB parity suite.
 func emitRMSNorm[S dispatchSink](sink S, pso metal.MTLComputePipelineState, x, w, out metal.MTLBuffer, wOff uint, axisSize int, eps float32, tg uint) {
+	emitRMSNormAt(sink, pso, x, w, out, 0, wOff, 0, axisSize, eps, tg)
+}
+
+// emitRMSNormAt is emitRMSNorm with the input and output bound at byte offsets — the SAME
+// single-row specialised pipeline, so a row living at an offset inside a shared K-row buffer
+// norms bit-identically to the sequential path (the generic rows kernel reduces in a different
+// order and drifts by ulps).
+func emitRMSNormAt[S dispatchSink](sink S, pso metal.MTLComputePipelineState, x, w, out metal.MTLBuffer, xOff, wOff, outOff uint, axisSize int, eps float32, tg uint) {
 	sink.setPSO(pso)
-	sink.setBuf(x, 0, 0)
+	sink.setBuf(x, xOff, 0)
 	sink.setBuf(w, wOff, 1)
-	sink.setBuf(out, 0, 2)
+	sink.setBuf(out, outOff, 2)
 	sink.setF32(eps, 3)
 	sink.setI32(int32(axisSize), 4)
 	sink.setI32(1, 5) // ws (row stride = 1, single row)
@@ -163,11 +171,18 @@ func emitRMSNormRows[S dispatchSink](sink S, pso metal.MTLComputePipelineState, 
 // (lthn_rmsnorm_residual_bf16) through any sink: x=0, w=1, res=2, out=3, eps=4, axisSize=5, ws=6. The
 // body behind encRMSNormResidualBF16 (live) and the recorder's setRMSResidual. pso + tg caller-provided.
 func emitRMSNormResidual[S dispatchSink](sink S, pso metal.MTLComputePipelineState, x, w, res, out metal.MTLBuffer, wOff uint, axisSize int, eps float32, tg uint) {
+	emitRMSNormResidualAt(sink, pso, x, w, res, out, 0, wOff, 0, 0, axisSize, eps, tg)
+}
+
+// emitRMSNormResidualAt is emitRMSNormResidual with the branch input, residual and output bound
+// at byte offsets — the SAME fused pipeline, so a batched row living at an offset inside a shared
+// K-row buffer runs the identical fused tail the sequential step records.
+func emitRMSNormResidualAt[S dispatchSink](sink S, pso metal.MTLComputePipelineState, x, w, res, out metal.MTLBuffer, xOff, wOff, resOff, outOff uint, axisSize int, eps float32, tg uint) {
 	sink.setPSO(pso)
-	sink.setBuf(x, 0, 0)
+	sink.setBuf(x, xOff, 0)
 	sink.setBuf(w, wOff, 1)
-	sink.setBuf(res, 0, 2)
-	sink.setBuf(out, 0, 3)
+	sink.setBuf(res, resOff, 2)
+	sink.setBuf(out, outOff, 3)
 	sink.setF32(eps, 4)
 	sink.setI32(int32(axisSize), 5)
 	sink.setI32(1, 6)
@@ -422,11 +437,18 @@ func emitSDPA2Pass2At[S dispatchSink](sink S, pso metal.MTLComputePipelineState,
 // COMMON decode matmul (e2b/12b/31b are 4-bit). K/N bind the memoised scalars the recorder's count
 // buffers (kDModel/nQDimByHd/…) hold; pso caller-provided (the qmv kernel name encodes groupSize/bits).
 func emitQMV[S dispatchSink](sink S, pso metal.MTLComputePipelineState, wq metal.MTLBuffer, wqOff uint, scales metal.MTLBuffer, scalesOff uint, biases metal.MTLBuffer, biasesOff uint, x, out metal.MTLBuffer, outOff uint, inDim, outDim int) {
+	emitQMVAt(sink, pso, wq, wqOff, scales, scalesOff, biases, biasesOff, x, 0, out, outOff, inDim, outDim)
+}
+
+// emitQMVAt is emitQMV with the activation vector bound at a byte offset — the batched dense
+// forward's rows live at byte offsets inside shared K-row buffers, and a row's quant gate reads
+// its input in place.
+func emitQMVAt[S dispatchSink](sink S, pso metal.MTLComputePipelineState, wq metal.MTLBuffer, wqOff uint, scales metal.MTLBuffer, scalesOff uint, biases metal.MTLBuffer, biasesOff uint, x metal.MTLBuffer, xOff uint, out metal.MTLBuffer, outOff uint, inDim, outDim int) {
 	sink.setPSO(pso)
 	sink.setBuf(wq, wqOff, 0)
 	sink.setBuf(scales, scalesOff, 1)
 	sink.setBuf(biases, biasesOff, 2)
-	sink.setBuf(x, 0, 3)
+	sink.setBuf(x, xOff, 3)
 	sink.setBuf(out, outOff, 4)
 	sink.setI32(int32(inDim), 5)  // K
 	sink.setI32(int32(outDim), 6) // N
