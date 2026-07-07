@@ -50,42 +50,36 @@ kernel void lthn_moe_router_topk_bf16(
     }
   }
 
-  threadgroup float lane_values[32 * 32];
-  threadgroup uint lane_indices[32 * 32];
-  uint base = lane * 32u;
-  for (int i = 0; i < K; i++) {
-    lane_values[base + uint(i)] = local_values[i];
-    lane_indices[base + uint(i)] = local_indices[i];
-  }
-  threadgroup_barrier(mem_flags::mem_threadgroup);
-
-  if (lane != 0) return;
-
+  // Merge the 32 per-lane sorted lists with K rounds of simd reduction — no threadgroup
+  // memory, no barrier, no serial lane-0 scan. Each round: simd_max picks the best score,
+  // simd_min over the max-holders' expert ids applies the same (score desc, index asc)
+  // order the insertion sort used, so the selection — and the softmax bytes — match the
+  // old merge exactly. The winner lane shifts its list down one slot (static K-bounded
+  // loops keep everything in registers; a data-dependent cursor would re-spill).
   float best_values[32];
   uint best_indices[32];
-  for (int i = 0; i < K; i++) {
-    best_values[i] = -3.402823466e+38f;
-    best_indices[i] = 0u;
-  }
-  for (uint src_lane = 0; src_lane < 32u; src_lane++) {
-    uint src_base = src_lane * 32u;
-    for (int src = 0; src < K; src++) {
-      float score = lane_values[src_base + uint(src)];
-      uint expert = lane_indices[src_base + uint(src)];
-      for (int slot = 0; slot < K; slot++) {
-        bool better = score > best_values[slot] ||
-                      (score == best_values[slot] && expert < best_indices[slot]);
-        if (!better) continue;
-        for (int move = K - 1; move > slot; move--) {
-          best_values[move] = best_values[move - 1];
-          best_indices[move] = best_indices[move - 1];
-        }
-        best_values[slot] = score;
-        best_indices[slot] = expert;
-        break;
+  for (int slot = 0; slot < K; slot++) {
+    float v = local_values[0];
+    uint idx = local_indices[0];
+    float bestV = simd_max(v);
+    uint cand = (v == bestV) ? idx : 0xFFFFFFFFu;
+    uint bestI = simd_min(cand);
+    if (v == bestV && idx == bestI) {
+      for (int m = 0; m < 31; m++) {
+        if (m >= K - 1) break;
+        local_values[m] = local_values[m + 1];
+        local_indices[m] = local_indices[m + 1];
+      }
+      if (K >= 1) {
+        local_values[K - 1] = -3.402823466e+38f;
+        local_indices[K - 1] = 0xFFFFFFFFu;
       }
     }
+    best_values[slot] = bestV;
+    best_indices[slot] = bestI;
   }
+
+  if (lane != 0) return;
 
   float max_value = best_values[0];
   float denom = 0.0f;
