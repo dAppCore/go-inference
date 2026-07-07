@@ -22,6 +22,7 @@ import (
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/serving"
+	"dappco.re/go/inference/serving/provider/openai"
 )
 
 // Config is the declarative generate request mirroring lthn-mlx's generate flag
@@ -217,7 +218,19 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 		return core.E("generate.RunGenerate", core.Sprintf("produced only %d tokens", n), nil)
 	}
 
-	core.WriteString(cfg.Out, string(out))
+	// The raw stream carries gemma4's channel markers (the 26B emits an EMPTY thought
+	// channel even with thinking off). Show what a serving client sees: the same shared
+	// extractor every serving route runs, content only — the reasoning stream prints
+	// under a `thought:` header when thinking is on.
+	extractor := openai.NewThinkingExtractor()
+	content, thought := extractor.Process(inference.Token{Text: string(out)})
+	flushContent, flushThought := extractor.Flush()
+	content += flushContent
+	thought += flushThought
+	if cfg.Think && core.Trim(thought) != "" {
+		core.WriteString(cfg.Out, "thought: "+thought+"\n---\n")
+	}
+	core.WriteString(cfg.Out, content)
 	core.WriteString(cfg.Out, "\n\n")
 	core.WriteString(cfg.Out, core.Sprintf(
 		"decode %.1f tok/s  (%d tok / %.3fs, prefill %dms excluded)  ·  total %.1f tok/s\n",
