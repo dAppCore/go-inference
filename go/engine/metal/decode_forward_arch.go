@@ -266,6 +266,13 @@ type archDecodeState struct {
 	// at the attn/moe family seams with timestamp counter sampling: the per-family GPU time table.
 	gpuProf *gpuCounterProfiler
 
+	// chainTail, when set (the session's chained live decode — nil otherwise), encodes the head
+	// argmax + the next token's input production into the step's OWN command buffer right before
+	// its commit: one cb and one wait per token, no host embed/argmax between. hidden is the
+	// final post-stack buffer. Skipped when this token's encoding broke the cb (MoE break-out /
+	// test probes) — the session detects the miss and finishes that token serially.
+	chainTail func(enc metal.MTLComputeCommandEncoderObject, hidden metal.MTLBuffer) error
+
 	// icb, when non-nil, is the recorded arch ICB the session replays per token (the encode-bypass)
 	// instead of re-encoding via stepToken. Set at session build when icbEligible (no MoE, no trace,
 	// uniform head geometry + simple uniform rope — the ICB core's assumptions). It holds its OWN
@@ -1200,6 +1207,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 	}
 	var trWorstAbs float32
 	trWorstLayer, trFirstBad, trBadLayers := -1, -1, 0
+	cbBroken := false // a mid-token cb swap (MoE break-out / test probes) invalidates chainTail
 	for li := 0; li < len(s.specs); li++ {
 		if li > 0 {
 			enc = s.profSeam(cb, enc, "attn")
@@ -1247,6 +1255,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			capturedAttnHiddens = append(capturedAttnHiddens, append([]byte(nil), s.bufferBytes(s.hBuf, s.dModel*bf16Size)...))
 			cb = commandBufferFast(queue)
 			enc = computeCommandEncoderFast(cb)
+			cbBroken = true
 		}
 		var moeQ *MoEQuantLayerWeights
 		if li < len(s.moeQuant) {
@@ -1312,6 +1321,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 				}
 				cb = commandBufferFast(queue)
 				enc = computeCommandEncoderFast(cb)
+				cbBroken = true
 			}
 		} else {
 			lff := s.dFF // per-layer FFN width (gemma4 E2B/E4B); falls back to the arch default
@@ -1376,6 +1386,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			layerSpanProbeForTest[li] += int64(float64(cb.GPUEndTime()-cb.GPUStartTime()) * 1e9)
 			cb = commandBufferFast(queue)
 			enc = computeCommandEncoderFast(cb)
+			cbBroken = true
 		}
 		if s.trace { // per-layer diagnostic: flush, read this layer's output hidden, accumulate
 			endEncodingFast(enc)
@@ -1393,6 +1404,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			}
 			cb = commandBufferFast(queue)
 			enc = computeCommandEncoderFast(cb)
+			cbBroken = true
 		}
 		if captureLayerHiddens { // cross-engine per-layer diff: store this layer's output hidden
 			endEncodingFast(enc)
@@ -1401,11 +1413,23 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			capturedLayerHiddens = append(capturedLayerHiddens, append([]byte(nil), s.bufferBytes(out, s.dModel*bf16Size)...))
 			cb = commandBufferFast(queue)
 			enc = computeCommandEncoderFast(cb)
+			cbBroken = true
 		}
 		if in == inputBuf && inputBuf != s.xA {
 			in, out = out, s.xB
 		} else {
 			in, out = out, in
+		}
+	}
+	if s.chainTail != nil && !cbBroken {
+		// The tail encodes the head argmax + the NEXT token's input production into THIS
+		// command buffer; the commit + wait below stay the token's single sync. When the
+		// tail writes the next input into a buffer the hidden currently occupies, encoder
+		// order keeps the GPU side correct — but the HOST readResult copy below reads the
+		// post-overwrite bytes, so a chained caller must ignore res.
+		if terr := s.chainTail(enc, in); terr != nil {
+			endEncodingFast(enc)
+			return nil, terr
 		}
 	}
 	endEncodingFast(enc)
