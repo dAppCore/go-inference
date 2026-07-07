@@ -24,7 +24,7 @@ func ExampleStandardWeightNames() {
 // every architecture, quant width, and layer count.
 func ExampleAssemble() {
 	tensors := map[string]safetensors.Tensor{
-		"embed.weight":            {Shape: []int{8, 4}, Data: make([]byte, 8*4*2)},
+		"embed.weight":             {Shape: []int{8, 4}, Data: make([]byte, 8*4*2)},
 		"norm.weight":              {Shape: []int{4}, Data: make([]byte, 4*2)},
 		"layer.0.attn_norm.weight": {Shape: []int{4}, Data: make([]byte, 4*2)},
 		"layer.0.q.weight":         {Shape: []int{4, 4}, Data: make([]byte, 4*4*2)},

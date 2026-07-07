@@ -64,12 +64,14 @@ func TestAssemble_StandardWeightNames_Ugly(t *testing.T) {
 // FinalNorm, under simple custom weight names (not the HF Standard layout, to keep the
 // fixture small and self-explanatory).
 func minimalDenseTensors(dtype string) map[string]safetensors.Tensor {
-	vec := func(n int) safetensors.Tensor { return safetensors.Tensor{Shape: []int{n}, Data: make([]byte, n*2), Dtype: dtype} }
+	vec := func(n int) safetensors.Tensor {
+		return safetensors.Tensor{Shape: []int{n}, Data: make([]byte, n*2), Dtype: dtype}
+	}
 	mat := func(rows, cols int) safetensors.Tensor {
 		return safetensors.Tensor{Shape: []int{rows, cols}, Data: make([]byte, rows*cols*2)}
 	}
 	return map[string]safetensors.Tensor{
-		"embed.weight":            mat(8, 4),
+		"embed.weight":             mat(8, 4),
 		"norm.weight":              vec(4),
 		"layer.0.attn_norm.weight": vec(4),
 		"layer.0.q.weight":         mat(4, 4),

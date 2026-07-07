@@ -40,34 +40,34 @@ import (
 // setBytes:length:atIndex:, plus the two MTLSize dispatch selectors.
 
 var (
-	selSetComputePipelineState = objc.Sel("setComputePipelineState:")
-	selSetBufferOffsetAtIndex  = objc.Sel("setBuffer:offset:atIndex:")
-	selSetKernelBufferAtIndex  = objc.Sel("setKernelBuffer:offset:atIndex:")
-	selSetBytesLengthAtIndex   = objc.Sel("setBytes:length:atIndex:")
-	selDispatchThreads         = objc.Sel("dispatchThreads:threadsPerThreadgroup:")
-	selDispatchThreadgroups    = objc.Sel("dispatchThreadgroups:threadsPerThreadgroup:")
-	selMemoryBarrierWithScope  = objc.Sel("memoryBarrierWithScope:")
-	selConcurrentThreads       = objc.Sel("concurrentDispatchThreads:threadsPerThreadgroup:")
-	selConcurrentThreadgroups  = objc.Sel("concurrentDispatchThreadgroups:threadsPerThreadgroup:")
-	selCommandBuffer           = objc.Sel("commandBuffer")
-	selComputeCommandEncoder   = objc.Sel("computeCommandEncoder")
+	selSetComputePipelineState             = objc.Sel("setComputePipelineState:")
+	selSetBufferOffsetAtIndex              = objc.Sel("setBuffer:offset:atIndex:")
+	selSetKernelBufferAtIndex              = objc.Sel("setKernelBuffer:offset:atIndex:")
+	selSetBytesLengthAtIndex               = objc.Sel("setBytes:length:atIndex:")
+	selDispatchThreads                     = objc.Sel("dispatchThreads:threadsPerThreadgroup:")
+	selDispatchThreadgroups                = objc.Sel("dispatchThreadgroups:threadsPerThreadgroup:")
+	selMemoryBarrierWithScope              = objc.Sel("memoryBarrierWithScope:")
+	selConcurrentThreads                   = objc.Sel("concurrentDispatchThreads:threadsPerThreadgroup:")
+	selConcurrentThreadgroups              = objc.Sel("concurrentDispatchThreadgroups:threadsPerThreadgroup:")
+	selCommandBuffer                       = objc.Sel("commandBuffer")
+	selComputeCommandEncoder               = objc.Sel("computeCommandEncoder")
 	selComputeCommandEncoderWithDescriptor = objc.Sel("computeCommandEncoderWithDescriptor:")
-	selBlitCommandEncoder      = objc.Sel("blitCommandEncoder")
-	selEndEncoding             = objc.Sel("endEncoding")
-	selCommit                  = objc.Sel("commit")
-	selWaitUntilCompleted      = objc.Sel("waitUntilCompleted")
-	selUseResourcesCountUsage  = objc.Sel("useResources:count:usage:")
-	selExecuteICBWithRange     = objc.Sel("executeCommandsInBuffer:withRange:")
-	selOptimizeICBWithRange    = objc.Sel("optimizeIndirectCommandBuffer:withRange:")
-	selIndirectComputeCommand  = objc.Sel("indirectComputeCommandAtIndex:")
-	selSetBarrier              = objc.Sel("setBarrier")
-	selContents                = objc.Sel("contents")
-	selBufferLength            = objc.Sel("length")
-	objcMsgSendAddr            uintptr
-	objcAutoreleasePoolPush    uintptr
-	objcAutoreleasePoolPop     uintptr
-	objcMsgSendOnce            sync.Once
-	objcSyscallArgsPool        sync.Pool
+	selBlitCommandEncoder                  = objc.Sel("blitCommandEncoder")
+	selEndEncoding                         = objc.Sel("endEncoding")
+	selCommit                              = objc.Sel("commit")
+	selWaitUntilCompleted                  = objc.Sel("waitUntilCompleted")
+	selUseResourcesCountUsage              = objc.Sel("useResources:count:usage:")
+	selExecuteICBWithRange                 = objc.Sel("executeCommandsInBuffer:withRange:")
+	selOptimizeICBWithRange                = objc.Sel("optimizeIndirectCommandBuffer:withRange:")
+	selIndirectComputeCommand              = objc.Sel("indirectComputeCommandAtIndex:")
+	selSetBarrier                          = objc.Sel("setBarrier")
+	selContents                            = objc.Sel("contents")
+	selBufferLength                        = objc.Sel("length")
+	objcMsgSendAddr                        uintptr
+	objcAutoreleasePoolPush                uintptr
+	objcAutoreleasePoolPop                 uintptr
+	objcMsgSendOnce                        sync.Once
+	objcSyscallArgsPool                    sync.Pool
 )
 
 // objcSyscallArgs mirrors purego.syscall15Args. The linknamed ABI trampoline
