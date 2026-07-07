@@ -27,7 +27,19 @@ func TestRealMoE26BHostProfile(t *testing.T) {
 		t.Skip("set LEM_REAL_MOE=1 to run the real 26B-A4B MoE decode profile (loads ~15GB)")
 	}
 	dir := resolveMoE26BDir(t)
-	const maxLen, warmup, N = 320, 4, 24
+	const warmup, N = 4, 24
+	ctx := 0
+	if v := os.Getenv("LEM_MOE_PROFILE_CTX"); v != "" {
+		if r := core.ParseInt(v, 10, 32); r.OK {
+			if n := int(r.Value.(int64)); n > 0 {
+				ctx = n
+			}
+		}
+	}
+	maxLen := 320
+	if ctx > 0 {
+		maxLen = ctx + 64
+	}
 
 	lm, dm, err := loadRegistered(dir)
 	if err != nil {
@@ -52,6 +64,12 @@ func TestRealMoE26BHostProfile(t *testing.T) {
 	}
 
 	prompt := []int32{2, 1000, 2500, 4000, 8000, 16000}
+	if ctx > 0 {
+		prompt = make([]int32, ctx)
+		for i := range prompt {
+			prompt[i] = int32(2 + (i*97)%16000)
+		}
+	}
 	if err := sess.PrefillTokens(prompt); err != nil {
 		t.Fatalf("prefill: %v", err)
 	}

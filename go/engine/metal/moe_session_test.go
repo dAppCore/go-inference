@@ -318,6 +318,10 @@ func TestLoadGemma4QuantMoESubmitAheadMatchesSerial(t *testing.T) {
 		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
 		EnableMoEBlock: true, NumExperts: numExperts, TopKExperts: topK, MoEIntermediateSize: expertDFF,
 		Quantization: quant,
+		// RING shape: window < maxLen makes the sliding layers ring caches — the speculative
+		// link's unwind must stay token-identical there too (the slot-rewrite argument).
+		SlidingWindow: 8,
+		LayerTypes:    []string{"sliding_attention", "full_attention"},
 	}
 	arch, err := cfg.Arch()
 	if err != nil {

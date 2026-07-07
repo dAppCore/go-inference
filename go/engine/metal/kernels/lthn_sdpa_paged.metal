@@ -82,11 +82,24 @@ constant constexpr uint kPagedSimdGroups = 8;
     o[i] = 0.0f;
   }
 
+  // vectorised K/V reads: per is headDim/32 (8 or 16 on every shipped head) and the lane
+  // offsets/strides are head-dim multiples, so bfloat4 loads are aligned — 4x fewer load
+  // instructions on the loop that touches every cached row (the depth-scaling cost).
+  const bool vec4 = (per % 4u) == 0u &&
+                    ((D.kSeqStride | D.kHeadStride | D.vSeqStride | D.vHeadStride) % 4u) == 0u;
   for (uint t = rowBase + sg; t < rowEnd; t += kPagedSimdGroups) {
     const device bf16* kt = kh + t * D.kSeqStride;
     float partial = 0.0f;
-    for (uint i = 0; i < per; i++) {
-      partial += qv[i] * float(kt[i]);
+    if (vec4) {
+      for (uint i = 0; i < per; i += 4) {
+        const bfloat4 k4 = *((const device bfloat4*)(kt + i));
+        partial += qv[i] * float(k4.x) + qv[i + 1] * float(k4.y) +
+                   qv[i + 2] * float(k4.z) + qv[i + 3] * float(k4.w);
+      }
+    } else {
+      for (uint i = 0; i < per; i++) {
+        partial += qv[i] * float(kt[i]);
+      }
     }
     const float dot = simd_sum(partial) * D.scale;
     const float newM = max(m, dot);
@@ -94,8 +107,18 @@ constant constexpr uint kPagedSimdGroups = 8;
     const float p = exp(dot - newM);
     s = s * f + p;
     const device bf16* vt = vh + t * D.vSeqStride;
-    for (uint i = 0; i < per; i++) {
-      o[i] = o[i] * f + p * float(vt[i]);
+    if (vec4) {
+      for (uint i = 0; i < per; i += 4) {
+        const bfloat4 v4 = *((const device bfloat4*)(vt + i));
+        o[i] = o[i] * f + p * float(v4.x);
+        o[i + 1] = o[i + 1] * f + p * float(v4.y);
+        o[i + 2] = o[i + 2] * f + p * float(v4.z);
+        o[i + 3] = o[i + 3] * f + p * float(v4.w);
+      }
+    } else {
+      for (uint i = 0; i < per; i++) {
+        o[i] = o[i] * f + p * float(vt[i]);
+      }
     }
     m = newM;
   }
