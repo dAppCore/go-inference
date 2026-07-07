@@ -385,12 +385,22 @@ func emitSDPAAt[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q met
 // emitSDPA2Pass1 records the first long-context SDPA pass. It writes one partial
 // weighted-V sum plus online-softmax sum/max per (batch, kv-head, block).
 func emitSDPA2Pass1[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q, k, v, partials, sums, maxs metal.MTLBuffer, kvByteOff uint, batch, nHeads, nKVHeads, n, blocks int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32) {
-	emitSDPA2Pass1At(sink, pso, q, 0, k, v, partials, sums, maxs, kvByteOff, batch, nHeads, nKVHeads, n, blocks, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+	emitSDPA2Pass1NAt(sink, pso, q, 0, k, v, partials, sums, maxs, kvByteOff, nil, batch, nHeads, nKVHeads, n, blocks, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
 }
 
 // emitSDPA2Pass1At is emitSDPA2Pass1 with the query bound at a byte offset (the attention fold's
 // slab rows). The partials/sums/maxs stay whole-buffer — they are per-dispatch scratch.
 func emitSDPA2Pass1At[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q metal.MTLBuffer, qOff uint, k, v, partials, sums, maxs metal.MTLBuffer, kvByteOff uint, batch, nHeads, nKVHeads, n, blocks int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32) {
+	emitSDPA2Pass1NAt(sink, pso, q, qOff, k, v, partials, sums, maxs, kvByteOff, nil, batch, nHeads, nKVHeads, n, blocks, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+}
+
+// emitSDPA2Pass1NAt is emitSDPA2Pass1At with the attended length optionally taken from a
+// BUFFER: nBuf != nil binds it at index 7 (the recorded arch ICB rebinds that buffer per
+// token — N is the one per-token-varying scalar, exactly as emitSDPAAt's nBuf); nBuf == nil
+// inlines n (the live paths know the length). blocks stays baked in the PSO + grid, which is
+// safe at ANY n: a block whose strided key walk starts past N contributes finite_min/0
+// partials that the pass-2 merge zeroes out.
+func emitSDPA2Pass1NAt[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q metal.MTLBuffer, qOff uint, k, v, partials, sums, maxs metal.MTLBuffer, kvByteOff uint, nBuf metal.MTLBuffer, batch, nHeads, nKVHeads, n, blocks int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32) {
 	sink.setPSO(pso)
 	sink.setBuf(q, qOff, 0)
 	sink.setBuf(k, kvByteOff, 1)
@@ -398,7 +408,11 @@ func emitSDPA2Pass1At[S dispatchSink](sink S, pso metal.MTLComputePipelineState,
 	sink.setBuf(partials, 0, 3)
 	sink.setBuf(sums, 0, 4)
 	sink.setBuf(maxs, 0, 5)
-	sink.setI32(int32(n), 7)
+	if nBuf != nil {
+		sink.setBuf(nBuf, 0, 7) // ICB: the N buffer, rebound per token at replay
+	} else {
+		sink.setI32(int32(n), 7)
+	}
 	sink.setI64(kHeadStride, 8)
 	sink.setI64(kSeqStride, 9)
 	sink.setI64(vHeadStride, 10)

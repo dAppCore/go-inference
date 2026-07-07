@@ -1210,6 +1210,43 @@ func recordArchICB(
 			sdpaPSOByHd[hd] = pso
 		}
 	}
+	// Deep-decode: GLOBAL layers record the 2-pass SDPA pair instead of the single-pass
+	// kernel. The single-pass sdpa_vector runs ONE threadgroup per head over the whole
+	// cache — recorded once, it can never re-parallelise as the KV grows, which collapsed
+	// deep decode far below bandwidth physics (E2B @52K: 44 tok/s measured vs ~115
+	// expected). blocks is fixed at record time from maxLen and is safe at ANY smaller n:
+	// a block whose strided key walk starts past N writes finite_min/0 partials that the
+	// pass-2 merge zeroes. Sliding layers stay single-pass — their window bounds n below
+	// the 2-pass knee. Sessions too short to ever cross the knee keep the pure
+	// single-pass layout (and the existing byte-parity fixtures with it).
+	sdpa2PassICBBlocks := 0
+	if maxLen >= sdpa2PassMinKV {
+		sdpa2PassICBBlocks = int(sdpa2PassBlocks(maxLen))
+	}
+	sdpa2Pass1PSOByHd := make(map[int]metal.MTLComputePipelineState)
+	sdpa2Pass2PSOByHd := make(map[int]metal.MTLComputePipelineState)
+	nGlobal2Pass := 0
+	if sdpa2PassICBBlocks > 0 {
+		for li := range nLayers {
+			if specs[li].Attention != model.GlobalAttention {
+				continue
+			}
+			nGlobal2Pass++
+			hd := hdOf(li)
+			if _, ok := sdpa2Pass1PSOByHd[hd]; !ok {
+				p1, e := sdpaVector2Pass1PipelineICB(hd, int32(sdpa2PassICBBlocks))
+				if e != nil {
+					return nil, e
+				}
+				p2, e2 := sdpaVector2Pass2PipelineICB(hd)
+				if e2 != nil {
+					return nil, e2
+				}
+				sdpa2Pass1PSOByHd[hd] = p1
+				sdpa2Pass2PSOByHd[hd] = p2
+			}
+		}
+	}
 	addPSO, err := pipelineForICB("vv_Addbfloat16")
 	if err != nil {
 		return nil, err
@@ -1411,6 +1448,20 @@ func recordArchICB(
 			offBuf, nGlobalBuf, nSlidingBuf, epsBuf, axisBuf, wsBuf,
 			ropeScaleB, ropeBaseB, ropeLocalBaseB, freqStride1B, sdpaScaleB, addModelB,
 		}
+		// 2-pass SDPA intermediates for the GLOBAL layers (shared across layers — the replay's
+		// dependency barriers already serialise each layer's attention on the shared scratch,
+		// exactly as the single-row attn scratch). f32 per the kernel ABI; sized at the widest
+		// head dim. Owned by the replay via residentRes for the session's lifetime.
+		var p2Partials, p2Sums, p2Maxs metal.MTLBuffer
+		if nGlobal2Pass > 0 {
+			p2Partials = device.NewBufferWithLengthOptions(uint(nHeads*sdpa2PassICBBlocks*maxHd*4), metal.MTLResourceStorageModeShared)
+			p2Sums = device.NewBufferWithLengthOptions(uint(nHeads*sdpa2PassICBBlocks*4), metal.MTLResourceStorageModeShared)
+			p2Maxs = device.NewBufferWithLengthOptions(uint(nHeads*sdpa2PassICBBlocks*4), metal.MTLResourceStorageModeShared)
+			// pass-2 binds blocks via the memoised scalar — a value no other op declares, so
+			// register it resident explicitly (an ICB op reading a non-resident buffer is
+			// undefined; the strides/scale/N binds all reuse scalars already listed above).
+			resident = append(resident, p2Partials, p2Sums, p2Maxs, scalarI32(int32(sdpa2PassICBBlocks)))
+		}
 		if !hasFusedGELU {
 			resident = append(resident, x2, x3, x3s, inner, scaled, tnh, onePlus, halfG, gelu, c044, c079, c1c, c05)
 		}
@@ -1538,7 +1589,8 @@ func recordArchICB(
 				opsPerLayer--
 			}
 		}
-		total := opsPerLayer * nLayers
+		// GLOBAL layers' 2-pass SDPA is pass-1 + pass-2 where the single-pass was one op.
+		total := opsPerLayer*nLayers + nGlobal2Pass
 		icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
 		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch)
 		icbDesc.SetInheritBuffers(false)
@@ -1743,9 +1795,23 @@ func recordArchICB(
 			// gqaOf/sdpaStrideOf/sdpaScaleB hold. attendK read offset rebound/token if sliding.
 			hd, kv := hdOf(li), kvOf(li)
 			kvd := int64(kv * hd)
-			emitSDPA(fastICBSink{emit()}, sdpaPSOByHd[hd], qr, attendK, attendV, attn, 0, nBufForLayer,
-				nHeads, kv, 0, int64(hd), kvd, int64(hd), kvd, scale)
-			sdpaIdx[li] = opIdx - 1
+			if sdpa2PassICBBlocks > 0 && specs[li].Attention == model.GlobalAttention {
+				// GLOBAL layer deep-decode: the 2-pass pair fans the growing-cache reduction over
+				// blocks threadgroups (pass 1) and merges the partials (pass 2) — the recorded
+				// replacement for the single-pass kernel that serialised the whole cache on one
+				// threadgroup per head. N binds the same rebindable nGlobalBuf; K/V bind at slots
+				// 1/2 exactly as the single-pass op, so the replay's rebind indices are unchanged.
+				emitSDPA2Pass1NAt(fastICBSink{emit()}, sdpa2Pass1PSOByHd[hd], qr, 0, attendK, attendV,
+					p2Partials, p2Sums, p2Maxs, 0, nBufForLayer, 1, nHeads, kv, 0, sdpa2PassICBBlocks,
+					int64(hd), kvd, int64(hd), kvd, scale)
+				sdpaIdx[li] = opIdx - 1
+				emitSDPA2Pass2(fastICBSink{emit()}, sdpa2Pass2PSOByHd[hd], p2Partials, p2Sums, p2Maxs,
+					attn, 1, nHeads, sdpa2PassICBBlocks)
+			} else {
+				emitSDPA(fastICBSink{emit()}, sdpaPSOByHd[hd], qr, attendK, attendV, attn, 0, nBufForLayer,
+					nHeads, kv, 0, int64(hd), kvd, int64(hd), kvd, scale)
+				sdpaIdx[li] = opIdx - 1
+			}
 			recordProj(li, emit(), attn, attnOut, 0, projO)
 			if hasPA && useFusedResRMS { // fused: hBuf = inBuf + rms(Wo·attn) — one op, one fewer barrier
 				setRMSResidual(emit(), attnOut, postAttnBufs[li], inBuf, hBuf)
@@ -1846,7 +1912,7 @@ func recordArchICB(
 		// the recorded layout diverged from opsPerLayer·nLayers — a recorder bug, not a numeric
 		// drift; fail loud rather than replay a misaligned ICB.
 		if opIdx != total {
-			coreErr = core.NewError(core.Sprintf("native.decodeForwardArchICBCore: recorded %d ops, expected %d (opsPerLayer=%d × %d layers) — heterogeneous layout misaligned", opIdx, total, opsPerLayer, nLayers))
+			coreErr = core.NewError(core.Sprintf("native.decodeForwardArchICBCore: recorded %d ops, expected %d (opsPerLayer=%d × %d layers + %d global 2-pass) — heterogeneous layout misaligned", opIdx, total, opsPerLayer, nLayers, nGlobal2Pass))
 			return
 		}
 

@@ -463,6 +463,78 @@ func sdpaVectorPipelineICB(name string) (metal.MTLComputePipelineState, error) {
 	return pso, nil
 }
 
+// sdpaVector2Pass1PipelineICB builds the ICB-recordable sdpa_vector_2pass_1 — the same
+// function constants as the live builder (20-25 false: decode-time no mask/transpose/
+// causal/sinks; 26 = blocks, baked because the kernel strides its key walk and indexes
+// the partials by it) with supportIndirectCommandBuffers set. The recorded arch ICB
+// replays this pair for GLOBAL layers so deep decode keeps the fanned-out reduction the
+// single-pass kernel cannot give (one threadgroup per head serialising the whole cache
+// — the deep-decode collapse).
+func sdpaVector2Pass1PipelineICB(headDim int, blocks int32) (metal.MTLComputePipelineState, error) {
+	key := core.Sprintf("sdpa_vector_2pass_1_bfloat16_t_%d_%d|b%d|icb", headDim, headDim, blocks)
+	icbPSOMu.Lock()
+	defer icbPSOMu.Unlock()
+	if pso, ok := icbPSOCache[key]; ok {
+		return pso, nil
+	}
+	if library == nil || library.GetID() == 0 {
+		return nil, core.NewError("native.sdpaVector2Pass1PipelineICB: library unavailable")
+	}
+	fc := metal.NewMTLFunctionConstantValues()
+	off := uint8(0)
+	for _, idx := range []uint{20, 21, 22, 23, 24, 25} {
+		fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&off), metal.MTLDataTypeBool, idx)
+	}
+	blk := blocks
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&blk), metal.MTLDataTypeInt, 26)
+	name := core.Sprintf("sdpa_vector_2pass_1_bfloat16_t_%d_%d", headDim, headDim)
+	fn, err := library.NewFunctionWithNameConstantValuesError(name, fc)
+	if err != nil {
+		return nil, core.E("native.sdpaVector2Pass1PipelineICB", name, err)
+	}
+	if fn == nil || fn.GetID() == 0 {
+		return nil, core.NewError("native.sdpaVector2Pass1PipelineICB: kernel " + name + " not found")
+	}
+	desc := metal.NewMTLComputePipelineDescriptor()
+	desc.SetComputeFunction(fn)
+	desc.SetSupportIndirectCommandBuffers(true)
+	pso, err := device.NewComputePipelineStateWithDescriptorOptionsReflectionError(desc, 0, nil)
+	if err != nil {
+		return nil, core.E("native.sdpaVector2Pass1PipelineICB", "pipeline "+name, err)
+	}
+	icbPSOCache[key] = pso
+	return pso, nil
+}
+
+// sdpaVector2Pass2PipelineICB builds the ICB-recordable sdpa_vector_2pass_2 combine
+// kernel (plain function, no constants — blocks arrives inlined at bind 4) with
+// supportIndirectCommandBuffers set.
+func sdpaVector2Pass2PipelineICB(headDim int) (metal.MTLComputePipelineState, error) {
+	name := core.Sprintf("sdpa_vector_2pass_2_bfloat16_t_%d", headDim)
+	key := name + "|icb"
+	icbPSOMu.Lock()
+	defer icbPSOMu.Unlock()
+	if pso, ok := icbPSOCache[key]; ok {
+		return pso, nil
+	}
+	if library == nil || library.GetID() == 0 {
+		return nil, core.NewError("native.sdpaVector2Pass2PipelineICB: library unavailable")
+	}
+	fn := library.NewFunctionWithName(name)
+	if fn == nil || fn.GetID() == 0 {
+		return nil, core.NewError("native.sdpaVector2Pass2PipelineICB: kernel " + name + " not found")
+	}
+	desc := metal.NewMTLComputePipelineDescriptor()
+	desc.SetComputeFunction(fn)
+	desc.SetSupportIndirectCommandBuffers(true)
+	pso, err := device.NewComputePipelineStateWithDescriptorOptionsReflectionError(desc, 0, nil)
+	if err != nil {
+		return nil, core.E("native.sdpaVector2Pass2PipelineICB", "pipeline "+name, err)
+	}
+	icbPSOCache[key] = pso
+	return pso, nil
+}
+
 func sdpaVectorPipelineICBForHeadDim(headDim int) (metal.MTLComputePipelineState, error) {
 	icbPSOMu.Lock()
 	if pso, ok := sdpaVectorICBHeadDimPSOCache[headDim]; ok {
