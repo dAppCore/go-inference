@@ -67,7 +67,11 @@ func FormatChatTemplateWithConfig(messages []inference.Message, cfg ChatTemplate
 	}
 	if !cfg.NoGenerationPrompt {
 		builder.WriteString("<|turn>model\n")
-		if !cfg.EnableThinking {
+		// Only the large-variant templates (12B/26B/31B) pre-close an empty
+		// thought channel on a thinking-off generation cue; the E2B/E4B
+		// chat_template.jinja has no such branch, so appending it there ships
+		// bytes the checkpoint was never trained on.
+		if !cfg.EnableThinking && cfg.LargeVariant {
 			builder.WriteString("<|channel>thought\n<channel|>")
 		}
 	}
