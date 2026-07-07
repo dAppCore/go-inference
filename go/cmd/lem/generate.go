@@ -39,6 +39,7 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 	fs := flag.NewFlagSet(cliCommandName("generate"), flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	prompt := fs.String("prompt", "Write a detailed Go function that reverses a singly linked list, with inline comments on every step, then explain the pointer dance.", "user prompt")
+	promptFile := fs.String("prompt-file", "", "read the user prompt from a file (long-context runs exceed argv limits); overrides -prompt")
 	maxTokens := fs.Int("max-tokens", 128, "tokens to generate")
 	draftPath := fs.String("draft", "auto", "MTP drafter: 'auto' detects one beside a Gemma 4 target (assistant/ pair layout, MTP/ gguf), a path forces it, '' disables")
 	draftBlock := fs.Int("draft-block", 0, "MTP draft block (verify forward = carried lead + block-1 proposals); 0 = engine default 4")
@@ -91,10 +92,25 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 		return 2
 	}
 
+	promptText := *prompt
+	if *promptFile != "" {
+		read := core.ReadFile(*promptFile)
+		if !read.OK {
+			core.Print(stderr, "%s generate: read -prompt-file %s: %s", cliName(), *promptFile, read.Error())
+			return 1
+		}
+		bytes, ok := read.Value.([]byte)
+		if !ok || len(bytes) == 0 {
+			core.Print(stderr, "%s generate: -prompt-file %s is empty", cliName(), *promptFile)
+			return 1
+		}
+		promptText = string(bytes)
+	}
+
 	native.SetPipelinedGPUDecode(*pipeline) // engine-level: -pipeline=false forces the chained serial loop
 	err := generate.RunGenerate(ctx, generate.Config{
 		ModelPath:  fs.Arg(0),
-		Prompt:     *prompt,
+		Prompt:     promptText,
 		MaxTokens:  *maxTokens,
 		Temp:       *temp,
 		Think:      *think,

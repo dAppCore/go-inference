@@ -301,3 +301,40 @@ func TestStepTokensBatchedDenseSyncsLinearCacheAfterPagedStep(t *testing.T) {
 		eqBytes(t, core.Sprintf("batched after paged row %d vs stepToken", i), batOut[i], seqOut[i])
 	}
 }
+
+// TestDenseBatchScratchAttnFoldGrowsWithRows pins the ~52K long-context corruption's root
+// cause: attnFold must reallocate its slabs when the batch row count GROWS, independent of
+// mlpFold. The production call order is mlpFold first (which raises the shared-looking
+// foldRowCap), then attnFold — the old attnFold keyed its growth check on foldRowCap and so
+// skipped the realloc for the one wide tail-absorbed chunk (window + tail rows), leaving every
+// attention slab short: rows past the stale capacity read/wrote out of bounds (undefined bytes,
+// NaN/garbage varying per process). The wide-chunk shape only occurs when promptLen mod window
+// lands in (0, window/2], which is why it escaped every fixed-size fixture.
+func TestDenseBatchScratchAttnFoldGrowsWithRows(t *testing.T) {
+	requireNativeRuntime(t)
+	const dModel, qDim, kvDim, dFF = 2048, 2048, 256, 8192
+	s := &denseBatchScratch{}
+	// the steady prompt chunks: window-sized batches
+	s.mlpFold(512, dModel, dFF)
+	normed, q, attn, attnOut, kSt, vSt := s.attnFold(512, dModel, qDim, kvDim)
+	if int(bufferLengthFast(q)) < 512*qDim*bf16Size {
+		t.Fatalf("baseline q slab too small: %d", bufferLengthFast(q))
+	}
+	_, _, _, _, _ = normed, attn, attnOut, kSt, vSt
+	// the wide tail-absorbed chunk: window + tail rows, mlpFold FIRST (production order)
+	const wide = 724
+	s.mlpFold(wide, dModel, dFF)
+	normed, q, attn, attnOut, kSt, vSt = s.attnFold(wide, dModel, qDim, kvDim)
+	check := func(name string, got, want int) {
+		t.Helper()
+		if got < want {
+			t.Fatalf("attnFold %s slab did not grow with the wide chunk: %d bytes, want >= %d — rows past the stale capacity read/write out of bounds", name, got, want)
+		}
+	}
+	check("attnNorm", int(bufferLengthFast(normed)), wide*dModel*bf16Size)
+	check("q", int(bufferLengthFast(q)), wide*qDim*bf16Size)
+	check("attn", int(bufferLengthFast(attn)), wide*qDim*bf16Size)
+	check("attnOut", int(bufferLengthFast(attnOut)), wide*dModel*bf16Size)
+	check("kStage", int(bufferLengthFast(kSt)), wide*kvDim*bf16Size)
+	check("vStage", int(bufferLengthFast(vSt)), wide*kvDim*bf16Size)
+}

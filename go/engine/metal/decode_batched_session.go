@@ -71,6 +71,8 @@ type denseBatchScratch struct {
 	attnOutPacked  metal.MTLBuffer // K × dModel O-projection outputs
 	kStagePacked   metal.MTLBuffer // K × kvDimMax staged K rows (ring-wrap landing)
 	vStagePacked   metal.MTLBuffer // K × kvDimMax staged V rows
+	attnRowCap     int // attnFold's OWN row capacity — NOT foldRowCap (mlpFold updates that first, which masked row growth and left these slabs short: the ~52K wide-tail-chunk corruption)
+	attnDModel     int
 	foldQDimCap    int
 	foldKVDimCap   int
 	// per-layer staging for the deferred-landing lane (the big-K staged sliding tail): each
@@ -100,16 +102,22 @@ func (s *denseBatchScratch) mlpFold(k, dModel, dFFMax int) (h, normed, gate, up,
 	return s.hPacked, s.mlpNormPacked, s.gatePacked, s.upPacked, s.gatedPacked, s.downPacked
 }
 
-// attnFold returns the attention-fold slabs, (re)allocating alongside mlpFold's sizing. Call after
-// mlpFold (it owns foldRowCap/foldDModel); qDimMax/kvDimMax are the widest per-layer head geometry.
+// attnFold returns the attention-fold slabs, (re)allocating when the batch width, model width or
+// the widest per-layer head geometry grows. Growth is tracked by attnFold's OWN attnRowCap /
+// attnDModel: the old code keyed on mlpFold's foldRowCap, which mlpFold (always called first)
+// had ALREADY raised for a wider chunk — attnFold then skipped its realloc and every attention
+// slab stayed at the old row count. At ~52K-token prompts the sliding-tail absorption produces
+// one chunk wider than all before it (window + tail), so rows past the stale capacity read and
+// wrote out of bounds: undefined bytes → per-process NaN/garbage → the long-context corruption.
 func (s *denseBatchScratch) attnFold(k, dModel, qDimMax, kvDimMax int) (normed, q, attn, attnOut, kStage, vStage metal.MTLBuffer) {
-	if s.attnNormPacked == nil || s.foldRowCap < k || s.foldDModel != dModel || s.foldQDimCap < qDimMax || s.foldKVDimCap < kvDimMax {
+	if s.attnNormPacked == nil || s.attnRowCap < k || s.attnDModel != dModel || s.foldQDimCap < qDimMax || s.foldKVDimCap < kvDimMax {
 		s.attnNormPacked = scratchBF16(k * dModel)
 		s.attnOutPacked = scratchBF16(k * dModel)
 		s.qPacked = scratchBF16(k * qDimMax)
 		s.attnPacked = scratchBF16(k * qDimMax)
 		s.kStagePacked = scratchBF16(k * kvDimMax)
 		s.vStagePacked = scratchBF16(k * kvDimMax)
+		s.attnRowCap, s.attnDModel = k, dModel
 		s.foldQDimCap, s.foldKVDimCap = qDimMax, kvDimMax
 	}
 	return s.attnNormPacked, s.qPacked, s.attnPacked, s.attnOutPacked, s.kStagePacked, s.vStagePacked

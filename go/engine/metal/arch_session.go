@@ -1867,6 +1867,7 @@ func (s *ArchSession) prefillRetainedTokensBatchedDense(ids []int32, scope strin
 
 func (s *ArchSession) prefillRetainedTokensBatchedDenseChunks(ids []int32, scope string) ([]byte, bool, error) {
 	var hidden []byte
+	chunk := 0
 	for len(ids) > 0 {
 		n := s.batchedDensePrefillChunkLen(len(ids))
 		if n <= 0 {
@@ -1876,6 +1877,29 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseChunks(ids []int32, scope
 		if err != nil || !ok {
 			return nil, ok, err
 		}
+		if argmaxDebugEnabled() {
+			if nan, first := bf16NaNScanBytes(nextHidden); nan > 0 {
+				nativeTraceLog(core.Sprintf("argmax-diag: batched prefill chunk %d (rows %d, pos now %d): boundary hidden NaN=%d first=%d\n",
+					chunk, n, s.pos, nan, first))
+				if views, verr := s.stateLayerViews(); verr == nil {
+					for _, v := range views {
+						kc, kf := bf16NaNScanBytes(v.keyBytes)
+						vc, vf := bf16NaNScanBytes(v.valueBytes)
+						if kc > 0 || vc > 0 {
+							sp := s.state.specs[v.layer]
+							at := "sliding"
+							if sp.Attention == model.GlobalAttention {
+								at = "GLOBAL "
+							}
+							rowB := kvHeadsOf(sp, s.arch.KVHeads) * headDimOf(sp, s.arch.HeadDim)
+							nativeTraceLog(core.Sprintf("argmax-diag:   L%2d %s owns=%v shareFrom=%d  K-NaN=%d(first row %d)  V-NaN=%d(first row %d)\n",
+								v.layer, at, sp.OwnsCache(), sp.KVShareFrom, kc, kf/rowB, vc, vf/rowB))
+						}
+					}
+				}
+			}
+		}
+		chunk++
 		hidden = nextHidden
 		ids = ids[n:]
 	}
