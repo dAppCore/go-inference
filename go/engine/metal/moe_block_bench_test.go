@@ -312,12 +312,12 @@ func BenchmarkMoEBlockQuantBufferOutputTop2Of4(b *testing.B) {
 	b.SetBytes(int64(len(h) + len(w.LocalGate.Packed) + len(w.ExpGate.Packed)))
 	resetResidentBufsForTest()
 	defer resetResidentBufsForTest()
-	if err := moeBlockQuantWithBufferOutputInPool(h, hBuf, out.buf, w, dModel, dFF, 1e-5); err != nil {
+	if err := moeBlockQuantWithBufferOutputInPool(h, hBuf, out.buf, w, dModel, dFF, 1e-5, nil); err != nil {
 		b.Fatal(err)
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := moeBlockQuantWithBufferOutputInPool(h, hBuf, out.buf, w, dModel, dFF, 1e-5); err != nil {
+		if err := moeBlockQuantWithBufferOutputInPool(h, hBuf, out.buf, w, dModel, dFF, 1e-5, nil); err != nil {
 			b.Fatal(err)
 		}
 	}
