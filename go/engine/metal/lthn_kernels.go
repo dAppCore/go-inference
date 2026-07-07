@@ -261,6 +261,31 @@ func moeWeightedSumPipeline() (metal.MTLComputePipelineState, error) {
 	return moeWeightedSumPSO, moeWeightedSumPSOErr
 }
 
+var (
+	moeCombineNormsPSOOnce sync.Once
+	moeCombineNormsPSO     metal.MTLComputePipelineState
+	moeCombineNormsPSOErr  error
+)
+
+// moeCombineNormsPipeline builds (once) the fused MoE norm/combine tail — five dispatches
+// (rms, rms, add, rms, residual add) as one, byte-identical rounding. Single-row rms only:
+// callers must fall back to the chain above rmsLoopedLimit.
+func moeCombineNormsPipeline() (metal.MTLComputePipelineState, error) {
+	moeCombineNormsPSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			moeCombineNormsPSOErr = core.NewError("native.moeCombineNormsPipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_moe_combine_norms_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			moeCombineNormsPSOErr = core.NewError("native.moeCombineNormsPipeline: kernel lthn_moe_combine_norms_bf16 not found")
+			return
+		}
+		moeCombineNormsPSO, moeCombineNormsPSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return moeCombineNormsPSO, moeCombineNormsPSOErr
+}
+
 func encMulScalarBF16(enc metal.MTLComputeCommandEncoder, in, scalar, out metal.MTLBuffer, scalarOffset uint, n int) error {
 	if n < 0 {
 		return core.NewError("native.encMulScalarBF16: n must be >= 0")
