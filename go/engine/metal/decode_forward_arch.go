@@ -273,6 +273,13 @@ type archDecodeState struct {
 	// test probes) — the session detects the miss and finishes that token serially.
 	chainTail func(enc metal.MTLComputeCommandEncoderObject, hidden metal.MTLBuffer) error
 
+	// chainSkipWait, with chainTail set, makes the step COMMIT its command buffer and return
+	// immediately — no wait, no host readback — leaving the committed cb in chainPendingCB.
+	// The submit-ahead decode uses this to encode token N+1 while N still runs; the caller
+	// owns the wait.
+	chainSkipWait bool
+	chainPendingCB metal.MTLCommandBufferObject
+
 	// icb, when non-nil, is the recorded arch ICB the session replays per token (the encode-bypass)
 	// instead of re-encoding via stepToken. Set at session build when icbEligible (no MoE, no trace,
 	// uniform head geometry + simple uniform rope — the ICB core's assumptions). It holds its OWN
@@ -1434,6 +1441,11 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 	}
 	endEncodingFast(enc)
 	commitCommandBufferFast(cb)
+	if s.chainSkipWait && s.chainTail != nil {
+		// submit-ahead: the caller waits on this cb (and reads the head scratch) later.
+		s.chainPendingCB = cb
+		return nil, nil
+	}
 	waitUntilCompletedFast(cb)
 	if pieceTimingOn { // diagnostic: the step CB's true GPU execution span vs its wall
 		chainedGPUSpanNs += int64(float64(cb.GPUEndTime()-cb.GPUStartTime()) * 1e9)
