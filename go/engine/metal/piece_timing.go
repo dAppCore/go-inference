@@ -34,6 +34,9 @@ var (
 	// pipelinedBatchDisabled forces the serial runBatch in DecodeForwardArchICBQuant (default: pipelined
 	// double-buffer for batches ≥4 tokens). Test hook to byte-compare serial vs pipelined.
 	pipelinedBatchDisabled bool
+	// moeConcurrentDisabled forces the serial (single-encoder) MoE block encode even when the
+	// concurrent-pass lane's gates hold. Test/bench hook for serial-vs-concurrent byte compares.
+	moeConcurrentDisabled bool
 	// stepGreedyChainDisabled forces the serial greedy+stepID decode loop (default: chain the prior
 	// token's stepBody with the next token's head+argmax in one command buffer). Test/bench hook.
 	stepGreedyChainDisabled bool

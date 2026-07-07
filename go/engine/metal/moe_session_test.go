@@ -232,6 +232,70 @@ func TestLoadGemma4QuantMoE(t *testing.T) {
 	t.Logf("mixed-precision MoE end to end: 4-bit experts + 8-bit local/router assemble → session generates %v; first token ≡ manual chain; config.json overrides dir-load ≡ in-memory", gen)
 }
 
+// TestLoadGemma4QuantMoEConcurrentMatchesSerial pins the concurrent-pass MoE encode to the
+// serial single-encoder path token for token: the pass reorders the SCHEDULE (explicit
+// barriers at the dependency edges, 3-way overlap where router/local/expert branches are
+// independent), never the values. An engagement counter guards against the vacuous compare.
+func TestLoadGemma4QuantMoEConcurrentMatchesSerial(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, nKV, headDim, vocab = 64, 2, 1, 64, 32
+	const dFF, expertDFF, numExperts, topK, numLayers = 128, 64, 4, 2, 2
+	const maxLen, n = 16, 6
+	quant := &model.QuantConfig{GroupSize: 64, Bits: 4, Overrides: map[string]model.ModuleQuant{}}
+	for i := range numLayers {
+		for _, m := range []string{"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "router.proj"} {
+			quant.Overrides[core.Sprintf("model.layers.%d.%s", i, m)] = model.ModuleQuant{GroupSize: 64, Bits: 8}
+		}
+	}
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+		EnableMoEBlock: true, NumExperts: numExperts, TopKExperts: topK, MoEIntermediateSize: expertDFF,
+		Quantization: quant,
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	ts := moeQuantTensors(t, arch, quant)
+	prompt := []int32{1, 5, 3}
+
+	gen := func(disableConcurrent bool) []int32 {
+		t.Helper()
+		moeConcurrentDisabled = disableConcurrent
+		defer func() { moeConcurrentDisabled = false }()
+		lm, aerr := model.Assemble(ts, arch, model.StandardWeightNames())
+		if aerr != nil {
+			t.Fatalf("model.Assemble: %v", aerr)
+		}
+		g, qerr := loadedToQuant(lm, quant.GroupSize, quant.Bits)
+		if qerr != nil {
+			t.Fatalf("loadedToQuant: %v", qerr)
+		}
+		sess, serr := NewArchQuantSession(g, arch, maxLen)
+		if serr != nil {
+			t.Fatalf("NewArchQuantSession: %v", serr)
+		}
+		out, gerr := sess.Generate(prompt, n, -1)
+		if gerr != nil {
+			t.Fatalf("Generate: %v", gerr)
+		}
+		return out
+	}
+	serial := gen(true)
+	before := moeConcurrentBlocks.Load()
+	concurrent := gen(false)
+	if moeConcurrentBlocks.Load() == before {
+		t.Fatal("concurrent MoE pass did not engage — the compare is vacuous")
+	}
+	if !idsEqual(concurrent, serial) {
+		t.Fatalf("concurrent MoE pass diverged from serial: %v != %v", concurrent, serial)
+	}
+	t.Logf("concurrent MoE pass ≡ serial over %d tokens (%v)", len(serial), serial)
+}
+
 func TestLoadGemma4QuantMoEFusedGateUpMatchesSplitExperts(t *testing.T) {
 	requireNativeRuntime(t)
 
