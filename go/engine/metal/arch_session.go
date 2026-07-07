@@ -887,7 +887,7 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 			// GPU next-inputs seam: produce the next step's emb+pli on-GPU from a token-id buffer (no host
 			// round-trip), the submit-ahead pipeline's gate. Handles e2b's shape only — 4-bit main + PLE
 			// embedding, bf16 PLE projection; other shapes leave it nil and keep the host path.
-			if bits == 4 && len(g.EmbedPerLayerScales) > 0 && len(g.PerLayerModelProjScales) == 0 {
+			if gatherBitsSupported(bits) && len(g.EmbedPerLayerScales) > 0 && len(g.PerLayerModelProjScales) == 0 {
 				numLayers, pliDim, dModel := len(arch.Layer), arch.PerLayerInputHidden, arch.Hidden
 				plDim := numLayers * pliDim
 				embScalePLE := float32(math.Sqrt(float64(pliDim)))
@@ -925,7 +925,7 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 			// matvec runs as the standard steel qmv instead of the bf16 gemv. This is
 			// what lets qat e2b/e4b ride the chained/pipelined decode like the plain
 			// 4-bit conversions do.
-			if bits == 4 && len(g.EmbedPerLayerScales) > 0 && len(g.PerLayerModelProjScales) > 0 &&
+			if gatherBitsSupported(bits) && len(g.EmbedPerLayerScales) > 0 && len(g.PerLayerModelProjScales) > 0 &&
 				g.PerLayerModelProjGS > 0 && g.PerLayerModelProjBits > 0 {
 				numLayers, pliDim, dModel := len(arch.Layer), arch.PerLayerInputHidden, arch.Hidden
 				plDim := numLayers * pliDim
@@ -954,7 +954,7 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 						g.PerLayerProjNormW, ids, embs, slab, numLayers, pliDim, dModel, arch.Eps)
 				}
 			}
-		} else if bits == 4 {
+		} else if gatherBitsSupported(bits) {
 			// GPU next-inputs seam, non-PLE dense (12B/31B): the only per-step input
 			// is the token's embedding, so the seam is the embed gather alone — no
 			// PLE stage, and the plGPUScratch the chain hands through is a zero-value
@@ -2395,7 +2395,12 @@ func (s *ArchSession) generateFromLogitsInPool(firstLogits []byte, maxNew, eosID
 	gen := make([]int32, 0, maxNew)
 	gen = append(gen, next)
 	stop := (yield != nil && !yield(next)) || (eosID >= 0 && int(next) == eosID)
+	// The chained/pipelined tails consume the GPU argmax head MID-CHAIN (the next step's input
+	// binds the head's token buffer with no host round-trip) — engaging without it fails at the
+	// first link. The head requirement is the head's own capability, not the input seam's: the
+	// old bits==4 seam gate masked this until the gather widened to every affine width.
 	if s.encNextInputsGPU != nil && s.plScratchNew != nil && s.state.icb != nil && s.headEnc != nil && s.greedy != nil &&
+		s.canUseDirectHeadGreedy() &&
 		!stepGreedyChainDisabled && !chainedGPUInputsDisabled && !icbDisabledForTest && transform == nil {
 		if pipelinedGPUDecodeEnabled && s.recordPeerICB != nil {
 			return s.generatePipelinedGPUTail(gen, maxNew, eosID, suppress, yield, stop)
@@ -4145,7 +4150,12 @@ func (s *ArchSession) generateFromHiddenInPool(hidden []byte, maxNew, eosID int,
 	// Chained-GPU decode (e2b): the prior step produces the next step's emb+pli on-GPU (encNextInputsGPU
 	// appended to the step's command buffer), so each token is ONE command buffer with no host embed/PLE.
 	// transform would change the token after the GPU already embedded it, so only when transform == nil.
+	// The chained/pipelined tails consume the GPU argmax head MID-CHAIN (the next step's input
+	// binds the head's token buffer with no host round-trip) — engaging without it fails at the
+	// first link. The head requirement is the head's own capability, not the input seam's: the
+	// old bits==4 seam gate masked this until the gather widened to every affine width.
 	if s.encNextInputsGPU != nil && s.plScratchNew != nil && s.state.icb != nil && s.headEnc != nil && s.greedy != nil &&
+		s.canUseDirectHeadGreedy() &&
 		!stepGreedyChainDisabled && !chainedGPUInputsDisabled && !icbDisabledForTest && transform == nil {
 		if pipelinedGPUDecodeEnabled && s.recordPeerICB != nil {
 			return s.generatePipelinedGPUTail(gen, maxNew, eosID, suppress, yield, stop)

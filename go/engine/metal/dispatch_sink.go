@@ -528,7 +528,9 @@ func emitEmbedGatherQuant[S dispatchSink](sink S, pso metal.MTLComputePipelineSt
 
 // emitEmbedGatherQuantAt is emitEmbedGatherQuant with the token id and output row bound at byte
 // offsets — the batched PLE slab builder binds token i of a K-id buffer and lands each gathered
-// row at its token-major staging offset, all inside one command buffer.
+// row at its token-major staging offset, all inside one command buffer. bits (index 10) selects
+// the kernel's generic LSB-first unpack width — 4-bit lands byte-identically to the old nibble
+// read (same code values, same fma).
 func emitEmbedGatherQuantAt[S dispatchSink](sink S, pso metal.MTLComputePipelineState, tokenBuf metal.MTLBuffer, tokenOff uint, packed, scales, biases, out metal.MTLBuffer, outOff, packedOff, scalesOff, biasesOff uint, dModel, groupSize, bits int, embedScale float32) {
 	rowPacked := dModel * bits / 8
 	rowSB := dModel / groupSize
@@ -543,6 +545,7 @@ func emitEmbedGatherQuantAt[S dispatchSink](sink S, pso metal.MTLComputePipeline
 	sink.setF32(embedScale, 7)
 	sink.setI32(int32(rowPacked), 8)
 	sink.setI32(int32(rowSB), 9)
+	sink.setI32(int32(bits), 10)
 	sink.dispatchThreads(
 		metal.MTLSize{Width: uint(dModel), Height: 1, Depth: 1},
 		metal.MTLSize{Width: uint(elemGroupTG(dModel)), Height: 1, Depth: 1},

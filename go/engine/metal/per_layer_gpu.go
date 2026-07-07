@@ -350,8 +350,8 @@ func perLayerInputsGPUInto(out []byte, tokenID int32, emb []byte, embedPacked, e
 	if err := ensureInit(); err != nil {
 		return nil, err
 	}
-	if embBits != 4 {
-		return nil, core.NewError("native.PerLayerInputsGPU: per-layer embedding must be 4-bit")
+	if !gatherBitsSupported(embBits) {
+		return nil, core.NewError("native.PerLayerInputsGPU: unsupported per-layer embedding width")
 	}
 	plDim := numLayers * pliDim
 	gpso, err := embedGatherPipeline()

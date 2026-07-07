@@ -127,22 +127,27 @@ func TestEmbedGatherQuantParity(t *testing.T) {
 	if !gpuHasGeluKernel() {
 		t.Skip("custom kernel library not loaded")
 	}
-	const vocab, dModel, gs, bits = 256, 1536, 64, 4
+	const vocab, dModel, gs = 256, 1536, 64
 	const scale = float32(0.5)
-	packed, scales, biases := embedGatherQuantFixture(vocab, dModel, gs, bits)
-
-	for _, tok := range []int32{0, 5, 42, 255} {
-		ref, err := embedTokenQuant(packed, scales, biases, tok, vocab, dModel, gs, bits, scale)
-		if err != nil {
-			t.Fatalf("tok %d: embedTokenQuant: %v", tok, err)
-		}
-		got, err := EmbedGatherQuantBF16(tok, packed, scales, biases, dModel, gs, bits, scale)
-		if err != nil {
-			t.Fatalf("tok %d: EmbedGatherQuantBF16: %v", tok, err)
-		}
-		if cos := cosineBF16(got, ref); cos < 0.99999 {
-			t.Fatalf("tok %d: GPU embed-gather cosine=%.7f vs host embedTokenQuant", tok, cos)
+	// every width MLX's affine quantiser emits: the kernel's generic LSB-first unpack must
+	// track the host extractAffineCode oracle BYTE-for-byte (the chained decode's input seam
+	// depends on exact bytes; 3/5/6-bit span byte boundaries — the widths the old nibble-only
+	// kernel could not decode).
+	for _, bits := range []int{2, 3, 4, 5, 6, 8} {
+		packed, scales, biases := embedGatherQuantFixture(vocab, dModel, gs, bits)
+		for _, tok := range []int32{0, 5, 42, 255} {
+			ref, err := embedTokenQuant(packed, scales, biases, tok, vocab, dModel, gs, bits, scale)
+			if err != nil {
+				t.Fatalf("b%d tok %d: embedTokenQuant: %v", bits, tok, err)
+			}
+			got, err := EmbedGatherQuantBF16(tok, packed, scales, biases, dModel, gs, bits, scale)
+			if err != nil {
+				t.Fatalf("b%d tok %d: EmbedGatherQuantBF16: %v", bits, tok, err)
+			}
+			if !bytes.Equal(got, ref) {
+				t.Fatalf("b%d tok %d: GPU embed-gather differs from host embedTokenQuant (cosine=%.7f)", bits, tok, cosineBF16(got, ref))
+			}
 		}
 	}
-	t.Logf("GPU embed-gather matches host embedTokenQuant")
+	t.Logf("GPU embed-gather matches host embedTokenQuant byte-for-byte at every affine width")
 }
