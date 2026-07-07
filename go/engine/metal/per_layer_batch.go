@@ -185,6 +185,113 @@ func perLayerInputsBatchIntoSlab(sc *pleBatchScratch, embedPerLayer []byte, proj
 	return true, nil
 }
 
+// perLayerInputsBatchQuantIntoSlab is perLayerInputsBatchIntoSlab for the QUANT PLE shapes —
+// the -4bit conversions carry a 4-bit per-layer embedding table (gathered per token with the
+// quant dequant-gather kernel) and either a resident bf16 model projection (plain 4-bit, steel
+// GEMM) or a quantised one (QAT, qmm_t). Same scratch, same batched tail, same relayout; the
+// slab lands host-side exactly like the bf16 builder so every consumer is unchanged.
+func perLayerInputsBatchQuantIntoSlab(
+	sc *pleBatchScratch,
+	tablePacked, tableScales, tableBiases metal.MTLBuffer, tableGS, tableBits int,
+	projW metal.MTLBuffer, projWOff uint,
+	projPacked, projScales, projBiases metal.MTLBuffer, projGS, projBits int,
+	projNormW []byte,
+	ids []int32, embs [][]byte, slab []byte,
+	numLayers, pliDim, dModel int, eps float32,
+) (bool, error) {
+	k := len(ids)
+	plDim := numLayers * pliDim
+	if tablePacked == nil || tableScales == nil || tableBiases == nil || k < steelGEMMMinRows || len(projNormW) != pliDim*bf16Size {
+		return false, nil
+	}
+	if projPacked == nil && projW == nil {
+		return false, nil
+	}
+	if len(slab) != k*plDim*bf16Size {
+		return false, core.NewError("native.perLayerInputsBatchQuant: slab size mismatch")
+	}
+	gatherPSO, gerr := embedGatherPipeline()
+	relayoutPSO, rerr := pleRelayoutPipeline()
+	if gerr != nil || rerr != nil {
+		return false, nil // kernels unavailable — the per-token loop still works
+	}
+	if projPacked != nil {
+		if dModel%projGS != 0 {
+			return false, nil
+		}
+		if _, perr := pipelineFor(qmmTKernelName(plDim, projGS, projBits)); perr != nil {
+			return false, nil
+		}
+	}
+	embScale := float32(math.Sqrt(float64(pliDim)))
+	projScale := float32(1.0 / math.Sqrt(float64(dModel)))
+	sc.ensure(k, plDim, dModel, projScale, gemma4PerLayerCombineScale)
+
+	rowBytes := dModel * bf16Size
+	for i, emb := range embs {
+		if len(emb) != rowBytes {
+			return false, core.NewError("native.perLayerInputsBatchQuant: hidden row size mismatch")
+		}
+		copy(sc.hidden[i*rowBytes:(i+1)*rowBytes], emb)
+	}
+	copy(unsafe.Slice((*int32)(sc.idsBuf.Contents()), k), ids)
+	copy(unsafe.Slice((*byte)(sc.hiddenBuf.Contents()), len(sc.hidden)), sc.hidden)
+
+	var encErr error
+	engaged := false
+	withAutoreleasePool(func() {
+		cb := commandBufferFast(queue)
+		enc := computeCommandEncoderFast(cb)
+		// K quant dequant-gathers of the per-layer table (each row lands token-major, scaled)
+		for i := range k {
+			emitEmbedGatherQuantAt(encSink{enc}, gatherPSO, sc.idsBuf, uint(i*4), tablePacked, tableScales, tableBiases, sc.perLayerBuf, uint(i*plDim*bf16Size), 0, 0, 0, plDim, tableGS, tableBits, embScale)
+		}
+		// projected[K, plDim] = hidden[K, dModel] @ projWᵀ — one weight sweep for the chunk
+		if projPacked != nil {
+			encErr = encQMMTBF16At(enc, projPacked, projScales, projBiases, sc.hiddenBuf, sc.projectedBuf, 0, 0, 0, 0, 0, k, plDim, dModel, projGS, projBits)
+		} else if !encGemmBF16NT(enc, projW, sc.hiddenBuf, sc.projectedBuf, projWOff, 0, 0, plDim, dModel, k) {
+			endEncodingFast(enc)
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+			return // steel unavailable — fall back to the per-token loop
+		}
+		if encErr == nil {
+			// ×1/√dModel → rms per (token,layer) row → +perLayer → ×1/√2, all batched
+			if encErr = encMulRowsBF16(enc, sc.projectedBuf, sc.projScaleBuf, sc.projectedBuf, 0, 0, 0, k*plDim, 1); encErr == nil {
+				if encErr = encRMSNormRowsBF16(enc, sc.projectedBuf, residentBytes(projNormW), sc.normedBuf, 0, 0, 0, k*numLayers, pliDim, eps); encErr == nil {
+					if encErr = encAddBF16To(enc, sc.normedBuf, sc.perLayerBuf, sc.normedBuf, 0, 0, 0, k*plDim); encErr == nil {
+						encErr = encMulRowsBF16(enc, sc.normedBuf, sc.combineScaleBuf, sc.normedBuf, 0, 0, 0, k*plDim, 1)
+					}
+				}
+			}
+		}
+		if encErr == nil {
+			// token-major → layer-major on-device (projectedBuf is free after the rms consumed it)
+			sink := encSink{enc}
+			sink.setPSO(relayoutPSO)
+			sink.setBuf(sc.normedBuf, 0, 0)
+			sink.setBuf(sc.projectedBuf, 0, 1)
+			sink.setI32(int32(k), 2)
+			sink.setI32(int32(numLayers), 3)
+			sink.setI32(int32(pliDim), 4)
+			n := k * plDim
+			sink.dispatchThreads(
+				metal.MTLSize{Width: uint(n), Height: 1, Depth: 1},
+				metal.MTLSize{Width: uint(elemGroupTG(n)), Height: 1, Depth: 1},
+			)
+		}
+		endEncodingFast(enc)
+		commitCommandBufferFast(cb)
+		waitUntilCompletedFast(cb)
+		engaged = encErr == nil
+	})
+	if encErr != nil || !engaged {
+		return false, encErr
+	}
+	copy(slab, unsafe.Slice((*byte)(sc.projectedBuf.Contents()), len(slab)))
+	return true, nil
+}
+
 type plHostScratchKey struct {
 	plDim, dModel int
 	projScale     [2]byte

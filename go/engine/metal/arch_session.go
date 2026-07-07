@@ -909,6 +909,16 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 					encEmbedGatherQuantObject(enc, gpso, tokenBuf, embedPackedBuf, embedScalesBuf, embedBiasesBuf, embOut, 0, 0, 0, dModel, gs, bits, embedScale)
 					return encPerLayerInputsGPUObject(enc, gpso, tokenBuf, embOut, plePackedBuf, pleScalesBuf, pleBiasesBuf, 0, 0, 0, projWBuf, projWOff, pleNormBuf, sc, numLayers, pliDim, dModel, gs, bits, embScalePLE, arch.Eps)
 				}
+				// the K-token slab builder (quant table + bf16 steel projection): the prompt
+				// prefill's PLE inputs on-GPU instead of the per-token host loop that idled
+				// the GPU ~a third of every chunk.
+				plainBatchScratch := &pleBatchScratch{}
+				sess.perLayerInputBatch = func(ids []int32, embs [][]byte, slab []byte) (bool, error) {
+					return perLayerInputsBatchQuantIntoSlab(plainBatchScratch,
+						plePackedBuf, pleScalesBuf, pleBiasesBuf, gs, bits,
+						projWBuf, projWOff, nil, nil, nil, 0, 0,
+						g.PerLayerProjNormW, ids, embs, slab, numLayers, pliDim, dModel, arch.Eps)
+				}
 			}
 			// GPU next-inputs seam, QAT shape: same PLE tower but the per-layer model
 			// projection ships QUANTISED (own gs/bits from the shapes) — the projection
@@ -934,6 +944,14 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 					}
 					encEmbedGatherQuantObject(enc, gpso, tokenBuf, embedPackedBuf, embedScalesBuf, embedBiasesBuf, embOut, 0, 0, 0, dModel, gs, bits, embedScale)
 					return encPerLayerInputsGPUQuantProjObject(enc, gpso, tokenBuf, embOut, plePackedBuf, pleScalesBuf, pleBiasesBuf, 0, 0, 0, projPackedBuf, projScalesBuf, projBiasesBuf, projGS, projBits, pleNormBuf, sc, numLayers, pliDim, dModel, gs, bits, embScalePLE, arch.Eps)
+				}
+				// the K-token slab builder (quant table + quant qmm_t projection — QAT shape)
+				qatBatchScratch := &pleBatchScratch{}
+				sess.perLayerInputBatch = func(ids []int32, embs [][]byte, slab []byte) (bool, error) {
+					return perLayerInputsBatchQuantIntoSlab(qatBatchScratch,
+						plePackedBuf, pleScalesBuf, pleBiasesBuf, gs, bits,
+						nil, 0, projPackedBuf, projScalesBuf, projBiasesBuf, projGS, projBits,
+						g.PerLayerProjNormW, ids, embs, slab, numLayers, pliDim, dModel, arch.Eps)
 				}
 			}
 		} else if bits == 4 {

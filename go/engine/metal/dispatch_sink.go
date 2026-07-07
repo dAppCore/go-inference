@@ -523,14 +523,21 @@ func emitVProjHeadRMS[S dispatchSink](sink S, pso metal.MTLComputePipelineState,
 // rowPacked=8, rowSB=9. The token buffer is intentionally caller-provided so decode can bind the
 // previous GPU argmax output without a host round-trip.
 func emitEmbedGatherQuant[S dispatchSink](sink S, pso metal.MTLComputePipelineState, tokenBuf, packed, scales, biases, out metal.MTLBuffer, packedOff, scalesOff, biasesOff uint, dModel, groupSize, bits int, embedScale float32) {
+	emitEmbedGatherQuantAt(sink, pso, tokenBuf, 0, packed, scales, biases, out, 0, packedOff, scalesOff, biasesOff, dModel, groupSize, bits, embedScale)
+}
+
+// emitEmbedGatherQuantAt is emitEmbedGatherQuant with the token id and output row bound at byte
+// offsets — the batched PLE slab builder binds token i of a K-id buffer and lands each gathered
+// row at its token-major staging offset, all inside one command buffer.
+func emitEmbedGatherQuantAt[S dispatchSink](sink S, pso metal.MTLComputePipelineState, tokenBuf metal.MTLBuffer, tokenOff uint, packed, scales, biases, out metal.MTLBuffer, outOff, packedOff, scalesOff, biasesOff uint, dModel, groupSize, bits int, embedScale float32) {
 	rowPacked := dModel * bits / 8
 	rowSB := dModel / groupSize
 	sink.setPSO(pso)
-	sink.setBuf(tokenBuf, 0, 0)
+	sink.setBuf(tokenBuf, tokenOff, 0)
 	sink.setBuf(packed, packedOff, 1)
 	sink.setBuf(scales, scalesOff, 2)
 	sink.setBuf(biases, biasesOff, 3)
-	sink.setBuf(out, 0, 4)
+	sink.setBuf(out, outOff, 4)
 	sink.setI32(int32(dModel), 5)
 	sink.setI32(int32(groupSize), 6)
 	sink.setF32(embedScale, 7)
