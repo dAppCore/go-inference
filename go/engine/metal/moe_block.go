@@ -1634,16 +1634,17 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, routerScra
 	if err != nil {
 		return false, nil
 	}
-	if expDownBits != 4 {
+	if !affineBitsSupported(expDownBits) {
 		return false, nil
 	}
 	inGroup, inBits, inRows := expGateGroupSize, expGateBits, expertDFF
 	if fusedExperts {
-		if expGateUpBits != 4 {
+		if !affineBitsSupported(expGateUpBits) {
 			return false, nil
 		}
 		inGroup, inBits, inRows = expGateUpGroupSize, expGateUpBits, 2*expertDFF
-	} else if expGateBits != 4 || expUpBits != 4 || expGateGroupSize != expUpGroupSize {
+	} else if !affineBitsSupported(expGateBits) || expGateBits != expUpBits || expGateGroupSize != expUpGroupSize {
+		// gate + up share one gather PSO — width and group size must agree between them.
 		return false, nil
 	}
 	gatherExpertInPSO, err := gatherQMVBF16SteelPipeline(expertDFF, dModel, inGroup, inBits)
@@ -2031,11 +2032,11 @@ func moeBlockQuantAfterRouterWithDeviceIndexBufferPooled(h []byte, hBuf metal.MT
 		}
 	}
 	hostIdxAvailable := len(idx) == topK
-	useGatherExperts := (idxBuf != nil || hostIdxAvailable) && topK > 0 && expDownBits == 4
+	useGatherExperts := (idxBuf != nil || hostIdxAvailable) && topK > 0 && affineBitsSupported(expDownBits)
 	if fusedExperts {
-		useGatherExperts = useGatherExperts && expGateUpBits == 4
+		useGatherExperts = useGatherExperts && affineBitsSupported(expGateUpBits)
 	} else {
-		useGatherExperts = useGatherExperts && expGateBits == 4 && expUpBits == 4 && expGateGroupSize == expUpGroupSize && expGateBits == expUpBits
+		useGatherExperts = useGatherExperts && affineBitsSupported(expGateBits) && expGateBits == expUpBits && expGateGroupSize == expUpGroupSize
 	}
 	var gatherExpertInPSO, gatherExpertDownPSO metal.MTLComputePipelineState
 	var gatherExpertInMeta, gatherExpertDownMeta *gatherQMVBF16Meta
@@ -2730,14 +2731,14 @@ func quantMoEDeviceRouterBuffersUsable(w MoEQuantLayerWeights, dModel int) bool 
 	}
 	expertDFF, numExperts := w.ExpertDFF, w.NumExperts
 	downGroup, downBits := quantWeightGeometryForShape(w.ExpDown, numExperts*dModel, expertDFF, w.ExpertGroupSize, w.ExpertBits)
-	if downGroup <= 0 || downBits != 4 || expertDFF%downGroup != 0 {
+	if downGroup <= 0 || !affineBitsSupported(downBits) || expertDFF%downGroup != 0 {
 		return false
 	}
 	if len(w.ExpGateUp.Packed) > 0 {
 		gateUpGroup, gateUpBits := quantWeightGeometryForShape(w.ExpGateUp, numExperts*2*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
-		return gateUpGroup > 0 && gateUpBits == 4 && dModel%gateUpGroup == 0
+		return gateUpGroup > 0 && affineBitsSupported(gateUpBits) && dModel%gateUpGroup == 0
 	}
 	gateGroup, gateBits := quantWeightGeometryForShape(w.ExpGate, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
 	upGroup, upBits := quantWeightGeometryForShape(w.ExpUp, numExperts*expertDFF, dModel, w.ExpertGroupSize, w.ExpertBits)
-	return gateGroup > 0 && upGroup > 0 && gateBits == 4 && upBits == 4 && dModel%gateGroup == 0 && dModel%upGroup == 0 && gateGroup == upGroup && gateBits == upBits
+	return gateGroup > 0 && upGroup > 0 && affineBitsSupported(gateBits) && gateBits == upBits && dModel%gateGroup == 0 && dModel%upGroup == 0 && gateGroup == upGroup
 }
