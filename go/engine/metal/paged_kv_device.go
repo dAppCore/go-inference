@@ -490,6 +490,15 @@ func encAttnHalfKVPaged(
 	}
 
 	// ---- serial path (hazard tracking orders every edge) ----
+	// Under the profiler the attention half splits at its family seams — proj
+	// (norm + q/k/v projections + ropes) | sdpa (both passes) | tail (o-proj +
+	// residual) — so the ranked table can tell weight-read time from attention
+	// math from launch overhead. prof==nil (production) encodes exactly as before.
+	if prof != nil {
+		endEncodingFast(enc)
+		enc = prof.encoderFor(cb, "attn.proj")
+		encI = metal.MTLComputeCommandEncoder(enc)
+	}
 	if err := encRMSNormBF16(encI, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
 		return enc, err
 	}
@@ -539,8 +548,18 @@ func encAttnHalfKVPaged(
 			return enc, err
 		}
 	}
+	if prof != nil {
+		endEncodingFast(enc)
+		enc = prof.encoderFor(cb, "attn.sdpa")
+		encI = metal.MTLComputeCommandEncoder(enc)
+	}
 	sdpaPlan.emitP1s(encI)
 	sdpaPlan.emitP2(encI)
+	if prof != nil {
+		endEncodingFast(enc)
+		enc = prof.encoderFor(cb, "attn.tail")
+		encI = metal.MTLComputeCommandEncoder(enc)
+	}
 	if err := proj.project(encI, sc.attn, sc.attnOut, 0, projO); err != nil {
 		return enc, err
 	}

@@ -157,9 +157,9 @@ func TestRealMoE26BFamilyGPUProfile(t *testing.T) {
 	}
 	t.Logf("profiling at position ~%d (maxLen %d)", len(prompt)+warmup, maxLen)
 
-	// 5 sampled encoders per layer per token (attn, moe.router, moe.local, moe.expert,
-	// moe.tail) + slack for the first encoder.
-	prof, err := newGPUCounterProfiler((5*len(lm.Arch.Layer) + 4) * N)
+	// 8 sampled encoders per layer per token (attn, attn.proj, attn.sdpa, attn.tail,
+	// moe.router, moe.local, moe.expert, moe.tail) + slack for the first encoder.
+	prof, err := newGPUCounterProfiler((8*len(lm.Arch.Layer) + 4) * N)
 	if err != nil {
 		t.Skipf("timestamp counter sampling unavailable: %v", err)
 	}
