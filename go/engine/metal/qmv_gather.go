@@ -7,6 +7,7 @@ package native
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	core "dappco.re/go"
@@ -176,12 +177,102 @@ func gatherQMVAllRoutesMetadata(numExperts, outDim, inDim, groupSize, bits, expe
 
 var gatherQMVAllRoutesRHS sync.Map
 
+// leanGatherDispatches counts all-routes gathers that ran the lean fc-specialised
+// lthn_gather_qmv kernel instead of MLX's shape/stride-buffer ABI (#280). Engagement
+// counter for the A/B tests — a compare that never engaged the lane proves nothing.
+var leanGatherDispatches atomic.Int64
+
+type lthnGatherQMVKey struct {
+	groupSize, bits, expertRows int
+	fast, batchedX              bool
+}
+
+var (
+	lthnGatherQMVPSOMu    sync.Mutex
+	lthnGatherQMVPSOCache = map[lthnGatherQMVKey]metal.MTLComputePipelineState{}
+)
+
+// lthnGatherQMVPipeline resolves (and caches, including failures) the fc-specialised
+// lean gather kernel for a geometry: expert_rows and batched_x bake as function
+// constants on the group_size/bits template instance. A miss — custom library absent,
+// or a gs/bits pair outside the instantiated set — caches nil so the caller falls back
+// to MLX's affine_gather_qmv path without re-probing per dispatch.
+func lthnGatherQMVPipeline(key lthnGatherQMVKey) (metal.MTLComputePipelineState, bool) {
+	lthnGatherQMVPSOMu.Lock()
+	defer lthnGatherQMVPSOMu.Unlock()
+	if pso, ok := lthnGatherQMVPSOCache[key]; ok {
+		return pso, pso != nil
+	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		lthnGatherQMVPSOCache[key] = nil
+		return nil, false
+	}
+	variant := "lthn_gather_qmv_"
+	if key.fast {
+		variant = "lthn_gather_qmv_fast_"
+	}
+	name := core.Sprintf("%sbfloat16_t_gs_%d_b_%d", variant, key.groupSize, key.bits)
+	fc := metal.NewMTLFunctionConstantValues()
+	rows := int32(key.expertRows)
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&rows), metal.MTLDataTypeInt, 0)
+	batched := key.batchedX
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&batched), metal.MTLDataTypeBool, 1)
+	fn, err := customLibrary.NewFunctionWithNameConstantValuesError(name, fc)
+	if err != nil || fn == nil || fn.GetID() == 0 {
+		lthnGatherQMVPSOCache[key] = nil
+		return nil, false
+	}
+	pso, perr := device.NewComputePipelineStateWithFunctionError(fn)
+	if perr != nil {
+		lthnGatherQMVPSOCache[key] = nil
+		return nil, false
+	}
+	lthnGatherQMVPSOCache[key] = pso
+	return pso, true
+}
+
+// emitLthnGatherQMVRoutes is the LEAN all-routes gather dispatch: same grid, same
+// arithmetic (the kernel calls MLX's qmv[_fast]_impl), but the expert addressing is
+// baked into the PSO so the shape/stride constant buffers and their ndim scalars are
+// never bound or read — setPSO + 7 setBuf + 2 setI32 versus the MLX path's 14+6.
+func emitLthnGatherQMVRoutes(sink encSink, pso metal.MTLComputePipelineState, x metal.MTLBuffer, xOff uint, wq metal.MTLBuffer, wqOff uint, scales metal.MTLBuffer, scalesOff uint, biases metal.MTLBuffer, biasesOff uint, lhsIdx, rhsIdx metal.MTLBuffer, rhsOff uint, out metal.MTLBuffer, outOff uint, outDim, inDim, groupSize, bits, rowBase, routes int) {
+	rowPackedBytes := inDim * bits / 8
+	groups := inDim / groupSize
+	sink.setPSO(pso)
+	sink.setBuf(wq, wqOff+uint(rowBase*rowPackedBytes), 0)
+	sink.setBuf(scales, scalesOff+uint(rowBase*groups*bf16Size), 1)
+	sink.setBuf(biases, biasesOff+uint(rowBase*groups*bf16Size), 2)
+	sink.setBuf(x, xOff, 3)
+	sink.setBuf(lhsIdx, 0, 4)
+	sink.setBuf(rhsIdx, rhsOff, 5)
+	sink.setBuf(out, outOff, 6)
+	sink.setI32(int32(inDim), 7)
+	sink.setI32(int32(outDim), 8)
+	const bn, bk = 8, 32
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: 1, Height: uint((outDim + bn - 1) / bn), Depth: uint(routes)},
+		metal.MTLSize{Width: bk, Height: 2, Depth: 1},
+	)
+}
+
 // emitGatherQMVAllRoutes dispatches one gather_qmv covering EVERY route: grid.z carries the
 // routes, rhs_indices supplies each route's expert id (the router's device idxBuf), and the
 // x/lhs binding either shares one row (gate/up) or walks the per-route gated rows (down).
-// Out is the [routes × outDim] slab. xBatchNdims/xBatchStride express the batched-x case
-// through MLX's x batch machinery (x.shape/strides bound at 10/11 stay the trailing 2-D).
+// Out is the [routes × outDim] slab. When the lean fc-specialised kernel is available the
+// dispatch routes through it (#280); otherwise xBatchNdims/xBatchStride express the batched-x
+// case through MLX's x batch machinery (x.shape/strides bound at 10/11 stay the trailing 2-D).
 func emitGatherQMVAllRoutes(sink encSink, pso metal.MTLComputePipelineState, meta *gatherQMVBF16Meta, metaKey gatherQMVAllRoutesMetaKey, x metal.MTLBuffer, xOff uint, wq metal.MTLBuffer, wqOff uint, scales metal.MTLBuffer, scalesOff uint, biases metal.MTLBuffer, biasesOff uint, lhsIdx, rhsIdx metal.MTLBuffer, rhsOff uint, out metal.MTLBuffer, outOff uint, outDim, inDim, groupSize, bits, rowBase, routes int) {
+	if !leanGatherDisabled {
+		leanKey := lthnGatherQMVKey{
+			groupSize: groupSize, bits: bits, expertRows: metaKey.expertRows,
+			fast: outDim%8 == 0 && inDim%512 == 0, batchedX: metaKey.batchedX,
+		}
+		if leanPSO, ok := lthnGatherQMVPipeline(leanKey); ok {
+			leanGatherDispatches.Add(1)
+			emitLthnGatherQMVRoutes(sink, leanPSO, x, xOff, wq, wqOff, scales, scalesOff, biases, biasesOff, lhsIdx, rhsIdx, rhsOff, out, outOff, outDim, inDim, groupSize, bits, rowBase, routes)
+			return
+		}
+	}
 	rowPackedBytes := inDim * bits / 8
 	groups := inDim / groupSize
 	rhsAny, _ := gatherQMVAllRoutesRHS.Load(metaKey)
