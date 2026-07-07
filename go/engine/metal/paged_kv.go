@@ -6,7 +6,12 @@ package native
 
 import core "dappco.re/go"
 
-const defaultPagedKVPageSize = 256
+// defaultPagedKVPageSize sizes the paged KV cache's pages. The paged SDPA's pass 1 runs
+// ONE dispatch per page at nHeads threadgroups each — small pages serialise deep contexts
+// into many under-occupied dispatches (256-row pages measured 12.4 ms/token of attention at
+// position ~3500 on the 26B, ~40x the bandwidth cost; #339). Larger pages trade allocation
+// granularity for dispatch count.
+const defaultPagedKVPageSize = 2048
 
 // PagedKVState is a borrowed view of a native paged BF16 K/V cache. KeyPages
 // and ValuePages include each page's physical backing; PageLens carries the
