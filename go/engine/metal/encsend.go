@@ -448,6 +448,15 @@ func blitCommandEncoderFast(cb metal.MTLCommandBufferObject) metal.MTLBlitComman
 	return metal.MTLBlitCommandEncoderObjectFromID(blit.GetID())
 }
 
+// concurrentComputeEncoderFast opens a CONCURRENT-dispatch compute encoder on cb: dispatches
+// may overlap and the encoder orders NOTHING between them — callers place explicit
+// memoryBarrierObject calls at every true dependency edge.
+func concurrentComputeEncoderFast(cb metal.MTLCommandBufferObject) metal.MTLComputeCommandEncoderObject {
+	pd := metal.NewMTLComputePassDescriptor()
+	pd.SetDispatchType(metal.MTLDispatchTypeConcurrent)
+	return metal.MTLComputeCommandEncoderObjectFromID(cb.ComputeCommandEncoderWithDescriptor(pd).GetID())
+}
+
 func endEncodingFast(enc metal.MTLComputeCommandEncoderObject) {
 	objcMsgSendOnce.Do(initObjCMsgSendStubs)
 	if objcMsgSendAddr != 0 && puregoSyscall15XABI0 != 0 {

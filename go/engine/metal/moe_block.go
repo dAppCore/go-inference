@@ -7,6 +7,7 @@ package native
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	core "dappco.re/go"
@@ -1542,6 +1543,10 @@ func moeArriveZeroBuffer() metal.MTLBuffer {
 	return moeArriveZeroBuf
 }
 
+// moeConcurrentBlocks counts concurrent-pass MoE block encodes — the engagement receipt for
+// the lane (a silent gate regression reads as zero, not as a perf blur).
+var moeConcurrentBlocks atomic.Int64
+
 // ffnMegaKernelCompatible is the KERNEL truth: the widths the megakernel is specialised for
 // (4/8-bit byte-aligned codes via ffnMegaPipelineBits, parity-proven at both) with all three
 // projections agreeing so one PSO serves the dispatch.
@@ -1712,9 +1717,11 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 	post2Buf := bf16WeightView(w.PostFFNorm2W, w.postFFNorm2View)
 	postBuf := bf16WeightView(w.PostFFNormW, w.postFFNormView)
 
-	// stage 1: the device router — idx/weights land in routerScratch on device.
-	var rerr error
-	if enc, rerr = encMoERouterQuantTopK(enc, cb, prof, routerScratch, hBuf, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps); rerr != nil {
+	// the device router's plan — idx/weights land in routerScratch on device; the emits are
+	// staged below (serial: back to back with the profiler seams; concurrent: interleaved
+	// with the local/expert stages between dependency barriers).
+	routerPlan, rerr := buildRouterEncodePlan(routerScratch, hBuf, w.RouterNormWScaled, w.routerNormView, w.Router, w.PerExpertScale, w.perExpertScaleView, numExperts, topK, dModel, w.RouterGroupSize, w.RouterBits, eps)
+	if rerr != nil {
 		return enc, false, nil
 	}
 	routeIdxBuf, weightsBuf := routerScratch.idxBuf, routerScratch.weightBuf
@@ -1769,13 +1776,7 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 	emitAdd := func(a, b, out metal.MTLBuffer) {
 		emitBinary(sink, addPSO, a, 0, b, 0, out, 0, dModel)
 	}
-	seam("moe.local")
-	emitRMS(hBuf, pre1Buf.buf, scratch.localIn, pre1Buf.off)
-	// local MLP: the FFN megakernel when its geometry holds — its grid barrier needs the
-	// arrive counter zeroed per dispatch, which the break-out path did with a HOST write;
-	// here a 2-element bf16 copy from a device zero buffer resets it INSIDE the encoder
-	// (hazard-ordered before the mega's atomics), keeping the whole lane host-free. The
-	// qmv trio stays as the fallback for unsupported geometry.
+	// ---- stage decisions, hoisted above the emits so the concurrent fork can gate ----
 	localGateViewQ := quantMLPProjView{packed: localGatePacked, scales: localGateScales, biases: localGateBiases, groupSize: localGateGroupSize, bits: localGateBits}
 	localUpViewQ := quantMLPProjView{packed: localUpPacked, scales: localUpScales, biases: localUpBiases, groupSize: localUpGroupSize, bits: localUpBits}
 	localDownViewQ := quantMLPProjView{packed: localDownPacked, scales: localDownScales, biases: localDownBiases, groupSize: localDownGroupSize, bits: localDownBits}
@@ -1791,27 +1792,11 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 			megaLocal = false
 		}
 	}
-	if megaLocal {
-		if cerr := encCopyBF16Contig(enc, moeArriveZeroBuffer(), scratch.localMegaArrive, 0, 0, 2); cerr != nil {
-			megaLocal = false
-		}
-	}
-	if megaLocal {
-		emitFFNMega(sink, localMegaPSO, scratch.localIn, 0, localGateViewQ, localUpViewQ, localDownViewQ, scratch.localMegaGated, scratch.localOut, 0, scratch.localMegaArrive, dModel, dFF)
-	} else {
-		emitQ(localGatePSO, localGatePacked, localGateScales, localGateBiases, scratch.localIn, msc.gate, dModel, dFF)
-		emitQ(localUpPSO, localUpPacked, localUpScales, localUpBiases, scratch.localIn, msc.up, dModel, dFF)
-		emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
-		emitQ(localDownPSO, localDownPacked, localDownScales, localDownBiases, msc.gated, scratch.localOut, dFF, dModel)
-	}
-	seam("moe.expert")
-	emitRMS(hBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
 	// expert MLPs, ALL routes per dispatch: the MLX gather batch dimension carries every
 	// selected expert (grid.z = topK, rhs = the router's device idxBuf), collapsing the
 	// old per-route loop's topK×3 matvec dispatches to 3. gate/up share the one normed
 	// input (lhs zeros, stride 0); down walks each route's gated row (lhs iota, stride 1).
-	// The weighted-sum tail stays per-route (small elementwise ops). Falls back to the
-	// per-route loop when the slabs or metadata are unavailable.
+	// Falls back to the per-route loop when the slabs or metadata are unavailable.
 	allRoutes := scratch.ensureAllRoutesScratch() == nil
 	var inKeyShared, downKeyBatched gatherQMVAllRoutesMetaKey
 	var inAllMeta, downAllMeta *gatherQMVBF16Meta
@@ -1828,7 +1813,50 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 			allRoutes = false
 		}
 	}
-	if allRoutes {
+	wsumPSO, wsumErr := moeWeightedSumPipeline()
+	// The norm/combine tail — out = h + rms(rms(local)·w1 + rms(expert)·w2)·w3 — as ONE
+	// fused dispatch (byte-identical rounding to the chain; single-row rms only), with the
+	// five-kernel chain as the fallback for unavailable PSO / looped-rms widths.
+	var combinePSO metal.MTLComputePipelineState
+	combineTG, combineOK := uint(0), false
+	if dModel <= rmsLoopedLimit {
+		if fusedPSO, ferr := moeCombineNormsPipeline(); ferr == nil {
+			tg := uint(rmsSimdSize * ((((dModel + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
+			if tg <= fusedPSO.MaxTotalThreadsPerThreadgroup() {
+				combinePSO, combineTG, combineOK = fusedPSO, tg, true
+			}
+		}
+	}
+	emitWSum := func() {
+		sink.setPSO(wsumPSO)
+		sink.setBuf(scratch.expertDownAll, 0, 0)
+		sink.setBuf(weightsBuf, 0, 1)
+		sink.setBuf(scratch.expertAcc, 0, 2)
+		sink.setI32(int32(dModel), 3)
+		sink.setI32(int32(topK), 4)
+		group := min(uint(dModel), uint(256))
+		sink.dispatchThreads(
+			metal.MTLSize{Width: uint(dModel), Height: 1, Depth: 1},
+			metal.MTLSize{Width: group, Height: 1, Depth: 1},
+		)
+	}
+	emitCombineNorms := func() {
+		sink.setPSO(combinePSO)
+		sink.setBuf(scratch.localOut, 0, 0)
+		sink.setBuf(post1Buf.buf, post1Buf.off, 1)
+		sink.setBuf(scratch.expertAcc, 0, 2)
+		sink.setBuf(post2Buf.buf, post2Buf.off, 3)
+		sink.setBuf(postBuf.buf, postBuf.off, 4)
+		sink.setBuf(hBuf, 0, 5)
+		sink.setBuf(outputBuf, 0, 6)
+		sink.setF32(eps, 7)
+		sink.setI32(int32(dModel), 8)
+		sink.dispatchThreads(
+			metal.MTLSize{Width: combineTG, Height: 1, Depth: 1},
+			metal.MTLSize{Width: combineTG, Height: 1, Depth: 1},
+		)
+	}
+	emitGatherInAll := func() {
 		if fusedExperts {
 			emitGatherQMVAllRoutes(sink, gatherExpertInPSO, inAllMeta, inKeyShared, scratch.expertIn, 0, expGateUpPacked.buf, expGateUpPacked.off, expGateUpScales.buf, expGateUpScales.off, expGateUpBiases.buf, expGateUpBiases.off, scratch.routeZeros, routeIdxBuf, 0, scratch.expertGateAll, 0, expertDFF, dModel, expGateUpGroupSize, expGateUpBits, 0, topK)
 			emitGatherQMVAllRoutes(sink, gatherExpertInPSO, inAllMeta, inKeyShared, scratch.expertIn, 0, expGateUpPacked.buf, expGateUpPacked.off, expGateUpScales.buf, expGateUpScales.off, expGateUpBiases.buf, expGateUpBiases.off, scratch.routeZeros, routeIdxBuf, 0, scratch.expertUpAll, 0, expertDFF, dModel, expGateUpGroupSize, expGateUpBits, expertDFF, topK)
@@ -1836,23 +1864,95 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 			emitGatherQMVAllRoutes(sink, gatherExpertInPSO, inAllMeta, inKeyShared, scratch.expertIn, 0, expGatePacked.buf, expGatePacked.off, expGateScales.buf, expGateScales.off, expGateBiases.buf, expGateBiases.off, scratch.routeZeros, routeIdxBuf, 0, scratch.expertGateAll, 0, expertDFF, dModel, expGateGroupSize, expGateBits, 0, topK)
 			emitGatherQMVAllRoutes(sink, gatherExpertInPSO, inAllMeta, inKeyShared, scratch.expertIn, 0, expUpPacked.buf, expUpPacked.off, expUpScales.buf, expUpScales.off, expUpBiases.buf, expUpBiases.off, scratch.routeZeros, routeIdxBuf, 0, scratch.expertUpAll, 0, expertDFF, dModel, expUpGroupSize, expUpBits, 0, topK)
 		}
-		emitBinary(sink, geluPSO, scratch.expertGateAll, 0, scratch.expertUpAll, 0, scratch.expertGatedAll, 0, topK*expertDFF)
+	}
+	emitGatherDownAll := func() {
 		emitGatherQMVAllRoutes(sink, gatherExpertDownPSO, downAllMeta, downKeyBatched, scratch.expertGatedAll, 0, expDownPacked.buf, expDownPacked.off, expDownScales.buf, expDownScales.off, expDownBiases.buf, expDownBiases.off, scratch.routeIota, routeIdxBuf, 0, scratch.expertDownAll, 0, dModel, expertDFF, expDownGroupSize, expDownBits, 0, topK)
+	}
+
+	// ---- concurrent pass: dispatches overlap; barriers mark the true dependency edges.
+	// The router, local-MLP, and expert branches are independent until the combine, so the
+	// serial path's 13 dependent dispatch gaps collapse to 7 barrier stages with 3-way
+	// overlap at the top. Values are unchanged — every kernel and rounding point is the
+	// serial path's; only the schedule differs.
+	if prof == nil && !moeConcurrentDisabled && !megaLocal && allRoutes && wsumErr == nil && combineOK {
+		moeConcurrentBlocks.Add(1)
+		endEncodingFast(enc)
+		enc = concurrentComputeEncoderFast(cb)
+		sink = encSink{enc}
+		barrier := func() { memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers) }
+		// stage 1: the three input norms (router ∥ local ∥ expert — all read hBuf only)
+		routerPlan.emitRMS(sink)
+		emitRMS(hBuf, pre1Buf.buf, scratch.localIn, pre1Buf.off)
+		emitRMS(hBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
+		barrier()
+		// stage 2: router scores ∥ local gate ∥ local up
+		routerPlan.emitQMV(sink)
+		emitQ(localGatePSO, localGatePacked, localGateScales, localGateBiases, scratch.localIn, msc.gate, dModel, dFF)
+		emitQ(localUpPSO, localUpPacked, localUpScales, localUpBiases, scratch.localIn, msc.up, dModel, dFF)
+		barrier()
+		// stage 3: top-k select ∥ local gelu
+		routerPlan.emitTopK(sink)
+		emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
+		barrier()
+		// stage 4: expert gate/up gathers (need the top-k indices) ∥ local down
+		emitGatherInAll()
+		emitQ(localDownPSO, localDownPacked, localDownScales, localDownBiases, msc.gated, scratch.localOut, dFF, dModel)
+		barrier()
+		// stage 5: expert gelu
+		emitBinary(sink, geluPSO, scratch.expertGateAll, 0, scratch.expertUpAll, 0, scratch.expertGatedAll, 0, topK*expertDFF)
+		barrier()
+		// stage 6: expert down gather
+		emitGatherDownAll()
+		barrier()
+		// stage 7: route combine (weights from stage 3)
+		emitWSum()
+		barrier()
+		// stage 8: the fused norm/combine tail -> residual out
+		emitCombineNorms()
+		endEncodingFast(enc)
+		enc = computeCommandEncoderFast(cb)
+		sink = encSink{enc}
+		return enc, true, nil
+	}
+
+	// ---- serial path: the single-encoder order (hazard tracking serialises every edge) ----
+	seam("router.rms")
+	routerPlan.emitRMS(sink)
+	seam("router.qmv")
+	routerPlan.emitQMV(sink)
+	seam("router.topk")
+	routerPlan.emitTopK(sink)
+	seam("moe.local")
+	emitRMS(hBuf, pre1Buf.buf, scratch.localIn, pre1Buf.off)
+	// local MLP: the FFN megakernel when its geometry holds — its grid barrier needs the
+	// arrive counter zeroed per dispatch, which the break-out path did with a HOST write;
+	// here a 2-element bf16 copy from a device zero buffer resets it INSIDE the encoder
+	// (hazard-ordered before the mega's atomics), keeping the whole lane host-free. The
+	// qmv trio stays as the fallback for unsupported geometry.
+	if megaLocal {
+		if cerr := encCopyBF16Contig(enc, moeArriveZeroBuffer(), scratch.localMegaArrive, 0, 0, 2); cerr != nil {
+			megaLocal = false
+		}
+	}
+	if megaLocal {
+		emitFFNMega(sink, localMegaPSO, scratch.localIn, 0, localGateViewQ, localUpViewQ, localDownViewQ, scratch.localMegaGated, scratch.localOut, 0, scratch.localMegaArrive, dModel, dFF)
+	} else {
+		emitQ(localGatePSO, localGatePacked, localGateScales, localGateBiases, scratch.localIn, msc.gate, dModel, dFF)
+		emitQ(localUpPSO, localUpPacked, localUpScales, localUpBiases, scratch.localIn, msc.up, dModel, dFF)
+		emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
+		emitQ(localDownPSO, localDownPacked, localDownScales, localDownBiases, msc.gated, scratch.localOut, dFF, dModel)
+	}
+	seam("moe.expert")
+	emitRMS(hBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
+	if allRoutes {
+		emitGatherInAll()
+		emitBinary(sink, geluPSO, scratch.expertGateAll, 0, scratch.expertUpAll, 0, scratch.expertGatedAll, 0, topK*expertDFF)
+		emitGatherDownAll()
 		seam("moe.tail")
 		// combine the routes: acc = Σ_r w_r · down_r — one fused dispatch (byte-identical
 		// rounding to the scale+add chain it replaces); the chain stays as the fallback.
-		if wsumPSO, werr := moeWeightedSumPipeline(); werr == nil {
-			sink.setPSO(wsumPSO)
-			sink.setBuf(scratch.expertDownAll, 0, 0)
-			sink.setBuf(weightsBuf, 0, 1)
-			sink.setBuf(scratch.expertAcc, 0, 2)
-			sink.setI32(int32(dModel), 3)
-			sink.setI32(int32(topK), 4)
-			group := min(uint(dModel), uint(256))
-			sink.dispatchThreads(
-				metal.MTLSize{Width: uint(dModel), Height: 1, Depth: 1},
-				metal.MTLSize{Width: group, Height: 1, Depth: 1},
-			)
+		if wsumErr == nil {
+			emitWSum()
 		} else {
 			for i := range topK {
 				if i == 0 {
@@ -1882,33 +1982,9 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 			}
 		}
 	}
-	// The norm/combine tail — out = h + rms(rms(local)·w1 + rms(expert)·w2)·w3 — as ONE
-	// fused dispatch (byte-identical rounding to the chain; single-row rms only), with the
-	// five-kernel chain as the fallback for unavailable PSO / looped-rms widths.
-	fusedTail := false
-	if dModel <= rmsLoopedLimit {
-		if fusedPSO, ferr := moeCombineNormsPipeline(); ferr == nil {
-			tg := uint(rmsSimdSize * ((((dModel + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
-			if tg <= fusedPSO.MaxTotalThreadsPerThreadgroup() {
-				sink.setPSO(fusedPSO)
-				sink.setBuf(scratch.localOut, 0, 0)
-				sink.setBuf(post1Buf.buf, post1Buf.off, 1)
-				sink.setBuf(scratch.expertAcc, 0, 2)
-				sink.setBuf(post2Buf.buf, post2Buf.off, 3)
-				sink.setBuf(postBuf.buf, postBuf.off, 4)
-				sink.setBuf(hBuf, 0, 5)
-				sink.setBuf(outputBuf, 0, 6)
-				sink.setF32(eps, 7)
-				sink.setI32(int32(dModel), 8)
-				sink.dispatchThreads(
-					metal.MTLSize{Width: tg, Height: 1, Depth: 1},
-					metal.MTLSize{Width: tg, Height: 1, Depth: 1},
-				)
-				fusedTail = true
-			}
-		}
-	}
-	if !fusedTail {
+	if combineOK {
+		emitCombineNorms()
+	} else {
 		emitRMS(scratch.localOut, post1Buf.buf, scratch.localNormed, post1Buf.off)
 		emitRMS(scratch.expertAcc, post2Buf.buf, scratch.expertNormed, post2Buf.off)
 		emitAdd(scratch.localNormed, scratch.expertNormed, scratch.combined)
