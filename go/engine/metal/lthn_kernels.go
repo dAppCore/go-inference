@@ -393,25 +393,45 @@ func mulScalarBF16Into(out, in, scalar []byte, directOutput bool) error {
 const routerTopKMaxK = 32
 
 var (
-	routerTopKPSOOnce sync.Once
-	routerTopKPSO     metal.MTLComputePipelineState
-	routerTopKPSOErr  error
+	routerTopKPSOMu    sync.Mutex
+	routerTopKPSOCache = map[int]metal.MTLComputePipelineState{}
 )
 
-func routerTopKPipeline() (metal.MTLComputePipelineState, error) {
-	routerTopKPSOOnce.Do(func() {
-		if customLibrary == nil || customLibrary.GetID() == 0 {
-			routerTopKPSOErr = core.NewError("native.routerTopKPipeline: custom library unavailable")
-			return
+// routerTopKPipelineK builds (and caches) the router top-k kernel SPECIALISED for k via
+// function constant 0. A runtime k left the selection loops un-unrollable, spilling the
+// 32-slot local arrays to device-memory stack — the trivial top-4-of-128 select measured
+// 4.78 ms/token (43% of ALL GPU time) on the 26B decode. Compile-time k keeps the slots
+// in registers.
+func routerTopKPipelineK(k int) (metal.MTLComputePipelineState, error) {
+	if k <= 0 || k > routerTopKMaxK {
+		return nil, core.NewError("native.routerTopKPipelineK: k must be in 1..32")
+	}
+	routerTopKPSOMu.Lock()
+	defer routerTopKPSOMu.Unlock()
+	if pso, ok := routerTopKPSOCache[k]; ok {
+		if pso == nil {
+			return nil, core.NewError("native.routerTopKPipelineK: kernel unavailable")
 		}
-		fn := customLibrary.NewFunctionWithName("lthn_moe_router_topk_bf16")
-		if fn == nil || fn.GetID() == 0 {
-			routerTopKPSOErr = core.NewError("native.routerTopKPipeline: kernel lthn_moe_router_topk_bf16 not found")
-			return
-		}
-		routerTopKPSO, routerTopKPSOErr = device.NewComputePipelineStateWithFunctionError(fn)
-	})
-	return routerTopKPSO, routerTopKPSOErr
+		return pso, nil
+	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		return nil, core.NewError("native.routerTopKPipelineK: custom library unavailable")
+	}
+	fc := metal.NewMTLFunctionConstantValues()
+	kk := uint32(k)
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&kk), metal.MTLDataTypeUInt, 0)
+	fn, err := customLibrary.NewFunctionWithNameConstantValuesError("lthn_moe_router_topk_bf16", fc)
+	if err != nil || fn == nil || fn.GetID() == 0 {
+		routerTopKPSOCache[k] = nil
+		return nil, core.E("native.routerTopKPipelineK", "specialise k", err)
+	}
+	pso, perr := device.NewComputePipelineStateWithFunctionError(fn)
+	if perr != nil {
+		routerTopKPSOCache[k] = nil
+		return nil, perr
+	}
+	routerTopKPSOCache[k] = pso
+	return pso, nil
 }
 
 type routerTopKScratch struct {
@@ -463,7 +483,7 @@ func encRouterTopKBF16(enc metal.MTLComputeCommandEncoder, scores, perExpertScal
 	if topK <= 0 || topK > numExperts || topK > routerTopKMaxK {
 		return core.NewError("native.encRouterTopKBF16: topK must be in 1..numExperts and <= 32")
 	}
-	pso, err := routerTopKPipeline()
+	pso, err := routerTopKPipelineK(topK)
 	if err != nil {
 		return err
 	}
@@ -483,9 +503,10 @@ func encRouterTopKBF16(enc metal.MTLComputeCommandEncoder, scores, perExpertScal
 	sink.setI32(int32(numExperts), 4)
 	sink.setI32(int32(topK), 5)
 	sink.setI32(scaleFlag, 6)
+	// the kernel is a single 32-lane simdgroup (lane >= 32 exits immediately)
 	sink.dispatchThreads(
-		metal.MTLSize{Width: 256, Height: 1, Depth: 1},
-		metal.MTLSize{Width: 256, Height: 1, Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
 	)
 	return nil
 }
