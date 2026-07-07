@@ -254,8 +254,9 @@ type archDecodeState struct {
 	// SESSION states own one (moeScratchOwnable, set by the session builders): a standalone
 	// forward's state dies per call, so owning would re-allocate the scratch every forward —
 	// it keeps the per-layer pool round-trip and its wait instead.
-	moeScratchOwnable bool
-	moeOwnedScratch   *moeBlockBF16Scratch
+	moeScratchOwnable     bool
+	moeOwnedScratch       *moeBlockBF16Scratch
+	moeRouterOwnedScratch *routerDeviceScratch
 
 	// trace (LTHN_NATIVE_TRACE): when set, stepToken flushes + reads back each layer's output
 	// hidden and logs the per-token worst max-abs + NaN layer — the decode-degradation probe.
@@ -1240,39 +1241,65 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			moeQ = s.moeQuant[li]
 		}
 		if moeW := s.moeWeights[li]; moeQ != nil || moeW != nil {
-			// The MoE stages run their own command buffers over h's SHARED buffer. The quant
-			// happy path (device router + device index + buffer output) never reads the host
-			// bytes, so the live buffer commits WITHOUT a wait — the queue orders the MoE
-			// stages after it, and the expert stage's own completion wait (which every scratch
-			// lifetime already assumes) remains the layer's single sync. The old shape waited
-			// AND host-read h here: two full GPU round-trips per MoE layer × ~48 layers was
-			// the 26B decode running at a sixth of its cgo rate.
-			endEncodingFast(enc)
-			commitCommandBufferFast(cb)
-			var err error
-			if moeQ != nil && quantMoEDeviceRouterBuffersUsable(*moeQ, s.dModel) && routerTopKUsable(moeQ.NumExperts, moeQ.TopK) {
-				if s.moeScratchOwnable && s.moeOwnedScratch == nil {
+			// Fully-encoded lane first (session-owned scratches, device router + gathered
+			// experts): the WHOLE block encodes into the LIVE encoder — no command-buffer
+			// break at all. Declines fall to the break-out flow below.
+			handledMoE := false
+			if moeQ != nil && s.moeScratchOwnable && quantMoEDeviceRouterBuffersUsable(*moeQ, s.dModel) && routerTopKUsable(moeQ.NumExperts, moeQ.TopK) {
+				var err error
+				if s.moeOwnedScratch == nil {
 					s.moeOwnedScratch, err = getMoEBlockBF16Scratch(s.dModel, s.dFF, moeQ.ExpertDFF, moeQ.TopK)
 					if err != nil {
 						return nil, err
 					}
 				}
-				err = moeBlockQuantWithBufferOutputInPool(nil, s.hBuf, out, *moeQ, s.dModel, s.dFF, s.eps, s.moeOwnedScratch)
-			} else if moeQ != nil {
-				// device router unavailable (older metallib / exotic geometry): the host
-				// router needs the bytes, so this lane keeps the completion wait.
-				waitUntilCompletedFast(cb)
-				err = moeBlockQuantWithBufferOutputInPool(s.bufferBytes(s.hBuf, s.dModel*bf16Size), s.hBuf, out, *moeQ, s.dModel, s.dFF, s.eps, nil)
-			} else {
-				// bf16 MoE keeps the host handoff (its block still reads host bytes).
-				waitUntilCompletedFast(cb)
-				err = moeBlockBF16WithBufferOutputInPool(s.bufferBytes(s.hBuf, s.dModel*bf16Size), s.hBuf, out, *moeW, s.dModel, s.dFF, s.eps)
+				if s.moeRouterOwnedScratch == nil {
+					s.moeRouterOwnedScratch, err = getRouterDeviceScratch(s.dModel, moeQ.NumExperts, moeQ.TopK)
+					if err != nil {
+						return nil, err
+					}
+				}
+				handledMoE, err = encMoEBlockQuantDevice(enc, s.moeRouterOwnedScratch, s.moeOwnedScratch, s.hBuf, out, *moeQ, s.dModel, s.dFF, s.eps)
+				if err != nil {
+					endEncodingFast(enc)
+					return nil, err
+				}
 			}
-			if err != nil {
-				return nil, err
+			if !handledMoE {
+				// The MoE stages run their own command buffers over h's SHARED buffer. The quant
+				// happy path (device router + device index + buffer output) never reads the host
+				// bytes, so the live buffer commits WITHOUT a wait — the queue orders the MoE
+				// stages after it, and the expert stage's own completion wait (which every scratch
+				// lifetime already assumes) remains the layer's single sync. The old shape waited
+				// AND host-read h here: two full GPU round-trips per MoE layer × ~48 layers was
+				// the 26B decode running at a sixth of its cgo rate.
+				endEncodingFast(enc)
+				commitCommandBufferFast(cb)
+				var err error
+				if moeQ != nil && quantMoEDeviceRouterBuffersUsable(*moeQ, s.dModel) && routerTopKUsable(moeQ.NumExperts, moeQ.TopK) {
+					if s.moeScratchOwnable && s.moeOwnedScratch == nil {
+						s.moeOwnedScratch, err = getMoEBlockBF16Scratch(s.dModel, s.dFF, moeQ.ExpertDFF, moeQ.TopK)
+						if err != nil {
+							return nil, err
+						}
+					}
+					err = moeBlockQuantWithBufferOutputInPool(nil, s.hBuf, out, *moeQ, s.dModel, s.dFF, s.eps, s.moeOwnedScratch)
+				} else if moeQ != nil {
+					// device router unavailable (older metallib / exotic geometry): the host
+					// router needs the bytes, so this lane keeps the completion wait.
+					waitUntilCompletedFast(cb)
+					err = moeBlockQuantWithBufferOutputInPool(s.bufferBytes(s.hBuf, s.dModel*bf16Size), s.hBuf, out, *moeQ, s.dModel, s.dFF, s.eps, nil)
+				} else {
+					// bf16 MoE keeps the host handoff (its block still reads host bytes).
+					waitUntilCompletedFast(cb)
+					err = moeBlockBF16WithBufferOutputInPool(s.bufferBytes(s.hBuf, s.dModel*bf16Size), s.hBuf, out, *moeW, s.dModel, s.dFF, s.eps)
+				}
+				if err != nil {
+					return nil, err
+				}
+				cb = commandBufferFast(queue)
+				enc = computeCommandEncoderFast(cb)
 			}
-			cb = commandBufferFast(queue)
-			enc = computeCommandEncoderFast(cb)
 		} else {
 			lff := s.dFF // per-layer FFN width (gemma4 E2B/E4B); falls back to the arch default
 			if s.lb[li].dFF > 0 {
