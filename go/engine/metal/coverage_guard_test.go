@@ -104,6 +104,8 @@ type failingProjector struct {
 
 func (p failingProjector) hasV() bool { return p.distinctV }
 
+func (p failingProjector) rowsCapable() bool { return true }
+
 func (p failingProjector) projectRows(_ metal.MTLComputeCommandEncoder, _, _ metal.MTLBuffer, _, _ uint, _ int, idx projIndex) (bool, error) {
 	if p.err != nil && idx == p.fail {
 		return true, p.err

@@ -1791,11 +1791,14 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseOne(ids []int32, scope st
 	if s.pos+len(ids) > s.maxLen {
 		return nil, false, core.NewError(scope + ": sequence would exceed maxLen cache rows")
 	}
-	// ICB (quant) sessions own their prefill via the GPU-chained inputs lane. A PLE arch
-	// (gemma4 E2B/E4B) batches here: the per-token PLE tensors are gathered into one slab
-	// below and the gate is encoded per row inside the same command buffer — without this,
-	// bf16 E-family prompts fell to n host-synced single-token forwards (O(n²) prefill).
-	if s.state.icb != nil {
+	// A PLE arch (gemma4 E2B/E4B) batches here: the per-token PLE tensors are gathered into
+	// one slab below and the gate is encoded per row inside the same command buffer — without
+	// this, E-family prompts fell to n host-synced single-token forwards (O(n²) prefill).
+	// Recorded-ICB (quant) sessions batch PROMPT-SCALE runs (the dense body's qmm fold over
+	// the replay's own caches); short appends decline HERE — before any host embed/PLE work —
+	// and keep the replay's GPU-chained lane (the dense body would decline them anyway: its
+	// small-K carve-out preserves the save/restore byte contract).
+	if s.state.icb != nil && (len(ids) <= batchedDenseICBMaxRows || batchedMLPFoldDisabledForTest || !gpuHasGeluKernel()) {
 		return nil, false, nil
 	}
 	embedStart := time.Now()
