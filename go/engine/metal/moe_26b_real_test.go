@@ -56,14 +56,22 @@ func TestRealMoE26BHostProfile(t *testing.T) {
 	if _, err := sess.GenerateFromCache(warmup, -1); err != nil {
 		t.Fatalf("warmup: %v", err)
 	}
+	pieceTimingOn, chainedGPUSpanNs = true, 0
 	t0 := time.Now()
 	if _, err := sess.GenerateFromCache(N, -1); err != nil {
+		pieceTimingOn = false
 		t.Fatalf("generate: %v", err)
 	}
 	wall := time.Since(t0)
+	pieceTimingOn = false
 	t.Logf("real 26B-A4B MoE decode (tg%d): %.1f tok/s (%.2f ms/token) — run under -cpuprofile; low cgocall ⇒ host-bound",
 		N, float64(N)/wall.Seconds(), wall.Seconds()*1000/float64(N))
 	t.Logf("chained live links: %d (0 = the chained live lane did not engage)", chainedLiveLinks.Load())
+	// cb GPU span vs wall: the residual host/sync gap a submit-ahead pipeline could overlap;
+	// span minus the profiler's kernel-sum is the intra-cb bubble tax a concurrent pass chases.
+	t.Logf("cb GPU span %.2f ms/token vs wall %.2f — host/sync gap %.2f ms/token",
+		float64(chainedGPUSpanNs)/1e6/float64(N), wall.Seconds()*1000/float64(N),
+		wall.Seconds()*1000/float64(N)-float64(chainedGPUSpanNs)/1e6/float64(N))
 }
 
 // TestRealMoE26BFamilyGPUProfile splits the decode's per-token encoder at the attn/moe family
