@@ -245,14 +245,14 @@ func gatherQMVBF16ByExpertIndexInto(out []byte, x []byte, idx []int32, w QuantWe
 	if topK == 0 || outDim == 0 || inDim == 0 {
 		return out, nil
 	}
-	if bits != 4 {
-		return nil, core.NewError("native.gatherQMVBF16ByExpertIndex: only 4-bit affine weights are supported")
+	if !affineBitsSupported(bits) {
+		return nil, core.NewError("native.gatherQMVBF16ByExpertIndex: unsupported affine quant width")
 	}
 	if err := ensureInit(); err != nil {
 		return nil, err
 	}
 	groupSize, bits = quantWeightGeometryForShape(w, numExperts*outDim, inDim, groupSize, bits)
-	if groupSize <= 0 || bits != 4 || inDim%groupSize != 0 {
+	if groupSize <= 0 || !affineBitsSupported(bits) || inDim%groupSize != 0 {
 		return nil, core.NewError("native.gatherQMVBF16ByExpertIndex: invalid quant geometry")
 	}
 	wantPacked := numExperts * outDim * inDim * bits / 8

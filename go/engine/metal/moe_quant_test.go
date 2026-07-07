@@ -1003,6 +1003,68 @@ func TestGatherQMVBF16ByExpertIndexMatchesSlicedQMV(t *testing.T) {
 	}
 }
 
+// TestGatherQMVBF16ByExpertIndexWidthSweep proves the expert gather at every affine width MLX's
+// quantiser emits — the gather kernels are gs/bits-parameterised template instantiations (the same
+// family as qmv), so the MoE lane's old bits==4 gates were folklore, not a kernel limit. Parity
+// oracle: per-expert sliced QMVBF16, byte-for-byte.
+func TestGatherQMVBF16ByExpertIndexWidthSweep(t *testing.T) {
+	requireNativeRuntime(t)
+	resetResidentBufsForTest()
+	defer resetResidentBufsForTest()
+
+	const numExperts, topK, outDim, inDim, groupSize = 4, 3, 64, 96, 32
+	idx := []int32{2, 0, 3}
+	x := toBF16Bytes(syntheticFloat32(inDim, 37))
+	for _, bits := range []int{2, 3, 5, 6, 8} { // 4 is TestGatherQMVBF16ByExpertIndexMatchesSlicedQMV
+		if _, err := gatherQMVBF16SteelPipeline(outDim, inDim, groupSize, bits); err != nil {
+			t.Skipf("b%d gather qmv kernel unavailable: %v", bits, err)
+		}
+		w := quantMoELayerWeightsGuard(t, numExperts, 1, inDim, 128, outDim, groupSize, bits).ExpGate
+		got, err := gatherQMVBF16ByExpertIndex(x, idx, w, numExperts, topK, outDim, inDim, groupSize, bits)
+		if err != nil {
+			t.Fatalf("b%d: gatherQMVBF16ByExpertIndex: %v", bits, err)
+		}
+		expertPacked := outDim * inDim * bits / 8
+		expertSB := outDim * (inDim / groupSize) * bf16Size
+		want := make([]byte, 0, topK*outDim*bf16Size)
+		for _, expert := range idx {
+			e := int(expert)
+			ref, err := QMVBF16(
+				x,
+				w.Packed[e*expertPacked:(e+1)*expertPacked],
+				w.Scales[e*expertSB:(e+1)*expertSB],
+				w.Biases[e*expertSB:(e+1)*expertSB],
+				outDim,
+				inDim,
+				groupSize,
+				bits,
+			)
+			if err != nil {
+				t.Fatalf("b%d: sliced QMVBF16 expert %d: %v", bits, e, err)
+			}
+			want = append(want, ref...)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("b%d: gathered qmv bytes != sliced QMVBF16", bits)
+		}
+	}
+	t.Logf("expert gather matches sliced qmv byte-for-byte at every affine width")
+}
+
+// TestQuantMoEDeviceRouterBuffersUsableWidthSweep pins the device MoE lane's admission gate open at
+// every affine width — a non-4-bit expert quant (e.g. an 8-bit MoE snapshot) must take the fast
+// device lane, not silently fall to the host path.
+func TestQuantMoEDeviceRouterBuffersUsableWidthSweep(t *testing.T) {
+	requireNativeRuntime(t)
+	const dModel, dFF, expertDFF, numExperts, topK, groupSize = 64, 128, 96, 4, 2, 32
+	for _, bits := range []int{2, 3, 4, 5, 6, 8} {
+		w := quantMoELayerWeightsGuard(t, numExperts, topK, dModel, dFF, expertDFF, groupSize, bits)
+		if !quantMoEDeviceRouterBuffersUsable(w, dModel) {
+			t.Fatalf("b%d: quantMoEDeviceRouterBuffersUsable = false — the device MoE lane must accept every affine width", bits)
+		}
+	}
+}
+
 func TestGatherQMVBF16ByExpertIndexIntoUsesCallerBacking(t *testing.T) {
 	requireNativeRuntime(t)
 	resetResidentBufsForTest()
