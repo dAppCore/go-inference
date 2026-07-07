@@ -22,14 +22,21 @@ type sdpaPagedP1Params struct {
 	KSeqStride  uint32
 	VHeadStride uint32
 	VSeqStride  uint32
-	PageIdx     uint32
-	PageCount   uint32
+	SplitRows   uint32
+	Splits      uint32
+	CellBase    uint32
+	CellCount   uint32
 	Scale       float32
 }
 
+// sdpaPagedSplitRows is the depth-parallelism grain: each pass-1 threadgroup owns one
+// split window of a page, so the grid grows with context (nHeads × ceil(len/splitRows)
+// threadgroups) instead of pinning at nHeads while simdgroups serialise the rows.
+const sdpaPagedSplitRows = 256
+
 type sdpaPagedP2Params struct {
 	HeadDim   uint32
-	PageCount uint32
+	CellCount uint32
 }
 
 // sdpaPagedDecodeScratch holds the parallel two-pass partials: one (max, sum,
@@ -197,8 +204,14 @@ func encSDPAPagedDecodeStrided(
 	if headDim%32 != 0 || headDim/32 > 16 {
 		return core.NewError("native.encSDPAPagedDecodeStrided: headDim must be a multiple of 32, at most 512")
 	}
-	pages := len(keyPages)
-	if err := scratch.ensure(nHeads, headDim, pages); err != nil {
+	// each page fans out over ceil(len/splitRows) independent split cells — the grid grows
+	// with context (#339: 16 fixed threadgroups measured 12.4 ms/token of attention at
+	// position ~3500; split windows keep the whole GPU busy at any depth).
+	cellCount := 0
+	for i := range keyPages {
+		cellCount += (pageLens[i] + sdpaPagedSplitRows - 1) / sdpaPagedSplitRows
+	}
+	if err := scratch.ensure(nHeads, headDim, cellCount); err != nil {
 		return err
 	}
 	p1PSO, err := sdpaPagedP1Pipeline()
@@ -210,12 +223,14 @@ func encSDPAPagedDecodeStrided(
 		return err
 	}
 
-	// pass 1: one dispatch per page, each writing its OWN (head, page) partial cells;
-	// pass 2 merges per head. Hazard tracking on the scratch orders pass 1 → pass 2
-	// for free. (The previous kernel carried the online softmax ACROSS pages at one
-	// scalar thread per head, looping each page twice — a serialised chain whose
-	// length grew with context: the #252 decode collapse.)
+	// pass 1: one dispatch per page, nHeads × splits threadgroups, each writing its OWN
+	// (head, cell) partial; pass 2 merges per head across every cell. Hazard tracking on
+	// the scratch orders pass 1 → pass 2 for free. (The previous kernel carried the online
+	// softmax ACROSS pages at one scalar thread per head, looping each page twice — a
+	// serialised chain whose length grew with context: the #252 decode collapse.)
+	cellBase := 0
 	for i := range keyPages {
+		splits := (pageLens[i] + sdpaPagedSplitRows - 1) / sdpaPagedSplitRows
 		params := sdpaPagedP1Params{
 			NHeads:      uint32(nHeads),
 			NKVHeads:    uint32(nKVHeads),
@@ -225,10 +240,13 @@ func encSDPAPagedDecodeStrided(
 			KSeqStride:  uint32(keySeqStrides[i]),
 			VHeadStride: uint32(valueHeadStrides[i]),
 			VSeqStride:  uint32(valueSeqStrides[i]),
-			PageIdx:     uint32(i),
-			PageCount:   uint32(pages),
+			SplitRows:   uint32(sdpaPagedSplitRows),
+			Splits:      uint32(splits),
+			CellBase:    uint32(cellBase),
+			CellCount:   uint32(cellCount),
 			Scale:       scale,
 		}
+		cellBase += splits
 		setPSO(enc, p1PSO)
 		setBuf(enc, q, 0, 0)
 		setBuf(enc, keyPages[i], 0, 1)
@@ -238,11 +256,11 @@ func encSDPAPagedDecodeStrided(
 		setBuf(enc, scratch.acc, 0, 5)
 		setBytes(enc, unsafe.Pointer(&params), uint(unsafe.Sizeof(params)), 6)
 		dispatchThreadgroups(enc,
-			metal.MTLSize{Width: uint(nHeads), Height: 1, Depth: 1},
-			metal.MTLSize{Width: 256, Height: 1, Depth: 1}, // 8 simdgroups split the page rows
+			metal.MTLSize{Width: uint(nHeads * splits), Height: 1, Depth: 1},
+			metal.MTLSize{Width: 256, Height: 1, Depth: 1}, // 8 simdgroups split the window rows
 		)
 	}
-	p2 := sdpaPagedP2Params{HeadDim: uint32(headDim), PageCount: uint32(pages)}
+	p2 := sdpaPagedP2Params{HeadDim: uint32(headDim), CellCount: uint32(cellCount)}
 	setPSO(enc, p2PSO)
 	setBuf(enc, scratch.maxs, 0, 0)
 	setBuf(enc, scratch.sums, 0, 1)

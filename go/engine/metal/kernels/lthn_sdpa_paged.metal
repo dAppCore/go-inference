@@ -23,8 +23,10 @@ struct PagedSDPAP1Dims {
   uint kSeqStride;
   uint vHeadStride;
   uint vSeqStride;
-  uint pageIdx;
-  uint pageCount;
+  uint splitRows;  // rows per split window (the depth-parallelism grain)
+  uint splits;     // split windows in THIS dispatch (ceil(pageLen / splitRows))
+  uint cellBase;   // first partial-cell index for this dispatch's split 0
+  uint cellCount;  // total partial cells across every dispatch (pass 2's merge width)
   float scale;
 };
 
@@ -42,16 +44,25 @@ constant constexpr uint kPagedSimdGroups = 8;
     const device bf16* q      [[buffer(0)]],
     const device bf16* kPage  [[buffer(1)]],
     const device bf16* vPage  [[buffer(2)]],
-    device float*      maxs   [[buffer(3)]],  // [nHeads * pageCount]
-    device float*      sums   [[buffer(4)]],  // [nHeads * pageCount]
-    device float*      acc    [[buffer(5)]],  // [nHeads * pageCount * headDim]
+    device float*      maxs   [[buffer(3)]],  // [nHeads * cellCount]
+    device float*      sums   [[buffer(4)]],  // [nHeads * cellCount]
+    device float*      acc    [[buffer(5)]],  // [nHeads * cellCount * headDim]
     const constant PagedSDPAP1Dims& D [[buffer(6)]],
-    uint h    [[threadgroup_position_in_grid]],
+    uint tgid [[threadgroup_position_in_grid]],
     uint sg   [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]) {
+  // grid = nHeads × splits, linearised on x (head-major): every split window is an
+  // independent threadgroup so the depth parallelism GROWS with context instead of
+  // serialising inside 8 simdgroups (16 TGs total was the #339 droop: 12.4 ms/token of
+  // attention at position ~3500 with most of the GPU idle).
+  const uint h = tgid / D.splits;
+  const uint split = tgid % D.splits;
   if (h >= D.nHeads) return;
   const uint per = D.headDim / 32;
   if (per == 0 || per > kPagedMaxPerLane) return;
+  const uint rowBase = split * D.splitRows;
+  if (rowBase >= D.pageLen) return;
+  const uint rowEnd = min(rowBase + D.splitRows, D.pageLen);
 
   const uint gqa = D.nHeads / D.nKVHeads;
   const uint kvh = h / gqa;
@@ -71,7 +82,7 @@ constant constexpr uint kPagedSimdGroups = 8;
     o[i] = 0.0f;
   }
 
-  for (uint t = sg; t < D.pageLen; t += kPagedSimdGroups) {
+  for (uint t = rowBase + sg; t < rowEnd; t += kPagedSimdGroups) {
     const device bf16* kt = kh + t * D.kSeqStride;
     float partial = 0.0f;
     for (uint i = 0; i < per; i++) {
@@ -126,7 +137,7 @@ constant constexpr uint kPagedSimdGroups = 8;
     }
   }
 
-  const uint cell = h * D.pageCount + D.pageIdx;
+  const uint cell = h * D.cellCount + D.cellBase + split;
   if (lane == 0) {
     maxs[cell] = M;
     sums[cell] = S;
@@ -139,7 +150,7 @@ constant constexpr uint kPagedSimdGroups = 8;
 
 struct PagedSDPAP2Dims {
   uint headDim;
-  uint pageCount;
+  uint cellCount;
 };
 
 [[kernel]] void lthn_sdpa_paged_p2_bf16(
@@ -152,10 +163,10 @@ struct PagedSDPAP2Dims {
     uint lane [[thread_index_in_simdgroup]]) {
   const uint per = D.headDim / 32;
   if (per == 0 || per > kPagedMaxPerLane) return;
-  const uint base = h * D.pageCount;
+  const uint base = h * D.cellCount;
 
   float M = -3.0e38f;
-  for (uint p = 0; p < D.pageCount; p++) {
+  for (uint p = 0; p < D.cellCount; p++) {
     if (sums[base + p] > 0.0f) {
       M = max(M, maxs[base + p]);
     }
@@ -166,7 +177,7 @@ struct PagedSDPAP2Dims {
   for (uint i = 0; i < per; i++) {
     o[i] = 0.0f;
   }
-  for (uint p = 0; p < D.pageCount; p++) {
+  for (uint p = 0; p < D.cellCount; p++) {
     const float s = sums[base + p];
     if (s <= 0.0f) {
       continue;
