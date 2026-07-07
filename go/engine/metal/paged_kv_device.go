@@ -368,8 +368,17 @@ func encAttnHalfKVPaged(
 	ropeFreqs metal.MTLBuffer,
 ) error {
 	if slideW > 0 {
-		if cache == nil || !cache.ring {
+		if cache == nil {
 			return core.NewError("native.encAttnHalfKVPaged: sliding window requires ring pages")
+		}
+		if !cache.ring {
+			// The builder skips ring pages when the window covers the whole cache
+			// (max pos = maxSize-1 < slideW ⇒ the mask can never clip): the window is
+			// inert here, so attend fully. A window that CAN clip still requires ring.
+			if cache.maxSize > slideW {
+				return core.NewError("native.encAttnHalfKVPaged: sliding window requires ring pages")
+			}
+			slideW = 0
 		}
 	}
 	kPage, vPage, rowOff, err := cache.slot(pos)
@@ -466,7 +475,12 @@ func encAttnHalfSharedPaged(
 		}
 	}
 	if slideW > 0 && !cache.ring {
-		return core.NewError("native.encAttnHalfSharedPaged: sliding window requires ring pages")
+		// Same inert-window carve-out as encAttnHalfKVPaged: a window covering the whole
+		// cache can never clip, so the builder deliberately built linear pages.
+		if cache.maxSize > slideW {
+			return core.NewError("native.encAttnHalfSharedPaged: sliding window requires ring pages")
+		}
+		slideW = 0
 	}
 	if err := encRMSNormBF16(enc, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
 		return err
