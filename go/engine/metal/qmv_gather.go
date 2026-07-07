@@ -113,6 +113,112 @@ func emitGatherQMVBF16Steel(sink encSink, pso metal.MTLComputePipelineState, met
 	)
 }
 
+type gatherQMVAllRoutesMetaKey struct {
+	numExperts, outDim, inDim, groupSize, bits, expertRows, routes int
+	batchedX                                                       bool
+}
+
+var gatherQMVAllRoutesMetas sync.Map
+
+// gatherQMVAllRoutesMetadata is gatherQMVBF16Metadata for the ALL-ROUTES dispatch: the MLX
+// gather batch dimension carries every selected expert in ONE dispatch (grid.z = routes).
+// batchedX=false shares one x row across routes (the gate/up projections — lhs stride 0);
+// batchedX=true indexes x as [routes × inDim] (the down projection reading each route's
+// gated row — lhs iota, stride 1).
+func gatherQMVAllRoutesMetadata(numExperts, outDim, inDim, groupSize, bits, expertRows, routes int, batchedX bool) (*gatherQMVBF16Meta, error) {
+	rowPackedBytes := inDim * bits / 8
+	if rowPackedBytes%4 != 0 {
+		return nil, core.NewError("native.gatherQMVAllRoutesMetadata: packed row must be uint32 aligned")
+	}
+	rowPackedU32 := inDim * bits / 32
+	groups := inDim / groupSize
+	key := gatherQMVAllRoutesMetaKey{numExperts: numExperts, outDim: outDim, inDim: inDim, groupSize: groupSize, bits: bits, expertRows: expertRows, routes: routes, batchedX: batchedX}
+	if v, ok := gatherQMVAllRoutesMetas.Load(key); ok {
+		return v.(*gatherQMVBF16Meta), nil
+	}
+	xShape := []int32{1, int32(inDim)}
+	xStrides := []int64{int64(inDim), 1}
+	if batchedX {
+		// x = [routes, 1, inDim] with batch ndims 1: the kernel resolves the lhs index
+		// against the LEADING batch dim (offset = lhs_value · strides[0]), then the
+		// trailing (M, K) pair addresses the row.
+		xShape = []int32{int32(routes), 1, int32(inDim)}
+		xStrides = []int64{int64(inDim), int64(inDim), 1}
+	}
+	wShape := [...]int32{int32(numExperts), int32(expertRows), int32(rowPackedU32)}
+	wStrides := [...]int64{int64(expertRows * rowPackedU32), int64(rowPackedU32), 1}
+	sbStrides := [...]int64{int64(expertRows * groups), int64(groups), 1}
+	batchShape := [...]int32{int32(routes)}
+	lhsStride := [...]int64{0}
+	if batchedX {
+		lhsStride = [...]int64{1}
+	}
+	rhsStride := [...]int64{1}
+	meta := &gatherQMVBF16Meta{
+		xShape:     device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&xShape[0]), uint(len(xShape)*4), metal.MTLResourceStorageModeShared),
+		xStrides:   device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&xStrides[0]), uint(len(xStrides)*8), metal.MTLResourceStorageModeShared),
+		wShape:     device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&wShape[0]), uint(len(wShape)*4), metal.MTLResourceStorageModeShared),
+		wStrides:   device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&wStrides[0]), uint(len(wStrides)*8), metal.MTLResourceStorageModeShared),
+		sbStrides:  device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&sbStrides[0]), uint(len(sbStrides)*8), metal.MTLResourceStorageModeShared),
+		batchShape: device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&batchShape[0]), uint(len(batchShape)*4), metal.MTLResourceStorageModeShared),
+		zeroStride: device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&lhsStride[0]), uint(len(lhsStride)*8), metal.MTLResourceStorageModeShared),
+	}
+	// rhs stride rides a second buffer — reuse the meta struct's spare slot via a paired map
+	rhs := device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&rhsStride[0]), uint(len(rhsStride)*8), metal.MTLResourceStorageModeShared)
+	gatherQMVAllRoutesRHS.Store(key, rhs)
+	if v, loaded := gatherQMVAllRoutesMetas.LoadOrStore(key, meta); loaded {
+		return v.(*gatherQMVBF16Meta), nil
+	}
+	return meta, nil
+}
+
+var gatherQMVAllRoutesRHS sync.Map
+
+// emitGatherQMVAllRoutes dispatches one gather_qmv covering EVERY route: grid.z carries the
+// routes, rhs_indices supplies each route's expert id (the router's device idxBuf), and the
+// x/lhs binding either shares one row (gate/up) or walks the per-route gated rows (down).
+// Out is the [routes × outDim] slab. xBatchNdims/xBatchStride express the batched-x case
+// through MLX's x batch machinery (x.shape/strides bound at 10/11 stay the trailing 2-D).
+func emitGatherQMVAllRoutes(sink encSink, pso metal.MTLComputePipelineState, meta *gatherQMVBF16Meta, metaKey gatherQMVAllRoutesMetaKey, x metal.MTLBuffer, xOff uint, wq metal.MTLBuffer, wqOff uint, scales metal.MTLBuffer, scalesOff uint, biases metal.MTLBuffer, biasesOff uint, lhsIdx, rhsIdx metal.MTLBuffer, rhsOff uint, out metal.MTLBuffer, outOff uint, outDim, inDim, groupSize, bits, rowBase, routes int) {
+	rowPackedBytes := inDim * bits / 8
+	groups := inDim / groupSize
+	rhsAny, _ := gatherQMVAllRoutesRHS.Load(metaKey)
+	rhsStrideBuf, _ := rhsAny.(metal.MTLBuffer)
+
+	sink.setPSO(pso)
+	sink.setBuf(wq, wqOff+uint(rowBase*rowPackedBytes), 0)
+	sink.setBuf(scales, scalesOff+uint(rowBase*groups*bf16Size), 1)
+	sink.setBuf(biases, biasesOff+uint(rowBase*groups*bf16Size), 2)
+	sink.setBuf(x, xOff, 3)
+	sink.setBuf(lhsIdx, 0, 4)
+	sink.setBuf(rhsIdx, rhsOff, 5)
+	sink.setBuf(out, outOff, 6)
+	sink.setI32(int32(inDim), 7)
+	sink.setI32(int32(outDim), 8)
+	xBatchNdims := int32(0)
+	if metaKey.batchedX {
+		xBatchNdims = 1
+	}
+	sink.setI32(xBatchNdims, 9)
+	sink.setBuf(meta.xShape, 0, 10)
+	sink.setBuf(meta.xStrides, 0, 11)
+	sink.setI32(1, 12)
+	sink.setBuf(meta.wShape, 0, 13)
+	sink.setBuf(meta.wStrides, 0, 14)
+	sink.setBuf(meta.sbStrides, 0, 15)
+	sink.setBuf(meta.sbStrides, 0, 16)
+	sink.setI32(1, 17)
+	sink.setBuf(meta.batchShape, 0, 18)
+	sink.setBuf(meta.zeroStride, 0, 19) // lhs stride (0 shared-x, 1 batched-x)
+	sink.setBuf(rhsStrideBuf, 0, 20)    // rhs stride 1 — consecutive routes
+
+	const bn, bk = 8, 32
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: 1, Height: uint((outDim + bn - 1) / bn), Depth: uint(routes)},
+		metal.MTLSize{Width: bk, Height: 2, Depth: 1},
+	)
+}
+
 func gatherQMVBF16ByExpertIndex(x []byte, idx []int32, w QuantWeight, numExperts, topK, outDim, inDim, groupSize, bits int) ([]byte, error) {
 	return gatherQMVBF16ByExpertIndexInto(nil, x, idx, w, numExperts, topK, outDim, inDim, groupSize, bits)
 }

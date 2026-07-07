@@ -426,6 +426,41 @@ type moeBlockBF16Scratch struct {
 	localMegaGated               metal.MTLBuffer
 	localMegaArrive              metal.MTLBuffer
 	localMegaArrivePtr           *uint32
+	// all-routes expert slabs (the encoded lane's single-dispatch expert projections):
+	// [topK × expertDFF] gate/up/gated + [topK × dModel] down, plus the constant index
+	// buffers the MLX gather batch dimension consumes (zeros for the shared-x lhs, iota
+	// for the per-route gated rows).
+	expertGateAll, expertUpAll, expertGatedAll, expertDownAll metal.MTLBuffer
+	routeZeros, routeIota                                     metal.MTLBuffer
+}
+
+// ensureAllRoutesScratch sizes the all-routes expert slabs (idempotent; the scratch's
+// dims are fixed at construction so a single build serves every layer).
+func (s *moeBlockBF16Scratch) ensureAllRoutesScratch() error {
+	if s.expertGateAll != nil {
+		return nil
+	}
+	if s.topK <= 0 || s.expertDFF <= 0 || s.dModel <= 0 {
+		return core.NewError("native.moeBlockScratch: all-routes scratch needs topK/expertDFF/dModel")
+	}
+	ffBytes := uint(s.topK * s.expertDFF * bf16Size)
+	s.expertGateAll = device.NewBufferWithLengthOptions(ffBytes, metal.MTLResourceStorageModeShared)
+	s.expertUpAll = device.NewBufferWithLengthOptions(ffBytes, metal.MTLResourceStorageModeShared)
+	s.expertGatedAll = device.NewBufferWithLengthOptions(ffBytes, metal.MTLResourceStorageModeShared)
+	s.expertDownAll = device.NewBufferWithLengthOptions(uint(s.topK*s.dModel*bf16Size), metal.MTLResourceStorageModeShared)
+	zeros := make([]int32, s.topK)
+	iota := make([]int32, s.topK)
+	for i := range iota {
+		iota[i] = int32(i)
+	}
+	s.routeZeros = device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&zeros[0]), uint(s.topK*4), metal.MTLResourceStorageModeShared)
+	s.routeIota = device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&iota[0]), uint(s.topK*4), metal.MTLResourceStorageModeShared)
+	if s.expertGateAll == nil || s.expertUpAll == nil || s.expertGatedAll == nil || s.expertDownAll == nil || s.routeZeros == nil || s.routeIota == nil {
+		s.expertGateAll, s.expertUpAll, s.expertGatedAll, s.expertDownAll = nil, nil, nil, nil
+		s.routeZeros, s.routeIota = nil, nil
+		return core.NewError("native.moeBlockScratch: all-routes scratch unavailable")
+	}
+	return nil
 }
 
 type moeBlockBF16ScratchKey struct {
@@ -1695,6 +1730,18 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, routerScra
 			metal.MTLSize{Width: group, Height: 1, Depth: 1},
 		)
 	}
+	emitScaleFromAt := func(in metal.MTLBuffer, inOff, scalarOff uint, out metal.MTLBuffer, n int) {
+		sink.setPSO(scalePSO)
+		sink.setBuf(in, inOff, 0)
+		sink.setBuf(weightsBuf, scalarOff, 1)
+		sink.setBuf(out, 0, 2)
+		sink.setI32(int32(n), 3)
+		group := min(uint(n), uint(256))
+		sink.dispatchThreads(
+			metal.MTLSize{Width: uint(n), Height: 1, Depth: 1},
+			metal.MTLSize{Width: group, Height: 1, Depth: 1},
+		)
+	}
 	emitAdd := func(a, b, out metal.MTLBuffer) {
 		emitBinary(sink, addPSO, a, 0, b, 0, out, 0, dModel)
 	}
@@ -1733,21 +1780,63 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, routerScra
 		emitQ(localDownPSO, localDownPacked, localDownScales, localDownBiases, msc.gated, scratch.localOut, dFF, dModel)
 	}
 	emitRMS(hBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
-	for i := range topK {
+	// expert MLPs, ALL routes per dispatch: the MLX gather batch dimension carries every
+	// selected expert (grid.z = topK, rhs = the router's device idxBuf), collapsing the
+	// old per-route loop's topK×3 matvec dispatches to 3. gate/up share the one normed
+	// input (lhs zeros, stride 0); down walks each route's gated row (lhs iota, stride 1).
+	// The weighted-sum tail stays per-route (small elementwise ops). Falls back to the
+	// per-route loop when the slabs or metadata are unavailable.
+	allRoutes := scratch.ensureAllRoutesScratch() == nil
+	var inKeyShared, downKeyBatched gatherQMVAllRoutesMetaKey
+	var inAllMeta, downAllMeta *gatherQMVBF16Meta
+	if allRoutes {
+		inGroupSize, inBitsSel, inRowsSel := expGateGroupSize, expGateBits, expertDFF
 		if fusedExperts {
-			emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expGateUpPacked, expGateUpScales, expGateUpBiases, scratch.expertIn, msc.gate, i, dModel, expertDFF, expGateUpGroupSize, expGateUpBits, 0)
-			emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expGateUpPacked, expGateUpScales, expGateUpBiases, scratch.expertIn, msc.up, i, dModel, expertDFF, expGateUpGroupSize, expGateUpBits, expertDFF)
-		} else {
-			emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expGatePacked, expGateScales, expGateBiases, scratch.expertIn, msc.gate, i, dModel, expertDFF, expGateGroupSize, expGateBits, 0)
-			emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expUpPacked, expUpScales, expUpBiases, scratch.expertIn, msc.up, i, dModel, expertDFF, expUpGroupSize, expUpBits, 0)
+			inGroupSize, inBitsSel, inRowsSel = expGateUpGroupSize, expGateUpBits, 2*expertDFF
 		}
-		emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, expertDFF)
-		emitGatherQ(gatherExpertDownPSO, gatherExpertDownMeta, expDownPacked, expDownScales, expDownBiases, msc.gated, msc.down, i, expertDFF, dModel, expDownGroupSize, expDownBits, 0)
-		if i == 0 {
-			emitScaleAt(msc.down, uint(i*bf16Size), scratch.expertAcc, dModel)
+		inKeyShared = gatherQMVAllRoutesMetaKey{numExperts: numExperts, outDim: expertDFF, inDim: dModel, groupSize: inGroupSize, bits: inBitsSel, expertRows: inRowsSel, routes: topK, batchedX: false}
+		downKeyBatched = gatherQMVAllRoutesMetaKey{numExperts: numExperts, outDim: dModel, inDim: expertDFF, groupSize: expDownGroupSize, bits: expDownBits, expertRows: dModel, routes: topK, batchedX: true}
+		if inAllMeta, err = gatherQMVAllRoutesMetadata(numExperts, expertDFF, dModel, inGroupSize, inBitsSel, inRowsSel, topK, false); err != nil {
+			allRoutes = false
+		} else if downAllMeta, err = gatherQMVAllRoutesMetadata(numExperts, dModel, expertDFF, expDownGroupSize, expDownBits, dModel, topK, true); err != nil {
+			allRoutes = false
+		}
+	}
+	if allRoutes {
+		if fusedExperts {
+			emitGatherQMVAllRoutes(sink, gatherExpertInPSO, inAllMeta, inKeyShared, scratch.expertIn, 0, expGateUpPacked.buf, expGateUpPacked.off, expGateUpScales.buf, expGateUpScales.off, expGateUpBiases.buf, expGateUpBiases.off, scratch.routeZeros, routeIdxBuf, 0, scratch.expertGateAll, 0, expertDFF, dModel, expGateUpGroupSize, expGateUpBits, 0, topK)
+			emitGatherQMVAllRoutes(sink, gatherExpertInPSO, inAllMeta, inKeyShared, scratch.expertIn, 0, expGateUpPacked.buf, expGateUpPacked.off, expGateUpScales.buf, expGateUpScales.off, expGateUpBiases.buf, expGateUpBiases.off, scratch.routeZeros, routeIdxBuf, 0, scratch.expertUpAll, 0, expertDFF, dModel, expGateUpGroupSize, expGateUpBits, expertDFF, topK)
 		} else {
-			emitScaleAt(msc.down, uint(i*bf16Size), scratch.expertScaled, dModel)
-			emitAdd(scratch.expertAcc, scratch.expertScaled, scratch.expertAcc)
+			emitGatherQMVAllRoutes(sink, gatherExpertInPSO, inAllMeta, inKeyShared, scratch.expertIn, 0, expGatePacked.buf, expGatePacked.off, expGateScales.buf, expGateScales.off, expGateBiases.buf, expGateBiases.off, scratch.routeZeros, routeIdxBuf, 0, scratch.expertGateAll, 0, expertDFF, dModel, expGateGroupSize, expGateBits, 0, topK)
+			emitGatherQMVAllRoutes(sink, gatherExpertInPSO, inAllMeta, inKeyShared, scratch.expertIn, 0, expUpPacked.buf, expUpPacked.off, expUpScales.buf, expUpScales.off, expUpBiases.buf, expUpBiases.off, scratch.routeZeros, routeIdxBuf, 0, scratch.expertUpAll, 0, expertDFF, dModel, expUpGroupSize, expUpBits, 0, topK)
+		}
+		emitBinary(sink, geluPSO, scratch.expertGateAll, 0, scratch.expertUpAll, 0, scratch.expertGatedAll, 0, topK*expertDFF)
+		emitGatherQMVAllRoutes(sink, gatherExpertDownPSO, downAllMeta, downKeyBatched, scratch.expertGatedAll, 0, expDownPacked.buf, expDownPacked.off, expDownScales.buf, expDownScales.off, expDownBiases.buf, expDownBiases.off, scratch.routeIota, routeIdxBuf, 0, scratch.expertDownAll, 0, dModel, expertDFF, expDownGroupSize, expDownBits, 0, topK)
+		for i := range topK {
+			if i == 0 {
+				emitScaleFromAt(scratch.expertDownAll, uint(i*dModel*bf16Size), uint(i*bf16Size), scratch.expertAcc, dModel)
+			} else {
+				emitScaleFromAt(scratch.expertDownAll, uint(i*dModel*bf16Size), uint(i*bf16Size), scratch.expertScaled, dModel)
+				emitAdd(scratch.expertAcc, scratch.expertScaled, scratch.expertAcc)
+			}
+		}
+	} else {
+		for i := range topK {
+			if fusedExperts {
+				emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expGateUpPacked, expGateUpScales, expGateUpBiases, scratch.expertIn, msc.gate, i, dModel, expertDFF, expGateUpGroupSize, expGateUpBits, 0)
+				emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expGateUpPacked, expGateUpScales, expGateUpBiases, scratch.expertIn, msc.up, i, dModel, expertDFF, expGateUpGroupSize, expGateUpBits, expertDFF)
+			} else {
+				emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expGatePacked, expGateScales, expGateBiases, scratch.expertIn, msc.gate, i, dModel, expertDFF, expGateGroupSize, expGateBits, 0)
+				emitGatherQ(gatherExpertInPSO, gatherExpertInMeta, expUpPacked, expUpScales, expUpBiases, scratch.expertIn, msc.up, i, dModel, expertDFF, expUpGroupSize, expUpBits, 0)
+			}
+			emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, expertDFF)
+			emitGatherQ(gatherExpertDownPSO, gatherExpertDownMeta, expDownPacked, expDownScales, expDownBiases, msc.gated, msc.down, i, expertDFF, dModel, expDownGroupSize, expDownBits, 0)
+			if i == 0 {
+				emitScaleAt(msc.down, uint(i*bf16Size), scratch.expertAcc, dModel)
+			} else {
+				emitScaleAt(msc.down, uint(i*bf16Size), scratch.expertScaled, dModel)
+				emitAdd(scratch.expertAcc, scratch.expertScaled, scratch.expertAcc)
+			}
 		}
 	}
 	emitRMS(scratch.localOut, post1Buf.buf, scratch.localNormed, post1Buf.off)
