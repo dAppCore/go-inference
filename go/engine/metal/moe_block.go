@@ -1525,8 +1525,16 @@ type quantMLPProjView struct {
 	groupSize, bits        int
 }
 
+// ffnMegaDefaultGeometry admits the FFN megakernel only on the shape family it
+// earned its receipt on: dense-style MLPs with dFF well above dModel (E2B
+// 1536×6144, E4B 2560×10240, 12B — all ratio 4). The grid-barrier design
+// parallelises over dFF rows, so an INVERTED shape starves it: the 26B-A4B's
+// 4-bit local expert (dModel 2816 × dFF 2112, first exposed by the non-QAT
+// checkpoint — the QAT local is 8-bit and routed away) measured 12.43 ms/token
+// on the mega vs ~1 ms on the qmv trio, a 9× family blowup that took the whole
+// decode from 137 to 42 tok/s. Route a new shape only with a receipt.
 func ffnMegaDefaultGeometry(dModel, dFF int) bool {
-	return dModel >= 256 && dFF >= 512
+	return dModel >= 256 && dFF >= 512 && dFF >= 2*dModel
 }
 
 var (

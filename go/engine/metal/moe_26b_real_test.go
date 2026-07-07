@@ -197,6 +197,11 @@ func TestRealMoE26BFamilyGPUProfile(t *testing.T) {
 }
 
 func resolveMoE26BDir(t *testing.T) string {
+	// LEM_MOE_DIR points the profile at any MoE snapshot (e.g. the non-QAT
+	// 26B) — checkpoint A/Bs reuse the same instrument.
+	if dir := os.Getenv("LEM_MOE_DIR"); dir != "" {
+		return dir
+	}
 	home := os.Getenv("HOME")
 	base := home + "/.cache/huggingface/hub/models--mlx-community--gemma-4-26B-A4B-it-qat-4bit/snapshots"
 	entries, err := os.ReadDir(base)
