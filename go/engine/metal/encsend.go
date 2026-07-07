@@ -51,6 +51,7 @@ var (
 	selConcurrentThreadgroups  = objc.Sel("concurrentDispatchThreadgroups:threadsPerThreadgroup:")
 	selCommandBuffer           = objc.Sel("commandBuffer")
 	selComputeCommandEncoder   = objc.Sel("computeCommandEncoder")
+	selComputeCommandEncoderWithDescriptor = objc.Sel("computeCommandEncoderWithDescriptor:")
 	selBlitCommandEncoder      = objc.Sel("blitCommandEncoder")
 	selEndEncoding             = objc.Sel("endEncoding")
 	selCommit                  = objc.Sel("commit")
@@ -450,10 +451,28 @@ func blitCommandEncoderFast(cb metal.MTLCommandBufferObject) metal.MTLBlitComman
 
 // concurrentComputeEncoderFast opens a CONCURRENT-dispatch compute encoder on cb: dispatches
 // may overlap and the encoder orders NOTHING between them — callers place explicit
-// memoryBarrierObject calls at every true dependency edge.
+// memoryBarrierObject calls at every true dependency edge. The pass descriptor is immutable
+// config ({dispatchType: concurrent}) built once and reused; the raw msgSend keeps the
+// per-layer encoder creation off the allocator (the sampled-wake budgets count every alloc).
+var (
+	concurrentPassDescOnce sync.Once
+	concurrentPassDescID   uintptr
+)
+
 func concurrentComputeEncoderFast(cb metal.MTLCommandBufferObject) metal.MTLComputeCommandEncoderObject {
-	pd := metal.NewMTLComputePassDescriptor()
-	pd.SetDispatchType(metal.MTLDispatchTypeConcurrent)
+	concurrentPassDescOnce.Do(func() {
+		pd := metal.NewMTLComputePassDescriptor()
+		pd.SetDispatchType(metal.MTLDispatchTypeConcurrent)
+		pd.Retain() // lives for the process — reused by every concurrent encoder
+		concurrentPassDescID = uintptr(pd.GetID())
+	})
+	objcMsgSendOnce.Do(initObjCMsgSendStubs)
+	if objcMsgSendAddr != 0 && puregoSyscall15XABI0 != 0 && concurrentPassDescID != 0 {
+		rv := objcMsgSendRaw1Ret(objcMsgSendAddr, uintptr(cb.GetID()), uintptr(selComputeCommandEncoderWithDescriptor), concurrentPassDescID)
+		runtime.KeepAlive(cb)
+		return metal.MTLComputeCommandEncoderObjectFromID(objc.ID(rv))
+	}
+	pd := metal.MTLComputePassDescriptorFromID(objc.ID(concurrentPassDescID))
 	return metal.MTLComputeCommandEncoderObjectFromID(cb.ComputeCommandEncoderWithDescriptor(pd).GetID())
 }
 

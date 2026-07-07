@@ -211,34 +211,34 @@ func buildSDPAPagedDecodePlan(
 	scratch *sdpaPagedDecodeScratch,
 	nHeads, nKVHeads, headDim int,
 	scale float32,
-) (*sdpaPagedDecodePlan, error) {
+) (sdpaPagedDecodePlan, error) {
 	if nHeads <= 0 || nKVHeads <= 0 || headDim <= 0 {
-		return nil, core.NewError("native.encSDPAPagedDecodeStrided: dimensions must be > 0")
+		return sdpaPagedDecodePlan{}, core.NewError("native.encSDPAPagedDecodeStrided: dimensions must be > 0")
 	}
 	if nHeads%nKVHeads != 0 {
-		return nil, core.NewError("native.encSDPAPagedDecodeStrided: nHeads must be a multiple of nKVHeads")
+		return sdpaPagedDecodePlan{}, core.NewError("native.encSDPAPagedDecodeStrided: nHeads must be a multiple of nKVHeads")
 	}
 	if q == nil || q.GetID() == 0 || out == nil || out.GetID() == 0 {
-		return nil, core.NewError("native.encSDPAPagedDecodeStrided: nil input/output buffer")
+		return sdpaPagedDecodePlan{}, core.NewError("native.encSDPAPagedDecodeStrided: nil input/output buffer")
 	}
 	if len(keyPages) == 0 || len(keyPages) != len(valuePages) || len(keyPages) != len(pageLens) ||
 		len(keyPages) != len(keyHeadStrides) || len(keyPages) != len(keySeqStrides) ||
 		len(keyPages) != len(valueHeadStrides) || len(keyPages) != len(valueSeqStrides) {
-		return nil, core.NewError("native.encSDPAPagedDecodeStrided: page buffers and strides must be non-empty and matched")
+		return sdpaPagedDecodePlan{}, core.NewError("native.encSDPAPagedDecodeStrided: page buffers and strides must be non-empty and matched")
 	}
 	for i := range keyPages {
 		if keyPages[i] == nil || keyPages[i].GetID() == 0 || valuePages[i] == nil || valuePages[i].GetID() == 0 {
-			return nil, core.NewError("native.encSDPAPagedDecodeStrided: nil page buffer")
+			return sdpaPagedDecodePlan{}, core.NewError("native.encSDPAPagedDecodeStrided: nil page buffer")
 		}
 		if pageLens[i] <= 0 || keyHeadStrides[i] <= 0 || keySeqStrides[i] <= 0 || valueHeadStrides[i] <= 0 || valueSeqStrides[i] <= 0 {
-			return nil, core.NewError("native.encSDPAPagedDecodeStrided: page lengths and strides must be > 0")
+			return sdpaPagedDecodePlan{}, core.NewError("native.encSDPAPagedDecodeStrided: page lengths and strides must be > 0")
 		}
 	}
 	// the lane slicing owns headDim/32 dims per lane — every shipped head dim (64,
 	// 128, 256, 512) is a multiple of 32; reject anything else loudly rather than
 	// silently dropping tail dims.
 	if headDim%32 != 0 || headDim/32 > 16 {
-		return nil, core.NewError("native.encSDPAPagedDecodeStrided: headDim must be a multiple of 32, at most 512")
+		return sdpaPagedDecodePlan{}, core.NewError("native.encSDPAPagedDecodeStrided: headDim must be a multiple of 32, at most 512")
 	}
 	// each page fans out over ceil(len/splitRows) independent split cells — the grid grows
 	// with context (#339: 16 fixed threadgroups measured 12.4 ms/token of attention at
@@ -248,17 +248,19 @@ func buildSDPAPagedDecodePlan(
 		cellCount += (pageLens[i] + sdpaPagedSplitRows - 1) / sdpaPagedSplitRows
 	}
 	if err := scratch.ensure(nHeads, headDim, cellCount); err != nil {
-		return nil, err
+		return sdpaPagedDecodePlan{}, err
 	}
 	p1PSO, err := sdpaPagedP1Pipeline()
 	if err != nil {
-		return nil, err
+		return sdpaPagedDecodePlan{}, err
 	}
 	p2PSO, err := sdpaPagedP2Pipeline()
 	if err != nil {
-		return nil, err
+		return sdpaPagedDecodePlan{}, err
 	}
-	return &sdpaPagedDecodePlan{
+	// returned BY VALUE (borrowed slices only): the callers hold it as a local, so it stays
+	// on the stack — the sampled-retained allocation budgets count every per-layer alloc.
+	return sdpaPagedDecodePlan{
 		q: q, out: out,
 		keyPages: keyPages, valuePages: valuePages, pageLens: pageLens,
 		kHead: keyHeadStrides, kSeq: keySeqStrides, vHead: valueHeadStrides, vSeq: valueSeqStrides,

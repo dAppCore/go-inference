@@ -393,6 +393,10 @@ func encAttnHalfKVPaged(
 	if err != nil {
 		return enc, err
 	}
+	// one interface value per encoder: the Object struct is not pointer-shaped, so every
+	// implicit conversion at an interface-taking call would allocate — 13 boxes per layer
+	// showed up straight in the sampled-wake allocation budgets.
+	encI := metal.MTLComputeCommandEncoder(enc)
 	fusedQKRope := gpuHasGeluKernel() && qNorm.buf != nil
 	fusedKRope := gpuHasGeluKernel() && kNorm.buf != nil
 
@@ -421,19 +425,19 @@ func encAttnHalfKVPaged(
 		attnConcurrentPasses.Add(1)
 		endEncodingFast(enc)
 		enc = concurrentComputeEncoderFast(cb)
-		barrier := func() { memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers) }
+		encI = metal.MTLComputeCommandEncoder(enc)
 		// stage 1: the shared input norm
-		if err := encRMSNormBF16(enc, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
+		if err := encRMSNormBF16(encI, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), err
 		}
-		barrier()
+		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
 		// stage 2: q ∥ k ∥ v projections
-		if err := proj.project(enc, sc.normed, sc.q, 0, projQ); err != nil {
+		if err := proj.project(encI, sc.normed, sc.q, 0, projQ); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), err
 		}
-		if err := proj.project(enc, sc.normed, kPage, rowOff, projK); err != nil {
+		if err := proj.project(encI, sc.normed, kPage, rowOff, projK); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), err
 		}
@@ -441,43 +445,43 @@ func encAttnHalfKVPaged(
 		if !proj.hasV() {
 			vIdx = projK
 		}
-		if err := proj.project(enc, sc.normed, vPage, rowOff, vIdx); err != nil {
+		if err := proj.project(encI, sc.normed, vPage, rowOff, vIdx); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), err
 		}
-		barrier()
+		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
 		// stage 3: q rope ∥ k rope ∥ v norm
-		if err := encQKNormRopeAt(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+		if err := encQKNormRopeAt(encI, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale, eps); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), err
 		}
 		if kNorm.buf != nil {
-			if err := encQKNormRopeAt(enc, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+			if err := encQKNormRopeAt(encI, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
 				endEncodingFast(enc)
 				return computeCommandEncoderFast(cb), err
 			}
 		}
 		if valueNorm != nil {
-			if err := encRMSNormRowsBF16(enc, vPage, valueNorm, vPage, rowOff, 0, rowOff, nKVHeads, headDim, eps); err != nil {
+			if err := encRMSNormRowsBF16(encI, vPage, valueNorm, vPage, rowOff, 0, rowOff, nKVHeads, headDim, eps); err != nil {
 				endEncodingFast(enc)
 				return computeCommandEncoderFast(cb), err
 			}
 		}
-		barrier()
+		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
 		// stage 4: SDPA pass 1 — the per-page/window partials, genuinely overlapped
-		sdpaPlan.emitP1s(enc)
-		barrier()
+		sdpaPlan.emitP1s(encI)
+		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
 		// stage 5: SDPA pass 2 — the cell merge
-		sdpaPlan.emitP2(enc)
-		barrier()
+		sdpaPlan.emitP2(encI)
+		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
 		// stage 6: output projection
-		if err := proj.project(enc, sc.attn, sc.attnOut, 0, projO); err != nil {
+		if err := proj.project(encI, sc.attn, sc.attnOut, 0, projO); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), err
 		}
-		barrier()
+		memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
 		// stage 7: residual (+ post-attention norm)
-		if err := encResidualMaybeNorm(enc, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps); err != nil {
+		if err := encResidualMaybeNorm(encI, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), err
 		}
@@ -486,40 +490,40 @@ func encAttnHalfKVPaged(
 	}
 
 	// ---- serial path (hazard tracking orders every edge) ----
-	if err := encRMSNormBF16(enc, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
+	if err := encRMSNormBF16(encI, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
 		return enc, err
 	}
-	if err := proj.project(enc, sc.normed, sc.q, 0, projQ); err != nil {
+	if err := proj.project(encI, sc.normed, sc.q, 0, projQ); err != nil {
 		return enc, err
 	}
 	if fusedQKRope {
-		if err := encQKNormRopeAt(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+		if err := encQKNormRopeAt(encI, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale, eps); err != nil {
 			return enc, err
 		}
 	} else {
 		if qNorm.buf != nil {
-			if err := encRMSNormRowsBF16(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, nHeads, headDim, eps); err != nil {
+			if err := encRMSNormRowsBF16(encI, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, nHeads, headDim, eps); err != nil {
 				return enc, err
 			}
 		}
-		if err := encRopeDecodeAt(enc, sc.q, sc.q, 0, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale); err != nil {
+		if err := encRopeDecodeAt(encI, sc.q, sc.q, 0, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale); err != nil {
 			return enc, err
 		}
 	}
-	if err := proj.project(enc, sc.normed, kPage, rowOff, projK); err != nil {
+	if err := proj.project(encI, sc.normed, kPage, rowOff, projK); err != nil {
 		return enc, err
 	}
 	if fusedKRope {
-		if err := encQKNormRopeAt(enc, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+		if err := encQKNormRopeAt(encI, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
 			return enc, err
 		}
 	} else {
 		if kNorm.buf != nil {
-			if err := encRMSNormRowsBF16(enc, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, nKVHeads, headDim, eps); err != nil {
+			if err := encRMSNormRowsBF16(encI, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, nKVHeads, headDim, eps); err != nil {
 				return enc, err
 			}
 		}
-		if err := encRopeDecodeAt(enc, kPage, kPage, rowOff, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale); err != nil {
+		if err := encRopeDecodeAt(encI, kPage, kPage, rowOff, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale); err != nil {
 			return enc, err
 		}
 	}
@@ -527,20 +531,20 @@ func encAttnHalfKVPaged(
 	if !proj.hasV() {
 		vIdx = projK
 	}
-	if err := proj.project(enc, sc.normed, vPage, rowOff, vIdx); err != nil {
+	if err := proj.project(encI, sc.normed, vPage, rowOff, vIdx); err != nil {
 		return enc, err
 	}
 	if valueNorm != nil {
-		if err := encRMSNormRowsBF16(enc, vPage, valueNorm, vPage, rowOff, 0, rowOff, nKVHeads, headDim, eps); err != nil {
+		if err := encRMSNormRowsBF16(encI, vPage, valueNorm, vPage, rowOff, 0, rowOff, nKVHeads, headDim, eps); err != nil {
 			return enc, err
 		}
 	}
-	sdpaPlan.emitP1s(enc)
-	sdpaPlan.emitP2(enc)
-	if err := proj.project(enc, sc.attn, sc.attnOut, 0, projO); err != nil {
+	sdpaPlan.emitP1s(encI)
+	sdpaPlan.emitP2(encI)
+	if err := proj.project(encI, sc.attn, sc.attnOut, 0, projO); err != nil {
 		return enc, err
 	}
-	return enc, encResidualMaybeNorm(enc, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps)
+	return enc, encResidualMaybeNorm(encI, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps)
 }
 
 func encAttnHalfSharedPaged(
