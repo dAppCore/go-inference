@@ -350,7 +350,7 @@ func perLayerInputsGPUInto(out []byte, tokenID int32, emb []byte, embedPacked, e
 	if err := ensureInit(); err != nil {
 		return nil, err
 	}
-	if !gatherBitsSupported(embBits) {
+	if !affineBitsSupported(embBits) {
 		return nil, core.NewError("native.PerLayerInputsGPU: unsupported per-layer embedding width")
 	}
 	plDim := numLayers * pliDim

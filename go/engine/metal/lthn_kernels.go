@@ -789,7 +789,10 @@ func bf16LMHeadArgmaxUsable(dModel, vocab int) bool {
 }
 
 func qmvLogitsArgmaxUsable(dModel, vocab, groupSize, bits int) bool {
-	if dModel <= 0 || vocab <= 0 || bits != 4 {
+	// every kernel in this chain is width-generic (the qmv name interpolates gs/bits and the
+	// pipeline probe below validates the exact variant; the argmax reads bf16 LOGITS) — the
+	// old bits==4 check was folklore, not a kernel limit.
+	if dModel <= 0 || vocab <= 0 || !affineBitsSupported(bits) {
 		return false
 	}
 	if groupSize != 32 && groupSize != 64 && groupSize != 128 {
@@ -824,7 +827,9 @@ func bf16LMHeadTopKUsable(dModel, vocab, topK int) bool {
 }
 
 func qmvLogitsTopKUsable(dModel, vocab, groupSize, bits, topK int) bool {
-	if dModel <= 0 || vocab <= 0 || bits != 4 || topK <= 0 || topK > headSampleTopKMaxK || topK > vocab {
+	// width-generic chain (see qmvLogitsArgmaxUsable) — only the FUSED q4LMHeadTopKUsable
+	// below is genuinely 4-bit-baked.
+	if dModel <= 0 || vocab <= 0 || !affineBitsSupported(bits) || topK <= 0 || topK > headSampleTopKMaxK || topK > vocab {
 		return false
 	}
 	if groupSize != 32 && groupSize != 64 && groupSize != 128 {

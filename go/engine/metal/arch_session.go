@@ -887,7 +887,7 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 			// GPU next-inputs seam: produce the next step's emb+pli on-GPU from a token-id buffer (no host
 			// round-trip), the submit-ahead pipeline's gate. Handles e2b's shape only — 4-bit main + PLE
 			// embedding, bf16 PLE projection; other shapes leave it nil and keep the host path.
-			if gatherBitsSupported(bits) && len(g.EmbedPerLayerScales) > 0 && len(g.PerLayerModelProjScales) == 0 {
+			if affineBitsSupported(bits) && len(g.EmbedPerLayerScales) > 0 && len(g.PerLayerModelProjScales) == 0 {
 				numLayers, pliDim, dModel := len(arch.Layer), arch.PerLayerInputHidden, arch.Hidden
 				plDim := numLayers * pliDim
 				embScalePLE := float32(math.Sqrt(float64(pliDim)))
@@ -925,7 +925,7 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 			// matvec runs as the standard steel qmv instead of the bf16 gemv. This is
 			// what lets qat e2b/e4b ride the chained/pipelined decode like the plain
 			// 4-bit conversions do.
-			if gatherBitsSupported(bits) && len(g.EmbedPerLayerScales) > 0 && len(g.PerLayerModelProjScales) > 0 &&
+			if affineBitsSupported(bits) && len(g.EmbedPerLayerScales) > 0 && len(g.PerLayerModelProjScales) > 0 &&
 				g.PerLayerModelProjGS > 0 && g.PerLayerModelProjBits > 0 {
 				numLayers, pliDim, dModel := len(arch.Layer), arch.PerLayerInputHidden, arch.Hidden
 				plDim := numLayers * pliDim
@@ -954,7 +954,7 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 						g.PerLayerProjNormW, ids, embs, slab, numLayers, pliDim, dModel, arch.Eps)
 				}
 			}
-		} else if gatherBitsSupported(bits) {
+		} else if affineBitsSupported(bits) {
 			// GPU next-inputs seam, non-PLE dense (12B/31B): the only per-step input
 			// is the token's embedding, so the seam is the embed gather alone — no
 			// PLE stage, and the plGPUScratch the chain hands through is a zero-value
