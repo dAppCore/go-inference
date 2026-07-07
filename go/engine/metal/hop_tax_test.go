@@ -9,6 +9,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/tmc/apple/foundation"
 	"github.com/tmc/apple/metal"
 )
 
@@ -203,4 +204,87 @@ func TestHopTaxMicrobench(t *testing.T) {
 	if depSerial <= empty {
 		t.Fatal("dependent chain measured no GPU time — the bench is broken")
 	}
+}
+
+// TestHopTaxICBMicrobench is the phase-3 go/no-go instrument (#341): ICB
+// commands within one executeCommandsInBuffer are CONCURRENT-typed (no
+// ordering inside an execute), so a dependent per-layer chain recorded as an
+// ICB must issue one execute per stage — the decisive constant is therefore
+// the cost of a DEPENDENT execute on a serial encoder, against the carried
+// concurrent encoder's 4.13µs barrier hop (the shape the decode already runs).
+//
+// Pre-registered rule: dependent-execute ≥ the barrier hop ⇒ a stage-ICB MoE
+// decode buys nothing GPU-side (and submit-ahead already hides the host
+// encode) ⇒ phase 3 closes by rule. Only a dramatically cheaper execute
+// (< ~2µs) earns the build.
+func TestHopTaxICBMicrobench(t *testing.T) {
+	requireNativeRuntime(t)
+	const dModel = 2816
+	const n = 512
+	eps := float32(1e-6)
+
+	rmsPSO, err := pipelineForICB(rmsKernelBF16(dModel))
+	if err != nil {
+		t.Skipf("ICB-capable rms pipeline unavailable: %v", err)
+	}
+	rmsTG := rmsThreadgroup(dModel, rmsPSO)
+
+	w := toBF16Bytes(syntheticFloat32(dModel, 7))
+	wBuf := device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&w[0]), uint(len(w)), metal.MTLResourceStorageModeShared)
+	ping := device.NewBufferWithLengthOptions(uint(dModel*bf16Size), metal.MTLResourceStorageModeShared)
+	pong := device.NewBufferWithLengthOptions(uint(dModel*bf16Size), metal.MTLResourceStorageModeShared)
+	indepOut := device.NewBufferWithLengthOptions(uint(n*dModel*bf16Size), metal.MTLResourceStorageModeShared)
+
+	icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
+	icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch)
+	icbDesc.SetInheritBuffers(false)
+	icbDesc.SetInheritPipelineState(false)
+	icbDesc.SetMaxKernelBufferBindCount(8)
+
+	// dependent chain: command i reads the previous command's output (ping↔pong),
+	// replayed as n SEPARATE executes so the serial encoder orders them.
+	depICB := device.NewIndirectCommandBufferWithDescriptorMaxCommandCountOptions(icbDesc, uint(n), metal.MTLResourceStorageModeShared)
+	a, b := ping, pong
+	for i := 0; i < n; i++ {
+		cmd := indirectComputeCommandAtIndexFast(depICB, uint(i))
+		emitRMSNorm(fastICBSink{cmd}, rmsPSO, a, wBuf, b, 0, dModel, eps, rmsTG)
+		a, b = b, a
+	}
+	// independent: n commands with disjoint outputs, ONE execute (the ICB's
+	// internal concurrency ceiling).
+	indepICB := device.NewIndirectCommandBufferWithDescriptorMaxCommandCountOptions(icbDesc, uint(n), metal.MTLResourceStorageModeShared)
+	for i := 0; i < n; i++ {
+		cmd := indirectComputeCommandAtIndexFast(indepICB, uint(i))
+		emitRMSNormAt(fastICBSink{cmd}, rmsPSO, ping, wBuf, indepOut, 0, 0, uint(i*dModel*bf16Size), dModel, eps, rmsTG)
+	}
+
+	resident := []metal.MTLResource{wBuf, ping, pong, indepOut}
+	residentIDs := resourceIDsForFastUse(nil, resident)
+	empty := hopTaxTime(t, func(cb metal.MTLCommandBufferObject) {})
+
+	depExec := hopTaxTime(t, func(cb metal.MTLCommandBufferObject) {
+		enc := computeCommandEncoderFast(cb)
+		useResourcesIDsFast(enc, resident, residentIDs, metal.MTLResourceUsageRead|metal.MTLResourceUsageWrite)
+		for i := 0; i < n; i++ {
+			executeCommandsInBufferWithRangeFast(enc, depICB, foundation.NSRange{Location: uint(i), Length: 1})
+		}
+		endEncodingFast(enc)
+	})
+	oneExec := hopTaxTime(t, func(cb metal.MTLCommandBufferObject) {
+		enc := computeCommandEncoderFast(cb)
+		useResourcesIDsFast(enc, resident, residentIDs, metal.MTLResourceUsageRead|metal.MTLResourceUsageWrite)
+		executeCommandsInBufferWithRangeFast(enc, indepICB, foundation.NSRange{Location: 0, Length: uint(n)})
+		endEncodingFast(enc)
+	})
+
+	per := func(d time.Duration, count int) float64 {
+		net := d - empty
+		if net < 0 {
+			net = 0
+		}
+		return float64(net.Nanoseconds()) / 1e3 / float64(count)
+	}
+	t.Logf("ICB rms %d-wide, n=%d:", dModel, n)
+	t.Logf("  dependent, one execute per hop (serial enc): %7.2f µs/hop   — compare the 4.13µs barrier hop", per(depExec, n))
+	t.Logf("  independent, ONE execute of %d commands:     %7.2f µs/dispatch — the ICB concurrency ceiling", n, per(oneExec, n))
 }
