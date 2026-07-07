@@ -815,3 +815,69 @@ func alignedSafetensorsBlob(t *testing.T, tensors map[string]safetensors.Tensor,
 	t.Fatal("could not build an aligned safetensors fixture")
 	return nil
 }
+
+// TestLoadGemma4QuantMoEGeluFoldMatchesChain pins the gelu-fused down
+// projections (#341 phase 1) to the gelu-dispatch + plain-down chain token for
+// token: the fused kernels compute T(gelu(gate)·up) at load with the chain's
+// exact expression and rounding (lthn_gelu_qmv_impl.h), so the fold is a
+// schedule-only change. The fixture's QAT-shaped overrides put the local down
+// at 8-bit and the expert down at 4-bit — both fused widths engage.
+func TestLoadGemma4QuantMoEGeluFoldMatchesChain(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, nKV, headDim, vocab = 64, 2, 1, 64, 32
+	const dFF, expertDFF, numExperts, topK, numLayers = 128, 64, 4, 2, 2
+	const maxLen, n = 16, 6
+	quant := &model.QuantConfig{GroupSize: 64, Bits: 4, Overrides: map[string]model.ModuleQuant{}}
+	for i := range numLayers {
+		for _, m := range []string{"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "router.proj"} {
+			quant.Overrides[core.Sprintf("model.layers.%d.%s", i, m)] = model.ModuleQuant{GroupSize: 64, Bits: 8}
+		}
+	}
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+		EnableMoEBlock: true, NumExperts: numExperts, TopKExperts: topK, MoEIntermediateSize: expertDFF,
+		Quantization: quant,
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	ts := moeQuantTensors(t, arch, quant)
+	prompt := []int32{1, 5, 3}
+
+	gen := func(fold bool) []int32 {
+		t.Helper()
+		geluFoldEnabled = fold
+		defer func() { geluFoldEnabled = false }()
+		lm, aerr := model.Assemble(ts, arch, model.StandardWeightNames())
+		if aerr != nil {
+			t.Fatalf("model.Assemble: %v", aerr)
+		}
+		g, qerr := loadedToQuant(lm, quant.GroupSize, quant.Bits)
+		if qerr != nil {
+			t.Fatalf("loadedToQuant: %v", qerr)
+		}
+		sess, serr := NewArchQuantSession(g, arch, maxLen)
+		if serr != nil {
+			t.Fatalf("NewArchQuantSession: %v", serr)
+		}
+		out, gerr := sess.Generate(prompt, n, -1)
+		if gerr != nil {
+			t.Fatalf("Generate: %v", gerr)
+		}
+		return out
+	}
+	chain := gen(false)
+	before := geluFoldDispatches.Load()
+	folded := gen(true)
+	if geluFoldDispatches.Load() == before {
+		t.Skip("gelu-fused down kernels unavailable (stale metallib) — the compare would be vacuous")
+	}
+	if !idsEqual(folded, chain) {
+		t.Fatalf("gelu fold diverged from the chain: %v != %v", folded, chain)
+	}
+	t.Logf("gelu-fused downs ≡ chain over %d tokens (%v)", len(chain), chain)
+}

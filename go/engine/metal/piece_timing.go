@@ -48,6 +48,16 @@ var (
 	// lthn_gather_qmv kernel is available (7 buffers + 2 scalars, #280). Test/bench hook
 	// for lean-vs-MLX byte compares.
 	leanGatherDisabled bool
+	// geluFoldEnabled opts the MoE down projections into the gelu-fused kernels
+	// (gelu(gate)·up computed at the down's x-load — token-identical to the
+	// chain, see lthn_gelu_qmv_impl.h). OFF by receipt: the chain evaluates each
+	// gelu ONCE, but an x-load fold re-evaluates it per row-tile — 352
+	// threadgroups × 2112 precise::tanh for the 26B local down and ×8 routes
+	// for the expert gather (~6M redundant tanh per layer) — and the real
+	// 26B-A4B decode measured 136.4 tok/s fused vs 154.7 chained. Fold only
+	// O(output) work into matvec loads; per-element work consumed by many tiles
+	// must stay its own dispatch. Capability + parity oracle kept.
+	geluFoldEnabled bool
 	// encCarryDisabled forces every concurrent pass to close its encoder and
 	// reopen a serial one on exit (the pre-#341 shape) instead of carrying the
 	// open concurrent encoder into the next pass. Test/bench hook for

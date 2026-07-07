@@ -440,6 +440,25 @@ func emitQMV[S dispatchSink](sink S, pso metal.MTLComputePipelineState, wq metal
 	emitQMVAt(sink, pso, wq, wqOff, scales, scalesOff, biases, biasesOff, x, 0, out, outOff, inDim, outDim)
 }
 
+// emitGeluQMV records the gelu-fused down projection (out = dequant(W) ·
+// gelu(gate)·up, lthn_gelu_qmv kernel — #341 phase 1) through any sink: wq=0,
+// scales=1, biases=2, gate=3, up=4, out=5, K=6, N=7, the same grid as emitQMV.
+// The separate gelu-gate-mul dispatch and its dependency hop never encode.
+func emitGeluQMV[S dispatchSink](sink S, pso metal.MTLComputePipelineState, wq metal.MTLBuffer, wqOff uint, scales metal.MTLBuffer, scalesOff uint, biases metal.MTLBuffer, biasesOff uint, gate, up, out metal.MTLBuffer, outOff uint, inDim, outDim int) {
+	sink.setPSO(pso)
+	sink.setBuf(wq, wqOff, 0)
+	sink.setBuf(scales, scalesOff, 1)
+	sink.setBuf(biases, biasesOff, 2)
+	sink.setBuf(gate, 0, 3)
+	sink.setBuf(up, 0, 4)
+	sink.setBuf(out, outOff, 5)
+	sink.setI32(int32(inDim), 6)  // K
+	sink.setI32(int32(outDim), 7) // N
+	const bn, bk = 8, 32
+	nTgp := uint((outDim + bn - 1) / bn)
+	sink.dispatchThreadgroups(metal.MTLSize{Width: 1, Height: nTgp, Depth: 1}, metal.MTLSize{Width: bk, Height: 2, Depth: 1})
+}
+
 // emitQMVAt is emitQMV with the activation vector bound at a byte offset — the batched dense
 // forward's rows live at byte offsets inside shared K-row buffers, and a row's quant gate reads
 // its input in place.

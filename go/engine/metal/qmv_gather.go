@@ -185,6 +185,10 @@ var leanGatherDispatches atomic.Int64
 type lthnGatherQMVKey struct {
 	groupSize, bits, expertRows int
 	fast, batchedX              bool
+	// gelu selects the down-projection variant with the MLP gate fused into its
+	// x-load (lthn_gather_qmv_gelu — #341 phase 1). Only the qmv_impl form is
+	// instantiated, so gelu keys always carry fast=false.
+	gelu bool
 }
 
 var (
@@ -210,6 +214,9 @@ func lthnGatherQMVPipeline(key lthnGatherQMVKey) (metal.MTLComputePipelineState,
 	variant := "lthn_gather_qmv_"
 	if key.fast {
 		variant = "lthn_gather_qmv_fast_"
+	}
+	if key.gelu {
+		variant = "lthn_gather_qmv_gelu_"
 	}
 	name := core.Sprintf("%sbfloat16_t_gs_%d_b_%d", variant, key.groupSize, key.bits)
 	fc := metal.NewMTLFunctionConstantValues()
@@ -248,6 +255,31 @@ func emitLthnGatherQMVRoutes(sink encSink, pso metal.MTLComputePipelineState, x 
 	sink.setBuf(out, outOff, 6)
 	sink.setI32(int32(inDim), 7)
 	sink.setI32(int32(outDim), 8)
+	const bn, bk = 8, 32
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: 1, Height: uint((outDim + bn - 1) / bn), Depth: uint(routes)},
+		metal.MTLSize{Width: bk, Height: 2, Depth: 1},
+	)
+}
+
+// emitLthnGatherQMVGeluRoutes is emitLthnGatherQMVRoutes for the gelu-fused
+// down variant (#341 phase 1): the kernel reads each route's gate/up activation
+// rows (same lhs indexing on both) and computes gelu(gate)·up at load, so the
+// expert gelu dispatch and its barrier never encode.
+func emitLthnGatherQMVGeluRoutes(sink encSink, pso metal.MTLComputePipelineState, gate metal.MTLBuffer, gateOff uint, up metal.MTLBuffer, upOff uint, wq metal.MTLBuffer, wqOff uint, scales metal.MTLBuffer, scalesOff uint, biases metal.MTLBuffer, biasesOff uint, lhsIdx, rhsIdx metal.MTLBuffer, rhsOff uint, out metal.MTLBuffer, outOff uint, outDim, inDim, groupSize, bits, rowBase, routes int) {
+	rowPackedBytes := inDim * bits / 8
+	groups := inDim / groupSize
+	sink.setPSO(pso)
+	sink.setBuf(wq, wqOff+uint(rowBase*rowPackedBytes), 0)
+	sink.setBuf(scales, scalesOff+uint(rowBase*groups*bf16Size), 1)
+	sink.setBuf(biases, biasesOff+uint(rowBase*groups*bf16Size), 2)
+	sink.setBuf(gate, gateOff, 3)
+	sink.setBuf(up, upOff, 4)
+	sink.setBuf(lhsIdx, 0, 5)
+	sink.setBuf(rhsIdx, rhsOff, 6)
+	sink.setBuf(out, outOff, 7)
+	sink.setI32(int32(inDim), 8)
+	sink.setI32(int32(outDim), 9)
 	const bn, bk = 8, 32
 	sink.dispatchThreadgroups(
 		metal.MTLSize{Width: 1, Height: uint((outDim + bn - 1) / bn), Depth: uint(routes)},
