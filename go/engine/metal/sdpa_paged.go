@@ -176,33 +176,69 @@ func encSDPAPagedDecodeStrided(
 	nHeads, nKVHeads, headDim int,
 	scale float32,
 ) error {
+	plan, err := buildSDPAPagedDecodePlan(q, keyPages, valuePages, pageLens, keyHeadStrides, keySeqStrides, valueHeadStrides, valueSeqStrides, out, scratch, nHeads, nKVHeads, headDim, scale)
+	if err != nil {
+		return err
+	}
+	// serial pass: buffer hazard tracking orders pass 1 → pass 2; a CONCURRENT pass must
+	// place an explicit barrier between emitP1s and emitP2 instead.
+	plan.emitP1s(enc)
+	plan.emitP2(enc)
+	return nil
+}
+
+// sdpaPagedDecodePlan is the validated paged-decode SDPA dispatch: pass 1 (per-page split
+// windows) and pass 2 (the cell merge) emit separately so the concurrent attention pass can
+// barrier between them.
+type sdpaPagedDecodePlan struct {
+	q, out               metal.MTLBuffer
+	keyPages, valuePages []metal.MTLBuffer
+	pageLens             []int
+	kHead, kSeq          []int
+	vHead, vSeq          []int
+	scratch              *sdpaPagedDecodeScratch
+	p1PSO, p2PSO         metal.MTLComputePipelineState
+	nHeads, nKVHeads     int
+	headDim, cellCount   int
+	scale                float32
+}
+
+func buildSDPAPagedDecodePlan(
+	q metal.MTLBuffer,
+	keyPages, valuePages []metal.MTLBuffer,
+	pageLens, keyHeadStrides, keySeqStrides, valueHeadStrides, valueSeqStrides []int,
+	out metal.MTLBuffer,
+	scratch *sdpaPagedDecodeScratch,
+	nHeads, nKVHeads, headDim int,
+	scale float32,
+) (*sdpaPagedDecodePlan, error) {
 	if nHeads <= 0 || nKVHeads <= 0 || headDim <= 0 {
-		return core.NewError("native.encSDPAPagedDecodeStrided: dimensions must be > 0")
+		return nil, core.NewError("native.encSDPAPagedDecodeStrided: dimensions must be > 0")
 	}
 	if nHeads%nKVHeads != 0 {
-		return core.NewError("native.encSDPAPagedDecodeStrided: nHeads must be a multiple of nKVHeads")
+		return nil, core.NewError("native.encSDPAPagedDecodeStrided: nHeads must be a multiple of nKVHeads")
 	}
 	if q == nil || q.GetID() == 0 || out == nil || out.GetID() == 0 {
-		return core.NewError("native.encSDPAPagedDecodeStrided: nil input/output buffer")
+		return nil, core.NewError("native.encSDPAPagedDecodeStrided: nil input/output buffer")
 	}
 	if len(keyPages) == 0 || len(keyPages) != len(valuePages) || len(keyPages) != len(pageLens) ||
 		len(keyPages) != len(keyHeadStrides) || len(keyPages) != len(keySeqStrides) ||
 		len(keyPages) != len(valueHeadStrides) || len(keyPages) != len(valueSeqStrides) {
-		return core.NewError("native.encSDPAPagedDecodeStrided: page buffers and strides must be non-empty and matched")
+		return nil, core.NewError("native.encSDPAPagedDecodeStrided: page buffers and strides must be non-empty and matched")
 	}
 	for i := range keyPages {
 		if keyPages[i] == nil || keyPages[i].GetID() == 0 || valuePages[i] == nil || valuePages[i].GetID() == 0 {
-			return core.NewError("native.encSDPAPagedDecodeStrided: nil page buffer")
+			return nil, core.NewError("native.encSDPAPagedDecodeStrided: nil page buffer")
 		}
 		if pageLens[i] <= 0 || keyHeadStrides[i] <= 0 || keySeqStrides[i] <= 0 || valueHeadStrides[i] <= 0 || valueSeqStrides[i] <= 0 {
-			return core.NewError("native.encSDPAPagedDecodeStrided: page lengths and strides must be > 0")
+			return nil, core.NewError("native.encSDPAPagedDecodeStrided: page lengths and strides must be > 0")
 		}
 	}
 	// the lane slicing owns headDim/32 dims per lane — every shipped head dim (64,
 	// 128, 256, 512) is a multiple of 32; reject anything else loudly rather than
 	// silently dropping tail dims.
 	if headDim%32 != 0 || headDim/32 > 16 {
-		return core.NewError("native.encSDPAPagedDecodeStrided: headDim must be a multiple of 32, at most 512")
+		return nil, core.NewError("native.encSDPAPagedDecodeStrided: headDim must be a multiple of 32, at most 512")
 	}
 	// each page fans out over ceil(len/splitRows) independent split cells — the grid grows
 	// with context (#339: 16 fixed threadgroups measured 12.4 ms/token of attention at
@@ -212,66 +248,76 @@ func encSDPAPagedDecodeStrided(
 		cellCount += (pageLens[i] + sdpaPagedSplitRows - 1) / sdpaPagedSplitRows
 	}
 	if err := scratch.ensure(nHeads, headDim, cellCount); err != nil {
-		return err
+		return nil, err
 	}
 	p1PSO, err := sdpaPagedP1Pipeline()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	p2PSO, err := sdpaPagedP2Pipeline()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	return &sdpaPagedDecodePlan{
+		q: q, out: out,
+		keyPages: keyPages, valuePages: valuePages, pageLens: pageLens,
+		kHead: keyHeadStrides, kSeq: keySeqStrides, vHead: valueHeadStrides, vSeq: valueSeqStrides,
+		scratch: scratch, p1PSO: p1PSO, p2PSO: p2PSO,
+		nHeads: nHeads, nKVHeads: nKVHeads, headDim: headDim, cellCount: cellCount,
+		scale: scale,
+	}, nil
+}
 
-	// pass 1: one dispatch per page, nHeads × splits threadgroups, each writing its OWN
-	// (head, cell) partial; pass 2 merges per head across every cell. Hazard tracking on
-	// the scratch orders pass 1 → pass 2 for free. (The previous kernel carried the online
-	// softmax ACROSS pages at one scalar thread per head, looping each page twice — a
-	// serialised chain whose length grew with context: the #252 decode collapse.)
+// emitP1s encodes pass 1: one dispatch per page, nHeads × splits threadgroups, each writing
+// its OWN (head, cell) partial — every dispatch independent of the others.
+func (p *sdpaPagedDecodePlan) emitP1s(enc metal.MTLComputeCommandEncoder) {
 	cellBase := 0
-	for i := range keyPages {
-		splits := (pageLens[i] + sdpaPagedSplitRows - 1) / sdpaPagedSplitRows
+	for i := range p.keyPages {
+		splits := (p.pageLens[i] + sdpaPagedSplitRows - 1) / sdpaPagedSplitRows
 		params := sdpaPagedP1Params{
-			NHeads:      uint32(nHeads),
-			NKVHeads:    uint32(nKVHeads),
-			HeadDim:     uint32(headDim),
-			PageLen:     uint32(pageLens[i]),
-			KHeadStride: uint32(keyHeadStrides[i]),
-			KSeqStride:  uint32(keySeqStrides[i]),
-			VHeadStride: uint32(valueHeadStrides[i]),
-			VSeqStride:  uint32(valueSeqStrides[i]),
+			NHeads:      uint32(p.nHeads),
+			NKVHeads:    uint32(p.nKVHeads),
+			HeadDim:     uint32(p.headDim),
+			PageLen:     uint32(p.pageLens[i]),
+			KHeadStride: uint32(p.kHead[i]),
+			KSeqStride:  uint32(p.kSeq[i]),
+			VHeadStride: uint32(p.vHead[i]),
+			VSeqStride:  uint32(p.vSeq[i]),
 			SplitRows:   uint32(sdpaPagedSplitRows),
 			Splits:      uint32(splits),
 			CellBase:    uint32(cellBase),
-			CellCount:   uint32(cellCount),
-			Scale:       scale,
+			CellCount:   uint32(p.cellCount),
+			Scale:       p.scale,
 		}
 		cellBase += splits
-		setPSO(enc, p1PSO)
-		setBuf(enc, q, 0, 0)
-		setBuf(enc, keyPages[i], 0, 1)
-		setBuf(enc, valuePages[i], 0, 2)
-		setBuf(enc, scratch.maxs, 0, 3)
-		setBuf(enc, scratch.sums, 0, 4)
-		setBuf(enc, scratch.acc, 0, 5)
+		setPSO(enc, p.p1PSO)
+		setBuf(enc, p.q, 0, 0)
+		setBuf(enc, p.keyPages[i], 0, 1)
+		setBuf(enc, p.valuePages[i], 0, 2)
+		setBuf(enc, p.scratch.maxs, 0, 3)
+		setBuf(enc, p.scratch.sums, 0, 4)
+		setBuf(enc, p.scratch.acc, 0, 5)
 		setBytes(enc, unsafe.Pointer(&params), uint(unsafe.Sizeof(params)), 6)
 		dispatchThreadgroups(enc,
-			metal.MTLSize{Width: uint(nHeads * splits), Height: 1, Depth: 1},
+			metal.MTLSize{Width: uint(p.nHeads * splits), Height: 1, Depth: 1},
 			metal.MTLSize{Width: 256, Height: 1, Depth: 1}, // 8 simdgroups split the window rows
 		)
 	}
-	p2 := sdpaPagedP2Params{HeadDim: uint32(headDim), CellCount: uint32(cellCount)}
-	setPSO(enc, p2PSO)
-	setBuf(enc, scratch.maxs, 0, 0)
-	setBuf(enc, scratch.sums, 0, 1)
-	setBuf(enc, scratch.acc, 0, 2)
-	setBuf(enc, out, 0, 3)
+}
+
+// emitP2 encodes pass 2: the per-head merge across every partial cell.
+func (p *sdpaPagedDecodePlan) emitP2(enc metal.MTLComputeCommandEncoder) {
+	p2 := sdpaPagedP2Params{HeadDim: uint32(p.headDim), CellCount: uint32(p.cellCount)}
+	setPSO(enc, p.p2PSO)
+	setBuf(enc, p.scratch.maxs, 0, 0)
+	setBuf(enc, p.scratch.sums, 0, 1)
+	setBuf(enc, p.scratch.acc, 0, 2)
+	setBuf(enc, p.out, 0, 3)
 	setBytes(enc, unsafe.Pointer(&p2), uint(unsafe.Sizeof(p2)), 4)
 	dispatchThreadgroups(enc,
-		metal.MTLSize{Width: uint(nHeads), Height: 1, Depth: 1},
+		metal.MTLSize{Width: uint(p.nHeads), Height: 1, Depth: 1},
 		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
 	)
-	return nil
 }
 
 func sdpaPagedTransientBuffer(b []byte, pinners *[]*runtime.Pinner) metal.MTLBuffer {

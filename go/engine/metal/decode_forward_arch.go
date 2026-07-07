@@ -1235,9 +1235,10 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 		}
 		if s.specs[li].OwnsCache() {
 			if cache := s.layerPagedKV(li); cache != nil {
-				if err := encAttnHalfKVPaged(enc, in, cache, s.offBuf, s.hBuf, 0, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); err != nil {
+				var aerr error
+				if enc, aerr = encAttnHalfKVPaged(enc, cb, s.gpuProf, in, cache, s.offBuf, s.hBuf, 0, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); aerr != nil {
 					endEncodingFast(enc)
-					return nil, err
+					return nil, aerr
 				}
 			} else if err := encAttnHalfKV(enc, in, s.lb[li].kCache, s.lb[li].vCache, s.offBuf, s.hBuf, s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj, s.dModel, s.nHeads, lkv, lhd, pos, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); err != nil {
 				endEncodingFast(enc)
