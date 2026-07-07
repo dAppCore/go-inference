@@ -9,6 +9,8 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	core "dappco.re/go"
 )
 
 // TestRealMoE26BHostProfile decodes the real gemma-4-26B-A4B MoE checkpoint so a CPU profile can show where
@@ -86,7 +88,22 @@ func TestRealMoE26BFamilyGPUProfile(t *testing.T) {
 		t.Skip("set LEM_REAL_MOE=1 to run the real 26B-A4B GPU family profile (loads ~15GB)")
 	}
 	dir := resolveMoE26BDir(t)
-	const maxLen, warmup, N = 320, 4, 8
+	const warmup, N = 4, 8
+	// LEM_MOE_PROFILE_CTX prefills a synthetic prompt of that length first, so the table
+	// shows the DEEP-context split (the long-context droop's anatomy — #339). Default: the
+	// short-context profile.
+	ctx := 0
+	if v := os.Getenv("LEM_MOE_PROFILE_CTX"); v != "" {
+		if r := core.ParseInt(v, 10, 32); r.OK {
+			if n := int(r.Value.(int64)); n > 0 {
+				ctx = n
+			}
+		}
+	}
+	maxLen := 320
+	if ctx > 0 {
+		maxLen = ctx + 64
+	}
 
 	lm, dm, err := loadRegistered(dir)
 	if err != nil {
@@ -107,12 +124,19 @@ func TestRealMoE26BFamilyGPUProfile(t *testing.T) {
 		t.Fatalf("newArchQuantSessionShards: %v", err)
 	}
 	prompt := []int32{2, 1000, 2500, 4000, 8000, 16000}
+	if ctx > 0 {
+		prompt = make([]int32, ctx)
+		for i := range prompt {
+			prompt[i] = int32(2 + (i*97)%16000)
+		}
+	}
 	if err := sess.PrefillTokens(prompt); err != nil {
 		t.Fatalf("prefill: %v", err)
 	}
 	if _, err := sess.GenerateFromCache(warmup, -1); err != nil {
 		t.Fatalf("warmup: %v", err)
 	}
+	t.Logf("profiling at position ~%d (maxLen %d)", len(prompt)+warmup, maxLen)
 
 	// 5 sampled encoders per layer per token (attn, moe.router, moe.local, moe.expert,
 	// moe.tail) + slack for the first encoder.
