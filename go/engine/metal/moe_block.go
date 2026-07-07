@@ -1555,6 +1555,50 @@ func moeArriveZeroBuffer() metal.MTLBuffer {
 // the lane (a silent gate regression reads as zero, not as a perf blur).
 var moeConcurrentBlocks atomic.Int64
 
+// geluFoldDispatches counts MoE blocks that ran the gelu-fused down kernels
+// (#341 phase 1) instead of the gelu-dispatch + plain-down chain. Engagement
+// counter for the A/B tests.
+var geluFoldDispatches atomic.Int64
+
+type lthnGeluQMVKey struct {
+	groupSize, bits int
+}
+
+var (
+	lthnGeluQMVPSOMu    sync.Mutex
+	lthnGeluQMVPSOCache = map[lthnGeluQMVKey]metal.MTLComputePipelineState{}
+)
+
+// lthnGeluQMVPipeline resolves (and caches, including failures) the local-down
+// variant with the MLP gate fused into its x-load (lthn_gelu_qmv, #341 phase
+// 1). A miss — custom library absent, or a gs/bits pair outside the
+// instantiated set — caches nil so the block falls back to the gelu-dispatch +
+// plain-qmv chain without re-probing.
+func lthnGeluQMVPipeline(groupSize, bits int) (metal.MTLComputePipelineState, bool) {
+	key := lthnGeluQMVKey{groupSize: groupSize, bits: bits}
+	lthnGeluQMVPSOMu.Lock()
+	defer lthnGeluQMVPSOMu.Unlock()
+	if pso, ok := lthnGeluQMVPSOCache[key]; ok {
+		return pso, pso != nil
+	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		lthnGeluQMVPSOCache[key] = nil
+		return nil, false
+	}
+	fn := customLibrary.NewFunctionWithName(core.Sprintf("lthn_gelu_qmv_bfloat16_t_gs_%d_b_%d", groupSize, bits))
+	if fn == nil || fn.GetID() == 0 {
+		lthnGeluQMVPSOCache[key] = nil
+		return nil, false
+	}
+	pso, perr := device.NewComputePipelineStateWithFunctionError(fn)
+	if perr != nil {
+		lthnGeluQMVPSOCache[key] = nil
+		return nil, false
+	}
+	lthnGeluQMVPSOCache[key] = pso
+	return pso, true
+}
+
 // ffnMegaKernelCompatible is the KERNEL truth: the widths the megakernel is specialised for
 // (4/8-bit byte-aligned codes via ffnMegaPipelineBits, parity-proven at both) with all three
 // projections agreeing so one PSO serves the dispatch.
@@ -1705,6 +1749,20 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 	localDownPSO, err := pipelineFor(qmvBF16KernelName(dModel, dFF, localDownGroupSize, localDownBits))
 	if err != nil {
 		return enc, encConc, false, nil
+	}
+	// gelu fold (#341 phase 1): both down projections read gate/up directly and
+	// compute gelu(gate)·up at load — the two gelu dispatches (and the expert
+	// gelu's barrier) never encode. Decided ONCE for the whole block so the
+	// gated scratch stays coherent; either PSO missing (stale metallib, exotic
+	// width) or the lever falls back to the chain unchanged.
+	geluFold := false
+	var localDownGeluPSO, gatherDownGeluPSO metal.MTLComputePipelineState
+	if geluFoldEnabled {
+		if p1, ok1 := lthnGeluQMVPipeline(localDownGroupSize, localDownBits); ok1 {
+			if p2, ok2 := lthnGatherQMVPipeline(lthnGatherQMVKey{groupSize: expDownGroupSize, bits: expDownBits, expertRows: dModel, batchedX: true, gelu: true}); ok2 {
+				localDownGeluPSO, gatherDownGeluPSO, geluFold = p1, p2, true
+			}
+		}
 	}
 	rmsPSO, err := pipelineFor(rmsKernelBF16(dModel))
 	if err != nil {
@@ -1881,7 +1939,21 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 		}
 	}
 	emitGatherDownAll := func() {
+		if geluFold {
+			// the fused down reads each route's gate/up rows and gelus at load —
+			// the expert gelu dispatch never encoded.
+			emitLthnGatherQMVGeluRoutes(sink, gatherDownGeluPSO, scratch.expertGateAll, 0, scratch.expertUpAll, 0, expDownPacked.buf, expDownPacked.off, expDownScales.buf, expDownScales.off, expDownBiases.buf, expDownBiases.off, scratch.routeIota, routeIdxBuf, 0, scratch.expertDownAll, 0, dModel, expertDFF, expDownGroupSize, expDownBits, 0, topK)
+			return
+		}
 		emitGatherQMVAllRoutes(sink, gatherExpertDownPSO, downAllMeta, downKeyBatched, scratch.expertGatedAll, 0, expDownPacked.buf, expDownPacked.off, expDownScales.buf, expDownScales.off, expDownBiases.buf, expDownBiases.off, scratch.routeIota, routeIdxBuf, 0, scratch.expertDownAll, 0, dModel, expertDFF, expDownGroupSize, expDownBits, 0, topK)
+	}
+	emitLocalDown := func() {
+		if geluFold {
+			geluFoldDispatches.Add(1)
+			emitGeluQMV(sink, localDownGeluPSO, localDownPacked.buf, localDownPacked.off, localDownScales.buf, localDownScales.off, localDownBiases.buf, localDownBiases.off, msc.gate, msc.up, scratch.localOut, 0, dFF, dModel)
+			return
+		}
+		emitQ(localDownPSO, localDownPacked, localDownScales, localDownBiases, msc.gated, scratch.localOut, dFF, dModel)
 	}
 
 	// ---- concurrent pass: dispatches overlap; barriers mark the true dependency edges.
@@ -1921,19 +1993,27 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 		emitQ(localGatePSO, localGatePacked, localGateScales, localGateBiases, scratch.localIn, msc.gate, dModel, dFF)
 		emitQ(localUpPSO, localUpPacked, localUpScales, localUpBiases, scratch.localIn, msc.up, dModel, dFF)
 		barrier()
-		// stage 3: top-k select ∥ local gelu
+		// stage 3: top-k select ∥ local gelu (folded into the local down when the
+		// fused kernels are available — the dispatch never encodes)
 		if !routerFused {
 			routerPlan.emitTopK(sink)
 		}
-		emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
+		if !geluFold {
+			emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
+		}
 		barrier()
 		// stage 4: expert gate/up gathers (need the top-k indices) ∥ local down
+		// (gelu-fused: reads msc.gate/msc.up from stage 2, two barriers upstream)
 		emitGatherInAll()
-		emitQ(localDownPSO, localDownPacked, localDownScales, localDownBiases, msc.gated, scratch.localOut, dFF, dModel)
+		emitLocalDown()
 		barrier()
-		// stage 5: expert gelu
-		emitBinary(sink, geluPSO, scratch.expertGateAll, 0, scratch.expertUpAll, 0, scratch.expertGatedAll, 0, topK*expertDFF)
-		barrier()
+		// stage 5: expert gelu — folded into the down gather's load when fused
+		// (the stage and its barrier disappear; the stage-4 barrier already
+		// orders the gate/up slabs ahead of the down gather)
+		if !geluFold {
+			emitBinary(sink, geluPSO, scratch.expertGateAll, 0, scratch.expertUpAll, 0, scratch.expertGatedAll, 0, topK*expertDFF)
+			barrier()
+		}
 		// stage 6: expert down gather
 		emitGatherDownAll()
 		barrier()
@@ -1989,14 +2069,18 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 	} else {
 		emitQ(localGatePSO, localGatePacked, localGateScales, localGateBiases, scratch.localIn, msc.gate, dModel, dFF)
 		emitQ(localUpPSO, localUpPacked, localUpScales, localUpBiases, scratch.localIn, msc.up, dModel, dFF)
-		emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
-		emitQ(localDownPSO, localDownPacked, localDownScales, localDownBiases, msc.gated, scratch.localOut, dFF, dModel)
+		if !geluFold {
+			emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
+		}
+		emitLocalDown()
 	}
 	seam("moe.expert")
 	emitRMS(hBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
 	if allRoutes {
 		emitGatherInAll()
-		emitBinary(sink, geluPSO, scratch.expertGateAll, 0, scratch.expertUpAll, 0, scratch.expertGatedAll, 0, topK*expertDFF)
+		if !geluFold {
+			emitBinary(sink, geluPSO, scratch.expertGateAll, 0, scratch.expertUpAll, 0, scratch.expertGatedAll, 0, topK*expertDFF)
+		}
 		emitGatherDownAll()
 		seam("moe.tail")
 		// combine the routes: acc = Σ_r w_r · down_r — one fused dispatch (byte-identical
