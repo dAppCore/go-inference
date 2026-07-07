@@ -48,6 +48,14 @@ var (
 	// lthn_gather_qmv kernel is available (7 buffers + 2 scalars, #280). Test/bench hook
 	// for lean-vs-MLX byte compares.
 	leanGatherDisabled bool
+	// routerFusedEnabled opts the MoE router into the single-dispatch fused kernel
+	// (rms→qmv→topk, byte-identical to the chain — see lthn_moe_router_fused.metal).
+	// OFF by receipt: the fusion serialises the 128×dModel score projection onto ONE
+	// threadgroup (the chain's qmv spreads 16), and the real 26B-A4B decode measured
+	// 125.3 tok/s fused vs 140.6 chained — the two saved launches never pay for the
+	// lost matvec parallelism. The kernel + parity oracle stay as capability; the
+	// parity test flips this on explicitly.
+	routerFusedEnabled bool
 	// stepGreedyChainDisabled forces the serial greedy+stepID decode loop (default: chain the prior
 	// token's stepBody with the next token's head+argmax in one command buffer). Test/bench hook.
 	stepGreedyChainDisabled bool

@@ -1880,18 +1880,28 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 		enc = concurrentComputeEncoderFast(cb)
 		sink = encSink{enc}
 		barrier := func() { memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers) }
-		// stage 1: the three input norms (router ∥ local ∥ expert — all read hBuf only)
-		routerPlan.emitRMS(sink)
+		// stage 1: router ∥ the two local input norms (all read hBuf only). The fused
+		// single-dispatch router runs its whole rms→qmv→topk here, overlapping the
+		// local gate/up/gelu stages instead of interleaving with them; its indices are
+		// ready three barriers before the stage-4 gathers either way.
+		routerFused := routerPlan.emitFused(sink)
+		if !routerFused {
+			routerPlan.emitRMS(sink)
+		}
 		emitRMS(hBuf, pre1Buf.buf, scratch.localIn, pre1Buf.off)
 		emitRMS(hBuf, pre2Buf.buf, scratch.expertIn, pre2Buf.off)
 		barrier()
 		// stage 2: router scores ∥ local gate ∥ local up
-		routerPlan.emitQMV(sink)
+		if !routerFused {
+			routerPlan.emitQMV(sink)
+		}
 		emitQ(localGatePSO, localGatePacked, localGateScales, localGateBiases, scratch.localIn, msc.gate, dModel, dFF)
 		emitQ(localUpPSO, localUpPacked, localUpScales, localUpBiases, scratch.localIn, msc.up, dModel, dFF)
 		barrier()
 		// stage 3: top-k select ∥ local gelu
-		routerPlan.emitTopK(sink)
+		if !routerFused {
+			routerPlan.emitTopK(sink)
+		}
 		emitBinary(sink, geluPSO, msc.gate, 0, msc.up, 0, msc.gated, 0, dFF)
 		barrier()
 		// stage 4: expert gate/up gathers (need the top-k indices) ∥ local down
@@ -1916,12 +1926,17 @@ func encMoEBlockQuantDevice(enc metal.MTLComputeCommandEncoderObject, cb metal.M
 	}
 
 	// ---- serial path: the single-encoder order (hazard tracking serialises every edge) ----
-	seam("router.rms")
-	routerPlan.emitRMS(sink)
-	seam("router.qmv")
-	routerPlan.emitQMV(sink)
-	seam("router.topk")
-	routerPlan.emitTopK(sink)
+	if routerPlan.fusedPSO != nil && routerFusedEnabled {
+		seam("router.fused")
+		routerPlan.emitFused(sink)
+	} else {
+		seam("router.rms")
+		routerPlan.emitRMS(sink)
+		seam("router.qmv")
+		routerPlan.emitQMV(sink)
+		seam("router.topk")
+		routerPlan.emitTopK(sink)
+	}
 	seam("moe.local")
 	emitRMS(hBuf, pre1Buf.buf, scratch.localIn, pre1Buf.off)
 	// local MLP: the FFN megakernel when its geometry holds — its grid barrier needs the
