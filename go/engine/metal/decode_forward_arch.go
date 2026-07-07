@@ -127,11 +127,10 @@ func encAttnHalfSharedInputAt(
 	ropeFreqs metal.MTLBuffer,
 ) error {
 	kvDim := nKVHeads * headDim
-	if xOff == 0 {
-		if err := encRMSNormBF16(enc, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
-			return err
-		}
-	} else if err := encRMSNormRowsBF16(enc, x, attnNormW.buf, sc.normed, xOff, attnNormW.off, 0, 1, dModel, eps); err != nil {
+	// entry rms via the size-specialised single-row kernel at the row's offset — the batched
+	// interleave's rows must norm bit-identically to the sequential step (the generic rows
+	// kernel reduces in a different order and drifts the whole layer by ulps).
+	if err := encRMSNormBF16At(enc, x, attnNormW.buf, sc.normed, xOff, attnNormW.off, 0, dModel, eps); err != nil {
 		return err
 	}
 	if err := proj.project(enc, sc.normed, sc.q, 0, projQ); err != nil {

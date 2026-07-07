@@ -207,6 +207,84 @@ func TestRealE2BAssistantFusedDraftParity(t *testing.T) {
 	}
 }
 
+// TestRealQuantVerifyBatchedHiddensParity pins the quant-PLE batched verify
+// forward (all K draft rows through the resident stack in ONE command buffer,
+// per-row quant interleave + the qmv PLE gate chain) against the sequential
+// stepID oracle: byte-identical hidden rows and identical greedy tokens. The
+// batched forward MUST engage on the 4-bit PLE arch — before the quant PLE
+// row-epilogue this declined to sequential and the pair paid ~2× per verify.
+func TestRealQuantVerifyBatchedHiddensParity(t *testing.T) {
+	requireNativeRuntime(t)
+	targetDir := enginegate.HFModelPath(t, "mlx-community/gemma-4-e2b-it-4bit")
+	target, err := LoadDir(targetDir, 4096)
+	if err != nil {
+		t.Fatalf("LoadDir: %v", err)
+	}
+	defer func() { _ = target.Close() }()
+	prompt := realE2BAssistantPrompt(t, targetDir)
+	if err := target.prepareAssistantPrompt(prompt); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	draft := []int32{506, 8134, 529, 506, 8134, 529}
+	posBefore := target.pos
+	hiddens, batched, err := target.verifyBatchedHiddens(draft)
+	if err != nil {
+		t.Fatalf("verifyBatchedHiddens: %v", err)
+	}
+	if !batched {
+		t.Fatal("quant PLE arch did not take the batched verify forward")
+	}
+	if len(hiddens) != len(draft) {
+		t.Fatalf("batched rows = %d, want %d", len(hiddens), len(draft))
+	}
+	batchedRows := make([][]byte, len(hiddens))
+	batchedTok := make([]int32, len(hiddens))
+	for i, h := range hiddens {
+		batchedRows[i] = append([]byte(nil), h...)
+		tok, gerr := target.greedyFromHiddenInPool(h, nil)
+		if gerr != nil {
+			t.Fatalf("greedy(batched row %d): %v", i, gerr)
+		}
+		batchedTok[i] = tok
+	}
+	target.pos = posBefore
+	if err := target.truncateSpeculativeKV(target.pos); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	for i, id := range draft {
+		hidden, serr := target.stepID(id)
+		if serr != nil {
+			t.Fatalf("sequential stepID(%d): %v", id, serr)
+		}
+		if !bytesEqualForTest(hidden, batchedRows[i]) {
+			t.Fatalf("row %d hidden differs between batched and sequential verify", i)
+		}
+		tok, gerr := target.greedyFromHiddenInPool(hidden, nil)
+		if gerr != nil {
+			t.Fatalf("greedy(sequential row %d): %v", i, gerr)
+		}
+		if tok != batchedTok[i] {
+			t.Fatalf("row %d: batched greedy %d != sequential %d", i, batchedTok[i], tok)
+		}
+	}
+	target.pos = posBefore
+	if err := target.truncateSpeculativeKV(target.pos); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+}
+
+func bytesEqualForTest(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // TestRealBF16VerifyGreedyRowsParity pins the batched K-row verify head (all
 // rows' lm_head+argmax chains in one command buffer) against the per-row
 // greedy loop: identical tokens for identical hiddens. The batched forward

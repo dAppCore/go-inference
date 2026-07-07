@@ -507,15 +507,23 @@ func scratchF32(nElems int) metal.MTLBuffer {
 // WEIGHT binding (bytes) — the zero-copy weight path binds the norm weight at its offset into the
 // shared shard mmap buffer rather than uploading it; wOff=0 is the plain (copied-buffer) binding.
 func encRMSNormBF16(enc metal.MTLComputeCommandEncoder, x, w, out metal.MTLBuffer, wOff uint, axisSize int, eps float32) error {
+	return encRMSNormBF16At(enc, x, w, out, 0, wOff, 0, axisSize, eps)
+}
+
+// encRMSNormBF16At is encRMSNormBF16 with the input row bound at xOff and the output at outOff
+// BYTES — the SAME single-row specialised pipeline, for rows living at offsets inside shared
+// K-row buffers (the batched dense interleave). Bit-identical per row to the sequential path;
+// the generic rows kernel (encRMSNormRowsBF16) reduces in a different order and drifts by ulps.
+func encRMSNormBF16At(enc metal.MTLComputeCommandEncoder, x, w, out metal.MTLBuffer, xOff, wOff, outOff uint, axisSize int, eps float32) error {
 	pso, err := pipelineFor(rmsKernelBF16(axisSize))
 	if err != nil {
 		return err
 	}
 	// single-row up to the limit, else the looped kernel (a max-threads threadgroup that grid-strides
 	// the axis) — a single row of axis > 4096 (gemma4 31B hidden 5376) overruns the single-row cap.
-	// One shared body (emitRMSNorm) records the binding ABI into the live encoder here and into the ICB
-	// recorder's setRMS — the path-unifying dispatchSink (one math, two targets).
-	emitRMSNorm(encSink{enc}, pso, x, w, out, wOff, axisSize, eps, rmsThreadgroup(axisSize, pso))
+	// One shared body (emitRMSNormAt) records the binding ABI into the live encoder here and into the
+	// ICB recorder's setRMS — the path-unifying dispatchSink (one math, two targets).
+	emitRMSNormAt(encSink{enc}, pso, x, w, out, xOff, wOff, outOff, axisSize, eps, rmsThreadgroup(axisSize, pso))
 	return nil
 }
 
@@ -641,12 +649,18 @@ func qmvBF16KernelName(outDim, inDim, groupSize, bits int) string {
 }
 
 func encQMVBF16(enc metal.MTLComputeCommandEncoder, wq, scales, biases, x, out metal.MTLBuffer, wqOff, scalesOff, biasesOff, outOff uint, outDim, inDim, groupSize, bits int) error {
+	return encQMVBF16At(enc, wq, scales, biases, x, out, wqOff, scalesOff, biasesOff, 0, outOff, outDim, inDim, groupSize, bits)
+}
+
+// encQMVBF16At is encQMVBF16 with the activation vector bound at xOff BYTES — the batched dense
+// forward's per-row quant PLE gate reads its row in place inside the shared K-row buffer.
+func encQMVBF16At(enc metal.MTLComputeCommandEncoder, wq, scales, biases, x, out metal.MTLBuffer, wqOff, scalesOff, biasesOff, xOff, outOff uint, outDim, inDim, groupSize, bits int) error {
 	pso, err := pipelineFor(qmvBF16KernelName(outDim, inDim, groupSize, bits))
 	if err != nil {
 		return err
 	}
 	// 4-bit quantised matvec through the SHARED emitQMV body (with the ICB recorder's setQMV).
-	emitQMV(encSink{enc}, pso, wq, wqOff, scales, scalesOff, biases, biasesOff, x, out, outOff, inDim, outDim)
+	emitQMVAt(encSink{enc}, pso, wq, wqOff, scales, scalesOff, biases, biasesOff, x, xOff, out, outOff, inDim, outDim)
 	return nil
 }
 

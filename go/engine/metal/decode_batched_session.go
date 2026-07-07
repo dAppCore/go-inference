@@ -389,6 +389,12 @@ var batchedRopeDisabledForTest bool
 // layer-tail (PLE gate + scalar) dispatches — the A/B lever for the rows-batched epilogue.
 var batchedEpilogueDisabledForTest bool
 
+// batchedDenseICBMaxRows caps the batch width the dense body accepts on a recorded-ICB session
+// (where it runs over the replay's own caches, per-row interleave only). MTP verify and
+// accept-commit blocks are ≤ draft block+1; the prompt prefill (hundreds of rows) keeps the
+// replay's pipelined lane.
+const batchedDenseICBMaxRows = 16
+
 // encBatchedRowEpilogue encodes row i's gemma4 tail for layer li — the per-layer-input gate (PLE,
 // when the arch has one and the caller supplied the K-token slab) and the per-layer output scalar —
 // reading and writing the row's layer output in place. Shared by the per-row MLP path and the
@@ -400,12 +406,28 @@ func (s *archDecodeState) encBatchedRowEpilogue(enc metal.MTLComputeCommandEncod
 		if len(pl.postNorm) != s.dModel*bf16Size {
 			return core.NewError("native.stepTokensBatchedDense: PLE post norm size mismatch")
 		}
-		if len(pl.gate.Packed) != s.pliDim*s.dModel*bf16Size || len(pl.proj.Packed) != s.dModel*s.pliDim*bf16Size {
-			return core.NewError("native.stepTokensBatchedDense: PLE bf16 weight size mismatch")
-		}
 		pliOff := uint((li*rows + i) * s.pliDim * bf16Size)
-		if err := encPerLayerInputGateBF16ScratchAt(enc, s.perLayerInputGateScratch(), outBuf, outOff, residentBytes(pl.gate.Packed), pleSlabBuf, residentBytes(pl.proj.Packed), residentBytes(pl.postNorm), outBuf, outOff, pliOff, s.dModel, s.pliDim, s.eps); err != nil {
-			return err
+		if pl.bits == 0 { // bf16 PLE gate (the quant path sets bits 4/8 ⇒ the qmv)
+			if len(pl.gate.Packed) != s.pliDim*s.dModel*bf16Size || len(pl.proj.Packed) != s.dModel*s.pliDim*bf16Size {
+				return core.NewError("native.stepTokensBatchedDense: PLE bf16 weight size mismatch")
+			}
+			if err := encPerLayerInputGateBF16ScratchAt(enc, s.perLayerInputGateScratch(), outBuf, outOff, residentBytes(pl.gate.Packed), pleSlabBuf, residentBytes(pl.proj.Packed), residentBytes(pl.postNorm), outBuf, outOff, pliOff, s.dModel, s.pliDim, s.eps); err != nil {
+				return err
+			}
+		} else {
+			gateGroupSize, gateBits, err := validatePerLayerInputGateQuantWeight("gate", pl.gate, s.pliDim, s.dModel, pl.groupSize, pl.bits)
+			if err != nil {
+				return err
+			}
+			projGroupSize, projBits, err := validatePerLayerInputGateQuantWeight("projection", pl.proj, s.dModel, s.pliDim, pl.groupSize, pl.bits)
+			if err != nil {
+				return err
+			}
+			gatePacked, gateScales, gateBiases := quantWeightViews(pl.gate)
+			projPacked, projScales, projBiases := quantWeightViews(pl.proj)
+			if err := encPerLayerInputGateQuantScratchAt(enc, s.perLayerInputGateScratch(), outBuf, outOff, gatePacked, gateScales, gateBiases, pleSlabBuf, projPacked, projScales, projBiases, residentBytes(pl.postNorm), outBuf, outOff, pliOff, s.dModel, s.pliDim, gateGroupSize, gateBits, projGroupSize, projBits, s.eps); err != nil {
+				return err
+			}
 		}
 	}
 	if s.lb[li].layerScalar != nil { // gemma4 per-layer output scalar (on-device)
@@ -459,24 +481,31 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	if K == 0 {
 		return nil, false, core.NewError("native.stepTokensBatchedDense: empty batch")
 	}
-	// dense uniform guard: every layer owns its cache + is non-MoE; no trace, no recorded ICB (whose
-	// replay holds its OWN caches, not s.lb). These need a per-row host flush / a different cache —
-	// the sequential verify already covers them, byte-identically. The bf16 PLE gate is NOT a host
-	// flush (it is an encoded kernel chain reading a per-token input buffer), so a PLE arch batches
-	// when the caller supplies the K-token slab; without one (the MTP verify wrappers) it declines
-	// to the proven sequential fallback. Quant PLE still declines — its gate runs the qmv path and
-	// the quant lane owns ICB prefill anyway.
-	if s.trace || s.icb != nil {
+	// dense uniform guard: every layer owns its cache + is non-MoE; no trace (per-layer host reads).
+	// The PLE gate is NOT a host flush (it is an encoded kernel chain reading a per-token input
+	// buffer — bf16 gemv or quant qmv), so a PLE arch batches when the caller supplies the K-token
+	// slab; without one it declines to the proven sequential fallback.
+	if s.trace {
 		return nil, false, nil
+	}
+	// recorded-ICB sessions (the quant decode lane): the replay owns the LIVE per-layer caches —
+	// s.lb is ring-sized and UNUSED there, so the batch must read and write the replay's own
+	// buffers or its rows would be invisible to every later replayed step. The per-row interleave's
+	// slot math (pos%slideW ring / linear global) matches prepareStepRebind's pos%cacheRows exactly
+	// when the capacities line up (checked per owner below); the folds stay off in this mode so no
+	// staged/deferred lane ever touches the other cache set. Small batches only — the MTP verify
+	// and accept-commit blocks — the prompt prefill keeps the replay's own pipelined lane.
+	var icbK, icbV []metal.MTLBuffer
+	if s.icb != nil {
+		if K > batchedDenseICBMaxRows ||
+			len(s.icb.kCaches) < len(s.specs) || len(s.icb.vCaches) < len(s.specs) || len(s.icb.cacheRows) < len(s.specs) {
+			return nil, false, nil
+		}
+		icbK, icbV = s.icb.kCaches, s.icb.vCaches
 	}
 	if len(s.ple) > 0 {
 		if pleSlab == nil {
 			return nil, false, nil
-		}
-		for li := range s.ple {
-			if len(s.ple[li].postNorm) > 0 && s.ple[li].bits != 0 {
-				return nil, false, nil
-			}
 		}
 		if want := K * len(s.specs) * s.pliDim * bf16Size; len(pleSlab) != want {
 			return nil, false, core.NewError("native.stepTokensBatchedDense: PLE slab size mismatch")
@@ -494,14 +523,39 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		if li < len(s.moeQuant) && s.moeQuant[li] != nil {
 			return nil, false, nil
 		}
-		// shared-KV layers (gemma4 E2B/E4B tails) attend an OWNER's cache: batchable —
-		// the owner's rows for this batch are encoded at a lower layer index in the same
-		// command buffer — provided the owner's linear caches are resident.
-		if !s.specs[li].OwnsCache() {
-			own := s.specs[li].KVShareFrom
-			if own < 0 || own >= len(s.lb) || s.lb[own].kCache == nil || s.lb[own].vCache == nil {
+		if s.specs[li].OwnsCache() {
+			if icbK == nil {
+				continue
+			}
+			if icbK[li] == nil || icbV[li] == nil {
 				return nil, false, nil
 			}
+			rows := s.icb.cacheRows[li]
+			if s.specs[li].Attention == model.SlidingAttention && s.slidingWindow > 0 {
+				// the interleave's slot math is pos%slidingWindow: identical to the replay's
+				// pos%cacheRows ring when rows==slidingWindow, and to its linear write when
+				// the allocation is un-bounded (rows>=maxLen ⇒ every pos writes linearly).
+				if rows != s.slidingWindow && rows < s.maxLen {
+					return nil, false, nil
+				}
+			} else if rows < basePos+K {
+				return nil, false, nil
+			}
+			continue
+		}
+		// shared-KV layers (gemma4 E2B/E4B tails) attend an OWNER's cache: batchable —
+		// the owner's rows for this batch are encoded at a lower layer index in the same
+		// command buffer — provided the owner's caches (live set) are resident.
+		own := s.specs[li].KVShareFrom
+		if own < 0 || own >= len(s.specs) {
+			return nil, false, nil
+		}
+		if icbK != nil {
+			if icbK[own] == nil || icbV[own] == nil {
+				return nil, false, nil
+			}
+		} else if own >= len(s.lb) || s.lb[own].kCache == nil || s.lb[own].vCache == nil {
+			return nil, false, nil
 		}
 	}
 	for i := range embs {
@@ -510,8 +564,10 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		}
 	}
 	syncStart := time.Now()
-	if err := s.syncLinearKVFromDevicePaged(basePos); err != nil {
-		return nil, false, err
+	if icbK == nil { // ICB sessions decode over the replay's caches; the paged pool is bypassed
+		if err := s.syncLinearKVFromDevicePaged(basePos); err != nil {
+			return nil, false, err
+		}
 	}
 	hostSpan("syncKV", syncStart, K)
 
@@ -596,7 +652,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	// single-row tile loop unchanged, and the residual's offset-keyed kernel selection matches the
 	// per-row path row for row).
 	foldDFFMax, foldQDimMax, foldKVDimMax := 0, 0, 0
-	if !batchedMLPFoldDisabledForTest && K > 1 && gpuHasGeluKernel() {
+	if icbK == nil && !batchedMLPFoldDisabledForTest && K > 1 && gpuHasGeluKernel() {
 		for li := range s.specs {
 			if _, isBF16 := s.lb[li].proj.(bf16Projector); !isBF16 {
 				continue
@@ -880,7 +936,11 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				hTarget, hOff = hSlab, uint(i*rowBytes)
 			}
 			if ownsCache {
-				if err = encAttnHalfKVInputAt(enc, readRows[i], readOff[i], s.lb[li].kCache, s.lb[li].vCache, offBuf[i], hTarget, hOff, offOff[i],
+				kC, vC := s.lb[li].kCache, s.lb[li].vCache
+				if icbK != nil { // recorded-ICB sessions: the replay's caches are the live set
+					kC, vC = icbK[li], icbV[li]
+				}
+				if err = encAttnHalfKVInputAt(enc, readRows[i], readOff[i], kC, vC, offBuf[i], hTarget, hOff, offOff[i],
 					s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.lb[li].kNorm, s.valueNormOnes, s.asc, s.lb[li].proj,
 					s.dModel, s.nHeads, lkv, lhd, basePos+i, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); err != nil {
 					endEncodingFast(enc)
@@ -888,7 +948,13 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				}
 			} else {
 				own := s.specs[li].KVShareFrom
-				if err = encAttnHalfSharedInputAt(enc, readRows[i], readOff[i], s.lb[own].kCache, s.lb[own].vCache, offBuf[i], hTarget, hOff, offOff[i],
+				var kC, vC metal.MTLBuffer
+				if icbK != nil {
+					kC, vC = icbK[own], icbV[own]
+				} else {
+					kC, vC = s.lb[own].kCache, s.lb[own].vCache
+				}
+				if err = encAttnHalfSharedInputAt(enc, readRows[i], readOff[i], kC, vC, offBuf[i], hTarget, hOff, offOff[i],
 					s.lb[li].anw, s.lb[li].postAttnNorm, s.lb[li].qNorm, s.asc, s.lb[li].proj,
 					s.dModel, s.nHeads, lkv, lhd, basePos+i, slideW, rotDim, rbase, s.scale, s.eps, layerRopeFreqs); err != nil {
 					endEncodingFast(enc)

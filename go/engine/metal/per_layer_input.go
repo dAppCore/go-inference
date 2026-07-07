@@ -776,10 +776,32 @@ func encPerLayerInputGateQuantScratch(
 	dModel, pliDim, gateGroupSize, gateBits, projGroupSize, projBits int,
 	eps float32,
 ) error {
+	return encPerLayerInputGateQuantScratchAt(enc, scratch, hBuf, 0, gatePacked, gateScales, gateBiases, perLayerBuf, projPacked, projScales, projBiases, postNormWBuf, outBuf, 0, perLayerOff, dModel, pliDim, gateGroupSize, gateBits, projGroupSize, projBits, eps)
+}
+
+// encPerLayerInputGateQuantScratchAt is encPerLayerInputGateQuantScratch with the layer hidden
+// bound at hOff and the output written at outOff — the quant sibling of
+// encPerLayerInputGateBF16ScratchAt for the batched dense forward, whose rows live at byte
+// offsets inside shared K-row buffers. The scratch is shared across rows within one command
+// buffer: Metal's hazard tracking on the scratch buffers serialises the gate chain row-by-row,
+// preserving the sequential byte-identity contract.
+func encPerLayerInputGateQuantScratchAt(
+	enc metal.MTLComputeCommandEncoder,
+	scratch *perLayerInputGateScratch,
+	hBuf metal.MTLBuffer,
+	hOff uint,
+	gatePacked, gateScales, gateBiases bufView,
+	perLayerBuf metal.MTLBuffer,
+	projPacked, projScales, projBiases bufView,
+	postNormWBuf, outBuf metal.MTLBuffer,
+	outOff, perLayerOff uint,
+	dModel, pliDim, gateGroupSize, gateBits, projGroupSize, projBits int,
+	eps float32,
+) error {
 	if scratch == nil || scratch.dModel != dModel || scratch.pliDim != pliDim {
 		return core.NewError("native.encPerLayerInputGateQuantScratch: scratch dimension mismatch")
 	}
-	if err := encQMVBF16(enc, gatePacked.buf, gateScales.buf, gateBiases.buf, hBuf, scratch.gate, gatePacked.off, gateScales.off, gateBiases.off, 0, pliDim, dModel, gateGroupSize, gateBits); err != nil {
+	if err := encQMVBF16At(enc, gatePacked.buf, gateScales.buf, gateBiases.buf, hBuf, scratch.gate, gatePacked.off, gateScales.off, gateBiases.off, hOff, 0, pliDim, dModel, gateGroupSize, gateBits); err != nil {
 		return err
 	}
 	if err := encPerLayerGeluGateMulBF16(enc, scratch.gate, perLayerBuf, scratch.gelu, scratch.multiplied, 0, perLayerOff, 0, pliDim); err != nil {
@@ -791,7 +813,7 @@ func encPerLayerInputGateQuantScratch(
 	if err := encRMSNormBF16(enc, scratch.projected, postNormWBuf, scratch.normed, 0, dModel, eps); err != nil {
 		return err
 	}
-	return encAddBF16(enc, hBuf, scratch.normed, outBuf, dModel)
+	return encAddBF16To(enc, hBuf, scratch.normed, outBuf, hOff, 0, outOff, dModel)
 }
 
 func encPerLayerGeluGateMulBF16(enc metal.MTLComputeCommandEncoder, gate, up, gelu, out metal.MTLBuffer, gateOff, upOff, outOff uint, n int) error {
