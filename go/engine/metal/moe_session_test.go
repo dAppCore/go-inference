@@ -377,6 +377,71 @@ func TestLoadGemma4QuantMoESubmitAheadMatchesSerial(t *testing.T) {
 	t.Logf("submit-ahead ≡ serial: full %v + cont %v; eos-stop %v + cont %v (rollback clean)", sf, ss, ef, es)
 }
 
+// TestLoadGemma4QuantMoEBatchedPrefillMatchesPerToken pins the K-row batched MoE prefill
+// (moe_batch.go) to the per-token stepping, token for token: a prompt wider than the fold
+// threshold prefills through the batched body, and the generated continuation must match a
+// session that prefilled per-token (the fold lever forces the old path). Token-identity is
+// this lane's tier (the prompt-scale qmm fold's bar).
+func TestLoadGemma4QuantMoEBatchedPrefillMatchesPerToken(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, nKV, headDim, vocab = 64, 2, 1, 64, 32
+	const dFF, expertDFF, numExperts, topK, numLayers = 128, 64, 4, 2, 2
+	const maxLen, n = 64, 6
+	quant := &model.QuantConfig{GroupSize: 64, Bits: 4, Overrides: map[string]model.ModuleQuant{}}
+	for i := range numLayers {
+		for _, m := range []string{"mlp.gate_proj", "mlp.up_proj", "mlp.down_proj", "router.proj"} {
+			quant.Overrides[core.Sprintf("model.layers.%d.%s", i, m)] = model.ModuleQuant{GroupSize: 64, Bits: 8}
+		}
+	}
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
+		EnableMoEBlock: true, NumExperts: numExperts, TopKExperts: topK, MoEIntermediateSize: expertDFF,
+		Quantization: quant,
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	ts := moeQuantTensors(t, arch, quant)
+	// a prompt wider than batchedDenseICBMaxRows so the batched body admits the chunk.
+	prompt := make([]int32, batchedDenseICBMaxRows+8)
+	for i := range prompt {
+		prompt[i] = int32((i*7 + 1) % vocab)
+	}
+
+	run := func(disableFold bool) []int32 {
+		t.Helper()
+		batchedMLPFoldDisabledForTest = disableFold
+		defer func() { batchedMLPFoldDisabledForTest = false }()
+		lm, aerr := model.Assemble(ts, arch, model.StandardWeightNames())
+		if aerr != nil {
+			t.Fatalf("model.Assemble: %v", aerr)
+		}
+		g, qerr := loadedToQuant(lm, quant.GroupSize, quant.Bits)
+		if qerr != nil {
+			t.Fatalf("loadedToQuant: %v", qerr)
+		}
+		sess, serr := NewArchQuantSession(g, arch, maxLen)
+		if serr != nil {
+			t.Fatalf("NewArchQuantSession: %v", serr)
+		}
+		out, gerr := sess.Generate(prompt, n, -1)
+		if gerr != nil {
+			t.Fatalf("Generate (disableFold=%v): %v", disableFold, gerr)
+		}
+		return out
+	}
+	perToken := run(true)
+	batched := run(false)
+	if !idsEqual(batched, perToken) {
+		t.Fatalf("batched MoE prefill diverged from per-token: %v != %v", batched, perToken)
+	}
+	t.Logf("batched MoE prefill ≡ per-token over %d prompt tokens → %v", len(prompt), perToken)
+}
+
 func TestLoadGemma4QuantMoEFusedGateUpMatchesSplitExperts(t *testing.T) {
 	requireNativeRuntime(t)
 

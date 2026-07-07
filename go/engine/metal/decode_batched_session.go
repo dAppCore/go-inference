@@ -80,6 +80,8 @@ type denseBatchScratch struct {
 	layerVStage      []metal.MTLBuffer
 	layerStageRowCap int
 	layerStageKVCap  int
+	// moeBatch holds the K-row MoE fold slabs (moe_batch.go) — nil until an MoE chunk runs.
+	moeBatch *moeBatchScratch
 }
 
 // mlpFold returns the K-row MLP-fold slabs, (re)allocating when the batch width, model width or
@@ -562,14 +564,21 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	} else if pleSlab != nil {
 		return nil, false, core.NewError("native.stepTokensBatchedDense: PLE slab supplied for a non-PLE arch")
 	}
+	// Quant MoE layers batch through the K-row MoE block (moe_batch.go) at prompt scale —
+	// the fold lane only (small batches keep the per-row interleave's byte contract, and MoE
+	// has no per-row interleave, so they fall to per-token stepping as before). bf16 MoE
+	// still declines.
+	batchMoE := K > batchedDenseICBMaxRows && !batchedMLPFoldDisabledForTest && gpuHasGeluKernel()
 	for li := range s.specs {
 		if s.specs[li].MoE {
+			if !batchMoE || li >= len(s.moeQuant) || s.moeQuant[li] == nil || !s.batchedMoEUsable(s.moeQuant[li]) ||
+				li >= len(s.lb) || s.lb[li].proj == nil || !s.lb[li].proj.rowsCapable() {
+				return nil, false, nil
+			}
+		} else if li < len(s.moeQuant) && s.moeQuant[li] != nil {
 			return nil, false, nil
 		}
 		if li < len(s.moeWeights) && s.moeWeights[li] != nil {
-			return nil, false, nil
-		}
-		if li < len(s.moeQuant) && s.moeQuant[li] != nil {
 			return nil, false, nil
 		}
 		if s.specs[li].OwnsCache() {
@@ -1042,7 +1051,43 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				return nil, false, err
 			}
 		}
-		if foldMLP {
+		if moeQ := moeQuantAt(s.moeQuant, li); moeQ != nil && s.specs[li].MoE {
+			enc = trace.checkpoint(enc, "moe")
+			// the batched MoE block: router + local MLP + all-pairs expert gathers + combine,
+			// every stage swept once over the K rows (moe_batch.go).
+			outContig := li != len(s.specs)-1 || (!directLastOut && !usingDirectOutputRows)
+			if batchedRows && outContig {
+				if err = s.encMoEBlockQuantBatched(enc, *moeQ, hSlab, outRows, rowOff, true, K); err != nil {
+					endEncodingFast(enc)
+					return nil, false, err
+				}
+				if err = s.encBatchedEpilogueRows(enc, pleSlabBuf, li, K, outRows[0], rowOff[0], gateSlab, gatedSlab, downSlab, mlpNormSlab); err != nil {
+					endEncodingFast(enc)
+					return nil, false, err
+				}
+			} else {
+				rowBufs := make([]metal.MTLBuffer, K)
+				rowOffs := make([]uint, K)
+				for i := range K {
+					rowBufs[i], rowOffs[i] = outRows[i], rowOff[i]
+					if directLastOut && li == len(s.specs)-1 && i == K-1 {
+						rowBufs[i], rowOffs[i] = lastOutBuf, 0
+					} else if usingDirectOutputRows && li == len(s.specs)-1 {
+						rowBufs[i], rowOffs[i] = directOutputRows[i], directOutputOff[i]
+					}
+				}
+				if err = s.encMoEBlockQuantBatched(enc, *moeQ, hSlab, rowBufs, rowOffs, false, K); err != nil {
+					endEncodingFast(enc)
+					return nil, false, err
+				}
+				for i := range K {
+					if err = s.encBatchedRowEpilogue(enc, pleSlabBuf, li, i, K, rowBufs[i], rowOffs[i]); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+				}
+			}
+		} else if foldMLP {
 			enc = trace.checkpoint(enc, "mlp")
 			// the folded MLP: one rms across the K rows, gate/up/down as batched gemvs (grid Z=K,
 			// the layer's weight matrix shared across rows), gelu(gate)·up fused over K·lff.
