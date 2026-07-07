@@ -37,6 +37,9 @@ var (
 	// liveSubmitAheadDisabled forces the chained live decode to wait each link before encoding
 	// the next (no speculative command buffer). Test/bench hook for A/B token compares.
 	liveSubmitAheadDisabled bool
+	// attnConcurrentDisabled forces the serial (single-encoder) attention half encode even
+	// when the concurrent-pass lane's gates hold. Test/bench hook for A/B token compares.
+	attnConcurrentDisabled bool
 	// moeConcurrentDisabled forces the serial (single-encoder) MoE block encode even when the
 	// concurrent-pass lane's gates hold. Test/bench hook for serial-vs-concurrent byte compares.
 	moeConcurrentDisabled bool

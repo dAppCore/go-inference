@@ -5,9 +5,11 @@
 package native
 
 import (
+	"sync/atomic"
+	"unsafe"
+
 	core "dappco.re/go"
 	"github.com/tmc/apple/metal"
-	"unsafe"
 )
 
 type devicePagedKVCache struct {
@@ -359,67 +361,166 @@ func (c *devicePagedKVCache) resetAttentionScratchCursor() {
 	}
 }
 
+// attnConcurrentPasses counts concurrent-pass attention encodes — the engagement receipt
+// (a silent gate regression reads as zero, not as a perf blur).
+var attnConcurrentPasses atomic.Int64
+
 func encAttnHalfKVPaged(
-	enc metal.MTLComputeCommandEncoder,
+	enc metal.MTLComputeCommandEncoderObject,
+	cb metal.MTLCommandBufferObject,
+	prof *gpuCounterProfiler,
 	x metal.MTLBuffer, cache *devicePagedKVCache, offBuf, h metal.MTLBuffer, offOff uint,
 	attnNormW, postAttnNorm, qNorm, kNorm bufView, valueNorm metal.MTLBuffer,
 	sc attnScratch, proj projector,
 	dModel, nHeads, nKVHeads, headDim, pos, slideW, rotaryDim int, base, scale, eps float32,
 	ropeFreqs metal.MTLBuffer,
-) error {
+) (metal.MTLComputeCommandEncoderObject, error) {
 	if slideW > 0 {
 		if cache == nil {
-			return core.NewError("native.encAttnHalfKVPaged: sliding window requires ring pages")
+			return enc, core.NewError("native.encAttnHalfKVPaged: sliding window requires ring pages")
 		}
 		if !cache.ring {
 			// The builder skips ring pages when the window covers the whole cache
 			// (max pos = maxSize-1 < slideW ⇒ the mask can never clip): the window is
 			// inert here, so attend fully. A window that CAN clip still requires ring.
 			if cache.maxSize > slideW {
-				return core.NewError("native.encAttnHalfKVPaged: sliding window requires ring pages")
+				return enc, core.NewError("native.encAttnHalfKVPaged: sliding window requires ring pages")
 			}
 			slideW = 0
 		}
 	}
 	kPage, vPage, rowOff, err := cache.slot(pos)
 	if err != nil {
-		return err
+		return enc, err
 	}
+	fusedQKRope := gpuHasGeluKernel() && qNorm.buf != nil
+	fusedKRope := gpuHasGeluKernel() && kNorm.buf != nil
+
+	// The paged SDPA plan up front: the concurrent pass needs its pass-1/pass-2 seam, and a
+	// plan failure must decline BEFORE any dispatch is encoded.
+	keyPages, valuePages, pageLens, kHead, kSeq, vHead, vSeq, err := cache.state()
+	if err != nil {
+		return enc, err
+	}
+	pagedScratch, err := cache.attentionScratch(nHeads)
+	if err != nil {
+		return enc, err
+	}
+	sdpaPlan, err := buildSDPAPagedDecodePlan(sc.q, keyPages, valuePages, pageLens, kHead, kSeq, vHead, vSeq, sc.attn, pagedScratch, nHeads, nKVHeads, headDim, scale)
+	if err != nil {
+		return enc, err
+	}
+
+	// ---- concurrent pass: the q/k/v projections all read the same normed row, their
+	// rope/norm stages are pairwise independent, and the SDPA's per-page pass-1 dispatches
+	// are independent by construction — a serial encoder never overlapped ANY of them.
+	// Explicit buffer barriers mark the true edges; values are unchanged (same kernels,
+	// same rounding — only the schedule differs). The fused-rope shape only (the plain
+	// rms+rope fallback keeps the serial path), and never under the profiler's seams.
+	if prof == nil && !attnConcurrentDisabled && fusedQKRope && (kNorm.buf == nil || fusedKRope) {
+		attnConcurrentPasses.Add(1)
+		endEncodingFast(enc)
+		enc = concurrentComputeEncoderFast(cb)
+		barrier := func() { memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers) }
+		// stage 1: the shared input norm
+		if err := encRMSNormBF16(enc, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
+			endEncodingFast(enc)
+			return computeCommandEncoderFast(cb), err
+		}
+		barrier()
+		// stage 2: q ∥ k ∥ v projections
+		if err := proj.project(enc, sc.normed, sc.q, 0, projQ); err != nil {
+			endEncodingFast(enc)
+			return computeCommandEncoderFast(cb), err
+		}
+		if err := proj.project(enc, sc.normed, kPage, rowOff, projK); err != nil {
+			endEncodingFast(enc)
+			return computeCommandEncoderFast(cb), err
+		}
+		vIdx := projV
+		if !proj.hasV() {
+			vIdx = projK
+		}
+		if err := proj.project(enc, sc.normed, vPage, rowOff, vIdx); err != nil {
+			endEncodingFast(enc)
+			return computeCommandEncoderFast(cb), err
+		}
+		barrier()
+		// stage 3: q rope ∥ k rope ∥ v norm
+		if err := encQKNormRopeAt(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+			endEncodingFast(enc)
+			return computeCommandEncoderFast(cb), err
+		}
+		if kNorm.buf != nil {
+			if err := encQKNormRopeAt(enc, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+				endEncodingFast(enc)
+				return computeCommandEncoderFast(cb), err
+			}
+		}
+		if valueNorm != nil {
+			if err := encRMSNormRowsBF16(enc, vPage, valueNorm, vPage, rowOff, 0, rowOff, nKVHeads, headDim, eps); err != nil {
+				endEncodingFast(enc)
+				return computeCommandEncoderFast(cb), err
+			}
+		}
+		barrier()
+		// stage 4: SDPA pass 1 — the per-page/window partials, genuinely overlapped
+		sdpaPlan.emitP1s(enc)
+		barrier()
+		// stage 5: SDPA pass 2 — the cell merge
+		sdpaPlan.emitP2(enc)
+		barrier()
+		// stage 6: output projection
+		if err := proj.project(enc, sc.attn, sc.attnOut, 0, projO); err != nil {
+			endEncodingFast(enc)
+			return computeCommandEncoderFast(cb), err
+		}
+		barrier()
+		// stage 7: residual (+ post-attention norm)
+		if err := encResidualMaybeNorm(enc, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps); err != nil {
+			endEncodingFast(enc)
+			return computeCommandEncoderFast(cb), err
+		}
+		endEncodingFast(enc)
+		return computeCommandEncoderFast(cb), nil
+	}
+
+	// ---- serial path (hazard tracking orders every edge) ----
 	if err := encRMSNormBF16(enc, x, attnNormW.buf, sc.normed, attnNormW.off, dModel, eps); err != nil {
-		return err
+		return enc, err
 	}
 	if err := proj.project(enc, sc.normed, sc.q, 0, projQ); err != nil {
-		return err
+		return enc, err
 	}
-	if gpuHasGeluKernel() && qNorm.buf != nil {
+	if fusedQKRope {
 		if err := encQKNormRopeAt(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale, eps); err != nil {
-			return err
+			return enc, err
 		}
 	} else {
 		if qNorm.buf != nil {
 			if err := encRMSNormRowsBF16(enc, sc.q, qNorm.buf, sc.q, 0, qNorm.off, 0, nHeads, headDim, eps); err != nil {
-				return err
+				return enc, err
 			}
 		}
 		if err := encRopeDecodeAt(enc, sc.q, sc.q, 0, 0, offBuf, offOff, ropeFreqs, nHeads, headDim, rotaryDim, base, scale); err != nil {
-			return err
+			return enc, err
 		}
 	}
 	if err := proj.project(enc, sc.normed, kPage, rowOff, projK); err != nil {
-		return err
+		return enc, err
 	}
-	if gpuHasGeluKernel() && kNorm.buf != nil {
+	if fusedKRope {
 		if err := encQKNormRopeAt(enc, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
-			return err
+			return enc, err
 		}
 	} else {
 		if kNorm.buf != nil {
 			if err := encRMSNormRowsBF16(enc, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, nKVHeads, headDim, eps); err != nil {
-				return err
+				return enc, err
 			}
 		}
 		if err := encRopeDecodeAt(enc, kPage, kPage, rowOff, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale); err != nil {
-			return err
+			return enc, err
 		}
 	}
 	vIdx := projV
@@ -427,28 +528,19 @@ func encAttnHalfKVPaged(
 		vIdx = projK
 	}
 	if err := proj.project(enc, sc.normed, vPage, rowOff, vIdx); err != nil {
-		return err
+		return enc, err
 	}
 	if valueNorm != nil {
 		if err := encRMSNormRowsBF16(enc, vPage, valueNorm, vPage, rowOff, 0, rowOff, nKVHeads, headDim, eps); err != nil {
-			return err
+			return enc, err
 		}
 	}
-	keyPages, valuePages, pageLens, kHead, kSeq, vHead, vSeq, err := cache.state()
-	if err != nil {
-		return err
-	}
-	pagedScratch, err := cache.attentionScratch(nHeads)
-	if err != nil {
-		return err
-	}
-	if err := encSDPAPagedDecodeStrided(enc, sc.q, keyPages, valuePages, pageLens, kHead, kSeq, vHead, vSeq, sc.attn, pagedScratch, nHeads, nKVHeads, headDim, scale); err != nil {
-		return err
-	}
+	sdpaPlan.emitP1s(enc)
+	sdpaPlan.emitP2(enc)
 	if err := proj.project(enc, sc.attn, sc.attnOut, 0, projO); err != nil {
-		return err
+		return enc, err
 	}
-	return encResidualMaybeNorm(enc, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps)
+	return enc, encResidualMaybeNorm(enc, x, sc.attnOut, sc.normed, h, postAttnNorm, dModel, eps)
 }
 
 func encAttnHalfSharedPaged(
