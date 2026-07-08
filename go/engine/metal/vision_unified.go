@@ -268,9 +268,11 @@ func UnifiedAudioProject(uv *model.LoadedUnifiedVision, samples []float32) ([]by
 	return out, n, nil
 }
 
-// DecodeWAVMono16k parses a RIFF/WAVE file into [-1,1] float32 samples for the
-// unified audio head. v1 accepts 16-bit PCM, mono, 16 kHz — anything else
-// errors loud (no silent resample).
+// DecodeWAVMono16k parses a RIFF/WAVE file into [-1,1] float32 samples at
+// 16 kHz for the unified audio head: 16-bit PCM at any sample rate and
+// channel count — stereo downmixes by averaging, non-16 kHz resamples through
+// a Kaiser-windowed sinc (anti-aliased for downsampling). Non-PCM formats
+// error loud.
 func DecodeWAVMono16k(data []byte) ([]float32, error) {
 	if len(data) < 44 || string(data[0:4]) != "RIFF" || string(data[8:12]) != "WAVE" {
 		return nil, core.NewError("native.DecodeWAVMono16k: not a RIFF/WAVE file")
@@ -280,6 +282,7 @@ func DecodeWAVMono16k(data []byte) ([]float32, error) {
 		return int(data[off]) | int(data[off+1])<<8 | int(data[off+2])<<16 | int(data[off+3])<<24
 	}
 	var fmtOK bool
+	var channels, rate int
 	var dataOff, dataLen int
 	for off := 12; off+8 <= len(data); {
 		id := string(data[off : off+4])
@@ -293,15 +296,13 @@ func DecodeWAVMono16k(data []byte) ([]float32, error) {
 			if size < 16 {
 				return nil, core.NewError("native.DecodeWAVMono16k: short fmt chunk")
 			}
-			format, channels, rate, bits := le16(body), le16(body+2), le32(body+4), le16(body+14)
+			format, bits := le16(body), le16(body+14)
+			channels, rate = le16(body+2), le32(body+4)
 			if format != 1 || bits != 16 {
 				return nil, core.NewError("native.DecodeWAVMono16k: want 16-bit PCM (format 1)")
 			}
-			if channels != 1 {
-				return nil, core.NewError("native.DecodeWAVMono16k: want mono audio")
-			}
-			if rate != 16000 {
-				return nil, core.NewError(core.Sprintf("native.DecodeWAVMono16k: want 16000 Hz, got %d (resample before sending)", rate))
+			if channels < 1 || channels > 8 || rate <= 0 {
+				return nil, core.NewError("native.DecodeWAVMono16k: malformed channel count or sample rate")
 			}
 			fmtOK = true
 		case "data":
@@ -312,13 +313,90 @@ func DecodeWAVMono16k(data []byte) ([]float32, error) {
 	if !fmtOK || dataLen < 2 {
 		return nil, core.NewError("native.DecodeWAVMono16k: missing fmt or data chunk")
 	}
-	n := dataLen / 2
-	out := make([]float32, n)
-	for i := range n {
-		s := int16(uint16(data[dataOff+2*i]) | uint16(data[dataOff+2*i+1])<<8)
-		out[i] = float32(s) / 32768
+	frameBytes := 2 * channels
+	n := dataLen / frameBytes
+	if n == 0 {
+		return nil, core.NewError("native.DecodeWAVMono16k: empty audio data")
 	}
-	return out, nil
+	mono := make([]float32, n)
+	for i := range n {
+		var acc float32
+		base := dataOff + i*frameBytes
+		for c := range channels {
+			s := int16(uint16(data[base+2*c]) | uint16(data[base+2*c+1])<<8)
+			acc += float32(s) / 32768
+		}
+		mono[i] = acc / float32(channels)
+	}
+	if rate == 16000 {
+		return mono, nil
+	}
+	return resampleTo16k(mono, rate), nil
+}
+
+// resampleTo16k converts mono samples from srcRate to 16 kHz through a
+// 32-tap-per-side Kaiser-windowed sinc, cutoff at the lower Nyquist (the
+// anti-alias filter for downsampling; unity for upsampling).
+func resampleTo16k(in []float32, srcRate int) []float32 {
+	const dstRate = 16000
+	ratio := float64(srcRate) / dstRate
+	cutoff := 1.0
+	if srcRate > dstRate {
+		cutoff = 1 / ratio
+	}
+	const taps = 32
+	const beta = 8.0
+	i0beta := kaiserI0(beta)
+	outN := int(float64(len(in))/ratio + 0.5)
+	if outN <= 0 {
+		outN = 1
+	}
+	out := make([]float32, outN)
+	for o := range outN {
+		centre := float64(o) * ratio
+		lo := int(math.Ceil(centre)) - taps
+		hi := int(math.Floor(centre)) + taps
+		var acc, wsum float64
+		for i := max(lo, 0); i <= min(hi, len(in)-1); i++ {
+			x := (float64(i) - centre) * cutoff
+			var sinc float64
+			if x == 0 {
+				sinc = 1
+			} else {
+				px := math.Pi * x
+				sinc = math.Sin(px) / px
+			}
+			t := (float64(i) - centre) / taps
+			if t < -1 || t > 1 {
+				continue
+			}
+			w := kaiserI0(beta*math.Sqrt(1-t*t)) / i0beta
+			k := sinc * w
+			acc += float64(in[i]) * k
+			wsum += k
+		}
+		// wsum-normalised taps give unity passband gain in both directions
+		if wsum != 0 {
+			acc /= wsum
+		}
+		out[o] = float32(acc)
+	}
+	return out
+}
+
+// kaiserI0 is the zeroth-order modified Bessel function of the first kind
+// (series form), the Kaiser window's kernel.
+func kaiserI0(x float64) float64 {
+	sum, term := 1.0, 1.0
+	half := x / 2
+	for k := 1; k <= 24; k++ {
+		term *= (half / float64(k)) * (half / float64(k))
+		sum += term
+		if term < 1e-12*sum {
+			break
+		}
+	}
+	return sum
 }
 
 // UnifiedVisionProject runs the encoder-free embedder over n model patches
