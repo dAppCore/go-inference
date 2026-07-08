@@ -123,8 +123,15 @@ func qkNormRopePipelineICB() (metal.MTLComputePipelineState, error) {
 // rmsResidualPipelineICB builds (and caches) the ICB-capable fused residual-RMSNorm pipeline
 // (lthn_rmsnorm_residual_bf16: out = res + rmsnorm(x, w)). supportIndirectCommandBuffers is required —
 // without it the kernel faults when recorded into an ICB command. Same kernel as RMSNormResidualBF16.
-func rmsResidualPipelineICB() (metal.MTLComputePipelineState, error) {
-	const key = "lthn_rmsnorm_residual_bf16|icb"
+// rmsResidualPipelineICB selects the fused post-norm tail kernel by axis, exactly as
+// rmsNormResidualPipelineFor does for the live encoder: single-row up to rmsLoopedLimit,
+// the grid-striding looped variant beyond (gemma4 31B hidden 5376 — the #348 tail-drop).
+func rmsResidualPipelineICB(axisSize int) (metal.MTLComputePipelineState, error) {
+	name := "lthn_rmsnorm_residual_bf16"
+	if axisSize > rmsLoopedLimit {
+		name = "lthn_rmsnorm_residual_looped_bf16"
+	}
+	key := name + "|icb"
 	icbPSOMu.Lock()
 	defer icbPSOMu.Unlock()
 	if pso, ok := icbPSOCache[key]; ok {
@@ -133,9 +140,9 @@ func rmsResidualPipelineICB() (metal.MTLComputePipelineState, error) {
 	if customLibrary == nil || customLibrary.GetID() == 0 {
 		return nil, core.NewError("native.rmsResidualPipelineICB: custom library unavailable")
 	}
-	fn := customLibrary.NewFunctionWithName("lthn_rmsnorm_residual_bf16")
+	fn := customLibrary.NewFunctionWithName(name)
 	if fn == nil || fn.GetID() == 0 {
-		return nil, core.NewError("native.rmsResidualPipelineICB: kernel lthn_rmsnorm_residual_bf16 not found")
+		return nil, core.NewError("native.rmsResidualPipelineICB: kernel " + name + " not found — rebuild lthn_kernels.metallib")
 	}
 	desc := metal.NewMTLComputePipelineDescriptor()
 	desc.SetComputeFunction(fn)

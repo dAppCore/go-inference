@@ -1184,7 +1184,14 @@ func recordArchICB(
 		maxGelu = ple.pliDim
 	}
 
-	rmsPSO, err := pipelineForICB("rmsbfloat16")
+	// looped-aware: dModel past rmsLoopedLimit takes the grid-striding rms kernel — the
+	// single-row kernel's one pass cannot cover it (#348, gemma4 31B hidden 5376). The
+	// per-HEAD rms rows (axis = headDim ≤ 512) stay on the single-row kernel below.
+	rmsPSO, err := pipelineForICB(rmsKernelBF16(dModel))
+	if err != nil {
+		return nil, err
+	}
+	rmsHeadPSO, err := pipelineForICB("rmsbfloat16")
 	if err != nil {
 		return nil, err
 	}
@@ -1280,7 +1287,7 @@ func recordArchICB(
 	var rmsResPSO metal.MTLComputePipelineState
 	useFusedResRMS := hasFusedGELU
 	if useFusedResRMS {
-		if rmsResPSO, err = rmsResidualPipelineICB(); err != nil {
+		if rmsResPSO, err = rmsResidualPipelineICB(dModel); err != nil {
 			return nil, err
 		}
 	}
@@ -1598,7 +1605,7 @@ func recordArchICB(
 		icbDesc.SetMaxKernelBufferBindCount(16)
 		icb := device.NewIndirectCommandBufferWithDescriptorMaxCommandCountOptions(icbDesc, uint(total), metal.MTLResourceStorageModeShared)
 
-		rmsTG := uint(rmsSimdSize * ((((dModel + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
+		rmsTG := rmsThreadgroup(dModel, rmsPSO)
 		headTGOf := func(hd int) uint {
 			return uint(rmsSimdSize * ((((hd + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
 		}
@@ -1622,7 +1629,7 @@ func recordArchICB(
 		// per-head RMSNorm (gemma4 QK-norm: rows of headDim each) through the SHARED emitRMSNormRows body;
 		// axisSize = hd binds the same memoised buffer hdAxisOf(hd).axisHead holds.
 		setRMSRows := func(c metal.MTLIndirectComputeCommand, in, w, o metal.MTLBuffer, rows, hd int) {
-			emitRMSNormRows(fastICBSink{c}, rmsPSO, in, w, o, 0, 0, 0, hd, eps, rows, headTGOf(hd))
+			emitRMSNormRows(fastICBSink{c}, rmsHeadPSO, in, w, o, 0, 0, 0, hd, eps, rows, headTGOf(hd))
 		}
 		// element-wise binary op through the SHARED emitBinary body (with encBinaryDT). The count binds the
 		// memoised scalar buffer addModelB/ffCntOf hold — no separate count param.

@@ -86,3 +86,54 @@ kernel void lthn_rmsnorm_residual_bf16(
     }
   }
 }
+
+// lthn_rmsnorm_residual_looped_bf16 — the SAME fused post-norm tail for axes past the
+// single-row kernel's one-pass coverage (≤1024 threads × N_READS): a max-threads
+// threadgroup grid-strides the axis instead (gemma4 31B hidden 5376 — the #348 tail-drop).
+// Rounding stations mirror the single-row kernel exactly: the normed product is rounded to
+// bf16 BEFORE the add, so the fused output equals the composed rms→bf16→add→bf16 result.
+kernel void lthn_rmsnorm_residual_looped_bf16(
+    const device bfloat* x         [[buffer(0)]],
+    const device bfloat* w         [[buffer(1)]],
+    const device bfloat* res       [[buffer(2)]],
+    device bfloat*       out       [[buffer(3)]],
+    constant float&      eps       [[buffer(4)]],
+    constant uint&       axis_size [[buffer(5)]],
+    constant uint&       w_stride  [[buffer(6)]],
+    uint gid [[threadgroup_position_in_grid]],
+    uint lid [[thread_position_in_threadgroup]],
+    uint lsize [[threads_per_threadgroup]],
+    uint simd_lane_id [[thread_index_in_simdgroup]],
+    uint simd_group_id [[simdgroup_index_in_threadgroup]]) {
+  constexpr int SIMD_SIZE = 32;
+  threadgroup float local_inv_mean[1];
+  threadgroup float local_sums[SIMD_SIZE];
+
+  uint base = gid * axis_size;
+  float acc = 0;
+  for (uint i = lid; i < axis_size; i += lsize) {
+    float xi = x[base + i];
+    acc += xi * xi;
+  }
+  acc = simd_sum(acc);
+  if (simd_group_id == 0) {
+    local_sums[simd_lane_id] = 0;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (simd_lane_id == 0) {
+    local_sums[simd_group_id] = acc;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (simd_group_id == 0) {
+    acc = simd_sum(local_sums[simd_lane_id]);
+    if (simd_lane_id == 0) {
+      local_inv_mean[0] = precise::rsqrt(acc / axis_size + eps);
+    }
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float inv = local_inv_mean[0];
+  for (uint i = lid; i < axis_size; i += lsize) {
+    bfloat normed = static_cast<bfloat>(float(w[i * w_stride]) * float(static_cast<bfloat>(x[base + i] * inv)));
+    out[base + i] = static_cast<bfloat>(float(res[base + i]) + float(normed));
+  }
+}
