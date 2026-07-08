@@ -224,12 +224,29 @@ func (s *archDecodeState) encMoEBlockQuantBatched(enc metal.MTLComputeCommandEnc
 
 	sink := encSink{enc}
 
+	// The MTP verify runs this block at K=2-6 rows, where the qmm_t tier's
+	// small-M occupancy collapse costs ~10x the weight-sweep floor (the same
+	// disease the dense verify had before the multi-row qmv swap). Under the
+	// verify tier the router + local projections take encQMVRowsBF16At (rows
+	// byte-identical to the per-row decode qmv); prompt-scale chunks keep the
+	// qmm_t tier untouched.
+	qmvRows := func(w, ws, wb bufView, in, out metal.MTLBuffer, outDim, inDim, gs, bits int) (bool, error) {
+		if !s.verifyFoldSmallK {
+			return false, nil
+		}
+		return encQMVRowsBF16At(enc, w.buf, ws.buf, wb.buf, in, out, w.off, ws.off, wb.off, 0, 0, K, outDim, inDim, gs, bits)
+	}
+
 	// router: rms rows → scores qmm → row-dimensioned topk (idx/weight slabs).
 	if err := encRMSNormRowsBF16Object(enc, hSlab, routerNormView.buf, mb.routerNorm, 0, routerNormView.off, 0, K, dModel, s.eps); err != nil {
 		return err
 	}
-	if err := encQMMTBF16At(enc, routerPacked.buf, routerScales.buf, routerBiases.buf, mb.routerNorm, mb.scores, routerPacked.off, routerScales.off, routerBiases.off, 0, 0, K, numExperts, dModel, routerGS, routerBits); err != nil {
+	if handled, err := qmvRows(routerPacked, routerScales, routerBiases, mb.routerNorm, mb.scores, numExperts, dModel, routerGS, routerBits); err != nil {
 		return err
+	} else if !handled {
+		if err := encQMMTBF16At(enc, routerPacked.buf, routerScales.buf, routerBiases.buf, mb.routerNorm, mb.scores, routerPacked.off, routerScales.off, routerBiases.off, 0, 0, K, numExperts, dModel, routerGS, routerBits); err != nil {
+			return err
+		}
 	}
 	sink.setPSO(topkPSO)
 	sink.setBuf(mb.scores, 0, 0)
@@ -248,17 +265,29 @@ func (s *archDecodeState) encMoEBlockQuantBatched(enc metal.MTLComputeCommandEnc
 	if err := encRMSNormRowsBF16Object(enc, hSlab, pre1.buf, mb.localIn, 0, pre1.off, 0, K, dModel, s.eps); err != nil {
 		return err
 	}
-	if err := encQMMTBF16At(enc, localGatePacked.buf, localGateScales.buf, localGateBiases.buf, mb.localIn, mb.localGate, localGatePacked.off, localGateScales.off, localGateBiases.off, 0, 0, K, dFF, dModel, localGateGS, localGateBits); err != nil {
+	if handled, err := qmvRows(localGatePacked, localGateScales, localGateBiases, mb.localIn, mb.localGate, dFF, dModel, localGateGS, localGateBits); err != nil {
 		return err
+	} else if !handled {
+		if err := encQMMTBF16At(enc, localGatePacked.buf, localGateScales.buf, localGateBiases.buf, mb.localIn, mb.localGate, localGatePacked.off, localGateScales.off, localGateBiases.off, 0, 0, K, dFF, dModel, localGateGS, localGateBits); err != nil {
+			return err
+		}
 	}
-	if err := encQMMTBF16At(enc, localUpPacked.buf, localUpScales.buf, localUpBiases.buf, mb.localIn, mb.localUp, localUpPacked.off, localUpScales.off, localUpBiases.off, 0, 0, K, dFF, dModel, localUpGS, localUpBits); err != nil {
+	if handled, err := qmvRows(localUpPacked, localUpScales, localUpBiases, mb.localIn, mb.localUp, dFF, dModel, localUpGS, localUpBits); err != nil {
 		return err
+	} else if !handled {
+		if err := encQMMTBF16At(enc, localUpPacked.buf, localUpScales.buf, localUpBiases.buf, mb.localIn, mb.localUp, localUpPacked.off, localUpScales.off, localUpBiases.off, 0, 0, K, dFF, dModel, localUpGS, localUpBits); err != nil {
+			return err
+		}
 	}
 	if err := encGeluGateMulFused(enc, mb.localGate, mb.localUp, mb.localGated, K*dFF); err != nil {
 		return err
 	}
-	if err := encQMMTBF16At(enc, localDownPacked.buf, localDownScales.buf, localDownBiases.buf, mb.localGated, mb.localOut, localDownPacked.off, localDownScales.off, localDownBiases.off, 0, 0, K, dModel, dFF, localDownGS, localDownBits); err != nil {
+	if handled, err := qmvRows(localDownPacked, localDownScales, localDownBiases, mb.localGated, mb.localOut, dModel, dFF, localDownGS, localDownBits); err != nil {
 		return err
+	} else if !handled {
+		if err := encQMMTBF16At(enc, localDownPacked.buf, localDownScales.buf, localDownBiases.buf, mb.localGated, mb.localOut, localDownPacked.off, localDownScales.off, localDownBiases.off, 0, 0, K, dModel, dFF, localDownGS, localDownBits); err != nil {
+			return err
+		}
 	}
 
 	// experts, all pairs: rms rows, then the pair projections. The grouped-GEMM lane
@@ -268,7 +297,11 @@ func (s *archDecodeState) encMoEBlockQuantBatched(enc metal.MTLComputeCommandEnc
 	if err := encRMSNormRowsBF16Object(enc, hSlab, pre2.buf, mb.expertIn, 0, pre2.off, 0, K, dModel, s.eps); err != nil {
 		return err
 	}
-	if moeGroupedUsable(w, inBits, inGS) {
+	// The grouped-GEMM expert lane amortises its sort/gather/scatter machinery at
+	// prompt-scale pair counts; the verify's 16-48 pairs measured FASTER on the
+	// all-routes gathers (84.2 vs 65.5 tok/s on the 26B pair, #354) — routed
+	// experts' weights at qmv occupancy beat the block machinery's fixed cost.
+	if moeGroupedUsable(w, inBits, inGS) && !s.verifyFoldSmallK {
 		if err := s.encMoEExpertsGrouped(enc, mb, fusedExperts,
 			expGateUpPacked, expGateUpScales, expGateUpBiases,
 			expGatePacked, expGateScales, expGateBiases,
