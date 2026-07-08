@@ -5,6 +5,7 @@ package generate
 import (
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
@@ -206,5 +207,53 @@ func TestResolvedDraftBlock_FlagWins_Good(t *testing.T) {
 func TestResolvedDraftBlock_DefaultWhenZero_Bad(t *testing.T) {
 	if got := resolvedDraftBlock(0); got != serving.MTPDefaultDraftBlock {
 		t.Fatalf("resolvedDraftBlock(0) = %d, want %d", got, serving.MTPDefaultDraftBlock)
+	}
+}
+
+// TestWarmPrefix_ShortPassthrough_Good pins the common case: a prompt at or
+// under the bound is returned unchanged, so short-prompt warms behave exactly
+// as before the bound existed.
+func TestWarmPrefix_ShortPassthrough_Good(t *testing.T) {
+	if got := warmPrefix("hello"); got != "hello" {
+		t.Fatalf("warmPrefix(short) = %q, want passthrough", got)
+	}
+	exact := make([]byte, warmPrefixChars)
+	for i := range exact {
+		exact[i] = 'a'
+	}
+	if got := warmPrefix(string(exact)); len(got) != warmPrefixChars {
+		t.Fatalf("warmPrefix(exact) len = %d, want %d", len(got), warmPrefixChars)
+	}
+}
+
+// TestWarmPrefix_TruncatesLong_Bad pins the deep-prompt case that motivated the
+// bound: a prompt far past warmPrefixChars comes back bounded, so the warm pass
+// never replays the full prefill.
+func TestWarmPrefix_TruncatesLong_Bad(t *testing.T) {
+	long := make([]byte, warmPrefixChars*4)
+	for i := range long {
+		long[i] = 'b'
+	}
+	got := warmPrefix(string(long))
+	if len(got) != warmPrefixChars {
+		t.Fatalf("warmPrefix(long) len = %d, want %d", len(got), warmPrefixChars)
+	}
+}
+
+// TestWarmPrefix_RuneBoundary_Ugly pins the truncation backing off to a rune
+// boundary: a multi-byte rune straddling the cut is dropped whole rather than
+// split into an invalid UTF-8 tail.
+func TestWarmPrefix_RuneBoundary_Ugly(t *testing.T) {
+	head := make([]byte, warmPrefixChars-1)
+	for i := range head {
+		head[i] = 'c'
+	}
+	s := string(head) + "€€€" // 3-byte runes straddle the cut at warmPrefixChars
+	got := warmPrefix(s)
+	if len(got) > warmPrefixChars {
+		t.Fatalf("warmPrefix over bound: %d", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("warmPrefix split a rune: tail %q", got[len(got)-4:])
 	}
 }
