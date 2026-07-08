@@ -585,6 +585,17 @@ func (s *ArchSession) restoreStateBlockMetadata(source SessionStateBlockSource) 
 }
 
 func (s *ArchSession) stateLayerViews() ([]sessionStateLayerView, error) {
+	return s.stateLayerViewsRefreshing(nil)
+}
+
+// stateLayerViewsRefreshing is stateLayerViews with a paged-refresh filter:
+// needed non-nil re-materialises only the named cache indices' snapshots. The
+// MTP drafter export reads 2 winner caches of the target's 30-48 owners, and
+// refreshing the rest cost ~10ms per draft block on the paged 26B (#355).
+// Every state save/restore path passes nil (refresh all); a filtered call can
+// leave other views' snapshot bytes stale, which is safe because every reader
+// refreshes through this entry first.
+func (s *ArchSession) stateLayerViewsRefreshing(needed map[int]bool) ([]sessionStateLayerView, error) {
 	ownerCount := s.ownedStateCacheLayers()
 	icb := s.state.icb != nil
 	if len(s.stateBlockViews) == ownerCount && s.stateBlockViewsICB == icb {
@@ -598,7 +609,7 @@ func (s *ArchSession) stateLayerViews() ([]sessionStateLayerView, error) {
 		// drafter then cross-attends a zeroed target Key and drafts garbage, which
 		// on a quant (ICB) target collapsed speculative acceptance to 0%.
 		if !icb {
-			if err := s.refreshPagedStateLayerViews(s.stateBlockViews); err != nil {
+			if err := s.refreshPagedStateLayerViews(s.stateBlockViews, needed); err != nil {
 				return nil, err
 			}
 		}
@@ -670,10 +681,13 @@ func stateLayerViewKVHeads(spec model.LayerSpec, archKVHeads, headDim, rowBytes 
 	return kvHeadsOf(spec, archKVHeads)
 }
 
-func (s *ArchSession) refreshPagedStateLayerViews(views []sessionStateLayerView) error {
+func (s *ArchSession) refreshPagedStateLayerViews(views []sessionStateLayerView, needed map[int]bool) error {
 	for i := range views {
 		cache := views[i].paged
 		if cache == nil {
+			continue
+		}
+		if needed != nil && !needed[views[i].cacheIndex] {
 			continue
 		}
 		_, _, kPtr, vPtr, err := cache.linearSnapshot(views[i].cacheRows)
