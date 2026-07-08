@@ -535,22 +535,23 @@ func encRMSNormBF16At(enc metal.MTLComputeCommandEncoder, x, w, out metal.MTLBuf
 // offset into the shared shard buffer; 0 is the plain binding). Safe in-place (the per-row
 // reduction barriers before the write phase, and each thread writes only its own element).
 func encRMSNormRowsBF16(enc metal.MTLComputeCommandEncoder, x, w, out metal.MTLBuffer, xOff, wOff, outOff uint, rows, axisSize int, eps float32) error {
-	pso, err := pipelineFor("rmsbfloat16")
+	// single-row kernel up to rmsLoopedLimit, the looped (grid-striding) kernel past it —
+	// the raw tg formula exceeds 1024 threads/threadgroup beyond 4096 dims and Metal DROPS
+	// the dispatch silently (31B dModel=5376 prefilled all-zero caches through exactly this).
+	pso, err := pipelineFor(rmsKernelBF16(axisSize))
 	if err != nil {
 		return err
 	}
-	tg := uint(rmsSimdSize * ((((axisSize + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
-	emitRMSNormRows(encSink{enc}, pso, x, w, out, xOff, wOff, outOff, axisSize, eps, rows, tg)
+	emitRMSNormRows(encSink{enc}, pso, x, w, out, xOff, wOff, outOff, axisSize, eps, rows, rmsThreadgroup(axisSize, pso))
 	return nil
 }
 
 func encRMSNormRowsBF16Object(enc metal.MTLComputeCommandEncoderObject, x, w, out metal.MTLBuffer, xOff, wOff, outOff uint, rows, axisSize int, eps float32) error {
-	pso, err := pipelineFor("rmsbfloat16")
+	pso, err := pipelineFor(rmsKernelBF16(axisSize))
 	if err != nil {
 		return err
 	}
-	tg := uint(rmsSimdSize * ((((axisSize + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
-	emitRMSNormRows(encObjectSink{enc}, pso, x, w, out, xOff, wOff, outOff, axisSize, eps, rows, tg)
+	emitRMSNormRows(encObjectSink{enc}, pso, x, w, out, xOff, wOff, outOff, axisSize, eps, rows, rmsThreadgroup(axisSize, pso))
 	return nil
 }
 
