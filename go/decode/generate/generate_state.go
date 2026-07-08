@@ -110,6 +110,19 @@ func runStateSession(ctx context.Context, cfg Config, storePath string, store *f
 		}
 	}
 
+	// contextFolder is the engine handle's budget-fold seam: when the turn (or the reply
+	// headroom) would outgrow the context window, the handle folds to BOS + the newest
+	// suffix instead of erroring — the turn report says so honestly.
+	type contextFolder interface {
+		ContextFolds() int
+		LastContextFold() (kept, dropped int)
+	}
+	folder, _ := sess.Native().(contextFolder)
+	foldsBefore := 0
+	if folder != nil {
+		foldsBefore = folder.ContextFolds()
+	}
+
 	woke := false
 	var wakeDur, prefillDur time.Duration
 	var wakeReport *agent.WakeReport
@@ -176,6 +189,12 @@ func runStateSession(ctx context.Context, cfg Config, storePath string, store *f
 
 	core.WriteString(cfg.Out, string(out))
 	core.WriteString(cfg.Out, "\n\n")
+	if folder != nil && folder.ContextFolds() > foldsBefore {
+		kept, dropped := folder.LastContextFold()
+		core.WriteString(cfg.Out, core.Sprintf(
+			"turn: context window folded — kept the newest %d tokens, evicted the oldest %d (budget fit for turn + reply headroom)\n",
+			kept, dropped))
+	}
 	if woke {
 		core.WriteString(cfg.Out, core.Sprintf(
 			"turn: woke %d prefix tokens in %dms (no replay) · new-turn prefill %dms\n",

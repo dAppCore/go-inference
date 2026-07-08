@@ -88,6 +88,9 @@ type SessionHandle struct {
 	prefillDuration time.Duration
 	err             error
 	closed          bool
+	// budget-triggered context-fold bookkeeping (session_fold.go)
+	contextFolds                 int
+	lastFoldKept, lastFoldDropped int
 }
 
 var (
@@ -173,6 +176,18 @@ func (s *SessionHandle) AppendPrompt(ctx context.Context, prompt string) error {
 	if len(ids) == 0 {
 		s.err = nil
 		return nil
+	}
+	// Budget-triggered context fold: when this turn would leave less than the reply
+	// headroom, keep BOS + the newest transcript suffix and re-prefill kept+turn in one
+	// engine call instead of dying on the maxLen wall (session_fold.go; LTHN_CONTEXT_FOLD=0
+	// restores the hard error).
+	if len(s.tokens)+len(ids)+foldHeadroom(s.model.maxLen) > s.model.maxLen && !contextFoldDisabled() {
+		if folded, err := s.foldForAppendLocked(ids); err != nil {
+			return err
+		} else if folded {
+			s.err = nil
+			return ctx.Err()
+		}
 	}
 	if err := s.sess.AppendTokens(ids); err != nil {
 		s.err = err
