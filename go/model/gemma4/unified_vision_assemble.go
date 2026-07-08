@@ -112,6 +112,8 @@ func AssembleUnifiedVision(weights map[string]safetensors.Tensor, textCfg *Gemma
 		uv.Cfg.ImageBeginToken = Gemma4BOIToken
 		uv.Cfg.ImageToken = Gemma4ImageToken
 		uv.Cfg.ImageEndToken = Gemma4EOIToken
+		uv.Cfg.VideoTokenID = textCfg.VideoTokenID
+		uv.Cfg.VideoToken = Gemma4VideoToken
 		uv.Cfg.BidirectionalImages = textCfg.UseBidirectionalAttention == "vision"
 	}
 	// The unified audio head: one projection over raw-waveform tokens

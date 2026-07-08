@@ -57,7 +57,9 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 	var images stringListFlag
 	fs.Var(&images, "image", "image input for a vision model: a local PNG/JPEG path or a base64 data: URL (repeatable) — gated on the model's vision capability, same as serve")
 	var audio stringListFlag
+	var videoFrames stringListFlag
 	fs.Var(&audio, "audio", "audio input for an audio model: a local WAV path (16-bit PCM mono 16 kHz) or a base64 data: URL (repeatable) — gated on the model's audio capability")
+	fs.Var(&videoFrames, "video-frame", "one sampled video frame in time order (repeatable): a local PNG/JPEG path or a base64 data: URL — frames become timestamped vision blocks 1s apart")
 	fs.Usage = func() {
 		name := cliName()
 		core.WriteString(stderr, core.Sprintf("Usage: %s generate [flags] <model-path>\n", name))
@@ -131,6 +133,7 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 		Raw:               *rawState,
 		ImageSources:      images,
 		AudioSources:      audio,
+		VideoFrameSources: videoFrames,
 		Out:               stdout,
 		Log:               stderr,
 	})

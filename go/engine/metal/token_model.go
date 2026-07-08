@@ -101,9 +101,10 @@ func (m *NativeTokenModel) OpenSession() (model.DecodeStepper, error) {
 	sess, err := m.openSession(m.shards, m.headEnc)
 	if err == nil && m.unifiedVision != nil && m.unifiedVision.Cfg.BidirectionalImages && !bidirSpansDisabled {
 		if as, ok := sess.(*ArchSession); ok {
-			// image soft-token spans attend bidirectionally in prefill —
-			// the session detects the placeholder runs itself.
-			as.bidirSpanToken = m.unifiedVision.Cfg.ImageTokenID
+			// image AND video soft-token spans attend bidirectionally in
+			// prefill (the reference's type-1|2 vision blocks) — the session
+			// detects the placeholder runs itself.
+			as.bidirSpanTokens = [2]int32{m.unifiedVision.Cfg.ImageTokenID, m.unifiedVision.Cfg.VideoTokenID}
 		}
 	}
 	return sess, err
@@ -221,14 +222,26 @@ func (m *NativeTokenModel) ImagePlaceholderBlock(softTokens int) string {
 }
 
 func (m *NativeTokenModel) VideoPlaceholderTokenID() int32 {
-	if m == nil || m.vision == nil {
+	switch {
+	case m == nil:
 		return 0
+	case m.unifiedVision != nil:
+		return m.unifiedVision.Cfg.VideoTokenID
+	case m.vision != nil:
+		return m.vision.Cfg.VideoTokenID
 	}
-	return m.vision.Cfg.VideoTokenID
+	return 0
 }
 
 func (m *NativeTokenModel) VideoPlaceholderBlock(softTokens int) string {
-	if m == nil || m.vision == nil || softTokens <= 0 {
+	if m == nil || softTokens <= 0 {
+		return ""
+	}
+	if m.unifiedVision != nil {
+		cfg := m.unifiedVision.Cfg
+		return nativeVisionPlaceholderBlock(cfg.ImageBeginToken, cfg.VideoToken, cfg.ImageEndToken, softTokens)
+	}
+	if m.vision == nil {
 		return ""
 	}
 	cfg := m.vision.Cfg
