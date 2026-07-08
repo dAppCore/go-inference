@@ -5,6 +5,7 @@
 package native
 
 import (
+	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -34,6 +35,17 @@ type sdpaPagedP1Params struct {
 	CellCount   uint32
 	Scale       float32
 }
+
+// sdpaPagedSplitRowsOverride: LTHN_SDPA_SPLIT probe lever for the #356 grain
+// sweep — 0 (unset) keeps the computed grain.
+var sdpaPagedSplitRowsOverride = func() int {
+	if v := os.Getenv("LTHN_SDPA_SPLIT"); v != "" {
+		if r := core.ParseInt(v, 10, 32); r.OK {
+			return int(r.Value.(int64))
+		}
+	}
+	return 0
+}()
 
 // sdpaPagedSplitRows is the depth-parallelism grain: each pass-1 threadgroup owns one
 // split window of a page, so the grid grows with context (nHeads × ceil(len/splitRows)
@@ -70,6 +82,14 @@ var (
 	sdpaPagedP1FinalPSOOnce sync.Once
 	sdpaPagedP1FinalPSO     metal.MTLComputePipelineState
 	sdpaPagedP1FinalPSOErr  error
+
+	sdpaPagedP1GQA2PSOOnce sync.Once
+	sdpaPagedP1GQA2PSO     metal.MTLComputePipelineState
+	sdpaPagedP1GQA2PSOErr  error
+
+	sdpaPagedP1FinalGQA2PSOOnce sync.Once
+	sdpaPagedP1FinalGQA2PSO     metal.MTLComputePipelineState
+	sdpaPagedP1FinalGQA2PSOErr  error
 )
 
 func newSDPAPagedDecodeScratch(nHeads, headDim int) (*sdpaPagedDecodeScratch, error) {
@@ -152,6 +172,42 @@ func sdpaPagedP1FinalPipeline() (metal.MTLComputePipelineState, error) {
 	return sdpaPagedP1FinalPSO, sdpaPagedP1FinalPSOErr
 }
 
+// sdpaPagedP1GQA2Pipeline resolves the GQA-shared pass 1: one threadgroup per
+// (KV head, split) streams rows once for BOTH query heads of the group (#356 —
+// the per-head kernel paid 2x the bandwidth floor on GQA-2 models). Separate
+// host_name so a stale metallib falls back to the per-head kernel loudly.
+func sdpaPagedP1GQA2Pipeline() (metal.MTLComputePipelineState, error) {
+	sdpaPagedP1GQA2PSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			sdpaPagedP1GQA2PSOErr = core.NewError("native.sdpaPagedP1GQA2Pipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_sdpa_paged_p1_gqa2_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			sdpaPagedP1GQA2PSOErr = core.NewError("native.sdpaPagedP1GQA2Pipeline: kernel lthn_sdpa_paged_p1_gqa2_bf16 not found")
+			return
+		}
+		sdpaPagedP1GQA2PSO, sdpaPagedP1GQA2PSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return sdpaPagedP1GQA2PSO, sdpaPagedP1GQA2PSOErr
+}
+
+func sdpaPagedP1FinalGQA2Pipeline() (metal.MTLComputePipelineState, error) {
+	sdpaPagedP1FinalGQA2PSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			sdpaPagedP1FinalGQA2PSOErr = core.NewError("native.sdpaPagedP1FinalGQA2Pipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_sdpa_paged_p1_final_gqa2_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			sdpaPagedP1FinalGQA2PSOErr = core.NewError("native.sdpaPagedP1FinalGQA2Pipeline: kernel lthn_sdpa_paged_p1_final_gqa2_bf16 not found")
+			return
+		}
+		sdpaPagedP1FinalGQA2PSO, sdpaPagedP1FinalGQA2PSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return sdpaPagedP1FinalGQA2PSO, sdpaPagedP1FinalGQA2PSOErr
+}
+
 func sdpaPagedP2Pipeline() (metal.MTLComputePipelineState, error) {
 	sdpaPagedP2PSOOnce.Do(func() {
 		if customLibrary == nil || customLibrary.GetID() == 0 {
@@ -229,6 +285,12 @@ type sdpaPagedDecodePlan struct {
 	vHead, vSeq          []int
 	scratch              *sdpaPagedDecodeScratch
 	p1PSO, p2PSO         metal.MTLComputePipelineState
+	// gqaShared: pass 1 runs one threadgroup per (KV head, split) computing both
+	// query heads of the GQA-2 group over rows read ONCE (#356); the grid width
+	// shrinks to nKVHeads x splits (splitRows halves to keep the threadgroup
+	// count) and the kernel derives h = kvh*2 + g.
+	gqaShared bool
+	splitRows int
 	// p1FinalPSO drives the single-cell fast path: pass 1 writes the final
 	// normalised row directly and emitP2 no-ops. Set only when cellCount == 1
 	// and the variant kernel resolved (see singleCell).
@@ -282,13 +344,44 @@ func buildSDPAPagedDecodePlan(
 	if headDim%32 != 0 || headDim/32 > 16 {
 		return sdpaPagedDecodePlan{}, core.NewError("native.encSDPAPagedDecodeStrided: headDim must be a multiple of 32, at most 512")
 	}
+	// GQA-2 models take the row-shared pass 1 (both query heads of a KV group
+	// computed over rows read ONCE — half the K/V traffic, #356). The grid loses
+	// its query-head factor, so the split grain HALVES to keep the threadgroup
+	// count — 8 kvHeads x 8 splits was 64 threadgroups on an 80-core GPU, and
+	// the first cut of this kernel measured SLOWER than the per-head one (4.15
+	// vs 3.82 ms/token) purely from that under-occupancy. Gated on headDim<=256
+	// (every gqa2 model's shape): the kernel sizes its two accumulator sets for
+	// per<=8 to keep the register budget at the per-head kernel's level.
+	gqaShared := false
+	totalRows := 0
+	for i := range pageLens {
+		if pageLens[i] > 0 {
+			totalRows += pageLens[i]
+		}
+	}
+	// Short windows keep the per-head kernel: a near-single-cell dispatch is
+	// already under-occupied, and halving its threadgroups measured 143.7 to
+	// 138.1 tok/s on the 26B short decode. The traffic halving only matters
+	// once the scan is deep.
+	if nHeads == 2*nKVHeads && headDim <= 256 && totalRows > sdpaPagedSplitRows {
+		if _, gerr := sdpaPagedP1GQA2Pipeline(); gerr == nil {
+			gqaShared = true
+		}
+	}
+	splitRows := sdpaPagedSplitRows
+	if gqaShared {
+		splitRows = sdpaPagedSplitRows / 2
+	}
+	if v := sdpaPagedSplitRowsOverride; v > 0 { // LTHN_SDPA_SPLIT probe (#356)
+		splitRows = v
+	}
 	// each page fans out over ceil(len/splitRows) independent split cells — the grid grows
 	// with context (#339: 16 fixed threadgroups measured 12.4 ms/token of attention at
 	// position ~3500; split windows keep the whole GPU busy at any depth).
 	cellCount := 0
 	for i := range keyPages {
 		if pageLens[i] > 0 {
-			cellCount += (pageLens[i] + sdpaPagedSplitRows - 1) / sdpaPagedSplitRows
+			cellCount += (pageLens[i] + splitRows - 1) / splitRows
 		}
 	}
 	if err := scratch.ensure(nHeads, headDim, cellCount); err != nil {
@@ -302,6 +395,13 @@ func buildSDPAPagedDecodePlan(
 	if err != nil {
 		return sdpaPagedDecodePlan{}, err
 	}
+	if gqaShared {
+		if pso, gerr := sdpaPagedP1GQA2Pipeline(); gerr == nil {
+			p1PSO = pso
+		} else {
+			gqaShared = false
+		}
+	}
 	// Single-cell fast path (#340): the whole visible cache is one split window of
 	// one page, so pass 2's merge of one cell is an identity rescale — pass 1
 	// writes the final row and pass 2 is skipped. Falls back to two passes when
@@ -309,8 +409,16 @@ func buildSDPAPagedDecodePlan(
 	var p1FinalPSO metal.MTLComputePipelineState
 	singleCell := false
 	if cellCount == 1 && !sdpaSingleCellDisabled {
-		if pso, ferr := sdpaPagedP1FinalPipeline(); ferr == nil {
-			p1FinalPSO, singleCell = pso, true
+		if gqaShared {
+			if pso, ferr := sdpaPagedP1FinalGQA2Pipeline(); ferr == nil {
+				p1FinalPSO, singleCell = pso, true
+			}
+		}
+		if !singleCell {
+			if pso, ferr := sdpaPagedP1FinalPipeline(); ferr == nil {
+				p1FinalPSO, singleCell = pso, true
+				gqaShared = false // per-head final variant: dispatch per query head
+			}
 		}
 	}
 	// returned BY VALUE (borrowed slices only): the callers hold it as a local, so it stays
@@ -320,7 +428,8 @@ func buildSDPAPagedDecodePlan(
 		keyPages: keyPages, valuePages: valuePages, pageLens: pageLens,
 		kHead: keyHeadStrides, kSeq: keySeqStrides, vHead: valueHeadStrides, vSeq: valueSeqStrides,
 		scratch: scratch, p1PSO: p1PSO, p2PSO: p2PSO,
-		p1FinalPSO: p1FinalPSO, singleCell: singleCell,
+		p1FinalPSO: p1FinalPSO, singleCell: singleCell, gqaShared: gqaShared,
+		splitRows: splitRows,
 		nHeads: nHeads, nKVHeads: nKVHeads, headDim: headDim, cellCount: cellCount,
 		scale: scale,
 	}, nil
@@ -346,7 +455,7 @@ func (p *sdpaPagedDecodePlan) emitP1s(enc metal.MTLComputeCommandEncoder) {
 				KSeqStride:  uint32(p.kSeq[i]),
 				VHeadStride: uint32(p.vHead[i]),
 				VSeqStride:  uint32(p.vSeq[i]),
-				SplitRows:   uint32(sdpaPagedSplitRows),
+				SplitRows:   uint32(p.splitRows),
 				Splits:      1,
 				CellBase:    0,
 				CellCount:   1,
@@ -358,8 +467,12 @@ func (p *sdpaPagedDecodePlan) emitP1s(enc metal.MTLComputeCommandEncoder) {
 			setBuf(enc, p.valuePages[i], 0, 2)
 			setBuf(enc, p.out, 0, 3)
 			setBytes(enc, unsafe.Pointer(&params), uint(unsafe.Sizeof(params)), 4)
+			tgWidth := p.nHeads
+			if p.gqaShared {
+				tgWidth = p.nKVHeads
+			}
 			dispatchThreadgroups(enc,
-				metal.MTLSize{Width: uint(p.nHeads), Height: 1, Depth: 1},
+				metal.MTLSize{Width: uint(tgWidth), Height: 1, Depth: 1},
 				metal.MTLSize{Width: 256, Height: 1, Depth: 1}, // 8 simdgroups split the window rows
 			)
 			return
@@ -371,7 +484,7 @@ func (p *sdpaPagedDecodePlan) emitP1s(enc metal.MTLComputeCommandEncoder) {
 		if p.pageLens[i] <= 0 {
 			continue // empty page: zero cells (see the plan validation)
 		}
-		splits := (p.pageLens[i] + sdpaPagedSplitRows - 1) / sdpaPagedSplitRows
+		splits := (p.pageLens[i] + p.splitRows - 1) / p.splitRows
 		params := sdpaPagedP1Params{
 			NHeads:      uint32(p.nHeads),
 			NKVHeads:    uint32(p.nKVHeads),
@@ -381,7 +494,7 @@ func (p *sdpaPagedDecodePlan) emitP1s(enc metal.MTLComputeCommandEncoder) {
 			KSeqStride:  uint32(p.kSeq[i]),
 			VHeadStride: uint32(p.vHead[i]),
 			VSeqStride:  uint32(p.vSeq[i]),
-			SplitRows:   uint32(sdpaPagedSplitRows),
+			SplitRows:   uint32(p.splitRows),
 			Splits:      uint32(splits),
 			CellBase:    uint32(cellBase),
 			CellCount:   uint32(p.cellCount),
@@ -396,8 +509,12 @@ func (p *sdpaPagedDecodePlan) emitP1s(enc metal.MTLComputeCommandEncoder) {
 		setBuf(enc, p.scratch.sums, 0, 4)
 		setBuf(enc, p.scratch.acc, 0, 5)
 		setBytes(enc, unsafe.Pointer(&params), uint(unsafe.Sizeof(params)), 6)
+		tgWidth := p.nHeads
+		if p.gqaShared {
+			tgWidth = p.nKVHeads
+		}
 		dispatchThreadgroups(enc,
-			metal.MTLSize{Width: uint(p.nHeads * splits), Height: 1, Depth: 1},
+			metal.MTLSize{Width: uint(tgWidth * splits), Height: 1, Depth: 1},
 			metal.MTLSize{Width: 256, Height: 1, Depth: 1}, // 8 simdgroups split the window rows
 		)
 	}
