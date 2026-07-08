@@ -607,9 +607,12 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	}
 	// Quant MoE layers batch through the K-row MoE block (moe_batch.go) at prompt scale —
 	// the fold lane only (small batches keep the per-row interleave's byte contract, and MoE
-	// has no per-row interleave, so they fall to per-token stepping as before). bf16 MoE
+	// has no per-row interleave, so they fall to per-token stepping as before). The MTP
+	// verify (verifyFoldSmallK, K>1 so the fold slabs exist) takes the block at small K too:
+	// without it the 26B verify ran K sequential full steps — 35.7ms for K=5 against a 7ms
+	// plain step — and the pair HALVED throughput at 81% acceptance (#354). bf16 MoE
 	// still declines.
-	batchMoE := K > batchedDenseICBMaxRows && !batchedMLPFoldDisabledForTest && gpuHasGeluKernel()
+	batchMoE := (K > batchedDenseICBMaxRows || (s.verifyFoldSmallK && K > 1)) && !batchedMLPFoldDisabledForTest && gpuHasGeluKernel()
 	for li := range s.specs {
 		if s.specs[li].MoE {
 			if !batchMoE || li >= len(s.moeQuant) || s.moeQuant[li] == nil || !s.batchedMoEUsable(s.moeQuant[li]) ||
