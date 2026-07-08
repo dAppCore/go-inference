@@ -164,6 +164,18 @@ func gemma4Snapshot(repo string) string {
 	return ""
 }
 
+// snapshotHasTensor reports whether the snapshot's safetensors index names a tensor
+// with this suffix — the checkpoint-derived expectation for layout assertions (the
+// key appears literally in the index JSON, so a substring probe suffices).
+func snapshotHasTensor(t *testing.T, dir, suffix string) bool {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "model.safetensors.index.json"))
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	return core.Contains(string(raw), suffix+`"`)
+}
+
 // TestParseConfigRealFamily round-trips the REAL per-size config.json files (the HF-cache
 // snapshots, config only — no weights, no GPU) through parseGemma4Config → Arch and asserts
 // the model-card truth for the WHOLE family. The gemma-4 sizes are NOT scaled twins — E2B is
@@ -303,11 +315,10 @@ func TestParseConfigRealFamily(t *testing.T) {
 // AX-11: mmap metadata only, no compute / no GPU.
 func TestLoad_EFamily_QuantAgnostic(t *testing.T) {
 	cases := []struct {
-		key, repo     string
-		wantProjQuant bool // per_layer_model_projection: e2b bf16, e4b 4-bit (the bug case)
+		key, repo string
 	}{
-		{"e2b", "models--mlx-community--gemma-4-E2B-it-4bit", false},
-		{"e4b", "models--mlx-community--gemma-4-E4B-it-qat-4bit", true},
+		{"e2b", "models--mlx-community--gemma-4-E2B-it-4bit"},
+		{"e4b", "models--mlx-community--gemma-4-E4B-it-qat-4bit"},
 	}
 	for _, c := range cases {
 		t.Run(c.key, func(t *testing.T) {
@@ -315,6 +326,11 @@ func TestLoad_EFamily_QuantAgnostic(t *testing.T) {
 			if dir == "" {
 				t.Skipf("%s not cached", c.key)
 			}
+			// the checkpoint decides the expectation: a conversion that ships
+			// per_layer_model_projection.scales quantised the projection (upstream
+			// re-conversions flip this — the 2026-07 e2b refresh made it 4-bit), and
+			// the loader must follow the weights with no per-weight branch.
+			wantProjQuant := snapshotHasTensor(t, dir, "per_layer_model_projection.scales")
 			m, dm, err := model.Load(dir)
 			if err != nil {
 				t.Fatalf("Load: %v", err)
@@ -351,8 +367,8 @@ func TestLoad_EFamily_QuantAgnostic(t *testing.T) {
 			if m.PerLayerModelProj == nil {
 				t.Fatal("PLE per_layer_model_projection missing")
 			}
-			if got := m.PerLayerModelProj.Quantised(); got != c.wantProjQuant {
-				t.Fatalf("per_layer_model_projection Quantised()=%v, want %v", got, c.wantProjQuant)
+			if got := m.PerLayerModelProj.Quantised(); got != wantProjQuant {
+				t.Fatalf("per_layer_model_projection Quantised()=%v, want %v (from the snapshot's own index)", got, wantProjQuant)
 			}
 			t.Logf("%s: %d layers · %d cache owners (%d shared) · FFN widths %v · PLE-proj quantised=%v",
 				c.key, len(m.Layers), owners, len(m.Layers)-owners, ffs, m.PerLayerModelProj.Quantised())

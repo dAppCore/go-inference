@@ -67,3 +67,54 @@ func TestDecodeForwardArchICBQuantPerLayerKVHeads(t *testing.T) {
 	}
 	t.Logf("non-uniform kvHeads (sliding GQA kv=%d / global MQA kv=%d): ICB replay ≡ DecodeForwardArchQuant byte-for-byte — the 12B/31B mix records correctly", slidingKV, globalKV)
 }
+
+// TestDecodeForwardArchICBQuantGlobalGQAKVHeads is the 31B-shaped sibling of the per-layer
+// kvHeads case: the global layer keeps SEVERAL kv heads (gkv > 1 — GQA on the global, not
+// MQA). 12B's globals are kv=1, so every head-offset bug that multiplies by a wrong stride
+// vanishes at offset 0 and the MQA case cannot catch it; 31B (sliding kv=16 / global kv=4,
+// gqa 2 vs 8) is the only family member that exercises kv-head indexing on the global layer.
+// ICB replay must equal the re-encode oracle byte-for-byte.
+func TestDecodeForwardArchICBQuantGlobalGQAKVHeads(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, headDim, globalHeadDim, dFF, gs, bits = 512, 8, 64, 128, 1024, 64, 4
+	const base, scale, eps = float32(10000), float32(0.125), float32(1e-5)
+	const maxLen = 8
+	const slidingKV, globalKV = 4, 2 // sliding GQA (ratio 2) + global GQA (ratio 4, gkv>1) — the 31B mix
+
+	mkInputs := func(n int) [][]byte {
+		in := make([][]byte, n)
+		for i := range in {
+			f := make([]float32, dModel)
+			for j := range f {
+				f[j] = float32((j*(i+5)+7)%89-44) * 0.02
+			}
+			in[i] = toBF16Bytes(f)
+		}
+		return in
+	}
+
+	specs := model.DeriveLayers([]string{"sliding_attention", "full_attention"}, 0)
+	specs[0].KVHeads, specs[0].HeadDim = slidingKV, headDim
+	specs[1].KVHeads, specs[1].HeadDim = globalKV, globalHeadDim
+	ql := []QuantizedLayerWeights{
+		buildQuantLayer(t, dModel, nHeads, slidingKV, headDim, dFF, gs, bits, 300),
+		buildQuantLayer(t, dModel, nHeads, globalKV, globalHeadDim, dFF, gs, bits, 400),
+	}
+
+	const T, slidingWindow = 6, 3
+	inputs := mkInputs(T)
+	got, err := DecodeForwardArchICBQuant(inputs, ql, specs, dModel, nHeads, slidingKV, headDim, maxLen, dFF, slidingWindow, base, scale, eps, false)
+	if err != nil {
+		t.Fatalf("DecodeForwardArchICBQuant: %v", err)
+	}
+	want, err := DecodeForwardArchQuant(inputs, ql, specs, dModel, nHeads, slidingKV, headDim, maxLen, dFF, slidingWindow, base, scale, eps, false)
+	if err != nil {
+		t.Fatalf("DecodeForwardArchQuant: %v", err)
+	}
+	for tok := range T {
+		eqBytes(t, core.Sprintf("global-GQA-kvHeads tok%d", tok), got[tok], want[tok])
+	}
+	t.Logf("global GQA kvHeads (sliding kv=%d / global kv=%d): ICB replay ≡ DecodeForwardArchQuant byte-for-byte — the 31B mix records correctly", slidingKV, globalKV)
+}
