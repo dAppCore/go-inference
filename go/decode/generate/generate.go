@@ -112,6 +112,25 @@ func RunGenerate(ctx context.Context, cfg Config) error {
 	return runBasicGenerate(ctx, cfg, loadOpts)
 }
 
+// warmPrefixChars bounds the prompt text the kernel-warm pass prefills: ~8K chars
+// ≈ 1.5K tokens ≈ three 512-row batched-prefill chunks — enough to compile every
+// PSO and size every slab the timed run needs, at seconds instead of the full
+// prompt's minutes at depth.
+const warmPrefixChars = 8192
+
+// warmPrefix returns the prompt bounded to warmPrefixChars, backed off to a rune
+// boundary so the truncation never splits a UTF-8 sequence.
+func warmPrefix(s string) string {
+	if len(s) <= warmPrefixChars {
+		return s
+	}
+	cut := warmPrefixChars
+	for cut > 0 && s[cut]&0xC0 == 0x80 {
+		cut--
+	}
+	return s[:cut]
+}
+
 // runBasicGenerate loads the model, warms the kernels, then times a prefill +
 // decode run and reports decode-only tok/s (comparable to llama-bench's tg).
 func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.LoadOption) error {
@@ -188,10 +207,10 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 
 	// run generates up to limit tokens, timing prefill (start → first token)
 	// separately from decode (first → last) so the reported rate is steady-state.
-	run := func(limit int, collect *[]byte) (n int, prefill, decode time.Duration) {
+	run := func(m []inference.Message, limit int, collect *[]byte) (n int, prefill, decode time.Duration) {
 		start := time.Now()
 		var first time.Time
-		for tok := range tm.Chat(ctx, msgs, genOpts(limit)...) {
+		for tok := range tm.Chat(ctx, m, genOpts(limit)...) {
 			if n == 0 {
 				first = time.Now()
 				prefill = first.Sub(start)
@@ -205,12 +224,20 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 		return n, prefill, decode
 	}
 
-	run(8, nil) // warm the kernels — first call pays compilation + allocation
+	// Warm on a bounded PREFIX of the prompt, not the whole thing. The warm pass
+	// exists to pay one-time costs — PSO compilation, scratch/slab allocation, the
+	// batched-prefill lane's first-use setup — and a few 512-row chunks covers all
+	// of them. Warming the full prompt runs the deep prefill twice: a 63K-token
+	// prompt cost ~96s of unmeasured warm prefill before the ~96s measured one.
+	// Chat calls on this path never reuse KV across runs (the measured prefill is
+	// cold either way), so the prefix warm changes nothing in the timed window.
+	warmMsgs := []inference.Message{{Role: "user", Content: warmPrefix(cfg.Prompt), Images: images}}
+	run(warmMsgs, 8, nil) // warm the kernels — first call pays compilation + allocation
 	if r := tm.Err(); !r.OK {
 		return core.E("generate.RunGenerate", "warm", r.Value.(error))
 	}
 	var out []byte
-	n, prefill, decode := run(cfg.MaxTokens, &out)
+	n, prefill, decode := run(msgs, cfg.MaxTokens, &out)
 	if r := tm.Err(); !r.OK {
 		return core.E("generate.RunGenerate", "generate", r.Value.(error))
 	}
