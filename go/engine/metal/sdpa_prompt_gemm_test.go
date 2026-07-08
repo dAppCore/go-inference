@@ -47,7 +47,7 @@ func TestSdpaPromptGemm_encSDPAPromptGEMM_Good(t *testing.T) {
 	kBuf := sharedBytes(kCache)
 	vBuf := sharedBytes(vCache)
 
-	run := func(gemm bool) []byte {
+	run := func(gemm bool, hb int) []byte {
 		outBuf := scratchBF16(kRows * qDim)
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
@@ -57,7 +57,7 @@ func TestSdpaPromptGemm_encSDPAPromptGEMM_Good(t *testing.T) {
 			s0 := scratchBF16(gqa * kRows * nTotal)
 			s1 := scratchBF16(gqa * kRows * nTotal)
 			err = encSDPAPromptGEMM(enc, qBuf, kBuf, vBuf, outBuf, s0, s1,
-				nHeads, nKVHeads, headDim, kRows, nTotal, qDim, kvDim, scale)
+				nHeads, nKVHeads, headDim, kRows, nTotal, qDim, kvDim, hb, scale)
 		} else {
 			err = encSDPAMultiQCausal(enc, qBuf, kBuf, vBuf, outBuf, nHeads, nKVHeads, headDim, kRows, nTotal,
 				int64(headDim), int64(kvDim), int64(headDim), int64(kvDim), scale)
@@ -72,14 +72,16 @@ func TestSdpaPromptGemm_encSDPAPromptGEMM_Good(t *testing.T) {
 		return append([]byte(nil), unsafe.Slice((*byte)(outBuf.Contents()), kRows*qDim*bf16Size)...)
 	}
 
-	got := run(true)
-	want := run(false)
+	want := run(false, 0)
 	rowBytes := qDim * bf16Size
-	for s := range kRows {
-		gotRow := got[s*rowBytes : (s+1)*rowBytes]
-		wantRow := want[s*rowBytes : (s+1)*rowBytes]
-		if cos := cosineBF16(gotRow, wantRow); cos < 0.999 {
-			t.Fatalf("row %d: GEMM composition cosine=%.6f vs multiQ vector kernel, want ~1", s, cos)
+	for _, hb := range []int{1, nHeads / nKVHeads} { // wide-chunk sub-batch AND narrow-chunk full-group batch
+		got := run(true, hb)
+		for s := range kRows {
+			gotRow := got[s*rowBytes : (s+1)*rowBytes]
+			wantRow := want[s*rowBytes : (s+1)*rowBytes]
+			if cos := cosineBF16(gotRow, wantRow); cos < 0.999 {
+				t.Fatalf("headBatch %d row %d: GEMM composition cosine=%.6f vs multiQ vector kernel, want ~1", hb, s, cos)
+			}
 		}
 	}
 }
@@ -100,7 +102,7 @@ func TestSdpaPromptGemm_encSDPAPromptGEMM_Bad(t *testing.T) {
 	cb := commandBufferFast(queue)
 	enc := computeCommandEncoderFast(cb)
 	defer endEncodingFast(enc)
-	if err := encSDPAPromptGEMM(enc, q, k, v, out, s0, s1, 3, 2, headDim, 1, 1, 3*headDim, 2*headDim, 0.125); err == nil {
+	if err := encSDPAPromptGEMM(enc, q, k, v, out, s0, s1, 3, 2, headDim, 1, 1, 3*headDim, 2*headDim, 1, 0.125); err == nil {
 		t.Fatal("expected encSDPAPromptGEMM to reject nHeads not a multiple of nKVHeads")
 	}
 }

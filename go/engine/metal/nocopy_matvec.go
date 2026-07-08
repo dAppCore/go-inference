@@ -4,7 +4,10 @@
 
 package native
 
-import core "dappco.re/go"
+import (
+	core "dappco.re/go"
+	"os"
+)
 
 // nocopy_matvec.go is the resident-weight sibling of MatVecBF16: the matrix is supplied as a bufView — a
 // no-copy view into a resident shard buffer (from shardBuffers.bufFor) — instead of host bytes, so a
@@ -20,7 +23,7 @@ var pleResidentDisabled bool
 
 // icbDisabledForTest forces Generate onto the per-op stepToken path instead of replaying the recorded ICB
 // (a test hook for the ICB-on/off cross-load reproducibility A/B; always false in production).
-var icbDisabledForTest bool
+var icbDisabledForTest = os.Getenv("LTHN_DECODE_ICB") == "0" // env mirror: the live decode-path A/B lever
 
 // resetResidentBufsForTest clears the address-keyed resident-weight cache. residentBytes assumes ONE model
 // per process (keys by &weight[0] in the stable mmap); a test that loads several models reuses freed mmap

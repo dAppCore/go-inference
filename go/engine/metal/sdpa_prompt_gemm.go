@@ -5,6 +5,7 @@
 package native
 
 import (
+	"os"
 	"sync"
 
 	core "dappco.re/go"
@@ -44,14 +45,51 @@ import (
 const sdpaPromptGEMMMinKV = 4096
 
 // sdpaPromptGEMMMaxRows bounds the chunk row count the composition accepts — the S scratch
-// is sized rows × maxLen, so an unchunked prompt (a no-sliding-window arch feeds the whole
-// prompt as ONE chunk) must stay on the vector kernel rather than ask for an N × N slab.
-// gemma4's window-aligned chunks are ≤ window + window/2 = 768 rows.
-const sdpaPromptGEMMMaxRows = 1024
+// is sized headBatch × rows × maxLen, so an unchunked prompt (a no-sliding-window arch feeds
+// the whole prompt as ONE chunk) must stay on the vector kernel rather than ask for an N × N
+// slab. Covers the widest window-multiple chunk the prefill policy can emit (8 windows + the
+// absorbed tail on a 1024-window arch).
+const sdpaPromptGEMMMaxRows = 8192
+
+// sdpaPromptSBudgetBytes caps ONE S scratch buffer for head-batch sizing. The head batch
+// adapts under it: at 512-row chunks the whole GQA group batches as today; at wide chunks
+// the batch drops toward 1 — where the M dimension itself already fills the machine —
+// instead of asking for a gqa × rows × maxLen slab measured in gigabytes.
+const sdpaPromptSBudgetBytes = 1 << 30
+
+// sdpaPromptSMaxBytes is the hard ceiling: when even a SINGLE head's S slab (kRows × nCap
+// bf16) would exceed it, the composition declines and the chunk keeps the multiQ vector
+// kernel — wide chunks on a 256K-context arch don't buy multi-gigabyte scratch.
+const sdpaPromptSMaxBytes = 2 << 30
+
+// sdpaPromptGEMMFeasible reports whether the S scratch for this chunk geometry fits the
+// hard ceiling at any head batch.
+func sdpaPromptGEMMFeasible(kRows, nCap int) bool {
+	return int64(kRows)*int64(nCap)*bf16Size <= sdpaPromptSMaxBytes
+}
+
+// sdpaPromptHeadBatch picks how many of a GQA group's query heads share one batched GEMM
+// dispatch, the largest count whose S slab (heads × kRows × nCap bf16) fits the budget,
+// always at least 1.
+func sdpaPromptHeadBatch(gqa, kRows, nCap int) int {
+	hb := gqa
+	for hb > 1 && int64(hb)*int64(kRows)*int64(nCap)*bf16Size > sdpaPromptSBudgetBytes {
+		hb--
+	}
+	if hb < 1 {
+		return 1
+	}
+	return hb
+}
 
 // sdpaPromptGEMMDisabledForTest forces the batched pass's global-layer SDPA back onto the
 // multiQ vector kernel at any depth — the A/B lever for the closeness and engagement tests.
 var sdpaPromptGEMMDisabledForTest bool
+
+// sdpaPromptGEMMEnvDisabled reports the field kill-switch: LTHN_SDPA_GEMM=0 pins deep-prompt
+// attention back onto the multiQ vector kernel without a rebuild — the live A/B lever for
+// separating a generation-trajectory change (token-identity tier) from a real quality fault.
+func sdpaPromptGEMMEnvDisabled() bool { return os.Getenv("LTHN_SDPA_GEMM") == "0" }
 
 var (
 	softmaxCausalPSOMu sync.Mutex
@@ -120,39 +158,49 @@ func encSoftmaxCausalRows(enc metal.MTLComputeCommandEncoder, s metal.MTLBuffer,
 // encSDPAPromptGEMM encodes the full prompt-attention GEMM composition for one global layer's
 // chunk: kRows query rows (query-major slab q, row stride qDim) against the first nTotal rows
 // of the layer's K/V caches (row stride kvDim, head offset kvh*hd), output into the attention
-// slab (query-major, row stride qDim). Each GQA group runs as ONE batched GEMM pair — grid
-// depth carries the group's q-heads off the scalar batch strides (B stride 0 broadcasts the
-// shared K/V), so GEMM2's skinny output (hd columns) fills gqa× more of the machine. s0/s1
-// are the two S scratch buffers, each at least gqa × kRows × nTotal bf16, alternated across
-// kv heads so group g+1's wide QKᵀ overlaps group g's P@V. Reports an error only for a
-// missing pipeline — the caller falls back to the multiQ vector kernel.
+// slab (query-major, row stride qDim). headBatch adjacent q-heads of a GQA group run as ONE
+// batched GEMM pair — grid depth carries them off the scalar batch strides (B stride 0
+// broadcasts the shared K/V), so GEMM2's skinny output (hd columns) fills headBatch× more of
+// the machine at narrow chunks; wide chunks carry the occupancy in M and run smaller batches
+// under the S budget. s0/s1 are the two S scratch buffers, each at least headBatch × kRows ×
+// nTotal bf16, alternated across batches so the next wide QKᵀ overlaps the previous skinny
+// P@V. Reports an error only for a missing pipeline — the caller falls back to the multiQ
+// vector kernel.
 func encSDPAPromptGEMM(enc metal.MTLComputeCommandEncoder, q, k, v, out, s0, s1 metal.MTLBuffer,
-	nHeads, nKVHeads, hd, kRows, nTotal, qDim, kvDim int, scale float32) error {
+	nHeads, nKVHeads, hd, kRows, nTotal, qDim, kvDim, headBatch int, scale float32) error {
 	if nKVHeads <= 0 || nHeads%nKVHeads != 0 {
 		return core.NewError("native.encSDPAPromptGEMM: nHeads must be a multiple of nKVHeads")
 	}
 	gqa := nHeads / nKVHeads
+	if headBatch < 1 {
+		headBatch = 1
+	}
 	sBufs := [2]metal.MTLBuffer{s0, s1}
 	headBlock := int64(kRows) * int64(nTotal)
+	dispatch := 0
 	for kvh := 0; kvh < nKVHeads; kvh++ {
-		sBuf := sBufs[kvh&1]
-		groupOff := uint(kvh * gqa * hd * bf16Size)
 		kvhOff := uint(kvh * hd * bf16Size)
-		// S[j][kRows × nTotal] = Q_(kvh·gqa+j) @ K_kvhᵀ for the group's gqa heads at once
-		if !encGemmBF16StridedBatch(enc, true, q, k, sBuf, groupOff, kvhOff, 0,
-			kRows, nTotal, hd, qDim, kvDim, nTotal,
-			gqa, int64(hd), 0, headBlock) {
-			return core.NewError("native.encSDPAPromptGEMM: steel nt pipeline unavailable")
-		}
-		// P = softmaxCausal(S × scale) over all gqa·kRows stacked rows, masked tails zeroed
-		if err := encSoftmaxCausalRows(enc, sBuf, kRows, gqa*kRows, nTotal, scale); err != nil {
-			return err
-		}
-		// O_(kvh·gqa+j) = P[j] @ V_kvh
-		if !encGemmBF16StridedBatch(enc, false, sBuf, v, out, 0, kvhOff, groupOff,
-			kRows, hd, nTotal, nTotal, kvDim, qDim,
-			gqa, headBlock, 0, int64(hd)) {
-			return core.NewError("native.encSDPAPromptGEMM: steel nn pipeline unavailable")
+		for j := 0; j < gqa; j += headBatch {
+			hb := min(headBatch, gqa-j)
+			sBuf := sBufs[dispatch&1]
+			dispatch++
+			groupOff := uint((kvh*gqa + j) * hd * bf16Size)
+			// S[b][kRows × nTotal] = Q_(kvh·gqa+j+b) @ K_kvhᵀ for hb adjacent heads at once
+			if !encGemmBF16StridedBatch(enc, true, q, k, sBuf, groupOff, kvhOff, 0,
+				kRows, nTotal, hd, qDim, kvDim, nTotal,
+				hb, int64(hd), 0, headBlock) {
+				return core.NewError("native.encSDPAPromptGEMM: steel nt pipeline unavailable")
+			}
+			// P = softmaxCausal(S × scale) over the hb·kRows stacked rows, masked tails zeroed
+			if err := encSoftmaxCausalRows(enc, sBuf, kRows, hb*kRows, nTotal, scale); err != nil {
+				return err
+			}
+			// O_(kvh·gqa+j+b) = P[b] @ V_kvh
+			if !encGemmBF16StridedBatch(enc, false, sBuf, v, out, 0, kvhOff, groupOff,
+				kRows, hd, nTotal, nTotal, kvDim, qDim,
+				hb, headBlock, 0, int64(hd)) {
+				return core.NewError("native.encSDPAPromptGEMM: steel nn pipeline unavailable")
+			}
 		}
 	}
 	return nil
