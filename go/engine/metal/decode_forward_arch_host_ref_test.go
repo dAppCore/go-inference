@@ -556,3 +556,72 @@ func TestRunArchDecodeHostReferencePartialRope(t *testing.T) {
 		})
 	}
 }
+
+// TestDecodeForwardArchQuantHostReferenceWideDModel is the #348 conviction receipt: the
+// single-row rms family (N_READS=4, one pass) covers at most 4096 dims per threadgroup —
+// 31B's dModel 5376 is the only family member past the limit, and every lane that drives
+// the single-row PSO at dModel axes silently drops the tail dims. The same fixture that is
+// green at dModel 512 must stay green at 5120; a red here pins the wide-dModel rms sites.
+func TestDecodeForwardArchQuantHostReferenceWideDModel(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	if err := ensureInit(); err != nil {
+		t.Skipf("metal init: %v", err)
+	}
+	const dModel, nHeads, headDim, globalHeadDim, dFF, gs, bits = 5376, 8, 64, 128, 1024, 64, 4
+	const base, scale, eps = float32(10000), float32(0.125), float32(1e-5)
+	const maxLen, T, slidingWindow = 8, 4, 3
+
+	mkInputs := func(n int) [][]byte {
+		in := make([][]byte, n)
+		for i := range in {
+			f := make([]float32, dModel)
+			for j := range f {
+				f[j] = float32((j*(i+7)+11)%83-41) * 0.02
+			}
+			in[i] = toBF16Bytes(f)
+		}
+		return in
+	}
+	specs := model.DeriveLayers([]string{"sliding_attention", "full_attention"}, 0)
+	specs[0].KVHeads, specs[0].HeadDim = 2, headDim
+	specs[1].KVHeads, specs[1].HeadDim = 2, globalHeadDim
+	ql := []QuantizedLayerWeights{
+		buildConditionedQuantLayer(t, dModel, nHeads, 2, headDim, dFF, gs, bits, 500),
+		buildConditionedQuantLayer(t, dModel, nHeads, 2, globalHeadDim, dFF, gs, bits, 600),
+	}
+	// the real-31B per-layer feature set routes the norms through the FUSED emission
+	// sites (rmsnorm_residual, qk-norm rows) — the lanes the bare fixture never runs.
+	mkw := func(n, s int) []byte {
+		f := make([]float32, n)
+		for i := range f {
+			f[i] = float32((i*s+3)%67-33)*0.01 + 1
+		}
+		return toBF16Bytes(f)
+	}
+	for li := range ql {
+		lhd := headDimOf(specs[li], headDim)
+		ql[li].QNormW = mkw(lhd, 41+li)
+		ql[li].KNormW = mkw(lhd, 43+li)
+		ql[li].PostAttnNormW = mkw(dModel, 47+li)
+		ql[li].PostFFNormW = mkw(dModel, 51+li)
+	}
+	inputs := mkInputs(T)
+
+	got, err := DecodeForwardArchQuant(inputs, ql, specs, dModel, nHeads, 2, headDim, maxLen, dFF, slidingWindow, base, scale, eps, false)
+	if err != nil {
+		t.Fatalf("DecodeForwardArchQuant: %v", err)
+	}
+	want := hostArchQuantReference(t, inputs, ql, specs, dModel, nHeads, 2, headDim, dFF, slidingWindow, base, scale, eps, false)
+	for tok := range T {
+		cos := cosineBF16(got[tok], want[tok])
+		t.Logf("tok %d cosine=%.6f", tok, cos)
+		// bar 0.96: the qk-norm mirror carries a known position-growing fidelity gap
+		// (rung C, same envelope at dModel 512); a wide-dModel tail-drop breaks cosine
+		// catastrophically (0.87 pre-fix at tok 0), far below mirror noise.
+		if cos < 0.96 {
+			t.Errorf("tok %d: wide-dModel forward diverges from host reference (cosine=%.6f)", tok, cos)
+		}
+	}
+}

@@ -160,6 +160,12 @@ func encRMSNormResidualBF16(enc metal.MTLComputeCommandEncoder, x, weight, res, 
 // bound at byte offsets — the SAME fused pipeline, for batched rows living at offsets inside
 // shared K-row buffers (bit-identical per row to the offset-0 sequential encode).
 func encRMSNormResidualBF16At(enc metal.MTLComputeCommandEncoder, x, weight, res, out metal.MTLBuffer, xOff, wOff, resOff, outOff uint, axisSize int, eps float32) error {
+	if axisSize > rmsLoopedLimit {
+		// the fused kernel is one-pass single-row: a clamped threadgroup would silently
+		// skip every dim past thread-coverage (the 31B dModel-5376 degeneracy, #348).
+		// Callers must compose the looped rms + residual add instead.
+		return core.NewError("native.encRMSNormResidualBF16At: axisSize exceeds the single-row fused kernel limit")
+	}
 	pso, err := rmsNormResidualPipeline()
 	if err != nil {
 		return err
