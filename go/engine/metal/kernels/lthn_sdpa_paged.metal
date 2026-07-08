@@ -299,7 +299,83 @@ METAL_FUNC void lthn_sdpa_paged_p1_gqa2_body(
 
   const bool vec4 = (per % 4u) == 0u &&
                     ((D.kSeqStride | D.kHeadStride | D.vSeqStride | D.vHeadStride) % 4u) == 0u;
-  for (uint t = rowBase + sg; t < rowEnd; t += kPagedSimdGroups) {
+  // Two rows per iteration (t and t+8): the four K-dots and their simd_sums are
+  // independent so they pipeline, and the online-softmax state folds BOTH rows
+  // in one batched update — s·e^(m−M) + e^(d₁−M) + e^(d₂−M) with M the joint
+  // max, mathematically the two sequential updates composed. The single-row
+  // form serialised (simd_sum → exp → accumulate) per row, which left the scan
+  // latency-bound at ~260 GB/s while the per-head kernel reached 432 (#356
+  // anatomy bench). The exp identities round differently from the sequential
+  // form, so this is a numeric TIER (the verify-fold precedent), not a
+  // byte-identical swap.
+  const uint stride2 = 2 * kPagedSimdGroups;
+  uint t = rowBase + sg;
+  for (; t + kPagedSimdGroups < rowEnd; t += stride2) {
+    const uint t2 = t + kPagedSimdGroups;
+    const device bf16* kt = kh + t * D.kSeqStride;
+    const device bf16* kt2 = kh + t2 * D.kSeqStride;
+    float pa0 = 0.0f, pa1 = 0.0f, pb0 = 0.0f, pb1 = 0.0f;
+    if (vec4) {
+      for (uint i = 0; i < per; i += 4) {
+        const bfloat4 ka = *((const device bfloat4*)(kt + i));
+        const bfloat4 kb = *((const device bfloat4*)(kt2 + i));
+        const float ax = float(ka.x), ay = float(ka.y), az = float(ka.z), aw = float(ka.w);
+        const float bx = float(kb.x), by = float(kb.y), bz = float(kb.z), bw = float(kb.w);
+        pa0 += qv[0][i] * ax + qv[0][i + 1] * ay + qv[0][i + 2] * az + qv[0][i + 3] * aw;
+        pa1 += qv[1][i] * ax + qv[1][i + 1] * ay + qv[1][i + 2] * az + qv[1][i + 3] * aw;
+        pb0 += qv[0][i] * bx + qv[0][i + 1] * by + qv[0][i + 2] * bz + qv[0][i + 3] * bw;
+        pb1 += qv[1][i] * bx + qv[1][i + 1] * by + qv[1][i + 2] * bz + qv[1][i + 3] * bw;
+      }
+    } else {
+      for (uint i = 0; i < per; i++) {
+        const float ax = float(kt[i]);
+        const float bx = float(kt2[i]);
+        pa0 += qv[0][i] * ax;
+        pa1 += qv[1][i] * ax;
+        pb0 += qv[0][i] * bx;
+        pb1 += qv[1][i] * bx;
+      }
+    }
+    float dA[kPagedGQA2], dB[kPagedGQA2];
+    dA[0] = simd_sum(pa0) * D.scale;
+    dA[1] = simd_sum(pa1) * D.scale;
+    dB[0] = simd_sum(pb0) * D.scale;
+    dB[1] = simd_sum(pb1) * D.scale;
+    float f[kPagedGQA2], pA[kPagedGQA2], pB[kPagedGQA2];
+    for (uint g = 0; g < kPagedGQA2; g++) {
+      const float newM = max(m[g], max(dA[g], dB[g]));
+      f[g] = s[g] > 0.0f ? exp(m[g] - newM) : 0.0f;
+      pA[g] = exp(dA[g] - newM);
+      pB[g] = exp(dB[g] - newM);
+      s[g] = s[g] * f[g] + pA[g] + pB[g];
+      m[g] = newM;
+    }
+    const device bf16* vt = vh + t * D.vSeqStride;
+    const device bf16* vt2 = vh + t2 * D.vSeqStride;
+    if (vec4) {
+      for (uint i = 0; i < per; i += 4) {
+        const bfloat4 va = *((const device bfloat4*)(vt + i));
+        const bfloat4 vb = *((const device bfloat4*)(vt2 + i));
+        o[0][i] = o[0][i] * f[0] + pA[0] * float(va.x) + pB[0] * float(vb.x);
+        o[0][i + 1] = o[0][i + 1] * f[0] + pA[0] * float(va.y) + pB[0] * float(vb.y);
+        o[0][i + 2] = o[0][i + 2] * f[0] + pA[0] * float(va.z) + pB[0] * float(vb.z);
+        o[0][i + 3] = o[0][i + 3] * f[0] + pA[0] * float(va.w) + pB[0] * float(vb.w);
+        o[1][i] = o[1][i] * f[1] + pA[1] * float(va.x) + pB[1] * float(vb.x);
+        o[1][i + 1] = o[1][i + 1] * f[1] + pA[1] * float(va.y) + pB[1] * float(vb.y);
+        o[1][i + 2] = o[1][i + 2] * f[1] + pA[1] * float(va.z) + pB[1] * float(vb.z);
+        o[1][i + 3] = o[1][i + 3] * f[1] + pA[1] * float(va.w) + pB[1] * float(vb.w);
+      }
+    } else {
+      for (uint i = 0; i < per; i++) {
+        const float ax = float(vt[i]);
+        const float bx = float(vt2[i]);
+        o[0][i] = o[0][i] * f[0] + pA[0] * ax + pB[0] * bx;
+        o[1][i] = o[1][i] * f[1] + pA[1] * ax + pB[1] * bx;
+      }
+    }
+  }
+  // odd tail row (window rows not a multiple of 2 simdgroup strides)
+  for (; t < rowEnd; t += kPagedSimdGroups) {
     const device bf16* kt = kh + t * D.kSeqStride;
     float partial0 = 0.0f;
     float partial1 = 0.0f;
