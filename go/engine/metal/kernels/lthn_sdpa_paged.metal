@@ -529,40 +529,37 @@ struct PagedSDPAP2Dims {
     const device float* acc  [[buffer(2)]],
     device bf16*        out  [[buffer(3)]],  // [nHeads * headDim]
     const constant PagedSDPAP2Dims& D [[buffer(4)]],
-    uint h    [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_simdgroup]]) {
-  const uint per = D.headDim / 32;
-  if (per == 0 || per > kPagedMaxPerLane) return;
+    uint h   [[threadgroup_position_in_grid]],
+    uint tid [[thread_position_in_threadgroup]]) {
+  // parallel over head dims (one thread per dim, 256-thread groups): the
+  // 32-lane form folded cellCount cells over 8 dims per lane serially, and at
+  // deep-context cell counts the whole merge sat in 512 threads machine-wide
+  // (#356 — the same shape the P1 merge fix addressed). The per-thread M/S
+  // scalar folds are redundant across dims, in exchange for no reduction.
   const uint base = h * D.cellCount;
-
   float M = -3.0e38f;
   for (uint p = 0; p < D.cellCount; p++) {
     if (sums[base + p] > 0.0f) {
       M = max(M, maxs[base + p]);
     }
   }
-
   float denom = 0.0f;
-  float o[kPagedMaxPerLane];
-  for (uint i = 0; i < per; i++) {
-    o[i] = 0.0f;
-  }
   for (uint p = 0; p < D.cellCount; p++) {
     const float s = sums[base + p];
-    if (s <= 0.0f) {
-      continue;
-    }
-    const float w = exp(maxs[base + p] - M);
-    denom += s * w;
-    const device float* a = acc + (base + p) * D.headDim + lane * per;
-    for (uint i = 0; i < per; i++) {
-      o[i] += a[i] * w;
+    if (s > 0.0f) {
+      denom += s * exp(maxs[base + p] - M);
     }
   }
-
-  device bf16* oh = out + h * D.headDim + lane * per;
-  for (uint i = 0; i < per; i++) {
-    oh[i] = denom > 0.0f ? bf16(o[i] / denom) : bf16(0.0f);
+  for (uint d = tid; d < D.headDim; d += 256) {
+    float o = 0.0f;
+    for (uint p = 0; p < D.cellCount; p++) {
+      const float s = sums[base + p];
+      if (s <= 0.0f) {
+        continue;
+      }
+      o += acc[(base + p) * D.headDim + d] * exp(maxs[base + p] - M);
+    }
+    out[h * D.headDim + d] = denom > 0.0f ? bf16(o / denom) : bf16(0.0f);
   }
 }
 

@@ -535,7 +535,7 @@ func (p *sdpaPagedDecodePlan) emitP2(enc metal.MTLComputeCommandEncoder) {
 	setBytes(enc, unsafe.Pointer(&p2), uint(unsafe.Sizeof(p2)), 4)
 	dispatchThreadgroups(enc,
 		metal.MTLSize{Width: uint(p.nHeads), Height: 1, Depth: 1},
-		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+		metal.MTLSize{Width: 256, Height: 1, Depth: 1}, // one thread per head dim
 	)
 }
 
