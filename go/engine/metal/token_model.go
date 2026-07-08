@@ -5,6 +5,8 @@
 package native
 
 import (
+	"os"
+
 	core "dappco.re/go"
 	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/model"
@@ -52,6 +54,9 @@ type NativeTokenModel struct {
 	// serve many request goroutines. Set by LoadGemma4TokenModelDir.
 	headEnc *headEncoder
 	vision  *model.LoadedVision
+	// unifiedVision is the encoder-free vision embedder (gemma4_unified, 12B):
+	// packs carry either the SigLIP tower (vision) or this — never both.
+	unifiedVision *model.LoadedUnifiedVision
 	// visionFeatureCfg is the image_processor preprocessing config (patch size,
 	// soft-token budget, pooling, rescale) read from processor_config.json at load
 	// time — ProjectImage needs it to patchify before the tower. nil for a
@@ -119,8 +124,23 @@ func (m *NativeTokenModel) Tokenizer() *tokenizer.Tokenizer {
 }
 
 func (m *NativeTokenModel) AcceptsImageInput() bool {
-	return m != nil && m.vision != nil
+	if m == nil {
+		return false
+	}
+	// The unified (encoder-free) lane is verified end-to-end at small spans but
+	// a full 280-token image span still runs CAUSAL attention — the arch is
+	// trained bidirectional within image spans, and large images misread until
+	// the span mask lands. Opt-in only until then: wrong answers are worse
+	// than the clean image-input rejection.
+	if m.unifiedVision != nil {
+		return unifiedVisionEnabled
+	}
+	return m.vision != nil
 }
+
+// unifiedVisionEnabled opts the encoder-free vision lane in (LTHN_UNIFIED_VISION=1)
+// while the bidirectional image-span mask is pending.
+var unifiedVisionEnabled = os.Getenv("LTHN_UNIFIED_VISION") == "1"
 
 // ProjectImage preprocesses one raw PNG/JPEG image (aspect-preserving resize onto
 // the patch budget, rescale, patchify) and runs it through the vision tower,
@@ -140,6 +160,17 @@ func (m *NativeTokenModel) ProjectImage(image []byte) ([]byte, int, error) {
 	if cfg == nil {
 		cfg = &VisionImageFeatureConfig{} // VisionImagePatches normalises to HF defaults
 	}
+	if m.unifiedVision != nil {
+		patches, positions, n, err := UnifiedVisionImagePatches(image, cfg)
+		if err != nil {
+			return nil, 0, core.E("native.vision", "preprocess image (unified)", err)
+		}
+		features, err := UnifiedVisionProject(m.unifiedVision, patches, positions, n)
+		if err != nil {
+			return nil, 0, core.E("native.vision", "project (unified)", err)
+		}
+		return features, n, nil
+	}
 	patches, softTokens, err := VisionImagePatches(image, cfg)
 	if err != nil {
 		return nil, 0, core.E("native.vision", "preprocess image", err)
@@ -155,14 +186,26 @@ func (m *NativeTokenModel) ProjectImage(image []byte) ([]byte, int, error) {
 }
 
 func (m *NativeTokenModel) ImagePlaceholderTokenID() int32 {
-	if m == nil || m.vision == nil {
+	switch {
+	case m == nil:
 		return 0
+	case m.unifiedVision != nil:
+		return m.unifiedVision.Cfg.ImageTokenID
+	case m.vision != nil:
+		return m.vision.Cfg.ImageTokenID
 	}
-	return m.vision.Cfg.ImageTokenID
+	return 0
 }
 
 func (m *NativeTokenModel) ImagePlaceholderBlock(softTokens int) string {
-	if m == nil || m.vision == nil || softTokens <= 0 {
+	if m == nil || softTokens <= 0 {
+		return ""
+	}
+	if m.unifiedVision != nil {
+		cfg := m.unifiedVision.Cfg
+		return nativeVisionPlaceholderBlock(cfg.ImageBeginToken, cfg.ImageToken, cfg.ImageEndToken, softTokens)
+	}
+	if m.vision == nil {
 		return ""
 	}
 	cfg := m.vision.Cfg

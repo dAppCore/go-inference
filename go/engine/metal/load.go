@@ -120,7 +120,8 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 		}
 		tm.headEnc = he
 		tm.vision = lm.Vision
-		if lm.Vision != nil {
+		tm.unifiedVision = lm.UnifiedVision
+		if lm.Vision != nil || lm.UnifiedVision != nil {
 			// Best-effort: absent/malformed processor config leaves the cfg nil and
 			// ProjectImage falls back to HF defaults, so it never fails the load.
 			tm.visionFeatureCfg, _ = LoadVisionImageFeatureConfig(dir)
@@ -151,7 +152,8 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	}
 	tm.headEnc = he
 	tm.vision = lm.Vision
-	if lm.Vision != nil {
+	tm.unifiedVision = lm.UnifiedVision
+	if lm.Vision != nil || lm.UnifiedVision != nil {
 		// Best-effort: absent/malformed processor config leaves the cfg nil and
 		// ProjectImage falls back to HF defaults, so it never fails the load.
 		tm.visionFeatureCfg, _ = LoadVisionImageFeatureConfig(dir)
