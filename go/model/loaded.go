@@ -118,6 +118,10 @@ type LoadedUnifiedVisionConfig struct {
 	ImageBeginToken string
 	ImageToken      string
 	ImageEndToken   string
+	// BidirectionalImages: the text config declares
+	// use_bidirectional_attention == "vision" — image soft-token spans attend
+	// bidirectionally in prefill (causal evaluation misreads large images).
+	BidirectionalImages bool
 }
 
 // LoadedUnifiedVision is the encoder-free vision payload (gemma4_unified):

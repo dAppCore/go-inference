@@ -98,8 +98,20 @@ const largeVariantAttentionHeads = 16
 // makes model.Generate run the native path O(1)/token (stepToken over a
 // persistent cache) instead of re-decoding the whole sequence each token.
 func (m *NativeTokenModel) OpenSession() (model.DecodeStepper, error) {
-	return m.openSession(m.shards, m.headEnc)
+	sess, err := m.openSession(m.shards, m.headEnc)
+	if err == nil && m.unifiedVision != nil && m.unifiedVision.Cfg.BidirectionalImages && !bidirSpansDisabled {
+		if as, ok := sess.(*ArchSession); ok {
+			// image soft-token spans attend bidirectionally in prefill —
+			// the session detects the placeholder runs itself.
+			as.bidirSpanToken = m.unifiedVision.Cfg.ImageTokenID
+		}
+	}
+	return sess, err
 }
+
+// bidirSpansDisabled forces causal image-span prefill (LTHN_VISION_BIDIR=0) —
+// the A/B lever for the bidirectional span mask.
+var bidirSpansDisabled = os.Getenv("LTHN_VISION_BIDIR") == "0"
 
 // AttachTokenizer binds the text tokenizer the string-prompt KV-capture
 // contracts need (inference.KVSnapshotter / KVChunkSnapshotter). It returns the
@@ -127,20 +139,16 @@ func (m *NativeTokenModel) AcceptsImageInput() bool {
 	if m == nil {
 		return false
 	}
-	// The unified (encoder-free) lane is verified end-to-end at small spans but
-	// a full 280-token image span still runs CAUSAL attention — the arch is
-	// trained bidirectional within image spans, and large images misread until
-	// the span mask lands. Opt-in only until then: wrong answers are worse
-	// than the clean image-input rejection.
 	if m.unifiedVision != nil {
 		return unifiedVisionEnabled
 	}
 	return m.vision != nil
 }
 
-// unifiedVisionEnabled opts the encoder-free vision lane in (LTHN_UNIFIED_VISION=1)
-// while the bidirectional image-span mask is pending.
-var unifiedVisionEnabled = os.Getenv("LTHN_UNIFIED_VISION") == "1"
+// unifiedVisionEnabled serves the encoder-free vision lane (receipted with the
+// bidirectional span mask: shape + colour + spatial answers correct on the
+// 12B); LTHN_UNIFIED_VISION=0 restores the image-input rejection.
+var unifiedVisionEnabled = os.Getenv("LTHN_UNIFIED_VISION") != "0"
 
 // ProjectImage preprocesses one raw PNG/JPEG image (aspect-preserving resize onto
 // the patch budget, rescale, patchify) and runs it through the vision tower,

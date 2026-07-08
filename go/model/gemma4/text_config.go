@@ -26,6 +26,7 @@ type Gemma4TextConfig struct {
 	NumGlobalKeyValueHeads    *int32                `json:"num_global_key_value_heads"`
 	GlobalHeadDim             int32                 `json:"global_head_dim"`
 	GlobalPartialRotaryFactor float32               `json:"global_partial_rotary_factor"`
+	UseBidirectionalAttention string                `json:"use_bidirectional_attention"` // "vision" ⇒ bidirectional within image spans (gemma4_unified)
 	VocabSizePerLayerInput    int32                 `json:"vocab_size_per_layer_input"`
 	SlidingWindow             int32                 `json:"sliding_window"`
 	SlidingWindowPattern      int32                 `json:"sliding_window_pattern"`

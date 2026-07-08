@@ -785,7 +785,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	type ringLanding struct{ li, kvDim, slideW int }
 	var pendingLandings []ringLanding
 	var stagedDeferred []bool
-	if foldDFFMax > 0 && K >= steelGEMMMinRows && !stagedRingDisabledForTest {
+	if foldDFFMax > 0 && K >= steelGEMMMinRows && !stagedRingDisabledForTest && s.rowAttnCaps == nil {
 		stagedDeferred = make([]bool, len(s.specs))
 	}
 	cb := commandBufferFast(queue)
@@ -922,7 +922,8 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			// layer (~173ms per 512-row chunk at basePos 512). Token-identity tier past the knee
 			// (the per-row oracle would have routed 2-pass there), same tier as the fold's qmm.
 			useMultiQ := !sdpaMultiQDisabledForTest && (slideW == 0 || basePos+K <= slideW) &&
-				(basePos+K < sdpa2PassMinKV || K >= steelGEMMMinRows) && gpuHasSDPAMultiQ(lhd)
+				(basePos+K < sdpa2PassMinKV || K >= steelGEMMMinRows) && gpuHasSDPAMultiQ(lhd) &&
+				s.rowAttnCaps == nil // per-row caps: the multiQ/GEMM kernels compute causal caps in-kernel
 			// Deep-prompt global layers route the SDPA to the steel GEMM composition
 			// (sdpa_prompt_gemm.go): K/V read once per HEAD instead of once per query row,
 			// so the traffic no longer scales with the row count and the multiQ kernel's
@@ -969,6 +970,14 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				}
 			}
 			enc = trace.checkpoint(enc, "attn.sdpa")
+			// Bidirectional row caps demand the batched-rope fold: only there
+			// does the WHOLE chunk's K/V land before any SDPA reads. Anything
+			// else would evaluate the span causally — hard-error, never fall
+			// through silently.
+			if s.rowAttnCaps != nil && ownsCache && (!foldAttn || !batchedRope || staged) {
+				endEncodingFast(enc)
+				return nil, false, core.NewError("native.stepTokensBatchedDense: bidirectional row caps need the batched-rope attention fold")
+			}
 			for i := 0; !deferredRing && i < K; i++ { // skipped whole on the deferred-ring lane
 				pos := basePos + i
 				slot, n := pos, pos+1
@@ -976,6 +985,17 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					slot = pos % slideW
 					if n > slideW {
 						n = slideW
+					}
+				}
+				if caps := s.rowAttnCaps; caps != nil && i < len(caps) {
+					if c := int(caps[i]); c > n {
+						if slideW > 0 && c > slideW {
+							c = slideW
+						}
+						n = c
+					}
+					if unifiedVisionDiag && li == 0 && (i == 5 || i == 128 || i == 260) {
+						nativeTraceLog(core.Sprintf("vision-diag cap: li=0 row=%d pos=%d n=%d cap=%d slideW=%d\n", i, pos, n, caps[i], slideW))
 					}
 				}
 				qRow := uint(i * qDim * bf16Size)
@@ -1064,6 +1084,11 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		// MLP half — folded across the K rows for bf16 layers, per-row otherwise. Metal's buffer
 		// hazard tracking orders the cross-row cache write→read, so row i+1 attends row i's freshly
 		// written K/V — exactly the sequential per-token causal structure.
+		if s.rowAttnCaps != nil && !foldAttn && ownsCache {
+			// per-row K/V landings can never satisfy a forward-looking cap
+			endEncodingFast(enc)
+			return nil, false, core.NewError("native.stepTokensBatchedDense: bidirectional row caps need the batched-rope attention fold")
+		}
 		for i := 0; !foldAttn && i < K; i++ { // skipped whole when the attention fold ran above
 			hTarget, hOff := s.hBuf, uint(0)
 			if foldMLP {
