@@ -33,6 +33,30 @@ const nativeAssistantDefaultDraftTokens = 4
 // a near-tie, even though the same drafter goes on to accept 40-80% of the rest.
 const nativeAssistantLowAcceptPatience = 4
 
+// Low-accept re-engagement (#299): a patience bail no longer retires the drafter
+// for the whole request. The loop runs PLAIN for a bounded cooldown (timed — the
+// live plain rate), then re-probes drafting for a few cycles and keeps it only
+// when the probe's measured emitted-token rate is at least the plain stretch's.
+// The gate is NET RATE, never acceptance %: a probe cycle still emits its
+// accepted+1 tokens, so a failed probe costs only the rate delta over those
+// cycles. Failed probes double the cooldown (capped) — a net-negative pair
+// converges to a ~1% probe tax — and a passing probe resets it. A fresh
+// patience bail restarts at the minimum (a new section going weak is a new
+// episode, not a failed probe). LTHN_MTP_REENGAGE=0 restores the permanent bail.
+const (
+	nativeAssistantReengageCooldownMin = 32
+	nativeAssistantReengageCooldownMax = 256
+	nativeAssistantReengageProbeBlocks = 3
+)
+
+// nativeAssistantReengageMargin is the engage-side hysteresis: a probe must
+// beat the plain rate by this factor to re-engage, while an engaged stretch
+// only exits when it falls below the plain rate itself. Without the gap, a
+// fast target sits exactly on the threshold (an e2b probe at 2-3 accepted
+// tokens reads ~176 tok/s against a 174 plain) and the loop flaps — engaging
+// on the burst, decaying, exiting — losing the margin each round trip.
+const nativeAssistantReengageMargin = 1.08
+
 var nativeAssistantByteScratchPools sync.Map
 
 // AssistantModel is the native, CGO-free assistant-only checkpoint
@@ -1634,6 +1658,14 @@ func (pair *AssistantPair) GenerateFromSession(target *ArchSession, promptIDs []
 }
 
 // GenerateFromSessionEach is GenerateFromSession with per-token streaming.
+//
+// Scheduling (#299): drafting is adaptive, gated on measured token rates. A
+// low-accept patience bail no longer retires the drafter for the request — it
+// runs a bounded plain stretch (whose rate is measured live), then re-probes
+// drafting and stays engaged only while the delivered rate holds at or above
+// plain (see the re-engagement constants above nativeAssistantLowAcceptPatience
+// for the full policy). LTHN_MTP_REENGAGE=0 restores the permanent bail — with
+// it set, the token stream is byte-identical to the pre-#299 loop.
 func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptIDs []int32, maxNew, eosID, draftTokens int, suppress []int32, yield AssistantTokenSink) (AssistantGenerateResult, error) {
 	if pair == nil || pair.Assistant == nil {
 		return AssistantGenerateResult{}, core.NewError("native.assistant generation requires a validated pair")
@@ -1660,9 +1692,103 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 	carryLead := int32(-1)
 	stopped := false
 	lowAcceptStreak := 0
+	reengageCooldown := 0
+	plainRate := 0.0
+	probeLeft := 0
+	probeTok0 := 0
+	var probeT0 time.Time
+	// Rolling engaged-stretch rate — the exit gate once plainRate is known. The
+	// acceptance streak is a coarse proxy: a stretch alternating 2-of-5 and
+	// 3-of-5 blocks never trips it yet loses to plain every cycle. Each engaged
+	// cycle's (tokens, seconds) feeds a 3-cycle ring; once filled, a window
+	// rate below the measured plain rate exits the stretch immediately.
+	var engCycleTok [3]int
+	var engCycleSec [3]float64
+	engCycles := 0
+	engagedCycleBelowPlain := func(cycleTok int, cycleSec float64) bool {
+		if plainRate <= 0 {
+			return false
+		}
+		engCycleTok[engCycles%len(engCycleTok)] = cycleTok
+		engCycleSec[engCycles%len(engCycleSec)] = cycleSec
+		engCycles++
+		if engCycles < len(engCycleTok) {
+			return false
+		}
+		tok, sec := 0, 0.0
+		for i := range engCycleTok {
+			tok += engCycleTok[i]
+			sec += engCycleSec[i]
+		}
+		return sec > 0 && float64(tok)/sec < plainRate
+	}
+	// runPlainStretch runs the bounded cooldown stretch (committing a pending
+	// lead first), measures the live plain rate, and re-arms drafting into a
+	// probe window. done=true ends the outer loop (stop / maxNew / error).
+	runPlainStretch := func(lead int32) (bool, error) {
+		t0 := time.Now()
+		last, emitted, plainStopped, err := nativeAssistantPlainRunFromTargetCache(target, &result, lead, reengageCooldown, maxNew, eosID, suppress, yield)
+		carryLead = -1
+		if err != nil || plainStopped || len(result.Tokens) >= maxNew {
+			return true, err
+		}
+		if emitted > 0 {
+			if wall := time.Since(t0).Seconds(); wall > 0 {
+				plainRate = float64(emitted) / wall
+			}
+		}
+		lastToken = last
+		lowAcceptStreak = 0
+		probeLeft = nativeAssistantReengageProbeBlocks
+		probeTok0 = len(result.Tokens)
+		probeT0 = time.Now()
+		return false, nil
+	}
+	// probeCycleDone closes out one drafted cycle of an open probe window. A
+	// cycle whose drafts were FULLY rejected aborts the probe on the spot — it
+	// emitted one token for a whole draft+verify round, unambiguously below any
+	// plain rate, no clock needed. A window already at or above the plain rate
+	// engages on the spot — riding out the remaining cycles only risks a
+	// section turn erasing a good verdict. Only a mediocre window runs the full
+	// probe; its last cycle settles it with the same rate gate, and a failed
+	// probe bails again with a doubled cooldown.
+	probeCycleDone := func(cycleAccepted int) (bool, error) {
+		if probeLeft <= 0 {
+			return false, nil
+		}
+		probeLeft--
+		probeRate := 0.0
+		if wall := time.Since(probeT0).Seconds(); wall > 0 {
+			probeRate = float64(len(result.Tokens)-probeTok0) / wall
+		}
+		// The first probe cycle never engages on its own: right after a plain
+		// stretch the drafter's proposals are at their most locally obvious, so
+		// a single-cycle rate reads systematically high (the burst bias). It
+		// can still abort (fully rejected is unambiguous in any cycle).
+		engageBar := plainRate * nativeAssistantReengageMargin
+		if cycleAccepted == 0 || (probeRate >= engageBar && probeLeft < nativeAssistantReengageProbeBlocks-1) {
+			probeLeft = 0
+		} else if probeLeft > 0 {
+			return false, nil
+		}
+		engaged := cycleAccepted > 0 && probeRate >= engageBar
+		if mtpDiagForTest {
+			nativeTraceLog(core.Sprintf("mtp-diag reengage probe: rate=%.1f plain=%.1f cooldown=%d engaged=%v\n",
+				probeRate, plainRate, reengageCooldown, engaged))
+		}
+		if engaged {
+			reengageCooldown = nativeAssistantReengageCooldownMin
+			engCycles = 0
+			return false, nil
+		}
+		reengageCooldown = min(reengageCooldown*2, nativeAssistantReengageCooldownMax)
+		return runPlainStretch(carryLead)
+	}
 	for len(result.Tokens) < maxNew && !stopped {
 		remaining := maxNew - len(result.Tokens)
 		blockSize := min(draftTokens, remaining)
+		cycleT0 := time.Now()
+		wasProbing := probeLeft > 0
 		diagRound := mtpDiagForTest && result.TargetVerifyCalls < 3
 		var diagRoundT0 time.Time
 		if diagRound {
@@ -1733,6 +1859,23 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 		if verify.AllAccepted {
 			lowAcceptStreak = 0
 			carryLead = -1
+			if wasProbing {
+				if done, perr := probeCycleDone(newDrafts); perr != nil {
+					return result, perr
+				} else if done {
+					break
+				}
+			} else if engagedCycleBelowPlain(newDrafts, time.Since(cycleT0).Seconds()) {
+				if mtpDiagForTest {
+					nativeTraceLog(core.Sprintf("mtp-diag reengage rate-exit: emitted=%d\n", len(result.Tokens)))
+				}
+				reengageCooldown = min(max(reengageCooldown, nativeAssistantReengageCooldownMin)*2, nativeAssistantReengageCooldownMax)
+				if done, perr := runPlainStretch(carryLead); perr != nil {
+					return result, perr
+				} else if done {
+					break
+				}
+			}
 			continue
 		}
 
@@ -1750,12 +1893,44 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 		// Give up on drafting only after the drafter has stayed weak for several
 		// consecutive blocks — one near-tie block is transient, not a mismatched pair.
 		if !stopped && len(result.Tokens) < maxNew && lowAcceptStreak >= nativeAssistantLowAcceptPatience {
-			if err := nativeAssistantFinishLowAcceptFromTargetCache(target, &result, replacement, maxNew, eosID, suppress, yield); err != nil {
-				return result, err
+			if mtpReengageDisabled {
+				if err := nativeAssistantFinishLowAcceptFromTargetCache(target, &result, replacement, maxNew, eosID, suppress, yield); err != nil {
+					return result, err
+				}
+				break
 			}
-			break
+			if mtpDiagForTest {
+				nativeTraceLog(core.Sprintf("mtp-diag reengage bail: streak=%d emitted=%d\n", lowAcceptStreak, len(result.Tokens)))
+			}
+			reengageCooldown = nativeAssistantReengageCooldownMin
+			if done, perr := runPlainStretch(replacement); perr != nil {
+				return result, perr
+			} else if done {
+				break
+			}
+			continue
 		}
 		carryLead = replacement
+		if stopped {
+			break
+		}
+		if wasProbing {
+			if done, perr := probeCycleDone(newDrafts); perr != nil {
+				return result, perr
+			} else if done {
+				break
+			}
+		} else if engagedCycleBelowPlain(newDrafts+1, time.Since(cycleT0).Seconds()) {
+			if mtpDiagForTest {
+				nativeTraceLog(core.Sprintf("mtp-diag reengage rate-exit: emitted=%d\n", len(result.Tokens)))
+			}
+			reengageCooldown = min(max(reengageCooldown, nativeAssistantReengageCooldownMin)*2, nativeAssistantReengageCooldownMax)
+			if done, perr := runPlainStretch(replacement); perr != nil {
+				return result, perr
+			} else if done {
+				break
+			}
+		}
 	}
 	if carryLead >= 0 && !stopped && yield == nil {
 		if _, err := target.stepID(carryLead); err != nil {
@@ -2009,6 +2184,42 @@ func nativeAssistantFinishLowAcceptFromTargetCache(target *ArchSession, result *
 	result.TargetCalls++
 	result.TargetTokens += len(tail)
 	return nil
+}
+
+// nativeAssistantPlainRunFromTargetCache runs up to budget plain-decode tokens
+// from the target cache — the re-engagement cooldown stretch. lead >= 0 is a
+// pending carried replacement: the caller already emitted it, so it is only
+// KV-committed here. Returns the last emitted token (lead when nothing new was
+// emitted), how many tokens the stretch emitted, and whether generation stopped
+// (EOS / yield). The run ends in the prepareAssistantPrompt shape — last token
+// cached, boundary hidden retained — so drafting resumes with no state surgery.
+func nativeAssistantPlainRunFromTargetCache(target *ArchSession, result *AssistantGenerateResult, lead int32, budget, maxNew, eosID int, suppress []int32, yield AssistantTokenSink) (int32, int, bool, error) {
+	if lead >= 0 {
+		if err := target.commitAssistantReplacement(lead); err != nil {
+			return lead, 0, false, err
+		}
+		result.TargetCalls++
+	}
+	remaining := maxNew - len(result.Tokens)
+	if remaining <= 0 {
+		return lead, 0, false, nil
+	}
+	last, emitted, stopped := lead, 0, false
+	tail, err := target.GenerateFromCacheEachWithSuppression(min(budget, remaining), eosID, suppress, func(id int32) bool {
+		if nativeAssistantEmitToken(result, id, eosID, yield) {
+			stopped = true
+			return false
+		}
+		last = id
+		emitted++
+		return true
+	})
+	if err != nil {
+		return last, emitted, stopped, err
+	}
+	result.TargetCalls++
+	result.TargetTokens += len(tail)
+	return last, emitted, stopped, nil
 }
 
 func nativeAssistantFinishLowAcceptSampledFromTargetCache(target *ArchSession, result *AssistantGenerateResult, replacement int32, maxNew int, stopTokens []int32, sampler *model.Sampler, params model.SampleParams, history []int32, yield AssistantTokenSink) ([]int32, error) {
