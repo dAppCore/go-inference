@@ -55,7 +55,7 @@ type ServeConfig struct {
 
 	// Conversation continuity.
 	StateConversations bool   // wake each chat from its slept state, no prompt replay
-	StateStorePath     string // state store file (default ~/Lethean/lem/state/conversations.kv)
+	StateStorePath     string // durable per-project store file; empty = ephemeral default, wiped each serve run
 
 	// HTTP + admin.
 	ReadTimeout     time.Duration
@@ -117,9 +117,12 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 	}
 
 	// Conversation continuity — on by default. Any failure here degrades to
-	// stateless serving with an honest notice; it never blocks the serve.
+	// stateless serving with an honest notice; it never blocks the serve. The
+	// cleanup closes the store at shutdown and clears the DEFAULTED store's
+	// file (per-run scratch); an explicit -state-store survives as the durable
+	// per-project state.
 	if cfg.StateConversations {
-		wireContinuity(ctx, cfg, hotSwap, log)
+		defer wireContinuity(ctx, cfg, hotSwap, log)()
 	}
 
 	if armDrafter {
@@ -188,23 +191,19 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 // wireContinuity opens the conversation state store and registers the per-load
 // continuity hook. When no ContinuityEnabler is injected (the registered engine
 // exposes no continuity attach), or the store can't open, serve degrades to
-// stateless with an honest notice rather than failing.
-func wireContinuity(ctx context.Context, cfg ServeConfig, hotSwap *hotSwapResolver, log io.Writer) {
+// stateless with an honest notice rather than failing. The returned cleanup
+// (never nil) runs at serve shutdown: it closes the store, and when the store
+// was the DEFAULTED one it removes the file — the default store is a per-run
+// scratch cache, not an archive.
+func wireContinuity(ctx context.Context, cfg ServeConfig, hotSwap *hotSwapResolver, log io.Writer) func() {
 	if cfg.EnableContinuity == nil {
 		printServe(log, "serve: conversation continuity unavailable on this engine — serving stateless")
-		return
+		return func() {}
 	}
-	storePath := core.Trim(cfg.StateStorePath)
-	if storePath == "" {
-		if homeR := core.UserHomeDir(); homeR.OK {
-			if home, ok := homeR.Value.(string); ok {
-				storePath = core.PathJoin(home, "Lethean", "lem", "state", "conversations.kv")
-			}
-		}
-	}
+	storePath, ephemeral := resolveStateStorePath(cfg.StateStorePath)
 	var store *filestore.Store
 	if storePath != "" {
-		if opened, err := openOrCreateStateStore(ctx, storePath); err == nil {
+		if opened, err := openConversationStore(ctx, storePath, ephemeral); err == nil {
 			store = opened
 		} else {
 			printServe(log, "serve: conversation state store %s: %v", storePath, err)
@@ -212,7 +211,7 @@ func wireContinuity(ctx context.Context, cfg ServeConfig, hotSwap *hotSwapResolv
 	}
 	if store == nil {
 		printServe(log, "serve: conversation continuity unavailable — serving stateless")
-		return
+		return func() {}
 	}
 	enable := cfg.EnableContinuity
 	hotSwap.setOnLoad(func(model inference.TextModel) {
@@ -220,20 +219,52 @@ func wireContinuity(ctx context.Context, cfg ServeConfig, hotSwap *hotSwapResolv
 			printServe(log, "serve: conversation continuity unavailable (stateless serving continues): %v", err)
 			return
 		}
+		if ephemeral {
+			printServe(log, "serve: conversation continuity ON — chats wake from %s (ephemeral: wiped each serve run; set -state-store for durable per-project state), no prompt replay", storePath)
+			return
+		}
 		printServe(log, "serve: conversation continuity ON — chats wake from %s, no prompt replay", storePath)
 	})
+	return func() {
+		_ = store.Close()
+		if ephemeral {
+			core.Remove(storePath)
+		}
+	}
 }
 
-// openOrCreateStateStore opens an existing conversation state store or creates a
-// fresh one (with its parent directory) at path. Ported from lthn-mlx's serve
-// state wiring.
-func openOrCreateStateStore(ctx context.Context, path string) (*filestore.Store, error) {
+// resolveStateStorePath maps the -state-store flag to the store path and its
+// lifetime: an EMPTY flag means serve made the store itself — the defaulted
+// conversations.kv is ephemeral (wiped fresh at launch, removed at shutdown),
+// so per-turn tail-block rewrites never accumulate across runs. Any explicit
+// path — even the default's literal location — is the durable per-project
+// store and is never wiped.
+func resolveStateStorePath(flagPath string) (path string, ephemeral bool) {
+	if p := core.Trim(flagPath); p != "" {
+		return p, false
+	}
+	if homeR := core.UserHomeDir(); homeR.OK {
+		if home, ok := homeR.Value.(string); ok {
+			return core.PathJoin(home, "Lethean", "lem", "state", "conversations.kv"), true
+		}
+	}
+	return "", false
+}
+
+// openConversationStore opens the conversation state store at path. An
+// ephemeral (defaulted) store is created FRESH every time — filestore.Create's
+// O_TRUNC wipes whatever a previous run (or crash) left behind. A durable
+// (explicit) store opens in place, created on first use.
+func openConversationStore(ctx context.Context, path string, ephemeral bool) (*filestore.Store, error) {
+	if ephemeral {
+		return filestore.Create(ctx, path)
+	}
 	if core.Stat(path).OK {
 		return filestore.Open(ctx, path)
 	}
 	if dir := core.PathDir(path); dir != "" {
 		if r := core.MkdirAll(dir, 0o755); !r.OK {
-			return nil, core.E("serving.openOrCreateStateStore", "mkdir store dir", r.Value.(error))
+			return nil, core.E("serving.openConversationStore", "mkdir store dir", r.Value.(error))
 		}
 	}
 	return filestore.Create(ctx, path)
