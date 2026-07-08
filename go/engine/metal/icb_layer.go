@@ -76,7 +76,7 @@ func DecodeLayerICBInto(
 	// ICB-capable pipelines. gemv tiles depend on (inDim, outDim) so there are
 	// four distinct gemv PSOs: Q (dModel→qDim), O (qDim→dModel), gate/up
 	// (dModel→dFF, shared) and down (dFF→dModel).
-	rmsPSO, err := pipelineForICB("rmsbfloat16")
+	rmsPSO, err := pipelineForICB(rmsKernelBF16(dModel))
 	if err != nil {
 		return nil, err
 	}
@@ -244,13 +244,13 @@ func DecodeLayerICBInto(
 		}
 
 		icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
-		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch)
+		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch | metal.MTLIndirectCommandTypeConcurrentDispatchThreads)
 		icbDesc.SetInheritBuffers(false)
 		icbDesc.SetInheritPipelineState(false)
 		icbDesc.SetMaxKernelBufferBindCount(16)
 		icb := device.NewIndirectCommandBufferWithDescriptorMaxCommandCountOptions(icbDesc, uint(nCmds), metal.MTLResourceStorageModeShared)
 
-		rmsTG := uint(rmsSimdSize * ((((dModel + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
+		rmsTG := rmsThreadgroup(dModel, rmsPSO)
 		log2base := float32(math.Log2(float64(base)))
 
 		// helper closures so each op's binding matches its encode-form exactly.
@@ -445,7 +445,7 @@ func DecodeTokenICBInto(
 		out = make([]byte, outLen)
 	}
 
-	rmsPSO, err := pipelineForICB("rmsbfloat16")
+	rmsPSO, err := pipelineForICB(rmsKernelBF16(dModel))
 	if err != nil {
 		return nil, err
 	}
@@ -610,13 +610,13 @@ func DecodeTokenICBInto(
 
 		total := opsPerLayer * nLayers
 		icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
-		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch)
+		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch | metal.MTLIndirectCommandTypeConcurrentDispatchThreads)
 		icbDesc.SetInheritBuffers(false)
 		icbDesc.SetInheritPipelineState(false)
 		icbDesc.SetMaxKernelBufferBindCount(16)
 		icb := device.NewIndirectCommandBufferWithDescriptorMaxCommandCountOptions(icbDesc, uint(total), metal.MTLResourceStorageModeShared)
 
-		rmsTG := uint(rmsSimdSize * ((((dModel + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
+		rmsTG := rmsThreadgroup(dModel, rmsPSO)
 		log2base := float32(math.Log2(float64(base)))
 		setRMS := func(c metal.MTLIndirectComputeCommand, in, w, o metal.MTLBuffer) {
 			emitRMSNorm(fastICBSink{c}, rmsPSO, in, w, o, 0, dModel, eps, rmsTG)

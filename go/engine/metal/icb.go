@@ -175,7 +175,7 @@ func squareICB(in []float32) ([]float32, error) {
 		sizeBuf := scalarI32(int32(n))
 
 		icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
-		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch)
+		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch | metal.MTLIndirectCommandTypeConcurrentDispatchThreads)
 		icbDesc.SetInheritBuffers(false)
 		icbDesc.SetInheritPipelineState(false)
 		icbDesc.SetMaxKernelBufferBindCount(4)
@@ -218,7 +218,7 @@ func gemvICB(mat, vec []float32, outDim, inDim int) ([]float32, error) {
 		bndB, bshB, vsB, msB := scalarI32(1), scalarI32(1), scalarI64(0), scalarI64(0)
 
 		icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
-		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch)
+		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch | metal.MTLIndirectCommandTypeConcurrentDispatchThreads)
 		icbDesc.SetInheritBuffers(false)
 		icbDesc.SetInheritPipelineState(false)
 		icbDesc.SetMaxKernelBufferBindCount(16)
@@ -266,7 +266,7 @@ func rebindProbeICB(mat, vec []float32, outDim, inDim, nRows int) ([]float32, er
 		bndB, bshB, vsB, msB := scalarI32(1), scalarI32(1), scalarI64(0), scalarI64(0)
 
 		icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
-		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch)
+		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch | metal.MTLIndirectCommandTypeConcurrentDispatchThreads)
 		icbDesc.SetInheritBuffers(false)
 		icbDesc.SetInheritPipelineState(false)
 		icbDesc.SetMaxKernelBufferBindCount(16)
@@ -315,7 +315,7 @@ func qmvICB(x, wq, scales, biases []byte, outDim, inDim, groupSize, bits int) ([
 		kB, nB := scalarI32(int32(inDim)), scalarI32(int32(outDim))
 
 		icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
-		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch)
+		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch | metal.MTLIndirectCommandTypeConcurrentDispatchThreads)
 		icbDesc.SetInheritBuffers(false)
 		icbDesc.SetInheritPipelineState(false)
 		icbDesc.SetMaxKernelBufferBindCount(8)
@@ -680,7 +680,7 @@ func newAttentionBlockICBScratch(dModel, qDim, nHeads, nKVHeads, headDim, kvLen 
 		return nil, err
 	}
 	icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
-	icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch)
+	icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch | metal.MTLIndirectCommandTypeConcurrentDispatchThreads)
 	icbDesc.SetInheritBuffers(false)
 	icbDesc.SetInheritPipelineState(false)
 	icbDesc.SetMaxKernelBufferBindCount(16)
@@ -837,7 +837,7 @@ func (s *attentionBlockICBScratch) record(
 	)
 	s.residentRes = resident
 
-	rmsTG := uint(rmsSimdSize * ((((s.dModel + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
+	rmsTG := rmsThreadgroup(s.dModel, rmsPSO)
 	gemvGrid := func(outDim, bm, sm, tm int) uint { return uint((outDim + bm*sm*tm - 1) / (bm * sm * tm)) }
 
 	c := indirectComputeCommandAtIndexFast(s.icb, 0)
@@ -936,7 +936,9 @@ func AttentionBlockICB(x, normWeight, wQ, wO, kCache, vCache []byte, dModel, nHe
 	}
 	qDim := nHeads * headDim
 
-	rmsPSO, err := pipelineForICB("rmsbfloat16")
+	// axis-selected rms: the single-row kernel over-caps its threadgroup past 4096 dims
+	// and Metal drops the dispatch silently (the #348 class); the looped kernel covers any.
+	rmsPSO, err := pipelineForICB(rmsKernelBF16(dModel))
 	if err != nil {
 		return nil, err
 	}
@@ -1065,7 +1067,11 @@ func NormProjectICB(x, normWeight, projWeight []float32, dIn, dOut int, eps floa
 		replays = 1
 	}
 
-	rmsPSO, err := pipelineForICB("rmsfloat32")
+	rmsName := "rmsfloat32"
+	if dIn > rmsLoopedLimit {
+		rmsName = "rms_loopedfloat32" // single-row over-caps its threadgroup past 4096 dims
+	}
+	rmsPSO, err := pipelineForICB(rmsName)
 	if err != nil {
 		return nil, err
 	}
@@ -1092,7 +1098,7 @@ func NormProjectICB(x, normWeight, projWeight []float32, dIn, dOut int, eps floa
 
 		// record the 2-op sequence once
 		icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
-		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch)
+		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch | metal.MTLIndirectCommandTypeConcurrentDispatchThreads)
 		icbDesc.SetInheritBuffers(false)
 		icbDesc.SetInheritPipelineState(false)
 		icbDesc.SetMaxKernelBufferBindCount(16) // gemv binds up to index 12
@@ -1100,8 +1106,7 @@ func NormProjectICB(x, normWeight, projWeight []float32, dIn, dOut int, eps floa
 
 		// cmd 0: rmsnorm  x -> tmp
 		c0 := indirectComputeCommandAtIndexFast(icb, 0)
-		tg := uint(rmsSimdSize * ((((dIn + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
-		emitRMSNorm(fastICBSink{c0}, rmsPSO, xBuf, nwBuf, tmpBuf, 0, dIn, eps, tg)
+		emitRMSNorm(fastICBSink{c0}, rmsPSO, xBuf, nwBuf, tmpBuf, 0, dIn, eps, rmsThreadgroup(dIn, rmsPSO))
 
 		// cmd 1: gemv  projW @ tmp -> out
 		c1 := indirectComputeCommandAtIndexFast(icb, 1)

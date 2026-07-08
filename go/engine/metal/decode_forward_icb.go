@@ -298,8 +298,10 @@ func decodeForwardICBCore(
 	nLayers, T := len(anwBufs), len(inputs)
 	qDim, kvDim := nHeads*headDim, nKVHeads*headDim
 
-	// shared (non-projection) ICB-capable pipelines
-	rmsPSO, err := pipelineForICB("rmsbfloat16")
+	// shared (non-projection) ICB-capable pipelines. rms selects by axis — the single-row
+	// kernel's threadgroup exceeds Metal's 1024-thread cap past 4096 dims and the dispatch
+	// is dropped silently (the #348 class); the looped kernel grid-strides any width.
+	rmsPSO, err := pipelineForICB(rmsKernelBF16(dModel))
 	if err != nil {
 		return nil, err
 	}
@@ -417,13 +419,13 @@ func decodeForwardICBCore(
 		}
 		total := opsPerLayer * nLayers
 		icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
-		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch)
+		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch | metal.MTLIndirectCommandTypeConcurrentDispatchThreads)
 		icbDesc.SetInheritBuffers(false)
 		icbDesc.SetInheritPipelineState(false)
 		icbDesc.SetMaxKernelBufferBindCount(16)
 		icb := device.NewIndirectCommandBufferWithDescriptorMaxCommandCountOptions(icbDesc, uint(total), metal.MTLResourceStorageModeShared)
 
-		rmsTG := uint(rmsSimdSize * ((((dModel + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
+		rmsTG := rmsThreadgroup(dModel, rmsPSO)
 		setRMS := func(c metal.MTLIndirectComputeCommand, in, w, o metal.MTLBuffer) {
 			emitRMSNorm(fastICBSink{c}, rmsPSO, in, w, o, 0, dModel, eps, rmsTG)
 		}
