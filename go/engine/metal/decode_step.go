@@ -234,7 +234,10 @@ func encResidualMaybeNormAt(enc metal.MTLComputeCommandEncoder, x metal.MTLBuffe
 	// out = res + rms(branch) into one kernel, so the re-encode must use the SAME fused kernel to
 	// stay byte-equal (the ICB-vs-re-encode parity tests) — bound at the row's offsets when it
 	// lives inside a shared K-row buffer. Same gpuHasGeluKernel gate as the recorder.
-	if gpuHasGeluKernel() {
+	// The fused kernel is single-row (one pass, N_READS per thread, ≤1024 threads): past
+	// rmsLoopedLimit (gemma4 31B hidden 5376) it CANNOT cover the axis and would silently
+	// drop the tail dims — the composed path below runs the looped rms + add instead.
+	if gpuHasGeluKernel() && dModel <= rmsLoopedLimit {
 		return encRMSNormResidualBF16At(enc, v, norm.buf, x, out, vOff, norm.off, xOff, outOff, dModel, eps)
 	}
 	if vOff == 0 {

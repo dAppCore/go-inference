@@ -33,8 +33,8 @@ func TestDumpArchFromSnapshot(t *testing.T) {
 	}
 	t.Logf("Hidden=%d Layer=%d Heads=%d KVHeads=%d GlobalKVHeads=%d HeadDim=%d GlobalHeadDim=%d FF=%d",
 		arch.Hidden, len(arch.Layer), arch.Heads, arch.KVHeads, arch.GlobalKVHeads, arch.HeadDim, arch.GlobalHeadDim, arch.FF)
-	t.Logf("SlidingWindow=%d RotaryDim=%d RotaryDimLocal=%d RopeBase=%.0f RopeLocalBase=%.0f ValueNorm=%v Eps=%g",
-		arch.SlidingWindow, arch.RotaryDim, arch.RotaryDimLocal, arch.RopeBase, arch.RopeLocalBase, arch.ValueNorm, arch.Eps)
+	t.Logf("SlidingWindow=%d RotaryDim=%d RotaryDimLocal=%d RopeBase=%.0f RopeLocalBase=%.0f ValueNorm=%v Eps=%g RopeFreqs=%d",
+		arch.SlidingWindow, arch.RotaryDim, arch.RotaryDimLocal, arch.RopeBase, arch.RopeLocalBase, arch.ValueNorm, arch.Eps, len(arch.RopeFreqs))
 	var firstG, firstS = -1, -1
 	for li, sp := range arch.Layer {
 		if sp.Attention == model.GlobalAttention && firstG < 0 {
