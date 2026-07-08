@@ -261,22 +261,36 @@ func (s *archDecodeState) encMoEBlockQuantBatched(enc metal.MTLComputeCommandEnc
 		return err
 	}
 
-	// experts, all pairs: rms rows, then routes = K·topK gathers — gate/up read each pair's
-	// TOKEN row (lhs = pair→token), down reads each pair's own gated row (lhs = identity).
+	// experts, all pairs: rms rows, then the pair projections. The grouped-GEMM lane
+	// (moe_grouped.go) sorts the pairs by expert and sweeps each expert's weights once per
+	// 64-row block; the all-routes gathers (one GEMV per pair, weights re-read per pair)
+	// remain the fallback for missing kernels / LTHN_MOE_GEMM=0.
 	if err := encRMSNormRowsBF16Object(enc, hSlab, pre2.buf, mb.expertIn, 0, pre2.off, 0, K, dModel, s.eps); err != nil {
 		return err
 	}
-	if fusedExperts {
-		emitGatherQMVAllRoutes(sink, gatherInPSO, inMeta, inKey, mb.expertIn, 0, expGateUpPacked.buf, expGateUpPacked.off, expGateUpScales.buf, expGateUpScales.off, expGateUpBiases.buf, expGateUpBiases.off, mb.pairToToken, mb.idx, 0, mb.gateAll, 0, expertDFF, dModel, inGS, inBits, 0, pairs)
-		emitGatherQMVAllRoutes(sink, gatherInPSO, inMeta, inKey, mb.expertIn, 0, expGateUpPacked.buf, expGateUpPacked.off, expGateUpScales.buf, expGateUpScales.off, expGateUpBiases.buf, expGateUpBiases.off, mb.pairToToken, mb.idx, 0, mb.upAll, 0, expertDFF, dModel, inGS, inBits, expertDFF, pairs)
+	if moeGroupedUsable(w, inBits, inGS) {
+		if err := s.encMoEExpertsGrouped(enc, mb, fusedExperts,
+			expGateUpPacked, expGateUpScales, expGateUpBiases,
+			expGatePacked, expGateScales, expGateBiases,
+			expUpPacked, expUpScales, expUpBiases,
+			expDownPacked, expDownScales, expDownBiases,
+			inGS, inBits, expDownGS, expDownBits,
+			numExperts, topK, expertDFF, dModel, pairs); err != nil {
+			return err
+		}
 	} else {
-		emitGatherQMVAllRoutes(sink, gatherInPSO, inMeta, inKey, mb.expertIn, 0, expGatePacked.buf, expGatePacked.off, expGateScales.buf, expGateScales.off, expGateBiases.buf, expGateBiases.off, mb.pairToToken, mb.idx, 0, mb.gateAll, 0, expertDFF, dModel, inGS, inBits, 0, pairs)
-		emitGatherQMVAllRoutes(sink, gatherInPSO, inMeta, inKey, mb.expertIn, 0, expUpPacked.buf, expUpPacked.off, expUpScales.buf, expUpScales.off, expUpBiases.buf, expUpBiases.off, mb.pairToToken, mb.idx, 0, mb.upAll, 0, expertDFF, dModel, inGS, inBits, 0, pairs)
+		if fusedExperts {
+			emitGatherQMVAllRoutes(sink, gatherInPSO, inMeta, inKey, mb.expertIn, 0, expGateUpPacked.buf, expGateUpPacked.off, expGateUpScales.buf, expGateUpScales.off, expGateUpBiases.buf, expGateUpBiases.off, mb.pairToToken, mb.idx, 0, mb.gateAll, 0, expertDFF, dModel, inGS, inBits, 0, pairs)
+			emitGatherQMVAllRoutes(sink, gatherInPSO, inMeta, inKey, mb.expertIn, 0, expGateUpPacked.buf, expGateUpPacked.off, expGateUpScales.buf, expGateUpScales.off, expGateUpBiases.buf, expGateUpBiases.off, mb.pairToToken, mb.idx, 0, mb.upAll, 0, expertDFF, dModel, inGS, inBits, expertDFF, pairs)
+		} else {
+			emitGatherQMVAllRoutes(sink, gatherInPSO, inMeta, inKey, mb.expertIn, 0, expGatePacked.buf, expGatePacked.off, expGateScales.buf, expGateScales.off, expGateBiases.buf, expGateBiases.off, mb.pairToToken, mb.idx, 0, mb.gateAll, 0, expertDFF, dModel, inGS, inBits, 0, pairs)
+			emitGatherQMVAllRoutes(sink, gatherInPSO, inMeta, inKey, mb.expertIn, 0, expUpPacked.buf, expUpPacked.off, expUpScales.buf, expUpScales.off, expUpBiases.buf, expUpBiases.off, mb.pairToToken, mb.idx, 0, mb.upAll, 0, expertDFF, dModel, inGS, inBits, 0, pairs)
+		}
+		if err := encGeluGateMulFused(enc, mb.gateAll, mb.upAll, mb.gatedAll, pairs*expertDFF); err != nil {
+			return err
+		}
+		emitGatherQMVAllRoutes(sink, gatherDownPSO, downMeta, downKey, mb.gatedAll, 0, expDownPacked.buf, expDownPacked.off, expDownScales.buf, expDownScales.off, expDownBiases.buf, expDownBiases.off, mb.pairIota, mb.idx, 0, mb.downAll, 0, dModel, expertDFF, expDownGS, expDownBits, 0, pairs)
 	}
-	if err := encGeluGateMulFused(enc, mb.gateAll, mb.upAll, mb.gatedAll, pairs*expertDFF); err != nil {
-		return err
-	}
-	emitGatherQMVAllRoutes(sink, gatherDownPSO, downMeta, downKey, mb.gatedAll, 0, expDownPacked.buf, expDownPacked.off, expDownScales.buf, expDownScales.off, expDownBiases.buf, expDownBiases.off, mb.pairIota, mb.idx, 0, mb.downAll, 0, dModel, expertDFF, expDownGS, expDownBits, 0, pairs)
 
 	// route combine: acc[t] = Σ_r w[t,r] · down[t,r] — one row-dimensioned dispatch.
 	sink.setPSO(wsumPSO)

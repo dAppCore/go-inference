@@ -91,6 +91,8 @@ type denseBatchScratch struct {
 	sdpaSNCap   int
 	// moeBatch holds the K-row MoE fold slabs (moe_batch.go) — nil until an MoE chunk runs.
 	moeBatch *moeBatchScratch
+	// moeGrouped holds the grouped-GEMM expert lane's sorted-order slabs (moe_grouped.go).
+	moeGrouped *moeGroupedScratch
 }
 
 // mlpFold returns the K-row MLP-fold slabs, (re)allocating when the batch width, model width or
