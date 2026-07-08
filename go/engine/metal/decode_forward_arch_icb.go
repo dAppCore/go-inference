@@ -1599,13 +1599,16 @@ func recordArchICB(
 		// GLOBAL layers' 2-pass SDPA is pass-1 + pass-2 where the single-pass was one op.
 		total := opsPerLayer*nLayers + nGlobal2Pass
 		icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
-		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch)
+		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch | metal.MTLIndirectCommandTypeConcurrentDispatchThreads)
 		icbDesc.SetInheritBuffers(false)
 		icbDesc.SetInheritPipelineState(false)
 		icbDesc.SetMaxKernelBufferBindCount(16)
 		icb := device.NewIndirectCommandBufferWithDescriptorMaxCommandCountOptions(icbDesc, uint(total), metal.MTLResourceStorageModeShared)
 
 		rmsTG := rmsThreadgroup(dModel, rmsPSO)
+		// per-head rows: hd is bounded at 512 by the attention plan guard, so the raw
+		// single-row threadgroup (≤ 128 lanes) never nears the 1024 cap the full-dModel
+		// sites needed rmsThreadgroup for.
 		headTGOf := func(hd int) uint {
 			return uint(rmsSimdSize * ((((hd + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
 		}

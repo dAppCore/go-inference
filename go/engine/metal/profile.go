@@ -89,7 +89,7 @@ func rebindCostProbe(M int) (time.Duration, error) {
 		a, b, o := scratchBF16(64), scratchBF16(64), scratchBF16(64*8)
 		cntB := scalarI32(64)
 		icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
-		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch)
+		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch | metal.MTLIndirectCommandTypeConcurrentDispatchThreads)
 		icbDesc.SetInheritBuffers(false)
 		icbDesc.SetInheritPipelineState(false)
 		icbDesc.SetMaxKernelBufferBindCount(4)
