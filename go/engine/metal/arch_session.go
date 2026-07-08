@@ -102,6 +102,11 @@ type ArchSession struct {
 	// paged→linear sync assumptions do not hold for restored state (the
 	// decode-parity carve-out): restored sessions append on the token path.
 	restoredKV bool
+	// bidirSpanToken, when non-zero, marks the placeholder token id whose runs
+	// attend BIDIRECTIONALLY during embedding prefill (gemma4_unified image
+	// spans; use_bidirectional_attention == "vision"). Set at session open by
+	// the token model; PrefillTokenEmbeddings detects the runs itself.
+	bidirSpanToken int32
 	// verifyBatchedDisabledForTest forces the MTP batched verify to decline
 	// (verifyBatchedHiddens / verifyBatchedInto return ok=false) so the caller
 	// takes the byte-identical sequential verify lane. Test-only — the honest
@@ -1661,6 +1666,16 @@ func (s *ArchSession) prefillRetainedTokenEmbeddings(ids []int32, embeddings [][
 	if s.pos+len(ids) > s.maxLen {
 		return nil, core.NewError(scope + ": sequence would exceed maxLen cache rows")
 	}
+	if spans := bidirTokenSpans(ids, s.bidirSpanToken); len(spans) > 0 {
+		if unifiedVisionDiag {
+			nativeTraceLog(core.Sprintf("vision-diag bidir: %d spans over %d ids (first %v)\n", len(spans), len(ids), spans[0]))
+		}
+		// Bidirectional spans NEVER fall back to a sequential lane: stepping
+		// writes each token's K/V after its own attention, so a span row can
+		// never see the rows after it — a silent causal evaluation misreads
+		// the image. Batched-or-error.
+		return s.prefillRetainedEmbeddingsBidir(ids, embeddings, spans, scope)
+	}
 	if hidden, ok, err := s.prefillRetainedEmbeddingsBatchedDense(ids, embeddings, scope); ok || err != nil {
 		return hidden, err
 	}
@@ -1672,6 +1687,128 @@ func (s *ArchSession) prefillRetainedTokenEmbeddings(ids []int32, embeddings [][
 			return nil, err
 		}
 	}
+	return hidden, nil
+}
+
+// bidirTokenSpans returns the [start,end) index runs of tok in ids — the
+// bidirectional image spans. A zero tok finds nothing.
+func bidirTokenSpans(ids []int32, tok int32) [][2]int {
+	if tok == 0 {
+		return nil
+	}
+	var spans [][2]int
+	start := -1
+	for i, id := range ids {
+		switch {
+		case id == tok && start < 0:
+			start = i
+		case id != tok && start >= 0:
+			spans = append(spans, [2]int{start, i})
+			start = -1
+		}
+	}
+	if start >= 0 {
+		spans = append(spans, [2]int{start, len(ids)})
+	}
+	return spans
+}
+
+// prefillRetainedEmbeddingsBidir prefills embedding rows whose span rows
+// attend bidirectionally: chunks are cut so no span straddles a chunk, and
+// each chunk runs the batched dense pass with per-row attention caps (a span
+// row sees through to its span end — legal because the fold lands the WHOLE
+// chunk's K/V before any SDPA reads). There is deliberately no sequential
+// fallback.
+func (s *ArchSession) prefillRetainedEmbeddingsBidir(ids []int32, embeddings [][]byte, spans [][2]int, scope string) ([]byte, error) {
+	if s.arch.SlidingWindow > 0 && s.arch.SlidingWindow < s.maxLen && s.pos+len(ids) > s.arch.SlidingWindow {
+		return nil, core.NewError(scope + ": bidirectional image spans require the prompt to fit the sliding window (staged ring landings are per-row)")
+	}
+	var hidden []byte
+	base := 0
+	for base < len(ids) {
+		n := s.batchedDensePrefillChunkLen(len(ids) - base)
+		if n <= 0 {
+			return nil, core.NewError(scope + ": invalid bidirectional prefill chunk")
+		}
+		// never cut inside a span: shrink the chunk to the span start, or grow
+		// it to the span end when the span starts the chunk. Growing may reach
+		// a later span, so iterate to a stable cut.
+		for adjusted := true; adjusted; {
+			adjusted = false
+			for _, sp := range spans {
+				st, en := sp[0]-base, sp[1]-base
+				if st < n && en > n {
+					if st > 0 {
+						n = st
+					} else {
+						n = en
+					}
+					adjusted = true
+				}
+			}
+		}
+		if base+n > len(ids) {
+			n = len(ids) - base
+		}
+		caps := make([]int32, n)
+		for i := range n {
+			caps[i] = int32(s.pos + i + 1) // causal default
+		}
+		for _, sp := range spans {
+			for i := max(sp[0], base); i < min(sp[1], base+n); i++ {
+				caps[i-base] = int32(s.pos + (min(sp[1], base+n) - base)) // see through to span end
+			}
+		}
+		next, err := s.prefillRetainedEmbeddingsBidirChunk(embeddings[base:base+n], caps, scope)
+		if err != nil {
+			return nil, err
+		}
+		hidden = next
+		base += n
+	}
+	return hidden, nil
+}
+
+func (s *ArchSession) prefillRetainedEmbeddingsBidirChunk(embeddings [][]byte, caps []int32, scope string) ([]byte, error) {
+	if s.verifyBatchedCrossesSlidingRingWrap(len(embeddings)) {
+		return nil, core.NewError(scope + ": bidirectional span chunk crosses the sliding ring wrap")
+	}
+	rowBytes := s.arch.Hidden * bf16Size
+	for i := range embeddings {
+		if len(embeddings[i]) != rowBytes {
+			return nil, core.NewError(scope + ": emb must be hidden bf16 bytes")
+		}
+	}
+	dst := s.sampleHidden
+	retained := false
+	if pinned, pinnedOK := s.ensureRetainedHiddenPinned(rowBytes); pinnedOK {
+		s.resetRetainedLogits()
+		dst = pinned.bytes[:rowBytes]
+		retained = true
+	}
+	var (
+		hidden []byte
+		ok     bool
+		err    error
+	)
+	s.state.rowAttnCaps = caps
+	withAutoreleasePool(func() {
+		hidden, ok, err = s.state.stepTokensBatchedDenseLastIntoCopyInputs(embeddings, s.pos, dst)
+	})
+	s.state.rowAttnCaps = nil
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, core.NewError(scope + ": the batched dense pass declined a bidirectional span chunk (no causal fallback exists for image spans)")
+	}
+	if retained {
+		s.sampleHidden = nil
+		s.retainedHidden = hidden
+	} else {
+		s.sampleHidden = hidden
+	}
+	s.pos += len(embeddings)
 	return hidden, nil
 }
 

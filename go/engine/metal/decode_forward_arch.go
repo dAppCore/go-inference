@@ -223,6 +223,14 @@ type archDecodeState struct {
 	// trades at, and the routing is deterministic (every verify folds), so
 	// live and restored sessions write the same lane's bytes.
 	verifyFoldSmallK bool
+	// rowAttnCaps, when non-nil, overrides each batch row's visible attention
+	// length (absolute kv rows) — the bidirectional image-span prefill
+	// (gemma4_unified): span rows see through to their span end. Legal only on
+	// the batched-rope attention fold, where the WHOLE chunk's K/V lands
+	// before any SDPA reads; the pass hard-errors rather than fall to a lane
+	// that would silently evaluate the span causally. Transient — set around
+	// one chunk by prefillRetainedEmbeddingsBidirChunk.
+	rowAttnCaps []int32
 	ropeFreqs    metal.MTLBuffer // resident periods (1/inv_freq) for YaRN long-context rope; nil = base-derived rope
 	// gemma4 global (proportional+partial) rope: the period spectrum over the FULL head dim
 	// (metal's gemma4ProportionalFreqs) for GlobalAttention layers, so rope pairs (d, d+globalHeadDim/2)
