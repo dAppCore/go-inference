@@ -77,6 +77,12 @@ var mtpNoFusedForTest = os.Getenv("LTHN_MTP_NOFUSED") != ""
 // per block instead of once per drafted row.
 var mtpVerifyFoldDisabled = os.Getenv("LTHN_MTP_VERIFY_FOLD") == "0"
 
+// mtpReengageDisabled restores the permanent low-accept bail (LTHN_MTP_REENGAGE=0):
+// the speculative loop otherwise runs plain for a bounded cooldown after a bail and
+// re-probes drafting, staying engaged only when the probe's measured emitted-token
+// rate is at least the plain stretch's (#299).
+var mtpReengageDisabled = os.Getenv("LTHN_MTP_REENGAGE") == "0"
+
 // mtpDiagDraftCalls counts draft-block invocations for the #352 instrument (single decode goroutine).
 var mtpDiagDraftCalls int
 
