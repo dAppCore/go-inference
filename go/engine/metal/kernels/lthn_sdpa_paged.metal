@@ -518,6 +518,276 @@ METAL_FUNC void lthn_sdpa_paged_p1_gqa2_body(
       tgM, tgS, tgO, tgid, sg, lane);
 }
 
+// ---- q8 KV pages (#357) ----------------------------------------------------
+// Pages hold int8 rows quantised symmetrically per kvQ8GroupSize(=64) elements
+// with f32 group scales in PARALLEL pages, same [row][kvHead][dim] order and
+// ELEMENT strides as the bf16 pages. At headDim 256 a lane's per=8 slice sits
+// inside one group, so each row costs the lane exactly one scale load; the
+// scale multiplies the lane's partial BEFORE simd_sum (lanes carry different
+// groups) and the V accumulate after the p·v product. Only the gqa2 shapes get
+// q8 kernels — the host gates the q8 cache mode on gqa2-eligible geometry and
+// FAILS LOUDLY rather than falling back to a bf16 kernel misreading int8 pages.
+
+template <bool WRITE_FINAL>
+METAL_FUNC void lthn_sdpa_paged_p1_gqa2_q8_body(
+    const device bf16* q,
+    const device char* kPage,
+    const device char* vPage,
+    const device float* kScales,
+    const device float* vScales,
+    device float* maxs,
+    device float* sums,
+    device float* acc,
+    device bf16* outFinal,
+    const constant PagedSDPAP1Dims& D,
+    threadgroup float* tgM,
+    threadgroup float* tgS,
+    threadgroup float* tgO,
+    uint tgid,
+    uint sg,
+    uint lane) {
+  const uint kvh = tgid / D.splits;
+  const uint split = tgid % D.splits;
+  if (kvh >= D.nKVHeads || D.nHeads != kPagedGQA2 * D.nKVHeads) return;
+  const uint per = D.headDim / 32;
+  if (per == 0 || per > kPagedGQA2MaxPerLane) return;
+  const uint rowBase = split * D.splitRows;
+  if (rowBase >= D.pageLen) return;
+  const uint rowEnd = min(rowBase + D.splitRows, D.pageLen);
+  const uint h0 = kvh * kPagedGQA2;
+
+  const device char* kh = kPage + kvh * D.kHeadStride + lane * per;
+  const device char* vh = vPage + kvh * D.vHeadStride + lane * per;
+  // scale addressing: one f32 per 64 elements, row-major over [row][kvh][group]
+  const uint rowGroups = (D.nKVHeads * D.headDim) / 64;
+  const uint headGroups = D.headDim / 64;
+  const uint laneGroup = kvh * headGroups + (lane * per) / 64;
+
+  float qv[kPagedGQA2][kPagedGQA2MaxPerLane];
+  for (uint g = 0; g < kPagedGQA2; g++) {
+    const device bf16* qh = q + (h0 + g) * D.headDim + lane * per;
+    for (uint i = 0; i < per; i++) {
+      qv[g][i] = float(qh[i]);
+    }
+  }
+
+  float m[kPagedGQA2];
+  float s[kPagedGQA2];
+  float o[kPagedGQA2][kPagedGQA2MaxPerLane];
+  for (uint g = 0; g < kPagedGQA2; g++) {
+    m[g] = -3.0e38f;
+    s[g] = 0.0f;
+    for (uint i = 0; i < per; i++) {
+      o[g][i] = 0.0f;
+    }
+  }
+
+  const uint stride2 = 2 * kPagedSimdGroups;
+  uint t = rowBase + sg;
+  for (; t + kPagedSimdGroups < rowEnd; t += stride2) {
+    const uint t2 = t + kPagedSimdGroups;
+    const device char* kt = kh + t * D.kSeqStride;
+    const device char* kt2 = kh + t2 * D.kSeqStride;
+    const float ksA = kScales[t * rowGroups + laneGroup];
+    const float ksB = kScales[t2 * rowGroups + laneGroup];
+    float pa0 = 0.0f, pa1 = 0.0f, pb0 = 0.0f, pb1 = 0.0f;
+    for (uint i = 0; i < per; i += 4) {
+      const char4 ka = *((const device char4*)(kt + i));
+      const char4 kb = *((const device char4*)(kt2 + i));
+      const float ax = float(ka.x), ay = float(ka.y), az = float(ka.z), aw = float(ka.w);
+      const float bx = float(kb.x), by = float(kb.y), bz = float(kb.z), bw = float(kb.w);
+      pa0 += qv[0][i] * ax + qv[0][i + 1] * ay + qv[0][i + 2] * az + qv[0][i + 3] * aw;
+      pa1 += qv[1][i] * ax + qv[1][i + 1] * ay + qv[1][i + 2] * az + qv[1][i + 3] * aw;
+      pb0 += qv[0][i] * bx + qv[0][i + 1] * by + qv[0][i + 2] * bz + qv[0][i + 3] * bw;
+      pb1 += qv[1][i] * bx + qv[1][i + 1] * by + qv[1][i + 2] * bz + qv[1][i + 3] * bw;
+    }
+    float dA[kPagedGQA2], dB[kPagedGQA2];
+    dA[0] = simd_sum(pa0 * ksA) * D.scale;
+    dA[1] = simd_sum(pa1 * ksA) * D.scale;
+    dB[0] = simd_sum(pb0 * ksB) * D.scale;
+    dB[1] = simd_sum(pb1 * ksB) * D.scale;
+    float f[kPagedGQA2], pA[kPagedGQA2], pB[kPagedGQA2];
+    for (uint g = 0; g < kPagedGQA2; g++) {
+      const float newM = max(m[g], max(dA[g], dB[g]));
+      f[g] = s[g] > 0.0f ? exp(m[g] - newM) : 0.0f;
+      pA[g] = exp(dA[g] - newM);
+      pB[g] = exp(dB[g] - newM);
+      s[g] = s[g] * f[g] + pA[g] + pB[g];
+      m[g] = newM;
+    }
+    const device char* vt = vh + t * D.vSeqStride;
+    const device char* vt2 = vh + t2 * D.vSeqStride;
+    const float vsA = vScales[t * rowGroups + laneGroup];
+    const float vsB = vScales[t2 * rowGroups + laneGroup];
+    const float pA0 = pA[0] * vsA, pB0 = pB[0] * vsB;
+    const float pA1 = pA[1] * vsA, pB1 = pB[1] * vsB;
+    for (uint i = 0; i < per; i += 4) {
+      const char4 va = *((const device char4*)(vt + i));
+      const char4 vb = *((const device char4*)(vt2 + i));
+      o[0][i] = o[0][i] * f[0] + pA0 * float(va.x) + pB0 * float(vb.x);
+      o[0][i + 1] = o[0][i + 1] * f[0] + pA0 * float(va.y) + pB0 * float(vb.y);
+      o[0][i + 2] = o[0][i + 2] * f[0] + pA0 * float(va.z) + pB0 * float(vb.z);
+      o[0][i + 3] = o[0][i + 3] * f[0] + pA0 * float(va.w) + pB0 * float(vb.w);
+      o[1][i] = o[1][i] * f[1] + pA1 * float(va.x) + pB1 * float(vb.x);
+      o[1][i + 1] = o[1][i + 1] * f[1] + pA1 * float(va.y) + pB1 * float(vb.y);
+      o[1][i + 2] = o[1][i + 2] * f[1] + pA1 * float(va.z) + pB1 * float(vb.z);
+      o[1][i + 3] = o[1][i + 3] * f[1] + pA1 * float(va.w) + pB1 * float(vb.w);
+    }
+  }
+  for (; t < rowEnd; t += kPagedSimdGroups) {
+    const device char* kt = kh + t * D.kSeqStride;
+    const float ks = kScales[t * rowGroups + laneGroup];
+    float partial0 = 0.0f;
+    float partial1 = 0.0f;
+    for (uint i = 0; i < per; i += 4) {
+      const char4 k4 = *((const device char4*)(kt + i));
+      const float x = float(k4.x), y = float(k4.y), z = float(k4.z), w = float(k4.w);
+      partial0 += qv[0][i] * x + qv[0][i + 1] * y + qv[0][i + 2] * z + qv[0][i + 3] * w;
+      partial1 += qv[1][i] * x + qv[1][i + 1] * y + qv[1][i + 2] * z + qv[1][i + 3] * w;
+    }
+    float dot[kPagedGQA2];
+    dot[0] = simd_sum(partial0 * ks) * D.scale;
+    dot[1] = simd_sum(partial1 * ks) * D.scale;
+    float f[kPagedGQA2];
+    float p[kPagedGQA2];
+    for (uint g = 0; g < kPagedGQA2; g++) {
+      const float newM = max(m[g], dot[g]);
+      f[g] = s[g] > 0.0f ? exp(m[g] - newM) : 0.0f;
+      p[g] = exp(dot[g] - newM);
+      s[g] = s[g] * f[g] + p[g];
+      m[g] = newM;
+    }
+    const device char* vt = vh + t * D.vSeqStride;
+    const float vs = vScales[t * rowGroups + laneGroup];
+    const float p0 = p[0] * vs, p1 = p[1] * vs;
+    for (uint i = 0; i < per; i += 4) {
+      const char4 v4 = *((const device char4*)(vt + i));
+      o[0][i] = o[0][i] * f[0] + p0 * float(v4.x);
+      o[0][i + 1] = o[0][i + 1] * f[0] + p0 * float(v4.y);
+      o[0][i + 2] = o[0][i + 2] * f[0] + p0 * float(v4.z);
+      o[0][i + 3] = o[0][i + 3] * f[0] + p0 * float(v4.w);
+      o[1][i] = o[1][i] * f[1] + p1 * float(v4.x);
+      o[1][i + 1] = o[1][i + 1] * f[1] + p1 * float(v4.y);
+      o[1][i + 2] = o[1][i + 2] * f[1] + p1 * float(v4.z);
+      o[1][i + 3] = o[1][i + 3] * f[1] + p1 * float(v4.w);
+    }
+  }
+
+  // merge: identical to the bf16 gqa2 body — parallel over head dims.
+  const uint tid = sg * 32 + lane;
+  const uint dimsPerThread = (D.headDim + 255) / 256;
+  for (uint g = 0; g < kPagedGQA2; g++) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0) {
+      tgM[sg] = m[g];
+      tgS[sg] = s[g];
+    }
+    for (uint i = 0; i < per; i++) {
+      tgO[sg * D.headDim + lane * per + i] = o[g][i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float M = -3.0e38f;
+    for (uint gg = 0; gg < kPagedSimdGroups; gg++) {
+      if (tgS[gg] > 0.0f) {
+        M = max(M, tgM[gg]);
+      }
+    }
+    float S = 0.0f;
+    float w[kPagedSimdGroups];
+    for (uint gg = 0; gg < kPagedSimdGroups; gg++) {
+      const float sgS = tgS[gg];
+      w[gg] = sgS > 0.0f ? exp(tgM[gg] - M) : 0.0f;
+      S += sgS * w[gg];
+    }
+    const uint h = h0 + g;
+    for (uint d = tid * dimsPerThread; d < min((tid + 1) * dimsPerThread, D.headDim); d++) {
+      float of = 0.0f;
+      for (uint gg = 0; gg < kPagedSimdGroups; gg++) {
+        of += tgO[gg * D.headDim + d] * w[gg];
+      }
+      if (WRITE_FINAL) {
+        outFinal[h * D.headDim + d] = S > 0.0f ? bf16(of / S) : bf16(0.0f);
+      } else {
+        acc[(h * D.cellCount + D.cellBase + split) * D.headDim + d] = of;
+      }
+    }
+    if (!WRITE_FINAL && tid == 0) {
+      const uint cell = h * D.cellCount + D.cellBase + split;
+      maxs[cell] = M;
+      sums[cell] = S;
+    }
+  }
+}
+
+[[kernel]] void lthn_sdpa_paged_p1_gqa2_q8_bf16(
+    const device bf16* q       [[buffer(0)]],
+    const device char* kPage   [[buffer(1)]],
+    const device char* vPage   [[buffer(2)]],
+    device float*      maxs    [[buffer(3)]],
+    device float*      sums    [[buffer(4)]],
+    device float*      acc     [[buffer(5)]],
+    const constant PagedSDPAP1Dims& D [[buffer(6)]],
+    const device float* kScales [[buffer(7)]],
+    const device float* vScales [[buffer(8)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint sg   [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float tgM[kPagedSimdGroups];
+  threadgroup float tgS[kPagedSimdGroups];
+  threadgroup float tgO[kPagedSimdGroups * 256]; // gqa2 models: headDim <= 256
+  lthn_sdpa_paged_p1_gqa2_q8_body<false>(
+      q, kPage, vPage, kScales, vScales, maxs, sums, acc, (device bf16*)acc, D,
+      tgM, tgS, tgO, tgid, sg, lane);
+}
+
+[[kernel]] void lthn_sdpa_paged_p1_final_gqa2_q8_bf16(
+    const device bf16* q       [[buffer(0)]],
+    const device char* kPage   [[buffer(1)]],
+    const device char* vPage   [[buffer(2)]],
+    device bf16*       out     [[buffer(3)]],
+    const constant PagedSDPAP1Dims& D [[buffer(4)]],
+    const device float* kScales [[buffer(7)]],
+    const device float* vScales [[buffer(8)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint sg   [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float tgM[kPagedSimdGroups];
+  threadgroup float tgS[kPagedSimdGroups];
+  threadgroup float tgO[kPagedSimdGroups * 256]; // gqa2 models: headDim <= 256
+  lthn_sdpa_paged_p1_gqa2_q8_body<true>(
+      q, kPage, vPage, kScales, vScales, (device float*)out, (device float*)out,
+      (device float*)out, out, D, tgM, tgS, tgO, tgid, sg, lane);
+}
+
+// lthn_kv_q8_store quantises one landed bf16 K or V row into its int8 page row
+// + f32 group scales — the per-token landing hop that replaces the projection
+// writing the page directly. Grid: one 32-lane threadgroup per 64-group; each
+// lane owns two elements; the group max reduces with simd_max.
+struct KVQ8StoreDims {
+  uint kvDim;
+};
+
+[[kernel]] void lthn_kv_q8_store_bf16(
+    const device bf16* row    [[buffer(0)]],
+    device char*       out    [[buffer(1)]],
+    device float*      scales [[buffer(2)]],
+    const constant KVQ8StoreDims& D [[buffer(3)]],
+    uint g    [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  const uint base = g * 64;
+  if (base >= D.kvDim) return;
+  const float a = float(row[base + lane * 2]);
+  const float b = float(row[base + lane * 2 + 1]);
+  const float m = simd_max(max(abs(a), abs(b)));
+  const float scale = m / 127.0f;
+  const float inv = scale > 0.0f ? 1.0f / scale : 0.0f;
+  out[base + lane * 2] = char(clamp(rint(a * inv), -127.0f, 127.0f));
+  out[base + lane * 2 + 1] = char(clamp(rint(b * inv), -127.0f, 127.0f));
+  if (lane == 0) {
+    scales[g] = scale;
+  }
+}
+
 struct PagedSDPAP2Dims {
   uint headDim;
   uint cellCount;

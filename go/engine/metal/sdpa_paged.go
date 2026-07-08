@@ -208,6 +208,73 @@ func sdpaPagedP1FinalGQA2Pipeline() (metal.MTLComputePipelineState, error) {
 	return sdpaPagedP1FinalGQA2PSO, sdpaPagedP1FinalGQA2PSOErr
 }
 
+// q8 pipelines (#357): int8 pages + f32 group scales. Resolved lazily like the
+// rest; a q8 CACHE with a missing q8 kernel is a hard error at plan time — a
+// bf16 kernel misreading int8 pages would be silent garbage, never a fallback.
+var (
+	sdpaPagedP1GQA2Q8PSOOnce sync.Once
+	sdpaPagedP1GQA2Q8PSO     metal.MTLComputePipelineState
+	sdpaPagedP1GQA2Q8PSOErr  error
+
+	sdpaPagedP1FinalGQA2Q8PSOOnce sync.Once
+	sdpaPagedP1FinalGQA2Q8PSO     metal.MTLComputePipelineState
+	sdpaPagedP1FinalGQA2Q8PSOErr  error
+
+	kvQ8StorePSOOnce sync.Once
+	kvQ8StorePSO     metal.MTLComputePipelineState
+	kvQ8StorePSOErr  error
+)
+
+func sdpaPagedP1GQA2Q8Pipeline() (metal.MTLComputePipelineState, error) {
+	sdpaPagedP1GQA2Q8PSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			sdpaPagedP1GQA2Q8PSOErr = core.NewError("native.sdpaPagedP1GQA2Q8Pipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_sdpa_paged_p1_gqa2_q8_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			sdpaPagedP1GQA2Q8PSOErr = core.NewError("native.sdpaPagedP1GQA2Q8Pipeline: kernel lthn_sdpa_paged_p1_gqa2_q8_bf16 not found")
+			return
+		}
+		sdpaPagedP1GQA2Q8PSO, sdpaPagedP1GQA2Q8PSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return sdpaPagedP1GQA2Q8PSO, sdpaPagedP1GQA2Q8PSOErr
+}
+
+func sdpaPagedP1FinalGQA2Q8Pipeline() (metal.MTLComputePipelineState, error) {
+	sdpaPagedP1FinalGQA2Q8PSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			sdpaPagedP1FinalGQA2Q8PSOErr = core.NewError("native.sdpaPagedP1FinalGQA2Q8Pipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_sdpa_paged_p1_final_gqa2_q8_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			sdpaPagedP1FinalGQA2Q8PSOErr = core.NewError("native.sdpaPagedP1FinalGQA2Q8Pipeline: kernel lthn_sdpa_paged_p1_final_gqa2_q8_bf16 not found")
+			return
+		}
+		sdpaPagedP1FinalGQA2Q8PSO, sdpaPagedP1FinalGQA2Q8PSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return sdpaPagedP1FinalGQA2Q8PSO, sdpaPagedP1FinalGQA2Q8PSOErr
+}
+
+// kvQ8StorePipeline resolves the landing hop: one bf16 row quantised into its
+// int8 page row + f32 group scales.
+func kvQ8StorePipeline() (metal.MTLComputePipelineState, error) {
+	kvQ8StorePSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			kvQ8StorePSOErr = core.NewError("native.kvQ8StorePipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_kv_q8_store_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			kvQ8StorePSOErr = core.NewError("native.kvQ8StorePipeline: kernel lthn_kv_q8_store_bf16 not found")
+			return
+		}
+		kvQ8StorePSO, kvQ8StorePSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return kvQ8StorePSO, kvQ8StorePSOErr
+}
+
 func sdpaPagedP2Pipeline() (metal.MTLComputePipelineState, error) {
 	sdpaPagedP2PSOOnce.Do(func() {
 		if customLibrary == nil || customLibrary.GetID() == 0 {
@@ -283,8 +350,12 @@ type sdpaPagedDecodePlan struct {
 	pageLens             []int
 	kHead, kSeq          []int
 	vHead, vSeq          []int
-	scratch              *sdpaPagedDecodeScratch
-	p1PSO, p2PSO         metal.MTLComputePipelineState
+	// q8 mode (#357): int8 pages with f32 group scales bound beside them —
+	// attachQ8 swaps the pass-1 pipelines and stores the scale pages.
+	kScales, vScales []metal.MTLBuffer
+	quantQ8          bool
+	scratch          *sdpaPagedDecodeScratch
+	p1PSO, p2PSO     metal.MTLComputePipelineState
 	// gqaShared: pass 1 runs one threadgroup per (KV head, split) computing both
 	// query heads of the GQA-2 group over rows read ONCE (#356); the grid width
 	// shrinks to nKVHeads x splits (splitRows halves to keep the threadgroup
@@ -435,6 +506,38 @@ func buildSDPAPagedDecodePlan(
 	}, nil
 }
 
+// attachQ8 switches a built plan onto the q8 kernels: int8 pages + f32 group
+// scales. q8 caches exist only on gqa2-eligible geometry (the host constructor
+// enforces it), so a plan that did not select the gqa2 route — or a metallib
+// missing the q8 kernels — is a HARD error: a bf16 kernel misreading int8
+// pages would be silent garbage, never a fallback.
+func (p *sdpaPagedDecodePlan) attachQ8(kScales, vScales []metal.MTLBuffer) error {
+	if p.nHeads != 2*p.nKVHeads || p.headDim > 256 {
+		return core.NewError("native.sdpaPagedDecodePlan.attachQ8: q8 pages require gqa2 geometry (nHeads == 2*nKVHeads, headDim <= 256)")
+	}
+	if len(kScales) != len(p.keyPages) || len(vScales) != len(p.valuePages) {
+		return core.NewError("native.sdpaPagedDecodePlan.attachQ8: scale pages must match data pages")
+	}
+	if p.singleCell {
+		pso, err := sdpaPagedP1FinalGQA2Q8Pipeline()
+		if err != nil {
+			return err
+		}
+		p.p1FinalPSO = pso
+	}
+	pso, err := sdpaPagedP1GQA2Q8Pipeline()
+	if err != nil {
+		return err
+	}
+	p.p1PSO = pso
+	// the q8 kernels exist only in gqa2 shape — force the route even where the
+	// bf16 plan preferred the per-head kernel (short windows): the grid width
+	// and the kernel's kvh derivation must agree.
+	p.gqaShared = true
+	p.kScales, p.vScales, p.quantQ8 = kScales, vScales, true
+	return nil
+}
+
 // emitP1s encodes pass 1: one dispatch per page, nHeads × splits threadgroups, each writing
 // its OWN (head, cell) partial — every dispatch independent of the others. On a single-cell
 // plan the one dispatch runs the P1-final variant instead, writing the normalised row
@@ -465,6 +568,10 @@ func (p *sdpaPagedDecodePlan) emitP1s(enc metal.MTLComputeCommandEncoder) {
 			setBuf(enc, p.q, 0, 0)
 			setBuf(enc, p.keyPages[i], 0, 1)
 			setBuf(enc, p.valuePages[i], 0, 2)
+			if p.quantQ8 {
+				setBuf(enc, p.kScales[i], 0, 7)
+				setBuf(enc, p.vScales[i], 0, 8)
+			}
 			setBuf(enc, p.out, 0, 3)
 			setBytes(enc, unsafe.Pointer(&params), uint(unsafe.Sizeof(params)), 4)
 			tgWidth := p.nHeads
@@ -509,6 +616,10 @@ func (p *sdpaPagedDecodePlan) emitP1s(enc metal.MTLComputeCommandEncoder) {
 		setBuf(enc, p.scratch.sums, 0, 4)
 		setBuf(enc, p.scratch.acc, 0, 5)
 		setBytes(enc, unsafe.Pointer(&params), uint(unsafe.Sizeof(params)), 6)
+		if p.quantQ8 {
+			setBuf(enc, p.kScales[i], 0, 7)
+			setBuf(enc, p.vScales[i], 0, 8)
+		}
 		tgWidth := p.nHeads
 		if p.gqaShared {
 			tgWidth = p.nKVHeads
