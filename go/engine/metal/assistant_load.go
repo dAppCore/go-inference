@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"math"
 	"sync"
+	"time"
 	"unsafe"
 
 	core "dappco.re/go"
@@ -1094,9 +1095,18 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 	if target.embed == nil && target.embedInto == nil {
 		return AssistantDraftBlockResult{}, core.NewError("native.assistant draft step target session has no embedder")
 	}
+	diagDraft := mtpDiagForTest && mtpDiagDraftCalls < 2
+	var diagT0 time.Time
+	if diagDraft {
+		diagT0 = time.Now()
+	}
 	targetKVs, err := pair.targetKVByLayerTypeFromSessionScratch(target)
 	if err != nil {
 		return AssistantDraftBlockResult{}, err
+	}
+	diagKVMs := float64(0)
+	if diagDraft {
+		diagKVMs = float64(time.Since(diagT0).Microseconds()) / 1000
 	}
 	currentHidden, err := target.boundaryNormedHiddenScratch()
 	if err != nil {
@@ -1115,6 +1125,12 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 			fused = nil
 		}
 	}
+	if diagDraft {
+		mtpDiagDraftCalls++
+		nativeTraceLog(core.Sprintf("mtp-diag draft call %d: last=%d fused=%v finalNorm=%v kvExport=%.1fms+load=%.1fms hidden{%s}\n",
+			mtpDiagDraftCalls, lastToken, fused != nil, len(target.finalNorm) == len(currentHidden),
+			diagKVMs, float64(time.Since(diagT0).Microseconds())/1000-diagKVMs, mtpDiagBF16Stats(currentHidden)))
+	}
 	for len(tokens) < maxDraftTokens {
 		tokenEmbedding, err := target.embedID(currentToken)
 		if err != nil {
@@ -1123,6 +1139,9 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 		if len(tokenEmbedding) != pair.TargetArch.Hidden*bf16Size {
 			return AssistantDraftBlockResult{}, core.NewError(core.Sprintf("native.assistant draft block target token embedding bytes = %d, want %d", len(tokenEmbedding), pair.TargetArch.Hidden*bf16Size))
 		}
+		if diagDraft && len(tokens) == 0 {
+			nativeTraceLog(core.Sprintf("mtp-diag draft emb: tok=%d emb{%s}\n", currentToken, mtpDiagBF16Stats(tokenEmbedding)))
+		}
 		normedOut := target.mtpDraftScratch(&target.mtpDraftNormed, pair.Assistant.Arch.Hidden*bf16Size)
 		hiddenOut := target.mtpDraftScratch(&target.mtpDraftHidden, pair.TargetArch.Hidden*bf16Size)
 		logitsOut := target.mtpDraftScratch(&target.mtpDraftLogits, pair.Assistant.Arch.Vocab*bf16Size)
@@ -1130,17 +1149,28 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 		logitSelected := target.mtpDraftLogitSelectedScratch(pair.Assistant.CentroidIntermediateTopK)
 		var stepToken int32
 		if fused != nil {
+			var stepT0 time.Time
+			if diagDraft {
+				stepT0 = time.Now()
+			}
 			normed, nextHidden, ferr := fused.step(tokenEmbedding, currentHidden, normedOut, hiddenOut)
 			if ferr != nil {
 				return AssistantDraftBlockResult{}, ferr
 			}
+			fwdMs := float64(time.Since(stepT0).Microseconds()) / 1000
 			logits, lerr := pair.Assistant.draftLogitsIntoScratch(logitsOut, normed, logitScores, logitSelected)
 			if lerr != nil {
 				return AssistantDraftBlockResult{}, lerr
 			}
+			headMs := float64(time.Since(stepT0).Microseconds())/1000 - fwdMs
 			tok, gerr := pair.Assistant.draftGreedyTokenWithSuppress(logits, suppress)
 			if gerr != nil {
 				return AssistantDraftBlockResult{}, gerr
+			}
+			if diagDraft && len(tokens) < 2 {
+				greedyMs := float64(time.Since(stepT0).Microseconds())/1000 - fwdMs - headMs
+				nativeTraceLog(core.Sprintf("mtp-diag draft step %d: tok=%d fwd=%.1fms head=%.1fms greedy=%.1fms normed{%s}\n",
+					len(tokens), tok, fwdMs, headMs, greedyMs, mtpDiagBF16Stats(normed)))
 			}
 			stepToken, currentHidden = tok, nextHidden
 		} else {
@@ -1153,6 +1183,10 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 			step, serr := pair.draftStepFromProjectedIntoWithSuppress(projected, targetKVs, normedOut, hiddenOut, logitsOut, logitScores, logitSelected, &target.mtpDraftLayerScratch, suppress)
 			if serr != nil {
 				return AssistantDraftBlockResult{}, serr
+			}
+			if diagDraft && len(tokens) < 2 {
+				nativeTraceLog(core.Sprintf("mtp-diag draft step %d: tok=%d projected{%s} logits{%s}\n",
+					len(tokens), step.Token, mtpDiagBF16Stats(projected), mtpDiagBF16Stats(logitsOut)))
 			}
 			stepToken, currentHidden = step.Token, step.Hidden
 		}
@@ -1580,9 +1614,18 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 	for len(result.Tokens) < maxNew && !stopped {
 		remaining := maxNew - len(result.Tokens)
 		blockSize := min(draftTokens, remaining)
+		diagRound := mtpDiagForTest && result.TargetVerifyCalls < 3
+		var diagRoundT0 time.Time
+		if diagRound {
+			diagRoundT0 = time.Now()
+		}
 		draft, err := pair.draftBlockFromSessionWithSuppress(target, lastToken, blockSize, false, suppress)
 		if err != nil {
 			return result, err
+		}
+		diagDraftMs := float64(0)
+		if diagRound {
+			diagDraftMs = float64(time.Since(diagRoundT0).Microseconds()) / 1000
 		}
 		result.DraftCalls++
 		result.DraftTokens += len(draft.Tokens)
@@ -1600,6 +1643,11 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 		}
 		result.TargetVerifyCalls++
 		result.TargetCalls++
+		if diagRound {
+			total := float64(time.Since(diagRoundT0).Microseconds()) / 1000
+			nativeTraceLog(core.Sprintf("mtp-diag verify %d: draft=%.1fms verify=%.1fms last=%d block=%v accepted=%v replacement=%d allAccepted=%v\n",
+				result.TargetVerifyCalls, diagDraftMs, total-diagDraftMs, lastToken, block, verify.AcceptedTokens, verify.ReplacementToken, verify.AllAccepted))
+		}
 		emitStart := 0
 		if carryPresent && len(verify.AcceptedTokens) > 0 && verify.AcceptedTokens[0] == carryLead {
 			emitStart = 1
@@ -2591,20 +2639,12 @@ func (m *AssistantModel) draftLogitsIntoScratch(out []byte, hiddenStates []byte,
 	if err != nil {
 		return nil, err
 	}
-	outLen := vocab * bf16Size
-	if cap(out) < outLen {
-		out = make([]byte, outLen)
-	} else {
-		out = out[:outLen]
-	}
-	for tokenID := range vocab {
-		sum := nativeAssistantDotBF16Row(hiddenStates, embed.Data, tokenID, hidden)
-		h := f32ToBF16(sum)
-		off := tokenID * bf16Size
-		out[off] = byte(h)
-		out[off+1] = byte(h >> 8)
-	}
-	return out, nil
+	// No centroid tables (the gemma4_unified assistants ship no
+	// masked_embedding.*): the head is a full-vocab tied-embedding matvec.
+	// One bf16 gemv on the GPU — the previous per-token host loop computed
+	// 262K × hidden dots on one core, ~240ms per draft step (#352), which
+	// drowned the entire speculative win.
+	return MatVecBF16Into(out, embed.Data, hiddenStates, vocab, hidden)
 }
 
 func (m *AssistantModel) draftOrderedLogitsInto(out []byte, hiddenStates []byte) ([]byte, error) {

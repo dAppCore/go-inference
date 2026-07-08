@@ -5,6 +5,9 @@
 package native
 
 import (
+	"math"
+	"os"
+
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 )
@@ -63,6 +66,36 @@ type MTPResult struct {
 // The two sessions are independent caches: typically draft is a small/cheap model and target the
 // real one, but for correctness they may share weights (the draft then accepts everything and the
 // speedup is maximal) or diverge wildly (nothing accepts, greedy speed) — the output is the same.
+// mtpDiagForTest prints the first rounds' t0/drafts/greedys (#352 instrument; env LTHN_MTP_DIAG).
+var mtpDiagForTest = os.Getenv("LTHN_MTP_DIAG") != ""
+
+// mtpNoFusedForTest forces the legacy per-op drafter path (#352 A/B; env LTHN_MTP_NOFUSED).
+var mtpNoFusedForTest = os.Getenv("LTHN_MTP_NOFUSED") != ""
+
+// mtpDiagDraftCalls counts draft-block invocations for the #352 instrument (single decode goroutine).
+var mtpDiagDraftCalls int
+
+// mtpDiagBF16Stats summarises a bf16 buffer for the #352 instrument.
+func mtpDiagBF16Stats(b []byte) string {
+	n := len(b) / 2
+	var sum, maxAbs float64
+	nan := 0
+	for i := 0; i < n; i++ {
+		bits := uint32(b[2*i]) | uint32(b[2*i+1])<<8
+		f := float64(math.Float32frombits(bits << 16))
+		if math.IsNaN(f) {
+			nan++
+			continue
+		}
+		a := math.Abs(f)
+		sum += a
+		if a > maxAbs {
+			maxAbs = a
+		}
+	}
+	return core.Sprintf("sum|x|=%.1f max|x|=%.3f nan=%d n=%d", sum, maxAbs, nan, n)
+}
+
 func MTPDecode(target, draft *ArchSession, promptIDs []int32, maxNew, eosID, k int) (*MTPResult, error) {
 	return MTPDecodeEach(target, draft, promptIDs, maxNew, eosID, k, nil)
 }
@@ -232,6 +265,10 @@ func MTPDecodeEach(target, draft *ArchSession, promptIDs []int32, maxNew, eosID,
 				}
 				bonus = expected
 			}
+		}
+		if mtpDiagForTest && res.Rounds <= 3 {
+			nativeTraceLog(core.Sprintf("mtp-diag round %d: t0=%d drafts=%v greedys=%v batched=%v accepted=%d\n",
+				res.Rounds, t0, drafts, greedys[:len(verifyIDs)], batched, accepted))
 		}
 		res.Accepted += accepted
 
