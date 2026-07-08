@@ -498,25 +498,21 @@ func (s *ArchSession) prefillPromptCacheEntry(ids []int32) ([]byte, []byte, erro
 	if s.pos+len(ids) > s.maxLen {
 		return nil, nil, core.NewError("native.WarmPromptCache: sequence would exceed maxLen cache rows")
 	}
-	if len(ids) > 1 {
-		if err := s.prefillCachedIDs(ids[:len(ids)-1]); err != nil {
-			return nil, nil, err
-		}
+	// Ride the SAME batched prompt lane as the plain generate path
+	// (prefillRetainedTokens: chunked batched dense + GPU PLE slab, per-token
+	// only as its own fallback). The previous split — prefillCachedIDs for the
+	// prefix then one retained step — routed recorded-ICB sessions down the
+	// chained per-token GPU-inputs lane for the WHOLE prompt: ~11ms/token on
+	// the 12B, 184s for a 16K prompt the batched lane prefills in 18s (#299
+	// depth sweep). The last id needs no special-casing: the batched lane
+	// returns (and retains) the boundary hidden after the final token.
+	hidden, err := s.prefillRetainedTokens(ids, "native.WarmPromptCache")
+	if err != nil {
+		return nil, nil, err
 	}
-	var hidden, logits []byte
-	var err error
+	s.rememberRetainedHidden(hidden)
+	var logits []byte
 	withAutoreleasePool(func() {
-		var ok bool
-		hidden, ok, err = s.stepIDRetainedGPUInputsInPool(ids[len(ids)-1])
-		if err != nil {
-			return
-		}
-		if !ok {
-			hidden, err = s.stepIDRetainedInPool(ids[len(ids)-1])
-			if err != nil {
-				return
-			}
-		}
 		logits, err = s.promptCacheLogitsFromRetainedHidden(hidden)
 	})
 	if err != nil {
