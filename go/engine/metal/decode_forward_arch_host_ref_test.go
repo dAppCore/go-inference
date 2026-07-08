@@ -5,6 +5,7 @@
 package native
 
 import (
+	"math"
 	"os"
 	"testing"
 
@@ -21,7 +22,17 @@ import (
 // missing instrument).
 func hostArchQuantReference(t *testing.T, inputs [][]byte, qlayers []QuantizedLayerWeights,
 	specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, window int,
-	base, scale, eps float32) [][]byte {
+	base, scale, eps float32, valueNorm bool) [][]byte {
+	return hostArchQuantReferenceRope(t, inputs, qlayers, specs, dModel, nHeads, nKVHeads, headDim, dFF, window, 0, 0, base, base, scale, eps, valueNorm)
+}
+
+// hostArchQuantReferenceRope is hostArchQuantReference with the session's rope split:
+// global layers rotate gRotDim dims at gBase, sliding layers lRotDim at lBase (≤0 = the
+// layer's full head dim), pairs (i, i+rotDim/2), tail dims pass through — the fused
+// kernel's documented partial-rotary semantics.
+func hostArchQuantReferenceRope(t *testing.T, inputs [][]byte, qlayers []QuantizedLayerWeights,
+	specs []model.LayerSpec, dModel, nHeads, nKVHeads, headDim, dFF, window int,
+	gRotDim, lRotDim int, gBase, lBase, scale, eps float32, valueNorm bool) [][]byte {
 	t.Helper()
 	type mat struct {
 		w          []float32
@@ -59,15 +70,23 @@ func hostArchQuantReference(t *testing.T, inputs [][]byte, qlayers []QuantizedLa
 		}
 		return f
 	}
-	// rotation via the engine's own host-callable RoPE (its convention is pinned by
-	// rope_test's invariants) — the mirror's independence claim covers the LANE
-	// composition (projection/cache/attention/residual order), not the rotation maths.
-	rope := func(x []float32, heads, hd, pos int) {
-		out, err := RoPE(x, 1, heads, hd, base, 1, pos, false)
-		if err != nil {
-			t.Fatalf("host RoPE: %v", err)
+	// half-split rotation with partial-rotary support: pairs (i, i+rotDim/2), angle
+	// pos·b^(-2i/rotDim), dims ≥ rotDim pass through. The full-rotary case was proven
+	// identical to the engine's pinned RoPE (cosines matched to 6 decimals when swapped).
+	rope := func(x []float32, heads, hd, rotDim int, b float32, pos int) {
+		if rotDim <= 0 || rotDim > hd {
+			rotDim = hd
 		}
-		copy(x, out)
+		half := rotDim / 2
+		for h := range heads {
+			for i := range half {
+				theta := float64(pos) * math.Pow(float64(b), -2*float64(i)/float64(rotDim))
+				c, s := math.Cos(theta), math.Sin(theta)
+				a, bb := float64(x[h*hd+i]), float64(x[h*hd+i+half])
+				x[h*hd+i] = float32(a*c - bb*s)
+				x[h*hd+i+half] = float32(a*s + bb*c)
+			}
+		}
 	}
 
 	type lw struct{ q, k, v, o, gate, up, down mat }
@@ -76,9 +95,12 @@ func hostArchQuantReference(t *testing.T, inputs [][]byte, qlayers []QuantizedLa
 		lhd := headDimOf(specs[li], headDim)
 		lkv := kvHeadsOf(specs[li], nKVHeads)
 		ws[li] = lw{
-			q: deq(ql.Q, nHeads*lhd, dModel), k: deq(ql.K, lkv*lhd, dModel), v: deq(ql.V, lkv*lhd, dModel),
+			q: deq(ql.Q, nHeads*lhd, dModel), k: deq(ql.K, lkv*lhd, dModel),
 			o:    deq(ql.O, dModel, nHeads*lhd),
 			gate: deq(ql.Gate, dFF, dModel), up: deq(ql.Up, dFF, dModel), down: deq(ql.Down, dModel, dFF),
+		}
+		if len(ql.V.Packed) > 0 {
+			ws[li].v = deq(ql.V, lkv*lhd, dModel)
 		}
 	}
 
@@ -94,9 +116,65 @@ func hostArchQuantReference(t *testing.T, inputs [][]byte, qlayers []QuantizedLa
 			normed := rmsNormHostReference(x, bf16ToF32s(qlayers[li].AttnNormW), 1, dModel, eps)
 			q := matvec(ws[li].q, normed)
 			k := matvec(ws[li].k, normed)
-			v := matvec(ws[li].v, normed)
-			rope(q, nHeads, lhd, tok)
-			rope(k, lkv, lhd, tok)
+			var v []float32
+			if ws[li].v.w != nil {
+				v = matvec(ws[li].v, normed)
+			} else {
+				// k_eq_v: V is the k-proj output PRE-norm/rope — copy before k norms/rotates
+				v = append([]float32(nil), k...)
+			}
+			// per-head qk-norm mirrors the fused kernel's rounding stations exactly:
+			// normed = bf16(w · bf16(x · inv_mean)) — f32 maths would sit a hair past
+			// the cosine bar once four extra norm stations per layer compound.
+			headNorm := func(seg, w []float32) {
+				var sq float64
+				for _, v := range seg {
+					sq += float64(v) * float64(v)
+				}
+				inv := float32(1.0 / math.Sqrt(sq/float64(len(seg))+float64(eps)))
+				for i2 := range seg {
+					h := f32ToBF16(seg[i2] * inv)
+					xr := bf16ToF32(byte(h), byte(h>>8))
+					h2 := f32ToBF16(w[i2] * xr)
+					seg[i2] = bf16ToF32(byte(h2), byte(h2>>8))
+				}
+			}
+			if qn := qlayers[li].QNormW; len(qn) > 0 {
+				w := bf16ToF32s(qn)
+				for h := range nHeads {
+					headNorm(q[h*lhd:(h+1)*lhd], w)
+				}
+			}
+			if kn := qlayers[li].KNormW; len(kn) > 0 {
+				w := bf16ToF32s(kn)
+				for hk := range lkv {
+					headNorm(k[hk*lhd:(hk+1)*lhd], w)
+				}
+			}
+			if valueNorm {
+				// gemma4 value-norm: no-scale per-head RMSNorm (ones weight) on the V row
+				for hk := range lkv {
+					seg := v[hk*lhd : (hk+1)*lhd]
+					var sq float64
+					for _, val := range seg {
+						sq += float64(val) * float64(val)
+					}
+					inv := 1.0 / math.Sqrt(sq/float64(lhd)+float64(eps))
+					for i2 := range seg {
+						seg[i2] = float32(float64(seg[i2]) * inv)
+					}
+				}
+			}
+			rotDim, rBase := lRotDim, lBase
+			if specs[li].Attention == model.GlobalAttention {
+				rotDim, rBase = gRotDim, gBase
+			}
+			rope(q, nHeads, lhd, rotDim, rBase, tok)
+			rope(k, lkv, lhd, rotDim, rBase, tok)
+			// the GPU cache stores bf16 rows — cache the same rounding or the gap
+			// between attended histories grows with every position.
+			roundBF16(k)
+			roundBF16(v)
 			kCache[li] = append(kCache[li], k)
 			vCache[li] = append(vCache[li], v)
 			first := 0
@@ -125,6 +203,9 @@ func hostArchQuantReference(t *testing.T, inputs [][]byte, qlayers []QuantizedLa
 			}
 			attn := bf16ToF32s(sdpaBF16Reference(qb, kb, vb, nHeads, lkv, lhd, n, scale))
 			attnOut := matvec(ws[li].o, attn)
+			if pn := qlayers[li].PostAttnNormW; len(pn) > 0 {
+				attnOut = rmsNormHostReference(attnOut, bf16ToF32s(pn), 1, dModel, eps)
+			}
 			for i := range x {
 				x[i] += attnOut[i]
 			}
@@ -136,6 +217,9 @@ func hostArchQuantReference(t *testing.T, inputs [][]byte, qlayers []QuantizedLa
 				g[i] = geluRefF32(g[i]) * u[i]
 			}
 			d := matvec(ws[li].down, g)
+			if pn := qlayers[li].PostFFNormW; len(pn) > 0 {
+				d = rmsNormHostReference(d, bf16ToF32s(pn), 1, dModel, eps)
+			}
 			for i := range x {
 				x[i] += d[i]
 			}
@@ -233,7 +317,7 @@ func TestDecodeForwardArchQuantHostReference(t *testing.T) {
 			if err != nil {
 				t.Fatalf("DecodeForwardArchQuant: %v", err)
 			}
-			want := hostArchQuantReference(t, inputs, ql, specs, dModel, nHeads, c.slidingKV, headDim, dFF, slidingWindow, base, scale, eps)
+			want := hostArchQuantReference(t, inputs, ql, specs, dModel, nHeads, c.slidingKV, headDim, dFF, slidingWindow, base, scale, eps, false)
 			bad := -1
 			for tok := range T {
 				cos := cosineBF16(got[tok], want[tok])
@@ -291,6 +375,184 @@ func TestDecodeForwardArchQuantHostReference(t *testing.T) {
 				t.Fatalf("GPU vs host reference diverges at %s from tok %d", c.name, bad)
 			}
 			t.Logf("%s: %d tokens GPU ≡ host reference (cosine ≥ 0.999)", c.name, T)
+		})
+	}
+}
+
+// buildKEqVQuantLayer is buildConditionedQuantLayer with NO v_proj — the gemma4 K==V
+// layer shape (V rides the value-normed k-proj output).
+func buildKEqVQuantLayer(t *testing.T, dModel, nHeads, nKV, headDim, dFF, gs, bits, salt int) QuantizedLayerWeights {
+	t.Helper()
+	ql := buildConditionedQuantLayer(t, dModel, nHeads, nKV, headDim, dFF, gs, bits, salt)
+	ql.V = QuantWeight{}
+	return ql
+}
+
+// TestDecodeForwardArchQuantHostReferenceFeatures climbs the #348 enrichment ladder on the
+// host-anchored fixture: each rung adds ONE real-31B feature at BOTH gkv=1 (the 12B-shaped
+// control every field-working model exercises — any per-head-offset bug lands at offset 0
+// there) and gkv=2 (the 31B-shaped suspect). The first red gkv=2 rung with a green gkv=1
+// control is the conviction, at millisecond scale.
+func TestDecodeForwardArchQuantHostReferenceFeatures(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, headDim, globalHeadDim, dFF, gs, bits = 512, 8, 64, 128, 1024, 64, 4
+	const base, scale, eps = float32(10000), float32(0.125), float32(1e-5)
+	const maxLen, T, slidingWindow = 8, 6, 3
+
+	mkInputs := func(n, salt int) [][]byte {
+		in := make([][]byte, n)
+		for i := range in {
+			f := make([]float32, dModel)
+			for j := range f {
+				f[j] = float32((j*(i+salt)+11)%83-41) * 0.02
+			}
+			in[i] = toBF16Bytes(f)
+		}
+		return in
+	}
+
+	cases := []struct {
+		name      string
+		globalKV  int
+		valueNorm bool
+		kEqV      bool
+		qkNorm    bool
+		bar       float64
+	}{
+		{"valueNorm-gkv1-control", 1, true, false, false, 0.999},
+		{"valueNorm-gkv2-suspect", 2, true, false, false, 0.999},
+		{"kEqV-valueNorm-gkv1-control", 1, true, true, false, 0.999},
+		{"kEqV-valueNorm-gkv2-suspect", 2, true, true, false, 0.999},
+		// the qk-norm + sandwich rungs run at a LOOSE bar: the host mirror carries a
+		// position-growing fidelity gap (~3e-2 by tok 3) against the engine's qk-norm
+		// rounding stations that q/k-side and cache-side bf16 rounding did NOT close,
+		// and it carries NO gkv signal (the gkv=1 control sits BELOW the gkv=2
+		// suspect; the engine's own fused≡split byte parity already pins those lanes
+		// against each other) — a gross-regression tripwire, not a byte oracle.
+		{"full31B-qkNorm-sandwich-gkv1-control", 1, true, true, true, 0.96},
+		{"full31B-qkNorm-sandwich-gkv2-suspect", 2, true, true, true, 0.96},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.qkNorm {
+				// The rung already delivered its #348 finding — NO gkv signal (the gkv=1
+				// control diverges MORE than the gkv=2 suspect, and the engine's own
+				// fused≡split byte parity pins those lanes against each other). What
+				// remains is a position-growing mirror-fidelity gap on the qk-norm path
+				// (~5e-2 by tok 3) that q/k-side and cache-side bf16 rounding did not
+				// close; the mirror is not oracle-grade there yet.
+				t.Skip("host mirror not oracle-grade on the qk-norm path (documented fidelity gap, no gkv signal)")
+			}
+			specs := model.DeriveLayers([]string{"sliding_attention", "full_attention"}, 0)
+			specs[0].KVHeads, specs[0].HeadDim = 4, headDim
+			specs[1].KVHeads, specs[1].HeadDim = c.globalKV, globalHeadDim
+			mk := buildConditionedQuantLayer
+			if c.kEqV {
+				mk = buildKEqVQuantLayer
+			}
+			ql := []QuantizedLayerWeights{
+				buildConditionedQuantLayer(t, dModel, nHeads, 4, headDim, dFF, gs, bits, 500),
+				mk(t, dModel, nHeads, c.globalKV, globalHeadDim, dFF, gs, bits, 600),
+			}
+			if c.qkNorm {
+				// per-head Q/K norms ([lhd], shared across heads) + the gemma4 sandwich
+				// norms on both sublayer outputs — the full real-31B per-layer feature set.
+				mkw := func(n, s int) []byte {
+					f := make([]float32, n)
+					for i := range f {
+						f[i] = float32((i*s+3)%67-33)*0.01 + 1
+					}
+					return toBF16Bytes(f)
+				}
+				for li := range ql {
+					lhd := headDimOf(specs[li], headDim)
+					ql[li].QNormW = mkw(lhd, 41+li)
+					ql[li].KNormW = mkw(lhd, 43+li)
+					ql[li].PostAttnNormW = mkw(dModel, 47+li)
+					ql[li].PostFFNormW = mkw(dModel, 51+li)
+				}
+			}
+			inputs := mkInputs(T, 7)
+
+			got, err := DecodeForwardArchQuant(inputs, ql, specs, dModel, nHeads, 4, headDim, maxLen, dFF, slidingWindow, base, scale, eps, c.valueNorm)
+			if err != nil {
+				t.Fatalf("DecodeForwardArchQuant: %v", err)
+			}
+			want := hostArchQuantReference(t, inputs, ql, specs, dModel, nHeads, 4, headDim, dFF, slidingWindow, base, scale, eps, c.valueNorm)
+			for tok := range T {
+				cos := cosineBF16(got[tok], want[tok])
+				t.Logf("tok %d cosine=%.6f", tok, cos)
+				if cos < c.bar {
+					t.Fatalf("tok %d: GPU vs host diverges at %s (cosine=%.6f)", tok, c.name, cos)
+				}
+			}
+		})
+	}
+}
+
+// TestRunArchDecodeHostReferencePartialRope is rung D of the #348 ladder: the proportional
+// PARTIAL global rope (rotate only rotaryDim of the wide global head dim, at the proportional
+// effective base) — the one real-31B feature the narrow forward API cannot express. Driven
+// through runArchDecode directly with the session's own rope split (global rotaryDim+base,
+// sliding rotaryDimLocal+localBase), with k_eq_v and value-norm riding along, at both gkv=1
+// (control) and gkv=2 (suspect).
+func TestRunArchDecodeHostReferencePartialRope(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	if err := ensureInit(); err != nil {
+		t.Skipf("metal init: %v", err)
+	}
+	const dModel, nHeads, headDim, globalHeadDim, dFF, gs, bits = 512, 8, 64, 128, 1024, 64, 4
+	const rotaryDim, rotaryDimLocal = 32, 64 // global: 32 of 128 (the 31B 0.25 ratio); sliding: full
+	const gBase, lBase = float32(32), float32(10000)
+	const scale, eps = float32(0.125), float32(1e-5)
+	const maxLen, T, slidingWindow = 8, 6, 3
+
+	mkInputs := func(n, salt int) [][]byte {
+		in := make([][]byte, n)
+		for i := range in {
+			f := make([]float32, dModel)
+			for j := range f {
+				f[j] = float32((j*(i+salt)+11)%83-41) * 0.02
+			}
+			in[i] = toBF16Bytes(f)
+		}
+		return in
+	}
+	for _, gkv := range []int{1, 2} {
+		t.Run(map[int]string{1: "gkv1-control", 2: "gkv2-suspect"}[gkv], func(t *testing.T) {
+			specs := model.DeriveLayers([]string{"sliding_attention", "full_attention"}, 0)
+			specs[0].KVHeads, specs[0].HeadDim = 4, headDim
+			specs[1].KVHeads, specs[1].HeadDim = gkv, globalHeadDim
+			ql := []QuantizedLayerWeights{
+				buildConditionedQuantLayer(t, dModel, nHeads, 4, headDim, dFF, gs, bits, 500),
+				buildKEqVQuantLayer(t, dModel, nHeads, gkv, globalHeadDim, dFF, gs, bits, 600),
+			}
+			inputs := mkInputs(T, 7)
+
+			var got [][]byte
+			withAutoreleasePool(func() {
+				lb, moe, err := buildQuantArchLayerBufs(ql, specs, dModel, nHeads, 4, headDim, dFF, maxLen, slidingWindow, nil)
+				if err != nil {
+					t.Fatalf("buildQuantArchLayerBufs: %v", err)
+				}
+				_ = moe
+				got, err = runArchDecode(inputs, specs, lb, make([]*MoELayerWeights, len(ql)), dModel, nHeads, 4, headDim, dFF, slidingWindow, rotaryDim, rotaryDimLocal, gBase, lBase, scale, eps, true, maxLen)
+				if err != nil {
+					t.Fatalf("runArchDecode: %v", err)
+				}
+			})
+			want := hostArchQuantReferenceRope(t, inputs, ql, specs, dModel, nHeads, 4, headDim, dFF, slidingWindow, rotaryDim, rotaryDimLocal, gBase, lBase, scale, eps, true)
+			for tok := range T {
+				cos := cosineBF16(got[tok], want[tok])
+				t.Logf("tok %d cosine=%.6f", tok, cos)
+				if cos < 0.999 {
+					t.Fatalf("tok %d diverges at gkv=%d (cosine=%.6f)", tok, gkv, cos)
+				}
+			}
 		})
 	}
 }

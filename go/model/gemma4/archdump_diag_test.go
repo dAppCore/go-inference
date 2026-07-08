@@ -55,4 +55,58 @@ func TestDumpArchFromSnapshot(t *testing.T) {
 		t.Logf("L%02d attn=%v KVHeads=%d HeadDim=%d KVShareFrom=%d OwnsCache=%v MoE=%v",
 			li, sp.Attention, sp.KVHeads, sp.HeadDim, sp.KVShareFrom, sp.OwnsCache(), sp.MoE)
 	}
+	// the KV-share map: every sharer must share from an owner with IDENTICAL attention
+	// geometry — a cross-type share reads the owner's cache at the wrong kvDim/headDim.
+	bad := 0
+	for li, sp := range arch.Layer {
+		if sp.OwnsCache() {
+			continue
+		}
+		o := arch.Layer[sp.KVShareFrom]
+		mark := ""
+		if o.Attention != sp.Attention || o.KVHeads != sp.KVHeads || o.HeadDim != sp.HeadDim {
+			mark = "  <<< GEOMETRY MISMATCH"
+			bad++
+		}
+		t.Logf("L%02d(attn=%v kv=%d hd=%d) shares from L%02d(attn=%v kv=%d hd=%d)%s",
+			li, sp.Attention, sp.KVHeads, sp.HeadDim, sp.KVShareFrom, o.Attention, o.KVHeads, o.HeadDim, mark)
+	}
+	t.Logf("cross-geometry shares: %d", bad)
+}
+
+// TestDumpLoadedLayersFromSnapshot is the loader-level half of the #348 hunt: GEMMA4_SNAP
+// assembles the real checkpoint (mmap metadata only, no GPU) and dumps the per-layer weight
+// dims the engine will actually run — the instrument that catches a mis-mapped tensor after
+// the forward maths itself was exonerated by the host-reference ladder.
+func TestDumpLoadedLayersFromSnapshot(t *testing.T) {
+	snap := os.Getenv("GEMMA4_SNAP")
+	if snap == "" {
+		t.Skip("GEMMA4_SNAP not set")
+	}
+	m, dm, err := model.Load(snap)
+	if err != nil {
+		t.Fatalf("model.Load: %v", err)
+	}
+	defer func() { _ = dm.Close() }()
+	dims := func(w *model.Linear) string {
+		if w == nil {
+			return "ABSENT"
+		}
+		return core.Sprintf("%dx%d quant=%v", w.OutDim, w.InDim, w.Quantised())
+	}
+	norm := func(b []byte) string {
+		if len(b) == 0 {
+			return "ABSENT"
+		}
+		return core.Sprintf("[%d]", len(b)/2)
+	}
+	for _, li := range []int{0, 5} {
+		if li >= len(m.Layers) {
+			continue
+		}
+		L := m.Layers[li]
+		t.Logf("L%02d Q=%s K=%s V=%s O=%s", li, dims(L.Q), dims(L.K), dims(L.V), dims(L.O))
+		t.Logf("L%02d qNorm=%s kNorm=%s postAttn=%s preFF(mlpNorm)=%s postFF=%s attnNorm=%s",
+			li, norm(L.QNorm), norm(L.KNorm), norm(L.PostAttnNorm), norm(L.MLPNorm), norm(L.PostFFNorm), norm(L.AttnNorm))
+	}
 }
