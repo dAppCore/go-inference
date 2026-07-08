@@ -172,13 +172,32 @@ func (m *TextModel) Generate(ctx context.Context, prompt string, opts ...inferen
 // against a text-only model are rejected rather than silently dropped.
 func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
 	cfg := inference.ApplyGenerateOpts(opts)
-	if messagesHaveImages(messages) {
-		if v, ok := m.tm.(VisionTokenModel); ok && v.AcceptsImageInput() {
-			return m.chatMultimodal(ctx, messages, v, cfg)
+	hasImages, hasAudios := messagesHaveImages(messages), messagesHaveAudios(messages)
+	if hasImages || hasAudios {
+		v, vok := m.tm.(VisionTokenModel)
+		if hasImages && (!vok || !v.AcceptsImageInput()) {
+			return func(yield func(inference.Token) bool) {
+				m.setErr(core.NewError("engine.TextModel.Chat: model does not accept image input"))
+			}
 		}
-		return func(yield func(inference.Token) bool) {
-			m.setErr(core.NewError("engine.TextModel.Chat: model does not accept image input"))
+		var a AudioInputTokenModel
+		if hasAudios {
+			aa, aok := m.tm.(AudioInputTokenModel)
+			if !aok || !aa.AcceptsAudioInput() {
+				return func(yield func(inference.Token) bool) {
+					m.setErr(core.NewError("engine.TextModel.Chat: model does not accept audio input"))
+				}
+			}
+			a = aa
 		}
+		if !vok {
+			// the embeddings splice + prefill infra rides the vision token
+			// model surface even for an audio-only turn
+			return func(yield func(inference.Token) bool) {
+				m.setErr(core.NewError("engine.TextModel.Chat: engine exposes no multimodal prefill surface"))
+			}
+		}
+		return m.chatMultimodal(ctx, messages, v, a, cfg)
 	}
 	return m.stream(ctx, m.encode(formatChatPrompt(m.turnTokens(), messages, cfg.EnableThinking, m.thoughtSuppressor)), cfg)
 }

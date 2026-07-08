@@ -59,6 +59,30 @@ type VisionSession interface {
 	PrefillTokenEmbeddings(ids []int32, embeddings [][]byte) error
 }
 
+// AudioInputTokenModel is the optional token-model capability for audio turns:
+// the loaded checkpoint carries an audio head (a live probe, like
+// AcceptsImageInput) and can project raw audio bytes to soft-token features.
+// The embeddings splice itself rides [VisionTokenModel.TokenEmbeddingsWithFeatures].
+type AudioInputTokenModel interface {
+	AcceptsAudioInput() bool
+	AudioPlaceholderTokenID() int32
+	AudioPlaceholderBlock(softTokens int) string
+	// ProjectAudio decodes one audio attachment (WAV, 16-bit PCM mono 16 kHz)
+	// and projects it through the audio head, returning the feature bytes and
+	// the soft-token count.
+	ProjectAudio(audio []byte) (features []byte, softTokens int, err error)
+}
+
+// messagesHaveAudios reports whether any turn carries audio attachments.
+func messagesHaveAudios(messages []inference.Message) bool {
+	for _, m := range messages {
+		if len(m.Audios) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // AcceptsImages reports whether the loaded checkpoint serves image turns — the
 // inference.VisionModel probe the serve + generate handlers gate on. True only
 // when the engine's TokenModel is a VisionTokenModel AND the loaded checkpoint
@@ -71,29 +95,39 @@ func (m *TextModel) AcceptsImages() bool {
 	return ok && v.AcceptsImageInput()
 }
 
+// AcceptsAudio reports whether the loaded checkpoint serves audio turns — the
+// inference.AudioModel probe, mirroring AcceptsImages.
+func (m *TextModel) AcceptsAudio() bool {
+	if m == nil || m.tm == nil {
+		return false
+	}
+	a, ok := m.tm.(AudioInputTokenModel)
+	return ok && a.AcceptsAudioInput()
+}
+
 // chatMultimodal serves a chat turn carrying images: it projects each image
 // through the vision tower, splices the soft-token features over the prompt's
 // placeholder positions, prefills the resulting token-embeddings, and streams the
 // completion — the neutral counterpart of the go-mlx cmd/mlx/vision.go driver.
-func (m *TextModel) chatMultimodal(ctx context.Context, messages []inference.Message, v VisionTokenModel, cfg inference.GenerateConfig) iter.Seq[inference.Token] {
+func (m *TextModel) chatMultimodal(ctx context.Context, messages []inference.Message, v VisionTokenModel, a AudioInputTokenModel, cfg inference.GenerateConfig) iter.Seq[inference.Token] {
 	return func(yield func(inference.Token) bool) {
 		start := time.Now()
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		// Project every image in turn order, prefixing each turn's content with
-		// the placeholder blocks for its images (the go-mlx convention: image
-		// blocks lead the turn text). imageFeatures accumulates the projected soft
-		// tokens in the same order the placeholders appear.
-		var imageFeatures []byte
-		wantPlaceholders := 0
+		// Project every attachment in turn order: image placeholder blocks lead
+		// the turn text (the go-mlx convention), audio blocks FOLLOW it (the
+		// gemma4 audio-after-text convention). imageFeatures/audioFeatures
+		// accumulate the projected soft tokens in placeholder order.
+		var imageFeatures, audioFeatures []byte
+		wantPlaceholders, wantAudioPlaceholders := 0, 0
 		rendered := make([]inference.Message, len(messages))
 		for i, msg := range messages {
 			rendered[i] = msg
-			if len(msg.Images) == 0 {
+			if len(msg.Images) == 0 && len(msg.Audios) == 0 {
 				continue
 			}
-			var prefix core.Builder
+			var prefix, suffix core.Builder
 			for _, img := range msg.Images {
 				features, softTokens, err := v.ProjectImage(img)
 				if err != nil {
@@ -114,7 +148,31 @@ func (m *TextModel) chatMultimodal(ctx context.Context, messages []inference.Mes
 				prefix.WriteString(block)
 				prefix.WriteString("\n")
 			}
-			rendered[i].Content = prefix.String() + msg.Content
+			for _, aud := range msg.Audios {
+				if a == nil {
+					m.setErr(core.NewError("engine.TextModel.Chat: audio turn without an audio-capable model"))
+					return
+				}
+				features, softTokens, err := a.ProjectAudio(aud)
+				if err != nil {
+					m.setErr(core.E("engine.TextModel.Chat", "project audio", err))
+					return
+				}
+				if softTokens <= 0 {
+					m.setErr(core.NewError("engine.TextModel.Chat: audio produced no soft tokens"))
+					return
+				}
+				block := a.AudioPlaceholderBlock(softTokens)
+				if block == "" {
+					m.setErr(core.NewError("engine.TextModel.Chat: model declares no audio placeholder tokens"))
+					return
+				}
+				audioFeatures = append(audioFeatures, features...)
+				wantAudioPlaceholders += softTokens
+				suffix.WriteString("\n")
+				suffix.WriteString(block)
+			}
+			rendered[i].Content = prefix.String() + msg.Content + suffix.String()
 		}
 
 		ids := m.encode(formatChatPrompt(m.turnTokens(), rendered, cfg.EnableThinking, m.thoughtSuppressor))
@@ -122,18 +180,25 @@ func (m *TextModel) chatMultimodal(ctx context.Context, messages []inference.Mes
 			m.setErr(core.NewError("engine.TextModel.Chat: empty prompt after tokenisation"))
 			return
 		}
-		// The templated placeholder run must survive tokenisation exactly, or the
-		// feature splice would land on the wrong rows — fail loud rather than
-		// answer against a corrupted prefill.
+		// The templated placeholder runs must survive tokenisation exactly, or
+		// the feature splice would land on the wrong rows — fail loud rather
+		// than answer against a corrupted prefill.
 		if got := countTokenID(ids, v.ImagePlaceholderTokenID()); got != wantPlaceholders {
 			m.setErr(core.E("engine.TextModel.Chat",
 				core.Sprintf("tokenizer produced %d image placeholders, want %d", got, wantPlaceholders), nil))
 			return
 		}
+		if a != nil {
+			if got := countTokenID(ids, a.AudioPlaceholderTokenID()); got != wantAudioPlaceholders {
+				m.setErr(core.E("engine.TextModel.Chat",
+					core.Sprintf("tokenizer produced %d audio placeholders, want %d", got, wantAudioPlaceholders), nil))
+				return
+			}
+		}
 
-		rows, err := v.TokenEmbeddingsWithFeatures(ids, imageFeatures, nil, nil)
+		rows, err := v.TokenEmbeddingsWithFeatures(ids, imageFeatures, audioFeatures, nil)
 		if err != nil {
-			m.setErr(core.E("engine.TextModel.Chat", "splice image features", err))
+			m.setErr(core.E("engine.TextModel.Chat", "splice multimodal features", err))
 			return
 		}
 

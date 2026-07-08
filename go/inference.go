@@ -95,6 +95,11 @@ type Message struct {
 	// engines implementing VisionModel serve image turns; the handlers
 	// reject image requests against text-only models.
 	Images [][]byte `json:"images,omitempty"`
+	// Audios carries encoded audio bytes (WAV, 16-bit PCM mono 16 kHz)
+	// attached to this turn. Audio placeholder blocks follow the turn text
+	// (the gemma4 audio-after-text convention); engines without an audio
+	// head reject audio turns rather than silently dropping them.
+	Audios [][]byte `json:"audios,omitempty"`
 }
 
 // VisionModel is the optional capability a TextModel implements when the
@@ -103,6 +108,13 @@ type Message struct {
 // not a static declaration.
 type VisionModel interface {
 	AcceptsImages() bool
+}
+
+// AudioModel is the optional capability a TextModel implements when the LOADED
+// CHECKPOINT accepts audio content — a live probe like VisionModel, not a
+// family declaration.
+type AudioModel interface {
+	AcceptsAudio() bool
 }
 
 // cr := m.Classify(ctx, []string{"positive", "negative"})

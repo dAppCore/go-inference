@@ -292,7 +292,35 @@ func (m *NativeTokenModel) InjectVideoFeatures(embeddings []byte, tokenIDs []int
 }
 
 func (m *NativeTokenModel) AcceptsAudioInput() bool {
-	return m != nil && m.audio != nil
+	if m == nil {
+		return false
+	}
+	if m.unifiedVision != nil && m.unifiedVision.Cfg.AudioSamplesPerToken > 0 {
+		return unifiedVisionEnabled
+	}
+	return m.audio != nil
+}
+
+// ProjectAudio decodes one WAV (16-bit PCM mono 16 kHz) and projects it
+// through the unified audio head, returning the soft-token features and their
+// count. The Conformer lane has no bytes-in path (its feature extractor runs
+// upstream), so non-unified models error here.
+func (m *NativeTokenModel) ProjectAudio(audio []byte) ([]byte, int, error) {
+	if m == nil {
+		return nil, 0, core.NewError("native.NativeTokenModel.ProjectAudio: nil model")
+	}
+	if m.unifiedVision == nil || m.unifiedVision.Cfg.AudioSamplesPerToken <= 0 {
+		return nil, 0, core.NewError("native.NativeTokenModel.ProjectAudio: model has no unified audio head")
+	}
+	samples, err := DecodeWAVMono16k(audio)
+	if err != nil {
+		return nil, 0, core.E("native.audio", "decode wav", err)
+	}
+	features, n, err := UnifiedAudioProject(m.unifiedVision, samples)
+	if err != nil {
+		return nil, 0, core.E("native.audio", "project (unified)", err)
+	}
+	return features, n, nil
 }
 
 func (m *NativeTokenModel) BlockDiffusionCapable() bool {
@@ -300,28 +328,30 @@ func (m *NativeTokenModel) BlockDiffusionCapable() bool {
 }
 
 func (m *NativeTokenModel) AudioPlaceholderTokenID() int32 {
-	if m == nil || m.audio == nil {
+	switch {
+	case m == nil:
 		return 0
+	case m.unifiedVision != nil && m.unifiedVision.Cfg.AudioSamplesPerToken > 0:
+		return m.unifiedVision.Cfg.AudioTokenID
+	case m.audio != nil:
+		return int32(m.audio.Cfg.AudioTokenID)
 	}
-	return int32(m.audio.Cfg.AudioTokenID)
+	return 0
 }
 
 func (m *NativeTokenModel) AudioPlaceholderBlock(softTokens int) string {
-	if m == nil || m.audio == nil || softTokens <= 0 {
+	if m == nil || softTokens <= 0 {
+		return ""
+	}
+	if m.unifiedVision != nil && m.unifiedVision.Cfg.AudioSamplesPerToken > 0 {
+		cfg := m.unifiedVision.Cfg
+		return nativeVisionPlaceholderBlock(cfg.AudioBeginToken, cfg.AudioToken, cfg.AudioEndToken, softTokens)
+	}
+	if m.audio == nil {
 		return ""
 	}
 	cfg := m.audio.Cfg
-	if cfg.AudioToken == "" {
-		return ""
-	}
-	var b core.Builder
-	b.Grow(len(cfg.AudioBeginToken) + len(cfg.AudioEndToken) + softTokens*len(cfg.AudioToken))
-	b.WriteString(cfg.AudioBeginToken)
-	for range softTokens {
-		b.WriteString(cfg.AudioToken)
-	}
-	b.WriteString(cfg.AudioEndToken)
-	return b.String()
+	return nativeVisionPlaceholderBlock(cfg.AudioBeginToken, cfg.AudioToken, cfg.AudioEndToken, softTokens)
 }
 
 func (m *NativeTokenModel) AudioSoftTokens(frames int) int {

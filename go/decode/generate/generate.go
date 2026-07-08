@@ -44,10 +44,10 @@ type Config struct {
 	// stateless one-shot path carries images; -state turns reject them (the
 	// durable session prefills text prompts only).
 	ImageSources []string
-	// AudioSources are --audio inputs. There is no engine-neutral audio-input
-	// seam yet (inference.Message carries Images, not audio), so a non-empty
-	// value is rejected honestly rather than silently dropped — audio input is
-	// a follow-up once the engine exposes the seam.
+	// AudioSources are --audio inputs (WAV, 16-bit PCM mono 16 kHz), each a
+	// local file path or a base64 "data:" URL. They attach to the user turn as
+	// inference.Message.Audios and are gated on the model's audio capability.
+	// Only the stateless one-shot path carries audio; -state turns reject it.
 	AudioSources []string
 
 	// Reactive MTP drafter (Gemma 4 targets) — same ladder as serve.
@@ -97,15 +97,14 @@ func RunGenerate(ctx context.Context, cfg Config) error {
 	// Audio input has no engine-neutral seam yet (inference.Message carries
 	// Images, not audio): reject rather than silently drop it, so the caller
 	// never gets a text-only answer that quietly ignored their audio.
-	if len(cfg.AudioSources) > 0 {
-		return core.E("generate.RunGenerate", "audio input is not yet exposed on the engine-neutral path — image input is wired, audio is a follow-up", nil)
-	}
-
 	if cfg.StateName != "" {
 		// The durable -state turn loop prefills text prompts through the spine
-		// session, which has no image seam; reject rather than drop the images.
+		// session, which has no multimodal seam; reject rather than drop.
 		if len(cfg.ImageSources) > 0 {
 			return core.E("generate.RunGenerate", "image input is not supported with -state yet — use stateless generate for vision (the durable session prefills text prompts only)", nil)
+		}
+		if len(cfg.AudioSources) > 0 {
+			return core.E("generate.RunGenerate", "audio input is not supported with -state yet — use stateless generate for audio", nil)
 		}
 		return runStateTurn(ctx, cfg, loadOpts)
 	}
@@ -141,6 +140,10 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 	if err != nil {
 		return core.E("generate.RunGenerate", "image input", err)
 	}
+	audios, err := resolveAudioInputs(cfg.AudioSources)
+	if err != nil {
+		return core.E("generate.RunGenerate", "audio input", err)
+	}
 
 	// Reactive MTP pair resolution — same ladder as serve. A detected drafter
 	// arms the speculative lane when the engine exposes a loader AND the request
@@ -155,8 +158,8 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 		switch {
 		case cfg.SpeculativeLoader == nil:
 			printNote(cfg.Log, "generate: drafter %s (%s) detected but this engine exposes no speculative path — generating plain autoregressive (block %d would apply)", det.DraftPath, det.Note, block)
-		case len(images) > 0:
-			printNote(cfg.Log, "generate: drafter %s detected but image input routes through the multimodal prefill the MTP loop does not carry — generating plain autoregressive", det.DraftPath)
+		case len(images) > 0 || len(audios) > 0:
+			printNote(cfg.Log, "generate: drafter %s detected but multimodal input routes through a prefill the MTP loop does not carry — generating plain autoregressive", det.DraftPath)
 		default:
 			sm, serr := cfg.SpeculativeLoader(cfg.ModelPath, det.DraftPath, block, loadOpts...)
 			if serr != nil {
@@ -179,14 +182,17 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 	noteCacheKnobs(cfg, tm)
 	noteKVStorageInert(cfg) // -kv-storage bites only on the -state sleep path
 
-	// Gate images on the model's neutral vision capability, exactly as serve's
+	// Gate images/audio on the model's neutral capabilities, exactly as serve's
 	// chat-completions handler does before prefill.
 	if err := requireVision(tm, images); err != nil {
 		return core.E("generate.RunGenerate", "vision", err)
 	}
+	if err := requireAudio(tm, audios); err != nil {
+		return core.E("generate.RunGenerate", "audio", err)
+	}
 
 	think := cfg.Think
-	msgs := []inference.Message{{Role: "user", Content: cfg.Prompt, Images: images}}
+	msgs := []inference.Message{{Role: "user", Content: cfg.Prompt, Images: images, Audios: audios}}
 	genOpts := func(limit int) []inference.GenerateOption {
 		opts := []inference.GenerateOption{
 			inference.WithMaxTokens(limit),
@@ -231,7 +237,7 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 	// prompt cost ~96s of unmeasured warm prefill before the ~96s measured one.
 	// Chat calls on this path never reuse KV across runs (the measured prefill is
 	// cold either way), so the prefix warm changes nothing in the timed window.
-	warmMsgs := []inference.Message{{Role: "user", Content: warmPrefix(cfg.Prompt), Images: images}}
+	warmMsgs := []inference.Message{{Role: "user", Content: warmPrefix(cfg.Prompt), Images: images, Audios: audios}}
 	run(warmMsgs, 8, nil) // warm the kernels — first call pays compilation + allocation
 	if r := tm.Err(); !r.OK {
 		return core.E("generate.RunGenerate", "warm", r.Value.(error))

@@ -122,6 +122,16 @@ type LoadedUnifiedVisionConfig struct {
 	// use_bidirectional_attention == "vision" — image soft-token spans attend
 	// bidirectionally in prefill (causal evaluation misreads large images).
 	BidirectionalImages bool
+
+	// Audio (encoder-free): each audio token is AudioSamplesPerToken raw
+	// 16 kHz waveform samples projected straight into the backbone — no mel
+	// front-end, no Conformer. Zero AudioSamplesPerToken ⇒ the pack carries
+	// no unified audio head.
+	AudioSamplesPerToken int
+	AudioTokenID         int32
+	AudioBeginToken      string
+	AudioToken           string
+	AudioEndToken        string
 }
 
 // LoadedUnifiedVision is the encoder-free vision payload (gemma4_unified):
@@ -136,7 +146,10 @@ type LoadedUnifiedVision struct {
 	PosEmbedding         []byte // [PosembSize, 2, MMEmbedDim] bf16 (axis 0 = row, 1 = col)
 	PosNormW, PosNormB   []byte
 	Projection           LoadedVisionLinear // embed_vision [TextHidden × MMEmbedDim], no bias
-	Cfg                  LoadedUnifiedVisionConfig
+	// AudioProjection is the unified audio head — embed_audio
+	// [TextHidden × AudioSamplesPerToken], no bias; nil Weight when absent.
+	AudioProjection LoadedVisionLinear
+	Cfg             LoadedUnifiedVisionConfig
 }
 
 // LoadedAudioClipBound is one optional per-linear activation clamp.

@@ -124,6 +124,57 @@ func decodeImageDataURL(url string) ([]byte, error) {
 	return bytes, nil
 }
 
+// resolveAudioInputs turns each --audio source (a "data:" base64 URL or a
+// local file path) into raw audio bytes (WAV, validated downstream by the
+// engine's decoder). Same shape and caps as resolveImageInputs; remote URLs
+// are refused.
+func resolveAudioInputs(sources []string) ([][]byte, error) {
+	if len(sources) == 0 {
+		return nil, nil
+	}
+	audios := make([][]byte, 0, len(sources))
+	for _, raw := range sources {
+		source := core.Trim(raw)
+		if source == "" {
+			continue
+		}
+		if len(audios) >= maxImagesPerRequest {
+			return nil, core.E("generate.audio", core.Sprintf("too many audio inputs — at most %d per request", maxImagesPerRequest), nil)
+		}
+		var bytes []byte
+		var err error
+		switch {
+		case core.HasPrefix(source, "data:"):
+			bytes, err = decodeImageDataURL(source) // same base64 data: URL machinery + size cap
+		case core.HasPrefix(source, "http://"), core.HasPrefix(source, "https://"):
+			return nil, core.E("generate.audio", "remote audio URLs are not fetched — pass a local file path or a base64 data: URL", nil)
+		default:
+			bytes, err = readImageFile(source) // same read + size cap; the engine validates the WAV shape
+		}
+		if err != nil {
+			return nil, err
+		}
+		audios = append(audios, bytes)
+	}
+	if len(audios) == 0 {
+		return nil, nil
+	}
+	return audios, nil
+}
+
+// requireAudio gates an audio-bearing request on the loaded model's neutral
+// audio capability, mirroring requireVision.
+func requireAudio(tm inference.TextModel, audios [][]byte) error {
+	if len(audios) == 0 {
+		return nil
+	}
+	audio, ok := tm.(inference.AudioModel)
+	if !ok || !audio.AcceptsAudio() {
+		return core.E("generate.audio", "model does not accept audio input — the loaded engine exposes no neutral audio capability", nil)
+	}
+	return nil
+}
+
 // requireVision gates an image-bearing request on the loaded model's neutral
 // vision capability, exactly as serve's chat-completions handler does before it
 // prefills: a model that does not implement inference.VisionModel (or reports it
