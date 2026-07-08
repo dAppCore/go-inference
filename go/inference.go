@@ -100,6 +100,10 @@ type Message struct {
 	// (the gemma4 audio-after-text convention); engines without an audio
 	// head reject audio turns rather than silently dropping them.
 	Audios [][]byte `json:"audios,omitempty"`
+	// Videos carries the sampled FRAMES of one video (encoded PNG/JPEG, in
+	// time order) attached to this turn — each frame becomes a timestamped
+	// vision block. Engines without vision reject video turns.
+	Videos [][]byte `json:"videos,omitempty"`
 }
 
 // VisionModel is the optional capability a TextModel implements when the

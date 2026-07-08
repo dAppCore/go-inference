@@ -102,11 +102,12 @@ type ArchSession struct {
 	// paged→linear sync assumptions do not hold for restored state (the
 	// decode-parity carve-out): restored sessions append on the token path.
 	restoredKV bool
-	// bidirSpanToken, when non-zero, marks the placeholder token id whose runs
-	// attend BIDIRECTIONALLY during embedding prefill (gemma4_unified image
-	// spans; use_bidirectional_attention == "vision"). Set at session open by
-	// the token model; PrefillTokenEmbeddings detects the runs itself.
-	bidirSpanToken int32
+	// bidirSpanTokens, when non-zero, mark the placeholder token ids whose
+	// runs attend BIDIRECTIONALLY during embedding prefill (gemma4_unified
+	// image + video spans; use_bidirectional_attention == "vision"). Set at
+	// session open by the token model; PrefillTokenEmbeddings detects the
+	// runs itself.
+	bidirSpanTokens [2]int32
 	// verifyBatchedDisabledForTest forces the MTP batched verify to decline
 	// (verifyBatchedHiddens / verifyBatchedInto return ok=false) so the caller
 	// takes the byte-identical sequential verify lane. Test-only — the honest
@@ -1666,7 +1667,7 @@ func (s *ArchSession) prefillRetainedTokenEmbeddings(ids []int32, embeddings [][
 	if s.pos+len(ids) > s.maxLen {
 		return nil, core.NewError(scope + ": sequence would exceed maxLen cache rows")
 	}
-	if spans := bidirTokenSpans(ids, s.bidirSpanToken); len(spans) > 0 {
+	if spans := bidirTokenSpans(ids, s.bidirSpanTokens); len(spans) > 0 {
 		if unifiedVisionDiag {
 			nativeTraceLog(core.Sprintf("vision-diag bidir: %d spans over %d ids (first %v)\n", len(spans), len(ids), spans[0]))
 		}
@@ -1690,21 +1691,29 @@ func (s *ArchSession) prefillRetainedTokenEmbeddings(ids []int32, embeddings [][
 	return hidden, nil
 }
 
-// bidirTokenSpans returns the [start,end) index runs of tok in ids — the
-// bidirectional image spans. A zero tok finds nothing.
-func bidirTokenSpans(ids []int32, tok int32) [][2]int {
-	if tok == 0 {
+// bidirTokenSpans returns the [start,end) index runs of the span tokens in
+// ids — the bidirectional image/video spans. Runs are per-token (an image
+// block and an adjacent video block stay separate spans); zero ids find
+// nothing.
+func bidirTokenSpans(ids []int32, toks [2]int32) [][2]int {
+	if toks[0] == 0 && toks[1] == 0 {
 		return nil
 	}
+	isSpan := func(id int32) bool { return id != 0 && (id == toks[0] || id == toks[1]) }
 	var spans [][2]int
 	start := -1
+	var startTok int32
 	for i, id := range ids {
 		switch {
-		case id == tok && start < 0:
-			start = i
-		case id != tok && start >= 0:
+		case isSpan(id) && start < 0:
+			start, startTok = i, id
+		case start >= 0 && id != startTok:
 			spans = append(spans, [2]int{start, i})
-			start = -1
+			if isSpan(id) {
+				start, startTok = i, id
+			} else {
+				start = -1
+			}
 		}
 	}
 	if start >= 0 {

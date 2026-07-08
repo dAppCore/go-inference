@@ -118,6 +118,11 @@ type LoadedUnifiedVisionConfig struct {
 	ImageBeginToken string
 	ImageToken      string
 	ImageEndToken   string
+	// Video rides the SAME embedder: each sampled frame patchifies like an
+	// image and splices at the video placeholder, one timestamped block per
+	// frame (the reference's "MM:SS {boi}{video_token×N}{eoi}" join).
+	VideoTokenID int32
+	VideoToken   string
 	// BidirectionalImages: the text config declares
 	// use_bidirectional_attention == "vision" — image soft-token spans attend
 	// bidirectionally in prefill (causal evaluation misreads large images).

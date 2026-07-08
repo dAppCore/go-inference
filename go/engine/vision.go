@@ -83,6 +83,24 @@ func messagesHaveAudios(messages []inference.Message) bool {
 	return false
 }
 
+// messagesHaveVideos reports whether any turn carries video frames.
+func messagesHaveVideos(messages []inference.Message) bool {
+	for _, m := range messages {
+		if len(m.Videos) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// VideoTokenModel is the optional token-model capability for video turns:
+// frames project through the SAME vision path but splice at the video
+// placeholder, one timestamped block per frame.
+type VideoTokenModel interface {
+	VideoPlaceholderTokenID() int32
+	VideoPlaceholderBlock(softTokens int) string
+}
+
 // AcceptsImages reports whether the loaded checkpoint serves image turns — the
 // inference.VisionModel probe the serve + generate handlers gate on. True only
 // when the engine's TokenModel is a VisionTokenModel AND the loaded checkpoint
@@ -119,15 +137,46 @@ func (m *TextModel) chatMultimodal(ctx context.Context, messages []inference.Mes
 		// the turn text (the go-mlx convention), audio blocks FOLLOW it (the
 		// gemma4 audio-after-text convention). imageFeatures/audioFeatures
 		// accumulate the projected soft tokens in placeholder order.
-		var imageFeatures, audioFeatures []byte
-		wantPlaceholders, wantAudioPlaceholders := 0, 0
+		var imageFeatures, audioFeatures, videoFeatures []byte
+		wantPlaceholders, wantAudioPlaceholders, wantVideoPlaceholders := 0, 0, 0
 		rendered := make([]inference.Message, len(messages))
 		for i, msg := range messages {
 			rendered[i] = msg
-			if len(msg.Images) == 0 && len(msg.Audios) == 0 {
+			if len(msg.Images) == 0 && len(msg.Audios) == 0 && len(msg.Videos) == 0 {
 				continue
 			}
 			var prefix, suffix core.Builder
+			if len(msg.Videos) > 0 {
+				vt, vtok := m.tm.(VideoTokenModel)
+				if !vtok || vt.VideoPlaceholderTokenID() == 0 {
+					m.setErr(core.NewError("engine.TextModel.Chat: model declares no video placeholder tokens"))
+					return
+				}
+				// One timestamped vision block per frame (the reference's
+				// "MM:SS {boi}{video_token×N}{eoi}" join); frames are treated
+				// as 1 s apart when the caller supplies no timing.
+				for f, frame := range msg.Videos {
+					features, softTokens, err := v.ProjectImage(frame)
+					if err != nil {
+						m.setErr(core.E("engine.TextModel.Chat", "project video frame", err))
+						return
+					}
+					if softTokens <= 0 {
+						m.setErr(core.NewError("engine.TextModel.Chat: video frame produced no soft tokens"))
+						return
+					}
+					block := vt.VideoPlaceholderBlock(softTokens)
+					if block == "" {
+						m.setErr(core.NewError("engine.TextModel.Chat: model declares no video placeholder tokens"))
+						return
+					}
+					videoFeatures = append(videoFeatures, features...)
+					wantVideoPlaceholders += softTokens
+					prefix.WriteString(core.Sprintf("%02d:%02d ", f/60, f%60))
+					prefix.WriteString(block)
+					prefix.WriteString("\n")
+				}
+			}
 			for _, img := range msg.Images {
 				features, softTokens, err := v.ProjectImage(img)
 				if err != nil {
@@ -195,8 +244,16 @@ func (m *TextModel) chatMultimodal(ctx context.Context, messages []inference.Mes
 				return
 			}
 		}
+		if wantVideoPlaceholders > 0 {
+			vt, _ := m.tm.(VideoTokenModel)
+			if got := countTokenID(ids, vt.VideoPlaceholderTokenID()); got != wantVideoPlaceholders {
+				m.setErr(core.E("engine.TextModel.Chat",
+					core.Sprintf("tokenizer produced %d video placeholders, want %d", got, wantVideoPlaceholders), nil))
+				return
+			}
+		}
 
-		rows, err := v.TokenEmbeddingsWithFeatures(ids, imageFeatures, audioFeatures, nil)
+		rows, err := v.TokenEmbeddingsWithFeatures(ids, imageFeatures, audioFeatures, videoFeatures)
 		if err != nil {
 			m.setErr(core.E("engine.TextModel.Chat", "splice multimodal features", err))
 			return

@@ -173,8 +173,14 @@ func (m *TextModel) Generate(ctx context.Context, prompt string, opts ...inferen
 func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
 	cfg := inference.ApplyGenerateOpts(opts)
 	hasImages, hasAudios := messagesHaveImages(messages), messagesHaveAudios(messages)
-	if hasImages || hasAudios {
+	hasVideos := messagesHaveVideos(messages)
+	if hasImages || hasAudios || hasVideos {
 		v, vok := m.tm.(VisionTokenModel)
+		if hasVideos && (!vok || !v.AcceptsImageInput()) {
+			return func(yield func(inference.Token) bool) {
+				m.setErr(core.NewError("engine.TextModel.Chat: model does not accept video input"))
+			}
+		}
 		if hasImages && (!vok || !v.AcceptsImageInput()) {
 			return func(yield func(inference.Token) bool) {
 				m.setErr(core.NewError("engine.TextModel.Chat: model does not accept image input"))
