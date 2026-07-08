@@ -30,6 +30,11 @@ import (
 type attnScratch struct {
 	dModel, qDim, kvDim, nHeads, maxLen int
 	normed, q, qr, kProj, attn, attnOut metal.MTLBuffer
+	// vProj stages the V row for q8 paged landings (#357): the projection
+	// cannot write int8 pages directly, so K/V project into scratch, the
+	// norms run there, and the quantise-store hop writes the page. bf16
+	// landings keep writing the page row and never touch it.
+	vProj metal.MTLBuffer
 	// 2-pass long-context SDPA intermediates — nil unless the path opted in (maxLen
 	// reaches the knee), so the router falls back to single-pass when absent. Sized to
 	// the largest layer's qDim × the maxLen block count, allocated once (no per-token
@@ -60,7 +65,7 @@ func attnScratchPoolFor(key attnScratchKey) *attnScratchPool {
 
 func attnScratchReady(sc *attnScratch, key attnScratchKey) bool {
 	if sc == nil || sc.dModel != key.dModel || sc.qDim != key.qDim || sc.kvDim != key.kvDim || sc.nHeads != key.nHeads || sc.maxLen != key.maxLen ||
-		sc.normed == nil || sc.q == nil || sc.qr == nil || sc.kProj == nil || sc.attn == nil || sc.attnOut == nil {
+		sc.normed == nil || sc.q == nil || sc.qr == nil || sc.kProj == nil || sc.vProj == nil || sc.attn == nil || sc.attnOut == nil {
 		return false
 	}
 	if key.maxLen >= sdpa2PassMinKV && key.nHeads > 0 {
@@ -81,6 +86,7 @@ func newAttnScratch(dModel, qDim, kvDim, nHeads, maxLen int) attnScratch {
 		q:       scratchBF16(qDim),
 		qr:      scratchBF16(qDim),
 		kProj:   scratchBF16(kvDim),
+		vProj:   scratchBF16(kvDim),
 		attn:    scratchBF16(qDim),
 		attnOut: scratchBF16(dModel),
 	}

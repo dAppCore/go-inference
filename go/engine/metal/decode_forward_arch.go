@@ -564,7 +564,8 @@ func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc b
 			cacheMax = s.slidingWindow
 			ring = true
 		}
-		cache, err := newDevicePagedKVCache(kvHeadsOf(spec, s.nKVHeads), headDimOf(spec, s.headDim), cacheMax, pageSize)
+		lkv, lhd := kvHeadsOf(spec, s.nKVHeads), headDimOf(spec, s.headDim)
+		cache, err := newDevicePagedKVCache(lkv, lhd, cacheMax, pageSize)
 		if err != nil {
 			for _, prior := range pages {
 				if prior != nil {
@@ -574,6 +575,14 @@ func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc b
 			return err
 		}
 		cache.ring = ring
+		if kvQ8Enabled && s.nHeads == 2*lkv && lhd <= 256 && (lkv*lhd)%kvQ8GroupSize == 0 {
+			// q8 pages exist only for gqa2 geometry (the only q8 SDPA kernels).
+			// Layers outside it keep bf16 pages — mixed modes are fine, every
+			// landing and read site branches per cache. The all-miss case is
+			// caught below: a requested quantised cache never silently
+			// downgrades wholesale.
+			cache.quantQ8 = true
+		}
 		if prealloc {
 			if err := cache.preallocPages(); err != nil {
 				for _, prior := range pages {
@@ -586,6 +595,23 @@ func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc b
 			}
 		}
 		pages[li] = cache
+	}
+	if kvQ8Enabled {
+		anyQ8 := false
+		for _, cache := range pages {
+			if cache != nil && cache.quantQ8 {
+				anyQ8 = true
+				break
+			}
+		}
+		if !anyQ8 {
+			for _, cache := range pages {
+				if cache != nil {
+					cache.Close()
+				}
+			}
+			return core.NewError("native.initDevicePagedKV: LTHN_KV_Q8 set but no layer has gqa2 geometry (nHeads == 2*kvHeads, headDim <= 256)")
+		}
 	}
 	s.pagedKV = pages
 	return nil

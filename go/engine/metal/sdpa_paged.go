@@ -36,6 +36,12 @@ type sdpaPagedP1Params struct {
 	Scale       float32
 }
 
+// kvQ8Enabled turns the paged KV cache q8 (#357): int8 rows + f32 group
+// scales, halving KV memory and scan bytes on gqa2 models (26B/12B/31B).
+// LTHN_KV_Q8=1 — the v1 lever; the -kv-cache selector graduates once the
+// mode has soak time.
+var kvQ8Enabled = os.Getenv("LTHN_KV_Q8") == "1"
+
 // sdpaPagedSplitRowsOverride: LTHN_SDPA_SPLIT probe lever for the #356 grain
 // sweep — 0 (unset) keeps the computed grain.
 var sdpaPagedSplitRowsOverride = func() int {
@@ -273,6 +279,34 @@ func kvQ8StorePipeline() (metal.MTLComputePipelineState, error) {
 		kvQ8StorePSO, kvQ8StorePSOErr = device.NewComputePipelineStateWithFunctionError(fn)
 	})
 	return kvQ8StorePSO, kvQ8StorePSOErr
+}
+
+type kvQ8StoreDims struct {
+	KVDim uint32
+}
+
+// encKVQ8Store quantises one landed bf16 row (kvDim elements at offset 0 of
+// row) into its int8 page row + f32 group scales — the landing hop between
+// the norms and the SDPA read. One 32-lane threadgroup per 64-group.
+func encKVQ8Store(enc metal.MTLComputeCommandEncoder, row, page metal.MTLBuffer, pageOff uint, scales metal.MTLBuffer, scaleOff uint, kvDim int) error {
+	pso, err := kvQ8StorePipeline()
+	if err != nil {
+		return err
+	}
+	if kvDim <= 0 || kvDim%kvQ8GroupSize != 0 {
+		return core.NewError("native.encKVQ8Store: kvDim must be a positive multiple of the q8 group size")
+	}
+	params := kvQ8StoreDims{KVDim: uint32(kvDim)}
+	setPSO(enc, pso)
+	setBuf(enc, row, 0, 0)
+	setBuf(enc, page, pageOff, 1)
+	setBuf(enc, scales, scaleOff, 2)
+	setBytes(enc, unsafe.Pointer(&params), uint(unsafe.Sizeof(params)), 3)
+	dispatchThreadgroups(enc,
+		metal.MTLSize{Width: uint(kvDim / kvQ8GroupSize), Height: 1, Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+	)
+	return nil
 }
 
 func sdpaPagedP2Pipeline() (metal.MTLComputePipelineState, error) {
