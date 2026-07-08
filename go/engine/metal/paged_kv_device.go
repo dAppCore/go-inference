@@ -7,6 +7,8 @@ package native
 import (
 	"math"
 	"math/bits"
+	"runtime"
+	"sync"
 	"sync/atomic"
 	"unsafe"
 
@@ -451,6 +453,32 @@ func (c *devicePagedKVCache) loadLinearSnapshot(kRows, vRows []byte, tokens int)
 	}
 	c.length = 0
 	c.offset = 0
+	if c.quantQ8 {
+		// materialise the pages/lengths first (slot is stateful), then quantise
+		// rows in parallel — the scalar loop cost ~10s for a 16K-row 26B prefill
+		// reload single-threaded, and every row is independent.
+		for pos := range tokens {
+			if _, _, _, err := c.slot(pos); err != nil {
+				return err
+			}
+		}
+		rowGroups := c.kvDim / kvQ8GroupSize
+		parallelRows(tokens, func(pos int) {
+			page := c.pageForPos(pos)
+			slotIdx := pos - c.pageStartFor(page)
+			qOff := uintptr(slotIdx * c.kvDim)
+			sOff := uintptr(slotIdx * c.scaleRowBytes())
+			srcOff := pos * rowBytes
+			kQ := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[page]), qOff)), c.kvDim)
+			vQ := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[page]), qOff)), c.kvDim)
+			kS := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.kScalePtrs[page]), sOff)), rowGroups)
+			vS := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.vScalePtrs[page]), sOff)), rowGroups)
+			kvQ8QuantRows(kQ, kS, kRows[srcOff:srcOff+rowBytes])
+			kvQ8QuantRows(vQ, vS, vRows[srcOff:srcOff+rowBytes])
+		})
+		c.linearSynced = tokens
+		return nil
+	}
 	for pos := range tokens {
 		_, _, rowOff, err := c.slot(pos)
 		if err != nil {
@@ -458,23 +486,46 @@ func (c *devicePagedKVCache) loadLinearSnapshot(kRows, vRows []byte, tokens int)
 		}
 		srcOff := pos * rowBytes
 		page := c.pageForPos(pos)
-		if c.quantQ8 {
-			rowGroups := c.kvDim / kvQ8GroupSize
-			qOff := uintptr(rowOff) // rowOff is already in row-elem bytes (1B/elem)
-			sOff := uintptr((pos - c.pageStartFor(page)) * c.scaleRowBytes())
-			kQ := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[page]), qOff)), c.kvDim)
-			vQ := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[page]), qOff)), c.kvDim)
-			kS := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.kScalePtrs[page]), sOff)), rowGroups)
-			vS := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.vScalePtrs[page]), sOff)), rowGroups)
-			kvQ8QuantRows(kQ, kS, kRows[srcOff:srcOff+rowBytes])
-			kvQ8QuantRows(vQ, vS, vRows[srcOff:srcOff+rowBytes])
-			continue
-		}
 		copy(unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[page]), uintptr(rowOff))), rowBytes), kRows[srcOff:srcOff+rowBytes])
 		copy(unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[page]), uintptr(rowOff))), rowBytes), vRows[srcOff:srcOff+rowBytes])
 	}
 	c.linearSynced = tokens
 	return nil
+}
+
+// parallelRows fans fn over [0, n) across the machine's cores — the q8 host
+// quantise/dequantise loops are embarrassingly parallel per row.
+func parallelRows(n int, fn func(int)) {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > n {
+		workers = n
+	}
+	if workers <= 1 {
+		for i := range n {
+			fn(i)
+		}
+		return
+	}
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func() {
+			defer wg.Done()
+			const stride = 64 // batch to keep the atomic off the hot path
+			for {
+				start := int(next.Add(stride)) - stride
+				if start >= n {
+					return
+				}
+				end := min(start+stride, n)
+				for i := start; i < end; i++ {
+					fn(i)
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func (c *devicePagedKVCache) truncate(tokens int) error {
@@ -673,6 +724,26 @@ func encAttnHalfKVPaged(
 	if err != nil {
 		return enc, encConc, err
 	}
+	// q8 landing targets (#357): the projections cannot write int8 pages, so
+	// K/V project into scratch rows, the norms/ropes run there, and the
+	// quantise-store hop writes the page row + group scales before the SDPA
+	// reads. bf16 landings keep writing the page row directly.
+	kDst, vDst := kPage, vPage
+	kDstOff, vDstOff := rowOff, rowOff
+	var kScalePage, vScalePage metal.MTLBuffer
+	var scaleOff uint
+	if cache.quantQ8 {
+		kSc, vSc := cache.scaleState()
+		if err := sdpaPlan.attachQ8(kSc, vSc); err != nil {
+			return enc, encConc, err
+		}
+		kScalePage, vScalePage, scaleOff = cache.scaleSlot(pos)
+		if kScalePage == nil || vScalePage == nil || sc.vProj == nil {
+			return enc, encConc, core.NewError("native.encAttnHalfKVPaged: q8 cache missing scale pages or vProj scratch")
+		}
+		kDst, vDst = sc.kProj, sc.vProj
+		kDstOff, vDstOff = 0, 0
+	}
 
 	// ---- concurrent pass: the q/k/v projections all read the same normed row, their
 	// rope/norm stages are pairwise independent, and the SDPA's per-page pass-1 dispatches
@@ -704,7 +775,7 @@ func encAttnHalfKVPaged(
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), false, err
 		}
-		if err := proj.project(encI, sc.normed, kPage, rowOff, projK); err != nil {
+		if err := proj.project(encI, sc.normed, kDst, kDstOff, projK); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), false, err
 		}
@@ -712,7 +783,7 @@ func encAttnHalfKVPaged(
 		if !proj.hasV() {
 			vIdx = projK
 		}
-		if err := proj.project(encI, sc.normed, vPage, rowOff, vIdx); err != nil {
+		if err := proj.project(encI, sc.normed, vDst, vDstOff, vIdx); err != nil {
 			endEncodingFast(enc)
 			return computeCommandEncoderFast(cb), false, err
 		}
@@ -723,13 +794,26 @@ func encAttnHalfKVPaged(
 			return computeCommandEncoderFast(cb), false, err
 		}
 		if kNorm.buf != nil {
-			if err := encQKNormRopeAt(encI, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+			if err := encQKNormRopeAt(encI, kDst, kNorm.buf, kDst, kDstOff, kNorm.off, kDstOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
 				endEncodingFast(enc)
 				return computeCommandEncoderFast(cb), false, err
 			}
 		}
 		if valueNorm != nil {
-			if err := encRMSNormRowsBF16(encI, vPage, valueNorm, vPage, rowOff, 0, rowOff, nKVHeads, headDim, eps); err != nil {
+			if err := encRMSNormRowsBF16(encI, vDst, valueNorm, vDst, vDstOff, 0, vDstOff, nKVHeads, headDim, eps); err != nil {
+				endEncodingFast(enc)
+				return computeCommandEncoderFast(cb), false, err
+			}
+		}
+		if cache.quantQ8 {
+			// stage 3.5: the quantise-store hop — a barrier orders the staged
+			// rows' writes ahead, then both stores land before stage 4's reads.
+			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+			if err := encKVQ8Store(encI, sc.kProj, kPage, rowOff, kScalePage, scaleOff, nKVHeads*headDim); err != nil {
+				endEncodingFast(enc)
+				return computeCommandEncoderFast(cb), false, err
+			}
+			if err := encKVQ8Store(encI, sc.vProj, vPage, rowOff, vScalePage, scaleOff, nKVHeads*headDim); err != nil {
 				endEncodingFast(enc)
 				return computeCommandEncoderFast(cb), false, err
 			}
@@ -799,20 +883,20 @@ func encAttnHalfKVPaged(
 			return enc, false, err
 		}
 	}
-	if err := proj.project(encI, sc.normed, kPage, rowOff, projK); err != nil {
+	if err := proj.project(encI, sc.normed, kDst, kDstOff, projK); err != nil {
 		return enc, false, err
 	}
 	if fusedKRope {
-		if err := encQKNormRopeAt(encI, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
+		if err := encQKNormRopeAt(encI, kDst, kNorm.buf, kDst, kDstOff, kNorm.off, kDstOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale, eps); err != nil {
 			return enc, false, err
 		}
 	} else {
 		if kNorm.buf != nil {
-			if err := encRMSNormRowsBF16(encI, kPage, kNorm.buf, kPage, rowOff, kNorm.off, rowOff, nKVHeads, headDim, eps); err != nil {
+			if err := encRMSNormRowsBF16(encI, kDst, kNorm.buf, kDst, kDstOff, kNorm.off, kDstOff, nKVHeads, headDim, eps); err != nil {
 				return enc, false, err
 			}
 		}
-		if err := encRopeDecodeAt(encI, kPage, kPage, rowOff, rowOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale); err != nil {
+		if err := encRopeDecodeAt(encI, kDst, kDst, kDstOff, kDstOff, offBuf, offOff, ropeFreqs, nKVHeads, headDim, rotaryDim, base, scale); err != nil {
 			return enc, false, err
 		}
 	}
@@ -820,11 +904,21 @@ func encAttnHalfKVPaged(
 	if !proj.hasV() {
 		vIdx = projK
 	}
-	if err := proj.project(encI, sc.normed, vPage, rowOff, vIdx); err != nil {
+	if err := proj.project(encI, sc.normed, vDst, vDstOff, vIdx); err != nil {
 		return enc, false, err
 	}
 	if valueNorm != nil {
-		if err := encRMSNormRowsBF16(encI, vPage, valueNorm, vPage, rowOff, 0, rowOff, nKVHeads, headDim, eps); err != nil {
+		if err := encRMSNormRowsBF16(encI, vDst, valueNorm, vDst, vDstOff, 0, vDstOff, nKVHeads, headDim, eps); err != nil {
+			return enc, false, err
+		}
+	}
+	if cache.quantQ8 {
+		// the quantise-store hop (hazard tracking orders it after the norms
+		// and ahead of the SDPA's page reads on this serial encoder).
+		if err := encKVQ8Store(encI, sc.kProj, kPage, rowOff, kScalePage, scaleOff, nKVHeads*headDim); err != nil {
+			return enc, false, err
+		}
+		if err := encKVQ8Store(encI, sc.vProj, vPage, rowOff, vScalePage, scaleOff, nKVHeads*headDim); err != nil {
 			return enc, false, err
 		}
 	}
@@ -905,9 +999,19 @@ func encAttnHalfSharedPaged(
 	if err != nil {
 		return err
 	}
-	if err := encSDPAPagedDecodeStrided(enc, sc.q, keyPages, valuePages, pageLens, kHead, kSeq, vHead, vSeq, sc.attn, pagedScratch, nHeads, nKVHeads, headDim, scale); err != nil {
+	plan, err := buildSDPAPagedDecodePlan(sc.q, keyPages, valuePages, pageLens, kHead, kSeq, vHead, vSeq, sc.attn, pagedScratch, nHeads, nKVHeads, headDim, scale)
+	if err != nil {
 		return err
 	}
+	if cache.quantQ8 {
+		// sharers attend the OWNER's q8 pages (read-only — no landing here).
+		kSc, vSc := cache.scaleState()
+		if err := plan.attachQ8(kSc, vSc); err != nil {
+			return err
+		}
+	}
+	plan.emitP1s(enc)
+	plan.emitP2(enc)
 	if err := proj.project(enc, sc.attn, sc.attnOut, 0, projO); err != nil {
 		return err
 	}
