@@ -330,7 +330,7 @@ func (f *assistantFusedDraft) step(tokenEmbedding, previousHidden, normedOut, hi
 // nil when the geometry is unsupported / the switch is off — callers fall
 // back to the legacy per-op step.
 func (pair *AssistantPair) fusedDraft() *assistantFusedDraft {
-	if !assistantFusedDraftEnabled || pair == nil || pair.Assistant == nil {
+	if mtpNoFusedForTest || !assistantFusedDraftEnabled || pair == nil || pair.Assistant == nil {
 		return nil
 	}
 	if pair.fusedInit {
