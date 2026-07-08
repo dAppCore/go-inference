@@ -922,7 +922,9 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			// differ. Token-identity tier (S stores bf16 between the GEMMs), the same
 			// boundary the fold's qmm and ≥32-row steel projections already trade at.
 			useGEMMSDPA := useMultiQ && slideW == 0 && basePos+K >= sdpaPromptGEMMMinKV &&
-				K <= sdpaPromptGEMMMaxRows && !sdpaPromptGEMMDisabledForTest && gpuHasPromptSDPAGEMM()
+				K <= sdpaPromptGEMMMaxRows && sdpaPromptGEMMFeasible(K, s.maxLen) &&
+				!sdpaPromptGEMMDisabledForTest &&
+				!sdpaPromptGEMMEnvDisabled() && gpuHasPromptSDPAGEMM()
 			if batchedRope {
 				if err = encQKNormRopeRows(enc, qSlab, s.lb[li].qNorm.buf, qSlab, 0, s.lb[li].qNorm.off, 0, qDim, qDim, offBuf[0], layerRopeFreqs, K, s.nHeads, lhd, rotDim, rbase, s.scale, s.eps); err != nil {
 					endEncodingFast(enc)
@@ -1014,9 +1016,10 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					pendingLandings = append(pendingLandings, ringLanding{li: li, kvDim: kvDim, slideW: slideW})
 				}
 			} else if useGEMMSDPA {
-				sScore0, sScore1 := s.denseBatch.sdpaPromptS((s.nHeads/lkv)*K, s.maxLen)
+				headBatch := sdpaPromptHeadBatch(s.nHeads/lkv, K, s.maxLen)
+				sScore0, sScore1 := s.denseBatch.sdpaPromptS(headBatch*K, s.maxLen)
 				if err = encSDPAPromptGEMM(enc, qSlab, ownerK, ownerV, attnSlab, sScore0, sScore1,
-					s.nHeads, lkv, lhd, K, basePos+K, qDim, kvDim, s.scale); err != nil {
+					s.nHeads, lkv, lhd, K, basePos+K, qDim, kvDim, headBatch, s.scale); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
 				}

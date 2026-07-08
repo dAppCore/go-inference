@@ -6,6 +6,7 @@ package native
 
 import (
 	"math"
+	"os"
 	"reflect"
 	"slices"
 	"sync/atomic"
@@ -1906,24 +1907,56 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseChunks(ids []int32, scope
 	return hidden, true, nil
 }
 
+// batchedDensePrefillWindows is how many sliding windows one prefill chunk spans once the
+// position is window-aligned. Wider chunks raise every per-chunk GEMM's M (the projections,
+// the qmm fold, the prompt SDPA) — the same kernels at 4× the rows run measurably closer to
+// the machine's matmul rate, which is where mlx-lm's 2048-row prefill steps get their edge.
+// The deferred-ring lane handles wrap-crossing batches at any basePos, so the width is an
+// engine tuning choice, not a model contract. LTHN_PREFILL_WINDOWS overrides (the A/B lever).
+const batchedDensePrefillWindows = 1
+
+func prefillChunkWindows() int {
+	if v := os.Getenv("LTHN_PREFILL_WINDOWS"); v != "" {
+		if r := core.Atoi(v); r.OK {
+			if n, ok := r.Value.(int); ok && n >= 1 && n <= 8 {
+				return n
+			}
+		}
+	}
+	return batchedDensePrefillWindows
+}
+
 func (s *ArchSession) batchedDensePrefillChunkLen(limit int) int {
 	if limit <= 1 || s == nil || s.arch.SlidingWindow <= 0 || s.arch.SlidingWindow >= s.maxLen {
 		return limit
 	}
-	remain := s.arch.SlidingWindow - s.pos%s.arch.SlidingWindow
+	w := s.arch.SlidingWindow
+	remain := w - s.pos%w
 	if remain <= 0 {
-		remain = s.arch.SlidingWindow
+		remain = w
 	}
-	if remain > limit {
+	if remain < w {
+		// realign to a window boundary first (a mid-window start after a partial append);
+		// wide chunks only ever begin window-aligned so the ring slot math stays exact.
+		if remain > limit {
+			return limit
+		}
+		if limit <= remain+w/2 {
+			return limit
+		}
+		return remain
+	}
+	wide := w * prefillChunkWindows()
+	if wide > limit {
 		return limit
 	}
 	// absorb a small tail into ONE wrap-crossing chunk: the deferred-ring lane handles a batch
 	// wider than the window (and the per-row staged fallback always did), while a skinny
 	// follow-up chunk pays a full weight sweep for a handful of rows.
-	if limit <= remain+s.arch.SlidingWindow/2 {
+	if limit <= wide+w/2 {
 		return limit
 	}
-	return remain
+	return wide
 }
 
 func (s *ArchSession) prefillRetainedTokensBatchedDenseOne(ids []int32, scope string) ([]byte, bool, error) {
