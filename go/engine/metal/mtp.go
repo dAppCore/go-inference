@@ -72,8 +72,16 @@ var mtpDiagForTest = os.Getenv("LTHN_MTP_DIAG") != ""
 // mtpNoFusedForTest forces the legacy per-op drafter path (#352 A/B; env LTHN_MTP_NOFUSED).
 var mtpNoFusedForTest = os.Getenv("LTHN_MTP_NOFUSED") != ""
 
+// mtpVerifyFoldDisabled restores the per-row verify lane (LTHN_MTP_VERIFY_FOLD=0):
+// the MTP verify otherwise takes the batched fold at small K — weights swept once
+// per block instead of once per drafted row.
+var mtpVerifyFoldDisabled = os.Getenv("LTHN_MTP_VERIFY_FOLD") == "0"
+
 // mtpDiagDraftCalls counts draft-block invocations for the #352 instrument (single decode goroutine).
 var mtpDiagDraftCalls int
+
+// mtpDiagVerifyRowsCalls counts verify-rows invocations for the #352 instrument.
+var mtpDiagVerifyRowsCalls int
 
 // mtpDiagBF16Stats summarises a bf16 buffer for the #352 instrument.
 func mtpDiagBF16Stats(b []byte) string {

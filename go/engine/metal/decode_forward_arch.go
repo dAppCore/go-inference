@@ -214,6 +214,15 @@ type archDecodeState struct {
 	offPtr       *int32
 	hBufPtr      *byte
 	xAPtr, xBPtr *byte
+	// verifyFoldSmallK lets the MTP verify take the batched fold on a
+	// recorded-ICB session BELOW batchedDenseICBMaxRows (the per-row
+	// interleave reads every quant weight K times — K× a plain decode step,
+	// which erased the speculative win on dense targets). Scoped to the
+	// assistant verify only (set around verifyAssistantDraftHiddens); the
+	// fold is the same token-identity tier the prompt-scale qmm already
+	// trades at, and the routing is deterministic (every verify folds), so
+	// live and restored sessions write the same lane's bytes.
+	verifyFoldSmallK bool
 	ropeFreqs    metal.MTLBuffer // resident periods (1/inv_freq) for YaRN long-context rope; nil = base-derived rope
 	// gemma4 global (proportional+partial) rope: the period spectrum over the FULL head dim
 	// (metal's gemma4ProportionalFreqs) for GlobalAttention layers, so rope pairs (d, d+globalHeadDim/2)
