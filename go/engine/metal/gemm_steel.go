@@ -51,7 +51,7 @@ type steelGEMMParams struct {
 	_                      int32 // trailing pad to the struct's 8-byte alignment
 }
 
-type steelGEMMKey struct{ alignM, alignN, alignK bool }
+type steelGEMMKey struct{ transB, alignM, alignN, alignK bool }
 
 var (
 	steelGEMMMu       sync.Mutex
@@ -72,12 +72,19 @@ const (
 // each combo is its own PSO. has_batch/use_out_source/do_axpby are baked false — the batched pass
 // runs plain single-batch D = A @ Bᵀ.
 func steelGEMMPipeline(alignM, alignN, alignK bool) (metal.MTLComputePipelineState, bool) {
+	return steelGEMMPipelineTrans(true, alignM, alignN, alignK)
+}
+
+// steelGEMMPipelineTrans is steelGEMMPipeline with the B-transpose selectable: transB=true loads
+// the nt kernel (B read transposed — weights, K caches), false the nn kernel (B read as-is — the
+// prompt attention's P @ V). Same function-constant layout either way.
+func steelGEMMPipelineTrans(transB, alignM, alignN, alignK bool) (metal.MTLComputePipelineState, bool) {
 	steelGEMMMu.Lock()
 	defer steelGEMMMu.Unlock()
 	if steelGEMMBroken {
 		return nil, false
 	}
-	key := steelGEMMKey{alignM: alignM, alignN: alignN, alignK: alignK}
+	key := steelGEMMKey{transB: transB, alignM: alignM, alignN: alignN, alignK: alignK}
 	if pso, ok := steelGEMMPSOCache[key]; ok {
 		return pso, true
 	}
@@ -85,8 +92,12 @@ func steelGEMMPipeline(alignM, alignN, alignK bool) (metal.MTLComputePipelineSta
 		steelGEMMBroken = true
 		return nil, false
 	}
-	name := core.Sprintf("steel_gemm_fused_nt_bfloat16_bfloat16_bm%d_bn%d_bk%d_wm%d_wn%d",
-		steelGEMMBM, steelGEMMBN, steelGEMMBK, steelGEMMWM, steelGEMMWN)
+	variant := "nn"
+	if transB {
+		variant = "nt"
+	}
+	name := core.Sprintf("steel_gemm_fused_%s_bfloat16_bfloat16_bm%d_bn%d_bk%d_wm%d_wn%d",
+		variant, steelGEMMBM, steelGEMMBN, steelGEMMBK, steelGEMMWM, steelGEMMWN)
 	fc := metal.NewMTLFunctionConstantValues()
 	off := uint8(0)
 	for _, idx := range []uint{10, 100, 110} { // has_batch, use_out_source, do_axpby
@@ -116,15 +127,35 @@ func steelGEMMPipeline(alignM, alignN, alignK bool) (metal.MTLComputePipelineSta
 // (ldd = outDim). Reports false when the steel pipeline is unavailable (the caller keeps the
 // batched gemv).
 func encGemmBF16NT(enc metal.MTLComputeCommandEncoder, mat, vec, out metal.MTLBuffer, matOff, vecOff, outOff uint, outDim, inDim, rows int) bool {
-	pso, ok := steelGEMMPipeline(rows%steelGEMMBM == 0, outDim%steelGEMMBN == 0, inDim%steelGEMMBK == 0)
+	return encGemmBF16Strided(enc, true, vec, mat, out, vecOff, matOff, outOff,
+		rows, outDim, inDim, inDim, inDim, outDim)
+}
+
+// encGemmBF16Strided encodes D[m × n] = A[m × k] @ B (nt: B[n × k] read transposed; nn: B[k × n]
+// read as-is) as ONE steel GEMM with explicit leading dimensions — the general form behind
+// encGemmBF16NT. lda/ldb/ldd are element strides between consecutive rows of A/B/D, so a caller
+// can address one head's columns inside a wider slab (the prompt attention's Q/K/V/O views).
+// Reports false when the steel pipeline is unavailable (the caller keeps its fallback path).
+func encGemmBF16Strided(enc metal.MTLComputeCommandEncoder, transB bool, a, b, d metal.MTLBuffer,
+	aOff, bOff, dOff uint, m, n, k, lda, ldb, ldd int) bool {
+	return encGemmBF16StridedBatch(enc, transB, a, b, d, aOff, bOff, dOff, m, n, k, lda, ldb, ldd, 1, 0, 0, 0)
+}
+
+// encGemmBF16StridedBatch is encGemmBF16Strided with a uniform-stride batch on grid depth:
+// batch problems at element strides batchA/batchB/batchD (stride 0 broadcasts an operand —
+// the GQA group's shared K/V). The steel fused kernel applies the scalar batch strides off
+// tid.z even with has_batch baked false, so this rides the SAME PSO as the single dispatch.
+func encGemmBF16StridedBatch(enc metal.MTLComputeCommandEncoder, transB bool, a, b, d metal.MTLBuffer,
+	aOff, bOff, dOff uint, m, n, k, lda, ldb, ldd, batch int, batchA, batchB, batchD int64) bool {
+	pso, ok := steelGEMMPipelineTrans(transB, m%steelGEMMBM == 0, n%steelGEMMBN == 0, k%steelGEMMBK == 0)
 	if !ok {
 		return false
 	}
 	if pieceTimingOn {
 		steelGEMMDispatchesForTest++
 	}
-	tilesM := (rows + steelGEMMBM - 1) / steelGEMMBM
-	tilesN := (outDim + steelGEMMBN - 1) / steelGEMMBN
+	tilesM := (m + steelGEMMBM - 1) / steelGEMMBM
+	tilesN := (n + steelGEMMBN - 1) / steelGEMMBN
 	// threadblock swizzle (mlx matmul.cpp): interleave the tile walk so neighbouring threadgroups
 	// share B panels in L2 — 0 for short grids, 2 on this device class for tall ones.
 	swizzle := 0
@@ -132,22 +163,26 @@ func encGemmBF16NT(enc metal.MTLComputeCommandEncoder, mat, vec, out metal.MTLBu
 		swizzle = 2
 	}
 	params := steelGEMMParams{
-		M: int32(rows), N: int32(outDim), K: int32(inDim),
-		LDA: int32(inDim), LDB: int32(inDim), LDD: int32(outDim),
+		M: int32(m), N: int32(n), K: int32(k),
+		LDA: int32(lda), LDB: int32(ldb), LDD: int32(ldd),
 		TilesN: int32(tilesN), TilesM: int32(tilesM),
-		SwizzleLog: int32(swizzle), GemmKIterationsAligned: int32(inDim / steelGEMMBK), BatchNDim: 1,
+		BatchStrideA: batchA, BatchStrideB: batchB, BatchStrideD: batchD,
+		SwizzleLog: int32(swizzle), GemmKIterationsAligned: int32(k / steelGEMMBK), BatchNDim: 1,
 	}
 	sink := encSink{enc}
 	sink.setPSO(pso)
-	sink.setBuf(vec, vecOff, 0) // A: the activation rows
-	sink.setBuf(mat, matOff, 1) // B: the weight, read transposed (nt)
-	sink.setBuf(out, outOff, 3) // D
+	sink.setBuf(a, aOff, 0)
+	sink.setBuf(b, bOff, 1)
+	sink.setBuf(d, dOff, 3)
 	setBytes(enc, unsafe.Pointer(&params), uint(unsafe.Sizeof(params)), 4)
 	tile := 1 << swizzle
 	gridX := tilesN * tile
 	gridY := (tilesM + tile - 1) / tile
+	if batch < 1 {
+		batch = 1
+	}
 	sink.dispatchThreadgroups(
-		metal.MTLSize{Width: uint(gridX), Height: uint(gridY), Depth: 1},
+		metal.MTLSize{Width: uint(gridX), Height: uint(gridY), Depth: uint(batch)},
 		metal.MTLSize{Width: 32, Height: steelGEMMWN, Depth: steelGEMMWM},
 	)
 	return true
