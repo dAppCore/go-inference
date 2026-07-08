@@ -2030,9 +2030,19 @@ func (s *ArchSession) commitAssistantReplacement(id int32) error {
 }
 
 func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([]int32, [][]byte, error) {
+	diagVerify := mtpDiagForTest && mtpDiagVerifyRowsCalls < 3
+	var diagT0 time.Time
+	if diagVerify {
+		mtpDiagVerifyRowsCalls++
+		diagT0 = time.Now()
+	}
 	hiddens, err := s.verifyAssistantDraftHiddens(draftTokens)
 	if err != nil {
 		return nil, nil, err
+	}
+	fwdMs := float64(0)
+	if diagVerify {
+		fwdMs = float64(time.Since(diagT0).Microseconds()) / 1000
 	}
 	rows := s.mtpVerifyRowScratch(len(draftTokens))
 	if len(hiddens) != len(draftTokens) {
@@ -2041,6 +2051,10 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 	if ok, gerr := s.greedyRowsFromHiddensInPool(hiddens, suppress, rows); gerr != nil {
 		return nil, nil, gerr
 	} else if ok {
+		if diagVerify {
+			nativeTraceLog(core.Sprintf("mtp-diag verify rows: K=%d fwd=%.1fms rows-head=%.1fms\n",
+				len(draftTokens), fwdMs, float64(time.Since(diagT0).Microseconds())/1000-fwdMs))
+		}
 		return rows, hiddens, nil
 	}
 	for i, hidden := range hiddens {
@@ -2049,6 +2063,10 @@ func (s *ArchSession) verifyAssistantDraftRows(draftTokens, suppress []int32) ([
 			return nil, nil, err
 		}
 		rows[i] = token
+	}
+	if diagVerify {
+		nativeTraceLog(core.Sprintf("mtp-diag verify rows: K=%d fwd=%.1fms perrow-head=%.1fms\n",
+			len(draftTokens), fwdMs, float64(time.Since(diagT0).Microseconds())/1000-fwdMs))
 	}
 	return rows, hiddens, nil
 }
@@ -2083,6 +2101,16 @@ func (s *ArchSession) greedyRowsFromHiddensInPool(hiddens [][]byte, suppress []i
 }
 
 func (s *ArchSession) verifyAssistantDraftHiddens(draftTokens []int32) ([][]byte, error) {
+	if !mtpVerifyFoldDisabled {
+		// verify blocks are 4-7 rows: below batchedDenseICBMaxRows the ICB
+		// per-row interleave reads every quant weight K times (K× a plain
+		// step — the whole speculative win gone on dense targets). Let this
+		// verify take the batched fold: weights swept once, token-identity
+		// tier (the same boundary the prompt-scale qmm trades at), routing
+		// deterministic. LTHN_MTP_VERIFY_FOLD=0 restores the per-row lane.
+		s.state.verifyFoldSmallK = true
+		defer func() { s.state.verifyFoldSmallK = false }()
+	}
 	hiddens, batched, err := s.verifyBatchedHiddens(draftTokens)
 	if err != nil {
 		return nil, err

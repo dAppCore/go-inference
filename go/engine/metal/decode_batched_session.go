@@ -560,12 +560,18 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	if K == 0 {
 		return nil, false, core.NewError("native.stepTokensBatchedDense: empty batch")
 	}
+	decline := func(why string) ([][]byte, bool, error) {
+		if mtpDiagForTest {
+			nativeTraceLog("mtp-diag batched-dense decline: " + why + "\n")
+		}
+		return nil, false, nil
+	}
 	// dense uniform guard: every layer owns its cache + is non-MoE; no trace (per-layer host reads).
 	// The PLE gate is NOT a host flush (it is an encoded kernel chain reading a per-token input
 	// buffer — bf16 gemv or quant qmv), so a PLE arch batches when the caller supplies the K-token
 	// slab; without one it declines to the proven sequential fallback.
 	if s.trace {
-		return nil, false, nil
+		return decline("trace")
 	}
 	// recorded-ICB sessions (the quant decode lane): the replay owns the LIVE per-layer caches —
 	// s.lb is ring-sized and UNUSED there, so the batch must read and write the replay's own
@@ -584,13 +590,14 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		foldable := !batchedMLPFoldDisabledForTest && K > batchedDenseICBMaxRows && gpuHasGeluKernel()
 		if (K > batchedDenseICBMaxRows && !foldable) ||
 			len(s.icb.kCaches) < len(s.specs) || len(s.icb.vCaches) < len(s.specs) || len(s.icb.cacheRows) < len(s.specs) {
-			return nil, false, nil
+			return decline(core.Sprintf("icb caches: K=%d kCaches=%d vCaches=%d cacheRows=%d specs=%d",
+				K, len(s.icb.kCaches), len(s.icb.vCaches), len(s.icb.cacheRows), len(s.specs)))
 		}
 		icbK, icbV = s.icb.kCaches, s.icb.vCaches
 	}
 	if len(s.ple) > 0 {
 		if pleSlab == nil {
-			return nil, false, nil
+			return decline("PLE arch without slab")
 		}
 		if want := K * len(s.specs) * s.pliDim * bf16Size; len(pleSlab) != want {
 			return nil, false, core.NewError("native.stepTokensBatchedDense: PLE slab size mismatch")
@@ -607,20 +614,20 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		if s.specs[li].MoE {
 			if !batchMoE || li >= len(s.moeQuant) || s.moeQuant[li] == nil || !s.batchedMoEUsable(s.moeQuant[li]) ||
 				li >= len(s.lb) || s.lb[li].proj == nil || !s.lb[li].proj.rowsCapable() {
-				return nil, false, nil
+				return decline(core.Sprintf("layer %d: quant MoE not batchable", li))
 			}
 		} else if li < len(s.moeQuant) && s.moeQuant[li] != nil {
-			return nil, false, nil
+			return decline(core.Sprintf("layer %d: moeQuant on non-MoE spec", li))
 		}
 		if li < len(s.moeWeights) && s.moeWeights[li] != nil {
-			return nil, false, nil
+			return decline(core.Sprintf("layer %d: bf16 MoE", li))
 		}
 		if s.specs[li].OwnsCache() {
 			if icbK == nil {
 				continue
 			}
 			if icbK[li] == nil || icbV[li] == nil {
-				return nil, false, nil
+				return decline(core.Sprintf("layer %d: icb owner cache nil (k=%v v=%v)", li, icbK[li] == nil, icbV[li] == nil))
 			}
 			rows := s.icb.cacheRows[li]
 			if s.specs[li].Attention == model.SlidingAttention && s.slidingWindow > 0 {
@@ -628,10 +635,10 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				// pos%cacheRows ring when rows==slidingWindow, and to its linear write when
 				// the allocation is un-bounded (rows>=maxLen ⇒ every pos writes linearly).
 				if rows != s.slidingWindow && rows < s.maxLen {
-					return nil, false, nil
+					return decline(core.Sprintf("layer %d: sliding rows=%d window=%d maxLen=%d", li, rows, s.slidingWindow, s.maxLen))
 				}
 			} else if rows < basePos+K {
-				return nil, false, nil
+				return decline(core.Sprintf("layer %d: cache rows=%d < basePos+K=%d", li, rows, basePos+K))
 			}
 			continue
 		}
@@ -640,14 +647,14 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		// command buffer — provided the owner's caches (live set) are resident.
 		own := s.specs[li].KVShareFrom
 		if own < 0 || own >= len(s.specs) {
-			return nil, false, nil
+			return decline(core.Sprintf("layer %d: KVShareFrom=%d out of range", li, own))
 		}
 		if icbK != nil {
 			if icbK[own] == nil || icbV[own] == nil {
-				return nil, false, nil
+				return decline(core.Sprintf("layer %d: icb shared owner %d cache nil", li, own))
 			}
 		} else if own >= len(s.lb) || s.lb[own].kCache == nil || s.lb[own].vCache == nil {
-			return nil, false, nil
+			return decline(core.Sprintf("layer %d: lb shared owner %d cache nil", li, own))
 		}
 	}
 	for i := range embs {
@@ -745,7 +752,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	// tier: simdgroup-MMA accumulation order, one weight pass — the prompt-prefill reclaim).
 	// Metallib-less runs / unfoldable geometry keep the proven per-row interleave.
 	foldDFFMax, foldQDimMax, foldKVDimMax := 0, 0, 0
-	if (icbK == nil || K > batchedDenseICBMaxRows) && !batchedMLPFoldDisabledForTest && K > 1 && gpuHasGeluKernel() {
+	if (icbK == nil || K > batchedDenseICBMaxRows || s.verifyFoldSmallK) && !batchedMLPFoldDisabledForTest && K > 1 && gpuHasGeluKernel() {
 		for li := range s.specs {
 			if !s.lb[li].proj.rowsCapable() {
 				continue
@@ -1317,6 +1324,9 @@ func (s *ArchSession) verifyBatchedHiddens(ids []int32) ([][]byte, bool, error) 
 	// PLE archs batch via the per-token slab (the batched pass ring-writes each
 	// row at its own slot, so wrap-crossing blocks are handled).
 	if s.pos+len(ids) > s.maxLen {
+		if mtpDiagForTest {
+			nativeTraceLog(core.Sprintf("mtp-diag verifyBatchedHiddens: pos+K=%d > maxLen=%d\n", s.pos+len(ids), s.maxLen))
+		}
 		return nil, false, nil
 	}
 	var embStack [16][]byte
@@ -1377,6 +1387,9 @@ func (s *ArchSession) verifyBatchedHiddens(ids []int32) ([][]byte, bool, error) 
 		}
 	})
 	if err != nil || !ok {
+		if mtpDiagForTest && err == nil {
+			nativeTraceLog("mtp-diag verifyBatchedHiddens: state declined the batched dense lane\n")
+		}
 		return nil, ok, err
 	}
 	return hiddens, true, nil

@@ -173,6 +173,14 @@ func (m qmvProjector) projectRows(enc metal.MTLComputeCommandEncoder, in, out me
 	if w.bits > 0 {
 		gs, bits = w.gs, w.bits
 	}
+	// Small row counts (the MTP verify's draft blocks) take the multi-row qmv:
+	// weight streamed once by Z-concurrent threadgroups at qmv occupancy, each
+	// row's bytes identical to the per-row decode qmv (the qmm_t below reads
+	// the weight once too, but at small-M GEMM occupancy — ~5× off the qmv
+	// floor on dense 12B/31B verifies).
+	if handled, err := encQMVRowsBF16At(enc, w.wq.buf, w.scales.buf, w.biases.buf, in, out, w.wq.off, w.scales.off, w.biases.off, inOff, outOff, rows, outDim, inDim, gs, bits); handled || err != nil {
+		return handled, err
+	}
 	// MLX's qmm_t needs K%group_size==0 (whole groups per row); anything else keeps per-row.
 	if inDim <= 0 || gs <= 0 || inDim%gs != 0 {
 		return false, nil
