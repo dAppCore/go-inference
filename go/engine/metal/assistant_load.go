@@ -394,11 +394,60 @@ func LoadAssistantDir(dir string) (*AssistantModel, error) {
 		Tok:                      tok,
 		mapping:                  dm,
 	}
+	if err := nativeAssistantDequantizeTensors(m); err != nil {
+		_ = m.Close()
+		return nil, core.E("native.assistant.Load", "dequantise", err)
+	}
 	if err := validateNativeAssistantModel(m); err != nil {
 		_ = m.Close()
 		return nil, core.E("native.assistant.Load", "validate tensors", err)
 	}
 	return m, nil
+}
+
+// nativeAssistantDequantizeTensors rewrites the drafter's affine-quantised
+// tensors (a U32 weight with .scales/.biases siblings) as plain bf16 at load,
+// so every runtime lane — the projections, the fused drafter, the full-vocab
+// logits head — runs the proven bf16 paths. Drafters are small (the 12B
+// assistant dequantises to ~750MB) and load once, so the win here is
+// CAPABILITY: 4-bit assistant repos pair at all (they previously failed the
+// runtime BF16 dtype checks). A native-quant drafter runtime that keeps the
+// packed weights on the GPU is the banked follow-up (#333). Non-affine quant
+// modes are left in place and fail the runtime dtype checks as before.
+func nativeAssistantDequantizeTensors(m *AssistantModel) error {
+	quant := m.Config.Quant
+	if quant == nil || model.NormalizeQuantizationMode(quant.Mode) != "affine" {
+		return nil
+	}
+	var names []string
+	for name, t := range m.Tensors {
+		if t.Dtype == "U32" && core.HasSuffix(name, ".weight") {
+			names = append(names, name)
+		}
+	}
+	for _, name := range names {
+		t := m.Tensors[name]
+		base := name[:len(name)-len(".weight")]
+		st, sok := m.Tensors[base+".scales"]
+		bt, bok := m.Tensors[base+".biases"]
+		if !sok || !bok || len(t.Shape) != 2 {
+			continue
+		}
+		gs, bits := quant.For(base)
+		if gs <= 0 || bits <= 0 {
+			return core.NewError("native.assistant quantised tensor " + name + " declares no group_size/bits")
+		}
+		rows, words := t.Shape[0], t.Shape[1]
+		cols := words * 32 / bits
+		f32, err := dequantizeAffineRowsF32(t.Data, st.Data, bt.Data, rows, cols, gs, bits)
+		if err != nil {
+			return core.E("native.assistant dequantise", name, err)
+		}
+		m.Tensors[name] = safetensors.Tensor{Dtype: "BF16", Shape: []int{rows, cols}, Data: f32ToBf16Slice(f32)}
+		delete(m.Tensors, base+".scales")
+		delete(m.Tensors, base+".biases")
+	}
+	return nil
 }
 
 // LoadAssistantPairDirs loads assistant metadata/tensors and validates
