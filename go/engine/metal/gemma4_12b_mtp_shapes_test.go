@@ -141,6 +141,76 @@ func TestUnalignedNoCopyGPURead(t *testing.T) {
 	}
 }
 
+// TestLthnQMVRowsParity gates the register-tiled M-row qmv (lthn_qmv_rows)
+// against the production per-row qmv on synthetic quant weights with
+// per-group VARYING scales/biases (uniform values are blind to group/row
+// indexing defects). At dims where QMVBF16 picks the plain qmv the rows must
+// be byte-identical (same qdot + simd_sum order); at fast-qmv dims the
+// comparison is tolerance-tier.
+func TestLthnQMVRowsParity(t *testing.T) {
+	requireNativeRuntime(t)
+	rng := rand.New(rand.NewSource(29))
+	const gs, bits = 64, 4
+	for _, dims := range [][2]int{{512, 1280}, {3840, 7680}} { // {outDim, inDim}: non-fast (in%512!=0, %256==0) then 12B pre_projection
+		outDim, inDim := dims[0], dims[1]
+		packed := make([]byte, outDim*inDim/2)
+		for i := range packed {
+			packed[i] = byte(rng.Intn(256))
+		}
+		groups := inDim / gs
+		scales := mtpShapeRandBF16(rng, outDim*groups)
+		biases := mtpShapeRandBF16(rng, outDim*groups)
+		for rows := 2; rows <= lthnQMVRowsMaxM; rows++ {
+			x := mtpShapeRandBF16(rng, rows*inDim)
+			want := make([]byte, rows*outDim*bf16Size)
+			for m := range rows {
+				row, err := QMVBF16(x[m*inDim*bf16Size:(m+1)*inDim*bf16Size], packed, scales, biases, outDim, inDim, gs, bits)
+				if err != nil {
+					t.Fatalf("QMVBF16 rows=%d m=%d: %v", rows, m, err)
+				}
+				copy(want[m*outDim*bf16Size:], row)
+			}
+			got := make([]byte, rows*outDim*bf16Size)
+			var handled bool
+			var encErr error
+			withAutoreleasePool(func() {
+				wqBuf, sBuf, bBuf := sharedBytes(packed), sharedBytes(scales), sharedBytes(biases)
+				xBuf, outBuf := sharedBytes(x), scratchBF16(rows*outDim)
+				cb := commandBufferFast(queue)
+				enc := computeCommandEncoderFast(cb)
+				handled, encErr = encQMVRowsBF16At(enc, wqBuf, sBuf, bBuf, xBuf, outBuf, 0, 0, 0, 0, 0, rows, outDim, inDim, gs, bits)
+				endEncodingFast(enc)
+				commitCommandBufferFast(cb)
+				waitUntilCompletedFast(cb)
+				copy(got, unsafe.Slice((*byte)(outBuf.Contents()), len(got)))
+			})
+			if encErr != nil {
+				t.Fatalf("encQMVRowsBF16At out=%d rows=%d: %v", outDim, rows, encErr)
+			}
+			if !handled {
+				t.Fatalf("encQMVRowsBF16At declined out=%d in=%d rows=%d", outDim, inDim, rows)
+			}
+			nan, _ := bf16NaNScanBytes(got)
+			if nan > 0 {
+				t.Fatalf("out=%d rows=%d produced %d NaN", outDim, rows, nan)
+			}
+			var maxDiff float64
+			for i := 0; i < rows*outDim; i++ {
+				w := float64(bf16ToF32(want[2*i], want[2*i+1]))
+				g := float64(bf16ToF32(got[2*i], got[2*i+1]))
+				if d := math.Abs(g - w); d > maxDiff {
+					maxDiff = d
+				}
+			}
+			if maxDiff > 0.25 {
+				t.Errorf("out=%d in=%d rows=%d maxDiff=%.4f vs per-row qmv", outDim, inDim, rows, maxDiff)
+			} else {
+				t.Logf("out=%d in=%d rows=%d maxDiff=%.4f", outDim, inDim, rows, maxDiff)
+			}
+		}
+	}
+}
+
 func TestMTPProjectionShapesGPUvsCPU(t *testing.T) {
 	rng := rand.New(rand.NewSource(352))
 	N := 1024
