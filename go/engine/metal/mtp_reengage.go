@@ -39,6 +39,31 @@ const (
 	nativeAssistantReengageProbeBlocks = 3
 )
 
+// nativeAssistantDeepBootstrapPos is the context depth past which an engaged
+// pair with NO measured plain rate spends one bounded plain stretch to arm the
+// economics gate. The #299 policy only measures plainRate on the first
+// acceptance-streak bail — a drafter that stays strong never bails, so the
+// rolling rate exit stays inert, and deep-context verify costs (SDPA + KV sync
+// scale with position; drafting does not) can leave the pair fully engaged at
+// HALF the plain rate (#358: 26B @16K measured 58.4 vs plain 116.2 at 74%
+// acceptance). Below this depth the economics never inverted on any receipt,
+// so short runs pay nothing.
+const nativeAssistantDeepBootstrapPos = 8192
+
+// nativeAssistantDeepBootstrapTokens is the bootstrap stretch length — long
+// enough for a stable rate on a ~30ms/token target, small enough that a deep
+// pair that is genuinely winning (12B @16K: 71.5 vs plain 62.8) pays only a
+// few percent once per generation.
+const nativeAssistantDeepBootstrapTokens = 8
+
+// needsDeepBootstrap reports whether the loop should spend the bootstrap
+// stretch now: no plain rate measured, the attended context is deep, and
+// enough budget remains for the measurement to pay back.
+func (r *mtpReengage) needsDeepBootstrap(pos, emitted, maxNew int) bool {
+	return r.plainRate == 0 && pos >= nativeAssistantDeepBootstrapPos &&
+		emitted+4*nativeAssistantDeepBootstrapTokens <= maxNew
+}
+
 // nativeAssistantReengageMargin is the engage-side hysteresis: a probe must
 // beat the plain rate by this factor to re-engage, while an engaged stretch
 // only exits when it falls below the plain rate itself. Without the gap, a
@@ -101,12 +126,25 @@ func (r *mtpReengage) probeCycle(cycleAccepted, tokensNow int) (bail bool) {
 		return false
 	}
 	r.probeLeft--
+	if r.probeLeft == nativeAssistantReengageProbeBlocks-1 {
+		// Cycle 1 is pure warmup — no verdict AND no clock, in both directions.
+		// Shallow, its rate reads systematically HIGH (the burst bias:
+		// post-plain proposals are locally obvious); deep, it reads
+		// systematically LOW (the drafter re-uploads its target-KV mirror
+		// after any plain stretch — ~40ms at 16K — and its first block after a
+		// re-seed can be fully rejected even when the steady pair wins: #358's
+		// 12B receipts showed both). The fully-rejected abort applies only to
+		// the MEASURED cycles.
+		r.probeT0 = time.Now()
+		r.probeTok0 = tokensNow
+		return false
+	}
 	probeRate := 0.0
 	if wall := time.Since(r.probeT0).Seconds(); wall > 0 {
 		probeRate = float64(tokensNow-r.probeTok0) / wall
 	}
 	engageBar := r.plainRate * nativeAssistantReengageMargin
-	if cycleAccepted == 0 || (probeRate >= engageBar && r.probeLeft < nativeAssistantReengageProbeBlocks-1) {
+	if cycleAccepted == 0 || probeRate >= engageBar {
 		r.probeLeft = 0
 	} else if r.probeLeft > 0 {
 		return false

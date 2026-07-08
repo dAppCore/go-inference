@@ -1802,6 +1802,18 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 		if verify.AllAccepted {
 			lowAcceptStreak = 0
 			carryLead = -1
+			if !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
+				if mtpDiagForTest {
+					nativeTraceLog(core.Sprintf("mtp-diag reengage deep-bootstrap: pos=%d emitted=%d\n", target.pos, len(result.Tokens)))
+				}
+				reng.cooldown = nativeAssistantDeepBootstrapTokens
+				if done, perr := runPlainStretch(carryLead); perr != nil {
+					return result, perr
+				} else if done {
+					break
+				}
+				continue
+			}
 			bail := false
 			if wasProbing {
 				bail = reng.probeCycle(newDrafts, len(result.Tokens))
@@ -1852,6 +1864,18 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 		carryLead = replacement
 		if stopped {
 			break
+		}
+		if !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
+			if mtpDiagForTest {
+				nativeTraceLog(core.Sprintf("mtp-diag reengage deep-bootstrap: pos=%d emitted=%d\n", target.pos, len(result.Tokens)))
+			}
+			reng.cooldown = nativeAssistantDeepBootstrapTokens
+			if done, perr := runPlainStretch(replacement); perr != nil {
+				return result, perr
+			} else if done {
+				break
+			}
+			continue
 		}
 		bail := false
 		if wasProbing {
@@ -2003,6 +2027,18 @@ func (pair *AssistantPair) GenerateSampledFromSessionEach(target *ArchSession, p
 		if verify.AllAccepted {
 			lowAcceptStreak = 0
 			carryLead = -1
+			if !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
+				if mtpDiagForTest {
+					nativeTraceLog(core.Sprintf("mtp-diag reengage deep-bootstrap: pos=%d emitted=%d\n", target.pos, len(result.Tokens)))
+				}
+				reng.cooldown = nativeAssistantDeepBootstrapTokens
+				if done, perr := runPlainStretch(carryLead); perr != nil {
+					return result, perr
+				} else if done {
+					break
+				}
+				continue
+			}
 			bail := false
 			if wasProbing {
 				bail = reng.probeCycle(newDrafts, len(result.Tokens))
@@ -2071,6 +2107,18 @@ func (pair *AssistantPair) GenerateSampledFromSessionEach(target *ArchSession, p
 		carryLead = replacement
 		if stopped {
 			break
+		}
+		if !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
+			if mtpDiagForTest {
+				nativeTraceLog(core.Sprintf("mtp-diag reengage deep-bootstrap: pos=%d emitted=%d\n", target.pos, len(result.Tokens)))
+			}
+			reng.cooldown = nativeAssistantDeepBootstrapTokens
+			if done, perr := runPlainStretch(replacement); perr != nil {
+				return result, perr
+			} else if done {
+				break
+			}
+			continue
 		}
 		bail := false
 		if wasProbing {

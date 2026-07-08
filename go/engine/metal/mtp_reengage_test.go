@@ -60,8 +60,11 @@ func TestMTPReengageNotePlainStretch(t *testing.T) {
 
 func TestMTPReengageProbeCycleAbortsOnFullyRejected(t *testing.T) {
 	r := reengageAfterPlain(100, 50*time.Millisecond)
+	if bail := r.probeCycle(0, 1); bail {
+		t.Fatal("a fully-rejected WARMUP cycle must not decide anything")
+	}
 	if bail := r.probeCycle(0, 1); !bail {
-		t.Fatal("fully-rejected probe cycle must bail")
+		t.Fatal("a fully-rejected measured cycle must bail")
 	}
 	if r.probing() {
 		t.Fatal("probe window must be closed after the abort")
@@ -88,8 +91,10 @@ func TestMTPReengageProbeCycleEngagesFromCycleTwo(t *testing.T) {
 	if bail := r.probeCycle(5, 300); bail {
 		t.Fatal("cycle 1 bailed unexpectedly")
 	}
-	// cycle 2 at 600 tokens over a ~1ms-old window reads far above the bar
-	// under any test-runner load: engage now.
+	// the warmup reset the probe clock; backdate it so cycle 2's window is
+	// never zero-width (two calls can land in one clock tick), then 300
+	// tokens over ~1ms reads far above the bar: engage now.
+	r.probeT0 = time.Now().Add(-time.Millisecond)
 	if bail := r.probeCycle(5, 600); bail {
 		t.Fatal("above-bar cycle 2 must engage, not bail")
 	}
@@ -105,14 +110,19 @@ func TestMTPReengageProbeCycleEngagesFromCycleTwo(t *testing.T) {
 }
 
 func TestMTPReengageProbeCycleMediocreRidesFullWindowThenFails(t *testing.T) {
-	// 100 tok/s plain, margin 1.08 → bar 108. One token per cycle over a
-	// 100ms-old window reads ≤ ~30 tok/s however fast the test runs: below
-	// the bar but not fully rejected — the probe rides all cycles and fails
-	// on the last with a doubled cooldown.
-	r := reengageAfterPlain(100, 100*time.Millisecond)
-	for i := range nativeAssistantReengageProbeBlocks - 1 {
-		if bail := r.probeCycle(1, i+1); bail {
-			t.Fatalf("mediocre cycle %d bailed before the window closed", i+1)
+	// 100 tok/s plain, margin 1.08 → bar 108. Cycle 1 is warmup (resets the
+	// probe clock); backdating the clock AFTER it makes the measured cycles
+	// read one token per ~100ms — ≤ ~30 tok/s however fast the test runs:
+	// below the bar but not fully rejected, so the probe rides the remaining
+	// cycles and fails on the last with a doubled cooldown.
+	r := reengageAfterPlain(100, 0)
+	if bail := r.probeCycle(1, 1); bail {
+		t.Fatal("warmup cycle bailed unexpectedly")
+	}
+	r.probeT0 = time.Now().Add(-100 * time.Millisecond)
+	for i := range nativeAssistantReengageProbeBlocks - 2 {
+		if bail := r.probeCycle(1, 2+i); bail {
+			t.Fatalf("mediocre cycle %d bailed before the window closed", 2+i)
 		}
 	}
 	if bail := r.probeCycle(1, nativeAssistantReengageProbeBlocks); !bail {
@@ -158,5 +168,22 @@ func TestMTPReengageEngagedCycleHoldsAtOrAbovePlain(t *testing.T) {
 		if bail := r.engagedCycle(20, 0.1, i*20); bail {
 			t.Fatal("above-plain window must stay engaged")
 		}
+	}
+}
+
+func TestMTPReengageNeedsDeepBootstrap(t *testing.T) {
+	r := &mtpReengage{}
+	if r.needsDeepBootstrap(4096, 10, 512) {
+		t.Fatal("shallow context must not bootstrap")
+	}
+	if !r.needsDeepBootstrap(nativeAssistantDeepBootstrapPos, 10, 512) {
+		t.Fatal("deep context with no plain rate must bootstrap")
+	}
+	if r.needsDeepBootstrap(1<<20, 500, 512) {
+		t.Fatal("must not bootstrap without budget to pay it back")
+	}
+	r.plainRate = 100
+	if r.needsDeepBootstrap(1<<20, 10, 512) {
+		t.Fatal("a measured plain rate must suppress the bootstrap")
 	}
 }
