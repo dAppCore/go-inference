@@ -6,11 +6,39 @@ package native
 
 import (
 	"math"
+	"os"
 	"unsafe"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 )
+
+// unifiedVisionDiag prints per-stage magnitude stats (#351 instrument; env LTHN_VISION_DIAG).
+var unifiedVisionDiag = os.Getenv("LTHN_VISION_DIAG") != ""
+
+func unifiedVisionStats(label string, b []byte, dim int) {
+	if !unifiedVisionDiag {
+		return
+	}
+	n := len(b) / 2
+	var sum, maxAbs float64
+	for i := range n {
+		v := math.Abs(float64(bf16ToF32(b[2*i], b[2*i+1])))
+		sum += v
+		if v > maxAbs {
+			maxAbs = v
+		}
+	}
+	row0 := ""
+	if dim > 0 && n >= dim {
+		var s0 float64
+		for i := range dim {
+			s0 += math.Abs(float64(bf16ToF32(b[2*i], b[2*i+1])))
+		}
+		row0 = core.Sprintf(" row0sum=%.2f", s0)
+	}
+	nativeTraceLog(core.Sprintf("vision-diag %s: sum|x|=%.1f max|x|=%.3f n=%d%s\n", label, sum, maxAbs, n, row0))
+}
 
 // vision_unified.go — the ENCODER-FREE vision embedder (gemma4_unified, 12B):
 // raw 48px model patches project straight into the backbone with no SigLIP
@@ -138,6 +166,79 @@ func unifiedRMSNoScale(h []byte, n, dim int, eps float32) {
 	}
 }
 
+// UnifiedVisionImagePatches decodes PNG/JPEG bytes through the shared Gemma 4
+// sizing rule (aspect-preserving resize onto the patch budget, dims rounded to
+// PoolingKernel·PatchSize multiples, rescale to [0,1] — VisionImagePixels) and
+// returns the unified embedder's inputs: KERNEL-GROUPED model patches
+// [n × (PoolKernel·PatchSize)²·3] bf16 — each model patch the raster concat of
+// its PoolKernel² teacher patches, each teacher patch the proven
+// HWC-innermost 16px flatten — plus the per-patch (row, col) position indices.
+func UnifiedVisionImagePatches(data []byte, cfg *VisionImageFeatureConfig) ([]byte, []int32, int, error) {
+	if v := os.Getenv("LTHN_VISION_MAXTOK"); v != "" { // #351 instrument: shrink the span (1 token = mask-free)
+		if r := core.ParseInt(v, 10, 32); r.OK {
+			if iv := r.Value.(int64); iv > 0 {
+				c := *normalizeVisionImageFeatureConfig(cfg)
+				c.MaxSoftTokens = int32(iv)
+				cfg = &c
+			}
+		}
+	}
+	pixels, th, tw, softTokens, err := VisionImagePixels(data, cfg)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	ncfg := normalizeVisionImageFeatureConfig(cfg)
+	if ncfg == nil {
+		ncfg = normalizeVisionImageFeatureConfig(&VisionImageFeatureConfig{})
+	}
+	ps, pool := int(ncfg.PatchSize), int(ncfg.PoolingKernelSize)
+	mp := ps * pool
+	gh, gw := int(th)/mp, int(tw)/mp
+	n := gh * gw
+	if n <= 0 {
+		return nil, nil, 0, core.NewError("native.UnifiedVisionImagePatches: image produced no model patches")
+	}
+	if n != softTokens {
+		return nil, nil, 0, core.NewError(core.Sprintf("native.UnifiedVisionImagePatches: model patches %d != soft tokens %d", n, softTokens))
+	}
+	patchDim := mp * mp * 3
+	out := make([]byte, n*patchDim*bf16Size)
+	positions := make([]int32, n*2)
+	row := 0
+	for R := range gh {
+		for C := range gw {
+			// Position ids are (x, y) — the reference meshgrids width-first
+			// with indexing="xy", so axis 0 of the pos table is the COLUMN.
+			positions[row*2] = int32(C)
+			positions[row*2+1] = int32(R)
+			// Teacher patches flatten [py][px][c] (the reference permutes the
+			// CHW image to (gh, gw, ps, ps, C) before the row reshape); the
+			// model patch concatenates its kernel's teachers in row-major
+			// kernel order.
+			col := 0
+			for ki := range pool {
+				for kj := range pool {
+					for py := range ps {
+						y := (R*pool+ki)*ps + py
+						for px := range ps {
+							x := (C*pool+kj)*ps + px
+							src := (y*int(tw) + x) * 3
+							for c := range 3 {
+								hh := f32ToBF16(pixels[src+c])
+								dst := (row*patchDim + col) * bf16Size
+								out[dst], out[dst+1] = byte(hh), byte(hh>>8)
+								col++
+							}
+						}
+					}
+				}
+			}
+			row++
+		}
+	}
+	return out, positions, n, nil
+}
+
 // UnifiedVisionProject runs the encoder-free embedder over n model patches
 // ([n × ModelPatchSize²·3] bf16, kernel-grouped) with their per-patch (row,
 // col) position indices, returning the [n × TextHidden] soft-token features
@@ -154,19 +255,23 @@ func UnifiedVisionProject(uv *model.LoadedUnifiedVision, patches []byte, positio
 	if len(patches) != n*patchDim*bf16Size {
 		return nil, core.NewError(core.Sprintf("native.UnifiedVisionProject: patches bytes = %d, want %d", len(patches), n*patchDim*bf16Size))
 	}
+	unifiedVisionStats("patches", patches, patchDim)
 	h, err := LayerNormBF16(patches, uv.PatchLN1W, uv.PatchLN1B, n, patchDim, cfg.LayerNormEps)
 	if err != nil {
 		return nil, core.E("native.UnifiedVisionProject", "patch_ln1", err)
 	}
+	unifiedVisionStats("ln1", h, patchDim)
 	if h, err = unifiedLinearRows(uv.PatchDense, h, n); err != nil {
 		return nil, core.E("native.UnifiedVisionProject", "patch_dense", err)
 	}
+	unifiedVisionStats("dense", h, cfg.MMEmbedDim)
 	if h, err = LayerNormBF16(h, uv.PatchLN2W, uv.PatchLN2B, n, cfg.MMEmbedDim, cfg.LayerNormEps); err != nil {
 		return nil, core.E("native.UnifiedVisionProject", "patch_ln2", err)
 	}
 	if err = unifiedAddPositions(h, positions, n, cfg.MMEmbedDim, cfg.PosembSize, uv.PosEmbedding); err != nil {
 		return nil, core.E("native.UnifiedVisionProject", "pos_embedding", err)
 	}
+	unifiedVisionStats("ln2+pos", h, cfg.MMEmbedDim)
 	if h, err = LayerNormBF16(h, uv.PosNormW, uv.PosNormB, n, cfg.MMEmbedDim, cfg.LayerNormEps); err != nil {
 		return nil, core.E("native.UnifiedVisionProject", "pos_norm", err)
 	}
@@ -175,5 +280,6 @@ func UnifiedVisionProject(uv *model.LoadedUnifiedVision, patches []byte, positio
 	if err != nil {
 		return nil, core.E("native.UnifiedVisionProject", "embedding_projection", err)
 	}
+	unifiedVisionStats("features", out, cfg.TextHidden)
 	return out, nil
 }
