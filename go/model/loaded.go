@@ -101,6 +101,40 @@ type LoadedVision struct {
 	Cfg                LoadedVisionConfig
 }
 
+// LoadedUnifiedVisionConfig is the encoder-free (gemma4_unified) vision
+// geometry: raw model patches project straight into the backbone with no
+// encoder tower.
+type LoadedUnifiedVisionConfig struct {
+	MMEmbedDim      int     // multimodal embed dim (the patch stage's width)
+	TextHidden      int     // backbone hidden the projection lands in
+	PosembSize      int     // pos_embedding positions per spatial axis
+	PatchSize       int     // teacher patch pixels (16)
+	ModelPatchSize  int     // pooled model patch pixels (48 = PoolKernel·PatchSize)
+	PoolKernel      int     // teacher patches per model-patch side (3)
+	MaxSoftTokens   int     // soft-token budget per image (280)
+	LayerNormEps    float32 // patch_ln1/patch_ln2/pos_norm epsilon
+	RMSNormEps      float32 // the scale-free pre-projection RMSNorm epsilon
+	ImageTokenID    int32
+	ImageBeginToken string
+	ImageToken      string
+	ImageEndToken   string
+}
+
+// LoadedUnifiedVision is the encoder-free vision payload (gemma4_unified):
+// LayerNorm → patch dense (+bias) → LayerNorm → factorised per-axis position
+// add → LayerNorm → scale-free RMSNorm → projection. The LayerNorms carry
+// weight+bias; the pre-projection RMSNorm has NO parameters (with_scale=False
+// upstream), so only its epsilon lives in the config.
+type LoadedUnifiedVision struct {
+	PatchLN1W, PatchLN1B []byte
+	PatchDense           LoadedVisionLinear // [MMEmbedDim × ModelPatchSize²·3] + Bias
+	PatchLN2W, PatchLN2B []byte
+	PosEmbedding         []byte // [PosembSize, 2, MMEmbedDim] bf16 (axis 0 = row, 1 = col)
+	PosNormW, PosNormB   []byte
+	Projection           LoadedVisionLinear // embed_vision [TextHidden × MMEmbedDim], no bias
+	Cfg                  LoadedUnifiedVisionConfig
+}
+
 // LoadedAudioClipBound is one optional per-linear activation clamp.
 type LoadedAudioClipBound struct {
 	Min, Max float32
@@ -206,6 +240,7 @@ type LoadedModel struct {
 	PerLayerModelProj *Linear
 	PerLayerProjNorm  []byte
 	Vision            *LoadedVision
+	UnifiedVision     *LoadedUnifiedVision // encoder-free vision (gemma4_unified); nil when absent
 	Audio             *LoadedAudio
 	Diffusion         *LoadedDiffusion
 }

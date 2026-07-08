@@ -34,6 +34,13 @@ func init() {
 			}
 			return AssembleVision(SanitizeVisionWeights(tensors), textCfg)
 		},
+		UnifiedVision: func(tensors map[string]safetensors.Tensor, cfg model.ArchConfig) (*model.LoadedUnifiedVision, error) {
+			textCfg, ok := cfg.(*Gemma4TextConfig)
+			if !ok {
+				return nil, nil
+			}
+			return AssembleUnifiedVision(tensors, textCfg)
+		},
 		Audio: func(tensors map[string]safetensors.Tensor, cfg model.ArchConfig) (*model.LoadedAudio, error) {
 			textCfg, ok := cfg.(*Gemma4TextConfig)
 			if !ok {

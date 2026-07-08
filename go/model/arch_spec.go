@@ -37,8 +37,11 @@ type ArchSpec struct {
 	Weights    WeightNames                      // logical weight role → tensor name; model.Assemble reacts to it
 	Normalize  func(map[string]safetensors.Tensor) map[string]safetensors.Tensor
 	Vision     func(map[string]safetensors.Tensor, ArchConfig) (*LoadedVision, error)
-	Audio      func(map[string]safetensors.Tensor, ArchConfig) (*LoadedAudio, error)
-	Diffusion  func(map[string]safetensors.Tensor, ArchConfig) (*LoadedDiffusion, error)
+	// UnifiedVision assembles the encoder-free vision payload (gemma4_unified);
+	// packs with an encoder tower return nil here and populate Vision instead.
+	UnifiedVision func(map[string]safetensors.Tensor, ArchConfig) (*LoadedUnifiedVision, error)
+	Audio         func(map[string]safetensors.Tensor, ArchConfig) (*LoadedAudio, error)
+	Diffusion     func(map[string]safetensors.Tensor, ArchConfig) (*LoadedDiffusion, error)
 }
 
 // archSpecs is the engine's architecture registry — the same core.NewRegistry primitive pkg/scheme
