@@ -61,6 +61,13 @@ func Load(dir string) (*LoadedModel, *safetensors.DirMapping, error) {
 			return nil, nil, err
 		}
 	}
+	if spec.UnifiedVision != nil {
+		m.UnifiedVision, err = spec.UnifiedVision(tensors, ac)
+		if err != nil {
+			_ = dm.Close()
+			return nil, nil, err
+		}
+	}
 	if spec.Audio != nil {
 		m.Audio, err = spec.Audio(tensors, ac)
 		if err != nil {
