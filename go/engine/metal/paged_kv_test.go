@@ -465,8 +465,9 @@ func TestDevicePagedKVCacheTruncateShrinksVisiblePages(t *testing.T) {
 			t.Fatalf("slot %d: %v", pos, err)
 		}
 	}
-	if got := append([]int(nil), cache.pageLens...); !slices.Equal(got, []int{2, 2, 1}) {
-		t.Fatalf("initial page lens = %v, want [2 2 1]", got)
+	// geometric schedule: page 0 holds pageSize rows, page 1 doubles (2, then 4)
+	if got := append([]int(nil), cache.pageLens...); !slices.Equal(got, []int{2, 3}) {
+		t.Fatalf("initial page lens = %v, want [2 3]", got)
 	}
 
 	if err := cache.truncate(3); err != nil {
@@ -478,8 +479,8 @@ func TestDevicePagedKVCacheTruncateShrinksVisiblePages(t *testing.T) {
 	if got := cache.offset; got != 3 {
 		t.Fatalf("offset after truncate = %d, want 3", got)
 	}
-	if got := append([]int(nil), cache.pageLens...); !slices.Equal(got, []int{2, 1, 0}) {
-		t.Fatalf("page lens after truncate = %v, want [2 1 0]", got)
+	if got := append([]int(nil), cache.pageLens...); !slices.Equal(got, []int{2, 1}) {
+		t.Fatalf("page lens after truncate = %v, want [2 1]", got)
 	}
 }
 
