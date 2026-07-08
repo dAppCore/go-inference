@@ -5,6 +5,7 @@
 package native
 
 import (
+	"math"
 	"math/bits"
 	"sync/atomic"
 	"unsafe"
@@ -13,16 +14,41 @@ import (
 	"github.com/tmc/apple/metal"
 )
 
+// float helpers for the host q8 paths (kept local: the package's other float
+// plumbing is GPU-side).
+func mathFloat32bits(f float32) uint32     { return math.Float32bits(f) }
+func mathFloat32frombits(b uint32) float32 { return math.Float32frombits(b) }
+func absF32(f float32) float32 {
+	if f < 0 {
+		return -f
+	}
+	return f
+}
+func roundF32(f float32) float32 { return float32(math.Round(float64(f))) }
+
 type devicePagedKVCache struct {
 	kPages, vPages []metal.MTLBuffer
 	kPagePtrs      []*byte
 	vPagePtrs      []*byte
 	pageLens       []int
 
+	// q8 mode (#357): pages hold int8 rows quantised symmetrically per
+	// kvQ8GroupSize elements, with f32 group scales in PARALLEL pages — the
+	// same [row][kvHead][...] order, element strides unchanged, so the SDPA
+	// kernels' addressing carries over with a byte (not bf16) element and one
+	// scale load per lane slice. The linear twin stays bf16: the host
+	// snapshot paths quantise on load and dequantise on read, so prefill, the
+	// batched verify, state save/restore, and the drafter export all flow
+	// through unchanged.
+	quantQ8                  bool
+	kScalePages, vScalePages []metal.MTLBuffer
+	kScalePtrs, vScalePtrs   []*byte
+
 	keyScratch, valueScratch           []metal.MTLBuffer
 	lensScratch                        []int
 	kHeadStrides, kSeqStrides          []int
 	vHeadStrides, vSeqStrides          []int
+	kScaleScratch, vScaleScratch       []metal.MTLBuffer
 	snapshotK, snapshotV               metal.MTLBuffer
 	snapshotKPtr, snapshotVPtr         *byte
 	snapshotBytes                      int
@@ -32,6 +58,27 @@ type devicePagedKVCache struct {
 	linearSynced                       int
 	sdpaScratch                        []*sdpaPagedDecodeScratch
 	sdpaScratchCursor                  int
+}
+
+// kvQ8GroupSize is the q8 quantisation group: 64 elements per scale keeps the
+// P1 kernels' lane slices (headDim/32 = 8 elements at headDim 256) inside one
+// group, so a lane loads exactly one scale per row.
+const kvQ8GroupSize = 64
+
+// rowElemBytes is the per-element byte width of a K/V page row.
+func (c *devicePagedKVCache) rowElemBytes() int {
+	if c.quantQ8 {
+		return 1
+	}
+	return bf16Size
+}
+
+// scaleRowBytes is one row's group-scale bytes (0 when not quantised).
+func (c *devicePagedKVCache) scaleRowBytes() int {
+	if !c.quantQ8 {
+		return 0
+	}
+	return c.kvDim / kvQ8GroupSize * 4
 }
 
 func newDevicePagedKVCache(nKVHeads, headDim, maxSize, pageSize int) (*devicePagedKVCache, error) {
@@ -136,6 +183,12 @@ func (c *devicePagedKVCache) Close() {
 	c.kSeqStrides = nil
 	c.vHeadStrides = nil
 	c.vSeqStrides = nil
+	c.kScalePages = nil
+	c.vScalePages = nil
+	c.kScalePtrs = nil
+	c.vScalePtrs = nil
+	c.kScaleScratch = nil
+	c.vScaleScratch = nil
 	c.snapshotK = nil
 	c.snapshotV = nil
 	c.snapshotKPtr = nil
@@ -165,15 +218,9 @@ func (c *devicePagedKVCache) slot(pos int) (kPage, vPage metal.MTLBuffer, rowOff
 	page := c.pageForPos(cachePos)
 	slot := cachePos - c.pageStartFor(page)
 	for len(c.kPages) <= page {
-		k, v, kPtr, vPtr, allocErr := c.newPage(c.pageRowsFor(len(c.kPages)))
-		if allocErr != nil {
+		if allocErr := c.appendPage(); allocErr != nil {
 			return nil, nil, 0, allocErr
 		}
-		c.kPages = append(c.kPages, k)
-		c.vPages = append(c.vPages, v)
-		c.kPagePtrs = append(c.kPagePtrs, kPtr)
-		c.vPagePtrs = append(c.vPagePtrs, vPtr)
-		c.pageLens = append(c.pageLens, 0)
 	}
 	if n := slot + 1; n > c.pageLens[page] {
 		c.pageLens[page] = n
@@ -189,11 +236,57 @@ func (c *devicePagedKVCache) slot(pos int) (kPage, vPage metal.MTLBuffer, rowOff
 	if cachePos < c.linearSynced {
 		c.linearSynced = cachePos
 	}
-	return c.kPages[page], c.vPages[page], uint(slot * c.kvDim * bf16Size), nil
+	return c.kPages[page], c.vPages[page], uint(slot * c.kvDim * c.rowElemBytes()), nil
+}
+
+// appendPage allocates the next page under the geometric schedule — the q8
+// mode grows the parallel scale pages in lockstep.
+func (c *devicePagedKVCache) appendPage() error {
+	rows := c.pageRowsFor(len(c.kPages))
+	k, v, kPtr, vPtr, err := c.newPage(rows)
+	if err != nil {
+		return err
+	}
+	if c.quantQ8 {
+		sBytes := uint(rows * c.scaleRowBytes())
+		ks := device.NewBufferWithLengthOptions(sBytes, metal.MTLResourceStorageModeShared)
+		vs := device.NewBufferWithLengthOptions(sBytes, metal.MTLResourceStorageModeShared)
+		if ks == nil || vs == nil || ks.GetID() == 0 || vs.GetID() == 0 {
+			return core.NewError("native.devicePagedKVCache.appendPage: failed to allocate scale pages")
+		}
+		c.kScalePages = append(c.kScalePages, ks)
+		c.vScalePages = append(c.vScalePages, vs)
+		c.kScalePtrs = append(c.kScalePtrs, (*byte)(ks.Contents()))
+		c.vScalePtrs = append(c.vScalePtrs, (*byte)(vs.Contents()))
+	}
+	c.kPages = append(c.kPages, k)
+	c.vPages = append(c.vPages, v)
+	c.kPagePtrs = append(c.kPagePtrs, kPtr)
+	c.vPagePtrs = append(c.vPagePtrs, vPtr)
+	c.pageLens = append(c.pageLens, 0)
+	return nil
+}
+
+// scaleSlot returns the q8 scale page + row byte offset for a landed row —
+// callers pair it with slot(pos) (nil when the cache is not quantised).
+func (c *devicePagedKVCache) scaleSlot(pos int) (kScale, vScale metal.MTLBuffer, scaleOff uint) {
+	if c == nil || !c.quantQ8 {
+		return nil, nil, 0
+	}
+	cachePos := pos
+	if c.ring && c.maxSize > 0 {
+		cachePos = pos % c.maxSize
+	}
+	page := c.pageForPos(cachePos)
+	if page >= len(c.kScalePages) {
+		return nil, nil, 0
+	}
+	slot := cachePos - c.pageStartFor(page)
+	return c.kScalePages[page], c.vScalePages[page], uint(slot * c.scaleRowBytes())
 }
 
 func (c *devicePagedKVCache) newPage(rows int) (metal.MTLBuffer, metal.MTLBuffer, *byte, *byte, error) {
-	bytes := uint(rows * c.kvDim * bf16Size)
+	bytes := uint(rows * c.kvDim * c.rowElemBytes())
 	k := device.NewBufferWithLengthOptions(bytes, metal.MTLResourceStorageModeShared)
 	v := device.NewBufferWithLengthOptions(bytes, metal.MTLResourceStorageModeShared)
 	if k == nil || v == nil || k.GetID() == 0 || v.GetID() == 0 {
@@ -211,15 +304,9 @@ func (c *devicePagedKVCache) preallocPages() error {
 	}
 	need := c.pageForPos(c.maxSize-1) + 1
 	for len(c.kPages) < need {
-		k, v, kPtr, vPtr, err := c.newPage(c.pageRowsFor(len(c.kPages)))
-		if err != nil {
+		if err := c.appendPage(); err != nil {
 			return err
 		}
-		c.kPages = append(c.kPages, k)
-		c.vPages = append(c.vPages, v)
-		c.kPagePtrs = append(c.kPagePtrs, kPtr)
-		c.vPagePtrs = append(c.vPagePtrs, vPtr)
-		c.pageLens = append(c.pageLens, 0)
 	}
 	return nil
 }
@@ -270,14 +357,78 @@ func (c *devicePagedKVCache) linearSnapshot(rows int) (kBuf, vBuf metal.MTLBuffe
 		if start+pageLen > rows {
 			pageLen = rows - start
 		}
-		copyBytes := pageLen * rowBytes
 		dstOff := start * rowBytes
+		if c.quantQ8 {
+			elems := pageLen * c.kvDim
+			srcK := unsafe.Slice((*int8)(unsafe.Pointer(c.kPagePtrs[pageIdx])), elems)
+			srcV := unsafe.Slice((*int8)(unsafe.Pointer(c.vPagePtrs[pageIdx])), elems)
+			scales := pageLen * c.kvDim / kvQ8GroupSize
+			sK := unsafe.Slice((*float32)(unsafe.Pointer(c.kScalePtrs[pageIdx])), scales)
+			sV := unsafe.Slice((*float32)(unsafe.Pointer(c.vScalePtrs[pageIdx])), scales)
+			kvQ8DequantRows(kBytes[dstOff:dstOff+pageLen*rowBytes], srcK, sK)
+			kvQ8DequantRows(vBytes[dstOff:dstOff+pageLen*rowBytes], srcV, sV)
+			continue
+		}
+		copyBytes := pageLen * rowBytes
 		srcK := unsafe.Slice(c.kPagePtrs[pageIdx], copyBytes)
 		srcV := unsafe.Slice(c.vPagePtrs[pageIdx], copyBytes)
 		copy(kBytes[dstOff:dstOff+copyBytes], srcK)
 		copy(vBytes[dstOff:dstOff+copyBytes], srcV)
 	}
 	return c.snapshotK, c.snapshotV, kPtr, vPtr, nil
+}
+
+// kvQ8DequantRows expands int8 group-quantised elements into bf16 bytes:
+// one f32 scale per kvQ8GroupSize elements, x = q·scale.
+func kvQ8DequantRows(dst []byte, q []int8, scales []float32) {
+	for g := range scales {
+		s := scales[g]
+		base := g * kvQ8GroupSize
+		for i := range kvQ8GroupSize {
+			f := float32(q[base+i]) * s
+			bits := mathFloat32bits(f)
+			// round-to-nearest-even bf16 truncation
+			bits += 0x7FFF + ((bits >> 16) & 1)
+			off := (base + i) * 2
+			dst[off] = byte(bits >> 16)
+			dst[off+1] = byte(bits >> 24)
+		}
+	}
+}
+
+// kvQ8QuantRows quantises bf16 bytes into int8 groups with f32 scales:
+// scale = maxabs/127 per group, q = round(x/scale) clamped to ±127.
+func kvQ8QuantRows(dstQ []int8, dstScales []float32, src []byte) {
+	groups := len(dstScales)
+	for g := range groups {
+		base := g * kvQ8GroupSize
+		maxAbs := float32(0)
+		var vals [kvQ8GroupSize]float32
+		for i := range kvQ8GroupSize {
+			off := (base + i) * 2
+			bits := uint32(src[off]) | uint32(src[off+1])<<8
+			f := mathFloat32frombits(bits << 16)
+			vals[i] = f
+			if a := absF32(f); a > maxAbs {
+				maxAbs = a
+			}
+		}
+		scale := maxAbs / 127
+		dstScales[g] = scale
+		inv := float32(0)
+		if scale > 0 {
+			inv = 1 / scale
+		}
+		for i := range kvQ8GroupSize {
+			q := int32(roundF32(vals[i] * inv))
+			if q > 127 {
+				q = 127
+			} else if q < -127 {
+				q = -127
+			}
+			dstQ[base+i] = int8(q)
+		}
+	}
 }
 
 func (c *devicePagedKVCache) loadLinearSnapshot(kRows, vRows []byte, tokens int) error {
@@ -307,6 +458,18 @@ func (c *devicePagedKVCache) loadLinearSnapshot(kRows, vRows []byte, tokens int)
 		}
 		srcOff := pos * rowBytes
 		page := c.pageForPos(pos)
+		if c.quantQ8 {
+			rowGroups := c.kvDim / kvQ8GroupSize
+			qOff := uintptr(rowOff) // rowOff is already in row-elem bytes (1B/elem)
+			sOff := uintptr((pos - c.pageStartFor(page)) * c.scaleRowBytes())
+			kQ := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[page]), qOff)), c.kvDim)
+			vQ := unsafe.Slice((*int8)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[page]), qOff)), c.kvDim)
+			kS := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.kScalePtrs[page]), sOff)), rowGroups)
+			vS := unsafe.Slice((*float32)(unsafe.Add(unsafe.Pointer(c.vScalePtrs[page]), sOff)), rowGroups)
+			kvQ8QuantRows(kQ, kS, kRows[srcOff:srcOff+rowBytes])
+			kvQ8QuantRows(vQ, vS, vRows[srcOff:srcOff+rowBytes])
+			continue
+		}
 		copy(unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[page]), uintptr(rowOff))), rowBytes), kRows[srcOff:srcOff+rowBytes])
 		copy(unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[page]), uintptr(rowOff))), rowBytes), vRows[srcOff:srcOff+rowBytes])
 	}
@@ -392,6 +555,24 @@ func (c *devicePagedKVCache) state() (keys, values []metal.MTLBuffer, lens, kHea
 		vSeq[i] = c.kvDim
 	}
 	return keys, values, lens, kHead, kSeq, vHead, vSeq, nil
+}
+
+// scaleState mirrors state() for the q8 group-scale pages (nil, nil when the
+// cache is not quantised) — the SDPA plan binds them beside the int8 pages.
+func (c *devicePagedKVCache) scaleState() (kScales, vScales []metal.MTLBuffer) {
+	if c == nil || !c.quantQ8 || len(c.kScalePages) != len(c.kPages) {
+		return nil, nil
+	}
+	n := len(c.kScalePages)
+	if cap(c.kScaleScratch) < n {
+		c.kScaleScratch = make([]metal.MTLBuffer, n)
+		c.vScaleScratch = make([]metal.MTLBuffer, n)
+	}
+	kScales = c.kScaleScratch[:n]
+	vScales = c.vScaleScratch[:n]
+	copy(kScales, c.kScalePages)
+	copy(vScales, c.vScalePages)
+	return kScales, vScales
 }
 
 func (c *devicePagedKVCache) attentionScratch(nHeads int) (*sdpaPagedDecodeScratch, error) {
