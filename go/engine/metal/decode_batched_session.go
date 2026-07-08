@@ -82,6 +82,13 @@ type denseBatchScratch struct {
 	layerVStage      []metal.MTLBuffer
 	layerStageRowCap int
 	layerStageKVCap  int
+	// prompt-attention GEMM score slabs (sdpa_prompt_gemm.go): two K × nCap buffers
+	// double-buffered across heads so head h+1's wide QKᵀ GEMM overlaps head h's skinny
+	// P@V GEMM instead of draining the GPU behind its 32 output tiles.
+	sdpaS0      metal.MTLBuffer
+	sdpaS1      metal.MTLBuffer
+	sdpaSRowCap int // sdpaPromptS's OWN capacities — never another fold's (the attnRowCap lesson)
+	sdpaSNCap   int
 	// moeBatch holds the K-row MoE fold slabs (moe_batch.go) — nil until an MoE chunk runs.
 	moeBatch *moeBatchScratch
 }
@@ -137,6 +144,23 @@ func (s *denseBatchScratch) layerStage(li, layers, k, kvDimMax int) (kSt, vSt me
 		s.layerVStage[li] = scratchBF16(s.layerStageRowCap * s.layerStageKVCap)
 	}
 	return s.layerKStage[li], s.layerVStage[li]
+}
+
+// sdpaPromptS returns the two prompt-attention score slabs (kRows × nCap bf16 each) for the
+// GEMM SDPA composition, (re)allocating when the chunk row count grows or the attended-length
+// cap rises. nCap is the session's maxLen so the allocation happens ONCE per session instead
+// of every deepening chunk. Growth is tracked by sdpaPromptS's OWN capacity fields — never
+// another fold's (the attnRowCap lesson: capacity consumed outside its owner left slabs short
+// at the wide tail-absorbed chunk).
+func (s *denseBatchScratch) sdpaPromptS(kRows, nCap int) (s0, s1 metal.MTLBuffer) {
+	if s.sdpaS0 == nil || s.sdpaSRowCap < kRows || s.sdpaSNCap < nCap {
+		rows := max(kRows, s.sdpaSRowCap)
+		cols := max(nCap, s.sdpaSNCap)
+		s.sdpaS0 = scratchBF16(rows * cols)
+		s.sdpaS1 = scratchBF16(rows * cols)
+		s.sdpaSRowCap, s.sdpaSNCap = rows, cols
+	}
+	return s.sdpaS0, s.sdpaS1
 }
 
 func (s *denseBatchScratch) Close() {
@@ -890,6 +914,15 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			// (the per-row oracle would have routed 2-pass there), same tier as the fold's qmm.
 			useMultiQ := !sdpaMultiQDisabledForTest && (slideW == 0 || basePos+K <= slideW) &&
 				(basePos+K < sdpa2PassMinKV || K >= steelGEMMMinRows) && gpuHasSDPAMultiQ(lhd)
+			// Deep-prompt global layers route the SDPA to the steel GEMM composition
+			// (sdpa_prompt_gemm.go): K/V read once per HEAD instead of once per query row,
+			// so the traffic no longer scales with the row count and the multiQ kernel's
+			// deep-context SLC-decay ramp never engages. Same emission seam as multiQ —
+			// the per-row loop still runs its staged/rope tail, only the SDPA dispatches
+			// differ. Token-identity tier (S stores bf16 between the GEMMs), the same
+			// boundary the fold's qmm and ≥32-row steel projections already trade at.
+			useGEMMSDPA := useMultiQ && slideW == 0 && basePos+K >= sdpaPromptGEMMMinKV &&
+				K <= sdpaPromptGEMMMaxRows && !sdpaPromptGEMMDisabledForTest && gpuHasPromptSDPAGEMM()
 			if batchedRope {
 				if err = encQKNormRopeRows(enc, qSlab, s.lb[li].qNorm.buf, qSlab, 0, s.lb[li].qNorm.off, 0, qDim, qDim, offBuf[0], layerRopeFreqs, K, s.nHeads, lhd, rotDim, rbase, s.scale, s.eps); err != nil {
 					endEncodingFast(enc)
@@ -979,6 +1012,13 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				if ownsCache {
 					stagedDeferred[li] = true
 					pendingLandings = append(pendingLandings, ringLanding{li: li, kvDim: kvDim, slideW: slideW})
+				}
+			} else if useGEMMSDPA {
+				sScore0, sScore1 := s.denseBatch.sdpaPromptS((s.nHeads/lkv)*K, s.maxLen)
+				if err = encSDPAPromptGEMM(enc, qSlab, ownerK, ownerV, attnSlab, sScore0, sScore1,
+					s.nHeads, lkv, lhd, K, basePos+K, qDim, kvDim, s.scale); err != nil {
+					endEncodingFast(enc)
+					return nil, false, err
 				}
 			} else if useMultiQ {
 				if err = encSDPAMultiQCausal(enc, qSlab, ownerK, ownerV, attnSlab, s.nHeads, lkv, lhd, K, basePos+K,
