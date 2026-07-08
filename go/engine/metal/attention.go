@@ -441,7 +441,26 @@ func residentBytes(b []byte) metal.MTLBuffer {
 	if r, ok := residentBufs[key]; ok {
 		return r.buf
 	}
-	buf, pinner, noCopy := residentNoCopyBytes(b)
+	var (
+		buf    metal.MTLBuffer
+		pinner *runtime.Pinner
+		noCopy bool
+	)
+	// An ODD base pointer cannot bind no-copy: the wrap comes back looking
+	// perfect from the CPU (Contents()==base, full Length()) but the GPU's
+	// view is sheared off the element boundary — every bf16 read is garbage
+	// and dot products go NaN (TestNoCopyOffsetAlignmentRule: odd offsets NaN,
+	// any even offset is exact). Odd bases only arise as interior slices of
+	// loaded file blobs — a tensor at an arbitrary byte offset, immutable —
+	// never as Go allocations (≥8-aligned), so a one-time upload copy is safe
+	// here while every mutation-aliasing consumer keeps the live no-copy view.
+	// (#352: the 12B assistant's pre_projection at blob+9423 drafted all-NaN
+	// from clean operands; the 31B pair's 0% acceptance shared the cause.)
+	if key%2 != 0 {
+		buf = sharedBytes(b)
+	} else {
+		buf, pinner, noCopy = residentNoCopyBytes(b)
+	}
 	residentBufs[key] = residentBuf{buf: buf, pin: b, pinner: pinner, noCopy: noCopy}
 	return buf
 }
