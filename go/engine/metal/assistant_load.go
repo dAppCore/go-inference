@@ -758,11 +758,43 @@ func (pair *AssistantPair) TargetKVByLayerType(targetKVs []AssistantTargetKV) (A
 	return pair.targetKVByLayerType(targetKVs, nil)
 }
 
+// assistantKVWinnerCaches resolves the owner cache each layer type actually
+// contributes to the drafter: targetKVByLayerType's set() overwrites per
+// type, so only the LAST target layer of a type wins. The session export
+// materialises just those caches — on gemma4 that is 2 streams where the
+// target owns 30-48, and transposing the rest was pure discarded work
+// (10-14ms per draft block on the 26B at short context, 47-72ms on the 12B
+// at 16K — #355). kvCount bounds the cache indices exactly as the consuming
+// loop bounds len(targetKVs).
+func (pair *AssistantPair) assistantKVWinnerCaches(kvCount int) map[string]int {
+	winners := map[string]int{}
+	for layerIdx, layer := range pair.TargetArch.Layer {
+		layerType := layer.TypeName()
+		if layerType == "" {
+			continue
+		}
+		ownerIdx := layerIdx
+		if layer.KVShareFrom >= 0 {
+			ownerIdx = layer.KVShareFrom
+		}
+		if ownerIdx < 0 || ownerIdx >= len(pair.TargetArch.Layer) {
+			continue
+		}
+		cacheIdx := pair.TargetArch.Layer[ownerIdx].CacheIndex
+		if cacheIdx < 0 || cacheIdx >= kvCount {
+			continue
+		}
+		winners[layerType] = cacheIdx
+	}
+	return winners
+}
+
 func (pair *AssistantPair) targetKVByLayerType(targetKVs []AssistantTargetKV, entries []AssistantKVEntry) (AssistantTargetKVByType, error) {
 	if pair == nil || pair.Assistant == nil {
 		return AssistantTargetKVByType{}, core.NewError("native.assistant draft step requires a validated pair")
 	}
 	out := AssistantTargetKVByType{entries: entries[:0]}
+	winners := pair.assistantKVWinnerCaches(len(targetKVs))
 	for layerIdx, layer := range pair.TargetArch.Layer {
 		layerType := layer.TypeName()
 		if layerType == "" {
@@ -777,6 +809,11 @@ func (pair *AssistantPair) targetKVByLayerType(targetKVs []AssistantTargetKV, en
 		}
 		cacheIdx := pair.TargetArch.Layer[ownerIdx].CacheIndex
 		if cacheIdx < 0 || cacheIdx >= len(targetKVs) {
+			continue
+		}
+		if winners[layerType] != cacheIdx {
+			// a non-winning stream: set() would overwrite it anyway, and the
+			// session export no longer materialises it.
 			continue
 		}
 		targetKV := targetKVs[cacheIdx]
@@ -820,7 +857,12 @@ func (pair *AssistantPair) targetKVByLayerTypeFromSession(target *ArchSession, u
 	if err := pair.validateTargetSessionArch(target.arch); err != nil {
 		return AssistantTargetKVByType{}, err
 	}
-	views, err := target.stateLayerViews()
+	winnerBound := len(pair.TargetArch.Layer)
+	needed := map[int]bool{}
+	for _, cacheIdx := range pair.assistantKVWinnerCaches(winnerBound) {
+		needed[cacheIdx] = true
+	}
+	views, err := target.stateLayerViewsRefreshing(needed)
 	if err != nil {
 		return AssistantTargetKVByType{}, err
 	}
@@ -840,7 +882,7 @@ func (pair *AssistantPair) targetKVByLayerTypeFromSession(target *ArchSession, u
 		targetKVs = make([]AssistantTargetKV, maxCacheIndex+1)
 	}
 	for _, view := range views {
-		if view.cacheIndex < 0 {
+		if view.cacheIndex < 0 || !needed[view.cacheIndex] {
 			continue
 		}
 		start, tokenCount, err := nativeKVLayerCaptureWindow(view, target.pos)
