@@ -430,8 +430,16 @@ METAL_FUNC void lthn_sdpa_paged_p1_gqa2_body(
 
   // merge the simdgroup partials per query head, two phases through the SAME
   // threadgroup slabs (tgO at headDim 512 already fills the 32KB budget once —
-  // doubling it for GQA would not fit). Every thread participates in both
-  // phases' barriers; simdgroup 0 does the merge work.
+  // doubling it for GQA would not fit). The merge itself is parallel over the
+  // head dims: EVERY thread owns headDim/256 dims (global thread id, not the
+  // lane), each folding the 8 simdgroup partials for its dims. The previous
+  // form parked 7 of 8 simdgroups at the barrier while simdgroup 0 merged all
+  // 256 dims — the #356 probe priced the whole row loop (loads, dots, sums,
+  // exp folds) at 0.178ms/scan against 0.367 for the full kernel: HALF the
+  // kernel was this merge. The 8 scalar M/S folds are recomputed per thread —
+  // redundant flops in exchange for no extra barrier.
+  const uint tid = sg * 32 + lane;
+  const uint dimsPerThread = (D.headDim + 255) / 256;
   for (uint g = 0; g < kPagedGQA2; g++) {
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (lane == 0) {
@@ -442,9 +450,6 @@ METAL_FUNC void lthn_sdpa_paged_p1_gqa2_body(
       tgO[sg * D.headDim + lane * per + i] = o[g][i];
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    if (sg != 0) {
-      continue;
-    }
     float M = -3.0e38f;
     for (uint gg = 0; gg < kPagedSimdGroups; gg++) {
       if (tgS[gg] > 0.0f) {
@@ -452,37 +457,28 @@ METAL_FUNC void lthn_sdpa_paged_p1_gqa2_body(
       }
     }
     float S = 0.0f;
-    float of[kPagedGQA2MaxPerLane];
-    for (uint i = 0; i < per; i++) {
-      of[i] = 0.0f;
-    }
+    float w[kPagedSimdGroups];
     for (uint gg = 0; gg < kPagedSimdGroups; gg++) {
       const float sgS = tgS[gg];
-      if (sgS <= 0.0f) {
-        continue;
-      }
-      const float w = exp(tgM[gg] - M);
-      S += sgS * w;
-      for (uint i = 0; i < per; i++) {
-        of[i] += tgO[gg * D.headDim + lane * per + i] * w;
-      }
+      w[gg] = sgS > 0.0f ? exp(tgM[gg] - M) : 0.0f;
+      S += sgS * w[gg];
     }
     const uint h = h0 + g;
-    if (WRITE_FINAL) {
-      device bf16* oh = outFinal + h * D.headDim + lane * per;
-      for (uint i = 0; i < per; i++) {
-        oh[i] = S > 0.0f ? bf16(of[i] / S) : bf16(0.0f);
+    for (uint d = tid * dimsPerThread; d < min((tid + 1) * dimsPerThread, D.headDim); d++) {
+      float of = 0.0f;
+      for (uint gg = 0; gg < kPagedSimdGroups; gg++) {
+        of += tgO[gg * D.headDim + d] * w[gg];
       }
-      continue;
+      if (WRITE_FINAL) {
+        outFinal[h * D.headDim + d] = S > 0.0f ? bf16(of / S) : bf16(0.0f);
+      } else {
+        acc[(h * D.cellCount + D.cellBase + split) * D.headDim + d] = of;
+      }
     }
-    const uint cell = h * D.cellCount + D.cellBase + split;
-    if (lane == 0) {
+    if (!WRITE_FINAL && tid == 0) {
+      const uint cell = h * D.cellCount + D.cellBase + split;
       maxs[cell] = M;
       sums[cell] = S;
-    }
-    device float* a = acc + cell * D.headDim + lane * per;
-    for (uint i = 0; i < per; i++) {
-      a[i] = of[i];
     }
   }
 }
@@ -569,3 +565,4 @@ struct PagedSDPAP2Dims {
     oh[i] = denom > 0.0f ? bf16(o[i] / denom) : bf16(0.0f);
   }
 }
+
