@@ -124,6 +124,40 @@ func (s *rmsNormResidualBF16Scratch) buffers(x, res []byte) (metal.MTLBuffer, me
 
 // rmsNormResidualPipeline builds (once) the fused rms-norm+residual pipeline from the custom kernels
 // library (lthn_kernels.metallib). Shares the customLibraryLoaded gate with the gelu kernel.
+// rmsNormResidualPipelineFor selects the fused kernel by axis: the single-row kernel
+// (one pass, ≤1024 threads × N_READS) up to rmsLoopedLimit, the grid-striding looped
+// variant beyond it (gemma4 31B hidden 5376 — the #348 tail-drop class). One dispatch
+// either way, so every lane keeps its barrier discipline (the paged lane's CONCURRENT
+// encoder orders stages with explicit barriers; a composed rms+add pair would race).
+var (
+	rmsResidualLoopedPSOOnce sync.Once
+	rmsResidualLoopedPSO     metal.MTLComputePipelineState
+	rmsResidualLoopedPSOErr  error
+)
+
+func rmsNormResidualPipelineFor(axisSize int) (metal.MTLComputePipelineState, error) {
+	if axisSize > rmsLoopedLimit {
+		return rmsNormResidualLoopedPipeline()
+	}
+	return rmsNormResidualPipeline()
+}
+
+func rmsNormResidualLoopedPipeline() (metal.MTLComputePipelineState, error) {
+	rmsResidualLoopedPSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			rmsResidualLoopedPSOErr = core.NewError("native.rmsNormResidualLoopedPipeline: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_rmsnorm_residual_looped_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			rmsResidualLoopedPSOErr = core.NewError("native.rmsNormResidualLoopedPipeline: kernel lthn_rmsnorm_residual_looped_bf16 not found — rebuild lthn_kernels.metallib")
+			return
+		}
+		rmsResidualLoopedPSO, rmsResidualLoopedPSOErr = device.NewComputePipelineStateWithFunctionError(fn)
+	})
+	return rmsResidualLoopedPSO, rmsResidualLoopedPSOErr
+}
+
 func rmsNormResidualPipeline() (metal.MTLComputePipelineState, error) {
 	rmsResidualPSOOnce.Do(func() {
 		if customLibrary == nil || customLibrary.GetID() == 0 {
@@ -160,13 +194,7 @@ func encRMSNormResidualBF16(enc metal.MTLComputeCommandEncoder, x, weight, res, 
 // bound at byte offsets — the SAME fused pipeline, for batched rows living at offsets inside
 // shared K-row buffers (bit-identical per row to the offset-0 sequential encode).
 func encRMSNormResidualBF16At(enc metal.MTLComputeCommandEncoder, x, weight, res, out metal.MTLBuffer, xOff, wOff, resOff, outOff uint, axisSize int, eps float32) error {
-	if axisSize > rmsLoopedLimit {
-		// the fused kernel is one-pass single-row: a clamped threadgroup would silently
-		// skip every dim past thread-coverage (the 31B dModel-5376 degeneracy, #348).
-		// Callers must compose the looped rms + residual add instead.
-		return core.NewError("native.encRMSNormResidualBF16At: axisSize exceeds the single-row fused kernel limit")
-	}
-	pso, err := rmsNormResidualPipeline()
+	pso, err := rmsNormResidualPipelineFor(axisSize)
 	if err != nil {
 		return err
 	}
