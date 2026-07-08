@@ -239,6 +239,88 @@ func UnifiedVisionImagePatches(data []byte, cfg *VisionImageFeatureConfig) ([]by
 	return out, positions, n, nil
 }
 
+// UnifiedAudioProject runs the encoder-free audio head: raw 16 kHz samples in
+// [-1,1], zero-padded to a whole number of AudioSamplesPerToken tokens, each
+// token's samples projected straight into the backbone (scale-free RMSNorm →
+// embed_audio) — no mel front-end, no Conformer. Returns the [n × TextHidden]
+// soft-token features and n.
+func UnifiedAudioProject(uv *model.LoadedUnifiedVision, samples []float32) ([]byte, int, error) {
+	if uv == nil || uv.AudioProjection.Weight == nil || uv.Cfg.AudioSamplesPerToken <= 0 {
+		return nil, 0, core.NewError("native.UnifiedAudioProject: model carries no unified audio head")
+	}
+	if len(samples) == 0 {
+		return nil, 0, core.NewError("native.UnifiedAudioProject: empty audio")
+	}
+	spt := uv.Cfg.AudioSamplesPerToken
+	n := (len(samples) + spt - 1) / spt
+	rows := make([]byte, n*spt*bf16Size)
+	for i, v := range samples {
+		b := f32ToBF16(v)
+		rows[2*i] = byte(b)
+		rows[2*i+1] = byte(b >> 8)
+	}
+	// the pad tail stays zero — the reference zero-pads to divisibility
+	unifiedRMSNoScale(rows, n, spt, uv.Cfg.RMSNormEps)
+	out, err := unifiedLinearRows(uv.AudioProjection, rows, n)
+	if err != nil {
+		return nil, 0, core.E("native.UnifiedAudioProject", "embed_audio", err)
+	}
+	return out, n, nil
+}
+
+// DecodeWAVMono16k parses a RIFF/WAVE file into [-1,1] float32 samples for the
+// unified audio head. v1 accepts 16-bit PCM, mono, 16 kHz — anything else
+// errors loud (no silent resample).
+func DecodeWAVMono16k(data []byte) ([]float32, error) {
+	if len(data) < 44 || string(data[0:4]) != "RIFF" || string(data[8:12]) != "WAVE" {
+		return nil, core.NewError("native.DecodeWAVMono16k: not a RIFF/WAVE file")
+	}
+	le16 := func(off int) int { return int(data[off]) | int(data[off+1])<<8 }
+	le32 := func(off int) int {
+		return int(data[off]) | int(data[off+1])<<8 | int(data[off+2])<<16 | int(data[off+3])<<24
+	}
+	var fmtOK bool
+	var dataOff, dataLen int
+	for off := 12; off+8 <= len(data); {
+		id := string(data[off : off+4])
+		size := le32(off + 4)
+		body := off + 8
+		if body+size > len(data) {
+			size = len(data) - body
+		}
+		switch id {
+		case "fmt ":
+			if size < 16 {
+				return nil, core.NewError("native.DecodeWAVMono16k: short fmt chunk")
+			}
+			format, channels, rate, bits := le16(body), le16(body+2), le32(body+4), le16(body+14)
+			if format != 1 || bits != 16 {
+				return nil, core.NewError("native.DecodeWAVMono16k: want 16-bit PCM (format 1)")
+			}
+			if channels != 1 {
+				return nil, core.NewError("native.DecodeWAVMono16k: want mono audio")
+			}
+			if rate != 16000 {
+				return nil, core.NewError(core.Sprintf("native.DecodeWAVMono16k: want 16000 Hz, got %d (resample before sending)", rate))
+			}
+			fmtOK = true
+		case "data":
+			dataOff, dataLen = body, size
+		}
+		off = body + size + (size & 1) // chunks are word-aligned
+	}
+	if !fmtOK || dataLen < 2 {
+		return nil, core.NewError("native.DecodeWAVMono16k: missing fmt or data chunk")
+	}
+	n := dataLen / 2
+	out := make([]float32, n)
+	for i := range n {
+		s := int16(uint16(data[dataOff+2*i]) | uint16(data[dataOff+2*i+1])<<8)
+		out[i] = float32(s) / 32768
+	}
+	return out, nil
+}
+
 // UnifiedVisionProject runs the encoder-free embedder over n model patches
 // ([n × ModelPatchSize²·3] bf16, kernel-grouped) with their per-patch (row,
 // col) position indices, returning the [n × TextHidden] soft-token features

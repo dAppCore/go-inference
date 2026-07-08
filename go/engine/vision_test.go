@@ -222,7 +222,7 @@ func TestChatMultimodal_Errors(t *testing.T) {
 				placeholderID:     42,
 				embedErr:          core.NewError("splice failed"),
 			},
-			wantErr: "splice image features",
+			wantErr: "splice multimodal features",
 		},
 		{
 			name: "SessionOpenFails",

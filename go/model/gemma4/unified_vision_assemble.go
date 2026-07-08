@@ -114,5 +114,18 @@ func AssembleUnifiedVision(weights map[string]safetensors.Tensor, textCfg *Gemma
 		uv.Cfg.ImageEndToken = Gemma4EOIToken
 		uv.Cfg.BidirectionalImages = textCfg.UseBidirectionalAttention == "vision"
 	}
+	// The unified audio head: one projection over raw-waveform tokens
+	// (AudioSamplesPerToken 16 kHz samples each — no mel, no Conformer).
+	if textCfg != nil && textCfg.AudioConfig != nil && textCfg.AudioConfig.AudioSamplesPerToken > 0 {
+		spt := int(textCfg.AudioConfig.AudioSamplesPerToken)
+		if audio := visionLinearWithInputDim(weights, spt, "embed_audio.embedding_projection"); audio.Weight != nil {
+			uv.AudioProjection = audio
+			uv.Cfg.AudioSamplesPerToken = spt
+			uv.Cfg.AudioTokenID = textCfg.AudioTokenID
+			uv.Cfg.AudioBeginToken = Gemma4BOAToken
+			uv.Cfg.AudioToken = Gemma4AudioToken
+			uv.Cfg.AudioEndToken = Gemma4EOAToken
+		}
+	}
 	return uv, nil
 }

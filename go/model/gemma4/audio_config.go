@@ -8,6 +8,7 @@ package gemma4
 type Gemma4AudioConfig struct {
 	ModelType               string  `json:"model_type"`
 	HiddenSize              int32   `json:"hidden_size"`
+	AudioSamplesPerToken    int32   `json:"audio_samples_per_token"` // gemma4_unified: raw 16 kHz samples per audio token (640 = 40ms)
 	NumHiddenLayers         int32   `json:"num_hidden_layers"`
 	NumAttentionHeads       int32   `json:"num_attention_heads"`
 	AttentionChunkSize      int32   `json:"attention_chunk_size"`
