@@ -29,7 +29,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	noAutoProfile := fs.Bool("no-auto-profile", false, "ignore tuned profiles from `lem tune` (run the flag/engine-default draft block)")
 	profileDir := fs.String("profile-dir", "", "tuned-profile directory (default ~/Lethean/lem/tuning)")
 	contextLen := fs.Int("context", 0, "override context length; 0 uses the model's default")
-	kvCacheMode := fs.String("kv-cache", "", "KV cache mode (paged, fp16, q8, kq8vq4, turboquant; empty = load default)")
+	kvCacheMode := fs.String("kv-cache", "", "KV cache mode override (engine-reported; the no-cgo metal engine runs its built-in cache only — other values are noted and ignored)")
 	readTimeout := fs.Duration("read-timeout", 30*time.Second, "HTTP read header timeout")
 	writeTimeout := fs.Duration("write-timeout", 5*time.Minute, "HTTP write timeout (covers full streaming response)")
 	shutdownTimeout := fs.Duration("shutdown-timeout", 10*time.Second, "graceful shutdown deadline after SIGINT/SIGTERM")

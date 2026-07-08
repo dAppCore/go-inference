@@ -230,6 +230,222 @@ METAL_FUNC void lthn_sdpa_paged_p1_body(
       tgM, tgS, tgO, tgid, sg, lane);
 }
 
+// GQA-SHARED pass 1 (#356): one threadgroup per (KV head, split window) streams
+// the window's K/V rows ONCE and carries TWO independent online-softmax states —
+// the per-query-head kernel above reads every cached row once per QUERY head, so
+// a GQA-2 model (26B/31B/12B: nHeads = 2·nKVHeads) paid 2x the bandwidth-floor
+// traffic on the depth-scaling loop. Row order, accumulation order, and the
+// simdgroup merge are IDENTICAL per query head, so the output bytes match the
+// per-head kernel exactly. Separate host_names (not function constants): a stale
+// metallib fails the pipeline lookup loudly and the host keeps the per-head
+// kernels. Wider GQA ratios (E2B 8, E4B 4) keep the per-head kernel — their hot
+// decode rides the recorded-ICB lane, and 8 register-resident accumulator sets
+// would collapse occupancy here.
+constant constexpr uint kPagedGQA2 = 2;
+
+// GQA-2 models (26B/31B/12B) run headDim 256 on every layer, so per = headDim/32
+// caps at 8 — sizing the two per-head accumulator sets at 8 keeps the register
+// budget equal to the per-head kernel's single 16-wide set. The host gates the
+// gqa2 pipelines on headDim <= 256; the in-kernel bound is the belt.
+constant constexpr uint kPagedGQA2MaxPerLane = 8;
+
+template <bool WRITE_FINAL>
+METAL_FUNC void lthn_sdpa_paged_p1_gqa2_body(
+    const device bf16* q,
+    const device bf16* kPage,
+    const device bf16* vPage,
+    device float* maxs,
+    device float* sums,
+    device float* acc,
+    device bf16* outFinal,
+    const constant PagedSDPAP1Dims& D,
+    threadgroup float* tgM,
+    threadgroup float* tgS,
+    threadgroup float* tgO,
+    uint tgid,
+    uint sg,
+    uint lane) {
+  const uint kvh = tgid / D.splits;
+  const uint split = tgid % D.splits;
+  if (kvh >= D.nKVHeads || D.nHeads != kPagedGQA2 * D.nKVHeads) return;
+  const uint per = D.headDim / 32;
+  if (per == 0 || per > kPagedGQA2MaxPerLane) return;
+  const uint rowBase = split * D.splitRows;
+  if (rowBase >= D.pageLen) return;
+  const uint rowEnd = min(rowBase + D.splitRows, D.pageLen);
+  const uint h0 = kvh * kPagedGQA2;
+
+  const device bf16* kh = kPage + kvh * D.kHeadStride + lane * per;
+  const device bf16* vh = vPage + kvh * D.vHeadStride + lane * per;
+
+  float qv[kPagedGQA2][kPagedGQA2MaxPerLane];
+  for (uint g = 0; g < kPagedGQA2; g++) {
+    const device bf16* qh = q + (h0 + g) * D.headDim + lane * per;
+    for (uint i = 0; i < per; i++) {
+      qv[g][i] = float(qh[i]);
+    }
+  }
+
+  float m[kPagedGQA2];
+  float s[kPagedGQA2];
+  float o[kPagedGQA2][kPagedGQA2MaxPerLane];
+  for (uint g = 0; g < kPagedGQA2; g++) {
+    m[g] = -3.0e38f;
+    s[g] = 0.0f;
+    for (uint i = 0; i < per; i++) {
+      o[g][i] = 0.0f;
+    }
+  }
+
+  const bool vec4 = (per % 4u) == 0u &&
+                    ((D.kSeqStride | D.kHeadStride | D.vSeqStride | D.vHeadStride) % 4u) == 0u;
+  for (uint t = rowBase + sg; t < rowEnd; t += kPagedSimdGroups) {
+    const device bf16* kt = kh + t * D.kSeqStride;
+    float partial0 = 0.0f;
+    float partial1 = 0.0f;
+    if (vec4) {
+      for (uint i = 0; i < per; i += 4) {
+        const bfloat4 k4 = *((const device bfloat4*)(kt + i));
+        const float x = float(k4.x), y = float(k4.y), z = float(k4.z), w = float(k4.w);
+        partial0 += qv[0][i] * x + qv[0][i + 1] * y + qv[0][i + 2] * z + qv[0][i + 3] * w;
+        partial1 += qv[1][i] * x + qv[1][i + 1] * y + qv[1][i + 2] * z + qv[1][i + 3] * w;
+      }
+    } else {
+      for (uint i = 0; i < per; i++) {
+        const float kx = float(kt[i]);
+        partial0 += qv[0][i] * kx;
+        partial1 += qv[1][i] * kx;
+      }
+    }
+    float dot[kPagedGQA2];
+    dot[0] = simd_sum(partial0) * D.scale;
+    dot[1] = simd_sum(partial1) * D.scale;
+    float f[kPagedGQA2];
+    float p[kPagedGQA2];
+    for (uint g = 0; g < kPagedGQA2; g++) {
+      const float newM = max(m[g], dot[g]);
+      f[g] = s[g] > 0.0f ? exp(m[g] - newM) : 0.0f;
+      p[g] = exp(dot[g] - newM);
+      s[g] = s[g] * f[g] + p[g];
+      m[g] = newM;
+    }
+    const device bf16* vt = vh + t * D.vSeqStride;
+    if (vec4) {
+      for (uint i = 0; i < per; i += 4) {
+        const bfloat4 v4 = *((const device bfloat4*)(vt + i));
+        const float x = float(v4.x), y = float(v4.y), z = float(v4.z), w = float(v4.w);
+        o[0][i] = o[0][i] * f[0] + p[0] * x;
+        o[0][i + 1] = o[0][i + 1] * f[0] + p[0] * y;
+        o[0][i + 2] = o[0][i + 2] * f[0] + p[0] * z;
+        o[0][i + 3] = o[0][i + 3] * f[0] + p[0] * w;
+        o[1][i] = o[1][i] * f[1] + p[1] * x;
+        o[1][i + 1] = o[1][i + 1] * f[1] + p[1] * y;
+        o[1][i + 2] = o[1][i + 2] * f[1] + p[1] * z;
+        o[1][i + 3] = o[1][i + 3] * f[1] + p[1] * w;
+      }
+    } else {
+      for (uint i = 0; i < per; i++) {
+        const float vx = float(vt[i]);
+        o[0][i] = o[0][i] * f[0] + p[0] * vx;
+        o[1][i] = o[1][i] * f[1] + p[1] * vx;
+      }
+    }
+  }
+
+  // merge the simdgroup partials per query head, two phases through the SAME
+  // threadgroup slabs (tgO at headDim 512 already fills the 32KB budget once —
+  // doubling it for GQA would not fit). Every thread participates in both
+  // phases' barriers; simdgroup 0 does the merge work.
+  for (uint g = 0; g < kPagedGQA2; g++) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0) {
+      tgM[sg] = m[g];
+      tgS[sg] = s[g];
+    }
+    for (uint i = 0; i < per; i++) {
+      tgO[sg * D.headDim + lane * per + i] = o[g][i];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg != 0) {
+      continue;
+    }
+    float M = -3.0e38f;
+    for (uint gg = 0; gg < kPagedSimdGroups; gg++) {
+      if (tgS[gg] > 0.0f) {
+        M = max(M, tgM[gg]);
+      }
+    }
+    float S = 0.0f;
+    float of[kPagedGQA2MaxPerLane];
+    for (uint i = 0; i < per; i++) {
+      of[i] = 0.0f;
+    }
+    for (uint gg = 0; gg < kPagedSimdGroups; gg++) {
+      const float sgS = tgS[gg];
+      if (sgS <= 0.0f) {
+        continue;
+      }
+      const float w = exp(tgM[gg] - M);
+      S += sgS * w;
+      for (uint i = 0; i < per; i++) {
+        of[i] += tgO[gg * D.headDim + lane * per + i] * w;
+      }
+    }
+    const uint h = h0 + g;
+    if (WRITE_FINAL) {
+      device bf16* oh = outFinal + h * D.headDim + lane * per;
+      for (uint i = 0; i < per; i++) {
+        oh[i] = S > 0.0f ? bf16(of[i] / S) : bf16(0.0f);
+      }
+      continue;
+    }
+    const uint cell = h * D.cellCount + D.cellBase + split;
+    if (lane == 0) {
+      maxs[cell] = M;
+      sums[cell] = S;
+    }
+    device float* a = acc + cell * D.headDim + lane * per;
+    for (uint i = 0; i < per; i++) {
+      a[i] = of[i];
+    }
+  }
+}
+
+[[kernel]] void lthn_sdpa_paged_p1_gqa2_bf16(
+    const device bf16* q      [[buffer(0)]],
+    const device bf16* kPage  [[buffer(1)]],
+    const device bf16* vPage  [[buffer(2)]],
+    device float*      maxs   [[buffer(3)]],
+    device float*      sums   [[buffer(4)]],
+    device float*      acc    [[buffer(5)]],
+    const constant PagedSDPAP1Dims& D [[buffer(6)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint sg   [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float tgM[kPagedSimdGroups];
+  threadgroup float tgS[kPagedSimdGroups];
+  threadgroup float tgO[kPagedSimdGroups * 256]; // gqa2 models: headDim <= 256
+  lthn_sdpa_paged_p1_gqa2_body<false>(
+      q, kPage, vPage, maxs, sums, acc, (device bf16*)acc, D, tgM, tgS, tgO, tgid, sg, lane);
+}
+
+[[kernel]] void lthn_sdpa_paged_p1_final_gqa2_bf16(
+    const device bf16* q      [[buffer(0)]],
+    const device bf16* kPage  [[buffer(1)]],
+    const device bf16* vPage  [[buffer(2)]],
+    device bf16*       out    [[buffer(3)]],
+    const constant PagedSDPAP1Dims& D [[buffer(4)]],
+    uint tgid [[threadgroup_position_in_grid]],
+    uint sg   [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+  threadgroup float tgM[kPagedSimdGroups];
+  threadgroup float tgS[kPagedSimdGroups];
+  threadgroup float tgO[kPagedSimdGroups * 256]; // gqa2 models: headDim <= 256
+  lthn_sdpa_paged_p1_gqa2_body<true>(
+      q, kPage, vPage, (device float*)out, (device float*)out, (device float*)out, out, D,
+      tgM, tgS, tgO, tgid, sg, lane);
+}
+
 struct PagedSDPAP2Dims {
   uint headDim;
   uint cellCount;
