@@ -116,6 +116,7 @@ type ChatMessage struct {
 	Role      string     `json:"role"`
 	Content   string     `json:"content"`
 	Images    [][]byte   `json:"-"`
+	Audios    [][]byte   `json:"-"`
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // assistant response: the model's function calls
 }
 

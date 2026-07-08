@@ -72,6 +72,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if messagesCarryAudios(messages) {
+		audio, ok := model.(inference.AudioModel)
+		if !ok || !audio.AcceptsAudio() {
+			writeError(w, http.StatusBadRequest, "model does not accept audio input", "messages")
+			return
+		}
+	}
 	if req.Stream {
 		h.serveStreaming(w, r, model, req, messages, stops, opts...)
 		return
@@ -312,7 +319,7 @@ func requestMessages(messages []ChatMessage, tools []Tool) []inference.Message {
 		out = append(out, inference.Message{Role: "system", Content: decl})
 	}
 	for _, msg := range messages {
-		out = append(out, inference.Message{Role: msg.Role, Content: openAIMessageContent(msg), Images: msg.Images})
+		out = append(out, inference.Message{Role: msg.Role, Content: openAIMessageContent(msg), Images: msg.Images, Audios: msg.Audios})
 	}
 	return out
 }
@@ -380,6 +387,15 @@ func toolCallID() string {
 func messagesCarryImages(messages []inference.Message) bool {
 	for i := range messages {
 		if len(messages[i].Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func messagesCarryAudios(messages []inference.Message) bool {
+	for i := range messages {
+		if len(messages[i].Audios) > 0 {
 			return true
 		}
 	}

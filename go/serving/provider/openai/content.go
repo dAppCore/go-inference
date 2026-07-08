@@ -22,13 +22,21 @@ const maxDecodedImageBytes = 32 << 20
 const maxImagesPerRequest = 16
 
 type chatContentPart struct {
-	Type     string               `json:"type"`
-	Text     string               `json:"text"`
-	ImageURL *chatContentImageURL `json:"image_url"`
+	Type       string                 `json:"type"`
+	Text       string                 `json:"text"`
+	ImageURL   *chatContentImageURL   `json:"image_url"`
+	InputAudio *chatContentInputAudio `json:"input_audio"`
 }
 
 type chatContentImageURL struct {
 	URL string `json:"url"`
+}
+
+// chatContentInputAudio is the OpenAI input_audio part: bare base64 audio
+// bytes plus a format tag. This engine decodes WAV (16-bit PCM mono 16 kHz).
+type chatContentInputAudio struct {
+	Data   string `json:"data"`
+	Format string `json:"format"`
 }
 
 // rawJSON captures a field's raw bytes during unmarshal without importing
@@ -57,6 +65,7 @@ func (m *ChatMessage) UnmarshalJSON(data []byte) error {
 	m.Role = wire.Role
 	m.Content = ""
 	m.Images = nil
+	m.Audios = nil
 
 	content := trimJSONSpace(wire.Content)
 	if len(content) == 0 || string(content) == "null" {
@@ -102,8 +111,23 @@ func (m *ChatMessage) applyContentParts(parts []chatContentPart) error {
 				return err
 			}
 			m.Images = append(m.Images, decoded)
+		case "input_audio":
+			if part.InputAudio == nil || part.InputAudio.Data == "" {
+				return core.E("openai.ChatMessage", core.Sprintf("content[%d].input_audio.data is required", index), nil)
+			}
+			if format := core.Lower(core.Trim(part.InputAudio.Format)); format != "" && format != "wav" {
+				return core.E("openai.ChatMessage", core.Sprintf("content[%d].input_audio.format %q is not supported (wav: 16-bit PCM mono 16 kHz)", index, part.InputAudio.Format), nil)
+			}
+			if len(m.Audios) >= maxImagesPerRequest {
+				return core.E("openai.ChatMessage", core.Sprintf("too many audio parts — at most %d per request", maxImagesPerRequest), nil)
+			}
+			decoded, err := decodeAudioBase64(part.InputAudio.Data)
+			if err != nil {
+				return err
+			}
+			m.Audios = append(m.Audios, decoded)
 		default:
-			return core.E("openai.ChatMessage", core.Sprintf("content[%d].type %q is not supported (text, image_url)", index, part.Type), nil)
+			return core.E("openai.ChatMessage", core.Sprintf("content[%d].type %q is not supported (text, image_url, input_audio)", index, part.Type), nil)
 		}
 	}
 	m.Content = text.String()
@@ -144,6 +168,30 @@ func decodeImageDataURL(url string) ([]byte, error) {
 	}
 	if len(bytes) == 0 {
 		return nil, core.E("openai.ChatMessage", "image payload is empty", nil)
+	}
+	return bytes, nil
+}
+
+// decodeAudioBase64 decodes an input_audio part's bare base64 payload,
+// bounding the encoded length before allocation like the image decoder.
+func decodeAudioBase64(payload string) ([]byte, error) {
+	if len(payload) > (maxDecodedImageBytes/3+1)*4 {
+		return nil, core.E("openai.ChatMessage", core.Sprintf("audio exceeds the %d MiB cap", maxDecodedImageBytes>>20), nil)
+	}
+	decoded := core.Base64Decode(payload)
+	if !decoded.OK {
+		return nil, core.E("openai.ChatMessage", "audio base64 payload is invalid", decoded.Err())
+	}
+	bytes, ok := decoded.Value.([]byte)
+	if !ok {
+		text, textOK := decoded.Value.(string)
+		if !textOK {
+			return nil, core.E("openai.ChatMessage", "audio base64 decode returned an unexpected type", nil)
+		}
+		bytes = []byte(text)
+	}
+	if len(bytes) == 0 {
+		return nil, core.E("openai.ChatMessage", "audio payload is empty", nil)
 	}
 	return bytes, nil
 }
