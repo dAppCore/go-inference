@@ -868,8 +868,8 @@ func TestNativeTokenModelOpenSessionHonoursPagedKVLoadOptions_Good(t *testing.T)
 	if cache.pageSize != pageSize {
 		t.Fatalf("paged KV page size = %d, want %d", cache.pageSize, pageSize)
 	}
-	if got, want := len(cache.kPages), maxLen/pageSize; got != want {
-		t.Fatalf("preallocated K pages = %d, want %d", got, want)
+	if got, want := len(cache.kPages), cache.pageForPos(maxLen-1)+1; got != want {
+		t.Fatalf("preallocated K pages = %d, want %d (geometric schedule)", got, want)
 	}
 	if cache.length != 0 || cache.pageLens[0] != 0 {
 		t.Fatalf("preallocated cache visible length/page = %d/%d, want 0/0", cache.length, cache.pageLens[0])

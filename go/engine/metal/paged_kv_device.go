@@ -5,6 +5,7 @@
 package native
 
 import (
+	"math/bits"
 	"sync/atomic"
 	"unsafe"
 
@@ -58,6 +59,67 @@ func newDevicePagedKVCache(nKVHeads, headDim, maxSize, pageSize int) (*devicePag
 	}, nil
 }
 
+// maxPagedKVPageRows caps the geometric page growth. Pages double from the
+// base size (2048 -> 4096 -> 8192 -> 16384, then 16384 flat): the paged SDPA
+// runs ONE pass-1 dispatch per visited page, and the #356 anatomy bench
+// measured the 16K scan 26% faster in one page than in eight — dispatch
+// boundaries, not hazards, were the cost. Doubling keeps the allocation
+// granularity of small pages for short sessions (a request that never leaves
+// page 0 allocates 2048 rows) while a deep scan converges to a handful of
+// dispatches; the cap bounds the worst-case over-allocation to one 16K page.
+const maxPagedKVPageRows = 16384
+
+// pageRowsFor is page i's row capacity under the geometric schedule, based at
+// the cache's (possibly maxSize-clamped) pageSize.
+func (c *devicePagedKVCache) pageRowsFor(page int) int {
+	if c.pageSize >= maxPagedKVPageRows {
+		return c.pageSize
+	}
+	doublings := 0
+	for sz := c.pageSize; sz < maxPagedKVPageRows; sz <<= 1 {
+		doublings++
+	}
+	if page >= doublings {
+		return maxPagedKVPageRows
+	}
+	return c.pageSize << page
+}
+
+// pageStartFor is the first cache position stored in page i (the prefix sum of
+// pageRowsFor, in closed form: base·(2^i − 1) through the doubling run, then
+// flat cap-sized steps).
+func (c *devicePagedKVCache) pageStartFor(page int) int {
+	if c.pageSize >= maxPagedKVPageRows {
+		return page * c.pageSize
+	}
+	doublings := 0
+	for sz := c.pageSize; sz < maxPagedKVPageRows; sz <<= 1 {
+		doublings++
+	}
+	if page <= doublings {
+		return c.pageSize * ((1 << page) - 1)
+	}
+	rampEnd := c.pageSize * ((1 << doublings) - 1)
+	return rampEnd + (page-doublings)*maxPagedKVPageRows
+}
+
+// pageForPos maps a cache position to its page index under the schedule —
+// the doubling run resolves with one bit-length, the flat tail by division.
+func (c *devicePagedKVCache) pageForPos(cachePos int) int {
+	if c.pageSize >= maxPagedKVPageRows {
+		return cachePos / c.pageSize
+	}
+	doublings := 0
+	for sz := c.pageSize; sz < maxPagedKVPageRows; sz <<= 1 {
+		doublings++
+	}
+	rampEnd := c.pageSize * ((1 << doublings) - 1)
+	if cachePos < rampEnd {
+		return bits.Len(uint(cachePos/c.pageSize+1)) - 1
+	}
+	return doublings + (cachePos-rampEnd)/maxPagedKVPageRows
+}
+
 func (c *devicePagedKVCache) Close() {
 	if c == nil {
 		return
@@ -100,10 +162,10 @@ func (c *devicePagedKVCache) slot(pos int) (kPage, vPage metal.MTLBuffer, rowOff
 	if c.ring && c.maxSize > 0 {
 		cachePos = pos % c.maxSize
 	}
-	page := cachePos / c.pageSize
-	slot := cachePos % c.pageSize
+	page := c.pageForPos(cachePos)
+	slot := cachePos - c.pageStartFor(page)
 	for len(c.kPages) <= page {
-		k, v, kPtr, vPtr, allocErr := c.newPage()
+		k, v, kPtr, vPtr, allocErr := c.newPage(c.pageRowsFor(len(c.kPages)))
 		if allocErr != nil {
 			return nil, nil, 0, allocErr
 		}
@@ -130,8 +192,8 @@ func (c *devicePagedKVCache) slot(pos int) (kPage, vPage metal.MTLBuffer, rowOff
 	return c.kPages[page], c.vPages[page], uint(slot * c.kvDim * bf16Size), nil
 }
 
-func (c *devicePagedKVCache) newPage() (metal.MTLBuffer, metal.MTLBuffer, *byte, *byte, error) {
-	bytes := uint(c.pageSize * c.kvDim * bf16Size)
+func (c *devicePagedKVCache) newPage(rows int) (metal.MTLBuffer, metal.MTLBuffer, *byte, *byte, error) {
+	bytes := uint(rows * c.kvDim * bf16Size)
 	k := device.NewBufferWithLengthOptions(bytes, metal.MTLResourceStorageModeShared)
 	v := device.NewBufferWithLengthOptions(bytes, metal.MTLResourceStorageModeShared)
 	if k == nil || v == nil || k.GetID() == 0 || v.GetID() == 0 {
@@ -147,9 +209,9 @@ func (c *devicePagedKVCache) preallocPages() error {
 	if c.maxSize <= 0 {
 		return nil
 	}
-	need := (c.maxSize + c.pageSize - 1) / c.pageSize
+	need := c.pageForPos(c.maxSize-1) + 1
 	for len(c.kPages) < need {
-		k, v, kPtr, vPtr, err := c.newPage()
+		k, v, kPtr, vPtr, err := c.newPage(c.pageRowsFor(len(c.kPages)))
 		if err != nil {
 			return err
 		}
@@ -201,7 +263,7 @@ func (c *devicePagedKVCache) linearSnapshot(rows int) (kBuf, vBuf metal.MTLBuffe
 		if pageLen <= 0 {
 			continue
 		}
-		start := pageIdx * c.pageSize
+		start := c.pageStartFor(pageIdx)
 		if start >= rows {
 			break
 		}
@@ -244,7 +306,7 @@ func (c *devicePagedKVCache) loadLinearSnapshot(kRows, vRows []byte, tokens int)
 			return err
 		}
 		srcOff := pos * rowBytes
-		page := pos / c.pageSize
+		page := c.pageForPos(pos)
 		copy(unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.kPagePtrs[page]), uintptr(rowOff))), rowBytes), kRows[srcOff:srcOff+rowBytes])
 		copy(unsafe.Slice((*byte)(unsafe.Add(unsafe.Pointer(c.vPagePtrs[page]), uintptr(rowOff))), rowBytes), vRows[srcOff:srcOff+rowBytes])
 	}
@@ -274,12 +336,13 @@ func (c *devicePagedKVCache) truncate(tokens int) error {
 		return core.NewError("native.devicePagedKVCache.truncate: cannot extend cache")
 	}
 	for page := range c.pageLens {
-		start := page * c.pageSize
+		start := c.pageStartFor(page)
+		rows := c.pageRowsFor(page)
 		switch {
 		case tokens <= start:
 			c.pageLens[page] = 0
-		case tokens-start >= c.pageSize:
-			c.pageLens[page] = c.pageSize
+		case tokens-start >= rows:
+			c.pageLens[page] = rows
 		default:
 			c.pageLens[page] = tokens - start
 		}
