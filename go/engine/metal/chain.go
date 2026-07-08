@@ -35,7 +35,13 @@ func scratch(n int) metal.MTLBuffer {
 // encodeRMSNorm encodes a single-row RMSNorm (x·rsqrt(mean(x²)+eps)·w) over
 // axisSize elements into enc. Mirrors RMSNorm's binding.
 func encodeRMSNorm(enc metal.MTLComputeCommandEncoder, x, w, out metal.MTLBuffer, axisSize int, eps float32) error {
-	pso, err := pipelineFor("rmsfloat32")
+	// single-row kernel up to rmsLoopedLimit, looped past it — the raw single-row threadgroup
+	// exceeds Metal's 1024-thread cap beyond 4096 dims and the dispatch is silently dropped.
+	name := "rmsfloat32"
+	if axisSize > rmsLoopedLimit {
+		name = "rms_loopedfloat32"
+	}
+	pso, err := pipelineFor(name)
 	if err != nil {
 		return err
 	}
@@ -46,9 +52,7 @@ func encodeRMSNorm(enc metal.MTLComputeCommandEncoder, x, w, out metal.MTLBuffer
 	setEncFloat32(enc, eps, 3)
 	setEncInt32(enc, int32(axisSize), 4)
 	setEncInt32(enc, 1, 5)
-	tgNeeded := (axisSize + rmsNReads - 1) / rmsNReads
-	simdsNeeded := (tgNeeded + rmsSimdSize - 1) / rmsSimdSize
-	tg := uint(rmsSimdSize * simdsNeeded)
+	tg := rmsThreadgroup(axisSize, pso)
 	dispatchThreads(enc,
 		metal.MTLSize{Width: tg, Height: 1, Depth: 1},
 		metal.MTLSize{Width: tg, Height: 1, Depth: 1},

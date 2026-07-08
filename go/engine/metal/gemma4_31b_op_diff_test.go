@@ -241,6 +241,55 @@ func TestRealModelOpDiff(t *testing.T) {
 		}
 		report(pre+"v_normed", vOurs, vLast)
 
+		// 5b. the LIVE fused producers — the kernels the decode actually runs to make q, k
+		// and v (encQKNormRopeAt's lthn_qknorm_rope_bf16, the rows value-norm) — never
+		// per-op verified before this. Same mlx inputs as the host mirrors above. Global
+		// layers take the live parameterisation exactly: rotaryDim = FULL headDim, the
+		// Inf-padded proportional spectrum, and the arch's FOLDED base in the base slot.
+		{
+			bfToF := func(b []byte) []float32 {
+				f := make([]float32, len(b)/2)
+				for i := range f {
+					f[i] = bf16ToF32(b[i*2], b[i*2+1])
+				}
+				return f
+			}
+			// the public wrapper takes LOG2(theta) — encQKNormRopeAt log2s the raw base before
+			// the shared emit body, so the leg must too (raw theta here rotates garbage).
+			liveRot, log2Base := hd, float32(math.Log2(float64(base)))
+			var periods []float32
+			if li == globalLayer {
+				periods = proportionalRopePeriods(hd, rotDim, base) // raw theta (1e6) → spectrum
+				folded := math.Pow(float64(base), float64(rotDim)/float64(hd))
+				log2Base = float32(math.Log2(folded))
+			}
+			qkFused, qferr := QKNormRopeBF16(toBF(qMLX), L.QNorm, nHeads, hd, liveRot, pos, 1.0, eps, log2Base, periods)
+			if qferr != nil {
+				t.Fatalf("QKNormRopeBF16 q: %v", qferr)
+			}
+			report(pre+"q_nr(KERNEL-FUSED)", bfToF(qkFused), readF32(pre+"q_normed_roped"))
+			kFused, kferr := QKNormRopeBF16(toBF(kMLX), L.KNorm, lkv, hd, liveRot, pos, 1.0, eps, log2Base, periods)
+			if kferr != nil {
+				t.Fatalf("QKNormRopeBF16 k: %v", kferr)
+			}
+			report(pre+"k_nr(KERNEL-FUSED)", bfToF(kFused), kLast)
+			// value-norm rows kernel on the raw v projection (k-proj output on k_eq_v layers),
+			// ones weight — the live encRMSNormRowsBF16 shape.
+			vIn := kMLX
+			if L.V != nil {
+				vIn = matvec(deq(L.V), L.V.OutDim, L.V.InDim, normed)
+			}
+			ones := make([]float32, hd)
+			for i := range ones {
+				ones[i] = 1
+			}
+			vRows, vrerr := RMSNormBF16(toBF(vIn), toBF(ones), lkv, hd, eps)
+			if vrerr != nil {
+				t.Fatalf("RMSNormBF16 v rows: %v", vrerr)
+			}
+			report(pre+"v_normed(KERNEL-ROWS)", bfToF(vRows), vLast)
+		}
+
 		// 6. SDPA through the ENGINE's kernel on MLX's exact q + caches (scale 1.0)
 		qb := toBF(readF32(pre + "q_normed_roped"))
 		out, serr := SDPA(qb, toBF(kCache), toBF(vCache), 1, nHeads, lkv, hd, T, 1.0)
@@ -252,6 +301,59 @@ func TestRealModelOpDiff(t *testing.T) {
 			sdpaOurs[i] = bf16ToF32(out[i*2], out[i*2+1])
 		}
 		report(pre+"sdpa(ENGINE)", sdpaOurs, readF32(pre+"sdpa"))
+
+		// 6b. the PAGED decode plan — the live decode's actual attention (emitP1s/emitP2 via
+		// buildSDPAPagedDecodePlan), never op-verified before this: same mlx q + caches, five
+		// page shapes so every kernel path runs — the single-cell P1-final fast path, the
+		// two-pass P1+P2 merge (forced and natural multi-page), and span-padded pages with a
+		// NaN poison tail (live pages are 256-row slabs: any read past pageLen surfaces as NaN).
+		{
+			bfToF := func(b []byte) []float32 {
+				f := make([]float32, len(b)/2)
+				for i := range f {
+					f[i] = bf16ToF32(b[i*2], b[i*2+1])
+				}
+				return f
+			}
+			// pageOf carves rows [r0,r1) of the [kvh, T, hd] head-major cache into a page
+			// with physical span (r1-r0); padded variants get span rows with NaN beyond r1.
+			pageOf := func(cache []float32, r0, r1, span int) []byte {
+				rows := r1 - r0
+				seg := make([]float32, lkv*span*hd)
+				if span > rows {
+					nan := float32(math.NaN())
+					for i := range seg {
+						seg[i] = nan
+					}
+				}
+				for hk := range lkv {
+					copy(seg[hk*span*hd:hk*span*hd+rows*hd], cache[(hk*T+r0)*hd:(hk*T+r1)*hd])
+				}
+				return toBF(seg)
+			}
+			sdpaMLXWant := readF32(pre + "sdpa")
+			runPaged := func(name string, kPages, vPages [][]byte, lens []int, force2pass bool) {
+				if force2pass {
+					sdpaSingleCellDisabled = true
+					defer func() { sdpaSingleCellDisabled = false }()
+				}
+				pOut, perr := sdpaPagedBF16IntoPageLens(nil, qb, kPages, vPages, lens, nHeads, lkv, hd, 1.0)
+				if perr != nil {
+					t.Fatalf("%s: %v", name, perr)
+				}
+				report(pre+name, bfToF(pOut), sdpaMLXWant)
+			}
+			kOne, vOne := pageOf(kCache, 0, T, T), pageOf(vCache, 0, T, T)
+			runPaged("sdpa(PAGED-1cell)", [][]byte{kOne}, [][]byte{vOne}, nil, false)
+			runPaged("sdpa(PAGED-2pass)", [][]byte{kOne}, [][]byte{vOne}, nil, true)
+			mid := T / 2
+			runPaged("sdpa(PAGED-2page)",
+				[][]byte{pageOf(kCache, 0, mid, mid), pageOf(kCache, mid, T, T-mid)},
+				[][]byte{pageOf(vCache, 0, mid, mid), pageOf(vCache, mid, T, T-mid)}, nil, false)
+			kPad, vPad := pageOf(kCache, 0, T, 256), pageOf(vCache, 0, T, 256)
+			runPaged("sdpa(PAGED-pad1cell)", [][]byte{kPad}, [][]byte{vPad}, []int{T}, false)
+			runPaged("sdpa(PAGED-pad2pass)", [][]byte{kPad}, [][]byte{vPad}, []int{T}, true)
+		}
 
 		// 7. o proj + tail off MLX's sdpa — host AND kernel
 		sdpaMLX := readF32(pre + "sdpa")
