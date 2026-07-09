@@ -43,36 +43,46 @@ func TestDecodeTokPerSecVsDepthRealE2B(t *testing.T) {
 	}
 
 	prevICB := icbDisabledForTest
-	icbDisabledForTest = false // measure the REAL (ICB) decode path — that's what serves
 	defer func() { icbDisabledForTest = prevICB }()
 
 	depths := []int{256, 1024, 4096, 8192, 16384}
 	const maxLen = 16384 + 256
 	const N = 48 // timed decode tokens per depth
 
+	// A/B the two decode paths: ICB replay (production for dense E2B) vs stepToken
+	// re-encode. Same KV scan; if ICB degrades with depth but stepToken doesn't, the
+	// tax is in the replay machinery (re-encode/host), not the fundamental scan.
 	t.Logf("=== #365 decode tok/s vs context depth — real e2b-4bit (bf16 KV) ===")
-	for _, d := range depths {
-		sess, serr := newArchQuantSessionShards(qm, lm.Arch, maxLen, sb)
-		if serr != nil {
-			t.Fatalf("session (depth %d): %v", d, serr)
+	for _, icbOff := range []bool{false, true} {
+		icbDisabledForTest = icbOff
+		mode := "ICB (production)"
+		if icbOff {
+			mode = "stepToken"
 		}
-		prompt := make([]int32, d)
-		prompt[0] = 2
-		for i := 1; i < d; i++ {
-			prompt[i] = int32(100 + (i*131)%3000) // in-vocab, diverse
+		t.Logf("--- %s path ---", mode)
+		for _, d := range depths {
+			sess, serr := newArchQuantSessionShards(qm, lm.Arch, maxLen, sb)
+			if serr != nil {
+				t.Fatalf("session (depth %d): %v", d, serr)
+			}
+			prompt := make([]int32, d)
+			prompt[0] = 2
+			for i := 1; i < d; i++ {
+				prompt[i] = int32(100 + (i*131)%3000) // in-vocab, diverse
+			}
+			if perr := sess.PrefillTokens(prompt); perr != nil {
+				t.Fatalf("prefill %d: %v", d, perr)
+			}
+			if _, gerr := sess.GenerateFromCache(4, -1); gerr != nil { // warmup, untimed
+				t.Fatalf("warmup (depth %d): %v", d, gerr)
+			}
+			t0 := time.Now()
+			if _, gerr := sess.GenerateFromCache(N, -1); gerr != nil {
+				t.Fatalf("timed decode (depth %d): %v", d, gerr)
+			}
+			wall := time.Since(t0)
+			t.Logf("  depth %5d: %5.1f tok/s  (%d tok / %.2fs)", d, float64(N)/wall.Seconds(), N, wall.Seconds())
 		}
-		if perr := sess.PrefillTokens(prompt); perr != nil {
-			t.Fatalf("prefill %d: %v", d, perr)
-		}
-		if _, gerr := sess.GenerateFromCache(4, -1); gerr != nil { // warmup, untimed
-			t.Fatalf("warmup (depth %d): %v", d, gerr)
-		}
-		t0 := time.Now()
-		if _, gerr := sess.GenerateFromCache(N, -1); gerr != nil {
-			t.Fatalf("timed decode (depth %d): %v", d, gerr)
-		}
-		wall := time.Since(t0)
-		t.Logf("  depth %5d: %5.1f tok/s  (%d tok / %.2fs)", d, float64(N)/wall.Seconds(), N, wall.Seconds())
 	}
-	t.Logf("  => the fall from depth-256 to depth-8192 is the KV-scan tax; fewer KV bytes (q8/q4) flattens it")
+	t.Logf("  => compare the two slopes: a steeper ICB fall = replay-machinery tax; equal falls = the scan itself")
 }
