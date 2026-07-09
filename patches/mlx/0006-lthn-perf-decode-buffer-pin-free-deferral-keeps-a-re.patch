@@ -1,4 +1,4 @@
-From 62fdca3c8aadde8cdd2be05e5ef908abd78e41ee Mon Sep 17 00:00:00 2001
+From 721f73290368a6987c93bfccc9dfe84d7fe2f92a Mon Sep 17 00:00:00 2001
 From: Snider <snider@host.uk.com>
 Date: Tue, 16 Jun 2026 18:06:34 +0100
 Subject: [PATCH 06/10] =?UTF-8?q?lthn(perf):=20decode=20buffer=20pin=20?=
@@ -18,10 +18,10 @@ Co-Authored-By: Virgil <virgil@lethean.io>
  3 files changed, 44 insertions(+)
 
 diff --git a/mlx/backend/metal/allocator.cpp b/mlx/backend/metal/allocator.cpp
-index 222c6fd9..c1b4c4f6 100644
+index 60459c67..f72f38a6 100644
 --- a/mlx/backend/metal/allocator.cpp
 +++ b/mlx/backend/metal/allocator.cpp
-@@ -169,12 +169,45 @@ void MetalAllocator::clear_cache() {
+@@ -180,12 +180,45 @@ void MetalAllocator::clear_cache() {
    num_resources_ -= buffer_cache_.clear();
  }
  
@@ -95,10 +95,10 @@ index 4cbbfb0a..1f8c1afc 100644
  };
  
 diff --git a/mlx/backend/metal/device.h b/mlx/backend/metal/device.h
-index a77674ae..6283182d 100644
+index 34c797fe..d0ac6b8c 100644
 --- a/mlx/backend/metal/device.h
 +++ b/mlx/backend/metal/device.h
-@@ -29,6 +29,8 @@ void lthn_decode_rec_bytes(const void* data, size_t nbytes, int idx);
+@@ -30,6 +30,8 @@ void lthn_decode_rec_bytes(const void* data, size_t nbytes, int idx);
  void lthn_decode_rec_tgmem(size_t length, int idx);
  size_t lthn_decode_finalize();
  void lthn_decode_replay(MTL::ComputeCommandEncoder* raw);
@@ -106,7 +106,7 @@ index a77674ae..6283182d 100644
 +void lthn_decode_pin_release();
  
  class Device;
- 
+ class EventImpl;
 -- 
 2.50.1 (Apple Git-155)
 

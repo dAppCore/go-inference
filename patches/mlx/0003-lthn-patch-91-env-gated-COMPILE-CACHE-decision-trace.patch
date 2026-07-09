@@ -1,4 +1,4 @@
-From 50852c83927a4a510656fe93e51017adfda21144 Mon Sep 17 00:00:00 2001
+From 462a4419197fbd0c31e64d47251dd092daab2862 Mon Sep 17 00:00:00 2001
 From: Snider <snider@host.uk.com>
 Date: Fri, 12 Jun 2026 18:12:05 +0100
 Subject: [PATCH 03/10] lthn patch (#91): env-gated COMPILE-CACHE decision
@@ -15,7 +15,7 @@ being reused across mismatched geometries.
  1 file changed, 37 insertions(+)
 
 diff --git a/mlx/compile.cpp b/mlx/compile.cpp
-index 6f3d89cf..67119c33 100644
+index 12d7397b..e56e7a13 100644
 --- a/mlx/compile.cpp
 +++ b/mlx/compile.cpp
 @@ -1,6 +1,7 @@
