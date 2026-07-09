@@ -405,6 +405,22 @@ func encMLPHalfBF16At(
 	sc mlpScratch, proj projector,
 	dModel, dFF int, eps float32,
 ) error {
+	if err := encMLPGatedBF16At(enc, h, mlpNormW, sc, proj, dModel, dFF, eps); err != nil {
+		return err
+	}
+	return encMLPDownResidBF16At(enc, h, out, outOff, postFFNorm, sc, proj, dModel, dFF, eps)
+}
+
+// encMLPGatedBF16At runs the FIRST half of the SwiGLU MLP into sc.gated: rmsnorm ->
+// gate,up projections -> gelu(gate)*up. Split from the down half so #364's argmax-drop
+// diagnostic can mask sc.gated between them; called back-to-back into one encoder
+// (the wrapper above) the two are byte-identical to the un-split kernel sequence.
+func encMLPGatedBF16At(
+	enc metal.MTLComputeCommandEncoder,
+	h metal.MTLBuffer, mlpNormW bufView,
+	sc mlpScratch, proj projector,
+	dModel, dFF int, eps float32,
+) error {
 	if err := encRMSNormBF16(enc, h, mlpNormW.buf, sc.mlpNormed, mlpNormW.off, dModel, eps); err != nil {
 		return err
 	}
@@ -416,21 +432,29 @@ func encMLPHalfBF16At(
 	}
 	// gelu(gate)·up — fused kernel (1 dispatch, fp32-internal) when loaded, composed bf16 chain otherwise
 	if gpuHasGeluKernel() {
-		if err := encGeluGateMulFused(enc, sc.gate, sc.up, sc.gated, dFF); err != nil {
-			return err
-		}
-	} else {
-		_ = encMulBF16(enc, sc.gate, sc.gate, sc.x2, dFF)
-		_ = encMulBF16(enc, sc.x2, sc.gate, sc.x3, dFF)
-		_ = encMulBF16(enc, sc.x3, sc.c044, sc.x3s, dFF)
-		_ = encAddBF16(enc, sc.gate, sc.x3s, sc.inner, dFF)
-		_ = encMulBF16(enc, sc.inner, sc.c079, sc.scaled, dFF)
-		_ = encTanhBF16(enc, sc.scaled, sc.tnh, dFF)
-		_ = encAddBF16(enc, sc.tnh, sc.c1, sc.onePlus, dFF)
-		_ = encMulBF16(enc, sc.gate, sc.c05, sc.halfG, dFF)
-		_ = encMulBF16(enc, sc.halfG, sc.onePlus, sc.gelu, dFF)
-		_ = encMulBF16(enc, sc.gelu, sc.up, sc.gated, dFF)
+		return encGeluGateMulFused(enc, sc.gate, sc.up, sc.gated, dFF)
 	}
+	_ = encMulBF16(enc, sc.gate, sc.gate, sc.x2, dFF)
+	_ = encMulBF16(enc, sc.x2, sc.gate, sc.x3, dFF)
+	_ = encMulBF16(enc, sc.x3, sc.c044, sc.x3s, dFF)
+	_ = encAddBF16(enc, sc.gate, sc.x3s, sc.inner, dFF)
+	_ = encMulBF16(enc, sc.inner, sc.c079, sc.scaled, dFF)
+	_ = encTanhBF16(enc, sc.scaled, sc.tnh, dFF)
+	_ = encAddBF16(enc, sc.tnh, sc.c1, sc.onePlus, dFF)
+	_ = encMulBF16(enc, sc.gate, sc.c05, sc.halfG, dFF)
+	_ = encMulBF16(enc, sc.halfG, sc.onePlus, sc.gelu, dFF)
+	_ = encMulBF16(enc, sc.gelu, sc.up, sc.gated, dFF)
+	return nil
+}
+
+// encMLPDownResidBF16At runs the SECOND half: Wdown·gated + the (optionally
+// post-normed) residual add into out. sc.gated may have been masked between halves.
+func encMLPDownResidBF16At(
+	enc metal.MTLComputeCommandEncoder,
+	h, out metal.MTLBuffer, outOff uint, postFFNorm bufView,
+	sc mlpScratch, proj projector,
+	dModel, dFF int, eps float32,
+) error {
 	if err := proj.project(enc, sc.gated, sc.down, 0, projDown); err != nil {
 		return err
 	}

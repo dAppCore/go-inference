@@ -175,3 +175,72 @@ func TestFFNGatedSparsityRealE2B(t *testing.T) {
 	t.Logf("  ‖down‖-WEIGHTED effective width (95%% L2):        %.1f%% of dFF   <- the real output sparsity", 100*wtdCov/float64(nFFN))
 	t.Logf("  => ~%.0f%% of columns carry <5%% of the OUTPUT — the honest skippable up+down fraction", 100*(1-wtdCov/float64(nFFN)))
 }
+
+// TestFFNDropArgmaxCeilingRealE2B is #364's DEFINITIVE ceiling: actually drop the
+// bottom-K% of |gated| columns before the down projection and measure when the
+// emitted token sequence first diverges from the full-precision baseline. That
+// largest all-match drop-% is the TRUE exploitable sparsity (per-layer error
+// compounds over 35 layers, so the ~77% "carry <5%" is an upper bound, not it).
+//
+//	LEM_REAL_E2B=1 MLX_METALLIB_PATH=... go test -run TestFFNDropArgmaxCeilingRealE2B -v ./engine/metal/
+func TestFFNDropArgmaxCeilingRealE2B(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	if os.Getenv("LEM_REAL_E2B") == "" {
+		t.Skip("set LEM_REAL_E2B=1 to run the real e2b-4bit FFN-drop ceiling (loads ~2.7GB)")
+	}
+	dir := resolveE2B4bitDir(t)
+	lm, dm, err := loadRegistered(dir)
+	if err != nil {
+		t.Fatalf("loadRegistered: %v", err)
+	}
+	defer func() { _ = dm.Close() }()
+	sb, err := buildShardBuffers(dm)
+	if err != nil {
+		t.Fatalf("buildShardBuffers: %v", err)
+	}
+	defer func() { _ = sb.Close() }()
+	qm, err := loadedToQuant(lm, lm.Embed.GroupSize, lm.Embed.Bits)
+	if err != nil {
+		t.Fatalf("loadedToQuant: %v", err)
+	}
+
+	prompt := []int32{2, 1000, 2500, 4000, 8000, 16000}
+	const N = 24
+	genWith := func(frac float64) []int32 {
+		prevFrac, prevICB := ffnDropFrac, icbDisabledForTest
+		icbDisabledForTest = true // the drop lives in the non-ICB stepToken path
+		ffnDropFrac = frac
+		defer func() { ffnDropFrac = prevFrac; icbDisabledForTest = prevICB }()
+		s, e := newArchQuantSessionShards(qm, lm.Arch, 320, sb)
+		if e != nil {
+			t.Fatalf("newArchQuantSessionShards: %v", e)
+		}
+		if e := s.PrefillTokens(prompt); e != nil {
+			t.Fatalf("prefill: %v", e)
+		}
+		toks, e := s.GenerateFromCache(N, -1)
+		if e != nil {
+			t.Fatalf("generate (drop %.2f): %v", frac, e)
+		}
+		return toks
+	}
+
+	base := genWith(0)
+	t.Logf("=== #364 FFN-drop argmax ceiling — real e2b-4bit, %d tokens ===", N)
+	t.Logf("  baseline (drop 0%%): %v", base)
+	for _, frac := range []float64{0.30, 0.35, 0.40, 0.45, 0.50} {
+		got := genWith(frac)
+		match := 0
+		for match < len(base) && match < len(got) && base[match] == got[match] {
+			match++
+		}
+		verdict := "ALL MATCH"
+		if match < len(base) {
+			verdict = "diverges"
+		}
+		t.Logf("  drop %2.0f%% of gated cols: %2d/%d tokens match baseline — %s", frac*100, match, len(base), verdict)
+	}
+	t.Logf("  => the largest drop%% that still ALL-MATCHES is the safe exploitable ceiling (~that %% of up+down skippable)")
+}
