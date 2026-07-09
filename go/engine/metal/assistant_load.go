@@ -120,9 +120,12 @@ type AssistantDraftStepResult struct {
 }
 
 // AssistantDraftBlockResult is a chained native assistant proposal block.
+// Probs is nil unless the LTHN_MTP_CONF capture is armed (mtp_conf_diag.go):
+// per drafted position, the drafter's softmax probability of its own pick.
 type AssistantDraftBlockResult struct {
 	Tokens []int32
 	Hidden []byte
+	Probs  []float32
 }
 
 // AssistantVerifyResult reports target-side verification of a proposed
@@ -1210,6 +1213,10 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 	} else {
 		tokens = target.mtpDraftTokenScratch(maxDraftTokens)
 	}
+	var confProbs []float32
+	if mtpConfEnabled() {
+		confProbs = make([]float32, 0, maxDraftTokens)
+	}
 	fused := pair.fusedDraft()
 	if fused != nil {
 		if err := fused.loadKV(targetKVs); err != nil {
@@ -1263,6 +1270,9 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 				nativeTraceLog(core.Sprintf("mtp-diag draft step %d: tok=%d fwd=%.1fms head=%.1fms greedy=%.1fms normed{%s}\n",
 					len(tokens), tok, fwdMs, headMs, greedyMs, mtpDiagBF16Stats(normed)))
 			}
+			if confProbs != nil {
+				confProbs = append(confProbs, mtpConfProb(logits, tok, suppress))
+			}
 			stepToken, currentHidden = tok, nextHidden
 		} else {
 			projectedOut := target.mtpProjectionScratch(pair.Assistant.Arch.Hidden * bf16Size)
@@ -1279,6 +1289,9 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 				nativeTraceLog(core.Sprintf("mtp-diag draft step %d: tok=%d projected{%s} logits{%s}\n",
 					len(tokens), step.Token, mtpDiagBF16Stats(projected), mtpDiagBF16Stats(logitsOut)))
 			}
+			if confProbs != nil {
+				confProbs = append(confProbs, mtpConfProb(logitsOut, step.Token, suppress))
+			}
 			stepToken, currentHidden = step.Token, step.Hidden
 		}
 		tokens = append(tokens, stepToken)
@@ -1287,7 +1300,7 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 	if !copyTokens {
 		target.mtpDraftTokens = tokens
 	}
-	return AssistantDraftBlockResult{Tokens: tokens, Hidden: currentHidden}, nil
+	return AssistantDraftBlockResult{Tokens: tokens, Hidden: currentHidden, Probs: confProbs}, nil
 }
 
 func (pair *AssistantPair) draftBlockSampledFromSessionWithSuppress(target *ArchSession, lastToken int32, maxDraftTokens int, copyTokens bool, params model.SampleParams, sampler *model.Sampler) (AssistantDraftBlockResult, error) {
@@ -1765,6 +1778,13 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 			nativeTraceLog(core.Sprintf("mtp-diag verify %d: draft=%.1fms verify=%.1fms last=%d block=%v accepted=%v replacement=%d allAccepted=%v\n",
 				result.TargetVerifyCalls, diagDraftMs, total-diagDraftMs, lastToken, block, verify.AcceptedTokens, verify.ReplacementToken, verify.AllAccepted))
 		}
+		if draft.Probs != nil {
+			off := 0
+			if carryPresent {
+				off = 1
+			}
+			mtpConfRecordCycle(posBeforeVerify, off, draft.Probs, verify.AcceptedCount)
+		}
 		emitStart := 0
 		if carryPresent && len(verify.AcceptedTokens) > 0 && verify.AcceptedTokens[0] == carryLead {
 			emitStart = 1
@@ -1801,7 +1821,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 		if verify.AllAccepted {
 			lowAcceptStreak = 0
 			carryLead = -1
-			if !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
+			if !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
 				if mtpDiagForTest {
 					nativeTraceLog(core.Sprintf("mtp-diag reengage deep-bootstrap: pos=%d emitted=%d\n", target.pos, len(result.Tokens)))
 				}
@@ -1819,7 +1839,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 			} else {
 				bail = reng.engagedCycle(newDrafts, time.Since(cycleT0).Seconds(), len(result.Tokens))
 			}
-			if bail {
+			if bail && !mtpConfForce {
 				if done, perr := runPlainStretch(carryLead); perr != nil {
 					return result, perr
 				} else if done {
@@ -1842,7 +1862,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 		}
 		// Give up on drafting only after the drafter has stayed weak for several
 		// consecutive blocks — one near-tie block is transient, not a mismatched pair.
-		if !stopped && len(result.Tokens) < maxNew && lowAcceptStreak >= nativeAssistantLowAcceptPatience {
+		if !mtpConfForce && !stopped && len(result.Tokens) < maxNew && lowAcceptStreak >= nativeAssistantLowAcceptPatience {
 			if mtpReengageDisabled {
 				if err := nativeAssistantFinishLowAcceptFromTargetCache(target, &result, replacement, maxNew, eosID, suppress, yield); err != nil {
 					return result, err
@@ -1864,7 +1884,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 		if stopped {
 			break
 		}
-		if !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
+		if !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
 			if mtpDiagForTest {
 				nativeTraceLog(core.Sprintf("mtp-diag reengage deep-bootstrap: pos=%d emitted=%d\n", target.pos, len(result.Tokens)))
 			}
@@ -1882,7 +1902,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 		} else {
 			bail = reng.engagedCycle(newDrafts+1, time.Since(cycleT0).Seconds(), len(result.Tokens))
 		}
-		if bail {
+		if bail && !mtpConfForce {
 			if done, perr := runPlainStretch(replacement); perr != nil {
 				return result, perr
 			} else if done {
@@ -2026,7 +2046,7 @@ func (pair *AssistantPair) GenerateSampledFromSessionEach(target *ArchSession, p
 		if verify.AllAccepted {
 			lowAcceptStreak = 0
 			carryLead = -1
-			if !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
+			if !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
 				if mtpDiagForTest {
 					nativeTraceLog(core.Sprintf("mtp-diag reengage deep-bootstrap: pos=%d emitted=%d\n", target.pos, len(result.Tokens)))
 				}
@@ -2044,7 +2064,7 @@ func (pair *AssistantPair) GenerateSampledFromSessionEach(target *ArchSession, p
 			} else {
 				bail = reng.engagedCycle(newDrafts, time.Since(cycleT0).Seconds(), len(result.Tokens))
 			}
-			if bail {
+			if bail && !mtpConfForce {
 				if done, perr := runPlainStretch(carryLead); perr != nil {
 					return result, perr
 				} else if done {
@@ -2082,7 +2102,7 @@ func (pair *AssistantPair) GenerateSampledFromSessionEach(target *ArchSession, p
 		}
 		// One weak block is a transient near-tie, not a mismatched pair — only fall
 		// back to plain target decode after several consecutive weak blocks.
-		if !stopped && len(result.Tokens) < maxNew && lowAcceptStreak >= nativeAssistantLowAcceptPatience {
+		if !mtpConfForce && !stopped && len(result.Tokens) < maxNew && lowAcceptStreak >= nativeAssistantLowAcceptPatience {
 			if mtpReengageDisabled {
 				var err error
 				history, err = nativeAssistantFinishLowAcceptSampledFromTargetCache(target, &result, replacement, maxNew, stopTokens, sampler, params, history, yield)
@@ -2107,7 +2127,7 @@ func (pair *AssistantPair) GenerateSampledFromSessionEach(target *ArchSession, p
 		if stopped {
 			break
 		}
-		if !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
+		if !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
 			if mtpDiagForTest {
 				nativeTraceLog(core.Sprintf("mtp-diag reengage deep-bootstrap: pos=%d emitted=%d\n", target.pos, len(result.Tokens)))
 			}
@@ -2125,7 +2145,7 @@ func (pair *AssistantPair) GenerateSampledFromSessionEach(target *ArchSession, p
 		} else {
 			bail = reng.engagedCycle(newDrafts+1, time.Since(cycleT0).Seconds(), len(result.Tokens))
 		}
-		if bail {
+		if bail && !mtpConfForce {
 			if done, perr := runPlainStretch(replacement); perr != nil {
 				return result, perr
 			} else if done {
