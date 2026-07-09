@@ -36,6 +36,17 @@ func RunSSDModel(ctx context.Context, model inference.TextModel, ds inference.Da
 		},
 		Score: scoreFn,
 	}
+	// Frame each prompt with the model's own turn template when the engine
+	// exposes one: model.Generate is RAW completion (Chat applies the
+	// template), and an instruct base fed a bare complete-sounding prompt
+	// samples end-of-turn as its first token — the whole trace comes back
+	// empty. The capability keeps this engine-neutral; a base without it
+	// (a true completion model) correctly stays raw.
+	if formatter, ok := model.(chatPromptFormatter); ok {
+		runner.FormatPrompt = func(prompt string) string {
+			return formatter.FormatChatPrompt([]inference.Message{{Role: "user", Content: prompt}})
+		}
+	}
 	// The kernel-prefix lane (#97): prefill the kernel ONCE as the exact
 	// token-prefix cache; every sample's generation reuses that KV state. An
 	// engine without the warm capability simply omits WarmPrefix — the prefix
@@ -44,6 +55,13 @@ func RunSSDModel(ctx context.Context, model inference.TextModel, ds inference.Da
 		runner.WarmPrefix = warmer.WarmPromptCache
 	}
 	return RunSSD(ctx, runner, ds, cfg)
+}
+
+// chatPromptFormatter is the engine capability that renders a fresh
+// single-turn prompt with the model's own chat template (engine.TextModel
+// exposes FormatChatPrompt; the serve path frames requests identically).
+type chatPromptFormatter interface {
+	FormatChatPrompt(messages []inference.Message) string
 }
 
 // generateText drives model.Generate to completion and returns the concatenated
