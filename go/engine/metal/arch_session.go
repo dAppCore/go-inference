@@ -2521,7 +2521,7 @@ func (s *ArchSession) Step(emb []byte) ([]byte, error) {
 	var res []byte
 	var err error
 	withAutoreleasePool(func() {
-		if s.state.icb != nil { // recorded encode-bypass: replay one token over the ICB's caches
+		if s.state.icb != nil && !icbDisabledForTest { // recorded encode-bypass: replay one token over the ICB's caches
 			res = s.state.icb.stepBody(emb, s.pos, nil)
 		} else {
 			res, err = s.state.stepToken(emb, s.pos)
@@ -2558,7 +2558,7 @@ func (s *ArchSession) StepWithID(id int32, emb []byte) ([]byte, error) {
 			}
 			s.state.perLayerInput = pli
 		}
-		if s.state.icb != nil { // recorded encode-bypass: replay one token over the ICB's caches
+		if s.state.icb != nil && !icbDisabledForTest { // recorded encode-bypass: replay one token over the ICB's caches
 			res = s.state.icb.stepBody(emb, s.pos, pli)
 		} else {
 			res, err = s.state.stepToken(emb, s.pos)
