@@ -19,6 +19,17 @@ Path `engine/metal`, package clause `native`, build tag `//go:build darwin && ar
 
 Registers as `"metal"`. Loads a reactive native token model (dense / MoE / PLE, bf16 or 4-bit) with the directory's tokenizer attached; `WithContextLen` sizes the KV cache (default 4096). It implements `VisionModel` (`AcceptsImages`) and exposes LoRA SFT training through the `engine.TrainerModel` / `engine.Trainer` seam (`OpenTrainer`), not the root `TrainableModel.ApplyLoRA` interface.
 
+#### Runtime levers
+
+Environment variables read once at process start. The load-bearing ones (non-exhaustive — the full list greps as `LTHN_[A-Z0-9_]*` in `engine/metal`):
+
+| Variable | Effect |
+|----------|--------|
+| `LTHN_KV_Q8=1` | int8 paged KV cache with f32 group scales, opted in per layer on gqa2 geometry (`nHeads == 2*kvHeads`, `headDim ≤ 256`) — half the KV bytes at parity tok/s. Errors loudly at load if no layer qualifies. |
+| `LTHN_MTP_REENGAGE=0` | Restores the permanent low-acceptance bail for MTP speculative decoding. The default re-engagement gate is wall-clock-adaptive (probes plain-decode economics live), so paired runs are not byte-reproducible run-to-run; this switch is the reproducibility anchor. |
+| `LTHN_SDPA_SPLIT=N` | Overrides the paged-SDPA split-window grain (rows per pass-1 threadgroup window; default 256, halved on the GQA-shared route). A probe lever for kernel tuning, not a serving knob. |
+| `LTHN_MTP_DIAG=1` | Per-cycle MTP draft/accept diagnostics on stderr (any non-empty value). |
+
 ### rocm — AMD ROCm
 
 Path `engine/hip`, package `hip`. The default `linux && amd64` build is native-first: it registers the ROCm backend, reads GGUF metadata, and drives the native HIP runtime — the old OpenAI-compatible `llama-server` subprocess path survives only behind the `rocm_legacy_server` build tag and is not built by default. Three variants of the backend exist by build tag:
