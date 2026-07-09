@@ -14,6 +14,7 @@ import (
 	"dappco.re/go/inference/engine/scheme"
 	"github.com/tmc/apple/kernel"
 	"github.com/tmc/apple/metal"
+	"github.com/tmc/apple/objc"
 )
 
 // This file assembles the attention half of a decode step on-device, in bf16
@@ -465,6 +466,18 @@ func residentBytes(b []byte) metal.MTLBuffer {
 	return buf
 }
 
+// noopResidentDealloc is the single, process-lifetime deallocator block shared by
+// every no-copy resident buffer. The bytes are owned by our own runtime.Pinner
+// (unpinned on residentBufs eviction — closeResidentBuf), so Metal must never free
+// them: the deallocator is a no-op. Materialising an ObjC block from a Go closure
+// costs a reflect.MakeFunc + a retained purego callback, and the tmc/apple binding
+// does that per NewBuffer call — it profiled as ~13% of hot-path alloc_objects, one
+// MakeFunc per buffer all wrapping this same empty closure. We build it ONCE and
+// name it directly. It is deliberately never Released: the +1 from NewBlock keeps it
+// alive for every buffer that references it, so — unlike the binding — we do NOT
+// associate it per buffer (association would free it when any one buffer deallocs).
+var noopResidentDealloc = objc.NewBlock(func(objc.Block, kernel.Pointer, uint64) {})
+
 func residentNoCopyBytes(b []byte) (metal.MTLBuffer, *runtime.Pinner, bool) {
 	if isMappedShardBytes(b) {
 		return sharedBytes(b), nil, false
@@ -473,13 +486,14 @@ func residentNoCopyBytes(b []byte) (metal.MTLBuffer, *runtime.Pinner, bool) {
 	if pinner == nil {
 		return sharedBytes(b), nil, false
 	}
-	buf := device.NewBufferWithBytesNoCopyLengthOptionsDeallocator(
-		unsafe.Pointer(&b[0]),
-		uint(len(b)),
-		metal.MTLResourceStorageModeShared,
-		func(kernel.Pointer, uint64) {},
-	)
-	if buf == nil || buf.GetID() == 0 {
+	// Mirrors device.NewBufferWithBytesNoCopyLengthOptionsDeallocator, but names the
+	// shared no-op block instead of the binding's per-call objc.NewBlock(closure).
+	rv := objc.Send[objc.ID](device.ID,
+		objc.Sel("newBufferWithBytesNoCopy:length:options:deallocator:"),
+		unsafe.Pointer(&b[0]), uint(len(b)), metal.MTLResourceStorageModeShared,
+		objc.ID(noopResidentDealloc))
+	buf := metal.MTLBufferObjectFromID(rv)
+	if buf.GetID() == 0 {
 		if pinner != nil {
 			pinner.Unpin()
 		}
