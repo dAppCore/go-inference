@@ -89,7 +89,7 @@ type SessionHandle struct {
 	err             error
 	closed          bool
 	// budget-triggered context-fold bookkeeping (session_fold.go)
-	contextFolds                 int
+	contextFolds                  int
 	lastFoldKept, lastFoldDropped int
 }
 

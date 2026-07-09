@@ -33,7 +33,6 @@ const nativeAssistantDefaultDraftTokens = 4
 // a near-tie, even though the same drafter goes on to accept 40-80% of the rest.
 const nativeAssistantLowAcceptPatience = 4
 
-
 var nativeAssistantByteScratchPools sync.Map
 
 // AssistantModel is the native, CGO-free assistant-only checkpoint

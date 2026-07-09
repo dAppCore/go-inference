@@ -535,7 +535,7 @@ func buildSDPAPagedDecodePlan(
 		scratch: scratch, p1PSO: p1PSO, p2PSO: p2PSO,
 		p1FinalPSO: p1FinalPSO, singleCell: singleCell, gqaShared: gqaShared,
 		splitRows: splitRows,
-		nHeads: nHeads, nKVHeads: nKVHeads, headDim: headDim, cellCount: cellCount,
+		nHeads:    nHeads, nKVHeads: nKVHeads, headDim: headDim, cellCount: cellCount,
 		scale: scale,
 	}, nil
 }
