@@ -89,7 +89,7 @@ func LoadTrainable(path string, opts ...LoadOption) core.Result {
 	modelType := model.ModelType()
 	tm, ok := model.(TrainableModel)
 	if !ok {
-		closeResult := core.ResultOf(nil, model.Close())
+		closeResult := model.Close()
 		if !closeResult.OK {
 			return core.Fail(core.Wrap(closeResult.Value.(error), "inference.LoadTrainable", "close non-trainable model"))
 		}

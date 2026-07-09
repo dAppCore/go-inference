@@ -1,0 +1,482 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LEM Dashboard</title>
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-card: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent: #3b82f6;
+            --accent-green: #22c55e;
+            --accent-amber: #f59e0b;
+            --accent-red: #ef4444;
+            --border: #475569;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.5;
+        }
+
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 24px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            --wails-draggable: drag;
+        }
+
+        .header h1 { font-size: 18px; font-weight: 600; }
+        .header .status { font-size: 13px; color: var(--text-secondary); }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            padding: 24px;
+        }
+
+        .card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px;
+        }
+
+        .card h2 {
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+        }
+
+        .card.full-width { grid-column: 1 / -1; }
+
+        .progress-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+
+        .progress-label {
+            min-width: 120px;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .progress-bar {
+            flex: 1;
+            height: 8px;
+            background: var(--bg-card);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.5s ease;
+        }
+
+        .progress-fill.green { background: var(--accent-green); }
+        .progress-fill.blue { background: var(--accent); }
+        .progress-fill.amber { background: var(--accent-amber); }
+
+        .progress-value {
+            font-size: 12px;
+            color: var(--text-secondary);
+            min-width: 60px;
+            text-align: right;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        th {
+            text-align: left;
+            padding: 6px 8px;
+            color: var(--text-secondary);
+            font-weight: 500;
+            border-bottom: 1px solid var(--border);
+        }
+
+        td {
+            padding: 6px 8px;
+            border-bottom: 1px solid rgba(71, 85, 105, 0.3);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .badge-green { background: rgba(34, 197, 94, 0.2); color: var(--accent-green); }
+        .badge-amber { background: rgba(245, 158, 11, 0.2); color: var(--accent-amber); }
+        .badge-red { background: rgba(239, 68, 68, 0.2); color: var(--accent-red); }
+        .badge-blue { background: rgba(59, 130, 246, 0.2); color: var(--accent); }
+
+        .controls {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+        }
+
+        button {
+            padding: 8px 16px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--bg-card);
+            color: var(--text-primary);
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        button:hover { background: var(--border); }
+        button.primary { background: var(--accent); border-color: var(--accent); }
+        button.primary:hover { background: #2563eb; }
+        button.danger { background: var(--accent-red); border-color: var(--accent-red); }
+        button.danger:hover { background: #dc2626; }
+
+        .service-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+        }
+
+        .service-item {
+            background: var(--bg-card);
+            border-radius: 6px;
+            padding: 10px;
+        }
+
+        .service-item .name {
+            font-size: 13px;
+            font-weight: 500;
+            margin-bottom: 4px;
+        }
+
+        .service-item .detail {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+
+        .dot-green { background: var(--accent-green); }
+        .dot-red { background: var(--accent-red); }
+        .dot-amber { background: var(--accent-amber); }
+
+        .empty-state {
+            text-align: center;
+            padding: 24px;
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+
+        .footer {
+            padding: 12px 24px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-align: center;
+            border-top: 1px solid var(--border);
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>LEM Dashboard</h1>
+        <span class="status" id="statusText">Connecting...</span>
+    </div>
+
+    <div class="grid">
+        <!-- Training Progress -->
+        <div class="card">
+            <h2>Training Progress</h2>
+            <div id="trainingList"></div>
+        </div>
+
+        <!-- Generation Progress -->
+        <div class="card">
+            <h2>Generation</h2>
+            <div id="generationList"></div>
+        </div>
+
+        <!-- Model Scoreboard -->
+        <div class="card full-width">
+            <h2>Model Scoreboard</h2>
+            <div id="scoreboardContainer"></div>
+        </div>
+
+        <!-- Docker Services -->
+        <div class="card">
+            <h2>Services</h2>
+            <div id="serviceGrid" class="service-grid"></div>
+            <div class="controls">
+                <button id="btnStack" class="primary" onclick="toggleStack()">Start Services</button>
+                <button onclick="refreshAll()">Refresh</button>
+            </div>
+        </div>
+
+        <!-- Scoring Agent -->
+        <div class="card">
+            <h2>Scoring Agent</h2>
+            <div id="agentStatus"></div>
+            <div class="controls">
+                <button id="btnAgent" class="primary" onclick="toggleAgent()">Start Agent</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer" id="footerText">LEM v0.1.0</div>
+
+    <script>
+        // Safe DOM helpers — no innerHTML.
+        function el(tag, attrs, children) {
+            var e = document.createElement(tag);
+            if (attrs) {
+                Object.keys(attrs).forEach(function(k) {
+                    if (k === 'className') e.className = attrs[k];
+                    else if (k === 'textContent') e.textContent = attrs[k];
+                    else e.setAttribute(k, attrs[k]);
+                });
+            }
+            if (children) {
+                children.forEach(function(c) {
+                    if (typeof c === 'string') e.appendChild(document.createTextNode(c));
+                    else if (c) e.appendChild(c);
+                });
+            }
+            return e;
+        }
+
+        function clear(id) {
+            var container = document.getElementById(id);
+            while (container.firstChild) container.removeChild(container.firstChild);
+            return container;
+        }
+
+        function makeProgressRow(label, pct, value, colorClass) {
+            var row = el('div', {className: 'progress-row'});
+            row.appendChild(el('span', {className: 'progress-label', textContent: label}));
+
+            var bar = el('div', {className: 'progress-bar'});
+            var fill = el('div', {className: 'progress-fill ' + (colorClass || 'blue')});
+            fill.style.width = Math.min(100, pct).toFixed(1) + '%';
+            bar.appendChild(fill);
+            row.appendChild(bar);
+
+            row.appendChild(el('span', {className: 'progress-value', textContent: value}));
+            return row;
+        }
+
+        function makeBadge(text, colorClass) {
+            return el('span', {className: 'badge ' + colorClass, textContent: text});
+        }
+
+        function makeDot(colorClass) {
+            return el('span', {className: 'dot ' + colorClass});
+        }
+
+        // Render functions.
+        function renderTraining(training) {
+            var container = clear('trainingList');
+            if (!training || training.length === 0) {
+                container.appendChild(el('div', {className: 'empty-state', textContent: 'No training data'}));
+                return;
+            }
+            training.forEach(function(t) {
+                var pct = t.totalIters > 0 ? (t.iteration / t.totalIters * 100) : 0;
+                var value = t.iteration + '/' + t.totalIters;
+                if (t.loss > 0) value += '  loss=' + t.loss.toFixed(3);
+                var color = t.status === 'complete' ? 'green' : t.status === 'training' ? 'blue' : 'amber';
+                container.appendChild(makeProgressRow(t.model, pct, value, color));
+            });
+        }
+
+        function renderGeneration(gen) {
+            var container = clear('generationList');
+            if (!gen) {
+                container.appendChild(el('div', {className: 'empty-state', textContent: 'No generation data'}));
+                return;
+            }
+            container.appendChild(makeProgressRow(
+                'Golden Set',
+                gen.goldenPct || 0,
+                (gen.goldenCompleted || 0) + '/' + (gen.goldenTarget || 0),
+                'green'
+            ));
+            container.appendChild(makeProgressRow(
+                'Expansion',
+                gen.expansionPct || 0,
+                (gen.expansionCompleted || 0) + '/' + (gen.expansionTarget || 0),
+                'blue'
+            ));
+        }
+
+        function renderScoreboard(models) {
+            var container = clear('scoreboardContainer');
+            if (!models || models.length === 0) {
+                container.appendChild(el('div', {className: 'empty-state', textContent: 'No scored models yet'}));
+                return;
+            }
+
+            var table = el('table');
+            var thead = el('thead');
+            var headerRow = el('tr');
+            ['Model', 'Tag', 'Accuracy', 'Iterations', 'Status'].forEach(function(h) {
+                headerRow.appendChild(el('th', {textContent: h}));
+            });
+            thead.appendChild(headerRow);
+            table.appendChild(thead);
+
+            var tbody = el('tbody');
+            models.forEach(function(m) {
+                var row = el('tr');
+                row.appendChild(el('td', {textContent: m.name}));
+                row.appendChild(el('td', {textContent: m.tag}));
+
+                var accTd = el('td');
+                var accPct = (m.accuracy * 100).toFixed(1) + '%';
+                var accColor = m.accuracy >= 0.8 ? 'badge-green' : m.accuracy >= 0.5 ? 'badge-amber' : 'badge-red';
+                accTd.appendChild(makeBadge(accPct, accColor));
+                row.appendChild(accTd);
+
+                row.appendChild(el('td', {textContent: String(m.iterations)}));
+
+                var statusTd = el('td');
+                statusTd.appendChild(makeBadge(m.status, 'badge-blue'));
+                row.appendChild(statusTd);
+
+                tbody.appendChild(row);
+            });
+            table.appendChild(tbody);
+            container.appendChild(table);
+        }
+
+        function renderServices(services) {
+            var container = clear('serviceGrid');
+            if (!services || Object.keys(services).length === 0) {
+                container.appendChild(el('div', {className: 'empty-state', textContent: 'No services detected'}));
+                return;
+            }
+
+            Object.keys(services).forEach(function(name) {
+                var svc = services[name];
+                var item = el('div', {className: 'service-item'});
+
+                var nameRow = el('div', {className: 'name'});
+                nameRow.appendChild(makeDot(svc.running ? 'dot-green' : 'dot-red'));
+                nameRow.appendChild(document.createTextNode(name));
+                item.appendChild(nameRow);
+
+                item.appendChild(el('div', {className: 'detail', textContent: svc.status || 'stopped'}));
+                container.appendChild(item);
+            });
+        }
+
+        function renderAgent(snapshot) {
+            var container = clear('agentStatus');
+            var running = snapshot.agentRunning;
+            var task = snapshot.agentTask || 'Idle';
+
+            var statusRow = el('div', {className: 'progress-row'});
+            statusRow.appendChild(makeDot(running ? 'dot-green' : 'dot-red'));
+            statusRow.appendChild(el('span', {textContent: running ? 'Running: ' + task : 'Stopped'}));
+            container.appendChild(statusRow);
+
+            var btn = document.getElementById('btnAgent');
+            btn.textContent = running ? 'Stop Agent' : 'Start Agent';
+            btn.className = running ? 'danger' : 'primary';
+        }
+
+        // Data fetching via Wails bindings.
+        var stackRunning = false;
+
+        async function refreshAll() {
+            try {
+                var snap = await window.go['main']['TrayService']['GetSnapshot']();
+
+                renderTraining(snap.training);
+                renderGeneration(snap.generation);
+                renderScoreboard(snap.models);
+                renderAgent(snap);
+
+                stackRunning = snap.stackRunning;
+                var btn = document.getElementById('btnStack');
+                btn.textContent = stackRunning ? 'Stop Services' : 'Start Services';
+                btn.className = stackRunning ? 'danger' : 'primary';
+
+                document.getElementById('statusText').textContent =
+                    stackRunning ? 'Services running' : 'Services stopped';
+
+                // Fetch Docker service details.
+                var dockerStatus = await window.go['main']['DockerService']['GetStatus']();
+                renderServices(dockerStatus.services);
+
+                document.getElementById('footerText').textContent =
+                    'LEM v0.1.0 | Updated ' + new Date().toLocaleTimeString();
+            } catch (e) {
+                document.getElementById('statusText').textContent = 'Error: ' + e.message;
+            }
+        }
+
+        async function toggleStack() {
+            try {
+                if (stackRunning) {
+                    await window.go['main']['TrayService']['StopStack']();
+                } else {
+                    await window.go['main']['TrayService']['StartStack']();
+                }
+                setTimeout(refreshAll, 1000);
+            } catch (e) {
+                document.getElementById('statusText').textContent = 'Error: ' + e.message;
+            }
+        }
+
+        async function toggleAgent() {
+            try {
+                var snap = await window.go['main']['TrayService']['GetSnapshot']();
+                if (snap.agentRunning) {
+                    await window.go['main']['TrayService']['StopAgent']();
+                } else {
+                    await window.go['main']['TrayService']['StartAgent']();
+                }
+                setTimeout(refreshAll, 500);
+            } catch (e) {
+                document.getElementById('statusText').textContent = 'Error: ' + e.message;
+            }
+        }
+
+        // Auto-refresh every 10 seconds.
+        refreshAll();
+        setInterval(refreshAll, 10000);
+    </script>
+</body>
+</html>

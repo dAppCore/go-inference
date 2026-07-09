@@ -1,0 +1,91 @@
+From 50852c83927a4a510656fe93e51017adfda21144 Mon Sep 17 00:00:00 2001
+From: Snider <snider@host.uk.com>
+Date: Fri, 12 Jun 2026 18:12:05 +0100
+Subject: [PATCH 03/10] lthn patch (#91): env-gated COMPILE-CACHE decision
+ trace in CompilerCache::find
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+GO_MLX_COMPILE_TRACE=1 prints per-call REUSE/FRESH decisions with the input
+and entry shape signatures — the instrument that caught shapeless entries
+being reused across mismatched geometries.
+---
+ mlx/compile.cpp | 37 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/mlx/compile.cpp b/mlx/compile.cpp
+index 6f3d89cf..67119c33 100644
+--- a/mlx/compile.cpp
++++ b/mlx/compile.cpp
+@@ -1,6 +1,7 @@
+ // Copyright © 2023-2024 Apple Inc.
+ 
+ #include <atomic>
++#include <cstdio>
+ #include <cstdlib>
+ #include <map>
+ #include <sstream>
+@@ -347,23 +348,59 @@ class CompilerCache {
+     // - Default stream and device match the entry's default stream
+     // - Inputs match i.e. shapes and types must be equal.
+     auto stream = default_stream(default_device());
++    // lthn instrument (#91): env-gated cache-decision trace.
++    const bool lthn_trace = std::getenv("GO_MLX_COMPILE_TRACE") != nullptr;
++    auto lthn_sig = [](const std::vector<array>& ins) {
++      std::ostringstream os;
++      for (auto& a : ins) {
++        os << "[";
++        for (int d = 0; d < a.ndim(); ++d) {
++          os << (d ? "," : "") << a.shape(d);
++        }
++        os << "]";
++      }
++      return os.str();
++    };
++    size_t lthn_idx = 0;
+     for (CacheEntry& entry : entries) {
+       // Check that the default stream and device match
+       if (entry.stream != stream) {
++        ++lthn_idx;
+         continue;
+       }
+       if (entry.shapeless != shapeless) {
++        ++lthn_idx;
+         continue;
+       }
+ 
+       // Check the inputs match and return if so
+       if (has_same_shape_and_dtype(inputs, entry.inputs) &&
+           constants == entry.constants) {
++        if (lthn_trace) {
++          fprintf(
++              stderr,
++              "COMPILE-CACHE fun=%llx REUSE idx=%zu/%zu empty=%d in=%s entry=%s\n",
++              (unsigned long long)fun_id,
++              lthn_idx,
++              entries.size(),
++              (int)entry.empty,
++              lthn_sig(inputs).c_str(),
++              lthn_sig(entry.inputs).c_str());
++        }
+         return entry;
+       }
++      ++lthn_idx;
+     }
+     // Otherwise append a new cache entry
+     entries.push_back(CacheEntry{stream, shapeless});
++    if (lthn_trace) {
++      fprintf(
++          stderr,
++          "COMPILE-CACHE fun=%llx FRESH idx=%zu in=%s\n",
++          (unsigned long long)fun_id,
++          entries.size() - 1,
++          lthn_sig(inputs).c_str());
++    }
+     return entries.back();
+   }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

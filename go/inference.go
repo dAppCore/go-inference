@@ -1,7 +1,7 @@
 // Package inference defines shared interfaces for text generation backends.
 //
 // This package is the contract between GPU-specific backends (go-mlx, go-rocm)
-// and consumers (go-ml, go-ai, go-i18n). It has zero dependencies and compiles
+// and consumers (go-i18n and the serving/score layers). It has zero dependencies and compiles
 // on all platforms.
 //
 // # Backend registration
@@ -16,14 +16,16 @@
 //
 // # Loading and generating
 //
-//	m, err := inference.LoadModel("/path/to/model/")
+//	r := inference.LoadModel("/path/to/model/")
+//	if !r.OK { log.Fatal(r.Error()) }
+//	m := r.Value.(inference.TextModel)
 //	defer m.Close()
 //
 //	ctx := context.Background()
 //	for tok := range m.Generate(ctx, "prompt", inference.WithMaxTokens(128)) {
 //	    fmt.Print(tok.Text)
 //	}
-//	if err := m.Err(); err != nil { log.Fatal(err) }
+//	if r := m.Err(); !r.OK { log.Fatal(r.Error()) }
 //
 // # Chat, classify, and batch generate
 //
@@ -38,10 +40,12 @@
 //	}
 //
 //	// Classify — single forward pass per prompt
-//	results, _ := m.Classify(ctx, prompts, inference.WithTemperature(0))
+//	cr := m.Classify(ctx, prompts, inference.WithTemperature(0))
+//	results := cr.Value.([]inference.ClassifyResult)
 //
 //	// Batch generate — parallel autoregressive decoding
-//	batched, _ := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(32))
+//	br := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(32))
+//	batched := br.Value.([]inference.BatchResult)
 //
 // # Generation options
 //
@@ -63,7 +67,6 @@ package inference
 import (
 	"context"
 	"iter"
-	"maps"
 	"slices"
 	"time"
 
@@ -87,9 +90,39 @@ type Token struct {
 type Message struct {
 	Role    string `json:"role"` // "system", "user", "assistant"
 	Content string `json:"content"`
+	// Images carries encoded image bytes (PNG/JPEG) attached to this turn,
+	// populated by the compat handlers from multimodal content parts. Only
+	// engines implementing VisionModel serve image turns; the handlers
+	// reject image requests against text-only models.
+	Images [][]byte `json:"images,omitempty"`
+	// Audios carries encoded audio bytes (WAV, 16-bit PCM mono 16 kHz)
+	// attached to this turn. Audio placeholder blocks follow the turn text
+	// (the gemma4 audio-after-text convention); engines without an audio
+	// head reject audio turns rather than silently dropping them.
+	Audios [][]byte `json:"audios,omitempty"`
+	// Videos carries the sampled FRAMES of one video (encoded PNG/JPEG, in
+	// time order) attached to this turn — each frame becomes a timestamped
+	// vision block. Engines without vision reject video turns.
+	Videos [][]byte `json:"videos,omitempty"`
 }
 
-// results, _ := m.Classify(ctx, []string{"positive", "negative"})
+// VisionModel is the optional capability a TextModel implements when the
+// LOADED CHECKPOINT accepts image content — the family supporting vision
+// does not mean the snapshot shipped the tower, so this is a live probe,
+// not a static declaration.
+type VisionModel interface {
+	AcceptsImages() bool
+}
+
+// AudioModel is the optional capability a TextModel implements when the LOADED
+// CHECKPOINT accepts audio content — a live probe like VisionModel, not a
+// family declaration.
+type AudioModel interface {
+	AcceptsAudio() bool
+}
+
+// cr := m.Classify(ctx, []string{"positive", "negative"})
+// results := cr.Value.([]inference.ClassifyResult)
 // label := results[0].Token.Text  // sampled token at last position
 // logits := results[0].Logits     // only populated when WithLogits() is set
 type ClassifyResult struct {
@@ -97,7 +130,8 @@ type ClassifyResult struct {
 	Logits []float32 // Raw vocab-sized logits (only when WithLogits is set)
 }
 
-// batched, _ := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(64))
+// br := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(64))
+// batched := br.Value.([]inference.BatchResult)
 //
 //	for i, r := range batched {
 //	    if r.Err != nil { continue }
@@ -130,6 +164,67 @@ type GenerateMetrics struct {
 	// Memory (Metal/GPU)
 	PeakMemoryBytes   uint64 // Peak GPU memory during this operation
 	ActiveMemoryBytes uint64 // Active GPU memory after operation
+
+	// Reasoning controls
+	ThinkingBudgetForced bool // ThinkingBudget forced the thought-channel close token
+
+	// DecodePhases is the aggregate per-token decode timing split, populated only
+	// when GenerateConfig.TraceTokenPhases was set AND the active engine + decode
+	// path reported a budget. nil otherwise — an engine without phase timing (or a
+	// decode path that isn't instrumented) simply leaves it unset.
+	DecodePhases *DecodePhaseBudget `json:",omitempty"`
+}
+
+// DecodePhaseBudget is the aggregate per-token decode timing split from a traced
+// generation (GenerateConfig.TraceTokenPhases): where the average generated
+// token's wall goes between GPU-busy work (the host blocked on a GPU result) and
+// host-serial work (the GPU idle while the host encodes / samples / detokenises).
+// It is the structured, engine-neutral form of the perf campaign's process-global
+// pieceTiming counters, so `lem generate -trace` can print the budget through the
+// production metrics surface instead of a test-only hook.
+//
+//	if b := m.Metrics().DecodePhases; b != nil {
+//	    fmt.Printf("%.3f ms/token · GPU %.0f%%\n",
+//	        float64(b.TotalPerToken.Microseconds())/1000, 100*b.GPUFraction())
+//	}
+type DecodePhaseBudget struct {
+	Tokens        int                `json:",omitempty"` // tokens the aggregate is averaged over
+	TotalPerToken time.Duration      `json:",omitempty"` // average wall per token
+	GPUPerToken   time.Duration      `json:",omitempty"` // average time the host blocked on GPU results
+	Phases        []DecodePhaseShare `json:",omitempty"` // engine-named sub-splits (may be empty)
+}
+
+// DecodePhaseShare is one named slice of the per-token decode budget. Name is the
+// engine's own label for the phase (the metal engine reports its GPU pieces —
+// "PLE projection", "layer stack (ICB)", "head — norm + lm_head" — and the
+// chained-decode GPU span). GPU marks a phase as GPU-busy time versus host-serial.
+type DecodePhaseShare struct {
+	Name     string        `json:",omitempty"`
+	PerToken time.Duration `json:",omitempty"`
+	GPU      bool          `json:",omitempty"`
+}
+
+// HostPerToken is the average per-token host-serial time — the wall the GPU sat
+// idle (TotalPerToken - GPUPerToken). It is the headroom a deeper decode pipeline
+// could overlap; a large share is the signal the engine perf work chases. Clamped
+// to zero when GPU time somehow exceeds the measured wall (overlapping spans).
+func (b DecodePhaseBudget) HostPerToken() time.Duration {
+	if b.GPUPerToken >= b.TotalPerToken {
+		return 0
+	}
+	return b.TotalPerToken - b.GPUPerToken
+}
+
+// GPUFraction is GPUPerToken / TotalPerToken in [0,1] (0 when untimed).
+func (b DecodePhaseBudget) GPUFraction() float64 {
+	if b.TotalPerToken <= 0 {
+		return 0
+	}
+	f := float64(b.GPUPerToken) / float64(b.TotalPerToken)
+	if f > 1 {
+		return 1
+	}
+	return f
 }
 
 // info := model.Info()
@@ -181,7 +276,7 @@ type TextModel interface {
 	//	for tok := range m.Generate(ctx, "The quick brown fox", inference.WithMaxTokens(64)) {
 	//	    fmt.Print(tok.Text)
 	//	}
-	//	if err := m.Err(); err != nil { return err }
+	//	if r := m.Err(); !r.OK { return r }
 	Generate(ctx context.Context, prompt string, opts ...GenerateOption) iter.Seq[Token]
 
 	// Chat streams tokens from a multi-turn conversation using the model's native template.
@@ -193,16 +288,22 @@ type TextModel interface {
 
 	// Classify runs batched prefill-only inference — fast path for classification tasks.
 	// Each prompt gets one forward pass; the token at the last position is sampled.
+	// The Result carries []ClassifyResult in Value when OK.
 	//
-	//	results, _ := m.Classify(ctx, []string{"positive review", "negative review"})
+	//	cr := m.Classify(ctx, []string{"positive review", "negative review"})
+	//	if !cr.OK { return cr }
+	//	results := cr.Value.([]inference.ClassifyResult)
 	//	label := results[0].Token.Text
-	Classify(ctx context.Context, prompts []string, opts ...GenerateOption) ([]ClassifyResult, error)
+	Classify(ctx context.Context, prompts []string, opts ...GenerateOption) core.Result
 
 	// BatchGenerate runs batched autoregressive generation up to MaxTokens per prompt.
+	// The Result carries []BatchResult in Value when OK.
 	//
-	//	results, _ := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(128))
+	//	br := m.BatchGenerate(ctx, prompts, inference.WithMaxTokens(128))
+	//	if !br.OK { return br }
+	//	results := br.Value.([]inference.BatchResult)
 	//	for i, r := range results { fmt.Println(i, r.Tokens) }
-	BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) ([]BatchResult, error)
+	BatchGenerate(ctx context.Context, prompts []string, opts ...GenerateOption) core.Result
 
 	// ModelType is the architecture string from config.json ("gemma3", "qwen3", "llama3").
 	//
@@ -221,17 +322,20 @@ type TextModel interface {
 	//	fmt.Printf("%.0f tok/s decode\n", m.Metrics().DecodeTokensPerSec)
 	Metrics() GenerateMetrics
 
-	// Err holds any error from the last Generate or Chat call.
+	// Err reports any error from the last Generate or Chat call.
 	// Check after the iterator stops to distinguish normal EOS from errors.
+	// The Result is OK with a nil Value on success, or a failure carrying
+	// the error otherwise.
 	//
 	//	for tok := range m.Generate(ctx, prompt) { ... }
-	//	if err := m.Err(); err != nil { return err }
-	Err() error
+	//	if r := m.Err(); !r.OK { return r }
+	Err() core.Result
 
-	// Close releases GPU memory, KV caches, and any subprocess.
+	// Close releases GPU memory, KV caches, and any subprocess. The Result
+	// is OK with a nil Value on success, or a failure carrying the error.
 	//
 	//	defer m.Close()
-	Close() error
+	Close() core.Result
 }
 
 // func init() { inference.Register(metal.NewBackend()) } // called from backend packages
@@ -241,10 +345,13 @@ type Backend interface {
 	//	b.Name() // "metal", "rocm", "llama_cpp"
 	Name() string
 
-	// LoadModel reads the model directory at path and returns a ready TextModel.
+	// LoadModel reads the model directory at path and returns a ready
+	// TextModel in the Result's Value when OK.
 	//
-	//	m, err := b.LoadModel("/models/gemma3-1b", inference.WithContextLen(4096))
-	LoadModel(path string, opts ...LoadOption) (TextModel, error)
+	//	r := b.LoadModel("/models/gemma3-1b", inference.WithContextLen(4096))
+	//	if !r.OK { return r }
+	//	m := r.Value.(inference.TextModel)
+	LoadModel(path string, opts ...LoadOption) core.Result
 
 	// Available reports whether the required hardware or driver is present at runtime.
 	//
@@ -262,13 +369,6 @@ var (
 		"llama_cpp": {},
 	}
 )
-
-func snapshotBackends() map[string]Backend {
-	backendsMu.RLock()
-	snap := maps.Clone(backends)
-	backendsMu.RUnlock()
-	return snap
-}
 
 // Register adds b to the global registry, overwriting any existing entry with the same name.
 //
@@ -293,19 +393,57 @@ func Get(name string) (Backend, bool) {
 }
 
 // names := inference.List() // ["llama_cpp", "metal", "rocm"]
+//
+// Single-pass key copy under RLock — earlier shape did maps.Clone +
+// maps.Keys + slices.Sorted (~4 allocs + bucket cost). Direct slice
+// build is 1 alloc; empty registry returns nil (preserves the test
+// contract that callers can branch on).
 func List() []string {
-	return slices.Sorted(maps.Keys(snapshotBackends()))
+	backendsMu.RLock()
+	if len(backends) == 0 {
+		backendsMu.RUnlock()
+		return nil
+	}
+	names := make([]string, 0, len(backends))
+	for name := range backends {
+		names = append(names, name)
+	}
+	backendsMu.RUnlock()
+	slices.Sort(names)
+	return names
 }
 
 //	for name, b := range inference.All() {
 //	    fmt.Println(name, b.Available())
 //	}
+//
+// Builds a slice of (name, backend) pairs under RLock so the returned
+// iterator runs without holding any lock — single alloc for the pair
+// slice instead of the previous maps.Clone + maps.Keys + slices.Sorted
+// cascade.
 func All() iter.Seq2[string, Backend] {
-	snap := snapshotBackends()
-	names := slices.Sorted(maps.Keys(snap))
+	type entry struct {
+		name string
+		back Backend
+	}
+	backendsMu.RLock()
+	entries := make([]entry, 0, len(backends))
+	for name, b := range backends {
+		entries = append(entries, entry{name, b})
+	}
+	backendsMu.RUnlock()
+	slices.SortFunc(entries, func(a, b entry) int {
+		if a.name < b.name {
+			return -1
+		}
+		if a.name > b.name {
+			return 1
+		}
+		return 0
+	})
 	return func(yield func(string, Backend) bool) {
-		for _, name := range names {
-			if !yield(name, snap[name]) {
+		for _, e := range entries {
+			if !yield(e.name, e.back) {
 				return
 			}
 		}
@@ -315,25 +453,53 @@ func All() iter.Seq2[string, Backend] {
 // Default picks the first available backend in preference order: metal → rocm → llama_cpp → any.
 //
 //	r := inference.Default() // r.Value is the backend when r.OK
+//
+// Both preferred-order scan and fallback run against direct map
+// lookups under RLock — no clone, no Keys-iterator allocation. The
+// happy path (preferred backend available) is 0 allocs.
 func Default() core.Result {
-	snap := snapshotBackends()
-	if len(snap) == 0 {
+	backendsMu.RLock()
+	if len(backends) == 0 {
+		backendsMu.RUnlock()
 		return core.Fail(core.E("inference.Default", "no backends registered", nil))
 	}
 
-	// Platform preference order
+	// Platform preference order — direct map lookups, no clone.
 	for _, name := range preferredBackendOrder {
-		if b, ok := snap[name]; ok && b.Available() {
+		if b, ok := backends[name]; ok && b.Available() {
+			backendsMu.RUnlock()
 			return core.Ok(b)
 		}
 	}
-	// Fall back to any available
-	for _, name := range slices.Sorted(maps.Keys(snap)) {
-		if _, ok := preferredBackendSet[name]; ok {
+
+	// Fall back to any non-preferred backend, in sorted-name order.
+	// Snapshot (name, backend) pairs under RLock so Available() runs
+	// outside the lock — matches the prior defensive behaviour.
+	type entry struct {
+		name string
+		back Backend
+	}
+	var fallback []entry
+	for name, b := range backends {
+		if _, isPreferred := preferredBackendSet[name]; isPreferred {
 			continue
 		}
-		if backend := snap[name]; backend.Available() {
-			return core.Ok(backend)
+		fallback = append(fallback, entry{name, b})
+	}
+	backendsMu.RUnlock()
+
+	slices.SortFunc(fallback, func(a, b entry) int {
+		if a.name < b.name {
+			return -1
+		}
+		if a.name > b.name {
+			return 1
+		}
+		return 0
+	})
+	for _, e := range fallback {
+		if e.back.Available() {
+			return core.Ok(e.back)
 		}
 	}
 	return core.Fail(core.E("inference.Default", "no backends available", nil))
@@ -351,7 +517,7 @@ func LoadModel(path string, opts ...LoadOption) core.Result {
 		if !b.Available() {
 			return core.Fail(core.E("inference.LoadModel", core.Sprintf("backend %q not available on this hardware", cfg.Backend), nil))
 		}
-		modelResult := core.ResultOf(b.LoadModel(path, opts...))
+		modelResult := b.LoadModel(path, opts...)
 		if !modelResult.OK {
 			return core.Fail(core.Wrap(modelResult.Value.(error), "inference.LoadModel", core.Sprintf("backend %q failed to load model", cfg.Backend)))
 		}
@@ -369,7 +535,7 @@ func LoadModel(path string, opts ...LoadOption) core.Result {
 	if !ok || b == nil {
 		return core.Fail(core.E("inference.LoadModel", "default backend result was not a backend", nil))
 	}
-	modelResult := core.ResultOf(b.LoadModel(path, opts...))
+	modelResult := b.LoadModel(path, opts...)
 	if !modelResult.OK {
 		return core.Fail(core.Wrap(modelResult.Value.(error), "inference.LoadModel", core.Sprintf("backend %q failed to load model", b.Name())))
 	}
