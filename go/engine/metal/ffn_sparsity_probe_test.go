@@ -208,11 +208,12 @@ func TestFFNDropArgmaxCeilingRealE2B(t *testing.T) {
 
 	prompt := []int32{2, 1000, 2500, 4000, 8000, 16000}
 	const N = 24
-	genWith := func(frac float64) []int32 {
-		prevFrac, prevICB := ffnDropFrac, icbDisabledForTest
+	genWith := func(frac float64, byGate bool) []int32 {
+		prevFrac, prevICB, prevBy := ffnDropFrac, icbDisabledForTest, ffnDropByGate
 		icbDisabledForTest = true // the drop lives in the non-ICB stepToken path
 		ffnDropFrac = frac
-		defer func() { ffnDropFrac = prevFrac; icbDisabledForTest = prevICB }()
+		ffnDropByGate = byGate
+		defer func() { ffnDropFrac = prevFrac; icbDisabledForTest = prevICB; ffnDropByGate = prevBy }()
 		s, e := newArchQuantSessionShards(qm, lm.Arch, 320, sb)
 		if e != nil {
 			t.Fatalf("newArchQuantSessionShards: %v", e)
@@ -222,25 +223,33 @@ func TestFFNDropArgmaxCeilingRealE2B(t *testing.T) {
 		}
 		toks, e := s.GenerateFromCache(N, -1)
 		if e != nil {
-			t.Fatalf("generate (drop %.2f): %v", frac, e)
+			t.Fatalf("generate (drop %.2f byGate=%v): %v", frac, byGate, e)
 		}
 		return toks
 	}
 
-	base := genWith(0)
+	base := genWith(0, false)
 	t.Logf("=== #364 FFN-drop argmax ceiling — real e2b-4bit, %d tokens ===", N)
 	t.Logf("  baseline (drop 0%%): %v", base)
-	for _, frac := range []float64{0.30, 0.35, 0.40, 0.45, 0.50} {
-		got := genWith(frac)
-		match := 0
-		for match < len(base) && match < len(got) && base[match] == got[match] {
-			match++
+	sweep := func(byGate bool, label string) {
+		t.Logf("  --- ranked by %s ---", label)
+		for _, frac := range []float64{0.30, 0.35, 0.40, 0.45, 0.50} {
+			got := genWith(frac, byGate)
+			match := 0
+			for match < len(base) && match < len(got) && base[match] == got[match] {
+				match++
+			}
+			verdict := "ALL MATCH"
+			if match < len(base) {
+				verdict = "diverges"
+			}
+			t.Logf("    drop %2.0f%%: %2d/%d tokens match — %s", frac*100, match, len(base), verdict)
 		}
-		verdict := "ALL MATCH"
-		if match < len(base) {
-			verdict = "diverges"
-		}
-		t.Logf("  drop %2.0f%% of gated cols: %2d/%d tokens match baseline — %s", frac*100, match, len(base), verdict)
 	}
-	t.Logf("  => the largest drop%% that still ALL-MATCHES is the safe exploitable ceiling (~that %% of up+down skippable)")
+	// EXACT |gated| = the down-skip ceiling (needs up already computed). gate-only
+	// |gelu(gate)| = the predictor a real UP-skipping kernel uses (scored before up);
+	// the gap between the two is the cost of predicting deadness from gate alone.
+	sweep(false, "|gated| (exact — DOWN-skip ceiling)")
+	sweep(true, "|gelu(gate)| (gate-only PREDICTOR — UP+down-skip ceiling)")
+	t.Logf("  => how much of the exact ceiling survives when deadness is predicted from gate alone")
 }
