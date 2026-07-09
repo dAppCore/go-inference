@@ -776,14 +776,18 @@ func (s *archDecodeState) bufferBytes(buf metal.MTLBuffer, n int) []byte {
 // byGate, by |gelu(gate)| (the gate-only PREDICTOR a real up-skipping kernel would
 // use, scored before the up projection). gated is a writable bf16 view; gate is
 // read-only (may be nil when !byGate). No-op at frac<=0 (split FFN stays identical).
-func maskGatedBottomFrac(gated, gate []byte, dFF int, frac float64, byGate bool) {
+func maskGatedBottomFrac(gated, gate []byte, upNorm []float32, dFF int, frac float64, byGate bool) {
 	if frac <= 0 || dFF <= 0 || len(gated) < dFF*2 {
 		return
 	}
 	score := make([]float64, dFF)
 	for i := 0; i < dFF; i++ {
 		if byGate {
-			score[i] = math.Abs(geluTanh(float64(bf16ToF32(gate[i*2], gate[i*2+1]))))
+			s := math.Abs(geluTanh(float64(bf16ToF32(gate[i*2], gate[i*2+1]))))
+			if upNorm != nil {
+				s *= float64(upNorm[i]) // |gelu(gate)|*||W_up[:,i]|| — the norm-weighted predictor
+			}
+			score[i] = s
 		} else {
 			score[i] = math.Abs(float64(bf16ToF32(gated[i*2], gated[i*2+1])))
 		}
@@ -1220,6 +1224,11 @@ var (
 	// the exact |gated|. The gap between the two argmax-ceilings = the cost of
 	// predicting deadness from gate alone (which is what buys the up-projection skip).
 	ffnDropByGate bool
+	// #364 predictor refinement: per-layer static up-column L2 norms ||W_up[:,i]||.
+	// When set (with ffnDropByGate), the score is |gelu(gate)|*upNorm[i] — a better
+	// proxy for |gated_i|=|gelu(gate_i)|*|up_i| than gelu(gate) alone, still scored
+	// before the up PROJECTION (the norms are static weights). nil = off.
+	ffnUpColNorms [][]float32
 	capturedAttnHiddens  [][]byte // post-attention hidden (x + Wo·attn) per layer — isolates attention from MLP
 )
 
@@ -1449,7 +1458,11 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 				encConc = false
 				commitCommandBufferFast(cb)
 				waitUntilCompletedFast(cb)
-				maskGatedBottomFrac(s.bufferBytes(s.msc.gated, lff*bf16Size), s.bufferBytes(s.msc.gate, lff*bf16Size), lff, ffnDropFrac, ffnDropByGate)
+				var upNorm []float32
+				if li < len(ffnUpColNorms) && len(ffnUpColNorms[li]) >= lff {
+					upNorm = ffnUpColNorms[li]
+				}
+				maskGatedBottomFrac(s.bufferBytes(s.msc.gated, lff*bf16Size), s.bufferBytes(s.msc.gate, lff*bf16Size), upNorm, lff, ffnDropFrac, ffnDropByGate)
 				cb = commandBufferFast(queue)
 				enc = computeCommandEncoderFast(cb)
 				cbBroken = true

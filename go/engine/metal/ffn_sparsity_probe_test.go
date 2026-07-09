@@ -250,6 +250,37 @@ func TestFFNDropArgmaxCeilingRealE2B(t *testing.T) {
 	// |gelu(gate)| = the predictor a real UP-skipping kernel uses (scored before up);
 	// the gap between the two is the cost of predicting deadness from gate alone.
 	sweep(false, "|gated| (exact — DOWN-skip ceiling)")
-	sweep(true, "|gelu(gate)| (gate-only PREDICTOR — UP+down-skip ceiling)")
-	t.Logf("  => how much of the exact ceiling survives when deadness is predicted from gate alone")
+	sweep(true, "|gelu(gate)| (gate-only PREDICTOR)")
+	prevNorms := ffnUpColNorms
+	ffnUpColNorms = upColNorms(t, qm, lm.Arch.Hidden)
+	defer func() { ffnUpColNorms = prevNorms }()
+	sweep(true, "|gelu(gate)|*||up_col|| (norm-weighted PREDICTOR — the up-skip make-or-break)")
+	t.Logf("  => exact = the lossless down-skip floor; whichever predictor holds nearest is the up-skip ceiling")
+}
+
+// upColNorms dequantizes each layer's up projection [dFF x dModel] and returns the
+// per-output-channel L2 norm ||W_up[i,:]|| — the static weight-space proxy for |up_i|
+// the #364 norm-weighted predictor multiplies |gelu(gate_i)| by (still pre-up-projection).
+func upColNorms(t *testing.T, qm *QuantModel, dModel int) [][]float32 {
+	L := len(qm.Layers)
+	out := make([][]float32, L)
+	for l := 0; l < L; l++ {
+		uw := qm.Layers[l].Up
+		dFF := len(uw.Packed) * 8 / uw.Bits / dModel
+		mat, err := dequantizeAffineRowsF32(uw.Packed, uw.Scales, uw.Biases, dFF, dModel, uw.GroupSize, uw.Bits)
+		if err != nil {
+			t.Fatalf("dequant up L%d: %v", l, err)
+		}
+		cn := make([]float32, dFF)
+		for i := 0; i < dFF; i++ {
+			var s float64
+			for j := 0; j < dModel; j++ {
+				v := float64(mat[i*dModel+j])
+				s += v * v
+			}
+			cn[i] = float32(math.Sqrt(s))
+		}
+		out[l] = cn
+	}
+	return out
 }
