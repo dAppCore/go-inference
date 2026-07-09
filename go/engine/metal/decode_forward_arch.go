@@ -7,7 +7,6 @@ package native
 import (
 	"math"
 	"runtime"
-	"sort"
 	"unsafe"
 
 	core "dappco.re/go"
@@ -771,42 +770,6 @@ func (s *archDecodeState) bufferBytes(buf metal.MTLBuffer, n int) []byte {
 	return unsafe.Slice(s.bufferPtr(buf), n)
 }
 
-// maskGatedBottomFrac zeros the bottom-frac of the dFF gated columns — the #364
-// argmax-drop diagnostic. Ranks by the exact |gated| (down-skip ceiling) or, when
-// byGate, by |gelu(gate)| (the gate-only PREDICTOR a real up-skipping kernel would
-// use, scored before the up projection). gated is a writable bf16 view; gate is
-// read-only (may be nil when !byGate). No-op at frac<=0 (split FFN stays identical).
-func maskGatedBottomFrac(gated, gate []byte, upNorm []float32, dFF int, frac float64, byGate bool) {
-	if frac <= 0 || dFF <= 0 || len(gated) < dFF*2 {
-		return
-	}
-	score := make([]float64, dFF)
-	for i := 0; i < dFF; i++ {
-		if byGate {
-			s := math.Abs(geluTanh(float64(bf16ToF32(gate[i*2], gate[i*2+1]))))
-			if upNorm != nil {
-				s *= float64(upNorm[i]) // |gelu(gate)|*||W_up[:,i]|| — the norm-weighted predictor
-			}
-			score[i] = s
-		} else {
-			score[i] = math.Abs(float64(bf16ToF32(gated[i*2], gated[i*2+1])))
-		}
-	}
-	sorted := append([]float64(nil), score...)
-	sort.Float64s(sorted)
-	ti := int(frac * float64(dFF))
-	if ti >= dFF {
-		ti = dFF - 1
-	}
-	thr := sorted[ti]
-	for i := 0; i < dFF; i++ {
-		if score[i] <= thr {
-			gated[i*2] = 0
-			gated[i*2+1] = 0
-		}
-	}
-}
-
 // pleLayer is one layer's per-layer-input gate weights: the 4-bit gate + projection and the
 // bf16 post-norm. A nil postNorm marks a layer with no gate (so a mixed model is fine).
 type pleLayer struct {
@@ -1208,27 +1171,6 @@ func bufMaxAbsNaN(buf metal.MTLBuffer, dModel int) (maxAbs float32, bad int) {
 var (
 	captureLayerHiddens  bool
 	capturedLayerHiddens [][]byte
-	// #364 FFN-sparsity probe (read-only; no-op unless set): each dense layer's
-	// gelu(gate)*up (dFF bf16). s.msc.gated still holds it at layer end (down read
-	// it, then wrote s.msc.down). MoE layers skip (msc unused there).
-	captureFFNGated  bool
-	capturedFFNGated [][]byte
-	// #364 argmax-drop test: 0 = off (byte-identical). Else, before the down
-	// projection, zero the bottom-ffnDropFrac of |gated| columns by magnitude — the
-	// definitive exploitable-sparsity test (does dropping dead columns flip the
-	// emitted token?). Diagnostic only; a real kernel would predict live columns
-	// from gate WITHOUT streaming up/down for the dead ones.
-	ffnDropFrac float64
-	// #364 predictor mode: when true, rank columns by |gelu(gate)| (the gate-only
-	// score a real up-skipping kernel computes BEFORE the up projection) instead of
-	// the exact |gated|. The gap between the two argmax-ceilings = the cost of
-	// predicting deadness from gate alone (which is what buys the up-projection skip).
-	ffnDropByGate bool
-	// #364 predictor refinement: per-layer static up-column L2 norms ||W_up[:,i]||.
-	// When set (with ffnDropByGate), the score is |gelu(gate)|*upNorm[i] — a better
-	// proxy for |gated_i|=|gelu(gate_i)|*|up_i| than gelu(gate) alone, still scored
-	// before the up PROJECTION (the norms are static weights). nil = off.
-	ffnUpColNorms [][]float32
 	capturedAttnHiddens  [][]byte // post-attention hidden (x + Wo·attn) per layer — isolates attention from MLP
 )
 
@@ -1449,25 +1391,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			if s.lb[li].dFF > 0 {
 				lff = s.lb[li].dFF
 			}
-			if err := encMLPGatedBF16At(enc, s.hBuf, s.lb[li].mnw, s.msc, s.lb[li].proj, s.dModel, lff, s.eps); err != nil {
-				endEncodingFast(enc)
-				return nil, err
-			}
-			if ffnDropFrac > 0 && s.msc.gated != nil { // #364 argmax-drop: mask dead gated columns before down
-				endEncodingFast(enc)
-				encConc = false
-				commitCommandBufferFast(cb)
-				waitUntilCompletedFast(cb)
-				var upNorm []float32
-				if li < len(ffnUpColNorms) && len(ffnUpColNorms[li]) >= lff {
-					upNorm = ffnUpColNorms[li]
-				}
-				maskGatedBottomFrac(s.bufferBytes(s.msc.gated, lff*bf16Size), s.bufferBytes(s.msc.gate, lff*bf16Size), upNorm, lff, ffnDropFrac, ffnDropByGate)
-				cb = commandBufferFast(queue)
-				enc = computeCommandEncoderFast(cb)
-				cbBroken = true
-			}
-			if err := encMLPDownResidBF16At(enc, s.hBuf, out, 0, s.lb[li].postFFNorm, s.msc, s.lb[li].proj, s.dModel, lff, s.eps); err != nil {
+			if err := encMLPHalfBF16(enc, s.hBuf, out, s.lb[li].mnw, s.lb[li].postFFNorm, s.msc, s.lb[li].proj, s.dModel, lff, s.eps); err != nil {
 				endEncodingFast(enc)
 				return nil, err
 			}
@@ -1553,17 +1477,12 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			enc = computeCommandEncoderFast(cb)
 			cbBroken = true
 		}
-		if captureLayerHiddens || captureFFNGated { // cross-engine per-layer diff / #364 FFN-sparsity probe
+		if captureLayerHiddens { // cross-engine per-layer diff: store this layer's output hidden
 			endEncodingFast(enc)
 			encConc = false
 			commitCommandBufferFast(cb)
 			waitUntilCompletedFast(cb)
-			if captureLayerHiddens { // this layer's output hidden
-				capturedLayerHiddens = append(capturedLayerHiddens, append([]byte(nil), s.bufferBytes(out, s.dModel*bf16Size)...))
-			}
-			if captureFFNGated && s.msc.gated != nil { // this dense layer's gelu(gate)*up
-				capturedFFNGated = append(capturedFFNGated, append([]byte(nil), s.bufferBytes(s.msc.gated, s.msc.dFF*bf16Size)...))
-			}
+			capturedLayerHiddens = append(capturedLayerHiddens, append([]byte(nil), s.bufferBytes(out, s.dModel*bf16Size)...))
 			cb = commandBufferFast(queue)
 			enc = computeCommandEncoderFast(cb)
 			cbBroken = true
