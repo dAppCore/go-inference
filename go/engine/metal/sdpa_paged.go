@@ -36,11 +36,16 @@ type sdpaPagedP1Params struct {
 	Scale       float32
 }
 
-// kvQ8Enabled turns the paged KV cache q8 (#357): int8 rows + f32 group
-// scales, halving KV memory and scan bytes on gqa2 models (26B/12B/31B).
-// LTHN_KV_Q8=1 — the v1 lever; the -kv-cache selector graduates once the
-// mode has soak time.
-var kvQ8Enabled = os.Getenv("LTHN_KV_Q8") == "1"
+// kvQ8Enabled turns the paged KV cache q8 (#357): int8 rows + f32 group scales,
+// halving KV memory and scan bytes on gqa2 models (26B/12B/31B). DEFAULT ON where
+// the geometry qualifies — bf16-precision KV is redundant for a 4-bit model and q8
+// quality held on the 12B reasoning smoke; the deep-context scan is bandwidth-bound,
+// so half the KV bytes is a direct win. LTHN_KV_Q8=0 forces bf16 everywhere.
+var kvQ8Enabled = os.Getenv("LTHN_KV_Q8") != "0"
+
+// kvQ8Requested is the EXPLICIT opt-in (LTHN_KV_Q8=1) — unlike the default, it errors
+// when no layer has gqa2 geometry, so a deliberate request can't silently run bf16.
+var kvQ8Requested = os.Getenv("LTHN_KV_Q8") == "1"
 
 // sdpaPagedSplitRowsOverride: LTHN_SDPA_SPLIT probe lever for the #356 grain
 // sweep — 0 (unset) keeps the computed grain.

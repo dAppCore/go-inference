@@ -585,7 +585,9 @@ func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc b
 		}
 		pages[li] = cache
 	}
-	if kvQ8Enabled {
+	if kvQ8Requested {
+		// EXPLICIT request only: the default (kvQ8Enabled) silently runs bf16 on
+		// non-gqa2 geometry, but an explicit LTHN_KV_Q8=1 that can't apply is an error.
 		anyQ8 := false
 		for _, cache := range pages {
 			if cache != nil && cache.quantQ8 {
@@ -599,7 +601,7 @@ func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc b
 					cache.Close()
 				}
 			}
-			return core.NewError("native.initDevicePagedKV: LTHN_KV_Q8 set but no layer has gqa2 geometry (nHeads == 2*kvHeads, headDim <= 256)")
+			return core.NewError("native.initDevicePagedKV: LTHN_KV_Q8=1 set but no layer has gqa2 geometry (nHeads == 2*kvHeads, headDim <= 256)")
 		}
 	}
 	s.pagedKV = pages
