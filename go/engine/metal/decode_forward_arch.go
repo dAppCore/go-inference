@@ -11,7 +11,6 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"github.com/tmc/apple/kernel"
 	"github.com/tmc/apple/metal"
 )
 
@@ -373,12 +372,7 @@ func (s *archDecodeState) inputEmbBuffer(inputEmb []byte, dModel int) (metal.MTL
 	if pinner == nil {
 		return nil, false
 	}
-	buf := device.NewBufferWithBytesNoCopyLengthOptionsDeallocator(
-		unsafe.Pointer(&inputEmb[0]),
-		uint(len(inputEmb)),
-		metal.MTLResourceStorageModeShared,
-		func(kernel.Pointer, uint64) {},
-	)
+	buf := newNoCopyBuffer(unsafe.Pointer(&inputEmb[0]), uint(len(inputEmb)))
 	if buf == nil || buf.GetID() == 0 {
 		pinner.Unpin()
 		return nil, false
@@ -429,12 +423,7 @@ func (s *archDecodeState) hostPLEInputBuffer(want int) (metal.MTLBuffer, error) 
 	if !isMappedShardBytes(s.perLayerInput) {
 		pinner := pinGoBytes(s.perLayerInput)
 		if pinner != nil {
-			buf := device.NewBufferWithBytesNoCopyLengthOptionsDeallocator(
-				unsafe.Pointer(&s.perLayerInput[0]),
-				uint(want),
-				metal.MTLResourceStorageModeShared,
-				func(kernel.Pointer, uint64) {},
-			)
+			buf := newNoCopyBuffer(unsafe.Pointer(&s.perLayerInput[0]), uint(want))
 			if buf != nil && buf.GetID() != 0 {
 				s.pleInputScratch = &pinnedNoCopyBytes{bytes: s.perLayerInput, buf: buf, pinner: pinner}
 				runtime.SetFinalizer(s.pleInputScratch, (*pinnedNoCopyBytes).Close)
