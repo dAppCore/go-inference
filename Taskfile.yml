@@ -2,7 +2,7 @@
 version: '3'
 # go-inference build — the sovereign `lem` binary + its two Metal kernel libraries.
 # Since the go-mlx/go-rocm retirement, go-inference owns the whole metal build chain:
-#   external/mlx           — Apple's canonical MLX (github.com/ml-explore/mlx) pinned at v0.31.2.
+#   external/mlx           — Apple's canonical MLX (github.com/ml-explore/mlx) pinned at v0.32.0.
 #   patches/mlx/      — the 10 lthn patches applied ON TOP at build time (decode-replay,
 #                       MLX_METALLIB_PATH override, 512-dim sdpa_vector). Patch-not-vendor:
 #                       track upstream MLX + pull updates by bumping the pin + rebasing patches.
@@ -26,7 +26,7 @@ tasks:
       - task: metallib:kernels
 
   metallib:mlx:
-    desc: "Build MLX's kernels (build/dist/lib/mlx.metallib) from Apple MLX (external/mlx @ v0.31.2) + the lthn patches."
+    desc: "Build MLX's kernels (build/dist/lib/mlx.metallib) from Apple MLX (external/mlx @ v0.32.0) + the lthn patches."
     cmds:
       - mkdir -p build/dist/lib build
       - |-

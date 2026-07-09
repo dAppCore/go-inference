@@ -1,4 +1,4 @@
-From 30bfbe062eb95940e9be9a3a46920d351340aee9 Mon Sep 17 00:00:00 2001
+From 22dbec40f084ecbec27cad6a8d9e429b77ce5cde Mon Sep 17 00:00:00 2001
 From: Snider <snider@host.uk.com>
 Date: Tue, 16 Jun 2026 18:34:24 +0100
 Subject: [PATCH 08/10] =?UTF-8?q?lthn(perf):=20decode=20step-level=20captu?=
@@ -17,10 +17,10 @@ Co-Authored-By: Virgil <virgil@lethean.io>
  2 files changed, 29 insertions(+), 1 deletion(-)
 
 diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
-index 2a978bf2..3e33c650 100644
+index ffbfa0a0..8360b2cb 100644
 --- a/mlx/backend/metal/device.cpp
 +++ b/mlx/backend/metal/device.cpp
-@@ -342,6 +342,11 @@ thread_local bool lthn_pending_barrier = false;
+@@ -385,6 +385,11 @@ thread_local bool lthn_pending_barrier = false;
  // guard so re-issuing it doesn't recursively re-record.
  thread_local std::vector<LthnRecCmd> lthn_replay_program;
  thread_local bool lthn_decode_replaying = false;
@@ -32,7 +32,7 @@ index 2a978bf2..3e33c650 100644
  } // namespace
  
  bool lthn_decode_recording() {
-@@ -407,6 +412,22 @@ void lthn_decode_replay(MTL::ComputeCommandEncoder* raw) {
+@@ -450,6 +455,22 @@ void lthn_decode_replay(MTL::ComputeCommandEncoder* raw) {
    lthn_decode_replaying = false;
  }
  
@@ -55,7 +55,7 @@ index 2a978bf2..3e33c650 100644
  void CommandEncoder::set_buffer(
      const MTL::Buffer* buf,
      int idx,
-@@ -520,7 +541,12 @@ void CommandEncoder::barrier() {
+@@ -569,7 +590,12 @@ void CommandEncoder::barrier() {
  }
  
  void CommandEncoder::end_encoding() {
@@ -70,10 +70,10 @@ index 2a978bf2..3e33c650 100644
      if (!lthn_rec_cmds.empty()) {
        size_t binds = 0, byteSets = 0;
 diff --git a/mlx/backend/metal/device.h b/mlx/backend/metal/device.h
-index 6283182d..23350c84 100644
+index d0ac6b8c..fc8f181f 100644
 --- a/mlx/backend/metal/device.h
 +++ b/mlx/backend/metal/device.h
-@@ -31,6 +31,8 @@ size_t lthn_decode_finalize();
+@@ -32,6 +32,8 @@ size_t lthn_decode_finalize();
  void lthn_decode_replay(MTL::ComputeCommandEncoder* raw);
  void lthn_decode_pin_begin();
  void lthn_decode_pin_release();
@@ -81,7 +81,7 @@ index 6283182d..23350c84 100644
 +size_t lthn_decode_step_end();
  
  class Device;
- 
+ class EventImpl;
 -- 
 2.50.1 (Apple Git-155)
 
