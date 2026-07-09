@@ -1724,6 +1724,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 	stopped := false
 	lowAcceptStreak := 0
 	var reng mtpReengage
+	dl := newMTPDraftLen(draftTokens)
 	// runPlainStretch runs the bounded cooldown stretch (committing a pending
 	// lead first), measures the live plain rate, and re-arms drafting into a
 	// probe window. done=true ends the outer loop (stop / maxNew / error).
@@ -1741,7 +1742,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 	}
 	for len(result.Tokens) < maxNew && !stopped {
 		remaining := maxNew - len(result.Tokens)
-		blockSize := min(draftTokens, remaining)
+		blockSize := dl.next(remaining)
 		cycleT0 := time.Now()
 		wasProbing := reng.probing()
 		diagRound := mtpDiagForTest && result.TargetVerifyCalls < 3
@@ -1819,6 +1820,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 			break
 		}
 		if verify.AllAccepted {
+			dl.cycle(true, target.pos)
 			lowAcceptStreak = 0
 			carryLead = -1
 			if !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
@@ -1849,6 +1851,7 @@ func (pair *AssistantPair) GenerateFromSessionEach(target *ArchSession, promptID
 			continue
 		}
 
+		dl.cycle(false, target.pos)
 		replacement := verify.ReplacementToken
 		if nativeAssistantEmitToken(&result, replacement, eosID, yield) {
 			stopped = true
@@ -1963,6 +1966,7 @@ func (pair *AssistantPair) GenerateSampledFromSessionEach(target *ArchSession, p
 	draftSampler := model.NewSampler(0)
 	lowAcceptStreak := 0
 	var reng mtpReengage
+	dl := newMTPDraftLen(draftTokens)
 	defer func() { target.sampleHistory = finalHistory }()
 	// runPlainStretch is the sampled twin of the greedy lane's: the bounded
 	// cooldown stretch, rate measurement, and probe re-arm (#299).
@@ -1982,7 +1986,7 @@ func (pair *AssistantPair) GenerateSampledFromSessionEach(target *ArchSession, p
 	}
 	for len(result.Tokens) < maxNew && !stopped {
 		remaining := maxNew - len(result.Tokens)
-		blockSize := min(draftTokens, remaining)
+		blockSize := dl.next(remaining)
 		cycleT0 := time.Now()
 		wasProbing := reng.probing()
 		pickParams := target.mtpSamplePickParams(params, stopTokens, len(result.Tokens))
@@ -2044,6 +2048,7 @@ func (pair *AssistantPair) GenerateSampledFromSessionEach(target *ArchSession, p
 			break
 		}
 		if verify.AllAccepted {
+			dl.cycle(true, target.pos)
 			lowAcceptStreak = 0
 			carryLead = -1
 			if !mtpConfForce && !wasProbing && reng.needsDeepBootstrap(target.pos, len(result.Tokens), maxNew) {
@@ -2074,6 +2079,7 @@ func (pair *AssistantPair) GenerateSampledFromSessionEach(target *ArchSession, p
 			continue
 		}
 
+		dl.cycle(false, target.pos)
 		replacement := verify.ReplacementToken
 		result.Tokens = append(result.Tokens, replacement)
 		yieldStopped := yield != nil && !yield(replacement)
