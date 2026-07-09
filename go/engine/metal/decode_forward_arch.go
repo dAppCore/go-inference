@@ -7,6 +7,7 @@ package native
 import (
 	"math"
 	"runtime"
+	"sort"
 	"unsafe"
 
 	core "dappco.re/go"
@@ -770,6 +771,32 @@ func (s *archDecodeState) bufferBytes(buf metal.MTLBuffer, n int) []byte {
 	return unsafe.Slice(s.bufferPtr(buf), n)
 }
 
+// maskGatedBottomFrac zeros the bottom-frac of the dFF gated columns by |value| —
+// the #364 argmax-drop diagnostic. gated is a writable bf16 buffer view; no-op at
+// frac<=0 (so the split FFN stays byte-identical off the diagnostic).
+func maskGatedBottomFrac(gated []byte, dFF int, frac float64) {
+	if frac <= 0 || dFF <= 0 || len(gated) < dFF*2 {
+		return
+	}
+	abs := make([]float64, dFF)
+	for i := 0; i < dFF; i++ {
+		abs[i] = math.Abs(float64(bf16ToF32(gated[i*2], gated[i*2+1])))
+	}
+	sorted := append([]float64(nil), abs...)
+	sort.Float64s(sorted)
+	ti := int(frac * float64(dFF))
+	if ti >= dFF {
+		ti = dFF - 1
+	}
+	thr := sorted[ti]
+	for i := 0; i < dFF; i++ {
+		if abs[i] <= thr {
+			gated[i*2] = 0
+			gated[i*2+1] = 0
+		}
+	}
+}
+
 // pleLayer is one layer's per-layer-input gate weights: the 4-bit gate + projection and the
 // bf16 post-norm. A nil postNorm marks a layer with no gate (so a mixed model is fine).
 type pleLayer struct {
@@ -1176,6 +1203,12 @@ var (
 	// it, then wrote s.msc.down). MoE layers skip (msc unused there).
 	captureFFNGated  bool
 	capturedFFNGated [][]byte
+	// #364 argmax-drop test: 0 = off (byte-identical). Else, before the down
+	// projection, zero the bottom-ffnDropFrac of |gated| columns by magnitude — the
+	// definitive exploitable-sparsity test (does dropping dead columns flip the
+	// emitted token?). Diagnostic only; a real kernel would predict live columns
+	// from gate WITHOUT streaming up/down for the dead ones.
+	ffnDropFrac float64
 	capturedAttnHiddens  [][]byte // post-attention hidden (x + Wo·attn) per layer — isolates attention from MLP
 )
 
@@ -1396,7 +1429,21 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			if s.lb[li].dFF > 0 {
 				lff = s.lb[li].dFF
 			}
-			if err := encMLPHalfBF16(enc, s.hBuf, out, s.lb[li].mnw, s.lb[li].postFFNorm, s.msc, s.lb[li].proj, s.dModel, lff, s.eps); err != nil {
+			if err := encMLPGatedBF16At(enc, s.hBuf, s.lb[li].mnw, s.msc, s.lb[li].proj, s.dModel, lff, s.eps); err != nil {
+				endEncodingFast(enc)
+				return nil, err
+			}
+			if ffnDropFrac > 0 && s.msc.gated != nil { // #364 argmax-drop: mask dead gated columns before down
+				endEncodingFast(enc)
+				encConc = false
+				commitCommandBufferFast(cb)
+				waitUntilCompletedFast(cb)
+				maskGatedBottomFrac(s.bufferBytes(s.msc.gated, lff*bf16Size), lff, ffnDropFrac)
+				cb = commandBufferFast(queue)
+				enc = computeCommandEncoderFast(cb)
+				cbBroken = true
+			}
+			if err := encMLPDownResidBF16At(enc, s.hBuf, out, 0, s.lb[li].postFFNorm, s.msc, s.lb[li].proj, s.dModel, lff, s.eps); err != nil {
 				endEncodingFast(enc)
 				return nil, err
 			}
