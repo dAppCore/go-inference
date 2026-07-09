@@ -793,7 +793,7 @@ func encSDPAStrided(enc metal.MTLComputeCommandEncoder, q, k, v, out metal.MTLBu
 // writes. Token-identical to encSDPAStrided (sdpa_2pass_test.go), differing only in how
 // the reduction parallelises — so it keeps scaling where the single-pass kernel stalls.
 func encSDPA2PassStrided(enc metal.MTLComputeCommandEncoder, q, k, v, out, partials, sums, maxs metal.MTLBuffer, nHeads, nKVHeads, headDim, n int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32, kvByteOff uint) error {
-	blocks := sdpa2PassBlocks(n)
+	blocks := sdpa2PassBlocks(n, nKVHeads)
 	pso1, err := sdpaVector2Pass1PipelineForHeadDim(headDim, blocks)
 	if err != nil {
 		return err
@@ -824,7 +824,7 @@ func encSDPADecode(enc metal.MTLComputeCommandEncoder, sc attnScratch, q, k, v, 
 // exactly as they did on the shared single-row scratch).
 func encSDPADecodeAt(enc metal.MTLComputeCommandEncoder, sc attnScratch, q metal.MTLBuffer, qOff uint, k, v, out metal.MTLBuffer, outOff uint, nHeads, nKVHeads, headDim, n int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32, kvByteOff uint) error {
 	if n >= sdpa2PassMinKV && sc.p2Partials != nil && !sdpa2PassDisabledForTest {
-		blocks := sdpa2PassBlocks(n)
+		blocks := sdpa2PassBlocks(n, nKVHeads)
 		pso1, err := sdpaVector2Pass1PipelineForHeadDim(headDim, blocks)
 		if err != nil {
 			return err
