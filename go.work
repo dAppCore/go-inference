@@ -1,10 +1,13 @@
-go 1.26.0
+go 1.26.2
 
-// Workspace mode for development: pulls local sources from external/ submodules.
+// Workspace mode for development. The dappco.re/* dependencies resolve from
+// released module tags (see go/go.mod) — the external/ dappcore submodules were
+// removed. go-inference's own go/ and gui/ modules are local to this workspace;
+// gui pulls dappco.re/go/container from the proxy (released go/v0.11.0).
 //
 // CI: GOWORK=off uses go/go.mod tags for reproducible resolution.
 
 use (
 	./go
-	./external/go
+	./gui
 )

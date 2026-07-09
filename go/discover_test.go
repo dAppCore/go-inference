@@ -389,3 +389,54 @@ func TestDiscover_Good_RecursiveEarlyBreak(t *testing.T) {
 	}
 	checkEqual(t, 1, count)
 }
+
+// AX-11: alloc budget locked at the measured baseline. Failing
+// this test means a recent change increased the per-call alloc
+// count above the documented ceiling — surface for review BEFORE
+// the regression hits a downstream backend (every driver that
+// imports go-inference for Discover pays this per app boot).
+//
+// Baselines (Apple M3 Ultra, -benchmem, 10 junk dirs):
+//
+//	alpha.95 (per-call core.New): 254 allocs / 26616 B
+//	sync.Once cached Core:        208 allocs / 24064 B  ← current
+//
+// The ceiling is set with deliberate headroom — small drift from
+// stdlib internals across Go releases is acceptable; a fix that
+// drops the alloc count ratchets this number DOWN, not up.
+//
+// Run a fresh Discover under testing.AllocsPerRun (which forces
+// a GC + measures averaged-per-call allocs). The harness already
+// produces N=10 dirs identical to BenchmarkDiscover_NoModels_TenJunkDirs
+// so the bench output and this gate stay aligned.
+func TestDiscover_AllocBudget_NoModels_TenJunkDirs(t *testing.T) {
+	base := t.TempDir()
+	for i := range 10 {
+		dir := core.Path(base, core.Sprintf("junk-%d", i))
+		checkResultOK(t, core.MkdirAll(dir, 0o755))
+		checkResultOK(t, core.WriteFile(core.Path(dir, "README.md"), []byte("not a model"), 0o644))
+	}
+
+	// AllocsPerRun does an untimed warm-up call then averages over
+	// runs — first call's lazy-init noise is excluded. 5 runs is
+	// enough to stabilise without making the test slow.
+	avg := testing.AllocsPerRun(5, func() {
+		for range Discover(base) {
+			// drain
+		}
+	})
+
+	// Ceiling: 215 — current measured (208) plus ~3% headroom for
+	// stdlib drift. Was 254→260 pre-sync.Once-Core. Ratchet DOWN
+	// when optimisations land; never up without a documented
+	// reason in the commit that bumps this.
+	const budget = 215.0
+	if avg > budget {
+		t.Fatalf("Discover alloc budget exceeded: %.1f allocs/call (budget=%.0f)\n"+
+			"This usually means a recent change added a per-call allocation "+
+			"that propagates to every consumer (go-mlx, go-rocm, go-cuda).\n"+
+			"Profile with: go test -bench=BenchmarkDiscover_NoModels_TenJunkDirs "+
+			"-benchmem -memprofile=/tmp/disc.mem && go tool pprof -alloc_objects /tmp/disc.mem",
+			avg, budget)
+	}
+}

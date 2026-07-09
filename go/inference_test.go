@@ -3,6 +3,7 @@ package inference
 import (
 	"context"
 	"iter"
+	"maps"
 	"slices"
 	"sync" // Note: test-only
 	"testing"
@@ -30,14 +31,14 @@ type stubBackend struct {
 
 func (s *stubBackend) Name() string    { return s.name }
 func (s *stubBackend) Available() bool { return s.available }
-func (s *stubBackend) LoadModel(path string, opts ...LoadOption) (TextModel, error) {
+func (s *stubBackend) LoadModel(path string, opts ...LoadOption) core.Result {
 	if s.loadErr != nil {
-		return nil, s.loadErr
+		return core.Fail(s.loadErr)
 	}
 	if s.nilModel {
-		return nil, nil
+		return core.Ok(nil)
 	}
-	return &stubTextModel{backend: s.name, path: path}, nil
+	return core.Ok(TextModel(&stubTextModel{backend: s.name, path: path}))
 }
 
 // capturingBackend records the LoadOption values it received.
@@ -49,9 +50,9 @@ type capturingBackend struct {
 
 func (c *capturingBackend) Name() string    { return c.name }
 func (c *capturingBackend) Available() bool { return c.available }
-func (c *capturingBackend) LoadModel(path string, opts ...LoadOption) (TextModel, error) {
+func (c *capturingBackend) LoadModel(path string, opts ...LoadOption) core.Result {
 	c.capturedOpts = opts
-	return &stubTextModel{backend: c.name, path: path}, nil
+	return core.Ok(TextModel(&stubTextModel{backend: c.name, path: path}))
 }
 
 // stubTextModel is a minimal TextModel for testing LoadModel routing.
@@ -66,17 +67,17 @@ func (m *stubTextModel) Generate(_ context.Context, _ string, _ ...GenerateOptio
 func (m *stubTextModel) Chat(_ context.Context, _ []Message, _ ...GenerateOption) iter.Seq[Token] {
 	return func(yield func(Token) bool) {}
 }
-func (m *stubTextModel) Classify(_ context.Context, _ []string, _ ...GenerateOption) ([]ClassifyResult, error) {
-	return nil, nil
+func (m *stubTextModel) Classify(_ context.Context, _ []string, _ ...GenerateOption) core.Result {
+	return core.Ok([]ClassifyResult(nil))
 }
-func (m *stubTextModel) BatchGenerate(_ context.Context, _ []string, _ ...GenerateOption) ([]BatchResult, error) {
-	return nil, nil
+func (m *stubTextModel) BatchGenerate(_ context.Context, _ []string, _ ...GenerateOption) core.Result {
+	return core.Ok([]BatchResult(nil))
 }
 func (m *stubTextModel) ModelType() string        { return "stub" }
 func (m *stubTextModel) Info() ModelInfo          { return ModelInfo{} }
 func (m *stubTextModel) Metrics() GenerateMetrics { return GenerateMetrics{} }
-func (m *stubTextModel) Err() error               { return nil }
-func (m *stubTextModel) Close() error             { return nil }
+func (m *stubTextModel) Err() core.Result         { return core.Ok(nil) }
+func (m *stubTextModel) Close() core.Result       { return core.Ok(nil) }
 
 // --- Register ---
 
@@ -169,10 +170,7 @@ func TestInference_All_Good(t *testing.T) {
 	Register(&stubBackend{name: "a", available: true})
 	Register(&stubBackend{name: "b", available: true})
 
-	found := map[string]Backend{}
-	for name, b := range All() {
-		found[name] = b
-	}
+	found := maps.Collect(All())
 
 	checkLen(t, found, 2)
 	checkContains(t, found, "a")
@@ -356,7 +354,7 @@ func TestInference_LoadModel_Good_DefaultBackend(t *testing.T) {
 	sm := m.(*stubTextModel)
 	checkEqual(t, "metal", sm.backend)
 	checkEqual(t, "/path/to/model", sm.path)
-	checkNoError(t, m.Close())
+	checkResultOK(t, m.Close())
 }
 
 func TestInference_LoadModel_Good_ExplicitBackend(t *testing.T) {
@@ -370,7 +368,7 @@ func TestInference_LoadModel_Good_ExplicitBackend(t *testing.T) {
 
 	sm := m.(*stubTextModel)
 	checkEqual(t, "rocm", sm.backend)
-	checkNoError(t, m.Close())
+	checkResultOK(t, m.Close())
 }
 
 func TestInference_LoadModel_Bad_NoBackends(t *testing.T) {
@@ -439,7 +437,7 @@ func TestInference_LoadModel_Good_PassesOptionsThrough(t *testing.T) {
 
 	sm := m.(*stubTextModel)
 	checkEqual(t, "/models/gemma3-1b", sm.path)
-	checkNoError(t, m.Close())
+	checkResultOK(t, m.Close())
 }
 
 func TestInference_LoadModel_Ugly_DefaultBackendLoadError(t *testing.T) {
@@ -724,7 +722,7 @@ func TestInference_LoadModel_Good_ExplicitBackendForwardsOptions(t *testing.T) {
 	checkEqual(t, "cap", cfg.Backend)
 	checkEqual(t, 4096, cfg.ContextLen)
 	checkEqual(t, 16, cfg.GPULayers)
-	checkNoError(t, m.Close())
+	checkResultOK(t, m.Close())
 }
 
 func TestInference_LoadModel_Good_DefaultBackendForwardsOptions(t *testing.T) {
@@ -747,7 +745,7 @@ func TestInference_LoadModel_Good_DefaultBackendForwardsOptions(t *testing.T) {
 	checkEqual(t, 8192, cfg.ContextLen)
 	checkEqual(t, -1, cfg.GPULayers)
 	checkEqual(t, 2, cfg.ParallelSlots)
-	checkNoError(t, m.Close())
+	checkResultOK(t, m.Close())
 }
 
 // --- Default preference order does not depend on registration order ---
@@ -782,7 +780,7 @@ func TestInference_LoadModel_Ugly_EmptyPath(t *testing.T) {
 	m := resultTextModel(t, LoadModel(""))
 	sm := m.(*stubTextModel)
 	checkEqual(t, "", sm.path)
-	checkNoError(t, m.Close())
+	checkResultOK(t, m.Close())
 }
 
 // --- Get after register and overwrite ---
@@ -958,7 +956,7 @@ func TestInference_LoadModel_Good(t *testing.T) {
 	model := resultTextModel(t, LoadModel("/models/gemma3"))
 	core.AssertNotNil(t, model)
 	core.AssertEqual(t, "stub", model.ModelType())
-	core.AssertNoError(t, model.Close())
+	checkResultOK(t, model.Close())
 }
 
 func TestInference_LoadModel_Bad(t *testing.T) {

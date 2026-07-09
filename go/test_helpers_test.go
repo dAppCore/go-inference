@@ -269,7 +269,7 @@ func toFloat64(v any) (float64, bool) {
 	}
 	switch rv.Kind() {
 	case reflect.Float32, reflect.Float64:
-		return rv.Convert(reflect.TypeOf(float64(0))).Float(), true
+		return rv.Convert(reflect.TypeFor[float64]()).Float(), true
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		return float64(rv.Int()), true
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:

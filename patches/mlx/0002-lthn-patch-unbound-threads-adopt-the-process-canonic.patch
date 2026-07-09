@@ -1,0 +1,69 @@
+From d02cc10bb3f37fb25dbd77603dc4738b2ca62a81 Mon Sep 17 00:00:00 2001
+From: Snider <snider@host.uk.com>
+Date: Thu, 11 Jun 2026 11:33:33 +0100
+Subject: [PATCH 02/10] lthn patch: unbound threads adopt the process-canonical
+ default stream
+
+Upstream 0.31.2 mints a brand-new stream per unbound thread asking for
+its default. Go goroutines migrate OS threads, so per-thread minting
+scatters one logical op stream across phantom streams no thread holds
+encoders for. Unbound threads now adopt the first-created canonical
+default per device, restoring pre-0.31.2 stream-identity semantics;
+threads that explicitly set_default_stream keep their choice.
+---
+ mlx/stream.cpp | 25 ++++++++++++++++++++++++-
+ 1 file changed, 24 insertions(+), 1 deletion(-)
+
+diff --git a/mlx/stream.cpp b/mlx/stream.cpp
+index 383cabc3..aacc91c1 100644
+--- a/mlx/stream.cpp
++++ b/mlx/stream.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include <array>
+ #include <map>
++#include <mutex>
+ #include <optional>
+ #include <shared_mutex>
+ 
+@@ -37,6 +38,28 @@ auto& thread_local_streams() {
+ 
+ } // namespace
+ 
++namespace {
++
++// lthn patch: process-canonical default streams. Upstream mints a brand-new
++// stream for every thread that asks for its default while unbound — correct
++// for hosts with stable threads, but Go goroutines migrate OS threads, so a
++// per-thread mint scatters one logical op stream across phantom streams.
++// Unbound threads adopt the first-created (canonical) default instead,
++// restoring pre-0.31.2 stream-identity semantics. Threads that explicitly
++// set_default_stream keep their choice.
++Stream canonical_default_stream(Device d) {
++  static std::mutex mtx;
++  static std::array<std::optional<Stream>, 2> canonical;
++  std::lock_guard<std::mutex> lock(mtx);
++  auto& s = canonical.at(static_cast<size_t>(d.type));
++  if (!s.has_value()) {
++    s = new_stream(d.type);
++  }
++  return s.value();
++}
++
++} // namespace
++
+ Stream default_stream(Device d) {
+   if (!gpu::is_available() && d.type == Device::gpu) {
+     throw std::invalid_argument(
+@@ -44,7 +67,7 @@ Stream default_stream(Device d) {
+   }
+   auto& s = default_stream_storage(d);
+   if (!s.has_value()) {
+-    s = new_stream(d.type);
++    s = canonical_default_stream(d);
+   }
+   return s.value();
+ }
+-- 
+2.50.1 (Apple Git-155)
+

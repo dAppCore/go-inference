@@ -5,7 +5,9 @@ description: Token, Message, config structs, functional options, and all support
 
 # Types
 
-All types are defined in the `inference` package (`dappco.re/go/inference`). There are no sub-packages.
+The types below are defined in the root `inference` package (`dappco.re/go/inference`) — the shared contract. The repository has many other packages (`engine/metal`, `engine/hip`, `serving/`, `model/`, `kv/`, `decode/`, `train/`, `eval/`, `model/state`, `cmd/lem`), but the contract types every engine and consumer share live at the root.
+
+Fallible operations in this package return `core.Result` (from `dappco.re/go`), not `(T, error)` — see [Interfaces](interfaces.md).
 
 ## Core value types
 
@@ -24,12 +26,13 @@ The atomic unit of streaming output. `ID` is the vocabulary index; `Text` is the
 
 ```go
 type Message struct {
-    Role    string `json:"role"`    // "system", "user", "assistant"
-    Content string `json:"content"`
+    Role    string   `json:"role"`             // "system", "user", "assistant"
+    Content string   `json:"content"`
+    Images  [][]byte `json:"images,omitempty"` // encoded image bytes (PNG/JPEG) for vision turns
 }
 ```
 
-A single turn in a multi-turn conversation. JSON tags are present for serialisation through MCP tool payloads and API responses. Pass a slice of these to `TextModel.Chat()`.
+A single turn in a multi-turn conversation. JSON tags are present for serialisation through MCP tool payloads and API responses. Pass a slice of these to `TextModel.Chat()`. `Images` is populated by the compat handlers from multimodal content parts; only engines implementing `VisionModel` serve image turns.
 
 ---
 
@@ -74,6 +77,7 @@ type GenerateMetrics struct {
     DecodeTokensPerSec  float64       // GeneratedTokens / DecodeDuration
     PeakMemoryBytes     uint64        // Peak GPU memory during this operation
     ActiveMemoryBytes   uint64        // Active GPU memory after operation
+    ThinkingBudgetForced bool         // ThinkingBudget forced the thought-channel close
 }
 ```
 
@@ -166,13 +170,28 @@ Generation is configured via functional options applied to `GenerateConfig`.
 
 ```go
 type GenerateConfig struct {
-    MaxTokens     int
-    Temperature   float32
-    TopK          int
-    TopP          float32
-    StopTokens    []int32
-    RepeatPenalty float32
-    ReturnLogits  bool
+    MaxTokens      int
+    Temperature    float32
+    TopK           int
+    TopP           float32
+    MinP           float32
+    Seed           uint64
+    SeedSet        bool
+    StopTokens     []int32
+    SuppressTokens []int32
+    MinTokensBeforeStop int
+    RepeatPenalty  float32
+    ReturnLogits   bool
+    EnableThinking *bool          // nil = model default; &true = on; &false = off
+    ThinkingBudget int            // cap tokens in the thought channel; 0 = unlimited
+    Thinking       ThinkingConfig // resolved thought-channel processing policy
+    // Engine-neutral trace, cache-hygiene, and probe knobs — an engine
+    // without the facility ignores them:
+    TraceTokenPhases             bool     // per-token coarse phase timing to the trace log
+    TraceTokenText               bool     // include decoded token text in the trace (debug)
+    GenerationClearCache         bool     // drop device caches between generations
+    GenerationClearCacheInterval int      // clear every N tokens; 0 = never
+    ProbeSink                    probe.Sink // research-telemetry sink; nil = probing off
 }
 ```
 
@@ -180,9 +199,9 @@ Defaults (from `DefaultGenerateConfig()`):
 
 | Field | Default | Notes |
 |-------|---------|-------|
-| `MaxTokens` | 256 | Maximum tokens to generate |
 | `Temperature` | 0.0 | Greedy decoding |
 | `RepeatPenalty` | 1.0 | No repetition penalty |
+| `MaxTokens` | 0 (**not defaulted**) | Absent, the engine resolves it to the model's context at generation time — a fixed default would truncate every generation at a guess |
 | All others | zero value | Disabled |
 
 ### GenerateOption functions
@@ -193,9 +212,16 @@ Defaults (from `DefaultGenerateConfig()`):
 | `WithTemperature` | `WithTemperature(t float32) GenerateOption` | Sampling temperature (0 = greedy) |
 | `WithTopK` | `WithTopK(k int) GenerateOption` | Top-k sampling (0 = disabled) |
 | `WithTopP` | `WithTopP(p float32) GenerateOption` | Nucleus sampling threshold (0 = disabled) |
+| `WithMinP` | `WithMinP(p float32) GenerateOption` | Minimum-probability sampling relative to the top token |
+| `WithSeed` | `WithSeed(seed uint64) GenerateOption` | Reproducible stochastic sampling for this request |
 | `WithStopTokens` | `WithStopTokens(ids ...int32) GenerateOption` | Token IDs that stop generation |
+| `WithSuppressTokens` | `WithSuppressTokens(ids ...int32) GenerateOption` | Token IDs masked out of the distribution |
+| `WithMinTokensBeforeStop` | `WithMinTokensBeforeStop(n int) GenerateOption` | Suppress stop tokens until n tokens emitted |
 | `WithRepeatPenalty` | `WithRepeatPenalty(p float32) GenerateOption` | Repetition penalty (1.0 = none) |
 | `WithLogits` | `WithLogits() GenerateOption` | Return raw logits in `ClassifyResult` |
+| `WithEnableThinking` | `WithEnableThinking(v *bool) GenerateOption` | Reasoning toggle for thinking-capable models |
+| `WithThinkingBudget` | `WithThinkingBudget(tokens int) GenerateOption` | Cap thought-channel tokens; 0 = unlimited |
+| `WithThinking` | `WithThinking(cfg ThinkingConfig) GenerateOption` | Resolved thought-channel processing policy |
 
 ### ApplyGenerateOpts
 
@@ -251,12 +277,33 @@ Builds a `LoadConfig` from options. Default `GPULayers` is `-1`. Called by `Load
 
 ```go
 type DiscoveredModel struct {
-    Path       string // Absolute path to the model directory
-    ModelType  string // Architecture from config.json (e.g. "gemma3", "qwen3", "llama")
-    QuantBits  int    // Quantisation bits (0 if unquantised)
-    QuantGroup int    // Quantisation group size
-    NumFiles   int    // Number of safetensors weight files
+    Path        string // Absolute path to the model directory or GGUF file
+    ModelType   string // Architecture from config.json / GGUF metadata (e.g. "gemma3", "qwen3", "llama")
+    QuantBits   int    // Quantisation bits (0 if unquantised or unknown)
+    QuantGroup  int    // Quantisation group size
+    QuantType   string // Quantisation type, when known (e.g. q4_k_m, q8_0)
+    QuantFamily string // Quantisation family, when known (e.g. q4, q8)
+    NumFiles    int    // Number of weight files
+    Format      string // "safetensors" or "gguf" when known
 }
 ```
 
-Returned by `Discover()`. `Path` is always absolute. `ModelType` is read from `config.json`'s `model_type` field.
+Returned by `Discover()`. `Path` is always absolute. `ModelType` is read from `config.json`'s `model_type` field (or GGUF metadata). `Discover` walks the tree **recursively**, so a nested models directory yields every model beneath it.
+
+---
+
+## Device information
+
+### DeviceInfo
+
+```go
+type DeviceInfo struct {
+    Name                         string // e.g. "Apple M3 Ultra"
+    Architecture                 string // e.g. "applegpu_g15d"
+    MemorySize                   uint64 // total device memory in bytes
+    MaxBufferLength              uint64 // largest single allocation the device allows
+    MaxRecommendedWorkingSetSize uint64 // device-recommended working-set ceiling
+}
+```
+
+Describes the accelerator a backend runs on — engine-neutral (Metal reports the Apple GPU; hip/cuda report theirs). Zero-valued fields mean the backend could not determine them. Retrieved via `inference.BackendDeviceInfo(name)`, which returns `false` when the backend is unregistered or does not implement `DeviceInfoProvider`.

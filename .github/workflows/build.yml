@@ -1,0 +1,122 @@
+# Build the sovereign `lem` binary for every target and ship the zips.
+# One binary named `lem` per platform (the GPU backend — metal/rocm/cuda — loads
+# its kernel sidecar at runtime); targets are separated by build folder, not by
+# binary name. Zips flow to a rolling `dev` prerelease.
+name: Build
+
+on:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: lem · ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest,     goos: darwin,  goarch: arm64, metal: true }
+          - { os: ubuntu-latest,    goos: linux,   goarch: amd64 }
+          - { os: ubuntu-24.04-arm, goos: linux,   goarch: arm64 }
+          - { os: windows-latest,   goos: windows, goarch: amd64 }
+    env:
+      CGO_ENABLED: "1"
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive          # metal needs external/mlx
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Install Task
+        run: go install github.com/go-task/task/v3/cmd/task@latest
+
+      - name: Build lem
+        shell: bash
+        env:
+          METAL: ${{ matrix.metal }}
+        run: |
+          set -e
+          if [ "$METAL" = "true" ]; then
+            task metallib && task build:embed     # self-contained metal lem
+          else
+            task build:native                     # plain lem (GPU sidecar loads at runtime)
+          fi
+
+      - name: Assemble build folder (build/dist/<target>/lem)
+        shell: bash
+        env:
+          TARGET: ${{ matrix.goos }}-${{ matrix.goarch }}
+        run: |
+          set -e
+          mkdir -p "build/dist/$TARGET"
+          cp bin/lem* "build/dist/$TARGET/"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lem-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: build/dist/${{ matrix.goos }}-${{ matrix.goarch }}/
+
+  release:
+    name: Zip + rolling dev prerelease
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist        # one subfolder per target (lem-<goos>-<goarch>/lem)
+
+      - name: Zip each target
+        run: |
+          set -e
+          cd dist
+          for d in */; do (cd "$d" && zip -r "../${d%/}.zip" .); done
+          ls -la *.zip
+
+      - name: Publish rolling dev prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev
+          name: dev (rolling)
+          prerelease: true
+          files: dist/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  sdk:
+    name: SDK clients (OpenAPI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-java@v4       # openapi-generator runs on the JVM
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install generators
+        run: |
+          npm install -g @openapitools/openapi-generator-cli@7.22.0
+          go install github.com/go-task/task/v3/cmd/task@latest
+      - name: Generate SDKs (lem spec -> OpenAPI 3.1 -> typed clients)
+        run: task sdk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lem-sdks
+          path: build/sdk/
+          if-no-files-found: warn

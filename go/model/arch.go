@@ -1,0 +1,170 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+// arch.go is the backend-agnostic decode-architecture declaration — the "what"
+// (transformer dims + per-layer cache topology + the layer derivation), separated from
+// any one backend's imperative Forward (the "how"). It is architecture-neutral: every
+// arch describes itself as an Arch over the backend contract, and every executor
+// (pkg/native, pkg/metal, future go-rocm) consumes it.
+//
+// It lives at the pkg/model ROOT, next to Backend / TokenModel / Sampler — NOT in a
+// model subpackage. A model-named home is exactly what makes one arch import another
+// just to get a general type; keeping the neutral contract neutral is what stops that recurring.
+package model
+
+// AttentionType is a layer's attention span.
+type AttentionType uint8
+
+const (
+	GlobalAttention  AttentionType = iota // full_attention — attends the whole context
+	SlidingAttention                      // sliding_attention — windowed
+)
+
+// LayerSpec declares one decode layer's structure, backend-agnostic.
+type LayerSpec struct {
+	Attention   AttentionType
+	KVShareFrom int  // index of the layer whose KV cache this layer reads (== own index if it owns its cache)
+	CacheIndex  int  // cache slot for an owner; -1 if this layer shares another's cache
+	MoE         bool // sparse-expert MLP instead of dense (derivation: a later slice)
+	// HeadDim / KVHeads are this layer's RESOLVED attention geometry. Some archs use a
+	// LARGER head_dim on full_attention layers than on sliding (e.g. sliding head_dim
+	// 256, full global_head_dim 512), and may carry a different KV head count on full
+	// layers (num_global_key_value_heads). Filled by Config.Arch
+	// per the layer's attention type; a backend reads these per layer rather than the
+	// single Arch.HeadDim. == the sliding/default values when the config draws no
+	// distinction (synthetic + uniform packs).
+	HeadDim int
+	KVHeads int
+}
+
+// OwnsCache reports whether this layer holds its own KV cache (vs sharing).
+func (l LayerSpec) OwnsCache() bool { return l.CacheIndex >= 0 }
+
+// TypeName is the layer's attention type as configs spell it — the inverse of the
+// DeriveLayers mapping, so KV-stream matching (e.g. drafter layer → target stream)
+// speaks the config vocabulary.
+func (l LayerSpec) TypeName() string {
+	if l.Attention == SlidingAttention {
+		return "sliding_attention"
+	}
+	return "full_attention"
+}
+
+// HasMoE reports whether any layer is a MoE (sparse-expert) layer — an arch may apply MoE
+// uniformly, but the check is per-layer so a backend can route MoE archs off fast paths
+// that can't host the router (the ICB replay).
+func (a Arch) HasMoE() bool {
+	for _, l := range a.Layer {
+		if l.MoE {
+			return true
+		}
+	}
+	return false
+}
+
+// MoEGating is the router's expert-scoring/combination method — the sparse-expert
+// analog of a dense FFN's fixed shape. INFERRED FROM THE MODEL: an arch's config
+// declares it and the engine applies it, never assumes (the same DECLARES discipline
+// as Arch.AttnScale / EmbedScale). Today the metal router ships softmax top-k; sigmoid
+// gating, top-k weight renormalisation (norm_topk_prob), routed-scaling, and always-on
+// shared experts — the deepseek / qwen3 / composed variants — each earn a value plus a
+// router branch as they land (model/composed/moe.go already implements softmax +
+// norm-topk + shared expert on the reference path).
+type MoEGating string
+
+const (
+	// MoEGatingSoftmax: softmax over the top-k selected experts' scores (optionally
+	// scaled per-expert). gemma4's MoE and the metal router's shipping path, and the
+	// default for any MoE arch whose config leaves the gating unset.
+	MoEGatingSoftmax MoEGating = "softmax"
+)
+
+// resolveMoEGating defaults an unset gating to MoEGatingSoftmax — the only router
+// variant the metal engine ships today, and gemma4's method.
+func resolveMoEGating(g MoEGating) MoEGating {
+	if g == "" {
+		return MoEGatingSoftmax
+	}
+	return g
+}
+
+// Arch is the full backend-agnostic decode declaration: the neutral transformer dims
+// + the arch-specific extras + the derived per-layer specs. Built from a model config;
+// consumed by a backend executor. (Dims are plain fields the loader fills from config;
+// the per-layer derivation is DeriveLayers.)
+type Arch struct {
+	Hidden, Heads, KVHeads, HeadDim, FF, Vocab int       // HeadDim / KVHeads are the sliding/default geometry; full_attention layers use GlobalHeadDim / GlobalKVHeads
+	GlobalHeadDim, GlobalKVHeads               int       // full_attention head_dim / kv-head count (== HeadDim / KVHeads when the config draws no distinction)
+	Experts, TopK, ExpertFF                    int       // MoE dims (Experts == 0 → dense model); ExpertFF is the experts' intermediate size
+	MoEGating                                  MoEGating // router expert-scoring method the model DECLARES (empty → softmax); see MoEGating
+	FuseExpertGateUp                           bool      // model opts its MoE experts into the fused gate+up path — a separate-gate/up checkpoint gets ExpGateUp synthesised at load (~34% MoE speed, trades the weights' mmap zero-copy for a heap copy)
+	Eps                                        float32
+	AttnScale                                  float32   // attention SDPA scale the model DECLARES (the engine applies it, never assumes): e.g. 1.0 when a QK-norm IS the scaling, else 1/√headDim
+	EmbedScale                                 float32   // token-embedding multiplier the model DECLARES (gemma-family √hidden; llama-family 1.0); 0 = undeclared → backends fall back to √hidden
+	RopeBase, RopeScale                        float32   // RopeBase = global-attention RoPE theta
+	RopeLocalBase                              float32   // sliding-attention RoPE theta (an arch may use a smaller local theta)
+	RotaryDim, RotaryDimLocal                  int       // rotated dims/head (partial rotary, e.g. full_attention=0.25·GlobalHeadDim); global / sliding
+	RopeFreqs                                  []float32 // explicit per-dim inverse frequencies (YaRN long-context remap); len RotaryDim/2; nil ⇒ derive uniformly from RopeBase
+	SoftCap                                    float32   // final logit soft-cap (0 = none)
+	SlidingWindow                              int
+	PerLayerInputVocab, PerLayerInputHidden    int  // per-layer-input aux embedding (0 = absent)
+	AttentionKEqV                              bool // K == V (shared projection)
+	ValueNorm                                  bool // an arch may apply a no-scale per-head RMSNorm to V (metal's RMSNormNoScale); most don't
+	Layer                                      []LayerSpec
+}
+
+// MaxHeadDim is the larger of the sliding and full head_dim — the head_dim a backend
+// sizes per-head buffers (Q/K/V scratch, the KV cache row stride) to so both layer
+// types fit. == HeadDim when the config draws no sliding/full distinction.
+func (a Arch) MaxHeadDim() int {
+	if a.GlobalHeadDim > a.HeadDim {
+		return a.GlobalHeadDim
+	}
+	return a.HeadDim
+}
+
+// MaxKVHeads is the larger of the sliding and full KV-head count — the count a backend
+// sizes KV-cache rows to. == KVHeads when the config draws no distinction.
+func (a Arch) MaxKVHeads() int {
+	if a.GlobalKVHeads > a.KVHeads {
+		return a.GlobalKVHeads
+	}
+	return a.KVHeads
+}
+
+// DeriveLayers resolves the per-layer attention type and KV-cache-sharing map from a
+// config — a faithful backend-agnostic lift of the metal model package's KV-cache-layout
+// logic plus the layer_types rule. layerTypes is the config's
+// per-layer "sliding_attention"/"full_attention"; numKVShared is
+// num_kv_shared_layers. Rule: the first (n − numKVShared) layers OWN their cache;
+// each later layer SHARES the KV cache of the most recent owner of the same
+// attention type (and is itself promoted to owner if no such owner exists yet — the
+// toy-config edge). Parity-gated against the metal impl (no model load needed).
+func DeriveLayers(layerTypes []string, numKVShared int) []LayerSpec {
+	n := len(layerTypes)
+	specs := make([]LayerSpec, n)
+	firstShared := min(max(n-numKVShared, 0), n)
+	latestByType := map[AttentionType]int{}
+	nextCache := 0
+	for i := range n {
+		at := GlobalAttention
+		if layerTypes[i] == "sliding_attention" {
+			at = SlidingAttention
+		}
+		specs[i] = LayerSpec{Attention: at, KVShareFrom: i, CacheIndex: -1}
+		owns := i < firstShared
+		if !owns {
+			if prev, ok := latestByType[at]; ok {
+				specs[i].KVShareFrom = prev
+			} else {
+				owns = true // first layer of this type lands in the shared region → promote to owner
+			}
+		}
+		if owns {
+			specs[i].KVShareFrom = i
+			latestByType[at] = i
+			specs[i].CacheIndex = nextCache
+			nextCache++
+		}
+	}
+	return specs
+}

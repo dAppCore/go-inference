@@ -1,253 +1,185 @@
 # Development Guide — go-inference
 
+go-inference is **the** sovereign inference repo for the Core Go ecosystem. It
+carries the GPU engines, the OpenAI/Anthropic/Ollama-compatible server, the
+training loops, the `lem` binary, and the LEM desktop GUI. go-mlx and go-rocm are
+retired — everything lives here now.
+
+For the `lem` verbs see [cmd-lem.md](cmd-lem.md); for the Metal build chain see
+[build.md](build.md); for the desktop app see [gui.md](gui.md).
+
 ## Prerequisites
 
-- Go 1.25 or later (uses `iter.Seq` from Go 1.23 and range-over-function from 1.22)
-- No CGO, no build tags, no external tools required
-- The package compiles on macOS, Linux, and Windows without modification
+- **Go 1.26** (the modules declare `go 1.26.2`).
+- Plain `go test ./...` and `go vet ./...` compile and run **without a GPU** —
+  the engines are build-tagged (`metal_runtime` for Apple, cgo + linux/amd64 for
+  HIP), so CI and routine dev do not need Metal or ROCm.
+- Building the **Apple engine** binary needs macOS 26+, the Xcode command-line
+  tools, CMake, and Task — see [build.md](build.md).
+- The **HIP engine** (`engine/hip`) carries cgo and is built from this same repo
+  on the AMD/linux box.
 
-## Commands
+## Module layout
 
-```bash
-# Run all tests
-go test ./...
+The repository holds two Go modules plus vendored externals:
 
-# Run a single test by name
-go test -run TestDefault_Good_Metal ./...
+| Path | Module | What |
+|------|--------|------|
+| `go/` | `dappco.re/go/inference` | the whole inference stack (engines, serving, training, model, kv, decode, the `lem` binary) |
+| `gui/` | `dappco.re/go/inference/gui` | the LEM desktop app (a side module — see [gui.md](gui.md)) |
+| `external/` | (submodules) | core dependencies pulled locally for workspace builds |
+| `patches/mlx/` | — | the lthn patch set applied to Apple MLX at build time |
 
-# Vet for common mistakes
-go vet ./...
-
-# View test coverage
-go test -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
+```
+go-inference/
+├── go/                      # module dappco.re/go/inference
+│   ├── cmd/lem/             # the `lem` binary (thin verb wiring)
+│   ├── engine/
+│   │   ├── metal/           # Apple GPU engine — NO cgo (tmc/apple bindings)
+│   │   │   └── kernels/     # the fused *.metal sources
+│   │   └── hip/             # AMD GPU engine — cgo, linux/amd64
+│   ├── serving/             # OpenAI/Anthropic/Ollama HTTP + scheduler, sessions
+│   ├── model/               # architectures, gguf, pack, quant, safetensors, …
+│   ├── decode/              # generate, tokenizer, sampler, parser
+│   ├── kv/                  # KV cache + portable snapshots
+│   ├── train/               # LoRA SFT, self-distillation, tune, grpo
+│   ├── eval/                # datapipe (Influx/DuckDB), probe, score, bench
+│   ├── agent/               # the scoring agent loop
+│   └── inference.go, …      # the TextModel/Backend/Token/Message contracts
+├── gui/                     # module dappco.re/go/inference/gui (Wails v3)
+├── external/                # core + third-party submodules (workspace)
+├── patches/mlx/             # the 10 lthn MLX patches
+├── Taskfile.yml             # metallib + build + build:embed
+├── go.work                  # workspace: go/, gui/, external/*
+└── docs/
 ```
 
-There is no Taskfile in this package; it is small enough that direct `go` invocations suffice. The parent workspace (`/Users/snider/Code/host-uk/core`) uses Task for cross-repo operations.
+## Go workspace
 
-## Go Workspace
-
-This package is part of the `host-uk/core` Go workspace. After adding or changing module dependencies:
+Development uses **workspace mode**. `go.work` at the repo root `use`s `./go`,
+`./gui`, and every `external/<dep>/go` submodule, so local edits to the core
+dependencies are picked up without a `replace` directive. After adding or
+changing module dependencies:
 
 ```bash
 go work sync
 ```
 
-The workspace root is `/Users/snider/Code/host-uk/core`. The workspace file (`go.work`) includes this module alongside `cmd/core-gui`, `cmd/bugseti`, and others.
+The `external/` submodules track the **`dev`** branch of the `github.com/dappcore`
+repos (`go`, `go-io`, `api`, `cli`, `go-container`, `mcp`, `go-scm`, …), plus
+Apple's `ml-explore/mlx` for the Metal build. Initialise them on a fresh clone
+with `git submodule update --init --recursive`.
 
-## Module Path
+**CI** runs with `GOWORK=off`, which falls back to `go/go.mod`'s tagged
+`require` versions for reproducible resolution.
 
-```
-dappco.re/go/inference
-```
+## Remotes
 
-Import it in consumers:
+Per house policy: **forge.lthn.sh** (homelab) is canonical, **forge.lthn.ai**
+(de1) is the public mirror, and GitHub (`github.com/dappcore`) is downstream.
+Note the local checkout's `origin` currently points at the mirror
+(`ssh://git@forge.lthn.ai:2223/core/go-inference.git`), with a separate
+`homelab` remote at `https://forge.lthn.sh/core/go-inference.git` — push to the
+canonical remote, non-force.
 
-```go
-import "dappco.re/go/inference"
-```
+## Dependencies
 
-Remote: `ssh://git@forge.lthn.ai:2223/core/go-inference.git`
+go-inference is no longer a stdlib-only contract package. `go/go.mod` consumes
+the core primitives (`dappco.re/go`, `dappco.re/go/api`, `dappco.re/go/cli`,
+`dappco.re/go/log`, `dappco.re/go/process`, and the `external/` family via the
+workspace) plus third-party libraries where warranted (gin, go-duckdb, parquet,
+the MCP Go SDK). The GUI additionally depends on Wails v3.
 
-## Repository Layout
+House rules for production code (enforced across the Core Go ecosystem):
 
-```
-go-inference/
-├── inference.go        # TextModel, Backend, Token, Message, registry, LoadModel
-├── options.go          # GenerateConfig, LoadConfig, all With* options
-├── discover.go         # Discover() and DiscoveredModel
-├── inference_test.go   # Tests for registry, LoadModel, all types
-├── options_test.go     # Tests for GenerateConfig, LoadConfig, all options
-├── discover_test.go    # Tests for Discover()
-├── go.mod
-├── go.sum
-├── CLAUDE.md           # Agent instructions
-├── README.md
-└── docs/
-    ├── architecture.md
-    ├── development.md
-    └── history.md
-```
+- Errors via `core.E(...)`, never `fmt.Errorf`.
+- Results are `core.Result` (`core.Ok` / `core.Fail`), not naked `(value, error)`
+  pairs, on library boundaries.
+- I/O through the core wrappers (`c.Fs()`, `c.Process()`, `coreio.Local`), not
+  raw `os` / `os/exec`.
+- Banned raw stdlib imports where a core wrapper exists: `os`, `os/exec`, `fmt`,
+  `log`, `errors`, `strings`, `path/filepath`, `encoding/json`. (The
+  `embed_metallib.go` build helper is a deliberate exception — it runs in
+  `init()` before core is set up and uses raw `os`/`io`/`compress/gzip`.)
 
-## Test Patterns
+## Commands
 
-Tests follow the `_Good`, `_Bad`, `_Ugly` suffix convention used across the Core Go ecosystem:
+```bash
+go test ./...                              # all tests (no GPU needed)
+go test -run TestBackend_Good_Metal ./...  # a single test by name
+go vet ./...
+golangci-lint run ./...                    # lint
 
-- `_Good` — happy path; confirms the documented behaviour works correctly
-- `_Bad` — expected error conditions; confirms errors are returned with useful messages
-- `_Ugly` — edge cases, panics, surprising-but-valid behaviour (e.g. last-option-wins, registry overwrites)
-
-```go
-func TestDefault_Good_Metal(t *testing.T) { ... }
-func TestDefault_Bad_NoBackends(t *testing.T) { ... }
-func TestDefault_Ugly_SkipsUnavailablePreferred(t *testing.T) { ... }
-```
-
-### Backend Registry Isolation
-
-Tests that touch the global backend registry call `resetBackends(t)` first. This helper clears the map and is defined in `inference_test.go`:
-
-```go
-func resetBackends(t *testing.T) {
-    t.Helper()
-    backendsMu.Lock()
-    defer backendsMu.Unlock()
-    backends = map[string]Backend{}
-}
+# coverage
+go test -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out
 ```
 
-Because `resetBackends` is in the `inference` package (not `inference_test`), it has direct access to the unexported `backends` map. Tests must not rely on registration order across test functions; each test that uses the registry must call `resetBackends` at the top.
+For the GPU binary and kernel libraries, use Task — see [build.md](build.md):
 
-### Stub Implementations
-
-`inference_test.go` provides `stubBackend` and `stubTextModel` — minimal implementations of `Backend` and `TextModel` for use in registry and routing tests. These are in the `inference` package itself (not a separate `_test` package) to allow access to unexported fields.
-
-When writing new tests, use the existing stubs rather than creating new ones unless you need behaviour the stubs do not support.
-
-### Table-Driven Tests
-
-Prefer table-driven tests for options and configuration variants. The existing `TestApplyGenerateOpts_Good`, `TestWithTemperature_Good`, and `TestDefault_Good_PriorityOrder` tests demonstrate the pattern:
-
-```go
-tests := []struct {
-    name string
-    val  float32
-    want float32
-}{
-    {"greedy", 0.0, 0.0},
-    {"low", 0.3, 0.3},
-}
-for _, tt := range tests {
-    t.Run(tt.name, func(t *testing.T) {
-        cfg := ApplyGenerateOpts([]GenerateOption{WithTemperature(tt.val)})
-        assert.InDelta(t, tt.want, cfg.Temperature, 0.0001)
-    })
-}
+```bash
+task metallib      # build both Metal kernel libraries
+task build         # -> bin/lem (external metallibs)
+task build:embed   # -> bin/lem (self-contained, both metallibs baked in)
 ```
 
-### Assertions
+## Test patterns
 
-Use `testify/assert` and `testify/require`:
+Tests follow the ecosystem conventions:
 
-- `require` for preconditions where failure makes subsequent assertions meaningless (e.g. `require.NoError(t, err)` before using the returned value)
-- `assert` for all other checks
-- `assert.InDelta` for float32/float64 comparisons (never `==`)
+- **One test per symbol per variant**, with the `_Good` / `_Bad` / `_Ugly`
+  suffix convention:
+  - `_Good` — happy path; the documented behaviour works.
+  - `_Bad` — expected error conditions return useful errors.
+  - `_Ugly` — edge cases and surprising-but-valid behaviour (last-option-wins,
+    registry overwrites, …).
+- File-per-concern testing: a `{file}.go` ships `{file}_test.go`, plus
+  `{file}_example_test.go` (usage examples that double as AX documentation) and
+  `{file}_bench_test.go` where a bench is meaningful.
+- `testify/assert` for general checks, `testify/require` for preconditions where
+  a failure makes later assertions meaningless. Use `assert.InDelta` for float
+  comparisons, never `==`.
+- Table-driven tests for option/config variants.
 
-## Coding Standards
+Tests that touch the global backend registry reset it first so registration
+order across test functions does not leak.
 
-### Language
+## Coding standards
 
-UK English throughout: colour, organisation, centre, licence (noun), serialise, recognise. American spellings are not accepted in comments, documentation, or error messages.
+- **UK English throughout**: colour, organise, centre, licence (noun),
+  serialise, recognise. American spellings are not accepted in comments,
+  documentation, or error messages.
+- **Formatting**: standard `gofmt`. Run `go fmt ./...` before committing.
+- **Licence header**: every `.go` file carries the EUPL-1.2 SPDX line, in UK
+  spelling:
 
-### Formatting
+  ```go
+  // SPDX-Licence-Identifier: EUPL-1.2
+  ```
 
-Standard `gofmt` formatting. No custom style rules. Run `gofmt -w .` or `go fmt ./...` before committing.
+- **Commits**: conventional commits (`type(scope): description`), UK English,
+  wrapped at 72 characters. Always include the trailer:
 
-### Error Messages
+  ```
+  Co-Authored-By: Virgil <virgil@lethean.io>
+  ```
 
-Error strings start with the package name and a colon, lowercase, no trailing period:
+## Adding an engine backend
 
-```go
-fmt.Errorf("inference: no backends registered (import a backend package)")
-fmt.Errorf("inference: backend %q not registered", cfg.Backend)
-fmt.Errorf("inference: backend %q not available on this hardware", cfg.Backend)
-```
+An engine is a self-registering runtime package behind
+`inference.Register` / `inference.LoadModel` (`WithBackend("<name>")`). To add
+one:
 
-This convention matches the Go standard library and makes `errors.Is`/`errors.As` wrapping straightforward.
+1. Implement the `inference.Backend` and `inference.TextModel` contracts (plus
+   any optional capability interfaces the engine supports — capabilities are
+   discovered by type assertion, e.g. `model.(inference.AttentionInspector)`,
+   rather than by widening `TextModel`).
+2. Register in `init()`, guarded by the appropriate build tag for the platform.
+3. Write stub-based tests that confirm registration and load routing without
+   requiring real GPU hardware in CI.
 
-### Strict Types
-
-All parameters and return types are explicitly typed. No `interface{}` or `any` outside of test helpers where unavoidable.
-
-### Dependencies
-
-No new external dependencies may be added to the production code. The `go.mod` `require` block must remain stdlib-only for non-test code. `testify` is the only permitted test dependency.
-
-If you find yourself wanting an external library, reconsider the approach. This package is intentionally minimal.
-
-### Licence Header
-
-Every new `.go` file must carry the EUPL-1.2 licence header:
-
-```go
-// Copyright (c) Lethean Technologies Ltd. All rights reserved.
-// SPDX-License-Identifier: EUPL-1.2
-```
-
-Existing files without this header will be updated in a future housekeeping pass.
-
-## Commit Guidelines
-
-Use conventional commits:
-
-```
-type(scope): short imperative description
-
-Longer explanation if needed. UK English. Wrap at 72 characters.
-```
-
-Types: `feat`, `fix`, `test`, `docs`, `refactor`, `chore`
-
-Scope: `inference`, `options`, `discover`, or omit for cross-cutting changes.
-
-Examples:
-
-```
-feat(inference): add WithParallelSlots load option
-fix(discover): handle config.json with invalid JSON gracefully
-test(options): add table-driven tests for WithTopP
-docs: expand architecture section on registry priority
-```
-
-Always include the co-author trailer:
-
-```
-Co-Authored-By: Virgil <virgil@lethean.io>
-```
-
-## Implementing a Backend
-
-To implement a new backend (e.g. `go-vulkan` for cross-platform GPU inference):
-
-1. Import `dappco.re/go/inference` in the new module.
-2. Implement `inference.Backend`:
-
-```go
-type vulkanBackend struct{}
-
-func (b *vulkanBackend) Name() string { return "vulkan" }
-
-func (b *vulkanBackend) Available() bool {
-    // Check whether Vulkan runtime is present on this host.
-    return vulkan.IsAvailable()
-}
-
-func (b *vulkanBackend) LoadModel(path string, opts ...inference.LoadOption) (inference.TextModel, error) {
-    cfg := inference.ApplyLoadOpts(opts)
-    // Load model using cfg.ContextLen, cfg.GPULayers, etc.
-    return &vulkanModel{...}, nil
-}
-```
-
-3. Implement `inference.TextModel` (all nine methods).
-4. Register in `init()`, guarded by the appropriate build tag:
-
-```go
-//go:build linux && (amd64 || arm64)
-
-func init() { inference.Register(&vulkanBackend{}) }
-```
-
-5. Write stub-based tests to confirm the backend registers and `LoadModel` routes correctly without requiring real GPU hardware in CI.
-
-## Extending the Interface
-
-Before adding a method to `TextModel` or `Backend`, consider:
-
-- Do two or more existing consumers require this capability right now?
-- Can the capability be expressed as a separate interface that embeds `TextModel`?
-- Will adding this method break existing backend implementations that do not yet provide it?
-
-If the answer to the first question is no, defer the addition. If a separate interface is sufficient, prefer that approach. See `docs/architecture.md` for the stability contract.
-
-When a new method is genuinely necessary, coordinate with the owners of go-mlx, go-rocm, and go-ml before merging, since all three must implement the new method simultaneously or the interface will be broken at build time.
+Both current engines live in-repo (`engine/metal`, `engine/hip`), so extending
+the contract no longer means coordinating across separate backend repositories —
+add the capability as an optional interface and let engines opt in. See
+[docs/architecture.md](architecture.md) for the stability contract and
+[docs/backends.md](backends.md) for the engine designs.

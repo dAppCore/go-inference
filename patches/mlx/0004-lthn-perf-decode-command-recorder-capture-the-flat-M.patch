@@ -1,0 +1,231 @@
+From 91fc88bb390a266403e3018ae51eae2fd525e62b Mon Sep 17 00:00:00 2001
+From: Snider <snider@host.uk.com>
+Date: Tue, 16 Jun 2026 17:42:38 +0100
+Subject: [PATCH 04/10] =?UTF-8?q?lthn(perf):=20decode=20command=20recorder?=
+ =?UTF-8?q?=20=E2=80=94=20capture=20the=20flat=20Metal=20command=20stream?=
+ =?UTF-8?q?=20per=20command=20buffer=20(env=20MLX=5FDECODE=5FCAPTURE)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Foundation for decode record/replay — the fix for the host-encode wall (~12ms/token, GPU 99.8% idle), validated externally by gemma E4B 100->500 tok/s on an A10 via CUDA graphs (the NVIDIA twin of Metal command-buffer replay). Records pipeline + buffer binds + inline bytes + threadgroup-mem + dispatch dims per command buffer via hooks in set_buffer/set_input_array/set_compute_pipeline_state/set_bytes/dispatch_*. Verified on 12B-4bit: decode steps are byte-structurally stable token-to-token (47 + 27/28 cmds repeating) — only buffer ADDRESSES churn, so replay pins the step's buffers. Zero cost when off.
+
+Co-Authored-By: Virgil <virgil@lethean.io>
+---
+ mlx/backend/metal/device.cpp | 92 ++++++++++++++++++++++++++++++++++++
+ mlx/backend/metal/device.h   | 25 ++++++++++
+ 2 files changed, 117 insertions(+)
+
+diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
+index e10e115d..a45fc5c1 100644
+--- a/mlx/backend/metal/device.cpp
++++ b/mlx/backend/metal/device.cpp
+@@ -1,7 +1,12 @@
+ // Copyright © 2023-2024 Apple Inc.
+ 
++#include <cstdint>
++#include <cstdio>
+ #include <cstdlib>
+ #include <sstream>
++#include <tuple>
++#include <utility>
++#include <vector>
+ 
+ #include <fmt/format.h>
+ 
+@@ -297,6 +302,62 @@ CommandEncoder::~CommandEncoder() {
+   queue_.reset();
+ }
+ 
++namespace {
++// lthn decode record/replay (#perf, env MLX_DECODE_CAPTURE=1): record the flat
++// Metal command stream of a (structurally-stable) decode step — pipeline, buffer
++// binds, inline bytes, threadgroup-mem, dispatch dims — so a later token can
++// re-issue it verbatim, skipping the MLX tape-walk + per-primitive eval_gpu that
++// costs ~12 ms host/token (GPU idle). The probe confirmed the dispatch STRUCTURE
++// is byte-stable token-to-token; only buffer addresses churn (handled at replay
++// by pinning the step's buffers). Zero cost when off.
++struct LthnRecCmd {
++  MTL::ComputePipelineState* pipeline = nullptr;
++  std::vector<std::tuple<const MTL::Buffer*, int64_t, int>> buffers; // buf,offset,idx
++  std::vector<std::pair<std::vector<uint8_t>, int>> bytes;           // payload,idx
++  std::vector<std::pair<size_t, int>> tgmem;                         // length,idx
++  MTL::Size grid{0, 0, 0};
++  MTL::Size group{0, 0, 0};
++  bool threadgroups = false;
++};
++inline bool lthn_capture_env() {
++  static const bool on = [] {
++    const char* v = std::getenv("MLX_DECODE_CAPTURE");
++    return v && v[0] != '\0' && v[0] != '0';
++  }();
++  return on;
++}
++thread_local std::vector<LthnRecCmd> lthn_rec_cmds;
++thread_local LthnRecCmd lthn_rec_cur;
++thread_local bool lthn_rec_cur_open = false;
++inline void lthn_rec_flush_cur() {
++  if (lthn_rec_cur_open) {
++    lthn_rec_cmds.push_back(std::move(lthn_rec_cur));
++    lthn_rec_cur = LthnRecCmd{};
++    lthn_rec_cur_open = false;
++  }
++}
++} // namespace
++
++bool lthn_decode_recording() { return lthn_capture_env(); }
++void lthn_decode_rec_pipeline(MTL::ComputePipelineState* kernel) {
++  lthn_rec_flush_cur(); // a new pipeline-set begins a new command
++  lthn_rec_cur.pipeline = kernel;
++  lthn_rec_cur_open = true;
++}
++void lthn_decode_rec_bytes(const void* data, size_t nbytes, int idx) {
++  if (!lthn_rec_cur_open) {
++    return;
++  }
++  const uint8_t* p = static_cast<const uint8_t*>(data);
++  lthn_rec_cur.bytes.emplace_back(std::vector<uint8_t>(p, p + nbytes), idx);
++}
++void lthn_decode_rec_tgmem(size_t length, int idx) {
++  if (!lthn_rec_cur_open) {
++    return;
++  }
++  lthn_rec_cur.tgmem.emplace_back(length, idx);
++}
++
+ void CommandEncoder::set_buffer(
+     const MTL::Buffer* buf,
+     int idx,
+@@ -305,6 +366,9 @@ void CommandEncoder::set_buffer(
+   // buffers
+   all_inputs_.insert((void*)buf);
+   all_outputs_.insert((void*)buf);
++  if (lthn_capture_env() && lthn_rec_cur_open) {
++    lthn_rec_cur.buffers.emplace_back(buf, offset, idx);
++  }
+   get_command_encoder()->setBuffer(buf, offset, idx);
+ }
+ 
+@@ -319,6 +383,9 @@ void CommandEncoder::set_input_array(
+   needs_barrier_ =
+       needs_barrier_ | (prev_outputs_.find(r_buf) != prev_outputs_.end());
+   auto a_buf = static_cast<const MTL::Buffer*>(a.buffer().ptr());
++  if (lthn_capture_env() && lthn_rec_cur_open) {
++    lthn_rec_cur.buffers.emplace_back(a_buf, a.offset() + offset, idx);
++  }
+   get_command_encoder()->setBuffer(a_buf, a.offset() + offset, idx);
+ }
+ 
+@@ -369,6 +436,12 @@ void CommandEncoder::dispatch_threadgroups(
+     MTL::Size group_dims) {
+   maybeInsertBarrier();
+   buffer_ops_++;
++  if (lthn_capture_env() && lthn_rec_cur_open) {
++    lthn_rec_cur.grid = grid_dims;
++    lthn_rec_cur.group = group_dims;
++    lthn_rec_cur.threadgroups = true;
++    lthn_rec_flush_cur();
++  }
+   get_command_encoder()->dispatchThreadgroups(grid_dims, group_dims);
+ }
+ 
+@@ -377,6 +450,12 @@ void CommandEncoder::dispatch_threads(
+     MTL::Size group_dims) {
+   maybeInsertBarrier();
+   buffer_ops_++;
++  if (lthn_capture_env() && lthn_rec_cur_open) {
++    lthn_rec_cur.grid = grid_dims;
++    lthn_rec_cur.group = group_dims;
++    lthn_rec_cur.threadgroups = false;
++    lthn_rec_flush_cur();
++  }
+   get_command_encoder()->dispatchThreads(grid_dims, group_dims);
+ }
+ 
+@@ -385,6 +464,19 @@ void CommandEncoder::barrier() {
+ }
+ 
+ void CommandEncoder::end_encoding() {
++  if (lthn_capture_env()) {
++    lthn_rec_flush_cur();
++    if (!lthn_rec_cmds.empty()) {
++      size_t binds = 0, byteSets = 0;
++      for (auto& c : lthn_rec_cmds) {
++        binds += c.buffers.size();
++        byteSets += c.bytes.size();
++      }
++      std::fprintf(stderr, "[decode-rec] cmds=%zu binds=%zu byteSets=%zu\n",
++                   lthn_rec_cmds.size(), binds, byteSets);
++      lthn_rec_cmds.clear();
++    }
++  }
+   // Each command encoder has a unique fence. We also store a map of
+   // all previous outputs of command encoders to their corresponding fence.
+   // - The command encoder records its inputs and outputs.
+diff --git a/mlx/backend/metal/device.h b/mlx/backend/metal/device.h
+index 5f2e72f9..2f2a8136 100644
+--- a/mlx/backend/metal/device.h
++++ b/mlx/backend/metal/device.h
+@@ -19,6 +19,15 @@ namespace mlx::core::metal {
+ using MTLFCList =
+     std::vector<std::tuple<const void*, MTL::DataType, NS::UInteger>>;
+ 
++// lthn decode record/replay (#perf): capture the flat Metal command stream of a
++// structurally-stable decode step (defined in device.cpp) so later tokens replay
++// it verbatim, skipping the MLX tape-walk + eval_gpu (~12 ms host/token, GPU
++// idle). The inline CommandEncoder setters below feed these when recording.
++bool lthn_decode_recording();
++void lthn_decode_rec_pipeline(MTL::ComputePipelineState* kernel);
++void lthn_decode_rec_bytes(const void* data, size_t nbytes, int idx);
++void lthn_decode_rec_tgmem(size_t length, int idx);
++
+ class Device;
+ 
+ class MLX_API CommandEncoder {
+@@ -57,11 +66,18 @@ class MLX_API CommandEncoder {
+   void maybeInsertBarrier();
+ 
+   void set_compute_pipeline_state(MTL::ComputePipelineState* kernel) {
++    if (lthn_decode_recording()) {
++      lthn_decode_rec_pipeline(kernel);
++    }
+     get_command_encoder()->setComputePipelineState(kernel);
+   }
+ 
+   template <typename Vec, typename = std::enable_if_t<is_vector_v<Vec>>>
+   void set_vector_bytes(const Vec& vec, size_t nelems, int idx) {
++    if (lthn_decode_recording()) {
++      lthn_decode_rec_bytes(
++          vec.data(), nelems * sizeof(typename Vec::value_type), idx);
++    }
+     get_command_encoder()->setBytes(
+         vec.data(), nelems * sizeof(typename Vec::value_type), idx);
+   }
+@@ -72,15 +88,24 @@ class MLX_API CommandEncoder {
+ 
+   template <typename T>
+   void set_bytes(const T* v, int n, int idx) {
++    if (lthn_decode_recording()) {
++      lthn_decode_rec_bytes(v, n * sizeof(T), idx);
++    }
+     return get_command_encoder()->setBytes(v, n * sizeof(T), idx);
+   }
+ 
+   template <typename T>
+   void set_bytes(const T& v, int idx) {
++    if (lthn_decode_recording()) {
++      lthn_decode_rec_bytes(&v, sizeof(T), idx);
++    }
+     return get_command_encoder()->setBytes(&v, sizeof(T), idx);
+   }
+ 
+   void set_threadgroup_memory_length(size_t length, int idx) {
++    if (lthn_decode_recording()) {
++      lthn_decode_rec_tgmem(length, idx);
++    }
+     get_command_encoder()->setThreadgroupMemoryLength(length, idx);
+   }
+ 
+-- 
+2.50.1 (Apple Git-155)
+
