@@ -74,6 +74,10 @@ type sdpaPagedP2Params struct {
 type sdpaPagedDecodeScratch struct {
 	nHeads, headDim, maxPages int
 	maxs, sums, acc           metal.MTLBuffer
+	// lastCellCount records the cell count of the most recent plan built on this
+	// scratch — the per-head stride into maxs/sums (the kernel writes h*cellCount+cell).
+	// Diagnostic only: lets the #365 attention-concentration probe read the partials.
+	lastCellCount int
 }
 
 var (
@@ -492,6 +496,7 @@ func buildSDPAPagedDecodePlan(
 	if err := scratch.ensure(nHeads, headDim, cellCount); err != nil {
 		return sdpaPagedDecodePlan{}, err
 	}
+	scratch.lastCellCount = cellCount // #365 probe: the per-head stride into maxs/sums
 	p1PSO, err := sdpaPagedP1Pipeline()
 	if err != nil {
 		return sdpaPagedDecodePlan{}, err
