@@ -101,7 +101,9 @@ func TestDecodeGPUProfileVsDepthRealE2B(t *testing.T) {
 	for l := range labs {
 		order = append(order, l)
 	}
-	sort.Slice(order, func(i, j int) bool { return (deep[order[i]] - shallow[order[i]]) > (deep[order[j]] - shallow[order[j]]) })
+	sort.Slice(order, func(i, j int) bool {
+		return (deep[order[i]] - shallow[order[i]]) > (deep[order[j]] - shallow[order[j]])
+	})
 
 	msPer := func(ns uint64) float64 { return float64(ns) / 1e6 / float64(N) }
 	t.Logf("=== #365 per-op GPU ms/token: depth 256 vs 16384 (real e2b-4bit), sorted by Δ ===")
