@@ -771,18 +771,24 @@ func (s *archDecodeState) bufferBytes(buf metal.MTLBuffer, n int) []byte {
 	return unsafe.Slice(s.bufferPtr(buf), n)
 }
 
-// maskGatedBottomFrac zeros the bottom-frac of the dFF gated columns by |value| —
-// the #364 argmax-drop diagnostic. gated is a writable bf16 buffer view; no-op at
-// frac<=0 (so the split FFN stays byte-identical off the diagnostic).
-func maskGatedBottomFrac(gated []byte, dFF int, frac float64) {
+// maskGatedBottomFrac zeros the bottom-frac of the dFF gated columns — the #364
+// argmax-drop diagnostic. Ranks by the exact |gated| (down-skip ceiling) or, when
+// byGate, by |gelu(gate)| (the gate-only PREDICTOR a real up-skipping kernel would
+// use, scored before the up projection). gated is a writable bf16 view; gate is
+// read-only (may be nil when !byGate). No-op at frac<=0 (split FFN stays identical).
+func maskGatedBottomFrac(gated, gate []byte, dFF int, frac float64, byGate bool) {
 	if frac <= 0 || dFF <= 0 || len(gated) < dFF*2 {
 		return
 	}
-	abs := make([]float64, dFF)
+	score := make([]float64, dFF)
 	for i := 0; i < dFF; i++ {
-		abs[i] = math.Abs(float64(bf16ToF32(gated[i*2], gated[i*2+1])))
+		if byGate {
+			score[i] = math.Abs(geluTanh(float64(bf16ToF32(gate[i*2], gate[i*2+1]))))
+		} else {
+			score[i] = math.Abs(float64(bf16ToF32(gated[i*2], gated[i*2+1])))
+		}
 	}
-	sorted := append([]float64(nil), abs...)
+	sorted := append([]float64(nil), score...)
 	sort.Float64s(sorted)
 	ti := int(frac * float64(dFF))
 	if ti >= dFF {
@@ -790,7 +796,7 @@ func maskGatedBottomFrac(gated []byte, dFF int, frac float64) {
 	}
 	thr := sorted[ti]
 	for i := 0; i < dFF; i++ {
-		if abs[i] <= thr {
+		if score[i] <= thr {
 			gated[i*2] = 0
 			gated[i*2+1] = 0
 		}
@@ -1209,6 +1215,11 @@ var (
 	// emitted token?). Diagnostic only; a real kernel would predict live columns
 	// from gate WITHOUT streaming up/down for the dead ones.
 	ffnDropFrac float64
+	// #364 predictor mode: when true, rank columns by |gelu(gate)| (the gate-only
+	// score a real up-skipping kernel computes BEFORE the up projection) instead of
+	// the exact |gated|. The gap between the two argmax-ceilings = the cost of
+	// predicting deadness from gate alone (which is what buys the up-projection skip).
+	ffnDropByGate bool
 	capturedAttnHiddens  [][]byte // post-attention hidden (x + Wo·attn) per layer — isolates attention from MLP
 )
 
@@ -1438,7 +1449,7 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 				encConc = false
 				commitCommandBufferFast(cb)
 				waitUntilCompletedFast(cb)
-				maskGatedBottomFrac(s.bufferBytes(s.msc.gated, lff*bf16Size), lff, ffnDropFrac)
+				maskGatedBottomFrac(s.bufferBytes(s.msc.gated, lff*bf16Size), s.bufferBytes(s.msc.gate, lff*bf16Size), lff, ffnDropFrac, ffnDropByGate)
 				cb = commandBufferFast(queue)
 				enc = computeCommandEncoderFast(cb)
 				cbBroken = true
