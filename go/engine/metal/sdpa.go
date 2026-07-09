@@ -386,22 +386,37 @@ var sdpa2PassDisabledForTest bool
 const sdpa2PassMinKV = 1024
 
 // sdpa2PassBlocks picks the cache-split count for a kvLen — the number of
-// threadgroups that share the softmax reduction. Single-pass uses one threadgroup
-// per (b·head) and stalls past ~1024 because that one group reduces the whole
-// cache; 2-pass fans the reduction over `blocks` groups, so saturation grows with
-// context. Must stay a multiple of BN=32 (the pass-2 combine loops blocks/32).
-// The ladder mirrors MLX's own heuristic (more blocks as N climbs).
-func sdpa2PassBlocks(kvLen int) int32 {
+// threadgroups PER KV HEAD that share the softmax reduction. Single-pass uses one
+// threadgroup per (b·head) and stalls past ~1024 because that one group reduces the
+// whole cache; 2-pass fans the reduction over `blocks` groups, so saturation grows
+// with context. Must stay a multiple of BN=32 (the pass-2 combine loops blocks/32).
+// The kvLen ladder mirrors MLX's own heuristic (more blocks as N climbs).
+//
+// The occupancy floor (#365): the pass-1 grid is (nKVHeads × blocks) threadgroups,
+// so few KV heads starve the GPU at any ladder step — E2B's single KV head at the
+// ladder's 128 blocks ran pass 1 at ~277 GB/s of read-once K+V where the 12B shape
+// (8 KV heads) saturates ~830 (the depth-anatomy bench). Fanning the fewer heads
+// over more blocks is the only parallelism axis the shape has; the sweep put the
+// PAIR optimum at ~256 total threadgroups across 4K/16K/32K (pass 2's merge grows
+// past it: 16K pair 0.072 ms @128 -> 0.060 @256, 32K 0.125 -> 0.094).
+func sdpa2PassBlocks(kvLen, nKVHeads int) int32 {
+	var blocks int32
 	switch {
 	case kvLen <= 8192:
-		return 64
+		blocks = 64
 	case kvLen <= 32768:
-		return 128
+		blocks = 128
 	case kvLen <= 65536:
-		return 256
+		blocks = 256
 	default:
-		return 512
+		blocks = 512
 	}
+	if nKVHeads > 0 {
+		if floor := int32((256/nKVHeads + 31) / 32 * 32); blocks < floor {
+			blocks = floor
+		}
+	}
+	return blocks
 }
 
 // SDPA2Pass computes single-query scaled-dot-product attention over a contiguous KV
@@ -425,7 +440,7 @@ func SDPA2PassInto(out []byte, qb, kb, vb []byte, b, nHeads, nKVHeads, headDim, 
 	if nKVHeads == 0 || nHeads%nKVHeads != 0 {
 		return nil, core.NewError("native.SDPA2Pass: nHeads must be a multiple of nKVHeads")
 	}
-	blocks := sdpa2PassBlocks(kvLen)
+	blocks := sdpa2PassBlocks(kvLen, nKVHeads)
 	pso1, err := sdpaVector2Pass1PipelineForHeadDim(headDim, blocks)
 	if err != nil {
 		return nil, err

@@ -1228,7 +1228,20 @@ func recordArchICB(
 	// single-pass layout (and the existing byte-parity fixtures with it).
 	sdpa2PassICBBlocks := 0
 	if maxLen >= sdpa2PassMinKV {
-		sdpa2PassICBBlocks = int(sdpa2PassBlocks(maxLen))
+		// blocks bakes into the recorded pipelines, so fan for the most-starved
+		// GLOBAL layer (fewest KV heads): the occupancy floor in sdpa2PassBlocks
+		// keys on the layer's KV heads (#365 — E2B's single KV head needs 4x the
+		// ladder's fan to feed the GPU). Wider layers pay only their pass-2 merge.
+		minKV := 0
+		for li := range nLayers {
+			if specs[li].Attention != model.GlobalAttention {
+				continue
+			}
+			if kv := kvOf(li); minKV == 0 || kv < minKV {
+				minKV = kv
+			}
+		}
+		sdpa2PassICBBlocks = int(sdpa2PassBlocks(maxLen, minKV))
 	}
 	sdpa2Pass1PSOByHd := make(map[int]metal.MTLComputePipelineState)
 	sdpa2Pass2PSOByHd := make(map[int]metal.MTLComputePipelineState)
