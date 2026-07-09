@@ -56,7 +56,7 @@ func (s *SessionHandle) foldForAppendLocked(ids []int32) (bool, error) {
 		return false, nil // nothing would be evicted — the plain append path handles it
 	}
 	folded := make([]int32, 0, keep+len(ids))
-	folded = append(folded, s.tokens[0])                    // the original BOS anchors position 0
+	folded = append(folded, s.tokens[0])                          // the original BOS anchors position 0
 	folded = append(folded, s.tokens[len(s.tokens)-(keep-1):]...) // the newest keep-1 tokens
 	folded = append(folded, ids...)
 	if err := s.sess.PrefillTokens(folded); err != nil {

@@ -231,7 +231,7 @@ func TestMTPProjectionShapesGPUvsCPU(t *testing.T) {
 		nanGemv, _ := bf16NaNScanBytes(gv)
 
 		var maxDiffGemm, maxDiffGemv float64
-		for _, n := range []int{0, 1, N/2, N - 1} {
+		for _, n := range []int{0, 1, N / 2, N - 1} {
 			want := float64(mtpShapeCPUDotNT(a, w, K, n))
 			gg := float64(bf16ToF32(got[2*n], got[2*n+1]))
 			gm := float64(bf16ToF32(gv[2*n], gv[2*n+1]))

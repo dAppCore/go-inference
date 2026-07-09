@@ -244,7 +244,7 @@ func TestRealModelLayerHiddenDump(t *testing.T) {
 					}
 					return out
 				}
-				if paged !=nil {
+				if paged != nil {
 					p, slot := r/paged.pageSize, r%paged.pageSize
 					ptrs, hs, ss := paged.kPagePtrs, paged.kHeadStrides, paged.kSeqStrides
 					if !isK {

@@ -231,7 +231,7 @@ type archDecodeState struct {
 	// that would silently evaluate the span causally. Transient — set around
 	// one chunk by prefillRetainedEmbeddingsBidirChunk.
 	rowAttnCaps []int32
-	ropeFreqs    metal.MTLBuffer // resident periods (1/inv_freq) for YaRN long-context rope; nil = base-derived rope
+	ropeFreqs   metal.MTLBuffer // resident periods (1/inv_freq) for YaRN long-context rope; nil = base-derived rope
 	// gemma4 global (proportional+partial) rope: the period spectrum over the FULL head dim
 	// (metal's gemma4ProportionalFreqs) for GlobalAttention layers, so rope pairs (d, d+globalHeadDim/2)
 	// over the whole head — NOT (d, d+rotaryDim/2). nil ⇒ no proportional global layers.

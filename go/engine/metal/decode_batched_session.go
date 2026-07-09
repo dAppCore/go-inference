@@ -71,7 +71,7 @@ type denseBatchScratch struct {
 	attnOutPacked  metal.MTLBuffer // K × dModel O-projection outputs
 	kStagePacked   metal.MTLBuffer // K × kvDimMax staged K rows (ring-wrap landing)
 	vStagePacked   metal.MTLBuffer // K × kvDimMax staged V rows
-	attnRowCap     int // attnFold's OWN row capacity — NOT foldRowCap (mlpFold updates that first, which masked row growth and left these slabs short: the ~52K wide-tail-chunk corruption)
+	attnRowCap     int             // attnFold's OWN row capacity — NOT foldRowCap (mlpFold updates that first, which masked row growth and left these slabs short: the ~52K wide-tail-chunk corruption)
 	attnDModel     int
 	foldQDimCap    int
 	foldKVDimCap   int

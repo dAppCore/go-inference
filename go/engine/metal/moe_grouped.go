@@ -46,8 +46,8 @@ const (
 )
 
 type moeGroupedPSOKey struct {
-	groupSize, bits         int
-	alignM, alignN, alignK  bool
+	groupSize, bits        int
+	alignM, alignN, alignK bool
 }
 
 var (
