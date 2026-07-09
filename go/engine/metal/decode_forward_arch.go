@@ -1171,6 +1171,11 @@ func bufMaxAbsNaN(buf metal.MTLBuffer, dModel int) (maxAbs float32, bad int) {
 var (
 	captureLayerHiddens  bool
 	capturedLayerHiddens [][]byte
+	// #364 FFN-sparsity probe (read-only; no-op unless set): each dense layer's
+	// gelu(gate)*up (dFF bf16). s.msc.gated still holds it at layer end (down read
+	// it, then wrote s.msc.down). MoE layers skip (msc unused there).
+	captureFFNGated  bool
+	capturedFFNGated [][]byte
 	capturedAttnHiddens  [][]byte // post-attention hidden (x + Wo·attn) per layer — isolates attention from MLP
 )
 
@@ -1477,12 +1482,17 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			enc = computeCommandEncoderFast(cb)
 			cbBroken = true
 		}
-		if captureLayerHiddens { // cross-engine per-layer diff: store this layer's output hidden
+		if captureLayerHiddens || captureFFNGated { // cross-engine per-layer diff / #364 FFN-sparsity probe
 			endEncodingFast(enc)
 			encConc = false
 			commitCommandBufferFast(cb)
 			waitUntilCompletedFast(cb)
-			capturedLayerHiddens = append(capturedLayerHiddens, append([]byte(nil), s.bufferBytes(out, s.dModel*bf16Size)...))
+			if captureLayerHiddens { // this layer's output hidden
+				capturedLayerHiddens = append(capturedLayerHiddens, append([]byte(nil), s.bufferBytes(out, s.dModel*bf16Size)...))
+			}
+			if captureFFNGated && s.msc.gated != nil { // this dense layer's gelu(gate)*up
+				capturedFFNGated = append(capturedFFNGated, append([]byte(nil), s.bufferBytes(s.msc.gated, s.msc.dFF*bf16Size)...))
+			}
 			cb = commandBufferFast(queue)
 			enc = computeCommandEncoderFast(cb)
 			cbBroken = true
