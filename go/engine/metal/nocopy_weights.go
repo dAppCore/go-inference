@@ -10,7 +10,6 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/safetensors"
-	"github.com/tmc/apple/kernel"
 	"github.com/tmc/apple/metal"
 )
 
@@ -136,13 +135,12 @@ func newShardBuffers(dm *safetensors.DirMapping) (*shardBuffers, error) {
 		bases: make([]uintptr, len(dm.Shards)),
 		ends:  make([]uintptr, len(dm.Shards)),
 	}
-	noop := func(kernel.Pointer, uint64) {} // mmap lifetime is dm.Close's, not the buffer's
 	for i, m := range dm.Shards {
 		if m == nil || len(m.Data) == 0 {
 			return nil, core.NewError("native.newShardBuffers: empty shard mapping")
 		}
 		base := unsafe.Pointer(&m.Data[0])
-		buf := device.NewBufferWithBytesNoCopyLengthOptionsDeallocator(base, uint(len(m.Data)), metal.MTLResourceStorageModeShared, noop)
+		buf := newNoCopyBuffer(base, uint(len(m.Data)))
 		if buf.Contents() != base {
 			return nil, core.NewError("native.newShardBuffers: no-copy buffer not backed by the mmap (bytesNoCopy rejected the page-aligned mapping)")
 		}

@@ -225,12 +225,7 @@ func withPinnedNoCopyBytes(b []byte, fn func(metal.MTLBuffer) error) error {
 		pinner.Unpin()
 		runtime.KeepAlive(b)
 	}()
-	buf := device.NewBufferWithBytesNoCopyLengthOptionsDeallocator(
-		unsafe.Pointer(&b[0]),
-		uint(len(b)),
-		metal.MTLResourceStorageModeShared,
-		func(kernel.Pointer, uint64) {},
-	)
+	buf := newNoCopyBuffer(unsafe.Pointer(&b[0]), uint(len(b)))
 	if buf == nil || buf.GetID() == 0 {
 		return core.NewError("native.withPinnedNoCopyBytes: failed to create no-copy Metal buffer")
 	}
@@ -242,12 +237,7 @@ func temporaryPinnedNoCopyBytes(b []byte, pinner *runtime.Pinner) (metal.MTLBuff
 		return nil, core.NewError("native.temporaryPinnedNoCopyBytes: empty byte slice")
 	}
 	pinner.Pin(&b[0])
-	buf := device.NewBufferWithBytesNoCopyLengthOptionsDeallocator(
-		unsafe.Pointer(&b[0]),
-		uint(len(b)),
-		metal.MTLResourceStorageModeShared,
-		func(kernel.Pointer, uint64) {},
-	)
+	buf := newNoCopyBuffer(unsafe.Pointer(&b[0]), uint(len(b)))
 	if buf == nil || buf.GetID() == 0 {
 		pinner.Unpin()
 		return nil, core.NewError("native.temporaryPinnedNoCopyBytes: failed to create no-copy Metal buffer")
@@ -326,12 +316,7 @@ func newPinnedNoCopyBytes(n int) (*pinnedNoCopyBytes, error) {
 	if pinner == nil {
 		return nil, core.NewError("native.newPinnedNoCopyBytes: failed to pin backing bytes")
 	}
-	buf := device.NewBufferWithBytesNoCopyLengthOptionsDeallocator(
-		unsafe.Pointer(&b[0]),
-		uint(len(b)),
-		metal.MTLResourceStorageModeShared,
-		func(kernel.Pointer, uint64) {},
-	)
+	buf := newNoCopyBuffer(unsafe.Pointer(&b[0]), uint(len(b)))
 	if buf == nil || buf.GetID() == 0 {
 		pinner.Unpin()
 		return nil, core.NewError("native.newPinnedNoCopyBytes: failed to create no-copy Metal buffer")
@@ -478,6 +463,18 @@ func residentBytes(b []byte) metal.MTLBuffer {
 // associate it per buffer (association would free it when any one buffer deallocs).
 var noopResidentDealloc = objc.NewBlock(func(objc.Block, kernel.Pointer, uint64) {})
 
+// newNoCopyBuffer wraps [ptr, ptr+length) as a no-copy Metal buffer with the shared
+// no-op deallocator above, via a direct msgSend — replacing the tmc/apple binding's
+// per-call objc.NewBlock(closure) (a reflect.MakeFunc + a retained purego callback on
+// every call). GetID()==0 on failure. Every no-copy site owns its bytes' lifetime
+// elsewhere (a runtime.Pinner, or the mmap's Close), so the shared no-op deallocator
+// is correct for all of them.
+func newNoCopyBuffer(ptr unsafe.Pointer, length uint) metal.MTLBuffer {
+	return metal.MTLBufferObjectFromID(objc.Send[objc.ID](device.ID,
+		objc.Sel("newBufferWithBytesNoCopy:length:options:deallocator:"),
+		ptr, length, metal.MTLResourceStorageModeShared, objc.ID(noopResidentDealloc)))
+}
+
 func residentNoCopyBytes(b []byte) (metal.MTLBuffer, *runtime.Pinner, bool) {
 	if isMappedShardBytes(b) {
 		return sharedBytes(b), nil, false
@@ -486,13 +483,7 @@ func residentNoCopyBytes(b []byte) (metal.MTLBuffer, *runtime.Pinner, bool) {
 	if pinner == nil {
 		return sharedBytes(b), nil, false
 	}
-	// Mirrors device.NewBufferWithBytesNoCopyLengthOptionsDeallocator, but names the
-	// shared no-op block instead of the binding's per-call objc.NewBlock(closure).
-	rv := objc.Send[objc.ID](device.ID,
-		objc.Sel("newBufferWithBytesNoCopy:length:options:deallocator:"),
-		unsafe.Pointer(&b[0]), uint(len(b)), metal.MTLResourceStorageModeShared,
-		objc.ID(noopResidentDealloc))
-	buf := metal.MTLBufferObjectFromID(rv)
+	buf := newNoCopyBuffer(unsafe.Pointer(&b[0]), uint(len(b)))
 	if buf.GetID() == 0 {
 		if pinner != nil {
 			pinner.Unpin()
