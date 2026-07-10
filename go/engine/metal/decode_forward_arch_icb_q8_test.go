@@ -1,6 +1,6 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-//go:build darwin && arm64
+//go:build darwin && arm64 && metal_runtime
 
 package native
 
