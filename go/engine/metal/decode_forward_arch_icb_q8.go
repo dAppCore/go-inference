@@ -263,16 +263,20 @@ func (r *archICBReplay) ensureQ8Mirrors(li int) (metal.MTLBuffer, metal.MTLBuffe
 	return r.kvQ8.kMirrors[li], r.kvQ8.vMirrors[li], nil
 }
 
-// q8SnapshotMirror returns layer li's bf16 mirror, freshly dequantised from
-// the int8 cache + scale plane. The mirror is allocated on first use and
-// retained (state-using sessions only pay for it once).
-func (r *archICBReplay) q8SnapshotMirror(li int) (metal.MTLBuffer, *byte, error) {
+// q8SnapshotMirror returns layer li's bf16 mirror with the LIVE prefix
+// ([0, liveRows)) freshly dequantised from the int8 cache + scale plane —
+// rows past the session position are dead and never move (refreshing the
+// full allocation cost the MTP drafter export ~8.7ms per draft block at the
+// 128K default: the export refreshes per block, and cacheRows is 30-200x
+// the live state on a fresh conversation). The mirror is allocated at full
+// cacheRows on first use and retained.
+func (r *archICBReplay) q8SnapshotMirror(li, liveRows int) (metal.MTLBuffer, *byte, error) {
 	if _, _, err := r.ensureQ8Mirrors(li); err != nil {
 		return nil, nil, err
 	}
 	kvd := r.rowBytes[li] / bf16Size
-	rows := r.cacheRows[li]
-	if !r.dequantQ8MirrorsGPU([]int{li}) {
+	rows := min(max(liveRows, 0), r.cacheRows[li])
+	if rows > 0 && !r.dequantQ8MirrorsGPU([]int{li}, rows) {
 		r.dequantiseQ8Into(li, r.kCaches[li], r.kvQ8.kScales[li], r.kvQ8.kMirrors[li], rows, kvd)
 		r.dequantiseQ8Into(li, r.vCaches[li], r.kvQ8.vScales[li], r.kvQ8.vMirrors[li], rows, kvd)
 	}
@@ -285,7 +289,7 @@ func (r *archICBReplay) q8SnapshotMirror(li int) (metal.MTLBuffer, *byte, error)
 // it EVERY draft block; the kernel makes the refresh sub-ms. Returns false
 // (nothing written coherently — the caller host-loops) when the pipeline is
 // unavailable.
-func (r *archICBReplay) dequantQ8MirrorsGPU(layers []int) bool {
+func (r *archICBReplay) dequantQ8MirrorsGPU(layers []int, liveRows int) bool {
 	if _, err := kvQ8DequantRowsPipeline(); err != nil {
 		return false
 	}
@@ -295,7 +299,10 @@ func (r *archICBReplay) dequantQ8MirrorsGPU(layers []int) bool {
 		enc := computeCommandEncoderFast(cb)
 		for _, li := range layers {
 			kvd := r.rowBytes[li] / bf16Size
-			rows := r.cacheRows[li]
+			rows := min(max(liveRows, 0), r.cacheRows[li])
+			if rows == 0 {
+				continue
+			}
 			if encKVQ8DequantRows(enc, r.kCaches[li], r.kvQ8.kScales[li], r.kvQ8.kMirrors[li], rows, kvd) != nil ||
 				encKVQ8DequantRows(enc, r.vCaches[li], r.kvQ8.vScales[li], r.kvQ8.vMirrors[li], rows, kvd) != nil {
 				ok = false
@@ -330,20 +337,20 @@ func (r *archICBReplay) dequantiseQ8Into(li int, cache, scales, mirror metal.MTL
 // copying snapshot bytes into the mirrors. Rows a restore did not touch
 // round-trip to their existing codes (the codec identity), so partial/prefix
 // restores are safe.
-func (r *archICBReplay) flushQ8Mirrors() {
-	if r == nil || r.kvQ8 == nil || r.kvQ8.kMirrors == nil {
+func (r *archICBReplay) flushQ8Mirrors(liveRows int) {
+	if r == nil || r.kvQ8 == nil || r.kvQ8.kMirrors == nil || liveRows <= 0 {
 		return
 	}
 	layers := r.q8MirrorLayers()
 	if len(layers) == 0 {
 		return
 	}
-	if r.quantQ8MirrorsGPU(layers) {
+	if r.quantQ8MirrorsGPU(layers, liveRows) {
 		return
 	}
 	for _, li := range layers {
 		kvd := r.rowBytes[li] / bf16Size
-		rows := r.cacheRows[li]
+		rows := min(liveRows, r.cacheRows[li])
 		r.quantiseQ8From(r.kvQ8.kMirrors[li], r.kCaches[li], r.kvQ8.kScales[li], rows, kvd)
 		r.quantiseQ8From(r.kvQ8.vMirrors[li], r.vCaches[li], r.kvQ8.vScales[li], rows, kvd)
 	}
@@ -367,7 +374,7 @@ func (r *archICBReplay) q8MirrorLayers() []int {
 // batched-landing kernel (lthn_kv_q8_store_rows_bf16, bit-exact against the
 // host quantiser) pointed at the whole mirror. Returns false when the
 // pipeline is unavailable (the caller host-loops).
-func (r *archICBReplay) quantQ8MirrorsGPU(layers []int) bool {
+func (r *archICBReplay) quantQ8MirrorsGPU(layers []int, liveRows int) bool {
 	if !gpuHasKVQ8StoreRows() {
 		return false
 	}
@@ -377,7 +384,10 @@ func (r *archICBReplay) quantQ8MirrorsGPU(layers []int) bool {
 		enc := computeCommandEncoderFast(cb)
 		for _, li := range layers {
 			kvd := r.rowBytes[li] / bf16Size
-			rows := r.cacheRows[li]
+			rows := min(max(liveRows, 0), r.cacheRows[li])
+			if rows == 0 {
+				continue
+			}
 			if encKVQ8StoreRows(enc, r.kvQ8.kMirrors[li], r.kCaches[li], 0, r.kvQ8.kScales[li], 0, rows, kvd) != nil ||
 				encKVQ8StoreRows(enc, r.kvQ8.vMirrors[li], r.vCaches[li], 0, r.kvQ8.vScales[li], 0, rows, kvd) != nil {
 				ok = false
@@ -455,19 +465,19 @@ func (r *archICBReplay) releaseQ8Mirrors() bool {
 // refreshQ8SnapshotMirrors re-dequantises every ALREADY-MATERIALISED mirror —
 // the cached stateLayerViews hold mirror pointers across saves, and the live
 // q8 caches move on between sleeps.
-func (r *archICBReplay) refreshQ8SnapshotMirrors() error {
-	if r == nil || r.kvQ8 == nil || r.kvQ8.kMirrors == nil {
+func (r *archICBReplay) refreshQ8SnapshotMirrors(liveRows int) error {
+	if r == nil || r.kvQ8 == nil || r.kvQ8.kMirrors == nil || liveRows <= 0 {
 		return nil
 	}
 	layers := r.q8MirrorLayers()
 	if len(layers) == 0 {
 		return nil
 	}
-	if r.dequantQ8MirrorsGPU(layers) {
+	if r.dequantQ8MirrorsGPU(layers, liveRows) {
 		return nil
 	}
 	for _, li := range layers {
-		if _, _, err := r.q8SnapshotMirror(li); err != nil {
+		if _, _, err := r.q8SnapshotMirror(li, liveRows); err != nil {
 			return err
 		}
 	}
