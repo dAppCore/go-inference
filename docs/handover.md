@@ -49,12 +49,17 @@ tok/turn while the client resends full history.
 
 ## The open campaigns (task tracker)
 
-- **#372 verify-ICB** — the next big lever (+15-25 e2b MTP est). Spec is
-  build-ready to the function level in the task metadata: record the
-  pos-independent per-layer tail of the MTP verify fold into an ICB, replay
-  between live attention encodes. Every unknown pre-answered (barrier
-  mechanics, the `SupportIndirectCommandBuffers` PSO checklist, sink
-  conversions, the cut line, validity keys). 3-5 focused hours.
+- **#372 verify-ICB (closed — built, measured, FALSIFIED at break-even)** —
+  the tail-only replay shipped opt-in (`LTHN_VERIFY_ICB=1`, default off):
+  live verify fwd 10.3-10.9ms vs replay 10.8-11.2ms. Two banked findings:
+  recordings must be **per-K** (the adaptive draft cap wobbles block width
+  5/6/7 — a single-K ICB never replays), and at ONE executeCommands per
+  14-op layer tail the execute + recorded-barrier-drain tax eats the
+  recorded-op savings — the chained lane's ~3µs/op economics need ONE
+  execute per pass. The remaining shape is whole-layer recording
+  (attention + tail, pos/N rebinds), blocked on the staged-sliding landing's
+  per-pass slot offsets. Also from this campaign: `c06cc8a` fixed
+  `serve --draft` (dead since 601ac4e — LoadDir passed maxLen 0 through).
 - **#367 q8 KV (dense/ICB lane)** — priced: halves the depth slope, small-RAM
   fleet value. The 26B depth curve is still wanted before building.
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
