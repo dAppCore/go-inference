@@ -578,26 +578,15 @@ func recordArchICBQuant(
 			plePlan.recordGate = func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer) {
 				setQMV(c, psoFor(pleLB[li].gate, pliDim, dModel), pleLB[li].gate, vec, out, 0, dModel, pliDim)
 			}
-			// Fused gate+gelu·pli (#373): quant gates on the FAST-qmv geometry only
-			// (the kernel is qmv_fast_impl verbatim), every layer or none — the ICB
-			// op layout stays uniform. Byte-identical to the composed pair, so a
-			// resolve failure just keeps the two-stage path.
-			if dModel%512 == 0 && pliDim%8 == 0 {
-				fusable := true
-				for li := range pleLB {
-					if pleLB[li].gate.dense() || pleLB[li].gate.wq.buf == nil {
-						fusable = false
-						break
-					}
-				}
-				if fusable {
-					if ggPSO, ggErr := pleGateGeluPipelineICB(pleLB[0].gate.gs, pleLB[0].gate.bits); ggErr == nil {
-						plePlan.recordGateGelu = func(li int, c metal.MTLIndirectComputeCommand, vec, pli metal.MTLBuffer, pliOff uint, out metal.MTLBuffer) {
-							emitPLEGateGelu(fastICBSink{c}, ggPSO, pleLB[li].gate, vec, pli, pliOff, out, dModel, pliDim)
-						}
-					}
-				}
-			}
+			// The fused gate+gelu·pli op (lthn_ple_gate_gelu_qmv, #373) is NOT
+			// recorded here: it is byte-identical to the composed pair in every
+			// standalone context (both PSO builds, every real e2b layer's weights
+			// — the kernel parity test), but IN THE RECORDED REPLAY it drifted
+			// the session off the PerLayerInputGate interleave from the second
+			// sequential step onward (#371, TestRealQuantVerifyBatchedHiddensParity;
+			// first bad d00c526, in-situ cause unresolved). Its receipt was ~3µs
+			// (thin-stage), so the composed two-stage path stays — the parity
+			// spine outranks a free-but-unproven op.
 			plePlan.recordProj = func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer) {
 				setQMV(c, psoFor(pleLB[li].proj, dModel, pliDim), pleLB[li].proj, vec, out, 0, pliDim, dModel)
 			}

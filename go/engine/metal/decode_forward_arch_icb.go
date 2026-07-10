@@ -24,11 +24,6 @@ type archICBPLEPlan struct {
 	postNormBufs           []metal.MTLBuffer
 	resident               []metal.MTLBuffer
 	recordGate, recordProj func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer)
-	// recordGateGelu fuses the gate qmv and the gelu·pli product into ONE op
-	// (lthn_ple_gate_gelu_qmv — qmv_fast_impl verbatim + the gelu at the
-	// store, output bytes equal to the composed pair's). nil keeps the
-	// composed two-stage path (bf16 PLE weights, missing kernel, geometry).
-	recordGateGelu func(li int, c metal.MTLIndirectComputeCommand, vec, pli metal.MTLBuffer, pliOff uint, out metal.MTLBuffer)
 }
 
 func (p *archICBPLEPlan) enabled() bool {
@@ -1591,12 +1586,9 @@ func recordArchICB(
 			kRopeBindIdx = 2
 		}
 		if hasPLE {
-			switch {
-			case ple.recordGateGelu != nil:
-				opsPerLayer += 4 // fused gate+gelu·pli, qmv proj, rms, residual add
-			case hasFusedGELU:
+			if hasFusedGELU {
 				opsPerLayer += 5 // qmv gate, fused gelu*pli, qmv proj, rms, residual add
-			default:
+			} else {
 				opsPerLayer += 14 // qmv gate, 10-op gelu*pli chain, qmv proj, rms, residual add
 			}
 		}
@@ -1900,9 +1892,7 @@ func recordArchICB(
 			}
 			if hasPLE {
 				pleOff := uint(li * ple.pliDim * bf16Size)
-				if ple.recordGateGelu != nil { // fused gate qmv + gelu·pli — one op, one fewer barrier stage (#373)
-					ple.recordGateGelu(li, emit(), outBuf, pleInput, pleOff, pleGated)
-				} else if hasFusedGELU { // fused gelu(pleGate)·pleInput — the binary-op ABI with the gelu pipeline (pleInput at offset)
+				if hasFusedGELU { // fused gelu(pleGate)·pleInput — the binary-op ABI with the gelu pipeline (pleInput at offset)
 					ple.recordGate(li, emit(), outBuf, pleGate)
 					setBinOffsets(emit(), geluICBPSO, pleGate, 0, pleInput, pleOff, pleGated, 0, ple.pliDim)
 				} else {
