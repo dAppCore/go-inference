@@ -25,6 +25,12 @@ import (
 // ArchSession. Zero-copy: the weights view the shard mmap, held on the session via shardBuffers for
 // its life (Close unmaps).
 func LoadDir(dir string, maxLen int) (*ArchSession, error) {
+	if maxLen <= 0 {
+		// The loader owns the context default (checkpoint window, capped) — the
+		// speculative pair serve passes an unset -context straight through here
+		// and NewArch*Session rejects 0 (the post-601ac4e pair-serve break).
+		maxLen = resolveDefaultContext(model.ProbeDirContextWindow(dir))
+	}
 	lm, dm, err := loadRegistered(dir)
 	if err != nil {
 		return nil, err
