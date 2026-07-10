@@ -85,15 +85,22 @@ func runVerifyBlocks(t *testing.T, sess *ArchSession, blocks [][]int32) [][][]by
 
 // TestVerifyTailICBRecordsReplaysAndMatchesLive pins the #372 verify-tail ICB
 // contract on the e2b-shaped quant PLE fixture: block 1 RECORDS the
-// pos-independent per-layer tail alongside its own live encodes, block 2
-// REPLAYS the recorded ranges (the engagement counter proves it), block 3's
-// truncated K misses the validity key and runs live — and every block's
-// hiddens are byte-identical to a session with the lane force-disabled.
+// pos-independent per-layer tail for K=5 alongside its own live encodes,
+// block 2 REPLAYS the recorded ranges (the engagement counter proves it),
+// block 3's truncated K=3 records ITS OWN width (the adaptive draft cap
+// wobbles K in production — recordings are per-K), block 4 replays the K=3
+// recording — and every block's hiddens are byte-identical to a session with
+// the lane force-disabled.
 func TestVerifyTailICBRecordsReplaysAndMatchesLive(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
 	}
-	blocks := [][]int32{{1, 5, 3, 2, 7}, {4, 9, 6, 8, 2}, {3, 1, 5}}
+	blocks := [][]int32{{1, 5, 3, 2, 7}, {4, 9, 6, 8, 2}, {3, 1, 5}, {2, 6, 4}}
+
+	// the lane is opt-in (break-even receipt) — force it on for the candidate.
+	wasDisabled := verifyTailICBDisabled
+	verifyTailICBDisabled = false
+	t.Cleanup(func() { verifyTailICBDisabled = wasDisabled })
 
 	// control: the live tail encodes for every block.
 	verifyTailICBDisabledForTest = true
@@ -102,31 +109,34 @@ func TestVerifyTailICBRecordsReplaysAndMatchesLive(t *testing.T) {
 	want := runVerifyBlocks(t, control, blocks)
 	verifyTailICBDisabledForTest = false
 
-	// candidate: record on block 1, replay on block 2, key-miss live on block 3.
+	// candidate: record K=5 on block 1, replay it on block 2, record K=3 on
+	// block 3, replay it on block 4.
 	candidate := newVerifyTailQuantFixture(t)
 	base := verifyTailReplays.Load()
 	got := runVerifyBlocks(t, candidate, blocks)
 
-	vt := candidate.state.verifyTail
-	if vt == nil {
-		t.Fatal("block 1 did not record the verify-tail ICB — the replay lane never armed")
-	}
-	if vt.key.k != len(blocks[0]) {
-		t.Fatalf("recorded key K = %d, want %d", vt.key.k, len(blocks[0]))
-	}
 	nLayers := len(candidate.state.specs)
-	for li := 1; li <= nLayers-2; li++ {
-		if vt.ranges[li].Length == 0 {
-			t.Fatalf("interior layer %d: no recorded range", li)
+	for _, k := range []int{5, 3} {
+		vt := candidate.state.verifyTail[k]
+		if vt == nil {
+			t.Fatalf("no verify-tail ICB recorded for K=%d — the replay lane never armed", k)
+		}
+		if vt.key.k != k {
+			t.Fatalf("K=%d recording carries key K=%d", k, vt.key.k)
+		}
+		for li := 1; li <= nLayers-2; li++ {
+			if vt.ranges[li].Length == 0 {
+				t.Fatalf("K=%d interior layer %d: no recorded range", k, li)
+			}
+		}
+		if vt.ranges[0].Length != 0 || vt.ranges[nLayers-1].Length != 0 {
+			t.Fatalf("K=%d: edge layers must stay live (unexpected recorded range)", k)
 		}
 	}
-	if vt.ranges[0].Length != 0 || vt.ranges[nLayers-1].Length != 0 {
-		t.Fatal("edge layers must stay live (unexpected recorded range)")
-	}
-	// exactly block 2 replays: (nLayers-2) interior executes. Block 1 is the
-	// recording pass (0 executes); block 3's K=3 misses the k=5 key (0).
-	if replays := verifyTailReplays.Load() - base; replays != int64(nLayers-2) {
-		t.Fatalf("replay executes = %d, want %d (block 2's interior layers only)", replays, nLayers-2)
+	// blocks 2 and 4 replay their widths' interiors; blocks 1 and 3 are
+	// recording passes (0 executes).
+	if replays := verifyTailReplays.Load() - base; replays != int64(2*(nLayers-2)) {
+		t.Fatalf("replay executes = %d, want %d (blocks 2+4's interior layers)", replays, 2*(nLayers-2))
 	}
 
 	for b := range blocks {

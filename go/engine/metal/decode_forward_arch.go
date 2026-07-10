@@ -222,14 +222,17 @@ type archDecodeState struct {
 	// trades at, and the routing is deterministic (every verify folds), so
 	// live and restored sessions write the same lane's bytes.
 	verifyFoldSmallK bool
-	// verifyTail is the recorded MTP verify-tail ICB (#372): the fold's
-	// pos-independent per-layer tail (O-projection → layer scalar) recorded once
-	// during the first eligible verify and replayed per layer thereafter.
-	// verifyTailRec is live only during the recording pass; verifyTailTried
-	// stops a failed recording from re-arming every block.
-	verifyTail      *verifyTailICB
+	// verifyTail holds the recorded MTP verify-tail ICBs (#372), keyed by the
+	// batch width K: the fold's pos-independent per-layer tail (O-projection →
+	// layer scalar) records once per K during that width's first eligible
+	// verify and replays per layer thereafter. Per-K because the adaptive
+	// draft cap wobbles the verify width block-to-block (5/6/7…) — a single-K
+	// recording never replayed. verifyTailRec is live only during a recording
+	// pass; verifyTailTried stops a failed recording from re-arming every
+	// block. Both maps are bounded by the draft-cap range (K ≤ qmvRowsMax).
+	verifyTail      map[int]*verifyTailICB
 	verifyTailRec   *verifyTailRecorder
-	verifyTailTried bool
+	verifyTailTried map[int]bool
 	// rowAttnCaps, when non-nil, overrides each batch row's visible attention
 	// length (absolute kv rows) — the bidirectional image-span prefill
 	// (gemma4_unified): span rows see through to their span end. Legal only on
