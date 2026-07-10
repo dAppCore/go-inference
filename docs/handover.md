@@ -71,7 +71,12 @@ tok/turn while the client resends full history.
   prefill 146s→14.3s @32K (bf16 batched 8.2s — the gap is the GEMM lane
   forced to multiQ on q8), MTP verify engages at shallow depth. Still
   declining: KV save/restore, per-row shapes, the deep+small 2-pass corner.
-  12B/31B receipts pending (kv1/kv4 hd512 globals — same kernels).
+  12B receipt CALIBRATES the campaign: decode 16K flat (57.1==57.1), 32K
+  −2.5% (q8 53.1-53.8 vs bf16 54.3-56.5, 3 runs each) — on compute-dominated
+  tokens the int8 read overhead ≈ the bandwidth saved. q8-KV's tok/s value
+  concentrates on FAST models (e2b +2.8-3.9%); on 12B/31B it is a RAM lever
+  only (global KV 8→4 GiB at 128K on 12B). Stays opt-in; the right default
+  is per-goal (fleet RAM boxes yes, tok/s-first no).
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
