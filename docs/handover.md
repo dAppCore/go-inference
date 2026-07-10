@@ -65,10 +65,19 @@ tok/turn while the client resends full history.
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
-- **#371** — 13 pre-existing metal_runtime failures (q8 tolerance, ICB prefill
-  serial-parity, RestoreKV budgets). They predate the campaigns above — do not
-  panic when the FULL sweep fails; the targeted suites are green. Suspected
-  mlx v0.32.0 bump fallout.
+- **#371 (closed — the FULL metal_runtime sweep is GREEN again)** — the 16
+  failures had three roots, none of them the suspected mlx bump (falsified:
+  pre-bump Go + current metallib passes). (a) the q8 KV default quantised the
+  paged pool on lanes whose decode never reads it — q8 now defaults only on
+  the paged-decode lane (MoE/trace = 26B), `8fc251d`; (b) the fused PLE
+  gate+gelu ICB op was reverted from the arch recording — byte-identical in
+  every standalone probe yet drifting in the recorded replay from the second
+  step (in-situ cause unresolved; its receipt was ~3µs), `96e0cc3`; (c) the
+  coverage guards now pin the loader-owns-default context contract,
+  `011a41d`. A red FULL sweep is a REGRESSION again — treat it as such.
+  Residual seam for #367: on the 26B paged-q8 lane the batched pass attends
+  its own fresh K/V rows pre-quantisation (serial attends post-round-trip) —
+  unpinned, price a fresh-row round-trip if 26B MTP revives.
 - **#366 / #360** — the frontier lanes (KV temporal coherence; Lemma v2
   training), waiting on their own starts.
 
