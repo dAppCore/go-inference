@@ -612,7 +612,7 @@ func (s *ArchSession) stateLayerViewsRefreshing(needed map[int]bool) ([]sessionS
 			if err := s.refreshPagedStateLayerViews(s.stateBlockViews, needed); err != nil {
 				return nil, err
 			}
-		} else if err := s.state.icb.refreshQ8SnapshotMirrors(); err != nil {
+		} else if err := s.state.icb.refreshQ8SnapshotMirrors(s.pos); err != nil {
 			// cached views hold q8 mirror pointers — re-dequantise so a second
 			// save sees the live cache, not the previous sleep's bytes.
 			return nil, err

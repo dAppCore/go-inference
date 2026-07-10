@@ -149,7 +149,7 @@ func (s *ArchSession) RestoreState(data []byte) error {
 		off += n
 	}
 	if s.state.icb != nil {
-		s.state.icb.flushQ8Mirrors() // q8 layers: requantise the restored bf16 rows
+		s.state.icb.flushQ8Mirrors(pos) // q8 layers: requantise the restored rows
 	}
 	s.pos = pos
 	s.cachedIDs = s.cachedIDs[:0]
@@ -329,7 +329,7 @@ func (s *ArchSession) snapshotCacheViews(li int) (metal.MTLBuffer, metal.MTLBuff
 			// MIRROR — every snapshot codec reads/writes bf16-shaped bytes, so
 			// snapshots stay portable to and from bf16 sessions. Restore paths
 			// flush the mirrors back through the quantiser when they finish.
-			kBuf, kPtr, err := s.state.icb.q8SnapshotMirror(li)
+			kBuf, kPtr, err := s.state.icb.q8SnapshotMirror(li, s.pos)
 			if err != nil {
 				return nil, nil, nil, nil, err
 			}
