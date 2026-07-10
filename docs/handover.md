@@ -166,6 +166,15 @@ the precedents, and `bytes.Equal` gates are achievable, not aspirational.
   silently ignored; the q8 lanes were bf16 reruns identical to the ms).
   `task build` before ANY receipt run, and treat impossibly-identical lanes
   as a stale-binary tell, not a result.
+- **objc `new*` buffers leak unless YOU release them** (third scar in this
+  class: the MoE re-upload leak, the resident-cache eviction leak). The
+  test sweep stacked ~10 GB of IOAccelerator-dirty per real-model test and
+  drove machine memory pressure red — `653aef1` releases at ranged eviction.
+  Two rules from its falsifications: release ONLY where the owner is
+  provably done (releasing at reset-for-test dangled live fixtures — wrong
+  tokens, then SIGSEGV), and don't chase ps-RSS — clean mmap pages inflate
+  it harmlessly; `vmmap --summary`'s physical footprint + IOAccelerator
+  DIRTY column is the pressure that matters.
 - `MLX_METALLIB_PATH` must be THIS repo's `build/dist/lib/mlx.metallib` —
   go-mlx's lacks the lthn kernels ("kernel not found" on runtime tests).
 - `task metallib:kernels` rebuilds the lthn library; new `.metal` files under
