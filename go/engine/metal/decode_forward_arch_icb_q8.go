@@ -426,6 +426,32 @@ func (r *archICBReplay) quantiseQ8From(mirror, cache, scales metal.MTLBuffer, ro
 	}
 }
 
+// releaseQ8Mirrors frees every materialised bf16 mirror pair and reports
+// whether anything was released. The q8 GEMM prefix materialises
+// full-cacheRows mirrors during deep prompt prefills (31B@256K: ~17GB — the
+// 64.9GB-footprint session that swapped a 96GB box), and decode never reads
+// them, so the prefill→decode seam returns the memory. Consumers re-ensure
+// lazily and per-layer: -state sleeps and the MTP drafter export
+// re-materialise only the layers they read. The CALLER must drop any cached
+// stateLayerViews — they hold the released mirrors' pointers.
+func (r *archICBReplay) releaseQ8Mirrors() bool {
+	if r == nil || r.kvQ8 == nil || r.kvQ8.kMirrors == nil {
+		return false
+	}
+	released := false
+	for li := range r.kvQ8.enabled {
+		if r.kvQ8.kMirrors[li] == nil {
+			continue
+		}
+		releaseDeviceBuffer(r.kvQ8.kMirrors[li])
+		releaseDeviceBuffer(r.kvQ8.vMirrors[li])
+		r.kvQ8.kMirrors[li] = nil
+		r.kvQ8.vMirrors[li] = nil
+		released = true
+	}
+	return released
+}
+
 // refreshQ8SnapshotMirrors re-dequantises every ALREADY-MATERIALISED mirror —
 // the cached stateLayerViews hold mirror pointers across saves, and the live
 // q8 caches move on between sleeps.
