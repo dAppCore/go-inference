@@ -676,7 +676,15 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					return decline("q8 icb caches: owner missing kNorm (per-row landing shape)")
 				}
 				if !(basePos+K < sdpa2PassMinKV || K >= steelGEMMMinRows) {
-					return decline("q8 icb caches: deep small batch needs the 2-pass (sequential replay)")
+					// the deep+small corner (MTP verify past the knee) rides the
+					// per-row 2-pass q8 — require the pipeline pair up front so a
+					// mid-encode resolve failure can never half-encode a layer.
+					if _, perr := sdpaVector2Pass1Q8Pipeline(lhd, sdpa2PassBlocks(basePos+K, kvHeadsOf(s.specs[li], s.nKVHeads))); perr != nil {
+						return decline("q8 icb caches: no 2-pass q8 kernel for head dim")
+					}
+					if _, perr := sdpaVector2Pass2PipelineForHeadDim(lhd); perr != nil {
+						return decline("q8 icb caches: no 2-pass merge kernel for head dim")
+					}
 				}
 			}
 		}
@@ -1207,7 +1215,16 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				if useMultiQ {
 					continue // the K SDPAs run as one multi-query dispatch after every landing
 				}
-				if err = encSDPADecodeAt(enc, s.asc, qSlab, qRow, ownerK, ownerV, attnSlab, qRow, s.nHeads, lkv, lhd, n,
+				if ownerQ8 {
+					// deep-verify q8 (#367): the same knee + blocks ladder as the
+					// bf16 row, reading the owner's int8 cache + scale planes.
+					if err = encSDPADecodeQ8At(enc, s.asc, qSlab, qRow, ownerK, ownerV,
+						s.icb.kvQ8.kScales[ownIdx], s.icb.kvQ8.vScales[ownIdx], attnSlab, qRow, s.nHeads, lkv, lhd, n,
+						int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+				} else if err = encSDPADecodeAt(enc, s.asc, qSlab, qRow, ownerK, ownerV, attnSlab, qRow, s.nHeads, lkv, lhd, n,
 					int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale, 0); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err

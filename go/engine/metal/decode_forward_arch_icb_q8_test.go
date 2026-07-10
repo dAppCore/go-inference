@@ -367,3 +367,82 @@ func TestKVQ8ICBStateSleepWakeRoundTrip(t *testing.T) {
 	}
 	t.Logf("q8 snapshot woke a bf16 session within quantisation distance over %d steps", len(cont))
 }
+
+// TestKVQ8ICBDeepVerifyEngages pins the deep-verify q8 branch (#367, the
+// MTP+q8 default stance): a verify block past sdpa2PassMinKV with small K —
+// the corner that used to decline to the sequential replay — now ENGAGES the
+// batched fold, routing each row through the per-row 2-pass q8 read, and
+// tracks a sequential q8 twin within quantisation distance.
+func TestKVQ8ICBDeepVerifyEngages(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	deep := newKVQ8ICBFixture(t)
+	seq := newKVQ8ICBFixture(t)
+	if !deep.state.icb.hasKVQ8() {
+		t.Fatal("fixture did not arm q8")
+	}
+
+	// prefill past the 2-pass knee via the batched fold (one call)
+	warm := make([]int32, sdpa2PassMinKV+6)
+	for i := range warm {
+		warm[i] = int32((i*11 + 2) % 60)
+	}
+	embs := make([][]byte, len(warm))
+	for i, id := range warm {
+		emb, err := deep.embedID(id)
+		if err != nil {
+			t.Fatalf("embedID: %v", err)
+		}
+		embs[i] = append([]byte(nil), emb...)
+	}
+	var ok bool
+	var err error
+	withAutoreleasePool(func() {
+		_, ok, err = deep.state.stepTokensBatchedDense(embs, 0)
+	})
+	if err != nil || !ok {
+		t.Fatalf("prefill fold: ok=%v err=%v", ok, err)
+	}
+	deep.pos = len(warm)
+	for _, id := range warm {
+		if _, serr := seq.stepID(id); serr != nil {
+			t.Fatalf("seq warm: %v", serr)
+		}
+	}
+
+	// the corner: basePos+K >= sdpa2PassMinKV with K < steelGEMMMinRows
+	draft := []int32{3, 7, 1, 9, 5}
+	deep.state.verifyFoldSmallK = true
+	vh, batched, verr := deep.verifyBatchedHiddens(draft)
+	deep.state.verifyFoldSmallK = false
+	if verr != nil {
+		t.Fatalf("verifyBatchedHiddens: %v", verr)
+	}
+	if !batched {
+		t.Fatal("deep verify must ENGAGE under q8 (the per-row 2-pass q8 branch)")
+	}
+	for i, id := range draft {
+		hs, serr := seq.stepID(id)
+		if serr != nil {
+			t.Fatalf("seq draft stepID(%d): %v", i, serr)
+		}
+		worst, hscale := 0.0, 0.0
+		for j := 0; j+1 < len(hs); j += 2 {
+			a := float64(bf16ToF32(vh[i][j], vh[i][j+1]))
+			b := float64(bf16ToF32(hs[j], hs[j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+			if m := math.Abs(b); m > hscale {
+				hscale = m
+			}
+		}
+		if worst > 0.05*math.Max(hscale, 1) {
+			t.Fatalf("deep verify row %d diverges structurally: worst |Δ|=%g (scale %g)", i, worst, hscale)
+		}
+	}
+	t.Logf("deep q8 verify engaged at basePos=%d and tracked sequential over %d rows", len(warm), len(draft))
+}
