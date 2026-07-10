@@ -89,18 +89,26 @@ tok/turn while the client resends full history.
   dequant/quant kernel pair fixed it (kvExport → 2.6ms steady, q8+MTP 85.6 →
   125.6 tok/s = bf16+MTP's 128.0 at the same 44% acceptance); (b) q8 plain
   decode @16K is at PARITY (152.0 vs 151.0), so the read-format fix does NOT
-  gate MTP+q8. It still gates 256K: the q8 2-pass reads at ~105 GB/s
-  effective vs bf16's 246 (wall 1.25× on 0.52× bytes), invisible at 16K
-  where the scan is a small share, decisive when the global scan dominates
-  at depth. Cheap first lever there: the strided→contiguous-chunk key walk
-  in the 2-pass q8 kernel (TestDiagQ8ReadKernelCost decides it, no model
-  load); the scales-in-row format change only if the walk doesn't move it.
-  MTP-at-depth economics, same receipt: MTP@16K loses on BOTH formats
-  (127-128 vs ~151 plain) even at 44% acceptance — draft AND verify pay the
-  depth scan — and the re-engage gate correctly oscillates it off, which is
-  exactly the adaptive default the stance needs. Remaining: the 256K cap
-  lift under q8 (+ the read-walk receipt at 64K+), the N-bit knob, the
-  default flip with 256K receipts. Full roadmap in the task metadata.
+  gate MTP+q8. The read-efficiency micro-fixes are ALL FALSIFIED by
+  instrument (2026-07-10): chunked key walk 105→95 GB/s (worse — the
+  strided TGs already cooperate on aggregate), scale-stream stubbed to 1.0
+  gives 105→107 (the separate scale plane is FREE), char4 already dead —
+  the q8 2-pass is per-iteration ISSUE-bound (same row-iterations as bf16
+  at half the bytes each), so only a fat-iteration kernel redesign (#373's
+  fat-dispatch lesson) moves it. The live depth matrix (e2b-4bit,
+  log-continuation prompts, full decodes) prices when that matters: q8
+  decode parity holds through 64K (124.9 vs 124.8) and opens to −11% at
+  ~124K (100.4 vs 89.2) — the redesign gates only the DEEP half of 256K
+  decode. The LOUDER 256K gate is Q8 PREFILL: 1.5× bf16 @16K → 2.65× @64K
+  → 3.6× @124K (307s vs 85s) — the slice-C seam (GEMM lane forced to
+  multiQ + the landing round-trip) scales super-linearly and is the next
+  build. MTP-at-depth economics: MTP@16K loses on BOTH formats (127-128 vs
+  ~151 plain) even at 44% acceptance — draft AND verify pay the depth
+  scan — and the re-engage gate correctly oscillates it off, which is
+  exactly the adaptive default the stance needs. Remaining: the q8 prefill
+  lane, the 256K cap lift, the deep-decode kernel redesign, the N-bit
+  knob, the default flip with 256K receipts. Full roadmap in the task
+  metadata.
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
