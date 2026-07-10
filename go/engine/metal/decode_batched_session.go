@@ -531,21 +531,46 @@ func (s *archDecodeState) encBatchedEpilogueRows(enc metal.MTLComputeCommandEnco
 			}
 			gatePacked, gateScales, gateBiases := quantWeightViews(pl.gate)
 			projPacked, projScales, projBiases := quantWeightViews(pl.proj)
-			if err := encQMMTBF16At(enc, gatePacked.buf, gateScales.buf, gateBiases.buf, outBuf, gateSlab, gatePacked.off, gateScales.off, gateBiases.off, outBase, 0, rows, s.pliDim, s.dModel, gateGroupSize, gateBits); err != nil {
-				return err
-			}
 			pliBase := uint(li * rows * s.pliDim * bf16Size)
-			if err := encGeluGateMulFusedTo(enc, gateSlab, pleSlabBuf, multSlab, 0, pliBase, 0, rows*s.pliDim); err != nil {
-				return err
+			// MTP verify blocks (small K) collapse the chain's five dispatches to
+			// three: gate+gelu fused, the proj qmm_t, rms+add fused — the stage is
+			// launch-bound there (#372: the gpu-trace bucket held 3.8ms at K=5 AND
+			// K=33). Same rounding stations; the gate matvec moves from qmm_t's
+			// MMA order to the qgemv order (the fold's token-identity tier).
+			// handled=false (older metallib) keeps the composed chain below.
+			fusedChain := false
+			if s.verifyFoldSmallK {
+				handled, gerr := encPLEGateGeluRows(enc, gatePacked, gateScales, gateBiases,
+					outBuf, outBase, pleSlabBuf, pliBase, multSlab, 0, rows, s.dModel, s.pliDim, gateGroupSize, gateBits)
+				if gerr != nil {
+					return gerr
+				}
+				if handled {
+					if err := encQMMTBF16At(enc, projPacked.buf, projScales.buf, projBiases.buf, multSlab, projSlab, projPacked.off, projScales.off, projBiases.off, 0, 0, rows, s.dModel, s.pliDim, projGroupSize, projBits); err != nil {
+						return err
+					}
+					if err := encRMSNormResidualRowsBF16At(enc, projSlab, residentBytes(pl.postNorm), outBuf, outBuf, 0, 0, outBase, outBase, rows, s.dModel, s.eps); err != nil {
+						return err
+					}
+					fusedChain = true
+				}
 			}
-			if err := encQMMTBF16At(enc, projPacked.buf, projScales.buf, projBiases.buf, multSlab, projSlab, projPacked.off, projScales.off, projBiases.off, 0, 0, rows, s.dModel, s.pliDim, projGroupSize, projBits); err != nil {
-				return err
-			}
-			if err := encRMSNormRowsBF16(enc, projSlab, residentBytes(pl.postNorm), normSlab, 0, 0, 0, rows, s.dModel, s.eps); err != nil {
-				return err
-			}
-			if err := encAddBF16To(enc, outBuf, normSlab, outBuf, outBase, 0, outBase, rows*s.dModel); err != nil {
-				return err
+			if !fusedChain {
+				if err := encQMMTBF16At(enc, gatePacked.buf, gateScales.buf, gateBiases.buf, outBuf, gateSlab, gatePacked.off, gateScales.off, gateBiases.off, outBase, 0, rows, s.pliDim, s.dModel, gateGroupSize, gateBits); err != nil {
+					return err
+				}
+				if err := encGeluGateMulFusedTo(enc, gateSlab, pleSlabBuf, multSlab, 0, pliBase, 0, rows*s.pliDim); err != nil {
+					return err
+				}
+				if err := encQMMTBF16At(enc, projPacked.buf, projScales.buf, projBiases.buf, multSlab, projSlab, projPacked.off, projScales.off, projBiases.off, 0, 0, rows, s.dModel, s.pliDim, projGroupSize, projBits); err != nil {
+					return err
+				}
+				if err := encRMSNormRowsBF16(enc, projSlab, residentBytes(pl.postNorm), normSlab, 0, 0, 0, rows, s.dModel, s.eps); err != nil {
+					return err
+				}
+				if err := encAddBF16To(enc, outBuf, normSlab, outBuf, outBase, 0, outBase, rows*s.dModel); err != nil {
+					return err
+				}
 			}
 		}
 	}
