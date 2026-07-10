@@ -108,16 +108,21 @@ tok/turn while the client resends full history.
   the depth scan — and the re-engage gate correctly oscillates it off,
   which is exactly the adaptive default the stance needs. q8 is now at
   bf16 parity on every measured axis (decode, prefill, MTP, -state) while
-  halving global-KV bytes. **THE DEFAULT LANDED (`ae0636e`)**: q8 KV on by
-  default (kill switch `LTHN_KV_Q8_ICB=0` — the bf16 A/B anchor),
-  defaultContextCap 32768→262144 (unset context follows the checkpoint
-  window: e2b runs 128K, 26B/31B 256K), `-draft auto` already the serve
-  default. Live receipt with ZERO flags: e2b 124K prompt → 104.6 tok/s
-  decode, 69.6s prefill (the identical command errored at the old 32K
-  cap). Known banked cost: the q8 GEMM prefix mirrors allocate
-  full-cacheRows bf16 per global owner on deep prompts (e2b@128K ~1.9GB,
-  31B@256K ~17GB) — free-after-prefill is the follow-up lever. Remaining:
-  the 31B@256K flagship receipt, the N-bit knob (q6/q4 opt-in tiers).
+  halving global-KV bytes. **THE DEFAULT LANDED (`ae0636e`, RAM-corrected
+  `df61abf`)**: q8 KV on by default (kill switch `LTHN_KV_Q8_ICB=0` — the
+  bf16 A/B anchor), defaultContextCap 32768→131072 (unset context follows
+  the checkpoint window to 128K; e2b runs its full window), `-draft auto`
+  already the serve default. Live receipt with ZERO flags: e2b 124K
+  prompt → 104.6 tok/s decode, 69.6s prefill (the identical command
+  errored at the old 32K cap). The 256K default was tried and PULLED BACK
+  the same day: a 31B all-defaults 250K run hit a 64.9GB footprint
+  (+19.5GB swap) on the 96GB box — weights ~17GB + q8 KV 8.6GB + 17GB
+  GEMM-prefix mirrors + ~19GB UNATTRIBUTED. Mirrors now free at the
+  prefill→decode seam (`df61abf`; -state and the drafter export
+  re-materialise per-layer). The 256K re-lift is gated on the
+  deep-session allocation census (find the 19GB; suspects: dense
+  sessions' paged-KV prealloc, GEMM S-scratch at maxLen cols) + a
+  RAM-aware default. Then the N-bit knob.
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
