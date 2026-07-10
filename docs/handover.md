@@ -93,22 +93,23 @@ tok/turn while the client resends full history.
   instrument (2026-07-10): chunked key walk 105→95 GB/s (worse — the
   strided TGs already cooperate on aggregate), scale-stream stubbed to 1.0
   gives 105→107 (the separate scale plane is FREE), char4 already dead —
-  the q8 2-pass is per-iteration ISSUE-bound (same row-iterations as bf16
-  at half the bytes each), so only a fat-iteration kernel redesign (#373's
-  fat-dispatch lesson) moves it. The live depth matrix (e2b-4bit,
-  log-continuation prompts, full decodes) prices when that matters: q8
-  decode parity holds through 64K (124.9 vs 124.8) and opens to −11% at
-  ~124K (100.4 vs 89.2) — the redesign gates only the DEEP half of 256K
-  decode. The LOUDER 256K gate is Q8 PREFILL: 1.5× bf16 @16K → 2.65× @64K
-  → 3.6× @124K (307s vs 85s) — the slice-C seam (GEMM lane forced to
-  multiQ + the landing round-trip) scales super-linearly and is the next
-  build. MTP-at-depth economics: MTP@16K loses on BOTH formats (127-128 vs
-  ~151 plain) even at 44% acceptance — draft AND verify pay the depth
-  scan — and the re-engage gate correctly oscillates it off, which is
-  exactly the adaptive default the stance needs. Remaining: the q8 prefill
-  lane, the 256K cap lift, the deep-decode kernel redesign, the N-bit
-  knob, the default flip with 256K receipts. Full roadmap in the task
-  metadata.
+  the q8 2-pass is per-iteration ISSUE-bound; a fat-iteration redesign is
+  the only shape that would move it, and the live matrix says it is NOT
+  needed: q8 decode holds PARITY at 16/32/64/124K (clean 124K pair 100.6
+  vs 103.2 — an earlier "−11% deep decode" was a pressured-machine
+  artefact; depth receipts want a quiet machine and full decodes, never
+  8-token samples). The q8 PREFILL tax (1.5→3.6× with depth, 307s vs 85s
+  at 124K) was the GEMM lane declining q8 — fixed by the q8 GEMM prefix
+  (`4751f9a`): the owner dequantises its attended prefix into the layer's
+  snapshot mirrors in-encoder and the steel GEMM reads the mirrors.
+  Prefill now 1.03-1.04× bf16 at every depth (9.9/26.9/70.8s at
+  32/64/124K). MTP-at-depth economics: MTP@16K loses on BOTH formats
+  (127-128 vs ~151 plain) even at 44% acceptance — draft AND verify pay
+  the depth scan — and the re-engage gate correctly oscillates it off,
+  which is exactly the adaptive default the stance needs. q8 is now at
+  bf16 parity on every measured axis (decode, prefill, MTP, -state) while
+  halving global-KV bytes. Remaining for the stance: the 256K cap lift +
+  256K receipts, the N-bit knob, the default flip.
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
