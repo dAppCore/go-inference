@@ -346,6 +346,56 @@ func gpuHasKVQ8StoreRows() bool {
 	return err == nil && pso != nil && pso.GetID() != 0
 }
 
+var (
+	kvQ8DequantRowsPSO  metal.MTLComputePipelineState
+	kvQ8DequantRowsErr  error
+	kvQ8DequantRowsDone bool
+)
+
+func kvQ8DequantRowsPipeline() (metal.MTLComputePipelineState, error) {
+	sdpaVectorQ8PSOMu.Lock()
+	defer sdpaVectorQ8PSOMu.Unlock()
+	if kvQ8DequantRowsDone {
+		return kvQ8DequantRowsPSO, kvQ8DequantRowsErr
+	}
+	kvQ8DequantRowsDone = true
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		kvQ8DequantRowsErr = core.NewError("native.kvQ8DequantRowsPipeline: custom library unavailable")
+		return nil, kvQ8DequantRowsErr
+	}
+	fn := customLibrary.NewFunctionWithName("lthn_kv_q8_dequant_rows_bf16")
+	if fn == nil || fn.GetID() == 0 {
+		kvQ8DequantRowsErr = core.NewError("native.kvQ8DequantRowsPipeline: kernel lthn_kv_q8_dequant_rows_bf16 not found")
+		return nil, kvQ8DequantRowsErr
+	}
+	kvQ8DequantRowsPSO, kvQ8DequantRowsErr = device.NewComputePipelineStateWithFunctionError(fn)
+	return kvQ8DequantRowsPSO, kvQ8DequantRowsErr
+}
+
+// encKVQ8DequantRows expands `rows` contiguous int8 cache rows + f32 scale
+// rows back into contiguous bf16 rows in one dispatch — the store kernel's
+// inverse, behind the snapshot mirrors and the drafter's target-KV export.
+func encKVQ8DequantRows(enc metal.MTLComputeCommandEncoder, cache, scales, mirror metal.MTLBuffer, rows, kvDim int) error {
+	pso, err := kvQ8DequantRowsPipeline()
+	if err != nil {
+		return err
+	}
+	if kvDim <= 0 || kvDim%kvQ8GroupSize != 0 {
+		return core.NewError("native.encKVQ8DequantRows: kvDim must be a positive multiple of the q8 group size")
+	}
+	sink := encSink{enc}
+	sink.setPSO(pso)
+	sink.setBuf(cache, 0, 0)
+	sink.setBuf(scales, 0, 1)
+	sink.setBuf(mirror, 0, 2)
+	sink.setI32(int32(kvDim), 3)
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: uint(kvDim / kvQ8GroupSize), Height: uint(rows), Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+	)
+	return nil
+}
+
 // encKVQ8StoreRows quantises `rows` contiguous bf16 staging rows into
 // contiguous int8 cache rows + f32 scale rows in one dispatch — the batched
 // prefill's landing. The cache/scale bindings carry the batch-base offsets

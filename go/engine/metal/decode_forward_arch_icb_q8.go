@@ -254,9 +254,40 @@ func (r *archICBReplay) q8SnapshotMirror(li int) (metal.MTLBuffer, *byte, error)
 			return nil, nil, core.NewError("native.q8SnapshotMirror: mirror allocation failed")
 		}
 	}
-	r.dequantiseQ8Into(li, r.kCaches[li], r.kvQ8.kScales[li], r.kvQ8.kMirrors[li], rows, kvd)
-	r.dequantiseQ8Into(li, r.vCaches[li], r.kvQ8.vScales[li], r.kvQ8.vMirrors[li], rows, kvd)
+	if !r.dequantQ8MirrorsGPU([]int{li}) {
+		r.dequantiseQ8Into(li, r.kCaches[li], r.kvQ8.kScales[li], r.kvQ8.kMirrors[li], rows, kvd)
+		r.dequantiseQ8Into(li, r.vCaches[li], r.kvQ8.vScales[li], r.kvQ8.vMirrors[li], rows, kvd)
+	}
 	return r.kvQ8.kMirrors[li], (*byte)(r.kvQ8.kMirrors[li].Contents()), nil
+}
+
+// dequantQ8MirrorsGPU refreshes the given layers' K+V mirrors on the GPU in
+// one command buffer — the kernel twin of dequantiseQ8Into. The host loop
+// costs ~100ms per call at 16K rows, and the drafter's target-KV export pays
+// it EVERY draft block; the kernel makes the refresh sub-ms. Returns false
+// (nothing written coherently — the caller host-loops) when the pipeline is
+// unavailable.
+func (r *archICBReplay) dequantQ8MirrorsGPU(layers []int) bool {
+	if _, err := kvQ8DequantRowsPipeline(); err != nil {
+		return false
+	}
+	ok := true
+	withAutoreleasePool(func() {
+		cb := commandBufferFast(queue)
+		enc := computeCommandEncoderFast(cb)
+		for _, li := range layers {
+			kvd := r.rowBytes[li] / bf16Size
+			rows := r.cacheRows[li]
+			if encKVQ8DequantRows(enc, r.kCaches[li], r.kvQ8.kScales[li], r.kvQ8.kMirrors[li], rows, kvd) != nil ||
+				encKVQ8DequantRows(enc, r.vCaches[li], r.kvQ8.vScales[li], r.kvQ8.vMirrors[li], rows, kvd) != nil {
+				ok = false
+			}
+		}
+		endEncodingFast(enc)
+		commitCommandBufferFast(cb)
+		waitUntilCompletedFast(cb)
+	})
+	return ok
 }
 
 // q8SnapshotMirrorV returns the V-side mirror buffer+pointer (q8SnapshotMirror
@@ -285,15 +316,60 @@ func (r *archICBReplay) flushQ8Mirrors() {
 	if r == nil || r.kvQ8 == nil || r.kvQ8.kMirrors == nil {
 		return
 	}
-	for li := range r.kvQ8.enabled {
-		if !r.kvQ8.on(li) || r.kvQ8.kMirrors[li] == nil {
-			continue
-		}
+	layers := r.q8MirrorLayers()
+	if len(layers) == 0 {
+		return
+	}
+	if r.quantQ8MirrorsGPU(layers) {
+		return
+	}
+	for _, li := range layers {
 		kvd := r.rowBytes[li] / bf16Size
 		rows := r.cacheRows[li]
 		r.quantiseQ8From(r.kvQ8.kMirrors[li], r.kCaches[li], r.kvQ8.kScales[li], rows, kvd)
 		r.quantiseQ8From(r.kvQ8.vMirrors[li], r.vCaches[li], r.kvQ8.vScales[li], rows, kvd)
 	}
+}
+
+// q8MirrorLayers lists the q8 layers whose mirrors are materialised — the
+// refresh/flush working set (mirrors allocate lazily; state-free sessions
+// have none).
+func (r *archICBReplay) q8MirrorLayers() []int {
+	var layers []int
+	for li := range r.kvQ8.enabled {
+		if r.kvQ8.on(li) && r.kvQ8.kMirrors[li] != nil {
+			layers = append(layers, li)
+		}
+	}
+	return layers
+}
+
+// quantQ8MirrorsGPU flushes the given layers' mirrors back into their int8
+// caches + scale planes on the GPU in one command buffer — the existing
+// batched-landing kernel (lthn_kv_q8_store_rows_bf16, bit-exact against the
+// host quantiser) pointed at the whole mirror. Returns false when the
+// pipeline is unavailable (the caller host-loops).
+func (r *archICBReplay) quantQ8MirrorsGPU(layers []int) bool {
+	if !gpuHasKVQ8StoreRows() {
+		return false
+	}
+	ok := true
+	withAutoreleasePool(func() {
+		cb := commandBufferFast(queue)
+		enc := computeCommandEncoderFast(cb)
+		for _, li := range layers {
+			kvd := r.rowBytes[li] / bf16Size
+			rows := r.cacheRows[li]
+			if encKVQ8StoreRows(enc, r.kvQ8.kMirrors[li], r.kCaches[li], 0, r.kvQ8.kScales[li], 0, rows, kvd) != nil ||
+				encKVQ8StoreRows(enc, r.kvQ8.vMirrors[li], r.vCaches[li], 0, r.kvQ8.vScales[li], 0, rows, kvd) != nil {
+				ok = false
+			}
+		}
+		endEncodingFast(enc)
+		commitCommandBufferFast(cb)
+		waitUntilCompletedFast(cb)
+	})
+	return ok
 }
 
 func (r *archICBReplay) quantiseQ8From(mirror, cache, scales metal.MTLBuffer, rows, kvd int) {
@@ -339,11 +415,16 @@ func (r *archICBReplay) refreshQ8SnapshotMirrors() error {
 	if r == nil || r.kvQ8 == nil || r.kvQ8.kMirrors == nil {
 		return nil
 	}
-	for li := range r.kvQ8.enabled {
-		if r.kvQ8.on(li) && r.kvQ8.kMirrors[li] != nil {
-			if _, _, err := r.q8SnapshotMirror(li); err != nil {
-				return err
-			}
+	layers := r.q8MirrorLayers()
+	if len(layers) == 0 {
+		return nil
+	}
+	if r.dequantQ8MirrorsGPU(layers) {
+		return nil
+	}
+	for _, li := range layers {
+		if _, _, err := r.q8SnapshotMirror(li); err != nil {
+			return err
 		}
 	}
 	return nil

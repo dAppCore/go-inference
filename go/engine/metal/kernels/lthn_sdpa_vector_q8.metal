@@ -434,6 +434,27 @@ struct KVQ8StoreRowsDims {
   }
 }
 
+// lthn_kv_q8_dequant_rows_bf16 — the mirror hop's inverse: `rows` contiguous
+// int8 cache rows + f32 scale rows expand back into bf16 rows in one dispatch.
+// This is the GPU twin of the host dequantise loop behind the -state snapshot
+// mirrors and the MTP drafter's target-KV export (the host loop costs ~100ms
+// per draft block at 16K). Bit-identical to the host path: float(code)·scale
+// in fp32, bf16 store rounds to nearest even — same two operations both sides.
+[[kernel]] void lthn_kv_q8_dequant_rows_bf16(
+    const device char*  codes  [[buffer(0)]],
+    const device float* scales [[buffer(1)]],
+    device bf16*        outp   [[buffer(2)]],
+    const constant KVQ8StoreRowsDims& D [[buffer(3)]],
+    uint2 g    [[threadgroup_position_in_grid]],
+    uint  lane [[thread_index_in_simdgroup]]) {
+  const uint base = g.x * 64;
+  if (base >= D.kvDim) return;
+  const float scale = scales[g.y * (D.kvDim / 64) + g.x];
+  const uint i0 = g.y * D.kvDim + base + lane * 2;
+  outp[i0] = bf16(float(codes[i0]) * scale);
+  outp[i0 + 1] = bf16(float(codes[i0 + 1]) * scale);
+}
+
 #define instantiate_lthn_sdpa_multiq_q8(dim)                              \
   template [[host_name("lthn_sdpa_multiq_q8_bf16_" #dim)]] [[kernel]]     \
   void lthn_sdpa_multiq_q8<dim>(                                          \
