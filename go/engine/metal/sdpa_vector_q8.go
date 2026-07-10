@@ -102,11 +102,18 @@ func sdpaVector2Pass1Q8Pipeline(headDim int, blocks int32) (metal.MTLComputePipe
 // sdpa_vector dispatch. Strides must be multiples of kvQ8GroupSize (the
 // kernel derives the scale-plane strides as stride/64).
 func emitSDPAVectorQ8[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q, k, v, out metal.MTLBuffer, kScales, vScales metal.MTLBuffer, kvByteOff, scaleByteOff uint, nBuf metal.MTLBuffer, nHeads, nKVHeads, n int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32) {
+	emitSDPAVectorQ8At(sink, pso, q, 0, k, v, out, 0, kScales, vScales, kvByteOff, scaleByteOff, nBuf, nHeads, nKVHeads, n, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+}
+
+// emitSDPAVectorQ8At is emitSDPAVectorQ8 with the query and output bound at
+// byte offsets — the batched pass's per-row deep loop keeps each row's q/attn
+// inside shared K-row slabs.
+func emitSDPAVectorQ8At[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q metal.MTLBuffer, qOff uint, k, v, out metal.MTLBuffer, outOff uint, kScales, vScales metal.MTLBuffer, kvByteOff, scaleByteOff uint, nBuf metal.MTLBuffer, nHeads, nKVHeads, n int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32) {
 	sink.setPSO(pso)
-	sink.setBuf(q, 0, 0)
+	sink.setBuf(q, qOff, 0)
 	sink.setBuf(k, kvByteOff, 1)
 	sink.setBuf(v, kvByteOff, 2)
-	sink.setBuf(out, 0, 3)
+	sink.setBuf(out, outOff, 3)
 	sink.setI32(int32(nHeads/nKVHeads), 4)
 	if nBuf != nil {
 		sink.setBuf(nBuf, 0, 5)
@@ -129,8 +136,14 @@ func emitSDPAVectorQ8[S dispatchSink](sink S, pso metal.MTLComputePipelineState,
 // (nKVHeads, 1, blocks) of (32, gqa, 1). Pass 2 is MLX's sdpa_vector_2pass_2
 // unchanged.
 func emitSDPAVector2Pass1Q8[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q, k, v, partials metal.MTLBuffer, sums, maxs metal.MTLBuffer, kScales, vScales metal.MTLBuffer, kvByteOff, scaleByteOff uint, nBuf metal.MTLBuffer, nHeads, nKVHeads, n, blocks int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32) {
+	emitSDPAVector2Pass1Q8At(sink, pso, q, 0, k, v, partials, sums, maxs, kScales, vScales, kvByteOff, scaleByteOff, nBuf, nHeads, nKVHeads, n, blocks, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+}
+
+// emitSDPAVector2Pass1Q8At is emitSDPAVector2Pass1Q8 with the query bound at a
+// byte offset (the per-row deep loop's slab rows).
+func emitSDPAVector2Pass1Q8At[S dispatchSink](sink S, pso metal.MTLComputePipelineState, q metal.MTLBuffer, qOff uint, k, v, partials metal.MTLBuffer, sums, maxs metal.MTLBuffer, kScales, vScales metal.MTLBuffer, kvByteOff, scaleByteOff uint, nBuf metal.MTLBuffer, nHeads, nKVHeads, n, blocks int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32) {
 	sink.setPSO(pso)
-	sink.setBuf(q, 0, 0)
+	sink.setBuf(q, qOff, 0)
 	sink.setBuf(k, kvByteOff, 1)
 	sink.setBuf(v, kvByteOff, 2)
 	sink.setBuf(partials, 0, 3)
@@ -355,5 +368,34 @@ func encKVQ8StoreRows(enc metal.MTLComputeCommandEncoder, stage metal.MTLBuffer,
 		metal.MTLSize{Width: uint(kvDim / kvQ8GroupSize), Height: uint(rows), Depth: 1},
 		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
 	)
+	return nil
+}
+
+// encSDPADecodeQ8At mirrors encSDPADecodeAt for a q8 cache — the same 2-pass
+// knee and blocks ladder, reading int8 + group scales. The deep-verify corner
+// (#367: MTP verify past sdpa2PassMinKV under q8) routes each row here; the
+// 2-pass intermediates stay the shared per-session scratch, exactly as the
+// bf16 rows.
+func encSDPADecodeQ8At(enc metal.MTLComputeCommandEncoder, sc attnScratch, q metal.MTLBuffer, qOff uint, k, v metal.MTLBuffer, kScales, vScales metal.MTLBuffer, out metal.MTLBuffer, outOff uint, nHeads, nKVHeads, headDim, n int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32) error {
+	if n >= sdpa2PassMinKV && sc.p2Partials != nil && !sdpa2PassDisabledForTest {
+		blocks := sdpa2PassBlocks(n, nKVHeads)
+		pso1, err := sdpaVector2Pass1Q8Pipeline(headDim, blocks)
+		if err != nil {
+			return err
+		}
+		pso2, err := sdpaVector2Pass2PipelineForHeadDim(headDim)
+		if err != nil {
+			return err
+		}
+		sink := encSink{enc}
+		emitSDPAVector2Pass1Q8At(sink, pso1, q, qOff, k, v, sc.p2Partials, sc.p2Sums, sc.p2Maxs, kScales, vScales, 0, 0, nil, nHeads, nKVHeads, n, int(blocks), kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
+		emitSDPA2Pass2At(sink, pso2, sc.p2Partials, sc.p2Sums, sc.p2Maxs, out, outOff, 1, nHeads, int(blocks))
+		return nil
+	}
+	pso, err := sdpaVectorQ8Pipeline(headDim)
+	if err != nil {
+		return err
+	}
+	emitSDPAVectorQ8At(encSink{enc}, pso, q, qOff, k, v, out, outOff, kScales, vScales, 0, 0, nil, nHeads, nKVHeads, n, kHeadStride, kSeqStride, vHeadStride, vSeqStride, scale)
 	return nil
 }
