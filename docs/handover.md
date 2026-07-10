@@ -71,12 +71,21 @@ tok/turn while the client resends full history.
   prefill 146s→14.3s @32K (bf16 batched 8.2s — the gap is the GEMM lane
   forced to multiQ on q8), MTP verify engages at shallow depth. Still
   declining: KV save/restore, per-row shapes, the deep+small 2-pass corner.
-  12B receipt CALIBRATES the campaign: decode 16K flat (57.1==57.1), 32K
-  −2.5% (q8 53.1-53.8 vs bf16 54.3-56.5, 3 runs each) — on compute-dominated
-  tokens the int8 read overhead ≈ the bandwidth saved. q8-KV's tok/s value
-  concentrates on FAST models (e2b +2.8-3.9%); on 12B/31B it is a RAM lever
-  only (global KV 8→4 GiB at 128K on 12B). Stays opt-in; the right default
-  is per-goal (fleet RAM boxes yes, tok/s-first no).
+  12B receipt CALIBRATES the campaign: decode 16K flat, 32K −2.5% — on
+  compute-dominated tokens the current int8 read overhead ≈ the bandwidth
+  saved; e2b gains +2.8-3.9%. `-state` works under q8 (`ee8632a`): the bf16
+  snapshot mirror makes sleep/wake BYTE-IDENTICAL and .kv portable both
+  directions (+0.9s wake at 16K = host mirror loops). The read-cost
+  instrument (`TestDiagQ8ReadKernelCost`) shows the q8 2-pass at 105 GB/s
+  effective vs bf16's 246 — char4 vectorisation FALSIFIED (no change); the
+  cause is strided small-visit DRAM efficiency + the separate scale line.
+  **THE TARGET STANCE (Snider): MTP + q8 + 256K context becomes the DEFAULT
+  once q8 completes** (q8 ≈ bf16 at ~1%; q6 −6% / q4 −22% stay user-choice).
+  That unparks, in order: the deep-verify q8 branch (MTP at depth must not
+  fall sequential), the read-format fix (scales interleaved into the row or
+  paired-row walks — worth 15-25% at 256K), the 256K context-cap lift under
+  q8, GPU mirror quant/dequant for deep wakes, then the default flip with
+  256K receipts. The roadmap lives in the task metadata.
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
