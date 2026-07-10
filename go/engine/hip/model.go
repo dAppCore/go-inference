@@ -108,13 +108,17 @@ func (m *rocmModel) Chat(ctx context.Context, messages []inference.Message, opts
 // Each prompt gets a single-token completion (max_tokens=1) while honoring
 // the sampling settings from opts. llama-server has no native classify
 // endpoint, so this simulates it.
-func (m *rocmModel) Classify(ctx context.Context, prompts []string, opts ...inference.GenerateOption) (
+func (m *rocmModel) Classify(ctx context.Context, prompts []string, opts ...inference.GenerateOption) core.Result {
+	return core.ResultOf(m.classifyResults(ctx, prompts, opts...))
+}
+
+func (m *rocmModel) classifyResults(ctx context.Context, prompts []string, opts ...inference.GenerateOption) (
 	[]inference.ClassifyResult,
 	error,
 ) {
 	if !m.server.alive() {
 		m.setServerExitErr()
-		return nil, m.Err()
+		return nil, m.currentError()
 	}
 
 	generateConfig := inference.ApplyGenerateOpts(opts)
@@ -168,13 +172,17 @@ func (m *rocmModel) Classify(ctx context.Context, prompts []string, opts ...infe
 
 // BatchGenerate runs batched autoregressive generation via llama-server.
 // Each prompt is decoded sequentially up to MaxTokens.
-func (m *rocmModel) BatchGenerate(ctx context.Context, prompts []string, opts ...inference.GenerateOption) (
+func (m *rocmModel) BatchGenerate(ctx context.Context, prompts []string, opts ...inference.GenerateOption) core.Result {
+	return core.ResultOf(m.batchGenerateResults(ctx, prompts, opts...))
+}
+
+func (m *rocmModel) batchGenerateResults(ctx context.Context, prompts []string, opts ...inference.GenerateOption) (
 	[]inference.BatchResult,
 	error,
 ) {
 	if !m.server.alive() {
 		m.setServerExitErr()
-		return nil, m.Err()
+		return nil, m.currentError()
 	}
 
 	generateConfig := inference.ApplyGenerateOpts(opts)
@@ -387,14 +395,25 @@ func (m *rocmModel) Metrics() inference.GenerateMetrics {
 }
 
 // Err returns the error from the last Generate/Chat call, if any.
-func (m *rocmModel) Err() error {
+func (m *rocmModel) Err() core.Result {
+	return core.ResultOf(nil, m.currentError())
+}
+
+func (m *rocmModel) currentError() error {
 	m.stateMutex.Lock()
 	defer m.stateMutex.Unlock()
 	return m.lastError
 }
 
 // Close releases the llama-server subprocess and all associated resources.
-func (m *rocmModel) Close() error {
+func (m *rocmModel) Close() core.Result {
+	return core.ResultOf(nil, m.closeModel())
+}
+
+func (m *rocmModel) closeModel() error {
+	if m == nil || m.server == nil {
+		return nil
+	}
 	return m.server.stop()
 }
 

@@ -42,6 +42,16 @@ func TestMoEReferenceRouter_Good_TieBreaksByExpertID(t *testing.T) {
 	core.AssertEqual(t, 2, routes[1].ID)
 }
 
+func TestMoEReferenceRouter_Good_NormalizesSelectedExperts(t *testing.T) {
+	routes, err := rocmReferenceRouteExperts([]float32{2, 1, 0}, 2, 0, nil)
+
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 2, len(routes))
+	assertFloat32Near(t, 1, routes[0].Prob+routes[1].Prob)
+	assertFloat32Near(t, 0.7310586, routes[0].Prob)
+	assertFloat32Near(t, 0.26894143, routes[1].Prob)
+}
+
 func TestMoEReferenceRouter_Bad_RejectsEmptyLogits(t *testing.T) {
 	_, err := rocmReferenceRouteExperts(nil, 1, 0, nil)
 

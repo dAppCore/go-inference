@@ -612,6 +612,74 @@ func TestKVCache_Good_DeviceMirrorAppendsDeviceRowsWindow(t *testing.T) {
 	core.AssertEqual(t, 1, descriptor.Pages[1].TokenCount)
 }
 
+func TestKVCache_Good_DeviceRowsAppendGrowsInterleavedPage(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	firstKeys := []float32{
+		100, -100,
+		0.5, -0.5,
+	}
+	firstValues := []float32{
+		7, -7,
+		0.25, -0.25,
+	}
+	firstKeyInput, err := hipUploadByteBuffer(driver, "rocm.KVCache.Test", "first key rows", mustHIPFloat32Payload(t, firstKeys), len(firstKeys))
+	core.RequireNoError(t, err)
+	defer firstKeyInput.Close()
+	firstValueInput, err := hipUploadByteBuffer(driver, "rocm.KVCache.Test", "first value rows", mustHIPFloat32Payload(t, firstValues), len(firstValues))
+	core.RequireNoError(t, err)
+	defer firstValueInput.Close()
+
+	cache := &rocmDeviceKVCache{driver: driver, mode: rocmKVCacheModeKQ8VQ4, blockSize: 8}
+	first, err := cache.withAppendedDeviceRowsWindow(context.Background(), firstKeyInput, firstValueInput, 2, 2, 2, 0)
+	core.RequireNoError(t, err)
+	defer first.Close()
+	core.AssertEqual(t, 1, first.PageCount())
+	core.AssertEqual(t, 2, first.pages[0].tokenCount)
+
+	appendKeys := []float32{
+		-1, 1,
+		2, -2,
+		3, -3,
+	}
+	appendValues := []float32{
+		3, -3,
+		4, -4,
+		5, -5,
+	}
+	appendKeyInput, err := hipUploadByteBuffer(driver, "rocm.KVCache.Test", "append key rows", mustHIPFloat32Payload(t, appendKeys), len(appendKeys))
+	core.RequireNoError(t, err)
+	defer appendKeyInput.Close()
+	appendValueInput, err := hipUploadByteBuffer(driver, "rocm.KVCache.Test", "append value rows", mustHIPFloat32Payload(t, appendValues), len(appendValues))
+	core.RequireNoError(t, err)
+	defer appendValueInput.Close()
+
+	next, err := first.withAppendedDeviceRowsWindow(context.Background(), appendKeyInput, appendValueInput, 2, 2, 3, 0)
+	core.RequireNoError(t, err)
+	defer next.Close()
+
+	keyStride, err := rocmKVInterleavedRowStride(rocmKVEncodingQ8RowsI, 2)
+	core.RequireNoError(t, err)
+	valueStride, err := rocmKVInterleavedRowStride(rocmKVEncodingQ4RowsI, 2)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 5, next.TokenCount())
+	core.AssertEqual(t, 1, next.PageCount())
+	core.AssertEqual(t, 0, next.pages[0].tokenStart)
+	core.AssertEqual(t, 5, next.pages[0].tokenCount)
+	core.AssertEqual(t, rocmKVEncodingQ8RowsI, next.pages[0].key.encoding)
+	core.AssertEqual(t, rocmKVEncodingQ4RowsI, next.pages[0].value.encoding)
+	core.AssertEqual(t, keyStride*5, next.pages[0].key.sizeBytes)
+	core.AssertEqual(t, valueStride*5, next.pages[0].value.sizeBytes)
+
+	payload, err := next.Snapshot()
+	core.RequireNoError(t, err)
+	restored, err := newROCmKVCacheFromSnapshot(payload)
+	core.RequireNoError(t, err)
+	keys, values, err := restored.Restore(0, 5)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, append(firstKeys, appendKeys...), keys, 0.02)
+	assertFloat32SlicesNear(t, append(firstValues, appendValues...), values, 0.06)
+}
+
 func TestKVCache_Good_DeviceRowsWindowSlicesInterleavedPage(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	keyRows := []float32{
