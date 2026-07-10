@@ -389,9 +389,27 @@ type residentBuf struct {
 	noCopy bool
 }
 
+// closeResidentBuf unpins WITHOUT releasing the buffer: resetResidentBufsForTest
+// evicts between loads while earlier fixtures' sessions can still be live and
+// bound to cache entries — releasing here dangled them (wrong tokens, then a
+// SIGSEGV in setBuf). The owner-scoped release lives in
+// evictResidentBufsForRanges, where the closing session's contract guarantees
+// no further use.
 func closeResidentBuf(r residentBuf) {
 	if r.pinner != nil {
 		r.pinner.Unpin()
+	}
+}
+
+// releaseResidentBuf drops the objc-"new" +1 reference. Nothing else ever
+// releases these buffers, and the copied (non-page-aligned) weight uploads are
+// ~10 GB of IOAccelerator-dirty memory per bf16 e2b load — evicting only the
+// map entry leaked the device memory and drove the full test sweep past 50 GB
+// (vmmap receipt in the commit). Call ONLY when the owning session is closed:
+// ICBs do not retain bound resources, so this reference is the last.
+func releaseResidentBuf(r residentBuf) {
+	if rel, ok := r.buf.(interface{ Release() }); ok && r.buf.GetID() != 0 {
+		rel.Release()
 	}
 }
 
@@ -416,6 +434,7 @@ func evictResidentBufsForRanges(bases, ends []uintptr) {
 			continue
 		}
 		closeResidentBuf(r)
+		releaseResidentBuf(r)
 		delete(residentBufs, key)
 	}
 }
