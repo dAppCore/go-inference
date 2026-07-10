@@ -22,10 +22,15 @@ anything here; the task tracker carries the live campaign state.
 
 Generate-measured (decode-only, greedy, log-continuation prompt); the old
 serve-bench board read a few % higher on plain lanes — harness delta, not a
-regression. TWO OPEN AREAS from this matrix: (a) **the qat tax** — qat-4bit
-runs 16-32% SLOWER than plain 4bit at the same width (E2B −16%, E4B −19%,
-31B −32%) — same arithmetic width, so likely a checkpoint quant-layout →
-slower kernel path; (b) the 26B MoE MTP loss magnitude. Both unowned.
+regression. **The qat tax is CLOSED (#374): not a kernel path** — the qat
+checkpoints ship their entire FFN at 8-bit (all 35 layers' gate/up/down at
+bits=8 in the config overrides), and the slowdown is byte-proportional to
+the percent (e2b 1.21× bytes → 1.19× slower; 31B 1.56× → 1.47×). qat is a
+quality tier priced in bytes. llama-bench calibration (E2B tg512, llama.cpp
+build 9860, same box): Q4_K_M 144.0, Q8_0 124.0 — **lthn leads +12% at the
+4-bit class and +44% with MTP** (llama-bench has no speculative lane; note
+unsloth's GGUF repo now ships an MTP drafter — the ecosystem is adopting
+gemma-4 MTP). Remaining open: the 26B MoE MTP loss magnitude (−76%).
 
 Depth (e2b, `generate`-measured): linear −0.61 tok/s per 1K context, no cliff;
 ~105 at 98K. Cold prefill is the deep-context pain (54s at 98K) — conversation
