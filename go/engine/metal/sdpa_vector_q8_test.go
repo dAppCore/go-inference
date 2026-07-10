@@ -219,3 +219,87 @@ func TestKVQ8StoreKernelMatchesHostQuantiser(t *testing.T) {
 	}
 	t.Logf("store kernel == host quantiser over %d codes + %d scales", len(wantCodes), len(wantScales))
 }
+
+// TestDiagQ8ReadKernelCost times the 2-pass q8 pair against the bf16 pair on a
+// 32K-row kv=1 hd=512 cache (the 12B/e2b global shape at depth) — the slice-D
+// item-1 instrument: is the q8 read kernel giving back the bandwidth saving?
+func TestDiagQ8ReadKernelCost(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	if err := ensureInit(); err != nil {
+		t.Fatalf("ensureInit: %v", err)
+	}
+	const nHeads, nKVHeads, headDim, n, blocks, iters = 16, 1, 512, 32768, 256, 50
+	kvDim := nKVHeads * headDim
+	scale := float32(1.0 / 16)
+
+	kRows := make([]byte, n*kvDim*2)
+	for i := range kRows {
+		kRows[i] = byte((i*13 + 7) % 251)
+	}
+	kCodes, kScales := kvQ8QuantiseRows(kRows, kvDim)
+	q := make([]byte, nHeads*headDim*2)
+	for i := range q {
+		q[i] = byte((i*31 + 5) % 250)
+	}
+
+	time2pass := func(q8 bool) float64 {
+		var ms float64
+		withAutoreleasePool(func() {
+			qBuf := sharedBytes(q)
+			outP := scratchBF16(nHeads * blocks * headDim)
+			sums, maxs := scratchF32(nHeads*blocks), scratchF32(nHeads*blocks)
+			out := scratchBF16(nHeads * headDim)
+			var kB, vB, kSc, vSc metal.MTLBuffer
+			if q8 {
+				kB, vB = sharedBytes(kCodes), sharedBytes(kCodes)
+				kSc, vSc = shared(kScales), shared(kScales)
+			} else {
+				kB, vB = sharedBytes(kRows), sharedBytes(kRows)
+			}
+			khs, kss := int64(headDim), int64(kvDim)
+			var p1, p2 metal.MTLComputePipelineState
+			var err error
+			if q8 {
+				p1, err = sdpaVector2Pass1Q8Pipeline(headDim, blocks)
+			} else {
+				p1, err = sdpaVector2Pass1PipelineICB(headDim, blocks)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p2, err = sdpaVector2Pass2PipelineICB(headDim); err != nil {
+				t.Fatal(err)
+			}
+			cb := commandBufferFast(queue)
+			enc := computeCommandEncoderFast(cb)
+			for it := 0; it < iters; it++ {
+				if q8 {
+					emitSDPAVector2Pass1Q8(encSink{enc}, p1, qBuf, kB, vB, outP, sums, maxs, kSc, vSc, 0, 0, nil,
+						nHeads, nKVHeads, n, blocks, khs, kss, khs, kss, scale)
+				} else {
+					emitSDPA2Pass1NAt(encSink{enc}, p1, qBuf, 0, kB, vB, outP, sums, maxs, 0, nil,
+						1, nHeads, nKVHeads, n, blocks, khs, kss, khs, kss, scale)
+				}
+				memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+				emitSDPA2Pass2(encSink{enc}, p2, outP, sums, maxs, out, 1, nHeads, blocks)
+				memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+			}
+			endEncodingFast(enc)
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+			ms = float64(cb.GPUEndTime()-cb.GPUStartTime()) * 1e3 / float64(iters)
+		})
+		return ms
+	}
+	// warm both once, then measure
+	time2pass(false)
+	time2pass(true)
+	bf := time2pass(false)
+	q8t := time2pass(true)
+	bytesBF := float64(2*n*kvDim*2) / 1e9
+	bytesQ8 := float64(2*n*kvDim+2*n*(kvDim/64)*4) / 1e9
+	t.Logf("2-pass @N=%d kv=1 hd=512: bf16 %.3f ms (%.0f GB/s) vs q8 %.3f ms (%.0f GB/s) — q8/bf16 wall %.2fx (byte ratio 0.52x)",
+		n, bf, bytesBF/(bf/1e3), q8t, bytesQ8/(q8t/1e3), q8t/bf)
+}
