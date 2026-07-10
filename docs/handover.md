@@ -81,16 +81,26 @@ tok/turn while the client resends full history.
   cause is strided small-visit DRAM efficiency + the separate scale line.
   **THE TARGET STANCE (Snider): MTP + q8 + 256K context becomes the DEFAULT
   once q8 completes** (q8 ≈ bf16 at ~1%; q6 −6% / q4 −22% stay user-choice).
-  The deep-verify q8 branch is BUILT (engagement-gated); its partial live
-  receipt reorders the roadmap: e2b MTP@16K greedy = bf16 112.9 vs q8 47.6
-  (both 25% acceptance) — the per-row 2-pass q8 read at ~105 GB/s makes the
-  READ-FORMAT FIX (scales-in-row or paired-row walks) the GATING item for
-  the stance, and bf16 MTP@16K also losing to plain (~144) at 25% acceptance
-  means MTP-at-depth economics need a high-acceptance-prompt receipt before
-  blaming q8 alone. Then: 256K cap lift under q8, GPU mirror quant/dequant
-  for deep wakes, the N-bit knob (q6 −6% / q4 −22% user-choice), and the
-  default flip with 256K receipts. Full roadmap + next-session opener in the
-  task metadata.
+  The 2026-07-10 fresh-binary 2×2 (e2b-4bit @16K, HIGH-acceptance
+  log-continuation prompt, greedy) rewrote the previous day's partial
+  receipt — that 47.6-vs-112.9 framing was wrong twice over: (a) the q8+MTP
+  loss was the DRAFTER's target-KV export host-dequantising the q8 mirrors
+  every draft block (kvExport 108.9ms vs bf16's 0.4); the GPU mirror
+  dequant/quant kernel pair fixed it (kvExport → 2.6ms steady, q8+MTP 85.6 →
+  125.6 tok/s = bf16+MTP's 128.0 at the same 44% acceptance); (b) q8 plain
+  decode @16K is at PARITY (152.0 vs 151.0), so the read-format fix does NOT
+  gate MTP+q8. It still gates 256K: the q8 2-pass reads at ~105 GB/s
+  effective vs bf16's 246 (wall 1.25× on 0.52× bytes), invisible at 16K
+  where the scan is a small share, decisive when the global scan dominates
+  at depth. Cheap first lever there: the strided→contiguous-chunk key walk
+  in the 2-pass q8 kernel (TestDiagQ8ReadKernelCost decides it, no model
+  load); the scales-in-row format change only if the walk doesn't move it.
+  MTP-at-depth economics, same receipt: MTP@16K loses on BOTH formats
+  (127-128 vs ~151 plain) even at 44% acceptance — draft AND verify pay the
+  depth scan — and the re-engage gate correctly oscillates it off, which is
+  exactly the adaptive default the stance needs. Remaining: the 256K cap
+  lift under q8 (+ the read-walk receipt at 64K+), the N-bit knob, the
+  default flip with 256K receipts. Full roadmap in the task metadata.
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
@@ -151,6 +161,11 @@ the precedents, and `bytes.Equal` gates are achievable, not aspirational.
 
 ## Traps that will bite you (each cost real time)
 
+- **`bin/lem` is a build artifact, not the tree** — a full 2×2 A/B ran on a
+  binary built 2h before the code it was supposed to measure (env opt-ins
+  silently ignored; the q8 lanes were bf16 reruns identical to the ms).
+  `task build` before ANY receipt run, and treat impossibly-identical lanes
+  as a stale-binary tell, not a result.
 - `MLX_METALLIB_PATH` must be THIS repo's `build/dist/lib/mlx.metallib` —
   go-mlx's lacks the lthn kernels ("kernel not found" on runtime tests).
 - `task metallib:kernels` rebuilds the lthn library; new `.metal` files under
