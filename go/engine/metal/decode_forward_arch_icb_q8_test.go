@@ -553,3 +553,45 @@ func TestKVQ8ICBBatchedGEMMPrefixMatchesSequential(t *testing.T) {
 	}
 	t.Logf("q8 GEMM prefix tracked sequential over %d probe rows at base %d (worst |Δ| = %v)", len(probe), len(warm), worstAll)
 }
+
+// TestKVQ8PrefillReleasesGEMMMirrors pins the prefill→decode seam: a deep
+// prompt materialises the q8 GEMM prefix mirrors (full-cacheRows bf16 per
+// global owner — 31B@256K paid ~17GB and swapped a 96GB box), and
+// PrefillTokens must hand the memory back before decode. -state saves still
+// work afterwards by re-materialising only the layers they read.
+func TestKVQ8PrefillReleasesGEMMMirrors(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	sess := newKVQ8ICBFixtureLen(t, 8192)
+	if !sess.state.icb.hasKVQ8() {
+		t.Fatal("fixture did not arm q8")
+	}
+
+	ids := make([]int32, sdpaPromptGEMMMinKV+512)
+	for i := range ids {
+		ids[i] = int32((i*13 + 5) % 60)
+	}
+	if err := sess.PrefillTokens(ids); err != nil {
+		t.Fatalf("PrefillTokens: %v", err)
+	}
+	for li := range sess.state.icb.kvQ8.enabled {
+		if !sess.state.icb.kvQ8.on(li) {
+			continue
+		}
+		if sess.state.icb.kvQ8.kMirrors != nil && sess.state.icb.kvQ8.kMirrors[li] != nil {
+			t.Fatalf("layer %d: GEMM prefix mirror survived the prefill seam", li)
+		}
+	}
+
+	// -state still works: the sleep re-materialises what it reads.
+	if _, err := sess.SerializeState(); err != nil {
+		t.Fatalf("SerializeState after mirror release: %v", err)
+	}
+	if _, err := sess.stepID(7); err != nil {
+		t.Fatalf("decode step after mirror release: %v", err)
+	}
+	t.Logf("mirrors released at the prefill seam; -state and decode intact")
+}

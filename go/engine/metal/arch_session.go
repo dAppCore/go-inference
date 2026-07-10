@@ -1206,7 +1206,19 @@ func (s *ArchSession) PrefillTokens(ids []int32) error {
 	}
 	s.cachedIDs = append(resident, ids...)
 	s.rememberRetainedHidden(hidden)
+	s.releaseQ8PrefillMirrors()
 	return nil
+}
+
+// releaseQ8PrefillMirrors returns the q8 GEMM prefix's mirror memory at the
+// prefill→decode seam and drops the cached state views that pointed into it
+// (they rebuild — and re-materialise only the layers they need — on the next
+// -state sleep or drafter export).
+func (s *ArchSession) releaseQ8PrefillMirrors() {
+	if s.state.icb == nil || !s.state.icb.releaseQ8Mirrors() {
+		return
+	}
+	s.stateBlockViews = nil
 }
 
 // PrefillTokenEmbeddings resets the retained decode state and prefills already
@@ -1237,6 +1249,7 @@ func (s *ArchSession) PrefillTokenEmbeddings(ids []int32, embeddings [][]byte) e
 	}
 	s.cachedIDs = append(resident, ids...)
 	s.rememberRetainedHidden(hidden)
+	s.releaseQ8PrefillMirrors()
 	return nil
 }
 

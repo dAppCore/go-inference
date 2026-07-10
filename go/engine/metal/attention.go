@@ -408,7 +408,15 @@ func closeResidentBuf(r residentBuf) {
 // (vmmap receipt in the commit). Call ONLY when the owning session is closed:
 // ICBs do not retain bound resources, so this reference is the last.
 func releaseResidentBuf(r residentBuf) {
-	if rel, ok := r.buf.(interface{ Release() }); ok && r.buf.GetID() != 0 {
+	releaseDeviceBuffer(r.buf)
+}
+
+// releaseDeviceBuffer drops a device-owned buffer's objc-"new" +1 reference —
+// the one idiom for returning IOAccelerator memory (nothing else releases;
+// see releaseResidentBuf). The caller owns the proof that no encoder, ICB
+// replay or cached view still reaches the buffer.
+func releaseDeviceBuffer(buf metal.MTLBuffer) {
+	if rel, ok := buf.(interface{ Release() }); ok && buf.GetID() != 0 {
 		rel.Release()
 	}
 }
