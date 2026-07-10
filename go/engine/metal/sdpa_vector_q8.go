@@ -233,3 +233,127 @@ func bf16BytesOfF32(f float32) (lo, hi byte) {
 	r := (bits + 0x7FFF + ((bits >> 16) & 1)) >> 16
 	return byte(r), byte(r >> 8)
 }
+
+// ---- batched-pass q8 lanes (#367 slice C): the multi-query causal read and
+// the rows-widened quantise landing the batched dense pass drives LIVE (plain
+// encoder pipelines — the pass re-encodes per chunk, nothing is recorded).
+
+var (
+	sdpaMultiQQ8PSOCache = map[int]metal.MTLComputePipelineState{}
+	kvQ8StoreRowsPSO     metal.MTLComputePipelineState
+	kvQ8StoreRowsErr     error
+	kvQ8StoreRowsDone    bool
+)
+
+func sdpaMultiQQ8Pipeline(headDim int) (metal.MTLComputePipelineState, bool) {
+	sdpaVectorQ8PSOMu.Lock()
+	defer sdpaVectorQ8PSOMu.Unlock()
+	key := -headDim // separate keyspace from the single-pass cache in this map? use own map
+	_ = key
+	if pso, ok := sdpaMultiQQ8PSOCache[headDim]; ok {
+		return pso, pso != nil
+	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		sdpaMultiQQ8PSOCache[headDim] = nil
+		return nil, false
+	}
+	fn := customLibrary.NewFunctionWithName(core.Sprintf("lthn_sdpa_multiq_q8_bf16_%d", headDim))
+	if fn == nil || fn.GetID() == 0 {
+		sdpaMultiQQ8PSOCache[headDim] = nil
+		return nil, false
+	}
+	pso, err := device.NewComputePipelineStateWithFunctionError(fn)
+	if err != nil {
+		sdpaMultiQQ8PSOCache[headDim] = nil
+		return nil, false
+	}
+	sdpaMultiQQ8PSOCache[headDim] = pso
+	return pso, true
+}
+
+// gpuHasSDPAMultiQQ8 gates the batched dense pass's q8 fold — the multi-query
+// causal q8 kernel must exist for the layer's head dim (256/512 instantiated).
+func gpuHasSDPAMultiQQ8(headDim int) bool {
+	pso, ok := sdpaMultiQQ8Pipeline(headDim)
+	return ok && pso != nil && pso.GetID() != 0
+}
+
+// encSDPAMultiQCausalQ8 is encSDPAMultiQCausal reading a q8 cache: same grid,
+// same causal cap, the scale planes bound at 11/12.
+func encSDPAMultiQCausalQ8(enc metal.MTLComputeCommandEncoder, q, k, v, out metal.MTLBuffer, kScales, vScales metal.MTLBuffer, nHeads, nKVHeads, headDim, kRows, nTotal int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32) error {
+	pso, ok := sdpaMultiQQ8Pipeline(headDim)
+	if !ok {
+		return core.NewError("native.encSDPAMultiQCausalQ8: kernel unavailable for headDim")
+	}
+	sink := encSink{enc}
+	sink.setPSO(pso)
+	sink.setBuf(q, 0, 0)
+	sink.setBuf(k, 0, 1)
+	sink.setBuf(v, 0, 2)
+	sink.setBuf(out, 0, 3)
+	sink.setI32(int32(nHeads/nKVHeads), 4)
+	sink.setI32(int32(nTotal), 5)
+	sink.setI64(kHeadStride, 6)
+	sink.setI64(kSeqStride, 7)
+	sink.setI64(vHeadStride, 8)
+	sink.setI64(vSeqStride, 9)
+	sink.setF32(scale, 10)
+	sink.setBuf(kScales, 0, 11)
+	sink.setBuf(vScales, 0, 12)
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: uint(nHeads), Height: uint(kRows), Depth: 1},
+		metal.MTLSize{Width: 1024, Height: 1, Depth: 1},
+	)
+	return nil
+}
+
+func kvQ8StoreRowsPipeline() (metal.MTLComputePipelineState, error) {
+	sdpaVectorQ8PSOMu.Lock()
+	defer sdpaVectorQ8PSOMu.Unlock()
+	if kvQ8StoreRowsDone {
+		return kvQ8StoreRowsPSO, kvQ8StoreRowsErr
+	}
+	kvQ8StoreRowsDone = true
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		kvQ8StoreRowsErr = core.NewError("native.kvQ8StoreRowsPipeline: custom library unavailable")
+		return nil, kvQ8StoreRowsErr
+	}
+	fn := customLibrary.NewFunctionWithName("lthn_kv_q8_store_rows_bf16")
+	if fn == nil || fn.GetID() == 0 {
+		kvQ8StoreRowsErr = core.NewError("native.kvQ8StoreRowsPipeline: kernel lthn_kv_q8_store_rows_bf16 not found")
+		return nil, kvQ8StoreRowsErr
+	}
+	kvQ8StoreRowsPSO, kvQ8StoreRowsErr = device.NewComputePipelineStateWithFunctionError(fn)
+	return kvQ8StoreRowsPSO, kvQ8StoreRowsErr
+}
+
+// gpuHasKVQ8StoreRows gates the batched q8 landing.
+func gpuHasKVQ8StoreRows() bool {
+	pso, err := kvQ8StoreRowsPipeline()
+	return err == nil && pso != nil && pso.GetID() != 0
+}
+
+// encKVQ8StoreRows quantises `rows` contiguous bf16 staging rows into
+// contiguous int8 cache rows + f32 scale rows in one dispatch — the batched
+// prefill's landing. The cache/scale bindings carry the batch-base offsets
+// (row basePos → cache at basePos·kvDim bytes, scales at basePos·groups·4).
+func encKVQ8StoreRows(enc metal.MTLComputeCommandEncoder, stage metal.MTLBuffer, cache metal.MTLBuffer, cacheOff uint, scales metal.MTLBuffer, scaleOff uint, rows, kvDim int) error {
+	pso, err := kvQ8StoreRowsPipeline()
+	if err != nil {
+		return err
+	}
+	if kvDim <= 0 || kvDim%kvQ8GroupSize != 0 {
+		return core.NewError("native.encKVQ8StoreRows: kvDim must be a positive multiple of the q8 group size")
+	}
+	sink := encSink{enc}
+	sink.setPSO(pso)
+	sink.setBuf(stage, 0, 0)
+	sink.setBuf(cache, cacheOff, 1)
+	sink.setBuf(scales, scaleOff, 2)
+	sink.setI32(int32(kvDim), 3)
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: uint(kvDim / kvQ8GroupSize), Height: uint(rows), Depth: 1},
+		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
+	)
+	return nil
+}
