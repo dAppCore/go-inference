@@ -13,6 +13,7 @@ import (
 
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/decode/tokenizer"
+	"dappco.re/go/inference/internal/enginegate"
 )
 
 // train_trainer_smoke_test.go is THE receipt for the train seam: a full SFT round trip on a real
@@ -26,13 +27,7 @@ import (
 // not present so the smoke is a no-op on a machine without the checkpoint.
 func gemma4E2BBf16Dir(t *testing.T) string {
 	t.Helper()
-	base := filepath.Join(os.Getenv("HOME"),
-		".cache/huggingface/hub/models--mlx-community--gemma-4-E2B-it-bf16/snapshots")
-	entries, err := os.ReadDir(base)
-	if err != nil || len(entries) == 0 {
-		t.Skip("gemma-4-E2B-it-bf16 not cached")
-	}
-	return filepath.Join(base, entries[0].Name())
+	return enginegate.HFModelPath(t, "mlx-community/gemma-4-E2B-it-bf16")
 }
 
 func TestLoRATrainerHeadSFTSmokeE2B(t *testing.T) {
