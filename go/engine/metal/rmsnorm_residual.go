@@ -270,6 +270,26 @@ func RMSNormResidualBF16Into(out []byte, x, weight, res []byte, axisSize int, ep
 	return out, nil
 }
 
+// emitRMSNormResidualRows records the rows-widened fused residual-RMSNorm through
+// any sink — same binding ABI as emitRMSNormResidualAt (x=0, w=1, res=2, out=3,
+// eps=4, axisSize=5, ws=6), one threadgroup per row. One body behind
+// encRMSNormResidualRowsBF16At (live) and the verify-tail ICB recorder; pso + tg
+// caller-provided (the ICB needs rmsResidualPipelineICB).
+func emitRMSNormResidualRows[S dispatchSink](sink S, pso metal.MTLComputePipelineState, x, weight, res, out metal.MTLBuffer, xOff, wOff, resOff, outOff uint, rows, axisSize int, eps float32, tg uint) {
+	sink.setPSO(pso)
+	sink.setBuf(x, xOff, 0)
+	sink.setBuf(weight, wOff, 1)
+	sink.setBuf(res, resOff, 2)
+	sink.setBuf(out, outOff, 3)
+	sink.setF32(eps, 4)
+	sink.setI32(int32(axisSize), 5)
+	sink.setI32(1, 6)
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: uint(rows), Height: 1, Depth: 1},
+		metal.MTLSize{Width: tg, Height: 1, Depth: 1},
+	)
+}
+
 // encRMSNormResidualRowsBF16At encodes out rows = res rows + RMSNorm(x rows, weight)
 // for `rows` CONTIGUOUS rows in one dispatch: the fused kernel's gid already indexes
 // rows (base = gid·axisSize), so the rows form just widens the grid — each row's
@@ -280,19 +300,6 @@ func encRMSNormResidualRowsBF16At(enc metal.MTLComputeCommandEncoder, x, weight,
 	if err != nil {
 		return err
 	}
-	sink := encSink{enc}
-	sink.setPSO(pso)
-	sink.setBuf(x, xOff, 0)
-	sink.setBuf(weight, wOff, 1)
-	sink.setBuf(res, resOff, 2)
-	sink.setBuf(out, outOff, 3)
-	sink.setF32(eps, 4)
-	sink.setI32(int32(axisSize), 5)
-	sink.setI32(1, 6)
-	tg := rmsThreadgroup(axisSize, pso)
-	sink.dispatchThreadgroups(
-		metal.MTLSize{Width: uint(rows), Height: 1, Depth: 1},
-		metal.MTLSize{Width: tg, Height: 1, Depth: 1},
-	)
+	emitRMSNormResidualRows(encSink{enc}, pso, x, weight, res, out, xOff, wOff, resOff, outOff, rows, axisSize, eps, rmsThreadgroup(axisSize, pso))
 	return nil
 }
