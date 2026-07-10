@@ -132,7 +132,8 @@ func TestKVQ8ICBDecodeTracksBF16(t *testing.T) {
 	if !batched {
 		t.Fatal("batched verify must ENGAGE on q8 ICB caches at shallow depth (slice C)")
 	}
-	// …and KV snapshots error rather than misread int8 as bf16.
+	// …and KV snapshots serve the dequantised bf16 MIRROR (slice D): the view
+	// is bf16-sized so every codec and cross-session restore stays compatible.
 	q8li := -1
 	for li := range q8.state.specs {
 		if q8.state.icb.kvQ8.on(li) {
@@ -140,8 +141,16 @@ func TestKVQ8ICBDecodeTracksBF16(t *testing.T) {
 			break
 		}
 	}
-	if _, _, _, _, serr := q8.snapshotCacheViews(q8li); serr == nil {
-		t.Fatal("snapshotCacheViews must error on a q8 ICB layer")
+	kBuf, _, kPtr, vPtr, serr := q8.snapshotCacheViews(q8li)
+	if serr != nil {
+		t.Fatalf("snapshotCacheViews on a q8 layer: %v", serr)
+	}
+	if kPtr == nil || vPtr == nil {
+		t.Fatal("q8 snapshot mirror returned nil pointers")
+	}
+	kvd := q8.state.icb.rowBytes[q8li] / bf16Size
+	if got, want := int(bufferLengthFast(kBuf)), q8.state.icb.cacheRows[q8li]*kvd*bf16Size; got != want {
+		t.Fatalf("q8 mirror is not bf16-sized: %d != %d", got, want)
 	}
 }
 
@@ -252,4 +261,109 @@ func TestKVQ8ICBBatchedPrefillMatchesSequential(t *testing.T) {
 		}
 	}
 	t.Logf("q8 batched verify tracked sequential over %d rows", len(draft))
+}
+
+// TestKVQ8ICBStateSleepWakeRoundTrip pins the -state contract under q8 (the
+// star feature): a q8 session sleeps (SerializeState reads the dequantised
+// mirror), a fresh q8 session wakes from those bytes (restore requantises —
+// the symmetric codec makes the round trip an exact identity), and the woken
+// session's continuation is BYTE-IDENTICAL to the uninterrupted one. The same
+// snapshot also wakes a bf16 session (portability both ways), tracking within
+// quantisation distance.
+func TestKVQ8ICBStateSleepWakeRoundTrip(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	// bf16 portability target built BEFORE the flag arms.
+	bf16Sess := newKVQ8ICBFixture(t)
+
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	live := newKVQ8ICBFixture(t)
+	woken := newKVQ8ICBFixture(t)
+	if !live.state.icb.hasKVQ8() {
+		t.Fatal("fixture did not arm q8")
+	}
+
+	warm := []int32{1, 5, 3, 9, 7, 2, 4, 8}
+	for _, id := range warm {
+		if _, err := live.stepID(id); err != nil {
+			t.Fatalf("warm stepID: %v", err)
+		}
+	}
+	snap, err := live.SerializeState()
+	if err != nil {
+		t.Fatalf("SerializeState: %v", err)
+	}
+
+	cont := []int32{6, 1, 5, 3, 2, 9}
+	liveHiddens := make([][]byte, len(cont))
+	for i, id := range cont {
+		h, err := live.stepID(id)
+		if err != nil {
+			t.Fatalf("live cont stepID: %v", err)
+		}
+		liveHiddens[i] = append([]byte(nil), h...)
+	}
+
+	if err := woken.RestoreState(snap); err != nil {
+		t.Fatalf("RestoreState (q8→q8): %v", err)
+	}
+	// save→restore→save identity FIRST (before the continuation moves pos):
+	// a woken session re-sleeps to the same bytes.
+	resnap, err := woken.SerializeState()
+	if err != nil {
+		t.Fatalf("re-SerializeState: %v", err)
+	}
+	if !bytesEqualForTest(resnap, snap) {
+		if len(resnap) != len(snap) {
+			t.Fatalf("save→restore→save: LENGTH differs %d vs %d", len(resnap), len(snap))
+		}
+		first, diffs := -1, 0
+		for i := range snap {
+			if snap[i] != resnap[i] {
+				if first < 0 {
+					first = i
+				}
+				diffs++
+			}
+		}
+		t.Fatalf("save→restore→save differs: %d/%d bytes, first at offset %d", diffs, len(snap), first)
+	}
+	for i, id := range cont {
+		h, err := woken.stepID(id)
+		if err != nil {
+			t.Fatalf("woken stepID: %v", err)
+		}
+		if !bytesEqualForTest(h, liveHiddens[i]) {
+			t.Fatalf("step %d: woken q8 session diverges from the uninterrupted one — the sleep/wake round trip is not the identity", i)
+		}
+	}
+	t.Logf("q8 sleep/wake continuation byte-identical over %d steps", len(cont))
+
+	// portability: the q8 snapshot wakes a bf16 session within quantisation distance.
+	if err := bf16Sess.RestoreState(snap); err != nil {
+		t.Fatalf("RestoreState (q8→bf16): %v", err)
+	}
+	for i, id := range cont {
+		h, err := bf16Sess.stepID(id)
+		if err != nil {
+			t.Fatalf("bf16 woken stepID: %v", err)
+		}
+		worst, hscale := 0.0, 0.0
+		for j := 0; j+1 < len(h); j += 2 {
+			a := float64(bf16ToF32(h[j], h[j+1]))
+			b := float64(bf16ToF32(liveHiddens[i][j], liveHiddens[i][j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+			if m := math.Abs(b); m > hscale {
+				hscale = m
+			}
+		}
+		if worst > 0.05*math.Max(hscale, 1) {
+			t.Fatalf("q8→bf16 wake step %d diverges structurally: worst |Δ|=%g (scale %g)", i, worst, hscale)
+		}
+	}
+	t.Logf("q8 snapshot woke a bf16 session within quantisation distance over %d steps", len(cont))
 }

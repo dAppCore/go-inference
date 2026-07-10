@@ -46,6 +46,9 @@ func kvQ8ICBOn() bool { return kvQ8ICBEnabled || kvQ8ICBForTest }
 type archICBKVQ8 struct {
 	enabled          []bool
 	kScales, vScales []metal.MTLBuffer
+	// bf16 snapshot mirrors (lazily allocated; -state/save/restore only) —
+	// see q8SnapshotMirror.
+	kMirrors, vMirrors []metal.MTLBuffer
 }
 
 func (q *archICBKVQ8) on(li int) bool {
@@ -218,4 +221,130 @@ func emitKVQ8Store[S dispatchSink](sink S, pso metal.MTLComputePipelineState, ro
 		metal.MTLSize{Width: uint(kvDim / kvQ8GroupSize), Height: 1, Depth: 1},
 		metal.MTLSize{Width: 32, Height: 1, Depth: 1},
 	)
+}
+
+// ---- -state / snapshot support (#367 slice D): q8 layers expose a bf16
+// MIRROR through snapshotCacheViews, so every save/restore path — the -state
+// sleeps, CaptureKV/RestoreKV, block and TurboQuant payload restores — reads
+// and writes the SAME bf16-shaped bytes a bf16 session would (snapshots stay
+// portable in both directions). The symmetric per-64 codec makes the
+// dequantise→requantise round trip an exact identity, so a q8 sleep/wake is
+// byte-lossless against the live q8 state.
+
+// q8SnapshotMirror returns layer li's bf16 mirror, freshly dequantised from
+// the int8 cache + scale plane. The mirror is allocated on first use and
+// retained (state-using sessions only pay for it once).
+func (r *archICBReplay) q8SnapshotMirror(li int) (metal.MTLBuffer, *byte, error) {
+	if r == nil || r.kvQ8 == nil || !r.kvQ8.on(li) {
+		return nil, nil, core.NewError("native.q8SnapshotMirror: not a q8 layer")
+	}
+	kvd := r.rowBytes[li] / bf16Size
+	rows := r.cacheRows[li]
+	if kvd <= 0 || rows <= 0 {
+		return nil, nil, core.NewError("native.q8SnapshotMirror: bad q8 layer geometry")
+	}
+	if r.kvQ8.kMirrors == nil {
+		r.kvQ8.kMirrors = make([]metal.MTLBuffer, len(r.kvQ8.enabled))
+		r.kvQ8.vMirrors = make([]metal.MTLBuffer, len(r.kvQ8.enabled))
+	}
+	if r.kvQ8.kMirrors[li] == nil {
+		r.kvQ8.kMirrors[li] = device.NewBufferWithLengthOptions(uint(rows*kvd*bf16Size), metal.MTLResourceStorageModeShared)
+		r.kvQ8.vMirrors[li] = device.NewBufferWithLengthOptions(uint(rows*kvd*bf16Size), metal.MTLResourceStorageModeShared)
+		if r.kvQ8.kMirrors[li] == nil || r.kvQ8.vMirrors[li] == nil {
+			return nil, nil, core.NewError("native.q8SnapshotMirror: mirror allocation failed")
+		}
+	}
+	r.dequantiseQ8Into(li, r.kCaches[li], r.kvQ8.kScales[li], r.kvQ8.kMirrors[li], rows, kvd)
+	r.dequantiseQ8Into(li, r.vCaches[li], r.kvQ8.vScales[li], r.kvQ8.vMirrors[li], rows, kvd)
+	return r.kvQ8.kMirrors[li], (*byte)(r.kvQ8.kMirrors[li].Contents()), nil
+}
+
+// q8SnapshotMirrorV returns the V-side mirror buffer+pointer (q8SnapshotMirror
+// refreshes both sides; this accessor avoids a second dequant pass).
+func (r *archICBReplay) q8SnapshotMirrorV(li int) (metal.MTLBuffer, *byte) {
+	return r.kvQ8.vMirrors[li], (*byte)(r.kvQ8.vMirrors[li].Contents())
+}
+
+func (r *archICBReplay) dequantiseQ8Into(li int, cache, scales, mirror metal.MTLBuffer, rows, kvd int) {
+	codes := unsafe.Slice((*byte)(cache.Contents()), rows*kvd)
+	sc := unsafe.Slice((*float32)(scales.Contents()), rows*(kvd/kvQ8GroupSize))
+	out := unsafe.Slice((*byte)(mirror.Contents()), rows*kvd*bf16Size)
+	for i, c := range codes {
+		f := float32(int8(c)) * sc[i/kvQ8GroupSize]
+		lo, hi := bf16BytesOfF32(f)
+		out[i*2], out[i*2+1] = lo, hi
+	}
+}
+
+// flushQ8Mirrors quantises every q8 layer's mirror back into its int8 cache +
+// scale plane — the post-write hook every restore entry point calls after
+// copying snapshot bytes into the mirrors. Rows a restore did not touch
+// round-trip to their existing codes (the codec identity), so partial/prefix
+// restores are safe.
+func (r *archICBReplay) flushQ8Mirrors() {
+	if r == nil || r.kvQ8 == nil || r.kvQ8.kMirrors == nil {
+		return
+	}
+	for li := range r.kvQ8.enabled {
+		if !r.kvQ8.on(li) || r.kvQ8.kMirrors[li] == nil {
+			continue
+		}
+		kvd := r.rowBytes[li] / bf16Size
+		rows := r.cacheRows[li]
+		r.quantiseQ8From(r.kvQ8.kMirrors[li], r.kCaches[li], r.kvQ8.kScales[li], rows, kvd)
+		r.quantiseQ8From(r.kvQ8.vMirrors[li], r.vCaches[li], r.kvQ8.vScales[li], rows, kvd)
+	}
+}
+
+func (r *archICBReplay) quantiseQ8From(mirror, cache, scales metal.MTLBuffer, rows, kvd int) {
+	src := unsafe.Slice((*byte)(mirror.Contents()), rows*kvd*bf16Size)
+	codes := unsafe.Slice((*byte)(cache.Contents()), rows*kvd)
+	sc := unsafe.Slice((*float32)(scales.Contents()), rows*(kvd/kvQ8GroupSize))
+	n := rows * kvd
+	for g := 0; g < n/kvQ8GroupSize; g++ {
+		base := g * kvQ8GroupSize
+		var m float32
+		for i := 0; i < kvQ8GroupSize; i++ {
+			f := bf16ToF32(src[(base+i)*2], src[(base+i)*2+1])
+			if f < 0 {
+				f = -f
+			}
+			if f > m {
+				m = f
+			}
+		}
+		scale := m * (1.0 / 127.0) // the store kernel's fast-math reciprocal form
+		inv := float32(0)
+		if scale > 0 {
+			inv = 1 / scale
+		}
+		sc[g] = scale
+		for i := 0; i < kvQ8GroupSize; i++ {
+			f := bf16ToF32(src[(base+i)*2], src[(base+i)*2+1])
+			q := rintF32(f * inv)
+			if q > 127 {
+				q = 127
+			} else if q < -127 {
+				q = -127
+			}
+			codes[base+i] = byte(int8(q))
+		}
+	}
+}
+
+// refreshQ8SnapshotMirrors re-dequantises every ALREADY-MATERIALISED mirror —
+// the cached stateLayerViews hold mirror pointers across saves, and the live
+// q8 caches move on between sleeps.
+func (r *archICBReplay) refreshQ8SnapshotMirrors() error {
+	if r == nil || r.kvQ8 == nil || r.kvQ8.kMirrors == nil {
+		return nil
+	}
+	for li := range r.kvQ8.enabled {
+		if r.kvQ8.on(li) && r.kvQ8.kMirrors[li] != nil {
+			if _, _, err := r.q8SnapshotMirror(li); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
