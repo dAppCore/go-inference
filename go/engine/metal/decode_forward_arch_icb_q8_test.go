@@ -60,8 +60,11 @@ func TestKVQ8ICBDecodeTracksBF16(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
 	}
-	// bf16 reference session first (the flag is read at session build).
+	// bf16 reference session, pinned against the q8 default (the flag is
+	// read at session build).
+	kvQ8ICBOffForTest = true
 	ref := newKVQ8ICBFixture(t)
+	kvQ8ICBOffForTest = false
 	if ref.state.icb == nil {
 		t.Fatal("fixture must record an ICB")
 	}
@@ -277,8 +280,10 @@ func TestKVQ8ICBStateSleepWakeRoundTrip(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
 	}
-	// bf16 portability target built BEFORE the flag arms.
+	// bf16 portability target, pinned against the q8 default.
+	kvQ8ICBOffForTest = true
 	bf16Sess := newKVQ8ICBFixture(t)
+	kvQ8ICBOffForTest = false
 
 	kvQ8ICBForTest = true
 	t.Cleanup(func() { kvQ8ICBForTest = false })

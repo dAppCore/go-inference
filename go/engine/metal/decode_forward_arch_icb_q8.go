@@ -32,14 +32,19 @@ import (
 // (prompt prefill + MTP verify go sequential), and KV save/restore errors.
 // The chained replay lane IS the decode; it is fully q8-aware by recording.
 
-// kvQ8ICBEnabled is the opt-in gate (LTHN_KV_Q8_ICB=1). Overridable in tests
-// via kvQ8ICBForTest (the env is read once at init).
+// kvQ8ICBEnabled: q8 KV on the dense recorded-ICB lane is the DEFAULT (#367
+// stance — parity receipts at 16/32/64/124K on decode, prefill, MTP and
+// -state, at half the global-KV bytes). LTHN_KV_Q8_ICB=0 is the kill switch
+// (the reproducibility anchor for bf16 A/Bs); =1 still forces it, matching
+// the opt-in era. Tests pin either direction via kvQ8ICBForTest /
+// kvQ8ICBOffForTest (the env is read once at init).
 var (
-	kvQ8ICBEnabled = os.Getenv("LTHN_KV_Q8_ICB") == "1"
-	kvQ8ICBForTest bool
+	kvQ8ICBEnabled    = os.Getenv("LTHN_KV_Q8_ICB") != "0"
+	kvQ8ICBForTest    bool
+	kvQ8ICBOffForTest bool
 )
 
-func kvQ8ICBOn() bool { return kvQ8ICBEnabled || kvQ8ICBForTest }
+func kvQ8ICBOn() bool { return (kvQ8ICBEnabled || kvQ8ICBForTest) && !kvQ8ICBOffForTest }
 
 // archICBKVQ8 carries the per-layer q8 KV state threaded from the session
 // constructor (which owns the cache allocation) into the recorder and replay.

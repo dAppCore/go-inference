@@ -76,12 +76,14 @@ func LoadTokenModelDir(dir string, maxLen int) (model.TokenModel, error) {
 	return LoadTokenModelDirWithConfig(dir, maxLen, TokenModelLoadConfig{})
 }
 
-// defaultContextCap bounds the checkpoint-window context default: KV for the
-// global layers allocates maxLen rows up front (26B's five 2048-wide globals
-// cost ~1.3GB at 32K but ~10.7GB at its full 256K window), so an unset
-// context follows the checkpoint only up to this cap. An explicit context
-// length overrides in both directions.
-const defaultContextCap = 32768
+// defaultContextCap bounds the checkpoint-window context default at the
+// stance's 256K (#367: MTP + q8 + full context IS the default). q8 KV is on
+// by default and halves the up-front global-KV allocation the old 32K cap
+// guarded against — 31B's eight 2048-wide globals cost ~8.5GB q8 at 256K,
+// e2b ~0.5GB at its 128K window. An explicit context length overrides in
+// both directions; LTHN_KV_Q8_ICB=0 pairs with an explicit -context for a
+// tight-RAM bf16 setup.
+const defaultContextCap = 262144
 
 // resolveDefaultContext maps an unset context length to the checkpoint
 // window capped at defaultContextCap, keeping the old 4096 floor when the
