@@ -3543,3 +3543,97 @@ func TestAssistantModel_ProportionalInvFreqs(t *testing.T) {
 		t.Fatal("second call rebuilt the spectrum, want the cached slice")
 	}
 }
+
+// TestDraftOrderedGreedyFromHeadMatchesHostHead gates the fused GPU ordered
+// head's selection (#359): given centroid scores + full-vocab logits computed
+// exactly as the head gemvs produce them (bf16-rounded row dots against the
+// same weights), the candidate-restricted argmax must pick the SAME token as
+// the host reference head (floor-filled draftLogitsIntoScratch + full-scan
+// DraftGreedyToken) — including under suppression. When suppression empties
+// the candidate set it must decline (ok=false): that degenerate case is the
+// host path's floor-pick, and the caller falls back to it.
+func TestDraftOrderedGreedyFromHeadMatchesHostHead(t *testing.T) {
+	tensors := nativeAssistantTinyTensors(true)
+	tensors["model.embed_tokens.weight"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{8, 4}, Data: toBF16Bytes(syntheticFloat32(8*4, 313))}
+	tensors["masked_embedding.centroids.weight"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{2, 4}, Data: toBF16Bytes(syntheticFloat32(2*4, 317))}
+	// non-trivial permutation: cluster 0 = tokens {3,1,7,5}, cluster 1 = {0,2,4,6}
+	tensors["masked_embedding.token_ordering"] = safetensors.Tensor{Dtype: "I64", Shape: []int{2, 4}, Data: nativeAssistantI64Tensor(3, 1, 7, 5, 0, 2, 4, 6)}
+	dir := writeNativeAssistantDir(t, tensors)
+
+	assistant, err := LoadAssistantDir(dir)
+	if err != nil {
+		t.Fatalf("LoadAssistantDir: %v", err)
+	}
+	defer assistant.Close()
+
+	vocab, hiddenDim := assistant.Arch.Vocab, assistant.Arch.Hidden
+	nC := assistant.NumCentroids
+	embed, _ := assistant.Tensor("model.embed_tokens.weight")
+	cents, _ := assistant.Tensor("masked_embedding.centroids.weight")
+
+	hs := toBF16Bytes([]float32{1, 0.5, -0.25, 2})
+	centroidScores := make([]byte, nC*bf16Size)
+	topCentroid, topScore := -1, float32(0)
+	for c := range nC {
+		v := nativeAssistantDotBF16Row(hs, cents.Data, c, hiddenDim)
+		h := f32ToBF16(v)
+		centroidScores[c*bf16Size], centroidScores[c*bf16Size+1] = byte(h), byte(h>>8)
+		if topCentroid < 0 || v > topScore {
+			topCentroid, topScore = c, v
+		}
+	}
+	vocabLogits := make([]byte, vocab*bf16Size)
+	for id := range vocab {
+		h := f32ToBF16(nativeAssistantDotBF16Row(hs, embed.Data, id, hiddenDim))
+		vocabLogits[id*bf16Size], vocabLogits[id*bf16Size+1] = byte(h), byte(h>>8)
+	}
+
+	ref, err := assistant.DraftLogits(hs)
+	if err != nil {
+		t.Fatalf("DraftLogits: %v", err)
+	}
+	want, err := assistant.DraftGreedyToken(ref)
+	if err != nil {
+		t.Fatalf("DraftGreedyToken: %v", err)
+	}
+	got, ok, err := assistant.draftOrderedGreedyFromHead(centroidScores, vocabLogits, nil, nil, nil)
+	if err != nil || !ok {
+		t.Fatalf("draftOrderedGreedyFromHead: ok=%v err=%v", ok, err)
+	}
+	if got != want {
+		t.Fatalf("ordered greedy head token = %d, host reference = %d", got, want)
+	}
+
+	// suppression parity: mask the winner, both paths must agree on the runner-up.
+	wantSup, err := assistant.DraftGreedyToken(ref, []int32{want})
+	if err != nil {
+		t.Fatalf("DraftGreedyToken suppressed: %v", err)
+	}
+	gotSup, ok, err := assistant.draftOrderedGreedyFromHead(centroidScores, vocabLogits, nil, nil, []int32{want})
+	if err != nil || !ok {
+		t.Fatalf("draftOrderedGreedyFromHead suppressed: ok=%v err=%v", ok, err)
+	}
+	if gotSup != wantSup {
+		t.Fatalf("suppressed ordered greedy head token = %d, host reference = %d", gotSup, wantSup)
+	}
+
+	// candidate exhaustion: suppress every member of the winning cluster
+	// (topK=1 so they are the whole candidate set) — the head must decline so
+	// the caller falls back to the host head's floor-pick.
+	members := make([]int32, 0, vocab/nC)
+	ordering, _ := assistant.Tensor("masked_embedding.token_ordering")
+	for pos := range vocab / nC {
+		id, oerr := nativeAssistantOrderingToken(ordering, topCentroid, pos, vocab/nC)
+		if oerr != nil {
+			t.Fatalf("ordering token: %v", oerr)
+		}
+		members = append(members, id)
+	}
+	_, ok, err = assistant.draftOrderedGreedyFromHead(centroidScores, vocabLogits, nil, nil, members)
+	if err != nil {
+		t.Fatalf("draftOrderedGreedyFromHead exhausted: %v", err)
+	}
+	if ok {
+		t.Fatal("ordered greedy head accepted a token with every candidate suppressed — must decline to the host fallback")
+	}
+}
