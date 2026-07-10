@@ -638,10 +638,47 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		// the live and the restored session route those identically by size.
 		foldable := !batchedMLPFoldDisabledForTest && K > batchedDenseICBMaxRows && gpuHasGeluKernel()
 		if s.icb.hasKVQ8() {
-			// q8 ICB caches (#367 v1): the interleave writes bf16 rows straight
-			// into the caches — int8 corruption. Callers fall to the per-token
-			// replay, which is q8-aware by recording.
-			return decline("q8 icb caches")
+			// q8 ICB caches (#367 slice C): the pass is q8-aware ONLY on the
+			// rows-batched fold — landings stage + quantise (encKVQ8StoreRows)
+			// and the reads ride the multi-query causal q8 kernel. Anything that
+			// would route a q8 layer through a bf16 write or a non-multiQ read
+			// declines to the per-token replay (q8-aware by recording): the
+			// per-row lanes, the deep+small 2-pass corner, vision row caps, and
+			// the test levers that force per-row shapes.
+			if batchedMLPFoldDisabledForTest || batchedRopeDisabledForTest || batchedEpilogueDisabledForTest ||
+				sdpaMultiQDisabledForTest || s.rowAttnCaps != nil ||
+				!gpuHasQKNormRopeRows() || !gpuHasKVQ8StoreRows() || !gpuHasMulRowsKernel() {
+				return decline("q8 icb caches: fold prerequisites")
+			}
+			if !(K > batchedDenseICBMaxRows || s.verifyFoldSmallK) || K <= 1 || !gpuHasGeluKernel() {
+				// small non-verify batches never engage the fold — their per-row
+				// interleave would write bf16 rows into the int8 caches. The
+				// per-token replay handles them (q8-aware by recording).
+				return decline("q8 icb caches: batch below the fold gate")
+			}
+			for li := range s.specs {
+				ownIdx := li
+				if !s.specs[li].OwnsCache() {
+					ownIdx = s.specs[li].KVShareFrom
+				}
+				if ownIdx < 0 || ownIdx >= len(s.specs) || !s.icb.kvQ8.on(ownIdx) {
+					continue // this layer never touches a q8 cache
+				}
+				lhd := headDimOf(s.specs[li], s.headDim)
+				if !gpuHasSDPAMultiQQ8(lhd) || !gpuHasSDPAMultiQ(lhd) {
+					return decline("q8 icb caches: no multiQ q8 kernel for head dim")
+				}
+				if li >= len(s.lb) || s.lb[li].proj == nil || !s.lb[li].proj.rowsCapable() ||
+					s.lb[li].qNorm.buf == nil {
+					return decline("q8 icb caches: layer not fold-capable")
+				}
+				if s.specs[li].OwnsCache() && s.lb[li].kNorm.buf == nil {
+					return decline("q8 icb caches: owner missing kNorm (per-row landing shape)")
+				}
+				if !(basePos+K < sdpa2PassMinKV || K >= steelGEMMMinRows) {
+					return decline("q8 icb caches: deep small batch needs the 2-pass (sequential replay)")
+				}
+			}
 		}
 		if (K > batchedDenseICBMaxRows && !foldable) ||
 			len(s.icb.kCaches) < len(s.specs) || len(s.icb.vCaches) < len(s.specs) || len(s.icb.cacheRows) < len(s.specs) {
@@ -1000,9 +1037,16 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					deferredRing = stagedDeferred[ownIdx] && slideW > 0
 				}
 			}
+			kvQ8Layer := s.icb != nil && s.icb.kvQ8.on(li)
 			if ownsCache {
 				kDst, vDst, dstOff := layerK, layerV, uint(basePos*kvDim*bf16Size)
-				if deferredRing {
+				if kvQ8Layer {
+					// q8 global owner (#367): project into the shared stage slabs,
+					// rope/norm there, then ONE rows-store quantises the K rows
+					// into the int8 cache + scale rows — the batch attends its own
+					// rows post-round-trip, exactly as the sequential replay does.
+					kDst, vDst, dstOff = kStage, vStage, 0
+				} else if deferredRing {
 					kDst, vDst = s.denseBatch.layerStage(li, len(s.specs), K, foldKVDimMax)
 					dstOff = 0
 				} else if staged {
@@ -1042,16 +1086,43 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			// the per-row loop still runs its staged/rope tail, only the SDPA dispatches
 			// differ. Token-identity tier (S stores bf16 between the GEMMs), the same
 			// boundary the fold's qmm and ≥32-row steel projections already trade at.
+			ownerQ8 := s.icb != nil && s.icb.kvQ8.on(ownIdx) // sharers of a q8 owner read q8 too
 			useGEMMSDPA := useMultiQ && slideW == 0 && basePos+K >= sdpaPromptGEMMMinKV &&
 				K <= sdpaPromptGEMMMaxRows && sdpaPromptGEMMFeasible(K, s.maxLen) &&
 				!sdpaPromptGEMMDisabledForTest &&
-				!sdpaPromptGEMMEnvDisabled() && gpuHasPromptSDPAGEMM()
+				!sdpaPromptGEMMEnvDisabled() && gpuHasPromptSDPAGEMM() &&
+				!ownerQ8 // the steel GEMM composition has no q8 read — multiQ q8 covers the fold
 			if batchedRope {
 				if err = encQKNormRopeRows(enc, qSlab, s.lb[li].qNorm.buf, qSlab, 0, s.lb[li].qNorm.off, 0, qDim, qDim, offBuf[0], layerRopeFreqs, K, s.nHeads, lhd, rotDim, rbase, s.scale, s.eps); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
 				}
-				if ownsCache && deferredRing {
+				if ownsCache && kvQ8Layer {
+					// q8 global owner (#367): rope/norm the STAGED rows in place, then
+					// ONE rows-store each quantises them into the int8 cache rows +
+					// scale rows at basePos — the same bytes the sequential replay's
+					// per-token store lands, chunk-wide.
+					if err = encQKNormRopeRows(enc, kStage, s.lb[li].kNorm.buf, kStage, 0, s.lb[li].kNorm.off, 0, kvDim, kvDim, offBuf[0], layerRopeFreqs, K, lkv, lhd, rotDim, rbase, s.scale, s.eps); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+					if s.valueNormOnes != nil {
+						if err = encRMSNormRowsBF16(enc, vStage, s.valueNormOnes, vStage, 0, 0, 0, K*lkv, lhd, s.eps); err != nil {
+							endEncodingFast(enc)
+							return nil, false, err
+						}
+					}
+					q8RowOff := uint(basePos * kvDim)
+					q8ScaleOff := uint(basePos * (kvDim / kvQ8GroupSize) * 4)
+					if err = encKVQ8StoreRows(enc, kStage, layerK, q8RowOff, s.icb.kvQ8.kScales[li], q8ScaleOff, K, kvDim); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+					if err = encKVQ8StoreRows(enc, vStage, layerV, q8RowOff, s.icb.kvQ8.vScales[li], q8ScaleOff, K, kvDim); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+				} else if ownsCache && deferredRing {
 					// rope/norm the staged rows IN PLACE — the deferred landing copies the
 					// finished bytes into the ring slots, so the landed rows are identical to
 					// what the per-row landing would have written.
@@ -1164,7 +1235,14 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					return nil, false, err
 				}
 			} else if useMultiQ {
-				if err = encSDPAMultiQCausal(enc, qSlab, ownerK, ownerV, attnSlab, s.nHeads, lkv, lhd, K, basePos+K,
+				if ownerQ8 {
+					if err = encSDPAMultiQCausalQ8(enc, qSlab, ownerK, ownerV, attnSlab,
+						s.icb.kvQ8.kScales[ownIdx], s.icb.kvQ8.vScales[ownIdx], s.nHeads, lkv, lhd, K, basePos+K,
+						int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+				} else if err = encSDPAMultiQCausal(enc, qSlab, ownerK, ownerV, attnSlab, s.nHeads, lkv, lhd, K, basePos+K,
 					int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
