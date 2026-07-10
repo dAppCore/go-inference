@@ -832,11 +832,13 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		attnNormSlab, qSlab, attnSlab, attnOutSlab, kStage, vStage = s.denseBatch.attnFold(K, s.dModel, foldQDimMax, foldKVDimMax)
 	}
 	// verify-tail ICB (#372): the fold's pos-independent per-layer tail replays
-	// recorded on repeat verify blocks; the first eligible block records it
-	// alongside its own live encodes. Key mismatches (a truncated final draft
-	// block's smaller K, a reallocated slab) simply run live — replayable()
-	// misses per layer.
+	// recorded on repeat verify blocks at the SAME width — recordings are per-K
+	// (the adaptive draft cap wobbles K block-to-block; a single-K recording
+	// never replayed). A width's first eligible block records alongside its own
+	// live encodes; a reallocated slab (K growth reallocs the fold slabs)
+	// mismatches the key and re-records that width once under the new buffers.
 	var vtKey verifyTailKey
+	var vtReplay *verifyTailICB
 	if s.verifyFoldSmallK && foldDFFMax > 0 && !verifyTailICBDisabled && !verifyTailICBDisabledForTest {
 		vtKey = verifyTailKey{
 			k: K, dModel: s.dModel,
@@ -847,12 +849,21 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			attnNormSlab: bufID(attnNormSlab), attnSlab: bufID(attnSlab), attnOut: bufID(attnOutSlab),
 			pleSlab: bufID(pleSlabBuf),
 		}
-		if s.verifyTail != nil && s.verifyTail.key.k == vtKey.k && s.verifyTail.key != vtKey {
-			s.verifyTail = nil // the buffer world changed under the same K: re-record once
-			s.verifyTailTried = false
+		if vt := s.verifyTail[K]; vt != nil && vt.key != vtKey {
+			delete(s.verifyTail, K) // the buffer world changed under this K: re-record once
+			delete(s.verifyTailTried, K)
 		}
-		if s.verifyTail == nil && !s.verifyTailTried {
-			s.verifyTailTried = true
+		vtReplay = s.verifyTail[K]
+		if vtReplay != nil {
+			// fresh pass, fresh encoder: the resident set must be re-declared
+			// (a new encoder can reallocate at a previous pass's address).
+			vtReplay.declaredEnc = 0
+		}
+		if vtReplay == nil && !s.verifyTailTried[K] {
+			if s.verifyTailTried == nil {
+				s.verifyTailTried = map[int]bool{}
+			}
+			s.verifyTailTried[K] = true
 			s.verifyTailRec = newVerifyTailRecorder(len(s.specs), vtKey)
 		}
 	}
@@ -861,7 +872,10 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			rec := s.verifyTailRec
 			s.verifyTailRec = nil
 			if vt := rec.finish(); vt != nil {
-				s.verifyTail = vt
+				if s.verifyTail == nil {
+					s.verifyTail = map[int]*verifyTailICB{}
+				}
+				s.verifyTail[vt.key.k] = vt
 			}
 		}()
 	}
@@ -1155,9 +1169,9 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			// whole tail — o-proj, both residuals, the MLP fold, the PLE chain
 			// and the layer scalar — so the live encodes below AND the foldMLP
 			// section are skipped for it.
-			if vt := s.verifyTail; s.verifyFoldSmallK && batchedRows && !s.specs[li].MoE &&
-				!verifyTailICBDisabledForTest && vt.replayable(li, vtKey) {
-				vt.execute(enc, li)
+			if vtReplay != nil && batchedRows && !s.specs[li].MoE &&
+				vtReplay.replayable(li, vtKey) {
+				vtReplay.execute(enc, li)
 				tailReplayed = true
 			}
 			if !tailReplayed {

@@ -43,8 +43,21 @@ import (
 // reproducibility anchor); the recording also disarms wholesale if any op in
 // range cannot record (missing ICB pipeline, unexpected branch shape).
 
-// verifyTailICBDisabled is the env kill switch (LTHN_VERIFY_ICB=0).
-var verifyTailICBDisabled = os.Getenv("LTHN_VERIFY_ICB") == "0"
+// verifyTailICBDisabled: the lane is OPT-IN (LTHN_VERIFY_ICB=1) — the live A/B
+// measured it break-even, not a win (see the receipt below), so production
+// keeps the proven live tail encodes and the mechanism stays for the
+// whole-layer follow-up.
+//
+// RECEIPT (2026-07-11, e2b 4-bit + bf16 assistant, K=6 blocks, same prompt):
+// live verify fwd 10.3-10.9ms; tail-replay 10.8-11.2ms after the declare-once
+// residency fix (12.1-12.2 before it), recording pass +2ms. The per-layer
+// executeCommands (~33/pass) + the recorded all-prior barrier drains
+// (~13/layer) cost what the recorded ops save — the chained decode lane's
+// ~3µs/op economics come from ONE execute per ~700-op token, not one per
+// 14-op layer tail. The winning shape is recording the WHOLE layer stack
+// (attention + tail, one execute per verify pass, pos/N rebinds) — blocked on
+// the staged-sliding landing's per-pass slot offsets, priced separately.
+var verifyTailICBDisabled = os.Getenv("LTHN_VERIFY_ICB") != "1"
 
 // verifyTailICBDisabledForTest forces the live tail encodes — the A/B lever for
 // the replay parity tests. Production never sets it.
@@ -84,6 +97,9 @@ type verifyTailICB struct {
 	resident    []metal.MTLResource
 	residentIDs []objc.ID
 	key         verifyTailKey
+	// declaredEnc is the encoder the resident set was last declared on — one
+	// UseResource per encoder, not per execute (see execute).
+	declaredEnc uintptr
 }
 
 // replayable reports whether layer li has a recorded range under a matching key.
@@ -92,11 +108,18 @@ func (v *verifyTailICB) replayable(li int, key verifyTailKey) bool {
 		v.ranges[li].Length > 0 && v.key == key
 }
 
-// execute replays layer li's recorded tail into the live encoder. UseResource
-// runs per execute — the GPU-trace checkpoints rotate encoders mid-pass, so a
-// once-per-pass declaration would miss the rotation.
+// execute replays layer li's recorded tail into the live encoder. Residency is
+// declared ONCE per encoder (the production fine-grained replay's shape — one
+// UseResource, many range executes): a per-execute declaration re-processed
+// ~70 resources × nLayers per verify pass and cost more than the replay saved
+// (the first live A/B measured the lane SLOWER by ~1.5ms/verify). declaredEnc
+// tracks the encoder identity — the GPU-trace checkpoints rotate encoders
+// mid-pass, and a rotated encoder needs its own declaration.
 func (v *verifyTailICB) execute(enc metal.MTLComputeCommandEncoderObject, li int) {
-	useResourcesIDsFastObject(enc, v.resident, v.residentIDs, metal.MTLResourceUsageRead|metal.MTLResourceUsageWrite)
+	if id := uintptr(enc.GetID()); id != v.declaredEnc {
+		useResourcesIDsFastObject(enc, v.resident, v.residentIDs, metal.MTLResourceUsageRead|metal.MTLResourceUsageWrite)
+		v.declaredEnc = id
+	}
 	executeCommandsInBufferWithRangeObjectFast(enc, v.icb, v.ranges[li])
 	verifyTailReplays.Add(1)
 }
