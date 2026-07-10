@@ -372,6 +372,13 @@ func kvQ8DequantRowsPipeline() (metal.MTLComputePipelineState, error) {
 	return kvQ8DequantRowsPSO, kvQ8DequantRowsErr
 }
 
+// gpuHasKVQ8DequantRows gates the batched pass's q8 GEMM prefix (any consumer
+// that encodes the mirror dequant into its own encoder).
+func gpuHasKVQ8DequantRows() bool {
+	pso, err := kvQ8DequantRowsPipeline()
+	return err == nil && pso != nil && pso.GetID() != 0
+}
+
 // encKVQ8DequantRows expands `rows` contiguous int8 cache rows + f32 scale
 // rows back into contiguous bf16 rows in one dispatch — the store kernel's
 // inverse, behind the snapshot mirrors and the drafter's target-KV export.

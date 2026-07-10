@@ -231,17 +231,18 @@ func emitKVQ8Store[S dispatchSink](sink S, pso metal.MTLComputePipelineState, ro
 // dequantise→requantise round trip an exact identity, so a q8 sleep/wake is
 // byte-lossless against the live q8 state.
 
-// q8SnapshotMirror returns layer li's bf16 mirror, freshly dequantised from
-// the int8 cache + scale plane. The mirror is allocated on first use and
-// retained (state-using sessions only pay for it once).
-func (r *archICBReplay) q8SnapshotMirror(li int) (metal.MTLBuffer, *byte, error) {
+// ensureQ8Mirrors allocates layer li's bf16 mirror pair on first use WITHOUT
+// refreshing it. Two consumers: the snapshot path (q8SnapshotMirror) refreshes
+// whole rows after this, and the batched pass's q8 GEMM prefix dequantises
+// exactly the rows it attends inside its own encoder.
+func (r *archICBReplay) ensureQ8Mirrors(li int) (metal.MTLBuffer, metal.MTLBuffer, error) {
 	if r == nil || r.kvQ8 == nil || !r.kvQ8.on(li) {
-		return nil, nil, core.NewError("native.q8SnapshotMirror: not a q8 layer")
+		return nil, nil, core.NewError("native.ensureQ8Mirrors: not a q8 layer")
 	}
 	kvd := r.rowBytes[li] / bf16Size
 	rows := r.cacheRows[li]
 	if kvd <= 0 || rows <= 0 {
-		return nil, nil, core.NewError("native.q8SnapshotMirror: bad q8 layer geometry")
+		return nil, nil, core.NewError("native.ensureQ8Mirrors: bad q8 layer geometry")
 	}
 	if r.kvQ8.kMirrors == nil {
 		r.kvQ8.kMirrors = make([]metal.MTLBuffer, len(r.kvQ8.enabled))
@@ -251,9 +252,21 @@ func (r *archICBReplay) q8SnapshotMirror(li int) (metal.MTLBuffer, *byte, error)
 		r.kvQ8.kMirrors[li] = device.NewBufferWithLengthOptions(uint(rows*kvd*bf16Size), metal.MTLResourceStorageModeShared)
 		r.kvQ8.vMirrors[li] = device.NewBufferWithLengthOptions(uint(rows*kvd*bf16Size), metal.MTLResourceStorageModeShared)
 		if r.kvQ8.kMirrors[li] == nil || r.kvQ8.vMirrors[li] == nil {
-			return nil, nil, core.NewError("native.q8SnapshotMirror: mirror allocation failed")
+			return nil, nil, core.NewError("native.ensureQ8Mirrors: mirror allocation failed")
 		}
 	}
+	return r.kvQ8.kMirrors[li], r.kvQ8.vMirrors[li], nil
+}
+
+// q8SnapshotMirror returns layer li's bf16 mirror, freshly dequantised from
+// the int8 cache + scale plane. The mirror is allocated on first use and
+// retained (state-using sessions only pay for it once).
+func (r *archICBReplay) q8SnapshotMirror(li int) (metal.MTLBuffer, *byte, error) {
+	if _, _, err := r.ensureQ8Mirrors(li); err != nil {
+		return nil, nil, err
+	}
+	kvd := r.rowBytes[li] / bf16Size
+	rows := r.cacheRows[li]
 	if !r.dequantQ8MirrorsGPU([]int{li}) {
 		r.dequantiseQ8Into(li, r.kCaches[li], r.kvQ8.kScales[li], r.kvQ8.kMirrors[li], rows, kvd)
 		r.dequantiseQ8Into(li, r.vCaches[li], r.kvQ8.vScales[li], r.kvQ8.vMirrors[li], rows, kvd)

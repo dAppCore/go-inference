@@ -17,10 +17,13 @@ import (
 // geometry (hd=256, kvd 64-aligned) with maxLen past sdpa2PassMinKV, so the
 // recorded ICB exercises BOTH the q8 store rebinds and the 2-pass q8 SDPA.
 func newKVQ8ICBFixture(t testing.TB) *ArchSession {
+	return newKVQ8ICBFixtureLen(t, 2048)
+}
+
+func newKVQ8ICBFixtureLen(t testing.TB, maxLen int) *ArchSession {
 	t.Helper()
 	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 256, 256, 64
 	const numLayers, gs, bits = 3, 64, 4
-	const maxLen = 2048
 	cfg := g4.Config{
 		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
 		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim, VocabSize: vocab, RMSNormEps: 1e-6,
@@ -445,4 +448,103 @@ func TestKVQ8ICBDeepVerifyEngages(t *testing.T) {
 		}
 	}
 	t.Logf("deep q8 verify engaged at basePos=%d and tracked sequential over %d rows", len(warm), len(draft))
+}
+
+// TestKVQ8ICBBatchedGEMMPrefixMatchesSequential pins the q8 GEMM prefix
+// (#367): past sdpaPromptGEMMMinKV the batched fold dequantises the attended
+// prefix into the layer mirrors and runs the steel GEMM composition against
+// them — the probe fold's hiddens must track a sequential twin within
+// quantisation distance. The warm fold stays BELOW the GEMM knee so the
+// caches feeding the probe are built by the already-pinned multiQ q8 lane.
+func TestKVQ8ICBBatchedGEMMPrefixMatchesSequential(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+	batched := newKVQ8ICBFixtureLen(t, 8192)
+	seq := newKVQ8ICBFixtureLen(t, 8192)
+	if !batched.state.icb.hasKVQ8() {
+		t.Fatal("fixture did not arm q8")
+	}
+	if !gpuHasKVQ8DequantRows() {
+		t.Fatal("q8 dequant-rows kernel unavailable")
+	}
+
+	// warm to just below the GEMM knee on BOTH sessions via the fold
+	warm := make([]int32, sdpaPromptGEMMMinKV-96)
+	for i := range warm {
+		warm[i] = int32((i*13 + 5) % 60)
+	}
+	wembs := make([][]byte, len(warm))
+	for i, id := range warm {
+		emb, err := batched.embedID(id)
+		if err != nil {
+			t.Fatalf("embedID: %v", err)
+		}
+		wembs[i] = append([]byte(nil), emb...)
+	}
+	for _, sess := range []*ArchSession{batched, seq} {
+		var ok bool
+		var err error
+		withAutoreleasePool(func() {
+			_, ok, err = sess.state.stepTokensBatchedDense(wembs, 0)
+		})
+		if err != nil || !ok {
+			t.Fatalf("warm fold: ok=%v err=%v", ok, err)
+		}
+		sess.pos = len(warm)
+	}
+
+	// the probe: a fold whose basePos+K crosses the GEMM knee
+	probe := make([]int32, 512)
+	for i := range probe {
+		probe[i] = int32((i*17 + 11) % 60)
+	}
+	pembs := make([][]byte, len(probe))
+	for i, id := range probe {
+		emb, err := batched.embedID(id)
+		if err != nil {
+			t.Fatalf("embedID: %v", err)
+		}
+		pembs[i] = append([]byte(nil), emb...)
+	}
+	if base := batched.pos; base+len(probe) < sdpaPromptGEMMMinKV {
+		t.Fatalf("probe does not reach the GEMM knee: %d+%d < %d", base, len(probe), sdpaPromptGEMMMinKV)
+	}
+	var out [][]byte
+	var ok bool
+	var err error
+	withAutoreleasePool(func() {
+		out, ok, err = batched.state.stepTokensBatchedDense(pembs, batched.pos)
+	})
+	if err != nil || !ok {
+		t.Fatalf("probe fold: ok=%v err=%v", ok, err)
+	}
+
+	worstAll := 0.0
+	for i, id := range probe {
+		hs, serr := seq.stepID(id)
+		if serr != nil {
+			t.Fatalf("sequential stepID(%d): %v", i, serr)
+		}
+		worst, hscale := 0.0, 0.0
+		for j := 0; j+1 < len(hs); j += 2 {
+			a := float64(bf16ToF32(out[i][j], out[i][j+1]))
+			b := float64(bf16ToF32(hs[j], hs[j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+			if m := math.Abs(b); m > hscale {
+				hscale = m
+			}
+		}
+		if worst > worstAll {
+			worstAll = worst
+		}
+		if hscale > 0 && worst > 0.05*hscale {
+			t.Fatalf("probe row %d: batched GEMM-q8 diverges from sequential: worst |Δ| = %v (scale %v)", i, worst, hscale)
+		}
+	}
+	t.Logf("q8 GEMM prefix tracked sequential over %d probe rows at base %d (worst |Δ| = %v)", len(probe), len(warm), worstAll)
 }
