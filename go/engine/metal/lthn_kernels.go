@@ -1002,6 +1002,18 @@ func encBF16LogitsArgmaxTilesBF16(
 	logits, tileValues, tileIndices, suppress metal.MTLBuffer,
 	vocab, suppressCount int,
 ) error {
+	return encBF16LogitsArgmaxTilesBF16At(enc, logits, tileValues, tileIndices, suppress, 0, 0, 0, vocab, suppressCount)
+}
+
+// encBF16LogitsArgmaxTilesBF16At is encBF16LogitsArgmaxTilesBF16 with byte
+// offsets into the logits/tile buffers — the K-row quant head argmaxes each
+// row's slice of the shared logits + tile scratch in one command buffer.
+func encBF16LogitsArgmaxTilesBF16At(
+	enc metal.MTLComputeCommandEncoder,
+	logits, tileValues, tileIndices, suppress metal.MTLBuffer,
+	logitsOff, valOff, idxOff uint,
+	vocab, suppressCount int,
+) error {
 	if vocab <= 0 {
 		return core.NewError("native.encBF16LogitsArgmaxTilesBF16: invalid logits geometry")
 	}
@@ -1011,9 +1023,9 @@ func encBF16LogitsArgmaxTilesBF16(
 	}
 	tileCount := (vocab + bf16LogitsArgmaxRowsPerTile - 1) / bf16LogitsArgmaxRowsPerTile
 	setPSO(enc, pso)
-	setBuf(enc, logits, 0, 0)
-	setBuf(enc, tileValues, 0, 1)
-	setBuf(enc, tileIndices, 0, 2)
+	setBuf(enc, logits, logitsOff, 0)
+	setBuf(enc, tileValues, valOff, 1)
+	setBuf(enc, tileIndices, idxOff, 2)
 	setEncInt32(enc, int32(vocab), 3)
 	if suppress == nil {
 		suppress = logits
