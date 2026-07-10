@@ -428,6 +428,18 @@ func (s *SessionHandle) Close() error {
 }
 
 // Err returns the last session error.
+// Pos reports the session's retained token position — the continuity layer
+// measures per-turn prefill (prompt tokens actually processed, no replay) as
+// the position delta across its append.
+func (s *SessionHandle) Pos() int {
+	if s == nil || s.sess == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sess.Pos()
+}
+
 func (s *SessionHandle) Err() error {
 	if s == nil {
 		return nil
