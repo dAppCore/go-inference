@@ -279,23 +279,56 @@ func FamilyPairEvidenceVerified(evidence PairEvidence) bool {
 	if evidence.TargetQuantMode == "" || evidence.TargetQuantGroup <= 0 {
 		return false
 	}
-	if evidence.TargetRuntime != RuntimeMLXAffine || evidence.TargetGenerateStatus != GenerateLinked {
+	if !targetRuntimeCompatibleWithAttachedDrafter(evidence.TargetRuntime) || evidence.TargetGenerateStatus != GenerateLinked {
 		return false
 	}
 	if evidence.AssistantGenerateStatus != GenerateLoadOnly {
 		return false
 	}
-	if _, ok := MTPAssistantQuantModeSupport(evidence.AssistantSize, evidence.AssistantQuantMode); !ok {
+	assistantSupport, ok := MTPAssistantQuantModeSupport(evidence.AssistantSize, evidence.AssistantQuantMode)
+	if !ok || assistantSupport.Runtime == RuntimePlanned {
 		return false
 	}
-	if evidence.AssistantQuantMode != AssistantQuantMode && evidence.AssistantQuantMode != denormalizeStatusQuantMode(evidence.TargetQuantMode) {
+	if !assistantRuntimeCompatibleWithAttachedDrafter(evidence.AssistantRuntime, evidence.AssistantQuantMode) {
 		return false
 	}
-	_, ok := QuantModeSupportBySize(evidence.TargetSize, evidence.TargetQuantMode)
+	if !assistantQuantModeCompatibleWithTarget(evidence.TargetQuantMode, evidence.AssistantQuantMode) {
+		return false
+	}
+	targetSupport, ok := QuantModeSupportBySize(evidence.TargetSize, evidence.TargetQuantMode)
 	if !ok {
-		_, ok = QATTargetQuantModeSupport(evidence.TargetSize, evidence.TargetQuantMode)
+		targetSupport, ok = QATTargetQuantModeSupport(evidence.TargetSize, evidence.TargetQuantMode)
 	}
-	return ok
+	return ok && targetSupport.Runtime != RuntimePlanned && targetSupport.GenerateStatus == GenerateLinked
+}
+
+func targetRuntimeCompatibleWithAttachedDrafter(runtime string) bool {
+	switch strings.ToLower(strings.TrimSpace(runtime)) {
+	case RuntimeMLXAffine, RuntimeGGUF:
+		return true
+	default:
+		return false
+	}
+}
+
+func assistantRuntimeCompatibleWithAttachedDrafter(runtime, mode string) bool {
+	runtime = strings.ToLower(strings.TrimSpace(runtime))
+	mode = denormalizeStatusQuantMode(strings.ToLower(strings.TrimSpace(mode)))
+	if mode == AssistantQuantMode {
+		return runtime == RuntimeBF16 || runtime == RuntimeGGUF
+	}
+	return runtime == RuntimeMLXAffine || runtime == RuntimeGGUF
+}
+
+func assistantQuantModeCompatibleWithTarget(targetMode, assistantMode string) bool {
+	targetMode = denormalizeStatusQuantMode(strings.ToLower(strings.TrimSpace(targetMode)))
+	assistantMode = denormalizeStatusQuantMode(strings.ToLower(strings.TrimSpace(assistantMode)))
+	if assistantMode == AssistantQuantMode || assistantMode == targetMode {
+		return true
+	}
+	targetBits := quantModeBits(targetMode)
+	assistantBits := quantModeBits(assistantMode)
+	return targetBits > 0 && assistantBits > 0 && strings.HasPrefix(targetMode, "q") && strings.HasPrefix(assistantMode, "q") && assistantBits >= targetBits
 }
 
 func ApplyPairVerificationLabels(labels map[string]string, target, assistant inference.ModelIdentity, dotted bool) {

@@ -958,7 +958,12 @@ func isROCmGemma4Architecture(architecture string) bool {
 }
 
 func isROCmGemma4AssistantArchitecture(architecture string) bool {
-	return normalizeROCmArchitecture(architecture) == "gemma4_assistant"
+	switch normalizeROCmArchitecture(architecture) {
+	case "gemma4_assistant", "gemma4_unified_assistant":
+		return true
+	default:
+		return false
+	}
 }
 
 func supportedNativeArchitecture(architecture string) bool {

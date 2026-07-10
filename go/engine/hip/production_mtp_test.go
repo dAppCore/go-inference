@@ -258,8 +258,8 @@ func TestProductionMTPAttachedDrafterPlanInfersPathOnlyQuant(t *testing.T) {
 	}
 }
 
-func TestProductionMTPAttachedDrafterPlan_Bad_RejectsGGUFTargetPath(t *testing.T) {
-	_, err := PlanAttachedDrafter(
+func TestProductionMTPAttachedDrafterPlan_Good_AcceptsGGUFTargetPath(t *testing.T) {
+	plan, err := PlanAttachedDrafter(
 		&rocmModel{
 			modelPath: "/models/lmstudio-community/gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q6_K.gguf",
 			modelInfo: inference.ModelInfo{
@@ -274,8 +274,19 @@ func TestProductionMTPAttachedDrafterPlan_Bad_RejectsGGUFTargetPath(t *testing.T
 		},
 	)
 
-	core.AssertError(t, err)
-	core.AssertContains(t, err.Error(), "target Gemma4 pack is not linked for generation")
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 6, plan.Target.QuantBits)
+	core.AssertEqual(t, 64, plan.Target.QuantGroup)
+	core.AssertEqual(t, "E2B", plan.Labels["attached_drafter_target_gemma4_size"])
+	core.AssertEqual(t, "q6", plan.Labels["attached_drafter_target_gemma4_quant_mode"])
+	core.AssertEqual(t, Gemma4RuntimeGGUF, plan.Labels["attached_drafter_target_gemma4_runtime"])
+	core.AssertEqual(t, Gemma4GenerateLinked, plan.Labels["attached_drafter_target_gemma4_generate_status"])
+	core.AssertEqual(t, "true", plan.Labels["attached_drafter_target_gemma4_pack_supported"])
+	core.AssertEqual(t, "true", plan.Labels["attached_drafter_target_gemma4_runnable_on_card"])
+	core.AssertEqual(t, "E2B", plan.Labels["attached_drafter_assistant_gemma4_size"])
+	core.AssertEqual(t, "bf16", plan.Labels["attached_drafter_assistant_gemma4_quant_mode"])
+	core.AssertEqual(t, Gemma4GenerateLoadOnly, plan.Labels["attached_drafter_assistant_gemma4_generate_status"])
+	core.AssertEqual(t, "true", plan.Labels["attached_drafter_gemma4_family_pair_verified"])
 }
 
 func TestProductionMTPAttachedDrafterEvidence_Good_PreservesNonOfficialGemma4PairLabels(t *testing.T) {
@@ -381,6 +392,36 @@ func TestProductionMTPAttachedDrafterEvidence_Good_PreservesSameSizeAssistantLab
 	core.AssertEqual(t, "", evidence.OfficialAssistantModelID)
 	core.AssertEqual(t, true, decision.EnableByDefault)
 	core.AssertContains(t, decision.Reason, "MTP retained workflow")
+}
+
+func TestProductionMTPAttachedDrafterEvidence_Good_AllowsHigherPrecisionGGUFAssistant(t *testing.T) {
+	plan, err := PlanAttachedDrafter(
+		productionMTPE2BQ4GGUFTargetModel(),
+		productionMTPE2BQ8GGUFAssistantModel(),
+	)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, "false", plan.Labels["attached_drafter_official_pair_verified"])
+	evidence := productionMTPPassingEvidence()
+	clearProductionMTPAttachedDrafterStaticEvidence(&evidence)
+
+	err = ApplyProductionMTPAttachedDrafterPlanEvidence(&evidence, plan)
+
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, "E2B", evidence.TargetGemma4Size)
+	core.AssertEqual(t, "q4", evidence.TargetGemma4QuantMode)
+	core.AssertEqual(t, 64, evidence.TargetGemma4QuantGroup)
+	core.AssertEqual(t, Gemma4RuntimeGGUF, evidence.TargetGemma4Runtime)
+	core.AssertEqual(t, Gemma4GenerateLinked, evidence.TargetGemma4GenerateStatus)
+	core.AssertEqual(t, "E2B", evidence.AssistantGemma4Size)
+	core.AssertEqual(t, "q8", evidence.AssistantGemma4QuantMode)
+	core.AssertEqual(t, 64, evidence.AssistantGemma4QuantGroup)
+	core.AssertEqual(t, Gemma4RuntimeGGUF, evidence.AssistantGemma4Runtime)
+	core.AssertEqual(t, Gemma4GenerateLoadOnly, evidence.AssistantGemma4GenerateStatus)
+	core.AssertEqual(t, "/models/unsloth-gemma-4-E2B-it-GGUF/MTP/gemma-4-E2B-it-Q8_0-MTP.gguf", evidence.SpeculativeDraftModelPath)
+	core.AssertEqual(t, "/models/unsloth-gemma-4-E2B-it-GGUF/MTP/gemma-4-E2B-it-Q8_0-MTP.gguf", evidence.AssistantProductionQuantModelID)
+	core.AssertEqual(t, "E2B:assistant-q8", evidence.AssistantProductionQuantPack)
+	core.AssertEqual(t, true, evidence.Gemma4FamilyPairVerified)
+	core.AssertEqual(t, false, evidence.OfficialPairVerified)
 }
 
 func TestProductionMTPAttachedDrafterEvidence_Good_CompletesMeasuredEvidence(t *testing.T) {
@@ -1245,6 +1286,34 @@ func productionMTPE2BBF16AssistantModel() *rocmModel {
 			NumLayers:    4,
 			HiddenSize:   productionLaneGemma4E2BHiddenSize,
 			QuantBits:    16,
+			VocabSize:    ProductionMTPAssistantTokenOrderingVocabSize,
+		},
+	}
+}
+
+func productionMTPE2BQ4GGUFTargetModel() *rocmModel {
+	return &rocmModel{
+		modelPath: "/models/unsloth-gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q4_K_M.gguf",
+		modelInfo: inference.ModelInfo{
+			Architecture: "gemma4_text",
+			NumLayers:    productionLaneGemma4E2BLayers,
+			HiddenSize:   productionLaneGemma4E2BHiddenSize,
+			QuantBits:    4,
+			QuantGroup:   64,
+			VocabSize:    ProductionMTPAssistantTokenOrderingVocabSize,
+		},
+	}
+}
+
+func productionMTPE2BQ8GGUFAssistantModel() *rocmModel {
+	return &rocmModel{
+		modelPath: "/models/unsloth-gemma-4-E2B-it-GGUF/MTP/gemma-4-E2B-it-Q8_0-MTP.gguf",
+		modelInfo: inference.ModelInfo{
+			Architecture: officialGemma4E2BAssistantArchitecture,
+			NumLayers:    4,
+			HiddenSize:   productionLaneGemma4E2BHiddenSize,
+			QuantBits:    8,
+			QuantGroup:   64,
 			VocabSize:    ProductionMTPAssistantTokenOrderingVocabSize,
 		},
 	}

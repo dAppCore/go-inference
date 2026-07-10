@@ -38,6 +38,78 @@ type hipAttachedDrafterGenerateRequest struct {
 	RestoreDeviceState  func(*hipGemma4Q4DeviceDecodeState) error
 }
 
+type hipAttachedDrafterCarryAdvanceRequest struct {
+	TargetForward    hipGemma4Q4ForwardConfig
+	DeviceKVMode     string
+	EngineConfig     hipGemma4Q4EngineConfig
+	State            hipGemma4Q4DecodeState
+	PriorDeviceState *hipGemma4Q4DeviceDecodeState
+	TokenID          int32
+	Position         int
+	Epsilon          float32
+	SuppressTokens   []int32
+	GreedyBuffer     *hipDeviceByteBuffer
+	Workspace        *hipAttentionHeadsChunkedWorkspace
+}
+
+type hipAttachedDrafterCarryAdvanceResult struct {
+	Current     hipGemma4Q4ForwardResult
+	State       hipGemma4Q4DecodeState
+	DeviceState *hipGemma4Q4DeviceDecodeState
+	Position    int
+}
+
+type hipAttachedDrafterTargetAdvanceOneRequest struct {
+	TargetForward    hipGemma4Q4ForwardConfig
+	DeviceKVMode     string
+	EngineConfig     hipGemma4Q4EngineConfig
+	PriorDeviceState *hipGemma4Q4DeviceDecodeState
+	TokenID          int32
+	Position         int
+	Epsilon          float32
+	SuppressTokens   []int32
+	GreedyBuffer     *hipDeviceByteBuffer
+	Workspace        *hipAttentionHeadsChunkedWorkspace
+	ReturnHidden     bool
+}
+
+type hipAttachedDrafterTargetAdvanceOneResult struct {
+	Current     hipGemma4Q4ForwardResult
+	DeviceState *hipGemma4Q4DeviceDecodeState
+	Position    int
+	TargetCalls int
+}
+
+func (result *hipAttachedDrafterCarryAdvanceResult) Close() error {
+	if result == nil {
+		return nil
+	}
+	var lastErr error
+	hipReleaseForwardDeviceFinalHidden(&result.Current)
+	if result.DeviceState != nil {
+		if err := result.DeviceState.Close(); err != nil {
+			lastErr = err
+		}
+	}
+	result.DeviceState = nil
+	return lastErr
+}
+
+func (result *hipAttachedDrafterTargetAdvanceOneResult) Close() error {
+	if result == nil {
+		return nil
+	}
+	var lastErr error
+	hipReleaseForwardDeviceFinalHidden(&result.Current)
+	if result.DeviceState != nil {
+		if err := result.DeviceState.Close(); err != nil {
+			lastErr = err
+		}
+	}
+	result.DeviceState = nil
+	return lastErr
+}
+
 func attachedDrafterAttachError(linked bool, targetRetainedDecode, assistantVerify, assistantPreflightStatus, assistantPlanStatus string) error {
 	if linked {
 		return nil
@@ -221,6 +293,116 @@ func hipGemma4Q4PromptTokenIDsRequired(prompt string, model *hipLoadedModel) ([]
 	return tokens, nil
 }
 
+func hipAdvanceAttachedDrafterCarryLead(ctx context.Context, driver nativeHIPDriver, req hipAttachedDrafterCarryAdvanceRequest) (hipAttachedDrafterCarryAdvanceResult, error) {
+	if err := hipContextErr(ctx); err != nil {
+		return hipAttachedDrafterCarryAdvanceResult{}, err
+	}
+	advanced, err := hipRunAttachedDrafterTargetAdvanceOneBatch(ctx, driver, hipAttachedDrafterTargetAdvanceOneRequest{
+		TargetForward:    req.TargetForward,
+		DeviceKVMode:     req.DeviceKVMode,
+		EngineConfig:     req.EngineConfig,
+		PriorDeviceState: req.PriorDeviceState,
+		TokenID:          req.TokenID,
+		Position:         req.Position,
+		Epsilon:          req.Epsilon,
+		SuppressTokens:   req.SuppressTokens,
+		GreedyBuffer:     req.GreedyBuffer,
+		Workspace:        req.Workspace,
+		ReturnHidden:     true,
+	})
+	if err != nil {
+		return hipAttachedDrafterCarryAdvanceResult{}, err
+	}
+	return hipAttachedDrafterCarryAdvanceResult{
+		Current:     advanced.Current,
+		State:       req.State,
+		DeviceState: advanced.DeviceState,
+		Position:    advanced.Position,
+	}, nil
+}
+
+func hipRunAttachedDrafterTargetAdvanceOneBatch(ctx context.Context, driver nativeHIPDriver, req hipAttachedDrafterTargetAdvanceOneRequest) (hipAttachedDrafterTargetAdvanceOneResult, error) {
+	if err := hipContextErr(ctx); err != nil {
+		return hipAttachedDrafterTargetAdvanceOneResult{}, err
+	}
+	if driver == nil || !driver.Available() {
+		return hipAttachedDrafterTargetAdvanceOneResult{}, core.E("rocm.hip.AttachedDrafterTargetAdvanceOne", "HIP driver is not available", nil)
+	}
+	if len(req.TargetForward.Layers) == 0 {
+		return hipAttachedDrafterTargetAdvanceOneResult{}, core.E("rocm.hip.AttachedDrafterTargetAdvanceOne", "target forward config has no layers", nil)
+	}
+	if req.PriorDeviceState == nil || req.PriorDeviceState.closed {
+		return hipAttachedDrafterTargetAdvanceOneResult{}, core.E("rocm.hip.AttachedDrafterTargetAdvanceOne", "live target device state is required", nil)
+	}
+	if req.Position < 0 {
+		return hipAttachedDrafterTargetAdvanceOneResult{}, core.E("rocm.hip.AttachedDrafterTargetAdvanceOne", "position must be non-negative", nil)
+	}
+	priorLayerKV := hipGemma4Q4DeviceLayerCaches(req.PriorDeviceState, nil, len(req.TargetForward.Layers))
+	priorLayerDescriptors, err := hipGemma4Q4DeviceLayerDescriptorTableAliases(req.PriorDeviceState, nil, len(req.TargetForward.Layers))
+	if err != nil {
+		return hipAttachedDrafterTargetAdvanceOneResult{}, err
+	}
+	defer hipCloseGemma4Q4DeviceLayerDescriptorTables(priorLayerDescriptors)
+	greedyBuffer := hipAttachedDrafterStableDeviceBufferView(req.GreedyBuffer)
+	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, driver, req.TargetForward, []int32{req.TokenID}, req.Position, req.Epsilon, req.DeviceKVMode, priorLayerKV, priorLayerDescriptors, nil, nil, 0, greedyBuffer, req.Workspace, req.EngineConfig)
+	if err != nil {
+		return hipAttachedDrafterTargetAdvanceOneResult{}, err
+	}
+	success := false
+	defer func() {
+		if !success {
+			_ = forward.Close()
+		}
+	}()
+	if len(forward.Greedy) != 1 {
+		return hipAttachedDrafterTargetAdvanceOneResult{}, core.E("rocm.hip.AttachedDrafterTargetAdvanceOne", "batch-one target advance did not return one greedy row", nil)
+	}
+	greedy := forward.Greedy[0].Greedy
+	if hipTokenIsSuppressed(int32(greedy.TokenID), req.SuppressTokens) {
+		last := req.TargetForward.Layers[len(req.TargetForward.Layers)-1]
+		greedy, err = hipRunGemma4Q4PrefillFinalGreedyForRowSuppressWorkspace(ctx, driver, last, forward.FinalHidden, 1, 0, req.Epsilon, greedyBuffer, req.SuppressTokens, req.Workspace)
+		if err != nil {
+			return hipAttachedDrafterTargetAdvanceOneResult{}, err
+		}
+	}
+	var hidden *hipDeviceByteBuffer
+	if req.ReturnHidden {
+		last := req.TargetForward.Layers[len(req.TargetForward.Layers)-1]
+		hidden, err = hipCloneGemma4Q4PrefillFinalHiddenRow(ctx, driver, forward.FinalHidden, 1, 0, last.HiddenSize, req.Workspace)
+		if err != nil {
+			return hipAttachedDrafterTargetAdvanceOneResult{}, err
+		}
+	}
+	nextDeviceState, stateErr := hipGemma4Q4DeviceDecodeStateFromPrefillForward(forward, req.DeviceKVMode)
+	closeErr := forward.Close()
+	success = true
+	if stateErr != nil {
+		_ = hidden.Close()
+		return hipAttachedDrafterTargetAdvanceOneResult{}, stateErr
+	}
+	if closeErr != nil {
+		_ = hidden.Close()
+		_ = nextDeviceState.Close()
+		return hipAttachedDrafterTargetAdvanceOneResult{}, closeErr
+	}
+	if err := hipFinalizeGemma4Q4ForwardDeviceState(req.PriorDeviceState, nextDeviceState); err != nil {
+		_ = hidden.Close()
+		_ = nextDeviceState.Close()
+		return hipAttachedDrafterTargetAdvanceOneResult{}, err
+	}
+	return hipAttachedDrafterTargetAdvanceOneResult{
+		Current: hipGemma4Q4ForwardResult{
+			Greedy:                    greedy,
+			GreedyDevice:              greedyBuffer,
+			DeviceFinalHidden:         hidden,
+			DeviceFinalHiddenBorrowed: false,
+		},
+		DeviceState: nextDeviceState,
+		Position:    req.Position + 1,
+		TargetCalls: 1,
+	}, nil
+}
+
 func (model *hipLoadedModel) runAttachedDrafterGenerate(ctx context.Context, runtime *hipAttachedDrafterRuntime, req hipAttachedDrafterGenerateRequest) (inferdecode.Result, error) {
 	if err := hipContextErr(ctx); err != nil {
 		return inferdecode.Result{}, err
@@ -295,13 +477,12 @@ func (model *hipLoadedModel) runAttachedDrafterGenerate(ctx context.Context, run
 		return inferdecode.Result{}, err
 	}
 	workspace.EnsureProjectionGreedyBestCapacity(req.MaxTokens + 2)
-	finalGreedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+	prefillGreedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
 	if err != nil {
 		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
 		return inferdecode.Result{}, err
 	}
 	defer func() {
-		_ = finalGreedyBuffer
 		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
 	}()
 
@@ -319,7 +500,7 @@ func (model *hipLoadedModel) runAttachedDrafterGenerate(ctx context.Context, run
 		TargetDeviceState: deviceState,
 		Epsilon:           1e-6,
 		SuppressTokens:    suppressTokens,
-		GreedyBuffer:      finalGreedyBuffer,
+		GreedyBuffer:      prefillGreedyBuffer,
 		Workspace:         workspace,
 	})
 	targetDuration += nonZeroHIPDuration(time.Since(targetStart))
@@ -341,6 +522,45 @@ func (model *hipLoadedModel) runAttachedDrafterGenerate(ctx context.Context, run
 	for len(tokens) < req.MaxTokens && !stopped {
 		if err := hipContextErr(ctx); err != nil {
 			return inferdecode.Result{}, err
+		}
+		if carryLead >= 0 {
+			carryGreedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+			if err != nil {
+				return inferdecode.Result{}, err
+			}
+			targetStart := time.Now()
+			advanced, err := hipAdvanceAttachedDrafterCarryLead(ctx, model.driver, hipAttachedDrafterCarryAdvanceRequest{
+				TargetForward:    targetCfg,
+				DeviceKVMode:     deviceKVMode,
+				EngineConfig:     engineConfig,
+				State:            state,
+				PriorDeviceState: deviceState,
+				TokenID:          carryLead,
+				Position:         position,
+				Epsilon:          1e-6,
+				SuppressTokens:   suppressTokens,
+				GreedyBuffer:     carryGreedyBuffer,
+				Workspace:        workspace,
+			})
+			targetDuration += nonZeroHIPDuration(time.Since(targetStart))
+			targetCalls++
+			if err != nil {
+				return inferdecode.Result{}, err
+			}
+			hipReleaseForwardDeviceFinalHidden(&current)
+			previousDeviceState := deviceState
+			current = advanced.Current
+			advanced.Current = hipGemma4Q4ForwardResult{}
+			state = advanced.State
+			deviceState = advanced.DeviceState
+			advanced.DeviceState = nil
+			position = advanced.Position
+			currentToken = carryLead
+			carryLead = -1
+			hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+			if err := advanced.Close(); err != nil {
+				return inferdecode.Result{}, err
+			}
 		}
 		remaining := req.MaxTokens - len(tokens)
 		if remaining == 1 && carryLead < 0 {
@@ -389,6 +609,14 @@ func (model *hipLoadedModel) runAttachedDrafterGenerate(ctx context.Context, run
 			verifyTokens = withCarry
 		}
 		targetStart := time.Now()
+		verifyGreedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+		if err != nil {
+			return inferdecode.Result{}, err
+		}
+		verifyWorkspace := workspace
+		if core.Env("GO_ROCM_ATTACHED_DRAFTER_DISABLE_VERIFY_WORKSPACE") == "1" {
+			verifyWorkspace = nil
+		}
 		verify, verifyErr := hipRunAttachedDrafterTargetVerifyBlock(ctx, model.driver, hipAttachedDrafterTargetVerifyBlockRequest{
 			TargetForward:     targetCfg,
 			DeviceKVMode:      deviceKVMode,
@@ -399,8 +627,8 @@ func (model *hipLoadedModel) runAttachedDrafterGenerate(ctx context.Context, run
 			Position:          position,
 			Epsilon:           1e-6,
 			SuppressTokens:    suppressTokens,
-			GreedyBuffer:      finalGreedyBuffer,
-			Workspace:         workspace,
+			GreedyBuffer:      verifyGreedyBuffer,
+			Workspace:         verifyWorkspace,
 		})
 		targetDuration += nonZeroHIPDuration(time.Since(targetStart))
 		if err := draftBlock.Close(); err != nil {
@@ -410,6 +638,23 @@ func (model *hipLoadedModel) runAttachedDrafterGenerate(ctx context.Context, run
 			return inferdecode.Result{}, verifyErr
 		}
 		targetCalls += verify.TargetCalls
+		if core.Env("GO_ROCM_ATTACHED_DRAFTER_TRACE_BLOCKS") == "1" {
+			core.Print(core.Stderr(), "rocm.hip.attached_drafter.block output=%d position=%d carry=%t current=%d draft=%v verify=%v verified=%v accepted=%d all=%t replacement=%d next=%d proposed=%d target_calls=%d",
+				len(tokens),
+				position,
+				carryPresent,
+				current.Greedy.TokenID,
+				draftBlock.Tokens,
+				verifyTokens,
+				hipAttachedDrafterGreedyTokenIDs(verify.VerifiedGreedies),
+				verify.AcceptedCount,
+				verify.AllAccepted,
+				verify.Replacement.TokenID,
+				verify.NextGreedy.TokenID,
+				proposedCount,
+				verify.TargetCalls,
+			)
+		}
 		if carryPresent && verify.AcceptedCount == 0 {
 			_ = verify.Close()
 			return inferdecode.Result{}, core.E("rocm.hip.AttachedDrafterGenerate", "carried target token was not accepted by verifier", nil)
@@ -487,37 +732,39 @@ func (model *hipLoadedModel) runAttachedDrafterGenerate(ctx context.Context, run
 	}
 	retainCarryState := req.RetainDeviceState != nil || req.RestoreDeviceState != nil
 	if carryLead >= 0 && deviceState != nil && retainCarryState {
+		flushGreedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+		if err != nil {
+			return inferdecode.Result{}, err
+		}
 		stepStart := time.Now()
-		flush, nextState, err := hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx, model.driver, targetCfg, state, hipGemma4Q4ForwardRequest{
-			TokenID:            carryLead,
-			Position:           position,
-			Epsilon:            1e-6,
-			DeviceKVAttention:  true,
-			DeviceKVMode:       deviceKVMode,
-			EngineConfig:       engineConfig,
-			PriorDeviceState:   deviceState,
-			ReturnDeviceState:  true,
-			SkipFinalSample:    true,
-			AttentionWorkspace: workspace,
-			OmitDebugTensors:   true,
-			OmitLabels:         true,
-			OmitHostState:      true,
-		}, false)
+		advanced, err := hipAdvanceAttachedDrafterCarryLead(ctx, model.driver, hipAttachedDrafterCarryAdvanceRequest{
+			TargetForward:    targetCfg,
+			DeviceKVMode:     deviceKVMode,
+			EngineConfig:     engineConfig,
+			State:            state,
+			PriorDeviceState: deviceState,
+			TokenID:          carryLead,
+			Position:         position,
+			Epsilon:          1e-6,
+			SuppressTokens:   suppressTokens,
+			GreedyBuffer:     flushGreedyBuffer,
+			Workspace:        workspace,
+		})
 		targetDuration += nonZeroHIPDuration(time.Since(stepStart))
 		targetCalls++
 		if err != nil {
 			return inferdecode.Result{}, err
 		}
-		state = nextState
-		if flush.DeviceState == nil {
-			return inferdecode.Result{}, core.E("rocm.hip.AttachedDrafterGenerate", "carry flush did not return device KV state", nil)
-		}
 		previousDeviceState := deviceState
-		deviceState = flush.DeviceState
-		flush.DeviceState = nil
+		deviceState = advanced.DeviceState
+		advanced.DeviceState = nil
+		state = advanced.State
 		hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
-		position++
+		position = advanced.Position
 		carryLead = -1
+		if err := advanced.Close(); err != nil {
+			return inferdecode.Result{}, err
+		}
 	}
 	hipReleaseForwardDeviceFinalHidden(&current)
 	if req.RetainDeviceState != nil && deviceState != nil {
@@ -549,6 +796,14 @@ func (model *hipLoadedModel) runAttachedDrafterGenerate(ctx context.Context, run
 		Tokens:  tokens,
 		Metrics: metrics,
 	}, nil
+}
+
+func hipAttachedDrafterGreedyTokenIDs(greedies []hipGreedySampleResult) []int32 {
+	tokens := make([]int32, 0, len(greedies))
+	for _, greedy := range greedies {
+		tokens = append(tokens, int32(greedy.TokenID))
+	}
+	return tokens
 }
 
 type hipAttachedDrafterTargetPrefillRequest struct {
