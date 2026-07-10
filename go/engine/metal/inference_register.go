@@ -42,10 +42,9 @@ func (metalBackend) Available() bool { return ensureInit() == nil }
 // KV cache (default 4096).
 func (metalBackend) LoadModel(path string, opts ...inference.LoadOption) core.Result {
 	cfg := inference.ApplyLoadOpts(opts)
+	// maxLen <= 0 defers to the loader's checkpoint-window default
+	// (resolveDefaultContext — the trained window capped at 32768).
 	maxLen := cfg.ContextLen
-	if maxLen <= 0 {
-		maxLen = 4096
-	}
 	tm, err := LoadTokenModelDirWithConfig(path, maxLen, TokenModelLoadConfig{AdapterPath: cfg.AdapterPath})
 	if err != nil {
 		return core.Fail(core.E("native.metalBackend.LoadModel", "load token model", err))

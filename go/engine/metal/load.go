@@ -70,9 +70,32 @@ func LoadTokenModelDir(dir string, maxLen int) (model.TokenModel, error) {
 	return LoadTokenModelDirWithConfig(dir, maxLen, TokenModelLoadConfig{})
 }
 
+// defaultContextCap bounds the checkpoint-window context default: KV for the
+// global layers allocates maxLen rows up front (26B's five 2048-wide globals
+// cost ~1.3GB at 32K but ~10.7GB at its full 256K window), so an unset
+// context follows the checkpoint only up to this cap. An explicit context
+// length overrides in both directions.
+const defaultContextCap = 32768
+
+// resolveDefaultContext maps an unset context length to the checkpoint
+// window capped at defaultContextCap, keeping the old 4096 floor when the
+// config declares no window.
+func resolveDefaultContext(window int) int {
+	if window <= 0 {
+		return 4096
+	}
+	return min(window, defaultContextCap)
+}
+
 func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadConfig) (model.TokenModel, error) {
 	if loadCfg.PagedKVPageSize < 0 {
 		return nil, core.NewError("native.LoadTokenModelDir: paged KV page size must be >= 0")
+	}
+	if maxLen <= 0 {
+		// Serve/generate without -context used to cap every session at 4096 —
+		// the resident-conversation killer (#370's book bench died mid-book).
+		// Default to the checkpoint's trained window instead, capped.
+		maxLen = resolveDefaultContext(model.ProbeDirContextWindow(dir))
 	}
 	// SSM / hybrid families don't fit the reactive transformer Assemble — route them to their own loader
 	// before the registered path. mamba2 is a standalone recurrent SSM; qwen3_5/3.6 is a config-composed
