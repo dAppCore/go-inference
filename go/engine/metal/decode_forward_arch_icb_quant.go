@@ -216,6 +216,7 @@ func recordArchICBQuant(
 	pleRuntime *archDecodePLEInputs, pliDim, pleGS, pleBits int,
 	dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow int,
 	rope icbRope, scale, eps float32, valueNorm bool,
+	kvQ8 *archICBKVQ8,
 ) (*archICBReplay, error) {
 	nLayers := len(qlayers)
 	setup := getArchICBQuantSetupScratch(nLayers)
@@ -701,7 +702,7 @@ func recordArchICBQuant(
 			}
 			return projV
 		}
-		r, coreErr = recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, plePlan, recordProj, recordFusedRMSProj, vOutBind, valueNormOnes, vProjIdxOf, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, lFF, rope, scale, eps)
+		r, coreErr = recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, plePlan, recordProj, recordFusedRMSProj, vOutBind, valueNormOnes, vProjIdxOf, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, lFF, rope, scale, eps, kvQ8)
 	})
 	if coreErr != nil {
 		return nil, coreErr
@@ -831,9 +832,9 @@ func decodeForwardArchICBQuantInto(
 				vCaches[li] = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
 			}
 		}
-		r, coreErr = recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, pleGS, pleBits, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, simpleICBRope(base, headDim), scale, eps, valueNorm)
+		r, coreErr = recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, pleGS, pleBits, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, simpleICBRope(base, headDim), scale, eps, valueNorm, nil)
 		if coreErr == nil && pipeline {
-			r2, coreErr = recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, pleGS, pleBits, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, simpleICBRope(base, headDim), scale, eps, valueNorm)
+			r2, coreErr = recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, pleGS, pleBits, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, simpleICBRope(base, headDim), scale, eps, valueNorm, nil)
 		}
 	})
 	if coreErr != nil {
