@@ -60,8 +60,15 @@ tok/turn while the client resends full history.
   (attention + tail, pos/N rebinds), blocked on the staged-sliding landing's
   per-pass slot offsets. Also from this campaign: `c06cc8a` fixed
   `serve --draft` (dead since 601ac4e — LoadDir passed maxLen 0 through).
-- **#367 q8 KV (dense/ICB lane)** — priced: halves the depth slope, small-RAM
-  fleet value. The 26B depth curve is still wanted before building.
+- **#367 q8 KV (dense/ICB lane)** — BUILT, opt-in (`LTHN_KV_Q8_ICB=1`),
+  receipted on e2b: global layers store int8+scales on the recorded ICB
+  (`0103bd9` kernels, `b41ce28` wiring). Depth receipt: 16K +3.9%, 32K +2.8%
+  decode; slope −0.70→−0.52/1K — i.e. ~half of e2b's depth slope IS the
+  global-KV bytes (now halved), the other half is #365's non-KV class. Zero
+  shallow-depth cost. V1 tax: batched prefill + MTP verify + KV snapshots
+  DECLINE on q8 (prefill runs the chained replay: 146s@32K vs 8.2s batched)
+  — slice C is the q8-aware batched landing that removes it. 12B/31B
+  receipts pending (kv1/kv4 hd512 globals — same kernels).
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
