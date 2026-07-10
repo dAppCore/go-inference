@@ -108,8 +108,16 @@ tok/turn while the client resends full history.
   the depth scan — and the re-engage gate correctly oscillates it off,
   which is exactly the adaptive default the stance needs. q8 is now at
   bf16 parity on every measured axis (decode, prefill, MTP, -state) while
-  halving global-KV bytes. Remaining for the stance: the 256K cap lift +
-  256K receipts, the N-bit knob, the default flip.
+  halving global-KV bytes. **THE DEFAULT LANDED (`ae0636e`)**: q8 KV on by
+  default (kill switch `LTHN_KV_Q8_ICB=0` — the bf16 A/B anchor),
+  defaultContextCap 32768→262144 (unset context follows the checkpoint
+  window: e2b runs 128K, 26B/31B 256K), `-draft auto` already the serve
+  default. Live receipt with ZERO flags: e2b 124K prompt → 104.6 tok/s
+  decode, 69.6s prefill (the identical command errored at the old 32K
+  cap). Known banked cost: the q8 GEMM prefix mirrors allocate
+  full-cacheRows bf16 per global owner on deep prompts (e2b@128K ~1.9GB,
+  31B@256K ~17GB) — free-after-prefill is the follow-up lever. Remaining:
+  the 31B@256K flagship receipt, the N-bit knob (q6/q4 opt-in tiers).
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
