@@ -553,6 +553,23 @@ func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc b
 		s.pagedKV = nil
 		return nil
 	}
+	// q8 defaults ONLY where the session's decode actually READS the paged pool:
+	// MoE/trace sessions (stepToken's paged attention — 26B's lane). ICB-eligible
+	// sessions decode through the replay's OWN linear bf16 caches and the batched
+	// lanes run linear too, so a q8 pool there is pure lane drift — stepToken
+	// fallbacks and save/restore read q8-round-tripped values the replay never
+	// sees, which broke every ICB↔serial and batched↔serial byte-parity gate
+	// (#371; first bad commit 6e78826d) — with zero bandwidth win, since the
+	// deep-context scan it pays for never touches the pages on those sessions.
+	// An explicit LTHN_KV_Q8=1 still forces q8 wherever the geometry allows.
+	pagedDecodeLane := s.trace
+	for _, spec := range s.specs {
+		if spec.MoE {
+			pagedDecodeLane = true
+			break
+		}
+	}
+	q8Lane := kvQ8Requested || (kvQ8Enabled && pagedDecodeLane)
 	pages := make([]*devicePagedKVCache, len(s.specs))
 	for li, spec := range s.specs {
 		if !spec.OwnsCache() {
@@ -575,7 +592,7 @@ func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc b
 			return err
 		}
 		cache.ring = ring
-		if kvQ8Enabled && s.nHeads == 2*lkv && lhd <= 256 && (lkv*lhd)%kvQ8GroupSize == 0 {
+		if q8Lane && s.nHeads == 2*lkv && lhd <= 256 && (lkv*lhd)%kvQ8GroupSize == 0 {
 			// q8 pages exist only for gqa2 geometry (the only q8 SDPA kernels).
 			// Layers outside it keep bf16 pages — mixed modes are fine, every
 			// landing and read site branches per cache. The all-miss case is
