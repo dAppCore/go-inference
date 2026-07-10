@@ -81,11 +81,16 @@ tok/turn while the client resends full history.
   cause is strided small-visit DRAM efficiency + the separate scale line.
   **THE TARGET STANCE (Snider): MTP + q8 + 256K context becomes the DEFAULT
   once q8 completes** (q8 ≈ bf16 at ~1%; q6 −6% / q4 −22% stay user-choice).
-  That unparks, in order: the deep-verify q8 branch (MTP at depth must not
-  fall sequential), the read-format fix (scales interleaved into the row or
-  paired-row walks — worth 15-25% at 256K), the 256K context-cap lift under
-  q8, GPU mirror quant/dequant for deep wakes, then the default flip with
-  256K receipts. The roadmap lives in the task metadata.
+  The deep-verify q8 branch is BUILT (engagement-gated); its partial live
+  receipt reorders the roadmap: e2b MTP@16K greedy = bf16 112.9 vs q8 47.6
+  (both 25% acceptance) — the per-row 2-pass q8 read at ~105 GB/s makes the
+  READ-FORMAT FIX (scales-in-row or paired-row walks) the GATING item for
+  the stance, and bf16 MTP@16K also losing to plain (~144) at 25% acceptance
+  means MTP-at-depth economics need a high-acceptance-prompt receipt before
+  blaming q8 alone. Then: 256K cap lift under q8, GPU mirror quant/dequant
+  for deep wakes, the N-bit knob (q6 −6% / q4 −22% user-choice), and the
+  default flip with 256K receipts. Full roadmap + next-session opener in the
+  task metadata.
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
