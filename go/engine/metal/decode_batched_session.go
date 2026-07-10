@@ -1095,11 +1095,22 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			// differ. Token-identity tier (S stores bf16 between the GEMMs), the same
 			// boundary the fold's qmm and ≥32-row steel projections already trade at.
 			ownerQ8 := s.icb != nil && s.icb.kvQ8.on(ownIdx) // sharers of a q8 owner read q8 too
+			// q8 GEMM prefix (#367): the steel GEMM composition reads bf16, so a
+			// q8 owner dequantises its attended prefix into the layer's snapshot
+			// mirrors first (in this encoder, after the landing) and the GEMM
+			// reads the mirrors. Without this the deep-prompt lane fell back to
+			// multiQ q8: attn.sdpa 323.6ms vs 71.3ms per chunk at basePos 25600
+			// (the whole 2-3.6x q8 prefill tax). Mirror ensure failing (no
+			// dequant kernel, alloc failure) keeps the multiQ fallback.
+			var q8GEMMK, q8GEMMV metal.MTLBuffer
+			if ownerQ8 && gpuHasKVQ8DequantRows() {
+				q8GEMMK, q8GEMMV, _ = s.icb.ensureQ8Mirrors(ownIdx)
+			}
 			useGEMMSDPA := useMultiQ && slideW == 0 && basePos+K >= sdpaPromptGEMMMinKV &&
 				K <= sdpaPromptGEMMMaxRows && sdpaPromptGEMMFeasible(K, s.maxLen) &&
 				!sdpaPromptGEMMDisabledForTest &&
 				!sdpaPromptGEMMEnvDisabled() && gpuHasPromptSDPAGEMM() &&
-				!ownerQ8 // the steel GEMM composition has no q8 read — multiQ q8 covers the fold
+				(!ownerQ8 || q8GEMMK != nil)
 			if batchedRope {
 				if err = encQKNormRopeRows(enc, qSlab, s.lb[li].qNorm.buf, qSlab, 0, s.lb[li].qNorm.off, 0, qDim, qDim, offBuf[0], layerRopeFreqs, K, s.nHeads, lhd, rotDim, rbase, s.scale, s.eps); err != nil {
 					endEncodingFast(enc)
@@ -1244,9 +1255,24 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					pendingLandings = append(pendingLandings, ringLanding{li: li, kvDim: kvDim, slideW: slideW})
 				}
 			} else if useGEMMSDPA {
+				kGEMM, vGEMM := ownerK, ownerV
+				if ownerQ8 {
+					// dequantise the attended prefix [0, basePos+K) into the
+					// mirrors — Metal's in-encoder hazard tracking orders this
+					// after the landing above and before the GEMM below.
+					if err = encKVQ8DequantRows(enc, ownerK, s.icb.kvQ8.kScales[ownIdx], q8GEMMK, basePos+K, kvDim); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+					if err = encKVQ8DequantRows(enc, ownerV, s.icb.kvQ8.vScales[ownIdx], q8GEMMV, basePos+K, kvDim); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+					kGEMM, vGEMM = q8GEMMK, q8GEMMV
+				}
 				headBatch := sdpaPromptHeadBatch(s.nHeads/lkv, K, s.maxLen)
 				sScore0, sScore1 := s.denseBatch.sdpaPromptS(headBatch*K, s.maxLen)
-				if err = encSDPAPromptGEMM(enc, qSlab, ownerK, ownerV, attnSlab, sScore0, sScore1,
+				if err = encSDPAPromptGEMM(enc, qSlab, kGEMM, vGEMM, attnSlab, sScore0, sScore1,
 					s.nHeads, lkv, lhd, K, basePos+K, qDim, kvDim, headBatch, s.scale); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
