@@ -238,11 +238,61 @@ func lthnGatherQMVPipeline(key lthnGatherQMVKey) (metal.MTLComputePipelineState,
 	return pso, true
 }
 
+var (
+	lthnGatherQMVICBPSOMu    sync.Mutex
+	lthnGatherQMVICBPSOCache = map[lthnGatherQMVKey]metal.MTLComputePipelineState{}
+)
+
+// lthnGatherQMVPipelineICB is lthnGatherQMVPipeline with supportIndirectCommandBuffers
+// set — the variant the MTP verify-tail ICB records (a kernel recorded into an indirect
+// command faults without it). Same function constants, same failure-caching contract.
+func lthnGatherQMVPipelineICB(key lthnGatherQMVKey) (metal.MTLComputePipelineState, bool) {
+	lthnGatherQMVICBPSOMu.Lock()
+	defer lthnGatherQMVICBPSOMu.Unlock()
+	if pso, ok := lthnGatherQMVICBPSOCache[key]; ok {
+		return pso, pso != nil
+	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		lthnGatherQMVICBPSOCache[key] = nil
+		return nil, false
+	}
+	variant := "lthn_gather_qmv_"
+	if key.fast {
+		variant = "lthn_gather_qmv_fast_"
+	}
+	if key.gelu {
+		variant = "lthn_gather_qmv_gelu_"
+	}
+	name := core.Sprintf("%sbfloat16_t_gs_%d_b_%d", variant, key.groupSize, key.bits)
+	fc := metal.NewMTLFunctionConstantValues()
+	rows := int32(key.expertRows)
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&rows), metal.MTLDataTypeInt, 0)
+	batched := key.batchedX
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&batched), metal.MTLDataTypeBool, 1)
+	fn, err := customLibrary.NewFunctionWithNameConstantValuesError(name, fc)
+	if err != nil || fn == nil || fn.GetID() == 0 {
+		lthnGatherQMVICBPSOCache[key] = nil
+		return nil, false
+	}
+	desc := metal.NewMTLComputePipelineDescriptor()
+	desc.SetComputeFunction(fn)
+	desc.SetSupportIndirectCommandBuffers(true)
+	pso, perr := device.NewComputePipelineStateWithDescriptorOptionsReflectionError(desc, 0, nil)
+	if perr != nil {
+		lthnGatherQMVICBPSOCache[key] = nil
+		return nil, false
+	}
+	lthnGatherQMVICBPSOCache[key] = pso
+	return pso, true
+}
+
 // emitLthnGatherQMVRoutes is the LEAN all-routes gather dispatch: same grid, same
 // arithmetic (the kernel calls MLX's qmv[_fast]_impl), but the expert addressing is
 // baked into the PSO so the shape/stride constant buffers and their ndim scalars are
 // never bound or read — setPSO + 7 setBuf + 2 setI32 versus the MLX path's 14+6.
-func emitLthnGatherQMVRoutes(sink encSink, pso metal.MTLComputePipelineState, x metal.MTLBuffer, xOff uint, wq metal.MTLBuffer, wqOff uint, scales metal.MTLBuffer, scalesOff uint, biases metal.MTLBuffer, biasesOff uint, lhsIdx, rhsIdx metal.MTLBuffer, rhsOff uint, out metal.MTLBuffer, outOff uint, outDim, inDim, groupSize, bits, rowBase, routes int) {
+// Sink-generic: the live encoder and the MTP verify-tail ICB recorder share this body
+// (pso caller-provided — the ICB needs its supportIndirectCommandBuffers variant).
+func emitLthnGatherQMVRoutes[S dispatchSink](sink S, pso metal.MTLComputePipelineState, x metal.MTLBuffer, xOff uint, wq metal.MTLBuffer, wqOff uint, scales metal.MTLBuffer, scalesOff uint, biases metal.MTLBuffer, biasesOff uint, lhsIdx, rhsIdx metal.MTLBuffer, rhsOff uint, out metal.MTLBuffer, outOff uint, outDim, inDim, groupSize, bits, rowBase, routes int) {
 	rowPackedBytes := inDim * bits / 8
 	groups := inDim / groupSize
 	sink.setPSO(pso)

@@ -520,6 +520,13 @@ func (s *archDecodeState) encBatchedEpilogueRows(enc metal.MTLComputeCommandEnco
 			if err := encAddBF16To(enc, outBuf, normSlab, outBuf, outBase, 0, outBase, rows*s.dModel); err != nil {
 				return err
 			}
+			if rec := s.verifyTailRec; rec.recording(li) {
+				rec.recordGemvBatched(residentBytes(pl.gate.Packed), 0, outBuf, outBase, gateSlab, 0, s.pliDim, s.dModel, rows)
+				rec.recordGeluGateMul(gateSlab, pleSlabBuf, multSlab, 0, pliBase, 0, rows*s.pliDim)
+				rec.recordGemvBatched(residentBytes(pl.proj.Packed), 0, multSlab, 0, projSlab, 0, s.dModel, s.pliDim, rows)
+				rec.recordRMSRows(projSlab, residentBytes(pl.postNorm), normSlab, 0, 0, 0, rows, s.dModel, s.eps)
+				rec.recordAdd(outBuf, outBase, normSlab, 0, outBuf, outBase, rows*s.dModel)
+			}
 		} else {
 			gateGroupSize, gateBits, err := validatePerLayerInputGateQuantWeight("gate", pl.gate, s.pliDim, s.dModel, pl.groupSize, pl.bits)
 			if err != nil {
@@ -552,6 +559,11 @@ func (s *archDecodeState) encBatchedEpilogueRows(enc metal.MTLComputeCommandEnco
 					if err := encRMSNormResidualRowsBF16At(enc, projSlab, residentBytes(pl.postNorm), outBuf, outBuf, 0, 0, outBase, outBase, rows, s.dModel, s.eps); err != nil {
 						return err
 					}
+					if rec := s.verifyTailRec; rec.recording(li) {
+						rec.recordPLEGateGeluRows(gatePacked, gateScales, gateBiases, outBuf, outBase, pleSlabBuf, pliBase, multSlab, 0, rows, s.dModel, s.pliDim, gateGroupSize, gateBits)
+						rec.recordQMMT(projPacked.buf, projScales.buf, projBiases.buf, multSlab, projSlab, projPacked.off, projScales.off, projBiases.off, 0, 0, rows, s.dModel, s.pliDim, projGroupSize, projBits)
+						rec.recordRMSNormResidualRows(projSlab, residentBytes(pl.postNorm), outBuf, outBuf, 0, 0, outBase, outBase, rows, s.dModel, s.eps)
+					}
 					fusedChain = true
 				}
 			}
@@ -571,11 +583,23 @@ func (s *archDecodeState) encBatchedEpilogueRows(enc metal.MTLComputeCommandEnco
 				if err := encAddBF16To(enc, outBuf, normSlab, outBuf, outBase, 0, outBase, rows*s.dModel); err != nil {
 					return err
 				}
+				if rec := s.verifyTailRec; rec.recording(li) {
+					rec.recordQMMT(gatePacked.buf, gateScales.buf, gateBiases.buf, outBuf, gateSlab, gatePacked.off, gateScales.off, gateBiases.off, outBase, 0, rows, s.pliDim, s.dModel, gateGroupSize, gateBits)
+					rec.recordGeluGateMul(gateSlab, pleSlabBuf, multSlab, 0, pliBase, 0, rows*s.pliDim)
+					rec.recordQMMT(projPacked.buf, projScales.buf, projBiases.buf, multSlab, projSlab, projPacked.off, projScales.off, projBiases.off, 0, 0, rows, s.dModel, s.pliDim, projGroupSize, projBits)
+					rec.recordRMSRows(projSlab, residentBytes(pl.postNorm), normSlab, 0, 0, 0, rows, s.dModel, s.eps)
+					rec.recordAdd(outBuf, outBase, normSlab, 0, outBuf, outBase, rows*s.dModel)
+				}
 			}
 		}
 	}
 	if s.lb[li].layerScalar != nil { // gemma4 per-layer output scalar, all rows in one dispatch
-		return encMulRowsBF16(enc, outBuf, s.lb[li].layerScalar, outBuf, outBase, 0, outBase, rows, s.dModel)
+		if err := encMulRowsBF16(enc, outBuf, s.lb[li].layerScalar, outBuf, outBase, 0, outBase, rows, s.dModel); err != nil {
+			return err
+		}
+		if rec := s.verifyTailRec; rec.recording(li) {
+			rec.recordMulRows(outBuf, s.lb[li].layerScalar, outBuf, outBase, 0, outBase, rows, s.dModel)
+		}
 	}
 	return nil
 }
@@ -807,6 +831,40 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		hSlab, mlpNormSlab, gateSlab, upSlab, gatedSlab, downSlab = s.denseBatch.mlpFold(K, s.dModel, foldDFFMax)
 		attnNormSlab, qSlab, attnSlab, attnOutSlab, kStage, vStage = s.denseBatch.attnFold(K, s.dModel, foldQDimMax, foldKVDimMax)
 	}
+	// verify-tail ICB (#372): the fold's pos-independent per-layer tail replays
+	// recorded on repeat verify blocks; the first eligible block records it
+	// alongside its own live encodes. Key mismatches (a truncated final draft
+	// block's smaller K, a reallocated slab) simply run live — replayable()
+	// misses per layer.
+	var vtKey verifyTailKey
+	if s.verifyFoldSmallK && foldDFFMax > 0 && !verifyTailICBDisabled && !verifyTailICBDisabledForTest {
+		vtKey = verifyTailKey{
+			k: K, dModel: s.dModel,
+			inPacked: bufID(inRows[0]), outPacked: bufID(outRows[0]),
+			hSlab: bufID(hSlab), mlpNormSlab: bufID(mlpNormSlab),
+			gateSlab: bufID(gateSlab), upSlab: bufID(upSlab),
+			gatedSlab: bufID(gatedSlab), downSlab: bufID(downSlab),
+			attnNormSlab: bufID(attnNormSlab), attnSlab: bufID(attnSlab), attnOut: bufID(attnOutSlab),
+			pleSlab: bufID(pleSlabBuf),
+		}
+		if s.verifyTail != nil && s.verifyTail.key.k == vtKey.k && s.verifyTail.key != vtKey {
+			s.verifyTail = nil // the buffer world changed under the same K: re-record once
+			s.verifyTailTried = false
+		}
+		if s.verifyTail == nil && !s.verifyTailTried {
+			s.verifyTailTried = true
+			s.verifyTailRec = newVerifyTailRecorder(len(s.specs), vtKey)
+		}
+	}
+	if s.verifyTailRec != nil {
+		defer func() {
+			rec := s.verifyTailRec
+			s.verifyTailRec = nil
+			if vt := rec.finish(); vt != nil {
+				s.verifyTail = vt
+			}
+		}()
+	}
 	// deferred-landing bookkeeping (the big-K staged sliding tail): which owners deferred their
 	// ring landing (their sharers then ride the owner's stage), and the landings to encode after
 	// every layer has read the pre-batch ring state.
@@ -865,6 +923,11 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		batchedRows := foldMLP && !batchedEpilogueDisabledForTest && gpuHasMulRowsKernel() &&
 			(len(s.ple) == 0 || s.pliDim <= foldDFFMax)
 		xContig := !(li == 0 && usingDirectInputRows)
+		// tailReplayed: this layer's whole pos-independent tail (o-proj → layer
+		// scalar) ran as one recorded-ICB range — the live tail encodes below
+		// (o-proj/resid AND the foldMLP section) are skipped for it. GPU-trace
+		// note: the replayed tail's span lands in the attn.o+resid bucket.
+		tailReplayed := false
 		if foldAttn {
 			enc = trace.checkpoint(enc, "attn.norm+qkv")
 			anw := s.lb[li].anw
@@ -1088,22 +1151,42 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				}
 			}
 			enc = trace.checkpoint(enc, "attn.o+resid")
-			if err = projectRowsRequired(proj, enc, attnSlab, attnOutSlab, 0, 0, K, projO); err != nil {
-				endEncodingFast(enc)
-				return nil, false, err
+			// verify-tail replay (#372): the recorded range covers this layer's
+			// whole tail — o-proj, both residuals, the MLP fold, the PLE chain
+			// and the layer scalar — so the live encodes below AND the foldMLP
+			// section are skipped for it.
+			if vt := s.verifyTail; s.verifyFoldSmallK && batchedRows && !s.specs[li].MoE &&
+				!verifyTailICBDisabledForTest && vt.replayable(li, vtKey) {
+				vt.execute(enc, li)
+				tailReplayed = true
 			}
-			if batchedRows && xContig {
-				// h = x + postAttnNorm(Wo·attn) for all K rows — attnNormSlab is free as scratch
-				if err = encResidualRowsMaybeNorm(enc, readRows[0], readOff[0], attnOutSlab, 0, attnNormSlab, hSlab, 0, s.lb[li].postAttnNorm, K, s.dModel, s.eps); err != nil {
+			if !tailReplayed {
+				if err = projectRowsRequired(proj, enc, attnSlab, attnOutSlab, 0, 0, K, projO); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
 				}
-			} else {
-				for i := range K {
-					// h row i = x row i + postAttnNorm(Wo·attn row i) — attnNormSlab is free as scratch
-					if err = encResidualMaybeNormAt(enc, readRows[i], readOff[i], attnOutSlab, uint(i*rowBytes), attnNormSlab, hSlab, uint(i*rowBytes), s.lb[li].postAttnNorm, s.dModel, s.eps); err != nil {
+				if rec := s.verifyTailRec; rec != nil && batchedRows && !s.specs[li].MoE {
+					rec.beginLayer(li) // no-op outside [1, nLayers-2]
+					if rec.recording(li) {
+						rec.recordProjectRows(proj, attnSlab, attnOutSlab, 0, 0, K, projO)
+					}
+				}
+				if batchedRows && xContig {
+					// h = x + postAttnNorm(Wo·attn) for all K rows — attnNormSlab is free as scratch
+					if err = encResidualRowsMaybeNorm(enc, readRows[0], readOff[0], attnOutSlab, 0, attnNormSlab, hSlab, 0, s.lb[li].postAttnNorm, K, s.dModel, s.eps); err != nil {
 						endEncodingFast(enc)
 						return nil, false, err
+					}
+					if rec := s.verifyTailRec; rec.recording(li) {
+						rec.recordResidualRowsMaybeNorm(readRows[0], readOff[0], attnOutSlab, 0, attnNormSlab, hSlab, 0, s.lb[li].postAttnNorm, K, s.dModel, s.eps)
+					}
+				} else {
+					for i := range K {
+						// h row i = x row i + postAttnNorm(Wo·attn row i) — attnNormSlab is free as scratch
+						if err = encResidualMaybeNormAt(enc, readRows[i], readOff[i], attnOutSlab, uint(i*rowBytes), attnNormSlab, hSlab, uint(i*rowBytes), s.lb[li].postAttnNorm, s.dModel, s.eps); err != nil {
+							endEncodingFast(enc)
+							return nil, false, err
+						}
 					}
 				}
 			}
@@ -1200,7 +1283,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					}
 				}
 			}
-		} else if foldMLP {
+		} else if foldMLP && !tailReplayed {
 			enc = trace.checkpoint(enc, "mlp")
 			// the folded MLP: one rms across the K rows, gate/up/down as batched gemvs (grid Z=K,
 			// the layer's weight matrix shared across rows), gelu(gate)·up fused over K·lff.
@@ -1225,6 +1308,13 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				endEncodingFast(enc)
 				return nil, false, err
 			}
+			if rec := s.verifyTailRec; rec.recording(li) {
+				rec.recordRMSRows(hSlab, mnw.buf, mlpNormSlab, 0, mnw.off, 0, K, s.dModel, s.eps)
+				rec.recordProjectRows(proj, mlpNormSlab, gateSlab, 0, 0, K, projGate)
+				rec.recordProjectRows(proj, mlpNormSlab, upSlab, 0, 0, K, projUp)
+				rec.recordGeluGateMul(gateSlab, upSlab, gatedSlab, 0, 0, 0, K*lff)
+				rec.recordProjectRows(proj, gatedSlab, downSlab, 0, 0, K, projDown)
+			}
 			enc = trace.checkpoint(enc, "resid+epilogue")
 			outContig := li != len(s.specs)-1 || (!directLastOut && !usingDirectOutputRows)
 			if batchedRows && outContig {
@@ -1235,9 +1325,15 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					endEncodingFast(enc)
 					return nil, false, err
 				}
+				if rec := s.verifyTailRec; rec.recording(li) {
+					rec.recordResidualRowsMaybeNorm(hSlab, 0, downSlab, 0, mlpNormSlab, outRows[0], rowOff[0], s.lb[li].postFFNorm, K, s.dModel, s.eps)
+				}
 				if err = s.encBatchedEpilogueRows(enc, pleSlabBuf, li, K, outRows[0], rowOff[0], gateSlab, gatedSlab, downSlab, mlpNormSlab); err != nil {
 					endEncodingFast(enc)
 					return nil, false, err
+				}
+				if rec := s.verifyTailRec; rec != nil {
+					rec.endLayer(li)
 				}
 			} else {
 				for i := range K {
