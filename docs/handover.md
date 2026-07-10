@@ -10,15 +10,22 @@ derivable from the code: how it got to this state, what was falsified along the
 way, and the traps that cost real hours. Trust the receipts in `git log` over
 anything here; the task tracker carries the live campaign state.
 
-## State of the board (2026-07-10, M3 Ultra 96GB, 4-bit, tg512)
+## State of the board (2026-07-10 evening, M3 Ultra 96GB, tg512, ALL-DEFAULTS: q8 KV + 128K ctx + -draft auto)
 
-| model | plain | MTP pair | notes |
-|-------|-------|----------|-------|
-| E2B | ~172 | **~235** | trainer workhorse; PLE arch |
-| E4B | ~120 | **~171** | qat-4bit drafter (dequantised at load) |
-| 12B | ~72 | ~93 | bf16 drafter |
-| 26B-A4B | ~142 | LOSS | MoE; its qat drafter loses — the MoE verify cost, not the drafter |
-| 31B | ~34 | ~47 | orchestrator |
+| model | plain | +MTP | qat plain | qat+MTP | notes |
+|-------|-------|------|-----------|---------|-------|
+| E2B | 161.3 | **207.3** | 136.1 | **188.4** | trainer workhorse; PLE arch |
+| E4B | 112.1 | (no asst) | 90.4 | **101.0** | non-qat assistant not cached |
+| 12B | 69.1 | **97.1** | — | — | bf16 drafter; beats the old board's 93 |
+| 26B-A4B | 139.8 | (no asst) | 133.0 | 31.5 LOSS | MoE verify cost — loss now QUANTIFIED (−76%) |
+| 31B | 32.5 | **47.4** | 22.1 | 19.1 LOSS | orchestrator; qat lanes are the anomaly |
+
+Generate-measured (decode-only, greedy, log-continuation prompt); the old
+serve-bench board read a few % higher on plain lanes — harness delta, not a
+regression. TWO OPEN AREAS from this matrix: (a) **the qat tax** — qat-4bit
+runs 16-32% SLOWER than plain 4bit at the same width (E2B −16%, E4B −19%,
+31B −32%) — same arithmetic width, so likely a checkpoint quant-layout →
+slower kernel path; (b) the 26B MoE MTP loss magnitude. Both unowned.
 
 Depth (e2b, `generate`-measured): linear −0.61 tok/s per 1K context, no cliff;
 ~105 at 98K. Cold prefill is the deep-context pain (54s at 98K) — conversation
