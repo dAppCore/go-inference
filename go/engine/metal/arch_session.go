@@ -801,28 +801,16 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 			if g.HasPLE() {
 				pleRuntime = &archDecodePLEInputs{compute: sess.perLayerInput}
 			}
-			kCaches := make([]metal.MTLBuffer, len(arch.Layer))
-			vCaches := make([]metal.MTLBuffer, len(arch.Layer))
-			for li := range arch.Layer {
-				if arch.Layer[li].OwnsCache() { // per-layer cache — global layers' rows are wider
-					cacheLen := maxLen
-					if arch.SlidingWindow > 0 && arch.SlidingWindow < maxLen && arch.Layer[li].Attention != model.GlobalAttention {
-						// Bounded ring — sliding owners need SlidingWindow rows, not maxLen
-						// (archICBReplay.prepareStepRebind ring-rebinds off the buffer length).
-						cacheLen = arch.SlidingWindow
-					}
-					cacheBytes := uint(cacheLen * kvHeadsOf(arch.Layer[li], arch.KVHeads) * headDimOf(arch.Layer[li], arch.HeadDim) * bf16Size)
-					kCaches[li] = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
-					vCaches[li] = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
-				}
-			}
+			// per-owner caches (sliding = bounded ring; global = maxLen rows), with the
+			// q8 opt-in allocating int8+scale caches on qualifying global owners (#367).
+			kCaches, vCaches, icbKVQ8 := allocArchICBCaches(arch.Layer, arch.KVHeads, arch.HeadDim, maxLen, arch.SlidingWindow)
 			rope := icbRope{
 				base: arch.RopeBase, localBase: arch.RopeLocalBase,
 				rotaryDim: arch.RotaryDim, rotaryDimLocal: arch.RotaryDimLocal,
 				globalHeadDim: state.globalHeadDim,
 				globalFreqs:   state.globalRopeFreqs, freqs: state.ropeFreqs,
 			}
-			rep, rerr := recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm)
+			rep, rerr := recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm, icbKVQ8)
 			if rerr != nil {
 				buildErr = rerr
 				return
@@ -831,7 +819,7 @@ func newArchSessionShardsWithHeadConfig(g *BF16Model, arch model.Arch, maxLen in
 			// Recorder for a PEER ICB sharing these KV caches (own ping0/pleInput) — the submit-ahead
 			// decode keeps two in flight over the same KV. Lazily invoked; most sessions never pipeline.
 			sess.recordPeerICB = func() (*archICBReplay, error) {
-				return recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm)
+				return recordArchICBBF16(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm, icbKVQ8)
 			}
 			if pipelinedGPUDecodeEnabled {
 				peer, perr := sess.recordPeerICB()
@@ -1091,33 +1079,16 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 			if g.HasPLE() {
 				pleRuntime = &archDecodePLEInputs{compute: sess.perLayerInput}
 			}
-			kCaches := make([]metal.MTLBuffer, len(arch.Layer))
-			vCaches := make([]metal.MTLBuffer, len(arch.Layer))
-			for li := range arch.Layer {
-				if arch.Layer[li].OwnsCache() { // per-layer cache — global layers' rows are wider
-					cacheLen := maxLen
-					if arch.SlidingWindow > 0 && arch.SlidingWindow < maxLen && arch.Layer[li].Attention != model.GlobalAttention {
-						// Bounded ring — the sliding-window KV memory fix: a sliding owner only
-						// ever attends its own window, so it only ever needs SlidingWindow rows of
-						// storage instead of the full maxLen context (O(window) not O(context)).
-						// archICBReplay.prepareStepRebind detects the smaller allocation (via the
-						// actual buffer length) and rebinds pos%cacheRows instead of the absolute
-						// position — a ring write/read matching the non-ICB sliding cache's own
-						// bounded ring (buildBF16ArchLayerBufsInternal).
-						cacheLen = arch.SlidingWindow
-					}
-					cacheBytes := uint(cacheLen * kvHeadsOf(arch.Layer[li], arch.KVHeads) * headDimOf(arch.Layer[li], arch.HeadDim) * bf16Size)
-					kCaches[li] = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
-					vCaches[li] = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
-				}
-			}
+			// per-owner caches (sliding = bounded ring; global = maxLen rows), with the
+			// q8 opt-in allocating int8+scale caches on qualifying global owners (#367).
+			kCaches, vCaches, icbKVQ8 := allocArchICBCaches(arch.Layer, arch.KVHeads, arch.HeadDim, maxLen, arch.SlidingWindow)
 			rope := icbRope{
 				base: arch.RopeBase, localBase: arch.RopeLocalBase,
 				rotaryDim: arch.RotaryDim, rotaryDimLocal: arch.RotaryDimLocal,
 				globalHeadDim: state.globalHeadDim,
 				globalFreqs:   state.globalRopeFreqs, freqs: state.ropeFreqs,
 			}
-			rep, rerr := recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm)
+			rep, rerr := recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm, icbKVQ8)
 			if rerr != nil {
 				buildErr = rerr
 				return
@@ -1126,7 +1097,7 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 			// Recorder for a PEER ICB sharing these KV caches (own ping0/pleInput) — the submit-ahead
 			// decode keeps two in flight over the same KV. Lazily invoked; most sessions never pipeline.
 			sess.recordPeerICB = func() (*archICBReplay, error) {
-				return recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm)
+				return recordArchICBQuant(g.Layers, arch.Layer, kCaches, vCaches, pleRuntime, arch.PerLayerInputHidden, gs, bits, arch.Hidden, arch.Heads, arch.KVHeads, arch.HeadDim, maxLen, arch.FF, arch.SlidingWindow, rope, attnScale, arch.Eps, arch.ValueNorm, icbKVQ8)
 			}
 			if pipelinedGPUDecodeEnabled {
 				peer, perr := sess.recordPeerICB()

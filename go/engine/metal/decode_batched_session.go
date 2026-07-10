@@ -637,6 +637,12 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		// the same bytes). Prompt-scale batches take the qmm fold (token-identity tier) — both
 		// the live and the restored session route those identically by size.
 		foldable := !batchedMLPFoldDisabledForTest && K > batchedDenseICBMaxRows && gpuHasGeluKernel()
+		if s.icb.hasKVQ8() {
+			// q8 ICB caches (#367 v1): the interleave writes bf16 rows straight
+			// into the caches — int8 corruption. Callers fall to the per-token
+			// replay, which is q8-aware by recording.
+			return decline("q8 icb caches")
+		}
 		if (K > batchedDenseICBMaxRows && !foldable) ||
 			len(s.icb.kCaches) < len(s.specs) || len(s.icb.vCaches) < len(s.specs) || len(s.icb.cacheRows) < len(s.specs) {
 			return decline(core.Sprintf("icb caches: K=%d kCaches=%d vCaches=%d cacheRows=%d specs=%d",

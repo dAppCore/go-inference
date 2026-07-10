@@ -162,7 +162,7 @@ func BenchmarkSpikeE2BReplayOnly(b *testing.B) {
 			}
 		}
 		var err error
-		r, err = recordArchICBQuant(layers, specs, kCaches, vCaches, nil, 0, 0, 0, dModel, nHeads, nKV, headDim, maxLen, dFF, arch.SlidingWindow, simpleICBRope(arch.RopeBase, headDim), arch.AttnScale, arch.Eps, arch.ValueNorm)
+		r, err = recordArchICBQuant(layers, specs, kCaches, vCaches, nil, 0, 0, 0, dModel, nHeads, nKV, headDim, maxLen, dFF, arch.SlidingWindow, simpleICBRope(arch.RopeBase, headDim), arch.AttnScale, arch.Eps, arch.ValueNorm, nil)
 		if err != nil {
 			b.Fatal(err)
 		}

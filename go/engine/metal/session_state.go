@@ -321,6 +321,11 @@ func readPromptEntryBytes(data []byte, off, want int, label string) ([]byte, int
 
 func (s *ArchSession) snapshotCacheViews(li int) (metal.MTLBuffer, metal.MTLBuffer, *byte, *byte, error) {
 	if s.state.icb != nil {
+		if s.state.icb.kvQ8.on(li) {
+			// q8 ICB caches (#367 v1): int8 + scale planes — the bf16-row
+			// snapshot codecs cannot represent them yet.
+			return nil, nil, nil, nil, core.NewError("native.sessionState: KV save/restore is unsupported on q8 ICB caches (LTHN_KV_Q8_ICB)")
+		}
 		if li >= len(s.state.icb.kCaches) || li >= len(s.state.icb.vCaches) {
 			return nil, nil, nil, nil, core.NewError("native.sessionState: ICB cache index out of range")
 		}

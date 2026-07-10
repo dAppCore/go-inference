@@ -5,6 +5,7 @@
 package native
 
 import (
+	"math"
 	"sync"
 	"unsafe"
 
@@ -165,7 +166,7 @@ func kvQ8QuantiseRows(rows []byte, kvDim int) (codes []byte, scales []float32) {
 		base := g * kvQ8GroupSize
 		var m float32
 		for i := 0; i < kvQ8GroupSize; i++ {
-			f := f32FromBF16(rows[(base+i)*2], rows[(base+i)*2+1])
+			f := bf16ToF32(rows[(base+i)*2], rows[(base+i)*2+1])
 			if a := absF32(f); a > m {
 				m = a
 			}
@@ -179,7 +180,7 @@ func kvQ8QuantiseRows(rows []byte, kvDim int) (codes []byte, scales []float32) {
 		}
 		scales[g] = scale
 		for i := 0; i < kvQ8GroupSize; i++ {
-			f := f32FromBF16(rows[(base+i)*2], rows[(base+i)*2+1])
+			f := bf16ToF32(rows[(base+i)*2], rows[(base+i)*2+1])
 			q := rintF32(f * inv)
 			if q > 127 {
 				q = 127
@@ -219,8 +220,16 @@ func kvQ8DequantiseRows(codes []byte, scales []float32) []byte {
 	out := make([]byte, len(codes)*2)
 	for i, c := range codes {
 		f := float32(int8(c)) * scales[i/kvQ8GroupSize]
-		b := bf16FromF32(f)
-		out[i*2], out[i*2+1] = b[0], b[1]
+		lo, hi := bf16BytesOfF32(f)
+		out[i*2], out[i*2+1] = lo, hi
 	}
 	return out
+}
+
+// bf16BytesOfF32 rounds an f32 to bf16 (round-to-nearest-even) and returns its
+// little-endian bytes — the production twin of the test helpers' bf16FromF32.
+func bf16BytesOfF32(f float32) (lo, hi byte) {
+	bits := math.Float32bits(f)
+	r := (bits + 0x7FFF + ((bits >> 16) & 1)) >> 16
+	return byte(r), byte(r >> 8)
 }
