@@ -5,6 +5,7 @@
 package native
 
 import (
+	"bytes"
 	"math"
 	"os"
 	"testing"
@@ -302,4 +303,55 @@ func TestDiagQ8ReadKernelCost(t *testing.T) {
 	bytesQ8 := float64(2*n*kvDim+2*n*(kvDim/64)*4) / 1e9
 	t.Logf("2-pass @N=%d kv=1 hd=512: bf16 %.3f ms (%.0f GB/s) vs q8 %.3f ms (%.0f GB/s) — q8/bf16 wall %.2fx (byte ratio 0.52x)",
 		n, bf, bytesBF/(bf/1e3), q8t, bytesQ8/(q8t/1e3), q8t/bf)
+}
+
+// TestKVQ8DequantKernelMatchesHostDequantiser pins the GPU mirror-dequant
+// kernel (lthn_kv_q8_dequant_rows_bf16) byte-for-byte against the host
+// dequantiser behind the snapshot mirrors — float(code)·scale in fp32 with a
+// bf16 round-to-nearest-even store on both sides, so equality is exact, not
+// tolerant.
+func TestKVQ8DequantKernelMatchesHostDequantiser(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	if err := ensureInit(); err != nil {
+		t.Fatalf("ensureInit: %v", err)
+	}
+	const kvDim, rows = 512, 5
+	src := make([]byte, rows*kvDim*2)
+	for i := 0; i < rows*kvDim; i++ {
+		b := bf16FromF32(float32(math.Cos(float64(i)*0.31)) * (0.05 + float32(i%11)*1.3))
+		src[i*2], src[i*2+1] = b[0], b[1]
+	}
+	codes, scales := kvQ8QuantiseRows(src, kvDim)
+	want := kvQ8DequantiseRows(codes, scales)
+
+	var got []byte
+	var encErr error
+	withAutoreleasePool(func() {
+		codeBuf := sharedBytes(codes)
+		scBuf := shared(scales)
+		mirror := device.NewBufferWithLengthOptions(uint(rows*kvDim*2), metal.MTLResourceStorageModeShared)
+		cb := commandBufferFast(queue)
+		enc := computeCommandEncoderFast(cb)
+		if encErr = encKVQ8DequantRows(enc, codeBuf, scBuf, mirror, rows, kvDim); encErr != nil {
+			endEncodingFast(enc)
+			return
+		}
+		endEncodingFast(enc)
+		commitCommandBufferFast(cb)
+		waitUntilCompletedFast(cb)
+		got = append([]byte(nil), unsafe.Slice((*byte)(mirror.Contents()), rows*kvDim*2)...)
+	})
+	if encErr != nil {
+		t.Fatalf("encKVQ8DequantRows: %v", encErr)
+	}
+	if !bytes.Equal(got, want) {
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("mirror byte %d: kernel %#x != host %#x", i, got[i], want[i])
+			}
+		}
+	}
+	t.Logf("dequant kernel == host dequantiser over %d rows × %d elems", rows, kvDim)
 }
