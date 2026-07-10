@@ -269,3 +269,30 @@ func RMSNormResidualBF16Into(out []byte, x, weight, res []byte, axisSize int, ep
 	}
 	return out, nil
 }
+
+// encRMSNormResidualRowsBF16At encodes out rows = res rows + RMSNorm(x rows, weight)
+// for `rows` CONTIGUOUS rows in one dispatch: the fused kernel's gid already indexes
+// rows (base = gid·axisSize), so the rows form just widens the grid — each row's
+// bytes identical to the sequential single-row encodes. The batched epilogue's
+// rms-rows + add pair collapses into it (#372: launch-bound at MTP-verify K).
+func encRMSNormResidualRowsBF16At(enc metal.MTLComputeCommandEncoder, x, weight, res, out metal.MTLBuffer, xOff, wOff, resOff, outOff uint, rows, axisSize int, eps float32) error {
+	pso, err := rmsNormResidualPipelineFor(axisSize)
+	if err != nil {
+		return err
+	}
+	sink := encSink{enc}
+	sink.setPSO(pso)
+	sink.setBuf(x, xOff, 0)
+	sink.setBuf(weight, wOff, 1)
+	sink.setBuf(res, resOff, 2)
+	sink.setBuf(out, outOff, 3)
+	sink.setF32(eps, 4)
+	sink.setI32(int32(axisSize), 5)
+	sink.setI32(1, 6)
+	tg := rmsThreadgroup(axisSize, pso)
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: uint(rows), Height: 1, Depth: 1},
+		metal.MTLSize{Width: tg, Height: 1, Depth: 1},
+	)
+	return nil
+}
