@@ -66,9 +66,12 @@ tok/turn while the client resends full history.
   decode; slope −0.70→−0.52/1K — i.e. ~half of e2b's depth slope IS the
   global-KV bytes (now halved), the other half is #365's non-KV class. Zero
   shallow-depth cost. V1 tax: batched prefill + MTP verify + KV snapshots
-  DECLINE on q8 (prefill runs the chained replay: 146s@32K vs 8.2s batched)
-  — slice C is the q8-aware batched landing that removes it. 12B/31B
-  receipts pending (kv1/kv4 hd512 globals — same kernels).
+  DECLINE on q8. Slice C (`bd1e314`) made the batched fold q8-aware
+  (stage + `lthn_kv_q8_store_rows` landing, `lthn_sdpa_multiq_q8` read):
+  prefill 146s→14.3s @32K (bf16 batched 8.2s — the gap is the GEMM lane
+  forced to multiQ on q8), MTP verify engages at shallow depth. Still
+  declining: KV save/restore, per-row shapes, the deep+small 2-pass corner.
+  12B/31B receipts pending (kv1/kv4 hd512 globals — same kernels).
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
