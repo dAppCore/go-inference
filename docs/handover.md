@@ -119,9 +119,16 @@ tok/turn while the client resends full history.
   (+19.5GB swap) on the 96GB box — weights ~17GB + q8 KV 8.6GB + 17GB
   GEMM-prefix mirrors + ~19GB UNATTRIBUTED. Mirrors now free at the
   prefill→decode seam (`df61abf`; -state and the drafter export
-  re-materialise per-layer). The 256K re-lift is gated on the
-  deep-session allocation census (find the 19GB; suspects: dense
-  sessions' paged-KV prealloc, GEMM S-scratch at maxLen cols) + a
+  re-materialise per-layer). The census then CLOSED the same evening,
+  statically: the "unattributed" ~19GB is the DUPLICATE CACHE SET — the
+  layer-buf builders allocate bf16 lb caches at maxLen for every owner
+  (decode_forward_arch.go:1856 / _quant.go:345) SEPARATE from the ICB
+  replay's own caches, and the batched pass prefers the ICB set when
+  present (decode_batched_session.go:961) — 17.2GB allocated-but-idle on
+  31B@256K — plus the sdpaPromptS S-slabs (2 × rows×maxLen bf16, whose
+  growth realloc also drops old slabs unreleased). The 256K re-lift is
+  gated on the cache dedupe (map the lb-cache fallback lanes first — a
+  q8 session's bf16 fallback may be dead code or a divergence risk) + a
   RAM-aware default. Then the N-bit knob.
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
