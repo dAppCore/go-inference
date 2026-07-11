@@ -89,6 +89,15 @@ type denseBatchScratch struct {
 	sdpaS1      metal.MTLBuffer
 	sdpaSRowCap int // sdpaPromptS's OWN capacities — never another fold's (the attnRowCap lesson)
 	sdpaSNCap   int
+	// q8 prompt staging (#375/#367): the per-chunk dequant of a q8 owner's
+	// attended prefix lands here instead of materialising per-layer
+	// full-cacheRows mirror planes (31B@256K: ~19GB of planes vs one pair per
+	// parity). Ping-pong by owner-index parity so layer li+1's dequant write
+	// does not serialise against layer li's flash read under Metal's
+	// in-encoder hazard tracking.
+	q8StageK   [2]metal.MTLBuffer
+	q8StageV   [2]metal.MTLBuffer
+	q8StageCap [2]int // bf16 element capacity per parity — q8Stage's OWN (the attnRowCap lesson)
 	// moeBatch holds the K-row MoE fold slabs (moe_batch.go) — nil until an MoE chunk runs.
 	moeBatch *moeBatchScratch
 	// moeGrouped holds the grouped-GEMM expert lane's sorted-order slabs (moe_grouped.go).
@@ -175,6 +184,24 @@ func (s *denseBatchScratch) sdpaPromptS(kRows, nCap int) (s0, s1 metal.MTLBuffer
 	return s.sdpaS0, s.sdpaS1
 }
 
+// q8Stage returns the ping-pong q8 prompt-staging pair for parity, sized to at
+// least rows×kvd bf16 values, releasing an outgrown pair before reallocating.
+// The prefill dequant is per-chunk work either way (the mirror lane also
+// re-dequantised the attended prefix every chunk) — staging only changes WHERE
+// it lands: one shared pair per parity instead of a full-cacheRows plane per
+// layer, which is the 31B@256K ingest-peak cut.
+func (s *denseBatchScratch) q8Stage(parity, rows, kvd int) (k, v metal.MTLBuffer) {
+	need := rows * kvd
+	if s.q8StageK[parity] == nil || s.q8StageCap[parity] < need {
+		releaseDeviceBuffers(s.q8StageK[parity], s.q8StageV[parity])
+		grown := max(need, s.q8StageCap[parity])
+		s.q8StageK[parity] = scratchBF16(grown)
+		s.q8StageV[parity] = scratchBF16(grown)
+		s.q8StageCap[parity] = grown
+	}
+	return s.q8StageK[parity], s.q8StageV[parity]
+}
+
 func (s *denseBatchScratch) Close() {
 	if s == nil {
 		return
@@ -201,6 +228,7 @@ func (s *denseBatchScratch) Close() {
 	releaseDeviceBuffers(s.layerKStage...)
 	releaseDeviceBuffers(s.layerVStage...)
 	releaseDeviceBuffers(s.sdpaS0, s.sdpaS1)
+	releaseDeviceBuffers(s.q8StageK[0], s.q8StageV[0], s.q8StageK[1], s.q8StageV[1])
 	*s = denseBatchScratch{}
 }
 
@@ -1137,15 +1165,22 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			// fallbacks.
 			flashQ8 := ownerQ8 && flashPromptEnabled && flashQ8Enabled &&
 				!flashQ8OffForTest && flashQ8Usable(lhd, basePos+K)
+			// q8 staging (#375): the per-chunk prefix dequant lands in the shared
+			// ping-pong staging pair instead of a per-layer full-cacheRows mirror
+			// plane — same dequant kernel, same flash/GEMM consumers, ~one plane
+			// pair of memory instead of one per global owner (the 31B@256K
+			// ingest-peak cut). LTHN_Q8_STAGE=0 restores the mirror planes.
+			q8Stage := ownerQ8 && !flashQ8 && q8StageEnabled && !q8StageOffForTest &&
+				gpuHasKVQ8DequantRows()
 			var q8GEMMK, q8GEMMV metal.MTLBuffer
-			if ownerQ8 && !flashQ8 && gpuHasKVQ8DequantRows() {
+			if ownerQ8 && !flashQ8 && !q8Stage && gpuHasKVQ8DequantRows() {
 				q8GEMMK, q8GEMMV, _ = s.icb.ensureQ8Mirrors(ownIdx)
 			}
 			useGEMMSDPA := useMultiQ && slideW == 0 && basePos+K >= sdpaPromptGEMMMinKV &&
 				K <= sdpaPromptGEMMMaxRows && sdpaPromptGEMMFeasible(K, s.maxLen) &&
 				!sdpaPromptGEMMDisabledForTest &&
 				!sdpaPromptGEMMEnvDisabled() && gpuHasPromptSDPAGEMM() &&
-				(!ownerQ8 || q8GEMMK != nil || flashQ8)
+				(!ownerQ8 || q8Stage || q8GEMMK != nil || flashQ8)
 			if batchedRope {
 				if err = encQKNormRopeRows(enc, qSlab, s.lb[li].qNorm.buf, qSlab, 0, s.lb[li].qNorm.off, 0, qDim, qDim, offBuf[0], layerRopeFreqs, K, s.nHeads, lhd, rotDim, rbase, s.scale, s.eps); err != nil {
 					endEncodingFast(enc)
@@ -1310,18 +1345,27 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			} else if useGEMMSDPA {
 				kGEMM, vGEMM := ownerK, ownerV
 				if ownerQ8 {
-					// dequantise the attended prefix [0, basePos+K) into the
-					// mirrors — Metal's in-encoder hazard tracking orders this
-					// after the landing above and before the GEMM below.
-					if err = encKVQ8DequantRows(enc, ownerK, s.icb.kvQ8.kScales[ownIdx], q8GEMMK, basePos+K, kvDim); err != nil {
+					kDst, vDst := q8GEMMK, q8GEMMV
+					if q8Stage {
+						kDst, vDst = s.denseBatch.q8Stage(ownIdx&1, basePos+K, kvDim)
+						if kDst == nil || vDst == nil {
+							endEncodingFast(enc)
+							return nil, false, core.NewError("native.batched prefill: q8 staging allocation failed")
+						}
+					}
+					// dequantise the attended prefix [0, basePos+K) into the staging
+					// pair (or the legacy mirror planes) — Metal's in-encoder hazard
+					// tracking orders this after the landing above and before the
+					// GEMM below.
+					if err = encKVQ8DequantRows(enc, ownerK, s.icb.kvQ8.kScales[ownIdx], kDst, basePos+K, kvDim); err != nil {
 						endEncodingFast(enc)
 						return nil, false, err
 					}
-					if err = encKVQ8DequantRows(enc, ownerV, s.icb.kvQ8.vScales[ownIdx], q8GEMMV, basePos+K, kvDim); err != nil {
+					if err = encKVQ8DequantRows(enc, ownerV, s.icb.kvQ8.vScales[ownIdx], vDst, basePos+K, kvDim); err != nil {
 						endEncodingFast(enc)
 						return nil, false, err
 					}
-					kGEMM, vGEMM = q8GEMMK, q8GEMMV
+					kGEMM, vGEMM = kDst, vDst
 				}
 				if flashPromptEnabled && flashPromptUsable(lhd, basePos+K) {
 					// flash lane (#375): one dispatch, no S materialisation — the
