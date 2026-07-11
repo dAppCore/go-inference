@@ -27,6 +27,16 @@ type Tokenizer struct {
 	special      map[string]int32
 	specialOrder []string
 
+	// specialLeads holds the distinct first bytes of every specialOrder token
+	// (all of Gemma/Qwen's specials begin '<', so this is usually one byte).
+	// nextSpecialBoundary uses it to IndexAny-jump between candidate start
+	// positions instead of scanning the whole remaining text once per special
+	// — the boundary scan was O(specials × text), quadratic under a marker-
+	// dense stream. Derived once from specialOrder (immutable post-construct)
+	// so hand-built tokenizers (tests) and LoadTokenizer share the same path.
+	specialLeadsOnce sync.Once
+	specialLeads     string
+
 	bosToken int32
 	eosToken int32
 	hasBOS   bool
@@ -354,14 +364,59 @@ func (t *Tokenizer) matchSpecialToken(input string) (string, int32, bool) {
 	return "", 0, false
 }
 
-func (t *Tokenizer) nextSpecialBoundary(input string) int {
-	end := len(input)
-	for _, tok := range t.specialOrder {
-		if idx := IndexIn(input, tok); idx > 0 && idx < end {
-			end = idx
+// specialLeadBytes returns the distinct first bytes of every special token, as
+// a string suitable for core.IndexAny. Computed once from specialOrder, which
+// is immutable after construction. An empty result means no special can start
+// anywhere (either no specials, or — impossible in practice — an empty-string
+// special), so the boundary scan short-circuits to len(input).
+func (t *Tokenizer) specialLeadBytes() string {
+	t.specialLeadsOnce.Do(func() {
+		var seen [256]bool
+		leads := make([]byte, 0, 4)
+		for _, tok := range t.specialOrder {
+			if tok == "" {
+				continue
+			}
+			b := tok[0]
+			if !seen[b] {
+				seen[b] = true
+				leads = append(leads, b)
+			}
 		}
+		t.specialLeads = string(leads)
+	})
+	return t.specialLeads
+}
+
+// nextSpecialBoundary returns the smallest index > 0 at which any special token
+// starts in input, or len(input) if none does. Its contract is that input has
+// no special token at position 0 (matchSpecialToken already ran and missed), so
+// "smallest start > 0" equals the naive "min over specials of first occurrence".
+//
+// A special can only begin at one of its lead bytes, so IndexAny hops directly
+// from one candidate position to the next and only pays the per-special prefix
+// check where a lead byte actually lands. That replaces the previous shape —
+// one full IndexIn scan of the whole remaining text for every special, i.e.
+// O(specials × text) per call and O(specials × segments²) across the Encode
+// loop of a marker-dense stream — with O(text + candidates × specials).
+func (t *Tokenizer) nextSpecialBoundary(input string) int {
+	leads := t.specialLeadBytes()
+	if leads == "" {
+		return len(input)
 	}
-	return end
+	// Position 0 is known clear (matchSpecialToken missed), so scan from 1.
+	for i := 1; i < len(input); {
+		rel := core.IndexAny(input[i:], leads)
+		if rel < 0 {
+			return len(input)
+		}
+		pos := i + rel
+		if _, _, ok := t.matchSpecialToken(input[pos:]); ok {
+			return pos
+		}
+		i = pos + 1
+	}
+	return len(input)
 }
 
 func (t *Tokenizer) normalizeSentencePieceSegment(segment string) string {
