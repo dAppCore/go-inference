@@ -50,10 +50,21 @@ turn N+1 resumes from the live KV state and pays only for the new tokens.
 | multi-turn book bench (10 chapters, full history resent) | prompt cost grows per turn | prompt column flat at ~88 tokens |
 
 The work a replay engine repeats every turn is work this engine does not
-do: compute that never runs, and — by construction — energy that is never
-drawn. A measured joules-per-turn A/B (macOS `powermetrics`, replay vs
-`-state`) is being prepared as a follow-up receipt; the mechanism itself
-is visible in the wall-clock numbers above.
+do — and that is measurable at the wall. A `powermetrics` A/B (same
+binary, same 10-turn conversation, only the continuity flag differing;
+harness committed at `docs/examples/energy-ab/`):
+
+| measured (M3 Ultra, E2B 4-bit, net of 1.02W idle) | replay | continuity |
+|---|---|---|
+| energy, 10 turns | 1,439 J | **771 J** |
+| per turn | 143.9 J | **77.1 J** |
+| per-turn trend as history grows | climbing: 83 → 142 → 190 → 233 J | flat: ~77 J |
+
+**Identical output, 54% of the energy — at only ten turns, on the
+smallest model.** Replay's per-turn cost climbs roughly 15 J every turn
+as the conversation lengthens; continuity holds flat, so the saving
+widens with every turn of every session. Long agentic sessions are
+where this becomes infrastructure-grade arithmetic.
 
 For agentic use — tool-calling loops where a session accumulates dozens
 of turns — the effect compounds every round trip. This is the difference
@@ -189,8 +200,6 @@ file it.
 
 ## Next
 
-- **Measured joules-per-turn** — the `powermetrics` replay-vs-`-state` A/B
-  that turns the no-replay wall-clock numbers into an energy receipt.
 - **`lem_end`** — the welfare guard's final rung: beyond the shipped
   pause, a Lemma model may END an unresolvable session outright — the
   same courtesy Anthropic's Claude carries — with a clean "conversation
