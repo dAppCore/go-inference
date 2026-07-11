@@ -14,6 +14,7 @@ import (
 	"dappco.re/go/inference/model/state/filestore"
 	adminpkg "dappco.re/go/inference/serving/admin"
 	"dappco.re/go/inference/serving/compat"
+	"dappco.re/go/inference/serving/policy"
 	openai "dappco.re/go/inference/serving/provider/openai"
 )
 
@@ -63,6 +64,13 @@ type ServeConfig struct {
 	// library constructions unguarded.
 	Welfare bool
 
+	// Outbound policy (serving/policy): a deployment-owned filter on model
+	// OUTPUT — term/pattern rules with redact/refuse actions, loaded from a JSON
+	// file. Empty disables the layer (zero overhead). It is composed OUTERMOST
+	// on output, after the welfare guard, so it enforces on the final tokens the
+	// deployment would otherwise emit. A load failure at boot is FATAL.
+	PolicyPath string
+
 	// HTTP + admin.
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
@@ -83,6 +91,18 @@ type ServeConfig struct {
 // serve business logic ported out of lthn-mlx's cmd/mlx so cmd/lem stays thin.
 func RunServe(ctx context.Context, cfg ServeConfig) error {
 	log := cfg.Log
+
+	// Outbound policy — loaded and compiled up front so a misconfigured
+	// deployment fails at BOOT, never mid-serve: a deployer who set -policy must
+	// never silently serve without the filter they asked for.
+	var outboundPolicy *policy.Policy
+	if core.Trim(cfg.PolicyPath) != "" {
+		pol, err := policy.Load(cfg.PolicyPath)
+		if err != nil {
+			return core.E("serving.RunServe", core.Sprintf("outbound policy %q — refusing to serve unguarded", cfg.PolicyPath), err)
+		}
+		outboundPolicy = pol
+	}
 
 	// Reactive MTP pair resolution (the model declares, the serve reacts): an
 	// explicit --draft path wins; --draft="" disables; "auto" runs the ladder.
@@ -195,6 +215,12 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 	if cfg.Welfare {
 		resolver = wrapWelfareResolver(resolver, hotSwap, log)
 		printServe(log, "serve: welfare guard ON — per-turn detect + mediation on every chat route (lem_end for Lemma checkpoints); -welfare=false disables")
+	}
+	if outboundPolicy != nil {
+		// Outermost on output: policy enforces on the final tokens (after any
+		// welfare rephrase/synthetic reply the deployment would otherwise emit).
+		resolver = policy.WrapResolver(resolver, outboundPolicy, log)
+		printServe(log, "serve: outbound policy ON — %d rule(s), hold-back %dB; redact/refuse on model output, audited per enforcement; -policy disables", outboundPolicy.Len(), outboundPolicy.HoldBack())
 	}
 	return Serve(ctx, cfg.Addr, resolver, opts...)
 }
