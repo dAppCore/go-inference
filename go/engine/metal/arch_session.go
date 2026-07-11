@@ -2040,15 +2040,29 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseChunks(ids []int32, scope
 	return hidden, true, nil
 }
 
-// batchedDensePrefillWindows is how many sliding windows one prefill chunk spans once the
-// position is window-aligned. Wider chunks raise every per-chunk GEMM's M (the projections,
-// the qmm fold, the prompt SDPA) — the same kernels at 4× the rows run measurably closer to
-// the machine's matmul rate, which is where mlx-lm's 2048-row prefill steps get their edge.
-// The deferred-ring lane handles wrap-crossing batches at any basePos, so the width is an
-// engine tuning choice, not a model contract. LTHN_PREFILL_WINDOWS overrides (the A/B lever).
-const batchedDensePrefillWindows = 1
+// batchedDensePrefillTargetRows is the prefill chunk's target row count once the
+// position is window-aligned; the per-model window divides it into whole windows.
+// Wider chunks raise every per-chunk GEMM's M (the projections, the qmm fold, the
+// prompt SDPA) and amortise the per-chunk seams — 2048 is the receipted sweet spot
+// (#367 2026-07-13, e2b depth ladder: 512-row chunks 2907/2594/2122 tok/s at
+// 8K/32K/62K vs 2048-row 3074/2669/2179; 4096 gave the gain back) and matches
+// mlx-lm's prefill_step_size. The deferred-ring lane handles wrap-crossing batches
+// at any basePos, so the width is an engine tuning choice, not a model contract.
+// LTHN_PREFILL_WINDOWS overrides with an explicit window count (the A/B lever).
+const batchedDensePrefillTargetRows = 2048
 
 func prefillChunkWindows() int {
+	return prefillChunkWindowsFor(0)
+}
+
+// prefillChunkWindowsFor resolves the chunk width in windows for a model's
+// sliding window (0 ⇒ the 512 the family ships): the explicit env override
+// wins, else enough whole windows to reach the target rows, capped at 8.
+// The wider default applies only when the target divides into ≥4 windows
+// (the 512-window E-family, receipted +3-6%); the 1024-window models
+// measured slightly WORSE at 2 windows (31B@8K: 261 vs 269 tok/s), so they
+// keep single-window chunks until a receipt says otherwise.
+func prefillChunkWindowsFor(slidingWindow int) int {
 	if v := os.Getenv("LTHN_PREFILL_WINDOWS"); v != "" {
 		if r := core.Atoi(v); r.OK {
 			if n, ok := r.Value.(int); ok && n >= 1 && n <= 8 {
@@ -2056,7 +2070,14 @@ func prefillChunkWindows() int {
 			}
 		}
 	}
-	return batchedDensePrefillWindows
+	if slidingWindow <= 0 {
+		slidingWindow = 512
+	}
+	n := batchedDensePrefillTargetRows / slidingWindow
+	if n < 4 {
+		return 1
+	}
+	return min(8, n)
 }
 
 func (s *ArchSession) batchedDensePrefillChunkLen(limit int) int {
@@ -2079,7 +2100,7 @@ func (s *ArchSession) batchedDensePrefillChunkLen(limit int) int {
 		}
 		return remain
 	}
-	wide := w * prefillChunkWindows()
+	wide := w * prefillChunkWindowsFor(w)
 	if wide > limit {
 		return limit
 	}
