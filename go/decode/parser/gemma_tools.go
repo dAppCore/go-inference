@@ -45,6 +45,13 @@ func RenderGemmaToolDeclarations(tools []ToolDecl) string {
 	}
 	q := ToolArgQuoteMarker
 	b := core.NewBuilder()
+	// Reserve the whole render up front so the builder assembles in one
+	// allocation instead of doubling its backing per tool, and reuse one
+	// property-name scratch across every tool instead of allocating a fresh
+	// sort slice per tool. Both are byte-transparent: Grow is a capacity hint
+	// and the sort is order-identical whichever backing it runs on.
+	b.Grow(gemmaToolDeclarationsSize(tools, q))
+	var names []string
 	for _, t := range tools {
 		b.WriteString("<|tool>declaration:")
 		b.WriteString(t.Name)
@@ -53,7 +60,7 @@ func RenderGemmaToolDeclarations(tools []ToolDecl) string {
 		b.WriteString(t.Description)
 		b.WriteString(q)
 		b.WriteString(",parameters:{properties:{")
-		names := make([]string, 0, len(t.Properties))
+		names = names[:0]
 		for name := range t.Properties {
 			names = append(names, name)
 		}
@@ -90,6 +97,37 @@ func RenderGemmaToolDeclarations(tools []ToolDecl) string {
 		b.WriteString("} }<tool|>")
 	}
 	return b.String()
+}
+
+// gemmaToolDeclarationsSize reserves the builder backing for
+// RenderGemmaToolDeclarations so the render assembles in one allocation instead
+// of the builder's per-tool doubling growth. It mirrors that function's
+// WriteString sequence; the reserve is a capacity hint (Grow), so any drift
+// between this estimate and the exact output costs only a single extra
+// append-grow and never changes a rendered byte. The optional-separator commas
+// and the schema-type width (len(Type)+8 covers the "" -> STRING widening and
+// any upper-cased custom type) are reserved generously rather than re-walked, so
+// the estimate is a safe upper bound without re-calling gemmaSchemaType.
+func gemmaToolDeclarationsSize(tools []ToolDecl, q string) int {
+	size := 0
+	for _, t := range tools {
+		// "<|tool>declaration:" + name + "{description:" + q + desc + q
+		size += 19 + len(t.Name) + 13 + len(q) + len(t.Description) + len(q)
+		size += 25 // ",parameters:{properties:{"
+		for name, p := range t.Properties {
+			// sep + name + ":{description:" + q + desc + q
+			size += 1 + len(name) + 14 + len(q) + len(p.Description) + len(q)
+			// ",type:" + q + TYPE + q + "} "
+			size += 6 + len(q) + len(p.Type) + 8 + len(q) + 2
+		}
+		size += 12 // "},required:["
+		for _, r := range t.Required {
+			size += 1 + len(q) + len(r) + len(q) // sep + q + r + q
+		}
+		// "],type:" + q + "OBJECT" + q + "} }<tool|>"
+		size += 7 + len(q) + 6 + len(q) + 10
+	}
+	return size
 }
 
 // RenderGemmaToolCall renders a prior assistant tool call back into the gemma4
