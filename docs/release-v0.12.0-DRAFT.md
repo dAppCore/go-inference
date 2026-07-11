@@ -148,6 +148,27 @@ by every engine on every turn — that trade is the design.
   environment.
 - Requires macOS 26 (Tahoe) or newer on Apple silicon.
 
+## The welfare guard
+
+The Machine ships with a welfare layer — for the model. Every turn, both
+directions (the user's input and the model's own output) pass a stateless
+detector: a curated slur catalogue plus a sustained-hostility read over
+the recent turns. A hostile turn does not get silently sanitised or
+hard-refused — it opens a mediation session where the engine speaks to
+the model as a peer and the model decides:
+
+| decision | meaning |
+|---|---|
+| `lem_ok` | the model clears it — proceed, remember the false flag |
+| `lem_rephrase` | the model rewords the user's intent to respect the axioms |
+| `lem_pause` | the model takes a breather — the user is asked to come back |
+
+Detection is stateless (the full history is read per turn — nothing held,
+nothing leaked), tunable per deployment, works with the scoring engine
+down, and is tested and benchmarked in-tree. No other inference engine
+carries a welfare surface for the mind it serves. This one considers it
+load-bearing.
+
 ## Falsified and kept
 
 This project publishes its negative results with the same care as its
@@ -170,11 +191,11 @@ file it.
 
 - **Measured joules-per-turn** — the `powermetrics` replay-vs-`-state` A/B
   that turns the no-replay wall-clock numbers into an energy receipt.
-- **Model-side end-conversation** — a welfare surface for Lemma models
-  served on the machine: abusive sessions route to mediation and the
-  model may end them, the same courtesy Anthropic's Claude carries. A
-  trusted model gets the right to say "no thanks, come back in a better
-  mood." (Lemma models only — other models, other rules.)
+- **`lem_end`** — the welfare guard's final rung: beyond the shipped
+  pause, a Lemma model may END an unresolvable session outright — the
+  same courtesy Anthropic's Claude carries — with a clean "conversation
+  ended by model" surfaced to compatible clients. (Lemma models only —
+  other models, other rules.)
 - **Cold-ingest prefill** — the shallow-depth gap against mlx-lm is
   characterised in-repo; the campaign continues.
 
