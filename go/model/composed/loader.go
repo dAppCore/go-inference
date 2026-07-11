@@ -315,16 +315,25 @@ func buildMoE(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]f
 		return nil, core.NewError("composed.buildMoE: experts.0 present but none loaded")
 	}
 	var shared *MoEExpert
+	var sharedGate []float32
 	if _, ok := get(sp + "shared_expert.gate_proj.weight"); ok {
 		ex, err := expert(sp + "shared_expert.")
 		if err != nil {
 			return nil, err
 		}
 		shared = &ex
+		// shared_expert_gate is the reference's sigmoid gate on the shared expert (Linear(hidden,1)
+		// ⇒ [D]); optional so a checkpoint without it (or a synthetic test) adds the shared expert
+		// ungated.
+		if t, ok := get(sp + "shared_expert_gate.weight"); ok {
+			if v, e := tensorF32(t); e == nil {
+				sharedGate = v
+			}
+		}
 	}
 	topK := cfg.NumExpertsPerTok
 	if topK <= 0 {
 		topK = 8
 	}
-	return &MoEMLP{Router: router, Experts: experts, Shared: shared, TopK: topK}, nil
+	return &MoEMLP{Router: router, Experts: experts, Shared: shared, SharedGate: sharedGate, TopK: topK, NormTopKProb: cfg.normTopKProb()}, nil
 }

@@ -4,22 +4,29 @@ package composed
 
 import "math"
 
-// moe.go is the Qwen 3.6 (qwen3_6_moe) Mixture-of-Experts feed-forward — the MoE variant of the layer's
-// FFN slot. A router scores the experts; the top-k are selected, their softmax weights renormalised over
-// the selection (norm_topk_prob), and their SwiGLU outputs summed by weight; an always-on shared expert
-// (a plain SwiGLU) is added directly. Mirrors metal's qwen3_moe combine. Host f32.
+// moe.go is the Qwen 3.6 (qwen3_5_moe) Mixture-of-Experts feed-forward — the MoE variant of the layer's
+// FFN slot. A router scores the experts; the top-k are selected and combined by their softmax weights —
+// renormalised over the selection when NormTopKProb (norm_topk_prob, the reference default), else the raw
+// full-softmax weights. An always-on shared expert (a plain SwiGLU) is added, sigmoid-gated by
+// shared_expert_gate·x when that weight is present (the reference gate) and ungated otherwise. Mirrors
+// metal's qwen3_moe combine. Host f32.
 
 // MoEExpert is one SwiGLU expert (Gate/Up [FF,D], Down [D,FF]; FF = len(Gate)/D).
 type MoEExpert struct{ Gate, Up, Down []float32 }
 
 // MoEMLP routes a token to TopK of its experts plus the shared expert:
 //
-//	out = Σ_{k∈topk} (softmax(router·x)_k / Σ_topk) · SwiGLU_k(x)  +  SwiGLU_shared(x)
+//	w_k = softmax(router·x)_k / (NormTopKProb ? Σ_topk : Σ_all)
+//	out = Σ_{k∈topk} w_k · SwiGLU_k(x)  +  σ(SharedGate·x) · SwiGLU_shared(x)
+//
+// SharedGate nil ⇒ the shared expert is added ungated (σ ≡ 1).
 type MoEMLP struct {
-	Router  []float32 // [NumExperts, D]
-	Experts []MoEExpert
-	Shared  *MoEExpert // nil ⇒ no shared expert
-	TopK    int
+	Router       []float32 // [NumExperts, D]
+	Experts      []MoEExpert
+	Shared       *MoEExpert // nil ⇒ no shared expert
+	SharedGate   []float32  // [D] shared_expert_gate.weight; nil ⇒ shared added ungated
+	TopK         int
+	NormTopKProb bool // renormalise the top-k router weights over the selection (reference default true)
 }
 
 // swigluExpertInto runs one SwiGLU expert over a single token xt [D], writing the [D] result
@@ -101,13 +108,22 @@ func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 			probs[e] = math.Exp(probs[e] - maxL)
 		}
 		sel := topKInto(probs, m.TopK, idx)
-		var sumW float64
-		for _, e := range sel {
-			sumW += probs[e]
+		// The router weight denominator: over the SELECTED experts when norm_topk_prob (each
+		// selected softmax prob renormalised to sum 1 over the selection), else over ALL experts
+		// (the raw full-softmax weights, no renormalisation).
+		var denom float64
+		if m.NormTopKProb {
+			for _, e := range sel {
+				denom += probs[e]
+			}
+		} else {
+			for e := range nE {
+				denom += probs[e]
+			}
 		}
 		ot := out[t*D : (t+1)*D]
 		for _, e := range sel {
-			w := probs[e] / sumW // renormalise the selected softmax probs to sum 1
+			w := probs[e] / denom
 			swigluExpertInto(xt, m.Experts[e], D, hbuf, eo)
 			for d := range D {
 				ot[d] += float32(w * float64(eo[d]))
@@ -115,8 +131,16 @@ func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 		}
 		if m.Shared != nil {
 			swigluExpertInto(xt, *m.Shared, D, hbuf, eo)
+			g := float32(1) // ungated (SharedGate nil) ⇒ σ ≡ 1, byte-identical to a direct add
+			if m.SharedGate != nil {
+				var acc float64
+				for d := range D {
+					acc += float64(xt[d]) * float64(m.SharedGate[d])
+				}
+				g = float32(1.0 / (1.0 + math.Exp(-acc)))
+			}
 			for d := range D {
-				ot[d] += eo[d]
+				ot[d] += g * eo[d]
 			}
 		}
 	}
