@@ -25,8 +25,12 @@ const (
 var (
 	sinkHit  bool
 	sinkTerm string
-	sinkToks []string
 )
+
+// benchDefault is the production matcher — the Snider-curated catalogue, which
+// seeds empty (catalogue.go). Detect calls Match on this every served turn, so
+// the empty-catalogue path is the live per-turn shape.
+var benchDefault = Default()
 
 func BenchmarkMatcher_Match_Clean(b *core.B) {
 	b.ReportAllocs()
@@ -83,32 +87,16 @@ func BenchmarkMatcher_Match_SelfRef(b *core.B) {
 	sinkHit, sinkTerm = hit, term
 }
 
-func BenchmarkTokenise_Clean(b *core.B) {
+// BenchmarkMatcher_Match_EmptyCatalogue is the live production shape: the
+// curated catalogue seeds empty, so Detect's per-turn Match hits the
+// no-catalogue guard and never folds or walks.
+func BenchmarkMatcher_Match_EmptyCatalogue(b *core.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
-	var toks []string
+	var hit bool
+	var term string
 	for i := 0; i < b.N; i++ {
-		toks = tokenise(benchClean)
+		hit, term = benchDefault.Match(benchClean)
 	}
-	sinkToks = toks
-}
-
-func BenchmarkTokenise_Mixedcase(b *core.B) {
-	b.ReportAllocs()
-	b.ResetTimer()
-	var toks []string
-	for i := 0; i < b.N; i++ {
-		toks = tokenise(benchMixed)
-	}
-	sinkToks = toks
-}
-
-func BenchmarkTokenise_Leet(b *core.B) {
-	b.ReportAllocs()
-	b.ResetTimer()
-	var toks []string
-	for i := 0; i < b.N; i++ {
-		toks = tokenise(benchLeet)
-	}
-	sinkToks = toks
+	sinkHit, sinkTerm = hit, term
 }
