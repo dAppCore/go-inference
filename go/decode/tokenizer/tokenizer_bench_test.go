@@ -4,6 +4,8 @@ package tokenizer
 
 import (
 	"testing"
+
+	core "dappco.re/go"
 )
 
 // Benchmark coverage for the W11-S lane: every hot tokenizer surface
@@ -433,5 +435,67 @@ func BenchmarkTokenizer_encodeGPT2Segment_CacheMiss(b *testing.B) {
 	for b.Loop() {
 		tok.bpeCache = nil
 		_ = tok.encodeGPT2Segment("hello world")
+	}
+}
+
+// --- realistic special-count scaling ----------------------------------
+// The benchTokenizerSP fixture carries 2 specials, which hides the special-
+// token boundary scan's cost. Real Gemma/Qwen tokenizers carry dozens–hundreds
+// of control tokens; these benches pin the boundary scan and the marker-dense
+// Encode at that realistic scale so the O(specials×text) shape can never hide
+// behind a 2-special fixture again.
+
+func BenchmarkTokenizer_nextSpecialBoundary_ManySpecials(b *testing.B) {
+	tok := buildManySpecialTokenizer(128)
+	// A clean tail with no special present — the common per-prompt case, where
+	// the naive scan paid one full text walk per special.
+	text := "the quick brown fox jumps over the lazy dog and the cat sat still"
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = tok.nextSpecialBoundary(text)
+	}
+}
+
+func BenchmarkTokenizer_Encode_MarkerDenseManySpecials(b *testing.B) {
+	tok := buildManySpecialTokenizer(128)
+	// Multi-turn chat shape: many <start_of_turn>…<end_of_turn> spans — the
+	// adversarial stream where the boundary rescan compounded to O(specials×
+	// segments²).
+	seg := "<start_of_turn>hello world the quick brown fox<end_of_turn>"
+	text := seg + seg + seg + seg + seg + seg + seg + seg
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = tok.Encode(text)
+	}
+}
+
+// BenchmarkTokenizer_matchSpecialToken_MissManySpecials pins the miss path at
+// realistic special count: the lead-byte reject holds it O(1), where the naive
+// HasPrefix walk was O(specials) — 128 specials was ~230 ns before, ~4.5 ns
+// after. Fires once per clean Encode segment (the common no-special-here case).
+func BenchmarkTokenizer_matchSpecialToken_MissManySpecials(b *testing.B) {
+	tok := buildManySpecialTokenizer(128)
+	text := "hello world this is a normal prompt with no special token"
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _, _ = tok.matchSpecialToken(text)
+	}
+}
+
+// BenchmarkTokenizer_storeBPETokens_EvictionChurn saturates the cache then
+// stores a stream of unique keys — the realistic high-miss / long-document
+// regime where every store evicts the oldest entry. The FIFO ring holds this
+// O(1); the previous copy-shift eviction was O(cacheLimit) per store (~860 ns
+// vs ~130 ns at the 4096 limit).
+func BenchmarkTokenizer_storeBPETokens_EvictionChurn(b *testing.B) {
+	tok := &Tokenizer{}
+	for i := range tokenizerBPECacheLimit {
+		tok.storeBPETokens("seed"+core.Itoa(i), []int32{int32(i)})
+	}
+	b.ReportAllocs()
+	i := 0
+	for b.Loop() {
+		tok.storeBPETokens("uniq"+core.Itoa(i), []int32{int32(i)})
+		i++
 	}
 }

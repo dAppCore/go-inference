@@ -28,6 +28,14 @@ type builtinOutputParser struct {
 	// partial-suffix set the streaming Processor holds back on, prebuilt so
 	// NewProcessor stays alloc-free.
 	thinkingHoldback []string
+	// markerLeads / startLeads / terminatorLeads are the distinct lead bytes of
+	// the reasoning-marker starts, the thinking-marker starts, and the
+	// terminators — the anchor sets the batch (findReasoningStart) and streaming
+	// (findStart / findTerminator) scans hop between instead of scanning the
+	// whole text once per candidate. Prebuilt from the immutable sets.
+	markerLeads     string
+	startLeads      string
+	terminatorLeads string
 }
 
 // turnTerminators maps a builtin parser id to its bare turn-terminator tokens.
@@ -84,6 +92,9 @@ func newBuiltinOutputParser(id string, markers []reasoningMarker) *builtinOutput
 		thinkingStarts:   thinkingStarts,
 		terminators:      terminators,
 		thinkingHoldback: holdback,
+		markerLeads:      reasoningMarkerLeadBytes(owned),
+		startLeads:       markerLeadBytes(thinkingStarts),
+		terminatorLeads:  markerLeadBytes(terminators),
 	}
 }
 
@@ -98,7 +109,7 @@ func (parser *builtinOutputParser) ParseReasoning(_ []inference.Token, text stri
 	if parser == nil {
 		parser = newBuiltinOutputParser("generic", genericMarkers())
 	}
-	return parseReasoningText(text, parser.markers), nil
+	return parseReasoningText(text, parser.markers, parser.markerLeads), nil
 }
 
 func (parser *builtinOutputParser) ParseTools(_ []inference.Token, text string) (inference.ToolParseResult, error) {
