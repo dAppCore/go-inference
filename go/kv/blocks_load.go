@@ -154,6 +154,7 @@ func loadAndAssembleStateBlocks(ctx context.Context, store state.Store, bundle *
 	if assembled == nil || lastBlock == nil {
 		return nil, errBlocksEmpty
 	}
+	finalizeAssembledLayerRaw(assembled)
 	assembled.Generated = core.SliceClone(lastBlock.Generated)
 	assembled.TokenOffset = lastBlock.TokenOffset
 	assembled.LogitShape = core.SliceClone(lastBlock.LogitShape)
@@ -223,6 +224,7 @@ func loadAndAssembleStateBlockPrefix(ctx context.Context, store state.Store, bun
 	if assembled == nil || lastBlock == nil {
 		return nil, errPrefixNoCoveringBlocks
 	}
+	finalizeAssembledLayerRaw(assembled)
 	assembled.Generated = core.SliceClone(lastBlock.Generated)
 	assembled.TokenOffset = lastBlock.TokenOffset
 	assembled.LogitShape = core.SliceClone(lastBlock.LogitShape)
@@ -281,10 +283,10 @@ func preSizeAssembledRawBytesFromFirst(assembled *Snapshot, first *Snapshot, blo
 		firstLayer := first.Layers[layerIndex]
 		dstLayer := &assembled.Layers[layerIndex]
 		if keyCap := len(firstLayer.KeyBytes) * blockCount; keyCap > 0 {
-			dstLayer.KeyBytes = make([]byte, 0, keyCap)
+			dstLayer.KeyBytes = presizeLayerRaw(dstLayer.KeyShape, dstLayer.KeyDType, keyCap)
 		}
 		if valueCap := len(firstLayer.ValueBytes) * blockCount; valueCap > 0 {
-			dstLayer.ValueBytes = make([]byte, 0, valueCap)
+			dstLayer.ValueBytes = presizeLayerRaw(dstLayer.ValueShape, dstLayer.ValueDType, valueCap)
 		}
 		for headIndex := range assembled.Layers[layerIndex].Heads {
 			if headIndex >= len(firstLayer.Heads) {
