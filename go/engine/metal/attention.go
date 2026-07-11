@@ -421,6 +421,15 @@ func releaseDeviceBuffer(buf metal.MTLBuffer) {
 	}
 }
 
+// releaseDeviceBuffers releases each handle (nil-safe) — the grow-realloc and
+// teardown sites for GPU-only scratch slabs, where dropping the old handle
+// leaked the +1 retained allocation.
+func releaseDeviceBuffers(bufs ...metal.MTLBuffer) {
+	for _, b := range bufs {
+		releaseDeviceBuffer(b)
+	}
+}
+
 func residentKeyInRanges(key uintptr, bases, ends []uintptr) bool {
 	for i, start := range bases {
 		if i >= len(ends) {
