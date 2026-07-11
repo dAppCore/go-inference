@@ -425,6 +425,19 @@ func conversationTurnSplit(messages []inference.Message) int {
 // finished turn stores under and the next request looks up by.
 func conversationKey(messages []inference.Message, thinking bool) string {
 	builder := core.NewBuilder()
+	// Presize to the exact byte budget so the prefix assembles in one
+	// allocation rather than the builder's doubling growth — a deep
+	// conversation is hashed twice per turn (acquire + sleep). len(Role) is an
+	// upper bound for the normalised role (Trim only shrinks, Lower preserves
+	// ASCII length), and Grow is a capacity hint, so the key is byte-identical.
+	size := 0
+	if thinking {
+		size += len("think\x02")
+	}
+	for _, msg := range messages {
+		size += len(msg.Role) + len(msg.Content) + 2
+	}
+	builder.Grow(size)
 	if thinking {
 		builder.WriteString("think\x02")
 	}
