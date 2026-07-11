@@ -16,58 +16,7 @@ import (
 // model.language_model. multimodal-wrapper prefix. The gated-delta geometry is derived from the weight
 // shapes (as metal does); the attention geometry from the config.
 
-type ropeParams struct {
-	RopeTheta           float32 `json:"rope_theta"`
-	PartialRotaryFactor float32 `json:"partial_rotary_factor"`
-}
-
-// loaderConfig is the arch-relevant subset of a qwen3_6 config.json (text fields nest under text_config in
-// the multimodal wrapper; rope under rope_parameters).
-type loaderConfig struct {
-	HiddenSize            int           `json:"hidden_size"`
-	NumHiddenLayers       int           `json:"num_hidden_layers"`
-	IntermediateSize      int           `json:"intermediate_size"`
-	NumAttentionHeads     int           `json:"num_attention_heads"`
-	NumKeyValueHeads      int           `json:"num_key_value_heads"`
-	HeadDim               int           `json:"head_dim"`
-	VocabSize             int           `json:"vocab_size"`
-	RMSNormEps            float32       `json:"rms_norm_eps"`
-	NumExpertsPerTok      int           `json:"num_experts_per_tok"`
-	RopeTheta             float32       `json:"rope_theta"`
-	PartialRotaryFactor   float32       `json:"partial_rotary_factor"`
-	LayerTypes            []string      `json:"layer_types"`
-	FullAttentionInterval int           `json:"full_attention_interval"`
-	RopeParameters        *ropeParams   `json:"rope_parameters"`
-	TextConfig            *loaderConfig `json:"text_config"`
-}
-
-// effective returns the text config (self, or the nested text_config for the multimodal wrapper).
-func (c *loaderConfig) effective() *loaderConfig {
-	if c.TextConfig != nil {
-		return c.TextConfig
-	}
-	return c
-}
-
-func (c *loaderConfig) ropeTheta() float32 {
-	if c.RopeTheta > 0 {
-		return c.RopeTheta
-	}
-	if c.RopeParameters != nil && c.RopeParameters.RopeTheta > 0 {
-		return c.RopeParameters.RopeTheta
-	}
-	return 1e6
-}
-
-func (c *loaderConfig) partialRotary() float32 {
-	if c.PartialRotaryFactor > 0 {
-		return c.PartialRotaryFactor
-	}
-	if c.RopeParameters != nil && c.RopeParameters.PartialRotaryFactor > 0 {
-		return c.RopeParameters.PartialRotaryFactor
-	}
-	return 1
-}
+// The loaderConfig type + its effective()/ropeTheta()/partialRotary() helpers live in config.go.
 
 // tensorF32 widens a bf16/f32 safetensors tensor to a flat f32 slice.
 func tensorF32(t safetensors.Tensor) ([]float32, error) {
@@ -166,7 +115,7 @@ func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*Co
 		if kinds[i] == "full_attention" {
 			mixer, err = buildAttn(f32, f32opt, lp+"self_attn.", cfg, D)
 		} else {
-			mixer, err = buildGatedDelta(get, f32, f32opt, lp+"linear_attn.", D)
+			mixer, err = buildGatedDelta(get, f32, f32opt, lp+"linear_attn.", cfg, D)
 		}
 		if err != nil {
 			return nil, core.E("composed.LoadComposed", core.Sprintf("layer %d (%s)", i, kinds[i]), err)
@@ -240,7 +189,7 @@ func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float3
 // buildGatedDelta builds a gated-delta mixer; geometry derived from the weight shapes (as metal does):
 // ValueHeads = len(A_log), HeadDim = len(norm), convDim/K from conv1d.weight, qDim = (convDim−vDim)/2,
 // KeyHeads = qDim/HeadDim.
-func buildGatedDelta(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, D int) (Mixer, error) {
+func buildGatedDelta(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, lcfg *loaderConfig, D int) (Mixer, error) {
 	aLogT, ok := get(sp + "A_log")
 	if !ok || len(aLogT.Shape) != 1 {
 		return nil, core.NewError("missing/!1D A_log")
@@ -266,6 +215,9 @@ func buildGatedDelta(get func(string) (safetensors.Tensor, bool), f32 func(strin
 		return nil, core.NewError("gated-delta geometry: qDim not divisible by headDim")
 	}
 	keyHeads := qDim / headDim
+	if err := lcfg.validateLinearGeometry(keyHeads, valueHeads, headDim, convK); err != nil {
+		return nil, err
+	}
 
 	qkv, err := f32(sp + "in_proj_qkv.weight")
 	if err != nil {
