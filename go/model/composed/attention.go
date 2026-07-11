@@ -109,10 +109,15 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 		}
 	}
 
-	// grow the cache: [pos0+L, KVH*HD].
+	// grow the cache: [pos0+L, KVH*HD]. ck and cv are the returned state — one backing slab, two
+	// non-overlapping capped windows. Both are copied out (read-only) at the head of the next call
+	// before any write, so sharing one array between the K and V caches is bit-identical and saves
+	// one alloc per token on the decode path.
 	N := pos0 + L
-	ck := make([]float32, N*KVH*HD)
-	cv := make([]float32, N*KVH*HD)
+	cacheN := N * KVH * HD
+	ckcv := make([]float32, 2*cacheN)
+	ck := ckcv[0:cacheN:cacheN]
+	cv := ckcv[cacheN : 2*cacheN : 2*cacheN]
 	copy(ck, st.k)
 	copy(cv, st.v)
 	copy(ck[pos0*KVH*HD:], k)
