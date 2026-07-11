@@ -2002,10 +2002,22 @@ func (s *ArchSession) prefillRetainedTokensBatchedDense(ids []int32, scope strin
 func (s *ArchSession) prefillRetainedTokensBatchedDenseChunks(ids []int32, scope string) ([]byte, bool, error) {
 	var hidden []byte
 	chunk := 0
+	// Non-final chunks bound the layer loop at the shared suffix (#381): the
+	// skipped layers own no cache rows and only the FINAL chunk's boundary
+	// hidden is ever read, so the pruned compute feeds nothing downstream.
+	skipTo := 0
+	if prefillSkipSharedEnabled && !prefillSkipSharedOffForTest && s.state.sharedSuffix > 0 {
+		skipTo = s.state.sharedSuffix
+	}
+	defer func() { s.state.prefillSkipToLayer = 0 }()
 	for len(ids) > 0 {
 		n := s.batchedDensePrefillChunkLen(len(ids))
 		if n <= 0 {
 			return nil, false, core.NewError("native.prefillRetainedTokensBatchedDense: invalid sliding chunk")
+		}
+		s.state.prefillSkipToLayer = 0
+		if n < len(ids) {
+			s.state.prefillSkipToLayer = skipTo
 		}
 		nextHidden, ok, err := s.prefillRetainedTokensBatchedDenseOne(ids[:n], scope)
 		if err != nil || !ok {

@@ -675,6 +675,108 @@ func TestArchSessionPrefillRetainedTokensBatchedDenseChunksSlidingRingWrap(t *te
 	}
 }
 
+func TestArchSessionPrefillChunksSkipSharedSuffix(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	t.Setenv("LTHN_PREFILL_WINDOWS", "1") // 4-token chunks: 14 ids → two skipped chunks + a final
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 64, 1, 1, 64, 128, 32
+	const maxLen = 16
+	specs := []model.LayerSpec{
+		{Attention: model.SlidingAttention, KVShareFrom: 0, CacheIndex: 0, HeadDim: headDim, KVHeads: nKV},
+		{Attention: model.SlidingAttention, KVShareFrom: 1, CacheIndex: 1, HeadDim: headDim, KVHeads: nKV},
+		{Attention: model.SlidingAttention, KVShareFrom: 1, CacheIndex: -1, HeadDim: headDim, KVHeads: nKV},
+		{Attention: model.SlidingAttention, KVShareFrom: 1, CacheIndex: -1, HeadDim: headDim, KVHeads: nKV},
+	}
+	layers := make([]DecodeLayerWeights, len(specs))
+	for i := range layers {
+		layers[i] = decodeLayerFixture(dModel, nHeads, nKV, headDim, dFF, 900+i)
+	}
+	g := &BF16Model{
+		Layers:    layers,
+		Embed:     toBF16Bytes(syntheticFloat32(vocab*dModel, 911)),
+		FinalNorm: toBF16Bytes(syntheticFloat32(dModel, 923)),
+	}
+	g.LMHead, g.Tied = g.Embed, true
+	arch := model.Arch{
+		Hidden: dModel, Heads: nHeads, KVHeads: nKV, HeadDim: headDim, FF: dFF, Vocab: vocab,
+		Layer: specs, SlidingWindow: 4, RotaryDim: headDim, RotaryDimLocal: headDim,
+		RopeBase: 10000, RopeLocalBase: 10000, AttnScale: 0.125, Eps: 1e-5,
+	}
+	newSess := func(name string) *ArchSession {
+		sess, err := NewArchSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("NewArchSession %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = sess.Close() })
+		sess.state.icb = nil
+		return sess
+	}
+	serial, skip := newSess("serial"), newSess("skip")
+	if got := skip.state.sharedSuffix; got != 2 {
+		t.Fatalf("sharedSuffix = %d, want 2 (two trailing KV-shared layers)", got)
+	}
+
+	ids := []int32{1, 5, 3, 9, 4, 7, 2, 8, 6, 11, 13, 10, 12, 14}
+	var serialHidden []byte
+	var err error
+	withAutoreleasePool(func() {
+		for _, id := range ids {
+			serialHidden, err = serial.stepIDInPool(id)
+			if err != nil {
+				return
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("serial stepIDInPool: %v", err)
+	}
+
+	hidden, ok, err := skip.prefillRetainedTokensBatchedDense(ids, "test")
+	if err != nil {
+		t.Fatalf("prefillRetainedTokensBatchedDense skip: %v", err)
+	}
+	if !ok {
+		t.Fatal("prefillRetainedTokensBatchedDense skip declined dense fixture")
+	}
+	if !bytes.Equal(hidden, serialHidden) {
+		t.Fatal("shared-suffix skip chunked prefill hidden differs from serial")
+	}
+	if skip.state.prefillSkipToLayer != 0 {
+		t.Fatalf("prefillSkipToLayer leaked = %d, want 0 after prefill", skip.state.prefillSkipToLayer)
+	}
+
+	// Kill switch: the full-stack chunk lane must produce the same bytes.
+	prefillSkipSharedOffForTest = true
+	defer func() { prefillSkipSharedOffForTest = false }()
+	noskip := newSess("noskip")
+	noskipHidden, ok, err := noskip.prefillRetainedTokensBatchedDense(ids, "test")
+	if err != nil {
+		t.Fatalf("prefillRetainedTokensBatchedDense noskip: %v", err)
+	}
+	if !ok {
+		t.Fatal("prefillRetainedTokensBatchedDense noskip declined dense fixture")
+	}
+	if !bytes.Equal(noskipHidden, serialHidden) {
+		t.Fatal("full-stack chunked prefill hidden differs from serial")
+	}
+
+	var serialNext, skipNext []byte
+	withAutoreleasePool(func() {
+		serialNext, err = serial.stepIDInPool(6)
+		if err != nil {
+			return
+		}
+		skipNext, err = skip.stepIDInPool(6)
+	})
+	if err != nil {
+		t.Fatalf("post-prefill stepIDInPool: %v", err)
+	}
+	if !bytes.Equal(skipNext, serialNext) {
+		t.Fatal("shared-suffix skip prefill cache differs from serial on next token")
+	}
+}
+
 func TestArchSessionPrefillTokenEmbeddingsBatchedDenseChunksSlidingRingWrap(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")

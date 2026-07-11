@@ -999,7 +999,16 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	cb := commandBufferFast(queue)
 	enc := computeCommandEncoderFast(cb)
 	trace := newBatchedGPUTrace(cb, "prologue") // LTHN_GPU_TRACE: per-stage GPU attribution
-	for li := 0; li < len(s.specs); li++ {
+	// Non-final prefill chunks stop at the shared suffix (#381): the bounded-out
+	// layers own no cache rows, and readRows past the loop is only consumed for
+	// the FINAL chunk, which always runs the full stack. The last-layer output
+	// redirects (directLastOut / usingDirectOutputRows) key off len(s.specs)-1
+	// and simply never fire on a bounded pass.
+	layerEnd := len(s.specs)
+	if s.prefillSkipToLayer > 0 && s.prefillSkipToLayer < layerEnd {
+		layerEnd = s.prefillSkipToLayer
+	}
+	for li := 0; li < layerEnd; li++ {
 		lhd, lkv := headDimOf(s.specs[li], s.headDim), kvHeadsOf(s.specs[li], s.nKVHeads)
 		slideW, rbase, rotDim := 0, s.base, s.rotaryDim
 		layerRopeFreqs := s.ropeFreqs

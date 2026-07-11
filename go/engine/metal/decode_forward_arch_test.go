@@ -703,3 +703,25 @@ func TestArchDecodeStateCachesGlobalProportionalRopePeriodsBuffer(t *testing.T) 
 		t.Fatalf("global proportional rope periods buffer was not reused: first=%d second=%d", first, second)
 	}
 }
+
+func TestSharedLayerSuffixStart(t *testing.T) {
+	owner := model.LayerSpec{Attention: model.SlidingAttention, CacheIndex: 0}
+	sharer := model.LayerSpec{Attention: model.SlidingAttention, CacheIndex: -1, KVShareFrom: 0}
+	cases := []struct {
+		name  string
+		specs []model.LayerSpec
+		want  int
+	}{
+		{"owners then shared suffix (gemma4 E-family shape)", []model.LayerSpec{owner, owner, sharer, sharer}, 2},
+		{"single trailing sharer", []model.LayerSpec{owner, sharer}, 1},
+		{"all owners", []model.LayerSpec{owner, owner}, -1},
+		{"sharer below an owner is not a clean suffix", []model.LayerSpec{owner, sharer, owner}, -1},
+		{"all sharers (0 stays inert: activation requires > 0)", []model.LayerSpec{sharer, sharer}, 0},
+		{"empty", nil, -1},
+	}
+	for _, tc := range cases {
+		if got := sharedLayerSuffixStart(tc.specs); got != tc.want {
+			t.Errorf("%s: sharedLayerSuffixStart = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
