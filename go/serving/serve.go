@@ -57,6 +57,12 @@ type ServeConfig struct {
 	StateConversations bool   // wake each chat from its slept state, no prompt replay
 	StateStorePath     string // durable per-project store file; empty = ephemeral default, wiped each serve run
 
+	// Welfare guard (go/welfare): per-turn detect + engine-model mediation on
+	// every chat route; lem_end is additionally offered to Lemma checkpoints.
+	// cmd/lem defaults this ON (-welfare=false disables); the zero value keeps
+	// library constructions unguarded.
+	Welfare bool
+
 	// HTTP + admin.
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
@@ -185,7 +191,12 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 	if cfg.ShutdownTimeout > 0 {
 		opts = append(opts, WithShutdownTimeout(cfg.ShutdownTimeout))
 	}
-	return Serve(ctx, cfg.Addr, hotSwap.openaiResolver(), opts...)
+	resolver := hotSwap.openaiResolver()
+	if cfg.Welfare {
+		resolver = wrapWelfareResolver(resolver, hotSwap, log)
+		printServe(log, "serve: welfare guard ON — per-turn detect + mediation on every chat route (lem_end for Lemma checkpoints); -welfare=false disables")
+	}
+	return Serve(ctx, cfg.Addr, resolver, opts...)
 }
 
 // wireContinuity opens the conversation state store and registers the per-load
