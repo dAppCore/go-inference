@@ -32,10 +32,16 @@ stages the next chunk only after the pass's wait). pleSlab host span
 builder's GPU work (~2ms/chunk) still serialises ahead of the main pass
 on the shared queue — a second queue + MTLEvent could overlap it, worth
 ~1-2% more, diminishing.
-FOLLOW-UPS still open on #381: per-chunk seams + embed host loop
-(17.6ms @8K — ids are already on-GPU for the builder; could gather
-embeddings the same way), embeddings/bidir chunk lane still full-stack,
-31B/26B family receipts.
+FIFTH LEVER SHIPPED (9e5846d): device embed gather — the builder's CB
+gathers the K main-embed rows too (same rows kernel at dModel width),
+the projection reads them in place of host staging, and the pass takes
+the same buffer as its input rows. Only token ids cross to the GPU.
+embed span 17.6->0ms; pp8K 8,708->9,016 (0.801s; mlx gap 1.11x).
+NIGHT TOTAL pp8K 3,190 -> 9,016 (2.83x), token-identical at every step.
+FOLLOW-UPS still open on #381: per-chunk seams + 2nd-queue overlap of
+the builder's ~2ms/chunk GPU work (~1-2%), embeddings/bidir chunk lane
+still full-stack, dense-arch (12B/31B) device embed gather (the closure
+pattern ports directly), 31B/26B family receipts.
 
 **THE TRAP THAT ATE AN HOUR (bank it):** running engine/metal tests with
 go-mlx's dist metallib (the retired path my own notes carried) makes the
