@@ -3,6 +3,8 @@
 package composed
 
 import (
+	"strings"
+
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/safetensors"
 )
@@ -32,4 +34,16 @@ func init() {
 			return NewTokenModel(cm), nil
 		},
 	})
+}
+
+// ChatMLDialect reports whether a composed model_type is served with the ChatML chat dialect
+// (<|im_start|>role\n…<|im_end|> turns, an "assistant" generation cue and a <think> reasoning block)
+// rather than the gemma turn template. Every Qwen hybrid this package builds — qwen3_5 and its
+// text/MoE aliases, qwen3_next, and any future qwenX — speaks ChatML; a non-qwen composed arch (the
+// generic "composed"/"hybrid" ids, or a later family) keeps the gemma fallback. The serve wrap consults
+// this to DECLARE its chat template, so the dialect follows config.json's model_type rather than being
+// hardcoded per checkpoint. Matching on the "qwen" prefix keeps a new qwen model_type ChatML with zero
+// edits, mirroring the registry's zero-edit routing.
+func ChatMLDialect(modelType string) bool {
+	return strings.HasPrefix(strings.ToLower(modelType), "qwen")
 }

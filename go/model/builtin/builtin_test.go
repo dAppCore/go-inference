@@ -1,0 +1,31 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+package builtin_test
+
+import (
+	"testing"
+
+	"dappco.re/go/inference/model"
+	_ "dappco.re/go/inference/model/builtin"
+)
+
+// TestBuiltinRegistersComposed is the blank-import round-trip: importing builtin must carry the composed
+// hybrids' registration into the reactive loader, so a serve binary resolves qwen3_5 / qwen3_5_moe /
+// qwen3_next by model_type through the ArchSpec.Composed hook — no engine/metal blank-import required for
+// the registration to be present.
+func TestBuiltinRegistersComposed(t *testing.T) {
+	for _, mt := range []string{"qwen3_5", "qwen3_5_moe", "qwen3_next"} {
+		spec, ok := model.LookupArch(mt)
+		if !ok {
+			t.Fatalf("model_type %q not registered — builtin did not carry the composed init()", mt)
+		}
+		if spec.Composed == nil {
+			t.Fatalf("model_type %q registered without a Composed hook", mt)
+		}
+	}
+	// A standard transformer arch resolves through the same import, without a Composed hook — the
+	// contrast that confirms Composed is the hybrid-only routing signal.
+	if spec, ok := model.LookupArch("gemma4"); !ok || spec.Composed != nil {
+		t.Fatalf("gemma4 = (spec.Composed==nil? %v, registered? %v), want a registered transformer arch with no Composed hook", spec.Composed == nil, ok)
+	}
+}

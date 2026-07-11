@@ -96,3 +96,29 @@ func TestLoadComposedDirRoundTrip(t *testing.T) {
 	}
 	t.Log("dir → LoadComposedDir → registry → Composed hook → TokenModel; model.Load rejects the composed arch")
 }
+
+// TestLoadComposedDir_RoutingContract pins the two branches engine/metal/load.go now delegates to the
+// registry (the "registry over allow-list" contract): a registered composed model_type resolves through
+// the ArchSpec.Composed hook (ok=true — the engine routes here, no hardcoded model_type switch), and a
+// non-composed model_type declines (ok=false) so the caller falls through to the transformer loader. A
+// future qwenX that registers a Composed hook therefore loads with zero engine edits.
+func TestLoadComposedDir_RoutingContract(t *testing.T) {
+	// Every registered composed arch is reachable through the registry — this is the coverage the engine
+	// switch used to hardcode. qwen3_5 additionally has the full dir round-trip above.
+	for _, mt := range []string{"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next"} {
+		if spec, ok := model.LookupArch(mt); !ok || spec.Composed == nil {
+			t.Fatalf("composed model_type %q not reachable through the registry (LoadComposedDir would miss it)", mt)
+		}
+	}
+	// A non-composed model_type: LoadComposedDir returns ok=false without touching tensors, so the engine
+	// falls through to Load — the fall-through the old switch expressed as its default case.
+	dir := t.TempDir()
+	if err := coreio.Local.Write(core.PathJoin(dir, "config.json"),
+		`{"model_type":"llama","hidden_size":8,"num_hidden_layers":2}`); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+	tm, ok, err := model.LoadComposedDir(dir)
+	if err != nil || ok || tm != nil {
+		t.Fatalf("LoadComposedDir(llama) = (%v, %v, %v), want (nil, false, nil) so the caller falls through", tm, ok, err)
+	}
+}

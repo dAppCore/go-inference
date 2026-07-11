@@ -132,10 +132,25 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	// (They keep the plain window-capped default: their state geometry isn't the
 	// transformer KV plan the RAM-aware clamp below budgets.)
 	if mt, cfg, perr := model.ProbeDirArch(dir); perr == nil {
-		switch mt {
-		case "mamba2":
+		if mt == "mamba2" {
+			// mamba2 is a standalone recurrent SSM with its own loader — it registers no
+			// ArchSpec, so it is reached by name here rather than through the composed registry.
 			return loadMamba2TokenModel(dir, cfg)
-		case "qwen3_5", "qwen3_6", "qwen3_5_moe", "qwen3_6_moe", "composed", "hybrid":
+		}
+		// Composed/hybrid archs route through the neutral registry: each registers an
+		// ArchSpec.Composed hook, and model.LoadComposedDir looks it up and builds the
+		// serve-ready TokenModel. A future qwenX checkpoint therefore loads with ZERO edits
+		// here — it is a new model-package init(), not an engine change. ok=false means the
+		// model_type is a plain transformer (or a composed type not yet registered): fall through.
+		if tm, ok, cerr := model.LoadComposedDir(dir); cerr != nil {
+			return nil, cerr
+		} else if ok {
+			return tm, nil
+		}
+		// Fallback for the historical composed model_types the registry does not (yet)
+		// cover, so every type the old hardcoded switch loaded still loads identically.
+		switch mt {
+		case "qwen3_6", "qwen3_6_moe", "composed", "hybrid":
 			return loadComposedTokenModel(dir, cfg)
 		}
 	}
