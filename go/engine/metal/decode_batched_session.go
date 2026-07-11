@@ -1299,12 +1299,25 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					}
 					kGEMM, vGEMM = q8GEMMK, q8GEMMV
 				}
-				headBatch := sdpaPromptHeadBatch(s.nHeads/lkv, K, s.maxLen)
-				sScore0, sScore1 := s.denseBatch.sdpaPromptS(headBatch*K, s.maxLen)
-				if err = encSDPAPromptGEMM(enc, qSlab, kGEMM, vGEMM, attnSlab, sScore0, sScore1,
-					s.nHeads, lkv, lhd, K, basePos+K, qDim, kvDim, headBatch, s.scale); err != nil {
-					endEncodingFast(enc)
-					return nil, false, err
+				if flashPromptEnabled && gpuHasFlashPrompt(lhd) {
+					// flash lane (#375): one dispatch, no S materialisation — the
+					// composition's S round-trip taxed every neighbouring GEMM ~6x
+					// its own bandwidth (the #367 fold-context conviction). Same
+					// inputs (q8 owners read the dequanted mirrors), same causal
+					// rule, token-identity tier either way.
+					if err = encFlashPromptSDPA(enc, qSlab, kGEMM, vGEMM, attnSlab,
+						s.nHeads, lkv, lhd, K, basePos+K, qDim, kvDim, s.scale); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+				} else {
+					headBatch := sdpaPromptHeadBatch(s.nHeads/lkv, K, s.maxLen)
+					sScore0, sScore1 := s.denseBatch.sdpaPromptS(headBatch*K, s.maxLen)
+					if err = encSDPAPromptGEMM(enc, qSlab, kGEMM, vGEMM, attnSlab, sScore0, sScore1,
+						s.nHeads, lkv, lhd, K, basePos+K, qDim, kvDim, headBatch, s.scale); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
 				}
 			} else if useMultiQ {
 				if ownerQ8 {
