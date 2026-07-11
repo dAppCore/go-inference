@@ -276,9 +276,17 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 	}
 	core.WriteString(cfg.Out, content)
 	core.WriteString(cfg.Out, "\n\n")
+	// prefill rate alongside the decode rate: prompt tokens over the wall
+	// prefill window (start → first token), the cold-ingest number llama-bench
+	// reports as pp<N> — engines that don't report a prompt count keep the
+	// bare-duration wording.
+	prefillPart := core.Sprintf("prefill %dms excluded", prefill.Milliseconds())
+	if pt := tm.Metrics().PromptTokens; pt > 0 && prefill > 0 {
+		prefillPart = core.Sprintf("prefill %d tok @ %.0f tok/s (%.3fs)", pt, float64(pt)/prefill.Seconds(), prefill.Seconds())
+	}
 	core.WriteString(cfg.Out, core.Sprintf(
-		"decode %.1f tok/s  (%d tok / %.3fs, prefill %dms excluded)  ·  total %.1f tok/s\n",
-		float64(n-1)/decode.Seconds(), n, decode.Seconds(), prefill.Milliseconds(),
+		"decode %.1f tok/s  (%d tok / %.3fs)  ·  %s  ·  total %.1f tok/s\n",
+		float64(n-1)/decode.Seconds(), n, decode.Seconds(), prefillPart,
 		float64(n)/(prefill+decode).Seconds(),
 	))
 	printMTPMetrics(cfg.Out, tm)

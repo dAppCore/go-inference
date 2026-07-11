@@ -15,8 +15,8 @@ func TestResolveDefaultContext(t *testing.T) {
 		{8192, 8192},
 		{32768, 32768},
 		{131072, 131072}, // e2b/e4b run their full 128K window by default (#367)
-		{262144, 131072}, // 256K checkpoints cap at the receipted 128K default
-		{524288, 131072}, // (the 256K default is gated on the deep-session RAM work)
+		{262144, 262144}, // 26B/31B run their full 256K window — the #367 target stance
+		{524288, 262144}, // beyond-window checkpoints still cap (RAM guard fits smaller boxes)
 	}
 	for _, tc := range cases {
 		if got := resolveDefaultContext(tc.window); got != tc.want {

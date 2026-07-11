@@ -80,14 +80,15 @@ func LoadTokenModelDir(dir string, maxLen int) (model.TokenModel, error) {
 	return LoadTokenModelDirWithConfig(dir, maxLen, TokenModelLoadConfig{})
 }
 
-// defaultContextCap bounds the checkpoint-window context default at 128K —
-// the RECEIPTED scale of the #367 default (e2b runs its full window at a
-// ~7GB session footprint). The stance's 256K default is gated on fixing the
-// deep-session allocation profile first: a 31B@256K all-defaults run hit a
-// 64.9GB physical footprint on a 96GB box (weights ~17GB + q8 KV 8.6GB +
-// 17GB of GEMM-prefix mirrors + ~19GB unattributed) and swapped. An
-// explicit -context overrides in both directions, 256K included.
-const defaultContextCap = 131072
+// defaultContextCap bounds the checkpoint-window context default at 256K —
+// the #367 target stance (MTP + q8 + 256K as THE default). The first 256K
+// attempt swapped a 96GB box (31B all-defaults, 64.9GB footprint) and was
+// pulled back to 128K the same day; the three gremlins behind it are fixed —
+// the duplicate lb KV set (13ffe18), the batch-scratch slab leaks (14fa6aa)
+// and the missing RAM budget (fad5212: clampContextToRAM now fits an unset
+// -context to the box, so smaller machines land below this cap naturally).
+// An explicit -context overrides in both directions.
+const defaultContextCap = 262144
 
 // resolveDefaultContext maps an unset context length to the checkpoint
 // window capped at defaultContextCap, keeping the old 4096 floor when the
