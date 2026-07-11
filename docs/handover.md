@@ -179,10 +179,35 @@ tok/turn while the client resends full history.
   -context always wins; LTHN_CONTEXT_RAM_GUARD=0 kills it; a failed
   sysctl probe disables rather than guesses. mamba2/composed keep the
   plain capped default. 5 unit gates + guard-silent live check on the
-  96GB box (suite 1513 green). The 256K re-lift is now UNGATED except
-  for its receipt: raise defaultContextCap to 262144 and take a 31B
-  all-defaults run ON A QUIET BOX (watch pressure, not just tok/s —
-  machine comfort outranks receipts). Then the N-bit knob.
+  96GB box (suite 1513 green).
+  **THE SESSION KV LIFECYCLE FIX** (`f9003ce`) — the fourth gremlin,
+  spotted by Snider off the pressure graph: session Close dropped the
+  archICBReplay without releasing its KV set; model.Generate closes a
+  session per call, so EVERY generate leaked a complete set (region
+  census: 40 half-GB q8 planes where one session owns 20; tiny-prompt
+  31B@256K footprint 41.3G→29.9G with the fix). releaseKVCaches frees
+  codes+scales+mirrors once via the primary (the peer ICB shares the
+  slices). Gate: TestArchSessionCloseReleasesICBKVCaches (falsified:
+  FAILS with the release neutered).
+  **256K DEFAULT LANDED** (`ef9392a`) — the receipt: 31B all-defaults
+  over a 235K cold prompt on the 96GB box: peak 53.96GB (Wednesday's
+  killed run: 64.9GB + 19.5GB swap), swap ended BELOW baseline,
+  answered the 235K needle correctly. generate now prints prefill
+  tok/s ('prefill N tok @ R tok/s').
+  **THE NEXT LANE — PREFILL ECONOMY AT DEPTH** (measured 2026-07-13):
+  31B@235K prefill = 110 tok/s (35.6 min). e2b vs llama.cpp (same-class
+  quants): pp512 3057 vs 4437 (−31%), pp8K 2840 vs 3776 (−25%),
+  pp32K 2541 vs 2412 (+5%) — llama.cpp wins SHALLOW, we cross over at
+  depth; our curve is flatter. Suspects: per-chunk fixed overheads in
+  the shallow regime, and the q8 GEMM-prefix re-dequant which is
+  O(N²) — every chunk re-dequants the whole attended prefix into the
+  mirrors when only the delta rows changed (mirrors persist; old rows
+  never change). Instrument first: LTHN_GPU_TRACE depth ladder
+  (16/64/128K) to attribute the curve before touching anything.
+  Remaining after that: the N-bit knob; the ~14GB of private
+  misaligned-tensor weight copies on 31B (census 180×53MB regions —
+  alignment-aware conversion is the fix shape); the 26B paged-lane q8
+  alignment; the row-plumbing buffer lifecycle care-map.
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
