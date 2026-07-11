@@ -55,7 +55,12 @@ func ReadSafetensors(path string) core.Result {
 	if err != nil {
 		return core.Fail(core.E("safetensors.ReadSafetensors", "read file", err))
 	}
-	data := []byte(raw)
+	// coreio.Local.Read returns a freshly-allocated, caller-owned string whose backing []byte
+	// is never referenced again, so view it read-only rather than copying the whole file a second
+	// time — the returned SafetensorsData.Data sub-slices this view and every consumer (decode,
+	// quantise, transpose-to-new-buffer) treats it read-only, the same contract Load/Parse rely on.
+	// []byte(raw) here duplicated the entire checkpoint (MBs) before any tensor was touched.
+	data := core.AsBytes(raw)
 
 	if len(data) < 8 {
 		return core.Fail(core.E("safetensors.ReadSafetensors", "file too small", nil))
@@ -70,7 +75,7 @@ func ReadSafetensors(path string) core.Result {
 	tensorData := data[8+headerSize:]
 
 	var rawHeader map[string]SafetensorsTensorInfo
-	if r := core.JSONUnmarshalString(string(headerJSON), &rawHeader); !r.OK {
+	if r := core.JSONUnmarshal(headerJSON, &rawHeader); !r.OK {
 		return core.Fail(core.E("safetensors.ReadSafetensors", "parse header", r.Value.(error)))
 	}
 	delete(rawHeader, "__metadata__")
