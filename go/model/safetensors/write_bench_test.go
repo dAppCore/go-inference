@@ -19,7 +19,7 @@ func benchSubsetRefs(n int) []TensorRef {
 	for i := 0; i < n; i++ {
 		bytes := int64(4096 * 2048 * 2)
 		refs[i] = TensorRef{
-			Name: "model.layers." + core.Sprintf("%d", i) + ".self_attn.q_proj.weight",
+			Name:  "model.layers." + core.Sprintf("%d", i) + ".self_attn.q_proj.weight",
 			DType: "BF16", Shape: []uint64{4096, 2048}, ByteLen: bytes, DataStart: off,
 		}
 		off += bytes

@@ -25,16 +25,16 @@ func Filter(text string, cfg Config, hint Hint) Result {
 // p := parser.NewProcessor(cfg, hint)
 // visible := p.Process(piece) + p.Flush()
 type Processor struct {
-	cfg            Config
-	mode           Mode
-	markers        []thinkingMarker
-	startSet       []string // cached marker.start values — invariant once markers is set
-	terminators    []string // bare turn-end tokens swallowed from visible output (gemma <end_of_turn>)
-	holdbackSet    []string // startSet + terminators — the streaming partial-suffix set
-	pending        string
-	inReasoning    bool
-	current        thinkingMarker
-	reasoning strings.Builder // reasoning text, folded per token as it arrives
+	cfg         Config
+	mode        Mode
+	markers     []thinkingMarker
+	startSet    []string // cached marker.start values — invariant once markers is set
+	terminators []string // bare turn-end tokens swallowed from visible output (gemma <end_of_turn>)
+	holdbackSet []string // startSet + terminators — the streaming partial-suffix set
+	pending     string
+	inReasoning bool
+	current     thinkingMarker
+	reasoning   strings.Builder // reasoning text, folded per token as it arrives
 	// blockStart marks where the current reasoning block begins as a BYTE
 	// offset into the reasoning builder. The block's text is
 	// reasoning.String()[blockStart:] — emitReasoningBlock takes that window

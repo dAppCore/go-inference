@@ -121,7 +121,7 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 	if cfg.OutputGate {
 		sc.qRaw = matNTInto(sc.qRaw, h, m.w.QProj, L, D, 2*H*HD)
 		raw := sc.qRaw
-		q = make([]float32, L*H*HD) // de-interleave targets: per-token state (q is written in place by
+		q = make([]float32, L*H*HD)    // de-interleave targets: per-token state (q is written in place by
 		gate = make([]float32, L*H*HD) // attention, gate outlives to the σ-gate), not scratch
 		for t := range L {
 			for hd := range H {
