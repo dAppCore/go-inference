@@ -12,9 +12,15 @@
 package native
 
 import (
+	"context"
+
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/decode/tokenizer"
+	"dappco.re/go/inference/engine"
+	"dappco.re/go/inference/kv"
+	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/composed"
 )
 
 func init() { inference.Register(metalBackend{}) }
@@ -49,22 +55,172 @@ func (metalBackend) LoadModel(path string, opts ...inference.LoadOption) core.Re
 	if err != nil {
 		return core.Fail(core.E("native.metalBackend.LoadModel", "load token model", err))
 	}
-	ntm, ok := tm.(*NativeTokenModel)
-	if !ok {
+	tok, terr := tokenizer.LoadTokenizer(core.PathJoin(path, "tokenizer.json"))
+	if terr != nil {
 		if closer, closeOK := tm.(interface{ Close() error }); closeOK {
 			_ = closer.Close()
 		}
-		return core.Fail(core.E("native.metalBackend.LoadModel", "loader did not return a NativeTokenModel", nil))
-	}
-	tok, terr := tokenizer.LoadTokenizer(core.PathJoin(path, "tokenizer.json"))
-	if terr != nil {
-		_ = ntm.Close()
 		return core.Fail(core.E("native.metalBackend.LoadModel", "load tokenizer", terr))
 	}
-	ntm.AttachTokenizer(tok)
-	ntm.declaredStops = loadGenerationConfigStops(path)
 	// Stamp the checkpoint's real architecture (config.json model_type), not a
 	// hardcoded "gemma4" — a second arch loaded through the metal backend must
 	// self-report truthfully on ModelInfo.Architecture / ModelType.
-	return core.Ok(newNativeTextModel(ntm, probeModelType(path)))
+	modelType := probeModelType(path)
+	switch loaded := tm.(type) {
+	case *NativeTokenModel:
+		loaded.AttachTokenizer(tok)
+		loaded.declaredStops = loadGenerationConfigStops(path)
+		return core.Ok(newNativeTextModel(loaded, modelType))
+	case *composed.ComposedTokenModel:
+		// A composed/hybrid checkpoint (host-f32 gated-delta + full attention, e.g. Qwen 3.6) is not the
+		// native decode struct, so wrap it as an engine.TextModel through the composed serve source. The
+		// source declares ChatML for the Qwen model_types, so the served checkpoint frames its own dialect
+		// rather than gemma's. Size the context to the checkpoint window when the caller left it unset,
+		// exactly as the native path's default does.
+		serveLen := maxLen
+		if serveLen <= 0 {
+			serveLen = resolveDefaultContext(model.ProbeDirContextWindow(path))
+		}
+		info := inference.ModelInfo{
+			Architecture: modelType,
+			VocabSize:    loaded.Vocab(),
+			NumLayers:    loaded.NumLayers(),
+			HiddenSize:   loaded.HiddenSize(),
+		}
+		src := &composedTextModel{sm: loaded, tok: tok, modelType: modelType}
+		return core.Ok(engine.NewTextModel(src, tok, modelType, info, serveLen))
+	default:
+		if closer, closeOK := tm.(interface{ Close() error }); closeOK {
+			_ = closer.Close()
+		}
+		return core.Fail(core.E("native.metalBackend.LoadModel", "loader returned an unservable token model (neither a NativeTokenModel nor a composed hybrid)", nil))
+	}
 }
+
+// composedTextModel adapts a loaded composed hybrid (a host-f32 model.SessionModel — Qwen 3.6's
+// gated-delta / full-attention stack) to engine.TokenModel, so metalBackend.LoadModel returns it as an
+// inference.TextModel through the shared engine.TextModel wrapper exactly like the native decode model.
+// It additionally DECLARES its chat dialect (engine.ChatTemplateDeclarer): ChatML for the Qwen model_types
+// (composed.ChatMLDialect), the gemma fallback for any other composed arch. The declared template WINS
+// over engine.TextModel's tokenizer detection, so a Qwen checkpoint frames <|im_start|>/<|im_end|> turns
+// even though its tokenizer carries no <|turn> marker.
+type composedTextModel struct {
+	sm        model.SessionModel
+	tok       *tokenizer.Tokenizer
+	modelType string
+}
+
+var (
+	_ engine.TokenModel           = (*composedTextModel)(nil)
+	_ engine.ChatTemplateDeclarer = (*composedTextModel)(nil)
+)
+
+// OpenEngineSession opens a fresh composed decode session bridged to engine.Session. The bridge threads
+// the composed model's own tested token loop (model.Generate*), so no decode logic is re-rolled here.
+func (m *composedTextModel) OpenEngineSession() (engine.Session, error) {
+	if m == nil || m.sm == nil {
+		return nil, core.NewError("native.composedTextModel: model is not initialised")
+	}
+	return &composedEngineSession{sm: m.sm}, nil
+}
+
+// Close releases the composed model's resident weights. The composed loader widens the checkpoint to f32
+// and unmaps the shard mmap during the build, so nothing is held past load — Close is a no-op.
+func (m *composedTextModel) Close() error { return nil }
+
+// DeclaredChatTemplate declares the composed checkpoint's chat dialect (engine.ChatTemplateDeclarer): the
+// ChatML family for the Qwen model_types (config-driven via composed.ChatMLDialect), the gemma turn
+// template built from the tokenizer for any other composed arch. A declared template wins over
+// engine.TextModel's detected gemma dialect, so the declaration is the precedence-setting seam.
+func (m *composedTextModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
+	if m != nil && composed.ChatMLDialect(m.modelType) {
+		return chatMLChatTemplate(), true
+	}
+	var tok *tokenizer.Tokenizer
+	if m != nil {
+		tok = m.tok
+	}
+	return engine.GemmaChatTemplate(engine.DetectTurnTokens(tok), false), true
+}
+
+// chatMLChatTemplate is the ChatML dialect as an engine.ChatTemplate: <|im_start|>role\n…<|im_end|> turns,
+// an "assistant" generation cue, an in-place "system" turn (not folded), and the Qwen no-think block
+// "<think>\n\n</think>\n\n" appended after the cue when thinking is off. It matches the reference ChatML
+// rendering pinned in engine/chat_template_test.go.
+func chatMLChatTemplate() engine.ChatTemplate {
+	return engine.ChatTemplate{
+		Open:          "<|im_start|>",
+		Close:         "<|im_end|>",
+		UserRole:      "user",
+		AssistantRole: "assistant",
+		SystemRole:    "system",
+		Thinking:      &engine.ChatThinking{OffSuffix: "<think>\n\n</think>\n\n"},
+		Stops:         []string{"<|im_end|>"},
+	}
+}
+
+// composedEngineSession bridges a composed model.SessionModel to engine.Session for the stateless serve
+// path (engine.TextModel.Generate / Chat): PrefillTokens stores the prompt, and the two generate methods
+// delegate to the composed model's own tested token loop (model.GenerateSampledWithStopTokensTransformEach),
+// which opens the recurrent session and threads every layer's state. The composed recurrent state is not a
+// portable kv.Snapshot, so the KV-capture methods report an explicit unsupported error rather than a wrong
+// snapshot — an honest capability boundary the -state / continuity paths detect and skip.
+type composedEngineSession struct {
+	sm     model.SessionModel
+	prompt []int32
+}
+
+var _ engine.Session = (*composedEngineSession)(nil)
+
+// PrefillTokens stores the prompt tokens; the composed loop re-runs prefill inside the generate delegate
+// (one prefill per stateless request), so the stored prompt is the whole retained state.
+func (s *composedEngineSession) PrefillTokens(ids []int32) error {
+	s.prompt = append(s.prompt[:0], ids...)
+	return nil
+}
+
+// AppendTokens extends the stored prompt (the recurrent state carries no separate replay-free append).
+func (s *composedEngineSession) AppendTokens(ids []int32) error {
+	s.prompt = append(s.prompt, ids...)
+	return nil
+}
+
+// Pos is the retained prompt length — the budget engine.TextModel sizes generation against.
+func (s *composedEngineSession) Pos() int { return len(s.prompt) }
+
+// GenerateFromCacheEach greedily decodes up to maxNew tokens from the stored prompt, yielding each. eosID
+// < 0 lets the caller own the stop decision (via yield returning false), matching engine.TextModel's emit.
+// A zero-temperature sampler decodes greedily per token, reusing the composed model's tested stepwise loop.
+func (s *composedEngineSession) GenerateFromCacheEach(maxNew, eosID int, yield func(int32) bool) ([]int32, error) {
+	var stops []int32
+	if eosID >= 0 {
+		stops = []int32{int32(eosID)}
+	}
+	return model.GenerateSampledWithStopTokensTransformEach(s.sm, model.NewSampler(0), model.SampleParams{}, s.prompt, maxNew, stops, nil, yield)
+}
+
+// GenerateSampledFromCacheEach decodes up to maxNew tokens with the sampler + params, honouring stopTokens
+// and the optional per-token transform — delegated wholesale to the composed model's tested sampled loop.
+func (s *composedEngineSession) GenerateSampledFromCacheEach(maxNew int, stopTokens []int32, sampler *model.Sampler, params model.SampleParams, transform model.TokenTransform, yield func(int32) bool) ([]int32, error) {
+	return model.GenerateSampledWithStopTokensTransformEach(s.sm, sampler, params, s.prompt, maxNew, stopTokens, transform, yield)
+}
+
+// CaptureKVWithOptions is unsupported: the composed hybrid's per-layer recurrent state has no portable KV
+// snapshot representation, so it reports the boundary rather than emitting a wrong one.
+func (s *composedEngineSession) CaptureKVWithOptions(kv.CaptureOptions) (*kv.Snapshot, error) {
+	return nil, core.NewError("native.composedEngineSession: composed recurrent state has no portable KV snapshot")
+}
+
+// RangeKVBlocks is unsupported for the composed hybrid (no portable KV snapshot — see CaptureKVWithOptions).
+func (s *composedEngineSession) RangeKVBlocks(int, kv.CaptureOptions, func(kv.Block) (bool, error)) error {
+	return core.NewError("native.composedEngineSession: composed recurrent state has no portable KV snapshot")
+}
+
+// RestoreFromKV is unsupported for the composed hybrid (its recurrent state cannot be rebuilt from a KV
+// snapshot — see CaptureKVWithOptions).
+func (s *composedEngineSession) RestoreFromKV(context.Context, *kv.Snapshot) error {
+	return core.NewError("native.composedEngineSession: composed recurrent state cannot be restored from a KV snapshot")
+}
+
+// Close releases the session state (none held beyond the stored prompt).
+func (s *composedEngineSession) Close() error { return nil }
