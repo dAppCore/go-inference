@@ -595,3 +595,37 @@ func TestKVQ8PrefillReleasesGEMMMirrors(t *testing.T) {
 	}
 	t.Logf("mirrors released at the prefill seam; -state and decode intact")
 }
+
+// TestArchSessionCloseReleasesICBKVCaches pins the session KV lifecycle:
+// model.Generate opens and closes a session per call, and Close used to drop
+// the archICBReplay without releasing its per-owner KV set — every generate
+// leaked a complete cache set (10.7GB q8 per close on 31B@256K; the 2026-07-11
+// receipt run carried a full dead set from the CLI's first session). Three
+// open+step+close cycles must return the device allocation to baseline.
+func TestArchSessionCloseReleasesICBKVCaches(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	// one throwaway build first so PSO/library/pool one-time costs are excluded
+	warm := newKVQ8ICBFixtureLen(t, 65536)
+	if _, err := warm.stepID(1); err != nil {
+		t.Fatalf("warm stepID: %v", err)
+	}
+	warm.Close()
+	baseline := device.CurrentAllocatedSize()
+	for range 3 {
+		sess := newKVQ8ICBFixtureLen(t, 65536) // 3 global owners @65536 rows ≈ 100MB+/session
+		if _, err := sess.stepID(1); err != nil {
+			t.Fatalf("stepID: %v", err)
+		}
+		sess.Close()
+	}
+	end := device.CurrentAllocatedSize()
+	var grew uint
+	if end > baseline {
+		grew = end - baseline
+	}
+	if grew > 64<<20 { // one leaked set alone exceeds this
+		t.Fatalf("session close leaked ICB KV caches: device allocation grew %dMB over 3 open+close cycles", grew>>20)
+	}
+}
