@@ -138,6 +138,48 @@ func TestLoadComposedWrapperConfig(t *testing.T) {
 	t.Log("wrapped config loaded: text_config + rope_parameters resolved, odd rotary dim rounded, tied head")
 }
 
+// TestLoadComposedGatedAttention loads a checkpoint whose attention layer is gated (attn_output_gate:true,
+// so q_proj carries 2·heads·head_dim rows) and confirms the loader sets AttnConfig.OutputGate and the model
+// decodes — the buildAttn wiring for the gated path.
+func TestLoadComposedGatedAttention(t *testing.T) {
+	const D, vocab, FF = 8, 32, 16
+	const AH, AKVH, AHD = 4, 2, 8 // gated attention: q_proj = 2·AH·AHD rows ([q ; gate])
+	ts := map[string]safetensors.Tensor{
+		"model.embed_tokens.weight": bf16T(syn(vocab*D, 1), vocab, D),
+		"model.norm.weight":         bf16T(syn(D, 2), D),
+		"lm_head.weight":            bf16T(syn(vocab*D, 3), vocab, D),
+	}
+	lp := "model.layers.0."
+	ts[lp+"input_layernorm.weight"] = bf16T(syn(D, 11), D)
+	ts[lp+"post_attention_layernorm.weight"] = bf16T(syn(D, 12), D)
+	ts[lp+"mlp.gate_proj.weight"] = bf16T(syn(FF*D, 13), FF, D)
+	ts[lp+"mlp.up_proj.weight"] = bf16T(syn(FF*D, 14), FF, D)
+	ts[lp+"mlp.down_proj.weight"] = bf16T(syn(D*FF, 15), D, FF)
+	ap := lp + "self_attn."
+	ts[ap+"q_proj.weight"] = bf16T(syn(2*AH*AHD*D, 16), 2*AH*AHD, D) // [q ; gate]
+	ts[ap+"k_proj.weight"] = bf16T(syn(AKVH*AHD*D, 17), AKVH*AHD, D)
+	ts[ap+"v_proj.weight"] = bf16T(syn(AKVH*AHD*D, 18), AKVH*AHD, D)
+	ts[ap+"o_proj.weight"] = bf16T(syn(D*AH*AHD, 19), D, AH*AHD)
+	ts[ap+"q_norm.weight"] = bf16T(syn(AHD, 20), AHD)
+	ts[ap+"k_norm.weight"] = bf16T(syn(AHD, 21), AHD)
+	config := []byte(`{"hidden_size":8,"num_hidden_layers":1,"intermediate_size":16,"num_attention_heads":4,"num_key_value_heads":2,"head_dim":8,"vocab_size":32,"rms_norm_eps":1e-5,"attn_output_gate":true,"rope_theta":1000000,"partial_rotary_factor":0.25,"layer_types":["full_attention"]}`)
+	m, err := LoadComposed(ts, config)
+	if err != nil {
+		t.Fatalf("LoadComposed: %v", err)
+	}
+	am, ok := m.Layers[0].Mixer.(*attnMixer)
+	if !ok {
+		t.Fatalf("layer 0 mixer is %T, want *attnMixer", m.Layers[0].Mixer)
+	}
+	if !am.cfg.OutputGate {
+		t.Fatal("attn_output_gate:true must set AttnConfig.OutputGate")
+	}
+	if _, err := NewSession(m).Forward([]int32{1, 5, 3}); err != nil {
+		t.Fatalf("gated forward: %v", err)
+	}
+	t.Log("gated-attention checkpoint (q_proj = 2·heads·head_dim) loaded — OutputGate set, decodes")
+}
+
 // TestLoadComposed loads the synthetic hybrid checkpoint, checks the per-layer dispatch is correct, the
 // untied head is read, and the loaded model decodes end-to-end with decode==prefill.
 func TestLoadComposed(t *testing.T) {

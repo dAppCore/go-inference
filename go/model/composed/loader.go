@@ -171,6 +171,9 @@ func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float3
 	headDim := cfg.HeadDim
 	if headDim == 0 && heads > 0 {
 		headDim = (len(q) / D) / heads
+		if cfg.AttnOutputGate {
+			headDim /= 2 // gated q_proj emits [q ; gate], so its rows are 2·heads·headDim
+		}
 	}
 	kvHeads := cfg.NumKeyValueHeads
 	if kvHeads == 0 {
@@ -183,7 +186,7 @@ func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float3
 	return NewAttnMixer(&AttnWeights{
 		QProj: q, KProj: k, VProj: v, OProj: o,
 		QNorm: f32opt(sp + "q_norm.weight"), KNorm: f32opt(sp + "k_norm.weight"),
-	}, AttnConfig{Heads: heads, KVHeads: kvHeads, HeadDim: headDim, RotaryDim: rd, RopeTheta: cfg.ropeTheta(), NormEps: cfg.RMSNormEps}), nil
+	}, AttnConfig{Heads: heads, KVHeads: kvHeads, HeadDim: headDim, RotaryDim: rd, RopeTheta: cfg.ropeTheta(), NormEps: cfg.RMSNormEps, OutputGate: cfg.AttnOutputGate}), nil
 }
 
 // buildGatedDelta builds a gated-delta mixer; geometry derived from the weight shapes (as metal does):
