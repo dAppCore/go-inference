@@ -64,6 +64,17 @@ func preSizeAssembledRawBytes(assembled *Snapshot, blocks []Block) {
 	}
 	for layerIndex := range assembled.Layers {
 		var layerKeyTotal, layerValueTotal int
+		dstLayer := &assembled.Layers[layerIndex]
+		// A windowed (sliding-cache) layer is empty in the leading blocks — its
+		// data begins only once the block range enters the window, so block 0 is
+		// the WRONG shape donor for it. emptyKVSnapshotLayers copied block 0's
+		// empty KeyShape/KeyDType, leaving the assembled layer with no 4D shape
+		// for presizeLayerRaw to size a placement buffer from; without it
+		// appendKVSnapshotLayerRawBlock falls to the O(N^2) merged-rebuild path
+		// (a full-tensor recopy per data block). Adopt the first non-empty
+		// block's shape+dtype so the strided placement buffer is built and each
+		// block folds in O(block). Full-attention layers already carry a 4D
+		// shape from block 0 (len==4), so they skip this and are unchanged.
 		for _, block := range blocks {
 			if block.Snapshot == nil || layerIndex >= len(block.Snapshot.Layers) {
 				continue
@@ -71,8 +82,15 @@ func preSizeAssembledRawBytes(assembled *Snapshot, blocks []Block) {
 			srcLayer := block.Snapshot.Layers[layerIndex]
 			layerKeyTotal += len(srcLayer.KeyBytes)
 			layerValueTotal += len(srcLayer.ValueBytes)
+			if len(dstLayer.KeyShape) != 4 && len(srcLayer.KeyShape) == 4 && len(srcLayer.KeyBytes) > 0 {
+				dstLayer.KeyShape = core.SliceClone(srcLayer.KeyShape)
+				dstLayer.KeyDType = srcLayer.KeyDType
+			}
+			if len(dstLayer.ValueShape) != 4 && len(srcLayer.ValueShape) == 4 && len(srcLayer.ValueBytes) > 0 {
+				dstLayer.ValueShape = core.SliceClone(srcLayer.ValueShape)
+				dstLayer.ValueDType = srcLayer.ValueDType
+			}
 		}
-		dstLayer := &assembled.Layers[layerIndex]
 		if layerKeyTotal > 0 {
 			dstLayer.KeyBytes = presizeLayerRaw(dstLayer.KeyShape, dstLayer.KeyDType, layerKeyTotal)
 		}
