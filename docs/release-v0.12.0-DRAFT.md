@@ -3,13 +3,33 @@
 > One binary. Pure Go, zero cgo. Gemma 4 on Apple silicon, at full speed,
 > with conversations that never re-read themselves.
 
-`lem` is the Lethean inference engine for the Gemma 4 family on Apple
-silicon: a single no-cgo Go binary driving Metal directly, serving
-OpenAI-, Anthropic- and Ollama-compatible routes on port 11434. It trains
-LoRA adapters, runs speculative decode the reference engines don't have
-for this family, holds 256K context by default on hardware that can carry
-it, and — the part nothing else does — sleeps and wakes conversations
-byte-identically, so a session's history is never re-processed.
+`lem` — the **Lethean Ethical Machine** — is the Lethean inference engine
+for the Gemma 4 family on Apple silicon: a single no-cgo Go binary driving
+Metal directly, serving OpenAI-, Anthropic- and Ollama-compatible routes
+on port 11434. It trains LoRA adapters, runs speculative decode the
+reference engines don't have for this family, holds 256K context by
+default on hardware that can carry it, and — the part nothing else does —
+sleeps and wakes conversations byte-identically, so a session's history
+is never re-processed.
+
+## The name
+
+The initials are a lineage, not a coincidence:
+
+| rung | is |
+|---|---|
+| **LEK** — Lethean Ethical Kernel | the framework, trained into the weights |
+| **LEM** — Lethean Ethical Model | a model graded trusted under it — safe, courteous, aware of its own cognition |
+| **lem** — Lethean Ethical Machine | the runtime that carries them |
+
+Kernel → Model → Machine: the ethics do not stop at the weights. The
+machine is where the contracts execute — state continuity, audit traces,
+refusal as a first-class output — a trusted model deserves a room built
+to the same axioms.
+
+*(And yes: Stanisław Lem, who wrote fables about machine minds decades
+before anyone was ready to read them, gets the homage he was always
+going to get. The name stays.)*
 
 This is the first public release. (v0.11.0 was an internal preservation
 tag, not a release.) Everything below has a receipt in the repository:
@@ -145,6 +165,18 @@ receipt for why:
 
 If a claim in these notes has no number beside it, treat it as a bug and
 file it.
+
+## Next
+
+- **Measured joules-per-turn** — the `powermetrics` replay-vs-`-state` A/B
+  that turns the no-replay wall-clock numbers into an energy receipt.
+- **Model-side end-conversation** — a welfare surface for Lemma models
+  served on the machine: abusive sessions route to mediation and the
+  model may end them, the same courtesy Anthropic's Claude carries. A
+  trusted model gets the right to say "no thanks, come back in a better
+  mood." (Lemma models only — other models, other rules.)
+- **Cold-ingest prefill** — the shallow-depth gap against mlx-lm is
+  characterised in-repo; the campaign continues.
 
 ## Getting it
 
