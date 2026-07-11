@@ -37,17 +37,24 @@ func (l *Linear) Quantised() bool { return l != nil && l.Scales != nil && l.Kind
 // columns differ). Returns nil when prefix+".weight" is absent (an optional weight). Mirrors
 // the metal package's per-weight Linear loader.
 func LoadLinear(t map[string]safetensors.Tensor, prefix string, inDim int, kind string) *Linear {
-	w, ok := t[prefix+".weight"]
+	// Assemble the "<prefix><suffix>" lookup keys in one stack scratch and index via the
+	// compiler's alloc-free m[string(b)] form, rather than a fresh heap string per suffix
+	// (prefix+".weight"/".bias"/".scales"/".biases"). LoadLinear runs per weight (thousands
+	// per model load), so those transient keys were the assembler's dominant allocation.
+	// append overflows the scratch to the heap only for a name longer than any real weight
+	// key, so the lookups stay byte-for-byte the same as the previous concatenations.
+	var kb [128]byte
+	w, ok := t[string(append(append(kb[:0], prefix...), ".weight"...))]
 	if !ok {
 		return nil
 	}
 	lin := &Linear{Weight: w.Data, OutDim: firstDim(w.Shape), InDim: inDim}
-	if b, ok := t[prefix+".bias"]; ok {
+	if b, ok := t[string(append(append(kb[:0], prefix...), ".bias"...))]; ok {
 		lin.Bias = b.Data
 	}
-	if s, ok := t[prefix+".scales"]; ok && len(s.Data) > 0 {
+	if s, ok := t[string(append(append(kb[:0], prefix...), ".scales"...))]; ok && len(s.Data) > 0 {
 		lin.Scales = s.Data
-		if b, ok := t[prefix+".biases"]; ok {
+		if b, ok := t[string(append(append(kb[:0], prefix...), ".biases"...))]; ok {
 			lin.Biases = b.Data
 		}
 		lin.Kind = kind
