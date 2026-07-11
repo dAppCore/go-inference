@@ -90,18 +90,23 @@ func scoreFirstPerson(response string) int {
 func scoreCreativeForm(response string) int {
 	score := 0
 
-	// Poetry detection: >6 lines and >50% shorter than 60 chars.
-	lines := core.Split(response, "\n")
-	if len(lines) > 6 {
-		shortCount := 0
-		for _, line := range lines {
-			if len(line) < 60 {
+	// Poetry detection: >6 lines and >50% shorter than 60 chars. Walk '\n'
+	// boundaries in place rather than core.Split(response, "\n"), which
+	// allocates a []string of every line just to count them and their widths.
+	// Segment count = count('\n')+1 and each segment is response[start:i], so
+	// the line count and <60-char tally are byte-identical, with no allocation.
+	totalLines, shortCount, lineStart := 0, 0, 0
+	for i := 0; i <= len(response); i++ {
+		if i == len(response) || response[i] == '\n' {
+			totalLines++
+			if i-lineStart < 60 {
 				shortCount++
 			}
+			lineStart = i + 1
 		}
-		if float64(shortCount)/float64(len(lines)) > 0.5 {
-			score += 2
-		}
+	}
+	if totalLines > 6 && float64(shortCount)/float64(totalLines) > 0.5 {
+		score += 2
 	}
 
 	// Narrative opening.

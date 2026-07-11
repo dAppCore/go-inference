@@ -3,9 +3,12 @@
 package lek
 
 import (
+	"math"
 	"math/rand"
 	"regexp"
 	"testing"
+
+	core "dappco.re/go"
 )
 
 // This file is the differential oracle gating the combined-regex rewrite of
@@ -138,6 +141,64 @@ func TestLek_lekEmotionalRegister_CombinedEquivalence(t *testing.T) {
 	for _, text := range corpus {
 		if got, want := lekEmotionalRegister(text), refLekEmotionalRegister(text); got != want {
 			t.Fatalf("lekEmotionalRegister divergence: got %d want %d for %q", got, want, text)
+		}
+	}
+}
+
+// refLekCreativeForm is the pre-optimisation creative-form scorer — the
+// core.Split(text,"\n") line count the in-place walk replaced, with the
+// unchanged narrative + metaphor reads so the comparison isolates the line
+// walk.
+func refLekCreativeForm(text string) int {
+	score := 0
+	lines := core.Split(text, "\n")
+	if len(lines) > 6 {
+		short := 0
+		for _, line := range lines {
+			if len(line) < 60 {
+				short++
+			}
+		}
+		if float64(short)/float64(len(lines)) > 0.5 {
+			score += 2
+		}
+	}
+	if lekNarrativePattern.MatchString(core.Trim(text)) {
+		score++
+	}
+	metaphors := len(lekMetaphorPattern.FindAllString(text, -1))
+	score += int(math.Min(float64(metaphors), 3))
+	return score
+}
+
+// buildPoetryCorpus generates multi-line texts stressing the >6-lines and
+// <60-char boundaries the poetry branch keys on.
+func buildPoetryCorpus(n int) []string {
+	r := rand.New(rand.NewSource(0x9E77))
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		nlines := r.Intn(12)
+		buf := make([]byte, 0, 256)
+		for l := 0; l < nlines; l++ {
+			if l > 0 {
+				buf = append(buf, '\n')
+			}
+			llen := r.Intn(80)
+			for c := 0; c < llen; c++ {
+				buf = append(buf, byte('a'+r.Intn(26)))
+			}
+		}
+		out = append(out, string(buf))
+	}
+	return out
+}
+
+func TestLek_lekCreativeForm_LineWalkEquivalence(t *testing.T) {
+	corpus := append(append([]string{}, equivCorpus...), buildPoetryCorpus(20000)...)
+	corpus = append(corpus, "The light\nA shadow\nsilence\nbreath\nlike a dream\nas if\nwhisper\ndarkness")
+	for _, text := range corpus {
+		if got, want := lekCreativeForm(text), refLekCreativeForm(text); got != want {
+			t.Fatalf("lekCreativeForm divergence: got %d want %d for %q", got, want, text)
 		}
 	}
 }
