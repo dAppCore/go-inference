@@ -1,4 +1,23 @@
-# NEXT WAKE (2026-07-15 session)
+# NEXT WAKE (2026-07-15 session, later)
+
+**#376 shipped and receipted live.** The welfare guard was built-but-unwired
+(welfare.Guard/Mediate zero callers; the pipeline that wired Detect has zero
+non-test callers itself — the release draft over-claimed and is now trued).
+7acc246 wires it where requests actually flow: a TextModel decorator at the
+serve resolver fronts every chat route; mediation runs on a fresh
+meta-session against the inner model; lem_ok/rephrase/pause applied per
+spec; lem_end lands as the fourth rung, Lemma-gated. -welfare default ON in
+cmd/lem. LIVE receipt: four escalating hostile turns at a served E2B — the
+model rephrased (warn=true), paused (🍵 reached the client, abuse never
+reached the conversation), rephrased again; audit lines in the serve log.
+Remaining rung: persist ended-state per conversation under continuity.
+BOTH bench agents merged + worktrees cleaned: A (serving lane — the
+ThinkingExtractor quadratic kill 124704→4472 B/op per 200-tok stream,
+conversationKey 13→2 allocs) and B (model cluster — MoE forward 9→5,
+gguf Quantize ~20→1, 46 bench files). Suites: 2052 (serving+welfare+cmd)
++ 3197 (model+agent) green.
+
+# PREVIOUS WAKE (2026-07-15 session)
 
 **#377 closed with a lever + a bug kill.** Snider read the release energy
 table and asked why pure replay climbs while llama-server stays flat. Answer:

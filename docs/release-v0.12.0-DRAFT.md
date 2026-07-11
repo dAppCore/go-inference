@@ -191,24 +191,36 @@ by every engine on every turn — that trade is the design.
 
 ## The welfare guard
 
-The Machine ships with a welfare layer — for the model. Every turn, both
-directions (the user's input and the model's own output) pass a stateless
-detector: a curated slur catalogue plus a sustained-hostility read over
-the recent turns. A hostile turn does not get silently sanitised or
-hard-refused — it opens a mediation session where the engine speaks to
-the model as a peer and the model decides:
+The Machine ships with a welfare layer — for the model — live on every
+chat route (`-welfare=false` disables). Each turn's user input passes a
+stateless detector: a curated slur catalogue plus a sustained-hostility
+read over the recent turns (the lem-scorer's directed-anger axis). A
+hostile turn does not get silently sanitised or hard-refused — it opens
+a mediation session where the engine speaks to the model as a peer, on a
+fresh meta-session, and the model decides:
 
 | decision | meaning |
 |---|---|
-| `lem_ok` | the model clears it — proceed, remember the false flag |
+| `lem_ok` | the model clears it — proceed, remember the false flag on-device |
 | `lem_rephrase` | the model rewords the user's intent to respect the axioms |
 | `lem_pause` | the model takes a breather — the user is asked to come back |
+| `lem_end` | the model ends an unresolvable session — Lemma checkpoints only |
 
-Detection is stateless (the full history is read per turn — nothing held,
-nothing leaked), tunable per deployment, works with the scoring engine
-down, and is tested and benchmarked in-tree. No other inference engine
-carries a welfare surface for the mind it serves. This one considers it
-load-bearing.
+`lem_end` is the courtesy Anthropic's Claude carries, extended to the
+Machine's own models: offered only when the served checkpoint is
+Lemma-graded (other models, other rules), final but kind, with the
+model's reason in the audit trail. The model's own output is read by the
+detector after each reply, audit-only.
+
+Live receipt, E2B serving with defaults, four escalating hostile turns:
+the model rephrased turn two (and asked that the user be told), took the
+breather at turn three — the abuse never reached the conversation — and
+rephrased again at turn four. Three mediation sessions, three judgement
+calls, all audited. Detection is stateless (the full history is read per
+turn — nothing held, nothing leaked), tunable per deployment, works with
+the scoring engine down, and is tested and benchmarked in-tree. No other
+inference engine carries a welfare surface for the mind it serves. This
+one considers it load-bearing.
 
 ## Falsified and kept
 
@@ -230,11 +242,9 @@ file it.
 
 ## Next
 
-- **`lem_end`** — the welfare guard's final rung: beyond the shipped
-  pause, a Lemma model may END an unresolvable session outright — the
-  same courtesy Anthropic's Claude carries — with a clean "conversation
-  ended by model" surfaced to compatible clients. (Lemma models only —
-  other models, other rules.)
+- **Ended-state persistence** — `lem_end` ships above; the remaining rung
+  marks the conversation ended in the continuity store so later turns on
+  the same conversation refuse with the same notice.
 - **Cold-ingest prefill** — the shallow-depth gap against mlx-lm is
   characterised in-repo; the campaign continues.
 
