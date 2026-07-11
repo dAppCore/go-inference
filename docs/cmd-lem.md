@@ -92,6 +92,7 @@ re-runs the reactive drafter ladder over the new target).
 | `--profile-dir` | `""` | tuned-profile directory (default `~/Lethean/lem/tuning`) |
 | `--state-conversations` | `true` | conversation continuity: wake each chat from its slept state, append only the new turn, no prompt replay |
 | `--state-store` | `""` | conversation state store file (default `~/Lethean/lem/state/conversations.kv`) |
+| `--welfare` | `true` | welfare guard: per-turn hostility detect + engine-model mediation on every chat route; Lemma checkpoints additionally carry `lem_end` (disable with `-welfare=false`) |
 | `--native` | `false` | serve via the no-cgo native token-loop contract (the default metal engine already is native) |
 | `--read-timeout` | `30s` | HTTP read-header timeout |
 | `--write-timeout` | `5m` | HTTP write timeout (covers a full streaming response) |
