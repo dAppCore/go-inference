@@ -82,3 +82,44 @@ func gptOSSMarkers() []reasoningMarker {
 	})
 	return gptOSSMarkersCache
 }
+
+// markerLeadBytes returns the distinct first bytes of the given strings, as a
+// string suitable for core.IndexAny. A marker/terminator scan uses it to hop
+// directly between candidate start positions (IndexAny is a single SIMD-backed
+// pass when the set is one ASCII byte, which every reasoning marker's leading
+// '<' makes the common case) instead of running one full Index over the text
+// per candidate — O(candidates × text) collapses to O(text + hits × candidates).
+// The sets are immutable, so this is computed once, never per scan. Empty
+// strings carry no lead byte and are skipped; real marker/terminator sets never
+// contain one (the grammar tables and newBuiltinOutputParser guarantee it), so
+// a genuine prefix always shares the text's byte at the matched position.
+func markerLeadBytes(strs []string) string {
+	var seen [256]bool
+	leads := make([]byte, 0, 4)
+	for _, s := range strs {
+		if s == "" {
+			continue
+		}
+		if c := s[0]; !seen[c] {
+			seen[c] = true
+			leads = append(leads, c)
+		}
+	}
+	return string(leads)
+}
+
+// reasoningMarkerLeadBytes is markerLeadBytes over the markers' start strings.
+func reasoningMarkerLeadBytes(markers []reasoningMarker) string {
+	var seen [256]bool
+	leads := make([]byte, 0, 4)
+	for _, m := range markers {
+		if m.start == "" {
+			continue
+		}
+		if c := m.start[0]; !seen[c] {
+			seen[c] = true
+			leads = append(leads, c)
+		}
+	}
+	return string(leads)
+}
