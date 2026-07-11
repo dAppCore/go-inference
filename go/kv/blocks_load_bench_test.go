@@ -46,6 +46,36 @@ func BenchmarkLoadPrefixFromStateBlocks_NativeLayerSingleHeadSlabThreeBlocks(b *
 	}
 }
 
+// BenchmarkLoadFromStateBlocks_NativeLayerMultiHeadSlabThreeBlocks wakes a
+// grouped-query (multi-KV-head) native bundle — the engine/metal capture shape.
+// It drives the interleaved multi-head layer-raw assembly, which folds each
+// block at a fill cursor rather than rebuilding the whole tensor per block.
+func BenchmarkLoadFromStateBlocks_NativeLayerMultiHeadSlabThreeBlocks(b *testing.B) {
+	ctx := context.Background()
+	store, bundle := benchmarkNativeLayerMultiHeadSlabStateBlocksFixture(b)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		snapshot, err := LoadFromStateBlocks(ctx, store, bundle)
+		if err != nil {
+			b.Fatal(err)
+		}
+		stateBlocksBenchmarkSnapshot = snapshot
+	}
+}
+
+func BenchmarkLoadPrefixFromStateBlocks_NativeLayerMultiHeadSlabThreeBlocks(b *testing.B) {
+	ctx := context.Background()
+	store, bundle := benchmarkNativeLayerMultiHeadSlabStateBlocksFixture(b)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		snapshot, err := LoadPrefixFromStateBlocksWithOptions(ctx, store, bundle, bundle.TokenCount, LoadOptions{RawKVOnly: true})
+		if err != nil {
+			b.Fatal(err)
+		}
+		stateBlocksBenchmarkSnapshot = snapshot
+	}
+}
+
 func BenchmarkLoadPrefixFromStateBlocks_NativeLayerSingleHeadSlabPartialPrefix(b *testing.B) {
 	ctx := context.Background()
 	store, bundle := benchmarkNativeLayerSlabStateBlocksFixture(b)
