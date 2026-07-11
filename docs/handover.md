@@ -14,11 +14,18 @@ the field outright at 32K+; mlx-lm true-wall gap 3.2x -> 1.48x at 8K.
 SECOND LEVER SHIPPED (c257ff0): minimal boundary chunk — with the skip
 armed, only the final chunk pays the full stack, so the absorb policy's
 1081-row final chunk shrank to the last partial window (57 rows at 8K,
-floored at 32 to keep the ICB/q8-fold gates clear). pp8K 6,777->8,049
-(0.898s wall; mlx true-wall gap now 1.25x). Chunk-width RE-RECEIPTED
-under the skip: 2048 stays the peak (4096 still collapses: 4,986).
-FOLLOW-UPS still open on #381: per-chunk host seams + PLE slab still
-gathered full-width per chunk (the remaining 1.25x lives there),
+floored at 32 to keep the ICB/q8-fold gates clear). pp8K 6,777->8,049.
+Chunk-width RE-RECEIPTED under the skip: 2048 stays the peak (4096
+still collapses: 4,986).
+THIRD LEVER SHIPPED (a0364b5): PLE slab at owner-layer width + the
+one-dispatch quant gather (lthn_ple_gather_rows_quant; K-loop of
+per-token gathers retired; builders derive the bound from slab length).
+pleSlab host span 104->47ms steady-state; pp8K 8,049->8,528 (0.847s
+wall; mlx true-wall gap now 1.18x). NOTE: first run after a metallib
+rebuild pays the new kernel's PSO compile once (~40ms) — measure
+steady-state.
+FOLLOW-UPS still open on #381: per-chunk seams + the PLE tower's own
+GPU pass (37ms of the 8K wall — could overlap the main pass),
 embeddings/bidir chunk lane still full-stack, 31B/26B family receipts.
 
 **THE TRAP THAT ATE AN HOUR (bank it):** running engine/metal tests with

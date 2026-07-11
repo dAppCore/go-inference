@@ -177,10 +177,10 @@ quants reported, never hidden):
 
 | depth | lem | llama.cpp | oMLX | mlx-lm |
 |---|---|---|---|---|
-| 8K | 8,049 | 4,002 | 6,696 | ~9,850² |
-| 32K | 7,195 | 2,412 | — | — |
-| 62K | 6,040 | — | — | — |
-| 118K | 4,305 | — | — | — |
+| 8K | 8,528 | 4,002 | 6,696 | ~9,850² |
+| 32K | 7,556 | 2,412 | — | — |
+| 62K | 6,285 | — | — | — |
+| 118K | 4,437 | — | — | — |
 
 ² mlx-lm prints 11,790 at this depth; 10,044 is its true wall measured
 with our own timer around a preloaded generate. oMLX (the closest feature rival — continuous
@@ -188,10 +188,10 @@ batching, tiered KV, OpenAI+Anthropic routes, menu-bar service — but a
 Python stack where lem is one contained binary) rides mlx-lm's kernels
 and lands 6,696 even through its HTTP serving path.
 
-Honest reading: mlx-lm's true wall still leads cold 8K ingest by ~1.25×
-(the remaining gap is per-chunk host seams and the full-width PLE
-gather, both open on the tracker). Everywhere else this table has data,
-lem now leads the field outright — llama.cpp at every depth, oMLX at its own
+Honest reading: mlx-lm's true wall still leads cold 8K ingest by ~1.18×
+(the residue is per-chunk seams and the PLE tower's own GPU pass, open
+on the tracker). Everywhere else this table has data, lem now leads the
+field outright — llama.cpp at every depth, oMLX at its own
 depth — and the curve stays flat where everyone else's dives. Decode —
 the cost every turn pays — leads the whole field (see the board above);
 and under `-state` serving, prefill is paid once per conversation while
