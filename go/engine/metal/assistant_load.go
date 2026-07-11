@@ -2229,6 +2229,13 @@ func (s *ArchSession) prepareAssistantPrompt(promptIDs []int32) error {
 	if lcp == len(promptIDs) {
 		lcp = len(promptIDs) - 1
 	}
+	if lcp < s.pos && s.ringRollbackUnsafe() {
+		// Rolling back past a wrapped sliding ring would resume attention over
+		// window rows the discarded tail already overwrote (the rule
+		// session_prompt_reuse.go gates for the plain lane) — re-prefill the
+		// whole prompt cold instead, token-identical, just uncached.
+		lcp = 0
+	}
 	s.pos = lcp
 	if err := s.truncateSpeculativeKV(s.pos); err != nil {
 		return err
