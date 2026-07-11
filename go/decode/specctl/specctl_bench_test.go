@@ -18,6 +18,7 @@ import (
 var (
 	sinkInt   int
 	sinkFloat float64
+	sinkCtrl  *specctl.Adaptive
 )
 
 func BenchmarkAdaptive_Record(b *testing.B) {
@@ -46,5 +47,28 @@ func BenchmarkAdaptive_AcceptRate(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		sinkFloat = c.AcceptRate()
+	}
+}
+
+// New is the once-per-request constructor — it allocates the single running
+// controller struct (the one unavoidable alloc); this pins that it is the only
+// one, and that config clamping stays scalar.
+func BenchmarkAdaptive_New(b *testing.B) {
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		sinkCtrl = specctl.New(specctl.Controller{Min: 1, Max: 8, Window: 8})
+	}
+}
+
+// Reset clears the learned rate back to cold-start under the mutex — a per-request
+// scalar write that must not allocate.
+func BenchmarkAdaptive_Reset(b *testing.B) {
+	c := specctl.New(specctl.Controller{Min: 1, Max: 8, Window: 8})
+	c.Record(8, 5)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		c.Reset()
 	}
 }
