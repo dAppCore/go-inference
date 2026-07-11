@@ -46,6 +46,39 @@ var (
 
 func kvQ8ICBOn() bool { return (kvQ8ICBEnabled || kvQ8ICBForTest) && !kvQ8ICBOffForTest }
 
+// releaseKVCaches releases the replay's per-owner KV cache set — the session
+// teardown hook. Session Close used to drop the archICBReplay reference
+// without releasing anything, leaking a COMPLETE KV set per closed session
+// (10.7GB q8 / 21.5GB bf16 on 31B@256K — model.Generate opens and closes a
+// session per call, so every generate stacked one). The peer replay SHARES
+// these slices, so the session releases them exactly once, through the
+// primary. The recording's own scratch stays pooled (MB-scale, reused).
+func (r *archICBReplay) releaseKVCaches() {
+	if r == nil {
+		return
+	}
+	releaseDeviceBuffers(r.kCaches...)
+	releaseDeviceBuffers(r.vCaches...)
+	for i := range r.kCaches {
+		r.kCaches[i] = nil
+	}
+	for i := range r.vCaches {
+		r.vCaches[i] = nil
+	}
+	r.kCachePtrs, r.vCachePtrs = nil, nil
+	if q := r.kvQ8; q != nil {
+		releaseDeviceBuffers(q.kScales...)
+		releaseDeviceBuffers(q.vScales...)
+		for i := range q.kScales {
+			q.kScales[i] = nil
+		}
+		for i := range q.vScales {
+			q.vScales[i] = nil
+		}
+		r.releaseQ8Mirrors()
+	}
+}
+
 // archICBKVQ8 carries the per-layer q8 KV state threaded from the session
 // constructor (which owns the cache allocation) into the recorder and replay.
 type archICBKVQ8 struct {

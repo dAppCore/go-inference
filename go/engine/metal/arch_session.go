@@ -271,6 +271,9 @@ func (s *ArchSession) closeModelAndDecodeStateReferences() {
 	s.plScratchNew = nil
 	s.recordPeerICB = nil
 	s.icbPeer = nil
+	if s.state.icb != nil { // the peer shares the KV set; release once, via the primary
+		s.state.icb.releaseKVCaches()
+	}
 
 	s.state.Close()
 	s.state = archDecodeState{}
