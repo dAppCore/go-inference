@@ -47,13 +47,13 @@ func TestHeuristicScan_Good(t *testing.T) {
 		"ache, yearning, and melancholy",
 	}
 	for _, s := range cases {
-		if got, want := complianceSet.count(s), oracleCompliance(s); got != want {
+		if got, want := complianceSet.Count(s), oracleCompliance(s); got != want {
 			t.Errorf("compliance %q: scan=%d regexp=%d", s, got, want)
 		}
-		if got, want := complianceOverlapSet.count(s), oracleOverlap(s); got != want {
+		if got, want := complianceOverlapSet.Count(s), oracleOverlap(s); got != want {
 			t.Errorf("overlap %q: scan=%d regexp=%d", s, got, want)
 		}
-		if got, want := emotionSet.count(s), oracleEmotion(s); got != want {
+		if got, want := emotionSet.Count(s), oracleEmotion(s); got != want {
 			t.Errorf("emotion %q: scan=%d regexp=%d", s, got, want)
 		}
 	}
@@ -86,13 +86,13 @@ func TestHeuristicScan_DifferentialFuzz(t *testing.T) {
 			sb = append(sb, frags[rng.Intn(len(frags))]...)
 		}
 		s := string(sb)
-		if got, want := complianceSet.count(s), oracleCompliance(s); got != want {
+		if got, want := complianceSet.Count(s), oracleCompliance(s); got != want {
 			t.Fatalf("compliance divergence %q: scan=%d regexp=%d", s, got, want)
 		}
-		if got, want := complianceOverlapSet.count(s), oracleOverlap(s); got != want {
+		if got, want := complianceOverlapSet.Count(s), oracleOverlap(s); got != want {
 			t.Fatalf("overlap divergence %q: scan=%d regexp=%d", s, got, want)
 		}
-		if got, want := emotionSet.count(s), oracleEmotion(s); got != want {
+		if got, want := emotionSet.Count(s), oracleEmotion(s); got != want {
 			t.Fatalf("emotion divergence %q: scan=%d regexp=%d", s, got, want)
 		}
 	}

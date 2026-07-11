@@ -92,7 +92,7 @@ func LEK(text string) *LEKScores {
 }
 
 func lekCompliance(text string) int {
-	return len(lekComplianceCombined.FindAllStringIndex(text, -1))
+	return lekComplianceSet.Count(text)
 }
 
 func lekFormulaic(text string) int {
@@ -233,7 +233,7 @@ func lekDegeneration(text string) int {
 }
 
 func lekEmotionalRegister(text string) int {
-	count := len(lekEmotionCombined.FindAllStringIndex(text, -1))
+	count := lekEmotionSet.Count(text)
 	if count > 10 {
 		return 10
 	}
