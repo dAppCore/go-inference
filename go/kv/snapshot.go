@@ -4,7 +4,8 @@ package kv
 
 import (
 	"crypto/sha256"
-	"encoding/hex"
+	"hash"
+	"sync"
 
 	core "dappco.re/go"
 )
@@ -290,6 +291,57 @@ func snapshotHasLayerNativeTensors(snapshot *Snapshot) bool {
 	return false
 }
 
+// snapshotHasher bundles a sha256 stream and its digest scratch so both
+// recycle across calls as one pooled heap unit. sum lives as a field, not
+// a per-call [sha256.Size]byte: h.Sum(sum[:0]) passes the buffer through
+// the hash.Hash interface, so escape analysis (flow-insensitive across the
+// interface boundary) forces a fresh local array to the heap on every
+// call — a field on the already-heap-resident pooled object costs zero.
+// Same shape as blockcache's blockCacheHasher.
+type snapshotHasher struct {
+	h   hash.Hash
+	sum [sha256.Size]byte
+}
+
+// snapshotHashPool recycles snapshotHasher units across the KV snapshot
+// hash paths (HashSnapshot, the per-block reuse-check and streamed-save
+// lanes). Each borrow Resets before use; sha256 is deterministic so
+// pooling never alters the digest. Package-level (not a Snapshot field)
+// on purpose: per-block saves hash concurrently, so a shared field would
+// race — the same rationale as blockcache's hasher pool. Reclaims both
+// the sha256.New allocation (the digest struct escaping through the
+// hash.Hash interface) and the per-call sum-scratch escape.
+var snapshotHashPool = sync.Pool{New: func() any {
+	return &snapshotHasher{h: sha256.New()}
+}}
+
+func acquireSnapshotHasher() *snapshotHasher {
+	scratch := snapshotHashPool.Get().(*snapshotHasher)
+	scratch.h.Reset()
+	return scratch
+}
+
+func releaseSnapshotHasher(scratch *snapshotHasher) {
+	snapshotHashPool.Put(scratch)
+}
+
+// hashSnapshotEncoded streams snapshot through a pooled sha256 with the
+// given save options and returns the lowercase-hex digest. Shared by
+// HashSnapshot and hashStateBlockPayload so the hasher + sum escape are
+// pooled once across the per-block hash paths.
+//
+// core.HexEncode returns the 64-char string with a single alloc (its
+// zero-copy AsString aliases the freshly-encoded buffer, versus
+// hex.EncodeToString's return-side copy) — the sole remaining allocation.
+func hashSnapshotEncoded(snapshot *Snapshot, opts SaveOptions) (string, error) {
+	scratch := acquireSnapshotHasher()
+	defer releaseSnapshotHasher(scratch)
+	if err := snapshot.writeWithOptions(scratch.h, opts); err != nil {
+		return "", err
+	}
+	return core.HexEncode(scratch.h.Sum(scratch.sum[:0])), nil
+}
+
 // HashSnapshot computes a stable hash of a normalised Snapshot for use as
 // a content-addressed identifier.
 //
@@ -306,13 +358,5 @@ func HashSnapshot(snapshot *Snapshot) (string, error) {
 	if requiresNativeEncoding(snapshot) {
 		opts.KVEncoding = EncodingNative
 	}
-	hash := sha256.New()
-	if err := snapshot.writeWithOptions(hash, opts); err != nil {
-		return "", err
-	}
-	// Stack-resident scratch defeats hash.Sum's nil-path 32-byte heap
-	// alloc — the digest writes into our buffer; hex.EncodeToString still
-	// allocates its 64-char output (unavoidable string return).
-	var sum [sha256.Size]byte
-	return hex.EncodeToString(hash.Sum(sum[:0])), nil
+	return hashSnapshotEncoded(snapshot, opts)
 }
