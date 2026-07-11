@@ -1,4 +1,35 @@
-# NEXT WAKE (2026-07-15 session, later)
+# NEXT WAKE (2026-07-15 session close — the convergence campaign)
+
+**The folder-by-folder Opus convergence campaign ran all day** (snider's
+rule: single-folder passes, first defended zero retires a folder, wins
+re-queue). ~45 gated wins landed across 11 merge waves, dev pushed at every
+step. Headlines: kv/ multi-head wake was O(N^2) (hidden by heads=1
+fixtures; 16-block wake 39.6MB->4.2MB); both per-turn scorers were mostly
+regexp (ScoreHeuristic halved); ngram drafter 6.7x on the miss path (CPU
+axis, was 0-alloc); model.Sampler full-sorted the 256K vocab per token
+when top-k/p engaged (19.6x fixed — NOTE: metal serve lane samples
+engine-side, live A/B 136 tok/s both sides, so primitive-level not
+serve-headline); welfare Detect/Guard now 0-alloc/turn; ProjMatMulInto
+seam threads projection scratch through all hybrid forwards (race-proven
+ownership model); engine render loop 20->1 allocs same day it landed.
+FOLDER LEDGER — retired on defended zeros: serving/, safety/, jsonenc/,
+internal/, root pkg, train/, agent/, gguf/, merge/, state/filestore.
+Won-and-owing-a-pass: decode/ (4 straight), kv/, eval/, welfare/, engine
+root, safetensors/. Locked: engine/hip (codex, ~1 month). Mine:
+engine/metal. ALSO SHIPPED between waves: Qwen 3.6 model layer (42feca3 —
+gated attention is SIGMOID per reference, registry path via
+ArchSpec.Composed; remaining: serve wiring + fused-expert reshape at
+smoke + GPU kernels, see #379) and the chat-template lift (a9d20c2 —
+ChatTemplateDeclarer, gemma byte-identical fallback, ChatML proven via
+fake; qwen declaration is now a one-liner at serve wiring). Traps 8+9
+(Go 1.26 Sprintf already 1-alloc; option-closure collapse forces whole-
+struct escape) banked in lethean-perf. #378 outbound policy spec awaits
+the plans-repo write (a guardrail blocked it; snider ok'd moving on).
+#380 openai emittedContent O(N^2) still needs the live-model pass.
+Slur catalogue ships EMPTY (hostility axis does live triggering) —
+snider-curated population pending, note for release draft.
+
+# PREVIOUS WAKE (2026-07-15 session, later)
 
 **#376 shipped and receipted live.** The welfare guard was built-but-unwired
 (welfare.Guard/Mediate zero callers; the pipeline that wired Detect has zero
