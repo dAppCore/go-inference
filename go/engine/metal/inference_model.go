@@ -27,8 +27,28 @@ var (
 	_ engine.Trainer                 = (*LoRATrainer)(nil)
 	_ engine.CacheModeReporter       = (*NativeTokenModel)(nil)
 	_ engine.StopTokenDeclarer       = (*NativeTokenModel)(nil)
+	_ engine.ChatTemplateDeclarer    = (*NativeTokenModel)(nil)
 	_ engine.DecodePhaseTracer       = (*ArchSession)(nil)
 )
+
+// DeclaredChatTemplate declares this checkpoint's chat dialect
+// (engine.ChatTemplateDeclarer): the gemma turn template in the marker dialect
+// the loaded tokenizer carries (gemma4 <|turn> vs the gemma3-era
+// <start_of_turn>), pre-closing the empty thought channel when the large-variant
+// geometry needs it (NeedsThoughtChannelSuppressor). Declaring it — rather than
+// leaving engine.TextModel to detect — is the seam a second architecture will
+// self-report its own dialect through; today it hands back exactly what the
+// tokenizer-detected fallback would build, so gemma rendering is unchanged.
+func (m *NativeTokenModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
+	if m == nil {
+		return engine.ChatTemplate{}, false
+	}
+	tok := m.Tokenizer()
+	if tok == nil {
+		return engine.ChatTemplate{}, false
+	}
+	return engine.GemmaChatTemplate(engine.DetectTurnTokens(tok), m.NeedsThoughtChannelSuppressor()), true
+}
 
 // SupportedCacheModes reports the one KV cache mode this no-cgo engine runs: its
 // own built-in cache, selected automatically (engine.CacheModeReporter). It
