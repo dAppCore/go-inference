@@ -52,6 +52,13 @@ type TextModel struct {
 	lastErr     core.Result
 	lastMetrics inference.GenerateMetrics
 
+	// reuseSess is the stateless lane's resident prompt-cache session
+	// (prompt_reuse.go): one slot, guarded by reuseMu; reuseUnsupported
+	// parks the lane when the engine session lacks the capability.
+	reuseMu          sync.Mutex
+	reuseSess        PromptReuseSession
+	reuseUnsupported atomic.Bool
+
 	// chatIntercept is the serve-layer chat hook (conversation continuity,
 	// serving/continuity): Chat offers every text-only turn to it first and a
 	// false return falls through to the stateless path. Atomic because the
@@ -317,6 +324,19 @@ func (m *TextModel) stream(ctx context.Context, ids []int32, cfg inference.Gener
 		if len(ids) == 0 {
 			m.setErr(core.NewError("engine.TextModel.Generate: empty prompt after tokenisation"))
 			return
+		}
+		// Resident-session prompt cache (prompt_reuse.go): the shared prefix
+		// of the last request is reused in place, only the divergent suffix
+		// is prefilled. A failed cached prefill drops the resident session
+		// and the request falls through to the fresh-session path below.
+		if rs, release, ok := m.acquireReuseSession(); ok {
+			if _, err := rs.PrefillTokensCached(ids); err == nil {
+				m.decodeFromPrefilled(ctx, rs, len(ids), cfg, start, yield)
+				release()
+				return
+			}
+			m.dropReuseSession()
+			release()
 		}
 		sess, err := m.openSession()
 		if err != nil {
@@ -595,6 +615,7 @@ func (m *TextModel) Close() core.Result {
 	if m == nil || m.tm == nil {
 		return core.Ok(nil)
 	}
+	m.closeReuseSession()
 	if err := m.tm.Close(); err != nil {
 		return core.Fail(core.E("engine.TextModel.Close", "close token model", err))
 	}

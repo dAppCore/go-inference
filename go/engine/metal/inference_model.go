@@ -19,13 +19,15 @@ import (
 )
 
 var (
-	_ engine.TokenModel        = (*NativeTokenModel)(nil)
-	_ engine.Session           = (*ArchSession)(nil)
-	_ engine.TrainerModel      = (*NativeTokenModel)(nil)
-	_ engine.Trainer           = (*LoRATrainer)(nil)
-	_ engine.CacheModeReporter = (*NativeTokenModel)(nil)
-	_ engine.StopTokenDeclarer = (*NativeTokenModel)(nil)
-	_ engine.DecodePhaseTracer = (*ArchSession)(nil)
+	_ engine.TokenModel              = (*NativeTokenModel)(nil)
+	_ engine.PromptReuseCapableModel = (*NativeTokenModel)(nil)
+	_ engine.Session                 = (*ArchSession)(nil)
+	_ engine.PromptReuseSession      = (*ArchSession)(nil)
+	_ engine.TrainerModel            = (*NativeTokenModel)(nil)
+	_ engine.Trainer                 = (*LoRATrainer)(nil)
+	_ engine.CacheModeReporter       = (*NativeTokenModel)(nil)
+	_ engine.StopTokenDeclarer       = (*NativeTokenModel)(nil)
+	_ engine.DecodePhaseTracer       = (*ArchSession)(nil)
 )
 
 // SupportedCacheModes reports the one KV cache mode this no-cgo engine runs: its
@@ -55,6 +57,13 @@ func newNativeTextModel(tm *NativeTokenModel, modelType string) *engine.TextMode
 		QuantGroup:   tm.quantGroup,
 	}
 	return engine.NewTextModel(tm, tm.Tokenizer(), modelType, info, tm.maxLen)
+}
+
+// SessionsReusePrompts declares that this engine's ArchSession implements
+// engine.PromptReuseSession (PrefillTokensCached, session_prompt_reuse.go) —
+// the model-level probe behind the stateless lane's resident prompt cache.
+func (m *NativeTokenModel) SessionsReusePrompts() bool {
+	return true
 }
 
 // OpenEngineSession opens a fresh incremental decode session (empty KV cache) as
