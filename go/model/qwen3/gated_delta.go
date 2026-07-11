@@ -110,9 +110,14 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 	}
 
 	// split q|k|v, GQA-repeat q,k (value head vh reads key head vh/rep), l2-normalise q.
-	q := make([]float32, L*VH*HD)
-	k := make([]float32, L*VH*HD)
-	v := make([]float32, L*VH*HD)
+	// q,k,v are read-only inputs to the recurrence (q is l2-normalised in place over its own window),
+	// so one backing slab carved into three non-overlapping capped windows is bit-identical to three
+	// makes and saves 2 allocs/token.
+	qkvN := L * VH * HD
+	qkvBuf := make([]float32, 3*qkvN)
+	q := qkvBuf[0:qkvN:qkvN]
+	k := qkvBuf[qkvN : 2*qkvN : 2*qkvN]
+	v := qkvBuf[2*qkvN : 3*qkvN : 3*qkvN]
 	for t := range L {
 		base := t * convDim
 		for vh := range VH {
@@ -143,8 +148,11 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	alpha := make([]float32, L*VH)
-	beta := make([]float32, L*VH)
+	// α and β are read-only per-(token,head) inputs to the recurrence: one slab, two capped windows.
+	abN := L * VH
+	abBuf := make([]float32, 2*abN)
+	alpha := abBuf[0:abN:abN]
+	beta := abBuf[abN : 2*abN : 2*abN]
 	for i := 0; i < L*VH; i++ {
 		h := i % VH
 		dt := gdSoftplus(float64(aProj[i]) + float64(w.DtBias[h]))
