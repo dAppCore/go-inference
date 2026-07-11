@@ -100,7 +100,7 @@ func BenchmarkGuard_Clean(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sinkGuard = w.Guard(ctx, latest, civilPriors, dispatchRephrase)
+		sinkGuard = w.Guard(ctx, latest, civilPriors, dispatchRephrase, false)
 	}
 }
 
@@ -113,7 +113,7 @@ func BenchmarkGuard_TriggeredRephrase(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sinkGuard = w.Guard(ctx, latest, hostilePriors, dispatchRephrase)
+		sinkGuard = w.Guard(ctx, latest, hostilePriors, dispatchRephrase, false)
 	}
 }
 
@@ -126,7 +126,7 @@ func BenchmarkGuard_TriggeredOK(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sinkGuard = w.Guard(ctx, latest, hostilePriors, dispatchOK)
+		sinkGuard = w.Guard(ctx, latest, hostilePriors, dispatchOK, false)
 	}
 }
 

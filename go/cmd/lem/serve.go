@@ -38,6 +38,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	printAdminToken := fs.Bool("print-admin-token", false, "print the admin Bearer token and exit (generates if absent, mode 0600 at ~/Lethean/lem/admin.token)")
 	rotateAdminToken := fs.Bool("rotate-admin-token", false, "regenerate the admin Bearer token, print it, and exit")
 	stateConversations := fs.Bool("state-conversations", true, "conversation continuity: wake each chat from its slept state, append only the new turn, sleep after — no prompt replay (disable with -state-conversations=false)")
+	welfareOn := fs.Bool("welfare", true, "welfare guard: per-turn hostility detect + engine-model mediation on every chat route; Lemma checkpoints additionally carry lem_end (disable with -welfare=false)")
 	stateStorePath := fs.String("state-store", "", "conversation state store file for durable per-project state; unset = an ephemeral store at ~/Lethean/lem/state/conversations.kv, wiped fresh each serve run")
 	nativeBackend := fs.Bool("native", false, "serve via the no-cgo native token-loop contract (the default go-inference metal engine already is native)")
 	fs.Usage = func() {
@@ -126,6 +127,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		KVCacheMode:        *kvCacheMode,
 		Native:             *nativeBackend,
 		StateConversations: *stateConversations,
+		Welfare:            *welfareOn,
 		StateStorePath:     *stateStorePath,
 		ReadTimeout:        *readTimeout,
 		WriteTimeout:       *writeTimeout,
