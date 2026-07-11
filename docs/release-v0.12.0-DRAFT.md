@@ -160,24 +160,40 @@ does our own fallback composition). This release ships:
   own fixed key span once through threadgroup tiles instead of re-reading
   the window per query row. +4% prefill at every depth measured.
 
-Prefill, E2B class, against the field (tok/s at prompt depth):
+Prefill, E2B class, against the field (tok/s at prompt depth; same MLX
+snapshot for lem/oMLX/mlx-lm, llama.cpp on the google qat-q4_0 GGUF —
+quants reported, never hidden):
 
-| depth | lem | llama.cpp | mlx-lm |
-|---|---|---|---|
-| ~512 | 3,157¹ | 4,437 | — |
-| 8K | 3,157 | 3,776 | ~9,850 |
-| 32K | 2,769 | 2,412 | — |
-| 62K | 2,255 | — | — |
-| 118K | 1,656 | — | — |
+| depth | lem | llama.cpp | oMLX | mlx-lm |
+|---|---|---|---|---|
+| 8K | 3,147 | 4,002 | 6,696 | ~9,850² |
+| 32K | 2,769 | 2,412 | — | — |
+| 62K | 2,349 | — | — | — |
+| 118K | 1,656 | — | — | — |
 
-¹ measured at 8K; the shallow-depth column carries the same configuration.
+² mlx-lm prints 11,790 at this depth; ~9,850 is its honest-wall rate
+under our calibration. oMLX (the closest feature rival — continuous
+batching, tiered KV, OpenAI+Anthropic routes, menu-bar service — but a
+Python stack where lem is one contained binary) rides mlx-lm's kernels
+and lands 6,696 even through its HTTP serving path.
 
-Honest reading: mlx-lm leads cold ingest at shallow depth by ~3× — that
-gap is characterised in-repo (the whole-prompt dispatch structure) and is
-open work. Two things frame it: past ~30K *we* lead llama.cpp and the
-curve is flatter than both; and under `-state` serving, prefill is a cost
-paid once per conversation, while the per-turn economics above are paid
-by every engine on every turn — that trade is the design.
+Honest reading: the mlx stack leads cold ingest at shallow depth by
+2-3× — the gap is the whole-prompt dispatch structure, characterised
+in-repo, and it is the next prefill campaign. Three things frame it:
+past ~30K *we* lead llama.cpp and the curve is flatter than everyone
+measured; decode — the cost every turn pays — leads the whole field
+(see the board above); and under `-state` serving, prefill is paid once
+per conversation while replay engines re-pay it per turn — that trade
+is the design.
+
+**Concurrency, receipted**: two and four simultaneous conversations at
+shipping defaults complete with zero errors and zero cross-talk
+(nonce-tripwire tested — every reply carried its own conversation's
+marker, never another's), concurrent SSE streams stay well-formed, and
+requests genuinely interleave (1.7× overlap factor). A full OpenAI
+tool-calling round trip — `finish_reason: tool_calls`, arguments
+parsed, tool result consumed, coherent final answer — passes over the
+live serve.
 
 ## Sovereignty
 
