@@ -176,7 +176,7 @@ captured rows (#97).
 | `-model` | (required) | frozen base model path to self-distil |
 | `-data` | (required) | prompt JSONL (only prompts are read) |
 | `-kernel` | `""` | file holding the LEK-2 kernel prefix (rides as KV state, never captured) |
-| `-sample-max-tokens` | `256` | tokens per self-generated sample |
+| `-sample-max-tokens` | `2048` | tokens per self-generated sample (gemma4 thinks first — small budgets truncate mid-thought into empty samples) |
 | `-sample-temp` | `0.7` | sampling temperature (must be ≠ 1.0 — diversity is the point) |
 | `-sample-top-k` | `64` | sampling top-k |
 | `-sample-top-p` | `0.95` | sampling top-p |
