@@ -186,39 +186,34 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 	})
 
 	extractor := NewThinkingExtractor()
-	emittedContent := ""
-	inTool := false
+	// contentStreamer detects the tool-call open marker and boundary-spanning
+	// stop sequences over a bounded (maxMarkerLen-1)+delta rescan window instead
+	// of re-concatenating and re-scanning the whole accumulated reply each token
+	// — the old `candidate := emittedContent + contentDelta` was O(N^2) bytes over
+	// an N-token stream (#380). Each out.* branch below reproduces the prior
+	// per-token case; the differential fuzz in handler_stream_fuzz_test.go pins
+	// them byte-for-byte to that old path.
+	cs := newContentStreamer(stops)
 	finishReason := "stop"
 	for token := range model.Chat(r.Context(), messages, opts...) {
 		contentDelta, thoughtDelta := extractor.Process(token)
-		candidate := emittedContent + contentDelta
-		if inTool {
-			emittedContent = candidate // buffering the tool-call span, lifted below
-			continue
+		out := cs.step(contentDelta)
+		if out.swallow {
+			continue // inside a <|tool_call> span — buffered, lifted below
 		}
-		if idx := core.Index(candidate, parser.ToolCallOpenMarker); idx >= 0 {
-			inTool = true
-			if idx > len(emittedContent) {
+		if out.tool {
+			if out.visible != "" {
 				writeChunk(ChatCompletionChunk{
 					ID:      completionID,
 					Object:  "chat.completion.chunk",
 					Created: created,
 					Model:   req.Model,
-					Choices: []ChatChunkChoice{{Index: 0, Delta: ChatMessageDelta{Content: candidate[len(emittedContent):idx]}}},
+					Choices: []ChatChunkChoice{{Index: 0, Delta: ChatMessageDelta{Content: out.visible}}},
 				})
 			}
-			emittedContent = candidate
 			continue
 		}
-		stopCut, stopHit := firstStopSequenceCut(candidate, stops)
-		if stopHit {
-			if stopCut <= len(emittedContent) {
-				contentDelta = ""
-			} else {
-				contentDelta = candidate[len(emittedContent):stopCut]
-			}
-		}
-		if contentDelta != "" || thoughtDelta != "" {
+		if out.visible != "" || thoughtDelta != "" {
 			chunk := ChatCompletionChunk{
 				ID:      completionID,
 				Object:  "chat.completion.chunk",
@@ -226,7 +221,7 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 				Model:   req.Model,
 				Choices: []ChatChunkChoice{{
 					Index: 0,
-					Delta: ChatMessageDelta{Content: contentDelta},
+					Delta: ChatMessageDelta{Content: out.visible},
 				}},
 			}
 			if thoughtDelta != "" {
@@ -234,12 +229,12 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 			}
 			writeChunk(chunk)
 		}
-		if stopHit {
-			emittedContent = candidate[:stopCut]
+		if out.stop {
 			break
 		}
-		emittedContent = candidate
 	}
+	emittedContent := cs.emitted()
+	inTool := cs.inTool
 	visibleTail, thoughtTail := extractor.Flush()
 	if visibleTail != "" {
 		emittedContent += visibleTail
