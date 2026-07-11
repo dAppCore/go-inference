@@ -14,6 +14,7 @@ import (
 	"dappco.re/go/inference/engine/scheme"
 	"github.com/tmc/apple/kernel"
 	"github.com/tmc/apple/metal"
+	"github.com/tmc/apple/objc"
 )
 
 // This file assembles the attention half of a decode step on-device, in bf16
@@ -224,12 +225,7 @@ func withPinnedNoCopyBytes(b []byte, fn func(metal.MTLBuffer) error) error {
 		pinner.Unpin()
 		runtime.KeepAlive(b)
 	}()
-	buf := device.NewBufferWithBytesNoCopyLengthOptionsDeallocator(
-		unsafe.Pointer(&b[0]),
-		uint(len(b)),
-		metal.MTLResourceStorageModeShared,
-		func(kernel.Pointer, uint64) {},
-	)
+	buf := newNoCopyBuffer(unsafe.Pointer(&b[0]), uint(len(b)))
 	if buf == nil || buf.GetID() == 0 {
 		return core.NewError("native.withPinnedNoCopyBytes: failed to create no-copy Metal buffer")
 	}
@@ -241,12 +237,7 @@ func temporaryPinnedNoCopyBytes(b []byte, pinner *runtime.Pinner) (metal.MTLBuff
 		return nil, core.NewError("native.temporaryPinnedNoCopyBytes: empty byte slice")
 	}
 	pinner.Pin(&b[0])
-	buf := device.NewBufferWithBytesNoCopyLengthOptionsDeallocator(
-		unsafe.Pointer(&b[0]),
-		uint(len(b)),
-		metal.MTLResourceStorageModeShared,
-		func(kernel.Pointer, uint64) {},
-	)
+	buf := newNoCopyBuffer(unsafe.Pointer(&b[0]), uint(len(b)))
 	if buf == nil || buf.GetID() == 0 {
 		pinner.Unpin()
 		return nil, core.NewError("native.temporaryPinnedNoCopyBytes: failed to create no-copy Metal buffer")
@@ -325,12 +316,7 @@ func newPinnedNoCopyBytes(n int) (*pinnedNoCopyBytes, error) {
 	if pinner == nil {
 		return nil, core.NewError("native.newPinnedNoCopyBytes: failed to pin backing bytes")
 	}
-	buf := device.NewBufferWithBytesNoCopyLengthOptionsDeallocator(
-		unsafe.Pointer(&b[0]),
-		uint(len(b)),
-		metal.MTLResourceStorageModeShared,
-		func(kernel.Pointer, uint64) {},
-	)
+	buf := newNoCopyBuffer(unsafe.Pointer(&b[0]), uint(len(b)))
 	if buf == nil || buf.GetID() == 0 {
 		pinner.Unpin()
 		return nil, core.NewError("native.newPinnedNoCopyBytes: failed to create no-copy Metal buffer")
@@ -403,9 +389,44 @@ type residentBuf struct {
 	noCopy bool
 }
 
+// closeResidentBuf unpins WITHOUT releasing the buffer: resetResidentBufsForTest
+// evicts between loads while earlier fixtures' sessions can still be live and
+// bound to cache entries — releasing here dangled them (wrong tokens, then a
+// SIGSEGV in setBuf). The owner-scoped release lives in
+// evictResidentBufsForRanges, where the closing session's contract guarantees
+// no further use.
 func closeResidentBuf(r residentBuf) {
 	if r.pinner != nil {
 		r.pinner.Unpin()
+	}
+}
+
+// releaseResidentBuf drops the objc-"new" +1 reference. Nothing else ever
+// releases these buffers, and the copied (non-page-aligned) weight uploads are
+// ~10 GB of IOAccelerator-dirty memory per bf16 e2b load — evicting only the
+// map entry leaked the device memory and drove the full test sweep past 50 GB
+// (vmmap receipt in the commit). Call ONLY when the owning session is closed:
+// ICBs do not retain bound resources, so this reference is the last.
+func releaseResidentBuf(r residentBuf) {
+	releaseDeviceBuffer(r.buf)
+}
+
+// releaseDeviceBuffer drops a device-owned buffer's objc-"new" +1 reference —
+// the one idiom for returning IOAccelerator memory (nothing else releases;
+// see releaseResidentBuf). The caller owns the proof that no encoder, ICB
+// replay or cached view still reaches the buffer.
+func releaseDeviceBuffer(buf metal.MTLBuffer) {
+	if rel, ok := buf.(interface{ Release() }); ok && buf.GetID() != 0 {
+		rel.Release()
+	}
+}
+
+// releaseDeviceBuffers releases each handle (nil-safe) — the grow-realloc and
+// teardown sites for GPU-only scratch slabs, where dropping the old handle
+// leaked the +1 retained allocation.
+func releaseDeviceBuffers(bufs ...metal.MTLBuffer) {
+	for _, b := range bufs {
+		releaseDeviceBuffer(b)
 	}
 }
 
@@ -430,6 +451,7 @@ func evictResidentBufsForRanges(bases, ends []uintptr) {
 			continue
 		}
 		closeResidentBuf(r)
+		releaseResidentBuf(r)
 		delete(residentBufs, key)
 	}
 }
@@ -465,6 +487,30 @@ func residentBytes(b []byte) metal.MTLBuffer {
 	return buf
 }
 
+// noopResidentDealloc is the single, process-lifetime deallocator block shared by
+// every no-copy resident buffer. The bytes are owned by our own runtime.Pinner
+// (unpinned on residentBufs eviction — closeResidentBuf), so Metal must never free
+// them: the deallocator is a no-op. Materialising an ObjC block from a Go closure
+// costs a reflect.MakeFunc + a retained purego callback, and the tmc/apple binding
+// does that per NewBuffer call — it profiled as ~13% of hot-path alloc_objects, one
+// MakeFunc per buffer all wrapping this same empty closure. We build it ONCE and
+// name it directly. It is deliberately never Released: the +1 from NewBlock keeps it
+// alive for every buffer that references it, so — unlike the binding — we do NOT
+// associate it per buffer (association would free it when any one buffer deallocs).
+var noopResidentDealloc = objc.NewBlock(func(objc.Block, kernel.Pointer, uint64) {})
+
+// newNoCopyBuffer wraps [ptr, ptr+length) as a no-copy Metal buffer with the shared
+// no-op deallocator above, via a direct msgSend — replacing the tmc/apple binding's
+// per-call objc.NewBlock(closure) (a reflect.MakeFunc + a retained purego callback on
+// every call). GetID()==0 on failure. Every no-copy site owns its bytes' lifetime
+// elsewhere (a runtime.Pinner, or the mmap's Close), so the shared no-op deallocator
+// is correct for all of them.
+func newNoCopyBuffer(ptr unsafe.Pointer, length uint) metal.MTLBuffer {
+	return metal.MTLBufferObjectFromID(objc.Send[objc.ID](device.ID,
+		objc.Sel("newBufferWithBytesNoCopy:length:options:deallocator:"),
+		ptr, length, metal.MTLResourceStorageModeShared, objc.ID(noopResidentDealloc)))
+}
+
 func residentNoCopyBytes(b []byte) (metal.MTLBuffer, *runtime.Pinner, bool) {
 	if isMappedShardBytes(b) {
 		return sharedBytes(b), nil, false
@@ -473,13 +519,8 @@ func residentNoCopyBytes(b []byte) (metal.MTLBuffer, *runtime.Pinner, bool) {
 	if pinner == nil {
 		return sharedBytes(b), nil, false
 	}
-	buf := device.NewBufferWithBytesNoCopyLengthOptionsDeallocator(
-		unsafe.Pointer(&b[0]),
-		uint(len(b)),
-		metal.MTLResourceStorageModeShared,
-		func(kernel.Pointer, uint64) {},
-	)
-	if buf == nil || buf.GetID() == 0 {
+	buf := newNoCopyBuffer(unsafe.Pointer(&b[0]), uint(len(b)))
+	if buf.GetID() == 0 {
 		if pinner != nil {
 			pinner.Unpin()
 		}
@@ -788,7 +829,7 @@ func encSDPAStrided(enc metal.MTLComputeCommandEncoder, q, k, v, out metal.MTLBu
 // writes. Token-identical to encSDPAStrided (sdpa_2pass_test.go), differing only in how
 // the reduction parallelises — so it keeps scaling where the single-pass kernel stalls.
 func encSDPA2PassStrided(enc metal.MTLComputeCommandEncoder, q, k, v, out, partials, sums, maxs metal.MTLBuffer, nHeads, nKVHeads, headDim, n int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32, kvByteOff uint) error {
-	blocks := sdpa2PassBlocks(n)
+	blocks := sdpa2PassBlocks(n, nKVHeads)
 	pso1, err := sdpaVector2Pass1PipelineForHeadDim(headDim, blocks)
 	if err != nil {
 		return err
@@ -819,7 +860,7 @@ func encSDPADecode(enc metal.MTLComputeCommandEncoder, sc attnScratch, q, k, v, 
 // exactly as they did on the shared single-row scratch).
 func encSDPADecodeAt(enc metal.MTLComputeCommandEncoder, sc attnScratch, q metal.MTLBuffer, qOff uint, k, v, out metal.MTLBuffer, outOff uint, nHeads, nKVHeads, headDim, n int, kHeadStride, kSeqStride, vHeadStride, vSeqStride int64, scale float32, kvByteOff uint) error {
 	if n >= sdpa2PassMinKV && sc.p2Partials != nil && !sdpa2PassDisabledForTest {
-		blocks := sdpa2PassBlocks(n)
+		blocks := sdpa2PassBlocks(n, nKVHeads)
 		pso1, err := sdpaVector2Pass1PipelineForHeadDim(headDim, blocks)
 		if err != nil {
 			return err

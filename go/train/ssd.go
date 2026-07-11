@@ -94,6 +94,13 @@ type SSDRecipe struct {
 type SSDRunner struct {
 	// Generate samples one response for a prompt under the given config.
 	Generate func(context.Context, string, inference.GenerateConfig) (string, error)
+	// FormatPrompt frames a bare prompt for GENERATION — an instruct base needs
+	// its own turn template around the prompt (raw completion of a
+	// complete-sounding utterance samples end-of-turn immediately and the trace
+	// comes back empty). The captured rows keep the BARE prompt regardless; the
+	// kernel prefix rides BEFORE the framed prompt (kernel, then turn
+	// structure). Optional — nil feeds the prompt raw.
+	FormatPrompt func(string) string
 	// WarmPrefix prefills the engine's exact token-prefix cache with the
 	// kernel ONCE, so every sample's generation reuses the kernel's KV state
 	// instead of recomputing it. Optional — without it the kernel lane is
@@ -323,10 +330,14 @@ func buildSSDSamples(ctx context.Context, runner SSDRunner, ds inference.Dataset
 		}
 		// The kernel rides the GENERATION prompt only — verbatim prefix,
 		// reused from the warmed KV state. The bare prompt is what the capture
-		// + scorer read.
+		// + scorer read; the turn framing (FormatPrompt) sits between kernel
+		// and prompt so the kernel stays standing KV state ahead of the turns.
 		generationPrompt := prompt
+		if runner.FormatPrompt != nil {
+			generationPrompt = runner.FormatPrompt(prompt)
+		}
 		if cfg.KernelPrefix != "" {
-			generationPrompt = cfg.KernelPrefix + prompt
+			generationPrompt = cfg.KernelPrefix + generationPrompt
 		}
 		response, err := runner.Generate(ctx, generationPrompt, genCfg)
 		if err != nil {

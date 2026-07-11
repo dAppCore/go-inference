@@ -1,4 +1,4 @@
-From 9f61739eeddcaef733ad50a31ba410cab7789fb3 Mon Sep 17 00:00:00 2001
+From c83166756d50623861cedcd496f9e71613c07adf Mon Sep 17 00:00:00 2001
 From: Snider <snider@host.uk.com>
 Date: Tue, 16 Jun 2026 17:59:40 +0100
 Subject: [PATCH 05/10] =?UTF-8?q?lthn(perf):=20decode=20replay=20primitive?=
@@ -17,10 +17,10 @@ Co-Authored-By: Virgil <virgil@lethean.io>
  2 files changed, 64 insertions(+), 1 deletion(-)
 
 diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
-index a45fc5c1..f298d234 100644
+index d7aee12c..a801e541 100644
 --- a/mlx/backend/metal/device.cpp
 +++ b/mlx/backend/metal/device.cpp
-@@ -318,6 +318,7 @@ struct LthnRecCmd {
+@@ -361,6 +361,7 @@ struct LthnRecCmd {
    MTL::Size grid{0, 0, 0};
    MTL::Size group{0, 0, 0};
    bool threadgroups = false;
@@ -28,7 +28,7 @@ index a45fc5c1..f298d234 100644
  };
  inline bool lthn_capture_env() {
    static const bool on = [] {
-@@ -336,9 +337,16 @@ inline void lthn_rec_flush_cur() {
+@@ -379,9 +380,16 @@ inline void lthn_rec_flush_cur() {
      lthn_rec_cur_open = false;
    }
  }
@@ -46,7 +46,7 @@ index a45fc5c1..f298d234 100644
  void lthn_decode_rec_pipeline(MTL::ComputePipelineState* kernel) {
    lthn_rec_flush_cur(); // a new pipeline-set begins a new command
    lthn_rec_cur.pipeline = kernel;
-@@ -358,6 +366,47 @@ void lthn_decode_rec_tgmem(size_t length, int idx) {
+@@ -401,6 +409,47 @@ void lthn_decode_rec_tgmem(size_t length, int idx) {
    lthn_rec_cur.tgmem.emplace_back(length, idx);
  }
  
@@ -94,17 +94,17 @@ index a45fc5c1..f298d234 100644
  void CommandEncoder::set_buffer(
      const MTL::Buffer* buf,
      int idx,
-@@ -424,6 +473,9 @@ void CommandEncoder::maybeInsertBarrier() {
-   if (needs_barrier_) {
+@@ -471,6 +520,9 @@ void CommandEncoder::maybeInsertBarrier() {
      get_command_encoder()->memoryBarrier(MTL::BarrierScopeBuffers);
      needs_barrier_ = false;
+     prev_inputs_ = std::move(next_inputs_);
 +    if (lthn_capture_env()) {
 +      lthn_pending_barrier = true;
 +    }
      prev_outputs_ = std::move(next_outputs_);
    } else {
-     prev_outputs_.insert(next_outputs_.begin(), next_outputs_.end());
-@@ -440,6 +492,8 @@ void CommandEncoder::dispatch_threadgroups(
+     prev_inputs_.insert(next_inputs_.begin(), next_inputs_.end());
+@@ -489,6 +541,8 @@ void CommandEncoder::dispatch_threadgroups(
      lthn_rec_cur.grid = grid_dims;
      lthn_rec_cur.group = group_dims;
      lthn_rec_cur.threadgroups = true;
@@ -113,7 +113,7 @@ index a45fc5c1..f298d234 100644
      lthn_rec_flush_cur();
    }
    get_command_encoder()->dispatchThreadgroups(grid_dims, group_dims);
-@@ -454,6 +508,8 @@ void CommandEncoder::dispatch_threads(
+@@ -503,6 +557,8 @@ void CommandEncoder::dispatch_threads(
      lthn_rec_cur.grid = grid_dims;
      lthn_rec_cur.group = group_dims;
      lthn_rec_cur.threadgroups = false;
@@ -123,10 +123,10 @@ index a45fc5c1..f298d234 100644
    }
    get_command_encoder()->dispatchThreads(grid_dims, group_dims);
 diff --git a/mlx/backend/metal/device.h b/mlx/backend/metal/device.h
-index 2f2a8136..a77674ae 100644
+index ba482eb2..34c797fe 100644
 --- a/mlx/backend/metal/device.h
 +++ b/mlx/backend/metal/device.h
-@@ -27,6 +27,8 @@ bool lthn_decode_recording();
+@@ -28,6 +28,8 @@ bool lthn_decode_recording();
  void lthn_decode_rec_pipeline(MTL::ComputePipelineState* kernel);
  void lthn_decode_rec_bytes(const void* data, size_t nbytes, int idx);
  void lthn_decode_rec_tgmem(size_t length, int idx);
@@ -134,8 +134,8 @@ index 2f2a8136..a77674ae 100644
 +void lthn_decode_replay(MTL::ComputeCommandEncoder* raw);
  
  class Device;
- 
-@@ -125,6 +127,11 @@ class MLX_API CommandEncoder {
+ class EventImpl;
+@@ -126,6 +128,11 @@ class MLX_API CommandEncoder {
    MTL::CommandBuffer* get_command_buffer() const {
      return buffer_.get();
    }

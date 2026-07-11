@@ -9,7 +9,9 @@ import (
 	"time"
 
 	core "dappco.re/go"
+	native "dappco.re/go/inference/engine/metal"
 	"dappco.re/go/inference/serving"
+	"dappco.re/go/inference/serving/continuity"
 )
 
 // runServeCommand parses the serve flags and hands them to serving.RunServe.
@@ -117,6 +119,8 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		DraftPath:          *draftPath,
 		DraftDetect:        *draftDetect,
 		DraftBlock:         *draftBlock,
+		SpeculativeLoader:  native.LoadSpeculativePair,
+		EnableContinuity:   continuity.Enable,
 		NoAutoProfile:      *noAutoProfile,
 		ProfileDir:         *profileDir,
 		KVCacheMode:        *kvCacheMode,

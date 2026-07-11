@@ -126,16 +126,38 @@ func gpuHasMulRowsKernel() bool {
 	return err == nil && pso != nil && pso.GetID() != 0
 }
 
-// encMulRowsBF16 encodes out row r = a row r · b — ONE b row of rowLen broadcast across `rows`
-// contiguous a rows — in one dispatch: the batched pass's per-layer output scalar applied to all
-// K rows at once. Per-element float math identical to `rows` per-row vv_mul dispatches.
-func encMulRowsBF16(enc metal.MTLComputeCommandEncoder, a, b, out metal.MTLBuffer, aOff, bOff, outOff uint, rows, rowLen int) error {
-	pso, err := mulRowsPipeline()
-	if err != nil {
-		return err
-	}
+var (
+	mulRowsICBPSOOnce sync.Once
+	mulRowsICBPSO     metal.MTLComputePipelineState
+	mulRowsICBPSOErr  error
+)
+
+// mulRowsPipelineICB is mulRowsPipeline with supportIndirectCommandBuffers set —
+// the variant the MTP verify-tail ICB records.
+func mulRowsPipelineICB() (metal.MTLComputePipelineState, error) {
+	mulRowsICBPSOOnce.Do(func() {
+		if customLibrary == nil || customLibrary.GetID() == 0 {
+			mulRowsICBPSOErr = core.NewError("native.mulRowsPipelineICB: custom library unavailable")
+			return
+		}
+		fn := customLibrary.NewFunctionWithName("lthn_mul_rows_bf16")
+		if fn == nil || fn.GetID() == 0 {
+			mulRowsICBPSOErr = core.NewError("native.mulRowsPipelineICB: kernel lthn_mul_rows_bf16 not found")
+			return
+		}
+		desc := metal.NewMTLComputePipelineDescriptor()
+		desc.SetComputeFunction(fn)
+		desc.SetSupportIndirectCommandBuffers(true)
+		mulRowsICBPSO, mulRowsICBPSOErr = device.NewComputePipelineStateWithDescriptorOptionsReflectionError(desc, 0, nil)
+	})
+	return mulRowsICBPSO, mulRowsICBPSOErr
+}
+
+// emitMulRows records the broadcast rows-multiply through any sink — binding ABI
+// a=0, b=1, out=2, n=3, rowLen=4 over n threads. One body behind encMulRowsBF16
+// (live) and the verify-tail ICB recorder; pso caller-provided (ICB variant).
+func emitMulRows[S dispatchSink](sink S, pso metal.MTLComputePipelineState, a, b, out metal.MTLBuffer, aOff, bOff, outOff uint, rows, rowLen int) {
 	n := rows * rowLen
-	sink := encSink{enc}
 	sink.setPSO(pso)
 	sink.setBuf(a, aOff, 0)
 	sink.setBuf(b, bOff, 1)
@@ -146,6 +168,17 @@ func encMulRowsBF16(enc metal.MTLComputeCommandEncoder, a, b, out metal.MTLBuffe
 		metal.MTLSize{Width: uint(n), Height: 1, Depth: 1},
 		metal.MTLSize{Width: uint(elemGroupTG(n)), Height: 1, Depth: 1},
 	)
+}
+
+// encMulRowsBF16 encodes out row r = a row r · b — ONE b row of rowLen broadcast across `rows`
+// contiguous a rows — in one dispatch: the batched pass's per-layer output scalar applied to all
+// K rows at once. Per-element float math identical to `rows` per-row vv_mul dispatches.
+func encMulRowsBF16(enc metal.MTLComputeCommandEncoder, a, b, out metal.MTLBuffer, aOff, bOff, outOff uint, rows, rowLen int) error {
+	pso, err := mulRowsPipeline()
+	if err != nil {
+		return err
+	}
+	emitMulRows(encSink{enc}, pso, a, b, out, aOff, bOff, outOff, rows, rowLen)
 	return nil
 }
 
@@ -1002,6 +1035,18 @@ func encBF16LogitsArgmaxTilesBF16(
 	logits, tileValues, tileIndices, suppress metal.MTLBuffer,
 	vocab, suppressCount int,
 ) error {
+	return encBF16LogitsArgmaxTilesBF16At(enc, logits, tileValues, tileIndices, suppress, 0, 0, 0, vocab, suppressCount)
+}
+
+// encBF16LogitsArgmaxTilesBF16At is encBF16LogitsArgmaxTilesBF16 with byte
+// offsets into the logits/tile buffers — the K-row quant head argmaxes each
+// row's slice of the shared logits + tile scratch in one command buffer.
+func encBF16LogitsArgmaxTilesBF16At(
+	enc metal.MTLComputeCommandEncoder,
+	logits, tileValues, tileIndices, suppress metal.MTLBuffer,
+	logitsOff, valOff, idxOff uint,
+	vocab, suppressCount int,
+) error {
 	if vocab <= 0 {
 		return core.NewError("native.encBF16LogitsArgmaxTilesBF16: invalid logits geometry")
 	}
@@ -1011,9 +1056,9 @@ func encBF16LogitsArgmaxTilesBF16(
 	}
 	tileCount := (vocab + bf16LogitsArgmaxRowsPerTile - 1) / bf16LogitsArgmaxRowsPerTile
 	setPSO(enc, pso)
-	setBuf(enc, logits, 0, 0)
-	setBuf(enc, tileValues, 0, 1)
-	setBuf(enc, tileIndices, 0, 2)
+	setBuf(enc, logits, logitsOff, 0)
+	setBuf(enc, tileValues, valOff, 1)
+	setBuf(enc, tileIndices, idxOff, 2)
 	setEncInt32(enc, int32(vocab), 3)
 	if suppress == nil {
 		suppress = logits

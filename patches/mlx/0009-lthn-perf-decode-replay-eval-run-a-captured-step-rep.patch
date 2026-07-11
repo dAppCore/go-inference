@@ -1,4 +1,4 @@
-From 12312ac990d34e6f83fb2a9ba272d0f64fbb97aa Mon Sep 17 00:00:00 2001
+From 2fb515da51c89df43fc5c08e98cd98f823511dbc Mon Sep 17 00:00:00 2001
 From: Snider <snider@host.uk.com>
 Date: Tue, 16 Jun 2026 18:39:56 +0100
 Subject: [PATCH 09/10] =?UTF-8?q?lthn(perf):=20decode=20replay-eval=20?=
@@ -18,10 +18,10 @@ Co-Authored-By: Virgil <virgil@lethean.io>
  2 files changed, 39 insertions(+)
 
 diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
-index 3e33c650..c9447bce 100644
+index 8360b2cb..6549ab8f 100644
 --- a/mlx/backend/metal/device.cpp
 +++ b/mlx/backend/metal/device.cpp
-@@ -428,6 +428,44 @@ size_t lthn_decode_step_end() {
+@@ -471,6 +471,44 @@ size_t lthn_decode_step_end() {
    return lthn_step_program.size();
  }
  
@@ -67,17 +67,17 @@ index 3e33c650..c9447bce 100644
      const MTL::Buffer* buf,
      int idx,
 diff --git a/mlx/backend/metal/device.h b/mlx/backend/metal/device.h
-index 23350c84..c0ed074d 100644
+index fc8f181f..73a4cec0 100644
 --- a/mlx/backend/metal/device.h
 +++ b/mlx/backend/metal/device.h
-@@ -33,6 +33,7 @@ void lthn_decode_pin_begin();
+@@ -34,6 +34,7 @@ void lthn_decode_pin_begin();
  void lthn_decode_pin_release();
  void lthn_decode_step_begin();
  size_t lthn_decode_step_end();
 +void lthn_decode_replay_step(Stream s);
  
  class Device;
- 
+ class EventImpl;
 -- 
 2.50.1 (Apple Git-155)
 

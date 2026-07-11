@@ -25,6 +25,13 @@ import (
 // ArchSession. Zero-copy: the weights view the shard mmap, held on the session via shardBuffers for
 // its life (Close unmaps).
 func LoadDir(dir string, maxLen int) (*ArchSession, error) {
+	usedDefaultContext := maxLen <= 0
+	if usedDefaultContext {
+		// The loader owns the context default (checkpoint window, capped) — the
+		// speculative pair serve passes an unset -context straight through here
+		// and NewArch*Session rejects 0 (the post-601ac4e pair-serve break).
+		maxLen = resolveDefaultContext(model.ProbeDirContextWindow(dir))
+	}
 	lm, dm, err := loadRegistered(dir)
 	if err != nil {
 		return nil, err
@@ -33,6 +40,9 @@ func LoadDir(dir string, maxLen int) (*ArchSession, error) {
 	if err != nil {
 		_ = dm.Close()
 		return nil, err
+	}
+	if usedDefaultContext { // exact geometry + weight bytes in hand: fit the default to the box
+		maxLen = clampDefaultContextToRAM(maxLen, lm.Arch, sb)
 	}
 	var sess *ArchSession
 	if quantised(lm) {
@@ -70,13 +80,42 @@ func LoadTokenModelDir(dir string, maxLen int) (model.TokenModel, error) {
 	return LoadTokenModelDirWithConfig(dir, maxLen, TokenModelLoadConfig{})
 }
 
+// defaultContextCap bounds the checkpoint-window context default at 256K —
+// the #367 target stance (MTP + q8 + 256K as THE default). The first 256K
+// attempt swapped a 96GB box (31B all-defaults, 64.9GB footprint) and was
+// pulled back to 128K the same day; the three gremlins behind it are fixed —
+// the duplicate lb KV set (13ffe18), the batch-scratch slab leaks (14fa6aa)
+// and the missing RAM budget (fad5212: clampContextToRAM now fits an unset
+// -context to the box, so smaller machines land below this cap naturally).
+// An explicit -context overrides in both directions.
+const defaultContextCap = 262144
+
+// resolveDefaultContext maps an unset context length to the checkpoint
+// window capped at defaultContextCap, keeping the old 4096 floor when the
+// config declares no window.
+func resolveDefaultContext(window int) int {
+	if window <= 0 {
+		return 4096
+	}
+	return min(window, defaultContextCap)
+}
+
 func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadConfig) (model.TokenModel, error) {
 	if loadCfg.PagedKVPageSize < 0 {
 		return nil, core.NewError("native.LoadTokenModelDir: paged KV page size must be >= 0")
 	}
+	usedDefaultContext := maxLen <= 0
+	if usedDefaultContext {
+		// Serve/generate without -context used to cap every session at 4096 —
+		// the resident-conversation killer (#370's book bench died mid-book).
+		// Default to the checkpoint's trained window instead, capped.
+		maxLen = resolveDefaultContext(model.ProbeDirContextWindow(dir))
+	}
 	// SSM / hybrid families don't fit the reactive transformer Assemble — route them to their own loader
 	// before the registered path. mamba2 is a standalone recurrent SSM; qwen3_5/3.6 is a config-composed
 	// hybrid (linear_attention gated-delta + full attention) built by the composed loader.
+	// (They keep the plain window-capped default: their state geometry isn't the
+	// transformer KV plan the RAM-aware clamp below budgets.)
 	if mt, cfg, perr := model.ProbeDirArch(dir); perr == nil {
 		switch mt {
 		case "mamba2":
@@ -93,6 +132,9 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	if err != nil {
 		_ = dm.Close()
 		return nil, err
+	}
+	if usedDefaultContext { // exact geometry + weight bytes in hand: fit the default to the box
+		maxLen = clampDefaultContextToRAM(maxLen, lm.Arch, sb)
 	}
 	arch := lm.Arch
 	backendOpts := nativeTokenModelBackendOptions(loadCfg)

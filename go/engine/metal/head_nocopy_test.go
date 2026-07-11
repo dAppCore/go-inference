@@ -1239,3 +1239,69 @@ func TestHeadEncoderBF16GreedySuppressesIDs(t *testing.T) {
 		t.Fatalf("headEncoder suppressed direct bf16 greedy = %d, want full-logits suppressed greedy %d", got, want)
 	}
 }
+
+// TestGreedyRowsQuantFusedMatchesPerRow gates the quant K-row fused greedy
+// head (#359 rows-head): one qmm_t weight pass + per-row logits argmax must
+// pick the same tokens as the per-row lane (K full qmv sweeps + argmax) on a
+// synthetic 4-bit head. qmv and qmm_t accumulate in different orders, so the
+// gate is token equality over well-separated random logits — the same
+// token-identity tier the MTP verify fold already runs on.
+func TestGreedyRowsQuantFusedMatchesPerRow(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const dModel, vocab, gs, bits, k = 64, 512, 64, 4, 5
+	groups := dModel / gs
+	packed := make([]byte, vocab*dModel/2)
+	rnd := syntheticFloat32(len(packed), 401)
+	for i := range packed {
+		packed[i] = byte(int(rnd[i]*127+128) & 0xFF)
+	}
+	scales := toBF16Bytes(syntheticFloat32(vocab*groups, 403))
+	biases := toBF16Bytes(syntheticFloat32(vocab*groups, 407))
+	normW := toBF16Bytes(syntheticFloat32(dModel, 409))
+
+	h, err := newHeadEncoder(nil, normW, packed, scales, biases, dModel, vocab, gs, bits, 1e-6, 0, true)
+	if err != nil || h == nil {
+		t.Fatalf("newHeadEncoder: h=%v err=%v", h, err)
+	}
+	rows := toBF16Bytes(syntheticFloat32(k*dModel, 411))
+	rowsBuf := sharedBytes(rows)
+	if rowsBuf == nil {
+		t.Fatal("rowsBuf alloc failed")
+	}
+
+	want := make([]int32, k)
+	for i := range k {
+		tok, ok, gerr := h.greedyBufferAtInPool(rowsBuf, uint(i*dModel*bf16Size), nil)
+		if gerr != nil || !ok {
+			t.Fatalf("per-row greedy %d: ok=%v err=%v", i, ok, gerr)
+		}
+		want[i] = tok
+	}
+
+	got := make([]int32, k)
+	handled, err := h.greedyRowsQuantFusedInPool(rowsBuf, k, got)
+	if err != nil {
+		t.Fatalf("greedyRowsQuantFusedInPool: %v", err)
+	}
+	if !handled {
+		t.Fatal("greedyRowsQuantFusedInPool declined — qmm pipeline or scratch unavailable")
+	}
+	for i := range k {
+		if got[i] != want[i] {
+			t.Fatalf("row %d: fused quant head token = %d, per-row lane = %d", i, got[i], want[i])
+		}
+	}
+
+	// the public entry must route the quant fused path for this geometry.
+	viaEntry := make([]int32, k)
+	ok, err := h.greedyRowsBufferInPool(rowsBuf, uint(dModel*bf16Size), k, nil, viaEntry)
+	if err != nil || !ok {
+		t.Fatalf("greedyRowsBufferInPool: ok=%v err=%v", ok, err)
+	}
+	for i := range k {
+		if viaEntry[i] != want[i] {
+			t.Fatalf("row %d: greedyRowsBufferInPool token = %d, per-row lane = %d", i, viaEntry[i], want[i])
+		}
+	}
+}

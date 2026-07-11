@@ -7,7 +7,6 @@ package native
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"github.com/tmc/apple/metal"
 )
 
 // DecodeForwardArchQuant is the 4-bit arch-driven decode forward: DecodeForwardArch
@@ -344,8 +343,9 @@ func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLay
 			if setup != nil {
 				lb[li].kCache, lb[li].vCache, lb[li].kCachePtr, lb[li].vCachePtr = setup.kvCache(li, cacheBytes)
 			} else {
-				lb[li].kCache = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
-				lb[li].vCache = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
+				// deferred like the bf16 build: session KV allocates lazily on first
+				// lane touch (ensureLBKVCaches) — recorded-ICB sessions never take one.
+				lb[li].kvCacheBytes = cacheBytes
 			}
 		}
 		lFF := dFF // per-layer FFN width (gemma4 E2B/E4B vary it); 0 ⇒ arch default

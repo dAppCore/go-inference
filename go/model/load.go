@@ -98,6 +98,29 @@ func ProbeDirArch(dir string) (modelType string, configJSON []byte, err error) {
 	return mt, []byte(cfgStr), nil
 }
 
+// ProbeDirContextWindow reads dir's config.json and returns the checkpoint's
+// trained context window — the LARGER of the top-level and nested
+// text_config max_position_embeddings (multimodal wrappers put the real
+// window on the text config; the gemma4 parser applies the same
+// prefer-the-larger rule). 0 when the config is unreadable or carries
+// neither, so callers keep their own floor.
+func ProbeDirContextWindow(dir string) int {
+	cfgStr, err := coreio.Local.Read(core.PathJoin(dir, "config.json"))
+	if err != nil {
+		return 0
+	}
+	var probe struct {
+		MaxPositionEmbeddings int `json:"max_position_embeddings"`
+		TextConfig            struct {
+			MaxPositionEmbeddings int `json:"max_position_embeddings"`
+		} `json:"text_config"`
+	}
+	if r := core.JSONUnmarshal([]byte(cfgStr), &probe); !r.OK {
+		return 0
+	}
+	return max(probe.MaxPositionEmbeddings, probe.TextConfig.MaxPositionEmbeddings)
+}
+
 // ProbeModelTypes returns config.json's top-level model_type and the nested text_config.model_type ids
 // (a multimodal wrapper carries both). It is the exported front door onto probeModelTypes, so a backend
 // or test can resolve a config's architecture through LookupArch without re-parsing the JSON itself.

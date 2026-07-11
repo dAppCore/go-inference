@@ -91,7 +91,9 @@ func newAttnScratch(dModel, qDim, kvDim, nHeads, maxLen int) attnScratch {
 		attnOut: scratchBF16(dModel),
 	}
 	if maxLen >= sdpa2PassMinKV && nHeads > 0 {
-		blocks := int(sdpa2PassBlocks(maxLen))
+		// sized for the WORST-case fan (nKVHeads=1 takes the largest occupancy
+		// floor, #365) — the encode sites pick the layer's own blocks, always ≤ this.
+		blocks := int(sdpa2PassBlocks(maxLen, 1))
 		sc.p2Partials = scratchBF16(blocks * qDim)
 		sc.p2Sums = scratchF32(blocks * nHeads)
 		sc.p2Maxs = scratchF32(blocks * nHeads)

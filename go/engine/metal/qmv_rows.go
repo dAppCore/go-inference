@@ -99,6 +99,104 @@ func lthnQMVRowsPipeline(key lthnQMVRowsKey) (metal.MTLComputePipelineState, boo
 	return pso, true
 }
 
+// qmvRowsPlan is the routing decision encQMVRowsBF16At takes for a geometry —
+// extracted so the verify-tail ICB recorder consults the SAME decision and
+// records exactly the dispatch the live path encodes (record==live by
+// construction, never by parallel logic).
+type qmvRowsPlan struct {
+	tiled     bool // register-tiled lthn_qmv_rows (rows ≤ lthnQMVRowsMaxM)
+	tiledKey  lthnQMVRowsKey
+	gatherKey lthnGatherQMVKey
+}
+
+// qmvRowsPlanFor reports the multi-row route for a geometry: ok=false means no
+// multi-row kernel applies (the caller keeps its qmm_t/per-row route). The
+// tiled preference is probed against the LIVE pipeline cache — kernel
+// availability, not just geometry, picks the branch, exactly as the encoder
+// does.
+func qmvRowsPlanFor(rows, outDim, inDim, gs, bits int) (qmvRowsPlan, bool) {
+	if rows < 2 || rows > qmvRowsMax || inDim <= 0 || gs <= 0 || inDim%gs != 0 || (inDim*bits)%32 != 0 {
+		return qmvRowsPlan{}, false
+	}
+	// The register-tiled kernel ports qmv_impl's MAIN loop only (no in-tail):
+	// every production projection dim is a 256-multiple (block_size = 8 values
+	// × 32 lanes), anything else keeps the gather fallback.
+	if rows <= lthnQMVRowsMaxM && outDim%8 == 0 && inDim%256 == 0 {
+		key := lthnQMVRowsKey{groupSize: gs, bits: bits, m: rows}
+		if _, ok := lthnQMVRowsPipeline(key); ok {
+			return qmvRowsPlan{tiled: true, tiledKey: key}, true
+		}
+	}
+	key := lthnGatherQMVKey{
+		groupSize: gs, bits: bits, expertRows: 0, batchedX: true,
+		fast: outDim%8 == 0 && inDim%512 == 0,
+	}
+	if _, ok := lthnGatherQMVPipeline(key); !ok {
+		return qmvRowsPlan{}, false
+	}
+	if _, _, ok := qmvRowsIndexBuffers(); !ok {
+		return qmvRowsPlan{}, false
+	}
+	return qmvRowsPlan{gatherKey: key}, true
+}
+
+// emitQMVRowsTiled records the register-tiled multi-row qmv through any sink —
+// binding ABI w=0, scales=1, biases=2, in=3, out=4, K=5, N=6 on the qmv-fast
+// grid. One body behind encQMVRowsBF16At's tiled branch (live) and the
+// verify-tail ICB recorder; pso caller-provided (ICB variant differs).
+func emitQMVRowsTiled[S dispatchSink](sink S, pso metal.MTLComputePipelineState, wq metal.MTLBuffer, wqOff uint, scales metal.MTLBuffer, scalesOff uint, biases metal.MTLBuffer, biasesOff uint, in metal.MTLBuffer, inOff uint, out metal.MTLBuffer, outOff uint, inDim, outDim int) {
+	sink.setPSO(pso)
+	sink.setBuf(wq, wqOff, 0)
+	sink.setBuf(scales, scalesOff, 1)
+	sink.setBuf(biases, biasesOff, 2)
+	sink.setBuf(in, inOff, 3)
+	sink.setBuf(out, outOff, 4)
+	sink.setI32(int32(inDim), 5)
+	sink.setI32(int32(outDim), 6)
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: 1, Height: uint((outDim + 7) / 8), Depth: 1},
+		metal.MTLSize{Width: 32, Height: 2, Depth: 1},
+	)
+}
+
+var (
+	lthnQMVRowsICBPSOMu    sync.Mutex
+	lthnQMVRowsICBPSOCache = map[lthnQMVRowsKey]metal.MTLComputePipelineState{}
+)
+
+// lthnQMVRowsPipelineICB is lthnQMVRowsPipeline with supportIndirectCommandBuffers
+// set — the variant the MTP verify-tail ICB records.
+func lthnQMVRowsPipelineICB(key lthnQMVRowsKey) (metal.MTLComputePipelineState, bool) {
+	lthnQMVRowsICBPSOMu.Lock()
+	defer lthnQMVRowsICBPSOMu.Unlock()
+	if pso, ok := lthnQMVRowsICBPSOCache[key]; ok {
+		return pso, pso != nil
+	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		lthnQMVRowsICBPSOCache[key] = nil
+		return nil, false
+	}
+	name := core.Sprintf("lthn_qmv_rows_bfloat16_t_gs_%d_b_%d", key.groupSize, key.bits)
+	fc := metal.NewMTLFunctionConstantValues()
+	m := int32(key.m)
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&m), metal.MTLDataTypeInt, 0)
+	fn, err := customLibrary.NewFunctionWithNameConstantValuesError(name, fc)
+	if err != nil || fn == nil || fn.GetID() == 0 {
+		lthnQMVRowsICBPSOCache[key] = nil
+		return nil, false
+	}
+	desc := metal.NewMTLComputePipelineDescriptor()
+	desc.SetComputeFunction(fn)
+	desc.SetSupportIndirectCommandBuffers(true)
+	pso, perr := device.NewComputePipelineStateWithDescriptorOptionsReflectionError(desc, 0, nil)
+	if perr != nil {
+		lthnQMVRowsICBPSOCache[key] = nil
+		return nil, false
+	}
+	lthnQMVRowsICBPSOCache[key] = pso
+	return pso, true
+}
+
 // encQMVRowsBF16At encodes the multi-row qmv, reporting handled=false (no
 // encode) when the geometry has no kernel so the caller keeps its
 // qmm_t/per-row route. in rows are contiguous bf16 at inOff + z·inDim·2; out
@@ -108,34 +206,19 @@ func lthnQMVRowsPipeline(key lthnQMVRowsKey) (metal.MTLComputePipelineState, boo
 // (grid-Z, qmv_fast bytes, weight re-streamed per row but still ~2× the
 // serialised per-row interleave).
 func encQMVRowsBF16At(enc metal.MTLComputeCommandEncoder, wq, scales, biases, in, out metal.MTLBuffer, wqOff, scalesOff, biasesOff, inOff, outOff uint, rows, outDim, inDim, gs, bits int) (bool, error) {
-	if rows < 2 || rows > qmvRowsMax || inDim <= 0 || gs <= 0 || inDim%gs != 0 || (inDim*bits)%32 != 0 {
+	plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits)
+	if !ok {
 		return false, nil
 	}
-	// The register-tiled kernel ports qmv_impl's MAIN loop only (no in-tail):
-	// every production projection dim is a 256-multiple (block_size = 8 values
-	// × 32 lanes), anything else keeps the gather fallback.
-	if rows <= lthnQMVRowsMaxM && outDim%8 == 0 && inDim%256 == 0 {
-		if pso, ok := lthnQMVRowsPipeline(lthnQMVRowsKey{groupSize: gs, bits: bits, m: rows}); ok {
-			sink := encSink{enc}
-			sink.setPSO(pso)
-			sink.setBuf(wq, wqOff, 0)
-			sink.setBuf(scales, scalesOff, 1)
-			sink.setBuf(biases, biasesOff, 2)
-			sink.setBuf(in, inOff, 3)
-			sink.setBuf(out, outOff, 4)
-			sink.setI32(int32(inDim), 5)
-			sink.setI32(int32(outDim), 6)
-			sink.dispatchThreadgroups(
-				metal.MTLSize{Width: 1, Height: uint((outDim + 7) / 8), Depth: 1},
-				metal.MTLSize{Width: 32, Height: 2, Depth: 1},
-			)
-			return true, nil
+	if plan.tiled {
+		pso, ok := lthnQMVRowsPipeline(plan.tiledKey)
+		if !ok {
+			return false, nil
 		}
+		emitQMVRowsTiled(encSink{enc}, pso, wq, wqOff, scales, scalesOff, biases, biasesOff, in, inOff, out, outOff, inDim, outDim)
+		return true, nil
 	}
-	pso, ok := lthnGatherQMVPipeline(lthnGatherQMVKey{
-		groupSize: gs, bits: bits, expertRows: 0, batchedX: true,
-		fast: outDim%8 == 0 && inDim%512 == 0,
-	})
+	pso, ok := lthnGatherQMVPipeline(plan.gatherKey)
 	if !ok {
 		return false, nil
 	}

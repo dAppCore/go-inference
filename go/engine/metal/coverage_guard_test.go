@@ -822,8 +822,16 @@ func TestNativeLoaderCleanupCoverage(t *testing.T) {
 	bf16Dir := t.TempDir()
 	writeLocal(t, core.PathJoin(bf16Dir, "config.json"), gemma4ConfigJSON(t, cfg))
 	writeLocal(t, core.PathJoin(bf16Dir, "model.safetensors"), encodedTensors(t, gemma4TensorsMust(t, arch)))
-	_, err = LoadDir(bf16Dir, 0)
-	expectErr(t, "LoadDir bf16 bad maxLen cleanup", err)
+	// maxLen <= 0 is the LOADER-OWNS-DEFAULT contract (checkpoint window, 4096
+	// floor) — the pair serve passes an unset -context straight through here.
+	bf16Default, err := LoadDir(bf16Dir, 0)
+	if err != nil {
+		t.Fatalf("LoadDir bf16 default maxLen: %v", err)
+	}
+	if want := resolveDefaultContext(model.ProbeDirContextWindow(bf16Dir)); bf16Default.maxLen != want {
+		t.Fatalf("LoadDir bf16 default maxLen = %d, want the resolved checkpoint window %d", bf16Default.maxLen, want)
+	}
+	_ = bf16Default.Close()
 
 	emptyDir := t.TempDir()
 	writeLocal(t, core.PathJoin(emptyDir, "config.json"), gemma4ConfigJSON(t, cfg))
@@ -839,8 +847,14 @@ func TestNativeLoaderCleanupCoverage(t *testing.T) {
 	quantDir := t.TempDir()
 	writeLocal(t, core.PathJoin(quantDir, "config.json"), gemma4ConfigJSON(t, quantCfg))
 	writeLocal(t, core.PathJoin(quantDir, "model.safetensors"), encodedTensors(t, quantGemma4TensorsGuard(t, arch, groupSize, bits)))
-	_, err = LoadDir(quantDir, 0)
-	expectErr(t, "LoadDir quant bad maxLen cleanup", err)
+	quantDefault, err := LoadDir(quantDir, 0)
+	if err != nil {
+		t.Fatalf("LoadDir quant default maxLen: %v", err)
+	}
+	if want := resolveDefaultContext(model.ProbeDirContextWindow(quantDir)); quantDefault.maxLen != want {
+		t.Fatalf("LoadDir quant default maxLen = %d, want the resolved checkpoint window %d", quantDefault.maxLen, want)
+	}
+	_ = quantDefault.Close()
 
 	emptyQuantDir := t.TempDir()
 	writeLocal(t, core.PathJoin(emptyQuantDir, "config.json"), gemma4ConfigJSON(t, quantCfg))
@@ -2485,8 +2499,15 @@ func TestNativeRemainingBranchCoverage(t *testing.T) {
 		defer func() { _ = closer.Close() }()
 	}
 	if sessionModel, ok := loadedBF16TM.(model.SessionModel); ok {
-		_, err = sessionModel.OpenSession()
-		expectErr(t, "LoadTokenModelDir bf16 OpenSession bad maxLen", err)
+		// maxLen 0 resolves at load (the loader-owns-default contract), so an
+		// opened session is fully usable — the old bad-maxLen error is gone.
+		sess, serr := sessionModel.OpenSession()
+		if serr != nil {
+			t.Fatalf("LoadTokenModelDir bf16 OpenSession default maxLen: %v", serr)
+		}
+		if closer, ok := sess.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
 	} else {
 		t.Fatal("loaded bf16 token model is not a SessionModel")
 	}
@@ -2503,8 +2524,15 @@ func TestNativeRemainingBranchCoverage(t *testing.T) {
 		defer func() { _ = closer.Close() }()
 	}
 	if sessionModel, ok := loadedQuantTM.(model.SessionModel); ok {
-		_, err = sessionModel.OpenSession()
-		expectErr(t, "LoadTokenModelDir quant OpenSession bad maxLen", err)
+		// maxLen 0 resolves at load (the loader-owns-default contract), so an
+		// opened session is fully usable — the old bad-maxLen error is gone.
+		sess, serr := sessionModel.OpenSession()
+		if serr != nil {
+			t.Fatalf("LoadTokenModelDir quant OpenSession default maxLen: %v", serr)
+		}
+		if closer, ok := sess.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
 	} else {
 		t.Fatal("loaded quant token model is not a SessionModel")
 	}

@@ -1,4 +1,4 @@
-From 08a2ba39833e93d53852fe422080c96556ab29b2 Mon Sep 17 00:00:00 2001
+From 15c5ebd7ba24fa516fa4971f180057b40cf6c118 Mon Sep 17 00:00:00 2001
 From: Snider <snider@host.uk.com>
 Date: Tue, 16 Jun 2026 18:15:40 +0100
 Subject: [PATCH 07/10] =?UTF-8?q?lthn(perf):=20decode-capture=20byte-paylo?=
@@ -16,10 +16,10 @@ Co-Authored-By: Virgil <virgil@lethean.io>
  1 file changed, 14 insertions(+), 2 deletions(-)
 
 diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
-index f298d234..2a978bf2 100644
+index a801e541..ffbfa0a0 100644
 --- a/mlx/backend/metal/device.cpp
 +++ b/mlx/backend/metal/device.cpp
-@@ -524,12 +524,24 @@ void CommandEncoder::end_encoding() {
+@@ -573,12 +573,24 @@ void CommandEncoder::end_encoding() {
      lthn_rec_flush_cur();
      if (!lthn_rec_cmds.empty()) {
        size_t binds = 0, byteSets = 0;

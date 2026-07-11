@@ -11,7 +11,6 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	"github.com/tmc/apple/kernel"
 	"github.com/tmc/apple/metal"
 )
 
@@ -178,6 +177,7 @@ type archLayerBufs struct {
 	layerScalar              metal.MTLBuffer // gemma4 per-layer output scalar, broadcast to dModel (synthesised, nil = skip)
 	kCache, vCache           metal.MTLBuffer
 	kCachePtr, vCachePtr     *byte
+	kvCacheBytes             uint // owner's linear KV size; caches allocate lazily on first lane touch (ensureLBKVCaches)
 	proj                     projector
 	dFF                      int // this layer's FFN width (gemma4 E2B/E4B vary it per layer)
 }
@@ -203,6 +203,7 @@ func (lb *archLayerBufs) cacheKVContents() {
 type archDecodeState struct {
 	specs        []model.LayerSpec
 	lb           []archLayerBufs
+	lbKVReady    bool // ensureLBKVCaches ran (session builds defer the linear KV allocation)
 	moeWeights   []*MoELayerWeights
 	pagedKV      []*devicePagedKVCache
 	asc          attnScratch
@@ -223,6 +224,17 @@ type archDecodeState struct {
 	// trades at, and the routing is deterministic (every verify folds), so
 	// live and restored sessions write the same lane's bytes.
 	verifyFoldSmallK bool
+	// verifyTail holds the recorded MTP verify-tail ICBs (#372), keyed by the
+	// batch width K: the fold's pos-independent per-layer tail (O-projection →
+	// layer scalar) records once per K during that width's first eligible
+	// verify and replays per layer thereafter. Per-K because the adaptive
+	// draft cap wobbles the verify width block-to-block (5/6/7…) — a single-K
+	// recording never replayed. verifyTailRec is live only during a recording
+	// pass; verifyTailTried stops a failed recording from re-arming every
+	// block. Both maps are bounded by the draft-cap range (K ≤ qmvRowsMax).
+	verifyTail      map[int]*verifyTailICB
+	verifyTailRec   *verifyTailRecorder
+	verifyTailTried map[int]bool
 	// rowAttnCaps, when non-nil, overrides each batch row's visible attention
 	// length (absolute kv rows) — the bidirectional image-span prefill
 	// (gemma4_unified): span rows see through to their span end. Legal only on
@@ -373,12 +385,7 @@ func (s *archDecodeState) inputEmbBuffer(inputEmb []byte, dModel int) (metal.MTL
 	if pinner == nil {
 		return nil, false
 	}
-	buf := device.NewBufferWithBytesNoCopyLengthOptionsDeallocator(
-		unsafe.Pointer(&inputEmb[0]),
-		uint(len(inputEmb)),
-		metal.MTLResourceStorageModeShared,
-		func(kernel.Pointer, uint64) {},
-	)
+	buf := newNoCopyBuffer(unsafe.Pointer(&inputEmb[0]), uint(len(inputEmb)))
 	if buf == nil || buf.GetID() == 0 {
 		pinner.Unpin()
 		return nil, false
@@ -429,12 +436,7 @@ func (s *archDecodeState) hostPLEInputBuffer(want int) (metal.MTLBuffer, error) 
 	if !isMappedShardBytes(s.perLayerInput) {
 		pinner := pinGoBytes(s.perLayerInput)
 		if pinner != nil {
-			buf := device.NewBufferWithBytesNoCopyLengthOptionsDeallocator(
-				unsafe.Pointer(&s.perLayerInput[0]),
-				uint(want),
-				metal.MTLResourceStorageModeShared,
-				func(kernel.Pointer, uint64) {},
-			)
+			buf := newNoCopyBuffer(unsafe.Pointer(&s.perLayerInput[0]), uint(want))
 			if buf != nil && buf.GetID() != 0 {
 				s.pleInputScratch = &pinnedNoCopyBytes{bytes: s.perLayerInput, buf: buf, pinner: pinner}
 				runtime.SetFinalizer(s.pleInputScratch, (*pinnedNoCopyBytes).Close)
@@ -536,6 +538,33 @@ func (s *archDecodeState) bufferPtr(buf metal.MTLBuffer) *byte {
 	return (*byte)(buf.Contents())
 }
 
+// ensureLBKVCaches materialises the deferred per-layer linear KV caches (the session
+// builders record kvCacheBytes instead of allocating — see buildBF16ArchLayerBufsInternal).
+// Recorded-ICB sessions never call this: their decode/prefill/snapshot lanes all run over
+// the replay's own caches, so the linear set would be a dead duplicate of the whole KV
+// footprint. The lanes that do read lb KV — the sequential stepToken path, the non-ICB
+// batched pass, the device-paged bridge and the state views — ensure it on first touch.
+// One-shot forwards (pooled scratch) bind their caches at build and take the fast path here.
+func (s *archDecodeState) ensureLBKVCaches() error {
+	if s == nil || s.lbKVReady {
+		return nil
+	}
+	for li := range s.lb {
+		lb := &s.lb[li]
+		if lb.kvCacheBytes == 0 || (lb.kCache != nil && lb.vCache != nil) {
+			continue
+		}
+		lb.kCache = device.NewBufferWithLengthOptions(lb.kvCacheBytes, metal.MTLResourceStorageModeShared)
+		lb.vCache = device.NewBufferWithLengthOptions(lb.kvCacheBytes, metal.MTLResourceStorageModeShared)
+		if lb.kCache == nil || lb.vCache == nil {
+			return core.NewError("native.archDecodeState.ensureLBKVCaches: KV cache allocation failed")
+		}
+		lb.cacheKVContents()
+	}
+	s.lbKVReady = true
+	return nil
+}
+
 func (s *archDecodeState) initDevicePagedKV(pageSize int) error {
 	return s.initDevicePagedKVWithPrealloc(pageSize, false)
 }
@@ -553,6 +582,23 @@ func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc b
 		s.pagedKV = nil
 		return nil
 	}
+	// q8 defaults ONLY where the session's decode actually READS the paged pool:
+	// MoE/trace sessions (stepToken's paged attention — 26B's lane). ICB-eligible
+	// sessions decode through the replay's OWN linear bf16 caches and the batched
+	// lanes run linear too, so a q8 pool there is pure lane drift — stepToken
+	// fallbacks and save/restore read q8-round-tripped values the replay never
+	// sees, which broke every ICB↔serial and batched↔serial byte-parity gate
+	// (#371; first bad commit 6e78826d) — with zero bandwidth win, since the
+	// deep-context scan it pays for never touches the pages on those sessions.
+	// An explicit LTHN_KV_Q8=1 still forces q8 wherever the geometry allows.
+	pagedDecodeLane := s.trace
+	for _, spec := range s.specs {
+		if spec.MoE {
+			pagedDecodeLane = true
+			break
+		}
+	}
+	q8Lane := kvQ8Requested || (kvQ8Enabled && pagedDecodeLane)
 	pages := make([]*devicePagedKVCache, len(s.specs))
 	for li, spec := range s.specs {
 		if !spec.OwnsCache() {
@@ -575,7 +621,7 @@ func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc b
 			return err
 		}
 		cache.ring = ring
-		if kvQ8Enabled && s.nHeads == 2*lkv && lhd <= 256 && (lkv*lhd)%kvQ8GroupSize == 0 {
+		if q8Lane && s.nHeads == 2*lkv && lhd <= 256 && (lkv*lhd)%kvQ8GroupSize == 0 {
 			// q8 pages exist only for gqa2 geometry (the only q8 SDPA kernels).
 			// Layers outside it keep bf16 pages — mixed modes are fine, every
 			// landing and read site branches per cache. The all-miss case is
@@ -596,7 +642,9 @@ func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc b
 		}
 		pages[li] = cache
 	}
-	if kvQ8Enabled {
+	if kvQ8Requested {
+		// EXPLICIT request only: the default (kvQ8Enabled) silently runs bf16 on
+		// non-gqa2 geometry, but an explicit LTHN_KV_Q8=1 that can't apply is an error.
 		anyQ8 := false
 		for _, cache := range pages {
 			if cache != nil && cache.quantQ8 {
@@ -610,7 +658,7 @@ func (s *archDecodeState) initDevicePagedKVWithPrealloc(pageSize int, prealloc b
 					cache.Close()
 				}
 			}
-			return core.NewError("native.initDevicePagedKV: LTHN_KV_Q8 set but no layer has gqa2 geometry (nHeads == 2*kvHeads, headDim <= 256)")
+			return core.NewError("native.initDevicePagedKV: LTHN_KV_Q8=1 set but no layer has gqa2 geometry (nHeads == 2*kvHeads, headDim <= 256)")
 		}
 	}
 	s.pagedKV = pages
@@ -648,6 +696,9 @@ func (s *archDecodeState) resetDevicePagedAttentionScratch() {
 func (s *archDecodeState) reloadDevicePagedKVFromLinear(position int) error {
 	if s == nil || !s.hasDevicePagedKV() {
 		return nil
+	}
+	if err := s.ensureLBKVCaches(); err != nil { // deferred linear caches are the copy source
+		return err
 	}
 	for li, spec := range s.specs {
 		cache := s.layerPagedKV(li)
@@ -687,6 +738,9 @@ func (s *archDecodeState) syncLinearKVFromDevicePaged(position int) error {
 	}
 	if position < 0 {
 		return core.NewError("native.archDecodeState.syncLinearKVFromDevicePaged: negative position")
+	}
+	if err := s.ensureLBKVCaches(); err != nil { // deferred linear caches are the copy target
+		return err
 	}
 	for li, spec := range s.specs {
 		cache := s.layerPagedKV(li)
@@ -1217,6 +1271,11 @@ func (s *archDecodeState) stepTokenResultWithInput(inputEmb []byte, pos int, rea
 }
 
 func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int, readResult, copyInput bool, dst []byte) ([]byte, error) {
+	if !s.hasDevicePagedKV() { // no paged pool ⇒ owners bind the deferred linear lb caches below
+		if err := s.ensureLBKVCaches(); err != nil {
+			return nil, err
+		}
+	}
 	*s.offPtr = int32(pos)
 	inputBuf := s.xA
 	if copyInput {
@@ -1836,9 +1895,13 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 			if setup != nil {
 				lb[li].kCache, lb[li].vCache, lb[li].kCachePtr, lb[li].vCachePtr = setup.kvCache(li, cacheBytes)
 			} else {
-				lb[li].kCache = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
-				lb[li].vCache = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
-				lb[li].cacheKVContents()
+				// Session builds defer the linear KV allocation (ensureLBKVCaches): a
+				// recorded-ICB session decodes/prefills/snapshots exclusively over the
+				// replay's own caches, so eager allocation here doubled the whole KV
+				// footprint for nothing (#367 census: 1.9GB idle on e2b@128K). The
+				// lanes that genuinely read lb KV (stepToken sequential, non-ICB
+				// batched, the paged bridge, state views) ensure it on first touch.
+				lb[li].kvCacheBytes = cacheBytes
 			}
 		}
 		lFF := dFF // per-layer FFN width — gemma4 E2B/E4B MatFormer varies it (6144/12288); 0 ⇒ arch default

@@ -216,6 +216,11 @@ func TestRealE2BAssistantFusedDraftParity(t *testing.T) {
 func TestRealQuantVerifyBatchedHiddensParity(t *testing.T) {
 	requireNativeRuntime(t)
 	targetDir := enginegate.HFModelPath(t, "mlx-community/gemma-4-e2b-it-4bit")
+	// bf16 KV pinned: this guard asserts BYTE identity between the batched
+	// and sequential verify (the PLE row-epilogue seam), a bf16-lane
+	// contract — q8 verify parity is tolerance-gated by its own tests.
+	kvQ8ICBOffForTest = true
+	t.Cleanup(func() { kvQ8ICBOffForTest = false })
 	target, err := LoadDir(targetDir, 4096)
 	if err != nil {
 		t.Fatalf("LoadDir: %v", err)
@@ -304,7 +309,12 @@ func TestRealBF16VerifyGreedyRowsParity(t *testing.T) {
 	}
 	draft := []int32{506, 8134, 529, 506, 8134, 529}
 	posBefore := target.pos
+	// the production verify entry (verifyAssistantDraftHiddens) forces the
+	// small-K fold; calling the inner forward directly needs the same flag —
+	// under the q8 default the un-folded small batch declines by design.
+	target.state.verifyFoldSmallK = true
 	hiddens, batched, err := target.verifyBatchedHiddens(draft)
+	target.state.verifyFoldSmallK = false
 	if err != nil {
 		t.Fatalf("verifyBatchedHiddens: %v", err)
 	}

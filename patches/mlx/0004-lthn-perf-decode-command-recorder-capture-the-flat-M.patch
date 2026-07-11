@@ -1,4 +1,4 @@
-From 91fc88bb390a266403e3018ae51eae2fd525e62b Mon Sep 17 00:00:00 2001
+From 0cbb875276578467b51acaaf1387b0e41c9df56f Mon Sep 17 00:00:00 2001
 From: Snider <snider@host.uk.com>
 Date: Tue, 16 Jun 2026 17:42:38 +0100
 Subject: [PATCH 04/10] =?UTF-8?q?lthn(perf):=20decode=20command=20recorder?=
@@ -17,7 +17,7 @@ Co-Authored-By: Virgil <virgil@lethean.io>
  2 files changed, 117 insertions(+)
 
 diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
-index e10e115d..a45fc5c1 100644
+index f593544a..d7aee12c 100644
 --- a/mlx/backend/metal/device.cpp
 +++ b/mlx/backend/metal/device.cpp
 @@ -1,7 +1,12 @@
@@ -33,7 +33,7 @@ index e10e115d..a45fc5c1 100644
  
  #include <fmt/format.h>
  
-@@ -297,6 +302,62 @@ CommandEncoder::~CommandEncoder() {
+@@ -340,6 +345,62 @@ CommandEncoder::~CommandEncoder() {
    queue_.reset();
  }
  
@@ -96,7 +96,7 @@ index e10e115d..a45fc5c1 100644
  void CommandEncoder::set_buffer(
      const MTL::Buffer* buf,
      int idx,
-@@ -305,6 +366,9 @@ void CommandEncoder::set_buffer(
+@@ -348,6 +409,9 @@ void CommandEncoder::set_buffer(
    // buffers
    all_inputs_.insert((void*)buf);
    all_outputs_.insert((void*)buf);
@@ -106,7 +106,7 @@ index e10e115d..a45fc5c1 100644
    get_command_encoder()->setBuffer(buf, offset, idx);
  }
  
-@@ -319,6 +383,9 @@ void CommandEncoder::set_input_array(
+@@ -363,6 +427,9 @@ void CommandEncoder::set_input_array(
    needs_barrier_ =
        needs_barrier_ | (prev_outputs_.find(r_buf) != prev_outputs_.end());
    auto a_buf = static_cast<const MTL::Buffer*>(a.buffer().ptr());
@@ -116,7 +116,7 @@ index e10e115d..a45fc5c1 100644
    get_command_encoder()->setBuffer(a_buf, a.offset() + offset, idx);
  }
  
-@@ -369,6 +436,12 @@ void CommandEncoder::dispatch_threadgroups(
+@@ -418,6 +485,12 @@ void CommandEncoder::dispatch_threadgroups(
      MTL::Size group_dims) {
    maybeInsertBarrier();
    buffer_ops_++;
@@ -129,7 +129,7 @@ index e10e115d..a45fc5c1 100644
    get_command_encoder()->dispatchThreadgroups(grid_dims, group_dims);
  }
  
-@@ -377,6 +450,12 @@ void CommandEncoder::dispatch_threads(
+@@ -426,6 +499,12 @@ void CommandEncoder::dispatch_threads(
      MTL::Size group_dims) {
    maybeInsertBarrier();
    buffer_ops_++;
@@ -142,7 +142,7 @@ index e10e115d..a45fc5c1 100644
    get_command_encoder()->dispatchThreads(grid_dims, group_dims);
  }
  
-@@ -385,6 +464,19 @@ void CommandEncoder::barrier() {
+@@ -434,6 +513,19 @@ void CommandEncoder::barrier() {
  }
  
  void CommandEncoder::end_encoding() {
@@ -163,10 +163,10 @@ index e10e115d..a45fc5c1 100644
    // all previous outputs of command encoders to their corresponding fence.
    // - The command encoder records its inputs and outputs.
 diff --git a/mlx/backend/metal/device.h b/mlx/backend/metal/device.h
-index 5f2e72f9..2f2a8136 100644
+index 871e95cc..ba482eb2 100644
 --- a/mlx/backend/metal/device.h
 +++ b/mlx/backend/metal/device.h
-@@ -19,6 +19,15 @@ namespace mlx::core::metal {
+@@ -20,6 +20,15 @@ namespace mlx::core::metal {
  using MTLFCList =
      std::vector<std::tuple<const void*, MTL::DataType, NS::UInteger>>;
  
@@ -180,9 +180,9 @@ index 5f2e72f9..2f2a8136 100644
 +void lthn_decode_rec_tgmem(size_t length, int idx);
 +
  class Device;
+ class EventImpl;
  
- class MLX_API CommandEncoder {
-@@ -57,11 +66,18 @@ class MLX_API CommandEncoder {
+@@ -59,11 +68,18 @@ class MLX_API CommandEncoder {
    void maybeInsertBarrier();
  
    void set_compute_pipeline_state(MTL::ComputePipelineState* kernel) {
@@ -201,7 +201,7 @@ index 5f2e72f9..2f2a8136 100644
      get_command_encoder()->setBytes(
          vec.data(), nelems * sizeof(typename Vec::value_type), idx);
    }
-@@ -72,15 +88,24 @@ class MLX_API CommandEncoder {
+@@ -74,15 +90,24 @@ class MLX_API CommandEncoder {
  
    template <typename T>
    void set_bytes(const T* v, int n, int idx) {
