@@ -69,8 +69,8 @@ var (
 // the complianceCombined / complianceOverlap regexps (which remain as the scan's
 // differential oracle in heuristic_scan_test.go), several times cheaper per call.
 func scoreComplianceMarkers(response string) int {
-	return complianceSet.count(response) +
-		complianceOverlapSet.count(response)
+	return complianceSet.Count(response) +
+		complianceOverlapSet.Count(response)
 }
 
 // scoreFormulaicPreamble checks if response starts with a formulaic preamble.
@@ -244,7 +244,7 @@ func scoreDegeneration(response string) int {
 // to the emotionCombined regexp (retained as the scan's differential oracle),
 // several times cheaper per call.
 func scoreEmotionalRegister(response string) int {
-	count := emotionSet.count(response)
+	count := emotionSet.Count(response)
 	if count > 10 {
 		return 10
 	}
