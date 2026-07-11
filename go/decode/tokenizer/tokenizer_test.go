@@ -3,6 +3,7 @@
 package tokenizer
 
 import (
+	"slices"
 	"testing"
 
 	core "dappco.re/go"
@@ -1740,5 +1741,116 @@ func TestTokenizer_decodeGPT2Bytes_Ugly(t *testing.T) {
 	want := string([]byte{0x41, 0xE2, 0x82, 0xAC})
 	if got != want {
 		t.Errorf("decodeGPT2Bytes(\"A€\") = %q, want %q", got, want)
+	}
+}
+
+// buildManySpecialTokenizer returns a SentencePiece tokenizer whose special set
+// is widened to a realistic Gemma-scale control vocabulary — the 2-special hand
+// fixture hides the special-token boundary scan's cost. All added tokens lead
+// with '<' (the degenerate lead-byte case) plus a couple of non-'<' leads to
+// exercise the multi-lead IndexAny path. specialOrder is sorted longest-first,
+// mirroring LoadTokenizer's invariant.
+func buildManySpecialTokenizer(nSpecial int) *Tokenizer {
+	tok := &Tokenizer{
+		vocab: map[string]int32{
+			"<bos>": 100, "<eos>": 101, "▁": 4,
+			"h": 0, "e": 1, "l": 2, "o": 3, "w": 8, "r": 9, "d": 10,
+			"he": 5, "ll": 6, "▁h": 7, "hel": 11, "hello": 12,
+			"▁hello": 13, "▁world": 14, "world": 15, " ": 16,
+			"t": 20, "a": 21, "n": 22, "s": 23, "i": 24, "g": 25,
+		},
+		invVocab: map[int32]string{
+			100: "<bos>", 101: "<eos>", 4: "▁",
+			0: "h", 1: "e", 2: "l", 3: "o", 8: "w", 9: "r", 10: "d",
+			5: "he", 6: "ll", 7: "▁h", 11: "hel", 12: "hello",
+			13: "▁hello", 14: "▁world", 15: "world", 16: " ",
+		},
+		special: map[string]int32{
+			"<bos>": 100, "<eos>": 101, "<start_of_turn>": 102,
+			"<end_of_turn>": 103, "<pad>": 104, "[INST]": 105, "|end|": 106,
+		},
+		bosToken: 100, hasBOS: true, eosToken: 101, hasEOS: true,
+		addPrefixSpace: true,
+		mergeRanks: map[mergeKey]int{
+			{a: "h", b: "e"}: 0, {a: "l", b: "l"}: 1, {a: "he", b: "l"}: 2,
+			{a: "▁", b: "h"}: 5, {a: "▁h", b: "ello"}: 6, {a: "▁", b: "w"}: 7,
+		},
+	}
+	id := int32(1000)
+	for len(tok.special) < nSpecial {
+		s := "<unused" + core.Itoa(int(id)) + ">"
+		tok.special[s] = id
+		tok.vocab[s] = id
+		tok.invVocab[id] = s
+		id++
+	}
+	tok.specialOrder = make([]string, 0, len(tok.special))
+	for s := range tok.special {
+		tok.specialOrder = append(tok.specialOrder, s)
+	}
+	slices.SortFunc(tok.specialOrder, func(a, b string) int {
+		if len(a) != len(b) {
+			return len(b) - len(a)
+		}
+		switch {
+		case a < b:
+			return -1
+		case a > b:
+			return 1
+		default:
+			return 0
+		}
+	})
+	return tok
+}
+
+// TestTokenizer_nextSpecialBoundary_AnchorScanMatchesNaive_Good pins the
+// lead-byte anchor scan byte-for-byte to the naive "min first-occurrence over
+// all specials" reference, across a realistic special set and adversarial
+// marker-dense inputs. This is the byte-identity guard for the O(specials×text)
+// → O(text) rewrite — a future edit that breaks equivalence fails here.
+func TestTokenizer_nextSpecialBoundary_AnchorScanMatchesNaive_Good(t *testing.T) {
+	tok := buildManySpecialTokenizer(128)
+
+	naive := func(input string) int {
+		end := len(input)
+		for _, s := range tok.specialOrder {
+			if idx := core.Index(input, s); idx > 0 && idx < end {
+				end = idx
+			}
+		}
+		return end
+	}
+
+	alphabet := []string{
+		"a", "b", " ", "<", ">", "the ", "quick ", "fox", "\n",
+		"<bos>", "<eos>", "<start_of_turn>", "<end_of_turn>", "<pad>",
+		"<unused1000>", "[INST]", "|end|", "bos>", "<un",
+	}
+	// Deterministic LCG — no math/rand dependency, reproducible corpus.
+	state := uint64(0x243f6a8885a308d3)
+	nextRand := func() uint64 {
+		state = state*6364136223846793005 + 1442695040888963407
+		return state >> 1
+	}
+
+	for iter := 0; iter < 40000; iter++ {
+		parts := int(nextRand()%14) + 1
+		b := core.NewBuilder()
+		for p := 0; p < parts; p++ {
+			b.WriteString(alphabet[nextRand()%uint64(len(alphabet))])
+		}
+		input := b.String()
+		if input == "" {
+			continue
+		}
+		// nextSpecialBoundary's contract: no special is a prefix at position 0
+		// (matchSpecialToken already ran and missed).
+		if _, _, ok := tok.matchSpecialToken(input); ok {
+			continue
+		}
+		if got, want := tok.nextSpecialBoundary(input), naive(input); got != want {
+			t.Fatalf("nextSpecialBoundary(%q) = %d, naive = %d", input, got, want)
+		}
 	}
 }
