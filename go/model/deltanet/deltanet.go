@@ -51,9 +51,12 @@ func GatedDeltaRuleF32(q, k, v, beta, alpha, prior []float32, L, H, D int, scale
 	if prior != nil {
 		copy(state, prior)
 	}
-	kn := make([]float64, D)   // L2-normalised key
-	read := make([]float64, D) // read at the key
-	be := make([]float64, D)   // β · error
+	// kn/read/be are per-step scratch, each fully overwritten before use every (t,h) iteration — one
+	// slab carved into three capped windows is bit-identical and saves 2 allocs/call.
+	scratch := make([]float64, 3*D)
+	kn := scratch[0:D:D]           // L2-normalised key
+	read := scratch[D : 2*D : 2*D] // read at the key
+	be := scratch[2*D : 3*D : 3*D] // β · error
 	for t := range L {
 		for h := range H {
 			sBase := h * D * D
