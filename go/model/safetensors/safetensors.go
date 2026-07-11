@@ -92,19 +92,52 @@ func GetTensorData(info SafetensorsTensorInfo, allData []byte) []byte {
 func WriteSafetensors(path string, tensors map[string]SafetensorsTensorInfo, tensorData map[string][]byte) core.Result {
 	keys := slices.Sorted(maps.Keys(tensors))
 
-	offset := 0
-	updatedTensors := make(map[string]SafetensorsTensorInfo, len(tensors))
+	// Emit the JSON header directly with the package's hand-rolled emitter (shared with Encode /
+	// subsetHeaderEncoded) rather than copying into an updatedTensors map and handing it to the
+	// reflection-driven core.JSONMarshalString — that map copy plus per-field boxing was the whole
+	// per-tensor allocation cost. Byte-identical to the previous marshal for any input: keys sorted,
+	// fields in declaration order (dtype, shape, data_offsets), integers base-10, and a nil Shape
+	// emits "null" while an empty []int{} emits "[]" (the encoding/json nil-slice rule the marshal
+	// used). Offsets lay out sequentially in key order. TestSafetensors_WriteSafetensors_HeaderGolden
+	// pins the exact header bytes including the null/[] distinction.
+	estBytes := 2 // {} braces
 	for _, k := range keys {
 		info := tensors[k]
+		estBytes += len(k) + len(info.Dtype) + 12*len(info.Shape) + 64
+	}
+	headerJSON := make([]byte, 0, estBytes)
+	headerJSON = append(headerJSON, '{')
+	offset := 0
+	for i, k := range keys {
+		info := tensors[k]
 		data := tensorData[k]
-		info.DataOffsets = [2]int{offset, offset + len(data)}
-		updatedTensors[k] = info
+		if i > 0 {
+			headerJSON = append(headerJSON, ',')
+		}
+		headerJSON = appendJSONString(headerJSON, k)
+		headerJSON = append(headerJSON, ':', '{', '"', 'd', 't', 'y', 'p', 'e', '"', ':')
+		headerJSON = appendJSONString(headerJSON, info.Dtype)
+		headerJSON = append(headerJSON, ',', '"', 's', 'h', 'a', 'p', 'e', '"', ':')
+		if info.Shape == nil {
+			headerJSON = append(headerJSON, 'n', 'u', 'l', 'l')
+		} else {
+			headerJSON = append(headerJSON, '[')
+			for j, d := range info.Shape {
+				if j > 0 {
+					headerJSON = append(headerJSON, ',')
+				}
+				headerJSON = appendJSONInt64(headerJSON, int64(d))
+			}
+			headerJSON = append(headerJSON, ']')
+		}
+		headerJSON = append(headerJSON, ',', '"', 'd', 'a', 't', 'a', '_', 'o', 'f', 'f', 's', 'e', 't', 's', '"', ':', '[')
+		headerJSON = appendJSONInt64(headerJSON, int64(offset))
+		headerJSON = append(headerJSON, ',')
+		headerJSON = appendJSONInt64(headerJSON, int64(offset+len(data)))
+		headerJSON = append(headerJSON, ']', '}')
 		offset += len(data)
 	}
-
-	// updatedTensors marshals to identical JSON as a map[string]any copy
-	// (json sorts keys; struct values serialise the same boxed or not).
-	headerJSON := []byte(core.JSONMarshalString(updatedTensors))
+	headerJSON = append(headerJSON, '}')
 
 	f, err := coreio.Local.Create(path)
 	if err != nil {

@@ -94,6 +94,37 @@ func TestSafetensors_WriteSafetensors_Ugly(t *core.T) {
 	core.AssertTrue(t, coreio.Local.IsFile(file))
 }
 
+// TestSafetensors_WriteSafetensors_HeaderGolden pins the EXACT header JSON WriteSafetensors
+// emits — sorted keys, dtype/shape/data_offsets field order, sequential offsets, and crucially
+// the nil-shape → "null" vs empty-shape → "[]" distinction that any direct emitter must preserve
+// byte-for-byte against the previous reflection marshal. The round-trip tests only prove the
+// tensors survive, not that the wire header is unchanged.
+func TestSafetensors_WriteSafetensors_HeaderGolden(t *core.T) {
+	file := core.JoinPath(t.TempDir(), "golden.safetensors")
+	tensors := map[string]SafetensorsTensorInfo{
+		"nilshape":   {Dtype: "F32", Shape: nil},
+		"emptyshape": {Dtype: "U8", Shape: []int{}},
+		"normal":     {Dtype: "BF16", Shape: []int{2, 3}},
+	}
+	data := map[string][]byte{
+		"nilshape":   {1, 2, 3, 4},
+		"emptyshape": {9},
+		"normal":     {5, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17},
+	}
+	requireResultOK(t, WriteSafetensors(file, tensors, data))
+	raw, err := coreio.Local.Read(file)
+	core.RequireNoError(t, err)
+	blob := []byte(raw)
+	hsz := int(blob[0]) | int(blob[1])<<8 | int(blob[2])<<16 | int(blob[3])<<24
+	gotHeader := string(blob[8 : 8+hsz])
+	const wantHeader = `{"emptyshape":{"dtype":"U8","shape":[],"data_offsets":[0,1]},` +
+		`"nilshape":{"dtype":"F32","shape":null,"data_offsets":[1,5]},` +
+		`"normal":{"dtype":"BF16","shape":[2,3],"data_offsets":[5,17]}}`
+	if gotHeader != wantHeader {
+		t.Fatalf("WriteSafetensors header diverged:\n got=%s\nwant=%s", gotHeader, wantHeader)
+	}
+}
+
 // TestSafetensors_ReadSafetensors_RoundTrip proves Write→Read is lossless
 // over the tensor directory and data section for a multi-tensor file.
 func TestSafetensors_ReadSafetensors_RoundTrip(t *core.T) {
