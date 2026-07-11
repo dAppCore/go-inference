@@ -27,7 +27,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	modelPath := fs.String("model", "", "model path to load; empty starts the driver model-less (load a model later via POST /v1/admin/serve/reload)")
 	draftPath := fs.String("draft", "auto", "MTP drafter: 'auto' detects one beside a Gemma 4 target (assistant/ pair layout, MTP/ gguf), a path forces it, '' disables")
 	draftDetect := fs.Bool("draft-detect", true, "reactive drafter detection for Gemma 4 targets (false = only an explicit --draft engages MTP)")
-	draftBlock := fs.Int("draft-block", 0, "MTP draft block (verify forward = carried lead + block-1 proposals); 0 = engine default 4, tuned profile overrides when present")
+	draftBlock := fs.Int("draft-block", 0, "MTP draft block (verify forward = carried lead + block-1 proposals); 0 = engine default 5, tuned profile overrides when present")
 	noAutoProfile := fs.Bool("no-auto-profile", false, "ignore tuned profiles from `lem tune` (run the flag/engine-default draft block)")
 	profileDir := fs.String("profile-dir", "", "tuned-profile directory (default ~/Lethean/lem/tuning)")
 	contextLen := fs.Int("context", 0, "override context length; 0 uses the model's default")
