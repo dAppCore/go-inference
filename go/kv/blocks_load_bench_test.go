@@ -76,6 +76,26 @@ func BenchmarkLoadPrefixFromStateBlocks_NativeLayerMultiHeadSlabThreeBlocks(b *t
 	}
 }
 
+// BenchmarkLoadFromStateBlocks_GlobalSlidingMix wakes a native multi-head bundle
+// mixing full-attention (global) layers with sliding-window layers over 16
+// blocks — the 31B-class global+sliding capture shape. The sliding layers are
+// empty in the leading blocks, so this exercises the lazy placement-buffer
+// seeding that keeps the wake O(block); a regression to the merged-rebuild path
+// balloons B/op super-linearly with the block count (the fixture-hidden O(N^2)
+// the single-shape full-attention slab benches missed).
+func BenchmarkLoadFromStateBlocks_GlobalSlidingMix(b *testing.B) {
+	ctx := context.Background()
+	store, bundle := benchmarkGlobalSlidingMixFixture(b)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		snapshot, err := LoadFromStateBlocks(ctx, store, bundle)
+		if err != nil {
+			b.Fatal(err)
+		}
+		stateBlocksBenchmarkSnapshot = snapshot
+	}
+}
+
 func BenchmarkLoadPrefixFromStateBlocks_NativeLayerSingleHeadSlabPartialPrefix(b *testing.B) {
 	ctx := context.Background()
 	store, bundle := benchmarkNativeLayerSlabStateBlocksFixture(b)
