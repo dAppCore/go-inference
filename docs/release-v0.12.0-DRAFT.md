@@ -253,6 +253,7 @@ file it.
 ```sh
 git clone https://github.com/dAppCore/go-inference
 cd go-inference
+git submodule update --init external/mlx   # Apple MLX source the metallib builds from
 task metallib && task build:embed   # self-contained bin/lem
 bin/lem serve --model <gemma-4 snapshot>   # port 36911, drop-in Ollama routes
 ```
