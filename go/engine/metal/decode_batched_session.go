@@ -100,6 +100,10 @@ type denseBatchScratch struct {
 // vary it per layer); each layer's gate/up rows still land contiguously at z·itsOwnDFF in the slab.
 func (s *denseBatchScratch) mlpFold(k, dModel, dFFMax int) (h, normed, gate, up, gated, down metal.MTLBuffer) {
 	if s.hPacked == nil || s.foldRowCap < k || s.foldDModel != dModel || s.foldDFFCap < dFFMax {
+		// growth re-allocates: release the outgrown slabs first (newBuffer returns +1
+		// retained; the old handles leaked on every widening chunk). GPU-only slabs —
+		// no cached host pointers — and in-flight command buffers retain their own refs.
+		releaseDeviceBuffers(s.hPacked, s.mlpNormPacked, s.downPacked, s.gatePacked, s.upPacked, s.gatedPacked)
 		s.hPacked = scratchBF16(k * dModel)
 		s.mlpNormPacked = scratchBF16(k * dModel)
 		s.downPacked = scratchBF16(k * dModel)
@@ -120,6 +124,7 @@ func (s *denseBatchScratch) mlpFold(k, dModel, dFFMax int) (h, normed, gate, up,
 // wrote out of bounds: undefined bytes → per-process NaN/garbage → the long-context corruption.
 func (s *denseBatchScratch) attnFold(k, dModel, qDimMax, kvDimMax int) (normed, q, attn, attnOut, kStage, vStage metal.MTLBuffer) {
 	if s.attnNormPacked == nil || s.attnRowCap < k || s.attnDModel != dModel || s.foldQDimCap < qDimMax || s.foldKVDimCap < kvDimMax {
+		releaseDeviceBuffers(s.attnNormPacked, s.attnOutPacked, s.qPacked, s.attnPacked, s.kStagePacked, s.vStagePacked)
 		s.attnNormPacked = scratchBF16(k * dModel)
 		s.attnOutPacked = scratchBF16(k * dModel)
 		s.qPacked = scratchBF16(k * qDimMax)
@@ -137,6 +142,8 @@ func (s *denseBatchScratch) attnFold(k, dModel, qDimMax, kvDimMax int) (normed, 
 // read the owner's true pre-batch ring + stage. Sized by the attnFold caps; call after attnFold.
 func (s *denseBatchScratch) layerStage(li, layers, k, kvDimMax int) (kSt, vSt metal.MTLBuffer) {
 	if len(s.layerKStage) != layers || s.layerStageRowCap < k || s.layerStageKVCap < kvDimMax {
+		releaseDeviceBuffers(s.layerKStage...)
+		releaseDeviceBuffers(s.layerVStage...)
 		s.layerKStage = make([]metal.MTLBuffer, layers)
 		s.layerVStage = make([]metal.MTLBuffer, layers)
 		s.layerStageRowCap, s.layerStageKVCap = k, kvDimMax
@@ -156,6 +163,9 @@ func (s *denseBatchScratch) layerStage(li, layers, k, kvDimMax int) (kSt, vSt me
 // at the wide tail-absorbed chunk).
 func (s *denseBatchScratch) sdpaPromptS(kRows, nCap int) (s0, s1 metal.MTLBuffer) {
 	if s.sdpaS0 == nil || s.sdpaSRowCap < kRows || s.sdpaSNCap < nCap {
+		// the census's GB-scale leak: these two slabs run to sdpaPromptSBudgetBytes/
+		// sdpaPromptSMaxBytes each, and every growth dropped the old pair unreleased.
+		releaseDeviceBuffers(s.sdpaS0, s.sdpaS1)
 		rows := max(kRows, s.sdpaSRowCap)
 		cols := max(nCap, s.sdpaSNCap)
 		s.sdpaS0 = scratchBF16(rows * cols)
@@ -182,6 +192,15 @@ func (s *denseBatchScratch) Close() {
 		s.outputViews[i].Close()
 	}
 	s.lastOutView.Close()
+	// the fold/stage/score slabs are +1 retained and session-lifetime — zeroing the
+	// struct without releasing them leaked the whole grown set on every session close.
+	// (The row-plumbing buffers — offBuf/inPacked/outPacked/lastRows — cache host
+	// pointers and keep their own lifecycle; they are NOT released here.)
+	releaseDeviceBuffers(s.hPacked, s.mlpNormPacked, s.downPacked, s.gatePacked, s.upPacked, s.gatedPacked)
+	releaseDeviceBuffers(s.attnNormPacked, s.attnOutPacked, s.qPacked, s.attnPacked, s.kStagePacked, s.vStagePacked)
+	releaseDeviceBuffers(s.layerKStage...)
+	releaseDeviceBuffers(s.layerVStage...)
+	releaseDeviceBuffers(s.sdpaS0, s.sdpaS1)
 	*s = denseBatchScratch{}
 }
 
