@@ -3,7 +3,6 @@
 package safetensors
 
 import (
-	"encoding/binary"
 	"math"
 	"unsafe"
 
@@ -80,9 +79,12 @@ func DecodeFloat32(dtype string, raw []byte, elements int) ([]float32, error) {
 //	tensorData["merged.weight"] = safetensors.EncodeFloat32(merged)
 func EncodeFloat32(values []float32) []byte {
 	raw := make([]byte, len(values)*4)
-	for i, v := range values {
-		binary.LittleEndian.PutUint32(raw[i*4:], math.Float32bits(v))
-	}
+	// Reinterpret-cast copy: float32 storage is little-endian on both Go targets this tree builds
+	// (arm64 + amd64), so one memcpy of the values' byte view is bit-identical to the per-element
+	// binary.LittleEndian.PutUint32(Float32bits(v)) loop — the encode twin of DecodeFloat32's F32
+	// reinterpret. A zero-length input yields an empty slice, as before.
+	src := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(values))), len(values)*4)
+	copy(raw, src)
 	return raw
 }
 
