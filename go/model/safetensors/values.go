@@ -3,8 +3,8 @@
 package safetensors
 
 import (
-	"encoding/binary"
 	"math"
+	"unsafe"
 
 	core "dappco.re/go"
 )
@@ -32,34 +32,40 @@ var (
 //	if err != nil { return err }
 func DecodeFloat32(dtype string, raw []byte, elements int) ([]float32, error) {
 	values := make([]float32, elements)
+	// Decode via reinterpret-casts of the little-endian on-disk bytes (arm64 + amd64 are both
+	// little-endian, the only Go targets this tree builds), matching index.go's DecodeFloatData:
+	// F16 then rides the NEON FCVTL batch path on darwin/arm64. Bit-identical to the previous
+	// per-element binary.LittleEndian decode — the parity is pinned for F16 by
+	// TestFloat16ToFloat32_NEONParity_BitExact — but skips the per-iter raw[i*n:] re-slice and
+	// byte-combine. Only reached for elements > 0, so raw is non-empty and unsafe.SliceData is valid.
 	switch core.Upper(dtype) {
 	case "F32":
 		if len(raw) != elements*4 {
 			return nil, errDecodeF32PayloadMismatch
 		}
-		for i := range values {
-			values[i] = math.Float32frombits(binary.LittleEndian.Uint32(raw[i*4:]))
-		}
+		dst := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(values))), elements*4)
+		copy(dst, raw)
 	case "F16":
 		if len(raw) != elements*2 {
 			return nil, errDecodeF16PayloadMismatch
 		}
-		for i := range values {
-			values[i] = Float16ToFloat32(binary.LittleEndian.Uint16(raw[i*2:]))
-		}
+		src16 := unsafe.Slice((*uint16)(unsafe.Pointer(unsafe.SliceData(raw))), elements)
+		float16SliceToFloat32(src16, values, elements)
 	case "BF16":
 		if len(raw) != elements*2 {
 			return nil, errDecodeBF16PayloadMismatch
 		}
-		for i := range values {
-			values[i] = BFloat16ToFloat32(binary.LittleEndian.Uint16(raw[i*2:]))
+		src16 := unsafe.Slice((*uint16)(unsafe.Pointer(unsafe.SliceData(raw))), elements)
+		for i, v := range src16 {
+			values[i] = math.Float32frombits(uint32(v) << 16)
 		}
 	case "F64":
 		if len(raw) != elements*8 {
 			return nil, errDecodeF64PayloadMismatch
 		}
-		for i := range values {
-			values[i] = float32(math.Float64frombits(binary.LittleEndian.Uint64(raw[i*8:])))
+		src64 := unsafe.Slice((*float64)(unsafe.Pointer(unsafe.SliceData(raw))), elements)
+		for i, v := range src64 {
+			values[i] = float32(v)
 		}
 	default:
 		return nil, core.NewError("safetensors: unsupported safetensors dtype for float decode: " + dtype)
@@ -73,9 +79,12 @@ func DecodeFloat32(dtype string, raw []byte, elements int) ([]float32, error) {
 //	tensorData["merged.weight"] = safetensors.EncodeFloat32(merged)
 func EncodeFloat32(values []float32) []byte {
 	raw := make([]byte, len(values)*4)
-	for i, v := range values {
-		binary.LittleEndian.PutUint32(raw[i*4:], math.Float32bits(v))
-	}
+	// Reinterpret-cast copy: float32 storage is little-endian on both Go targets this tree builds
+	// (arm64 + amd64), so one memcpy of the values' byte view is bit-identical to the per-element
+	// binary.LittleEndian.PutUint32(Float32bits(v)) loop — the encode twin of DecodeFloat32's F32
+	// reinterpret. A zero-length input yields an empty slice, as before.
+	src := unsafe.Slice((*byte)(unsafe.Pointer(unsafe.SliceData(values))), len(values)*4)
+	copy(raw, src)
 	return raw
 }
 

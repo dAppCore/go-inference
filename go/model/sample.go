@@ -199,16 +199,24 @@ func (s *Sampler) sampleMapped(logits []byte, ids []int32, vocab int, p SamplePa
 		return s.sampleMappedInVocabOrder(probs, ids, vocab, sum)
 	}
 
-	// rank by probability, descending (top-k + top-p both work over this order).
-	order := s.order[:vocab]
-	for i := range order {
-		order[i] = i
-	}
-	sort.SliceStable(order, func(a, b int) bool { return probs[order[a]] > probs[order[b]] })
-
+	// rank by probability, descending (top-k + top-p both work over this order). Only
+	// the top `keep` entries are ever read below, so when top-k caps the set we select
+	// just those instead of sorting the whole vocab: a bounded O(vocab + keep·log keep)
+	// heap select produces the identical prefix a full stable sort would, without paying
+	// O(vocab·log vocab) to read 64 rows out of 256k. Top-p / min-p alone can walk the
+	// entire ordering, so those keep the full sort.
 	keep := vocab
 	if p.TopK > 0 && p.TopK < keep {
 		keep = p.TopK
+	}
+	order := s.order[:keep]
+	if keep == vocab {
+		for i := range order {
+			order[i] = i
+		}
+		sort.SliceStable(order, func(a, b int) bool { return probs[order[a]] > probs[order[b]] })
+	} else {
+		selectTopKDesc(order, probs, vocab)
 	}
 	if p.TopP > 0 && p.TopP < 1 {
 		keptMass := sum
@@ -270,6 +278,60 @@ func sampleRankFilterNeeded(p SampleParams, vocab int) bool {
 		return true
 	}
 	return p.MinP > 0
+}
+
+// selectTopKDesc fills dst with the indices of the k = len(dst) highest-ranked entries
+// of probs[:vocab], ordered exactly as the first k of a descending sort.SliceStable by
+// probs (ties broken by ascending index, matching the stable sort's original-order rule).
+// It is the bounded equivalent of ranking the whole vocab when only the top k positions
+// are read: an O(vocab + k·log k) min-heap select rather than an O(vocab·log vocab) sort.
+// Callers must ensure 0 < k <= vocab.
+func selectTopKDesc(dst []int, probs []float32, vocab int) {
+	k := len(dst)
+	for i := 0; i < k; i++ {
+		dst[i] = i
+	}
+	// Min-heap by rank (root = lowest-ranked kept), so the weakest survivor evicts first.
+	for i := k/2 - 1; i >= 0; i-- {
+		siftDownByRank(dst, i, k, probs)
+	}
+	for i := k; i < vocab; i++ {
+		if rankLess(probs, dst[0], i) { // the kept minimum is outranked by i → i replaces it
+			dst[0] = i
+			siftDownByRank(dst, 0, k, probs)
+		}
+	}
+	// The kept set is a heap; order it as the stable descending sort would. rankLess is a
+	// strict total order over distinct indices, so an unstable sort is deterministic here.
+	sort.Slice(dst, func(a, b int) bool { return rankLess(probs, dst[b], dst[a]) })
+}
+
+// rankLess reports whether index a ranks below index b under the sampler's stable-descending
+// order: strictly lower probability, or equal probability with a higher index (the stable
+// sort keeps the lower index ahead).
+func rankLess(probs []float32, a, b int) bool {
+	if probs[a] != probs[b] {
+		return probs[a] < probs[b]
+	}
+	return a > b
+}
+
+// siftDownByRank restores the min-heap property (root = lowest rank) at node i over h[:n].
+func siftDownByRank(h []int, i, n int, probs []float32) {
+	for {
+		lo := i
+		if l := 2*i + 1; l < n && rankLess(probs, h[l], h[lo]) {
+			lo = l
+		}
+		if r := 2*i + 2; r < n && rankLess(probs, h[r], h[lo]) {
+			lo = r
+		}
+		if lo == i {
+			break
+		}
+		h[i], h[lo] = h[lo], h[i]
+		i = lo
+	}
 }
 
 func (s *Sampler) sampleMappedInVocabOrder(probs []float32, ids []int32, vocab int, sum float32) (int32, error) {
