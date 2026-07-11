@@ -1,5 +1,5 @@
 [![Go Reference](https://pkg.go.dev/badge/dappco.re/go/inference.svg)](https://pkg.go.dev/dappco.re/go/inference)
-[![License: EUPL-1.2](https://img.shields.io/badge/License-EUPL--1.2-blue.svg)](LICENSE.md)
+[![Licence: EUPL-1.2](https://img.shields.io/badge/Licence-EUPL--1.2-blue.svg)](LICENCE)
 [![Go Version](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat&logo=go)](go.mod)
 
 # go-inference
