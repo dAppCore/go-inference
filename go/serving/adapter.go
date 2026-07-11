@@ -86,20 +86,11 @@ func (a *InferenceAdapter) GenerateStream(ctx context.Context, prompt string, op
 		return a.model.Err()
 	}
 
-	full := core.NewBuilder()
-	emitted := 0
-	for tok := range a.model.Generate(ctx, prompt, inferOpts...) {
-		full.WriteString(tok.Text)
-		truncated := applyStopSequences(full.String(), opts.StopSequences)
-		if len(truncated) > emitted {
-			if err := cb(truncated[emitted:]); err != nil {
-				return core.Fail(err)
-			}
-			emitted = len(truncated)
-		}
-		if len(truncated) < full.Len() {
-			return a.model.Err()
-		}
+	// streamStopWindow rescans a bounded (maxStopLen-1)+token window instead of
+	// the whole accumulated reply each token — the old applyStopSequences over
+	// full.String() every token was O(N^2) time over an N-token stream (#380).
+	if err := streamStopWindow(a.model.Generate(ctx, prompt, inferOpts...), opts.StopSequences, cb); err != nil {
+		return core.Fail(err)
 	}
 	return a.model.Err()
 }
@@ -121,20 +112,9 @@ func (a *InferenceAdapter) ChatStream(ctx context.Context, messages []Message, o
 		return a.model.Err()
 	}
 
-	full := core.NewBuilder()
-	emitted := 0
-	for tok := range a.model.Chat(ctx, messages, inferOpts...) {
-		full.WriteString(tok.Text)
-		truncated := applyStopSequences(full.String(), opts.StopSequences)
-		if len(truncated) > emitted {
-			if err := cb(truncated[emitted:]); err != nil {
-				return core.Fail(err)
-			}
-			emitted = len(truncated)
-		}
-		if len(truncated) < full.Len() {
-			return a.model.Err()
-		}
+	// See GenerateStream — same bounded-window stop scan (#380).
+	if err := streamStopWindow(a.model.Chat(ctx, messages, inferOpts...), opts.StopSequences, cb); err != nil {
+		return core.Fail(err)
 	}
 	return a.model.Err()
 }
