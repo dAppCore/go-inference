@@ -138,10 +138,29 @@ tok/turn while the client resends full history.
   replay's own caches, and the batched pass prefers the ICB set when
   present (decode_batched_session.go:961) — 17.2GB allocated-but-idle on
   31B@256K — plus the sdpaPromptS S-slabs (2 × rows×maxLen bf16, whose
-  growth realloc also drops old slabs unreleased). The 256K re-lift is
-  gated on the cache dedupe (map the lb-cache fallback lanes first — a
-  q8 session's bf16 fallback may be dead code or a divergence risk) + a
-  RAM-aware default. Then the N-bit knob.
+  growth realloc also drops old slabs unreleased).
+  **THE DEDUPE SHIPPED** (`13ffe18`, 2026-07-11): session builders defer
+  the lb KV allocation (kvCacheBytes recorded, buffers nil) and the four
+  lanes that genuinely read lb ensure it on first touch (stepToken top,
+  non-ICB batched entry, the paged↔linear bridge, the state-view lb
+  branch) — a recorded-ICB session now never materialises the set, and
+  `TestICBSessionDefersLBKVCaches` pins that through build/prefill/
+  decode/serialize/restore. Care-map that proved it: every batched site
+  overrides to icbK/icbV, declines fall to the per-token replay,
+  prefillCachedIDs' lb fallback is gated icb==nil, state views branch to
+  icb/q8-mirrors first, and the sequential encoder prefers the PAGED
+  pool — the only lb consumer on a real session is the LTHN_DECODE_ICB=0
+  lever (tests set it around fresh builds; ensure serves it).
+  HONESTY NOTE on the census number: the dup was CLEAN-but-mapped GPU VA,
+  not dirty RSS — e2b@128K receipt: IOAccelerator(graphics) VA 5.6G→4.1G
+  (−1.5G, regions 1183→1133), physical peak only 4.9G→4.8G, resident 4.1G
+  both, decode 155.9→155.3 tok/s + prefill 1076→1077ms (parity), suite
+  1507 green. So the 31B@256K swap driver was NOT the lb dup (clean pages
+  don't swap) — it was the live ICB caches + mirrors + slabs; the dedupe
+  buys ~17GB of Metal VA/working-set headroom at 256K, which is what
+  trips allocation failures near the wired limit. The 256K re-lift still
+  needs the RAM-aware default + the sdpaPromptS slab fix + a quiet-box
+  31B receipt. Then the N-bit knob.
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
