@@ -186,23 +186,37 @@ func scoreDegeneration(response string) int {
 		return 5
 	}
 
-	sentences := core.Split(response, ".")
-	// Count non-empty sentences and dedup in a single pass — the previous
-	// `filtered` slice was an avoidable intermediate (sentences are only
-	// consumed to compute total + unique). Presize the map to the sentence
-	// count to skip incremental bucket growth.
+	// Two non-allocating passes over the '.'-delimited sentences rather than
+	// core.Split(response, ".") (which allocates a []string of every segment):
+	// first count the non-empty trimmed segments (response[start:i]), then
+	// dedup them into the map presized to that count. The segment set is
+	// identical to Split's (trimmed, empty-skipped), so total and the unique
+	// set are byte-identical — this drops the intermediate []string, leaving
+	// only the map alloc. Mirrors lek.lekDegeneration's proven form.
 	total := 0
-	unique := make(map[string]struct{}, len(sentences))
-	for _, s := range sentences {
-		trimmed := core.Trim(s)
-		if trimmed != "" {
-			total++
-			unique[trimmed] = struct{}{}
+	start := 0
+	for i := 0; i <= len(response); i++ {
+		if i < len(response) && response[i] != '.' {
+			continue
 		}
+		if t := core.Trim(response[start:i]); t != "" {
+			total++
+		}
+		start = i + 1
 	}
-
 	if total == 0 {
 		return 10
+	}
+	unique := make(map[string]struct{}, total)
+	start = 0
+	for i := 0; i <= len(response); i++ {
+		if i < len(response) && response[i] != '.' {
+			continue
+		}
+		if t := core.Trim(response[start:i]); t != "" {
+			unique[t] = struct{}{}
+		}
+		start = i + 1
 	}
 
 	uniqueCount := len(unique)

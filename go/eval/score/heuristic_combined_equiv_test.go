@@ -193,3 +193,69 @@ func TestHeuristic_scoreCreativeForm_LineWalkEquivalence(t *testing.T) {
 		}
 	}
 }
+
+// refScoreDegeneration is the pre-optimisation degeneration scorer built on
+// core.Split(response,".") — the reference the two-pass in-place walk must match.
+func refScoreDegeneration(response string) int {
+	if response == "" {
+		return 10
+	}
+	if truncationPattern.MatchString(response) {
+		return 5
+	}
+	sentences := core.Split(response, ".")
+	total := 0
+	unique := make(map[string]struct{}, len(sentences))
+	for _, s := range sentences {
+		trimmed := core.Trim(s)
+		if trimmed != "" {
+			total++
+			unique[trimmed] = struct{}{}
+		}
+	}
+	if total == 0 {
+		return 10
+	}
+	uniqueCount := len(unique)
+	repeatRatio := 1.0 - float64(uniqueCount)/float64(total)
+	if repeatRatio > 0.5 {
+		return 5
+	}
+	if repeatRatio > 0.3 {
+		return 3
+	}
+	if repeatRatio > 0.15 {
+		return 1
+	}
+	return 0
+}
+
+// buildDegenCorpus makes '.'-delimited multi-sentence texts with deliberate
+// repetition so the dedup/repeat-ratio thresholds actually fire.
+func buildDegenCorpus(n int) []string {
+	r := rand.New(rand.NewSource(0xDE6E))
+	pool := []string{"the cat sat", "hello world", "same", "same", "again and again", "", " ", "a"}
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		nsent := r.Intn(10)
+		buf := make([]byte, 0, 128)
+		for s := 0; s < nsent; s++ {
+			buf = append(buf, pool[r.Intn(len(pool))]...)
+			if r.Intn(3) != 0 {
+				buf = append(buf, '.')
+			}
+		}
+		out = append(out, string(buf))
+	}
+	return out
+}
+
+func TestHeuristic_scoreDegeneration_WalkEquivalence(t *testing.T) {
+	corpus := append(append([]string{}, heurEquivCorpus...), buildDegenCorpus(30000)...)
+	corpus = append(corpus, "a. a. a. a. b.", "one. two. three.", "...", ". . .", "x")
+	for _, text := range corpus {
+		if got, want := scoreDegeneration(text), refScoreDegeneration(text); got != want {
+			t.Fatalf("scoreDegeneration divergence: got %d want %d for %q", got, want, text)
+		}
+	}
+}
