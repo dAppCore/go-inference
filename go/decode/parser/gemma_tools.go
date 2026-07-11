@@ -311,15 +311,22 @@ func parseGemmaCallSpan(span string) (inference.ToolCall, bool) {
 // — mirroring the cast in the gemma4 function-calling reference. inner is the
 // already-unwrapped object body (the outer braces stripped by the caller).
 func gemmaArgsToJSON(inner string) string {
-	obj, _ := gemmaObjectBody(inner, 0)
+	// Append the whole object into one buffer sized to the input rather than
+	// letting every nested value/object/array return its own freshly-allocated
+	// []byte the parent then copies back in. JSON quoting/escaping can nudge the
+	// size, so a drifted estimate costs at most a single append-grow; the common
+	// case is one backing allocation. len(inner)+2 covers the braces.
+	obj, _ := gemmaAppendObjectBody(make([]byte, 0, len(inner)+2), inner, 0)
 	return string(obj)
 }
 
-// gemmaObjectBody parses key:value pairs from s[i] into a JSON object, stopping
-// at a closing '}' (consumed) or end of input. Nested values recurse via
-// gemmaValue. Returns the JSON object and the index just past the body.
-func gemmaObjectBody(s string, i int) ([]byte, int) {
-	buf := []byte{'{'}
+// gemmaAppendObjectBody appends the JSON object for the key:value pairs in s[i…]
+// onto dst, stopping at a closing '}' (consumed) or end of input, and returns the
+// grown buffer plus the index just past the body. Nested values recurse via
+// gemmaAppendValue, all writing into the same dst — byte-identical to the prior
+// shape that returned a fresh []byte per node and copied it back in.
+func gemmaAppendObjectBody(dst []byte, s string, i int) ([]byte, int) {
+	dst = append(dst, '{')
 	first := true
 	for {
 		i = gemmaSkipSep(s, i)
@@ -334,25 +341,33 @@ func gemmaObjectBody(s string, i int) ([]byte, int) {
 			break
 		}
 		key := core.Trim(s[i:colon])
-		val, next := gemmaValue(s, colon+1)
-		if key != "" {
-			if !first {
-				buf = append(buf, ',')
-			}
-			first = false
-			buf = jsonenc.AppendJSONString(buf, key)
-			buf = append(buf, ':')
-			buf = append(buf, val...)
+		if key == "" {
+			// Keyless pair: parse the value only to advance the index (the prior
+			// shape computed val then discarded it), rolling dst back so nothing
+			// is emitted.
+			mark := len(dst)
+			var next int
+			dst, next = gemmaAppendValue(dst, s, colon+1)
+			dst = dst[:mark]
+			i = next
+			continue
 		}
-		i = next
+		if !first {
+			dst = append(dst, ',')
+		}
+		first = false
+		dst = jsonenc.AppendJSONString(dst, key)
+		dst = append(dst, ':')
+		dst, i = gemmaAppendValue(dst, s, colon+1)
 	}
-	return append(buf, '}'), i
+	return append(dst, '}'), i
 }
 
-// gemmaArrayBody parses comma-separated values from s[i] into a JSON array,
-// stopping at ']' (consumed) or end. Returns the array and the index past it.
-func gemmaArrayBody(s string, i int) ([]byte, int) {
-	buf := []byte{'['}
+// gemmaAppendArrayBody appends the JSON array for the comma-separated values in
+// s[i…] onto dst, stopping at ']' (consumed) or end, and returns the grown buffer
+// and the index past it.
+func gemmaAppendArrayBody(dst []byte, s string, i int) ([]byte, int) {
+	dst = append(dst, '[')
 	first := true
 	for {
 		i = gemmaSkipSep(s, i)
@@ -362,47 +377,45 @@ func gemmaArrayBody(s string, i int) ([]byte, int) {
 			}
 			break
 		}
-		val, next := gemmaValue(s, i)
 		if !first {
-			buf = append(buf, ',')
+			dst = append(dst, ',')
 		}
 		first = false
-		buf = append(buf, val...)
-		i = next
+		dst, i = gemmaAppendValue(dst, s, i)
 	}
-	return append(buf, ']'), i
+	return append(dst, ']'), i
 }
 
-// gemmaValue parses one value at s[i] — a <|"|>-delimited string, a {nested
-// object}, an [array], or a bare scalar — returning its JSON bytes and the index
-// just past the value.
-func gemmaValue(s string, i int) ([]byte, int) {
+// gemmaAppendValue appends one value at s[i] — a <|"|>-delimited string, a
+// {nested object}, an [array], or a bare scalar — onto dst and returns the grown
+// buffer and the index just past the value.
+func gemmaAppendValue(dst []byte, s string, i int) ([]byte, int) {
 	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
 		i++
 	}
 	if i >= len(s) {
-		return []byte("null"), i
+		return append(dst, "null"...), i
 	}
 	if core.HasPrefix(s[i:], ToolArgQuoteMarker) {
 		j := i + len(ToolArgQuoteMarker)
 		end := gemmaIndexStr(s, j, ToolArgQuoteMarker)
 		if end < 0 {
-			return jsonenc.AppendJSONString(nil, s[j:]), len(s)
+			return jsonenc.AppendJSONString(dst, s[j:]), len(s)
 		}
-		return jsonenc.AppendJSONString(nil, s[j:end]), end + len(ToolArgQuoteMarker)
+		return jsonenc.AppendJSONString(dst, s[j:end]), end + len(ToolArgQuoteMarker)
 	}
 	switch s[i] {
 	case '{':
-		return gemmaObjectBody(s, i+1)
+		return gemmaAppendObjectBody(dst, s, i+1)
 	case '[':
-		return gemmaArrayBody(s, i+1)
+		return gemmaAppendArrayBody(dst, s, i+1)
 	}
 	// Bare scalar — runs to the next separator or closing bracket.
 	j := i
 	for j < len(s) && s[j] != ',' && s[j] != '}' && s[j] != ']' {
 		j++
 	}
-	return bareArgToJSON(core.Trim(s[i:j])), j
+	return gemmaAppendBareArg(dst, core.Trim(s[i:j])), j
 }
 
 // gemmaSkipSep skips whitespace and leading separator commas.
@@ -431,16 +444,16 @@ func gemmaIndexStr(s string, i int, sub string) int {
 	return -1
 }
 
-// bareArgToJSON renders an unquoted argument value: a JSON literal when it is one
-// (number / true / false / null), otherwise a JSON string so the object stays
-// valid regardless of what the model emitted.
-func bareArgToJSON(v string) []byte {
+// gemmaAppendBareArg appends an unquoted argument value onto dst: a JSON literal
+// when it is one (number / true / false / null), otherwise a JSON string so the
+// object stays valid regardless of what the model emitted.
+func gemmaAppendBareArg(dst []byte, v string) []byte {
 	switch v {
 	case "true", "false", "null":
-		return []byte(v)
+		return append(dst, v...)
 	}
 	if _, err := strconv.ParseFloat(v, 64); err == nil {
-		return []byte(v)
+		return append(dst, v...)
 	}
-	return jsonenc.AppendJSONString(nil, v)
+	return jsonenc.AppendJSONString(dst, v)
 }
