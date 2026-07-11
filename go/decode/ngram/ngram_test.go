@@ -2,7 +2,78 @@
 
 package ngram
 
-import "testing"
+import (
+	"math/rand"
+	"testing"
+)
+
+// referenceLookup is the independent, deliberately-naive spec oracle for lookup:
+// for n from maxNgram down to 1 it takes the last n tokens and scans backwards for
+// the most-recent non-overlapping earlier occurrence, returning up to maxDraft
+// tokens that followed it. It is written for obvious correctness, not speed — the
+// differential fixture (TestNgram_Lookup_MatchesReferenceFuzz) asserts the real
+// lookup is byte-identical to it across a wide random input space, so the fast
+// anchor scan can never silently diverge from the longest-suffix / most-recent /
+// non-overlap contract the hand-written cases below pin.
+func referenceLookup(context []int, maxNgram, maxDraft int) []int {
+	L := len(context)
+	if L < 2 {
+		return nil
+	}
+	maxN := maxNgram
+	if maxN > L-1 {
+		maxN = L - 1
+	}
+	for n := maxN; n >= 1; n-- {
+		suffixStart := L - n
+		for i := suffixStart - n; i >= 0; i-- {
+			match := true
+			for j := 0; j < n; j++ {
+				if context[i+j] != context[suffixStart+j] {
+					match = false
+					break
+				}
+			}
+			if !match {
+				continue
+			}
+			from := i + n
+			end := from + maxDraft
+			if end > L {
+				end = L
+			}
+			out := make([]int, end-from)
+			copy(out, context[from:end])
+			return out
+		}
+	}
+	return nil
+}
+
+// TestNgram_Lookup_MatchesReferenceFuzz is the byte-identity gate for the anchor
+// scan: over thousands of random contexts drawn from a deliberately tiny alphabet
+// (so suffixes collide often and the longest / most-recent / non-overlap arbitration
+// is exercised hard), the production lookup must agree with the naive reference for
+// every (MaxNgram, MaxDraft) pair. A single divergence fails the pass.
+func TestNgram_Lookup_MatchesReferenceFuzz(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	for iter := 0; iter < 20000; iter++ {
+		L := rng.Intn(40)
+		alphabet := 1 + rng.Intn(4) // 1..4 distinct ids → frequent collisions
+		ctx := make([]int, L)
+		for i := range ctx {
+			ctx[i] = rng.Intn(alphabet)
+		}
+		maxNgram := 1 + rng.Intn(5)
+		maxDraft := 1 + rng.Intn(6)
+		got := lookup(ctx, maxNgram, maxDraft)
+		want := referenceLookup(ctx, maxNgram, maxDraft)
+		if !eq(got, want) {
+			t.Fatalf("lookup diverged from reference:\n ctx=%v maxNgram=%d maxDraft=%d\n got  %v\n want %v",
+				ctx, maxNgram, maxDraft, got, want)
+		}
+	}
+}
 
 // eq reports whether two token slices are element-wise equal. A nil slice and an
 // empty slice are treated as equal (both mean "no draft proposed").
