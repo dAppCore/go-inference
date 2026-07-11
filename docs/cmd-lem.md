@@ -131,12 +131,13 @@ lem generate -state chat1 -prompt "Hello, who are you?" ~/models/gemma-4-e2b-it-
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `-prompt` | (a Go linked-list prompt) | user prompt |
+| `-prompt-file` | `""` | read the user prompt from a file (long-context runs exceed argv limits); overrides `-prompt` |
 | `-max-tokens` | `128` | tokens to generate |
 | `-temp` | `1.0` | sampling temperature (0 = greedy/argmax — fastest, fair vs `llama-bench`) |
 | `-think` | `false` | enable the thinking channel (off keeps the decode rate clean) |
 | `-context` | `0` | context length override (0 = model default) |
 | `-kv-cache` | `""` | KV cache mode (`paged`, `fp16`, `q8`, `kq8vq4`, `turboquant`; empty = load default) |
-| `-kv-storage` | `""` | retained KV storage dtype (`fp16`, `bf16`; empty = native fp32) |
+| `-kv-storage` | `""` | KV snapshot encoding for `-state` sleeps (`native`, `q8`, `float32`; empty = native) — inert without `-state` |
 | `-draft` | `auto` | MTP drafter (as for `serve`) |
 | `-draft-block` | `0` | MTP draft block; 0 = engine default (5) |
 | `-pipeline` | `true` | one-ahead pipelined decode (false forces the serial loop, for A/B traces) |
@@ -147,6 +148,7 @@ lem generate -state chat1 -prompt "Hello, who are you?" ~/models/gemma-4-e2b-it-
 | `-raw` | `false` | with `-state`: skip chat-framing and run the raw completion-loop turn (ignored without `-state`) |
 | `-image` | (repeatable) | image input for a vision model: a local PNG/JPEG path or a base64 `data:` URL; gated on the model's vision capability |
 | `-audio` | (repeatable) | reserved — no engine-neutral audio-input seam yet, so passing one errors (follow-up) |
+| `-video-frame` | (repeatable) | one sampled video frame in time order: a local PNG/JPEG path or a base64 `data:` URL — frames become timestamped vision blocks 1s apart |
 
 ---
 
