@@ -629,3 +629,61 @@ func TestArchSessionCloseReleasesICBKVCaches(t *testing.T) {
 		t.Fatalf("session close leaked ICB KV caches: device allocation grew %dMB over 3 open+close cycles", grew>>20)
 	}
 }
+
+// TestFlashQ8PromptMatchesMirrorLane pins the #375 phase-3 contract: the
+// q8-READING flash (codes+scales dequantised inside the tile load, no
+// mirrors) must track the mirror-dequant lane it replaces within
+// quantisation distance across a prompt-scale prefill + decode. Fresh
+// session per lane; both are token-identity tiers against the sequential
+// oracle, so the bar is closeness, not bytes.
+func TestFlashQ8PromptMatchesMirrorLane(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	if !flashQ8Usable(256, 1<<20) {
+		t.Skip("q8 flash kernel unavailable")
+	}
+	const maxLen = 8192
+	prompt := make([]int32, 4600) // past sdpaPromptGEMMMinKV with the fold engaged
+	for i := range prompt {
+		prompt[i] = int32(1 + i%50)
+	}
+	run := func(mirrorLane bool) [][]byte {
+		flashQ8OffForTest = mirrorLane
+		defer func() { flashQ8OffForTest = false }()
+		sess := newKVQ8ICBFixtureLen(t, maxLen)
+		if err := sess.PrefillTokens(prompt); err != nil {
+			t.Fatalf("PrefillTokens (mirror=%v): %v", mirrorLane, err)
+		}
+		var outs [][]byte
+		for _, id := range []int32{7, 3, 9, 5} {
+			h, err := sess.stepID(id)
+			if err != nil {
+				t.Fatalf("stepID (mirror=%v): %v", mirrorLane, err)
+			}
+			outs = append(outs, append([]byte(nil), h...))
+		}
+		return outs
+	}
+	flash := run(false)
+	mirror := run(true)
+	for i := range flash {
+		if len(flash[i]) != len(mirror[i]) {
+			t.Fatalf("step %d: hidden sizes differ", i)
+		}
+		worst := 0.0
+		for j := 0; j+1 < len(flash[i]); j += 2 {
+			a := float64(bf16ToF32(flash[i][j], flash[i][j+1]))
+			b := float64(bf16ToF32(mirror[i][j], mirror[i][j+1]))
+			if d := math.Abs(a - b); d > worst {
+				worst = d
+			}
+		}
+		// quantisation-distance bar: both lanes read the SAME q8 codes; the only
+		// difference is dequant placement + accumulation order.
+		if worst > 0.5 {
+			t.Fatalf("step %d: q8 flash diverges from the mirror lane: worst |Δ| = %.4f", i, worst)
+		}
+		t.Logf("step %d worst |Δ| = %.4f", i, worst)
+	}
+}

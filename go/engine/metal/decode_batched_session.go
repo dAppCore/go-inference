@@ -1131,15 +1131,21 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			// multiQ q8: attn.sdpa 323.6ms vs 71.3ms per chunk at basePos 25600
 			// (the whole 2-3.6x q8 prefill tax). Mirror ensure failing (no
 			// dequant kernel, alloc failure) keeps the multiQ fallback.
+			// q8 flash (#375 phase 3): the flash lane reads the int8 codes + scales
+			// directly, so a q8 owner needs NO mirrors and NO dequant dispatches on
+			// that route — the ensure below runs only for the composition/bf16-flash
+			// fallbacks.
+			flashQ8 := ownerQ8 && flashPromptEnabled && flashQ8Enabled &&
+				!flashQ8OffForTest && flashQ8Usable(lhd, basePos+K)
 			var q8GEMMK, q8GEMMV metal.MTLBuffer
-			if ownerQ8 && gpuHasKVQ8DequantRows() {
+			if ownerQ8 && !flashQ8 && gpuHasKVQ8DequantRows() {
 				q8GEMMK, q8GEMMV, _ = s.icb.ensureQ8Mirrors(ownIdx)
 			}
 			useGEMMSDPA := useMultiQ && slideW == 0 && basePos+K >= sdpaPromptGEMMMinKV &&
 				K <= sdpaPromptGEMMMaxRows && sdpaPromptGEMMFeasible(K, s.maxLen) &&
 				!sdpaPromptGEMMDisabledForTest &&
 				!sdpaPromptGEMMEnvDisabled() && gpuHasPromptSDPAGEMM() &&
-				(!ownerQ8 || q8GEMMK != nil)
+				(!ownerQ8 || q8GEMMK != nil || flashQ8)
 			if batchedRope {
 				if err = encQKNormRopeRows(enc, qSlab, s.lb[li].qNorm.buf, qSlab, 0, s.lb[li].qNorm.off, 0, qDim, qDim, offBuf[0], layerRopeFreqs, K, s.nHeads, lhd, rotDim, rbase, s.scale, s.eps); err != nil {
 					endEncodingFast(enc)
@@ -1273,7 +1279,16 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			if deferredRing {
 				kSt, vSt := s.denseBatch.layerStage(ownIdx, len(s.specs), K, foldKVDimMax)
 				ringLive := min(basePos, slideW)
-				if err = encSDPAMultiQRing(enc, qSlab, ownerK, ownerV, kSt, vSt, attnSlab,
+				if flashPromptEnabled && flashWinEnabled && !flashWinOffForTest && flashWinUsable(lhd) {
+					// window flash (#375 phase 4): the query tile streams its own
+					// ≤ W+BQ key span once, shared by 32 queries — the multiQ ring
+					// kernel it replaces re-read the window per query row.
+					if err = encFlashWindowSDPA(enc, qSlab, ownerK, ownerV, kSt, vSt, attnSlab,
+						s.nHeads, lkv, lhd, K, slideW, basePos, ringLive, qDim, kvDim, s.scale); err != nil {
+						endEncodingFast(enc)
+						return nil, false, err
+					}
+				} else if err = encSDPAMultiQRing(enc, qSlab, ownerK, ownerV, kSt, vSt, attnSlab,
 					s.nHeads, lkv, lhd, K, slideW, basePos%slideW, ringLive,
 					int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s.scale); err != nil {
 					endEncodingFast(enc)
@@ -1282,6 +1297,15 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				if ownsCache {
 					stagedDeferred[li] = true
 					pendingLandings = append(pendingLandings, ringLanding{li: li, kvDim: kvDim, slideW: slideW})
+				}
+			} else if useGEMMSDPA && flashQ8 {
+				// q8 codes + scales straight into the flash tiles — no mirrors on
+				// this route (the ensure above was skipped), half the K/V bytes.
+				if err = encFlashPromptQ8(enc, qSlab, ownerK, ownerV,
+					s.icb.kvQ8.kScales[ownIdx], s.icb.kvQ8.vScales[ownIdx], attnSlab,
+					s.nHeads, lkv, lhd, K, basePos+K, qDim, kvDim, s.scale); err != nil {
+					endEncodingFast(enc)
+					return nil, false, err
 				}
 			} else if useGEMMSDPA {
 				kGEMM, vGEMM := ownerK, ownerV
