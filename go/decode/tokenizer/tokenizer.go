@@ -49,9 +49,14 @@ type Tokenizer struct {
 	gpt2Decoder map[rune]byte // Unicode char → original byte
 	gpt2Encoder map[byte]rune // original byte → Unicode char
 
-	bpeCacheMu    sync.RWMutex
-	bpeCache      map[string][]int32
+	bpeCacheMu sync.RWMutex
+	bpeCache   map[string][]int32
+	// bpeCacheOrder is a FIFO eviction ring: it grows by append until it holds
+	// tokenizerBPECacheLimit keys, then bpeCacheHead marks the oldest slot,
+	// overwritten in place on eviction. bpeCacheHead is meaningful only once the
+	// ring is full.
 	bpeCacheOrder []string
+	bpeCacheHead  int
 }
 
 type mergePair struct {
@@ -661,14 +666,24 @@ func (t *Tokenizer) storeBPETokens(key string, tokens []int32) {
 		t.bpeCache[key] = append([]int32(nil), tokens...)
 		return
 	}
-	for len(t.bpeCacheOrder) >= tokenizerBPECacheLimit {
-		oldest := t.bpeCacheOrder[0]
-		copy(t.bpeCacheOrder, t.bpeCacheOrder[1:])
-		t.bpeCacheOrder = t.bpeCacheOrder[:len(t.bpeCacheOrder)-1]
-		delete(t.bpeCache, oldest)
+	// FIFO ring eviction: append while the ring is below the limit, otherwise
+	// overwrite the oldest slot in place and advance the head. The previous
+	// shape copy-shifted the entire order slice left by one on every eviction —
+	// an O(limit) memmove per store once the cache was full, which dominated
+	// tokenisation of long, low-repeat inputs (code, mixed scripts, document
+	// ingestion) where every distinct segment evicts. Ring eviction is O(1) and
+	// preserves the same FIFO order and limit cap.
+	if len(t.bpeCacheOrder) < tokenizerBPECacheLimit {
+		t.bpeCacheOrder = append(t.bpeCacheOrder, key)
+	} else {
+		delete(t.bpeCache, t.bpeCacheOrder[t.bpeCacheHead])
+		t.bpeCacheOrder[t.bpeCacheHead] = key
+		t.bpeCacheHead++
+		if t.bpeCacheHead >= tokenizerBPECacheLimit {
+			t.bpeCacheHead = 0
+		}
 	}
 	t.bpeCache[key] = append([]int32(nil), tokens...)
-	t.bpeCacheOrder = append(t.bpeCacheOrder, key)
 }
 
 // splitRunes appends each UTF-8 rune of s to dst as a substring of s
