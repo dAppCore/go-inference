@@ -146,6 +146,7 @@ func loadAndAssembleStateBlocks(ctx context.Context, store state.Store, bundle *
 			// available; appendKVSnapshotRawBlock then handles growth.
 			preSizeAssembledRawBytesFromFirst(assembled, first, len(bundle.Blocks))
 		}
+		ensureAssembledLayerRawPlacement(assembled, block.Snapshot, totalTokens)
 		if err := appendKVSnapshotBlock(assembled, block.Snapshot); err != nil {
 			return nil, err
 		}
@@ -216,6 +217,7 @@ func loadAndAssembleStateBlockPrefix(ctx context.Context, store state.Store, bun
 			}
 			preSizeAssembledRawBytesFromFirst(assembled, first, blockCount)
 		}
+		ensureAssembledLayerRawPlacement(assembled, blockSnapshot, prefixTokens)
 		if err := appendKVSnapshotBlock(assembled, blockSnapshot); err != nil {
 			return nil, err
 		}
@@ -313,6 +315,70 @@ func preSizeAssembledRawBytesFromFirst(assembled *Snapshot, first *Snapshot, blo
 			}
 		}
 	}
+}
+
+// ensureAssembledLayerRawPlacement seeds a strided placement buffer for an
+// assembled multi-head layer-raw tensor the first time a data block arrives for
+// it. The streaming assemblers build the skeleton from block 0, whose windowed
+// (sliding-cache) layers are empty — their data begins only once the block range
+// enters the window — so preSizeAssembledRawBytesFromFirst leaves them with no
+// buffer, and appendKVSnapshotLayerRawBlock would then fall to the O(N^2)
+// merged-rebuild path (one full-tensor recopy per data block). Unlike the batch
+// AssembleBlocks path, the streaming load cannot scan all blocks for the shape,
+// so the buffer is sized from the layer window (MaxSize — the v6 clamp — or the
+// bundle token total as a pre-v6 over-size fallback the finalise compaction
+// later truncates). Idempotent and cheap: skips layers already carrying a buffer
+// (full-attention layers seed from block 0) and single-head shapes (which use
+// the linear fast-append path and need no placement buffer).
+func ensureAssembledLayerRawPlacement(assembled, block *Snapshot, totalTokens int) {
+	if assembled == nil || block == nil {
+		return
+	}
+	for layerIndex := range assembled.Layers {
+		if layerIndex >= len(block.Layers) {
+			continue
+		}
+		dstLayer := &assembled.Layers[layerIndex]
+		srcLayer := block.Layers[layerIndex]
+		if dstLayer.KeyBytes == nil {
+			seedAssembledLayerRawPlacement(&dstLayer.KeyBytes, &dstLayer.KeyShape, &dstLayer.KeyDType, srcLayer.KeyBytes, srcLayer.KeyShape, srcLayer.KeyDType, srcLayer.MaxSize, totalTokens)
+		}
+		if dstLayer.ValueBytes == nil {
+			seedAssembledLayerRawPlacement(&dstLayer.ValueBytes, &dstLayer.ValueShape, &dstLayer.ValueDType, srcLayer.ValueBytes, srcLayer.ValueShape, srcLayer.ValueDType, srcLayer.MaxSize, totalTokens)
+		}
+	}
+}
+
+// seedAssembledLayerRawPlacement builds one multi-head layer-raw placement
+// buffer from a source block's shape. placementL bounds the assembled window
+// length: min(MaxSize, totalTokens) is always >= the folded token count (a
+// sliding layer caches at most MaxSize tokens, and at most totalTokens of them),
+// so the placement never undershoots — an over-size (pre-v6, MaxSize unset)
+// leaves a gap that finalizeAssembledLayerRaw compacts away.
+func seedAssembledLayerRawPlacement(dstBytes *[]byte, dstShape *[]int32, dstDType *string, srcBytes []byte, srcShape []int32, srcDType string, maxSize, totalTokens int) {
+	if len(srcBytes) == 0 || len(srcShape) != 4 {
+		return
+	}
+	bh := int(srcShape[0]) * int(srcShape[1])
+	if bh <= 1 {
+		return
+	}
+	_, bytesPerValue := normalizeKVSnapshotTensorDType(srcDType)
+	if bytesPerValue <= 0 {
+		return
+	}
+	placementL := totalTokens
+	if maxSize > 0 && maxSize < placementL {
+		placementL = maxSize
+	}
+	if placementL <= 0 {
+		return
+	}
+	total := bh * placementL * int(srcShape[3]) * bytesPerValue
+	shape := []int32{srcShape[0], srcShape[1], int32(placementL), srcShape[3]}
+	*dstShape = shape
+	*dstDType = srcDType
+	*dstBytes = presizeLayerRaw(shape, srcDType, total)
 }
 
 // LoadFromMemvidBlocksWithOptions restores a full KV snapshot from a
