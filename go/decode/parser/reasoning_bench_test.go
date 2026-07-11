@@ -91,11 +91,12 @@ func Benchmark_Reasoning_ParseText(b *testing.B) {
 			for _, span := range reasoningBenchSpanFractions {
 				text := reasoningBenchStream(size, span.frac, arch.start, arch.end)
 				markers := arch.markers
+				leads := reasoningMarkerLeadBytes(markers)
 				b.Run(arch.id+"/"+span.id+"/"+core.Sprintf("Tokens%d", size), func(b *testing.B) {
 					b.ReportAllocs()
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
-						reasoningBenchResult = parseReasoningText(text, markers)
+						reasoningBenchResult = parseReasoningText(text, markers, leads)
 					}
 				})
 			}
@@ -109,10 +110,11 @@ func Benchmark_Reasoning_ParseText(b *testing.B) {
 func Benchmark_Reasoning_ParseText_NoSpan_Qwen(b *testing.B) {
 	text := reasoningBenchWords(256)
 	markers := qwenMarkers()
+	leads := reasoningMarkerLeadBytes(markers)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		reasoningBenchResult = parseReasoningText(text, markers)
+		reasoningBenchResult = parseReasoningText(text, markers, leads)
 	}
 }
 
@@ -123,10 +125,11 @@ func Benchmark_Reasoning_ParseText_NoSpan_Qwen(b *testing.B) {
 func Benchmark_Reasoning_ParseText_Unclosed_Qwen(b *testing.B) {
 	text := "preamble <think>" + reasoningBenchWords(200)
 	markers := qwenMarkers()
+	leads := reasoningMarkerLeadBytes(markers)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		reasoningBenchResult = parseReasoningText(text, markers)
+		reasoningBenchResult = parseReasoningText(text, markers, leads)
 	}
 }
 
@@ -138,8 +141,9 @@ func Benchmark_Reasoning_ParseText_Unclosed_Qwen(b *testing.B) {
 func Test_Reasoning_ParseText_Unclosed_OneAlloc(t *testing.T) {
 	text := "preamble <think>" + reasoningBenchWords(200)
 	markers := qwenMarkers()
+	leads := reasoningMarkerLeadBytes(markers)
 	allocs := testing.AllocsPerRun(50, func() {
-		reasoningBenchResult = parseReasoningText(text, markers)
+		reasoningBenchResult = parseReasoningText(text, markers, leads)
 	})
 	if allocs > 1 {
 		t.Fatalf("expected <=1 alloc/op on unclosed-first-marker short-circuit, got %.2f", allocs)
@@ -157,40 +161,44 @@ func Test_Reasoning_ParseText_Unclosed_OneAlloc(t *testing.T) {
 func Benchmark_Reasoning_FindStart_HitEarly_Qwen(b *testing.B) {
 	text := "<think>plan</think>" + reasoningBenchWords(256)
 	markers := qwenMarkers()
+	leads := reasoningMarkerLeadBytes(markers)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		reasoningBenchIdx, reasoningBenchMarker, reasoningBenchOK = findReasoningStart(text, markers)
+		reasoningBenchIdx, reasoningBenchMarker, reasoningBenchOK = findReasoningStart(text, markers, leads)
 	}
 }
 
 func Benchmark_Reasoning_FindStart_HitMid_Qwen(b *testing.B) {
 	text := reasoningBenchStream(256, 0.50, "<think>", "</think>")
 	markers := qwenMarkers()
+	leads := reasoningMarkerLeadBytes(markers)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		reasoningBenchIdx, reasoningBenchMarker, reasoningBenchOK = findReasoningStart(text, markers)
+		reasoningBenchIdx, reasoningBenchMarker, reasoningBenchOK = findReasoningStart(text, markers, leads)
 	}
 }
 
 func Benchmark_Reasoning_FindStart_HitLate_Qwen(b *testing.B) {
 	text := reasoningBenchWords(256) + "<think>plan</think>tail"
 	markers := qwenMarkers()
+	leads := reasoningMarkerLeadBytes(markers)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		reasoningBenchIdx, reasoningBenchMarker, reasoningBenchOK = findReasoningStart(text, markers)
+		reasoningBenchIdx, reasoningBenchMarker, reasoningBenchOK = findReasoningStart(text, markers, leads)
 	}
 }
 
 func Benchmark_Reasoning_FindStart_Miss_Qwen(b *testing.B) {
 	text := reasoningBenchWords(256)
 	markers := qwenMarkers()
+	leads := reasoningMarkerLeadBytes(markers)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		reasoningBenchIdx, reasoningBenchMarker, reasoningBenchOK = findReasoningStart(text, markers)
+		reasoningBenchIdx, reasoningBenchMarker, reasoningBenchOK = findReasoningStart(text, markers, leads)
 	}
 }
 
@@ -199,20 +207,22 @@ func Benchmark_Reasoning_FindStart_Miss_Qwen(b *testing.B) {
 func Benchmark_Reasoning_FindStart_Miss_Gemma(b *testing.B) {
 	text := reasoningBenchWords(256)
 	markers := gemmaMarkers()
+	leads := reasoningMarkerLeadBytes(markers)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		reasoningBenchIdx, reasoningBenchMarker, reasoningBenchOK = findReasoningStart(text, markers)
+		reasoningBenchIdx, reasoningBenchMarker, reasoningBenchOK = findReasoningStart(text, markers, leads)
 	}
 }
 
 func Benchmark_Reasoning_FindStart_Miss_GPTOSS(b *testing.B) {
 	text := reasoningBenchWords(256)
 	markers := gptOSSMarkers()
+	leads := reasoningMarkerLeadBytes(markers)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		reasoningBenchIdx, reasoningBenchMarker, reasoningBenchOK = findReasoningStart(text, markers)
+		reasoningBenchIdx, reasoningBenchMarker, reasoningBenchOK = findReasoningStart(text, markers, leads)
 	}
 }
 
@@ -294,11 +304,12 @@ func TestAllocBudget_Reasoning_ParseText_NoSpan(t *testing.T) {
 		{"Long", 2048},
 	}
 	markers := qwenMarkers()
+	leads := reasoningMarkerLeadBytes(markers)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			text := reasoningBenchWords(tc.tokens)
 			avg := testing.AllocsPerRun(5, func() {
-				reasoningBenchResult = parseReasoningText(text, markers)
+				reasoningBenchResult = parseReasoningText(text, markers, leads)
 			})
 			const budget = 0.0
 			if avg > budget {
