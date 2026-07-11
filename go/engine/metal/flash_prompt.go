@@ -118,6 +118,104 @@ func steelAttnPipeline(hd int, alignQ, alignK bool) (metal.MTLComputePipelineSta
 	return pso, true
 }
 
+// --- 2b: head dim 512 via split-D (lthn_attn_splitd) ---
+
+const (
+	splitDAttnBQ      = 16
+	splitDAttnBK      = 16
+	splitDAttnThreads = 64 // wm2 × wn1 × 32
+)
+
+// splitDAttnMinKV depth-gates the 512 lane: split-D recomputes QK per half,
+// which costs ~8% at 8K on 31B but crosses the composition at 32K (207 vs
+// 204, 2026-07-13) and pulls away as S bloats — so shallow chunks keep the
+// composition and the deep regime (where prefill time actually hurts) goes
+// flash. Receipted crossover ~24-32K; gated at the measured point.
+const splitDAttnMinKV = 32768
+
+var (
+	splitDAttnPSOMu    sync.Mutex
+	splitDAttnPSOCache = map[steelAttnKey]metal.MTLComputePipelineState{}
+)
+
+// splitDAttnPipeline resolves the split-D flash kernel (hd 512 = two 256
+// halves; grid.z picks the half) with the same alignment/causal constants.
+func splitDAttnPipeline(alignQ, alignK bool) (metal.MTLComputePipelineState, bool) {
+	splitDAttnPSOMu.Lock()
+	defer splitDAttnPSOMu.Unlock()
+	key := steelAttnKey{hd: 512, alignQ: alignQ, alignK: alignK}
+	if pso, ok := splitDAttnPSOCache[key]; ok {
+		return pso, pso != nil
+	}
+	if customLibrary == nil || customLibrary.GetID() == 0 {
+		splitDAttnPSOCache[key] = nil
+		return nil, false
+	}
+	name := core.Sprintf("lthn_attn_splitd_bfloat16_bq%d_bk%d_bdh256_wm2_wn1", splitDAttnBQ, splitDAttnBK)
+	fc := metal.NewMTLFunctionConstantValues()
+	aQ, aK := alignQ, alignK
+	hasMask, doCausal, hasSinks := false, true, false
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&aQ), metal.MTLDataTypeBool, 200)
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&aK), metal.MTLDataTypeBool, 201)
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&hasMask), metal.MTLDataTypeBool, 300)
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&doCausal), metal.MTLDataTypeBool, 301)
+	fc.SetConstantValueTypeAtIndex(unsafe.Pointer(&hasSinks), metal.MTLDataTypeBool, 302)
+	fn, err := customLibrary.NewFunctionWithNameConstantValuesError(name, fc)
+	if err != nil || fn == nil || fn.GetID() == 0 {
+		splitDAttnPSOCache[key] = nil
+		return nil, false
+	}
+	pso, perr := device.NewComputePipelineStateWithFunctionError(fn)
+	if perr != nil || pso == nil || pso.GetID() == 0 {
+		splitDAttnPSOCache[key] = nil
+		return nil, false
+	}
+	splitDAttnPSOCache[key] = pso
+	return pso, true
+}
+
+// encSteelAttnSplitD encodes the hd-512 chunk-layer prompt attention as ONE
+// split-D flash dispatch pair: grid (NQ, H, 2), each z-half recomputing the
+// full S from both Q·K halves and writing its own 256-wide O half. Same
+// causal rule, same params ABI (D = the full 512).
+func encSteelAttnSplitD(enc metal.MTLComputeCommandEncoderObject, q, k, v, out metal.MTLBuffer,
+	nHeads, nKVHeads, hd, kRows, nTotal, qDim, kvDim int, scale float32) error {
+	alignQ := kRows%splitDAttnBQ == 0
+	alignK := nTotal%splitDAttnBK == 0
+	pso, ok := splitDAttnPipeline(alignQ, alignK)
+	if !ok {
+		return core.NewError("native.encSteelAttnSplitD: split-D pipeline unavailable")
+	}
+	nq := (kRows + splitDAttnBQ - 1) / splitDAttnBQ
+	nk := (nTotal + splitDAttnBK - 1) / splitDAttnBK
+	p := steelAttnParams{
+		b: 1, h: int32(nHeads), d: int32(hd),
+		qL: int32(kRows), kL: int32(nTotal),
+		gqaFactor: int32(nHeads / nKVHeads), scale: scale,
+		nq: int32(nq), nk: int32(nk),
+		nqAligned: int32(kRows / splitDAttnBQ), nkAligned: int32(nTotal / splitDAttnBK),
+		qLRem: int32(kRows % splitDAttnBQ), kLRem: int32(nTotal % splitDAttnBK),
+		qLOff:    int32(nTotal - kRows),
+		qStrides: [3]int64{0, int64(hd), int64(qDim)},
+		kStrides: [3]int64{0, int64(hd), int64(kvDim)},
+		vStrides: [3]int64{0, int64(hd), int64(kvDim)},
+		oStrides: [3]int64{0, int64(hd), int64(qDim)},
+	}
+	sink := encSink{enc}
+	sink.setPSO(pso)
+	sink.setBuf(q, 0, 0)
+	sink.setBuf(k, 0, 1)
+	sink.setBuf(v, 0, 2)
+	sink.setBuf(out, 0, 3)
+	pb := unsafe.Slice((*byte)(unsafe.Pointer(&p)), unsafe.Sizeof(p))
+	enc.SetBytesLengthAtIndex(pb, uint(len(pb)), 4)
+	sink.dispatchThreadgroups(
+		metal.MTLSize{Width: uint(nq), Height: uint(nHeads), Depth: 2},
+		metal.MTLSize{Width: splitDAttnThreads, Height: 1, Depth: 1},
+	)
+	return nil
+}
+
 // encSteelAttnPrompt encodes the chunk-layer prompt attention as ONE steel
 // flash dispatch: query-major slab q (row stride qDim, head h at h·hd),
 // K/V caches (row stride kvDim, kv head at kvh·hd), output query-major.
@@ -194,11 +292,29 @@ func flashPromptPipeline(hd int) (metal.MTLComputePipelineState, bool) {
 // vector-flash kernel kept in-tree as its parity oracle. 512 stays on the
 // GEMM composition until the split-D treatment (phase 2b).
 func gpuHasFlashPrompt(hd int) bool {
-	if hd == 256 {
+	switch hd {
+	case 256:
 		_, ok := steelAttnPipeline(hd, true, true)
+		return ok
+	case 512:
+		_, ok := splitDAttnPipeline(true, true)
 		return ok
 	}
 	return false
+}
+
+// flashPromptUsable is the seam's routing check: the lane exists for the head
+// dim AND the depth is on flash's side of its receipted crossover. 256 wins
+// or ties everywhere; 512 (split-D) pays its QK recompute below ~32K and
+// keeps the composition there.
+func flashPromptUsable(hd, nTotal int) bool {
+	if !gpuHasFlashPrompt(hd) {
+		return false
+	}
+	if hd == 512 && nTotal < splitDAttnMinKV {
+		return false
+	}
+	return true
 }
 
 // encFlashPromptSDPA encodes the whole chunk-layer prompt attention as ONE
@@ -210,6 +326,9 @@ func encFlashPromptSDPA(enc metal.MTLComputeCommandEncoderObject, q, k, v, out m
 	nHeads, nKVHeads, hd, kRows, nTotal, qDim, kvDim int, scale float32) error {
 	if hd == 256 { // v2: the steel BD-256 instantiation (one MMA flash dispatch)
 		return encSteelAttnPrompt(enc, q, k, v, out, nHeads, nKVHeads, hd, kRows, nTotal, qDim, kvDim, scale)
+	}
+	if hd == 512 { // 2b: split-D — the seam's flashPromptUsable already depth-gated it
+		return encSteelAttnSplitD(enc, q, k, v, out, nHeads, nKVHeads, hd, kRows, nTotal, qDim, kvDim, scale)
 	}
 	pso, ok := flashPromptPipeline(hd)
 	if !ok {
