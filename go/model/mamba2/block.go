@@ -84,10 +84,14 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// split z | xBC | dt along the channel axis.
-	z := make([]float32, L*dInner)
-	xBC := make([]float32, L*convDim)
-	dtRaw := make([]float32, L*H)
+	// split z | xBC | dt along the channel axis. One backing slab, three non-overlapping capped
+	// windows: each is filled once then read-only (xBC feeds the conv, dtRaw the dt map, z the gate),
+	// so the slab is bit-identical to three makes and saves 2 allocs per block per token.
+	zN, xbcN, dtN := L*dInner, L*convDim, L*H
+	splitBuf := make([]float32, zN+xbcN+dtN)
+	z := splitBuf[0:zN:zN]
+	xBC := splitBuf[zN : zN+xbcN : zN+xbcN]
+	dtRaw := splitBuf[zN+xbcN : zN+xbcN+dtN : zN+xbcN+dtN]
 	for t := range L {
 		row := proj[t*projDim:]
 		copy(z[t*dInner:(t+1)*dInner], row[0:dInner])
@@ -103,11 +107,14 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 		convOut[i] = float32(silu(float64(convOut[i])))
 	}
 
-	// split conv output x_inner | B | C, expand B/C groups to heads.
+	// split conv output x_inner | B | C, expand B/C groups to heads. One backing slab, three capped
+	// windows (xHeads [L,H,P] | bHeads [L,H,N] | cHeads [L,H,N]) — all read-only inputs to the scan.
 	groupDim := G * N
-	xHeads := make([]float32, L*H*P) // [L,H,P]
-	bHeads := make([]float32, L*H*N) // [L,H,N]
-	cHeads := make([]float32, L*H*N)
+	xhN, bhN, chN := L*H*P, L*H*N, L*H*N
+	headBuf := make([]float32, xhN+bhN+chN)
+	xHeads := headBuf[0:xhN:xhN]
+	bHeads := headBuf[xhN : xhN+bhN : xhN+bhN]
+	cHeads := headBuf[xhN+bhN : xhN+bhN+chN : xhN+bhN+chN]
 	headsPerGroup := H / G
 	for t := range L {
 		crow := convOut[t*convDim:]
@@ -119,8 +126,11 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 		}
 	}
 
-	// dt = softplus(dt + dt_bias) ; A = -exp(A_log)
-	dt := make([]float32, L*H)
+	// dt = softplus(dt + dt_bias) ; A = -exp(A_log). One slab, two capped windows (dt [L,H] | a [H]) —
+	// both read-only inputs to the scan.
+	dtaBuf := make([]float32, L*H+H)
+	dt := dtaBuf[0 : L*H : L*H]
+	a := dtaBuf[L*H : L*H+H : L*H+H]
 	for t := range L {
 		for h := range H {
 			v := float64(dtRaw[t*H+h])
@@ -130,7 +140,6 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 			dt[t*H+h] = float32(softplus(v))
 		}
 	}
-	a := make([]float32, H)
 	for h := range H {
 		a[h] = float32(-math.Exp(float64(w.ALog[h])))
 	}
