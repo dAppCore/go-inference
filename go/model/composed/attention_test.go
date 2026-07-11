@@ -117,6 +117,147 @@ func TestAttnMixerSingleTokenClosedForm(t *testing.T) {
 	t.Logf("single-token attention matches the closed form OProj·GQA(VProj·x) — V path, GQA map, o_proj verified independently")
 }
 
+// mkGatedAttnMixer builds a gated (attn_output_gate) attention mixer: q_proj carries 2·Heads·HeadDim rows
+// ([q ; gate] per head), everything else is the ungated shape.
+func mkGatedAttnMixer(cfg AttnConfig, D, seed int) Mixer {
+	return NewAttnMixer(&AttnWeights{
+		QProj: syn(2*cfg.Heads*cfg.HeadDim*D, seed+1),
+		KProj: syn(cfg.KVHeads*cfg.HeadDim*D, seed+2),
+		VProj: syn(cfg.KVHeads*cfg.HeadDim*D, seed+3),
+		OProj: syn(D*cfg.Heads*cfg.HeadDim, seed+4),
+		QNorm: syn(cfg.HeadDim, seed+5),
+		KNorm: syn(cfg.HeadDim, seed+6),
+	}, cfg)
+}
+
+// TestAttnMixerGatedSingleTokenClosedForm checks the gated (attn_output_gate) path against an INDEPENDENT
+// closed form: at L=1, pos=0 the softmax over the single key is 1 (whatever Q computes) and rotary is the
+// identity, so the pre-gate attention output is GQA(VProj·x); the gate is the SECOND half of each head's
+// q_proj block (never QK-normed or rotated), applied as σ(gate) element-wise before o_proj. So
+// out MUST equal OProj·(GQA(V) ⊙ σ(gate)) — assembled here from the raw weights. Catches a wrong split
+// (q vs gate half), a missing/wrong activation, or a mis-placed gate.
+func TestAttnMixerGatedSingleTokenClosedForm(t *testing.T) {
+	cfg := AttnConfig{Heads: 4, KVHeads: 2, HeadDim: 8, RotaryDim: 4, RopeTheta: 1e6, NormEps: 1e-6, OutputGate: true}
+	const D = 8
+	w := &AttnWeights{
+		QProj: syn(2*cfg.Heads*cfg.HeadDim*D, 1),
+		KProj: syn(cfg.KVHeads*cfg.HeadDim*D, 2),
+		VProj: syn(cfg.KVHeads*cfg.HeadDim*D, 3),
+		OProj: syn(D*cfg.Heads*cfg.HeadDim, 4),
+		QNorm: syn(cfg.HeadDim, 5),
+		KNorm: syn(cfg.HeadDim, 6),
+	}
+	got, _, err := NewAttnMixer(w, cfg).Forward(syn(D, 7), 1, D, nil)
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	x := syn(D, 7)
+	H, HD, rep := cfg.Heads, cfg.HeadDim, cfg.Heads/cfg.KVHeads
+	v := matNT(x, w.VProj, 1, D, cfg.KVHeads*HD)
+	attn := make([]float32, H*HD) // GQA(V): query head hd reads value head hd/rep
+	for hd := range H {
+		copy(attn[hd*HD:hd*HD+HD], v[(hd/rep)*HD:(hd/rep)*HD+HD])
+	}
+	raw := matNT(x, w.QProj, 1, D, 2*H*HD) // [q_0 gate_0 q_1 gate_1 ...] per head
+	gated := make([]float32, H*HD)
+	for hd := range H {
+		for d := range HD {
+			s := 1.0 / (1.0 + math.Exp(-float64(raw[hd*2*HD+HD+d]))) // σ(gate half)
+			gated[hd*HD+d] = float32(float64(attn[hd*HD+d]) * s)
+		}
+	}
+	want := matNT(gated, w.OProj, 1, H*HD, D)
+	for i := range D {
+		if got[i] != want[i] {
+			t.Fatalf("gated out[%d] = %v, want %v (out = OProj·(GQA(V) ⊙ σ(gate)))", i, got[i], want[i])
+		}
+	}
+	t.Log("gated single-token attention matches OProj·(GQA(VProj·x) ⊙ σ(gate half of q_proj)) bit-exact — split, sigmoid, placement verified independently")
+}
+
+// TestAttnMixerGatedDecodeEqualsPrefill confirms the gate does not break the KV-cache equivalence: the gate
+// is a per-position transform of q_proj (no cache), so stepping the gated mixer token-by-token stays
+// bit-exact to a single gated prefill pass.
+func TestAttnMixerGatedDecodeEqualsPrefill(t *testing.T) {
+	cfg := AttnConfig{Heads: 4, KVHeads: 2, HeadDim: 8, RotaryDim: 4, RopeTheta: 1e6, NormEps: 1e-6, OutputGate: true}
+	const D, L = 8, 6
+	m := mkGatedAttnMixer(cfg, D, 0)
+	h := syn(L*D, 1)
+	full, _, err := m.Forward(h, L, D, nil)
+	if err != nil {
+		t.Fatalf("prefill: %v", err)
+	}
+	var st any
+	for t0 := range L {
+		o, next, err := m.Forward(h[t0*D:(t0+1)*D], 1, D, st)
+		if err != nil {
+			t.Fatalf("decode %d: %v", t0, err)
+		}
+		st = next
+		for i := range D {
+			if o[i] != full[t0*D+i] {
+				t.Fatalf("token %d gated out[%d] = %v != prefill %v", t0, i, o[i], full[t0*D+i])
+			}
+		}
+	}
+	t.Logf("gated attention decode == prefill bit-exact over %d tokens (gate is per-position, cache unaffected)", L)
+}
+
+// TestAttnMixerGatedSizeMismatch pins that an OutputGate config with an ungated-sized q_proj fails loudly
+// (rather than reading past the projection) — the guard that a gated/ungated config and checkpoint agree.
+func TestAttnMixerGatedSizeMismatch(t *testing.T) {
+	cfg := AttnConfig{Heads: 4, KVHeads: 2, HeadDim: 8, RotaryDim: 4, RopeTheta: 1e6, NormEps: 1e-6, OutputGate: true}
+	const D = 8
+	w := &AttnWeights{ // ungated-sized q_proj (H*HD rows) with OutputGate set
+		QProj: syn(cfg.Heads*cfg.HeadDim*D, 1),
+		KProj: syn(cfg.KVHeads*cfg.HeadDim*D, 2),
+		VProj: syn(cfg.KVHeads*cfg.HeadDim*D, 3),
+		OProj: syn(D*cfg.Heads*cfg.HeadDim, 4),
+	}
+	if _, _, err := NewAttnMixer(w, cfg).Forward(syn(D, 7), 1, D, nil); err == nil {
+		t.Fatal("gated config with ungated q_proj must error, not read past the projection")
+	}
+}
+
+// TestAttnMixerGated_Forward_Golden pins the exact f32 bit-pattern of the GATED attention output over a
+// fixed 3-token input (the task-required gated-path golden, hand-built weights), locking the gate against
+// future drift. The K/V cache bits are byte-identical to the ungated golden (same K/V seeds) — the gate is
+// confined to the q-half and the output — so this test asserts that invariant too.
+func TestAttnMixerGated_Forward_Golden(t *testing.T) {
+	cfg := AttnConfig{Heads: 4, KVHeads: 2, HeadDim: 8, RotaryDim: 4, RopeTheta: 1e6, NormEps: 1e-6, OutputGate: true}
+	const D, L = 8, 3
+	w := &AttnWeights{
+		QProj: syn(2*cfg.Heads*cfg.HeadDim*D, 1),
+		KProj: syn(cfg.KVHeads*cfg.HeadDim*D, 2),
+		VProj: syn(cfg.KVHeads*cfg.HeadDim*D, 3),
+		OProj: syn(D*cfg.Heads*cfg.HeadDim, 4),
+		QNorm: syn(cfg.HeadDim, 5),
+		KNorm: syn(cfg.HeadDim, 6),
+	}
+	out, st, err := NewAttnMixer(w, cfg).Forward(syn(L*D, 7), L, D, nil)
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	stt := st.(attnState)
+	wantOut := []uint32{0xbff05122, 0xbdd3eb7d, 0x3f8c2c8b, 0xbfb6272d, 0xbf8b5cc8, 0x3e15fc69, 0x3de10e4b, 0x3e87e579, 0x3bd0cf0e, 0x3e4bc2ad, 0x3d3b7ddf, 0xbf9dabd5, 0xbd59502a, 0x3e910b66, 0xbdf519cb, 0xbe602dc8, 0xbf290b9a, 0x3e226593, 0x3ee3e7a8, 0xbf8be734, 0xbeaa9b73, 0x3f1a1538, 0x3da961a7, 0xbe004cdd}
+	// K/V caches: identical to the ungated golden (TestAttnMixer_Forward_Golden) — gating leaves them untouched.
+	wantK := []uint32{0xbf8df4bc, 0xbf128303, 0xbe234d40, 0x3e04967b, 0x3e96cf92, 0x3ebd7c07, 0xbe4fff68, 0xbc992422, 0xbf0d6be7, 0x3de326c5, 0x3f1588b7, 0x3f5dffb6, 0x3d97cb8f, 0xbedfee5c, 0xbdff2962, 0xbb000bf8, 0x3eb9d031, 0x3efdf818, 0x3f5e1b36, 0xbd919815, 0xbe55f728, 0xbf03abdd, 0x3e2c9b49, 0x3c82a1ac, 0x3f3d0598, 0xbcacc85f, 0x3e849ed1, 0xbf42fb51, 0x3ea6b75b, 0x3ee1fb6f, 0x3e084baa, 0x3b859a6c, 0x3f250273, 0xbf168eba, 0xbf5c31df, 0x3ce6aa50, 0x3e3cdab7, 0x3edefe14, 0xbe4234dd, 0xbc980b70, 0xbce4fbb1, 0xbda899c9, 0xbf359de0, 0x3f126596, 0x3f190746, 0xbecf94f2, 0xbe05ae31, 0xbbc847ab}
+	wantV := []uint32{0x4011b717, 0x3f5b22d0, 0xbf1096bb, 0xbffe2823, 0x4024a8c1, 0x3f9374bc, 0xbe89a027, 0xbfd844cf, 0x3f90d845, 0x3fb9580f, 0x3cded285, 0xbfb2617c, 0xbf99652b, 0x3fdf3b64, 0x3ea57a78, 0xbf8c7e28, 0xbfd2fec5, 0xbf352545, 0x3e6ecbfd, 0x3f9645a2, 0xbfec154c, 0xbf675253, 0x3d185f0a, 0x3f7a5e34, 0xbfc1f213, 0xbf8cbfb1, 0xbe229c76, 0x3f483128, 0x3e401a31, 0xbfa5d638, 0xbeb5a858, 0x3f160418, 0x3f90ff97, 0x3f0e8a71, 0xbc9d4954, 0xbf185f06, 0x3fa05bc0, 0x3f2d42c3, 0x3dce703a, 0xbef34d69, 0x3da3d70d, 0x3f4bfb15, 0x3e621964, 0xbeb5dcc6, 0xbfc4c2f7, 0x3f6ab368, 0x3eae7d56, 0xbe70d844}
+	chk := func(name string, got []float32, want []uint32) {
+		if len(got) != len(want) {
+			t.Fatalf("%s len %d, want %d", name, len(got), len(want))
+		}
+		for i, v := range got {
+			if b := math.Float32bits(v); b != want[i] {
+				t.Fatalf("%s[%d] bits 0x%08x, want 0x%08x", name, i, b, want[i])
+			}
+		}
+	}
+	chk("gated out", out, wantOut)
+	chk("cache K", stt.k, wantK)
+	chk("cache V", stt.v, wantV)
+}
+
 // TestAttnMixerDecodeEqualsPrefill is the KV-cache correctness: stepping tokens one at a time through the
 // attention mixer (growing the cache) produces outputs BIT-EXACT to a single prefill pass — causal
 // attention over the cache reproduces full-sequence attention.
