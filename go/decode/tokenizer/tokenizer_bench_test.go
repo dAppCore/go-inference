@@ -237,7 +237,7 @@ func BenchmarkTokenizer_bpeMerge_Short(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		syms := []string{"h", "e", "l", "l", "o"}
-		_ = tok.bpeMerge(syms)
+		_ = tok.bpeMerge("hello", syms)
 	}
 }
 
@@ -251,7 +251,7 @@ func BenchmarkTokenizer_bpeMerge_Long(b *testing.B) {
 			"▁", "w", "o", "r", "l", "d",
 			"h", "e", "l", "l",
 		}
-		_ = tok.bpeMerge(syms)
+		_ = tok.bpeMerge("▁hello▁worldhell", syms)
 	}
 }
 
