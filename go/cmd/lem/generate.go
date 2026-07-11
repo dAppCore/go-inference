@@ -42,7 +42,7 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 	promptFile := fs.String("prompt-file", "", "read the user prompt from a file (long-context runs exceed argv limits); overrides -prompt")
 	maxTokens := fs.Int("max-tokens", 128, "tokens to generate")
 	draftPath := fs.String("draft", "auto", "MTP drafter: 'auto' detects one beside a Gemma 4 target (assistant/ pair layout, MTP/ gguf), a path forces it, '' disables")
-	draftBlock := fs.Int("draft-block", 0, "MTP draft block (verify forward = carried lead + block-1 proposals); 0 = engine default 4")
+	draftBlock := fs.Int("draft-block", 0, "MTP draft block (verify forward = carried lead + block-1 proposals); 0 = engine default 5")
 	temp := fs.Float64("temp", 1.0, "sampling temperature (0 = greedy/argmax — fastest, fair vs llama-bench)")
 	think := fs.Bool("think", false, "enable the thinking channel (off keeps the decode rate clean)")
 	contextLen := fs.Int("context", 0, "context length override (0 = model default)")
