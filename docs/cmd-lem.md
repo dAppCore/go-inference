@@ -40,7 +40,7 @@ prints its own name in usage and notices (the dev binary is often built as
 Run `lem <verb> -h` for the command-specific flag dump. Boot notices and errors
 go to stderr; generation output goes to stdout.
 
-Default runtime paths live under `~/Lethean/data/` (admin token, tuning
+Default runtime paths live under `~/Lethean/lem/` (admin token, tuning
 profiles, conversation state) — see each verb below.
 
 ---
@@ -72,7 +72,7 @@ collides. Point any OpenAI or Ollama client at `http://localhost:36911`.
 
 The `/v1/admin/*` subtree (machine identity, serve status, hot-swap reload) sits
 behind a Bearer wall. The admin token is stored mode `0600` at
-`~/Lethean/data/admin.token`. Serve is **fail-closed**: if the token file cannot
+`~/Lethean/lem/admin.token`. Serve is **fail-closed**: if the token file cannot
 be written it refuses to boot rather than binding a listener with an unprotected
 admin surface. `POST /v1/admin/serve/reload` hot-swaps the loaded model (and
 re-runs the reactive drafter ladder over the new target).
@@ -89,9 +89,9 @@ re-runs the reactive drafter ladder over the new target).
 | `--draft-detect` | `true` | reactive drafter detection for Gemma 4 targets |
 | `--draft-block` | `0` | MTP draft block; 0 = engine default (5), a tuned profile overrides when present |
 | `--no-auto-profile` | `false` | ignore tuned profiles from `lem tune` |
-| `--profile-dir` | `""` | tuned-profile directory (default `~/Lethean/data/tuning`) |
+| `--profile-dir` | `""` | tuned-profile directory (default `~/Lethean/lem/tuning`) |
 | `--state-conversations` | `true` | conversation continuity: wake each chat from its slept state, append only the new turn, no prompt replay |
-| `--state-store` | `""` | conversation state store file (default `~/Lethean/data/state/conversations.kv`) |
+| `--state-store` | `""` | conversation state store file (default `~/Lethean/lem/state/conversations.kv`) |
 | `--native` | `false` | serve via the no-cgo native token-loop contract (the default metal engine already is native) |
 | `--read-timeout` | `30s` | HTTP read-header timeout |
 | `--write-timeout` | `5m` | HTTP write timeout (covers a full streaming response) |
@@ -141,7 +141,7 @@ lem generate -state chat1 -prompt "Hello, who are you?" ~/models/gemma-4-e2b-it-
 | `-native` | `false` | generate via the no-cgo native token-loop contract |
 | `-trace` | `false` | print the per-token decode time budget — GPU wait vs host-serial work |
 | `-state` | `""` | conversation state name: wake it from the store, generate, sleep it back — the no-prompt-replay turn loop |
-| `-state-store` | `""` | state store file (default `~/Lethean/data/state/agent.kv`) |
+| `-state-store` | `""` | state store file (default `~/Lethean/lem/state/agent.kv`) |
 | `-raw` | `false` | with `-state`: skip chat-framing and run the raw completion-loop turn (ignored without `-state`) |
 | `-image` | (repeatable) | image input for a vision model: a local PNG/JPEG path or a base64 `data:` URL; gated on the model's vision capability |
 | `-audio` | (repeatable) | reserved — no engine-neutral audio-input seam yet, so passing one errors (follow-up) |
@@ -159,7 +159,7 @@ refines the trace into an SFT artifact; a separate `sft` run trains on it.
 
 ```
 lem ssd --model ~/models/gemma-4-E2B-it-bf16 --data prompts.jsonl \
-        --checkpoint-dir ~/Lethean/data/ssd/run1
+        --checkpoint-dir ~/Lethean/lem/ssd/run1
 ```
 
 `--data` is a prompt JSONL — `{"messages":[…]}` or `{"prompt":…}` per line; only
@@ -199,7 +199,7 @@ adapter at load with `serve`/`generate --adapter`.
 ```
 lem sft --model ~/models/gemma-4-E2B-it-bf16 \
     --data train.jsonl --valid valid.jsonl \
-    --rank 16 --epochs 2 --checkpoint-dir ~/Lethean/data/sft/run1
+    --rank 16 --epochs 2 --checkpoint-dir ~/Lethean/lem/sft/run1
 ```
 
 ### Flags
@@ -258,7 +258,7 @@ seam lands). It reports this honestly rather than faking a measurement.
 | `-max-tokens` | `256` | tokens per measurement run |
 | `-prompt` | (a Go linked-list prompt) | measurement prompt |
 | `-workload` | `chat` | workload the profile is scored + persisted under |
-| `-profile-dir` | `""` | tuned-profile directory (default `~/Lethean/data/tuning`) |
+| `-profile-dir` | `""` | tuned-profile directory (default `~/Lethean/lem/tuning`) |
 | `-json` | `false` | emit JSONL tuning events instead of the text summary |
 
 ---
