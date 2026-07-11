@@ -14,14 +14,19 @@
 //
 //	import _ "dappco.re/go/inference/model/builtin" // all arches resolvable
 //
-// The mixer/component packages (composed, deltanet, mamba2, rwkv7) are not
-// listed: they carry no top-level model_type and are pulled in transitively by
-// the arches that compose them.
+// composed IS listed: it registers the Qwen 3.6 hybrids (qwen3_5 / qwen3_5_moe /
+// qwen3_next) as top-level model_types through [model.ArchSpec].Composed, so a
+// serve binary resolves them by model_type here rather than relying on an engine
+// blank-import. The remaining component packages (deltanet, rwkv7) carry no
+// top-level model_type and ride in transitively through the arches that compose
+// them; the recurrent SSM mamba2 is reached by the backend's own hybrid/SSM
+// branch, not this registry.
 package builtin
 
 import (
-	_ "dappco.re/go/inference/model/gemma3"  // gemma3
-	_ "dappco.re/go/inference/model/gemma4"  // gemma4 / gemma4_text / gemma4_unified (+ assistant)
-	_ "dappco.re/go/inference/model/mistral" // mistral
-	_ "dappco.re/go/inference/model/qwen3"   // qwen3
+	_ "dappco.re/go/inference/model/composed" // qwen3_5 / qwen3_5_moe / qwen3_next hybrids (ArchSpec.Composed)
+	_ "dappco.re/go/inference/model/gemma3"   // gemma3
+	_ "dappco.re/go/inference/model/gemma4"   // gemma4 / gemma4_text / gemma4_unified (+ assistant)
+	_ "dappco.re/go/inference/model/mistral"  // mistral
+	_ "dappco.re/go/inference/model/qwen3"    // qwen3
 )
