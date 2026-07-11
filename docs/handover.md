@@ -158,9 +158,19 @@ tok/turn while the client resends full history.
   1507 green. So the 31B@256K swap driver was NOT the lb dup (clean pages
   don't swap) — it was the live ICB caches + mirrors + slabs; the dedupe
   buys ~17GB of Metal VA/working-set headroom at 256K, which is what
-  trips allocation failures near the wired limit. The 256K re-lift still
-  needs the RAM-aware default + the sdpaPromptS slab fix + a quiet-box
-  31B receipt. Then the N-bit knob.
+  trips allocation failures near the wired limit.
+  **THE SLAB LEAK ALSO SHIPPED** (`14fa6aa`, same day): denseBatchScratch's
+  grow sites (mlpFold/attnFold/layerStage/sdpaPromptS) now release the
+  outgrown slabs and Close() releases the whole set — the old code stacked
+  a dead 1-2GB sdpaPromptS pair per widening chunk and leaked the grown
+  set on every session teardown. Gate:
+  TestDenseBatchScratchReleasesSlabsOnGrowthAndClose (device
+  CurrentAllocatedSize back to baseline over 4 grow+close cycles;
+  +405MB FAIL with releases neutered — falsified before trusted). The
+  row-plumbing buffers (offBuf/inPacked/outPacked/lastRows) cache host
+  pointers and were deliberately left alone — they need their own
+  care-map. The 256K re-lift still needs the RAM-aware default + a
+  quiet-box 31B receipt. Then the N-bit knob.
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
