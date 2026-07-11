@@ -6,7 +6,7 @@
 `lem` — the **Lethean Ethical Machine** — is the Lethean inference engine
 for the Gemma 4 family on Apple silicon: a single no-cgo Go binary driving
 Metal directly, serving OpenAI-, Anthropic- and Ollama-compatible routes
-on port 11434. It trains LoRA adapters, runs speculative decode the
+on port 36911. It trains LoRA adapters, runs speculative decode the
 reference engines don't have for this family, holds 256K context by
 default on hardware that can carry it, and — the part nothing else does —
 sleeps and wakes conversations byte-identically, so a session's history
@@ -269,8 +269,9 @@ file it.
 ```sh
 git clone https://github.com/dAppCore/go-inference
 cd go-inference
+git submodule update --init external/mlx   # Apple MLX source the metallib builds from
 task metallib && task build:embed   # self-contained bin/lem
-bin/lem serve --model <gemma-4 snapshot>   # port 11434, drop-in Ollama routes
+bin/lem serve --model <gemma-4 snapshot>   # port 36911, drop-in Ollama routes
 ```
 
 Prebuilt binaries (macOS 26+, Apple silicon) attached to this release.
