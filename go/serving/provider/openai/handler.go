@@ -313,6 +313,107 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 	}
 }
 
+// streamOutcome is one token's detection result in the streamed content path:
+// the visible text to emit (may be empty) and which boundary — the tool-call
+// open marker opening (tool), an already-open tool span (swallow), or a stop
+// sequence being crossed (stop) — was hit. It mirrors serveStreaming's original
+// per-token branch outcomes exactly; the differential fuzz in
+// handler_stream_fuzz_test.go pins it to the pre-optimisation reference.
+type streamOutcome struct {
+	visible string
+	tool    bool
+	swallow bool
+	stop    bool
+}
+
+// contentStreamer detects the tool-call open marker and boundary-spanning stop
+// sequences across a streamed reply WITHOUT re-concatenating the whole reply per
+// token. The pre-optimisation path built `candidate := emittedContent +
+// contentDelta` every token and scanned the full candidate — O(N²) bytes over an
+// N-token stream (a 2048-token reply re-copies megabytes; an 8K agentic reply
+// ~16× that). Detection only ever needs the last (maxMarkerLen-1) bytes of
+// already-emitted content plus the new delta: a stop sequence or the tool marker
+// can only newly COMPLETE within that window — anything ending inside the
+// already-emitted prefix would have been detected (and broken / entered-tool on)
+// at an earlier token, so once past it the loop never scans there again. The
+// cumulative content therefore lives in a strings.Builder (amortised O(1)
+// append), and each token scans only a bounded window+delta slice of it — the
+// same zero-copy tail-view idiom as ThinkingExtractor.tailFrom.
+type contentStreamer struct {
+	content   core.Builder // cumulative emitted+scanned content (== the old emittedContent)
+	stops     []string
+	window    int  // maxMarkerLen - 1: carry-over needed to catch a straddling marker
+	inTool    bool // a <|tool_call> span has opened; everything after is buffered
+	stopped   bool // a stop sequence was crossed; stoppedAt bounds the kept content
+	stoppedAt int
+}
+
+// newContentStreamer sizes the rescan window from the actual marker set in play:
+// the 12-byte tool-call open marker and every stop sequence for this request.
+// maxMarkerLen-1 is the largest carry-over any of them can need to complete
+// across a token boundary; a bigger-than-needed window is safe (no marker can
+// sit wholly inside it — that would have fired earlier).
+func newContentStreamer(stops []string) *contentStreamer {
+	maxMarkerLen := len(parser.ToolCallOpenMarker)
+	for _, s := range stops {
+		if len(s) > maxMarkerLen {
+			maxMarkerLen = len(s)
+		}
+	}
+	return &contentStreamer{stops: stops, window: maxMarkerLen - 1}
+}
+
+// step feeds one content delta, appends it to the cumulative builder, and scans
+// only the bounded window+delta tail — returning what to emit and which boundary
+// was crossed. Each branch reproduces the old serveStreaming case byte-for-byte:
+// absolute positions in the old full candidate map to scan-window positions via
+// the windowStart offset, and the emitted slices are byte-identical.
+func (c *contentStreamer) step(contentDelta string) streamOutcome {
+	emittedLen := c.content.Len()
+	c.content.WriteString(contentDelta)
+	if c.inTool {
+		return streamOutcome{swallow: true} // CASE A: buffering the tool span
+	}
+	windowStart := emittedLen - c.window
+	if windowStart < 0 {
+		windowStart = 0
+	}
+	scan := c.content.String()[windowStart:] // == oldTail + contentDelta, zero-copy
+	boundary := emittedLen - windowStart     // emitted/new split, in scan coords
+	// CASE B: the tool-call open marker (idx > len(emittedContent) ⟺ rel > boundary).
+	if rel := core.Index(scan, parser.ToolCallOpenMarker); rel >= 0 {
+		c.inTool = true
+		out := streamOutcome{tool: true}
+		if rel > boundary {
+			out.visible = scan[boundary:rel]
+		}
+		return out
+	}
+	// CASE C: a stop sequence (stopCut <= len(emittedContent) ⟺ stopRel <= boundary).
+	stopRel, stopHit := firstStopSequenceCut(scan, c.stops)
+	if !stopHit {
+		return streamOutcome{visible: contentDelta} // CASE D: plain content delta
+	}
+	out := streamOutcome{stop: true}
+	if stopRel > boundary {
+		out.visible = scan[boundary:stopRel]
+	}
+	c.stopped = true
+	c.stoppedAt = windowStart + stopRel
+	return out
+}
+
+// emitted returns the full content the stream produced, truncated at the stop
+// cut when one was crossed. It fires once, post-loop (feeding ParseGemmaToolCalls
+// and the flushed-tail append) — the single O(N) materialisation the per-token
+// loop no longer pays.
+func (c *contentStreamer) emitted() string {
+	if c.stopped {
+		return c.content.String()[:c.stoppedAt]
+	}
+	return c.content.String()
+}
+
 func requestMessages(messages []ChatMessage, tools []Tool) []inference.Message {
 	out := make([]inference.Message, 0, len(messages)+1)
 	if decl := renderOpenAITools(tools); decl != "" {
