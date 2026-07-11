@@ -20,18 +20,23 @@ func benchBlockWeights(D, H, K, V int) *BlockWeights {
 	}
 }
 
-// BenchmarkBlockForwardF32_Decode — one token through the full time-mix block: the
-// projection GEMMs + the log-decay + WKV7 + out-proj. The projection results are the bulk of
-// the per-token allocation.
+// BenchmarkBlockForwardF32_Decode — one token through the full time-mix block on the steady-state
+// scratch path: a caller-owned BlockScratch (sized by the warmup call) is reused every token so the
+// seven projection GEMM outputs (r/w/k/v/a/b + out) write into resident buffers. This pins the residual
+// per-token allocation once the projection outputs are eliminated (the WKV7 output + advanced state).
 func BenchmarkBlockForwardF32_Decode(b *testing.B) {
 	const D, H, K, V = 1024, benchRwkvHeads, benchRwkvK, benchRwkvV
 	w := benchBlockWeights(D, H, K, V)
 	cfg := BlockConfig{NumHeads: H, KeyDim: K, ValueDim: V}
 	x := benchRwkvF32(1 * D)
+	sc := &BlockScratch{}
+	if _, _, err := BlockForwardScratchF32(x, w, cfg, nil, 1, D, sc); err != nil { // size the scratch
+		b.Fatal(err)
+	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, _, err := BlockForwardF32(x, w, cfg, nil, 1, D); err != nil {
+		if _, _, err := BlockForwardScratchF32(x, w, cfg, nil, 1, D, sc); err != nil {
 			b.Fatal(err)
 		}
 	}
