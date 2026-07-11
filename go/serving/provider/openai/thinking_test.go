@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	core "dappco.re/go"
 	"dappco.re/go/inference"
 )
 
@@ -446,27 +445,25 @@ func TestOpenAI_ThinkingExtractor_Good_ChannelMarkerWithLeadingSpace(t *testing.
 // first), so the guard is only reachable via a direct call.
 func TestThinking_WriteContent_Direct(t *testing.T) {
 	e := NewThinkingExtractor()
-	var b core.Builder
-	writeContent(e, &b, "")
-	if b.Len() != 0 || e.content != "" {
-		t.Fatalf("writeContent(empty) wrote something: builder=%q content=%q", b.String(), e.content)
+	writeContent(e, "")
+	if e.content.String() != "" {
+		t.Fatalf("writeContent(empty) wrote something: content=%q", e.content.String())
 	}
-	writeContent(e, &b, "hi")
-	if b.String() != "hi" || e.content != "hi" {
-		t.Fatalf("writeContent(hi) = builder:%q content:%q, want hi/hi", b.String(), e.content)
+	writeContent(e, "hi")
+	if e.content.String() != "hi" {
+		t.Fatalf("writeContent(hi) = content:%q, want hi", e.content.String())
 	}
 }
 
 func TestThinking_WriteThought_Direct(t *testing.T) {
 	e := NewThinkingExtractor()
-	var b core.Builder
-	writeThought(e, &b, "")
-	if b.Len() != 0 || e.thinking != "" {
-		t.Fatalf("writeThought(empty) wrote something: builder=%q thinking=%q", b.String(), e.thinking)
+	writeThought(e, "")
+	if e.thinking.String() != "" {
+		t.Fatalf("writeThought(empty) wrote something: thinking=%q", e.thinking.String())
 	}
-	writeThought(e, &b, "hmm")
-	if b.String() != "hmm" || e.thinking != "hmm" {
-		t.Fatalf("writeThought(hmm) = builder:%q thinking:%q, want hmm/hmm", b.String(), e.thinking)
+	writeThought(e, "hmm")
+	if e.thinking.String() != "hmm" {
+		t.Fatalf("writeThought(hmm) = thinking:%q, want hmm", e.thinking.String())
 	}
 }
 

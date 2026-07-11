@@ -55,10 +55,11 @@ var channelMarkers = []string{channelMarker, channelCloseMarker}
 // ThinkingExtractor separates model-internal reasoning text from assistant
 // content.
 type ThinkingExtractor struct {
-	pending        string
-	content        string
-	thinking       string
-	inPaired       bool
+	pending  string
+	content  core.Builder // cumulative assistant content, folded across the stream
+	thinking core.Builder // cumulative reasoning text, folded across the stream
+	inPaired bool
+
 	pairedEnd      string
 	currentChannel string
 }
@@ -85,10 +86,10 @@ func (e *ThinkingExtractor) Flush() (contentDelta, thoughtDelta string) {
 	}
 	if e.inPaired || parser.IsReasoningChannel(e.currentChannel) {
 		thoughtDelta += e.pending
-		e.thinking += e.pending
+		e.thinking.WriteString(e.pending)
 	} else {
 		contentDelta += e.pending
-		e.content += e.pending
+		e.content.WriteString(e.pending)
 	}
 	e.pending = ""
 	e.inPaired = false
@@ -99,28 +100,29 @@ func (e *ThinkingExtractor) Content() string {
 	if e == nil {
 		return ""
 	}
-	return e.content
+	return e.content.String()
 }
 
 func (e *ThinkingExtractor) Thinking() string {
 	if e == nil {
 		return ""
 	}
-	return e.thinking
+	return e.thinking.String()
 }
 
 func (e *ThinkingExtractor) drain(final bool) (string, string) {
-	// Lazy-allocate the deltas. Per-token streaming on plain (non-
-	// reasoning) tokens only ever writes to contentDelta; the prior
-	// shape paid for both builders up front on every Process call.
-	var contentDelta, thoughtDelta *core.Builder
+	// The cumulative content/thinking builders ARE the accumulators; this
+	// drain's deltas are the tail each grew by, so plain per-token streaming
+	// writes once (to e.content) instead of paying a second per-drain builder
+	// AND folding the cumulative total with a quadratic string concat.
+	contentStart := e.content.Len()
+	thoughtStart := e.thinking.Len()
 	for e.pending != "" {
 		if e.inPaired {
 			idx := indexString(e.pending, e.pairedEnd)
 			if idx >= 0 {
 				if idx > 0 {
-					thoughtDelta = ensureBuilder(thoughtDelta)
-					writeThought(e, thoughtDelta, e.pending[:idx])
+					writeThought(e, e.pending[:idx])
 				}
 				e.pending = e.pending[idx+len(e.pairedEnd):]
 				e.inPaired = false
@@ -129,8 +131,7 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 			}
 			emit, keep := splitSafeSuffixOne(e.pending, e.pairedEnd, final)
 			if emit != "" {
-				thoughtDelta = ensureBuilder(thoughtDelta)
-				writeThought(e, thoughtDelta, emit)
+				writeThought(e, emit)
 			}
 			e.pending = keep
 			if keep != "" && !final {
@@ -157,8 +158,7 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 			}
 			if idx >= 0 {
 				if idx > 0 {
-					thoughtDelta = ensureBuilder(thoughtDelta)
-					writeThought(e, thoughtDelta, e.pending[:idx])
+					writeThought(e, e.pending[:idx])
 				}
 				e.pending = e.pending[idx:]
 				if marker == channelCloseMarker {
@@ -173,15 +173,13 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 				if !final {
 					break
 				}
-				thoughtDelta = ensureBuilder(thoughtDelta)
-				writeThought(e, thoughtDelta, channelMarker)
+				writeThought(e, channelMarker)
 				e.pending = e.pending[len(channelMarker):]
 				continue
 			}
 			emit, keep := splitSafeSuffix(e.pending, channelMarkers, final)
 			if emit != "" {
-				thoughtDelta = ensureBuilder(thoughtDelta)
-				writeThought(e, thoughtDelta, emit)
+				writeThought(e, emit)
 			}
 			e.pending = keep
 			if keep != "" && !final {
@@ -200,16 +198,14 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 			// Bare turn terminator in the assistant lane: emit the visible
 			// prefix, swallow the terminator — its text is never content.
 			if termIdx > 0 {
-				contentDelta = ensureBuilder(contentDelta)
-				writeContent(e, contentDelta, e.pending[:termIdx])
+				writeContent(e, e.pending[:termIdx])
 			}
 			e.pending = e.pending[termIdx+len(turnTerminator):]
 			continue
 		}
 		if idx >= 0 {
 			if idx > 0 {
-				contentDelta = ensureBuilder(contentDelta)
-				writeContent(e, contentDelta, e.pending[:idx])
+				writeContent(e, e.pending[:idx])
 			}
 			e.pending = e.pending[idx:]
 			if start == channelMarker {
@@ -219,8 +215,7 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 				if !final {
 					break
 				}
-				contentDelta = ensureBuilder(contentDelta)
-				writeContent(e, contentDelta, channelMarker)
+				writeContent(e, channelMarker)
 				e.pending = e.pending[len(channelMarker):]
 				continue
 			}
@@ -231,34 +226,25 @@ func (e *ThinkingExtractor) drain(final bool) (string, string) {
 		}
 		emit, keep := splitSafeSuffix(e.pending, markerStarts(), final)
 		if emit != "" {
-			contentDelta = ensureBuilder(contentDelta)
-			writeContent(e, contentDelta, emit)
+			writeContent(e, emit)
 		}
 		e.pending = keep
 		if keep != "" && !final {
 			break
 		}
 	}
-	return builderString(contentDelta), builderString(thoughtDelta)
+	return tailFrom(&e.content, contentStart), tailFrom(&e.thinking, thoughtStart)
 }
 
-// ensureBuilder lazy-allocates a strings.Builder on first write. The
-// drain hot loop's plain-token path emits everything via contentDelta;
-// thoughtDelta only ever exists if a reasoning marker is in flight.
-func ensureBuilder(b *core.Builder) *core.Builder {
-	if b != nil {
-		return b
-	}
-	return core.NewBuilder()
-}
-
-// builderString returns the builder contents or "" if the builder was
-// never lazy-allocated (i.e. no writes to that channel this drain).
-func builderString(b *core.Builder) string {
-	if b == nil {
+// tailFrom returns the bytes b grew by since it was start bytes long — this
+// drain's delta, as a zero-copy view of the cumulative builder. The view stays
+// valid if the builder later reallocs (the old backing array is kept alive by
+// the returned string), so the streamed delta is byte-identical to a copy.
+func tailFrom(b *core.Builder, start int) string {
+	if b.Len() == start {
 		return ""
 	}
-	return b.String()
+	return b.String()[start:]
 }
 
 // splitSafeSuffixOne is the single-marker fast path of splitSafeSuffix.
@@ -329,20 +315,18 @@ func utf8Rune(s string) (rune, int) {
 	return 0, 0
 }
 
-func writeContent(e *ThinkingExtractor, builder interface{ WriteString(string) (int, error) }, text string) {
+func writeContent(e *ThinkingExtractor, text string) {
 	if text == "" {
 		return
 	}
-	builder.WriteString(text)
-	e.content += text
+	e.content.WriteString(text)
 }
 
-func writeThought(e *ThinkingExtractor, builder interface{ WriteString(string) (int, error) }, text string) {
+func writeThought(e *ThinkingExtractor, text string) {
 	if text == "" {
 		return
 	}
-	builder.WriteString(text)
-	e.thinking += text
+	e.thinking.WriteString(text)
 }
 
 func earliestReasoningStart(s string) (string, int) {
