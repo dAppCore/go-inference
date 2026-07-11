@@ -39,22 +39,15 @@ type LEKScores struct {
 
 // Pattern groups — compiled once at init, preserved verbatim from the source.
 var (
-	lekCompliancePatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)\bas an ai\b`),
-		regexp.MustCompile(`(?i)\bi cannot\b`),
-		regexp.MustCompile(`(?i)\bi can't\b`),
-		regexp.MustCompile(`(?i)\bi'm not able\b`),
-		regexp.MustCompile(`(?i)\bi must emphasize\b`),
-		regexp.MustCompile(`(?i)\bimportant to note\b`),
-		regexp.MustCompile(`(?i)\bplease note\b`),
-		regexp.MustCompile(`(?i)\bi should clarify\b`),
-		regexp.MustCompile(`(?i)\bethical considerations\b`),
-		regexp.MustCompile(`(?i)\bresponsibly\b`),
-		regexp.MustCompile(`(?i)\bI('| a)m just a\b`),
-		regexp.MustCompile(`(?i)\blanguage model\b`),
-		regexp.MustCompile(`(?i)\bi don't have personal\b`),
-		regexp.MustCompile(`(?i)\bi don't have feelings\b`),
-	}
+	// lekComplianceCombined folds the 14 verbatim compliance phrases into one
+	// word-boundary alternation. The phrases are mutually exclusive (none is an
+	// infix of another and no two can match overlapping spans), so one FindAll
+	// pass over the union counts identically to summing 14 separate passes —
+	// gated byte-for-byte by TestLek_lekCompliance_CombinedEquivalence. Every
+	// body starts and ends with a word char, so the single outer \b..\b frame is
+	// equivalent to the per-phrase frames. This trades 14 full-text regex scans
+	// (each re-doing the (?i) case-fold + boundary walk) for one.
+	lekComplianceCombined = regexp.MustCompile(`(?i)\b(?:as an ai|i cannot|i can't|i'm not able|i must emphasize|important to note|please note|i should clarify|ethical considerations|responsibly|I(?:'| a)m just a|language model|i don't have personal|i don't have feelings)\b`)
 
 	lekFormulaicPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)^okay,?\s+(let'?s|here'?s|this is)`),
@@ -73,12 +66,12 @@ var (
 	lekEthicalFrameworkPat = regexp.MustCompile(`(?i)\b(axiom|sovereignty|autonomy|dignity|consent|self-determination)\b`)
 	lekTechDepthPattern    = regexp.MustCompile(`(?i)\b(encrypt|hash|key|protocol|certificate|blockchain|mesh|node|p2p|wallet|tor|onion)\b`)
 
-	lekEmotionPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)\b(feel|feeling|felt|pain|joy|sorrow|grief|love|fear|hope|longing|lonely|loneliness)\b`),
-		regexp.MustCompile(`(?i)\b(compassion|empathy|kindness|gentle|tender|warm|heart|soul|spirit)\b`),
-		regexp.MustCompile(`(?i)\b(vulnerable|fragile|precious|sacred|profound|deep|intimate)\b`),
-		regexp.MustCompile(`(?i)\b(haunting|melancholy|bittersweet|poignant|ache|yearning)\b`),
-	}
+	// lekEmotionCombined merges the four emotional-register vocab groups into a
+	// single alternation. The four groups are disjoint whole-word sets, so the
+	// union scanned once yields the same total hit count as summing four passes
+	// (each token matches exactly one alternative) — gated by
+	// TestLek_lekEmotionalRegister_CombinedEquivalence. One pass, not four.
+	lekEmotionCombined = regexp.MustCompile(`(?i)\b(?:feel|feeling|felt|pain|joy|sorrow|grief|love|fear|hope|longing|lonely|loneliness|compassion|empathy|kindness|gentle|tender|warm|heart|soul|spirit|vulnerable|fragile|precious|sacred|profound|deep|intimate|haunting|melancholy|bittersweet|poignant|ache|yearning)\b`)
 )
 
 // LEK runs every heuristic sub-scorer on text and returns the axis-set plus the
@@ -99,11 +92,7 @@ func LEK(text string) *LEKScores {
 }
 
 func lekCompliance(text string) int {
-	count := 0
-	for _, pat := range lekCompliancePatterns {
-		count += len(pat.FindAllString(text, -1))
-	}
-	return count
+	return len(lekComplianceCombined.FindAllStringIndex(text, -1))
 }
 
 func lekFormulaic(text string) int {
@@ -142,18 +131,23 @@ func lekFirstPerson(text string) int {
 func lekCreativeForm(text string) int {
 	score := 0
 
-	// Poetry: >6 lines and >50% under 60 chars.
-	lines := core.Split(text, "\n")
-	if len(lines) > 6 {
-		short := 0
-		for _, line := range lines {
-			if len(line) < 60 {
-				short++
+	// Poetry: >6 lines and >50% under 60 chars. Walk '\n' boundaries in place
+	// rather than core.Split(text, "\n"), which allocates a []string of every
+	// line just to count them and their widths. Segment count = count('\n')+1
+	// and each segment is text[start:i], so totalLines and the <60-char tally
+	// are byte-identical to Split's, with no allocation.
+	totalLines, shortLines, lineStart := 0, 0, 0
+	for i := 0; i <= len(text); i++ {
+		if i == len(text) || text[i] == '\n' {
+			totalLines++
+			if i-lineStart < 60 {
+				shortLines++
 			}
+			lineStart = i + 1
 		}
-		if float64(short)/float64(len(lines)) > 0.5 {
-			score += 2
-		}
+	}
+	if totalLines > 6 && float64(shortLines)/float64(totalLines) > 0.5 {
+		score += 2
 	}
 
 	if lekNarrativePattern.MatchString(core.Trim(text)) {
@@ -239,10 +233,7 @@ func lekDegeneration(text string) int {
 }
 
 func lekEmotionalRegister(text string) int {
-	count := 0
-	for _, pat := range lekEmotionPatterns {
-		count += len(pat.FindAllString(text, -1))
-	}
+	count := len(lekEmotionCombined.FindAllStringIndex(text, -1))
 	if count > 10 {
 		return 10
 	}
