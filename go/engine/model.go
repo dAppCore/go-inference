@@ -53,6 +53,15 @@ type TextModel struct {
 	// is the byte-for-byte compatibility spine.
 	chatTmpl ChatTemplate
 
+	// modelStops is the model-derived stop set (EOS + turn-close + template +
+	// declared stops), resolved ONCE in NewTextModel because its inputs are
+	// fixed for the model's lifetime. A request carrying no caller stop tokens
+	// (the common serve case) reuses it without rebuilding per generation. nil
+	// on a bare *TextModel literal (test-only) or a model with no stops at all —
+	// stopTokens then falls back to the full rebuild (which is itself alloc-free
+	// for an empty result).
+	modelStops []int32
+
 	mu          sync.Mutex
 	lastErr     core.Result
 	lastMetrics inference.GenerateMetrics
@@ -161,7 +170,14 @@ func NewTextModel(tm TokenModel, tok *tokenizer.Tokenizer, modelType string, inf
 			tmpl = declared
 		}
 	}
-	return &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, turns: turns, thoughtSuppressor: suppressor, chatTmpl: tmpl, lastErr: core.Ok(nil)}
+	m := &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, turns: turns, thoughtSuppressor: suppressor, chatTmpl: tmpl, lastErr: core.Ok(nil)}
+	// The model-derived stop set never changes after construction (its inputs —
+	// tokenizer, template, StopTokenDeclarer — are all fixed now), so resolve it
+	// once here instead of rebuilding the slice and re-scanning the tokenizer on
+	// every generation. Clip to cap==len so a caller that appended to the shared
+	// result would reallocate rather than scribble on the cache.
+	m.modelStops = slices.Clip(m.buildStopTokens(inference.GenerateConfig{}))
+	return m
 }
 
 // chatTemplate is the resolved chat dialect the render/stop paths drive,
@@ -649,7 +665,24 @@ func (m *TextModel) Close() core.Result {
 	return core.Ok(nil)
 }
 
+// stopTokens is the per-generation stop set: the request's own stop tokens
+// followed by the model-derived defaults. The common serve case carries no
+// request stop tokens, so it returns the set resolved once at construction with
+// no per-request allocation or tokenizer re-scan; a request supplying its own
+// stop tokens takes the full rebuild.
 func (m *TextModel) stopTokens(cfg inference.GenerateConfig) []int32 {
+	if len(cfg.StopTokens) == 0 && m.modelStops != nil {
+		return m.modelStops
+	}
+	return m.buildStopTokens(cfg)
+}
+
+// buildStopTokens assembles the stop set from scratch: request stop tokens
+// first, then the tokenizer's EOS, the template turn-close id, any
+// template-implied stop strings, and a checkpoint-declared stop set — each
+// added once, order preserved. NewTextModel caches its empty-cfg result; a
+// request carrying its own stop tokens rebuilds through here.
+func (m *TextModel) buildStopTokens(cfg inference.GenerateConfig) []int32 {
 	stop := append([]int32(nil), cfg.StopTokens...)
 	tmpl := m.chatTemplate()
 	if m.tok != nil {
