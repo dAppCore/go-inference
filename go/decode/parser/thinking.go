@@ -34,15 +34,18 @@ type Processor struct {
 	pending        string
 	inReasoning    bool
 	current        thinkingMarker
-	reasoningParts []string
-	// blockStart marks where the current reasoning block begins in
-	// reasoningParts. The block's parts are reasoningParts[blockStart:] —
-	// emitReasoningBlock joins that window and advances blockStart to the
-	// new tail. The previous shape kept a parallel blockParts slice that
-	// received the same per-token append as reasoningParts; tracking an
-	// index instead drops that second slice and its per-token growth
-	// reallocations (the streaming hot path appends per token, so the
-	// duplicate slice doubled addReasoning's allocs).
+	reasoning strings.Builder // reasoning text, folded per token as it arrives
+	// blockStart marks where the current reasoning block begins as a BYTE
+	// offset into the reasoning builder. The block's text is
+	// reasoning.String()[blockStart:] — emitReasoningBlock takes that window
+	// as a zero-copy view and advances blockStart to the builder's new
+	// length. The previous shape kept reasoning as a []string appended per
+	// token then joined; folding into a builder trades the per-token slice
+	// headers (16 B each, more than the short reasoning fragments they point
+	// at) for a compact byte buffer, and turns Reasoning() into a zero-copy
+	// String() instead of a full re-join. The block window stays byte-stable
+	// because a builder only appends — earlier views keep their length and
+	// the old backing array if a later write reallocs.
 	blockStart int
 	chunks     []Chunk
 }
@@ -139,7 +142,7 @@ func (p *Processor) Flush() string {
 
 // reasoning := p.Reasoning()
 func (p *Processor) Reasoning() string {
-	return core.Join("", p.reasoningParts...)
+	return p.reasoning.String()
 }
 
 // chunks := p.Chunks()
@@ -271,12 +274,12 @@ func (p *Processor) addReasoning(text string) {
 	if text == "" {
 		return
 	}
-	p.reasoningParts = append(p.reasoningParts, text)
+	p.reasoning.WriteString(text)
 }
 
 func (p *Processor) emitReasoningBlock() {
-	text := core.Join("", p.reasoningParts[p.blockStart:]...)
-	p.blockStart = len(p.reasoningParts)
+	text := p.reasoning.String()[p.blockStart:]
+	p.blockStart = p.reasoning.Len()
 	if text == "" {
 		return
 	}
