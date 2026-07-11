@@ -289,35 +289,89 @@ func perLayerInputsBatchQuantIntoSlab(
 	ids []int32, embs [][]byte, slab []byte,
 	numLayers, pliDim, dModel int, eps float32,
 ) (bool, error) {
+	nOut, serr := pleSlabOutLayers(len(slab), len(ids), pliDim, numLayers)
+	if serr != nil {
+		return false, serr
+	}
+	plDimC, ok, err := perLayerInputsBatchQuantEncode(sc, tablePacked, tableScales, tableBiases, tableGS, tableBits,
+		projW, projWOff, projPacked, projScales, projBiases, projGS, projBits,
+		projNormW, ids, embs, nOut, numLayers, pliDim, dModel, eps, true)
+	if err != nil || !ok {
+		return false, err
+	}
+	outStart := time.Now()
+	// layer-major: the slab (nOut ≤ computed layers) is a prefix of the computed tensor
+	copy(slab, unsafe.Slice((*byte)(sc.projectedBuf.Contents()), len(ids)*plDimC*bf16Size)[:len(slab)])
+	hostSpan("pleSlab.out", outStart, len(ids))
+	return true, nil
+}
+
+// perLayerInputsBatchQuantDevice is the DEVICE-RESIDENT quant slab build (#381):
+// encode + commit WITHOUT waiting and hand the layer-major tensor's buffer
+// straight to the batched pass — the pass's own command buffer follows on the
+// same queue, so the GPU orders the read after the build and the host never
+// blocks on the builder, copies the slab out, or uploads it again. The scratch
+// is safe single-buffered: the caller stages the NEXT chunk only after the
+// pass's wait, which covers this command buffer too. ok=false (no work) when
+// the encode cannot run at exactly outLayers — the bounded-width contract the
+// pass's slab geometry check enforces.
+func perLayerInputsBatchQuantDevice(
+	sc *pleBatchScratch,
+	tablePacked, tableScales, tableBiases metal.MTLBuffer, tableGS, tableBits int,
+	projW metal.MTLBuffer, projWOff uint,
+	projPacked, projScales, projBiases metal.MTLBuffer, projGS, projBits int,
+	projNormW []byte,
+	ids []int32, embs [][]byte,
+	outLayers, numLayers, pliDim, dModel int, eps float32,
+) (metal.MTLBuffer, bool, error) {
+	if outLayers < 1 || outLayers > numLayers {
+		return nil, false, core.NewError("native.perLayerInputsBatchQuantDevice: layer bound out of range")
+	}
+	plDimC, ok, err := perLayerInputsBatchQuantEncode(sc, tablePacked, tableScales, tableBiases, tableGS, tableBits,
+		projW, projWOff, projPacked, projScales, projBiases, projGS, projBits,
+		projNormW, ids, embs, outLayers, numLayers, pliDim, dModel, eps, false)
+	if err != nil || !ok || plDimC != outLayers*pliDim {
+		return nil, ok && plDimC == outLayers*pliDim, err
+	}
+	return sc.projectedBuf, true, nil
+}
+
+func perLayerInputsBatchQuantEncode(
+	sc *pleBatchScratch,
+	tablePacked, tableScales, tableBiases metal.MTLBuffer, tableGS, tableBits int,
+	projW metal.MTLBuffer, projWOff uint,
+	projPacked, projScales, projBiases metal.MTLBuffer, projGS, projBits int,
+	projNormW []byte,
+	ids []int32, embs [][]byte,
+	nOut, numLayers, pliDim, dModel int, eps float32,
+	wait bool,
+) (int, bool, error) {
 	k := len(ids)
 	plDim := numLayers * pliDim
 	if tablePacked == nil || tableScales == nil || tableBiases == nil || k < steelGEMMMinRows || len(projNormW) != pliDim*bf16Size {
-		return false, nil
+		return 0, false, nil
 	}
 	if projPacked == nil && projW == nil {
-		return false, nil
-	}
-	nOut, serr := pleSlabOutLayers(len(slab), k, pliDim, numLayers)
-	if serr != nil {
-		return false, serr
+		return 0, false, nil
 	}
 	gatherPSO, gerr := embedGatherPipeline()
 	relayoutPSO, rerr := pleRelayoutPipeline()
 	if gerr != nil || rerr != nil {
-		return false, nil // kernels unavailable — the per-token loop still works
+		return 0, false, nil // kernels unavailable — the per-token loop still works
 	}
 	if projPacked != nil {
 		if dModel%projGS != 0 {
-			return false, nil
+			return 0, false, nil
 		}
 		if _, perr := pipelineFor(qmmTKernelName(plDim, projGS, projBits)); perr != nil {
-			return false, nil
+			return 0, false, nil
 		}
 	}
-	// The compute width: a bounded slab (#381 shared-suffix chunk) runs the whole
+	// The compute width: a bounded build (#381 shared-suffix chunk) runs the whole
 	// pipeline at the owner-layer prefix when the rows gather + (quant path) the
-	// bounded qmm_t instantiation resolve; otherwise compute full width and copy
-	// the layer-major prefix out — both land the identical slab bytes.
+	// bounded qmm_t instantiation resolve; otherwise compute full width — the
+	// IntoSlab wrapper copies the layer-major prefix out either way (identical
+	// bytes), and the Device wrapper declines a full-width result.
 	rowsPSO, rowsErr := pleGatherRowsQuantPipeline()
 	plDimC, nC := plDim, numLayers
 	if rowsErr == nil && nOut < numLayers {
@@ -341,7 +395,7 @@ func perLayerInputsBatchQuantIntoSlab(
 	rowBytes := dModel * bf16Size
 	for i, emb := range embs {
 		if len(emb) != rowBytes {
-			return false, core.NewError("native.perLayerInputsBatchQuant: hidden row size mismatch")
+			return 0, false, core.NewError("native.perLayerInputsBatchQuant: hidden row size mismatch")
 		}
 		copy(sc.hidden[i*rowBytes:(i+1)*rowBytes], emb)
 	}
@@ -417,18 +471,16 @@ func perLayerInputsBatchQuantIntoSlab(
 		}
 		endEncodingFast(enc)
 		commitCommandBufferFast(cb)
-		waitUntilCompletedFast(cb)
+		if wait {
+			waitUntilCompletedFast(cb)
+		}
 		engaged = encErr == nil
 	})
 	if encErr != nil || !engaged {
-		return false, encErr
+		return 0, false, encErr
 	}
 	hostSpan("pleSlab.gpu", gpuStart, k)
-	outStart := time.Now()
-	// layer-major: the slab (nOut ≤ nC layers) is a prefix of the computed tensor
-	copy(slab, unsafe.Slice((*byte)(sc.projectedBuf.Contents()), k*plDimC*bf16Size)[:len(slab)])
-	hostSpan("pleSlab.out", outStart, k)
-	return true, nil
+	return plDimC, true, nil
 }
 
 type plHostScratchKey struct {

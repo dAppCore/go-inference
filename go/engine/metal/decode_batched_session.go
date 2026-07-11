@@ -753,17 +753,20 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		}
 	}
 	if len(s.ple) > 0 {
-		if pleSlab == nil {
+		if pleSlab == nil && s.prefillPLESlabDevice == nil {
 			return decline("PLE arch without slab")
 		}
 		// a skipped chunk's slab carries only the owner layers' slices (#381) —
-		// the bounded layer loop below never reads past prefillSkipToLayer
-		wantLayers := len(s.specs)
-		if s.prefillSkipToLayer > 0 && s.prefillSkipToLayer < wantLayers {
-			wantLayers = s.prefillSkipToLayer
-		}
-		if want := K * wantLayers * s.pliDim * bf16Size; len(pleSlab) != want {
-			return nil, false, core.NewError("native.stepTokensBatchedDense: PLE slab size mismatch")
+		// the bounded layer loop below never reads past prefillSkipToLayer. The
+		// device tensor's geometry is the builder's outLayers contract.
+		if pleSlab != nil {
+			wantLayers := len(s.specs)
+			if s.prefillSkipToLayer > 0 && s.prefillSkipToLayer < wantLayers {
+				wantLayers = s.prefillSkipToLayer
+			}
+			if want := K * wantLayers * s.pliDim * bf16Size; len(pleSlab) != want {
+				return nil, false, core.NewError("native.stepTokensBatchedDense: PLE slab size mismatch")
+			}
 		}
 	} else if pleSlab != nil {
 		return nil, false, core.NewError("native.stepTokensBatchedDense: PLE slab supplied for a non-PLE arch")
@@ -905,7 +908,11 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	}
 
 	var pleSlabBuf metal.MTLBuffer
-	if len(pleSlab) > 0 {
+	if s.prefillPLESlabDevice != nil {
+		// device-resident build (#381): committed on the shared queue ahead of this
+		// pass — GPU-ordered, no host wait, no copy-out, no re-upload.
+		pleSlabBuf = s.prefillPLESlabDevice
+	} else if len(pleSlab) > 0 {
 		if pleSlabBuf, err = s.pleSlabBuffer(pleSlab); err != nil {
 			return nil, false, err
 		}
