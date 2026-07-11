@@ -48,6 +48,29 @@ func benchmarkNativeLayerSlabStateBlocksFixture(tb testing.TB) (state.Store, *St
 	return store, bundle
 }
 
+// benchmarkNativeLayerMultiHeadSlabStateBlocksFixture builds a durable bundle
+// whose layer-raw tensors carry MULTIPLE KV heads ([1,H,L,D], B*H>1) — the
+// shape engine/metal captures for every grouped-query model. The single-head
+// fixture (B*H==1) exercises only the linear fast-append assembly path; this
+// one drives the interleaved multi-head assembly that appendKVSnapshotLayerRawBlock
+// must fold without an O(N^2) per-block rebuild.
+func benchmarkNativeLayerMultiHeadSlabStateBlocksFixture(tb testing.TB) (state.Store, *StateBlockBundle) {
+	tb.Helper()
+	store := state.NewInMemoryStore(nil)
+	snapshot := benchmarkNativeLayerSlabSnapshot(1536, 4, 64)
+	bundle, err := snapshot.SaveStateBlocks(context.Background(), store, StateBlockOptions{
+		BlockSize:  512,
+		KVEncoding: EncodingNative,
+	})
+	if err != nil {
+		tb.Fatalf("SaveStateBlocks(native multi-head layer slab) error = %v", err)
+	}
+	if len(bundle.Blocks) != 3 {
+		tb.Fatalf("blocks = %d, want 3", len(bundle.Blocks))
+	}
+	return store, bundle
+}
+
 func benchmarkStateBlocksSnapshot(tokenCount, localWindow int) *Snapshot {
 	tokens := make([]int32, tokenCount)
 	fullKey := make([]float32, tokenCount)
