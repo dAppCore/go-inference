@@ -54,8 +54,17 @@ type mergeKey struct {
 	b string
 }
 
+// bpeNode tracks one live symbol as a byte window [start,end) into the segment
+// text rather than an owned string. Merging two adjacent symbols is then a pure
+// window-extend (left.end = right.end) — the merged token is text[left.start:
+// right.end], a zero-copy substring view — instead of `left.token += right.token`
+// allocating a fresh growing string on every merge. Byte-identical because the
+// split symbols are contiguous, non-overlapping substrings of text and merges
+// only ever join a node with its immediate successor, so every window stays a
+// real contiguous slice of the original segment.
 type bpeNode struct {
-	token   string
+	start   int
+	end     int
 	prev    int
 	next    int
 	alive   bool
@@ -447,8 +456,11 @@ func buildGPT2ByteMaps() (decoder map[rune]byte, encoder map[byte]rune) {
 // forced the closure (and its captured slice headers / map) to escape
 // to heap on every bpeMerge call. The free-function version takes the
 // state explicitly + uses pushDirect to bypass container/heap's `any`
-// interface boxing — one alloc per push eliminated.
-func bpeMergePushPair(nodes []bpeNode, candidates *bpeCandidateHeap, ranks map[mergeKey]int, left int) {
+// interface boxing — one alloc per push eliminated. text is the segment the
+// node windows index into; the pair's merge key is the two adjacent windows'
+// substring views, allocation-free (the map lookup hashes the bytes, not the
+// header).
+func bpeMergePushPair(text string, nodes []bpeNode, candidates *bpeCandidateHeap, ranks map[mergeKey]int, left int) {
 	if left < 0 || left >= len(nodes) || !nodes[left].alive {
 		return
 	}
@@ -456,7 +468,7 @@ func bpeMergePushPair(nodes []bpeNode, candidates *bpeCandidateHeap, ranks map[m
 	if right < 0 || right >= len(nodes) || !nodes[right].alive {
 		return
 	}
-	rank, ok := ranks[mergeKey{a: nodes[left].token, b: nodes[right].token}]
+	rank, ok := ranks[mergeKey{a: text[nodes[left].start:nodes[left].end], b: text[nodes[right].start:nodes[right].end]}]
 	if !ok {
 		return
 	}
@@ -471,25 +483,33 @@ func bpeMergePushPair(nodes []bpeNode, candidates *bpeCandidateHeap, ranks map[m
 
 // bpeMerge applies BPE merges to a sequence of symbols until no more merges apply.
 // Uses the standard algorithm: repeatedly find the lowest-rank adjacent pair and merge it.
-func (t *Tokenizer) bpeMerge(symbols []string) []string {
+// text is the segment the symbols were split from (symbols == the in-order rune
+// pieces of text); each node tracks a byte window into it, so a merge extends a
+// window instead of concatenating strings — the previous shape's
+// `left.token += right.token` allocated a fresh growing string on every merge
+// (the single biggest allocator on the cache-miss encode path).
+func (t *Tokenizer) bpeMerge(text string, symbols []string) []string {
 	if len(symbols) <= 1 || len(t.mergeRanks) == 0 {
 		return symbols
 	}
 
 	nodes := make([]bpeNode, len(symbols))
+	offset := 0
 	for i, sym := range symbols {
 		nodes[i] = bpeNode{
-			token: sym,
+			start: offset,
+			end:   offset + len(sym),
 			prev:  i - 1,
 			next:  i + 1,
 			alive: true,
 		}
+		offset += len(sym)
 	}
 	nodes[len(nodes)-1].next = -1
 
 	candidates := make(bpeCandidateHeap, 0, len(nodes)-1)
 	for i := 0; i < len(nodes)-1; i++ {
-		bpeMergePushPair(nodes, &candidates, t.mergeRanks, i)
+		bpeMergePushPair(text, nodes, &candidates, t.mergeRanks, i)
 	}
 	// pushDirect maintains heap invariant on each insert — no separate
 	// heap.Init pass needed.
@@ -506,11 +526,16 @@ func (t *Tokenizer) bpeMerge(symbols []string) []string {
 		if nodes[left].version != candidate.leftVersion || nodes[right].version != candidate.rightVersion {
 			continue
 		}
-		if rank, ok := t.mergeRanks[mergeKey{a: nodes[left].token, b: nodes[right].token}]; !ok || rank != candidate.rank {
+		if rank, ok := t.mergeRanks[mergeKey{a: text[nodes[left].start:nodes[left].end], b: text[nodes[right].start:nodes[right].end]}]; !ok || rank != candidate.rank {
 			continue
 		}
 
-		nodes[left].token += nodes[right].token
+		// Window-extend: left now spans to right's end. The merged token is
+		// text[left.start:left.end] — a substring view, no allocation. Valid
+		// because right is left's immediate successor, so the two windows are
+		// contiguous ([left.start,left.end) then [right.start,right.end) with
+		// left.end == right.start) and their union is one contiguous window.
+		nodes[left].end = nodes[right].end
 		nodes[left].next = nodes[right].next
 		nodes[left].version++
 		nodes[right].alive = false
@@ -519,13 +544,13 @@ func (t *Tokenizer) bpeMerge(symbols []string) []string {
 			nodes[next].prev = left
 		}
 
-		bpeMergePushPair(nodes, &candidates, t.mergeRanks, nodes[left].prev)
-		bpeMergePushPair(nodes, &candidates, t.mergeRanks, left)
+		bpeMergePushPair(text, nodes, &candidates, t.mergeRanks, nodes[left].prev)
+		bpeMergePushPair(text, nodes, &candidates, t.mergeRanks, left)
 	}
 
 	merged := symbols[:0]
 	for i := 0; i >= 0; i = nodes[i].next {
-		merged = append(merged, nodes[i].token)
+		merged = append(merged, text[nodes[i].start:nodes[i].end])
 	}
 	return merged
 }
@@ -620,7 +645,7 @@ func (t *Tokenizer) encodeSentencePieceSegment(segment string) []int32 {
 	}
 
 	symbols := splitRunes(make([]string, 0, len(spText)), spText)
-	symbols = t.bpeMerge(symbols)
+	symbols = t.bpeMerge(spText, symbols)
 
 	tokens := make([]int32, 0, len(symbols))
 	for _, sym := range symbols {
@@ -657,7 +682,7 @@ func (t *Tokenizer) encodeGPT2Segment(segment string) []int32 {
 	}
 
 	symbols := splitRunes(make([]string, 0, len(encodedText)), encodedText)
-	symbols = t.bpeMerge(symbols)
+	symbols = t.bpeMerge(encodedText, symbols)
 
 	tokens := make([]int32, 0, len(symbols))
 	for _, sym := range symbols {
