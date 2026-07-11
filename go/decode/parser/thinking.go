@@ -25,16 +25,18 @@ func Filter(text string, cfg Config, hint Hint) Result {
 // p := parser.NewProcessor(cfg, hint)
 // visible := p.Process(piece) + p.Flush()
 type Processor struct {
-	cfg         Config
-	mode        Mode
-	markers     []thinkingMarker
-	startSet    []string // cached marker.start values — invariant once markers is set
-	terminators []string // bare turn-end tokens swallowed from visible output (gemma <end_of_turn>)
-	holdbackSet []string // startSet + terminators — the streaming partial-suffix set
-	pending     string
-	inReasoning bool
-	current     thinkingMarker
-	reasoning   strings.Builder // reasoning text, folded per token as it arrives
+	cfg             Config
+	mode            Mode
+	markers         []thinkingMarker
+	startSet        []string // cached marker.start values — invariant once markers is set
+	startLeads      string   // distinct lead bytes of startSet — the findStart anchor set
+	terminators     []string // bare turn-end tokens swallowed from visible output (gemma <end_of_turn>)
+	terminatorLeads string   // distinct lead bytes of terminators — the findTerminator anchor set
+	holdbackSet     []string // startSet + terminators — the streaming partial-suffix set
+	pending         string
+	inReasoning     bool
+	current         thinkingMarker
+	reasoning       strings.Builder // reasoning text, folded per token as it arrives
 	// blockStart marks where the current reasoning block begins as a BYTE
 	// offset into the reasoning builder. The block's text is
 	// reasoning.String()[blockStart:] — emitReasoningBlock takes that window
@@ -57,14 +59,16 @@ func NewProcessor(cfg Config, hint Hint) *Processor {
 	// after construction; sharing the headers avoids per-stream alloc
 	// of both the marker slice and the start-set slice (the previous
 	// shape paid both per NewProcessor call).
-	markers, startSet, terminators, holdback := markersStartsTerminatorsForHint(hint)
+	markers, startSet, terminators, holdback, startLeads, terminatorLeads := markersStartsTerminatorsForHint(hint)
 	return &Processor{
-		cfg:         cfg,
-		mode:        NormaliseMode(cfg.Mode),
-		markers:     markers,
-		startSet:    startSet,
-		terminators: terminators,
-		holdbackSet: holdback,
+		cfg:             cfg,
+		mode:            NormaliseMode(cfg.Mode),
+		markers:         markers,
+		startSet:        startSet,
+		startLeads:      startLeads,
+		terminators:     terminators,
+		terminatorLeads: terminatorLeads,
+		holdbackSet:     holdback,
 	}
 }
 
@@ -91,19 +95,19 @@ func markersForHint(hint Hint) []thinkingMarker {
 // them as read-only. Non-builtin parsers (custom registrations) fall back
 // to allocating fresh views, preserving the legacy shape for those paths.
 func markersAndStartsForHint(hint Hint) ([]thinkingMarker, []string) {
-	markers, starts, _, _ := markersStartsTerminatorsForHint(hint)
+	markers, starts, _, _, _, _ := markersStartsTerminatorsForHint(hint)
 	return markers, starts
 }
 
 // markersStartsTerminatorsForHint is markersAndStartsForHint plus the family's
 // bare turn terminators and the combined streaming holdback set (all four are
 // registry-owned read-only views).
-func markersStartsTerminatorsForHint(hint Hint) ([]thinkingMarker, []string, []string, []string) {
+func markersStartsTerminatorsForHint(hint Hint) ([]thinkingMarker, []string, []string, []string, string, string) {
 	p, ok := ForHint(hint).(*builtinOutputParser)
 	if !ok || p == nil {
 		p = newBuiltinOutputParser("generic", genericMarkers())
 	}
-	return p.thinkingMarkers, p.thinkingStarts, p.terminators, p.thinkingHoldback
+	return p.thinkingMarkers, p.thinkingStarts, p.terminators, p.thinkingHoldback, p.startLeads, p.terminatorLeads
 }
 
 // visible := p.Process(piece)
@@ -240,34 +244,57 @@ func (p *Processor) drain(final bool) string {
 
 // findTerminator returns the earliest bare turn-terminator occurrence in text
 // as (index, length), or (-1, 0) when none of the family's terminators appear.
+// terminatorLeads (their distinct lead bytes) anchors the scan: IndexAny hops to
+// each candidate position and the HasPrefix check runs only there, replacing one
+// full indexString per terminator. On a tie the first terminator in iteration
+// order wins its length — identical to the prior strict-less min-index scan
+// (which also never overrode an equal index).
 func (p *Processor) findTerminator(text string) (int, int) {
-	best, size := -1, 0
-	for _, term := range p.terminators {
-		idx := indexString(text, term)
-		if idx < 0 {
-			continue
+	for i := 0; i < len(text); {
+		rel := core.IndexAny(text[i:], p.terminatorLeads)
+		if rel < 0 {
+			break
 		}
-		if best < 0 || idx < best {
-			best, size = idx, len(term)
+		pos := i + rel
+		for _, term := range p.terminators {
+			if core.HasPrefix(text[pos:], term) {
+				return pos, len(term)
+			}
 		}
+		i = pos + 1
 	}
-	return best, size
+	return -1, 0
 }
 
+// findStart returns the earliest position at which any thinking marker's start
+// occurs in text (longest start winning a tie), or (-1, zero, false) if none
+// does. startLeads (the markers' distinct lead bytes) anchors the scan so a full
+// indexString runs once per lead-byte hit rather than once per marker over the
+// whole text — the per-token streaming cost drops from O(markers × pending) to
+// O(pending + hits × markers). Byte-identical to the min-index / longest-tie
+// scan it replaces.
 func (p *Processor) findStart(text string) (int, thinkingMarker, bool) {
-	best := -1
 	var marker thinkingMarker
-	for _, candidate := range p.markers {
-		idx := indexString(text, candidate.start)
-		if idx < 0 {
-			continue
+	for i := 0; i < len(text); {
+		rel := core.IndexAny(text[i:], p.startLeads)
+		if rel < 0 {
+			break
 		}
-		if best < 0 || idx < best || idx == best && len(candidate.start) > len(marker.start) {
-			best = idx
-			marker = candidate
+		pos := i + rel
+		best := -1
+		for _, candidate := range p.markers {
+			if core.HasPrefix(text[pos:], candidate.start) &&
+				(best < 0 || len(candidate.start) > len(marker.start)) {
+				best = pos
+				marker = candidate
+			}
 		}
+		if best >= 0 {
+			return best, marker, true
+		}
+		i = pos + 1
 	}
-	return best, marker, best >= 0
+	return -1, marker, false
 }
 
 func (p *Processor) addReasoning(text string) {

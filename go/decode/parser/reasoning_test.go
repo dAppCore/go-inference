@@ -4,6 +4,8 @@ package parser
 
 import (
 	"testing"
+
+	core "dappco.re/go"
 )
 
 func TestReasoning_BuiltinParsers_Good(t *testing.T) {
@@ -57,5 +59,52 @@ func TestReasoning_BuiltinParsers_Good(t *testing.T) {
 				t.Fatalf("Reasoning[0] = %+v, want %q/%q", got.Reasoning[0], tc.kind, tc.reasoning)
 			}
 		})
+	}
+}
+
+// TestReasoning_FindReasoningStart_AnchorMatchesNaive_Good pins the lead-byte
+// anchor scan byte-for-byte to the naive min-index / longest-tie reference
+// across every builtin marker family and 240k adversarial fragment streams
+// (stray '<', '|', partial markers). The guard for the O(markers×text)→O(text)
+// rewrite: a change that breaks equivalence fails here.
+func TestReasoning_FindReasoningStart_AnchorMatchesNaive_Good(t *testing.T) {
+	naive := func(text string, markers []reasoningMarker) (int, reasoningMarker, bool) {
+		best := -1
+		var marker reasoningMarker
+		for _, c := range markers {
+			idx := indexString(text, c.start)
+			if idx < 0 {
+				continue
+			}
+			if best < 0 || idx < best || idx == best && len(c.start) > len(marker.start) {
+				best = idx
+				marker = c
+			}
+		}
+		return best, marker, best >= 0
+	}
+	sets := [][]reasoningMarker{qwenMarkers(), gemmaMarkers(), gptOSSMarkers(), genericMarkers()}
+	frags := []string{
+		"word ", "the ", "<", ">", "|", "\n", "<think>", "</think>", "<thinking>",
+		"<|channel>", "analysis\n", "final\n", "<start_of_turn>", "thinking\n",
+		"thought\n", "<end_of_turn>", "reasoning\n", "<reason", "chan", "x", "  ",
+		"<|channel>analysis\n", "<start_of_turn>thought\n",
+	}
+	st := uint64(0xd1b54a32d192ed03)
+	rnd := func() uint64 { st = st*6364136223846793005 + 1442695040888963407; return st >> 1 }
+	for _, markers := range sets {
+		leads := reasoningMarkerLeadBytes(markers)
+		for iter := 0; iter < 60000; iter++ {
+			b := core.NewBuilder()
+			for k := int(rnd()%10) + 1; k > 0; k-- {
+				b.WriteString(frags[rnd()%uint64(len(frags))])
+			}
+			text := b.String()
+			ai, am, aok := findReasoningStart(text, markers, leads)
+			ni, nm, nok := naive(text, markers)
+			if ai != ni || aok != nok || am.start != nm.start {
+				t.Fatalf("text=%q anchor=(%d,%q,%v) naive=(%d,%q,%v)", text, ai, am.start, aok, ni, nm.start, nok)
+			}
+		}
 	}
 }
