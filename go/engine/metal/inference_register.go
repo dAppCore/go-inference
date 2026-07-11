@@ -63,5 +63,8 @@ func (metalBackend) LoadModel(path string, opts ...inference.LoadOption) core.Re
 	}
 	ntm.AttachTokenizer(tok)
 	ntm.declaredStops = loadGenerationConfigStops(path)
-	return core.Ok(newNativeTextModel(ntm, "gemma4"))
+	// Stamp the checkpoint's real architecture (config.json model_type), not a
+	// hardcoded "gemma4" — a second arch loaded through the metal backend must
+	// self-report truthfully on ModelInfo.Architecture / ModelType.
+	return core.Ok(newNativeTextModel(ntm, probeModelType(path)))
 }

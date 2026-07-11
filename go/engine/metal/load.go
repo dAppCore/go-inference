@@ -63,6 +63,21 @@ func LoadDir(dir string, maxLen int) (*ArchSession, error) {
 	return sess, nil
 }
 
+// probeModelType reads the checkpoint's declared architecture — config.json's
+// model_type — so a loaded model self-reports its real arch (gemma4, gemma3,
+// llama, …) instead of a hardcoded stamp. It falls back to "gemma4" only when
+// the probe fails or the config declares nothing, keeping a broken-config load
+// no worse than the historical default. This is the truthful source
+// inference.ModelInfo.Architecture / ModelType report for ANY architecture the
+// native engine loads.
+func probeModelType(dir string) string {
+	mt, _, err := model.ProbeDirArch(dir)
+	if err != nil || mt == "" {
+		return "gemma4"
+	}
+	return mt
+}
+
 type TokenModelLoadConfig struct {
 	PagedKVPageSize int
 	PagedKVPrealloc bool
