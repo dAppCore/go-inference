@@ -1,4 +1,25 @@
-# NEXT WAKE (2026-07-15 session close — the convergence campaign)
+# NEXT WAKE (2026-07-16 early hours — the capture night)
+
+**#381: eleven acquittals and a localised mystery.** The prefill gap vs mlx
+is NOT: host, q8, chunk width, hazards, the metallib binary, bf16 emulation,
+clocks, data values, PSO options, CB overlap, or weight allocation — every
+one receipted (instruments at d65e96b, full chain in #381). Metal System
+Trace with MLX_MAX_OPS_PER_BUFFER=1 shows their real forward's fat qmms at
+~1.7ms each (≈45 TFLOPS, serial, no overlap, no gaps — bucket-count fit is
+decisive) while the SAME op in ANY isolated context (our Go bench, their own
+runtime, their real weight tensors) runs 20.5-22.9. NEXT TOOL: GPU counter
+capture (ALU utilisation forward-vs-burst) — traces saved at
+/private/tmp/lem-dev/{mlx_prefill,mlx_perop,mlx_burst}.trace + harnesses.
+BUILD REGARDLESS: our in-situ 12.9 vs our benched 22 = 1.7x from our own
+pass first (sdpa 2.7TF@win512, launch-bound elementwise, GEMM 14-vs-22).
+ALSO TONIGHT: lem quant SHIPPED (319ddc4 — bf16 in, BYTE-IDENTICAL-to-
+mlx_lm.convert variations out, oracle in-tree; bits 2/4/8, -gguf lane);
+convergence campaign closed at ~50 wins (decode 5-for-5, kv sliding-wake
+quadratic, eval scanners 10-26x, engine render 20->1); field matrix +
+concurrency + tool-calling receipts in the release draft; first-impressions
+audit merged (port decision PENDING WITH SNIDER: 36911 vs 11434).
+
+# PREVIOUS WAKE (2026-07-15 session close — the convergence campaign)
 
 **The folder-by-folder Opus convergence campaign ran all day** (snider's
 rule: single-folder passes, first defended zero retires a folder, wins
