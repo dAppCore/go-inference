@@ -149,15 +149,18 @@ func RenderGemmaToolCall(name, argumentsJSON string) string {
 	b.WriteString(ToolCallOpenMarker)
 	b.WriteString("call:")
 	b.WriteString(name)
-	b.WriteString(renderGemmaObject(args))
+	writeGemmaObject(b, args)
 	b.WriteString(ToolCallCloseMarker)
 	return b.String()
 }
 
-// renderGemmaObject renders a decoded JSON object as a gemma tool-arg body
-// {k:v,…}; keys are sorted so the render is deterministic.
-func renderGemmaObject(m map[string]any) string {
-	b := core.NewBuilder()
+// writeGemmaObject writes a decoded JSON object as a gemma tool-arg body {k:v,…}
+// into b; keys are sorted so the render is deterministic. The recursion threads
+// the single caller builder rather than each level allocating its own builder +
+// returning an intermediate string that the parent copies back in — byte-
+// identical output, but a nested {…}/[…] no longer costs a builder alloc plus a
+// String() copy per level.
+func writeGemmaObject(b *core.Builder, m map[string]any) {
 	b.WriteString("{")
 	names := make([]string, 0, len(m))
 	for k := range m {
@@ -170,46 +173,49 @@ func renderGemmaObject(m map[string]any) string {
 		}
 		b.WriteString(k)
 		b.WriteString(":")
-		b.WriteString(renderGemmaValue(m[k]))
+		writeGemmaValue(b, m[k])
 	}
 	b.WriteString("}")
-	return b.String()
 }
 
-// renderGemmaArray renders a decoded JSON array as a gemma [v,…] body.
-func renderGemmaArray(a []any) string {
-	b := core.NewBuilder()
+// writeGemmaArray writes a decoded JSON array as a gemma [v,…] body into b.
+func writeGemmaArray(b *core.Builder, a []any) {
 	b.WriteString("[")
 	for i, v := range a {
 		if i > 0 {
 			b.WriteString(",")
 		}
-		b.WriteString(renderGemmaValue(v))
+		writeGemmaValue(b, v)
 	}
 	b.WriteString("]")
-	return b.String()
 }
 
-// renderGemmaValue renders one decoded JSON value in gemma tool-arg form: a
+// writeGemmaValue writes one decoded JSON value in gemma tool-arg form into b: a
 // string wraps in ToolArgQuoteMarker; an object/array recurses; a number/bool/
-// null renders as its bare scalar (identical to the gemma form).
-func renderGemmaValue(v any) string {
+// null renders as its bare scalar (identical to the gemma form). The float path
+// appends through a stack buffer so the scalar never materialises as its own heap
+// string.
+func writeGemmaValue(b *core.Builder, v any) {
 	switch t := v.(type) {
 	case string:
-		return ToolArgQuoteMarker + t + ToolArgQuoteMarker
+		b.WriteString(ToolArgQuoteMarker)
+		b.WriteString(t)
+		b.WriteString(ToolArgQuoteMarker)
 	case map[string]any:
-		return renderGemmaObject(t)
+		writeGemmaObject(b, t)
 	case []any:
-		return renderGemmaArray(t)
+		writeGemmaArray(b, t)
 	case float64:
-		return strconv.FormatFloat(t, 'g', -1, 64)
+		var buf [32]byte
+		b.Write(strconv.AppendFloat(buf[:0], t, 'g', -1, 64))
 	case bool:
 		if t {
-			return "true"
+			b.WriteString("true")
+		} else {
+			b.WriteString("false")
 		}
-		return "false"
 	default: // nil or an unexpected type
-		return "null"
+		b.WriteString("null")
 	}
 }
 
