@@ -24,9 +24,18 @@ pleSlab host span 104->47ms steady-state; pp8K 8,049->8,528 (0.847s
 wall; mlx true-wall gap now 1.18x). NOTE: first run after a metallib
 rebuild pays the new kernel's PSO compile once (~40ms) — measure
 steady-state.
-FOLLOW-UPS still open on #381: per-chunk seams + the PLE tower's own
-GPU pass (37ms of the 8K wall — could overlap the main pass),
-embeddings/bidir chunk lane still full-stack, 31B/26B family receipts.
+FOURTH LEVER SHIPPED (cfc84d5): device-resident PLE slab handoff — the
+builder commits WITHOUT waiting and the pass binds its buffer directly
+(same queue = GPU-ordered; single-buffered scratch safe because the host
+stages the next chunk only after the pass's wait). pleSlab host span
+47->3.1ms; pp8K 8,528->8,708 (0.830s; mlx true-wall gap 1.15x). The
+builder's GPU work (~2ms/chunk) still serialises ahead of the main pass
+on the shared queue — a second queue + MTLEvent could overlap it, worth
+~1-2% more, diminishing.
+FOLLOW-UPS still open on #381: per-chunk seams + embed host loop
+(17.6ms @8K — ids are already on-GPU for the builder; could gather
+embeddings the same way), embeddings/bidir chunk lane still full-stack,
+31B/26B family receipts.
 
 **THE TRAP THAT ATE AN HOUR (bank it):** running engine/metal tests with
 go-mlx's dist metallib (the retired path my own notes carried) makes the
