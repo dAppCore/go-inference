@@ -1,4 +1,30 @@
-# NEXT WAKE (2026-07-16 early hours — the capture night)
+# NEXT WAKE (2026-07-16 — SOLVED, and the biggest lever of the campaign)
+
+**#381 SOLVED at ~3am with snider on the powermetrics trigger.** There is no
+faster kernel. mlx-lm's prompt loop evals ONLY the cache states; gemma4
+E-series KV-SHARED layers (e2b: 20 of 35, the double-wide deep ones) own no
+cache state, so lazy DCE skips their ENTIRE compute on every non-final
+chunk — architecturally correct (deep outputs of prompt positions feed only
+unsampled logits; later attention reaches prompt tokens via OWNER-layer KV).
+Kill shots: halving all 60 fat projections = 0ms chunk delta; energy (burst
+190.5W@20.6TF vs forward 138.3W, same 1379MHz — joules forbid the phantom
+45TF). Everything reconciles at ~22TF = our own kernel rate. THE BUILD
+(next wake's crown work, engine/metal, mine): skip non-KV-owning layers on
+non-final prefill chunks (OwnsCache/KVShareFrom already know); final chunk
++ decode run all layers. Expect 3,147 -> ~9,000+ pp8K (mlx true wall
+10,044); family-wide (31B's deep-ingest pain shrinks ~3x). Gates: token-
+identical continuation, needle-at-depth, receipts at 3 depths; caveats in
+#381 (Classify all-position logits must NOT skip; MTP boundary hidden ok).
+ALSO LANDED OVERNIGHT: #380 emittedContent quadratic (871x B/op at 8K,
+45,530-case oracle fuzz — live tok/s A/B still owed); #378 outbound policy
+G1 (term 0-alloc + bounded-window patterns, boot-fatal, outermost wrap; G2
+mediated-rewrite designed-next); #379 serve wiring (composed models were
+NEVER servable — metalBackend hard-asserted native; now bridged + registry
+routing + ChatML declaration with precedence golden; composed live-serve
+needs a metallib smoke; multi-turn -state for composed = follow-up).
+Port DECIDED: 36911 stays.
+
+# PREVIOUS WAKE (2026-07-16 early hours — the capture night)
 
 **#381: eleven acquittals and a localised mystery.** The prefill gap vs mlx
 is NOT: host, q8, chunk width, hazards, the metallib binary, bf16 emulation,
