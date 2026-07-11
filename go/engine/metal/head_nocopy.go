@@ -61,15 +61,22 @@ type headEncoder struct {
 }
 
 // headGreedyRowsScratch is one K-row fused-greedy invocation's GPU scratch.
+// logitsRows is allocated only for the quant head (the bf16 head scores
+// weight tiles directly and never materialises logits).
 type headGreedyRowsScratch struct {
-	kCap, tileCap, dModelCap                   int
+	kCap, tileCap, dModelCap, vocabCap         int
 	normed, tileValues, tileIndices, outTokens metal.MTLBuffer
+	logitsRows                                 metal.MTLBuffer
 }
 
 func (h *headEncoder) getGreedyRowsScratch(k, tileCount int) *headGreedyRowsScratch {
+	return h.getGreedyRowsScratchLogits(k, tileCount, false)
+}
+
+func (h *headEncoder) getGreedyRowsScratchLogits(k, tileCount int, needLogits bool) *headGreedyRowsScratch {
 	if v := h.greedyRowsScratch.Get(); v != nil {
 		s := v.(*headGreedyRowsScratch)
-		if s.kCap >= k && s.tileCap >= tileCount && s.dModelCap >= h.dModel {
+		if s.kCap >= k && s.tileCap >= tileCount && s.dModelCap >= h.dModel && (!needLogits || s.vocabCap >= h.vocab) {
 			return s
 		}
 	}
@@ -80,6 +87,13 @@ func (h *headEncoder) getGreedyRowsScratch(k, tileCount int) *headGreedyRowsScra
 	s.outTokens = device.NewBufferWithLengthOptions(uint(k*4), metal.MTLResourceStorageModeShared)
 	if s.normed == nil || s.tileValues == nil || s.tileIndices == nil || s.outTokens == nil {
 		return nil
+	}
+	if needLogits {
+		s.logitsRows = device.NewBufferWithLengthOptions(uint(k*h.vocab*bf16Size), metal.MTLResourceStorageModeShared)
+		if s.logitsRows == nil {
+			return nil
+		}
+		s.vocabCap = h.vocab
 	}
 	return s
 }
@@ -1676,6 +1690,15 @@ func (h *headEncoder) greedyRowsBufferInPool(rowsBuf metal.MTLBuffer, rowStride 
 			return handled && err == nil, err
 		}
 	}
+	// quant heads batch the same way through the qmm_t the verify fold already
+	// runs on (token-identity tier): ONE weight pass produces all K logits
+	// rows, then per-row tile argmax + one rows merge — the per-row path's K
+	// full qmv weight sweeps were the verify's rows-head cost (#359).
+	if h.quant && len(suppress) == 0 && k > 1 && k <= 8 && int(rowStride) == h.dModel*bf16Size {
+		if handled, err := h.greedyRowsQuantFusedInPool(rowsBuf, k, out); handled || err != nil {
+			return handled && err == nil, err
+		}
+	}
 	cb := commandBufferFast(queue)
 	enc := computeCommandEncoderFast(cb)
 	scratches := make([]*headGreedyScratch, 0, k)
@@ -1707,6 +1730,60 @@ func (h *headEncoder) greedyRowsBufferInPool(rowsBuf metal.MTLBuffer, rowStride 
 		out[i] = token
 	}
 	release()
+	return true, nil
+}
+
+// greedyRowsQuantFusedInPool is the quant head's K-row fused greedy: one
+// RMSNorm over all K rows, ONE qmm_t sweeping the quant lm_head once to
+// produce all K logits rows (the same kernel + accuracy tier the MTP verify
+// fold runs its projections on), then a per-row logits tile argmax and one
+// rows merge — a single command buffer. handled=false defers to the per-row
+// encodes (qmm pipeline unavailable, or scratch allocation failed).
+func (h *headEncoder) greedyRowsQuantFusedInPool(rowsBuf metal.MTLBuffer, k int, out []int32) (handled bool, err error) {
+	if _, perr := pipelineFor(qmmTKernelName(h.vocab, h.groupSize, h.bits)); perr != nil {
+		return false, nil
+	}
+	tileCount := (h.vocab + bf16LogitsArgmaxRowsPerTile - 1) / bf16LogitsArgmaxRowsPerTile
+	s := h.getGreedyRowsScratchLogits(k, tileCount, true)
+	if s == nil {
+		return false, nil
+	}
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	fail := func(ferr error) (bool, error) {
+		endEncodingFast(enc)
+		h.putGreedyRowsScratch(s)
+		return true, ferr
+	}
+	if ferr := encRMSNormRowsBF16(enc, rowsBuf, h.finalNorm.buf, s.normed, 0, h.finalNorm.off, 0, k, h.dModel, h.eps); ferr != nil {
+		return fail(ferr)
+	}
+	if ferr := encQMMTBF16At(enc, h.weight.buf, h.scales.buf, h.biases.buf, s.normed, s.logitsRows,
+		h.weight.off, h.scales.off, h.biases.off, 0, 0, k, h.vocab, h.dModel, h.groupSize, h.bits); ferr != nil {
+		return fail(ferr)
+	}
+	for i := range k {
+		if ferr := encBF16LogitsArgmaxTilesBF16At(enc, s.logitsRows, s.tileValues, s.tileIndices, nil,
+			uint(i*h.vocab*bf16Size), uint(i*tileCount*4), uint(i*tileCount*4), h.vocab, 0); ferr != nil {
+			return fail(ferr)
+		}
+	}
+	if ferr := encArgmaxMergeRowsF32(enc, s.tileValues, s.tileIndices, s.outTokens, tileCount, k); ferr != nil {
+		return fail(ferr)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	toks := unsafe.Slice((*int32)(s.outTokens.Contents()), k)
+	for i := range k {
+		token := toks[i]
+		if token < 0 || int(token) >= h.vocab {
+			h.putGreedyRowsScratch(s)
+			return true, core.NewError(core.Sprintf("native.headEncoder.greedyRowsQuantFused: row %d argmax returned invalid token %d for vocab %d", i, token, h.vocab))
+		}
+		out[i] = token
+	}
+	h.putGreedyRowsScratch(s)
 	return true, nil
 }
 

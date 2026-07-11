@@ -216,6 +216,7 @@ func recordArchICBQuant(
 	pleRuntime *archDecodePLEInputs, pliDim, pleGS, pleBits int,
 	dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow int,
 	rope icbRope, scale, eps float32, valueNorm bool,
+	kvQ8 *archICBKVQ8,
 ) (*archICBReplay, error) {
 	nLayers := len(qlayers)
 	setup := getArchICBQuantSetupScratch(nLayers)
@@ -578,6 +579,15 @@ func recordArchICBQuant(
 			plePlan.recordGate = func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer) {
 				setQMV(c, psoFor(pleLB[li].gate, pliDim, dModel), pleLB[li].gate, vec, out, 0, dModel, pliDim)
 			}
+			// The fused gate+gelu·pli op (lthn_ple_gate_gelu_qmv, #373) is NOT
+			// recorded here: it is byte-identical to the composed pair in every
+			// standalone context (both PSO builds, every real e2b layer's weights
+			// — the kernel parity test), but IN THE RECORDED REPLAY it drifted
+			// the session off the PerLayerInputGate interleave from the second
+			// sequential step onward (#371, TestRealQuantVerifyBatchedHiddensParity;
+			// first bad d00c526, in-situ cause unresolved). Its receipt was ~3µs
+			// (thin-stage), so the composed two-stage path stays — the parity
+			// spine outranks a free-but-unproven op.
 			plePlan.recordProj = func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer) {
 				setQMV(c, psoFor(pleLB[li].proj, dModel, pliDim), pleLB[li].proj, vec, out, 0, pliDim, dModel)
 			}
@@ -692,7 +702,7 @@ func recordArchICBQuant(
 			}
 			return projV
 		}
-		r, coreErr = recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, plePlan, recordProj, recordFusedRMSProj, vOutBind, valueNormOnes, vProjIdxOf, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, lFF, rope, scale, eps)
+		r, coreErr = recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, plePlan, recordProj, recordFusedRMSProj, vOutBind, valueNormOnes, vProjIdxOf, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, lFF, rope, scale, eps, kvQ8)
 	})
 	if coreErr != nil {
 		return nil, coreErr
@@ -822,9 +832,9 @@ func decodeForwardArchICBQuantInto(
 				vCaches[li] = device.NewBufferWithLengthOptions(cacheBytes, metal.MTLResourceStorageModeShared)
 			}
 		}
-		r, coreErr = recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, pleGS, pleBits, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, simpleICBRope(base, headDim), scale, eps, valueNorm)
+		r, coreErr = recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, pleGS, pleBits, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, simpleICBRope(base, headDim), scale, eps, valueNorm, nil)
 		if coreErr == nil && pipeline {
-			r2, coreErr = recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, pleGS, pleBits, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, simpleICBRope(base, headDim), scale, eps, valueNorm)
+			r2, coreErr = recordArchICBQuant(qlayers, specs, kCaches, vCaches, pleRuntime, pliDim, pleGS, pleBits, dModel, nHeads, nKVHeads, headDim, maxLen, dFF, slidingWindow, simpleICBRope(base, headDim), scale, eps, valueNorm, nil)
 		}
 	})
 	if coreErr != nil {

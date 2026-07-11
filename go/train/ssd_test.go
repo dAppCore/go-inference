@@ -104,6 +104,29 @@ func TestSsd_RunSSD_Ugly(t *testing.T) {
 	}
 }
 
+// TestRunSSD_FormatPromptFramesGenerationOnly asserts the FormatPrompt hook
+// frames the GENERATION prompt (the instruct model's own turn template) while
+// the captured sample keeps the BARE prompt, and the kernel prefix rides
+// BEFORE the framing — kernel, then turn structure, exactly the #97 KV-state
+// layering. Raw-completion feeding was the empty-trace bug: an -it base given
+// a bare complete-sounding prompt emits end-of-turn as its first token.
+func TestRunSSD_FormatPromptFramesGenerationOnly(t *testing.T) {
+	rec := &recordingRunner{}
+	run := rec.runner(true, false)
+	run.FormatPrompt = func(prompt string) string { return "<U>" + prompt + "</U><M>" }
+	cfg := SSDConfig{SampleTemperature: 0.7, KernelPrefix: "KERNEL::", DisableCapture: true, FilterShortestPercent: 0}
+	result, err := RunSSD(context.Background(), run, ssdDataset("q"), cfg)
+	if err != nil {
+		t.Fatalf("RunSSD: %v", err)
+	}
+	if len(rec.prompts) != 1 || rec.prompts[0] != "KERNEL::<U>q</U><M>" {
+		t.Fatalf("generation prompt = %v, want [KERNEL::<U>q</U><M>]", rec.prompts)
+	}
+	if result.Samples[0].Prompt != "q" {
+		t.Fatalf("sample kept prompt %q, want the bare q", result.Samples[0].Prompt)
+	}
+}
+
 // TestRunSSD_ScoreAtBirth asserts that with ScoreSamples + a Score hook, every
 // self-sample is scored at birth and the mean rides into the result.
 func TestRunSSD_ScoreAtBirth(t *testing.T) {

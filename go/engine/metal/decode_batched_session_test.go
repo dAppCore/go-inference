@@ -338,3 +338,40 @@ func TestDenseBatchScratchAttnFoldGrowsWithRows(t *testing.T) {
 	check("kStage", int(bufferLengthFast(kSt)), wide*kvDim*bf16Size)
 	check("vStage", int(bufferLengthFast(vSt)), wide*kvDim*bf16Size)
 }
+
+// TestDenseBatchScratchReleasesSlabsOnGrowthAndClose pins the slab lifecycle
+// (#367 census): every grow-realloc releases the outgrown slabs and Close
+// releases the whole set — the old code dropped +1 retained handles at both
+// seams, stacking GB-scale sdpaPromptS pairs across widening chunks and
+// leaking the grown set on every session teardown. Device-level receipt:
+// grow + close in a loop must return CurrentAllocatedSize to ~baseline.
+func TestDenseBatchScratchReleasesSlabsOnGrowthAndClose(t *testing.T) {
+	requireNativeRuntime(t)
+	const dModel, dFF, qDim, kvDim = 512, 1024, 512, 512
+	const rowsA, rowsB = 256, 1024
+	const sCols = 16384 // sdpaS pair at rowsB: 2 × 1024×16384×2B = 64MB — dominates noise
+	baseline := device.CurrentAllocatedSize()
+	for range 4 {
+		var s denseBatchScratch
+		s.mlpFold(rowsA, dModel, dFF)
+		s.attnFold(rowsA, dModel, qDim, kvDim)
+		s.layerStage(0, 3, rowsA, kvDim)
+		s.sdpaPromptS(rowsA, sCols)
+		// widen: every grow site reallocates (and must release the outgrown set)
+		s.mlpFold(rowsB, dModel, dFF)
+		s.attnFold(rowsB, dModel, qDim, kvDim)
+		s.layerStage(1, 3, rowsB, kvDim)
+		s.sdpaPromptS(rowsB, sCols)
+		s.Close()
+	}
+	end := device.CurrentAllocatedSize()
+	var grew uint
+	if end > baseline {
+		grew = end - baseline
+	}
+	// one leaked generation would exceed 64MB (the sdpaS pair alone); allow slack
+	// for allocator noise well below it.
+	if grew > 32<<20 {
+		t.Fatalf("scratch slabs not reclaimed: device allocation grew %dMB across grow+close cycles", grew>>20)
+	}
+}

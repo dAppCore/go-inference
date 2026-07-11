@@ -1,4 +1,4 @@
-From 0c650300471538638f38a2776e99a348655ec469 Mon Sep 17 00:00:00 2001
+From 750c4901b619bfe9c6dc747107c0f1a9f3143ab7 Mon Sep 17 00:00:00 2001
 From: Snider <snider@host.uk.com>
 Date: Thu, 11 Jun 2026 10:26:33 +0100
 Subject: [PATCH 01/10] lthn patches: MLX_METALLIB_PATH override + defensive
@@ -11,10 +11,10 @@ Subject: [PATCH 01/10] lthn patches: MLX_METALLIB_PATH override + defensive
  3 files changed, 17 insertions(+), 3 deletions(-)
 
 diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
-index d678461e..e10e115d 100644
+index 29eecf55..f593544a 100644
 --- a/mlx/backend/metal/device.cpp
 +++ b/mlx/backend/metal/device.cpp
-@@ -187,8 +187,19 @@ MTL::Library* load_default_library(MTL::Device* device) {
+@@ -230,8 +230,19 @@ MTL::Library* load_default_library(MTL::Device* device) {
      return lib;
    }
  
@@ -36,12 +36,12 @@ index d678461e..e10e115d 100644
      std::ostringstream msg;
      msg << "Failed to load the default metallib. ";
 diff --git a/mlx/backend/metal/kernels/scaled_dot_product_attention.metal b/mlx/backend/metal/kernels/scaled_dot_product_attention.metal
-index c668d9d8..f00263e6 100644
+index 44ccb834..80e40c4a 100644
 --- a/mlx/backend/metal/kernels/scaled_dot_product_attention.metal
 +++ b/mlx/backend/metal/kernels/scaled_dot_product_attention.metal
-@@ -33,10 +33,13 @@ using namespace metal;
-   instantiate_sdpa_vector(type, 96, 96)          \
+@@ -34,10 +34,13 @@ using namespace metal;
    instantiate_sdpa_vector(type, 128, 128)        \
+   instantiate_sdpa_vector(type, 192, 128)        \
    instantiate_sdpa_vector(type, 256, 256)        \
 +  instantiate_sdpa_vector(type, 512, 512)        \
 +  instantiate_sdpa_vector(type, 512, 256)        \
@@ -55,18 +55,18 @@ index c668d9d8..f00263e6 100644
  instantiate_sdpa_vector_heads(float)
  instantiate_sdpa_vector_heads(bfloat16_t)
 diff --git a/mlx/backend/metal/scaled_dot_product_attention.cpp b/mlx/backend/metal/scaled_dot_product_attention.cpp
-index c79cd51f..f5acef28 100644
+index d6f74bc2..ba464b09 100644
 --- a/mlx/backend/metal/scaled_dot_product_attention.cpp
 +++ b/mlx/backend/metal/scaled_dot_product_attention.cpp
-@@ -618,7 +618,7 @@ bool ScaledDotProductAttention::use_fallback(
+@@ -621,7 +621,7 @@ bool ScaledDotProductAttention::use_fallback(
    const bool sdpa_vector_supported_head_dim =
-       query_head_dim == value_head_dim &&
-       (query_head_dim == 64 || query_head_dim == 96 || query_head_dim == 128 ||
--       query_head_dim == 256);
-+       query_head_dim == 256 || query_head_dim == 512);
+       (query_head_dim == value_head_dim &&
+        (query_head_dim == 64 || query_head_dim == 96 || query_head_dim == 128 ||
+-        query_head_dim == 256)) ||
++        query_head_dim == 256 || query_head_dim == 512)) ||
+       (query_head_dim == 192 && value_head_dim == 128);
    const bool sdpa_full_supported_head_dim = query_head_dim == value_head_dim &&
        (query_head_dim == 64 || query_head_dim == 80 || query_head_dim == 128);
- 
 -- 
 2.50.1 (Apple Git-155)
 

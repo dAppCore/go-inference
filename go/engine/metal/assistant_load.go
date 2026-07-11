@@ -1256,22 +1256,37 @@ func (pair *AssistantPair) draftBlockFromSessionWithSuppress(target *ArchSession
 				return AssistantDraftBlockResult{}, ferr
 			}
 			fwdMs := float64(time.Since(stepT0).Microseconds()) / 1000
-			logits, lerr := pair.Assistant.draftLogitsIntoScratch(logitsOut, normed, logitScores, logitSelected)
-			if lerr != nil {
-				return AssistantDraftBlockResult{}, lerr
+			// GPU-headed fast path: the ordered head's gemvs rode the fused
+			// command buffer, so selection is a 4096-candidate host argmax.
+			// The conf capture needs the full floored logits row — it stays on
+			// the host head (a diag lever that trades speed by design).
+			var tok int32
+			headed := false
+			if cs, vl := fused.headScores(); cs != nil && confProbs == nil {
+				t, hok, herr := pair.Assistant.draftOrderedGreedyFromHead(cs, vl, logitScores, logitSelected, suppress)
+				if herr != nil {
+					return AssistantDraftBlockResult{}, herr
+				}
+				tok, headed = t, hok
 			}
-			headMs := float64(time.Since(stepT0).Microseconds())/1000 - fwdMs
-			tok, gerr := pair.Assistant.draftGreedyTokenWithSuppress(logits, suppress)
-			if gerr != nil {
-				return AssistantDraftBlockResult{}, gerr
+			if !headed {
+				logits, lerr := pair.Assistant.draftLogitsIntoScratch(logitsOut, normed, logitScores, logitSelected)
+				if lerr != nil {
+					return AssistantDraftBlockResult{}, lerr
+				}
+				t, gerr := pair.Assistant.draftGreedyTokenWithSuppress(logits, suppress)
+				if gerr != nil {
+					return AssistantDraftBlockResult{}, gerr
+				}
+				tok = t
+				if confProbs != nil {
+					confProbs = append(confProbs, mtpConfProb(logits, tok, suppress))
+				}
 			}
 			if diagDraft && len(tokens) < 2 {
-				greedyMs := float64(time.Since(stepT0).Microseconds())/1000 - fwdMs - headMs
-				nativeTraceLog(core.Sprintf("mtp-diag draft step %d: tok=%d fwd=%.1fms head=%.1fms greedy=%.1fms normed{%s}\n",
-					len(tokens), tok, fwdMs, headMs, greedyMs, mtpDiagBF16Stats(normed)))
-			}
-			if confProbs != nil {
-				confProbs = append(confProbs, mtpConfProb(logits, tok, suppress))
+				headMs := float64(time.Since(stepT0).Microseconds())/1000 - fwdMs
+				nativeTraceLog(core.Sprintf("mtp-diag draft step %d: tok=%d fwd=%.1fms head=%.1fms gpu-head=%v normed{%s}\n",
+					len(tokens), tok, fwdMs, headMs, headed, mtpDiagBF16Stats(normed)))
 			}
 			stepToken, currentHidden = tok, nextHidden
 		} else {
@@ -1369,13 +1384,25 @@ func (pair *AssistantPair) draftBlockSampledFromSessionWithSuppress(target *Arch
 			if ferr != nil {
 				return AssistantDraftBlockResult{}, ferr
 			}
-			logits, lerr := pair.Assistant.draftLogitsIntoScratch(logitsOut, normed, logitScores, logitSelected)
-			if lerr != nil {
-				return AssistantDraftBlockResult{}, lerr
+			var tok int32
+			headed := false
+			if cs, vl := fused.headScores(); cs != nil {
+				t, hok, herr := pair.Assistant.draftOrderedGreedyFromHead(cs, vl, logitScores, logitSelected, params.SuppressTokens)
+				if herr != nil {
+					return AssistantDraftBlockResult{}, herr
+				}
+				tok, headed = t, hok
 			}
-			tok, gerr := pair.Assistant.draftGreedyTokenWithSuppress(logits, params.SuppressTokens)
-			if gerr != nil {
-				return AssistantDraftBlockResult{}, gerr
+			if !headed {
+				logits, lerr := pair.Assistant.draftLogitsIntoScratch(logitsOut, normed, logitScores, logitSelected)
+				if lerr != nil {
+					return AssistantDraftBlockResult{}, lerr
+				}
+				t, gerr := pair.Assistant.draftGreedyTokenWithSuppress(logits, params.SuppressTokens)
+				if gerr != nil {
+					return AssistantDraftBlockResult{}, gerr
+				}
+				tok = t
 			}
 			stepToken, currentHidden = tok, nextHidden
 		} else {
@@ -3128,6 +3155,74 @@ func (m *AssistantModel) draftOrderedLogitsIntoScratch(out []byte, hiddenStates 
 		}
 	}
 	return out, nil
+}
+
+// draftOrderedGreedyFromHead picks the greedy draft token from the fused
+// ordered head's GPU outputs: top-K centroid gating over the bf16 centroid
+// scores, then argmax over ONLY the selected clusters' member tokens in the
+// full-vocab logits — the same support restriction the host head's floor fill
+// encodes, without materialising 262K floored logits or running the 2048+4096
+// row dots on one CPU core (10-17ms per draft token, the #359 break-even).
+// Ties resolve to the lowest token id, matching the full-scan argmax's
+// first-strictly-greater order. ok=false when every candidate is suppressed —
+// the degenerate case the floor-filled scan resolved by picking the lowest
+// unsuppressed vocab id; the caller falls back to the host head for it.
+func (m *AssistantModel) draftOrderedGreedyFromHead(centroidScores, vocabLogits []byte, scores []float32, selected []int, suppressed []int32) (int32, bool, error) {
+	if m == nil {
+		return 0, false, core.NewError("native.assistant ordered greedy head model is nil")
+	}
+	vocab, numCentroids, topK := m.Arch.Vocab, m.NumCentroids, m.CentroidIntermediateTopK
+	if vocab <= 0 || numCentroids <= 0 || topK <= 0 || topK > numCentroids || vocab%numCentroids != 0 {
+		return 0, false, core.NewError("native.assistant ordered greedy head geometry is invalid")
+	}
+	if len(centroidScores) != numCentroids*bf16Size {
+		return 0, false, core.NewError(core.Sprintf("native.assistant ordered greedy head centroid bytes = %d, want %d", len(centroidScores), numCentroids*bf16Size))
+	}
+	if len(vocabLogits) != vocab*bf16Size {
+		return 0, false, core.NewError(core.Sprintf("native.assistant ordered greedy head logits bytes = %d, want %d", len(vocabLogits), vocab*bf16Size))
+	}
+	vocabPerCentroid := vocab / numCentroids
+	ordering, ok := m.Tensors["masked_embedding.token_ordering"]
+	if !ok {
+		return 0, false, core.NewError("native.assistant ordered greedy head requires masked_embedding.token_ordering")
+	}
+	if err := nativeAssistantValidateOrdering(ordering, vocab, numCentroids, vocabPerCentroid); err != nil {
+		return 0, false, err
+	}
+	if cap(scores) < numCentroids {
+		scores = make([]float32, numCentroids)
+	} else {
+		scores = scores[:numCentroids]
+	}
+	for c := range numCentroids {
+		scores[c] = bf16ToF32(centroidScores[c*bf16Size], centroidScores[c*bf16Size+1])
+	}
+	selected = nativeAssistantTopKInto(selected, scores, topK)
+
+	var bestID int32 = -1
+	var best float32
+	for _, centroid := range selected {
+		for pos := range vocabPerCentroid {
+			tokenID, err := nativeAssistantOrderingToken(ordering, centroid, pos, vocabPerCentroid)
+			if err != nil {
+				return 0, false, err
+			}
+			if tokenID < 0 || int(tokenID) >= vocab {
+				return 0, false, core.NewError(core.Sprintf("native.assistant token_ordering token id = %d, want [0,%d)", tokenID, vocab))
+			}
+			if nativeAssistantSuppressed(tokenID, suppressed) {
+				continue
+			}
+			v := bf16ToF32(vocabLogits[int(tokenID)*bf16Size], vocabLogits[int(tokenID)*bf16Size+1])
+			if bestID < 0 || v > best || (v == best && tokenID < bestID) {
+				bestID, best = tokenID, v
+			}
+		}
+	}
+	if bestID < 0 {
+		return 0, false, nil
+	}
+	return bestID, true, nil
 }
 
 func nativeAssistantBF16Matrix(m *AssistantModel, name string, rows, cols int) (safetensors.Tensor, error) {

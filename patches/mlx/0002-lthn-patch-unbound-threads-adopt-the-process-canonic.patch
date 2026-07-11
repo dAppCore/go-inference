@@ -1,4 +1,4 @@
-From d02cc10bb3f37fb25dbd77603dc4738b2ca62a81 Mon Sep 17 00:00:00 2001
+From b1c584b3d22b1bb5207cff3f5aff0634529c21e1 Mon Sep 17 00:00:00 2001
 From: Snider <snider@host.uk.com>
 Date: Thu, 11 Jun 2026 11:33:33 +0100
 Subject: [PATCH 02/10] lthn patch: unbound threads adopt the process-canonical
@@ -15,10 +15,10 @@ threads that explicitly set_default_stream keep their choice.
  1 file changed, 24 insertions(+), 1 deletion(-)
 
 diff --git a/mlx/stream.cpp b/mlx/stream.cpp
-index 383cabc3..aacc91c1 100644
+index b78ee67d..e74c67f6 100644
 --- a/mlx/stream.cpp
 +++ b/mlx/stream.cpp
-@@ -7,6 +7,7 @@
+@@ -8,6 +8,7 @@
  
  #include <array>
  #include <map>
@@ -26,7 +26,7 @@ index 383cabc3..aacc91c1 100644
  #include <optional>
  #include <shared_mutex>
  
-@@ -37,6 +38,28 @@ auto& thread_local_streams() {
+@@ -38,6 +39,28 @@ auto& thread_local_streams() {
  
  } // namespace
  
@@ -55,7 +55,7 @@ index 383cabc3..aacc91c1 100644
  Stream default_stream(Device d) {
    if (!gpu::is_available() && d.type == Device::gpu) {
      throw std::invalid_argument(
-@@ -44,7 +67,7 @@ Stream default_stream(Device d) {
+@@ -45,7 +68,7 @@ Stream default_stream(Device d) {
    }
    auto& s = default_stream_storage(d);
    if (!s.has_value()) {

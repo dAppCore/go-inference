@@ -19,7 +19,10 @@ import (
 // otherwise port — see the package doc) and the spine.GenerateConfig ->
 // inference.GenerateConfig substitution, every symbol below is unchanged.
 const (
-	defaultSSDMaxTokens = 256
+	// 2048, not the ported 256: gemma4 opens every sample in the thought
+	// channel, and a 256-token budget truncates mid-thought — the visible
+	// sample comes back empty ("256 thinking is not enough budget").
+	defaultSSDMaxTokens = 2048
 	defaultSSDTopK      = 64
 	defaultSSDTopP      = 0.95
 )

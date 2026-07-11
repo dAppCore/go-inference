@@ -433,6 +433,157 @@ func kvQ8QuantRows(dstQ []int8, dstScales []float32, src []byte) {
 	}
 }
 
+// kvQuantQMax returns the positive saturation code for a bit-depth: the
+// symmetric grid runs -qmax..qmax, so qmax = (1<<(bits-1))-1 → 7/31/127 for
+// bits 4/6/8. Any other bit-depth is a programmer error and panics.
+func kvQuantQMax(bits int) int {
+	switch bits {
+	case 4, 6, 8:
+		return (1 << (bits - 1)) - 1
+	default:
+		panic(core.NewError("native.kvQuant: unsupported bits (want 4, 6 or 8)"))
+	}
+}
+
+// kvQuantPackedLen is the byte length a group-quantised row of elems elements
+// occupies at a given bit-depth: 1 byte/elem at q8, two nibbles/byte at q4, a
+// contiguous 6-bit stream at q6. kvQ8GroupSize (64) is divisible by 8, so every
+// group stays byte-aligned at q6 (64·6 = 384 bits = 48 bytes).
+func kvQuantPackedLen(elems, bits int) int {
+	return elems * bits / 8
+}
+
+// kvQuantPack writes the signed code q for one element into dstPacked. q is
+// assumed already clamped to ±kvQuantQMax(bits). Layouts:
+//   - bits==8: one int8 per byte (byte(int8(q)) — identical to kvQ8QuantRows).
+//   - bits==4: two two's-complement nibbles per byte, element 2i in the low
+//     nibble (assignment clears the byte), 2i+1 in the high nibble (OR-in).
+//   - bits==6: little-endian bit stream, element e occupies bits e·6 .. e·6+5;
+//     bits are OR-ed in, so dstPacked must be zeroed for the q6 region first.
+func kvQuantPack(dstPacked []byte, elem int, q int32, bits int) {
+	switch bits {
+	case 8:
+		dstPacked[elem] = byte(int8(q))
+	case 4:
+		code := byte(q & 0x0F)
+		if elem&1 == 0 {
+			dstPacked[elem>>1] = code
+		} else {
+			dstPacked[elem>>1] |= code << 4
+		}
+	case 6:
+		code := uint32(q) & 0x3F
+		bitPos := elem * 6
+		for k := 0; k < 6; k++ {
+			if code&(uint32(1)<<uint(k)) != 0 {
+				gb := bitPos + k
+				dstPacked[gb>>3] |= 1 << uint(gb&7)
+			}
+		}
+	}
+}
+
+// kvQuantUnpack reads and sign-extends the code for one element — the inverse
+// of kvQuantPack. bits is assumed already validated by the caller.
+func kvQuantUnpack(packed []byte, elem int, bits int) int32 {
+	switch bits {
+	case 8:
+		return int32(int8(packed[elem]))
+	case 4:
+		var nib byte
+		if elem&1 == 0 {
+			nib = packed[elem>>1] & 0x0F
+		} else {
+			nib = packed[elem>>1] >> 4
+		}
+		if nib >= 8 { // sign-extend the 4-bit two's-complement code
+			return int32(nib) - 16
+		}
+		return int32(nib)
+	case 6:
+		bitPos := elem * 6
+		var code uint32
+		for k := 0; k < 6; k++ {
+			gb := bitPos + k
+			if packed[gb>>3]&(1<<uint(gb&7)) != 0 {
+				code |= uint32(1) << uint(k)
+			}
+		}
+		if code >= 32 { // sign-extend the 6-bit two's-complement code
+			return int32(code) - 64
+		}
+		return int32(code)
+	default:
+		return 0 // unreachable: callers validate bits via kvQuantQMax
+	}
+}
+
+// kvQuantRows quantises bf16 rows into symmetric per-group N-bit integers with
+// f32 group scales — the bit-parameterised generalisation of kvQ8QuantRows.
+// bits ∈ {4,6,8} selects the grid: qmax = (1<<(bits-1))-1, scale = maxabs/qmax
+// per kvQ8GroupSize-element group, q = round(clamp(x/scale, -qmax..qmax)). The
+// group count is taken from len(dstScales); src is bf16 (2 bytes/element) and
+// dstPacked must be kvQuantPackedLen(groups·kvQ8GroupSize, bits) bytes. This is
+// the host byte layer only — a follow-up kernel reads the packed bytes.
+func kvQuantRows(dstPacked []byte, dstScales []float32, src []byte, bits int) {
+	qmax := kvQuantQMax(bits)
+	if bits != 8 {
+		// q4/q6 share bytes or cross byte boundaries and are OR-ed in, so start
+		// from a cleared buffer (q8 assigns every byte outright).
+		clear(dstPacked)
+	}
+	for g := range dstScales {
+		base := g * kvQ8GroupSize
+		maxAbs := float32(0)
+		var vals [kvQ8GroupSize]float32
+		for i := range kvQ8GroupSize {
+			off := (base + i) * 2
+			raw := uint32(src[off]) | uint32(src[off+1])<<8
+			f := mathFloat32frombits(raw << 16)
+			vals[i] = f
+			if a := absF32(f); a > maxAbs {
+				maxAbs = a
+			}
+		}
+		scale := maxAbs / float32(qmax)
+		dstScales[g] = scale
+		inv := float32(0)
+		if scale > 0 {
+			inv = 1 / scale
+		}
+		for i := range kvQ8GroupSize {
+			q := int32(roundF32(vals[i] * inv))
+			if q > int32(qmax) {
+				q = int32(qmax)
+			} else if q < -int32(qmax) {
+				q = -int32(qmax)
+			}
+			kvQuantPack(dstPacked, base+i, q, bits)
+		}
+	}
+}
+
+// kvDequantRows expands N-bit group-quantised codes back into bf16 bytes — the
+// exact inverse of kvQuantRows, with the same round-to-nearest-even bf16
+// truncation as kvQ8DequantRows. bits ∈ {4,6,8}; the group count is len(scales).
+func kvDequantRows(dst []byte, packed []byte, scales []float32, bits int) {
+	_ = kvQuantQMax(bits) // validate bits once (panics on unsupported)
+	for g := range scales {
+		s := scales[g]
+		base := g * kvQ8GroupSize
+		for i := range kvQ8GroupSize {
+			q := kvQuantUnpack(packed, base+i, bits)
+			f := float32(q) * s
+			bits32 := mathFloat32bits(f)
+			// round-to-nearest-even bf16 truncation
+			bits32 += 0x7FFF + ((bits32 >> 16) & 1)
+			off := (base + i) * 2
+			dst[off] = byte(bits32 >> 16)
+			dst[off+1] = byte(bits32 >> 24)
+		}
+	}
+}
+
 func (c *devicePagedKVCache) loadLinearSnapshot(kRows, vRows []byte, tokens int) error {
 	if c == nil {
 		return core.NewError("native.devicePagedKVCache.loadLinearSnapshot: nil cache")

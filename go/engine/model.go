@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	core "dappco.re/go"
@@ -50,6 +51,13 @@ type TextModel struct {
 	mu          sync.Mutex
 	lastErr     core.Result
 	lastMetrics inference.GenerateMetrics
+
+	// chatIntercept is the serve-layer chat hook (conversation continuity,
+	// serving/continuity): Chat offers every text-only turn to it first and a
+	// false return falls through to the stateless path. Atomic because the
+	// composition root installs it on the load path while requests may
+	// already hold the model.
+	chatIntercept atomic.Pointer[func(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) (iter.Seq[inference.Token], bool)]
 }
 
 var (
@@ -174,6 +182,15 @@ func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts
 	cfg := inference.ApplyGenerateOpts(opts)
 	hasImages, hasAudios := messagesHaveImages(messages), messagesHaveAudios(messages)
 	hasVideos := messagesHaveVideos(messages)
+	if !hasImages && !hasAudios && !hasVideos {
+		// text-only turns are offered to the installed chat interceptor
+		// (conversation continuity) first; a decline serves statelessly.
+		if fn := m.chatIntercept.Load(); fn != nil {
+			if seq, ok := (*fn)(ctx, messages, opts...); ok {
+				return seq
+			}
+		}
+	}
 	if hasImages || hasAudios || hasVideos {
 		v, vok := m.tm.(VisionTokenModel)
 		if hasVideos && (!vok || !v.AcceptsImageInput()) {
@@ -232,6 +249,30 @@ func (m *TextModel) FormatChatPrompt(messages []inference.Message) string {
 func (m *TextModel) FormatChatContinuation(messages []inference.Message) string {
 	turns := m.turnTokens()
 	return turns.Close + "\n" + formatChatTurns(turns, messages)
+}
+
+// FormatChatPromptWithThinking is FormatChatPrompt honouring a request's
+// thinking flag — byte-identical to the stateless Chat framing for the same
+// flag (the <|think|> system line switches reasoning on; a thought-suppressor
+// checkpoint pre-closes the empty thought channel when it is off). The
+// conversation-continuity layer frames fresh conversations with it.
+func (m *TextModel) FormatChatPromptWithThinking(messages []inference.Message, enableThinking *bool) string {
+	return formatChatPrompt(m.turnTokens(), messages, enableThinking, m.thoughtSuppressor)
+}
+
+// FormatChatContinuationWithThinking is FormatChatContinuation honouring the
+// conversation's thinking mode: the mode itself lives in the retained
+// prefix's first system turn, but a thought-suppressor checkpoint re-renders
+// the pre-closed empty thought channel on EVERY thinking-off generation cue —
+// exactly as the stateless path does per request.
+func (m *TextModel) FormatChatContinuationWithThinking(messages []inference.Message, enableThinking *bool) string {
+	turns := m.turnTokens()
+	out := turns.Close + "\n" + formatChatTurns(turns, messages)
+	thinking := enableThinking != nil && *enableThinking
+	if turns.Open == "<|turn>" && !thinking && m.thoughtSuppressor {
+		out += "<|channel>thought\n<channel|>"
+	}
+	return out
 }
 
 func (m *TextModel) encode(prompt string) []int32 {
@@ -447,6 +488,41 @@ func (m *TextModel) NewSession() inference.SessionHandle {
 		return nil
 	}
 	return NewSessionHandle(m, sess)
+}
+
+// SetChatInterceptor installs the serve-layer chat hook (conversation
+// continuity): Chat offers every text-only turn to fn first; (nil, false)
+// falls through to the stateless path. Passing nil uninstalls.
+func (m *TextModel) SetChatInterceptor(fn func(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) (iter.Seq[inference.Token], bool)) {
+	if m == nil {
+		return
+	}
+	if fn == nil {
+		m.chatIntercept.Store(nil)
+		return
+	}
+	m.chatIntercept.Store(&fn)
+}
+
+// RecordChatMetrics records a chat turn's usage served OUTSIDE the stateless
+// stream (the continuity interceptor): promptTokens = tokens actually
+// prefilled this turn (the appended tail — no replay, so the count is the
+// honest per-turn work), generated = tokens yielded. The compat handlers read
+// the result through Metrics exactly as they do for stateless turns.
+func (m *TextModel) RecordChatMetrics(promptTokens, generated int, start, decodeStart time.Time) {
+	if m == nil {
+		return
+	}
+	m.setMetrics(promptTokens, generated, time.Since(start), decodeStart)
+}
+
+// MaxLen reports the loaded context length (the engine session capacity) —
+// the continuity layer sizes woken sessions with it.
+func (m *TextModel) MaxLen() int {
+	if m == nil {
+		return 0
+	}
+	return m.maxLen
 }
 
 // ModelType reports the architecture selector; empty on a nil receiver, like

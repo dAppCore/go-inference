@@ -148,6 +148,9 @@ func (s *ArchSession) RestoreState(data []byte) error {
 		copy(unsafe.Slice(vPtr, n), data[off:off+n])
 		off += n
 	}
+	if s.state.icb != nil {
+		s.state.icb.flushQ8Mirrors(pos) // q8 layers: requantise the restored rows
+	}
 	s.pos = pos
 	s.cachedIDs = s.cachedIDs[:0]
 	s.resetRetainedHidden()
@@ -321,6 +324,18 @@ func readPromptEntryBytes(data []byte, off, want int, label string) ([]byte, int
 
 func (s *ArchSession) snapshotCacheViews(li int) (metal.MTLBuffer, metal.MTLBuffer, *byte, *byte, error) {
 	if s.state.icb != nil {
+		if s.state.icb.kvQ8.on(li) {
+			// q8 ICB caches (#367 slice D): expose a freshly-dequantised bf16
+			// MIRROR — every snapshot codec reads/writes bf16-shaped bytes, so
+			// snapshots stay portable to and from bf16 sessions. Restore paths
+			// flush the mirrors back through the quantiser when they finish.
+			kBuf, kPtr, err := s.state.icb.q8SnapshotMirror(li, s.pos)
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
+			vBuf, vPtr := s.state.icb.q8SnapshotMirrorV(li)
+			return kBuf, vBuf, kPtr, vPtr, nil
+		}
 		if li >= len(s.state.icb.kCaches) || li >= len(s.state.icb.vCaches) {
 			return nil, nil, nil, nil, core.NewError("native.sessionState: ICB cache index out of range")
 		}
@@ -353,6 +368,9 @@ func (s *ArchSession) snapshotCacheViews(li int) (metal.MTLBuffer, metal.MTLBuff
 	}
 	if cache := s.state.layerPagedKV(li); cache != nil {
 		return cache.linearSnapshot(s.stateCacheRows(s.state.specs[li]))
+	}
+	if err := s.state.ensureLBKVCaches(); err != nil { // deferred on sessions; state views read/write it
+		return nil, nil, nil, nil, err
 	}
 	lb := &s.state.lb[li]
 	k, v := lb.kCache, lb.vCache

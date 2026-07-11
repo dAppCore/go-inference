@@ -72,7 +72,7 @@ func TestSDPA2PassMatchesReference(t *testing.T) {
 	if cos := cosineBF16(got, ref); cos < 0.999 {
 		t.Fatalf("2-pass SDPA cosine=%.6f vs host reference — block split/merge broken", cos)
 	} else {
-		t.Logf("2-pass SDPA (kvLen=%d, blocks=%d): cosine=%.6f vs host reference — the cache reduction fans over %d threadgroups, token-identical", kvLen, sdpa2PassBlocks(kvLen), cos, sdpa2PassBlocks(kvLen))
+		t.Logf("2-pass SDPA (kvLen=%d, blocks=%d): cosine=%.6f vs host reference — the cache reduction fans over %d threadgroups, token-identical", kvLen, sdpa2PassBlocks(kvLen, nKV), cos, sdpa2PassBlocks(kvLen, nKV))
 	}
 
 	// cross-check against the proven single-pass kernel at the same inputs.
@@ -164,7 +164,7 @@ func TestEncSDPA2PassSeqMajorMatchesSinglePass(t *testing.T) {
 		qBuf, kBuf, vBuf := sharedBytes(qb), sharedBytes(kb), sharedBytes(vb)
 		o1 := device.NewBufferWithLengthOptions(uint(qDim*2), metal.MTLResourceStorageModeShared)
 		o2 := device.NewBufferWithLengthOptions(uint(qDim*2), metal.MTLResourceStorageModeShared)
-		blocks := int(sdpa2PassBlocks(n))
+		blocks := int(sdpa2PassBlocks(n, nKV))
 		partials := scratchBF16(blocks * qDim)
 		sums, maxs := scratchF32(blocks*nHeads), scratchF32(blocks*nHeads)
 		khs, kss := int64(headDim), int64(kvDim) // SEQ-MAJOR strides (the live-path convention)
@@ -194,6 +194,6 @@ func TestEncSDPA2PassSeqMajorMatchesSinglePass(t *testing.T) {
 	if cos := cosineBF16(out2, out1); cos < 0.999 {
 		t.Fatalf("encoder 2-pass vs single-pass (seq-major, n=%d) cosine=%.6f — live-path wiring broken", n, cos)
 	} else {
-		t.Logf("encoder 2-pass vs single-pass (seq-major MQA, nHeads=%d, headDim=%d, n=%d, blocks=%d): cosine=%.6f — live-path routing token-identical", nHeads, headDim, n, sdpa2PassBlocks(n), cos)
+		t.Logf("encoder 2-pass vs single-pass (seq-major MQA, nHeads=%d, headDim=%d, n=%d, blocks=%d): cosine=%.6f — live-path routing token-identical", nHeads, headDim, n, sdpa2PassBlocks(n, nKV), cos)
 	}
 }

@@ -70,9 +70,7 @@ var (
 func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...inference.LoadOption) (inference.TextModel, error) {
 	cfg := inference.ApplyLoadOpts(opts)
 	maxLen := cfg.ContextLen
-	if maxLen <= 0 {
-		maxLen = 4096
-	}
+	// maxLen <= 0 defers to the loader's checkpoint-window default.
 	if draftBlock <= 0 {
 		draftBlock = 5
 	}

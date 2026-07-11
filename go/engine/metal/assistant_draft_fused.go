@@ -68,17 +68,24 @@ type assistantFusedDraft struct {
 	attnScale             float32
 	ropeScale             float32
 
-	layers                 []fusedDraftLayer
-	preProjW, postProjW    metal.MTLBuffer
-	finalNormW             metal.MTLBuffer
-	kv                     map[string]*fusedDraftKV
-	inConcat               metal.MTLBuffer // [2*backbone] bf16 — concat(emb, hidden)
-	h, resid, normed, ffIn metal.MTLBuffer // [hidden]
-	q, qr, attn            metal.MTLBuffer // [nHeads*maxHeadDim]
-	gate, up, gated        metal.MTLBuffer // [dFF]
-	ff                     metal.MTLBuffer // [hidden]
-	outNormed              metal.MTLBuffer // [hidden]
-	outHidden              metal.MTLBuffer // [backbone]
+	layers              []fusedDraftLayer
+	preProjW, postProjW metal.MTLBuffer
+	finalNormW          metal.MTLBuffer
+	// ordered-cluster head (E2B/E4B assistants): centroid gate + full-vocab
+	// logits gemvs ride the SAME command buffer as the transformer, replacing
+	// the host-side scalar head that cost 10-17ms per draft token (#359 — the
+	// whole MTP break-even). nil when the checkpoint ships no masked_embedding.
+	centroidsW, embedW          metal.MTLBuffer
+	centroidScores, vocabLogits metal.MTLBuffer
+	numCentroids, vocab         int
+	kv                          map[string]*fusedDraftKV
+	inConcat                    metal.MTLBuffer // [2*backbone] bf16 — concat(emb, hidden)
+	h, resid, normed, ffIn      metal.MTLBuffer // [hidden]
+	q, qr, attn                 metal.MTLBuffer // [nHeads*maxHeadDim]
+	gate, up, gated             metal.MTLBuffer // [dFF]
+	ff                          metal.MTLBuffer // [hidden]
+	outNormed                   metal.MTLBuffer // [hidden]
+	outHidden                   metal.MTLBuffer // [backbone]
 }
 
 // fusedTensorBuf resolves a named bf16 tensor to a resident buffer, failing
@@ -206,6 +213,24 @@ func newAssistantFusedDraft(m *AssistantModel) (*assistantFusedDraft, error) {
 		}
 		f.layers = append(f.layers, l)
 	}
+	if m.UseOrderedEmbeddings {
+		vocab, numCentroids, topK := m.Arch.Vocab, m.NumCentroids, m.CentroidIntermediateTopK
+		if vocab <= 0 || numCentroids <= 0 || topK <= 0 || topK > numCentroids || vocab%numCentroids != 0 {
+			return nil, core.NewError("native.assistant fused draft ordered-head geometry is invalid")
+		}
+		if f.centroidsW, err = fusedTensorBuf(m, "masked_embedding.centroids.weight", numCentroids*hidden); err != nil {
+			return nil, err
+		}
+		if f.embedW, err = fusedTensorBuf(m, "model.embed_tokens.weight", vocab*hidden); err != nil {
+			return nil, err
+		}
+		f.centroidScores = scratchBF16(numCentroids)
+		f.vocabLogits = scratchBF16(vocab)
+		if f.centroidScores == nil || f.vocabLogits == nil {
+			return nil, core.NewError("native.assistant fused draft ordered-head scratch allocation failed")
+		}
+		f.numCentroids, f.vocab = numCentroids, vocab
+	}
 	f.inConcat = scratchBF16(2 * backbone)
 	f.h = scratchBF16(hidden)
 	f.resid = scratchBF16(hidden)
@@ -312,6 +337,10 @@ func (f *assistantFusedDraft) step(tokenEmbedding, previousHidden, normedOut, hi
 		}
 		emit(encRMSNormBF16(enc, f.h, f.finalNormW, f.outNormed, 0, f.hidden, f.eps))
 		emit(encGemvBF16(enc, f.postProjW, f.outNormed, f.outHidden, f.backbone, f.hidden))
+		if f.centroidsW != nil {
+			emit(encGemvBF16(enc, f.centroidsW, f.outNormed, f.centroidScores, f.numCentroids, f.hidden))
+			emit(encGemvBF16(enc, f.embedW, f.outNormed, f.vocabLogits, f.vocab, f.hidden))
+		}
 		endEncodingFast(enc)
 		commitCommandBufferFast(cb)
 		waitUntilCompletedFast(cb)
@@ -344,4 +373,17 @@ func (pair *AssistantPair) fusedDraft() *assistantFusedDraft {
 	}
 	pair.fused = f
 	return f
+}
+
+// headScores returns host views of the ordered head's GPU outputs from the
+// last step — the centroid scores [numCentroids] and full-vocab logits
+// [vocab], both bf16, valid until the next step overwrites them. nil,nil when
+// the fused ordered head is not armed (no masked_embedding in the checkpoint),
+// which routes the caller back to the host-side head.
+func (f *assistantFusedDraft) headScores() ([]byte, []byte) {
+	if f == nil || f.centroidsW == nil {
+		return nil, nil
+	}
+	return unsafe.Slice((*byte)(f.centroidScores.Contents()), f.numCentroids*bf16Size),
+		unsafe.Slice((*byte)(f.vocabLogits.Contents()), f.vocab*bf16Size)
 }

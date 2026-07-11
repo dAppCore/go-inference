@@ -178,6 +178,9 @@ func (s *ArchSession) RestoreKV(snapshot *kv.Snapshot) error {
 	if s == nil {
 		return core.NewError("native.RestoreKV: nil session")
 	}
+	if s.state.icb != nil {
+		defer func() { s.state.icb.flushQ8Mirrors(s.pos) }() // requantise the restored rows (pos set by the restore)
+	}
 	if snapshot == nil {
 		return core.NewError("native.RestoreKV: nil snapshot")
 	}
@@ -321,6 +324,9 @@ func restoreNativeKVLayerSlabs(scope string, view sessionStateLayerView, start, 
 // native cache. It avoids assembling the blocks into a monolithic CPU snapshot
 // before writing cache rows.
 func (s *ArchSession) RestoreKVBlocks(source KVBlockSource) error {
+	if s != nil && s.state.icb != nil {
+		defer func() { s.state.icb.flushQ8Mirrors(s.pos) }() // requantise the restored rows (pos set by the restore)
+	}
 	if s == nil {
 		return core.NewError("native.RestoreKVBlocks: nil session")
 	}
