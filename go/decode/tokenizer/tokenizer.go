@@ -356,12 +356,35 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 }
 
 func (t *Tokenizer) matchSpecialToken(input string) (string, int32, bool) {
+	// A special can only be a prefix of input when input's first byte is one of
+	// the specials' lead bytes. That single membership test rejects the common
+	// "no special here" case (the first token of every clean segment) in O(1)
+	// instead of walking HasPrefix over every special — the walk is O(specials)
+	// and fires once per Encode segment. Specials are non-empty (LoadTokenizer
+	// builds them from added-token content), so a real prefix always shares
+	// input's first byte with input.
+	if input == "" || !t.isSpecialLead(input[0]) {
+		return "", 0, false
+	}
 	for _, tok := range t.specialOrder {
 		if core.HasPrefix(input, tok) {
 			return tok, t.special[tok], true
 		}
 	}
 	return "", 0, false
+}
+
+// isSpecialLead reports whether b is the first byte of any special token. The
+// lead set is tiny (usually the single byte '<'), so a linear scan is a couple
+// of compares — cheaper than a map lookup and allocation-free.
+func (t *Tokenizer) isSpecialLead(b byte) bool {
+	leads := t.specialLeadBytes()
+	for i := 0; i < len(leads); i++ {
+		if leads[i] == b {
+			return true
+		}
+	}
+	return false
 }
 
 // specialLeadBytes returns the distinct first bytes of every special token, as
