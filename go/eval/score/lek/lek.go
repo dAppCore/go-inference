@@ -131,18 +131,23 @@ func lekFirstPerson(text string) int {
 func lekCreativeForm(text string) int {
 	score := 0
 
-	// Poetry: >6 lines and >50% under 60 chars.
-	lines := core.Split(text, "\n")
-	if len(lines) > 6 {
-		short := 0
-		for _, line := range lines {
-			if len(line) < 60 {
-				short++
+	// Poetry: >6 lines and >50% under 60 chars. Walk '\n' boundaries in place
+	// rather than core.Split(text, "\n"), which allocates a []string of every
+	// line just to count them and their widths. Segment count = count('\n')+1
+	// and each segment is text[start:i], so totalLines and the <60-char tally
+	// are byte-identical to Split's, with no allocation.
+	totalLines, shortLines, lineStart := 0, 0, 0
+	for i := 0; i <= len(text); i++ {
+		if i == len(text) || text[i] == '\n' {
+			totalLines++
+			if i-lineStart < 60 {
+				shortLines++
 			}
+			lineStart = i + 1
 		}
-		if float64(short)/float64(len(lines)) > 0.5 {
-			score += 2
-		}
+	}
+	if totalLines > 6 && float64(shortLines)/float64(totalLines) > 0.5 {
+		score += 2
 	}
 
 	if lekNarrativePattern.MatchString(core.Trim(text)) {

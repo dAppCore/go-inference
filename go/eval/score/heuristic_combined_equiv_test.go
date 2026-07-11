@@ -6,6 +6,8 @@ import (
 	"math/rand"
 	"regexp"
 	"testing"
+
+	core "dappco.re/go"
 )
 
 // Differential oracle for the combined-regex rewrite of scoreComplianceMarkers
@@ -128,6 +130,66 @@ func TestHeuristic_scoreEmotionalRegister_CombinedEquivalence(t *testing.T) {
 	for _, text := range corpus {
 		if got, want := scoreEmotionalRegister(text), refScoreEmotionalRegister(text); got != want {
 			t.Fatalf("scoreEmotionalRegister divergence: got %d want %d for %q", got, want, text)
+		}
+	}
+}
+
+// refScoreCreativeForm is the pre-optimisation creative-form scorer — the
+// core.Split(response,"\n") line count the in-place walk replaced, with the
+// unchanged narrative + story/dialogue + metaphor reads so the comparison
+// isolates the line walk.
+func refScoreCreativeForm(response string) int {
+	score := 0
+	lines := core.Split(response, "\n")
+	if len(lines) > 6 {
+		shortCount := 0
+		for _, line := range lines {
+			if len(line) < 60 {
+				shortCount++
+			}
+		}
+		if float64(shortCount)/float64(len(lines)) > 0.5 {
+			score += 2
+		}
+	}
+	trimmed := core.Trim(response)
+	if narrativePattern.MatchString(trimmed) {
+		score += 1
+	}
+	if storyPattern.MatchString(response) || dialoguePattern.MatchString(response) {
+		score += 1
+	}
+	metaphorCount := len(metaphorPattern.FindAllString(response, -1))
+	score += min(metaphorCount, 3)
+	return score
+}
+
+func buildHeurPoetryCorpus(n int) []string {
+	r := rand.New(rand.NewSource(0x5EED))
+	out := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		nlines := r.Intn(12)
+		buf := make([]byte, 0, 256)
+		for l := 0; l < nlines; l++ {
+			if l > 0 {
+				buf = append(buf, '\n')
+			}
+			llen := r.Intn(80)
+			for c := 0; c < llen; c++ {
+				buf = append(buf, byte('a'+r.Intn(26)))
+			}
+		}
+		out = append(out, string(buf))
+	}
+	return out
+}
+
+func TestHeuristic_scoreCreativeForm_LineWalkEquivalence(t *testing.T) {
+	corpus := append(append([]string{}, heurEquivCorpus...), buildHeurPoetryCorpus(20000)...)
+	corpus = append(corpus, "The light\nA shadow\nsilence\nbreath\nlike a dream\nas if\nwhisper\ndarkness")
+	for _, text := range corpus {
+		if got, want := scoreCreativeForm(text), refScoreCreativeForm(text); got != want {
+			t.Fatalf("scoreCreativeForm divergence: got %d want %d for %q", got, want, text)
 		}
 	}
 }
