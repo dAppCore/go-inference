@@ -2282,7 +2282,14 @@ func (s *ArchSession) pleSlabFor(ids []int32, embs [][]byte) ([]byte, error) {
 	}
 	numLayers, pliBytes := len(s.state.specs), s.state.pliDim*bf16Size
 	tokenPLE := numLayers * pliBytes
-	pleSlab := make([]byte, len(ids)*tokenPLE)
+	// A skipped prefill chunk (#381) reads only the owner layers' gate slices —
+	// the slab carries just that layer-major prefix (the batch builders bound
+	// their compute to it, or compute full width and copy the prefix).
+	outLayers := numLayers
+	if b := s.state.prefillSkipToLayer; b > 0 && b < numLayers {
+		outLayers = b
+	}
+	pleSlab := make([]byte, len(ids)*outLayers*pliBytes)
 	if s.perLayerInputBatch != nil {
 		if ok, err := s.perLayerInputBatch(ids, embs, pleSlab); err != nil {
 			return nil, err
@@ -2300,7 +2307,7 @@ func (s *ArchSession) pleSlabFor(ids []int32, embs [][]byte) ([]byte, error) {
 		}
 		// the closure returns token i's [numLayers × pliDim] tensor (and may reuse its
 		// scratch across calls) — scatter each layer's slice to its layer-major home.
-		for li := range numLayers {
+		for li := range outLayers {
 			copy(pleSlab[(li*len(ids)+i)*pliBytes:(li*len(ids)+i+1)*pliBytes], pli[li*pliBytes:(li+1)*pliBytes])
 		}
 	}

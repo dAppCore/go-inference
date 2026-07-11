@@ -756,7 +756,13 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		if pleSlab == nil {
 			return decline("PLE arch without slab")
 		}
-		if want := K * len(s.specs) * s.pliDim * bf16Size; len(pleSlab) != want {
+		// a skipped chunk's slab carries only the owner layers' slices (#381) —
+		// the bounded layer loop below never reads past prefillSkipToLayer
+		wantLayers := len(s.specs)
+		if s.prefillSkipToLayer > 0 && s.prefillSkipToLayer < wantLayers {
+			wantLayers = s.prefillSkipToLayer
+		}
+		if want := K * wantLayers * s.pliDim * bf16Size; len(pleSlab) != want {
 			return nil, false, core.NewError("native.stepTokensBatchedDense: PLE slab size mismatch")
 		}
 	} else if pleSlab != nil {
