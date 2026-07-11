@@ -117,6 +117,82 @@ func benchmarkStateBlocksSnapshot(tokenCount, localWindow int) *Snapshot {
 	}
 }
 
+// benchmarkGlobalSlidingMixFixture builds a durable bundle whose native
+// multi-head layer-raw tensors mix full-attention (global) layers with
+// sliding-window layers — the global+sliding cache shape a 31B-class model
+// captures. A sliding layer is empty in the leading blocks, so its block 0 is
+// the wrong assembly shape donor; if the placement buffer is not seeded from a
+// later block the wake regresses to the O(N^2) merged-rebuild path. This is the
+// fixture the single-shape full-attention slab fixtures did not cover.
+func benchmarkGlobalSlidingMixFixture(tb testing.TB) (state.Store, *StateBlockBundle) {
+	tb.Helper()
+	store := state.NewInMemoryStore(nil)
+	snapshot := benchmarkGlobalSlidingMixSnapshot(2048, 4, 4, 1024, 4, 64)
+	bundle, err := snapshot.SaveStateBlocks(context.Background(), store, StateBlockOptions{
+		BlockSize:  128,
+		KVEncoding: EncodingNative,
+	})
+	if err != nil {
+		tb.Fatalf("SaveStateBlocks(global+sliding mix) error = %v", err)
+	}
+	if len(bundle.Blocks) != 16 {
+		tb.Fatalf("blocks = %d, want 16", len(bundle.Blocks))
+	}
+	return store, bundle
+}
+
+// benchmarkGlobalSlidingMixSnapshot builds globalLayers full-attention native
+// layers (L=tokenCount) followed by slidingLayers windowed layers (L=window),
+// each a [1,heads,L,headDim] float16 slab.
+func benchmarkGlobalSlidingMixSnapshot(tokenCount, globalLayers, slidingLayers, window, heads, headDim int) *Snapshot {
+	tokens := make([]int32, tokenCount)
+	for i := range tokenCount {
+		tokens[i] = int32(i + 1)
+	}
+	slab := func(l int) ([]byte, []byte, []int32) {
+		n := heads * l * headDim * 2
+		kb := make([]byte, n)
+		vb := make([]byte, n)
+		for i := range kb {
+			kb[i] = byte(i)
+			vb[i] = byte(i + 17)
+		}
+		return kb, vb, []int32{1, int32(heads), int32(l), int32(headDim)}
+	}
+	layers := make([]LayerSnapshot, 0, globalLayers+slidingLayers)
+	for l := range globalLayers {
+		kb, vb, sh := slab(tokenCount)
+		layers = append(layers, LayerSnapshot{
+			Layer: l, CacheIndex: l,
+			KeyDType: "float16", KeyBytes: kb, KeyShape: sh,
+			ValueDType: "float16", ValueBytes: vb, ValueShape: append([]int32(nil), sh...),
+			Heads: make([]HeadSnapshot, heads),
+		})
+	}
+	slideL := min(tokenCount, window)
+	for l := range slidingLayers {
+		kb, vb, sh := slab(slideL)
+		layers = append(layers, LayerSnapshot{
+			Layer: globalLayers + l, CacheIndex: globalLayers + l, MaxSize: window,
+			KeyDType: "float16", KeyBytes: kb, KeyShape: sh,
+			ValueDType: "float16", ValueBytes: vb, ValueShape: append([]int32(nil), sh...),
+			Heads: make([]HeadSnapshot, heads),
+		})
+	}
+	return &Snapshot{
+		Version:       SnapshotVersion,
+		Architecture:  "qwen3",
+		Tokens:        tokens,
+		TokenOffset:   tokenCount,
+		NumLayers:     globalLayers + slidingLayers,
+		NumHeads:      heads,
+		SeqLen:        tokenCount,
+		HeadDim:       headDim,
+		NumQueryHeads: heads,
+		Layers:        layers,
+	}
+}
+
 func benchmarkNativeLayerSlabSnapshot(tokenCount, heads, headDim int) *Snapshot {
 	tokens := make([]int32, tokenCount)
 	B, H, L, D := 1, heads, tokenCount, headDim
