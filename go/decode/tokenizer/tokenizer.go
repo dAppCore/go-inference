@@ -555,10 +555,6 @@ func (t *Tokenizer) bpeMerge(text string, symbols []string) []string {
 	return merged
 }
 
-func tokenizerBPECacheKey(kind, segment string) string {
-	return kind + "\x00" + segment
-}
-
 func (t *Tokenizer) cachedBPETokens(key string) ([]int32, bool) {
 	t.bpeCacheMu.RLock()
 	// Defer-free path — the hot one fires once per Encode segment so
@@ -639,7 +635,13 @@ func (t *Tokenizer) encodeSentencePieceSegment(segment string) []int32 {
 	if spText == "" {
 		return nil
 	}
-	key := tokenizerBPECacheKey("sp", spText)
+	// Key the BPE cache by the segment text directly. isGPT2BPE is fixed for a
+	// tokenizer's whole life (set once in LoadTokenizer, never mutated), so only
+	// one of encodeSentencePieceSegment / encodeGPT2Segment ever runs on a given
+	// tokenizer — a "sp"/"gpt2" kind prefix could never disambiguate two entries,
+	// and dropping it saves the per-segment `kind + "\x00" + segment` concat
+	// allocation on every cache lookup and store.
+	key := spText
 	if cached, ok := t.cachedBPETokens(key); ok {
 		return cached
 	}
@@ -676,7 +678,9 @@ func (t *Tokenizer) encodeGPT2Segment(segment string) []int32 {
 	if encodedText == "" {
 		return nil
 	}
-	key := tokenizerBPECacheKey("gpt2", encodedText)
+	// Key by the encoded text directly — see encodeSentencePieceSegment: only one
+	// encode kind runs per tokenizer, so no kind prefix is needed.
+	key := encodedText
 	if cached, ok := t.cachedBPETokens(key); ok {
 		return cached
 	}
