@@ -1457,18 +1457,22 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 				endEncodingFast(enc)
 				return nil, false, err
 			}
+			enc = trace.checkpoint(enc, "mlp.gate")
 			if err = projectRowsRequired(proj, enc, mlpNormSlab, gateSlab, 0, 0, K, projGate); err != nil {
 				endEncodingFast(enc)
 				return nil, false, err
 			}
+			enc = trace.checkpoint(enc, "mlp.up")
 			if err = projectRowsRequired(proj, enc, mlpNormSlab, upSlab, 0, 0, K, projUp); err != nil {
 				endEncodingFast(enc)
 				return nil, false, err
 			}
+			enc = trace.checkpoint(enc, "mlp.gelu")
 			if err = encGeluGateMulFused(enc, gateSlab, upSlab, gatedSlab, K*lff); err != nil {
 				endEncodingFast(enc)
 				return nil, false, err
 			}
+			enc = trace.checkpoint(enc, "mlp.down")
 			if err = projectRowsRequired(proj, enc, gatedSlab, downSlab, 0, 0, K, projDown); err != nil {
 				endEncodingFast(enc)
 				return nil, false, err
