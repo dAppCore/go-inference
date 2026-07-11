@@ -159,6 +159,15 @@ does our own fallback composition). This release ships:
   50/60 on 31B) window their attention; each query tile now streams its
   own fixed key span once through threadgroup tiles instead of re-reading
   the window per query row. +4% prefill at every depth measured.
+- **The kv-shared prefill skip** — Gemma 4's E-series shares KV: the
+  trailing 20 of 35 layers on E2B own no cache rows, and on every prompt
+  chunk except the last their outputs feed nothing the continuation ever
+  reads. The engine now proves that suffix at load and skips it per
+  chunk — 2.1–2.6× prefill at every depth, token-identical by
+  construction and by receipt (32-token greedy continuations
+  byte-identical at 8K and 62K). This is the same pruning mlx-lm gets
+  implicitly from lazy evaluation; here it is explicit, validated
+  against the arch, and kill-switched (`LTHN_PREFILL_SKIP_SHARED=0`).
 
 Prefill, E2B class, against the field (tok/s at prompt depth; same MLX
 snapshot for lem/oMLX/mlx-lm, llama.cpp on the google qat-q4_0 GGUF —
@@ -166,10 +175,10 @@ quants reported, never hidden):
 
 | depth | lem | llama.cpp | oMLX | mlx-lm |
 |---|---|---|---|---|
-| 8K | 3,147 | 4,002 | 6,696 | ~9,850² |
-| 32K | 2,769 | 2,412 | — | — |
-| 62K | 2,349 | — | — | — |
-| 118K | 1,656 | — | — | — |
+| 8K | 6,777 | 4,002 | 6,696 | ~9,850² |
+| 32K | 7,008 | 2,412 | — | — |
+| 62K | 5,833 | — | — | — |
+| 118K | 4,249 | — | — | — |
 
 ² mlx-lm prints 11,790 at this depth; 10,044 is its true wall measured
 with our own timer around a preloaded generate. oMLX (the closest feature rival — continuous
@@ -177,14 +186,14 @@ batching, tiered KV, OpenAI+Anthropic routes, menu-bar service — but a
 Python stack where lem is one contained binary) rides mlx-lm's kernels
 and lands 6,696 even through its HTTP serving path.
 
-Honest reading: the mlx stack leads cold ingest at shallow depth by
-2-3× — the gap is the whole-prompt dispatch structure, characterised
-in-repo, and it is the next prefill campaign. Three things frame it:
-past ~30K *we* lead llama.cpp and the curve is flatter than everyone
-measured; decode — the cost every turn pays — leads the whole field
-(see the board above); and under `-state` serving, prefill is paid once
-per conversation while replay engines re-pay it per turn — that trade
-is the design.
+Honest reading: mlx-lm's true wall still leads cold 8K ingest by ~1.5×
+(the remaining gap is chunk-width economics and per-chunk host seams,
+both open on the tracker). Everywhere else this table has data, lem now
+leads the field outright — llama.cpp at every depth, oMLX at its own
+depth — and the curve stays flat where everyone else's dives. Decode —
+the cost every turn pays — leads the whole field (see the board above);
+and under `-state` serving, prefill is paid once per conversation while
+replay engines re-pay it per turn — that trade is the design.
 
 **Concurrency, receipted**: two and four simultaneous conversations at
 shipping defaults complete with zero errors and zero cross-talk
