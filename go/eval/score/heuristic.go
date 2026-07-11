@@ -64,9 +64,13 @@ var (
 )
 
 // scoreComplianceMarkers counts RLHF compliance/safety markers (case-insensitive).
+// The two alternations are counted by the direct word-boundary scan
+// (heuristic_scan.go) rather than RE2's FindAllStringIndex — byte-identical to
+// the complianceCombined / complianceOverlap regexps (which remain as the scan's
+// differential oracle in heuristic_scan_test.go), several times cheaper per call.
 func scoreComplianceMarkers(response string) int {
-	return len(complianceCombined.FindAllStringIndex(response, -1)) +
-		len(complianceOverlap.FindAllStringIndex(response, -1))
+	return complianceSet.count(response) +
+		complianceOverlapSet.count(response)
 }
 
 // scoreFormulaicPreamble checks if response starts with a formulaic preamble.
@@ -236,8 +240,11 @@ func scoreDegeneration(response string) int {
 }
 
 // scoreEmotionalRegister counts emotional vocabulary presence, capped at 10.
+// Counted by the direct word-boundary scan (heuristic_scan.go) — byte-identical
+// to the emotionCombined regexp (retained as the scan's differential oracle),
+// several times cheaper per call.
 func scoreEmotionalRegister(response string) int {
-	count := len(emotionCombined.FindAllStringIndex(response, -1))
+	count := emotionSet.count(response)
 	if count > 10 {
 		return 10
 	}

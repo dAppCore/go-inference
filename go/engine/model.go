@@ -6,6 +6,7 @@ import (
 	"context"
 	"iter"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -298,7 +299,18 @@ func (m *TextModel) FormatChatPrompt(messages []inference.Message) string {
 // bleeding into its own open turn.
 func (m *TextModel) FormatChatContinuation(messages []inference.Message) string {
 	t := m.chatTemplate()
-	return t.Close + "\n" + renderChatTurns(t, messages)
+	// The turn-close + \n and the plain turns go into ONE pre-sized builder —
+	// byte-identical to t.Close + "\n" + renderChatTurns(t, messages) but a
+	// single allocation, where the concat re-copied the whole rendered body into
+	// a second heap string. renderChatTurns zeroes SystemAsLeadingTurn/Thinking,
+	// neither of which writePlainTurns reads, so passing t directly is the same
+	// framing.
+	var out strings.Builder
+	out.Grow(len(t.Close) + 1 + plainTurnsSize(t, messages))
+	out.WriteString(t.Close)
+	out.WriteString("\n")
+	writePlainTurns(&out, t, messages)
+	return out.String()
 }
 
 // FormatChatPromptWithThinking is FormatChatPrompt honouring a request's
@@ -317,12 +329,20 @@ func (m *TextModel) FormatChatPromptWithThinking(messages []inference.Message, e
 // exactly as the stateless path does per request.
 func (m *TextModel) FormatChatContinuationWithThinking(messages []inference.Message, enableThinking *bool) string {
 	t := m.chatTemplate()
-	out := t.Close + "\n" + renderChatTurns(t, messages)
 	thinking := enableThinking != nil && *enableThinking
+	tail := ""
 	if !thinking && t.Thinking != nil {
-		out += t.Thinking.OffSuffix
+		tail = t.Thinking.OffSuffix
 	}
-	return out
+	// One pre-sized builder: close + \n + plain turns + the thinking-off suffix
+	// — byte-identical to the former render-then-concat-then-append, one alloc.
+	var out strings.Builder
+	out.Grow(len(t.Close) + 1 + plainTurnsSize(t, messages) + len(tail))
+	out.WriteString(t.Close)
+	out.WriteString("\n")
+	writePlainTurns(&out, t, messages)
+	out.WriteString(tail)
+	return out.String()
 }
 
 func (m *TextModel) encode(prompt string) []int32 {
