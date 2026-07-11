@@ -1,3 +1,20 @@
+# NEXT WAKE (2026-07-13 session close)
+
+**The release is on the pad.** `docs/release-v0.12.0-DRAFT.md` is complete —
+name (lem = Lethean Ethical Machine, LEK→LEM→lem lineage), the THREE-WAY
+measured energy receipt (continuity 77.1 J/turn vs llama-server 112.1 vs
+replay 143.9; 21.4/31.1/40.0 kWh per million turns; harness at
+docs/examples/energy-ab/), decode board, 256K receipt, flash kernels,
+welfare guard (go/welfare — already built, wired bidirectionally; #376 =
+just the lem_end rung), falsified-and-kept, video storyboard. Remaining
+before tag: Snider's edit pass, `task build:embed` binaries, tag
+(GitHub-first or after forge returns), the side-by-side video.
+**forge.lthn.sh is DOWN deliberately (CoreAgent phase work)** — plans repo
+has TWO LOCAL UNPUSHED commits (6c50e77 dreaming tier §13, 05d5b1f
+field-first + register view); push forge_sh main when it returns.
+Flash campaign (#375): 256+window shipped default-on (+4% all depths);
+split-D and q8-flash opt-in with falsification receipts in metadata.
+
 ---
 title: Handover
 description: Working notes from the engine-perf campaigns — for the next driver of this codebase.
