@@ -139,26 +139,24 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 		}
 	}
 
-	// α = exp(−exp(A_log)·softplus(a+dt_bias)) ∈ (0,1] ; β = sigmoid(b). Per (token, value-head).
-	aProj, err := projMatMul(x, w.InProjA, L, D, VH)
+	// α = exp(−exp(A_log)·softplus(a+dt_bias)) ∈ (0,1] ; β = sigmoid(b). Per (token, value-head). The
+	// two projection outputs are each read once and then dead, and α/β are the same [L,VH] shape, so
+	// map α over aProj and β over bProj in place — the element-wise transform (output i depends only
+	// on input i) makes this bit-identical and needs no separate α/β buffer.
+	alpha, err := projMatMul(x, w.InProjA, L, D, VH)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	bProj, err := projMatMul(x, w.InProjB, L, D, VH)
+	beta, err := projMatMul(x, w.InProjB, L, D, VH)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// α and β are read-only per-(token,head) inputs to the recurrence: one slab, two capped windows.
-	abN := L * VH
-	abBuf := make([]float32, 2*abN)
-	alpha := abBuf[0:abN:abN]
-	beta := abBuf[abN : 2*abN : 2*abN]
 	for i := 0; i < L*VH; i++ {
 		h := i % VH
-		dt := gdSoftplus(float64(aProj[i]) + float64(w.DtBias[h]))
+		dt := gdSoftplus(float64(alpha[i]) + float64(w.DtBias[h]))
 		aDecay := -math.Exp(float64(w.ALog[h]))
+		beta[i] = float32(1.0 / (1.0 + math.Exp(-float64(beta[i]))))
 		alpha[i] = float32(math.Exp(aDecay * dt))
-		beta[i] = float32(1.0 / (1.0 + math.Exp(-float64(bProj[i]))))
 	}
 
 	o, newDelta, err := deltanet.GatedDeltaRuleF32(q, k, v, beta, alpha, priorDelta, L, VH, HD, scale, 0)
