@@ -2011,7 +2011,12 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseChunks(ids []int32, scope
 	}
 	defer func() { s.state.prefillSkipToLayer = 0 }()
 	for len(ids) > 0 {
-		n := s.batchedDensePrefillChunkLen(len(ids))
+		var n int
+		if skipTo > 0 {
+			n = s.batchedDensePrefillChunkLenSkip(len(ids))
+		} else {
+			n = s.batchedDensePrefillChunkLen(len(ids))
+		}
 		if n <= 0 {
 			return nil, false, core.NewError("native.prefillRetainedTokensBatchedDense: invalid sliding chunk")
 		}
@@ -2123,6 +2128,48 @@ func (s *ArchSession) batchedDensePrefillChunkLen(limit int) int {
 		return limit
 	}
 	return wide
+}
+
+// batchedDenseSkipFinalFloor is the minimum FINAL-chunk width when the
+// shared-suffix skip is armed: above batchedDenseICBMaxRows so a recorded-ICB
+// session's DenseOne never declines the boundary chunk (a decline there falls
+// the WHOLE prompt back to the per-token lane), and at steelGEMMMinRows so the
+// q8 fold gate stays open.
+const batchedDenseSkipFinalFloor = 32
+
+// batchedDensePrefillChunkLenSkip is the chunk policy with the shared-suffix
+// skip armed (#381): only the FINAL chunk runs the full layer stack, so
+// instead of absorbing the tail into a wide full-stack chunk (up to wide+w/2
+// rows paying the 20 skipped fat layers for one read row), it splits a
+// MINIMAL window-aligned boundary chunk off the end — the last partial
+// window, raised to batchedDenseSkipFinalFloor. e2b pp8K: the full-stack span
+// falls 1081 -> 57 rows.
+func (s *ArchSession) batchedDensePrefillChunkLenSkip(limit int) int {
+	n := s.batchedDensePrefillChunkLen(limit)
+	if n < limit {
+		return n // a non-final chunk — the base policy's width stands
+	}
+	w := s.arch.SlidingWindow
+	if w <= 0 || limit <= batchedDenseSkipFinalFloor {
+		return n
+	}
+	rem := (s.pos + limit) % w
+	if rem == 0 {
+		rem = w
+	}
+	for rem < batchedDenseSkipFinalFloor {
+		rem += w
+	}
+	if rem >= limit {
+		return n // already minimal
+	}
+	// emit the skipped span first (window-aligned end); the loop calls back
+	// for the boundary chunk.
+	span := limit - rem
+	if wide := w * prefillChunkWindowsFor(w); span > wide {
+		span = wide
+	}
+	return span
 }
 
 func (s *ArchSession) prefillRetainedTokensBatchedDenseOne(ids []int32, scope string) ([]byte, bool, error) {

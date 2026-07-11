@@ -675,6 +675,42 @@ func TestArchSessionPrefillRetainedTokensBatchedDenseChunksSlidingRingWrap(t *te
 	}
 }
 
+func TestArchSessionBatchedDensePrefillChunkLenSkip(t *testing.T) {
+	t.Setenv("LTHN_PREFILL_WINDOWS", "4") // pin wide = 4×512 = 2048
+	walk := func(pos, total int) []int {
+		s := &ArchSession{maxLen: 1 << 20}
+		s.arch.SlidingWindow = 512
+		s.pos = pos
+		var seq []int
+		for total > 0 {
+			n := s.batchedDensePrefillChunkLenSkip(total)
+			if n <= 0 || n > total {
+				t.Fatalf("walk(pos=%d): chunk %d of remaining %d", pos, n, total)
+			}
+			seq = append(seq, n)
+			s.pos += n
+			total -= n
+		}
+		return seq
+	}
+	cases := []struct {
+		name       string
+		pos, total int
+		want       []int
+	}{
+		{"8K shape: minimal 57-row boundary chunk", 0, 7225, []int{2048, 2048, 2048, 1024, 57}},
+		{"sub-floor remainder rises by a window", 0, 7180, []int{2048, 2048, 2048, 512, 524}},
+		{"aligned end keeps one whole window", 0, 6144, []int{2048, 2048, 1536, 512}},
+		{"below the floor stays one chunk", 0, 20, []int{20}},
+		{"mid-window start realigns first", 100, 1000, []int{412, 512, 76}},
+	}
+	for _, tc := range cases {
+		if got := walk(tc.pos, tc.total); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: chunks = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestArchSessionPrefillChunksSkipSharedSuffix(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
