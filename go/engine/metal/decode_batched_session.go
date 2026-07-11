@@ -695,6 +695,11 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 		}
 		icbK, icbV = s.icb.kCaches, s.icb.vCaches
 	}
+	if icbK == nil { // non-ICB batches read+write the linear lb caches (deferred on sessions)
+		if err := s.ensureLBKVCaches(); err != nil {
+			return nil, false, err
+		}
+	}
 	if len(s.ple) > 0 {
 		if pleSlab == nil {
 			return decline("PLE arch without slab")

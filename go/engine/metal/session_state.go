@@ -369,6 +369,9 @@ func (s *ArchSession) snapshotCacheViews(li int) (metal.MTLBuffer, metal.MTLBuff
 	if cache := s.state.layerPagedKV(li); cache != nil {
 		return cache.linearSnapshot(s.stateCacheRows(s.state.specs[li]))
 	}
+	if err := s.state.ensureLBKVCaches(); err != nil { // deferred on sessions; state views read/write it
+		return nil, nil, nil, nil, err
+	}
 	lb := &s.state.lb[li]
 	k, v := lb.kCache, lb.vCache
 	if k == nil || v == nil {

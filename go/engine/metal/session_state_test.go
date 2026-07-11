@@ -152,12 +152,15 @@ func TestSessionStateSnapshotCacheViewsUseCachedContentsPointers(t *testing.T) {
 		// arch ICB now, so force the lane this subtest is about.
 		s.state.icb = nil
 		li := firstOwnedCacheLayer(t, s)
-		if s.state.lb[li].kCachePtr == nil || s.state.lb[li].vCachePtr == nil {
-			t.Fatal("layer KV cache contents pointers were not cached at construction")
-		}
 		k, v, kPtr, vPtr, err := s.snapshotCacheViews(li)
 		if err != nil {
 			t.Fatalf("snapshotCacheViews: %v", err)
+		}
+		// session lb KV materialises lazily (ensureLBKVCaches at the state-view seam);
+		// after the first view the contents pointers must be CACHED — never re-derived
+		// per call (the paged branch below never touches lb, so only assert on the lb lane).
+		if s.state.layerPagedKV(li) == nil && (s.state.lb[li].kCachePtr == nil || s.state.lb[li].vCachePtr == nil) {
+			t.Fatal("layer KV cache contents pointers were not cached at materialisation")
 		}
 		if cache := s.state.layerPagedKV(li); cache != nil {
 			if k != cache.snapshotK || v != cache.snapshotV {
