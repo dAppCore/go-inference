@@ -149,6 +149,35 @@ func (t ChatTemplate) turnRole(role string) string {
 	}
 }
 
+// plainTurnsSize returns the exact rendered length of messages as plain turns
+// (Open + role + "\n" + content + Close + "\n" each) followed by the trailing
+// assistant generation cue — the pre-size for the single builder allocation
+// shared by the render loop and the woken-session continuation.
+func plainTurnsSize(t ChatTemplate, messages []inference.Message) int {
+	size := len(t.Open) + len(t.AssistantRole) + 1
+	for _, msg := range messages {
+		size += len(t.Open) + len(t.turnRole(msg.Role)) + 1 + len(msg.Content) + len(t.Close) + 1
+	}
+	return size
+}
+
+// writePlainTurns writes messages as plain turns followed by the assistant
+// generation cue into out — the one turn-writing body the render loop and the
+// continuation both drive, so plain-turn framing has a single implementation.
+func writePlainTurns(out *strings.Builder, t ChatTemplate, messages []inference.Message) {
+	for _, msg := range messages {
+		out.WriteString(t.Open)
+		out.WriteString(t.turnRole(msg.Role))
+		out.WriteString("\n")
+		out.WriteString(msg.Content)
+		out.WriteString(t.Close)
+		out.WriteString("\n")
+	}
+	out.WriteString(t.Open)
+	out.WriteString(t.AssistantRole)
+	out.WriteString("\n")
+}
+
 // renderChatTemplate is the ONE neutral render loop: it frames messages as a
 // fresh chat prompt in template t's dialect and appends the trailing assistant
 // generation cue. enableThinking honours the request's thinking flag through
@@ -178,12 +207,9 @@ func renderChatTemplate(t ChatTemplate, messages []inference.Message, enableThin
 	// allocated ONCE (String() then hands it back without a copy), and write each
 	// turn's parts straight into it — the old loop concatenated a fresh per-turn
 	// string (one heap allocation per turn) only to copy it in and drop it.
-	size := len(t.Open) + len(t.AssistantRole) + 1 + len(offSuffix)
+	size := plainTurnsSize(t, rest) + len(offSuffix)
 	if leadingSystem {
 		size += len(t.Open) + len(t.SystemRole) + 1 + len(prelude) + len(sysContent) + len(t.Close) + 1
-	}
-	for _, msg := range rest {
-		size += len(t.Open) + len(t.turnRole(msg.Role)) + 1 + len(msg.Content) + len(t.Close) + 1
 	}
 	var out strings.Builder
 	out.Grow(size)
@@ -196,17 +222,7 @@ func renderChatTemplate(t ChatTemplate, messages []inference.Message, enableThin
 		out.WriteString(t.Close)
 		out.WriteString("\n")
 	}
-	for _, msg := range rest {
-		out.WriteString(t.Open)
-		out.WriteString(t.turnRole(msg.Role))
-		out.WriteString("\n")
-		out.WriteString(msg.Content)
-		out.WriteString(t.Close)
-		out.WriteString("\n")
-	}
-	out.WriteString(t.Open)
-	out.WriteString(t.AssistantRole)
-	out.WriteString("\n")
+	writePlainTurns(&out, t, rest)
 	out.WriteString(offSuffix)
 	return out.String()
 }

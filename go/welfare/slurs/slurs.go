@@ -22,6 +22,18 @@ var l33t = [][2]string{
 	{"0", "o"}, {"5", "s"}, {"$", "s"}, {"7", "t"},
 }
 
+// l33tSrc[b] reports whether byte b is an l33t evasion glyph fold rewrites.
+// Precomputed from l33t so fold can decide in one pass whether ANY substitution
+// is needed, rather than paying nine core.Replace scans on the common path
+// (real chat text carries no l33t glyph). The Replaces run byte-for-byte
+// unchanged when a glyph is present.
+var l33tSrc = func() (t [256]bool) {
+	for _, sub := range l33t {
+		t[sub[0][0]] = true
+	}
+	return
+}()
+
 // Matcher tests text against a fixed, pre-normalised catalogue. Build with New
 // (tests inject their own terms) or Default (the curated production list).
 type Matcher struct {
@@ -91,11 +103,22 @@ func (m *Matcher) Match(text string) (bool, string) {
 	return false, ""
 }
 
-// fold lowercases the text and applies the l33t substitutions.
+// fold lowercases the text and applies the l33t substitutions. The nine
+// single-byte substitutions only fire when their glyph is present, so a single
+// presence scan gates them: on l33t-free text (the common case) fold does one
+// Lower and one scan instead of nine no-op core.Replace passes. Byte-identical
+// to running all nine unconditionally — an absent glyph's Replace is a no-op,
+// and no substitution's target is another's source, so gating cannot reorder or
+// cascade the result.
 func fold(text string) string {
 	out := core.Lower(text)
-	for _, sub := range l33t {
-		out = core.Replace(out, sub[0], sub[1])
+	for i := 0; i < len(out); i++ {
+		if l33tSrc[out[i]] {
+			for _, sub := range l33t {
+				out = core.Replace(out, sub[0], sub[1])
+			}
+			break
+		}
 	}
 	return out
 }
