@@ -1,20 +1,39 @@
-# NEXT WAKE (2026-07-16 — SOLVED, and the biggest lever of the campaign)
+# NEXT WAKE (2026-07-16 — #381 SHIPPED: the skip is live, 2.1-2.6x at every depth)
 
-**#381 SOLVED at ~3am with snider on the powermetrics trigger.** There is no
-faster kernel. mlx-lm's prompt loop evals ONLY the cache states; gemma4
-E-series KV-SHARED layers (e2b: 20 of 35, the double-wide deep ones) own no
-cache state, so lazy DCE skips their ENTIRE compute on every non-final
-chunk — architecturally correct (deep outputs of prompt positions feed only
-unsampled logits; later attention reaches prompt tokens via OWNER-layer KV).
-Kill shots: halving all 60 fat projections = 0ms chunk delta; energy (burst
-190.5W@20.6TF vs forward 138.3W, same 1379MHz — joules forbid the phantom
-45TF). Everything reconciles at ~22TF = our own kernel rate. THE BUILD
-(next wake's crown work, engine/metal, mine): skip non-KV-owning layers on
-non-final prefill chunks (OwnsCache/KVShareFrom already know); final chunk
-+ decode run all layers. Expect 3,147 -> ~9,000+ pp8K (mlx true wall
-10,044); family-wide (31B's deep-ingest pain shrinks ~3x). Gates: token-
-identical continuation, needle-at-depth, receipts at 3 depths; caveats in
-#381 (Classify all-position logits must NOT skip; MTP boundary hidden ok).
+**The kv-shared layer skip is BUILT, receipted, and pushed (473c242).**
+sharedLayerSuffixStart validates the non-owner suffix at state build;
+prefillRetainedTokensBatchedDenseChunks arms prefillSkipToLayer on
+non-final chunks; the batched pass bounds its layer loop. Receipts (e2b
+4bit, correct metallib, A/B vs LTHN_PREFILL_SKIP_SHARED=0 same env):
+pp8K 3,190->6,777 · pp32K 2,753->7,008 · pp62K 2,323->5,833 · pp118K
+1,688->4,249 tok/s; 32-token greedy continuations byte-identical at 8K
+and 62K; TestArchSessionPrefillChunksSkipSharedSuffix pins serial-vs-
+chunked byte identity over a kv-shared fixture both lanes. Field position
+now: beats llama.cpp everywhere, edges oMLX at 8K (6,777 vs 6,696), leads
+the field outright at 32K+; mlx-lm true-wall gap 3.2x -> 1.48x at 8K.
+FOLLOW-UPS still open on #381: chunk-width retune under the new balance
+(skipped chunks are ~2.3x cheaper — wider may amortise better), PLE slab
+still gathered full-width per chunk, embeddings/bidir chunk lane still
+full-stack, 31B/26B family receipts.
+
+**THE TRAP THAT ATE AN HOUR (bank it):** running engine/metal tests with
+go-mlx's dist metallib (the retired path my own notes carried) makes the
+sibling lthn_kernels.metallib STALE -> missing kernels
+(`lthn_embed_gather_row_bf16 not found`) -> a 40-test parity red wave that
+reproduces at KNOWN-GREEN commits. The correct pair is
+**$REPO/build/dist/lib/mlx.metallib** (the Taskfile var; lem.sh already
+defaults to it). If a mass parity red appears at a green commit: read ONE
+failure message before bisecting — mine said "kernel not found" all along.
+
+**The solved mechanism (for the record):** mlx-lm's prompt loop evals ONLY
+cache states; gemma4 E-series KV-SHARED layers (e2b: 20 of 35) own no cache
+state, so lazy DCE skips their entire compute on every non-final chunk —
+architecturally correct (deep outputs of prompt positions feed only unsampled
+logits; later attention reaches prompt tokens via OWNER-layer KV). Kill
+shots: width-halving = 0ms delta; powermetrics energy forbids the phantom
+45TF. Caveats held: Classify all-position logits do NOT skip (they take the
+non-chunked lane); MTP boundary hidden comes from the final chunk (full
+stack).
 ALSO LANDED OVERNIGHT: #380 emittedContent quadratic (871x B/op at 8K,
 45,530-case oracle fuzz — live tok/s A/B still owed); #378 outbound policy
 G1 (term 0-alloc + bounded-window patterns, boot-fatal, outermost wrap; G2
