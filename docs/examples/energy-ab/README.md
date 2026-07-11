@@ -16,3 +16,13 @@ idle 1.02W): replay 1,439 J net (climbing 83→233 J/turn as history grows);
 continuity 771 J net (flat ~77 J/turn). Identical output both arms
 (3,370 vs 3,364 words). Continuity: 54% of the energy, gap widening
 every turn.
+
+## Peer arm — llama-server (2026-07-13, same session)
+
+Same driver, same 10 turns, llama-server at shipping defaults
+(`-ngl 99 -c 8192`, its prefix cache active — confirmed by its flat
+per-turn trend): **1,121 J net = 112.1 J/turn** (0.031 Wh/turn), output
+3,223 words. Three-way: lem continuity 77.1 J/turn · llama-server
+112.1 · pure replay 143.9. Per million turns: 21.4 / 31.1 / 40.0 kWh.
+llama's cache is single-slot volatile RAM (lost on restart/eviction);
+lem's state is durable per-conversation.

@@ -50,21 +50,35 @@ turn N+1 resumes from the live KV state and pays only for the new tokens.
 | multi-turn book bench (10 chapters, full history resent) | prompt cost grows per turn | prompt column flat at ~88 tokens |
 
 The work a replay engine repeats every turn is work this engine does not
-do — and that is measurable at the wall. A `powermetrics` A/B (same
-binary, same 10-turn conversation, only the continuity flag differing;
-harness committed at `docs/examples/energy-ab/`):
+do — and that is measurable at the wall. A `powermetrics` A/B — the same
+10-turn conversation driven identically at three servers, energy
+integrated over each arm net of the 1.02W idle baseline (M3 Ultra,
+E2B/Q4 class, every engine at its shipping defaults; harness committed
+at `docs/examples/energy-ab/`):
 
-| measured (M3 Ultra, E2B 4-bit, net of 1.02W idle) | replay | continuity |
-|---|---|---|
-| energy, 10 turns | 1,439 J | **771 J** |
-| per turn | 143.9 J | **77.1 J** |
-| per-turn trend as history grows | climbing: 83 → 142 → 190 → 233 J | flat: ~77 J |
+| engine, as shipped | 10 turns | per turn | Wh/turn | per-turn trend |
+|---|---|---|---|---|
+| **lem, continuity (default)** | **771 J** | **77.1 J** | **0.021** | flat ~77 J |
+| llama-server (prefix cache active) | 1,121 J | 112.1 J | 0.031 | flat-ish, noisy |
+| lem, `-state-conversations=false` (pure replay) | 1,439 J | 143.9 J | 0.040 | climbing 83 → 233 J |
 
-**Identical output, 54% of the energy — at only ten turns, on the
-smallest model.** Replay's per-turn cost climbs roughly 15 J every turn
-as the conversation lengthens; continuity holds flat, so the saving
-widens with every turn of every session. Long agentic sessions are
-where this becomes infrastructure-grade arithmetic.
+**Identical task, 54% of replay's energy and 69% of llama-server's — at
+ten turns, on the smallest model.** Pure replay's per-turn cost climbs
+~15 J every turn as the history grows, so the saving widens with every
+turn of every session. llama-server's in-memory prefix cache does help
+it (its trend stays flat) — but it is a single-slot volatile cache,
+lost on restart or slot eviction; lem's state is durable and
+per-conversation. Footnotes for the sceptical: llama-server produced
+slightly shorter chapters (3,223 words vs lem's 3,364), so per-word the
+gap is wider still (0.23 vs 0.35 J/word); lem's defaults include MTP,
+llama's include its cache — engines compared as they ship.
+
+Fleet arithmetic, per **million conversation turns** at these measured
+rates: lem 21.4 kWh · llama-server 31.1 kWh · replay engines 40.0 kWh —
+and that is a 4-billion-parameter model on ten-turn chats; larger
+models and longer agentic sessions scale the absolute gap, not close
+it. For sustainability reporting: roughly a third of the serving energy
+removed, measured at the wall, method committed.
 
 For agentic use — tool-calling loops where a session accumulates dozens
 of turns — the effect compounds every round trip. This is the difference
