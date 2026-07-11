@@ -3637,3 +3637,43 @@ func TestDraftOrderedGreedyFromHeadMatchesHostHead(t *testing.T) {
 		t.Fatal("ordered greedy head accepted a token with every candidate suppressed — must decline to the host fallback")
 	}
 }
+
+// TestPrepareAssistantPromptRingSafety pins the pair lane to the same sliding-
+// ring rollback rule as PrefillTokensCached: once the resident run has wrapped
+// a sliding ring (pos > window), a divergent prompt must re-prefill COLD
+// (never roll back over window rows the discarded tail destroyed), and the
+// continuation must be token-identical to a fresh session over the same
+// prompt.
+func TestPrepareAssistantPromptRingSafety(t *testing.T) {
+	requireNativeRuntime(t)
+	const window = 8
+	types := []string{"sliding_attention", "full_attention", "sliding_attention"}
+	g, arch, maxLen := reuseTestModel(t, types, window, 96)
+
+	warm := reuseSession(t, g, arch, maxLen)
+	defer warm.Close()
+	long := make([]int32, 20) // pos 20 > window 8: rings wrapped
+	for i := range long {
+		long[i] = int32(i%13 + 1)
+	}
+	if err := warm.prepareAssistantPrompt(long); err != nil {
+		t.Fatalf("long prepareAssistantPrompt: %v", err)
+	}
+	branch := append(append([]int32(nil), long[:10]...), 40, 41, 42)
+	if err := warm.prepareAssistantPrompt(branch); err != nil {
+		t.Fatalf("branch prepareAssistantPrompt: %v", err)
+	}
+	if warm.pos != len(branch) {
+		t.Fatalf("pos after branch = %d, want %d", warm.pos, len(branch))
+	}
+	got, err := warm.GenerateFromCache(6, -1)
+	if err != nil {
+		t.Fatalf("branch GenerateFromCache: %v", err)
+	}
+	cold := reuseColdDecode(t, g, arch, maxLen, branch, 6)
+	for i := range cold {
+		if got[i] != cold[i] {
+			t.Fatalf("token %d diverged after a wrapped-ring divergence: warm=%d cold=%d", i, got[i], cold[i])
+		}
+	}
+}

@@ -79,6 +79,14 @@ func (s *ArchSession) generateCached(promptIDs []int32, maxNew, eosID int, suppr
 	for lcp < len(promptIDs) && lcp < len(s.cachedIDs) && promptIDs[lcp] == s.cachedIDs[lcp] {
 		lcp++
 	}
+	if lcp < s.pos && s.ringRollbackUnsafe() {
+		// Any reuse here needs a rollback past a wrapped sliding ring, whose
+		// window rows the discarded tail already overwrote — go cold instead
+		// (token-identical, just uncached). Same rule as PrefillTokensCached.
+		lcp = 0
+		s.cachedIDs = nil
+		s.clearCachedPromptHidden()
+	}
 	if lcp == len(promptIDs) {
 		if hidden := s.cachedPromptHiddenFor(promptIDs); hidden != nil {
 			logits := s.cachedPromptLogitsFor(promptIDs)
@@ -154,6 +162,13 @@ func (s *ArchSession) generateCachedSampled(promptIDs []int32, maxNew int, stopT
 	lcp := 0
 	for lcp < len(promptIDs) && lcp < len(s.cachedIDs) && promptIDs[lcp] == s.cachedIDs[lcp] {
 		lcp++
+	}
+	if lcp < s.pos && s.ringRollbackUnsafe() {
+		// Same ring rule as GenerateCached above: a rollback past a wrapped
+		// sliding ring goes cold instead of reusing destroyed window rows.
+		lcp = 0
+		s.cachedIDs = nil
+		s.clearCachedPromptHidden()
 	}
 	if lcp == len(promptIDs) {
 		if logits := s.cachedPromptLogitsForSampledReplay(promptIDs, params); logits != nil {
