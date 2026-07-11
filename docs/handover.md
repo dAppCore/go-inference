@@ -1,4 +1,25 @@
-# NEXT WAKE (2026-07-13 session close)
+# NEXT WAKE (2026-07-15 session)
+
+**#377 closed with a lever + a bug kill.** Snider read the release energy
+table and asked why pure replay climbs while llama-server stays flat. Answer:
+the stateless lane opened a fresh session per request (full re-prefill every
+turn + a maxLen-sized KV alloc/free round trip — also why 31B feels heavy on
+short chats) while TWO complete LCP reuse implementations sat in-engine
+caller-less. Shipped 64688fb: resident-session prompt reuse on the stateless
+lane (llama slot parity; TryLock single slot; stands down under continuity;
+`LTHN_PROMPT_REUSE=0` kills). Receipt: 10-turn stateless walls 3.1→4.4s now
+FLAT ~3.1s with prompt_tok climbing to 3,959. Found + fixed en route
+(300eb33): every prompt-cache rollback (pair lane prepareAssistantPrompt,
+GenerateCached×2) rolled back past wrapped sliding RINGS — silent wrong
+context on MTP multi-turn; all sites now degrade to cold prefill
+(TestPrepareAssistantPromptRingSafety). Release draft + energy-ab README
+updated (replay arm now needs the kill switch to reproduce). TWO OPUS BENCH
+AGENTS dispatched on worktrees perf/bench-a (serving/decode/kv/welfare/root)
++ perf/bench-b (model/agent) off 9af89e9 — adding missing
+{file}_bench_test.go + allocs/B-op cuts; merge their branches when done, then
+`git worktree remove` + prune (.worktrees/goinf-bench-{a,b}).
+
+# PREVIOUS WAKE (2026-07-13 session close)
 
 **The release is on the pad.** `docs/release-v0.12.0-DRAFT.md` is complete —
 name (lem = Lethean Ethical Machine, LEK→LEM→lem lineage), the THREE-WAY

@@ -5,8 +5,12 @@ Measures joules per conversation turn, same binary, same traffic, one flag.
 1. In your own terminal (sudo needs a TTY):
    `sudo powermetrics --samplers cpu_power,gpu_power -i 500 -o /tmp/pm.txt`
 2. 60s idle window (markers via the driver's clock).
-3. Arm A: `lem serve --model <snapshot> -state-conversations=false`,
-   then `LEM_PORT=<port> python3 energy_turns.py REPLAY`.
+3. Arm A: `LTHN_PROMPT_REUSE=0 lem serve --model <snapshot>
+   -state-conversations=false`, then
+   `LEM_PORT=<port> python3 energy_turns.py REPLAY`.
+   (Since 64688fb the stateless lane ships llama-parity prompt reuse ON
+   and its per-turn wall is flat — the kill switch reproduces the
+   cache-less replay shape this arm measures.)
 4. Arm B: serve with the default (continuity on), `energy_turns.py STATE`.
 5. `python3 pm_integrate.py` — integrates Combined Power over the marked
    windows, subtracts idle, reports J/turn and the per-turn series.
