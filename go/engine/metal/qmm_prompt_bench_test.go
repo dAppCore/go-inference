@@ -403,3 +403,214 @@ func TestDiagMLPChainWithSDPASlabTraffic(t *testing.T) {
 	t.Logf("with S-traffic   %8.2fms  gemm-effective %.1f TFLOPS after subtracting ~%.0fms copy cost",
 		dS.Seconds()*1000, gemmFlops/(dS.Seconds()-sSeconds)/1e12, sSeconds*1000)
 }
+
+// TestDiagQMMTPipelinedRotatingOutputs measures qmm_t's TRUE pipelined rate at
+// the e2b gate shape: reps encoded in ONE command buffer as in the diag above,
+// but each rep writes a DIFFERENT output buffer — no WAW hazard chain, so the
+// GPU may overlap dispatches exactly as a real forward with per-op outputs
+// (mlx's model) does. The delta against the shared-output run quantifies how
+// much of the in-situ prefill GEMM tax is hazard serialisation on reused
+// scratch slabs (#381).
+func TestDiagQMMTPipelinedRotatingOutputs(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	requireNativeRuntime(t)
+	const gs, bits = 64, 4
+	const m, k, n = 2048, 1536, 6144 // e2b TRUE gate/up at the default chunk
+	const iters = 32
+	const rot = 8
+	rng := rand.New(rand.NewPCG(42, 99))
+	wq := device.NewBufferWithLengthOptions(uint(n*k/8*4), metal.MTLResourceStorageModeShared)
+	scales := device.NewBufferWithLengthOptions(uint(n*(k/gs)*2), metal.MTLResourceStorageModeShared)
+	biases := device.NewBufferWithLengthOptions(uint(n*(k/gs)*2), metal.MTLResourceStorageModeShared)
+	x := device.NewBufferWithLengthOptions(uint(m*k*2), metal.MTLResourceStorageModeShared)
+	outs := make([]metal.MTLBuffer, rot)
+	for i := range outs {
+		outs[i] = device.NewBufferWithLengthOptions(uint(m*n*2), metal.MTLResourceStorageModeShared)
+		if outs[i] == nil {
+			t.Fatal("out buffer allocation failed")
+		}
+	}
+	for _, b := range []metal.MTLBuffer{wq, scales, biases, x} {
+		if b == nil {
+			t.Fatal("buffer allocation failed")
+		}
+	}
+	wqs := unsafe.Slice((*uint32)(wq.Contents()), n*k/8)
+	for i := range wqs {
+		wqs[i] = rng.Uint32()
+	}
+	fill := func(buf metal.MTLBuffer, elems int, scale float32) {
+		s := unsafe.Slice((*uint16)(buf.Contents()), elems)
+		for i := range s {
+			s[i] = f32ToBF16(rng.Float32()*scale - scale/2)
+		}
+	}
+	fill(scales, n*(k/gs), 0.02)
+	fill(biases, n*(k/gs), 0.02)
+	fill(x, m*k, 2.0)
+
+	psoT, err := pipelineFor(qmmTKernelName(n, gs, bits))
+	if err != nil {
+		t.Fatalf("qmm_t pipeline: %v", err)
+	}
+	run := func(rotate bool, reps int) time.Duration {
+		cb := commandBufferFast(queue)
+		enc := computeCommandEncoderFast(cb)
+		for r := range reps {
+			out := outs[0]
+			if rotate {
+				out = outs[r%rot]
+			}
+			emitQMMT(encSink{enc}, psoT, wq, 0, scales, 0, biases, 0, x, 0, out, 0, m, n, k)
+		}
+		endEncodingFast(enc)
+		start := time.Now()
+		commitCommandBufferFast(cb)
+		waitUntilCompletedFast(cb)
+		return time.Since(start)
+	}
+	run(true, 2)
+	run(false, 2)
+	flops := float64(2*m) * float64(k) * float64(n) * float64(iters)
+	dShared := run(false, iters)
+	dRot := run(true, iters)
+	t.Logf("qmm_t %dx%dx%d ×%d: shared-out %.1fms = %.1f TFLOPS · rotating-out %.1fms = %.1f TFLOPS (%.2fx)",
+		m, k, n, iters,
+		float64(dShared.Microseconds())/1000, flops/dShared.Seconds()/1e12,
+		float64(dRot.Microseconds())/1000, flops/dRot.Seconds()/1e12,
+		dShared.Seconds()/dRot.Seconds())
+}
+
+// TestDiagQMMTMlxWorkloadReplay prices the EXACT qmm workload a spied mlx-lm
+// 8K-prompt run dispatched (shape × count table captured 2026-07-15, 32.98
+// TFLOP total, their wall 0.74s) on OUR qmm_t pipelined dispatches — the
+// apples-to-apples that says whether the prefill gap is per-op kernel
+// efficiency (this sum >> theirs) or work outside the GEMMs (#381).
+func TestDiagQMMTMlxWorkloadReplay(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	requireNativeRuntime(t)
+	const gs, bits = 64, 4
+	shapes := []struct {
+		m, k, n, count int
+	}{
+		{2048, 1536, 12288, 120}, {2048, 1536, 262144, 3}, {2048, 12288, 1536, 60},
+		{2048, 1536, 6144, 90}, {2048, 6144, 1536, 45}, {1087, 1536, 12288, 40},
+		{2048, 1536, 2048, 84}, {2048, 2048, 1536, 84}, {1087, 1536, 262144, 1},
+		{1087, 12288, 1536, 20}, {1087, 1536, 6144, 30}, {2048, 1536, 4096, 21},
+		{2048, 4096, 1536, 21}, {1087, 6144, 1536, 15}, {2048, 1536, 256, 177},
+		{1087, 1536, 2048, 28}, {1087, 2048, 1536, 28}, {2048, 1536, 8960, 3},
+		{2048, 256, 1536, 105}, {1087, 1536, 4096, 7}, {1087, 4096, 1536, 7},
+		{2048, 1536, 512, 18}, {1087, 1536, 256, 59},
+	}
+	var totalTime time.Duration
+	var totalFLOPs float64
+	for _, sh := range shapes {
+		m, k, n := sh.m, sh.k, sh.n
+		wq := device.NewBufferWithLengthOptions(uint(n*k/8*4), metal.MTLResourceStorageModeShared)
+		scales := device.NewBufferWithLengthOptions(uint(n*(k/gs)*2), metal.MTLResourceStorageModeShared)
+		biases := device.NewBufferWithLengthOptions(uint(n*(k/gs)*2), metal.MTLResourceStorageModeShared)
+		x := device.NewBufferWithLengthOptions(uint(m*k*2), metal.MTLResourceStorageModeShared)
+		out := device.NewBufferWithLengthOptions(uint(m*n*2), metal.MTLResourceStorageModeShared)
+		if wq == nil || scales == nil || biases == nil || x == nil || out == nil {
+			t.Fatalf("alloc failed at %dx%dx%d", m, k, n)
+		}
+		pso, err := pipelineFor(qmmTKernelName(n, gs, bits))
+		if err != nil {
+			t.Fatalf("pipeline %dx%dx%d: %v", m, k, n, err)
+		}
+		run := func(reps int) time.Duration {
+			cb := commandBufferFast(queue)
+			enc := computeCommandEncoderFast(cb)
+			for range reps {
+				emitQMMT(encSink{enc}, pso, wq, 0, scales, 0, biases, 0, x, 0, out, 0, m, n, k)
+			}
+			endEncodingFast(enc)
+			start := time.Now()
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+			return time.Since(start)
+		}
+		run(2)
+		reps := min(sh.count, 24)
+		d := run(reps)
+		per := d / time.Duration(reps)
+		shapeTotal := per * time.Duration(sh.count)
+		fl := 2 * float64(m) * float64(k) * float64(n)
+		totalTime += shapeTotal
+		totalFLOPs += fl * float64(sh.count)
+		t.Logf("%5dx%5dx%6d x%3d: %7.2fms total (%5.1f TFLOPS)",
+			m, k, n, sh.count, float64(shapeTotal.Microseconds())/1000, fl/per.Seconds()/1e12)
+		releaseDeviceBuffers(wq, scales, biases, x, out)
+	}
+	t.Logf("OUR price for mlx's workload: %.2fs (%.1f TFLOPS overall) vs their 0.74s wall — %.2fx",
+		totalTime.Seconds(), totalFLOPs/totalTime.Seconds()/1e12, totalTime.Seconds()/0.74)
+}
+
+// TestDiagQMMTFloat16VsBfloat16 A/Bs the SAME qmm_t kernel at the e2b gate
+// shape with float16 vs bfloat16 activations — pre-M4 Apple GPUs emulate
+// bf16 (fp32 convert in-shader) while fp16 runs native ALU rate (#381).
+func TestDiagQMMTFloat16VsBfloat16(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	requireNativeRuntime(t)
+	const gs, bits = 64, 4
+	const m, k, n = 2048, 1536, 12288
+	const iters = 24
+	wq := device.NewBufferWithLengthOptions(uint(n*k/8*4), metal.MTLResourceStorageModeShared)
+	scales := device.NewBufferWithLengthOptions(uint(n*(k/gs)*2), metal.MTLResourceStorageModeShared)
+	biases := device.NewBufferWithLengthOptions(uint(n*(k/gs)*2), metal.MTLResourceStorageModeShared)
+	x := device.NewBufferWithLengthOptions(uint(m*k*2), metal.MTLResourceStorageModeShared)
+	out := device.NewBufferWithLengthOptions(uint(m*n*2), metal.MTLResourceStorageModeShared)
+	if wq == nil || scales == nil || biases == nil || x == nil || out == nil {
+		t.Fatal("alloc failed")
+	}
+	run := func(kname string) float64 {
+		pso, err := pipelineFor(kname)
+		if err != nil {
+			t.Fatalf("pipeline %s: %v", kname, err)
+		}
+		bench := func(reps int) time.Duration {
+			cb := commandBufferFast(queue)
+			enc := computeCommandEncoderFast(cb)
+			for range reps {
+				emitQMMT(encSink{enc}, pso, wq, 0, scales, 0, biases, 0, x, 0, out, 0, m, n, k)
+			}
+			endEncodingFast(enc)
+			start := time.Now()
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+			return time.Since(start)
+		}
+		bench(2)
+		d := bench(iters)
+		return 2 * float64(m) * float64(k) * float64(n) * float64(iters) / d.Seconds() / 1e12
+	}
+	bf := run("affine_qmm_t_bfloat16_t_gs_64_b_4_alN_true_batch_0")
+	fp := run("affine_qmm_t_float16_t_gs_64_b_4_alN_true_batch_0")
+	t.Logf("qmm_t %dx%dx%d: bfloat16 %.1f TFLOPS · float16 %.1f TFLOPS (%.2fx)", m, k, n, bf, fp, fp/bf)
+	if os.Getenv("LTHN_DIAG_SUSTAINED") != "" {
+		pso, err := pipelineFor("affine_qmm_t_bfloat16_t_gs_64_b_4_alN_true_batch_0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, reps := range []int{24, 96, 384} {
+			cb := commandBufferFast(queue)
+			enc := computeCommandEncoderFast(cb)
+			for range reps {
+				emitQMMT(encSink{enc}, pso, wq, 0, scales, 0, biases, 0, x, 0, out, 0, m, n, k)
+			}
+			endEncodingFast(enc)
+			start := time.Now()
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+			d := time.Since(start)
+			t.Logf("sustained x%d: %.0fms = %.1f TFLOPS", reps, float64(d.Microseconds())/1000,
+				2*float64(m)*float64(k)*float64(n)*float64(reps)/d.Seconds()/1e12)
+		}
+	}
+}
