@@ -25,7 +25,8 @@ import (
 // ArchSession. Zero-copy: the weights view the shard mmap, held on the session via shardBuffers for
 // its life (Close unmaps).
 func LoadDir(dir string, maxLen int) (*ArchSession, error) {
-	if maxLen <= 0 {
+	usedDefaultContext := maxLen <= 0
+	if usedDefaultContext {
 		// The loader owns the context default (checkpoint window, capped) — the
 		// speculative pair serve passes an unset -context straight through here
 		// and NewArch*Session rejects 0 (the post-601ac4e pair-serve break).
@@ -39,6 +40,9 @@ func LoadDir(dir string, maxLen int) (*ArchSession, error) {
 	if err != nil {
 		_ = dm.Close()
 		return nil, err
+	}
+	if usedDefaultContext { // exact geometry + weight bytes in hand: fit the default to the box
+		maxLen = clampDefaultContextToRAM(maxLen, lm.Arch, sb)
 	}
 	var sess *ArchSession
 	if quantised(lm) {
@@ -99,7 +103,8 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	if loadCfg.PagedKVPageSize < 0 {
 		return nil, core.NewError("native.LoadTokenModelDir: paged KV page size must be >= 0")
 	}
-	if maxLen <= 0 {
+	usedDefaultContext := maxLen <= 0
+	if usedDefaultContext {
 		// Serve/generate without -context used to cap every session at 4096 —
 		// the resident-conversation killer (#370's book bench died mid-book).
 		// Default to the checkpoint's trained window instead, capped.
@@ -108,6 +113,8 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	// SSM / hybrid families don't fit the reactive transformer Assemble — route them to their own loader
 	// before the registered path. mamba2 is a standalone recurrent SSM; qwen3_5/3.6 is a config-composed
 	// hybrid (linear_attention gated-delta + full attention) built by the composed loader.
+	// (They keep the plain window-capped default: their state geometry isn't the
+	// transformer KV plan the RAM-aware clamp below budgets.)
 	if mt, cfg, perr := model.ProbeDirArch(dir); perr == nil {
 		switch mt {
 		case "mamba2":
@@ -124,6 +131,9 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	if err != nil {
 		_ = dm.Close()
 		return nil, err
+	}
+	if usedDefaultContext { // exact geometry + weight bytes in hand: fit the default to the box
+		maxLen = clampDefaultContextToRAM(maxLen, lm.Arch, sb)
 	}
 	arch := lm.Arch
 	backendOpts := nativeTokenModelBackendOptions(loadCfg)
