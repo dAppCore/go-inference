@@ -243,7 +243,18 @@ type archDecodeState struct {
 	// that would silently evaluate the span causally. Transient — set around
 	// one chunk by prefillRetainedEmbeddingsBidirChunk.
 	rowAttnCaps []int32
-	ropeFreqs   metal.MTLBuffer // resident periods (1/inv_freq) for YaRN long-context rope; nil = base-derived rope
+	// sharedSuffix is the first layer index of the trailing run of KV-shared
+	// (non-cache-owning) layers, or -1 when the non-owners are not a clean
+	// suffix. prefillSkipToLayer, when >0, bounds the batched dense pass's
+	// layer loop at that index for ONE chunk: a non-final prefill chunk's
+	// shared-suffix layers write no cache rows and their outputs feed only
+	// that chunk's unread boundary hidden, so the compute is dead — the mlx
+	// prefill-parity mechanism (#381). Transient — set around non-final
+	// chunks by prefillRetainedTokensBatchedDenseChunks; the final chunk and
+	// every decode/verify pass run the full stack.
+	sharedSuffix       int
+	prefillSkipToLayer int
+	ropeFreqs          metal.MTLBuffer // resident periods (1/inv_freq) for YaRN long-context rope; nil = base-derived rope
 	// gemma4 global (proportional+partial) rope: the period spectrum over the FULL head dim
 	// (metal's gemma4ProportionalFreqs) for GlobalAttention layers, so rope pairs (d, d+globalHeadDim/2)
 	// over the whole head — NOT (d, d+rotaryDim/2). nil ⇒ no proportional global layers.
@@ -1135,6 +1146,27 @@ func quantPLELayers(fn string, qlayers []QuantizedLayerWeights, dModel, pliDim, 
 
 // newArchDecodeState builds the shared scratch + position buffer over the caller's
 // per-layer buffers. MUST be called inside a withAutoreleasePool.
+// sharedLayerSuffixStart returns the first index of the trailing run of
+// non-cache-owning (KV-shared) layers — gemma4 E-family: 15 for the 20-of-35
+// shared suffix — or -1 when the non-owners do not form a clean suffix (an
+// interleaved sharer would sit BELOW an owner whose cache rows the chunk must
+// still land, so the prefill skip stays off for that shape).
+func sharedLayerSuffixStart(specs []model.LayerSpec) int {
+	i := len(specs)
+	for i > 0 && !specs[i-1].OwnsCache() {
+		i--
+	}
+	if i == len(specs) {
+		return -1 // no shared suffix
+	}
+	for j := 0; j < i; j++ {
+		if !specs[j].OwnsCache() {
+			return -1 // non-owner below the suffix — not a clean split
+		}
+	}
+	return i
+}
+
 func newArchDecodeState(specs []model.LayerSpec, lb []archLayerBufs, moeWeights []*MoELayerWeights, dModel, nHeads, nKVHeads, headDim, dFF, slidingWindow, rotaryDim, rotaryDimLocal int, base, localBase, scale, eps float32, valueNorm bool, maxLen int) archDecodeState {
 	// scratch must fit the LARGEST layer's q/kv (gemma4 full_attention layers use a
 	// bigger head_dim than sliding) — the shared scratch is reused across all layers.
@@ -1182,6 +1214,7 @@ func newArchDecodeState(specs []model.LayerSpec, lb []archLayerBufs, moeWeights 
 	coreScratch := getArchDecodeCoreScratch(dModel, maxQDim, maxKvDim, nHeads, maxLen, maxDFF)
 	return archDecodeState{
 		specs: specs, lb: lb, moeWeights: moeWeights,
+		sharedSuffix:    sharedLayerSuffixStart(specs),
 		globalRopeFreqs: globalRopeFreqs, globalHeadDim: globalHeadDim,
 		asc: coreScratch.asc, msc: coreScratch.msc,
 		coreScratch:    coreScratch,

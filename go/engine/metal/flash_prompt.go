@@ -257,6 +257,20 @@ var q8StageEnabled = os.Getenv("LTHN_Q8_STAGE") != "0"
 // byte-identity A/B (TestQ8StagePromptMatchesMirrorLane) flips it.
 var q8StageOffForTest bool
 
+// prefillSkipSharedEnabled skips the trailing KV-shared (non-cache-owning)
+// layers on NON-FINAL prefill chunks: those layers land no cache rows and
+// their outputs feed only the chunk's unread boundary hidden, so the work is
+// dead — later positions reach the prompt through the OWNER layers' KV. This
+// is the mechanism behind mlx-lm's prefill lead (#381: its lazy DCE prunes
+// the same 20-of-35 gemma4 layers per chunk). Token-identical by
+// construction; the final chunk and every decode pass run the full stack.
+// Default ON; LTHN_PREFILL_SKIP_SHARED=0 restores full-stack chunks.
+var prefillSkipSharedEnabled = os.Getenv("LTHN_PREFILL_SKIP_SHARED") != "0"
+
+// prefillSkipSharedOffForTest pins the full-stack chunk lane in-process — the
+// byte-identity A/B (TestArchSessionPrefillChunksSkipSharedSuffix) flips it.
+var prefillSkipSharedOffForTest bool
+
 type flashQ8Key struct {
 	nHalves        int
 	alignQ, alignK bool
