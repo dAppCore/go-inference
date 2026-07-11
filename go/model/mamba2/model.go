@@ -59,13 +59,21 @@ func rmsNormRowsPlain(x, w []float32, rows, d int, eps float32) []float32 {
 // SSM state, threaded across forward calls. Single-goroutine (the per-layer state is mutable).
 type MambaSession struct {
 	m         *MambaModel
-	convState [][]float32 // per-layer [(K-1)*convDim]; nil ⇒ fresh
-	ssmState  [][]float32 // per-layer [H*P*N];          nil ⇒ fresh
+	convState [][]float32   // per-layer [(K-1)*convDim]; nil ⇒ fresh
+	ssmState  [][]float32   // per-layer [H*P*N];          nil ⇒ fresh
+	scratch   *BlockScratch // reused in/out projection buffers, shared across layers (they run sequentially
+	// and each layer's out is folded into the residual before the next runs) — per-session, so it lives here
+	// beside the recurrent state and never on the shared block weights.
 }
 
 // NewSession builds a fresh recurrent session (zero state).
 func NewSession(m *MambaModel) *MambaSession {
-	return &MambaSession{m: m, convState: make([][]float32, len(m.Layers)), ssmState: make([][]float32, len(m.Layers))}
+	return &MambaSession{
+		m:         m,
+		convState: make([][]float32, len(m.Layers)),
+		ssmState:  make([][]float32, len(m.Layers)),
+		scratch:   &BlockScratch{},
+	}
 }
 
 // forwardEmb runs L input embeddings [L, D] through the whole stack (per-layer pre-RMSNorm → block →
@@ -81,7 +89,7 @@ func (s *MambaSession) forwardEmb(hidden []float32, L int) ([]float32, error) {
 	for li := range s.m.Layers {
 		layer := s.m.Layers[li]
 		normed := rmsNormRowsPlain(hidden, layer.Norm, L, D, s.m.Cfg.Eps)
-		out, nc, ns, err := BlockForwardF32(normed, layer.W, s.m.Cfg, s.convState[li], s.ssmState[li], L, D)
+		out, nc, ns, err := BlockForwardScratchF32(normed, layer.W, s.m.Cfg, s.convState[li], s.ssmState[li], L, D, s.scratch)
 		if err != nil {
 			return nil, err
 		}
