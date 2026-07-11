@@ -164,12 +164,15 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 		return nil, nil, nil, err
 	}
 
-	// gated RMSNorm: per (token, value-head) RMSNorm(o over HD)·SiLU(z), then out-proj.
+	// gated RMSNorm: per (token, value-head) RMSNorm(o over HD)·SiLU(z), then out-proj. o is [L,VH,HD]
+	// = [L·vDim], the gated shape, and is dead after this stage; each row's o is fully read (ss) then
+	// each element is read once more immediately before its own write, so the gated result is written
+	// in place over o — bit-identical, one fewer alloc per token.
 	zProj, err := projMatMul(x, w.InProjZ, L, D, vDim)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	gated := make([]float32, L*vDim)
+	gated := o
 	for row := 0; row < L*VH; row++ {
 		var ss float64
 		for i := range HD {
