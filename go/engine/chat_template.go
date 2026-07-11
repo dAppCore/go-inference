@@ -165,23 +165,48 @@ func renderChatTemplate(t ChatTemplate, messages []inference.Message, enableThin
 		}
 	}
 	sysFirst := t.SystemAsLeadingTurn && len(messages) > 0 && chatSystemRole(messages[0].Role)
-	var out strings.Builder
 	rest := messages
 	// The leading system turn renders when the template folds a leading system
 	// message OR the thinking prelude needs a system turn to live in.
-	if t.SystemAsLeadingTurn && (sysFirst || prelude != "") {
-		out.WriteString(t.Open + t.SystemRole + "\n")
-		out.WriteString(prelude)
-		if sysFirst {
-			out.WriteString(strings.TrimSpace(messages[0].Content))
-			rest = messages[1:]
-		}
-		out.WriteString(t.Close + "\n")
+	leadingSystem := t.SystemAsLeadingTurn && (sysFirst || prelude != "")
+	sysContent := "" // the folded leading system message, trimmed once
+	if sysFirst {
+		sysContent = strings.TrimSpace(messages[0].Content)
+		rest = messages[1:]
+	}
+	// Pre-size the builder to the exact rendered length so its backing buffer is
+	// allocated ONCE (String() then hands it back without a copy), and write each
+	// turn's parts straight into it — the old loop concatenated a fresh per-turn
+	// string (one heap allocation per turn) only to copy it in and drop it.
+	size := len(t.Open) + len(t.AssistantRole) + 1 + len(offSuffix)
+	if leadingSystem {
+		size += len(t.Open) + len(t.SystemRole) + 1 + len(prelude) + len(sysContent) + len(t.Close) + 1
 	}
 	for _, msg := range rest {
-		out.WriteString(t.Open + t.turnRole(msg.Role) + "\n" + msg.Content + t.Close + "\n")
+		size += len(t.Open) + len(t.turnRole(msg.Role)) + 1 + len(msg.Content) + len(t.Close) + 1
 	}
-	out.WriteString(t.Open + t.AssistantRole + "\n")
+	var out strings.Builder
+	out.Grow(size)
+	if leadingSystem {
+		out.WriteString(t.Open)
+		out.WriteString(t.SystemRole)
+		out.WriteString("\n")
+		out.WriteString(prelude)
+		out.WriteString(sysContent)
+		out.WriteString(t.Close)
+		out.WriteString("\n")
+	}
+	for _, msg := range rest {
+		out.WriteString(t.Open)
+		out.WriteString(t.turnRole(msg.Role))
+		out.WriteString("\n")
+		out.WriteString(msg.Content)
+		out.WriteString(t.Close)
+		out.WriteString("\n")
+	}
+	out.WriteString(t.Open)
+	out.WriteString(t.AssistantRole)
+	out.WriteString("\n")
 	out.WriteString(offSuffix)
 	return out.String()
 }
