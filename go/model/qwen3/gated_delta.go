@@ -52,6 +52,13 @@ type GatedDeltaWeights struct {
 // its steel GEMM). AX-8: the lib declares the hook, the backend sets it.
 var ProjMatMul func(x, w []float32, M, K, N int) ([]float32, error)
 
+// ProjMatMulInto is the OPTIONAL write-into sibling of ProjMatMul: a backend that can target a
+// caller-owned output buffer sets this so the projection GEMM skips its per-call output alloc (the
+// dominant per-token decode cost). nil ⇒ not injected — the caller falls back to ProjMatMul, then the
+// host matNTInto. AX-8: the lib declares the hook, the backend sets it. Into is preferred when set and
+// the legacy ProjMatMul stays the fallback, so a backend that wired only the old hook keeps working.
+var ProjMatMulInto func(out, x, w []float32, M, K, N int) ([]float32, error)
+
 func projMatMul(x, w []float32, M, K, N int) ([]float32, error) {
 	if ProjMatMul != nil {
 		return ProjMatMul(x, w, M, K, N)
@@ -59,8 +66,34 @@ func projMatMul(x, w []float32, M, K, N int) ([]float32, error) {
 	return matNT(x, w, M, K, N), nil
 }
 
+// projMatMulInto runs y = x[M,K] @ w[N,K]ᵀ into out (reused when cap(out) ≥ M·N, else a fresh slab).
+// It prefers the write-into backend hook, then the legacy fresh-buffer hook (out is ignored there —
+// correctness kept, no reuse), then the host matNTInto. The RETURNED slice is authoritative (it may be a
+// freshly grown/allocated buffer); callers store it back into their scratch to retain the growth.
+func projMatMulInto(out, x, w []float32, M, K, N int) ([]float32, error) {
+	if ProjMatMulInto != nil {
+		return ProjMatMulInto(out, x, w, M, K, N)
+	}
+	if ProjMatMul != nil {
+		return ProjMatMul(x, w, M, K, N)
+	}
+	return matNTInto(out, x, w, M, K, N), nil
+}
+
+// matNT computes out[M,N] = in[M,K] @ w[N,K]ᵀ (the Linear y = x·Wᵀ), f32 host.
 func matNT(in, w []float32, M, K, N int) []float32 {
-	out := make([]float32, M*N)
+	return matNTInto(nil, in, w, M, K, N)
+}
+
+// matNTInto is matNT writing into out, reusing it when cap(out) ≥ M·N (else it allocates a fresh M·N
+// slab). Identical f64 accumulation + write order to the fresh-buffer form — only WHERE the result lands
+// changes, so the output is bit-identical.
+func matNTInto(out, in, w []float32, M, K, N int) []float32 {
+	if cap(out) < M*N {
+		out = make([]float32, M*N)
+	} else {
+		out = out[:M*N]
+	}
 	for m := range M {
 		for n := range N {
 			var acc float64
@@ -82,10 +115,33 @@ func gdSoftplus(v float64) float64 {
 	return math.Log1p(math.Exp(v))
 }
 
-// GatedDeltaForwardF32 runs one chunk of the Qwen 3.6 gated-delta block over x [L, D], threading the
-// [conv-state ring, delta state] across calls (priorConv [(K-1),convDim], priorDelta [ValueHeads,HeadDim,
-// HeadDim]; both nil ⇒ fresh). Returns out [L, D] and the advanced (newConv, newDelta).
+// GatedDeltaScratch holds the reusable projection-output buffers for GatedDeltaForwardScratchF32. A
+// caller that steps one sequence (a decode session — single-goroutine) keeps one Scratch and passes it
+// every token so the five projection GEMMs (qkv, a, b, z, out) write into resident buffers instead of
+// allocating — the dominant per-token cost. NEVER share a Scratch across concurrently-stepped sessions:
+// the buffers are mutable and unsynchronised (they mirror the recurrent conv/delta state's ownership —
+// per-session, threaded, never on the shared weights). Buffers grow to fit and are reused thereafter.
+type GatedDeltaScratch struct {
+	qkv, aProj, bProj, zProj, out []float32
+}
+
+// GatedDeltaForwardF32 is GatedDeltaForwardScratchF32 with a fresh (nil) scratch — every projection
+// allocates, the behaviour before the write-into seam. Kept for existing callers and the engine backend
+// parity tests; bit-identical to the scratch path.
 func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L, D int) (out, newConv, newDelta []float32, err error) {
+	return GatedDeltaForwardScratchF32(x, w, cfg, priorConv, priorDelta, L, D, nil)
+}
+
+// GatedDeltaForwardScratchF32 runs one chunk of the Qwen 3.6 gated-delta block over x [L, D], threading
+// the [conv-state ring, delta state] across calls (priorConv [(K-1),convDim], priorDelta [ValueHeads,
+// HeadDim,HeadDim]; both nil ⇒ fresh). Returns out [L, D] and the advanced (newConv, newDelta). When sc
+// is non-nil the five projection outputs write into its buffers (reused across calls); nil ⇒ each
+// projection allocates fresh (the GatedDeltaForwardF32 path). The recurrent state (newConv/newDelta) is
+// always freshly allocated — it is carried information, not scratch.
+func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L, D int, sc *GatedDeltaScratch) (out, newConv, newDelta []float32, err error) {
+	if sc == nil {
+		sc = &GatedDeltaScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
+	}
 	if w == nil {
 		return nil, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: nil weights")
 	}
@@ -97,10 +153,11 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 	rep := VH / KH
 	scale := float32(1.0 / math.Sqrt(float64(HD)))
 
-	qkv, err := projMatMul(x, w.InProjQKV, L, D, convDim)
+	qkv, err := projMatMulInto(sc.qkv, x, w.InProjQKV, L, D, convDim)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	sc.qkv = qkv
 	convOut, newConv, err := mamba2.CausalConv1dF32(qkv, w.ConvWeight, w.ConvBias, priorConv, L, convDim, K)
 	if err != nil {
 		return nil, nil, nil, err
@@ -143,14 +200,16 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 	// two projection outputs are each read once and then dead, and α/β are the same [L,VH] shape, so
 	// map α over aProj and β over bProj in place — the element-wise transform (output i depends only
 	// on input i) makes this bit-identical and needs no separate α/β buffer.
-	alpha, err := projMatMul(x, w.InProjA, L, D, VH)
+	alpha, err := projMatMulInto(sc.aProj, x, w.InProjA, L, D, VH)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	beta, err := projMatMul(x, w.InProjB, L, D, VH)
+	sc.aProj = alpha
+	beta, err := projMatMulInto(sc.bProj, x, w.InProjB, L, D, VH)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	sc.bProj = beta
 	for i := 0; i < L*VH; i++ {
 		h := i % VH
 		dt := gdSoftplus(float64(alpha[i]) + float64(w.DtBias[h]))
@@ -168,10 +227,11 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 	// = [L·vDim], the gated shape, and is dead after this stage; each row's o is fully read (ss) then
 	// each element is read once more immediately before its own write, so the gated result is written
 	// in place over o — bit-identical, one fewer alloc per token.
-	zProj, err := projMatMul(x, w.InProjZ, L, D, vDim)
+	zProj, err := projMatMulInto(sc.zProj, x, w.InProjZ, L, D, vDim)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	sc.zProj = zProj
 	gated := o
 	for row := 0; row < L*VH; row++ {
 		var ss float64
@@ -185,9 +245,10 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 			gated[row*HD+i] = float32(normed * gdSilu(float64(zProj[row*HD+i])))
 		}
 	}
-	out, err = projMatMul(gated, w.OutProj, L, vDim, D)
+	out, err = projMatMulInto(sc.out, gated, w.OutProj, L, vDim, D)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	sc.out = out
 	return out, newConv, newDelta, nil
 }
