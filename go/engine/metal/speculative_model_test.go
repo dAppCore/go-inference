@@ -11,20 +11,22 @@ import (
 	"dappco.re/go/inference/engine"
 )
 
-// TestFormatSpeculativeChatTurns pins that the speculative model's chat framing
-// is byte-identical to the plain engine path's turn template in BOTH marker
+// TestSpeculativeChatFraming pins that the speculative model frames its chat
+// prompt through the SHARED engine render (engine.RenderChatTurns over the
+// gemma ChatTemplate) — byte-identical to the plain engine path in BOTH marker
 // dialects (gemma4 <|turn>/<turn|>; legacy <start_of_turn>), with a trailing
-// open model turn. Divergence here would give the drafter a different prompt
-// shape than the plain path, so keep it locked.
-func TestFormatSpeculativeChatTurns(t *testing.T) {
+// open model turn. It is the receipt that the private duplicate template is
+// gone: the bytes speculativeModel.Chat encodes now come from the one engine
+// render, not a package-local copy that could drift from the plain path.
+func TestSpeculativeChatFraming(t *testing.T) {
 	gemma4 := engine.TurnTokens{Open: "<|turn>", Close: "<turn|>"}
-	got := formatSpeculativeChatTurns(gemma4, []inference.Message{{Role: "user", Content: "hi"}})
+	got := engine.RenderChatTurns(engine.GemmaChatTemplate(gemma4, false), []inference.Message{{Role: "user", Content: "hi"}})
 	want := "<|turn>user\nhi<turn|>\n<|turn>model\n"
 	if got != want {
-		t.Fatalf("formatSpeculativeChatTurns = %q, want %q", got, want)
+		t.Fatalf("gemma4 speculative framing = %q, want %q", got, want)
 	}
 	legacy := engine.TurnTokens{Open: "<start_of_turn>", Close: "<end_of_turn>"}
-	multi := formatSpeculativeChatTurns(legacy, []inference.Message{
+	multi := engine.RenderChatTurns(engine.GemmaChatTemplate(legacy, false), []inference.Message{
 		{Role: "user", Content: "q"},
 		{Role: "assistant", Content: "a"},
 		{Role: "user", Content: "q2"},
@@ -34,21 +36,25 @@ func TestFormatSpeculativeChatTurns(t *testing.T) {
 		"<start_of_turn>user\nq2<end_of_turn>\n" +
 		"<start_of_turn>model\n"
 	if multi != wantMulti {
-		t.Fatalf("multi-turn framing = %q, want %q", multi, wantMulti)
+		t.Fatalf("legacy multi-turn framing = %q, want %q", multi, wantMulti)
 	}
 }
 
-// TestSpeculativeChatRole pins the role mapping the template keys on: assistant
-// and model both render as "model"; anything else is "user".
+// TestSpeculativeChatRole pins the role spellings the shared gemma template
+// keys on for the speculative path: assistant and model both render as the
+// "model" turn; anything else (user, system, empty) renders as a "user" turn.
 func TestSpeculativeChatRole(t *testing.T) {
+	tmpl := engine.GemmaChatTemplate(engine.TurnTokens{Open: "<|turn>", Close: "<turn|>"}, false)
 	for _, role := range []string{"assistant", "model"} {
-		if got := speculativeChatRole(role); got != "model" {
-			t.Fatalf("speculativeChatRole(%q) = %q, want model", role, got)
+		got := engine.RenderChatTurns(tmpl, []inference.Message{{Role: role, Content: "x"}})
+		if want := "<|turn>model\nx<turn|>\n<|turn>model\n"; got != want {
+			t.Fatalf("role %q framed %q, want the model turn %q", role, got, want)
 		}
 	}
 	for _, role := range []string{"user", "system", ""} {
-		if got := speculativeChatRole(role); got != "user" {
-			t.Fatalf("speculativeChatRole(%q) = %q, want user", role, got)
+		got := engine.RenderChatTurns(tmpl, []inference.Message{{Role: role, Content: "x"}})
+		if want := "<|turn>user\nx<turn|>\n<|turn>model\n"; got != want {
+			t.Fatalf("role %q framed %q, want the user turn %q", role, got, want)
 		}
 	}
 }
