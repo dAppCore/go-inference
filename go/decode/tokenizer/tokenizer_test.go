@@ -991,7 +991,7 @@ func TestTokenizer_BPEMerge_Good(t *testing.T) {
 	// → merge "l l" (rank 1) → "he" "ll" "o"
 	// → merge "he l" does NOT match "he ll" — stops here.
 	symbols := []string{"h", "e", "l", "l", "o"}
-	got := tok.bpeMerge(symbols)
+	got := tok.bpeMerge("hello", symbols)
 	want := []string{"he", "ll", "o"}
 	if len(got) != len(want) {
 		t.Fatalf("bpeMerge = %v, want %v", got, want)
@@ -1013,7 +1013,7 @@ func TestTokenizer_BPEMerge_OverlappingPairs_Good(t *testing.T) {
 		},
 	}
 
-	got := tok.bpeMerge([]string{"a", "b", "c", "d"})
+	got := tok.bpeMerge("abcd", []string{"a", "b", "c", "d"})
 	want := []string{"abcd"}
 	if len(got) != len(want) {
 		t.Fatalf("bpeMerge = %v, want %v", got, want)
@@ -1034,7 +1034,7 @@ func TestTokenizer_BPEMerge_LeftMostTie_Good(t *testing.T) {
 		},
 	}
 
-	got := tok.bpeMerge([]string{"a", "b", "c", "d"})
+	got := tok.bpeMerge("abcd", []string{"a", "b", "c", "d"})
 	want := []string{"abc", "d"}
 	if len(got) != len(want) {
 		t.Fatalf("bpeMerge = %v, want %v", got, want)
@@ -1049,7 +1049,7 @@ func TestTokenizer_BPEMerge_LeftMostTie_Good(t *testing.T) {
 func TestTokenizer_BPEMerge_NoMerges_Good(t *testing.T) {
 	tok := &Tokenizer{mergeRanks: map[mergeKey]int{}}
 	symbols := []string{"a", "b", "c"}
-	got := tok.bpeMerge(symbols)
+	got := tok.bpeMerge("abc", symbols)
 	if len(got) != 3 {
 		t.Errorf("bpeMerge with no merges = %v, want [a b c]", got)
 	}
@@ -1057,7 +1057,7 @@ func TestTokenizer_BPEMerge_NoMerges_Good(t *testing.T) {
 
 func TestTokenizer_BPEMerge_SingleSymbol_Good(t *testing.T) {
 	tok := &Tokenizer{mergeRanks: map[mergeKey]int{{a: "a", b: "b"}: 0}}
-	got := tok.bpeMerge([]string{"x"})
+	got := tok.bpeMerge("x", []string{"x"})
 	if len(got) != 1 || got[0] != "x" {
 		t.Errorf("bpeMerge single = %v, want [x]", got)
 	}
@@ -1076,7 +1076,7 @@ func TestTokenizer_BPEMerge_StaleVersionDiscarded_Ugly(t *testing.T) {
 		{a: "aa", b: "aa"}: 2,
 	}}
 	// "a a a a" → merges collapse to "aaaa"; the middle candidates go stale.
-	got := tok.bpeMerge([]string{"a", "a", "a", "a"})
+	got := tok.bpeMerge("aaaa", []string{"a", "a", "a", "a"})
 	want := []string{"aaaa"}
 	if len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("bpeMerge = %v, want %v", got, want)
@@ -1085,7 +1085,7 @@ func TestTokenizer_BPEMerge_StaleVersionDiscarded_Ugly(t *testing.T) {
 
 func TestTokenizer_BPEMerge_NilSymbols_Ugly(t *testing.T) {
 	tok := &Tokenizer{mergeRanks: map[mergeKey]int{{a: "a", b: "b"}: 0}}
-	got := tok.bpeMerge([]string{})
+	got := tok.bpeMerge("", []string{})
 	if len(got) != 0 {
 		t.Errorf("bpeMerge(empty) = %v, want empty", got)
 	}

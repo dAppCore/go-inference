@@ -197,7 +197,11 @@ func normaliseArgumentsJSON(existing string, args core.RawMessage) string {
 	if len(args) == 0 {
 		return ""
 	}
-	trimmed := core.Trim(string(args))
+	// core.AsString views the RawMessage bytes without the string(args) copy.
+	// Safe: RawMessage.UnmarshalJSON stores a fresh, exact-size copy the parsed
+	// struct owns, and the returned trimmed view keeps that backing alive — the
+	// bytes are never mutated after decode.
+	trimmed := core.Trim(core.AsString(args))
 	if trimmed == "" || trimmed == "null" {
 		return ""
 	}
