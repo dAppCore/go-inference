@@ -60,7 +60,11 @@ at `docs/examples/energy-ab/`):
 |---|---|---|---|---|
 | **lem, continuity (default)** | **771 J** | **77.1 J** | **0.021** | flat ~77 J |
 | llama-server (prefix cache active) | 1,121 J | 112.1 J | 0.031 | flat-ish, noisy |
-| lem, `-state-conversations=false` (pure replay) | 1,439 J | 143.9 J | 0.040 | climbing 83 → 233 J |
+| pure replay (no cache of any kind)² | 1,439 J | 143.9 J | 0.040 | climbing 83 → 233 J |
+
+² Measured on lem with all reuse off — the shape every cache-less replay
+deployment pays. lem's stateless mode does not ship like this: see the
+prompt-reuse note below the table.
 
 **Identical task, 54% of replay's energy and 69% of llama-server's — at
 ten turns, on the smallest model.** Pure replay's per-turn cost climbs
@@ -72,6 +76,18 @@ per-conversation. Footnotes for the sceptical: llama-server produced
 slightly shorter chapters (3,223 words vs lem's 3,364), so per-word the
 gap is wider still (0.23 vs 0.35 J/word); lem's defaults include MTP,
 llama's include its cache — engines compared as they ship.
+
+**And stateless mode is not the punching bag.** Even with `-state` off,
+lem ships llama-parity automatic prompt reuse: a resident session keeps
+the conversation's KV rows and each request re-prefills only what
+diverged, so the stateless per-turn wall is flat too (turn 10 of the
+same bench: 4.4s → 3.1s, level with turn 2). It honours the
+sliding-window ring geometry (a reuse that would resume over overwritten
+window rows degrades to a cold prefill — token-identical either way) and
+stands down when continuity is on. `LTHN_PROMPT_REUSE=0` reproduces the
+pure-replay row. The difference that remains between the two lem rows is
+what `-state` alone buys: durable, per-conversation, restart-surviving
+state instead of one volatile slot.
 
 Fleet arithmetic, per **million conversation turns** at these measured
 rates: lem 21.4 kWh · llama-server 31.1 kWh · replay engines 40.0 kWh —
