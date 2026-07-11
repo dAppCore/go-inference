@@ -21,7 +21,6 @@ import (
 	"context"
 	"iter"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -89,16 +88,20 @@ func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...i
 		_ = pair.Close()
 		return nil, core.E("native.LoadSpeculativePair", "load tokenizer", err)
 	}
+	// Stamp the target checkpoint's real architecture (config.json model_type),
+	// not a hardcoded "gemma4" — the speculative pair must self-report as
+	// truthfully as the plain path does.
+	modelType := probeModelType(targetPath)
 	return &speculativeModel{
 		target:        target,
 		pair:          pair,
 		tok:           tok,
-		modelType:     "gemma4",
+		modelType:     modelType,
 		draftBlock:    draftBlock,
 		turns:         engine.DetectTurnTokens(tok),
 		declaredStops: loadGenerationConfigStops(targetPath),
 		info: inference.ModelInfo{
-			Architecture: "gemma4",
+			Architecture: modelType,
 			VocabSize:    pair.TargetArch.Vocab,
 			NumLayers:    len(pair.TargetArch.Layer),
 			HiddenSize:   pair.TargetArch.Hidden,
@@ -112,10 +115,13 @@ func (m *speculativeModel) Generate(ctx context.Context, prompt string, opts ...
 }
 
 // Chat streams the speculative completion of a multi-turn conversation, framed
-// with the model's turn template (byte-identical to the plain engine path's
-// formatChatTurns — a trailing open model turn to complete).
+// through the SHARED engine render (engine.RenderChatTurns over the gemma
+// ChatTemplate for the target's detected marker dialect) — byte-identical to
+// the plain engine path's plain-turns framing, with no private template copy to
+// drift.
 func (m *speculativeModel) Chat(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
-	return m.speculate(ctx, m.tok.Encode(formatSpeculativeChatTurns(m.turns, messages)), inference.ApplyGenerateOpts(opts))
+	prompt := engine.RenderChatTurns(engine.GemmaChatTemplate(m.turns, false), messages)
+	return m.speculate(ctx, m.tok.Encode(prompt), inference.ApplyGenerateOpts(opts))
 }
 
 // speculate runs the AssistantPair MTP loop over the target session, decoding
@@ -294,27 +300,6 @@ func (m *speculativeModel) setErr(err error) {
 // the sink uses to blank a stop token's text.
 func speculativeTokenInSet(id int32, set []int32) bool {
 	return slices.Contains(set, id)
-}
-
-// formatSpeculativeChatTurns renders the model's turn template, byte-identical
-// to the engine package's formatChatTurns (which is unexported there): each
-// turn as OPEN+ROLE+"\n"+CONTENT+CLOSE+"\n" in the detected marker dialect
-// (gemma4 <|turn>/<turn|>; legacy <start_of_turn>), then a trailing open model
-// turn to complete. Kept here because package native cannot reach engine's
-// copy.
-func formatSpeculativeChatTurns(turns engine.TurnTokens, messages []inference.Message) string {
-	var out strings.Builder
-	for _, msg := range messages {
-		out.WriteString(turns.Open + speculativeChatRole(msg.Role) + "\n" + msg.Content + turns.Close + "\n")
-	}
-	return out.String() + turns.Open + "model\n"
-}
-
-func speculativeChatRole(role string) string {
-	if role == "assistant" || role == "model" {
-		return "model"
-	}
-	return "user"
 }
 
 // speculativeSampleParams mirrors the plain engine path's SampleParams mapping
