@@ -65,6 +65,22 @@ type mappedShardRange struct {
 	end   uintptr
 }
 
+// totalMappedBytes sums the mapped shard sizes — the checkpoint's weight bytes
+// as the RAM-aware context default budgets them (zero-copy weights go resident
+// as decode touches them, so steady state is the full mapping).
+func (sb *shardBuffers) totalMappedBytes() uint64 {
+	if sb == nil {
+		return 0
+	}
+	var n uint64
+	for i := range sb.bases {
+		if sb.ends[i] > sb.bases[i] {
+			n += uint64(sb.ends[i] - sb.bases[i])
+		}
+	}
+	return n
+}
+
 var (
 	mappedShardRangeMu sync.Mutex
 	mappedShardRanges  []mappedShardRange

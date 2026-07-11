@@ -174,7 +174,7 @@ require (
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
 	golang.org/x/crypto v0.50.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/sys v0.43.0
 )
 
 // Pure-Go Apple-GPU bindings brought in with engine/metal (the native/metal
