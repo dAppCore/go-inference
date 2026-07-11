@@ -37,7 +37,18 @@ func (c BlockConfig) hv() int { return c.NumHeads * c.ValueDim }
 
 // matNT computes out[M,N] = in[M,K] @ w[N,K]ᵀ (the Linear y = x·Wᵀ), f32 host.
 func matNT(in, w []float32, M, K, N int) []float32 {
-	out := make([]float32, M*N)
+	return matNTInto(nil, in, w, M, K, N)
+}
+
+// matNTInto is matNT writing into out, reusing it when cap(out) ≥ M·N (else it allocates a fresh M·N
+// slab). Identical f64 accumulation + write order to the fresh-buffer form — only WHERE the result lands
+// changes, so the output is bit-identical.
+func matNTInto(out, in, w []float32, M, K, N int) []float32 {
+	if cap(out) < M*N {
+		out = make([]float32, M*N)
+	} else {
+		out = out[:M*N]
+	}
 	for m := range M {
 		for n := range N {
 			var acc float64
@@ -50,9 +61,31 @@ func matNT(in, w []float32, M, K, N int) []float32 {
 	return out
 }
 
-// BlockForwardF32 runs one chunk of the RWKV-7 time-mix block over x [L, D], threading the single
-// [H,K,V] state (prior nil ⇒ fresh). Returns out [L, D] and the advanced state.
+// BlockScratch holds the reusable projection-output buffers for BlockForwardScratchF32 — the six input
+// projections (r/w/k/v/a/b) plus the out-proj. A caller stepping one sequence (a decode session —
+// single-goroutine) keeps one Scratch and passes it every token so the seven projection GEMMs write into
+// resident buffers instead of allocating. NEVER share a Scratch across concurrently-stepped sessions: the
+// buffers are mutable and unsynchronised (they mirror the recurrent [H,K,V] state's ownership —
+// per-session, threaded, never on the shared weights). Buffers grow to fit and are reused thereafter.
+type BlockScratch struct {
+	r, wDecay, kp, vp, ap, bp, out []float32
+}
+
+// BlockForwardF32 is BlockForwardScratchF32 with a fresh (nil) scratch — every projection allocates, the
+// behaviour before the write-into seam. Kept for existing callers and the engine backend parity tests;
+// bit-identical to the scratch path.
 func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, prior []float32, L, D int) (out, state []float32, err error) {
+	return BlockForwardScratchF32(x, w, cfg, prior, L, D, nil)
+}
+
+// BlockForwardScratchF32 runs one chunk of the RWKV-7 time-mix block over x [L, D], threading the single
+// [H,K,V] state (prior nil ⇒ fresh). Returns out [L, D] and the advanced state. When sc is non-nil the
+// seven projection outputs write into its buffers (reused across calls); nil ⇒ each allocates fresh (the
+// BlockForwardF32 path). The recurrent state is always freshly allocated — carried information, not scratch.
+func BlockForwardScratchF32(x []float32, w *BlockWeights, cfg BlockConfig, prior []float32, L, D int, sc *BlockScratch) (out, state []float32, err error) {
+	if sc == nil {
+		sc = &BlockScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
+	}
 	if w == nil {
 		return nil, nil, core.NewError("rwkv7.BlockForwardF32: nil weights")
 	}
@@ -68,43 +101,50 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, prior []floa
 		return nil, nil, core.NewError("rwkv7.BlockForwardF32: V must be [H*V,D] and OutProj [D,H*V]")
 	}
 
-	r, err := projMatMul(x, w.RProj, L, D, hk)
+	r, err := projMatMulInto(sc.r, x, w.RProj, L, D, hk)
 	if err != nil {
 		return nil, nil, err
 	}
-	wDecay, err := projMatMul(x, w.WProj, L, D, hk)
+	sc.r = r
+	wDecay, err := projMatMulInto(sc.wDecay, x, w.WProj, L, D, hk)
 	if err != nil {
 		return nil, nil, err
 	}
+	sc.wDecay = wDecay
 	// RWKV-7 log-decay: w = -exp(WProj) ≤ 0. The projection output is dead after this transform, so
 	// map it in place rather than allocating a second buffer — bit-identical, one fewer alloc/token.
 	for i := range wDecay {
 		wDecay[i] = float32(-math.Exp(float64(wDecay[i])))
 	}
-	kp, err := projMatMul(x, w.KProj, L, D, hk)
+	kp, err := projMatMulInto(sc.kp, x, w.KProj, L, D, hk)
 	if err != nil {
 		return nil, nil, err
 	}
-	vp, err := projMatMul(x, w.VProj, L, D, hv)
+	sc.kp = kp
+	vp, err := projMatMulInto(sc.vp, x, w.VProj, L, D, hv)
 	if err != nil {
 		return nil, nil, err
 	}
-	ap, err := projMatMul(x, w.AProj, L, D, hk)
+	sc.vp = vp
+	ap, err := projMatMulInto(sc.ap, x, w.AProj, L, D, hk)
 	if err != nil {
 		return nil, nil, err
 	}
-	bp, err := projMatMul(x, w.BProj, L, D, hk)
+	sc.ap = ap
+	bp, err := projMatMulInto(sc.bp, x, w.BProj, L, D, hk)
 	if err != nil {
 		return nil, nil, err
 	}
+	sc.bp = bp
 
 	o, state, err := WKV7F32(r, wDecay, kp, vp, ap, bp, prior, L, H, K, V) // o [L, H*V]
 	if err != nil {
 		return nil, nil, err
 	}
-	out, err = projMatMul(o, w.OutProj, L, hv, D)
+	out, err = projMatMulInto(sc.out, o, w.OutProj, L, hv, D)
 	if err != nil {
 		return nil, nil, err
 	}
+	sc.out = out
 	return out, state, nil
 }
