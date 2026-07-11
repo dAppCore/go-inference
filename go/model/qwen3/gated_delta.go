@@ -110,9 +110,14 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 	}
 
 	// split q|k|v, GQA-repeat q,k (value head vh reads key head vh/rep), l2-normalise q.
-	q := make([]float32, L*VH*HD)
-	k := make([]float32, L*VH*HD)
-	v := make([]float32, L*VH*HD)
+	// q,k,v are read-only inputs to the recurrence (q is l2-normalised in place over its own window),
+	// so one backing slab carved into three non-overlapping capped windows is bit-identical to three
+	// makes and saves 2 allocs/token.
+	qkvN := L * VH * HD
+	qkvBuf := make([]float32, 3*qkvN)
+	q := qkvBuf[0:qkvN:qkvN]
+	k := qkvBuf[qkvN : 2*qkvN : 2*qkvN]
+	v := qkvBuf[2*qkvN : 3*qkvN : 3*qkvN]
 	for t := range L {
 		base := t * convDim
 		for vh := range VH {
@@ -134,23 +139,24 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 		}
 	}
 
-	// α = exp(−exp(A_log)·softplus(a+dt_bias)) ∈ (0,1] ; β = sigmoid(b). Per (token, value-head).
-	aProj, err := projMatMul(x, w.InProjA, L, D, VH)
+	// α = exp(−exp(A_log)·softplus(a+dt_bias)) ∈ (0,1] ; β = sigmoid(b). Per (token, value-head). The
+	// two projection outputs are each read once and then dead, and α/β are the same [L,VH] shape, so
+	// map α over aProj and β over bProj in place — the element-wise transform (output i depends only
+	// on input i) makes this bit-identical and needs no separate α/β buffer.
+	alpha, err := projMatMul(x, w.InProjA, L, D, VH)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	bProj, err := projMatMul(x, w.InProjB, L, D, VH)
+	beta, err := projMatMul(x, w.InProjB, L, D, VH)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	alpha := make([]float32, L*VH)
-	beta := make([]float32, L*VH)
 	for i := 0; i < L*VH; i++ {
 		h := i % VH
-		dt := gdSoftplus(float64(aProj[i]) + float64(w.DtBias[h]))
+		dt := gdSoftplus(float64(alpha[i]) + float64(w.DtBias[h]))
 		aDecay := -math.Exp(float64(w.ALog[h]))
+		beta[i] = float32(1.0 / (1.0 + math.Exp(-float64(beta[i]))))
 		alpha[i] = float32(math.Exp(aDecay * dt))
-		beta[i] = float32(1.0 / (1.0 + math.Exp(-float64(bProj[i]))))
 	}
 
 	o, newDelta, err := deltanet.GatedDeltaRuleF32(q, k, v, beta, alpha, priorDelta, L, VH, HD, scale, 0)
@@ -158,12 +164,15 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 		return nil, nil, nil, err
 	}
 
-	// gated RMSNorm: per (token, value-head) RMSNorm(o over HD)·SiLU(z), then out-proj.
+	// gated RMSNorm: per (token, value-head) RMSNorm(o over HD)·SiLU(z), then out-proj. o is [L,VH,HD]
+	// = [L·vDim], the gated shape, and is dead after this stage; each row's o is fully read (ss) then
+	// each element is read once more immediately before its own write, so the gated result is written
+	// in place over o — bit-identical, one fewer alloc per token.
 	zProj, err := projMatMul(x, w.InProjZ, L, D, vDim)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	gated := make([]float32, L*vDim)
+	gated := o
 	for row := 0; row < L*VH; row++ {
 		var ss float64
 		for i := range HD {

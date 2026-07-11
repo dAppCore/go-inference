@@ -10,6 +10,24 @@ import (
 	"dappco.re/go/inference/model/safetensors"
 )
 
+// TestMoEMLP_Forward_Golden pins the exact f32 bit-pattern of MoEMLP.forward over a fixed
+// multi-token input with TopK=2 (selection + renormalise exercised), gating scratch-fusion
+// refactors on bit-identical output — the mixture reference test above is 1e-4 tolerant.
+func TestMoEMLP_Forward_Golden(t *testing.T) {
+	const D, FF, nE, L = 8, 12, 6, 3
+	m := mkMoEMLP(D, FF, nE, 2, 77)
+	out := m.forward(syn(L*D, 1), L, D)
+	wantOut := []uint32{0x40a18d25, 0xc0ddb35e, 0xc07b560b, 0xc0429d7a, 0xbf856967, 0x3f8221e8, 0x40810437, 0x40d86fb8, 0x4030bf64, 0xc07fb44e, 0xc00f4752, 0xbfe04404, 0xbf1c2100, 0x3f1306dc, 0x401c40fd, 0x40811fa2, 0x3fa03aa7, 0xbff74426, 0xbf877803, 0xbf58a28e, 0xbe9b0363, 0x3e898cde, 0x3fa28473, 0x4003ed40}
+	if len(out) != len(wantOut) {
+		t.Fatalf("out len %d, want %d", len(out), len(wantOut))
+	}
+	for i, v := range out {
+		if b := math.Float32bits(v); b != wantOut[i] {
+			t.Fatalf("out[%d] bits 0x%08x, want 0x%08x", i, b, wantOut[i])
+		}
+	}
+}
+
 func mkMoEMLP(D, FF, nE, topK, seed int) *MoEMLP {
 	experts := make([]MoEExpert, nE)
 	for e := range experts {
