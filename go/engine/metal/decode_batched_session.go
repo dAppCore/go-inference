@@ -826,9 +826,11 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			return decline(core.Sprintf("layer %d: lb shared owner %d cache nil", li, own))
 		}
 	}
-	for i := range embs {
-		if len(embs[i]) != s.dModel*bf16Size {
-			return nil, false, core.NewError("native.stepTokensBatchedDense: emb must be dModel bf16 bytes")
+	if s.prefillEmbedDevice == nil {
+		for i := range embs {
+			if len(embs[i]) != s.dModel*bf16Size {
+				return nil, false, core.NewError("native.stepTokensBatchedDense: emb must be dModel bf16 bytes")
+			}
 		}
 	}
 	syncStart := time.Now()
@@ -871,6 +873,14 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 	usingDirectInputRows := false
 	for i := range K {
 		*offPtr[i] = int32(basePos + i)
+		if s.prefillEmbedDevice != nil {
+			// device-gathered embed rows (#381): the builder's buffer, row i at
+			// i·rowBytes — GPU-ordered behind the gather on the shared queue.
+			directInputRows[i] = s.prefillEmbedDevice
+			directInputOff[i] = uint(i * rowBytes)
+			usingDirectInputRows = true
+			continue
+		}
 		if directInputs {
 			if buf, direct := inputViews[i].buffer(embs[i]); direct {
 				directInputRows[i] = buf

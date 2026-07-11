@@ -21,6 +21,7 @@ type pleBatchScratch struct {
 	hidden          []byte          // K × dModel bf16, host staging for the GEMM input
 	idsBuf          metal.MTLBuffer // K int32 token ids (the GPU gather's input)
 	hiddenBuf       metal.MTLBuffer
+	embBuf          metal.MTLBuffer // K × dModel main-embed rows (device gather output; the pass's input rows)
 	perLayerBuf     metal.MTLBuffer // K × plDim gathered per-layer embeddings (GPU gather output)
 	projectedBuf    metal.MTLBuffer // K × plDim projection; free after the rms — reused as the relayout dst
 	normedBuf       metal.MTLBuffer // K × plDim, the rms output and final combined tensor
@@ -37,6 +38,7 @@ func (s *pleBatchScratch) ensure(k, plDim, dModel int, projScale, combineScale f
 	s.hidden = make([]byte, k*dModel*bf16Size)
 	s.idsBuf = device.NewBufferWithLengthOptions(uint(k*4), metal.MTLResourceStorageModeShared)
 	s.hiddenBuf = device.NewBufferWithLengthOptions(uint(k*dModel*bf16Size), metal.MTLResourceStorageModeShared)
+	s.embBuf = device.NewBufferWithLengthOptions(uint(k*dModel*bf16Size), metal.MTLResourceStorageModeShared)
 	s.perLayerBuf = device.NewBufferWithLengthOptions(uint(k*plDim*bf16Size), metal.MTLResourceStorageModeShared)
 	s.projectedBuf = device.NewBufferWithLengthOptions(uint(k*plDim*bf16Size), metal.MTLResourceStorageModeShared)
 	s.normedBuf = device.NewBufferWithLengthOptions(uint(k*plDim*bf16Size), metal.MTLResourceStorageModeShared)
@@ -44,6 +46,17 @@ func (s *pleBatchScratch) ensure(k, plDim, dModel int, projScale, combineScale f
 	s.projScaleBuf = device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&ps[0]), 2, metal.MTLResourceStorageModeShared)
 	s.combineScaleBuf = device.NewBufferWithBytesLengthOptions(unsafe.Pointer(&cs[0]), 2, metal.MTLResourceStorageModeShared)
 	s.rowCap, s.plDim, s.dModel = k, plDim, dModel
+}
+
+// mainEmbedGather carries the MAIN embed table's quant views for the combined
+// device build (#381): the builder gathers the K token embeddings on-GPU
+// (same rows kernel, dModel width) ahead of the PLE chain, the projection
+// reads them in place of host-staged hidden rows, and the batched pass binds
+// the same buffer as its input rows — the per-token host dequant loop dies.
+type mainEmbedGather struct {
+	packed, scales, biases metal.MTLBuffer
+	gs, bits               int
+	scale                  float32
 }
 
 var (
@@ -295,7 +308,7 @@ func perLayerInputsBatchQuantIntoSlab(
 	}
 	plDimC, ok, err := perLayerInputsBatchQuantEncode(sc, tablePacked, tableScales, tableBiases, tableGS, tableBits,
 		projW, projWOff, projPacked, projScales, projBiases, projGS, projBits,
-		projNormW, ids, embs, nOut, numLayers, pliDim, dModel, eps, true)
+		projNormW, ids, embs, nil, nOut, numLayers, pliDim, dModel, eps, true)
 	if err != nil || !ok {
 		return false, err
 	}
@@ -306,34 +319,38 @@ func perLayerInputsBatchQuantIntoSlab(
 	return true, nil
 }
 
-// perLayerInputsBatchQuantDevice is the DEVICE-RESIDENT quant slab build (#381):
-// encode + commit WITHOUT waiting and hand the layer-major tensor's buffer
-// straight to the batched pass — the pass's own command buffer follows on the
-// same queue, so the GPU orders the read after the build and the host never
-// blocks on the builder, copies the slab out, or uploads it again. The scratch
-// is safe single-buffered: the caller stages the NEXT chunk only after the
-// pass's wait, which covers this command buffer too. ok=false (no work) when
-// the encode cannot run at exactly outLayers — the bounded-width contract the
-// pass's slab geometry check enforces.
+// perLayerInputsBatchQuantDevice is the DEVICE-RESIDENT quant build (#381):
+// gather the K main-embed rows AND build the layer-major PLE tensor in one
+// committed-not-waited command buffer, handing BOTH buffers straight to the
+// batched pass — the pass's own command buffer follows on the same queue, so
+// the GPU orders the reads after the build and the host never dequants an
+// embedding row, blocks on the builder, copies the slab out, or uploads
+// either tensor. The scratch is safe single-buffered: the caller stages the
+// NEXT chunk only after the pass's wait, which covers this command buffer
+// too. ok=false (no work) when the encode cannot run at exactly outLayers
+// with the device embed gather — the caller keeps the host path.
 func perLayerInputsBatchQuantDevice(
 	sc *pleBatchScratch,
 	tablePacked, tableScales, tableBiases metal.MTLBuffer, tableGS, tableBits int,
 	projW metal.MTLBuffer, projWOff uint,
 	projPacked, projScales, projBiases metal.MTLBuffer, projGS, projBits int,
 	projNormW []byte,
-	ids []int32, embs [][]byte,
+	ids []int32, mainEmb *mainEmbedGather,
 	outLayers, numLayers, pliDim, dModel int, eps float32,
-) (metal.MTLBuffer, bool, error) {
+) (metal.MTLBuffer, metal.MTLBuffer, bool, error) {
 	if outLayers < 1 || outLayers > numLayers {
-		return nil, false, core.NewError("native.perLayerInputsBatchQuantDevice: layer bound out of range")
+		return nil, nil, false, core.NewError("native.perLayerInputsBatchQuantDevice: layer bound out of range")
+	}
+	if mainEmb == nil {
+		return nil, nil, false, core.NewError("native.perLayerInputsBatchQuantDevice: main embed gather required")
 	}
 	plDimC, ok, err := perLayerInputsBatchQuantEncode(sc, tablePacked, tableScales, tableBiases, tableGS, tableBits,
 		projW, projWOff, projPacked, projScales, projBiases, projGS, projBits,
-		projNormW, ids, embs, outLayers, numLayers, pliDim, dModel, eps, false)
+		projNormW, ids, nil, mainEmb, outLayers, numLayers, pliDim, dModel, eps, false)
 	if err != nil || !ok || plDimC != outLayers*pliDim {
-		return nil, ok && plDimC == outLayers*pliDim, err
+		return nil, nil, ok && plDimC == outLayers*pliDim, err
 	}
-	return sc.projectedBuf, true, nil
+	return sc.embBuf, sc.projectedBuf, true, nil
 }
 
 func perLayerInputsBatchQuantEncode(
@@ -342,7 +359,7 @@ func perLayerInputsBatchQuantEncode(
 	projW metal.MTLBuffer, projWOff uint,
 	projPacked, projScales, projBiases metal.MTLBuffer, projGS, projBits int,
 	projNormW []byte,
-	ids []int32, embs [][]byte,
+	ids []int32, embs [][]byte, mainEmb *mainEmbedGather,
 	nOut, numLayers, pliDim, dModel int, eps float32,
 	wait bool,
 ) (int, bool, error) {
@@ -373,6 +390,9 @@ func perLayerInputsBatchQuantEncode(
 	// IntoSlab wrapper copies the layer-major prefix out either way (identical
 	// bytes), and the Device wrapper declines a full-width result.
 	rowsPSO, rowsErr := pleGatherRowsQuantPipeline()
+	if mainEmb != nil && rowsErr != nil {
+		return 0, false, nil // the device-embed contract needs the rows gather — host path instead
+	}
 	plDimC, nC := plDim, numLayers
 	if rowsErr == nil && nOut < numLayers {
 		bounded := true
@@ -392,15 +412,23 @@ func perLayerInputsBatchQuantEncode(
 	hostSpan("pleSlab.ensure", ensureStart, k)
 
 	stageStart := time.Now()
-	rowBytes := dModel * bf16Size
-	for i, emb := range embs {
-		if len(emb) != rowBytes {
-			return 0, false, core.NewError("native.perLayerInputsBatchQuant: hidden row size mismatch")
+	hin := sc.hiddenBuf
+	if mainEmb != nil {
+		// device embed gather: only the ids cross to the GPU — the K hidden rows
+		// are gathered below into embBuf, which also feeds the batched pass.
+		hin = sc.embBuf
+		copy(unsafe.Slice((*int32)(sc.idsBuf.Contents()), k), ids)
+	} else {
+		rowBytes := dModel * bf16Size
+		for i, emb := range embs {
+			if len(emb) != rowBytes {
+				return 0, false, core.NewError("native.perLayerInputsBatchQuant: hidden row size mismatch")
+			}
+			copy(sc.hidden[i*rowBytes:(i+1)*rowBytes], emb)
 		}
-		copy(sc.hidden[i*rowBytes:(i+1)*rowBytes], emb)
+		copy(unsafe.Slice((*int32)(sc.idsBuf.Contents()), k), ids)
+		copy(unsafe.Slice((*byte)(sc.hiddenBuf.Contents()), len(sc.hidden)), sc.hidden)
 	}
-	copy(unsafe.Slice((*int32)(sc.idsBuf.Contents()), k), ids)
-	copy(unsafe.Slice((*byte)(sc.hiddenBuf.Contents()), len(sc.hidden)), sc.hidden)
 	hostSpan("pleSlab.stage", stageStart, k)
 
 	gpuStart := time.Now()
@@ -409,6 +437,26 @@ func perLayerInputsBatchQuantEncode(
 	withAutoreleasePool(func() {
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
+		if mainEmb != nil {
+			// the K main-embed rows, one dispatch (full-width rows: dModel == the row)
+			sink := encSink{enc}
+			sink.setPSO(rowsPSO)
+			sink.setBuf(sc.idsBuf, 0, 0)
+			sink.setBuf(mainEmb.packed, 0, 1)
+			sink.setBuf(mainEmb.scales, 0, 2)
+			sink.setBuf(mainEmb.biases, 0, 3)
+			sink.setBuf(sc.embBuf, 0, 4)
+			sink.setI32(int32(dModel), 5)
+			sink.setI32(int32(mainEmb.gs), 6)
+			sink.setF32(mainEmb.scale, 7)
+			sink.setI32(int32(dModel*mainEmb.bits/8), 8)
+			sink.setI32(int32(dModel/mainEmb.gs), 9)
+			sink.setI32(int32(mainEmb.bits), 10)
+			sink.dispatchThreads(
+				metal.MTLSize{Width: uint(dModel), Height: uint(k), Depth: 1},
+				metal.MTLSize{Width: uint(elemGroupTG(dModel)), Height: 1, Depth: 1},
+			)
+		}
 		if rowsErr == nil {
 			// ONE dispatch dequant-gathers all K rows (prefix width, full-row strides)
 			sink := encSink{enc}
@@ -437,8 +485,8 @@ func perLayerInputsBatchQuantEncode(
 		// projected[K, plDimC] = hidden[K, dModel] @ projWᵀ — one weight sweep for the chunk
 		// (a bounded pass sweeps only the owner layers' projection rows: a prefix of projW)
 		if projPacked != nil {
-			encErr = encQMMTBF16At(enc, projPacked, projScales, projBiases, sc.hiddenBuf, sc.projectedBuf, 0, 0, 0, 0, 0, k, plDimC, dModel, projGS, projBits)
-		} else if !encGemmBF16NT(enc, projW, sc.hiddenBuf, sc.projectedBuf, projWOff, 0, 0, plDimC, dModel, k) {
+			encErr = encQMMTBF16At(enc, projPacked, projScales, projBiases, hin, sc.projectedBuf, 0, 0, 0, 0, 0, k, plDimC, dModel, projGS, projBits)
+		} else if !encGemmBF16NT(enc, projW, hin, sc.projectedBuf, projWOff, 0, 0, plDimC, dModel, k) {
 			endEncodingFast(enc)
 			commitCommandBufferFast(cb)
 			waitUntilCompletedFast(cb)

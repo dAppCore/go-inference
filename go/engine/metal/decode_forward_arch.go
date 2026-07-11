@@ -256,9 +256,13 @@ type archDecodeState struct {
 	prefillSkipToLayer int
 	// prefillPLESlabDevice, when non-nil, is the chunk's layer-major PLE tensor
 	// already resident on the GPU (the committed-not-waited builder output) — the
-	// batched pass binds it directly instead of uploading a host slab. Transient —
-	// set around one chunk by prefillRetainedTokensBatchedDenseOne.
+	// batched pass binds it directly instead of uploading a host slab.
+	// prefillEmbedDevice is its sibling for the K main-embed rows: the pass takes
+	// them as its input rows (buffer + i·rowBytes offsets) instead of host
+	// embeddings. Transient — set around one chunk by
+	// prefillRetainedTokensBatchedDenseOne.
 	prefillPLESlabDevice metal.MTLBuffer
+	prefillEmbedDevice   metal.MTLBuffer
 	ropeFreqs            metal.MTLBuffer // resident periods (1/inv_freq) for YaRN long-context rope; nil = base-derived rope
 	// gemma4 global (proportional+partial) rope: the period spectrum over the FULL head dim
 	// (metal's gemma4ProportionalFreqs) for GlobalAttention layers, so rope pairs (d, d+globalHeadDim/2)

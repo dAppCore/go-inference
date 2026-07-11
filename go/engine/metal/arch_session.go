@@ -51,12 +51,14 @@ type ArchSession struct {
 	// buffer (steel GEMM + batched chain) — the K-per-token CB round-trips were the prefill's
 	// largest host cost. false = not applicable (small batch, quant tower) → per-token loop.
 	perLayerInputBatch func(ids []int32, embs [][]byte, slab []byte) (bool, error)
-	// perLayerInputBatchDevice is perLayerInputBatch handing the layer-major tensor
-	// back DEVICE-RESIDENT at exactly outLayers width, committed but NOT waited —
-	// the batched pass reads it GPU-ordered on the shared queue, so the host never
-	// blocks on the build, copies the slab out, or uploads it again (#381). false =
-	// build at that width not available → the host-slab path.
-	perLayerInputBatchDevice func(ids []int32, embs [][]byte, outLayers int) (metal.MTLBuffer, bool, error)
+	// perLayerInputBatchDevice hands a prefill chunk's inputs back DEVICE-RESIDENT,
+	// committed but NOT waited (#381): the K main-embed rows (the batched pass's
+	// input rows) and the layer-major PLE tensor at exactly outLayers width, built
+	// in one command buffer from just the token ids — the pass reads both
+	// GPU-ordered on the shared queue, so the host never dequants an embedding,
+	// blocks on the build, or copies either tensor. false = not available at that
+	// shape → the host embed loop + host-slab path.
+	perLayerInputBatchDevice func(ids []int32, outLayers int) (metal.MTLBuffer, metal.MTLBuffer, bool, error)
 	// pleHostScratch reuses pinned host staging and intermediate Metal buffers for the host-side
 	// resident BF16 PLE projection path. nil when the model has no PLE tower or uses quant PLE projection.
 	pleHostScratch *plHostScratch
@@ -1023,11 +1025,12 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 						projWBuf, projWOff, nil, nil, nil, 0, 0,
 						g.PerLayerProjNormW, ids, embs, slab, numLayers, pliDim, dModel, arch.Eps)
 				}
-				sess.perLayerInputBatchDevice = func(ids []int32, embs [][]byte, outLayers int) (metal.MTLBuffer, bool, error) {
+				plainMainEmb := &mainEmbedGather{packed: embedPackedBuf, scales: embedScalesBuf, biases: embedBiasesBuf, gs: gs, bits: bits, scale: embedScale}
+				sess.perLayerInputBatchDevice = func(ids []int32, outLayers int) (metal.MTLBuffer, metal.MTLBuffer, bool, error) {
 					return perLayerInputsBatchQuantDevice(plainBatchScratch,
 						plePackedBuf, pleScalesBuf, pleBiasesBuf, gs, bits,
 						projWBuf, projWOff, nil, nil, nil, 0, 0,
-						g.PerLayerProjNormW, ids, embs, outLayers, numLayers, pliDim, dModel, arch.Eps)
+						g.PerLayerProjNormW, ids, plainMainEmb, outLayers, numLayers, pliDim, dModel, arch.Eps)
 				}
 			}
 			// GPU next-inputs seam, QAT shape: same PLE tower but the per-layer model
@@ -1063,11 +1066,12 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 						nil, 0, projPackedBuf, projScalesBuf, projBiasesBuf, projGS, projBits,
 						g.PerLayerProjNormW, ids, embs, slab, numLayers, pliDim, dModel, arch.Eps)
 				}
-				sess.perLayerInputBatchDevice = func(ids []int32, embs [][]byte, outLayers int) (metal.MTLBuffer, bool, error) {
+				qatMainEmb := &mainEmbedGather{packed: embedPackedBuf, scales: embedScalesBuf, biases: embedBiasesBuf, gs: gs, bits: bits, scale: embedScale}
+				sess.perLayerInputBatchDevice = func(ids []int32, outLayers int) (metal.MTLBuffer, metal.MTLBuffer, bool, error) {
 					return perLayerInputsBatchQuantDevice(qatBatchScratch,
 						plePackedBuf, pleScalesBuf, pleBiasesBuf, gs, bits,
 						nil, 0, projPackedBuf, projScalesBuf, projBiasesBuf, projGS, projBits,
-						g.PerLayerProjNormW, ids, embs, outLayers, numLayers, pliDim, dModel, arch.Eps)
+						g.PerLayerProjNormW, ids, qatMainEmb, outLayers, numLayers, pliDim, dModel, arch.Eps)
 				}
 			}
 		} else if affineBitsSupported(bits) {
@@ -2207,7 +2211,13 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseOne(ids []int32, scope st
 	if s.state.icb != nil && (len(ids) <= batchedDenseICBMaxRows || batchedMLPFoldDisabledForTest || !gpuHasGeluKernel()) {
 		return nil, false, nil
 	}
-	embedStart := time.Now()
+	// Device-first inputs (#381): on the quant PLE lane one committed-not-waited
+	// command buffer gathers the K main-embed rows AND builds the PLE tensor from
+	// just the token ids — the host never dequants an embedding row.
+	embBuf, pleBuf, devErr := s.prefillInputsDevice(ids)
+	if devErr != nil {
+		return nil, false, devErr
+	}
 	var embStack [16][]byte
 	var embs [][]byte
 	if len(ids) <= len(embStack) {
@@ -2215,41 +2225,46 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseOne(ids []int32, scope st
 	} else {
 		embs = make([][]byte, len(ids))
 	}
-	if s.canUseEmbedScratch() {
-		rowBytes := s.arch.Hidden * bf16Size
-		need := len(ids) * rowBytes
-		if cap(s.embedScratch) < need {
-			s.embedScratch = make([]byte, need)
+	var pleSlab []byte
+	if embBuf == nil {
+		embedStart := time.Now()
+		if s.canUseEmbedScratch() {
+			rowBytes := s.arch.Hidden * bf16Size
+			need := len(ids) * rowBytes
+			if cap(s.embedScratch) < need {
+				s.embedScratch = make([]byte, need)
+			} else {
+				s.embedScratch = s.embedScratch[:need]
+			}
+			for i, id := range ids {
+				dst := s.embedScratch[i*rowBytes : (i+1)*rowBytes]
+				emb, err := s.embedInto(dst, id)
+				if err != nil {
+					return nil, false, err
+				}
+				if len(emb) != rowBytes {
+					return nil, false, core.NewError("native.prefillRetainedTokensBatchedDense: embedInto returned wrong hidden size")
+				}
+				embs[i] = emb
+			}
 		} else {
-			s.embedScratch = s.embedScratch[:need]
-		}
-		for i, id := range ids {
-			dst := s.embedScratch[i*rowBytes : (i+1)*rowBytes]
-			emb, err := s.embedInto(dst, id)
-			if err != nil {
-				return nil, false, err
+			for i, id := range ids {
+				emb, err := s.embed(id)
+				if err != nil {
+					return nil, false, err
+				}
+				embs[i] = emb
 			}
-			if len(emb) != rowBytes {
-				return nil, false, core.NewError("native.prefillRetainedTokensBatchedDense: embedInto returned wrong hidden size")
-			}
-			embs[i] = emb
 		}
-	} else {
-		for i, id := range ids {
-			emb, err := s.embed(id)
-			if err != nil {
-				return nil, false, err
-			}
-			embs[i] = emb
+		hostSpan("embed", embedStart, len(ids))
+		pleStart := time.Now()
+		var slabErr error
+		pleSlab, slabErr = s.pleSlabFor(ids, embs)
+		if slabErr != nil {
+			return nil, false, slabErr
 		}
+		hostSpan("pleSlab", pleStart, len(ids))
 	}
-	hostSpan("embed", embedStart, len(ids))
-	pleStart := time.Now()
-	pleBuf, pleSlab, slabErr := s.pleSlabForPrefill(ids, embs)
-	if slabErr != nil {
-		return nil, false, slabErr
-	}
-	hostSpan("pleSlab", pleStart, len(ids))
 	var (
 		hidden []byte
 		ok     bool
@@ -2265,7 +2280,11 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseOne(ids []int32, scope st
 	withAutoreleasePool(func() {
 		if pleBuf != nil {
 			s.state.prefillPLESlabDevice = pleBuf
-			defer func() { s.state.prefillPLESlabDevice = nil }()
+			s.state.prefillEmbedDevice = embBuf
+			defer func() {
+				s.state.prefillPLESlabDevice = nil
+				s.state.prefillEmbedDevice = nil
+			}()
 			hidden, ok, err = s.state.stepTokensBatchedDenseLastIntoPLE(embs, nil, s.pos, dst)
 		} else if pleSlab != nil {
 			hidden, ok, err = s.state.stepTokensBatchedDenseLastIntoPLE(embs, pleSlab, s.pos, dst)
@@ -2286,32 +2305,28 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseOne(ids []int32, scope st
 	return hidden, true, nil
 }
 
-// pleSlabForPrefill resolves a prefill chunk's PLE tensors DEVICE-first (#381):
-// the committed-not-waited builder tensor when the device closure can build at
-// the chunk's exact layer bound — the batched pass reads it GPU-ordered on the
-// shared queue, so the host skips the builder wait, the slab copy-out and the
-// re-upload — else the host slab via pleSlabFor. (nil, nil, nil) for a
-// non-PLE model.
-func (s *ArchSession) pleSlabForPrefill(ids []int32, embs [][]byte) (metal.MTLBuffer, []byte, error) {
-	if s.perLayerInput == nil || len(s.state.ple) == 0 {
+// prefillInputsDevice builds a prefill chunk's inputs DEVICE-first (#381): one
+// committed-not-waited command buffer gathers the K main-embed rows AND the
+// PLE tensor at the chunk's exact layer bound, from just the token ids — the
+// batched pass reads both GPU-ordered on the shared queue, so the host skips
+// the per-token embed dequant, the builder wait, the slab copy-out and the
+// re-uploads. (nil, nil, nil) when the lane is not available (non-PLE model,
+// no device closure, stale metallib, small K) — the host paths take over.
+func (s *ArchSession) prefillInputsDevice(ids []int32) (metal.MTLBuffer, metal.MTLBuffer, error) {
+	if s.perLayerInput == nil || len(s.state.ple) == 0 || s.perLayerInputBatchDevice == nil {
 		return nil, nil, nil
 	}
-	if s.perLayerInputBatchDevice != nil {
-		if len(ids) != len(embs) {
-			return nil, nil, core.NewError("native.pleSlabForPrefill: token and embedding counts differ")
-		}
-		outLayers := len(s.state.specs)
-		if b := s.state.prefillSkipToLayer; b > 0 && b < outLayers {
-			outLayers = b
-		}
-		if buf, ok, err := s.perLayerInputBatchDevice(ids, embs, outLayers); err != nil {
-			return nil, nil, err
-		} else if ok {
-			return buf, nil, nil
-		}
+	outLayers := len(s.state.specs)
+	if b := s.state.prefillSkipToLayer; b > 0 && b < outLayers {
+		outLayers = b
 	}
-	slab, err := s.pleSlabFor(ids, embs)
-	return nil, slab, err
+	devStart := time.Now()
+	embBuf, pleBuf, ok, err := s.perLayerInputBatchDevice(ids, outLayers)
+	if err != nil || !ok {
+		return nil, nil, err
+	}
+	hostSpan("inputsDev", devStart, len(ids))
+	return embBuf, pleBuf, nil
 }
 
 // pleSlabFor gathers the per-token PLE tensors for a token batch into one
