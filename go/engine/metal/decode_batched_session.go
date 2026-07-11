@@ -1299,7 +1299,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					}
 					kGEMM, vGEMM = q8GEMMK, q8GEMMV
 				}
-				if flashPromptEnabled && gpuHasFlashPrompt(lhd) {
+				if flashPromptEnabled && flashPromptUsable(lhd, basePos+K) {
 					// flash lane (#375): one dispatch, no S materialisation — the
 					// composition's S round-trip taxed every neighbouring GEMM ~6x
 					// its own bandwidth (the #367 fold-context conviction). Same
