@@ -31,18 +31,24 @@ func benchGatedDeltaWeights(D, KH, VH, HD, K int) *GatedDeltaWeights {
 	}
 }
 
-// BenchmarkGatedDeltaForwardF32_Decode — one token through the gated-delta block from a fresh
-// state: the full projection + conv + recurrence + gated-norm chain. The intermediate buffers
-// are the per-token allocation the linear-attention layer pays.
+// BenchmarkGatedDeltaForwardF32_Decode — one token through the gated-delta block on the steady-state
+// decode path (a session's real path): a caller-owned GatedDeltaScratch, sized by a warmup call, is
+// reused every token so the five projection GEMM outputs (qkv, a, b, z, out) write into resident buffers.
+// This pins the residual per-token allocation once the projection outputs are eliminated — the carried
+// state (newConv/newDelta) + the q/k/v split slab + the conv/recurrence intermediates.
 func BenchmarkGatedDeltaForwardF32_Decode(b *testing.B) {
 	const D, KH, VH, HD, K = 1024, 4, 8, 128, 4
 	w := benchGatedDeltaWeights(D, KH, VH, HD, K)
 	cfg := GatedDeltaConfig{KeyHeads: KH, ValueHeads: VH, HeadDim: HD, ConvKernel: K, Eps: 1e-6}
 	x := benchQwenF32(1 * D)
+	sc := &GatedDeltaScratch{}
+	if _, _, _, err := GatedDeltaForwardScratchF32(x, w, cfg, nil, nil, 1, D, sc); err != nil { // size the scratch
+		b.Fatal(err)
+	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, _, _, err := GatedDeltaForwardF32(x, w, cfg, nil, nil, 1, D); err != nil {
+		if _, _, _, err := GatedDeltaForwardScratchF32(x, w, cfg, nil, nil, 1, D, sc); err != nil {
 			b.Fatal(err)
 		}
 	}
