@@ -1,0 +1,134 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+package policy
+
+import (
+	"context"
+	"iter"
+	"testing"
+
+	core "dappco.re/go"
+	"dappco.re/go/inference"
+	"dappco.re/go/inference/serving/provider/openai"
+)
+
+// policyFakeModel is an inference.TextModel double whose Chat streams a fixed
+// slice of token texts — the caller controls the exact chunk boundaries so a
+// match can be forced to span them.
+type policyFakeModel struct{ tokens []string }
+
+func fakeSeq(texts ...string) iter.Seq[inference.Token] {
+	return func(yield func(inference.Token) bool) {
+		for i, t := range texts {
+			if !yield(inference.Token{ID: int32(i + 1), Text: t}) {
+				return
+			}
+		}
+	}
+}
+
+func (f *policyFakeModel) Chat(context.Context, []inference.Message, ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return fakeSeq(f.tokens...)
+}
+func (f *policyFakeModel) Generate(context.Context, string, ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return fakeSeq(f.tokens...)
+}
+func (f *policyFakeModel) Classify(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok(nil)
+}
+func (f *policyFakeModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok(nil)
+}
+func (f *policyFakeModel) ModelType() string                  { return "policy-fake" }
+func (f *policyFakeModel) Info() inference.ModelInfo          { return inference.ModelInfo{} }
+func (f *policyFakeModel) Metrics() inference.GenerateMetrics { return inference.GenerateMetrics{} }
+func (f *policyFakeModel) Err() core.Result                   { return core.Ok(nil) }
+func (f *policyFakeModel) Close() core.Result                 { return core.Ok(nil) }
+
+var _ inference.TextModel = (*policyFakeModel)(nil)
+
+// resolverOf returns a resolver that always yields model.
+func resolverOf(model inference.TextModel) openai.Resolver {
+	return openai.ResolverFunc(func(context.Context, string) (inference.TextModel, error) {
+		return model, nil
+	})
+}
+
+// drain resolves and streams a Chat reply through the wrapped resolver.
+func drain(t *testing.T, r openai.Resolver) string {
+	t.Helper()
+	model, err := r.ResolveModel(context.Background(), "any")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	var b core.Builder
+	for tok := range model.Chat(context.Background(), []inference.Message{{Role: "user", Content: "hi"}}) {
+		b.WriteString(tok.Text)
+	}
+	return b.String()
+}
+
+// TestPolicy_WrapResolver_Redact_Good pins redaction through the full wrapper —
+// tokens arrive split across the matched span and are still redacted.
+func TestPolicy_WrapResolver_Redact_Good(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"PROJECT-X","action":"redact"}]}`)
+	fake := &policyFakeModel{tokens: []string{"the PROJ", "ECT-X sh", "ips soon"}}
+	got := drain(t, WrapResolver(resolverOf(fake), pol, nil))
+	if got != "the [redacted] ships soon" {
+		t.Fatalf("wrapped reply = %q", got)
+	}
+}
+
+// TestPolicy_WrapResolver_Refuse_Good pins that a refuse ends the reply at the
+// match with the configured message.
+func TestPolicy_WrapResolver_Refuse_Good(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"SECRET","action":"refuse","message":"Not in this deployment."}]}`)
+	fake := &policyFakeModel{tokens: []string{"here is the ", "SEC", "RET value and more"}}
+	got := drain(t, WrapResolver(resolverOf(fake), pol, nil))
+	if got != "here is the Not in this deployment." {
+		t.Fatalf("wrapped refuse reply = %q", got)
+	}
+}
+
+// TestPolicy_WrapResolver_Passthrough pins byte-exactness through the wrapper on
+// a clean stream: the reply is the model's tokens concatenated, unchanged.
+func TestPolicy_WrapResolver_Passthrough(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"SECRET","action":"redact"}]}`)
+	fake := &policyFakeModel{tokens: []string{"a perfectly ", "ordinary ", "answer here"}}
+	got := drain(t, WrapResolver(resolverOf(fake), pol, nil))
+	if got != "a perfectly ordinary answer here" {
+		t.Fatalf("clean wrapped reply = %q", got)
+	}
+}
+
+// TestPolicy_WrapResolver_ResolveError pins that an inner resolve failure
+// propagates unwrapped — the policy layer never masks a load error.
+func TestPolicy_WrapResolver_ResolveError(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[]}`)
+	inner := openai.ResolverFunc(func(context.Context, string) (inference.TextModel, error) {
+		return nil, core.E("test", "model not found", nil)
+	})
+	_, err := WrapResolver(inner, pol, nil).ResolveModel(context.Background(), "missing")
+	if err == nil || !core.Contains(err.Error(), "model not found") {
+		t.Fatalf("resolve error = %v, want the inner failure to propagate", err)
+	}
+}
+
+// TestPolicy_WrapResolver_Audit pins the audit line: one entry per enforcement,
+// carrying the rule index + action and NEVER the matched content.
+func TestPolicy_WrapResolver_Audit(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[
+		{"match":"term","value":"client","action":"redact"},
+		{"match":"term","value":"PROJECT-X","action":"redact"}
+	]}`)
+	fake := &policyFakeModel{tokens: []string{"the client and PROJECT-X"}}
+	var log core.Builder
+	drain(t, WrapResolver(resolverOf(fake), pol, &log))
+	audit := log.String()
+	if !core.Contains(audit, "rule #0 redact") || !core.Contains(audit, "rule #1 redact") {
+		t.Fatalf("audit = %q, want both rule enforcements logged", audit)
+	}
+	if core.Contains(audit, "client") || core.Contains(audit, "PROJECT-X") {
+		t.Fatalf("audit leaked matched content: %q", audit)
+	}
+}
