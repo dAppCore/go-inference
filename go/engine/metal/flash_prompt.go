@@ -244,6 +244,19 @@ var flashQ8Enabled = os.Getenv("LTHN_FLASH_Q8") == "1"
 // tests A/B the q8-reading flash against it on fresh sessions.
 var flashQ8OffForTest bool
 
+// q8StageEnabled routes a q8 owner's per-chunk prefix dequant into the shared
+// ping-pong staging pair instead of per-layer full-cacheRows mirror planes —
+// the once-per-chunk staging shape the FALSIFIED note above anticipated
+// (#375): same dequant kernel, same flash/GEMM consumers, one transient plane
+// pair per parity instead of one persistent plane per global owner (the
+// 31B@256K ~19GB ingest-peak cut). Default ON; LTHN_Q8_STAGE=0 restores the
+// mirror planes.
+var q8StageEnabled = os.Getenv("LTHN_Q8_STAGE") != "0"
+
+// q8StageOffForTest pins the legacy mirror-plane lane in-process — the
+// byte-identity A/B (TestQ8StagePromptMatchesMirrorLane) flips it.
+var q8StageOffForTest bool
+
 type flashQ8Key struct {
 	nHalves        int
 	alignQ, alignK bool

@@ -357,11 +357,15 @@ func TestDenseBatchScratchReleasesSlabsOnGrowthAndClose(t *testing.T) {
 		s.attnFold(rowsA, dModel, qDim, kvDim)
 		s.layerStage(0, 3, rowsA, kvDim)
 		s.sdpaPromptS(rowsA, sCols)
+		s.q8Stage(0, rowsA, kvDim)
+		s.q8Stage(1, rowsA, kvDim)
 		// widen: every grow site reallocates (and must release the outgrown set)
 		s.mlpFold(rowsB, dModel, dFF)
 		s.attnFold(rowsB, dModel, qDim, kvDim)
 		s.layerStage(1, 3, rowsB, kvDim)
 		s.sdpaPromptS(rowsB, sCols)
+		s.q8Stage(0, rowsB*64, kvDim) // q8 staging grows to the attended prefix — force a realloc
+		s.q8Stage(1, rowsB*64, kvDim)
 		s.Close()
 	}
 	end := device.CurrentAllocatedSize()
