@@ -466,3 +466,16 @@ func BenchmarkTokenizer_Encode_MarkerDenseManySpecials(b *testing.B) {
 		_ = tok.Encode(text)
 	}
 }
+
+// BenchmarkTokenizer_matchSpecialToken_MissManySpecials pins the miss path at
+// realistic special count: the lead-byte reject holds it O(1), where the naive
+// HasPrefix walk was O(specials) — 128 specials was ~230 ns before, ~4.5 ns
+// after. Fires once per clean Encode segment (the common no-special-here case).
+func BenchmarkTokenizer_matchSpecialToken_MissManySpecials(b *testing.B) {
+	tok := buildManySpecialTokenizer(128)
+	text := "hello world this is a normal prompt with no special token"
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _, _ = tok.matchSpecialToken(text)
+	}
+}
