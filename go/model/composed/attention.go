@@ -123,8 +123,11 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 	copy(ck[pos0*KVH*HD:], k)
 	copy(cv[pos0*KVH*HD:], v)
 
-	// causal attention: query t (position pos0+t) attends to cached keys 0..pos0+t.
-	out := make([]float32, L*H*HD)
+	// causal attention: query t (position pos0+t) attends to cached keys 0..pos0+t. The query buffer q
+	// is [L,H,HD] = the output shape and is dead after this loop; each head's qrow is fully consumed by
+	// its score dot-products before that head's orow is written (orow is at the same offset), so the
+	// attention output is written in place over q — bit-identical, one fewer alloc per token.
+	out := q
 	scores := make([]float64, N)
 	for t := range L {
 		last := pos0 + t // inclusive
