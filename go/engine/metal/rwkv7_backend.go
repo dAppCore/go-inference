@@ -15,4 +15,5 @@ import "dappco.re/go/inference/model/rwkv7"
 // for whenever the mixer-decode path lands; it is not itself a serve path.)
 func init() {
 	rwkv7.ProjMatMul = MatMulF32NT
+	rwkv7.ProjMatMulInto = MatMulF32NTInto // write-into sibling: skips the projection-output alloc, byte-identical
 }

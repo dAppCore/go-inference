@@ -15,7 +15,14 @@ type gatedDeltaMixer struct {
 	cfg qwen3.GatedDeltaConfig
 }
 
-type gatedDeltaState struct{ conv, delta []float32 }
+// gatedDeltaState threads the recurrent state (conv ring + delta matrix) AND the projection scratch. The
+// scratch is per-session memory, not carried information, but it rides the same per-layer state slot so
+// one decode stream reuses its projection buffers every token (the shared mixer weights must never hold
+// it — sessions are concurrent). sc is created lazily on the first (nil-prior) step.
+type gatedDeltaState struct {
+	conv, delta []float32
+	sc          *qwen3.GatedDeltaScratch
+}
 
 // NewGatedDeltaMixer builds a gated-delta mixer for one layer.
 func NewGatedDeltaMixer(w *qwen3.GatedDeltaWeights, cfg qwen3.GatedDeltaConfig) Mixer {
@@ -26,12 +33,16 @@ func (m *gatedDeltaMixer) Kind() string { return "gated_deltanet" }
 
 func (m *gatedDeltaMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, error) {
 	var pc, pd []float32
+	var sc *qwen3.GatedDeltaScratch
 	if st, ok := prior.(gatedDeltaState); ok {
-		pc, pd = st.conv, st.delta
+		pc, pd, sc = st.conv, st.delta, st.sc
 	}
-	out, nc, nd, err := qwen3.GatedDeltaForwardF32(h, m.w, m.cfg, pc, pd, L, D)
+	if sc == nil {
+		sc = &qwen3.GatedDeltaScratch{}
+	}
+	out, nc, nd, err := qwen3.GatedDeltaForwardScratchF32(h, m.w, m.cfg, pc, pd, L, D, sc)
 	if err != nil {
 		return nil, nil, err
 	}
-	return out, gatedDeltaState{conv: nc, delta: nd}, nil
+	return out, gatedDeltaState{conv: nc, delta: nd, sc: sc}, nil
 }

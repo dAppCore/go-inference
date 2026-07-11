@@ -64,7 +64,19 @@ func silu(v float64) float64 { return v / (1 + math.Exp(-v)) }
 
 // matNT computes out[M,N] = in[M,K] @ w[N,K]ᵀ (the Linear y = x·Wᵀ), f32 host.
 func matNT(in, w []float32, M, K, N int) []float32 {
-	out := make([]float32, M*N)
+	return matNTInto(nil, in, w, M, K, N)
+}
+
+// matNTInto is matNT writing into out, reusing it when cap(out) ≥ M·N (else it allocates a fresh M·N
+// slab). Identical f64 accumulation + write order to the fresh-buffer form — only WHERE the result lands
+// changes, so the output is bit-identical. The attention mixer threads a caller-owned scratch through
+// this for its per-token q/k/v/o projections.
+func matNTInto(out, in, w []float32, M, K, N int) []float32 {
+	if cap(out) < M*N {
+		out = make([]float32, M*N)
+	} else {
+		out = out[:M*N]
+	}
 	for m := range M {
 		for n := range N {
 			var acc float64

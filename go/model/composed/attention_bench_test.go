@@ -40,13 +40,19 @@ func benchAttnPriorState() attnState {
 	return attnState{k: benchF32(benchAttnPrior * kv), v: benchF32(benchAttnPrior * kv), n: benchAttnPrior}
 }
 
-// BenchmarkAttnMixer_Forward — a single-token decode step over a 128-token cache: the qkv
-// projections + causal attention + the cache-grow copy. The grow allocates a fresh
-// [N·KVH·HD] k and v each step (the O(N)-per-token copy), so this pins that per-token cost.
+// BenchmarkAttnMixer_Forward — a single-token decode step over a 128-token cache on the steady-state
+// scratch path: a caller-owned attnScratch (seeded on the prior, sized by the warmup call) is reused
+// every token so the q/k/v/o projections write into resident buffers. What remains pins the residual
+// per-token cost: the O(N) cache-grow copy (fresh [N·KVH·HD] k and v each step), the scores buffer, and
+// the boxed state return.
 func BenchmarkAttnMixer_Forward(b *testing.B) {
 	m := benchAttnMixer()
 	h := benchF32(benchAttnHeads * benchAttnHeadDim)
 	prior := benchAttnPriorState()
+	prior.sc = &attnScratch{}
+	if _, _, err := m.Forward(h, 1, benchAttnHeads*benchAttnHeadDim, prior); err != nil { // size the scratch
+		b.Fatal(err)
+	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
