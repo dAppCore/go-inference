@@ -140,9 +140,9 @@ func Encode(tensors map[string]Tensor) ([]byte, error) {
 		DataOffsets [2]int `json:"data_offsets"`
 	}
 	hdr := make(map[string]entry, len(names))
-	// Presize the data buffer to the exact total: append-from-nil grows by doubling and
-	// recopies the whole checkpoint several times over (13MB FLAT on the 256-tensor bench).
-	data := make([]byte, 0, totalData)
+	// First pass validates and lays out the offsets — no data copy. The payload is written straight
+	// into the final buffer in the second pass below, so the intermediate concat buffer (a full extra
+	// copy of every tensor's bytes — totalData, the whole checkpoint) is gone entirely.
 	off := 0
 	for _, n := range names {
 		t := tensors[n]
@@ -165,7 +165,6 @@ func Encode(tensors map[string]Tensor) ([]byte, error) {
 			shape = []int{}
 		}
 		hdr[n] = entry{Dtype: t.Dtype, Shape: shape, DataOffsets: [2]int{off, off + len(t.Data)}}
-		data = append(data, t.Data...)
 		off += len(t.Data)
 	}
 
@@ -174,13 +173,18 @@ func Encode(tensors map[string]Tensor) ([]byte, error) {
 		return nil, core.NewError("safetensors.Encode: header marshal failed")
 	}
 	hdrBytes := hj.Value.([]byte)
-	out := make([]byte, 8+len(hdrBytes)+len(data))
+	out := make([]byte, 8+len(hdrBytes)+totalData)
 	n := uint64(len(hdrBytes))
 	for i := range 8 {
 		out[i] = byte(n >> (8 * uint(i)))
 	}
 	copy(out[8:], hdrBytes)
-	copy(out[8+len(hdrBytes):], data)
+	// Copy each tensor's payload directly into its slot in the final buffer (name-sorted, same order
+	// the offsets were assigned), so the data is copied exactly once.
+	dataStart := 8 + len(hdrBytes)
+	for _, name := range names {
+		copy(out[dataStart+hdr[name].DataOffsets[0]:], tensors[name].Data)
+	}
 	return out, nil
 }
 

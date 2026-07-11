@@ -72,13 +72,14 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, prior []floa
 	if err != nil {
 		return nil, nil, err
 	}
-	wRaw, err := projMatMul(x, w.WProj, L, D, hk)
+	wDecay, err := projMatMul(x, w.WProj, L, D, hk)
 	if err != nil {
 		return nil, nil, err
 	}
-	wDecay := make([]float32, len(wRaw)) // RWKV-7 log-decay: w = -exp(WProj) ≤ 0
-	for i := range wRaw {
-		wDecay[i] = float32(-math.Exp(float64(wRaw[i])))
+	// RWKV-7 log-decay: w = -exp(WProj) ≤ 0. The projection output is dead after this transform, so
+	// map it in place rather than allocating a second buffer — bit-identical, one fewer alloc/token.
+	for i := range wDecay {
+		wDecay[i] = float32(-math.Exp(float64(wDecay[i])))
 	}
 	kp, err := projMatMul(x, w.KProj, L, D, hk)
 	if err != nil {

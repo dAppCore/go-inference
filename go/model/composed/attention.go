@@ -109,17 +109,25 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 		}
 	}
 
-	// grow the cache: [pos0+L, KVH*HD].
+	// grow the cache: [pos0+L, KVH*HD]. ck and cv are the returned state — one backing slab, two
+	// non-overlapping capped windows. Both are copied out (read-only) at the head of the next call
+	// before any write, so sharing one array between the K and V caches is bit-identical and saves
+	// one alloc per token on the decode path.
 	N := pos0 + L
-	ck := make([]float32, N*KVH*HD)
-	cv := make([]float32, N*KVH*HD)
+	cacheN := N * KVH * HD
+	ckcv := make([]float32, 2*cacheN)
+	ck := ckcv[0:cacheN:cacheN]
+	cv := ckcv[cacheN : 2*cacheN : 2*cacheN]
 	copy(ck, st.k)
 	copy(cv, st.v)
 	copy(ck[pos0*KVH*HD:], k)
 	copy(cv[pos0*KVH*HD:], v)
 
-	// causal attention: query t (position pos0+t) attends to cached keys 0..pos0+t.
-	out := make([]float32, L*H*HD)
+	// causal attention: query t (position pos0+t) attends to cached keys 0..pos0+t. The query buffer q
+	// is [L,H,HD] = the output shape and is dead after this loop; each head's qrow is fully consumed by
+	// its score dot-products before that head's orow is written (orow is at the same offset), so the
+	// attention output is written in place over q — bit-identical, one fewer alloc per token.
+	out := q
 	scores := make([]float64, N)
 	for t := range L {
 		last := pos0 + t // inclusive

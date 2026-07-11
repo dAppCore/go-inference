@@ -59,7 +59,6 @@ func swigluExpert(xt []float32, e MoEExpert, D int) []float32 {
 func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 	nE := len(m.Experts)
 	out := make([]float32, L*D)
-	probs := make([]float64, nE)
 	// Per-token routing scratch, hoisted out of the token loop so a multi-token decode
 	// allocates it once, not per token: the top-k index buffer, the expert hidden buffer
 	// (sized to the widest expert), and the single expert-output buffer. Each is fully
@@ -76,7 +75,12 @@ func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 			maxFF = ff
 		}
 	}
-	hbuf := make([]float64, maxFF)
+	// probs (router numerators, [nE]) and hbuf (expert hidden, [maxFF]) are both f64 scratch,
+	// each fully overwritten before use — one backing slab carved into two capped windows saves
+	// one alloc per forward call (per MoE layer per token) with no byte change.
+	f64buf := make([]float64, nE+maxFF)
+	probs := f64buf[0:nE:nE]
+	hbuf := f64buf[nE : nE+maxFF : nE+maxFF]
 	eo := make([]float32, D)
 	for t := range L {
 		xt := x[t*D : (t+1)*D]
