@@ -171,8 +171,8 @@ quants reported, never hidden):
 | 62K | 2,349 | — | — | — |
 | 118K | 1,656 | — | — | — |
 
-² mlx-lm prints 11,790 at this depth; ~9,850 is its honest-wall rate
-under our calibration. oMLX (the closest feature rival — continuous
+² mlx-lm prints 11,790 at this depth; 10,044 is its true wall measured
+with our own timer around a preloaded generate. oMLX (the closest feature rival — continuous
 batching, tiered KV, OpenAI+Anthropic routes, menu-bar service — but a
 Python stack where lem is one contained binary) rides mlx-lm's kernels
 and lands 6,696 even through its HTTP serving path.
