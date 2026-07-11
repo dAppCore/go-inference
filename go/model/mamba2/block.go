@@ -153,7 +153,10 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 	// g = y·SiLU(z), then normalise g and scale by the weight. This is NOT RMSNorm(y)·SiLU(z) (gate
 	// after), the form metal's shared flakernel uses: on a real mamba2 checkpoint that gate-after form
 	// inflates the activations ~5× and corrupts the logit distribution (confirmed against the HF smoke).
-	gated := make([]float32, L*dInner)
+	// The scan output y is written in place as the gated result: within each row all of y's row is read
+	// into g (f64) before that row is overwritten, and y is dead after this stage, so reusing it is
+	// bit-identical and drops the gated buffer.
+	gated := y
 	g := make([]float64, dInner)
 	for t := range L {
 		yr := y[t*dInner : (t+1)*dInner]
