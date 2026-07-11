@@ -169,8 +169,20 @@ tok/turn while the client resends full history.
   +405MB FAIL with releases neutered — falsified before trusted). The
   row-plumbing buffers (offBuf/inPacked/outPacked/lastRows) cache host
   pointers and were deliberately left alone — they need their own
-  care-map. The 256K re-lift still needs the RAM-aware default + a
-  quiet-box 31B receipt. Then the N-bit knob.
+  care-map.
+  **THE RAM-AWARE DEFAULT ALSO SHIPPED** (`fad5212`, same day):
+  clampContextToRAM fits an UNSET -context to the box after
+  loadRegistered — budget = RAM − reserve(min(max(20%,8GiB),24GiB)) −
+  mapped weights − 4GiB fixed; global owners pay bf16-rate K+V per row
+  (covers the q8 mirror transient), sliding owners charge their ring
+  once; floor 4096, 1024-aligned, trace line on clamp. Escapes: explicit
+  -context always wins; LTHN_CONTEXT_RAM_GUARD=0 kills it; a failed
+  sysctl probe disables rather than guesses. mamba2/composed keep the
+  plain capped default. 5 unit gates + guard-silent live check on the
+  96GB box (suite 1513 green). The 256K re-lift is now UNGATED except
+  for its receipt: raise defaultContextCap to 262144 and take a 31B
+  all-defaults run ON A QUIET BOX (watch pressure, not just tok/s —
+  machine comfort outranks receipts). Then the N-bit knob.
 - **#373 (closed — read its receipts before ANY fusion work)** — the fusion
   map: decode is GPU-busy at ~170GB/s of ~800; thin-stage fusion is EXHAUSTED
   (receipted flat); the 500-tok/s lane is fat-dispatch kernel architecture.
