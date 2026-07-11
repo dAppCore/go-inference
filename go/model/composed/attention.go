@@ -37,10 +37,20 @@ type attnMixer struct {
 }
 
 // attnState is the KV cache: n past tokens, k/v laid out [n, KVHeads, HeadDim] (rotary already applied to
-// the cached keys).
+// the cached keys). It also carries the projection scratch — per-session memory, not cache content, but
+// threaded in the same per-layer state slot so one decode stream reuses its q/k/v/o buffers every token
+// (the shared mixer weights must never hold it). sc is nil ⇒ the projections allocate fresh.
 type attnState struct {
 	k, v []float32
 	n    int
+	sc   *attnScratch
+}
+
+// attnScratch holds the reusable projection-output buffers: qRaw is the q_proj output (or the [q;gate]
+// raw when OutputGate); k, v the key/value projections; o the out-proj. The de-interleaved q/gate and the
+// grown KV cache are NOT scratch — they are per-token state that outlives the call or grows each step.
+type attnScratch struct {
+	qRaw, k, v, o []float32
 }
 
 // NewAttnMixer builds a full-attention mixer for one layer.
@@ -97,6 +107,10 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 	if p, ok := prior.(attnState); ok {
 		st = p
 	}
+	sc := st.sc
+	if sc == nil {
+		sc = &attnScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
+	}
 	pos0 := st.n
 	scale := 1.0 / math.Sqrt(float64(HD))
 	rep := H / KVH
@@ -105,9 +119,10 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 	// gate [L,H*HD] ([q_h ; gate_h] within each head's 2·HD block, per the transformers qwen3_5 chunk).
 	var q, gate []float32
 	if cfg.OutputGate {
-		raw := matNT(h, m.w.QProj, L, D, 2*H*HD)
-		q = make([]float32, L*H*HD)
-		gate = make([]float32, L*H*HD)
+		sc.qRaw = matNTInto(sc.qRaw, h, m.w.QProj, L, D, 2*H*HD)
+		raw := sc.qRaw
+		q = make([]float32, L*H*HD) // de-interleave targets: per-token state (q is written in place by
+		gate = make([]float32, L*H*HD) // attention, gate outlives to the σ-gate), not scratch
 		for t := range L {
 			for hd := range H {
 				src := raw[t*2*H*HD+hd*2*HD:]
@@ -116,10 +131,13 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 			}
 		}
 	} else {
-		q = matNT(h, m.w.QProj, L, D, H*HD) // [L, H*HD]
+		sc.qRaw = matNTInto(sc.qRaw, h, m.w.QProj, L, D, H*HD) // [L, H*HD]
+		q = sc.qRaw
 	}
-	k := matNT(h, m.w.KProj, L, D, KVH*HD) // [L, KVH*HD]
-	v := matNT(h, m.w.VProj, L, D, KVH*HD) // [L, KVH*HD]
+	sc.k = matNTInto(sc.k, h, m.w.KProj, L, D, KVH*HD) // [L, KVH*HD]
+	k := sc.k
+	sc.v = matNTInto(sc.v, h, m.w.VProj, L, D, KVH*HD) // [L, KVH*HD]
+	v := sc.v
 
 	// QK-norm (per head) + partial rotary at absolute positions pos0+t.
 	for t := range L {
@@ -200,6 +218,7 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 			out[i] = float32(float64(out[i]) * s)
 		}
 	}
-	o := matNT(out, m.w.OProj, L, H*HD, D)
-	return o, attnState{k: ck, v: cv, n: N}, nil
+	sc.o = matNTInto(sc.o, out, m.w.OProj, L, H*HD, D)
+	o := sc.o
+	return o, attnState{k: ck, v: cv, n: N, sc: sc}, nil
 }
