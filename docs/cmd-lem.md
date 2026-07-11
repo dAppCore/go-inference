@@ -36,6 +36,7 @@ prints its own name in usage and notices (the dev binary is often built as
 | `tune` | Measure + persist the best MTP draft block as a serve profile | `train/tune.RunTune` |
 | `pack` | Build/inspect/list/extract/hash `.model` containers (no weights loaded) | `model/pack` |
 | `ebook` | Render a model directory as a valid EPUB3 (weights as base64 plates) | `model/modelmgmt.BuildModelBook` |
+| `spec` | Export the OpenAPI 3.1 document for lem's HTTP surface (feeds SDK generation) | `serving` (Describable route groups) |
 
 Run `lem <verb> -h` for the command-specific flag dump. Boot notices and errors
 go to stderr; generation output goes to stdout.
