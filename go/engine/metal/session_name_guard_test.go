@@ -20,7 +20,9 @@ import (
 // entry only for a genuinely neutral session name, never a model-named one. The
 // inference.SessionHandle adapter over ArchSession now lives in the shared
 // package engine (engine.SessionHandle), so pkg/native declares only ArchSession.
-var allowedSessionTypes = map[string]bool{"ArchSession": true}
+// composedEngineSession is the registry bridge for composed (hybrid-stack) archs —
+// "composed" names an arch class, like Arch, not a model.
+var allowedSessionTypes = map[string]bool{"ArchSession": true, "composedEngineSession": true}
 
 // TestSessionTypeNeutralName locks the ArchSession name the same way pkg/model's
 // TestArchTypesNeutralHome locks the arch declaration: it fails if pkg/native declares a
