@@ -7,13 +7,13 @@ import (
 	"dappco.re/go/inference"
 )
 
-func parseReasoningText(text string, markers []reasoningMarker) inference.ReasoningParseResult {
+func parseReasoningText(text string, markers []reasoningMarker, leads string) inference.ReasoningParseResult {
 	// Fuse first findReasoningStart with the short-circuit probe — if
 	// it misses, return text verbatim with no builder alloc + no
 	// .String() copy. The previous shape always built the builder +
 	// wrote len(text) bytes + paid the .String() copy on every call;
 	// per-response cost on every non-reasoning response.
-	idx, marker, ok := findReasoningStart(text, markers)
+	idx, marker, ok := findReasoningStart(text, markers, leads)
 	if !ok {
 		return inference.ReasoningParseResult{VisibleText: text}
 	}
@@ -63,7 +63,7 @@ func parseReasoningText(text string, markers []reasoningMarker) inference.Reason
 		if pending == "" {
 			break
 		}
-		idx, marker, ok = findReasoningStart(pending, markers)
+		idx, marker, ok = findReasoningStart(pending, markers, leads)
 		if !ok {
 			visible.WriteString(pending)
 			break
@@ -81,20 +81,37 @@ func parseReasoningText(text string, markers []reasoningMarker) inference.Reason
 	return inference.ReasoningParseResult{VisibleText: visible.String(), Reasoning: segments}
 }
 
-func findReasoningStart(text string, markers []reasoningMarker) (int, reasoningMarker, bool) {
-	best := -1
+// findReasoningStart returns the earliest position at which any marker's start
+// occurs in text (longest start winning a tie), or (-1, zero, false) if none
+// does. leads is markerLeadBytes(markers' starts): a marker can only begin at
+// one of those bytes, so IndexAny jumps straight to each candidate position and
+// the per-marker HasPrefix check runs only there — replacing one full
+// indexString scan of the whole text per marker (O(markers × text)) with
+// O(text + hits × markers). Byte-identical to the min-index / longest-tie scan
+// it replaces (the earliest start position equals the min over markers of first
+// occurrence, and among starts at that position the longest wins both ways).
+func findReasoningStart(text string, markers []reasoningMarker, leads string) (int, reasoningMarker, bool) {
 	var marker reasoningMarker
-	for _, candidate := range markers {
-		idx := indexString(text, candidate.start)
-		if idx < 0 {
-			continue
+	for i := 0; i < len(text); {
+		rel := core.IndexAny(text[i:], leads)
+		if rel < 0 {
+			break
 		}
-		if best < 0 || idx < best || idx == best && len(candidate.start) > len(marker.start) {
-			best = idx
-			marker = candidate
+		pos := i + rel
+		best := -1
+		for _, candidate := range markers {
+			if core.HasPrefix(text[pos:], candidate.start) &&
+				(best < 0 || len(candidate.start) > len(marker.start)) {
+				best = pos
+				marker = candidate
+			}
 		}
+		if best >= 0 {
+			return best, marker, true
+		}
+		i = pos + 1
 	}
-	return best, marker, best >= 0
+	return -1, marker, false
 }
 
 func firstReasoningEnd(text string, ends []string) (int, int) {
