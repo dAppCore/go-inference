@@ -15,14 +15,17 @@ import (
 // the package matNT (the device-GEMM path is a later optimisation, shared with the gated-delta seam).
 
 // AttnConfig is the per-layer attention geometry. RotaryDim ≤ HeadDim (partial rotary; Qwen 3.6 uses
-// 0.25·HeadDim). KVHeads ≤ Heads (GQA).
+// 0.25·HeadDim). KVHeads ≤ Heads (GQA). OutputGate is the gated-attention flag (attn_output_gate): when
+// set, q_proj emits [q ; gate] per head and the attention output is σ(gate)-gated before o_proj.
 type AttnConfig struct {
 	Heads, KVHeads, HeadDim, RotaryDim int
 	RopeTheta, NormEps                 float32
+	OutputGate                         bool
 }
 
-// AttnWeights is one layer's attention weights. QProj is [Heads*HeadDim, D]; K/VProj [KVHeads*HeadDim, D];
-// OProj [D, Heads*HeadDim]; QNorm/KNorm [HeadDim] (per-head RMSNorm, plain — qwen is not gemma).
+// AttnWeights is one layer's attention weights. QProj is [Heads*HeadDim, D] (or [2·Heads*HeadDim, D] when
+// OutputGate — the [q ; gate] projection); K/VProj [KVHeads*HeadDim, D]; OProj [D, Heads*HeadDim];
+// QNorm/KNorm [HeadDim] (per-head RMSNorm, plain — qwen is not gemma).
 type AttnWeights struct {
 	QProj, KProj, VProj, OProj []float32
 	QNorm, KNorm               []float32
@@ -83,6 +86,13 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 	if theta == 0 {
 		theta = 1e6
 	}
+	qCols := H * HD
+	if cfg.OutputGate {
+		qCols = 2 * H * HD // q_proj emits [q ; gate] per head
+	}
+	if len(m.w.QProj) != qCols*D {
+		return nil, nil, core.NewError("composed.attnMixer: q_proj size mismatch (OutputGate?)")
+	}
 	var st attnState
 	if p, ok := prior.(attnState); ok {
 		st = p
@@ -91,7 +101,23 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 	scale := 1.0 / math.Sqrt(float64(HD))
 	rep := H / KVH
 
-	q := matNT(h, m.w.QProj, L, D, H*HD)   // [L, H*HD]
+	// q_proj: [L, H*HD] ungated, or [L, 2·H*HD] gated — de-interleaved per head into q [L,H*HD] and the
+	// gate [L,H*HD] ([q_h ; gate_h] within each head's 2·HD block, per the transformers qwen3_5 chunk).
+	var q, gate []float32
+	if cfg.OutputGate {
+		raw := matNT(h, m.w.QProj, L, D, 2*H*HD)
+		q = make([]float32, L*H*HD)
+		gate = make([]float32, L*H*HD)
+		for t := range L {
+			for hd := range H {
+				src := raw[t*2*H*HD+hd*2*HD:]
+				copy(q[(t*H+hd)*HD:(t*H+hd)*HD+HD], src[:HD])
+				copy(gate[(t*H+hd)*HD:(t*H+hd)*HD+HD], src[HD:2*HD])
+			}
+		}
+	} else {
+		q = matNT(h, m.w.QProj, L, D, H*HD) // [L, H*HD]
+	}
 	k := matNT(h, m.w.KProj, L, D, KVH*HD) // [L, KVH*HD]
 	v := matNT(h, m.w.VProj, L, D, KVH*HD) // [L, KVH*HD]
 
@@ -163,6 +189,15 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 				}
 				orow[d] = float32(acc / sum)
 			}
+		}
+	}
+	// attn_output_gate: gate the attention output (per head, per dim) by σ(gate) before o_proj. The gate
+	// is the second half of each head's q_proj block — never QK-normed or rotated. The transformers
+	// qwen3_5 reference hardcodes sigmoid here (output_gate_type is not consumed by the reference forward).
+	if gate != nil {
+		for i := range out {
+			s := 1.0 / (1.0 + math.Exp(-float64(gate[i])))
+			out[i] = float32(float64(out[i]) * s)
 		}
 	}
 	o := matNT(out, m.w.OProj, L, H*HD, D)
