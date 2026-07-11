@@ -317,3 +317,89 @@ func TestDiagMLPChainEncoderModes(t *testing.T) {
 		t.Logf("%-24s %8.2fms  %.1f TFLOPS", arm.name, ms, flops/d.Seconds()/1e12)
 	}
 }
+
+// TestDiagMLPChainWithSDPASlabTraffic adds the one ingredient the real fold
+// has that TestDiagMLPChainEncoderModes lacked: SDPA-GEMM-scale S-slab
+// streaming between layers (sdpaPromptS pairs run to hundreds of MB and are
+// written+read once per global layer). If interleaving that traffic drops
+// the chain from ~19 TFLOPS to the fold's ~13-14, the SLC-poisoning
+// mechanism is convicted and the prefill fix is S-traffic shaping
+// (flash-style streaming softmax / tighter S tiles), not encoder work.
+func TestDiagMLPChainWithSDPASlabTraffic(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	requireNativeRuntime(t)
+	const gs, bits = 64, 4
+	const m, dModel, dFF = 512, 1536, 6144
+	const layers, iters = 35, 3
+	rng := rand.New(rand.NewPCG(21, 34))
+	mkW := func(n, k int) (metal.MTLBuffer, metal.MTLBuffer, metal.MTLBuffer) {
+		wq := device.NewBufferWithLengthOptions(uint(n*k/8*4), metal.MTLResourceStorageModeShared)
+		sc := device.NewBufferWithLengthOptions(uint(n*(k/gs)*2), metal.MTLResourceStorageModeShared)
+		bi := device.NewBufferWithLengthOptions(uint(n*(k/gs)*2), metal.MTLResourceStorageModeShared)
+		ws := unsafe.Slice((*uint32)(wq.Contents()), n*k/8)
+		for i := range ws {
+			ws[i] = rng.Uint32()
+		}
+		return wq, sc, bi
+	}
+	gateW, gateS, gateB := mkW(dFF, dModel)
+	upW, upS, upB := mkW(dFF, dModel)
+	downW, downS, downB := mkW(dModel, dFF)
+	h := scratchBF16(m * dModel)
+	normW := scratchBF16(dModel)
+	normed := scratchBF16(m * dModel)
+	gate := scratchBF16(m * dFF)
+	up := scratchBF16(m * dFF)
+	gated := scratchBF16(m * dFF)
+	down := scratchBF16(m * dModel)
+	// S-slab stand-ins at the real scale: the 8K-prompt sdpaS pair holds
+	// headBatch*K x (basePos+K) bf16 — ~64MB per slab mid-prompt. Stream one
+	// slab-to-slab copy per layer, exactly one write+read of 64MB.
+	const sElems = 32 << 20 // 64MB bf16
+	s0 := scratchBF16(sElems)
+	s1 := scratchBF16(sElems)
+	run := func(withS bool) time.Duration {
+		cb := commandBufferFast(queue)
+		enc := computeCommandEncoderFast(cb)
+		for it := 0; it < iters; it++ {
+			for li := 0; li < layers; li++ {
+				if err := encRMSNormRowsBF16(enc, h, normW, normed, 0, 0, 0, m, dModel, 1e-6); err != nil {
+					t.Fatalf("rms: %v", err)
+				}
+				if withS { // the SDPA seat: S-scale streaming between norm and the gemms
+					if err := encCopyBF16Contig(enc, s0, s1, 0, 0, sElems); err != nil {
+						t.Fatalf("scopy: %v", err)
+					}
+				}
+				if err := encQMMTBF16At(enc, gateW, gateS, gateB, normed, gate, 0, 0, 0, 0, 0, m, dFF, dModel, gs, bits); err != nil {
+					t.Fatalf("gate: %v", err)
+				}
+				if err := encQMMTBF16At(enc, upW, upS, upB, normed, up, 0, 0, 0, 0, 0, m, dFF, dModel, gs, bits); err != nil {
+					t.Fatalf("up: %v", err)
+				}
+				if err := encGeluGateMulFused(enc, gate, up, gated, m*dFF); err != nil {
+					t.Fatalf("gelu: %v", err)
+				}
+				if err := encQMMTBF16At(enc, downW, downS, downB, gated, down, 0, 0, 0, 0, 0, m, dModel, dFF, gs, bits); err != nil {
+					t.Fatalf("down: %v", err)
+				}
+			}
+		}
+		endEncodingFast(enc)
+		start := time.Now()
+		commitCommandBufferFast(cb)
+		waitUntilCompletedFast(cb)
+		return time.Since(start)
+	}
+	run(false) // warm
+	gemmFlops := 2.0 * float64(m) * float64(layers) * 3 * float64(dModel) * float64(dFF) * float64(iters)
+	dPlain := run(false)
+	dS := run(true)
+	sBytes := float64(layers*iters) * float64(sElems) * 2 * 2 // write+read per layer
+	sSeconds := sBytes / 700e9                                // ~DRAM-rate cost of the copies themselves
+	t.Logf("plain chain      %8.2fms  %.1f TFLOPS", dPlain.Seconds()*1000, gemmFlops/dPlain.Seconds()/1e12)
+	t.Logf("with S-traffic   %8.2fms  gemm-effective %.1f TFLOPS after subtracting ~%.0fms copy cost",
+		dS.Seconds()*1000, gemmFlops/(dS.Seconds()-sSeconds)/1e12, sSeconds*1000)
+}
