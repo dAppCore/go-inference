@@ -4,6 +4,8 @@ package tokenizer
 
 import (
 	"testing"
+
+	core "dappco.re/go"
 )
 
 // Benchmark coverage for the W11-S lane: every hot tokenizer surface
@@ -477,5 +479,23 @@ func BenchmarkTokenizer_matchSpecialToken_MissManySpecials(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		_, _, _ = tok.matchSpecialToken(text)
+	}
+}
+
+// BenchmarkTokenizer_storeBPETokens_EvictionChurn saturates the cache then
+// stores a stream of unique keys — the realistic high-miss / long-document
+// regime where every store evicts the oldest entry. The FIFO ring holds this
+// O(1); the previous copy-shift eviction was O(cacheLimit) per store (~860 ns
+// vs ~130 ns at the 4096 limit).
+func BenchmarkTokenizer_storeBPETokens_EvictionChurn(b *testing.B) {
+	tok := &Tokenizer{}
+	for i := range tokenizerBPECacheLimit {
+		tok.storeBPETokens("seed"+core.Itoa(i), []int32{int32(i)})
+	}
+	b.ReportAllocs()
+	i := 0
+	for b.Loop() {
+		tok.storeBPETokens("uniq"+core.Itoa(i), []int32{int32(i)})
+		i++
 	}
 }
