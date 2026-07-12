@@ -236,8 +236,13 @@ type LoadedAudio struct {
 	Subsample  LoadedAudioSubsample
 	Layers     []LoadedAudioLayer
 	OutputProj []byte
-	Projector  LoadedAudioLinear
-	Cfg        LoadedAudioConfig
+	// OutputProjBias is audio_tower.output_proj.bias [OutputDim] (BF16 bytes), added per row after
+	// the encoder's output projection. HF's Gemma4AudioModel.output_proj is a bias=True Linear and
+	// the checkpoint ships a non-negligible bias (e2b max|abs| 14.875), so dropping it corrupts every
+	// clip; nil only for packs that omit it.
+	OutputProjBias []byte
+	Projector      LoadedAudioLinear
+	Cfg            LoadedAudioConfig
 }
 
 // LoadedDiffusion is the neutral block-diffusion payload a backend can upload/build.

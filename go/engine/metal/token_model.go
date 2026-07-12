@@ -63,7 +63,13 @@ type NativeTokenModel struct {
 	// text-only checkpoint (ProjectImage then falls back to the HF defaults).
 	visionFeatureCfg *VisionImageFeatureConfig
 	audio            *model.LoadedAudio
-	diffusion        *model.LoadedDiffusion
+	// audioExtractor is the host mel front-end for a Conformer audio tower (E2B/E4B),
+	// built + held at load from the model's processor_config.json so ProjectAudio can run
+	// WAV -> mel -> tower (mirroring visionFeatureCfg). nil for unified (12B raw-waveform
+	// head) or text-only checkpoints, and left nil — audio disabled, load unaffected — when
+	// the front-end config is absent or malformed.
+	audioExtractor *AudioFeatureExtractor
+	diffusion      *model.LoadedDiffusion
 	bf16             *BF16Model
 	quant            *QuantModel
 	// tok is the optional text tokenizer, mirroring pkg/metal Model's held
@@ -314,26 +320,40 @@ func (m *NativeTokenModel) AcceptsAudioInput() bool {
 	return m.audio != nil
 }
 
-// ProjectAudio decodes one WAV (16-bit PCM mono 16 kHz) and projects it
-// through the unified audio head, returning the soft-token features and their
-// count. The Conformer lane has no bytes-in path (its feature extractor runs
-// upstream), so non-unified models error here.
+// ProjectAudio decodes one WAV (16-bit PCM mono 16 kHz) and projects it into audio soft-token
+// features, returning the feature bytes and their count. Two heads: the unified 12B raw-waveform head
+// (UnifiedAudioProject), and the Conformer E2B/E4B tower — the host mel front-end runs upstream here
+// (WAV -> AudioInputFeatures -> ProjectAudioFeatures) so the bytes-in contract holds for both.
 func (m *NativeTokenModel) ProjectAudio(audio []byte) ([]byte, int, error) {
 	if m == nil {
 		return nil, 0, core.NewError("native.NativeTokenModel.ProjectAudio: nil model")
-	}
-	if m.unifiedVision == nil || m.unifiedVision.Cfg.AudioSamplesPerToken <= 0 {
-		return nil, 0, core.NewError("native.NativeTokenModel.ProjectAudio: model has no unified audio head")
 	}
 	samples, err := DecodeWAVMono16k(audio)
 	if err != nil {
 		return nil, 0, core.E("native.audio", "decode wav", err)
 	}
-	features, n, err := UnifiedAudioProject(m.unifiedVision, samples)
-	if err != nil {
-		return nil, 0, core.E("native.audio", "project (unified)", err)
+	if m.unifiedVision != nil && m.unifiedVision.Cfg.AudioSamplesPerToken > 0 {
+		features, n, perr := UnifiedAudioProject(m.unifiedVision, samples)
+		if perr != nil {
+			return nil, 0, core.E("native.audio", "project (unified)", perr)
+		}
+		return features, n, nil
 	}
-	return features, n, nil
+	if m.audio != nil {
+		if m.audioExtractor == nil {
+			return nil, 0, core.NewError("native.NativeTokenModel.ProjectAudio: Conformer audio disabled (feature extractor unavailable)")
+		}
+		features, frames, melBins, ferr := AudioInputFeatures(samples, m.audioExtractor)
+		if ferr != nil {
+			return nil, 0, core.E("native.audio", "extract features", ferr)
+		}
+		projected, perr := m.ProjectAudioFeatures(features, frames, melBins)
+		if perr != nil {
+			return nil, 0, perr
+		}
+		return projected, m.AudioSoftTokens(frames), nil
+	}
+	return nil, 0, core.NewError("native.NativeTokenModel.ProjectAudio: model has no audio head")
 }
 
 func (m *NativeTokenModel) BlockDiffusionCapable() bool {
@@ -618,9 +638,10 @@ func nativeAudioFromLoaded(loaded *model.LoadedAudio, frames, melBins int) (*Aud
 			Frames: frames, MelBins: melBins, OutC0: outC0, OutC1: outC1,
 			Hidden: loaded.Cfg.Hidden, Eps: loaded.Cfg.Eps,
 		},
-		Layers:     make([]*AudioLayerWeights, len(loaded.Layers)),
-		OutputProj: loaded.OutputProj,
-		OutputDim:  loaded.Cfg.OutputDim,
+		Layers:         make([]*AudioLayerWeights, len(loaded.Layers)),
+		OutputProj:     loaded.OutputProj,
+		OutputProjBias: loaded.OutputProjBias,
+		OutputDim:      loaded.Cfg.OutputDim,
 	}
 	for i := range loaded.Layers {
 		src := &loaded.Layers[i]
