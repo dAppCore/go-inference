@@ -19,9 +19,8 @@ import (
 // to f32; layer1 + input_proj run f32. Mirrors engine/metal's AudioSubsampleF32. validity is the
 // optional per-frame (length frames) validity mask (nil ⇒ a fully-valid clip, byte-identical to the
 // mask-free path): the second return is the per-soft-token validity, HF's SubSampleConvProjection
-// halving the input mask (mask[:, ::2]) at each stride-2 conv. Values are NOT re-zeroed here — the mel
-// extractor already zeros padding frames, so the subsampler activations stay byte-identical to the
-// mask-free path; the halved mask only feeds the attention key-padding AND.
+// halving the input mask (mask[:, ::2]) at each stride-2 conv. The once-halved mask also zeroes invalid
+// time rows between the conv stages, matching HF's per-layer input mask at an odd ceil boundary.
 func Subsample(features []byte, frames, melBins int, la *model.LoadedAudio, validity []bool) ([]float32, []bool, error) {
 	if la == nil {
 		return nil, nil, core.NewError("audio.Subsample: nil LoadedAudio")
@@ -42,6 +41,8 @@ func Subsample(features []byte, frames, melBins int, la *model.LoadedAudio, vali
 	c0 := conv2dF32(bf16ToF32Slice(features), bf16ToF32Slice(sub.Conv0), 1, frames, melBins, 1, outC0, 3, 3, 2, 2, 1, 1)
 	n0 := layerNorm(roundBf16(c0), sub.Norm0W, sub.Norm0B, t0*f0, outC0, cfg.Eps)
 	r0 := relu(roundBf16(n0))
+	stageMask := halveValidity(validity)
+	zeroInvalidTimeRows(r0, t0, f0*outC0, stageMask)
 
 	// Layer1: f32 (conv + norm widened from bf16).
 	t1, f1 := convOut(t0), convOut(f0)
@@ -51,7 +52,22 @@ func Subsample(features []byte, frames, melBins int, la *model.LoadedAudio, vali
 
 	// flatten [t1, f1·outC1] → input_proj (f32 mixed-dtype matmul).
 	out := linear(r1, sub.InputProj, t1, f1*outC1, cfg.Hidden)
-	return out, halveValidity(halveValidity(validity)), nil
+	return out, halveValidity(stageMask), nil
+}
+
+// zeroInvalidTimeRows applies HF's per-layer subsampling mask in place. Each false time position zeros
+// its complete frequency-by-channel row before the following convolution; nil and all-true masks do
+// no writes, preserving the fully-valid path byte-for-byte.
+func zeroInvalidTimeRows(x []float32, times, rowWidth int, validity []bool) {
+	if validity == nil {
+		return
+	}
+	for t := range times {
+		if t < len(validity) && validity[t] {
+			continue
+		}
+		clear(x[t*rowWidth : (t+1)*rowWidth])
+	}
 }
 
 // halveValidity is HF's mask[:, ::2]: a stride-2 conv halves the time axis, so the validity mask keeps
