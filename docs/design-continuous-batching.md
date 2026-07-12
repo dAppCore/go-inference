@@ -205,6 +205,59 @@ Enumerated requirements, deliberately not attempted this round (hard fence:
    decode (available today, per §a) is actually CB-count-bound rather than
    compute-bound at realistic concurrency. Nobody has measured this — see §d.
 
+### Slice 3 implementation audit (2026-07-12, task #35 slice 3)
+
+The implementation audit reached the brief's explicit deep-surgery stop. No
+optional capability is bound and the scheduler remains on its existing
+single-request path. In particular, this audit does **not** call K ordinary
+session steps behind a method named "batch": that would increment an
+engagement counter without performing one shared forward.
+
+The blocking ownership boundary is evidenced in the current tree:
+
+1. `go/engine/metal/arch_session.go:35-86` gives each `ArchSession` one embedded
+   `archDecodeState` and one scalar `pos`. Session construction creates that
+   state and its paged KV allocation together at
+   `go/engine/metal/arch_session.go:645-668`.
+2. The available batched primitive is a method on **one** such state and takes
+   one scalar position: `stepTokensBatchedDense(embs, basePos)` at
+   `go/engine/metal/decode_batched_session.go:381-387`. Its documented and
+   implemented contract is consecutive positions
+   `[basePos, basePos+K)` written into that state's per-layer caches, not K
+   independent positions in K independent caches.
+3. The attention plumbing derives every row's live length and cache landing
+   from that shared `basePos` (for example
+   `go/engine/metal/decode_batched_session.go:1137-1140` and
+   `go/engine/metal/decode_batched_session.go:1321-1350`). Substituting a
+   position vector alone is insufficient: those calls still bind cache buffers
+   through the receiver's single `archDecodeState`.
+4. The existing engine wrapper opens a fresh independent engine session for
+   every generation (`go/engine/model.go:195-201`). There is no owner above
+   those sessions that can encode one command buffer against all of their KV
+   allocations.
+
+The smallest honest engine seam remains an optional capability with three
+operations: prepare/prefill an independent decode lane, advance a slice of
+prepared lanes in one `Step(ctx, lanes)` forward, and retire a lane. A step
+result must contain one token-or-terminal result per input lane and expose a
+monotonic batched-forward counter so tests can prove the K-way implementation
+fired. `serving/scheduler` interleave mode can probe that capability and use a
+single step coordinator only when it is present; serial, batch, and the
+existing interleave source path need no changes. Capability construction must
+also check `LTHN_CB_STEP`: the exact value `0` returns the ordinary model
+without the optional wrapper, so an interface assertion fails rather than a
+claimed batch method silently falling back internally.
+
+Implementing that seam in Metal first requires a multi-session state owner
+which separates shared immutable weights from lane-owned mutable state, then
+changes the whole batched attention/cache path to accept per-lane KV buffer
+bindings, positions, live lengths, ring slots, and optional PLE state. Only
+after that owner exists can the required varied-fill fixture compare K
+independent serial sessions byte-for-byte with one counter-guarded K-way
+forward. That is the deep surgery named by the brief; adding the public
+interface or scheduler probe before any engine can truthfully bind it would be
+dead API rather than a buildable partial.
+
 ## (c) Memory / KV budget interaction with the multi-model + tiered work
 
 Two KV-budget primitives exist and are **unwired into anything** (same status
