@@ -16,6 +16,15 @@ import (
 // affordance shape as LTHN_KV_Q8_ICB / LTHN_FLASH_PROMPT.
 var oprojFuseEnabled = os.Getenv("LTHN_OPROJ_FUSE") != "0"
 
+// inputFuseEnabled gates the input-side mirror of the o_proj fuse: the NEXT layer's input RMSNorm + input
+// projections folded onto the BACK of the current layer's proj-fused tail command buffer. It EXTENDS that
+// tail (reimplements it inline, so it never calls ResidualNormMLPProjDevice itself) but still requires
+// oprojFuseEnabled — disabling the base proj-fuse is meant to disable the whole family, not leave an
+// equivalent fused path active under a different switch. Default on; LTHN_INPUT_FUSE=0 leaves these hooks
+// unbound so forwardEmb falls back to the proj-fused-tail-only path — the "before" arm of a same-binary
+// interleaved A/B.
+var inputFuseEnabled = oprojFuseEnabled && os.Getenv("LTHN_INPUT_FUSE") != "0"
+
 // composed_backend.go wires native's device GEMM into the composed stack's own projections — the
 // attention mixer's q/k/v/o, the MLP/MoE matmuls, and the LM head (the largest single matmul of every
 // decode step) — the same AX-8 seam as gated_delta_backend.go: composed declares the hook and runs the
@@ -30,5 +39,9 @@ func init() {
 	composed.ResidualNormMLPDevice = ResidualNormMLPDevice // fuses the FFN tail: mixer residual + post-attn RMSNorm + SwiGLU MLP + MLP residual into one command buffer
 	if oprojFuseEnabled {
 		composed.ResidualNormMLPProjDevice = ResidualNormMLPProjDevice // folds the mixer's o_proj/out_proj onto the front of that tail — one CB where the unfused path pays a standalone projection CB per layer
+	}
+	if inputFuseEnabled {
+		composed.ResidualNormMLPProjAttnInputDevice = ResidualNormMLPProjAttnInputDevice             // folds the NEXT full-attention layer's input RMSNorm + q/k/v onto the back of that tail
+		composed.ResidualNormMLPProjGatedDeltaInputDevice = ResidualNormMLPProjGatedDeltaInputDevice // folds the NEXT gated-delta layer's input RMSNorm + in_proj_qkv/z/a/b onto the back of that tail
 	}
 }

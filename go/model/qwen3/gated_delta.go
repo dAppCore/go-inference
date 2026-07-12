@@ -33,6 +33,15 @@ func (c GatedDeltaConfig) qDim() int    { return c.KeyHeads * c.HeadDim }
 func (c GatedDeltaConfig) vDim() int    { return c.ValueHeads * c.HeadDim }
 func (c GatedDeltaConfig) convDim() int { return 2*c.qDim() + c.vDim() } // q | k | v
 
+// QDim, VDim and ConvDim are the exported forms of qDim/vDim/convDim — the projection-shape formulas a
+// caller OUTSIDE this package needs to target a gated-delta layer's input projections (in_proj_qkv/z/a/b)
+// without duplicating the arithmetic. Exported for composed's device-fusion seam (see
+// composed.ResidualNormMLPProjGatedDeltaInputDevice), which reads a NEXT layer's gated-delta geometry to
+// size the fused command buffer's projection outputs.
+func (c GatedDeltaConfig) QDim() int    { return c.qDim() }
+func (c GatedDeltaConfig) VDim() int    { return c.vDim() }
+func (c GatedDeltaConfig) ConvDim() int { return c.convDim() }
+
 // GatedDeltaWeights is one layer's f32 weights (the loader widens the bf16 checkpoint). InProjQKV is
 // [convDim, D]; ConvWeight [convDim, K]; InProjA/InProjB [ValueHeads, D]; ALog/DtBias [ValueHeads];
 // InProjZ [vDim, D]; Norm [HeadDim] (per-value-head gated RMSNorm); OutProj [D, vDim].
@@ -214,7 +223,10 @@ func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDel
 // dim vDim, and the advanced (newConv, newDelta). The composed session uses it to fold out_proj into the
 // FFN-tail command buffer (composed.projMixer); GatedDeltaForwardScratchF32 wraps it with the out_proj GEMM.
 // The state advances identically — only the final projection is deferred to the caller. sc's projection
-// buffers (qkv/aProj/bProj/zProj) are reused as in the wrapper; nil ⇒ each allocates fresh.
+// buffers (qkv/aProj/bProj/zProj) are reused as in the wrapper; nil ⇒ each allocates fresh. It computes its
+// own input projections then hands off to GatedDeltaForwardScratchFromInputF32, which a device fusion
+// (composed.ResidualNormMLPProjGatedDeltaInputDevice) also feeds directly — the two entry points differ
+// only in HOW qkv/z/a/b were produced.
 func GatedDeltaForwardScratchNoProjF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L, D int, sc *GatedDeltaScratch) (gated []float32, vDim int, newConv, newDelta []float32, err error) {
 	if sc == nil {
 		sc = &GatedDeltaScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
@@ -222,19 +234,18 @@ func GatedDeltaForwardScratchNoProjF32(x []float32, w *GatedDeltaWeights, cfg Ga
 	if w == nil {
 		return nil, 0, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: nil weights")
 	}
-	KH, VH, HD, K := cfg.KeyHeads, cfg.ValueHeads, cfg.HeadDim, cfg.ConvKernel
-	if KH <= 0 || VH <= 0 || HD <= 0 || VH%KH != 0 || len(x) != L*D {
+	KH, VH := cfg.KeyHeads, cfg.ValueHeads
+	if KH <= 0 || VH <= 0 || cfg.HeadDim <= 0 || VH%KH != 0 || len(x) != L*D {
 		return nil, 0, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: bad geometry or x size")
 	}
-	qDim, vDim, convDim := cfg.qDim(), cfg.vDim(), cfg.convDim()
-	rep := VH / KH
-	scale := float32(1.0 / math.Sqrt(float64(HD)))
+	vDim = cfg.vDim()
+	convDim := cfg.convDim()
 
 	// Input fuse: in_proj_qkv/z/a/b all read x [L,D]. When the backend supplies the fused hook and the
 	// dominant qkv projection crosses the device floor, all four are computed up front in ONE command
 	// buffer (a/b ride free inside it); z's value depends only on x, so computing it here — before the
 	// conv/recurrence that consume it downstream — is identical to computing it at its use site. A nil
-	// hook or a device error leaves inputFused false and each projection runs at its original site.
+	// hook or a device error leaves inputFused false and each projection runs at its per-call site below.
 	var qkv, alpha, beta, zProj []float32
 	inputFused := false
 	if GatedDeltaInputDevice != nil && L*D*convDim >= deviceMinWork {
@@ -249,7 +260,48 @@ func GatedDeltaForwardScratchNoProjF32(x []float32, w *GatedDeltaWeights, cfg Ga
 			return nil, 0, nil, nil, err
 		}
 		sc.qkv = qkv
+		alpha, err = projMatMulInto(sc.aProj, x, w.InProjA, L, D, VH)
+		if err != nil {
+			return nil, 0, nil, nil, err
+		}
+		sc.aProj = alpha
+		beta, err = projMatMulInto(sc.bProj, x, w.InProjB, L, D, VH)
+		if err != nil {
+			return nil, 0, nil, nil, err
+		}
+		sc.bProj = beta
+		zProj, err = projMatMulInto(sc.zProj, x, w.InProjZ, L, D, vDim)
+		if err != nil {
+			return nil, 0, nil, nil, err
+		}
+		sc.zProj = zProj
 	}
+	return GatedDeltaForwardScratchFromInputF32(qkv, zProj, alpha, beta, w, cfg, priorConv, priorDelta, L, D, sc)
+}
+
+// GatedDeltaForwardScratchFromInputF32 is GatedDeltaForwardScratchNoProjF32 from ALREADY-COMPUTED input
+// projections (qkv, zProj, alpha, beta) — used when a device fusion
+// (composed.ResidualNormMLPProjGatedDeltaInputDevice) folds the PREVIOUS layer's tail + THIS layer's input
+// RMSNorm + in_proj_qkv/z/a/b into one command buffer, so this call skips the input projection step
+// entirely. From here on the computation — causal conv, split q|k|v, l2-norm, the α/β gate transform, the
+// delta-rule recurrence and the gated output norm — is identical to GatedDeltaForwardScratchNoProjF32;
+// state threading is the same (priorConv/priorDelta in, newConv/newDelta out). alpha and beta are mutated
+// in place (the α/β gate transform below), so callers must not reuse them after this call.
+func GatedDeltaForwardScratchFromInputF32(qkv, zProj, alpha, beta []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L, D int, sc *GatedDeltaScratch) (gated []float32, vDim int, newConv, newDelta []float32, err error) {
+	if sc == nil {
+		sc = &GatedDeltaScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
+	}
+	if w == nil {
+		return nil, 0, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: nil weights")
+	}
+	KH, VH, HD, K := cfg.KeyHeads, cfg.ValueHeads, cfg.HeadDim, cfg.ConvKernel
+	if KH <= 0 || VH <= 0 || HD <= 0 || VH%KH != 0 {
+		return nil, 0, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: bad geometry")
+	}
+	qDim, vDim, convDim := cfg.qDim(), cfg.vDim(), cfg.convDim()
+	rep := VH / KH
+	scale := float32(1.0 / math.Sqrt(float64(HD)))
+
 	convOut, newConv, err := mamba2.CausalConv1dF32(qkv, w.ConvWeight, w.ConvBias, priorConv, L, convDim, K)
 	if err != nil {
 		return nil, 0, nil, nil, err
@@ -290,20 +342,8 @@ func GatedDeltaForwardScratchNoProjF32(x []float32, w *GatedDeltaWeights, cfg Ga
 
 	// α = exp(−exp(A_log)·softplus(a+dt_bias)) ∈ (0,1] ; β = sigmoid(b). Per (token, value-head). The
 	// two projection outputs are each read once and then dead, and α/β are the same [L,VH] shape, so
-	// map α over aProj and β over bProj in place — the element-wise transform (output i depends only
+	// map α over alpha and β over beta in place — the element-wise transform (output i depends only
 	// on input i) makes this bit-identical and needs no separate α/β buffer.
-	if !inputFused {
-		alpha, err = projMatMulInto(sc.aProj, x, w.InProjA, L, D, VH)
-		if err != nil {
-			return nil, 0, nil, nil, err
-		}
-		sc.aProj = alpha
-		beta, err = projMatMulInto(sc.bProj, x, w.InProjB, L, D, VH)
-		if err != nil {
-			return nil, 0, nil, nil, err
-		}
-		sc.bProj = beta
-	}
 	for i := 0; i < L*VH; i++ {
 		h := i % VH
 		dt := gdSoftplus(float64(alpha[i]) + float64(w.DtBias[h]))
@@ -321,13 +361,6 @@ func GatedDeltaForwardScratchNoProjF32(x []float32, w *GatedDeltaWeights, cfg Ga
 	// = [L·vDim], the gated shape, and is dead after this stage; each row's o is fully read (ss) then
 	// each element is read once more immediately before its own write, so the gated result is written
 	// in place over o — bit-identical, one fewer alloc per token.
-	if !inputFused {
-		zProj, err = projMatMulInto(sc.zProj, x, w.InProjZ, L, D, vDim)
-		if err != nil {
-			return nil, 0, nil, nil, err
-		}
-		sc.zProj = zProj
-	}
 	gated = o
 	for row := 0; row < L*VH; row++ {
 		var ss float64
