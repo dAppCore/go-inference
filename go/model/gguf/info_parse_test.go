@@ -4,6 +4,8 @@ package gguf
 
 import (
 	"bytes"
+	"encoding/binary"
+	"math"
 	"testing"
 
 	core "dappco.re/go"
@@ -140,6 +142,14 @@ func TestInfoParse_readGGUFValue_AllScalarTypes_Good(t *testing.T) {
 	}{
 		{"uint8", ggufValueTypeUint8, func(b *bytes.Buffer) { b.WriteByte(0xAB) }, uint8(0xAB)},
 		{"int8", ggufValueTypeInt8, func(b *bytes.Buffer) { b.WriteByte(0xFF) }, int8(-1)},
+		{"uint16", ggufValueTypeUint16, func(b *bytes.Buffer) { b.Write(binary.LittleEndian.AppendUint16(nil, 0xABCD)) }, uint16(0xABCD)},
+		{"int16", ggufValueTypeInt16, func(b *bytes.Buffer) { b.Write(binary.LittleEndian.AppendUint16(nil, 0xFFFF)) }, int16(-1)},
+		{"uint32", ValueTypeUint32, func(b *bytes.Buffer) { b.Write(binary.LittleEndian.AppendUint32(nil, 0xDEADBEEF)) }, uint32(0xDEADBEEF)},
+		{"int32", ggufValueTypeInt32, func(b *bytes.Buffer) { b.Write(binary.LittleEndian.AppendUint32(nil, 0xFFFFFFFF)) }, int32(-1)},
+		{"float32", ValueTypeFloat32, func(b *bytes.Buffer) { b.Write(binary.LittleEndian.AppendUint32(nil, math.Float32bits(1.5))) }, float32(1.5)},
+		{"uint64", ggufValueTypeUint64, func(b *bytes.Buffer) { b.Write(binary.LittleEndian.AppendUint64(nil, 0x0123456789ABCDEF)) }, uint64(0x0123456789ABCDEF)},
+		{"int64", ggufValueTypeInt64, func(b *bytes.Buffer) { b.Write(binary.LittleEndian.AppendUint64(nil, 0xFFFFFFFFFFFFFFFF)) }, int64(-1)},
+		{"float64", ggufValueTypeFloat64, func(b *bytes.Buffer) { b.Write(binary.LittleEndian.AppendUint64(nil, math.Float64bits(2.25))) }, float64(2.25)},
 		{"bool-true", ggufValueTypeBool, func(b *bytes.Buffer) { b.WriteByte(1) }, true},
 		{"bool-false", ggufValueTypeBool, func(b *bytes.Buffer) { b.WriteByte(0) }, false},
 	}
@@ -162,6 +172,130 @@ func TestInfoParse_readGGUFValue_UnsupportedType_Bad(t *testing.T) {
 	var scratch [8]byte
 	if _, err := readGGUFValue(buf, 0xFFFF, scratch[:], nil); err == nil {
 		t.Fatalf("readGGUFValue(unsupported type): want error, got nil")
+	}
+}
+
+// TestInfoParse_readGGUFValue_String_Good exercises the two string branches of
+// the value switch: the arena path (strArena != nil) and the standalone
+// readGGUFString path (strArena == nil). Both must decode the same bytes.
+func TestInfoParse_readGGUFValue_String_Good(t *testing.T) {
+	value := "a-fresh-uninterned-string"
+
+	arenaBuf := new(bytes.Buffer)
+	mustWriteLenPrefixed(t, arenaBuf, value)
+	var scratch [64]byte
+	var arena []byte
+	got, err := readGGUFValue(arenaBuf, ValueTypeString, scratch[:], &arena)
+	if err != nil {
+		t.Fatalf("readGGUFValue(string, arena): %v", err)
+	}
+	if got != value {
+		t.Errorf("readGGUFValue(string, arena) = %v, want %q", got, value)
+	}
+
+	plainBuf := new(bytes.Buffer)
+	mustWriteLenPrefixed(t, plainBuf, value)
+	got, err = readGGUFValue(plainBuf, ValueTypeString, scratch[:], nil)
+	if err != nil {
+		t.Fatalf("readGGUFValue(string, no arena): %v", err)
+	}
+	if got != value {
+		t.Errorf("readGGUFValue(string, no arena) = %v, want %q", got, value)
+	}
+}
+
+// TestInfoParse_readGGUFValue_NumericArray_Good decodes a numeric-element array,
+// which materialises every element into a []any (unlike the string-element array
+// which is counted only). Verifies element type, count and values.
+func TestInfoParse_readGGUFValue_NumericArray_Good(t *testing.T) {
+	buf := new(bytes.Buffer)
+	buf.Write(binary.LittleEndian.AppendUint32(nil, ValueTypeUint32)) // element type
+	buf.Write(binary.LittleEndian.AppendUint64(nil, 3))               // length
+	for _, v := range []uint32{10, 20, 30} {
+		buf.Write(binary.LittleEndian.AppendUint32(nil, v))
+	}
+
+	var scratch [8]byte
+	got, err := readGGUFValue(buf, ggufValueTypeArray, scratch[:], nil)
+	if err != nil {
+		t.Fatalf("readGGUFValue(numeric array): %v", err)
+	}
+	values, ok := got.([]any)
+	if !ok {
+		t.Fatalf("readGGUFValue(numeric array) = %T, want []any", got)
+	}
+	if len(values) != 3 || values[0] != uint32(10) || values[2] != uint32(30) {
+		t.Errorf("readGGUFValue(numeric array) = %v, want [10 20 30]", values)
+	}
+}
+
+// TestInfoParse_readGGUFValue_StringArray_Good exercises the vocab-skip fast
+// path: a string-element array is parsed for its COUNT only and returned as a
+// ggufStringArrayLen, never materialising the (potentially 200k-token) strings.
+func TestInfoParse_readGGUFValue_StringArray_Good(t *testing.T) {
+	buf := new(bytes.Buffer)
+	buf.Write(binary.LittleEndian.AppendUint32(nil, ValueTypeString)) // element type
+	buf.Write(binary.LittleEndian.AppendUint64(nil, 4))               // length
+	for _, tok := range []string{"a", "bb", "ccc", "dddd"} {
+		mustWriteLenPrefixed(t, buf, tok)
+	}
+
+	var scratch [8]byte
+	got, err := readGGUFValue(buf, ggufValueTypeArray, scratch[:], nil)
+	if err != nil {
+		t.Fatalf("readGGUFValue(string array): %v", err)
+	}
+	if got != ggufStringArrayLen(4) {
+		t.Errorf("readGGUFValue(string array) = %v (%T), want ggufStringArrayLen(4)", got, got)
+	}
+	if n := metadataArrayLen(got); n != 4 {
+		t.Errorf("metadataArrayLen = %d, want 4", n)
+	}
+}
+
+// TestInfoParse_readGGUFValue_ArrayTooLong_Bad rejects an array whose declared
+// length exceeds maxGGUFCollectionEntries — the guard against a corrupt header
+// asking the parser to allocate a giant slice.
+func TestInfoParse_readGGUFValue_ArrayTooLong_Bad(t *testing.T) {
+	buf := new(bytes.Buffer)
+	buf.Write(binary.LittleEndian.AppendUint32(nil, ValueTypeUint32))
+	buf.Write(binary.LittleEndian.AppendUint64(nil, maxGGUFCollectionEntries+1))
+
+	var scratch [8]byte
+	if _, err := readGGUFValue(buf, ggufValueTypeArray, scratch[:], nil); err == nil {
+		t.Fatalf("readGGUFValue(over-length array): want error, got nil")
+	}
+}
+
+// TestInfoParse_readGGUFValue_Truncated_Ugly feeds a reader that ends before the
+// value is fully read. Every scalar branch, plus the array element-type and
+// length headers, must surface the io.ReadFull error rather than returning a
+// half-decoded value.
+func TestInfoParse_readGGUFValue_Truncated_Ugly(t *testing.T) {
+	cases := []struct {
+		name      string
+		valueType uint32
+		payload   []byte // deliberately shorter than the type needs
+	}{
+		{"uint8", ggufValueTypeUint8, nil},
+		{"int8", ggufValueTypeInt8, nil},
+		{"uint16", ggufValueTypeUint16, []byte{0x01}},
+		{"int16", ggufValueTypeInt16, []byte{0x01}},
+		{"uint32", ValueTypeUint32, []byte{0x01, 0x02}},
+		{"int32", ggufValueTypeInt32, []byte{0x01, 0x02}},
+		{"float32", ValueTypeFloat32, []byte{0x01, 0x02}},
+		{"bool", ggufValueTypeBool, nil},
+		{"uint64", ggufValueTypeUint64, []byte{0x01, 0x02, 0x03}},
+		{"int64", ggufValueTypeInt64, []byte{0x01, 0x02, 0x03}},
+		{"float64", ggufValueTypeFloat64, []byte{0x01, 0x02, 0x03}},
+		{"array-elemtype", ggufValueTypeArray, []byte{0x01}},                                         // < 4 bytes for element type
+		{"array-length", ggufValueTypeArray, binary.LittleEndian.AppendUint32(nil, ValueTypeUint32)}, // element type ok, length truncated
+	}
+	for _, tc := range cases {
+		var scratch [8]byte
+		if _, err := readGGUFValue(bytes.NewReader(tc.payload), tc.valueType, scratch[:], nil); err == nil {
+			t.Errorf("%s: readGGUFValue(truncated): want error, got nil", tc.name)
+		}
 	}
 }
 
