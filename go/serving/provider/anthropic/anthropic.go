@@ -77,6 +77,9 @@ type MessageRequest struct {
 	Stream        bool      `json:"stream,omitempty"`
 	StopSequences []string  `json:"stop_sequences,omitempty"`
 	Tools         []Tool    `json:"tools,omitempty"`
+	// ToolChoice controls whether/which of Tools the model is offered this turn
+	// — see toolchoice.go.
+	ToolChoice *ToolChoice `json:"tool_choice,omitempty"`
 }
 
 // Usage records Anthropic-style token accounting.
@@ -351,13 +354,25 @@ func MessageRequestSize(r MessageRequest) int {
 }
 
 // InferenceMessages converts Anthropic messages into shared inference messages.
-// When the request carries tools, their Gemma 4 declarations are appended to the
-// system turn (the placement the model was trained on) so it can answer with a
-// <|tool_call> — see RenderToolDeclarations.
+// When the request carries tools, the tools actually offered this turn — after
+// applying tool_choice (ResolveOfferedTools) — have their Gemma 4 declarations
+// appended to the system turn (the placement the model was trained on) so the
+// model can answer with a <|tool_call> — see RenderToolDeclarations.
+//
+// InferenceMessages' signature is load-bearing for existing callers (engine/hip
+// among them), so a contradictory tool_choice degrades to declaring every
+// tool — the pre-tool_choice behaviour — rather than erroring with no way to
+// report it; an HTTP caller that wants a clean 4xx on that contradiction (and
+// the tool-calling capability gate) validates explicitly with
+// ResolveOfferedTools first — see serving/compat's anthropicMessagesHandler.
 func InferenceMessages(req MessageRequest) []inference.Message {
 	out := make([]inference.Message, 0, len(req.Messages)+1)
 	system := req.System
-	if decl := RenderToolDeclarations(req.Tools); decl != "" {
+	offered, err := ResolveOfferedTools(req.Tools, req.ToolChoice)
+	if err != nil {
+		offered = req.Tools
+	}
+	if decl := RenderToolDeclarations(offered); decl != "" {
 		if system != "" {
 			system += "\n" + decl
 		} else {

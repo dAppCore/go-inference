@@ -175,6 +175,29 @@ func TestJsondec_MessageRequest_UnmarshalJSON_Ugly(t *testing.T) {
 	}
 }
 
+// TestJsondec_MessageRequest_UnmarshalJSON_ToolChoice pins tool_choice's
+// reflect-fallback decode path (the same cold-path shape as "tools" above),
+// and that the field omitted entirely leaves ToolChoice nil rather than a
+// zero-value struct (InferenceMessages' nil check relies on that distinction).
+func TestJsondec_MessageRequest_UnmarshalJSON_ToolChoice(t *testing.T) {
+	var req MessageRequest
+	data := []byte(`{"model":"x","max_tokens":5,"messages":[],"tool_choice":{"type":"tool","name":"get_weather"}}`)
+	if err := req.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if req.ToolChoice == nil || req.ToolChoice.Type != "tool" || req.ToolChoice.Name != "get_weather" {
+		t.Fatalf("req.ToolChoice = %+v, want type=tool name=get_weather", req.ToolChoice)
+	}
+
+	var reqOmitted MessageRequest
+	if err := reqOmitted.UnmarshalJSON([]byte(`{"model":"x","max_tokens":5,"messages":[]}`)); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if reqOmitted.ToolChoice != nil {
+		t.Fatalf("req.ToolChoice with the field omitted = %+v, want nil", reqOmitted.ToolChoice)
+	}
+}
+
 // TestUnmarshalMessageResponse_DirectShapes pins the response decoder.
 func TestUnmarshalMessageResponse_DirectShapes(t *testing.T) {
 	in := `{"id":"msg_1","type":"message","role":"assistant","model":"claude-3","content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`
