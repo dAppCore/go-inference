@@ -139,4 +139,20 @@ func TestSchedulerResolver_Unset_NoWrapper(t *testing.T) {
 	if _, isScheduler := wrapped.(*scheduler.Model); !isScheduler {
 		t.Fatal("wrapped resolver did not return a *scheduler.Model")
 	}
+
+	// Multi-model twin of the same contract (#35): a multiModelResolver that
+	// never called setScheduler (the -models-config path with -scheduler
+	// unset) must ALSO hand back the plain model — ensureResident's scheduler
+	// branch is gated on schedCfg != nil, so no scheduler package type is
+	// constructed at all.
+	mmLoader, _, _ := countingLoader()
+	mm := mustResolver(t, []ModelSpec{{ID: "m", Path: "/m/m"}}, MultiModelOptions{})
+	mm.setLoader(mmLoader)
+	mmGot, err := mm.ResolveModel(context.Background(), "m")
+	if err != nil {
+		t.Fatalf("multi-model bare ResolveModel error = %v", err)
+	}
+	if _, isScheduler := mmGot.(*scheduler.Model); isScheduler {
+		t.Fatal("multi-model resolver returned a *scheduler.Model — a scheduler was built with -scheduler unset")
+	}
 }

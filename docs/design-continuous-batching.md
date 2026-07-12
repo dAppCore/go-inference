@@ -352,6 +352,27 @@ model's scheduler goroutine does not outlive it. That is a registry-lifecycle
 change (a scheduler is a live goroutine, unlike the stateless welfare/policy
 resolver wraps), deliberately out of this single-model slice.
 
+**Multi-model resolution — wired (#35, supersedes the paragraph above).**
+`multiModelResolver` gained exactly the per-model-id scheduler cache the
+paragraph above anticipated: a `schedCfg *scheduler.Config` set once
+(`setScheduler`, wired from `runMultiModelServe` when `-scheduler` is set) and
+a `sched *scheduler.Model` field on `modelEntry`. `ensureResident` builds the
+scheduler right after a model loads (fail-closed: a capability-probe failure
+rolls the entry back to non-resident and Closes the just-loaded model rather
+than serving it unscheduled), and `evict` — the ONE function LRU/budget
+eviction, idle-TTL sweep, and explicit unload all already funnelled through —
+calls `sched.CloseEngine()` before `model.Close()`, so a request genuinely
+in flight on the evicting model is cancelled and its stream ends cleanly
+before the engine underneath it is torn down. `closeSchedulers` (deferred by
+`runMultiModelServe`) drains whatever is still resident at serve shutdown, the
+multi-model twin of the single-model path's `sched.close()`.
+One pre-existing gap this surfaced and fixed in `serving/scheduler` itself:
+serial mode's `CloseEngine` was a no-op (nothing ever closed the worker
+queue) — harmless for single-model serve (the process exits anyway) but a
+real per-eviction goroutine leak once a scheduler is built and torn down
+repeatedly over a serve process's life. It now joins its worker pool
+synchronously, the same guarantee batch/interleave already held.
+
 **One semantics the unification could NOT fully collapse (evidenced):** the
 former `schedule.Engine`'s int-based `Stepper` seam (`StepResult.Tokens
 map[string]int`, `go/serving/schedule/schedule.go:71` in the pre-merge tree) is a

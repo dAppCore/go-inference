@@ -4,12 +4,15 @@ package serving
 
 import (
 	"context"
+	"iter"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/serving/scheduler"
 )
 
 // mustResolver builds a resolver from specs + opts, failing the test on a
@@ -40,6 +43,113 @@ func countingLoader() (loader ModelLoader, loads map[string]int, models map[stri
 		return m, nil
 	}
 	return loader, loads, models
+}
+
+// blockingModel is a TextModel whose Generate/Chat report the instant they
+// start (on started) then block on release until signalled or the request
+// ctx is cancelled — the double for holding a scheduled request genuinely
+// "in flight" while a concurrent eviction runs, so the eviction lifecycle
+// tests exercise a real race rather than a request that finished before
+// eviction had a chance to matter.
+type blockingModel struct {
+	modelType string
+	started   chan string
+	release   chan struct{}
+	closed    bool
+}
+
+func newBlockingModel(modelType string) *blockingModel {
+	return &blockingModel{modelType: modelType, started: make(chan string, 8), release: make(chan struct{})}
+}
+
+func (m *blockingModel) Generate(ctx context.Context, prompt string, _ ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return func(yield func(inference.Token) bool) {
+		m.started <- prompt
+		select {
+		case <-ctx.Done():
+			return
+		case <-m.release:
+		}
+		yield(inference.Token{Text: prompt})
+	}
+}
+
+func (m *blockingModel) Chat(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
+	prompt := ""
+	if len(messages) > 0 {
+		prompt = messages[len(messages)-1].Content
+	}
+	return m.Generate(ctx, prompt, opts...)
+}
+
+func (m *blockingModel) Classify(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.ClassifyResult(nil))
+}
+func (m *blockingModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.BatchResult(nil))
+}
+func (m *blockingModel) ModelType() string                  { return m.modelType }
+func (m *blockingModel) Info() inference.ModelInfo          { return inference.ModelInfo{} }
+func (m *blockingModel) Metrics() inference.GenerateMetrics { return inference.GenerateMetrics{} }
+func (m *blockingModel) Err() core.Result                   { return core.Ok(nil) }
+func (m *blockingModel) Close() core.Result                 { m.closed = true; return core.Ok(nil) }
+
+// tokenizingMockModel adds inference.TokenizerModel to mockTextModel — the
+// capability batch mode (and interleave with a token budget) require at
+// scheduler.New's construction-time probe.
+type tokenizingMockModel struct {
+	*mockTextModel
+}
+
+func (m *tokenizingMockModel) Encode(text string) []int32 { return make([]int32, len([]rune(text))) }
+func (m *tokenizingMockModel) Decode([]int32) string      { return "" }
+func (m *tokenizingMockModel) ApplyChatTemplate(messages []inference.Message) (string, error) {
+	out := ""
+	for _, msg := range messages {
+		out += msg.Content
+	}
+	return out, nil
+}
+
+// drainScheduledTokens reads every token off ch until it closes, with a
+// timeout so a stuck test fails fast instead of hanging the suite — the
+// serving-package twin of serving/scheduler's drainScheduled.
+func drainScheduledTokens(t *testing.T, ch <-chan inference.ScheduledToken) []inference.ScheduledToken {
+	t.Helper()
+	var got []inference.ScheduledToken
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case tok, ok := <-ch:
+			if !ok {
+				return got
+			}
+			got = append(got, tok)
+		case <-deadline:
+			t.Fatalf("drainScheduledTokens: timed out, got %d so far", len(got))
+		}
+	}
+}
+
+// waitGoroutineCount polls runtime.NumGoroutine until want is satisfied or the
+// deadline passes — mirrors serving/scheduler's identically-named test helper
+// (a goroutine's own exit trails the WaitGroup/doneCh signal that unblocks a
+// synchronous Close/CloseEngine call by a scheduling instant, so an immediate
+// read can occasionally observe a stale, still-draining count).
+func waitGoroutineCount(t *testing.T, want func(int) bool) int {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		n := runtime.NumGoroutine()
+		if want(n) {
+			return n
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("goroutine count never satisfied predicate, last = %d", n)
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
 }
 
 // TestMultiModelResolver_New_NoModels_Bad proves construction refuses an empty
@@ -511,4 +621,327 @@ func TestEstimateModelBytes_MissingPath_Good(t *testing.T) {
 	if got := estimateModelBytes("/no/such/model/dir/anywhere"); got != 0 {
 		t.Fatalf("estimateModelBytes(missing) = %d, want 0", got)
 	}
+}
+
+// --- #35: per-resident-model scheduler under -models-config ---
+
+// TestMultiModelResolver_Scheduler_PerModelInstance_Good proves each resident
+// model gets its OWN scheduler instance: scheduling a request against model
+// "a" — addressed once by its canonical id and once by an ALIAS — is
+// observable in a's Stats and NOT in b's, and the alias resolves to the exact
+// same scheduler pointer as the canonical id (not a second, distinct
+// instance). The registry is not accidentally sharing one scheduler (the
+// single-model schedulerResolver's shape, one shared instance keyed on "last
+// resolved model") across distinct resident models, nor building a fresh one
+// per alias.
+func TestMultiModelResolver_Scheduler_PerModelInstance_Good(t *testing.T) {
+	loader, _, _ := countingLoader()
+	r := mustResolver(t, []ModelSpec{
+		{ID: "a", Path: "/m/a", Aliases: []string{"a-alias"}},
+		{ID: "b", Path: "/m/b"},
+	}, MultiModelOptions{})
+	r.setLoader(loader)
+	schedCfg := scheduler.Config{Mode: scheduler.ModeSerial, MaxConcurrent: 2, MaxQueue: 4, StreamBuffer: 4}
+	r.setScheduler(&schedCfg)
+	defer r.closeSchedulers()
+
+	modelA, err := r.ResolveModel(context.Background(), "a")
+	if err != nil {
+		t.Fatalf("resolve a: %v", err)
+	}
+	modelAByAlias, err := r.ResolveModel(context.Background(), "a-alias")
+	if err != nil {
+		t.Fatalf("resolve a-alias: %v", err)
+	}
+	if modelAByAlias != modelA {
+		t.Fatal("alias resolved to a DIFFERENT scheduler instance than the canonical id — want the same one")
+	}
+	if _, err := r.ResolveModel(context.Background(), "b"); err != nil {
+		t.Fatalf("resolve b: %v", err)
+	}
+	schedA, ok := modelA.(inference.SchedulerModel)
+	if !ok {
+		t.Fatalf("resolved model a is not scheduler-backed: %T", modelA)
+	}
+
+	_, tokens, err := schedA.Schedule(context.Background(), inference.ScheduledRequest{Prompt: "hi"})
+	if err != nil {
+		t.Fatalf("Schedule(a): %v", err)
+	}
+	drainScheduledTokens(t, tokens)
+
+	if s := r.entries["a"].sched.Stats(); s.Submitted != 1 {
+		t.Fatalf("a Stats.Submitted = %d, want 1", s.Submitted)
+	}
+	if s := r.entries["b"].sched.Stats(); s.Submitted != 0 {
+		t.Fatalf("b Stats.Submitted = %d, want 0 (a request must not reach b's scheduler)", s.Submitted)
+	}
+}
+
+// TestMultiModelResolver_Scheduler_ProfileRouting_Good proves a `model:profile`
+// request BOTH applies the named preset AND is counted by that model's own
+// scheduler. profileModel does not itself satisfy inference.SchedulerModel
+// (Schedule sits outside TextModel's method set, so embedding the TextModel
+// interface cannot promote it regardless of what concrete value is stored
+// inside), so forEachCompatToken's direct Schedule branch is not taken for a
+// profiled request — it falls through to Chat/Generate, which
+// scheduler.Model.Chat/Generate itself routes through Schedule internally.
+// This is the composition that makes "requests route through THAT model's
+// scheduler" true for profiled requests too, exercised end to end rather than
+// asserted from reading the two files separately.
+func TestMultiModelResolver_Scheduler_ProfileRouting_Good(t *testing.T) {
+	spy := newPresetSpy()
+	r := mustResolver(t, []ModelSpec{
+		{ID: "a", Path: "/m/a", Profiles: map[string]ProfileConfig{
+			"creative": {Temperature: ptrFloat32(0.9)},
+		}},
+	}, MultiModelOptions{})
+	r.setLoader(func(string, ...inference.LoadOption) (inference.TextModel, error) { return spy, nil })
+	schedCfg := scheduler.Config{Mode: scheduler.ModeSerial, MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4}
+	r.setScheduler(&schedCfg)
+	defer r.closeSchedulers()
+
+	profiled, err := r.ResolveModel(context.Background(), "a:creative")
+	if err != nil {
+		t.Fatalf("resolve a:creative: %v", err)
+	}
+	if _, ok := profiled.(inference.SchedulerModel); ok {
+		t.Fatal("a profiled model unexpectedly satisfies SchedulerModel directly — the routing composition assumption changed, re-check forEachCompatToken's fallback path still reaches the scheduler")
+	}
+	drain(profiled.Chat(context.Background(), []inference.Message{{Role: "user", Content: "hi"}}))
+
+	if spy.lastCfg.Temperature != 0.9 {
+		t.Fatalf("preset temperature = %v, want 0.9 (profile not applied)", spy.lastCfg.Temperature)
+	}
+	if s := r.entries["a"].sched.Stats(); s.Submitted != 1 {
+		t.Fatalf("a scheduler Stats.Submitted = %d, want 1 (a profiled request must still reach the model's own scheduler)", s.Submitted)
+	}
+}
+
+// TestMultiModelResolver_Scheduler_LoadEvictLifecycle_Good is the full
+// resident-scheduler lifecycle receipt: load a model with a scheduler
+// attached, schedule a request against it, evict the model WHILE that request
+// is genuinely in flight, and prove (a) eviction itself does not hang waiting
+// on the in-flight request, (b) the in-flight request's channel closes rather
+// than hanging for ITS caller, (c) the scheduler's worker goroutines are fully
+// reclaimed (leak guard: count before/after), (d) the registry entry is left
+// non-resident with no lingering scheduler reference, and (e) a later resolve
+// rebuilds a FRESH scheduler rather than reusing the torn-down one.
+func TestMultiModelResolver_Scheduler_LoadEvictLifecycle_Good(t *testing.T) {
+	before := runtime.NumGoroutine()
+	base := newBlockingModel("a")
+	r := mustResolver(t, []ModelSpec{{ID: "a", Path: "/m/a"}}, MultiModelOptions{})
+	r.setLoader(func(string, ...inference.LoadOption) (inference.TextModel, error) { return base, nil })
+	schedCfg := scheduler.Config{Mode: scheduler.ModeSerial, MaxConcurrent: 3, MaxQueue: 4, StreamBuffer: 4}
+	r.setScheduler(&schedCfg)
+
+	model, err := r.ResolveModel(context.Background(), "a")
+	if err != nil {
+		t.Fatalf("resolve a: %v", err)
+	}
+	waitGoroutineCount(t, func(n int) bool { return n >= before+3 })
+
+	sched, ok := model.(inference.SchedulerModel)
+	if !ok {
+		t.Fatalf("resolved model is not scheduler-backed: %T", model)
+	}
+	_, tokens, err := sched.Schedule(context.Background(), inference.ScheduledRequest{ID: "inflight", Prompt: "hi"})
+	if err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+	select {
+	case prompt := <-base.started:
+		if prompt != "hi" {
+			t.Fatalf("started prompt = %q, want hi", prompt)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight request never reached the base model")
+	}
+
+	// Evict WHILE the request is genuinely in flight (blocked on base.release,
+	// which nothing ever signals) — unloadModel must not hang waiting on it.
+	unloadDone := make(chan error, 1)
+	go func() { unloadDone <- r.unloadModel("a") }()
+	select {
+	case err := <-unloadDone:
+		if err != nil {
+			t.Fatalf("unloadModel: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("unloadModel did not return — eviction hung on the in-flight request")
+	}
+
+	// The in-flight request must complete/error cleanly, not hang.
+	select {
+	case _, ok := <-tokens:
+		if ok {
+			t.Fatal("got a token after eviction cancelled the request, want a closed channel")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight request channel never closed after eviction — hang")
+	}
+	if !base.closed {
+		t.Fatal("evicted model must be Closed to reclaim GPU memory")
+	}
+
+	// The scheduler's goroutines are fully reclaimed.
+	waitGoroutineCount(t, func(n int) bool { return n <= before })
+
+	// The registry entry is left clean.
+	entry := r.entries["a"]
+	if entry.model != nil || entry.sched != nil {
+		t.Fatalf("entry after evict: model=%v sched=%v, want both nil", entry.model, entry.sched)
+	}
+
+	// A later resolve rebuilds a fresh scheduler rather than reusing the
+	// torn-down one.
+	fresh := newBlockingModel("a2")
+	r.setLoader(func(string, ...inference.LoadOption) (inference.TextModel, error) { return fresh, nil })
+	reModel, err := r.ResolveModel(context.Background(), "a")
+	if err != nil {
+		t.Fatalf("re-resolve a: %v", err)
+	}
+	if reModel == model {
+		t.Fatal("re-resolve after evict returned the SAME scheduler instance, want a fresh one")
+	}
+	r.closeSchedulers()
+}
+
+// TestMultiModelResolver_Scheduler_CapabilityProbeFailure_Bad proves a
+// lazily-loading model that cannot satisfy the configured mode's capability
+// probe (batch mode needs inference.TokenizerModel) fails THAT load with a
+// clear error to the requester, without downgrading the mode or crashing the
+// process: the failed entry rolls back to non-resident (never silently served
+// unscheduled), the loaded-but-unusable model is Closed rather than leaked,
+// and a DIFFERENT model that DOES satisfy the capability still loads and
+// schedules fine on the very same (still-alive) resolver right afterwards.
+func TestMultiModelResolver_Scheduler_CapabilityProbeFailure_Bad(t *testing.T) {
+	noTok := &mockTextModel{modelType: "no-tok"}
+	tok := &tokenizingMockModel{mockTextModel: &mockTextModel{modelType: "tok"}}
+	r := mustResolver(t, []ModelSpec{
+		{ID: "no-tok", Path: "/m/no-tok"},
+		{ID: "tok", Path: "/m/tok"},
+	}, MultiModelOptions{})
+	r.setLoader(func(path string, _ ...inference.LoadOption) (inference.TextModel, error) {
+		if path == "/m/tok" {
+			return tok, nil
+		}
+		return noTok, nil
+	})
+	schedCfg := scheduler.Config{Mode: scheduler.ModeBatch, MaxConcurrent: 2, MaxBatchTokens: 16}
+	r.setScheduler(&schedCfg)
+	defer r.closeSchedulers()
+
+	if _, err := r.ResolveModel(context.Background(), "no-tok"); err == nil {
+		t.Fatal("resolve no-tok error = nil, want a fail-closed capability-probe error")
+	}
+	entry := r.entries["no-tok"]
+	if entry.model != nil || entry.sched != nil {
+		t.Fatalf("failed load left entry model=%v sched=%v, want both nil (never silently resident)", entry.model, entry.sched)
+	}
+	if !noTok.closed {
+		t.Fatal("the loaded-but-unschedulable model must be Closed on rollback, not leaked")
+	}
+
+	// Fail-soft per process: a sibling model that DOES satisfy the capability
+	// still loads and schedules on the same resolver right after the failure.
+	model, err := r.ResolveModel(context.Background(), "tok")
+	if err != nil {
+		t.Fatalf("resolve tok (capable model) error = %v, want success — a sibling model's capability failure must not take the process down", err)
+	}
+	if _, ok := model.(inference.SchedulerModel); !ok {
+		t.Fatalf("resolved capable model is not scheduler-backed: %T", model)
+	}
+}
+
+// TestMultiModelResolver_List_SchedulerStats_Good proves list() reports the
+// scheduler mode + live stats for a resident scheduled model, and leaves both
+// empty for a non-resident model even though a scheduler mode IS configured.
+func TestMultiModelResolver_List_SchedulerStats_Good(t *testing.T) {
+	loader, _, _ := countingLoader()
+	r := mustResolver(t, []ModelSpec{
+		{ID: "a", Path: "/m/a"},
+		{ID: "b", Path: "/m/b"}, // never resolved — stays non-resident
+	}, MultiModelOptions{})
+	r.setLoader(loader)
+	schedCfg := scheduler.Config{Mode: scheduler.ModeSerial, MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4}
+	r.setScheduler(&schedCfg)
+	defer r.closeSchedulers()
+
+	if _, err := r.ResolveModel(context.Background(), "a"); err != nil {
+		t.Fatalf("resolve a: %v", err)
+	}
+	var a, b ModelStatus
+	for _, s := range r.list() {
+		switch s.ID {
+		case "a":
+			a = s
+		case "b":
+			b = s
+		}
+	}
+	if a.SchedulerMode != "serial" || a.SchedulerStats == nil {
+		t.Fatalf("a status = %+v, want scheduler_mode=serial and non-nil stats", a)
+	}
+	if b.SchedulerMode != "" || b.SchedulerStats != nil {
+		t.Fatalf("b (non-resident) status = %+v, want no scheduler fields", b)
+	}
+}
+
+// TestMultiModelResolver_List_SchedulerStats_Unconfigured_Good proves list()
+// carries no scheduler fields at all when the registry has no scheduler mode
+// configured — the flag-unset contract at the admin-listing seam.
+func TestMultiModelResolver_List_SchedulerStats_Unconfigured_Good(t *testing.T) {
+	loader, _, _ := countingLoader()
+	r := mustResolver(t, []ModelSpec{{ID: "a", Path: "/m/a"}}, MultiModelOptions{})
+	r.setLoader(loader)
+	if _, err := r.ResolveModel(context.Background(), "a"); err != nil {
+		t.Fatalf("resolve a: %v", err)
+	}
+	statuses := r.list()
+	if statuses[0].SchedulerMode != "" || statuses[0].SchedulerStats != nil {
+		t.Fatalf("status with no scheduler configured = %+v, want no scheduler fields", statuses[0])
+	}
+}
+
+// TestMultiModelResolver_CloseSchedulers_Good proves closeSchedulers drains
+// EVERY resident model's scheduler — the multi-model teardown twin of the
+// single-model schedulerResolver.close(), which RunServe defers at multi-model
+// serve shutdown so a scheduler-mode serve leaves no goroutines behind.
+func TestMultiModelResolver_CloseSchedulers_Good(t *testing.T) {
+	before := runtime.NumGoroutine()
+	loader, _, _ := countingLoader()
+	r := mustResolver(t, []ModelSpec{
+		{ID: "a", Path: "/m/a"},
+		{ID: "b", Path: "/m/b"},
+	}, MultiModelOptions{})
+	r.setLoader(loader)
+	schedCfg := scheduler.Config{Mode: scheduler.ModeSerial, MaxConcurrent: 2, MaxQueue: 4, StreamBuffer: 4}
+	r.setScheduler(&schedCfg)
+
+	if _, err := r.ResolveModel(context.Background(), "a"); err != nil {
+		t.Fatalf("resolve a: %v", err)
+	}
+	if _, err := r.ResolveModel(context.Background(), "b"); err != nil {
+		t.Fatalf("resolve b: %v", err)
+	}
+	waitGoroutineCount(t, func(n int) bool { return n >= before+4 }) // 2 models * 2 workers
+
+	r.closeSchedulers()
+
+	waitGoroutineCount(t, func(n int) bool { return n <= before })
+}
+
+// TestMultiModelResolver_CloseSchedulers_Unconfigured_NoOp_Good proves
+// closeSchedulers is a harmless no-op on a registry that never configured a
+// scheduler — RunServe defers it unconditionally whenever -scheduler is set
+// for the process, so it must tolerate a registry with nothing to close too.
+func TestMultiModelResolver_CloseSchedulers_Unconfigured_NoOp_Good(t *testing.T) {
+	loader, _, _ := countingLoader()
+	r := mustResolver(t, []ModelSpec{{ID: "a", Path: "/m/a"}}, MultiModelOptions{})
+	r.setLoader(loader)
+	if _, err := r.ResolveModel(context.Background(), "a"); err != nil {
+		t.Fatalf("resolve a: %v", err)
+	}
+	r.closeSchedulers() // must not panic
 }
