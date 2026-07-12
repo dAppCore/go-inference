@@ -965,6 +965,21 @@ func hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx context.Context, driv
 			}
 			defer finalNormBuffer.Close()
 		}
+		if receipts := hipActiveLogitSpreadReceipts(); receipts != nil && !req.DeviceFinalTopKSample {
+			// The fused greedy kernel owns softcap, so its sampler input is the raw
+			// LM-head projection. This armed-only twin projection exposes that exact
+			// input without changing the production kernel or its unarmed cost.
+			rawBuffer, receiptErr := hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx, driver, finalNormBuffer, last.LMHeadProjection)
+			if receiptErr != nil {
+				return hipGemma4Q4ForwardResult{}, hipGemma4Q4DecodeState{}, receiptErr
+			}
+			rawLogits, receiptErr := hipReadFloat32DeviceOutput(rawBuffer, "rocm.hip.LogitSpread", "fused greedy projection scores", last.LMHeadProjection.Rows)
+			_ = rawBuffer.Close()
+			if receiptErr != nil {
+				return hipGemma4Q4ForwardResult{}, hipGemma4Q4DecodeState{}, receiptErr
+			}
+			receipts.recordNext("fused-greedy", "sampler-input-pre-softcap", rawLogits)
+		}
 		if req.DeviceFinalTopKSample {
 			greedy, greedyDevice, err = hipRunMLXQ4ProjectionSoftcapSampleKernelWithDeviceInputBufferSuppress(ctx, driver, finalNormBuffer, last.LMHeadProjection, last.FinalLogitSoftcap, req.FinalCandidateCount, req.FinalTemperature, req.FinalTopP, req.FinalDraw, req.FinalGreedyBuffer, req.SuppressTokens, req.AttentionWorkspace)
 			if err != nil {

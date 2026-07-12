@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference"
 )
 
 const (
@@ -4573,6 +4574,26 @@ func hipRunMLXQ4ProjectionSoftcapSampleKernelWithDeviceInputBufferSuppress(ctx c
 	if err := hipLaunchKernel(driver, config); err != nil {
 		return hipGreedySampleResult{}, nil, err
 	}
+	var receiptHostSample hipGreedySampleResult
+	if receipts := hipActiveLogitSpreadReceipts(); receipts != nil {
+		packedScores, readErr := hipReadUint64DeviceOutput(scores, "rocm.hip.LogitSpread", "packed sampler projection scores", cfg.Rows)
+		if readErr != nil {
+			return hipGreedySampleResult{}, nil, readErr
+		}
+		rawScores := make([]float32, len(packedScores))
+		for tokenID, packed := range packedScores {
+			rawScores[tokenID] = hipFloat32FromOrderedKey(uint32(packed >> 32))
+		}
+		receipts.recordNext("device-topk", "sampler-input-pre-softcap", rawScores)
+		softcapped, softcapErr := hipGemma4Q4SoftcapLogits(rawScores, softcap)
+		if softcapErr != nil {
+			return hipGreedySampleResult{}, nil, softcapErr
+		}
+		receiptHostSample, readErr = hipGemma4Q4HostSampleResult(softcapped, inference.GenerateConfig{Temperature: temperature, TopK: topK, TopP: topP, RepeatPenalty: 1}, nil, nil, draw)
+		if readErr != nil {
+			return hipGreedySampleResult{}, nil, readErr
+		}
+	}
 	partial, partialCount, err := hipRunPackedTopKReduceKernelWithWorkspace(ctx, driver, scores, cfg.Rows, topK, workspace)
 	if err != nil {
 		return hipGreedySampleResult{}, nil, err
@@ -4580,6 +4601,9 @@ func hipRunMLXQ4ProjectionSoftcapSampleKernelWithDeviceInputBufferSuppress(ctx c
 	result, best, err := hipRunPackedTopKSampleKernel(ctx, driver, partial, partialCount, topK, temperature, topP, softcap, draw, best, workspace)
 	if err != nil {
 		return hipGreedySampleResult{}, nil, err
+	}
+	if hipActiveLogitSpreadReceipts() != nil {
+		core.Println(core.Sprintf("HIP_DEVICE_SAMPLE_ORACLE draw=%.9g device=%d host=%d", draw, result.TokenID, receiptHostSample.TokenID))
 	}
 	if result.TokenID < 0 || result.TokenID >= cfg.Rows {
 		return hipGreedySampleResult{}, nil, core.E("rocm.hip.PackedTopKSampleLaunch", "sampled token is out of range", nil)
