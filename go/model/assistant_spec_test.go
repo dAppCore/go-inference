@@ -130,6 +130,14 @@ func TestResolveMTPMethod(t *testing.T) {
 	if got := resolveMTPMethod(MTPMethod("eagle")); got != MTPMethod("eagle") {
 		t.Fatalf(`resolveMTPMethod("eagle") = %q, want a set method to pass through`, got)
 	}
+	// MTPDFlash is the block-diffusion method; its value is the checkpoint's
+	// speculators_model_type marker and it passes through unchanged.
+	if MTPDFlash != "dflash" {
+		t.Fatalf("MTPDFlash should equal the checkpoint marker %q, got %q", "dflash", MTPDFlash)
+	}
+	if got := resolveMTPMethod(MTPDFlash); got != MTPDFlash {
+		t.Fatalf("resolveMTPMethod(MTPDFlash) = %q, want it unchanged", got)
+	}
 }
 
 // TestParseAssistantConfigStampsMTPMethod proves the MTP method is INFERRED FROM THE
