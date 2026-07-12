@@ -25,6 +25,14 @@ var oprojFuseEnabled = os.Getenv("LTHN_OPROJ_FUSE") != "0"
 // interleaved A/B.
 var inputFuseEnabled = oprojFuseEnabled && os.Getenv("LTHN_INPUT_FUSE") != "0"
 
+// headFuseEnabled gates the OUTPUT-side mirror of the input fuse: the model's own final RMSNorm + LM head
+// GEMM folded onto the back of the LAST layer's proj-fused tail (the head's own separate command buffer
+// disappears — the terminal N+1 → N collapse). Requires oprojFuseEnabled — same "disabling the base
+// proj-fuse disables the whole family" rule the input fuses follow. Default on; LTHN_HEAD_FUSE=0 leaves
+// the hook unbound so the last layer falls back to the plain proj-fused tail + the separate host-RMSNorm/
+// device-GEMM head path (ComposedSession.headLogits) — the "before" arm of a same-binary interleaved A/B.
+var headFuseEnabled = oprojFuseEnabled && os.Getenv("LTHN_HEAD_FUSE") != "0"
+
 // composed_backend.go wires native's device GEMM into the composed stack's own projections — the
 // attention mixer's q/k/v/o, the MLP/MoE matmuls, and the LM head (the largest single matmul of every
 // decode step) — the same AX-8 seam as gated_delta_backend.go: composed declares the hook and runs the
@@ -43,5 +51,8 @@ func init() {
 	if inputFuseEnabled {
 		composed.ResidualNormMLPProjAttnInputDevice = ResidualNormMLPProjAttnInputDevice             // folds the NEXT full-attention layer's input RMSNorm + q/k/v onto the back of that tail
 		composed.ResidualNormMLPProjGatedDeltaInputDevice = ResidualNormMLPProjGatedDeltaInputDevice // folds the NEXT gated-delta layer's input RMSNorm + in_proj_qkv/z/a/b onto the back of that tail
+	}
+	if headFuseEnabled {
+		composed.ResidualNormMLPProjHeadDevice = ResidualNormMLPProjHeadDevice // folds the model's own final RMSNorm + LM head GEMM onto the back of the LAST layer's tail
 	}
 }
