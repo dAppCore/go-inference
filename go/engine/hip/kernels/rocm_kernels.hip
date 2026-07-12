@@ -10724,7 +10724,12 @@ extern "C" __global__ void rocm_attention_heads_batch_causal(const unsigned char
 	single.scale_bits = args.scale_bits;
 	single.descriptor_pointer = args.descriptor_pointer;
 	single.descriptor_bytes = args.descriptor_bytes;
-	if (window_start > 0u) {
+	// Contiguous KV derives its per-token stride from the full buffer (key_bytes / token_count),
+	// so the causal window must be iterated as an explicit [window_start, visible_tokens) range with
+	// the full token_count in scope. The visible-count fast paths below reduce single.token_count to
+	// the window, which would divide the full buffer by the window and mis-stride every query row that
+	// sees fewer than all tokens. The device KV path addresses via descriptors and is unaffected.
+	if (window_start > 0u || args.kv_source == ROCM_ATTENTION_KV_SOURCE_CONTIGUOUS) {
 		single.token_count = args.token_count;
 		single.weight_bytes = args.token_count * sizeof(float);
 		rocm_run_single_head_attention_range_token_parallel(single, window_start, visible_tokens);
@@ -10851,7 +10856,12 @@ extern "C" __global__ void rocm_attention_heads_batch_causal_query_rms_rope(cons
 	single.scale_bits = args.scale_bits;
 	single.descriptor_pointer = args.descriptor_pointer;
 	single.descriptor_bytes = args.descriptor_bytes;
-	if (window_start > 0u) {
+	// Contiguous KV derives its per-token stride from the full buffer (key_bytes / token_count),
+	// so the causal window must be iterated as an explicit [window_start, visible_tokens) range with
+	// the full token_count in scope. The visible-count fast paths below reduce single.token_count to
+	// the window, which would divide the full buffer by the window and mis-stride every query row that
+	// sees fewer than all tokens. The device KV path addresses via descriptors and is unaffected.
+	if (window_start > 0u || args.kv_source == ROCM_ATTENTION_KV_SOURCE_CONTIGUOUS) {
 		single.token_count = args.token_count;
 		single.weight_bytes = args.token_count * sizeof(float);
 		rocm_run_single_head_attention_range_token_parallel(single, window_start, visible_tokens);
