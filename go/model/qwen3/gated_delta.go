@@ -190,17 +190,41 @@ func GatedDeltaForwardF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfi
 // HeadDim,HeadDim]; both nil ⇒ fresh). Returns out [L, D] and the advanced (newConv, newDelta). When sc
 // is non-nil the five projection outputs write into its buffers (reused across calls); nil ⇒ each
 // projection allocates fresh (the GatedDeltaForwardF32 path). The recurrent state (newConv/newDelta) is
-// always freshly allocated — it is carried information, not scratch.
+// always freshly allocated — it is carried information, not scratch. It is GatedDeltaForwardScratchNoProjF32
+// plus the out_proj — the projection is split out so the composed session can instead fold it into the
+// FFN-tail command buffer (see composed.projMixer / ResidualNormMLPProjDevice).
 func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L, D int, sc *GatedDeltaScratch) (out, newConv, newDelta []float32, err error) {
 	if sc == nil {
 		sc = &GatedDeltaScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
 	}
+	gated, vDim, newConv, newDelta, err := GatedDeltaForwardScratchNoProjF32(x, w, cfg, priorConv, priorDelta, L, D, sc)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	out, err = projMatMulInto(sc.out, gated, w.OutProj, L, vDim, D)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	sc.out = out
+	return out, newConv, newDelta, nil
+}
+
+// GatedDeltaForwardScratchNoProjF32 is GatedDeltaForwardScratchF32 up to but NOT including out_proj: it
+// returns the gated pre-projection hidden [L, vDim] (per (token, value-head) RMSNorm(o)·SiLU(z)), the value
+// dim vDim, and the advanced (newConv, newDelta). The composed session uses it to fold out_proj into the
+// FFN-tail command buffer (composed.projMixer); GatedDeltaForwardScratchF32 wraps it with the out_proj GEMM.
+// The state advances identically — only the final projection is deferred to the caller. sc's projection
+// buffers (qkv/aProj/bProj/zProj) are reused as in the wrapper; nil ⇒ each allocates fresh.
+func GatedDeltaForwardScratchNoProjF32(x []float32, w *GatedDeltaWeights, cfg GatedDeltaConfig, priorConv, priorDelta []float32, L, D int, sc *GatedDeltaScratch) (gated []float32, vDim int, newConv, newDelta []float32, err error) {
+	if sc == nil {
+		sc = &GatedDeltaScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
+	}
 	if w == nil {
-		return nil, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: nil weights")
+		return nil, 0, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: nil weights")
 	}
 	KH, VH, HD, K := cfg.KeyHeads, cfg.ValueHeads, cfg.HeadDim, cfg.ConvKernel
 	if KH <= 0 || VH <= 0 || HD <= 0 || VH%KH != 0 || len(x) != L*D {
-		return nil, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: bad geometry or x size")
+		return nil, 0, nil, nil, core.NewError("qwen3.GatedDeltaForwardF32: bad geometry or x size")
 	}
 	qDim, vDim, convDim := cfg.qDim(), cfg.vDim(), cfg.convDim()
 	rep := VH / KH
@@ -222,13 +246,13 @@ func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDel
 	if !inputFused {
 		qkv, err = projMatMulInto(sc.qkv, x, w.InProjQKV, L, D, convDim)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, 0, nil, nil, err
 		}
 		sc.qkv = qkv
 	}
 	convOut, newConv, err := mamba2.CausalConv1dF32(qkv, w.ConvWeight, w.ConvBias, priorConv, L, convDim, K)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, 0, nil, nil, err
 	}
 	for i := range convOut {
 		convOut[i] = float32(gdSilu(float64(convOut[i])))
@@ -271,12 +295,12 @@ func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDel
 	if !inputFused {
 		alpha, err = projMatMulInto(sc.aProj, x, w.InProjA, L, D, VH)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, 0, nil, nil, err
 		}
 		sc.aProj = alpha
 		beta, err = projMatMulInto(sc.bProj, x, w.InProjB, L, D, VH)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, 0, nil, nil, err
 		}
 		sc.bProj = beta
 	}
@@ -290,7 +314,7 @@ func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDel
 
 	o, newDelta, err := deltanet.GatedDeltaRuleF32(q, k, v, beta, alpha, priorDelta, L, VH, HD, scale, 0)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, 0, nil, nil, err
 	}
 
 	// gated RMSNorm: per (token, value-head) RMSNorm(o over HD)·SiLU(z), then out-proj. o is [L,VH,HD]
@@ -300,11 +324,11 @@ func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDel
 	if !inputFused {
 		zProj, err = projMatMulInto(sc.zProj, x, w.InProjZ, L, D, vDim)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, 0, nil, nil, err
 		}
 		sc.zProj = zProj
 	}
-	gated := o
+	gated = o
 	for row := 0; row < L*VH; row++ {
 		var ss float64
 		for i := range HD {
@@ -317,10 +341,5 @@ func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDel
 			gated[row*HD+i] = float32(normed * gdSilu(float64(zProj[row*HD+i])))
 		}
 	}
-	out, err = projMatMulInto(sc.out, gated, w.OutProj, L, vDim, D)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	sc.out = out
-	return out, newConv, newDelta, nil
+	return gated, vDim, newConv, newDelta, nil
 }
