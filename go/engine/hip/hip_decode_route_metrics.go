@@ -14,6 +14,7 @@ import (
 )
 
 const hipDecodeRouteMetricsEnv = "GO_ROCM_HIP_DECODE_ROUTE_METRICS"
+const hipFeedbackReceiptsEnv = "GO_ROCM_HIP_FEEDBACK_RECEIPTS"
 
 type hipDecodeRoute string
 
@@ -47,6 +48,77 @@ type hipDecodeRouteMetrics struct {
 
 var hipDecodeRouteMetricsActive atomic.Pointer[hipDecodeRouteMetrics]
 var hipDecodeRouteMetricsArmed atomic.Bool
+
+type hipFeedbackReceipt struct {
+	Step         int
+	DeviceArgmax int32
+	FedToken     int32
+	Position     int
+	KVWriteIndex int
+}
+
+type hipFeedbackReceipts struct {
+	mu      sync.Mutex
+	entries []hipFeedbackReceipt
+}
+
+var hipFeedbackReceiptsActive atomic.Pointer[hipFeedbackReceipts]
+var hipFeedbackReceiptsArmed atomic.Bool
+
+func newHIPFeedbackReceipts() *hipFeedbackReceipts {
+	return &hipFeedbackReceipts{entries: make([]hipFeedbackReceipt, 0, 128)}
+}
+
+func hipActiveFeedbackReceipts() *hipFeedbackReceipts {
+	return hipFeedbackReceiptsActive.Load()
+}
+
+func hipBeginFeedbackReceipts() *hipFeedbackReceipts {
+	if core.Getenv(hipFeedbackReceiptsEnv) == "" || !hipFeedbackReceiptsArmed.CompareAndSwap(false, true) {
+		return nil
+	}
+	receipts := newHIPFeedbackReceipts()
+	hipFeedbackReceiptsActive.Store(receipts)
+	return receipts
+}
+
+func hipFinishFeedbackReceipts(receipts *hipFeedbackReceipts) {
+	if receipts == nil {
+		return
+	}
+	hipFeedbackReceiptsActive.CompareAndSwap(receipts, nil)
+	core.Println("HIP_FEEDBACK_RECEIPTS_BEGIN")
+	core.Println("step\tdevice_argmax\tfed_token\tposition\tkv_write_index")
+	for _, entry := range receipts.snapshot() {
+		core.Println(core.Sprintf("%d\t%d\t%d\t%d\t%d", entry.Step, entry.DeviceArgmax, entry.FedToken, entry.Position, entry.KVWriteIndex))
+	}
+	core.Println("HIP_FEEDBACK_RECEIPTS_END")
+}
+
+func (receipts *hipFeedbackReceipts) record(step int, deviceArgmax, fedToken int32, position, kvWriteIndex int) {
+	if receipts == nil {
+		return
+	}
+	receipts.mu.Lock()
+	receipts.entries = append(receipts.entries, hipFeedbackReceipt{
+		Step:         step,
+		DeviceArgmax: deviceArgmax,
+		FedToken:     fedToken,
+		Position:     position,
+		KVWriteIndex: kvWriteIndex,
+	})
+	receipts.mu.Unlock()
+}
+
+func (receipts *hipFeedbackReceipts) snapshot() []hipFeedbackReceipt {
+	if receipts == nil {
+		return nil
+	}
+	receipts.mu.Lock()
+	out := append([]hipFeedbackReceipt(nil), receipts.entries...)
+	receipts.mu.Unlock()
+	return out
+}
 
 func newHIPDecodeRouteMetrics() *hipDecodeRouteMetrics {
 	return &hipDecodeRouteMetrics{layer: -1, entries: make(map[hipDecodeRouteMetricKey]hipDecodeRouteMetric, 64)}
