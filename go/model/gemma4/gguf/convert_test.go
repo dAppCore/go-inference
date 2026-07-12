@@ -113,12 +113,10 @@ func TestGemma4Convert_float32ToBF16(t *testing.T) {
 	}
 }
 
-// TestGemma4Convert_encodeGemma4TensorData_Unsupported errors on a type it has
-// no encoder for (Q2_K — out of scope for the gemma4 lane per
-// docs/design-quant-formats.md, gated on an operator decision) and on a
-// K-quant tensor that is not a whole number of blocks.
+// TestGemma4Convert_encodeGemma4TensorData_Unsupported errors on an unknown
+// tensor type and on a K-quant tensor that is not a whole number of blocks.
 func TestGemma4Convert_encodeGemma4TensorData_Unsupported(t *testing.T) {
-	if _, err := encodeGemma4TensorData([]float32{1, 2, 3}, basegguf.TensorTypeQ2K); err == nil {
+	if _, err := encodeGemma4TensorData([]float32{1, 2, 3}, uint32(999)); err == nil {
 		t.Error("want error for unsupported encoder type")
 	}
 	if _, err := encodeGemma4TensorData(make([]float32, 100), basegguf.TensorTypeQ4K); err == nil {
@@ -156,5 +154,20 @@ func TestGemma4Convert_encodeGemma4TensorData_Q3_K(t *testing.T) {
 	}
 	if _, err := encodeGemma4TensorData(make([]float32, 100), basegguf.TensorTypeQ3K); err == nil {
 		t.Error("want error for non-block-aligned (100-element) Q3_K tensor")
+	}
+}
+
+// TestGemma4Convert_encodeGemma4TensorData_Q2_K checks the Q2_K encoder
+// accepts a block-aligned tensor and rejects a partial superblock.
+func TestGemma4Convert_encodeGemma4TensorData_Q2_K(t *testing.T) {
+	data, err := encodeGemma4TensorData(make([]float32, 512), basegguf.TensorTypeQ2K)
+	if err != nil {
+		t.Fatalf("encodeGemma4TensorData(512 elements, Q2_K): %v", err)
+	}
+	if len(data) != 168 {
+		t.Errorf("len(Q2_K data) = %d, want 168", len(data))
+	}
+	if _, err := encodeGemma4TensorData(make([]float32, 100), basegguf.TensorTypeQ2K); err == nil {
+		t.Error("want error for non-block-aligned (100-element) Q2_K tensor")
 	}
 }
