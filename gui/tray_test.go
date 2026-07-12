@@ -96,7 +96,7 @@ func TestTray_TrayService_ServiceStartup_Good(t *core.T) {
 	err := tray.ServiceStartup(core.Background(), application.ServiceOptions{})
 	got := tray.ServiceName()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, "TrayService", got)
 }
 
@@ -106,7 +106,7 @@ func TestTray_TrayService_ServiceStartup_Bad(t *core.T) {
 	cancel()
 
 	err := tray.ServiceStartup(ctx, application.ServiceOptions{})
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, TraySnapshot{}, tray.GetSnapshot())
 }
 
@@ -115,7 +115,7 @@ func TestTray_TrayService_ServiceStartup_Ugly(t *core.T) {
 	err := tray.ServiceStartup(core.Background(), application.ServiceOptions{})
 	snapshot := tray.GetSnapshot()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, TraySnapshot{}, snapshot)
 }
 
@@ -124,7 +124,7 @@ func TestTray_TrayService_ServiceShutdown_Good(t *core.T) {
 	err := tray.ServiceShutdown()
 	got := tray.ServiceName()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, "TrayService", got)
 }
 
@@ -133,7 +133,7 @@ func TestTray_TrayService_ServiceShutdown_Bad(t *core.T) {
 	err := tray.ServiceShutdown()
 	snapshot := tray.GetSnapshot()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, TraySnapshot{}, snapshot)
 }
 
@@ -142,7 +142,7 @@ func TestTray_TrayService_ServiceShutdown_Ugly(t *core.T) {
 	err := tray.ServiceShutdown()
 	got := tray.GetSnapshot()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, TraySnapshot{}, got)
 }
 
@@ -247,7 +247,7 @@ func TestTray_TrayService_StartAgent_Bad(t *core.T) {
 	tray.SetServices(nil, nil, nil, &AgentRunner{running: true})
 	err := tray.StartAgent()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertTrue(t, tray.agent.IsRunning())
 }
 
@@ -256,7 +256,7 @@ func TestTray_TrayService_StartAgent_Ugly(t *core.T) {
 	tray.SetServices(nil, nil, nil, &AgentRunner{running: true, task: "queued"})
 	err := tray.StartAgent()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, "queued", tray.agent.CurrentTask())
 }
 
