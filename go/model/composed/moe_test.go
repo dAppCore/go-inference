@@ -6,9 +6,27 @@ import (
 	"math"
 	"testing"
 
+	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/qwen3"
 	"dappco.re/go/inference/model/safetensors"
 )
+
+func TestMoESigmoidRouterDistributionReceipts(t *testing.T) {
+	m := &MoEMLP{Router: []float32{1, 0, 0, 1, -1, -1}, Experts: []MoEExpert{{}, {}, {}}, TopK: 1, Gating: model.MoEGatingSigmoid}
+	for _, receipt := range []struct {
+		fill []float32
+		want int
+	}{{[]float32{3, 1}, 0}, {[]float32{1, 4}, 1}, {[]float32{-3, -2}, 2}} {
+		probs, idx := make([]float64, 3), make([]int, 3)
+		selected, denom := m.routeInto(receipt.fill, 2, probs, idx)
+		if len(selected) != 1 || selected[0] != receipt.want {
+			t.Fatalf("sigmoid router fill %v selected %v, want expert %d", receipt.fill, selected, receipt.want)
+		}
+		if denom != 1 || probs[selected[0]] <= 0 || probs[selected[0]] >= 1 {
+			t.Fatalf("sigmoid receipt fill %v: score %v denominator %v", receipt.fill, probs[selected[0]], denom)
+		}
+	}
+}
 
 // TestMoEMLP_Forward_Golden pins the exact f32 bit-pattern of MoEMLP.forward over a fixed
 // multi-token input with TopK=2 (selection + renormalise exercised), gating scratch-fusion
