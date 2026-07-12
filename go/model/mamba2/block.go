@@ -133,8 +133,8 @@ func BlockForwardScratchNoProjF32(x []float32, w *BlockWeights, cfg BlockConfig,
 	if w == nil {
 		return nil, 0, nil, nil, core.NewError("mamba2.BlockForwardF32: nil weights")
 	}
-	H, P, N, G, K := cfg.NumHeads, cfg.HeadDim, cfg.StateDim, cfg.NumGroups, cfg.ConvKernel
-	dInner, convDim, projDim := cfg.dInner(), cfg.convDim(), cfg.projDim()
+	H, G := cfg.NumHeads, cfg.NumGroups
+	projDim := cfg.projDim()
 	if len(x) != L*D || len(w.InProj) != projDim*D {
 		return nil, 0, nil, nil, core.NewError("mamba2.BlockForwardF32: x/InProj size mismatch")
 	}
@@ -147,6 +147,28 @@ func BlockForwardScratchNoProjF32(x []float32, w *BlockWeights, cfg BlockConfig,
 		return nil, 0, nil, nil, err
 	}
 	sc.proj = proj
+	return BlockForwardScratchFromInputF32(proj, w, cfg, priorConv, priorSSM, L, D, sc)
+}
+
+// BlockForwardScratchFromInputF32 resumes a Mamba-2 block from an ALREADY-COMPUTED in_proj output
+// [L,projDim]. It is the recurrence half of BlockForwardScratchNoProjF32: callers that fold the input
+// RMSNorm and InProj GEMM into a predecessor's command buffer can skip that standalone projection while
+// preserving the causal-conv/SSM state transition and the gated pre-out_proj result byte for byte.
+func BlockForwardScratchFromInputF32(proj []float32, w *BlockWeights, cfg BlockConfig, priorConv, priorSSM []float32, L, D int, sc *BlockScratch) (gated []float32, dInner int, newConv, newSSM []float32, err error) {
+	if sc == nil {
+		sc = &BlockScratch{}
+	}
+	if w == nil {
+		return nil, 0, nil, nil, core.NewError("mamba2.BlockForwardF32: nil weights")
+	}
+	H, P, N, G, K := cfg.NumHeads, cfg.HeadDim, cfg.StateDim, cfg.NumGroups, cfg.ConvKernel
+	dInner, convDim, projDim := cfg.dInner(), cfg.convDim(), cfg.projDim()
+	if len(proj) != L*projDim {
+		return nil, 0, nil, nil, core.NewError("mamba2.BlockForwardF32: projected input size mismatch")
+	}
+	if H%G != 0 {
+		return nil, 0, nil, nil, core.NewError("mamba2.BlockForwardF32: num_heads must be a multiple of num_groups")
+	}
 	// split z | xBC | dt along the channel axis. One backing slab, three non-overlapping capped
 	// windows: each is filled once then read-only (xBC feeds the conv, dtRaw the dt map, z the gate),
 	// so the slab is bit-identical to three makes and saves 2 allocs per block per token.

@@ -4,6 +4,13 @@ package composed
 
 import "dappco.re/go/inference/model/rwkv7"
 
+// ResidualNormMLPProjRWKV7InputDevice folds a predecessor's projection-fused tail together with this
+// layer's input RMSNorm and six RWKV-7 projection GEMMs. A nil hook or error keeps the ordinary path.
+var ResidualNormMLPProjRWKV7InputDevice func(
+	mixerHidden, projW, h, normW, gate, up, down []float32, L, D, mixCols, FF int, eps float32,
+	nextNormW, nextRW, nextWW, nextKW, nextVW, nextAW, nextBW []float32, nextHK, nextHV int,
+) (y, r, w, k, v, a, b []float32, err error)
+
 // rwkv7.go adapts the RWKV-7 time-mix block (model/rwkv7) to the composed Mixer interface — Cut 4 of the
 // composed-mixer roster (mixers.go's gated-delta is Cut 1, attention.go's full-attention Cut 2, mamba2.go
 // Cut 3): the other half of this breadth extension — the proj-fused tail already serving attention and
@@ -63,6 +70,22 @@ func (m *rwkv7Mixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidde
 		sc = &rwkv7.BlockScratch{}
 	}
 	o, hv, ns, err := rwkv7.BlockForwardScratchNoProjF32(h, m.w, m.cfg, ps, L, D, sc)
+	if err != nil {
+		return nil, nil, 0, nil, err
+	}
+	return o, m.w.OutProj, hv, rwkv7State{state: ns, sc: sc}, nil
+}
+
+func (m *rwkv7Mixer) forwardFromInput(r, w, k, v, a, b []float32, L, D int, prior any) (mixerHidden, projW []float32, mixCols int, next any, err error) {
+	var ps []float32
+	var sc *rwkv7.BlockScratch
+	if st, ok := prior.(rwkv7State); ok {
+		ps, sc = st.state, st.sc
+	}
+	if sc == nil {
+		sc = &rwkv7.BlockScratch{}
+	}
+	o, hv, ns, err := rwkv7.BlockForwardScratchFromInputF32(r, w, k, v, a, b, m.w, m.cfg, ps, L, D, sc)
 	if err != nil {
 		return nil, nil, 0, nil, err
 	}

@@ -264,6 +264,8 @@ type pendingAttnQKV struct{ q, k, v []float32 }
 // pendingGatedDeltaInput is pendingAttnQKV's gated-delta counterpart — set by
 // ResidualNormMLPProjGatedDeltaInputDevice; the layer resumes via gatedDeltaMixer.forwardFromInput.
 type pendingGatedDeltaInput struct{ qkv, z, a, b []float32 }
+type pendingMamba2Input struct{ projected []float32 }
+type pendingRWKV7Input struct{ r, w, k, v, a, b []float32 }
 
 // forwardEmb runs L input embeddings [L,D] through the stack, advancing each layer's mixer state, and
 // returns the output hiddens [L,D]. Serves both prefill (L>1) and decode (L=1).
@@ -277,6 +279,8 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 	// layer computes its input norm + projections fresh (always true for layer 0 — no predecessor tail).
 	var pendingAttn *pendingAttnQKV
 	var pendingGD *pendingGatedDeltaInput
+	var pendingMamba2 *pendingMamba2Input
+	var pendingRWKV7 *pendingRWKV7Input
 
 	for li := range s.m.Layers {
 		layer := &s.m.Layers[li]
@@ -303,6 +307,18 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 			pendingGD = nil
 			gm := layer.Mixer.(*gatedDeltaMixer) // guaranteed: only ever set for a *gatedDeltaMixer next layer
 			mixerHidden, projW, mixCols, next, err = gm.forwardFromInput(p.qkv, p.z, p.a, p.b, L, D, s.states[li])
+			isProj = true
+		case pendingMamba2 != nil:
+			p := pendingMamba2
+			pendingMamba2 = nil
+			mm := layer.Mixer.(*mamba2Mixer)
+			mixerHidden, projW, mixCols, next, err = mm.forwardFromInput(p.projected, L, D, s.states[li])
+			isProj = true
+		case pendingRWKV7 != nil:
+			p := pendingRWKV7
+			pendingRWKV7 = nil
+			rm := layer.Mixer.(*rwkv7Mixer)
+			mixerHidden, projW, mixCols, next, err = rm.forwardFromInput(p.r, p.w, p.k, p.v, p.a, p.b, L, D, s.states[li])
 			isProj = true
 		default:
 			if pm, ok := layer.Mixer.(projMixer); ok {
@@ -353,6 +369,31 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 							); ferr == nil {
 								h = y
 								pendingGD = &pendingGatedDeltaInput{qkv: qkv, z: z, a: a, b: b}
+								continue
+							}
+						}
+					case *mamba2Mixer:
+						if ResidualNormMLPProjMamba2InputDevice != nil {
+							projDim := 2*nm.cfg.NumHeads*nm.cfg.HeadDim + 2*nm.cfg.NumGroups*nm.cfg.StateDim + nm.cfg.NumHeads
+							if y, projected, ferr := ResidualNormMLPProjMamba2InputDevice(
+								mixerHidden, projW, h, layer.PostAttnNorm, mlp.Gate, mlp.Up, mlp.Down, L, D, mixCols, mlp.FF, eps,
+								nextLayer.InputNorm, nm.w.InProj, projDim,
+							); ferr == nil {
+								h = y
+								pendingMamba2 = &pendingMamba2Input{projected: projected}
+								continue
+							}
+						}
+					case *rwkv7Mixer:
+						if ResidualNormMLPProjRWKV7InputDevice != nil {
+							hk := nm.cfg.NumHeads * nm.cfg.KeyDim
+							hv := nm.cfg.NumHeads * nm.cfg.ValueDim
+							if y, r, w, k, v, a, b, ferr := ResidualNormMLPProjRWKV7InputDevice(
+								mixerHidden, projW, h, layer.PostAttnNorm, mlp.Gate, mlp.Up, mlp.Down, L, D, mixCols, mlp.FF, eps,
+								nextLayer.InputNorm, nm.w.RProj, nm.w.WProj, nm.w.KProj, nm.w.VProj, nm.w.AProj, nm.w.BProj, hk, hv,
+							); ferr == nil {
+								h = y
+								pendingRWKV7 = &pendingRWKV7Input{r: r, w: w, k: k, v: v, a: a, b: b}
 								continue
 							}
 						}
