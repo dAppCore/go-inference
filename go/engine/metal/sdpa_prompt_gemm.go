@@ -41,8 +41,28 @@ import (
 // sdpaPromptGEMMMinKV is the attended length at which the batched dense pass's global-layer
 // SDPA switches from the multiQ vector kernel to the GEMM composition. Below it the vector
 // kernel's single dispatch wins (no S round-trip, byte-identical to the per-row oracle);
-// past it the GEMM's traffic advantage dominates and grows with depth.
-const sdpaPromptGEMMMinKV = 4096
+// past it the GEMM's traffic advantage dominates and grows with depth. Retuned 4096→2048
+// by the per-lane trace (#375): at span 2048 the first chunk's globals cost 30.7ms on the
+// vector kernel while the GEMM ran a DEEPER span in 17.6ms — the old knee sat well past
+// the crossover. NOTE the numeric tier: chunks that cross the knee move from the vector
+// kernel's byte-exact f32 stream to the composition's bf16-S rounding, so a greedy
+// continuation may fork at a near-tie — the same trade every GEMM-lane depth already
+// makes, pinned by the closeness test. LTHN_SDPA_GEMM_MINKV overrides for live A/Bs
+// (and =4096 restores the previous knee exactly).
+const sdpaPromptGEMMMinKV = 2048
+
+// sdpaPromptGEMMKnee returns the live knee: LTHN_SDPA_GEMM_MINKV when set (the
+// A/B lever for the retune), else the compiled default.
+func sdpaPromptGEMMKnee() int {
+	if v := os.Getenv("LTHN_SDPA_GEMM_MINKV"); v != "" {
+		if r := core.Atoi(v); r.OK {
+			if n := r.Value.(int); n > 0 {
+				return n
+			}
+		}
+	}
+	return sdpaPromptGEMMMinKV
+}
 
 // sdpaPromptGEMMMaxRows bounds the chunk row count the composition accepts — the S scratch
 // is sized headBatch × rows × maxLen, so an unchunked prompt (a no-sliding-window arch feeds
