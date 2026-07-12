@@ -4090,6 +4090,8 @@ func (s *ArchSession) stepSampleTopKCandidatesWithHistoryInPool(id int32, params
 			lastOut = icb.encodeStepBody(enc, emb, s.pos, pli)
 		}
 		scratch, ok, err = s.headEnc.encodeTopKCandidatesWithHistoryFast(enc, lastOut, params.TopK, params.SuppressTokens, history, params.RepeatPenalty)
+		// Keep the encoder decline guard: sampleTopKParamsEligible does not prove
+		// the backend-specific Q4/QMV/BF16 kernel shape used by this call.
 		if !ok || err != nil {
 			endEncodingFast(enc)
 			if scratch != nil {
@@ -4160,6 +4162,8 @@ func (s *ArchSession) stepSampleTopKCandidatesGPUInputsWithHistoryInPool(id int3
 			}
 		}
 		scratch, ok, err = s.headEnc.encodeTopKCandidatesWithHistoryFast(enc, lastOut, params.TopK, params.SuppressTokens, history, params.RepeatPenalty)
+		// Keep the encoder decline guard: this GPU-input helper is also reached by
+		// a wrapper that does not establish the backend-specific kernel shape.
 		if !ok || err != nil {
 			endEncodingFast(enc)
 			if scratch != nil {
@@ -4412,7 +4416,7 @@ func (s *ArchSession) stepSampleLogitsTokenInPool(id int32, params model.SampleP
 			lastOut = icb.encodeStepBody(enc, emb, s.pos, pli)
 		}
 		scratch, ok, err = s.headEnc.encodeLogitsSample(enc, lastOut, params, draw, history)
-		if !ok || err != nil {
+		if err != nil {
 			endEncodingFast(enc)
 			if scratch != nil {
 				s.headEnc.putGreedyScratch(scratch)
@@ -4433,7 +4437,7 @@ func (s *ArchSession) stepSampleLogitsTokenInPool(id int32, params model.SampleP
 		s.headEnc.putGreedyScratch(scratch)
 		scratch = nil
 	})
-	if err != nil || !ok {
+	if err != nil {
 		return nil, 0, ok, err
 	}
 	if token < 0 || int(token) >= s.arch.Vocab {
@@ -4479,7 +4483,7 @@ func (s *ArchSession) stepSampleLogitsTokenGPUInputsInPool(id int32, params mode
 			}
 		}
 		scratch, ok, err = s.headEnc.encodeLogitsSample(enc, lastOut, params, draw, history)
-		if !ok || err != nil {
+		if err != nil {
 			endEncodingFast(enc)
 			if scratch != nil {
 				s.headEnc.putGreedyScratch(scratch)
@@ -4500,7 +4504,7 @@ func (s *ArchSession) stepSampleLogitsTokenGPUInputsInPool(id int32, params mode
 		s.headEnc.putGreedyScratch(scratch)
 		scratch = nil
 	})
-	if err != nil || !ok {
+	if err != nil {
 		return nil, 0, ok, err
 	}
 	if token < 0 || int(token) >= s.arch.Vocab {
@@ -5978,8 +5982,8 @@ func (s *ArchSession) generateSampledPipelinedGPUTail(gen []int32, maxNew int, s
 		enc := computeCommandEncoderFast(cb)
 		lastOut, directHidden := s.encodeStepBodyNoInputRetained(enc, icb, s.pos)
 		if s.sampleTopKTokenParamsEligible(pickParams) {
-			scratch, ok, stepErr := s.headEnc.encodeTopKSampleFast(enc, lastOut, pickParams, draw, history)
-			if !ok || stepErr != nil {
+			scratch, _, stepErr := s.headEnc.encodeTopKSampleFast(enc, lastOut, pickParams, draw, history)
+			if stepErr != nil {
 				endEncodingFast(enc)
 				if scratch != nil {
 					s.headEnc.putTopKScratch(scratch)
@@ -6001,8 +6005,8 @@ func (s *ArchSession) generateSampledPipelinedGPUTail(gen []int32, maxNew int, s
 			s.pos++
 			return inflightSampledStep{cb: cb, lastOut: icb.lastOutPtr, directHidden: directHidden, topK: scratch}, true
 		}
-		scratch, ok, stepErr := s.headEnc.encodeLogitsSample(enc, lastOut, pickParams, draw, history)
-		if !ok || stepErr != nil {
+		scratch, _, stepErr := s.headEnc.encodeLogitsSample(enc, lastOut, pickParams, draw, history)
+		if stepErr != nil {
 			endEncodingFast(enc)
 			if scratch != nil {
 				s.headEnc.putGreedyScratch(scratch)
@@ -6061,10 +6065,7 @@ func (s *ArchSession) generateSampledPipelinedGPUTail(gen []int32, maxNew int, s
 		stop = (yield != nil && !yield(token)) || nativeTokenInSet(token, stopTokens)
 		prev = nxt
 	}
-	token, valid := read(prev)
-	if valid && !stop && len(gen) < maxNew {
-		gen = append(gen, token)
-	}
+	read(prev)
 	if rerr != nil {
 		return gen, history, rerr
 	}
@@ -6147,8 +6148,8 @@ func (s *ArchSession) generateSampledPipelinedGPUOneShotTail(gen []int32, maxNew
 		enc := computeCommandEncoderFast(cb)
 		lastOut, directHidden := s.encodeStepBodyNoInputRetained(enc, icb, s.pos)
 		if s.sampleTopKTokenParamsEligible(pickParams) {
-			scratch, ok, stepErr := s.headEnc.encodeTopKSampleFast(enc, lastOut, pickParams, draw, history)
-			if !ok || stepErr != nil {
+			scratch, _, stepErr := s.headEnc.encodeTopKSampleFast(enc, lastOut, pickParams, draw, history)
+			if stepErr != nil {
 				endEncodingFast(enc)
 				if scratch != nil {
 					s.headEnc.putTopKScratch(scratch)
@@ -6170,8 +6171,8 @@ func (s *ArchSession) generateSampledPipelinedGPUOneShotTail(gen []int32, maxNew
 			s.pos++
 			return inflightSampledStep{cb: cb, lastOut: icb.lastOutPtr, directHidden: directHidden, topK: scratch}, true
 		}
-		scratch, ok, stepErr := s.headEnc.encodeLogitsSample(enc, lastOut, pickParams, draw, history)
-		if !ok || stepErr != nil {
+		scratch, _, stepErr := s.headEnc.encodeLogitsSample(enc, lastOut, pickParams, draw, history)
+		if stepErr != nil {
 			endEncodingFast(enc)
 			if scratch != nil {
 				s.headEnc.putGreedyScratch(scratch)
@@ -6211,7 +6212,7 @@ func (s *ArchSession) generateSampledPipelinedGPUOneShotTail(gen []int32, maxNew
 		return gen, history, rerr
 	}
 	i := 1
-	for len(gen) < maxNew {
+	for {
 		if len(gen)+1 < maxNew {
 			nxt, ok := submit(i, len(gen)+1)
 			if !ok {
@@ -6241,9 +6242,6 @@ func (s *ArchSession) generateSampledPipelinedGPUOneShotTail(gen []int32, maxNew
 		}
 		return gen, history, rerr
 	}
-	waitUntilCompletedFast(prev.cb)
-	release(prev)
-	return gen, history, rerr
 }
 
 func (s *ArchSession) sampleTopKCandidatesFromHiddenInPool(hidden []byte, params model.SampleParams) ([]byte, []int32, bool, error) {
