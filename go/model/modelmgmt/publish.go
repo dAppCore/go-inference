@@ -123,6 +123,11 @@ func collectUploadFiles(inputDir string) core.Result {
 	return core.Ok(files)
 }
 
+// hfHubBase is the HuggingFace Hub API host. It is a package variable rather
+// than a constant so hermetic tests can point the upload path at an httptest
+// server, mirroring the way ollama.go takes its host as a value.
+var hfHubBase = "https://huggingface.co"
+
 // uploadFileToHF uploads a single file to a HuggingFace dataset repo via the Hub API.
 func uploadFileToHF(token, repoID, localPath, remotePath string) core.Result {
 	raw, err := coreio.Local.Read(localPath)
@@ -130,7 +135,7 @@ func uploadFileToHF(token, repoID, localPath, remotePath string) core.Result {
 		return core.Fail(core.E("modelmgmt.uploadFileToHF", core.Sprintf("read %s", localPath), err))
 	}
 
-	url := core.Sprintf("https://huggingface.co/api/datasets/%s/upload/main/%s", repoID, remotePath)
+	url := core.Sprintf("%s/api/datasets/%s/upload/main/%s", hfHubBase, repoID, remotePath)
 
 	req, err := http.NewRequest(http.MethodPut, url, core.NewReader(raw))
 	if err != nil {
