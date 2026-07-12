@@ -145,6 +145,48 @@ func TestTokenizer_Encode_BGEIDs(t *testing.T) {
 	}
 }
 
+// TestModel_Rerank_MSMARCOMiniLMParity pins the host score to the real
+// cross-encoder/ms-marco-MiniLM-L-6-v2 snapshot. Regenerate the fixture with
+// testdata/dump_cross_encoder_reference.py.
+func TestModel_Rerank_MSMARCOMiniLMParity(t *testing.T) {
+	snapshot := os.Getenv("BERT_XENCODER_SNAPSHOT")
+	if snapshot == "" {
+		t.Skip("set BERT_XENCODER_SNAPSHOT to run cross-encoder parity")
+	}
+	model, err := bert.Load(snapshot)
+	if err != nil {
+		t.Fatalf("bert.Load: %v", err)
+	}
+	result, err := model.Rerank(context.Background(), inference.RerankRequest{
+		Query: "How do I reset my password?",
+		Documents: []string{
+			"The quick brown fox jumps over the lazy dog.",
+			"To change your password, open account settings and choose reset password.",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Rerank: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join("testdata", "ms_marco_cross_encoder_reference.json"))
+	if err != nil {
+		t.Fatalf("read cross-encoder fixture: %v", err)
+	}
+	var fixture struct {
+		Scores []float64 `json:"scores"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatalf("decode cross-encoder fixture: %v", err)
+	}
+	for _, scored := range result.Results {
+		if math.Abs(scored.Score-fixture.Scores[scored.Index]) > 0.002 {
+			t.Errorf("score[%d] = %.6f, want %.6f", scored.Index, scored.Score, fixture.Scores[scored.Index])
+		}
+	}
+	if result.Results[0].Index != 1 || result.Labels["rerank_score_source"] != "cross_encoder_classifier" {
+		t.Fatalf("cross-encoder result = %+v", result)
+	}
+}
+
 func scoreList(results []inference.RerankScore) []float64 {
 	out := make([]float64, len(results))
 	for i, r := range results {

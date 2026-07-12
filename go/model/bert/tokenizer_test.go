@@ -62,6 +62,27 @@ func TestTokenizer_Encode_Good_Empty(t *testing.T) {
 	assertIDs(t, got, want)
 }
 
+func TestTokenizer_EncodePair_Good(t *testing.T) {
+	tk := newTestTokenizer(t)
+	ids, types := tk.EncodePair("reset password", "the quick fox")
+	assertIDs(t, ids, []int32{2, 11, 14, 3, 5, 6, 8, 3})
+	assertIDs(t, types, []int32{0, 0, 0, 0, 1, 1, 1, 1})
+}
+
+func TestTokenizer_EncodePair_Bad(t *testing.T) {
+	tk := newTestTokenizer(t)
+	ids, types := tk.EncodePair("zzzz", "yyyy")
+	assertIDs(t, ids, []int32{2, 1, 3, 1, 3})
+	assertIDs(t, types, []int32{0, 0, 0, 1, 1})
+}
+
+func TestTokenizer_EncodePair_Ugly(t *testing.T) {
+	tk := newTestTokenizer(t)
+	ids, types := tk.EncodePair("", "")
+	assertIDs(t, ids, []int32{2, 3, 3})
+	assertIDs(t, types, []int32{0, 0, 1})
+}
+
 func assertIDs(t *testing.T, got, want []int32) {
 	t.Helper()
 	if len(got) != len(want) {

@@ -78,6 +78,10 @@ type Weights struct {
 	embLNW         []float32
 	embLNB         []float32
 	layers         []layerWeights
+	poolerW        []float32
+	poolerB        []float32
+	classifierW    []float32
+	classifierB    []float32
 }
 
 // forward runs the encoder over a single unpadded token sequence and returns the
@@ -88,6 +92,10 @@ type Weights struct {
 // The maths is naive host float32 with float64 accumulation in the hot dot
 // products, which keeps it within cosine 0.999 of PyTorch's float32 result.
 func (w *Weights) forward(cfg Config, ids []int32) ([][]float32, error) {
+	return w.forwardSegments(cfg, ids, nil)
+}
+
+func (w *Weights) forwardSegments(cfg Config, ids, tokenTypes []int32) ([][]float32, error) {
 	hiddenSize := cfg.HiddenSize
 	seqLen := len(ids)
 	if seqLen == 0 {
@@ -104,7 +112,17 @@ func (w *Weights) forward(cfg Config, ids []int32) ([][]float32, error) {
 		}
 		wordRow := w.wordEmbeddings[int(id)*hiddenSize : (int(id)+1)*hiddenSize]
 		posRow := w.posEmbeddings[pos*hiddenSize : (pos+1)*hiddenSize]
-		typeRow := w.typeEmbeddings[0:hiddenSize]
+		typeID := int32(0)
+		if tokenTypes != nil {
+			if len(tokenTypes) != seqLen {
+				return nil, core.E("bert.forward", "token_type_ids length does not match input_ids", nil)
+			}
+			typeID = tokenTypes[pos]
+		}
+		if typeID < 0 || int(typeID) >= cfg.TypeVocabSize {
+			return nil, core.E("bert.forward", core.Sprintf("token type id %d is outside type vocab size %d", typeID, cfg.TypeVocabSize), nil)
+		}
+		typeRow := w.typeEmbeddings[int(typeID)*hiddenSize : (int(typeID)+1)*hiddenSize]
 		summed := make([]float32, hiddenSize)
 		for j := 0; j < hiddenSize; j++ {
 			summed[j] = wordRow[j] + posRow[j] + typeRow[j]

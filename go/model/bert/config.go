@@ -27,17 +27,19 @@ import (
 //
 //	cfg, err := bert.ParseConfig(configBytes)
 type Config struct {
-	ModelType             string  `json:"model_type"`
-	HiddenSize            int     `json:"hidden_size"`
-	NumHiddenLayers       int     `json:"num_hidden_layers"`
-	NumAttentionHeads     int     `json:"num_attention_heads"`
-	IntermediateSize      int     `json:"intermediate_size"`
-	VocabSize             int     `json:"vocab_size"`
-	MaxPositionEmbeddings int     `json:"max_position_embeddings"`
-	TypeVocabSize         int     `json:"type_vocab_size"`
-	LayerNormEps          float64 `json:"layer_norm_eps"`
-	HiddenAct             string  `json:"hidden_act"`
-	PadTokenID            int     `json:"pad_token_id"`
+	Architectures         []string `json:"architectures"`
+	NumLabels             int      `json:"num_labels"`
+	ModelType             string   `json:"model_type"`
+	HiddenSize            int      `json:"hidden_size"`
+	NumHiddenLayers       int      `json:"num_hidden_layers"`
+	NumAttentionHeads     int      `json:"num_attention_heads"`
+	IntermediateSize      int      `json:"intermediate_size"`
+	VocabSize             int      `json:"vocab_size"`
+	MaxPositionEmbeddings int      `json:"max_position_embeddings"`
+	TypeVocabSize         int      `json:"type_vocab_size"`
+	LayerNormEps          float64  `json:"layer_norm_eps"`
+	HiddenAct             string   `json:"hidden_act"`
+	PadTokenID            int      `json:"pad_token_id"`
 }
 
 // HeadDim is the per-head width — hidden size split across the attention heads.
@@ -67,10 +69,35 @@ func ParseConfig(data []byte) (Config, error) {
 	if cfg.HiddenAct == "" {
 		cfg.HiddenAct = "gelu"
 	}
+	// Older transformers snapshots omit num_labels and serialise id2label
+	// instead. Recover the equivalent HF classifier width for those models.
+	if cfg.NumLabels == 0 {
+		var probe struct {
+			IDToLabel map[string]string `json:"id2label"`
+		}
+		if result := core.JSONUnmarshal(data, &probe); result.OK {
+			cfg.NumLabels = len(probe.IDToLabel)
+		}
+	}
 	if err := cfg.validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// IsCrossEncoder reports whether the HF config identifies a scalar sequence
+// classifier. Both facts are required so ordinary one-dimensional embedders do
+// not accidentally switch away from the established cosine rerank path.
+func (c Config) IsCrossEncoder() bool {
+	if c.NumLabels != 1 {
+		return false
+	}
+	for _, architecture := range c.Architectures {
+		if core.Contains(architecture, "SequenceClassification") {
+			return true
+		}
+	}
+	return false
 }
 
 func (c Config) validate() error {
