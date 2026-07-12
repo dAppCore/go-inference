@@ -393,6 +393,17 @@ func TestOpenAI_CapabilityHandler_Good_ToolParseForGemma4(t *testing.T) {
 	}
 }
 
+func TestOpenAI_CapabilityHandler_Good_ToolParseForLlama3(t *testing.T) {
+	handler := NewCapabilityHandler(NewStaticResolver(map[string]inference.TextModel{"llama": &recordingModel{arch: "llama3_1"}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCapabilitiesPath+"?model=llama", nil))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"tool.parse"`) {
+		t.Fatalf("status = %d body=%s, want tool.parse reported for a llama3 architecture", rec.Code, rec.Body.String())
+	}
+}
+
 // TestOpenAI_CapabilityHandler_Bad_ToolParseAbsentForNonGemma pins the honest
 // negative: an architecture with no Gemma 4 tool syntax never gets a tool.parse
 // entry — omission, not a misleading "supported", matching the same

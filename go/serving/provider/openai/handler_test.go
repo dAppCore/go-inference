@@ -449,6 +449,52 @@ func TestHandler_ServeHTTP_Good_ToolsRenderedForGemma4(t *testing.T) {
 	}
 }
 
+func TestHandler_ServeHTTP_Good_ToolsRenderedForLlama3(t *testing.T) {
+	model := &recordingModel{arch: "llama3_1", stubModel: stubModel{tokens: []inference.Token{{Text: "sunny"}}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"llama": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"llama","messages":[{"role":"user","content":"weather?"}],` +
+		`"tools":[{"type":"function","function":{"name":"get_weather","description":"d","parameters":{"type":"object"}}}]}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if len(model.received) == 0 || !strings.Contains(model.received[0].Content, "Environment: ipython") || !strings.Contains(model.received[0].Content, `"name":"get_weather"`) {
+		t.Fatalf("model received %+v, want Llama 3 native declarations", model.received)
+	}
+}
+
+func TestHandler_ServeHTTP_Good_Llama3ToolCall(t *testing.T) {
+	model := &recordingModel{arch: "llama3_1", stubModel: stubModel{tokens: []inference.Token{{Text: `<|python_tag|>{"type":"function","name":"get_weather","parameters":{"city":"London"}}<|eom_id|>`}}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"llama": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"llama","messages":[{"role":"user","content":"weather?"}]}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"finish_reason":"tool_calls"`) || !strings.Contains(rec.Body.String(), `"name":"get_weather"`) {
+		t.Fatalf("status = %d body=%s, want parsed Llama tool call", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandler_ServeStreaming_Good_Llama3ToolCallDeltas(t *testing.T) {
+	model := &recordingModel{arch: "llama3_1", stubModel: stubModel{tokens: []inference.Token{
+		{Text: "<|python_"}, {Text: `tag|>{"type":"function","name":"get_weather","parameters":{"city":"London"}}<|eom_id|>`},
+	}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"llama": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"llama","stream":true,"messages":[{"role":"user","content":"weather?"}]}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	got := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.Contains(got, `"name":"get_weather"`) || !strings.Contains(got, `"finish_reason":"tool_calls"`) || !strings.Contains(got, "data: [DONE]") {
+		t.Fatalf("status = %d body=%s, want streamed Llama tool-call deltas", rec.Code, got)
+	}
+}
+
 // TestHandler_ServeHTTP_Bad_ToolsRejectedForUnsupportedArchitecture pins the
 // capability-honesty gate (#37): a tools request against an architecture with
 // no Gemma 4 tool syntax is rejected with a clear 4xx instead of silently
