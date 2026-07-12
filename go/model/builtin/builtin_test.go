@@ -40,6 +40,14 @@ func TestBuiltinRegistersLlama(t *testing.T) {
 	}
 }
 
+func TestBuiltinRegistersGPT2Families(t *testing.T) {
+	for _, mt := range []string{"gpt2", "gpt_bigcode", "starcoder"} {
+		if _, ok := model.LookupArch(mt); !ok {
+			t.Fatalf("model_type %q not registered through builtin", mt)
+		}
+	}
+}
+
 func TestBuiltinRegistersMoEFamilies(t *testing.T) {
 	for _, mt := range []string{"mixtral", "deepseek_v2", "deepseek_v3"} {
 		spec, ok := model.LookupArch(mt)
