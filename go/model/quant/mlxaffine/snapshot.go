@@ -40,6 +40,34 @@ const snapshotMeta = `{"format":"mlx"}`
 // parameters replace it with .scales / .biases.
 const weightSuffix = ".weight"
 
+// hipWideBF16Suffixes names the weight tensors a downstream engine requires to stay
+// wide (its source dtype, BF16 for the bf16 packs this lane targets) rather than be
+// group-affine quantised — even though their shape is otherwise eligible.
+//
+// per_layer_model_projection is the Gemma4/Gemma-3n per-layer-input model projection.
+// The HIP engine loads it through loadedGemma4BF16ProjectionConfig
+// (engine/hip/hip_gemma4_q4_layer.go), which validates dtype == BF16 and a rank-2
+// [hiddenPerLayer, hidden] shape; a U32-packed tensor there fails the load. Keeping it
+// wide here is the quant-side half of that contract, so `lem quant -bits 4` output loads
+// on HIP with no per-tensor workaround. The suffix is matched (not the full name) to
+// stay robust to the top-level prefix while never colliding with the per-layer
+// per_layer_projection.weight, which is quantised.
+var hipWideBF16Suffixes = []string{
+	".per_layer_model_projection.weight",
+}
+
+// quantiseSkipped reports whether a weight must be passed through wide (kept at its
+// source dtype, never quantised) to satisfy a downstream engine's dtype contract —
+// see hipWideBF16Suffixes.
+func quantiseSkipped(name string) bool {
+	for _, suffix := range hipWideBF16Suffixes {
+		if core.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 // ConvertSnapshot reads an MLX-format bf16 model directory and writes a new directory
 // with every eligible weight group-affine quantised (packed uint32 + bf16 .scales /
 // .biases), every ineligible tensor (norms, non-group-aligned matrices) passed through
@@ -136,7 +164,7 @@ func planItems(idx safetensors.Index, opts Options) ([]planItem, *Result, error)
 		ref := idx.Tensors[name]
 		res.SourceBytes += ref.ByteLen
 
-		if core.HasSuffix(name, weightSuffix) && EligibleShape(ref.Shape, opts.GroupSize) && isFloatDType(ref.DType) {
+		if core.HasSuffix(name, weightSuffix) && !quantiseSkipped(name) && EligibleShape(ref.Shape, opts.GroupSize) && isFloatDType(ref.DType) {
 			outDim, inDim := int(ref.Shape[0]), int(ref.Shape[1])
 			base := name[:len(name)-len(weightSuffix)]
 			groups := inDim / opts.GroupSize
