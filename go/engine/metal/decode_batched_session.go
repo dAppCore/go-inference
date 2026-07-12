@@ -1208,7 +1208,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			if ownerQ8 && !flashQ8 && !q8Stage && gpuHasKVQ8DequantRows() {
 				q8GEMMK, q8GEMMV, _ = s.icb.ensureQ8Mirrors(ownIdx)
 			}
-			useGEMMSDPA := useMultiQ && slideW == 0 && basePos+K >= sdpaPromptGEMMMinKV &&
+			useGEMMSDPA := useMultiQ && slideW == 0 && basePos+K >= sdpaPromptGEMMKnee() &&
 				K <= sdpaPromptGEMMMaxRows && sdpaPromptGEMMFeasible(K, s.maxLen) &&
 				!sdpaPromptGEMMDisabledForTest &&
 				!sdpaPromptGEMMEnvDisabled() && gpuHasPromptSDPAGEMM() &&
@@ -1272,7 +1272,16 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 					}
 				}
 			}
-			enc = trace.checkpoint(enc, "attn.sdpa")
+			// the sdpa span, labelled by ROUTE (#375): the lump hid which lane the
+			// time lived in — window flash (sliding layers), the steel GEMM
+			// composition, or the multiQ vector kernel (shallow globals).
+			sdpaLbl := "attn.sdpa.mq"
+			if slideW > 0 {
+				sdpaLbl = "attn.sdpa.win"
+			} else if useGEMMSDPA {
+				sdpaLbl = "attn.sdpa.gemm"
+			}
+			enc = trace.checkpoint(enc, sdpaLbl)
 			// Bidirectional row caps demand the batched-rope fold: only there
 			// does the WHOLE chunk's K/V land before any SDPA reads. Anything
 			// else would evaluate the span causally — hard-error, never fall
