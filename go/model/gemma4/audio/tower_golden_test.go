@@ -118,21 +118,21 @@ func TestTower_Encode_ModuleGoldens(t *testing.T) {
 	la := lm.Audio
 
 	// Defect-catcher 1 — real conv layout: subsample output collapses on a double-transposed conv.
-	sub, err := Subsample(mel, g.Frames, g.MelBins, la)
+	sub, _, err := Subsample(mel, g.Frames, g.MelBins, la, nil)
 	if err != nil {
 		t.Fatalf("Subsample: %v", err)
 	}
 	assertCosineGE(t, "subsample", sub, decodeF32LE(t, g.SubsampleB64), 0.999)
 
 	// Layer-0 Conformer block vs HF.
-	lay0, err := Layer(sub, &la.Layers[0], la.Cfg)
+	lay0, err := Layer(sub, &la.Layers[0], la.Cfg, nil)
 	if err != nil {
 		t.Fatalf("Layer(0): %v", err)
 	}
 	assertCosineGE(t, "layer0", lay0, decodeF32LE(t, g.Layer0B64), 0.999)
 
 	// Defect-catcher 2 — output_proj.bias: full tower last_hidden_state carries the [1536] bias.
-	tower, err := Encode(mel, g.Frames, g.MelBins, la)
+	tower, err := Encode(mel, g.Frames, g.MelBins, la, nil)
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
