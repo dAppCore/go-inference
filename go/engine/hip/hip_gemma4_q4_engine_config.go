@@ -21,8 +21,15 @@ type hipGemma4Q4EngineConfig struct {
 	ChunkedAttention                 bool
 	PageAlignedLocalKV               bool
 	DisableInterleavedRowPages       bool
+	DisableBatchedDecode             bool
 	PrefillUBatchTokens              int
 	PrefillAttentionQueryChunkTokens int
+	// ForceBatchedProjection makes the prefill body launch the batched
+	// projection kernel even for a single-token ubatch, instead of the
+	// single-row fast path. The attached-drafter target prefill sets this so a
+	// trailing one-token ubatch stays on the batched path; normal decode-style
+	// single-token prefill leaves it false and keeps the single-row kernel.
+	ForceBatchedProjection bool
 }
 
 func defaultHIPGemma4Q4EngineConfig() hipGemma4Q4EngineConfig {

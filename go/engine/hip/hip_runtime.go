@@ -174,6 +174,7 @@ func loadHIPDefaultNativeModel(runtime *hipRuntime, path string, cfg nativeLoadC
 		contextSize:       cfg.ContextSize,
 		gemma4TextConfig:  cloneNativeGemma4TextConfig(cfg.Gemma4TextConfig),
 		tensors:           make(map[string]hipTensor, len(cfg.Tensors)),
+		hostTensors:       make(map[string]nativeTensorInfo),
 		tokenText:         loadHIPTokenTextDecoderIfPresent(cfg.TokenizerPath),
 		createdAt:         time.Now(),
 	}
@@ -182,6 +183,13 @@ func loadHIPDefaultNativeModel(runtime *hipRuntime, path string, cfg nativeLoadC
 	defer closeTensorSourceFiles(tensorFiles)
 	for _, tensor := range cfg.Tensors {
 		if tensor.ByteSize == 0 {
+			continue
+		}
+		if hipGemma4HostResidentExpertTensor(cfg, tensor) {
+			hostTensor := tensor
+			hostTensor.SourcePath = hipTensorSourcePath(path, tensor)
+			hostTensor.DataOffset = hipTensorDataOffset(cfg, tensor)
+			model.hostTensors[tensor.Name] = hostTensor
 			continue
 		}
 		pointer, err := runtime.driver.Malloc(tensor.ByteSize)
@@ -196,6 +204,10 @@ func loadHIPDefaultNativeModel(runtime *hipRuntime, path string, cfg nativeLoadC
 			model.Close()
 			return nil, core.E("rocm.hip.LoadModel", "copy tensor "+tensor.Name, err)
 		}
+	}
+	if err := model.synthesizeGemma4GGUFAffineTensors(); err != nil {
+		model.Close()
+		return nil, core.E("rocm.hip.LoadModel", "synthesize Gemma4 GGUF affine tensors", err)
 	}
 	if model.sequenceMixerPlan != nil {
 		if err := model.bindSequenceMixerPlan(); err != nil {
@@ -218,13 +230,21 @@ func loadHIPDefaultNativeModel(runtime *hipRuntime, path string, cfg nativeLoadC
 	return model, nil
 }
 
+func hipGemma4HostResidentExpertTensor(cfg nativeLoadConfig, tensor nativeTensorInfo) bool {
+	return isROCmGemma4Architecture(cfg.ModelInfo.Architecture) &&
+		len(tensor.Dimensions) == 3 &&
+		core.Contains(tensor.Name, "_exps.weight")
+}
+
 var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameKVEncodeToken,
+	hipKernelNameKVEncodeTokenValueNormDescriptorAppend,
 	hipKernelNameKVDescriptorAppend,
 	hipKernelNameProjection,
 	hipKernelNameProjectionBatch,
 	hipKernelNameMLXQ4Proj,
 	hipKernelNameMLXQ4ProjCols256,
+	hipKernelNameMLXQ4ProjQ6G16Row16,
 	hipKernelNameMLXQ4ProjQ6Row16,
 	hipKernelNameMLXQ4ProjQ6Row64,
 	hipKernelNameMLXQ4ProjBatch,
@@ -243,20 +263,25 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameMLXQ4TripleProj,
 	hipKernelNameMLXQ4TripleProjQ6Row64,
 	hipKernelNameMLXQ4GELUTanhMul,
+	hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16,
+	hipKernelNameMLXQ4GELUTanhMLPQ4G32Cols1536Persistent,
 	hipKernelNameMLXQ4GELUTanhMulQ6Cols1536,
 	hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64,
 	hipKernelNameMLXQ4GELUTanhMulBatch,
 	hipKernelNameMLXQ4GELUTanhProj,
 	hipKernelNameMLXQ4GELUTanhProjQ6Row16,
 	hipKernelNameMLXQ4GELUTanhProjBatch,
+	hipKernelNameRMSNormResidualAddGELUTanhProj,
 	hipKernelNameRMSNorm,
 	hipKernelNameRMSNormResidualAdd,
 	hipKernelNameRMSNormResAddNorm,
 	hipKernelNameRMSNormHeads,
 	hipKernelNameRMSNormRoPEHeads,
+	hipKernelNameRMSNormRoPEHeadsPair,
 	hipKernelNameRMSNormRoPEHeadsBatch,
 	hipKernelNameAttentionHeads,
 	hipKernelNameAttentionHeadsBatchCausal,
+	hipKernelNameAttentionHeadsBatchCausalQueryRMSRoPE,
 	hipKernelNameAttentionHeadsChunkedStage1,
 	hipKernelNameAttentionHeadsChunkedStage2,
 	hipKernelNameAttentionHeadsBatchChunkedStage1,
@@ -288,22 +313,27 @@ func hipPrewarmGemma4Q4KernelFunctions(driver nativeHIPDriver) {
 
 var hipGemma4Q4WarmLaunchPacketSizes = []int{
 	hipKVEncodeTokenLaunchArgsBytes,
+	hipKVEncodeTokenValueNormDescriptorAppendLaunchArgsBytes,
 	hipKVDescriptorAppendLaunchArgsBytes,
 	hipMLXQ4ProjectionLaunchArgsBytes,
 	hipMLXQ4ProjectionBatchLaunchArgsBytes,
 	hipMLXQ4TripleProjLaunchArgsBytes,
 	hipMLXQ4GELUTanhMulLaunchArgsBytes,
+	hipMLXQ4GELUTanhMLPPersistentLaunchArgsBytes,
 	hipMLXQ4GELUTanhMulBatchLaunchArgsBytes,
 	hipMLXQ4GELUTanhProjLaunchArgsBytes,
 	hipMLXQ4GELUTanhProjBatchLaunchArgsBytes,
+	hipRMSResidualAddGELUTanhProjLaunchArgsBytes,
 	hipRMSNormLaunchArgsBytes,
 	hipRMSNormResidualAddArgsBytes,
 	hipRMSNormResAddNormArgsBytes,
 	hipRMSNormHeadsLaunchArgsBytes,
 	hipRMSNormRoPEHeadsLaunchArgsBytes,
+	hipRMSNormRoPEHeadsPairLaunchArgsBytes,
 	hipRMSNormRoPEHeadsBatchLaunchArgsBytes,
 	hipAttentionHeadsLaunchArgsBytes,
 	hipAttentionHeadsBatchCausalLaunchArgsBytes,
+	hipAttentionHeadsBatchCausalQueryRMSRoPELaunchArgsBytes,
 	hipAttentionHeadsChunkedLaunchArgsBytes,
 	hipAttentionHeadsBatchChunkedLaunchArgsBytes,
 	hipVectorAddScaledLaunchArgsBytes,
@@ -576,6 +606,9 @@ type hipLoadedModel struct {
 	contextSize           int
 	gemma4TextConfig      nativeGemma4TextConfig
 	tensors               map[string]hipTensor
+	hostTensors           map[string]nativeTensorInfo
+	expertCacheMu         sync.Mutex
+	expertCache           *hipGemma4ExpertCache
 	adapter               inference.AdapterIdentity
 	tinyLoRA              *hipLoadedTinyLoRAAdapter
 	smallLoRA             *hipLoadedSmallLoRAAdapter
@@ -1077,14 +1110,27 @@ func validateHIPTensorShape(info inference.ModelInfo, tensor nativeTensorInfo) e
 }
 
 func isHIPEmbeddingTensor(name string) bool {
+	if isHIPPerLayerEmbeddingTensor(name) {
+		return false
+	}
 	return core.Contains(name, "tok_embeddings.weight") ||
 		core.Contains(name, "token_embd.weight") ||
 		core.Contains(name, "embed_tokens.weight") ||
 		core.Contains(name, "word_embeddings.weight")
 }
 
+func isHIPPerLayerEmbeddingTensor(name string) bool {
+	name = core.Lower(name)
+	return core.Contains(name, "per_layer_token_embd.weight") ||
+		core.Contains(name, "embed_tokens_per_layer.weight")
+}
+
 func isHIPOutputTensor(name string) bool {
-	return core.Contains(name, "output.weight") || core.Contains(name, "lm_head.weight")
+	name = core.Lower(name)
+	return name == "output.weight" ||
+		name == "lm_head.weight" ||
+		core.HasSuffix(name, ".output.weight") ||
+		core.HasSuffix(name, ".lm_head.weight")
 }
 
 func hipLoadConfigRequiresOutputHead(cfg nativeLoadConfig) bool {
@@ -1253,11 +1299,20 @@ func (model *hipLoadedModel) Close() error {
 		return nil
 	}
 	var lastErr error
+	model.expertCacheMu.Lock()
+	if err := model.expertCache.Close(); err != nil {
+		lastErr = core.E("rocm.hip.Close", "close expert cache", err)
+	}
+	model.expertCache = nil
+	model.expertCacheMu.Unlock()
 	for name, tensor := range model.tensors {
 		if err := model.driver.Free(tensor.pointer); err != nil {
 			lastErr = core.E("rocm.hip.Close", "free tensor "+name, err)
 		}
 		delete(model.tensors, name)
+	}
+	for name := range model.hostTensors {
+		delete(model.hostTensors, name)
 	}
 	model.adapter = inference.AdapterIdentity{}
 	model.tinyLoRA = nil

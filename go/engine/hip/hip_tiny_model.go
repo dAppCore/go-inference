@@ -1172,6 +1172,8 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 			history = make([]int32, 0, generate.MaxTokens)
 		}
 		useBatchedPrefill := hipGemma4Q4CanUseBatchedGeneratePrefill(cfg) && !hostSampling
+		disableBatchedDecode := engineConfig.DisableBatchedDecode || core.Env("GO_ROCM_GEMMA4_Q4_DISABLE_BATCHED_DECODE") == "1"
+		useBatchedDecode := useBatchedPrefill && !disableBatchedDecode && !deviceCandidateSampling && !deviceTopKSampling
 		if attentionWorkspace != nil {
 			if err := hipGemma4Q4EnsureAttentionWorkspacePrefillCapacity(model.driver, attentionWorkspace, cfg, prefillPlan, useBatchedPrefill); err != nil {
 				runErr = err
@@ -1324,12 +1326,45 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 			if trackHistory {
 				history = append(history, tokenID)
 			}
-			if generated == 0 && hipGemma4Q4DeviceGreedyUnrollEnabled(generate, hostSampling, deviceCandidateSampling, deviceTopKSampling, attentionWorkspace, current) {
+			if !useBatchedDecode && generated == 0 && hipGemma4Q4DeviceGreedyUnrollEnabled(generate, hostSampling, deviceCandidateSampling, deviceTopKSampling, attentionWorkspace, current) {
 				state, deviceState, position, runErr = hipGemma4Q4GenerateDeviceGreedyUnrolled(ctx, model, cfg, state, deviceState, current, generate, engineConfig, deviceKVMode, suppressTokens, attentionWorkspace, position, yield)
+				return
+			}
+			if useBatchedDecode && generated == 0 && hipGemma4Q4BatchDeviceGreedyUnrollEnabled(generate, hostSampling, deviceCandidateSampling, deviceTopKSampling, attentionWorkspace, current) {
+				deviceState, position, runErr = hipGemma4Q4GenerateBatchDeviceGreedyUnrolled(ctx, model, cfg, deviceState, current, generate, engineConfig, deviceKVMode, suppressTokens, attentionWorkspace, position, req.Epsilon, yield)
 				return
 			}
 			if generated == generate.MaxTokens-1 {
 				return
+			}
+			if useBatchedDecode {
+				advanced, err := hipRunAttachedDrafterTargetAdvanceOneBatch(ctx, model.driver, hipAttachedDrafterTargetAdvanceOneRequest{
+					TargetForward:    cfg,
+					DeviceKVMode:     deviceKVMode,
+					EngineConfig:     engineConfig,
+					PriorDeviceState: deviceState,
+					TokenID:          tokenID,
+					Position:         position,
+					Epsilon:          req.Epsilon,
+					SuppressTokens:   suppressTokens,
+					GreedyBuffer:     finalGreedyBuffer,
+					Workspace:        attentionWorkspace,
+				})
+				if err != nil {
+					runErr = err
+					return
+				}
+				previousDeviceState := deviceState
+				deviceState = advanced.DeviceState
+				advanced.DeviceState = nil
+				current = advanced.Current
+				position = advanced.Position
+				hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+				if err := advanced.Close(); err != nil {
+					runErr = err
+					return
+				}
+				continue
 			}
 			var tokenIDDeviceBuffer *hipDeviceByteBuffer
 			if !hostSampling || deviceTopKSampling {
@@ -1404,6 +1439,12 @@ func hipGemma4Q4DeviceGreedyUnrollEnabled(generate inference.GenerateConfig, hos
 		current.GreedyDevice.Pointer() != 0
 }
 
+func hipGemma4Q4BatchDeviceGreedyUnrollEnabled(generate inference.GenerateConfig, hostSampling, deviceCandidateSampling, deviceTopKSampling bool, workspace *hipAttentionHeadsChunkedWorkspace, current hipGemma4Q4ForwardResult) bool {
+	return hipGemma4Q4DeviceGreedyUnrollEnabled(generate, hostSampling, deviceCandidateSampling, deviceTopKSampling, workspace, current) &&
+		current.GreedyDevice.Count() == 1 &&
+		current.GreedyDevice.SizeBytes() == hipMLXQ4ProjectionBestBytes
+}
+
 func hipGemma4Q4GenerateDeviceGreedyUnrolled(ctx context.Context, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, state hipGemma4Q4DecodeState, deviceState *hipGemma4Q4DeviceDecodeState, current hipGemma4Q4ForwardResult, generate inference.GenerateConfig, engineConfig hipGemma4Q4EngineConfig, deviceKVMode string, suppressTokens []int32, workspace *hipAttentionHeadsChunkedWorkspace, position int, yield func(inference.Token) bool) (hipGemma4Q4DecodeState, *hipGemma4Q4DeviceDecodeState, int, error) {
 	tokenDevices := make([]*hipDeviceByteBuffer, 0, generate.MaxTokens-1)
 	currentDevice := current.GreedyDevice
@@ -1461,12 +1502,87 @@ func hipGemma4Q4GenerateDeviceGreedyUnrolled(ctx context.Context, model *hipLoad
 	return state, deviceState, position, nil
 }
 
+func hipGemma4Q4GenerateBatchDeviceGreedyUnrolled(ctx context.Context, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, deviceState *hipGemma4Q4DeviceDecodeState, current hipGemma4Q4ForwardResult, generate inference.GenerateConfig, engineConfig hipGemma4Q4EngineConfig, deviceKVMode string, suppressTokens []int32, workspace *hipAttentionHeadsChunkedWorkspace, position int, epsilon float32, yield func(inference.Token) bool) (*hipGemma4Q4DeviceDecodeState, int, error) {
+	tokenDevices := make([]*hipDeviceByteBuffer, 0, generate.MaxTokens-1)
+	currentDevice := current.GreedyDevice
+	var priorLayerKVScratch []*rocmDeviceKVCache
+	var priorLayerDescriptorScratch []*rocmDeviceKVDescriptorTable
+	tokens := []int32{0}
+	for generated := 1; generated < generate.MaxTokens; generated++ {
+		if err := hipContextErr(ctx); err != nil {
+			return deviceState, position, err
+		}
+		inputDevice := hipCloneDeviceByteBufferView(currentDevice)
+		greedyToken, err := hipGreedyBestTokenBufferView(inputDevice)
+		if err != nil {
+			return deviceState, position, err
+		}
+		var priorLayerKV []*rocmDeviceKVCache
+		var priorLayerDescriptorTables []*rocmDeviceKVDescriptorTable
+		if deviceState != nil {
+			priorLayerKVScratch = hipGemma4Q4DeviceLayerCaches(deviceState, priorLayerKVScratch, len(cfg.Layers))
+			priorLayerKV = priorLayerKVScratch
+			priorLayerDescriptorScratch = hipGemma4Q4DeviceLayerDescriptorTables(deviceState, priorLayerDescriptorScratch, len(cfg.Layers))
+			priorLayerDescriptorTables = priorLayerDescriptorScratch
+		}
+		forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowGreedyTokenWithEngineConfig(ctx, model.driver, cfg, tokens, position, epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, nil, -1, nil, workspace, engineConfig, greedyToken)
+		if err != nil {
+			return deviceState, position, err
+		}
+		nextDeviceState, stateErr := hipGemma4Q4DeviceDecodeStateFromPrefillForward(forward, deviceKVMode)
+		if stateErr != nil {
+			_ = forward.Close()
+			return deviceState, position, stateErr
+		}
+		last := cfg.Layers[len(cfg.Layers)-1]
+		nextGreedyDevice, greedyErr := hipRunGemma4Q4PrefillFinalGreedyDeviceForRowWorkspace(ctx, model.driver, last, forward.FinalHidden, 1, 0, epsilon, nil, suppressTokens, workspace)
+		if greedyErr != nil {
+			_ = nextDeviceState.Close()
+			_ = forward.Close()
+			return deviceState, position, greedyErr
+		}
+		nextGreedyView := hipCloneDeviceByteBufferView(nextGreedyDevice)
+		closeErr := forward.Close()
+		if closeErr != nil {
+			_ = nextDeviceState.Close()
+			return deviceState, position, closeErr
+		}
+		previousDeviceState := deviceState
+		if err := hipFinalizeGemma4Q4ForwardDeviceState(previousDeviceState, nextDeviceState); err != nil {
+			_ = nextDeviceState.Close()
+			return deviceState, position, err
+		}
+		deviceState = nextDeviceState
+		hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+		currentDevice = nextGreedyView
+		tokenDevices = append(tokenDevices, nextGreedyView)
+		position++
+	}
+	tokenIDs, err := hipReadGreedyDeviceTokenIDs(model.driver, tokenDevices, cfg.Layers[0].VocabSize)
+	if err != nil {
+		return deviceState, position, err
+	}
+	for _, tokenID := range tokenIDs {
+		if !yield(inference.Token{ID: tokenID, Text: hipGeneratedTokenText(model, tokenID)}) {
+			return deviceState, position, nil
+		}
+	}
+	return deviceState, position, nil
+}
+
 func hipCloneDeviceByteBufferView(buffer *hipDeviceByteBuffer) *hipDeviceByteBuffer {
 	if buffer == nil {
 		return nil
 	}
 	clone := *buffer
 	return &clone
+}
+
+func hipGreedyBestTokenBufferView(buffer *hipDeviceByteBuffer) (*hipDeviceByteBuffer, error) {
+	if buffer == nil || buffer.Pointer() == 0 || buffer.Count() != 1 || buffer.SizeBytes() != hipMLXQ4ProjectionBestBytes {
+		return nil, core.E(hipGemma4Q4Layer0Operation, "greedy token device buffer shape mismatch", nil)
+	}
+	return hipBorrowDeviceByteBuffer(buffer.driver, "Gemma4 q4 packed greedy token view", buffer.Pointer(), buffer.SizeBytes(), buffer.Count()), nil
 }
 
 func hipReadGreedyDeviceTokenIDs(driver nativeHIPDriver, buffers []*hipDeviceByteBuffer, vocabSize int) ([]int32, error) {
@@ -1570,6 +1686,12 @@ func hipPrewarmGemma4Q4AttentionWorkspaceDeviceBuffers(driver nativeHIPDriver, c
 	if _, err := workspace.BorrowProjectionGreedyBest(driver); err != nil {
 		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
 		return err
+	}
+	if hipMLXQ4GELUTanhMLPPersistentRouteEnabled {
+		if _, err := workspace.EnsureGELUTanhMLPBarrier(driver); err != nil {
+			_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
+			return err
+		}
 	}
 	if err := hipGemma4Q4EnsureAttentionWorkspacePrefillCapacity(driver, workspace, cfg, prefillPlan, true); err != nil {
 		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
