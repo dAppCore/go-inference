@@ -192,22 +192,30 @@ func QuantizeModelPack(ctx context.Context, opts QuantizeOptions) (*QuantizeResu
 		return nil, core.E("QuantizeModelPack", "load dense safetensors", err)
 	}
 
-	// gemma-4 checkpoints take a dedicated lane: llama.cpp maps the text stack
-	// by canonical names and needs the full gemma4.* hyperparameter set plus the
-	// embedded tokenizer, none of which the generic pipeline produces. Detected
-	// from config.json's model_type; the lane covers the formats with an
-	// oracle-grade acceptance receipt (#28 q4_k_m; #53 q8_0/q6_k/q5_k_m/q3_k_m).
+	// Some architectures take a dedicated lane instead of the generic
+	// per-tensor pipeline below — e.g. gemma-4, where llama.cpp maps the text
+	// stack by canonical names and needs the full gemma4.* hyperparameter set
+	// plus the embedded tokenizer (registered by model/gemma4/gguf; the lane
+	// covers the formats with an oracle-grade acceptance receipt — #28
+	// q4_k_m, #53 q8_0/q6_k/q5_k_m/q3_k_m). Detected from config.json via the
+	// lane's own Detect, so this package never imports an arch (AX-8).
 	var quantized []Tensor
 	var metadata []MetadataEntry
-	if configRead := core.ReadFile(core.PathJoin(source.Root, "config.json")); configRead.OK && isGemma4Config(configRead.Value.([]byte)) {
-		if !isGemma4SupportedQuantizeFormat(requested) {
-			return nil, core.NewError("gguf: gemma4 GGUF conversion does not support " + string(requested) + " (supported: q4_k_m, q8_0, q6_k, q5_k_m, q3_k_m)")
+	var lane QuantizeLane
+	var laneMatched bool
+	if configRead := core.ReadFile(core.PathJoin(source.Root, "config.json")); configRead.OK {
+		lane, laneMatched = lookupQuantizeLane(configRead.Value.([]byte))
+		if laneMatched {
+			if !lane.SupportsFormat(requested) {
+				return nil, lane.UnsupportedFormatError(requested)
+			}
+			quantized, metadata, err = lane.Quantize(source, configRead.Value.([]byte), tensors, requested)
+			if err != nil {
+				return nil, err
+			}
 		}
-		quantized, metadata, err = quantizeGemma4ModelPack(source, configRead.Value.([]byte), tensors, requested)
-		if err != nil {
-			return nil, err
-		}
-	} else {
+	}
+	if !laneMatched {
 		quantized, err = quantizeGGUFTensors(ctx, tensors, format)
 		if err != nil {
 			return nil, err
