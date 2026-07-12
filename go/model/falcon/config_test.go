@@ -18,8 +18,15 @@ func TestConfigFalconRW1B_Good(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Arch: %v", err)
 	}
-	if arch.Hidden != 2048 || arch.Heads != 32 || arch.KVHeads != 32 || !arch.ALiBi || len(arch.Layer) != 24 {
+	if arch.Hidden != 2048 || arch.Heads != 32 || arch.KVHeads != 32 || !arch.ALiBi || arch.ParallelResidual || len(arch.Layer) != 24 {
 		t.Fatalf("Falcon-RW-1B arch = %+v", arch)
+	}
+}
+
+func TestConfigParallelAttention_Good(t *testing.T) {
+	arch, err := (Config{HiddenSize: 64, NumHiddenLayers: 2, NumAttentionHeads: 8, VocabSize: 100, ParallelAttn: true}).Arch()
+	if err != nil || !arch.ParallelResidual {
+		t.Fatalf("parallel attention Arch = %+v, %v", arch, err)
 	}
 }
 
