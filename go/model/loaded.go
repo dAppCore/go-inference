@@ -257,13 +257,15 @@ type LoadedDiffusion struct {
 // LoadedModel is the whole backend-agnostic weight set: the Arch + every weight as a Linear or raw
 // norm bytes, viewing the source mmap. The single assembler output every backend consumes.
 type LoadedModel struct {
-	Arch          Arch
-	Embed         *Linear // token embedding (also the tied LM head when LMHead is nil)
-	EmbedNorm     []byte  // optional layer norm applied immediately after token embedding (BLOOM)
-	PositionEmbed *Linear // learned absolute position table; nil for rotary architectures
-	LMHead        *Linear // separate output projection, or nil ⇒ tied to Embed
-	FinalNorm     []byte
-	Layers        []LoadedLayer
+	Arch               Arch
+	Embed              *Linear // token embedding (also the tied LM head when LMHead is nil)
+	EmbedNorm          []byte  // optional layer norm applied immediately after token embedding (BLOOM)
+	PositionEmbed      *Linear // learned absolute position table; nil for rotary architectures
+	EmbedProjectionIn  *Linear // optional embedding-width to hidden-width projection
+	EmbedProjectionOut *Linear // optional hidden-width to tied-head-width projection
+	LMHead             *Linear // separate output projection, or nil ⇒ tied to Embed
+	FinalNorm          []byte
+	Layers             []LoadedLayer
 
 	EmbedPerLayer     *Linear // PLE tower (E2B/E4B); nil when absent
 	PerLayerModelProj *Linear
@@ -286,7 +288,7 @@ func (m *LoadedModel) ValidateRequired(arch Arch) error {
 	if m.Embed == nil {
 		return core.NewError("model.LoadedModel: missing model.embed_tokens")
 	}
-	if m.FinalNorm == nil {
+	if m.FinalNorm == nil && !arch.NoFinalNorm {
 		return core.NewError("model.LoadedModel: missing model.norm.weight")
 	}
 	for i := range m.Layers {

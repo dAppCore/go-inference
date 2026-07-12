@@ -19,15 +19,15 @@ import (
 // "" field = the weight is absent for this arch → loaded nil. StandardWeightNames is the canonical
 // layout; an arch overrides only the names that differ.
 type WeightNames struct {
-	Embed, EmbedNorm, PositionEmbed, LMHead, FinalNorm string // model-level
-	EmbedPerLayer, PerLayerModelProj, PerLayerProjNorm string // PLE tower (E2B/E4B)
-	LayerPrefix                                        string // "model.layers.%d" — the %d carrier
-	AttnNorm, PostAttnNorm, QNorm, KNorm, LayerScalar  string // per-layer norms (suffixes)
-	Q, K, V, O                                         string // attention projections (suffixes)
-	MLPNorm, Gate, Up, Down, PostFFNorm                string // dense MLP (suffixes)
-	PerLayerGate, PerLayerProjection                   string // PLE per-layer (suffixes)
-	PostPerLayerInputNorm                              string
-	MoE                                                MoEWeightNames
+	Embed, EmbedNorm, PositionEmbed, EmbedProjectionIn, EmbedProjectionOut, LMHead, FinalNorm string // model-level
+	EmbedPerLayer, PerLayerModelProj, PerLayerProjNorm                                        string // PLE tower (E2B/E4B)
+	LayerPrefix                                                                               string // "model.layers.%d" — the %d carrier
+	AttnNorm, PostAttnNorm, QNorm, KNorm, LayerScalar                                         string // per-layer norms (suffixes)
+	Q, K, V, O                                                                                string // attention projections (suffixes)
+	MLPNorm, Gate, Up, Down, PostFFNorm                                                       string // dense MLP (suffixes)
+	PerLayerGate, PerLayerProjection                                                          string // PLE per-layer (suffixes)
+	PostPerLayerInputNorm                                                                     string
+	MoE                                                                                       MoEWeightNames
 	// NormBiasOne folds the gemma "(1 + weight)" RMSNorm convention into every norm weight at load
 	// (see norm_bias.go), so the plain RMSNorm kernel reproduces gemma's (1+w)·rms(x). gemma/gemma2/
 	// gemma3/gemma4 set it; mistral and non-gemma arches leave it false.
@@ -97,8 +97,14 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 	}
 
 	m := &LoadedModel{Arch: arch, EmbedNorm: norm(names.EmbedNorm), FinalNorm: norm(names.FinalNorm)}
-	m.Embed = lin(names.Embed, d)
+	embedDim := arch.EmbeddingDim
+	if embedDim == 0 {
+		embedDim = d
+	}
+	m.Embed = lin(names.Embed, embedDim)
 	m.PositionEmbed = lin(names.PositionEmbed, d)
+	m.EmbedProjectionIn = lin(names.EmbedProjectionIn, arch.EmbeddingDim)
+	m.EmbedProjectionOut = lin(names.EmbedProjectionOut, d)
 	if m.Embed == nil {
 		return nil, core.NewError("model.Assemble: " + names.Embed + " absent")
 	}
