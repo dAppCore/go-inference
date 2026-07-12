@@ -21,6 +21,7 @@ import (
 type AttnConfig struct {
 	Heads, KVHeads, HeadDim, RotaryDim int
 	RopeTheta, NormEps                 float32
+	QKVClip                            float32
 	OutputGate                         bool
 	ALiBi                              bool
 	QKNormalization                    model.QKNormalization
@@ -197,6 +198,17 @@ func (m *attnMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidden
 		k = sc.k
 		sc.v = matNTInto(sc.v, h, m.w.VProj, L, D, KVH*cfg.HeadDim) // [L, KVH*HD]
 		v = sc.v
+	}
+	if cfg.QKVClip > 0 {
+		for _, values := range [][]float32{qRaw, k, v} {
+			for i, value := range values {
+				if value > cfg.QKVClip {
+					values[i] = cfg.QKVClip
+				} else if value < -cfg.QKVClip {
+					values[i] = -cfg.QKVClip
+				}
+			}
+		}
 	}
 	return m.continueFromQKV(qRaw, k, v, L, D, st, sc)
 }
