@@ -40,6 +40,17 @@ func TestBuiltinRegistersLlama(t *testing.T) {
 	}
 }
 
+func TestBuiltinRegistersGranite(t *testing.T) {
+	if _, ok := model.LookupArch("granite"); !ok {
+		t.Fatal("model_type granite not registered through builtin")
+	}
+	for _, modelType := range []string{"granitemoe", "granitemoehybrid"} {
+		if _, ok := model.LookupArch(modelType); ok {
+			t.Fatalf("out-of-scope %s registered through builtin", modelType)
+		}
+	}
+}
+
 func TestBuiltinRegistersQwen2(t *testing.T) {
 	spec, ok := model.LookupArch("qwen2")
 	if !ok {

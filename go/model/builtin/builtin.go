@@ -32,6 +32,7 @@ import (
 	_ "dappco.re/go/inference/model/gemma4"   // gemma4 / gemma4_text / gemma4_unified (+ assistant)
 	_ "dappco.re/go/inference/model/gpt2"     // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
 	_ "dappco.re/go/inference/model/gptneox"  // gpt_neox / gptj / gpt_neo
+	_ "dappco.re/go/inference/model/granite"  // IBM Granite dense (excludes Granite MoE/hybrid)
 	_ "dappco.re/go/inference/model/llama"    // llama (dense text)
 	_ "dappco.re/go/inference/model/mistral"  // mistral
 	_ "dappco.re/go/inference/model/mixtral"  // mixtral sparse MoE
