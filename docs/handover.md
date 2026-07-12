@@ -1,5 +1,78 @@
 # NEXT WAKE (2026-07-16 — #381 SHIPPED: the skip is live, 2.1-2.6x at every depth)
 
+## POST-UNFENCE NIGHT (2026-07-12 night — the oMLX gap closes; ladder terminal rung)
+
+- #23 LADDER COMPLETE to the terminal rung. Input-side fold merged
+  (2N+1→N+1, +20%/+18%), then HEAD FUSE (e64421b): final RMSNorm + head
+  GEMM onto the LAST layer's tail CB (N+1→N). 0.8B 24.96→25.83 /
+  24.41→25.46 tok/s interleaved A/B; 4B neutral at floor (head CB was
+  amortised — the win is the norm-glue round-trip); text byte-identical;
+  metal 1609/0. The serve-loop piece that makes it real:
+  generateStepwiseWithSession prefers a stepper-level LMHead (one-shot
+  byte-keyed logits cache in composedStepper). Kill switch LTHN_HEAD_FUSE.
+  Day total 0.8B: 1.6 → ~25.5 (~16×). Remainder booked #56: the fuse also
+  fires per prefill-walk token (L==1 stateless replay) — bounded, next rung.
+- TOKENIZER ChatML fix (886d2b7): `added` map = FULL atomic matcher (all
+  added tokens), `special` = decode-skip only; qwen im_start-as-BOS branch
+  removed. Go==HF token-for-token; the "think soup"/assistant-echo leaks
+  were encode defects, never template bugs. Gate turns 36→4 tokens clean.
+- WRAPPER CAPABILITY BUG CLASS (233fb4c): interface embedding never widens
+  method sets — welfare/policy wrappers now forward AcceptsImages/Audio;
+  inference.WrappedModel/BaseTextModel unwrap seam. Audio+vision now work
+  over HTTP (both were 400-ing behind wrappers while CLI worked). General
+  registry-level fix parked in #50 item 4.
+- AUDIO CONVERGED: model/gemma4/audio is the one neutral Conformer home
+  (#44 — engine/metal audio_features.go 385→59 lines, aliases); HIP port
+  #31 done to the same goldens. Remainder tasks #42/#43/#45/#46.
+- HIP LINE: causal-stride kernel root-cause fixed (f2bb2cc — stride derived
+  from key_bytes/token_count broke on causal windows; GPU suite 1475/0).
+  Option A format fork (e79ee2e): mlxaffine skip-list keeps
+  .per_layer_model_projection.weight wide BF16 (hip's loaded contract).
+  First coherent AMD decodes: E2B 125 tok/s, E4B 72 tok/s on the 7800 XT.
+  make test-matrix + named binaries lthn-{amd,cuda,cpu-x86,cpu-aarch64};
+  cuda lane is REAL CUDA runtime via ZLUDA-on-AMD; cpu lane = HIP-CPU+TBB
+  (linker gap #51). Kernel doctrine (snider): one portable HIP++/C++23
+  source, made-to-work cpu/cuda/amd; per-hardware tuning AFTER this
+  version. 12B dense forward lane running (#52). hip hygiene #49 +
+  darwin-tag fix c7f17c8.
+- K-QUANT SWEEP (#47): 7 of 9 GGUF formats were broken-since-written —
+  Q4_K/Q5_K geometry, Q4_0 scale sign, Q5_0 STRUCTURAL (24- vs 22-byte
+  block + writer stride table), Q6_K/Q3_K/Q2_K naive scales — all
+  byte-pinned vs real compiled libggml via a clang harness.
+- oMLX GAP CLOSED (each with receipts): #34 embeddings — go-rag had NO
+  native ML (delegation only); model/bert built fresh (WordPiece, 12-layer,
+  CLS/mean, L2), cosine=1.000000 vs sentence-transformers on bge-small;
+  /v1/embeddings + /v1/rerank live. #36 multi-model — resolver-seam
+  registry: aliases, lazy load, LRU+idle-TTL under byte ceiling with real
+  Close reclaim, pinning, model:profile presets; -models-config. #35
+  slice 1 — serving/interleave skeleton (dual admission budget, goroutine
+  isolation; 3 real concurrency bugs found by its own tests). THREE
+  schedulers now exist (schedule/scheduler/interleave) — survivor fork is
+  an operator call before slice 2. #40 tray — gui ServeService + manager
+  (gui test binary had been build-dead since the core.Result migration;
+  22 masked assertions repaired). #39/#48 tiered KV — RAM-default store
+  (-state-store unset = pure RAM; InMemoryStore race fixed), then ramspill
+  (cb2fd5c): kv/kvtier found COMPLETE, wrapped as a state.Store behind
+  -state-ram-budget (coldest chunks spill to scratch .kv, wake
+  transparently). kv/radix cross-conversation sharing = evidenced defer →
+  #54 (needs Tokenize capability + global prefix index; whole-message-hash
+  keys can never cross-match; ReusePrefix dedup already general).
+  kv/blockcache found HIP-only → #55.
+- QUANT FORMAT RESEARCH (a5ecc6d → #53): GPTQ #1 next (autoround's numeric
+  core exists; its MXFP4/NVFP4 schemes are metadata stubs), AWQ, plain fp8,
+  NF4; MX hold — gfx1101 has ZERO fp8/fp6/fp4 acceleration (CDNA3+/RDNA4/
+  CDNA4 territory) and no ggml-style reference to byte-verify. Affine =
+  shared native BOTH engines, GGUF = interchange: confirmed resting
+  position. Operator fork: is lem a general HF exporter at all?
+- KNOWLEDGE PACK (knowledge-packs 722e1d4): corego/pkg/inference split into
+  repo-shaped area folders (contract/build/engine{,metal,hip}/model/kv/
+  decode/serving/train/agent/lem/gui), root README = getting started;
+  facts re-verified against dev HEAD.
+- FLEET DOCTRINE this stretch: staffing 2 Opus + 4 Sonnet (Sonnet default,
+  quota pooled); rtk block in every brief (it HELPS — pass/fail summaries,
+  rtk --help for retrieval; never work around it); no deferred notes on
+  Mantis — harvest to tasks (#42-46, #50-56 all came from that rule).
+
 ## UNFENCED EVENING (2026-07-12 late — hip lands, GGUF interop, the ratchet)
 
 - HIP UNFENCED (snider): scout run proved the lane workable → codex's stint
