@@ -123,3 +123,61 @@ func TestComposedAttnQKVFuseDeviceVsHost(t *testing.T) {
 	}
 	t.Logf("composed attn q/k/v fuse: %d fused-CB call(s); device matches host within f32 tol over %d logits", calls, len(dev))
 }
+
+// TestComposedResidualNormMLPFuseDeviceVsHost exercises the fused FFN-tail primitive (mixer residual add +
+// post-attn RMSNorm + SwiGLU MLP + MLP residual add, all in ONE command buffer) at a shape whose MLP
+// crosses composed.deviceMinWork so the tail hook genuinely engages, and confirms the logits match a
+// pure-host run within f32 tolerance. A call-counter around the hook asserts the fuse actually fired.
+// L·D·FF = 3·512·2048 = 3,145,728 ≥ 1<<20 opens the fuse gate.
+func TestComposedResidualNormMLPFuseDeviceVsHost(t *testing.T) {
+	if composed.ResidualNormMLPDevice == nil {
+		t.Fatal("native init did not wire composed.ResidualNormMLPDevice")
+	}
+	const D, FF, vocab, heads, hd = 512, 2048, 4096, 4, 128
+	m := &composed.ComposedModel{
+		Embed: cbSyn(vocab*D, 1), NormF: cbSyn(D, 2), D: D, Vocab: vocab, Eps: 1e-6,
+		Layers: []composed.Layer{{
+			InputNorm:    cbSyn(D, 3),
+			PostAttnNorm: cbSyn(D, 4),
+			MLP:          &composed.MLP{Gate: cbSyn(FF*D, 5), Up: cbSyn(FF*D, 6), Down: cbSyn(D*FF, 7), FF: FF},
+			Mixer: composed.NewAttnMixer(&composed.AttnWeights{
+				QProj: cbSyn(heads*hd*D, 8), KProj: cbSyn(heads*hd*D, 9),
+				VProj: cbSyn(heads*hd*D, 10), OProj: cbSyn(D*heads*hd, 11),
+				QNorm: cbSyn(hd, 12), KNorm: cbSyn(hd, 13),
+			}, composed.AttnConfig{Heads: heads, KVHeads: heads, HeadDim: hd, RotaryDim: hd / 2, RopeTheta: 1e6, NormEps: 1e-6}),
+		}},
+	}
+	tokens := []int32{5, 9, 21}
+
+	calls := 0
+	savedTail := composed.ResidualNormMLPDevice
+	composed.ResidualNormMLPDevice = func(h, mixOut, normW, gate, up, down []float32, L, D, FF int, eps float32) ([]float32, error) {
+		calls++
+		return ResidualNormMLPDevice(h, mixOut, normW, gate, up, down, L, D, FF, eps)
+	}
+	dev, err := composed.NewSession(m).Forward(tokens)
+	composed.ResidualNormMLPDevice = savedTail
+	if err != nil {
+		t.Fatalf("device (fused tail) forward: %v", err)
+	}
+	if calls == 0 {
+		t.Fatal("fused FFN-tail hook never engaged — shape below device floor?")
+	}
+
+	savedTail2, savedProj, savedMLP, savedFuse := composed.ResidualNormMLPDevice, composed.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice
+	composed.ResidualNormMLPDevice, composed.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice = nil, nil, nil, nil
+	host, herr := composed.NewSession(m).Forward(tokens)
+	composed.ResidualNormMLPDevice, composed.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice = savedTail2, savedProj, savedMLP, savedFuse
+	if herr != nil {
+		t.Fatalf("host forward: %v", herr)
+	}
+	if len(dev) != len(host) {
+		t.Fatalf("length: device %d host %d", len(dev), len(host))
+	}
+	for i := range dev {
+		if math.Abs(float64(dev[i]-host[i])) > 1e-2*(1+math.Abs(float64(host[i]))) {
+			t.Fatalf("logits[%d]: device %v host %v (fused FFN-tail diverged)", i, dev[i], host[i])
+		}
+	}
+	t.Logf("composed FFN-tail fuse: %d fused-CB call(s); device matches host within f32 tol over %d logits", calls, len(dev))
+}

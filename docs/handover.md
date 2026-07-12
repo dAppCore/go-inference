@@ -50,6 +50,59 @@
   500s). #1839 open remainder = unit D (mask fidelity) + unit E (HIP
   Conformer port — NOW DISPATCHABLE, board #31, acceptance kit = the audio
   goldens).
+## QWEN-LINE SHARED FFN-TAIL FUSE (2026-07-12 — evidenced NEUTRAL, and why)
+
+- BUILT SHARED: engine/metal/residual_norm_mlp_device.go — ResidualNormMLPDevice,
+  an ARCH-NEUTRAL f32 primitive (named for the op, not for composed) that encodes
+  the whole pre-norm SwiGLU FFN sub-block into ONE command buffer: hplus = h +
+  mixOut → normed = RMSNorm(hplus, w) [plain rsqrt(mean²+eps)·w, the f32 rms
+  kernel] → SwiGLU(normed) → y = hplus + mlpOut. Every pre-norm SwiGLU stack
+  (llama/qwen/mistral) has exactly this tail, so it is a shared rung, not a
+  composed one-off. Reuses the existing emit helpers (emitBinary vv_Addfloat32,
+  emitRMSNormRows, emitSteelGemm, emitUnary sigmoid) + pooled pinned scratch.
+  composed declares the AX-8 hook (composed.ResidualNormMLPDevice); native binds
+  it; forwardEmb routes the dense-MLP layers above deviceMinWork through it, MoE
+  + sub-floor + device-fail fall back to the host add/norm/MLP/add path.
+- PARITY: TestComposedResidualNormMLPFuseDeviceVsHost (counter-guarded device-vs
+  -host, f32 tol, mirrors the q/k/v fuse test). Full metal suite 1554 green,
+  model/composed + model/qwen3 52 green, vet clean.
+- RECEIPT (interleaved same-thermal A/B, temp 0, sky-blue prompt): greedy text
+  BYTE-IDENTICAL before/after on BOTH models. tok/s NEUTRAL within thermal noise
+  — 0.8B before 21.3/22.0 -> after 23.0/21.9; 4B steady-state ~9.3 both (the lone
+  8.3 was the cold first run).
+- WHY NEUTRAL (the inventory correction): this fuse RELOCATES host glue onto the
+  GPU, it does NOT collapse a command buffer. The MLP was ALREADY one CB
+  (ComposedMLPDevice); the residual adds + RMSNorm were CPU work BETWEEN CBs, not
+  a CB each — and at L=1 that CPU glue is ~3 passes over [1,D], negligible. So
+  the CB-per-token count is UNCHANGED by this slice; it removes host glue (which
+  matters more at larger L, and cleans the boundary) and, crucially, is the
+  scaffold the real CB-collapse needs. The genuine collapse is merging the
+  mixer's FINAL-projection CB (o_proj / out_proj) INTO this tail CB — i.e. the
+  mixer hands a device-resident buffer to the tail instead of reading it back —
+  which is the GPU-resident whole-token orchestration flagged design-worthy
+  below. That is the next rung; this slice makes the tail a single shared entry
+  it can plug into.
+
+## QWEN-LINE 4B STEP-UP (2026-07-12 — the family scales, zero loader fixes)
+
+- RECEIPT: mlx-community/Qwen3.5-4B-OptiQ-4bit loads through LoadComposed and
+  greedy-generates (temp 0) coherent text — the sky-blue Rayleigh answer — at
+  8.2 tok/s decode (55 tok / 6.553s), prefill 9 tok/s (23 tok / 2.691s), on the
+  same host-f32 + device-GEMM-fuse composed stack the 0.8B rides. Two-turn
+  continuity gate (composed_gate_4b.py, mirror of composed_gate.py at the 4B):
+  turn1 "OK Wibble", turn2 "Wibble" — RECALL=PASS, NO-REPLAY=PASS (turn2
+  prompt_tokens 25 < full-history 29, so no replay).
+- NO GEOMETRY/LOADER FIX NEEDED. The shape-derived loader absorbed every 4B
+  delta out of the box: D 2560, 32 layers, 16 attn heads / 4 KV, head_dim 256
+  (explicit, != D/heads=160), attn_output_gate=true (q_proj [8192,640] = 2·16·256
+  carries the [q;gate] split), full_attention_interval 4, vocab 248320, tied
+  embeddings; gated-delta derived keyHeads 16 / valueHeads 32 / headDim 128 /
+  convK 4 from the weight shapes; mixed per-tensor 4/8-bit OptiQ quant resolved
+  by QuantConfig.For overrides (embed 8-bit, per-layer proj bits vary). ~16GB
+  f32 dequant footprint, fine on 96GB.
+- Confirms the composed stack is arch-general across the Qwen3.5 family, not
+  0.8B-tuned. The perf ladder below (device seam, fused MLP) now has a second,
+  larger model to A/B against — see the shared-glue slice receipts.
 
 ## #23 COMPOSED DEVICE SEAM (2026-07-12 evening — 1.6 -> 16.7 tok/s in one day)
 

@@ -78,6 +78,15 @@ var ProjMatMulInto func(out, x, w []float32, M, K, N int) ([]float32, error)
 // per-projection path.
 var MLPDevice func(gate, up, down, x []float32, L, D, FF int) ([]float32, error)
 
+// ResidualNormMLPDevice is the fused pre-norm FFN-tail hook: the mixer-output residual add, the post-attn
+// RMSNorm, the SwiGLU MLP and the MLP residual add encoded into ONE command buffer with device-resident
+// intermediates — where the host path pays three passes over [L,D] (add, norm, add) bracketing the MLP's
+// own command buffer. Given the pre-mixer hidden h and the mixer output mixOut, it returns the new hidden
+// h = (h+mixOut) + SwiGLU(RMSNorm(h+mixOut, normW)). Same AX-8 shape as MLPDevice; nil — or a MoE FFN, or
+// a sub-floor shape — runs the host add/norm/MLP/add path. Arch-neutral: every pre-norm SwiGLU stack has
+// exactly this tail, so the backend primitive is named for the op, not for this stack.
+var ResidualNormMLPDevice func(h, mixOut, normW, gate, up, down []float32, L, D, FF int, eps float32) ([]float32, error)
+
 // deviceMinWork is the M·K·N floor below which matNTInto ignores the device hook — a tiny GEMV's
 // command-buffer round-trip outweighs its compute, so sub-MMAC shapes stay on the host path.
 const deviceMinWork = 1 << 20
@@ -209,6 +218,16 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 			return nil, err
 		}
 		s.states[li] = next
+		// Fused device tail: (h += mixOut) → RMSNorm(PostAttnNorm) → SwiGLU MLP → (h += mlpOut) in ONE
+		// command buffer, for the dense-MLP layers above the device floor. MoE FFNs and sub-floor shapes
+		// fall through to the host add/norm/MLP/add path below (a device failure does too — deterministic
+		// for the rest of the process either way).
+		if mlp, ok := layer.MLP.(*MLP); ok && ResidualNormMLPDevice != nil && L*D*mlp.FF >= deviceMinWork {
+			if y, err := ResidualNormMLPDevice(h, mixOut, layer.PostAttnNorm, mlp.Gate, mlp.Up, mlp.Down, L, D, mlp.FF, eps); err == nil {
+				h = y
+				continue
+			}
+		}
 		for i := range h {
 			h[i] += mixOut[i] // mixer residual
 		}
