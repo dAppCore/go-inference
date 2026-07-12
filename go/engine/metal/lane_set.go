@@ -53,6 +53,12 @@ type laneSet struct {
 	nextID int
 
 	fwdCount uint64 // monotonic: +1 per batched forward (one per Step that advances ≥1 lane)
+
+	// gemmMode caches the LTHN_CB_GEMM read (0 unread, 1 armed, 2 disabled); gemm
+	// holds the reusable K-row projection staging (lane_set_gemm.go).
+	gemmMode     int
+	gemm         *gemmSlabs
+	gemmFwdCount uint64 // monotonic: +1 per weight-read-once GEMM forward (the counter guard)
 }
 
 // decodeLane is one lane's owned mutable state.
@@ -240,8 +246,16 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 		if len(advancing) == 0 {
 			return
 		}
-		// Phase 2 — ONE batched forward: replay every advancing lane's ICB into a
-		// single command buffer and commit/wait once.
+		// Phase 2 — ONE batched forward that advances the whole set. The
+		// weight-read-once GEMM forward (lane_set_gemm.go) sweeps each weight once
+		// for all K lanes; LTHN_CB_GEMM=0 or an ineligible arch falls back to the
+		// per-lane ICB replay (byte-for-byte the merged 2.58× path).
+		if ls.gemmForwardEnabled() && ls.gemmEligible(advancing) {
+			if err := ls.batchedGEMMForward(advancing); err != nil {
+				stepErr = err
+			}
+			return
+		}
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
 		for _, lane := range advancing {
@@ -341,6 +355,8 @@ func (ls *laneSet) Close() error {
 			firstErr = err
 		}
 	}
+	ls.gemm.release()
+	ls.gemm = nil
 	ls.lanes = nil
 	ls.order = nil
 	return firstErr
