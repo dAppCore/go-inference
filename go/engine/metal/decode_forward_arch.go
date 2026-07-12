@@ -1279,7 +1279,12 @@ var (
 	captureLayerHiddens  bool
 	capturedLayerHiddens [][]byte
 	capturedAttnHiddens  [][]byte // post-attention hidden (x + Wo·attn) per layer — isolates attention from MLP
+	capturedLayer5MLP    []capturedMLPInternal
 )
+
+type capturedMLPInternal struct {
+	gate, up, product, down []byte
+}
 
 // stepToken decodes ONE token (its embedding) at sequence position pos, writing this
 // token's K/V into the growing cache, and returns its output hidden state. The projector
@@ -1595,6 +1600,18 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			commitCommandBufferFast(cb)
 			waitUntilCompletedFast(cb)
 			capturedLayerHiddens = append(capturedLayerHiddens, append([]byte(nil), s.bufferBytes(out, s.dModel*bf16Size)...))
+			if li == 5 {
+				captureFF := s.dFF
+				if s.lb[li].dFF > 0 {
+					captureFF = s.lb[li].dFF
+				}
+				capturedLayer5MLP = append(capturedLayer5MLP, capturedMLPInternal{
+					gate:    append([]byte(nil), s.bufferBytes(s.msc.gate, captureFF*bf16Size)...),
+					up:      append([]byte(nil), s.bufferBytes(s.msc.up, captureFF*bf16Size)...),
+					product: append([]byte(nil), s.bufferBytes(s.msc.gated, captureFF*bf16Size)...),
+					down:    append([]byte(nil), s.bufferBytes(s.msc.down, s.dModel*bf16Size)...),
+				})
+			}
 			cb = commandBufferFast(queue)
 			enc = computeCommandEncoderFast(cb)
 			cbBroken = true

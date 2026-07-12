@@ -52,6 +52,7 @@ func TestGemma4CrossEngineLayerDump(t *testing.T) {
 	defer session.Close()
 	capturedAttnHiddens = nil
 	capturedLayerHiddens = nil
+	capturedLayer5MLP = nil
 	captureLayerHiddens = true
 	defer func() { captureLayerHiddens = false }()
 	for position, id := range ids {
@@ -106,6 +107,32 @@ func TestGemma4CrossEngineLayerDump(t *testing.T) {
 	if err := os.WriteFile(dumpPath+".json", []byte(manifest), 0o644); err != nil {
 		t.Fatalf("write manifest: %v", err)
 	}
+	if len(capturedLayer5MLP) != len(ids) {
+		t.Fatalf("captured layer-5 MLP rows = %d, want %d", len(capturedLayer5MLP), len(ids))
+	}
+	lastMLP := capturedLayer5MLP[len(capturedLayer5MLP)-1]
+	writeBF16 := func(name string, values []byte) {
+		payload := make([]byte, 0, len(values)*2)
+		for offset := 0; offset < len(values); offset += 2 {
+			bits := uint16(values[offset]) | uint16(values[offset+1])<<8
+			payload = binary.LittleEndian.AppendUint32(payload, uint32(bits)<<16)
+		}
+		if err := os.WriteFile(dumpPath+".mlp."+name+".bin", payload, 0o644); err != nil {
+			t.Fatalf("write layer-5 MLP %s: %v", name, err)
+		}
+	}
+	writeBF16("gate", lastMLP.gate)
+	writeBF16("up", lastMLP.up)
+	writeBF16("product", lastMLP.product)
+	writeBF16("down", lastMLP.down)
+	activation := make([]byte, len(lastMLP.gate))
+	for i := 0; i < len(lastMLP.gate); i += 2 {
+		g := bf16ToF32(lastMLP.gate[i], lastMLP.gate[i+1])
+		a := geluTanhScalar(g)
+		bits := math.Float32bits(a)
+		activation[i], activation[i+1] = byte(bits>>16), byte(bits>>24)
+	}
+	writeBF16("activation", activation)
 	t.Logf("CROSS-ENGINE token_ids=%v layers=%d tokens=%d hidden=%d dump=%s", ids, len(layers), len(ids), hidden, dumpPath)
 }
 
