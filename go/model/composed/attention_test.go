@@ -9,6 +9,17 @@ import (
 	"dappco.re/go/inference/model/qwen3"
 )
 
+func TestRMSNormHeadWithoutWeights_Ugly(t *testing.T) {
+	x := []float32{1, -2, 3, -4}
+	want := append([]float32(nil), x...)
+	rmsNormHead(x, nil, 1e-5)
+	for i := range x {
+		if x[i] != want[i] {
+			t.Fatalf("x[%d] = %g, want identity %g without QK norm", i, x[i], want[i])
+		}
+	}
+}
+
 func mkAttnMixer(cfg AttnConfig, D, seed int) Mixer {
 	return NewAttnMixer(&AttnWeights{
 		QProj: syn(cfg.Heads*cfg.HeadDim*D, seed+1),

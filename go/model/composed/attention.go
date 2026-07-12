@@ -82,6 +82,9 @@ func (m *attnMixer) Kind() string { return "full_attention" }
 
 // rmsNormHead RMS-normalises a single [HeadDim] vector in place by weight w.
 func rmsNormHead(x, w []float32, eps float32) {
+	if len(w) == 0 { // Llama/Mistral have no per-head QK norm.
+		return
+	}
 	var ss float64
 	for _, e := range x {
 		ss += float64(e) * float64(e)

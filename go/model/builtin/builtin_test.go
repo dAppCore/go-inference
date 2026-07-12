@@ -29,3 +29,13 @@ func TestBuiltinRegistersComposed(t *testing.T) {
 		t.Fatalf("gemma4 = (spec.Composed==nil? %v, registered? %v), want a registered transformer arch with no Composed hook", spec.Composed == nil, ok)
 	}
 }
+
+func TestBuiltinRegistersLlama(t *testing.T) {
+	spec, ok := model.LookupArch("llama")
+	if !ok {
+		t.Fatal("model_type llama not registered through builtin")
+	}
+	if spec.Composed != nil {
+		t.Fatal("llama unexpectedly registered as a composed architecture")
+	}
+}
