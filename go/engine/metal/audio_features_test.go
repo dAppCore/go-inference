@@ -123,7 +123,7 @@ func TestAudioInputFeatures_Good(t *testing.T) {
 		t.Fatalf("Extract: %v", err)
 	}
 
-	got, frames, melBins, err := AudioInputFeatures(samples, extractor)
+	got, _, frames, melBins, err := AudioInputFeatures(samples, extractor)
 	if err != nil {
 		t.Fatalf("AudioInputFeatures: %v", err)
 	}

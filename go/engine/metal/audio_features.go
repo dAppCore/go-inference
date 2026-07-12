@@ -298,17 +298,19 @@ func (e *AudioFeatureExtractor) Extract(samples []float32) ([]float32, []bool, i
 }
 
 // AudioInputFeatures converts one mono waveform through the native host extractor and returns the
-// bf16 [frames, melBins] rows consumed by the native audio encoder.
-func AudioInputFeatures(samples []float32, extractor *AudioFeatureExtractor) ([]byte, int, int, error) {
-	features, _, frames, err := extractor.Extract(samples)
+// bf16 [frames, melBins] rows consumed by the native audio encoder plus the per-frame validity mask
+// (false = padding). The mask flows through AudioEncode into the Conformer attention so padded frames
+// are never attended; a fully-valid clip yields an all-true mask (byte-identical to the mask-free path).
+func AudioInputFeatures(samples []float32, extractor *AudioFeatureExtractor) ([]byte, []bool, int, int, error) {
+	features, mask, frames, err := extractor.Extract(samples)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, nil, 0, 0, err
 	}
 	if frames <= 0 || len(features)%frames != 0 {
-		return nil, 0, 0, core.NewError("native.AudioInputFeatures: invalid audio feature geometry")
+		return nil, nil, 0, 0, core.NewError("native.AudioInputFeatures: invalid audio feature geometry")
 	}
 	melBins := len(features) / frames
-	return f32ToBf16Slice(features), frames, melBins, nil
+	return f32ToBf16Slice(features), mask, frames, melBins, nil
 }
 
 // htkMelFilterBank ports HF audio_utils.mel_filter_bank with mel_scale="htk", norm=nil: triangular

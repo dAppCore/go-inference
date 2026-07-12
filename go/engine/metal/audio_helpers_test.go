@@ -162,10 +162,10 @@ func TestAudioF32HelperInputGuards(t *testing.T) {
 
 func TestAudioEncodeAndSubsampleF32InputGuards(t *testing.T) {
 	requireNativeRuntime(t)
-	if _, err := AudioSubsampleF32([]byte{1}, &AudioSubsampleWeights{}, AudioSubsampleConfig{Frames: 1, MelBins: 1}); err == nil {
+	if _, _, err := AudioSubsampleF32([]byte{1}, &AudioSubsampleWeights{}, AudioSubsampleConfig{Frames: 1, MelBins: 1}, nil); err == nil {
 		t.Fatal("AudioSubsampleF32(short features) error = nil")
 	}
-	if _, err := AudioEncode([]byte{1}, &AudioEncoderWeights{}, AudioConfig{}); err == nil {
+	if _, err := AudioEncode([]byte{1}, &AudioEncoderWeights{}, AudioConfig{}, nil); err == nil {
 		t.Fatal("AudioEncode(short features) error = nil")
 	}
 }
@@ -257,7 +257,7 @@ func TestAudioBlockKernelFailureGuards(t *testing.T) {
 		}
 		resetNativePipelineCachesForCoverage()
 
-		if _, err := AudioSubsampleF32(features, subWeights, subCfg); err == nil {
+		if _, _, err := AudioSubsampleF32(features, subWeights, subCfg, nil); err == nil {
 			t.Fatal("AudioSubsampleF32(wrong library) error = nil")
 		}
 	})
