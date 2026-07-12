@@ -12,6 +12,7 @@ import (
 	"time"
 	"unsafe"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
 	"dappco.re/go/inference/model/safetensors"
@@ -1499,4 +1500,382 @@ func TestQATPipelinedGPUDecodeMatchesHost(t *testing.T) {
 		}
 	}
 	t.Logf("qat host/chained/pipelined identical: %v", hostGen)
+}
+
+// TestSampledPipelinedGPUTailLogitsArmMatchesChained extends the pipelined-sampled parity
+// coverage (#30 r5): every existing pipelined test uses TopK>=2, which always takes
+// submit()'s sampleTopKTokenParamsEligible arm (encodeTopKSampleFast). TopK==0 with
+// TopP==0 declines that arm outright (sampleTopKTokenParamsEligible requires TopK>0) but
+// stays sampleLogitsTokenParamsEligible and NOT CPU-preferred (sampleLogitsTokenCPUPreferred
+// needs 0<TopP<1), so submit() takes the OTHER arm — headEnc.encodeLogitsSample — for both
+// the Tail (multi-step, cache-final) and OneShotTail (request-session) shapes. Parity
+// against the pipeline disabled (serial chained) control proves the logits arm produces
+// the same tokens as the byte-identical non-pipelined lane, exactly like
+// TestPipelinedSampledGPUDecodeMatchesChained already does for the TopK arm.
+func TestSampledPipelinedGPUTailLogitsArmMatchesChained(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	g, arch := pleQuantModel(t, 3, 256, 32, 0)
+	const maxLen, maxNew = 24, 8
+	prompt := []int32{1, 5, 3, 2}
+	params := model.SampleParams{Temperature: 0.9} // TopK=0, TopP=0 ⇒ logits arm, not TopK arm
+
+	oldPipe := pipelinedGPUDecodeEnabled
+	oldChainDisabled := chainedGPUInputsDisabled
+	defer func() {
+		pipelinedGPUDecodeEnabled = oldPipe
+		chainedGPUInputsDisabled = oldChainDisabled
+	}()
+	chainedGPUInputsDisabled = false
+
+	probe, err := NewArchQuantSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("probe session: %v", err)
+	}
+	if probe.sampleTopKTokenParamsEligible(params) {
+		t.Fatal("fixture params must decline the TopK-token arm to exercise the logits arm")
+	}
+	if !probe.sampleLogitsTokenParamsEligible(params) {
+		t.Skip("device logits sampled-token path unavailable")
+	}
+
+	t.Run("multi-step tail", func(t *testing.T) {
+		pipelinedGPUDecodeEnabled = false
+		chain, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("chained session: %v", err)
+		}
+		chainGen, err := chain.GenerateSampledEach(prompt, maxNew, nil, model.NewSampler(91), params, nil, nil)
+		if err != nil {
+			t.Fatalf("chained GenerateSampledEach: %v", err)
+		}
+
+		pipelinedGPUDecodeEnabled = true
+		pipe, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("pipelined session: %v", err)
+		}
+		if pipe.recordPeerICB == nil {
+			t.Skip("peer ICB recorder unavailable")
+		}
+		pipeGen, err := pipe.GenerateSampledEach(prompt, maxNew, nil, model.NewSampler(91), params, nil, nil)
+		if err != nil {
+			t.Fatalf("pipelined GenerateSampledEach: %v", err)
+		}
+		if !idsEqual(pipeGen, chainGen) {
+			t.Fatalf("sampled pipelined logits-arm tokens = %v, want chained %v", pipeGen, chainGen)
+		}
+	})
+
+	t.Run("one-shot tail", func(t *testing.T) {
+		pipelinedGPUDecodeEnabled = false
+		chain, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("chained session: %v", err)
+		}
+		chainGen, err := chain.GenerateSampledOneShotEach(prompt, maxNew, nil, model.NewSampler(91), params, nil, nil)
+		if err != nil {
+			t.Fatalf("chained GenerateSampledOneShotEach: %v", err)
+		}
+
+		pipelinedGPUDecodeEnabled = true
+		pipe, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("pipelined session: %v", err)
+		}
+		if pipe.recordPeerICB == nil {
+			t.Skip("peer ICB recorder unavailable")
+		}
+		pipeGen, err := pipe.GenerateSampledOneShotEach(prompt, maxNew, nil, model.NewSampler(91), params, nil, nil)
+		if err != nil {
+			t.Fatalf("pipelined GenerateSampledOneShotEach: %v", err)
+		}
+		if !idsEqual(pipeGen, chainGen) {
+			t.Fatalf("sampled one-shot pipelined logits-arm tokens = %v, want chained %v", pipeGen, chainGen)
+		}
+	})
+}
+
+// TestSampledPipelinedGPUTailDirectCallGuards drives generateSampledPipelinedGPUTail and
+// generateSampledPipelinedGPUOneShotTail directly (bypassing the public Generate ladder,
+// exactly as the parity tests above already do) to pin their own defensive contract (#30
+// r5): the empty-seed guard, the one-shot already-satisfied no-op, a failing peer-ICB
+// recorder, and a mid-pipeline shape change (RepeatPenalty>1) — the public ladder's own
+// sampledPipelinedGPUTailCanContinue gate declines BEFORE ever calling these functions
+// with such params, but a direct/future caller with stale params can still reach them, and
+// every one of these arms is dark under the existing suite.
+func TestSampledPipelinedGPUTailDirectCallGuards(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	g, arch := pleQuantModel(t, 2, 256, 32, 0)
+	const maxLen = 24
+
+	newPrimed := func(t *testing.T) *ArchSession {
+		t.Helper()
+		sess, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("NewArchQuantSession: %v", err)
+		}
+		if sess.recordPeerICB == nil {
+			t.Skip("peer ICB recorder unavailable")
+		}
+		return sess
+	}
+
+	t.Run("empty seed", func(t *testing.T) {
+		params := model.SampleParams{Temperature: 0.9, TopK: 4, TopP: 0.8}
+		tail := newPrimed(t)
+		if _, _, err := tail.generateSampledPipelinedGPUTail(nil, 4, nil, model.NewSampler(1), params, nil, 0, nil); err == nil {
+			t.Fatal("Tail empty seed: want error, got nil")
+		}
+		oneShot := newPrimed(t)
+		if _, _, err := oneShot.generateSampledPipelinedGPUOneShotTail(nil, 4, model.NewSampler(1), params, 0, nil); err == nil {
+			t.Fatal("OneShotTail empty seed: want error, got nil")
+		}
+	})
+
+	t.Run("one-shot already satisfied", func(t *testing.T) {
+		params := model.SampleParams{Temperature: 0.9, TopK: 4, TopP: 0.8}
+		sess := newPrimed(t)
+		seed := []int32{1, 2, 3}
+		gen, history, err := sess.generateSampledPipelinedGPUOneShotTail(seed, len(seed), model.NewSampler(1), params, 0, nil)
+		if err != nil {
+			t.Fatalf("already-satisfied OneShotTail: %v", err)
+		}
+		if !idsEqual(gen, seed) {
+			t.Fatalf("already-satisfied OneShotTail gen = %v, want unchanged seed %v", gen, seed)
+		}
+		if history != nil {
+			t.Fatalf("already-satisfied OneShotTail history = %v, want unchanged nil", history)
+		}
+	})
+
+	t.Run("peer ICB failure", func(t *testing.T) {
+		params := model.SampleParams{Temperature: 0.9, TopK: 4, TopP: 0.8}
+		wantErr := core.NewError("test: peer ICB recorder deliberately broken")
+
+		tail := newPrimed(t)
+		tail.icbPeer = nil
+		tail.recordPeerICB = func() (*archICBReplay, error) { return nil, wantErr }
+		if _, _, err := tail.generateSampledPipelinedGPUTail([]int32{1}, 4, nil, model.NewSampler(1), params, nil, 0, nil); err == nil {
+			t.Fatal("Tail peer ICB failure: want error, got nil")
+		}
+
+		oneShot := newPrimed(t)
+		oneShot.icbPeer = nil
+		oneShot.recordPeerICB = func() (*archICBReplay, error) { return nil, wantErr }
+		if _, _, err := oneShot.generateSampledPipelinedGPUOneShotTail([]int32{1}, 4, model.NewSampler(1), params, 0, nil); err == nil {
+			t.Fatal("OneShotTail peer ICB failure: want error, got nil")
+		}
+	})
+
+	t.Run("non-pipeline shape mid-call", func(t *testing.T) {
+		// RepeatPenalty>1 fails sampledPipelinedGPUTailCanContinue on the very first
+		// submit() — the public ladder never reaches these functions with such params
+		// (its own gate declines first), but the Tail functions must still refuse
+		// cleanly if a direct/future caller ever does.
+		params := model.SampleParams{Temperature: 0.9, TopK: 4, TopP: 0.8, RepeatPenalty: 1.5}
+		tail := newPrimed(t)
+		if _, _, err := tail.generateSampledPipelinedGPUTail([]int32{1}, 4, nil, model.NewSampler(1), params, nil, 0, nil); err == nil {
+			t.Fatal("Tail non-pipeline shape: want error, got nil")
+		}
+		oneShot := newPrimed(t)
+		if _, _, err := oneShot.generateSampledPipelinedGPUOneShotTail([]int32{1}, 4, model.NewSampler(1), params, 0, nil); err == nil {
+			t.Fatal("OneShotTail non-pipeline shape: want error, got nil")
+		}
+	})
+}
+
+// TestSampledPipelinedGPUTailSuppressesStopTokensBeforeMinTokens pins the
+// MinTokensBeforeStop branch inside generateSampledPipelinedGPUTail's submit() (#30 r5):
+// while initialGenerated+generatedBefore stays under MinTokensBeforeStop, a caller-supplied
+// stopToken must be merged into suppression (s.suppressionTokensScratch(SuppressTokens,
+// stopTokens)) instead of being left free to end the run the moment it is drawn. Proven
+// behaviourally: a free run (no MinTokensBeforeStop) discovers a token it generates AND
+// treats as a stop token; a guarded run with the SAME seed/sampler/stopTokens but
+// MinTokensBeforeStop covering the whole run must neither emit that token nor stop early.
+func TestSampledPipelinedGPUTailSuppressesStopTokensBeforeMinTokens(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	g, arch := pleQuantModel(t, 2, 256, 32, 0)
+	const maxLen, maxNew = 24, 6
+	prompt := []int32{1, 5, 3, 2}
+	params := model.SampleParams{Temperature: 1.4, TopK: 8}
+
+	build := func(t *testing.T) *ArchSession {
+		t.Helper()
+		sess, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("NewArchQuantSession: %v", err)
+		}
+		if sess.recordPeerICB == nil {
+			t.Skip("peer ICB recorder unavailable")
+		}
+		return sess
+	}
+
+	free := build(t)
+	freeGen, err := free.GenerateSampledEach(prompt, maxNew, nil, model.NewSampler(5), params, nil, nil)
+	if err != nil {
+		t.Fatalf("free-run GenerateSampledEach: %v", err)
+	}
+	if len(freeGen) == 0 {
+		t.Fatal("free run generated nothing")
+	}
+	stopTok := freeGen[0] // proven reachable within maxNew tokens under this exact seed
+
+	unguarded := build(t)
+	unguardedGen, err := unguarded.GenerateSampledEach(prompt, maxNew, []int32{stopTok}, model.NewSampler(5), params, nil, nil)
+	if err != nil {
+		t.Fatalf("unguarded GenerateSampledEach: %v", err)
+	}
+	if len(unguardedGen) == 0 || unguardedGen[len(unguardedGen)-1] != stopTok {
+		t.Fatalf("unguarded run = %v, want to stop exactly at token %d", unguardedGen, stopTok)
+	}
+
+	guardedParams := params
+	guardedParams.MinTokensBeforeStop = maxNew + 10 // never lifts during this run
+	guarded := build(t)
+	guardedGen, err := guarded.GenerateSampledEach(prompt, maxNew, []int32{stopTok}, model.NewSampler(5), guardedParams, nil, nil)
+	if err != nil {
+		t.Fatalf("guarded GenerateSampledEach: %v", err)
+	}
+	if nativeTokenInSet(stopTok, guardedGen) {
+		t.Fatalf("stop token %d survived the MinTokensBeforeStop suppression window: %v", stopTok, guardedGen)
+	}
+	if len(guardedGen) != maxNew {
+		t.Fatalf("guarded run length = %d, want the full maxNew %d (MinTokensBeforeStop must prevent the early stop)", len(guardedGen), maxNew)
+	}
+}
+
+// TestSampledPipelinedGPUOneShotTailSuppressesBeforeMinTokens is
+// TestSampledPipelinedGPUTailSuppressesStopTokensBeforeMinTokens's OneShotTail sibling:
+// OneShotTail takes no stopTokens (GenerateSampledOneShotEach only reaches it when
+// yield==nil && len(stopTokens)==0), so its MinTokensBeforeStop branch merges
+// SuppressTokens with a nil stop set instead — proven the same way, with an ordinary
+// SuppressTokens entry standing in for the stop token.
+func TestSampledPipelinedGPUOneShotTailSuppressesBeforeMinTokens(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	g, arch := pleQuantModel(t, 2, 256, 32, 0)
+	const maxLen, maxNew = 24, 6
+	prompt := []int32{1, 5, 3, 2}
+	params := model.SampleParams{Temperature: 1.4, TopK: 8}
+
+	build := func(t *testing.T) *ArchSession {
+		t.Helper()
+		sess, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("NewArchQuantSession: %v", err)
+		}
+		if sess.recordPeerICB == nil {
+			t.Skip("peer ICB recorder unavailable")
+		}
+		return sess
+	}
+
+	free := build(t)
+	freeGen, err := free.GenerateSampledOneShotEach(prompt, maxNew, nil, model.NewSampler(5), params, nil, nil)
+	if err != nil {
+		t.Fatalf("free-run GenerateSampledOneShotEach: %v", err)
+	}
+	if len(freeGen) == 0 {
+		t.Fatal("free run generated nothing")
+	}
+	heldOut := freeGen[0] // proven reachable without suppression under this exact seed
+
+	guardedParams := params
+	guardedParams.MinTokensBeforeStop = maxNew + 10 // never lifts during this run
+	guardedParams.SuppressTokens = []int32{heldOut}
+	guarded := build(t)
+	guardedGen, err := guarded.GenerateSampledOneShotEach(prompt, maxNew, nil, model.NewSampler(5), guardedParams, nil, nil)
+	if err != nil {
+		t.Fatalf("guarded GenerateSampledOneShotEach: %v", err)
+	}
+	if nativeTokenInSet(heldOut, guardedGen) {
+		t.Fatalf("held-out token %d survived MinTokensBeforeStop suppression: %v", heldOut, guardedGen)
+	}
+}
+
+// TestSampledPipelinedGPUTailPieceTimingSpan pins the pieceTimingOn GPU-span
+// accumulation inside generateSampledPipelinedGPUTail's and
+// generateSampledPipelinedGPUOneShotTail's read() closures (#30 r5) — dark whenever
+// pieceTimingOn is left at its default false, which every other pipelined test in this
+// file does.
+func TestSampledPipelinedGPUTailPieceTimingSpan(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	g, arch := pleQuantModel(t, 2, 256, 32, 0)
+	const maxLen, maxNew = 24, 4
+	prompt := []int32{1, 5, 3, 2}
+	params := model.SampleParams{Temperature: 0.9, TopK: 4, TopP: 0.8}
+
+	seedFirst := func(t *testing.T, sess *ArchSession, seed uint64) ([]int32, *model.Sampler) {
+		t.Helper()
+		sampler := model.NewSampler(seed)
+		var first int32
+		withAutoreleasePool(func() {
+			hidden, err := sess.prefillPromptRetainedInPool(prompt)
+			if err != nil {
+				t.Fatalf("prefillPromptRetainedInPool: %v", err)
+			}
+			var ok bool
+			var serr error
+			first, ok, serr = sess.sampleTopKTokenFromHiddenInPool(hidden, params, sampler.Draw(), nil)
+			if serr != nil || !ok {
+				t.Fatalf("sampleTopKTokenFromHiddenInPool ok=%v err=%v", ok, serr)
+			}
+		})
+		return []int32{first}, sampler
+	}
+
+	oldPieceTiming := pieceTimingOn
+	oldSpan := chainedGPUSpanNs
+	defer func() {
+		pieceTimingOn = oldPieceTiming
+		chainedGPUSpanNs = oldSpan
+	}()
+
+	t.Run("multi-step tail", func(t *testing.T) {
+		sess, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("NewArchQuantSession: %v", err)
+		}
+		if sess.recordPeerICB == nil {
+			t.Skip("peer ICB recorder unavailable")
+		}
+		seed, sampler := seedFirst(t, sess, 23)
+		pieceTimingOn = true
+		chainedGPUSpanNs = 0
+		if _, _, err := sess.generateSampledPipelinedGPUTail(seed, maxNew, nil, sampler, params, nil, 0, nil); err != nil {
+			t.Fatalf("generateSampledPipelinedGPUTail: %v", err)
+		}
+		if chainedGPUSpanNs <= 0 {
+			t.Fatal("pieceTimingOn did not accumulate chainedGPUSpanNs across the pipelined tail")
+		}
+	})
+
+	t.Run("one-shot tail", func(t *testing.T) {
+		sess, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("NewArchQuantSession: %v", err)
+		}
+		if sess.recordPeerICB == nil {
+			t.Skip("peer ICB recorder unavailable")
+		}
+		seed, sampler := seedFirst(t, sess, 29)
+		pieceTimingOn = true
+		chainedGPUSpanNs = 0
+		if _, _, err := sess.generateSampledPipelinedGPUOneShotTail(seed, maxNew, sampler, params, 0, nil); err != nil {
+			t.Fatalf("generateSampledPipelinedGPUOneShotTail: %v", err)
+		}
+		if chainedGPUSpanNs <= 0 {
+			t.Fatal("pieceTimingOn did not accumulate chainedGPUSpanNs across the one-shot pipelined tail")
+		}
+	})
 }
