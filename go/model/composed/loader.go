@@ -162,7 +162,7 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 	}
 
 	isCohere := cfg.ModelType == "cohere" || cfg.ModelType == "cohere2"
-	m := &ComposedModel{Embed: embed, NormF: normF, Output: output, D: D, Vocab: vocab, Eps: cfg.RMSNormEps, LayerNorm: isCohere, ParallelResidual: isCohere, LogitScale: cfg.LogitScale}
+	m := &ComposedModel{Embed: embed, NormF: normF, Output: output, D: D, Vocab: vocab, Eps: cfg.RMSNormEps, LayerNorm: isCohere || cfg.UseLayerNorm, ParallelResidual: isCohere, LogitScale: cfg.LogitScale}
 	if isCohere {
 		m.Eps = cfg.LayerNormEps
 		if m.Eps == 0 {
@@ -195,7 +195,7 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 
 		var mixer Mixer
 		if kinds[i] == "full_attention" || kinds[i] == "sliding_attention" {
-			mixer, err = buildAttn(f32, f32opt, lp+"self_attn.", cfg, D, kinds[i])
+			mixer, err = buildAttn(f32, f32opt, lp+"self_attn.", cfg, arch, D, kinds[i])
 		} else {
 			mixer, err = buildGatedDelta(get, f32, f32opt, lp+"linear_attn.", cfg, D)
 		}
@@ -250,7 +250,7 @@ func resolveKinds(cfg *loaderConfig) ([]string, error) {
 }
 
 // buildAttn builds a full-attention mixer; geometry from the config.
-func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, cfg *loaderConfig, D int, kind string) (Mixer, error) {
+func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, cfg *loaderConfig, arch *model.Arch, D int, kind string) (Mixer, error) {
 	q, err := f32(sp + "q_proj.weight")
 	if err != nil {
 		return nil, err
@@ -294,10 +294,14 @@ func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float3
 	if kind == "sliding_attention" {
 		window = cfg.SlidingWindow
 	}
+	qkvClip := cfg.QKVClip
+	if arch != nil && arch.QKVClip > 0 {
+		qkvClip = arch.QKVClip
+	}
 	return NewAttnMixer(&AttnWeights{
 		QProj: q, KProj: k, VProj: v, OProj: o,
 		QNorm: f32opt(sp + "q_norm.weight"), KNorm: f32opt(sp + "k_norm.weight"),
-	}, AttnConfig{Heads: heads, KVHeads: kvHeads, HeadDim: headDim, RotaryDim: rd, RopeTheta: cfg.ropeTheta(), NormEps: func() float32 {
+	}, AttnConfig{Heads: heads, KVHeads: kvHeads, HeadDim: headDim, RotaryDim: rd, RopeTheta: cfg.ropeTheta(), QKVClip: qkvClip, NormEps: func() float32 {
 		if cfg.LayerNormEps > 0 {
 			return cfg.LayerNormEps
 		}

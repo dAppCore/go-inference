@@ -150,6 +150,8 @@ type Arch struct {
 	MultiQueryAttention                                      bool            // one K/V head is shared by every query head
 	Activation                                               string          // declared feed-forward activation (for example gelu_new)
 	QKNormalization                                          QKNormalization // per-head Q/K normalisation before position encoding
+	QKVClip                                                  float32         // symmetric clamp applied to projected Q/K/V; zero disables it
+	LayerNorm                                                bool            // centred LayerNorm for block and final norms instead of RMSNorm
 	NormPlacement                                            NormPlacement   // declared norm-placement strategy (OLMo generations differ)
 	NonParametricLayerNorm                                   bool            // LayerNorm has no learned scale or bias (OLMo 1)
 	Layer                                                    []LayerSpec

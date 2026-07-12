@@ -48,6 +48,8 @@ type loaderConfig struct {
 	LayerNormEps          float32  `json:"layer_norm_eps"`
 	LogitScale            float32  `json:"logit_scale"`
 	UseQKNorm             *bool    `json:"use_qk_norm"`
+	UseLayerNorm          bool     `json:"use_layer_norm"`
+	QKVClip               float32  `json:"qkv_clip"`
 	SlidingWindow         int      `json:"sliding_window"`
 	SlidingWindowPattern  int      `json:"sliding_window_pattern"`
 	RopeTheta             float32  `json:"rope_theta"`
