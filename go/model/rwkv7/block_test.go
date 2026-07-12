@@ -67,6 +67,52 @@ func TestBlockForwardCarry(t *testing.T) {
 	t.Logf("rwkv7 block decode invariant: split %d|%d, [H,K,V] state carry → output bit-exact to one-pass", split, rem)
 }
 
+// TestBlockForwardScratchNoProjF32_Parity proves BlockForwardScratchNoProjF32 (everything up to but NOT
+// including out_proj — RWKV-7's time-mix has no gate/norm between the WKV7 recurrence and out_proj, so
+// this is just the recurrence read-out) plus a host out_proj GEMM reproduces BlockForwardScratchF32's own
+// output and advanced [H,K,V] state bit-for-bit. This is the split the composed session's projMixer path
+// relies on: o (the recurrence read-out) @ projW (OutProj) must equal what the full forward computes
+// internally, so folding the projection into the FFN-tail command buffer changes WHERE the GEMM runs,
+// never its result.
+func TestBlockForwardScratchNoProjF32_Parity(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
+	const L, D = 5, 8
+	w := mkBlockWeights(cfg, D)
+	x := syn(L*D, 21)
+
+	wantOut, wantState, err := BlockForwardF32(x, w, cfg, nil, L, D)
+	if err != nil {
+		t.Fatalf("BlockForwardF32: %v", err)
+	}
+
+	o, hv, gotState, err := BlockForwardScratchNoProjF32(x, w, cfg, nil, L, D, nil)
+	if err != nil {
+		t.Fatalf("BlockForwardScratchNoProjF32: %v", err)
+	}
+	if want := cfg.NumHeads * cfg.ValueDim; hv != want {
+		t.Fatalf("hv = %d, want %d", hv, want)
+	}
+	gotOut := matNT(o, w.OutProj, L, hv, D)
+
+	if len(gotOut) != len(wantOut) {
+		t.Fatalf("out len %d, want %d", len(gotOut), len(wantOut))
+	}
+	for i := range wantOut {
+		if gotOut[i] != wantOut[i] {
+			t.Fatalf("out[%d] = %v, want %v (forwardNoProj+host out_proj diverged from full forward)", i, gotOut[i], wantOut[i])
+		}
+	}
+	if len(gotState) != len(wantState) {
+		t.Fatalf("state len %d, want %d", len(gotState), len(wantState))
+	}
+	for i := range wantState {
+		if gotState[i] != wantState[i] {
+			t.Fatalf("state[%d] = %v, want %v", i, gotState[i], wantState[i])
+		}
+	}
+	t.Logf("rwkv7 forwardNoProj+host out_proj byte-identical to full BlockForwardF32 over [%d,%d], hv=%d", L, D, hv)
+}
+
 // TestBlockForwardF32_Golden pins the exact f32 bit-pattern of the block's output and advanced [H,K,V]
 // state for a fixed input, gating the in-place log-decay refactor on bit-identical behaviour.
 func TestBlockForwardF32_Golden(t *testing.T) {

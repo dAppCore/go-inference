@@ -17,6 +17,31 @@ func syn(n, seed int) []float32 {
 	return out
 }
 
+// countingMixer wraps a Mixer that also implements projMixer, counting calls to each method — used to
+// prove forwardEmb's dispatch actually takes the isProj path (forwardNoProj) rather than the standard
+// path (Forward) for a given composed config. Unlike engine/metal's composed_backend_test.go pattern
+// (which counts a bound DEVICE hook), there is no device hook at this level to intercept: projMixer is
+// composed's own arch-neutral dispatch contract, so the count is taken directly on the mixer.
+type countingMixer struct {
+	inner interface {
+		Mixer
+		projMixer
+	}
+	forwardCalls, noProjCalls int
+}
+
+func (c *countingMixer) Kind() string { return c.inner.Kind() }
+
+func (c *countingMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, error) {
+	c.forwardCalls++
+	return c.inner.Forward(h, L, D, prior)
+}
+
+func (c *countingMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidden, projW []float32, mixCols int, next any, err error) {
+	c.noProjCalls++
+	return c.inner.forwardNoProj(h, L, D, prior)
+}
+
 func mkGatedDeltaMixer(cfg qwen3.GatedDeltaConfig, D, seed int) Mixer {
 	qd, vd, cd := cfg.KeyHeads*cfg.HeadDim, cfg.ValueHeads*cfg.HeadDim, 2*cfg.KeyHeads*cfg.HeadDim+cfg.ValueHeads*cfg.HeadDim
 	_ = qd
