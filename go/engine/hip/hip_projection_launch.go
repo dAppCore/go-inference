@@ -42,8 +42,8 @@ const (
 	hipRMSResidualAddGELUTanhProjLaunchArgsBytes          = 160
 	hipPackedTopKLaunchArgsVersion                 uint32 = 1
 	hipPackedTopKLaunchArgsBytes                          = 48
-	hipPackedTopKSampleLaunchArgsVersion           uint32 = 1
-	hipPackedTopKSampleLaunchArgsBytes                    = 56
+	hipPackedTopKSampleLaunchArgsVersion           uint32 = 2
+	hipPackedTopKSampleLaunchArgsBytes                    = 64
 	hipOrderedEmbeddingCandidatesLaunchArgsVersion uint32 = 1
 	hipOrderedEmbeddingCandidatesLaunchArgsBytes          = 80
 	hipOrderedEmbeddingCandidatesBlockSize         uint32 = 256
@@ -249,6 +249,7 @@ type hipPackedTopKSampleLaunchArgs struct {
 	Temperature   float32
 	TopP          float32
 	Draw          float64
+	Softcap       float32
 }
 
 type hipOrderedEmbeddingCandidatesLaunchArgs struct {
@@ -1157,6 +1158,9 @@ func (args hipPackedTopKSampleLaunchArgs) BinaryInto(payload []byte) ([]byte, er
 	if math.IsNaN(args.Draw) || math.IsInf(args.Draw, 0) {
 		return nil, core.E("rocm.hip.PackedTopKSampleLaunch", "draw must be finite", nil)
 	}
+	if args.Softcap < 0 || math.IsNaN(float64(args.Softcap)) || math.IsInf(float64(args.Softcap), 0) {
+		return nil, core.E("rocm.hip.PackedTopKSampleLaunch", "softcap must be non-negative and finite", nil)
+	}
 	if err := hipProjectionUint32Bytes("rocm.hip.PackedTopKSampleLaunch", "input bytes", args.InputBytes); err != nil {
 		return nil, err
 	}
@@ -1177,6 +1181,7 @@ func (args hipPackedTopKSampleLaunchArgs) BinaryInto(payload []byte) ([]byte, er
 	binary.LittleEndian.PutUint32(payload[40:], math.Float32bits(args.Temperature))
 	binary.LittleEndian.PutUint32(payload[44:], math.Float32bits(args.TopP))
 	binary.LittleEndian.PutUint64(payload[48:], math.Float64bits(args.Draw))
+	binary.LittleEndian.PutUint32(payload[56:], math.Float32bits(args.Softcap))
 	return payload, nil
 }
 
@@ -4317,7 +4322,7 @@ func hipRunMLXQ4ProjectionSoftcapScoreTopKDeviceWithDeviceInputBufferSuppress(ct
 	return hipRunPackedTopKReduceKernelWithWorkspace(ctx, driver, scores, cfg.Rows, topK, workspace)
 }
 
-func hipRunPackedTopKSampleKernel(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, inputCount, topK int, generateTemperature, generateTopP float32, draw float64, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) (hipGreedySampleResult, *hipDeviceByteBuffer, error) {
+func hipRunPackedTopKSampleKernel(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, inputCount, topK int, generateTemperature, generateTopP, softcap float32, draw float64, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) (hipGreedySampleResult, *hipDeviceByteBuffer, error) {
 	if input == nil || input.Pointer() == 0 {
 		return hipGreedySampleResult{}, nil, core.E("rocm.hip.PackedTopKSampleLaunch", "packed candidate input is required", nil)
 	}
@@ -4350,6 +4355,7 @@ func hipRunPackedTopKSampleKernel(ctx context.Context, driver nativeHIPDriver, i
 		Temperature:   generateTemperature,
 		TopP:          generateTopP,
 		Draw:          draw,
+		Softcap:       softcap,
 	}).BinaryInto(workspace.ProjectionTopKSampleArgs[:])
 	if err != nil {
 		return hipGreedySampleResult{}, nil, err
@@ -4571,7 +4577,7 @@ func hipRunMLXQ4ProjectionSoftcapSampleKernelWithDeviceInputBufferSuppress(ctx c
 	if err != nil {
 		return hipGreedySampleResult{}, nil, err
 	}
-	result, best, err := hipRunPackedTopKSampleKernel(ctx, driver, partial, partialCount, topK, temperature, topP, draw, best, workspace)
+	result, best, err := hipRunPackedTopKSampleKernel(ctx, driver, partial, partialCount, topK, temperature, topP, softcap, draw, best, workspace)
 	if err != nil {
 		return hipGreedySampleResult{}, nil, err
 	}

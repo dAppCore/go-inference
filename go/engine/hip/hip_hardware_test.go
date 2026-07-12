@@ -93,7 +93,7 @@ func TestHIPHardwarePackedTopKSamplerMatchesHostReference_Good(t *testing.T) {
 					core.RequireNoError(t, err)
 					candidates, candidateCount, err := hipRunPackedTopKReduceKernelWithWorkspace(context.Background(), hipRuntime.driver, input, vocabSize, topK, workspace)
 					core.RequireNoError(t, err)
-					got, _, err := hipRunPackedTopKSampleKernel(context.Background(), hipRuntime.driver, candidates, candidateCount, topK, generate.Temperature, generate.TopP, draw, nil, workspace)
+					got, _, err := hipRunPackedTopKSampleKernel(context.Background(), hipRuntime.driver, candidates, candidateCount, topK, generate.Temperature, generate.TopP, 30, draw, nil, workspace)
 					core.RequireNoError(t, err)
 					if got.TokenID != want.TokenID {
 						t.Fatalf("device token = %d (score %.6f), host softcap reference = %d (score %.6f)", got.TokenID, got.Score, want.TokenID, want.Score)
