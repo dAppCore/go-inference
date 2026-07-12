@@ -2,7 +2,25 @@
 
 package policy
 
-import core "dappco.re/go"
+import (
+	"context"
+
+	core "dappco.re/go"
+)
+
+// Mediator transforms a violating span into the text to emit in its place — the
+// grade-G2 rewrite hook. It is supplied by the deployment (NewMediatingEnforcer
+// / WrapResolverMediated), so the policy engine ships the mechanism and stays
+// engine-neutral, exactly as welfare.Dispatcher injects the model session.
+//
+//   - ruleIndex identifies the rewrite rule that fired (0-based), so one mediator
+//     can route different rules to different transforms.
+//   - span is the exact matched bytes — the only place matched content crosses
+//     the engine boundary; it never enters the audit trail.
+//   - a (text, nil) result with text != "" is emitted in place of the span; an
+//     error, an empty result, or a timeout degrades to redact (the rule's
+//     replacement). The original span is NEVER emitted.
+type Mediator func(ctx context.Context, ruleIndex int, span string) (string, error)
 
 // Event records one enforcement for the audit trail: which rule fired and the
 // action taken. It NEVER carries the matched content — the deployment may
@@ -25,12 +43,16 @@ type Event struct {
 // it (or Close flushes it at end of stream).
 type Enforcer struct {
 	pol     *Policy
-	tail    []byte // held-back bytes pending disambiguation (capacity reused)
-	scan    []byte // tail+chunk join buffer (capacity reused)
-	stopped bool   // a refuse rule fired; everything after is swallowed
+	tail    []byte          // held-back bytes pending disambiguation (capacity reused)
+	scan    []byte          // tail+chunk join buffer (capacity reused)
+	stopped bool            // a refuse rule fired; everything after is swallowed
+	mediate Mediator        // G2 rewrite hook; nil for a redact/refuse-only stream
+	ctx     context.Context // parent context for mediator calls; nil ⇒ Background
 }
 
-// NewEnforcer returns a fresh Enforcer for one reply stream.
+// NewEnforcer returns a fresh Enforcer for one reply stream. It carries no
+// mediator, so a rewrite rule degrades to redact — use NewMediatingEnforcer for
+// a policy that NeedsMediator.
 //
 //	enf := pol.NewEnforcer()
 //	for tok := range modelStream {
@@ -40,6 +62,15 @@ type Enforcer struct {
 //	}
 //	if out, events, _ := enf.Close(); out != "" { emit(out); audit(events) }
 func (p *Policy) NewEnforcer() *Enforcer { return &Enforcer{pol: p} }
+
+// NewMediatingEnforcer returns a fresh Enforcer whose rewrite rules (grade G2)
+// route their matched span through m. ctx is the parent for each mediator call
+// (one reply stream = one ctx); a nil ctx uses context.Background. Every call is
+// bounded by Policy.MediateTimeout and degrades to redact on error/timeout/empty
+// — the original span is never emitted.
+func (p *Policy) NewMediatingEnforcer(ctx context.Context, m Mediator) *Enforcer {
+	return &Enforcer{pol: p, mediate: m, ctx: ctx}
+}
 
 // Feed processes the next chunk of model output. It returns the text to emit
 // downstream (a possibly-empty run of settled, enforced bytes), the enforcement
@@ -68,7 +99,7 @@ func (e *Enforcer) Feed(chunk string) (out string, events []Event, stop bool) {
 	}
 
 	holdFrom := e.pol.holdFrom(buf)
-	out, events, consumed, stop := e.pol.process(buf, holdFrom, &e.stopped)
+	out, events, consumed, stop := e.pol.process(buf, holdFrom, e)
 	e.tail = append(e.tail[:0], buf[consumed:]...)
 	return out, events, stop
 }
@@ -81,7 +112,7 @@ func (e *Enforcer) Close() (out string, events []Event, stop bool) {
 		return "", nil, e.stopped
 	}
 	buf := string(e.tail)
-	out, events, _, stop = e.pol.process(buf, len(buf), &e.stopped)
+	out, events, _, stop = e.pol.process(buf, len(buf), e)
 	e.tail = e.tail[:0]
 	return out, events, stop
 }
@@ -102,7 +133,7 @@ type match struct {
 //
 // The clean hot path — no match settled — returns buf[:consumed] as a substring
 // (zero allocation when the caller passed the original chunk).
-func (p *Policy) process(buf string, holdFrom int, stopped *bool) (out string, events []Event, consumed int, stop bool) {
+func (p *Policy) process(buf string, holdFrom int, e *Enforcer) (out string, events []Event, consumed int, stop bool) {
 	n := len(buf)
 	var b core.Builder
 	rewrote := false
@@ -117,12 +148,18 @@ func (p *Policy) process(buf string, holdFrom int, stopped *bool) (out string, e
 		b.WriteString(buf[lastEmit:i])
 		rewrote = true
 		events = append(events, Event{RuleIndex: m.ruleIndex, Action: m.action})
-		if m.action == ActionRefuse {
+		switch m.action {
+		case ActionRefuse:
 			b.WriteString(p.rules[m.ruleIndex].Message)
-			*stopped = true
+			e.stopped = true
 			return b.String(), events, n, true
+		case ActionRewrite:
+			// The full span is present (a match settles only when its window has
+			// arrived), so the mediator is always called with the complete span.
+			b.WriteString(p.mediateSpan(e, m.ruleIndex, buf[i:m.end]))
+		default: // ActionRedact
+			b.WriteString(p.rules[m.ruleIndex].Replacement)
 		}
-		b.WriteString(p.rules[m.ruleIndex].Replacement)
 		i = m.end
 		lastEmit = i
 	}
@@ -236,4 +273,57 @@ func (p *Policy) termPrefixAt(buf string, j, n int) bool {
 		}
 	}
 	return false
+}
+
+// mediateSpan is the grade-G2 rewrite action: it hands the complete matched span
+// to the enforcer's mediator and returns the text to emit in its place. On any
+// failure — no mediator wired, mediator error, timeout, or an empty result — it
+// degrades to the safe floor (the rule's redact replacement). The original span
+// is never returned, so a rewrite never leaks the violating content.
+func (p *Policy) mediateSpan(e *Enforcer, ruleIndex int, span string) string {
+	if e.mediate == nil {
+		// Defensive: the serving layer refuses to boot a rewrite policy without a
+		// mediator, so this path is only reached by a library caller that used
+		// NewEnforcer on a rewrite policy — degrade rather than leak.
+		return p.rules[ruleIndex].Replacement
+	}
+	if out, ok := e.callMediator(ruleIndex, span); ok {
+		return out
+	}
+	return p.rules[ruleIndex].Replacement
+}
+
+// callMediator runs the mediator under a per-span deadline. It returns the
+// mediator's text and ok=true only for a non-empty result delivered before the
+// timeout; an error, an empty result, or a deadline returns ok=false so the
+// caller degrades to redact. The call runs in its own goroutine and delivers
+// into a buffered channel, so a mediator that ignores cancellation still lets
+// the stream advance (its late result is simply discarded).
+func (e *Enforcer) callMediator(ruleIndex int, span string) (string, bool) {
+	parent := e.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, e.pol.mediateTimeout)
+	defer cancel()
+
+	type mediateResult struct {
+		text string
+		err  error
+	}
+	done := make(chan mediateResult, 1)
+	go func() {
+		text, err := e.mediate(ctx, ruleIndex, span)
+		done <- mediateResult{text, err}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err != nil || r.text == "" {
+			return "", false
+		}
+		return r.text, true
+	case <-ctx.Done():
+		return "", false
+	}
 }

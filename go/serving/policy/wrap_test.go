@@ -132,3 +132,44 @@ func TestPolicy_WrapResolver_Audit(t *testing.T) {
 		t.Fatalf("audit leaked matched content: %q", audit)
 	}
 }
+
+// TestPolicy_WrapResolverMediated_Rewrite_Good pins grade-G2 rewrite through the
+// full wrapper — tokens arrive split across the span and the mediator's transform
+// replaces the whole span.
+func TestPolicy_WrapResolverMediated_Rewrite_Good(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"PROJECT-X","action":"rewrite"}]}`)
+	fake := &policyFakeModel{tokens: []string{"the PROJ", "ECT-X sh", "ips soon"}}
+	mediate := func(_ context.Context, _ int, span string) (string, error) {
+		return "«" + span + "»", nil
+	}
+	got := drain(t, WrapResolverMediated(resolverOf(fake), pol, nil, mediate))
+	if got != "the «PROJECT-X» ships soon" {
+		t.Fatalf("mediated wrapped reply = %q", got)
+	}
+}
+
+// TestPolicy_WrapResolverMediated_MediatorError pins the wrapper's fail-safe: a
+// mediator error degrades to redact — the reply survives, the span never leaks.
+func TestPolicy_WrapResolverMediated_MediatorError(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"SECRET","action":"rewrite","replacement":"[gone]"}]}`)
+	fake := &policyFakeModel{tokens: []string{"the SEC", "RET here"}}
+	boom := func(context.Context, int, string) (string, error) {
+		return "SECRET", core.E("test", "mediator down", nil)
+	}
+	got := drain(t, WrapResolverMediated(resolverOf(fake), pol, nil, boom))
+	if got != "the [gone] here" {
+		t.Fatalf("degraded wrapped reply = %q, want the redact fallback", got)
+	}
+}
+
+// TestPolicy_WrapResolver_RewriteDegrades pins that the G1 wrapper (no mediator)
+// on a rewrite policy degrades every rewrite to redact rather than leaking — the
+// serving layer boots fatal to avoid this in production.
+func TestPolicy_WrapResolver_RewriteDegrades(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"SECRET","action":"rewrite","replacement":"[x]"}]}`)
+	fake := &policyFakeModel{tokens: []string{"the SEC", "RET here"}}
+	got := drain(t, WrapResolver(resolverOf(fake), pol, nil))
+	if got != "the [x] here" {
+		t.Fatalf("no-mediator wrapped reply = %q, want the redact fallback", got)
+	}
+}
