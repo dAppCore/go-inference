@@ -60,8 +60,14 @@ var ProjMatMul func(x, w []float32, M, K, N int) ([]float32, error)
 // the legacy ProjMatMul stays the fallback, so a backend that wired only the old hook keeps working.
 var ProjMatMulInto func(out, x, w []float32, M, K, N int) ([]float32, error)
 
+// deviceMinWork is the M·K·N floor below which the projections ignore the device hooks — a tiny
+// GEMV (the gated-delta in_proj_a/b are [ValueHeads, D] = a few KMACs) pays a full command-buffer
+// round-trip for microseconds of compute, so sub-MMAC shapes stay on the host path. Mirrors
+// composed.deviceMinWork.
+const deviceMinWork = 1 << 20
+
 func projMatMul(x, w []float32, M, K, N int) ([]float32, error) {
-	if ProjMatMul != nil {
+	if ProjMatMul != nil && M*K*N >= deviceMinWork {
 		return ProjMatMul(x, w, M, K, N)
 	}
 	return matNT(x, w, M, K, N), nil
@@ -72,11 +78,13 @@ func projMatMul(x, w []float32, M, K, N int) ([]float32, error) {
 // correctness kept, no reuse), then the host matNTInto. The RETURNED slice is authoritative (it may be a
 // freshly grown/allocated buffer); callers store it back into their scratch to retain the growth.
 func projMatMulInto(out, x, w []float32, M, K, N int) ([]float32, error) {
-	if ProjMatMulInto != nil {
-		return ProjMatMulInto(out, x, w, M, K, N)
-	}
-	if ProjMatMul != nil {
-		return ProjMatMul(x, w, M, K, N)
+	if M*K*N >= deviceMinWork {
+		if ProjMatMulInto != nil {
+			return ProjMatMulInto(out, x, w, M, K, N)
+		}
+		if ProjMatMul != nil {
+			return ProjMatMul(x, w, M, K, N)
+		}
 	}
 	return matNTInto(out, x, w, M, K, N), nil
 }
