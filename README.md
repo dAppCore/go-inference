@@ -45,7 +45,7 @@ The Apple engine dispatches two compiled kernel libraries, both **built from sou
 this repo** (no go-mlx dependency):
 
 - **`mlx.metallib`** — Apple's MLX kernels (`steel_gemm`, `affine_qmv`, `vv_*`, rms, rope).
-  Built by CMake from `external/mlx` (Apple's `ml-explore/mlx` pinned at v0.31.2) with the
+  Built by CMake from `external/mlx` (Apple's `ml-explore/mlx` pinned at v0.32.0) with the
   10 **lthn patches** in `patches/mlx/` applied on top (decode-replay, `MLX_METALLIB_PATH`
   override, 512-dim sdpa). Patch-not-vendor: bump the pin + rebase to pull MLX updates.
 - **`lthn_kernels.metallib`** — go-inference's own fused kernels (`engine/metal/kernels/*.metal`).
