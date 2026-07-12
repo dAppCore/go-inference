@@ -12,25 +12,30 @@
 // regexp, an empty term, a refuse rule with no message, or an out-of-range
 // window is rejected at LOAD, never at serve time. The file shape:
 //
-//	{
-//	  "window": 256,
-//	  "rules": [
-//	    {"match": "term",    "value": "PROJECT-X", "action": "redact", "replacement": "[redacted]"},
-//	    {"match": "pattern", "value": "v[0-9]+\\.[0-9]+\\.[0-9]+-rc[0-9]+", "action": "refuse", "message": "This deployment does not discuss unreleased versions."},
-//	    {"match": "term",    "value": "client",    "action": "redact"}
-//	  ]
-//	}
+//		{
+//		  "window": 256,
+//		  "rules": [
+//		    {"match": "term",    "value": "PROJECT-X", "action": "redact", "replacement": "[redacted]"},
+//		    {"match": "pattern", "value": "v[0-9]+\\.[0-9]+\\.[0-9]+-rc[0-9]+", "action": "refuse", "message": "This deployment does not discuss unreleased versions."},
+//		    {"match": "term",    "value": "client",    "action": "redact"}
+//		  ]
+//		}
 //
-//   - match "term"    — a case-insensitive literal (ASCII case fold; bytes ≥ 0x80
-//     compare exactly).
-//   - match "pattern" — a Go regexp compiled at load. Its match is bounded by a
-//     window (per-rule "window", else the file "window", else DefaultWindow) so
-//     the streaming enforcer can establish a hold-back bound; a pattern that
-//     matches the empty string is rejected (its bound cannot be established).
-//   - action "redact" — replace the matched span with "replacement" (default
-//     "[redacted]").
-//   - action "refuse" — end the reply at the match; "message" becomes the last
-//     visible text (required, non-empty).
+//	  - match "term"    — a case-insensitive literal (ASCII case fold; bytes ≥ 0x80
+//	    compare exactly).
+//	  - match "pattern" — a Go regexp compiled at load. Its match is bounded by a
+//	    window (per-rule "window", else the file "window", else DefaultWindow) so
+//	    the streaming enforcer can establish a hold-back bound; a pattern that
+//	    matches the empty string is rejected (its bound cannot be established).
+//	  - action "redact" — replace the matched span with "replacement" (default
+//	    "[redacted]").
+//	  - action "refuse" — end the reply at the match; "message" becomes the last
+//	    visible text (required, non-empty).
+//	  - action "rewrite" — grade G2: route the matched span through a
+//	    caller-supplied mediator so the reply survives with the span transformed
+//	    (see docs/policy-g2-mediated-rewrite.md and enforce.go). "replacement" is
+//	    the safe-floor fallback used when the mediator errors, times out, or
+//	    returns nothing — the original span is never emitted.
 //
 // Enforcement is streaming and byte-exact — see enforce.go for the hold-back
 // design that keeps boundary-spanning matches correct while letting
@@ -39,6 +44,7 @@ package policy
 
 import (
 	"regexp"
+	"time"
 
 	core "dappco.re/go"
 )
@@ -55,8 +61,9 @@ const (
 type ActionKind string
 
 const (
-	ActionRedact ActionKind = "redact" // replace the matched span with the replacement
-	ActionRefuse ActionKind = "refuse" // end the reply at the match; the message is the last text
+	ActionRedact  ActionKind = "redact"  // replace the matched span with the replacement
+	ActionRefuse  ActionKind = "refuse"  // end the reply at the match; the message is the last text
+	ActionRewrite ActionKind = "rewrite" // G2: transform the matched span via a mediator; redact on failure
 )
 
 const (
@@ -68,6 +75,13 @@ const (
 	// MaxWindow caps any pattern window: the hold-back (and so the enforcer's
 	// buffered tail) can never exceed this many bytes.
 	MaxWindow = 1 << 16
+	// DefaultMediateTimeout is the per-span mediator deadline (G2 rewrite) when
+	// the policy file omits "mediate_timeout_ms". A rewrite hit stalls the stream
+	// for at most this long before degrading to redact.
+	DefaultMediateTimeout = 5 * time.Second
+	// MaxMediateTimeoutMS caps "mediate_timeout_ms": a deployment cannot stall the
+	// output stream on a single span for longer than this.
+	MaxMediateTimeoutMS = 60000
 )
 
 // ruleJSON is the on-disk shape of one rule (see the package doc for the schema).
@@ -82,8 +96,9 @@ type ruleJSON struct {
 
 // policyJSON is the on-disk shape of a policy file.
 type policyJSON struct {
-	Window int        `json:"window,omitempty"` // default pattern window (bytes)
-	Rules  []ruleJSON `json:"rules"`
+	Window           int        `json:"window,omitempty"`             // default pattern window (bytes)
+	MediateTimeoutMS int        `json:"mediate_timeout_ms,omitempty"` // G2 per-span mediator deadline (ms)
+	Rules            []ruleJSON `json:"rules"`
 }
 
 // Rule is one compiled outbound-policy rule. The audit trail identifies a rule
@@ -104,12 +119,14 @@ type Rule struct {
 // Load/Compile and safe to share across concurrent streams; per-stream state
 // lives in the Enforcer (NewEnforcer).
 type Policy struct {
-	rules      []Rule
-	patternIdx []int      // indices of pattern rules (empty for term-only policies)
-	firstByte  [256][]int // term dispatch: ASCII-folded first byte → rule indices
-	maxTermLen int        // longest term (bytes); 0 if no terms
-	maxWindow  int        // largest pattern window (bytes); 0 if no patterns
-	hold       int        // streaming hold-back bound (bytes) = max(maxTermLen, maxWindow), ≥ 1
+	rules          []Rule
+	patternIdx     []int         // indices of pattern rules (empty for term-only policies)
+	firstByte      [256][]int    // term dispatch: ASCII-folded first byte → rule indices
+	maxTermLen     int           // longest term (bytes); 0 if no terms
+	maxWindow      int           // largest pattern window (bytes); 0 if no patterns
+	hold           int           // streaming hold-back bound (bytes) = max(maxTermLen, maxWindow), ≥ 1
+	rewrites       int           // count of rewrite rules (G2); >0 means a mediator is required
+	mediateTimeout time.Duration // per-span mediator deadline (G2)
 }
 
 // Load reads and compiles the policy file at path. Every fault — unreadable
@@ -145,7 +162,13 @@ func Compile(data []byte) (*Policy, error) {
 	if defWindow < 1 || defWindow > MaxWindow {
 		return nil, core.E("policy.Compile", core.Sprintf("policy window %d out of range (1..%d)", doc.Window, MaxWindow), nil)
 	}
-	pol := &Policy{}
+	pol := &Policy{mediateTimeout: DefaultMediateTimeout}
+	if doc.MediateTimeoutMS != 0 {
+		if doc.MediateTimeoutMS < 1 || doc.MediateTimeoutMS > MaxMediateTimeoutMS {
+			return nil, core.E("policy.Compile", core.Sprintf("mediate_timeout_ms %d out of range (1..%d)", doc.MediateTimeoutMS, MaxMediateTimeoutMS), nil)
+		}
+		pol.mediateTimeout = time.Duration(doc.MediateTimeoutMS) * time.Millisecond
+	}
 	for i, rj := range doc.Rules {
 		rule, err := compileRule(i, rj, defWindow)
 		if err != nil {
@@ -164,9 +187,11 @@ func compileRule(index int, rj ruleJSON, defWindow int) (Rule, error) {
 	rule := Rule{Index: index, Match: rj.Match, Action: rj.Action}
 
 	switch rj.Action {
-	case ActionRedact:
+	case ActionRedact, ActionRewrite:
+		// Rewrite shares redact's shape: the replacement is the safe-floor
+		// fallback used when the mediator fails, and a refuse message is invalid.
 		if rj.Message != "" {
-			return Rule{}, core.E(op, "redact rule must not carry a refuse message", nil)
+			return Rule{}, core.E(op, core.Sprintf("%s rule must not carry a refuse message", rj.Action), nil)
 		}
 		rule.Replacement = DefaultReplacement
 		if rj.Replacement != nil {
@@ -181,7 +206,7 @@ func compileRule(index int, rj ruleJSON, defWindow int) (Rule, error) {
 		}
 		rule.Message = rj.Message
 	default:
-		return Rule{}, core.E(op, core.Sprintf("unknown action %q (want redact|refuse)", rj.Action), nil)
+		return Rule{}, core.E(op, core.Sprintf("unknown action %q (want redact|refuse|rewrite)", rj.Action), nil)
 	}
 
 	switch rj.Match {
@@ -225,6 +250,9 @@ func (p *Policy) index() {
 	p.hold = 1
 	for i := range p.rules {
 		r := &p.rules[i]
+		if r.Action == ActionRewrite {
+			p.rewrites++
+		}
 		switch r.Match {
 		case MatchTerm:
 			if len(r.lower) > p.maxTermLen {
@@ -255,6 +283,16 @@ func (p *Policy) Len() int { return len(p.rules) }
 // pattern window). It is the concrete answer to "how far can a match reach
 // across token boundaries".
 func (p *Policy) HoldBack() int { return p.hold }
+
+// NeedsMediator reports whether the policy declares any rewrite rule (grade G2).
+// A policy that needs a mediator must be wired with one (NewMediatingEnforcer /
+// WrapResolverMediated); the serving layer refuses to boot a rewrite policy with
+// no mediator, mirroring G1's "refuse to serve unguarded" contract.
+func (p *Policy) NeedsMediator() bool { return p.rewrites > 0 }
+
+// MediateTimeout reports the per-span mediator deadline (grade G2): a rewrite hit
+// stalls the output stream for at most this long before degrading to redact.
+func (p *Policy) MediateTimeout() time.Duration { return p.mediateTimeout }
 
 // asciiLower returns s with ASCII upper-case letters folded to lower. Bytes
 // ≥ 0x80 are left untouched — term matching folds ASCII case only.
