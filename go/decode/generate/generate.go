@@ -164,6 +164,11 @@ func runBasicGenerate(ctx context.Context, cfg Config, loadOpts []inference.Load
 	if det := serving.ResolveServeDraft(cfg.ModelPath, cfg.DraftPath, true); det.Active() {
 		block := resolvedDraftBlock(cfg.DraftBlock)
 		switch {
+		case det.IsDFlash():
+			// A DFlash block-diffusion drafter is recognised but the engine has no
+			// block-diffusion draft forward yet — degrade to plain autoregressive
+			// with the shared honest notice rather than misloading it as MTP.
+			printNote(cfg.Log, "generate: %s", serving.DFlashDraftNotice(det))
 		case cfg.SpeculativeLoader == nil:
 			printNote(cfg.Log, "generate: drafter %s (%s) detected but this engine exposes no speculative path — generating plain autoregressive (block %d would apply)", det.DraftPath, det.Note, block)
 		case len(images) > 0 || len(audios) > 0 || len(videoFrames) > 0:

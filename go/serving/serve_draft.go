@@ -21,6 +21,8 @@ package serving
 
 import (
 	core "dappco.re/go"
+	"dappco.re/go/inference/decode/dflash"
+	"dappco.re/go/inference/model"
 )
 
 // MTPDefaultDraftBlock is the engine-default MTP draft block (verify forward =
@@ -52,6 +54,12 @@ const (
 type DraftDetection struct {
 	Source    DraftDetectionSource
 	DraftPath string
+	// Method is the speculative method the detected drafter uses. It is left
+	// empty for the ordinary MTP draft-model path (model.MTPDraftModel, the
+	// default the loader assumes); it is stamped model.MTPDFlash when the drafter
+	// is a DFlash block-diffusion checkpoint — a method this engine cannot yet
+	// run, so serve declines to arm it (see IsDFlash).
+	Method model.MTPMethod
 	// Note carries the operator-facing wording for the serve boot notice
 	// (why this drafter engaged, or why detection stood down).
 	Note string
@@ -60,6 +68,16 @@ type DraftDetection struct {
 // Active reports whether a drafter should be engaged.
 func (d DraftDetection) Active() bool {
 	return d.Source != DraftSourceNone && d.DraftPath != ""
+}
+
+// IsDFlash reports whether the detected drafter is a DFlash block-diffusion
+// checkpoint. This engine has no block-diffusion draft forward yet (the fused
+// multi-layer hidden extraction + parallel diffusion draft are an evidenced gap,
+// docs/design-dflash.md), so serve recognises such a drafter and degrades to
+// plain autoregressive with an honest notice rather than misloading it on the
+// autoregressive MTP lane.
+func (d DraftDetection) IsDFlash() bool {
+	return d.Method == model.MTPDFlash
 }
 
 // DetectGemma4DraftPath resolves the drafter for modelPath through the reactive
@@ -121,7 +139,65 @@ func ResolveServeDraft(modelPath, draftFlag string, detect bool) DraftDetection 
 	default:
 		explicit = trimmed
 	}
-	return DetectGemma4DraftPath(modelPath, explicit, opts)
+	return stampDFlashMethod(DetectGemma4DraftPath(modelPath, explicit, opts))
+}
+
+// stampDFlashMethod tags a resolved detection with model.MTPDFlash when its
+// drafter path is a DFlash block-diffusion checkpoint, so a serve/generate boot
+// tells the truth (the engine cannot yet run it) instead of announcing an MTP
+// lane over a drafter that would misload. A non-DFlash (or drafterless)
+// detection passes through unchanged.
+func stampDFlashMethod(det DraftDetection) DraftDetection {
+	if det.DraftPath == "" {
+		return det
+	}
+	if _, ok := DetectDFlashDraft(det.DraftPath); ok {
+		det.Method = model.MTPDFlash
+	}
+	return det
+}
+
+// DetectDFlashDraft recognises a DFlash speculator checkpoint at draftPath by its
+// config.json marker (speculators_model_type "dflash") and returns the parsed
+// drafter contract (block size, fused verifier layers, target). It reads the
+// config only — never weights — the same posture as the reactive assistant
+// detection. A path that is not a directory carrying a DFlash config.json returns
+// ok=false.
+//
+//	if cfg, ok := serving.DetectDFlashDraft(draftPath); ok { /* a DFlash drafter */ }
+func DetectDFlashDraft(draftPath string) (dflash.Config, bool) {
+	draftPath = core.Trim(draftPath)
+	if draftPath == "" {
+		return dflash.Config{}, false
+	}
+	data := core.ReadFile(core.PathJoin(draftPath, "config.json"))
+	if !data.OK {
+		return dflash.Config{}, false
+	}
+	raw, ok := data.Value.([]byte)
+	if !ok {
+		return dflash.Config{}, false
+	}
+	return dflash.ParseConfig(raw)
+}
+
+// DFlashDraftNotice is the honest boot notice for a detected-but-unrunnable
+// DFlash drafter: it names the block and fused-verifier-layer count from the
+// checkpoint and states plainly that the engine serves plain autoregressive,
+// pointing at the design memo — the same posture as the hip diffusion sampler
+// route (declared, kernel not linked), not a faked lane. Shared by the serve and
+// generate boot paths. Returns "" when det is not a DFlash drafter.
+func DFlashDraftNotice(det DraftDetection) string {
+	cfg, ok := DetectDFlashDraft(det.DraftPath)
+	if !ok {
+		return ""
+	}
+	verifier := ""
+	if cfg.Verifier != "" {
+		verifier = ", verifier " + cfg.Verifier
+	}
+	return core.Sprintf("DFlash block-diffusion drafter detected — %s (block %d, %d fused verifier layers%s); this engine has no block-diffusion draft forward yet, so serving plain autoregressive. See docs/design-dflash.md",
+		det.DraftPath, cfg.BlockSize, len(cfg.AuxHiddenLayerIDs), verifier)
 }
 
 // speculativeServeNotice reports the ACTIVE MTP pair at boot: which drafter
