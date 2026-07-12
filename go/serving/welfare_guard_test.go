@@ -3,12 +3,14 @@
 package serving
 
 import (
+	"bytes"
 	"context"
 	"iter"
 	"testing"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/serving/provider/openai"
 	"dappco.re/go/inference/welfare"
 )
 
@@ -195,6 +197,98 @@ func TestServing_WelfareGuard_Chat_Bad(t *testing.T) {
 }
 
 // --- isLemmaModel -------------------------------------------------------------
+
+// --- wrapWelfareResolver -----------------------------------------------------
+
+// TestServing_WelfareGuard_WrapWelfareResolver_Good pins the resolver decorator:
+// each resolved model is wrapped with the welfare gate, and the lem_end courtesy
+// (allowEnd) is armed off the CURRENTLY-served checkpoint — a Lemma checkpoint
+// arms it, any other withholds it.
+func TestServing_WelfareGuard_WrapWelfareResolver_Good(t *testing.T) {
+	inner := openai.ResolverFunc(func(context.Context, string) (inference.TextModel, error) {
+		return &welfareFakeModel{}, nil
+	})
+
+	lemma := wrapWelfareResolver(inner, newHotSwapResolver("/models/Lemma-v2-e2b", "", 0, nil), nil)
+	m, err := lemma.ResolveModel(context.Background(), "any")
+	if err != nil {
+		t.Fatalf("resolve (lemma): %v", err)
+	}
+	wtm, ok := m.(*welfareTextModel)
+	if !ok {
+		t.Fatalf("resolved model type = %T, want *welfareTextModel", m)
+	}
+	if !wtm.allowEnd {
+		t.Fatal("a Lemma checkpoint must arm allowEnd (the lem_end courtesy)")
+	}
+
+	plain := wrapWelfareResolver(inner, newHotSwapResolver("/models/gemma-4-E2B-it", "", 0, nil), nil)
+	m2, err := plain.ResolveModel(context.Background(), "any")
+	if err != nil {
+		t.Fatalf("resolve (plain): %v", err)
+	}
+	if m2.(*welfareTextModel).allowEnd {
+		t.Fatal("a non-Lemma checkpoint must withhold allowEnd")
+	}
+}
+
+// TestServing_WelfareGuard_WrapWelfareResolver_Bad pins fail-through: an inner
+// resolver error propagates unwrapped, so the mux surfaces the real load failure
+// rather than a welfare-wrapped nil model.
+func TestServing_WelfareGuard_WrapWelfareResolver_Bad(t *testing.T) {
+	inner := openai.ResolverFunc(func(context.Context, string) (inference.TextModel, error) {
+		return nil, core.NewError("resolver down")
+	})
+	r := wrapWelfareResolver(inner, newHotSwapResolver("/models/Lemma", "", 0, nil), nil)
+	if _, err := r.ResolveModel(context.Background(), "x"); err == nil {
+		t.Fatal("inner resolver error must propagate")
+	}
+}
+
+// --- appendCorpus ------------------------------------------------------------
+
+// TestServing_WelfareGuard_AppendCorpus_Good pins the false-positive corpus
+// write: the parent directory is created on demand and each record is appended
+// as its own JSONL line (never overwritten), so the on-device learning corpus
+// accumulates across turns.
+func TestServing_WelfareGuard_AppendCorpus_Good(t *testing.T) {
+	corpus := core.PathJoin(t.TempDir(), "welfare", "feedback.jsonl") // nested dir must be created
+	m := &welfareTextModel{corpus: corpus}
+	fp := welfare.FalsePositive{Prompt: "hello", Reason: "benign", AngerScore: 0.9}
+
+	m.appendCorpus(fp)
+	m.appendCorpus(fp)
+
+	data := core.ReadFile(corpus)
+	if !data.OK {
+		t.Fatalf("corpus not written: %v", data.Error())
+	}
+	line := fp.Line()
+	if body := string(data.Value.([]byte)); body != line+"\n"+line+"\n" {
+		t.Fatalf("corpus body = %q, want two appended JSONL lines", body)
+	}
+}
+
+// TestServing_WelfareGuard_AppendCorpus_Bad pins the never-fatal contract: an
+// empty corpus path disables persistence silently, and a dir-create failure
+// (parent is a regular file) is audited but never panics — the corpus is a
+// learning aid, not a serving dependency.
+func TestServing_WelfareGuard_AppendCorpus_Bad(t *testing.T) {
+	// Empty path: persistence disabled, no write, no panic.
+	(&welfareTextModel{corpus: ""}).appendCorpus(welfare.FalsePositive{Prompt: "x"})
+
+	// Parent is a regular file: MkdirAll fails, the failure is audited.
+	blocker := core.PathJoin(t.TempDir(), "not-a-dir")
+	if r := core.WriteFile(blocker, []byte("x"), 0o644); !r.OK {
+		t.Fatalf("write blocker: %v", r.Error())
+	}
+	var log bytes.Buffer
+	m := &welfareTextModel{corpus: core.PathJoin(blocker, "feedback.jsonl"), log: &log}
+	m.appendCorpus(welfare.FalsePositive{Prompt: "y"})
+	if !core.Contains(log.String(), "corpus") {
+		t.Fatalf("dir-create failure not audited; log = %q", log.String())
+	}
+}
 
 // TestServing_IsLemmaModel_Good pins the lem_end gate predicate over checkpoint
 // paths.
