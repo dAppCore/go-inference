@@ -9,6 +9,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/state"
 	"dappco.re/go/inference/model/state/filestore"
+	"dappco.re/go/inference/model/state/ramspill"
 )
 
 // statSize returns path's byte size via core.Stat (os.FileInfo behind Result).
@@ -26,7 +27,7 @@ func statSize(t *testing.T, path string) int64 {
 // touched, and a cleanup that is safe to call. This is the MacBook-class
 // default (no per-turn disk round-trip for a cache discarded at shutdown).
 func TestOpenContinuityStore_RAMDefault_Good(t *testing.T) {
-	store, cleanup, where, err := openContinuityStore(context.Background(), "")
+	store, cleanup, where, err := openContinuityStore(context.Background(), "", 0, nil)
 	if err != nil {
 		t.Fatalf("openContinuityStore(unset): %v", err)
 	}
@@ -52,7 +53,7 @@ func TestOpenContinuityStore_Unopenable_Bad(t *testing.T) {
 		t.Fatalf("seed blocker file: %v", r.Value)
 	}
 	// A store path UNDER the regular file: mkdir of the parent must fail.
-	_, _, _, err := openContinuityStore(context.Background(), blocker+"/store.kv")
+	_, _, _, err := openContinuityStore(context.Background(), blocker+"/store.kv", 0, nil)
 	if err == nil {
 		t.Fatal("a durable store under a regular file must error, not succeed")
 	}
@@ -63,7 +64,7 @@ func TestOpenContinuityStore_Unopenable_Bad(t *testing.T) {
 // and the boot notice names it — chats that asked for durability keep .kv.
 func TestOpenContinuityStore_DurableFile_Ugly(t *testing.T) {
 	path := t.TempDir() + "/project.kv"
-	store, cleanup, where, err := openContinuityStore(context.Background(), path)
+	store, cleanup, where, err := openContinuityStore(context.Background(), path, 0, nil)
 	if err != nil {
 		t.Fatalf("openContinuityStore(%q): %v", path, err)
 	}
@@ -76,6 +77,49 @@ func TestOpenContinuityStore_DurableFile_Ugly(t *testing.T) {
 	}
 	if !core.Contains(where, path) {
 		t.Fatalf("boot notice = %q, want it to name the store path", where)
+	}
+}
+
+// TestOpenContinuityStore_RAMBudget_Good pins the pressure-spill wiring
+// (#48): a positive -state-ram-budget with -state-store unset builds a
+// ramspill.Store instead of the unbounded state.InMemoryStore, and its
+// scratch spill file exists on disk (created fresh, ready to receive
+// whatever the budget eventually evicts).
+func TestOpenContinuityStore_RAMBudget_Good(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, cleanup, where, err := openContinuityStore(context.Background(), "", 64<<10, nil)
+	if err != nil {
+		t.Fatalf("openContinuityStore(ram-budget): %v", err)
+	}
+	defer cleanup()
+	if _, ok := store.(*ramspill.Store); !ok {
+		t.Fatalf("-state-ram-budget gave %T, want a *ramspill.Store", store)
+	}
+	if !core.Contains(where, "budget") {
+		t.Fatalf("boot notice = %q, want it to mention the budget", where)
+	}
+	if !core.Stat(ramSpillPath()).OK {
+		t.Fatalf("spill scratch file not created at %s", ramSpillPath())
+	}
+	cleanup()
+	if core.Stat(ramSpillPath()).OK {
+		t.Fatalf("cleanup left the spill scratch file behind at %s", ramSpillPath())
+	}
+}
+
+// TestOpenContinuityStore_RAMBudgetIgnoredWithDurableStore_Ugly pins that an
+// explicit -state-store wins outright: -state-ram-budget is a RAM-tier-only
+// knob, so pairing it with a durable path is a no-op (logged, not fatal) —
+// the durable store's own disk-backed semantics are untouched.
+func TestOpenContinuityStore_RAMBudgetIgnoredWithDurableStore_Ugly(t *testing.T) {
+	path := t.TempDir() + "/project.kv"
+	store, cleanup, _, err := openContinuityStore(context.Background(), path, 64<<10, nil)
+	if err != nil {
+		t.Fatalf("openContinuityStore(%q): %v", path, err)
+	}
+	defer cleanup()
+	if _, ok := store.(*filestore.Store); !ok {
+		t.Fatalf("durable path + ram-budget gave %T, want the *filestore.Store untouched", store)
 	}
 }
 
