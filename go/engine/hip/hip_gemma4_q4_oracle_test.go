@@ -1281,6 +1281,7 @@ func TestHIPGemma4Q4IncrementalDecodeOracle(t *testing.T) {
 		prompt = ids
 	}
 	promptLen := len(prompt)
+	t.Logf("CROSS-ENGINE token_ids=%v", prompt)
 	t.Logf("INCR-ORACLE model=%s layers=%d (full=%d sliding=%d) hidden=%d vocab=%d kvMode=%s prompt=%q promptLen=%d steps=%d forceBatchedProj=%v kvSharedLayers=%d sharedKVSources=%v",
 		modelPath, layerCount, fullLayers, layerCount-fullLayers, hidden, vocab, mode, promptText, promptLen, steps, forceBatchedProj, cfg.KVSharedLayers, cfg.SharedKVSources)
 
@@ -1395,6 +1396,13 @@ func hipIncrOracleLogitLens(ctx context.Context, t *testing.T, driver nativeHIPD
 	tokenCount := len(prompt)
 	rows := []string{"  L     rawArgmax  ctrl?  suppArgmax  top1     top2     margin   hiddenRMS"}
 	flip := -1
+	dumpPath := strings.TrimSpace(os.Getenv("GO_ROCM_ORACLE_LAYER_DUMP"))
+	var dump []byte
+	var attnDump []byte
+	if dumpPath != "" {
+		dump = make([]byte, 0, len(cfg.Layers)*tokenCount*hidden*4)
+		attnDump = make([]byte, 0, len(cfg.Layers)*tokenCount*hidden*4)
+	}
 	for L := 1; L <= len(cfg.Layers); L++ {
 		tcfg := cfg
 		tcfg.Layers = cfg.Layers[:L]
@@ -1406,11 +1414,24 @@ func hipIncrOracleLogitLens(ctx context.Context, t *testing.T, driver nativeHIPD
 			continue
 		}
 		all, rErr := hipReadFloat32DeviceOutput(forward.FinalHidden, "rocm.hip.IncrOracle", "lens hidden", tokenCount*hidden)
-		_ = forward.Close()
 		if rErr != nil {
+			_ = forward.Close()
 			rows = append(rows, fmt.Sprintf("  %-4d  (read err: %v)", L, rErr))
 			continue
 		}
+		if dumpPath != "" {
+			for _, value := range all {
+				dump = binary.LittleEndian.AppendUint32(dump, math.Float32bits(value))
+			}
+			attentionResidual, aErr := hipReadFloat32DeviceOutput(forward.Layers[L-1].Body.AttentionResidual, "rocm.hip.IncrOracle", "lens attention residual", tokenCount*hidden)
+			if aErr != nil {
+				t.Fatalf("read layer %d attention residual: %v", L-1, aErr)
+			}
+			for _, value := range attentionResidual {
+				attnDump = binary.LittleEndian.AppendUint32(attnDump, math.Float32bits(value))
+			}
+		}
+		_ = forward.Close()
 		rowH := all[(tokenCount-1)*hidden : tokenCount*hidden]
 		hiddenRMS := hipOracleRMS(rowH)
 		logits, lErr := hipIncrOracleFinalLogits(ctx, driver, last, rowH, epsilon)
@@ -1433,6 +1454,14 @@ func hipIncrOracleLogitLens(ctx context.Context, t *testing.T, driver nativeHIPD
 		}
 		rows = append(rows, fmt.Sprintf("  %-4d  %-9d  %-5s  %-10d  %-8.3f %-8.3f %-8.3f %-8.3f",
 			L, rawArg, ctrlMark, suppArg, top1, top2, top1-top2, hiddenRMS))
+	}
+	if dumpPath != "" {
+		core.RequireNoError(t, os.WriteFile(dumpPath, dump, 0o644))
+		core.RequireNoError(t, os.WriteFile(dumpPath+".attn.bin", attnDump, 0o644))
+		tokenJSON := strings.ReplaceAll(core.Sprintf("%v", prompt), " ", ",")
+		manifest := core.Sprintf("{\n  \"engine\": \"hip\",\n  \"dtype\": \"float32-le\",\n  \"layout\": \"layer-token-hidden\",\n  \"layers\": %d,\n  \"tokens\": %d,\n  \"hidden\": %d,\n  \"token_ids\": %s\n}\n", len(cfg.Layers), tokenCount, hidden, tokenJSON)
+		core.RequireNoError(t, os.WriteFile(dumpPath+".json", []byte(manifest), 0o644))
+		t.Logf("CROSS-ENGINE dump=%s bytes=%d", dumpPath, len(dump))
 	}
 	t.Logf("=== #52 logit-lens per-depth argmax (prompt last row, kvMode=%s) ===\n%s\n  earliest sustained control-token depth (to output) = %d of %d layers",
 		mode, strings.Join(rows, "\n"), flip, len(cfg.Layers))
