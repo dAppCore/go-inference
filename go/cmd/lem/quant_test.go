@@ -81,6 +81,78 @@ func TestRunQuantCommand_PositionalOrder(t *testing.T) {
 	}
 }
 
+// writeGGUFToy writes a toy dense model whose tensor dims are multiples of the
+// GGUF block size (32), so the GGUF quant lane has valid input to convert — the
+// standard writeToyModel's 8-wide norm is not divisible by 32 and is used to
+// drive the rejection path instead.
+func writeGGUFToy(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "toy-gguf")
+	if r := core.MkdirAll(dir, 0o755); !r.OK {
+		t.Fatalf("mkdir: %v", r.Err())
+	}
+	weight := make([]float32, 64*64)
+	for i := range weight {
+		weight[i] = 0.01 * float32((i%7)-3)
+	}
+	norm := make([]float32, 64)
+	for i := range norm {
+		norm[i] = 1.0 + 0.001*float32(i)
+	}
+	blob, err := safetensors.Encode(map[string]safetensors.Tensor{
+		"language_model.model.layers.0.self_attn.q_proj.weight": {Dtype: "F32", Shape: []int{64, 64}, Data: safetensors.EncodeFloat32(weight)},
+		"language_model.model.layers.0.input_layernorm.weight":  {Dtype: "F32", Shape: []int{64}, Data: safetensors.EncodeFloat32(norm)},
+	})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if r := core.WriteFile(filepath.Join(dir, "model.safetensors"), blob, 0o644); !r.OK {
+		t.Fatalf("write shard: %v", r.Err())
+	}
+	if r := core.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"model_type":"gemma3","hidden_size":64}`), 0o644); !r.OK {
+		t.Fatalf("write config: %v", r.Err())
+	}
+	return dir
+}
+
+// TestRunQuantGGUF covers the -gguf lane: a block-size-valid model quantises to
+// a model.gguf (Good), the default output dir carries the gguf-<format> suffix
+// when -o is omitted (Good), and a tensor whose width is not divisible by the
+// GGUF block size is rejected with exit 1 (Bad).
+func TestRunQuantGGUF(t *testing.T) {
+	t.Run("Good/explicit out", func(t *testing.T) {
+		src := writeGGUFToy(t)
+		out := filepath.Join(t.TempDir(), "gguf-out")
+		var stdout, stderr bytes.Buffer
+		if code := runQuantCommand(context.Background(), []string{src, "-gguf", "q8_0", "-o", out}, &stdout, &stderr); code != 0 {
+			t.Fatalf("exit %d; stderr=%s", code, stderr.String())
+		}
+		if _, err := os.Stat(filepath.Join(out, "model.gguf")); err != nil {
+			t.Errorf("model.gguf not written: %v", err)
+		}
+	})
+	t.Run("Good/default out dir", func(t *testing.T) {
+		src := writeGGUFToy(t)
+		var stdout, stderr bytes.Buffer
+		if code := runQuantCommand(context.Background(), []string{src, "-gguf", "q8_0"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("exit %d; stderr=%s", code, stderr.String())
+		}
+		// defaultOutDir tags the source basename with -gguf-<format> in its parent.
+		wantDir := filepath.Join(filepath.Dir(src), "toy-gguf-gguf-q8_0")
+		if _, err := os.Stat(filepath.Join(wantDir, "model.gguf")); err != nil {
+			t.Errorf("default-named output missing model.gguf at %s: %v", wantDir, err)
+		}
+	})
+	t.Run("Bad/block size", func(t *testing.T) {
+		src := writeToyModel(t) // 8-wide norm, not divisible by 32
+		out := filepath.Join(t.TempDir(), "gguf-out")
+		var stdout, stderr bytes.Buffer
+		if code := runQuantCommand(context.Background(), []string{src, "-gguf", "q8_0", "-o", out}, &stdout, &stderr); code != 1 {
+			t.Fatalf("exit %d, want 1; stderr=%s", code, stderr.String())
+		}
+	})
+}
+
 // TestDefaultOutDir covers the mlx_lm.convert naming convention: strip a trailing
 // slash, drop a -bf16/-f32 dense tag, and append the quant suffix in the source's
 // parent directory. A name with no dense tag keeps its basename intact.
