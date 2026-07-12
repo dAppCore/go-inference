@@ -1,5 +1,26 @@
 # NEXT WAKE (2026-07-16 — #381 SHIPPED: the skip is live, 2.1-2.6x at every depth)
 
+## QWEN-LINE 4B STEP-UP (2026-07-12 — the family scales, zero loader fixes)
+
+- RECEIPT: mlx-community/Qwen3.5-4B-OptiQ-4bit loads through LoadComposed and
+  greedy-generates (temp 0) coherent text — the sky-blue Rayleigh answer — at
+  8.2 tok/s decode (55 tok / 6.553s), prefill 9 tok/s (23 tok / 2.691s), on the
+  same host-f32 + device-GEMM-fuse composed stack the 0.8B rides. Two-turn
+  continuity gate (composed_gate_4b.py, mirror of composed_gate.py at the 4B):
+  turn1 "OK Wibble", turn2 "Wibble" — RECALL=PASS, NO-REPLAY=PASS (turn2
+  prompt_tokens 25 < full-history 29, so no replay).
+- NO GEOMETRY/LOADER FIX NEEDED. The shape-derived loader absorbed every 4B
+  delta out of the box: D 2560, 32 layers, 16 attn heads / 4 KV, head_dim 256
+  (explicit, != D/heads=160), attn_output_gate=true (q_proj [8192,640] = 2·16·256
+  carries the [q;gate] split), full_attention_interval 4, vocab 248320, tied
+  embeddings; gated-delta derived keyHeads 16 / valueHeads 32 / headDim 128 /
+  convK 4 from the weight shapes; mixed per-tensor 4/8-bit OptiQ quant resolved
+  by QuantConfig.For overrides (embed 8-bit, per-layer proj bits vary). ~16GB
+  f32 dequant footprint, fine on 96GB.
+- Confirms the composed stack is arch-general across the Qwen3.5 family, not
+  0.8B-tuned. The perf ladder below (device seam, fused MLP) now has a second,
+  larger model to A/B against — see the shared-glue slice receipts.
+
 ## #23 COMPOSED DEVICE SEAM (2026-07-12 evening — 1.6 -> 16.7 tok/s in one day)
 
 - SLICE 1 (a36b11a): composed.ProjMatMulInto — the stack's OWN projections
