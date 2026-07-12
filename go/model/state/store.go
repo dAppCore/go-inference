@@ -71,6 +71,17 @@ type BinaryStreamWriter interface {
 	PutBytesStream(ctx context.Context, payloadSize int, opts PutOptions, write func(stdio.Writer) error) (ChunkRef, error)
 }
 
+// Deleter is the optional chunk-removal capability a DedupStore uses to
+// physically reclaim a content chunk once its last reference is released. An
+// append-only or otherwise immortal store omits it; a DedupStore over such a
+// store keeps a zero-referenced chunk resident (safe — a referenced chunk is
+// never removed) rather than reclaiming it. Deleting an id the caller has not
+// proven unreferenced is a contract violation; the DedupStore refcount is that
+// proof.
+type Deleter interface {
+	Delete(ctx context.Context, chunkID int) error
+}
+
 type PutOptions struct {
 	URI    string            `json:"uri,omitempty"`
 	Title  string            `json:"title,omitempty"`
