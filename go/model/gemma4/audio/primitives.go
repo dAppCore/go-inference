@@ -14,12 +14,33 @@ import (
 // layer/RMS norm, softmax, the element-wise activations and the clamps. On the engine/metal reference
 // these dispatch to GPU kernels; here they are plain host arithmetic so the tower runs with no GPU
 // dependency. The math mirrors the reference op-for-op (torch LayerNorm variance, mlx tanh-GELU, the
-// im2col conv), so the shared HF goldens gate the composition at cosine >= 0.999. A device GEMM path is
-// a later optimisation layered over this reference forward.
+// im2col conv), so the shared HF goldens gate the composition at cosine >= 0.999.
+
+// GEMM is the engine-neutral acceleration seam for tower matrix products. Implementations return
+// ok=false when a product cannot be run on their device; the tower then computes that product on the
+// host. Inputs and outputs are row-major float32. transposeB selects A*B^T rather than A*B.
+type GEMM interface {
+	MatMul(a, b []float32, m, k, n int, transposeB bool) (out []float32, ok bool)
+}
+
+func dispatchMatMul(gemm GEMM, a, b []float32, m, k, n int, transposeB bool) ([]float32, bool) {
+	if gemm == nil || m <= 0 || k <= 0 || n <= 0 {
+		return nil, false
+	}
+	out, ok := gemm.MatMul(a, b, m, k, n, transposeB)
+	return out, ok && len(out) == m*n
+}
 
 // matMulNT computes out[M,N] = a[M,K] · w[N,K]ᵀ — the linear/attention "NT" form (weight stored
 // [outDim,inDim]). f32 accumulation.
 func matMulNT(a, w []float32, m, k, n int) []float32 {
+	return matMulNTWith(nil, a, w, m, k, n)
+}
+
+func matMulNTWith(gemm GEMM, a, w []float32, m, k, n int) []float32 {
+	if out, ok := dispatchMatMul(gemm, a, w, m, k, n, true); ok {
+		return out
+	}
 	out := make([]float32, m*n)
 	for i := range m {
 		arow := a[i*k : i*k+k]
@@ -39,6 +60,13 @@ func matMulNT(a, w []float32, m, k, n int) []float32 {
 // matMulNN computes out[M,N] = a[M,K] · b[K,N] — the attention "NN" form (b already [K,N]). f32
 // accumulation.
 func matMulNN(a, b []float32, m, k, n int) []float32 {
+	return matMulNNWith(nil, a, b, m, k, n)
+}
+
+func matMulNNWith(gemm GEMM, a, b []float32, m, k, n int) []float32 {
+	if out, ok := dispatchMatMul(gemm, a, b, m, k, n, false); ok {
+		return out
+	}
 	out := make([]float32, m*n)
 	for i := range m {
 		arow := a[i*k : i*k+k]
@@ -57,7 +85,11 @@ func matMulNN(a, b []float32, m, k, n int) []float32 {
 // matMulMixedNT widens the bf16 weight [outDim,inDim] to f32 and runs matMulNT — the linear forward
 // (in [L,inDim] f32, weight bf16, out [L,outDim] f32), matching the engine's promote-and-GEMM.
 func matMulMixedNT(in []float32, weight []byte, l, inDim, outDim int) []float32 {
-	return matMulNT(in, bf16ToF32Slice(weight), l, inDim, outDim)
+	return matMulMixedNTWith(nil, in, weight, l, inDim, outDim)
+}
+
+func matMulMixedNTWith(gemm GEMM, in []float32, weight []byte, l, inDim, outDim int) []float32 {
+	return matMulNTWith(gemm, in, bf16ToF32Slice(weight), l, inDim, outDim)
 }
 
 // transpose returns the [cols,rows] transpose of a [rows,cols] matrix.
@@ -98,8 +130,12 @@ func applyClip(x []float32, c model.LoadedAudioClipBound) []float32 {
 // linear runs a clippable linear on f32 [L,inDim]: clip input → bf16-widen matmul → clip output →
 // [L,outDim]. Mirrors the engine's ClippableLinear.Forward in f32.
 func linear(in []float32, w model.LoadedAudioLinear, l, inDim, outDim int) []float32 {
+	return linearWith(nil, in, w, l, inDim, outDim)
+}
+
+func linearWith(gemm GEMM, in []float32, w model.LoadedAudioLinear, l, inDim, outDim int) []float32 {
 	clipped := applyClip(in, w.Clip.In)
-	out := matMulMixedNT(clipped, w.Weight, l, inDim, outDim)
+	out := matMulMixedNTWith(gemm, clipped, w.Weight, l, inDim, outDim)
 	return applyClip(out, w.Clip.Out)
 }
 

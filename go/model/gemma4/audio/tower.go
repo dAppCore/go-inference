@@ -22,6 +22,10 @@ import (
 // halving the input mask (mask[:, ::2]) at each stride-2 conv. The once-halved mask also zeroes invalid
 // time rows between the conv stages, matching HF's per-layer input mask at an odd ceil boundary.
 func Subsample(features []byte, frames, melBins int, la *model.LoadedAudio, validity []bool) ([]float32, []bool, error) {
+	return subsampleWith(nil, features, frames, melBins, la, validity)
+}
+
+func subsampleWith(gemm GEMM, features []byte, frames, melBins int, la *model.LoadedAudio, validity []bool) ([]float32, []bool, error) {
 	if la == nil {
 		return nil, nil, core.NewError("audio.Subsample: nil LoadedAudio")
 	}
@@ -51,7 +55,7 @@ func Subsample(features []byte, frames, melBins int, la *model.LoadedAudio, vali
 	r1 := relu(n1)
 
 	// flatten [t1, f1·outC1] → input_proj (f32 mixed-dtype matmul).
-	out := linear(r1, sub.InputProj, t1, f1*outC1, cfg.Hidden)
+	out := linearWith(gemm, r1, sub.InputProj, t1, f1*outC1, cfg.Hidden)
 	return out, halveValidity(stageMask), nil
 }
 
@@ -114,11 +118,15 @@ func depthwiseConv1d(in, dw []float32, l, ch, k int) []float32 {
 // feedForward runs one Conformer macaron FeedForward on f32 [L,Hidden]: clamp → RMSNorm → FFW1 → act →
 // FFW2 → clamp → RMSNorm → ·residual → +x. Mirrors AudioFeedForwardF32.
 func feedForward(x []float32, ff model.LoadedAudioFeedForward, cfg model.LoadedAudioConfig) []float32 {
+	return feedForwardWith(nil, x, ff, cfg)
+}
+
+func feedForwardWith(gemm GEMM, x []float32, ff model.LoadedAudioFeedForward, cfg model.LoadedAudioConfig) []float32 {
 	l := len(x) / cfg.Hidden
 	pre := rmsNorm(clampF32(x, cfg.ClipMin, cfg.ClipMax), ff.PreNorm, l, cfg.Hidden, cfg.Eps)
-	up := linear(pre, ff.FFW1, l, cfg.Hidden, cfg.FFInter)
+	up := linearWith(gemm, pre, ff.FFW1, l, cfg.Hidden, cfg.FFInter)
 	act := activate(up, cfg.Act)
-	down := linear(act, ff.FFW2, l, cfg.FFInter, cfg.Hidden)
+	down := linearWith(gemm, act, ff.FFW2, l, cfg.FFInter, cfg.Hidden)
 	post := rmsNorm(clampF32(down, cfg.ClipMin, cfg.ClipMax), ff.PostNorm, l, cfg.Hidden, cfg.Eps)
 	return add(mulScalar(post, cfg.FFResidual), x)
 }
@@ -127,16 +135,20 @@ func feedForward(x []float32, ff model.LoadedAudioFeedForward, cfg model.LoadedA
 // depthwise conv → clamp → RMSNorm → act → LinearEnd → +x. No clamp before the first RMSNorm (unlike
 // the FF). Mirrors AudioLightConvF32.
 func lightConv(x []float32, lc model.LoadedAudioLightConv, cfg model.LoadedAudioConfig) []float32 {
+	return lightConvWith(nil, x, lc, cfg)
+}
+
+func lightConvWith(gemm GEMM, x []float32, lc model.LoadedAudioLightConv, cfg model.LoadedAudioConfig) []float32 {
 	l, ch := len(x)/cfg.Hidden, cfg.Channels
 	pre := rmsNorm(x, lc.PreNorm, l, cfg.Hidden, cfg.Eps)
-	start := linear(pre, lc.LinearStart, l, cfg.Hidden, 2*ch) // [L, 2·ch]
+	start := linearWith(gemm, pre, lc.LinearStart, l, cfg.Hidden, 2*ch) // [L, 2·ch]
 	gate := sliceCols(start, l, 2*ch, 0, ch)
 	sig := sigmoid(sliceCols(start, l, 2*ch, ch, 2*ch))
 	glu := mul(gate, sig) // GLU [L, ch]
 	conv := depthwiseConv1d(glu, bf16ToF32Slice(lc.DepthwiseWeight), l, ch, cfg.KernelSize)
 	normed := rmsNorm(clampF32(conv, cfg.ClipMin, cfg.ClipMax), lc.ConvNorm, l, ch, cfg.Eps)
 	act := activate(normed, cfg.Act)
-	end := linear(act, lc.LinearEnd, l, ch, cfg.Hidden)
+	end := linearWith(gemm, act, lc.LinearEnd, l, ch, cfg.Hidden)
 	return add(end, x) // residual on the f32 input
 }
 
@@ -145,6 +157,10 @@ func lightConv(x []float32, lc model.LoadedAudioLightConv, cfg model.LoadedAudio
 // validity is the optional per-soft-token (length L) key-padding mask forwarded to the attention;
 // nil ⇒ all-valid.
 func Layer(x []float32, layer *model.LoadedAudioLayer, cfg model.LoadedAudioConfig, validity []bool) ([]float32, error) {
+	return layerWith(nil, x, layer, cfg, validity)
+}
+
+func layerWith(gemm GEMM, x []float32, layer *model.LoadedAudioLayer, cfg model.LoadedAudioConfig, validity []bool) ([]float32, error) {
 	if cfg.Hidden == 0 {
 		return nil, core.NewError("audio.Layer: cfg.Hidden must be set")
 	}
@@ -152,13 +168,13 @@ func Layer(x []float32, layer *model.LoadedAudioLayer, cfg model.LoadedAudioConf
 	rmsClamped := func(b []float32, norm []byte) []float32 {
 		return rmsNorm(clampF32(b, cfg.ClipMin, cfg.ClipMax), norm, l, cfg.Hidden, cfg.Eps)
 	}
-	h := feedForward(x, layer.FF1, cfg)
+	h := feedForwardWith(gemm, x, layer.FF1, cfg)
 	pre := rmsClamped(h, layer.NormPreAttn)
-	attn := attention(pre, layer.Attn, cfg, validity)
+	attn := attentionWith(gemm, pre, layer.Attn, cfg, validity)
 	post := rmsClamped(attn, layer.NormPostAttn)
 	res := add(post, h)
-	conv := lightConv(res, layer.LConv, cfg)
-	ff2 := feedForward(conv, layer.FF2, cfg)
+	conv := lightConvWith(gemm, res, layer.LConv, cfg)
+	ff2 := feedForwardWith(gemm, conv, layer.FF2, cfg)
 	return rmsClamped(ff2, layer.NormOut), nil
 }
 
@@ -169,21 +185,28 @@ func Layer(x []float32, layer *model.LoadedAudioLayer, cfg model.LoadedAudioConf
 // per-soft-token mask each Conformer attention ANDs into its blocked mask, so padding keys are never
 // attended for padded/batched clips.
 func Encode(features []byte, frames, melBins int, la *model.LoadedAudio, validity []bool) ([]float32, error) {
+	return EncodeWithGEMM(features, frames, melBins, la, validity, nil)
+}
+
+// EncodeWithGEMM runs Encode with an optional engine-supplied float32 GEMM accelerator. A nil or
+// unavailable accelerator is byte-identical to Encode because every rejected product uses the host
+// reference implementation.
+func EncodeWithGEMM(features []byte, frames, melBins int, la *model.LoadedAudio, validity []bool, gemm GEMM) ([]float32, error) {
 	if la == nil || la.OutputProj == nil {
 		return nil, core.NewError("audio.Encode: LoadedAudio has no output projection")
 	}
 	cfg := la.Cfg
-	h, softMask, err := Subsample(features, frames, melBins, la, validity)
+	h, softMask, err := subsampleWith(gemm, features, frames, melBins, la, validity)
 	if err != nil {
 		return nil, err
 	}
 	for i := range la.Layers {
-		if h, err = Layer(h, &la.Layers[i], cfg, softMask); err != nil {
+		if h, err = layerWith(gemm, h, &la.Layers[i], cfg, softMask); err != nil {
 			return nil, core.E("audio.Encode", core.Sprintf("layer %d", i), err)
 		}
 	}
 	t := len(h) / cfg.Hidden
-	out := matMulMixedNT(h, la.OutputProj, t, cfg.Hidden, cfg.OutputDim)
+	out := matMulMixedNTWith(gemm, h, la.OutputProj, t, cfg.Hidden, cfg.OutputDim)
 	addOutputProjBias(out, la.OutputProjBias, t, cfg.OutputDim)
 	return out, nil
 }

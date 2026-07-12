@@ -83,20 +83,28 @@ func blockedMask(seqLen, nB, chunk, ctx, past, future int, validity []bool) []bo
 // attention runs the Conformer chunked relative-position attention on f32 [T,hidden] → f32 [T,hidden].
 // validity is the optional per-soft-token (length T) key-padding mask; nil ⇒ all-valid.
 func attention(x []float32, w model.LoadedAudioAttention, cfg model.LoadedAudioConfig, validity []bool) []float32 {
+	return attentionWith(nil, x, w, cfg, validity)
+}
+
+func attentionWith(gemm GEMM, x []float32, w model.LoadedAudioAttention, cfg model.LoadedAudioConfig, validity []bool) []float32 {
 	hd := cfg.NumHeads * cfg.HeadDim
 	t := len(x) / cfg.Hidden
-	qf := linear(x, w.Q, t, cfg.Hidden, hd)
-	kf := linear(x, w.K, t, cfg.Hidden, hd)
-	vf := linear(x, w.V, t, cfg.Hidden, hd)
+	qf := linearWith(gemm, x, w.Q, t, cfg.Hidden, hd)
+	kf := linearWith(gemm, x, w.K, t, cfg.Hidden, hd)
+	vf := linearWith(gemm, x, w.V, t, cfg.Hidden, hd)
 
-	merged := attentionCore(qf, kf, vf, w, cfg, t, validity)
-	return linear(merged, w.Post, t, hd, cfg.Hidden)
+	merged := attentionCoreWith(gemm, qf, kf, vf, w, cfg, t, validity)
+	return linearWith(gemm, merged, w.Post, t, hd, cfg.Hidden)
 }
 
 // attentionCore runs the f32 chunked relative-position attention math on the projections qf/kf/vf
 // ([T,H,D]; q-scale/k-scale applied here), returning the merged context [T*hd] (pre output-projection).
 // validity (nil ⇒ all-valid) ANDs into the blocked mask so padding keys are never attended.
 func attentionCore(qf, kf, vf []float32, w model.LoadedAudioAttention, cfg model.LoadedAudioConfig, t int, validity []bool) []float32 {
+	return attentionCoreWith(nil, qf, kf, vf, w, cfg, t, validity)
+}
+
+func attentionCoreWith(gemm GEMM, qf, kf, vf []float32, w model.LoadedAudioAttention, cfg model.LoadedAudioConfig, t int, validity []bool) []float32 {
 	h, d := cfg.NumHeads, cfg.HeadDim
 	hd := h * d
 	chunk := cfg.ChunkSize
@@ -118,7 +126,7 @@ func attentionCore(qf, kf, vf []float32, w model.LoadedAudioAttention, cfg model
 	vc := blockContext(vf, t, h, d, nB, chunk, past, future)
 
 	// relK = RelativeKProj.Forward(PosEmbed) = PosEmbed[P,hidden] · Wᵀ → [P,hd].
-	relK := matMulMixedNT(w.PosEmbed, w.RelativeKProj, w.PosCount, cfg.Hidden, hd)
+	relK := matMulMixedNTWith(gemm, w.PosEmbed, w.RelativeKProj, w.PosCount, cfg.Hidden, hd)
 
 	mask := blockedMask(t, nB, chunk, ctx, past, future, validity)
 	merged := make([]float32, nB*chunk*hd)
@@ -145,7 +153,7 @@ func attentionCore(qf, kf, vf []float32, w model.LoadedAudioAttention, cfg model
 			copy(relKh[p*d:p*d+d], relK[(p*h+head)*d:(p*h+head)*d+d])
 		}
 		relKhT := transpose(relKh, w.PosCount, d)
-		bd := matMulNN(qh, relKhT, nB*chunk, d, w.PosCount)
+		bd := matMulNNWith(gemm, qh, relKhT, nB*chunk, d, w.PosCount)
 		relShiftInto(bdShift, bd, 1, nB, chunk, w.PosCount, ctx)
 
 		for b := range nB {
@@ -154,7 +162,7 @@ func attentionCore(qf, kf, vf []float32, w model.LoadedAudioAttention, cfg model
 				copy(vh[c*d:c*d+d], vc[((b*ctx+c)*h+head)*d:((b*ctx+c)*h+head)*d+d])
 			}
 			khT := transpose(kh, ctx, d)
-			ac := matMulNN(qh[b*chunk*d:(b+1)*chunk*d], khT, chunk, d, ctx)
+			ac := matMulNNWith(gemm, qh[b*chunk*d:(b+1)*chunk*d], khT, chunk, d, ctx)
 			// soft-cap = LogitCap·tanh(logits/LogitCap).
 			scaled := make([]float32, chunk*ctx)
 			for i := range chunk {
@@ -173,7 +181,7 @@ func attentionCore(qf, kf, vf []float32, w model.LoadedAudioAttention, cfg model
 				}
 			}
 			probs := softmax(capped, chunk, ctx)
-			blockOut := matMulNN(probs, vh, chunk, ctx, d)
+			blockOut := matMulNNWith(gemm, probs, vh, chunk, ctx, d)
 			for i := range chunk {
 				copy(merged[((b*chunk+i)*hd)+head*d:((b*chunk+i)*hd)+head*d+d], blockOut[i*d:i*d+d])
 			}
