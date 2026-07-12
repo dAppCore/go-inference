@@ -58,8 +58,11 @@ func relShiftInto(out, x []float32, h, nB, chunk, p, ctx int) {
 }
 
 // blockedMask builds the [nB,chunk,ctx] validity mask: query q=blk·chunk+i may attend key
-// kv=blk·chunk-past+j iff both in-sequence and kv∈[q-past, q+future]. Port of blockedMask.
-func blockedMask(seqLen, nB, chunk, ctx, past, future int) []bool {
+// kv=blk·chunk-past+j iff both in-sequence, kv∈[q-past, q+future], AND kv is a valid (non-padding)
+// frame. Port of engine/metal's audioBlockedMask. validity is the per-soft-token (post-subsample) mask
+// over [0,seqLen); nil means every position is valid (a fully-valid clip), byte-identical to the
+// purely-positional mask (all-true validity is the same no-op).
+func blockedMask(seqLen, nB, chunk, ctx, past, future int, validity []bool) []bool {
 	m := make([]bool, nB*chunk*ctx)
 	for b := range nB {
 		for i := range chunk {
@@ -67,7 +70,9 @@ func blockedMask(seqLen, nB, chunk, ctx, past, future int) []bool {
 			for j := range ctx {
 				kv := b*chunk - past + j
 				if q < seqLen && kv >= 0 && kv < seqLen && kv >= q-past && kv <= q+future {
-					m[(b*chunk+i)*ctx+j] = true
+					if validity == nil || validity[kv] {
+						m[(b*chunk+i)*ctx+j] = true
+					}
 				}
 			}
 		}
@@ -76,20 +81,22 @@ func blockedMask(seqLen, nB, chunk, ctx, past, future int) []bool {
 }
 
 // attention runs the Conformer chunked relative-position attention on f32 [T,hidden] → f32 [T,hidden].
-func attention(x []float32, w model.LoadedAudioAttention, cfg model.LoadedAudioConfig) []float32 {
+// validity is the optional per-soft-token (length T) key-padding mask; nil ⇒ all-valid.
+func attention(x []float32, w model.LoadedAudioAttention, cfg model.LoadedAudioConfig, validity []bool) []float32 {
 	hd := cfg.NumHeads * cfg.HeadDim
 	t := len(x) / cfg.Hidden
 	qf := linear(x, w.Q, t, cfg.Hidden, hd)
 	kf := linear(x, w.K, t, cfg.Hidden, hd)
 	vf := linear(x, w.V, t, cfg.Hidden, hd)
 
-	merged := attentionCore(qf, kf, vf, w, cfg, t)
+	merged := attentionCore(qf, kf, vf, w, cfg, t, validity)
 	return linear(merged, w.Post, t, hd, cfg.Hidden)
 }
 
 // attentionCore runs the f32 chunked relative-position attention math on the projections qf/kf/vf
 // ([T,H,D]; q-scale/k-scale applied here), returning the merged context [T*hd] (pre output-projection).
-func attentionCore(qf, kf, vf []float32, w model.LoadedAudioAttention, cfg model.LoadedAudioConfig, t int) []float32 {
+// validity (nil ⇒ all-valid) ANDs into the blocked mask so padding keys are never attended.
+func attentionCore(qf, kf, vf []float32, w model.LoadedAudioAttention, cfg model.LoadedAudioConfig, t int, validity []bool) []float32 {
 	h, d := cfg.NumHeads, cfg.HeadDim
 	hd := h * d
 	chunk := cfg.ChunkSize
@@ -113,7 +120,7 @@ func attentionCore(qf, kf, vf []float32, w model.LoadedAudioAttention, cfg model
 	// relK = RelativeKProj.Forward(PosEmbed) = PosEmbed[P,hidden] · Wᵀ → [P,hd].
 	relK := matMulMixedNT(w.PosEmbed, w.RelativeKProj, w.PosCount, cfg.Hidden, hd)
 
-	mask := blockedMask(t, nB, chunk, ctx, past, future)
+	mask := blockedMask(t, nB, chunk, ctx, past, future, validity)
 	merged := make([]float32, nB*chunk*hd)
 	qh := make([]float32, nB*chunk*d)
 	relKh := make([]float32, w.PosCount*d)

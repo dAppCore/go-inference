@@ -78,7 +78,7 @@ func (a *AudioTower) Project(waveform []float32) (features []float32, softTokens
 	if err != nil {
 		return nil, 0, core.E("hip.AudioTower.Project", "mel feature extraction", err)
 	}
-	features, err = audio.Encode(mel, frames, melBins, a.loaded)
+	features, err = audio.Encode(mel, frames, melBins, a.loaded, nil)
 	if err != nil {
 		return nil, 0, core.E("hip.AudioTower.Project", "conformer encode", err)
 	}

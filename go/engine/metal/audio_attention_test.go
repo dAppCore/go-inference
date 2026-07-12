@@ -260,7 +260,8 @@ func TestAudioAttention_AudioRelShiftF32_Ugly(t *testing.T) {
 	const H, nB, chunk, P = 1, 1, 2, 2
 	ctx := P
 	x := []float32{1, 2, 3, 4} // [chunk=2, P=2]: row 0 = [1,2], row 1 = [3,4]
-	out := audioRelShiftF32(x, H, nB, chunk, P, ctx)
+	out := make([]float32, H*nB*chunk*ctx)
+	audioRelShiftF32Into(out, x, H, nB, chunk, P, ctx)
 	if len(out) != H*nB*chunk*ctx {
 		t.Fatalf("len(out) = %d, want %d", len(out), H*nB*chunk*ctx)
 	}
@@ -271,7 +272,7 @@ func TestAudioAttention_AudioRelShiftF32_Ugly(t *testing.T) {
 	want := []float32{1, 2, 0, 3}
 	for i, v := range want {
 		if out[i] != v {
-			t.Fatalf("audioRelShiftF32[%d] = %v, want %v (full out %v)", i, out[i], v, out)
+			t.Fatalf("audioRelShiftF32Into[%d] = %v, want %v (full out %v)", i, out[i], v, out)
 		}
 	}
 }
