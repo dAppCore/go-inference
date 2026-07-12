@@ -129,7 +129,7 @@ func TestServe_ServeService_ServiceStartup_Ugly(t *core.T) {
 
 func TestServe_ServeService_ServiceShutdown_Good(t *core.T) {
 	svc := NewServeService(":0", fakeLemBinary(t), t.TempDir())
-	svc.Start("")
+	svc.Start("", "", "")
 
 	r := svc.ServiceShutdown()
 
@@ -147,7 +147,7 @@ func TestServe_ServeService_ServiceShutdown_Bad(t *core.T) {
 
 func TestServe_ServeService_ServiceShutdown_Ugly(t *core.T) {
 	svc := NewServeService(":0", fakeLemBinary(t), t.TempDir())
-	svc.Start("")
+	svc.Start("", "", "")
 
 	first := svc.ServiceShutdown()
 	second := svc.ServiceShutdown()
@@ -211,7 +211,7 @@ func TestServe_ServeService_GetSnapshot_Bad(t *core.T) {
 func TestServe_ServeService_GetSnapshot_Ugly(t *core.T) {
 	svc := NewServeService(":0", fakeLemBinary(t), t.TempDir())
 	defer svc.Stop()
-	svc.Start("")
+	svc.Start("", "", "")
 
 	snap := svc.GetSnapshot()
 
@@ -248,7 +248,7 @@ func TestServe_ServeService_Start_Good(t *core.T) {
 	svc := NewServeService(":0", fakeLemBinary(t), t.TempDir())
 	defer svc.Stop()
 
-	r := svc.Start("")
+	r := svc.Start("", "", "")
 
 	core.AssertTrue(t, r.OK)
 	core.AssertTrue(t, svc.manager.Managed())
@@ -257,7 +257,7 @@ func TestServe_ServeService_Start_Good(t *core.T) {
 func TestServe_ServeService_Start_Bad(t *core.T) {
 	svc := NewServeService(":0", "/nonexistent/lem", t.TempDir())
 
-	r := svc.Start("/models/x")
+	r := svc.Start("/models/x", "/models/embed", "batch")
 
 	core.AssertFalse(t, r.OK)
 	core.AssertFalse(t, svc.manager.Managed())
@@ -267,8 +267,8 @@ func TestServe_ServeService_Start_Ugly(t *core.T) {
 	svc := NewServeService(":0", fakeLemBinary(t), t.TempDir())
 	defer svc.Stop()
 
-	first := svc.Start("")
-	second := svc.Start("/models/other") // idempotent while managing
+	first := svc.Start("", "", "")
+	second := svc.Start("/models/other", "/models/embed", "serial") // idempotent while managing
 
 	core.AssertTrue(t, first.OK)
 	core.AssertTrue(t, second.OK)
@@ -276,7 +276,7 @@ func TestServe_ServeService_Start_Ugly(t *core.T) {
 
 func TestServe_ServeService_Stop_Good(t *core.T) {
 	svc := NewServeService(":0", fakeLemBinary(t), t.TempDir())
-	svc.Start("")
+	svc.Start("", "", "")
 
 	r := svc.Stop()
 
@@ -294,7 +294,7 @@ func TestServe_ServeService_Stop_Bad(t *core.T) {
 
 func TestServe_ServeService_Stop_Ugly(t *core.T) {
 	svc := NewServeService(":0", fakeLemBinary(t), t.TempDir())
-	svc.Start("")
+	svc.Start("", "", "")
 
 	first := svc.Stop()
 	second := svc.Stop()

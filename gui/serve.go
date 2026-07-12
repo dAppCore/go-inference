@@ -105,9 +105,11 @@ func (s *ServeService) ListModels() []serve.Model {
 	return serve.DiscoverModels(s.modelsDir)
 }
 
-// Start spawns a managed `lem serve` for modelPath (empty = start model-less).
-func (s *ServeService) Start(modelPath string) core.Result {
-	return s.manager.Start(modelPath)
+// Start spawns a managed `lem serve` with optional chat model, embeddings model
+// and scheduler mode. Empty scheduler means off; supported enabled values are
+// serial, batch and interleave, matching the lem serve flag.
+func (s *ServeService) Start(modelPath, embedModelPath, scheduler string) core.Result {
+	return s.manager.Start(modelPath, embedModelPath, scheduler)
 }
 
 // Stop terminates the managed serve daemon.

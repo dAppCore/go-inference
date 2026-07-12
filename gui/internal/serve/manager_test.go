@@ -3,6 +3,8 @@
 package serve
 
 import (
+	"time"
+
 	core "dappco.re/go"
 )
 
@@ -16,6 +18,17 @@ func fakeLem(t *core.T) string {
 		t.Fatal("write fake lem: " + r.Error())
 	}
 	return path
+}
+
+func recordingLem(t *core.T) (string, string) {
+	dir := t.TempDir()
+	path := core.PathJoin(dir, "lem")
+	argsPath := core.PathJoin(dir, "args")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"" + argsPath + "\"\nexec sleep 300\n"
+	if r := core.WriteFile(path, []byte(script), 0o755); !r.OK {
+		t.Fatal("write recording lem: " + r.Error())
+	}
+	return path, argsPath
 }
 
 func TestManager_NewManager_Good(t *core.T) {
@@ -40,19 +53,32 @@ func TestManager_NewManager_Ugly(t *core.T) {
 }
 
 func TestManager_Manager_Start_Good(t *core.T) {
-	m := NewManager(fakeLem(t), ":0")
+	binary, argsPath := recordingLem(t)
+	m := NewManager(binary, ":0")
 	defer m.Stop()
 
-	r := m.Start("")
+	r := m.Start("/models/chat", "/models/embed", "batch")
 
 	core.AssertTrue(t, r.OK)
 	core.AssertTrue(t, m.Managed())
+	var data []byte
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if read := core.ReadFile(argsPath); read.OK {
+			data, _ = read.Value.([]byte)
+			if len(data) > 0 {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	core.AssertEqual(t, "serve\n--addr\n:0\n--model\n/models/chat\n--embed-model\n/models/embed\n--scheduler\nbatch\n", string(data))
 }
 
 func TestManager_Manager_Start_Bad(t *core.T) {
 	m := NewManager("/nonexistent/lem-binary", ":0")
 
-	r := m.Start("")
+	r := m.Start("", "", "")
 
 	core.AssertFalse(t, r.OK)
 	core.AssertFalse(t, m.Managed())
@@ -63,8 +89,8 @@ func TestManager_Manager_Start_Ugly(t *core.T) {
 	m := NewManager(fakeLem(t), ":0")
 	defer m.Stop()
 
-	first := m.Start("")
-	second := m.Start("/models/other") // already managing → idempotent no-op
+	first := m.Start("", "", "")
+	second := m.Start("/models/other", "/models/embed", "serial") // already managing → idempotent no-op
 
 	core.AssertTrue(t, first.OK)
 	core.AssertTrue(t, second.OK)
@@ -73,7 +99,7 @@ func TestManager_Manager_Start_Ugly(t *core.T) {
 
 func TestManager_Manager_Stop_Good(t *core.T) {
 	m := NewManager(fakeLem(t), ":0")
-	m.Start("")
+	m.Start("", "", "")
 
 	r := m.Stop()
 
@@ -92,7 +118,7 @@ func TestManager_Manager_Stop_Bad(t *core.T) {
 
 func TestManager_Manager_Stop_Ugly(t *core.T) {
 	m := NewManager(fakeLem(t), ":0")
-	m.Start("")
+	m.Start("", "", "")
 
 	first := m.Stop()
 	second := m.Stop() // double stop → no-op
@@ -105,7 +131,7 @@ func TestManager_Manager_Stop_Ugly(t *core.T) {
 func TestManager_Manager_Managed_Good(t *core.T) {
 	m := NewManager(fakeLem(t), ":0")
 	defer m.Stop()
-	m.Start("")
+	m.Start("", "", "")
 
 	core.AssertTrue(t, m.Managed())
 }
@@ -118,7 +144,7 @@ func TestManager_Manager_Managed_Bad(t *core.T) {
 
 func TestManager_Manager_Managed_Ugly(t *core.T) {
 	m := NewManager(fakeLem(t), ":0")
-	m.Start("")
+	m.Start("", "", "")
 	m.Stop()
 
 	core.AssertFalse(t, m.Managed())
