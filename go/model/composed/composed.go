@@ -63,6 +63,19 @@ type ComposedModel struct {
 
 func silu(v float64) float64 { return v / (1 + math.Exp(-v)) }
 
+// ProjMatMulInto is the device-GEMM seam for the composed stack's OWN projections — the attention
+// mixer's q/k/v/o, the MLP/MoE matmuls, and the LM head (the largest single matmul of every decode
+// step). Same AX-8 shape as qwen3/mamba2/rwkv7's hooks: the lib declares it and runs the host matNT
+// by default; importing the native backend binds it to the steel GEMM. The device kernel accumulates
+// in f32 (host is f64), so binding trades at the same numeric tier the gated-delta projections
+// already serve at — the composed -state contract (a token-prefix snapshot, recomputed on wake) is
+// deterministic per build either way.
+var ProjMatMulInto func(out, x, w []float32, M, K, N int) ([]float32, error)
+
+// deviceMinWork is the M·K·N floor below which matNTInto ignores the device hook — a tiny GEMV's
+// command-buffer round-trip outweighs its compute, so sub-MMAC shapes stay on the host path.
+const deviceMinWork = 1 << 20
+
 // matNT computes out[M,N] = in[M,K] @ w[N,K]ᵀ (the Linear y = x·Wᵀ), f32 host.
 func matNT(in, w []float32, M, K, N int) []float32 {
 	return matNTInto(nil, in, w, M, K, N)
@@ -78,6 +91,13 @@ func matNT(in, w []float32, M, K, N int) []float32 {
 // bit-identical too — the composed -state byte-identity contract holds. Small shapes stay serial: the
 // goroutine fan-out costs more than it saves below the work floor (tests' toy shapes, tiny projections).
 func matNTInto(out, in, w []float32, M, K, N int) []float32 {
+	if ProjMatMulInto != nil && M*K*N >= deviceMinWork {
+		if res, err := ProjMatMulInto(out, in, w, M, K, N); err == nil {
+			return res
+		}
+		// A device failure (missing kernel, no Metal device) falls through to the
+		// host path — deterministic for the rest of the process either way.
+	}
 	if cap(out) < M*N {
 		out = make([]float32, M*N)
 	} else {

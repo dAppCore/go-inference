@@ -5,6 +5,7 @@ package composed
 import (
 	"testing"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference/model/qwen3"
 )
 
@@ -97,4 +98,46 @@ func TestComposedGenerate(t *testing.T) {
 		}
 	}
 	t.Logf("composed Generate: prefill→recurrent decode→head produced %v (deterministic)", g1)
+}
+
+// TestMatNTIntoDeviceHook pins the ProjMatMulInto seam: the hook fires only at
+// or above the deviceMinWork floor, its result is returned verbatim, and a
+// device error falls back to the host path (deterministic either way).
+func TestMatNTIntoDeviceHook(t *testing.T) {
+	defer func() { ProjMatMulInto = nil }()
+
+	var calls int
+	sentinel := []float32{42}
+	ProjMatMulInto = func(out, x, w []float32, M, K, N int) ([]float32, error) {
+		calls++
+		return sentinel, nil
+	}
+	// Below the floor: 4·4·4 MACs — hook must NOT fire.
+	small := matNTInto(nil, make([]float32, 16), make([]float32, 16), 4, 4, 4)
+	if calls != 0 {
+		t.Fatalf("device hook fired below deviceMinWork (calls=%d)", calls)
+	}
+	if len(small) != 16 {
+		t.Fatalf("host path returned %d elems, want 16", len(small))
+	}
+	// At the floor: 1<<20 MACs (M=1, K=1024, N=1024) — hook result verbatim.
+	in := make([]float32, 1024)
+	w := make([]float32, 1024*1024)
+	got := matNTInto(nil, in, w, 1, 1024, 1024)
+	if calls != 1 || len(got) != 1 || got[0] != 42 {
+		t.Fatalf("device hook not used verbatim at floor (calls=%d, got=%v)", calls, got[:min(len(got), 4)])
+	}
+	// Device error: host fallback produces the real result.
+	ProjMatMulInto = func(out, x, w []float32, M, K, N int) ([]float32, error) {
+		return nil, core.NewError("synthetic device failure")
+	}
+	fallback := matNTInto(nil, in, w, 1, 1024, 1024)
+	if len(fallback) != 1024 {
+		t.Fatalf("error fallback returned %d elems, want 1024", len(fallback))
+	}
+	for i, v := range fallback {
+		if v != 0 {
+			t.Fatalf("fallback[%d]=%v, want 0 (zero inputs)", i, v)
+		}
+	}
 }
