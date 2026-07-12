@@ -66,7 +66,7 @@ func TestAgentRunner_AgentRunner_ServiceStartup_Good(t *core.T) {
 	err := runner.ServiceStartup(core.Background(), application.ServiceOptions{})
 	got := runner.ServiceName()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, "AgentRunner", got)
 }
 
@@ -76,7 +76,7 @@ func TestAgentRunner_AgentRunner_ServiceStartup_Bad(t *core.T) {
 	cancel()
 
 	err := runner.ServiceStartup(ctx, application.ServiceOptions{})
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertFalse(t, runner.IsRunning())
 }
 
@@ -85,7 +85,7 @@ func TestAgentRunner_AgentRunner_ServiceStartup_Ugly(t *core.T) {
 	err := runner.ServiceStartup(core.Background(), application.ServiceOptions{})
 	task := runner.CurrentTask()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, "", task)
 }
 
@@ -148,7 +148,7 @@ func TestAgentRunner_AgentRunner_Start_Good(t *core.T) {
 	err := runner.Start()
 	running := runner.IsRunning()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertTrue(t, running)
 }
 
@@ -157,7 +157,7 @@ func TestAgentRunner_AgentRunner_Start_Bad(t *core.T) {
 	err := runner.Start()
 	task := runner.CurrentTask()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, "already running", task)
 }
 
@@ -166,7 +166,7 @@ func TestAgentRunner_AgentRunner_Start_Ugly(t *core.T) {
 	runner.running = true
 	err := runner.Start()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertTrue(t, runner.IsRunning())
 }
 

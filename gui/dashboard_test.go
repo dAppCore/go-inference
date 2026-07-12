@@ -68,7 +68,7 @@ func TestDashboard_DashboardService_ServiceStartup_Good(t *core.T) {
 	cancel()
 
 	err := service.ServiceStartup(ctx, application.ServiceOptions{})
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, "DashboardService", service.ServiceName())
 }
 
@@ -78,7 +78,7 @@ func TestDashboard_DashboardService_ServiceStartup_Bad(t *core.T) {
 	cancel()
 
 	err := service.ServiceStartup(ctx, application.ServiceOptions{})
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEmpty(t, service.GetModels())
 }
 
@@ -87,7 +87,7 @@ func TestDashboard_DashboardService_ServiceStartup_Ugly(t *core.T) {
 	err := service.ServiceStartup(core.Background(), application.ServiceOptions{})
 	snapshot := service.GetSnapshot()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, "", snapshot.DBPath)
 }
 
@@ -204,7 +204,7 @@ func TestDashboard_DashboardService_Refresh_Good(t *core.T) {
 	err := service.Refresh()
 	snapshot := service.GetSnapshot()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertNotEqual(t, "", snapshot.UpdatedAt)
 }
 
@@ -221,36 +221,30 @@ func TestDashboard_DashboardService_Refresh_Ugly(t *core.T) {
 	err := service.Refresh()
 	generation := service.GetGeneration()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, GenerationStats{}, generation)
 }
 
 func TestDashboard_DashboardService_RunQuery_Good(t *core.T) {
 	service := &DashboardService{}
-	rows, err := service.RunQuery("select 1")
-	got := core.ErrorMessage(err)
+	r := service.RunQuery("select 1")
 
-	core.AssertNil(t, rows)
-	core.AssertError(t, err)
-	core.AssertContains(t, got, "no database configured")
+	core.AssertFalse(t, r.OK)
+	core.AssertContains(t, r.Error(), "no database configured")
 }
 
 func TestDashboard_DashboardService_RunQuery_Bad(t *core.T) {
 	service := &DashboardService{dbPath: ""}
-	rows, err := service.RunQuery("")
-	got := core.ErrorMessage(err)
+	r := service.RunQuery("")
 
-	core.AssertNil(t, rows)
-	core.AssertError(t, err)
-	core.AssertContains(t, got, "no database configured")
+	core.AssertFalse(t, r.OK)
+	core.AssertContains(t, r.Error(), "no database configured")
 }
 
 func TestDashboard_DashboardService_RunQuery_Ugly(t *core.T) {
 	service := &DashboardService{dbPath: "/path/that/does/not/exist.duckdb"}
-	rows, err := service.RunQuery("select 1")
-	got := core.ErrorMessage(err)
+	r := service.RunQuery("select 1")
 
-	core.AssertNil(t, rows)
-	core.AssertError(t, err)
-	core.AssertContains(t, got, "open db")
+	core.AssertFalse(t, r.OK)
+	core.AssertContains(t, r.Error(), "open db")
 }
