@@ -1446,11 +1446,11 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 			if err != nil {
 				return hipGemma4Q4DecoderLayerResult{}, err
 			}
-			if err := hipRunGemma4Q4RMSNormNoScaleDeviceKernelOutputWithWorkspace(ctx, driver, valueBuffer, valueDevice, req.Epsilon, req.AttentionWorkspace); err != nil {
+			if err := hipRunGemma4Q4ValueNormDeviceKernelOutputWithWorkspace(ctx, driver, valueBuffer, valueDevice, cfg.HeadDim, keyHeads, req.Epsilon, req.AttentionWorkspace); err != nil {
 				return hipGemma4Q4DecoderLayerResult{}, err
 			}
 		} else {
-			valueDevice, err = hipRunGemma4Q4RMSNormNoScaleDeviceKernel(ctx, driver, valueBuffer, req.Epsilon)
+			valueDevice, err = hipRunGemma4Q4ValueNormDeviceKernel(ctx, driver, valueBuffer, cfg.HeadDim, keyHeads, req.Epsilon)
 			if err != nil {
 				return hipGemma4Q4DecoderLayerResult{}, err
 			}
@@ -1516,11 +1516,11 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 			if err != nil {
 				return hipGemma4Q4DecoderLayerResult{}, err
 			}
-			if err := hipRunGemma4Q4RMSNormNoScaleDeviceKernelOutputWithWorkspace(ctx, driver, valueBuffer, valueDevice, req.Epsilon, req.AttentionWorkspace); err != nil {
+			if err := hipRunGemma4Q4ValueNormDeviceKernelOutputWithWorkspace(ctx, driver, valueBuffer, valueDevice, cfg.HeadDim, keyHeads, req.Epsilon, req.AttentionWorkspace); err != nil {
 				return hipGemma4Q4DecoderLayerResult{}, err
 			}
 		} else {
-			valueDevice, err = hipRunGemma4Q4RMSNormNoScaleDeviceKernel(ctx, driver, valueBuffer, req.Epsilon)
+			valueDevice, err = hipRunGemma4Q4ValueNormDeviceKernel(ctx, driver, valueBuffer, cfg.HeadDim, keyHeads, req.Epsilon)
 			if err != nil {
 				return hipGemma4Q4DecoderLayerResult{}, err
 			}
@@ -2860,6 +2860,29 @@ func hipRunGemma4Q4RMSNormNoScaleDeviceKernel(ctx context.Context, driver native
 
 func hipRunGemma4Q4RMSNormNoScaleDeviceKernelOutput(ctx context.Context, driver nativeHIPDriver, input, output *hipDeviceByteBuffer, epsilon float32) error {
 	return hipRunGemma4Q4RMSNormNoScaleDeviceKernelOutputWithWorkspace(ctx, driver, input, output, epsilon, nil)
+}
+
+// hipRunGemma4Q4ValueNormDeviceKernel applies gemma4's no-scale value RMSNorm
+// PER HEAD: one RMSNorm over each headDim-length kv head. This mirrors the
+// prefill value-norm (hipRunGemma4Q4PrefillValueNormBatch) and the metal
+// reference. Normalising over the whole kvDim instead folds every kv head under
+// a single RMS, which is identical only when headCount == 1 (E2B); for the
+// dense 12B's 8-kv-head sliding layers it shrinks V by ~sqrt(headCount) and
+// rebalances the heads, starving attention into repetition.
+func hipRunGemma4Q4ValueNormDeviceKernel(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, headDim, headCount int, epsilon float32) (*hipDeviceByteBuffer, error) {
+	return hipRunRMSNormHeadsKernelWithDeviceInputWeightConfig(ctx, driver, input, hipGemma4Q4ValueNormConfig(headDim, epsilon), headCount)
+}
+
+func hipRunGemma4Q4ValueNormDeviceKernelOutputWithWorkspace(ctx context.Context, driver nativeHIPDriver, input, output *hipDeviceByteBuffer, headDim, headCount int, epsilon float32, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	return hipRunRMSNormHeadsKernelWithDeviceInputWeightConfigOutputWithWorkspace(ctx, driver, input, hipGemma4Q4ValueNormConfig(headDim, epsilon), headCount, output, workspace)
+}
+
+func hipGemma4Q4ValueNormConfig(headDim int, epsilon float32) hipRMSNormDeviceWeightConfig {
+	return hipRMSNormDeviceWeightConfig{
+		Count:          headDim,
+		Epsilon:        epsilon,
+		WeightEncoding: hipRMSNormWeightEncodingNone,
+	}
 }
 
 func hipRunGemma4Q4RMSNormNoScaleDeviceKernelOutputWithWorkspace(ctx context.Context, driver nativeHIPDriver, input, output *hipDeviceByteBuffer, epsilon float32, workspace *hipAttentionHeadsChunkedWorkspace) error {
