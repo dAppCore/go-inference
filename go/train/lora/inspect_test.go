@@ -5,6 +5,7 @@
 package lora
 
 import (
+	"crypto/sha256"
 	"testing"
 
 	core "dappco.re/go"
@@ -175,6 +176,52 @@ func TestInspectAdapter_LargeShardStreamingHash_Good(t *testing.T) {
 	different := makeAdapter(t, 0xCD)
 	if first.Hash == different.Hash {
 		t.Fatalf("streaming hash collided across distinct shard content: %q", first.Hash)
+	}
+}
+
+func TestStreamHashWeightFile_MatchesWholeFileSHA256_Good(t *testing.T) {
+	// The reusable-buffer streaming copy must produce the identical digest to
+	// a plain SHA-256 over the whole file — SHA-256 is chunk-invariant, so the
+	// hand-rolled read loop cannot drop or duplicate a chunk at the buffer
+	// boundary. The content size is deliberately NOT a multiple of the 32KiB
+	// copy buffer so the final short read is exercised, and a second shard runs
+	// through the SAME hashWriter to prove the reset accumulator + reused
+	// buffer stay correct across shards.
+	dir := t.TempDir()
+
+	content := make([]byte, hashCopyBufSize*2+123)
+	for i := range content {
+		content[i] = byte(i * 7)
+	}
+	path := core.PathJoin(dir, "shard-a.safetensors")
+	if r := core.WriteFile(path, content, 0o600); !r.OK {
+		t.Fatalf("WriteFile shard-a: %s", r.Error())
+	}
+	var hasher hashWriter
+	got, ok := streamHashWeightFile(path, &hasher)
+	if !ok {
+		t.Fatalf("streamHashWeightFile(shard-a) returned ok=false")
+	}
+	if want := sha256.Sum256(content); got != want {
+		t.Fatalf("streaming digest %x != whole-file SHA-256 %x", got, want)
+	}
+
+	// Exactly one full buffer + 1 byte — the second Read returns a single byte
+	// then EOF, the tightest boundary for the reused buffer.
+	content2 := make([]byte, hashCopyBufSize+1)
+	for i := range content2 {
+		content2[i] = byte(255 - i)
+	}
+	path2 := core.PathJoin(dir, "shard-b.safetensors")
+	if r := core.WriteFile(path2, content2, 0o600); !r.OK {
+		t.Fatalf("WriteFile shard-b: %s", r.Error())
+	}
+	got2, ok := streamHashWeightFile(path2, &hasher)
+	if !ok {
+		t.Fatalf("streamHashWeightFile(shard-b, reused hasher) returned ok=false")
+	}
+	if want2 := sha256.Sum256(content2); got2 != want2 {
+		t.Fatalf("reused-hasher digest %x != whole-file SHA-256 %x", got2, want2)
 	}
 }
 
