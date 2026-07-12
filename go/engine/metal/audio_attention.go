@@ -54,15 +54,9 @@ func audioBlockContextF32(x []float32, T, H, D, nB, chunk, past, future int) []f
 	return out
 }
 
-// audioRelShiftF32 is the Transformer-XL relative shift: [H, nB, chunk, P] → [H, nB, chunk, ctx] by
+// audioRelShiftF32Into is the Transformer-XL relative shift: [H, nB, chunk, P] → [H, nB, chunk, ctx] by
 // padding the position axis to ctx+1, folding chunk·(ctx+1), truncating to chunk·ctx, refolding. Port
 // of relShift (B=1). Pure index remap (byte-copy / zero-pad), so byte-identical.
-func audioRelShiftF32(x []float32, H, nB, chunk, P, ctx int) []float32 {
-	out := make([]float32, H*nB*chunk*ctx)
-	audioRelShiftF32Into(out, x, H, nB, chunk, P, ctx)
-	return out
-}
-
 func audioRelShiftF32Into(out, x []float32, H, nB, chunk, P, ctx int) {
 	padP := ctx + 1
 	for h := range H {
