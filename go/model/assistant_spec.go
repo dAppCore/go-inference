@@ -32,6 +32,18 @@ const (
 	// checkpoints are this method, and it is the default for any drafter whose
 	// spec leaves the method unset (every checkpoint predating this field).
 	MTPDraftModel MTPMethod = "draft-model"
+
+	// MTPDFlash: a block-diffusion draft model (DFlash, arXiv 2602.06036)
+	// proposes a whole block of tokens in ONE parallel forward, conditioned on
+	// fused hidden states drawn from several verifier layers, which the target
+	// verifies with the ordinary greedy prefix-accept. The value matches the
+	// checkpoint's speculators_model_type marker. The drafter/verify contract
+	// itself lives, model-free and provably lossless, in decode/dflash; the
+	// engine-side block-diffusion draft forward + fused multi-layer hidden
+	// extraction are an evidenced gap (docs/design-dflash.md), so serving
+	// recognises a DFlash checkpoint and reports the gap rather than faking a
+	// lane.
+	MTPDFlash MTPMethod = "dflash"
 )
 
 // resolveMTPMethod defaults an unset method to MTPDraftModel — the only method
