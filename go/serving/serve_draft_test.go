@@ -350,3 +350,53 @@ func TestDFlashDraftNotice_Bad(t *testing.T) {
 		t.Fatalf("a non-DFlash detection yields no DFlash notice: %q", notice)
 	}
 }
+
+// TestArmDFlash_EngineSupported_Good proves that when the engine declares it can run
+// the block-diffusion lane (DFlashEngineProbe true), a detected DFlash drafter ARMS
+// and the active notice states the lossless block-verify posture.
+func TestArmDFlash_EngineSupported_Good(t *testing.T) {
+	prev := DFlashEngineProbe
+	DFlashEngineProbe = func() bool { return true }
+	t.Cleanup(func() { DFlashEngineProbe = prev })
+
+	dir := t.TempDir()
+	writeDFlashDraft(t, dir)
+	det := ResolveServeDraft("/models/target", dir, true)
+	if !ArmDFlash(det) {
+		t.Fatal("a DFlash drafter must arm when the engine declares support")
+	}
+	notice := DFlashActiveNotice(det)
+	for _, want := range []string{"ACTIVE", "block 8", "5 fused", "lossless", "docs/design-dflash.md"} {
+		if !core.Contains(notice, want) {
+			t.Fatalf("active notice missing %q: %s", want, notice)
+		}
+	}
+}
+
+// TestArmDFlash_EngineUnsupported_Bad proves the shipped default declines: with no
+// engine support (the default probe), a DFlash drafter does NOT arm — serve keeps the
+// honest plain-autoregressive decline, never a fake or losslessness-breaking lane.
+func TestArmDFlash_EngineUnsupported_Bad(t *testing.T) {
+	dir := t.TempDir()
+	writeDFlashDraft(t, dir)
+	det := ResolveServeDraft("/models/target", dir, true)
+	if ArmDFlash(det) {
+		t.Fatal("a DFlash drafter must NOT arm without engine support (default probe)")
+	}
+}
+
+// TestArmDFlash_NonDFlash_Ugly proves a non-DFlash detection never arms the DFlash
+// lane even with the probe up, and yields no active notice.
+func TestArmDFlash_NonDFlash_Ugly(t *testing.T) {
+	prev := DFlashEngineProbe
+	DFlashEngineProbe = func() bool { return true }
+	t.Cleanup(func() { DFlashEngineProbe = prev })
+
+	det := DraftDetection{Source: DraftSourceFlag, DraftPath: "/models/plain-drafter"}
+	if ArmDFlash(det) {
+		t.Fatal("a non-DFlash drafter must never arm the DFlash lane")
+	}
+	if DFlashActiveNotice(det) != "" {
+		t.Fatal("a non-DFlash detection yields no DFlash active notice")
+	}
+}
