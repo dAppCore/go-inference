@@ -356,3 +356,121 @@ func TestBlocksSave_TrustedReuseBoundary_Ugly(t *testing.T) {
 		t.Fatalf("TrustedReuseBoundary(block-size mismatch) = %d, want 0", boundary)
 	}
 }
+
+// TestBlocksSave_DedupStore_Good_SharesPrefixWritesOnlyDivergentTail is the
+// cross-conversation store-savings receipt: two DIFFERENT conversations (no
+// parent-prefix reuse wired between them) that share a leading token span sleep
+// into a content-addressed DedupStore, and the second physically writes ONLY its
+// divergent-tail blocks — the shared prefix blocks dedup to the first
+// conversation's chunks. The second still wakes byte-identical.
+func TestBlocksSave_DedupStore_Good_SharesPrefixWritesOnlyDivergentTail(t *testing.T) {
+	ctx := context.Background()
+	inner := state.NewInMemoryStore(nil)
+	store := state.NewDedupStore(inner)
+
+	// Same first four tokens (blocks 0,1), divergent last four (blocks 2,3).
+	convA := stateTokenOnlyTestSnapshot([]int32{1, 2, 3, 4, 5, 6, 7, 8}, 8, 2)
+	convB := stateTokenOnlyTestSnapshot([]int32{1, 2, 3, 4, 90, 91, 92, 93}, 8, 2)
+	opts := func(uri string) StateBlockOptions {
+		return StateBlockOptions{BlockSize: 2, KVEncoding: EncodingNative, URI: uri}
+	}
+
+	bundleA, err := convA.SaveStateBlocks(ctx, store, opts("mlx://conv-a"))
+	if err != nil {
+		t.Fatalf("SaveStateBlocks(A) error = %v", err)
+	}
+	afterA := inner.ChunkCount()
+	bundleB, err := convB.SaveStateBlocks(ctx, store, opts("mlx://conv-b"))
+	if err != nil {
+		t.Fatalf("SaveStateBlocks(B) error = %v", err)
+	}
+	afterB := inner.ChunkCount()
+
+	if len(bundleA.Blocks) != 4 || len(bundleB.Blocks) != 4 {
+		t.Fatalf("block counts = A %d / B %d, want 4 each", len(bundleA.Blocks), len(bundleB.Blocks))
+	}
+	// The savings: B's sleep added only its two divergent-tail chunks.
+	if added := afterB - afterA; added != 2 {
+		t.Fatalf("B added %d physical chunks, want 2 (only the divergent tail)", added)
+	}
+	if stats := store.Stats(); stats.Dedups != 2 {
+		t.Fatalf("stats.Dedups = %d, want 2 (both shared prefix blocks)", stats.Dedups)
+	}
+	// The two shared prefix blocks point at the SAME chunks; the tail diverges.
+	if bundleB.Blocks[0].State.ChunkID != bundleA.Blocks[0].State.ChunkID ||
+		bundleB.Blocks[1].State.ChunkID != bundleA.Blocks[1].State.ChunkID {
+		t.Fatalf("shared prefix blocks not shared: A %d,%d B %d,%d",
+			bundleA.Blocks[0].State.ChunkID, bundleA.Blocks[1].State.ChunkID,
+			bundleB.Blocks[0].State.ChunkID, bundleB.Blocks[1].State.ChunkID)
+	}
+	if bundleB.Blocks[2].State.ChunkID == bundleA.Blocks[2].State.ChunkID {
+		t.Fatal("divergent-tail block shared a chunk, want distinct")
+	}
+	// B wakes byte-identical (the loader re-verifies each block hash on read).
+	assertLoadedTokens(t, ctx, store, bundleB, convB.Tokens)
+}
+
+// TestBlocksSave_DedupStore_Good_ReclaimKeepsSharedBreaksNothing is the
+// reclaim-safety receipt: after B dedups against A, reclaiming A physically frees
+// only A's private-tail chunks; the shared prefix (still referenced by B) and B's
+// own tail survive, so B wakes byte-identical — while A, whose tail is gone, no
+// longer loads.
+func TestBlocksSave_DedupStore_Good_ReclaimKeepsSharedBreaksNothing(t *testing.T) {
+	ctx := context.Background()
+	store := state.NewDedupStore(state.NewInMemoryStore(nil))
+
+	convA := stateTokenOnlyTestSnapshot([]int32{1, 2, 3, 4, 5, 6, 7, 8}, 8, 2)
+	convB := stateTokenOnlyTestSnapshot([]int32{1, 2, 3, 4, 90, 91, 92, 93}, 8, 2)
+	opts := func(uri string) StateBlockOptions {
+		return StateBlockOptions{BlockSize: 2, KVEncoding: EncodingNative, URI: uri}
+	}
+	bundleA, err := convA.SaveStateBlocks(ctx, store, opts("mlx://conv-a"))
+	if err != nil {
+		t.Fatalf("SaveStateBlocks(A) error = %v", err)
+	}
+	bundleB, err := convB.SaveStateBlocks(ctx, store, opts("mlx://conv-b"))
+	if err != nil {
+		t.Fatalf("SaveStateBlocks(B) error = %v", err)
+	}
+	// B wakes byte-identical before any reclaim.
+	assertLoadedTokens(t, ctx, store, bundleB, convB.Tokens)
+
+	// Reclaim A: release the block refs A's bundle recorded.
+	refs := make([]state.ChunkRef, 0, len(bundleA.Blocks))
+	for _, blk := range bundleA.Blocks {
+		refs = append(refs, StateBlockChunkRef(blk))
+	}
+	if err := store.Release(ctx, refs...); err != nil {
+		t.Fatalf("Release(A) error = %v", err)
+	}
+	// Only A's two private-tail blocks reached refcount 0; the shared prefix
+	// (referenced by B) stayed.
+	if stats := store.Stats(); stats.Reclaimed != 2 {
+		t.Fatalf("stats.Reclaimed = %d, want 2 (A's private tail only)", stats.Reclaimed)
+	}
+	// B still wakes byte-identical across A's reclaim.
+	assertLoadedTokens(t, ctx, store, bundleB, convB.Tokens)
+	// A itself can no longer load — its tail chunks were physically reclaimed,
+	// proving the reclaim actually happened rather than being a no-op.
+	if _, err := LoadFromStateBlocks(ctx, store, bundleA); err == nil {
+		t.Fatal("LoadFromStateBlocks(A) error = nil after reclaim, want its tail gone")
+	}
+}
+
+// assertLoadedTokens loads bundle through store and fails unless the restored
+// token sequence equals want.
+func assertLoadedTokens(t *testing.T, ctx context.Context, store state.Store, bundle *StateBlockBundle, want []int32) {
+	t.Helper()
+	loaded, err := LoadFromStateBlocks(ctx, store, bundle)
+	if err != nil {
+		t.Fatalf("LoadFromStateBlocks error = %v", err)
+	}
+	if len(loaded.Tokens) != len(want) {
+		t.Fatalf("loaded tokens = %v, want %v", loaded.Tokens, want)
+	}
+	for i := range want {
+		if loaded.Tokens[i] != want[i] {
+			t.Fatalf("loaded tokens = %v, want %v", loaded.Tokens, want)
+		}
+	}
+}
