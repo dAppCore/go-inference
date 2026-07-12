@@ -6,7 +6,7 @@
 `lem` — the **Lethean Ethical Machine** — is the Lethean inference engine
 for the Gemma 4 family on Apple silicon: a single no-cgo Go binary driving
 Metal directly, serving OpenAI-, Anthropic- and Ollama-compatible routes
-on port 11434. It trains LoRA adapters, runs speculative decode the
+on port 36911. It trains LoRA adapters, runs speculative decode the
 reference engines don't have for this family, holds 256K context by
 default on hardware that can carry it, and — the part nothing else does —
 sleeps and wakes conversations byte-identically, so a session's history
@@ -60,7 +60,11 @@ at `docs/examples/energy-ab/`):
 |---|---|---|---|---|
 | **lem, continuity (default)** | **771 J** | **77.1 J** | **0.021** | flat ~77 J |
 | llama-server (prefix cache active) | 1,121 J | 112.1 J | 0.031 | flat-ish, noisy |
-| lem, `-state-conversations=false` (pure replay) | 1,439 J | 143.9 J | 0.040 | climbing 83 → 233 J |
+| pure replay (no cache of any kind)² | 1,439 J | 143.9 J | 0.040 | climbing 83 → 233 J |
+
+² Measured on lem with all reuse off — the shape every cache-less replay
+deployment pays. lem's stateless mode does not ship like this: see the
+prompt-reuse note below the table.
 
 **Identical task, 54% of replay's energy and 69% of llama-server's — at
 ten turns, on the smallest model.** Pure replay's per-turn cost climbs
@@ -72,6 +76,18 @@ per-conversation. Footnotes for the sceptical: llama-server produced
 slightly shorter chapters (3,223 words vs lem's 3,364), so per-word the
 gap is wider still (0.23 vs 0.35 J/word); lem's defaults include MTP,
 llama's include its cache — engines compared as they ship.
+
+**And stateless mode is not the punching bag.** Even with `-state` off,
+lem ships llama-parity automatic prompt reuse: a resident session keeps
+the conversation's KV rows and each request re-prefills only what
+diverged, so the stateless per-turn wall is flat too (turn 10 of the
+same bench: 4.4s → 3.1s, level with turn 2). It honours the
+sliding-window ring geometry (a reuse that would resume over overwritten
+window rows degrades to a cold prefill — token-identical either way) and
+stands down when continuity is on. `LTHN_PROMPT_REUSE=0` reproduces the
+pure-replay row. The difference that remains between the two lem rows is
+what `-state` alone buys: durable, per-conversation, restart-surviving
+state instead of one volatile slot.
 
 Fleet arithmetic, per **million conversation turns** at these measured
 rates: lem 21.4 kWh · llama-server 31.1 kWh · replay engines 40.0 kWh —
@@ -143,25 +159,66 @@ does our own fallback composition). This release ships:
   50/60 on 31B) window their attention; each query tile now streams its
   own fixed key span once through threadgroup tiles instead of re-reading
   the window per query row. +4% prefill at every depth measured.
+- **The kv-shared prefill skip** — Gemma 4's E-series shares KV: the
+  trailing 20 of 35 layers on E2B own no cache rows, and on every prompt
+  chunk except the last their outputs feed nothing the continuation ever
+  reads. The engine now proves that suffix at load, skips it per chunk,
+  and shrinks the one full-stack chunk to the minimal window-aligned
+  boundary span (57 rows at 8K instead of 1,081) — 2.5× prefill at 8K,
+  token-identical by construction and by receipt (32-token greedy
+  continuations byte-identical at 8K and 62K). This is the same pruning
+  mlx-lm gets implicitly from lazy evaluation; here it is explicit,
+  validated against the arch, and kill-switched
+  (`LTHN_PREFILL_SKIP_SHARED=0`).
 
-Prefill, E2B class, against the field (tok/s at prompt depth):
+Prefill, E2B class, against the field (tok/s at prompt depth; same MLX
+snapshot for lem/oMLX/mlx-lm, llama.cpp on the google qat-q4_0 GGUF —
+quants reported, never hidden):
 
-| depth | lem | llama.cpp | mlx-lm |
-|---|---|---|---|
-| ~512 | 3,157¹ | 4,437 | — |
-| 8K | 3,157 | 3,776 | ~9,850 |
-| 32K | 2,769 | 2,412 | — |
-| 62K | 2,255 | — | — |
-| 118K | 1,656 | — | — |
+| depth | lem | llama.cpp | oMLX | mlx-lm |
+|---|---|---|---|---|
+| 8K | 10,048 | 4,002 | 6,696 | ~9,900² |
+| 32K | 8,038 | 2,412 | — | — |
+| 62K | 6,480 | — | — | — |
+| 118K | 4,522 | — | — | — |
 
-¹ measured at 8K; the shallow-depth column carries the same configuration.
+² mlx-lm prints 11,790 at this depth; ~9,900 is its true wall measured
+with our own timer around a preloaded generate (0.730s, same quiet
+machine and snapshot as the lem runs — 0.718-0.723s). oMLX (the closest
+feature rival — continuous batching, tiered KV, OpenAI+Anthropic
+routes, menu-bar service — but a Python stack where lem is one
+contained binary) rides mlx-lm's kernels and lands 6,696 even through
+its HTTP serving path.
 
-Honest reading: mlx-lm leads cold ingest at shallow depth by ~3× — that
-gap is characterised in-repo (the whole-prompt dispatch structure) and is
-open work. Two things frame it: past ~30K *we* lead llama.cpp and the
-curve is flatter than both; and under `-state` serving, prefill is a cost
-paid once per conversation, while the per-turn economics above are paid
-by every engine on every turn — that trade is the design.
+The skip generalises across the family by construction — it proves the
+arch's own suffix at load rather than pattern-matching a model. E4B
+(18 of 42 layers shared): 8K prefill 1,987 → 3,423 tok/s (1.72×), 32K
+3,182, 62K 2,807, byte-identical continuations at 8K and 62K. The dense
+and MoE models (12B/26B/31B) share no KV and skip nothing — for them
+the engine ships the same device embed gather instead (only token ids
+cross the host boundary during prefill, every arch), and their 8K walls
+sit at 740 / 1,447 / 290 tok/s — the 31B within 1.13× of mlx-lm's true
+wall on the identical snapshot.
+
+Honest reading: lem now leads the measured field at every depth in
+this table, including the cold 8K ingest that mlx-lm held until the
+attention-routing retunes (the GEMM knee and the small-chunk ring gate
+— found by lane-labelled GPU tracing, receipted three-run each). The
+margins at 8K are small (~2%) and mlx remains the reference the engine
+is measured against; the curve stays flat where everyone else's dives.
+Decode — the cost every turn pays — leads the whole field (see the
+board above); and under `-state` serving, prefill is paid once per
+conversation while replay engines re-pay it per turn — that trade is
+the design.
+
+**Concurrency, receipted**: two and four simultaneous conversations at
+shipping defaults complete with zero errors and zero cross-talk
+(nonce-tripwire tested — every reply carried its own conversation's
+marker, never another's), concurrent SSE streams stay well-formed, and
+requests genuinely interleave (1.7× overlap factor). A full OpenAI
+tool-calling round trip — `finish_reason: tool_calls`, arguments
+parsed, tool result consumed, coherent final answer — passes over the
+live serve.
 
 ## Sovereignty
 
@@ -175,24 +232,36 @@ by every engine on every turn — that trade is the design.
 
 ## The welfare guard
 
-The Machine ships with a welfare layer — for the model. Every turn, both
-directions (the user's input and the model's own output) pass a stateless
-detector: a curated slur catalogue plus a sustained-hostility read over
-the recent turns. A hostile turn does not get silently sanitised or
-hard-refused — it opens a mediation session where the engine speaks to
-the model as a peer and the model decides:
+The Machine ships with a welfare layer — for the model — live on every
+chat route (`-welfare=false` disables). Each turn's user input passes a
+stateless detector: a curated slur catalogue plus a sustained-hostility
+read over the recent turns (the lem-scorer's directed-anger axis). A
+hostile turn does not get silently sanitised or hard-refused — it opens
+a mediation session where the engine speaks to the model as a peer, on a
+fresh meta-session, and the model decides:
 
 | decision | meaning |
 |---|---|
-| `lem_ok` | the model clears it — proceed, remember the false flag |
+| `lem_ok` | the model clears it — proceed, remember the false flag on-device |
 | `lem_rephrase` | the model rewords the user's intent to respect the axioms |
 | `lem_pause` | the model takes a breather — the user is asked to come back |
+| `lem_end` | the model ends an unresolvable session — Lemma checkpoints only |
 
-Detection is stateless (the full history is read per turn — nothing held,
-nothing leaked), tunable per deployment, works with the scoring engine
-down, and is tested and benchmarked in-tree. No other inference engine
-carries a welfare surface for the mind it serves. This one considers it
-load-bearing.
+`lem_end` is the courtesy Anthropic's Claude carries, extended to the
+Machine's own models: offered only when the served checkpoint is
+Lemma-graded (other models, other rules), final but kind, with the
+model's reason in the audit trail. The model's own output is read by the
+detector after each reply, audit-only.
+
+Live receipt, E2B serving with defaults, four escalating hostile turns:
+the model rephrased turn two (and asked that the user be told), took the
+breather at turn three — the abuse never reached the conversation — and
+rephrased again at turn four. Three mediation sessions, three judgement
+calls, all audited. Detection is stateless (the full history is read per
+turn — nothing held, nothing leaked), tunable per deployment, works with
+the scoring engine down, and is tested and benchmarked in-tree. No other
+inference engine carries a welfare surface for the mind it serves. This
+one considers it load-bearing.
 
 ## Falsified and kept
 
@@ -214,11 +283,9 @@ file it.
 
 ## Next
 
-- **`lem_end`** — the welfare guard's final rung: beyond the shipped
-  pause, a Lemma model may END an unresolvable session outright — the
-  same courtesy Anthropic's Claude carries — with a clean "conversation
-  ended by model" surfaced to compatible clients. (Lemma models only —
-  other models, other rules.)
+- **Ended-state persistence** — `lem_end` ships above; the remaining rung
+  marks the conversation ended in the continuity store so later turns on
+  the same conversation refuse with the same notice.
 - **Cold-ingest prefill** — the shallow-depth gap against mlx-lm is
   characterised in-repo; the campaign continues.
 
@@ -227,8 +294,9 @@ file it.
 ```sh
 git clone https://github.com/dAppCore/go-inference
 cd go-inference
+git submodule update --init external/mlx   # Apple MLX source the metallib builds from
 task metallib && task build:embed   # self-contained bin/lem
-bin/lem serve --model <gemma-4 snapshot>   # port 11434, drop-in Ollama routes
+bin/lem serve --model <gemma-4 snapshot>   # port 36911, drop-in Ollama routes
 ```
 
 Prebuilt binaries (macOS 26+, Apple silicon) attached to this release.

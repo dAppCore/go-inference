@@ -4,6 +4,7 @@ package serving
 
 import (
 	"context"
+	"iter"
 
 	"dappco.re/go"
 	"dappco.re/go/inference"
@@ -85,20 +86,11 @@ func (a *InferenceAdapter) GenerateStream(ctx context.Context, prompt string, op
 		return a.model.Err()
 	}
 
-	full := core.NewBuilder()
-	emitted := 0
-	for tok := range a.model.Generate(ctx, prompt, inferOpts...) {
-		full.WriteString(tok.Text)
-		truncated := applyStopSequences(full.String(), opts.StopSequences)
-		if len(truncated) > emitted {
-			if err := cb(truncated[emitted:]); err != nil {
-				return core.Fail(err)
-			}
-			emitted = len(truncated)
-		}
-		if len(truncated) < full.Len() {
-			return a.model.Err()
-		}
+	// streamStopWindow rescans a bounded (maxStopLen-1)+token window instead of
+	// the whole accumulated reply each token — the old applyStopSequences over
+	// full.String() every token was O(N^2) time over an N-token stream (#380).
+	if err := streamStopWindow(a.model.Generate(ctx, prompt, inferOpts...), opts.StopSequences, cb); err != nil {
+		return core.Fail(err)
 	}
 	return a.model.Err()
 }
@@ -120,20 +112,9 @@ func (a *InferenceAdapter) ChatStream(ctx context.Context, messages []Message, o
 		return a.model.Err()
 	}
 
-	full := core.NewBuilder()
-	emitted := 0
-	for tok := range a.model.Chat(ctx, messages, inferOpts...) {
-		full.WriteString(tok.Text)
-		truncated := applyStopSequences(full.String(), opts.StopSequences)
-		if len(truncated) > emitted {
-			if err := cb(truncated[emitted:]); err != nil {
-				return core.Fail(err)
-			}
-			emitted = len(truncated)
-		}
-		if len(truncated) < full.Len() {
-			return a.model.Err()
-		}
+	// See GenerateStream — same bounded-window stop scan (#380).
+	if err := streamStopWindow(a.model.Chat(ctx, messages, inferOpts...), opts.StopSequences, cb); err != nil {
+		return core.Fail(err)
 	}
 	return a.model.Err()
 }
@@ -270,4 +251,67 @@ func convertOpts(opts GenOpts) []inference.GenerateOption {
 func metricsPtr(m inference.TextModel) *inference.GenerateMetrics {
 	met := m.Metrics()
 	return &met
+}
+
+// streamStopWindow forwards a stop-truncated token stream to cb WITHOUT
+// re-scanning the whole reply per token. The pre-optimisation path ran
+// applyStopSequences over the full builder every token — O(N²) bytes over an
+// N-token stream. A stop sequence can only newly complete within the last
+// (maxStopLen-1) bytes of already-emitted content plus the new token (anything
+// ending inside the already-emitted prefix would have cut the stream at an
+// earlier token), so each step scans only that bounded window+delta slice.
+//
+// It returns the callback's error if cb stops early, or nil once the stream ends
+// or a stop sequence truncates it — the caller then returns the model's own
+// Result, exactly as the old inline loop did for both the stop and end paths.
+func streamStopWindow(seq iter.Seq[inference.Token], stops []string, cb TokenCallback) error {
+	full := core.NewBuilder()
+	emitted := 0
+	window := maxStopLen(stops) - 1
+	if window < 0 {
+		window = 0
+	}
+	for tok := range seq {
+		prevLen := full.Len()
+		full.WriteString(tok.Text)
+		s := full.String()
+		windowStart := prevLen - window
+		if windowStart < 0 {
+			windowStart = 0
+		}
+		scan := s[windowStart:] // == oldTail + tok.Text, zero-copy view
+		kept := applyStopSequences(scan, stops)
+		if len(kept) < len(scan) {
+			// A stop sequence cut the scan: absolute cut = windowStart + len(kept).
+			// Emit only the newly-revealed run before it, then stop (the old loop
+			// returned here because truncated < full).
+			cut := windowStart + len(kept)
+			if cut > emitted {
+				if err := cb(s[emitted:cut]); err != nil {
+					return err
+				}
+				emitted = cut
+			}
+			return nil
+		}
+		if full.Len() > emitted {
+			if err := cb(s[emitted:]); err != nil {
+				return err
+			}
+			emitted = full.Len()
+		}
+	}
+	return nil
+}
+
+// maxStopLen returns the byte length of the longest stop sequence, sizing the
+// rescan window. Empty entries (ignored by applyStopSequences) contribute 0.
+func maxStopLen(stops []string) int {
+	m := 0
+	for _, s := range stops {
+		if len(s) > m {
+			m = len(s)
+		}
+	}
+	return m
 }

@@ -6,68 +6,21 @@ import (
 	"math"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/quant/mlxaffine"
 	"dappco.re/go/inference/model/qwen3"
 	"dappco.re/go/inference/model/safetensors"
 )
 
 // loader.go builds a ComposedModel from a hybrid checkpoint (Qwen 3.6), the native port of metal's
 // composed.buildComposed: parse the config, dispatch each layer by layer_type to its mixer (linear_attn →
-// gated-delta, self_attn → attention), wire the SwiGLU MLP + the two norms, and resolve the
-// model.language_model. multimodal-wrapper prefix. The gated-delta geometry is derived from the weight
-// shapes (as metal does); the attention geometry from the config.
+// gated-delta, self_attn → attention), wire the SwiGLU MLP + the two norms, and resolve the wrapper
+// prefixes (model.language_model. via the prefix probe; the language_model.model. nesting real Qwen 3.6
+// packs ship via model.NormalizeWrapperNames). Quantised checkpoints (mlx affine packed-uint32 weights
+// with .scales/.biases siblings) dequantise host-side to f32 at load. The gated-delta geometry is derived
+// from the weight shapes (as metal does); the attention geometry from the config.
 
-type ropeParams struct {
-	RopeTheta           float32 `json:"rope_theta"`
-	PartialRotaryFactor float32 `json:"partial_rotary_factor"`
-}
-
-// loaderConfig is the arch-relevant subset of a qwen3_6 config.json (text fields nest under text_config in
-// the multimodal wrapper; rope under rope_parameters).
-type loaderConfig struct {
-	HiddenSize            int           `json:"hidden_size"`
-	NumHiddenLayers       int           `json:"num_hidden_layers"`
-	IntermediateSize      int           `json:"intermediate_size"`
-	NumAttentionHeads     int           `json:"num_attention_heads"`
-	NumKeyValueHeads      int           `json:"num_key_value_heads"`
-	HeadDim               int           `json:"head_dim"`
-	VocabSize             int           `json:"vocab_size"`
-	RMSNormEps            float32       `json:"rms_norm_eps"`
-	NumExpertsPerTok      int           `json:"num_experts_per_tok"`
-	RopeTheta             float32       `json:"rope_theta"`
-	PartialRotaryFactor   float32       `json:"partial_rotary_factor"`
-	LayerTypes            []string      `json:"layer_types"`
-	FullAttentionInterval int           `json:"full_attention_interval"`
-	RopeParameters        *ropeParams   `json:"rope_parameters"`
-	TextConfig            *loaderConfig `json:"text_config"`
-}
-
-// effective returns the text config (self, or the nested text_config for the multimodal wrapper).
-func (c *loaderConfig) effective() *loaderConfig {
-	if c.TextConfig != nil {
-		return c.TextConfig
-	}
-	return c
-}
-
-func (c *loaderConfig) ropeTheta() float32 {
-	if c.RopeTheta > 0 {
-		return c.RopeTheta
-	}
-	if c.RopeParameters != nil && c.RopeParameters.RopeTheta > 0 {
-		return c.RopeParameters.RopeTheta
-	}
-	return 1e6
-}
-
-func (c *loaderConfig) partialRotary() float32 {
-	if c.PartialRotaryFactor > 0 {
-		return c.PartialRotaryFactor
-	}
-	if c.RopeParameters != nil && c.RopeParameters.PartialRotaryFactor > 0 {
-		return c.RopeParameters.PartialRotaryFactor
-	}
-	return 1
-}
+// The loaderConfig type + its effective()/ropeTheta()/partialRotary() helpers live in config.go.
 
 // tensorF32 widens a bf16/f32 safetensors tensor to a flat f32 slice.
 func tensorF32(t safetensors.Tensor) ([]float32, error) {
@@ -89,6 +42,53 @@ func tensorF32(t safetensors.Tensor) ([]float32, error) {
 	return nil, core.NewError("composed.tensorF32: unsupported dtype " + t.Dtype)
 }
 
+// quantBlock extracts the checkpoint's mlx quantization block (top-level, else nested under
+// text_config in the multimodal wrapper); nil for an unquantised (bf16/f32) checkpoint.
+func quantBlock(configJSON []byte) *model.QuantConfig {
+	var probe struct {
+		Quantization *model.QuantConfig `json:"quantization"`
+		TextConfig   struct {
+			Quantization *model.QuantConfig `json:"quantization"`
+		} `json:"text_config"`
+	}
+	if r := core.JSONUnmarshal(configJSON, &probe); !r.OK {
+		return nil
+	}
+	if probe.Quantization != nil {
+		return probe.Quantization
+	}
+	return probe.TextConfig.Quantization
+}
+
+// tensorAsF32 widens t (looked up as name) to a flat f32 slice. A quantised tensor — mlx
+// affine's packed-uint32 weight with .scales/.biases siblings — dequantises host-side, its
+// (groupSize, bits) read from the quantization block and cross-checked against the packed
+// shape so a mismatched config/checkpoint pairing fails loudly rather than mis-loading.
+func tensorAsF32(tensors map[string]safetensors.Tensor, name string, t safetensors.Tensor, quant *model.QuantConfig) ([]float32, error) {
+	base := name
+	if core.HasSuffix(base, ".weight") {
+		base = base[:len(base)-len(".weight")]
+	}
+	scalesT, sOK := tensors[base+".scales"]
+	biasesT, bOK := tensors[base+".biases"]
+	if !sOK || !bOK {
+		return tensorF32(t)
+	}
+	if quant == nil {
+		return nil, core.NewError("composed.tensorAsF32: " + name + " carries .scales/.biases but the config has no quantization block")
+	}
+	if len(t.Shape) != 2 || len(scalesT.Shape) != 2 {
+		return nil, core.NewError("composed.tensorAsF32: quantised " + name + " is not 2-D")
+	}
+	gs, bits := quant.For(base)
+	outDim, packedCols := t.Shape[0], t.Shape[1]
+	inDim := scalesT.Shape[1] * gs
+	if packedCols*32 != inDim*bits {
+		return nil, core.NewError(core.Sprintf("composed.tensorAsF32: %s packed cols %d ≠ inDim %d·bits %d/32 (groupSize %d)", name, packedCols, inDim, bits, gs))
+	}
+	return mlxaffine.DequantizeTensor(t.Data, scalesT.Data, biasesT.Data, outDim, inDim, bits, gs)
+}
+
 // LoadComposed assembles a ComposedModel from a hybrid checkpoint's tensors + its config.json bytes.
 func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*ComposedModel, error) {
 	var raw loaderConfig
@@ -99,6 +99,11 @@ func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*Co
 	if cfg.HiddenSize <= 0 || cfg.NumHiddenLayers <= 0 {
 		return nil, core.NewError("composed.LoadComposed: hidden_size and num_hidden_layers required")
 	}
+
+	// Real Qwen 3.6 packs nest the text model under language_model. (language_model.model.layers…);
+	// the normaliser adds the stripped model.… aliases so the bare lookups below work either way.
+	tensors = model.NormalizeWrapperNames(tensors)
+	quant := quantBlock(configJSON)
 
 	// Resolve the weight prefix (multimodal wrapper nests under model.language_model.).
 	prefix := "model."
@@ -111,11 +116,11 @@ func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*Co
 		if !ok {
 			return nil, core.NewError("composed.LoadComposed: missing " + name)
 		}
-		return tensorF32(t)
+		return tensorAsF32(tensors, name, t, quant)
 	}
 	f32opt := func(name string) []float32 {
 		if t, ok := get(name); ok {
-			if v, e := tensorF32(t); e == nil {
+			if v, e := tensorAsF32(tensors, name, t, quant); e == nil {
 				return v
 			}
 		}
@@ -126,12 +131,14 @@ func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*Co
 	if !ok || len(embedT.Shape) != 2 {
 		return nil, core.NewError("composed.LoadComposed: missing/!2D embed_tokens.weight")
 	}
-	embed, err := tensorF32(embedT)
+	embed, err := tensorAsF32(tensors, prefix+"embed_tokens.weight", embedT, quant)
 	if err != nil {
 		return nil, err
 	}
-	D := embedT.Shape[1]
 	vocab := embedT.Shape[0]
+	// Logical width from the dequantised length — a quantised embed's Shape[1] is the
+	// bits-compressed packed-word count, not the hidden size.
+	D := len(embed) / vocab
 	normF, err := f32(prefix + "norm.weight")
 	if err != nil {
 		return nil, err
@@ -166,7 +173,7 @@ func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*Co
 		if kinds[i] == "full_attention" {
 			mixer, err = buildAttn(f32, f32opt, lp+"self_attn.", cfg, D)
 		} else {
-			mixer, err = buildGatedDelta(get, f32, f32opt, lp+"linear_attn.", D)
+			mixer, err = buildGatedDelta(get, f32, f32opt, lp+"linear_attn.", cfg, D)
 		}
 		if err != nil {
 			return nil, core.E("composed.LoadComposed", core.Sprintf("layer %d (%s)", i, kinds[i]), err)
@@ -222,6 +229,9 @@ func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float3
 	headDim := cfg.HeadDim
 	if headDim == 0 && heads > 0 {
 		headDim = (len(q) / D) / heads
+		if cfg.AttnOutputGate {
+			headDim /= 2 // gated q_proj emits [q ; gate], so its rows are 2·heads·headDim
+		}
 	}
 	kvHeads := cfg.NumKeyValueHeads
 	if kvHeads == 0 {
@@ -234,13 +244,13 @@ func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float3
 	return NewAttnMixer(&AttnWeights{
 		QProj: q, KProj: k, VProj: v, OProj: o,
 		QNorm: f32opt(sp + "q_norm.weight"), KNorm: f32opt(sp + "k_norm.weight"),
-	}, AttnConfig{Heads: heads, KVHeads: kvHeads, HeadDim: headDim, RotaryDim: rd, RopeTheta: cfg.ropeTheta(), NormEps: cfg.RMSNormEps}), nil
+	}, AttnConfig{Heads: heads, KVHeads: kvHeads, HeadDim: headDim, RotaryDim: rd, RopeTheta: cfg.ropeTheta(), NormEps: cfg.RMSNormEps, OutputGate: cfg.AttnOutputGate}), nil
 }
 
 // buildGatedDelta builds a gated-delta mixer; geometry derived from the weight shapes (as metal does):
 // ValueHeads = len(A_log), HeadDim = len(norm), convDim/K from conv1d.weight, qDim = (convDim−vDim)/2,
 // KeyHeads = qDim/HeadDim.
-func buildGatedDelta(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, D int) (Mixer, error) {
+func buildGatedDelta(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, lcfg *loaderConfig, D int) (Mixer, error) {
 	aLogT, ok := get(sp + "A_log")
 	if !ok || len(aLogT.Shape) != 1 {
 		return nil, core.NewError("missing/!1D A_log")
@@ -257,6 +267,11 @@ func buildGatedDelta(get func(string) (safetensors.Tensor, bool), f32 func(strin
 	headDim := normT.Shape[0]
 	convDim := convT.Shape[0]
 	convK := convT.Shape[len(convT.Shape)-1]
+	if len(convT.Shape) == 3 && convK == 1 {
+		// mlx packs the depthwise conv channel-last ([convDim, K, 1]); torch packs [convDim, 1, K].
+		// The flat bytes are identical (the 1-dim contributes no stride) — only K's slot moves.
+		convK = convT.Shape[1]
+	}
 	vDim := valueHeads * headDim
 	if (convDim-vDim)%2 != 0 {
 		return nil, core.NewError(core.Sprintf("gated-delta geometry: convDim %d − vDim %d not even", convDim, vDim))
@@ -266,6 +281,9 @@ func buildGatedDelta(get func(string) (safetensors.Tensor, bool), f32 func(strin
 		return nil, core.NewError("gated-delta geometry: qDim not divisible by headDim")
 	}
 	keyHeads := qDim / headDim
+	if err := lcfg.validateLinearGeometry(keyHeads, valueHeads, headDim, convK); err != nil {
+		return nil, err
+	}
 
 	qkv, err := f32(sp + "in_proj_qkv.weight")
 	if err != nil {
@@ -363,16 +381,25 @@ func buildMoE(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]f
 		return nil, core.NewError("composed.buildMoE: experts.0 present but none loaded")
 	}
 	var shared *MoEExpert
+	var sharedGate []float32
 	if _, ok := get(sp + "shared_expert.gate_proj.weight"); ok {
 		ex, err := expert(sp + "shared_expert.")
 		if err != nil {
 			return nil, err
 		}
 		shared = &ex
+		// shared_expert_gate is the reference's sigmoid gate on the shared expert (Linear(hidden,1)
+		// ⇒ [D]); optional so a checkpoint without it (or a synthetic test) adds the shared expert
+		// ungated.
+		if t, ok := get(sp + "shared_expert_gate.weight"); ok {
+			if v, e := tensorF32(t); e == nil {
+				sharedGate = v
+			}
+		}
 	}
 	topK := cfg.NumExpertsPerTok
 	if topK <= 0 {
 		topK = 8
 	}
-	return &MoEMLP{Router: router, Experts: experts, Shared: shared, TopK: topK}, nil
+	return &MoEMLP{Router: router, Experts: experts, Shared: shared, SharedGate: sharedGate, TopK: topK, NormTopKProb: cfg.normTopKProb()}, nil
 }

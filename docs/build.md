@@ -29,7 +29,7 @@ source in this repo** — there is no go-mlx dependency:
 | Library | Built from | Contents |
 |---------|-----------|----------|
 | `mlx.metallib` | Apple MLX (`external/mlx`) + the lthn patches, via CMake | Apple MLX's own kernels: `steel_gemm`, `affine_qmv`, `vv_*`, rms, rope, sdpa |
-| `lthn_kernels.metallib` | `go/engine/metal/kernels/*.metal`, via `xcrun` | go-inference's own fused kernels (23 `.metal` sources: the FFN/attention/layer megakernels, gelu-gate-mul, qgemv, rmsnorm-residual, sdpa variants, MoE router, …) |
+| `lthn_kernels.metallib` | `go/engine/metal/kernels/*.metal`, via `xcrun` | go-inference's own fused kernels (39 `.metal` sources: the FFN/attention/layer megakernels, gelu-gate-mul, qgemv, rmsnorm-residual, sdpa variants, MoE router, …) |
 
 At runtime the engine loads `mlx.metallib` (named by `MLX_METALLIB_PATH`) and
 then looks for `lthn_kernels.metallib` **as a sibling in the same directory**.
@@ -39,7 +39,7 @@ primitives.
 ## Patch-not-vendor: `external/mlx` + `patches/mlx/`
 
 `external/mlx` is Apple's canonical MLX (`github.com/ml-explore/mlx`) as a git
-submodule, **pinned at v0.31.2**. Rather than fork or vendor a modified MLX, the
+submodule, **pinned at v0.32.0**. Rather than fork or vendor a modified MLX, the
 10 lthn patches in `patches/mlx/` are applied **on top at build time** and then
 reverted, so the submodule stays pristine in `git status`.
 
@@ -79,15 +79,13 @@ Compiles each `go/engine/metal/kernels/*.metal` to a `.air` object with
 the include path), then links them with `xcrun -sdk macosx metallib` into
 `lthn_kernels.metallib`.
 
-### Output paths (verify before wiring downstream)
+### Output paths
 
-The kernels library lands at `build/dist/lib/lthn_kernels.metallib`. The MLX
-library is copied to, and the Taskfile's `MLX_METALLIB_PATH` env points at,
-`build/dist/external/mlx.metallib`. Note the `metallib:mlx` task **description**
-string still says `build/dist/lib` — the actual `cp` target and the exported
-`MLX_METALLIB_PATH` both use `build/dist/external/mlx.metallib`, and the embed
-build reads both from `build/dist/lib/` (see below). If you script around these
-paths, trust the commands, not the description string, and confirm on disk.
+Both libraries land under `build/dist/lib/`: `mlx.metallib` (copied out of the
+CMake build) and `lthn_kernels.metallib` (linked from the compiled `.air`
+objects). The Taskfile's `MLX_METALLIB_PATH` env points at
+`build/dist/lib/mlx.metallib`, and the embed build reads both from that same
+directory (see below).
 
 ## `task build` — the external-metallib binary
 

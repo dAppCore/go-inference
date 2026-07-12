@@ -97,3 +97,33 @@ func TestGatedDeltaChunkCarry(t *testing.T) {
 	}
 	t.Logf("gated delta chunk-carry bit-exact: split %d|%d, o and delta state identical to the one-pass run", split, rem)
 }
+
+// TestGatedDeltaRuleF32_Golden pins the exact f32 bit-pattern of the recurrence outputs (o and the advanced
+// state) for a fixed input, gating alloc-reduction refactors on bit-identical behaviour.
+func TestGatedDeltaRuleF32_Golden(t *testing.T) {
+	const L, H, D = 3, 2, 4
+	alpha := syn(L*H, 23)
+	for i := range alpha {
+		alpha[i] = float32(1.0 / (1.0 + math.Exp(-float64(alpha[i])))) // decay ∈ (0,1]
+	}
+	o, state, err := GatedDeltaRuleF32(syn(L*H*D, 11), syn(L*H*D, 13), syn(L*H*D, 17), syn(L*H, 19), alpha, nil, L, H, D, 0.5, testEps)
+	if err != nil {
+		t.Fatalf("GatedDeltaRuleF32: %v", err)
+	}
+	wantO := []uint32{0x3edbaebe, 0x3e84d4d2, 0x3db7eb99, 0xbda37c17, 0xbdd02dc4, 0xbe2edec3, 0x3e2edec3, 0x3dd02dc4, 0x3ba1af64, 0x3b628f60, 0x3b01c01a, 0x3a03c354, 0xb9b480a3, 0xbd002dc1, 0x3d57144e, 0x3cb09f1f, 0xbe2200ee, 0xbe71adfe, 0x3e520d77, 0x3e026068, 0x3c1fa5df, 0x3d753dbf, 0x3dccb71b, 0x3e19b09f}
+	wantState := []uint32{0xbebc9975, 0xbf03ba26, 0x3ed8cdd5, 0x3e8df2ff, 0xbe802a66, 0xbeae32e6, 0x3e8bd764, 0x3e3b9dc9, 0xbe0776af, 0xbe29e301, 0x3dfb83cd, 0x3db6ab29, 0xbc698907, 0x3c09fcaf, 0xbce157db, 0xbb9e5403, 0xbc6c2fd2, 0xbd9ffb88, 0xbde086ac, 0xbe317e1d, 0xbd0d3564, 0xbe1ed564, 0xbe4a7529, 0xbea2fe9a, 0xbd5f5ed4, 0xbe6dad03, 0xbe92537e, 0xbeed3e25, 0xbb84000d, 0x3e1551a0, 0x3ee84d2a, 0x3f1a82fd}
+	checkGoldenBits(t, "o", o, wantO)
+	checkGoldenBits(t, "state", state, wantState)
+}
+
+func checkGoldenBits(t *testing.T, name string, got []float32, want []uint32) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s len %d, want %d", name, len(got), len(want))
+	}
+	for i := range got {
+		if b := math.Float32bits(got[i]); b != want[i] {
+			t.Fatalf("%s[%d] bits 0x%08x, want 0x%08x", name, i, b, want[i])
+		}
+	}
+}

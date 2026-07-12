@@ -4,6 +4,7 @@ package model
 
 import (
 	"math"
+	"sort"
 	"testing"
 )
 
@@ -124,6 +125,49 @@ func TestSample(t *testing.T) {
 		t.Fatal("expected a length-mismatch error")
 	}
 	t.Logf("sample: temp0=greedy; same-seed reproducible; RNG advances (%d distinct/64); peaked→peak 195+/200; top-k=1 and tiny top-p →argmax", len(seen))
+}
+
+// TestSelectTopKDescMatchesStableSort locks the bounded top-k select byte-identical to the
+// prefix of the full descending stable sort it replaces on the sampler hot path — across a
+// deterministic fuzz of vocab/k with a deliberately tiny value range so ties are frequent and
+// the ascending-index tie-break is exercised, the corner the sampler's determinism rides on.
+func TestSelectTopKDescMatchesStableSort(t *testing.T) {
+	rng := uint64(0x9e3779b97f4a7c15) // splitmix64 state — hermetic, no math/rand import
+	nextInt := func(n int) int {
+		rng += 0x9e3779b97f4a7c15
+		z := rng
+		z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+		z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+		z ^= z >> 31
+		return int(z % uint64(n))
+	}
+	for _, vocab := range []int{1, 2, 5, 8, 33, 64, 257, 1000} {
+		for trial := 0; trial < 40; trial++ {
+			probs := make([]float32, vocab)
+			for i := range probs {
+				probs[i] = float32(nextInt(5)) // 0..4 → many collisions → tie-break coverage
+			}
+			ref := make([]int, vocab)
+			for i := range ref {
+				ref[i] = i
+			}
+			sort.SliceStable(ref, func(a, b int) bool { return probs[ref[a]] > probs[ref[b]] })
+			for _, k := range []int{1, 2, 7, vocab/2 + 1, vocab} {
+				if k < 1 || k > vocab {
+					continue
+				}
+				got := make([]int, k)
+				selectTopKDesc(got, probs, vocab)
+				for i := 0; i < k; i++ {
+					if got[i] != ref[i] {
+						t.Fatalf("vocab=%d k=%d pos=%d: got %d, want %d (full-sort prefix %v; probs=%v)",
+							vocab, k, i, got[i], ref[i], ref[:k], probs)
+					}
+				}
+			}
+		}
+	}
+	t.Logf("selectTopKDesc matches the stable-sort prefix across tie-heavy fuzz")
 }
 
 func TestSampleCandidatesMatchesFullTopKWindow(t *testing.T) {

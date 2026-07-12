@@ -19,14 +19,36 @@ import (
 )
 
 var (
-	_ engine.TokenModel        = (*NativeTokenModel)(nil)
-	_ engine.Session           = (*ArchSession)(nil)
-	_ engine.TrainerModel      = (*NativeTokenModel)(nil)
-	_ engine.Trainer           = (*LoRATrainer)(nil)
-	_ engine.CacheModeReporter = (*NativeTokenModel)(nil)
-	_ engine.StopTokenDeclarer = (*NativeTokenModel)(nil)
-	_ engine.DecodePhaseTracer = (*ArchSession)(nil)
+	_ engine.TokenModel              = (*NativeTokenModel)(nil)
+	_ engine.PromptReuseCapableModel = (*NativeTokenModel)(nil)
+	_ engine.Session                 = (*ArchSession)(nil)
+	_ engine.PromptReuseSession      = (*ArchSession)(nil)
+	_ engine.TrainerModel            = (*NativeTokenModel)(nil)
+	_ engine.Trainer                 = (*LoRATrainer)(nil)
+	_ engine.CacheModeReporter       = (*NativeTokenModel)(nil)
+	_ engine.StopTokenDeclarer       = (*NativeTokenModel)(nil)
+	_ engine.ChatTemplateDeclarer    = (*NativeTokenModel)(nil)
+	_ engine.DecodePhaseTracer       = (*ArchSession)(nil)
 )
+
+// DeclaredChatTemplate declares this checkpoint's chat dialect
+// (engine.ChatTemplateDeclarer): the gemma turn template in the marker dialect
+// the loaded tokenizer carries (gemma4 <|turn> vs the gemma3-era
+// <start_of_turn>), pre-closing the empty thought channel when the large-variant
+// geometry needs it (NeedsThoughtChannelSuppressor). Declaring it — rather than
+// leaving engine.TextModel to detect — is the seam a second architecture will
+// self-report its own dialect through; today it hands back exactly what the
+// tokenizer-detected fallback would build, so gemma rendering is unchanged.
+func (m *NativeTokenModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
+	if m == nil {
+		return engine.ChatTemplate{}, false
+	}
+	tok := m.Tokenizer()
+	if tok == nil {
+		return engine.ChatTemplate{}, false
+	}
+	return engine.GemmaChatTemplate(engine.DetectTurnTokens(tok), m.NeedsThoughtChannelSuppressor()), true
+}
 
 // SupportedCacheModes reports the one KV cache mode this no-cgo engine runs: its
 // own built-in cache, selected automatically (engine.CacheModeReporter). It
@@ -55,6 +77,13 @@ func newNativeTextModel(tm *NativeTokenModel, modelType string) *engine.TextMode
 		QuantGroup:   tm.quantGroup,
 	}
 	return engine.NewTextModel(tm, tm.Tokenizer(), modelType, info, tm.maxLen)
+}
+
+// SessionsReusePrompts declares that this engine's ArchSession implements
+// engine.PromptReuseSession (PrefillTokensCached, session_prompt_reuse.go) —
+// the model-level probe behind the stateless lane's resident prompt cache.
+func (m *NativeTokenModel) SessionsReusePrompts() bool {
+	return true
 }
 
 // OpenEngineSession opens a fresh incremental decode session (empty KV cache) as

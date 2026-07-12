@@ -5,6 +5,7 @@
 package native
 
 import (
+	"bytes"
 	"math"
 	"os"
 	"testing"
@@ -685,5 +686,45 @@ func TestFlashQ8PromptMatchesMirrorLane(t *testing.T) {
 			t.Fatalf("step %d: q8 flash diverges from the mirror lane: worst |Δ| = %.4f", i, worst)
 		}
 		t.Logf("step %d worst |Δ| = %.4f", i, worst)
+	}
+}
+
+// TestQ8StagePromptMatchesMirrorLane pins the #375 staging contract: routing a
+// q8 owner's per-chunk prefix dequant into the shared ping-pong staging pair
+// instead of the per-layer mirror planes changes WHERE the dequant lands and
+// nothing else — same dequant kernel, same flash/GEMM consumers — so the
+// hidden states must be BYTE-identical to the mirror lane, prompt and decode.
+func TestQ8StagePromptMatchesMirrorLane(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const maxLen = 8192
+	prompt := make([]int32, 4600) // past sdpaPromptGEMMMinKV so the q8 GEMM/flash branch engages
+	for i := range prompt {
+		prompt[i] = int32(1 + i%50)
+	}
+	run := func(mirrorLane bool) [][]byte {
+		q8StageOffForTest = mirrorLane
+		defer func() { q8StageOffForTest = false }()
+		sess := newKVQ8ICBFixtureLen(t, maxLen)
+		if err := sess.PrefillTokens(prompt); err != nil {
+			t.Fatalf("PrefillTokens (mirror=%v): %v", mirrorLane, err)
+		}
+		var outs [][]byte
+		for _, id := range []int32{7, 3, 9, 5} {
+			h, err := sess.stepID(id)
+			if err != nil {
+				t.Fatalf("stepID (mirror=%v): %v", mirrorLane, err)
+			}
+			outs = append(outs, append([]byte(nil), h...))
+		}
+		return outs
+	}
+	stage := run(false)
+	mirror := run(true)
+	for i := range stage {
+		if !bytes.Equal(stage[i], mirror[i]) {
+			t.Fatalf("step %d: staging lane diverged from the mirror lane (want byte-identical)", i)
+		}
 	}
 }

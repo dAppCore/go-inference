@@ -54,15 +54,9 @@ func audioBlockContextF32(x []float32, T, H, D, nB, chunk, past, future int) []f
 	return out
 }
 
-// audioRelShiftF32 is the Transformer-XL relative shift: [H, nB, chunk, P] → [H, nB, chunk, ctx] by
+// audioRelShiftF32Into is the Transformer-XL relative shift: [H, nB, chunk, P] → [H, nB, chunk, ctx] by
 // padding the position axis to ctx+1, folding chunk·(ctx+1), truncating to chunk·ctx, refolding. Port
 // of relShift (B=1). Pure index remap (byte-copy / zero-pad), so byte-identical.
-func audioRelShiftF32(x []float32, H, nB, chunk, P, ctx int) []float32 {
-	out := make([]float32, H*nB*chunk*ctx)
-	audioRelShiftF32Into(out, x, H, nB, chunk, P, ctx)
-	return out
-}
-
 func audioRelShiftF32Into(out, x []float32, H, nB, chunk, P, ctx int) {
 	padP := ctx + 1
 	for h := range H {
@@ -85,8 +79,11 @@ func audioRelShiftF32Into(out, x []float32, H, nB, chunk, P, ctx int) {
 }
 
 // audioBlockedMask builds the [nB, chunk, ctx] validity mask: query q=blk·chunk+i may attend key
-// kv=blk·chunk-past+j iff both in-sequence and kv∈[q-past, q+future]. Port of blockedMask.
-func audioBlockedMask(seqLen, nB, chunk, ctx, past, future int) []bool {
+// kv=blk·chunk-past+j iff both in-sequence, kv∈[q-past, q+future], AND kv is a valid (non-padding)
+// frame. Port of blockedMask AND'd with HF's _convert_4d_mask_to_blocked_5d key-padding term. validity
+// is the per-soft-token (post-subsample) mask over [0,seqLen); nil means every position is valid (a
+// fully-valid clip), byte-identical to the purely-positional mask (all-true validity is the same no-op).
+func audioBlockedMask(seqLen, nB, chunk, ctx, past, future int, validity []bool) []bool {
 	m := make([]bool, nB*chunk*ctx)
 	for b := range nB {
 		for i := range chunk {
@@ -94,7 +91,9 @@ func audioBlockedMask(seqLen, nB, chunk, ctx, past, future int) []bool {
 			for j := range ctx {
 				kv := b*chunk - past + j
 				if q < seqLen && kv >= 0 && kv < seqLen && kv >= q-past && kv <= q+future {
-					m[(b*chunk+i)*ctx+j] = true
+					if validity == nil || validity[kv] {
+						m[(b*chunk+i)*ctx+j] = true
+					}
 				}
 			}
 		}
@@ -129,7 +128,7 @@ func AudioAttention(x []byte, w *AudioAttentionWeights, cfg AudioConfig) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	merged, err := audioAttentionCore(qf, kf, vf, w, cfg, T)
+	merged, err := audioAttentionCore(qf, kf, vf, w, cfg, T, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -139,8 +138,9 @@ func AudioAttention(x []byte, w *AudioAttentionWeights, cfg AudioConfig) ([]byte
 // AudioAttentionF32 runs the Conformer attention on fp32 [T, hidden] — the TOWER path (the layer feeds
 // fp32 after the GC clamp promotes the activation). Projections + output projection are fp32 mixed-
 // dtype matmuls (bf16 weights widened); the attention math is the same fp32 core. Byte-identical to
-// metal's Gemma4AudioAttention.Forward with an fp32 input.
-func AudioAttentionF32(x []float32, w *AudioAttentionWeights, cfg AudioConfig) ([]float32, error) {
+// metal's Gemma4AudioAttention.Forward with an fp32 input. validity is the optional per-soft-token
+// (length T) key-padding mask; nil (a fully-valid clip) keeps the purely-positional blocked mask.
+func AudioAttentionF32(x []float32, w *AudioAttentionWeights, cfg AudioConfig, validity []bool) ([]float32, error) {
 	if err := ensureInit(); err != nil {
 		return nil, err
 	}
@@ -161,7 +161,7 @@ func AudioAttentionF32(x []float32, w *AudioAttentionWeights, cfg AudioConfig) (
 	if err != nil {
 		return nil, err
 	}
-	merged, err := audioAttentionCore(qf, kf, vf, w, cfg, T)
+	merged, err := audioAttentionCore(qf, kf, vf, w, cfg, T, validity)
 	if err != nil {
 		return nil, err
 	}
@@ -170,8 +170,9 @@ func AudioAttentionF32(x []float32, w *AudioAttentionWeights, cfg AudioConfig) (
 
 // audioAttentionCore runs the fp32 chunked relative-position attention math on the fp32 projections
 // qf/kf/vf ([T,H,D]; q-scale/k-scale applied here), returning the merged context [T*hd] fp32 (pre
-// output-projection). Shared by the bf16 and fp32 entry points.
-func audioAttentionCore(qf, kf, vf []float32, w *AudioAttentionWeights, cfg AudioConfig, T int) ([]float32, error) {
+// output-projection). Shared by the bf16 and fp32 entry points. validity (nil ⇒ all-valid) ANDs into
+// the blocked mask so padding keys are never attended.
+func audioAttentionCore(qf, kf, vf []float32, w *AudioAttentionWeights, cfg AudioConfig, T int, validity []bool) ([]float32, error) {
 	H, D := cfg.NumHeads, cfg.HeadDim
 	hd := H * D
 	chunk := cfg.ChunkSize
@@ -202,7 +203,7 @@ func audioAttentionCore(qf, kf, vf []float32, w *AudioAttentionWeights, cfg Audi
 
 	// per query head h: matrix_ac[i,j] = Σ_d q[blk,i,h,d]·k_ctx[blk,j,h,d]; bd[i,p] = Σ_d q·relK[p,h,d];
 	// logits = ac + relShift(bd); soft-cap; mask; softmax over ctx; out = Σ_j w[i,j]·v_ctx[blk,j,h,d].
-	mask := audioBlockedMask(T, nB, chunk, ctx, past, future)
+	mask := audioBlockedMask(T, nB, chunk, ctx, past, future, validity)
 	merged := make([]float32, nB*chunk*hd)
 	qh := make([]float32, nB*chunk*D)
 	relKh := make([]float32, w.PosCount*D)

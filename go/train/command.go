@@ -33,6 +33,9 @@ type SSDCommandConfig struct {
 	KernelPath    string
 	CheckpointDir string
 	ContextLen    int
+	// Backend pins the inference backend by registered name. Empty keeps the
+	// default selection (the preferred engine linked into the binary).
+	Backend string
 
 	SampleMaxTokens   int
 	SampleTemp        float64
@@ -72,7 +75,7 @@ func RunSSDCommand(ctx context.Context, cfg SSDCommandConfig) error {
 	}
 
 	printNote(cfg.Log, "ssd: loading %s", cfg.ModelPath)
-	model, err := loadTextModel(cfg.ModelPath, cfg.ContextLen)
+	model, err := loadTextModel(cfg.ModelPath, cfg.Backend, cfg.ContextLen)
 	if err != nil {
 		return core.E("train.RunSSDCommand", "model load", err)
 	}
@@ -124,6 +127,9 @@ type SFTCommandConfig struct {
 	SavePath        string
 	ResumePath      string
 	ContextLen      int
+	// Backend pins the inference backend by registered name. Empty keeps the
+	// default selection (the preferred engine linked into the binary).
+	Backend string
 
 	Rank            int
 	Alpha           float64
@@ -172,7 +178,7 @@ func RunSFTCommand(ctx context.Context, cfg SFTCommandConfig) error {
 	}
 
 	printNote(cfg.Log, "sft: loading %s", cfg.ModelPath)
-	model, err := loadTextModel(cfg.ModelPath, cfg.ContextLen)
+	model, err := loadTextModel(cfg.ModelPath, cfg.Backend, cfg.ContextLen)
 	if err != nil {
 		return core.E("train.RunSFTCommand", "model load", err)
 	}
@@ -313,11 +319,14 @@ func loadJSONLDataset(path string) (*dataset.JSONLDataset, error) {
 }
 
 // loadTextModel loads path through the registered backend as an
-// inference.TextModel, applying a context-length override when set.
-func loadTextModel(path string, contextLen int) (inference.TextModel, error) {
+// inference.TextModel, applying context-length and backend overrides when set.
+func loadTextModel(path, backend string, contextLen int) (inference.TextModel, error) {
 	var opts []inference.LoadOption
 	if contextLen > 0 {
 		opts = append(opts, inference.WithContextLen(contextLen))
+	}
+	if backend != "" {
+		opts = append(opts, inference.WithBackend(backend))
 	}
 	result := inference.LoadModel(path, opts...)
 	if !result.OK {

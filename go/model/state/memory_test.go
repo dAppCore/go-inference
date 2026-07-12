@@ -11,6 +11,7 @@ package state
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	core "dappco.re/go"
@@ -660,4 +661,41 @@ func TestMemory_InMemoryStore_PutBytes_Ugly(t *testing.T) {
 	if _, err := zero.PutBytes(nil, []byte("second"), PutOptions{}); err != nil {
 		t.Fatalf("PutBytes(nil ctx) error = %v", err)
 	}
+}
+
+// TestMemory_InMemoryStore_Concurrent_Good proves the store is safe to share
+// across goroutines — the contract the concurrent serve path assumes when the
+// RAM store is the default conversation tier. Without the RWMutex this races
+// the backing maps (fatal "concurrent map read and map write"); run under
+// -race to see the guard hold. Mixed writers (Put/PutBytes), readers
+// (Resolve/ResolveBytes/BorrowBytes), and URI lookups run at once.
+func TestMemory_InMemoryStore_Concurrent_Good(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	ctx := context.Background()
+
+	const workers = 8
+	const opsPerWorker = 200
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < opsPerWorker; i++ {
+				uri := "mem://c/" + core.Itoa(w) + "/" + core.Itoa(i)
+				if i%2 == 0 {
+					store.Put(ctx, "text", PutOptions{URI: uri})
+				} else {
+					store.PutBytes(ctx, []byte("bytes"), PutOptions{URI: uri})
+				}
+				// Read back through every read seam concurrently with peers'
+				// writes; correctness is "no race, no panic", so ignore the
+				// not-found errors a just-issued id may still be racing.
+				_, _ = store.Resolve(ctx, 1)
+				_, _ = store.ResolveBytes(ctx, 1)
+				_, _ = store.BorrowBytes(ctx, 1)
+				_, _ = store.ResolveURI(ctx, uri)
+			}
+		}(w)
+	}
+	wg.Wait()
 }

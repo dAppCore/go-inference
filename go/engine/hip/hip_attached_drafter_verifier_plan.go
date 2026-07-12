@@ -6,6 +6,7 @@ package hip
 
 import (
 	"encoding/binary"
+	"math"
 	"strconv"
 	"strings"
 
@@ -288,11 +289,20 @@ func hipAttachedDrafterAssistantNormPlan(label string, tensor hipTensor, count i
 	if tensor.pointer == 0 {
 		return hipRMSNormDeviceWeightConfig{}, core.E("rocm.hip.AttachedDrafterAssistantVerifierPlan", label+" pointer is required", nil)
 	}
+	encoding, expectedBytes, err := hipGemma4NormWeightEncodingAndBytes(tensor.info, label, count)
+	if err != nil {
+		return hipRMSNormDeviceWeightConfig{}, core.E("rocm.hip.AttachedDrafterAssistantVerifierPlan", label+" config", err)
+	}
+	if len(tensor.info.Dimensions) != 1 ||
+		tensor.info.Dimensions[0] != uint64(count) ||
+		tensor.info.ByteSize != expectedBytes {
+		return hipRMSNormDeviceWeightConfig{}, core.E("rocm.hip.AttachedDrafterAssistantVerifierPlan", label+" tensor shape/type mismatch", nil)
+	}
 	cfg := hipRMSNormDeviceWeightConfig{
 		WeightPointer:  tensor.pointer,
 		WeightBytes:    tensor.info.ByteSize,
 		Count:          count,
-		WeightEncoding: hipRMSNormWeightEncodingBF16,
+		WeightEncoding: encoding,
 	}
 	if err := hipValidateGemma4Q4NormConfig(label, cfg, count); err != nil {
 		return hipRMSNormDeviceWeightConfig{}, core.E("rocm.hip.AttachedDrafterAssistantVerifierPlan", label+" config", err)
@@ -399,7 +409,8 @@ func hipAttachedDrafterAssistantLayerPlanFor(draft *hipLoadedModel, layer hipAtt
 	if plan.DownProjection, err = hipAttachedDrafterAssistantProjectionPlanFor("mlp.down_proj", layer.DownProjection, groupSize, bits); err != nil {
 		return plan, err
 	}
-	if err := hipAttachedDrafterAssistantFillLayerGeometry(draft, &plan); err != nil {
+	queryNormCount := hipAttachedDrafterAssistantNormTensorCount(layer.QueryNorm)
+	if err := hipAttachedDrafterAssistantFillLayerGeometry(draft, &plan, queryNormCount); err != nil {
 		return plan, err
 	}
 	if plan.QueryNorm, err = hipAttachedDrafterAssistantNormPlan("q_norm", layer.QueryNorm, plan.HeadDim); err != nil {
@@ -415,7 +426,7 @@ func hipAttachedDrafterAssistantLayerPlanFor(draft *hipLoadedModel, layer hipAtt
 	return plan, nil
 }
 
-func hipAttachedDrafterAssistantFillLayerGeometry(draft *hipLoadedModel, plan *hipAttachedDrafterAssistantVerifierLayerPlan) error {
+func hipAttachedDrafterAssistantFillLayerGeometry(draft *hipLoadedModel, plan *hipAttachedDrafterAssistantVerifierLayerPlan, queryNormCount int) error {
 	if plan == nil {
 		return core.E("rocm.hip.AttachedDrafterAssistantVerifierPlan", "assistant layer plan is nil", nil)
 	}
@@ -436,6 +447,9 @@ func hipAttachedDrafterAssistantFillLayerGeometry(draft *hipLoadedModel, plan *h
 			headDim = draft.gemma4TextConfig.HeadDim
 		}
 	}
+	if queryNormCount > 0 && plan.QueryProjection.Rows%queryNormCount == 0 {
+		headDim = queryNormCount
+	}
 	if headDim <= 0 || plan.QueryProjection.Rows%headDim != 0 {
 		headDim = hipAttachedDrafterAssistantInferHeadDim(plan.QueryProjection.Rows, layerType)
 	}
@@ -451,6 +465,13 @@ func hipAttachedDrafterAssistantFillLayerGeometry(draft *hipLoadedModel, plan *h
 	plan.RoPEBase, plan.RoPERotaryDim, plan.RoPEFrequencyScale = draft.loadedGemma4Q4LayerRoPE(layerType, headDim)
 	plan.SlidingWindow = draft.loadedGemma4Q4EffectiveSlidingWindow(layerType, headDim)
 	return nil
+}
+
+func hipAttachedDrafterAssistantNormTensorCount(tensor hipTensor) int {
+	if len(tensor.info.Dimensions) != 1 || tensor.info.Dimensions[0] == 0 {
+		return 0
+	}
+	return int(tensor.info.Dimensions[0])
 }
 
 func hipAttachedDrafterAssistantInferHeadDim(queryRows int, layerType string) int {
@@ -479,17 +500,22 @@ func hipAttachedDrafterAssistantLayerScalar(model *hipLoadedModel, tensor hipTen
 	if model == nil || model.driver == nil {
 		return 1, nil
 	}
-	if core.Upper(tensor.info.TypeName) != "BF16" ||
-		len(tensor.info.Dimensions) != 1 ||
-		tensor.info.Dimensions[0] != 1 ||
-		tensor.info.ByteSize != 2 {
-		return 0, core.E("rocm.hip.AttachedDrafterAssistantVerifierPlan", "assistant layer scalar tensor must be BF16 [1]", nil)
+	scalarBytes, err := hipGemma4LayerScalarBytes(tensor.info, "assistant layer scalar tensor")
+	if err != nil {
+		return 0, core.E("rocm.hip.AttachedDrafterAssistantVerifierPlan", "assistant layer scalar config", err)
 	}
-	payload := make([]byte, 2)
+	payload := make([]byte, scalarBytes)
 	if err := model.driver.CopyDeviceToHost(tensor.pointer, payload); err != nil {
 		return 0, core.E("rocm.hip.AttachedDrafterAssistantVerifierPlan", "copy assistant layer scalar", err)
 	}
-	return hipBFloat16ToFloat32(binary.LittleEndian.Uint16(payload)), nil
+	switch core.Upper(tensor.info.TypeName) {
+	case "F32":
+		return math.Float32frombits(binary.LittleEndian.Uint32(payload)), nil
+	case "BF16":
+		return hipBFloat16ToFloat32(binary.LittleEndian.Uint16(payload)), nil
+	default:
+		return 0, core.E("rocm.hip.AttachedDrafterAssistantVerifierPlan", "assistant layer scalar tensor must be F32 or BF16", nil)
+	}
 }
 
 func hipAttachedDrafterAssistantTokenOrdering(model *hipLoadedModel, tensor hipTensor, vocabSize, centroids int) ([]int32, int, error) {

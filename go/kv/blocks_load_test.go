@@ -9,6 +9,73 @@ import (
 	state "dappco.re/go/inference/model/state"
 )
 
+// TestBlocksLoad_LoadFromStateBlocks_WindowedMultiHeadByteIdentical saves then
+// wakes a grouped-query snapshot mixing a full-attention layer with a
+// sliding-window layer whose leading blocks carry no data (the global+sliding
+// 31B capture shape). The streaming assembler seeds its skeleton from block 0,
+// where the windowed layer is empty, so it seeds that layer's placement buffer
+// lazily from the block's MaxSize window clamp; without it the wake fell to the
+// O(N^2) merged rebuild. The persisted round-trip must stay byte-identical.
+func TestBlocksLoad_LoadFromStateBlocks_WindowedMultiHeadByteIdentical(t *testing.T) {
+	const seqLen, blockSize, heads, window = 6, 2, 2, 4
+	seqBytes := func(n int, base byte) []byte {
+		out := make([]byte, n)
+		for i := range out {
+			out[i] = base + byte(i)
+		}
+		return out
+	}
+	source := &Snapshot{
+		Version:       SnapshotVersion,
+		Architecture:  "gemma4_text",
+		Tokens:        []int32{1, 2, 3, 4, 5, 6},
+		TokenOffset:   seqLen,
+		NumLayers:     2,
+		NumHeads:      heads,
+		SeqLen:        seqLen,
+		HeadDim:       1,
+		NumQueryHeads: heads,
+		Layers: []LayerSnapshot{
+			{
+				Layer: 0, CacheIndex: 0,
+				KeyDType: "float16", KeyBytes: seqBytes(heads*seqLen*2, 1), KeyShape: []int32{1, heads, seqLen, 1},
+				ValueDType: "float16", ValueBytes: seqBytes(heads*seqLen*2, 101), ValueShape: []int32{1, heads, seqLen, 1},
+				Heads: make([]HeadSnapshot, heads),
+			},
+			{
+				Layer: 1, CacheIndex: 1, MaxSize: window,
+				KeyDType: "float16", KeyBytes: seqBytes(heads*window*2, 41), KeyShape: []int32{1, heads, window, 1},
+				ValueDType: "float16", ValueBytes: seqBytes(heads*window*2, 151), ValueShape: []int32{1, heads, window, 1},
+				Heads: make([]HeadSnapshot, heads),
+			},
+		},
+	}
+	store := state.NewInMemoryStore(nil)
+	bundle, err := source.SaveStateBlocks(context.Background(), store, StateBlockOptions{BlockSize: blockSize, KVEncoding: EncodingNative})
+	if err != nil {
+		t.Fatalf("SaveStateBlocks() error = %v", err)
+	}
+	if len(bundle.Blocks) != 3 {
+		t.Fatalf("blocks = %d, want 3", len(bundle.Blocks))
+	}
+	loaded, err := LoadFromStateBlocksWithOptions(context.Background(), store, bundle, LoadOptions{RawKVOnly: true})
+	if err != nil {
+		t.Fatalf("LoadFromStateBlocksWithOptions() error = %v", err)
+	}
+	for i, want := range source.Layers {
+		got := loaded.Layers[i]
+		if !equalBytes(got.KeyBytes, want.KeyBytes) {
+			t.Fatalf("layer %d KeyBytes = %v, want %v", i, got.KeyBytes, want.KeyBytes)
+		}
+		if !equalBytes(got.ValueBytes, want.ValueBytes) {
+			t.Fatalf("layer %d ValueBytes = %v, want %v", i, got.ValueBytes, want.ValueBytes)
+		}
+		if !equalInt32s(got.KeyShape, want.KeyShape) || !equalInt32s(got.ValueShape, want.ValueShape) {
+			t.Fatalf("layer %d shapes = %v/%v, want %v/%v", i, got.KeyShape, got.ValueShape, want.KeyShape, want.ValueShape)
+		}
+	}
+}
+
 // TestBlocksLoad_LoadFromStateBlocks_Good loads a full snapshot from the
 // two-block fixture bundle and asserts the token stream is recovered.
 func TestBlocksLoad_LoadFromStateBlocks_Good(t *testing.T) {

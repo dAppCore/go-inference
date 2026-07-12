@@ -629,9 +629,11 @@ func inferenceBenchmarkReportHIPKernelRouteMetrics(b *testing.B, driver *inferen
 	report(hipKernelNameAttentionHeadsBatchChunkedStage2, "kernel_attention_batch_chunked_stage2")
 	report(hipKernelNameAttentionHeadsChunkedStage1, "kernel_attention_decode_chunked_stage1")
 	report(hipKernelNameAttentionHeadsChunkedStage2, "kernel_attention_decode_chunked_stage2")
+	report(hipKernelNameKVEncodeTokenValueNorm, "kernel_rocm_kv_encode_token_value_norm")
 	report(hipKernelNameKVDescriptorAppend, "kernel_rocm_kv_descriptor_append")
 	report(hipKernelNameMLXQ4Proj, "kernel_mlx_q4_projection")
 	report(hipKernelNameMLXQ4ProjCols256, "kernel_mlx_q4_projection_cols256")
+	report(hipKernelNameMLXQ4ProjQ6G16Row16, "kernel_mlx_q4_projection_q6_g16_row16")
 	report(hipKernelNameMLXQ4ProjQ6Row16, "kernel_mlx_q4_projection_q6_row16")
 	report(hipKernelNameMLXQ4ProjQ6Row32, "kernel_mlx_q4_projection_q6_row32")
 	report(hipKernelNameMLXQ4ProjQ6Row64, "kernel_mlx_q4_projection_q6_row64")
@@ -649,6 +651,7 @@ func inferenceBenchmarkReportHIPKernelRouteMetrics(b *testing.B, driver *inferen
 	report(hipKernelNameMLXQ4TripleProjQ6Row64, "kernel_mlx_q4_triple_projection_q6_row64")
 	report(hipKernelNameMLXQ4PairProj, "kernel_mlx_q4_pair_projection")
 	report(hipKernelNameMLXQ4GELUTanhMul, "kernel_mlx_q4_gelu_tanh_multiply")
+	report(hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, "kernel_mlx_q4_gelu_tanh_multiply_q4_g32_cols1536_row16")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536_row32")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536_row64")
@@ -1171,7 +1174,7 @@ func inferenceBenchmarkHIPKernelShapeLabel(entry inferenceBenchmarkHIPKernelShap
 func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows, cols, group, batch uint32) {
 	args := config.Args
 	switch config.Name {
-	case hipKernelNameMLXQ4Proj, hipKernelNameMLXQ4ProjCols256, hipKernelNameMLXQ4ProjQ6Row16, hipKernelNameMLXQ4ProjQ6Row32, hipKernelNameMLXQ4ProjQ6Row64, hipKernelNameMLXQ4ProjGreedy, hipKernelNameMLXQ4ProjGreedyQ6Row64, hipKernelNameMLXQ4ProjScores, hipKernelNameMLXQ4ProjScoresQ6Row64:
+	case hipKernelNameMLXQ4Proj, hipKernelNameMLXQ4ProjCols256, hipKernelNameMLXQ4ProjQ6G16Row16, hipKernelNameMLXQ4ProjQ6Row16, hipKernelNameMLXQ4ProjQ6Row32, hipKernelNameMLXQ4ProjQ6Row64, hipKernelNameMLXQ4ProjGreedy, hipKernelNameMLXQ4ProjGreedyQ6Row64, hipKernelNameMLXQ4ProjScores, hipKernelNameMLXQ4ProjScoresQ6Row64:
 		return inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 52), inferenceBenchmarkU32At(args, 56), 0
 	case hipKernelNameMLXQ4ProjGreedyBatch, hipKernelNameMLXQ4ProjGreedyBatchQ6Row64:
 		return inferenceBenchmarkU32At(args, 56), inferenceBenchmarkU32At(args, 60), inferenceBenchmarkU32At(args, 68), inferenceBenchmarkU32At(args, 64)
@@ -1182,7 +1185,7 @@ func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows,
 		secondRows := inferenceBenchmarkU32At(args, 100)
 		thirdRows := inferenceBenchmarkU32At(args, 104)
 		return firstRows + secondRows + thirdRows, inferenceBenchmarkU32At(args, 108), inferenceBenchmarkU32At(args, 112), 0
-	case hipKernelNameMLXQ4GELUTanhMul, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
+	case hipKernelNameMLXQ4GELUTanhMul, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), 0
 	case hipKernelNameMLXQ4GELUTanhMulBatch:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), inferenceBenchmarkU32At(args, 120)
@@ -2302,7 +2305,13 @@ func BenchmarkInferenceGemma4Q4Generate_Ladder(b *testing.B) {
 		b.Fatal(err)
 	}
 	nativeRuntime, kernelCounter := inferenceBenchmarkNativeRuntimeAndKernelCounter()
-	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(nativeRuntime).LoadModel(modelPath, inference.WithContextLen(contextLen)))
+	rocmConfig := ROCmLoadConfig{DeviceKVMode: strings.TrimSpace(os.Getenv("GO_ROCM_BENCH_DEVICE_KV_MODE"))}
+	var model inference.TextModel
+	if rocmConfig.active() {
+		model, err = newROCmBackendWithRuntime(nativeRuntime).LoadModelWithConfig(modelPath, rocmConfig, inference.WithContextLen(contextLen))
+	} else {
+		model, err = resultValue[inference.TextModel](newROCmBackendWithRuntime(nativeRuntime).LoadModel(modelPath, inference.WithContextLen(contextLen)))
+	}
 	if err != nil {
 		b.Fatalf("LoadModel(%q): %v", modelPath, err)
 	}
@@ -4065,6 +4074,7 @@ func inferenceBenchmarkSelectedHIPKernelNames() []string {
 	return []string{
 		hipKernelNameMLXQ4Proj,
 		hipKernelNameMLXQ4ProjCols256,
+		hipKernelNameMLXQ4ProjQ6G16Row16,
 		hipKernelNameMLXQ4ProjQ6Row16,
 		hipKernelNameMLXQ4ProjQ6Row32,
 		hipKernelNameMLXQ4ProjQ6Row64,
@@ -4074,6 +4084,7 @@ func inferenceBenchmarkSelectedHIPKernelNames() []string {
 		hipKernelNameMLXQ4TripleProjQ6Row64,
 		hipKernelNameMLXQ4PairProj,
 		hipKernelNameMLXQ4GELUTanhMul,
+		hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16,
 		hipKernelNameMLXQ4GELUTanhMulQ6Cols1536,
 		hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32,
 		hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64,
@@ -4700,7 +4711,14 @@ func inferenceBenchmarkLoadGemma4Q4ModelWithKernelCounter(b *testing.B, contextL
 		b.Skip("set GO_ROCM_PRODUCTION_MODEL_PATH or GO_ROCM_MODEL_PATH to a local Gemma4 q6/q8/q4 MLX affine model pack")
 	}
 	nativeRuntime, kernelCounter := inferenceBenchmarkNativeRuntimeAndKernelCounter()
-	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(nativeRuntime).LoadModel(modelPath, inference.WithContextLen(contextLen)))
+	rocmConfig := ROCmLoadConfig{DeviceKVMode: strings.TrimSpace(os.Getenv("GO_ROCM_BENCH_DEVICE_KV_MODE"))}
+	var model inference.TextModel
+	var err error
+	if rocmConfig.active() {
+		model, err = newROCmBackendWithRuntime(nativeRuntime).LoadModelWithConfig(modelPath, rocmConfig, inference.WithContextLen(contextLen))
+	} else {
+		model, err = resultValue[inference.TextModel](newROCmBackendWithRuntime(nativeRuntime).LoadModel(modelPath, inference.WithContextLen(contextLen)))
+	}
 	if err != nil {
 		b.Fatalf("LoadModel(%q): %v", modelPath, err)
 	}

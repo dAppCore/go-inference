@@ -244,6 +244,33 @@ var flashQ8Enabled = os.Getenv("LTHN_FLASH_Q8") == "1"
 // tests A/B the q8-reading flash against it on fresh sessions.
 var flashQ8OffForTest bool
 
+// q8StageEnabled routes a q8 owner's per-chunk prefix dequant into the shared
+// ping-pong staging pair instead of per-layer full-cacheRows mirror planes —
+// the once-per-chunk staging shape the FALSIFIED note above anticipated
+// (#375): same dequant kernel, same flash/GEMM consumers, one transient plane
+// pair per parity instead of one persistent plane per global owner (the
+// 31B@256K ~19GB ingest-peak cut). Default ON; LTHN_Q8_STAGE=0 restores the
+// mirror planes.
+var q8StageEnabled = os.Getenv("LTHN_Q8_STAGE") != "0"
+
+// q8StageOffForTest pins the legacy mirror-plane lane in-process — the
+// byte-identity A/B (TestQ8StagePromptMatchesMirrorLane) flips it.
+var q8StageOffForTest bool
+
+// prefillSkipSharedEnabled skips the trailing KV-shared (non-cache-owning)
+// layers on NON-FINAL prefill chunks: those layers land no cache rows and
+// their outputs feed only the chunk's unread boundary hidden, so the work is
+// dead — later positions reach the prompt through the OWNER layers' KV. This
+// is the mechanism behind mlx-lm's prefill lead (#381: its lazy DCE prunes
+// the same 20-of-35 gemma4 layers per chunk). Token-identical by
+// construction; the final chunk and every decode pass run the full stack.
+// Default ON; LTHN_PREFILL_SKIP_SHARED=0 restores full-stack chunks.
+var prefillSkipSharedEnabled = os.Getenv("LTHN_PREFILL_SKIP_SHARED") != "0"
+
+// prefillSkipSharedOffForTest pins the full-stack chunk lane in-process — the
+// byte-identity A/B (TestArchSessionPrefillChunksSkipSharedSuffix) flips it.
+var prefillSkipSharedOffForTest bool
+
 type flashQ8Key struct {
 	nHalves        int
 	alignQ, alignK bool
@@ -377,6 +404,18 @@ var flashWinEnabled = os.Getenv("LTHN_FLASH_WIN") != "0"
 
 // flashWinOffForTest pins the multiQ ring lane in-process for parity A/Bs.
 var flashWinOffForTest bool
+
+// flashWinMinRows keeps SMALL chunks on the multiQ ring kernel: the window
+// flash launches one threadgroup per (BQ-query tile, head) — at a 57-row
+// boundary chunk that is 16 threadgroups on an 80-core GPU, an occupancy
+// cliff the per-row-parallel ring kernel never hits. Receipted crossover
+// (e2b 8K, per-lane trace, #375): rows=57 ring 2.4ms vs flash 35.7ms (15×);
+// 484 → 17.2 vs 28.4; 1024 → 16.7 vs 17.3 (tie); 1536+ → flash wins
+// (2048: 25-27 vs 34-41). Numeric tier: the kernels share the mask rule but
+// not the accumulation order, so re-routing a chunk can fork a greedy
+// continuation at a near-tie — the same tier the win flash itself shipped
+// at, and LTHN_FLASH_WIN=0 still pins the ring lane outright for A/Bs.
+const flashWinMinRows = 1024
 
 // attnWinParams mirrors the kernel's AttnWinParams.
 type attnWinParams struct {

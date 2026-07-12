@@ -354,16 +354,25 @@ func jsonSkipValue(data []byte, i int) (int, error) {
 	case c == '"':
 		return jsonSkipString(data, i)
 	case c == '{' || c == '[':
-		open := c
-		var closeByte byte
-		if open == '{' {
-			closeByte = '}'
+		// LIFO stack of expected closers: each opener pushes the byte
+		// that must close it, and every closer must equal the top of
+		// the stack. A single object/array-depth pair cannot express
+		// heterogeneous nesting — {"a":[1]} or [{}] — because it only
+		// knows the outermost bracket type, so it both false-mismatches
+		// valid mixed shapes and false-accepts a mixed close ([{]] or
+		// {[}}) whose closers happen to equal the outer close byte.
+		// The stack lives in a fixed local array so shallow metadata
+		// (the recordMeta shape is one or two levels) never heap-
+		// allocates; deeper nesting spills to append's heap growth.
+		var closers [16]byte
+		stack := closers[:0]
+		if c == '{' {
+			stack = append(stack, '}')
 		} else {
-			closeByte = ']'
+			stack = append(stack, ']')
 		}
-		depth := 1
 		i++
-		for i < len(data) && depth > 0 {
+		for i < len(data) && len(stack) > 0 {
 			cc := data[i]
 			switch cc {
 			case '"':
@@ -372,25 +381,23 @@ func jsonSkipValue(data []byte, i int) (int, error) {
 					return i, err
 				}
 				i = end
-			case '{', '[':
-				depth++
+			case '{':
+				stack = append(stack, '}')
+				i++
+			case '[':
+				stack = append(stack, ']')
 				i++
 			case '}', ']':
-				if cc == closeByte {
-					depth--
-					i++
-					continue
-				}
-				if (open == '{' && cc == ']') || (open == '[' && cc == '}') {
+				if cc != stack[len(stack)-1] {
 					return i, core.NewError("state file store metadata has mismatched bracket")
 				}
-				depth--
+				stack = stack[:len(stack)-1]
 				i++
 			default:
 				i++
 			}
 		}
-		if depth != 0 {
+		if len(stack) != 0 {
 			return i, core.NewError("state file store metadata is unbalanced")
 		}
 		return i, nil

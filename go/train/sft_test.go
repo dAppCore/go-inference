@@ -224,3 +224,49 @@ func TestSft_SFTResult_Metrics_Ugly(t *testing.T) {
 		t.Fatalf("LearningRate = %v, want normalised default 1e-5", m.LearningRate)
 	}
 }
+
+// --- sftSampleText ---
+// sftSampleText renders a dataset sample to its training string through a fixed
+// precedence: Messages, then Prompt+Response, then Response-only, then raw Text.
+// Each test pins one branch and (where it matters) proves it wins over the
+// lower-precedence fields set alongside it.
+
+// Messages: joined "role: content\n" turns, winning even when Prompt/Response
+// are also populated.
+func TestSft_SampleText_Messages(t *testing.T) {
+	sample := dataset.Sample{
+		Prompt:   "ignored",
+		Response: "ignored",
+		Messages: []inference.Message{
+			{Role: "user", Content: "hi"},
+			{Role: "assistant", Content: "hello"},
+		},
+	}
+	if got, want := sftSampleText(sample), "user: hi\nassistant: hello\n"; got != want {
+		t.Fatalf("sftSampleText = %q, want %q", got, want)
+	}
+}
+
+// PromptResponse: with no Messages, a Prompt+Response pair joins on a newline.
+func TestSft_SampleText_PromptResponse(t *testing.T) {
+	sample := dataset.Sample{Prompt: "2+2?", Response: "4"}
+	if got, want := sftSampleText(sample), "2+2?\n4"; got != want {
+		t.Fatalf("sftSampleText = %q, want %q", got, want)
+	}
+}
+
+// ResponseOnly: a Response with no Prompt renders as the response verbatim.
+func TestSft_SampleText_ResponseOnly(t *testing.T) {
+	sample := dataset.Sample{Response: "just the answer"}
+	if got, want := sftSampleText(sample), "just the answer"; got != want {
+		t.Fatalf("sftSampleText = %q, want %q", got, want)
+	}
+}
+
+// RawText: with no Messages/Prompt/Response, the raw Text field is the fallback.
+func TestSft_SampleText_RawText(t *testing.T) {
+	sample := dataset.Sample{Text: "raw corpus line"}
+	if got, want := sftSampleText(sample), "raw corpus line"; got != want {
+		t.Fatalf("sftSampleText = %q, want %q", got, want)
+	}
+}

@@ -3,6 +3,7 @@
 package generate
 
 import (
+	"context"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -207,6 +208,143 @@ func TestResolvedDraftBlock_FlagWins_Good(t *testing.T) {
 func TestResolvedDraftBlock_DefaultWhenZero_Bad(t *testing.T) {
 	if got := resolvedDraftBlock(0); got != serving.MTPDefaultDraftBlock {
 		t.Fatalf("resolvedDraftBlock(0) = %d, want %d", got, serving.MTPDefaultDraftBlock)
+	}
+}
+
+// stubModelPath is any non-empty path — the -state multimodal guards reject
+// before RunGenerate reaches a model load, so this path is never opened.
+const stubModelPath = "/nonexistent/model/dir"
+
+// TestRunGenerate_StateImageRejected_Bad proves an image turn combined with
+// -state is rejected before any load — the durable session prefills text only.
+// It also drives the -native notice and the -context-len load-option threading
+// on the way in (both run before the guard fires), so the pure entry path is
+// covered without touching a GPU.
+func TestRunGenerate_StateImageRejected_Bad(t *testing.T) {
+	log := core.NewBuffer()
+	err := RunGenerate(context.Background(), Config{
+		StateName:    "s",
+		ModelPath:    stubModelPath,
+		ImageSources: []string{"data:image/png;base64,AAAA"},
+		Native:       true,
+		ContextLen:   2048,
+		Out:          core.NewBuffer(),
+		Log:          log,
+	})
+	if err == nil {
+		t.Fatal("image input with -state: want rejection, got nil")
+	}
+	if !core.Contains(err.Error(), "image") {
+		t.Fatalf("error %q, want it to name image input", err.Error())
+	}
+	if !core.Contains(log.String(), "native") {
+		t.Fatalf("log %q, want the -native notice", log.String())
+	}
+}
+
+// TestRunGenerate_StateAudioRejected_Bad proves an audio turn with -state is
+// rejected before any load (audio is a stateless-only input).
+func TestRunGenerate_StateAudioRejected_Bad(t *testing.T) {
+	err := RunGenerate(context.Background(), Config{
+		StateName:    "s",
+		ModelPath:    stubModelPath,
+		AudioSources: []string{"data:audio/wav;base64,AAAA"},
+	})
+	if err == nil {
+		t.Fatal("audio input with -state: want rejection, got nil")
+	}
+	if !core.Contains(err.Error(), "audio") {
+		t.Fatalf("error %q, want it to name audio input", err.Error())
+	}
+}
+
+// TestRunGenerate_StateVideoRejected_Ugly proves a video-frame turn with -state
+// is rejected before any load (video is a stateless-only input).
+func TestRunGenerate_StateVideoRejected_Ugly(t *testing.T) {
+	err := RunGenerate(context.Background(), Config{
+		StateName:         "s",
+		ModelPath:         stubModelPath,
+		VideoFrameSources: []string{"data:image/png;base64,AAAA"},
+	})
+	if err == nil {
+		t.Fatal("video input with -state: want rejection, got nil")
+	}
+	if !core.Contains(err.Error(), "video") {
+		t.Fatalf("error %q, want it to name video input", err.Error())
+	}
+}
+
+// TestLoadTextModel_MissingDir_Bad proves loadTextModel surfaces an error (and a
+// nil model) when the metal backend cannot load the path. In the portable test
+// binary the "metal" backend is unregistered, so LoadModel fails fast; the arm
+// under test is the failure-to-model handling, not the GPU load itself.
+func TestLoadTextModel_MissingDir_Bad(t *testing.T) {
+	tm, err := loadTextModel(core.PathJoin(t.TempDir(), "no-such-model"))
+	if err == nil {
+		if tm != nil {
+			tm.Close()
+		}
+		t.Fatal("loadTextModel of a missing dir: want error, got nil")
+	}
+	if tm != nil {
+		t.Fatalf("loadTextModel returned a non-nil model alongside an error: %v", tm)
+	}
+}
+
+// TestPrintNote_NilWriter_Silent_Bad proves printNote is a no-op with a nil
+// writer — RunGenerate passes a nil Log on the quiet paths, so a notice must
+// silently drop rather than panic.
+func TestPrintNote_NilWriter_Silent_Bad(t *testing.T) {
+	printNote(nil, "this should be swallowed %d", 1) // must not panic
+}
+
+// fakeMTPModel adds the optional speculative-metrics capability so
+// printMTPMetrics can be exercised without arming a real drafter.
+type fakeMTPModel struct {
+	inference.TextModel
+	metrics inference.SpeculativeMetrics
+}
+
+func (f fakeMTPModel) SpeculativeMetrics() inference.SpeculativeMetrics { return f.metrics }
+
+// Compile-time proof the fake carries the interface printMTPMetrics asserts.
+var _ inference.SpeculativeMetricsProvider = fakeMTPModel{}
+
+// TestPrintMTPMetrics_NoProvider_Bad proves a model that exposes no speculative
+// seam prints nothing — the MTP line is silent unless speculation engaged.
+func TestPrintMTPMetrics_NoProvider_Bad(t *testing.T) {
+	out := core.NewBuffer()
+	printMTPMetrics(out, fakeTextModel{})
+	if s := out.String(); s != "" {
+		t.Fatalf("non-speculative model printed %q, want silence", s)
+	}
+}
+
+// TestPrintMTPMetrics_ZeroProposed_Ugly proves a provider that reports no
+// proposed tokens (speculation never engaged) stays silent.
+func TestPrintMTPMetrics_ZeroProposed_Ugly(t *testing.T) {
+	out := core.NewBuffer()
+	printMTPMetrics(out, fakeMTPModel{})
+	if s := out.String(); s != "" {
+		t.Fatalf("zero-proposed metrics printed %q, want silence", s)
+	}
+}
+
+// TestPrintMTPMetrics_Accepted_Good proves an engaged speculative lane renders
+// the acceptance line the bench reads to judge whether the drafter earns its keep.
+func TestPrintMTPMetrics_Accepted_Good(t *testing.T) {
+	out := core.NewBuffer()
+	printMTPMetrics(out, fakeMTPModel{metrics: inference.SpeculativeMetrics{
+		ProposedTokens:    10,
+		AcceptedTokens:    7,
+		AcceptanceRate:    0.7,
+		TargetVerifyCalls: 4,
+	}})
+	s := out.String()
+	for _, want := range []string{"mtp:", "70%", "7/10", "4 verify"} {
+		if !core.Contains(s, want) {
+			t.Fatalf("mtp line %q missing %q", s, want)
+		}
 	}
 }
 

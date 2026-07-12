@@ -6,15 +6,17 @@ training and packaging verbs — and it compiles from **go-inference alone** (no
 go-mlx, no go-rocm). Each subcommand is deliberately thin: flag parsing plus one
 call into a go-inference library package. The business logic lives in the
 libraries (`serving`, `decode/generate`, `train`, `train/tune`, `model/pack`,
-`model/modelmgmt`), not in `cmd/lem`.
+`model/quant`, `model/modelmgmt`), not in `cmd/lem`.
 
 Source: `go/cmd/lem/`. Build instructions: [build.md](build.md).
 
 ## Backends registered at compile time
 
-`main.go` blank-imports two packages so their `init()` hooks register into the
+`main.go` blank-imports three packages so their `init()` hooks register into the
 inference registry before any verb runs:
 
+- `dappco.re/go/inference/engine/hip` — the ROCm backend (linux/amd64; a no-op
+  stub off-platform).
 - `dappco.re/go/inference/engine/metal` — the no-cgo Apple "metal" backend
   (darwin/arm64, dispatches Apple MLX's compiled kernels via the Objective-C
   runtime).
@@ -36,11 +38,13 @@ prints its own name in usage and notices (the dev binary is often built as
 | `tune` | Measure + persist the best MTP draft block as a serve profile | `train/tune.RunTune` |
 | `pack` | Build/inspect/list/extract/hash `.model` containers (no weights loaded) | `model/pack` |
 | `ebook` | Render a model directory as a valid EPUB3 (weights as base64 plates) | `model/modelmgmt.BuildModelBook` |
+| `quant` | Quantise a dense model directory (MLX affine, or `-gguf`) into a loadable model directory | `model/quant/mlxaffine`, `model/gguf` |
+| `spec` | Export the OpenAPI 3.1 document for lem's HTTP surface (feeds SDK generation) | `serving` (Describable route groups) |
 
 Run `lem <verb> -h` for the command-specific flag dump. Boot notices and errors
 go to stderr; generation output goes to stdout.
 
-Default runtime paths live under `~/Lethean/data/` (admin token, tuning
+Default runtime paths live under `~/Lethean/lem/` (admin token, tuning
 profiles, conversation state) — see each verb below.
 
 ---
@@ -72,7 +76,7 @@ collides. Point any OpenAI or Ollama client at `http://localhost:36911`.
 
 The `/v1/admin/*` subtree (machine identity, serve status, hot-swap reload) sits
 behind a Bearer wall. The admin token is stored mode `0600` at
-`~/Lethean/data/admin.token`. Serve is **fail-closed**: if the token file cannot
+`~/Lethean/lem/admin.token`. Serve is **fail-closed**: if the token file cannot
 be written it refuses to boot rather than binding a listener with an unprotected
 admin surface. `POST /v1/admin/serve/reload` hot-swaps the loaded model (and
 re-runs the reactive drafter ladder over the new target).
@@ -84,14 +88,16 @@ re-runs the reactive drafter ladder over the new target).
 | `--addr` | `:36911` | listen address (Lethean's own port) |
 | `--model` | `""` | model to load; empty starts the driver model-less (load later via admin reload) |
 | `--context` | `0` | override context length; 0 uses the model default |
-| `--kv-cache` | `""` | KV cache mode: `paged`, `fp16`, `q8`, `kq8vq4`, `turboquant`; empty loads the model default |
+| `--kv-cache` | `""` | KV cache mode override; the no-cgo metal engine runs only its built-in `native` cache — any other mode name is noted and ignored |
 | `--draft` | `auto` | MTP drafter: `auto` detects one beside a Gemma 4 target, a path forces it, `""` disables |
 | `--draft-detect` | `true` | reactive drafter detection for Gemma 4 targets |
 | `--draft-block` | `0` | MTP draft block; 0 = engine default (5), a tuned profile overrides when present |
 | `--no-auto-profile` | `false` | ignore tuned profiles from `lem tune` |
-| `--profile-dir` | `""` | tuned-profile directory (default `~/Lethean/data/tuning`) |
+| `--profile-dir` | `""` | tuned-profile directory (default `~/Lethean/lem/tuning`) |
 | `--state-conversations` | `true` | conversation continuity: wake each chat from its slept state, append only the new turn, no prompt replay |
-| `--state-store` | `""` | conversation state store file (default `~/Lethean/data/state/conversations.kv`) |
+| `--state-store` | `""` | conversation state store file (default `~/Lethean/lem/state/conversations.kv`) |
+| `--welfare` | `true` | welfare guard: per-turn hostility detect + engine-model mediation on every chat route; Lemma checkpoints additionally carry `lem_end` (disable with `-welfare=false`) |
+| `--policy` | `""` | outbound policy file (JSON): deployment-owned redact/refuse rules on model output; unset disables the layer, a load failure is fatal at boot |
 | `--native` | `false` | serve via the no-cgo native token-loop contract (the default metal engine already is native) |
 | `--read-timeout` | `30s` | HTTP read-header timeout |
 | `--write-timeout` | `5m` | HTTP write timeout (covers a full streaming response) |
@@ -129,22 +135,24 @@ lem generate -state chat1 -prompt "Hello, who are you?" ~/models/gemma-4-e2b-it-
 | Flag | Default | Meaning |
 |------|---------|---------|
 | `-prompt` | (a Go linked-list prompt) | user prompt |
+| `-prompt-file` | `""` | read the user prompt from a file (long-context runs exceed argv limits); overrides `-prompt` |
 | `-max-tokens` | `128` | tokens to generate |
 | `-temp` | `1.0` | sampling temperature (0 = greedy/argmax — fastest, fair vs `llama-bench`) |
 | `-think` | `false` | enable the thinking channel (off keeps the decode rate clean) |
 | `-context` | `0` | context length override (0 = model default) |
-| `-kv-cache` | `""` | KV cache mode (`paged`, `fp16`, `q8`, `kq8vq4`, `turboquant`; empty = load default) |
-| `-kv-storage` | `""` | retained KV storage dtype (`fp16`, `bf16`; empty = native fp32) |
+| `-kv-cache` | `""` | KV cache mode override; the metal engine runs only its built-in `native` cache — other mode names are noted and ignored |
+| `-kv-storage` | `""` | KV snapshot encoding for `-state` sleeps (`native`, `q8`, `float32`; empty = native) — inert without `-state` |
 | `-draft` | `auto` | MTP drafter (as for `serve`) |
 | `-draft-block` | `0` | MTP draft block; 0 = engine default (5) |
 | `-pipeline` | `true` | one-ahead pipelined decode (false forces the serial loop, for A/B traces) |
 | `-native` | `false` | generate via the no-cgo native token-loop contract |
 | `-trace` | `false` | print the per-token decode time budget — GPU wait vs host-serial work |
 | `-state` | `""` | conversation state name: wake it from the store, generate, sleep it back — the no-prompt-replay turn loop |
-| `-state-store` | `""` | state store file (default `~/Lethean/data/state/agent.kv`) |
+| `-state-store` | `""` | state store file (default `~/Lethean/lem/state/agent.kv`) |
 | `-raw` | `false` | with `-state`: skip chat-framing and run the raw completion-loop turn (ignored without `-state`) |
 | `-image` | (repeatable) | image input for a vision model: a local PNG/JPEG path or a base64 `data:` URL; gated on the model's vision capability |
-| `-audio` | (repeatable) | reserved — no engine-neutral audio-input seam yet, so passing one errors (follow-up) |
+| `-audio` | (repeatable) | audio input for an audio model: a local WAV path (16-bit PCM mono 16 kHz) or a base64 `data:` URL — gated on the model's audio capability |
+| `-video-frame` | (repeatable) | one sampled video frame in time order: a local PNG/JPEG path or a base64 `data:` URL — frames become timestamped vision blocks 1s apart |
 
 ---
 
@@ -159,7 +167,7 @@ refines the trace into an SFT artifact; a separate `sft` run trains on it.
 
 ```
 lem ssd --model ~/models/gemma-4-E2B-it-bf16 --data prompts.jsonl \
-        --checkpoint-dir ~/Lethean/data/ssd/run1
+        --checkpoint-dir ~/Lethean/lem/ssd/run1
 ```
 
 `--data` is a prompt JSONL — `{"messages":[…]}` or `{"prompt":…}` per line; only
@@ -174,14 +182,14 @@ captured rows (#97).
 | `-model` | (required) | frozen base model path to self-distil |
 | `-data` | (required) | prompt JSONL (only prompts are read) |
 | `-kernel` | `""` | file holding the LEK-2 kernel prefix (rides as KV state, never captured) |
-| `-sample-max-tokens` | `256` | tokens per self-generated sample |
+| `-sample-max-tokens` | `2048` | tokens per self-generated sample (gemma4 thinks first — small budgets truncate mid-thought into empty samples) |
 | `-sample-temp` | `0.7` | sampling temperature (must be ≠ 1.0 — diversity is the point) |
 | `-sample-top-k` | `64` | sampling top-k |
 | `-sample-top-p` | `0.95` | sampling top-p |
 | `-sample-min-p` | `0` | sampling min-p |
 | `-rep-penalty` | `1.0` | repetition penalty over self-samples |
 | `-filter-shortest` | `10` | drop the shortest N% of self-samples before the trace (0 keeps all) |
-| `-score-samples` | `false` | score every self-sample at birth — needs a scorer wired into go-inference (none yet, so this is an honest no-op) |
+| `-score-samples` | `false` | score every self-sample at birth with the LEK scorer — writes birth-scores alongside the captured trace |
 | `-checkpoint-dir` | `""` | output dir for the scored trace (`ssd-captures.jsonl`) |
 | `-context` | `0` | model context override; 0 uses the model default |
 
@@ -199,7 +207,7 @@ adapter at load with `serve`/`generate --adapter`.
 ```
 lem sft --model ~/models/gemma-4-E2B-it-bf16 \
     --data train.jsonl --valid valid.jsonl \
-    --rank 16 --epochs 2 --checkpoint-dir ~/Lethean/data/sft/run1
+    --rank 16 --epochs 2 --checkpoint-dir ~/Lethean/lem/sft/run1
 ```
 
 ### Flags
@@ -214,7 +222,7 @@ lem sft --model ~/models/gemma-4-E2B-it-bf16 \
 | `-eval-max-tokens` | `200` | tokens per eval generation |
 | `-eval-probes` | `4` | probes derived from `-valid` when `-eval-prompts` is absent |
 | `-eval-temp` | `0` | eval sampling temperature (0 = greedy) |
-| `-score-cascade` | `false` | score every eval pass — needs a scorer wired in (none yet; notes honestly and captures only) |
+| `-score-cascade` | `false` | score every eval pass with the LEK scorer and pick the best checkpoint by windowed composite |
 | `-score-window` | `3` | eval passes per windowed composite |
 | `-rank` | `16` | LoRA rank |
 | `-alpha` | `32` | LoRA alpha |
@@ -258,7 +266,7 @@ seam lands). It reports this honestly rather than faking a measurement.
 | `-max-tokens` | `256` | tokens per measurement run |
 | `-prompt` | (a Go linked-list prompt) | measurement prompt |
 | `-workload` | `chat` | workload the profile is scored + persisted under |
-| `-profile-dir` | `""` | tuned-profile directory (default `~/Lethean/data/tuning`) |
+| `-profile-dir` | `""` | tuned-profile directory (default `~/Lethean/lem/tuning`) |
 | `-json` | `false` | emit JSONL tuning events instead of the text summary |
 
 ---
@@ -322,3 +330,33 @@ lem ebook --model <dir> --weights=false     # the readable manifesto, no plates
 
 On success it reports the output path, chapter count (and how many are in the
 table of contents), and the EPUB size in bytes.
+
+---
+
+## `quant` — quantise a dense model directory
+
+Quantises a dense (bf16/f32) safetensors model directory into a **quantised model
+directory** the engine loads natively. Two lanes, selected by `-gguf`. Pure file
+I/O over the model quantisers — no engine is loaded. The single `<src-model-dir>`
+positional may sit before or after the flags.
+
+```
+lem quant ~/models/gemma-4-12B-it-bf16                 # -> …-4bit (MLX affine, default)
+lem quant ~/models/gemma-4-12B-it-bf16 -bits 8 -group-size 32
+lem quant ~/models/gemma-4-12B-it-bf16 -gguf q4_k_m    # -> …-gguf-q4_k_m (GGUF lane)
+```
+
+- **Default — MLX group-affine** (`model/quant/mlxaffine`): the packed-uint32 +
+  bf16 scales/biases format the engine loads natively, byte-for-byte what
+  `mlx_lm.convert` produces.
+- **`-gguf <FORMAT>` — the GGUF whole-model pipeline** (`model/gguf`): `q4_k_m`,
+  `q8_0`, `q5_k`, `q6_k`, …
+
+### Flags
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `-bits` | `4` | affine quantisation bit-width (2, 4, or 8) — MLX lane |
+| `-group-size` | `64` | affine quantisation group size — MLX lane |
+| `-o` | `""` | output model directory (default `<src>-<bits>bit`, or `<src>-gguf-<format>`) |
+| `-gguf` | `""` | run the GGUF lane in this format (`q4_k_m`, `q8_0`, `q5_k`, `q6_k`, …) instead of MLX affine |

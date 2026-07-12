@@ -24,8 +24,25 @@ type Tokenizer struct {
 	invVocab     map[int32]string
 	merges       []mergePair
 	mergeRanks   map[mergeKey]int
+	// special holds the special:true added tokens ONLY — the decode-side skip set
+	// (Decode/DecodeToken silence these). added holds EVERY added token: the
+	// encode-side atomic matcher, because HF matches all added tokens as single
+	// ids regardless of the special flag (qwen's <think>/</think> are
+	// special:false yet atomic — BPE-splitting them corrupts the reasoning
+	// channel the model was trained on).
 	special      map[string]int32
+	added        map[string]int32
 	specialOrder []string
+
+	// specialLeads holds the distinct first bytes of every specialOrder token
+	// (all of Gemma/Qwen's specials begin '<', so this is usually one byte).
+	// nextSpecialBoundary uses it to IndexAny-jump between candidate start
+	// positions instead of scanning the whole remaining text once per special
+	// — the boundary scan was O(specials × text), quadratic under a marker-
+	// dense stream. Derived once from specialOrder (immutable post-construct)
+	// so hand-built tokenizers (tests) and LoadTokenizer share the same path.
+	specialLeadsOnce sync.Once
+	specialLeads     string
 
 	bosToken int32
 	eosToken int32
@@ -39,9 +56,14 @@ type Tokenizer struct {
 	gpt2Decoder map[rune]byte // Unicode char → original byte
 	gpt2Encoder map[byte]rune // original byte → Unicode char
 
-	bpeCacheMu    sync.RWMutex
-	bpeCache      map[string][]int32
+	bpeCacheMu sync.RWMutex
+	bpeCache   map[string][]int32
+	// bpeCacheOrder is a FIFO eviction ring: it grows by append until it holds
+	// tokenizerBPECacheLimit keys, then bpeCacheHead marks the oldest slot,
+	// overwritten in place on eviction. bpeCacheHead is meaningful only once the
+	// ring is full.
 	bpeCacheOrder []string
+	bpeCacheHead  int
 }
 
 type mergePair struct {
@@ -54,8 +76,17 @@ type mergeKey struct {
 	b string
 }
 
+// bpeNode tracks one live symbol as a byte window [start,end) into the segment
+// text rather than an owned string. Merging two adjacent symbols is then a pure
+// window-extend (left.end = right.end) — the merged token is text[left.start:
+// right.end], a zero-copy substring view — instead of `left.token += right.token`
+// allocating a fresh growing string on every merge. Byte-identical because the
+// split symbols are contiguous, non-overlapping substrings of text and merges
+// only ever join a node with its immediate successor, so every window stays a
+// real contiguous slice of the original segment.
 type bpeNode struct {
-	token   string
+	start   int
+	end     int
 	prev    int
 	next    int
 	alive   bool
@@ -205,6 +236,7 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 		vocab:          make(map[string]int32),
 		invVocab:       make(map[int32]string),
 		special:        make(map[string]int32),
+		added:          make(map[string]int32),
 		addPrefixSpace: true,
 	}
 
@@ -260,11 +292,12 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 		if added.Special {
 			tokenizer.special[added.Content] = added.ID
 		}
+		tokenizer.added[added.Content] = added.ID
 		tokenizer.vocab[added.Content] = added.ID
 		tokenizer.invVocab[added.ID] = added.Content
 	}
-	tokenizer.specialOrder = make([]string, 0, len(tokenizer.special))
-	for tokenText := range tokenizer.special {
+	tokenizer.specialOrder = make([]string, 0, len(tokenizer.added))
+	for tokenText := range tokenizer.added {
 		tokenizer.specialOrder = append(tokenizer.specialOrder, tokenText)
 	}
 	slices.SortFunc(tokenizer.specialOrder, func(a, b string) int {
@@ -312,11 +345,11 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 		tokenizer.eosToken = id
 		tokenizer.hasEOS = true
 	}
-	// Qwen3 BOS: <|im_start|>
-	if id, ok := tokenizer.special["<|im_start|>"]; ok {
-		tokenizer.bosToken = id
-		tokenizer.hasBOS = true
-	}
+	// NB: <|im_start|> is deliberately NOT a BOS. The ChatML dialect supplies
+	// every <|im_start|> through the template and HF never auto-prepends one
+	// (add_bos_token is false for the qwen family) — the old mapping injected a
+	// ghost <|im_start|> at the head of every encode that didn't already start
+	// with it, corrupting woken-conversation continuations.
 	// Llama 3: <|eot_id|> is the turn-end token
 	if id, ok := tokenizer.special["<|eot_id|>"]; ok {
 		tokenizer.eosToken = id
@@ -337,22 +370,95 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 }
 
 func (t *Tokenizer) matchSpecialToken(input string) (string, int32, bool) {
+	// A special can only be a prefix of input when input's first byte is one of
+	// the specials' lead bytes. That single membership test rejects the common
+	// "no special here" case (the first token of every clean segment) in O(1)
+	// instead of walking HasPrefix over every special — the walk is O(specials)
+	// and fires once per Encode segment. Specials are non-empty (LoadTokenizer
+	// builds them from added-token content), so a real prefix always shares
+	// input's first byte with input.
+	if input == "" || !t.isSpecialLead(input[0]) {
+		return "", 0, false
+	}
 	for _, tok := range t.specialOrder {
 		if core.HasPrefix(input, tok) {
+			// added is the full atomic-match set; hand-built tokenizers (tests)
+			// that populate only special still resolve through the fallback.
+			if id, ok := t.added[tok]; ok {
+				return tok, id, true
+			}
 			return tok, t.special[tok], true
 		}
 	}
 	return "", 0, false
 }
 
-func (t *Tokenizer) nextSpecialBoundary(input string) int {
-	end := len(input)
-	for _, tok := range t.specialOrder {
-		if idx := IndexIn(input, tok); idx > 0 && idx < end {
-			end = idx
+// isSpecialLead reports whether b is the first byte of any special token. The
+// lead set is tiny (usually the single byte '<'), so a linear scan is a couple
+// of compares — cheaper than a map lookup and allocation-free.
+func (t *Tokenizer) isSpecialLead(b byte) bool {
+	leads := t.specialLeadBytes()
+	for i := 0; i < len(leads); i++ {
+		if leads[i] == b {
+			return true
 		}
 	}
-	return end
+	return false
+}
+
+// specialLeadBytes returns the distinct first bytes of every special token, as
+// a string suitable for core.IndexAny. Computed once from specialOrder, which
+// is immutable after construction. An empty result means no special can start
+// anywhere (either no specials, or — impossible in practice — an empty-string
+// special), so the boundary scan short-circuits to len(input).
+func (t *Tokenizer) specialLeadBytes() string {
+	t.specialLeadsOnce.Do(func() {
+		var seen [256]bool
+		leads := make([]byte, 0, 4)
+		for _, tok := range t.specialOrder {
+			if tok == "" {
+				continue
+			}
+			b := tok[0]
+			if !seen[b] {
+				seen[b] = true
+				leads = append(leads, b)
+			}
+		}
+		t.specialLeads = string(leads)
+	})
+	return t.specialLeads
+}
+
+// nextSpecialBoundary returns the smallest index > 0 at which any special token
+// starts in input, or len(input) if none does. Its contract is that input has
+// no special token at position 0 (matchSpecialToken already ran and missed), so
+// "smallest start > 0" equals the naive "min over specials of first occurrence".
+//
+// A special can only begin at one of its lead bytes, so IndexAny hops directly
+// from one candidate position to the next and only pays the per-special prefix
+// check where a lead byte actually lands. That replaces the previous shape —
+// one full IndexIn scan of the whole remaining text for every special, i.e.
+// O(specials × text) per call and O(specials × segments²) across the Encode
+// loop of a marker-dense stream — with O(text + candidates × specials).
+func (t *Tokenizer) nextSpecialBoundary(input string) int {
+	leads := t.specialLeadBytes()
+	if leads == "" {
+		return len(input)
+	}
+	// Position 0 is known clear (matchSpecialToken missed), so scan from 1.
+	for i := 1; i < len(input); {
+		rel := core.IndexAny(input[i:], leads)
+		if rel < 0 {
+			return len(input)
+		}
+		pos := i + rel
+		if _, _, ok := t.matchSpecialToken(input[pos:]); ok {
+			return pos
+		}
+		i = pos + 1
+	}
+	return len(input)
 }
 
 func (t *Tokenizer) normalizeSentencePieceSegment(segment string) string {
@@ -447,8 +553,11 @@ func buildGPT2ByteMaps() (decoder map[rune]byte, encoder map[byte]rune) {
 // forced the closure (and its captured slice headers / map) to escape
 // to heap on every bpeMerge call. The free-function version takes the
 // state explicitly + uses pushDirect to bypass container/heap's `any`
-// interface boxing — one alloc per push eliminated.
-func bpeMergePushPair(nodes []bpeNode, candidates *bpeCandidateHeap, ranks map[mergeKey]int, left int) {
+// interface boxing — one alloc per push eliminated. text is the segment the
+// node windows index into; the pair's merge key is the two adjacent windows'
+// substring views, allocation-free (the map lookup hashes the bytes, not the
+// header).
+func bpeMergePushPair(text string, nodes []bpeNode, candidates *bpeCandidateHeap, ranks map[mergeKey]int, left int) {
 	if left < 0 || left >= len(nodes) || !nodes[left].alive {
 		return
 	}
@@ -456,7 +565,7 @@ func bpeMergePushPair(nodes []bpeNode, candidates *bpeCandidateHeap, ranks map[m
 	if right < 0 || right >= len(nodes) || !nodes[right].alive {
 		return
 	}
-	rank, ok := ranks[mergeKey{a: nodes[left].token, b: nodes[right].token}]
+	rank, ok := ranks[mergeKey{a: text[nodes[left].start:nodes[left].end], b: text[nodes[right].start:nodes[right].end]}]
 	if !ok {
 		return
 	}
@@ -471,25 +580,33 @@ func bpeMergePushPair(nodes []bpeNode, candidates *bpeCandidateHeap, ranks map[m
 
 // bpeMerge applies BPE merges to a sequence of symbols until no more merges apply.
 // Uses the standard algorithm: repeatedly find the lowest-rank adjacent pair and merge it.
-func (t *Tokenizer) bpeMerge(symbols []string) []string {
+// text is the segment the symbols were split from (symbols == the in-order rune
+// pieces of text); each node tracks a byte window into it, so a merge extends a
+// window instead of concatenating strings — the previous shape's
+// `left.token += right.token` allocated a fresh growing string on every merge
+// (the single biggest allocator on the cache-miss encode path).
+func (t *Tokenizer) bpeMerge(text string, symbols []string) []string {
 	if len(symbols) <= 1 || len(t.mergeRanks) == 0 {
 		return symbols
 	}
 
 	nodes := make([]bpeNode, len(symbols))
+	offset := 0
 	for i, sym := range symbols {
 		nodes[i] = bpeNode{
-			token: sym,
+			start: offset,
+			end:   offset + len(sym),
 			prev:  i - 1,
 			next:  i + 1,
 			alive: true,
 		}
+		offset += len(sym)
 	}
 	nodes[len(nodes)-1].next = -1
 
 	candidates := make(bpeCandidateHeap, 0, len(nodes)-1)
 	for i := 0; i < len(nodes)-1; i++ {
-		bpeMergePushPair(nodes, &candidates, t.mergeRanks, i)
+		bpeMergePushPair(text, nodes, &candidates, t.mergeRanks, i)
 	}
 	// pushDirect maintains heap invariant on each insert — no separate
 	// heap.Init pass needed.
@@ -506,11 +623,16 @@ func (t *Tokenizer) bpeMerge(symbols []string) []string {
 		if nodes[left].version != candidate.leftVersion || nodes[right].version != candidate.rightVersion {
 			continue
 		}
-		if rank, ok := t.mergeRanks[mergeKey{a: nodes[left].token, b: nodes[right].token}]; !ok || rank != candidate.rank {
+		if rank, ok := t.mergeRanks[mergeKey{a: text[nodes[left].start:nodes[left].end], b: text[nodes[right].start:nodes[right].end]}]; !ok || rank != candidate.rank {
 			continue
 		}
 
-		nodes[left].token += nodes[right].token
+		// Window-extend: left now spans to right's end. The merged token is
+		// text[left.start:left.end] — a substring view, no allocation. Valid
+		// because right is left's immediate successor, so the two windows are
+		// contiguous ([left.start,left.end) then [right.start,right.end) with
+		// left.end == right.start) and their union is one contiguous window.
+		nodes[left].end = nodes[right].end
 		nodes[left].next = nodes[right].next
 		nodes[left].version++
 		nodes[right].alive = false
@@ -519,19 +641,15 @@ func (t *Tokenizer) bpeMerge(symbols []string) []string {
 			nodes[next].prev = left
 		}
 
-		bpeMergePushPair(nodes, &candidates, t.mergeRanks, nodes[left].prev)
-		bpeMergePushPair(nodes, &candidates, t.mergeRanks, left)
+		bpeMergePushPair(text, nodes, &candidates, t.mergeRanks, nodes[left].prev)
+		bpeMergePushPair(text, nodes, &candidates, t.mergeRanks, left)
 	}
 
 	merged := symbols[:0]
 	for i := 0; i >= 0; i = nodes[i].next {
-		merged = append(merged, nodes[i].token)
+		merged = append(merged, text[nodes[i].start:nodes[i].end])
 	}
 	return merged
-}
-
-func tokenizerBPECacheKey(kind, segment string) string {
-	return kind + "\x00" + segment
 }
 
 func (t *Tokenizer) cachedBPETokens(key string) ([]int32, bool) {
@@ -562,14 +680,24 @@ func (t *Tokenizer) storeBPETokens(key string, tokens []int32) {
 		t.bpeCache[key] = append([]int32(nil), tokens...)
 		return
 	}
-	for len(t.bpeCacheOrder) >= tokenizerBPECacheLimit {
-		oldest := t.bpeCacheOrder[0]
-		copy(t.bpeCacheOrder, t.bpeCacheOrder[1:])
-		t.bpeCacheOrder = t.bpeCacheOrder[:len(t.bpeCacheOrder)-1]
-		delete(t.bpeCache, oldest)
+	// FIFO ring eviction: append while the ring is below the limit, otherwise
+	// overwrite the oldest slot in place and advance the head. The previous
+	// shape copy-shifted the entire order slice left by one on every eviction —
+	// an O(limit) memmove per store once the cache was full, which dominated
+	// tokenisation of long, low-repeat inputs (code, mixed scripts, document
+	// ingestion) where every distinct segment evicts. Ring eviction is O(1) and
+	// preserves the same FIFO order and limit cap.
+	if len(t.bpeCacheOrder) < tokenizerBPECacheLimit {
+		t.bpeCacheOrder = append(t.bpeCacheOrder, key)
+	} else {
+		delete(t.bpeCache, t.bpeCacheOrder[t.bpeCacheHead])
+		t.bpeCacheOrder[t.bpeCacheHead] = key
+		t.bpeCacheHead++
+		if t.bpeCacheHead >= tokenizerBPECacheLimit {
+			t.bpeCacheHead = 0
+		}
 	}
 	t.bpeCache[key] = append([]int32(nil), tokens...)
-	t.bpeCacheOrder = append(t.bpeCacheOrder, key)
 }
 
 // splitRunes appends each UTF-8 rune of s to dst as a substring of s
@@ -614,13 +742,19 @@ func (t *Tokenizer) encodeSentencePieceSegment(segment string) []int32 {
 	if spText == "" {
 		return nil
 	}
-	key := tokenizerBPECacheKey("sp", spText)
+	// Key the BPE cache by the segment text directly. isGPT2BPE is fixed for a
+	// tokenizer's whole life (set once in LoadTokenizer, never mutated), so only
+	// one of encodeSentencePieceSegment / encodeGPT2Segment ever runs on a given
+	// tokenizer — a "sp"/"gpt2" kind prefix could never disambiguate two entries,
+	// and dropping it saves the per-segment `kind + "\x00" + segment` concat
+	// allocation on every cache lookup and store.
+	key := spText
 	if cached, ok := t.cachedBPETokens(key); ok {
 		return cached
 	}
 
 	symbols := splitRunes(make([]string, 0, len(spText)), spText)
-	symbols = t.bpeMerge(symbols)
+	symbols = t.bpeMerge(spText, symbols)
 
 	tokens := make([]int32, 0, len(symbols))
 	for _, sym := range symbols {
@@ -651,13 +785,15 @@ func (t *Tokenizer) encodeGPT2Segment(segment string) []int32 {
 	if encodedText == "" {
 		return nil
 	}
-	key := tokenizerBPECacheKey("gpt2", encodedText)
+	// Key by the encoded text directly — see encodeSentencePieceSegment: only one
+	// encode kind runs per tokenizer, so no kind prefix is needed.
+	key := encodedText
 	if cached, ok := t.cachedBPETokens(key); ok {
 		return cached
 	}
 
 	symbols := splitRunes(make([]string, 0, len(encodedText)), encodedText)
-	symbols = t.bpeMerge(symbols)
+	symbols = t.bpeMerge(encodedText, symbols)
 
 	tokens := make([]int32, 0, len(symbols))
 	for _, sym := range symbols {

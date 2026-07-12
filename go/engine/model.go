@@ -47,10 +47,32 @@ type TextModel struct {
 	// capability: render the pre-closed empty thought channel on thinking-off
 	// generation cues, exactly as the checkpoint's own template does.
 	thoughtSuppressor bool
+	// chatTmpl is the resolved chat dialect the neutral render loop drives
+	// (chat_template.go): the model's DECLARED template
+	// (ChatTemplateDeclarer) when it declares one, else the gemma dialect
+	// built from the detected turn markers + thoughtSuppressor — that fallback
+	// is the byte-for-byte compatibility spine.
+	chatTmpl ChatTemplate
+
+	// modelStops is the model-derived stop set (EOS + turn-close + template +
+	// declared stops), resolved ONCE in NewTextModel because its inputs are
+	// fixed for the model's lifetime. A request carrying no caller stop tokens
+	// (the common serve case) reuses it without rebuilding per generation. nil
+	// on a bare *TextModel literal (test-only) or a model with no stops at all —
+	// stopTokens then falls back to the full rebuild (which is itself alloc-free
+	// for an empty result).
+	modelStops []int32
 
 	mu          sync.Mutex
 	lastErr     core.Result
 	lastMetrics inference.GenerateMetrics
+
+	// reuseSess is the stateless lane's resident prompt-cache session
+	// (prompt_reuse.go): one slot, guarded by reuseMu; reuseUnsupported
+	// parks the lane when the engine session lacks the capability.
+	reuseMu          sync.Mutex
+	reuseSess        PromptReuseSession
+	reuseUnsupported atomic.Bool
 
 	// chatIntercept is the serve-layer chat hook (conversation continuity,
 	// serving/continuity): Chat offers every text-only turn to it first and a
@@ -138,7 +160,36 @@ func NewTextModel(tm TokenModel, tok *tokenizer.Tokenizer, modelType string, inf
 	if d, ok := tm.(ThoughtSuppressorDeclarer); ok {
 		suppressor = d.NeedsThoughtChannelSuppressor()
 	}
-	return &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, turns: DetectTurnTokens(tok), thoughtSuppressor: suppressor, lastErr: core.Ok(nil)}
+	turns := DetectTurnTokens(tok)
+	// The chat dialect is DECLARED by the model when it can (a second
+	// architecture self-reports its own template through ChatTemplateDeclarer);
+	// otherwise it is the tokenizer-detected gemma dialect, so an undeclaring
+	// model renders exactly as before.
+	tmpl := GemmaChatTemplate(turns, suppressor)
+	if d, ok := tm.(ChatTemplateDeclarer); ok {
+		if declared, ok := d.DeclaredChatTemplate(); ok {
+			tmpl = declared
+		}
+	}
+	m := &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, turns: turns, thoughtSuppressor: suppressor, chatTmpl: tmpl, lastErr: core.Ok(nil)}
+	// The model-derived stop set never changes after construction (its inputs —
+	// tokenizer, template, StopTokenDeclarer — are all fixed now), so resolve it
+	// once here instead of rebuilding the slice and re-scanning the tokenizer on
+	// every generation. Clip to cap==len so a caller that appended to the shared
+	// result would reallocate rather than scribble on the cache.
+	m.modelStops = slices.Clip(m.buildStopTokens(inference.GenerateConfig{}))
+	return m
+}
+
+// chatTemplate is the resolved chat dialect the render/stop paths drive,
+// defaulting a zero-value TextModel (no template resolved) to the legacy gemma
+// dialect — the same fallback turnTokens() applies, so a bare *TextModel
+// literal renders and stops exactly as it always did.
+func (m *TextModel) chatTemplate() ChatTemplate {
+	if m == nil || m.chatTmpl.Open == "" {
+		return GemmaChatTemplate(TurnTokens{Open: "<start_of_turn>", Close: "<end_of_turn>"}, false)
+	}
+	return m.chatTmpl
 }
 
 // openSession opens a fresh incremental decode session as the engine [Session]
@@ -222,7 +273,7 @@ func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts
 		}
 		return m.chatMultimodal(ctx, messages, v, a, cfg)
 	}
-	return m.stream(ctx, m.encode(formatChatPrompt(m.turnTokens(), messages, cfg.EnableThinking, m.thoughtSuppressor)), cfg)
+	return m.stream(ctx, m.encode(renderChatTemplate(m.chatTemplate(), messages, cfg.EnableThinking)), cfg)
 }
 
 // FormatChatPrompt renders a fresh multi-turn prompt with the model's turn
@@ -235,7 +286,7 @@ func (m *TextModel) Chat(ctx context.Context, messages []inference.Message, opts
 // checkpoint additionally pre-closes the empty thought channel, exactly as the
 // stateless serve request would).
 func (m *TextModel) FormatChatPrompt(messages []inference.Message) string {
-	return formatChatPrompt(m.turnTokens(), messages, nil, m.thoughtSuppressor)
+	return renderChatTemplate(m.chatTemplate(), messages, nil)
 }
 
 // FormatChatContinuation renders a woken-session turn with no replay of the
@@ -247,8 +298,19 @@ func (m *TextModel) FormatChatPrompt(messages []inference.Message) string {
 // model resumes on a well-formed turn boundary rather than the raw prompt
 // bleeding into its own open turn.
 func (m *TextModel) FormatChatContinuation(messages []inference.Message) string {
-	turns := m.turnTokens()
-	return turns.Close + "\n" + formatChatTurns(turns, messages)
+	t := m.chatTemplate()
+	// The turn-close + \n and the plain turns go into ONE pre-sized builder —
+	// byte-identical to t.Close + "\n" + renderChatTurns(t, messages) but a
+	// single allocation, where the concat re-copied the whole rendered body into
+	// a second heap string. renderChatTurns zeroes SystemAsLeadingTurn/Thinking,
+	// neither of which writePlainTurns reads, so passing t directly is the same
+	// framing.
+	var out strings.Builder
+	out.Grow(len(t.Close) + 1 + plainTurnsSize(t, messages))
+	out.WriteString(t.Close)
+	out.WriteString("\n")
+	writePlainTurns(&out, t, messages)
+	return out.String()
 }
 
 // FormatChatPromptWithThinking is FormatChatPrompt honouring a request's
@@ -257,7 +319,7 @@ func (m *TextModel) FormatChatContinuation(messages []inference.Message) string 
 // checkpoint pre-closes the empty thought channel when it is off). The
 // conversation-continuity layer frames fresh conversations with it.
 func (m *TextModel) FormatChatPromptWithThinking(messages []inference.Message, enableThinking *bool) string {
-	return formatChatPrompt(m.turnTokens(), messages, enableThinking, m.thoughtSuppressor)
+	return renderChatTemplate(m.chatTemplate(), messages, enableThinking)
 }
 
 // FormatChatContinuationWithThinking is FormatChatContinuation honouring the
@@ -266,13 +328,21 @@ func (m *TextModel) FormatChatPromptWithThinking(messages []inference.Message, e
 // the pre-closed empty thought channel on EVERY thinking-off generation cue —
 // exactly as the stateless path does per request.
 func (m *TextModel) FormatChatContinuationWithThinking(messages []inference.Message, enableThinking *bool) string {
-	turns := m.turnTokens()
-	out := turns.Close + "\n" + formatChatTurns(turns, messages)
+	t := m.chatTemplate()
 	thinking := enableThinking != nil && *enableThinking
-	if turns.Open == "<|turn>" && !thinking && m.thoughtSuppressor {
-		out += "<|channel>thought\n<channel|>"
+	tail := ""
+	if !thinking && t.Thinking != nil {
+		tail = t.Thinking.OffSuffix
 	}
-	return out
+	// One pre-sized builder: close + \n + plain turns + the thinking-off suffix
+	// — byte-identical to the former render-then-concat-then-append, one alloc.
+	var out strings.Builder
+	out.Grow(len(t.Close) + 1 + plainTurnsSize(t, messages) + len(tail))
+	out.WriteString(t.Close)
+	out.WriteString("\n")
+	writePlainTurns(&out, t, messages)
+	out.WriteString(tail)
+	return out.String()
 }
 
 func (m *TextModel) encode(prompt string) []int32 {
@@ -317,6 +387,19 @@ func (m *TextModel) stream(ctx context.Context, ids []int32, cfg inference.Gener
 		if len(ids) == 0 {
 			m.setErr(core.NewError("engine.TextModel.Generate: empty prompt after tokenisation"))
 			return
+		}
+		// Resident-session prompt cache (prompt_reuse.go): the shared prefix
+		// of the last request is reused in place, only the divergent suffix
+		// is prefilled. A failed cached prefill drops the resident session
+		// and the request falls through to the fresh-session path below.
+		if rs, release, ok := m.acquireReuseSession(); ok {
+			if _, err := rs.PrefillTokensCached(ids); err == nil {
+				m.decodeFromPrefilled(ctx, rs, len(ids), cfg, start, yield)
+				release()
+				return
+			}
+			m.dropReuseSession()
+			release()
 		}
 		sess, err := m.openSession()
 		if err != nil {
@@ -595,24 +678,50 @@ func (m *TextModel) Close() core.Result {
 	if m == nil || m.tm == nil {
 		return core.Ok(nil)
 	}
+	m.closeReuseSession()
 	if err := m.tm.Close(); err != nil {
 		return core.Fail(core.E("engine.TextModel.Close", "close token model", err))
 	}
 	return core.Ok(nil)
 }
 
+// stopTokens is the per-generation stop set: the request's own stop tokens
+// followed by the model-derived defaults. The common serve case carries no
+// request stop tokens, so it returns the set resolved once at construction with
+// no per-request allocation or tokenizer re-scan; a request supplying its own
+// stop tokens takes the full rebuild.
 func (m *TextModel) stopTokens(cfg inference.GenerateConfig) []int32 {
+	if len(cfg.StopTokens) == 0 && m.modelStops != nil {
+		return m.modelStops
+	}
+	return m.buildStopTokens(cfg)
+}
+
+// buildStopTokens assembles the stop set from scratch: request stop tokens
+// first, then the tokenizer's EOS, the template turn-close id, any
+// template-implied stop strings, and a checkpoint-declared stop set — each
+// added once, order preserved. NewTextModel caches its empty-cfg result; a
+// request carrying its own stop tokens rebuilds through here.
+func (m *TextModel) buildStopTokens(cfg inference.GenerateConfig) []int32 {
 	stop := append([]int32(nil), cfg.StopTokens...)
+	tmpl := m.chatTemplate()
 	if m.tok != nil {
 		if eos := m.tok.EOS(); eos >= 0 {
 			stop = append(stop, eos)
 		}
 		// The turn-close marker ends an assistant turn on chat-tuned checkpoints
 		// (gemma4 declares <turn|> in its generation_config eos set; tuned models
-		// emit it instead of <eos>). Without it a chat reply never terminates and
-		// generation runs to the token budget.
-		if id, ok := m.tok.TokenID(m.turnTokens().Close); ok && !tokenInSet(id, stop) {
+		// emit it instead of <eos>; ChatML ends on <|im_end|>). Without it a chat
+		// reply never terminates and generation runs to the token budget.
+		if id, ok := m.tok.TokenID(tmpl.Close); ok && !tokenInSet(id, stop) {
 			stop = append(stop, id)
+		}
+		// Any further template-implied stop strings the dialect declares
+		// (resolved to ids against this model's tokenizer). Empty for gemma.
+		for _, s := range tmpl.Stops {
+			if id, ok := m.tok.TokenID(s); ok && !tokenInSet(id, stop) {
+				stop = append(stop, id)
+			}
 		}
 	}
 	// A checkpoint-declared stop set (generation_config eos_token_id) outranks
@@ -660,64 +769,30 @@ func (m *TextModel) setMetrics(promptTokens, generated int, total time.Duration,
 	m.mu.Unlock()
 }
 
-// formatChatTurns renders messages with the model's turn template (user/model
-// turns in the detected marker dialect, a trailing open model turn to
-// complete).
+// formatChatTurns renders messages as plain turns in the gemma dialect for the
+// given markers (user/model turns, a trailing open model turn to complete) —
+// the gemma-flavoured spelling of the neutral [renderChatTurns] primitive. Kept
+// as the seam the engine's own callers and tests pin the plain-turns framing on.
 func formatChatTurns(turns TurnTokens, messages []inference.Message) string {
-	var out strings.Builder
-	for _, msg := range messages {
-		out.WriteString(turns.Open + chatTurnRole(msg.Role) + "\n" + msg.Content + turns.Close + "\n")
-	}
-	out.WriteString(turns.Open + "model\n")
-	return out.String()
+	return renderChatTurns(GemmaChatTemplate(turns, false), messages)
 }
 
-// formatChatPrompt renders the full chat prompt: on the gemma4 dialect a
-// leading system turn carries the thinking marker and/or a first system
-// message, matching the checkpoint's chat_template.jinja byte-for-byte —
-//
-//	thinking only:  <|turn>system\n<|think|>\n<turn|>\n<|turn>user\n…
-//	system+think:   <|turn>system\n<|think|>\nCONTENT<turn|>\n<|turn>user\n…
-//	system only:    <|turn>system\nCONTENT<turn|>\n<|turn>user\n…
-//
-// The trained template is the thinking SWITCH: the <|think|> line in the first
-// system turn is how a request turns reasoning on. Legacy-dialect models have
-// no system-turn concept — system messages keep rendering as user turns and
-// the prompt is exactly formatChatTurns.
-//
-// ghostSuppressor is the model's [ThoughtSuppressorDeclarer] capability: with
-// thinking off, a declaring checkpoint's template ends the generation cue as
-// <|turn>model\n<|channel>thought\n<channel|> — the pre-closed empty thought
-// channel that stops a large variant ghosting one of its own.
+// formatChatPrompt renders a full gemma chat prompt for the given markers and
+// thinking flag by building the gemma [ChatTemplate] and running the neutral
+// render loop — the gemma dialect expressed as a declared template rather than
+// as engine-level hardcoding. Its output is byte-for-byte the prior gemma
+// rendering: on gemma4 a leading system turn carries the <|think|> switch and/or
+// a first system message; ghostSuppressor pre-closes the empty thought channel
+// on the thinking-off cue; the gemma3-era dialect has neither a system turn nor
+// a thinking channel. Retained so the multimodal path and the format goldens
+// drive the gemma dialect directly.
 func formatChatPrompt(turns TurnTokens, messages []inference.Message, enableThinking *bool, ghostSuppressor bool) string {
-	if turns.Open != "<|turn>" {
-		return formatChatTurns(turns, messages)
-	}
-	thinking := enableThinking != nil && *enableThinking
-	suffix := ""
-	if !thinking && ghostSuppressor {
-		suffix = "<|channel>thought\n<channel|>"
-	}
-	sysFirst := len(messages) > 0 && chatSystemRole(messages[0].Role)
-	if !thinking && !sysFirst {
-		return formatChatTurns(turns, messages) + suffix
-	}
-	var out strings.Builder
-	out.WriteString(turns.Open + "system\n")
-	if thinking {
-		out.WriteString("<|think|>\n")
-	}
-	rest := messages
-	if sysFirst {
-		out.WriteString(strings.TrimSpace(messages[0].Content))
-		rest = messages[1:]
-	}
-	out.WriteString(turns.Close + "\n")
-	return out.String() + formatChatTurns(turns, rest) + suffix
+	return renderChatTemplate(GemmaChatTemplate(turns, ghostSuppressor), messages, enableThinking)
 }
 
-// chatSystemRole reports whether role opens the leading system turn on the
-// gemma4 template (its jinja accepts both spellings).
+// chatSystemRole reports whether role opens the leading system turn (its jinja
+// accepts both spellings) — the dialect-independent "is this a system message?"
+// classification the neutral render loop keys the leading-system fold on.
 func chatSystemRole(role string) bool {
 	return role == "system" || role == "developer"
 }

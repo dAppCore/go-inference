@@ -134,17 +134,24 @@ func Encode(tensors map[string]Tensor) ([]byte, error) {
 	}
 	sort.Strings(names) // deterministic layout
 
-	type entry struct {
-		Dtype       string `json:"dtype"`
-		Shape       []int  `json:"shape"`
-		DataOffsets [2]int `json:"data_offsets"`
-	}
-	hdr := make(map[string]entry, len(names))
-	// Presize the data buffer to the exact total: append-from-nil grows by doubling and
-	// recopies the whole checkpoint several times over (13MB FLAT on the 256-tensor bench).
-	data := make([]byte, 0, totalData)
-	off := 0
+	// Emit the JSON header directly with the package's hand-rolled emitter (shared with
+	// WriteSubset's subsetHeaderEncoded) rather than building a map[string]entry and handing it
+	// to the reflection-driven core.JSONMarshal — that map-marshal was the whole per-tensor
+	// allocation story (~2 allocs/tensor: the map entry plus the encoder's per-field boxing).
+	// The bytes are identical to the old core.JSONMarshal(map[string]entry) for any valid input:
+	// keys emit in sorted-name order, fields in declaration order (dtype, shape, data_offsets),
+	// integers base-10, dtype verbatim (validation already pinned it to a dtypeBytes key). Offsets
+	// are laid out sequentially in name order, so the data copy re-derives them without a map.
+	// TestEncodeHeaderGolden pins the exact header bytes.
+	estBytes := 2 // {} braces
 	for _, n := range names {
+		t := tensors[n]
+		estBytes += len(n) + len(t.Dtype) + 12*len(t.Shape) + 64
+	}
+	hdrBytes := make([]byte, 0, estBytes)
+	hdrBytes = append(hdrBytes, '{')
+	off := 0
+	for i, n := range names {
 		t := tensors[n]
 		elem, ok := dtypeBytes[t.Dtype]
 		if !ok {
@@ -160,27 +167,43 @@ func Encode(tensors map[string]Tensor) ([]byte, error) {
 		if len(t.Data) != count*elem {
 			return nil, core.NewError("safetensors.Encode: tensor " + n + " byte span != dtype × shape")
 		}
-		shape := t.Shape
-		if shape == nil {
-			shape = []int{}
+		if i > 0 {
+			hdrBytes = append(hdrBytes, ',')
 		}
-		hdr[n] = entry{Dtype: t.Dtype, Shape: shape, DataOffsets: [2]int{off, off + len(t.Data)}}
-		data = append(data, t.Data...)
+		hdrBytes = appendJSONString(hdrBytes, n)
+		hdrBytes = append(hdrBytes, ':', '{', '"', 'd', 't', 'y', 'p', 'e', '"', ':')
+		hdrBytes = appendJSONString(hdrBytes, t.Dtype)
+		hdrBytes = append(hdrBytes, ',', '"', 's', 'h', 'a', 'p', 'e', '"', ':', '[')
+		for j, d := range t.Shape {
+			if j > 0 {
+				hdrBytes = append(hdrBytes, ',')
+			}
+			hdrBytes = appendJSONInt64(hdrBytes, int64(d))
+		}
+		hdrBytes = append(hdrBytes, ']', ',', '"', 'd', 'a', 't', 'a', '_', 'o', 'f', 'f', 's', 'e', 't', 's', '"', ':', '[')
+		hdrBytes = appendJSONInt64(hdrBytes, int64(off))
+		hdrBytes = append(hdrBytes, ',')
+		hdrBytes = appendJSONInt64(hdrBytes, int64(off+len(t.Data)))
+		hdrBytes = append(hdrBytes, ']', '}')
 		off += len(t.Data)
 	}
+	hdrBytes = append(hdrBytes, '}')
 
-	hj := core.JSONMarshal(hdr)
-	if !hj.OK {
-		return nil, core.NewError("safetensors.Encode: header marshal failed")
-	}
-	hdrBytes := hj.Value.([]byte)
-	out := make([]byte, 8+len(hdrBytes)+len(data))
+	out := make([]byte, 8+len(hdrBytes)+totalData)
 	n := uint64(len(hdrBytes))
 	for i := range 8 {
 		out[i] = byte(n >> (8 * uint(i)))
 	}
 	copy(out[8:], hdrBytes)
-	copy(out[8+len(hdrBytes):], data)
+	// Copy each tensor's payload directly into its slot in the final buffer (name-sorted, the
+	// same order the offsets were assigned), so the data is copied exactly once and the offsets
+	// re-derive as a running sum — no per-tensor offset map.
+	dataOff := 8 + len(hdrBytes)
+	for _, name := range names {
+		data := tensors[name].Data
+		copy(out[dataOff:], data)
+		dataOff += len(data)
+	}
 	return out, nil
 }
 

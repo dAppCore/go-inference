@@ -63,6 +63,21 @@ func LoadDir(dir string, maxLen int) (*ArchSession, error) {
 	return sess, nil
 }
 
+// probeModelType reads the checkpoint's declared architecture — config.json's
+// model_type — so a loaded model self-reports its real arch (gemma4, gemma3,
+// llama, …) instead of a hardcoded stamp. It falls back to "gemma4" only when
+// the probe fails or the config declares nothing, keeping a broken-config load
+// no worse than the historical default. This is the truthful source
+// inference.ModelInfo.Architecture / ModelType report for ANY architecture the
+// native engine loads.
+func probeModelType(dir string) string {
+	mt, _, err := model.ProbeDirArch(dir)
+	if err != nil || mt == "" {
+		return "gemma4"
+	}
+	return mt
+}
+
 type TokenModelLoadConfig struct {
 	PagedKVPageSize int
 	PagedKVPrealloc bool
@@ -117,10 +132,25 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 	// (They keep the plain window-capped default: their state geometry isn't the
 	// transformer KV plan the RAM-aware clamp below budgets.)
 	if mt, cfg, perr := model.ProbeDirArch(dir); perr == nil {
-		switch mt {
-		case "mamba2":
+		if mt == "mamba2" {
+			// mamba2 is a standalone recurrent SSM with its own loader — it registers no
+			// ArchSpec, so it is reached by name here rather than through the composed registry.
 			return loadMamba2TokenModel(dir, cfg)
-		case "qwen3_5", "qwen3_6", "qwen3_5_moe", "qwen3_6_moe", "composed", "hybrid":
+		}
+		// Composed/hybrid archs route through the neutral registry: each registers an
+		// ArchSpec.Composed hook, and model.LoadComposedDir looks it up and builds the
+		// serve-ready TokenModel. A future qwenX checkpoint therefore loads with ZERO edits
+		// here — it is a new model-package init(), not an engine change. ok=false means the
+		// model_type is a plain transformer (or a composed type not yet registered): fall through.
+		if tm, ok, cerr := model.LoadComposedDir(dir); cerr != nil {
+			return nil, cerr
+		} else if ok {
+			return tm, nil
+		}
+		// Fallback for the historical composed model_types the registry does not (yet)
+		// cover, so every type the old hardcoded switch loaded still loads identically.
+		switch mt {
+		case "qwen3_6", "qwen3_6_moe", "composed", "hybrid":
 			return loadComposedTokenModel(dir, cfg)
 		}
 	}
@@ -169,6 +199,9 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 			tm.visionFeatureCfg, _ = LoadVisionImageFeatureConfig(dir)
 		}
 		tm.audio = lm.Audio
+		if lm.Audio != nil {
+			tm.audioExtractor = buildAudioExtractor(dir)
+		}
 		tm.diffusion = lm.Diffusion
 		return tm, nil
 	}
@@ -201,8 +234,29 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 		tm.visionFeatureCfg, _ = LoadVisionImageFeatureConfig(dir)
 	}
 	tm.audio = lm.Audio
+	if lm.Audio != nil {
+		tm.audioExtractor = buildAudioExtractor(dir)
+	}
 	tm.diffusion = lm.Diffusion
 	return tm, nil
+}
+
+// buildAudioExtractor builds the host mel front-end for a Conformer audio tower from the model
+// directory's processor_config.json. Best-effort, mirroring visionFeatureCfg: a missing or malformed
+// config returns nil (audio disabled, ProjectAudio then errors clearly) and never blocks the load. The
+// disable is traced so a broken front-end is diagnosable.
+func buildAudioExtractor(dir string) *AudioFeatureExtractor {
+	cfg, err := LoadAudioFeatureConfig(dir)
+	if err != nil || cfg == nil {
+		nativeTraceLog(core.Sprintf("audio: feature extractor disabled (config: %v)\n", err))
+		return nil
+	}
+	extractor, err := NewAudioFeatureExtractor(cfg)
+	if err != nil {
+		nativeTraceLog(core.Sprintf("audio: feature extractor disabled (build: %v)\n", err))
+		return nil
+	}
+	return extractor
 }
 
 func nativeTokenModelBackendOptions(cfg TokenModelLoadConfig) []BackendOption {

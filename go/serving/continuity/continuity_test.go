@@ -3,10 +3,147 @@
 package continuity
 
 import (
+	"context"
+	"iter"
 	"testing"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/kv"
+	"dappco.re/go/inference/model/spine"
+	state "dappco.re/go/inference/model/state"
+	"dappco.re/go/inference/model/state/session"
 )
+
+// decliningSessionHandle is an inference.SessionHandle whose block-sleep declines — the shape a composed
+// hybrid presents before the token-only RangeKVBlocks lands, and the shape any session takes when a sleep
+// genuinely fails. Every other method is an inert stub; only RangeKVBlocks' decline is under test.
+type decliningSessionHandle struct{}
+
+func (decliningSessionHandle) Prefill(context.Context, string) error      { return nil }
+func (decliningSessionHandle) AppendPrompt(context.Context, string) error { return nil }
+func (decliningSessionHandle) CaptureKV(context.Context) (*kv.Snapshot, error) {
+	return nil, core.NewError("continuity_test: no capture")
+}
+func (decliningSessionHandle) Generate(context.Context, inference.GenerateConfig) iter.Seq[inference.Token] {
+	return func(func(inference.Token) bool) {}
+}
+func (decliningSessionHandle) RangeKVBlocks(context.Context, int, kv.CaptureOptions, func(kv.Block) (bool, error)) error {
+	return core.NewError("continuity_test: block sleep declines")
+}
+func (decliningSessionHandle) Fork(context.Context) (inference.SessionHandle, error) {
+	return nil, core.NewError("continuity_test: no fork")
+}
+func (decliningSessionHandle) Reset()       {}
+func (decliningSessionHandle) Close() error { return nil }
+func (decliningSessionHandle) Err() error   { return nil }
+
+// countingSessionHandle is a decliningSessionHandle that records how many times
+// Close was called — the seam residentConversation.close and the eviction path
+// close through, so the count proves the handle was actually released.
+type countingSessionHandle struct {
+	decliningSessionHandle
+	closed int
+}
+
+func (h *countingSessionHandle) Close() error { h.closed++; return nil }
+
+// fakeSessionFactory is the inference.SessionFactory Manager.newConversation
+// consumes: NewSession hands back handle (nil to exercise the nil-session
+// guard) and counts its calls.
+type fakeSessionFactory struct {
+	handle inference.SessionHandle
+	calls  int
+}
+
+func (f *fakeSessionFactory) NewSession() inference.SessionHandle {
+	f.calls++
+	return f.handle
+}
+
+var _ inference.SessionFactory = (*fakeSessionFactory)(nil)
+
+// TestResidentConversationClose gates the close seam both ways: a
+// conversation holding only a raw handle closes the handle directly, and one
+// holding a session.Session closes through the session (which releases the same
+// underlying handle). Close must reach the handle exactly once on each path.
+func TestResidentConversationClose(t *testing.T) {
+	// handle-only branch: no session wrapper.
+	rawHandle := &countingSessionHandle{}
+	(&residentConversation{handle: rawHandle}).close()
+	if rawHandle.closed != 1 {
+		t.Fatalf("handle-only close: handle.closed = %d, want 1", rawHandle.closed)
+	}
+
+	// session branch: the wrapper is closed, which releases the handle beneath.
+	sessHandle := &countingSessionHandle{}
+	(&residentConversation{sess: session.New(sessHandle, spine.ModelInfo{}, nil), handle: sessHandle}).close()
+	if sessHandle.closed != 1 {
+		t.Fatalf("session close: underlying handle.closed = %d, want 1", sessHandle.closed)
+	}
+
+	// A conversation with neither is inert — no panic.
+	(&residentConversation{}).close()
+}
+
+// TestManagerNewConversation gates fresh-session construction: a working
+// factory yields a busy conversation with both the handle and its session view
+// set, and a factory returning a nil session errors instead of handing back a
+// conversation that would nil-panic on first use.
+func TestManagerNewConversation(t *testing.T) {
+	m := &Manager{factory: &fakeSessionFactory{handle: &countingSessionHandle{}}}
+	conv, err := m.newConversation()
+	if err != nil {
+		t.Fatalf("newConversation: %v", err)
+	}
+	if conv.handle == nil || conv.sess == nil {
+		t.Fatal("newConversation must set both the handle and its session view")
+	}
+	if !conv.busy {
+		t.Fatal("a fresh conversation must start busy (owned by the acquiring turn)")
+	}
+
+	nilFactory := &Manager{factory: &fakeSessionFactory{handle: nil}}
+	if _, err := nilFactory.newConversation(); err == nil {
+		t.Fatal("a nil session from the factory must error, not return a conversation")
+	}
+}
+
+// TestManagerRemoveOrderLocked gates the eviction-order bookkeeping: removing a
+// key drops exactly that entry and preserves the rest's order, at the front,
+// middle, and tail; an absent key is a no-op.
+func TestManagerRemoveOrderLocked(t *testing.T) {
+	eq := func(got, want []string) bool {
+		if len(got) != len(want) {
+			return false
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				return false
+			}
+		}
+		return true
+	}
+	cases := []struct {
+		name   string
+		order  []string
+		remove string
+		want   []string
+	}{
+		{"middle", []string{"a", "b", "c"}, "b", []string{"a", "c"}},
+		{"front", []string{"a", "b", "c"}, "a", []string{"b", "c"}},
+		{"tail", []string{"a", "b", "c"}, "c", []string{"a", "b"}},
+		{"absent", []string{"a", "b"}, "z", []string{"a", "b"}},
+		{"last remaining", []string{"only"}, "only", []string{}},
+	}
+	for _, tc := range cases {
+		m := &Manager{order: append([]string(nil), tc.order...)}
+		m.removeOrderLocked(tc.remove)
+		if !eq(m.order, tc.want) {
+			t.Errorf("%s: order = %v, want %v", tc.name, m.order, tc.want)
+		}
+	}
+}
 
 // TestConversationTurnSplit gates the prefix/tail boundary: the trailing run
 // of user/tool messages is the new turn; everything before it is the prefix a
@@ -79,5 +216,70 @@ func TestManagerChatDeclines(t *testing.T) {
 func TestEnableCapabilityErrors(t *testing.T) {
 	if err := Enable(nil, nil); err == nil {
 		t.Fatal("nil model must error")
+	}
+}
+
+// TestManagerFinishTurnSleepDeclineStaysResident gates the sleep-decline degrade: when a session's block
+// sleep declines (a composed hybrid without the token-only lane, or any genuine sleep failure), finishTurn
+// must keep the conversation RAM-resident, clear its busy flag, and not count the failed sleep — turns keep
+// working, durability resumes on the next successful sleep. No hard-fail, no panic.
+func TestManagerFinishTurnSleepDeclineStaysResident(t *testing.T) {
+	store := state.NewInMemoryStore(nil)
+	m := &Manager{
+		store:    store,
+		writer:   store,
+		max:      defaultMaxResident,
+		resident: map[string]*residentConversation{},
+	}
+	conv := &residentConversation{sess: session.New(decliningSessionHandle{}, m.info, nil), busy: true}
+	messages := []inference.Message{{Role: "user", Content: "hi"}}
+
+	m.finishTurn(t.Context(), conv, messages, "hello", false)
+
+	if len(m.resident) != 1 {
+		t.Fatalf("conversation count after declined sleep = %d, want 1 (stays RAM-resident)", len(m.resident))
+	}
+	if m.stats.Sleeps != 0 {
+		t.Fatalf("declined sleep counted %d Sleeps, want 0", m.stats.Sleeps)
+	}
+	if conv.busy {
+		t.Fatal("finishTurn must clear busy even when the sleep declines")
+	}
+}
+
+// TestSpineModelInfo checks the neutral-to-spine field mapping and the context
+// length default: the seven mapped fields carry across verbatim, and a
+// non-positive context length falls back to 4096 (the spine's minimum window).
+func TestSpineModelInfo(t *testing.T) {
+	info := inference.ModelInfo{
+		Architecture: "gemma3",
+		VocabSize:    262144,
+		NumLayers:    34,
+		HiddenSize:   3840,
+		QuantBits:    4,
+		QuantGroup:   64,
+	}
+	got := spineModelInfo(info, 8192)
+	want := spine.ModelInfo{
+		Architecture:  "gemma3",
+		VocabSize:     262144,
+		NumLayers:     34,
+		HiddenSize:    3840,
+		QuantBits:     4,
+		QuantGroup:    64,
+		ContextLength: 8192,
+	}
+	if got.Architecture != want.Architecture || got.VocabSize != want.VocabSize ||
+		got.NumLayers != want.NumLayers || got.HiddenSize != want.HiddenSize ||
+		got.QuantBits != want.QuantBits || got.QuantGroup != want.QuantGroup ||
+		got.ContextLength != want.ContextLength {
+		t.Fatalf("spineModelInfo mapping = %+v, want the seven fields of %+v", got, want)
+	}
+
+	// A non-positive context length falls back to the default.
+	for _, in := range []int{0, -1} {
+		if cl := spineModelInfo(info, in).ContextLength; cl != 4096 {
+			t.Errorf("spineModelInfo(contextLen=%d).ContextLength = %d, want 4096", in, cl)
+		}
 	}
 }

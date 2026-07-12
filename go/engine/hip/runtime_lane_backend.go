@@ -4,7 +4,6 @@ package hip
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	core "dappco.re/go"
@@ -319,5 +318,9 @@ func runtimeLaneBackendPendingError(operation, backend string, lanes []RuntimeLa
 	if status == "" {
 		status = RuntimeDispatchStatusCompileReadyPending
 	}
-	return fmt.Errorf("rocm %s %s: %s runtime lane is compiled and packaged for %s (%s), but runtime dispatch is pending (runtime_dispatch_status=%s); use the rocm backend or lthn-amd until %s runtime dispatch is registered", backend, operation, backend, runtimeLanes, sidecars, status, backend)
+	return core.E(
+		core.Sprintf("rocm %s %s", backend, operation),
+		core.Sprintf("%s runtime lane is compiled and packaged for %s (%s), but runtime dispatch is pending (runtime_dispatch_status=%s); use the rocm backend or lthn-amd until %s runtime dispatch is registered", backend, runtimeLanes, sidecars, status, backend),
+		nil,
+	)
 }

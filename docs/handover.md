@@ -1,3 +1,548 @@
+# NEXT WAKE (2026-07-16 — #381 SHIPPED: the skip is live, 2.1-2.6x at every depth)
+
+## UNFENCED EVENING (2026-07-12 late — hip lands, GGUF interop, the ratchet)
+
+- HIP UNFENCED (snider): scout run proved the lane workable → codex's stint
+  3eb3cf2 MERGED to dev (15.9k lines, hip-only) with ALL 11 aspirational
+  spec-tests implemented green: config-label veto root-caused; kernel-source
+  assertion retargeted; thought-suffix test repinned to runtime contract
+  (provenance in commit — orphan red predating the stint); attached-drafter
+  batching via scoped ForceBatchedProjection — incl. wiring codex's
+  built-but-UNWIRED accepted-prefix KV truncation into KQ8VQ4 verify. gfx1101
+  hsaco builds (-O3); MoE router + GGUF expert kernels PASS on the 7800 XT.
+  Box working rules: desk /home/claude/Code NEVER touched; fresh /tmp clones
+  + rsync for validation. OPEN: TestHIPHardwareTransformerKernelSource
+  numerical red (slice[0]=3.0 want 1.462, kernel-debug, inherent to stint);
+  on-device tok/s parity for the new verify path awaits a real-model run.
+- lem BUILDS ON LINUX for the first time (799fce8): cmd/lem imported
+  engine/metal unguarded — portable seam (engine_metal.go darwin /
+  engine_other.go) + tagged the untagged MLX example test. Receipted on a
+  fresh homelab clone: build + both packages green.
+- QUANT FEATURES RECEIPTED (oMLX parity): lem quant bf16→MLX-4bit —
+  E2B 9.54→2.71 GiB, loads + answers 143.7 tok/s. GGUF lane: multimodal
+  crash fixed (tower skip + F32 fallback, 8739e99) THEN the full
+  llama.cpp-interop layer landed (#28 merged): canonical blk.N.* names,
+  56-key gemma4.*+tokenizer.ggml.* metadata, per-tensor type policy,
+  rope_freqs mask, MatFormer double-wide FFN widths from tensors — and the
+  HIDDEN BLOCKER: quantizeQ4_K/Q5_K had wrong super-block geometry + never
+  applied sub-block scales (garbage, never validated running) — rewritten to
+  ggml reference. ACCEPTANCE: llama-completion generates coherently from our
+  file; type histogram identical to the unsloth oracle. JANG parked (snider:
+  experimental). Remainder: other gemma4 GGUF formats need own oracles;
+  K-quant fix warrants a consumer regression sweep.
+- QWEN FUSES MERGED (#23 ladder): gated-delta input CB (+3.8%) + attention
+  q/k/v CB (k/v host matmuls absorbed, +15%) = ~21.3 tok/s on 0.8B,
+  byte-identical text, thermal-honest interleaved A/B method banked.
+  Frontier: host glue (residual/RMSNorm/conv/recurrence/sdpa) between device
+  GEMMs. QWEN-LINE LANE RUNNING: 4B step-up + residual/RMSNorm on-device as
+  SHARED engine primitives (snider mandate: multi-arch shared kernels,
+  engine/ or model/ roots — no composed-only one-offs).
+- CODECOV RATCHET (#30 = pre-req for the #8 tag; snider doctrine: gap table
+  = how we find perf + underused features + gemma4-isms in shared code).
+  Measured: whole-repo CPU 67.8%; excluding hip 91.1%; metal 75.6%; hip ~1%
+  on darwin (12.6k stmts = 78% of the gap, needs box-measured coverage).
+  Rotation 1 MERGED: decode/generate 37.2→83.3 tagged (supervised idiom,
+  -state proven on real weights); eval/datapipe 75.1→89.5 + eval/score
+  82.6→92.8 (ScoreAll -race). Rotation 2 IN FLIGHT: modelmgmt, shared-roots
+  (arch-neutrality tests: non-gemma fakes drive shared surfaces), metal
+  interior r1 (per-file uncovered-mass ranking = deliverable).
+- MANTIS: #1840 noted fixed (2488; status flip needs a human — REST update
+  500s). #1839 open remainder = unit D (mask fidelity) + unit E (HIP
+  Conformer port — NOW DISPATCHABLE, board #31, acceptance kit = the audio
+  goldens).
+## QWEN-LINE SHARED FFN-TAIL FUSE (2026-07-12 — evidenced NEUTRAL, and why)
+
+- BUILT SHARED: engine/metal/residual_norm_mlp_device.go — ResidualNormMLPDevice,
+  an ARCH-NEUTRAL f32 primitive (named for the op, not for composed) that encodes
+  the whole pre-norm SwiGLU FFN sub-block into ONE command buffer: hplus = h +
+  mixOut → normed = RMSNorm(hplus, w) [plain rsqrt(mean²+eps)·w, the f32 rms
+  kernel] → SwiGLU(normed) → y = hplus + mlpOut. Every pre-norm SwiGLU stack
+  (llama/qwen/mistral) has exactly this tail, so it is a shared rung, not a
+  composed one-off. Reuses the existing emit helpers (emitBinary vv_Addfloat32,
+  emitRMSNormRows, emitSteelGemm, emitUnary sigmoid) + pooled pinned scratch.
+  composed declares the AX-8 hook (composed.ResidualNormMLPDevice); native binds
+  it; forwardEmb routes the dense-MLP layers above deviceMinWork through it, MoE
+  + sub-floor + device-fail fall back to the host add/norm/MLP/add path.
+- PARITY: TestComposedResidualNormMLPFuseDeviceVsHost (counter-guarded device-vs
+  -host, f32 tol, mirrors the q/k/v fuse test). Full metal suite 1554 green,
+  model/composed + model/qwen3 52 green, vet clean.
+- RECEIPT (interleaved same-thermal A/B, temp 0, sky-blue prompt): greedy text
+  BYTE-IDENTICAL before/after on BOTH models. tok/s NEUTRAL within thermal noise
+  — 0.8B before 21.3/22.0 -> after 23.0/21.9; 4B steady-state ~9.3 both (the lone
+  8.3 was the cold first run).
+- WHY NEUTRAL (the inventory correction): this fuse RELOCATES host glue onto the
+  GPU, it does NOT collapse a command buffer. The MLP was ALREADY one CB
+  (ComposedMLPDevice); the residual adds + RMSNorm were CPU work BETWEEN CBs, not
+  a CB each — and at L=1 that CPU glue is ~3 passes over [1,D], negligible. So
+  the CB-per-token count is UNCHANGED by this slice; it removes host glue (which
+  matters more at larger L, and cleans the boundary) and, crucially, is the
+  scaffold the real CB-collapse needs. The genuine collapse is merging the
+  mixer's FINAL-projection CB (o_proj / out_proj) INTO this tail CB — i.e. the
+  mixer hands a device-resident buffer to the tail instead of reading it back —
+  which is the GPU-resident whole-token orchestration flagged design-worthy
+  below. That is the next rung; this slice makes the tail a single shared entry
+  it can plug into.
+
+## QWEN-LINE 4B STEP-UP (2026-07-12 — the family scales, zero loader fixes)
+
+- RECEIPT: mlx-community/Qwen3.5-4B-OptiQ-4bit loads through LoadComposed and
+  greedy-generates (temp 0) coherent text — the sky-blue Rayleigh answer — at
+  8.2 tok/s decode (55 tok / 6.553s), prefill 9 tok/s (23 tok / 2.691s), on the
+  same host-f32 + device-GEMM-fuse composed stack the 0.8B rides. Two-turn
+  continuity gate (composed_gate_4b.py, mirror of composed_gate.py at the 4B):
+  turn1 "OK Wibble", turn2 "Wibble" — RECALL=PASS, NO-REPLAY=PASS (turn2
+  prompt_tokens 25 < full-history 29, so no replay).
+- NO GEOMETRY/LOADER FIX NEEDED. The shape-derived loader absorbed every 4B
+  delta out of the box: D 2560, 32 layers, 16 attn heads / 4 KV, head_dim 256
+  (explicit, != D/heads=160), attn_output_gate=true (q_proj [8192,640] = 2·16·256
+  carries the [q;gate] split), full_attention_interval 4, vocab 248320, tied
+  embeddings; gated-delta derived keyHeads 16 / valueHeads 32 / headDim 128 /
+  convK 4 from the weight shapes; mixed per-tensor 4/8-bit OptiQ quant resolved
+  by QuantConfig.For overrides (embed 8-bit, per-layer proj bits vary). ~16GB
+  f32 dequant footprint, fine on 96GB.
+- Confirms the composed stack is arch-general across the Qwen3.5 family, not
+  0.8B-tuned. The perf ladder below (device seam, fused MLP) now has a second,
+  larger model to A/B against — see the shared-glue slice receipts.
+
+## #23 COMPOSED DEVICE SEAM (2026-07-12 evening — 1.6 -> 16.7 tok/s in one day)
+
+- SLICE 1 (a36b11a): composed.ProjMatMulInto — the stack's OWN projections
+  (attn q/k/v/o, MLP, LM head 155 MMAC) now ride the steel GEMM, same AX-8
+  seam as qwen3/mamba2/rwkv7; native binds at init; deviceMinWork 1<<20 keeps
+  sub-MMAC GEMVs on the sharded host path. Parity: TestComposedDeviceVsHost
+  (one-layer attn+MLP forward, f32 tol) + TestMatNTIntoDeviceHook (floor /
+  verbatim / error-fallback). 10.5 -> 14.9 tok/s.
+- SLICE 2 (5620c01): qwen3's hooks fired UNCONDITIONALLY — the gated-delta
+  in_proj_a/b ([16,1024] = 16 KMAC) each paid a full CB round-trip, 36
+  wasted/token. Floored to match. 14.9 -> 16.7 tok/s, same greedy text;
+  continuity gate PASS at the new tier (turn-2 now 4s, was 21s host-tier).
+- DAY TOTAL on the 0.8B hybrid: 1.6 -> 16.7 tok/s (10.4x): column-sharded
+  host GEMVs (574d179, 8325ee2) + device seam + floors. Numeric tier note:
+  device f32 accumulation vs host f64 — same tier the gated-delta already
+  served at; greedy text unchanged on the receipts prompt; -state contract
+  is token-prefix, per-build deterministic.
+- SLICE 3 (0460e13): fused SwiGLU MLP — instrumented the round-trip first
+  (330us/call at decode shapes, ~10us of it compute); composed.MLPDevice
+  encodes gate+up GEMMs + sigmoid + 2 multiplies + down GEMM into ONE CB,
+  [L,FF] intermediates device-resident, pooled pinned scratch. 16.7 -> 18.6
+  tok/s, prefill 15 -> 19. Ladder next: same fuse for gated-delta
+  (in_proj_qkv/z/out) and attention (q/o) projections, then whole-layer.
+- THE CEILING NOW: ~70+ per-projection command-buffer round-trips per token.
+  Next slice is the GPU-resident orchestration — weights uploaded once,
+  whole token encoded in ONE CB (intermediates stay device-side), recurrence
+  on device — the real composed decode session in engine/metal. Design-worthy;
+  brief a research pass before building. mamba2/rwkv7 hooks share the
+  no-floor issue but are not on today's receipt path (noted, not touched).
+
+## SWEEP ROUNDS (2026-07-12 afternoon — 8 Opus lanes, 2 rounds; the wrapper bug)
+
+- THE BUG OF THE DAY (233fb4c): welfareTextModel + policyTextModel embed
+  inference.TextModel, which does NOT widen the wrapper's method set — so the
+  serve handler's VisionModel/AudioModel assertions failed on EVERY wrapped
+  serve (welfare is default-on): all image_url AND input_audio requests 400'd
+  while the same checkpoint worked over the CLI. Nothing could trip it until
+  the first audio-capable serve existed (today). Failing tests first, then
+  explicit AcceptsImages/AcceptsAudio forwards on both wrappers. LIVE RECEIPT:
+  base64-WAV input_audio chat completion on e2b → exact fox transcript, 2.8s.
+  LESSON (bug class): a serving wrapper must forward every capability
+  interface the handler gates on; embedding forwards calls, not assertions.
+- COMPOSED CPU LEVERS (574d179 composed, 8325ee2 qwen3): both host GEMVs now
+  shard output columns across cores — bit-identical (per-element f64
+  accumulation order untouched; serial floor 1<<20 MACs). MLP fwd 12.47→1.15ms
+  (10.9x), attn 4.00→1.43ms, gated-delta 4.48→1.25ms. 0.8B live decode
+  1.6→10.5 tok/s quiet-machine (35-tok coherent answer). Next order of
+  magnitude = the GPU lane (ProjMatMulInto seam ready) — board task open.
+- FLEET ROUND 1 (4 Opus, merged 7c04584): cmd/lem 18.7→85.4% (25→133 tests,
+  every verb family); train 89.4→91.1% + sftSampleText 8→1 allocs
+  (928→240 B/op, per-sample-per-epoch); serving policy MATCH path 7→3 allocs
+  (clean path 0-alloc now bench-pinned); engine-neutral 80.3→82.2% (six 0%
+  fns). TWO honest premise-corrections: my bench-presence instrument was
+  broken by zsh glob noise — engine + policy were ALREADY benched; both
+  agents verified reality and refused theatre benches.
+- FLEET ROUND 2 (4 Opus, merged 3b43573): train2 — appendSidecar −37% B/op
+  (named lead confirmed), lora multi-shard hash −63% B/op, distill cache-key
+  byte-identity pinned; serve2 — five named 0% gaps with real fakes
+  (sessionkv route-drift gate, continuity fake session factory), kv floored
+  97.3%, one perf hypothesis benchstat-FALSIFIED and reverted clean;
+  modeldeep — gguf metadata 41→97%, tar-slip guard tested with hostile
+  containers, ggufLoadTensorData corruption guards; decodedeep — spec-decode
+  path evidenced at the floor (0-1 inherent allocs), redaction-gate slice
+  descent leak-pinned, json.Number grammar parity 100%.
+- MY FINDING CLOSES (e1c1de1, 61a6725): decode/parser Flush's residue
+  branches removed after independently verifying drain(true)'s postcondition
+  (holdback only arms mid-stream); TestProcessorDrainFinalConsumesPending
+  pins it. Orphaned Err doc comment rehomed.
+- PARKED DESIGN CALLS: safetensors Parse (reflection, 1819 allocs/shard) vs
+  parseHeaderInto (6-8) unification — divergent validation semantics
+  (zero-dim, dtype case), wall impact at load is small; eval ScoreAll
+  fake-judge harness; DuckDB ingest fixtures.
+- Round-close gates: 9,537 CPU (122 pkgs) + 1,550 metal green.
+- GATE-SCRIPT SCAR: serve boot pings need ≥120s timeouts (cold first request
+  pays welfare probe + PSO warmup); kill stray serves BY PORT
+  (lsof -ti:PORT | xargs kill -9) — go run children live in the build cache,
+  name-pattern pkill misses them.
+
+## HEATWAVE ROUND (2026-07-12 midday — Opus fleet rolling; composed lands for real)
+
+- EMBED PAYLOADS REFRESHED (79ed05e): the tracked cmd/lem/*.metallib.gz had
+  drifted from build/dist (a fresh-clone `task build:embed` baked stale
+  kernels). Smoke: bin/lem 154M runs generate + serve with NO
+  MLX_METALLIB_PATH. /bin/ gitignored. Release pre-flight DONE — snider's
+  edit pass on docs/release-v0.12.0-DRAFT.md is the only step left before
+  tag (rebuild binaries at tag time; today's bin/ predates 886d2b7).
+- COMPOSED LOADS REAL PACKS (787ada6): Qwen3.5-0.8B-OptiQ-4bit (867MB,
+  hybrid 18 linear + 6 full attention, qwen3_5) pulled to the HF cache;
+  LoadComposed gained language_model.* normalisation
+  (model.NormalizeWrapperNames), mlx-affine host dequant
+  (mlxaffine.DequantizeTensor; per-module bits/gs overrides honoured,
+  packed-shape cross-check fails loudly), and the mlx [convDim,K,1]
+  depthwise-conv shape. 3 loader pins added. Loads + greedy-generates on
+  engine/metal (host-f32 mixers ~1.6 tok/s — composed GPU speed is future
+  work, by design).
+- #379 LIVE GATE PASS (#10 closed): two-turn serve -state-conversations on
+  the real hybrid — turn 2 recalled turn 1's fact AND prompt_tokens 25 vs
+  29+ full-history replay (wake + append-only proven live). Gate script:
+  /private/tmp/lem-dev/composed_gate.py.
+- TOKENIZER CHATML PARITY (886d2b7): the gate's two leaks root-caused to
+  ENCODE defects, not templates — <|im_start|> was wrongly mapped as a BOS
+  (ghost im_start at the head of every continuation → 'assistant' echo on
+  woken turns) and only special:true added tokens joined the atomic
+  matcher, so qwen's special:false <think>/</think> BPE-split into text
+  (the model never saw its pre-closed think channel → reasoning leaked
+  into content). Fix: added = the full atomic matcher, special = the
+  decode-side skip; qwen BOS mapping removed with rationale. Receipts:
+  Go == HF token-for-token on the real qwen tokenizer (19-id continuation
+  identical); gate turn 1 36→4 tokens clean 'OK Wibble', turn 2 clean
+  'Wibble'. Gemma blast radius zero (no special:false added tokens in
+  gemma packs; <bos> untouched): engine/metal 1547 green, tokenizer 123
+  green (+2 pins). <think> is already in decode/parser's paired reasoning
+  markers, so think-ON requests now split into reasoning_content properly.
+- G2 DEFAULT-MEDIATOR DECISION (deferred item closed): cmd/lem ships NO
+  default mediator — a rewrite-rule policy without a wired mediator
+  refuses to boot (loud + correct, serving/serve.go:111); redact/refuse
+  policies work with plain -policy.
+- FLEET (Opus 4.8, worktree protocol): docs drift sweep MERGED (2c08372 —
+  lem verb/flag surface, campaign env knobs LTHN_SDPA_GEMM_MINKV /
+  LTHN_FLASH_WIN / LTHN_GPU_TRACE=host, MLX pin v0.32.0 confirmed via
+  gitlink, 8 files). QA honest-tests MERGED (570dd34 — gguf
+  dequant-on-load path 20 tests, train/tune 0→100%, welfare, eval bits;
+  the 28-flag fake-coverage class adjudicated as analyser false-positives
+  on 4-slot scenario names — honest tests left alone; analyser-upgrade
+  noted as the real fix).
+- AUDIO LANE LANDED (fded3d4, Mantis #1839 note 2487): E2B/E4B Conformer
+  audio LIVE on metal. Both suspected parity defects were REAL and are
+  fixed — output_proj.bias (max|abs| 14.875) was silently dropped;
+  real-pack OHWI convs were double-scrambled by the torch-OIHW assumption
+  (shape discriminator now routes both). Serve seam wired (audioExtractor
+  held at load; ProjectAudio Conformer bytes-in branch) — CLI -audio +
+  OpenAI input_audio light up with zero serve changes. HF harness: mel
+  golden max|Δ| 4.768e-7 (the go-mlx 1-ULP bar), tower goldens subsample
+  0.999999 / layer0 1.000000 / tower 0.999995 cosine (supervised — skips
+  without the cached e2b). E2E receipt reproduced independently in the
+  main tree: say→afconvert→lem generate -audio transcribes "the quick
+  brown fox jumps over the lazy dog" EXACTLY at 128.7 tok/s decode. NB
+  the ASR prompt from capabilities-audio.md is required — generic
+  "transcribe this" truncates (prompt-shape, not code). Deferred: D
+  (batch/pad mask fidelity), E (HIP port — codex's lane). Post-merge
+  gates: engine/metal + model/gemma4 1,631 green.
+- dev pushed through fded3d4 (d412158 → 79ed05e, 787ada6, 2c08372,
+  570dd34, 886d2b7, 8c828a9, audio 3c614b3..322590b, fded3d4).
+
+**The kv-shared layer skip is BUILT, receipted, and pushed (473c242).**
+sharedLayerSuffixStart validates the non-owner suffix at state build;
+prefillRetainedTokensBatchedDenseChunks arms prefillSkipToLayer on
+non-final chunks; the batched pass bounds its layer loop. Receipts (e2b
+4bit, correct metallib, A/B vs LTHN_PREFILL_SKIP_SHARED=0 same env):
+pp8K 3,190->6,777 · pp32K 2,753->7,008 · pp62K 2,323->5,833 · pp118K
+1,688->4,249 tok/s; 32-token greedy continuations byte-identical at 8K
+and 62K; TestArchSessionPrefillChunksSkipSharedSuffix pins serial-vs-
+chunked byte identity over a kv-shared fixture both lanes. Field position
+now: beats llama.cpp everywhere, edges oMLX at 8K (6,777 vs 6,696), leads
+the field outright at 32K+; mlx-lm true-wall gap 3.2x -> 1.48x at 8K.
+SECOND LEVER SHIPPED (c257ff0): minimal boundary chunk — with the skip
+armed, only the final chunk pays the full stack, so the absorb policy's
+1081-row final chunk shrank to the last partial window (57 rows at 8K,
+floored at 32 to keep the ICB/q8-fold gates clear). pp8K 6,777->8,049.
+Chunk-width RE-RECEIPTED under the skip: 2048 stays the peak (4096
+still collapses: 4,986).
+THIRD LEVER SHIPPED (a0364b5): PLE slab at owner-layer width + the
+one-dispatch quant gather (lthn_ple_gather_rows_quant; K-loop of
+per-token gathers retired; builders derive the bound from slab length).
+pleSlab host span 104->47ms steady-state; pp8K 8,049->8,528 (0.847s
+wall; mlx true-wall gap now 1.18x). NOTE: first run after a metallib
+rebuild pays the new kernel's PSO compile once (~40ms) — measure
+steady-state.
+FOURTH LEVER SHIPPED (cfc84d5): device-resident PLE slab handoff — the
+builder commits WITHOUT waiting and the pass binds its buffer directly
+(same queue = GPU-ordered; single-buffered scratch safe because the host
+stages the next chunk only after the pass's wait). pleSlab host span
+47->3.1ms; pp8K 8,528->8,708 (0.830s; mlx true-wall gap 1.15x). The
+builder's GPU work (~2ms/chunk) still serialises ahead of the main pass
+on the shared queue — a second queue + MTLEvent could overlap it, worth
+~1-2% more, diminishing.
+FIFTH LEVER SHIPPED (9e5846d): device embed gather — the builder's CB
+gathers the K main-embed rows too (same rows kernel at dModel width),
+the projection reads them in place of host staging, and the pass takes
+the same buffer as its input rows. Only token ids cross to the GPU.
+embed span 17.6->0ms; pp8K 8,708->9,016 (0.801s; mlx gap 1.11x).
+NIGHT TOTAL pp8K 3,190 -> 9,016 (2.83x), token-identical at every step.
+MORNING AFTER (2026-07-12) — the family round:
+- E4B RECEIPTED (zero code): 18-of-42 kv-shared -> the skip engages
+  by construction. pp8K 1,987->3,423 (1.72x, off=LTHN_PREFILL_SKIP_SHARED=0),
+  32K 3,182, 62K 2,807; 32-token greedy identity at 8K AND 62K.
+- DENSE/MoE EMBED GATHER PORTED (c470d19): the rows kernel gathers a
+  whole chunk's embed rows in one committed-not-waited CB; dense archs
+  have no PLE so the closure hands back (embBuf, nil). 31B qat 289->290
+  (embed span ~71ms->0), 26B-A4B 1,440->1,447, 12B ENGAGES (inputsDev
+  spans replace host embed; ~0.5% under bench noise). e2b-qat unchanged
+  at ~9,250 (E-series untouched). Bytes identical pre/post on ALL FOUR.
+  Gate: TestEmbedRowsBatchQuantDeviceMatchesEmbedTokenQuant (host-oracle
+  byte identity 4/8-bit) + decline-contract test.
+- 31B mlx GAP MEASURED: mlx-lm true wall 22.16s vs our 24.99s = 1.13x —
+  same shape as e2b's 1.11x. The gap is SYSTEMATIC across archs; the 31B
+  chunk trace says GEMM-bound (mlp gate/up/down 60%, qkv 16% —
+  proportionate to FLOPs at head_dim 256, checked), sdpa 11.6% -> the
+  likely gap home is the flash prompt SDPA (#375's campaign).
+- WHOLE-REPO metal_runtime SWEEP NOW GREEN (10,754 tests / 122 pkgs):
+  train's command tests/examples pinned their fake backend (514297e —
+  SSDCommandConfig/SFTCommandConfig grew Backend -> WithBackend; under
+  metal_runtime the metal engine had been winning selection and
+  genuinely loading fixture paths).
+AFTERNOON (2026-07-12) — #375 flash routing + the Opus fleet round:
+- THE 8K CELL FLIPPED: e2b pp8K 10,048 tok/s (0.718-0.723s ×3, quiet
+  machine) vs mlx-lm true wall 0.730s SAME conditions — lem now leads
+  the measured field at EVERY depth. 32K 7,849->8,038; 62K/118K
+  unchanged. Two levers, both found by the NEW per-lane sdpa trace
+  (attn.sdpa -> .win/.gemm/.mq, permanent instrument, d8f8e24):
+  1. GEMM knee 4096->2048 (d8f8e24): chunk-1 globals rode the multiQ
+     vector kernel at 30.7ms where the composition runs deeper spans in
+     17.6ms. LTHN_SDPA_GEMM_MINKV overrides live. pp8K 9,315->9,641.
+  2. Window-flash occupancy cliff (e9e0935): one TG per (BQ-tile,head)
+     = 16 TGs at a 57-row boundary chunk — 35.7ms vs the ring kernel's
+     2.4ms (15x). flashWinMinRows=1024 gates small chunks to ring
+     (crossover receipted: 484->ring 1.7x, 1024 tie, 2048 flash 1.5x).
+     pp8K 9,641->10,058.
+  NUMERIC TIER, both levers: re-routed chunks change accumulation
+  order -> greedy forks at near-ties observed (both branches coherent).
+  Same tier the GEMM/flash lanes already trade at; kill switches:
+  LTHN_SDPA_GEMM_MINKV=4096 / LTHN_FLASH_WIN=0.
+  BANKED NEGATIVE: BQ16/BK32/WM2 steel shape (halve rescale/barrier
+  tax) ran 18% SLOWER — halving BQ doubles Q-tiles and each re-reads
+  its whole K/V span; the kernel is bandwidth-bound, not rescale-bound.
+  Reverted. (Also: the win flash at BD256 is ALREADY the max legal
+  shape — BQ32/BK32 blows the 32KB TG budget.)
+  mlx anatomy brief (Opus research, /private/tmp/lem-dev/
+  sdpa_anatomy_brief.md): mlx has NO fused attention at head_dim 256
+  (use_fallback fuses 64/80/128 only) — it runs the unfused composition
+  with a materialised mask tensor; our fused BD-256 steel port + window
+  flash are structurally AHEAD; mlx-lm caps sliding KV via
+  RotatingKVCache(512). NAX is an M5-era feature — nothing hiding on M3.
+- OPUS FLEET MERGED (d566736, 4 agents, worktrees cleaned):
+  #378 G2 mediated rewrite SHIPPED (5 commits): rewrite action +
+  streaming mediation (degrade lattice refuse>redact>rewrite, mediator
+  timeout per span, original span can never leak), WrapResolverMediated,
+  ServeConfig.PolicyMediator boot-fatal seam. 0 B/op clean path.
+  FOLLOW-UPS parked: mediator output is emitted verbatim (add a
+  non-recursive re-enforcement pass if the mediator is untrusted);
+  cmd/lem ships no default mediator (rewrite policies boot-fatal from
+  the CLI until one is injected); audit lacks a Degraded flag.
+  #379 composed -state SHIPPED: token-prefix kv.Snapshot (a stateless-
+  replay session's complete state IS its prefix; restore re-prefills,
+  deterministic host-f32 recomputes identical recurrent state).
+  generate -state + snapshot-strategy wake now work for composed.
+  PARKED: RangeKVBlocks (serve -state-conversations sleep lane) —
+  needs trusted-prefix block tiling + a LIVE multi-turn serve gate;
+  also confirm serve degrades gracefully when composed sleep declines.
+  #381 vision/bidir lane: skip is structurally VALID there (consumer
+  reads only boundary hidden — the "embeddings lane" is the VISION
+  lane; the pooling forward is engine/hip's) but UNARMED pending a
+  real unified-vision receipt; prefillSkipToLayer pinned 0 at entry
+  (load-bearing: no per-chunk reset there) + guard test.
+EVENING (2026-07-12) — the scraps round (fleet ×4 again, all merged):
+- SEAMS + 2ND-QUEUE: BOTH CLOSED NEGATIVE, receipted (e97056d). The new
+  LTHN_GPU_TRACE=host mode (host spans at production GPU fidelity — no
+  segment-splitting tax) + chunk/chunk.step spans show chunk==chunk.step
+  within 0.1ms on every chunk at 10,039 tok/s UNDER the instrument: the
+  #381 device-input levers already ate the host seams. The 2nd queue was
+  FULLY BUILT (builder queue + MTLEvent + double-buffered scratch pairs
+  + one-ahead pipeline), held byte identity, measured 10,053 vs 10,051 —
+  parity; the builder's GPU work is ~0.2ms/chunk post-#381 (the ~2ms
+  estimate was stale). Machinery reverted; instrument kept.
+- #380 LIVE RECEIPT CLOSED: served e2b decode 162.6/165.4/165.1 tok/s
+  (512-tok completions, temp0, think off) through the full HTTP +
+  streaming path — at/above the generate-measured board's 161.3. No
+  streaming tax; the emittedContent fix stands end-to-end.
+- G2 HARDENED (be440c0, merged c486c9c): mediator output re-enforced
+  (one non-recursive pass; residual hits — INCLUDING refuse — degrade
+  to redact, stream never killed by mediator output; mediator called
+  exactly once) + audit Event.Degraded flag. Clean path still 0 B/op.
+  Contract change: span-echoing mediators now get echoes redacted.
+- Mantis #1840 FIXED (148044d, merged 9435b26): jsonSkipValue fixed
+  bracket pair -> LIFO closer stack ([16]byte local, no heap on shallow
+  metadata); 9 pinned heterogeneous-nesting cases; sibling audit clean.
+- #379 COMPOSED BLOCK SLEEP, CPU HALF (1403fd4, merged 9f412b1):
+  RangeKVBlocks streams token-only blocks on ArchSession's exact tiling
+  contract (uniform grid, absolute contiguous Index/TokenStart,
+  BlockStartToken skips whole blocks, graft alignment); multi-turn
+  re-sleep vs trusted parent bundles CPU-tested; serve degrade confirmed
+  already graceful (finishTurn logs + stays RAM-resident). LIVE GATE
+  STILL OWED: multi-turn `lem serve -state-conversations` on a real
+  composed checkpoint — NONE CACHED locally (needs a Qwen3-Next-class
+  download decision).
+- AUDIO TOWER RECON (Mantis #1839, /private/tmp/lem-dev/
+  audio_tower_brief.md): THE TICKET IS STALE — the full Conformer
+  already lives in engine/metal (ported from go-mlx in b142528:
+  encoder/attention/subsample/mel extractor/assembly all real). Actual
+  gaps: (A) ~40-80 LOC serve wiring (build+hold the feature extractor at
+  load; Conformer branch in NativeTokenModel.ProjectAudio — today only
+  the 12B-unified raw-waveform path exists, so E2B/E4B audio gates true
+  then fails); (C) two probable parity defects — output_proj.bias
+  [1536] dropped by AssembleAudio/AudioEncode, and audioConv2dToOHWI
+  may double-transpose mlx checkpoints' already-OHWI conv weights
+  ("wrong = garbage audio", confirm empirically first); (B) HF
+  fixture-parity harness gates it. HIP port = codex's lane.
+FOLLOW-UPS still open on #381: (none — seams + 2nd-queue closed above). 26B/31B receipts DONE;
+12B unified receipts ride the same lane. #375 remaining slack: the
+win lane at big rows (~26ms/chunk vs ~15ms physics) and the global
+flash lane (67ms vs ~30) — genuinely diminishing; next likely lever is
+structural (fewer dispatches per chunk / 2nd queue), not tile shapes.
+
+**THE TRAP THAT ATE AN HOUR (bank it):** running engine/metal tests with
+go-mlx's dist metallib (the retired path my own notes carried) makes the
+sibling lthn_kernels.metallib STALE -> missing kernels
+(`lthn_embed_gather_row_bf16 not found`) -> a 40-test parity red wave that
+reproduces at KNOWN-GREEN commits. The correct pair is
+**$REPO/build/dist/lib/mlx.metallib** (the Taskfile var; lem.sh already
+defaults to it). If a mass parity red appears at a green commit: read ONE
+failure message before bisecting — mine said "kernel not found" all along.
+
+**The solved mechanism (for the record):** mlx-lm's prompt loop evals ONLY
+cache states; gemma4 E-series KV-SHARED layers (e2b: 20 of 35) own no cache
+state, so lazy DCE skips their entire compute on every non-final chunk —
+architecturally correct (deep outputs of prompt positions feed only unsampled
+logits; later attention reaches prompt tokens via OWNER-layer KV). Kill
+shots: width-halving = 0ms delta; powermetrics energy forbids the phantom
+45TF. Caveats held: Classify all-position logits do NOT skip (they take the
+non-chunked lane); MTP boundary hidden comes from the final chunk (full
+stack).
+ALSO LANDED OVERNIGHT: #380 emittedContent quadratic (871x B/op at 8K,
+45,530-case oracle fuzz — live tok/s A/B still owed); #378 outbound policy
+G1 (term 0-alloc + bounded-window patterns, boot-fatal, outermost wrap; G2
+mediated-rewrite designed-next); #379 serve wiring (composed models were
+NEVER servable — metalBackend hard-asserted native; now bridged + registry
+routing + ChatML declaration with precedence golden; composed live-serve
+needs a metallib smoke; multi-turn -state for composed = follow-up).
+Port DECIDED: 36911 stays.
+
+# PREVIOUS WAKE (2026-07-16 early hours — the capture night)
+
+**#381: eleven acquittals and a localised mystery.** The prefill gap vs mlx
+is NOT: host, q8, chunk width, hazards, the metallib binary, bf16 emulation,
+clocks, data values, PSO options, CB overlap, or weight allocation — every
+one receipted (instruments at d65e96b, full chain in #381). Metal System
+Trace with MLX_MAX_OPS_PER_BUFFER=1 shows their real forward's fat qmms at
+~1.7ms each (≈45 TFLOPS, serial, no overlap, no gaps — bucket-count fit is
+decisive) while the SAME op in ANY isolated context (our Go bench, their own
+runtime, their real weight tensors) runs 20.5-22.9. NEXT TOOL: GPU counter
+capture (ALU utilisation forward-vs-burst) — traces saved at
+/private/tmp/lem-dev/{mlx_prefill,mlx_perop,mlx_burst}.trace + harnesses.
+BUILD REGARDLESS: our in-situ 12.9 vs our benched 22 = 1.7x from our own
+pass first (sdpa 2.7TF@win512, launch-bound elementwise, GEMM 14-vs-22).
+ALSO TONIGHT: lem quant SHIPPED (319ddc4 — bf16 in, BYTE-IDENTICAL-to-
+mlx_lm.convert variations out, oracle in-tree; bits 2/4/8, -gguf lane);
+convergence campaign closed at ~50 wins (decode 5-for-5, kv sliding-wake
+quadratic, eval scanners 10-26x, engine render 20->1); field matrix +
+concurrency + tool-calling receipts in the release draft; first-impressions
+audit merged (port decision PENDING WITH SNIDER: 36911 vs 11434).
+
+# PREVIOUS WAKE (2026-07-15 session close — the convergence campaign)
+
+**The folder-by-folder Opus convergence campaign ran all day** (snider's
+rule: single-folder passes, first defended zero retires a folder, wins
+re-queue). ~45 gated wins landed across 11 merge waves, dev pushed at every
+step. Headlines: kv/ multi-head wake was O(N^2) (hidden by heads=1
+fixtures; 16-block wake 39.6MB->4.2MB); both per-turn scorers were mostly
+regexp (ScoreHeuristic halved); ngram drafter 6.7x on the miss path (CPU
+axis, was 0-alloc); model.Sampler full-sorted the 256K vocab per token
+when top-k/p engaged (19.6x fixed — NOTE: metal serve lane samples
+engine-side, live A/B 136 tok/s both sides, so primitive-level not
+serve-headline); welfare Detect/Guard now 0-alloc/turn; ProjMatMulInto
+seam threads projection scratch through all hybrid forwards (race-proven
+ownership model); engine render loop 20->1 allocs same day it landed.
+FOLDER LEDGER — retired on defended zeros: serving/, safety/, jsonenc/,
+internal/, root pkg, train/, agent/, gguf/, merge/, state/filestore.
+Won-and-owing-a-pass: decode/ (4 straight), kv/, eval/, welfare/, engine
+root, safetensors/. Locked: engine/hip (codex, ~1 month). Mine:
+engine/metal. ALSO SHIPPED between waves: Qwen 3.6 model layer (42feca3 —
+gated attention is SIGMOID per reference, registry path via
+ArchSpec.Composed; remaining: serve wiring + fused-expert reshape at
+smoke + GPU kernels, see #379) and the chat-template lift (a9d20c2 —
+ChatTemplateDeclarer, gemma byte-identical fallback, ChatML proven via
+fake; qwen declaration is now a one-liner at serve wiring). Traps 8+9
+(Go 1.26 Sprintf already 1-alloc; option-closure collapse forces whole-
+struct escape) banked in lethean-perf. #378 outbound policy spec awaits
+the plans-repo write (a guardrail blocked it; snider ok'd moving on).
+#380 openai emittedContent O(N^2) still needs the live-model pass.
+Slur catalogue ships EMPTY (hostility axis does live triggering) —
+snider-curated population pending, note for release draft.
+
+# PREVIOUS WAKE (2026-07-15 session, later)
+
+**#376 shipped and receipted live.** The welfare guard was built-but-unwired
+(welfare.Guard/Mediate zero callers; the pipeline that wired Detect has zero
+non-test callers itself — the release draft over-claimed and is now trued).
+7acc246 wires it where requests actually flow: a TextModel decorator at the
+serve resolver fronts every chat route; mediation runs on a fresh
+meta-session against the inner model; lem_ok/rephrase/pause applied per
+spec; lem_end lands as the fourth rung, Lemma-gated. -welfare default ON in
+cmd/lem. LIVE receipt: four escalating hostile turns at a served E2B — the
+model rephrased (warn=true), paused (🍵 reached the client, abuse never
+reached the conversation), rephrased again; audit lines in the serve log.
+Remaining rung: persist ended-state per conversation under continuity.
+BOTH bench agents merged + worktrees cleaned: A (serving lane — the
+ThinkingExtractor quadratic kill 124704→4472 B/op per 200-tok stream,
+conversationKey 13→2 allocs) and B (model cluster — MoE forward 9→5,
+gguf Quantize ~20→1, 46 bench files). Suites: 2052 (serving+welfare+cmd)
++ 3197 (model+agent) green.
+
+# PREVIOUS WAKE (2026-07-15 session)
+
+**#377 closed with a lever + a bug kill.** Snider read the release energy
+table and asked why pure replay climbs while llama-server stays flat. Answer:
+the stateless lane opened a fresh session per request (full re-prefill every
+turn + a maxLen-sized KV alloc/free round trip — also why 31B feels heavy on
+short chats) while TWO complete LCP reuse implementations sat in-engine
+caller-less. Shipped 64688fb: resident-session prompt reuse on the stateless
+lane (llama slot parity; TryLock single slot; stands down under continuity;
+`LTHN_PROMPT_REUSE=0` kills). Receipt: 10-turn stateless walls 3.1→4.4s now
+FLAT ~3.1s with prompt_tok climbing to 3,959. Found + fixed en route
+(300eb33): every prompt-cache rollback (pair lane prepareAssistantPrompt,
+GenerateCached×2) rolled back past wrapped sliding RINGS — silent wrong
+context on MTP multi-turn; all sites now degrade to cold prefill
+(TestPrepareAssistantPromptRingSafety). Release draft + energy-ab README
+updated (replay arm now needs the kill switch to reproduce). TWO OPUS BENCH
+AGENTS dispatched on worktrees perf/bench-a (serving/decode/kv/welfare/root)
++ perf/bench-b (model/agent) off 9af89e9 — adding missing
+{file}_bench_test.go + allocs/B-op cuts; merge their branches when done, then
+`git worktree remove` + prune (.worktrees/goinf-bench-{a,b}).
+
+# PREVIOUS WAKE (2026-07-13 session close)
+
+**The release is on the pad.** `docs/release-v0.12.0-DRAFT.md` is complete —
+name (lem = Lethean Ethical Machine, LEK→LEM→lem lineage), the THREE-WAY
+measured energy receipt (continuity 77.1 J/turn vs llama-server 112.1 vs
+replay 143.9; 21.4/31.1/40.0 kWh per million turns; harness at
+docs/examples/energy-ab/), decode board, 256K receipt, flash kernels,
+welfare guard (go/welfare — already built, wired bidirectionally; #376 =
+just the lem_end rung), falsified-and-kept, video storyboard. Remaining
+before tag: Snider's edit pass, `task build:embed` binaries, tag
+(GitHub-first or after forge returns), the side-by-side video.
+**forge.lthn.sh is DOWN deliberately (CoreAgent phase work)** — plans repo
+has TWO LOCAL UNPUSHED commits (6c50e77 dreaming tier §13, 05d5b1f
+field-first + register view); push forge_sh main when it returns.
+Flash campaign (#375): 256+window shipped default-on (+4% all depths);
+split-D and q8-flash opt-in with falsification receipts in metadata.
+
 ---
 title: Handover
 description: Working notes from the engine-perf campaigns — for the next driver of this codebase.

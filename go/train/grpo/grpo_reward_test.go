@@ -171,3 +171,155 @@ func TestRewardExactAnswer_Ugly(t *testing.T) {
 		t.Fatalf("reward = %+v, want a miss for a superstring answer", reward)
 	}
 }
+
+// --- containsFoldASCII (leaf case-insensitive ASCII substring search) ---
+
+// Good: the haystack folds A-Z to a-z against an already-lowercased needle,
+// and an empty needle is a trivial match.
+func TestContainsFoldASCII_Good(t *testing.T) {
+	if hit, ok := containsFoldASCII("The ANSWER is 42", "answer"); !hit || !ok {
+		t.Fatalf("containsFoldASCII(fold match) = (%v,%v), want (true,true)", hit, ok)
+	}
+	if hit, ok := containsFoldASCII("anything", ""); !hit || !ok {
+		t.Fatalf("containsFoldASCII(empty needle) = (%v,%v), want (true,true)", hit, ok)
+	}
+}
+
+// Bad: a needle with a non-ASCII byte returns ok=false so the caller falls
+// back to the unicode-aware path; a needle longer than the haystack is a clean
+// miss with ok=true (the input was valid ASCII).
+func TestContainsFoldASCII_Bad(t *testing.T) {
+	if hit, ok := containsFoldASCII("a café here", "café"); hit || ok {
+		t.Fatalf("containsFoldASCII(non-ascii needle) = (%v,%v), want (false,false)", hit, ok)
+	}
+	if hit, ok := containsFoldASCII("hi", "hello"); hit || !ok {
+		t.Fatalf("containsFoldASCII(needle longer than haystack) = (%v,%v), want (false,true)", hit, ok)
+	}
+	// A valid-ASCII needle that never occurs — the common "no match" reward
+	// outcome — falls through the whole scan to (false, true).
+	if hit, ok := containsFoldASCII("hello world", "xyz"); hit || !ok {
+		t.Fatalf("containsFoldASCII(absent needle) = (%v,%v), want (false,true)", hit, ok)
+	}
+}
+
+// Ugly: a folded first-byte false-start must not abort the scan — the real
+// match follows later — and a punctuation/digit needle matches raw (folding
+// only touches letters).
+func TestContainsFoldASCII_Ugly(t *testing.T) {
+	if hit, ok := containsFoldASCII("axe ... ANSwer", "answer"); !hit || !ok {
+		t.Fatalf("containsFoldASCII(false-start then match) = (%v,%v), want (true,true)", hit, ok)
+	}
+	if hit, ok := containsFoldASCII("value=+7", "+7"); !hit || !ok {
+		t.Fatalf("containsFoldASCII(punct needle) = (%v,%v), want (true,true)", hit, ok)
+	}
+}
+
+// --- asciiHasPrefixFold ---
+
+// Good: a mixed-case string matches a lowercase prefix under ASCII folding.
+func TestAsciiHasPrefixFold_Good(t *testing.T) {
+	if !asciiHasPrefixFold("ANSWER: 42", "answer:") {
+		t.Fatal("asciiHasPrefixFold(folded prefix) = false, want true")
+	}
+}
+
+// Bad: a string shorter than the prefix can never match, and a mid-prefix
+// divergence fails honestly.
+func TestAsciiHasPrefixFold_Bad(t *testing.T) {
+	if asciiHasPrefixFold("ans", "answer:") {
+		t.Fatal("asciiHasPrefixFold(s shorter than prefix) = true, want false")
+	}
+	if asciiHasPrefixFold("answXr:", "answer:") {
+		t.Fatal("asciiHasPrefixFold(mid divergence) = true, want false")
+	}
+}
+
+// --- cleanAnswerLine ---
+
+// Good: each recognised answer prefix is folded and stripped, leaving the
+// trimmed remainder.
+func TestCleanAnswerLine_Good(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"final answer: 7", "7"},
+		{"Answer: Paris", "Paris"},
+		{"SOLUTION: 42", "42"},
+	} {
+		if got := cleanAnswerLine(tc.in); got != tc.want {
+			t.Fatalf("cleanAnswerLine(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Bad: a whitespace-only line collapses to empty.
+func TestCleanAnswerLine_Bad(t *testing.T) {
+	if got := cleanAnswerLine("   "); got != "" {
+		t.Fatalf("cleanAnswerLine(blank) = %q, want empty", got)
+	}
+}
+
+// Ugly: a line whose first byte is in the {a,f,s} gate but which is not an
+// answer prefix survives verbatim, and a first byte outside the gate skips the
+// prefix scan entirely.
+func TestCleanAnswerLine_Ugly(t *testing.T) {
+	if got := cleanAnswerLine("september was warm"); got != "september was warm" {
+		t.Fatalf("cleanAnswerLine(gate-in non-prefix) = %q, want unchanged", got)
+	}
+	if got := cleanAnswerLine("42 is the answer"); got != "42 is the answer" {
+		t.Fatalf("cleanAnswerLine(gate miss) = %q, want unchanged", got)
+	}
+}
+
+// --- extractReasoningWithAnswer ---
+
+// Good: the answer suffix is stripped off the response to leave the reasoning.
+func TestExtractReasoningWithAnswer_Good(t *testing.T) {
+	got := extractReasoningWithAnswer(dataset.Sample{Response: "First A then B. 42"}, "42")
+	if got != "First A then B." {
+		t.Fatalf("extractReasoningWithAnswer = %q, want the response minus the answer suffix", got)
+	}
+}
+
+// Bad: no answer, or an empty response, yields no reasoning.
+func TestExtractReasoningWithAnswer_Bad(t *testing.T) {
+	if got := extractReasoningWithAnswer(dataset.Sample{Response: "some text"}, ""); got != "" {
+		t.Fatalf("extractReasoningWithAnswer(no answer) = %q, want empty", got)
+	}
+	if got := extractReasoningWithAnswer(dataset.Sample{}, "42"); got != "" {
+		t.Fatalf("extractReasoningWithAnswer(no response) = %q, want empty", got)
+	}
+}
+
+// Ugly: an explicit thinking label wins over the derived suffix-strip, and an
+// answer that is not actually a suffix leaves the whole response intact.
+func TestExtractReasoningWithAnswer_Ugly(t *testing.T) {
+	labelled := extractReasoningWithAnswer(dataset.Sample{
+		Response: "ignored 42",
+		Labels:   map[string]string{"thinking": "the real chain"},
+	}, "42")
+	if labelled != "the real chain" {
+		t.Fatalf("extractReasoningWithAnswer(thinking label) = %q, want the label", labelled)
+	}
+	if got := extractReasoningWithAnswer(dataset.Sample{Response: "42 came first"}, "different"); got != "42 came first" {
+		t.Fatalf("extractReasoningWithAnswer(answer not a suffix) = %q, want the full response", got)
+	}
+}
+
+// --- expectedIsASCIINoNL ---
+
+// Good: plain ASCII with no newline is the fast-path case.
+func TestExpectedIsASCIINoNL_Good(t *testing.T) {
+	if !expectedIsASCIINoNL("plain ascii 42") {
+		t.Fatal("expectedIsASCIINoNL(ascii) = false, want true")
+	}
+}
+
+// Bad: a newline (would span the fragment join) or a non-ASCII byte forces the
+// slower join + unicode-fold path.
+func TestExpectedIsASCIINoNL_Bad(t *testing.T) {
+	if expectedIsASCIINoNL("has\nnewline") {
+		t.Fatal("expectedIsASCIINoNL(newline) = true, want false")
+	}
+	if expectedIsASCIINoNL("café") {
+		t.Fatal("expectedIsASCIINoNL(non-ascii) = true, want false")
+	}
+}

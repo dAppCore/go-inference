@@ -15,4 +15,6 @@ import "dappco.re/go/inference/model/qwen3"
 // orchestration (the composed.ComposedModel port) that will serve it.
 func init() {
 	qwen3.ProjMatMul = MatMulF32NT
+	qwen3.ProjMatMulInto = MatMulF32NTInto              // write-into sibling: skips the projection-output alloc, byte-identical
+	qwen3.GatedDeltaInputDevice = GatedDeltaInputDevice // fuses in_proj_qkv/z/a/b (all read x) into one command buffer
 }

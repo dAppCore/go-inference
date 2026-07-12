@@ -51,7 +51,18 @@ func softplus(v float64) float64 { // log(1+e^v), numerically stable
 
 // matNT computes out[M,N] = in[M,K] @ w[N,K]ᵀ (the Linear y = x·Wᵀ), f32 host.
 func matNT(in, w []float32, M, K, N int) []float32 {
-	out := make([]float32, M*N)
+	return matNTInto(nil, in, w, M, K, N)
+}
+
+// matNTInto is matNT writing into out, reusing it when cap(out) ≥ M·N (else it allocates a fresh M·N
+// slab). Identical f64 accumulation + write order to the fresh-buffer form — only WHERE the result lands
+// changes, so the output is bit-identical.
+func matNTInto(out, in, w []float32, M, K, N int) []float32 {
+	if cap(out) < M*N {
+		out = make([]float32, M*N)
+	} else {
+		out = out[:M*N]
+	}
 	for m := range M {
 		for n := range N {
 			var acc float64
@@ -64,10 +75,33 @@ func matNT(in, w []float32, M, K, N int) []float32 {
 	return out
 }
 
-// BlockForwardF32 runs one chunk of the Mamba-2 block over x [L, D], threading the conv-state ring
-// (priorConv [(K-1),convDim]) and the SSM state (priorSSM [H,P,N]); both nil for a fresh sequence.
-// Returns out [L, D] and the advanced (newConv, newSSM) for the next chunk.
+// BlockScratch holds the reusable projection-output buffers for BlockForwardScratchF32 — the in-proj
+// [L,projDim] and the out-proj [L,D]. A caller stepping one sequence (a decode session — single-goroutine)
+// keeps one Scratch and passes it every token so the two projection GEMMs write into resident buffers
+// instead of allocating. NEVER share a Scratch across concurrently-stepped sessions: the buffers are
+// mutable and unsynchronised (they mirror the recurrent conv/SSM state's ownership — per-session, threaded,
+// never on the shared weights). Buffers grow to fit and are reused thereafter.
+type BlockScratch struct {
+	proj, out []float32
+}
+
+// BlockForwardF32 is BlockForwardScratchF32 with a fresh (nil) scratch — both projections allocate, the
+// behaviour before the write-into seam. Kept for existing callers and the engine backend parity tests;
+// bit-identical to the scratch path.
 func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, priorSSM []float32, L, D int) (out, newConv, newSSM []float32, err error) {
+	return BlockForwardScratchF32(x, w, cfg, priorConv, priorSSM, L, D, nil)
+}
+
+// BlockForwardScratchF32 runs one chunk of the Mamba-2 block over x [L, D], threading the conv-state ring
+// (priorConv [(K-1),convDim]) and the SSM state (priorSSM [H,P,N]); both nil for a fresh sequence.
+// Returns out [L, D] and the advanced (newConv, newSSM) for the next chunk. When sc is non-nil the in/out
+// projection outputs write into its buffers (reused across calls); nil ⇒ each allocates fresh (the
+// BlockForwardF32 path). The recurrent state (newConv/newSSM) is always freshly allocated — carried
+// information, not scratch.
+func BlockForwardScratchF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, priorSSM []float32, L, D int, sc *BlockScratch) (out, newConv, newSSM []float32, err error) {
+	if sc == nil {
+		sc = &BlockScratch{} // throwaway: nil buffers ⇒ both projections allocate, the legacy path
+	}
 	if w == nil {
 		return nil, nil, nil, core.NewError("mamba2.BlockForwardF32: nil weights")
 	}
@@ -80,14 +114,19 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 		return nil, nil, nil, core.NewError("mamba2.BlockForwardF32: num_heads must be a multiple of num_groups")
 	}
 
-	proj, err := projMatMul(x, w.InProj, L, D, projDim) // [L, projDim] (device GEMM when a backend is wired)
+	proj, err := projMatMulInto(sc.proj, x, w.InProj, L, D, projDim) // [L, projDim] (device GEMM when a backend is wired)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	// split z | xBC | dt along the channel axis.
-	z := make([]float32, L*dInner)
-	xBC := make([]float32, L*convDim)
-	dtRaw := make([]float32, L*H)
+	sc.proj = proj
+	// split z | xBC | dt along the channel axis. One backing slab, three non-overlapping capped
+	// windows: each is filled once then read-only (xBC feeds the conv, dtRaw the dt map, z the gate),
+	// so the slab is bit-identical to three makes and saves 2 allocs per block per token.
+	zN, xbcN, dtN := L*dInner, L*convDim, L*H
+	splitBuf := make([]float32, zN+xbcN+dtN)
+	z := splitBuf[0:zN:zN]
+	xBC := splitBuf[zN : zN+xbcN : zN+xbcN]
+	dtRaw := splitBuf[zN+xbcN : zN+xbcN+dtN : zN+xbcN+dtN]
 	for t := range L {
 		row := proj[t*projDim:]
 		copy(z[t*dInner:(t+1)*dInner], row[0:dInner])
@@ -103,11 +142,14 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 		convOut[i] = float32(silu(float64(convOut[i])))
 	}
 
-	// split conv output x_inner | B | C, expand B/C groups to heads.
+	// split conv output x_inner | B | C, expand B/C groups to heads. One backing slab, three capped
+	// windows (xHeads [L,H,P] | bHeads [L,H,N] | cHeads [L,H,N]) — all read-only inputs to the scan.
 	groupDim := G * N
-	xHeads := make([]float32, L*H*P) // [L,H,P]
-	bHeads := make([]float32, L*H*N) // [L,H,N]
-	cHeads := make([]float32, L*H*N)
+	xhN, bhN, chN := L*H*P, L*H*N, L*H*N
+	headBuf := make([]float32, xhN+bhN+chN)
+	xHeads := headBuf[0:xhN:xhN]
+	bHeads := headBuf[xhN : xhN+bhN : xhN+bhN]
+	cHeads := headBuf[xhN+bhN : xhN+bhN+chN : xhN+bhN+chN]
 	headsPerGroup := H / G
 	for t := range L {
 		crow := convOut[t*convDim:]
@@ -119,8 +161,11 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 		}
 	}
 
-	// dt = softplus(dt + dt_bias) ; A = -exp(A_log)
-	dt := make([]float32, L*H)
+	// dt = softplus(dt + dt_bias) ; A = -exp(A_log). One slab, two capped windows (dt [L,H] | a [H]) —
+	// both read-only inputs to the scan.
+	dtaBuf := make([]float32, L*H+H)
+	dt := dtaBuf[0 : L*H : L*H]
+	a := dtaBuf[L*H : L*H+H : L*H+H]
 	for t := range L {
 		for h := range H {
 			v := float64(dtRaw[t*H+h])
@@ -130,7 +175,6 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 			dt[t*H+h] = float32(softplus(v))
 		}
 	}
-	a := make([]float32, H)
 	for h := range H {
 		a[h] = float32(-math.Exp(float64(w.ALog[h])))
 	}
@@ -144,7 +188,10 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 	// g = y·SiLU(z), then normalise g and scale by the weight. This is NOT RMSNorm(y)·SiLU(z) (gate
 	// after), the form metal's shared flakernel uses: on a real mamba2 checkpoint that gate-after form
 	// inflates the activations ~5× and corrupts the logit distribution (confirmed against the HF smoke).
-	gated := make([]float32, L*dInner)
+	// The scan output y is written in place as the gated result: within each row all of y's row is read
+	// into g (f64) before that row is overwritten, and y is dead after this stage, so reusing it is
+	// bit-identical and drops the gated buffer.
+	gated := y
 	g := make([]float64, dInner)
 	for t := range L {
 		yr := y[t*dInner : (t+1)*dInner]
@@ -164,9 +211,10 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 			gated[t*dInner+i] = float32(normed)
 		}
 	}
-	out, err = projMatMul(gated, w.OutProj, L, dInner, D)
+	out, err = projMatMulInto(sc.out, gated, w.OutProj, L, dInner, D)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	sc.out = out
 	return out, newConv, newSSM, nil
 }

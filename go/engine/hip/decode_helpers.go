@@ -457,10 +457,10 @@ func (pair *AttachedDrafterPair) Close() error {
 	}
 	var err error
 	if pair.ownsDraft && pair.Draft != nil && pair.Draft != pair.Target {
-		err = core.ErrorJoin(err, pair.Draft.Close())
+		err = core.ErrorJoin(err, resultError(pair.Draft.Close()))
 	}
 	if pair.ownsTarget && pair.Target != nil {
-		err = core.ErrorJoin(err, pair.Target.Close())
+		err = core.ErrorJoin(err, resultError(pair.Target.Close()))
 	}
 	pair.Target = nil
 	pair.Draft = nil

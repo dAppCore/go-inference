@@ -4,6 +4,8 @@ package parser
 
 import (
 	"testing"
+
+	core "dappco.re/go"
 )
 
 func TestThinking_FilterGemmaHide_Good(t *testing.T) {
@@ -297,5 +299,102 @@ func TestThinking_Processor_Chunks_Ugly(t *testing.T) {
 	chunks[0].Text = "mutated"
 	if got := p.Chunks(); got[0].Text != "plan" {
 		t.Fatalf("Chunks() after external mutation = %+v, want the original plan text intact", got)
+	}
+}
+
+// TestThinking_FindStartTerminator_AnchorMatchesNaive_Good pins the streaming
+// Processor's lead-byte anchor scans (findStart, findTerminator) byte-for-byte
+// to naive min-index references, across the builtin families and adversarial
+// fragment streams. These fire per token, so a divergence would corrupt every
+// streamed reply — this is the byte-identity guard for the O(markers×pending)→
+// O(pending) rewrite.
+func TestThinking_FindStartTerminator_AnchorMatchesNaive_Good(t *testing.T) {
+	naiveStart := func(p *Processor, text string) (int, thinkingMarker, bool) {
+		best := -1
+		var m thinkingMarker
+		for _, c := range p.markers {
+			idx := indexString(text, c.start)
+			if idx < 0 {
+				continue
+			}
+			if best < 0 || idx < best || idx == best && len(c.start) > len(m.start) {
+				best = idx
+				m = c
+			}
+		}
+		return best, m, best >= 0
+	}
+	naiveTerm := func(p *Processor, text string) (int, int) {
+		best, size := -1, 0
+		for _, term := range p.terminators {
+			idx := indexString(text, term)
+			if idx < 0 {
+				continue
+			}
+			if best < 0 || idx < best {
+				best, size = idx, len(term)
+			}
+		}
+		return best, size
+	}
+	hints := []Hint{{Architecture: "qwen3"}, {Architecture: "gemma4_text"}, {Architecture: "gpt-oss"}, {Architecture: ""}}
+	frags := []string{
+		"word ", "the ", "<", ">", "|", "\n", "<think>", "</think>", "<|channel>",
+		"analysis\n", "<start_of_turn>", "thinking\n", "thought\n", "<end_of_turn>",
+		"reasoning\n", "final\n", "x", "  ", "<start_of_turn>thinking\n",
+	}
+	st := uint64(0x2545f4914f6cdd1d)
+	rnd := func() uint64 { st = st*6364136223846793005 + 1442695040888963407; return st >> 1 }
+	for _, hint := range hints {
+		p := NewProcessor(Config{Mode: Hide}, hint)
+		for iter := 0; iter < 50000; iter++ {
+			b := core.NewBuilder()
+			for k := int(rnd()%9) + 1; k > 0; k-- {
+				b.WriteString(frags[rnd()%uint64(len(frags))])
+			}
+			text := b.String()
+			si, sm, sok := p.findStart(text)
+			ni, nm, nok := naiveStart(p, text)
+			if si != ni || sok != nok || sm.start != nm.start {
+				t.Fatalf("findStart %q anchor=(%d,%q,%v) naive=(%d,%q,%v)", text, si, sm.start, sok, ni, nm.start, nok)
+			}
+			ti, tl := p.findTerminator(text)
+			nti, ntl := naiveTerm(p, text)
+			if ti != nti || tl != ntl {
+				t.Fatalf("findTerminator %q anchor=(%d,%d) naive=(%d,%d)", text, ti, tl, nti, ntl)
+			}
+		}
+	}
+}
+
+// TestProcessorDrainFinalConsumesPending pins drain(final=true)'s postcondition:
+// pending is fully consumed on EVERY path (the partial-marker holdback only arms
+// mid-stream), which is what lets Flush skip residue splicing. If a drain change
+// ever retains bytes at final, this fails before Flush silently drops them.
+func TestProcessorDrainFinalConsumesPending(t *testing.T) {
+	cases := []struct {
+		name  string
+		feeds []string
+	}{
+		{"reasoning_tail_no_end_marker", []string{"<think>half finished thought"}},
+		{"holdback_shaped_tail", []string{"visible <thi"}},
+		{"marker_then_tail", []string{"a<think>x</think>b<thi"}},
+		{"bare_terminator_tail", []string{"answer<turn|"}},
+		{"empty", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewProcessor(Config{Mode: Hide}, Hint{Architecture: "gemma4"})
+			for _, f := range tc.feeds {
+				p.Process(f)
+			}
+			p.Flush()
+			if p.pending != "" {
+				t.Fatalf("drain(true) left pending %q — Flush residue splicing was removed on this postcondition", p.pending)
+			}
+			if p.inReasoning {
+				t.Fatalf("Flush left inReasoning set")
+			}
+		})
 	}
 }
