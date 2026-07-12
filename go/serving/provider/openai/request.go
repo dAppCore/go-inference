@@ -62,6 +62,42 @@ func ValidateRequest(req ChatCompletionRequest) error {
 	if req.MaxTokens != nil && *req.MaxTokens < 0 {
 		return requestError("max_tokens must be >= 0", "max_tokens")
 	}
+	if err := validateResponseFormat(req.ResponseFormat, req.Stream); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateResponseFormat checks response_format's shape ahead of generation: a
+// nil format (the field omitted) or Type "" / "text" is always valid (no
+// schema required); "json_object" needs no schema either; "json_schema" must
+// carry a non-empty JSONSchema.Schema (structured.ValidateWithRepair has
+// nothing to validate against otherwise). Any other Type is rejected outright.
+//
+// stream=true is rejected for a validating format (json_object / json_schema):
+// validateStructuredOutput needs the full response materialised before it can
+// check — let alone repair — the shape, which is fundamentally at odds with
+// emitting content deltas as they arrive. Rather than half-build streaming
+// structured output (silently skipping validation, or buffering and replaying
+// as a single fake "stream"), this is a clean, documented 4xx — see the gap
+// note in handler.go.
+func validateResponseFormat(format *ResponseFormat, stream bool) error {
+	if format == nil {
+		return nil
+	}
+	switch format.Type {
+	case "", "text", "json_object":
+		// no schema required
+	case "json_schema":
+		if format.JSONSchema == nil || len(format.JSONSchema.Schema) == 0 {
+			return requestError("response_format.json_schema.schema is required", "response_format")
+		}
+	default:
+		return requestError("response_format.type must be \"text\", \"json_object\", or \"json_schema\"", "response_format")
+	}
+	if stream && format.needsValidation() {
+		return requestError("response_format json_object/json_schema requires stream=false", "response_format")
+	}
 	return nil
 }
 

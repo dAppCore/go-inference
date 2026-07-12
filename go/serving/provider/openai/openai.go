@@ -38,6 +38,11 @@ type ChatCompletionRequest struct {
 	ReasoningEffort    string              `json:"reasoning_effort,omitempty"`
 	ChatTemplateKwargs *ChatTemplateKwargs `json:"chat_template_kwargs,omitempty"`
 	Tools              []Tool              `json:"tools,omitempty"`
+	// ToolChoice controls whether/which of Tools the model is offered this turn
+	// (RFC §6.4) — see toolchoice.go.
+	ToolChoice *ToolChoice `json:"tool_choice,omitempty"`
+	// ResponseFormat selects structured output (RFC §6.15) — see responseformat.go.
+	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
 }
 
 // Tool is one OpenAI function-calling tool declaration.

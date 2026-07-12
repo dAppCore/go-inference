@@ -251,11 +251,18 @@ func (h *CapabilityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	var report inference.CapabilityReport
 	if reporter, ok := model.(inference.CapabilityReporter); ok {
-		writeJSON(w, http.StatusOK, reporter.Capabilities())
-		return
+		report = reporter.Capabilities()
+	} else {
+		report = inference.TextModelCapabilities(inference.RuntimeIdentity{}, model)
 	}
-	writeJSON(w, http.StatusOK, inference.TextModelCapabilities(inference.RuntimeIdentity{}, model))
+	// Layer this package's own tool-calling / structured-output capabilities on
+	// top (capabilities.go) — a model/backend's own report has no way to know
+	// about the Gemma 4 tool syntax or the serving/structured validation loop
+	// this HTTP surface adds, so /v1/models/capabilities would otherwise
+	// under-report what a request against it can actually do (#37).
+	writeJSON(w, http.StatusOK, withServingCapabilities(report, model.Info()))
 }
 
 func (h *CacheStatsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

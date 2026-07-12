@@ -185,3 +185,51 @@ func ParseWithRepair(raw string, target any, reprompt Reprompter, maxAttempts in
 	}
 	return err
 }
+
+// ValidateWithRepair is Validate with the same bounded reprompt-and-retry
+// contract as ParseWithRepair, for the schema-descriptor (no Go type) case.
+// There is no target out-parameter to coerce into here, so — unlike
+// ParseWithRepair, which reports only success/failure — the (possibly
+// repaired) raw text travels back to the caller alongside the error: on
+// success it is the first attempt that validated; on exhaustion it is the
+// last attempt tried, paired with that attempt's error.
+//
+// A nil reprompt (or maxAttempts <= 0) means a single attempt with no
+// repair — behaving exactly like Validate, with raw echoed back unchanged.
+// maxAttempts counts every Validate, so maxAttempts of 3 is one initial
+// validate plus up to two repair re-prompts.
+//
+//	fixed, err := structured.ValidateWithRepair(raw, schema, model, 3)
+//	if err != nil { return err }
+//	// fixed is raw's text once it satisfied schema.
+func ValidateWithRepair(raw string, schema Schema, reprompt Reprompter, maxAttempts int) (string, error) {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+
+	err := Validate(raw, schema)
+	if err == nil {
+		return raw, nil
+	}
+	// No repair channel — one shot only.
+	if reprompt == nil {
+		return raw, err
+	}
+
+	current := raw
+	// One attempt already spent above; loop the remaining budget.
+	for attempt := 1; attempt < maxAttempts; attempt++ {
+		next, rErr := reprompt.Reprompt(current, err)
+		if rErr != nil {
+			// Couldn't reach the model — surface the reprompt failure as the
+			// final error, with the last validation error as its cause for context.
+			return current, core.E("structured", "repair: reprompt failed: "+rErr.Error(), err)
+		}
+		current = next
+		err = Validate(current, schema)
+		if err == nil {
+			return current, nil
+		}
+	}
+	return current, err
+}
