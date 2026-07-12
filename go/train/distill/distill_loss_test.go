@@ -5,6 +5,8 @@ package distill
 import (
 	"math"
 	"testing"
+
+	core "dappco.re/go"
 )
 
 // --- NormalizeConfig ---
@@ -175,5 +177,103 @@ func TestBatchCacheKey_Ugly(t *testing.T) {
 	}
 	if nilKey == emptyKey {
 		t.Fatal("BatchCacheKey(nil) and BatchCacheKey(empty) produced the same key, want them distinct")
+	}
+}
+
+// --- appendBatchCacheKeyJSON / batchCacheKeyJSONLen (the cache-key emitter) ---
+
+// Good: the hand-rolled emitter is byte-identical to core.JSONMarshal of the
+// equivalent payload, and the length predictor returns exactly the emitted
+// byte count. The teacher-logit cache is keyed on SHA256 of the emitter output
+// (BatchCacheKey), so any drift from encoding/json silently invalidates every
+// cached entry, and any predictor/emitter mismatch mis-sizes the buffer. This
+// battery walks the float-format edges where a divergence would hide: the
+// 'e'-format cutoffs (< 1e-6, >= 1e21), the "e-09" -> "e-9" exponent cleanup,
+// negative/zero/neg-zero values, wide ints, and the nil-vs-empty distinction.
+func TestAppendBatchCacheKeyJSON_Good(t *testing.T) {
+	f := func(v float64) float32 { return float32(v) }
+	cases := []struct {
+		name    string
+		tokens  [][]int
+		targets [][]int
+		mask    [][]float32
+	}{
+		{"simple", [][]int{{1, 2}}, [][]int{{3, 4}}, [][]float32{{0.5, 1}}},
+		{"nil-all", nil, nil, nil},
+		{"empty-outer", [][]int{}, [][]int{}, [][]float32{}},
+		{"nil-inner-row", [][]int{nil}, [][]int{{}}, [][]float32{nil}},
+		{"empty-inner-row", [][]int{{}}, [][]int{nil}, [][]float32{{}}},
+		{"wide-ints", [][]int{{-1, -12345, 0}}, [][]int{{2147483647, -2147483648}}, [][]float32{{-1}}},
+		{"tiny-exp-cleanup", nil, nil, [][]float32{{f(1e-7), f(5e-7), f(9e-8)}}},
+		{"tiny-exp-two-digit", nil, nil, [][]float32{{f(1e-10), f(3e-20), f(1e-38)}}},
+		{"huge-exp", nil, nil, [][]float32{{f(1e21), f(1e22), f(3.4e38)}}},
+		{"boundary", nil, nil, [][]float32{{f(1e-6), f(9.999e-7), f(9.9e20), f(1.0001e21)}}},
+		{"fractions", nil, nil, [][]float32{{0.1, 0.25, 123.456, -0.001}}},
+		{"neg-zero", nil, nil, [][]float32{{f(math.Copysign(0, -1)), 0}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := struct {
+				Tokens  [][]int     `json:"tokens"`
+				Targets [][]int     `json:"targets"`
+				Mask    [][]float32 `json:"mask"`
+			}{Tokens: tc.tokens, Targets: tc.targets, Mask: tc.mask}
+			ref := core.JSONMarshal(payload)
+			if !ref.OK {
+				t.Fatalf("core.JSONMarshal reference failed: %v", ref.Value)
+			}
+			want := string(ref.Value.([]byte))
+			got, ok := appendBatchCacheKeyJSON(nil, tc.tokens, tc.targets, tc.mask)
+			if !ok {
+				t.Fatalf("appendBatchCacheKeyJSON ok=false, want true")
+			}
+			if string(got) != want {
+				t.Fatalf("emitter not byte-identical to JSONMarshal\n emitter: %s\n marshal: %s", got, want)
+			}
+			n, okLen := batchCacheKeyJSONLen(tc.tokens, tc.targets, tc.mask)
+			if !okLen {
+				t.Fatalf("batchCacheKeyJSONLen ok=false, want true")
+			}
+			if n != len(got) {
+				t.Fatalf("length predictor = %d, emitter wrote %d bytes: %s", n, len(got), got)
+			}
+		})
+	}
+}
+
+// Bad: a NaN or Inf mask value makes the emitter (and the length predictor)
+// report ok=false at exactly the inputs where core.JSONMarshal errors — the
+// parity that guarantees BatchCacheKey takes its Sprintf fallback whenever, and
+// only whenever, encoding/json would have failed.
+func TestAppendBatchCacheKeyJSON_Bad(t *testing.T) {
+	for _, bad := range []float32{float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))} {
+		mask := [][]float32{{1, bad}}
+		payload := struct {
+			Tokens  [][]int     `json:"tokens"`
+			Targets [][]int     `json:"targets"`
+			Mask    [][]float32 `json:"mask"`
+		}{Tokens: [][]int{{1}}, Targets: [][]int{{2}}, Mask: mask}
+		if ref := core.JSONMarshal(payload); ref.OK {
+			t.Fatalf("core.JSONMarshal unexpectedly succeeded for non-finite %v", bad)
+		}
+		if _, ok := appendBatchCacheKeyJSON(nil, [][]int{{1}}, [][]int{{2}}, mask); ok {
+			t.Fatalf("appendBatchCacheKeyJSON ok=true for non-finite %v, want false", bad)
+		}
+		if _, ok := batchCacheKeyJSONLen([][]int{{1}}, [][]int{{2}}, mask); ok {
+			t.Fatalf("batchCacheKeyJSONLen ok=true for non-finite %v, want false", bad)
+		}
+	}
+}
+
+// Bad: the leaf float emitter guards NaN/Inf itself (returning ok=false and
+// leaving dst untouched) even though appendBatchCacheKeyJSON pre-filters them
+// in its length pass — the guard is part of the primitive's own contract, not
+// only the batch caller's.
+func TestAppendCacheKeyFloat32_Bad(t *testing.T) {
+	for _, bad := range []float32{float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))} {
+		out, ok := appendCacheKeyFloat32(nil, bad)
+		if ok || out != nil {
+			t.Fatalf("appendCacheKeyFloat32(nil, %v) = (%v, %v), want (nil, false)", bad, out, ok)
+		}
 	}
 }
