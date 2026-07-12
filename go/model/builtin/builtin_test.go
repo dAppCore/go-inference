@@ -40,6 +40,16 @@ func TestBuiltinRegistersLlama(t *testing.T) {
 	}
 }
 
+func TestBuiltinRegistersQwen2(t *testing.T) {
+	spec, ok := model.LookupArch("qwen2")
+	if !ok {
+		t.Fatal("model_type qwen2 not registered through builtin")
+	}
+	if spec.Composed != nil {
+		t.Fatal("qwen2 unexpectedly registered as a composed architecture")
+	}
+}
+
 func TestBuiltinRegistersMoEFamilies(t *testing.T) {
 	for _, mt := range []string{"mixtral", "deepseek_v2", "deepseek_v3"} {
 		spec, ok := model.LookupArch(mt)
