@@ -961,3 +961,49 @@ on GPU (10-17ms → 0.1ms/draft tok) · `aa45e02` quant K-row verify head ·
 conversation continuity (13× turn-2) · `601ac4e` checkpoint-window context
 default · `45e014f` the wall/GPU split probe · `d00c526` byte-identical PLE
 gate fusion + the thin-stage receipt.
+
+## 2026-07-12, LATE NIGHT — the 12B verdict, GEMM rung, wave-4 close
+
+- **#52 r10 VERDICT — the nine-round "hip 12B forward bug" dissolved.** On
+  IDENTICAL pack bytes (box clean requant rsynced to the mac — r8 had compared
+  metal-on-local-HF-quant vs hip-on-box-requant, so its "layer-5 MLP
+  amplification, final cosine 0.22" was a PACK-MISMATCH ARTEFACT) the engines
+  AGREE: worst cosine 0.9635 anywhere in the 48L×6tok ladder, final layers
+  0.994+, all five layer-5 MLP sub-tensors ≥0.9997, hip product ==
+  tanh-gelu(gate)×up to 1e-5. Metal generates the clean pack coherently
+  (71 tok/s). The REAL hip signature: PROGRESSIVE decay (coherent ~60 tok →
+  "Rayreuleg" → "Earth'ように" → "1.11"-loop collapse) at **0.1 tok/s decode /
+  2 tok/s prefill** — accumulating error on a host-fallback-heavy route, not a
+  wrong kernel. Suspect: 12B dual-geometry attention (512 head-dim full-attn
+  every 6th layer vs 256 sliding; E2B/E4B have no dual geometry) missing the
+  device route. r10 codex lane (lane/hip-12b-r10) is producing the per-op
+  device-vs-host route table 12B-vs-E2B, diagnosis only.
+- **Cross-engine diff discipline:** any future engine differential MUST consume
+  byte-identical weights on both sides (rsync the pack, sha the shards) — two
+  quantisation runs of the same model differ enough to fake an engine bug.
+- **`fix(serving,generate) 0af1329`:** the serve resolver + decode/generate
+  pinned `WithBackend("metal")`, so `lem generate`/serve could NEVER load on
+  the hip box. Now inference.LoadModel preference order (metal→rocm→llama_cpp,
+  Available()-checked). Darwin receipt unchanged (67.5 tok/s).
+- **TRAP: `go -C go build -o <relative>`** resolves -o against the -C dir —
+  wrote the fixed binary to go/build/bin/ while the probe ran the stale one at
+  build/bin/ (cost ~20 min). Absolute -o always; verify with
+  `strings <bin> | grep <new-literal>` before trusting a probe.
+- **CB rung 2 landed (lane/gemm-batch → ea73a3a~):** weight-read-once GEMM
+  batching over the lane set — the seven projections gather K lanes into one
+  slab, sweep each weight once. **1.47× over replay at K=4/8** (synthetic bf16
+  E2B-shape; 265.9 tok/s aggregate at K=4 vs 179.4 replay), byte-identical,
+  lockstep counter-guarded receipt. 4-bit falls back to the 2.58× per-lane ICB
+  replay: the quant ICB fuses entry/MLP RMS into the qmv (fp32-internal), so a
+  batched read needs a **batched rms-qmv-rows metallib kernel** — pinned as the
+  next rung; metallib is read-only until a rebuild window.
+- **Wave-4 MoE flood closed:** qwenmoe, granitemoe, dbrx, llama4-text
+  (a9b658d), jetmoe re-run (37f9c68 — self-committed 13 tests). Composed gained
+  QKVClip (dbrx), l2NormHead + per-layer buildAttn (llama4), granite
+  multipliers survived the union (its own test caught my drop). **LESSON PAID
+  TWICE: never remove a worktree until `git log <branch> -1` shows a commit
+  past base** — jetmoe run 1's uncommitted 97%-coverage package was destroyed
+  by the orchestrator's cleanup sweep.
+- **Gate discipline (third strike today):** `<cmd> | tail; echo $?` reports
+  TAIL's exit — the rsync "success" that copied nothing and the vet
+  "clean-exit" both hid behind it. Capture to file; assert on the file.
