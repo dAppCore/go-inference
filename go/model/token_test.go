@@ -740,6 +740,102 @@ func TestGenerate_StepWithID(t *testing.T) {
 	}
 }
 
+// batchStepper is counterStepper's batch-prefill-capable sibling: PrefillBatch is the identity on the
+// LAST embedding (the counter is memoryless, so that's exactly what len(embs) sequential Step calls would
+// leave as the running hidden), and it records every PrefillBatch/Step call it sees — a passing generation
+// with the right call counts proves generateStepwiseWithSession's prefill walk used PrefillBatch ONCE for
+// the whole prompt and reserved Step for the genuine per-token decode steps that follow, not the other way
+// round.
+type batchStepper struct {
+	prefillCalls *int
+	prefillLens  *[]int
+	stepCalls    *int
+}
+
+func (s batchStepper) Step(emb []byte) ([]byte, error) {
+	if s.stepCalls != nil {
+		*s.stepCalls++
+	}
+	return emb, nil // identity, same as counterStepper — the counter is memoryless
+}
+
+func (s batchStepper) PrefillBatch(embs [][]byte) ([]byte, error) {
+	if s.prefillCalls != nil {
+		*s.prefillCalls++
+	}
+	if s.prefillLens != nil {
+		*s.prefillLens = append(*s.prefillLens, len(embs))
+	}
+	if len(embs) == 0 {
+		return nil, core.NewError("batchStepper: PrefillBatch called with an empty batch")
+	}
+	return embs[len(embs)-1], nil
+}
+
+// batchSessionModel is counterModel plus a BatchPrefillStepper-capable session — with an erroring
+// DecodeForward so a passing generation proves the incremental session path (not the whole-seq fallback)
+// ran.
+type batchSessionModel struct {
+	counterModel
+	prefillCalls *int
+	prefillLens  *[]int
+	stepCalls    *int
+}
+
+func (batchSessionModel) DecodeForward(inputs [][]byte) ([][]byte, error) {
+	return nil, core.NewError("whole-seq path must not run when a session is available")
+}
+
+func (m batchSessionModel) OpenSession() (DecodeStepper, error) {
+	return batchStepper{prefillCalls: m.prefillCalls, prefillLens: m.prefillLens, stepCalls: m.stepCalls}, nil
+}
+
+// TestGenerate_BatchPrefillStepper is BatchPrefillStepper's behavioural receipt: given a 3-token prompt
+// and 4 requested tokens, PrefillBatch must be called EXACTLY once (with all 3 prompt embeddings, not one
+// call per token) — the fix's whole point, that a per-Step device fusion no longer fires once per prefill
+// token. Step must still be called for every GENUINE decode step: maxNew-1 times (the transition from
+// each generated token to the next; the last generated token is produced but never stepped, generation
+// having stopped — the same off-by-one TestGenerate_StepWithID's own count documents). The generated
+// sequence must also be byte-identical to the pre-existing per-token walk (sessionCounterModel), proving
+// the batching changes HOW the prompt reaches the cache, not WHAT gets generated.
+func TestGenerate_BatchPrefillStepper(t *testing.T) {
+	var prefillCalls, stepCalls int
+	var prefillLens []int
+	m := batchSessionModel{
+		counterModel: counterModel{vocab: 16, dModel: 4},
+		prefillCalls: &prefillCalls, prefillLens: &prefillLens, stepCalls: &stepCalls,
+	}
+	prompt := []int32{0, 1, 2}
+	const maxNew = 4
+
+	got, err := Generate(m, prompt, maxNew, -1)
+	if err != nil {
+		t.Fatalf("Generate (BatchPrefillStepper path): %v", err)
+	}
+	if want := []int32{3, 4, 5, 6}; !idsEqual(got, want) {
+		t.Fatalf("batch-prefill count = %v, want %v", got, want)
+	}
+	if prefillCalls != 1 {
+		t.Fatalf("PrefillBatch called %d times, want exactly 1 (the whole prompt in ONE call)", prefillCalls)
+	}
+	if len(prefillLens) != 1 || prefillLens[0] != len(prompt) {
+		t.Fatalf("PrefillBatch saw batch lengths %v, want a single call of length %d", prefillLens, len(prompt))
+	}
+	if want := maxNew - 1; stepCalls != want {
+		t.Fatalf("Step called %d times, want exactly %d (once per genuine decode transition, zero for prefill)", stepCalls, want)
+	}
+
+	// Output-identical to the pre-existing per-token walk over the same prompt — batching the prefill
+	// must not change WHAT is generated.
+	perTokenWalk, err := Generate(sessionCounterModel{counterModel: counterModel{vocab: 16, dModel: 4}, opened: new(int), closed: new(int)}, prompt, maxNew, -1)
+	if err != nil {
+		t.Fatalf("Generate (per-token walk): %v", err)
+	}
+	if !idsEqual(got, perTokenWalk) {
+		t.Fatalf("batch-prefill result %v != per-token-walk result %v", got, perTokenWalk)
+	}
+}
+
 // errModel is a TokenModel with one injectable failure point — embed/decode/head — for
 // driving every error return in the whole-sequence generate loop. failAt names which call
 // errors (and embedAfter delays the embed failure to the RE-embed of a generated token).
