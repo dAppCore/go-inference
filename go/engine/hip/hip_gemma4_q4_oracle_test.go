@@ -646,3 +646,798 @@ func hipOracleEnvFloat(key string, def float64) float64 {
 	}
 	return def
 }
+
+// TestHIPGemma4Q4IncrementalDecodeOracle is the #52 round-3 STATE-CARRY oracle.
+// Round 2 proved every op on the batched-prefill path is float-clean and that
+// prefill yields a correct first token; the 12B still garbles between decode
+// steps. This oracle isolates the carry: it greedy-decodes N tokens through the
+// real device-KV decode machinery (a 1-token prefill-with-prior per step, which
+// is exactly what production batched decode appends with) and, after each step,
+// diffs the incremental next-token logits against a FRESH full batched prefill
+// of the identical prefix (prompt + generated[0..k-1]) — the path round 2
+// proved op-correct. Both prefixes are token-identical, so the ONLY variable is
+// carried-vs-fresh KV state; the first step whose argmax (or logits) diverges is
+// the bug's address.
+//
+// When a divergence is found (or GO_ROCM_ORACLE_LOCALISE_STEP forces one), it
+// re-derives the incremental and fresh device state at that step and dumps a
+// per-layer KV-row divergence table, labelled sliding vs full, comparing both
+// the newly appended row and all retained rows. The 5:1 interleave gives the
+// signature: a sliding-window append/RoPE fault lights up the sliding layers, a
+// full-attention/k_eq_v fault the 8 full layers (5,11,17,23,29,35,41,47 on the
+// 12B), a global position fault every layer; new-row-only vs all-rows delta
+// separates an append/RoPE-at-position bug from a retention/window bug.
+//
+// Calibrate on E2B/E4B first: they are coherent on hip and MUST match at every
+// step. If they diverge too, the oracle harness is wrong, not the engine.
+//
+// FINDING (2026-07-12, this oracle): the state-carry theory is FALSIFIED. On the
+// exact production garble trajectory (12B fp16 -> token 45518 "thought" on loop),
+// incremental == recompute at every step (max/refRMS <= 0.006, argmax identical),
+// and so does coherent E2B. The embedding, all 48 per-op layer transforms, and
+// the final norm + tied LM head are each float-reference-clean; yet the 12B's
+// full-forward top logit is a control token (107) and its residual-stream RMS
+// collapses (peak ~4.4 @ L23 -> 0.22 @ L48). The bug is in the DENSE chained
+// forward, not the KV carry. CRUCIAL: E2B/E4B are Gemma-3n (per-layer inputs +
+// cross-layer KV sharing) while the 12B is standard DENSE (perLayerInputLayers=0,
+// kvSharedLayers=0) — a structurally DIFFERENT path. So E2B coherence validates
+// the ORACLE METHOD but NOT the dense forward; the 12B is the only model here on
+// the dense path, and it is the one that garbles. The reference-clean components
+// prove the corruption is cross-layer accumulation, invisible to per-op isolation.
+// Strongest next instrument: a chained full-float reference forward (chain round
+// 2's per-op references across all 48 layers) to pin the exact dense layer.
+//
+// Env: GO_ROCM_RUN_HIP_TESTS=1, GO_ROCM_KERNEL_HSACO, model path (as round 2).
+// Optional: GO_ROCM_ORACLE_KV_MODE (default fp16 — near-exact, so any divergence
+// is a genuine geometry/stride/mapping fault, not quant noise; round 2 showed
+// fp16 also garbles), GO_ROCM_ORACLE_PROMPT_LEN (8), GO_ROCM_ORACLE_DECODE_STEPS
+// (6), GO_ROCM_ORACLE_TOL (0.05 of refRMS — argmax is the hard gate),
+// GO_ROCM_ORACLE_LOCALISE_STEP (-1 = auto: first divergent step),
+// GO_ROCM_ORACLE_FORCE_BATCHED_PROJ (0 — set 1 to drive the incremental step
+// through production's exact ForceBatchedProjection decode kernel).
+func TestHIPGemma4Q4IncrementalDecodeOracle(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware oracle tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled gfx1101 kernels/rocm_kernels.hip HSACO")
+	}
+	modelPath := hipOracleModelPath()
+	if modelPath == "" {
+		t.Skip("set GO_ROCM_ORACLE_MODEL_PATH / GO_ROCM_PRODUCTION_MODEL_PATH to a local Gemma4 MLX-affine pack")
+	}
+	mode := strings.TrimSpace(os.Getenv("GO_ROCM_ORACLE_KV_MODE"))
+	if mode == "" {
+		mode = rocmKVCacheModeFP16
+	}
+	// A real prompt reproduces the production garble ("Sky"/"thought" then
+	// collapse); synthetic gibberish merely repeats and both paths agree, which
+	// says nothing. Default to the production repro prompt; set "synthetic" to
+	// fall back to the round-2 deterministic token generator.
+	promptText := os.Getenv("GO_ROCM_ORACLE_PROMPT")
+	if promptText == "" {
+		promptText = "why the sky is blue"
+	}
+	synthLen := hipOracleEnvInt("GO_ROCM_ORACLE_PROMPT_LEN", 8)
+	steps := hipOracleEnvInt("GO_ROCM_ORACLE_DECODE_STEPS", 6)
+	tolRatio := float32(hipOracleEnvFloat("GO_ROCM_ORACLE_TOL", 0.05))
+	localiseStep := hipOracleEnvInt("GO_ROCM_ORACLE_LOCALISE_STEP", -1)
+	forceBatchedProj := os.Getenv("GO_ROCM_ORACLE_FORCE_BATCHED_PROJ") == "1"
+	const epsilon = float32(1e-6)
+
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(runtime).LoadModel(modelPath, inference.WithContextLen(4096)))
+	if err != nil {
+		t.Fatalf("LoadModel(%q): %v", modelPath, err)
+	}
+	defer model.Close()
+	rocmLoaded, ok := model.(*rocmModel)
+	if !ok {
+		t.Fatalf("LoadModel returned %T, want *rocmModel", model)
+	}
+	loaded, ok := rocmLoaded.native.(*hipLoadedModel)
+	if !ok {
+		t.Fatalf("native is %T, want *hipLoadedModel", rocmLoaded.native)
+	}
+	driver := loaded.driver
+	ctx := context.Background()
+
+	layerCount := loaded.modelInfo.NumLayers
+	if layerCount <= 0 {
+		t.Fatalf("loaded model reports %d layers", layerCount)
+	}
+	cfg, err := loaded.loadedGemma4Q4ForwardConfig(layerCount)
+	if err != nil {
+		t.Fatalf("loadedGemma4Q4ForwardConfig(%d): %v", layerCount, err)
+	}
+	if !hipGemma4Q4CanUseBatchedGeneratePrefill(cfg) {
+		t.Skipf("model at %s cannot use batched generate prefill (MoE/per-layer-input); oracle targets the dense Q4 carry", modelPath)
+	}
+	hidden := cfg.Layers[0].HiddenSize
+	vocab := cfg.Layers[0].VocabSize
+	last := cfg.Layers[len(cfg.Layers)-1]
+
+	// Match production's greedy trajectory: production suppresses control tokens
+	// before argmax (without it, raw greedy picks low special tokens and walks a
+	// different, non-garbling path — E2B then looks broken though production
+	// decodes it coherently). Both compared paths share the same suppression, so
+	// the incremental-vs-recompute diff stays apples-to-apples.
+	suppress := map[int32]bool{}
+	for _, id := range hipGemma4Q4GenerationSuppressTokenIDs(loaded, nil) {
+		suppress[id] = true
+	}
+
+	fullLayers := 0
+	perLayerInputLayers := 0
+	for _, l := range cfg.Layers {
+		if hipIncrOracleLayerKind(l) == "full" {
+			fullLayers++
+		}
+		if l.PerLayerInput.hasLayerApply() {
+			perLayerInputLayers++
+		}
+	}
+	scalars := make([]float32, len(cfg.Layers))
+	sMin, sMax := float32(math.Inf(1)), float32(math.Inf(-1))
+	for i, l := range cfg.Layers {
+		s := l.effectiveLayerScalar()
+		scalars[i] = s
+		if s < sMin {
+			sMin = s
+		}
+		if s > sMax {
+			sMax = s
+		}
+	}
+	t.Logf("INCR-ORACLE structure: perLayerInputLayers=%d globalPrecompute=%v layer_scalar min=%.5f max=%.5f\n  layer_scalars=%v",
+		perLayerInputLayers, cfg.Layers[0].PerLayerInput.hasGlobalPrecompute(), sMin, sMax, scalars)
+	var prompt []int32
+	if promptText == "synthetic" {
+		prompt = make([]int32, synthLen)
+		for i := range prompt {
+			prompt[i] = int32((i*2654435761 + 12345) % vocab)
+			if prompt[i] < 0 {
+				prompt[i] += int32(vocab)
+			}
+		}
+	} else {
+		ids, matched, terr := hipGemma4Q4PromptTokenIDs(promptText, loaded)
+		if terr != nil {
+			t.Fatalf("tokenize prompt %q: %v", promptText, terr)
+		}
+		if !matched || len(ids) == 0 {
+			t.Fatalf("prompt %q did not tokenize to Gemma4 IDs (matched=%v len=%d)", promptText, matched, len(ids))
+		}
+		prompt = ids
+	}
+	promptLen := len(prompt)
+	t.Logf("INCR-ORACLE model=%s layers=%d (full=%d sliding=%d) hidden=%d vocab=%d kvMode=%s prompt=%q promptLen=%d steps=%d forceBatchedProj=%v kvSharedLayers=%d sharedKVSources=%v",
+		modelPath, layerCount, fullLayers, layerCount-fullLayers, hidden, vocab, mode, promptText, promptLen, steps, forceBatchedProj, cfg.KVSharedLayers, cfg.SharedKVSources)
+
+	// --- Prefill the prompt: builds the initial carried device state and the
+	// logits that predict the first generated token (round 2: prefill-correct). ---
+	prefillLogits, prefillGreedy, deviceState, err := hipIncrOraclePrefill(ctx, t, driver, cfg, last, prompt, mode, epsilon, suppress, true)
+	if err != nil {
+		t.Fatalf("prompt prefill: %v", err)
+	}
+	defer func() {
+		if deviceState != nil {
+			_ = deviceState.Close()
+		}
+	}()
+
+	generated := []int32{int32(prefillGreedy)}
+	incrLogits := [][]float32{prefillLogits}
+	incrGreedy := []int{prefillGreedy}
+	position := promptLen
+
+	for k := 1; k <= steps; k++ {
+		tok := generated[k-1]
+		lg, gtok, next, stepErr := hipIncrOracleStep(ctx, t, driver, cfg, last, mode, forceBatchedProj, deviceState, tok, position, epsilon, suppress)
+		if stepErr != nil {
+			t.Fatalf("incremental decode step %d (token %d @ pos %d): %v", k, tok, position, stepErr)
+		}
+		hipReleaseClosedGemma4Q4DeviceDecodeState(deviceState)
+		deviceState = next
+		incrLogits = append(incrLogits, lg)
+		incrGreedy = append(incrGreedy, gtok)
+		generated = append(generated, int32(gtok))
+		position++
+	}
+
+	// --- Per-step incremental-vs-recompute divergence table. ---
+	rows := []string{"  step  pos   argmax(incr/recompute)  match  max|Δlogit|  refRMS   max/refRMS"}
+	firstDivergent := -1
+	for k := 1; k <= steps; k++ {
+		seq := make([]int32, 0, promptLen+k)
+		seq = append(seq, prompt...)
+		seq = append(seq, generated[:k]...)
+		recLogits, recGreedy, _, recErr := hipIncrOraclePrefill(ctx, t, driver, cfg, last, seq, mode, epsilon, suppress, false)
+		if recErr != nil {
+			t.Fatalf("recompute prefill (len %d) for step %d: %v", len(seq), k, recErr)
+		}
+		maxAbs, _ := hipOracleMaxMeanDiff(recLogits, incrLogits[k])
+		refRMS := hipOracleRMS(recLogits)
+		ratio := float32(0)
+		if refRMS > 0 {
+			ratio = maxAbs / refRMS
+		}
+		argMatch := recGreedy == incrGreedy[k]
+		diverged := !argMatch || ratio > tolRatio
+		if diverged && firstDivergent < 0 {
+			firstDivergent = k
+		}
+		status := "ok"
+		if !argMatch {
+			status = "ARGMAX"
+		} else if ratio > tolRatio {
+			status = "logit"
+		}
+		rows = append(rows, fmt.Sprintf("  %-4d  %-4d  %-8d / %-8d       %-5s  %-11.5f  %-7.4f  %-9.4f %s",
+			k, promptLen+k-1, incrGreedy[k], recGreedy, boolLabel(argMatch), maxAbs, refRMS, ratio, status))
+	}
+	t.Logf("=== #52 incremental-vs-recompute divergence table (kvMode=%s) ===\n%s", mode, strings.Join(rows, "\n"))
+
+	// --- Surface (c): the retained final stage (final RMSNorm -> LM-head ->
+	// softcap) is SHARED by incremental and recompute, so an incr==recompute
+	// result cannot exonerate it. Round 2 never checked it. Diff the final norm
+	// and the tied LM-head projection against round 2's proven float references
+	// at the last prompt row (which predicts the first generated token). ---
+	if os.Getenv("GO_ROCM_ORACLE_SKIP_FINAL_STAGE") != "1" {
+		hipIncrOracleCheckFinalStage(ctx, t, driver, cfg, last, prompt, mode, epsilon, tolRatio)
+	}
+
+	// --- Logit lens: run the prompt through the first L layers only, then apply
+	// the real final head. Since embedding, every per-op layer transform, and the
+	// final stage are each reference-clean, the corruption lives in the CHAINED
+	// residual stream; this pins the depth at which the top token turns into a
+	// suppressed control token (E2B stays a real word). ---
+	if os.Getenv("GO_ROCM_ORACLE_SKIP_LOGIT_LENS") != "1" {
+		hipIncrOracleLogitLens(ctx, t, driver, cfg, last, prompt, mode, epsilon, suppress)
+	}
+
+	// --- Localise the pinned step to a KV surface. ---
+	target := localiseStep
+	if target < 0 {
+		target = firstDivergent
+	}
+	if target >= 1 && target <= steps {
+		hipIncrOracleLocaliseKV(ctx, t, driver, cfg, mode, forceBatchedProj, prompt, generated, target, promptLen, epsilon, suppress)
+	} else if firstDivergent < 0 {
+		t.Logf("INCR-ORACLE: no incremental/recompute divergence across %d steps — the state-carry theory is FALSIFIED for this config (kvMode=%s, promptLen=%d). Widen steps/prompt or switch KV mode; report the strongest next hypothesis.", steps, mode, promptLen)
+	}
+
+	if firstDivergent >= 1 {
+		t.Errorf("INCR-ORACLE: incremental decode diverges from recompute at step %d (pos %d) — carried KV state != fresh prefill; see the divergence + per-layer KV tables above", firstDivergent, promptLen+firstDivergent-1)
+	}
+}
+
+// hipIncrOracleLogitLens applies the real final head to the residual stream after
+// each depth L (1..N layers), reporting the last-prompt-row argmax, whether that
+// raw top token is a suppressed control token, and the top/2nd-logit margin. The
+// depth at which a real-word top token turns into a control token localises where
+// the chained residual stream corrupts — the surface per-op isolation can't see.
+func hipIncrOracleLogitLens(ctx context.Context, t *testing.T, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, last hipGemma4Q4Layer0Config, prompt []int32, mode string, epsilon float32, suppress map[int32]bool) {
+	t.Helper()
+	ec := defaultHIPGemma4Q4EngineConfig()
+	ec.DeviceKVMode = mode
+	hidden := cfg.Layers[0].HiddenSize
+	tokenCount := len(prompt)
+	rows := []string{"  L     rawArgmax  ctrl?  suppArgmax  top1     top2     margin   hiddenRMS"}
+	flip := -1
+	for L := 1; L <= len(cfg.Layers); L++ {
+		tcfg := cfg
+		tcfg.Layers = cfg.Layers[:L]
+		tcfg.KVSharedLayers = 0
+		tcfg.SharedKVSources = nil
+		forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, driver, tcfg, prompt, 0, epsilon, mode, nil, nil, nil, nil, -1, nil, nil, ec)
+		if err != nil {
+			rows = append(rows, fmt.Sprintf("  %-4d  (prefill err: %v)", L, err))
+			continue
+		}
+		all, rErr := hipReadFloat32DeviceOutput(forward.FinalHidden, "rocm.hip.IncrOracle", "lens hidden", tokenCount*hidden)
+		_ = forward.Close()
+		if rErr != nil {
+			rows = append(rows, fmt.Sprintf("  %-4d  (read err: %v)", L, rErr))
+			continue
+		}
+		rowH := all[(tokenCount-1)*hidden : tokenCount*hidden]
+		hiddenRMS := hipOracleRMS(rowH)
+		logits, lErr := hipIncrOracleFinalLogits(ctx, driver, last, rowH, epsilon)
+		if lErr != nil {
+			rows = append(rows, fmt.Sprintf("  %-4d  (final-stage err: %v)", L, lErr))
+			continue
+		}
+		rawArg := hipIncrOracleArgmax(logits, nil)
+		suppArg := hipIncrOracleArgmax(logits, suppress)
+		ctrl := suppress[int32(rawArg)]
+		top1, top2 := hipIncrOracleTop2(logits)
+		ctrlMark := "no"
+		if ctrl {
+			ctrlMark = "YES"
+			if flip < 0 {
+				flip = L
+			}
+		} else {
+			flip = -1 // reset: only a sustained flip near the output matters
+		}
+		rows = append(rows, fmt.Sprintf("  %-4d  %-9d  %-5s  %-10d  %-8.3f %-8.3f %-8.3f %-8.3f",
+			L, rawArg, ctrlMark, suppArg, top1, top2, top1-top2, hiddenRMS))
+	}
+	t.Logf("=== #52 logit-lens per-depth argmax (prompt last row, kvMode=%s) ===\n%s\n  earliest sustained control-token depth (to output) = %d of %d layers",
+		mode, strings.Join(rows, "\n"), flip, len(cfg.Layers))
+}
+
+// hipIncrOracleTop2 returns the top and second logit values.
+func hipIncrOracleTop2(logits []float32) (top1, top2 float32) {
+	top1 = float32(math.Inf(-1))
+	top2 = float32(math.Inf(-1))
+	for _, v := range logits {
+		if v > top1 {
+			top2 = top1
+			top1 = v
+		} else if v > top2 {
+			top2 = v
+		}
+	}
+	return top1, top2
+}
+
+// hipIncrOracleCheckFinalStage validates the shared final stage against round 2's
+// proven float references: the final RMSNorm and the (tied) LM-head projection.
+// It prefills the prompt, takes the last row's post-stack hidden, then (1) diffs
+// hip's final norm vs hipReferenceRMSNorm and (2) diffs hip's LM-head projection
+// vs hipReferenceMLXAffineProjection fed the SAME normed input (so only the
+// projection differs). A divergence here is the 12B garble's address on a surface
+// incremental-vs-recompute cannot see, because both paths share this stage.
+func hipIncrOracleCheckFinalStage(ctx context.Context, t *testing.T, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, last hipGemma4Q4Layer0Config, prompt []int32, mode string, epsilon float32, tolRatio float32) {
+	t.Helper()
+	ec := defaultHIPGemma4Q4EngineConfig()
+	ec.DeviceKVMode = mode
+	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, driver, cfg, prompt, 0, epsilon, mode, nil, nil, nil, nil, -1, nil, nil, ec)
+	if err != nil {
+		t.Logf("final-stage: prompt prefill: %v", err)
+		return
+	}
+	defer forward.Close()
+	tokenCount := len(prompt)
+	hidden := cfg.Layers[0].HiddenSize
+	all, err := hipReadFloat32DeviceOutput(forward.FinalHidden, "rocm.hip.IncrOracle", "final-stage hidden", tokenCount*hidden)
+	if err != nil {
+		t.Logf("final-stage: read hidden: %v", err)
+		return
+	}
+	row := all[(tokenCount-1)*hidden : tokenCount*hidden]
+
+	// (0) Embedding: hip's scaled lookup vs float reference. Round 2 only prints
+	// the embedding RMS (never reference-checks it), yet it is the ONE forward
+	// input every per-op check is fed and so cannot validate: a wrong embedding
+	// (bad dequant, wrong row, wrong sqrt(hidden) scale) makes every downstream
+	// op "pass" while the residual stream — and thus the logits — are wrong. The
+	// check is scale-invariant: direction (normalised) isolates the lookup, the
+	// implied scale isolates the sqrt(hidden) embedding scale.
+	emb := cfg.Layers[0].Embedding
+	expScale := cfg.Layers[0].EmbeddingScale
+	if expScale == 0 {
+		expScale = hipGemma4Q4EmbeddingScale(hidden)
+	}
+	embBits := emb.QuantBits
+	if embBits == 0 {
+		embBits = hipMLXQ4ProjectionBits
+	}
+	embW := hipOracleReadUint32(t, driver, emb.EmbeddingPointer, emb.EmbeddingBytes)
+	embS := hipOracleReadUint16(t, driver, emb.ScalePointer, emb.ScaleBytes)
+	embB := hipOracleReadUint16(t, driver, emb.BiasPointer, emb.BiasBytes)
+	embRefUnscaled, embErr := hipReferenceMLXAffineEmbeddingLookup(embW, embS, embB, emb.VocabSize, emb.HiddenSize, emb.GroupSize, prompt, embBits)
+	if embErr != nil {
+		t.Logf("final-stage: ref embedding lookup: %v", embErr)
+	} else {
+		embHip, hErr := hipReadFloat32DeviceOutput(forward.Embedding, "rocm.hip.IncrOracle", "scaled embedding", tokenCount*hidden)
+		if hErr != nil {
+			t.Logf("final-stage: read hip embedding: %v", hErr)
+		} else {
+			refRow := embRefUnscaled[:hidden]
+			hipRow := embHip[:hidden]
+			refRMS := hipOracleRMS(refRow)
+			hipRMS := hipOracleRMS(hipRow)
+			impliedScale := float32(0)
+			if refRMS > 0 {
+				impliedScale = hipRMS / refRMS
+			}
+			var dirMax float32
+			if refRMS > 0 && hipRMS > 0 {
+				for i := 0; i < hidden; i++ {
+					d := refRow[i]/refRMS - hipRow[i]/hipRMS
+					if d < 0 {
+						d = -d
+					}
+					if d > dirMax {
+						dirMax = d
+					}
+				}
+			}
+			embStatus := "ok"
+			if dirMax > tolRatio || impliedScale < expScale*0.98 || impliedScale > expScale*1.02 {
+				embStatus = "FAIL"
+			}
+			t.Logf("=== #52 embedding float-reference check (token0=%d, hidden=%d, group=%d bits=%d) ===\n"+
+				"  embedding    dirMax(normalised)=%.5f  impliedScale=%.4f expScale=%.4f(sqrt%d)  %s",
+				prompt[0], hidden, emb.GroupSize, embBits, dirMax, impliedScale, expScale, hidden, embStatus)
+			if embStatus == "FAIL" {
+				t.Errorf("EMBEDDING DIVERGES from float reference (dirMax=%.5f impliedScale=%.4f vs expScale=%.4f) — the 12B garble is in the embedding lookup/scale, upstream of every per-op-clean layer", dirMax, impliedScale, expScale)
+			}
+		}
+	}
+
+	// (1) Final RMSNorm: hip kernel vs float reference on the identical hidden row.
+	finalNormCfg := last.FinalNorm
+	finalNormCfg.Epsilon = epsilon
+	normW := hipOracleReadNormWeight(t, driver, last.FinalNorm)
+	normHip, err := hipRunRMSNormKernelWithDeviceWeightConfig(ctx, driver, row, finalNormCfg)
+	if err != nil {
+		t.Logf("final-stage: hip final norm: %v", err)
+		return
+	}
+	normRef, err := hipReferenceRMSNorm(row, normW, epsilon)
+	if err != nil {
+		t.Logf("final-stage: ref final norm: %v", err)
+		return
+	}
+	normMax, _ := hipOracleMaxMeanDiff(normRef, normHip)
+	normRMS := hipOracleRMS(normRef)
+	normRatio := float32(0)
+	if normRMS > 0 {
+		normRatio = normMax / normRMS
+	}
+
+	// (2) Tied LM-head projection: hip kernel vs float reference, both fed hip's
+	// own normed row, so the ONLY variable is the projection kernel/weights.
+	lmW := hipOracleReadUint32(t, driver, last.LMHeadProjection.WeightPointer, last.LMHeadProjection.WeightBytes)
+	lmS := hipOracleReadUint16(t, driver, last.LMHeadProjection.ScalePointer, last.LMHeadProjection.ScaleBytes)
+	lmB := hipOracleReadUint16(t, driver, last.LMHeadProjection.BiasPointer, last.LMHeadProjection.BiasBytes)
+	bits := last.LMHeadProjection.Bits
+	if bits == 0 {
+		bits = hipMLXQ4ProjectionBits
+	}
+	logitsHip, err := hipRunMLXQ4ProjectionKernelWithDeviceWeightConfig(ctx, driver, normHip, last.LMHeadProjection)
+	if err != nil {
+		t.Logf("final-stage: hip LM-head: %v", err)
+		return
+	}
+	logitsRef, err := hipReferenceMLXAffineProjection(normHip, lmW, lmS, lmB, last.LMHeadProjection.Rows, last.LMHeadProjection.Cols, last.LMHeadProjection.GroupSize, bits)
+	if err != nil {
+		t.Logf("final-stage: ref LM-head: %v", err)
+		return
+	}
+	lmMax, lmMean := hipOracleMaxMeanDiff(logitsRef, logitsHip)
+	lmRMS := hipOracleRMS(logitsRef)
+	lmRatio := float32(0)
+	if lmRMS > 0 {
+		lmRatio = lmMax / lmRMS
+	}
+	argHip := hipIncrOracleArgmax(logitsHip, nil)
+	argRef := hipIncrOracleArgmax(logitsRef, nil)
+
+	normStatus := "ok"
+	if normRatio > tolRatio {
+		normStatus = "FAIL"
+	}
+	lmStatus := "ok"
+	if lmRatio > tolRatio || argHip != argRef {
+		lmStatus = "FAIL"
+	}
+	t.Logf("=== #52 final-stage float-reference check (row=%d, kvMode=%s, LM rows=%d cols=%d group=%d bits=%d) ===\n"+
+		"  final_norm   maxAbs=%.5f refRMS=%.4f max/refRMS=%.5f  %s\n"+
+		"  lm_head      maxAbs=%.5f meanAbs=%.5f refRMS=%.4f max/refRMS=%.5f argmax(hip/ref)=%d/%d  %s",
+		tokenCount-1, mode, last.LMHeadProjection.Rows, last.LMHeadProjection.Cols, last.LMHeadProjection.GroupSize, bits,
+		normMax, normRMS, normRatio, normStatus,
+		lmMax, lmMean, lmRMS, lmRatio, argHip, argRef, lmStatus)
+	if normStatus == "FAIL" || lmStatus == "FAIL" {
+		t.Errorf("FINAL-STAGE DIVERGES from float reference (norm=%s lm_head=%s) — the 12B garble is in the shared retained final stage, not the KV carry", normStatus, lmStatus)
+	}
+}
+
+// hipIncrOracleFinalLogits runs the retained final stage — final RMSNorm, LM-head
+// projection, tanh softcap — on one hidden row, byte-identically to the decode
+// else-branch in hipRunGemma4Q4SingleTokenForwardWithStateInternal. Sharing this
+// stage across both compared paths controls surface (c): the only variable left
+// between incremental and recompute logits is the hidden row each path produced.
+func hipIncrOracleFinalLogits(ctx context.Context, driver nativeHIPDriver, last hipGemma4Q4Layer0Config, rowHidden []float32, epsilon float32) ([]float32, error) {
+	finalNormCfg := last.FinalNorm
+	finalNormCfg.Epsilon = epsilon
+	finalNorm, err := hipRunRMSNormKernelWithDeviceWeightConfig(ctx, driver, rowHidden, finalNormCfg)
+	if err != nil {
+		return nil, err
+	}
+	logits, err := hipRunMLXQ4ProjectionKernelWithDeviceWeightConfig(ctx, driver, finalNorm, last.LMHeadProjection)
+	if err != nil {
+		return nil, err
+	}
+	return hipGemma4Q4SoftcapLogits(logits, last.FinalLogitSoftcap)
+}
+
+// hipIncrOraclePrefill runs a fresh full batched prefill (startPosition 0, no
+// prior) over tokens and returns the last row's softcapped logits + greedy
+// token. When returnState is set it also returns the finalised device KV state
+// (positions 0..len(tokens)-1) for KV-surface localisation.
+func hipIncrOraclePrefill(ctx context.Context, t *testing.T, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, last hipGemma4Q4Layer0Config, tokens []int32, mode string, epsilon float32, suppress map[int32]bool, returnState bool) ([]float32, int, *hipGemma4Q4DeviceDecodeState, error) {
+	t.Helper()
+	ec := defaultHIPGemma4Q4EngineConfig()
+	ec.DeviceKVMode = mode
+	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, driver, cfg, tokens, 0, epsilon, mode, nil, nil, nil, nil, -1, nil, nil, ec)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	tokenCount := len(tokens)
+	hiddenSize := cfg.Layers[0].HiddenSize
+	all, err := hipReadFloat32DeviceOutput(forward.FinalHidden, "rocm.hip.IncrOracle", "prefill final hidden", tokenCount*hiddenSize)
+	if err != nil {
+		_ = forward.Close()
+		return nil, 0, nil, err
+	}
+	lastRow := all[(tokenCount-1)*hiddenSize : tokenCount*hiddenSize]
+	logits, err := hipIncrOracleFinalLogits(ctx, driver, last, lastRow, epsilon)
+	if err != nil {
+		_ = forward.Close()
+		return nil, 0, nil, err
+	}
+	greedy := hipIncrOracleArgmax(logits, suppress)
+	if !returnState {
+		return logits, greedy, nil, forward.Close()
+	}
+	state, stateErr := hipGemma4Q4DeviceDecodeStateFromPrefillForward(forward, mode)
+	closeErr := forward.Close()
+	if stateErr != nil {
+		return nil, 0, nil, stateErr
+	}
+	if closeErr != nil {
+		_ = state.Close()
+		return nil, 0, nil, closeErr
+	}
+	return logits, greedy, state, nil
+}
+
+// hipIncrOracleStep advances the carried device KV state by one token exactly as
+// production batched decode does (a 1-token prefill-with-prior; ForceBatchedProjection
+// mirrors hipRunAttachedDrafterTargetAdvanceOneBatch when requested). It returns
+// that step's softcapped logits + greedy token and the new device state; the
+// caller releases the prior state after finalisation, as production does.
+func hipIncrOracleStep(ctx context.Context, t *testing.T, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, last hipGemma4Q4Layer0Config, mode string, forceBatchedProj bool, prior *hipGemma4Q4DeviceDecodeState, tokenID int32, position int, epsilon float32, suppress map[int32]bool) ([]float32, int, *hipGemma4Q4DeviceDecodeState, error) {
+	t.Helper()
+	layerCount := len(cfg.Layers)
+	priorLayerKV := hipGemma4Q4DeviceLayerCaches(prior, nil, layerCount)
+	priorDesc, err := hipGemma4Q4DeviceLayerDescriptorTableAliases(prior, nil, layerCount)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer hipCloseGemma4Q4DeviceLayerDescriptorTables(priorDesc)
+	ec := defaultHIPGemma4Q4EngineConfig()
+	ec.DeviceKVMode = mode
+	ec.ForceBatchedProjection = forceBatchedProj
+	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, driver, cfg, []int32{tokenID}, position, epsilon, mode, priorLayerKV, priorDesc, nil, nil, -1, nil, nil, ec)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	hiddenSize := cfg.Layers[0].HiddenSize
+	row, err := hipReadFloat32DeviceOutput(forward.FinalHidden, "rocm.hip.IncrOracle", "step final hidden", hiddenSize)
+	if err != nil {
+		_ = forward.Close()
+		return nil, 0, nil, err
+	}
+	logits, err := hipIncrOracleFinalLogits(ctx, driver, last, row, epsilon)
+	if err != nil {
+		_ = forward.Close()
+		return nil, 0, nil, err
+	}
+	greedy := hipIncrOracleArgmax(logits, suppress)
+	next, stateErr := hipGemma4Q4DeviceDecodeStateFromPrefillForward(forward, mode)
+	closeErr := forward.Close()
+	if stateErr != nil {
+		return nil, 0, nil, stateErr
+	}
+	if closeErr != nil {
+		_ = next.Close()
+		return nil, 0, nil, closeErr
+	}
+	if err := hipFinalizeGemma4Q4ForwardDeviceState(prior, next); err != nil {
+		_ = next.Close()
+		return nil, 0, nil, err
+	}
+	return logits, greedy, next, nil
+}
+
+// hipIncrOracleLocaliseKV re-derives the incremental carried state and a fresh
+// recompute state at the pinned step (identical token prefix) and diffs their
+// per-layer device KV, at the newly appended row and across all retained rows,
+// so the first diverging layer + its type name the corrupted surface.
+func hipIncrOracleLocaliseKV(ctx context.Context, t *testing.T, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, mode string, forceBatchedProj bool, prompt, generated []int32, step, promptLen int, epsilon float32, suppress map[int32]bool) {
+	t.Helper()
+	last := cfg.Layers[len(cfg.Layers)-1]
+	newPos := promptLen + step - 1
+
+	// Incremental carried state after feeding generated[0..step-1].
+	_, _, incrState, err := hipIncrOraclePrefill(ctx, t, driver, cfg, last, prompt, mode, epsilon, suppress, true)
+	if err != nil {
+		t.Logf("localise: prompt prefill: %v", err)
+		return
+	}
+	defer func() {
+		if incrState != nil {
+			_ = incrState.Close()
+		}
+	}()
+	pos := promptLen
+	for j := 0; j < step; j++ {
+		_, _, next, stepErr := hipIncrOracleStep(ctx, t, driver, cfg, last, mode, forceBatchedProj, incrState, generated[j], pos, epsilon, suppress)
+		if stepErr != nil {
+			t.Logf("localise: incremental step %d: %v", j, stepErr)
+			return
+		}
+		hipReleaseClosedGemma4Q4DeviceDecodeState(incrState)
+		incrState = next
+		pos++
+	}
+
+	// Fresh recompute state over the identical prefix prompt+generated[0..step-1].
+	seq := make([]int32, 0, promptLen+step)
+	seq = append(seq, prompt...)
+	seq = append(seq, generated[:step]...)
+	_, _, recState, err := hipIncrOraclePrefill(ctx, t, driver, cfg, last, seq, mode, epsilon, suppress, true)
+	if err != nil {
+		t.Logf("localise: recompute prefill: %v", err)
+		return
+	}
+	defer func() {
+		if recState != nil {
+			_ = recState.Close()
+		}
+	}()
+
+	rows := []string{fmt.Sprintf("  layer  type      window  newRow(pos=%d) maxΔkey maxΔval   allRows maxΔkey maxΔval", newPos)}
+	firstDivLayer := -1
+	firstDivKind := ""
+	divByKind := map[string]int{}
+	for L := range cfg.Layers {
+		layer := cfg.Layers[L]
+		kind := hipIncrOracleLayerKind(layer)
+		incrCache := incrState.layerCache(L)
+		recCache := recState.layerCache(L)
+		if incrCache == nil || recCache == nil {
+			rows = append(rows, fmt.Sprintf("  %-5d  %-8s  %-6d  (cache unavailable)", L, kind, layer.SlidingWindow))
+			continue
+		}
+		ik, iv, iKW, iVW, iTok, ierr := hipIncrOracleDecodeCache(incrCache)
+		rk, rv, rKW, rVW, rTok, rerr := hipIncrOracleDecodeCache(recCache)
+		if ierr != nil || rerr != nil {
+			rows = append(rows, fmt.Sprintf("  %-5d  %-8s  %-6d  (decode err incr=%v rec=%v)", L, kind, layer.SlidingWindow, ierr, rerr))
+			continue
+		}
+		if iKW != rKW || iVW != rVW {
+			rows = append(rows, fmt.Sprintf("  %-5d  %-8s  %-6d  (width mismatch key %d/%d val %d/%d)", L, kind, layer.SlidingWindow, iKW, rKW, iVW, rVW))
+			continue
+		}
+		newKeyD := hipIncrOracleRowDelta(ik, rk, iKW, iTok, rTok, newPos)
+		newValD := hipIncrOracleRowDelta(iv, rv, iVW, iTok, rTok, newPos)
+		allKeyD := hipIncrOracleAllDelta(ik, rk)
+		allValD := hipIncrOracleAllDelta(iv, rv)
+		diverged := newKeyD > 1e-2 || newValD > 1e-2 || allKeyD > 1e-2 || allValD > 1e-2
+		mark := ""
+		if diverged {
+			divByKind[kind]++
+			mark = "  <== DIVERGES"
+			if firstDivLayer < 0 {
+				firstDivLayer = L
+				firstDivKind = kind
+			}
+		}
+		rows = append(rows, fmt.Sprintf("  %-5d  %-8s  %-6d  %-13.5f %-8.5f  %-13.5f %-8.5f%s",
+			L, kind, layer.SlidingWindow, newKeyD, newValD, allKeyD, allValD, mark))
+		_ = iTok
+		_ = rTok
+	}
+	summary := fmt.Sprintf("first-diverging-layer=%d kind=%s  divergent-by-kind=%v", firstDivLayer, firstDivKind, divByKind)
+	if firstDivLayer < 0 {
+		summary = "NO per-layer KV divergence at this step — the corrupted surface is downstream of KV (final-stage/scratch) or the logit divergence is numeric-only"
+	}
+	t.Logf("=== #52 per-layer KV-row localisation @ step %d (pos %d, kvMode=%s) ===\n%s\n  %s", step, newPos, mode, strings.Join(rows, "\n"), summary)
+}
+
+// hipIncrOracleDecodeCache reads a device KV cache back to host and dequantises
+// it to contiguous [tokens*width] key/value float slices, indexed by absolute
+// token position.
+func hipIncrOracleDecodeCache(cache *rocmDeviceKVCache) (keys, values []float32, keyWidth, valueWidth, tokenCount int, err error) {
+	host, err := cache.hostCache()
+	if err != nil {
+		return nil, nil, 0, 0, 0, err
+	}
+	keyWidth = host.keyWidth
+	valueWidth = host.valueWidth
+	if keyWidth <= 0 || valueWidth <= 0 {
+		return nil, nil, 0, 0, 0, core.E("rocm.hip.IncrOracle", "kv cache has zero vector width", nil)
+	}
+	for _, b := range host.blocks {
+		end := b.tokenStart + b.tokenCount
+		if end > tokenCount {
+			tokenCount = end
+		}
+	}
+	keys = make([]float32, tokenCount*keyWidth)
+	values = make([]float32, tokenCount*valueWidth)
+	for _, b := range host.blocks {
+		if b.keyWidth != keyWidth || b.valueWidth != valueWidth {
+			return nil, nil, 0, 0, 0, core.E("rocm.hip.IncrOracle", "kv block width mismatch", nil)
+		}
+		kd := b.key.decodeRows(b.keyWidth)
+		vd := b.value.decodeRows(b.valueWidth)
+		copy(keys[b.tokenStart*keyWidth:], kd)
+		copy(values[b.tokenStart*valueWidth:], vd)
+	}
+	return keys, values, keyWidth, valueWidth, tokenCount, nil
+}
+
+// hipIncrOracleRowDelta returns max|Δ| over one token row shared by both caches.
+func hipIncrOracleRowDelta(a, b []float32, width, aTok, bTok, pos int) float32 {
+	if pos < 0 || pos >= aTok || pos >= bTok {
+		return float32(math.NaN())
+	}
+	var maxAbs float32
+	for i := 0; i < width; i++ {
+		d := a[pos*width+i] - b[pos*width+i]
+		if d < 0 {
+			d = -d
+		}
+		if d > maxAbs {
+			maxAbs = d
+		}
+	}
+	return maxAbs
+}
+
+// hipIncrOracleAllDelta returns max|Δ| over every element both caches share.
+func hipIncrOracleAllDelta(a, b []float32) float32 {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	var maxAbs float32
+	for i := 0; i < n; i++ {
+		d := a[i] - b[i]
+		if d < 0 {
+			d = -d
+		}
+		if d > maxAbs {
+			maxAbs = d
+		}
+	}
+	return maxAbs
+}
+
+// hipIncrOracleLayerKind classifies a layer as full-attention or sliding-window
+// (the 5:1 interleave), used to read the divergence signature.
+func hipIncrOracleLayerKind(layer hipGemma4Q4Layer0Config) string {
+	if layer.SlidingWindow > 0 {
+		return "sliding"
+	}
+	return "full"
+}
+
+// hipIncrOracleArgmax is the host greedy over a softcapped logit vector, skipping
+// suppressed control tokens exactly as production does before argmax.
+func hipIncrOracleArgmax(logits []float32, suppress map[int32]bool) int {
+	best := -1
+	for i, v := range logits {
+		if suppress[int32(i)] {
+			continue
+		}
+		if best < 0 || v > logits[best] {
+			best = i
+		}
+	}
+	if best < 0 {
+		best = 0
+	}
+	return best
+}
