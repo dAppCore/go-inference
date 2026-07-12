@@ -22,6 +22,11 @@ import (
 // portable so it runs on darwin and on the AMD box via the rsync tree.
 
 func e2b4bitSnapshotDir() string {
+	if dir := os.Getenv("GO_ROCM_AUDIO_MODEL_PATH"); dir != "" {
+		if _, err := os.Stat(dir + "/model.safetensors"); err == nil {
+			return dir
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
