@@ -105,7 +105,7 @@ func printUsage(w io.Writer) {
 	core.WriteString(w, "  ebook               render a model directory as a valid EPUB3 (weights as base64 plates)\n")
 	core.WriteString(w, "\n")
 	core.WriteString(w, "Convert\n")
-	core.WriteString(w, "  quant               quantise a dense model dir (MLX affine, or -gguf) into a loadable model dir\n")
+	core.WriteString(w, "  quant               quantise a dense model dir (MLX, GPTQ, FP8, NF4, or GGUF)\n")
 	core.WriteString(w, "\n")
 	core.WriteString(w, "API\n")
 	core.WriteString(w, "  spec                export the OpenAPI document for lem's HTTP surface (feeds SDK generation)\n")

@@ -29,6 +29,20 @@ func TestSafetensors_Encode_Golden(t *testing.T) {
 	}
 }
 
+func TestEncodeFP8E4M3RoundTrip(t *testing.T) {
+	blob, err := Encode(map[string]Tensor{"weight": {Dtype: "F8_E4M3", Shape: []int{2}, Data: []byte{0x38, 0xb8}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(blob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed["weight"].Dtype != "F8_E4M3" || len(parsed["weight"].Data) != 2 {
+		t.Fatalf("FP8 tensor = %+v", parsed["weight"])
+	}
+}
+
 // blob builds a safetensors byte stream from a header JSON string + the data section
 // (8-byte little-endian header length, the JSON, then the data).
 func blob(header string, data []byte) []byte {
