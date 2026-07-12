@@ -33,3 +33,27 @@ func TestHIPDecodeRouteMetrics_DisabledIsZeroCost(t *testing.T) {
 		t.Fatalf("inactive metrics = %#v, want nil", got)
 	}
 }
+
+func TestHIPFeedbackReceipts_RecordAndSnapshot(t *testing.T) {
+	receipts := newHIPFeedbackReceipts()
+	receipts.record(0, 17, 17, 9, 9)
+	receipts.record(1, 23, 23, 10, 10)
+
+	snapshot := receipts.snapshot()
+	if len(snapshot) != 2 {
+		t.Fatalf("receipt count = %d, want 2", len(snapshot))
+	}
+	if got := snapshot[0]; got.Step != 0 || got.DeviceArgmax != 17 || got.FedToken != 17 || got.Position != 9 || got.KVWriteIndex != 9 {
+		t.Fatalf("first receipt = %#v", got)
+	}
+	if got := snapshot[1]; got.Step != 1 || got.DeviceArgmax != 23 || got.FedToken != 23 || got.Position != 10 || got.KVWriteIndex != 10 {
+		t.Fatalf("second receipt = %#v", got)
+	}
+}
+
+func TestHIPFeedbackReceipts_DisabledIsZeroCost(t *testing.T) {
+	hipFeedbackReceiptsActive.Store(nil)
+	if got := hipActiveFeedbackReceipts(); got != nil {
+		t.Fatalf("inactive receipts = %#v, want nil", got)
+	}
+}
