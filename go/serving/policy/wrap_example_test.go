@@ -11,11 +11,12 @@ import (
 
 // ExampleWrapResolverMediated shows the grade-G2 wrapper decorating a resolver so
 // every resolved model's output routes rewrite hits through the mediator. Tokens
-// arrive split across the span; the mediator still sees it whole.
+// arrive split across the span; the mediator still sees it whole, and its
+// (sanitised) output is re-enforced once before it reaches the client.
 func ExampleWrapResolverMediated() {
 	pol, _ := Compile([]byte(`{"rules":[{"match":"term","value":"PROJECT-X","action":"rewrite"}]}`))
-	mediate := func(_ context.Context, _ int, span string) (string, error) {
-		return "«" + span + "»", nil
+	mediate := func(_ context.Context, _ int, _ string) (string, error) {
+		return "our flagship", nil
 	}
 	fake := &policyFakeModel{tokens: []string{"the PROJ", "ECT-X ships"}}
 	resolver := WrapResolverMediated(resolverOf(fake), pol, nil, mediate)
@@ -27,5 +28,5 @@ func ExampleWrapResolverMediated() {
 	}
 	core.Println(b.String())
 	// Output:
-	// the «PROJECT-X» ships
+	// the our flagship ships
 }

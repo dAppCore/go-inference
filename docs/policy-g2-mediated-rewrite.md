@@ -66,8 +66,9 @@ type Mediator func(ctx context.Context, ruleIndex int, span string) (string, err
 - return `(text, nil)` — emit `text` in place of the span.
 - return `("", _)` or `(_, err)` — treated as failure → degrade to redact.
 
-The mediator is trusted deployment code (exactly like `welfare.Dispatcher`). Its
-output is emitted verbatim; the engine does not re-scan it (see Open questions).
+The mediator is deployment-*supplied* but **not trusted with its output**: it may
+be the model itself, so its returned text is re-enforced once before emission
+(see **Re-enforcement of mediator output** below).
 
 ## Streaming behaviour — the buffering boundary
 
@@ -98,15 +99,38 @@ Consequence for latency: the enforcer calls the mediator **synchronously** from
 long as the mediator takes — bounded by `mediate_timeout_ms`. Non-matching text
 before and after the span streams at G1 speed; only the hit pays the stall.
 
+## Re-enforcement of mediator output (untrusted mediator)
+
+The mediator may be the model itself, so its output is **re-enforced once** before
+emission — a single, **non-recursive** enforcement pass (`Policy.rescanMediated`):
+
+- The mediator output is a **complete string** (the mediator returned it whole),
+  so there is no streaming hold-back — it is scanned as a **closed buffer**.
+- **Every** residual policy hit in it — redact, refuse, *or* rewrite — degrades to
+  **redact**: the span is replaced by the rule's redact text (`residualReplacement`
+  — a refuse rule, which carries no replacement, uses the default redaction).
+- The mediator is **never called again**: no recursion, no second mediator call. A
+  rewrite hit inside mediator output is redacted, not re-mediated.
+- A residual **refuse** hit degrades to redact and **does not stop the stream** —
+  the stream-level refuse decision belongs to the *original* scan over the model's
+  own output, never to a re-scan of mediator text.
+- The deployment-configured redact **fallback** (used on a mediator failure) is
+  *not* re-scanned — only the untrusted mediator's own output is.
+
+Any residual hit found here marks the rewrite's audit `Event` **degraded** (below).
+The clean streaming path is untouched and stays 0-alloc; the re-scan allocates
+only on the mediated path, which already allocates for the mediator call.
+
 ## Failure behaviour
 
-| condition                                   | outcome                          |
-|---------------------------------------------|----------------------------------|
-| mediator returns `(text, nil)`, `text != ""`| emit `text`                      |
-| mediator returns an error                   | degrade to redact (`replacement`)|
-| mediator returns `("", nil)`                | degrade to redact (empty = fail) |
-| mediator exceeds `mediate_timeout_ms`       | degrade to redact; stall ends    |
-| rewrite policy loaded, **no mediator wired**| **boot-fatal** (config error)    |
+| condition                                       | outcome                          |
+|-------------------------------------------------|----------------------------------|
+| mediator returns clean `(text, nil)`, `text!=""`| emit `text` (re-enforced, no hit)|
+| mediator output has a residual policy hit       | redact the hit; **degraded**     |
+| mediator returns an error                       | degrade to redact (`replacement`)|
+| mediator returns `("", nil)`                    | degrade to redact (empty = fail) |
+| mediator exceeds `mediate_timeout_ms`           | degrade to redact; stall ends    |
+| rewrite policy loaded, **no mediator wired**    | **boot-fatal** (config error)    |
 
 The timeout is owned by the enforcer, not delegated to the mediator's own
 discipline: each mediator call runs under `context.WithTimeout` and the settle
@@ -157,20 +181,23 @@ and stays 0-alloc; a mediator goroutine is spawned only when a rewrite hit
 settles, never per chunk. `BenchmarkPolicy_MediatingEnforcer_NoMatch` pins the
 0-alloc clean path for a mediating enforcer.
 
+## Resolved hardening (#378 follow-ups)
+
+1. **Mediator output IS re-enforced.** Resolved: the stricter threat model won —
+   the mediator is treated as untrusted (it may be the model itself), and its
+   output passes one non-recursive enforcement pass before emission. See
+   **Re-enforcement of mediator output** above.
+2. **Degrades are audited distinctly.** Resolved: `Event` now carries a
+   content-free `Degraded bool`, set when a rewrite fell back to redact (mediator
+   error/timeout/empty/missing, or a residual hit redacted during re-enforcement).
+   The serving audit line reads `rule #N rewrite degraded on output` in that case
+   (vs `… enforced …`), never leaking the matched content.
+
 ## Open questions (for orchestrator review before merge)
 
-1. **Mediator output is not re-scanned.** If a mediator returns text that itself
-   violates the policy, it is emitted. This matches welfare's trust of its
-   deployment-supplied dispatcher, but a stricter threat model (e.g. the mediator
-   is the model itself) may want a single non-recursive re-enforcement pass over
-   the mediator output, degrading any residual hit to redact.
-2. **Degrades are audited as `rewrite`, not separately.** The audit records the
-   rule + its configured action; a mediator failure that degraded to redact is
-   not distinguished in the audit line. If operators need to see mediator
-   failures, `Event` needs a `Degraded` flag (still content-free).
-3. **No default mediator in `cmd/lem`.** The seam is wired and boot-fatal, but
+1. **No default mediator in `cmd/lem`.** The seam is wired and boot-fatal, but
    the CLI does not yet supply a mediator, so a rewrite policy is boot-fatal from
    `lem serve`. A model-reword mediator is a follow-up.
-4. **Empty mediator result = failure.** A mediator that wants to delete a span
+2. **Empty mediator result = failure.** A mediator that wants to delete a span
    must return a non-empty sentinel (e.g. a space or the replacement); `""` is
    treated as a failure and degrades to redact.
