@@ -573,6 +573,22 @@ func TestQuantizeKernels_QuantizeQ3_K_Bad(t *testing.T) {
 	}
 }
 
+// TestQuantizeKernels_QuantizeQ3_K_Ugly pins quantizeQ3_K(rampBlock(256))
+// against ggml's compiled quantize_row_q3_K_ref (see the Q8_0 pin for
+// methodology). Was broken before this fix on two independent axes: the
+// per-sub-block scale was a naive maxAbs/4 instead of ggml's make_q3_quants
+// coordinate-descent fit, and hmask packing used a convoluted per-sub-block
+// scheme instead of ggml's simple sequential walk (hmask[j%32] |=
+// 1<<(j/32) over all 256 elements) — the hmask bytes differed from the very
+// first byte.
+func TestQuantizeKernels_QuantizeQ3_K_Ugly(t *testing.T) {
+	const wantHex = "1010000000000000000000000000000000000000000000000000000000000008000000000000404040404040505090900000004040404080809090d0d0d0d01014141717171706060202010101010000060606050505050505010100000000004084c81d5084c8fce4e4e4f48ea3"
+	got := hex.EncodeToString(quantizeQ3_K(rampBlock(qkBlockSize)))
+	if got != wantHex {
+		t.Errorf("quantizeQ3_K(rampBlock(256)) = %s, want ggml-ref %s", got, wantHex)
+	}
+}
+
 // --- Q2_K -----------------------------------------------------------------
 
 func testDequantQ2_K(data []byte) []float32 {
