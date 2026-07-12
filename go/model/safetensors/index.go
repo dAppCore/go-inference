@@ -533,6 +533,8 @@ func DTypeByteSize(dtype string) (int, error) {
 	// match (the common case after RefFromHeader has normalised
 	// entry.DType through core.Upper).
 	switch dtype {
+	case "F8_E4M3", "F8_E4M3FN", "F8_E5M2":
+		return 1, nil
 	case "F16", "BF16":
 		return 2, nil
 	case "F32":
@@ -560,6 +562,18 @@ func DTypeByteSize(dtype string) (int, error) {
 		// BF16.
 		if (dtype[0] == 'B' || dtype[0] == 'b') && (dtype[1] == 'F' || dtype[1] == 'f') && dtype[2] == '1' && dtype[3] == '6' {
 			return 2, nil
+		}
+	case 7:
+		if core.EqualFold(dtype, "F8_E5M2") {
+			return 1, nil
+		}
+	case 8:
+		if core.EqualFold(dtype, "F8_E4M3") {
+			return 1, nil
+		}
+	case 9:
+		if core.EqualFold(dtype, "F8_E4M3FN") {
+			return 1, nil
 		}
 	}
 	return 0, core.NewError("unsupported dense safetensors dtype: " + dtype)
