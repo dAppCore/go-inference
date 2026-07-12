@@ -5,14 +5,109 @@
 package native
 
 import (
+	"encoding/binary"
 	"math"
 	"os"
+	"strings"
 	"testing"
 	"unsafe"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 )
+
+// TestGemma4CrossEngineLayerDump writes the Metal half of the #52 cross-engine
+// differential. GEMMA4_IDS must be the exact IDs printed by the HIP oracle.
+// The binary layout is float32 [layer][token][hidden].
+func TestGemma4CrossEngineLayerDump(t *testing.T) {
+	icbDisabledForTest = true
+	defer func() { icbDisabledForTest = false }()
+	modelPath := os.Getenv("GEMMA4_CROSS_ENGINE_MODEL")
+	idsCSV := os.Getenv("GEMMA4_IDS")
+	dumpPath := os.Getenv("GEMMA4_LAYER_DUMP")
+	if modelPath == "" || idsCSV == "" || dumpPath == "" {
+		t.Skip("set GEMMA4_CROSS_ENGINE_MODEL, GEMMA4_IDS, and GEMMA4_LAYER_DUMP")
+	}
+	var ids []int32
+	for _, part := range core.Split(idsCSV, ",") {
+		parsed := core.Atoi(core.Trim(part))
+		if !parsed.OK {
+			t.Fatalf("bad token ID %q", part)
+		}
+		ids = append(ids, int32(parsed.Value.(int)))
+	}
+	loaded, err := LoadTokenModelDir(modelPath, 4096)
+	if err != nil {
+		t.Fatalf("LoadTokenModelDir(%q): %v", modelPath, err)
+	}
+	sessionModel, ok := loaded.(model.SessionModel)
+	if !ok {
+		t.Fatalf("loaded model is %T, want model.SessionModel", loaded)
+	}
+	opened, err := sessionModel.OpenSession()
+	if err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	session := opened.(*ArchSession)
+	defer session.Close()
+	capturedAttnHiddens = nil
+	capturedLayerHiddens = nil
+	captureLayerHiddens = true
+	defer func() { captureLayerHiddens = false }()
+	for position, id := range ids {
+		embedding, embedErr := session.embed(id)
+		if embedErr != nil {
+			t.Fatalf("embed(%d): %v", id, embedErr)
+		}
+		if session.perLayerInput != nil {
+			perLayer, perLayerErr := session.perLayerInput(id, embedding)
+			if perLayerErr != nil {
+				t.Fatalf("perLayerInput(%d): %v", id, perLayerErr)
+			}
+			session.state.perLayerInput = perLayer
+		}
+		if _, stepErr := session.state.stepToken(embedding, position); stepErr != nil {
+			t.Fatalf("stepToken(%d): %v", position, stepErr)
+		}
+	}
+	captureLayerHiddens = false
+	layerCount := len(session.state.specs)
+	layers := make([][]byte, layerCount)
+	rowBytes := session.arch.Hidden * 2
+	for layer := range layerCount {
+		layers[layer] = make([]byte, len(ids)*rowBytes)
+		for token := range ids {
+			copy(layers[layer][token*rowBytes:(token+1)*rowBytes], capturedLayerHiddens[token*layerCount+layer])
+		}
+	}
+	hidden := session.arch.Hidden
+	payload := make([]byte, 0, len(layers)*len(ids)*hidden*4)
+	for _, layer := range layers {
+		for offset := 0; offset < len(layer); offset += 2 {
+			bits := uint16(layer[offset]) | uint16(layer[offset+1])<<8
+			payload = binary.LittleEndian.AppendUint32(payload, math.Float32bits(math.Float32frombits(uint32(bits)<<16)))
+		}
+	}
+	if err := os.WriteFile(dumpPath, payload, 0o644); err != nil {
+		t.Fatalf("write %s: %v", dumpPath, err)
+	}
+	attnPayload := make([]byte, 0, len(capturedAttnHiddens)*hidden*4)
+	for _, row := range capturedAttnHiddens {
+		for offset := 0; offset < len(row); offset += 2 {
+			bits := uint16(row[offset]) | uint16(row[offset+1])<<8
+			attnPayload = binary.LittleEndian.AppendUint32(attnPayload, math.Float32bits(math.Float32frombits(uint32(bits)<<16)))
+		}
+	}
+	if err := os.WriteFile(dumpPath+".attn.bin", attnPayload, 0o644); err != nil {
+		t.Fatalf("write attention dump: %v", err)
+	}
+	tokenJSON := strings.ReplaceAll(core.Sprintf("%v", ids), " ", ",")
+	manifest := core.Sprintf("{\n  \"engine\": \"metal\",\n  \"dtype\": \"float32-le\",\n  \"layout\": \"layer-token-hidden\",\n  \"layers\": %d,\n  \"tokens\": %d,\n  \"hidden\": %d,\n  \"token_ids\": %s\n}\n", len(layers), len(ids), hidden, tokenJSON)
+	if err := os.WriteFile(dumpPath+".json", []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	t.Logf("CROSS-ENGINE token_ids=%v layers=%d tokens=%d hidden=%d dump=%s", ids, len(layers), len(ids), hidden, dumpPath)
+}
 
 // TestRealModelLayerHiddenDump is the env-gated real-model half of the cross-engine
 // per-layer divergence hunt (#348): GEMMA4_SNAP names a snapshot, GEMMA4_IDS a
