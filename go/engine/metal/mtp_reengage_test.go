@@ -5,8 +5,14 @@
 package native
 
 import (
+	"bytes"
+	"io"
+	"os"
 	"testing"
 	"time"
+
+	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 )
 
 // reengageAfterPlain returns a policy state that has measured a plain stretch
@@ -185,5 +191,252 @@ func TestMTPReengageNeedsDeepBootstrap(t *testing.T) {
 	r.plainRate = 100
 	if r.needsDeepBootstrap(1<<20, 10, 512) {
 		t.Fatal("a measured plain rate must suppress the bootstrap")
+	}
+}
+
+// --- Long multi-block integration: the #299 policy driven through the real
+// Generate*FromSessionEach loops (assistant_load.go), not the bare struct
+// above. The tests above pin mtpReengage's OWN decision logic with a fake
+// clock; these pin the WIRING between that logic and the speculative
+// generate loop -- probeCycle/engagedCycle actually get called from the
+// right branch, runPlainStretch actually threads the carried lead and
+// re-arms the probe, bailAgain actually escalates across several real
+// bail/plain/probe rounds in one call.
+//
+// The cadence is DRIVEN, not hoped for: newNativeAssistantGenerateFixture's
+// assistant carries all-zero weights end to end (embed/attn/mlp/head), so
+// every drafted token is the same tie-broken index (0, greedyBF16Suppressed
+// keeps the lowest-index winner on an exact tie) regardless of context or
+// position -- see nativeAssistantPromptWhoseTargetTokensAvoid, already used
+// by the low-accept-patience tests in assistant_load_test.go for the same
+// reason. Pairing that fixed drafter with a prompt whose target continuation
+// is proven (by a real reference Generate call) to avoid token 0 for the
+// WHOLE run makes every drafted block a full, unambiguous reject: no
+// content luck, no clock precision, so probeCycle's cycleAccepted==0 abort
+// fires deterministically every time. What is NOT reachable this way is the
+// engage verdict itself (probeRate >= engageBar): measured on this hardware,
+// plain decode over this tiny fixture runs at several thousand tok/s while
+// even a fully-accepted, fused speculative cycle tops out in the low
+// hundreds (confirmed with the fused draft path forced eligible and with a
+// target model built 16x more expensive on the Q/FF side -- neither closed
+// the gap, since plain decode here is dispatch/cache-bound, not
+// compute-bound). Engaging for real needs a target expensive enough that
+// verify's one-command-buffer-per-block amortisation beats plain's
+// per-token dispatch, which is a real-model-scale economy no synthetic
+// fixture at unit-test speed can produce -- see the report for the file:line
+// callsites this leaves uncovered (assistant_load.go's engagedCycle call
+// sites), a needs-hook remainder precisely because it needs GPU wall-clock
+// economics unit tests cannot fake honestly.
+
+// captureNativeTraceLog redirects nativeTraceLog's (device.go) os.Stderr
+// destination for the duration of fn and returns everything written --
+// mtpDiagForTest's trace lines are the re-engagement machine's OWN fields
+// (cooldown, measured plainRate, the engaged verdict) printed verbatim by
+// mtp_reengage.go itself, so matching against them is reading the machine's
+// state, not a self-computed pin. Process-wide os.Stderr swap: the caller
+// must not run this concurrently with another such capture (none of this
+// package's tests call t.Parallel()).
+func captureNativeTraceLog(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	captured := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		captured <- buf.String()
+	}()
+	fn()
+	os.Stderr = saved
+	if cerr := w.Close(); cerr != nil {
+		t.Fatalf("close capture pipe writer: %v", cerr)
+	}
+	out := <-captured
+	_ = r.Close()
+	return out
+}
+
+// assertReengageCooldownEscalationTrace asserts the common behavioural
+// signature shared by the greedy and sampled long-run tests below: a fresh
+// patience bail at the exact streak constant, then the cooldown ladder
+// doubling through at least two escalations, and never an engage verdict
+// (this fixture/prompt pair cannot legitimately clear the rate bar -- see
+// the package doc comment above).
+func assertReengageCooldownEscalationTrace(t *testing.T, trace string) {
+	t.Helper()
+	if want := core.Sprintf("reengage bail: streak=%d", nativeAssistantLowAcceptPatience); !core.Contains(trace, want) {
+		t.Fatalf("trace missing the patience bail %q:\n%s", want, trace)
+	}
+	if want := core.Sprintf("cooldown=%d", nativeAssistantReengageCooldownMin); !core.Contains(trace, want) {
+		t.Fatalf("trace missing the initial cooldown %q:\n%s", want, trace)
+	}
+	if want := core.Sprintf("cooldown=%d", nativeAssistantReengageCooldownMin*2); !core.Contains(trace, want) {
+		t.Fatalf("trace missing the first doubled cooldown %q:\n%s", want, trace)
+	}
+	if want := core.Sprintf("cooldown=%d", nativeAssistantReengageCooldownMin*4); !core.Contains(trace, want) {
+		t.Fatalf("trace missing the second doubled cooldown %q:\n%s", want, trace)
+	}
+	if core.Contains(trace, "engaged=true") {
+		t.Fatalf("trace reports an engage verdict this scenario cannot legitimately earn:\n%s", trace)
+	}
+}
+
+// TestAssistantPairGenerateFromSessionEachReengageCooldownEscalatesOnRepeatedProbeFailure
+// is the greedy lane's long multi-block drive: bailFresh -> the bounded
+// plain cooldown stretch -> the re-armed probe -> repeated probe failure ->
+// bailAgain doubling the cooldown, across several real rounds in one call.
+func TestAssistantPairGenerateFromSessionEachReengageCooldownEscalatesOnRepeatedProbeFailure(t *testing.T) {
+	requireNativeRuntime(t)
+	const maxNew = 300
+	const draftTokens = 2
+	pair, mk := newNativeAssistantGenerateFixtureMaxLen(t, maxNew+20)
+	defer pair.Close()
+	prompt := nativeAssistantPromptWhoseTargetTokensAvoid(t, mk, 0, maxNew)
+	target := mk()
+
+	prevDiag := mtpDiagForTest
+	mtpDiagForTest = true
+	defer func() { mtpDiagForTest = prevDiag }()
+
+	var got AssistantGenerateResult
+	var err error
+	trace := captureNativeTraceLog(t, func() {
+		got, err = pair.GenerateFromSessionEach(target, prompt, maxNew, -1, draftTokens, nil, nil)
+	})
+	if err != nil {
+		t.Fatalf("GenerateFromSessionEach: %v", err)
+	}
+
+	// Behavioural invariants on the machine's own result counters: the
+	// prompt's guarantee makes every drafted block a full reject, so nothing
+	// is ever accepted and the whole stream is target-sourced.
+	if len(got.Tokens) != maxNew {
+		t.Fatalf("generated %d tokens, want %d", len(got.Tokens), maxNew)
+	}
+	if got.AcceptedTokens != 0 {
+		t.Fatalf("accepted tokens = %d, want 0 (target continuation avoids the drafter's only proposal)", got.AcceptedTokens)
+	}
+	if got.TargetTokens != maxNew {
+		t.Fatalf("target tokens = %d, want %d (every committed token is target-sourced)", got.TargetTokens, maxNew)
+	}
+	if got.DraftCalls <= nativeAssistantLowAcceptPatience {
+		t.Fatalf("draft calls = %d, want > %d patience blocks -- probing must have resumed after the plain stretch", got.DraftCalls, nativeAssistantLowAcceptPatience)
+	}
+	assertReengageCooldownEscalationTrace(t, trace)
+}
+
+// TestAssistantPairGenerateSampledFromSessionEachReengageCooldownEscalatesOnRepeatedProbeFailure
+// is the sampled lane's twin. model.SampleParams{} (Temperature<=0, MinP<=0)
+// routes model.Sampler through its greedy branch (model/sample.go
+// sampleMapped), so the sampled verify matches the SAME target continuation
+// the greedy test above proved avoids the drafter's only proposal -- reusing
+// that guarantee rather than re-deriving one for the sampled lane.
+func TestAssistantPairGenerateSampledFromSessionEachReengageCooldownEscalatesOnRepeatedProbeFailure(t *testing.T) {
+	requireNativeRuntime(t)
+	const maxNew = 300
+	const draftTokens = 2
+	pair, mk := newNativeAssistantGenerateFixtureMaxLen(t, maxNew+20)
+	defer pair.Close()
+	prompt := nativeAssistantPromptWhoseTargetTokensAvoid(t, mk, 0, maxNew)
+	target := mk()
+
+	prevDiag := mtpDiagForTest
+	mtpDiagForTest = true
+	defer func() { mtpDiagForTest = prevDiag }()
+
+	params := model.SampleParams{}
+	sampler := model.NewSampler(1)
+
+	var got AssistantGenerateResult
+	var err error
+	trace := captureNativeTraceLog(t, func() {
+		got, err = pair.GenerateSampledFromSessionEach(target, prompt, maxNew, nil, sampler, params, draftTokens, nil)
+	})
+	if err != nil {
+		t.Fatalf("GenerateSampledFromSessionEach: %v", err)
+	}
+
+	if len(got.Tokens) != maxNew {
+		t.Fatalf("generated %d tokens, want %d", len(got.Tokens), maxNew)
+	}
+	if got.AcceptedTokens != 0 {
+		t.Fatalf("accepted tokens = %d, want 0 (target continuation avoids the drafter's only proposal)", got.AcceptedTokens)
+	}
+	if got.TargetTokens != maxNew {
+		t.Fatalf("target tokens = %d, want %d (every committed token is target-sourced)", got.TargetTokens, maxNew)
+	}
+	if got.DraftCalls <= nativeAssistantLowAcceptPatience {
+		t.Fatalf("draft calls = %d, want > %d patience blocks -- probing must have resumed after the plain stretch", got.DraftCalls, nativeAssistantLowAcceptPatience)
+	}
+	assertReengageCooldownEscalationTrace(t, trace)
+}
+
+// TestAssistantPairGenerateFromSessionEachCoversFirstAllAcceptedCycleBeforeAnyPlainRate
+// covers the loop's OTHER major branch the cooldown-escalation tests above
+// cannot reach: `if verify.AllAccepted`. Existing single-block accept tests
+// (assistant_load_test.go's yield-stop-after-one-token cases) return before
+// this check ever runs -- a stopped yield breaks the outer loop first -- so
+// it stayed dark under the whole suite. nativeAssistantPromptWithAcceptedFirstDraft
+// finds a prompt whose target continuation starts with the drafter's actual
+// first proposal; with draftTokens=1 that single token IS the whole block,
+// so it is unconditionally AllAccepted. reng is freshly zero-valued at the
+// start of a call (no plain stretch has run), so wasProbing is false and
+// engagedCycle's own plainRate==0 guard makes it inert (bail=false) --
+// exercising dl.cycle(true, ...), the needsDeepBootstrap call (false at this
+// shallow depth), and the "not probing" dispatch arm into engagedCycle.
+func TestAssistantPairGenerateFromSessionEachCoversFirstAllAcceptedCycleBeforeAnyPlainRate(t *testing.T) {
+	requireNativeRuntime(t)
+	pair, mk := newNativeAssistantGenerateFixture(t)
+	defer pair.Close()
+	prompt := nativeAssistantPromptWithAcceptedFirstDraft(t, pair, mk)
+	target := mk()
+
+	const maxNew, draftTokens = 4, 1
+	want, err := mk().Generate(prompt, maxNew, -1)
+	if err != nil {
+		t.Fatalf("reference Generate: %v", err)
+	}
+	got, err := pair.GenerateFromSessionEach(target, prompt, maxNew, -1, draftTokens, nil, nil)
+	if err != nil {
+		t.Fatalf("GenerateFromSessionEach: %v", err)
+	}
+	if !idsEqual(got.Tokens, want) {
+		t.Fatalf("tokens = %v, want target-identical %v", got.Tokens, want)
+	}
+	if got.AcceptedTokens == 0 {
+		t.Fatal("accepted tokens = 0, want the guaranteed first-block accept (verify.AllAccepted never exercised)")
+	}
+}
+
+// TestAssistantPairGenerateSampledFromSessionEachCoversFirstAllAcceptedCycleBeforeAnyPlainRate
+// is the sampled lane's twin, reusing model.SampleParams{}'s zero-temperature
+// greedy branch (see the cooldown-escalation tests' doc comment) so the same
+// guaranteed-accept prompt applies unchanged.
+func TestAssistantPairGenerateSampledFromSessionEachCoversFirstAllAcceptedCycleBeforeAnyPlainRate(t *testing.T) {
+	requireNativeRuntime(t)
+	pair, mk := newNativeAssistantGenerateFixture(t)
+	defer pair.Close()
+	prompt := nativeAssistantPromptWithAcceptedFirstDraft(t, pair, mk)
+	target := mk()
+
+	params := model.SampleParams{}
+	const maxNew, draftTokens = 4, 1
+	want, err := mk().GenerateSampledEach(prompt, maxNew, nil, model.NewSampler(1), params, nil, nil)
+	if err != nil {
+		t.Fatalf("reference GenerateSampledEach: %v", err)
+	}
+	got, err := pair.GenerateSampledFromSessionEach(target, prompt, maxNew, nil, model.NewSampler(1), params, draftTokens, nil)
+	if err != nil {
+		t.Fatalf("GenerateSampledFromSessionEach: %v", err)
+	}
+	if !idsEqual(got.Tokens, want) {
+		t.Fatalf("tokens = %v, want target-identical %v", got.Tokens, want)
+	}
+	if got.AcceptedTokens == 0 {
+		t.Fatal("accepted tokens = 0, want the guaranteed first-block accept (verify.AllAccepted never exercised)")
 	}
 }
