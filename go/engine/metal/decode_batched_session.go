@@ -1355,7 +1355,7 @@ func (s *archDecodeState) stepTokensBatchedDenseResultWithInputViewsPLE(embs [][
 			if deferredRing {
 				kSt, vSt := s.denseBatch.layerStage(ownIdx, len(s.specs), K, foldKVDimMax)
 				ringLive := min(basePos, slideW)
-				if flashPromptEnabled && flashWinEnabled && !flashWinOffForTest && flashWinUsable(lhd) {
+				if flashPromptEnabled && flashWinEnabled && !flashWinOffForTest && K >= flashWinMinRows && flashWinUsable(lhd) {
 					// window flash (#375 phase 4): the query tile streams its own
 					// ≤ W+BQ key span once, shared by 32 queries — the multiQ ring
 					// kernel it replaces re-read the window per query row.
