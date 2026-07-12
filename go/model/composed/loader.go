@@ -162,16 +162,12 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 	}
 
 	isCohere := cfg.ModelType == "cohere" || cfg.ModelType == "cohere2"
-<<<<<<< HEAD
-	m := &ComposedModel{Embed: embed, NormF: normF, Output: output, D: D, Vocab: vocab, Eps: cfg.RMSNormEps, LayerNorm: isCohere, ParallelResidual: isCohere, LogitScale: cfg.LogitScale}
+	m := &ComposedModel{Embed: embed, NormF: normF, Output: output, D: D, Vocab: vocab, Eps: cfg.RMSNormEps, LayerNorm: isCohere || cfg.UseLayerNorm, ParallelResidual: isCohere, LogitScale: cfg.LogitScale}
 	if arch != nil {
 		m.EmbedScale = arch.EmbedScale
 		m.LogitsScaling = arch.LogitsScaling
 		m.ResidualScale = arch.ResidualMultiplier
 	}
-=======
-	m := &ComposedModel{Embed: embed, NormF: normF, Output: output, D: D, Vocab: vocab, Eps: cfg.RMSNormEps, LayerNorm: isCohere || cfg.UseLayerNorm, ParallelResidual: isCohere, LogitScale: cfg.LogitScale}
->>>>>>> lane/moe-dbrx
 	if isCohere {
 		m.Eps = cfg.LayerNormEps
 		if m.Eps == 0 {
@@ -204,15 +200,7 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 
 		var mixer Mixer
 		if kinds[i] == "full_attention" || kinds[i] == "sliding_attention" {
-<<<<<<< HEAD
-<<<<<<< HEAD
-			mixer, err = buildAttn(f32, f32opt, lp+"self_attn.", cfg, arch, D, kinds[i])
-=======
 			mixer, err = buildAttn(f32, f32opt, lp+"self_attn.", cfg, arch, i, D, kinds[i])
->>>>>>> lane/llama4-text
-=======
-			mixer, err = buildAttn(f32, f32opt, lp+"self_attn.", cfg, arch, D, kinds[i])
->>>>>>> lane/moe-dbrx
 		} else {
 			mixer, err = buildGatedDelta(get, f32, f32opt, lp+"linear_attn.", cfg, D)
 		}
@@ -267,15 +255,7 @@ func resolveKinds(cfg *loaderConfig) ([]string, error) {
 }
 
 // buildAttn builds a full-attention mixer; geometry from the config.
-<<<<<<< HEAD
-<<<<<<< HEAD
-func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, cfg *loaderConfig, arch *model.Arch, D int, kind string) (Mixer, error) {
-=======
 func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, cfg *loaderConfig, arch *model.Arch, layer, D int, kind string) (Mixer, error) {
->>>>>>> lane/llama4-text
-=======
-func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, cfg *loaderConfig, arch *model.Arch, D int, kind string) (Mixer, error) {
->>>>>>> lane/moe-dbrx
 	q, err := f32(sp + "q_proj.weight")
 	if err != nil {
 		return nil, err
@@ -332,16 +312,7 @@ func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float3
 	return NewAttnMixer(&AttnWeights{
 		QProj: q, KProj: k, VProj: v, OProj: o,
 		QNorm: f32opt(sp + "q_norm.weight"), KNorm: f32opt(sp + "k_norm.weight"),
-<<<<<<< HEAD
-	}, AttnConfig{Heads: heads, KVHeads: kvHeads, HeadDim: headDim, RotaryDim: rd, RopeTheta: cfg.ropeTheta(), Scale: func() float32 {
-		if arch != nil {
-			return arch.AttnScale
-		}
-		return 0
-	}(), NormEps: func() float32 {
-=======
 	}, AttnConfig{Heads: heads, KVHeads: kvHeads, HeadDim: headDim, RotaryDim: rd, RopeTheta: cfg.ropeTheta(), QKVClip: qkvClip, NormEps: func() float32 {
->>>>>>> lane/moe-dbrx
 		if cfg.LayerNormEps > 0 {
 			return cfg.LayerNormEps
 		}
