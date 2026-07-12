@@ -35,11 +35,11 @@ func isGemma4Config(configJSON []byte) bool {
 // gemma-4-E2B-it-Q4_K_M oracle; #53 added q8_0 (oracle-confirmed against the
 // unsloth gemma-4-E2B-it-Q8_0.gguf), q6_k, q5_k_m, and q3_k_m (llama.cpp's
 // own quantize source as the reference — no oracle on disk for those three).
-// q2_k and the GPTQ/AWQ/fp8/NF4/MX family remain gated on an operator
-// decision (docs/design-quant-formats.md).
+// q2_k uses llama.cpp's conventional mixed Q2_K recipe. GPTQ/AWQ/fp8/NF4/MX
+// remain gated on an operator decision (docs/design-quant-formats.md).
 func isGemma4SupportedQuantizeFormat(format basegguf.QuantizeFormat) bool {
 	switch format {
-	case basegguf.QuantizeQ4_K_M, basegguf.QuantizeQ8_0, basegguf.QuantizeQ6_K, basegguf.QuantizeQ5_K_M, basegguf.QuantizeQ3_K_M:
+	case basegguf.QuantizeQ4_K_M, basegguf.QuantizeQ8_0, basegguf.QuantizeQ6_K, basegguf.QuantizeQ5_K_M, basegguf.QuantizeQ3_K_M, basegguf.QuantizeQ2_K_M:
 		return true
 	default:
 		return false
@@ -152,6 +152,8 @@ func gemma4FileType(format basegguf.QuantizeFormat) uint32 {
 		return 7
 	case basegguf.QuantizeQ3_K_M:
 		return 12
+	case basegguf.QuantizeQ2_K_M:
+		return 10
 	case basegguf.QuantizeQ5_K_M:
 		return 17
 	case basegguf.QuantizeQ6_K:
@@ -261,6 +263,11 @@ func encodeGemma4TensorData(data []float32, tensorType uint32) ([]byte, error) {
 			return nil, core.Errorf("gguf: Q8_0 tensor has %d elements, not a multiple of 32", len(data))
 		}
 		return basegguf.Quantize(basegguf.QuantizeQ8_0, data)
+	case basegguf.TensorTypeQ2K:
+		if len(data)%256 != 0 {
+			return nil, core.Errorf("gguf: Q2_K tensor has %d elements, not a multiple of 256", len(data))
+		}
+		return basegguf.Quantize(basegguf.QuantizeQ2_K, data)
 	case basegguf.TensorTypeQ3K:
 		if len(data)%256 != 0 {
 			return nil, core.Errorf("gguf: Q3_K tensor has %d elements, not a multiple of 256", len(data))

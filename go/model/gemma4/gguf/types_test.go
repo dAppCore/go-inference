@@ -60,7 +60,7 @@ func TestGemma4Types_gemma4TensorType_PerLayerF32(t *testing.T) {
 		"blk.7.proj.weight",
 		"blk.7.layer_output_scale.weight",
 	}
-	for _, format := range []basegguf.QuantizeFormat{basegguf.QuantizeQ4_K_M, basegguf.QuantizeQ8_0, basegguf.QuantizeQ6_K, basegguf.QuantizeQ5_K_M, basegguf.QuantizeQ3_K_M} {
+	for _, format := range []basegguf.QuantizeFormat{basegguf.QuantizeQ4_K_M, basegguf.QuantizeQ8_0, basegguf.QuantizeQ6_K, basegguf.QuantizeQ5_K_M, basegguf.QuantizeQ3_K_M, basegguf.QuantizeQ2_K_M} {
 		for _, name := range names {
 			if got := gemma4TensorType(format, name, 7, 35); got != basegguf.TensorTypeF32 {
 				t.Errorf("gemma4TensorType(%s, %q) = %d, want F32(%d)", format, name, got, basegguf.TensorTypeF32)
@@ -245,5 +245,49 @@ func TestGemma4Types_gemma4TensorType_Q3_K_M(t *testing.T) {
 		if got := gemma4TensorType(basegguf.QuantizeQ3_K_M, name, 10, layerCount); got != basegguf.TensorTypeQ3K {
 			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want Q3_K(%d)", name, got, basegguf.TensorTypeQ3K)
 		}
+	}
+}
+
+// TestGemma4Types_gemma4TensorType_Q2_K_M checks llama.cpp's conventional
+// Q2_K mix for Gemma 4 E2B: Q2_K bulk, Q4_K attention values (GQA >= 4),
+// and Q3_K feed-forward down and attention output projections.
+func TestGemma4Types_gemma4TensorType_Q2_K_M(t *testing.T) {
+	const layerCount = 35
+	for _, name := range []string{
+		"token_embd.weight", "per_layer_token_embd.weight",
+		"blk.7.attn_q.weight", "blk.7.attn_k.weight",
+		"blk.7.ffn_gate.weight", "blk.7.ffn_up.weight",
+	} {
+		if got := gemma4TensorType(basegguf.QuantizeQ2_K_M, name, 7, layerCount); got != basegguf.TensorTypeQ2K {
+			t.Errorf("gemma4TensorType(q2_k, %q) = %d, want Q2_K(%d)", name, got, basegguf.TensorTypeQ2K)
+		}
+	}
+	for _, layer := range []int{0, 7, 34} {
+		name := core.Concat("blk.", core.Itoa(layer), ".attn_v.weight")
+		if got := gemma4TensorType(basegguf.QuantizeQ2_K_M, name, layer, layerCount); got != basegguf.TensorTypeQ4K {
+			t.Errorf("gemma4TensorType(q2_k, %q) = %d, want Q4_K(%d)", name, got, basegguf.TensorTypeQ4K)
+		}
+	}
+	for _, suffix := range []string{"ffn_down.weight", "attn_output.weight"} {
+		name := "blk.7." + suffix
+		if got := gemma4TensorType(basegguf.QuantizeQ2_K_M, name, 7, layerCount); got != basegguf.TensorTypeQ3K {
+			t.Errorf("gemma4TensorType(q2_k, %q) = %d, want Q3_K(%d)", name, got, basegguf.TensorTypeQ3K)
+		}
+	}
+}
+
+// TestGemma4Types_isGemma4SupportedQuantizeFormat_Q2_K_M checks q2_k is
+// registered on the architecture-owned export lane.
+func TestGemma4Types_isGemma4SupportedQuantizeFormat_Q2_K_M(t *testing.T) {
+	if !isGemma4SupportedQuantizeFormat(basegguf.QuantizeQ2_K_M) {
+		t.Fatal("isGemma4SupportedQuantizeFormat(q2_k) = false, want true")
+	}
+}
+
+// TestGemma4Types_gemma4FileType_Q2_K_M checks q2_k writes llama.cpp's
+// LLAMA_FTYPE_MOSTLY_Q2_K general.file_type value.
+func TestGemma4Types_gemma4FileType_Q2_K_M(t *testing.T) {
+	if got := gemma4FileType(basegguf.QuantizeQ2_K_M); got != 10 {
+		t.Fatalf("gemma4FileType(q2_k) = %d, want 10", got)
 	}
 }

@@ -186,6 +186,7 @@ func TestQuantize_resolveGGUFQuantizeFormat_Good(t *testing.T) {
 	}{
 		{"", QuantizeQ8_0, QuantizeQ8_0},
 		{"Q4_K_M", "q4_k_m", QuantizeQ4_K},
+		{QuantizeQ2_K_M, QuantizeQ2_K_M, QuantizeQ2_K},
 		{QuantizeQ2_K, QuantizeQ2_K, QuantizeQ2_K},
 	}
 	for _, tc := range cases {
