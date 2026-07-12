@@ -6,15 +6,17 @@ training and packaging verbs — and it compiles from **go-inference alone** (no
 go-mlx, no go-rocm). Each subcommand is deliberately thin: flag parsing plus one
 call into a go-inference library package. The business logic lives in the
 libraries (`serving`, `decode/generate`, `train`, `train/tune`, `model/pack`,
-`model/modelmgmt`), not in `cmd/lem`.
+`model/quant`, `model/modelmgmt`), not in `cmd/lem`.
 
 Source: `go/cmd/lem/`. Build instructions: [build.md](build.md).
 
 ## Backends registered at compile time
 
-`main.go` blank-imports two packages so their `init()` hooks register into the
+`main.go` blank-imports three packages so their `init()` hooks register into the
 inference registry before any verb runs:
 
+- `dappco.re/go/inference/engine/hip` — the ROCm backend (linux/amd64; a no-op
+  stub off-platform).
 - `dappco.re/go/inference/engine/metal` — the no-cgo Apple "metal" backend
   (darwin/arm64, dispatches Apple MLX's compiled kernels via the Objective-C
   runtime).
@@ -36,6 +38,7 @@ prints its own name in usage and notices (the dev binary is often built as
 | `tune` | Measure + persist the best MTP draft block as a serve profile | `train/tune.RunTune` |
 | `pack` | Build/inspect/list/extract/hash `.model` containers (no weights loaded) | `model/pack` |
 | `ebook` | Render a model directory as a valid EPUB3 (weights as base64 plates) | `model/modelmgmt.BuildModelBook` |
+| `quant` | Quantise a dense model directory (MLX affine, or `-gguf`) into a loadable model directory | `model/quant/mlxaffine`, `model/gguf` |
 | `spec` | Export the OpenAPI 3.1 document for lem's HTTP surface (feeds SDK generation) | `serving` (Describable route groups) |
 
 Run `lem <verb> -h` for the command-specific flag dump. Boot notices and errors
@@ -85,7 +88,7 @@ re-runs the reactive drafter ladder over the new target).
 | `--addr` | `:36911` | listen address (Lethean's own port) |
 | `--model` | `""` | model to load; empty starts the driver model-less (load later via admin reload) |
 | `--context` | `0` | override context length; 0 uses the model default |
-| `--kv-cache` | `""` | KV cache mode: `paged`, `fp16`, `q8`, `kq8vq4`, `turboquant`; empty loads the model default |
+| `--kv-cache` | `""` | KV cache mode override; the no-cgo metal engine runs only its built-in `native` cache — any other mode name is noted and ignored |
 | `--draft` | `auto` | MTP drafter: `auto` detects one beside a Gemma 4 target, a path forces it, `""` disables |
 | `--draft-detect` | `true` | reactive drafter detection for Gemma 4 targets |
 | `--draft-block` | `0` | MTP draft block; 0 = engine default (5), a tuned profile overrides when present |
@@ -94,6 +97,7 @@ re-runs the reactive drafter ladder over the new target).
 | `--state-conversations` | `true` | conversation continuity: wake each chat from its slept state, append only the new turn, no prompt replay |
 | `--state-store` | `""` | conversation state store file (default `~/Lethean/lem/state/conversations.kv`) |
 | `--welfare` | `true` | welfare guard: per-turn hostility detect + engine-model mediation on every chat route; Lemma checkpoints additionally carry `lem_end` (disable with `-welfare=false`) |
+| `--policy` | `""` | outbound policy file (JSON): deployment-owned redact/refuse rules on model output; unset disables the layer, a load failure is fatal at boot |
 | `--native` | `false` | serve via the no-cgo native token-loop contract (the default metal engine already is native) |
 | `--read-timeout` | `30s` | HTTP read-header timeout |
 | `--write-timeout` | `5m` | HTTP write timeout (covers a full streaming response) |
@@ -136,7 +140,7 @@ lem generate -state chat1 -prompt "Hello, who are you?" ~/models/gemma-4-e2b-it-
 | `-temp` | `1.0` | sampling temperature (0 = greedy/argmax — fastest, fair vs `llama-bench`) |
 | `-think` | `false` | enable the thinking channel (off keeps the decode rate clean) |
 | `-context` | `0` | context length override (0 = model default) |
-| `-kv-cache` | `""` | KV cache mode (`paged`, `fp16`, `q8`, `kq8vq4`, `turboquant`; empty = load default) |
+| `-kv-cache` | `""` | KV cache mode override; the metal engine runs only its built-in `native` cache — other mode names are noted and ignored |
 | `-kv-storage` | `""` | KV snapshot encoding for `-state` sleeps (`native`, `q8`, `float32`; empty = native) — inert without `-state` |
 | `-draft` | `auto` | MTP drafter (as for `serve`) |
 | `-draft-block` | `0` | MTP draft block; 0 = engine default (5) |
@@ -147,7 +151,7 @@ lem generate -state chat1 -prompt "Hello, who are you?" ~/models/gemma-4-e2b-it-
 | `-state-store` | `""` | state store file (default `~/Lethean/lem/state/agent.kv`) |
 | `-raw` | `false` | with `-state`: skip chat-framing and run the raw completion-loop turn (ignored without `-state`) |
 | `-image` | (repeatable) | image input for a vision model: a local PNG/JPEG path or a base64 `data:` URL; gated on the model's vision capability |
-| `-audio` | (repeatable) | reserved — no engine-neutral audio-input seam yet, so passing one errors (follow-up) |
+| `-audio` | (repeatable) | audio input for an audio model: a local WAV path (16-bit PCM mono 16 kHz) or a base64 `data:` URL — gated on the model's audio capability |
 | `-video-frame` | (repeatable) | one sampled video frame in time order: a local PNG/JPEG path or a base64 `data:` URL — frames become timestamped vision blocks 1s apart |
 
 ---
@@ -326,3 +330,33 @@ lem ebook --model <dir> --weights=false     # the readable manifesto, no plates
 
 On success it reports the output path, chapter count (and how many are in the
 table of contents), and the EPUB size in bytes.
+
+---
+
+## `quant` — quantise a dense model directory
+
+Quantises a dense (bf16/f32) safetensors model directory into a **quantised model
+directory** the engine loads natively. Two lanes, selected by `-gguf`. Pure file
+I/O over the model quantisers — no engine is loaded. The single `<src-model-dir>`
+positional may sit before or after the flags.
+
+```
+lem quant ~/models/gemma-4-12B-it-bf16                 # -> …-4bit (MLX affine, default)
+lem quant ~/models/gemma-4-12B-it-bf16 -bits 8 -group-size 32
+lem quant ~/models/gemma-4-12B-it-bf16 -gguf q4_k_m    # -> …-gguf-q4_k_m (GGUF lane)
+```
+
+- **Default — MLX group-affine** (`model/quant/mlxaffine`): the packed-uint32 +
+  bf16 scales/biases format the engine loads natively, byte-for-byte what
+  `mlx_lm.convert` produces.
+- **`-gguf <FORMAT>` — the GGUF whole-model pipeline** (`model/gguf`): `q4_k_m`,
+  `q8_0`, `q5_k`, `q6_k`, …
+
+### Flags
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `-bits` | `4` | affine quantisation bit-width (2, 4, or 8) — MLX lane |
+| `-group-size` | `64` | affine quantisation group size — MLX lane |
+| `-o` | `""` | output model directory (default `<src>-<bits>bit`, or `<src>-gguf-<format>`) |
+| `-gguf` | `""` | run the GGUF lane in this format (`q4_k_m`, `q8_0`, `q5_k`, `q6_k`, …) instead of MLX affine |

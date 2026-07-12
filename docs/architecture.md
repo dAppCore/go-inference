@@ -51,7 +51,7 @@ go/                         module root — package inference (the contract)
 ├── serving/                OpenAI/Anthropic/Ollama HTTP servers over the engine
 ├── model/                  arch definitions + model/state (identity, agent memory)
 ├── kv/ decode/ train/ eval/ agent/ safety/ welfare/   supporting libraries
-└── cmd/lem/                the lem binary (serve/generate/ssd/sft/tune/pack/ebook)
+└── cmd/lem/                the lem binary (serve/generate/ssd/sft/tune/pack/ebook/quant/spec)
 gui/                        desktop GUI (repo root, separate module surface)
 external/<dep>/             Core external dependencies as workspace submodules
 ```
@@ -78,7 +78,7 @@ Package `hip`, path `engine/hip`. Native-first ROCm/HIP engine (the old `llama-s
 
 `serving/` exposes a loaded engine over OpenAI-, Anthropic-, and Ollama-compatible HTTP (the multiplexer is `serving/compat/mux.go`). `serving.NewMLXBackend` loads a model through the Metal backend (`inference.LoadModel(..., WithBackend("metal"))`) and wraps it as a `serving.Backend`. Note the serving layer also carries `HTTPBackend` (name `"http"`) and `LlamaBackend` (name `"llama"`) adapters that wrap an external llama.cpp HTTP server as a `TextModel` — these are serving-level adapters, not registered `inference.Backend`s.
 
-`cmd/lem` is Lethean's sovereign inference binary. Its subcommands are thin flag-parsing wrappers over the `serving` and training libraries: `serve`, `generate`, `ssd`, `sft`, `tune`, `pack`, `ebook`. `main.go` blank-imports `engine/metal` and `model/builtin` to register the Apple backend and the built-in arches. Built with `-tags embed_metallib`, `lem` bakes both gzipped metallibs into the binary and extracts them to a content-addressed cache at start, setting `MLX_METALLIB_PATH` — so the shipped binary runs from any path with nothing external to resolve.
+`cmd/lem` is Lethean's sovereign inference binary. Its subcommands are thin flag-parsing wrappers over the `serving` and training libraries: `serve`, `generate`, `ssd`, `sft`, `tune`, `pack`, `ebook`, `quant`, `spec`. `main.go` blank-imports `engine/metal` and `model/builtin` to register the Apple backend and the built-in arches. Built with `-tags embed_metallib`, `lem` bakes both gzipped metallibs into the binary and extracts them to a content-addressed cache at start, setting `MLX_METALLIB_PATH` — so the shipped binary runs from any path with nothing external to resolve.
 
 ## Core types
 
