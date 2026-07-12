@@ -40,6 +40,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	welfareOn := fs.Bool("welfare", true, "welfare guard: per-turn hostility detect + engine-model mediation on every chat route; Lemma checkpoints additionally carry lem_end (disable with -welfare=false)")
 	policyPath := fs.String("policy", "", "outbound policy file (JSON): deployment-owned redact/refuse rules on model OUTPUT (term/pattern matches); unset disables the layer; a load failure is fatal at boot (see serving/policy)")
 	stateStorePath := fs.String("state-store", "", "conversation state store file for durable per-project state; unset = conversations held in RAM for the life of the serve process (no per-turn disk round-trip)")
+	stateRAMBudget := fs.Int64("state-ram-budget", 0, "byte ceiling for the RAM conversation store (ignored when -state-store is set); 0 = unlimited; over budget the coldest conversation chunks spill to a scratch .kv file and wake back transparently")
 	nativeBackend := fs.Bool("native", false, "serve via the no-cgo native token-loop contract (the default go-inference metal engine already is native)")
 	modelsConfig := fs.String("models-config", "", "multi-model serving config (JSON): several models with aliases and named profiles, held resident under a memory ceiling with LRU + idle-TTL eviction; -model becomes the pinned default; empty = single-model serve")
 	fs.Usage = func() {
@@ -148,6 +149,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		Welfare:            *welfareOn,
 		PolicyPath:         *policyPath,
 		StateStorePath:     *stateStorePath,
+		StateRAMBudget:     *stateRAMBudget,
 		ReadTimeout:        *readTimeout,
 		WriteTimeout:       *writeTimeout,
 		ShutdownTimeout:    *shutdownTimeout,
