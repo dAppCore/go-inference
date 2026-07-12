@@ -1686,6 +1686,21 @@ func (s *ArchSession) prefillRetainedTokenEmbeddings(ids []int32, embeddings [][
 	if s.pos+len(ids) > s.maxLen {
 		return nil, core.NewError(scope + ": sequence would exceed maxLen cache rows")
 	}
+	// Multimodal embeddings/bidir prefill keeps the FULL stack on every chunk:
+	// pin prefillSkipToLayer to 0 so this lane never inherits the causal kv-shared
+	// suffix skip (#381). Its consumer (engine/vision.go PrefillTokenEmbeddings ->
+	// decodeFromPrefilled) reads only the FINAL chunk's boundary hidden for
+	// autoregressive generation, so the skip is STRUCTURALLY valid here too — but
+	// it stays UNARMED: arming it on the correctness-critical bidirectional
+	// image/video span path is a perf change owing the same real-model
+	// byte-identity receipt the causal lane earned (pp8K/pp62K), and the skip is
+	// byte-identical by construction so no fixture A/B can stand in for that. The
+	// pin is also load-bearing: unlike the causal lane this lane has no per-chunk
+	// reset, so a leaked non-zero value would bound the FINAL (read) chunk and
+	// corrupt the boundary hidden. Both sub-lanes (bidir spans + batched-dense
+	// embeddings) enter here. Guarded by
+	// TestArchSessionPrefillTokenEmbeddingsKeepsFullStackIgnoresSkip.
+	s.state.prefillSkipToLayer = 0
 	if spans := bidirTokenSpans(ids, s.bidirSpanTokens); len(spans) > 0 {
 		if unifiedVisionDiag {
 			nativeTraceLog(core.Sprintf("vision-diag bidir: %d spans over %d ids (first %v)\n", len(spans), len(ids), spans[0]))
