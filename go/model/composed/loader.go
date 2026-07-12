@@ -91,6 +91,17 @@ func tensorAsF32(tensors map[string]safetensors.Tensor, name string, t safetenso
 
 // LoadComposed assembles a ComposedModel from a hybrid checkpoint's tensors + its config.json bytes.
 func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*ComposedModel, error) {
+	return loadComposed(tensors, configJSON, nil)
+}
+
+// LoadComposedWithArch assembles a composed model while consuming the neutral MoE
+// policy declared by an architecture package. The policy is validated against the
+// checkpoint instead of re-assuming one family's router behaviour from tensor names.
+func LoadComposedWithArch(tensors map[string]safetensors.Tensor, configJSON []byte, arch model.Arch) (*ComposedModel, error) {
+	return loadComposed(tensors, configJSON, &arch)
+}
+
+func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch *model.Arch) (*ComposedModel, error) {
 	var raw loaderConfig
 	if r := core.JSONUnmarshal(configJSON, &raw); !r.OK {
 		return nil, core.NewError("composed.LoadComposed: config.json parse failed")
@@ -164,7 +175,7 @@ func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*Co
 		if err != nil {
 			return nil, err
 		}
-		ffn, err := buildFFN(get, f32, lp+"mlp.", cfg, D)
+		ffn, err := buildFFN(get, f32, lp+"mlp.", cfg, arch, D)
 		if err != nil {
 			return nil, core.E("composed.LoadComposed", core.Sprintf("layer %d ffn", i), err)
 		}
@@ -333,9 +344,9 @@ func buildGatedDelta(get func(string) (safetensors.Tensor, bool), f32 func(strin
 
 // buildFFN builds a layer's feed-forward: a MoE (qwen3_6_moe) when expert weights are present, else a
 // dense SwiGLU MLP. sp is the "…mlp." prefix.
-func buildFFN(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]float32, error), sp string, cfg *loaderConfig, D int) (FFN, error) {
+func buildFFN(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]float32, error), sp string, cfg *loaderConfig, arch *model.Arch, D int) (FFN, error) {
 	if _, ok := get(sp + "experts.0.gate_proj.weight"); ok {
-		return buildMoE(get, f32, sp, cfg, D)
+		return buildMoE(get, f32, sp, cfg, arch, D)
 	}
 	gate, err := f32(sp + "gate_proj.weight")
 	if err != nil {
@@ -354,7 +365,7 @@ func buildFFN(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]f
 
 // buildMoE loads the MoE FFN: router (mlp.gate.weight), the experts (mlp.experts.E.*), and the optional
 // shared expert (mlp.shared_expert.*). TopK = num_experts_per_tok.
-func buildMoE(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]float32, error), sp string, cfg *loaderConfig, D int) (FFN, error) {
+func buildMoE(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]float32, error), sp string, cfg *loaderConfig, arch *model.Arch, D int) (FFN, error) {
 	router, err := f32(sp + "gate.weight")
 	if err != nil {
 		return nil, err
@@ -385,6 +396,14 @@ func buildMoE(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]f
 	if len(experts) == 0 {
 		return nil, core.NewError("composed.buildMoE: experts.0 present but none loaded")
 	}
+	if arch != nil {
+		if arch.MoEGating != "" && arch.MoEGating != model.MoEGatingSoftmax {
+			return nil, core.NewError("composed.buildMoE: unsupported router score function " + string(arch.MoEGating))
+		}
+		if arch.Experts > 0 && len(experts) != arch.Experts {
+			return nil, core.NewError(core.Sprintf("composed.buildMoE: checkpoint experts %d != architecture %d", len(experts), arch.Experts))
+		}
+	}
 	var shared *MoEExpert
 	var sharedGate []float32
 	if _, ok := get(sp + "shared_expert.gate_proj.weight"); ok {
@@ -402,9 +421,21 @@ func buildMoE(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]f
 			}
 		}
 	}
+	sharedExperts := 0
+	if shared != nil {
+		sharedExperts = 1
+	}
+	if arch != nil && sharedExperts != arch.SharedExperts {
+		return nil, core.NewError(core.Sprintf("composed.buildMoE: checkpoint shared experts %d != architecture %d", sharedExperts, arch.SharedExperts))
+	}
 	topK := cfg.NumExpertsPerTok
+	normTopK := cfg.normTopKProb()
+	if arch != nil {
+		topK = arch.TopK
+		normTopK = arch.NormaliseMoETopK
+	}
 	if topK <= 0 {
 		topK = 8
 	}
-	return &MoEMLP{Router: router, Experts: experts, Shared: shared, SharedGate: sharedGate, TopK: topK, NormTopKProb: cfg.normTopKProb()}, nil
+	return &MoEMLP{Router: router, Experts: experts, Shared: shared, SharedGate: sharedGate, TopK: topK, NormTopKProb: normTopK}, nil
 }
