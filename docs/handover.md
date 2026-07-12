@@ -1,5 +1,39 @@
 # NEXT WAKE (2026-07-16 — #381 SHIPPED: the skip is live, 2.1-2.6x at every depth)
 
+## LATER THE SAME NIGHT (2026-07-12 — schedulers become modes; the CB physics receipt)
+
+- SCHEDULERS UNIFIED AS MODES (snider's fork resolution, a57829e): ONE
+  serving/scheduler — serial (survivor base) / batch (schedule's admission
+  policy + interleave's bounded MaxQueue, live tokens via iter.Pull) /
+  interleave (verbatim); serving/schedule + serving/interleave DELETED.
+  -scheduler flag: unset = request path byte-for-byte unbuilt; batch fails
+  closed at New without TokenizerModel. Suite 9864 > 9797 baseline.
+  Non-reconcilable documented: schedule's static int-token slab vs live
+  delivery — batch keeps lockstep prefill costs, why interleave stays.
+- THE CB PHYSICS RECEIPT (live A/B, E2B, 4 concurrent × 48 tok, alternating
+  arms): serial 142.9 vs interleave 143.6 tok/s aggregate — PARITY, pinned
+  at single-stream rate. Routing proven live; aggregate is ENGINE-bound.
+  #35 slice 3 = step-level batched decode INSIDE the engine (one forward
+  advances N requests; stepTokensBatched* machinery exists unwired).
+  Slice 2 (per-resident-model scheduler under -models-config) in flight.
+- HIP 12B round 1 (honest negative, 6de7459): per-head value-norm fix on
+  the single-token path (RED->GREEN, armed box suite 1246/0 vs own
+  kernels); 12B still garbles — directional, pack exonerated, suspects =
+  16 query heads vs the 8 k_eq_v layers. NOTE the layering is a 5:1
+  INTERLEAVE (full attn at 5,11,...,47 — every 6th), not set positions.
+  Round 2 (layer-0 numerical oracle) running. TRAP BANKED: box card is
+  gfx1101; make hip-amd defaults gfx1100 — 14 false FAILs from the arch
+  mismatch; always AMD_HIP_ARCH=gfx1101.
+- COMPOSED BREADTH (same merge): mamba2 + rwkv7 gained composed wrappers +
+  projMixer (block-level NoProj splits; byte-for-bit parity) — the CB-fold
+  family now reaches all four mixer kinds.
+- RATCHET r3+r4 (metal 76.77 -> 77.1%, suite 1634/0): quant-PLE fixture
+  family (two 0%->100% unlocks, #381 bounded-chunk branch verified firing);
+  arch_session 72.9->75.0 (bidir lane non-vacuous vs causal control);
+  vacuous-fixture trap caught (constant-fill tensors). r5 target: the
+  pipelined-GPU sampling tails. Quant fold variance ~0.125 diagnosed as
+  accumulation-order class, tolerance calibrated at site.
+
 ## POST-UNFENCE NIGHT (2026-07-12 night — the oMLX gap closes; ladder terminal rung)
 
 - #23 LADDER COMPLETE to the terminal rung. Input-side fold merged
