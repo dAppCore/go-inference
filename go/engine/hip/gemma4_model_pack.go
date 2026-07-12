@@ -306,8 +306,13 @@ func rocmGemma4ModelSourceFormatGGUF(model inference.ModelIdentity) bool {
 
 func rocmGemma4LabelsVetoGenerateLinked(labels map[string]string) bool {
 	status := rocmGemma4LabelValue(labels, "gemma4_generate_status")
+	// The parallelised MoE router and GGUF expert kernels are now linked in
+	// this engine, so an MoE block defaults to linked. Only an explicit
+	// not-linked/planned runtime status still vetoes generate-linked; an unset
+	// moe_text_runtime label no longer implies an unintegrated MoE runtime.
+	moeRuntime := rocmGemma4LabelValue(labels, "moe_text_runtime")
 	moeUnlinked := rocmGemma4LabelValue(labels, "gemma4_enable_moe_block") == "true" &&
-		rocmGemma4LabelValue(labels, "moe_text_runtime") != hipKernelStatusLinked
+		moeRuntime != "" && moeRuntime != hipKernelStatusLinked
 	return rocmGemma4LabelValue(labels, "gemma4_pack_supported") == "false" ||
 		rocmGemma4LabelValue(labels, "gemma4_runnable_on_card") == "false" ||
 		moeUnlinked ||
