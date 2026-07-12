@@ -216,6 +216,32 @@ func TestCapability_TextModelCapabilities_Good(t *testing.T) {
 	checkTrue(t, report.Supports(CapabilityGRPO))
 }
 
+// TestCapability_TextModelCapabilities_Good_ThroughWrapper proves
+// TextModelCapabilities sees the FULL surface through a welfare/policy/profile
+// -shaped decorator that forwards no optional capability itself (hidingWrapper,
+// defined alongside inference.As in wrapped_model_test.go). Every branch above
+// used to type-assert directly against model, so a request routed through a
+// resolver that wraps the resolved model — exactly what /v1/models/capabilities
+// serves in production — silently under-reported almost everything: the
+// capability-stripping bug class inference.As closes generally, here applied to
+// capability DISCOVERY rather than a single route's capability GATE.
+func TestCapability_TextModelCapabilities_Good_ThroughWrapper(t *testing.T) {
+	model := &capabilityModel{stubTextModel: &stubTextModel{}}
+	wrapped := hidingWrapper{TextModel: model}
+
+	direct := TextModelCapabilities(RuntimeIdentity{Backend: "test"}, model)
+	throughWrapper := TextModelCapabilities(RuntimeIdentity{Backend: "test"}, wrapped)
+
+	if len(throughWrapper.Capabilities) != len(direct.Capabilities) {
+		t.Fatalf("through a hiding wrapper: %d capabilities, want %d (same as unwrapped) — capability-stripping bug", len(throughWrapper.Capabilities), len(direct.Capabilities))
+	}
+	for _, id := range direct.SupportedCapabilityIDs() {
+		if !throughWrapper.Supports(id) {
+			t.Fatalf("through a hiding wrapper: missing %s that the unwrapped model reports", id)
+		}
+	}
+}
+
 func TestCapability_BackendCapabilities_BadUnavailable(t *testing.T) {
 	backend := &stubBackend{name: "gpu", available: false}
 

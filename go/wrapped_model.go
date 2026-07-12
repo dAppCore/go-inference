@@ -41,3 +41,43 @@ func BaseTextModel(model TextModel) TextModel {
 	}
 	return model
 }
+
+// As reports whether model — or a model reached by walking its Unwrap() chain —
+// implements T, returning the first implementation found, outermost in first.
+// It mirrors errors.As's semantics for the decorator chain: embedding the
+// TextModel interface widens a struct's fields but never its method set, so an
+// optional capability the wrapper does not explicitly re-declare is invisible to
+// a direct type assertion against the wrapper, EVEN THOUGH the base model
+// implements it (the capability-stripping bug class BaseTextModel was built to
+// answer for embeddings/rerank — see the doc on WrappedModel).
+//
+// As generalises that answer to every optional capability probe (VisionModel,
+// AudioModel, EmbeddingModel, RerankModel, SchedulerModel, CancellableModel,
+// ToolParser, …), not only the ones a decorator's author remembered to forward
+// by hand — so a NEW wrapper is safe by default even if it forwards nothing.
+// Existing explicit forwards (welfareTextModel/policyTextModel/profileModel's
+// AcceptsImages/AcceptsAudio) keep working unchanged: As finds them at the
+// outer level on the first iteration, before it ever reaches for Unwrap.
+//
+//	if embedder, ok := inference.As[inference.EmbeddingModel](model); ok {
+//	    result, err := embedder.Embed(ctx, req)
+//	}
+func As[T any](model TextModel) (T, bool) {
+	const maxUnwrapDepth = 16
+	for depth := 0; depth < maxUnwrapDepth && model != nil; depth++ {
+		if typed, ok := model.(T); ok {
+			return typed, true
+		}
+		wrapped, ok := model.(WrappedModel)
+		if !ok {
+			break
+		}
+		inner := wrapped.Unwrap()
+		if inner == nil || inner == model {
+			break
+		}
+		model = inner
+	}
+	var zero T
+	return zero, false
+}
