@@ -466,6 +466,7 @@ func TestHIPTransformerReferenceSamplerBadInputsAndTies_Bad(t *testing.T) {
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, candidatePenalized, sortedPenalized)
 	core.AssertTrue(t, hipGemma4Q4DeviceTopKSamplingRequested(inference.GenerateConfig{Temperature: 1, TopK: 2, TopP: 1, RepeatPenalty: 1}), "top-k sampling can stay on device without repeat penalty")
+	core.AssertTrue(t, !hipGemma4Q4DeviceTopKSamplingRequested(inference.GenerateConfig{Temperature: 1, RepeatPenalty: 1}), "temperature-only sampling has top-k disabled and takes the full-logit host path")
 	core.AssertTrue(t, !hipGemma4Q4DeviceTopKSamplingRequested(inference.GenerateConfig{Temperature: 1, TopK: 2, TopP: 1, MinP: 0.1, RepeatPenalty: 1}), "min-p is a host sampler contract until device sampling supports it")
 	core.AssertTrue(t, !hipGemma4Q4DeviceCandidateSamplingRequested(inference.GenerateConfig{Temperature: 1, TopK: 2, TopP: 1, RepeatPenalty: 1}), "host candidate copy path is not the default neutral top-k route")
 	core.AssertTrue(t, !hipGemma4Q4DeviceCandidateSamplingRequested(inference.GenerateConfig{Temperature: 1, TopK: 2, TopP: 1, RepeatPenalty: 2}), "repeat penalty changes the top-k set and must use full logits")

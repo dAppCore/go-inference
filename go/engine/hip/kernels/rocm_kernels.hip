@@ -97,8 +97,8 @@ constexpr uint32_t ROCM_MLX_Q4_PROJECTION_GREEDY_Q6_THREADS_PER_ROW = ROCM_MLX_Q
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_BEST_BYTES = 8;
 constexpr uint32_t ROCM_PACKED_TOPK_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_PACKED_TOPK_LAUNCH_ARGS_BYTES = 48;
-constexpr uint32_t ROCM_PACKED_TOPK_SAMPLE_LAUNCH_ARGS_VERSION = 1;
-constexpr uint32_t ROCM_PACKED_TOPK_SAMPLE_LAUNCH_ARGS_BYTES = 56;
+constexpr uint32_t ROCM_PACKED_TOPK_SAMPLE_LAUNCH_ARGS_VERSION = 2;
+constexpr uint32_t ROCM_PACKED_TOPK_SAMPLE_LAUNCH_ARGS_BYTES = 64;
 constexpr uint32_t ROCM_ORDERED_EMBEDDING_CANDIDATES_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_ORDERED_EMBEDDING_CANDIDATES_LAUNCH_ARGS_BYTES = 80;
 constexpr uint32_t ROCM_ORDERED_EMBEDDING_CANDIDATES_BLOCK_SIZE = 256;
@@ -490,6 +490,8 @@ struct rocm_packed_topk_sample_launch_args {
 	uint32_t temperature_bits;
 	uint32_t top_p_bits;
 	uint64_t draw_bits;
+	uint32_t softcap_bits;
+	uint32_t reserved0;
 };
 
 struct rocm_ordered_embedding_candidates_launch_args {
@@ -1950,6 +1952,7 @@ __device__ bool rocm_valid_packed_topk_sample_args(const rocm_packed_topk_sample
 	const float temperature = rocm_float_from_bits(args.temperature_bits);
 	const float top_p = rocm_float_from_bits(args.top_p_bits);
 	const double draw = rocm_double_from_bits(args.draw_bits);
+	const float softcap = rocm_float_from_bits(args.softcap_bits);
 	return args.version == ROCM_PACKED_TOPK_SAMPLE_LAUNCH_ARGS_VERSION &&
 		args.total_bytes == ROCM_PACKED_TOPK_SAMPLE_LAUNCH_ARGS_BYTES &&
 		args.input_pointer != 0 &&
@@ -1965,6 +1968,8 @@ __device__ bool rocm_valid_packed_topk_sample_args(const rocm_packed_topk_sample
 		top_p >= 0.0f &&
 		top_p <= 1.0f &&
 		isfinite(top_p) &&
+		softcap >= 0.0f &&
+		isfinite(softcap) &&
 		isfinite(draw);
 }
 
@@ -6682,14 +6687,19 @@ extern "C" __global__ void rocm_packed_topk_sample(const unsigned char *packet)
 	if (!(temperature > 0.0) || !(top_p > 0.0 && top_p <= 1.0)) {
 		return;
 	}
-	const double max_value = static_cast<double>(rocm_score_from_ordered_key(static_cast<uint32_t>(input[first_valid] >> 32))) / temperature;
+	const double softcap = static_cast<double>(rocm_float_from_bits(args.softcap_bits));
+	const auto sample_score = [softcap] __device__ (unsigned long long packed) {
+		double score = static_cast<double>(rocm_score_from_ordered_key(static_cast<uint32_t>(packed >> 32)));
+		return softcap > 0.0 ? tanh(score / softcap) * softcap : score;
+	};
+	const double max_value = sample_score(input[first_valid]) / temperature;
 	double total = 0.0;
 	for (uint32_t index = first_valid; index < args.top_k; ++index) {
 		const unsigned long long packed = input[index];
 		if (packed == 0ull) {
 			continue;
 		}
-		const double score = static_cast<double>(rocm_score_from_ordered_key(static_cast<uint32_t>(packed >> 32)));
+		const double score = sample_score(packed);
 		const double weight = exp(score / temperature - max_value);
 		if (!isfinite(weight)) {
 			return;
@@ -6707,7 +6717,7 @@ extern "C" __global__ void rocm_packed_topk_sample(const unsigned char *packet)
 			if (packed == 0ull) {
 				continue;
 			}
-			const double score = static_cast<double>(rocm_score_from_ordered_key(static_cast<uint32_t>(packed >> 32)));
+			const double score = sample_score(packed);
 			cumulative += exp(score / temperature - max_value);
 			if (cumulative / total >= top_p) {
 				limit = index + 1u;
@@ -6723,7 +6733,7 @@ extern "C" __global__ void rocm_packed_topk_sample(const unsigned char *packet)
 			continue;
 		}
 		fallback = packed;
-		const double score = static_cast<double>(rocm_score_from_ordered_key(static_cast<uint32_t>(packed >> 32)));
+		const double score = sample_score(packed);
 		selected_total += exp(score / temperature - max_value);
 	}
 	if (!(selected_total > 0.0) || !isfinite(selected_total)) {
@@ -6743,7 +6753,7 @@ extern "C" __global__ void rocm_packed_topk_sample(const unsigned char *packet)
 		if (packed == 0ull) {
 			continue;
 		}
-		const double score = static_cast<double>(rocm_score_from_ordered_key(static_cast<uint32_t>(packed >> 32)));
+		const double score = sample_score(packed);
 		cumulative += exp(score / temperature - max_value);
 		if (target <= cumulative) {
 			output[0] = packed;

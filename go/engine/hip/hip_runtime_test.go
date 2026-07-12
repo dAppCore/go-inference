@@ -5194,11 +5194,13 @@ func (driver *fakeHIPDriver) launchPackedTopKSample(args []byte) error {
 	temperature := math.Float32frombits(binary.LittleEndian.Uint32(args[40:]))
 	topP := math.Float32frombits(binary.LittleEndian.Uint32(args[44:]))
 	draw := math.Float64frombits(binary.LittleEndian.Uint64(args[48:]))
+	softcap := math.Float32frombits(binary.LittleEndian.Uint32(args[56:]))
 	if inputCount <= 0 || topK <= 0 || topK > inputCount || topK > hipPackedTopKMaxK ||
 		inputBytes != inputCount*hipMLXQ4ProjectionBestBytes ||
 		outputBytes != hipMLXQ4ProjectionBestBytes ||
 		temperature < 0 || math.IsNaN(float64(temperature)) || math.IsInf(float64(temperature), 0) ||
 		topP < 0 || topP > 1 || math.IsNaN(float64(topP)) || math.IsInf(float64(topP), 0) ||
+		softcap < 0 || math.IsNaN(float64(softcap)) || math.IsInf(float64(softcap), 0) ||
 		math.IsNaN(draw) || math.IsInf(draw, 0) {
 		return core.E("rocm.hip.FakeLaunch", "packed top-k sample shape metadata mismatch", nil)
 	}
@@ -5226,7 +5228,13 @@ func (driver *fakeHIPDriver) launchPackedTopKSample(args []byte) error {
 		binary.LittleEndian.PutUint64(outputData[outputOffset:], 0)
 		return nil
 	}
-	result, err := hipGemma4Q4HostSampleSortedCandidateResultWorkspace(candidates, inference.GenerateConfig{
+	samplingCandidates := append([]hipGreedySampleResult(nil), candidates...)
+	if softcap > 0 {
+		for index := range samplingCandidates {
+			samplingCandidates[index].Score = float32(math.Tanh(float64(samplingCandidates[index].Score/softcap))) * softcap
+		}
+	}
+	result, err := hipGemma4Q4HostSampleSortedCandidateResultWorkspace(samplingCandidates, inference.GenerateConfig{
 		Temperature:   temperature,
 		TopK:          topK,
 		TopP:          topP,
@@ -5235,8 +5243,13 @@ func (driver *fakeHIPDriver) launchPackedTopKSample(args []byte) error {
 	if err != nil {
 		return err
 	}
-	binary.LittleEndian.PutUint64(outputData[outputOffset:], hipPackGreedyBest(result.Score, result.TokenID))
-	return nil
+	for _, candidate := range candidates {
+		if candidate.TokenID == result.TokenID {
+			binary.LittleEndian.PutUint64(outputData[outputOffset:], hipPackGreedyBest(candidate.Score, candidate.TokenID))
+			return nil
+		}
+	}
+	return core.E("rocm.hip.FakeLaunch", "sampled token is not in packed candidates", nil)
 }
 
 func (driver *fakeHIPDriver) launchJANGTQProjection(args []byte) error {
