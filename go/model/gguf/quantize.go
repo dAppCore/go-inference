@@ -444,7 +444,10 @@ func ggufQuantizeLayout(format QuantizeFormat) (tensorType uint32, blockSize int
 	case QuantizeQ4_0:
 		return TensorTypeQ4_0, 32, 18, nil
 	case QuantizeQ5_0:
-		return ggufTensorTypeQ5_0, 32, 24, nil
+		// Canonical block_q5_0 is 22 (f16 d + 4-byte qh high-bit plane +
+		// 16 qs) — a SYMMETRIC scale-only block, not the 24-byte affine
+		// (scale+min) layout this used to (wrongly) assume.
+		return ggufTensorTypeQ5_0, 32, 22, nil
 	case QuantizeQ4_K:
 		return ggufTensorTypeQ4K, 256, 144, nil
 	case QuantizeQ5_K:
