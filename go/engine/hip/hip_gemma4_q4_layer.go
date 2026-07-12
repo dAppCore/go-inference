@@ -630,6 +630,8 @@ func hipRunGemma4Q4SingleTokenForwardWithState(ctx context.Context, driver nativ
 }
 
 func hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, state hipGemma4Q4DecodeState, req hipGemma4Q4ForwardRequest, validate bool) (hipGemma4Q4ForwardResult, hipGemma4Q4DecodeState, error) {
+	routeMetrics := hipBeginDecodeRouteMetrics()
+	defer hipFinishDecodeRouteMetrics(routeMetrics)
 	if err := hipContextErr(ctx); err != nil {
 		return hipGemma4Q4ForwardResult{}, hipGemma4Q4DecodeState{}, err
 	}
@@ -796,6 +798,9 @@ func hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx context.Context, driv
 		}
 	}
 	for index, layerCfg := range cfg.Layers {
+		if routeMetrics != nil {
+			routeMetrics.setLayer(index, layerCfg.LayerType)
+		}
 		layerState := state.layer(index)
 		var priorDeviceKV *rocmDeviceKVCache
 		var priorDescriptorTable *rocmDeviceKVDescriptorTable
