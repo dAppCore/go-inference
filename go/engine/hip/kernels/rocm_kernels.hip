@@ -10748,6 +10748,16 @@ extern "C" __global__ void rocm_attention_heads_batch_causal(const unsigned char
 	rocm_run_single_head_attention_parallel(single);
 }
 
+#if defined(__HIP_CPU_RT__)
+// HIP-CPU does not provide the dynamically-sized extern shared-memory symbol
+// required by this fused kernel. CPU callers must use the existing unfused
+// RMSNorm/RoPE and attention kernels; abort if this entry point is launched so
+// an unsupported fused path cannot silently return incorrect output.
+extern "C" __global__ void rocm_attention_heads_batch_causal_query_rms_rope(const unsigned char *)
+{
+	__builtin_trap();
+}
+#else
 extern "C" __global__ void rocm_attention_heads_batch_causal_query_rms_rope(const unsigned char *packet)
 {
 	if (packet == nullptr) {
@@ -10879,6 +10889,7 @@ extern "C" __global__ void rocm_attention_heads_batch_causal_query_rms_rope(cons
 	}
 	rocm_run_single_head_attention_parallel(single);
 }
+#endif
 
 extern "C" __global__ void rocm_vector_add(const unsigned char *packet)
 {
