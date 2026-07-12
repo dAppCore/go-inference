@@ -20,10 +20,10 @@ const (
 
 // Tokenizer handles text-to-token and token-to-text conversion.
 type Tokenizer struct {
-	vocab        map[string]int32
-	invVocab     map[int32]string
-	merges       []mergePair
-	mergeRanks   map[mergeKey]int
+	vocab      map[string]int32
+	invVocab   map[int32]string
+	merges     []mergePair
+	mergeRanks map[mergeKey]int
 	// special holds the special:true added tokens ONLY — the decode-side skip set
 	// (Decode/DecodeToken silence these). added holds EVERY added token: the
 	// encode-side atomic matcher, because HF matches all added tokens as single

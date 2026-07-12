@@ -35,6 +35,7 @@ import (
 	_ "dappco.re/go/inference/model/llama"    // llama (dense text)
 	_ "dappco.re/go/inference/model/mistral"  // mistral
 	_ "dappco.re/go/inference/model/mixtral"  // mixtral sparse MoE
+	_ "dappco.re/go/inference/model/olmo"     // OLMo / OLMo 2
 	_ "dappco.re/go/inference/model/phi"      // phi / phi3
 	_ "dappco.re/go/inference/model/qwen2"    // qwen2 / qwen2.5 dense text
 	_ "dappco.re/go/inference/model/qwen3"    // qwen3
