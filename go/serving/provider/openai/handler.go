@@ -78,11 +78,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// anything it could act on, so it just answers in prose and the caller
 	// gets an ordinary content response with no signal anything went wrong.
 	// Reject up front instead.
-	if len(offeredTools) > 0 && !supportsGemmaToolSyntax(model.Info()) {
+	if len(offeredTools) > 0 && !supportsToolSyntax(model.Info()) {
 		writeError(w, http.StatusBadRequest, "model does not support tool calling: architecture "+model.Info().Architecture, "tools")
 		return
 	}
-	messages := requestMessages(req.Messages, offeredTools)
+	messages := requestMessages(req.Messages, offeredTools, model.Info().Architecture)
 	if messagesCarryImages(messages) {
 		vision, ok := inference.As[inference.VisionModel](model)
 		if !ok || !vision.AcceptsImages() {
@@ -142,7 +142,7 @@ func (h *Handler) serveNonStreaming(w http.ResponseWriter, r *http.Request, mode
 	// tools and reply with a role:"tool" message. Any leading prose stays as
 	// content.
 	message := ChatMessage{Role: "assistant", Content: content}
-	if calls, clean := parser.ParseGemmaToolCalls(content); len(calls) > 0 {
+	if calls, clean := parser.ParseToolCalls(model.Info().Architecture, content); len(calls) > 0 {
 		message.Content = core.Trim(clean)
 		message.ToolCalls = make([]ToolCall, len(calls))
 		for i, c := range calls {
@@ -224,7 +224,7 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 	// an N-token stream (#380). Each out.* branch below reproduces the prior
 	// per-token case; the differential fuzz in handler_stream_fuzz_test.go pins
 	// them byte-for-byte to that old path.
-	cs := newContentStreamer(stops)
+	cs := newContentStreamer(stops, model.Info().Architecture)
 	finishReason := "stop"
 	for token := range model.Chat(r.Context(), messages, opts...) {
 		contentDelta, thoughtDelta := extractor.Process(token)
@@ -297,7 +297,7 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 	// the client assembles them. finish_reason flips to tool_calls. These rare
 	// chunks go through the reflect writer (the hand-rolled path is text-only).
 	if finishReason != "error" {
-		if calls, _ := parser.ParseGemmaToolCalls(emittedContent); len(calls) > 0 {
+		if calls, _ := parser.ParseToolCalls(model.Info().Architecture, emittedContent); len(calls) > 0 {
 			finishReason = "tool_calls"
 			for i, c := range calls {
 				id := toolCallID()
@@ -368,6 +368,7 @@ type streamOutcome struct {
 type contentStreamer struct {
 	content   core.Builder // cumulative emitted+scanned content (== the old emittedContent)
 	stops     []string
+	toolOpen  string
 	window    int  // maxMarkerLen - 1: carry-over needed to catch a straddling marker
 	inTool    bool // a <|tool_call> span has opened; everything after is buffered
 	stopped   bool // a stop sequence was crossed; stoppedAt bounds the kept content
@@ -379,14 +380,19 @@ type contentStreamer struct {
 // maxMarkerLen-1 is the largest carry-over any of them can need to complete
 // across a token boundary; a bigger-than-needed window is safe (no marker can
 // sit wholly inside it — that would have fired earlier).
-func newContentStreamer(stops []string) *contentStreamer {
-	maxMarkerLen := len(parser.ToolCallOpenMarker)
+func newContentStreamer(stops []string, architecture ...string) *contentStreamer {
+	arch := "gemma4"
+	if len(architecture) > 0 {
+		arch = architecture[0]
+	}
+	toolOpen := parser.ToolCallOpenMarkerFor(arch)
+	maxMarkerLen := len(toolOpen)
 	for _, s := range stops {
 		if len(s) > maxMarkerLen {
 			maxMarkerLen = len(s)
 		}
 	}
-	return &contentStreamer{stops: stops, window: maxMarkerLen - 1}
+	return &contentStreamer{stops: stops, toolOpen: toolOpen, window: maxMarkerLen - 1}
 }
 
 // step feeds one content delta, appends it to the cumulative builder, and scans
@@ -407,7 +413,7 @@ func (c *contentStreamer) step(contentDelta string) streamOutcome {
 	scan := c.content.String()[windowStart:] // == oldTail + contentDelta, zero-copy
 	boundary := emittedLen - windowStart     // emitted/new split, in scan coords
 	// CASE B: the tool-call open marker (idx > len(emittedContent) ⟺ rel > boundary).
-	if rel := core.Index(scan, parser.ToolCallOpenMarker); rel >= 0 {
+	if rel := core.Index(scan, c.toolOpen); rel >= 0 {
 		c.inTool = true
 		out := streamOutcome{tool: true}
 		if rel > boundary {
@@ -440,9 +446,13 @@ func (c *contentStreamer) emitted() string {
 	return c.content.String()
 }
 
-func requestMessages(messages []ChatMessage, tools []Tool) []inference.Message {
+func requestMessages(messages []ChatMessage, tools []Tool, architecture ...string) []inference.Message {
 	out := make([]inference.Message, 0, len(messages)+1)
-	if decl := renderOpenAITools(tools); decl != "" {
+	arch := "gemma4"
+	if len(architecture) > 0 {
+		arch = architecture[0]
+	}
+	if decl := renderOpenAITools(tools, arch); decl != "" {
 		out = append(out, inference.Message{Role: "system", Content: decl})
 	}
 	for _, msg := range messages {
@@ -452,8 +462,8 @@ func requestMessages(messages []ChatMessage, tools []Tool) []inference.Message {
 }
 
 // renderOpenAITools converts OpenAI function declarations to the neutral shape
-// and renders them into Gemma 4's tool syntax via the shared renderer.
-func renderOpenAITools(tools []Tool) string {
+// and renders them into the architecture's native tool syntax.
+func renderOpenAITools(tools []Tool, architecture ...string) string {
 	if len(tools) == 0 {
 		return ""
 	}
@@ -470,7 +480,11 @@ func renderOpenAITools(tools []Tool) string {
 			Required:    t.Function.Parameters.Required,
 		}
 	}
-	return parser.RenderGemmaToolDeclarations(decls)
+	arch := "gemma4"
+	if len(architecture) > 0 {
+		arch = architecture[0]
+	}
+	return parser.RenderToolDeclarations(arch, decls)
 }
 
 // openAIMessageContent renders one message's content. A role:"tool" message (a

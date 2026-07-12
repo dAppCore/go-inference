@@ -13,13 +13,9 @@ import (
 	"dappco.re/go/inference/decode/parser"
 )
 
-// supportsGemmaToolSyntax reports whether info's architecture is a Gemma 4
-// checkpoint — see decode/parser.SupportsToolSyntax for why only that family
-// is honest to gate on: RenderGemmaToolDeclarations / ParseGemmaToolCalls speak
-// Gemma 4's native special-token vocabulary, so declaring tools to any other
-// architecture would inject bytes its tokenizer has never seen as special
-// tokens and no reliable tool_calls would ever come back.
-func supportsGemmaToolSyntax(info inference.ModelInfo) bool {
+// supportsToolSyntax reports whether serving has a matching native declaration
+// renderer and response parser for info's architecture.
+func supportsToolSyntax(info inference.ModelInfo) bool {
 	return parser.SupportsToolSyntax(info.Architecture)
 }
 
@@ -39,7 +35,7 @@ func supportsGemmaToolSyntax(info inference.ModelInfo) bool {
 // inference.ToolParser directly for a non-Gemma architecture keeps its own
 // answer).
 func withServingCapabilities(report inference.CapabilityReport, info inference.ModelInfo) inference.CapabilityReport {
-	if supportsGemmaToolSyntax(info) {
+	if supportsToolSyntax(info) {
 		report = upsertCapability(report, inference.SupportedCapability(inference.CapabilityToolParse, inference.CapabilityGroupModel))
 	}
 	report = upsertCapability(report, inference.SupportedCapability(inference.CapabilityStructuredOutput, inference.CapabilityGroupModel))

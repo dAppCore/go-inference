@@ -19,21 +19,17 @@ import (
 )
 
 // SupportsToolSyntax reports whether architecture — a loaded model's
-// inference.ModelInfo.Architecture — is a Gemma 4 checkpoint, the only family
-// RenderGemmaToolDeclarations / ParseGemmaToolCalls actually round-trip tool
-// calls for. Both functions speak Gemma 4's native special-token vocabulary
-// (<|tool>, <tool|>, <|tool_call>, <tool_call|>, <|"|>) rather than a generic
-// convention any instruction-tuned model would recognise, so declaring tools to
-// an unsupported architecture would inject bytes its tokenizer has never seen
-// as special tokens — the model would see ordinary text, not a tool menu, and
-// no reliable tool_calls would ever come back. Callers (the OpenAI/Anthropic
-// serving handlers, capability reporting) use this to gate tool declarations
-// honestly instead of silently rendering a menu the model can't read.
+// inference.ModelInfo.Architecture — has a native declaration renderer and
+// response parser in this package. Gemma 4 uses its special-token grammar;
+// Llama-family checkpoints use Meta's JSON/<|python_tag|> grammar. Callers use
+// this predicate to reject tool declarations for architectures whose trained
+// syntax is not implemented.
 //
 //	parser.SupportsToolSyntax("gemma4_text") // true
 //	parser.SupportsToolSyntax("qwen3")       // false
 func SupportsToolSyntax(architecture string) bool {
-	return core.Contains(core.Lower(architecture), "gemma4")
+	lower := core.Lower(architecture)
+	return core.Contains(lower, "gemma4") || isLlamaToolArchitecture(lower)
 }
 
 // ToolDecl is one tool a caller offers the model — the engine-neutral form both
