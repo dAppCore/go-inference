@@ -20,7 +20,7 @@ import (
 // set, q_proj emits [q ; gate] per head and the attention output is σ(gate)-gated before o_proj.
 type AttnConfig struct {
 	Heads, KVHeads, HeadDim, RotaryDim int
-	RopeTheta, NormEps                 float32
+	RopeTheta, NormEps, Scale          float32
 	OutputGate                         bool
 	ALiBi                              bool
 	QKNormalization                    model.QKNormalization
@@ -233,7 +233,10 @@ func (m *attnMixer) continueFromQKV(qRaw, k, v []float32, L, D int, st attnState
 		theta = 1e6
 	}
 	pos0 := st.n
-	scale := 1.0 / math.Sqrt(float64(HD))
+	scale := float64(m.cfg.Scale)
+	if scale == 0 {
+		scale = 1.0 / math.Sqrt(float64(HD))
+	}
 	rep := H / KVH
 	var alibiSlopes []float32
 	if cfg.ALiBi {

@@ -56,7 +56,13 @@ func (tm *ComposedTokenModel) Embed(id int32) ([]byte, error) {
 	if int(id) < 0 || int(id) >= tm.m.Vocab {
 		return nil, core.NewError("composed.Embed: id out of range")
 	}
-	return f32ToBF16Bytes(tm.m.Embed[int(id)*tm.m.D : int(id)*tm.m.D+tm.m.D]), nil
+	embed := append([]float32(nil), tm.m.Embed[int(id)*tm.m.D:int(id)*tm.m.D+tm.m.D]...)
+	if tm.m.EmbedScale != 0 && tm.m.EmbedScale != 1 {
+		for i := range embed {
+			embed[i] *= tm.m.EmbedScale
+		}
+	}
+	return f32ToBF16Bytes(embed), nil
 }
 
 // Head maps a final hidden (dModel bf16) to vocab logits (vocab bf16).
