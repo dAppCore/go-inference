@@ -431,6 +431,275 @@ type hipOracleReport struct {
 	failed   []string
 }
 
+// TestHIPGemma4Q4ChainedLayerOracle runs the complete transformer as two
+// independent chains: the normal HIP forward and a float32 host reference.
+// Unlike TestHIPGemma4Q4LayerOracle, every reference layer consumes the prior
+// REFERENCE residual. This makes cross-layer accumulation visible and reports
+// the first tensor at which the two chains separate.
+//
+// Env: the common HIP oracle variables above. GO_ROCM_ORACLE_TOKEN_COUNT
+// defaults to 1 because a full 12B host reference is intentionally expensive.
+// GO_ROCM_CHAIN_TOL defaults to 0.005 (0.5% of reference RMS).
+func TestHIPGemma4Q4ChainedLayerOracle(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware oracle tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled gfx1101 kernels/rocm_kernels.hip HSACO")
+	}
+	modelPath := hipOracleModelPath()
+	if modelPath == "" {
+		t.Skip("set GO_ROCM_ORACLE_MODEL_PATH / GO_ROCM_PRODUCTION_MODEL_PATH to a local Gemma4 MLX-affine pack")
+	}
+	tokenCount := hipOracleEnvInt("GO_ROCM_ORACLE_TOKEN_COUNT", 1)
+	tolRatio := float32(hipOracleEnvFloat("GO_ROCM_CHAIN_TOL", 0.005))
+	const epsilon = float32(1e-6)
+
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(runtime).LoadModel(modelPath, inference.WithContextLen(4096)))
+	if err != nil {
+		t.Fatalf("LoadModel(%q): %v", modelPath, err)
+	}
+	defer model.Close()
+	loaded := model.(*rocmModel).native.(*hipLoadedModel)
+	cfg, err := loaded.loadedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	core.RequireNoError(t, err)
+	tokens := make([]int32, tokenCount)
+	for i := range tokens {
+		tokens[i] = int32((i*2654435761 + 12345) % cfg.Layers[0].VocabSize)
+		if tokens[i] < 0 {
+			tokens[i] += int32(cfg.Layers[0].VocabSize)
+		}
+	}
+
+	ctx := context.Background()
+	forward, err := hipRunGemma4Q4PrefillForwardBatch(ctx, loaded.driver, cfg, tokens, 0, epsilon, rocmKVCacheModeFP16, nil, nil, nil)
+	core.RequireNoError(t, err)
+	defer forward.Close()
+	ref := hipOracleReadF32(t, forward.Embedding, tokenCount*cfg.Layers[0].HiddenSize)
+	perLayer, err := hipRunGemma4Q4PrefillPerLayerInputDeviceSetBatch(ctx, loaded.driver, cfg, tokens, forward.Embedding, epsilon)
+	core.RequireNoError(t, err)
+	if perLayer != nil {
+		defer perLayer.Close()
+	}
+
+	rows := make([]string, 0, len(cfg.Layers))
+	refLayers := make([]hipOracleLayerReference, 0, len(cfg.Layers))
+	sharedSources := hipGemma4Q4SharedKVSourceByLayer(cfg)
+	firstLayer := -1
+	firstTensor := ""
+	var firstMax, firstMean, firstRatio float32
+	for index, layer := range cfg.Layers {
+		var multiplier []float32
+		if perLayer != nil {
+			multiplier = hipOracleReadF32(t, perLayer.Layer(index), tokenCount*layer.PerLayerInput.InputSize)
+		}
+		var sharedKV *hipOracleLayerReference
+		if sharedSources[index] != index {
+			sharedKV = &refLayers[sharedSources[index]]
+		}
+		result := hipOracleReferenceLayer(t, loaded.driver, layer, ref, multiplier, sharedKV, tokenCount, epsilon)
+		hipBody := forward.Layers[index].Body
+		tensors := []struct {
+			name string
+			ref  []float32
+			hip  *hipDeviceByteBuffer
+		}{
+			{"input_norm", result.inputNorm, forward.Layers[index].KV.InputNorm},
+			{"attention", result.attention, hipBody.AttentionOutput},
+			{"attention_projection", result.attentionProjection, hipBody.AttentionProjection},
+			{"attention_residual", result.attentionResidual, hipBody.AttentionResidual},
+			{"pre_ff_norm", result.preFeedForward, hipBody.PreFeedForward},
+			{"mlp", result.mlp, hipBody.MLPOutput},
+			{"post_ff", result.postFeedForward, hipBody.PostFeedForward},
+			{"final_hidden", result.finalHidden, hipBody.FinalHidden},
+		}
+		layerTensor := "clean"
+		var layerMax, layerMean, layerRatio float32
+		for _, tensor := range tensors {
+			hip := hipOracleReadF32(t, tensor.hip, len(tensor.ref))
+			maxAbs, meanAbs := hipOracleMaxMeanDiff(tensor.ref, hip)
+			ratio := float32(0)
+			if rms := hipOracleRMS(tensor.ref); rms > 0 {
+				ratio = maxAbs / rms
+			}
+			if ratio > layerRatio {
+				layerMax, layerMean, layerRatio = maxAbs, meanAbs, ratio
+			}
+			if layerTensor == "clean" && ratio > tolRatio {
+				layerTensor = tensor.name
+				if firstLayer < 0 {
+					firstLayer, firstTensor = index, tensor.name
+					firstMax, firstMean, firstRatio = maxAbs, meanAbs, ratio
+				}
+			}
+		}
+		rows = append(rows, fmt.Sprintf("  L%02d %-22s maxAbs=%-11.6g meanAbs=%-11.6g refRMS=%-9.5g max/refRMS=%.6g", index, layerTensor, layerMax, layerMean, hipOracleRMS(result.finalHidden), layerRatio))
+		ref = result.finalHidden
+		refLayers = append(refLayers, result)
+	}
+	t.Logf("=== #52 chained float-reference divergence table model=%s tokens=%d tol=%.6g ===\n%s", modelPath, tokenCount, tolRatio, strings.Join(rows, "\n"))
+	if firstLayer >= 0 {
+		t.Fatalf("FIRST CHAIN DIVERGENCE layer=%d tensor=%s maxAbs=%.7g meanAbs=%.7g max/refRMS=%.7g", firstLayer, firstTensor, firstMax, firstMean, firstRatio)
+	}
+}
+
+type hipOracleLayerReference struct {
+	inputNorm           []float32
+	attention           []float32
+	attentionProjection []float32
+	attentionResidual   []float32
+	preFeedForward      []float32
+	mlp                 []float32
+	postFeedForward     []float32
+	finalHidden         []float32
+	key                 []float32
+	value               []float32
+}
+
+func hipOracleReferenceLayer(t *testing.T, driver nativeHIPDriver, layer hipGemma4Q4Layer0Config, input, multiplier []float32, sharedKV *hipOracleLayerReference, tokenCount int, epsilon float32) hipOracleLayerReference {
+	t.Helper()
+	hidden := layer.HiddenSize
+	queryRows := layer.QueryHeads * layer.HeadDim
+	kvRows := layer.KeyHeads * layer.HeadDim
+	result := hipOracleLayerReference{}
+	result.inputNorm = hipOracleReferenceNormRows(t, input, hipOracleReadNormWeight(t, driver, layer.InputNorm), tokenCount, hidden, epsilon)
+	query := hipOracleReferenceProjectionRows(t, driver, layer.QueryProjection, result.inputNorm, tokenCount)
+	key := hipOracleReferenceProjectionRows(t, driver, layer.KeyProjection, result.inputNorm, tokenCount)
+	valueRaw := key
+	if !layer.AttentionKEqV {
+		valueRaw = hipOracleReferenceProjectionRows(t, driver, layer.ValueProjection, result.inputNorm, tokenCount)
+	}
+	freqDim, rotary := hipGemma4Q4RoPEKernelDims(layer)
+	if freqDim == 0 {
+		freqDim = layer.HeadDim
+	}
+	if rotary == 0 {
+		rotary = layer.HeadDim
+	}
+	query = hipOracleNormRoPEHeads(t, query, tokenCount, layer.QueryHeads, layer.HeadDim, hipOracleReadNormWeight(t, driver, layer.QueryNorm), epsilon, float64(layer.RoPEBase), freqDim, rotary, float64(layer.effectiveRoPEFrequencyScale()))
+	key = hipOracleNormRoPEHeads(t, key, tokenCount, layer.KeyHeads, layer.HeadDim, hipOracleReadNormWeight(t, driver, layer.KeyNorm), epsilon, float64(layer.RoPEBase), freqDim, rotary, float64(layer.effectiveRoPEFrequencyScale()))
+	ones := make([]float32, layer.HeadDim)
+	for i := range ones {
+		ones[i] = 1
+	}
+	value := hipOracleReferenceHeadNormRows(t, valueRaw, ones, tokenCount, layer.KeyHeads, layer.HeadDim, epsilon)
+	result.key, result.value = key, value
+	if sharedKV != nil {
+		key, value = sharedKV.key, sharedKV.value
+		result.key, result.value = key, value
+	}
+	result.attention = make([]float32, tokenCount*queryRows)
+	for tok := 0; tok < tokenCount; tok++ {
+		start := 0
+		if layer.SlidingWindow > 0 && tok+1 > layer.SlidingWindow {
+			start = tok + 1 - layer.SlidingWindow
+		}
+		for head := 0; head < layer.QueryHeads; head++ {
+			kvHead := rocmOracleKVHeadForQuery(head, layer.QueryHeads, layer.KeyHeads)
+			keys, values := make([][]float32, 0, tok+1-start), make([][]float32, 0, tok+1-start)
+			for pos := start; pos <= tok; pos++ {
+				base := pos*kvRows + kvHead*layer.HeadDim
+				keys, values = append(keys, key[base:base+layer.HeadDim]), append(values, value[base:base+layer.HeadDim])
+			}
+			base := tok*queryRows + head*layer.HeadDim
+			out, _, err := hipReferenceSingleHeadAttentionWithScale(query[base:base+layer.HeadDim], keys, values, 1)
+			core.RequireNoError(t, err)
+			copy(result.attention[base:], out)
+		}
+	}
+	result.attentionProjection = hipOracleReferenceProjectionRows(t, driver, layer.OutputProjection, result.attention, tokenCount)
+	postAttention := hipOracleReferenceNormRows(t, result.attentionProjection, hipOracleReadNormWeight(t, driver, layer.PostAttentionNorm), tokenCount, hidden, epsilon)
+	result.attentionResidual = hipOracleAddRows(input, postAttention, 1)
+	result.preFeedForward = hipOracleReferenceNormRows(t, result.attentionResidual, hipOracleReadNormWeight(t, driver, layer.PreFeedForwardNorm), tokenCount, hidden, epsilon)
+	gate := hipOracleReferenceProjectionRows(t, driver, layer.GateProjection, result.preFeedForward, tokenCount)
+	up := hipOracleReferenceProjectionRows(t, driver, layer.UpProjection, result.preFeedForward, tokenCount)
+	activation := make([]float32, len(gate))
+	for row := 0; row < tokenCount; row++ {
+		start := row * layer.GateProjection.Rows
+		gelu, err := hipGemma4Q4HostGELU(gate[start : start+layer.GateProjection.Rows])
+		core.RequireNoError(t, err)
+		product, err := hipGemma4Q4HostMultiply(gelu, up[start:start+layer.GateProjection.Rows])
+		core.RequireNoError(t, err)
+		copy(activation[start:], product)
+	}
+	result.mlp = hipOracleReferenceProjectionRows(t, driver, layer.DownProjection, activation, tokenCount)
+	postFFNorm := hipOracleReferenceNormRows(t, result.mlp, hipOracleReadNormWeight(t, driver, layer.PostFeedForwardNorm), tokenCount, hidden, epsilon)
+	result.postFeedForward = hipOracleAddRows(result.attentionResidual, postFFNorm, 1)
+	result.finalHidden = result.postFeedForward
+	if len(multiplier) == 0 {
+		result.postFeedForward = hipOracleScale(result.postFeedForward, layer.effectiveLayerScalar())
+		result.finalHidden = result.postFeedForward
+		return result
+	}
+	inputGate := hipOracleReferenceProjectionRows(t, driver, layer.PerLayerInput.InputGate, result.postFeedForward, tokenCount)
+	for tok := 0; tok < tokenCount; tok++ {
+		start := tok * layer.PerLayerInput.InputGate.Rows
+		gelu, err := hipGemma4Q4HostGELU(inputGate[start : start+layer.PerLayerInput.InputGate.Rows])
+		core.RequireNoError(t, err)
+		for i := range gelu {
+			inputGate[start+i] = gelu[i] * multiplier[start+i]
+		}
+	}
+	perLayerProjection := hipOracleReferenceProjectionRows(t, driver, layer.PerLayerInput.Projection, inputGate, tokenCount)
+	perLayerNorm := hipOracleReferenceNormRows(t, perLayerProjection, hipOracleReadNormWeight(t, driver, layer.PerLayerInput.PostInputNorm), tokenCount, hidden, epsilon)
+	result.finalHidden = hipOracleScale(hipOracleAddRows(result.postFeedForward, perLayerNorm, 1), layer.effectiveLayerScalar())
+	return result
+}
+
+func hipOracleReferenceProjectionRows(t *testing.T, driver nativeHIPDriver, projection hipMLXQ4DeviceWeightConfig, input []float32, tokenCount int) []float32 {
+	t.Helper()
+	weights := hipOracleReadUint32(t, driver, projection.WeightPointer, projection.WeightBytes)
+	scales := hipOracleReadUint16(t, driver, projection.ScalePointer, projection.ScaleBytes)
+	biases := hipOracleReadUint16(t, driver, projection.BiasPointer, projection.BiasBytes)
+	bits := projection.Bits
+	if bits == 0 {
+		bits = hipMLXQ4ProjectionBits
+	}
+	out := make([]float32, tokenCount*projection.Rows)
+	for row := 0; row < tokenCount; row++ {
+		projected, err := hipReferenceMLXAffineProjection(input[row*projection.Cols:(row+1)*projection.Cols], weights, scales, biases, projection.Rows, projection.Cols, projection.GroupSize, bits)
+		core.RequireNoError(t, err)
+		copy(out[row*projection.Rows:], projected)
+	}
+	return out
+}
+
+func hipOracleReferenceNormRows(t *testing.T, input, weight []float32, rows, width int, epsilon float32) []float32 {
+	t.Helper()
+	out := make([]float32, len(input))
+	for row := 0; row < rows; row++ {
+		normed, err := hipReferenceRMSNorm(input[row*width:(row+1)*width], weight, epsilon)
+		core.RequireNoError(t, err)
+		copy(out[row*width:], normed)
+	}
+	return out
+}
+
+func hipOracleReferenceHeadNormRows(t *testing.T, input, weight []float32, tokens, heads, width int, epsilon float32) []float32 {
+	t.Helper()
+	return hipOracleReferenceNormRows(t, input, weight, tokens*heads, width, epsilon)
+}
+
+func hipOracleAddRows(a, b []float32, scale float32) []float32 {
+	out := make([]float32, len(a))
+	for i := range out {
+		out[i] = a[i] + b[i]*scale
+	}
+	return out
+}
+
+func hipOracleScale(input []float32, scale float32) []float32 {
+	out := make([]float32, len(input))
+	for i := range out {
+		out[i] = input[i] * scale
+	}
+	return out
+}
+
 func (r *hipOracleReport) rmsOnly(name string, hip []float32, width int) {
 	r.rows = append(r.rows, fmt.Sprintf("  %-16s   (input)   hipRMS=%.4f", name, hipOracleRMS(hip)))
 }
