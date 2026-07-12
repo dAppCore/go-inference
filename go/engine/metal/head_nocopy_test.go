@@ -527,6 +527,100 @@ func TestHeadEncoderRejectsHiddenShapeMismatch(t *testing.T) {
 	}
 }
 
+func TestGreedyBF16Suppressed_Good(t *testing.T) {
+	logits := toBF16Bytes([]float32{-3.5, 7.25, 2.5, 6.75, -1.25})
+
+	got, err := greedyBF16Suppressed(logits, 5, []int32{1, 4})
+	if err != nil {
+		t.Fatalf("greedyBF16Suppressed: %v", err)
+	}
+	if got != 3 {
+		t.Fatalf("greedyBF16Suppressed = %d, want 3", got)
+	}
+}
+
+func TestGreedyBF16Suppressed_Bad(t *testing.T) {
+	logits := toBF16Bytes([]float32{1.5, -2.25, 3.75})
+
+	if _, err := greedyBF16Suppressed(logits[:len(logits)-1], 3, []int32{0}); err == nil {
+		t.Fatal("greedyBF16Suppressed accepted malformed bf16 logits")
+	}
+}
+
+func TestGreedyBF16Suppressed_Ugly(t *testing.T) {
+	logits := toBF16Bytes([]float32{1.5, -2.25, 3.75})
+
+	if _, err := greedyBF16Suppressed(logits, 3, []int32{2, 0, 1, 2}); err == nil {
+		t.Fatal("greedyBF16Suppressed accepted an entirely suppressed vocabulary")
+	}
+}
+
+func TestBF16NaNScanBytes_Good(t *testing.T) {
+	values := append(toBF16Bytes([]float32{-2.5, 4.25}), []byte{0xc1, 0x7f}...)
+	values = append(values, toBF16Bytes([]float32{7.5})...)
+	values = append(values, []byte{0xa1, 0xff}...)
+
+	count, first := bf16NaNScanBytes(values)
+	if count != 2 || first != 2 {
+		t.Fatalf("bf16NaNScanBytes = (%d, %d), want (2, 2)", count, first)
+	}
+}
+
+func TestBF16NaNScanBytes_Bad(t *testing.T) {
+	count, first := bf16NaNScanBytes(toBF16Bytes([]float32{-9.5, 0.25, 11.75}))
+	if count != 0 || first != -1 {
+		t.Fatalf("bf16NaNScanBytes finite input = (%d, %d), want (0, -1)", count, first)
+	}
+}
+
+func TestBF16NaNScanBytes_Ugly(t *testing.T) {
+	count, first := bf16NaNScanBytes([]byte{0xc1, 0x7f, 0xff})
+	if count != 1 || first != 0 {
+		t.Fatalf("bf16NaNScanBytes odd input = (%d, %d), want (1, 0)", count, first)
+	}
+}
+
+func TestBF16BufStats_Good(t *testing.T) {
+	if err := ensureInit(); err != nil {
+		t.Skipf("device init: %v", err)
+	}
+	requireNativeRuntime(t)
+	values := append(toBF16Bytes([]float32{-7.5, 2.25}), []byte{0x80, 0x7f}...)
+	values = append(values, []byte{0xc1, 0x7f}...)
+	values = append(values, toBF16Bytes([]float32{5.5})...)
+
+	nan, inf, minV, maxV, firstNaN := bf16BufStats(sharedBytes(values), 0, 5)
+	if nan != 1 || inf != 1 || minV != -7.5 || maxV != 5.5 || firstNaN != 3 {
+		t.Fatalf("bf16BufStats = (%d, %d, %g, %g, %d), want (1, 1, -7.5, 5.5, 3)", nan, inf, minV, maxV, firstNaN)
+	}
+}
+
+func TestBF16BufStats_Bad(t *testing.T) {
+	if err := ensureInit(); err != nil {
+		t.Skipf("device init: %v", err)
+	}
+	requireNativeRuntime(t)
+
+	nan, inf, minV, maxV, firstNaN := bf16BufStats(nil, 0, 4)
+	if nan != 0 || inf != 0 || minV != 0 || maxV != 0 || firstNaN != -1 {
+		t.Fatalf("bf16BufStats nil buffer = (%d, %d, %g, %g, %d), want zero counts/range and -1", nan, inf, minV, maxV, firstNaN)
+	}
+}
+
+func TestBF16BufStats_Ugly(t *testing.T) {
+	if err := ensureInit(); err != nil {
+		t.Skipf("device init: %v", err)
+	}
+	requireNativeRuntime(t)
+	prefix := toBF16Bytes([]float32{99.5, -88.25})
+	values := append(prefix, toBF16Bytes([]float32{3.5, -4.75, 1.25})...)
+
+	nan, inf, minV, maxV, firstNaN := bf16BufStats(sharedBytes(values), uint(len(prefix)), 3)
+	if nan != 0 || inf != 0 || minV != -4.75 || maxV != 3.5 || firstNaN != -1 {
+		t.Fatalf("bf16BufStats offset range = (%d, %d, %g, %g, %d), want (0, 0, -4.75, 3.5, -1)", nan, inf, minV, maxV, firstNaN)
+	}
+}
+
 func TestHeadEncoderSoftcapUsesBF16Kernel(t *testing.T) {
 	requireNativeRuntime(t)
 
