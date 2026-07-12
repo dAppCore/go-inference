@@ -405,6 +405,18 @@ var flashWinEnabled = os.Getenv("LTHN_FLASH_WIN") != "0"
 // flashWinOffForTest pins the multiQ ring lane in-process for parity A/Bs.
 var flashWinOffForTest bool
 
+// flashWinMinRows keeps SMALL chunks on the multiQ ring kernel: the window
+// flash launches one threadgroup per (BQ-query tile, head) — at a 57-row
+// boundary chunk that is 16 threadgroups on an 80-core GPU, an occupancy
+// cliff the per-row-parallel ring kernel never hits. Receipted crossover
+// (e2b 8K, per-lane trace, #375): rows=57 ring 2.4ms vs flash 35.7ms (15×);
+// 484 → 17.2 vs 28.4; 1024 → 16.7 vs 17.3 (tie); 1536+ → flash wins
+// (2048: 25-27 vs 34-41). Numeric tier: the kernels share the mask rule but
+// not the accumulation order, so re-routing a chunk can fork a greedy
+// continuation at a near-tie — the same tier the win flash itself shipped
+// at, and LTHN_FLASH_WIN=0 still pins the ring lane outright for A/Bs.
+const flashWinMinRows = 1024
+
 // attnWinParams mirrors the kernel's AttnWinParams.
 type attnWinParams struct {
 	winW     int32
