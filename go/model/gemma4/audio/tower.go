@@ -16,20 +16,25 @@ import (
 
 // Subsample runs the Conformer audio subsampler on log-mel features [frames,melBins] bf16, returning
 // f32 [ceil(frames/4), Hidden]. Layer0's conv + LayerNorm run bf16 (rounded), then the ReLU promotes
-// to f32; layer1 + input_proj run f32. Mirrors engine/metal's AudioSubsampleF32.
-func Subsample(features []byte, frames, melBins int, la *model.LoadedAudio) ([]float32, error) {
+// to f32; layer1 + input_proj run f32. Mirrors engine/metal's AudioSubsampleF32. validity is the
+// optional per-frame (length frames) validity mask (nil ⇒ a fully-valid clip, byte-identical to the
+// mask-free path): the second return is the per-soft-token validity, HF's SubSampleConvProjection
+// halving the input mask (mask[:, ::2]) at each stride-2 conv. Values are NOT re-zeroed here — the mel
+// extractor already zeros padding frames, so the subsampler activations stay byte-identical to the
+// mask-free path; the halved mask only feeds the attention key-padding AND.
+func Subsample(features []byte, frames, melBins int, la *model.LoadedAudio, validity []bool) ([]float32, []bool, error) {
 	if la == nil {
-		return nil, core.NewError("audio.Subsample: nil LoadedAudio")
+		return nil, nil, core.NewError("audio.Subsample: nil LoadedAudio")
 	}
 	cfg := la.Cfg
 	sub := la.Subsample
 	if len(features) != frames*melBins*bf16Size {
-		return nil, core.NewError("audio.Subsample: len(features) must equal frames*melBins*2 bytes")
+		return nil, nil, core.NewError("audio.Subsample: len(features) must equal frames*melBins*2 bytes")
 	}
 	outC0 := len(sub.Norm0W) / bf16Size
 	outC1 := len(sub.Norm1W) / bf16Size
 	if outC0 == 0 || outC1 == 0 {
-		return nil, core.NewError("audio.Subsample: subsample norm widths must be non-zero")
+		return nil, nil, core.NewError("audio.Subsample: subsample norm widths must be non-zero")
 	}
 	t0, f0 := convOut(frames), convOut(melBins)
 
@@ -45,7 +50,22 @@ func Subsample(features []byte, frames, melBins int, la *model.LoadedAudio) ([]f
 	r1 := relu(n1)
 
 	// flatten [t1, f1·outC1] → input_proj (f32 mixed-dtype matmul).
-	return linear(r1, sub.InputProj, t1, f1*outC1, cfg.Hidden), nil
+	out := linear(r1, sub.InputProj, t1, f1*outC1, cfg.Hidden)
+	return out, halveValidity(halveValidity(validity)), nil
+}
+
+// halveValidity is HF's mask[:, ::2]: a stride-2 conv halves the time axis, so the validity mask keeps
+// every other entry (index 2i). nil (a fully-valid clip) stays nil. len(out) == (len(v)+1)/2 == the
+// conv's output time length convOut(len(v)), so two halvings track the subsampler's two stride-2 convs.
+func halveValidity(v []bool) []bool {
+	if v == nil {
+		return nil
+	}
+	out := make([]bool, (len(v)+1)/2)
+	for i := range out {
+		out[i] = v[2*i]
+	}
+	return out
 }
 
 // sliceCols extracts columns [c0:c1) from each row of [rows,cols] f32.
@@ -106,7 +126,9 @@ func lightConv(x []float32, lc model.LoadedAudioLightConv, cfg model.LoadedAudio
 
 // Layer runs one Conformer block on f32 [L,Hidden] — the macaron sandwich: ff1 → clamp→RMSNorm(pre)→
 // attn → clamp→RMSNorm(post)→+ff1 → lconv → ff2 → clamp→RMSNorm(out). Mirrors engine/metal's AudioLayer.
-func Layer(x []float32, layer *model.LoadedAudioLayer, cfg model.LoadedAudioConfig) ([]float32, error) {
+// validity is the optional per-soft-token (length L) key-padding mask forwarded to the attention;
+// nil ⇒ all-valid.
+func Layer(x []float32, layer *model.LoadedAudioLayer, cfg model.LoadedAudioConfig, validity []bool) ([]float32, error) {
 	if cfg.Hidden == 0 {
 		return nil, core.NewError("audio.Layer: cfg.Hidden must be set")
 	}
@@ -116,7 +138,7 @@ func Layer(x []float32, layer *model.LoadedAudioLayer, cfg model.LoadedAudioConf
 	}
 	h := feedForward(x, layer.FF1, cfg)
 	pre := rmsClamped(h, layer.NormPreAttn)
-	attn := attention(pre, layer.Attn, cfg)
+	attn := attention(pre, layer.Attn, cfg, validity)
 	post := rmsClamped(attn, layer.NormPostAttn)
 	res := add(post, h)
 	conv := lightConv(res, layer.LConv, cfg)
@@ -126,18 +148,21 @@ func Layer(x []float32, layer *model.LoadedAudioLayer, cfg model.LoadedAudioConf
 
 // Encode runs the full audio tower on log-mel features [frames,melBins] bf16, returning
 // [ceil(frames/4), OutputDim] f32: subsample → Conformer layers → output projection (+bias). Mirrors
-// engine/metal's AudioEncode.
-func Encode(features []byte, frames, melBins int, la *model.LoadedAudio) ([]float32, error) {
+// engine/metal's AudioEncode. validity is the optional per-frame (length frames) validity mask (nil ⇒ a
+// fully-valid clip, byte-identical to the mask-free path): the subsampler halves it twice into the
+// per-soft-token mask each Conformer attention ANDs into its blocked mask, so padding keys are never
+// attended for padded/batched clips.
+func Encode(features []byte, frames, melBins int, la *model.LoadedAudio, validity []bool) ([]float32, error) {
 	if la == nil || la.OutputProj == nil {
 		return nil, core.NewError("audio.Encode: LoadedAudio has no output projection")
 	}
 	cfg := la.Cfg
-	h, err := Subsample(features, frames, melBins, la)
+	h, softMask, err := Subsample(features, frames, melBins, la, validity)
 	if err != nil {
 		return nil, err
 	}
 	for i := range la.Layers {
-		if h, err = Layer(h, &la.Layers[i], cfg); err != nil {
+		if h, err = Layer(h, &la.Layers[i], cfg, softMask); err != nil {
 			return nil, core.E("audio.Encode", core.Sprintf("layer %d", i), err)
 		}
 	}

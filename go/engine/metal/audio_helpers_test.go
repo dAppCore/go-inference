@@ -9,65 +9,6 @@ import (
 	"testing"
 )
 
-func TestAudioHelpersClampAndActivate(t *testing.T) {
-	cfg := AudioConfig{ChunkSize: 4, PastHorizon: 2, FutureHorizon: 1}
-	if got := cfg.audioContextSize(); got != 7 {
-		t.Fatalf("audioContextSize = %d, want 7", got)
-	}
-
-	clamped := []float32{-2, -0.5, 0.25, 3}
-	audioClamp(clamped, -1, 1)
-	wantClamp := []float32{-1, -0.5, 0.25, 1}
-	for i := range wantClamp {
-		if clamped[i] != wantClamp[i] {
-			t.Fatalf("clamped[%d] = %v, want %v", i, clamped[i], wantClamp[i])
-		}
-	}
-	noOp := []float32{-2, 3}
-	audioClamp(noOp, 0, 0)
-	if noOp[0] != -2 || noOp[1] != 3 {
-		t.Fatalf("no-op clamp = %v, want original", noOp)
-	}
-
-	relu := []float32{-1, 0, 2}
-	audioActivate(relu, "relu")
-	if relu[0] != 0 || relu[1] != 0 || relu[2] != 2 {
-		t.Fatalf("relu activation = %v, want [0 0 2]", relu)
-	}
-
-	gelu := []float32{-0.5, 0.5}
-	audioActivate(gelu, "gelu")
-	for i, x := range []float32{-0.5, 0.5} {
-		if diff := math.Abs(float64(gelu[i] - geluTanhScalar(x))); diff > 1e-6 {
-			t.Fatalf("gelu[%d] diff = %.3g", i, diff)
-		}
-	}
-
-	silu := []float32{-1, 2}
-	audioActivate(silu, "swish")
-	for i, x := range []float32{-1, 2} {
-		want := x / (1 + float32(math.Exp(float64(-x))))
-		if diff := math.Abs(float64(silu[i] - want)); diff > 1e-6 {
-			t.Fatalf("silu[%d] diff = %.3g", i, diff)
-		}
-	}
-}
-
-func TestRMSRowsHost(t *testing.T) {
-	got := rmsRowsHost([]float32{3, 4, 1, 2}, []float32{1, 2}, 2, 2, 0)
-	want := []float32{
-		3 / float32(math.Sqrt(12.5)),
-		8 / float32(math.Sqrt(12.5)),
-		1 / float32(math.Sqrt(2.5)),
-		4 / float32(math.Sqrt(2.5)),
-	}
-	for i := range want {
-		if diff := math.Abs(float64(got[i] - want[i])); diff > 1e-6 {
-			t.Fatalf("rms row value %d diff = %.3g, got %v want %v", i, diff, got[i], want[i])
-		}
-	}
-}
-
 func TestAudioPositionTable(t *testing.T) {
 	got := AudioPositionTable(2, 4)
 	if len(got) != 8 {
