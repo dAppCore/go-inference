@@ -3824,3 +3824,1117 @@ func TestNativeAssistantSuppressed_Ugly(t *testing.T) {
 		t.Fatal("nativeAssistantSuppressed accepted negative sentinel")
 	}
 }
+
+// --- #30 coverage rotation: assistant_load.go loader/validation surface. ---
+// These drive real production functions against hand-built or on-disk
+// synthetic fixtures — no GPU/session needed, since every function below
+// resolves shape/dtype/config errors in pure Go before any native call.
+
+func TestNativeAssistantDequantizeTensors_Good(t *testing.T) {
+	const rows, cols, groupSize, bits = 2, 8, 4, 4
+	f := syntheticFloat32(rows*cols, 11)
+	packed, scales, biases := packAffineQuant(f, rows, cols, groupSize, bits)
+	words := cols * bits / 32
+	wantF32, err := dequantizeAffineRowsF32(packed, scales, biases, rows, cols, groupSize, bits)
+	if err != nil {
+		t.Fatalf("reference dequantizeAffineRowsF32: %v", err)
+	}
+	want := f32ToBf16Slice(wantF32)
+
+	m := &AssistantModel{
+		Config: model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: groupSize, Bits: bits}},
+		Tensors: map[string]safetensors.Tensor{
+			"layer.weight": {Dtype: "U32", Shape: []int{rows, words}, Data: packed},
+			"layer.scales": {Dtype: "BF16", Shape: []int{rows, cols / groupSize}, Data: scales},
+			"layer.biases": {Dtype: "BF16", Shape: []int{rows, cols / groupSize}, Data: biases},
+		},
+	}
+	if err := nativeAssistantDequantizeTensors(m); err != nil {
+		t.Fatalf("nativeAssistantDequantizeTensors: %v", err)
+	}
+	got, ok := m.Tensors["layer.weight"]
+	if !ok || got.Dtype != "BF16" || !slices.Equal(got.Shape, []int{rows, cols}) {
+		t.Fatalf("dequantised tensor = %+v, ok=%v; want BF16 [%d %d]", got, ok, rows, cols)
+	}
+	if !slices.Equal(got.Data, want) {
+		t.Fatalf("dequantised bytes = %v, want %v", got.Data, want)
+	}
+	if _, sok := m.Tensors["layer.scales"]; sok {
+		t.Fatal("nativeAssistantDequantizeTensors left layer.scales behind")
+	}
+	if _, bok := m.Tensors["layer.biases"]; bok {
+		t.Fatal("nativeAssistantDequantizeTensors left layer.biases behind")
+	}
+}
+
+func TestNativeAssistantDequantizeTensors_Bad(t *testing.T) {
+	cases := []struct {
+		name    string
+		quant   model.QuantConfig
+		shape   []int
+		wantErr string
+	}{
+		{"no_group_size_or_bits", model.QuantConfig{}, []int{1, 1}, "declares no group_size/bits"},
+		{"groupsize_does_not_divide_cols", model.QuantConfig{GroupSize: 3, Bits: 8}, []int{1, 1}, "native.assistant dequantise"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := &AssistantModel{
+				Config: model.AssistantConfig{Quant: &c.quant},
+				Tensors: map[string]safetensors.Tensor{
+					"layer.weight": {Dtype: "U32", Shape: c.shape, Data: make([]byte, 4)},
+					"layer.scales": {Dtype: "BF16", Shape: []int{1, 1}, Data: make([]byte, 2)},
+					"layer.biases": {Dtype: "BF16", Shape: []int{1, 1}, Data: make([]byte, 2)},
+				},
+			}
+			err := nativeAssistantDequantizeTensors(m)
+			if err == nil || !core.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("nativeAssistantDequantizeTensors(%s) = %v, want error containing %q", c.name, err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestNativeAssistantDequantizeTensors_Ugly(t *testing.T) {
+	untouched := safetensors.Tensor{Dtype: "U32", Shape: []int{1, 1}, Data: make([]byte, 4)}
+	t.Run("quant_nil_is_noop", func(t *testing.T) {
+		m := &AssistantModel{Tensors: map[string]safetensors.Tensor{"layer.weight": untouched}}
+		if err := nativeAssistantDequantizeTensors(m); err != nil {
+			t.Fatalf("nil quant: %v", err)
+		}
+		if got := m.Tensors["layer.weight"]; got.Dtype != "U32" {
+			t.Fatalf("nil quant mutated tensor = %+v", got)
+		}
+	})
+	t.Run("non_affine_mode_is_noop", func(t *testing.T) {
+		m := &AssistantModel{
+			Config:  model.AssistantConfig{Quant: &model.QuantConfig{Mode: "mxfp4", GroupSize: 4, Bits: 4}},
+			Tensors: map[string]safetensors.Tensor{"layer.weight": untouched},
+		}
+		if err := nativeAssistantDequantizeTensors(m); err != nil {
+			t.Fatalf("mxfp4 mode: %v", err)
+		}
+		if got := m.Tensors["layer.weight"]; got.Dtype != "U32" {
+			t.Fatalf("mxfp4 mode mutated tensor = %+v", got)
+		}
+	})
+	t.Run("missing_sibling_is_skipped", func(t *testing.T) {
+		m := &AssistantModel{
+			Config: model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 4}},
+			Tensors: map[string]safetensors.Tensor{
+				"layer.weight": untouched,
+				"layer.scales": {Dtype: "BF16", Shape: []int{1, 1}, Data: make([]byte, 2)},
+				// no layer.biases sibling.
+			},
+		}
+		if err := nativeAssistantDequantizeTensors(m); err != nil {
+			t.Fatalf("missing sibling: %v", err)
+		}
+		if got := m.Tensors["layer.weight"]; got.Dtype != "U32" {
+			t.Fatalf("missing-sibling tensor mutated = %+v", got)
+		}
+	})
+	t.Run("wrong_rank_is_skipped", func(t *testing.T) {
+		m := &AssistantModel{
+			Config: model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 4}},
+			Tensors: map[string]safetensors.Tensor{
+				"layer.weight": {Dtype: "U32", Shape: []int{4}, Data: make([]byte, 4)},
+				"layer.scales": {Dtype: "BF16", Shape: []int{1}, Data: make([]byte, 2)},
+				"layer.biases": {Dtype: "BF16", Shape: []int{1}, Data: make([]byte, 2)},
+			},
+		}
+		if err := nativeAssistantDequantizeTensors(m); err != nil {
+			t.Fatalf("wrong rank: %v", err)
+		}
+		if got := m.Tensors["layer.weight"]; got.Dtype != "U32" {
+			t.Fatalf("wrong-rank tensor mutated = %+v", got)
+		}
+	})
+}
+
+func TestNativeAssistantLinearInputMatches_Good(t *testing.T) {
+	m := &AssistantModel{}
+	if !nativeAssistantLinearInputMatches(m, "layer", 8, 8) {
+		t.Fatal("nativeAssistantLinearInputMatches exact match = false, want true")
+	}
+}
+
+func TestNativeAssistantLinearInputMatches_Bad(t *testing.T) {
+	cases := []struct {
+		name string
+		m    *AssistantModel
+	}{
+		{"quant_nil", &AssistantModel{}},
+		{"bits_zero", &AssistantModel{Config: model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4}}}},
+		{"missing_scales", &AssistantModel{
+			Config:  model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 4}},
+			Tensors: map[string]safetensors.Tensor{},
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if nativeAssistantLinearInputMatches(c.m, "layer", 4, 8) {
+				t.Fatalf("nativeAssistantLinearInputMatches(%s) = true, want false", c.name)
+			}
+		})
+	}
+}
+
+func TestNativeAssistantLinearInputMatches_Ugly(t *testing.T) {
+	// bits=4 packs 8 codes/word (packFactor=32/4=8): wantIn=8 divides evenly,
+	// so a packed gotIn of wantIn/packFactor=1 word is accepted.
+	packed := &AssistantModel{
+		Config:  model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 4}},
+		Tensors: map[string]safetensors.Tensor{"layer.scales": {Dtype: "BF16", Data: make([]byte, 2)}},
+	}
+	if !nativeAssistantLinearInputMatches(packed, "layer", 1, 8) {
+		t.Fatal("nativeAssistantLinearInputMatches packed-word match = false, want true")
+	}
+	// bits=3: packFactor=32/3=10 does not divide wantIn=8, so the packer falls
+	// back to the byte-packed-row formula gotIn == (wantIn*bits+31)/32.
+	fallback := &AssistantModel{
+		Config:  model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 3}},
+		Tensors: map[string]safetensors.Tensor{"layer.scales": {Dtype: "BF16", Data: make([]byte, 2)}},
+	}
+	const wantIn = 8
+	gotIn := (wantIn*3 + 31) / 32
+	if !nativeAssistantLinearInputMatches(fallback, "layer", gotIn, wantIn) {
+		t.Fatalf("nativeAssistantLinearInputMatches byte-packed fallback = false, want true (gotIn=%d)", gotIn)
+	}
+}
+
+func TestValidateNativeAssistantLinearShape_Bad(t *testing.T) {
+	base := func() *AssistantModel {
+		return &AssistantModel{Tensors: map[string]safetensors.Tensor{
+			"layer.weight": {Dtype: "BF16", Shape: []int{4, 8}, Data: make([]byte, 4*8*bf16Size)},
+		}}
+	}
+	t.Run("rank_too_low", func(t *testing.T) {
+		m := base()
+		m.Tensors["layer.weight"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{32}, Data: make([]byte, 64)}
+		err := validateNativeAssistantLinearShape(m, "layer", 4, 8)
+		if err == nil || !core.Contains(err.Error(), "invalid rank") {
+			t.Fatalf("validateNativeAssistantLinearShape(rank) = %v, want invalid rank error", err)
+		}
+	})
+	t.Run("output_dim_mismatch", func(t *testing.T) {
+		err := validateNativeAssistantLinearShape(base(), "layer", 5, 8)
+		if err == nil || !core.Contains(err.Error(), "output dim") {
+			t.Fatalf("validateNativeAssistantLinearShape(output) = %v, want output dim error", err)
+		}
+	})
+	t.Run("input_dim_mismatch", func(t *testing.T) {
+		err := validateNativeAssistantLinearShape(base(), "layer", 4, 9)
+		if err == nil || !core.Contains(err.Error(), "input dim") {
+			t.Fatalf("validateNativeAssistantLinearShape(input) = %v, want input dim error", err)
+		}
+	})
+}
+
+func TestValidateNativeAssistantLinearShape_Ugly(t *testing.T) {
+	m := &AssistantModel{Tensors: map[string]safetensors.Tensor{}}
+	if err := validateNativeAssistantLinearShape(m, "absent", 4, 8); err != nil {
+		t.Fatalf("validateNativeAssistantLinearShape(tensor absent) = %v, want nil (an absent tensor is not this validator's job)", err)
+	}
+}
+
+func TestValidateNativeAssistantOrderedEmbeddingShape_Bad(t *testing.T) {
+	cases := []struct {
+		name    string
+		m       *AssistantModel
+		wantErr string
+	}{
+		{
+			"bad_dtype",
+			&AssistantModel{
+				UseOrderedEmbeddings: true,
+				Arch:                 model.Arch{Vocab: 8},
+				NumCentroids:         2,
+				Tensors: map[string]safetensors.Tensor{
+					"masked_embedding.token_ordering": {Dtype: "F32", Shape: []int{8}, Data: make([]byte, 32)},
+				},
+			},
+			"want int32 or int64",
+		},
+		{
+			"vocab_not_divisible",
+			&AssistantModel{
+				UseOrderedEmbeddings: true,
+				Arch:                 model.Arch{Vocab: 9},
+				NumCentroids:         2,
+				Tensors: map[string]safetensors.Tensor{
+					"masked_embedding.token_ordering": {Dtype: "I64", Shape: []int{9}, Data: make([]byte, 72)},
+				},
+			},
+			"divisible by num_centroids",
+		},
+		{
+			"shape_mismatch",
+			&AssistantModel{
+				UseOrderedEmbeddings: true,
+				Arch:                 model.Arch{Vocab: 8},
+				NumCentroids:         2,
+				Tensors: map[string]safetensors.Tensor{
+					"masked_embedding.token_ordering": {Dtype: "I64", Shape: []int{3}, Data: make([]byte, 24)},
+				},
+			},
+			"token_ordering shape",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateNativeAssistantOrderedEmbeddingShape(c.m)
+			if err == nil || !core.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("validateNativeAssistantOrderedEmbeddingShape(%s) = %v, want error containing %q", c.name, err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateNativeAssistantOrderedEmbeddingShape_Ugly(t *testing.T) {
+	m := &AssistantModel{UseOrderedEmbeddings: true, Tensors: map[string]safetensors.Tensor{}}
+	if err := validateNativeAssistantOrderedEmbeddingShape(m); err != nil {
+		t.Fatalf("validateNativeAssistantOrderedEmbeddingShape(tensor absent) = %v, want nil", err)
+	}
+}
+
+func TestDraftInputProjectionShape_Bad(t *testing.T) {
+	t.Run("nil_model", func(t *testing.T) {
+		var m *AssistantModel
+		_, _, _, _, err := m.draftInputProjectionShape()
+		if err == nil || !core.Contains(err.Error(), "model is nil") {
+			t.Fatalf("draftInputProjectionShape(nil) = %v, want model is nil error", err)
+		}
+	})
+	t.Run("incomplete_dims", func(t *testing.T) {
+		m := &AssistantModel{BackboneHiddenSize: 0, Arch: model.Arch{Hidden: 4}}
+		_, _, _, _, err := m.draftInputProjectionShape()
+		if err == nil || !core.Contains(err.Error(), "incomplete dimensions") {
+			t.Fatalf("draftInputProjectionShape(incomplete) = %v, want incomplete dimensions error", err)
+		}
+	})
+	t.Run("missing_weight", func(t *testing.T) {
+		m := &AssistantModel{BackboneHiddenSize: 8, Arch: model.Arch{Hidden: 4}, Tensors: map[string]safetensors.Tensor{}}
+		_, _, _, _, err := m.draftInputProjectionShape()
+		if err == nil || !core.Contains(err.Error(), "missing pre_projection.weight") {
+			t.Fatalf("draftInputProjectionShape(missing) = %v, want missing pre_projection.weight error", err)
+		}
+	})
+}
+
+func TestDraftInputProjectionShape_Ugly(t *testing.T) {
+	t.Run("wrong_dtype", func(t *testing.T) {
+		m := &AssistantModel{BackboneHiddenSize: 8, Arch: model.Arch{Hidden: 4}, Tensors: map[string]safetensors.Tensor{
+			"pre_projection.weight": {Dtype: "F32", Shape: []int{4, 16}, Data: make([]byte, 4*16*4)},
+		}}
+		_, _, _, _, err := m.draftInputProjectionShape()
+		if err == nil || !core.Contains(err.Error(), "want BF16") {
+			t.Fatalf("draftInputProjectionShape(wrong dtype) = %v, want dtype error", err)
+		}
+	})
+	t.Run("wrong_shape", func(t *testing.T) {
+		m := &AssistantModel{BackboneHiddenSize: 8, Arch: model.Arch{Hidden: 4}, Tensors: map[string]safetensors.Tensor{
+			"pre_projection.weight": {Dtype: "BF16", Shape: []int{4, 15}, Data: make([]byte, 4*15*bf16Size)},
+		}}
+		_, _, _, _, err := m.draftInputProjectionShape()
+		if err == nil || !core.Contains(err.Error(), "pre_projection.weight shape") {
+			t.Fatalf("draftInputProjectionShape(wrong shape) = %v, want shape error", err)
+		}
+	})
+	t.Run("wrong_byte_length", func(t *testing.T) {
+		m := &AssistantModel{BackboneHiddenSize: 8, Arch: model.Arch{Hidden: 4}, Tensors: map[string]safetensors.Tensor{
+			"pre_projection.weight": {Dtype: "BF16", Shape: []int{4, 16}, Data: make([]byte, 4*16*bf16Size-1)},
+		}}
+		_, _, _, _, err := m.draftInputProjectionShape()
+		if err == nil || !core.Contains(err.Error(), "pre_projection.weight bytes") {
+			t.Fatalf("draftInputProjectionShape(wrong bytes) = %v, want bytes error", err)
+		}
+	})
+}
+
+func assistantSessionArchFixture() model.Arch {
+	layers := model.DeriveLayers([]string{"sliding_attention", "full_attention"}, 0)
+	for i := range layers {
+		layers[i].HeadDim = 2
+		layers[i].KVHeads = 2
+	}
+	return model.Arch{Hidden: 4, Vocab: 8, Layer: layers}
+}
+
+func TestAssistantPairValidateTargetSessionArch_Good(t *testing.T) {
+	arch := assistantSessionArchFixture()
+	pair := &AssistantPair{TargetArch: arch}
+	if err := pair.validateTargetSessionArch(arch); err != nil {
+		t.Fatalf("validateTargetSessionArch(matching) = %v, want nil", err)
+	}
+}
+
+func TestAssistantPairValidateTargetSessionArch_Bad(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*model.Arch)
+		wantErr string
+	}{
+		{"hidden_mismatch", func(a *model.Arch) { a.Hidden = 5 }, "hidden_size"},
+		{"vocab_mismatch", func(a *model.Arch) { a.Vocab = 9 }, "vocab_size"},
+		{"layer_count_mismatch", func(a *model.Arch) { a.Layer = a.Layer[:1] }, "layer count"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pair := &AssistantPair{TargetArch: assistantSessionArchFixture()}
+			arch := assistantSessionArchFixture()
+			c.mutate(&arch)
+			err := pair.validateTargetSessionArch(arch)
+			if err == nil || !core.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("validateTargetSessionArch(%s) = %v, want error containing %q", c.name, err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestAssistantPairValidateTargetSessionArch_Ugly(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*model.Arch)
+		wantErr string
+	}{
+		{"cache_topology_mismatch", func(a *model.Arch) { a.Layer[0].CacheIndex = 9 }, "cache topology"},
+		{"head_dim_mismatch", func(a *model.Arch) { a.Layer[0].HeadDim = 3 }, "head_dim"},
+		{"kv_heads_mismatch", func(a *model.Arch) { a.Layer[0].KVHeads = 3 }, "kv_heads"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pair := &AssistantPair{TargetArch: assistantSessionArchFixture()}
+			arch := assistantSessionArchFixture()
+			c.mutate(&arch)
+			err := pair.validateTargetSessionArch(arch)
+			if err == nil || !core.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("validateTargetSessionArch(%s) = %v, want error containing %q", c.name, err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestNativeAssistantTargetKVHeads_Good(t *testing.T) {
+	kv := AssistantTargetKV{KVHeads: 4}
+	got, err := nativeAssistantTargetKVHeads(kv, 64)
+	if err != nil || got != 4 {
+		t.Fatalf("nativeAssistantTargetKVHeads(explicit) = %d, %v; want 4, nil", got, err)
+	}
+}
+
+func TestNativeAssistantTargetKVHeads_Bad(t *testing.T) {
+	cases := []struct {
+		name    string
+		kv      AssistantTargetKV
+		headDim int
+	}{
+		{"zero_length", AssistantTargetKV{Length: 0}, 64},
+		{"zero_headdim", AssistantTargetKV{Length: 4}, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := nativeAssistantTargetKVHeads(c.kv, c.headDim)
+			if err == nil || !core.Contains(err.Error(), "geometry is incomplete") {
+				t.Fatalf("nativeAssistantTargetKVHeads(%s) = %v, want geometry incomplete error", c.name, err)
+			}
+		})
+	}
+}
+
+func TestNativeAssistantTargetKVHeads_Ugly(t *testing.T) {
+	const headDim, length = 4, 2
+	denom := length * headDim * bf16Size
+	kv := AssistantTargetKV{Length: length, Key: make([]byte, denom*3)}
+	got, err := nativeAssistantTargetKVHeads(kv, headDim)
+	if err != nil || got != 3 {
+		t.Fatalf("nativeAssistantTargetKVHeads(inferred) = %d, %v; want 3, nil", got, err)
+	}
+	kvBad := AssistantTargetKV{Length: length, Key: make([]byte, denom+1)}
+	if _, err := nativeAssistantTargetKVHeads(kvBad, headDim); err == nil || !core.Contains(err.Error(), "cannot infer") {
+		t.Fatalf("nativeAssistantTargetKVHeads(non-divisible) = %v, want cannot infer error", err)
+	}
+}
+
+func TestNativeAssistantTargetKVByteLen_Good(t *testing.T) {
+	kv := AssistantTargetKV{KVHeads: 2, Length: 3}
+	got := nativeAssistantTargetKVByteLen(kv, 4)
+	want := 2 * 3 * 4 * bf16Size
+	if got != want {
+		t.Fatalf("nativeAssistantTargetKVByteLen(explicit) = %d, want %d", got, want)
+	}
+}
+
+func TestNativeAssistantTargetKVByteLen_Bad(t *testing.T) {
+	kv := AssistantTargetKV{Length: 0}
+	if got := nativeAssistantTargetKVByteLen(kv, 4); got != 0 {
+		t.Fatalf("nativeAssistantTargetKVByteLen(no length) = %d, want 0", got)
+	}
+}
+
+func TestNativeAssistantTargetKVByteLen_Ugly(t *testing.T) {
+	const headDim, length = 4, 2
+	denom := length * headDim * bf16Size
+	kv := AssistantTargetKV{Length: length, Key: make([]byte, denom*5)}
+	got := nativeAssistantTargetKVByteLen(kv, headDim)
+	want := 5 * length * headDim * bf16Size
+	if got != want {
+		t.Fatalf("nativeAssistantTargetKVByteLen(inferred) = %d, want %d", got, want)
+	}
+}
+
+func TestNativeAssistantCopyInto_Good(t *testing.T) {
+	in := []byte{1, 2, 3, 4}
+	out := make([]byte, 0, 8)
+	got := nativeAssistantCopyInto(out, in)
+	if !slices.Equal(got, in) {
+		t.Fatalf("nativeAssistantCopyInto = %v, want %v", got, in)
+	}
+	got[0] = 99
+	if in[0] == 99 {
+		t.Fatal("nativeAssistantCopyInto aliased the input instead of copying into out")
+	}
+}
+
+func TestNativeAssistantCopyInto_Ugly(t *testing.T) {
+	in := []byte{1, 2, 3, 4}
+	out := make([]byte, 0, 1) // too small to hold in: must fall back to returning in itself.
+	got := nativeAssistantCopyInto(out, in)
+	if &got[0] != &in[0] {
+		t.Fatal("nativeAssistantCopyInto with insufficient cap did not alias input")
+	}
+}
+
+func TestAssistantPairTargetKVByLayerType_Bad(t *testing.T) {
+	var pair *AssistantPair
+	if _, err := pair.targetKVByLayerType(nil, nil); err == nil || !core.Contains(err.Error(), "requires a validated pair") {
+		t.Fatalf("targetKVByLayerType(nil pair) = %v, want validated pair error", err)
+	}
+}
+
+func TestAssistantPairTargetKVByLayerType_Ugly(t *testing.T) {
+	assistant := nativeAssistantTinyLoaded(t, false)
+	defer assistant.Close()
+	pair := &AssistantPair{TargetArch: assistantSessionArchFixture(), Assistant: assistant}
+
+	t.Run("empty_target_stream", func(t *testing.T) {
+		targetKVs := []AssistantTargetKV{{}, {}}
+		_, err := pair.targetKVByLayerType(targetKVs, nil)
+		if err == nil || !core.Contains(err.Error(), "empty K/V stream") {
+			t.Fatalf("targetKVByLayerType(empty streams) = %v, want empty K/V stream error", err)
+		}
+	})
+	t.Run("no_target_streams_supplied", func(t *testing.T) {
+		_, err := pair.targetKVByLayerType(nil, nil)
+		if err == nil || !core.Contains(err.Error(), "missing populated target K/V stream") {
+			t.Fatalf("targetKVByLayerType(no streams) = %v, want missing populated stream error", err)
+		}
+	})
+}
+
+func TestValidateDraftLayerInput_Bad(t *testing.T) {
+	assistant := nativeAssistantTinyLoaded(t, false)
+	defer assistant.Close()
+
+	t.Run("nil_model", func(t *testing.T) {
+		var m *AssistantModel
+		if _, _, err := m.validateDraftLayerInput(0, nil); err == nil || !core.Contains(err.Error(), "model is nil") {
+			t.Fatalf("validateDraftLayerInput(nil) = %v, want model is nil error", err)
+		}
+	})
+	t.Run("bad_layer_index", func(t *testing.T) {
+		if _, _, err := assistant.validateDraftLayerInput(99, nil); err == nil || !core.Contains(err.Error(), "layer index") {
+			t.Fatalf("validateDraftLayerInput(bad idx) = %v, want layer index error", err)
+		}
+	})
+	t.Run("bad_hidden_bytes", func(t *testing.T) {
+		if _, _, err := assistant.validateDraftLayerInput(0, make([]byte, 3)); err == nil || !core.Contains(err.Error(), "hidden bytes") {
+			t.Fatalf("validateDraftLayerInput(bad bytes) = %v, want hidden bytes error", err)
+		}
+	})
+}
+
+func TestValidateDraftLayerInput_Ugly(t *testing.T) {
+	m := &AssistantModel{Arch: model.Arch{Hidden: 0, FF: 8, Layer: model.DeriveLayers([]string{"sliding_attention"}, 0)}}
+	if _, _, err := m.validateDraftLayerInput(0, nil); err == nil || !core.Contains(err.Error(), "incomplete dimensions") {
+		t.Fatalf("validateDraftLayerInput(incomplete) = %v, want incomplete dimensions error", err)
+	}
+}
+
+func TestValidateDraftAttentionInput_Bad(t *testing.T) {
+	assistant := nativeAssistantTinyLoaded(t, false)
+	defer assistant.Close()
+	hidden := assistant.Arch.Hidden
+	validHidden := make([]byte, hidden*bf16Size)
+	headDim := assistant.Arch.Layer[0].HeadDim
+	if headDim <= 0 {
+		headDim = assistant.Arch.HeadDim
+	}
+	validKV := AssistantTargetKV{
+		KVHeads: 2, HeadDim: headDim, Length: 3,
+		Key:   make([]byte, 2*3*headDim*bf16Size),
+		Value: make([]byte, 2*3*headDim*bf16Size),
+	}
+
+	t.Run("nil_model", func(t *testing.T) {
+		var m *AssistantModel
+		if _, _, _, err := m.validateDraftAttentionInput(0, validHidden, validKV); err == nil || !core.Contains(err.Error(), "model is nil") {
+			t.Fatalf("validateDraftAttentionInput(nil) = %v, want model is nil error", err)
+		}
+	})
+	t.Run("bad_layer_index", func(t *testing.T) {
+		if _, _, _, err := assistant.validateDraftAttentionInput(99, validHidden, validKV); err == nil || !core.Contains(err.Error(), "layer index") {
+			t.Fatalf("validateDraftAttentionInput(bad idx) = %v, want layer index error", err)
+		}
+	})
+	t.Run("bad_hidden_bytes", func(t *testing.T) {
+		if _, _, _, err := assistant.validateDraftAttentionInput(0, make([]byte, 3), validKV); err == nil || !core.Contains(err.Error(), "hidden bytes") {
+			t.Fatalf("validateDraftAttentionInput(bad bytes) = %v, want hidden bytes error", err)
+		}
+	})
+	t.Run("empty_target_kv", func(t *testing.T) {
+		if _, _, _, err := assistant.validateDraftAttentionInput(0, validHidden, AssistantTargetKV{}); err == nil || !core.Contains(err.Error(), "target K/V stream is empty") {
+			t.Fatalf("validateDraftAttentionInput(empty kv) = %v, want target K/V stream empty error", err)
+		}
+	})
+	t.Run("head_dim_mismatch", func(t *testing.T) {
+		bad := validKV
+		bad.HeadDim = headDim + 1
+		if _, _, _, err := assistant.validateDraftAttentionInput(0, validHidden, bad); err == nil || !core.Contains(err.Error(), "target head_dim") {
+			t.Fatalf("validateDraftAttentionInput(head_dim mismatch) = %v, want target head_dim error", err)
+		}
+	})
+	t.Run("key_bytes_mismatch", func(t *testing.T) {
+		bad := validKV
+		bad.Key = make([]byte, 1)
+		if _, _, _, err := assistant.validateDraftAttentionInput(0, validHidden, bad); err == nil || !core.Contains(err.Error(), "target key bytes") {
+			t.Fatalf("validateDraftAttentionInput(key bytes mismatch) = %v, want target key bytes error", err)
+		}
+	})
+	t.Run("value_bytes_mismatch", func(t *testing.T) {
+		bad := validKV
+		bad.Value = make([]byte, 1)
+		if _, _, _, err := assistant.validateDraftAttentionInput(0, validHidden, bad); err == nil || !core.Contains(err.Error(), "target value bytes") {
+			t.Fatalf("validateDraftAttentionInput(value bytes mismatch) = %v, want target value bytes error", err)
+		}
+	})
+}
+
+func TestValidateDraftAttentionInput_Ugly(t *testing.T) {
+	m := &AssistantModel{Arch: model.Arch{Hidden: 0, Heads: 2, Layer: model.DeriveLayers([]string{"sliding_attention"}, 0)}}
+	if _, _, _, err := m.validateDraftAttentionInput(0, nil, AssistantTargetKV{}); err == nil || !core.Contains(err.Error(), "incomplete dimensions") {
+		t.Fatalf("validateDraftAttentionInput(incomplete) = %v, want incomplete dimensions error", err)
+	}
+}
+
+func TestDraftFinalNormInto_Bad(t *testing.T) {
+	assistant := nativeAssistantTinyLoaded(t, false)
+	defer assistant.Close()
+	hidden := assistant.Arch.Hidden
+	validHidden := make([]byte, hidden*bf16Size)
+
+	t.Run("nil_model", func(t *testing.T) {
+		var m *AssistantModel
+		if _, err := m.DraftFinalNormInto(nil, validHidden); err == nil || !core.Contains(err.Error(), "model is nil") {
+			t.Fatalf("DraftFinalNormInto(nil) = %v, want model is nil error", err)
+		}
+	})
+	t.Run("invalid_hidden_size", func(t *testing.T) {
+		m := &AssistantModel{}
+		if _, err := m.DraftFinalNormInto(nil, nil); err == nil || !core.Contains(err.Error(), "hidden_size is invalid") {
+			t.Fatalf("DraftFinalNormInto(bad hidden_size) = %v, want hidden_size invalid error", err)
+		}
+	})
+	t.Run("bad_hidden_bytes", func(t *testing.T) {
+		if _, err := assistant.DraftFinalNormInto(nil, make([]byte, 3)); err == nil || !core.Contains(err.Error(), "hidden bytes") {
+			t.Fatalf("DraftFinalNormInto(bad bytes) = %v, want hidden bytes error", err)
+		}
+	})
+	t.Run("missing_weight", func(t *testing.T) {
+		m := &AssistantModel{Arch: model.Arch{Hidden: hidden}, Tensors: map[string]safetensors.Tensor{}}
+		if _, err := m.DraftFinalNormInto(nil, validHidden); err == nil || !core.Contains(err.Error(), "missing model.norm.weight") {
+			t.Fatalf("DraftFinalNormInto(missing weight) = %v, want missing model.norm.weight error", err)
+		}
+	})
+	t.Run("wrong_dtype", func(t *testing.T) {
+		m := &AssistantModel{Arch: model.Arch{Hidden: hidden}, Tensors: map[string]safetensors.Tensor{
+			"model.norm.weight": {Dtype: "F32", Shape: []int{hidden}, Data: make([]byte, hidden*4)},
+		}}
+		if _, err := m.DraftFinalNormInto(nil, validHidden); err == nil || !core.Contains(err.Error(), "want BF16") {
+			t.Fatalf("DraftFinalNormInto(wrong dtype) = %v, want dtype error", err)
+		}
+	})
+	t.Run("wrong_shape", func(t *testing.T) {
+		m := &AssistantModel{Arch: model.Arch{Hidden: hidden}, Tensors: map[string]safetensors.Tensor{
+			"model.norm.weight": {Dtype: "BF16", Shape: []int{hidden + 1}, Data: make([]byte, (hidden+1)*bf16Size)},
+		}}
+		if _, err := m.DraftFinalNormInto(nil, validHidden); err == nil || !core.Contains(err.Error(), "model.norm.weight shape") {
+			t.Fatalf("DraftFinalNormInto(wrong shape) = %v, want shape error", err)
+		}
+	})
+	t.Run("wrong_byte_length", func(t *testing.T) {
+		m := &AssistantModel{Arch: model.Arch{Hidden: hidden}, Tensors: map[string]safetensors.Tensor{
+			"model.norm.weight": {Dtype: "BF16", Shape: []int{hidden}, Data: make([]byte, hidden*bf16Size-1)},
+		}}
+		if _, err := m.DraftFinalNormInto(nil, validHidden); err == nil || !core.Contains(err.Error(), "model.norm.weight bytes") {
+			t.Fatalf("DraftFinalNormInto(wrong bytes) = %v, want bytes error", err)
+		}
+	})
+}
+
+func TestDraftOutputProjectionInto_Bad(t *testing.T) {
+	assistant := nativeAssistantTinyLoaded(t, false)
+	defer assistant.Close()
+	hidden := assistant.Arch.Hidden
+	backbone := assistant.BackboneHiddenSize
+	validHidden := make([]byte, hidden*bf16Size)
+
+	t.Run("nil_model", func(t *testing.T) {
+		var m *AssistantModel
+		if _, err := m.DraftOutputProjectionInto(nil, validHidden); err == nil || !core.Contains(err.Error(), "model is nil") {
+			t.Fatalf("DraftOutputProjectionInto(nil) = %v, want model is nil error", err)
+		}
+	})
+	t.Run("incomplete_dimensions", func(t *testing.T) {
+		m := &AssistantModel{}
+		if _, err := m.DraftOutputProjectionInto(nil, nil); err == nil || !core.Contains(err.Error(), "incomplete dimensions") {
+			t.Fatalf("DraftOutputProjectionInto(incomplete) = %v, want incomplete dimensions error", err)
+		}
+	})
+	t.Run("missing_weight", func(t *testing.T) {
+		m := &AssistantModel{Arch: model.Arch{Hidden: hidden}, BackboneHiddenSize: backbone, Tensors: map[string]safetensors.Tensor{}}
+		if _, err := m.DraftOutputProjectionInto(nil, validHidden); err == nil || !core.Contains(err.Error(), "missing post_projection.weight") {
+			t.Fatalf("DraftOutputProjectionInto(missing weight) = %v, want missing post_projection.weight error", err)
+		}
+	})
+	t.Run("wrong_dtype", func(t *testing.T) {
+		m := &AssistantModel{Arch: model.Arch{Hidden: hidden}, BackboneHiddenSize: backbone, Tensors: map[string]safetensors.Tensor{
+			"post_projection.weight": {Dtype: "F32", Shape: []int{backbone, hidden}, Data: make([]byte, backbone*hidden*4)},
+		}}
+		if _, err := m.DraftOutputProjectionInto(nil, validHidden); err == nil || !core.Contains(err.Error(), "want BF16") {
+			t.Fatalf("DraftOutputProjectionInto(wrong dtype) = %v, want dtype error", err)
+		}
+	})
+	t.Run("wrong_shape", func(t *testing.T) {
+		m := &AssistantModel{Arch: model.Arch{Hidden: hidden}, BackboneHiddenSize: backbone, Tensors: map[string]safetensors.Tensor{
+			"post_projection.weight": {Dtype: "BF16", Shape: []int{backbone + 1, hidden}, Data: make([]byte, (backbone+1)*hidden*bf16Size)},
+		}}
+		if _, err := m.DraftOutputProjectionInto(nil, validHidden); err == nil || !core.Contains(err.Error(), "post_projection.weight shape") {
+			t.Fatalf("DraftOutputProjectionInto(wrong shape) = %v, want shape error", err)
+		}
+	})
+	t.Run("wrong_byte_length", func(t *testing.T) {
+		m := &AssistantModel{Arch: model.Arch{Hidden: hidden}, BackboneHiddenSize: backbone, Tensors: map[string]safetensors.Tensor{
+			"post_projection.weight": {Dtype: "BF16", Shape: []int{backbone, hidden}, Data: make([]byte, backbone*hidden*bf16Size-1)},
+		}}
+		if _, err := m.DraftOutputProjectionInto(nil, validHidden); err == nil || !core.Contains(err.Error(), "post_projection.weight bytes") {
+			t.Fatalf("DraftOutputProjectionInto(wrong bytes) = %v, want bytes error", err)
+		}
+	})
+}
+
+func TestNativeAssistantBF16Matrix_Good(t *testing.T) {
+	m := &AssistantModel{Tensors: map[string]safetensors.Tensor{
+		"w": {Dtype: "BF16", Shape: []int{2, 3}, Data: make([]byte, 2*3*bf16Size)},
+	}}
+	got, err := nativeAssistantBF16Matrix(m, "w", 2, 3)
+	if err != nil || !slices.Equal(got.Shape, []int{2, 3}) {
+		t.Fatalf("nativeAssistantBF16Matrix = %+v, %v; want shape [2 3], nil", got, err)
+	}
+}
+
+func TestNativeAssistantBF16Matrix_Bad(t *testing.T) {
+	cases := []struct {
+		name    string
+		tensors map[string]safetensors.Tensor
+		wantErr string
+	}{
+		{"missing", map[string]safetensors.Tensor{}, "missing w"},
+		{"wrong_dtype", map[string]safetensors.Tensor{"w": {Dtype: "F32", Shape: []int{2, 3}, Data: make([]byte, 24)}}, "want BF16"},
+		{"wrong_shape", map[string]safetensors.Tensor{"w": {Dtype: "BF16", Shape: []int{3, 2}, Data: make([]byte, 12)}}, "shape ="},
+		{"wrong_bytes", map[string]safetensors.Tensor{"w": {Dtype: "BF16", Shape: []int{2, 3}, Data: make([]byte, 4)}}, "bytes ="},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := &AssistantModel{Tensors: c.tensors}
+			_, err := nativeAssistantBF16Matrix(m, "w", 2, 3)
+			if err == nil || !core.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("nativeAssistantBF16Matrix(%s) = %v, want error containing %q", c.name, err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestNativeAssistantBF16Vector_Good(t *testing.T) {
+	m := &AssistantModel{Tensors: map[string]safetensors.Tensor{
+		"v": {Dtype: "BF16", Shape: []int{4}, Data: make([]byte, 4*bf16Size)},
+	}}
+	got, err := nativeAssistantBF16Vector(m, "v", 4)
+	if err != nil || !slices.Equal(got.Shape, []int{4}) {
+		t.Fatalf("nativeAssistantBF16Vector = %+v, %v; want shape [4], nil", got, err)
+	}
+}
+
+func TestNativeAssistantBF16Vector_Bad(t *testing.T) {
+	cases := []struct {
+		name    string
+		tensors map[string]safetensors.Tensor
+		wantErr string
+	}{
+		{"missing", map[string]safetensors.Tensor{}, "missing v"},
+		{"wrong_dtype", map[string]safetensors.Tensor{"v": {Dtype: "F32", Shape: []int{4}, Data: make([]byte, 16)}}, "want BF16"},
+		{"wrong_shape", map[string]safetensors.Tensor{"v": {Dtype: "BF16", Shape: []int{2, 2}, Data: make([]byte, 8)}}, "shape ="},
+		{"wrong_bytes", map[string]safetensors.Tensor{"v": {Dtype: "BF16", Shape: []int{4}, Data: make([]byte, 2)}}, "bytes ="},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := &AssistantModel{Tensors: c.tensors}
+			_, err := nativeAssistantBF16Vector(m, "v", 4)
+			if err == nil || !core.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("nativeAssistantBF16Vector(%s) = %v, want error containing %q", c.name, err, c.wantErr)
+			}
+		})
+	}
+}
+
+func TestNativeAssistantLayerScalar_Good(t *testing.T) {
+	// the first candidate name is absent, so this also exercises the fall
+	// through to the ".weight"-suffixed alias.
+	m := &AssistantModel{Tensors: map[string]safetensors.Tensor{
+		"model.layers.0.layer_scalar.weight": {Dtype: "BF16", Shape: []int{1}, Data: make([]byte, bf16Size)},
+	}}
+	got, err := nativeAssistantLayerScalar(m, "model.layers.0", 4)
+	if err != nil || len(got) != bf16Size {
+		t.Fatalf("nativeAssistantLayerScalar(weight alias) = %v, %v; want %d bytes, nil", got, err, bf16Size)
+	}
+}
+
+func TestNativeAssistantLayerScalar_Bad(t *testing.T) {
+	t.Run("wrong_dtype", func(t *testing.T) {
+		m := &AssistantModel{Tensors: map[string]safetensors.Tensor{
+			"model.layers.0.layer_scalar": {Dtype: "F32", Shape: []int{1}, Data: make([]byte, 4)},
+		}}
+		if _, err := nativeAssistantLayerScalar(m, "model.layers.0", 4); err == nil || !core.Contains(err.Error(), "want BF16") {
+			t.Fatalf("nativeAssistantLayerScalar(wrong dtype) = %v, want dtype error", err)
+		}
+	})
+	t.Run("wrong_shape", func(t *testing.T) {
+		m := &AssistantModel{Tensors: map[string]safetensors.Tensor{
+			"model.layers.0.layer_scalar": {Dtype: "BF16", Shape: []int{3}, Data: make([]byte, 3*bf16Size)},
+		}}
+		if _, err := nativeAssistantLayerScalar(m, "model.layers.0", 4); err == nil || !core.Contains(err.Error(), "want [1] or [4]") {
+			t.Fatalf("nativeAssistantLayerScalar(bad shape) = %v, want shape error", err)
+		}
+	})
+}
+
+func TestNativeAssistantLayerScalar_Ugly(t *testing.T) {
+	m := &AssistantModel{Tensors: map[string]safetensors.Tensor{}}
+	got, err := nativeAssistantLayerScalar(m, "model.layers.0", 4)
+	if err != nil || got != nil {
+		t.Fatalf("nativeAssistantLayerScalar(absent) = %v, %v; want nil, nil", got, err)
+	}
+}
+
+func TestNativeAssistantOrderingToken_Good(t *testing.T) {
+	data := make([]byte, 8*4)
+	binary.LittleEndian.PutUint32(data[3*4:], uint32(int32(42)))
+	tensor := safetensors.Tensor{Dtype: "I32", Data: data}
+	got, err := nativeAssistantOrderingToken(tensor, 1, 1, 2) // idx = 1*2+1 = 3
+	if err != nil || got != 42 {
+		t.Fatalf("nativeAssistantOrderingToken(I32) = %d, %v; want 42, nil", got, err)
+	}
+}
+
+func TestNativeAssistantOrderingToken_Bad(t *testing.T) {
+	data := make([]byte, 8)
+	binary.LittleEndian.PutUint64(data, uint64(int64(1)<<40)) // out of int32 range
+	tensor := safetensors.Tensor{Dtype: "I64", Data: data}
+	if _, err := nativeAssistantOrderingToken(tensor, 0, 0, 1); err == nil || !core.Contains(err.Error(), "want int32 range") {
+		t.Fatalf("nativeAssistantOrderingToken(out of range) = %v, want int32 range error", err)
+	}
+}
+
+func TestNativeAssistantOrderingToken_Ugly(t *testing.T) {
+	tensor := safetensors.Tensor{Dtype: "F32", Data: make([]byte, 4)}
+	if _, err := nativeAssistantOrderingToken(tensor, 0, 0, 1); err == nil || !core.Contains(err.Error(), "want int32 or int64") {
+		t.Fatalf("nativeAssistantOrderingToken(bad dtype) = %v, want dtype error", err)
+	}
+}
+
+func TestNativeAssistantTopK_Good(t *testing.T) {
+	got := nativeAssistantTopK([]float32{1, 5, 2}, 1)
+	if !slices.Equal(got, []int{1}) {
+		t.Fatalf("nativeAssistantTopK = %v, want [1]", got)
+	}
+}
+
+func TestValidateDraftInputTarget_Bad(t *testing.T) {
+	t.Run("nil_pair", func(t *testing.T) {
+		var pair *AssistantPair
+		if _, err := pair.validateDraftInputTarget(); err == nil || !core.Contains(err.Error(), "requires a validated pair") {
+			t.Fatalf("validateDraftInputTarget(nil pair) = %v, want validated pair error", err)
+		}
+	})
+	t.Run("incomplete_target", func(t *testing.T) {
+		pair := &AssistantPair{Assistant: &AssistantModel{}, TargetArch: model.Arch{}}
+		if _, err := pair.validateDraftInputTarget(); err == nil || !core.Contains(err.Error(), "target arch is incomplete") {
+			t.Fatalf("validateDraftInputTarget(incomplete target) = %v, want incomplete error", err)
+		}
+	})
+	t.Run("backbone_mismatch", func(t *testing.T) {
+		pair := &AssistantPair{
+			Assistant:  &AssistantModel{BackboneHiddenSize: 4},
+			TargetArch: model.Arch{Hidden: 8, Vocab: 16},
+		}
+		if _, err := pair.validateDraftInputTarget(); err == nil || !core.Contains(err.Error(), "backbone_hidden_size") {
+			t.Fatalf("validateDraftInputTarget(backbone mismatch) = %v, want backbone_hidden_size error", err)
+		}
+	})
+}
+
+func TestDraftInputProjectionForTokenInto_Bad(t *testing.T) {
+	assistant := nativeAssistantTinyLoaded(t, false)
+	defer assistant.Close()
+	pair := &AssistantPair{Assistant: assistant, TargetArch: model.Arch{Hidden: assistant.BackboneHiddenSize, Vocab: 8}}
+
+	t.Run("invalid_target", func(t *testing.T) {
+		bad := &AssistantPair{Assistant: assistant, TargetArch: model.Arch{}}
+		if _, err := bad.DraftInputProjectionForTokenInto(nil, nil, 0, nil); err == nil || !core.Contains(err.Error(), "target arch is incomplete") {
+			t.Fatalf("DraftInputProjectionForTokenInto(invalid target) = %v, want incomplete target error", err)
+		}
+	})
+	t.Run("bad_previous_hidden", func(t *testing.T) {
+		_, err := pair.DraftInputProjectionForTokenInto(nil, nil, 0, make([]byte, 3))
+		if err == nil || !core.Contains(err.Error(), "previous hidden bytes") {
+			t.Fatalf("DraftInputProjectionForTokenInto(bad previous hidden) = %v, want previous hidden bytes error", err)
+		}
+	})
+}
+
+func TestDraftInputProjectionForTokenQuantInto_Bad(t *testing.T) {
+	assistant := nativeAssistantTinyLoaded(t, false)
+	defer assistant.Close()
+	pair := &AssistantPair{Assistant: assistant, TargetArch: model.Arch{Hidden: assistant.BackboneHiddenSize, Vocab: 8}}
+
+	t.Run("invalid_target", func(t *testing.T) {
+		bad := &AssistantPair{Assistant: assistant, TargetArch: model.Arch{}}
+		if _, err := bad.DraftInputProjectionForTokenQuantInto(nil, nil, nil, nil, 4, 4, 0, nil); err == nil || !core.Contains(err.Error(), "target arch is incomplete") {
+			t.Fatalf("DraftInputProjectionForTokenQuantInto(invalid target) = %v, want incomplete target error", err)
+		}
+	})
+	t.Run("bad_previous_hidden", func(t *testing.T) {
+		_, err := pair.DraftInputProjectionForTokenQuantInto(nil, nil, nil, nil, 4, 4, 0, make([]byte, 3))
+		if err == nil || !core.Contains(err.Error(), "previous hidden bytes") {
+			t.Fatalf("DraftInputProjectionForTokenQuantInto(bad previous hidden) = %v, want previous hidden bytes error", err)
+		}
+	})
+}
+
+func TestLoadAssistantTargetArch_Bad(t *testing.T) {
+	t.Run("missing_config", func(t *testing.T) {
+		dir := t.TempDir()
+		if _, err := loadAssistantTargetArch(dir); err == nil || !core.Contains(err.Error(), "read config.json") {
+			t.Fatalf("loadAssistantTargetArch(no config) = %v, want read config.json error", err)
+		}
+	})
+	t.Run("unregistered_model_type", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := coreio.Local.Write(core.PathJoin(dir, "config.json"), `{"model_type": "not_a_real_arch_xyz"}`); err != nil {
+			t.Fatalf("write config.json: %v", err)
+		}
+		if _, err := loadAssistantTargetArch(dir); err == nil || !core.Contains(err.Error(), "no registered architecture") {
+			t.Fatalf("loadAssistantTargetArch(unregistered) = %v, want no registered architecture error", err)
+		}
+	})
+}
+
+const nativeAssistantMinimalConfigJSON = `{
+	"model_type": "gemma4_assistant",
+	"backbone_hidden_size": 8,
+	"text_config": {
+		"model_type": "gemma4_assistant",
+		"hidden_size": 4, "num_hidden_layers": 2, "intermediate_size": 8,
+		"num_attention_heads": 2, "num_key_value_heads": 2, "head_dim": 2,
+		"vocab_size": 8, "rms_norm_eps": 0.000001, "max_position_embeddings": 16,
+		"layer_types": ["sliding_attention", "full_attention"],
+		"rope_parameters": {
+			"sliding_attention": {"rope_theta": 10000, "partial_rotary_factor": 1.0},
+			"full_attention": {"rope_theta": 1000000, "partial_rotary_factor": 1.0}
+		}
+	}
+}`
+
+func TestLoadAssistantDir_Bad(t *testing.T) {
+	t.Run("missing_config", func(t *testing.T) {
+		dir := t.TempDir()
+		if _, err := LoadAssistantDir(dir); err == nil || !core.Contains(err.Error(), "read config.json") {
+			t.Fatalf("LoadAssistantDir(no config) = %v, want read config.json error", err)
+		}
+	})
+	t.Run("bad_config", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := coreio.Local.Write(core.PathJoin(dir, "config.json"), `{"model_type": "not_a_real_arch_xyz"}`); err != nil {
+			t.Fatalf("write config.json: %v", err)
+		}
+		if _, err := LoadAssistantDir(dir); err == nil || !core.Contains(err.Error(), "parse config") {
+			t.Fatalf("LoadAssistantDir(bad config) = %v, want parse config error", err)
+		}
+	})
+	t.Run("missing_tokenizer", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := coreio.Local.Write(core.PathJoin(dir, "config.json"), nativeAssistantMinimalConfigJSON); err != nil {
+			t.Fatalf("write config.json: %v", err)
+		}
+		blob, err := safetensors.Encode(nativeAssistantTinyTensors(false))
+		if err != nil {
+			t.Fatalf("encode tensors: %v", err)
+		}
+		if err := coreio.Local.Write(core.PathJoin(dir, "model.safetensors"), string(blob)); err != nil {
+			t.Fatalf("write model.safetensors: %v", err)
+		}
+		if _, err := LoadAssistantDir(dir); err == nil || !core.Contains(err.Error(), "load tokenizer") {
+			t.Fatalf("LoadAssistantDir(no tokenizer) = %v, want load tokenizer error", err)
+		}
+	})
+	t.Run("missing_weights", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := coreio.Local.Write(core.PathJoin(dir, "config.json"), nativeAssistantMinimalConfigJSON); err != nil {
+			t.Fatalf("write config.json: %v", err)
+		}
+		writeNativeAssistantTokenizer(t, dir)
+		if _, err := LoadAssistantDir(dir); err == nil || !core.Contains(err.Error(), "load weights") {
+			t.Fatalf("LoadAssistantDir(no weights) = %v, want load weights error", err)
+		}
+	})
+}
+
+func TestLoadAssistantPairDirs_Bad(t *testing.T) {
+	t.Run("empty_target_path", func(t *testing.T) {
+		if _, err := LoadAssistantPairDirs("", "assistantdir"); err == nil || !core.Contains(err.Error(), "target path is required") {
+			t.Fatalf("LoadAssistantPairDirs(empty target) = %v, want target path required error", err)
+		}
+	})
+	t.Run("empty_assistant_path", func(t *testing.T) {
+		if _, err := LoadAssistantPairDirs("targetdir", ""); err == nil || !core.Contains(err.Error(), "assistant path is required") {
+			t.Fatalf("LoadAssistantPairDirs(empty assistant) = %v, want assistant path required error", err)
+		}
+	})
+	t.Run("bad_target_config", func(t *testing.T) {
+		targetDir := t.TempDir() // no config.json.
+		assistantDir := writeNativeAssistantDir(t, nativeAssistantTinyTensors(true))
+		if _, err := LoadAssistantPairDirs(targetDir, assistantDir); err == nil || !core.Contains(err.Error(), "load target config") {
+			t.Fatalf("LoadAssistantPairDirs(bad target) = %v, want load target config error", err)
+		}
+	})
+	t.Run("bad_assistant_dir", func(t *testing.T) {
+		targetDir := writeNativeAssistantTargetDir(t, 4, []string{"sliding_attention", "full_attention"})
+		assistantDir := t.TempDir() // no config.json.
+		if _, err := LoadAssistantPairDirs(targetDir, assistantDir); err == nil || !core.Contains(err.Error(), "load assistant") {
+			t.Fatalf("LoadAssistantPairDirs(bad assistant) = %v, want load assistant error", err)
+		}
+	})
+}
+
+func TestDraftAttentionIntoScratch_Ugly(t *testing.T) {
+	assistant := nativeAssistantTinyLoaded(t, false)
+	defer assistant.Close()
+	hidden := assistant.Arch.Hidden
+	headDim := assistant.Arch.Layer[0].HeadDim
+	if headDim <= 0 {
+		headDim = assistant.Arch.HeadDim
+	}
+	const kvHeads = 3 // assistant.Arch.Heads (2) is not a multiple of this.
+	kv := AssistantTargetKV{
+		KVHeads: kvHeads, HeadDim: headDim, Length: 1,
+		Key:   make([]byte, kvHeads*1*headDim*bf16Size),
+		Value: make([]byte, kvHeads*1*headDim*bf16Size),
+	}
+	_, err := assistant.draftAttentionIntoScratch(nil, 0, make([]byte, hidden*bf16Size), kv, nil)
+	if err == nil || !core.Contains(err.Error(), "want multiple of target kv heads") {
+		t.Fatalf("draftAttentionIntoScratch(indivisible heads) = %v, want kv heads multiple error", err)
+	}
+}
+
+func TestDraftLayerIntoScratch_Bad(t *testing.T) {
+	const hidden, nHeads, kvHeads, headDim, kvLen, dFF = 128, 2, 2, 64, 3, 256
+	tensors := nativeAssistantAttentionTensors()
+	p := "model.layers.0"
+	tensors[p+".input_layernorm.weight"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{hidden}, Data: toBF16Bytes(syntheticFloat32(hidden, 11))}
+	tensors[p+".post_attention_layernorm.weight"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{hidden}, Data: toBF16Bytes(syntheticFloat32(hidden, 13))}
+	tensors[p+".pre_feedforward_layernorm.weight"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{hidden}, Data: toBF16Bytes(syntheticFloat32(hidden, 17))}
+	tensors[p+".post_feedforward_layernorm.weight"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{hidden}, Data: toBF16Bytes(syntheticFloat32(hidden, 19))}
+	tensors[p+".layer_scalar"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{1}, Data: toBF16Bytes([]float32{0.75})}
+	tensors[p+".self_attn.q_proj.weight"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{nHeads * headDim, hidden}, Data: toBF16Bytes(nativeAssistantProjectionFixture(nHeads*headDim, hidden))}
+	tensors[p+".self_attn.o_proj.weight"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{hidden, nHeads * headDim}, Data: toBF16Bytes(nativeAssistantProjectionFixture(hidden, nHeads*headDim))}
+	tensors[p+".self_attn.q_norm.weight"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{headDim}, Data: toBF16Bytes(syntheticFloat32(headDim, 23))}
+	tensors[p+".mlp.gate_proj.weight"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{dFF, hidden}, Data: toBF16Bytes(nativeAssistantProjectionFixture(dFF, hidden))}
+	tensors[p+".mlp.up_proj.weight"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{dFF, hidden}, Data: toBF16Bytes(nativeAssistantProjectionFixture(dFF, hidden))}
+	tensors[p+".mlp.down_proj.weight"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{hidden, dFF}, Data: toBF16Bytes(nativeAssistantProjectionFixture(hidden, dFF))}
+	dir := writeNativeAssistantAttentionDir(t, tensors)
+
+	assistant, err := LoadAssistantDir(dir)
+	if err != nil {
+		t.Fatalf("LoadAssistantDir: %v", err)
+	}
+	defer assistant.Close()
+
+	targetKV := AssistantTargetKV{
+		Key: toBF16Bytes(syntheticFloat32(kvHeads*kvLen*headDim, 31)), Value: toBF16Bytes(syntheticFloat32(kvHeads*kvLen*headDim, 37)),
+		Offset: 4, Length: kvLen, KVHeads: kvHeads, HeadDim: headDim,
+	}
+	x := toBF16Bytes(syntheticFloat32(hidden, 29))
+	savedInputNorm := tensors[p+".input_layernorm.weight"]
+
+	t.Run("missing_input_norm", func(t *testing.T) {
+		delete(assistant.Tensors, p+".input_layernorm.weight")
+		defer func() { assistant.Tensors[p+".input_layernorm.weight"] = savedInputNorm }()
+		if _, err := assistant.DraftLayer(0, x, targetKV); err == nil || !core.Contains(err.Error(), "missing "+p+".input_layernorm.weight") {
+			t.Fatalf("DraftLayer(missing input norm) = %v, want missing input_layernorm.weight error", err)
+		}
+	})
+}
+
+func TestArchSessionGreedyRowsFromHiddensInPool_Bad(t *testing.T) {
+	requireNativeRuntime(t)
+	_, mk := newNativeAssistantGenerateFixture(t)
+	session := mk()
+
+	// len(hiddens)==0 short-circuits before even consulting canUseDirectHeadGreedy.
+	ok, err := session.greedyRowsFromHiddensInPool(nil, nil, nil)
+	if err != nil || ok {
+		t.Fatalf("greedyRowsFromHiddensInPool(no hiddens) = %v, %v; want false, nil", ok, err)
+	}
+}
+
+func TestArchSessionGreedyRowsFromHiddensInPool_Ugly(t *testing.T) {
+	requireNativeRuntime(t)
+	_, mk := newNativeAssistantGenerateFixture(t)
+	session := mk()
+	if !session.canUseDirectHeadGreedy() {
+		t.Skip("fixture session is not direct-greedy capable")
+	}
+	out := make([]int32, 1)
+	ok, err := session.greedyRowsFromHiddensInPool([][]byte{make([]byte, 3)}, nil, out)
+	if err != nil || ok {
+		t.Fatalf("greedyRowsFromHiddensInPool(wrong row length) = %v, %v; want false, nil", ok, err)
+	}
+}
+
+func TestArchSessionPrepareAssistantPrompt_Bad(t *testing.T) {
+	requireNativeRuntime(t)
+	_, mk := newNativeAssistantGenerateFixture(t)
+	session := mk()
+
+	t.Run("empty_prompt", func(t *testing.T) {
+		if err := session.PrepareAssistantPrompt(nil); err == nil || !core.Contains(err.Error(), "prompt tokens are required") {
+			t.Fatalf("PrepareAssistantPrompt(empty) = %v, want prompt tokens required error", err)
+		}
+	})
+	t.Run("exceeds_max_len", func(t *testing.T) {
+		tooLong := make([]int32, session.maxLen+1)
+		if err := session.PrepareAssistantPrompt(tooLong); err == nil || !core.Contains(err.Error(), "exceed maxLen") {
+			t.Fatalf("PrepareAssistantPrompt(too long) = %v, want exceed maxLen error", err)
+		}
+	})
+}

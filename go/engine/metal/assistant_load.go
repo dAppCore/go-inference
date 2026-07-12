@@ -164,6 +164,9 @@ type AssistantGenerateResult struct {
 type AssistantTokenSink func(int32) bool
 
 func newAssistantGenerateResult(promptTokens, maxNew, draftTokens int) AssistantGenerateResult {
+	if maxNew < 0 {
+		maxNew = 0
+	}
 	scheduleCap := 0
 	if maxNew > 0 && draftTokens > 0 {
 		scheduleCap = (maxNew + draftTokens - 1) / draftTokens
