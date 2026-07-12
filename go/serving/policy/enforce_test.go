@@ -3,11 +3,44 @@
 package policy
 
 import (
+	"context"
 	"math/rand"
 	"testing"
 
 	core "dappco.re/go"
 )
+
+// runChunksMediated drives a mediating Enforcer (grade G2) over chunks and
+// returns the concatenated output, the events, and whether a refuse stopped it.
+func runChunksMediated(pol *Policy, m Mediator, chunks []string) (string, []Event, bool) {
+	enf := pol.NewMediatingEnforcer(context.Background(), m)
+	var b core.Builder
+	var events []Event
+	stopped := false
+	for _, c := range chunks {
+		out, ev, stop := enf.Feed(c)
+		b.WriteString(out)
+		events = append(events, ev...)
+		if stop {
+			stopped = true
+			break
+		}
+	}
+	if !stopped {
+		out, ev, stop := enf.Close()
+		b.WriteString(out)
+		events = append(events, ev...)
+		stopped = stop
+	}
+	return b.String(), events, stopped
+}
+
+// markSpan is a deterministic mediator: it wraps the span in guillemets. Because
+// its output depends on the exact span bytes, a differential run over random
+// chunkings proves the enforcer always mediates the COMPLETE span.
+func markSpan(_ context.Context, _ int, span string) (string, error) {
+	return "«" + span + "»", nil
+}
 
 func mustCompile(t testing.TB, jsonSrc string) *Policy {
 	t.Helper()
@@ -221,6 +254,141 @@ func TestPolicy_Enforcer_ClosedSwallow(t *testing.T) {
 	}
 }
 
+// TestPolicy_Enforcer_Rewrite_Good pins the grade-G2 happy path: the matched
+// span is replaced by the mediator's transform, and everything else is untouched.
+func TestPolicy_Enforcer_Rewrite_Good(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"PROJECT-X","action":"rewrite"}]}`)
+	got, events, _ := runChunksMediated(pol, markSpan, []string{"the PROJECT-X launch is soon"})
+	if got != "the «PROJECT-X» launch is soon" {
+		t.Fatalf("mediated = %q", got)
+	}
+	if len(events) != 1 || events[0].Action != ActionRewrite || events[0].RuleIndex != 0 {
+		t.Fatalf("events = %+v, want one rewrite on rule #0", events)
+	}
+}
+
+// TestPolicy_Enforcer_Rewrite_BoundarySpanning is the buffering-boundary proof:
+// a span fed one byte at a time is mediated with the COMPLETE span, never a
+// partial one — the mediator sees "PROJECT-X" whole.
+func TestPolicy_Enforcer_Rewrite_BoundarySpanning(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"PROJECT-X","action":"rewrite"}]}`)
+	var seen []string
+	capture := func(_ context.Context, _ int, span string) (string, error) {
+		seen = append(seen, span)
+		return "[" + span + "]", nil
+	}
+	text := "start PROJECT-X end"
+	var oneByte []string
+	for i := 0; i < len(text); i++ {
+		oneByte = append(oneByte, text[i:i+1])
+	}
+	got, _, _ := runChunksMediated(pol, capture, oneByte)
+	if got != "start [PROJECT-X] end" {
+		t.Fatalf("byte-split mediation = %q", got)
+	}
+	if len(seen) != 1 || seen[0] != "PROJECT-X" {
+		t.Fatalf("mediator saw %q, want exactly the whole span once", seen)
+	}
+}
+
+// TestPolicy_Enforcer_Rewrite_MediatorError pins the fail-safe: a mediator error
+// degrades to redact (the rule's replacement) — the original span never leaks.
+func TestPolicy_Enforcer_Rewrite_MediatorError(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"SECRET","action":"rewrite","replacement":"[gone]"}]}`)
+	boom := func(context.Context, int, string) (string, error) {
+		return "SECRET-should-not-appear", core.E("test", "mediator down", nil)
+	}
+	got, _, _ := runChunksMediated(pol, boom, []string{"the SECRET value"})
+	if got != "the [gone] value" {
+		t.Fatalf("degraded = %q, want the redact fallback, never the original span", got)
+	}
+	if core.Contains(got, "SECRET") {
+		t.Fatalf("degrade leaked the original span: %q", got)
+	}
+}
+
+// TestPolicy_Enforcer_Rewrite_MediatorEmpty pins that an empty mediator result
+// is treated as failure — it degrades to redact rather than deleting the span
+// silently.
+func TestPolicy_Enforcer_Rewrite_MediatorEmpty(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"SECRET","action":"rewrite"}]}`)
+	empty := func(context.Context, int, string) (string, error) { return "", nil }
+	got, _, _ := runChunksMediated(pol, empty, []string{"the SECRET value"})
+	if got != "the [redacted] value" {
+		t.Fatalf("empty-result = %q, want the redact fallback", got)
+	}
+}
+
+// TestPolicy_Enforcer_Rewrite_MediatorTimeout pins that a mediator which blocks
+// past the deadline (ignoring cancellation) still degrades to redact and lets the
+// stream advance — the timeout is a guarantee of the layer, not the hook.
+func TestPolicy_Enforcer_Rewrite_MediatorTimeout(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"SECRET","action":"rewrite"}],"mediate_timeout_ms":30}`)
+	block := make(chan struct{})
+	defer close(block) // release the abandoned mediator goroutine at test end
+	stuck := func(context.Context, int, string) (string, error) {
+		<-block // ignores ctx cancellation on purpose
+		return "late", nil
+	}
+	got, _, _ := runChunksMediated(pol, stuck, []string{"the SECRET value"})
+	if got != "the [redacted] value" {
+		t.Fatalf("timeout = %q, want the redact fallback after the deadline", got)
+	}
+}
+
+// TestPolicy_Enforcer_Rewrite_NoMediator pins the defensive path: a rewrite rule
+// on a plain (non-mediating) Enforcer degrades to redact rather than emitting the
+// span. The serving layer boots fatal before this can happen in production.
+func TestPolicy_Enforcer_Rewrite_NoMediator(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"SECRET","action":"rewrite","replacement":"[x]"}]}`)
+	got, _, _ := runChunks(pol, []string{"the SECRET value"})
+	if got != "the [x] value" {
+		t.Fatalf("no-mediator = %q, want the redact fallback", got)
+	}
+}
+
+// TestPolicy_Enforcer_Rewrite_MidStream pins that mediation is per-span: when the
+// mediator fails on one hit but succeeds on a later one, each is handled
+// independently and the stream survives.
+func TestPolicy_Enforcer_Rewrite_MidStream(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"TAG","action":"rewrite","replacement":"[df]"}]}`)
+	calls := 0
+	flaky := func(_ context.Context, _ int, span string) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", core.E("test", "first fails", nil)
+		}
+		return "«" + span + "»", nil
+	}
+	got, events, _ := runChunksMediated(pol, flaky, []string{"a TAG then another TAG here"})
+	if got != "a [df] then another «TAG» here" {
+		t.Fatalf("mid-stream = %q", got)
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %+v, want one per hit", events)
+	}
+}
+
+// TestPolicy_Enforcer_Rewrite_Differential is the byte-identity proof for grade
+// G2: with a content-dependent mediator, the whole-string result must equal the
+// streamed result under 1000 random chunkings — so the enforcer always mediates
+// the complete span regardless of where the token boundaries fall.
+func TestPolicy_Enforcer_Rewrite_Differential(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[
+		{"match":"term","value":"PROJECT-X","action":"rewrite"},
+		{"match":"pattern","value":"rc[0-9]+","action":"rewrite","window":12}
+	]}`)
+	text := "intro PROJECT-X then rc42 and more PROJECT-X talk near rc9 end"
+	want, _, _ := runChunksMediated(pol, markSpan, []string{text})
+	r := rand.New(rand.NewSource(3))
+	for iter := 0; iter < 1000; iter++ {
+		got, _, _ := runChunksMediated(pol, markSpan, randomChunks(r, text))
+		if got != want {
+			t.Fatalf("chunking %d diverged\n  want %q\n  got  %q", iter, want, got)
+		}
+	}
+}
+
 // BenchmarkPolicy_Enforcer_NoMatch measures the per-chunk overhead of the clean
 // hot path on a term-only policy — the common deployment shape. The tail stays
 // empty and each chunk streams through as a substring: the target is ~0 allocs
@@ -258,5 +426,26 @@ func BenchmarkPolicy_Enforcer_NoMatch_Pattern(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		enf.Feed(chunk)
+	}
+}
+
+// BenchmarkPolicy_MediatingEnforcer_NoMatch proves grade G2 keeps the clean hot
+// path 0-alloc: a mediating enforcer on a rewrite policy, fed a stream with no
+// hit, spawns no mediator goroutine and allocates nothing per chunk — the
+// mediation cost is paid only when a rewrite span actually settles.
+func BenchmarkPolicy_MediatingEnforcer_NoMatch(b *testing.B) {
+	pol := mustCompile(b, `{"rules":[
+		{"match":"term","value":"PROJECT-X","action":"rewrite"},
+		{"match":"term","value":"client","action":"redact"}
+	]}`)
+	chunk := "the quick brown fox jumps over the lazy dog and keeps on running "
+	enf := pol.NewMediatingEnforcer(context.Background(), markSpan)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		out, _, _ := enf.Feed(chunk)
+		if len(out) != len(chunk) {
+			b.Fatalf("clean chunk should pass through whole, got %d/%d bytes", len(out), len(chunk))
+		}
 	}
 }
