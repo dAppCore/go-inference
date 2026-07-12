@@ -252,3 +252,87 @@ func TestQuantizeWriter_writeGGUFMetadataValue_Bad(t *testing.T) {
 		t.Fatalf("writeGGUFMetadataValue(unsupported type): want error, got nil")
 	}
 }
+
+// TestQuantizeWriter_writeGGUFMetadataValue_Int32Bool round-trips int32 and bool
+// scalars (the gemma-4 header carries INT32 sampling.top_k and BOOL add_bos)
+// through this package's own parser.
+func TestQuantizeWriter_writeGGUFMetadataValue_Int32Bool(t *testing.T) {
+	path := core.PathJoin(t.TempDir(), "scalars.gguf")
+	metadata := []ggufMetadataEntry{
+		{Key: "general.architecture", ValueType: ValueTypeString, Value: "gemma4"},
+		{Key: "general.sampling.top_k", ValueType: ggufValueTypeInt32, Value: int32(64)},
+		{Key: "tokenizer.ggml.add_bos_token", ValueType: ggufValueTypeBool, Value: true},
+		{Key: "tokenizer.ggml.add_space_prefix", ValueType: ggufValueTypeBool, Value: false},
+	}
+	if err := writeQuantizedGGUF(path, metadata, nil); err != nil {
+		t.Fatalf("writeQuantizedGGUF: %v", err)
+	}
+	parsed, _, err := parseGGUF(path)
+	if err != nil {
+		t.Fatalf("parseGGUF: %v", err)
+	}
+	if got, ok := parsed["general.sampling.top_k"].(int32); !ok || got != 64 {
+		t.Errorf("top_k = %v (%T), want int32 64", parsed["general.sampling.top_k"], parsed["general.sampling.top_k"])
+	}
+	if got, ok := parsed["tokenizer.ggml.add_bos_token"].(bool); !ok || got != true {
+		t.Errorf("add_bos_token = %v (%T), want bool true", parsed["tokenizer.ggml.add_bos_token"], parsed["tokenizer.ggml.add_bos_token"])
+	}
+	if got, ok := parsed["tokenizer.ggml.add_space_prefix"].(bool); !ok || got != false {
+		t.Errorf("add_space_prefix = %v (%T), want bool false", parsed["tokenizer.ggml.add_space_prefix"], parsed["tokenizer.ggml.add_space_prefix"])
+	}
+}
+
+// TestQuantizeWriter_writeGGUFArrayValue_RoundTrip round-trips each array
+// element type the gemma-4 header needs — string tokens, float32 scores, int32
+// token types, bool sliding-window pattern — through this package's parser,
+// checking element count, order and value.
+func TestQuantizeWriter_writeGGUFArrayValue_RoundTrip(t *testing.T) {
+	path := core.PathJoin(t.TempDir(), "arrays.gguf")
+	metadata := []ggufMetadataEntry{
+		{Key: "general.architecture", ValueType: ValueTypeString, Value: "gemma4"},
+		{Key: "tokenizer.ggml.tokens", ValueType: ggufValueTypeArray, Value: []string{"<pad>", "<eos>", "▁the"}},
+		{Key: "tokenizer.ggml.scores", ValueType: ggufValueTypeArray, Value: []float32{-1000, -1000, -0.5}},
+		{Key: "tokenizer.ggml.token_type", ValueType: ggufValueTypeArray, Value: []int32{3, 1, 1}},
+		{Key: "gemma4.attention.sliding_window_pattern", ValueType: ggufValueTypeArray, Value: []bool{true, true, false}},
+	}
+	if err := writeQuantizedGGUF(path, metadata, nil); err != nil {
+		t.Fatalf("writeQuantizedGGUF: %v", err)
+	}
+	parsed, _, err := parseGGUF(path)
+	if err != nil {
+		t.Fatalf("parseGGUF: %v", err)
+	}
+	// parseGGUF parses string-element arrays for their COUNT only (the vocab
+	// optimisation), returning ggufStringArrayLen rather than the strings.
+	tokens, ok := parsed["tokenizer.ggml.tokens"].(ggufStringArrayLen)
+	if !ok || int(tokens) != 3 {
+		t.Errorf("tokens = %v (%T), want ggufStringArrayLen 3", parsed["tokenizer.ggml.tokens"], parsed["tokenizer.ggml.tokens"])
+	}
+	scores, ok := parsed["tokenizer.ggml.scores"].([]any)
+	if !ok || len(scores) != 3 || scores[2] != float32(-0.5) {
+		t.Errorf("scores = %v (%T), want [-1000 -1000 -0.5]", parsed["tokenizer.ggml.scores"], parsed["tokenizer.ggml.scores"])
+	}
+	types, ok := parsed["tokenizer.ggml.token_type"].([]any)
+	if !ok || len(types) != 3 || types[0] != int32(3) || types[1] != int32(1) {
+		t.Errorf("token_type = %v (%T), want [3 1 1]", parsed["tokenizer.ggml.token_type"], parsed["tokenizer.ggml.token_type"])
+	}
+	pattern, ok := parsed["gemma4.attention.sliding_window_pattern"].([]any)
+	if !ok || len(pattern) != 3 || pattern[0] != true || pattern[2] != false {
+		t.Errorf("pattern = %v (%T), want [true true false]", parsed["gemma4.attention.sliding_window_pattern"], parsed["gemma4.attention.sliding_window_pattern"])
+	}
+}
+
+// TestQuantizeWriter_writeGGUFArrayValue_Unsupported checks an array of an
+// unsupported element type is a loud error, not a silent empty write.
+func TestQuantizeWriter_writeGGUFArrayValue_Unsupported(t *testing.T) {
+	path := core.PathJoin(t.TempDir(), "value.bin")
+	created := core.Create(path)
+	if !created.OK {
+		t.Fatalf("create: %v", created.Value)
+	}
+	file := created.Value.(*core.OSFile)
+	defer file.Close()
+	if err := writeGGUFArrayValue(file, []uint64{1, 2, 3}); err == nil {
+		t.Fatalf("writeGGUFArrayValue([]uint64): want error, got nil")
+	}
+}
