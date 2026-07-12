@@ -107,3 +107,16 @@ func TestPlanModelReplace_Good(t *testing.T) {
 		t.Fatalf("summary plan = %+v, want incompatible summary_window", summary)
 	}
 }
+
+// TestCandidateID_Good pins the stable readable id builder used when a planner
+// supplies none — the colon-delimited workload:cacheMode:ctxN:batchM shape,
+// deterministic for a given tuple.
+func TestCandidateID_Good(t *testing.T) {
+	got := CandidateID(TuningWorkloadChat, "quantized", 4096, 8)
+	if got != "chat:quantized:ctx4096:batch8" {
+		t.Fatalf("CandidateID = %q, want chat:quantized:ctx4096:batch8", got)
+	}
+	if CandidateID(TuningWorkloadChat, "quantized", 4096, 8) != got {
+		t.Fatal("CandidateID is not deterministic for a fixed tuple")
+	}
+}
