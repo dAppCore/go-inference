@@ -107,6 +107,7 @@ func TestCommand_RunSSDCommand_Good(t *testing.T) {
 
 	err := RunSSDCommand(context.Background(), SSDCommandConfig{
 		ModelPath:      "unused-model-path",
+		Backend:        commandFakeBackendName, // a linked real engine (metal) must not win selection
 		DataPath:       dataPath,
 		SampleTemp:     0.7,
 		FilterShortest: 0,
@@ -138,6 +139,7 @@ func TestCommand_RunSSDCommand_Ugly(t *testing.T) {
 
 	err := RunSSDCommand(context.Background(), SSDCommandConfig{
 		ModelPath:    "unused-model-path",
+		Backend:      commandFakeBackendName, // a linked real engine (metal) must not win selection
 		DataPath:     dataPath,
 		SampleTemp:   0.7,
 		ScoreSamples: true, // Score left nil
@@ -164,6 +166,7 @@ func TestCommand_RunSFTCommand_Good(t *testing.T) {
 
 	err := RunSFTCommand(context.Background(), SFTCommandConfig{
 		ModelPath: modelPath,
+		Backend:   commandFakeBackendName, // a linked real engine (metal) must not win selection
 		DataPath:  dataPath,
 		Epochs:    1,
 		BatchSize: 1,
@@ -199,6 +202,7 @@ func TestCommand_RunSFTCommand_Ugly(t *testing.T) {
 
 	err := RunSFTCommand(context.Background(), SFTCommandConfig{
 		ModelPath: modelPath,
+		Backend:   commandFakeBackendName, // a linked real engine (metal) must not win selection
 		DataPath:  dataPath,
 		Epochs:    1,
 		BatchSize: 1,
