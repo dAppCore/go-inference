@@ -106,9 +106,10 @@ type Arch struct {
 	RopeFreqs                                  []float32 // explicit per-dim inverse frequencies (YaRN long-context remap); len RotaryDim/2; nil ⇒ derive uniformly from RopeBase
 	SoftCap                                    float32   // final logit soft-cap (0 = none)
 	SlidingWindow                              int
-	PerLayerInputVocab, PerLayerInputHidden    int  // per-layer-input aux embedding (0 = absent)
-	AttentionKEqV                              bool // K == V (shared projection)
-	ValueNorm                                  bool // an arch may apply a no-scale per-head RMSNorm to V (metal's RMSNormNoScale); most don't
+	PerLayerInputVocab, PerLayerInputHidden    int   // per-layer-input aux embedding (0 = absent)
+	AttentionKEqV                              bool  // K == V (shared projection)
+	ValueNorm                                  bool  // an arch may apply a no-scale per-head RMSNorm to V (metal's RMSNormNoScale); most don't
+	TieWordEmbeddings                          *bool // nil = checkpoint presence decides; non-nil validates lm_head against config.json
 	Layer                                      []LayerSpec
 }
 

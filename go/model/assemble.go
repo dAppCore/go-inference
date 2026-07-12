@@ -102,6 +102,14 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 		return nil, core.NewError("model.Assemble: " + names.Embed + " absent")
 	}
 	m.LMHead = lin(names.LMHead, d) // nil ⇒ tied to Embed
+	if arch.TieWordEmbeddings != nil {
+		if *arch.TieWordEmbeddings && m.LMHead != nil {
+			return nil, core.NewError("model.Assemble: config declares tied word embeddings but lm_head is present")
+		}
+		if !*arch.TieWordEmbeddings && m.LMHead == nil {
+			return nil, core.NewError("model.Assemble: config declares untied word embeddings but lm_head is absent")
+		}
+	}
 
 	if arch.PerLayerInputHidden > 0 {
 		plDim := len(arch.Layer) * arch.PerLayerInputHidden
