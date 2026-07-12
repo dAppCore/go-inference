@@ -72,7 +72,7 @@ import (
 | `engine/hip/` | AMD ROCm engine (package `hip`, linux/amd64) |
 | `serving/` | OpenAI/Anthropic/Ollama-compatible HTTP servers over the engine |
 | `model/`, `model/state/` | arch definitions; identity + agent-memory state |
-| `cmd/lem/` | the `lem` binary — `serve`/`generate`/`ssd`/`sft`/`tune`/`pack`/`ebook` |
+| `cmd/lem/` | the `lem` binary — `serve`/`generate`/`ssd`/`sft`/`tune`/`pack`/`ebook`/`quant`/`spec` |
 
 ## Further reading
 

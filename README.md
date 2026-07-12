@@ -19,7 +19,7 @@ go-inference** — one repo, and (with `task build:embed`) one self-contained bi
 | **Engines** | `engine/metal` | Apple-GPU engine — **no cgo**, dispatches Apple MLX's compiled kernels + go-inference's own fused `lthn_` kernels via the Objective-C runtime; the ICB replay path replaces MLX's per-step re-encode (darwin/arm64) |
 | | `engine/hip` | AMD-GPU engine (linux/amd64, ROCm) — built on the AMD box from this same repo |
 | **Serving** | `serving/` | Native OpenAI / Anthropic / Ollama HTTP servers backed by the local engine (`/v1/chat/completions`, `/v1/messages`, `/api/chat`, …) + scheduler, sessions, chat history |
-| **Binary** | `cmd/lem` | `lem` — `serve`, `generate`, `ssd`/`sft`/`tune` (training), `pack`/`ebook` |
+| **Binary** | `cmd/lem` | `lem` — `serve`, `generate`, `ssd`/`sft`/`tune` (training), `pack`/`ebook`, `quant`, `spec` |
 | **Training** | `train/`, `eval/` | LoRA SFT, self-distillation (SSD), MTP tuning, the score cascade + capture, DuckDB/Influx metrics |
 | **Core lib** | `inference`, `model/`, `kv/`, `decode/` | `TextModel`/`Backend`/`Token`/`Message` contracts, model loading, KV cache + portable snapshots, tokenizer + sampler |
 | **GUI** | `gui/` | The LEM desktop app (Wails v3 — system tray + dashboard), a side module (`dappco.re/go/inference/gui`) |
