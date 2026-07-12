@@ -7,8 +7,8 @@ import (
 )
 
 // ExampleManager shows a freshly built manager owns no process until Start is
-// called. In use, Start spawns `lem serve --addr :36911 --model <path>` and Stop
-// terminates it with a graceful SIGTERM.
+// called. In use, Start can add chat, embeddings and scheduler flags, and Stop
+// terminates the child with a graceful SIGTERM.
 func ExampleManager() {
 	m := NewManager("lem", ":36911")
 

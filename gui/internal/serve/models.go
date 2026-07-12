@@ -22,7 +22,7 @@ type Model struct {
 // yields nil; an unreadable one yields the models it could probe (none).
 //
 //	for _, m := range serve.DiscoverModels(serve.DefaultModelsDir()) {
-//	    menu.Add(m.Name).OnClick(func() { svc.Start(m.Path) })
+//	    menu.Add(m.Name).OnClick(func() { svc.Start(m.Path, "", "") })
 //	}
 func DiscoverModels(baseDir string) []Model {
 	if baseDir == "" {
