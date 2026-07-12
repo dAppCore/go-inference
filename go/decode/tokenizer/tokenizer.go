@@ -24,7 +24,14 @@ type Tokenizer struct {
 	invVocab     map[int32]string
 	merges       []mergePair
 	mergeRanks   map[mergeKey]int
+	// special holds the special:true added tokens ONLY — the decode-side skip set
+	// (Decode/DecodeToken silence these). added holds EVERY added token: the
+	// encode-side atomic matcher, because HF matches all added tokens as single
+	// ids regardless of the special flag (qwen's <think>/</think> are
+	// special:false yet atomic — BPE-splitting them corrupts the reasoning
+	// channel the model was trained on).
 	special      map[string]int32
+	added        map[string]int32
 	specialOrder []string
 
 	// specialLeads holds the distinct first bytes of every specialOrder token
@@ -229,6 +236,7 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 		vocab:          make(map[string]int32),
 		invVocab:       make(map[int32]string),
 		special:        make(map[string]int32),
+		added:          make(map[string]int32),
 		addPrefixSpace: true,
 	}
 
@@ -284,11 +292,12 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 		if added.Special {
 			tokenizer.special[added.Content] = added.ID
 		}
+		tokenizer.added[added.Content] = added.ID
 		tokenizer.vocab[added.Content] = added.ID
 		tokenizer.invVocab[added.ID] = added.Content
 	}
-	tokenizer.specialOrder = make([]string, 0, len(tokenizer.special))
-	for tokenText := range tokenizer.special {
+	tokenizer.specialOrder = make([]string, 0, len(tokenizer.added))
+	for tokenText := range tokenizer.added {
 		tokenizer.specialOrder = append(tokenizer.specialOrder, tokenText)
 	}
 	slices.SortFunc(tokenizer.specialOrder, func(a, b string) int {
@@ -336,11 +345,11 @@ func LoadTokenizer(path string) (*Tokenizer, error) {
 		tokenizer.eosToken = id
 		tokenizer.hasEOS = true
 	}
-	// Qwen3 BOS: <|im_start|>
-	if id, ok := tokenizer.special["<|im_start|>"]; ok {
-		tokenizer.bosToken = id
-		tokenizer.hasBOS = true
-	}
+	// NB: <|im_start|> is deliberately NOT a BOS. The ChatML dialect supplies
+	// every <|im_start|> through the template and HF never auto-prepends one
+	// (add_bos_token is false for the qwen family) — the old mapping injected a
+	// ghost <|im_start|> at the head of every encode that didn't already start
+	// with it, corrupting woken-conversation continuations.
 	// Llama 3: <|eot_id|> is the turn-end token
 	if id, ok := tokenizer.special["<|eot_id|>"]; ok {
 		tokenizer.eosToken = id
@@ -373,6 +382,11 @@ func (t *Tokenizer) matchSpecialToken(input string) (string, int32, bool) {
 	}
 	for _, tok := range t.specialOrder {
 		if core.HasPrefix(input, tok) {
+			// added is the full atomic-match set; hand-built tokenizers (tests)
+			// that populate only special still resolve through the fallback.
+			if id, ok := t.added[tok]; ok {
+				return tok, id, true
+			}
 			return tok, t.special[tok], true
 		}
 	}
