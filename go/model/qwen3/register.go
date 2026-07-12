@@ -5,6 +5,7 @@ package qwen3
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	_ "dappco.re/go/inference/model/qwen3/gguf"
 )
 
 // init registers dense qwen3 with the reactive loader. The weight layout is the llama/mistral 2-norm
