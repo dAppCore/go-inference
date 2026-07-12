@@ -4,6 +4,7 @@ package bert
 
 import (
 	"math"
+	"reflect"
 	"testing"
 )
 
@@ -28,6 +29,20 @@ func TestLinear_Good_NilBias(t *testing.T) {
 	got := linear([]float32{2, 3}, []float32{1, 1}, nil, 2, 1)
 	if math.Abs(float64(got[0]-5)) > 1e-6 {
 		t.Fatalf("linear nil bias = %v, want [5]", got)
+	}
+}
+
+// TestLinearBatch_Good preserves linear's result bits while projecting all rows.
+func TestLinearBatch_Good(t *testing.T) {
+	x := [][]float32{{1, 2, 3}, {-4, 5, -6}}
+	weight := []float32{0.25, -0.5, 0.75, -1.25, 1.5, -1.75}
+	bias := []float32{0.125, -0.25}
+	got := linearBatch(x, weight, bias, 3, 2)
+	for i := range x {
+		want := linear(x[i], weight, bias, 3, 2)
+		if !reflect.DeepEqual(got[i], want) {
+			t.Fatalf("linearBatch row %d = %v, want bit-identical %v", i, got[i], want)
+		}
 	}
 }
 
