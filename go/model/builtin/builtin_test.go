@@ -66,6 +66,12 @@ func TestBuiltinRegistersGPT2Families(t *testing.T) {
 	}
 }
 
+func TestBuiltinRegistersOPT(t *testing.T) {
+	if _, ok := model.LookupArch("opt"); !ok {
+		t.Fatal("model_type opt not registered through builtin")
+	}
+}
+
 func TestBuiltinRegistersMoEFamilies(t *testing.T) {
 	for _, mt := range []string{"mixtral", "deepseek_v2", "deepseek_v3"} {
 		spec, ok := model.LookupArch(mt)
