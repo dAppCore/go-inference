@@ -463,20 +463,21 @@ func printMTPMetrics(out io.Writer, tm inference.TextModel) {
 	))
 }
 
-// loadTextModel loads path through the registered "metal" backend (the no-cgo
-// Apple engine) as an inference.TextModel.
+// loadTextModel loads path through inference.LoadModel's registered-backend
+// preference order (metal on Apple, rocm on linux/amd64, llama_cpp fallback)
+// as an inference.TextModel — pinning "metal" here made `lem generate`
+// unloadable on a hip host even with the rocm backend registered.
 func loadTextModel(path string, opts ...inference.LoadOption) (inference.TextModel, error) {
-	merged := append(append([]inference.LoadOption(nil), opts...), inference.WithBackend("metal"))
-	result := inference.LoadModel(path, merged...)
+	result := inference.LoadModel(path, opts...)
 	if !result.OK {
 		if err, ok := result.Value.(error); ok {
 			return nil, err
 		}
-		return nil, core.E("generate.loadTextModel", "metal backend failed to load model", nil)
+		return nil, core.E("generate.loadTextModel", "registered backend failed to load model", nil)
 	}
 	tm, ok := result.Value.(inference.TextModel)
 	if !ok || tm == nil {
-		return nil, core.E("generate.loadTextModel", "metal backend returned non-TextModel value", nil)
+		return nil, core.E("generate.loadTextModel", "registered backend returned non-TextModel value", nil)
 	}
 	return tm, nil
 }

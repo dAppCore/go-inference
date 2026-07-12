@@ -131,7 +131,7 @@ func newMultiModelResolver(specs []ModelSpec, opts MultiModelOptions) (*multiMod
 		entries: make(map[string]*modelEntry, len(specs)),
 		aliases: make(map[string]string, len(specs)),
 		opts:    opts,
-		loader:  metalTextModelLoader,
+		loader:  defaultTextModelLoader,
 		sizer:   estimateModelBytes,
 		now:     time.Now,
 	}

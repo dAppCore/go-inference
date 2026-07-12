@@ -34,21 +34,23 @@ type ModelLoader func(path string, opts ...inference.LoadOption) (inference.Text
 // to plain autoregressive load with an honest notice, rather than panicking.
 type SpeculativeLoader func(targetPath, draftPath string, draftBlock int, opts ...inference.LoadOption) (inference.TextModel, error)
 
-// metalTextModelLoader is the default ModelLoader: it resolves the registered
-// "metal" backend (Apple no-cgo engine) through inference.LoadModel. Engines
-// that aren't registered fail cleanly with "not available".
-func metalTextModelLoader(path string, opts ...inference.LoadOption) (inference.TextModel, error) {
-	merged := append(append([]inference.LoadOption(nil), opts...), inference.WithBackend("metal"))
-	result := inference.LoadModel(path, merged...)
+// defaultTextModelLoader is the default ModelLoader: it resolves through
+// inference.LoadModel's registered-backend preference order (metal on Apple,
+// rocm on linux/amd64, llama_cpp fallback) rather than pinning one backend by
+// name — pinning "metal" here made `lem generate`/serve unloadable on the hip
+// box even though the rocm backend was registered. No backend available fails
+// cleanly.
+func defaultTextModelLoader(path string, opts ...inference.LoadOption) (inference.TextModel, error) {
+	result := inference.LoadModel(path, opts...)
 	if !result.OK {
 		if err, ok := result.Value.(error); ok {
 			return nil, err
 		}
-		return nil, core.E("serving.metalTextModelLoader", "metal backend failed to load model", nil)
+		return nil, core.E("serving.defaultTextModelLoader", "registered backend failed to load model", nil)
 	}
 	tm, ok := result.Value.(inference.TextModel)
 	if !ok || tm == nil {
-		return nil, core.E("serving.metalTextModelLoader", "metal backend returned non-TextModel value", nil)
+		return nil, core.E("serving.defaultTextModelLoader", "registered backend returned non-TextModel value", nil)
 	}
 	return tm, nil
 }
@@ -94,8 +96,8 @@ type hotSwapResolver struct {
 	// onLoad runs after every successful load — the lazy boot load and each
 	// reload swap — so per-model wiring (conversation continuity) re-attaches.
 	onLoad func(inference.TextModel)
-	// loader builds a TextModel from a path — the registered metal engine
-	// (metalTextModelLoader, the default) or an injected native/other loader.
+	// loader builds a TextModel from a path — the preference-order registered
+	// backend (defaultTextModelLoader, the default) or an injected loader.
 	loader ModelLoader
 	// speculativeLoader builds a target+draft TextModel when drafter detection
 	// is active. nil when the engine exposes no speculative path.
@@ -105,14 +107,14 @@ type hotSwapResolver struct {
 // newHotSwapResolver returns a resolver staged with the initial model path +
 // options (and, when a drafter resolved, the MTP pair + draft block). The model
 // is NOT loaded until the first ResolveModel call. The loader defaults to the
-// registered metal backend; setLoader / setSpeculativeLoader override it.
+// preference-order backend; setLoader / setSpeculativeLoader override it.
 func newHotSwapResolver(modelPath, draftPath string, draftBlock int, opts []inference.LoadOption) *hotSwapResolver {
 	return &hotSwapResolver{
 		initPath:       modelPath,
 		initDraftPath:  draftPath,
 		initDraftBlock: draftBlock,
 		initOpts:       opts,
-		loader:         metalTextModelLoader,
+		loader:         defaultTextModelLoader,
 	}
 }
 
