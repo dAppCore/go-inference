@@ -50,6 +50,14 @@ func TestBuiltinRegistersQwen2(t *testing.T) {
 	}
 }
 
+func TestBuiltinRegistersPhi(t *testing.T) {
+	for _, mt := range []string{"phi", "phi3"} {
+		if spec, ok := model.LookupArch(mt); !ok || spec.Composed != nil {
+			t.Fatalf("model_type %q = registered %v composed %v", mt, ok, spec.Composed != nil)
+		}
+	}
+}
+
 func TestBuiltinRegistersMoEFamilies(t *testing.T) {
 	for _, mt := range []string{"mixtral", "deepseek_v2", "deepseek_v3"} {
 		spec, ok := model.LookupArch(mt)
