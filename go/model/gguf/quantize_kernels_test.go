@@ -4,6 +4,7 @@ package gguf
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"math"
 	"testing"
 )
@@ -37,27 +38,6 @@ func testFloat16Decode(bits uint16) float32 {
 	}
 	exp += 127 - 15
 	return math.Float32frombits((sign << 31) | (uint32(exp) << 23) | (frac << 13))
-}
-
-// testUnpack5BitLSB reverses the LSB-first 5-bit bitstream packing
-// quantizeQ5_0/quantizeKBlock(bits=5) write: accumulate whole bytes into
-// a bit buffer, then peel off 5 bits at a time.
-func testUnpack5BitLSB(packed []byte, count int) []int {
-	out := make([]int, count)
-	bitBuf := uint64(0)
-	bitCount := 0
-	byteIdx := 0
-	for i := range count {
-		for bitCount < 5 {
-			bitBuf |= uint64(packed[byteIdx]) << bitCount
-			byteIdx++
-			bitCount += 8
-		}
-		out[i] = int(bitBuf & 0x1F)
-		bitBuf >>= 5
-		bitCount -= 5
-	}
-	return out
 }
 
 // testUnpackQ3KScale reverses packQ3KScales for sub-block index j (0..15).
@@ -164,6 +144,22 @@ func TestQuantizeKernels_QuantizeQ8_0_Bad(t *testing.T) {
 	}
 }
 
+// TestQuantizeKernels_QuantizeQ8_0_Ugly pins quantizeQ8_0(rampBlock(32))
+// against the byte-exact output of ggml's own quantize_row_q8_0_ref (called
+// directly, via cgo-free C harness, against homebrew ggml 0.15.3 —
+// libggml-base.dylib's compiled reference implementation, not a
+// reimplementation). This is the load-bearing conformance gate: a
+// self-consistent round-trip through testDequantQ8_0 above can't catch a bug
+// shared between encoder and test decoder, but a real llama.cpp/ggml would
+// read these bytes wrong. Q8_0 needed no fix; this pin is the receipt.
+func TestQuantizeKernels_QuantizeQ8_0_Ugly(t *testing.T) {
+	const wantHex = "082481899199a1a9b1b9c0c8d0d8e0e8f0f8000810182028303840474f575f676f77"
+	got := hex.EncodeToString(quantizeQ8_0(rampBlock(32)))
+	if got != wantHex {
+		t.Errorf("quantizeQ8_0(rampBlock(32)) = %s, want ggml-ref %s", got, wantHex)
+	}
+}
+
 // --- Q4_0 ---------------------------------------------------------------
 
 func testDequantQ4_0(data []byte) []float32 {
@@ -208,19 +204,44 @@ func TestQuantizeKernels_QuantizeQ4_0_Bad(t *testing.T) {
 	}
 }
 
+// TestQuantizeKernels_QuantizeQ4_0_Ugly pins quantizeQ4_0(rampBlock(32))
+// against ggml's compiled quantize_row_q4_0_ref (see the Q8_0 pin above for
+// methodology). Was broken before this fix: the scale used maxAbs/7 (always
+// positive, wastes nibble 0) instead of ggml's max/-8 (signed extremal
+// value, uses the full [0,15] nibble range) — every non-edge nibble differed.
+func TestQuantizeKernels_QuantizeQ4_0_Ugly(t *testing.T) {
+	const wantHex = "0034809191a2a2b3b3c4c4d5d5e6e6f7f7f8"
+	got := hex.EncodeToString(quantizeQ4_0(rampBlock(32)))
+	if got != wantHex {
+		t.Errorf("quantizeQ4_0(rampBlock(32)) = %s, want ggml-ref %s", got, wantHex)
+	}
+}
+
 // --- Q5_0 ---------------------------------------------------------------
+//
+// block_q5_0 is a SYMMETRIC quantiser like Q4_0 (single scale d, no min
+// field) — 22 B/block: 2 d + 4 qh (5th/high bit of each of the 32 elements,
+// bit j) + 16 qs (low 4 bits, lower/upper-half interleaved exactly as Q4_0).
+// testDequantQ5_0 mirrors ggml's dequantize_row_q5_0.
 
 func testDequantQ5_0(data []byte) []float32 {
-	const blockBytes = 24
+	const blockBytes = 22
 	nBlocks := len(data) / blockBytes
 	out := make([]float32, 0, nBlocks*32)
 	for b := range nBlocks {
 		block := data[b*blockBytes:]
 		scale := testFloat16Decode(binary.LittleEndian.Uint16(block[0:2]))
-		minVal := testFloat16Decode(binary.LittleEndian.Uint16(block[2:4]))
-		qs := testUnpack5BitLSB(block[4:24], 32)
-		for _, q := range qs {
-			out = append(out, minVal+scale*float32(q))
+		qh := binary.LittleEndian.Uint32(block[2:6])
+		qs := block[6:22]
+		for i := range 16 {
+			hi := byte((qh >> uint(i)) & 1)
+			q := (qs[i] & 0xF) | hi<<4
+			out = append(out, scale*(float32(q)-16))
+		}
+		for i := range 16 {
+			hi := byte((qh >> uint(i+16)) & 1)
+			q := (qs[i] >> 4) | hi<<4
+			out = append(out, scale*(float32(q)-16))
 		}
 	}
 	return out
@@ -229,12 +250,11 @@ func testDequantQ5_0(data []byte) []float32 {
 func TestQuantizeKernels_QuantizeQ5_0_Good(t *testing.T) {
 	values := rampBlock(32)
 	data := quantizeQ5_0(values)
-	if len(data) != 24 {
-		t.Fatalf("len(data) = %d, want 24", len(data))
+	if len(data) != 22 {
+		t.Fatalf("len(data) = %d, want 22", len(data))
 	}
 	decoded := testDequantQ5_0(data)
-	span := maxAbsFloat32Slice(values) * 2
-	step := span / 31
+	step := maxAbsFloat32Slice(values) / 16
 	for i, want := range values {
 		if got := absFloat32Diff(decoded[i], want); got > step*1.5 {
 			t.Errorf("Q5_0[%d]: decoded %v want ~%v (err %v > tol %v)", i, decoded[i], want, got, step*1.5)
@@ -244,10 +264,29 @@ func TestQuantizeKernels_QuantizeQ5_0_Good(t *testing.T) {
 
 func TestQuantizeKernels_QuantizeQ5_0_Bad(t *testing.T) {
 	data := quantizeQ5_0(make([]float32, 32))
-	for _, b := range data[4:] {
-		if b != 0x44 {
-			t.Fatalf("zero-block Q5_0 quant bytes = %x, want all 0x44", data[4:])
+	if len(data) != 22 {
+		t.Fatalf("len(data) = %d, want 22", len(data))
+	}
+	decoded := testDequantQ5_0(data)
+	for i, v := range decoded {
+		if v != 0 {
+			t.Fatalf("zero-block Q5_0 decoded[%d] = %v, want 0", i, v)
 		}
+	}
+}
+
+// TestQuantizeKernels_QuantizeQ5_0_Ugly pins quantizeQ5_0(rampBlock(32))
+// against ggml's compiled quantize_row_q5_0_ref (see the Q8_0 pin for
+// methodology). Was severely broken before this fix: the encoder wrote a
+// 24-byte affine (scale+min) block with a custom LSB-first 5-bit bitstream —
+// wrong size, wrong scheme, wrong bit layout entirely. Any real GGUF file
+// with Q5_0 tensors was byte-corrupt (block size alone didn't match), not
+// just numerically off.
+func TestQuantizeKernels_QuantizeQ5_0_Ugly(t *testing.T) {
+	const wantHex = "00300000ffff00112233445566778899aabbccddeeff"
+	got := hex.EncodeToString(quantizeQ5_0(rampBlock(32)))
+	if got != wantHex {
+		t.Errorf("quantizeQ5_0(rampBlock(32)) = %s, want ggml-ref %s", got, wantHex)
 	}
 }
 
@@ -326,6 +365,21 @@ func TestQuantizeKernels_QuantizeQ4_K_Bad(t *testing.T) {
 	}
 }
 
+// TestQuantizeKernels_QuantizeQ4_K_Ugly pins quantizeQ4_K(rampBlock(256))
+// against ggml's compiled quantize_row_q4_K_ref (see the Q8_0 pin for
+// methodology). This format was already fixed to the ggml reference
+// algorithm (makeQKX2Quants + get_scale_min_k4) before this pin existed;
+// the pin turns that self-consistent round-trip test into a real
+// conformance receipt against the compiled reference, not just proof the
+// encoder and the in-repo test decoder agree with each other.
+func TestQuantizeKernels_QuantizeQ4_K_Ugly(t *testing.T) {
+	const wantHex = "32180c284f4fcfcf3f2f1f10000f000f0000111122223333444455556666777788889999aaaabbbbccccddddeeeeffff00101021213232434354546565767687879899a9aababbcbccdcddedeefeffff80808191929293a3a4a4a5b5b6b6b7c7c8c8c9d9dadadaebebececfdfdfefeffcacacacbcbcbcbcbdbdcdcdcdcdcdcddedededededeeeeeefefefefeffffffff"
+	got := hex.EncodeToString(quantizeQ4_K(rampBlock(qkBlockSize)))
+	if got != wantHex {
+		t.Errorf("quantizeQ4_K(rampBlock(256)) = %s, want ggml-ref %s", got, wantHex)
+	}
+}
+
 // --- Q5_K -----------------------------------------------------------------
 
 func testDequantQ5_K(data []byte) []float32 {
@@ -396,6 +450,19 @@ func TestQuantizeKernels_QuantizeQ5_K_Good(t *testing.T) {
 	}
 }
 
+// TestQuantizeKernels_QuantizeQ5_K_Ugly pins quantizeQ5_K(rampBlock(256))
+// against ggml's compiled quantize_row_q5_K_ref (see the Q8_0 pin for
+// methodology). This format was already fixed to the ggml reference
+// algorithm before this pin existed; see the Q4_K pin for why the pin still
+// matters on top of the existing round-trip test.
+func TestQuantizeKernels_QuantizeQ5_K_Ugly(t *testing.T) {
+	const wantHex = "1e141028505090d03f2f2010000f0f0fe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e4fdffffffffffffffffffffffffffffff000112233445566778899aabbccddeeff000112233445566778899aabbccddee0112233445566778899aabbccddeeff001112233445566778899aabbccddeeff001112232435364748595a6b6c7d7e8f809191a2a3b4b5c6c7d8d9eaebfcfdfe8585868696979797a8a8a8a9b9b9babacacbcbcbdcdcdcddededeeeefeffffff"
+	got := hex.EncodeToString(quantizeQ5_K(rampBlock(qkBlockSize)))
+	if got != wantHex {
+		t.Errorf("quantizeQ5_K(rampBlock(256)) = %s, want ggml-ref %s", got, wantHex)
+	}
+}
+
 // --- Q6_K -----------------------------------------------------------------
 
 func testDequantQ6_K(data []byte) []float32 {
@@ -454,6 +521,21 @@ func TestQuantizeKernels_QuantizeQ6_K_Bad(t *testing.T) {
 		if v != 0 {
 			t.Fatalf("zero-block Q6_K decoded[%d] = %v, want 0", i, v)
 		}
+	}
+}
+
+// TestQuantizeKernels_QuantizeQ6_K_Ugly pins quantizeQ6_K(rampBlock(256))
+// against ggml's compiled quantize_row_q6_K_ref (see the Q8_0 pin for
+// methodology). Was broken before this fix: each sub-block's scale was a
+// naive maxAbs/32 (always non-negative) instead of ggml's make_qx_quants
+// least-squares fit, and the scale-of-scales used 127/maxScale (positive
+// only) instead of -128/maxScale (signed, hits the int8 range's edge
+// exactly) — every scale byte and every derived quant level differed.
+func TestQuantizeKernels_QuantizeQ6_K_Ugly(t *testing.T) {
+	const wantHex = "00001011212131324242525363637374001010213131425252627373839494a400102131415262728393a3b4c4d4e5f50020416181a2c2e30323446485a5c5e6606e5c5a474543313f2d2b1816140200505f4e4d4c3b3a3928272615141302014b4a4a3938382726262514141302020148373736362525242413131212010100000000000000000000000000000000000000000000000000404040404040404002010101010101010000000000000000010000000000000000000000000000008090a0b0c0d0e0f00f2031404f5f6f7ff78f"
+	got := hex.EncodeToString(quantizeQ6_K(rampBlock(qkBlockSize)))
+	if got != wantHex {
+		t.Errorf("quantizeQ6_K(rampBlock(256)) = %s, want ggml-ref %s", got, wantHex)
 	}
 }
 
@@ -516,6 +598,22 @@ func TestQuantizeKernels_QuantizeQ3_K_Bad(t *testing.T) {
 		if v != 0 {
 			t.Fatalf("zero-block Q3_K decoded[%d] = %v, want 0", i, v)
 		}
+	}
+}
+
+// TestQuantizeKernels_QuantizeQ3_K_Ugly pins quantizeQ3_K(rampBlock(256))
+// against ggml's compiled quantize_row_q3_K_ref (see the Q8_0 pin for
+// methodology). Was broken before this fix on two independent axes: the
+// per-sub-block scale was a naive maxAbs/4 instead of ggml's make_q3_quants
+// coordinate-descent fit, and hmask packing used a convoluted per-sub-block
+// scheme instead of ggml's simple sequential walk (hmask[j%32] |=
+// 1<<(j/32) over all 256 elements) — the hmask bytes differed from the very
+// first byte.
+func TestQuantizeKernels_QuantizeQ3_K_Ugly(t *testing.T) {
+	const wantHex = "1010000000000000000000000000000000000000000000000000000000000008000000000000404040404040505090900000004040404080809090d0d0d0d01014141717171706060202010101010000060606050505050505010100000000004084c81d5084c8fce4e4e4f48ea3"
+	got := hex.EncodeToString(quantizeQ3_K(rampBlock(qkBlockSize)))
+	if got != wantHex {
+		t.Errorf("quantizeQ3_K(rampBlock(256)) = %s, want ggml-ref %s", got, wantHex)
 	}
 }
 
@@ -590,6 +688,20 @@ func TestQuantizeKernels_QuantizeQ2_K_Bad(t *testing.T) {
 	}
 }
 
+// TestQuantizeKernels_QuantizeQ2_K_Ugly pins quantizeQ2_K(rampBlock(256))
+// against ggml's compiled quantize_row_q2_K_ref (see the Q8_0 pin for
+// methodology). Was broken before this fix: the per-sub-block (scale, min)
+// was a naive (max-min)/3 affine fit instead of ggml's make_qkx2_quants —
+// the same optimal-fit search already ported for Q4_K/Q5_K, called here
+// with Q2_K's own parameters (nmax=3, plain |x| weights, useMad=true).
+func TestQuantizeKernels_QuantizeQ2_K_Ugly(t *testing.T) {
+	const wantHex = "f1d1b1917161412102030507090b0e0f404040818185c6d6dadbebefffffffff10506060a1b1f5f6f6fafbfffffffffff8f8f8fdfdfdfdfdfdfefefefefefffffefefefefeffffffffffffffffffffff7b293830"
+	got := hex.EncodeToString(quantizeQ2_K(rampBlock(qkBlockSize)))
+	if got != wantHex {
+		t.Errorf("quantizeQ2_K(rampBlock(256)) = %s, want ggml-ref %s", got, wantHex)
+	}
+}
+
 // --- Q8_K -----------------------------------------------------------------
 
 func testDequantQ8_K(data []byte) ([]float32, []int16) {
@@ -654,6 +766,20 @@ func TestQuantizeKernels_QuantizeQ8_K_Bad(t *testing.T) {
 	}
 }
 
+// TestQuantizeKernels_QuantizeQ8_K_Ugly pins quantizeQ8_K(rampBlock(256))
+// against ggml's compiled quantize_row_q8_K_ref (see the Q8_0 pin for
+// methodology). Q8_K is never itself a GGUF tensor storage type — llama.cpp
+// only produces it as a matmul-intermediate quantisation of activations, not
+// a file format (llama-quantize's allowed-type list has no Q8_K entry) — but
+// the reference function is real and exported, so the same byte pin applies.
+func TestQuantizeKernels_QuantizeQ8_K_Ugly(t *testing.T) {
+	const wantHex = "0402813c8182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e88f888f988fa88fb78fc78fd78fe78ff78007801780278036904680568066807"
+	got := hex.EncodeToString(quantizeQ8_K(rampBlock(qkBlockSize)))
+	if got != wantHex {
+		t.Errorf("quantizeQ8_K(rampBlock(256)) = %s, want ggml-ref %s", got, wantHex)
+	}
+}
+
 // --- shared numeric helpers ------------------------------------------------
 
 func TestQuantizeKernels_Float32ToFloat16_Good(t *testing.T) {
@@ -680,12 +806,6 @@ func TestQuantizeKernels_MaxAbsFloat32_Good(t *testing.T) {
 	// Exercise the scalar tail (len not a multiple of 4).
 	if got := maxAbsFloat32([]float32{1, -2, 3, -4, 9}); got != 9 {
 		t.Errorf("maxAbsFloat32(tail) = %v, want 9", got)
-	}
-}
-
-func TestQuantizeKernels_MinFloat32_Good(t *testing.T) {
-	if got := minFloat32([]float32{1, -5, 3, -2}); got != -5 {
-		t.Errorf("minFloat32 = %v, want -5", got)
 	}
 }
 
