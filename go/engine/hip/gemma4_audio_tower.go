@@ -3,10 +3,13 @@
 package hip
 
 import (
+	"math"
+
 	core "dappco.re/go"
 	enginegemma4 "dappco.re/go/inference/engine/hip/model/gemma4"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/gemma4/audio"
+	"dappco.re/go/inference/model/quant/mlxaffine"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -17,16 +20,17 @@ import (
 // soft-token policy so E2B/E4B audio is reachable through the hip build. hip previously had audio policy
 // + labels only and no path to the tower weights (its text load is GGUF); this is that first path.
 //
-// Scope (round 1): the tower forward. The embed_audio 4-bit projector (1536 -> LM embed width), the WAV
-// bytes-in decode, and the serve token-model seam (implementing engine.AudioInputTokenModel over a hip
-// token model, with a combined GGUF-text + safetensors-audio load) are later work — see the port report.
+// The tower forward and embed_audio affine-q4 projector are implemented here. WAV bytes-in decode and
+// the serve token-model seam (implementing engine.AudioInputTokenModel over a hip token model, with a
+// combined GGUF-text + safetensors-audio load) remain separate integration work.
 
 // AudioTower holds the assembled Gemma 4 audio tower payload and the mel feature extractor, plus the
 // mmap the tower weight byte-views reference. Close it once the tower is no longer needed.
 type AudioTower struct {
-	loaded    *model.LoadedAudio
-	extractor *audio.FeatureExtractor
-	mapping   *safetensors.DirMapping
+	loaded           *model.LoadedAudio
+	extractor        *audio.FeatureExtractor
+	projectorWeights []float32
+	mapping          *safetensors.DirMapping
 }
 
 // LoadAudioTower assembles the Gemma 4 audio tower + mel extractor from a safetensors model directory.
@@ -63,7 +67,14 @@ func LoadAudioTower(dir string) (*AudioTower, error) {
 		}
 		return nil, core.E("hip.LoadAudioTower", "build mel feature extractor", err)
 	}
-	return &AudioTower{loaded: loaded.Audio, extractor: extractor, mapping: mapping}, nil
+	projectorWeights, err := hipLoadAudioProjectorQ4(loaded.Audio.Projector)
+	if err != nil {
+		if mapping != nil {
+			_ = mapping.Close()
+		}
+		return nil, core.E("hip.LoadAudioTower", "load embed_audio projector", err)
+	}
+	return &AudioTower{loaded: loaded.Audio, extractor: extractor, projectorWeights: projectorWeights, mapping: mapping}, nil
 }
 
 // Project runs one decoded waveform (16 kHz mono float32, [-1,1]) through the tower: mel extract →
@@ -83,6 +94,65 @@ func (a *AudioTower) Project(waveform []float32) (features []float32, softTokens
 		return nil, 0, core.E("hip.AudioTower.Project", "conformer encode", err)
 	}
 	return features, enginegemma4.AudioSoftTokens(frames), nil
+}
+
+// ProjectEmbeddings runs the audio tower and then embed_audio's no-scale RMS normalisation plus its
+// MLX-affine 4-bit projection. LoadAudioTower dequantises the projector once into host float32; this
+// keeps the binding portable while matching the same affine q*scale+bias convention as HIP's q4 kernels.
+func (a *AudioTower) ProjectEmbeddings(waveform []float32) (embeddings []float32, softTokens int, err error) {
+	features, softTokens, err := a.Project(waveform)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(a.projectorWeights) == 0 {
+		return nil, 0, core.NewError("hip.AudioTower.ProjectEmbeddings: q4 projector not loaded")
+	}
+	embeddings, err = hipAudioProjectorF32(features, softTokens, a.loaded.Projector, a.projectorWeights, 1e-6)
+	if err != nil {
+		return nil, 0, core.E("hip.AudioTower.ProjectEmbeddings", "embed_audio projection", err)
+	}
+	return embeddings, softTokens, nil
+}
+
+func hipLoadAudioProjectorQ4(projector model.LoadedAudioLinear) ([]float32, error) {
+	if projector.Kind != mlxaffine.Mode || projector.Bits != 4 || projector.GroupSize <= 0 ||
+		len(projector.Weight) == 0 || len(projector.Scales) == 0 || len(projector.Biases) == 0 {
+		return nil, core.NewError("hip.embed_audio: complete MLX affine 4-bit projector is required")
+	}
+	weights, err := mlxaffine.DequantizeTensor(projector.Weight, projector.Scales, projector.Biases,
+		projector.OutDim, projector.InDim, projector.Bits, projector.GroupSize)
+	if err != nil {
+		return nil, core.E("hip.embed_audio", "dequantise projector", err)
+	}
+	return weights, nil
+}
+
+func hipAudioProjectorF32(features []float32, rows int, projector model.LoadedAudioLinear, weights []float32, eps float32) ([]float32, error) {
+	if rows <= 0 || projector.InDim <= 0 || projector.OutDim <= 0 || len(features) != rows*projector.InDim ||
+		len(weights) != projector.OutDim*projector.InDim {
+		return nil, core.NewError("hip.embed_audio: invalid projector geometry")
+	}
+	if eps < 0 || math.IsNaN(float64(eps)) || math.IsInf(float64(eps), 0) {
+		return nil, core.NewError("hip.embed_audio: epsilon must be non-negative and finite")
+	}
+	out := make([]float32, rows*projector.OutDim)
+	for row := range rows {
+		input := features[row*projector.InDim : (row+1)*projector.InDim]
+		var squares float32
+		for _, value := range input {
+			squares += value * value
+		}
+		invRMS := float32(1 / math.Sqrt(float64(squares/float32(projector.InDim)+eps)))
+		for output := range projector.OutDim {
+			weight := weights[output*projector.InDim : (output+1)*projector.InDim]
+			var sum float32
+			for col, value := range input {
+				sum += value * invRMS * weight[col]
+			}
+			out[row*projector.OutDim+output] = sum
+		}
+	}
+	return out, nil
 }
 
 // OutputDim reports the tower's last_hidden_state width (audio output_proj_dims).
