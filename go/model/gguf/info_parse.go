@@ -400,7 +400,7 @@ func readGGUFValue(reader io.Reader, valueType uint32, scratch []byte, strArena 
 			return float32(0), err
 		}
 		return math.Float32frombits(binary.LittleEndian.Uint32(scratch[:4])), nil
-	case ggufValueTypeBool:
+	case ValueTypeBool:
 		if _, err := io.ReadFull(reader, scratch[:1]); err != nil {
 			return false, err
 		}
@@ -410,7 +410,7 @@ func readGGUFValue(reader io.Reader, valueType uint32, scratch []byte, strArena 
 			return readStringIntoArena(reader, scratch, strArena)
 		}
 		return readGGUFString(reader, scratch)
-	case ggufValueTypeArray:
+	case ValueTypeArray:
 		if _, err := io.ReadFull(reader, scratch[:4]); err != nil {
 			return nil, err
 		}

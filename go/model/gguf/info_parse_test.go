@@ -17,14 +17,14 @@ func TestInfoParse_parseGGUF_Good(t *testing.T) {
 	writeTestGGUF(t, path, []ggufMetaSpec{
 		{Key: "general.architecture", ValueType: ValueTypeString, Value: "llama"},
 		{Key: "general.file_type", ValueType: ValueTypeUint32, Value: uint32(7)},
-		{Key: "general.is_test", ValueType: ggufValueTypeBool, Value: true},
+		{Key: "general.is_test", ValueType: ValueTypeBool, Value: true},
 		{Key: "general.scale", ValueType: ValueTypeFloat32, Value: float32(1.5)},
-		{Key: "tokenizer.ggml.tokens", ValueType: ggufValueTypeArray, Value: ggufArraySpec{
+		{Key: "tokenizer.ggml.tokens", ValueType: ValueTypeArray, Value: ggufArraySpec{
 			ElementType: ValueTypeString,
 			Values:      []any{"a", "b", "c"},
 		}},
 	}, []ggufTensorSpec{
-		{Name: "blk.0.attn_q.weight", Type: ggufTensorTypeF32, Dims: []uint64{4, 4}},
+		{Name: "blk.0.attn_q.weight", Type: TensorTypeF32, Dims: []uint64{4, 4}},
 	})
 
 	metadata, tensors, err := parseGGUF(path)
@@ -150,8 +150,8 @@ func TestInfoParse_readGGUFValue_AllScalarTypes_Good(t *testing.T) {
 		{"uint64", ggufValueTypeUint64, func(b *bytes.Buffer) { b.Write(binary.LittleEndian.AppendUint64(nil, 0x0123456789ABCDEF)) }, uint64(0x0123456789ABCDEF)},
 		{"int64", ggufValueTypeInt64, func(b *bytes.Buffer) { b.Write(binary.LittleEndian.AppendUint64(nil, 0xFFFFFFFFFFFFFFFF)) }, int64(-1)},
 		{"float64", ggufValueTypeFloat64, func(b *bytes.Buffer) { b.Write(binary.LittleEndian.AppendUint64(nil, math.Float64bits(2.25))) }, float64(2.25)},
-		{"bool-true", ggufValueTypeBool, func(b *bytes.Buffer) { b.WriteByte(1) }, true},
-		{"bool-false", ggufValueTypeBool, func(b *bytes.Buffer) { b.WriteByte(0) }, false},
+		{"bool-true", ValueTypeBool, func(b *bytes.Buffer) { b.WriteByte(1) }, true},
+		{"bool-false", ValueTypeBool, func(b *bytes.Buffer) { b.WriteByte(0) }, false},
 	}
 	for _, tc := range cases {
 		buf := new(bytes.Buffer)
@@ -216,7 +216,7 @@ func TestInfoParse_readGGUFValue_NumericArray_Good(t *testing.T) {
 	}
 
 	var scratch [8]byte
-	got, err := readGGUFValue(buf, ggufValueTypeArray, scratch[:], nil)
+	got, err := readGGUFValue(buf, ValueTypeArray, scratch[:], nil)
 	if err != nil {
 		t.Fatalf("readGGUFValue(numeric array): %v", err)
 	}
@@ -241,7 +241,7 @@ func TestInfoParse_readGGUFValue_StringArray_Good(t *testing.T) {
 	}
 
 	var scratch [8]byte
-	got, err := readGGUFValue(buf, ggufValueTypeArray, scratch[:], nil)
+	got, err := readGGUFValue(buf, ValueTypeArray, scratch[:], nil)
 	if err != nil {
 		t.Fatalf("readGGUFValue(string array): %v", err)
 	}
@@ -262,7 +262,7 @@ func TestInfoParse_readGGUFValue_ArrayTooLong_Bad(t *testing.T) {
 	buf.Write(binary.LittleEndian.AppendUint64(nil, maxGGUFCollectionEntries+1))
 
 	var scratch [8]byte
-	if _, err := readGGUFValue(buf, ggufValueTypeArray, scratch[:], nil); err == nil {
+	if _, err := readGGUFValue(buf, ValueTypeArray, scratch[:], nil); err == nil {
 		t.Fatalf("readGGUFValue(over-length array): want error, got nil")
 	}
 }
@@ -284,12 +284,12 @@ func TestInfoParse_readGGUFValue_Truncated_Ugly(t *testing.T) {
 		{"uint32", ValueTypeUint32, []byte{0x01, 0x02}},
 		{"int32", ggufValueTypeInt32, []byte{0x01, 0x02}},
 		{"float32", ValueTypeFloat32, []byte{0x01, 0x02}},
-		{"bool", ggufValueTypeBool, nil},
+		{"bool", ValueTypeBool, nil},
 		{"uint64", ggufValueTypeUint64, []byte{0x01, 0x02, 0x03}},
 		{"int64", ggufValueTypeInt64, []byte{0x01, 0x02, 0x03}},
 		{"float64", ggufValueTypeFloat64, []byte{0x01, 0x02, 0x03}},
-		{"array-elemtype", ggufValueTypeArray, []byte{0x01}},                                         // < 4 bytes for element type
-		{"array-length", ggufValueTypeArray, binary.LittleEndian.AppendUint32(nil, ValueTypeUint32)}, // element type ok, length truncated
+		{"array-elemtype", ValueTypeArray, []byte{0x01}},                                         // < 4 bytes for element type
+		{"array-length", ValueTypeArray, binary.LittleEndian.AppendUint32(nil, ValueTypeUint32)}, // element type ok, length truncated
 	}
 	for _, tc := range cases {
 		var scratch [8]byte

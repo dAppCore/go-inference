@@ -47,7 +47,10 @@ var (
 
 // GGUF metadata value-type ids (the uint32 written before each metadata
 // value on the wire). The exported subset — ValueTypeUint32, ValueTypeFloat32,
-// ValueTypeString — names the types WriteFile accepts in a MetadataEntry.
+// ValueTypeString, ValueTypeArray, ValueTypeBool — names the types WriteFile
+// accepts in a MetadataEntry; Array and Bool are exported alongside the
+// tensor-type ids below for arch export-lane consumers (model/gemma4/gguf)
+// that build MetadataEntry/Tensor values outside this package.
 //
 //	entry := gguf.MetadataEntry{Key: "adapter.lora.alpha", ValueType: gguf.ValueTypeFloat32, Value: float32(16)}
 const (
@@ -58,16 +61,22 @@ const (
 	ValueTypeUint32      = 4
 	ggufValueTypeInt32   = 5
 	ValueTypeFloat32     = 6
-	ggufValueTypeBool    = 7
+	ValueTypeBool        = 7
 	ValueTypeString      = 8
-	ggufValueTypeArray   = 9
+	ValueTypeArray       = 9
 	ggufValueTypeUint64  = 10
 	ggufValueTypeInt64   = 11
 	ggufValueTypeFloat64 = 12
 )
 
+// GGML tensor-type ids (the uint32 stored per-tensor in a GGUF's tensor
+// directory and used in a Tensor.Type). Most stay unexported — internal to
+// this package's own read/quantise paths; TensorTypeQ4_0, TensorTypeQ8_0,
+// TensorTypeF32, TensorTypeBF16, and TensorTypeQ2K..TensorTypeQ6K are
+// exported for arch export-lane consumers (model/gemma4/gguf) that build
+// Tensor values with a specific type outside this package.
 const (
-	ggufTensorTypeF32      = 0
+	TensorTypeF32          = 0
 	ggufTensorTypeF16      = 1
 	TensorTypeQ4_0         = 2
 	ggufTensorTypeQ4_1     = 3
@@ -75,11 +84,11 @@ const (
 	ggufTensorTypeQ5_1     = 7
 	TensorTypeQ8_0         = 8
 	ggufTensorTypeQ8_1     = 9
-	ggufTensorTypeQ2K      = 10
-	ggufTensorTypeQ3K      = 11
-	ggufTensorTypeQ4K      = 12
-	ggufTensorTypeQ5K      = 13
-	ggufTensorTypeQ6K      = 14
+	TensorTypeQ2K          = 10
+	TensorTypeQ3K          = 11
+	TensorTypeQ4K          = 12
+	TensorTypeQ5K          = 13
+	TensorTypeQ6K          = 14
 	ggufTensorTypeQ8K      = 15
 	ggufTensorTypeIQ2XXS   = 16
 	ggufTensorTypeIQ2XS    = 17
@@ -95,7 +104,7 @@ const (
 	ggufTensorTypeI64      = 27
 	ggufTensorTypeF64      = 28
 	ggufTensorTypeIQ1M     = 29
-	ggufTensorTypeBF16     = 30
+	TensorTypeBF16         = 30
 	ggufTensorTypeQ4_0_4_4 = 31
 	ggufTensorTypeQ4_0_4_8 = 32
 	ggufTensorTypeQ4_0_8_8 = 33

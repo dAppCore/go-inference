@@ -44,8 +44,8 @@ func TestInfo_ReadInfo_Good(t *testing.T) {
 		{Key: "qwen3.context_length", ValueType: ValueTypeUint32, Value: uint32(40960)},
 		{Key: "qwen3.embedding_length", ValueType: ValueTypeUint32, Value: uint32(2048)},
 	}, []ggufTensorSpec{
-		{Name: "blk.0.attn_q.weight", Type: ggufTensorTypeQ4K, Dims: []uint64{256, 4}},
-		{Name: "blk.1.attn_q.weight", Type: ggufTensorTypeQ4K, Dims: []uint64{256, 4}},
+		{Name: "blk.0.attn_q.weight", Type: TensorTypeQ4K, Dims: []uint64{256, 4}},
+		{Name: "blk.1.attn_q.weight", Type: TensorTypeQ4K, Dims: []uint64{256, 4}},
 	})
 
 	info, err := ReadInfo(path)
@@ -102,7 +102,7 @@ func TestInfo_ReadInfo_Ugly(t *testing.T) {
 	writeTestGGUF(t, path, []ggufMetaSpec{
 		{Key: "general.architecture", ValueType: ValueTypeString, Value: "llama"},
 	}, []ggufTensorSpec{
-		{Name: "broken.weight", Type: ggufTensorTypeF32, Dims: []uint64{0}},
+		{Name: "broken.weight", Type: TensorTypeF32, Dims: []uint64{0}},
 	})
 
 	info, err := ReadInfo(path)
@@ -177,8 +177,8 @@ func TestInfo_ReadInfo_LayerCountFromTensorNames_Good(t *testing.T) {
 	writeTestGGUF(t, path, []ggufMetaSpec{
 		{Key: "general.architecture", ValueType: ValueTypeString, Value: "llama"},
 	}, []ggufTensorSpec{
-		{Name: "blk.0.attn_q.weight", Type: ggufTensorTypeF32, Dims: []uint64{4, 4}},
-		{Name: "blk.3.attn_q.weight", Type: ggufTensorTypeF32, Dims: []uint64{4, 4}},
+		{Name: "blk.0.attn_q.weight", Type: TensorTypeF32, Dims: []uint64{4, 4}},
+		{Name: "blk.3.attn_q.weight", Type: TensorTypeF32, Dims: []uint64{4, 4}},
 	})
 
 	info, err := ReadInfo(path)

@@ -2,7 +2,10 @@
 
 package gguf
 
-import core "dappco.re/go"
+import (
+	core "dappco.re/go"
+	basegguf "dappco.re/go/inference/model/gguf"
+)
 
 // gemma4UseMoreBits reproduces llama.cpp's use_more_bits selector (the rule
 // llama_tensor_get_type applies to attn_v and ffn_down under the *_K_M "medium"
@@ -33,18 +36,18 @@ func gemma4UseMoreBits(layerIndex, layerCount int) bool {
 //
 // Reference: llama.cpp src/llama-quant.cpp, llama_ftype_get_default_type
 // (ggml-org/llama.cpp@master, fetched 2026-07-12).
-func gemma4BulkType(format QuantizeFormat) uint32 {
+func gemma4BulkType(format basegguf.QuantizeFormat) uint32 {
 	switch format {
-	case QuantizeQ8_0:
-		return TensorTypeQ8_0
-	case QuantizeQ6_K:
-		return ggufTensorTypeQ6K
-	case QuantizeQ5_K_M:
-		return ggufTensorTypeQ5K
-	case QuantizeQ3_K_M:
-		return ggufTensorTypeQ3K
-	default: // QuantizeQ4_K_M
-		return ggufTensorTypeQ4K
+	case basegguf.QuantizeQ8_0:
+		return basegguf.TensorTypeQ8_0
+	case basegguf.QuantizeQ6_K:
+		return basegguf.TensorTypeQ6K
+	case basegguf.QuantizeQ5_K_M:
+		return basegguf.TensorTypeQ5K
+	case basegguf.QuantizeQ3_K_M:
+		return basegguf.TensorTypeQ3K
+	default: // basegguf.QuantizeQ4_K_M
+		return basegguf.TensorTypeQ4K
 	}
 }
 
@@ -55,18 +58,18 @@ func gemma4BulkType(format QuantizeFormat) uint32 {
 // use_more_bits(i, n) selector (gemma4UseMoreBits); Q3_K_M instead has its
 // own fixed "first two layers" rule, independent of layerCount. Q8_0/Q6_K
 // have no override — always bulk.
-func gemma4AttnVType(format QuantizeFormat, bulk uint32, layerIndex, layerCount int) uint32 {
+func gemma4AttnVType(format basegguf.QuantizeFormat, bulk uint32, layerIndex, layerCount int) uint32 {
 	switch format {
-	case QuantizeQ4_K_M, QuantizeQ5_K_M:
+	case basegguf.QuantizeQ4_K_M, basegguf.QuantizeQ5_K_M:
 		if gemma4UseMoreBits(layerIndex, layerCount) {
-			return ggufTensorTypeQ6K
+			return basegguf.TensorTypeQ6K
 		}
 		return bulk
-	case QuantizeQ3_K_M:
+	case basegguf.QuantizeQ3_K_M:
 		if layerIndex < 2 {
-			return ggufTensorTypeQ5K
+			return basegguf.TensorTypeQ5K
 		}
-		return ggufTensorTypeQ4K
+		return basegguf.TensorTypeQ4K
 	default:
 		return bulk
 	}
@@ -78,18 +81,18 @@ func gemma4AttnVType(format QuantizeFormat, bulk uint32, layerIndex, layerCount 
 // other layer to Q4_K — llama.cpp's Q3_K_M FFN_DOWN branch on a non-Falcon
 // arch (gemma is never Falcon, so its use_more_bits fallback never applies
 // here: the tensor is always bumped away from the Q3_K bulk).
-func gemma4FfnDownType(format QuantizeFormat, bulk uint32, layerIndex, layerCount int) uint32 {
+func gemma4FfnDownType(format basegguf.QuantizeFormat, bulk uint32, layerIndex, layerCount int) uint32 {
 	switch format {
-	case QuantizeQ4_K_M, QuantizeQ5_K_M:
+	case basegguf.QuantizeQ4_K_M, basegguf.QuantizeQ5_K_M:
 		if gemma4UseMoreBits(layerIndex, layerCount) {
-			return ggufTensorTypeQ6K
+			return basegguf.TensorTypeQ6K
 		}
 		return bulk
-	case QuantizeQ3_K_M:
+	case basegguf.QuantizeQ3_K_M:
 		if layerIndex < layerCount/16 {
-			return ggufTensorTypeQ5K
+			return basegguf.TensorTypeQ5K
 		}
-		return ggufTensorTypeQ4K
+		return basegguf.TensorTypeQ4K
 	default:
 		return bulk
 	}
@@ -99,9 +102,9 @@ func gemma4FfnDownType(format QuantizeFormat, bulk uint32, layerIndex, layerCoun
 // llama.cpp's Q3_K_M ATTENTION_OUTPUT branch bumps this tensor to Q4_K on
 // every layer (non-Falcon arch, non-8-expert model — gemma-4-E2B is both);
 // every other format leaves it at bulk.
-func gemma4AttnOutputType(format QuantizeFormat, bulk uint32) uint32 {
-	if format == QuantizeQ3_K_M {
-		return ggufTensorTypeQ4K
+func gemma4AttnOutputType(format basegguf.QuantizeFormat, bulk uint32) uint32 {
+	if format == basegguf.QuantizeQ3_K_M {
+		return basegguf.TensorTypeQ4K
 	}
 	return bulk
 }
@@ -136,30 +139,30 @@ func gemma4AttnOutputType(format QuantizeFormat, bulk uint32) uint32 {
 //
 // layerIndex is the block index for a per-layer (blk.N.*) tensor and is ignored
 // for whole-model tensors; layerCount is the model's block_count.
-func gemma4TensorType(format QuantizeFormat, canonical string, layerIndex, layerCount int) uint32 {
+func gemma4TensorType(format basegguf.QuantizeFormat, canonical string, layerIndex, layerCount int) uint32 {
 	switch canonical {
 	case "per_layer_model_proj.weight":
-		return ggufTensorTypeBF16
+		return basegguf.TensorTypeBF16
 	case "output_norm.weight", "per_layer_proj_norm.weight", "rope_freqs.weight":
-		return ggufTensorTypeF32
+		return basegguf.TensorTypeF32
 	}
 	switch {
 	case core.HasSuffix(canonical, "_norm.weight"):
 		// attn_norm, ffn_norm, post_attention_norm, post_ffw_norm, post_norm,
 		// attn_q_norm, attn_k_norm.
-		return ggufTensorTypeF32
+		return basegguf.TensorTypeF32
 	case core.HasSuffix(canonical, ".layer_output_scale.weight"),
 		core.HasSuffix(canonical, ".inp_gate.weight"),
 		core.HasSuffix(canonical, ".proj.weight"):
-		return ggufTensorTypeF32
+		return basegguf.TensorTypeF32
 	}
 
 	bulk := gemma4BulkType(format)
 
 	switch canonical {
 	case "per_layer_token_embd.weight":
-		if format == QuantizeQ4_K_M {
-			return ggufTensorTypeQ5K
+		if format == basegguf.QuantizeQ4_K_M {
+			return basegguf.TensorTypeQ5K
 		}
 		return bulk
 	case "token_embd.weight":

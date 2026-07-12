@@ -113,7 +113,7 @@ func writeGGUFTestValue(t *testing.T, file *core.OSFile, valueType uint32, value
 		if err := binary.Write(file, binary.LittleEndian, floatValue); err != nil {
 			t.Fatalf("write float32: %v", err)
 		}
-	case ggufValueTypeBool:
+	case ValueTypeBool:
 		boolValue, ok := value.(bool)
 		if !ok {
 			t.Fatalf("write bool: got %T, want bool", value)
@@ -125,7 +125,7 @@ func writeGGUFTestValue(t *testing.T, file *core.OSFile, valueType uint32, value
 		if err := binary.Write(file, binary.LittleEndian, encoded); err != nil {
 			t.Fatalf("write bool: %v", err)
 		}
-	case ggufValueTypeArray:
+	case ValueTypeArray:
 		arrayValue, ok := value.(ggufArraySpec)
 		if !ok {
 			t.Fatalf("write array: got %T, want ggufArraySpec", value)
