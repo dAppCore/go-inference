@@ -27,6 +27,10 @@ const (
 	QuantizeQ8_K   QuantizeFormat = "q8_k"
 	QuantizeQ3_K_M QuantizeFormat = "q3_k_m"
 	QuantizeQ3_K   QuantizeFormat = "q3_k"
+	// QuantizeQ2_K_M names llama.cpp's conventional mixed Q2_K recipe. Its
+	// command-line spelling is q2_k; the alias distinguishes the requested
+	// per-tensor recipe from the resolved Q2_K encoding kernel.
+	QuantizeQ2_K_M QuantizeFormat = "q2_k"
 	QuantizeQ2_K   QuantizeFormat = "q2_k"
 
 	ggufQuantizeOutputWeights = "model.gguf"

@@ -29,12 +29,14 @@ func gemma4UseMoreBits(layerIndex, layerCount int) bool {
 // LLAMA_FTYPE_MOSTLY_Q8_0 / _Q6_K case) — every quantisable tensor is the
 // bulk type for those two, oracle-confirmed for q8_0 against the on-disk
 // unsloth gemma-4-E2B-it-Q8_0.gguf (uniform Q8_0, 247/247 quantised
-// tensors). Q5_K_M and Q3_K_M are llama.cpp's "_M" mixed-precision recipes;
+// tensors). Q5_K_M, Q3_K_M, and Q2_K_M are llama.cpp-conventional mixed-
+// precision recipes;
 // gemma4AttnVType / gemma4FfnDownType / gemma4AttnOutputType layer their
 // overrides on top of this bulk type. Q4_K_M is the existing unsloth-oracle-
 // matched policy.
 //
-// Reference: llama.cpp src/llama-quant.cpp, llama_ftype_get_default_type
+// Reference: https://github.com/ggml-org/llama.cpp/blob/master/src/llama-quant.cpp,
+// llama_ftype_get_default_type and llama_tensor_get_type_impl
 // (ggml-org/llama.cpp@master, fetched 2026-07-12).
 func gemma4BulkType(format basegguf.QuantizeFormat) uint32 {
 	switch format {
@@ -46,6 +48,8 @@ func gemma4BulkType(format basegguf.QuantizeFormat) uint32 {
 		return basegguf.TensorTypeQ5K
 	case basegguf.QuantizeQ3_K_M:
 		return basegguf.TensorTypeQ3K
+	case basegguf.QuantizeQ2_K_M:
+		return basegguf.TensorTypeQ2K
 	default: // basegguf.QuantizeQ4_K_M
 		return basegguf.TensorTypeQ4K
 	}
@@ -56,7 +60,8 @@ func gemma4BulkType(format basegguf.QuantizeFormat) uint32 {
 // attention-sensitive tensor above the bulk type on specific layers for
 // every "_M" mixed recipe it defines: Q4_K_M and Q5_K_M share the identical
 // use_more_bits(i, n) selector (gemma4UseMoreBits); Q3_K_M instead has its
-// own fixed "first two layers" rule, independent of layerCount. Q8_0/Q6_K
+// own fixed "first two layers" rule, independent of layerCount. Q2_K_M uses
+// Q4_K for Gemma 4 E2B because its grouped-query ratio is eight. Q8_0/Q6_K
 // have no override — always bulk.
 func gemma4AttnVType(format basegguf.QuantizeFormat, bulk uint32, layerIndex, layerCount int) uint32 {
 	switch format {
@@ -70,6 +75,10 @@ func gemma4AttnVType(format basegguf.QuantizeFormat, bulk uint32, layerIndex, la
 			return basegguf.TensorTypeQ5K
 		}
 		return basegguf.TensorTypeQ4K
+	case basegguf.QuantizeQ2_K_M:
+		// Gemma 4 E2B has eight query heads and one KV head (GQA >= 4),
+		// selecting llama.cpp's Q4_K attention-value override.
+		return basegguf.TensorTypeQ4K
 	default:
 		return bulk
 	}
@@ -80,7 +89,8 @@ func gemma4AttnVType(format basegguf.QuantizeFormat, bulk uint32, layerIndex, la
 // Q3_K_M instead bumps the first layerCount/16 layers to Q5_K and every
 // other layer to Q4_K — llama.cpp's Q3_K_M FFN_DOWN branch on a non-Falcon
 // arch (gemma is never Falcon, so its use_more_bits fallback never applies
-// here: the tensor is always bumped away from the Q3_K bulk).
+// here: the tensor is always bumped away from the Q3_K bulk). Q2_K_M bumps
+// every ffn_down tensor to Q3_K.
 func gemma4FfnDownType(format basegguf.QuantizeFormat, bulk uint32, layerIndex, layerCount int) uint32 {
 	switch format {
 	case basegguf.QuantizeQ4_K_M, basegguf.QuantizeQ5_K_M:
@@ -93,6 +103,8 @@ func gemma4FfnDownType(format basegguf.QuantizeFormat, bulk uint32, layerIndex, 
 			return basegguf.TensorTypeQ5K
 		}
 		return basegguf.TensorTypeQ4K
+	case basegguf.QuantizeQ2_K_M:
+		return basegguf.TensorTypeQ3K
 	default:
 		return bulk
 	}
@@ -101,10 +113,13 @@ func gemma4FfnDownType(format basegguf.QuantizeFormat, bulk uint32, layerIndex, 
 // gemma4AttnOutputType returns attn_output.weight's type for format.
 // llama.cpp's Q3_K_M ATTENTION_OUTPUT branch bumps this tensor to Q4_K on
 // every layer (non-Falcon arch, non-8-expert model — gemma-4-E2B is both);
-// every other format leaves it at bulk.
+// Q2_K_M bumps it to Q3_K; every other format leaves it at bulk.
 func gemma4AttnOutputType(format basegguf.QuantizeFormat, bulk uint32) uint32 {
 	if format == basegguf.QuantizeQ3_K_M {
 		return basegguf.TensorTypeQ4K
+	}
+	if format == basegguf.QuantizeQ2_K_M {
+		return basegguf.TensorTypeQ3K
 	}
 	return bulk
 }
