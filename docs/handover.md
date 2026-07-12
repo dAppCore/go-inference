@@ -1007,3 +1007,21 @@ gate fusion + the thin-stage receipt.
 - **Gate discipline (third strike today):** `<cmd> | tail; echo $?` reports
   TAIL's exit — the rsync "success" that copied nothing and the vet
   "clean-exit" both hid behind it. Capture to file; assert on the file.
+
+## 2026-07-13, SMALL HOURS — the sampler conviction (r11+A/B)
+
+- r11 feedback receipts: argmax==fed 30/30, pos==KV 30/30, generation==teacher-
+  forced 29/29 — feedback loop CLEAN (that hypothesis lasted one round).
+- **The A/B that ended the hunt** (box, clean pack, same binary/prompt, 40 tok):
+  greedy temp 0 → COHERENT at 42.4 tok/s; sampled temp 1.0 → repetition
+  collapse by ~token 12 at **0.2 tok/s**. The garble AND the "923s" slowness
+  are BOTH sampled-path-only. Nine rounds of oracles were clean because every
+  one of them ran greedy — the device sampling stack
+  (hipRunPackedTopKSampleKernel / softcap-sample variants + host prep + the
+  eligibility gates) is the one seam no oracle ever touched. r12 codex lane is
+  on it: RED device-vs-host sampler oracle → timing receipt → root-cause fix
+  (host-sampling reroute banned as a workaround); done-gate = temp-1.0 120-tok
+  coherent 12B at sane speed, greedy byte-unchanged, E2B still coherent.
+- Triage rule earned: **when generation misbehaves, A/B temp-0 vs default FIRST**
+  — it separates forward from sampler in one run and would have saved rounds
+  1–11. (lem generate defaults to temp 1.0, not greedy.)
