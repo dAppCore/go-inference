@@ -99,7 +99,7 @@ func (m *cancellableBenchModel) seq(ctx context.Context) iter.Seq[inference.Toke
 
 func BenchmarkScheduler_Cancel_MidStream(b *testing.B) {
 	base := &cancellableBenchModel{tokens: benchTokens(64), perTokenNs: 100 * time.Microsecond}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -135,7 +135,7 @@ func BenchmarkScheduler_Cancel_BeforeStart_QueueWait(b *testing.B) {
 	// avoids a producer-blocks-on-consumer deadlock with the queued
 	// drain ordering below.
 	base := &cancellableBenchModel{tokens: benchTokens(8), perTokenNs: 50 * time.Microsecond}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 16})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 16})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -172,7 +172,7 @@ func BenchmarkScheduler_Cancel_BeforeStart_QueueWait(b *testing.B) {
 
 func BenchmarkScheduler_Cancel_ParentContextAlreadyCancelled(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	parent, cancel := context.WithCancel(context.Background())
 	cancel()
 	b.ReportAllocs()
@@ -194,7 +194,7 @@ func BenchmarkScheduler_Cancel_ParentContextAlreadyCancelled(b *testing.B) {
 
 func BenchmarkScheduler_Cancel_TimeoutAlreadyElapsed(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	parent := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -217,7 +217,7 @@ func BenchmarkScheduler_Cancel_TimeoutAlreadyElapsed(b *testing.B) {
 
 func BenchmarkScheduler_Cancel_DeadlineDuringStream(b *testing.B) {
 	base := &cancellableBenchModel{tokens: benchTokens(32), perTokenNs: 100 * time.Microsecond}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -242,7 +242,7 @@ func BenchmarkScheduler_Cancel_DeadlineDuringStream(b *testing.B) {
 
 func BenchmarkScheduler_Cancel_DrainAfterCancel_LongStream(b *testing.B) {
 	base := &cancellableBenchModel{tokens: benchTokens(256), perTokenNs: 10 * time.Microsecond}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 256})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 256})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
