@@ -153,6 +153,80 @@ func (t *Tree) Match(tokens []int) (node *Node, matchedLen int) {
 	return cur, matched
 }
 
+// LongestPrefix returns the longest cached token prefix of tokens together with
+// a representative node whose cached prefix covers AT LEAST that many tokens —
+// unlike Match, it counts a partially-matched final edge. Match advances only
+// over whole edges (the exact-KV-block-reuse contract: a hit length must land on
+// a stored block boundary), so a single cached sequence [1,2,3,4,5] yields
+// Match([1,2,3,9]) == 0. Cross-conversation prefix sharing needs the OTHER
+// answer: two conversations whose first cached run is one long edge still share
+// its leading tokens, and the shared KV is valid up to the divergence token even
+// though no node terminates there. LongestPrefix gives that length and a node in
+// the diverged subtree to reuse — every node under a shared ancestor holds a
+// prefix byte-identical over the shared run, so ANY of their values is a correct
+// representative for the shared span. The returned node's own prefix may be
+// longer than matchedLen; the caller reuses only the first matchedLen tokens
+// (block-aligned) of the value it carries. ok is false when nothing is cached
+// for even the first token, or the matched subtree carries no value at all.
+// Like Match it marks the walked path used (LRU), keeping a hot shared prefix
+// warm against eviction.
+//
+//	tr.Insert([]int{1, 2, 3, 4, 5}, bundleA)
+//	node, n, ok := tr.LongestPrefix([]int{1, 2, 3, 9}) // n == 3, ok, node.Value == bundleA
+func (t *Tree) LongestPrefix(tokens []int) (node *Node, matchedLen int, ok bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(tokens) == 0 {
+		return nil, 0, false
+	}
+	cur := t.root
+	cur.tick = t.nextTick()
+	matched := 0
+	for matched < len(tokens) {
+		child, has := cur.children[tokens[matched]]
+		if !has {
+			break
+		}
+		// child is keyed by tokens[matched] == child.edge[0], so the shared run
+		// is always >= 1 token; a partial run (k < len(child.edge)) is the
+		// mid-edge divergence Match discards and this method keeps.
+		k := commonPrefix(child.edge, tokens[matched:])
+		matched += k
+		cur = child
+		cur.tick = t.nextTick()
+		if k < len(child.edge) {
+			break
+		}
+	}
+	if matched == 0 {
+		return nil, 0, false
+	}
+	rep := anyValuedNode(cur)
+	if rep == nil {
+		return nil, 0, false
+	}
+	return rep, matched, true
+}
+
+// anyValuedNode returns node if it carries a value, else the first value-bearing
+// node found under it (depth-first). Every node in the subtree shares node's
+// prefix, so any of them is a valid representative for a prefix that ends within
+// node's own. Caller holds mu.
+func anyValuedNode(node *Node) *Node {
+	if node == nil {
+		return nil
+	}
+	if node.Value != nil {
+		return node
+	}
+	for _, c := range node.children {
+		if v := anyValuedNode(c); v != nil {
+			return v
+		}
+	}
+	return nil
+}
+
 // Insert adds tokens to the tree, attaching value to the node for the full key,
 // and returns that node. It reuses any existing shared prefix and SPLITS an
 // existing edge when tokens diverge mid-edge (the classic radix split: the edge
