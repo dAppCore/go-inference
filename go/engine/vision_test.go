@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	core "dappco.re/go"
@@ -380,6 +381,107 @@ func TestChatMultimodal_ArchNeutral_NonGemmaFraming(t *testing.T) {
 	if !tokenInSet(imStart, visionSess.embedIDs) {
 		t.Fatalf("multimodal prompt ids %v missing the declared ChatML <|im_start|> id %d — "+
 			"the shared multimodal path framed a non-gemma model in gemma's dialect", visionSess.embedIDs, imStart)
+	}
+}
+
+// multimodalFake composes the vision, video and audio token-model capabilities
+// over the shared fakeVisionTokenModel so chatMultimodal's video- and audio-
+// splice paths are exercised. Video/audio placeholder blocks are runs of the
+// fixture's "z" (id 42) so a block of N tokenises to exactly N placeholder ids;
+// the image placeholder id stays 0 so the image-count check no-ops on the
+// video-/audio-only turns these tests drive.
+type multimodalFake struct {
+	fakeVisionTokenModel
+	videoPlaceholderID int32
+	audioPlaceholderID int32
+	audioSoftTokens    int
+}
+
+func (f *multimodalFake) VideoPlaceholderTokenID() int32     { return f.videoPlaceholderID }
+func (f *multimodalFake) VideoPlaceholderBlock(n int) string { return strings.Repeat("z", n) }
+func (f *multimodalFake) AcceptsAudioInput() bool            { return true }
+func (f *multimodalFake) AudioPlaceholderTokenID() int32     { return f.audioPlaceholderID }
+func (f *multimodalFake) AudioPlaceholderBlock(n int) string { return strings.Repeat("z", n) }
+func (f *multimodalFake) ProjectAudio([]byte) ([]byte, int, error) {
+	return []byte{7}, f.audioSoftTokens, nil
+}
+
+var (
+	_ VideoTokenModel      = (*multimodalFake)(nil)
+	_ AudioInputTokenModel = (*multimodalFake)(nil)
+	_ VisionTokenModel     = (*multimodalFake)(nil)
+)
+
+// TestChatMultimodal_VideoTurn_Good walks the video-frame path: each frame
+// projects through the SAME vision tower, splices at the video placeholder as
+// one timestamped block per frame, and the templated placeholder run must
+// survive tokenisation exactly before the embeddings prefill.
+func TestChatMultimodal_VideoTurn_Good(t *testing.T) {
+	tok := newFixtureTokenizer(t)
+	visionSess := &fakeVisionSession{fakeSession: fakeSession{genIDs: []int32{10, 11}}}
+	fake := &multimodalFake{
+		fakeVisionTokenModel: fakeVisionTokenModel{
+			accepts:           true,
+			placeholderID:     0, // image-count check no-ops (video-only turn)
+			projectFeatures:   []byte{9},
+			projectSoftTokens: 2,
+			embedRows:         [][]byte{{0}, {1}, {2}, {3}},
+			session:           visionSess,
+		},
+		videoPlaceholderID: 42,
+	}
+	m := NewTextModel(fake, tok, "gemma-test", inference.ModelInfo{}, 4096)
+	msgs := []inference.Message{{Role: "user", Content: "describe", Videos: [][]byte{{1}, {2}}}}
+
+	var got int
+	for range m.Chat(context.Background(), msgs, inference.WithMaxTokens(2)) {
+		got++
+	}
+	if r := m.Err(); !r.OK {
+		t.Fatalf("video turn failed: %+v", r)
+	}
+	if !visionSess.prefillEmbedCalled {
+		t.Fatal("video path did not reach the token-embedding prefill")
+	}
+	if got != 2 {
+		t.Fatalf("video turn produced %d tokens, want 2", got)
+	}
+}
+
+// TestChatMultimodal_AudioTurn_Good walks the audio path: the audio head projects
+// the attachment to soft-token features, the placeholder block FOLLOWS the turn
+// text (the gemma4 audio-after-text convention), and the placeholder run is
+// verified against the tokenised prompt before the embeddings prefill.
+func TestChatMultimodal_AudioTurn_Good(t *testing.T) {
+	tok := newFixtureTokenizer(t)
+	visionSess := &fakeVisionSession{fakeSession: fakeSession{genIDs: []int32{10, 11}}}
+	fake := &multimodalFake{
+		fakeVisionTokenModel: fakeVisionTokenModel{
+			accepts:           true,
+			placeholderID:     0, // image-count check no-ops (audio-only turn)
+			projectFeatures:   []byte{9},
+			projectSoftTokens: 2,
+			embedRows:         [][]byte{{0}, {1}, {2}},
+			session:           visionSess,
+		},
+		audioPlaceholderID: 42,
+		audioSoftTokens:    2,
+	}
+	m := NewTextModel(fake, tok, "gemma-test", inference.ModelInfo{}, 4096)
+	msgs := []inference.Message{{Role: "user", Content: "transcribe", Audios: [][]byte{{1}}}}
+
+	var got int
+	for range m.Chat(context.Background(), msgs, inference.WithMaxTokens(2)) {
+		got++
+	}
+	if r := m.Err(); !r.OK {
+		t.Fatalf("audio turn failed: %+v", r)
+	}
+	if !visionSess.prefillEmbedCalled {
+		t.Fatal("audio path did not reach the token-embedding prefill")
+	}
+	if got != 2 {
+		t.Fatalf("audio turn produced %d tokens, want 2", got)
 	}
 }
 
