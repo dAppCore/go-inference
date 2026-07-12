@@ -82,6 +82,17 @@ func (a Arch) HasMoE() bool {
 // norm-topk + shared expert on the reference path).
 type MoEGating string
 
+// NormPlacement declares where a transformer's block norms sit relative to
+// attention and feed-forward sublayers. It is architecture data: executors
+// consume it rather than inferring residual order from optional weight names.
+type NormPlacement string
+
+const (
+	NormPlacementUnspecified NormPlacement = ""
+	NormPlacementPre         NormPlacement = "pre"
+	NormPlacementPost        NormPlacement = "post"
+)
+
 const (
 	// MoEGatingSoftmax: softmax over the top-k selected experts' scores (optionally
 	// scaled per-expert). gemma4's MoE and the metal router's shipping path, and the
@@ -135,6 +146,8 @@ type Arch struct {
 	MultiQueryAttention                                      bool            // one K/V head is shared by every query head
 	Activation                                               string          // declared feed-forward activation (for example gelu_new)
 	QKNormalization                                          QKNormalization // per-head Q/K normalisation before position encoding
+	NormPlacement                                            NormPlacement   // declared norm-placement strategy (OLMo generations differ)
+	NonParametricLayerNorm                                   bool            // LayerNorm has no learned scale or bias (OLMo 1)
 	Layer                                                    []LayerSpec
 }
 

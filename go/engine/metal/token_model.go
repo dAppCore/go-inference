@@ -70,8 +70,8 @@ type NativeTokenModel struct {
 	// the front-end config is absent or malformed.
 	audioExtractor *AudioFeatureExtractor
 	diffusion      *model.LoadedDiffusion
-	bf16             *BF16Model
-	quant            *QuantModel
+	bf16           *BF16Model
+	quant          *QuantModel
 	// tok is the optional text tokenizer, mirroring pkg/metal Model's held
 	// tokenizer. It is nil unless attached (AttachTokenizer): the decode model
 	// works in token-id space, so text↔ids is a serve-boundary concern the

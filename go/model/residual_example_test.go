@@ -10,3 +10,11 @@ func ExampleParallelResidual() {
 	// Output:
 	// [9 12]
 }
+
+func ExampleApplyResidualOrder() {
+	id := func(x []float32) []float32 { return x }
+	r := ApplyResidualOrder(NormPlacementPost, []float32{1, 2}, id, id, id, id)
+	core.Println(r.Value)
+	// Output:
+	// [4 8]
+}

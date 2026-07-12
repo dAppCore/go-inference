@@ -288,19 +288,35 @@ func (m *LoadedModel) ValidateRequired(arch Arch) error {
 	if m.Embed == nil {
 		return core.NewError("model.LoadedModel: missing model.embed_tokens")
 	}
-	if m.FinalNorm == nil && !arch.NoFinalNorm {
+	if m.FinalNorm == nil && !arch.NoFinalNorm && !arch.NonParametricLayerNorm {
 		return core.NewError("model.LoadedModel: missing model.norm.weight")
 	}
 	for i := range m.Layers {
 		L := &m.Layers[i]
-		if len(L.AttnNorm) == 0 || L.Q == nil || L.O == nil {
+		if L.Q == nil || L.O == nil {
 			return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing input_layernorm/q_proj/o_proj", i))
+		}
+		if arch.NormPlacement == NormPlacementPost {
+			if len(L.PostAttnNorm) == 0 {
+				return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing post_attention_layernorm", i))
+			}
+		} else if len(L.AttnNorm) == 0 && !arch.NonParametricLayerNorm {
+			return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing input_layernorm", i))
 		}
 		if arch.Layer[i].OwnsCache() && L.K == nil {
 			return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing k_proj (cache owner)", i))
 		}
-		if L.MoE == nil && (len(L.MLPNorm) == 0 || L.Gate == nil || L.Up == nil || L.Down == nil) {
-			return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing a required dense-MLP weight", i))
+		if L.MoE == nil {
+			if L.Gate == nil || L.Up == nil || L.Down == nil {
+				return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing a required dense-MLP weight", i))
+			}
+			if arch.NormPlacement == NormPlacementPost {
+				if len(L.PostFFNorm) == 0 {
+					return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing post_feedforward_layernorm", i))
+				}
+			} else if len(L.MLPNorm) == 0 && !arch.NonParametricLayerNorm {
+				return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing MLP norm", i))
+			}
 		}
 	}
 	return nil

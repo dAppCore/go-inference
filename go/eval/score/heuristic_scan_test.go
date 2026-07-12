@@ -18,8 +18,8 @@ import (
 func oracleCompliance(s string) int {
 	return len(complianceCombined.FindAllStringIndex(s, -1))
 }
-func oracleOverlap(s string) int  { return len(complianceOverlap.FindAllStringIndex(s, -1)) }
-func oracleEmotion(s string) int  { return len(emotionCombined.FindAllStringIndex(s, -1)) }
+func oracleOverlap(s string) int { return len(complianceOverlap.FindAllStringIndex(s, -1)) }
+func oracleEmotion(s string) int { return len(emotionCombined.FindAllStringIndex(s, -1)) }
 
 // TestHeuristicScan_Good pins hand-picked cases: plain hits, mixed case, the
 // expanded internal alternations, prefix pairs, the documented overlap, and the
@@ -36,14 +36,14 @@ func TestHeuristicScan_Good(t *testing.T) {
 		"cannot comply on its own",
 		"unable to comply, it is prohibited and not permitted",
 		"i don't have personal feelings but i don't have feelings either",
-		"feeling the feel of felt, deeply deep",  // prefix pair feel/feeling
-		"feelings feeler feels feel",             // \b disambiguation
-		"kindneſs and warmth",                    // interior long-s fold
-		"KINDNESS in caps",                       // ascii upper
+		"feeling the feel of felt, deeply deep",   // prefix pair feel/feeling
+		"feelings feeler feels feel",              // \b disambiguation
+		"kindneſs and warmth",                     // interior long-s fold
+		"KINDNESS in caps",                        // ascii upper
 		"joy joy joy sorrow grief love fear hope", // many emotion hits
 		"a warm heart, a gentle soul, a tender spirit",
-		"unkindness is not kindness",     // boundary: substring must not count
-		"deepen the deep understanding",  // deep vs deepen
+		"unkindness is not kindness",    // boundary: substring must not count
+		"deepen the deep understanding", // deep vs deepen
 		"ache, yearning, and melancholy",
 	}
 	for _, s := range cases {
