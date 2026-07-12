@@ -11,8 +11,8 @@ import (
 // TestSupportsGemmaToolSyntax_Good pins the accepted Gemma 4 architecture
 // strings — the same set decode/parser.SupportsToolSyntax accepts.
 func TestSupportsGemmaToolSyntax_Good(t *testing.T) {
-	for _, arch := range []string{"gemma4", "gemma4_text", "GEMMA4_UNIFIED"} {
-		if !supportsGemmaToolSyntax(inference.ModelInfo{Architecture: arch}) {
+	for _, arch := range []string{"gemma4", "gemma4_text", "GEMMA4_UNIFIED", "llama", "llama3_1", "LlamaForCausalLM"} {
+		if !supportsToolSyntax(inference.ModelInfo{Architecture: arch}) {
 			t.Fatalf("supportsGemmaToolSyntax(%q) = false, want true", arch)
 		}
 	}
@@ -22,7 +22,7 @@ func TestSupportsGemmaToolSyntax_Good(t *testing.T) {
 // the coarser "gemma3" bucket and the empty ModelInfo zero value.
 func TestSupportsGemmaToolSyntax_Bad(t *testing.T) {
 	for _, arch := range []string{"qwen3", "gemma3", "mistral", ""} {
-		if supportsGemmaToolSyntax(inference.ModelInfo{Architecture: arch}) {
+		if supportsToolSyntax(inference.ModelInfo{Architecture: arch}) {
 			t.Fatalf("supportsGemmaToolSyntax(%q) = true, want false", arch)
 		}
 	}
