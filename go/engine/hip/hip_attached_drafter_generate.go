@@ -845,6 +845,11 @@ func hipRunAttachedDrafterTargetPrefill(ctx context.Context, driver nativeHIPDri
 }
 
 func hipRunAttachedDrafterTargetPrefillBatched(ctx context.Context, driver nativeHIPDriver, req hipAttachedDrafterTargetPrefillRequest) (hipAttachedDrafterTargetPrefillResult, error) {
+	// The target prefill keeps every ubatch — including a trailing single-token
+	// ubatch — on the batched projection path so the retained decode state is
+	// built from uniform batched kernels rather than the single-row fast path.
+	forwardEngineConfig := req.EngineConfig
+	forwardEngineConfig.ForceBatchedProjection = true
 	ubatchTokens, err := req.EngineConfig.prefillUBatchTokens()
 	if err != nil {
 		return hipAttachedDrafterTargetPrefillResult{}, err
@@ -885,7 +890,7 @@ func hipRunAttachedDrafterTargetPrefillBatched(ctx context.Context, driver nativ
 			priorLayerDescriptorScratch = hipGemma4Q4DeviceLayerDescriptorTables(result.DeviceState, priorLayerDescriptorScratch, len(req.TargetForward.Layers))
 			priorLayerDescriptorTables = priorLayerDescriptorScratch
 		}
-		forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, driver, req.TargetForward, ubatch.Tokens, ubatch.Position, req.Epsilon, req.DeviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, ubatch.OutputTokens, ubatch.OutputRow, req.GreedyBuffer, req.Workspace, req.EngineConfig)
+		forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, driver, req.TargetForward, ubatch.Tokens, ubatch.Position, req.Epsilon, req.DeviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, ubatch.OutputTokens, ubatch.OutputRow, req.GreedyBuffer, req.Workspace, forwardEngineConfig)
 		if err != nil {
 			return hipAttachedDrafterTargetPrefillResult{}, err
 		}
