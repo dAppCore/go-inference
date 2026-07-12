@@ -61,6 +61,20 @@ type attnScratch struct {
 // composed declares the hook, engine/metal binds it; the lib never imports the backend.
 var AttnQKVDevice func(h, qW, kW, vW []float32, L, D, qCols, kvCols int) (q, k, v []float32, err error)
 
+// ResidualNormMLPProjAttnInputDevice is the input-side mirror of ResidualNormMLPProjDevice: given the
+// PREVIOUS layer's already-fused proj+tail inputs (identical to ResidualNormMLPProjDevice) PLUS THIS
+// layer's input RMSNorm weight and q/k/v projection weights, it computes the previous layer's tail
+// (o_proj/out_proj → residual → post-attn RMSNorm → SwiGLU → residual = y) AND this layer's RMSNorm(y) →
+// q/k/v projections, all in ONE command buffer — y never crosses the host floor before feeding this
+// layer's projections. Returns y [L,D] (the previous layer's output, needed on the host for THIS layer's
+// mixer-output residual add) plus q [L,qCols], k/v [L,kvCols] (the same shapes AttnQKVDevice returns). nil
+// — or an error — leaves the standard per-layer path in charge (see composed.forwardEmb); the session then
+// resumes this layer via attnMixer.forwardFromQKV instead of recomputing its input norm + projections.
+var ResidualNormMLPProjAttnInputDevice func(
+	mixerHidden, projW, h, normW, gate, up, down []float32, L, D, mixCols, FF int, eps float32,
+	nextNormW, nextQW, nextKW, nextVW []float32, nextQCols, nextKVCols int,
+) (y, q, k, v []float32, err error)
+
 // NewAttnMixer builds a full-attention mixer for one layer.
 func NewAttnMixer(w *AttnWeights, cfg AttnConfig) Mixer { return &attnMixer{w: w, cfg: cfg} }
 
@@ -108,20 +122,15 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 
 // forwardNoProj runs attention over hidden [L,D] up to but NOT including o_proj, returning the pre-projection
 // attention output [L,H*HD], the o_proj weight OProj [D,H*HD] and mixCols=H*HD, plus the grown cache. The
-// state advances identically to Forward; only the final projection is deferred to the caller.
+// state advances identically to Forward; only the final projection is deferred to the caller. It computes
+// its own q/k/v projections then hands off to continueFromQKV, which forwardFromQKV also feeds — the two
+// entry points differ only in HOW qRaw/k/v were produced.
 func (m *attnMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidden, projW []float32, mixCols int, next any, err error) {
 	cfg := m.cfg
-	H, KVH, HD, RD := cfg.Heads, cfg.KVHeads, cfg.HeadDim, cfg.RotaryDim
-	if H <= 0 || KVH <= 0 || HD <= 0 || H%KVH != 0 {
-		return nil, nil, 0, nil, core.NewError("composed.attnMixer: bad geometry")
-	}
-	theta := float64(cfg.RopeTheta)
-	if theta == 0 {
-		theta = 1e6
-	}
-	qCols := H * HD
+	H, KVH := cfg.Heads, cfg.KVHeads
+	qCols := H * cfg.HeadDim
 	if cfg.OutputGate {
-		qCols = 2 * H * HD // q_proj emits [q ; gate] per head
+		qCols = 2 * H * cfg.HeadDim // q_proj emits [q ; gate] per head
 	}
 	if len(m.w.QProj) != qCols*D {
 		return nil, nil, 0, nil, core.NewError("composed.attnMixer: q_proj size mismatch (OutputGate?)")
@@ -134,9 +143,6 @@ func (m *attnMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidden
 	if sc == nil {
 		sc = &attnScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
 	}
-	pos0 := st.n
-	scale := 1.0 / math.Sqrt(float64(HD))
-	rep := H / KVH
 
 	// q/k/v all read the hidden h [L,D]. When the backend supplies the fused hook and the q projection
 	// crosses the device floor, q_raw/k/v are computed in ONE command buffer (k/v ride free — sub-floor
@@ -145,7 +151,7 @@ func (m *attnMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidden
 	var qRaw, k, v []float32
 	qkvFused := false
 	if AttnQKVDevice != nil && L*D*qCols >= deviceMinWork {
-		if fq, fk, fv, ferr := AttnQKVDevice(h, m.w.QProj, m.w.KProj, m.w.VProj, L, D, qCols, KVH*HD); ferr == nil {
+		if fq, fk, fv, ferr := AttnQKVDevice(h, m.w.QProj, m.w.KProj, m.w.VProj, L, D, qCols, KVH*cfg.HeadDim); ferr == nil {
 			qRaw, k, v = fq, fk, fv
 			qkvFused = true
 		}
@@ -153,11 +159,48 @@ func (m *attnMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidden
 	if !qkvFused {
 		sc.qRaw = matNTInto(sc.qRaw, h, m.w.QProj, L, D, qCols) // [L, qCols]
 		qRaw = sc.qRaw
-		sc.k = matNTInto(sc.k, h, m.w.KProj, L, D, KVH*HD) // [L, KVH*HD]
+		sc.k = matNTInto(sc.k, h, m.w.KProj, L, D, KVH*cfg.HeadDim) // [L, KVH*HD]
 		k = sc.k
-		sc.v = matNTInto(sc.v, h, m.w.VProj, L, D, KVH*HD) // [L, KVH*HD]
+		sc.v = matNTInto(sc.v, h, m.w.VProj, L, D, KVH*cfg.HeadDim) // [L, KVH*HD]
 		v = sc.v
 	}
+	return m.continueFromQKV(qRaw, k, v, L, D, st, sc)
+}
+
+// forwardFromQKV resumes attention from ALREADY-COMPUTED q/k/v projections — e.g. supplied by
+// ResidualNormMLPProjAttnInputDevice, which folds the PREVIOUS layer's tail + THIS layer's input RMSNorm +
+// q/k/v projections into one command buffer — skipping this mixer's own input norm and projection step
+// entirely. State threading is identical to forwardNoProj (prior in, next out); the caller is responsible
+// for having applied this layer's input RMSNorm before computing qRaw/k/v (the fused device op does this
+// on device) and for qRaw/k/v matching m.w.QProj/KProj/VProj's shapes exactly.
+func (m *attnMixer) forwardFromQKV(qRaw, k, v []float32, L, D int, prior any) (mixerHidden, projW []float32, mixCols int, next any, err error) {
+	var st attnState
+	if p, ok := prior.(attnState); ok {
+		st = p
+	}
+	sc := st.sc
+	if sc == nil {
+		sc = &attnScratch{}
+	}
+	return m.continueFromQKV(qRaw, k, v, L, D, st, sc)
+}
+
+// continueFromQKV is the shared attention math from q/k/v projections onward: de-interleave the
+// output-gate (if configured), per-head QK-norm + partial rotary, grow the KV cache, causal softmax
+// attention and the output-gate multiply. Both forwardNoProj and forwardFromQKV feed it.
+func (m *attnMixer) continueFromQKV(qRaw, k, v []float32, L, D int, st attnState, sc *attnScratch) (mixerHidden, projW []float32, mixCols int, next any, err error) {
+	cfg := m.cfg
+	H, KVH, HD, RD := cfg.Heads, cfg.KVHeads, cfg.HeadDim, cfg.RotaryDim
+	if H <= 0 || KVH <= 0 || HD <= 0 || H%KVH != 0 {
+		return nil, nil, 0, nil, core.NewError("composed.attnMixer: bad geometry")
+	}
+	theta := float64(cfg.RopeTheta)
+	if theta == 0 {
+		theta = 1e6
+	}
+	pos0 := st.n
+	scale := 1.0 / math.Sqrt(float64(HD))
+	rep := H / KVH
 
 	// q_proj raw → per-head q [L,H*HD] and (gated) the σ-gate [L,H*HD] ([q_h ; gate_h] within each head's
 	// 2·HD block, per the transformers qwen3_5 chunk).

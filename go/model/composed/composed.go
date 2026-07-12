@@ -228,49 +228,133 @@ func NewSession(m *ComposedModel) *ComposedSession {
 	return &ComposedSession{m: m, states: make([]any, len(m.Layers))}
 }
 
+// pendingAttnQKV carries a NEXT layer's ALREADY-COMPUTED input RMSNorm + q/k/v projections, folded into
+// the PREVIOUS layer's proj-fused tail command buffer by ResidualNormMLPProjAttnInputDevice — the
+// input-side mirror of the o_proj fuse. The layer at that index resumes via attnMixer.forwardFromQKV
+// instead of recomputing its input norm + projections.
+type pendingAttnQKV struct{ q, k, v []float32 }
+
+// pendingGatedDeltaInput is pendingAttnQKV's gated-delta counterpart — set by
+// ResidualNormMLPProjGatedDeltaInputDevice; the layer resumes via gatedDeltaMixer.forwardFromInput.
+type pendingGatedDeltaInput struct{ qkv, z, a, b []float32 }
+
 // forwardEmb runs L input embeddings [L,D] through the stack, advancing each layer's mixer state, and
 // returns the output hiddens [L,D]. Serves both prefill (L>1) and decode (L=1).
 func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 	D, eps := s.m.D, s.m.Eps
+
+	// pendingAttn / pendingGD carry a NEXT layer's already-computed input RMSNorm + input projections —
+	// folded into the PREVIOUS layer's proj-fused tail command buffer, the symmetric collapse to the
+	// o_proj fuse below. At most one is ever set (a layer has exactly one mixer kind); both nil ⇒ this
+	// layer computes its input norm + projections fresh (always true for layer 0 — no predecessor tail).
+	var pendingAttn *pendingAttnQKV
+	var pendingGD *pendingGatedDeltaInput
+
 	for li := range s.m.Layers {
 		layer := &s.m.Layers[li]
-		normed := rmsNormRowsPlain(h, layer.InputNorm, L, D, eps)
 
-		// Projection-fused tail: when the mixer can defer its final output projection (attn o_proj /
-		// gated-delta out_proj) AND the FFN is a dense MLP above the device floor, that projection rides
-		// the FFN-tail command buffer — o_proj → (h+mixOut) → post-attn RMSNorm → SwiGLU → (+mlpOut) in ONE
-		// CB, collapsing the standalone projection CB the mixer would otherwise commit per layer. The
-		// projection rides free whatever its own size (the tail CB is already paid for). forwardNoProj
-		// advances the mixer state; a nil hook / MoE / sub-floor MLP skips this and runs the standard
-		// Forward → tail path below.
-		if pm, isProj := layer.Mixer.(projMixer); isProj {
+		// Resolve this layer's (mixerHidden, projW, mixCols, next-state): either resume from a pending
+		// input-fuse (skipping this layer's own RMSNorm + projection step — both mixer kinds implement
+		// projMixer, so a pending resume always lands here) or run the mixer's forwardNoProj off a
+		// freshly-computed input RMSNorm.
+		var mixerHidden, projW []float32
+		var mixCols int
+		var next any
+		var err error
+		isProj := false
+
+		switch {
+		case pendingAttn != nil:
+			p := pendingAttn
+			pendingAttn = nil
+			am := layer.Mixer.(*attnMixer) // guaranteed: only ever set for an *attnMixer next layer
+			mixerHidden, projW, mixCols, next, err = am.forwardFromQKV(p.q, p.k, p.v, L, D, s.states[li])
+			isProj = true
+		case pendingGD != nil:
+			p := pendingGD
+			pendingGD = nil
+			gm := layer.Mixer.(*gatedDeltaMixer) // guaranteed: only ever set for a *gatedDeltaMixer next layer
+			mixerHidden, projW, mixCols, next, err = gm.forwardFromInput(p.qkv, p.z, p.a, p.b, L, D, s.states[li])
+			isProj = true
+		default:
+			if pm, ok := layer.Mixer.(projMixer); ok {
+				normed := rmsNormRowsPlain(h, layer.InputNorm, L, D, eps)
+				mixerHidden, projW, mixCols, next, err = pm.forwardNoProj(normed, L, D, s.states[li])
+				isProj = true
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		if isProj {
+			s.states[li] = next
 			if mlp, isDense := layer.MLP.(*MLP); isDense && ResidualNormMLPProjDevice != nil && L*D*mlp.FF >= deviceMinWork {
-				mixerHidden, projW, mixCols, next, err := pm.forwardNoProj(normed, L, D, s.states[li])
-				if err != nil {
-					return nil, err
+				// Input-fuse: when the NEXT layer exists and is itself a full-attention or gated-delta
+				// mixer, fold its input RMSNorm + input projections onto the BACK of this layer's
+				// proj+tail command buffer — the symmetric collapse to the o_proj fuse. y never crosses
+				// the host floor before feeding the next layer's projections; only y and the projections
+				// do. The projections ride free whatever their own size (the tail CB is already paid
+				// for); a nil hook, an unmatched next-mixer kind, the last layer, or a device error all
+				// fall through to the plain proj-fused tail below.
+				if li+1 < len(s.m.Layers) {
+					nextLayer := &s.m.Layers[li+1]
+					switch nm := nextLayer.Mixer.(type) {
+					case *attnMixer:
+						if ResidualNormMLPProjAttnInputDevice != nil {
+							qCols := nm.cfg.Heads * nm.cfg.HeadDim
+							if nm.cfg.OutputGate {
+								qCols *= 2
+							}
+							kvCols := nm.cfg.KVHeads * nm.cfg.HeadDim
+							if y, q, k, v, ferr := ResidualNormMLPProjAttnInputDevice(
+								mixerHidden, projW, h, layer.PostAttnNorm, mlp.Gate, mlp.Up, mlp.Down, L, D, mixCols, mlp.FF, eps,
+								nextLayer.InputNorm, nm.w.QProj, nm.w.KProj, nm.w.VProj, qCols, kvCols,
+							); ferr == nil {
+								h = y
+								pendingAttn = &pendingAttnQKV{q: q, k: k, v: v}
+								continue
+							}
+						}
+					case *gatedDeltaMixer:
+						if ResidualNormMLPProjGatedDeltaInputDevice != nil {
+							convDim, vDim, VH := nm.cfg.ConvDim(), nm.cfg.VDim(), nm.cfg.ValueHeads
+							if y, qkv, z, a, b, ferr := ResidualNormMLPProjGatedDeltaInputDevice(
+								mixerHidden, projW, h, layer.PostAttnNorm, mlp.Gate, mlp.Up, mlp.Down, L, D, mixCols, mlp.FF, eps,
+								nextLayer.InputNorm, nm.w.InProjQKV, nm.w.InProjZ, nm.w.InProjA, nm.w.InProjB, convDim, vDim, VH,
+							); ferr == nil {
+								h = y
+								pendingGD = &pendingGatedDeltaInput{qkv: qkv, z: z, a: a, b: b}
+								continue
+							}
+						}
+					}
 				}
-				s.states[li] = next
+				// Plain proj-fused tail (no next-input fuse applies): o_proj/out_proj → residual →
+				// post-attn RMSNorm → SwiGLU → residual, in one command buffer.
 				if y, ferr := ResidualNormMLPProjDevice(mixerHidden, projW, h, layer.PostAttnNorm, mlp.Gate, mlp.Up, mlp.Down, L, D, mixCols, mlp.FF, eps); ferr == nil {
 					h = y
 					continue
 				}
-				// Fused proj-tail errored (missing kernel / OOM): the mixer state has already advanced, so
-				// complete on the host from the returned pre-projection hidden (NO second mixer call — the
-				// state must not double-advance): run the projection, then the standard tail selection.
-				mixOut := matNT(mixerHidden, projW, L, mixCols, D)
-				if ResidualNormMLPDevice != nil {
-					if y, err := ResidualNormMLPDevice(h, mixOut, layer.PostAttnNorm, mlp.Gate, mlp.Up, mlp.Down, L, D, mlp.FF, eps); err == nil {
-						h = y
-						continue
-					}
-				}
-				h = tailHost(h, mixOut, layer.PostAttnNorm, mlp, L, D, eps)
-				continue
 			}
+			// Fallback — covers a failed proj-fused tail attempt above AND a projMixer layer whose MLP
+			// isn't dense/above-floor (including one reached via a pending resume): complete the mixer's
+			// own projection on the host, then the plain device tail-fuse, else host tail.
+			mixOut := matNT(mixerHidden, projW, L, mixCols, D)
+			if mlp, ok := layer.MLP.(*MLP); ok && ResidualNormMLPDevice != nil && L*D*mlp.FF >= deviceMinWork {
+				if y, err := ResidualNormMLPDevice(h, mixOut, layer.PostAttnNorm, mlp.Gate, mlp.Up, mlp.Down, L, D, mlp.FF, eps); err == nil {
+					h = y
+					continue
+				}
+			}
+			h = tailHost(h, mixOut, layer.PostAttnNorm, layer.MLP, L, D, eps)
+			continue
 		}
 
-		// Standard path: the mixer owns its final projection; the FFN tail fuses on its own device CB
-		// (h += mixOut → RMSNorm → SwiGLU → h += mlpOut) for a dense MLP above the floor, else host.
+		// Standard path: the mixer doesn't implement projMixer at all — it owns its final projection
+		// outright; the FFN tail fuses on its own device CB (h += mixOut → RMSNorm → SwiGLU → h += mlpOut)
+		// for a dense MLP above the floor, else host.
+		normed := rmsNormRowsPlain(h, layer.InputNorm, L, D, eps)
 		mixOut, next, err := layer.Mixer.Forward(normed, L, D, s.states[li])
 		if err != nil {
 			return nil, err
