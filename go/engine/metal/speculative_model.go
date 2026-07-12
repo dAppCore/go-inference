@@ -26,9 +26,11 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/decode/dflash"
 	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/model"
+	coreio "dappco.re/go/io"
 )
 
 // speculativeModel adapts a target ArchSession + drafter AssistantPair to
@@ -40,6 +42,7 @@ import (
 type speculativeModel struct {
 	target     *ArchSession
 	pair       *AssistantPair
+	dflash     *DFlashDrafter
 	tok        *tokenizer.Tokenizer
 	info       inference.ModelInfo
 	modelType  string
@@ -82,6 +85,27 @@ func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...i
 		_ = target.Close()
 		return nil, core.E("native.LoadSpeculativePair", "attach drafter", err)
 	}
+	var dflashDrafter *DFlashDrafter
+	if pair.Method() == model.MTPDFlash {
+		cfgJSON, readErr := coreio.Local.Read(core.PathJoin(draftPath, "config.json"))
+		if readErr != nil {
+			_ = target.Close()
+			_ = pair.Close()
+			return nil, core.E("native.LoadSpeculativePair", "read DFlash config", readErr)
+		}
+		cfg, ok := dflash.ParseConfig([]byte(cfgJSON))
+		if !ok {
+			_ = target.Close()
+			_ = pair.Close()
+			return nil, core.NewError("native.LoadSpeculativePair: DFlash method has no DFlash config")
+		}
+		dflashDrafter, err = newDFlashDrafter(pair.Assistant, cfg)
+		if err != nil {
+			_ = target.Close()
+			_ = pair.Close()
+			return nil, core.E("native.LoadSpeculativePair", "attach DFlash drafter", err)
+		}
+	}
 	tok, err := tokenizer.LoadTokenizer(core.PathJoin(targetPath, "tokenizer.json"))
 	if err != nil {
 		_ = target.Close()
@@ -95,6 +119,7 @@ func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...i
 	return &speculativeModel{
 		target:        target,
 		pair:          pair,
+		dflash:        dflashDrafter,
 		tok:           tok,
 		modelType:     modelType,
 		draftBlock:    draftBlock,
@@ -183,17 +208,113 @@ func (m *speculativeModel) speculate(ctx context.Context, ids []int32, cfg infer
 			res  AssistantGenerateResult
 			gerr error
 		)
-		if cfg.Temperature > 0 || cfg.MinP > 0 || cfg.RepeatPenalty > 1 {
-			// The sampled verify lane: the target's sampler decides every committed
-			// token (drafts only affect acceptance), so a temp>0 request through
-			// the pair is a true sampled generation — not a silent greedy decode.
-			res, gerr = m.pair.GenerateSampledFromSessionEach(m.target, ids, maxNew, stop,
-				model.NewSampler(cfg.Seed), speculativeSampleParams(cfg), m.draftBlock, sink)
-		} else {
-			res, gerr = m.pair.GenerateFromSessionEach(m.target, ids, maxNew, int(eos), m.draftBlock, cfg.SuppressTokens, sink)
+		mtp := func() (AssistantGenerateResult, error) {
+			if cfg.Temperature > 0 || cfg.MinP > 0 || cfg.RepeatPenalty > 1 {
+				// The sampled verify lane: the target's sampler decides every committed
+				// token (drafts only affect acceptance), so a temp>0 request through
+				// the pair is a true sampled generation — not a silent greedy decode.
+				return m.pair.GenerateSampledFromSessionEach(m.target, ids, maxNew, stop,
+					model.NewSampler(cfg.Seed), speculativeSampleParams(cfg), m.draftBlock, sink)
+			}
+			return m.pair.GenerateFromSessionEach(m.target, ids, maxNew, int(eos), m.draftBlock, cfg.SuppressTokens, sink)
 		}
+		res, gerr = speculativeMethodRoute(m.pair, mtp, func() (AssistantGenerateResult, error) {
+			return m.generateDFlash(ids, maxNew, stop, cfg.SuppressTokens, sink)
+		})
 		m.record(res, len(ids), time.Since(start), gerr)
 	}
+}
+
+// speculativeMethodRoute is the serving decode switch. Keeping the switch
+// independent of either engine loop lets scripted-engine tests prove that the
+// pair's declared method, rather than checkpoint naming or caller state, is the
+// sole routing input.
+func speculativeMethodRoute(pair *AssistantPair, mtp, dfl func() (AssistantGenerateResult, error)) (AssistantGenerateResult, error) {
+	if pair != nil && pair.Method() == model.MTPDFlash {
+		return dfl()
+	}
+	return mtp()
+}
+
+// generateDFlash drives the block-diffusion proposer through the model-free,
+// lossless DFlash verifier. Until the live aux tap lands, both the aux source and
+// target oracle deliberately replay the full prefix. That is slower, but it does
+// not depend on or corrupt an incremental serving cache and makes the routing
+// complete behind the still-false serving probe.
+func (m *speculativeModel) generateDFlash(ids []int32, maxNew int, stop, suppress []int32, sink AssistantTokenSink) (AssistantGenerateResult, error) {
+	if m.dflash == nil {
+		return AssistantGenerateResult{}, core.NewError("native.speculativeModel: DFlash pair has no DFlash drafter")
+	}
+	prompt := speculativeInts(ids)
+	var runErr error
+	proposer := NewDFlashProposer(m.dflash, func(context []int) ([][]byte, []byte, int, bool) {
+		prefix := speculativeInt32s(context)
+		aux, err := ExtractAuxHiddens(m.target, prefix, m.dflash.AuxLayers())
+		if err != nil {
+			runErr = core.E("native.speculativeModel.DFlash", "extract aux hiddens", err)
+			return nil, nil, 0, false
+		}
+		anchor, err := m.target.embedID(prefix[len(prefix)-1])
+		if err != nil {
+			runErr = core.E("native.speculativeModel.DFlash", "embed anchor", err)
+			return nil, nil, 0, false
+		}
+		return aux, append([]byte(nil), anchor...), len(prefix) - 1, true
+	})
+	next := func(prefix []int) int {
+		if runErr != nil {
+			return 0
+		}
+		if err := m.target.PrefillTokens(speculativeInt32s(prefix)); err != nil {
+			runErr = core.E("native.speculativeModel.DFlash", "prefill verifier", err)
+			return 0
+		}
+		logits, err := m.target.BoundaryLogits()
+		if err != nil {
+			runErr = core.E("native.speculativeModel.DFlash", "read verifier logits", err)
+			return 0
+		}
+		id, err := greedyBF16Suppressed(logits, m.target.arch.Vocab, suppress)
+		if err != nil {
+			runErr = core.E("native.speculativeModel.DFlash", "select verifier token", err)
+			return 0
+		}
+		return int(id)
+	}
+	tokens, stats := dflash.Generate(prompt, maxNew, proposer, next)
+	res := AssistantGenerateResult{
+		Tokens:            make([]int32, 0, len(tokens)),
+		DraftTokens:       stats.ProposedTokens,
+		AcceptedTokens:    stats.AcceptedTokens,
+		RejectedTokens:    stats.ProposedTokens - stats.AcceptedTokens,
+		TargetVerifyCalls: stats.Rounds,
+		TargetCalls:       stats.TargetCalls,
+		DraftCalls:        stats.Rounds,
+	}
+	for _, token := range tokens {
+		id := int32(token)
+		res.Tokens = append(res.Tokens, id)
+		if runErr != nil || (sink != nil && !sink(id)) || speculativeTokenInSet(id, stop) {
+			break
+		}
+	}
+	return res, runErr
+}
+
+func speculativeInts(ids []int32) []int {
+	out := make([]int, len(ids))
+	for i, id := range ids {
+		out[i] = int(id)
+	}
+	return out
+}
+
+func speculativeInt32s(ids []int) []int32 {
+	out := make([]int32, len(ids))
+	for i, id := range ids {
+		out[i] = int32(id)
+	}
+	return out
 }
 
 // record folds one speculative run's counters into the metric surfaces the
