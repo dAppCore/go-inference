@@ -62,6 +62,9 @@ type ComposedModel struct {
 	LayerNorm        bool
 	ParallelResidual bool
 	LogitScale       float32
+	EmbedScale       float32
+	LogitsScaling    float32
+	ResidualScale    float32
 }
 
 func silu(v float64) float64 { return v / (1 + math.Exp(-v)) }
@@ -324,8 +327,9 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 			}
 			s.states[li] = next
 			mlpOut := layer.MLP.forward(normed, L, D)
+			scale := s.m.residualScale()
 			for i := range h {
-				h[i] += mixOut[i] + mlpOut[i]
+				h[i] += scale * (mixOut[i] + mlpOut[i])
 			}
 			continue
 		}
@@ -480,7 +484,7 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 					continue
 				}
 			}
-			h = tailHost(h, mixOut, layer.PostAttnNorm, layer.MLP, L, D, eps)
+			h = tailHost(h, mixOut, layer.PostAttnNorm, layer.MLP, L, D, eps, s.m.residualScale())
 			continue
 		}
 
@@ -499,7 +503,7 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 				continue
 			}
 		}
-		h = tailHost(h, mixOut, layer.PostAttnNorm, layer.MLP, L, D, eps)
+		h = tailHost(h, mixOut, layer.PostAttnNorm, layer.MLP, L, D, eps, s.m.residualScale())
 	}
 	return h, nil
 }
@@ -508,16 +512,23 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 // (dense SwiGLU or MoE) and the MLP residual add — returning the new hidden. It is the shared fallback for
 // both the projection-fused and standard paths when the device tail hook is nil or errors; a MoE FFN always
 // lands here (no fused-MLP device kernel).
-func tailHost(h, mixOut, normW []float32, ffn FFN, L, D int, eps float32) []float32 {
+func tailHost(h, mixOut, normW []float32, ffn FFN, L, D int, eps, residualScale float32) []float32 {
 	for i := range h {
-		h[i] += mixOut[i] // mixer residual
+		h[i] += residualScale * mixOut[i] // mixer residual
 	}
 	normed := rmsNormRowsPlain(h, normW, L, D, eps)
 	mlpOut := ffn.forward(normed, L, D)
 	for i := range h {
-		h[i] += mlpOut[i] // MLP residual
+		h[i] += residualScale * mlpOut[i] // MLP residual
 	}
 	return h
+}
+
+func (m *ComposedModel) residualScale() float32 {
+	if m.ResidualScale == 0 {
+		return 1
+	}
+	return m.ResidualScale
 }
 
 // forward embeds tokens then runs the stack.
@@ -529,6 +540,11 @@ func (s *ComposedSession) forward(tokens []int32) ([]float32, error) {
 			return nil, core.NewError("composed.forward: token out of range")
 		}
 		copy(h[t*D:(t+1)*D], s.m.Embed[int(tok)*D:int(tok)*D+D])
+		if s.m.EmbedScale != 0 && s.m.EmbedScale != 1 {
+			for i := t * D; i < (t+1)*D; i++ {
+				h[i] *= s.m.EmbedScale
+			}
+		}
 	}
 	return s.forwardEmb(h, L)
 }
@@ -547,6 +563,11 @@ func (s *ComposedSession) headLogits(hidden []float32) []float32 {
 	if s.m.LogitScale != 0 {
 		for i := range logits {
 			logits[i] *= s.m.LogitScale
+		}
+	}
+	if s.m.LogitsScaling != 0 && s.m.LogitsScaling != 1 {
+		for i := range logits {
+			logits[i] /= s.m.LogitsScaling
 		}
 	}
 	return logits
