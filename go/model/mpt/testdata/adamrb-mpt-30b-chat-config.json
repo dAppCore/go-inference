@@ -1,0 +1,1 @@
+{"model_type":"mpt","d_model":7168,"n_heads":64,"n_layers":48,"expansion_ratio":4,"max_seq_len":8192,"vocab_size":50432,"attn_config":{"alibi":true},"learned_pos_emb":true,"embedding_fraction":1.0,"norm_type":"low_precision_layernorm","no_bias":true}

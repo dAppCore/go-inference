@@ -1,0 +1,1 @@
+{"model_type":"stablelm","hidden_size":5120,"intermediate_size":13824,"num_hidden_layers":40,"num_attention_heads":32,"num_key_value_heads":8,"partial_rotary_factor":0.25,"rope_theta":10000,"layer_norm_eps":0.00001,"hidden_act":"silu","qk_layernorm":true,"use_parallel_residual":true,"tie_word_embeddings":false,"vocab_size":100352}

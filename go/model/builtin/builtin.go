@@ -63,6 +63,7 @@ import (
 	_ "dappco.re/go/inference/model/mixtral"    // mixtral sparse MoE
 	_ "dappco.re/go/inference/model/mixtral"    // mixtral sparse MoE
 	_ "dappco.re/go/inference/model/mixtral"    // mixtral sparse MoE
+	_ "dappco.re/go/inference/model/mpt"        // MPT ALiBi / learned-position decoder
 	_ "dappco.re/go/inference/model/olmo"       // OLMo / OLMo 2
 	_ "dappco.re/go/inference/model/opt"        // OPT learned-position transformer
 	_ "dappco.re/go/inference/model/phi"        // phi / phi3
@@ -74,5 +75,7 @@ import (
 	_ "dappco.re/go/inference/model/qwen3"      // qwen3
 	_ "dappco.re/go/inference/model/qwen3"      // qwen3
 	_ "dappco.re/go/inference/model/qwen3"      // qwen3
+	_ "dappco.re/go/inference/model/smollm3"    // SmolLM3 GQA / NoPE decoder
+	_ "dappco.re/go/inference/model/stablelm"   // StableLM partial-RoPE decoder
 	_ "dappco.re/go/inference/model/starcoder2" // starcoder2
 )
