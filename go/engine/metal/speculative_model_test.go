@@ -9,6 +9,7 @@ import (
 
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/engine"
+	"dappco.re/go/inference/model"
 )
 
 // TestSpeculativeChatFraming pins that the speculative model frames its chat
@@ -37,6 +38,52 @@ func TestSpeculativeChatFraming(t *testing.T) {
 		"<start_of_turn>model\n"
 	if multi != wantMulti {
 		t.Fatalf("legacy multi-turn framing = %q, want %q", multi, wantMulti)
+	}
+}
+
+// TestDFlashSpeculativeMethodRoute proves a DFlash-stamped pair selects the
+// block-diffusion driver and never enters the legacy MTP loop.
+func TestDFlashSpeculativeMethodRoute(t *testing.T) {
+	pair := &AssistantPair{Assistant: &AssistantModel{Config: model.AssistantConfig{Method: model.MTPDFlash}}}
+	mtpCalls, dflashCalls := 0, 0
+	got, err := speculativeMethodRoute(pair,
+		func() (AssistantGenerateResult, error) {
+			mtpCalls++
+			return AssistantGenerateResult{Tokens: []int32{1}}, nil
+		},
+		func() (AssistantGenerateResult, error) {
+			dflashCalls++
+			return AssistantGenerateResult{Tokens: []int32{2}}, nil
+		})
+	if err != nil {
+		t.Fatalf("speculativeMethodRoute: %v", err)
+	}
+	if mtpCalls != 0 || dflashCalls != 1 || len(got.Tokens) != 1 || got.Tokens[0] != 2 {
+		t.Fatalf("DFlash route: mtp=%d dflash=%d tokens=%v", mtpCalls, dflashCalls, got.Tokens)
+	}
+}
+
+// TestDFlashSpeculativeMethodRouteKeepsMTP pins the pre-existing MTP behaviour:
+// explicit MTP and the historical unstamped default both select only that loop.
+func TestDFlashSpeculativeMethodRouteKeepsMTP(t *testing.T) {
+	for _, method := range []model.MTPMethod{model.MTPDraftModel, ""} {
+		pair := &AssistantPair{Assistant: &AssistantModel{Config: model.AssistantConfig{Method: method}}}
+		mtpCalls, dflashCalls := 0, 0
+		got, err := speculativeMethodRoute(pair,
+			func() (AssistantGenerateResult, error) {
+				mtpCalls++
+				return AssistantGenerateResult{Tokens: []int32{7}}, nil
+			},
+			func() (AssistantGenerateResult, error) {
+				dflashCalls++
+				return AssistantGenerateResult{Tokens: []int32{9}}, nil
+			})
+		if err != nil {
+			t.Fatalf("method %q: %v", method, err)
+		}
+		if mtpCalls != 1 || dflashCalls != 0 || len(got.Tokens) != 1 || got.Tokens[0] != 7 {
+			t.Fatalf("method %q route: mtp=%d dflash=%d tokens=%v", method, mtpCalls, dflashCalls, got.Tokens)
+		}
 	}
 }
 
