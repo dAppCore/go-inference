@@ -35,7 +35,7 @@ type Manager struct {
 // defaults to Lethean's own port.
 //
 //	m := serve.NewManager("", ":36911")
-//	m.Start("/models/gemma-4-e2b-it-4bit")
+//	m.Start("/models/gemma-4-e2b-it-4bit", "/models/bge-small", "batch")
 //	defer m.Stop()
 func NewManager(binary, addr string) *Manager {
 	if binary == "" {
@@ -50,10 +50,11 @@ func NewManager(binary, addr string) *Manager {
 // Addr returns the listen address the manager spawns serve on.
 func (m *Manager) Addr() string { return m.addr }
 
-// Start spawns `lem serve --addr <addr>` (with `--model <modelPath>` when
-// modelPath is non-empty) in the background and returns immediately. It is an
-// idempotent no-op returning OK when this manager already owns a live process.
-func (m *Manager) Start(modelPath string) core.Result {
+// Start spawns `lem serve --addr <addr>` with optional chat model, embeddings
+// model and scheduler flags. Empty option values leave their corresponding CLI
+// flags absent; in particular an empty scheduler keeps scheduling off. Start is
+// an idempotent no-op returning OK when this manager already owns a live process.
+func (m *Manager) Start(modelPath, embedModelPath, scheduler string) core.Result {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -64,6 +65,12 @@ func (m *Manager) Start(modelPath string) core.Result {
 	args := []string{"serve", "--addr", m.addr}
 	if modelPath != "" {
 		args = append(args, "--model", modelPath)
+	}
+	if embedModelPath != "" {
+		args = append(args, "--embed-model", embedModelPath)
+	}
+	if scheduler != "" {
+		args = append(args, "--scheduler", scheduler)
 	}
 	cmd := execabs.Command(m.binary, args...)
 	if err := cmd.Start(); err != nil {

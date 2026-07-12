@@ -211,6 +211,7 @@ func setupSystemTray(app *application.App, tray *TrayService, dashboard *Dashboa
 	// ── Serve (lem serve — the OpenAI / Anthropic / Ollama HTTP host) ──
 	serveStatusItem := trayMenu.Add(serveStatusLabel(serveSvc.GetSnapshot()))
 	serveStatusItem.SetEnabled(false)
+	var serveModelPath, embedModelPath, schedulerMode string
 
 	serveToggleItem := trayMenu.Add(serveToggleLabel(serveSvc.GetSnapshot()))
 	serveToggleItem.OnClick(func(ctx *application.Context) {
@@ -218,7 +219,7 @@ func setupSystemTray(app *application.App, tray *TrayService, dashboard *Dashboa
 		if snap.Up || snap.Managed {
 			serveSvc.Stop()
 		} else {
-			serveSvc.Start("")
+			serveSvc.Start(serveModelPath, embedModelPath, schedulerMode)
 		}
 		serveToggleItem.SetLabel(serveToggleLabel(serveSvc.GetSnapshot()))
 	})
@@ -235,9 +236,41 @@ func setupSystemTray(app *application.App, tray *TrayService, dashboard *Dashboa
 				label += "  (" + model.Type + ")"
 			}
 			serveModelsMenu.Add(label).OnClick(func(ctx *application.Context) {
-				serveSvc.Start(model.Path)
+				serveModelPath = model.Path
+				serveSvc.Start(serveModelPath, embedModelPath, schedulerMode)
 			})
 		}
+	}
+
+	// Embeddings picker — optional and independent of the chat model. Selecting
+	// a path arms the next start; Off omits -embed-model entirely.
+	embedModelsMenu := trayMenu.AddSubmenu("Embeddings Model")
+	embedModelsMenu.AddRadio("Off", true).OnClick(func(ctx *application.Context) {
+		embedModelPath = ""
+	})
+	for _, m := range serveSvc.ListModels() {
+		model := m
+		embedModelsMenu.AddRadio(model.Name, false).OnClick(func(ctx *application.Context) {
+			embedModelPath = model.Path
+		})
+	}
+
+	// Scheduler selection is additive and takes effect on the next managed
+	// start. Off is the default and preserves the pre-scheduler launch path.
+	schedulerMenu := trayMenu.AddSubmenu("Scheduler")
+	for _, option := range []struct {
+		label string
+		mode  string
+	}{
+		{label: "Off", mode: ""},
+		{label: "Serial", mode: "serial"},
+		{label: "Batch", mode: "batch"},
+		{label: "Interleave", mode: "interleave"},
+	} {
+		selection := option
+		schedulerMenu.AddRadio(selection.label, selection.mode == "").OnClick(func(ctx *application.Context) {
+			schedulerMode = selection.mode
+		})
 	}
 
 	trayMenu.AddSeparator()
