@@ -3,7 +3,7 @@
 `gui/` is the **LEM Desktop** application — a system-tray app for driving and
 watching local training and inference. It is a **side app**: its own module,
 `dappco.re/go/inference/gui`, distinct from the main `dappco.re/go/inference`
-module. It is built on **Wails v3** (`v3.0.0-alpha.71`) and, per its package doc,
+module. It is built on **Wails v3** (`v3.0.0-alpha.96`) and, per its package doc,
 ships as a signed native macOS binary (Lethean CIC), a Linux AppImage, and a
 Windows installer.
 
