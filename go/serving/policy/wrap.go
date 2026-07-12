@@ -136,3 +136,13 @@ func (m *policyTextModel) AcceptsAudio() bool {
 	a, ok := m.TextModel.(inference.AudioModel)
 	return ok && a.AcceptsAudio()
 }
+
+// Unwrap exposes the wrapped model so the serving layer can reach optional
+// capabilities this guard does not itself re-expose (embeddings, rerank). The
+// policy guard enforces the outbound text stream; an embedding call produces no
+// text to police, so serving it through the base model is correct. Without
+// this, a policy-wrapped embedder is stripped of its EmbeddingModel/RerankModel
+// interface at the /v1/embeddings and /v1/rerank capability gate.
+func (m *policyTextModel) Unwrap() inference.TextModel {
+	return m.TextModel
+}

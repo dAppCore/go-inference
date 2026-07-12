@@ -197,8 +197,8 @@ func TestOpenAI_ServiceHandlers_Bad_UnsupportedInterface(t *testing.T) {
 
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("status = %d body=%s, want not implemented", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s, want bad request (model cannot embed)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -311,7 +311,7 @@ func TestOpenAI_RerankHandler_Bad_Validation(t *testing.T) {
 		"query-empty":     {`{"model":"qwen","documents":["a"]}`, http.StatusBadRequest},
 		"documents-empty": {`{"model":"qwen","query":"q","documents":[]}`, http.StatusBadRequest},
 		"model-not-found": {`{"model":"missing","query":"q","documents":["a"]}`, http.StatusNotFound},
-		"unsupported":     {`{"model":"plain","query":"q","documents":["a"]}`, http.StatusNotImplemented},
+		"unsupported":     {`{"model":"plain","query":"q","documents":["a"]}`, http.StatusBadRequest},
 	}
 	resolverWithPlain := NewStaticResolver(map[string]inference.TextModel{
 		"qwen": &serviceModel{stubModel: &stubModel{}}, "plain": &stubModel{},
