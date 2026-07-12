@@ -109,6 +109,21 @@ type ServeConfig struct {
 	// to redact — the deployer who asked for mediation must get it or none).
 	PolicyMediator policy.Mediator
 
+	// EmbedModelPath is an optional bert/BGE-class host encoder snapshot
+	// directory (model/bert) served ALONGSIDE — or, with ModelPath empty,
+	// INSTEAD OF — the chat model. Empty (the default) changes nothing:
+	// /v1/embeddings and /v1/rerank keep serving only whatever the resolved
+	// chat model itself implements (a clean 400 on every shipped engine today
+	// — see serving/provider/openai/services.go). A load failure here is
+	// FATAL at boot, matching the outbound-policy and admin-token pattern: a
+	// deployer who asked for an embeddings model gets one or an honest
+	// refusal to serve, never a silent fallback to "no embeddings model".
+	EmbedModelPath string
+	// EmbedModelID is the request-facing `model` name that routes to
+	// EmbedModelPath; empty derives the pack's basename (matching how the
+	// chat model's own default id is derived — see serveHost.listModels).
+	EmbedModelID string
+
 	// HTTP + admin.
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
@@ -288,6 +303,26 @@ func loadOutboundPolicy(cfg ServeConfig) (*policy.Policy, error) {
 // welfare + outbound-policy wraps, and runs the server. It is the shared tail
 // both serve modes reach after wiring their resolver + continuity.
 func hostServe(ctx context.Context, cfg ServeConfig, host serveHost, outboundPolicy *policy.Policy, log io.Writer) error {
+	// Embeddings/rerank model — loaded once, up front, so a bad -embed-model
+	// fails the boot before any listener binds (fail-closed, matching the
+	// outbound-policy and admin-token pattern below). Folded into /v1/models
+	// and /v1/health here so both surfaces are honest about what the serve
+	// actually answers; the resolver wrap itself is applied further down,
+	// OUTERMOST on the welfare/policy stack (see serve_embed.go).
+	var embedModel inference.TextModel
+	var embedID string
+	if core.Trim(cfg.EmbedModelPath) != "" {
+		var err error
+		embedModel, embedID, err = loadEmbedModel(cfg.EmbedModelPath, cfg.EmbedModelID)
+		if err != nil {
+			return core.E("serving.RunServe", core.Sprintf("embeddings model %q — refusing to serve", cfg.EmbedModelPath), err)
+		}
+		baseListModels, baseHealthModels := host.listModels, host.healthModels
+		host.listModels = func() []string { return append(append([]string{}, baseListModels()...), embedID) }
+		host.healthModels = func() []string { return append(append([]string{}, baseHealthModels()...), embedID) }
+		printServe(log, "serve: embeddings model %q ready (%s) — /v1/embeddings and /v1/rerank route requests naming it; other names still reach the chat model", embedID, cfg.EmbedModelPath)
+	}
+
 	admin := compat.AdminConfig{
 		Health: func(_ context.Context) (compat.Health, error) {
 			return compat.Health{Status: "ok", Runtime: "go-inference", Models: host.healthModels(), Time: time.Now().Unix()}, nil
@@ -331,6 +366,14 @@ func hostServe(ctx context.Context, cfg ServeConfig, host serveHost, outboundPol
 			resolver = policy.WrapResolver(resolver, outboundPolicy, log)
 			printServe(log, "serve: outbound policy ON — %d rule(s), hold-back %dB; redact/refuse on model output, audited per enforcement; -policy disables", outboundPolicy.Len(), outboundPolicy.HoldBack())
 		}
+	}
+	if embedModel != nil {
+		// Outermost of all: an embeddings/rerank call isn't a Chat call, so
+		// there is nothing in it for the welfare/policy text guards above to
+		// police — routing it past them (rather than through, like the chat
+		// path) skips a wrap hop those guards' own Unwrap seam would only
+		// have absorbed anyway (see serve_embed.go, welfare_guard.go).
+		resolver = wrapEmbedResolver(resolver, embedID, embedModel)
 	}
 	return Serve(ctx, cfg.Addr, resolver, opts...)
 }
