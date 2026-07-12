@@ -286,3 +286,40 @@ func TestTray_TrayService_StopAgent_Ugly(t *core.T) {
 	core.AssertFalse(t, tray.agent.IsRunning())
 	core.AssertEqual(t, "", tray.agent.CurrentTask())
 }
+
+// --- serve menu label rendering ---
+
+func TestTray_serveStatusLabel_Good(t *core.T) {
+	got := serveStatusLabel(ServeSnapshot{Up: true, ModelName: "gemma-4-e2b-it-4bit"})
+	core.AssertEqual(t, "Serve: gemma-4-e2b-it-4bit (running)", got)
+}
+
+func TestTray_serveStatusLabel_Bad(t *core.T) {
+	got := serveStatusLabel(ServeSnapshot{})
+	core.AssertEqual(t, "Serve: stopped", got)
+}
+
+func TestTray_serveStatusLabel_Ugly(t *core.T) {
+	got := serveStatusLabel(ServeSnapshot{Managed: true})
+	core.AssertEqual(t, "Serve: starting…", got)
+}
+
+func TestTray_serveStatusLabel_ModelLess(t *core.T) {
+	got := serveStatusLabel(ServeSnapshot{Up: true})
+	core.AssertEqual(t, "Serve: running (no model)", got)
+}
+
+func TestTray_serveToggleLabel_Good(t *core.T) {
+	got := serveToggleLabel(ServeSnapshot{})
+	core.AssertEqual(t, "Start Serve", got)
+}
+
+func TestTray_serveToggleLabel_Bad(t *core.T) {
+	got := serveToggleLabel(ServeSnapshot{Up: true})
+	core.AssertEqual(t, "Stop Serve", got)
+}
+
+func TestTray_serveToggleLabel_Ugly(t *core.T) {
+	got := serveToggleLabel(ServeSnapshot{Managed: true})
+	core.AssertEqual(t, "Stop Serve", got)
+}
