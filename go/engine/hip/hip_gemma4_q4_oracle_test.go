@@ -493,6 +493,15 @@ func TestHIPGemma4Q4ChainedLayerOracle(t *testing.T) {
 	firstTensor := ""
 	var firstMax, firstMean, firstRatio float32
 	for index, layer := range cfg.Layers {
+		refInputRMS := hipOracleRMS(ref)
+		hipInput := ref
+		if index == 0 {
+			hipInput = hipOracleReadF32(t, forward.Embedding, len(ref))
+		} else {
+			hipInput = hipOracleReadF32(t, forward.Layers[index-1].Body.FinalHidden, len(ref))
+		}
+		hipInputRMS := hipOracleRMS(hipInput)
+		metalInputRMS := hipOracleRMS(hipOracleRoundBF16(hipInput))
 		var multiplier []float32
 		if perLayer != nil {
 			multiplier = hipOracleReadF32(t, perLayer.Layer(index), tokenCount*layer.PerLayerInput.InputSize)
@@ -537,6 +546,9 @@ func TestHIPGemma4Q4ChainedLayerOracle(t *testing.T) {
 				}
 			}
 		}
+		if index >= 23 && index <= 35 {
+			rows = append(rows, fmt.Sprintf("  L%02d carry hip=f32 rms=%-9.6g metal=bf16 rms=%-9.6g ref=f32 rms=%-9.6g", index, hipInputRMS, metalInputRMS, refInputRMS))
+		}
 		rows = append(rows, fmt.Sprintf("  L%02d %-22s maxAbs=%-11.6g meanAbs=%-11.6g refRMS=%-9.5g max/refRMS=%.6g", index, layerTensor, layerMax, layerMean, hipOracleRMS(result.finalHidden), layerRatio))
 		ref = result.finalHidden
 		refLayers = append(refLayers, result)
@@ -545,6 +557,16 @@ func TestHIPGemma4Q4ChainedLayerOracle(t *testing.T) {
 	if firstLayer >= 0 {
 		t.Fatalf("FIRST CHAIN DIVERGENCE layer=%d tensor=%s maxAbs=%.7g meanAbs=%.7g max/refRMS=%.7g", firstLayer, firstTensor, firstMax, firstMean, firstRatio)
 	}
+}
+
+func hipOracleRoundBF16(input []float32) []float32 {
+	out := make([]float32, len(input))
+	for i, value := range input {
+		bits := math.Float32bits(value)
+		bits += 0x7fff + ((bits >> 16) & 1)
+		out[i] = math.Float32frombits(bits & 0xffff0000)
+	}
+	return out
 }
 
 type hipOracleLayerReference struct {
