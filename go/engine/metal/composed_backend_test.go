@@ -14,6 +14,150 @@ import (
 	"dappco.re/go/inference/model/rwkv7"
 )
 
+// TestComposedPrefillBatchDeviceEngagement receipts the L>1 composed path itself, rather than calling
+// ComposedSession.Forward directly. L=16, D=128 and FF=512 put the dense tail exactly at the 1<<20 device
+// floor. For both mixer families the predecessor's proj+tail+next-input fold and the last layer's
+// proj+tail+head fold must engage once. Those folds deliberately supersede the standalone projection and
+// MLP hooks, so their zero counters are part of the contract rather than evidence that prefill stayed on
+// the host. The same-binary fallback keeps the lower-level device hooks bound and disables only the fold
+// family; bf16 output parity therefore isolates the orchestration change.
+func TestComposedPrefillBatchDeviceEngagement(t *testing.T) {
+	const L, D, FF, vocab = 16, 128, 512, 128
+
+	newMLP := func(seed int) *composed.MLP {
+		return &composed.MLP{Gate: cbSyn(FF*D, seed), Up: cbSyn(FF*D, seed+1), Down: cbSyn(D*FF, seed+2), FF: FF}
+	}
+	attnLayer := func(seed int) composed.Layer {
+		const heads, hd = 4, 32
+		return composed.Layer{
+			InputNorm: cbSyn(D, seed), PostAttnNorm: cbSyn(D, seed+1), MLP: newMLP(seed + 2),
+			Mixer: composed.NewAttnMixer(&composed.AttnWeights{
+				QProj: cbSyn(D*D, seed+5), KProj: cbSyn(D*D, seed+6), VProj: cbSyn(D*D, seed+7),
+				OProj: cbSyn(D*D, seed+8), QNorm: cbSyn(hd, seed+9), KNorm: cbSyn(hd, seed+10),
+			}, composed.AttnConfig{Heads: heads, KVHeads: heads, HeadDim: hd, RotaryDim: hd, RopeTheta: 1e6, NormEps: 1e-6}),
+		}
+	}
+	gdLayer := func(seed int) composed.Layer {
+		cfg := qwen3.GatedDeltaConfig{KeyHeads: 4, ValueHeads: 4, HeadDim: 32, ConvKernel: 4, Eps: 1e-5}
+		convDim, vDim := cfg.ConvDim(), cfg.VDim()
+		return composed.Layer{
+			InputNorm: cbSyn(D, seed), PostAttnNorm: cbSyn(D, seed+1), MLP: newMLP(seed + 2),
+			Mixer: composed.NewGatedDeltaMixer(&qwen3.GatedDeltaWeights{
+				InProjQKV: cbSyn(convDim*D, seed+5), ConvWeight: cbSyn(convDim*cfg.ConvKernel, seed+6), ConvBias: cbSyn(convDim, seed+7),
+				InProjA: cbSyn(cfg.ValueHeads*D, seed+8), ALog: cbSyn(cfg.ValueHeads, seed+9), DtBias: cbSyn(cfg.ValueHeads, seed+10),
+				InProjB: cbSyn(cfg.ValueHeads*D, seed+11), InProjZ: cbSyn(vDim*D, seed+12), Norm: cbSyn(cfg.HeadDim, seed+13), OutProj: cbSyn(D*vDim, seed+14),
+			}, cfg),
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		layers []composed.Layer
+	}{
+		{name: "attention", layers: []composed.Layer{attnLayer(20), attnLayer(40)}},
+		{name: "gated_delta", layers: []composed.Layer{attnLayer(60), gdLayer(80)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &composed.ComposedModel{Embed: cbSyn(vocab*D, 1), NormF: cbSyn(D, 2), D: D, Vocab: vocab, Eps: 1e-6, Layers: tc.layers}
+			embs := make([][]byte, L)
+			tm := composed.NewTokenModel(m)
+			for i := range embs {
+				var err error
+				embs[i], err = tm.Embed(int32(i % vocab))
+				if err != nil {
+					t.Fatalf("Embed(%d): %v", i, err)
+				}
+			}
+
+			projCalls, mlpCalls, projTailCalls, inputCalls, headCalls := 0, 0, 0, 0, 0
+			savedProj, savedMLP := composed.ProjMatMulInto, composed.MLPDevice
+			savedTail, savedAttn, savedGD, savedHead := composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPProjAttnInputDevice, composed.ResidualNormMLPProjGatedDeltaInputDevice, composed.ResidualNormMLPProjHeadDevice
+			defer func() {
+				composed.ProjMatMulInto, composed.MLPDevice = savedProj, savedMLP
+				composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPProjAttnInputDevice, composed.ResidualNormMLPProjGatedDeltaInputDevice, composed.ResidualNormMLPProjHeadDevice = savedTail, savedAttn, savedGD, savedHead
+			}()
+			composed.ProjMatMulInto = func(out, x, w []float32, M, K, N int) ([]float32, error) {
+				projCalls++
+				return MatMulF32NTInto(out, x, w, M, K, N)
+			}
+			composed.MLPDevice = func(g, u, d, x []float32, L, D, FF int) ([]float32, error) {
+				mlpCalls++
+				return ComposedMLPDevice(g, u, d, x, L, D, FF)
+			}
+			composed.ResidualNormMLPProjDevice = func(mh, pw, h, nw, g, u, d []float32, L, D, mc, FF int, eps float32) ([]float32, error) {
+				projTailCalls++
+				y, err := ResidualNormMLPProjDevice(mh, pw, h, nw, g, u, d, L, D, mc, FF, eps)
+				if err != nil {
+					t.Logf("plain proj tail: %v", err)
+				}
+				return y, err
+			}
+			composed.ResidualNormMLPProjAttnInputDevice = func(mh, pw, h, nw, g, u, d []float32, L, D, mc, FF int, eps float32, nn, qw, kw, vw []float32, qc, kvc int) ([]float32, []float32, []float32, []float32, error) {
+				inputCalls++
+				y, q, k, v, err := ResidualNormMLPProjAttnInputDevice(mh, pw, h, nw, g, u, d, L, D, mc, FF, eps, nn, qw, kw, vw, qc, kvc)
+				if err != nil {
+					t.Logf("attention input fold: %v", err)
+				}
+				return y, q, k, v, err
+			}
+			composed.ResidualNormMLPProjGatedDeltaInputDevice = func(mh, pw, h, nw, g, u, d []float32, L, D, mc, FF int, eps float32, nn, qkvw, zw, aw, bw []float32, cd, vd, vh int) ([]float32, []float32, []float32, []float32, []float32, error) {
+				inputCalls++
+				y, qkv, z, a, b, err := ResidualNormMLPProjGatedDeltaInputDevice(mh, pw, h, nw, g, u, d, L, D, mc, FF, eps, nn, qkvw, zw, aw, bw, cd, vd, vh)
+				if err != nil {
+					t.Logf("gated-delta input fold: %v", err)
+				}
+				return y, qkv, z, a, b, err
+			}
+			composed.ResidualNormMLPProjHeadDevice = func(mh, pw, h, nw, g, u, d []float32, L, D, mc, FF int, eps float32, nf, hw []float32, v int) ([]float32, []float32, error) {
+				headCalls++
+				y, logits, err := ResidualNormMLPProjHeadDevice(mh, pw, h, nw, g, u, d, L, D, mc, FF, eps, nf, hw, v)
+				if err != nil {
+					t.Logf("head fold: %v", err)
+				}
+				return y, logits, err
+			}
+
+			stepper, err := tm.OpenSession()
+			if err != nil {
+				t.Fatalf("OpenSession: %v", err)
+			}
+			bp := stepper.(interface {
+				PrefillBatch([][]byte) ([]byte, error)
+			})
+			got, err := bp.PrefillBatch(embs)
+			if err != nil {
+				t.Fatalf("PrefillBatch device: %v", err)
+			}
+			if inputCalls != 1 || headCalls != 1 {
+				t.Fatalf("fold hook calls: input=%d head=%d, want 1,1 (fallback plain-proj-tail=%d projection=%d mlp=%d)", inputCalls, headCalls, projTailCalls, projCalls, mlpCalls)
+			}
+			if projTailCalls == 0 && (projCalls != 0 || mlpCalls != 0) {
+				t.Fatalf("successful folds reached superseded hooks: projection=%d mlp=%d, want 0,0", projCalls, mlpCalls)
+			}
+
+			composed.ResidualNormMLPProjAttnInputDevice, composed.ResidualNormMLPProjGatedDeltaInputDevice, composed.ResidualNormMLPProjHeadDevice = nil, nil, nil
+			stepper, err = tm.OpenSession()
+			if err != nil {
+				t.Fatalf("OpenSession fallback: %v", err)
+			}
+			want, err := stepper.(interface {
+				PrefillBatch([][]byte) ([]byte, error)
+			}).PrefillBatch(embs)
+			if err != nil {
+				t.Fatalf("PrefillBatch fallback: %v", err)
+			}
+			if len(got) != len(want) {
+				t.Fatalf("bf16 last hidden length: folded=%d fallback=%d", len(got), len(want))
+			}
+			for i := range got {
+				if got[i] != want[i] {
+					t.Fatalf("bf16 last hidden byte %d: folded=%d fallback=%d", i, got[i], want[i])
+				}
+			}
+		})
+	}
+}
+
 func cbSyn(n, seed int) []float32 {
 	v := make([]float32, n)
 	for i := range v {
