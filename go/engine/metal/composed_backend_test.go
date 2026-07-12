@@ -47,10 +47,10 @@ func TestComposedDeviceVsHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("device forward: %v", err)
 	}
-	saved := composed.ProjMatMulInto
-	composed.ProjMatMulInto = nil
+	saved, savedMLP := composed.ProjMatMulInto, composed.MLPDevice
+	composed.ProjMatMulInto, composed.MLPDevice = nil, nil
 	host, herr := composed.NewSession(m).Forward(tokens)
-	composed.ProjMatMulInto = saved
+	composed.ProjMatMulInto, composed.MLPDevice = saved, savedMLP
 	if herr != nil {
 		t.Fatalf("host forward: %v", herr)
 	}
