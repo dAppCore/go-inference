@@ -1249,4 +1249,80 @@ func TestModel_TextModel_NilReceiverGuards(t *testing.T) {
 	if s := m.NewSession(); s != nil {
 		t.Fatal("nil NewSession should return nil")
 	}
+	if got := m.MaxLen(); got != 0 {
+		t.Fatalf("nil MaxLen = %d, want 0", got)
+	}
+}
+
+// TestModel_TextModel_MaxLen_Good pins the loaded-context-length accessor the
+// continuity layer sizes woken sessions with: it reports the maxLen the model
+// was constructed with.
+func TestModel_TextModel_MaxLen_Good(t *testing.T) {
+	m := NewTextModel(&fakeTokenModel{}, newFixtureTokenizer(t), "x", inference.ModelInfo{}, 4096)
+	if got := m.MaxLen(); got != 4096 {
+		t.Fatalf("MaxLen() = %d, want 4096", got)
+	}
+}
+
+// TestModel_FormatChatContinuationWithThinking pins the durable -state
+// continuation render honouring thinking mode: the woken-session tail closes
+// the open model turn, appends the new turn(s), reopens the cue, and — only when
+// thinking is OFF on a thought-suppressor checkpoint — re-renders the pre-closed
+// empty thought channel (exactly as the stateless per-request path does).
+func TestModel_FormatChatContinuationWithThinking(t *testing.T) {
+	tok := newGemma4FixtureTokenizer(t)
+	suppressor := NewTextModel(thoughtSuppressorTokenModel{suppressor: true}, tok, "gemma4", inference.ModelInfo{}, 4096)
+	msgs := []inference.Message{{Role: "user", Content: "Hi"}}
+	base := "<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"
+
+	// Good: thinking ON — no suffix, byte-identical to the plain continuation.
+	on := true
+	if got := suppressor.FormatChatContinuationWithThinking(msgs, &on); got != base {
+		t.Fatalf("thinking-on continuation = %q, want the plain continuation %q", got, base)
+	}
+	if got := suppressor.FormatChatContinuationWithThinking(msgs, &on); got != suppressor.FormatChatContinuation(msgs) {
+		t.Fatalf("thinking-on continuation must equal FormatChatContinuation, got %q", got)
+	}
+
+	// Bad: thinking OFF on a suppressor checkpoint — the pre-closed thought
+	// channel is appended after the generation cue.
+	off := false
+	wantOff := base + "<|channel>thought\n<channel|>"
+	if got := suppressor.FormatChatContinuationWithThinking(msgs, &off); got != wantOff {
+		t.Fatalf("thinking-off suppressor continuation = %q, want the pre-closed channel %q", got, wantOff)
+	}
+
+	// Ugly: a nil flag defaults to OFF (so a suppressor still emits the tail),
+	// while a checkpoint whose template frames no reasoning channel appends
+	// nothing even when off — the tail is suppressor-specific, not a blanket
+	// rewrite.
+	if got := suppressor.FormatChatContinuationWithThinking(msgs, nil); got != wantOff {
+		t.Fatalf("nil-flag suppressor continuation = %q, want the default-off tail %q", got, wantOff)
+	}
+	legacy := NewTextModel(&fakeTokenModel{}, newFixtureTokenizer(t), "gemma", inference.ModelInfo{}, 4096)
+	if got := legacy.FormatChatContinuationWithThinking(msgs, &off); got != legacy.FormatChatContinuation(msgs) {
+		t.Fatalf("no-channel continuation-with-thinking = %q, want no tail (== FormatChatContinuation)", got)
+	}
+}
+
+// TestModel_RecordChatMetrics pins the continuity interceptor's usage record:
+// the per-turn prompt/generated counts (prefilled tail, no replay) land in
+// Metrics() exactly as a stateless turn's do, and a nil receiver is a no-op
+// rather than a panic.
+func TestModel_RecordChatMetrics(t *testing.T) {
+	m := NewTextModel(&fakeTokenModel{}, newFixtureTokenizer(t), "x", inference.ModelInfo{}, 4096)
+	start := time.Now().Add(-50 * time.Millisecond)
+	decodeStart := time.Now().Add(-20 * time.Millisecond)
+	m.RecordChatMetrics(7, 13, start, decodeStart)
+
+	got := m.Metrics()
+	if got.PromptTokens != 7 || got.GeneratedTokens != 13 {
+		t.Fatalf("Metrics() = %+v, want PromptTokens=7 GeneratedTokens=13", got)
+	}
+	if got.TotalDuration <= 0 || got.DecodeDuration <= 0 {
+		t.Fatalf("Metrics() durations = total %v decode %v, want both positive", got.TotalDuration, got.DecodeDuration)
+	}
+
+	var nilModel *TextModel
+	nilModel.RecordChatMetrics(1, 1, start, decodeStart) // must not panic
 }
