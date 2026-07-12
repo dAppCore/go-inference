@@ -60,8 +60,13 @@ type ServeConfig struct {
 	// default) leaves the request path byte-for-byte unchanged — NO scheduler
 	// is built and nothing new runs on the hot path. "serial" / "batch" /
 	// "interleave" select the discipline; an unknown value fails closed at boot.
-	// Single-model serve only in this slice; see docs/design-continuous-batching.md
-	// for how -models-config would carry a per-resident-model scheduler.
+	// Single-model serve builds ONE scheduler shared by every resolve
+	// (schedulerResolver). Multi-model serve (Models non-empty) builds one
+	// scheduler instance PER RESIDENT model instead — created when that model
+	// loads, closed when it evicts or unloads (see multiModelResolver's
+	// schedCfg/ensureResident/evict) — since each resident model is a
+	// different underlying inference.TextModel with its own lifecycle. See
+	// docs/design-continuous-batching.md for the design rationale.
 	Scheduler string
 
 	// Multi-model serving lifecycle. Models empty = today's single-model
@@ -350,6 +355,27 @@ func runMultiModelServe(ctx context.Context, cfg ServeConfig, outboundPolicy *po
 	}
 	mm.setLoader(cfg.Loader) // nil-safe: keeps the registered-metal default
 	mm.setLog(log)
+
+	// Optional per-resident-model scheduler — mirrors the single-model wiring
+	// above (RunServe's schedulerResolver), but one instance PER resident model
+	// rather than one shared instance: ensureResident attaches a fresh
+	// scheduler.Model when a model loads, evict tears it down (CloseEngine)
+	// when that model is evicted or unloaded, and closeSchedulers drains
+	// whatever is still resident at serve shutdown. Unset leaves schedCfg nil
+	// — ensureResident's fast path never constructs a scheduler package type,
+	// so the request path is byte-for-byte unchanged, exactly as the
+	// single-model path holds when its flag is unset.
+	if core.Trim(cfg.Scheduler) != "" {
+		mode, err := parseSchedulerMode(cfg.Scheduler)
+		if err != nil {
+			return err
+		}
+		schedCfg := schedulerServeConfig(mode)
+		mm.setScheduler(&schedCfg)
+		defer mm.closeSchedulers()
+		printServe(log, "serve: scheduler %s — each resident model gets its own %s scheduler on load", mode, mode)
+	}
+
 	mm.startSweeper(ctx, resolveSweepInterval(cfg))
 
 	if cfg.StateConversations {
@@ -422,15 +448,28 @@ func (c *multiModelController) ListModels() []adminpkg.ModelStatus {
 	statuses := c.r.list()
 	out := make([]adminpkg.ModelStatus, 0, len(statuses))
 	for _, s := range statuses {
-		out = append(out, adminpkg.ModelStatus{
-			ID:           s.ID,
-			Path:         s.Path,
-			Resident:     s.Resident,
-			Pinned:       s.Pinned,
-			EstBytes:     s.EstBytes,
-			Profiles:     s.Profiles,
-			LastUsedUnix: s.LastUsedUnix,
-		})
+		status := adminpkg.ModelStatus{
+			ID:            s.ID,
+			Path:          s.Path,
+			Resident:      s.Resident,
+			Pinned:        s.Pinned,
+			EstBytes:      s.EstBytes,
+			Profiles:      s.Profiles,
+			LastUsedUnix:  s.LastUsedUnix,
+			SchedulerMode: s.SchedulerMode,
+		}
+		if s.SchedulerStats != nil {
+			status.SchedulerStats = &adminpkg.SchedulerStats{
+				Submitted:  s.SchedulerStats.Submitted,
+				Admitted:   s.SchedulerStats.Admitted,
+				Completed:  s.SchedulerStats.Completed,
+				Cancelled:  s.SchedulerStats.Cancelled,
+				Active:     s.SchedulerStats.Active,
+				Queued:     s.SchedulerStats.Queued,
+				MaxRunning: s.SchedulerStats.MaxRunning,
+			}
+		}
+		out = append(out, status)
 	}
 	return out
 }
