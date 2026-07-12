@@ -219,6 +219,29 @@ func BenchmarkTextModel_FormatChatContinuation(b *testing.B) {
 	}
 }
 
+// BenchmarkTextModel_FormatChatContinuationWithThinking is the durable -state
+// per-request continuation render honouring thinking mode. The think_off
+// sub-bench runs the suppressor-tail branch (the pre-closed thought channel the
+// plain FormatChatContinuation bench never exercises); think_on runs the
+// no-tail branch, byte-identical to FormatChatContinuation.
+func BenchmarkTextModel_FormatChatContinuationWithThinking(b *testing.B) {
+	m := NewTextModel(thoughtSuppressorTokenModel{suppressor: true}, benchLoadTokenizer(b, gemma4FixtureTokenizerJSON), "gemma4", inference.ModelInfo{}, 4096)
+	msgs := []inference.Message{{Role: "user", Content: "and how does that interact with a fork?"}}
+	on, off := true, false
+	b.Run("think_off_suppressor", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			benchStr = m.FormatChatContinuationWithThinking(msgs, &off)
+		}
+	})
+	b.Run("think_on", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			benchStr = m.FormatChatContinuationWithThinking(msgs, &on)
+		}
+	})
+}
+
 // BenchmarkFormatChatPrompt is the gemma-flavoured full-prompt helper the
 // multimodal path and the format goldens drive directly.
 func BenchmarkFormatChatPrompt(b *testing.B) {
