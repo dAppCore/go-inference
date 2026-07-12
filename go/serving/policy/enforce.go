@@ -17,18 +17,27 @@ import (
 //     can route different rules to different transforms.
 //   - span is the exact matched bytes — the only place matched content crosses
 //     the engine boundary; it never enters the audit trail.
-//   - a (text, nil) result with text != "" is emitted in place of the span; an
-//     error, an empty result, or a timeout degrades to redact (the rule's
-//     replacement). The original span is NEVER emitted.
+//   - a (text, nil) result with text != "" is re-enforced ONCE (non-recursive)
+//     over its whole self and then emitted in place of the span: the mediator is
+//     UNTRUSTED (it may be the model itself), so any residual policy hit in its
+//     output degrades to redact — see rescanMediated. An error, an empty result,
+//     or a timeout degrades the whole span to redact (the rule's replacement).
+//     The original span is NEVER emitted.
 type Mediator func(ctx context.Context, ruleIndex int, span string) (string, error)
 
-// Event records one enforcement for the audit trail: which rule fired and the
-// action taken. It NEVER carries the matched content — the deployment may
-// consider the match itself sensitive, so only the rule index and action are
-// ever surfaced.
+// Event records one enforcement for the audit trail: which rule fired, the
+// action taken, and whether a rewrite had to degrade. It NEVER carries the
+// matched content — the deployment may consider the match itself sensitive, so
+// only the rule index, action, and degrade flag are ever surfaced.
 type Event struct {
 	RuleIndex int
 	Action    ActionKind
+	// Degraded is set on a rewrite Event when the action could not complete
+	// cleanly and fell back to redact — a mediator error, timeout, empty result,
+	// a missing mediator, or a residual policy hit found in the mediator output
+	// during re-enforcement. It is content-free: it says a rewrite degraded, never
+	// what matched. Always false for redact and refuse Events.
+	Degraded bool
 }
 
 // Enforcer applies a Policy to a SINGLE output stream. It is stateful — it holds
@@ -156,7 +165,9 @@ func (p *Policy) process(buf string, holdFrom int, e *Enforcer) (out string, eve
 		case ActionRewrite:
 			// The full span is present (a match settles only when its window has
 			// arrived), so the mediator is always called with the complete span.
-			b.WriteString(p.mediateSpan(e, m.ruleIndex, buf[i:m.end]))
+			text, degraded := p.mediateSpan(e, m.ruleIndex, buf[i:m.end])
+			events[len(events)-1].Degraded = degraded
+			b.WriteString(text)
 		default: // ActionRedact
 			b.WriteString(p.rules[m.ruleIndex].Replacement)
 		}
@@ -276,21 +287,74 @@ func (p *Policy) termPrefixAt(buf string, j, n int) bool {
 }
 
 // mediateSpan is the grade-G2 rewrite action: it hands the complete matched span
-// to the enforcer's mediator and returns the text to emit in its place. On any
-// failure — no mediator wired, mediator error, timeout, or an empty result — it
-// degrades to the safe floor (the rule's redact replacement). The original span
-// is never returned, so a rewrite never leaks the violating content.
-func (p *Policy) mediateSpan(e *Enforcer, ruleIndex int, span string) string {
+// to the enforcer's mediator, re-enforces the mediator's output, and returns the
+// text to emit in its place plus whether the rewrite had to degrade (for the
+// audit Event). On any failure — no mediator wired, mediator error, timeout, or
+// an empty result — it degrades the whole span to the safe floor (the rule's
+// redact replacement) and reports degraded=true. On success the mediator output
+// is re-enforced once (rescanMediated): a residual policy hit in it is redacted
+// and also reports degraded=true. The original span is never returned, so a
+// rewrite never leaks the violating content.
+func (p *Policy) mediateSpan(e *Enforcer, ruleIndex int, span string) (out string, degraded bool) {
 	if e.mediate == nil {
 		// Defensive: the serving layer refuses to boot a rewrite policy without a
 		// mediator, so this path is only reached by a library caller that used
 		// NewEnforcer on a rewrite policy — degrade rather than leak.
-		return p.rules[ruleIndex].Replacement
+		return p.rules[ruleIndex].Replacement, true
 	}
-	if out, ok := e.callMediator(ruleIndex, span); ok {
-		return out
+	text, ok := e.callMediator(ruleIndex, span)
+	if !ok {
+		// The redact fallback is deployment-configured (trusted), so it is emitted
+		// as-is — only the untrusted mediator output is re-enforced.
+		return p.rules[ruleIndex].Replacement, true
 	}
-	return p.rules[ruleIndex].Replacement
+	return p.rescanMediated(text)
+}
+
+// rescanMediated runs ONE non-recursive enforcement pass over the mediator's
+// output before it is emitted — the mediator is untrusted (it may be the model
+// itself), so its text is treated as a fresh, COMPLETE stream. Because the whole
+// string has already arrived there is no streaming hold-back: it is scanned as a
+// closed buffer. Every residual policy hit — redact, refuse, or rewrite —
+// degrades to redact (the rule's residualReplacement): the mediator is NEVER
+// called again (no recursion, no second mediator call), and a residual refuse
+// does NOT stop the stream — the stream-level refuse decision belongs to the
+// original scan over the model's own output. It returns the enforced text and
+// whether any residual hit degraded (which marks the rewrite Event degraded).
+func (p *Policy) rescanMediated(text string) (out string, degraded bool) {
+	n := len(text)
+	var b core.Builder
+	lastEmit := 0
+	i := 0
+	for i < n {
+		m, ok := p.longestMatchAt(text, i, n)
+		if !ok {
+			i++
+			continue
+		}
+		b.WriteString(text[lastEmit:i])
+		b.WriteString(p.rules[m.ruleIndex].residualReplacement())
+		degraded = true
+		i = m.end
+		lastEmit = i
+	}
+	if !degraded {
+		return text, false // clean mediator output: emit it verbatim
+	}
+	b.WriteString(text[lastEmit:n])
+	return b.String(), true
+}
+
+// residualReplacement is the redact text substituted for a residual hit of this
+// rule during the mediator-output re-scan. Redact and rewrite rules carry a
+// replacement (their configured or default redaction); a refuse rule carries
+// none — it emits a message and stops — so a residual refuse degrades to the
+// default redaction rather than being deleted silently.
+func (r *Rule) residualReplacement() string {
+	if r.Action == ActionRefuse {
+		return DefaultReplacement
+	}
+	return r.Replacement
 }
 
 // callMediator runs the mediator under a per-span deadline. It returns the

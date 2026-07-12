@@ -104,14 +104,20 @@ func (m *policyTextModel) newEnforcer(ctx context.Context) *Enforcer {
 	return m.pol.NewEnforcer()
 }
 
-// audit writes one serve-log line per enforcement — the rule index and action
-// only. The matched text is deliberately never logged: the deployment that
-// configured the rule may consider the match itself sensitive.
+// audit writes one serve-log line per enforcement — the rule index, action, and
+// (for a rewrite that fell back to redact) a degraded marker. The matched text is
+// deliberately never logged: the deployment that configured the rule may consider
+// the match itself sensitive, and the degraded flag is content-free — it says a
+// rewrite degraded, never what matched.
 func (m *policyTextModel) audit(events []Event) {
 	if m.log == nil {
 		return
 	}
 	for _, ev := range events {
-		core.Print(m.log, "policy: rule #%d %s enforced on output", ev.RuleIndex, ev.Action)
+		verb := "enforced"
+		if ev.Degraded {
+			verb = "degraded"
+		}
+		core.Print(m.log, "policy: rule #%d %s %s on output", ev.RuleIndex, ev.Action, verb)
 	}
 }

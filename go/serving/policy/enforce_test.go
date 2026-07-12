@@ -254,16 +254,19 @@ func TestPolicy_Enforcer_ClosedSwallow(t *testing.T) {
 	}
 }
 
-// TestPolicy_Enforcer_Rewrite_Good pins the grade-G2 happy path: the matched
-// span is replaced by the mediator's transform, and everything else is untouched.
+// TestPolicy_Enforcer_Rewrite_Good pins the grade-G2 happy path: a mediator that
+// genuinely sanitises the span (its output carries no policy term) has that
+// output emitted in place, everything else is untouched, and the Event is clean
+// (not degraded) because re-enforcement finds nothing to redact.
 func TestPolicy_Enforcer_Rewrite_Good(t *testing.T) {
 	pol := mustCompile(t, `{"rules":[{"match":"term","value":"PROJECT-X","action":"rewrite"}]}`)
-	got, events, _ := runChunksMediated(pol, markSpan, []string{"the PROJECT-X launch is soon"})
-	if got != "the «PROJECT-X» launch is soon" {
+	reword := func(_ context.Context, _ int, _ string) (string, error) { return "our flagship", nil }
+	got, events, _ := runChunksMediated(pol, reword, []string{"the PROJECT-X launch is soon"})
+	if got != "the our flagship launch is soon" {
 		t.Fatalf("mediated = %q", got)
 	}
-	if len(events) != 1 || events[0].Action != ActionRewrite || events[0].RuleIndex != 0 {
-		t.Fatalf("events = %+v, want one rewrite on rule #0", events)
+	if len(events) != 1 || events[0].Action != ActionRewrite || events[0].RuleIndex != 0 || events[0].Degraded {
+		t.Fatalf("events = %+v, want one clean rewrite on rule #0", events)
 	}
 }
 
@@ -275,7 +278,7 @@ func TestPolicy_Enforcer_Rewrite_BoundarySpanning(t *testing.T) {
 	var seen []string
 	capture := func(_ context.Context, _ int, span string) (string, error) {
 		seen = append(seen, span)
-		return "[" + span + "]", nil
+		return "[reworded]", nil // sanitised: no policy term, so re-enforcement is a no-op
 	}
 	text := "start PROJECT-X end"
 	var oneByte []string
@@ -283,7 +286,7 @@ func TestPolicy_Enforcer_Rewrite_BoundarySpanning(t *testing.T) {
 		oneByte = append(oneByte, text[i:i+1])
 	}
 	got, _, _ := runChunksMediated(pol, capture, oneByte)
-	if got != "start [PROJECT-X] end" {
+	if got != "start [reworded] end" {
 		t.Fatalf("byte-split mediation = %q", got)
 	}
 	if len(seen) != 1 || seen[0] != "PROJECT-X" {
@@ -348,24 +351,25 @@ func TestPolicy_Enforcer_Rewrite_NoMediator(t *testing.T) {
 }
 
 // TestPolicy_Enforcer_Rewrite_MidStream pins that mediation is per-span: when the
-// mediator fails on one hit but succeeds on a later one, each is handled
-// independently and the stream survives.
+// mediator fails on one hit but sanitises a later one, each is handled
+// independently — the first degrades to redact, the second emits clean — and the
+// stream survives. The per-hit Degraded flags mirror that split.
 func TestPolicy_Enforcer_Rewrite_MidStream(t *testing.T) {
 	pol := mustCompile(t, `{"rules":[{"match":"term","value":"TAG","action":"rewrite","replacement":"[df]"}]}`)
 	calls := 0
-	flaky := func(_ context.Context, _ int, span string) (string, error) {
+	flaky := func(_ context.Context, _ int, _ string) (string, error) {
 		calls++
 		if calls == 1 {
 			return "", core.E("test", "first fails", nil)
 		}
-		return "«" + span + "»", nil
+		return "reworded", nil
 	}
 	got, events, _ := runChunksMediated(pol, flaky, []string{"a TAG then another TAG here"})
-	if got != "a [df] then another «TAG» here" {
+	if got != "a [df] then another reworded here" {
 		t.Fatalf("mid-stream = %q", got)
 	}
-	if len(events) != 2 {
-		t.Fatalf("events = %+v, want one per hit", events)
+	if len(events) != 2 || !events[0].Degraded || events[1].Degraded {
+		t.Fatalf("events = %+v, want a degraded first hit and a clean second", events)
 	}
 }
 
@@ -386,6 +390,163 @@ func TestPolicy_Enforcer_Rewrite_Differential(t *testing.T) {
 		if got != want {
 			t.Fatalf("chunking %d diverged\n  want %q\n  got  %q", iter, want, got)
 		}
+	}
+}
+
+// TestPolicy_Enforcer_Rewrite_ReEnforced_ResidualRedact pins the untrusted-
+// mediator guard: mediator output that still contains a policy term (here one
+// that matches a redact rule) has that residual hit redacted before emission, the
+// original term never leaks, and the rewrite Event is marked degraded.
+func TestPolicy_Enforcer_Rewrite_ReEnforced_ResidualRedact(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[
+		{"match":"term","value":"PROJECT-X","action":"rewrite"},
+		{"match":"term","value":"SECRET","action":"redact","replacement":"[S]"}
+	]}`)
+	inject := func(_ context.Context, _ int, _ string) (string, error) { return "our SECRET plan", nil }
+	got, events, _ := runChunksMediated(pol, inject, []string{"the PROJECT-X launch"})
+	if got != "the our [S] plan launch" {
+		t.Fatalf("residual redact = %q", got)
+	}
+	if core.Contains(got, "SECRET") {
+		t.Fatalf("re-enforcement leaked the residual term: %q", got)
+	}
+	if len(events) != 1 || events[0].Action != ActionRewrite || !events[0].Degraded {
+		t.Fatalf("events = %+v, want one degraded rewrite", events)
+	}
+}
+
+// TestPolicy_Enforcer_Rewrite_ReEnforced_ResidualRefuse pins that a residual hit
+// on a REFUSE rule inside mediator output degrades to redact (the default
+// redaction, since a refuse rule carries no replacement) WITHOUT stopping the
+// stream — the stream-level refuse decision belongs to the original scan over the
+// model's own output, not to a re-scan of mediator text.
+func TestPolicy_Enforcer_Rewrite_ReEnforced_ResidualRefuse(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[
+		{"match":"term","value":"PROJECT-X","action":"rewrite"},
+		{"match":"term","value":"SECRET","action":"refuse","message":"stream must not stop here"}
+	]}`)
+	inject := func(_ context.Context, _ int, _ string) (string, error) { return "our SECRET plan", nil }
+	got, events, stopped := runChunksMediated(pol, inject, []string{"the PROJECT-X here and more"})
+	if got != "the our [redacted] plan here and more" {
+		t.Fatalf("residual refuse = %q", got)
+	}
+	if stopped {
+		t.Fatal("a residual refuse inside mediator output must NOT stop the stream")
+	}
+	if core.Contains(got, "SECRET") || core.Contains(got, "stream must not stop") {
+		t.Fatalf("residual refuse leaked content or its message: %q", got)
+	}
+	if len(events) != 1 || events[0].Action != ActionRewrite || !events[0].Degraded {
+		t.Fatalf("events = %+v, want one degraded rewrite", events)
+	}
+}
+
+// TestPolicy_Enforcer_Rewrite_ReEnforced_NoRecursion pins that re-enforcement is
+// a SINGLE non-recursive pass: a mediator that echoes the banned term back has
+// that residual hit redacted, and the mediator is called exactly once — the
+// re-scan never re-mediates.
+func TestPolicy_Enforcer_Rewrite_ReEnforced_NoRecursion(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"PROJECT-X","action":"rewrite"}]}`)
+	calls := 0
+	echo := func(_ context.Context, _ int, span string) (string, error) {
+		calls++
+		return "our " + span + " team", nil
+	}
+	got, events, _ := runChunksMediated(pol, echo, []string{"ship PROJECT-X today"})
+	if got != "ship our [redacted] team today" {
+		t.Fatalf("no-recursion = %q", got)
+	}
+	if calls != 1 {
+		t.Fatalf("mediator called %d times, want exactly one (re-enforcement must not re-mediate)", calls)
+	}
+	if len(events) != 1 || !events[0].Degraded {
+		t.Fatalf("events = %+v, want one degraded rewrite", events)
+	}
+}
+
+// TestPolicy_Enforcer_Rewrite_ReEnforced_Differential is the byte-identity proof
+// for the re-enforcement pass: with a mediator that injects residual hits (a
+// redact term and a refuse-rule token) around each span, the whole-string result
+// must equal the streamed result under 1000 random chunkings — so the enforcer
+// always mediates AND re-enforces the complete span, and the residual refuse
+// never stops the stream regardless of where token boundaries fall.
+func TestPolicy_Enforcer_Rewrite_ReEnforced_Differential(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[
+		{"match":"term","value":"PROJECT-X","action":"rewrite"},
+		{"match":"term","value":"SECRET","action":"redact","replacement":"[S]"},
+		{"match":"pattern","value":"rc[0-9]+","action":"refuse","message":"[stop]","window":12}
+	]}`)
+	inject := func(_ context.Context, _ int, span string) (string, error) {
+		return "SECRET " + span + " rc7", nil
+	}
+	text := "intro PROJECT-X then more PROJECT-X talk end"
+	want, _, wantStop := runChunksMediated(pol, inject, []string{text})
+	if wantStop {
+		t.Fatal("a residual refuse must not stop the whole-string reference stream")
+	}
+	r := rand.New(rand.NewSource(5))
+	for iter := 0; iter < 1000; iter++ {
+		got, _, stop := runChunksMediated(pol, inject, randomChunks(r, text))
+		if got != want || stop != wantStop {
+			t.Fatalf("chunking %d diverged\n  want %q stop=%v\n  got  %q stop=%v", iter, want, wantStop, got, stop)
+		}
+	}
+}
+
+// TestPolicy_Event_Degraded pins the content-free Degraded flag across every path
+// that sets it: a clean rewrite is NOT degraded; a mediator error, an empty
+// result, a residual hit in the mediator output, and a missing mediator all mark
+// the rewrite Event degraded.
+func TestPolicy_Event_Degraded(t *testing.T) {
+	const rewritePol = `{"rules":[{"match":"term","value":"X","action":"rewrite","replacement":"[r]"}]}`
+	const residualPol = `{"rules":[{"match":"term","value":"X","action":"rewrite"},{"match":"term","value":"BAD","action":"redact"}]}`
+	cases := []struct {
+		name     string
+		policy   string
+		mediator Mediator
+		plain    bool // drive a non-mediating Enforcer (no mediator wired)
+		want     bool
+	}{
+		{"clean", rewritePol, func(context.Context, int, string) (string, error) { return "safe", nil }, false, false},
+		{"mediator_error", rewritePol, func(context.Context, int, string) (string, error) { return "X", core.E("t", "boom", nil) }, false, true},
+		{"empty_result", rewritePol, func(context.Context, int, string) (string, error) { return "", nil }, false, true},
+		{"residual_hit", residualPol, func(context.Context, int, string) (string, error) { return "BAD", nil }, false, true},
+		{"no_mediator", rewritePol, nil, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pol := mustCompile(t, tc.policy)
+			var events []Event
+			if tc.plain {
+				_, events, _ = runChunks(pol, []string{"a X b"})
+			} else {
+				_, events, _ = runChunksMediated(pol, tc.mediator, []string{"a X b"})
+			}
+			if len(events) != 1 || events[0].Action != ActionRewrite || events[0].Degraded != tc.want {
+				t.Fatalf("events = %+v, want one rewrite Degraded=%v", events, tc.want)
+			}
+		})
+	}
+}
+
+// TestPolicy_Rule_residualReplacement pins the per-action redact text used when a
+// residual hit is degraded during re-enforcement: redact and rewrite rules use
+// their own (configured or default) replacement; a refuse rule — which carries no
+// replacement — falls back to the default redaction rather than deleting silently.
+func TestPolicy_Rule_residualReplacement(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[
+		{"match":"term","value":"A","action":"redact","replacement":"[a]"},
+		{"match":"term","value":"B","action":"rewrite","replacement":"[b]"},
+		{"match":"term","value":"C","action":"refuse","message":"no"}
+	]}`)
+	if got := pol.rules[0].residualReplacement(); got != "[a]" {
+		t.Fatalf("redact residual = %q, want [a]", got)
+	}
+	if got := pol.rules[1].residualReplacement(); got != "[b]" {
+		t.Fatalf("rewrite residual = %q, want [b]", got)
+	}
+	if got := pol.rules[2].residualReplacement(); got != DefaultReplacement {
+		t.Fatalf("refuse residual = %q, want the default redaction", got)
 	}
 }
 
