@@ -53,6 +53,14 @@ type attnScratch struct {
 	qRaw, k, v, o []float32
 }
 
+// AttnQKVDevice is the fused q/k/v projection hook for the full-attention mixer: q_proj, k_proj and
+// v_proj all read the same hidden h [L,D], so a backend can encode the three GEMMs into ONE command
+// buffer (k/v — sub-floor standalone, their host matmul is serial — ride along inside it). qCols is
+// H*HD ungated or 2·H*HD gated ([q;gate] per head); kvCols is KVH*HD. nil ⇒ the per-projection
+// matNTInto path (the device hook for q, host for the sub-floor k/v). Same AX-8 shape as MLPDevice:
+// composed declares the hook, engine/metal binds it; the lib never imports the backend.
+var AttnQKVDevice func(h, qW, kW, vW []float32, L, D, qCols, kvCols int) (q, k, v []float32, err error)
+
 // NewAttnMixer builds a full-attention mixer for one layer.
 func NewAttnMixer(w *AttnWeights, cfg AttnConfig) Mixer { return &attnMixer{w: w, cfg: cfg} }
 
@@ -115,12 +123,32 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 	scale := 1.0 / math.Sqrt(float64(HD))
 	rep := H / KVH
 
-	// q_proj: [L, H*HD] ungated, or [L, 2·H*HD] gated — de-interleaved per head into q [L,H*HD] and the
-	// gate [L,H*HD] ([q_h ; gate_h] within each head's 2·HD block, per the transformers qwen3_5 chunk).
+	// q/k/v all read the hidden h [L,D]. When the backend supplies the fused hook and the q projection
+	// crosses the device floor, q_raw/k/v are computed in ONE command buffer (k/v ride free — sub-floor
+	// standalone, their host matmul is serial); otherwise the per-projection matNTInto path runs (the
+	// device hook for q, host below the floor for k/v). k/v feed the KV cache either way; deterministic.
+	var qRaw, k, v []float32
+	qkvFused := false
+	if AttnQKVDevice != nil && L*D*qCols >= deviceMinWork {
+		if fq, fk, fv, ferr := AttnQKVDevice(h, m.w.QProj, m.w.KProj, m.w.VProj, L, D, qCols, KVH*HD); ferr == nil {
+			qRaw, k, v = fq, fk, fv
+			qkvFused = true
+		}
+	}
+	if !qkvFused {
+		sc.qRaw = matNTInto(sc.qRaw, h, m.w.QProj, L, D, qCols) // [L, qCols]
+		qRaw = sc.qRaw
+		sc.k = matNTInto(sc.k, h, m.w.KProj, L, D, KVH*HD) // [L, KVH*HD]
+		k = sc.k
+		sc.v = matNTInto(sc.v, h, m.w.VProj, L, D, KVH*HD) // [L, KVH*HD]
+		v = sc.v
+	}
+
+	// q_proj raw → per-head q [L,H*HD] and (gated) the σ-gate [L,H*HD] ([q_h ; gate_h] within each head's
+	// 2·HD block, per the transformers qwen3_5 chunk).
 	var q, gate []float32
 	if cfg.OutputGate {
-		sc.qRaw = matNTInto(sc.qRaw, h, m.w.QProj, L, D, 2*H*HD)
-		raw := sc.qRaw
+		raw := qRaw
 		q = make([]float32, L*H*HD)    // de-interleave targets: per-token state (q is written in place by
 		gate = make([]float32, L*H*HD) // attention, gate outlives to the σ-gate), not scratch
 		for t := range L {
@@ -131,13 +159,8 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 			}
 		}
 	} else {
-		sc.qRaw = matNTInto(sc.qRaw, h, m.w.QProj, L, D, H*HD) // [L, H*HD]
-		q = sc.qRaw
+		q = qRaw
 	}
-	sc.k = matNTInto(sc.k, h, m.w.KProj, L, D, KVH*HD) // [L, KVH*HD]
-	k := sc.k
-	sc.v = matNTInto(sc.v, h, m.w.VProj, L, D, KVH*HD) // [L, KVH*HD]
-	v := sc.v
 
 	// QK-norm (per head) + partial rotary at absolute positions pos0+t.
 	for t := range L {
