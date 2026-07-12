@@ -139,6 +139,24 @@ func TestAssemble_Assemble_Good(t *testing.T) {
 	}
 }
 
+func TestAssemble_EmbeddingProjection_Good(t *testing.T) {
+	tensors := minimalDenseTensors("BF16")
+	tensors["embed.weight"] = safetensors.Tensor{Shape: []int{8, 2}, Data: make([]byte, 8*2*2)}
+	tensors["project_in.weight"] = safetensors.Tensor{Shape: []int{4, 2}, Data: make([]byte, 4*2*2)}
+	tensors["project_out.weight"] = safetensors.Tensor{Shape: []int{2, 4}, Data: make([]byte, 2*4*2)}
+	names := minimalDenseNames()
+	names.EmbedProjectionIn, names.EmbedProjectionOut = "project_in", "project_out"
+	arch := minimalDenseArch()
+	arch.EmbeddingDim = 2
+	m, err := Assemble(tensors, arch, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Embed.InDim != 2 || m.EmbedProjectionIn.InDim != 2 || m.EmbedProjectionOut.InDim != 4 {
+		t.Fatalf("embedding widths: embed=%d project_in=%d project_out=%d", m.Embed.InDim, m.EmbedProjectionIn.InDim, m.EmbedProjectionOut.InDim)
+	}
+}
+
 // TestAssemble_Assemble_Bad covers the always-required Embed weight absent: a malformed
 // checkpoint is a clean load error naming the missing tensor, never a nil-deref later.
 func TestAssemble_Assemble_Bad(t *testing.T) {
