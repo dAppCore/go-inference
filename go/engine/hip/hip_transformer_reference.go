@@ -6,6 +6,7 @@ package hip
 
 import (
 	"math"
+	"sort"
 
 	core "dappco.re/go"
 )
@@ -500,13 +501,14 @@ func splitHIPReferenceVectors(flat []float32, width int) ([][]float32, error) {
 }
 
 func sortHIPReferenceCandidates(candidates []hipReferenceCandidate) {
-	for i := 1; i < len(candidates); i++ {
-		current := candidates[i]
-		j := i - 1
-		for j >= 0 && (candidates[j].value < current.value || (candidates[j].value == current.value && candidates[j].index > current.index)) {
-			candidates[j+1] = candidates[j]
-			j--
+	// Full-vocabulary host sampling depends on this exact total order. Keep the
+	// softcapped score descending and token ID ascending, but use an O(n log n)
+	// sort: Gemma 4 has 262144 candidates and insertion sort made the default
+	// TopK=0 path quadratic.
+	sort.Slice(candidates, func(left, right int) bool {
+		if candidates[left].value == candidates[right].value {
+			return candidates[left].index < candidates[right].index
 		}
-		candidates[j+1] = current
-	}
+		return candidates[left].value > candidates[right].value
+	})
 }

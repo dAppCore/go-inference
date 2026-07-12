@@ -706,6 +706,24 @@ func BenchmarkHIPGemma4Q4HostSampleCandidateResultScratch_TopK64(b *testing.B) {
 	}
 }
 
+func BenchmarkHIPGemma4Q4HostSampleResult_FullVocabulary(b *testing.B) {
+	logits := make([]float32, 262144)
+	for index := range logits {
+		logits[index] = float32((index*7919)%65537) / 1024
+	}
+	generate := inference.GenerateConfig{Temperature: 1, TopP: 1, RepeatPenalty: 1}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		result, err := hipGemma4Q4HostSampleResult(logits, generate, nil, nil, 0.42)
+		if err != nil {
+			b.Fatal(err)
+		}
+		benchmarkHIPCandidateSampleResultSink = result
+	}
+}
+
 func BenchmarkHIPGemma4Q4HostSampleSortedCandidateResultScratch_TopK64(b *testing.B) {
 	candidates := make([]hipGreedySampleResult, 64)
 	for index := range candidates {
