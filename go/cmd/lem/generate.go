@@ -9,7 +9,6 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/decode/generate"
-	native "dappco.re/go/inference/engine/metal"
 )
 
 // stringListFlag is a repeatable string flag: each occurrence appends, so
@@ -109,7 +108,7 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 		promptText = string(bytes)
 	}
 
-	native.SetPipelinedGPUDecode(*pipeline) // engine-level: -pipeline=false forces the chained serial loop
+	setPipelinedGPUDecode(*pipeline) // engine-level: -pipeline=false forces the chained serial loop
 	err := generate.RunGenerate(ctx, generate.Config{
 		ModelPath:  fs.Arg(0),
 		Prompt:     promptText,
@@ -122,7 +121,7 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 		// Inject the metal engine's speculative loader so a detected drafter arms
 		// the MTP lane instead of degrading to plain — the composition root is the
 		// one place that may import the engine (keeps decode/generate neutral).
-		SpeculativeLoader: native.LoadSpeculativePair,
+		SpeculativeLoader: speculativeLoader,
 		KVCacheMode:       *kvCacheMode,
 		KVStorage:         *kvStorage,
 		Pipeline:          *pipeline,

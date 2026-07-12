@@ -118,7 +118,7 @@ func writeGGUFToy(t *testing.T) string {
 // TestRunQuantGGUF covers the -gguf lane: a block-size-valid model quantises to
 // a model.gguf (Good), the default output dir carries the gguf-<format> suffix
 // when -o is omitted (Good), and a tensor whose width is not divisible by the
-// GGUF block size is rejected with exit 1 (Bad).
+// GGUF block size falls back to raw F32 storage rather than failing (Good).
 func TestRunQuantGGUF(t *testing.T) {
 	t.Run("Good/explicit out", func(t *testing.T) {
 		src := writeGGUFToy(t)
@@ -143,12 +143,18 @@ func TestRunQuantGGUF(t *testing.T) {
 			t.Errorf("default-named output missing model.gguf at %s: %v", wantDir, err)
 		}
 	})
-	t.Run("Bad/block size", func(t *testing.T) {
+	t.Run("Good/block-incompatible falls back to F32", func(t *testing.T) {
+		// Block-incompatible tensors (the 8-wide norm) no longer fail the model —
+		// they store as raw F32 (llama.cpp's own quantizer convention), so the
+		// conversion succeeds end-to-end.
 		src := writeToyModel(t) // 8-wide norm, not divisible by 32
 		out := filepath.Join(t.TempDir(), "gguf-out")
 		var stdout, stderr bytes.Buffer
-		if code := runQuantCommand(context.Background(), []string{src, "-gguf", "q8_0", "-o", out}, &stdout, &stderr); code != 1 {
-			t.Fatalf("exit %d, want 1; stderr=%s", code, stderr.String())
+		if code := runQuantCommand(context.Background(), []string{src, "-gguf", "q8_0", "-o", out}, &stdout, &stderr); code != 0 {
+			t.Fatalf("exit %d, want 0 (F32 fallback); stderr=%s", code, stderr.String())
+		}
+		if _, err := os.Stat(filepath.Join(out, "model.gguf")); err != nil {
+			t.Fatalf("model.gguf not written: %v", err)
 		}
 	})
 }
