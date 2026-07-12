@@ -177,16 +177,18 @@ quants reported, never hidden):
 
 | depth | lem | llama.cpp | oMLX | mlx-lm |
 |---|---|---|---|---|
-| 8K | 9,016 | 4,002 | 6,696 | ~9,850² |
-| 32K | 7,849 | 2,412 | — | — |
-| 62K | 6,474 | — | — | — |
+| 8K | 10,048 | 4,002 | 6,696 | ~9,900² |
+| 32K | 8,038 | 2,412 | — | — |
+| 62K | 6,480 | — | — | — |
 | 118K | 4,522 | — | — | — |
 
-² mlx-lm prints 11,790 at this depth; 10,044 is its true wall measured
-with our own timer around a preloaded generate. oMLX (the closest feature rival — continuous
-batching, tiered KV, OpenAI+Anthropic routes, menu-bar service — but a
-Python stack where lem is one contained binary) rides mlx-lm's kernels
-and lands 6,696 even through its HTTP serving path.
+² mlx-lm prints 11,790 at this depth; ~9,900 is its true wall measured
+with our own timer around a preloaded generate (0.730s, same quiet
+machine and snapshot as the lem runs — 0.718-0.723s). oMLX (the closest
+feature rival — continuous batching, tiered KV, OpenAI+Anthropic
+routes, menu-bar service — but a Python stack where lem is one
+contained binary) rides mlx-lm's kernels and lands 6,696 even through
+its HTTP serving path.
 
 The skip generalises across the family by construction — it proves the
 arch's own suffix at load rather than pattern-matching a model. E4B
@@ -198,14 +200,16 @@ cross the host boundary during prefill, every arch), and their 8K walls
 sit at 740 / 1,447 / 290 tok/s — the 31B within 1.13× of mlx-lm's true
 wall on the identical snapshot.
 
-Honest reading: mlx-lm's true wall still leads cold 8K ingest by ~1.11×
-(what remains is the prompt pass itself and per-chunk seams, open on
-the tracker). Everywhere else this table has data, lem now leads the field
-outright — llama.cpp at every depth, oMLX at its own
-depth — and the curve stays flat where everyone else's dives. Decode —
-the cost every turn pays — leads the whole field (see the board above);
-and under `-state` serving, prefill is paid once per conversation while
-replay engines re-pay it per turn — that trade is the design.
+Honest reading: lem now leads the measured field at every depth in
+this table, including the cold 8K ingest that mlx-lm held until the
+attention-routing retunes (the GEMM knee and the small-chunk ring gate
+— found by lane-labelled GPU tracing, receipted three-run each). The
+margins at 8K are small (~2%) and mlx remains the reference the engine
+is measured against; the curve stays flat where everyone else's dives.
+Decode — the cost every turn pays — leads the whole field (see the
+board above); and under `-state` serving, prefill is paid once per
+conversation while replay engines re-pay it per turn — that trade is
+the design.
 
 **Concurrency, receipted**: two and four simultaneous conversations at
 shipping defaults complete with zero errors and zero cross-talk
