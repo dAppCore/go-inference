@@ -9486,13 +9486,13 @@ func BenchmarkHIPPackedTopKSampleKernelWithWorkspace_Hot(b *testing.B) {
 		borrowed:  true,
 		label:     "benchmark packed top-k sample output",
 	}
-	_, _, err := hipRunPackedTopKSampleKernel(context.Background(), driver, input, inputCount, topK, 0.7, 0.95, 0.25, output, workspace)
+	_, _, err := hipRunPackedTopKSampleKernel(context.Background(), driver, input, inputCount, topK, 0.7, 0.95, 0, 0.25, output, workspace)
 	if err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_, _, err = hipRunPackedTopKSampleKernel(context.Background(), driver, input, inputCount, topK, 0.7, 0.95, 0.25, output, workspace)
+		_, _, err = hipRunPackedTopKSampleKernel(context.Background(), driver, input, inputCount, topK, 0.7, 0.95, 0, 0.25, output, workspace)
 		if err != nil {
 			b.Fatal(err)
 		}
