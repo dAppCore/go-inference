@@ -258,7 +258,7 @@ func kQuantSubBlockScales(block []float32, nmax int, weights []float32, levels [
 		for l := range sub {
 			weights[l] = avX + absFloat32(sub[l])
 		}
-		sc, mn := makeQKX2Quants(nmax, sub, weights, levels[start:start+kQuantSubBlockSize], rmin, rdelta, nstep)
+		sc, mn := makeQKX2Quants(nmax, sub, weights, levels[start:start+kQuantSubBlockSize], rmin, rdelta, nstep, false)
 		scales[j] = sc
 		mins[j] = mn
 		if sc > maxScale {
@@ -350,9 +350,12 @@ func kQuantRequantLevels(block []float32, packed *[12]byte, d, dmin float32, nma
 
 // makeQKX2Quants finds the sub-block scale and non-negative min that best fit x
 // under the importance weights, filling levels with [0,nmax] quant levels.
-// Faithful port of ggml's make_qkx2_quants (use_mad=false). Returns (scale,
-// min) such that the dequant is x ≈ scale*level - min.
-func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta float32, nstep int) (scale, theMin float32) {
+// Faithful port of ggml's make_qkx2_quants. Returns (scale, min) such that
+// the dequant is x ≈ scale*level - min. useMad selects the error metric: the
+// squared diff (Q4_K/Q5_K's use_mad=false) or |diff| (Q2_K's use_mad=true,
+// despite the "mad" name meaning "mean absolute deviation" either way — the
+// weighted accumulator is just named bestMad/mad in both ggml and here).
+func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta float32, nstep int, useMad bool) (scale, theMin float32) {
 	n := len(x)
 	minv, maxv := x[0], x[0]
 	sumW := weights[0]
@@ -384,7 +387,12 @@ func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta
 		l := clampInt(nearestIntGGML(iscale*(x[i]-minv)), 0, nmax)
 		levels[i] = uint8(l)
 		diff := scale*float32(l) + minv - x[i]
-		bestMad += weights[i] * diff * diff
+		if useMad {
+			diff = absFloat32(diff)
+		} else {
+			diff *= diff
+		}
+		bestMad += weights[i] * diff
 	}
 	if nstep < 1 {
 		return scale, -minv
@@ -413,7 +421,12 @@ func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta
 			var mad float32
 			for i := 0; i < n; i++ {
 				diff := thisScale*float32(laux[i]) + thisMin - x[i]
-				mad += weights[i] * diff * diff
+				if useMad {
+					diff = absFloat32(diff)
+				} else {
+					diff *= diff
+				}
+				mad += weights[i] * diff
 			}
 			if mad < bestMad {
 				for i := 0; i < n; i++ {
@@ -897,29 +910,27 @@ func appendQuantizeQ2_K(out []byte, values []float32) []byte {
 	var scales [qkSubBlocks]byte
 	var qs [qkBlockSize / 4]byte
 	var levels [qkBlockSize]uint8 // q ∈ [0,3] per element
+	var weights [qkSubBlockSize]float32
 	for blockStart := 0; blockStart < len(values); blockStart += qkBlockSize {
 		block := values[blockStart : blockStart+qkBlockSize]
 
-		// Per-sub-block affine fit: scale = (max-min)/3, min = -minValue
-		// (the decoder subtracts dmin*min, so min is stored as a positive
-		// magnitude of the most-negative offset). Then the block-global d
-		// and dmin map each sub scale/min into a 4-bit field.
-		maxScale := float32(0)
-		maxMin := float32(0)
+		// Per-sub-block optimal (scale, min) via makeQKX2Quants — the same
+		// helper Q4_K/Q5_K use, called here with ggml's Q2_K parameters:
+		// nmax=3, plain |x| importance weights (not Q4_K's av_x+|x|),
+		// rmin=-0.5/rdelta=0.1/nstep=15, useMad=true. Faithful port of
+		// quantize_row_q2_K_ref, replacing the previous naive per-sub-block
+		// (max-min)/3 affine fit. makeQKX2Quants also writes its own
+		// best-effort levels directly into levels[]; those survive as the
+		// fallback for any sub-block whose reconstructed scale rounds to
+		// exactly zero below (ggml reuses its own first-pass L there too).
+		var maxScale, maxMin float32
 		for sb := range qkSubBlocks {
 			subStart := sb * qkSubBlockSize
-			lo, hi := block[subStart], block[subStart]
-			for j := 1; j < qkSubBlockSize; j++ {
-				v := block[subStart+j]
-				if v < lo {
-					lo = v
-				}
-				if v > hi {
-					hi = v
-				}
+			sub := block[subStart : subStart+qkSubBlockSize]
+			for l, v := range sub {
+				weights[l] = absFloat32(v)
 			}
-			sc := (hi - lo) / 3
-			mn := -lo // y = scale*q - min ⇒ min = -lo so q=0 → lo
+			sc, mn := makeQKX2Quants(3, sub, weights[:], levels[subStart:subStart+qkSubBlockSize], -0.5, 0.1, 15, true)
 			scratch.subMax[sb] = sc
 			scratch.subMin[sb] = mn
 			if sc > maxScale {
@@ -930,38 +941,39 @@ func appendQuantizeQ2_K(out []byte, values []float32) []byte {
 			}
 		}
 		d := float32(0)
-		dmin := float32(0)
-		var iscale, imin float32
 		if maxScale > 0 {
+			iscale := float32(15) / maxScale
+			for sb := range qkSubBlocks {
+				scales[sb] = byte(nearestIntGGML(iscale * scratch.subMax[sb]))
+			}
 			d = maxScale / 15
-			iscale = 15 / maxScale
+		} else {
+			for sb := range scales {
+				scales[sb] = 0
+			}
 		}
+		dmin := float32(0)
 		if maxMin > 0 {
+			iscale := float32(15) / maxMin
+			for sb := range qkSubBlocks {
+				scales[sb] |= byte(nearestIntGGML(iscale*scratch.subMin[sb])) << 4
+			}
 			dmin = maxMin / 15
-			imin = 15 / maxMin
-		}
-		for sb := range qkSubBlocks {
-			sc := clampInt(int(roundFloat32(iscale*scratch.subMax[sb])), 0, 15)
-			mn := clampInt(int(roundFloat32(imin*scratch.subMin[sb])), 0, 15)
-			scales[sb] = byte(sc) | byte(mn<<4)
 		}
 
 		// Requantise each element to q ∈ [0,3] against the reconstructed
-		// sub-scale/sub-min (exactly what the decoder reconstructs).
+		// sub-scale/sub-min. A sub-block whose reconstructed scale is
+		// exactly zero is left at its makeQKX2Quants fallback from above.
 		for sb := range qkSubBlocks {
 			subStart := sb * qkSubBlockSize
 			sc := d * float32(scales[sb]&0xF)
-			ml := dmin * float32(scales[sb]>>4)
-			inv := float32(0)
-			if sc != 0 {
-				inv = 1 / sc
+			if sc == 0 {
+				continue
 			}
+			ml := dmin * float32(scales[sb]>>4)
 			for j := range qkSubBlockSize {
-				q := 0
-				if inv != 0 {
-					q = clampInt(int(roundFloat32((block[subStart+j]+ml)*inv)), 0, 3)
-				}
-				levels[subStart+j] = uint8(q)
+				l := clampInt(nearestIntGGML((block[subStart+j]+ml)/sc), 0, 3)
+				levels[subStart+j] = uint8(l)
 			}
 		}
 
