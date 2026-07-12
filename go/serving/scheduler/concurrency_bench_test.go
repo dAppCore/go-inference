@@ -57,7 +57,7 @@ func drainSchedulerStream(tokens <-chan inference.ScheduledToken) int {
 
 func BenchmarkScheduler_Schedule_Concurrent_4Workers_32Tokens(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(32)}
-	sched := New(base, Config{MaxConcurrent: 4, MaxQueue: 64, StreamBuffer: 32})
+	sched, _ := New(base, Config{MaxConcurrent: 4, MaxQueue: 64, StreamBuffer: 32})
 	ctx := context.Background()
 	var total atomic.Int64
 	b.ReportAllocs()
@@ -76,7 +76,7 @@ func BenchmarkScheduler_Schedule_Concurrent_4Workers_32Tokens(b *testing.B) {
 
 func BenchmarkScheduler_Schedule_Concurrent_16Workers_32Tokens(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(32)}
-	sched := New(base, Config{MaxConcurrent: 16, MaxQueue: 128, StreamBuffer: 32})
+	sched, _ := New(base, Config{MaxConcurrent: 16, MaxQueue: 128, StreamBuffer: 32})
 	ctx := context.Background()
 	var total atomic.Int64
 	b.ReportAllocs()
@@ -95,7 +95,7 @@ func BenchmarkScheduler_Schedule_Concurrent_16Workers_32Tokens(b *testing.B) {
 
 func BenchmarkScheduler_Schedule_Concurrent_1Worker_32Tokens(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(32)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 256, StreamBuffer: 32})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 256, StreamBuffer: 32})
 	ctx := context.Background()
 	var total atomic.Int64
 	b.ReportAllocs()
@@ -118,7 +118,7 @@ func BenchmarkScheduler_Schedule_Concurrent_1Worker_32Tokens(b *testing.B) {
 
 func benchScheduleBurst(b *testing.B, workers int, tokens int) {
 	base := &schedBenchModel{tokens: benchTokens(tokens)}
-	sched := New(base, Config{
+	sched, _ := New(base, Config{
 		MaxConcurrent: 4,
 		MaxQueue:      workers * 2,
 		StreamBuffer:  tokens,
@@ -169,7 +169,7 @@ func BenchmarkScheduler_Burst_16Producers_256Tokens(b *testing.B) {
 
 func BenchmarkScheduler_QueueSaturation_TinyQueue(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(32)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 4})
 	ctx := context.Background()
 	var total, errs atomic.Int64
 	b.ReportAllocs()
@@ -195,7 +195,7 @@ func BenchmarkScheduler_QueueSaturation_TinyQueue(b *testing.B) {
 
 func BenchmarkScheduler_CancelRequest_NotFound_Parallel(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 4, MaxQueue: 16, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 4, MaxQueue: 16, StreamBuffer: 4})
 	ctx := context.Background()
 	var total atomic.Int64
 	b.ReportAllocs()

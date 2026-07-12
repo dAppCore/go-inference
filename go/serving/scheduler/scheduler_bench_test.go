@@ -98,7 +98,7 @@ func benchTokens(n int) []inference.Token {
 // 1 token — the dominant cost is queue+probe overhead, not token transfer.
 func BenchmarkScheduler_Generate_1Token(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -114,7 +114,7 @@ func BenchmarkScheduler_Generate_1Token(b *testing.B) {
 // 32 tokens — closer to a realistic chat reply.
 func BenchmarkScheduler_Generate_32Tokens(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(32)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 32})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 32})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -130,7 +130,7 @@ func BenchmarkScheduler_Generate_32Tokens(b *testing.B) {
 // 256 tokens — long reply; per-token label clone is the inner hot path.
 func BenchmarkScheduler_Generate_256Tokens(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(256)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 256})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 256})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -147,7 +147,7 @@ func BenchmarkScheduler_Generate_256Tokens(b *testing.B) {
 
 func BenchmarkScheduler_Schedule_1Token(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 32, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 32, StreamBuffer: 4})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -165,7 +165,7 @@ func BenchmarkScheduler_Schedule_1Token(b *testing.B) {
 
 func BenchmarkScheduler_CancelRequest_NotFound(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -180,7 +180,7 @@ func BenchmarkScheduler_CancelRequest_NotFound(b *testing.B) {
 
 func BenchmarkScheduler_Classify(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	ctx := context.Background()
 	prompts := []string{"alpha", "beta", "gamma"}
 	b.ReportAllocs()
@@ -192,7 +192,7 @@ func BenchmarkScheduler_Classify(b *testing.B) {
 
 func BenchmarkScheduler_BatchGenerate(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	ctx := context.Background()
 	prompts := []string{"alpha", "beta", "gamma"}
 	b.ReportAllocs()
@@ -206,7 +206,7 @@ func BenchmarkScheduler_BatchGenerate(b *testing.B) {
 // bench proves the scheduler layer adds no allocation over the base read.
 func BenchmarkScheduler_Accessors_InfoMetricsModelType(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

@@ -1,14 +1,32 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
 // Package scheduler is the driver-neutral request scheduler for
-// inference.TextModel. It wraps a model with bounded queueing,
-// cancellation, streaming backpressure, and scheduler probe events.
+// inference.TextModel. It is the ONE scheduling home for lem serve: one
+// constructor, one submission surface (inference.SchedulerModel.Schedule),
+// and a Mode that selects the discipline —
 //
-//	model := scheduler.New(backend, scheduler.Config{
-//	    MaxConcurrent: 4, MaxQueue: 16, StreamBuffer: 8,
-//	    RequestIDPrefix: "ide", ProbeSink: sink,
+//   - ModeSerial: a bounded-queue worker pool wrapping a TextModel with
+//     cancellation, streaming backpressure, and scheduler probe events
+//     (today's scheduler semantics — the most-tested base).
+//   - ModeBatch: continuous in-flight batching — a running set advanced one
+//     decode step per iteration under a dual concurrency + token budget
+//     (the throughput core, lifted from the former serving/schedule).
+//   - ModeInterleave: a live admission-budget scheduler — requests Submit at
+//     any time, each admitted onto its own goroutine for per-request
+//     backpressure + cancellation isolation (from the former serving/interleave).
+//
+// Mode-specific engine requirements are probed at construction: batch mode
+// (and interleave configured with a token budget) needs the model to expose
+// inference.TokenizerModel so prompt tokens can be counted for the
+// MaxBatchTokens budget — a model that lacks it fails CLOSED at New rather
+// than silently degrading the budget to a no-op. Serial mode needs only a
+// TextModel and accepts a nil model (Schedule then reports the nil).
+//
+//	m, err := scheduler.New(backend, scheduler.Config{
+//	    Mode: scheduler.ModeInterleave, MaxConcurrent: 4, MaxQueue: 16, StreamBuffer: 8,
 //	})
-//	handle, tokens, err := model.Schedule(ctx, request)
+//	if err != nil { return err }
+//	handle, tokens, err := m.Schedule(ctx, request)
 package scheduler
 
 import (
@@ -24,19 +42,58 @@ import (
 	"dappco.re/go/inference"
 )
 
-// Config configures the package-first request scheduler.
+// Mode selects the scheduling discipline. The zero value ("") is treated as
+// ModeSerial so existing single-mode constructions keep their behaviour.
+type Mode string
+
+const (
+	// ModeSerial wraps a TextModel with a bounded-queue worker pool.
+	ModeSerial Mode = "serial"
+	// ModeBatch runs continuous in-flight batching over a running set.
+	ModeBatch Mode = "batch"
+	// ModeInterleave admits requests live, each on its own goroutine.
+	ModeInterleave Mode = "interleave"
+)
+
+// Config configures the unified request scheduler. Not every field is
+// meaningful in every mode: MaxBatchTokens gates admission only in batch and
+// interleave; RequestIDPrefix/ProbeSink drive serial's request IDs and probe
+// stream. Non-positive sizings are clamped per mode so the scheduler always
+// makes progress.
 type Config struct {
-	MaxConcurrent   int
-	MaxQueue        int
-	StreamBuffer    int
-	RequestIDPrefix string
-	ProbeSink       inference.ProbeSink
+	Mode            Mode                // scheduling discipline; "" = ModeSerial
+	MaxConcurrent   int                 // serial workers / batch+interleave running-set cap
+	MaxQueue        int                 // bounded queue depth / admission backpressure room
+	MaxBatchTokens  int                 // batch+interleave running prompt-token budget; <= 0 = uncapped (batch requires > 0)
+	StreamBuffer    int                 // per-request output channel buffer
+	RequestIDPrefix string              // serial request-ID prefix (default "scheduler")
+	ProbeSink       inference.ProbeSink // serial scheduler-probe sink (nil = no probes)
 }
 
-// Model wraps an inference.TextModel with bounded queueing,
-// cancellation, streaming backpressure, and scheduler probe events.
+// Stats is a mode-neutral snapshot of a scheduler's counters, safe to read
+// concurrently with Schedule/CancelRequest. Not every counter is populated in
+// every mode (serial reports Submitted/Completed/Cancelled/Queued; batch adds
+// Admitted/Active/MaxRunning; interleave populates all but MaxRunning).
+type Stats struct {
+	Submitted  int64 // total accepted submissions
+	Admitted   int64 // total moved from queue into the running set (batch/interleave)
+	Completed  int64 // total that ran to completion
+	Cancelled  int64 // total retired by cancellation (queued or active)
+	Active     int64 // requests currently running
+	Queued     int64 // requests currently waiting for a slot
+	MaxRunning int64 // largest running-set ever co-resident (batch witness)
+}
+
+// Model wraps an inference.TextModel and schedules requests through the mode
+// selected at New. In serial mode it owns a bounded-queue worker pool; in
+// batch/interleave mode it delegates Schedule/CancelRequest to the mode engine
+// while still presenting the full TextModel surface (Generate/Chat/... route
+// through Schedule; the accessors delegate to the wrapped model).
 type Model struct {
-	base            inference.TextModel
+	base inference.TextModel
+	mode Mode
+
+	// --- serial-mode state (owned by the worker pool) ---
 	queue           chan *job
 	maxConcurrent   int
 	streamBuffer    int
@@ -63,6 +120,15 @@ type Model struct {
 
 	mu      sync.Mutex
 	lastErr error
+
+	// serial-mode counters for Stats (off the per-token hot path).
+	submitted atomic.Int64
+	completed atomic.Int64
+	cancelled atomic.Int64
+
+	// --- non-serial engines (exactly one is non-nil off serial) ---
+	batch *batchEngine
+	inter *interleaveEngine
 }
 
 // probeSinkBox wraps the sink interface so it can be stored in an
@@ -80,44 +146,89 @@ type job struct {
 	queuedAt time.Time
 }
 
-// New returns a scheduler wrapper for model. Nil models are accepted so
-// callers can construct package surfaces before a backend loads.
+// New returns a scheduler for model in cfg.Mode, or an error when the mode is
+// unknown or the model lacks a capability the mode requires. Serial mode
+// accepts a nil model so callers can construct package surfaces before a
+// backend loads; batch/interleave-with-budget require an inference.TokenizerModel.
 //
-//	scheduler := scheduler.New(model, scheduler.Config{MaxConcurrent: 4})
-func New(model inference.TextModel, cfg Config) *Model {
-	maxConcurrent := cfg.MaxConcurrent
-	if maxConcurrent <= 0 {
-		maxConcurrent = 1
+//	m, err := scheduler.New(model, scheduler.Config{Mode: scheduler.ModeBatch, MaxConcurrent: 4, MaxBatchTokens: 8192})
+func New(model inference.TextModel, cfg Config) (*Model, error) {
+	mode := cfg.Mode
+	if mode == "" {
+		mode = ModeSerial
 	}
-	maxQueue := max(cfg.MaxQueue, 0)
-	streamBuffer := max(cfg.StreamBuffer, 0)
-	prefix := core.Trim(cfg.RequestIDPrefix)
-	if prefix == "" {
-		prefix = "scheduler"
+	switch mode {
+	case ModeSerial, ModeBatch, ModeInterleave:
+	default:
+		return nil, core.E("scheduler.New", "unknown scheduler mode "+string(mode)+" (want serial|batch|interleave)", nil)
 	}
+
+	// Mode-specific capability probe — fail closed, never a silent downgrade.
+	// Batch's identity is its dual concurrency+token budget; interleave's
+	// budget is optional. Either that needs the token budget must be able to
+	// count a request's prompt tokens, which is the model's own tokeniser.
+	needsTokenBudget := mode == ModeBatch || (mode == ModeInterleave && cfg.MaxBatchTokens > 0)
+	if needsTokenBudget {
+		if _, ok := model.(inference.TokenizerModel); !ok {
+			return nil, core.E("scheduler.New", string(mode)+" mode with a token budget needs an inference.TokenizerModel to count prompt tokens; the model does not expose Encode — refusing to serve a budget that cannot engage", nil)
+		}
+	}
+
 	m := &Model{
 		base:            model,
-		queue:           make(chan *job, maxQueue),
-		maxConcurrent:   maxConcurrent,
-		streamBuffer:    streamBuffer,
-		requestIDPrefix: prefix,
+		mode:            mode,
+		maxConcurrent:   maxOrDefault(cfg.MaxConcurrent, 1),
+		streamBuffer:    max(cfg.StreamBuffer, 0),
+		requestIDPrefix: schedulerPrefix(cfg.RequestIDPrefix),
 	}
 	if cfg.ProbeSink != nil {
 		m.probeSink.Store(&probeSinkBox{sink: cfg.ProbeSink})
 	}
-	for worker := range maxConcurrent {
-		go m.worker(worker)
+
+	switch mode {
+	case ModeBatch:
+		m.batch = newBatchEngine(m, cfg)
+	case ModeInterleave:
+		m.inter = newInterleaveEngine(cfg)
+	default: // serial
+		m.queue = make(chan *job, max(cfg.MaxQueue, 0))
+		for worker := range m.maxConcurrent {
+			go m.worker(worker)
+		}
 	}
-	return m
+	return m, nil
 }
 
-// Schedule enqueues a generation request and returns its streamed tokens.
+func maxOrDefault(v, def int) int {
+	if v <= 0 {
+		return def
+	}
+	return v
+}
+
+func schedulerPrefix(prefix string) string {
+	prefix = core.Trim(prefix)
+	if prefix == "" {
+		return "scheduler"
+	}
+	return prefix
+}
+
+// Schedule enqueues a generation request and returns its streamed tokens,
+// routing through the mode selected at New.
 //
 //	handle, tokens, err := model.Schedule(ctx, request)
 func (m *Model) Schedule(ctx context.Context, req inference.ScheduledRequest) (inference.RequestHandle, <-chan inference.ScheduledToken, error) {
 	if m == nil || m.base == nil {
 		return inference.RequestHandle{}, nil, core.NewError("scheduler: model is nil")
 	}
+	switch m.mode {
+	case ModeBatch:
+		return m.scheduleBatch(ctx, req)
+	case ModeInterleave:
+		return m.scheduleInterleave(ctx, req)
+	}
+	// serial
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -138,6 +249,7 @@ func (m *Model) Schedule(ctx context.Context, req inference.ScheduledRequest) (i
 	m.register(j)
 	select {
 	case m.queue <- j:
+		m.submitted.Add(1)
 		m.emitProbe(j, "queued", 0, 0, false)
 		// handle.Labels mirrors the request's caller-supplied Labels —
 		// skip the map clone when the request has none. Saves one alloc
@@ -162,7 +274,8 @@ func (m *Model) Schedule(ctx context.Context, req inference.ScheduledRequest) (i
 	}
 }
 
-// CancelRequest cancels a queued or running request by ID.
+// CancelRequest cancels a queued or running request by ID, routing through the
+// active mode.
 //
 //	result, err := model.CancelRequest(ctx, id)
 func (m *Model) CancelRequest(_ context.Context, id string) (inference.RequestCancelResult, error) {
@@ -172,6 +285,13 @@ func (m *Model) CancelRequest(_ context.Context, id string) (inference.RequestCa
 	if core.Trim(id) == "" {
 		return inference.RequestCancelResult{Reason: "missing_id"}, nil
 	}
+	switch m.mode {
+	case ModeBatch:
+		return m.batch.cancel(id), nil
+	case ModeInterleave:
+		return m.inter.cancel(id), nil
+	}
+	// serial
 	value, ok := m.active.Load(id)
 	if !ok {
 		if cancellable, ok := m.base.(inference.CancellableModel); ok {
@@ -181,8 +301,34 @@ func (m *Model) CancelRequest(_ context.Context, id string) (inference.RequestCa
 	}
 	j := value.(*job)
 	j.cancel()
+	m.cancelled.Add(1)
 	m.emitProbe(j, "cancel", time.Since(j.queuedAt), 0, true)
 	return inference.RequestCancelResult{ID: id, Cancelled: true, Reason: "cancelled"}, nil
+}
+
+// Stats returns a mode-neutral snapshot of the scheduler's counters.
+//
+//	if s := model.Stats(); s.Submitted > 0 { … }
+func (m *Model) Stats() Stats {
+	if m == nil {
+		return Stats{}
+	}
+	switch m.mode {
+	case ModeBatch:
+		return m.batch.stats()
+	case ModeInterleave:
+		return m.inter.stats()
+	}
+	queued := int64(0)
+	if m.queue != nil {
+		queued = int64(len(m.queue))
+	}
+	return Stats{
+		Submitted: m.submitted.Load(),
+		Completed: m.completed.Load(),
+		Cancelled: m.cancelled.Load(),
+		Queued:    queued,
+	}
 }
 
 // Generate schedules a prompt request and yields tokens with scheduler
@@ -319,12 +465,37 @@ func (m *Model) Err() core.Result {
 	return m.base.Err()
 }
 
-// Close releases the wrapped model. The Result is OK with a nil Value on
-// success, or a failure carrying the error.
+// CloseEngine releases the mode engine's goroutines WITHOUT closing the wrapped
+// model — for callers (e.g. the serve resolver) that own the model's lifecycle
+// separately and only want the scheduler layer torn down.
+//
+//	model.CloseEngine()
+func (m *Model) CloseEngine() {
+	if m == nil {
+		return
+	}
+	switch m.mode {
+	case ModeBatch:
+		if m.batch != nil {
+			m.batch.close()
+		}
+	case ModeInterleave:
+		if m.inter != nil {
+			m.inter.close()
+		}
+	}
+}
+
+// Close releases the mode engine and the wrapped model. The Result is OK with
+// a nil Value on success, or a failure carrying the error.
 //
 //	model.Close()
 func (m *Model) Close() core.Result {
-	if m == nil || m.base == nil {
+	if m == nil {
+		return core.Ok(nil)
+	}
+	m.CloseEngine()
+	if m.base == nil {
 		return core.Ok(nil)
 	}
 	return m.base.Close()
@@ -397,6 +568,7 @@ func (m *Model) run(j *job) {
 			m.setErr(core.NewError(r.Error()))
 		}
 	}
+	m.completed.Add(1)
 	m.emitProbe(j, "complete", queueLatency, 0, false)
 }
 
