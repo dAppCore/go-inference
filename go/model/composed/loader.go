@@ -150,7 +150,17 @@ func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*Co
 		return nil, err
 	}
 
-	m := &ComposedModel{Embed: embed, NormF: normF, Output: output, D: D, Vocab: vocab, Eps: cfg.RMSNormEps}
+	isCohere := cfg.ModelType == "cohere" || cfg.ModelType == "cohere2"
+	m := &ComposedModel{Embed: embed, NormF: normF, Output: output, D: D, Vocab: vocab, Eps: cfg.RMSNormEps, LayerNorm: isCohere, ParallelResidual: isCohere, LogitScale: cfg.LogitScale}
+	if isCohere {
+		m.Eps = cfg.LayerNormEps
+		if m.Eps == 0 {
+			m.Eps = 1e-5
+		}
+		if m.LogitScale == 0 {
+			m.LogitScale = 0.0625
+		}
+	}
 	if m.Eps == 0 {
 		m.Eps = 1e-6
 	}
@@ -160,9 +170,12 @@ func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*Co
 		if err != nil {
 			return nil, err
 		}
-		postNorm, err := f32(lp + "post_attention_layernorm.weight")
-		if err != nil {
-			return nil, err
+		var postNorm []float32
+		if !isCohere {
+			postNorm, err = f32(lp + "post_attention_layernorm.weight")
+			if err != nil {
+				return nil, err
+			}
 		}
 		ffn, err := buildFFN(get, f32, lp+"mlp.", cfg, D)
 		if err != nil {
@@ -170,8 +183,8 @@ func LoadComposed(tensors map[string]safetensors.Tensor, configJSON []byte) (*Co
 		}
 
 		var mixer Mixer
-		if kinds[i] == "full_attention" {
-			mixer, err = buildAttn(f32, f32opt, lp+"self_attn.", cfg, D)
+		if kinds[i] == "full_attention" || kinds[i] == "sliding_attention" {
+			mixer, err = buildAttn(f32, f32opt, lp+"self_attn.", cfg, D, kinds[i])
 		} else {
 			mixer, err = buildGatedDelta(get, f32, f32opt, lp+"linear_attn.", cfg, D)
 		}
@@ -204,6 +217,19 @@ func resolveKinds(cfg *loaderConfig) ([]string, error) {
 		}
 		return out, nil
 	}
+	if cfg.ModelType == "cohere2" && cfg.SlidingWindow > 0 {
+		pattern := cfg.SlidingWindowPattern
+		if pattern == 0 {
+			pattern = 4
+		}
+		for i := range out {
+			out[i] = "sliding_attention"
+			if (i+1)%pattern == 0 {
+				out[i] = "full_attention"
+			}
+		}
+		return out, nil
+	}
 	// Dense-attention families such as Llama and Mixtral omit both hybrid selectors:
 	// every layer is full attention.
 	for i := range out {
@@ -213,7 +239,7 @@ func resolveKinds(cfg *loaderConfig) ([]string, error) {
 }
 
 // buildAttn builds a full-attention mixer; geometry from the config.
-func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, cfg *loaderConfig, D int) (Mixer, error) {
+func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, cfg *loaderConfig, D int, kind string) (Mixer, error) {
 	q, err := f32(sp + "q_proj.weight")
 	if err != nil {
 		return nil, err
@@ -243,13 +269,29 @@ func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float3
 		kvHeads = heads
 	}
 	rd := int(cfg.partialRotary() * float32(headDim))
+	if cfg.ModelType == "cohere2" && kind == "full_attention" {
+		rd = 0
+	}
 	if rd%2 != 0 {
 		rd--
+	}
+	qk := model.QKNone
+	if cfg.ModelType == "cohere" && cfg.UseQKNorm != nil && *cfg.UseQKNorm {
+		qk = model.QKLayerNorm
+	}
+	window := 0
+	if kind == "sliding_attention" {
+		window = cfg.SlidingWindow
 	}
 	return NewAttnMixer(&AttnWeights{
 		QProj: q, KProj: k, VProj: v, OProj: o,
 		QNorm: f32opt(sp + "q_norm.weight"), KNorm: f32opt(sp + "k_norm.weight"),
-	}, AttnConfig{Heads: heads, KVHeads: kvHeads, HeadDim: headDim, RotaryDim: rd, RopeTheta: cfg.ropeTheta(), NormEps: cfg.RMSNormEps, OutputGate: cfg.AttnOutputGate}), nil
+	}, AttnConfig{Heads: heads, KVHeads: kvHeads, HeadDim: headDim, RotaryDim: rd, RopeTheta: cfg.ropeTheta(), NormEps: func() float32 {
+		if cfg.LayerNormEps > 0 {
+			return cfg.LayerNormEps
+		}
+		return cfg.RMSNormEps
+	}(), OutputGate: cfg.AttnOutputGate, QKNormalization: qk, SlidingWindow: window}), nil
 }
 
 // buildGatedDelta builds a gated-delta mixer; geometry derived from the weight shapes (as metal does):

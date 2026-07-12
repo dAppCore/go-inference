@@ -36,6 +36,7 @@ type visionConfig struct {
 // loaderConfig is the arch-relevant subset of a Qwen 3.6 config.json. Text fields nest under text_config in
 // the multimodal wrapper (effective() resolves the nesting); rope lives under rope_parameters.
 type loaderConfig struct {
+	ModelType             string   `json:"model_type"`
 	HiddenSize            int      `json:"hidden_size"`
 	NumHiddenLayers       int      `json:"num_hidden_layers"`
 	IntermediateSize      int      `json:"intermediate_size"`
@@ -44,6 +45,11 @@ type loaderConfig struct {
 	HeadDim               int      `json:"head_dim"`
 	VocabSize             int      `json:"vocab_size"`
 	RMSNormEps            float32  `json:"rms_norm_eps"`
+	LayerNormEps          float32  `json:"layer_norm_eps"`
+	LogitScale            float32  `json:"logit_scale"`
+	UseQKNorm             *bool    `json:"use_qk_norm"`
+	SlidingWindow         int      `json:"sliding_window"`
+	SlidingWindowPattern  int      `json:"sliding_window_pattern"`
 	RopeTheta             float32  `json:"rope_theta"`
 	PartialRotaryFactor   float32  `json:"partial_rotary_factor"`
 	LayerTypes            []string `json:"layer_types"`

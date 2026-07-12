@@ -4,6 +4,25 @@ package model
 
 import "testing"
 
+func TestArch_QKNormalization_Good(t *testing.T) {
+	if got := (Arch{QKNormalization: QKLayerNorm}).QKNormalization; got != QKLayerNorm {
+		t.Fatalf("QKNormalization = %q, want %q", got, QKLayerNorm)
+	}
+}
+
+func TestArch_QKNormalization_Bad(t *testing.T) {
+	if got := (Arch{}).QKNormalization; got != QKNone {
+		t.Fatalf("zero-value QKNormalization = %q, want none", got)
+	}
+}
+
+func TestArch_QKNormalization_Ugly(t *testing.T) {
+	const unknown QKNormalization = "unknown"
+	if got := (Arch{QKNormalization: unknown}).QKNormalization; got != unknown {
+		t.Fatalf("declared QKNormalization = %q, want preserved %q", got, unknown)
+	}
+}
+
 // TestResolveMoEGating covers the gating default: an unset gating resolves to
 // MoEGatingSoftmax (the only router variant the metal engine ships, and gemma4's
 // method), while an explicitly-declared gating passes through unchanged — the path

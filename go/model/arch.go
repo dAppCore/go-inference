@@ -19,6 +19,17 @@ const (
 	SlidingAttention                      // sliding_attention — windowed
 )
 
+// QKNormalization declares the per-head operation applied to projected queries
+// and keys before rotary position encoding. It is an architecture property, not
+// inferred from the presence of weights: Cohere's LayerNorm may be enabled by a
+// config switch, while most families use no QK operation.
+type QKNormalization string
+
+const (
+	QKNone      QKNormalization = ""
+	QKLayerNorm QKNormalization = "layer_norm"
+)
+
 // LayerSpec declares one decode layer's structure, backend-agnostic.
 type LayerSpec struct {
 	Attention   AttentionType
@@ -108,15 +119,17 @@ type Arch struct {
 	RopeOriginalContext                        int       // positions below this boundary use RopeShortFreqs; 0 = one static table
 	SoftCap                                    float32   // final logit soft-cap (0 = none)
 	SlidingWindow                              int
-	PerLayerInputVocab, PerLayerInputHidden    int    // per-layer-input aux embedding (0 = absent)
-	AttentionKEqV                              bool   // K == V (shared projection)
-	ValueNorm                                  bool   // an arch may apply a no-scale per-head RMSNorm to V (metal's RMSNormNoScale); most don't
-	ParallelResidual                           bool   // attention and MLP consume the same normalised input, then both outputs join the residual
-	ALiBi                                      bool   // attention uses linear position bias instead of rotary embeddings
-	TieWordEmbeddings                          *bool  // nil = checkpoint presence decides; non-nil validates lm_head against config.json
-	LearnedAbsolutePositions                   bool   // token embeddings are offset by a learned position table
-	MultiQueryAttention                        bool   // one K/V head is shared by every query head
-	Activation                                 string // declared feed-forward activation (for example gelu_new)
+	PerLayerInputVocab, PerLayerInputHidden    int             // per-layer-input aux embedding (0 = absent)
+	AttentionKEqV                              bool            // K == V (shared projection)
+	ValueNorm                                  bool            // an arch may apply a no-scale per-head RMSNorm to V (metal's RMSNormNoScale); most don't
+	ParallelResidual                           bool            // attention and MLP consume the same normalised input, then both outputs join the residual
+	ALiBi                                      bool            // attention uses linear position bias instead of rotary embeddings
+	TieWordEmbeddings                          *bool           // nil = checkpoint presence decides; non-nil validates lm_head against config.json
+	LearnedAbsolutePositions                   bool            // token embeddings are offset by a learned position table
+	MultiQueryAttention                        bool            // one K/V head is shared by every query head
+	Activation                                 string          // declared feed-forward activation (for example gelu_new)
+	QKNormalization                            QKNormalization // per-head Q/K normalisation before position encoding
+	LogitScale                                 float32         // final LM-head multiplier (0 = backend default 1)
 	Layer                                      []LayerSpec
 }
 

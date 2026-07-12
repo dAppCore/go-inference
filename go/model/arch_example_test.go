@@ -4,6 +4,14 @@ package model
 
 import core "dappco.re/go"
 
+// ExampleQKNormalization shows how an architecture declares Cohere's
+// mean-centred per-head Q/K operation without tying it to a family package.
+func ExampleQKNormalization() {
+	a := Arch{QKNormalization: QKLayerNorm}
+	core.Println(a.QKNormalization)
+	// Output: layer_norm
+}
+
 // ExampleLayerSpec_OwnsCache shows the owner/sharer distinction: a non-negative
 // CacheIndex means this layer holds its own KV cache; -1 means it reads another
 // layer's (see KVShareFrom).
