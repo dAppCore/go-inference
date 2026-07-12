@@ -200,6 +200,47 @@ func DFlashDraftNotice(det DraftDetection) string {
 		det.DraftPath, cfg.BlockSize, len(cfg.AuxHiddenLayerIDs), verifier)
 }
 
+// DFlashEngineProbe reports whether the compiled-in engine can RUN a DFlash
+// block-diffusion drafter end to end over a serving session — the block-parallel
+// proposal AND the fused verifier-hidden extraction the proposal conditions on. serve
+// consults it to decide whether a detected DFlash drafter ARMS the block-diffusion
+// lane or degrades to plain autoregressive with an honest notice. It defaults to
+// "unsupported" so a build without the forward — or one whose live-session aux tap is
+// not yet non-corrupting (docs/design-dflash.md) — declines truthfully rather than
+// arming a lane it cannot run losslessly. The engine flips it, in one place, once it
+// drives the lane correctly over a live session; the block forward itself is already
+// built and proven (engine/metal/assistant_dflash*.go). This is the kill switch: with
+// the probe down, an explicit --draft to a DFlash pack still declines honestly.
+var DFlashEngineProbe = func() bool { return false }
+
+// ArmDFlash reports whether a detected DFlash drafter should engage the live
+// block-diffusion lane: it is a DFlash checkpoint AND the engine declares it can run
+// one (DFlashEngineProbe). For a DFlash drafter the engine cannot yet run, this is
+// false and serve degrades to plain autoregressive with DFlashDraftNotice — the honest
+// decline, never a misload onto the autoregressive MTP lane.
+func ArmDFlash(det DraftDetection) bool {
+	return det.IsDFlash() && DFlashEngineProbe()
+}
+
+// DFlashActiveNotice is the boot notice for an ARMED DFlash drafter: the engine's
+// block-diffusion draft forward proposes a whole block per readout and the target
+// verifies it with the ordinary greedy prefix-accept, so the emitted sequence stays
+// byte-identical to plain decode (lossless) — the drafter changes only speed, never
+// which tokens. Returns "" when det is not a DFlash drafter. Shared by the serve and
+// generate boot paths, the armed twin of DFlashDraftNotice.
+func DFlashActiveNotice(det DraftDetection) string {
+	cfg, ok := DetectDFlashDraft(det.DraftPath)
+	if !ok {
+		return ""
+	}
+	verifier := ""
+	if cfg.Verifier != "" {
+		verifier = ", verifier " + cfg.Verifier
+	}
+	return core.Sprintf("DFlash block-diffusion lane ACTIVE — drafter %s (block %d, %d fused verifier layers%s); each proposed block is greedy-prefix verified against the target, so output stays byte-identical to plain decode (lossless). See docs/design-dflash.md",
+		det.DraftPath, cfg.BlockSize, len(cfg.AuxHiddenLayerIDs), verifier)
+}
+
 // speculativeServeNotice reports the ACTIVE MTP pair at boot: which drafter
 // engaged, which ladder rung chose it, and the draft block the verify forwards
 // will run. Drafterless serves return "". The pair loads lazily with the model —
