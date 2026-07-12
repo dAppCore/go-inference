@@ -442,3 +442,113 @@ newly-admitted request's first pull pays its prefill inside the round (briefly
 stalling peers), and a stalled consumer backpressures the whole set — which is
 exactly why `interleave` (per-request goroutines) remains the other mode rather
 than being folded into batch.
+
+## Slice 3 — the multi-session owner, BUILT (#35, 2026-07-12)
+
+The slice-3 audit above stopped at the deep-surgery fence; this round builds
+across it. What shipped is a real multi-session state owner in `engine/metal`, a
+neutral capability the scheduler probes, and receipts.
+
+### The owner — `engine/metal/lane_set.go` (`laneSet`)
+
+Shared vs lane-owned, the separation the audit demanded:
+
+- **Shared immutable (weights).** Each lane is an `ArchSession` opened from the
+  SAME `NativeTokenModel` (`openLaneSession` → `model.openSession(shards, headEnc)`),
+  so the resident weight buffers — keyed by mmap address in the process-global
+  `residentBufs` cache (`attention.go`), read-only during decode — are the SAME
+  device buffers for every lane. No new sharing mechanism; the engine already
+  shared weights across sessions, it lacked an owner ABOVE them.
+- **Lane-owned mutable.** Each lane owns its `archDecodeState` (recorded-ICB
+  decode caches, per-lane scratch), its scalar `pos`, its sampler/greedy state,
+  its per-lane embed/PLE scratch.
+
+The forward (`Step`) advances every active lane by one token through ONE shared
+command buffer. The seam is `archICBReplay.encodeStepBody(enc, emb, pos, pli)`
+(`decode_forward_arch_icb.go:663`), which replays a lane's recorded ICB into an
+EXTERNAL encoder without committing (the MTP chained-decode path already uses
+it). `Step` phase 1 produces each lane's token from its current hidden
+(`greedyFromHiddenInPool` — the same per-lane op the serial loop runs); phase 2
+replays every still-live lane's ICB into a single encoder and commits + waits
+ONCE. K lanes cost one GPU submission, not K commit/wait round-trips, and the
+GPU may pipeline the lanes' disjoint executions.
+
+**Why it is byte-identical, not a K-serial-steps fake:** a lane replays its OWN
+recorded ICB over its OWN caches at its OWN position — the exact GPU commands
+`ArchSession.Step` runs for that lane alone. Lanes touch disjoint device buffers
+(only read-only weights are shared), so fusing them into one command buffer
+changes submission and scheduling, never arithmetic. A monotonic
+`BatchForwardCount` (+1 per `Step`) proves the K-way path fired: the batched run
+advances K lanes with the forward count of a SINGLE lane, not K× it.
+
+Ragged admission is supported (`Prepare` between `Step`s). Prefill rides the same
+per-token ICB `stepBody` the decode replays, so a lane's caches are populated
+exactly as `Step` reads them regardless of which production prefill route a
+batched prefill would take (batched-prefill admission is the pinned slice-2 rung).
+
+### The capability seam
+
+- `inference.BatchStepModel` (`go/batch_step.go`) — neutral, zero-dep, alongside
+  `SchedulerModel`/`TokenizerModel`: `BatchStepAvailable() bool` +
+  `OpenLaneSet(cfg) (LaneSet, error)` + the `LaneSet`/`LaneSpec`/`LaneStep`
+  contract. `OpenLaneSet` REFUSES with a clear error when unavailable — never a
+  silent serial degrade.
+- `engine.TextModel` (`go/engine/batch_step.go`) implements it, delegating to the
+  metal model's `LaneSetOpener` (structural — the backend never imports engine).
+- **Kill switch:** `engine.batchStepKillSwitch()` reads `LTHN_CB_STEP`; the EXACT
+  value `0` makes `BatchStepAvailable` report false and `OpenLaneSet` refuse. The
+  gate is an availability method, NOT a wrapper type, deliberately: wrapping the
+  model to add/remove the interface would strip its other optional capabilities
+  (the registry capability-stripping bug class) — probe-then-check keeps every
+  capability reachable on one value.
+
+### Scheduler wiring — interleave mode probes it
+
+`serving/scheduler` interleave mode probes `base.(inference.BatchStepModel)` +
+`BatchStepAvailable()` + `TokenizerModel` at `New`; present ⇒ it builds a
+`cbStepEngine` (`cb_step.go`) — a single goroutine that owns one `LaneSet` and
+drives every admitted request through it (ragged `Prepare`, one shared `Step`
+per round, per-request token channels, cancel, close). CB-eligible requests (raw
+prompt, greedy) route there; chat (the neutral `TextModel` surface exposes no
+template render) and non-greedy fall to the UNCHANGED plain interleave engine.
+When the capability is absent — the common case, and whenever `LTHN_CB_STEP=0` —
+`cbEngine` is nil and interleave mode is byte-for-byte the plain per-request
+engine (52 existing scheduler tests still green; serial/batch modes untouched).
+
+### Receipts
+
+- **Byte-identity (counter-guarded), synthetic dense fixture** —
+  `lane_set_test.go`: the same lane specs (varied prompt content AND length)
+  produce the SAME per-lane token streams run alone (K=1) or all together (K>1);
+  `BatchForwardCount` advances by one per step, not K; the owner also matches
+  production `ArchSession.Generate` greedy token-for-token. Both PASS on GPU.
+- **Coordinator (race-clean), fake lane set** — `cb_step_test.go`: interleave
+  mode drives K raw-prompt greedy requests through one shared lane set (one
+  forward per round, far fewer than K×maxNew); chat and unavailable/kill-switch
+  fall back with no lane admitted. All PASS `-race`.
+- **Throughput A/B on real E2B** — `lane_set_ab_test.go` (4 concurrent, temp 0,
+  maxNew 64, prompt 24 tok, prefill included): serial one-lane-at-a-time
+  **45.9 tok/s** aggregate vs batched four-lanes-one-forward **118.3 tok/s**
+  aggregate = **2.58× aggregate speedup**, output byte-identical, 63 batched
+  forwards (one per step). This CONVERTS §d's open assumption into a receipt: the
+  dense ICB path IS submission-bound enough at K=4 that fusing lanes into one
+  command buffer is a real win, even before weight-read-once GEMM batching.
+
+### Pinned gaps (evidenced, the next rungs)
+
+1. **Weight-read-once GEMM batching.** The fused-ICB forward SHARES weights but
+   reads each weight matrix once per lane per layer (K reads/layer). Sweeping the
+   weight once for all K lanes needs the batched-projection + per-lane-SDPA
+   rewrite: `decode_batched_session.go:1108-1216` binds the batched attention to
+   ONE cache + a shared `basePos`, so per-lane KV bindings/positions/live-lengths
+   are new surface, not a parameter tweak. The 2.58× above is the CB-count win;
+   this is the compute-density ceiling on top of it.
+2. **Non-ICB arches.** The external-encoder fusion needs the ICB `encodeStepBody`
+   seam; a non-ICB `stepToken` opens its own command buffer. MoE (12B/26B) and
+   COMPOSED/hybrid decode fall outside the owner today — `Prepare` refuses them.
+3. **Batched prefill admission** (slice 2) and a **batched head** (phase 1 runs K
+   per-lane greedy heads; small vs the fused body, but foldable).
+4. **Serve integration.** The `cbStepEngine` serves raw-prompt greedy; chat
+   template rendering, incremental detokenisation, and per-request non-greedy
+   sampler state are the serve-layer rungs before the CB path is the default
+   interleave discipline.
