@@ -2071,10 +2071,12 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseChunks(ids []int32, scope
 		if n < len(ids) {
 			s.state.prefillSkipToLayer = skipTo
 		}
+		chunkStart := time.Now()
 		nextHidden, ok, err := s.prefillRetainedTokensBatchedDenseOne(ids[:n], scope)
 		if err != nil || !ok {
 			return nil, ok, err
 		}
+		hostSpan("chunk", chunkStart, n)
 		if argmaxDebugEnabled() {
 			if nan, first := bf16NaNScanBytes(nextHidden); nan > 0 {
 				nativeTraceLog(core.Sprintf("argmax-diag: batched prefill chunk %d (rows %d, pos now %d): boundary hidden NaN=%d first=%d\n",
@@ -2302,6 +2304,7 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseOne(ids []int32, scope st
 		dst = pinned.bytes[:s.arch.Hidden*bf16Size]
 		retained = true
 	}
+	stepStart := time.Now()
 	withAutoreleasePool(func() {
 		if pleBuf != nil {
 			s.state.prefillPLESlabDevice = pleBuf
@@ -2323,6 +2326,7 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseOne(ids []int32, scope st
 			hidden, ok, err = s.state.stepTokensBatchedDenseLastInto(embs, s.pos, dst)
 		}
 	})
+	hostSpan("chunk.step", stepStart, len(ids))
 	if err != nil || !ok {
 		return nil, ok, err
 	}

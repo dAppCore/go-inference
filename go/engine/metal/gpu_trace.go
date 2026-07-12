@@ -35,9 +35,11 @@ type batchedGPUTrace struct {
 func gpuTraceEnabled() bool { return os.Getenv("LTHN_GPU_TRACE") != "" }
 
 // newBatchedGPUTrace adopts the pass's opening command buffer under the first stage name.
-// Returns nil when tracing is off — every method is nil-safe.
+// Returns nil when tracing is off — every method is nil-safe. LTHN_GPU_TRACE=host arms
+// the HOST spans only (hostSpan lines) without the per-segment command-buffer splitting,
+// so wall-vs-seam decomposition reads at production GPU fidelity (#381 seams).
 func newBatchedGPUTrace(cb metal.MTLCommandBufferObject, first string) *batchedGPUTrace {
-	if !gpuTraceEnabled() {
+	if !gpuTraceEnabled() || os.Getenv("LTHN_GPU_TRACE") == "host" {
 		return nil
 	}
 	return &batchedGPUTrace{cb: cb, stage: first, seconds: map[string]float64{}}
