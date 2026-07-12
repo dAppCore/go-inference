@@ -5,6 +5,7 @@ package phi
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	_ "dappco.re/go/inference/model/phi/gguf"
 	"dappco.re/go/inference/model/safetensors"
 )
 
