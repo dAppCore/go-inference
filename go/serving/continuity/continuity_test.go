@@ -38,6 +38,113 @@ func (decliningSessionHandle) Reset()       {}
 func (decliningSessionHandle) Close() error { return nil }
 func (decliningSessionHandle) Err() error   { return nil }
 
+// countingSessionHandle is a decliningSessionHandle that records how many times
+// Close was called — the seam residentConversation.close and the eviction path
+// close through, so the count proves the handle was actually released.
+type countingSessionHandle struct {
+	decliningSessionHandle
+	closed int
+}
+
+func (h *countingSessionHandle) Close() error { h.closed++; return nil }
+
+// fakeSessionFactory is the inference.SessionFactory Manager.newConversation
+// consumes: NewSession hands back handle (nil to exercise the nil-session
+// guard) and counts its calls.
+type fakeSessionFactory struct {
+	handle inference.SessionHandle
+	calls  int
+}
+
+func (f *fakeSessionFactory) NewSession() inference.SessionHandle {
+	f.calls++
+	return f.handle
+}
+
+var _ inference.SessionFactory = (*fakeSessionFactory)(nil)
+
+// TestResidentConversationClose gates the close seam both ways: a
+// conversation holding only a raw handle closes the handle directly, and one
+// holding a session.Session closes through the session (which releases the same
+// underlying handle). Close must reach the handle exactly once on each path.
+func TestResidentConversationClose(t *testing.T) {
+	// handle-only branch: no session wrapper.
+	rawHandle := &countingSessionHandle{}
+	(&residentConversation{handle: rawHandle}).close()
+	if rawHandle.closed != 1 {
+		t.Fatalf("handle-only close: handle.closed = %d, want 1", rawHandle.closed)
+	}
+
+	// session branch: the wrapper is closed, which releases the handle beneath.
+	sessHandle := &countingSessionHandle{}
+	(&residentConversation{sess: session.New(sessHandle, spine.ModelInfo{}, nil), handle: sessHandle}).close()
+	if sessHandle.closed != 1 {
+		t.Fatalf("session close: underlying handle.closed = %d, want 1", sessHandle.closed)
+	}
+
+	// A conversation with neither is inert — no panic.
+	(&residentConversation{}).close()
+}
+
+// TestManagerNewConversation gates fresh-session construction: a working
+// factory yields a busy conversation with both the handle and its session view
+// set, and a factory returning a nil session errors instead of handing back a
+// conversation that would nil-panic on first use.
+func TestManagerNewConversation(t *testing.T) {
+	m := &Manager{factory: &fakeSessionFactory{handle: &countingSessionHandle{}}}
+	conv, err := m.newConversation()
+	if err != nil {
+		t.Fatalf("newConversation: %v", err)
+	}
+	if conv.handle == nil || conv.sess == nil {
+		t.Fatal("newConversation must set both the handle and its session view")
+	}
+	if !conv.busy {
+		t.Fatal("a fresh conversation must start busy (owned by the acquiring turn)")
+	}
+
+	nilFactory := &Manager{factory: &fakeSessionFactory{handle: nil}}
+	if _, err := nilFactory.newConversation(); err == nil {
+		t.Fatal("a nil session from the factory must error, not return a conversation")
+	}
+}
+
+// TestManagerRemoveOrderLocked gates the eviction-order bookkeeping: removing a
+// key drops exactly that entry and preserves the rest's order, at the front,
+// middle, and tail; an absent key is a no-op.
+func TestManagerRemoveOrderLocked(t *testing.T) {
+	eq := func(got, want []string) bool {
+		if len(got) != len(want) {
+			return false
+		}
+		for i := range got {
+			if got[i] != want[i] {
+				return false
+			}
+		}
+		return true
+	}
+	cases := []struct {
+		name   string
+		order  []string
+		remove string
+		want   []string
+	}{
+		{"middle", []string{"a", "b", "c"}, "b", []string{"a", "c"}},
+		{"front", []string{"a", "b", "c"}, "a", []string{"b", "c"}},
+		{"tail", []string{"a", "b", "c"}, "c", []string{"a", "b"}},
+		{"absent", []string{"a", "b"}, "z", []string{"a", "b"}},
+		{"last remaining", []string{"only"}, "only", []string{}},
+	}
+	for _, tc := range cases {
+		m := &Manager{order: append([]string(nil), tc.order...)}
+		m.removeOrderLocked(tc.remove)
+		if !eq(m.order, tc.want) {
+			t.Errorf("%s: order = %v, want %v", tc.name, m.order, tc.want)
+		}
+	}
+}
+
 // TestConversationTurnSplit gates the prefix/tail boundary: the trailing run
 // of user/tool messages is the new turn; everything before it is the prefix a
 // prior turn's retained state covers.
