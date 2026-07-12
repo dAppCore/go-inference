@@ -699,3 +699,73 @@ func TestMemory_InMemoryStore_Concurrent_Good(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// --- Delete + ChunkCount (state.Deleter, for DedupStore reclamation) ---------
+
+// TestMemory_InMemoryStore_Delete_Good removes a chunk and its URI alias, and
+// asserts ChunkCount drops — the reclamation DedupStore drives once a content
+// chunk's last reference is released.
+func TestMemory_InMemoryStore_Delete_Good(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryStore(nil)
+
+	ref, err := store.PutBytes(ctx, []byte("payload"), PutOptions{URI: "blk/0"})
+	if err != nil {
+		t.Fatalf("PutBytes error = %v", err)
+	}
+	if got := store.ChunkCount(); got != 1 {
+		t.Fatalf("ChunkCount before Delete = %d, want 1", got)
+	}
+	if err := store.Delete(ctx, ref.ChunkID); err != nil {
+		t.Fatalf("Delete error = %v", err)
+	}
+	if got := store.ChunkCount(); got != 0 {
+		t.Fatalf("ChunkCount after Delete = %d, want 0", got)
+	}
+	if _, err := store.ResolveBytes(ctx, ref.ChunkID); err == nil {
+		t.Fatal("ResolveBytes after Delete error = nil, want not-found")
+	}
+	if _, err := store.ResolveURI(ctx, "blk/0"); err == nil {
+		t.Fatal("ResolveURI after Delete error = nil, want the alias dropped")
+	}
+}
+
+// TestMemory_InMemoryStore_Delete_Ugly asserts deleting a missing id and a
+// cancelled-context call behave — a no-op and a context error respectively.
+func TestMemory_InMemoryStore_Delete_Ugly(t *testing.T) {
+	store := NewInMemoryStore(nil)
+	if err := store.Delete(context.Background(), 404); err != nil {
+		t.Fatalf("Delete(missing id) error = %v, want no-op", err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.Delete(cancelled, 1); err == nil {
+		t.Fatal("Delete(cancelled ctx) error = nil, want context error")
+	}
+}
+
+// TestMemory_InMemoryStore_ChunkCount_Good tracks the live-id count across
+// writes through both write paths and a Delete.
+func TestMemory_InMemoryStore_ChunkCount_Good(t *testing.T) {
+	ctx := context.Background()
+	store := NewInMemoryStore(nil)
+	if got := store.ChunkCount(); got != 0 {
+		t.Fatalf("ChunkCount(empty) = %d, want 0", got)
+	}
+	if _, err := store.Put(ctx, "text", PutOptions{}); err != nil {
+		t.Fatalf("Put error = %v", err)
+	}
+	ref, err := store.PutBytes(ctx, []byte("bytes"), PutOptions{})
+	if err != nil {
+		t.Fatalf("PutBytes error = %v", err)
+	}
+	if got := store.ChunkCount(); got != 2 {
+		t.Fatalf("ChunkCount after two writes = %d, want 2", got)
+	}
+	if err := store.Delete(ctx, ref.ChunkID); err != nil {
+		t.Fatalf("Delete error = %v", err)
+	}
+	if got := store.ChunkCount(); got != 1 {
+		t.Fatalf("ChunkCount after Delete = %d, want 1", got)
+	}
+}
