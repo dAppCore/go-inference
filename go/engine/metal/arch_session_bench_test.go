@@ -1465,3 +1465,62 @@ func BenchmarkArchSessionSuppressionScratchExtraCovered(b *testing.B) {
 		sampleSuppressBenchSink = out
 	}
 }
+
+// BenchmarkArchSessionPrefillTokenEmbeddingsBidirSpan measures the bidirectional image/video span
+// prefill lane (#30 r4, arch_session_retained_test.go's TestArchSessionPrefillTokenEmbeddingsBidir
+// SpanEngages) — prefillRetainedEmbeddingsBidir/-Chunk's chunk-boundary-adjustment + per-row cap
+// construction against BenchmarkArchSessionPrefillTokenEmbeddings' plain causal cost (below):
+// same session shape, only bidirSpanTokens differs, so the delta isolates the span bookkeeping
+// (bidirTokenSpans + the caps slice build) from ordinary causal batched-dense prefill.
+func BenchmarkArchSessionPrefillTokenEmbeddingsBidirSpan(b *testing.B) {
+	requireNativeRuntime(b)
+	const spanTok = 9
+	ids := []int32{1, 2, spanTok, spanTok, spanTok, 3, 4}
+	sess := newBidirSpanFixture(b)
+	sess.bidirSpanTokens = [2]int32{spanTok, 0}
+	embeddings := make([][]byte, len(ids))
+	for i, id := range ids {
+		emb, err := sess.embedID(id)
+		if err != nil {
+			b.Fatalf("embedID(%d): %v", id, err)
+		}
+		embeddings[i] = append([]byte(nil), emb...)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := sess.PrefillTokenEmbeddings(ids, embeddings); err != nil {
+			b.Fatal(err)
+		}
+		archSessionHiddenBenchSink = sess.retainedHidden
+	}
+}
+
+// BenchmarkArchSessionPrefillTokenEmbeddings is BenchmarkArchSessionPrefillTokenEmbeddingsBidirSpan's
+// causal control: identical session shape and ids, bidirSpanTokens left zero so
+// prefillRetainedTokenEmbeddings takes the ordinary prefillRetainedEmbeddingsBatchedDense/
+// StepWithID lane instead.
+func BenchmarkArchSessionPrefillTokenEmbeddings(b *testing.B) {
+	requireNativeRuntime(b)
+	const spanTok = 9
+	ids := []int32{1, 2, spanTok, spanTok, spanTok, 3, 4}
+	sess := newBidirSpanFixture(b)
+	embeddings := make([][]byte, len(ids))
+	for i, id := range ids {
+		emb, err := sess.embedID(id)
+		if err != nil {
+			b.Fatalf("embedID(%d): %v", id, err)
+		}
+		embeddings[i] = append([]byte(nil), emb...)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := sess.PrefillTokenEmbeddings(ids, embeddings); err != nil {
+			b.Fatal(err)
+		}
+		archSessionHiddenBenchSink = sess.retainedHidden
+	}
+}

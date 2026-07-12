@@ -4277,3 +4277,33 @@ func TestHeadEncoderQuantSampleTopKCandidatesMatchesFullHead(t *testing.T) {
 		}
 	}
 }
+
+// TestBidirTokenSpans is a direct table test of the pure span-extraction function bidirTokenSpans
+// (#30 r4): no session or fixture needed. Cases cover every branch — the toks={0,0} disabled
+// guard, a run that never matches either span token, a single contiguous span ending mid-slice,
+// a span left open at the end of ids, two SEPARATE runs of the same span token (a non-span gap
+// resets start), and two DIFFERENT span tokens immediately adjacent with no gap (the transition
+// arm that both closes the old span and opens a new one in the same iteration).
+func TestBidirTokenSpans(t *testing.T) {
+	cases := []struct {
+		name string
+		ids  []int32
+		toks [2]int32
+		want [][2]int
+	}{
+		{"disabled when both tokens are zero", []int32{1, 5, 5, 2}, [2]int32{0, 0}, nil},
+		{"no id matches either span token", []int32{1, 2, 3}, [2]int32{5, 6}, nil},
+		{"single contiguous span ending mid-slice", []int32{1, 2, 5, 5, 5, 3}, [2]int32{5, 0}, [][2]int{{2, 5}}},
+		{"span left open at the end", []int32{1, 5, 5}, [2]int32{5, 0}, [][2]int{{1, 3}}},
+		{"two separate runs of the same span token", []int32{5, 5, 1, 1, 5}, [2]int32{5, 0}, [][2]int{{0, 2}, {4, 5}}},
+		{"two different span tokens adjacent with no gap", []int32{7, 8, 1}, [2]int32{7, 8}, [][2]int{{0, 1}, {1, 2}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := bidirTokenSpans(tc.ids, tc.toks)
+			if !slices.EqualFunc(got, tc.want, func(a, b [2]int) bool { return a == b }) {
+				t.Fatalf("bidirTokenSpans(%v, %v) = %v, want %v", tc.ids, tc.toks, got, tc.want)
+			}
+		})
+	}
+}

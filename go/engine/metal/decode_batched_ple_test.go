@@ -146,6 +146,66 @@ func newBatchedPLEQuantFixture(t testing.TB) *ArchSession {
 	return sess
 }
 
+// newBatchedPLEQuantFixtureShared is the quant twin of newBatchedPLEBF16FixtureShared: a 4-bit
+// gemma4 arch WITH the per-layer-input tower, a clean trailing KV-shared suffix of kvShared
+// layers (0 = none, mirroring the bf16 fixture), and an explicit sliding window. Unlike the bf16
+// sibling, slidingWindow is a real parameter (not implicit 0): the #381 BOUNDED per-layer-input
+// build (per_layer_batch.go's perLayerInputsBatchQuantEncode, nOut < numLayers at ~line 464) only
+// ever runs when a prefill crosses the sliding-window ring wrap into multiple chunks — a
+// kvShared-only fixture (newBatchedPLEQuantFixture's plain 2-layer shape, or this one called with
+// slidingWindow=0) never leaves prefillRetainedTokensBatchedDenseOne, so nOut always equals
+// numLayers (the unbounded arm r3 already covers). Layers are ALL sliding_attention (not the
+// mixed sliding/full real E2B pattern) so the fixture needs no per-attention-type RoPE — only an
+// OWNING sliding layer is required for verifyBatchedCrossesSlidingRingWrap to engage.
+func newBatchedPLEQuantFixtureShared(t testing.TB, kvShared, slidingWindow int) *ArchSession {
+	t.Helper()
+	requireNativeRuntime(t)
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 64, 256, 32
+	const numLayers, pliDim, gs, bits = 4, 64, 64, 4
+	const maxLen = 128
+	layerTypes := make([]string, numLayers)
+	for i := range layerTypes {
+		layerTypes[i] = "sliding_attention"
+	}
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim,
+		VocabSize: vocab, RMSNormEps: 1e-6,
+		HiddenSizePerLayerInput: pliDim, VocabSizePerLayerInput: vocab,
+		Quantization:      &model.QuantConfig{GroupSize: gs, Bits: bits},
+		NumKVSharedLayers: kvShared,
+		SlidingWindow:     slidingWindow,
+		LayerTypes:        layerTypes,
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	ts := quantGemma4Tensors(t, arch, gs, bits)
+	addPLETensors(t, ts, arch, gs, bits)
+	lm, err := model.Assemble(ts, arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("model.Assemble: %v", err)
+	}
+	g, err := loadedToQuant(lm, gs, bits)
+	if err != nil {
+		t.Fatalf("loadedToQuant: %v", err)
+	}
+	if !g.HasPLE() {
+		t.Fatal("fixture model should have PLE")
+	}
+	sess, err := NewArchQuantSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchQuantSession: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+	// mirrors newBatchedPLEQuantFixture: force the batched-dense lane on rather than the
+	// recorded-ICB replay, so this suite pins the batched-dense body (and, via the sliding
+	// window, the chunked skip-suffix body) itself.
+	sess.state.icb = nil
+	return sess
+}
+
 // quantBatchedPLEIDs returns a token batch at/above steelGEMMMinRows: below that floor
 // perLayerInputsBatchQuantEncode declines and the quant slab builders never engage, silently
 // degrading this suite back to the already-tested per-token PerLayerInputs chain
@@ -153,6 +213,18 @@ func newBatchedPLEQuantFixture(t testing.TB) *ArchSession {
 func quantBatchedPLEIDs() []int32 {
 	const vocab = 32
 	ids := make([]int32, steelGEMMMinRows+8)
+	for i := range ids {
+		ids[i] = int32((i*7 + 3) % vocab)
+	}
+	return ids
+}
+
+// quantBatchedPLESharedIDs is quantBatchedPLEIDs parametrised by count: the shared-suffix
+// bounded-chunk test needs an EXACT multiple of the sliding window (so the chunk split lands
+// where the test expects it), not just steelGEMMMinRows+8.
+func quantBatchedPLESharedIDs(n int) []int32 {
+	const vocab = 32
+	ids := make([]int32, n)
 	for i := range ids {
 		ids[i] = int32((i*7 + 3) % vocab)
 	}
@@ -762,5 +834,83 @@ func TestVerifyBatchedEngagesQuantPLE(t *testing.T) {
 	}
 	if greedySess.Pos() != 0 {
 		t.Fatalf("verifyBatchedInto advanced pos to %d, want 0 (verify must not commit)", greedySess.Pos())
+	}
+}
+
+// TestPrefillRetainedTokensBatchedDenseChunksEngagesQuantPLEBoundedSlab is the quant-PLE
+// analogue of arch_session_test.go's TestArchSessionPrefillChunksSkipSharedSuffix (#30 r4): a
+// 4-bit gemma4 arch WITH the per-layer-input tower, a clean 2-of-4 trailing KV-shared suffix, and
+// a sliding window small enough that a steel-floor-sized prompt crosses the ring wrap into TWO
+// chunks. The non-final (steelGEMMMinRows-sized) chunk arms state.prefillSkipToLayer =
+// sharedSuffix, which prefillInputsDevice threads into perLayerInputBatchDevice's outLayers bound
+// — the ONLY route (#381) that drives perLayerInputsBatchQuantEncode with nOut < numLayers on a
+// real session (per_layer_batch.go ~464-472: the "plain" quant-PLE profile this fixture builds
+// has projPacked == nil, so the bounded arm engages unconditionally once nOut < numLayers).
+// TestPrefillRetainedTokensBatchedDenseEngagesQuantPLEAndMatchesSequential (r3, above) runs a
+// single 40-row chunk and never sees this branch: nOut == numLayers there because the whole
+// prompt lands in one unbounded chunk. LTHN_PREFILL_WINDOWS=1 keeps the "wide" chunk unit at
+// exactly one window (sized to steelGEMMMinRows) so the fixture stays at 64 tokens rather than
+// the 256+ the production default (up to 8 windows) would need to observe the same split.
+func TestPrefillRetainedTokensBatchedDenseChunksEngagesQuantPLEBoundedSlab(t *testing.T) {
+	requireNativeRuntime(t)
+	t.Setenv("LTHN_PREFILL_WINDOWS", "1")
+	const window = steelGEMMMinRows // 32: one window == one steel-floor chunk
+	const kvShared = 2
+	control := newBatchedPLEQuantFixtureShared(t, kvShared, window)
+	candidate := newBatchedPLEQuantFixtureShared(t, kvShared, window)
+	if candidate.arch.PerLayerInputHidden == 0 {
+		t.Fatal("fixture lost its per-layer-input tower — this parity no longer exercises quant PLE")
+	}
+	if candidate.perLayerInputBatchDevice == nil {
+		t.Fatal("fixture lost its quant PLE device closure — arch_session's #381 plain-quant gate no longer wires it")
+	}
+	if got := candidate.state.sharedSuffix; got != kvShared {
+		t.Fatalf("sharedSuffix = %d, want %d (fixture must have a clean trailing KV-shared suffix)", got, kvShared)
+	}
+
+	ids := quantBatchedPLESharedIDs(2 * window) // 64: exactly two steel-floor chunks
+	if !candidate.verifyBatchedCrossesSlidingRingWrap(len(ids)) {
+		t.Fatal("fixture prompt must cross the sliding ring wrap — the chunked skip-suffix lane never engages otherwise")
+	}
+
+	// control: genuinely sequential per-token stepping (oblivious to prefillSkipToLayer, which
+	// only the batched chunked lane reads) — the r3 pattern, avoided prefillPromptRetainedInPool
+	// because once state.icb is nil its own pos==0 branch tries the batched-dense lane first too.
+	var ctrlHidden []byte
+	var err error
+	for _, id := range ids[:len(ids)-1] {
+		if _, err = control.stepIDInPool(id); err != nil {
+			t.Fatalf("control step: %v", err)
+		}
+	}
+	if ctrlHidden, err = control.stepIDRetainedInPool(ids[len(ids)-1]); err != nil {
+		t.Fatalf("control last step: %v", err)
+	}
+
+	hidden, ok, err := candidate.prefillRetainedTokensBatchedDense(ids, "test.batchedQuantPLEBoundedSlab")
+	if err != nil {
+		t.Fatalf("prefillRetainedTokensBatchedDense: %v", err)
+	}
+	if !ok {
+		t.Fatal("prefillRetainedTokensBatchedDense DECLINED the quant PLE shared-suffix fixture")
+	}
+	// unlike the causal skip lane's own test (TestArchSessionPrefillChunksSkipSharedSuffix), which
+	// asserts this on the ArchSession's exported state, the PLE builders read the SAME field — the
+	// leaked-flag hazard is identical, so pin it here too.
+	if candidate.state.prefillSkipToLayer != 0 {
+		t.Fatalf("prefillSkipToLayer leaked = %d, want 0 after prefill", candidate.state.prefillSkipToLayer)
+	}
+	if candidate.Pos() != control.Pos() {
+		t.Fatalf("pos after prefill: batched=%d sequential=%d", candidate.Pos(), control.Pos())
+	}
+	if len(hidden) != len(ctrlHidden) {
+		t.Fatalf("hidden sizes differ: batched=%d sequential=%d", len(hidden), len(ctrlHidden))
+	}
+	// same tolerance class as TestPrefillRetainedTokensBatchedDenseEngagesQuantPLEAndMatchesSequential
+	// (measured, not assumed: the general quant batched-dense fold's qmm_t/qmv accumulation-order
+	// difference, not anything specific to the bounded-slab lane this test adds).
+	const hiddenTol = 0.25
+	if maxDiff := pleSlabMaxDiff(hidden, ctrlHidden); maxDiff > hiddenTol {
+		t.Fatalf("boundary hidden diverges from sequential: maxDiff=%.5f (> %.2f)", maxDiff, hiddenTol)
 	}
 }
