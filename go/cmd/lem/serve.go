@@ -37,6 +37,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	printAdminToken := fs.Bool("print-admin-token", false, "print the admin Bearer token and exit (generates if absent, mode 0600 at ~/Lethean/lem/admin.token)")
 	rotateAdminToken := fs.Bool("rotate-admin-token", false, "regenerate the admin Bearer token, print it, and exit")
 	stateConversations := fs.Bool("state-conversations", true, "conversation continuity: wake each chat from its slept state, append only the new turn, sleep after — no prompt replay (disable with -state-conversations=false)")
+	stateSharePrefix := fs.Bool("state-share-prefix", false, "cross-conversation KV sharing: a fresh chat opening with a system prompt another conversation has already served wakes that shared token span instead of re-prefilling it (needs -state-conversations; falls back to a fresh prefill byte-identically on any miss)")
 	welfareOn := fs.Bool("welfare", true, "welfare guard: per-turn hostility detect + engine-model mediation on every chat route; Lemma checkpoints additionally carry lem_end (disable with -welfare=false)")
 	policyPath := fs.String("policy", "", "outbound policy file (JSON): deployment-owned redact/refuse rules on model OUTPUT (term/pattern matches); unset disables the layer; a load failure is fatal at boot (see serving/policy)")
 	stateStorePath := fs.String("state-store", "", "conversation state store file for durable per-project state; unset = conversations held in RAM for the life of the serve process (no per-turn disk round-trip)")
@@ -133,6 +134,13 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		extraModels, mmOpts = specs, opts
 	}
 
+	// Cross-conversation prefix sharing is an opt-in variant of the continuity
+	// enabler; default off (an operator call, made with bench receipts).
+	continuityEnabler := continuity.Enable
+	if *stateSharePrefix {
+		continuityEnabler = continuity.EnableSharing
+	}
+
 	err = serving.RunServe(ctx, serving.ServeConfig{
 		Addr:               *addr,
 		ModelPath:          *modelPath,
@@ -145,7 +153,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		DraftDetect:        *draftDetect,
 		DraftBlock:         *draftBlock,
 		SpeculativeLoader:  speculativeLoader,
-		EnableContinuity:   continuity.Enable,
+		EnableContinuity:   continuityEnabler,
 		NoAutoProfile:      *noAutoProfile,
 		ProfileDir:         *profileDir,
 		KVCacheMode:        *kvCacheMode,

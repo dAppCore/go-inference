@@ -28,6 +28,8 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/kv"
+	"dappco.re/go/inference/kv/prefixindex"
 	"dappco.re/go/inference/model/bundle"
 	"dappco.re/go/inference/model/spine"
 	state "dappco.re/go/inference/model/state"
@@ -41,6 +43,10 @@ const entryPrefix = "lem://conversation/"
 // defaultMaxResident caps RAM-resident conversations; older conversations are
 // closed on eviction and wake from the store on their next turn.
 const defaultMaxResident = 4
+
+// defaultPrefixIndexEntries bounds the cross-conversation prefix index's node
+// count; hot shared system prompts stay warm, cold ones fall out LRU.
+const defaultPrefixIndexEntries = 4096
 
 // chatFormatter is the model's chat-framing seam: a fresh conversation frames
 // with the full turn template honouring the request's thinking flag, a woken
@@ -79,13 +85,29 @@ type positionReporter interface{ Pos() int }
 //
 // Errors report which capability is missing; serve degrades to stateless.
 func Enable(model inference.TextModel, store state.Store) error {
-	_, err := EnableWithManager(model, store)
+	_, err := enable(model, store, false)
+	return err
+}
+
+// EnableSharing is Enable with cross-conversation KV prefix sharing turned on:
+// a fresh conversation that opens with a system prompt another conversation has
+// already served wakes that shared token span instead of re-prefilling it. It
+// is the serving.ContinuityEnabler the -state-share-prefix flag selects; sharing
+// falls back to a fresh prefill byte-identically whenever a share is missing,
+// stale, or the model exposes no tokeniser, so flipping it on never changes an
+// answer, only the prefill cost.
+func EnableSharing(model inference.TextModel, store state.Store) error {
+	_, err := enable(model, store, true)
 	return err
 }
 
 // EnableWithManager is Enable returning the manager (stats introspection in
 // tests and diagnostics).
 func EnableWithManager(model inference.TextModel, store state.Store) (*Manager, error) {
+	return enable(model, store, false)
+}
+
+func enable(model inference.TextModel, store state.Store, sharePrefix bool) (*Manager, error) {
 	if model == nil {
 		return nil, core.E("continuity.Enable", "model is nil", nil)
 	}
@@ -128,6 +150,17 @@ func EnableWithManager(model inference.TextModel, store state.Store) (*Manager, 
 	if rec, ok := model.(chatMetricsRecorder); ok {
 		m.metrics = rec
 	}
+	// Cross-conversation sharing needs the model's own tokeniser to compute the
+	// shared token-prefix key — probed through inference.As so a welfare/policy
+	// wrapper cannot hide it. Absent a tokeniser, sharing stays off (fresh
+	// prefill everywhere) even when the flag asked for it.
+	if tokenizer, ok := inference.As[inference.PromptTokenizer](model); ok {
+		m.tokenizer = tokenizer
+	}
+	if sharePrefix && m.tokenizer != nil {
+		m.sharePrefix = true
+		m.prefixIndex = prefixindex.New(prefixindex.Config{MaxEntries: defaultPrefixIndexEntries})
+	}
 	interceptable.SetChatInterceptor(m.Chat)
 	return m, nil
 }
@@ -138,6 +171,7 @@ type Stats struct {
 	FreshConversations int // prefilled from scratch (no matching state)
 	ResidentTurns      int // continued on a RAM-resident session
 	StoreWakes         int // woken from the state store
+	SharedGrafts       int // woken from ANOTHER conversation's shared prefix
 	Sleeps             int // turns slept to the store
 	StatelessFallbacks int // requests declined to the stateless path
 }
@@ -153,6 +187,13 @@ type Manager struct {
 
 	metrics chatMetricsRecorder // nil when the model exposes no usage seam
 
+	// Cross-conversation prefix sharing (behind -state-share-prefix). tokenizer
+	// and prefixIndex are non-nil only when sharePrefix is on; the index is
+	// cross-request shared state and is internally locked.
+	sharePrefix bool
+	tokenizer   inference.PromptTokenizer
+	prefixIndex *prefixindex.Index
+
 	mu       sync.Mutex
 	resident map[string]*residentConversation
 	order    []string // oldest first, for eviction
@@ -166,6 +207,12 @@ type residentConversation struct {
 	sess   *session.Session
 	busy   bool
 	dead   bool
+
+	// graftTail is the divergent token tail to append after a cross-conversation
+	// wake grafted a shared prefix's KV into this fresh session — nil on every
+	// path that is not a share (the fresh/resident/store-wake prefill logic runs
+	// unchanged). Set only by acquire's share branch.
+	graftTail []int32
 
 	parentEntry  string
 	parentBundle string
@@ -204,8 +251,7 @@ func (m *Manager) Chat(ctx context.Context, messages []inference.Message, opts .
 	// turn's <|think|> switch, retained in the woken prefix), so it is part
 	// of the conversation key: a mid-conversation flip misses the resident
 	// prefix and starts a correctly framed fresh conversation.
-	thinking := cfg.EnableThinking != nil && *cfg.EnableThinking
-	conv, tailStart, err := m.acquire(ctx, messages, thinking)
+	conv, tailStart, err := m.acquire(ctx, messages, cfg.EnableThinking)
 	if err != nil {
 		core.Error("continuity declined; serving statelessly", "error", err)
 		return m.declineStat(), false
@@ -219,9 +265,15 @@ func (m *Manager) Chat(ctx context.Context, messages []inference.Message, opts .
 		posBefore = p.Pos()
 	}
 	var prefillErr error
-	if tailStart == 0 {
+	switch {
+	case conv.graftTail != nil:
+		// A cross-conversation wake already grafted the shared prefix's KV; only
+		// the divergent token tail is prefilled — the measured prompt-token cost
+		// this turn is len(graftTail), not the whole prompt.
+		prefillErr = conv.sess.AppendTokens(ctx, conv.graftTail)
+	case tailStart == 0:
 		prefillErr = conv.handle.Prefill(ctx, m.formatter.FormatChatPromptWithThinking(messages, cfg.EnableThinking))
-	} else {
+	default:
 		prefillErr = conv.handle.AppendPrompt(ctx, m.formatter.FormatChatContinuationWithThinking(messages[tailStart:], cfg.EnableThinking))
 	}
 	if prefillErr != nil {
@@ -229,6 +281,11 @@ func (m *Manager) Chat(ctx context.Context, messages []inference.Message, opts .
 		conv.close()
 		return m.declineStat(), false
 	}
+	// A fresh full prefill and a grafted turn both leave a bundle whose prompt
+	// prefix equals tokenize(frame(messages)) exactly, so both are safe to
+	// publish as a shareable prefix; a store-wake CONTINUATION (text-appended
+	// tail) is not re-derivable that way and is left unpublished.
+	publishable := conv.graftTail != nil || tailStart == 0
 	promptTokens := 0
 	if p, ok := conv.handle.(positionReporter); ok {
 		promptTokens = p.Pos() - posBefore
@@ -255,7 +312,7 @@ func (m *Manager) Chat(ctx context.Context, messages []inference.Message, opts .
 		// A client that disconnected mid-stream received exactly the tokens
 		// generated so far, so its next request's prefix matches the partial
 		// state — sleeping it is correct, not a compromise.
-		m.finishTurn(ctx, conv, messages, reply.String(), thinking)
+		m.finishTurn(ctx, conv, messages, reply.String(), cfg.EnableThinking, publishable)
 	}, true
 }
 
@@ -271,7 +328,8 @@ func (m *Manager) declineStat() iter.Seq[inference.Token] {
 // acquire resolves the session a request rides: RAM-resident match, store
 // wake, or a fresh session. tailStart is the index of the first message that
 // still needs prefilling (0 = the whole conversation).
-func (m *Manager) acquire(ctx context.Context, messages []inference.Message, thinking bool) (*residentConversation, int, error) {
+func (m *Manager) acquire(ctx context.Context, messages []inference.Message, enableThinking *bool) (*residentConversation, int, error) {
+	thinking := enableThinking != nil && *enableThinking
 	split := conversationTurnSplit(messages)
 	if split == len(messages) {
 		return nil, 0, core.E("continuity", "request has no trailing user turn", nil)
@@ -320,6 +378,12 @@ func (m *Manager) acquire(ctx context.Context, messages []inference.Message, thi
 		}
 	}
 
+	// Own-conversation state missed on every tier; before paying a fresh full
+	// prefill, try to graft a prefix shared with ANOTHER conversation.
+	if conv := m.tryShareGraft(ctx, messages, enableThinking); conv != nil {
+		return conv, 0, nil
+	}
+
 	conv, err := m.newConversation()
 	if err != nil {
 		return nil, 0, err
@@ -328,6 +392,78 @@ func (m *Manager) acquire(ctx context.Context, messages []inference.Message, thi
 	m.stats.FreshConversations++
 	m.mu.Unlock()
 	return conv, 0, nil
+}
+
+// tryShareGraft attempts a cross-conversation KV graft: tokenise the framed
+// prompt, find the longest shared prefix in the index, and wake that span from
+// the backing conversation's durable bundle into a fresh session whose divergent
+// token tail the caller appends. It returns nil — fall through to a fresh
+// prefill — on every miss: sharing off, no tokeniser, no shared prefix, or a
+// load/wake failure (whose dead index entry it evicts). It never errors and
+// never leaks: the graft adopts only whole KV blocks inside the verified shared
+// run, so a fall-back fresh prefill is byte-identical to the no-sharing path.
+func (m *Manager) tryShareGraft(ctx context.Context, messages []inference.Message, enableThinking *bool) *residentConversation {
+	if !m.sharePrefix || m.tokenizer == nil || m.prefixIndex == nil {
+		return nil
+	}
+	tokens, err := m.tokenizer.Tokenize(m.formatter.FormatChatPromptWithThinking(messages, enableThinking))
+	if err != nil || len(tokens) == 0 {
+		return nil
+	}
+	entry, matched, ok := m.prefixIndex.Match(tokens)
+	if !ok {
+		return nil
+	}
+	conv, err := m.graftConversation(ctx, entry, matched, tokens)
+	if err != nil {
+		core.Error("continuity share graft missed; serving fresh", "error", err)
+		m.prefixIndex.Evict(tokens, entry.BundleURI)
+		return nil
+	}
+	m.mu.Lock()
+	m.stats.SharedGrafts++
+	m.mu.Unlock()
+	return conv
+}
+
+// graftConversation loads the shared bundle, aligns the shared span DOWN to
+// whole blocks against that bundle (so a graft never adopts a block straddling
+// the divergence into the other conversation's private tail), wakes that span
+// into a fresh session, and records the divergent token tail to append. It
+// errors — caller falls back to a fresh prefill — when the bundle is missing,
+// carries no block size, or the shared span is below one block.
+func (m *Manager) graftConversation(ctx context.Context, entry prefixindex.Entry, matched int, tokens []int32) (*residentConversation, error) {
+	blocks, err := kv.LoadStateBlockBundle(ctx, m.store, entry.BundleURI)
+	if err != nil {
+		return nil, core.E("continuity", "load shared prefix bundle", err)
+	}
+	blockSize := blocks.BlockSize
+	if blockSize <= 0 {
+		return nil, core.E("continuity", "shared bundle carries no block size", nil)
+	}
+	span := matched
+	if span > blocks.TokenCount {
+		span = blocks.TokenCount
+	}
+	span -= span % blockSize
+	// Keep at least one token for the tail so the decode boundary is rebuilt,
+	// even when a prior identical conversation shares the whole prompt.
+	if span >= len(tokens) {
+		span = (len(tokens) - 1) - (len(tokens)-1)%blockSize
+	}
+	if span < blockSize {
+		return nil, core.E("continuity", "shared prefix below one block after alignment", nil)
+	}
+	conv, err := m.newConversation()
+	if err != nil {
+		return nil, err
+	}
+	if err := conv.sess.LoadKVPrefixBlocksFromState(ctx, m.store, blocks, span); err != nil {
+		conv.close()
+		return nil, core.E("continuity", "graft shared prefix KV", err)
+	}
+	conv.graftTail = tokens[span:]
+	return conv, nil
 }
 
 // newConversation opens a fresh engine session and its state-machinery view.
@@ -348,11 +484,12 @@ func (m *Manager) newConversation() (*residentConversation, error) {
 // RAM-resident, and evicts beyond the cap. Sleep failure keeps the
 // conversation RAM-resident only — turns keep working, durability resumes on
 // the next successful sleep.
-func (m *Manager) finishTurn(ctx context.Context, conv *residentConversation, messages []inference.Message, reply string, thinking bool) {
+func (m *Manager) finishTurn(ctx context.Context, conv *residentConversation, messages []inference.Message, reply string, enableThinking *bool, publishable bool) {
 	if conv.dead {
 		conv.close()
 		return
 	}
+	thinking := enableThinking != nil && *enableThinking
 	full := append(slices.Clone(messages), inference.Message{Role: "assistant", Content: reply})
 	key := conversationKey(full, thinking)
 	entryURI := entryPrefix + key
@@ -376,6 +513,7 @@ func (m *Manager) finishTurn(ctx context.Context, conv *residentConversation, me
 		m.mu.Lock()
 		m.stats.Sleeps++
 		m.mu.Unlock()
+		m.publishShareablePrefix(messages, enableThinking, publishable, report)
 	}
 
 	m.mu.Lock()
@@ -393,6 +531,28 @@ func (m *Manager) finishTurn(ctx context.Context, conv *residentConversation, me
 		evicted.close()
 	}
 	m.mu.Unlock()
+}
+
+// publishShareablePrefix records this turn's framed prompt in the
+// cross-conversation index so a later conversation opening with the same system
+// prompt can wake this bundle's leading blocks. Only a fresh full prefill or a
+// grafted turn is publishable — both leave a bundle whose prompt prefix equals
+// tokenize(frame(messages)) exactly; a text-appended store-wake continuation is
+// not re-derivable that way and is skipped, so a published entry never points at
+// a bundle whose leading tokens differ from the key.
+func (m *Manager) publishShareablePrefix(messages []inference.Message, enableThinking *bool, publishable bool, report *agent.SleepReport) {
+	if !m.sharePrefix || !publishable || m.tokenizer == nil || m.prefixIndex == nil || report == nil {
+		return
+	}
+	tokens, err := m.tokenizer.Tokenize(m.formatter.FormatChatPromptWithThinking(messages, enableThinking))
+	if err != nil || len(tokens) == 0 {
+		return
+	}
+	m.prefixIndex.Publish(tokens, prefixindex.Entry{
+		BundleURI:  report.BundleURI,
+		BlockSize:  report.BlockSize,
+		TokenCount: len(tokens),
+	})
 }
 
 func (m *Manager) removeOrderLocked(key string) {

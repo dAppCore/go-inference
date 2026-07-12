@@ -234,7 +234,7 @@ func TestManagerFinishTurnSleepDeclineStaysResident(t *testing.T) {
 	conv := &residentConversation{sess: session.New(decliningSessionHandle{}, m.info, nil), busy: true}
 	messages := []inference.Message{{Role: "user", Content: "hi"}}
 
-	m.finishTurn(t.Context(), conv, messages, "hello", false)
+	m.finishTurn(t.Context(), conv, messages, "hello", nil, false)
 
 	if len(m.resident) != 1 {
 		t.Fatalf("conversation count after declined sleep = %d, want 1 (stays RAM-resident)", len(m.resident))
