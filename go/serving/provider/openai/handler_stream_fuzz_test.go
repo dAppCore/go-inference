@@ -105,13 +105,13 @@ func TestContentStreamer_DifferentialFuzz_EveryBoundary(t *testing.T) {
 		{"hello STOP world", []string{"STOP"}},
 		{"answerSTOP", []string{"STOP"}},
 		{"<|tool_call>", []string{"STOP"}},
-		{"pre<|tool_call>post", []string{"tool"}},   // stop is a substring of the marker
-		{"aSTOPb<|tool_call>c", []string{"STOP"}},    // stop earlier, but tool is checked first
-		{"<|tool_ca<|tool_call>x", nil},              // overlapping marker prefix
+		{"pre<|tool_call>post", []string{"tool"}},     // stop is a substring of the marker
+		{"aSTOPb<|tool_call>c", []string{"STOP"}},     // stop earlier, but tool is checked first
+		{"<|tool_ca<|tool_call>x", nil},               // overlapping marker prefix
 		{"end<|im_end|>tail", []string{"<|im_end|>"}}, // stop longer than the tool marker
-		{"café<|tool_call>世界", nil},                  // unicode either side of the marker
+		{"café<|tool_call>世界", nil},                   // unicode either side of the marker
 		{"世界STOP世界", []string{"STOP"}},
-		{"<|tool_call", []string{"call>"}},   // marker never completes; stop is its tail
+		{"<|tool_call", []string{"call>"}}, // marker never completes; stop is its tail
 		{"x<|>y<|tool_call>z", []string{"<|>"}},
 		{"multi STOP and END here", []string{"STOP", "END"}},
 	}
