@@ -352,6 +352,20 @@ func (m *TextModel) encode(prompt string) []int32 {
 	return m.tok.Encode(prompt)
 }
 
+// Tokenize exposes the model's text→token encoding as the
+// inference.PromptTokenizer capability — the same IDs a Prefill of text would
+// load. The serving layer probes it (via inference.As, so a welfare/policy
+// wrapper cannot hide it) to compute the token-prefix key two conversations
+// share, without standing up a second tokeniser that could drift from this one.
+//
+//	ids, err := model.Tokenize("You are a helpful assistant.")
+func (m *TextModel) Tokenize(text string) ([]int32, error) {
+	if m == nil || m.tok == nil {
+		return nil, core.NewError("engine.TextModel.Tokenize: model carries no tokenizer")
+	}
+	return m.tok.Encode(text), nil
+}
+
 // decode is the STREAMING per-token decode: DecodeToken keeps the SentencePiece
 // ▁ word boundary as a leading space (so concatenated stream chunks reassemble
 // "hello world", not "helloworld") and preserves the gemma4 channel markers the
