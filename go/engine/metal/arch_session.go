@@ -1093,6 +1093,16 @@ func newArchQuantSessionShardsWithHeadConfig(g *QuantModel, arch model.Arch, max
 					encEmbedGatherQuantObject(enc, gpso, tokenBuf, embedPackedBuf, embedScalesBuf, embedBiasesBuf, embOut, 0, 0, 0, dModel, gs, bits, embedScale)
 					return nil
 				}
+				// prefill chunk inputs, device-first (#381 dense port): the rows kernel
+				// gathers a whole chunk's embed rows in one committed-not-waited command
+				// buffer — no PLE tensor here, so the device closure hands back
+				// (embBuf, nil) and the batched pass binds embBuf as its input rows.
+				denseEmbScratch := &embedRowsScratch{}
+				denseMainEmb := &mainEmbedGather{packed: embedPackedBuf, scales: embedScalesBuf, biases: embedBiasesBuf, gs: gs, bits: bits, scale: embedScale}
+				sess.perLayerInputBatchDevice = func(ids []int32, _ int) (metal.MTLBuffer, metal.MTLBuffer, bool, error) {
+					embBuf, ok, err := embedRowsBatchQuantDevice(denseEmbScratch, ids, denseMainEmb, dModel)
+					return embBuf, nil, ok, err
+				}
 			}
 		}
 		// gemma4 incremental ICB encode-bypass (E2B/E4B dense): record the decode stack once + replay
@@ -2286,6 +2296,12 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseOne(ids []int32, scope st
 				s.state.prefillEmbedDevice = nil
 			}()
 			hidden, ok, err = s.state.stepTokensBatchedDenseLastIntoPLE(embs, nil, s.pos, dst)
+		} else if embBuf != nil {
+			// dense device inputs (#381): no PLE tensor — the builder's embed rows
+			// are the pass's input rows; embs stays a nil-filled K-carrier.
+			s.state.prefillEmbedDevice = embBuf
+			defer func() { s.state.prefillEmbedDevice = nil }()
+			hidden, ok, err = s.state.stepTokensBatchedDenseLastInto(embs, s.pos, dst)
 		} else if pleSlab != nil {
 			hidden, ok, err = s.state.stepTokensBatchedDenseLastIntoPLE(embs, pleSlab, s.pos, dst)
 		} else {
@@ -2306,19 +2322,31 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseOne(ids []int32, scope st
 }
 
 // prefillInputsDevice builds a prefill chunk's inputs DEVICE-first (#381): one
-// committed-not-waited command buffer gathers the K main-embed rows AND the
-// PLE tensor at the chunk's exact layer bound, from just the token ids — the
-// batched pass reads both GPU-ordered on the shared queue, so the host skips
-// the per-token embed dequant, the builder wait, the slab copy-out and the
-// re-uploads. (nil, nil, nil) when the lane is not available (non-PLE model,
-// no device closure, stale metallib, small K) — the host paths take over.
+// committed-not-waited command buffer gathers the K main-embed rows AND — on a
+// PLE arch — the PLE tensor at the chunk's exact layer bound, from just the
+// token ids; a dense (non-PLE) arch builds the embed rows alone (pleBuf nil).
+// The batched pass reads the buffers GPU-ordered on the shared queue, so the
+// host skips the per-token embed dequant, the builder wait, the slab copy-out
+// and the re-uploads. (nil, nil, nil) when the lane is not available (no
+// device closure, stale metallib, small K) — the host paths take over.
 func (s *ArchSession) prefillInputsDevice(ids []int32) (metal.MTLBuffer, metal.MTLBuffer, error) {
-	if s.perLayerInput == nil || len(s.state.ple) == 0 || s.perLayerInputBatchDevice == nil {
+	if s.perLayerInputBatchDevice == nil {
 		return nil, nil, nil
 	}
-	outLayers := len(s.state.specs)
-	if b := s.state.prefillSkipToLayer; b > 0 && b < outLayers {
-		outLayers = b
+	plePresent := s.perLayerInput != nil && len(s.state.ple) > 0
+	if !plePresent && (s.perLayerInput != nil || len(s.state.ple) > 0) {
+		// mixed shape — a session closure without state PLE layers or the
+		// reverse (test fakes): the host paths stay authoritative.
+		return nil, nil, nil
+	}
+	// a dense (non-PLE) session's closure ignores the layer bound: the build is
+	// the embed gather alone, so outLayers stays 0.
+	outLayers := 0
+	if plePresent {
+		outLayers = len(s.state.specs)
+		if b := s.state.prefillSkipToLayer; b > 0 && b < outLayers {
+			outLayers = b
+		}
 	}
 	devStart := time.Now()
 	embBuf, pleBuf, ok, err := s.perLayerInputBatchDevice(ids, outLayers)

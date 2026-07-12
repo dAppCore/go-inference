@@ -353,6 +353,73 @@ func perLayerInputsBatchQuantDevice(
 	return sc.embBuf, sc.projectedBuf, true, nil
 }
 
+// embedRowsScratch carries the dense (non-PLE) arch's device embed-rows build
+// (#381): idsBuf stages the chunk's token ids, embBuf receives the K gathered
+// main-embed rows. Single-buffered for the same reason as pleBatchScratch —
+// the caller stages chunk N+1 only after the batched pass's wait, which covers
+// this command buffer on the shared queue.
+type embedRowsScratch struct {
+	idsBuf metal.MTLBuffer
+	embBuf metal.MTLBuffer
+	rowCap int
+	dModel int
+}
+
+func (s *embedRowsScratch) ensure(k, dModel int) {
+	if s.rowCap >= k && s.dModel == dModel && s.embBuf != nil {
+		return
+	}
+	s.idsBuf = device.NewBufferWithLengthOptions(uint(k*4), metal.MTLResourceStorageModeShared)
+	s.embBuf = device.NewBufferWithLengthOptions(uint(k*dModel*bf16Size), metal.MTLResourceStorageModeShared)
+	s.rowCap, s.dModel = k, dModel
+}
+
+// embedRowsBatchQuantDevice gathers a prefill chunk's K main-embed rows into a
+// DEVICE buffer (#381, the dense/MoE port of the E-family embed gather): one
+// committed-not-waited command buffer dequant-gathers the rows from the quant
+// embed table and the batched pass binds the same buffer as its input rows —
+// only the token ids cross the host boundary. The dense arch has no PLE
+// tensor, so the seam is the gather alone. ok=false (no work) when the rows
+// kernel is unavailable (stale metallib) or the chunk is below the batch
+// floor — the per-token host loop takes over.
+func embedRowsBatchQuantDevice(sc *embedRowsScratch, ids []int32, mainEmb *mainEmbedGather, dModel int) (metal.MTLBuffer, bool, error) {
+	k := len(ids)
+	if mainEmb == nil || k < steelGEMMMinRows {
+		return nil, false, nil
+	}
+	rowsPSO, rowsErr := pleGatherRowsQuantPipeline()
+	if rowsErr != nil {
+		return nil, false, nil
+	}
+	sc.ensure(k, dModel)
+	copy(unsafe.Slice((*int32)(sc.idsBuf.Contents()), k), ids)
+	withAutoreleasePool(func() {
+		cb := commandBufferFast(queue)
+		enc := computeCommandEncoderFast(cb)
+		// full-width rows: dModel == the row, so width and strides coincide
+		sink := encSink{enc}
+		sink.setPSO(rowsPSO)
+		sink.setBuf(sc.idsBuf, 0, 0)
+		sink.setBuf(mainEmb.packed, 0, 1)
+		sink.setBuf(mainEmb.scales, 0, 2)
+		sink.setBuf(mainEmb.biases, 0, 3)
+		sink.setBuf(sc.embBuf, 0, 4)
+		sink.setI32(int32(dModel), 5)
+		sink.setI32(int32(mainEmb.gs), 6)
+		sink.setF32(mainEmb.scale, 7)
+		sink.setI32(int32(dModel*mainEmb.bits/8), 8)
+		sink.setI32(int32(dModel/mainEmb.gs), 9)
+		sink.setI32(int32(mainEmb.bits), 10)
+		sink.dispatchThreads(
+			metal.MTLSize{Width: uint(dModel), Height: uint(k), Depth: 1},
+			metal.MTLSize{Width: uint(elemGroupTG(dModel)), Height: 1, Depth: 1},
+		)
+		endEncodingFast(enc)
+		commitCommandBufferFast(cb)
+	})
+	return sc.embBuf, true, nil
+}
+
 func perLayerInputsBatchQuantEncode(
 	sc *pleBatchScratch,
 	tablePacked, tableScales, tableBiases metal.MTLBuffer, tableGS, tableBits int,
