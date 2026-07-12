@@ -251,6 +251,31 @@ func TestMoENormTopKProbFalse(t *testing.T) {
 	t.Fatal("norm_topk_prob false vs true produced identical output — the flag is not wired")
 }
 
+// TestMoEMLP_OLMoERouterDistribution proves the production router used by
+// MoEMLP.forward selects varied expert sets for signed, seeded OLMoE-style inputs.
+func TestMoEMLP_OLMoERouterDistribution(t *testing.T) {
+	const D, FF, nE, topK, tokens = 8, 12, 4, 2, 8
+	m := mkMoEMLP(D, FF, nE, topK, 0x01e0e)
+	m.Shared = nil
+	m.SharedGate = nil
+	m.NormTopKProb = false
+	x := syn(tokens*D, 0x07e57)
+	probs := make([]float64, nE)
+	idx := make([]int, nE)
+	distributions := map[[2]int]bool{}
+	for token := range tokens {
+		sel, _ := m.routeInto(x[token*D:(token+1)*D], D, probs, idx)
+		distributions[[2]int{sel[0], sel[1]}] = true
+	}
+	if len(distributions) < 2 {
+		t.Fatalf("production router selected %d distinct top-k distributions, want at least 2", len(distributions))
+	}
+	out := m.forward(x, tokens, D)
+	if len(out) != tokens*D {
+		t.Fatalf("MoE forward output length = %d, want %d", len(out), tokens*D)
+	}
+}
+
 // TestMoESharedExpertGate pins the reference's sigmoid gate on the shared expert (σ(shared_expert_gate·x)):
 // the gated and ungated variants differ by exactly (σ−1)·SwiGLU_shared(x), isolating the gate from the
 // (identical) expert mixture. A precondition ensures σ is meaningfully below 1 so the gate is observable.
