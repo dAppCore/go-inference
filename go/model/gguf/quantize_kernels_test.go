@@ -4,6 +4,7 @@ package gguf
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"math"
 	"testing"
 )
@@ -37,27 +38,6 @@ func testFloat16Decode(bits uint16) float32 {
 	}
 	exp += 127 - 15
 	return math.Float32frombits((sign << 31) | (uint32(exp) << 23) | (frac << 13))
-}
-
-// testUnpack5BitLSB reverses the LSB-first 5-bit bitstream packing
-// quantizeQ5_0/quantizeKBlock(bits=5) write: accumulate whole bytes into
-// a bit buffer, then peel off 5 bits at a time.
-func testUnpack5BitLSB(packed []byte, count int) []int {
-	out := make([]int, count)
-	bitBuf := uint64(0)
-	bitCount := 0
-	byteIdx := 0
-	for i := range count {
-		for bitCount < 5 {
-			bitBuf |= uint64(packed[byteIdx]) << bitCount
-			byteIdx++
-			bitCount += 8
-		}
-		out[i] = int(bitBuf & 0x1F)
-		bitBuf >>= 5
-		bitCount -= 5
-	}
-	return out
 }
 
 // testUnpackQ3KScale reverses packQ3KScales for sub-block index j (0..15).
@@ -164,6 +144,22 @@ func TestQuantizeKernels_QuantizeQ8_0_Bad(t *testing.T) {
 	}
 }
 
+// TestQuantizeKernels_QuantizeQ8_0_Ugly pins quantizeQ8_0(rampBlock(32))
+// against the byte-exact output of ggml's own quantize_row_q8_0_ref (called
+// directly, via cgo-free C harness, against homebrew ggml 0.15.3 —
+// libggml-base.dylib's compiled reference implementation, not a
+// reimplementation). This is the load-bearing conformance gate: a
+// self-consistent round-trip through testDequantQ8_0 above can't catch a bug
+// shared between encoder and test decoder, but a real llama.cpp/ggml would
+// read these bytes wrong. Q8_0 needed no fix; this pin is the receipt.
+func TestQuantizeKernels_QuantizeQ8_0_Ugly(t *testing.T) {
+	const wantHex = "082481899199a1a9b1b9c0c8d0d8e0e8f0f8000810182028303840474f575f676f77"
+	got := hex.EncodeToString(quantizeQ8_0(rampBlock(32)))
+	if got != wantHex {
+		t.Errorf("quantizeQ8_0(rampBlock(32)) = %s, want ggml-ref %s", got, wantHex)
+	}
+}
+
 // --- Q4_0 ---------------------------------------------------------------
 
 func testDequantQ4_0(data []byte) []float32 {
@@ -208,19 +204,44 @@ func TestQuantizeKernels_QuantizeQ4_0_Bad(t *testing.T) {
 	}
 }
 
+// TestQuantizeKernels_QuantizeQ4_0_Ugly pins quantizeQ4_0(rampBlock(32))
+// against ggml's compiled quantize_row_q4_0_ref (see the Q8_0 pin above for
+// methodology). Was broken before this fix: the scale used maxAbs/7 (always
+// positive, wastes nibble 0) instead of ggml's max/-8 (signed extremal
+// value, uses the full [0,15] nibble range) — every non-edge nibble differed.
+func TestQuantizeKernels_QuantizeQ4_0_Ugly(t *testing.T) {
+	const wantHex = "0034809191a2a2b3b3c4c4d5d5e6e6f7f7f8"
+	got := hex.EncodeToString(quantizeQ4_0(rampBlock(32)))
+	if got != wantHex {
+		t.Errorf("quantizeQ4_0(rampBlock(32)) = %s, want ggml-ref %s", got, wantHex)
+	}
+}
+
 // --- Q5_0 ---------------------------------------------------------------
+//
+// block_q5_0 is a SYMMETRIC quantiser like Q4_0 (single scale d, no min
+// field) — 22 B/block: 2 d + 4 qh (5th/high bit of each of the 32 elements,
+// bit j) + 16 qs (low 4 bits, lower/upper-half interleaved exactly as Q4_0).
+// testDequantQ5_0 mirrors ggml's dequantize_row_q5_0.
 
 func testDequantQ5_0(data []byte) []float32 {
-	const blockBytes = 24
+	const blockBytes = 22
 	nBlocks := len(data) / blockBytes
 	out := make([]float32, 0, nBlocks*32)
 	for b := range nBlocks {
 		block := data[b*blockBytes:]
 		scale := testFloat16Decode(binary.LittleEndian.Uint16(block[0:2]))
-		minVal := testFloat16Decode(binary.LittleEndian.Uint16(block[2:4]))
-		qs := testUnpack5BitLSB(block[4:24], 32)
-		for _, q := range qs {
-			out = append(out, minVal+scale*float32(q))
+		qh := binary.LittleEndian.Uint32(block[2:6])
+		qs := block[6:22]
+		for i := range 16 {
+			hi := byte((qh >> uint(i)) & 1)
+			q := (qs[i] & 0xF) | hi<<4
+			out = append(out, scale*(float32(q)-16))
+		}
+		for i := range 16 {
+			hi := byte((qh >> uint(i+16)) & 1)
+			q := (qs[i] >> 4) | hi<<4
+			out = append(out, scale*(float32(q)-16))
 		}
 	}
 	return out
@@ -229,12 +250,11 @@ func testDequantQ5_0(data []byte) []float32 {
 func TestQuantizeKernels_QuantizeQ5_0_Good(t *testing.T) {
 	values := rampBlock(32)
 	data := quantizeQ5_0(values)
-	if len(data) != 24 {
-		t.Fatalf("len(data) = %d, want 24", len(data))
+	if len(data) != 22 {
+		t.Fatalf("len(data) = %d, want 22", len(data))
 	}
 	decoded := testDequantQ5_0(data)
-	span := maxAbsFloat32Slice(values) * 2
-	step := span / 31
+	step := maxAbsFloat32Slice(values) / 16
 	for i, want := range values {
 		if got := absFloat32Diff(decoded[i], want); got > step*1.5 {
 			t.Errorf("Q5_0[%d]: decoded %v want ~%v (err %v > tol %v)", i, decoded[i], want, got, step*1.5)
@@ -244,10 +264,29 @@ func TestQuantizeKernels_QuantizeQ5_0_Good(t *testing.T) {
 
 func TestQuantizeKernels_QuantizeQ5_0_Bad(t *testing.T) {
 	data := quantizeQ5_0(make([]float32, 32))
-	for _, b := range data[4:] {
-		if b != 0x44 {
-			t.Fatalf("zero-block Q5_0 quant bytes = %x, want all 0x44", data[4:])
+	if len(data) != 22 {
+		t.Fatalf("len(data) = %d, want 22", len(data))
+	}
+	decoded := testDequantQ5_0(data)
+	for i, v := range decoded {
+		if v != 0 {
+			t.Fatalf("zero-block Q5_0 decoded[%d] = %v, want 0", i, v)
 		}
+	}
+}
+
+// TestQuantizeKernels_QuantizeQ5_0_Ugly pins quantizeQ5_0(rampBlock(32))
+// against ggml's compiled quantize_row_q5_0_ref (see the Q8_0 pin for
+// methodology). Was severely broken before this fix: the encoder wrote a
+// 24-byte affine (scale+min) block with a custom LSB-first 5-bit bitstream —
+// wrong size, wrong scheme, wrong bit layout entirely. Any real GGUF file
+// with Q5_0 tensors was byte-corrupt (block size alone didn't match), not
+// just numerically off.
+func TestQuantizeKernels_QuantizeQ5_0_Ugly(t *testing.T) {
+	const wantHex = "00300000ffff00112233445566778899aabbccddeeff"
+	got := hex.EncodeToString(quantizeQ5_0(rampBlock(32)))
+	if got != wantHex {
+		t.Errorf("quantizeQ5_0(rampBlock(32)) = %s, want ggml-ref %s", got, wantHex)
 	}
 }
 
@@ -680,12 +719,6 @@ func TestQuantizeKernels_MaxAbsFloat32_Good(t *testing.T) {
 	// Exercise the scalar tail (len not a multiple of 4).
 	if got := maxAbsFloat32([]float32{1, -2, 3, -4, 9}); got != 9 {
 		t.Errorf("maxAbsFloat32(tail) = %v, want 9", got)
-	}
-}
-
-func TestQuantizeKernels_MinFloat32_Good(t *testing.T) {
-	if got := minFloat32([]float32{1, -5, 3, -2}); got != -5 {
-		t.Errorf("minFloat32 = %v, want -5", got)
 	}
 }
 
