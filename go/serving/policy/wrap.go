@@ -121,3 +121,18 @@ func (m *policyTextModel) audit(events []Event) {
 		core.Print(m.log, "policy: rule #%d %s %s on output", ev.RuleIndex, ev.Action, verb)
 	}
 }
+
+// AcceptsImages forwards the vision-capability gate to the wrapped model. The
+// embedded interface does not widen this wrapper's method set, so without the
+// explicit forward a wrapped vision checkpoint 400s at the serve gate.
+func (m *policyTextModel) AcceptsImages() bool {
+	v, ok := m.TextModel.(inference.VisionModel)
+	return ok && v.AcceptsImages()
+}
+
+// AcceptsAudio forwards the audio-capability gate to the wrapped model — the
+// audio twin of AcceptsImages.
+func (m *policyTextModel) AcceptsAudio() bool {
+	a, ok := m.TextModel.(inference.AudioModel)
+	return ok && a.AcceptsAudio()
+}
