@@ -19,7 +19,7 @@ import (
 // "" field = the weight is absent for this arch → loaded nil. StandardWeightNames is the canonical
 // layout; an arch overrides only the names that differ.
 type WeightNames struct {
-	Embed, PositionEmbed, LMHead, FinalNorm            string // model-level
+	Embed, EmbedNorm, PositionEmbed, LMHead, FinalNorm string // model-level
 	EmbedPerLayer, PerLayerModelProj, PerLayerProjNorm string // PLE tower (E2B/E4B)
 	LayerPrefix                                        string // "model.layers.%d" — the %d carrier
 	AttnNorm, PostAttnNorm, QNorm, KNorm, LayerScalar  string // per-layer norms (suffixes)
@@ -96,7 +96,7 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 		return x.Data
 	}
 
-	m := &LoadedModel{Arch: arch, FinalNorm: norm(names.FinalNorm)}
+	m := &LoadedModel{Arch: arch, EmbedNorm: norm(names.EmbedNorm), FinalNorm: norm(names.FinalNorm)}
 	m.Embed = lin(names.Embed, d)
 	m.PositionEmbed = lin(names.PositionEmbed, d)
 	if m.Embed == nil {

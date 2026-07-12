@@ -48,6 +48,10 @@ func Load(dir string) (*LoadedModel, *safetensors.DirMapping, error) {
 		tensors = spec.Normalize(tensors)
 		dm.Tensors = tensors
 	}
+	if spec.NormalizeConfig != nil {
+		tensors = spec.NormalizeConfig(tensors, ac)
+		dm.Tensors = tensors
+	}
 	ac.InferFromWeights(NormalizeWrapperNames(tensors)) // resolve omitted dims from the shapes (don't-guess)
 	arch, err := ac.Arch()
 	if err != nil {

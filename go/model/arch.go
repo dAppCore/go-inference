@@ -112,6 +112,7 @@ type Arch struct {
 	AttentionKEqV                              bool   // K == V (shared projection)
 	ValueNorm                                  bool   // an arch may apply a no-scale per-head RMSNorm to V (metal's RMSNormNoScale); most don't
 	ParallelResidual                           bool   // attention and MLP consume the same normalised input, then both outputs join the residual
+	ALiBi                                      bool   // attention uses linear position bias instead of rotary embeddings
 	TieWordEmbeddings                          *bool  // nil = checkpoint presence decides; non-nil validates lm_head against config.json
 	LearnedAbsolutePositions                   bool   // token embeddings are offset by a learned position table
 	MultiQueryAttention                        bool   // one K/V head is shared by every query head
