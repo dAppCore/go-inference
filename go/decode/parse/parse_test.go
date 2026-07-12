@@ -3,6 +3,7 @@
 package parse
 
 import (
+	"encoding/json"
 	"testing"
 
 	core "dappco.re/go"
@@ -497,6 +498,100 @@ func TestParse_parseGemma4Value_Kinds(t *testing.T) {
 	// JSON null is not a number — falls through to a bare string.
 	if parseGemma4Value("null") != "null" {
 		t.Fatalf("null should stay a bare string: %v", parseGemma4Value("null"))
+	}
+}
+
+func TestParse_isJSONNumber_Good(t *testing.T) {
+	// Every accepted arm of the RFC 8259 grammar: lone zero, a signed integer, a
+	// fraction, and an exponent with each sign form — plus a grammar-valid value
+	// that overflows float64 (1e400), which isJSONNumber accepts because it gates
+	// the grammar only (parseNumber applies the range check separately).
+	for _, s := range []string{
+		"0", "-0", "123", "-123",
+		"1.5", "-2.5e3", "1e10", "1E+5", "1e-9", "0.0",
+		"1e400", "9007199254740993",
+	} {
+		if !isJSONNumber(s) {
+			t.Errorf("isJSONNumber(%q) = false, want true", s)
+		}
+	}
+}
+
+func TestParse_isJSONNumber_Bad(t *testing.T) {
+	// Malformed inputs — each trips a distinct rejection arm: empty, a lone sign,
+	// a leading '+', a bare fraction, a trailing dot, leading zeros, an exponent
+	// with no digit (bare and signed), non-numeric text, JSON's excluded literals
+	// (NaN/Inf), hex, and trailing garbage after a valid prefix.
+	for _, s := range []string{
+		"", "-", "+1", ".5", "1.", "01", "00",
+		"1e", "1e+", "1E-", "abc", "NaN", "Inf", "0x1", "1x", "--1",
+	} {
+		if isJSONNumber(s) {
+			t.Errorf("isJSONNumber(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestParse_isJSONNumber_Ugly(t *testing.T) {
+	// Boundary and unicode edges. isJSONNumber scans BYTES, so a full-width digit
+	// '１' (U+FF11, multibyte) is rejected at the integer switch's default arm. It
+	// also demands an exact match (i == n), so any surrounding whitespace or a
+	// second dot leaves a trailing byte and fails — unlike json.Unmarshal, which
+	// tolerates surrounding whitespace (isJSONNumber runs on pre-extracted tokens).
+	for _, s := range []string{
+		"１", " 1", "1 ", "1\n", "\t1", "1.5.5", "1..5", "e5", "1-2",
+	} {
+		if isJSONNumber(s) {
+			t.Errorf("isJSONNumber(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestParse_isJSONNumber_JSONParity(t *testing.T) {
+	// The function's contract is exact parity with encoding/json's number scanner.
+	// json.Unmarshal into a json.Number enforces the same RFC 8259 grammar, so for
+	// any WHITESPACE-FREE candidate the two must agree token-for-token. (Whitespace
+	// is the one documented divergence — json.Unmarshal trims it, isJSONNumber does
+	// not — so the corpus is whitespace-free.) A mismatch is a real grammar bug.
+	corpus := []string{
+		"0", "-0", "00", "01", "123", "-123", "+1",
+		"1.5", "1.", ".5", "1..5", "1.5.5",
+		"1e10", "1E+5", "1e-9", "1e", "1e+", "1E-", "e5",
+		"1e400", "0.0", "-2.5e3",
+		"", "-", "abc", "NaN", "Inf", "0x1", "1x", "--1", "1-2",
+	}
+	for _, s := range corpus {
+		var num json.Number
+		jsonAccepts := json.Unmarshal([]byte(s), &num) == nil
+		if got := isJSONNumber(s); got != jsonAccepts {
+			t.Errorf("isJSONNumber(%q) = %v, encoding/json accepts = %v — grammar divergence", s, got, jsonAccepts)
+		}
+	}
+}
+
+func TestParse_parseNumber_Good(t *testing.T) {
+	// Valid numbers convert to their float64 value with ok=true.
+	for _, tc := range []struct {
+		in   string
+		want float64
+	}{
+		{"0", 0}, {"1.5", 1.5}, {"-2.5e3", -2500}, {"123", 123},
+	} {
+		got, ok := parseNumber(tc.in)
+		if !ok || got != tc.want {
+			t.Errorf("parseNumber(%q) = (%v, %v), want (%v, true)", tc.in, got, ok, tc.want)
+		}
+	}
+}
+
+func TestParse_parseNumber_Bad(t *testing.T) {
+	// Two rejection paths: (1) not a JSON number at all — the isJSONNumber gate;
+	// (2) grammar-valid but out of float64 range (1e400) — the ParseFloat error
+	// arm that isJSONNumber alone can't catch. Both yield (0, false).
+	for _, s := range []string{"abc", "", "1e400"} {
+		if got, ok := parseNumber(s); ok || got != 0 {
+			t.Errorf("parseNumber(%q) = (%v, %v), want (0, false)", s, got, ok)
+		}
 	}
 }
 

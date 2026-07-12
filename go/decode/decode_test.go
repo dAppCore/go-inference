@@ -7,6 +7,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	core "dappco.re/go"
 )
 
 func TestSpeculative_AcceptsAndRejectsDraftTokens_Good(t *testing.T) {
@@ -238,5 +240,33 @@ func TestNonZeroDuration_ClampsToNanosecond_Ugly(t *testing.T) {
 	}
 	if got := nonZeroDuration(7 * time.Millisecond); got != 7*time.Millisecond {
 		t.Fatalf("nonZeroDuration(7ms) = %v, want passthrough", got)
+	}
+}
+
+func TestHasNonSpace_MatchesCoreTrim_GoodBadUgly(t *testing.T) {
+	// hasNonSpace is a per-token fast path documented as "core.Trim(s) != ''"
+	// without the allocation. Its contract is therefore exact parity with that
+	// expression, so assert both together over every arm: ASCII content (fast
+	// true), ASCII-only whitespace and empty (fast false), multi-byte content
+	// (>=0x80 fallback → true) and multi-byte-ONLY Unicode whitespace — NBSP,
+	// ideographic and EM space — which the ASCII switch cannot classify and which
+	// only the core.Trim fallback rejects (the arm the indirect tests never hit).
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"abc", true}, {" a ", true}, {"\t\tx", true},
+		{"", false}, {" ", false}, {" \t\n\v\f\r", false},
+		{"héllo", true}, {"α", true}, {" x ", true},
+		{"\u00a0", false}, {"\u3000", false}, {"\u2003", false}, // NBSP, ideographic, EM space
+	}
+	for _, tc := range cases {
+		got := hasNonSpace(tc.in)
+		if got != tc.want {
+			t.Errorf("hasNonSpace(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+		if parity := core.Trim(tc.in) != ""; got != parity {
+			t.Errorf("hasNonSpace(%q) = %v diverges from core.Trim != \"\" = %v", tc.in, got, parity)
+		}
 	}
 }
