@@ -5,6 +5,7 @@ package mistral
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	_ "dappco.re/go/inference/model/mistral/gguf"
 )
 
 // init registers mistral's ArchSpec for the Mistral model_type ids, so the engine's reactive loader
