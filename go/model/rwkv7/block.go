@@ -141,11 +141,6 @@ func BlockForwardScratchNoProjF32(x []float32, w *BlockWeights, cfg BlockConfig,
 		return nil, 0, nil, err
 	}
 	sc.wDecay = wDecay
-	// RWKV-7 log-decay: w = -exp(WProj) ≤ 0. The projection output is dead after this transform, so
-	// map it in place rather than allocating a second buffer — bit-identical, one fewer alloc/token.
-	for i := range wDecay {
-		wDecay[i] = float32(-math.Exp(float64(wDecay[i])))
-	}
 	kp, err := projMatMulInto(sc.kp, x, w.KProj, L, D, hk)
 	if err != nil {
 		return nil, 0, nil, err
@@ -166,6 +161,29 @@ func BlockForwardScratchNoProjF32(x []float32, w *BlockWeights, cfg BlockConfig,
 		return nil, 0, nil, err
 	}
 	sc.bp = bp
+	return BlockForwardScratchFromInputF32(r, wDecay, kp, vp, ap, bp, w, cfg, prior, L, D, sc)
+}
+
+// BlockForwardScratchFromInputF32 resumes RWKV-7 from its six ALREADY-COMPUTED input projections.
+// wDecay is the raw WProj result and is transformed to -exp(w) here, matching the ordinary path. This
+// lets a predecessor tail compute the input RMSNorm and all six GEMMs in its command buffer without
+// changing the recurrence or deferred out_proj result.
+func BlockForwardScratchFromInputF32(r, wDecay, kp, vp, ap, bp []float32, w *BlockWeights, cfg BlockConfig, prior []float32, L, D int, sc *BlockScratch) (o []float32, hv int, state []float32, err error) {
+	if sc == nil {
+		sc = &BlockScratch{}
+	}
+	if w == nil {
+		return nil, 0, nil, core.NewError("rwkv7.BlockForwardF32: nil weights")
+	}
+	H, K, V := cfg.NumHeads, cfg.KeyDim, cfg.ValueDim
+	hk, hv := cfg.hk(), cfg.hv()
+	if H <= 0 || K <= 0 || V <= 0 || len(r) != L*hk || len(wDecay) != L*hk || len(kp) != L*hk ||
+		len(vp) != L*hv || len(ap) != L*hk || len(bp) != L*hk {
+		return nil, 0, nil, core.NewError("rwkv7.BlockForwardF32: projected input size mismatch")
+	}
+	for i := range wDecay {
+		wDecay[i] = float32(-math.Exp(float64(wDecay[i])))
+	}
 
 	o, state, err = WKV7F32(r, wDecay, kp, vp, ap, bp, prior, L, H, K, V) // o [L, H*V]
 	if err != nil {

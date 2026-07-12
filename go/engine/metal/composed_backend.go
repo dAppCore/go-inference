@@ -51,6 +51,8 @@ func init() {
 	if inputFuseEnabled {
 		composed.ResidualNormMLPProjAttnInputDevice = ResidualNormMLPProjAttnInputDevice             // folds the NEXT full-attention layer's input RMSNorm + q/k/v onto the back of that tail
 		composed.ResidualNormMLPProjGatedDeltaInputDevice = ResidualNormMLPProjGatedDeltaInputDevice // folds the NEXT gated-delta layer's input RMSNorm + in_proj_qkv/z/a/b onto the back of that tail
+		composed.ResidualNormMLPProjMamba2InputDevice = ResidualNormMLPProjMamba2InputDevice
+		composed.ResidualNormMLPProjRWKV7InputDevice = ResidualNormMLPProjRWKV7InputDevice
 	}
 	if headFuseEnabled {
 		composed.ResidualNormMLPProjHeadDevice = ResidualNormMLPProjHeadDevice // folds the model's own final RMSNorm + LM head GEMM onto the back of the LAST layer's tail
