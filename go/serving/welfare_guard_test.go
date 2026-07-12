@@ -303,3 +303,27 @@ func TestServing_IsLemmaModel_Good(t *testing.T) {
 		t.Fatal("empty path recognised as Lemma")
 	}
 }
+
+// welfareCapableFake is a TextModel that also carries both media capabilities,
+// so the wrapper's forwarding of the serve gates is observable.
+type welfareCapableFake struct{ inference.TextModel }
+
+func (welfareCapableFake) AcceptsImages() bool { return true }
+func (welfareCapableFake) AcceptsAudio() bool  { return true }
+
+// TestWelfareTextModel_ForwardsCapabilityGates_Good: the welfare wrap must not
+// hide the wrapped checkpoint's media capabilities — the serve handler gates
+// input_audio/image_url on these assertions, and the embedded interface does
+// not widen the wrapper's method set by itself.
+func TestWelfareTextModel_ForwardsCapabilityGates_Good(t *testing.T) {
+	inner := welfareCapableFake{}
+	wrapped := inference.TextModel(&welfareTextModel{TextModel: inner})
+	v, ok := wrapped.(inference.VisionModel)
+	if !ok || !v.AcceptsImages() {
+		t.Fatalf("welfare wrap hides AcceptsImages (ok=%v) — image serve gate 400s", ok)
+	}
+	a, ok := wrapped.(inference.AudioModel)
+	if !ok || !a.AcceptsAudio() {
+		t.Fatalf("welfare wrap hides AcceptsAudio (ok=%v) — audio serve gate 400s", ok)
+	}
+}

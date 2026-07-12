@@ -195,3 +195,26 @@ func TestPolicy_WrapResolver_RewriteDegrades(t *testing.T) {
 		t.Fatalf("no-mediator wrapped reply = %q, want the redact fallback", got)
 	}
 }
+
+// policyCapableFake is a TextModel carrying both media capabilities, so the
+// wrapper's forwarding of the serve gates is observable.
+type policyCapableFake struct{ inference.TextModel }
+
+func (policyCapableFake) AcceptsImages() bool { return true }
+func (policyCapableFake) AcceptsAudio() bool  { return true }
+
+// TestPolicyTextModel_ForwardsCapabilityGates_Good: the policy wrap must not
+// hide the wrapped checkpoint's media capabilities — the serve handler gates
+// input_audio/image_url on these assertions.
+func TestPolicyTextModel_ForwardsCapabilityGates_Good(t *testing.T) {
+	inner := policyCapableFake{}
+	wrapped := inference.TextModel(&policyTextModel{TextModel: inner})
+	v, ok := wrapped.(inference.VisionModel)
+	if !ok || !v.AcceptsImages() {
+		t.Fatalf("policy wrap hides AcceptsImages (ok=%v) — image serve gate 400s", ok)
+	}
+	a, ok := wrapped.(inference.AudioModel)
+	if !ok || !a.AcceptsAudio() {
+		t.Fatalf("policy wrap hides AcceptsAudio (ok=%v) — audio serve gate 400s", ok)
+	}
+}
