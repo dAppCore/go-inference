@@ -46,3 +46,23 @@ func (m *gatedDeltaMixer) Forward(h []float32, L, D int, prior any) ([]float32, 
 	}
 	return out, gatedDeltaState{conv: nc, delta: nd, sc: sc}, nil
 }
+
+// forwardNoProj runs the gated-delta block up to but NOT including out_proj, returning the gated
+// pre-projection hidden [L,vDim], the out_proj weight OutProj [D,vDim] and mixCols=vDim, plus the advanced
+// state. It implements composed.projMixer so the session folds out_proj into the FFN-tail command buffer;
+// the recurrent state advances identically to Forward.
+func (m *gatedDeltaMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidden, projW []float32, mixCols int, next any, err error) {
+	var pc, pd []float32
+	var sc *qwen3.GatedDeltaScratch
+	if st, ok := prior.(gatedDeltaState); ok {
+		pc, pd, sc = st.conv, st.delta, st.sc
+	}
+	if sc == nil {
+		sc = &qwen3.GatedDeltaScratch{}
+	}
+	gated, vDim, nc, nd, err := qwen3.GatedDeltaForwardScratchNoProjF32(h, m.w, m.cfg, pc, pd, L, D, sc)
+	if err != nil {
+		return nil, nil, 0, nil, err
+	}
+	return gated, m.w.OutProj, vDim, gatedDeltaState{conv: nc, delta: nd, sc: sc}, nil
+}
