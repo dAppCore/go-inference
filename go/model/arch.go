@@ -104,6 +104,8 @@ type Arch struct {
 	RopeLocalBase                              float32   // sliding-attention RoPE theta (an arch may use a smaller local theta)
 	RotaryDim, RotaryDimLocal                  int       // rotated dims/head (partial rotary, e.g. full_attention=0.25·GlobalHeadDim); global / sliding
 	RopeFreqs                                  []float32 // explicit per-dim inverse frequencies (YaRN long-context remap); len RotaryDim/2; nil ⇒ derive uniformly from RopeBase
+	RopeShortFreqs                             []float32 // short-context inverse frequencies for position-dependent LongRoPE
+	RopeOriginalContext                        int       // positions below this boundary use RopeShortFreqs; 0 = one static table
 	SoftCap                                    float32   // final logit soft-cap (0 = none)
 	SlidingWindow                              int
 	PerLayerInputVocab, PerLayerInputHidden    int   // per-layer-input aux embedding (0 = absent)
