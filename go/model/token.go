@@ -69,6 +69,26 @@ type DecodeStepper interface {
 	Step(emb []byte) ([]byte, error)
 }
 
+// BatchPrefillStepper is the OPTIONAL capability of a DecodeStepper whose backend can forward more
+// than one token through the persistent cache in a single call — an L>1 forward path alongside the
+// L==1 Step contract (e.g. a recurrent/attention mixer stack that already batches prefill this way
+// internally). generateStepwiseWithSession prefers it for the PROMPT: without it, the prefill walk
+// calls Step once per prompt token, so any device fusion bound to Step's own last-layer tail (e.g. a
+// head GEMM folded onto the final layer's command buffer) fires once per PREFILL token even though
+// only the LAST token's result is ever read — bounded waste that is invisible on a short prompt and
+// real on a long one. PrefillBatch collapses the whole prompt into the ONE call the backend's L>1
+// path already supports, so that fusion runs once for the batch, not once per token. Mutually
+// exclusive with StepWithID (PrefillBatch carries no ids): a stepper needing per-token ids keeps the
+// per-token loop even if it also implements this. A stepper without an L>1 forward path simply
+// doesn't implement BatchPrefillStepper; nothing about it changes.
+type BatchPrefillStepper interface {
+	// PrefillBatch runs the whole of embs through the persistent cache in one forward pass — the
+	// same state transition len(embs) sequential Step calls would produce — and returns the LAST
+	// token's output hidden state (same shape Step returns), so the caller's post-prefill tail
+	// (head → pick → append) is unchanged.
+	PrefillBatch(embs [][]byte) ([]byte, error)
+}
+
 // SessionModel is a TokenModel whose backend can decode incrementally over a
 // persistent cache — the OPTIONAL fast path. Generate prefers OpenSession's
 // incremental stepper (O(1)/token) over the whole-sequence DecodeForward when a
@@ -197,10 +217,27 @@ func generateStepwiseWithSession(m SessionModel, sess DecodeStepper, promptIDs [
 	}
 
 	var hidden []byte
-	for _, id := range promptIDs { // prefill the prompt over the growing cache
+	if bp, ok := sess.(BatchPrefillStepper); ok && !idAware {
+		// Batch the whole prompt into ONE forward call instead of len(promptIDs) Step calls — see
+		// BatchPrefillStepper.
+		embs := make([][]byte, len(promptIDs))
+		for i, id := range promptIDs {
+			emb, err := m.Embed(id)
+			if err != nil {
+				return nil, err
+			}
+			embs[i] = emb
+		}
 		var err error
-		if hidden, err = step(id); err != nil {
+		if hidden, err = bp.PrefillBatch(embs); err != nil {
 			return nil, err
+		}
+	} else {
+		for _, id := range promptIDs { // prefill the prompt over the growing cache
+			var err error
+			if hidden, err = step(id); err != nil {
+				return nil, err
+			}
 		}
 	}
 	gen := make([]int32, 0, maxNew)
