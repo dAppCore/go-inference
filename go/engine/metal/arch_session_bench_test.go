@@ -1524,3 +1524,97 @@ func BenchmarkArchSessionPrefillTokenEmbeddings(b *testing.B) {
 		archSessionHiddenBenchSink = sess.retainedHidden
 	}
 }
+
+// BenchmarkArchSessionGenerateSampledPipelinedGPUTail benches the multi-step submit-ahead
+// pipelined-GPU sampled tail (#30 r5) — chained_gpu_decode_test.go's pipelined-vs-chained
+// parity tests exercise this per-token hot path for correctness but never bench it
+// directly; the lower-level step*InPool symbols it replaces (stepSampleTopKTokenInPool
+// etc.) already have their own benches above.
+func BenchmarkArchSessionGenerateSampledPipelinedGPUTail(b *testing.B) {
+	requireNativeRuntime(b)
+
+	g, arch := pleQuantModel(b, 2, 256, 32, 0)
+	const maxLen, maxNew = 24, 8
+	prompt := []int32{1, 5, 3, 2}
+	params := model.SampleParams{Temperature: 0.9, TopK: 4, TopP: 0.8}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		sess, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			b.Fatalf("NewArchQuantSession: %v", err)
+		}
+		if sess.recordPeerICB == nil {
+			b.Fatal("fixture did not wire the peer ICB recorder")
+		}
+		sampler := model.NewSampler(91)
+		var seed []int32
+		withAutoreleasePool(func() {
+			hidden, herr := sess.prefillPromptRetainedInPool(prompt)
+			if herr != nil {
+				b.Fatalf("prefillPromptRetainedInPool: %v", herr)
+			}
+			first, ok, serr := sess.sampleTopKTokenFromHiddenInPool(hidden, params, sampler.Draw(), nil)
+			if serr != nil || !ok {
+				b.Fatalf("sampleTopKTokenFromHiddenInPool ok=%v err=%v", ok, serr)
+			}
+			seed = []int32{first}
+		})
+		b.StartTimer()
+		gen, _, err := sess.generateSampledPipelinedGPUTail(seed, maxNew, nil, sampler, params, nil, 0, nil)
+		if err != nil {
+			b.Fatalf("generateSampledPipelinedGPUTail: %v", err)
+		}
+		archSessionSampleTokenBenchSink = gen[len(gen)-1]
+		b.StopTimer()
+		_ = sess.Close()
+		b.StartTimer()
+	}
+}
+
+// BenchmarkArchSessionGenerateSampledPipelinedGPUOneShotTail is the OneShotTail sibling —
+// the request-session shape GenerateSampledOneShotEach drives (no yield, no stopTokens),
+// dropped after one generation instead of cached for reuse.
+func BenchmarkArchSessionGenerateSampledPipelinedGPUOneShotTail(b *testing.B) {
+	requireNativeRuntime(b)
+
+	g, arch := pleQuantModel(b, 2, 256, 32, 0)
+	const maxLen, maxNew = 24, 8
+	prompt := []int32{1, 5, 3, 2}
+	params := model.SampleParams{Temperature: 0.9, TopK: 4, TopP: 0.8}
+
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		sess, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			b.Fatalf("NewArchQuantSession: %v", err)
+		}
+		if sess.recordPeerICB == nil {
+			b.Fatal("fixture did not wire the peer ICB recorder")
+		}
+		sampler := model.NewSampler(91)
+		var seed []int32
+		withAutoreleasePool(func() {
+			hidden, herr := sess.prefillPromptRetainedInPool(prompt)
+			if herr != nil {
+				b.Fatalf("prefillPromptRetainedInPool: %v", herr)
+			}
+			first, ok, serr := sess.sampleTopKTokenFromHiddenInPool(hidden, params, sampler.Draw(), nil)
+			if serr != nil || !ok {
+				b.Fatalf("sampleTopKTokenFromHiddenInPool ok=%v err=%v", ok, serr)
+			}
+			seed = []int32{first}
+		})
+		b.StartTimer()
+		gen, _, err := sess.generateSampledPipelinedGPUOneShotTail(seed, maxNew, sampler, params, 0, nil)
+		if err != nil {
+			b.Fatalf("generateSampledPipelinedGPUOneShotTail: %v", err)
+		}
+		archSessionSampleTokenBenchSink = gen[len(gen)-1]
+		b.StopTimer()
+		_ = sess.Close()
+		b.StartTimer()
+	}
+}
