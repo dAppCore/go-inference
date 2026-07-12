@@ -368,76 +368,76 @@ func TextModelCapabilities(runtime RuntimeIdentity, model TextModel) CapabilityR
 		SupportedCapability(CapabilityClassify, CapabilityGroupModel),
 		SupportedCapability(CapabilityBatchGenerate, CapabilityGroupModel),
 	)
-	if tokenizer, ok := model.(TokenizerModel); ok {
+	if tokenizer, ok := As[TokenizerModel](model); ok {
 		report.Capabilities = append(report.Capabilities,
 			SupportedCapability(CapabilityTokenizer, CapabilityGroupModel),
 			SupportedCapability(CapabilityChatTemplate, CapabilityGroupModel),
 		)
 		_ = tokenizer
 	}
-	if adapter, ok := model.(AdapterModel); ok {
+	if adapter, ok := As[AdapterModel](model); ok {
 		report.Adapter = adapter.ActiveAdapter()
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityLoRAInference, CapabilityGroupModel))
 	}
-	if _, ok := model.(StatefulModel); ok {
+	if _, ok := As[StatefulModel](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityStateBundle, CapabilityGroupRuntime))
 	}
-	if _, ok := model.(ProbeableModel); ok {
+	if _, ok := As[ProbeableModel](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityProbeEvents, CapabilityGroupProbe))
 	}
-	if _, ok := model.(AttentionInspector); ok {
+	if _, ok := As[AttentionInspector](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityAttentionProbe, CapabilityGroupProbe))
 	}
-	if _, ok := model.(BenchableModel); ok {
+	if _, ok := As[BenchableModel](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityBenchmark, CapabilityGroupRuntime))
 	}
-	if _, ok := model.(Evaluator); ok {
+	if _, ok := As[Evaluator](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityEvaluation, CapabilityGroupRuntime))
 	}
-	if _, ok := model.(SchedulerModel); ok {
+	if _, ok := As[SchedulerModel](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityScheduler, CapabilityGroupRuntime))
 	}
-	if _, ok := model.(CancellableModel); ok {
+	if _, ok := As[CancellableModel](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityRequestCancel, CapabilityGroupRuntime))
 	}
-	if _, ok := model.(CacheService); ok {
+	if _, ok := As[CacheService](model); ok {
 		report.Capabilities = append(report.Capabilities,
 			SupportedCapability(CapabilityCacheBlocks, CapabilityGroupRuntime),
 			SupportedCapability(CapabilityCacheWarm, CapabilityGroupRuntime),
 		)
 	}
-	if _, ok := model.(EmbeddingModel); ok {
+	if _, ok := As[EmbeddingModel](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityEmbeddings, CapabilityGroupModel))
 	}
-	if _, ok := model.(RerankModel); ok {
+	if _, ok := As[RerankModel](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityRerank, CapabilityGroupModel))
 	}
-	if _, ok := model.(ReasoningParser); ok {
+	if _, ok := As[ReasoningParser](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityReasoningParse, CapabilityGroupModel))
 	}
-	if _, ok := model.(ToolParser); ok {
+	if _, ok := As[ToolParser](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityToolParse, CapabilityGroupModel))
 	}
-	if _, ok := model.(SFTTrainer); ok {
+	if _, ok := As[SFTTrainer](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityLoRATraining, CapabilityGroupTraining))
 	}
-	if _, ok := model.(DistillTrainer); ok {
+	if _, ok := As[DistillTrainer](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityDistillation, CapabilityGroupTraining))
 	}
-	if _, ok := model.(GRPOTrainer); ok {
+	if _, ok := As[GRPOTrainer](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityGRPO, CapabilityGroupTraining))
 	}
-	if _, ok := model.(ModelFitPlanner); ok {
+	if _, ok := As[ModelFitPlanner](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityModelFit, CapabilityGroupRuntime))
 	}
-	if _, ok := model.(AgentMemorySession); ok {
+	if _, ok := As[AgentMemorySession](model); ok {
 		report.Capabilities = append(report.Capabilities,
 			SupportedCapability(CapabilityAgentMemory, CapabilityGroupRuntime),
 			SupportedCapability(CapabilityStateWake, CapabilityGroupRuntime),
 			SupportedCapability(CapabilityStateSleep, CapabilityGroupRuntime),
 		)
 	}
-	if _, ok := model.(AgentMemoryForker); ok {
+	if _, ok := As[AgentMemoryForker](model); ok {
 		report.Capabilities = append(report.Capabilities, SupportedCapability(CapabilityStateFork, CapabilityGroupRuntime))
 	}
 	return report

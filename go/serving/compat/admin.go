@@ -143,7 +143,9 @@ func (h *adminCacheEntriesHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	lister, ok := model.(CacheEntryLister)
+	// inference.As reaches past a welfare/policy/profile decorator to the
+	// base model's cache capabilities — see inference.WrappedModel.
+	lister, ok := inference.As[CacheEntryLister](model)
 	if !ok {
 		writeOpenAIError(w, http.StatusNotImplemented, "model does not support cache entry listing", "model")
 		return
@@ -159,7 +161,7 @@ func (h *adminCacheEntriesHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		Model:   modelName,
 		Entries: entries,
 	}
-	if service, ok := model.(inference.CacheService); ok {
+	if service, ok := inference.As[inference.CacheService](model); ok {
 		stats, err := service.CacheStats(r.Context())
 		if err != nil {
 			writeOpenAIError(w, http.StatusInternalServerError, err.Error(), "cache")
