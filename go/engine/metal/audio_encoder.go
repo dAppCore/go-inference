@@ -28,8 +28,9 @@ type AudioLayerWeights struct {
 // AudioLayer runs one Conformer block on [L, hidden] FP32 — byte-identical to metal's
 // Gemma4AudioLayer.Forward: ff1 → clamp→RMSNorm(pre)→attn→clamp→RMSNorm(post)→+ff1 → lconv → ff2 →
 // clamp→RMSNorm(out). The tower runs in fp32 (the f32 GC clamp promotes the activation — see
-// audio_f32.go); the clamp is the shared ±gradient-clipping (cfg.ClipMin/ClipMax).
-func AudioLayer(x []float32, w *AudioLayerWeights, cfg AudioConfig) ([]float32, error) {
+// audio_f32.go); the clamp is the shared ±gradient-clipping (cfg.ClipMin/ClipMax). validity is the
+// optional per-soft-token (length L) key-padding mask forwarded to the attention; nil ⇒ all-valid.
+func AudioLayer(x []float32, w *AudioLayerWeights, cfg AudioConfig, validity []bool) ([]float32, error) {
 	L := len(x) / cfg.Hidden
 	rmsClamped := func(b []float32, norm []byte) ([]float32, error) {
 		return RMSNorm(clampF32(b, cfg.ClipMin, cfg.ClipMax), bf16ToF32Slice(norm), L, cfg.Hidden, cfg.Eps)
@@ -43,7 +44,7 @@ func AudioLayer(x []float32, w *AudioLayerWeights, cfg AudioConfig) ([]float32, 
 	if err != nil {
 		return nil, err
 	}
-	attn, err := AudioAttentionF32(pre, w.Attn, cfg)
+	attn, err := AudioAttentionF32(pre, w.Attn, cfg, validity)
 	if err != nil {
 		return nil, err
 	}
@@ -84,16 +85,20 @@ type AudioEncoderWeights struct {
 // [ceil(frames/4), OutputDim] FP32 — byte-identical to metal's Gemma4AudioEncoder.Forward: subsample
 // (bf16) → widen → Conformer layers (fp32) → OutputProj (fp32 mixed-dtype matmul). The per-layer
 // attentions share PosEmbed (cfg-derived, set on each layer's Attn weights by the caller / loader).
-func AudioEncode(features []byte, w *AudioEncoderWeights, cfg AudioConfig) ([]float32, error) {
+// validity is the optional per-frame (length frames) validity mask (nil ⇒ a fully-valid clip, byte-
+// identical to the mask-free path): the subsampler halves it twice (HF mask[:, ::2] per stride-2 conv)
+// into the per-soft-token mask each Conformer attention ANDs into its blocked mask, so padding keys are
+// never attended for padded/batched clips.
+func AudioEncode(features []byte, w *AudioEncoderWeights, cfg AudioConfig, validity []bool) ([]float32, error) {
 	if err := ensureInit(); err != nil {
 		return nil, err
 	}
-	h, err := AudioSubsampleF32(features, w.Subsample, w.SubsampleC) // subsampler promotes to fp32 at its first ReLU
+	h, softMask, err := AudioSubsampleF32(features, w.Subsample, w.SubsampleC, validity) // fp32 at its first ReLU; halves validity like HF
 	if err != nil {
 		return nil, err
 	}
 	for i, layer := range w.Layers {
-		if h, err = AudioLayer(h, layer, cfg); err != nil {
+		if h, err = AudioLayer(h, layer, cfg, softMask); err != nil {
 			return nil, core.E("native.AudioEncode", core.Sprintf("layer %d", i), err)
 		}
 	}
