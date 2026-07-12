@@ -1,5 +1,7 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
+//go:build darwin && arm64
+
 package native
 
 import (
