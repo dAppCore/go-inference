@@ -154,6 +154,14 @@ func (p *Policy) process(buf string, holdFrom int, e *Enforcer) (out string, eve
 			i++
 			continue
 		}
+		if !rewrote {
+			// First hit: presize the builder to the settled span in one allocation
+			// so the remaining WriteStrings don't regrow geometrically. Grown only
+			// on the matching path — the clean path never reaches here, so it stays
+			// zero-allocation. n is a tight upper bound: output is buf minus matched
+			// spans plus their (usually shorter) replacements.
+			b.Grow(n)
+		}
 		b.WriteString(buf[lastEmit:i])
 		rewrote = true
 		events = append(events, Event{RuleIndex: m.ruleIndex, Action: m.action})
