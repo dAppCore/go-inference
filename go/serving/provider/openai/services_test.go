@@ -378,6 +378,52 @@ func TestOpenAI_CapabilityHandler_Good_ReporterFastPath(t *testing.T) {
 	}
 }
 
+// TestOpenAI_CapabilityHandler_Good_ToolParseForGemma4 pins #37's capability
+// honesty: a Gemma 4 architecture (no CapabilityReporter of its own, so this
+// drives the TextModelCapabilities fallback branch withServingCapabilities
+// layers onto) reports tool.parse supported.
+func TestOpenAI_CapabilityHandler_Good_ToolParseForGemma4(t *testing.T) {
+	handler := NewCapabilityHandler(NewStaticResolver(map[string]inference.TextModel{"gemma": &recordingModel{arch: "gemma4_text"}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCapabilitiesPath+"?model=gemma", nil))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"tool.parse"`) {
+		t.Fatalf("status = %d body=%s, want tool.parse reported for a gemma4 architecture", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOpenAI_CapabilityHandler_Bad_ToolParseAbsentForNonGemma pins the honest
+// negative: an architecture with no Gemma 4 tool syntax never gets a tool.parse
+// entry — omission, not a misleading "supported", matching the same
+// present-only-when-true convention TextModelCapabilities already uses for
+// every other optional capability.
+func TestOpenAI_CapabilityHandler_Bad_ToolParseAbsentForNonGemma(t *testing.T) {
+	handler := NewCapabilityHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &recordingModel{arch: "qwen3"}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCapabilitiesPath+"?model=qwen", nil))
+
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"tool.parse"`) {
+		t.Fatalf("status = %d body=%s, want no tool.parse entry for a non-gemma4 architecture", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOpenAI_CapabilityHandler_Good_StructuredOutputAlwaysReported pins that
+// structured.output is reported regardless of architecture — it works from
+// the model's plain visible text alone (serving/structured), needing no
+// native support.
+func TestOpenAI_CapabilityHandler_Good_StructuredOutputAlwaysReported(t *testing.T) {
+	handler := NewCapabilityHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": &stubModel{}}))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, DefaultCapabilitiesPath+"?model=qwen", nil))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"structured.output"`) {
+		t.Fatalf("status = %d body=%s, want structured.output reported regardless of architecture", rec.Code, rec.Body.String())
+	}
+}
+
 // TestOpenAI_CacheHandlers_Bad_MissingModel exercises resolve's own
 // modelName=="" rejection — reachable only through the cache handlers,
 // none of which pre-check model emptiness before calling

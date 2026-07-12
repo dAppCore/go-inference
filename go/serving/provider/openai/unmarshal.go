@@ -103,6 +103,41 @@ func (r *ChatCompletionRequest) unmarshalField(data []byte, i int, key []byte) (
 			return next, res.Err()
 		}
 		return next, nil
+	case "tool_choice":
+		// tool_choice carries a variant string-or-object shape (ToolChoice's own
+		// UnmarshalJSON, jsondec.go) and — like tools — only appears on agentic
+		// requests, so it reflect-decodes the captured span rather than
+		// hand-rolling the branch here.
+		if jsonenc.IsJSONNull(data, i) {
+			return i + 4, nil
+		}
+		next, err := jsonenc.SkipJSONValue(data, i)
+		if err != nil {
+			return next, err
+		}
+		var choice ToolChoice
+		if res := core.JSONUnmarshal(data[i:next], &choice); !res.OK {
+			return next, res.Err()
+		}
+		r.ToolChoice = &choice
+		return next, nil
+	case "response_format":
+		// response_format nests an arbitrary JSON-schema document and only
+		// appears on structured-output requests — same cold-path rationale as
+		// tools / tool_choice above.
+		if jsonenc.IsJSONNull(data, i) {
+			return i + 4, nil
+		}
+		next, err := jsonenc.SkipJSONValue(data, i)
+		if err != nil {
+			return next, err
+		}
+		var format ResponseFormat
+		if res := core.JSONUnmarshal(data[i:next], &format); !res.OK {
+			return next, res.Err()
+		}
+		r.ResponseFormat = &format
+		return next, nil
 	case "temperature":
 		if jsonenc.IsJSONNull(data, i) {
 			return i + 4, nil
