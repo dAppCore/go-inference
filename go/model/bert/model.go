@@ -130,8 +130,25 @@ func (m *Model) Embed(ctx context.Context, req inference.EmbeddingRequest) (*inf
 
 // Rerank scores each document against the query by cosine similarity of their
 // embeddings (higher is more relevant), sorts descending, and truncates to
-// TopN when positive. It is the embedding-cosine rerank — a cross-encoder head
-// is a later addition, mirroring the device path's two rerank modes.
+// TopN when positive. It is the embedding-cosine (bi-encoder) rerank — a
+// cross-encoder head is a later addition, mirroring the device path's two
+// rerank modes.
+//
+// Evidenced gap (item B of #50): a cross-encoder pack needs (1) config.go's
+// Config to carry a classifier width (HF's num_labels; absent today), (2)
+// weights.go's bindWeights to read a classifier head (classifier.{weight,bias}
+// [1,hidden]/[1], and usually a pooler.dense.{weight,bias} ahead of it —
+// neither is read; bindWeights only binds embeddings.* and encoder.layer.N.*),
+// (3) tokenizer.go's Encode(text string) to grow a paired form (query [SEP]
+// passage [SEP] in one sequence — no such method exists), and (4) encoder.go's
+// forward to accept per-token segment ids (today typeRow is hardcoded to
+// token_type_ids=0 for every position — see forward below — so even a paired
+// encoding would embed both segments identically). No cross-encoder snapshot
+// or parity fixture is available locally to verify any of this against (only
+// bge-small-en-v1.5, a bi-encoder, is cached; testdata/ carries only
+// bge_small_reference.json) — shipping the maths unverified risks a silently
+// wrong score with no test to catch it, so this slice documents the gap
+// rather than guessing at it.
 //
 //	res, err := m.Rerank(ctx, inference.RerankRequest{Query: q, Documents: docs, TopN: 3})
 func (m *Model) Rerank(ctx context.Context, req inference.RerankRequest) (*inference.RerankResult, error) {

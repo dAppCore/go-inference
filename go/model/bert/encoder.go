@@ -8,6 +8,56 @@ import (
 	core "dappco.re/go"
 )
 
+// Device-hook design note (item C of #50 — measured baseline, no kernel built
+// this slice).
+//
+// Baseline (Apple M3 Ultra, this package's BenchmarkModel_Embed_TokensPerSecond,
+// -benchmem, bge-small-en-v1.5, 8 realistic sentences / 114 tokens/batch):
+//
+//	2534785211 ns/op   44.97 tok/s   25795105 B/op   13949 allocs/op
+//
+// Today's forward (bindWeights, forward, encoderLayer below) is naive host
+// float32/float64-accumulate, single-threaded, zero SIMD/BLAS, zero device
+// hook — every number above is pure Go scalar loops. 45 tok/s means a
+// realistic 100-doc reranking batch (~1.5K tokens) costs on the order of 30s;
+// the composed AX-8 device-hook pattern (model/composed/composed.go's
+// ProjMatMulInto/MLPDevice/ResidualNormMLPDevice — a nil package-level func
+// var the lib calls conditionally, bound by engine/metal at runtime, never
+// imported the other way per AX-8) is the house precedent for closing that
+// gap without coupling this package to any engine.
+//
+// The blocking prerequisite is NOT the missing hook — it's that encoderLayer
+// calls linear() ONE TOKEN AT A TIME (`for i := range seqLen { query[i] =
+// linear(hidden[i], ...) }`, likewise key/value/attnDense/intermediate/
+// output), i.e. seqLen separate M=1 GEMVs per projection per layer instead of
+// ONE M=seqLen GEMM. BERT's encoder is not autoregressive — every token's
+// projection at a given layer is independent of its neighbours — so batching
+// the row loop into a single [seqLen,hidden]×[hidden,hidden] matmul is a pure
+// host refactor (same maths, bit-identical accumulation order achievable),
+// and it is what makes a device hook profitable at all: composed.go gates its
+// hooks behind deviceMinWork = 1<<20 (M·K·N), and bge-small's shapes (hidden
+// 384, intermediate 1536) never reach that floor at M=1 — Q/K/V/attnDense is
+// 1×384×384 = 147,456 and the FFN intermediate is 1×384×1536 = 589,824, both
+// sub-floor — but at M=seqLen (14 tokens, this benchmark's average) they
+// become 2,064,384 and 8,257,536, both comfortably above it. So the shape is:
+//
+//  1. Batch encoderLayer's per-token loops into per-layer [seqLen,·] matmuls
+//     (matNTInto in composed.go is the exact reusable primitive — it already
+//     shards output columns across cores for large shapes and is the natural
+//     home for a shared host GEMM if one doesn't already fit here).
+//  2. THEN add the hook seam: a package-level `var LinearDevice func(x, w,
+//     bias []float32, M, K, N int) ([]float32, error)` that linear()-family
+//     call sites try first when bound and M·K·N is above the same floor,
+//     falling back to the host path on a nil hook or a device error — byte-
+//     for-byte the composed.go pattern, so engine/metal binds it exactly as
+//     it binds ProjMatMulInto today.
+//
+// The allocation side of the baseline (13,949 allocs for one 8-sentence
+// batch) is the same root cause: every linear()/layerNorm() call allocates a
+// fresh output slice per token per layer. Batching to per-layer buffers cuts
+// both the compute shape AND the allocation count in the same change — no
+// device dependency required to bank that part of the win.
+
 // layerWeights holds one transformer encoder block's parameters. Linear weights
 // keep the PyTorch [out, in] row-major layout straight from the safetensors, so
 // linear() reads each output row as a contiguous span.

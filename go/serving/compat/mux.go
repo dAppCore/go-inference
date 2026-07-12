@@ -578,7 +578,11 @@ func forEachOpenAIResponseToken(ctx context.Context, model inference.TextModel, 
 }
 
 func forEachCompatToken(ctx context.Context, model inference.TextModel, requestID, modelName, prompt string, messages []inference.Message, opts []inference.GenerateOption, yield func(inference.Token) bool) error {
-	if scheduler, ok := model.(inference.SchedulerModel); ok {
+	// inference.As walks past a welfare/policy/profile decorator to the
+	// scheduler-capable base model — a direct assertion against model would
+	// silently drop back to plain Chat/Generate for a wrapped scheduled model
+	// (the capability-stripping bug class; see inference.WrappedModel).
+	if scheduler, ok := inference.As[inference.SchedulerModel](model); ok {
 		handle, stream, err := scheduler.Schedule(ctx, inference.ScheduledRequest{
 			ID:       requestID,
 			Model:    modelName,
@@ -591,7 +595,7 @@ func forEachCompatToken(ctx context.Context, model inference.TextModel, requestI
 		}
 		for scheduled := range stream {
 			if !yield(scheduled.Token) {
-				if cancellable, ok := model.(inference.CancellableModel); ok {
+				if cancellable, ok := inference.As[inference.CancellableModel](model); ok {
 					_, _ = cancellable.CancelRequest(ctx, handle.ID)
 				}
 				return nil
@@ -1217,7 +1221,7 @@ func parseOpenAIModelOutput(model inference.TextModel, tokens []inference.Token,
 		result inference.ReasoningParseResult
 		err    error
 	)
-	if p, ok := model.(inference.ReasoningParser); ok {
+	if p, ok := inference.As[inference.ReasoningParser](model); ok {
 		result, err = p.ParseReasoning(tokens, text)
 	} else if model != nil {
 		result, err = parser.ForHint(parser.HintFromInference(model.Info())).ParseReasoning(tokens, text)

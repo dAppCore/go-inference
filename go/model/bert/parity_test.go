@@ -183,8 +183,10 @@ func loadReferenceFixture(t *testing.T) referenceFixture {
 }
 
 // bgeSmallSnapshot resolves the snapshot directory from BERT_PARITY_SNAPSHOT or
-// the default Hugging Face cache; returns "" when neither is present.
-func bgeSmallSnapshot(t *testing.T) string {
+// the default Hugging Face cache; returns "" when neither is present. Takes
+// testing.TB (not *testing.T) so both the parity tests above and the
+// tokens/sec benchmark in model_bench_test.go can share one resolver.
+func bgeSmallSnapshot(t testing.TB) string {
 	t.Helper()
 	if dir := os.Getenv("BERT_PARITY_SNAPSHOT"); dir != "" {
 		return dir

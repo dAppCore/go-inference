@@ -324,7 +324,9 @@ func (m *Model) CancelRequest(_ context.Context, id string) (inference.RequestCa
 	// serial
 	value, ok := m.active.Load(id)
 	if !ok {
-		if cancellable, ok := m.base.(inference.CancellableModel); ok {
+		// inference.As reaches past a welfare/policy/profile decorator to the
+		// base model's cancellation capability — see inference.WrappedModel.
+		if cancellable, ok := inference.As[inference.CancellableModel](m.base); ok {
 			return cancellable.CancelRequest(context.Background(), id)
 		}
 		return inference.RequestCancelResult{ID: id, Reason: "not_found"}, nil
