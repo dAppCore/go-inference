@@ -27,6 +27,7 @@ import (
 	_ "dappco.re/go/inference/model/composed" // qwen3_5 / qwen3_5_moe / qwen3_next hybrids (ArchSpec.Composed)
 	_ "dappco.re/go/inference/model/gemma3"   // gemma3
 	_ "dappco.re/go/inference/model/gemma4"   // gemma4 / gemma4_text / gemma4_unified (+ assistant)
+	_ "dappco.re/go/inference/model/llama"    // llama (dense text)
 	_ "dappco.re/go/inference/model/mistral"  // mistral
 	_ "dappco.re/go/inference/model/qwen3"    // qwen3
 )
