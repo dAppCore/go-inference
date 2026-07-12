@@ -3,10 +3,39 @@
 package continuity
 
 import (
+	"context"
+	"iter"
 	"testing"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/kv"
+	state "dappco.re/go/inference/model/state"
+	"dappco.re/go/inference/model/state/session"
 )
+
+// decliningSessionHandle is an inference.SessionHandle whose block-sleep declines — the shape a composed
+// hybrid presents before the token-only RangeKVBlocks lands, and the shape any session takes when a sleep
+// genuinely fails. Every other method is an inert stub; only RangeKVBlocks' decline is under test.
+type decliningSessionHandle struct{}
+
+func (decliningSessionHandle) Prefill(context.Context, string) error      { return nil }
+func (decliningSessionHandle) AppendPrompt(context.Context, string) error { return nil }
+func (decliningSessionHandle) CaptureKV(context.Context) (*kv.Snapshot, error) {
+	return nil, core.NewError("continuity_test: no capture")
+}
+func (decliningSessionHandle) Generate(context.Context, inference.GenerateConfig) iter.Seq[inference.Token] {
+	return func(func(inference.Token) bool) {}
+}
+func (decliningSessionHandle) RangeKVBlocks(context.Context, int, kv.CaptureOptions, func(kv.Block) (bool, error)) error {
+	return core.NewError("continuity_test: block sleep declines")
+}
+func (decliningSessionHandle) Fork(context.Context) (inference.SessionHandle, error) {
+	return nil, core.NewError("continuity_test: no fork")
+}
+func (decliningSessionHandle) Reset()       {}
+func (decliningSessionHandle) Close() error { return nil }
+func (decliningSessionHandle) Err() error   { return nil }
 
 // TestConversationTurnSplit gates the prefix/tail boundary: the trailing run
 // of user/tool messages is the new turn; everything before it is the prefix a
@@ -79,5 +108,33 @@ func TestManagerChatDeclines(t *testing.T) {
 func TestEnableCapabilityErrors(t *testing.T) {
 	if err := Enable(nil, nil); err == nil {
 		t.Fatal("nil model must error")
+	}
+}
+
+// TestManagerFinishTurnSleepDeclineStaysResident gates the sleep-decline degrade: when a session's block
+// sleep declines (a composed hybrid without the token-only lane, or any genuine sleep failure), finishTurn
+// must keep the conversation RAM-resident, clear its busy flag, and not count the failed sleep — turns keep
+// working, durability resumes on the next successful sleep. No hard-fail, no panic.
+func TestManagerFinishTurnSleepDeclineStaysResident(t *testing.T) {
+	store := state.NewInMemoryStore(nil)
+	m := &Manager{
+		store:    store,
+		writer:   store,
+		max:      defaultMaxResident,
+		resident: map[string]*residentConversation{},
+	}
+	conv := &residentConversation{sess: session.New(decliningSessionHandle{}, m.info, nil), busy: true}
+	messages := []inference.Message{{Role: "user", Content: "hi"}}
+
+	m.finishTurn(t.Context(), conv, messages, "hello", false)
+
+	if len(m.resident) != 1 {
+		t.Fatalf("conversation count after declined sleep = %d, want 1 (stays RAM-resident)", len(m.resident))
+	}
+	if m.stats.Sleeps != 0 {
+		t.Fatalf("declined sleep counted %d Sleeps, want 0", m.stats.Sleeps)
+	}
+	if conv.busy {
+		t.Fatal("finishTurn must clear busy even when the sleep declines")
 	}
 }
