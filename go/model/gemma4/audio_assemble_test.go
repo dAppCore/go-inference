@@ -187,3 +187,99 @@ func TestAssembleAudioTextOnly(t *testing.T) {
 		t.Fatalf("text-only pack should yield (nil,nil), got (%v, %v)", a, err)
 	}
 }
+
+// audioF32Tensor builds a little-endian F32 tensor from float values — the second dtype
+// audioF32Values decodes (clip bounds / per_dim_scale ship BF16 or F32).
+func audioF32Tensor(vals ...float32) safetensors.Tensor {
+	data := make([]byte, len(vals)*4)
+	for i, v := range vals {
+		bits := math.Float32bits(v)
+		data[i*4] = byte(bits)
+		data[i*4+1] = byte(bits >> 8)
+		data[i*4+2] = byte(bits >> 16)
+		data[i*4+3] = byte(bits >> 24)
+	}
+	return safetensors.Tensor{Dtype: "F32", Shape: []int{len(vals)}, Data: data}
+}
+
+// TestAudioF32Values covers audioF32Values across both accepted dtypes and their guards: a BF16
+// tensor decodes to the folded float32s, an F32 tensor round-trips its exact values, a data slice
+// shorter than the shape declares is rejected for each dtype, and an unsupported dtype returns
+// (nil,false). This scalar/vector reader feeds every audio clip bound and per_dim_scale fold.
+func TestAudioF32Values(t *testing.T) {
+	// BF16: high byte carries the mantissa top — audioBF16Tensor(2) encodes bits 0x0000, 0x0100
+	// (index i → low byte i, high byte i>>8), so element 1 is BF16 0x0100 = 2^-126 * ... just
+	// assert the count + that decode succeeds rather than pin the tiny subnormal.
+	bf, ok := audioF32Values(audioBF16Tensor(2, 2))
+	if !ok || len(bf) != 4 {
+		t.Fatalf("BF16 decode = (%v, %v), want 4 values, true", bf, ok)
+	}
+
+	// F32: exact round-trip of the little-endian bytes.
+	f32, ok := audioF32Values(audioF32Tensor(1.5, -2.25, 0))
+	if !ok || len(f32) != 3 || f32[0] != 1.5 || f32[1] != -2.25 || f32[2] != 0 {
+		t.Fatalf("F32 decode = (%v, %v), want [1.5 -2.25 0], true", f32, ok)
+	}
+
+	// Short data: shape declares more elements than the byte slice holds → reject, both dtypes.
+	shortBF := safetensors.Tensor{Dtype: "BF16", Shape: []int{4}, Data: make([]byte, 2)} // want 8 bytes
+	if v, ok := audioF32Values(shortBF); ok || v != nil {
+		t.Fatalf("short BF16 = (%v, %v), want (nil, false)", v, ok)
+	}
+	shortF32 := safetensors.Tensor{Dtype: "F32", Shape: []int{4}, Data: make([]byte, 4)} // want 16 bytes
+	if v, ok := audioF32Values(shortF32); ok || v != nil {
+		t.Fatalf("short F32 = (%v, %v), want (nil, false)", v, ok)
+	}
+
+	// Unsupported dtype (e.g. a quantised U32 clip tensor) → (nil, false), not a garbage decode.
+	if v, ok := audioF32Values(safetensors.Tensor{Dtype: "U32", Shape: []int{2}, Data: make([]byte, 8)}); ok || v != nil {
+		t.Fatalf("U32 decode = (%v, %v), want (nil, false)", v, ok)
+	}
+	t.Logf("audioF32Values: BF16 + F32 decode, short data rejected per dtype, unsupported dtype → (nil,false)")
+}
+
+// validAudioConfigForAssemble returns a Conformer-complete audio config: the base every branch of
+// TestValidateGemma4AudioConfigForAssemble clones and mutates one field of.
+func validAudioConfigForAssemble() *Gemma4AudioConfig {
+	return &Gemma4AudioConfig{
+		HiddenSize: 8, NumHiddenLayers: 1, NumAttentionHeads: 2,
+		AttentionChunkSize: 2, AttentionContextLeft: 3, ConvKernelSize: 5,
+		SubsamplingConvChannels: []int32{4, 2}, OutputProjDims: 6,
+		ResidualWeight: 0.5, AttentionLogitCap: 50,
+	}
+}
+
+// TestValidateGemma4AudioConfigForAssemble covers the encoder-config gate: a complete config
+// passes, and each malformed shape the Conformer path cannot build is rejected — a zeroed
+// dimensional field, a subsampling-channel list that isn't exactly two entries, a zero logit cap,
+// and a hidden size the head count does not divide.
+func TestValidateGemma4AudioConfigForAssemble(t *testing.T) {
+	if err := validateGemma4AudioConfigForAssemble(validAudioConfigForAssemble()); err != nil {
+		t.Fatalf("a complete audio config should validate, got %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		mutate func(*Gemma4AudioConfig)
+	}{
+		{"hidden_size zero", func(c *Gemma4AudioConfig) { c.HiddenSize = 0 }},
+		{"num_hidden_layers zero", func(c *Gemma4AudioConfig) { c.NumHiddenLayers = 0 }},
+		{"num_attention_heads zero", func(c *Gemma4AudioConfig) { c.NumAttentionHeads = 0 }},
+		{"attention_context_left zero", func(c *Gemma4AudioConfig) { c.AttentionContextLeft = 0 }},
+		{"conv_kernel_size zero", func(c *Gemma4AudioConfig) { c.ConvKernelSize = 0 }},
+		{"subsampling channels not two", func(c *Gemma4AudioConfig) { c.SubsamplingConvChannels = []int32{4} }},
+		{"output_proj_dims zero", func(c *Gemma4AudioConfig) { c.OutputProjDims = 0 }},
+		{"attention_logit_cap zero", func(c *Gemma4AudioConfig) { c.AttentionLogitCap = 0 }},
+		{"hidden not divisible by heads", func(c *Gemma4AudioConfig) { c.HiddenSize = 9 }}, // 9 % 2 != 0
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validAudioConfigForAssemble()
+			tc.mutate(cfg)
+			if err := validateGemma4AudioConfigForAssemble(cfg); err == nil {
+				t.Fatalf("%s should be rejected", tc.name)
+			}
+		})
+	}
+	t.Logf("validateGemma4AudioConfigForAssemble: complete config passes; each malformed dim / channel-count / logit-cap / indivisible-hidden rejected")
+}
