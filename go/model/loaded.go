@@ -257,11 +257,12 @@ type LoadedDiffusion struct {
 // LoadedModel is the whole backend-agnostic weight set: the Arch + every weight as a Linear or raw
 // norm bytes, viewing the source mmap. The single assembler output every backend consumes.
 type LoadedModel struct {
-	Arch      Arch
-	Embed     *Linear // token embedding (also the tied LM head when LMHead is nil)
-	LMHead    *Linear // separate output projection, or nil ⇒ tied to Embed
-	FinalNorm []byte
-	Layers    []LoadedLayer
+	Arch          Arch
+	Embed         *Linear // token embedding (also the tied LM head when LMHead is nil)
+	PositionEmbed *Linear // learned absolute position table; nil for rotary architectures
+	LMHead        *Linear // separate output projection, or nil ⇒ tied to Embed
+	FinalNorm     []byte
+	Layers        []LoadedLayer
 
 	EmbedPerLayer     *Linear // PLE tower (E2B/E4B); nil when absent
 	PerLayerModelProj *Linear
