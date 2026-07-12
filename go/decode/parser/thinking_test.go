@@ -366,3 +366,35 @@ func TestThinking_FindStartTerminator_AnchorMatchesNaive_Good(t *testing.T) {
 		}
 	}
 }
+
+// TestProcessorDrainFinalConsumesPending pins drain(final=true)'s postcondition:
+// pending is fully consumed on EVERY path (the partial-marker holdback only arms
+// mid-stream), which is what lets Flush skip residue splicing. If a drain change
+// ever retains bytes at final, this fails before Flush silently drops them.
+func TestProcessorDrainFinalConsumesPending(t *testing.T) {
+	cases := []struct {
+		name  string
+		feeds []string
+	}{
+		{"reasoning_tail_no_end_marker", []string{"<think>half finished thought"}},
+		{"holdback_shaped_tail", []string{"visible <thi"}},
+		{"marker_then_tail", []string{"a<think>x</think>b<thi"}},
+		{"bare_terminator_tail", []string{"answer<turn|"}},
+		{"empty", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewProcessor(Config{Mode: Hide}, Hint{Architecture: "gemma4"})
+			for _, f := range tc.feeds {
+				p.Process(f)
+			}
+			p.Flush()
+			if p.pending != "" {
+				t.Fatalf("drain(true) left pending %q — Flush residue splicing was removed on this postcondition", p.pending)
+			}
+			if p.inReasoning {
+				t.Fatalf("Flush left inReasoning set")
+			}
+		})
+	}
+}

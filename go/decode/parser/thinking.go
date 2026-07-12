@@ -125,22 +125,15 @@ func (p *Processor) Flush() string {
 		return ""
 	}
 	out := p.drain(true)
-	if p.pending == "" {
-		if p.inReasoning {
-			p.emitReasoningBlock()
-			p.inReasoning = false
-		}
-		return out
-	}
+	// drain(final=true) consumes pending completely on every path — the keep
+	// holdback that retains a partial marker only arms mid-stream (!final) —
+	// so there is never a residue to splice here; only an open reasoning
+	// block remains to close. TestProcessorDrainFinalConsumesPending pins
+	// the postcondition so a drain change cannot silently reopen the gap.
 	if p.inReasoning {
-		p.addReasoning(p.pending)
-		p.pending = ""
 		p.emitReasoningBlock()
 		p.inReasoning = false
-		return out
 	}
-	out += p.pending
-	p.pending = ""
 	return out
 }
 
