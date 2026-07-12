@@ -454,8 +454,11 @@ func rocmGemma4ModelSourceFormatGGUF(model inference.ModelIdentity) bool {
 
 func rocmGemma4LabelsVetoGenerateLinked(labels map[string]string) bool {
 	status := rocmGemma4LabelValue(labels, "gemma4_generate_status")
+	moeUnlinked := rocmGemma4LabelValue(labels, "gemma4_enable_moe_block") == "true" &&
+		rocmGemma4LabelValue(labels, "moe_text_runtime") != hipKernelStatusLinked
 	return rocmGemma4LabelValue(labels, "gemma4_pack_supported") == "false" ||
 		rocmGemma4LabelValue(labels, "gemma4_runnable_on_card") == "false" ||
+		moeUnlinked ||
 		status == Gemma4GenerateLoadOnly ||
 		status == Gemma4GeneratePlannedOnly
 }

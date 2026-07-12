@@ -15,6 +15,8 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	inferdecode "dappco.re/go/inference/decode"
+	"dappco.re/go/inference/engine/hip/internal/gguf"
 )
 
 func TestHIPHardwareAvailabilitySmoke_Good(t *testing.T) {
@@ -41,6 +43,969 @@ func TestHIPHardwareAvailabilitySmoke_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_KERNEL_HSACO") != "" && report.Labels["projection_kernel"] != hipKernelStatusLinked {
 		t.Fatalf("report = %+v, want linked projection fixture kernel when GO_ROCM_KERNEL_HSACO is set", report)
 	}
+}
+
+func TestHIPHardwareGemma4MoEGGUFHostResidency_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run ROCm model smoke tests")
+	}
+	modelPath := strings.TrimSpace(os.Getenv("GO_ROCM_PRODUCTION_MODEL_PATH"))
+	if modelPath == "" {
+		t.Skip("set GO_ROCM_PRODUCTION_MODEL_PATH to a local Gemma4 MoE GGUF")
+	}
+	info, err := gguf.ReadInfo(modelPath)
+	core.RequireNoError(t, err)
+	if info.Metadata.ExpertCount == 0 {
+		t.Skip("GO_ROCM_PRODUCTION_MODEL_PATH is not a sparse Gemma4 GGUF")
+	}
+	textConfig := nativeGemma4TextConfigFromGGUFMetadata(info.Metadata)
+	core.AssertEqual(t, true, textConfig.EnableMoEBlock)
+	core.AssertEqual(t, 128, textConfig.NumExperts)
+	core.AssertEqual(t, 8, textConfig.TopKExperts)
+	core.AssertEqual(t, 704, textConfig.MoEIntermediateSize)
+	if os.Getenv("GO_ROCM_LOG_MOE_TENSORS") == "1" {
+		for _, tensor := range info.Tensors {
+			if strings.Contains(tensor.Name, "_exps.weight") {
+				t.Logf("%s type=%s dims=%v bytes=%d", tensor.Name, tensor.TypeName, tensor.Dimensions, tensor.ByteSize)
+			}
+		}
+	}
+
+	textModel, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).loadModelWithROCmConfig(modelPath, inference.LoadConfig{ContextLen: 64}, ROCmLoadConfig{})
+	core.RequireNoError(t, err)
+	defer textModel.Close()
+	rocmLoaded, ok := textModel.(*rocmModel)
+	core.RequireTrue(t, ok)
+	loaded, ok := rocmLoaded.native.(*hipLoadedModel)
+	core.RequireTrue(t, ok)
+	loadConfig := nativeLoadConfig{ModelInfo: loaded.modelInfo}
+
+	var deviceBytes uint64
+	for _, tensor := range loaded.tensors {
+		deviceBytes += tensor.info.ByteSize
+		if hipGemma4HostResidentExpertTensor(loadConfig, tensor.info) {
+			t.Fatalf("expert tensor %q was allocated in device memory", tensor.info.Name)
+		}
+	}
+	var hostBytes uint64
+	for _, tensor := range loaded.hostTensors {
+		hostBytes += tensor.ByteSize
+	}
+	core.AssertEqual(t, int(info.Metadata.BlockCount)*2, len(loaded.hostTensors))
+	core.AssertGreater(t, hostBytes, uint64(11*memoryGiB))
+	moe, err := loaded.loadedGemma4MoELayerConfig(0, loaded.modelInfo.HiddenSize)
+	core.RequireNoError(t, err)
+	core.RequireTrue(t, moe != nil)
+	core.AssertEqual(t, 128, moe.NumExperts)
+	core.AssertEqual(t, 8, moe.TopKExperts)
+	core.AssertEqual(t, 704, moe.ExpertIntermediateSize)
+	core.AssertEqual(t, 128, moe.RouterProjection.Rows)
+	core.AssertEqual(t, 2816, moe.RouterProjection.Cols)
+	core.AssertEqual(t, 128, len(moe.PerExpertScale))
+	core.RequireTrue(t, moe.ExpertCache != nil)
+	forward, err := loaded.cachedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	if err != nil {
+		t.Fatalf("load complete Gemma4 MoE forward config: %v", err)
+	}
+	core.AssertEqual(t, loaded.modelInfo.NumLayers, len(forward.Layers))
+	for index, layer := range forward.Layers {
+		if layer.MoE == nil {
+			t.Fatalf("forward layer %d has no MoE config", index)
+		}
+	}
+	inputValues := make([]float32, loaded.modelInfo.HiddenSize)
+	for index := range inputValues {
+		inputValues[index] = float32(math.Sin(float64(index+1) * 0.013))
+	}
+	input, err := hipUploadGemma4Q4Float32Input(loaded.driver, "real Gemma4 MoE layer input", inputValues)
+	core.RequireNoError(t, err)
+	defer input.Close()
+	preCfg := forward.Layers[0].PreFeedForwardNorm
+	preCfg.Epsilon = 1e-6
+	localInput, err := hipRunRMSNormKernelWithDeviceInputWeightConfig(context.Background(), loaded.driver, input, preCfg)
+	core.RequireNoError(t, err)
+	defer localInput.Close()
+	moeOutput, err := hipRunGemma4MoEDeviceMLP(context.Background(), loaded.driver, input, localInput, forward.Layers[0], 1e-6)
+	core.RequireNoError(t, err)
+	defer moeOutput.Close()
+	outputValues, err := hipReadFloat32DeviceOutput(moeOutput, "rocm.hip.Gemma4MoE", "real MoE layer output", loaded.modelInfo.HiddenSize)
+	core.RequireNoError(t, err)
+	core.RequireTrue(t, rocmFloat32SliceFinite(outputValues))
+	var outputMagnitude float64
+	for _, value := range outputValues {
+		outputMagnitude += math.Abs(float64(value))
+	}
+	core.AssertGreater(t, outputMagnitude, 0.0)
+	core.AssertEqual(t, 8, len(moe.ExpertCache.entries))
+	device := loaded.driver.DeviceInfo()
+	t.Logf("Gemma4 MoE residency: device_tensors=%d device_bytes=%d host_tensors=%d host_bytes=%d device_free_bytes=%d expert_cache_bytes=%d", len(loaded.tensors), deviceBytes, len(loaded.hostTensors), hostBytes, device.FreeBytes, moe.ExpertCache.maxBytes)
+}
+
+func TestHIPHardwareGGUFQ4_0ProjectionAndGateUp_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatal("native ROCm runtime is not available")
+	}
+	const cols = 32
+	input := make([]float32, cols)
+	for index := range input {
+		input[index] = float32(index%7-3) / 8
+	}
+	weightRows := [][]byte{
+		hipHardwareGGUFQ4_0Row(0.25, 1),
+		hipHardwareGGUFQ4_0Row(-0.125, 3),
+		hipHardwareGGUFQ4_0Row(0.0625, 5),
+		hipHardwareGGUFQ4_0Row(-0.03125, 7),
+	}
+	weights := make([]byte, 0, len(weightRows)*hipGGUFQ4_0BlockBytes)
+	for _, row := range weightRows {
+		weights = append(weights, row...)
+	}
+	inputPayload, err := hipFloat32Payload(input)
+	core.RequireNoError(t, err)
+	inputBuffer, err := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4_0ProjectionLaunch", "hardware input", inputPayload, len(input))
+	core.RequireNoError(t, err)
+	defer inputBuffer.Close()
+	weightBuffer, err := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4_0ProjectionLaunch", "hardware weights", weights, len(weights))
+	core.RequireNoError(t, err)
+	defer weightBuffer.Close()
+
+	projectionOutput, err := hipAllocateByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4_0ProjectionLaunch", "hardware projection output", 2*4, 2)
+	core.RequireNoError(t, err)
+	defer projectionOutput.Close()
+	core.RequireNoError(t, hipRunGGUFQ4_0ProjectionKernelWithDeviceInputOutput(context.Background(), runtime.(*hipRuntime).driver, inputBuffer, weightBuffer, 2, cols, 1, len(weightRows), projectionOutput))
+	projection, err := hipReadFloat32DeviceOutput(projectionOutput, "rocm.hip.GGUFQ4_0ProjectionLaunch", "hardware projection output", 2)
+	core.RequireNoError(t, err)
+	for row := range projection {
+		assertFloat32Near(t, hipHardwareGGUFQ4_0Dot(input, weightRows[row+1]), projection[row])
+	}
+
+	gateUpOutput, err := hipAllocateByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4_0ProjectionLaunch", "hardware gate-up output", 2*4, 2)
+	core.RequireNoError(t, err)
+	defer gateUpOutput.Close()
+	core.RequireNoError(t, hipRunGGUFQ4_0GELUTanhGateUpKernelWithDeviceInputOutput(context.Background(), runtime.(*hipRuntime).driver, inputBuffer, weightBuffer, 2, cols, 0, len(weightRows), gateUpOutput))
+	gateUp, err := hipReadFloat32DeviceOutput(gateUpOutput, "rocm.hip.GGUFQ4_0ProjectionLaunch", "hardware gate-up output", 2)
+	core.RequireNoError(t, err)
+	wantGate := []float32{hipHardwareGGUFQ4_0Dot(input, weightRows[0]), hipHardwareGGUFQ4_0Dot(input, weightRows[1])}
+	wantUp := []float32{hipHardwareGGUFQ4_0Dot(input, weightRows[2]), hipHardwareGGUFQ4_0Dot(input, weightRows[3])}
+	wantGateUp := expectedGELUTanhMultiply(wantGate, wantUp)
+	assertFloat32SlicesNear(t, wantGateUp, gateUp, 1e-5)
+
+	const selectedExperts = 2
+	expertGateUpRows := make([][][]byte, selectedExperts)
+	expertDownRows := make([][][]byte, selectedExperts)
+	entries := make([]*hipGemma4ExpertCacheEntry, selectedExperts)
+	for expert := 0; expert < selectedExperts; expert++ {
+		expertGateUpRows[expert] = make([][]byte, 2*cols)
+		gateUpPayload := make([]byte, 0, 2*cols*hipGGUFQ4_0BlockBytes)
+		for row := range expertGateUpRows[expert] {
+			expertGateUpRows[expert][row] = hipHardwareGGUFQ4_0Row(0.015625*float32(expert+1), expert*7+row+1)
+			gateUpPayload = append(gateUpPayload, expertGateUpRows[expert][row]...)
+		}
+		expertDownRows[expert] = make([][]byte, cols)
+		downPayload := make([]byte, 0, cols*hipGGUFQ4_0BlockBytes)
+		for row := range expertDownRows[expert] {
+			expertDownRows[expert][row] = hipHardwareGGUFQ4_0Row(0.03125*float32(expert+1), expert*11+row+3)
+			downPayload = append(downPayload, expertDownRows[expert][row]...)
+		}
+		gateUpBuffer, err := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4_0SelectedExpertsLaunch", "hardware selected gate/up", gateUpPayload, len(gateUpPayload))
+		core.RequireNoError(t, err)
+		defer gateUpBuffer.Close()
+		downBuffer, err := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4_0SelectedExpertsLaunch", "hardware selected down", downPayload, len(downPayload))
+		core.RequireNoError(t, err)
+		defer downBuffer.Close()
+		entries[expert] = &hipGemma4ExpertCacheEntry{
+			GateUp: gateUpBuffer, Down: downBuffer,
+			GateUpRows: 2 * cols, GateUpCols: cols, DownRows: cols, DownCols: cols,
+		}
+	}
+	selectedActivation, err := hipAllocateByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4_0SelectedExpertsLaunch", "hardware selected activation", selectedExperts*cols*4, selectedExperts*cols)
+	core.RequireNoError(t, err)
+	defer selectedActivation.Close()
+	selectedOutput, err := hipAllocateByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFQ4_0SelectedExpertsLaunch", "hardware selected output", cols*4, cols)
+	core.RequireNoError(t, err)
+	defer selectedOutput.Close()
+	routeWeights := []float32{0.75, 0.25}
+	core.RequireNoError(t, hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(context.Background(), runtime.(*hipRuntime).driver, inputBuffer, entries, routeWeights, cols, cols, selectedActivation, selectedOutput))
+	selected, err := hipReadFloat32DeviceOutput(selectedOutput, "rocm.hip.GGUFQ4_0SelectedExpertsLaunch", "hardware selected output", cols)
+	core.RequireNoError(t, err)
+	wantSelected := make([]float32, cols)
+	for expert := 0; expert < selectedExperts; expert++ {
+		activationValues := make([]float32, cols)
+		for row := 0; row < cols; row++ {
+			gate := hipHardwareGGUFQ4_0Dot(input, expertGateUpRows[expert][row])
+			up := hipHardwareGGUFQ4_0Dot(input, expertGateUpRows[expert][cols+row])
+			activationValues[row] = expectedGELUTanhMultiply([]float32{gate}, []float32{up})[0]
+		}
+		for row := 0; row < cols; row++ {
+			wantSelected[row] += routeWeights[expert] * hipHardwareGGUFQ4_0Dot(activationValues, expertDownRows[expert][row])
+		}
+	}
+	assertFloat32SlicesNear(t, wantSelected, selected, 1e-4)
+}
+
+func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatal("native ROCm runtime is not available")
+	}
+	const (
+		hidden          = 256
+		expertFF        = 32
+		selectedExperts = 2
+	)
+	input := make([]float32, hidden)
+	for index := range input {
+		input[index] = float32(index%17-8) / 32
+	}
+	inputPayload, err := hipFloat32Payload(input)
+	core.RequireNoError(t, err)
+	inputBuffer, err := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed input", inputPayload, len(input))
+	core.RequireNoError(t, err)
+	defer inputBuffer.Close()
+
+	expertGateUpRows := make([][][]byte, selectedExperts)
+	expertDownRows := make([][][]byte, selectedExperts)
+	entries := make([]*hipGemma4ExpertCacheEntry, selectedExperts)
+	for expert := 0; expert < selectedExperts; expert++ {
+		expertGateUpRows[expert] = make([][]byte, 2*expertFF)
+		gateUpPayload := make([]byte, 0, 2*expertFF*hipGGUFQ4KBlockBytes)
+		for row := range expertGateUpRows[expert] {
+			expertGateUpRows[expert][row] = hipHardwareGGUFQ4KRow(0.00390625*float32(expert+1), 0.001953125, expert*19+row+1)
+			gateUpPayload = append(gateUpPayload, expertGateUpRows[expert][row]...)
+		}
+		expertDownRows[expert] = make([][]byte, hidden)
+		downPayload := make([]byte, 0, hidden*hipGGUFQ5_1BlockBytes)
+		for row := range expertDownRows[expert] {
+			expertDownRows[expert][row] = hipHardwareGGUFQ5_1Row(0.0078125*float32(expert+1), -0.0625, expert*23+row+3)
+			downPayload = append(downPayload, expertDownRows[expert][row]...)
+		}
+		gateUpBuffer, uploadErr := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed gate/up", gateUpPayload, len(gateUpPayload))
+		core.RequireNoError(t, uploadErr)
+		defer gateUpBuffer.Close()
+		downBuffer, uploadErr := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed down", downPayload, len(downPayload))
+		core.RequireNoError(t, uploadErr)
+		defer downBuffer.Close()
+		entries[expert] = &hipGemma4ExpertCacheEntry{
+			GateUp: gateUpBuffer, Down: downBuffer,
+			GateUpRows: 2 * expertFF, GateUpCols: hidden, DownRows: hidden, DownCols: expertFF,
+			GateUpFormat: hipGGUFExpertFormatQ4K, DownFormat: hipGGUFExpertFormatQ5_1,
+		}
+	}
+	activation, err := hipAllocateByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed activation", selectedExperts*expertFF*4, selectedExperts*expertFF)
+	core.RequireNoError(t, err)
+	defer activation.Close()
+	output, err := hipAllocateByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed output", hidden*4, hidden)
+	core.RequireNoError(t, err)
+	defer output.Close()
+	routeWeights := []float32{0.625, 0.375}
+	core.RequireNoError(t, hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(context.Background(), runtime.(*hipRuntime).driver, inputBuffer, entries, routeWeights, hidden, expertFF, activation, output))
+	got, err := hipReadFloat32DeviceOutput(output, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed output", hidden)
+	core.RequireNoError(t, err)
+
+	want := make([]float32, hidden)
+	for expert := 0; expert < selectedExperts; expert++ {
+		activationValues := make([]float32, expertFF)
+		for row := 0; row < expertFF; row++ {
+			gate := hipHardwareGGUFQ4KDot(input, expertGateUpRows[expert][row])
+			up := hipHardwareGGUFQ4KDot(input, expertGateUpRows[expert][expertFF+row])
+			activationValues[row] = expectedGELUTanhMultiply([]float32{gate}, []float32{up})[0]
+		}
+		for row := 0; row < hidden; row++ {
+			want[row] += routeWeights[expert] * hipHardwareGGUFQ5_1Dot(activationValues, expertDownRows[expert][row])
+		}
+	}
+	assertFloat32SlicesNear(t, want, got, 2e-3)
+
+	q8DownRows := make([][][]byte, selectedExperts)
+	for expert := 0; expert < selectedExperts; expert++ {
+		q8DownRows[expert] = make([][]byte, hidden)
+		downPayload := make([]byte, 0, hidden*hipGGUFQ8_0BlockBytes)
+		for row := range q8DownRows[expert] {
+			q8DownRows[expert][row] = hipHardwareGGUFQ8_0Row(0.00390625*float32(expert+1), expert*29+row+5)
+			downPayload = append(downPayload, q8DownRows[expert][row]...)
+		}
+		downBuffer, uploadErr := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed Q8_0 down", downPayload, len(downPayload))
+		core.RequireNoError(t, uploadErr)
+		defer downBuffer.Close()
+		entries[expert].Down = downBuffer
+		entries[expert].DownFormat = hipGGUFExpertFormatQ8_0
+	}
+	core.RequireNoError(t, hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(context.Background(), runtime.(*hipRuntime).driver, inputBuffer, entries, routeWeights, hidden, expertFF, activation, output))
+	gotQ8, err := hipReadFloat32DeviceOutput(output, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed Q8_0 output", hidden)
+	core.RequireNoError(t, err)
+	wantQ8 := make([]float32, hidden)
+	for expert := 0; expert < selectedExperts; expert++ {
+		activationValues := make([]float32, expertFF)
+		for row := 0; row < expertFF; row++ {
+			gate := hipHardwareGGUFQ4KDot(input, expertGateUpRows[expert][row])
+			up := hipHardwareGGUFQ4KDot(input, expertGateUpRows[expert][expertFF+row])
+			activationValues[row] = expectedGELUTanhMultiply([]float32{gate}, []float32{up})[0]
+		}
+		for row := 0; row < hidden; row++ {
+			wantQ8[row] += routeWeights[expert] * hipHardwareGGUFQ8_0Dot(activationValues, q8DownRows[expert][row])
+		}
+	}
+	assertFloat32SlicesNear(t, wantQ8, gotQ8, 2e-3)
+}
+
+func TestHIPHardwareMoERouterParallel_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatal("native ROCm runtime is not available")
+	}
+	logits := make([]float32, 128)
+	for expert := range logits {
+		logits[expert] = float32((expert*37)%23) / 8
+	}
+	req := hipMoERouterRequest{Logits: logits, TopK: 8, Layer: 11}
+	want, err := rocmReferenceRouteExperts(req.Logits, req.TopK, req.Layer, nil)
+	core.RequireNoError(t, err)
+	got, err := hipRunMoERouterKernel(context.Background(), runtime.(*hipRuntime).driver, req)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipMoERouterLaunchStatusOK, got.Status)
+	core.AssertEqual(t, len(want), len(got.Routes))
+	for index := range want {
+		core.AssertEqual(t, want[index].ID, got.Routes[index].ID)
+		assertFloat32Near(t, want[index].Prob, got.Routes[index].Prob)
+	}
+}
+
+func hipHardwareGGUFQ4_0Row(scale float32, salt int) []byte {
+	row := make([]byte, hipGGUFQ4_0BlockBytes)
+	binary.LittleEndian.PutUint16(row, rocmFloat32ToFloat16(scale))
+	for lane := 0; lane < 16; lane++ {
+		low := byte((lane + salt) & 0x0f)
+		high := byte((31 - lane + salt) & 0x0f)
+		row[2+lane] = low | high<<4
+	}
+	return row
+}
+
+func hipHardwareGGUFQ4_0Dot(input []float32, row []byte) float32 {
+	scale := hipFloat16ToFloat32(binary.LittleEndian.Uint16(row))
+	var sum float32
+	for lane, value := range input {
+		packed := row[2+lane%16]
+		quant := packed & 0x0f
+		if lane >= 16 {
+			quant = packed >> 4
+		}
+		sum += value * scale * (float32(quant) - 8)
+	}
+	return sum
+}
+
+func hipHardwareGGUFQ4KRow(scale, minimumScale float32, salt int) []byte {
+	row := make([]byte, hipGGUFQ4KBlockBytes)
+	binary.LittleEndian.PutUint16(row[0:], rocmFloat32ToFloat16(scale))
+	binary.LittleEndian.PutUint16(row[2:], rocmFloat32ToFloat16(minimumScale))
+	for group := 0; group < hipGGUFQ4KGroupsPerBlock; group++ {
+		groupScale := byte(1 + (salt+group)%7)
+		groupMinimum := byte((salt + group*2) % 4)
+		if group < 4 {
+			row[4+group] = groupScale
+			row[8+group] = groupMinimum
+			continue
+		}
+		row[8+group] = groupScale | groupMinimum<<4
+	}
+	for group := 0; group < hipGGUFQ4KGroupsPerBlock; group++ {
+		for lane := 0; lane < 32; lane++ {
+			quant := byte((salt + group*5 + lane*3) & 0x0f)
+			index := 16 + (group/2)*32 + lane
+			if group&1 == 0 {
+				row[index] = quant
+			} else {
+				row[index] |= quant << 4
+			}
+		}
+	}
+	return row
+}
+
+func hipHardwareGGUFQ4KDot(input []float32, row []byte) float32 {
+	scale := hipFloat16ToFloat32(binary.LittleEndian.Uint16(row[0:]))
+	minimumScale := hipFloat16ToFloat32(binary.LittleEndian.Uint16(row[2:]))
+	var sum float32
+	for lane, inputValue := range input {
+		group := lane / 32
+		groupScale, groupMinimum := hipGGUFQ4KScaleMin(row[4:16], group)
+		packed := row[16+(group/2)*32+lane%32]
+		quant := packed & 0x0f
+		if group&1 != 0 {
+			quant = packed >> 4
+		}
+		value := scale*float32(groupScale)*float32(quant) - minimumScale*float32(groupMinimum)
+		sum += inputValue * value
+	}
+	return sum
+}
+
+func hipHardwareGGUFQ5_1Row(scale, minimum float32, salt int) []byte {
+	row := make([]byte, hipGGUFQ5_1BlockBytes)
+	binary.LittleEndian.PutUint16(row[0:], rocmFloat32ToFloat16(scale))
+	binary.LittleEndian.PutUint16(row[2:], rocmFloat32ToFloat16(minimum))
+	var highBits uint32
+	for lane := 0; lane < hipGGUFQ5_1BlockSize; lane++ {
+		quant := byte((salt + lane*7) & 0x1f)
+		if quant&0x10 != 0 {
+			highBits |= 1 << lane
+		}
+		index := 8 + lane%16
+		if lane < 16 {
+			row[index] = quant & 0x0f
+		} else {
+			row[index] |= (quant & 0x0f) << 4
+		}
+	}
+	binary.LittleEndian.PutUint32(row[4:], highBits)
+	return row
+}
+
+func hipHardwareGGUFQ5_1Dot(input []float32, row []byte) float32 {
+	scale := hipFloat16ToFloat32(binary.LittleEndian.Uint16(row[0:]))
+	minimum := hipFloat16ToFloat32(binary.LittleEndian.Uint16(row[2:]))
+	highBits := binary.LittleEndian.Uint32(row[4:])
+	var sum float32
+	for lane, inputValue := range input {
+		packed := row[8+lane%16]
+		quant := packed & 0x0f
+		if lane >= 16 {
+			quant = packed >> 4
+		}
+		quant |= byte((highBits>>lane)&1) << 4
+		sum += inputValue * (scale*float32(quant) + minimum)
+	}
+	return sum
+}
+
+func hipHardwareGGUFQ8_0Row(scale float32, salt int) []byte {
+	row := make([]byte, hipGGUFQ8_0BlockBytes)
+	binary.LittleEndian.PutUint16(row[0:], rocmFloat32ToFloat16(scale))
+	for lane := 0; lane < hipGGUFQ8_0BlockSize; lane++ {
+		row[2+lane] = byte(int8((salt+lane*11)%255 - 127))
+	}
+	return row
+}
+
+func hipHardwareGGUFQ8_0Dot(input []float32, row []byte) float32 {
+	scale := hipFloat16ToFloat32(binary.LittleEndian.Uint16(row[0:]))
+	var sum float32
+	for lane, inputValue := range input {
+		sum += inputValue * scale * float32(int8(row[2+lane]))
+	}
+	return sum
+}
+
+func TestHIPHardwareAttentionHeadsDeviceKVGQA_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		dim        = 2
+		tokenCount = 3
+		headCount  = 4
+		keyHeads   = 2
+	)
+	queryValues := []float32{
+		1, 0,
+		0, 1,
+		1, 1,
+		-1, 0.5,
+	}
+	keyValues := []float32{
+		1, 0, 0, 1,
+		0, 1, 1, 0,
+		1, 1, -1, 1,
+	}
+	valueValues := []float32{
+		2, 0, 0, 4,
+		0, 6, 8, 0,
+		4, 4, -2, 2,
+	}
+	for _, mode := range []string{rocmKVCacheModeFP16, rocmKVCacheModeQ8, rocmKVCacheModeKQ8VQ4} {
+		t.Run(mode, func(t *testing.T) {
+			queryPayload, err := hipFloat32Payload(queryValues)
+			core.RequireNoError(t, err)
+			query, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsLaunch", "hardware GQA attention query", queryPayload, len(queryValues))
+			core.RequireNoError(t, err)
+			defer query.Close()
+			output, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsLaunch", "hardware GQA attention output", uint64(len(queryValues)*4), len(queryValues))
+			core.RequireNoError(t, err)
+			defer output.Close()
+
+			cache, err := newROCmKVCache(mode, defaultROCmKVBlockSize)
+			core.RequireNoError(t, err)
+			core.RequireNoError(t, cache.AppendVectors(0, keyHeads*dim, keyHeads*dim, keyValues, valueValues))
+			deviceKV, err := cache.MirrorToDevice(hipRuntime.driver)
+			core.RequireNoError(t, err)
+			defer deviceKV.Close()
+			table, err := deviceKV.KernelDescriptorTable()
+			core.RequireNoError(t, err)
+			defer table.Close()
+
+			core.RequireNoError(t, hipRunAttentionHeadsOutputFromDeviceQueryToDeviceKernel(context.Background(), hipRuntime.driver, hipAttentionRequest{
+				QueryDim:        dim,
+				KeyHeads:        keyHeads,
+				DeviceKV:        deviceKV,
+				DescriptorTable: table,
+				Scale:           1,
+			}, query, headCount, output))
+			got, err := hipReadFloat32DeviceOutput(output, "rocm.hip.AttentionHeadsLaunch", "hardware GQA attention output", len(queryValues))
+			core.RequireNoError(t, err)
+			restoredKeys, restoredValues, err := cache.Restore(0, cache.TokenCount())
+			core.RequireNoError(t, err)
+			want := make([]float32, 0, len(queryValues))
+			for head := 0; head < headCount; head++ {
+				keys, err := fakeROCmAttentionHeadVectors(restoredKeys, tokenCount, keyHeads, dim, headCount, head)
+				core.RequireNoError(t, err)
+				values, err := fakeROCmAttentionHeadVectors(restoredValues, tokenCount, keyHeads, dim, headCount, head)
+				core.RequireNoError(t, err)
+				queryBase := head * dim
+				headOutput, _, err := hipReferenceSingleHeadAttentionWithScale(queryValues[queryBase:queryBase+dim], keys, values, 1)
+				core.RequireNoError(t, err)
+				want = append(want, headOutput...)
+			}
+			assertFloat32SlicesNear(t, want, got, 0.005)
+		})
+	}
+}
+
+func TestHIPHardwareMLXAffineQ8ProjectionCols256Group32_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		rows      = 3
+		cols      = 256
+		groupSize = 32
+		bits      = 8
+		groups    = cols / groupSize
+	)
+	input := make([]float32, cols)
+	values := make([]uint32, rows*cols)
+	scales := make([]uint16, rows*groups)
+	biases := make([]uint16, rows*groups)
+	for col := range input {
+		input[col] = float32((col%17)-8) / 8
+	}
+	for row := 0; row < rows; row++ {
+		for col := 0; col < cols; col++ {
+			values[row*cols+col] = uint32((row*19 + col*7) & 0xff)
+		}
+		for group := 0; group < groups; group++ {
+			scales[row*groups+group] = hipFloat32ToBFloat16(0.015625 * float32(row+group+1))
+			biases[row*groups+group] = hipFloat32ToBFloat16(-0.25 * float32(row+1))
+		}
+	}
+	req := hipMLXQ4ProjectionRequest{
+		Input:     input,
+		Weight:    hipPackMLXAffineValuesForTest(values, cols, bits),
+		Scales:    scales,
+		Biases:    biases,
+		Rows:      rows,
+		Cols:      cols,
+		GroupSize: groupSize,
+		Bits:      bits,
+	}
+	want, err := hipReferenceMLXAffineProjection(req.Input, req.Weight, req.Scales, req.Biases, req.Rows, req.Cols, req.GroupSize, req.Bits)
+	core.RequireNoError(t, err)
+	got, err := hipRunMLXQ4ProjectionKernel(context.Background(), hipRuntime.driver, req)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, want, got, 0.01)
+}
+
+func TestHIPHardwareMLXAffineQ8ProjectionCols3072Group32_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		rows      = 5
+		cols      = 3072
+		groupSize = 32
+		bits      = 8
+		groups    = cols / groupSize
+	)
+	input := make([]float32, cols)
+	values := make([]uint32, rows*cols)
+	scales := make([]uint16, rows*groups)
+	biases := make([]uint16, rows*groups)
+	for col := range input {
+		input[col] = float32((col%23)-11) / 64
+	}
+	for row := 0; row < rows; row++ {
+		for col := 0; col < cols; col++ {
+			values[row*cols+col] = uint32((row*29 + col*11) & 0xff)
+		}
+		for group := 0; group < groups; group++ {
+			scales[row*groups+group] = hipFloat32ToBFloat16(0.001953125 * float32((row+group)%7+1))
+			biases[row*groups+group] = hipFloat32ToBFloat16(-0.03125 * float32(row+1))
+		}
+	}
+	req := hipMLXQ4ProjectionRequest{
+		Input:     input,
+		Weight:    hipPackMLXAffineValuesForTest(values, cols, bits),
+		Scales:    scales,
+		Biases:    biases,
+		Rows:      rows,
+		Cols:      cols,
+		GroupSize: groupSize,
+		Bits:      bits,
+	}
+	want, err := hipReferenceMLXAffineProjection(req.Input, req.Weight, req.Scales, req.Biases, req.Rows, req.Cols, req.GroupSize, req.Bits)
+	core.RequireNoError(t, err)
+	got, err := hipRunMLXQ4ProjectionKernel(context.Background(), hipRuntime.driver, req)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, want, got, 0.03)
+}
+
+func TestHIPHardwareMLXAffineQ4ProjectionCols2560Group32_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		rows      = 9
+		cols      = 2560
+		groupSize = 32
+		bits      = 4
+		groups    = cols / groupSize
+	)
+	input := make([]float32, cols)
+	values := make([]uint32, rows*cols)
+	scales := make([]uint16, rows*groups)
+	biases := make([]uint16, rows*groups)
+	for col := range input {
+		input[col] = float32((col%29)-14) / 128
+	}
+	for row := 0; row < rows; row++ {
+		for col := 0; col < cols; col++ {
+			values[row*cols+col] = uint32((row*11 + col*5) & 0x0f)
+		}
+		for group := 0; group < groups; group++ {
+			scales[row*groups+group] = hipFloat32ToBFloat16(float32((row+group)%7+1) / 256)
+			biases[row*groups+group] = hipFloat32ToBFloat16(float32((row-group)%5) / 128)
+		}
+	}
+	req := hipMLXQ4ProjectionRequest{
+		Input:     input,
+		Weight:    hipPackMLXAffineValuesForTest(values, cols, bits),
+		Scales:    scales,
+		Biases:    biases,
+		Rows:      rows,
+		Cols:      cols,
+		GroupSize: groupSize,
+		Bits:      bits,
+	}
+	want, err := hipReferenceMLXAffineProjection(req.Input, req.Weight, req.Scales, req.Biases, req.Rows, req.Cols, req.GroupSize, req.Bits)
+	core.RequireNoError(t, err)
+	got, err := hipRunMLXQ4ProjectionKernel(context.Background(), hipRuntime.driver, req)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, want, got, 0.03)
+}
+
+func TestHIPHardwareMLXAffineQ4GELUTanhCols2560Group32_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		rows      = 32
+		cols      = 2560
+		groupSize = 32
+		bits      = 4
+	)
+	input := make([]float32, cols)
+	for col := range input {
+		input[col] = float32((col%23)-11) / 128
+	}
+	makeReq := func(valueStride int, scaleBase float32) hipMLXQ4ProjectionRequest {
+		groups := cols / groupSize
+		values := make([]uint32, rows*cols)
+		scales := make([]uint16, rows*groups)
+		biases := make([]uint16, rows*groups)
+		for row := 0; row < rows; row++ {
+			for col := 0; col < cols; col++ {
+				values[row*cols+col] = uint32((row*valueStride + col*(valueStride+2)) & 0x0f)
+			}
+			for group := 0; group < groups; group++ {
+				scales[row*groups+group] = hipFloat32ToBFloat16(scaleBase * float32((row+group)%7+1))
+				biases[row*groups+group] = hipFloat32ToBFloat16(-scaleBase * float32((row+group)%3+1))
+			}
+		}
+		return hipMLXQ4ProjectionRequest{
+			Input:     input,
+			Weight:    hipPackMLXAffineValuesForTest(values, cols, bits),
+			Scales:    scales,
+			Biases:    biases,
+			Rows:      rows,
+			Cols:      cols,
+			GroupSize: groupSize,
+			Bits:      bits,
+		}
+	}
+	gateReq := makeReq(5, 0.001953125)
+	upReq := makeReq(7, 0.00146484375)
+	gate, err := hipReferenceMLXAffineProjection(gateReq.Input, gateReq.Weight, gateReq.Scales, gateReq.Biases, gateReq.Rows, gateReq.Cols, gateReq.GroupSize, gateReq.Bits)
+	core.RequireNoError(t, err)
+	up, err := hipReferenceMLXAffineProjection(upReq.Input, upReq.Weight, upReq.Scales, upReq.Biases, upReq.Rows, upReq.Cols, upReq.GroupSize, upReq.Bits)
+	core.RequireNoError(t, err)
+	want := expectedGELUTanhMultiply(gate, up)
+	inputPayload, err := hipFloat32Payload(input)
+	core.RequireNoError(t, err)
+	inputBuffer, err := hipUploadByteBuffer(hipRuntime.driver, hipGemma4Q4Layer0Operation, "hardware q4 group32 GELU input", inputPayload, len(input))
+	core.RequireNoError(t, err)
+	defer inputBuffer.Close()
+	gateBuffers, err := gateReq.deviceBuffers(hipRuntime.driver)
+	core.RequireNoError(t, err)
+	defer gateBuffers.Close()
+	upBuffers, err := upReq.deviceBuffers(hipRuntime.driver)
+	core.RequireNoError(t, err)
+	defer upBuffers.Close()
+	deviceConfig := func(req hipMLXQ4ProjectionRequest, buffers *hipMLXQ4ProjectionDeviceBuffers) hipMLXQ4DeviceWeightConfig {
+		return hipMLXQ4DeviceWeightConfig{
+			WeightPointer: buffers.Weight.Pointer(),
+			ScalePointer:  buffers.Scales.Pointer(),
+			BiasPointer:   buffers.Biases.Pointer(),
+			WeightBytes:   buffers.Weight.SizeBytes(),
+			ScaleBytes:    buffers.Scales.SizeBytes(),
+			BiasBytes:     buffers.Biases.SizeBytes(),
+			Rows:          req.Rows,
+			Cols:          req.Cols,
+			GroupSize:     req.GroupSize,
+			Bits:          req.Bits,
+		}
+	}
+	output, err := hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInput(context.Background(), hipRuntime.driver, inputBuffer, deviceConfig(gateReq, gateBuffers), deviceConfig(upReq, upBuffers))
+	core.RequireNoError(t, err)
+	defer output.Close()
+	got, err := hipReadFloat32DeviceOutput(output, hipGemma4Q4Layer0Operation, "hardware q4 group32 GELU output", rows)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, want, got, 0.03)
+}
+
+func TestHIPHardwareMLXAffineQ6ProjectionCols3072Group16_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		rows      = 5
+		cols      = 3072
+		groupSize = 16
+		bits      = 6
+		groups    = cols / groupSize
+	)
+	input := make([]float32, cols)
+	values := make([]uint32, rows*cols)
+	scales := make([]uint16, rows*groups)
+	biases := make([]uint16, rows*groups)
+	for col := range input {
+		input[col] = float32((col%23)-11) / 64
+	}
+	for row := 0; row < rows; row++ {
+		for col := 0; col < cols; col++ {
+			values[row*cols+col] = uint32((row*17 + col*11) & 0x3f)
+		}
+		for group := 0; group < groups; group++ {
+			scales[row*groups+group] = hipFloat32ToBFloat16(0.00390625 * float32((row+group)%7+1))
+			biases[row*groups+group] = hipFloat32ToBFloat16(-0.015625 * float32(row+1))
+		}
+	}
+	req := hipMLXQ4ProjectionRequest{
+		Input:     input,
+		Weight:    hipPackMLXAffineValuesForTest(values, cols, bits),
+		Scales:    scales,
+		Biases:    biases,
+		Rows:      rows,
+		Cols:      cols,
+		GroupSize: groupSize,
+		Bits:      bits,
+	}
+	want, err := hipReferenceMLXAffineProjection(req.Input, req.Weight, req.Scales, req.Biases, req.Rows, req.Cols, req.GroupSize, req.Bits)
+	core.RequireNoError(t, err)
+	got, err := hipRunMLXQ4ProjectionKernel(context.Background(), hipRuntime.driver, req)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, want, got, 0.03)
+}
+
+func TestHIPHardwareMLXAffineQ8AssistantMLPGroup32_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		hidden       = 256
+		intermediate = 2048
+		groupSize    = 32
+		bits         = 8
+	)
+	input := make([]float32, hidden)
+	for index := range input {
+		input[index] = float32((index%29)-14) / 256
+	}
+	makeReq := func(rows, cols, valueStride int, scaleBase float32) hipMLXQ4ProjectionRequest {
+		groups := cols / groupSize
+		values := make([]uint32, rows*cols)
+		scales := make([]uint16, rows*groups)
+		biases := make([]uint16, rows*groups)
+		for row := 0; row < rows; row++ {
+			for col := 0; col < cols; col++ {
+				values[row*cols+col] = uint32((row*valueStride + col*(valueStride+4)) & 0xff)
+			}
+			for group := 0; group < groups; group++ {
+				scales[row*groups+group] = hipFloat32ToBFloat16(scaleBase * float32((row+group)%5+1))
+				biases[row*groups+group] = hipFloat32ToBFloat16(scaleBase * float32((row-group)%7) / 8)
+			}
+		}
+		return hipMLXQ4ProjectionRequest{
+			Input:     input,
+			Weight:    hipPackMLXAffineValuesForTest(values, cols, bits),
+			Scales:    scales,
+			Biases:    biases,
+			Rows:      rows,
+			Cols:      cols,
+			GroupSize: groupSize,
+			Bits:      bits,
+		}
+	}
+	gateReq := makeReq(intermediate, hidden, 7, 0.00048828125)
+	upReq := makeReq(intermediate, hidden, 11, 0.00036621094)
+	downReq := makeReq(hidden, intermediate, 13, 0.00012207031)
+	gate, err := hipReferenceMLXAffineProjection(gateReq.Input, gateReq.Weight, gateReq.Scales, gateReq.Biases, gateReq.Rows, gateReq.Cols, gateReq.GroupSize, gateReq.Bits)
+	core.RequireNoError(t, err)
+	up, err := hipReferenceMLXAffineProjection(upReq.Input, upReq.Weight, upReq.Scales, upReq.Biases, upReq.Rows, upReq.Cols, upReq.GroupSize, upReq.Bits)
+	core.RequireNoError(t, err)
+	activated := expectedGELUTanhMultiply(gate, up)
+	downReq.Input = activated
+	want, err := hipReferenceMLXAffineProjection(activated, downReq.Weight, downReq.Scales, downReq.Biases, downReq.Rows, downReq.Cols, downReq.GroupSize, downReq.Bits)
+	core.RequireNoError(t, err)
+
+	inputPayload, err := hipFloat32Payload(input)
+	core.RequireNoError(t, err)
+	inputBuffer, err := hipUploadByteBuffer(hipRuntime.driver, hipGemma4Q4Layer0Operation, "hardware assistant MLP input", inputPayload, len(input))
+	core.RequireNoError(t, err)
+	defer inputBuffer.Close()
+	gateBuffers, err := gateReq.deviceBuffers(hipRuntime.driver)
+	core.RequireNoError(t, err)
+	defer gateBuffers.Close()
+	upBuffers, err := upReq.deviceBuffers(hipRuntime.driver)
+	core.RequireNoError(t, err)
+	defer upBuffers.Close()
+	downBuffers, err := downReq.deviceBuffers(hipRuntime.driver)
+	core.RequireNoError(t, err)
+	defer downBuffers.Close()
+	deviceConfig := func(req hipMLXQ4ProjectionRequest, buffers *hipMLXQ4ProjectionDeviceBuffers) hipMLXQ4DeviceWeightConfig {
+		return hipMLXQ4DeviceWeightConfig{
+			WeightPointer: buffers.Weight.Pointer(),
+			ScalePointer:  buffers.Scales.Pointer(),
+			BiasPointer:   buffers.Biases.Pointer(),
+			WeightBytes:   buffers.Weight.SizeBytes(),
+			ScaleBytes:    buffers.Scales.SizeBytes(),
+			BiasBytes:     buffers.Biases.SizeBytes(),
+			Rows:          req.Rows,
+			Cols:          req.Cols,
+			GroupSize:     req.GroupSize,
+			Bits:          req.Bits,
+		}
+	}
+
+	output, err := hipRunGemma4Q4DeviceGELUTanhMLPWithDeviceInput(context.Background(), hipRuntime.driver, inputBuffer, deviceConfig(gateReq, gateBuffers), deviceConfig(upReq, upBuffers), deviceConfig(downReq, downBuffers))
+	core.RequireNoError(t, err)
+	defer output.Close()
+	got, err := hipReadFloat32DeviceOutput(output, hipGemma4Q4Layer0Operation, "hardware assistant MLP output", hidden)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, want, got, 0.03)
 }
 
 func TestNativeDecodeSmokeKernelStatus_Good(t *testing.T) {
@@ -71,6 +1036,7 @@ func TestNativeDecodeSmokeKernelStatus_Good(t *testing.T) {
 		if err == nil || !core.Contains(err.Error(), "native decode kernels are not linked yet") {
 			t.Fatalf("Generate error = %v, want explicit native decode kernel status", err)
 		}
+		return
 	}
 	if os.Getenv("GO_ROCM_KERNEL_HSACO") != "" {
 		rocmLoaded, ok := model.(*rocmModel)
@@ -103,6 +1069,113 @@ func TestNativeDecodeSmokeKernelStatus_Good(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestHIPHardwareAttentionHeadsBatchCausalKQ8VQ4FutureRowsInvariant_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_CACHE_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_CACHE_TESTS=1 to run ROCm cache hardware tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		dim         = 128
+		headCount   = 8
+		keyHeads    = 4
+		priorTokens = 64
+		queryRows   = 5
+	)
+	keyWidth := keyHeads * dim
+	valueWidth := keyHeads * dim
+	priorKeyValues := make([]float32, priorTokens*keyWidth)
+	priorValueValues := make([]float32, priorTokens*valueWidth)
+	for index := range priorKeyValues {
+		priorKeyValues[index] = float32(math.Sin(float64(index+3)*0.013) * 0.75)
+	}
+	for index := range priorValueValues {
+		priorValueValues[index] = float32(math.Cos(float64(index+7)*0.017) * 0.5)
+	}
+	appendKeyValues := make([]float32, queryRows*keyWidth)
+	appendValueValues := make([]float32, queryRows*valueWidth)
+	for index := range appendKeyValues {
+		appendKeyValues[index] = float32(math.Sin(float64(index+priorTokens*keyWidth)*0.019) * 0.75)
+	}
+	for index := range appendValueValues {
+		appendValueValues[index] = float32(math.Cos(float64(index+priorTokens*valueWidth)*0.023) * 0.5)
+	}
+	queryValues := make([]float32, queryRows*headCount*dim)
+	for index := range queryValues {
+		queryValues[index] = float32(math.Sin(float64(index+11)*0.011) * 0.65)
+	}
+
+	priorKeyInput, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsBatchCausalLaunch", "future invariant prior keys", mustHIPFloat32Payload(t, priorKeyValues), len(priorKeyValues))
+	core.RequireNoError(t, err)
+	defer priorKeyInput.Close()
+	priorValueInput, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsBatchCausalLaunch", "future invariant prior values", mustHIPFloat32Payload(t, priorValueValues), len(priorValueValues))
+	core.RequireNoError(t, err)
+	defer priorValueInput.Close()
+	appendKeyInput, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsBatchCausalLaunch", "future invariant appended keys", mustHIPFloat32Payload(t, appendKeyValues), len(appendKeyValues))
+	core.RequireNoError(t, err)
+	defer appendKeyInput.Close()
+	appendValueInput, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsBatchCausalLaunch", "future invariant appended values", mustHIPFloat32Payload(t, appendValueValues), len(appendValueValues))
+	core.RequireNoError(t, err)
+	defer appendValueInput.Close()
+	queryInput, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsBatchCausalLaunch", "future invariant queries", mustHIPFloat32Payload(t, queryValues), len(queryValues))
+	core.RequireNoError(t, err)
+	defer queryInput.Close()
+
+	engineConfig := defaultHIPGemma4Q4EngineConfig()
+	prior, err := newROCmDeviceKVCacheFromDeviceRowsWithEngineConfig(context.Background(), hipRuntime.driver, rocmKVCacheModeKQ8VQ4, engineConfig.globalDeviceKVBlockSize(), priorKeyInput, priorValueInput, keyWidth, valueWidth, priorTokens, 0, engineConfig)
+	core.RequireNoError(t, err)
+	defer prior.Close()
+
+	runBatch := func(t *testing.T, rows int) []float32 {
+		t.Helper()
+		keyBytes := uint64(rows * keyWidth * 4)
+		valueBytes := uint64(rows * valueWidth * 4)
+		keyRows := hipBorrowDeviceByteBufferValue(hipRuntime.driver, "future invariant appended key rows", appendKeyInput.Pointer(), keyBytes, rows*keyWidth)
+		valueRows := hipBorrowDeviceByteBufferValue(hipRuntime.driver, "future invariant appended value rows", appendValueInput.Pointer(), valueBytes, rows*valueWidth)
+		deviceKV, err := prior.withAppendedDeviceRowsWindowWithEngineConfig(context.Background(), &keyRows, &valueRows, keyWidth, valueWidth, rows, 0, engineConfig)
+		core.RequireNoError(t, err)
+		defer deviceKV.Close()
+		table, err := deviceKV.KernelDescriptorTable()
+		core.RequireNoError(t, err)
+		defer table.Close()
+		outputCount := rows * headCount * dim
+		output, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsBatchCausalLaunch", "future invariant attention output", uint64(outputCount*4), outputCount)
+		core.RequireNoError(t, err)
+		defer output.Close()
+		queryBytes := uint64(outputCount * 4)
+		queryRows := hipBorrowDeviceByteBufferValue(hipRuntime.driver, "future invariant query rows", queryInput.Pointer(), queryBytes, outputCount)
+		core.RequireNoError(t, hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernel(context.Background(), hipRuntime.driver, hipAttentionHeadsBatchCausalDeviceRequest{
+			DeviceKV:        deviceKV,
+			DescriptorTable: table,
+			Dim:             dim,
+			TokenCount:      deviceKV.TokenCount(),
+			HeadCount:       headCount,
+			KeyHeads:        keyHeads,
+			QueryCount:      rows,
+			QueryStartToken: priorTokens,
+			Scale:           1,
+		}, &queryRows, output))
+		got, err := hipReadFloat32DeviceOutput(output, "rocm.hip.AttentionHeadsBatchCausalLaunch", "future invariant attention output", outputCount)
+		core.RequireNoError(t, err)
+		return got
+	}
+
+	twoRows := runBatch(t, 2)
+	fiveRows := runBatch(t, 5)
+	firstTwoCount := 2 * headCount * dim
+	assertFloat32SlicesNear(t, twoRows[:firstTwoCount], fiveRows[:firstTwoCount], 0.0001)
 }
 
 func TestNativeAttachedDrafterGenerateSmoke_Good(t *testing.T) {
@@ -139,10 +1212,27 @@ func TestNativeAttachedDrafterGenerateSmoke_Good(t *testing.T) {
 		maxTokens = value
 	}
 
+	targetROCmConfig := ROCmLoadConfig{}
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE")); raw != "" {
+		targetROCmConfig.DeviceKVMode = raw
+		if _, err := targetROCmConfig.deviceKVMode(); err != nil {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE=%q: %v", raw, err)
+		}
+	}
+	draftROCmConfig := ROCmLoadConfig{}
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_DRAFT_KV_MODE")); raw != "" {
+		draftROCmConfig.DeviceKVMode = raw
+		if _, err := draftROCmConfig.deviceKVMode(); err != nil {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_DRAFT_KV_MODE=%q: %v", raw, err)
+		}
+	}
+
 	backend := newROCmBackendWithRuntime(newSystemNativeRuntime())
 	pair, err := backend.LoadAttachedDrafterPair(targetPath, draftPath, AttachedDrafterPairConfig{
-		TargetOptions: []inference.LoadOption{inference.WithContextLen(defaultContextLengthCap)},
-		DraftOptions:  []inference.LoadOption{inference.WithContextLen(defaultContextLengthCap)},
+		TargetOptions:    []inference.LoadOption{inference.WithContextLen(defaultContextLengthCap)},
+		DraftOptions:     []inference.LoadOption{inference.WithContextLen(defaultContextLengthCap)},
+		TargetROCmConfig: targetROCmConfig,
+		DraftROCmConfig:  draftROCmConfig,
 	})
 	if err != nil {
 		t.Fatalf("LoadAttachedDrafterPair(%q, %q): %v", targetPath, draftPath, err)
@@ -162,6 +1252,13 @@ func TestNativeAttachedDrafterGenerateSmoke_Good(t *testing.T) {
 	}
 
 	draftTokens := pair.Plan.DraftTokens
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_DRAFT_TOKENS")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_DRAFT_TOKENS=%q, want positive integer", raw)
+		}
+		draftTokens = value
+	}
 	result, err := pair.GenerateNative(context.Background(), prompt, AttachedDrafterGenerateConfig{
 		MaxTokens:   maxTokens,
 		DraftTokens: draftTokens,
@@ -182,46 +1279,2305 @@ func TestNativeAttachedDrafterGenerateSmoke_Good(t *testing.T) {
 	if result.Metrics.AcceptedTokens+result.Metrics.RejectedTokens != result.Metrics.DraftTokens {
 		t.Fatalf("GenerateNative metrics = %+v, want accepted+rejected to match draft tokens", result.Metrics)
 	}
+	if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_LOG_TOKENS") == "1" {
+		t.Logf("native attached tokens=%v text=%q metrics=%+v", decodeTokenIDs(result.Tokens), result.Text, result.Metrics)
+	}
 	if err := pair.Close(); err != nil {
 		t.Fatalf("close attached drafter pair before reference target load: %v", err)
 	}
 	pairClosed = true
 
-	referenceModel, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModel(targetPath, inference.WithContextLen(defaultContextLengthCap)))
+	referenceModel, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModelWithConfig(targetPath, targetROCmConfig, inference.WithContextLen(defaultContextLengthCap))
 	if err != nil {
 		t.Fatalf("LoadModel reference target %q: %v", targetPath, err)
 	}
 	defer referenceModel.Close()
-	targetText := strings.Join(collectTokenText(referenceModel.Generate(context.Background(), prompt, inference.WithMaxTokens(maxTokens), inference.WithTemperature(0))), "")
+	referenceTokens := collectInferenceTokens(referenceModel.Generate(context.Background(), prompt, inference.WithMaxTokens(maxTokens), inference.WithTemperature(0)))
+	targetText := strings.Join(inferenceTokenText(referenceTokens), "")
 	if err := resultError(referenceModel.Err()); err != nil {
 		t.Fatalf("reference target Generate(%q): %v", prompt, err)
 	}
 	if targetText == "" {
 		t.Fatalf("reference target Generate(%q) returned empty text", prompt)
 	}
+	if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_LOG_TOKENS") == "1" {
+		t.Logf("reference target tokens=%v text=%q", inferenceTokenIDs(referenceTokens), targetText)
+	}
 	if result.Text == targetText {
 		t.Logf("native attached smoke exact-match: text=%q metrics=%+v", result.Text, result.Metrics)
 	} else {
-		assertNativeAttachedDrafterTargetARMatchStable(t, targetPath, draftPath, prompt, maxTokens, draftTokens, result.Text, targetText)
+		assertNativeAttachedDrafterTargetARMatchStable(t, targetPath, draftPath, targetROCmConfig, draftROCmConfig, prompt, maxTokens, draftTokens, result.Text, targetText)
 	}
 }
 
-func assertNativeAttachedDrafterTargetARMatchStable(t *testing.T, targetPath, draftPath, prompt string, maxTokens, draftTokens int, nativeText, targetText string) {
+func TestNativeGemma4Q4GenerateMatchesBatchStepwise_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run ROCm model smoke tests")
+	}
+	targetPath := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH"))
+	if targetPath == "" {
+		t.Skip("set GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH to a local Gemma4 QAT target pack")
+	}
+	prompt := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_PROMPT"))
+	if prompt == "" {
+		prompt = "text:Write one concise sentence about ROCm inference."
+	}
+	maxTokens := 8
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS=%q, want positive integer", raw)
+		}
+		maxTokens = value
+	}
+
+	targetROCmConfig := ROCmLoadConfig{}
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE")); raw != "" {
+		targetROCmConfig.DeviceKVMode = raw
+		if _, err := targetROCmConfig.deviceKVMode(); err != nil {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE=%q: %v", raw, err)
+		}
+	}
+	model, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModelWithConfig(targetPath, targetROCmConfig, inference.WithContextLen(defaultContextLengthCap))
+	if err != nil {
+		t.Fatalf("LoadModel target %q: %v", targetPath, err)
+	}
+	defer model.Close()
+	rocmLoaded, ok := model.(*rocmModel)
+	if !ok || rocmLoaded == nil {
+		t.Fatalf("LoadModel target returned %T, want *rocmModel", model)
+	}
+	loaded, ok := rocmLoaded.native.(*hipLoadedModel)
+	if !ok || loaded == nil || !hipLoadedGemma4Q4GenerateLinked(loaded) {
+		t.Fatalf("native target = %T linked=%v, want linked *hipLoadedModel", rocmLoaded.native, ok && loaded != nil && hipLoadedGemma4Q4GenerateLinked(loaded))
+	}
+	cfg, err := loaded.cachedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	if err != nil {
+		t.Fatalf("loaded target forward config: %v", err)
+	}
+	promptTokens, matched, err := hipGemma4Q4PromptTokenIDs(prompt, loaded)
+	if err != nil {
+		t.Fatalf("Gemma4 prompt %q: %v", prompt, err)
+	}
+	if !matched {
+		t.Fatalf("Gemma4 prompt %q did not resolve to native target token IDs", prompt)
+	}
+	engineConfig := loaded.gemma4Q4EngineConfig()
+	stream, streamErr := hipGemma4Q4GenerateTokenSeqWithEngineConfig(context.Background(), loaded, cfg, promptTokens, inference.GenerateConfig{MaxTokens: maxTokens}, engineConfig)
+	unrolled := inferenceTokenIDs(collectInferenceTokens(stream))
+	if err := streamErr(); err != nil {
+		t.Fatalf("unrolled Generate(%q): %v", prompt, err)
+	}
+	stepwise := runNativeGemma4Q4StepwiseBatchPrefillAfterAttachedPrefillForHardwareTest(t, loaded, cfg, promptTokens, maxTokens, engineConfig)
+	if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_LOG_TOKENS") == "1" {
+		t.Logf("target generate tokens=%v batch_stepwise tokens=%v", unrolled, stepwise)
+	}
+	core.AssertEqual(t, stepwise, unrolled)
+}
+
+func TestNativeGemma4Q4VerifierAcceptedBlocksMatchStepwise_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run ROCm model smoke tests")
+	}
+	targetPath := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH"))
+	if targetPath == "" {
+		t.Skip("set GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH to a local Gemma4 QAT target pack")
+	}
+	prompt := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_PROMPT"))
+	if prompt == "" {
+		prompt = "text:Write one concise sentence about ROCm inference."
+	}
+	maxTokens := 16
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS=%q, want positive integer", raw)
+		}
+		maxTokens = value
+	}
+	blockTokens := 4
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_VERIFY_BLOCK_TOKENS")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_VERIFY_BLOCK_TOKENS=%q, want positive integer", raw)
+		}
+		blockTokens = value
+	}
+	compactPrefixTokens := 0
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_VERIFY_COMPACT_PREFIX_TOKENS")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_VERIFY_COMPACT_PREFIX_TOKENS=%q, want non-negative integer", raw)
+		}
+		compactPrefixTokens = value
+	}
+
+	targetROCmConfig := ROCmLoadConfig{}
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE")); raw != "" {
+		targetROCmConfig.DeviceKVMode = raw
+		if _, err := targetROCmConfig.deviceKVMode(); err != nil {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE=%q: %v", raw, err)
+		}
+	}
+	model, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModelWithConfig(targetPath, targetROCmConfig, inference.WithContextLen(defaultContextLengthCap))
+	if err != nil {
+		t.Fatalf("LoadModel target %q: %v", targetPath, err)
+	}
+	defer model.Close()
+	rocmLoaded, ok := model.(*rocmModel)
+	if !ok || rocmLoaded == nil {
+		t.Fatalf("LoadModel target returned %T, want *rocmModel", model)
+	}
+	loaded, ok := rocmLoaded.native.(*hipLoadedModel)
+	if !ok || loaded == nil || !hipLoadedGemma4Q4GenerateLinked(loaded) {
+		t.Fatalf("native target = %T linked=%v, want linked *hipLoadedModel", rocmLoaded.native, ok && loaded != nil && hipLoadedGemma4Q4GenerateLinked(loaded))
+	}
+	cfg, err := loaded.cachedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	if err != nil {
+		t.Fatalf("loaded target forward config: %v", err)
+	}
+	promptTokens, matched, err := hipGemma4Q4PromptTokenIDs(prompt, loaded)
+	if err != nil {
+		t.Fatalf("Gemma4 prompt %q: %v", prompt, err)
+	}
+	if !matched {
+		t.Fatalf("Gemma4 prompt %q did not resolve to native target token IDs", prompt)
+	}
+	engineConfig := loaded.gemma4Q4EngineConfig()
+	if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_DISABLE_INTERLEAVED_ROWS") == "1" {
+		engineConfig.DisableInterleavedRowPages = true
+	}
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_KV_BLOCK_SIZE")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_KV_BLOCK_SIZE=%q, want positive integer", raw)
+		}
+		engineConfig.DeviceKVBlockSize = value
+		engineConfig.GlobalDeviceKVBlockSize = value
+	}
+	stepwise := runNativeGemma4Q4StepwiseBatchPrefillAfterAttachedPrefillForHardwareTest(t, loaded, cfg, promptTokens, maxTokens, engineConfig)
+	if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_STEPWISE_COMPACT") == "1" {
+		stepwise = runNativeGemma4Q4StepwiseAfterAttachedPrefillForHardwareTest(t, loaded, cfg, promptTokens, maxTokens, engineConfig, true)
+	}
+	blocked := runNativeGemma4Q4VerifierAcceptedBlocksAfterAttachedPrefillForHardwareTest(t, loaded, cfg, promptTokens, stepwise, blockTokens, compactPrefixTokens, engineConfig)
+	if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_LOG_TOKENS") == "1" {
+		t.Logf("target stepwise tokens=%v verifier_accepted_block_%d tokens=%v", stepwise, blockTokens, blocked)
+	}
+	core.AssertEqual(t, stepwise, blocked)
+}
+
+func TestNativeGemma4Q4VerifierCarryWrongDraftMatchesStepwise_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run ROCm model smoke tests")
+	}
+	targetPath := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH"))
+	if targetPath == "" {
+		t.Skip("set GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH to a local Gemma4 QAT target pack")
+	}
+	prompt := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_PROMPT"))
+	if prompt == "" {
+		prompt = "text:Write one concise sentence about ROCm inference."
+	}
+	maxTokens := 80
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS=%q, want positive integer", raw)
+		}
+		maxTokens = value
+	}
+	if maxTokens < 3 {
+		t.Skip("set GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS to at least 3 for verifier carry testing")
+	}
+
+	targetROCmConfig := ROCmLoadConfig{}
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE")); raw != "" {
+		targetROCmConfig.DeviceKVMode = raw
+		if _, err := targetROCmConfig.deviceKVMode(); err != nil {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE=%q: %v", raw, err)
+		}
+	}
+	model, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModelWithConfig(targetPath, targetROCmConfig, inference.WithContextLen(defaultContextLengthCap))
+	if err != nil {
+		t.Fatalf("LoadModel target %q: %v", targetPath, err)
+	}
+	defer model.Close()
+	rocmLoaded, ok := model.(*rocmModel)
+	if !ok || rocmLoaded == nil {
+		t.Fatalf("LoadModel target returned %T, want *rocmModel", model)
+	}
+	loaded, ok := rocmLoaded.native.(*hipLoadedModel)
+	if !ok || loaded == nil || !hipLoadedGemma4Q4GenerateLinked(loaded) {
+		t.Fatalf("native target = %T linked=%v, want linked *hipLoadedModel", rocmLoaded.native, ok && loaded != nil && hipLoadedGemma4Q4GenerateLinked(loaded))
+	}
+	cfg, err := loaded.cachedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	if err != nil {
+		t.Fatalf("loaded target forward config: %v", err)
+	}
+	promptTokens, matched, err := hipGemma4Q4PromptTokenIDs(prompt, loaded)
+	if err != nil {
+		t.Fatalf("Gemma4 prompt %q: %v", prompt, err)
+	}
+	if !matched {
+		t.Fatalf("Gemma4 prompt %q did not resolve to native target token IDs", prompt)
+	}
+	engineConfig := loaded.gemma4Q4EngineConfig()
+	stepwise := runNativeGemma4Q4StepwiseBatchPrefillAfterAttachedPrefillForHardwareTest(t, loaded, cfg, promptTokens, maxTokens, engineConfig)
+	wrongDraftToken := stepwise[0]
+	if len(stepwise) > 1 {
+		wrongDraftToken = stepwise[1]
+	}
+	hasMismatchPoint := false
+	for _, tokenID := range stepwise {
+		if tokenID != wrongDraftToken {
+			hasMismatchPoint = true
+			break
+		}
+	}
+	if !hasMismatchPoint {
+		t.Skipf("target sequence does not diverge from repeated token %d within %d tokens", wrongDraftToken, maxTokens)
+	}
+	wrongDraft := []int32{wrongDraftToken, wrongDraftToken, wrongDraftToken, wrongDraftToken, wrongDraftToken}
+	carried := runNativeGemma4Q4VerifierCarryAfterAttachedPrefillForHardwareTest(t, loaded, cfg, promptTokens, maxTokens, engineConfig, wrongDraft)
+	if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_LOG_TOKENS") == "1" {
+		t.Logf("target stepwise tokens=%v verifier_wrong_draft_carry tokens=%v wrong_draft=%v", stepwise, carried, wrongDraft)
+	}
+	core.AssertEqual(t, stepwise, carried)
+}
+
+func TestNativeAttachedDrafterAssistantDraftDoesNotShiftTargetVerify_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run ROCm model smoke tests")
+	}
+	targetPath := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH"))
+	if targetPath == "" {
+		t.Skip("set GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH to a local Gemma4 QAT target pack")
+	}
+	draftPath := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_DRAFT_PATH"))
+	if draftPath == "" {
+		t.Skip("set GO_ROCM_ATTACHED_DRAFTER_DRAFT_PATH to a local Gemma4 MTP-QAT assistant pack")
+	}
+	prompt := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_PROMPT"))
+	if prompt == "" {
+		prompt = "text:Write one concise sentence about ROCm inference."
+	}
+	maxTokens := 80
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS=%q, want positive integer", raw)
+		}
+		maxTokens = value
+	}
+
+	targetROCmConfig := ROCmLoadConfig{}
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE")); raw != "" {
+		targetROCmConfig.DeviceKVMode = raw
+		if _, err := targetROCmConfig.deviceKVMode(); err != nil {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE=%q: %v", raw, err)
+		}
+	}
+	draftROCmConfig := ROCmLoadConfig{}
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_DRAFT_KV_MODE")); raw != "" {
+		draftROCmConfig.DeviceKVMode = raw
+		if _, err := draftROCmConfig.deviceKVMode(); err != nil {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_DRAFT_KV_MODE=%q: %v", raw, err)
+		}
+	}
+
+	pair, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadAttachedDrafterPair(targetPath, draftPath, AttachedDrafterPairConfig{
+		TargetOptions:    []inference.LoadOption{inference.WithContextLen(defaultContextLengthCap)},
+		DraftOptions:     []inference.LoadOption{inference.WithContextLen(defaultContextLengthCap)},
+		TargetROCmConfig: targetROCmConfig,
+		DraftROCmConfig:  draftROCmConfig,
+	})
+	if err != nil {
+		t.Fatalf("LoadAttachedDrafterPair(%q, %q): %v", targetPath, draftPath, err)
+	}
+	defer pair.Close()
+	if !pair.NativeReady() {
+		t.Fatalf("attached drafter native ready = false labels=%+v error=%q", pair.Attachment.Labels, pair.NativeError)
+	}
+	target, ok := pair.Target.(*rocmModel)
+	if !ok || target == nil {
+		t.Fatalf("pair target = %T, want *rocmModel", pair.Target)
+	}
+	loaded, ok := target.native.(*hipLoadedModel)
+	if !ok || loaded == nil || !hipLoadedGemma4Q4GenerateLinked(loaded) {
+		t.Fatalf("native target = %T linked=%v, want linked *hipLoadedModel", target.native, ok && loaded != nil && hipLoadedGemma4Q4GenerateLinked(loaded))
+	}
+	runtime, err := loaded.attachedDrafterRuntimeSnapshot()
+	if err != nil {
+		t.Fatalf("attached drafter runtime snapshot: %v", err)
+	}
+	cfg, err := loaded.cachedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	if err != nil {
+		t.Fatalf("loaded target forward config: %v", err)
+	}
+	promptTokens, matched, err := hipGemma4Q4PromptTokenIDs(prompt, loaded)
+	if err != nil {
+		t.Fatalf("Gemma4 prompt %q: %v", prompt, err)
+	}
+	if !matched {
+		t.Fatalf("Gemma4 prompt %q did not resolve to native target token IDs", prompt)
+	}
+	engineConfig := loaded.gemma4Q4EngineConfig()
+	stepwise := runNativeGemma4Q4StepwiseBatchPrefillAfterAttachedPrefillForHardwareTest(t, loaded, cfg, promptTokens, maxTokens, engineConfig)
+	repeated := stepwise[1]
+	changeIndex := -1
+	for index := 2; index < len(stepwise); index++ {
+		if stepwise[index] != repeated {
+			changeIndex = index
+			break
+		}
+	}
+	if changeIndex < 3 {
+		t.Skipf("target sequence %v does not contain a late repeated-token change", stepwise)
+	}
+	prefix := changeIndex - 2
+	if prefix+6 > len(stepwise) {
+		t.Skipf("target sequence length %d cannot cover verifier window at prefix %d", len(stepwise), prefix)
+	}
+	draftTokens := make([]int32, 6)
+	for index := range draftTokens {
+		draftTokens[index] = stepwise[prefix]
+	}
+	suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(loaded, nil)
+	withoutWorkspace := hipBorrowAttentionHeadsChunkedWorkspace()
+	withWorkspace := hipBorrowAttentionHeadsChunkedWorkspace()
+	defer func() {
+		if err := hipRecycleAttentionHeadsChunkedWorkspace(withoutWorkspace); err != nil {
+			t.Fatalf("recycle verifier workspace: %v", err)
+		}
+		if err := hipRecycleAttentionHeadsChunkedWorkspace(withWorkspace); err != nil {
+			t.Fatalf("recycle assistant workspace: %v", err)
+		}
+	}()
+	if err := hipGemma4Q4EnsureAttentionWorkspaceDecodeCapacity(loaded.driver, withoutWorkspace, cfg, len(promptTokens)+maxTokens+1); err != nil {
+		t.Fatalf("verifier decode workspace: %v", err)
+	}
+	if err := hipGemma4Q4EnsureAttentionWorkspaceDecodeCapacity(loaded.driver, withWorkspace, cfg, len(promptTokens)+maxTokens+1); err != nil {
+		t.Fatalf("assistant decode workspace: %v", err)
+	}
+	withoutWorkspace.EnsureProjectionGreedyBestCapacity(maxTokens + 2)
+	withWorkspace.EnsureProjectionGreedyBestCapacity(maxTokens + 2)
+
+	withoutAssistant := runNativeGemma4Q4AttachedTargetStateAfterTokensForHardwareTest(t, loaded, cfg, promptTokens, stepwise[:prefix], engineConfig, suppressTokens, withoutWorkspace)
+	defer closeNativeGemma4Q4AttachedTargetStateForHardwareTest(t, &withoutAssistant)
+	withAssistant := runNativeGemma4Q4AttachedTargetStateAfterTokensForHardwareTest(t, loaded, cfg, promptTokens, stepwise[:prefix], engineConfig, suppressTokens, withWorkspace)
+	defer closeNativeGemma4Q4AttachedTargetStateForHardwareTest(t, &withAssistant)
+
+	assistantBlock, err := hipRunAttachedDrafterAssistantDraftBlock(context.Background(), loaded.driver, hipAttachedDrafterAssistantDraftBlockRequest{
+		LastToken:         stepwise[prefix-1],
+		TargetHidden:      withAssistant.Current.DeviceFinalHidden,
+		TargetForward:     cfg,
+		TargetDeviceState: withAssistant.DeviceState,
+		Plan:              runtime.assistantPlan,
+		InputPlan:         runtime.inputPlan,
+		Position:          withAssistant.Position,
+		Epsilon:           1e-6,
+		Softcap:           runtime.softcap,
+		SuppressTokens:    suppressTokens,
+		MaxDraftTokens:    6,
+		Workspace:         withWorkspace,
+	})
+	if err != nil {
+		t.Fatalf("assistant draft block at prefix %d: %v", prefix, err)
+	}
+	assistantTokens := append([]int32(nil), assistantBlock.Tokens...)
+	if err := assistantBlock.Close(); err != nil {
+		t.Fatalf("close assistant draft block: %v", err)
+	}
+
+	withoutVerify := runNativeGemma4Q4VerifierDecisionForHardwareTest(t, loaded, cfg, withoutAssistant, draftTokens, engineConfig, suppressTokens, withoutWorkspace)
+	withVerify := runNativeGemma4Q4VerifierDecisionForHardwareTest(t, loaded, cfg, withAssistant, draftTokens, engineConfig, suppressTokens, withWorkspace)
+	if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_LOG_TOKENS") == "1" {
+		t.Logf("assistant mutation probe prefix=%d stepwise=%v draft=%v assistant=%v without=%+v with=%+v", prefix, stepwise, draftTokens, assistantTokens, withoutVerify, withVerify)
+	}
+	core.AssertEqual(t, withoutVerify, withVerify)
+}
+
+func TestNativeGemma4Q4VerifierMixedDraftBlocksMatchStepwise_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run ROCm model smoke tests")
+	}
+	targetPath := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH"))
+	if targetPath == "" {
+		t.Skip("set GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH to a local Gemma4 QAT target pack")
+	}
+	prompt := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_PROMPT"))
+	if prompt == "" {
+		prompt = "text:Write one concise sentence about ROCm inference."
+	}
+	maxTokens := 80
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS=%q, want positive integer", raw)
+		}
+		maxTokens = value
+	}
+
+	targetROCmConfig := ROCmLoadConfig{}
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE")); raw != "" {
+		targetROCmConfig.DeviceKVMode = raw
+		if _, err := targetROCmConfig.deviceKVMode(); err != nil {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE=%q: %v", raw, err)
+		}
+	}
+	model, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModelWithConfig(targetPath, targetROCmConfig, inference.WithContextLen(defaultContextLengthCap))
+	if err != nil {
+		t.Fatalf("LoadModel target %q: %v", targetPath, err)
+	}
+	defer model.Close()
+	rocmLoaded, ok := model.(*rocmModel)
+	if !ok || rocmLoaded == nil {
+		t.Fatalf("LoadModel target returned %T, want *rocmModel", model)
+	}
+	loaded, ok := rocmLoaded.native.(*hipLoadedModel)
+	if !ok || loaded == nil || !hipLoadedGemma4Q4GenerateLinked(loaded) {
+		t.Fatalf("native target = %T linked=%v, want linked *hipLoadedModel", rocmLoaded.native, ok && loaded != nil && hipLoadedGemma4Q4GenerateLinked(loaded))
+	}
+	cfg, err := loaded.cachedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	if err != nil {
+		t.Fatalf("loaded target forward config: %v", err)
+	}
+	promptTokens, matched, err := hipGemma4Q4PromptTokenIDs(prompt, loaded)
+	if err != nil {
+		t.Fatalf("Gemma4 prompt %q: %v", prompt, err)
+	}
+	if !matched {
+		t.Fatalf("Gemma4 prompt %q did not resolve to native target token IDs", prompt)
+	}
+	engineConfig := loaded.gemma4Q4EngineConfig()
+	stepwise := runNativeGemma4Q4StepwiseBatchPrefillAfterAttachedPrefillForHardwareTest(t, loaded, cfg, promptTokens, maxTokens, engineConfig)
+	if len(stepwise) < 6 {
+		t.Skip("target sequence is too short for mixed verifier draft blocks")
+	}
+	repeated := stepwise[1]
+	mixedBlocks := [][]int32{
+		{180613, 36955, 62945, 144558, 236779, 36955},
+		{243179, 83834, 230657, 205097, stepwise[0], 3292},
+		{repeated, repeated, 236775, stepwise[0], 237221, stepwise[0]},
+	}
+	for len(mixedBlocks) < maxTokens {
+		mixedBlocks = append(mixedBlocks, []int32{repeated, repeated, repeated, repeated, repeated, repeated})
+	}
+	mixed := runNativeGemma4Q4VerifierDraftBlocksAfterAttachedPrefillForHardwareTest(t, loaded, cfg, promptTokens, maxTokens, engineConfig, mixedBlocks)
+	if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_LOG_TOKENS") == "1" {
+		t.Logf("target stepwise tokens=%v verifier_mixed_draft tokens=%v", stepwise, mixed)
+	}
+	core.AssertEqual(t, stepwise, mixed)
+}
+
+func TestNativeGemma4Q4VerifierPartialChunkStateMatchesStepwise_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run ROCm model smoke tests")
+	}
+	targetPath := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH"))
+	if targetPath == "" {
+		t.Skip("set GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH to a local Gemma4 QAT target pack")
+	}
+	prompt := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_PROMPT"))
+	if prompt == "" {
+		prompt = "text:Write one concise sentence about ROCm inference."
+	}
+
+	targetROCmConfig := ROCmLoadConfig{}
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE")); raw != "" {
+		targetROCmConfig.DeviceKVMode = raw
+		if _, err := targetROCmConfig.deviceKVMode(); err != nil {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE=%q: %v", raw, err)
+		}
+	}
+	model, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModelWithConfig(targetPath, targetROCmConfig, inference.WithContextLen(defaultContextLengthCap))
+	if err != nil {
+		t.Fatalf("LoadModel target %q: %v", targetPath, err)
+	}
+	defer model.Close()
+	rocmLoaded, ok := model.(*rocmModel)
+	if !ok || rocmLoaded == nil {
+		t.Fatalf("LoadModel target returned %T, want *rocmModel", model)
+	}
+	loaded, ok := rocmLoaded.native.(*hipLoadedModel)
+	if !ok || loaded == nil || !hipLoadedGemma4Q4GenerateLinked(loaded) {
+		t.Fatalf("native target = %T linked=%v, want linked *hipLoadedModel", rocmLoaded.native, ok && loaded != nil && hipLoadedGemma4Q4GenerateLinked(loaded))
+	}
+	cfg, err := loaded.cachedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	if err != nil {
+		t.Fatalf("loaded target forward config: %v", err)
+	}
+	promptTokens, matched, err := hipGemma4Q4PromptTokenIDs(prompt, loaded)
+	if err != nil {
+		t.Fatalf("Gemma4 prompt %q: %v", prompt, err)
+	}
+	if !matched {
+		t.Fatalf("Gemma4 prompt %q did not resolve to native target token IDs", prompt)
+	}
+	engineConfig := loaded.gemma4Q4EngineConfig()
+	probeTokens := 65
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_STATE_PROBE_TOKENS")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_STATE_PROBE_TOKENS=%q, want positive integer", raw)
+		}
+		probeTokens = value
+	}
+	stepwise := runNativeGemma4Q4StepwiseBatchPrefillAfterAttachedPrefillForHardwareTest(t, loaded, cfg, promptTokens, probeTokens+8, engineConfig)
+	if len(stepwise) < probeTokens {
+		t.Skipf("target sequence %v is too short for partial verifier state probe", stepwise)
+	}
+	repeated := stepwise[1]
+	suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(loaded, nil)
+	stepWorkspace := hipBorrowAttentionHeadsChunkedWorkspace()
+	verifyWorkspace := hipBorrowAttentionHeadsChunkedWorkspace()
+	defer func() {
+		if err := hipRecycleAttentionHeadsChunkedWorkspace(verifyWorkspace); err != nil {
+			t.Fatalf("recycle verifier workspace: %v", err)
+		}
+		if err := hipRecycleAttentionHeadsChunkedWorkspace(stepWorkspace); err != nil {
+			t.Fatalf("recycle stepwise workspace: %v", err)
+		}
+	}()
+	if err := hipGemma4Q4EnsureAttentionWorkspaceDecodeCapacity(loaded.driver, stepWorkspace, cfg, len(promptTokens)+probeTokens+8); err != nil {
+		t.Fatalf("stepwise decode workspace: %v", err)
+	}
+	if err := hipGemma4Q4EnsureAttentionWorkspaceDecodeCapacity(loaded.driver, verifyWorkspace, cfg, len(promptTokens)+probeTokens+8); err != nil {
+		t.Fatalf("verifier decode workspace: %v", err)
+	}
+	stepWorkspace.EnsureProjectionGreedyBestCapacity(probeTokens + 8)
+	verifyWorkspace.EnsureProjectionGreedyBestCapacity(probeTokens + 8)
+
+	want := runNativeGemma4Q4AttachedTargetStateAfterTokensForHardwareTest(t, loaded, cfg, promptTokens, stepwise[:probeTokens], engineConfig, suppressTokens, stepWorkspace)
+	defer closeNativeGemma4Q4AttachedTargetStateForHardwareTest(t, &want)
+
+	mixedBlocks := [][]int32{
+		{180613, 36955, 62945, 144558, 236779, 36955},
+		{243179, 83834, 230657, 205097, stepwise[0], 3292},
+		{repeated, repeated, 236775, stepwise[0], 237221, stepwise[0]},
+	}
+	for len(mixedBlocks)*6 < probeTokens+12 {
+		mixedBlocks = append(mixedBlocks, []int32{repeated, repeated, repeated, repeated, repeated, repeated})
+	}
+	got := runNativeGemma4Q4AttachedTargetStateAfterMixedDraftPrefixForHardwareTest(t, loaded, cfg, promptTokens, engineConfig, suppressTokens, verifyWorkspace, mixedBlocks, probeTokens)
+	defer closeNativeGemma4Q4AttachedTargetStateForHardwareTest(t, &got)
+
+	core.AssertEqual(t, want.Position, got.Position)
+	core.AssertEqual(t, int32(want.Current.Greedy.TokenID), int32(got.Current.Greedy.TokenID))
+	if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_LOG_STATE_PAGES") == "1" {
+		t.Logf("probe=%d want pages %s", probeTokens, nativeGemma4Q4DeviceStatePageSummaryForHardwareTest(want.DeviceState, []int{2, 14}))
+		t.Logf("probe=%d got pages %s", probeTokens, nativeGemma4Q4DeviceStatePageSummaryForHardwareTest(got.DeviceState, []int{2, 14}))
+	}
+	assertNativeGemma4Q4DeviceStatesMatchForHardwareTest(t, cfg, want.DeviceState, got.DeviceState)
+}
+
+func TestNativeGemma4Q4VerifierBatchedChunkStateMatchesStepwise_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run ROCm model smoke tests")
+	}
+	targetPath := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH"))
+	if targetPath == "" {
+		t.Skip("set GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH to a local Gemma4 QAT target pack")
+	}
+	prompt := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_PROMPT"))
+	if prompt == "" {
+		prompt = "text:Write one concise sentence about ROCm inference."
+	}
+
+	targetROCmConfig := ROCmLoadConfig{}
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE")); raw != "" {
+		targetROCmConfig.DeviceKVMode = raw
+		if _, err := targetROCmConfig.deviceKVMode(); err != nil {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE=%q: %v", raw, err)
+		}
+	}
+	model, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModelWithConfig(targetPath, targetROCmConfig, inference.WithContextLen(defaultContextLengthCap))
+	if err != nil {
+		t.Fatalf("LoadModel target %q: %v", targetPath, err)
+	}
+	defer model.Close()
+	rocmLoaded, ok := model.(*rocmModel)
+	if !ok || rocmLoaded == nil {
+		t.Fatalf("LoadModel target returned %T, want *rocmModel", model)
+	}
+	loaded, ok := rocmLoaded.native.(*hipLoadedModel)
+	if !ok || loaded == nil || !hipLoadedGemma4Q4GenerateLinked(loaded) {
+		t.Fatalf("native target = %T linked=%v, want linked *hipLoadedModel", rocmLoaded.native, ok && loaded != nil && hipLoadedGemma4Q4GenerateLinked(loaded))
+	}
+	cfg, err := loaded.cachedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	if err != nil {
+		t.Fatalf("loaded target forward config: %v", err)
+	}
+	promptTokens, matched, err := hipGemma4Q4PromptTokenIDs(prompt, loaded)
+	if err != nil {
+		t.Fatalf("Gemma4 prompt %q: %v", prompt, err)
+	}
+	if !matched {
+		t.Fatalf("Gemma4 prompt %q did not resolve to native target token IDs", prompt)
+	}
+	engineConfig := loaded.gemma4Q4EngineConfig()
+	prefixTokens := 5
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_BATCH_STATE_PREFIX_TOKENS")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_BATCH_STATE_PREFIX_TOKENS=%q, want non-negative integer", raw)
+		}
+		prefixTokens = value
+	}
+	chunkTokens := 6
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_BATCH_STATE_CHUNK_TOKENS")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 1 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_BATCH_STATE_CHUNK_TOKENS=%q, want integer greater than one", raw)
+		}
+		chunkTokens = value
+	}
+	stepwise := runNativeGemma4Q4StepwiseBatchPrefillAfterAttachedPrefillForHardwareTest(t, loaded, cfg, promptTokens, prefixTokens+chunkTokens+4, engineConfig)
+	if len(stepwise) < prefixTokens+chunkTokens {
+		t.Skipf("target sequence %v is too short for batched verifier state probe", stepwise)
+	}
+	suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(loaded, nil)
+	stepWorkspace := hipBorrowAttentionHeadsChunkedWorkspace()
+	verifyWorkspace := hipBorrowAttentionHeadsChunkedWorkspace()
+	defer func() {
+		if err := hipRecycleAttentionHeadsChunkedWorkspace(verifyWorkspace); err != nil {
+			t.Fatalf("recycle verifier workspace: %v", err)
+		}
+		if err := hipRecycleAttentionHeadsChunkedWorkspace(stepWorkspace); err != nil {
+			t.Fatalf("recycle stepwise workspace: %v", err)
+		}
+	}()
+	if err := hipGemma4Q4EnsureAttentionWorkspaceDecodeCapacity(loaded.driver, stepWorkspace, cfg, len(promptTokens)+prefixTokens+chunkTokens+4); err != nil {
+		t.Fatalf("stepwise decode workspace: %v", err)
+	}
+	if err := hipGemma4Q4EnsureAttentionWorkspaceDecodeCapacity(loaded.driver, verifyWorkspace, cfg, len(promptTokens)+prefixTokens+chunkTokens+4); err != nil {
+		t.Fatalf("verifier decode workspace: %v", err)
+	}
+	stepWorkspace.EnsureProjectionGreedyBestCapacity(prefixTokens + chunkTokens + 4)
+	verifyWorkspace.EnsureProjectionGreedyBestCapacity(prefixTokens + chunkTokens + 4)
+
+	want := runNativeGemma4Q4AttachedTargetStateAfterTokensForHardwareTest(t, loaded, cfg, promptTokens, stepwise[:prefixTokens+chunkTokens], engineConfig, suppressTokens, stepWorkspace)
+	defer closeNativeGemma4Q4AttachedTargetStateForHardwareTest(t, &want)
+	var prefix hipAttachedDrafterTargetPrefillResult
+	if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_BATCH_STATE_MIXED_PREFIX") == "1" {
+		repeated := stepwise[1]
+		mixedBlocks := [][]int32{
+			{180613, 36955, 62945, 144558, 236779, 36955},
+			{243179, 83834, 230657, 205097, stepwise[0], 3292},
+			{repeated, repeated, 236775, stepwise[0], 237221, stepwise[0]},
+		}
+		prefix = runNativeGemma4Q4AttachedTargetStateAfterMixedDraftPrefixForHardwareTest(t, loaded, cfg, promptTokens, engineConfig, suppressTokens, verifyWorkspace, mixedBlocks, prefixTokens)
+	} else {
+		prefix = runNativeGemma4Q4AttachedTargetStateAfterTokensForHardwareTest(t, loaded, cfg, promptTokens, stepwise[:prefixTokens], engineConfig, suppressTokens, verifyWorkspace)
+	}
+	defer closeNativeGemma4Q4AttachedTargetStateForHardwareTest(t, &prefix)
+	batchWorkspace := verifyWorkspace
+	var freshBatchWorkspace *hipAttentionHeadsChunkedWorkspace
+	if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_BATCH_STATE_FRESH_WORKSPACE") == "1" {
+		freshBatchWorkspace = hipBorrowAttentionHeadsChunkedWorkspace()
+		if err := hipGemma4Q4EnsureAttentionWorkspaceDecodeCapacity(loaded.driver, freshBatchWorkspace, cfg, len(promptTokens)+prefixTokens+chunkTokens+4); err != nil {
+			t.Fatalf("fresh batch decode workspace: %v", err)
+		}
+		freshBatchWorkspace.EnsureProjectionGreedyBestCapacity(prefixTokens + chunkTokens + 4)
+		batchWorkspace = freshBatchWorkspace
+	}
+	defer func() {
+		if freshBatchWorkspace != nil {
+			if err := hipRecycleAttentionHeadsChunkedWorkspace(freshBatchWorkspace); err != nil {
+				t.Fatalf("recycle fresh batch workspace: %v", err)
+			}
+		}
+	}()
+	got := runNativeGemma4Q4AttachedTargetStateAfterBatchedVerifyForHardwareTest(t, loaded, cfg, &prefix, stepwise[prefixTokens:prefixTokens+chunkTokens], engineConfig, suppressTokens, batchWorkspace)
+	defer closeNativeGemma4Q4AttachedTargetStateForHardwareTest(t, &got)
+
+	core.AssertEqual(t, want.Position, got.Position)
+	core.AssertEqual(t, int32(want.Current.Greedy.TokenID), int32(got.Current.Greedy.TokenID))
+	assertNativeGemma4Q4DeviceStatesMatchForHardwareTest(t, cfg, want.DeviceState, got.DeviceState)
+}
+
+func TestNativeAttachedDrafterAssistantDraftSeedProbe_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run ROCm model smoke tests")
+	}
+	targetPath := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH"))
+	if targetPath == "" {
+		t.Skip("set GO_ROCM_ATTACHED_DRAFTER_TARGET_PATH to a local Gemma4 QAT target pack")
+	}
+	draftPath := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_DRAFT_PATH"))
+	if draftPath == "" {
+		t.Skip("set GO_ROCM_ATTACHED_DRAFTER_DRAFT_PATH to a local Gemma4 MTP-QAT assistant pack")
+	}
+	prompt := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_PROMPT"))
+	if prompt == "" {
+		prompt = "text:Write one concise sentence about ROCm inference."
+	}
+	maxTokens := 4
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS=%q, want positive integer", raw)
+		}
+		maxTokens = value
+	}
+	if maxTokens < 2 {
+		t.Skip("set GO_ROCM_ATTACHED_DRAFTER_GENERATE_TOKENS to at least 2 for the assistant seed probe")
+	}
+	maxDraftTokens := 2
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_DRAFT_TOKENS")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value <= 0 {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_DRAFT_TOKENS=%q, want positive integer", raw)
+		}
+		maxDraftTokens = value
+	}
+	targetROCmConfig := ROCmLoadConfig{}
+	if raw := strings.TrimSpace(os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE")); raw != "" {
+		targetROCmConfig.DeviceKVMode = raw
+		if _, err := targetROCmConfig.deviceKVMode(); err != nil {
+			t.Fatalf("GO_ROCM_ATTACHED_DRAFTER_TARGET_KV_MODE=%q: %v", raw, err)
+		}
+	}
+
+	pair, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadAttachedDrafterPair(targetPath, draftPath, AttachedDrafterPairConfig{
+		TargetROCmConfig: targetROCmConfig,
+		TargetOptions:    []inference.LoadOption{inference.WithContextLen(defaultContextLengthCap)},
+		DraftOptions:     []inference.LoadOption{inference.WithContextLen(defaultContextLengthCap)},
+	})
+	if err != nil {
+		t.Fatalf("LoadAttachedDrafterPair(%q, %q): %v", targetPath, draftPath, err)
+	}
+	defer pair.Close()
+	if !pair.NativeReady() {
+		t.Fatalf("attached drafter native ready = false labels=%+v error=%q", pair.Attachment.Labels, pair.NativeError)
+	}
+	target, ok := pair.Target.(*rocmModel)
+	if !ok || target == nil {
+		t.Fatalf("pair target = %T, want *rocmModel", pair.Target)
+	}
+	loaded, ok := target.native.(*hipLoadedModel)
+	if !ok || loaded == nil || !hipLoadedGemma4Q4GenerateLinked(loaded) {
+		t.Fatalf("native target = %T linked=%v, want linked *hipLoadedModel", target.native, ok && loaded != nil && hipLoadedGemma4Q4GenerateLinked(loaded))
+	}
+	runtime, err := loaded.attachedDrafterRuntimeSnapshot()
+	if err != nil {
+		t.Fatalf("attached drafter runtime snapshot: %v", err)
+	}
+	cfg, err := loaded.cachedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	if err != nil {
+		t.Fatalf("loaded target forward config: %v", err)
+	}
+	promptTokens, matched, err := hipGemma4Q4PromptTokenIDs(prompt, loaded)
+	if err != nil {
+		t.Fatalf("Gemma4 prompt %q: %v", prompt, err)
+	}
+	if !matched {
+		t.Fatalf("Gemma4 prompt %q did not resolve to native target token IDs", prompt)
+	}
+	engineConfig := loaded.gemma4Q4EngineConfig()
+	targetStream, targetStreamErr := hipGemma4Q4GenerateTokenSeqWithEngineConfig(context.Background(), loaded, cfg, promptTokens, inference.GenerateConfig{MaxTokens: maxTokens}, engineConfig)
+	targetTokens := inferenceTokenIDs(collectInferenceTokens(targetStream))
+	if err := targetStreamErr(); err != nil {
+		t.Fatalf("target Generate(%q): %v", prompt, err)
+	}
+	if len(targetTokens) < 2 {
+		t.Fatalf("target Generate(%q) tokens=%v, want at least 2 tokens", prompt, targetTokens)
+	}
+	deviceKVMode, err := engineConfig.deviceKVMode()
+	if err != nil {
+		t.Fatalf("device KV mode: %v", err)
+	}
+	workspace := hipBorrowAttentionHeadsChunkedWorkspace()
+	if err := hipGemma4Q4EnsureAttentionWorkspaceDecodeCapacity(loaded.driver, workspace, cfg, len(promptTokens)+maxTokens+1); err != nil {
+		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
+		t.Fatalf("decode workspace: %v", err)
+	}
+	workspace.EnsureProjectionGreedyBestCapacity(maxTokens + 2)
+	greedyBuffer, err := workspace.BorrowProjectionGreedyBest(loaded.driver)
+	if err != nil {
+		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
+		t.Fatalf("greedy buffer: %v", err)
+	}
+	defer func() {
+		_ = greedyBuffer
+		if err := hipRecycleAttentionHeadsChunkedWorkspace(workspace); err != nil {
+			t.Fatalf("recycle workspace: %v", err)
+		}
+	}()
+	suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(loaded, nil)
+	prefill, err := hipRunAttachedDrafterTargetPrefill(context.Background(), loaded.driver, hipAttachedDrafterTargetPrefillRequest{
+		TargetForward:  cfg,
+		DeviceKVMode:   deviceKVMode,
+		EngineConfig:   engineConfig,
+		InputTokenIDs:  promptTokens,
+		Epsilon:        1e-6,
+		SuppressTokens: suppressTokens,
+		GreedyBuffer:   greedyBuffer,
+		Workspace:      workspace,
+	})
+	if err != nil {
+		t.Fatalf("attached target prefill: %v", err)
+	}
+	defer func() {
+		hipReleaseForwardDeviceFinalHidden(&prefill.Current)
+		if prefill.DeviceState != nil {
+			_ = prefill.DeviceState.Close()
+		}
+	}()
+	lastPromptSeed, err := runNativeAttachedDrafterAssistantDraftSeedProbeBlockForHardwareTest(t, loaded, runtime, cfg, prefill, prefill.LastToken, maxDraftTokens, suppressTokens, workspace)
+	if err != nil {
+		t.Fatalf("assistant draft from last prompt token: %v", err)
+	}
+	targetGreedySeed := int32(prefill.Current.Greedy.TokenID)
+	nextTargetSeed, err := runNativeAttachedDrafterAssistantDraftSeedProbeBlockForHardwareTest(t, loaded, runtime, cfg, prefill, targetGreedySeed, maxDraftTokens, suppressTokens, workspace)
+	if err != nil {
+		t.Fatalf("assistant draft from target greedy token: %v", err)
+	}
+	fullHeadRuntime := *runtime
+	fullHeadRuntime.assistantPlan.OrderedEmbeddings = false
+	fullHeadRuntime.assistantPlan.MaskedCentroids = hipAttachedDrafterAssistantProjectionPlan{}
+	fullHeadRuntime.assistantPlan.TokenOrdering = nil
+	fullHeadRuntime.assistantPlan.TokenOrderingPointer = 0
+	fullHeadRuntime.assistantPlan.TokenOrderingBytes = 0
+	fullHeadRuntime.assistantPlan.TokenOrderingElementBytes = 0
+	fullHeadRuntime.assistantPlan.TokenOrderingDeviceReady = false
+	lastPromptSeedFullHead, err := runNativeAttachedDrafterAssistantDraftSeedProbeBlockForHardwareTest(t, loaded, &fullHeadRuntime, cfg, prefill, prefill.LastToken, maxDraftTokens, suppressTokens, workspace)
+	if err != nil {
+		t.Fatalf("assistant full-head draft from last prompt token: %v", err)
+	}
+	targetGreedySeedFullHead, err := runNativeAttachedDrafterAssistantDraftSeedProbeBlockForHardwareTest(t, loaded, &fullHeadRuntime, cfg, prefill, targetGreedySeed, maxDraftTokens, suppressTokens, workspace)
+	if err != nil {
+		t.Fatalf("assistant full-head draft from target greedy token: %v", err)
+	}
+	lastPromptRaw, err := runNativeAttachedDrafterAssistantDraftSeedProbeStepForHardwareTest(t, loaded, runtime, cfg, prefill, prefill.LastToken, suppressTokens, workspace)
+	if err != nil {
+		t.Fatalf("assistant raw-hidden draft from last prompt token: %v", err)
+	}
+	targetGreedyRaw, err := runNativeAttachedDrafterAssistantDraftSeedProbeStepForHardwareTest(t, loaded, runtime, cfg, prefill, targetGreedySeed, suppressTokens, workspace)
+	if err != nil {
+		t.Fatalf("assistant raw-hidden draft from target greedy token: %v", err)
+	}
+	lastPromptAligned, err := runNativeAttachedDrafterAssistantDraftSeedProbeAlignedStepForHardwareTest(t, loaded, runtime, cfg, prefill, prefill.LastToken, suppressTokens, workspace)
+	if err != nil {
+		t.Fatalf("assistant aligned draft from last prompt token: %v", err)
+	}
+	targetGreedyAligned, err := runNativeAttachedDrafterAssistantDraftSeedProbeAlignedStepForHardwareTest(t, loaded, runtime, cfg, prefill, targetGreedySeed, suppressTokens, workspace)
+	if err != nil {
+		t.Fatalf("assistant aligned draft from target greedy token: %v", err)
+	}
+	noSoftcapRuntime := *runtime
+	noSoftcapRuntime.softcap = 0
+	targetGreedyNoSoftcap, err := runNativeAttachedDrafterAssistantDraftSeedProbeBlockForHardwareTest(t, loaded, &noSoftcapRuntime, cfg, prefill, targetGreedySeed, maxDraftTokens, suppressTokens, workspace)
+	if err != nil {
+		t.Fatalf("assistant no-softcap draft from target greedy token: %v", err)
+	}
+	forcedSourceProbes := make([]string, 0, 3)
+	for _, sourceProbe := range []struct {
+		name    string
+		sliding int
+		full    int
+	}{
+		{name: "first", sliding: 0, full: 4},
+		{name: "shared", sliding: 13, full: 14},
+		{name: "last", sliding: 33, full: 34},
+	} {
+		forcedCfg := hipForceAttachedDrafterTargetSourcesForHardwareTest(cfg, sourceProbe.sliding, sourceProbe.full)
+		proposals, err := runNativeAttachedDrafterAssistantDraftSeedProbeBlockForHardwareTest(t, loaded, runtime, forcedCfg, prefill, targetGreedySeed, maxDraftTokens, suppressTokens, workspace)
+		if err != nil {
+			forcedSourceProbes = append(forcedSourceProbes, core.Sprintf("%s=%s", sourceProbe.name, err.Error()))
+			continue
+		}
+		forcedSourceProbes = append(forcedSourceProbes, core.Sprintf("%s=%v", sourceProbe.name, proposals))
+	}
+	positionProbes := make([]string, 0, 3)
+	seenPositions := []int{0, 1, prefill.Position - 2, prefill.Position - 1, prefill.Position, prefill.Position + 1}
+	seenPositionLogged := map[int]bool{}
+	for _, seenPosition := range seenPositions {
+		if seenPosition < 0 || seenPositionLogged[seenPosition] {
+			continue
+		}
+		seenPositionLogged[seenPosition] = true
+		positionPrefill := prefill
+		positionPrefill.Position = seenPosition + 1
+		proposals, err := runNativeAttachedDrafterAssistantDraftSeedProbeBlockForHardwareTest(t, loaded, runtime, cfg, positionPrefill, targetGreedySeed, maxDraftTokens, suppressTokens, workspace)
+		if err != nil {
+			positionProbes = append(positionProbes, core.Sprintf("seen%d=%s", seenPosition, err.Error()))
+			continue
+		}
+		positionProbes = append(positionProbes, core.Sprintf("seen%d=%v", seenPosition, proposals))
+	}
+	scaleProbes := make([]string, 0, 3)
+	for _, scaleProbe := range []struct {
+		name  string
+		scale float32
+	}{
+		{name: "unit", scale: 1},
+		{name: "default", scale: runtime.inputPlan.TargetEmbeddingScale},
+		{name: "inverse", scale: 1 / runtime.inputPlan.TargetEmbeddingScale},
+	} {
+		scaleRuntime := *runtime
+		scaleRuntime.inputPlan.TargetEmbeddingScale = scaleProbe.scale
+		proposals, err := runNativeAttachedDrafterAssistantDraftSeedProbeBlockForHardwareTest(t, loaded, &scaleRuntime, cfg, prefill, targetGreedySeed, maxDraftTokens, suppressTokens, workspace)
+		if err != nil {
+			scaleProbes = append(scaleProbes, core.Sprintf("%s=%s", scaleProbe.name, err.Error()))
+			continue
+		}
+		scaleProbes = append(scaleProbes, core.Sprintf("%s=%v", scaleProbe.name, proposals))
+	}
+	rawScaleProbes := make([]string, 0, 3)
+	for _, scaleProbe := range []struct {
+		name  string
+		scale float32
+	}{
+		{name: "unit", scale: 1},
+		{name: "default", scale: runtime.inputPlan.TargetEmbeddingScale},
+		{name: "inverse", scale: 1 / runtime.inputPlan.TargetEmbeddingScale},
+	} {
+		scaleRuntime := *runtime
+		scaleRuntime.inputPlan.TargetEmbeddingScale = scaleProbe.scale
+		proposal, err := runNativeAttachedDrafterAssistantDraftSeedProbeStepForHardwareTest(t, loaded, &scaleRuntime, cfg, prefill, targetGreedySeed, suppressTokens, workspace)
+		if err != nil {
+			rawScaleProbes = append(rawScaleProbes, core.Sprintf("%s=%s", scaleProbe.name, err.Error()))
+			continue
+		}
+		rawScaleProbes = append(rawScaleProbes, core.Sprintf("%s=%d", scaleProbe.name, proposal))
+	}
+	layerPrefixProbes := make([]string, 0, len(runtime.assistantPlan.Layers))
+	for count := 1; count <= len(runtime.assistantPlan.Layers); count++ {
+		prefixRuntime := *runtime
+		prefixRuntime.assistantPlan = runtime.assistantPlan
+		prefixRuntime.assistantPlan.Layers = append([]hipAttachedDrafterAssistantVerifierLayerPlan(nil), runtime.assistantPlan.Layers[:count]...)
+		prefixRuntime.assistantPlan.LayerCount = count
+		proposal, err := runNativeAttachedDrafterAssistantDraftSeedProbeStepForHardwareTest(t, loaded, &prefixRuntime, cfg, prefill, targetGreedySeed, suppressTokens, workspace)
+		if err != nil {
+			layerPrefixProbes = append(layerPrefixProbes, core.Sprintf("%d=%s", count, err.Error()))
+			continue
+		}
+		layerPrefixProbes = append(layerPrefixProbes, core.Sprintf("%d=%d", count, proposal))
+	}
+	layerSources := make([]string, 0, len(runtime.assistantPlan.Layers))
+	layerPlans := make([]string, 0, len(runtime.assistantPlan.Layers))
+	for _, layer := range runtime.assistantPlan.Layers {
+		_, _, source, err := hipAttachedDrafterAssistantTargetLayerFor(layer.LayerType, cfg, prefill.DeviceState)
+		if err != nil {
+			t.Fatalf("assistant target layer source for %s: %v", layer.LayerType, err)
+		}
+		layerSources = append(layerSources, core.Sprintf("%d:%s->%d", layer.Layer, layer.LayerType, source))
+		layerPlans = append(layerPlans, core.Sprintf("%d:%s q=%d h=%d heads=%d rope=%d/%g win=%d scalar=%g",
+			layer.Layer,
+			layer.LayerType,
+			layer.QueryProjection.Rows,
+			layer.HeadDim,
+			layer.QueryHeads,
+			layer.RoPERotaryDim,
+			layer.RoPEBase,
+			layer.SlidingWindow,
+			layer.LayerScalar,
+		))
+	}
+	postFirstTarget, err := hipAdvanceAttachedDrafterCarryLead(context.Background(), loaded.driver, hipAttachedDrafterCarryAdvanceRequest{
+		TargetForward:    cfg,
+		DeviceKVMode:     deviceKVMode,
+		EngineConfig:     engineConfig,
+		State:            prefill.State,
+		PriorDeviceState: prefill.DeviceState,
+		TokenID:          targetGreedySeed,
+		Position:         prefill.Position,
+		Epsilon:          1e-6,
+		SuppressTokens:   suppressTokens,
+		GreedyBuffer:     greedyBuffer,
+		Workspace:        workspace,
+	})
+	if err != nil {
+		t.Fatalf("advance first target token: %v", err)
+	}
+	postFirstPrefill := hipAttachedDrafterTargetPrefillResult{
+		Current:     postFirstTarget.Current,
+		State:       postFirstTarget.State,
+		DeviceState: postFirstTarget.DeviceState,
+		Position:    postFirstTarget.Position,
+		LastToken:   targetGreedySeed,
+	}
+	postFirstTarget.Current = hipGemma4Q4ForwardResult{}
+	postFirstTarget.DeviceState = nil
+	defer func() {
+		hipReleaseForwardDeviceFinalHidden(&postFirstPrefill.Current)
+		if postFirstPrefill.DeviceState != nil {
+			_ = postFirstPrefill.DeviceState.Close()
+		}
+		_ = postFirstTarget.Close()
+	}()
+	postFirstSeed, err := runNativeAttachedDrafterAssistantDraftSeedProbeBlockForHardwareTest(t, loaded, runtime, cfg, postFirstPrefill, targetGreedySeed, maxDraftTokens, suppressTokens, workspace)
+	if err != nil {
+		t.Fatalf("assistant draft after first target token: %v", err)
+	}
+	postFirstRaw, err := runNativeAttachedDrafterAssistantDraftSeedProbeStepForHardwareTest(t, loaded, runtime, cfg, postFirstPrefill, targetGreedySeed, suppressTokens, workspace)
+	if err != nil {
+		t.Fatalf("assistant raw-hidden draft after first target token: %v", err)
+	}
+	postFirstAligned, err := runNativeAttachedDrafterAssistantDraftSeedProbeAlignedStepForHardwareTest(t, loaded, runtime, cfg, postFirstPrefill, targetGreedySeed, suppressTokens, workspace)
+	if err != nil {
+		t.Fatalf("assistant aligned draft after first target token: %v", err)
+	}
+	draftCfg := nativeGemma4TextConfig{}
+	if runtime.draft != nil {
+		draftCfg = runtime.draft.gemma4TextConfig
+	}
+	t.Logf("assistant seed probe target=%v target_kv_mode=%s last_prompt_seed_token=%d ordered=%v full_head=%v raw_step=%d aligned_step=%d target_greedy_seed_token=%d ordered=%v full_head=%v raw_step=%d aligned_step=%d no_softcap=%v runtime_softcap=%g post_first_ordered=%v post_first_raw_step=%d post_first_aligned_step=%d forced_sources=%s position_delta=%s embedding_scales=%s raw_embedding_scales=%s layer_prefix_raw=%s plan_hidden=%d vocab=%d quant=%s/%d group=%d ordered=%t input=%dx%d post=%dx%d layers=%d sources=%s layer_plans=%s target_cfg_layers=%d target_kv_shared=%d/%t target_pattern=%d target_layer_types=%v draft_cfg_layers=%d draft_kv_shared=%d/%t draft_pattern=%d draft_head=%d/%d draft_hidden_per_input=%d draft_layer_types=%v",
+		targetTokens,
+		deviceKVMode,
+		prefill.LastToken,
+		lastPromptSeed,
+		lastPromptSeedFullHead,
+		lastPromptRaw,
+		lastPromptAligned,
+		targetGreedySeed,
+		nextTargetSeed,
+		targetGreedySeedFullHead,
+		targetGreedyRaw,
+		targetGreedyAligned,
+		targetGreedyNoSoftcap,
+		runtime.softcap,
+		postFirstSeed,
+		postFirstRaw,
+		postFirstAligned,
+		strings.Join(forcedSourceProbes, ","),
+		strings.Join(positionProbes, ","),
+		strings.Join(scaleProbes, ","),
+		strings.Join(rawScaleProbes, ","),
+		strings.Join(layerPrefixProbes, ","),
+		runtime.assistantPlan.HiddenSize,
+		runtime.assistantPlan.VocabSize,
+		runtime.assistantPlan.QuantMode,
+		runtime.assistantPlan.QuantBits,
+		runtime.assistantPlan.QuantGroup,
+		runtime.assistantPlan.OrderedEmbeddings,
+		runtime.inputPlan.PreProjection.Rows,
+		runtime.inputPlan.PreProjection.Cols,
+		runtime.assistantPlan.PostProjection.Rows,
+		runtime.assistantPlan.PostProjection.Cols,
+		len(runtime.assistantPlan.Layers),
+		strings.Join(layerSources, ","),
+		strings.Join(layerPlans, ";"),
+		loaded.gemma4TextConfig.NumLayers,
+		loaded.gemma4TextConfig.KVSharedLayers,
+		loaded.gemma4TextConfig.KVSharedLayersSet,
+		loaded.gemma4TextConfig.SlidingWindowPattern,
+		loaded.gemma4TextConfig.LayerTypes,
+		draftCfg.NumLayers,
+		draftCfg.KVSharedLayers,
+		draftCfg.KVSharedLayersSet,
+		draftCfg.SlidingWindowPattern,
+		draftCfg.HeadDim,
+		draftCfg.GlobalHeadDim,
+		draftCfg.HiddenSizePerLayerInput,
+		draftCfg.LayerTypes,
+	)
+}
+
+func hipForceAttachedDrafterTargetSourcesForHardwareTest(cfg hipGemma4Q4ForwardConfig, slidingSource, fullSource int) hipGemma4Q4ForwardConfig {
+	cfg.SharedKVSources = make([]int, len(cfg.Layers))
+	for index, layer := range cfg.Layers {
+		source := index
+		switch layer.LayerType {
+		case "sliding_attention":
+			source = slidingSource
+		case "full_attention":
+			source = fullSource
+		}
+		if source < 0 || source >= len(cfg.Layers) {
+			source = index
+		}
+		cfg.SharedKVSources[index] = source
+	}
+	return cfg
+}
+
+func runNativeAttachedDrafterAssistantDraftSeedProbeBlockForHardwareTest(t *testing.T, model *hipLoadedModel, runtime *hipAttachedDrafterRuntime, cfg hipGemma4Q4ForwardConfig, prefill hipAttachedDrafterTargetPrefillResult, seedToken int32, maxDraftTokens int, suppressTokens []int32, workspace *hipAttentionHeadsChunkedWorkspace) ([]int32, error) {
 	t.Helper()
-	targetAgain := loadNativeAttachedDrafterReferenceText(t, targetPath, prompt, maxTokens)
+	block, err := hipRunAttachedDrafterAssistantDraftBlock(context.Background(), model.driver, hipAttachedDrafterAssistantDraftBlockRequest{
+		LastToken:         seedToken,
+		TargetHidden:      prefill.Current.DeviceFinalHidden,
+		TargetForward:     cfg,
+		TargetDeviceState: prefill.DeviceState,
+		Plan:              runtime.assistantPlan,
+		InputPlan:         runtime.inputPlan,
+		Position:          prefill.Position,
+		Epsilon:           1e-6,
+		Softcap:           runtime.softcap,
+		SuppressTokens:    suppressTokens,
+		MaxDraftTokens:    maxDraftTokens,
+		Workspace:         workspace,
+	})
+	if err != nil {
+		return nil, err
+	}
+	tokens := append([]int32(nil), block.Tokens...)
+	if err := block.Close(); err != nil {
+		return nil, err
+	}
+	return tokens, nil
+}
+
+func runNativeAttachedDrafterAssistantDraftSeedProbeStepForHardwareTest(t *testing.T, model *hipLoadedModel, runtime *hipAttachedDrafterRuntime, cfg hipGemma4Q4ForwardConfig, prefill hipAttachedDrafterTargetPrefillResult, seedToken int32, suppressTokens []int32, workspace *hipAttentionHeadsChunkedWorkspace) (int32, error) {
+	t.Helper()
+	return runNativeAttachedDrafterAssistantDraftSeedProbeStepWithHiddenForHardwareTest(t, model, runtime, cfg, prefill, prefill.Current.DeviceFinalHidden, prefill.Position, seedToken, suppressTokens, workspace)
+}
+
+func runNativeAttachedDrafterAssistantDraftSeedProbeAlignedStepForHardwareTest(t *testing.T, model *hipLoadedModel, runtime *hipAttachedDrafterRuntime, cfg hipGemma4Q4ForwardConfig, prefill hipAttachedDrafterTargetPrefillResult, seedToken int32, suppressTokens []int32, workspace *hipAttentionHeadsChunkedWorkspace) (int32, error) {
+	t.Helper()
+	if len(cfg.Layers) == 0 {
+		return 0, core.E("rocm.hip.AttachedDrafterAssistantDraftSeedProbe", "target forward config has no layers", nil)
+	}
+	targetNormCfg := cfg.Layers[len(cfg.Layers)-1].FinalNorm
+	targetNormCfg.Epsilon = 1e-6
+	if err := hipValidateRMSNormDeviceWeightConfig("AttachedDrafterAssistantDraftSeedProbe.target_final_norm", targetNormCfg); err != nil {
+		return 0, err
+	}
+	normedHidden, err := hipAllocateByteBuffer(model.driver, "rocm.hip.AttachedDrafterAssistantDraftSeedProbe", "target final-norm aligned seed", uint64(targetNormCfg.Count*4), targetNormCfg.Count)
+	if err != nil {
+		return 0, err
+	}
+	defer normedHidden.Close()
+	if err := hipRunRMSNormDeviceToDeviceKernelWithWorkspace(context.Background(), model.driver, prefill.Current.DeviceFinalHidden.Pointer(), uint64(targetNormCfg.Count)*4, normedHidden.Pointer(), normedHidden.SizeBytes(), targetNormCfg, workspace); err != nil {
+		return 0, err
+	}
+	return runNativeAttachedDrafterAssistantDraftSeedProbeStepWithHiddenForHardwareTest(t, model, runtime, cfg, prefill, normedHidden, hipAttachedDrafterAssistantSeenPosition(prefill.Position), seedToken, suppressTokens, workspace)
+}
+
+func runNativeAttachedDrafterAssistantDraftSeedProbeStepWithHiddenForHardwareTest(t *testing.T, model *hipLoadedModel, runtime *hipAttachedDrafterRuntime, cfg hipGemma4Q4ForwardConfig, prefill hipAttachedDrafterTargetPrefillResult, targetHidden *hipDeviceByteBuffer, position int, seedToken int32, suppressTokens []int32, workspace *hipAttentionHeadsChunkedWorkspace) (int32, error) {
+	t.Helper()
+	step, err := hipRunAttachedDrafterAssistantDraftStepProposal(context.Background(), model.driver, hipAttachedDrafterAssistantDraftStepProposalRequest{
+		LastToken:         seedToken,
+		TargetHidden:      targetHidden,
+		TargetForward:     cfg,
+		TargetDeviceState: prefill.DeviceState,
+		Plan:              runtime.assistantPlan,
+		InputPlan:         runtime.inputPlan,
+		Position:          position,
+		Epsilon:           1e-6,
+		Softcap:           runtime.softcap,
+		SuppressTokens:    suppressTokens,
+		Workspace:         workspace,
+	})
+	if err != nil {
+		return 0, err
+	}
+	token := int32(step.Token.TokenID)
+	if err := step.Close(); err != nil {
+		return 0, err
+	}
+	return token, nil
+}
+
+type nativeGemma4Q4VerifierDecisionForHardwareTest struct {
+	Accepted    int
+	AllAccepted bool
+	Replacement int32
+	Next        int32
+	Verified    []int32
+}
+
+func runNativeGemma4Q4AttachedTargetStateAfterTokensForHardwareTest(t *testing.T, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens, generatedTokens []int32, engineConfig hipGemma4Q4EngineConfig, suppressTokens []int32, workspace *hipAttentionHeadsChunkedWorkspace) hipAttachedDrafterTargetPrefillResult {
+	t.Helper()
+	deviceKVMode, err := engineConfig.deviceKVMode()
+	if err != nil {
+		t.Fatalf("device KV mode: %v", err)
+	}
+	greedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+	if err != nil {
+		t.Fatalf("greedy buffer: %v", err)
+	}
+	prefill, err := hipRunAttachedDrafterTargetPrefill(context.Background(), model.driver, hipAttachedDrafterTargetPrefillRequest{
+		TargetForward:  cfg,
+		DeviceKVMode:   deviceKVMode,
+		EngineConfig:   engineConfig,
+		InputTokenIDs:  promptTokens,
+		Epsilon:        1e-6,
+		SuppressTokens: suppressTokens,
+		GreedyBuffer:   greedyBuffer,
+		Workspace:      workspace,
+	})
+	if err != nil {
+		t.Fatalf("attached target prefill: %v", err)
+	}
+	current := prefill.Current
+	state := prefill.State
+	deviceState := prefill.DeviceState
+	position := prefill.Position
+	success := false
+	defer func() {
+		if success {
+			return
+		}
+		hipReleaseForwardDeviceFinalHidden(&current)
+		if deviceState != nil {
+			_ = deviceState.Close()
+		}
+	}()
+	for index, tokenID := range generatedTokens {
+		if int32(current.Greedy.TokenID) != tokenID {
+			t.Fatalf("advance prefix token %d current greedy=%d want %d", index, current.Greedy.TokenID, tokenID)
+		}
+		advanced, err := hipAdvanceAttachedDrafterCarryLead(context.Background(), model.driver, hipAttachedDrafterCarryAdvanceRequest{
+			TargetForward:    cfg,
+			DeviceKVMode:     deviceKVMode,
+			EngineConfig:     engineConfig,
+			State:            state,
+			PriorDeviceState: deviceState,
+			TokenID:          tokenID,
+			Position:         position,
+			Epsilon:          1e-6,
+			SuppressTokens:   suppressTokens,
+			GreedyBuffer:     greedyBuffer,
+			Workspace:        workspace,
+		})
+		if err != nil {
+			t.Fatalf("advance prefix token %d: %v", index, err)
+		}
+		hipReleaseForwardDeviceFinalHidden(&current)
+		previousDeviceState := deviceState
+		current = advanced.Current
+		advanced.Current = hipGemma4Q4ForwardResult{}
+		state = advanced.State
+		deviceState = advanced.DeviceState
+		advanced.DeviceState = nil
+		position = advanced.Position
+		hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+		if err := advanced.Close(); err != nil {
+			t.Fatalf("close advanced prefix token %d: %v", index, err)
+		}
+	}
+	success = true
+	return hipAttachedDrafterTargetPrefillResult{
+		Current:     current,
+		State:       state,
+		DeviceState: deviceState,
+		Position:    position,
+		LastToken:   promptTokens[len(promptTokens)-1],
+	}
+}
+
+func closeNativeGemma4Q4AttachedTargetStateForHardwareTest(t *testing.T, state *hipAttachedDrafterTargetPrefillResult) {
+	t.Helper()
+	if state == nil {
+		return
+	}
+	hipReleaseForwardDeviceFinalHidden(&state.Current)
+	if state.DeviceState != nil {
+		if err := state.DeviceState.Close(); err != nil {
+			t.Fatalf("close target device state: %v", err)
+		}
+		state.DeviceState = nil
+	}
+}
+
+func assertNativeGemma4Q4DeviceStatesMatchForHardwareTest(t *testing.T, cfg hipGemma4Q4ForwardConfig, want, got *hipGemma4Q4DeviceDecodeState) {
+	t.Helper()
+	if want == nil || got == nil {
+		t.Fatalf("device states want=%v got=%v, want both non-nil", want, got)
+	}
+	core.AssertEqual(t, want.LayerTokenCounts(), got.LayerTokenCounts())
+	assertNativeGemma4Q4DeviceDescriptorTablesMatchCachesForHardwareTest(t, "want", want)
+	assertNativeGemma4Q4DeviceDescriptorTablesMatchCachesForHardwareTest(t, "got", got)
+	wantHost, err := want.HostState()
+	if err != nil {
+		t.Fatalf("restore want device state: %v", err)
+	}
+	gotHost, err := got.HostState()
+	if err != nil {
+		t.Fatalf("restore got device state: %v", err)
+	}
+	core.AssertEqual(t, len(wantHost.Layers), len(gotHost.Layers))
+	if len(wantHost.Layers) != len(cfg.Layers) {
+		t.Fatalf("restored layer count = %d, want %d", len(wantHost.Layers), len(cfg.Layers))
+	}
+	for index := range wantHost.Layers {
+		assertFloat32SlicesNearRelativeNamedForHardwareTest(t, core.Sprintf("layer %d keys", index), wantHost.Layers[index].Keys, gotHost.Layers[index].Keys, 0.0001, 0.0001)
+		assertFloat32SlicesNearRelativeNamedForHardwareTest(t, core.Sprintf("layer %d values", index), wantHost.Layers[index].Values, gotHost.Layers[index].Values, 0.0001, 0.0001)
+	}
+}
+
+func assertNativeGemma4Q4DeviceDescriptorTablesMatchCachesForHardwareTest(t *testing.T, name string, state *hipGemma4Q4DeviceDecodeState) {
+	t.Helper()
+	if state == nil {
+		t.Fatalf("%s device state is nil", name)
+	}
+	for index := range state.layers {
+		layer := &state.layers[index]
+		if layer.cache == nil || layer.descriptorTable == nil {
+			t.Fatalf("%s layer %d cache=%v descriptor=%v, want both non-nil", name, index, layer.cache, layer.descriptorTable)
+		}
+		want, err := layer.cache.KernelDescriptorBytes()
+		if err != nil {
+			t.Fatalf("%s layer %d descriptor bytes from cache: %v", name, index, err)
+		}
+		if layer.descriptorTable.SizeBytes() < uint64(len(want)) {
+			t.Fatalf("%s layer %d descriptor table bytes = %d, want at least %d", name, index, layer.descriptorTable.SizeBytes(), len(want))
+		}
+		got := make([]byte, len(want))
+		if err := layer.descriptorTable.driver.CopyDeviceToHost(layer.descriptorTable.Pointer(), got); err != nil {
+			t.Fatalf("%s layer %d copy descriptor table: %v", name, index, err)
+		}
+		for offset := range want {
+			if got[offset] != want[offset] {
+				t.Fatalf("%s layer %d descriptor byte[%d] = %d, want %d", name, index, offset, got[offset], want[offset])
+			}
+		}
+	}
+}
+
+func assertFloat32SlicesNearRelativeNamedForHardwareTest(t *testing.T, name string, want, got []float32, absTol, relTol float64) {
+	t.Helper()
+	if len(want) != len(got) {
+		t.Fatalf("%s length = %d, want %d", name, len(got), len(want))
+	}
+	for index := range want {
+		diff := math.Abs(float64(got[index] - want[index]))
+		scale := math.Max(math.Abs(float64(want[index])), 1)
+		if diff > absTol && diff/scale > relTol {
+			t.Fatalf("%s[%d] = %f, want %f within abs=%f rel=%f", name, index, got[index], want[index], absTol, relTol)
+		}
+	}
+}
+
+func nativeGemma4Q4DeviceStatePageSummaryForHardwareTest(state *hipGemma4Q4DeviceDecodeState, layers []int) string {
+	if state == nil {
+		return "<nil>"
+	}
+	parts := make([]string, 0, len(layers))
+	for _, layerIndex := range layers {
+		if layerIndex < 0 || layerIndex >= len(state.layers) || state.layers[layerIndex].cache == nil {
+			parts = append(parts, core.Sprintf("L%d:<nil>", layerIndex))
+			continue
+		}
+		layer := state.layers[layerIndex]
+		pageParts := make([]string, 0, len(layer.cache.pages))
+		for _, page := range layer.cache.pages {
+			pageParts = append(pageParts, core.Sprintf("%d:%d:%t", page.tokenStart, page.tokenCount, page.owned))
+		}
+		parts = append(parts, core.Sprintf("L%d borrowed=%t tokens=%d pages=[%s]", layerIndex, layer.borrowedCache, layer.cache.TokenCount(), strings.Join(pageParts, ",")))
+	}
+	return strings.Join(parts, " ")
+}
+
+func runNativeGemma4Q4AttachedTargetStateAfterBatchedVerifyForHardwareTest(t *testing.T, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, prefix *hipAttachedDrafterTargetPrefillResult, draftTokens []int32, engineConfig hipGemma4Q4EngineConfig, suppressTokens []int32, workspace *hipAttentionHeadsChunkedWorkspace) hipAttachedDrafterTargetPrefillResult {
+	t.Helper()
+	if prefix == nil || prefix.DeviceState == nil {
+		t.Fatalf("batched verifier prefix state is required")
+	}
+	if len(draftTokens) <= 1 {
+		t.Fatalf("batched verifier draft tokens length = %d, want more than one", len(draftTokens))
+	}
+	deviceKVMode, err := engineConfig.deviceKVMode()
+	if err != nil {
+		t.Fatalf("device KV mode: %v", err)
+	}
+	greedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+	if err != nil {
+		t.Fatalf("verifier greedy buffer: %v", err)
+	}
+	verify, err := hipRunAttachedDrafterTargetVerifyBlockBatched(context.Background(), model.driver, hipAttachedDrafterTargetVerifyBlockRequest{
+		TargetForward:     cfg,
+		DeviceKVMode:      deviceKVMode,
+		EngineConfig:      engineConfig,
+		TargetDeviceState: prefix.DeviceState,
+		CurrentGreedy:     prefix.Current.Greedy,
+		DraftTokens:       draftTokens,
+		Position:          prefix.Position,
+		Epsilon:           1e-6,
+		SuppressTokens:    suppressTokens,
+		GreedyBuffer:      greedyBuffer,
+		Workspace:         workspace,
+	})
+	if err != nil {
+		t.Fatalf("batched verifier target block: %v", err)
+	}
+	success := false
+	defer func() {
+		if !success {
+			_ = verify.Close()
+		}
+	}()
+	if !verify.AllAccepted || verify.AcceptedCount != len(draftTokens) {
+		t.Fatalf("batched verifier accepted=%d all=%v replacement=%d draft=%v, want all accepted", verify.AcceptedCount, verify.AllAccepted, verify.Replacement.TokenID, draftTokens)
+	}
+	if verify.DeviceState == nil {
+		t.Fatalf("batched verifier did not return device state")
+	}
+	previousDeviceState := prefix.DeviceState
+	if !verify.PriorDeviceStateFinalized {
+		if err := hipFinalizeGemma4Q4ForwardDeviceState(previousDeviceState, verify.DeviceState); err != nil {
+			t.Fatalf("finalize batched verifier state: %v", err)
+		}
+	}
+	hipReleaseForwardDeviceFinalHidden(&prefix.Current)
+	prefix.DeviceState = nil
+	hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+	current := hipGemma4Q4ForwardResult{
+		Greedy:                    verify.NextGreedy,
+		DeviceFinalHidden:         verify.DeviceHidden,
+		DeviceFinalHiddenBorrowed: false,
+	}
+	verify.DeviceHidden = nil
+	result := hipAttachedDrafterTargetPrefillResult{
+		Current:     current,
+		DeviceState: verify.DeviceState,
+		Position:    prefix.Position + len(draftTokens),
+		LastToken:   int32(draftTokens[len(draftTokens)-1]),
+	}
+	verify.DeviceState = nil
+	if err := verify.Close(); err != nil {
+		closeNativeGemma4Q4AttachedTargetStateForHardwareTest(t, &result)
+		t.Fatalf("close batched verifier result: %v", err)
+	}
+	success = true
+	return result
+}
+
+func runNativeGemma4Q4AttachedTargetStateAfterMixedDraftPrefixForHardwareTest(t *testing.T, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens []int32, engineConfig hipGemma4Q4EngineConfig, suppressTokens []int32, workspace *hipAttentionHeadsChunkedWorkspace, draftBlocks [][]int32, wantGeneratedTokens int) hipAttachedDrafterTargetPrefillResult {
+	t.Helper()
+	deviceKVMode, err := engineConfig.deviceKVMode()
+	if err != nil {
+		t.Fatalf("device KV mode: %v", err)
+	}
+	greedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+	if err != nil {
+		t.Fatalf("greedy buffer: %v", err)
+	}
+	prefill, err := hipRunAttachedDrafterTargetPrefill(context.Background(), model.driver, hipAttachedDrafterTargetPrefillRequest{
+		TargetForward:  cfg,
+		DeviceKVMode:   deviceKVMode,
+		EngineConfig:   engineConfig,
+		InputTokenIDs:  promptTokens,
+		Epsilon:        1e-6,
+		SuppressTokens: suppressTokens,
+		GreedyBuffer:   greedyBuffer,
+		Workspace:      workspace,
+	})
+	if err != nil {
+		t.Fatalf("attached target prefill: %v", err)
+	}
+	current := prefill.Current
+	state := prefill.State
+	deviceState := prefill.DeviceState
+	position := prefill.Position
+	tokens := make([]int32, 0, wantGeneratedTokens+1)
+	success := false
+	defer func() {
+		if success {
+			return
+		}
+		hipReleaseForwardDeviceFinalHidden(&current)
+		if deviceState != nil {
+			_ = deviceState.Close()
+		}
+	}()
+	for blockIndex, draftTokens := range draftBlocks {
+		remaining := wantGeneratedTokens - len(tokens)
+		if remaining <= 0 {
+			success = true
+			return hipAttachedDrafterTargetPrefillResult{
+				Current:     current,
+				State:       state,
+				DeviceState: deviceState,
+				Position:    position,
+				LastToken:   promptTokens[len(promptTokens)-1],
+			}
+		}
+		if len(draftTokens) > remaining {
+			draftTokens = draftTokens[:remaining]
+		}
+		verifyGreedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+		if err != nil {
+			t.Fatalf("verifier greedy buffer: %v", err)
+		}
+		verify, err := hipRunAttachedDrafterTargetVerifyBlock(context.Background(), model.driver, hipAttachedDrafterTargetVerifyBlockRequest{
+			TargetForward:     cfg,
+			DeviceKVMode:      deviceKVMode,
+			EngineConfig:      engineConfig,
+			TargetDeviceState: deviceState,
+			CurrentGreedy:     current.Greedy,
+			DraftTokens:       draftTokens,
+			Position:          position,
+			Epsilon:           1e-6,
+			SuppressTokens:    suppressTokens,
+			GreedyBuffer:      verifyGreedyBuffer,
+			Workspace:         workspace,
+		})
+		if err != nil {
+			t.Fatalf("verifier mixed block %d: %v", blockIndex, err)
+		}
+		if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_TRACE_BLOCKS") == "1" {
+			t.Logf("mixed_state block=%d output=%d position=%d current=%d draft=%v verified=%v accepted=%d all=%t replacement=%d next=%d",
+				blockIndex,
+				len(tokens),
+				position,
+				current.Greedy.TokenID,
+				draftTokens,
+				hipAttachedDrafterGreedyTokenIDs(verify.VerifiedGreedies),
+				verify.AcceptedCount,
+				verify.AllAccepted,
+				verify.Replacement.TokenID,
+				verify.NextGreedy.TokenID,
+			)
+		}
+		for index := 0; index < verify.AcceptedCount && len(tokens) < wantGeneratedTokens; index++ {
+			tokens = append(tokens, draftTokens[index])
+		}
+		if verify.DeviceState != nil {
+			previousDeviceState := deviceState
+			if !verify.PriorDeviceStateFinalized {
+				if err := hipFinalizeGemma4Q4ForwardDeviceState(previousDeviceState, verify.DeviceState); err != nil {
+					_ = verify.Close()
+					t.Fatalf("verifier mixed block %d finalize state: %v", blockIndex, err)
+				}
+			}
+			deviceState = verify.DeviceState
+			verify.DeviceState = nil
+			hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+			position = deviceState.maxLayerTokenCount()
+		}
+		if verify.DeviceHidden != nil {
+			hipReleaseForwardDeviceFinalHidden(&current)
+			current.DeviceFinalHidden = verify.DeviceHidden
+			current.DeviceFinalHiddenBorrowed = false
+			verify.DeviceHidden = nil
+		}
+		current.Greedy = verify.NextGreedy
+		current.GreedyDevice = nil
+		if verify.AllAccepted {
+			if err := verify.Close(); err != nil {
+				t.Fatalf("close verifier mixed block %d: %v", blockIndex, err)
+			}
+			if len(tokens) >= wantGeneratedTokens {
+				success = true
+				return hipAttachedDrafterTargetPrefillResult{
+					Current:     current,
+					State:       state,
+					DeviceState: deviceState,
+					Position:    position,
+					LastToken:   promptTokens[len(promptTokens)-1],
+				}
+			}
+			continue
+		}
+		replacement := int32(verify.Replacement.TokenID)
+		if len(tokens) >= wantGeneratedTokens {
+			if err := verify.Close(); err != nil {
+				t.Fatalf("close verifier mixed block %d: %v", blockIndex, err)
+			}
+			success = true
+			return hipAttachedDrafterTargetPrefillResult{
+				Current:     current,
+				State:       state,
+				DeviceState: deviceState,
+				Position:    position,
+				LastToken:   promptTokens[len(promptTokens)-1],
+			}
+		}
+		tokens = append(tokens, replacement)
+		advanceGreedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+		if err != nil {
+			_ = verify.Close()
+			t.Fatalf("advance greedy buffer mixed block %d: %v", blockIndex, err)
+		}
+		advanced, err := hipAdvanceAttachedDrafterCarryLead(context.Background(), model.driver, hipAttachedDrafterCarryAdvanceRequest{
+			TargetForward:    cfg,
+			DeviceKVMode:     deviceKVMode,
+			EngineConfig:     engineConfig,
+			State:            state,
+			PriorDeviceState: deviceState,
+			TokenID:          replacement,
+			Position:         position,
+			Epsilon:          1e-6,
+			SuppressTokens:   suppressTokens,
+			GreedyBuffer:     advanceGreedyBuffer,
+			Workspace:        workspace,
+		})
+		if err != nil {
+			_ = verify.Close()
+			t.Fatalf("advance mixed block %d replacement %d: %v", blockIndex, replacement, err)
+		}
+		hipReleaseForwardDeviceFinalHidden(&current)
+		previousDeviceState := deviceState
+		current = advanced.Current
+		advanced.Current = hipGemma4Q4ForwardResult{}
+		state = advanced.State
+		deviceState = advanced.DeviceState
+		advanced.DeviceState = nil
+		position = advanced.Position
+		hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+		if err := advanced.Close(); err != nil {
+			_ = verify.Close()
+			t.Fatalf("close advanced mixed block %d: %v", blockIndex, err)
+		}
+		if err := verify.Close(); err != nil {
+			t.Fatalf("close verifier mixed block %d: %v", blockIndex, err)
+		}
+		if len(tokens) >= wantGeneratedTokens {
+			success = true
+			return hipAttachedDrafterTargetPrefillResult{
+				Current:     current,
+				State:       state,
+				DeviceState: deviceState,
+				Position:    position,
+				LastToken:   promptTokens[len(promptTokens)-1],
+			}
+		}
+	}
+	t.Fatalf("mixed draft prefix produced %d tokens, want %d", len(tokens), wantGeneratedTokens)
+	return hipAttachedDrafterTargetPrefillResult{}
+}
+
+func runNativeGemma4Q4VerifierDecisionForHardwareTest(t *testing.T, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, targetState hipAttachedDrafterTargetPrefillResult, draftTokens []int32, engineConfig hipGemma4Q4EngineConfig, suppressTokens []int32, workspace *hipAttentionHeadsChunkedWorkspace) nativeGemma4Q4VerifierDecisionForHardwareTest {
+	t.Helper()
+	deviceKVMode, err := engineConfig.deviceKVMode()
+	if err != nil {
+		t.Fatalf("device KV mode: %v", err)
+	}
+	greedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+	if err != nil {
+		t.Fatalf("verifier greedy buffer: %v", err)
+	}
+	verify, err := hipRunAttachedDrafterTargetVerifyBlock(context.Background(), model.driver, hipAttachedDrafterTargetVerifyBlockRequest{
+		TargetForward:     cfg,
+		DeviceKVMode:      deviceKVMode,
+		EngineConfig:      engineConfig,
+		TargetDeviceState: targetState.DeviceState,
+		CurrentGreedy:     targetState.Current.Greedy,
+		DraftTokens:       draftTokens,
+		Position:          targetState.Position,
+		Epsilon:           1e-6,
+		SuppressTokens:    suppressTokens,
+		GreedyBuffer:      greedyBuffer,
+		Workspace:         workspace,
+	})
+	if err != nil {
+		t.Fatalf("verifier decision: %v", err)
+	}
+	decision := nativeGemma4Q4VerifierDecisionForHardwareTest{
+		Accepted:    verify.AcceptedCount,
+		AllAccepted: verify.AllAccepted,
+		Replacement: int32(verify.Replacement.TokenID),
+		Next:        int32(verify.NextGreedy.TokenID),
+		Verified:    hipAttachedDrafterGreedyTokenIDs(verify.VerifiedGreedies),
+	}
+	if err := verify.Close(); err != nil {
+		t.Fatalf("close verifier decision: %v", err)
+	}
+	return decision
+}
+
+func runNativeGemma4Q4StepwiseAfterAttachedPrefillForHardwareTest(t *testing.T, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens []int32, maxTokens int, engineConfig hipGemma4Q4EngineConfig, useDeviceToken bool) []int32 {
+	t.Helper()
+	deviceKVMode, err := engineConfig.deviceKVMode()
+	if err != nil {
+		t.Fatalf("device KV mode: %v", err)
+	}
+	workspace := hipBorrowAttentionHeadsChunkedWorkspace()
+	if err := hipGemma4Q4EnsureAttentionWorkspaceDecodeCapacity(model.driver, workspace, cfg, len(promptTokens)+maxTokens+1); err != nil {
+		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
+		t.Fatalf("decode workspace: %v", err)
+	}
+	workspace.EnsureProjectionGreedyBestCapacity(maxTokens + 2)
+	greedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+	if err != nil {
+		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
+		t.Fatalf("greedy buffer: %v", err)
+	}
+	defer func() {
+		_ = greedyBuffer
+		if err := hipRecycleAttentionHeadsChunkedWorkspace(workspace); err != nil {
+			t.Fatalf("recycle workspace: %v", err)
+		}
+	}()
+	suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(model, nil)
+	prefill, err := hipRunAttachedDrafterTargetPrefill(context.Background(), model.driver, hipAttachedDrafterTargetPrefillRequest{
+		TargetForward:  cfg,
+		DeviceKVMode:   deviceKVMode,
+		EngineConfig:   engineConfig,
+		InputTokenIDs:  promptTokens,
+		Epsilon:        1e-6,
+		SuppressTokens: suppressTokens,
+		GreedyBuffer:   greedyBuffer,
+		Workspace:      workspace,
+	})
+	if err != nil {
+		t.Fatalf("attached target prefill: %v", err)
+	}
+	current := prefill.Current
+	state := prefill.State
+	deviceState := prefill.DeviceState
+	position := prefill.Position
+	defer func() {
+		hipReleaseForwardDeviceFinalHidden(&current)
+		if deviceState != nil {
+			_ = deviceState.Close()
+		}
+	}()
+	tokens := make([]int32, 0, maxTokens)
+	for len(tokens) < maxTokens {
+		tokenID := int32(current.Greedy.TokenID)
+		tokens = append(tokens, tokenID)
+		if len(tokens) == maxTokens {
+			break
+		}
+		var tokenIDDeviceBuffer *hipDeviceByteBuffer
+		if useDeviceToken {
+			tokenIDDeviceBuffer = current.GreedyDevice
+		}
+		forward, nextState, err := hipRunGemma4Q4SingleTokenForwardWithStateInternal(context.Background(), model.driver, cfg, state, hipGemma4Q4ForwardRequest{
+			TokenID:             tokenID,
+			Position:            position,
+			Epsilon:             1e-6,
+			DeviceKVAttention:   true,
+			DeviceKVMode:        deviceKVMode,
+			EngineConfig:        engineConfig,
+			PriorDeviceState:    deviceState,
+			ReturnDeviceState:   true,
+			DeviceFinalSample:   true,
+			FinalGreedyBuffer:   greedyBuffer,
+			TokenIDDeviceBuffer: tokenIDDeviceBuffer,
+			SuppressTokens:      suppressTokens,
+			AttentionWorkspace:  workspace,
+			OmitDebugTensors:    true,
+			OmitLabels:          true,
+			OmitHostState:       true,
+		}, false)
+		if err != nil {
+			t.Fatalf("stepwise token %d forward: %v", len(tokens), err)
+		}
+		if forward.DeviceState == nil {
+			t.Fatalf("stepwise token %d forward did not return device state", len(tokens))
+		}
+		hipReleaseForwardDeviceFinalHidden(&current)
+		previousDeviceState := deviceState
+		deviceState = forward.DeviceState
+		forward.DeviceState = nil
+		hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+		current = forward
+		state = nextState
+		position++
+	}
+	return tokens
+}
+
+func runNativeGemma4Q4StepwiseBatchPrefillAfterAttachedPrefillForHardwareTest(t *testing.T, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens []int32, maxTokens int, engineConfig hipGemma4Q4EngineConfig) []int32 {
+	t.Helper()
+	deviceKVMode, err := engineConfig.deviceKVMode()
+	if err != nil {
+		t.Fatalf("device KV mode: %v", err)
+	}
+	workspace := hipBorrowAttentionHeadsChunkedWorkspace()
+	if err := hipGemma4Q4EnsureAttentionWorkspaceDecodeCapacity(model.driver, workspace, cfg, len(promptTokens)+maxTokens+1); err != nil {
+		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
+		t.Fatalf("decode workspace: %v", err)
+	}
+	workspace.EnsureProjectionGreedyBestCapacity(maxTokens + 2)
+	greedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+	if err != nil {
+		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
+		t.Fatalf("greedy buffer: %v", err)
+	}
+	defer func() {
+		_ = greedyBuffer
+		if err := hipRecycleAttentionHeadsChunkedWorkspace(workspace); err != nil {
+			t.Fatalf("recycle workspace: %v", err)
+		}
+	}()
+	suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(model, nil)
+	prefill, err := hipRunAttachedDrafterTargetPrefill(context.Background(), model.driver, hipAttachedDrafterTargetPrefillRequest{
+		TargetForward:  cfg,
+		DeviceKVMode:   deviceKVMode,
+		EngineConfig:   engineConfig,
+		InputTokenIDs:  promptTokens,
+		Epsilon:        1e-6,
+		SuppressTokens: suppressTokens,
+		GreedyBuffer:   greedyBuffer,
+		Workspace:      workspace,
+	})
+	if err != nil {
+		t.Fatalf("attached target prefill: %v", err)
+	}
+	currentGreedy := prefill.Current.Greedy
+	deviceState := prefill.DeviceState
+	position := prefill.Position
+	defer func() {
+		hipReleaseForwardDeviceFinalHidden(&prefill.Current)
+		if deviceState != nil {
+			_ = deviceState.Close()
+		}
+	}()
+	tokens := make([]int32, 0, maxTokens)
+	for len(tokens) < maxTokens {
+		tokenID := int32(currentGreedy.TokenID)
+		tokens = append(tokens, tokenID)
+		if len(tokens) == maxTokens {
+			break
+		}
+		priorLayerKV := hipGemma4Q4DeviceLayerCaches(deviceState, nil, len(cfg.Layers))
+		priorLayerDescriptors, err := hipGemma4Q4DeviceLayerDescriptorTableAliases(deviceState, nil, len(cfg.Layers))
+		if err != nil {
+			t.Fatalf("batch1 token %d descriptor aliases: %v", len(tokens), err)
+		}
+		forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(context.Background(), model.driver, cfg, []int32{tokenID}, position, 1e-6, deviceKVMode, priorLayerKV, priorLayerDescriptors, nil, nil, 0, greedyBuffer, workspace, engineConfig)
+		hipCloseGemma4Q4DeviceLayerDescriptorTables(priorLayerDescriptors)
+		if err != nil {
+			t.Fatalf("batch1 token %d forward: %v", len(tokens), err)
+		}
+		if len(forward.Greedy) != 1 {
+			_ = forward.Close()
+			t.Fatalf("batch1 token %d greedy rows = %d, want 1", len(tokens), len(forward.Greedy))
+		}
+		nextGreedy := forward.Greedy[0].Greedy
+		nextDeviceState, stateErr := hipGemma4Q4DeviceDecodeStateFromPrefillForward(forward, deviceKVMode)
+		closeErr := forward.Close()
+		if stateErr != nil {
+			t.Fatalf("batch1 token %d state: %v", len(tokens), stateErr)
+		}
+		if closeErr != nil {
+			_ = nextDeviceState.Close()
+			t.Fatalf("batch1 token %d close forward: %v", len(tokens), closeErr)
+		}
+		previousDeviceState := deviceState
+		if err := hipFinalizeGemma4Q4ForwardDeviceState(previousDeviceState, nextDeviceState); err != nil {
+			_ = nextDeviceState.Close()
+			t.Fatalf("batch1 token %d finalize state: %v", len(tokens), err)
+		}
+		deviceState = nextDeviceState
+		hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+		currentGreedy = nextGreedy
+		position = deviceState.maxLayerTokenCount()
+	}
+	return tokens
+}
+
+func runNativeGemma4Q4VerifierCarryAfterAttachedPrefillForHardwareTest(t *testing.T, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens []int32, maxTokens int, engineConfig hipGemma4Q4EngineConfig, wrongDraft []int32) []int32 {
+	t.Helper()
+	if len(wrongDraft) == 0 {
+		t.Fatalf("wrong draft suffix is required")
+	}
+	deviceKVMode, err := engineConfig.deviceKVMode()
+	if err != nil {
+		t.Fatalf("device KV mode: %v", err)
+	}
+	workspace := hipBorrowAttentionHeadsChunkedWorkspace()
+	if err := hipGemma4Q4EnsureAttentionWorkspaceDecodeCapacity(model.driver, workspace, cfg, len(promptTokens)+maxTokens+1); err != nil {
+		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
+		t.Fatalf("decode workspace: %v", err)
+	}
+	workspace.EnsureProjectionGreedyBestCapacity(maxTokens + 2)
+	greedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+	if err != nil {
+		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
+		t.Fatalf("greedy buffer: %v", err)
+	}
+	defer func() {
+		_ = greedyBuffer
+		if err := hipRecycleAttentionHeadsChunkedWorkspace(workspace); err != nil {
+			t.Fatalf("recycle workspace: %v", err)
+		}
+	}()
+	suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(model, nil)
+	prefill, err := hipRunAttachedDrafterTargetPrefill(context.Background(), model.driver, hipAttachedDrafterTargetPrefillRequest{
+		TargetForward:  cfg,
+		DeviceKVMode:   deviceKVMode,
+		EngineConfig:   engineConfig,
+		InputTokenIDs:  promptTokens,
+		Epsilon:        1e-6,
+		SuppressTokens: suppressTokens,
+		GreedyBuffer:   greedyBuffer,
+		Workspace:      workspace,
+	})
+	if err != nil {
+		t.Fatalf("attached target prefill: %v", err)
+	}
+	current := prefill.Current
+	state := prefill.State
+	deviceState := prefill.DeviceState
+	position := prefill.Position
+	defer func() {
+		hipReleaseForwardDeviceFinalHidden(&current)
+		if deviceState != nil {
+			_ = deviceState.Close()
+		}
+	}()
+	tokens := make([]int32, 0, maxTokens)
+	carryLead := int32(-1)
+	for len(tokens) < maxTokens {
+		if carryLead < 0 {
+			carryLead = int32(current.Greedy.TokenID)
+			tokens = append(tokens, carryLead)
+			continue
+		}
+		verifyTokens := make([]int32, 0, len(wrongDraft)+1)
+		verifyTokens = append(verifyTokens, carryLead)
+		verifyTokens = append(verifyTokens, wrongDraft...)
+		verify, err := hipRunAttachedDrafterTargetVerifyBlock(context.Background(), model.driver, hipAttachedDrafterTargetVerifyBlockRequest{
+			TargetForward:     cfg,
+			DeviceKVMode:      deviceKVMode,
+			EngineConfig:      engineConfig,
+			TargetDeviceState: deviceState,
+			CurrentGreedy:     current.Greedy,
+			DraftTokens:       verifyTokens,
+			Position:          position,
+			Epsilon:           1e-6,
+			SuppressTokens:    suppressTokens,
+			GreedyBuffer:      greedyBuffer,
+			Workspace:         workspace,
+		})
+		if err != nil {
+			t.Fatalf("verifier token %d: %v", len(tokens), err)
+		}
+		if verify.AcceptedCount == 0 {
+			_ = verify.Close()
+			t.Fatalf("verifier token %d rejected carried token %d", len(tokens), carryLead)
+		}
+		for index := 1; index < verify.AcceptedCount && len(tokens) < maxTokens; index++ {
+			tokens = append(tokens, verifyTokens[index])
+		}
+		if verify.DeviceState != nil {
+			previousDeviceState := deviceState
+			if !verify.PriorDeviceStateFinalized {
+				if err := hipFinalizeGemma4Q4ForwardDeviceState(previousDeviceState, verify.DeviceState); err != nil {
+					_ = verify.Close()
+					t.Fatalf("verifier token %d finalize state: %v", len(tokens), err)
+				}
+			}
+			deviceState = verify.DeviceState
+			verify.DeviceState = nil
+			hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+			position = deviceState.maxLayerTokenCount()
+		}
+		if verify.DeviceHidden != nil {
+			hipReleaseForwardDeviceFinalHidden(&current)
+			current.DeviceFinalHidden = verify.DeviceHidden
+			current.DeviceFinalHiddenBorrowed = false
+			verify.DeviceHidden = nil
+		}
+		current.Greedy = verify.NextGreedy
+		current.GreedyDevice = nil
+		if verify.AllAccepted {
+			carryLead = -1
+			_ = verify.Close()
+			continue
+		}
+		carryLead = int32(verify.Replacement.TokenID)
+		if len(tokens) < maxTokens {
+			tokens = append(tokens, carryLead)
+		}
+		_ = verify.Close()
+		state = hipGemma4Q4DecodeState{}
+	}
+	_ = state
+	return tokens
+}
+
+func runNativeGemma4Q4VerifierDraftBlocksAfterAttachedPrefillForHardwareTest(t *testing.T, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens []int32, maxTokens int, engineConfig hipGemma4Q4EngineConfig, draftBlocks [][]int32) []int32 {
+	t.Helper()
+	deviceKVMode, err := engineConfig.deviceKVMode()
+	if err != nil {
+		t.Fatalf("device KV mode: %v", err)
+	}
+	workspace := hipBorrowAttentionHeadsChunkedWorkspace()
+	if err := hipGemma4Q4EnsureAttentionWorkspaceDecodeCapacity(model.driver, workspace, cfg, len(promptTokens)+maxTokens+1); err != nil {
+		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
+		t.Fatalf("decode workspace: %v", err)
+	}
+	workspace.EnsureProjectionGreedyBestCapacity(maxTokens + 2)
+	greedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+	if err != nil {
+		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
+		t.Fatalf("greedy buffer: %v", err)
+	}
+	defer func() {
+		_ = greedyBuffer
+		if err := hipRecycleAttentionHeadsChunkedWorkspace(workspace); err != nil {
+			t.Fatalf("recycle workspace: %v", err)
+		}
+	}()
+	suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(model, nil)
+	prefill, err := hipRunAttachedDrafterTargetPrefill(context.Background(), model.driver, hipAttachedDrafterTargetPrefillRequest{
+		TargetForward:  cfg,
+		DeviceKVMode:   deviceKVMode,
+		EngineConfig:   engineConfig,
+		InputTokenIDs:  promptTokens,
+		Epsilon:        1e-6,
+		SuppressTokens: suppressTokens,
+		GreedyBuffer:   greedyBuffer,
+		Workspace:      workspace,
+	})
+	if err != nil {
+		t.Fatalf("attached target prefill: %v", err)
+	}
+	current := prefill.Current
+	state := prefill.State
+	deviceState := prefill.DeviceState
+	position := prefill.Position
+	defer func() {
+		hipReleaseForwardDeviceFinalHidden(&current)
+		if deviceState != nil {
+			_ = deviceState.Close()
+		}
+	}()
+	tokens := make([]int32, 0, maxTokens)
+	carryLead := int32(-1)
+	blockIndex := 0
+	for len(tokens) < maxTokens {
+		if carryLead >= 0 {
+			carryGreedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+			if err != nil {
+				t.Fatalf("carry greedy buffer: %v", err)
+			}
+			advanced, err := hipAdvanceAttachedDrafterCarryLead(context.Background(), model.driver, hipAttachedDrafterCarryAdvanceRequest{
+				TargetForward:    cfg,
+				DeviceKVMode:     deviceKVMode,
+				EngineConfig:     engineConfig,
+				State:            state,
+				PriorDeviceState: deviceState,
+				TokenID:          carryLead,
+				Position:         position,
+				Epsilon:          1e-6,
+				SuppressTokens:   suppressTokens,
+				GreedyBuffer:     carryGreedyBuffer,
+				Workspace:        workspace,
+			})
+			if err != nil {
+				t.Fatalf("advance carried token %d: %v", carryLead, err)
+			}
+			hipReleaseForwardDeviceFinalHidden(&current)
+			previousDeviceState := deviceState
+			current = advanced.Current
+			advanced.Current = hipGemma4Q4ForwardResult{}
+			state = advanced.State
+			deviceState = advanced.DeviceState
+			advanced.DeviceState = nil
+			position = advanced.Position
+			hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+			if err := advanced.Close(); err != nil {
+				t.Fatalf("close carried token advance: %v", err)
+			}
+			carryLead = -1
+		}
+		if blockIndex >= len(draftBlocks) {
+			t.Fatalf("ran out of draft blocks after %d tokens", len(tokens))
+		}
+		draftTokens := draftBlocks[blockIndex]
+		blockIndex++
+		if len(draftTokens) == 0 {
+			t.Fatalf("draft block %d is empty", blockIndex-1)
+		}
+		remaining := maxTokens - len(tokens)
+		if len(draftTokens) > remaining {
+			draftTokens = draftTokens[:remaining]
+		}
+		verifyGreedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+		if err != nil {
+			t.Fatalf("verifier greedy buffer: %v", err)
+		}
+		verify, err := hipRunAttachedDrafterTargetVerifyBlock(context.Background(), model.driver, hipAttachedDrafterTargetVerifyBlockRequest{
+			TargetForward:     cfg,
+			DeviceKVMode:      deviceKVMode,
+			EngineConfig:      engineConfig,
+			TargetDeviceState: deviceState,
+			CurrentGreedy:     current.Greedy,
+			DraftTokens:       draftTokens,
+			Position:          position,
+			Epsilon:           1e-6,
+			SuppressTokens:    suppressTokens,
+			GreedyBuffer:      verifyGreedyBuffer,
+			Workspace:         workspace,
+		})
+		if err != nil {
+			t.Fatalf("verifier mixed block %d token %d: %v", blockIndex-1, len(tokens), err)
+		}
+		for index := 0; index < verify.AcceptedCount && len(tokens) < maxTokens; index++ {
+			tokens = append(tokens, draftTokens[index])
+		}
+		if verify.DeviceState != nil {
+			previousDeviceState := deviceState
+			if !verify.PriorDeviceStateFinalized {
+				if err := hipFinalizeGemma4Q4ForwardDeviceState(previousDeviceState, verify.DeviceState); err != nil {
+					_ = verify.Close()
+					t.Fatalf("verifier mixed block %d finalize state: %v", blockIndex-1, err)
+				}
+			}
+			deviceState = verify.DeviceState
+			verify.DeviceState = nil
+			hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+			position = deviceState.maxLayerTokenCount()
+		}
+		if verify.DeviceHidden != nil {
+			hipReleaseForwardDeviceFinalHidden(&current)
+			current.DeviceFinalHidden = verify.DeviceHidden
+			current.DeviceFinalHiddenBorrowed = false
+			verify.DeviceHidden = nil
+		}
+		current.Greedy = verify.NextGreedy
+		current.GreedyDevice = nil
+		if verify.AllAccepted || len(tokens) == maxTokens {
+			carryLead = -1
+			_ = verify.Close()
+			continue
+		}
+		carryLead = int32(verify.Replacement.TokenID)
+		if len(tokens) < maxTokens {
+			tokens = append(tokens, carryLead)
+		}
+		_ = verify.Close()
+	}
+	_ = state
+	return tokens
+}
+
+func runNativeGemma4Q4VerifierAcceptedBlocksAfterAttachedPrefillForHardwareTest(t *testing.T, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens []int32, targetTokens []int32, blockTokens, compactPrefixTokens int, engineConfig hipGemma4Q4EngineConfig) []int32 {
+	t.Helper()
+	if len(targetTokens) == 0 {
+		t.Fatalf("target tokens are required")
+	}
+	if blockTokens <= 0 {
+		t.Fatalf("block tokens must be positive")
+	}
+	deviceKVMode, err := engineConfig.deviceKVMode()
+	if err != nil {
+		t.Fatalf("device KV mode: %v", err)
+	}
+	workspace := hipBorrowAttentionHeadsChunkedWorkspace()
+	if err := hipGemma4Q4EnsureAttentionWorkspaceDecodeCapacity(model.driver, workspace, cfg, len(promptTokens)+len(targetTokens)+1); err != nil {
+		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
+		t.Fatalf("decode workspace: %v", err)
+	}
+	requestWorkspace := workspace
+	if os.Getenv("GO_ROCM_ATTACHED_DRAFTER_DISABLE_WORKSPACE") == "1" {
+		requestWorkspace = nil
+	}
+	workspace.EnsureProjectionGreedyBestCapacity(len(targetTokens) + 2)
+	greedyBuffer, err := workspace.BorrowProjectionGreedyBest(model.driver)
+	if err != nil {
+		_ = hipRecycleAttentionHeadsChunkedWorkspace(workspace)
+		t.Fatalf("greedy buffer: %v", err)
+	}
+	defer func() {
+		_ = greedyBuffer
+		if err := hipRecycleAttentionHeadsChunkedWorkspace(workspace); err != nil {
+			t.Fatalf("recycle workspace: %v", err)
+		}
+	}()
+	suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(model, nil)
+	prefill, err := hipRunAttachedDrafterTargetPrefill(context.Background(), model.driver, hipAttachedDrafterTargetPrefillRequest{
+		TargetForward:  cfg,
+		DeviceKVMode:   deviceKVMode,
+		EngineConfig:   engineConfig,
+		InputTokenIDs:  promptTokens,
+		Epsilon:        1e-6,
+		SuppressTokens: suppressTokens,
+		GreedyBuffer:   greedyBuffer,
+		Workspace:      requestWorkspace,
+	})
+	if err != nil {
+		t.Fatalf("attached target prefill: %v", err)
+	}
+	current := prefill.Current
+	state := prefill.State
+	deviceState := prefill.DeviceState
+	position := prefill.Position
+	defer func() {
+		hipReleaseForwardDeviceFinalHidden(&current)
+		if deviceState != nil {
+			_ = deviceState.Close()
+		}
+	}()
+	tokens := make([]int32, 0, len(targetTokens))
+	for cursor := 0; cursor < len(targetTokens); {
+		nextBlockTokens := blockTokens
+		if cursor < compactPrefixTokens {
+			nextBlockTokens = 1
+		}
+		end := cursor + nextBlockTokens
+		if end > len(targetTokens) {
+			end = len(targetTokens)
+		}
+		verifyTokens := targetTokens[cursor:end]
+		if int32(current.Greedy.TokenID) != verifyTokens[0] {
+			t.Fatalf("verifier block cursor %d current greedy=%d want %d", cursor, current.Greedy.TokenID, verifyTokens[0])
+		}
+		verifyGreedyBuffer := (*hipDeviceByteBuffer)(nil)
+		if requestWorkspace != nil {
+			verifyGreedyBuffer, err = workspace.BorrowProjectionGreedyBest(model.driver)
+			if err != nil {
+				t.Fatalf("verifier block cursor %d greedy buffer: %v", cursor, err)
+			}
+		}
+		verify, err := hipRunAttachedDrafterTargetVerifyBlock(context.Background(), model.driver, hipAttachedDrafterTargetVerifyBlockRequest{
+			TargetForward:     cfg,
+			DeviceKVMode:      deviceKVMode,
+			EngineConfig:      engineConfig,
+			TargetDeviceState: deviceState,
+			CurrentGreedy:     current.Greedy,
+			DraftTokens:       verifyTokens,
+			Position:          position,
+			Epsilon:           1e-6,
+			SuppressTokens:    suppressTokens,
+			GreedyBuffer:      verifyGreedyBuffer,
+			Workspace:         requestWorkspace,
+		})
+		if err != nil {
+			t.Fatalf("verifier block cursor %d: %v", cursor, err)
+		}
+		if !verify.AllAccepted || verify.AcceptedCount != len(verifyTokens) {
+			verified := make([]int32, 0, len(verify.VerifiedGreedies))
+			for _, greedy := range verify.VerifiedGreedies {
+				verified = append(verified, int32(greedy.TokenID))
+			}
+			_ = verify.Close()
+			t.Fatalf("verifier block cursor %d tokens=%v verified=%v replacement=%d accepted=%d all=%v want %d", cursor, verifyTokens, verified, verify.Replacement.TokenID, verify.AcceptedCount, verify.AllAccepted, len(verifyTokens))
+		}
+		tokens = append(tokens, verifyTokens...)
+		if verify.DeviceState != nil {
+			previousDeviceState := deviceState
+			if !verify.PriorDeviceStateFinalized {
+				if err := hipFinalizeGemma4Q4ForwardDeviceState(previousDeviceState, verify.DeviceState); err != nil {
+					_ = verify.Close()
+					t.Fatalf("verifier block cursor %d finalize state: %v", cursor, err)
+				}
+			}
+			deviceState = verify.DeviceState
+			verify.DeviceState = nil
+			hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+			position = deviceState.maxLayerTokenCount()
+		}
+		if verify.DeviceHidden != nil {
+			hipReleaseForwardDeviceFinalHidden(&current)
+			current.DeviceFinalHidden = verify.DeviceHidden
+			current.DeviceFinalHiddenBorrowed = false
+			verify.DeviceHidden = nil
+		}
+		current.Greedy = verify.NextGreedy
+		current.GreedyDevice = nil
+		_ = verify.Close()
+		cursor = end
+	}
+	_ = state
+	return tokens
+}
+
+func assertNativeAttachedDrafterTargetARMatchStable(t *testing.T, targetPath, draftPath string, targetROCmConfig, draftROCmConfig ROCmLoadConfig, prompt string, maxTokens, draftTokens int, nativeText, targetText string) {
+	t.Helper()
+	targetAgain := loadNativeAttachedDrafterReferenceText(t, targetPath, targetROCmConfig, prompt, maxTokens)
 	if targetAgain != targetText {
 		t.Skipf("reference target Generate(%q) shifted between runs (%q -> %q); attached-drafter equivalence comparison is not stable", prompt, targetText, targetAgain)
 	}
-	nativeAgain := loadNativeAttachedDrafterText(t, targetPath, draftPath, prompt, maxTokens, draftTokens)
+	nativeAgain := loadNativeAttachedDrafterText(t, targetPath, draftPath, targetROCmConfig, draftROCmConfig, prompt, maxTokens, draftTokens)
 	if nativeAgain != nativeText {
 		t.Skipf("native attached Generate(%q) shifted between runs (%q -> %q); attached-drafter equivalence comparison is not stable", prompt, nativeText, nativeAgain)
 	}
 	t.Fatalf("native attached drafter text differs from stable target AR route: native=%q target=%q", nativeText, targetText)
 }
 
-func loadNativeAttachedDrafterReferenceText(t *testing.T, targetPath, prompt string, maxTokens int) string {
+func loadNativeAttachedDrafterReferenceText(t *testing.T, targetPath string, targetROCmConfig ROCmLoadConfig, prompt string, maxTokens int) string {
 	t.Helper()
-	referenceModel, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModel(targetPath, inference.WithContextLen(defaultContextLengthCap)))
+	referenceModel, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModelWithConfig(targetPath, targetROCmConfig, inference.WithContextLen(defaultContextLengthCap))
 	if err != nil {
 		t.Fatalf("LoadModel reference target %q: %v", targetPath, err)
 	}
@@ -236,11 +3592,13 @@ func loadNativeAttachedDrafterReferenceText(t *testing.T, targetPath, prompt str
 	return targetText
 }
 
-func loadNativeAttachedDrafterText(t *testing.T, targetPath, draftPath, prompt string, maxTokens, draftTokens int) string {
+func loadNativeAttachedDrafterText(t *testing.T, targetPath, draftPath string, targetROCmConfig, draftROCmConfig ROCmLoadConfig, prompt string, maxTokens, draftTokens int) string {
 	t.Helper()
 	pair, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadAttachedDrafterPair(targetPath, draftPath, AttachedDrafterPairConfig{
-		TargetOptions: []inference.LoadOption{inference.WithContextLen(defaultContextLengthCap)},
-		DraftOptions:  []inference.LoadOption{inference.WithContextLen(defaultContextLengthCap)},
+		TargetOptions:    []inference.LoadOption{inference.WithContextLen(defaultContextLengthCap)},
+		DraftOptions:     []inference.LoadOption{inference.WithContextLen(defaultContextLengthCap)},
+		TargetROCmConfig: targetROCmConfig,
+		DraftROCmConfig:  draftROCmConfig,
 	})
 	if err != nil {
 		t.Fatalf("LoadAttachedDrafterPair(%q, %q): %v", targetPath, draftPath, err)
@@ -926,10 +4284,13 @@ func assertLoadedGemma4Q4PublicGenerateSmoke(t *testing.T, textModel inference.T
 	if resultError(textModel.Err()) == nil || !strings.Contains(resultError(textModel.Err()).Error(), "text prompt must contain prompt text") {
 		t.Fatalf("Gemma4 q4 public BatchGenerate Err() = %v, want per-prompt text prompt error", resultError(textModel.Err()))
 	}
+	if resettable, ok := any(textModel).(interface{ ResetState() error }); ok {
+		core.RequireNoError(t, resettable.ResetState())
+	}
 	chatMessages := []inference.Message{{Role: "user", Content: "Hi"}}
-	chatPrompt, err := loaded.ApplyChatTemplate(chatMessages)
-	if err != nil {
-		t.Fatalf("Gemma4 q4 chat template: %v", err)
+	chatPrompt := formatGemma4ChatTemplateWithConfig(chatMessages, loaded.gemma4ChatTemplateConfig(inference.GenerateConfig{}, false))
+	if rocmChatModel, ok := any(textModel).(*rocmModel); ok {
+		chatPrompt = formatGemma4ChatTemplateWithConfig(chatMessages, rocmChatModel.gemma4ChatTemplateConfig(inference.GenerateConfig{}, false))
 	}
 	chatPromptTokens, chatPromptOK, err := hipGemma4Q4TextPromptIDs("text:"+chatPrompt, loaded)
 	if err != nil || !chatPromptOK {
@@ -979,6 +4340,9 @@ func assertLoadedGemma4Q4PublicGenerateSmoke(t *testing.T, textModel inference.T
 		}
 		probeable.SetProbeSink(nil)
 	}
+	if resettable, ok := any(textModel).(interface{ ResetState() error }); ok {
+		core.RequireNoError(t, resettable.ResetState())
+	}
 	speculative, err := SpeculativeDecode(context.Background(), textModel, textModel, SpeculativeDecodeConfig{
 		Prompt:      prompt,
 		MaxTokens:   1,
@@ -990,11 +4354,14 @@ func assertLoadedGemma4Q4PublicGenerateSmoke(t *testing.T, textModel inference.T
 	if speculative.Mode != "speculative" ||
 		speculative.Metrics.TargetCalls != 1 ||
 		speculative.Metrics.DraftCalls != 1 ||
-		speculative.Metrics.AcceptedTokens != 1 ||
+		speculative.Metrics.AcceptedTokens+speculative.Metrics.RejectedTokens != 1 ||
 		len(speculative.Tokens) != 1 ||
 		speculative.Tokens[0].ID < 0 ||
 		int(speculative.Tokens[0].ID) >= loaded.modelInfo.VocabSize {
-		t.Fatalf("Gemma4 q4 public SpeculativeDecode = %+v, want one accepted in-vocab token", speculative)
+		t.Fatalf("Gemma4 q4 public SpeculativeDecode = %+v, want one proposed/emitted in-vocab token", speculative)
+	}
+	if resettable, ok := any(textModel).(interface{ ResetState() error }); ok {
+		core.RequireNoError(t, resettable.ResetState())
 	}
 	promptLookup, err := PromptLookupDecode(context.Background(), textModel, PromptLookupDecodeConfig{
 		Prompt:       prompt,
@@ -3466,4 +6833,36 @@ func readHIPDeviceUint32(t *testing.T, driver nativeHIPDriver, pointer nativeDev
 	payload := make([]byte, 4)
 	core.RequireNoError(t, driver.CopyDeviceToHost(pointer, payload))
 	return binary.LittleEndian.Uint32(payload)
+}
+
+func decodeTokenIDs(tokens []inferdecode.Token) []int32 {
+	ids := make([]int32, 0, len(tokens))
+	for _, token := range tokens {
+		ids = append(ids, token.ID)
+	}
+	return ids
+}
+
+func collectInferenceTokens(stream func(func(inference.Token) bool)) []inference.Token {
+	tokens := []inference.Token{}
+	for token := range stream {
+		tokens = append(tokens, token)
+	}
+	return tokens
+}
+
+func inferenceTokenIDs(tokens []inference.Token) []int32 {
+	ids := make([]int32, 0, len(tokens))
+	for _, token := range tokens {
+		ids = append(ids, token.ID)
+	}
+	return ids
+}
+
+func inferenceTokenText(tokens []inference.Token) []string {
+	text := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		text = append(text, token.Text)
+	}
+	return text
 }

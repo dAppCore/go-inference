@@ -55,6 +55,7 @@ type hipGemma4Q4Layer0Config struct {
 	UpProjection     hipMLXQ4DeviceWeightConfig
 	DownProjection   hipMLXQ4DeviceWeightConfig
 	LMHeadProjection hipMLXQ4DeviceWeightConfig
+	MoE              *hipGemma4MoELayerConfig
 }
 
 type hipBF16DeviceWeightConfig struct {
@@ -288,6 +289,10 @@ func (model *hipLoadedModel) loadedGemma4Q4Layer0Config() (hipGemma4Q4Layer0Conf
 }
 
 func (model *hipLoadedModel) loadedGemma4Q4LayerConfig(layer int) (hipGemma4Q4Layer0Config, error) {
+	return model.loadedGemma4Q4LayerConfigWithSharedKV(layer, nil)
+}
+
+func (model *hipLoadedModel) loadedGemma4Q4LayerConfigWithSharedKV(layer int, sharedKV *hipGemma4Q4Layer0Config) (hipGemma4Q4Layer0Config, error) {
 	if model == nil {
 		return hipGemma4Q4Layer0Config{}, core.E(hipGemma4Q4Layer0Operation, "loaded model is required", nil)
 	}
@@ -295,6 +300,9 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerConfig(layer int) (hipGemma4Q4La
 		return hipGemma4Q4Layer0Config{}, core.E(hipGemma4Q4Layer0Operation, "HIP driver is not available", nil)
 	}
 	if !hipLoadedGemma4Q4GenerateLinked(model) {
+		if model.gemma4TextConfig.EnableMoEBlock {
+			return hipGemma4Q4Layer0Config{}, core.E(hipGemma4Q4Layer0Operation, "loaded Gemma4 MoE runtime is not ready", hipLoadedGemma4MoERuntimeError(model))
+		}
 		return hipGemma4Q4Layer0Config{}, core.E(hipGemma4Q4Layer0Operation, "loaded Gemma4 MLX affine 4/6/8-bit model is required", nil)
 	}
 	if layer < 0 {
@@ -319,17 +327,31 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerConfig(layer int) (hipGemma4Q4La
 	if err != nil {
 		return hipGemma4Q4Layer0Config{}, err
 	}
-	key, keyRows, keyCols, err := model.loadedGemma4Q4ProjectionConfig(layerPrefix+".self_attn.k_proj", "k_proj", groupSize)
-	if err != nil {
-		return hipGemma4Q4Layer0Config{}, err
+	var key, value hipMLXQ4DeviceWeightConfig
+	var keyRows, keyCols, valueRows, valueCols int
+	layerType := ""
+	if sharedKV != nil {
+		key = sharedKV.KeyProjection
+		keyRows = key.Rows
+		keyCols = key.Cols
+		value = sharedKV.ValueProjection
+		valueRows = value.Rows
+		valueCols = value.Cols
+		layerType = sharedKV.LayerType
+	} else {
+		key, keyRows, keyCols, err = model.loadedGemma4Q4ProjectionConfig(layerPrefix+".self_attn.k_proj", "k_proj", groupSize)
+		if err != nil {
+			return hipGemma4Q4Layer0Config{}, err
+		}
+		layerType = model.loadedGemma4Q4LayerType(layer, keyRows)
 	}
-	layerType := model.loadedGemma4Q4LayerType(layer, keyRows)
 	headDim := model.loadedGemma4Q4LayerHeadDim(layerType, queryRows, keyRows)
-	attentionKEqV := model.loadedGemma4Q4AttentionKEqV(layerType)
-	value := key
-	valueRows := keyRows
-	valueCols := keyCols
-	if !attentionKEqV {
+	attentionKEqV := model.loadedGemma4Q4LayerAttentionKEqV(layerPrefix, layerType)
+	if sharedKV == nil && attentionKEqV {
+		value = key
+		valueRows = keyRows
+		valueCols = keyCols
+	} else if sharedKV == nil {
 		value, valueRows, valueCols, err = model.loadedGemma4Q4ProjectionConfig(layerPrefix+".self_attn.v_proj", "v_proj", groupSize)
 		if err != nil {
 			return hipGemma4Q4Layer0Config{}, err
@@ -371,31 +393,36 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerConfig(layer int) (hipGemma4Q4La
 	ropeBase, ropeRotaryDim, ropeFrequencyScale := model.loadedGemma4Q4LayerRoPE(layerType, headDim)
 	slidingWindow := model.loadedGemma4Q4EffectiveSlidingWindow(layerType, headDim)
 
-	inputNorm, err := model.loadedGemma4BF16NormConfig(layerPrefix+".input_layernorm.weight", "input_layernorm", hidden)
+	inputNorm, err := model.loadedGemma4NormConfig(layerPrefix+".input_layernorm.weight", "input_layernorm", hidden)
 	if err != nil {
 		return hipGemma4Q4Layer0Config{}, err
 	}
-	queryNorm, err := model.loadedGemma4BF16NormConfig(layerPrefix+".self_attn.q_norm.weight", "q_norm", headDim)
+	queryNorm, err := model.loadedGemma4NormConfig(layerPrefix+".self_attn.q_norm.weight", "q_norm", headDim)
 	if err != nil {
 		return hipGemma4Q4Layer0Config{}, err
 	}
-	keyNorm, err := model.loadedGemma4BF16NormConfig(layerPrefix+".self_attn.k_norm.weight", "k_norm", headDim)
+	var keyNorm hipRMSNormDeviceWeightConfig
+	if sharedKV != nil {
+		keyNorm = sharedKV.KeyNorm
+	} else {
+		keyNorm, err = model.loadedGemma4NormConfig(layerPrefix+".self_attn.k_norm.weight", "k_norm", headDim)
+		if err != nil {
+			return hipGemma4Q4Layer0Config{}, err
+		}
+	}
+	postAttentionNorm, err := model.loadedGemma4NormConfig(layerPrefix+".post_attention_layernorm.weight", "post_attention_layernorm", hidden)
 	if err != nil {
 		return hipGemma4Q4Layer0Config{}, err
 	}
-	postAttentionNorm, err := model.loadedGemma4BF16NormConfig(layerPrefix+".post_attention_layernorm.weight", "post_attention_layernorm", hidden)
+	preFeedForwardNorm, err := model.loadedGemma4NormConfig(layerPrefix+".pre_feedforward_layernorm.weight", "pre_feedforward_layernorm", hidden)
 	if err != nil {
 		return hipGemma4Q4Layer0Config{}, err
 	}
-	preFeedForwardNorm, err := model.loadedGemma4BF16NormConfig(layerPrefix+".pre_feedforward_layernorm.weight", "pre_feedforward_layernorm", hidden)
+	postFeedForwardNorm, err := model.loadedGemma4NormConfig(layerPrefix+".post_feedforward_layernorm.weight", "post_feedforward_layernorm", hidden)
 	if err != nil {
 		return hipGemma4Q4Layer0Config{}, err
 	}
-	postFeedForwardNorm, err := model.loadedGemma4BF16NormConfig(layerPrefix+".post_feedforward_layernorm.weight", "post_feedforward_layernorm", hidden)
-	if err != nil {
-		return hipGemma4Q4Layer0Config{}, err
-	}
-	finalNorm, err := model.loadedGemma4BF16NormConfig("language_model.model.norm.weight", "final_norm", hidden)
+	finalNorm, err := model.loadedGemma4NormConfig("language_model.model.norm.weight", "final_norm", hidden)
 	if err != nil {
 		return hipGemma4Q4Layer0Config{}, err
 	}
@@ -414,7 +441,7 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerConfig(layer int) (hipGemma4Q4La
 		Embedding:           embedding,
 		HiddenSize:          hidden,
 		VocabSize:           vocab,
-		GroupSize:           groupSize,
+		GroupSize:           embedding.GroupSize,
 		HeadDim:             headDim,
 		QueryHeads:          queryHeads,
 		KeyHeads:            keyHeads,
@@ -443,6 +470,11 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerConfig(layer int) (hipGemma4Q4La
 		DownProjection:      down,
 		LMHeadProjection:    lmHead,
 	}
+	moe, err := model.loadedGemma4MoELayerConfig(layer, hidden)
+	if err != nil {
+		return hipGemma4Q4Layer0Config{}, err
+	}
+	cfg.MoE = moe
 	cfg.finalizeScales()
 	if err := cfg.validate(); err != nil {
 		return hipGemma4Q4Layer0Config{}, err
@@ -460,17 +492,33 @@ func (model *hipLoadedModel) loadedGemma4Q4ForwardConfig(layerCount int) (hipGem
 	if model.modelInfo.NumLayers > 0 && layerCount > model.modelInfo.NumLayers {
 		return hipGemma4Q4ForwardConfig{}, core.E(hipGemma4Q4Layer0Operation, "layer count exceeds loaded model layer count", nil)
 	}
+	kvSharedLayers := model.loadedGemma4Q4KVSharedLayers(layerCount)
+	firstSharedLayer := layerCount - kvSharedLayers
 	layers := make([]hipGemma4Q4Layer0Config, 0, layerCount)
+	latestKVSourceByType := map[string]int{}
 	for layer := 0; layer < layerCount; layer++ {
-		cfg, err := model.loadedGemma4Q4LayerConfig(layer)
+		layerType := model.loadedGemma4Q4LayerType(layer, 0)
+		ownsKV := layer < firstSharedLayer
+		var sharedKV *hipGemma4Q4Layer0Config
+		if !ownsKV {
+			if source, ok := latestKVSourceByType[layerType]; ok {
+				sharedKV = &layers[source]
+			} else {
+				ownsKV = true
+			}
+		}
+		cfg, err := model.loadedGemma4Q4LayerConfigWithSharedKV(layer, sharedKV)
 		if err != nil {
-			return hipGemma4Q4ForwardConfig{}, err
+			return hipGemma4Q4ForwardConfig{}, core.E(hipGemma4Q4Layer0Operation, core.Sprintf("load layer %d config", layer), err)
 		}
 		layers = append(layers, cfg)
+		if ownsKV {
+			latestKVSourceByType[cfg.LayerType] = layer
+		}
 	}
 	forward := hipGemma4Q4ForwardConfig{
 		Layers:         layers,
-		KVSharedLayers: model.loadedGemma4Q4KVSharedLayers(layerCount),
+		KVSharedLayers: kvSharedLayers,
 	}
 	forward.SharedKVSources = hipGemma4Q4BuildSharedKVSourceByLayer(forward)
 	if err := forward.validate(); err != nil {
@@ -1744,7 +1792,13 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 		}
 	}
 	var mlpOutputBuffer *hipDeviceByteBuffer
-	if req.AttentionWorkspace != nil && req.OmitDebugTensors {
+	if cfg.MoE != nil {
+		mlpOutputBuffer, err = hipRunGemma4MoEDeviceMLP(ctx, driver, attentionResidualBuffer, preFeedForwardBuffer, cfg, req.Epsilon)
+		if err != nil {
+			return hipGemma4Q4DecoderLayerResult{}, err
+		}
+		defer mlpOutputBuffer.Close()
+	} else if req.AttentionWorkspace != nil && req.OmitDebugTensors {
 		mlpOutputBuffer, err = req.AttentionWorkspace.EnsureProjectionOutput(driver, cfg.DownProjection.Rows)
 		if err != nil {
 			return hipGemma4Q4DecoderLayerResult{}, err
@@ -1971,6 +2025,17 @@ func hipRunGemma4Q4DeviceGELUTanhMLPWithDeviceInput(ctx context.Context, driver 
 }
 
 func hipRunGemma4Q4DeviceGELUTanhMLPWithDeviceInputOutput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, gateCfg, upCfg, downCfg hipMLXQ4DeviceWeightConfig, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	if workspace != nil && hipMLXQ4GELUTanhMLPPersistentRouteEnabled && hipMLXQ4GELUTanhMLPPersistentCompatible(input, gateCfg, upCfg, downCfg) {
+		activated, err := workspace.EnsureActivationOutput(driver, gateCfg.Rows)
+		if err != nil {
+			return err
+		}
+		barrier, err := workspace.EnsureGELUTanhMLPBarrier(driver)
+		if err != nil {
+			return err
+		}
+		return hipRunMLXQ4GELUTanhMLPPersistentKernelWithDeviceInputOutputWithWorkspace(ctx, driver, input, gateCfg, upCfg, downCfg, activated, output, barrier, workspace)
+	}
 	var activated *hipDeviceByteBuffer
 	closeActivated := false
 	if workspace != nil {
@@ -2169,6 +2234,9 @@ func (cfg hipGemma4Q4Layer0Config) validate() error {
 	if err := cfg.validatePerLayerInput(); err != nil {
 		return err
 	}
+	if err := cfg.MoE.validate(cfg.HiddenSize); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -2281,11 +2349,7 @@ func (cfg *hipGemma4Q4Layer0Config) finalizeScales() {
 	if cfg == nil {
 		return
 	}
-	if cfg.HiddenSize > 0 {
-		cfg.EmbeddingScale = float32(math.Sqrt(float64(cfg.HiddenSize)))
-	} else {
-		cfg.EmbeddingScale = 0
-	}
+	cfg.EmbeddingScale = hipGemma4Q4EmbeddingScale(cfg.HiddenSize)
 	cfg.PerLayerInput.finalizeScales()
 }
 
@@ -2293,21 +2357,14 @@ func (cfg hipGemma4Q4Layer0Config) embeddingScale() float32 {
 	if cfg.EmbeddingScale != 0 {
 		return cfg.EmbeddingScale
 	}
-	if cfg.HiddenSize <= 0 {
-		return 0
-	}
-	return float32(math.Sqrt(float64(cfg.HiddenSize)))
+	return hipGemma4Q4EmbeddingScale(cfg.HiddenSize)
 }
 
 func (cfg *hipGemma4Q4PerLayerInputConfig) finalizeScales() {
 	if cfg == nil {
 		return
 	}
-	if cfg.InputSize > 0 {
-		cfg.EmbeddingScale = float32(math.Sqrt(float64(cfg.InputSize)))
-	} else {
-		cfg.EmbeddingScale = 0
-	}
+	cfg.EmbeddingScale = hipGemma4Q4EmbeddingScale(cfg.InputSize)
 	if cfg.ModelProjection.Cols > 0 {
 		cfg.ModelProjectionScale = float32(math.Pow(float64(cfg.ModelProjection.Cols), -0.5))
 	} else {
@@ -2319,10 +2376,7 @@ func (cfg hipGemma4Q4PerLayerInputConfig) embeddingScale() float32 {
 	if cfg.EmbeddingScale != 0 {
 		return cfg.EmbeddingScale
 	}
-	if cfg.InputSize <= 0 {
-		return 0
-	}
-	return float32(math.Sqrt(float64(cfg.InputSize)))
+	return hipGemma4Q4EmbeddingScale(cfg.InputSize)
 }
 
 func (cfg hipGemma4Q4PerLayerInputConfig) modelProjectionScale() float32 {
@@ -2333,6 +2387,14 @@ func (cfg hipGemma4Q4PerLayerInputConfig) modelProjectionScale() float32 {
 		return 0
 	}
 	return float32(math.Pow(float64(cfg.ModelProjection.Cols), -0.5))
+}
+
+func hipGemma4Q4EmbeddingScale(hiddenSize int) float32 {
+	if hiddenSize <= 0 {
+		return 0
+	}
+	scale := float32(math.Sqrt(float64(hiddenSize)))
+	return hipBFloat16ToFloat32(hipFloat32ToBFloat16(scale))
 }
 
 func (cfg hipBF16DeviceWeightConfig) validate(encoding uint32) error {
@@ -3240,11 +3302,17 @@ func hipValidateGemma4Q4NormConfig(label string, cfg hipRMSNormDeviceWeightConfi
 	if cfg.Count != count {
 		return core.E(hipGemma4Q4Layer0Operation, label+" count does not match layer geometry", nil)
 	}
-	if cfg.WeightBytes != uint64(count*2) {
-		return core.E(hipGemma4Q4Layer0Operation, label+" BF16 weight byte count mismatch", nil)
-	}
-	if cfg.WeightEncoding != hipRMSNormWeightEncodingBF16 {
-		return core.E(hipGemma4Q4Layer0Operation, label+" weight encoding must be BF16", nil)
+	switch cfg.WeightEncoding {
+	case hipRMSNormWeightEncodingF32:
+		if cfg.WeightBytes != uint64(count*4) {
+			return core.E(hipGemma4Q4Layer0Operation, label+" F32 weight byte count mismatch", nil)
+		}
+	case hipRMSNormWeightEncodingBF16:
+		if cfg.WeightBytes != uint64(count*2) {
+			return core.E(hipGemma4Q4Layer0Operation, label+" BF16 weight byte count mismatch", nil)
+		}
+	default:
+		return core.E(hipGemma4Q4Layer0Operation, label+" weight encoding must be F32 or BF16", nil)
 	}
 	if cfg.Flags&hipRMSNormLaunchFlagAddUnitWeight != 0 {
 		return core.E(hipGemma4Q4Layer0Operation, label+" must use raw Gemma4 RMSNorm weights", nil)
@@ -3267,14 +3335,12 @@ func (model *hipLoadedModel) loadedGemma4Q4EmbeddingConfig(groupSize int) (hipDe
 	}
 	vocab := model.modelInfo.VocabSize
 	hidden := model.modelInfo.HiddenSize
-	bits := hipMLXQ4ProjectionBitsOrDefault(model.modelInfo.QuantBits)
-	groups := hidden / groupSize
-	packedCols, err := hipMLXAffinePackedCols(hidden, bits)
+	bits, rows, cols, effectiveGroupSize, groups, packedCols, err := hipInferMLXAffineBitsFromTensorShapes(weight, scales, biases, groupSize, model.modelInfo.QuantBits, "embed_tokens")
 	if err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, err
 	}
-	if hidden%groupSize != 0 {
-		return hipDeviceEmbeddingLookupConfig{}, core.E(hipGemma4Q4Layer0Operation, "embed_tokens hidden size must align with MLX affine group size", nil)
+	if rows != vocab || cols != hidden {
+		return hipDeviceEmbeddingLookupConfig{}, core.E(hipGemma4Q4Layer0Operation, "embed_tokens dimensions must match Gemma4 config", nil)
 	}
 	if err := hipValidateGemma4Q4Tensor(weight, "embed_tokens weight", "U32", vocab, packedCols, uint64(vocab)*uint64(packedCols)*4); err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, err
@@ -3291,7 +3357,7 @@ func (model *hipLoadedModel) loadedGemma4Q4EmbeddingConfig(groupSize int) (hipDe
 		TableEncoding:    hipEmbeddingTableEncodingMLXQ4,
 		VocabSize:        vocab,
 		HiddenSize:       hidden,
-		GroupSize:        groupSize,
+		GroupSize:        effectiveGroupSize,
 		QuantBits:        bits,
 		ScalePointer:     scales.pointer,
 		BiasPointer:      biases.pointer,
@@ -3328,7 +3394,7 @@ func (model *hipLoadedModel) loadedGemma4Q4PerLayerInputConfig(layerPrefix strin
 	if err != nil {
 		return hipGemma4Q4PerLayerInputConfig{}, err
 	}
-	projectionNorm, err := model.loadedGemma4BF16NormConfig("language_model.model.per_layer_projection_norm.weight", "per_layer_projection_norm", inputSize)
+	projectionNorm, err := model.loadedGemma4NormConfig("language_model.model.per_layer_projection_norm.weight", "per_layer_projection_norm", inputSize)
 	if err != nil {
 		return hipGemma4Q4PerLayerInputConfig{}, err
 	}
@@ -3340,7 +3406,7 @@ func (model *hipLoadedModel) loadedGemma4Q4PerLayerInputConfig(layerPrefix strin
 	if err != nil {
 		return hipGemma4Q4PerLayerInputConfig{}, err
 	}
-	postNorm, err := model.loadedGemma4BF16NormConfig(layerPrefix+".post_per_layer_input_norm.weight", "post_per_layer_input_norm", hidden)
+	postNorm, err := model.loadedGemma4NormConfig(layerPrefix+".post_per_layer_input_norm.weight", "post_per_layer_input_norm", hidden)
 	if err != nil {
 		return hipGemma4Q4PerLayerInputConfig{}, err
 	}
@@ -3387,9 +3453,7 @@ func (model *hipLoadedModel) loadedGemma4Q4PerLayerEmbeddingConfig(groupSize, nu
 	if weight.info.TypeName != "U32" || len(weight.info.Dimensions) != 2 {
 		return hipDeviceEmbeddingLookupConfig{}, 0, core.E(hipGemma4Q4Layer0Operation, "embed_tokens_per_layer weight must be U32 rank-2 MLX affine packed tensor", nil)
 	}
-	bits := hipMLXQ4ProjectionBitsOrDefault(model.modelInfo.QuantBits)
-	vocab := int(weight.info.Dimensions[0])
-	hiddenTotal, err := hipMLXAffineColsFromPackedCols(int(weight.info.Dimensions[1]), bits)
+	bits, vocab, hiddenTotal, effectiveGroupSize, groups, packedCols, err := hipInferMLXAffineBitsFromTensorShapes(weight, scales, biases, groupSize, model.modelInfo.QuantBits, "embed_tokens_per_layer")
 	if err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, 0, err
 	}
@@ -3402,14 +3466,6 @@ func (model *hipLoadedModel) loadedGemma4Q4PerLayerEmbeddingConfig(groupSize, nu
 	}
 	if model.gemma4TextConfig.VocabSizePerLayerInput > 0 && vocab != model.gemma4TextConfig.VocabSizePerLayerInput {
 		return hipDeviceEmbeddingLookupConfig{}, 0, core.E(hipGemma4Q4Layer0Operation, "embed_tokens_per_layer vocab size does not match Gemma4 config", nil)
-	}
-	if hiddenTotal%groupSize != 0 {
-		return hipDeviceEmbeddingLookupConfig{}, 0, core.E(hipGemma4Q4Layer0Operation, "embed_tokens_per_layer hidden size must align with MLX affine group size", nil)
-	}
-	groups := hiddenTotal / groupSize
-	packedCols, err := hipMLXAffinePackedCols(hiddenTotal, bits)
-	if err != nil {
-		return hipDeviceEmbeddingLookupConfig{}, 0, err
 	}
 	if err := hipValidateGemma4Q4Tensor(weight, "embed_tokens_per_layer weight", "U32", vocab, packedCols, uint64(vocab)*uint64(packedCols)*4); err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, 0, err
@@ -3426,7 +3482,7 @@ func (model *hipLoadedModel) loadedGemma4Q4PerLayerEmbeddingConfig(groupSize, nu
 		TableEncoding:    hipEmbeddingTableEncodingMLXQ4,
 		VocabSize:        vocab,
 		HiddenSize:       hiddenTotal,
-		GroupSize:        groupSize,
+		GroupSize:        effectiveGroupSize,
 		QuantBits:        bits,
 		ScalePointer:     scales.pointer,
 		BiasPointer:      biases.pointer,
@@ -3475,7 +3531,7 @@ func (model *hipLoadedModel) loadedGemma4Q4ProjectionConfig(baseName, label stri
 	if weight.pointer == 0 || scales.pointer == 0 || biases.pointer == 0 {
 		return hipMLXQ4DeviceWeightConfig{}, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" MLX affine tensor pointers are required", nil)
 	}
-	bits, rows, cols, groups, packedCols, err := hipInferMLXAffineBitsFromTensorShapes(weight, scales, biases, groupSize, model.modelInfo.QuantBits, label)
+	bits, rows, cols, effectiveGroupSize, groups, packedCols, err := hipInferMLXAffineBitsFromTensorShapes(weight, scales, biases, groupSize, model.modelInfo.QuantBits, label)
 	if err != nil {
 		return hipMLXQ4DeviceWeightConfig{}, 0, 0, err
 	}
@@ -3497,7 +3553,7 @@ func (model *hipLoadedModel) loadedGemma4Q4ProjectionConfig(baseName, label stri
 		BiasBytes:     biases.info.ByteSize,
 		Rows:          rows,
 		Cols:          cols,
-		GroupSize:     groupSize,
+		GroupSize:     effectiveGroupSize,
 		Bits:          bits,
 	}
 	if err := cfg.validateInputCount(cols); err != nil {
@@ -3506,18 +3562,18 @@ func (model *hipLoadedModel) loadedGemma4Q4ProjectionConfig(baseName, label stri
 	return cfg, rows, cols, nil
 }
 
-func hipInferMLXAffineBitsFromTensorShapes(weight, scales, biases hipTensor, groupSize, preferredBits int, label string) (int, int, int, int, int, error) {
+func hipInferMLXAffineBitsFromTensorShapes(weight, scales, biases hipTensor, groupSize, preferredBits int, label string) (int, int, int, int, int, int, error) {
 	if groupSize <= 0 {
-		return 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" MLX affine group size must be positive", nil)
+		return 0, 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" MLX affine group size must be positive", nil)
 	}
 	if weight.info.TypeName != "U32" || len(weight.info.Dimensions) != 2 {
-		return 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" weight must be U32 rank-2 MLX affine packed tensor", nil)
+		return 0, 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" weight must be U32 rank-2 MLX affine packed tensor", nil)
 	}
 	if scales.info.TypeName != "BF16" || len(scales.info.Dimensions) != 2 {
-		return 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" scales must be BF16 rank-2 MLX affine tensor", nil)
+		return 0, 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" scales must be BF16 rank-2 MLX affine tensor", nil)
 	}
 	if biases.info.TypeName != "BF16" || len(biases.info.Dimensions) != 2 {
-		return 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" biases must be BF16 rank-2 MLX affine tensor", nil)
+		return 0, 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" biases must be BF16 rank-2 MLX affine tensor", nil)
 	}
 	rows := int(weight.info.Dimensions[0])
 	packedCols := int(weight.info.Dimensions[1])
@@ -3526,22 +3582,24 @@ func hipInferMLXAffineBitsFromTensorShapes(weight, scales, biases hipTensor, gro
 	biasRows := int(biases.info.Dimensions[0])
 	biasGroups := int(biases.info.Dimensions[1])
 	if rows <= 0 || packedCols <= 0 || groups <= 0 {
-		return 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" MLX affine dimensions must be positive", nil)
+		return 0, 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" MLX affine dimensions must be positive", nil)
 	}
 	if scaleRows != rows || biasRows != rows || biasGroups != groups {
-		return 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" MLX affine tensor shapes must agree", nil)
+		return 0, 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" MLX affine tensor shapes must agree", nil)
 	}
-	cols := groups * groupSize
-	if cols <= 0 || cols/groupSize != groups {
-		return 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" MLX affine dimensions must be group-aligned", nil)
-	}
-	for _, bits := range hipMLXAffineCandidateBits(preferredBits) {
-		wantPackedCols, err := hipMLXAffinePackedCols(cols, bits)
-		if err == nil && wantPackedCols == packedCols {
-			return bits, rows, cols, groups, packedCols, nil
+	for _, candidateGroupSize := range hipMLXAffineCandidateGroupSizes(groupSize) {
+		cols := groups * candidateGroupSize
+		if cols <= 0 || cols/candidateGroupSize != groups {
+			continue
+		}
+		for _, bits := range hipMLXAffineCandidateBits(preferredBits) {
+			wantPackedCols, err := hipMLXAffinePackedCols(cols, bits)
+			if err == nil && wantPackedCols == packedCols {
+				return bits, rows, cols, candidateGroupSize, groups, packedCols, nil
+			}
 		}
 	}
-	return 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" MLX affine packed shape does not match supported bit widths", nil)
+	return 0, 0, 0, 0, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" MLX affine packed shape does not match supported bit widths", nil)
 }
 
 func hipMLXAffineCandidateBits(preferredBits int) []int {
@@ -3565,6 +3623,26 @@ func hipMLXAffineCandidateBits(preferredBits int) []int {
 	return out
 }
 
+func hipMLXAffineCandidateGroupSizes(preferredGroupSize int) []int {
+	out := make([]int, 0, 4)
+	for _, groupSize := range []int{preferredGroupSize, 16, 32, 64} {
+		if groupSize <= 0 {
+			continue
+		}
+		seen := false
+		for _, existing := range out {
+			if existing == groupSize {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			out = append(out, groupSize)
+		}
+	}
+	return out
+}
+
 func (model *hipLoadedModel) loadedGemma4Q4LMHeadProjectionConfig(groupSize int) (hipMLXQ4DeviceWeightConfig, int, int, error) {
 	for _, baseName := range []string{
 		"language_model.lm_head",
@@ -3578,33 +3656,50 @@ func (model *hipLoadedModel) loadedGemma4Q4LMHeadProjectionConfig(groupSize int)
 	return model.loadedGemma4Q4ProjectionConfig("language_model.model.embed_tokens", "embed_tokens_lm_head", groupSize)
 }
 
-func (model *hipLoadedModel) loadedGemma4BF16NormConfig(name, label string, count int) (hipRMSNormDeviceWeightConfig, error) {
+func (model *hipLoadedModel) loadedGemma4NormConfig(name, label string, count int) (hipRMSNormDeviceWeightConfig, error) {
 	tensor, err := model.requiredHIPTensor(name, label)
 	if err != nil {
 		return hipRMSNormDeviceWeightConfig{}, err
 	}
-	if tensor.info.TypeName != "BF16" ||
-		len(tensor.info.Dimensions) != 1 ||
+	encoding, expectedBytes, err := hipGemma4NormWeightEncodingAndBytes(tensor.info, label, count)
+	if err != nil {
+		return hipRMSNormDeviceWeightConfig{}, err
+	}
+	if len(tensor.info.Dimensions) != 1 ||
 		tensor.info.Dimensions[0] != uint64(count) ||
-		tensor.info.ByteSize != uint64(count*2) {
+		tensor.info.ByteSize != expectedBytes {
 		return hipRMSNormDeviceWeightConfig{}, core.E(hipGemma4Q4Layer0Operation, label+" tensor shape/type mismatch", nil)
 	}
 	if tensor.pointer == 0 {
 		return hipRMSNormDeviceWeightConfig{}, core.E(hipGemma4Q4Layer0Operation, label+" tensor pointer is required", nil)
 	}
-	if err := hipValidateGemma4Q4TensorBytes(label, tensor.info.ByteSize, uint64(count)*2); err != nil {
+	if err := hipValidateGemma4Q4TensorBytes(label, tensor.info.ByteSize, expectedBytes); err != nil {
 		return hipRMSNormDeviceWeightConfig{}, err
 	}
 	cfg := hipRMSNormDeviceWeightConfig{
 		WeightPointer:  tensor.pointer,
 		WeightBytes:    tensor.info.ByteSize,
 		Count:          count,
-		WeightEncoding: hipRMSNormWeightEncodingBF16,
+		WeightEncoding: encoding,
 	}
 	if err := hipValidateGemma4Q4NormConfig(label, cfg, count); err != nil {
 		return hipRMSNormDeviceWeightConfig{}, err
 	}
 	return cfg, nil
+}
+
+func hipGemma4NormWeightEncodingAndBytes(info nativeTensorInfo, label string, count int) (uint32, uint64, error) {
+	if count <= 0 {
+		return 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" count must be positive", nil)
+	}
+	switch core.Upper(info.TypeName) {
+	case "F32":
+		return hipRMSNormWeightEncodingF32, uint64(count) * 4, nil
+	case "BF16":
+		return hipRMSNormWeightEncodingBF16, uint64(count) * 2, nil
+	default:
+		return 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" tensor must be F32 or BF16", nil)
+	}
 }
 
 func (model *hipLoadedModel) loadedGemma4Q4LayerScalar(layer int) (float32, error) {
@@ -3616,27 +3711,59 @@ func (model *hipLoadedModel) loadedGemma4Q4LayerScalar(layer int) (float32, erro
 	if !ok {
 		return 1, nil
 	}
-	if core.Upper(tensor.info.TypeName) != "BF16" ||
-		len(tensor.info.Dimensions) != 1 ||
-		tensor.info.Dimensions[0] != 1 ||
-		tensor.info.ByteSize != 2 {
-		return 0, core.E(hipGemma4Q4Layer0Operation, "layer scalar tensor must be BF16 [1]", nil)
+	scalarBytes, err := hipGemma4LayerScalarBytes(tensor.info, "layer scalar tensor")
+	if err != nil {
+		return 0, err
 	}
 	if tensor.pointer == 0 {
 		return 0, core.E(hipGemma4Q4Layer0Operation, "layer scalar tensor pointer is required", nil)
 	}
-	payload := make([]byte, 2)
+	payload := make([]byte, scalarBytes)
 	if err := model.driver.CopyDeviceToHost(tensor.pointer, payload); err != nil {
 		return 0, core.E(hipGemma4Q4Layer0Operation, "copy layer scalar", err)
 	}
-	return hipBFloat16ToFloat32(binary.LittleEndian.Uint16(payload)), nil
+	return hipGemma4LayerScalarValue(tensor.info, payload)
+}
+
+func hipGemma4LayerScalarBytes(info nativeTensorInfo, label string) (int, error) {
+	if len(info.Dimensions) != 1 || info.Dimensions[0] != 1 {
+		return 0, core.E(hipGemma4Q4Layer0Operation, label+" must be F32 or BF16 [1]", nil)
+	}
+	switch core.Upper(info.TypeName) {
+	case "F32":
+		if info.ByteSize != 4 {
+			return 0, core.E(hipGemma4Q4Layer0Operation, label+" F32 byte count mismatch", nil)
+		}
+		return 4, nil
+	case "BF16":
+		if info.ByteSize != 2 {
+			return 0, core.E(hipGemma4Q4Layer0Operation, label+" BF16 byte count mismatch", nil)
+		}
+		return 2, nil
+	default:
+		return 0, core.E(hipGemma4Q4Layer0Operation, label+" must be F32 or BF16 [1]", nil)
+	}
+}
+
+func hipGemma4LayerScalarValue(info nativeTensorInfo, payload []byte) (float32, error) {
+	switch core.Upper(info.TypeName) {
+	case "F32":
+		if len(payload) != 4 {
+			return 0, core.E(hipGemma4Q4Layer0Operation, "layer scalar F32 payload byte count mismatch", nil)
+		}
+		return math.Float32frombits(binary.LittleEndian.Uint32(payload)), nil
+	case "BF16":
+		if len(payload) != 2 {
+			return 0, core.E(hipGemma4Q4Layer0Operation, "layer scalar BF16 payload byte count mismatch", nil)
+		}
+		return hipBFloat16ToFloat32(binary.LittleEndian.Uint16(payload)), nil
+	default:
+		return 0, core.E(hipGemma4Q4Layer0Operation, "layer scalar tensor must be F32 or BF16", nil)
+	}
 }
 
 func (model *hipLoadedModel) hasHIPTensor(name string) bool {
-	if model == nil {
-		return false
-	}
-	_, ok := model.tensors[name]
+	_, ok := model.lookupHIPTensor(name)
 	return ok
 }
 
@@ -3644,7 +3771,7 @@ func (model *hipLoadedModel) requiredHIPTensor(name, label string) (hipTensor, e
 	if model == nil {
 		return hipTensor{}, core.E(hipGemma4Q4Layer0Operation, "loaded model is required", nil)
 	}
-	tensor, ok := model.tensors[name]
+	tensor, ok := model.lookupHIPTensor(name)
 	if !ok {
 		return hipTensor{}, core.E(hipGemma4Q4Layer0Operation, "loaded Gemma4 q4 model is missing "+label+" tensor", nil)
 	}
@@ -3652,6 +3779,109 @@ func (model *hipLoadedModel) requiredHIPTensor(name, label string) (hipTensor, e
 		return hipTensor{}, core.E(hipGemma4Q4Layer0Operation, label+" tensor pointer is required", nil)
 	}
 	return tensor, nil
+}
+
+func (model *hipLoadedModel) lookupHIPTensor(name string) (hipTensor, bool) {
+	if model == nil {
+		return hipTensor{}, false
+	}
+	if tensor, ok := model.tensors[name]; ok {
+		return tensor, true
+	}
+	if !model.hipGGUFTensorAliasesEnabled() {
+		return hipTensor{}, false
+	}
+	for _, alias := range hipGemma4GGUFTensorAliases(name) {
+		if tensor, ok := model.tensors[alias]; ok {
+			return tensor, true
+		}
+	}
+	return hipTensor{}, false
+}
+
+func (model *hipLoadedModel) hipGGUFTensorAliasesEnabled() bool {
+	if model == nil {
+		return false
+	}
+	if rocmGemma4SourceFormatGGUF(model.modelLabels) {
+		return true
+	}
+	path := core.Lower(core.Trim(model.modelPath))
+	return core.HasSuffix(path, ".gguf") || core.Contains(path, "-gguf")
+}
+
+func hipGemma4GGUFTensorAliases(name string) []string {
+	switch name {
+	case "language_model.model.embed_tokens.weight":
+		return []string{"token_embd.weight"}
+	case "language_model.model.embed_tokens_per_layer.weight":
+		return []string{"per_layer_token_embd.weight"}
+	case "language_model.model.per_layer_model_projection.weight":
+		return []string{"per_layer_model_proj.weight"}
+	case "language_model.model.per_layer_projection_norm.weight":
+		return []string{"per_layer_proj_norm.weight"}
+	case "language_model.model.norm.weight":
+		return []string{"output_norm.weight"}
+	}
+
+	const layerPrefix = "language_model.model.layers."
+	if !core.HasPrefix(name, layerPrefix) {
+		return nil
+	}
+	parts := core.Split(core.TrimPrefix(name, layerPrefix), ".")
+	if len(parts) < 2 || parts[0] == "" {
+		return nil
+	}
+	suffix := core.Join(".", parts[1:]...)
+	ggufSuffix := ""
+	switch suffix {
+	case "self_attn.q_proj.weight":
+		ggufSuffix = "attn_q.weight"
+	case "self_attn.k_proj.weight":
+		ggufSuffix = "attn_k.weight"
+	case "self_attn.v_proj.weight":
+		ggufSuffix = "attn_v.weight"
+	case "self_attn.o_proj.weight":
+		ggufSuffix = "attn_output.weight"
+	case "self_attn.q_norm.weight":
+		ggufSuffix = "attn_q_norm.weight"
+	case "self_attn.k_norm.weight":
+		ggufSuffix = "attn_k_norm.weight"
+	case "input_layernorm.weight":
+		ggufSuffix = "attn_norm.weight"
+	case "post_attention_layernorm.weight":
+		ggufSuffix = "post_attention_norm.weight"
+	case "pre_feedforward_layernorm.weight":
+		ggufSuffix = "ffn_norm.weight"
+	case "post_feedforward_layernorm.weight":
+		ggufSuffix = "post_ffw_norm.weight"
+	case "pre_feedforward_layernorm_2.weight":
+		ggufSuffix = "pre_ffw_norm_2.weight"
+	case "post_feedforward_layernorm_1.weight":
+		ggufSuffix = "post_ffw_norm_1.weight"
+	case "post_feedforward_layernorm_2.weight":
+		ggufSuffix = "post_ffw_norm_2.weight"
+	case "router.scale":
+		ggufSuffix = "ffn_gate_inp.scale"
+	case "router.per_expert_scale":
+		ggufSuffix = "ffn_down_exps.scale"
+	case "mlp.gate_proj.weight":
+		ggufSuffix = "ffn_gate.weight"
+	case "mlp.up_proj.weight":
+		ggufSuffix = "ffn_up.weight"
+	case "mlp.down_proj.weight":
+		ggufSuffix = "ffn_down.weight"
+	case "per_layer_input_gate.weight":
+		ggufSuffix = "inp_gate.weight"
+	case "per_layer_projection.weight":
+		ggufSuffix = "proj.weight"
+	case "post_per_layer_input_norm.weight":
+		ggufSuffix = "post_norm.weight"
+	}
+	if ggufSuffix == "" {
+		return nil
+	}
+	return []string{"blk." + parts[0] + "." + ggufSuffix}
 }
 
 func hipValidateGemma4Q4Tensor(tensor hipTensor, label, typeName string, rows, cols int, bytes uint64) error {
@@ -3838,6 +4068,18 @@ func (model *hipLoadedModel) loadedGemma4Q4EffectiveSlidingWindow(layerType stri
 
 func (model *hipLoadedModel) loadedGemma4Q4AttentionKEqV(layerType string) bool {
 	return layerType == "full_attention" && model != nil && model.gemma4TextConfig.AttentionKEqV
+}
+
+func (model *hipLoadedModel) loadedGemma4Q4LayerAttentionKEqV(layerPrefix, layerType string) bool {
+	if model.loadedGemma4Q4AttentionKEqV(layerType) {
+		return true
+	}
+	if model == nil || layerType != "full_attention" || !model.hipGGUFTensorAliasesEnabled() {
+		return false
+	}
+	keyName := layerPrefix + ".self_attn.k_proj.weight"
+	valueName := layerPrefix + ".self_attn.v_proj.weight"
+	return model.hasHIPTensor(keyName) && !model.hasHIPTensor(valueName)
 }
 
 func hipGemma4Q4AttentionScale(_ int) float32 {

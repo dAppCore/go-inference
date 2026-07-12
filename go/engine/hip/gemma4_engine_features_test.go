@@ -9,7 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/engine/hip/internal/gguf"
 )
 
 func linkedGemma4TestLabels(size, mode string) map[string]string {
@@ -94,16 +96,20 @@ func TestGemma4EngineFeaturesForIdentityUsesLabels(t *testing.T) {
 		t.Fatalf("Gemma4 E4B q6 identity features = %+v, want linked generation", linked)
 	}
 
-	for name, identity := range map[string]inference.ModelIdentity{
-		"gguf": {
-			Architecture: "gemma4_text",
-			QuantBits:    6,
-			Labels: map[string]string{
-				"format":            " GGUF ",
-				"gemma4_size":       "E2B",
-				"gemma4_quant_mode": "q6",
-			},
+	gguf := Gemma4EngineFeaturesForIdentity(inference.ModelIdentity{
+		Architecture: "gemma4_text",
+		QuantBits:    6,
+		Labels: map[string]string{
+			"format":            " GGUF ",
+			"gemma4_size":       "E2B",
+			"gemma4_quant_mode": "q6",
 		},
+	})
+	if !gguf.GenerateLinked() || !gguf.DeviceKVState || !gguf.ModelContextWindow {
+		t.Fatalf("Gemma4 GGUF identity features = %+v, want native HIP generation", gguf)
+	}
+
+	for name, identity := range map[string]inference.ModelIdentity{
 		"bf16": {
 			Architecture: "gemma4_text",
 			QuantBits:    16,
@@ -581,7 +587,7 @@ func TestGemma4CapabilityReportEngineFeaturesFollowConfigLabels(t *testing.T) {
 	}
 }
 
-func TestHipLoadedGemma4Q4GenerateLinkedRejectsGGUFSource(t *testing.T) {
+func TestHipLoadedGemma4Q4GenerateLinkedAcceptsGGUFSource(t *testing.T) {
 	info := inference.ModelInfo{Architecture: "gemma4_text", QuantBits: 6, NumLayers: 35, HiddenSize: 1536}
 	if !hipLoadedGemma4Q4GenerateLinked(&hipLoadedModel{modelInfo: info, modelLabels: map[string]string{
 		"gemma4_size":       "E2B",
@@ -589,12 +595,67 @@ func TestHipLoadedGemma4Q4GenerateLinkedRejectsGGUFSource(t *testing.T) {
 	}}) {
 		t.Fatalf("Gemma4 declared E2B q6 safetensors source should be linked")
 	}
-	if hipLoadedGemma4Q4GenerateLinked(&hipLoadedModel{modelInfo: info, modelLabels: map[string]string{"format": " GGUF "}}) {
-		t.Fatalf("Gemma4 GGUF source must not claim linked MLX-affine generation")
+	if !hipLoadedGemma4Q4GenerateLinked(&hipLoadedModel{
+		modelPath:   "/models/unsloth-gemma-4-E2B-it-GGUF/gemma-4-E2B-it-Q4_K_M.gguf",
+		modelInfo:   info,
+		modelLabels: map[string]string{"gemma4_size": "E2B", "gemma4_quant_mode": "q4"},
+	}) {
+		t.Fatalf("Gemma4 GGUF path should use native HIP generation when size/quant labels are linked")
 	}
-	if hipLoadedGemma4Q4GenerateLinked(&hipLoadedModel{modelInfo: info, modelLabels: map[string]string{"gemma4_source_format": " GGUF "}}) {
-		t.Fatalf("Gemma4 GGUF source label must not claim linked MLX-affine generation")
+}
+
+func TestHipLoadedGemma4Q4GenerateLinkedRejectsUnintegratedMoE(t *testing.T) {
+	model := &hipLoadedModel{
+		modelInfo: inference.ModelInfo{Architecture: "gemma4", QuantBits: 4, NumLayers: 30, HiddenSize: 2816},
+		engineProfile: ROCmModelProfile{
+			Name:     "gemma4",
+			Family:   "gemma4",
+			Registry: rocmModelRegistryName,
+			Gemma4EngineFeatures: Gemma4EngineFeatures{
+				TextGenerate:    true,
+				MLXAffineDecode: true,
+			},
+		},
+		modelLabels: map[string]string{
+			"gemma4_size":             "26B-A4B",
+			"gemma4_quant_mode":       "q4",
+			"gemma4_enable_moe_block": "true",
+			"moe_text_runtime":        hipKernelStatusNotLinked,
+		},
 	}
+	core.AssertEqual(t, false, hipLoadedGemma4Q4GenerateLinked(model))
+	model.modelLabels["moe_text_runtime"] = hipKernelStatusLinked
+	core.AssertEqual(t, false, rocmGemma4LabelsVetoGenerateLinked(model.modelLabels))
+}
+
+func TestHipLoadedGemma4Q4GenerateLinkedAcceptsIntegratedMoEGGUF(t *testing.T) {
+	const (
+		hidden   = 32
+		experts  = 2
+		expertFF = 32
+	)
+	model := &hipLoadedModel{
+		driver:    &fakeHIPDriver{available: true},
+		modelPath: "/models/gemma-4-26b-a4b-q4_0.gguf",
+		modelInfo: inference.ModelInfo{Architecture: "gemma4", QuantBits: 4, NumLayers: 1, HiddenSize: hidden},
+		gemma4TextConfig: nativeGemma4TextConfig{
+			EnableMoEBlock: true, NumExperts: experts, TopKExperts: 1, MoEIntermediateSize: expertFF,
+		},
+		modelLabels: map[string]string{
+			"gemma4_source_format":    "gguf",
+			"gemma4_enable_moe_block": "true",
+			"moe_text_runtime":        hipKernelStatusNotLinked,
+		},
+		tensors: map[string]hipTensor{
+			"blk.0.ffn_gate_inp.weight": {pointer: 1, info: nativeTensorInfo{TypeName: "F32", Dimensions: []uint64{hidden, experts}, ByteSize: hidden * experts * 4}},
+		},
+		hostTensors: map[string]nativeTensorInfo{
+			"blk.0.ffn_gate_up_exps.weight": {Type: hipGGUFQ4_0TensorType, TypeName: "Q4_0", Dimensions: []uint64{hidden, 2 * expertFF, experts}},
+			"blk.0.ffn_down_exps.weight":    {Type: hipGGUFQ4_0TensorType, TypeName: "Q4_0", Dimensions: []uint64{expertFF, hidden, experts}},
+		},
+	}
+
+	core.AssertEqual(t, true, hipLoadedGemma4Q4GenerateLinked(model))
 }
 
 func TestHipLoadedGemma4Q4GenerateLinkedUsesEngineProfile(t *testing.T) {
@@ -656,15 +717,6 @@ func TestGemma4CapabilityReportGenericLinkedKernelsStillUseMatrix(t *testing.T) 
 		Reason:  "generic linked fixture",
 	}
 	for name, model := range map[string]inference.ModelIdentity{
-		"gguf": {
-			Architecture: "gemma4_text",
-			QuantBits:    6,
-			Labels: map[string]string{
-				"format":            " GGUF ",
-				"gemma4_size":       "E2B",
-				"gemma4_quant_mode": "q6",
-			},
-		},
 		"status_only": {
 			Architecture: "gemma4_text",
 			QuantBits:    6,
@@ -704,6 +756,41 @@ func TestGemma4CapabilityReportGenericLinkedKernelsStillUseMatrix(t *testing.T) 
 			benchmark.Labels["decode_kernel"] == hipKernelStatusLinked {
 			t.Fatalf("%s benchmark capability = %+v ok=%v, want benchmark without linked decode labels", name, benchmark, ok)
 		}
+	}
+}
+
+func TestGemma4CapabilityReportGGUFLinkedKernelsUseNativeHIP_Good(t *testing.T) {
+	kernelStatus := hipKernelStatus{
+		Decode:  hipKernelStatusLinked,
+		Prefill: hipKernelStatusLinked,
+		Reason:  "generic linked fixture",
+	}
+	model := inference.ModelIdentity{
+		Architecture: "gemma4_text",
+		QuantBits:    6,
+		Labels: map[string]string{
+			"format":            " GGUF ",
+			"gemma4_size":       "E2B",
+			"gemma4_quant_mode": "q6",
+		},
+	}
+	report := rocmCapabilityReport(nativeDeviceInfo{}, model, inference.AdapterIdentity{}, true, kernelStatus, rocmCapabilityReportOption{
+		ClassifyLinked:         true,
+		Gemma4Q4GenerateLinked: true,
+	})
+
+	if report.Labels["decode_kernel"] != hipKernelStatusLinked ||
+		report.Labels["prefill_kernel"] != hipKernelStatusLinked ||
+		report.Labels["gemma4_runtime"] != Gemma4RuntimeGGUF ||
+		report.Labels["gemma4_source_format"] != "gguf" ||
+		report.Labels["gemma4_generate_status"] != Gemma4GenerateLinked {
+		t.Fatalf("GGUF report labels = %+v, want native HIP GGUF linked kernel labels", report.Labels)
+	}
+	generate, ok := report.Capability(inference.CapabilityGenerate)
+	if !ok || generate.Status != inference.CapabilityStatusExperimental ||
+		generate.Labels["decode_kernel"] != hipKernelStatusLinked ||
+		generate.Labels["gemma4_runtime"] != Gemma4RuntimeGGUF {
+		t.Fatalf("generate capability = %+v ok=%v, want native HIP GGUF generation", generate, ok)
 	}
 }
 
@@ -928,8 +1015,8 @@ func TestROCmModelGemma4TextPromptSupportUsesLoadedMatrix(t *testing.T) {
 		},
 		tokenText: tokenText,
 	}}
-	if gguf.gemma4Q4TextPromptSupported() {
-		t.Fatalf("Gemma4 GGUF load-only model must not auto-route plain text into linked generation")
+	if !gguf.gemma4Q4TextPromptSupported() {
+		t.Fatalf("Gemma4 GGUF model should auto-route plain text into native HIP generation")
 	}
 	statusOnly := &rocmModel{native: &hipLoadedModel{
 		modelInfo: inference.ModelInfo{Architecture: "gemma4_text", QuantBits: 6, NumLayers: 64, HiddenSize: 4096},
@@ -979,8 +1066,8 @@ func TestHIPGemma4PackageBranchesUseLoadedMatrix(t *testing.T) {
 		},
 	}
 	results, err = kernels.BatchGenerate(context.Background(), gguf, []string{"tokens:1"}, inference.GenerateConfig{MaxTokens: 1})
-	if err == nil || strings.Contains(err.Error(), "layer count") {
-		t.Fatalf("GGUF batch = %+v err=%v, want fallback not-linked error instead of Gemma4 package config error", results, err)
+	if err == nil || !strings.Contains(err.Error(), "layer count") {
+		t.Fatalf("GGUF batch = %+v err=%v, want native HIP package config error", results, err)
 	}
 }
 
@@ -1016,23 +1103,38 @@ func TestHIPGemma4PackageForwardConfigUsesLoadedMatrix(t *testing.T) {
 		},
 	}
 	_, ok, err = gguf.loadedGemma4Q4PackageForwardConfig()
-	if ok || err != nil {
-		t.Fatalf("GGUF package config ok=%v err=%v, want not a linked package candidate", ok, err)
+	if !ok || err == nil || !strings.Contains(err.Error(), "layer count") {
+		t.Fatalf("GGUF package config ok=%v err=%v, want linked native HIP candidate with missing layer-count error", ok, err)
 	}
 }
 
-func TestROCmGGUFNativeLoadLabelsGemma4LoadOnly(t *testing.T) {
-	labels := rocmGGUFNativeLoadLabels(inference.ModelInfo{Architecture: "gemma4", QuantBits: 4}, "gemma-4-e2b-it-q4.gguf")
+func TestROCmGGUFNativeLoadLabelsGemma4Linked(t *testing.T) {
+	labels := rocmGGUFNativeLoadLabels(inference.ModelInfo{Architecture: "gemma4", QuantBits: 4}, "gemma-4-e2b-it-q4.gguf", gguf.Metadata{})
 	if labels["format"] != "gguf" ||
 		labels["gemma4_source_format"] != "gguf" ||
 		labels["gemma4_size"] != "E2B" ||
 		labels["gemma4_quant_mode"] != "q4" ||
-		labels["gemma4_generate_status"] != Gemma4GenerateLoadOnly {
-		t.Fatalf("labels = %+v, want Gemma4 GGUF load-only labels", labels)
+		labels["gemma4_generate_status"] != Gemma4GenerateLinked {
+		t.Fatalf("labels = %+v, want Gemma4 GGUF native HIP linked labels", labels)
 	}
 }
 
-func TestLoadModelGemma4GGUFForwardsLoadOnlyLabels(t *testing.T) {
+func TestROCmGGUFNativeLoadLabelsGemma4AssistantBackboneHidden_Good(t *testing.T) {
+	labels := rocmGGUFNativeLoadLabels(inference.ModelInfo{
+		Architecture: "gemma4_assistant",
+		NumLayers:    4,
+		HiddenSize:   256,
+		QuantBits:    8,
+		QuantGroup:   64,
+		VocabSize:    ProductionMTPAssistantTokenOrderingVocabSize,
+	}, "gemma-4-e2b-it-Q8_0-MTP.gguf", gguf.Metadata{EmbeddingLengthOut: 1536})
+
+	if labels["attached_drafter_assistant_backbone_hidden_size"] != "1536" {
+		t.Fatalf("labels = %+v, want GGUF assistant backbone hidden size from embedding_length_out", labels)
+	}
+}
+
+func TestLoadModelGemma4GGUFForwardsLinkedLabels(t *testing.T) {
 	runtime := &fakeNativeRuntime{available: true}
 	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(runtime).LoadModel(writeGemma4ModelPackGGUF(t)))
 	if err != nil {
@@ -1048,15 +1150,204 @@ func TestLoadModelGemma4GGUFForwardsLoadOnlyLabels(t *testing.T) {
 		runtime.loadConfig.ModelLabels["gemma4_source_format"] != "gguf" ||
 		runtime.loadConfig.ModelLabels["gemma4_size"] != "E2B" ||
 		runtime.loadConfig.ModelLabels["gemma4_quant_mode"] != "q4" ||
-		runtime.loadConfig.ModelLabels["gemma4_generate_status"] != Gemma4GenerateLoadOnly {
-		t.Fatalf("load labels = %+v, want Gemma4 GGUF load-only labels", runtime.loadConfig.ModelLabels)
+		runtime.loadConfig.ModelLabels["gemma4_generate_status"] != Gemma4GenerateLinked {
+		t.Fatalf("load labels = %+v, want Gemma4 GGUF native HIP linked labels", runtime.loadConfig.ModelLabels)
 	}
 	if !runtime.loadConfig.EngineProfile.Matched() ||
 		runtime.loadConfig.EngineProfile.Name != "gemma4" ||
-		runtime.loadConfig.EngineProfile.Gemma4EngineFeatures.GenerateLinked() ||
+		!runtime.loadConfig.EngineProfile.Gemma4EngineFeatures.GenerateLinked() ||
 		runtime.loadConfig.ModelLabels["engine_profile"] != "gemma4" ||
-		runtime.loadConfig.ModelLabels["engine_text_generate"] != "false" {
-		t.Fatalf("engine profile = %+v labels=%+v, want Gemma4 GGUF load-only registry profile", runtime.loadConfig.EngineProfile, runtime.loadConfig.ModelLabels)
+		runtime.loadConfig.ModelLabels["engine_text_generate"] != "true" {
+		t.Fatalf("engine profile = %+v labels=%+v, want Gemma4 GGUF native HIP registry profile", runtime.loadConfig.EngineProfile, runtime.loadConfig.ModelLabels)
+	}
+}
+
+func TestLoadModelGemma4GGUFInfersTensorGeometry_Good(t *testing.T) {
+	runtime := &fakeNativeRuntime{available: true}
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(runtime).LoadModel(writeGemma4ModelPackGGUFWithEmbeddingTensor(t)))
+	if err != nil {
+		t.Fatalf("LoadModel Gemma4 GGUF: %v", err)
+	}
+	defer model.Close()
+	if runtime.loadConfig.ModelInfo.VocabSize != productionLaneGemma4E2BVocabSize ||
+		runtime.loadConfig.ModelInfo.HiddenSize != productionLaneGemma4E2BHiddenSize {
+		t.Fatalf("load model info = %+v, want Gemma4 GGUF vocab and hidden size inferred from tensor directory", runtime.loadConfig.ModelInfo)
+	}
+	if !runtime.loadConfig.TiedWordEmbeddings {
+		t.Fatalf("TiedWordEmbeddings = false, want Gemma4 GGUF without output.weight to reuse token embeddings")
+	}
+}
+
+func TestLoadModelGemma4GGUFForwardsNativeTextConfig_Good(t *testing.T) {
+	runtime := &fakeNativeRuntime{available: true}
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(runtime).LoadModel(writeGemma4ModelPackGGUFWithEmbeddingTensor(t)))
+	if err != nil {
+		t.Fatalf("LoadModel Gemma4 GGUF: %v", err)
+	}
+	defer model.Close()
+	cfg := runtime.loadConfig.Gemma4TextConfig
+	if cfg.NumLayers != productionLaneGemma4E2BLayers ||
+		cfg.HeadDim != 256 ||
+		cfg.GlobalHeadDim != 512 ||
+		cfg.SlidingWindow != 512 ||
+		!cfg.KVSharedLayersSet ||
+		cfg.KVSharedLayers != 20 ||
+		cfg.HiddenSizePerLayerInput != 256 ||
+		cfg.FinalLogitSoftcap != 30 {
+		t.Fatalf("Gemma4 text config = %+v, want GGUF metadata-derived runtime config", cfg)
+	}
+	full := cfg.RoPEParameters["full_attention"]
+	sliding := cfg.RoPEParameters["sliding_attention"]
+	if full.RopeTheta != 1000000 ||
+		full.PartialRotaryFactor != 1 ||
+		sliding.RopeTheta != 10000 ||
+		sliding.PartialRotaryFactor != 1 {
+		t.Fatalf("Gemma4 RoPE params = %+v, want full/sliding GGUF RoPE metadata", cfg.RoPEParameters)
+	}
+}
+
+func TestNativeGemma4TextConfigFromGGUFMetadataAssistant_Good(t *testing.T) {
+	cfg := nativeGemma4TextConfigFromGGUFMetadata(gguf.Metadata{
+		Architecture:                 "gemma4-assistant",
+		BlockCount:                   4,
+		AttentionSlidingWindow:       512,
+		AttentionSharedKVLayers:      20,
+		AttentionSharedKVLayersSet:   true,
+		EmbeddingLengthPerLayerInput: 256,
+		AttentionKeyLength:           512,
+		AttentionValueLength:         512,
+		AttentionKeyLengthSWA:        256,
+		AttentionValueLengthSWA:      256,
+		RopeFreqBase:                 1000000,
+		RopeFreqBaseSWA:              10000,
+		RopeDimensionCount:           512,
+		RopeDimensionCountSWA:        256,
+	})
+	if cfg.NumLayers != 4 ||
+		cfg.HeadDim != 256 ||
+		cfg.GlobalHeadDim != 512 ||
+		cfg.SlidingWindow != 512 ||
+		!cfg.KVSharedLayersSet ||
+		cfg.KVSharedLayers != 20 ||
+		cfg.HiddenSizePerLayerInput != 256 {
+		t.Fatalf("Gemma4 assistant text config = %+v, want GGUF metadata-derived runtime config", cfg)
+	}
+	core.AssertEqual(t, []string{
+		"sliding_attention",
+		"sliding_attention",
+		"sliding_attention",
+		"full_attention",
+	}, cfg.LayerTypes)
+	full := cfg.RoPEParameters["full_attention"]
+	sliding := cfg.RoPEParameters["sliding_attention"]
+	if full.RopeTheta != 1000000 ||
+		full.PartialRotaryFactor != 1 ||
+		sliding.RopeTheta != 10000 ||
+		sliding.PartialRotaryFactor != 1 {
+		t.Fatalf("Gemma4 assistant RoPE params = %+v, want full/sliding GGUF RoPE metadata", cfg.RoPEParameters)
+	}
+}
+
+func TestNativeGemma4TextConfigFromGGUFMetadataExpandsSlidingPattern_Good(t *testing.T) {
+	cfg := nativeGemma4TextConfigFromGGUFMetadata(gguf.Metadata{
+		Architecture:                  "gemma4",
+		BlockCount:                    7,
+		AttentionSlidingWindowPattern: true,
+	})
+	core.AssertEqual(t, defaultGemma4SlidingWindowPattern, cfg.SlidingWindowPattern)
+	core.AssertEqual(t, []string{
+		"sliding_attention",
+		"sliding_attention",
+		"sliding_attention",
+		"sliding_attention",
+		"sliding_attention",
+		"full_attention",
+		"full_attention",
+	}, cfg.LayerTypes)
+	cfg = nativeGemma4TextConfigFromGGUFMetadata(gguf.Metadata{
+		Architecture:            "gemma4",
+		BlockCount:              2,
+		AttentionSlidingWindow:  1024,
+		AttentionKeyLength:      512,
+		AttentionKeyLengthSWA:   256,
+		AttentionValueLength:    512,
+		AttentionValueLengthSWA: 256,
+	})
+	core.AssertEqual(t, []string{"sliding_attention", "full_attention"}, cfg.LayerTypes)
+	cfg = nativeGemma4TextConfigFromGGUFMetadata(gguf.Metadata{
+		Architecture:            "gemma4",
+		BlockCount:              productionLaneGemma4E2BLayers,
+		AttentionSlidingWindow:  512,
+		AttentionKeyLength:      512,
+		AttentionKeyLengthSWA:   256,
+		AttentionValueLength:    512,
+		AttentionValueLengthSWA: 256,
+	})
+	core.AssertEqual(t, 5, cfg.SlidingWindowPattern)
+	core.AssertEqual(t, "full_attention", cfg.LayerTypes[4])
+	core.AssertEqual(t, "sliding_attention", cfg.LayerTypes[5])
+	cfg = nativeGemma4TextConfigFromGGUFMetadata(gguf.Metadata{
+		Architecture:            "gemma4",
+		BlockCount:              42,
+		AttentionSlidingWindow:  512,
+		AttentionKeyLength:      512,
+		AttentionKeyLengthSWA:   256,
+		AttentionValueLength:    512,
+		AttentionValueLengthSWA: 256,
+	})
+	core.AssertEqual(t, 6, cfg.SlidingWindowPattern)
+	core.AssertEqual(t, "full_attention", cfg.LayerTypes[5])
+	core.AssertEqual(t, "sliding_attention", cfg.LayerTypes[6])
+}
+
+func TestLoadModelGemma4GGUFNativeLoadSmoke_Ugly(t *testing.T) {
+	path := core.Getenv("ROCM_HIP_NATIVE_GGUF_SMOKE_MODEL")
+	if path == "" {
+		t.Skip("set ROCM_HIP_NATIVE_GGUF_SMOKE_MODEL to exercise real native HIP GGUF load")
+	}
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModel(path, inference.WithContextLen(2048)))
+	if err != nil {
+		t.Fatalf("LoadModel Gemma4 GGUF native: %v", err)
+	}
+	defer model.Close()
+	rocmLoaded, ok := model.(*rocmModel)
+	if !ok {
+		t.Fatalf("model = %T, want *rocmModel", model)
+	}
+	loaded, ok := rocmLoaded.native.(*hipLoadedModel)
+	if !ok {
+		t.Fatalf("native = %T, want *hipLoadedModel", rocmLoaded.native)
+	}
+	if loaded.modelInfo.HiddenSize <= 0 ||
+		loaded.modelInfo.VocabSize <= 0 ||
+		loaded.gemma4TextConfig.HeadDim <= 0 ||
+		loaded.gemma4TextConfig.GlobalHeadDim <= 0 ||
+		!loaded.gemma4TextConfig.KVSharedLayersSet ||
+		loaded.modelLabels["format"] != "gguf" {
+		t.Fatalf("loaded GGUF model info=%+v text=%+v labels=%+v, want native GGUF geometry and labels", loaded.modelInfo, loaded.gemma4TextConfig, loaded.modelLabels)
+	}
+}
+
+func TestLoadModelGemma4GGUFNativeGenerateSmoke_Ugly(t *testing.T) {
+	path := core.Getenv("ROCM_HIP_NATIVE_GGUF_GENERATE_MODEL")
+	if path == "" {
+		t.Skip("set ROCM_HIP_NATIVE_GGUF_GENERATE_MODEL to exercise real native HIP GGUF generation")
+	}
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModel(path, inference.WithContextLen(2048)))
+	if err != nil {
+		t.Fatalf("LoadModel Gemma4 GGUF native: %v", err)
+	}
+	defer model.Close()
+
+	tokenCount := 0
+	for range model.Generate(context.Background(), "tokens:2,10979,2", inference.WithMaxTokens(1), inference.WithTemperature(0)) {
+		tokenCount++
+	}
+	if err := resultError(model.Err()); err != nil {
+		t.Fatalf("Generate Gemma4 GGUF native: %v", err)
+	}
+	if tokenCount != 1 {
+		t.Fatalf("Generate emitted %d tokens, want 1", tokenCount)
 	}
 }
 
@@ -1097,7 +1388,7 @@ func TestLoadModelWithConfigRejectsPlannedKVMode(t *testing.T) {
 }
 
 func TestLoadModelGemma4GGUFHIPIdentityKeepsModelContext(t *testing.T) {
-	runtime := &gemma4LoadConfigHIPRuntime{available: true}
+	runtime := &fakeNativeRuntime{available: true}
 	path := writeGemma4ModelPackGGUF(t)
 	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(runtime).LoadModel(path))
 	if err != nil {
@@ -1113,8 +1404,8 @@ func TestLoadModelGemma4GGUFHIPIdentityKeepsModelContext(t *testing.T) {
 		report.Model.ContextLength != 131072 ||
 		report.Model.QuantType != "q4" ||
 		report.Model.Labels["gemma4_size"] != "E2B" ||
-		report.Model.Labels["gemma4_generate_status"] != Gemma4GenerateLoadOnly {
-		t.Fatalf("capability model identity = %+v, want loaded Gemma4 GGUF path, context, quant, and load-only labels", report.Model)
+		report.Model.Labels["gemma4_generate_status"] != Gemma4GenerateLinked {
+		t.Fatalf("capability model identity = %+v, want loaded Gemma4 GGUF path, context, quant, and native HIP labels", report.Model)
 	}
 }
 
@@ -1347,26 +1638,15 @@ func TestLoadModelGemma4GGUFDoesNotExposeLinkedCapabilities(t *testing.T) {
 	}
 }
 
-func TestLoadModelGemma4GGUFSkipsLinkedWarmup(t *testing.T) {
+func TestLoadModelGemma4GGUFLinkedWarmupRequiresHIPConfig(t *testing.T) {
 	runtime := &gemma4LoadConfigHIPRuntime{available: true}
-	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(runtime).LoadModel(writeGemma4ModelPackGGUF(t)))
-	if err != nil {
-		t.Fatalf("LoadModel Gemma4 GGUF: %v", err)
+	_, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(runtime).LoadModel(writeGemma4ModelPackGGUF(t)))
+	if err == nil || !strings.Contains(err.Error(), "prepare Gemma4 MLX affine forward config") {
+		t.Fatalf("LoadModel Gemma4 GGUF err = %v, want linked native HIP warmup error", err)
 	}
-	defer model.Close()
-	loaded, ok := model.(*rocmModel)
-	if !ok {
-		t.Fatalf("model = %T, want *rocmModel", model)
-	}
-	hipModel, ok := loaded.native.(*hipLoadedModel)
-	if !ok {
-		t.Fatalf("native = %T, want *hipLoadedModel", loaded.native)
-	}
-	if hipModel.q4ConfigOK {
-		t.Fatalf("Gemma4 GGUF load prepared linked q4 config, want load-only warmup skipped")
-	}
-	if hipLoadedGemma4Q4GenerateLinked(hipModel) {
-		t.Fatalf("Gemma4 GGUF loaded model must remain load-only")
+	if runtime.loadCfg.ModelLabels["gemma4_generate_status"] != Gemma4GenerateLinked ||
+		runtime.loadCfg.ModelLabels["gemma4_source_format"] != "gguf" {
+		t.Fatalf("load labels = %+v, want linked GGUF labels before warmup", runtime.loadCfg.ModelLabels)
 	}
 }
 

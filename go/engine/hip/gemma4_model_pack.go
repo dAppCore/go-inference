@@ -9,6 +9,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/engine/hip/internal/gguf"
 	modelgemma4 "dappco.re/go/inference/engine/hip/model/gemma4"
 )
 
@@ -190,8 +191,12 @@ func rocmApplyGemma4SizeQuantSupportLabels(labels map[string]string, model infer
 		return
 	}
 	assistant := isROCmGemma4AssistantArchitecture(model.Architecture)
-	size := rocmGemma4ModelPackSize(model, model.Path)
-	mode := rocmGemma4ModelPackQuantModeForPath(model, model.Path)
+	explicitStatus := rocmGemma4LabelValue(model.Labels, "gemma4_generate_status")
+	explicitRuntime := strings.TrimSpace(model.Labels["gemma4_runtime"])
+	explicitSupported := rocmGemma4LabelValue(model.Labels, "gemma4_pack_supported")
+	explicitRunnable := rocmGemma4LabelValue(model.Labels, "gemma4_runnable_on_card")
+	size := firstNonEmptyString(model.Labels["gemma4_size"], rocmGemma4ModelPackSize(model, model.Path))
+	mode := firstNonEmptyString(model.Labels["gemma4_quant_mode"], rocmGemma4ModelPackQuantModeForPath(model, model.Path))
 	qatEntry, qatEntryOK := modelgemma4.QATCollectionEntryForModelID(model.Path)
 	qatEntryOK = qatEntryOK && qatEntry.Assistant == assistant
 	if qatEntryOK {
@@ -203,6 +208,9 @@ func rocmApplyGemma4SizeQuantSupportLabels(labels map[string]string, model infer
 		}
 	} else {
 		mode = rocmGemma4NormalizeSizeQuantMode(size, mode)
+	}
+	if canonicalSize := rocmGemma4CanonicalSize(size); canonicalSize != "" {
+		size = canonicalSize
 	}
 	if size != "" {
 		labels["gemma4_size"] = size
@@ -233,8 +241,13 @@ func rocmApplyGemma4SizeQuantSupportLabels(labels map[string]string, model infer
 	}
 	if rocmGemma4ModelSourceFormatGGUF(model) {
 		support.Runtime = Gemma4RuntimeGGUF
-		support.GenerateStatus = Gemma4GenerateLoadOnly
 		labels["gemma4_source_format"] = "gguf"
+	}
+	if explicitRuntime != "" {
+		support.Runtime = explicitRuntime
+	}
+	if explicitStatus == Gemma4GenerateLinked || explicitStatus == Gemma4GenerateLoadOnly || explicitStatus == Gemma4GeneratePlannedOnly {
+		support.GenerateStatus = explicitStatus
 	}
 	sizeSupport, _ := Gemma4SizeQuantSupportBySize(size)
 	if assistant {
@@ -244,17 +257,25 @@ func rocmApplyGemma4SizeQuantSupportLabels(labels map[string]string, model infer
 		sizeSupport.RunnableOnCard = qatEntry.RunnableOnCard
 		labels["gemma4_qat_collection"] = qatEntry.CollectionID
 	}
-	labels["gemma4_pack_supported"] = "true"
+	if explicitSupported == "false" {
+		labels["gemma4_pack_supported"] = "false"
+	} else {
+		labels["gemma4_pack_supported"] = "true"
+	}
 	labels["gemma4_runtime"] = support.Runtime
 	labels["gemma4_generate_status"] = support.GenerateStatus
-	labels["gemma4_runnable_on_card"] = core.Sprintf("%t", sizeSupport.RunnableOnCard)
+	if explicitRunnable == "false" {
+		labels["gemma4_runnable_on_card"] = "false"
+	} else {
+		labels["gemma4_runnable_on_card"] = core.Sprintf("%t", sizeSupport.RunnableOnCard)
+	}
 }
 
 func rocmGemma4SupportMatrixGenerateLinked(model inference.ModelIdentity) bool {
 	if !isROCmGemma4Architecture(model.Architecture) {
 		return false
 	}
-	if rocmGemma4ModelSourceFormatGGUF(model) || rocmGemma4LabelsVetoGenerateLinked(model.Labels) {
+	if rocmGemma4LabelsVetoGenerateLinked(model.Labels) {
 		return false
 	}
 	size := rocmGemma4ModelPackSize(model, model.Path)
@@ -285,8 +306,16 @@ func rocmGemma4ModelSourceFormatGGUF(model inference.ModelIdentity) bool {
 
 func rocmGemma4LabelsVetoGenerateLinked(labels map[string]string) bool {
 	status := rocmGemma4LabelValue(labels, "gemma4_generate_status")
+	// The parallelised MoE router and GGUF expert kernels are now linked in
+	// this engine, so an MoE block defaults to linked. Only an explicit
+	// not-linked/planned runtime status still vetoes generate-linked; an unset
+	// moe_text_runtime label no longer implies an unintegrated MoE runtime.
+	moeRuntime := rocmGemma4LabelValue(labels, "moe_text_runtime")
+	moeUnlinked := rocmGemma4LabelValue(labels, "gemma4_enable_moe_block") == "true" &&
+		moeRuntime != "" && moeRuntime != hipKernelStatusLinked
 	return rocmGemma4LabelValue(labels, "gemma4_pack_supported") == "false" ||
 		rocmGemma4LabelValue(labels, "gemma4_runnable_on_card") == "false" ||
+		moeUnlinked ||
 		status == Gemma4GenerateLoadOnly ||
 		status == Gemma4GeneratePlannedOnly
 }
@@ -352,11 +381,10 @@ func rocmGemma4ModelInfoIdentity(info inference.ModelInfo, path string) inferenc
 	})
 }
 
-func rocmGGUFNativeLoadLabels(info inference.ModelInfo, path string) map[string]string {
+func rocmGGUFNativeLoadLabels(info inference.ModelInfo, path string, metadata gguf.Metadata) map[string]string {
 	labels := map[string]string{"format": "gguf"}
 	if isROCmGemma4Architecture(info.Architecture) {
 		labels["gemma4_source_format"] = "gguf"
-		labels["gemma4_generate_status"] = Gemma4GenerateLoadOnly
 		identity := inference.ModelIdentity{
 			Architecture: info.Architecture,
 			NumLayers:    info.NumLayers,
@@ -370,6 +398,23 @@ func rocmGGUFNativeLoadLabels(info inference.ModelInfo, path string) map[string]
 		}
 		if mode := rocmGemma4ModelPackQuantModeForPath(identity, path); mode != "" {
 			labels["gemma4_quant_mode"] = mode
+		}
+		identity.Path = path
+		identity.Labels = labels
+		if rocmGemma4SupportMatrixGenerateLinked(identity) {
+			labels["gemma4_generate_status"] = Gemma4GenerateLinked
+		} else {
+			labels["gemma4_generate_status"] = Gemma4GenerateLoadOnly
+		}
+	}
+	if isROCmGemma4AssistantArchitecture(info.Architecture) && metadata.EmbeddingLengthOut > 0 {
+		var contradictsOfficial bool
+		labels, contradictsOfficial = modelgemma4.ApplyAssistantConfigLabels(labels, modelgemma4.AssistantConfig{
+			BackboneHiddenSize: int(metadata.EmbeddingLengthOut),
+		})
+		if contradictsOfficial {
+			labels["attached_drafter_official_pair_verified"] = "false"
+			labels["attached_drafter_gemma4_family_pair_verified"] = "false"
 		}
 	}
 	return labels
