@@ -110,7 +110,7 @@ traffic.
 | 13 | Llama4 text | TEMPLATE-EXISTS | `lane/moe-family` landed | One sparse text lane; vision is a separate TOWER-WORK lane. |
 | 14 | DBRX / JetMoE / OLMoE / GraniteMoE / Qwen MoE | TEMPLATE-EXISTS | stable neutral MoE router/expert interface | Dispatch one family per lane; router score, top-k normalisation and shared experts are never assumed equal. |
 | 15 | Jamba / Zamba / Falcon-H1 / Nemotron-H / OLMo-hybrid | TEMPLATE-EXISTS | mixer scheduling and recurrent-state ABI frozen | One hybrid family per lane, each with prefill/decode state goldens. |
-| 16 | Mamba / Falcon-Mamba | TEMPLATE-EXISTS | Mamba2 compatibility audit | One lane only if Mamba1 discretisation and convolution state fit the existing mixer API. |
+| 16 | Mamba / Falcon-Mamba | TEMPLATE-EXISTS | [Mamba2 compatibility audit](mamba1-mamba2-compatibility-audit.md): incompatible | Mamba1 needs a channel-wise selective scan and x/dt projection primitive before a model lane. |
 | 17 | RecurrentGemma | TEMPLATE-EXISTS | recurrent cache/state fixture format | One lane: recurrent gated linear unit plus local attention schedule. |
 | 18 | GLM / GLM4 dense, Exaone4, Ernie4.5 dense, HunYuan dense | DIRECT | family-specific public fixture and tokenizer licences | Independent one-family lanes; demand justified by regional ecosystem presence, not presumed Llama aliases. |
 | 19 | MPT / StableLM / Persimmon / SmolLM3 / Solar / Apertus / Arcee / Nemotron dense | DIRECT | none beyond quirks below | Opportunistic one-family lanes, ordered by a refreshed Hub query when a worker is free. |
