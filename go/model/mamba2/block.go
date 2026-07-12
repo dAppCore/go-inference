@@ -76,11 +76,12 @@ func matNTInto(out, in, w []float32, M, K, N int) []float32 {
 }
 
 // BlockScratch holds the reusable projection-output buffers for BlockForwardScratchF32 — the in-proj
-// [L,projDim] and the out-proj [L,D]. A caller stepping one sequence (a decode session — single-goroutine)
-// keeps one Scratch and passes it every token so the two projection GEMMs write into resident buffers
-// instead of allocating. NEVER share a Scratch across concurrently-stepped sessions: the buffers are
-// mutable and unsynchronised (they mirror the recurrent conv/SSM state's ownership — per-session, threaded,
-// never on the shared weights). Buffers grow to fit and are reused thereafter.
+// [L,projDim] and the out-proj [L,D]. BlockForwardScratchNoProjF32 uses the same Scratch but leaves the
+// out-proj buffer untouched (it stops one GEMM short). A caller stepping one sequence (a decode session —
+// single-goroutine) keeps one Scratch and passes it every token so the projection GEMMs write into
+// resident buffers instead of allocating. NEVER share a Scratch across concurrently-stepped sessions: the
+// buffers are mutable and unsynchronised (they mirror the recurrent conv/SSM state's ownership —
+// per-session, threaded, never on the shared weights). Buffers grow to fit and are reused thereafter.
 type BlockScratch struct {
 	proj, out []float32
 }
@@ -97,26 +98,53 @@ func BlockForwardF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, p
 // Returns out [L, D] and the advanced (newConv, newSSM) for the next chunk. When sc is non-nil the in/out
 // projection outputs write into its buffers (reused across calls); nil ⇒ each allocates fresh (the
 // BlockForwardF32 path). The recurrent state (newConv/newSSM) is always freshly allocated — carried
-// information, not scratch.
+// information, not scratch. It is BlockForwardScratchNoProjF32 plus the out_proj GEMM — the projection is
+// split out so the composed session can instead fold it into the FFN-tail command buffer (see
+// composed.projMixer / ResidualNormMLPProjDevice).
 func BlockForwardScratchF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, priorSSM []float32, L, D int, sc *BlockScratch) (out, newConv, newSSM []float32, err error) {
 	if sc == nil {
 		sc = &BlockScratch{} // throwaway: nil buffers ⇒ both projections allocate, the legacy path
 	}
+	gated, dInner, newConv, newSSM, err := BlockForwardScratchNoProjF32(x, w, cfg, priorConv, priorSSM, L, D, sc)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if len(w.OutProj) != D*dInner {
+		return nil, nil, nil, core.NewError("mamba2.BlockForwardF32: x/InProj/OutProj size mismatch")
+	}
+	out, err = projMatMulInto(sc.out, gated, w.OutProj, L, dInner, D)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	sc.out = out
+	return out, newConv, newSSM, nil
+}
+
+// BlockForwardScratchNoProjF32 is BlockForwardScratchF32 up to but NOT including out_proj: it returns the
+// gated pre-projection hidden [L, dInner] (per-token gate-before-norm RMSNorm — see the doc note below),
+// dInner itself, and the advanced (newConv, newSSM). The composed session uses it to fold out_proj into
+// the FFN-tail command buffer (composed.projMixer); BlockForwardScratchF32 wraps it with the out_proj
+// GEMM. The state advances identically — only the final projection is deferred to the caller. sc's
+// in-proj buffer is reused as in the wrapper; nil ⇒ it allocates fresh.
+func BlockForwardScratchNoProjF32(x []float32, w *BlockWeights, cfg BlockConfig, priorConv, priorSSM []float32, L, D int, sc *BlockScratch) (gated []float32, dInner int, newConv, newSSM []float32, err error) {
+	if sc == nil {
+		sc = &BlockScratch{} // throwaway: nil buffers ⇒ the in-proj allocates, the legacy path
+	}
 	if w == nil {
-		return nil, nil, nil, core.NewError("mamba2.BlockForwardF32: nil weights")
+		return nil, 0, nil, nil, core.NewError("mamba2.BlockForwardF32: nil weights")
 	}
 	H, P, N, G, K := cfg.NumHeads, cfg.HeadDim, cfg.StateDim, cfg.NumGroups, cfg.ConvKernel
 	dInner, convDim, projDim := cfg.dInner(), cfg.convDim(), cfg.projDim()
-	if len(x) != L*D || len(w.InProj) != projDim*D || len(w.OutProj) != D*dInner {
-		return nil, nil, nil, core.NewError("mamba2.BlockForwardF32: x/InProj/OutProj size mismatch")
+	if len(x) != L*D || len(w.InProj) != projDim*D {
+		return nil, 0, nil, nil, core.NewError("mamba2.BlockForwardF32: x/InProj size mismatch")
 	}
 	if H%G != 0 {
-		return nil, nil, nil, core.NewError("mamba2.BlockForwardF32: num_heads must be a multiple of num_groups")
+		return nil, 0, nil, nil, core.NewError("mamba2.BlockForwardF32: num_heads must be a multiple of num_groups")
 	}
 
 	proj, err := projMatMulInto(sc.proj, x, w.InProj, L, D, projDim) // [L, projDim] (device GEMM when a backend is wired)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, 0, nil, nil, err
 	}
 	sc.proj = proj
 	// split z | xBC | dt along the channel axis. One backing slab, three non-overlapping capped
@@ -136,7 +164,7 @@ func BlockForwardScratchF32(x []float32, w *BlockWeights, cfg BlockConfig, prior
 
 	convOut, newConv, err := CausalConv1dF32(xBC, w.ConvWeight, w.ConvBias, priorConv, L, convDim, K)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, 0, nil, nil, err
 	}
 	for i := range convOut { // SiLU activation after the conv
 		convOut[i] = float32(silu(float64(convOut[i])))
@@ -181,7 +209,7 @@ func BlockForwardScratchF32(x []float32, w *BlockWeights, cfg BlockConfig, prior
 
 	y, newSSM, err := SSDScanF32(xHeads, dt, a, bHeads, cHeads, w.D, priorSSM, L, H, P, N)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, 0, nil, nil, err
 	}
 
 	// gated RMSNorm (HF/state-spaces MambaRMSNormGated): the gate is applied BEFORE the norm —
@@ -191,7 +219,7 @@ func BlockForwardScratchF32(x []float32, w *BlockWeights, cfg BlockConfig, prior
 	// The scan output y is written in place as the gated result: within each row all of y's row is read
 	// into g (f64) before that row is overwritten, and y is dead after this stage, so reusing it is
 	// bit-identical and drops the gated buffer.
-	gated := y
+	gated = y
 	g := make([]float64, dInner)
 	for t := range L {
 		yr := y[t*dInner : (t+1)*dInner]
@@ -211,10 +239,5 @@ func BlockForwardScratchF32(x []float32, w *BlockWeights, cfg BlockConfig, prior
 			gated[t*dInner+i] = float32(normed)
 		}
 	}
-	out, err = projMatMulInto(sc.out, gated, w.OutProj, L, dInner, D)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	sc.out = out
-	return out, newConv, newSSM, nil
+	return gated, dInner, newConv, newSSM, nil
 }
