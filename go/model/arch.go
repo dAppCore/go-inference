@@ -29,6 +29,7 @@ const (
 	QKNone      QKNormalization = ""
 	QKLayerNorm QKNormalization = "layer_norm"
 	QKRMSNorm   QKNormalization = "rms_norm"
+	QKL2Norm    QKNormalization = "l2_norm"
 )
 
 // LayerSpec declares one decode layer's structure, backend-agnostic.
@@ -100,6 +101,9 @@ const (
 	// scaled per-expert). gemma4's MoE and the metal router's shipping path, and the
 	// default for any MoE arch whose config leaves the gating unset.
 	MoEGatingSoftmax MoEGating = "softmax"
+	// MoEGatingSigmoid applies sigmoid independently to the selected top-k router
+	// logits. Llama 4 declares this policy and does not renormalise the scores.
+	MoEGatingSigmoid MoEGating = "sigmoid"
 )
 
 // resolveMoEGating defaults an unset gating to MoEGatingSoftmax — the only router

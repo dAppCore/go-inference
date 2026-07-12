@@ -2,7 +2,11 @@
 
 package composed
 
-import "math"
+import (
+	"math"
+
+	"dappco.re/go/inference/model"
+)
 
 // moe.go is the Qwen 3.6 (qwen3_5_moe) Mixture-of-Experts feed-forward — the MoE variant of the layer's
 // FFN slot. A router scores the experts; the top-k are selected and combined by their softmax weights —
@@ -27,6 +31,7 @@ type MoEMLP struct {
 	SharedGate   []float32  // [D] shared_expert_gate.weight; nil ⇒ shared added ungated
 	TopK         int
 	NormTopKProb bool // renormalise the top-k router weights over the selection (reference default true)
+	Gating       model.MoEGating
 }
 
 // swigluExpertInto runs one SwiGLU expert over a single token xt [D], writing the [D] result
@@ -135,16 +140,24 @@ func (m *MoEMLP) routeInto(xt []float32, D int, probs []float64, idx []int) ([]i
 			maxL = acc
 		}
 	}
-	for e := range nE {
-		probs[e] = math.Exp(probs[e] - maxL)
+	if m.Gating == model.MoEGatingSigmoid {
+		for e := range nE {
+			probs[e] = 1 / (1 + math.Exp(-probs[e]))
+		}
+	} else {
+		for e := range nE {
+			probs[e] = math.Exp(probs[e] - maxL)
+		}
 	}
 	sel := topKInto(probs, m.TopK, idx)
-	var denom float64
+	denom := float64(1)
 	if m.NormTopKProb {
+		denom = 0
 		for _, e := range sel {
 			denom += probs[e]
 		}
-	} else {
+	} else if m.Gating != model.MoEGatingSigmoid {
+		denom = 0
 		for e := range nE {
 			denom += probs[e]
 		}

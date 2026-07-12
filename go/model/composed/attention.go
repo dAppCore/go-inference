@@ -104,6 +104,18 @@ func rmsNormHead(x, w []float32, eps float32) {
 	}
 }
 
+// l2NormHead applies Llama 4's non-parametric per-head normalisation.
+func l2NormHead(x []float32, eps float32) {
+	var ss float64
+	for _, value := range x {
+		ss += float64(value) * float64(value)
+	}
+	inv := 1 / math.Sqrt(ss/float64(len(x))+float64(eps))
+	for i := range x {
+		x[i] = float32(float64(x[i]) * inv)
+	}
+}
+
 // layerNormHead applies Cohere's learned per-head LayerNorm. Unlike RMSNorm it
 // centres each head before variance normalisation.
 func layerNormHead(x, w []float32, eps float32) {
@@ -262,7 +274,9 @@ func (m *attnMixer) continueFromQKV(qRaw, k, v []float32, L, D int, st attnState
 	for t := range L {
 		for hd := range H {
 			row := q[t*H*HD+hd*HD : t*H*HD+hd*HD+HD]
-			if cfg.QKNormalization == model.QKLayerNorm {
+			if cfg.QKNormalization == model.QKL2Norm {
+				l2NormHead(row, cfg.NormEps)
+			} else if cfg.QKNormalization == model.QKLayerNorm {
 				layerNormHead(row, m.w.QNorm, cfg.NormEps)
 			} else {
 				rmsNormHead(row, m.w.QNorm, cfg.NormEps)
@@ -271,7 +285,9 @@ func (m *attnMixer) continueFromQKV(qRaw, k, v []float32, L, D int, st attnState
 		}
 		for hd := range KVH {
 			row := k[t*KVH*HD+hd*HD : t*KVH*HD+hd*HD+HD]
-			if cfg.QKNormalization == model.QKLayerNorm {
+			if cfg.QKNormalization == model.QKL2Norm {
+				l2NormHead(row, cfg.NormEps)
+			} else if cfg.QKNormalization == model.QKLayerNorm {
 				layerNormHead(row, m.w.KNorm, cfg.NormEps)
 			} else {
 				rmsNormHead(row, m.w.KNorm, cfg.NormEps)
