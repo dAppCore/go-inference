@@ -41,6 +41,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	policyPath := fs.String("policy", "", "outbound policy file (JSON): deployment-owned redact/refuse rules on model OUTPUT (term/pattern matches); unset disables the layer; a load failure is fatal at boot (see serving/policy)")
 	stateStorePath := fs.String("state-store", "", "conversation state store file for durable per-project state; unset = conversations held in RAM for the life of the serve process (no per-turn disk round-trip)")
 	nativeBackend := fs.Bool("native", false, "serve via the no-cgo native token-loop contract (the default go-inference metal engine already is native)")
+	modelsConfig := fs.String("models-config", "", "multi-model serving config (JSON): several models with aliases and named profiles, held resident under a memory ceiling with LRU + idle-TTL eviction; -model becomes the pinned default; empty = single-model serve")
 	fs.Usage = func() {
 		name := cliName()
 		core.WriteString(stderr, core.Sprintf("Usage: %s serve [--model <path>] [flags]\n", name))
@@ -113,10 +114,27 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		core.Print(stderr, "%s serve: fresh admin token generated at %s — reveal with `%s serve --print-admin-token`", cliName(), tokenPath, cliName())
 	}
 
+	// Multi-model config — parsed up front so a malformed file fails before the
+	// listener binds. Empty leaves Models nil, i.e. the single-model serve path.
+	var extraModels []serving.ModelSpec
+	var mmOpts serving.MultiModelOptions
+	if core.Trim(*modelsConfig) != "" {
+		specs, opts, cfgErr := serving.LoadModelsConfig(*modelsConfig)
+		if cfgErr != nil {
+			core.Print(stderr, "%s serve: %v", cliName(), cfgErr)
+			return 1
+		}
+		extraModels, mmOpts = specs, opts
+	}
+
 	err = serving.RunServe(ctx, serving.ServeConfig{
 		Addr:               *addr,
 		ModelPath:          *modelPath,
 		ContextLen:         *contextLen,
+		Models:             extraModels,
+		MemoryCeiling:      mmOpts.MemoryCeiling,
+		IdleTTL:            mmOpts.IdleTTL,
+		SweepInterval:      mmOpts.SweepInterval,
 		DraftPath:          *draftPath,
 		DraftDetect:        *draftDetect,
 		DraftBlock:         *draftBlock,
