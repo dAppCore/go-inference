@@ -2,7 +2,11 @@
 
 package gguf
 
-import "testing"
+import (
+	"testing"
+
+	basegguf "dappco.re/go/inference/model/gguf"
+)
 
 // gemma4TestTokenizer is a compact tokenizer.json exercising every token-type
 // class: control/special added tokens (ids 0-5), one USER_DEFINED non-special
@@ -27,7 +31,7 @@ const gemma4TestTokenizer = `{
   }
 }`
 
-func gemma4TokenizerEntry(t *testing.T, entries []MetadataEntry, key string) MetadataEntry {
+func gemma4TokenizerEntry(t *testing.T, entries []basegguf.MetadataEntry, key string) basegguf.MetadataEntry {
 	t.Helper()
 	for _, e := range entries {
 		if e.Key == key {
@@ -35,7 +39,7 @@ func gemma4TokenizerEntry(t *testing.T, entries []MetadataEntry, key string) Met
 		}
 	}
 	t.Fatalf("tokenizer key %q not found", key)
-	return MetadataEntry{}
+	return basegguf.MetadataEntry{}
 }
 
 // TestGemma4Tokenizer_gemma4Tokenizer_Tokens checks the token list is

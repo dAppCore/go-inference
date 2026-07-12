@@ -2,7 +2,10 @@
 
 package gguf
 
-import core "dappco.re/go"
+import (
+	core "dappco.re/go"
+	basegguf "dappco.re/go/inference/model/gguf"
+)
 
 // gemma4Arch is the GGUF general.architecture value (and the metadata key
 // prefix) llama.cpp dispatches the gemma-4 text graph on.
@@ -56,7 +59,7 @@ type gemma4Config struct {
 //
 // The tokenizer.ggml.* set is built separately (gemma4Tokenizer); this covers
 // the architecture hyperparameters only.
-func gemma4Metadata(configJSON []byte, feedForward []int32, fileType uint32, modelName string) ([]MetadataEntry, error) {
+func gemma4Metadata(configJSON []byte, feedForward []int32, fileType uint32, modelName string) ([]basegguf.MetadataEntry, error) {
 	var config gemma4Config
 	if r := core.JSONUnmarshal(configJSON, &config); !r.OK {
 		return nil, core.E("gemma4Metadata", "parse config.json", r.Err())
@@ -79,27 +82,27 @@ func gemma4Metadata(configJSON []byte, feedForward []int32, fileType uint32, mod
 		pattern[i] = kind == "sliding_attention"
 	}
 
-	u32 := func(key string, v int) MetadataEntry {
-		return MetadataEntry{Key: key, ValueType: ValueTypeUint32, Value: uint32(v)}
+	u32 := func(key string, v int) basegguf.MetadataEntry {
+		return basegguf.MetadataEntry{Key: key, ValueType: basegguf.ValueTypeUint32, Value: uint32(v)}
 	}
-	f32 := func(key string, v float32) MetadataEntry {
-		return MetadataEntry{Key: key, ValueType: ValueTypeFloat32, Value: v}
+	f32 := func(key string, v float32) basegguf.MetadataEntry {
+		return basegguf.MetadataEntry{Key: key, ValueType: basegguf.ValueTypeFloat32, Value: v}
 	}
 
-	metadata := []MetadataEntry{
-		{Key: "general.architecture", ValueType: ValueTypeString, Value: gemma4Arch},
-		{Key: "general.type", ValueType: ValueTypeString, Value: "model"},
-		{Key: "general.quantization_version", ValueType: ValueTypeUint32, Value: uint32(2)},
-		{Key: "general.file_type", ValueType: ValueTypeUint32, Value: fileType},
+	metadata := []basegguf.MetadataEntry{
+		{Key: "general.architecture", ValueType: basegguf.ValueTypeString, Value: gemma4Arch},
+		{Key: "general.type", ValueType: basegguf.ValueTypeString, Value: "model"},
+		{Key: "general.quantization_version", ValueType: basegguf.ValueTypeUint32, Value: uint32(2)},
+		{Key: "general.file_type", ValueType: basegguf.ValueTypeUint32, Value: fileType},
 	}
 	if modelName != "" {
-		metadata = append(metadata, MetadataEntry{Key: "general.name", ValueType: ValueTypeString, Value: modelName})
+		metadata = append(metadata, basegguf.MetadataEntry{Key: "general.name", ValueType: basegguf.ValueTypeString, Value: modelName})
 	}
 	metadata = append(metadata,
 		u32(gemma4Arch+".block_count", text.NumHiddenLayers),
 		u32(gemma4Arch+".context_length", text.MaxPositionEmbeddings),
 		u32(gemma4Arch+".embedding_length", text.HiddenSize),
-		MetadataEntry{Key: gemma4Arch + ".feed_forward_length", ValueType: ValueTypeArray, Value: feedForward},
+		basegguf.MetadataEntry{Key: gemma4Arch + ".feed_forward_length", ValueType: basegguf.ValueTypeArray, Value: feedForward},
 		u32(gemma4Arch+".attention.head_count", text.NumAttentionHeads),
 		u32(gemma4Arch+".attention.head_count_kv", text.NumKeyValueHeads),
 		f32(gemma4Arch+".rope.freq_base", text.RopeParameters.FullAttention.RopeTheta),
@@ -111,7 +114,7 @@ func gemma4Metadata(configJSON []byte, feedForward []int32, fileType uint32, mod
 		u32(gemma4Arch+".attention.sliding_window", text.SlidingWindow),
 		u32(gemma4Arch+".attention.shared_kv_layers", text.NumKVSharedLayers),
 		u32(gemma4Arch+".embedding_length_per_layer_input", text.HiddenSizePerLayerInput),
-		MetadataEntry{Key: gemma4Arch + ".attention.sliding_window_pattern", ValueType: ValueTypeArray, Value: pattern},
+		basegguf.MetadataEntry{Key: gemma4Arch + ".attention.sliding_window_pattern", ValueType: basegguf.ValueTypeArray, Value: pattern},
 		u32(gemma4Arch+".attention.key_length_swa", text.HeadDim),
 		u32(gemma4Arch+".attention.value_length_swa", text.HeadDim),
 		u32(gemma4Arch+".rope.dimension_count", text.GlobalHeadDim),
