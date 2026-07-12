@@ -315,3 +315,158 @@ func TestComposedGatedDeltaProjFuseDeviceVsHost(t *testing.T) {
 	}
 	t.Logf("composed gated-delta out_proj+FFN-tail fuse: %d fused-CB call(s); device matches host within f32 tol over %d logits", calls, len(dev))
 }
+
+// TestComposedResidualNormMLPProjAttnInputFuseDeviceVsHost exercises the input-side mirror of the o_proj
+// fuse: layer 0's proj-fused tail command buffer additionally folds in layer 1's (a full-attention mixer)
+// input RMSNorm + q/k/v projections — the symmetric collapse to TestComposedResidualNormMLPProjFuseDeviceVsHost.
+// A call-counter around the hook asserts the input-fuse actually fired; the full 2-layer forward's hiddens
+// must still match a pure-host run within f32 tolerance. Both layers share D=512, FF=2048 (L·D·FF =
+// 3,145,728 ≥ 1<<20 opens layer 0's proj-fused tail; the input-fuse rides free whatever layer 1's own q/k/v
+// shape).
+func TestComposedResidualNormMLPProjAttnInputFuseDeviceVsHost(t *testing.T) {
+	if composed.ResidualNormMLPProjAttnInputDevice == nil {
+		t.Fatal("native init did not wire composed.ResidualNormMLPProjAttnInputDevice")
+	}
+	const D, FF, vocab, heads, hd = 512, 2048, 4096, 4, 128
+	newAttnLayer := func(seed int) composed.Layer {
+		return composed.Layer{
+			InputNorm:    cbSyn(D, seed),
+			PostAttnNorm: cbSyn(D, seed+1),
+			MLP:          &composed.MLP{Gate: cbSyn(FF*D, seed+2), Up: cbSyn(FF*D, seed+3), Down: cbSyn(D*FF, seed+4), FF: FF},
+			Mixer: composed.NewAttnMixer(&composed.AttnWeights{
+				QProj: cbSyn(heads*hd*D, seed+5), KProj: cbSyn(heads*hd*D, seed+6),
+				VProj: cbSyn(heads*hd*D, seed+7), OProj: cbSyn(D*heads*hd, seed+8),
+				QNorm: cbSyn(hd, seed+9), KNorm: cbSyn(hd, seed+10),
+			}, composed.AttnConfig{Heads: heads, KVHeads: heads, HeadDim: hd, RotaryDim: hd / 2, RopeTheta: 1e6, NormEps: 1e-6}),
+		}
+	}
+	m := &composed.ComposedModel{
+		Embed: cbSyn(vocab*D, 1), NormF: cbSyn(D, 2), D: D, Vocab: vocab, Eps: 1e-6,
+		Layers: []composed.Layer{newAttnLayer(20), newAttnLayer(40)},
+	}
+	tokens := []int32{5, 9, 21}
+
+	calls := 0
+	saved := composed.ResidualNormMLPProjAttnInputDevice
+	composed.ResidualNormMLPProjAttnInputDevice = func(
+		mixerHidden, projW, h, normW, gate, up, down []float32, L, D, mixCols, FF int, eps float32,
+		nextNormW, nextQW, nextKW, nextVW []float32, nextQCols, nextKVCols int,
+	) ([]float32, []float32, []float32, []float32, error) {
+		calls++
+		return ResidualNormMLPProjAttnInputDevice(mixerHidden, projW, h, normW, gate, up, down, L, D, mixCols, FF, eps, nextNormW, nextQW, nextKW, nextVW, nextQCols, nextKVCols)
+	}
+	dev, err := composed.NewSession(m).Forward(tokens)
+	composed.ResidualNormMLPProjAttnInputDevice = saved
+	if err != nil {
+		t.Fatalf("device (input-fused) forward: %v", err)
+	}
+	if calls == 0 {
+		t.Fatal("attn input-fuse hook never engaged — layer 1 not seen as a full-attention next mixer?")
+	}
+
+	savedInput, savedProjTail, savedTail, savedProj, savedMLP, savedFuse :=
+		composed.ResidualNormMLPProjAttnInputDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice
+	composed.ResidualNormMLPProjAttnInputDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice =
+		nil, nil, nil, nil, nil, nil
+	host, herr := composed.NewSession(m).Forward(tokens)
+	composed.ResidualNormMLPProjAttnInputDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice =
+		savedInput, savedProjTail, savedTail, savedProj, savedMLP, savedFuse
+	if herr != nil {
+		t.Fatalf("host forward: %v", herr)
+	}
+	if len(dev) != len(host) {
+		t.Fatalf("length: device %d host %d", len(dev), len(host))
+	}
+	for i := range dev {
+		if math.Abs(float64(dev[i]-host[i])) > 1e-2*(1+math.Abs(float64(host[i]))) {
+			t.Fatalf("hidden[%d]: device %v host %v (attn input-fuse diverged)", i, dev[i], host[i])
+		}
+	}
+	t.Logf("composed proj-tail+attn-input fuse: %d fused-CB call(s); device matches host within f32 tol over %d values", calls, len(dev))
+}
+
+// TestComposedResidualNormMLPProjGatedDeltaInputFuseDeviceVsHost exercises the input-side mirror of the
+// o_proj fuse for a GATED-DELTA next layer: layer 0's (full-attention) proj-fused tail command buffer
+// additionally folds in layer 1's (a gated-delta mixer) input RMSNorm + in_proj_qkv/z/a/b. A call-counter
+// around the hook asserts the input-fuse actually fired; the full 2-layer forward's hiddens must still
+// match a pure-host run within f32 tolerance.
+func TestComposedResidualNormMLPProjGatedDeltaInputFuseDeviceVsHost(t *testing.T) {
+	if composed.ResidualNormMLPProjGatedDeltaInputDevice == nil {
+		t.Fatal("native init did not wire composed.ResidualNormMLPProjGatedDeltaInputDevice")
+	}
+	const D, FF, vocab, heads, hd = 512, 2048, 4096, 4, 128
+	attnLayer := composed.Layer{
+		InputNorm:    cbSyn(D, 20),
+		PostAttnNorm: cbSyn(D, 21),
+		MLP:          &composed.MLP{Gate: cbSyn(FF*D, 22), Up: cbSyn(FF*D, 23), Down: cbSyn(D*FF, 24), FF: FF},
+		Mixer: composed.NewAttnMixer(&composed.AttnWeights{
+			QProj: cbSyn(heads*hd*D, 25), KProj: cbSyn(heads*hd*D, 26),
+			VProj: cbSyn(heads*hd*D, 27), OProj: cbSyn(D*heads*hd, 28),
+			QNorm: cbSyn(hd, 29), KNorm: cbSyn(hd, 30),
+		}, composed.AttnConfig{Heads: heads, KVHeads: heads, HeadDim: hd, RotaryDim: hd / 2, RopeTheta: 1e6, NormEps: 1e-6}),
+	}
+	gdCfg := qwen3.GatedDeltaConfig{KeyHeads: 8, ValueHeads: 8, HeadDim: 32, ConvKernel: 4, Eps: 1e-5}
+	qDim, vDim := gdCfg.KeyHeads*gdCfg.HeadDim, gdCfg.ValueHeads*gdCfg.HeadDim
+	convDim := 2*qDim + vDim
+	gdw := &qwen3.GatedDeltaWeights{
+		InProjQKV:  cbSyn(convDim*D, 40),
+		ConvWeight: cbSyn(convDim*gdCfg.ConvKernel, 41),
+		ConvBias:   cbSyn(convDim, 42),
+		InProjA:    cbSyn(gdCfg.ValueHeads*D, 43),
+		ALog:       cbSyn(gdCfg.ValueHeads, 44),
+		DtBias:     cbSyn(gdCfg.ValueHeads, 45),
+		InProjB:    cbSyn(gdCfg.ValueHeads*D, 46),
+		InProjZ:    cbSyn(vDim*D, 47),
+		Norm:       cbSyn(gdCfg.HeadDim, 48),
+		OutProj:    cbSyn(D*vDim, 49),
+	}
+	gdLayer := composed.Layer{
+		InputNorm:    cbSyn(D, 50),
+		PostAttnNorm: cbSyn(D, 51),
+		MLP:          &composed.MLP{Gate: cbSyn(FF*D, 52), Up: cbSyn(FF*D, 53), Down: cbSyn(D*FF, 54), FF: FF},
+		Mixer:        composed.NewGatedDeltaMixer(gdw, gdCfg),
+	}
+	m := &composed.ComposedModel{
+		Embed: cbSyn(vocab*D, 1), NormF: cbSyn(D, 2), D: D, Vocab: vocab, Eps: 1e-6,
+		Layers: []composed.Layer{attnLayer, gdLayer},
+	}
+	tokens := []int32{5, 9, 21}
+
+	calls := 0
+	saved := composed.ResidualNormMLPProjGatedDeltaInputDevice
+	composed.ResidualNormMLPProjGatedDeltaInputDevice = func(
+		mixerHidden, projW, h, normW, gate, up, down []float32, L, D, mixCols, FF int, eps float32,
+		nextNormW, nextQKVW, nextZW, nextAW, nextBW []float32, nextConvDim, nextVDim, nextVH int,
+	) ([]float32, []float32, []float32, []float32, []float32, error) {
+		calls++
+		return ResidualNormMLPProjGatedDeltaInputDevice(mixerHidden, projW, h, normW, gate, up, down, L, D, mixCols, FF, eps, nextNormW, nextQKVW, nextZW, nextAW, nextBW, nextConvDim, nextVDim, nextVH)
+	}
+	dev, err := composed.NewSession(m).Forward(tokens)
+	composed.ResidualNormMLPProjGatedDeltaInputDevice = saved
+	if err != nil {
+		t.Fatalf("device (input-fused) forward: %v", err)
+	}
+	if calls == 0 {
+		t.Fatal("gated-delta input-fuse hook never engaged — layer 1 not seen as a gated-delta next mixer?")
+	}
+
+	savedInput, savedProjTail, savedTail, savedCProj, savedProj, savedInto, savedMLP, savedFuse, savedGDIn :=
+		composed.ResidualNormMLPProjGatedDeltaInputDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, qwen3.ProjMatMul, qwen3.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice, qwen3.GatedDeltaInputDevice
+	composed.ResidualNormMLPProjGatedDeltaInputDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, qwen3.ProjMatMul, qwen3.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice, qwen3.GatedDeltaInputDevice =
+		nil, nil, nil, nil, nil, nil, nil, nil, nil
+	host, herr := composed.NewSession(m).Forward(tokens)
+	composed.ResidualNormMLPProjGatedDeltaInputDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, qwen3.ProjMatMul, qwen3.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice, qwen3.GatedDeltaInputDevice =
+		savedInput, savedProjTail, savedTail, savedCProj, savedProj, savedInto, savedMLP, savedFuse, savedGDIn
+	if herr != nil {
+		t.Fatalf("host forward: %v", herr)
+	}
+	if len(dev) != len(host) {
+		t.Fatalf("length: device %d host %d", len(dev), len(host))
+	}
+	for i := range dev {
+		if math.Abs(float64(dev[i]-host[i])) > 1e-2*(1+math.Abs(float64(host[i]))) {
+			t.Fatalf("hidden[%d]: device %v host %v (gated-delta input-fuse diverged)", i, dev[i], host[i])
+		}
+	}
+	t.Logf("composed proj-tail+gated-delta-input fuse: %d fused-CB call(s); device matches host within f32 tol over %d values", calls, len(dev))
+}
