@@ -343,11 +343,11 @@ func (m *NativeTokenModel) ProjectAudio(audio []byte) ([]byte, int, error) {
 		if m.audioExtractor == nil {
 			return nil, 0, core.NewError("native.NativeTokenModel.ProjectAudio: Conformer audio disabled (feature extractor unavailable)")
 		}
-		features, frames, melBins, ferr := AudioInputFeatures(samples, m.audioExtractor)
+		features, validity, frames, melBins, ferr := AudioInputFeatures(samples, m.audioExtractor)
 		if ferr != nil {
 			return nil, 0, core.E("native.audio", "extract features", ferr)
 		}
-		projected, perr := m.ProjectAudioFeatures(features, frames, melBins)
+		projected, perr := m.ProjectAudioFeatures(features, validity, frames, melBins)
 		if perr != nil {
 			return nil, 0, perr
 		}
@@ -395,7 +395,10 @@ func (m *NativeTokenModel) AudioSoftTokens(frames int) int {
 	return half(half(frames))
 }
 
-func (m *NativeTokenModel) ProjectAudioFeatures(features []byte, frames, melBins int) ([]byte, error) {
+// ProjectAudioFeatures encodes log-mel features [frames, melBins] bf16 into audio soft-token features.
+// validity is the optional per-frame validity mask (nil ⇒ a fully-valid clip): it flows into AudioEncode
+// so padding frames are masked out of the Conformer attention for padded/batched clips.
+func (m *NativeTokenModel) ProjectAudioFeatures(features []byte, validity []bool, frames, melBins int) ([]byte, error) {
 	if m == nil {
 		return nil, core.NewError("native.NativeTokenModel.ProjectAudioFeatures: nil model")
 	}
@@ -403,7 +406,7 @@ func (m *NativeTokenModel) ProjectAudioFeatures(features []byte, frames, melBins
 	if !ok {
 		return nil, core.NewError("native.NativeTokenModel.ProjectAudioFeatures: model has no audio payload")
 	}
-	encoded, err := AudioEncode(features, weights, cfg)
+	encoded, err := AudioEncode(features, weights, cfg, validity)
 	if err != nil {
 		return nil, err
 	}

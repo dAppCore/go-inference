@@ -48,7 +48,7 @@ func TestAudioAttention_AudioAttention_Good(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AudioAttention: %v", err)
 	}
-	wantF32, err := AudioAttentionF32(xf, w, cfg)
+	wantF32, err := AudioAttentionF32(xf, w, cfg, nil)
 	if err != nil {
 		t.Fatalf("AudioAttentionF32 reference: %v", err)
 	}
@@ -130,7 +130,7 @@ func TestAudioAttention_AudioAttentionF32_Good(t *testing.T) {
 	xf := bf16Round(syntheticFloat32(T*hid, 19))
 	x := toBF16Bytes(xf)
 
-	got, err := AudioAttentionF32(xf, w, cfg)
+	got, err := AudioAttentionF32(xf, w, cfg, nil)
 	if err != nil {
 		t.Fatalf("AudioAttentionF32: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestAudioAttention_AudioAttentionF32_Bad(t *testing.T) {
 		w := audioAttentionWeightsFixture(hid, H, D, P)
 		xf := syntheticFloat32(T*hid, 17)
 		xf = xf[:len(xf)-1]
-		if _, err := AudioAttentionF32(xf, w, cfg); err == nil {
+		if _, err := AudioAttentionF32(xf, w, cfg, nil); err == nil {
 			t.Fatal("expected AudioAttentionF32 to reject a misaligned input length")
 		}
 	})
@@ -166,7 +166,7 @@ func TestAudioAttention_AudioAttentionF32_Bad(t *testing.T) {
 		w := audioAttentionWeightsFixture(hid, H, D, P)
 		w.VProj = w.VProj[:len(w.VProj)-2]
 		xf := syntheticFloat32(T*hid, 17)
-		if _, err := AudioAttentionF32(xf, w, cfg); err == nil {
+		if _, err := AudioAttentionF32(xf, w, cfg, nil); err == nil {
 			t.Fatal("expected AudioAttentionF32 to reject a truncated VProj weight")
 		}
 	})
@@ -184,7 +184,7 @@ func TestAudioAttention_AudioAttentionF32_Ugly(t *testing.T) {
 	cfg := audioAttentionCfgFixture(hid, H, D, chunk, past, future)
 	xf := syntheticFloat32(T*hid, 17)
 
-	got, err := AudioAttentionF32(xf, w, cfg)
+	got, err := AudioAttentionF32(xf, w, cfg, nil)
 	if err != nil {
 		t.Fatalf("AudioAttentionF32: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestAudioAttention_AudioBlockedMask_Bad(t *testing.T) {
 	const seqLen, chunk, past, future = 3, 2, 1, 1
 	ctx := chunk + past + future
 	nB := (seqLen + chunk - 1) / chunk
-	mask := audioBlockedMask(seqLen, nB, chunk, ctx, past, future)
+	mask := audioBlockedMask(seqLen, nB, chunk, ctx, past, future, nil)
 	// block 1 (queries 2..3), the LAST block only has query index 0 in-sequence (seqLen=3);
 	// query index 1 (t=3) is past the sequence end and must be masked at every key.
 	base := (1*chunk + 1) * ctx
