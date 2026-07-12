@@ -813,6 +813,90 @@ func TestArchSessionPrefillChunksSkipSharedSuffix(t *testing.T) {
 	}
 }
 
+// TestArchSessionPrefillTokenEmbeddingsKeepsFullStackIgnoresSkip guards the
+// multimodal embeddings/bidir prefill lane against inheriting the causal
+// kv-shared suffix skip (#381). The fixture has a clean shared suffix
+// (sharedSuffix == 2) so the skip WOULD engage if the lane honoured
+// prefillSkipToLayer. With the skip pre-armed, the lane must still produce the
+// full-stack serial boundary hidden AND clear the flag: unlike the causal lane
+// it has no per-chunk reset, so a leaked value would bound the FINAL (read)
+// chunk and corrupt the boundary hidden. The skip is byte-identical on non-final
+// chunks by construction, so only the final-chunk divergence + the residual flag
+// are observable — both are asserted.
+func TestArchSessionPrefillTokenEmbeddingsKeepsFullStackIgnoresSkip(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 64, 1, 1, 64, 128, 32
+	const maxLen = 16
+	specs := []model.LayerSpec{
+		{Attention: model.SlidingAttention, KVShareFrom: 0, CacheIndex: 0, HeadDim: headDim, KVHeads: nKV},
+		{Attention: model.SlidingAttention, KVShareFrom: 1, CacheIndex: 1, HeadDim: headDim, KVHeads: nKV},
+		{Attention: model.SlidingAttention, KVShareFrom: 1, CacheIndex: -1, HeadDim: headDim, KVHeads: nKV},
+		{Attention: model.SlidingAttention, KVShareFrom: 1, CacheIndex: -1, HeadDim: headDim, KVHeads: nKV},
+	}
+	layers := make([]DecodeLayerWeights, len(specs))
+	for i := range layers {
+		layers[i] = decodeLayerFixture(dModel, nHeads, nKV, headDim, dFF, 900+i)
+	}
+	g := &BF16Model{
+		Layers:    layers,
+		Embed:     toBF16Bytes(syntheticFloat32(vocab*dModel, 911)),
+		FinalNorm: toBF16Bytes(syntheticFloat32(dModel, 923)),
+	}
+	g.LMHead, g.Tied = g.Embed, true
+	arch := model.Arch{
+		Hidden: dModel, Heads: nHeads, KVHeads: nKV, HeadDim: headDim, FF: dFF, Vocab: vocab,
+		Layer: specs, SlidingWindow: 4, RotaryDim: headDim, RotaryDimLocal: headDim,
+		RopeBase: 10000, RopeLocalBase: 10000, AttnScale: 0.125, Eps: 1e-5,
+	}
+	newSess := func(name string) *ArchSession {
+		sess, err := NewArchSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("NewArchSession %s: %v", name, err)
+		}
+		t.Cleanup(func() { _ = sess.Close() })
+		sess.state.icb = nil
+		return sess
+	}
+	serial, chunked := newSess("serial"), newSess("chunked")
+	if got := chunked.state.sharedSuffix; got != 2 {
+		t.Fatalf("sharedSuffix = %d, want 2 (fixture would engage the skip if honoured)", got)
+	}
+
+	// SlidingWindow 4 over 14 ids forces the batched-dense chunk lane (multiple
+	// chunks, so a bounded FINAL chunk would show).
+	ids := []int32{1, 5, 3, 9, 4, 7, 2, 8, 6, 11, 13, 10, 12, 14}
+	embeddings := make([][]byte, len(ids))
+	for i, id := range ids {
+		emb, err := serial.embedID(id)
+		if err != nil {
+			t.Fatalf("embedID(%d): %v", id, err)
+		}
+		embeddings[i] = append([]byte(nil), emb...)
+	}
+	var serialHidden []byte
+	var err error
+	for i, id := range ids {
+		serialHidden, err = serial.StepWithID(id, embeddings[i])
+		if err != nil {
+			t.Fatalf("serial StepWithID(%d): %v", id, err)
+		}
+	}
+
+	// Pre-arm the skip: a leaked prefillSkipToLayer must be IGNORED, not honoured.
+	chunked.state.prefillSkipToLayer = chunked.state.sharedSuffix
+	if err := chunked.PrefillTokenEmbeddings(ids, embeddings); err != nil {
+		t.Fatalf("PrefillTokenEmbeddings: %v", err)
+	}
+	if !bytes.Equal(chunked.retainedHidden, serialHidden) {
+		t.Fatal("embeddings prefill hidden differs from full-stack serial — a leaked skip bounded the read (final) chunk")
+	}
+	if chunked.state.prefillSkipToLayer != 0 {
+		t.Fatalf("prefillSkipToLayer = %d after embeddings prefill, want 0 (lane must pin the full stack)", chunked.state.prefillSkipToLayer)
+	}
+}
+
 func TestArchSessionPrefillTokenEmbeddingsBatchedDenseChunksSlidingRingWrap(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
