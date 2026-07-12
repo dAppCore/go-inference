@@ -3,7 +3,10 @@
 package mlxaffine_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -122,6 +125,97 @@ func TestConvertSnapshot_ToyLoadable(t *testing.T) {
 	// --- the written bytes dequantise back to the source within the group bound ---
 	assertDequantMatches(t, outIdx,
 		"language_model.model.layers.0.self_attn.q_proj.weight", sources, 8, 64, bits, groupSize)
+}
+
+// TestConvertSnapshot_HIPProjectionStaysWideBF16 pins the Option-A skip contract: the
+// per_layer_model_projection weight is given a group-aligned shape (so it WOULD be
+// quantised on the default predicate), yet the converter must pass it through wide —
+// BF16, same shape, byte-identical payload, no .scales/.biases siblings — because the
+// HIP engine's loadedGemma4BF16ProjectionConfig requires it BF16. The sibling
+// per_layer_projection.weight (per-layer, no `model_`) must still quantise, guarding
+// against a suffix over-match that would starve the quantised path.
+func TestConvertSnapshot_HIPProjectionStaysWideBF16(t *testing.T) {
+	const bits, groupSize = 4, 64
+	srcDir := filepath.Join(t.TempDir(), "src")
+	outDir := filepath.Join(t.TempDir(), "out")
+	if r := core.MkdirAll(srcDir, 0o755); !r.OK {
+		t.Fatalf("mkdir src: %v", r.Err())
+	}
+
+	// The projection is stored BF16 (as the bf16 packs do); everything else F32. Both
+	// projection tensors have an eligible [8,128] shape (128 % 64 == 0) so the skip — not
+	// shape — is what keeps the model projection wide.
+	projName := "language_model.model.per_layer_model_projection.weight"
+	perLayerName := "language_model.model.layers.0.per_layer_projection.weight"
+	qProjName := "language_model.model.layers.0.self_attn.q_proj.weight"
+	normName := "language_model.model.layers.0.input_layernorm.weight"
+
+	projBF16 := encodeBF16(toyWeight(8, 128))
+	tensors := map[string]safetensors.Tensor{
+		projName:     {Dtype: "BF16", Shape: []int{8, 128}, Data: projBF16},
+		perLayerName: {Dtype: "F32", Shape: []int{8, 128}, Data: safetensors.EncodeFloat32(toyWeight(8, 128))},
+		qProjName:    {Dtype: "F32", Shape: []int{8, 64}, Data: safetensors.EncodeFloat32(toyWeight(8, 64))},
+		normName:     {Dtype: "F32", Shape: []int{8}, Data: safetensors.EncodeFloat32(toyWeight(8, 1))},
+	}
+	blob, err := safetensors.Encode(tensors)
+	if err != nil {
+		t.Fatalf("encode source safetensors: %v", err)
+	}
+	if r := core.WriteFile(filepath.Join(srcDir, "model.safetensors"), blob, 0o644); !r.OK {
+		t.Fatalf("write source shard: %v", r.Err())
+	}
+	writeFile(t, filepath.Join(srcDir, "config.json"), `{"model_type":"gemma3","hidden_size":64,"num_hidden_layers":1}`)
+
+	res, err := mlxaffine.ConvertSnapshot(context.Background(), srcDir, outDir, mlxaffine.Options{Bits: bits, GroupSize: groupSize}, nil)
+	if err != nil {
+		t.Fatalf("ConvertSnapshot: %v", err)
+	}
+	// q_proj + per_layer_projection quantise; per_layer_model_projection + norm pass wide.
+	if res.QuantizedWeights != 2 || res.PassthroughCount != 2 {
+		t.Fatalf("counts: quantised=%d passthrough=%d, want 2 and 2 (projection must be skipped)", res.QuantizedWeights, res.PassthroughCount)
+	}
+
+	outIdx, err := safetensors.IndexFiles([]string{filepath.Join(outDir, "model.safetensors")})
+	if err != nil {
+		t.Fatalf("index output safetensors: %v", err)
+	}
+
+	// The model projection survives wide: BF16, same shape, byte-identical payload.
+	assertTensor(t, outIdx, projName, "BF16", []uint64{8, 128})
+	cache := safetensors.NewShardCache()
+	defer cache.Close()
+	gotRaw, err := cache.ReadRefRaw(outIdx.Tensors[projName])
+	if err != nil {
+		t.Fatalf("read output projection: %v", err)
+	}
+	if !bytes.Equal(gotRaw, projBF16) {
+		t.Errorf("projection payload changed: got %d bytes, want the %d source bytes byte-identical", len(gotRaw), len(projBF16))
+	}
+	base := projName[:len(projName)-len(".weight")]
+	if _, ok := outIdx.Tensors[base+".scales"]; ok {
+		t.Error("projection was quantised: unexpected .scales sibling (must stay wide BF16)")
+	}
+	if _, ok := outIdx.Tensors[base+".biases"]; ok {
+		t.Error("projection was quantised: unexpected .biases sibling (must stay wide BF16)")
+	}
+
+	// Collision guard: the per-layer per_layer_projection (no `model_`) still quantises.
+	assertTensor(t, outIdx, perLayerName, "U32", []uint64{8, uint64(mlxaffine.PackedWords(128, bits))})
+	perLayerBase := perLayerName[:len(perLayerName)-len(".weight")]
+	if _, ok := outIdx.Tensors[perLayerBase+".scales"]; !ok {
+		t.Error("per_layer_projection missing .scales: it must still be quantised, not caught by the skip")
+	}
+}
+
+// encodeBF16 packs float32 values as little-endian BF16 (high 16 bits, truncating) — a
+// test-local helper to build a BF16 source tensor whose bytes we then assert survive the
+// wide passthrough unchanged.
+func encodeBF16(values []float32) []byte {
+	out := make([]byte, len(values)*2)
+	for i, v := range values {
+		binary.LittleEndian.PutUint16(out[i*2:], uint16(math.Float32bits(v)>>16))
+	}
+	return out
 }
 
 // toyWeight builds a small deterministic weight with a sign spread so groups exercise
