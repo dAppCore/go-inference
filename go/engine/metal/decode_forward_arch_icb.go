@@ -12,6 +12,7 @@ import (
 	"unsafe"
 
 	core "dappco.re/go"
+	icbop "dappco.re/go/inference/engine/metal/ops/icb"
 	"dappco.re/go/inference/model"
 	"github.com/tmc/apple/foundation"
 	"github.com/tmc/apple/metal"
@@ -1691,12 +1692,8 @@ func recordArchICB(
 		// GLOBAL layers' 2-pass SDPA is pass-1 + pass-2 where the single-pass was one op;
 		// q8 owner layers add two quantise-store ops (K row, V row).
 		total := opsPerLayer*nLayers + nGlobal2Pass + nQ8Store
-		icbDesc := metal.NewMTLIndirectCommandBufferDescriptor()
-		icbDesc.SetCommandTypes(metal.MTLIndirectCommandTypeConcurrentDispatch | metal.MTLIndirectCommandTypeConcurrentDispatchThreads)
-		icbDesc.SetInheritBuffers(false)
-		icbDesc.SetInheritPipelineState(false)
-		icbDesc.SetMaxKernelBufferBindCount(16)
-		icb := device.NewIndirectCommandBufferWithDescriptorMaxCommandCountOptions(icbDesc, uint(total), metal.MTLResourceStorageModeShared)
+		recorder := icbop.New(device, uint(total), 16)
+		icb := recorder.Buffer
 
 		rmsTG := rmsThreadgroup(dModel, rmsPSO)
 		// per-head rows: hd is bounded at 512 by the attention plan guard, so the raw
@@ -2069,7 +2066,7 @@ func recordArchICB(
 		}
 		sc.residentResIDs = resourceIDsForFastUse(sc.residentResIDs, residentRes)
 		residentResIDs := sc.residentResIDs
-		rng := foundation.NSRange{Location: 0, Length: uint(total)}
+		rng := recorder.Range
 
 		optCb := commandBufferFast(queue)
 		blit := blitCommandEncoderFast(optCb)
