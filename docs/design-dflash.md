@@ -139,23 +139,64 @@ exercised without a GPU exactly as they are:
    block-diffusion draft forward is not linked, serving plain autoregressive
    (the `diffusion_gemma` honesty posture, not a faked lane).
 
+## The engine forward — what #60 landed
+
+The block-parallel draft forward is now built on engine/metal, against the seams
+above, no cgo (`go/engine/metal/assistant_dflash.go`). It is a SIBLING of the MTP
+draft step, not a modification of it — it reuses the parity-gated draft-layer
+machinery (`draftLayerIntoScratch`, the SDPA inside `draftAttentionIntoScratch`)
+verbatim and adds only the DFlash-specific maths:
+
+- **KV injection (1b).** Each verifier hidden projects through every draft layer's
+  own `k_proj`/`v_proj` into that layer's injected `AssistantTargetKV` (numAux rows
+  of target-context memory) — the exact seam the MTP `draftLayer` already consumes.
+  `DFlashDrafter.injectedKV` (`assistant_dflash.go`).
+- **Block-parallel readout (1c).** The block's positions decode in one sweep against
+  the SAME shared injected context, differentiated by rope position (anchorPos+j) —
+  no position depends on another's PREDICTION, so it is genuinely non-autoregressive.
+  `DFlashDrafter.ProposeBlock`.
+- **Reduced-vocab `d2t` (1d).** `dflash.lm_head` → argmax → `dflash.d2t` maps the
+  drafted id into the target vocab. `DFlashDrafter.headArgmax` / `loadDFlashD2T`.
+- **Loader.** The drafter loads through the ordinary reactive pack loader
+  (`LoadDFlashDrafter` → `LoadAssistantDir` → the registered `gemma4_dflash_assistant`
+  spec, `go/model/gemma4/assistant_dflash.go`); no hand-rolled loader.
+- **Verify bridge.** Wrapped behind `decode/dflash.BlockProposer`
+  (`assistant_dflash_proposer.go`) and driven through `dflash.Generate` (the
+  fuzz-proven verify driver) — output stays byte-identical to plain decode.
+
+Receipts (`go/engine/metal/assistant_dflash_test.go`, no public checkpoint exists so
+these ARE the done-bar, not a real-model accept rate): the metal forward's proposals
+match a bf16 host reference of the same maths (`TestDFlashProposeBlockParity`); the
+proposer fires through the verify driver and the emitted sequence equals plain decode
+(`TestDFlashProposeBlockLosslessEngagement`); a pack on disk loads and proposes
+(`TestLoadDFlashDrafter`).
+
 ## The evidenced gap (deliberately not forced)
 
-The DFlash **engine forward** is not shipped and is not faked:
+Two steps could not be expressed cleanly against the current engine seams and are
+NOT faked — the block forward takes the fused verifier hiddens as INPUT, so parity +
+losslessness are provable now while these remain open:
 
-- **Fused multi-layer hidden extraction.** The metal engine exposes one final
-  hidden to the drafter (`DraftLayer(hidden, targetKV)`); DFlash needs *N*
-  layers (`aux_hidden_state_layer_ids`) concatenated + projected + injected as
-  KV into *every* draft layer. New extraction + projection seam.
-- **Block-parallel diffusion draft forward.** MTP drafts one token per draft
-  pass; DFlash denoises a whole masked block per pass. A new draft-forward kernel
-  (or the hip `diffusion_gemma` sampler, currently metadata-only, linked).
-- **Reduced-vocab `d2t`/`t2d`.** The draft LM head is a smaller vocab mapped to
-  the target vocab; the loader and the accept comparison must map ids across.
+- **A cheap, non-corrupting live-session aux tap (1a).** The extraction SEAM exists
+  and is demonstrated (`ExtractAuxHiddens` in `assistant_dflash_proposer.go`, over the
+  real per-layer capture `ForwardCaptureHiddens` / `captureLayerHiddens`), but that
+  capture RESETS the session to pos 0 and re-runs the whole sequence, OVERWRITING the
+  KV cache. On a live incrementally-decoding serving session that would corrupt the
+  target cache and BREAK losslessness — not merely slow it. A boundary tap that
+  captures the aux-layer hiddens during the ordinary decode step (the way
+  `retainedHidden` already captures the final one, `decode_forward_arch.go:1592`), or
+  a separate resident tap session, is the seam DFlash still needs before the live lane
+  can extract cheaply and correctly.
+- **The live HTTP lane (`speculativeModel`).** `speculative_model.go` always runs the
+  autoregressive MTP loop (`GenerateFromSessionEach`); `pair.Method()` has no consumer
+  yet. Routing `MTPDFlash` to a DFlash generate loop (proposer + verify) waits on the
+  tap above. Until then `serving.DFlashEngineProbe` stays false and serve declines
+  honestly (`serve_draft.go`) — the arming SEAM is wired and tested (toggle the probe),
+  ready to flip in one place.
+- **Joint intra-block self-attention.** The shipped readout treats block positions as
+  independent given the shared injected context (differentiated by rope). Positions
+  attending each other's hidden (true block-diffusion denoise) is the refinement; the
+  losslessness invariant holds either way, so this only affects accept-rate.
 
-Recommendation: land the contract + detection + losslessness proof now (this
-slice); implement the engine forward against the `AssistantModel` hidden/KV
-seam + the hip diffusion sampler when a DFlash checkpoint is on the box to
-measure accept-length against. The contract here fixes the interface so that
-engine work is a fill-in, not a redesign, and the losslessness fuzz is the
-acceptance gate it must pass.
+The contract fixed the interface so the engine work here was a fill-in, not a redesign;
+the losslessness fuzz remains the acceptance gate the whole lane passes.
