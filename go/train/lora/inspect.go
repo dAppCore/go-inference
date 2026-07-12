@@ -212,19 +212,21 @@ func hashAdapterPrecomputed(path string, config []byte, isSafetensors bool) stri
 	// via core.ReadFile + core.SHA256. core.ReadFile materialises the
 	// entire weight file (MBs on a real adapter) into one allocation that
 	// scales linearly with shard size — the dominant B/op cost on every
-	// model load that attaches a LoRA. core.Copy (io.Copy) feeds the file
+	// model load that attaches a LoRA. streamHashWeightFile feeds the file
 	// through the hasher in fixed 32KiB chunks, so B/op goes flat against
 	// shard size. SHA-256 is chunk-invariant, so the digest (and the
 	// final adapter identity hash) is bit-identical to the
-	// read-whole-then-hash form. The hasher is allocated lazily on the
-	// first weight file so the config-only path keeps its zero-shard
-	// alloc profile.
+	// read-whole-then-hash form. The hasher AND its copy buffer are
+	// allocated lazily on the first weight file so the config-only path
+	// keeps its zero-shard alloc profile, and every later shard reuses
+	// the one buffer rather than allocating a fresh 32KiB scratch per file.
 	//
 	// Small shards (<= streamHashMinBytes) stay on the in-memory path:
-	// io.Copy allocates its own 32KiB scratch buffer, so for a file at
-	// or below that size streaming would cost MORE bytes than reading it
-	// whole. The gate keeps small-adapter inspection strictly at or below
-	// its prior B/op while large/real shards win.
+	// streaming needs a 32KiB copy buffer (allocated once on the first
+	// streamed shard), so for a lone file at or below that size streaming
+	// would cost MORE bytes than reading it whole. The gate keeps
+	// small-adapter inspection strictly at or below its prior B/op while
+	// large/real shards win.
 	var hasher hashWriter
 	for _, weightPath := range paths {
 		weightSum, ok := hashWeightFile(weightPath, &hasher)
@@ -246,16 +248,25 @@ func hashAdapterPrecomputed(path string, config []byte, isSafetensors bool) stri
 // read stays on the cheap in-memory path.
 const streamHashMinBytes = 128 * 1024
 
-// hashWriter lazily holds the reusable SHA-256 accumulator used by the
-// streaming branch of hashWeightFile. Allocated on first streamed file
-// so the config-only / small-shard paths never construct one.
+// hashWriter lazily holds the reusable SHA-256 accumulator and the copy
+// buffer used by the streaming branch of hashWeightFile. Both are allocated
+// on the first streamed file so the config-only / small-shard paths never
+// construct one; a multi-shard adapter reuses the single buffer across every
+// shard instead of io.Copy allocating a fresh 32KiB scratch per file.
 type hashWriter struct {
 	h interface {
 		Write([]byte) (int, error)
 		Sum([]byte) []byte
 		Reset()
 	}
+	buf []byte
 }
+
+// hashCopyBufSize matches io.Copy's own internal scratch size, so a single
+// shard streams in exactly the chunk count it did before (SHA-256 is
+// chunk-invariant either way) — the only change is that the buffer is reused
+// across shards rather than reallocated per file.
+const hashCopyBufSize = 32 * 1024
 
 // hashWeightFile returns the SHA-256 digest of the weight file at path.
 // Files larger than streamHashMinBytes are streamed through the shared
@@ -278,9 +289,10 @@ func hashWeightFile(path string, hasher *hashWriter) ([32]byte, bool) {
 }
 
 // streamHashWeightFile hashes the file at path by copying it through the
-// reusable accumulator in hasher (reset per call). The reader is closed
-// on every return path — including the copy-failure path — so a
-// multi-shard adapter never holds more than one descriptor open.
+// reusable accumulator and copy buffer in hasher (the accumulator is reset
+// per call; the buffer is reused as-is). The reader is closed on every
+// return path — including the read-failure path — so a multi-shard adapter
+// never holds more than one descriptor open.
 func streamHashWeightFile(path string, hasher *hashWriter) ([32]byte, bool) {
 	opened := core.Open(path)
 	if !opened.OK {
@@ -292,11 +304,28 @@ func streamHashWeightFile(path string, hasher *hashWriter) ([32]byte, bool) {
 	} else {
 		hasher.h.Reset()
 	}
-	copied := core.Copy(hasher.h, reader)
-	core.CloseStream(reader)
-	if !copied.OK {
-		return [32]byte{}, false
+	if hasher.buf == nil {
+		hasher.buf = make([]byte, hashCopyBufSize)
 	}
+	// Hand-rolled reusable-buffer copy: core has no CopyBuffer wrapper and
+	// core.Copy (io.Copy) allocates a fresh 32KiB scratch every call, so a
+	// multi-shard adapter paid one buffer per shard. Feed the file through
+	// the shared buffer instead — hash.Hash.Write never errors, and EOF is
+	// the io.Reader end-of-stream signal (compared directly, as io.Copy does).
+	for {
+		n, readErr := reader.Read(hasher.buf)
+		if n > 0 {
+			_, _ = hasher.h.Write(hasher.buf[:n])
+		}
+		if readErr != nil {
+			if readErr == core.EOF {
+				break
+			}
+			core.CloseStream(reader)
+			return [32]byte{}, false
+		}
+	}
+	core.CloseStream(reader)
 	var sum [32]byte
 	copy(sum[:], hasher.h.Sum(nil))
 	return sum, true

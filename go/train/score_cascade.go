@@ -115,7 +115,20 @@ func (c *scoreCascade) appendSidecar(step int) {
 	if c.sidecarPath == "" {
 		return
 	}
-	var out []byte
+	// Presize the accumulator from the raw field sizes so the per-row appends
+	// don't regrow it geometrically (the -alloc_space FLAT profile put the
+	// whole cost on the append line): each row's JSON is the two text fields
+	// plus a fixed scaffold of keys/quoting/newline and the six numeric fields
+	// (~128 bytes covers the {"step":,"prompt":,"text":,"lek":,
+	// "sycophancy_tier":,"hostility":,"echo":,"at_unix":} frame and its digits).
+	estimate := 0
+	for _, rec := range c.records {
+		if rec.Step != step {
+			continue
+		}
+		estimate += len(rec.Prompt) + len(rec.Text) + 128
+	}
+	out := make([]byte, 0, estimate)
 	for _, rec := range c.records {
 		if rec.Step != step {
 			continue
