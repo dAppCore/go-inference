@@ -70,7 +70,7 @@ func gemma4CanonicalLayerIndex(canonical string) int {
 // multimodal towers are excluded (a text GGUF carries the language model
 // only). format must be one of isGemma4SupportedQuantizeFormat's set — the
 // caller (QuantizeModelPack) gates this before calling in.
-func quantizeGemma4ModelPack(source Source, configJSON []byte, tensors []denseSafetensor, format QuantizeFormat) ([]Tensor, []MetadataEntry, error) {
+func quantizeGemma4ModelPack(source Source, configJSON []byte, tensors []DenseSafetensor, format QuantizeFormat) ([]Tensor, []MetadataEntry, error) {
 	var config gemma4Config
 	if r := core.JSONUnmarshal(configJSON, &config); !r.OK {
 		return nil, nil, core.E("quantizeGemma4ModelPack", "parse config.json", r.Err())
@@ -87,7 +87,7 @@ func quantizeGemma4ModelPack(source Source, configJSON []byte, tensors []denseSa
 
 	quantized := make([]Tensor, 0, len(tensors))
 	for _, tensor := range tensors {
-		if isMultimodalTowerTensor(tensor.Name) {
+		if IsMultimodalTowerTensor(tensor.Name) {
 			continue
 		}
 		canonical, err := gemma4CanonicalTensorName(tensor.Name)
@@ -233,7 +233,7 @@ func gemma4RopeFreqsTensor(dimensionCount int, partialRotaryFactor float32) (Ten
 	}
 	return Tensor{
 		Name:  "rope_freqs.weight",
-		Type:  ggufTensorTypeF32,
+		Type:  TensorTypeF32,
 		Shape: []uint64{uint64(length)},
 		Data:  encodeGemma4F32(freqs),
 	}, nil
@@ -246,31 +246,31 @@ func gemma4RopeFreqsTensor(dimensionCount int, partialRotaryFactor float32) (Ten
 // is an error rather than a silently mis-encoded tensor.
 func encodeGemma4TensorData(data []float32, tensorType uint32) ([]byte, error) {
 	switch tensorType {
-	case ggufTensorTypeF32:
+	case TensorTypeF32:
 		return encodeGemma4F32(data), nil
-	case ggufTensorTypeBF16:
+	case TensorTypeBF16:
 		return encodeGemma4BF16(data), nil
 	case TensorTypeQ8_0:
 		if len(data)%32 != 0 {
 			return nil, core.Errorf("gguf: Q8_0 tensor has %d elements, not a multiple of 32", len(data))
 		}
 		return quantizeQ8_0(data), nil
-	case ggufTensorTypeQ3K:
+	case TensorTypeQ3K:
 		if len(data)%256 != 0 {
 			return nil, core.Errorf("gguf: Q3_K tensor has %d elements, not a multiple of 256", len(data))
 		}
 		return quantizeQ3_K(data), nil
-	case ggufTensorTypeQ4K:
+	case TensorTypeQ4K:
 		if len(data)%256 != 0 {
 			return nil, core.Errorf("gguf: Q4_K tensor has %d elements, not a multiple of 256", len(data))
 		}
 		return quantizeQ4_K(data), nil
-	case ggufTensorTypeQ5K:
+	case TensorTypeQ5K:
 		if len(data)%256 != 0 {
 			return nil, core.Errorf("gguf: Q5_K tensor has %d elements, not a multiple of 256", len(data))
 		}
 		return quantizeQ5_K(data), nil
-	case ggufTensorTypeQ6K:
+	case TensorTypeQ6K:
 		if len(data)%256 != 0 {
 			return nil, core.Errorf("gguf: Q6_K tensor has %d elements, not a multiple of 256", len(data))
 		}

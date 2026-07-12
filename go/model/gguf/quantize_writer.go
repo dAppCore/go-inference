@@ -224,7 +224,7 @@ func writeGGUFMetadataValue(file *core.OSFile, valueType uint32, value any) erro
 		binary.LittleEndian.PutUint32(buf[:], uint32(v))
 		_, err := file.Write(buf[:])
 		return err
-	case ggufValueTypeBool:
+	case ValueTypeBool:
 		boolValue, ok := value.(bool)
 		if !ok {
 			return core.NewError("gguf: GGUF metadata value is not bool")
@@ -235,7 +235,7 @@ func writeGGUFMetadataValue(file *core.OSFile, valueType uint32, value any) erro
 		}
 		_, err := file.Write(buf[:])
 		return err
-	case ggufValueTypeArray:
+	case ValueTypeArray:
 		return writeGGUFArrayValue(file, value)
 	default:
 		return core.NewError("gguf: unsupported GGUF metadata write type " + strconv.FormatUint(uint64(valueType), 10))
@@ -283,7 +283,7 @@ func writeGGUFArrayValue(file *core.OSFile, value any) error {
 			binary.LittleEndian.PutUint32(payload[i*4:], uint32(n))
 		}
 	case []bool:
-		binary.LittleEndian.PutUint32(head[:4], ggufValueTypeBool)
+		binary.LittleEndian.PutUint32(head[:4], ValueTypeBool)
 		binary.LittleEndian.PutUint64(head[4:12], uint64(len(arr)))
 		payload = make([]byte, len(arr))
 		for i, b := range arr {

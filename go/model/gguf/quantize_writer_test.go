@@ -261,8 +261,8 @@ func TestQuantizeWriter_writeGGUFMetadataValue_Int32Bool(t *testing.T) {
 	metadata := []ggufMetadataEntry{
 		{Key: "general.architecture", ValueType: ValueTypeString, Value: "gemma4"},
 		{Key: "general.sampling.top_k", ValueType: ggufValueTypeInt32, Value: int32(64)},
-		{Key: "tokenizer.ggml.add_bos_token", ValueType: ggufValueTypeBool, Value: true},
-		{Key: "tokenizer.ggml.add_space_prefix", ValueType: ggufValueTypeBool, Value: false},
+		{Key: "tokenizer.ggml.add_bos_token", ValueType: ValueTypeBool, Value: true},
+		{Key: "tokenizer.ggml.add_space_prefix", ValueType: ValueTypeBool, Value: false},
 	}
 	if err := writeQuantizedGGUF(path, metadata, nil); err != nil {
 		t.Fatalf("writeQuantizedGGUF: %v", err)
@@ -290,10 +290,10 @@ func TestQuantizeWriter_writeGGUFArrayValue_RoundTrip(t *testing.T) {
 	path := core.PathJoin(t.TempDir(), "arrays.gguf")
 	metadata := []ggufMetadataEntry{
 		{Key: "general.architecture", ValueType: ValueTypeString, Value: "gemma4"},
-		{Key: "tokenizer.ggml.tokens", ValueType: ggufValueTypeArray, Value: []string{"<pad>", "<eos>", "▁the"}},
-		{Key: "tokenizer.ggml.scores", ValueType: ggufValueTypeArray, Value: []float32{-1000, -1000, -0.5}},
-		{Key: "tokenizer.ggml.token_type", ValueType: ggufValueTypeArray, Value: []int32{3, 1, 1}},
-		{Key: "gemma4.attention.sliding_window_pattern", ValueType: ggufValueTypeArray, Value: []bool{true, true, false}},
+		{Key: "tokenizer.ggml.tokens", ValueType: ValueTypeArray, Value: []string{"<pad>", "<eos>", "▁the"}},
+		{Key: "tokenizer.ggml.scores", ValueType: ValueTypeArray, Value: []float32{-1000, -1000, -0.5}},
+		{Key: "tokenizer.ggml.token_type", ValueType: ValueTypeArray, Value: []int32{3, 1, 1}},
+		{Key: "gemma4.attention.sliding_window_pattern", ValueType: ValueTypeArray, Value: []bool{true, true, false}},
 	}
 	if err := writeQuantizedGGUF(path, metadata, nil); err != nil {
 		t.Fatalf("writeQuantizedGGUF: %v", err)

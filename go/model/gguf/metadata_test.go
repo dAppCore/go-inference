@@ -48,9 +48,9 @@ func TestMetadata_MetadataSubset_Good(t *testing.T) {
 	writeTestGGUF(t, path, []ggufMetaSpec{
 		{Key: "general.architecture", ValueType: ValueTypeString, Value: "qwen3"},
 		{Key: "general.file_type", ValueType: ValueTypeUint32, Value: uint32(15)},
-		{Key: "general.is_test", ValueType: ggufValueTypeBool, Value: true},
+		{Key: "general.is_test", ValueType: ValueTypeBool, Value: true},
 		{Key: "general.scale", ValueType: ValueTypeFloat32, Value: float32(1.5)},
-		{Key: "tokenizer.ggml.tokens", ValueType: ggufValueTypeArray, Value: ggufArraySpec{
+		{Key: "tokenizer.ggml.tokens", ValueType: ValueTypeArray, Value: ggufArraySpec{
 			ElementType: ValueTypeString,
 			Values:      []any{"a", "b", "c"},
 		}},
@@ -91,7 +91,7 @@ func TestMetadata_MetadataSubset_Ugly(t *testing.T) {
 	path := core.PathJoin(dir, "model.gguf")
 	writeTestGGUF(t, path, []ggufMetaSpec{
 		{Key: "general.architecture", ValueType: ValueTypeString, Value: "llama"},
-		{Key: "general.lengths", ValueType: ggufValueTypeArray, Value: ggufArraySpec{
+		{Key: "general.lengths", ValueType: ValueTypeArray, Value: ggufArraySpec{
 			ElementType: ValueTypeUint32,
 			Values:      []any{uint32(1), uint32(2), uint32(3)},
 		}},

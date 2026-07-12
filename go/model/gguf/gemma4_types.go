@@ -38,13 +38,13 @@ func gemma4BulkType(format QuantizeFormat) uint32 {
 	case QuantizeQ8_0:
 		return TensorTypeQ8_0
 	case QuantizeQ6_K:
-		return ggufTensorTypeQ6K
+		return TensorTypeQ6K
 	case QuantizeQ5_K_M:
-		return ggufTensorTypeQ5K
+		return TensorTypeQ5K
 	case QuantizeQ3_K_M:
-		return ggufTensorTypeQ3K
+		return TensorTypeQ3K
 	default: // QuantizeQ4_K_M
-		return ggufTensorTypeQ4K
+		return TensorTypeQ4K
 	}
 }
 
@@ -59,14 +59,14 @@ func gemma4AttnVType(format QuantizeFormat, bulk uint32, layerIndex, layerCount 
 	switch format {
 	case QuantizeQ4_K_M, QuantizeQ5_K_M:
 		if gemma4UseMoreBits(layerIndex, layerCount) {
-			return ggufTensorTypeQ6K
+			return TensorTypeQ6K
 		}
 		return bulk
 	case QuantizeQ3_K_M:
 		if layerIndex < 2 {
-			return ggufTensorTypeQ5K
+			return TensorTypeQ5K
 		}
-		return ggufTensorTypeQ4K
+		return TensorTypeQ4K
 	default:
 		return bulk
 	}
@@ -82,14 +82,14 @@ func gemma4FfnDownType(format QuantizeFormat, bulk uint32, layerIndex, layerCoun
 	switch format {
 	case QuantizeQ4_K_M, QuantizeQ5_K_M:
 		if gemma4UseMoreBits(layerIndex, layerCount) {
-			return ggufTensorTypeQ6K
+			return TensorTypeQ6K
 		}
 		return bulk
 	case QuantizeQ3_K_M:
 		if layerIndex < layerCount/16 {
-			return ggufTensorTypeQ5K
+			return TensorTypeQ5K
 		}
-		return ggufTensorTypeQ4K
+		return TensorTypeQ4K
 	default:
 		return bulk
 	}
@@ -101,7 +101,7 @@ func gemma4FfnDownType(format QuantizeFormat, bulk uint32, layerIndex, layerCoun
 // every other format leaves it at bulk.
 func gemma4AttnOutputType(format QuantizeFormat, bulk uint32) uint32 {
 	if format == QuantizeQ3_K_M {
-		return ggufTensorTypeQ4K
+		return TensorTypeQ4K
 	}
 	return bulk
 }
@@ -139,19 +139,19 @@ func gemma4AttnOutputType(format QuantizeFormat, bulk uint32) uint32 {
 func gemma4TensorType(format QuantizeFormat, canonical string, layerIndex, layerCount int) uint32 {
 	switch canonical {
 	case "per_layer_model_proj.weight":
-		return ggufTensorTypeBF16
+		return TensorTypeBF16
 	case "output_norm.weight", "per_layer_proj_norm.weight", "rope_freqs.weight":
-		return ggufTensorTypeF32
+		return TensorTypeF32
 	}
 	switch {
 	case core.HasSuffix(canonical, "_norm.weight"):
 		// attn_norm, ffn_norm, post_attention_norm, post_ffw_norm, post_norm,
 		// attn_q_norm, attn_k_norm.
-		return ggufTensorTypeF32
+		return TensorTypeF32
 	case core.HasSuffix(canonical, ".layer_output_scale.weight"),
 		core.HasSuffix(canonical, ".inp_gate.weight"),
 		core.HasSuffix(canonical, ".proj.weight"):
-		return ggufTensorTypeF32
+		return TensorTypeF32
 	}
 
 	bulk := gemma4BulkType(format)
@@ -159,7 +159,7 @@ func gemma4TensorType(format QuantizeFormat, canonical string, layerIndex, layer
 	switch canonical {
 	case "per_layer_token_embd.weight":
 		if format == QuantizeQ4_K_M {
-			return ggufTensorTypeQ5K
+			return TensorTypeQ5K
 		}
 		return bulk
 	case "token_embd.weight":

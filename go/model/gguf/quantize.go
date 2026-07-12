@@ -87,9 +87,9 @@ type QuantizeResult struct {
 	Notes            []string       `json:"notes,omitempty"`
 }
 
-// denseSafetensor is one decoded dense (unquantised) tensor read from a
+// DenseSafetensor is one decoded dense (unquantised) tensor read from a
 // source safetensors pack, ready for GGUF quantisation.
-type denseSafetensor struct {
+type DenseSafetensor struct {
 	Name  string
 	Shape []uint64
 	Data  []float32
@@ -292,11 +292,11 @@ func ensureEmptyGGUFQuantizeDestination(output string) error {
 
 // loadDenseSafetensors decodes every tensor in paths (in sorted-name order,
 // duplicates across shards rejected) to float32 via safetensors.ReadSafetensors.
-func loadDenseSafetensors(paths []string) ([]denseSafetensor, error) {
+func loadDenseSafetensors(paths []string) ([]DenseSafetensor, error) {
 	if len(paths) == 0 {
 		return nil, core.NewError("gguf: no safetensors weight files available")
 	}
-	var out []denseSafetensor
+	var out []DenseSafetensor
 	seen := map[string]struct{}{}
 	for _, path := range paths {
 		tensors, err := readDenseSafetensorsFile(path)
@@ -317,7 +317,7 @@ func loadDenseSafetensors(paths []string) ([]denseSafetensor, error) {
 
 // readDenseSafetensorsFile decodes every tensor in one safetensors file,
 // in sorted tensor-name order.
-func readDenseSafetensorsFile(path string) ([]denseSafetensor, error) {
+func readDenseSafetensorsFile(path string) ([]DenseSafetensor, error) {
 	read := safetensors.ReadSafetensors(path)
 	if !read.OK {
 		return nil, core.E("QuantizeModelPack", "read safetensors "+path, read.Err())
@@ -330,7 +330,7 @@ func readDenseSafetensorsFile(path string) ([]denseSafetensor, error) {
 	}
 	sort.Strings(names)
 
-	tensors := make([]denseSafetensor, 0, len(names))
+	tensors := make([]DenseSafetensor, 0, len(names))
 	for _, name := range names {
 		info := data.Tensors[name]
 		raw := safetensors.GetTensorData(info, data.Data)
@@ -342,7 +342,7 @@ func readDenseSafetensorsFile(path string) ([]denseSafetensor, error) {
 		for i, dim := range info.Shape {
 			shape[i] = uint64(dim)
 		}
-		tensors = append(tensors, denseSafetensor{Name: name, Shape: shape, Data: values})
+		tensors = append(tensors, DenseSafetensor{Name: name, Shape: shape, Data: values})
 	}
 	return tensors, nil
 }
@@ -358,13 +358,13 @@ func safetensorsShapeElements(shape []int) int {
 	return n
 }
 
-func quantizeGGUFTensors(ctx context.Context, tensors []denseSafetensor, format QuantizeFormat) ([]Tensor, error) {
+func quantizeGGUFTensors(ctx context.Context, tensors []DenseSafetensor, format QuantizeFormat) ([]Tensor, error) {
 	out := make([]Tensor, 0, len(tensors))
 	for _, tensor := range tensors {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if isMultimodalTowerTensor(tensor.Name) {
+		if IsMultimodalTowerTensor(tensor.Name) {
 			// A text GGUF carries text tensors only — llama.cpp maps the text
 			// stack by name and rejects unknown tensors; multimodal towers ship
 			// separately in that ecosystem (the mmproj convention). Matches the
@@ -383,9 +383,9 @@ func quantizeGGUFTensors(ctx context.Context, tensors []denseSafetensor, format 
 	return out, nil
 }
 
-// isMultimodalTowerTensor reports whether name belongs to a non-text tower a
+// IsMultimodalTowerTensor reports whether name belongs to a non-text tower a
 // text GGUF must exclude (audio/vision encoders and their embedding bridges).
-func isMultimodalTowerTensor(name string) bool {
+func IsMultimodalTowerTensor(name string) bool {
 	for _, prefix := range []string{"audio_tower.", "vision_tower.", "embed_audio.", "embed_vision.", "multi_modal_projector."} {
 		if core.HasPrefix(name, prefix) {
 			return true
@@ -394,7 +394,7 @@ func isMultimodalTowerTensor(name string) bool {
 	return false
 }
 
-func quantizeGGUFTensor(tensor denseSafetensor, format QuantizeFormat) (Tensor, error) {
+func quantizeGGUFTensor(tensor DenseSafetensor, format QuantizeFormat) (Tensor, error) {
 	tensorType, blockSize, _, err := ggufQuantizeLayout(format)
 	if err != nil {
 		return Tensor{}, err
@@ -410,7 +410,7 @@ func quantizeGGUFTensor(tensor denseSafetensor, format QuantizeFormat) (Tensor, 
 		}
 		return Tensor{
 			Name:  tensor.Name,
-			Type:  ggufTensorTypeF32,
+			Type:  TensorTypeF32,
 			Shape: core.SliceClone(tensor.Shape),
 			Data:  raw,
 		}, nil
@@ -456,21 +456,21 @@ func ggufQuantizeLayout(format QuantizeFormat) (tensorType uint32, blockSize int
 		// (scale+min) layout this used to (wrongly) assume.
 		return ggufTensorTypeQ5_0, 32, 22, nil
 	case QuantizeQ4_K:
-		return ggufTensorTypeQ4K, 256, 144, nil
+		return TensorTypeQ4K, 256, 144, nil
 	case QuantizeQ5_K:
-		return ggufTensorTypeQ5K, 256, 176, nil
+		return TensorTypeQ5K, 256, 176, nil
 	case QuantizeQ6_K:
-		return ggufTensorTypeQ6K, 256, 210, nil
+		return TensorTypeQ6K, 256, 210, nil
 	case QuantizeQ8_K:
 		// Canonical block_q8_K: float32 d + 256 int8 qs + 16 int16 bsums.
 		return ggufTensorTypeQ8K, 256, 292, nil
 	case QuantizeQ3_K:
-		return ggufTensorTypeQ3K, 256, 110, nil
+		return TensorTypeQ3K, 256, 110, nil
 	case QuantizeQ2_K:
 		// Canonical block_q2_K is 84 (16 scales + 64 qs + f16 d + f16
 		// dmin). The gguflib type-size table's 82 drops dmin; its decoder
 		// nonetheless advances 84, and upstream static_assert is 84.
-		return ggufTensorTypeQ2K, 256, 84, nil
+		return TensorTypeQ2K, 256, 84, nil
 	default:
 		return 0, 0, 0, core.NewError("gguf: unsupported resolved GGUF format: " + string(format))
 	}

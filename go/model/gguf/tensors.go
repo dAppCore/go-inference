@@ -121,11 +121,11 @@ func ggufTensorShapeElements(info TensorInfo) ([]int, uint64, error) {
 
 func ggufTensorNativeStorage(info TensorInfo, elements uint64) (string, uint64, error) {
 	switch info.Type {
-	case ggufTensorTypeF32:
+	case TensorTypeF32:
 		return ggufTensorNativeDenseStorage(info, "F32", elements, 4)
 	case ggufTensorTypeF16:
 		return ggufTensorNativeDenseStorage(info, "F16", elements, 2)
-	case ggufTensorTypeBF16:
+	case TensorTypeBF16:
 		return ggufTensorNativeDenseStorage(info, "BF16", elements, 2)
 	case TensorTypeQ4_0:
 		return ggufTensorNativeBlockStorage(info, elements, 32, 18, "Q4_0")
