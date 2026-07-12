@@ -9,6 +9,7 @@ import (
 
 	"dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/eval/profile"
 	"dappco.re/go/inference/model/gguf"
 	coreio "dappco.re/go/io"
 )
@@ -45,8 +46,12 @@ const (
 	ggmlTypeBF16 = 30
 )
 
-// gemma3ModuleMap maps HuggingFace module names to GGUF tensor names.
-var gemma3ModuleMap = map[string]string{
+// hfModuleToGGUFTensorMap maps HuggingFace module names to GGUF tensor
+// names. The mapping covers the standard transformer attention/MLP block
+// (q/k/v/o projections, gate/up/down MLP) and is generic across every
+// architecture MLXTensorToGGUF handles — it was previously named
+// gemma3ModuleMap, which claimed a family-specific scope it never had.
+var hfModuleToGGUFTensorMap = map[string]string{
 	"self_attn.q_proj": "attn_q",
 	"self_attn.k_proj": "attn_k",
 	"self_attn.v_proj": "attn_v",
@@ -75,7 +80,7 @@ func MLXTensorToGGUF(mlxName string) core.Result {
 	module := m[2]
 	loraSuffix := m[3]
 
-	ggufModule, ok := gemma3ModuleMap[module]
+	ggufModule, ok := hfModuleToGGUFTensorMap[module]
 	if !ok {
 		return core.Fail(core.E("modelmgmt.MLXTensorToGGUF", core.Sprintf("unknown module %q in %s", module, mlxName), nil))
 	}
@@ -201,35 +206,63 @@ func ConvertMLXtoGGUFLoRA(safetensorsPath, configPath, outputPath, architecture 
 	return core.Ok(nil)
 }
 
-// DetectArchFromConfig tries to infer the model architecture from adapter_config.json.
-func DetectArchFromConfig(configPath string) string {
+// DetectArchFromConfig infers a model's architecture from a base model's
+// config.json (model_type, falling back to architectures[0]). It is not for
+// adapter_config.json: a PEFT/LoRA adapter config carries only the adapter's
+// own hyperparameters (rank, alpha, target modules), never the base model's
+// architecture — pass the base model's own config.json. Resolution runs
+// through the shared eval/profile registry (the loader's single source of
+// truth for architecture identification) rather than a second, driftable
+// copy. Returns an explicit error when configPath can't be read or parsed,
+// or when the config carries neither signal.
+func DetectArchFromConfig(configPath string) core.Result {
 	data, err := coreio.Local.Read(configPath)
 	if err != nil {
-		return "gemma3"
+		return core.Fail(core.E("modelmgmt.DetectArchFromConfig", core.Sprintf("read %s", configPath), err))
 	}
 	var cfg struct {
-		LoraParameters struct {
-			Rank int `json:"rank"`
-		} `json:"lora_parameters"`
+		ModelType     string   `json:"model_type"`
+		Architectures []string `json:"architectures"`
 	}
-	core.JSONUnmarshalString(data, &cfg)
-	return "gemma3"
+	if r := core.JSONUnmarshalString(data, &cfg); !r.OK {
+		return core.Fail(core.E("modelmgmt.DetectArchFromConfig", core.Sprintf("parse %s", configPath), r.Value.(error)))
+	}
+	if len(cfg.Architectures) > 0 {
+		if arch := profile.ArchitectureFromTransformersName(cfg.Architectures[0]); arch != "" {
+			return core.Ok(arch)
+		}
+	}
+	if cfg.ModelType != "" {
+		return core.Ok(profile.NormalizeArchitecture(cfg.ModelType))
+	}
+	return core.Fail(core.E("modelmgmt.DetectArchFromConfig", core.Sprintf("no model_type or architectures in %s", configPath), nil))
 }
 
 // ArchitectureGGUFMap maps model tags to GGUF architecture names.
+//
+// Qwen 3.5/3.6 (model_type qwen3_5 / qwen3_6) has no entry: this repo carries
+// no GGUF writer for the hybrid linear-attention family (nothing analogous to
+// gemma4_metadata.go under model/gguf/), so there is no verified
+// general.architecture string to map to. ModelTagToGGUFArch returns an
+// explicit error for unmapped tags rather than guessing one.
 var ArchitectureGGUFMap = map[string]string{
-	"gemma-3-1b":  "gemma3",
-	"gemma-3-4b":  "gemma3",
-	"gemma-3-12b": "gemma3",
-	"gemma-3-27b": "gemma3",
+	"gemma-3-1b":      "gemma3",
+	"gemma-3-4b":      "gemma3",
+	"gemma-3-12b":     "gemma3",
+	"gemma-3-27b":     "gemma3",
+	"gemma-4-e2b":     "gemma4",
+	"gemma-4-12b":     "gemma4",
+	"gemma-4-26b-a4b": "gemma4",
+	"gemma-4-31b":     "gemma4",
 }
 
-// ModelTagToGGUFArch returns the GGUF architecture for a model tag.
-func ModelTagToGGUFArch(modelTag string) string {
+// ModelTagToGGUFArch returns the GGUF architecture for a known model tag, or
+// an explicit error when the tag has no registered mapping.
+func ModelTagToGGUFArch(modelTag string) core.Result {
 	if arch, ok := ArchitectureGGUFMap[modelTag]; ok {
-		return arch
+		return core.Ok(arch)
 	}
-	return "gemma3"
+	return core.Fail(core.E("modelmgmt.ModelTagToGGUFArch", core.Sprintf("no known GGUF architecture for model tag %q", modelTag), nil))
 }
 
 // GGUFModelBlobPath returns the path to the GGUF model blob in Ollama's store.

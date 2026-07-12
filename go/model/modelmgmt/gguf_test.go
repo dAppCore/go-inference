@@ -98,44 +98,62 @@ func TestGguf_ConvertMLXtoGGUFLoRA_Ugly(t *core.T) {
 }
 
 func TestGguf_DetectArchFromConfig_Good(t *core.T) {
-	_, cfg := writeSafetensorsFixture(t)
-	got := DetectArchFromConfig(cfg)
-	core.AssertEqual(t, "gemma3", got)
+	cases := map[string]struct {
+		json string
+		want string
+	}{
+		"gemma3 via architectures[0]": {`{"architectures":["Gemma3ForCausalLM"]}`, "gemma3"},
+		"gemma4 via model_type":       {`{"model_type":"gemma4"}`, "gemma4"},
+		"qwen3.5 via model_type":      {`{"model_type":"qwen3_5"}`, "qwen3_6"},
+	}
+	for name, c := range cases {
+		cfg := core.JoinPath(t.TempDir(), "config.json")
+		core.RequireNoError(t, coreio.Local.Write(cfg, c.json))
+		r := DetectArchFromConfig(cfg)
+		requireResultOK(t, r)
+		core.AssertEqual(t, c.want, r.Value.(string), name)
+	}
 }
 
 func TestGguf_DetectArchFromConfig_Bad(t *core.T) {
-	stubName := t.Name()
-	core.AssertNotEmpty(t, stubName)
-	got := DetectArchFromConfig(core.JoinPath(t.TempDir(), "missing.cfg"))
-	core.AssertEqual(t, "gemma3", got)
+	cfg := core.JoinPath(t.TempDir(), "config.json")
+	core.RequireNoError(t, coreio.Local.Write(cfg, "not json"))
+	assertResultError(t, DetectArchFromConfig(cfg), "parse")
 }
 
 func TestGguf_DetectArchFromConfig_Ugly(t *core.T) {
-	cfg := core.JoinPath(t.TempDir(), "empty.cfg")
-	core.RequireNoError(t, coreio.Local.Write(cfg, "{}"))
-	got := DetectArchFromConfig(cfg)
-	core.AssertEqual(t, "gemma3", got)
+	// Absent file: read error.
+	assertResultError(t, DetectArchFromConfig(core.JoinPath(t.TempDir(), "missing.json")), "read")
+
+	// A syntactically valid config that carries no architecture signal — the
+	// original bug's exact trigger shape (an adapter_config.json passed where
+	// a base model's config.json belongs).
+	_, adapterCfg := writeSafetensorsFixture(t)
+	assertResultError(t, DetectArchFromConfig(adapterCfg), "no model_type or architectures")
 }
 
 func TestGguf_ModelTagToGGUFArch_Good(t *core.T) {
-	stubName := t.Name()
-	core.AssertNotEmpty(t, stubName)
-	got := ModelTagToGGUFArch("gemma-3-1b")
-	core.AssertEqual(t, "gemma3", got)
+	cases := map[string]string{
+		"gemma-3-1b":  "gemma3",
+		"gemma-4-e2b": "gemma4",
+	}
+	for tag, want := range cases {
+		r := ModelTagToGGUFArch(tag)
+		requireResultOK(t, r)
+		core.AssertEqual(t, want, r.Value.(string), tag)
+	}
 }
 
 func TestGguf_ModelTagToGGUFArch_Bad(t *core.T) {
-	stubName := t.Name()
-	core.AssertNotEmpty(t, stubName)
-	got := ModelTagToGGUFArch("unknown")
-	core.AssertEqual(t, "gemma3", got)
+	// qwen3_5 has no registered GGUF architecture (no writer in this repo for
+	// the hybrid linear-attention family) — an unmapped tag errors rather
+	// than silently reporting gemma3.
+	assertResultError(t, ModelTagToGGUFArch("qwen-3-5"))
+	assertResultError(t, ModelTagToGGUFArch("unknown"))
 }
 
 func TestGguf_ModelTagToGGUFArch_Ugly(t *core.T) {
-	stubName := t.Name()
-	core.AssertNotEmpty(t, stubName)
-	got := ModelTagToGGUFArch("")
-	core.AssertEqual(t, "gemma3", got)
+	assertResultError(t, ModelTagToGGUFArch(""))
 }
 
 func TestGguf_GGUFModelBlobPath_Good(t *core.T) {
