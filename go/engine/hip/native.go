@@ -85,6 +85,14 @@ type nativeModel interface {
 	Close() error
 }
 
+// nativeAudioInputModel is the HIP runtime side of the neutral audio
+// capability.  It is deliberately optional: text-only checkpoints and older
+// runtime implementations do not acquire audio support merely by belonging to
+// an audio-capable model family.
+type nativeAudioInputModel interface {
+	AcceptsAudioInput() bool
+}
+
 func newROCmBackendWithRuntime(runtime nativeRuntime) *rocmBackend {
 	return &rocmBackend{runtime: runtime}
 }
@@ -330,6 +338,19 @@ type rocmModel struct {
 	promptCache *ROCmPromptCacheEntry
 }
 
+var _ inference.AudioModel = (*rocmModel)(nil)
+
+// AcceptsAudio reports the capability of the loaded HIP runtime.  Serving
+// probes this inference.AudioModel seam before forwarding input_audio turns;
+// keep the answer tied to the loaded payload rather than model-family labels.
+func (m *rocmModel) AcceptsAudio() bool {
+	if m == nil || m.native == nil {
+		return false
+	}
+	audio, ok := m.native.(nativeAudioInputModel)
+	return ok && audio.AcceptsAudioInput()
+}
+
 func (m *rocmModel) Generate(ctx context.Context, prompt string, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
 	m.clearLastError()
 	if err := rocmContextErr(ctx); err != nil {
@@ -389,10 +410,14 @@ func (m *rocmModel) Chat(ctx context.Context, messages []inference.Message, opts
 		m.setLastFailure(err)
 		return emptyTokenSeq
 	}
+	if messagesHaveROCMAudio(messages) && !m.AcceptsAudio() {
+		m.setLastFailure(core.E("rocm.Chat", "model does not accept audio input", nil))
+		return emptyTokenSeq
+	}
 	cfg := m.applyGenerateOpts(opts)
 	loaded, loadedOK := m.native.(*hipLoadedModel)
 	directGemma4Q4Linked := false
-	if loadedOK && hipLoadedGemma4Q4GenerateLinked(loaded) {
+	if loadedOK && !messagesHaveROCMAudio(messages) && hipLoadedGemma4Q4GenerateLinked(loaded) {
 		_, directGemma4Q4Linked = loaded.kernelSet().(hipNativeProjectionKernelSet)
 	}
 	var session *StateSession
@@ -427,6 +452,15 @@ func (m *rocmModel) Chat(ctx context.Context, messages []inference.Message, opts
 	}
 	stream, streamError := m.native.Chat(ctx, append([]inference.Message(nil), messages...), cloneGenerateConfig(cfg))
 	return m.wrapTokenStream(stream, streamError, promptTokens, start, nil)
+}
+
+func messagesHaveROCMAudio(messages []inference.Message) bool {
+	for i := range messages {
+		if len(messages[i].Audios) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *rocmModel) hipGemma4Q4GenerateTokenSeq(ctx context.Context, session *StateSession, loaded *hipLoadedModel, q4Cfg hipGemma4Q4ForwardConfig, promptTokenIDs []int32, cfg inference.GenerateConfig) (iter.Seq[inference.Token], func() error) {
