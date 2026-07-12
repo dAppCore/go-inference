@@ -460,6 +460,87 @@ func writeGemma4ModelPackGGUF(t *testing.T) string {
 	return path
 }
 
+func writeGemma4ModelPackGGUFWithEmbeddingTensor(t *testing.T) string {
+	t.Helper()
+	path := core.PathJoin(t.TempDir(), "gemma-4-e2b-it-q4.gguf")
+	buf := core.NewBuffer()
+	writeUint32 := func(v uint32) { core.RequireNoError(t, binary.Write(buf, binary.LittleEndian, v)) }
+	writeUint64 := func(v uint64) { core.RequireNoError(t, binary.Write(buf, binary.LittleEndian, v)) }
+	writeString := func(v string) {
+		writeUint64(uint64(len(v)))
+		_, err := buf.Write([]byte(v))
+		core.RequireNoError(t, err)
+	}
+	writeKVString := func(key, value string) {
+		writeString(key)
+		writeUint32(8)
+		writeString(value)
+	}
+	writeKVUint32 := func(key string, value uint32) {
+		writeString(key)
+		writeUint32(4)
+		writeUint32(value)
+	}
+	writeKVFloat32 := func(key string, value float32) {
+		writeString(key)
+		writeUint32(6)
+		core.RequireNoError(t, binary.Write(buf, binary.LittleEndian, value))
+	}
+	writeKVBool := func(key string, value bool) {
+		writeString(key)
+		writeUint32(7)
+		if value {
+			buf.WriteByte(1)
+		} else {
+			buf.WriteByte(0)
+		}
+	}
+	writeTensorInfo := func(name string, tensorType uint32, dimensions ...uint64) {
+		writeString(name)
+		writeUint32(uint32(len(dimensions)))
+		for _, dimension := range dimensions {
+			writeUint64(dimension)
+		}
+		writeUint32(tensorType)
+		writeUint64(0)
+	}
+
+	writeUint32(0x46554747)
+	writeUint32(3)
+	writeUint64(3)
+	writeUint64(23)
+	writeKVString("general.architecture", "gemma4")
+	writeKVString("general.name", "gemma4-e2b-test")
+	writeKVString("general.size_label", "E2B")
+	writeKVUint32("general.file_type", 15)
+	writeKVUint32("gemma4.context_length", 131072)
+	writeKVUint32("gemma4.block_count", productionLaneGemma4E2BLayers)
+	writeKVUint32("gemma4.embedding_length", productionLaneGemma4E2BHiddenSize)
+	writeKVUint32("gemma4.feed_forward_length", 12288)
+	writeKVUint32("gemma4.attention.head_count", 8)
+	writeKVUint32("gemma4.attention.head_count_kv", 1)
+	writeKVUint32("gemma4.attention.key_length", 512)
+	writeKVUint32("gemma4.attention.value_length", 512)
+	writeKVUint32("gemma4.attention.key_length_swa", 256)
+	writeKVUint32("gemma4.attention.value_length_swa", 256)
+	writeKVUint32("gemma4.attention.sliding_window", 512)
+	writeKVUint32("gemma4.attention.shared_kv_layers", 20)
+	writeKVUint32("gemma4.embedding_length_per_layer_input", 256)
+	writeKVBool("gemma4.attention.sliding_window_pattern", false)
+	writeKVFloat32("gemma4.rope.freq_base", 1000000)
+	writeKVFloat32("gemma4.rope.freq_base_swa", 10000)
+	writeKVUint32("gemma4.rope.dimension_count", 512)
+	writeKVUint32("gemma4.rope.dimension_count_swa", 256)
+	writeKVFloat32("gemma4.final_logit_softcapping", 30)
+	writeTensorInfo("per_layer_token_embd.weight", 13, 8960, productionLaneGemma4E2BVocabSize)
+	writeTensorInfo("token_embd.weight", 12, productionLaneGemma4E2BHiddenSize, productionLaneGemma4E2BVocabSize)
+	writeTensorInfo("blk.0.attn_output.weight", 12, 2048, productionLaneGemma4E2BHiddenSize)
+
+	result := core.WriteFile(path, buf.Bytes(), 0o644)
+	core.RequireTrue(t, result.OK)
+	return path
+}
+
 func TestModelPackInspectorGemma4Unified12BQ4QATSupported(t *testing.T) {
 	dir := core.PathJoin(t.TempDir(), "lmstudio-community-gemma-4-12b-it-4bit")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

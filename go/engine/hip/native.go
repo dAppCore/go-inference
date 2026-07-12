@@ -117,33 +117,34 @@ func (b *rocmBackend) loadModelWithROCmConfigMode(path string, loadConfig infere
 		return nil, core.E("rocm.LoadModel", "adapter path is required", nil)
 	}
 	modelPack, err := gguf.ReadInfo(path)
+	loadedGGUF := err == nil
 	modelPath := path
 	nativeConfig := nativeLoadConfig{}
 	modelInfo := inference.ModelInfo{}
-	if err == nil {
+	if loadedGGUF {
 		metadata := modelPack.Metadata
-		modelInfo = modelInfoFromMetadata(metadata)
+		tensors := nativeTensorInfos(modelPack.Tensors)
+		modelInfo = modelInfoFromGGUFInfo(metadata, tensors)
 		nativeConfig = nativeLoadConfig{
-			ContextSize:       resolveContextLength(loadConfig.ContextLen, metadata),
-			GPULayerCount:     loadConfig.GPULayers,
-			ParallelSlotCount: loadConfig.ParallelSlots,
-			AdapterPath:       loadConfig.AdapterPath,
-			AllowAttachedOnly: allowAttachedOnly,
-			ModelInfo:         modelInfo,
-			ModelLabels:       rocmGGUFNativeLoadLabels(modelInfo, path),
-			DeviceKVMode:      deviceKVMode,
-			DataOffset:        modelPack.DataOffset,
-			Tensors:           nativeTensorInfos(modelPack.Tensors),
+			ContextSize:        resolveContextLength(loadConfig.ContextLen, metadata),
+			GPULayerCount:      loadConfig.GPULayers,
+			ParallelSlotCount:  loadConfig.ParallelSlots,
+			AdapterPath:        loadConfig.AdapterPath,
+			AllowAttachedOnly:  allowAttachedOnly,
+			ModelInfo:          modelInfo,
+			ModelLabels:        rocmGGUFNativeLoadLabels(modelInfo, path, metadata),
+			DeviceKVMode:       deviceKVMode,
+			Gemma4TextConfig:   nativeGemma4TextConfigFromGGUFMetadata(metadata),
+			DataOffset:         modelPack.DataOffset,
+			Tensors:            tensors,
+			TiedWordEmbeddings: inferTiedWordEmbeddingsFromNativeTensors(tensors),
 		}
 	} else {
-		// Quarantine landing note: upstream fell back to
-		// b.safetensorsNativeLoadConfig here (model_pack.go), excluded from
-		// this landing because it pervasively depends on the missing
-		// dappco.re/go/rocm/model (+ model/gemma4) packages — see the
-		// landing commit body. GGUF loading (the branch above) is
-		// unaffected; safetensors-format model packs are not loadable
-		// through this quarantined engine yet.
-		return nil, core.E("rocm.LoadModel", "safetensors model-pack loading is not available in this pkg/hip quarantine landing (blocked on the missing dappco.re/go/rocm/model package)", err)
+		modelPath, nativeConfig, err = b.safetensorsNativeLoadConfig(context.Background(), path, loadConfig)
+		if err != nil {
+			return nil, core.E("rocm.LoadModel", "read model-pack metadata", err)
+		}
+		modelInfo = nativeConfig.ModelInfo
 	}
 	nativeConfig.AllowAttachedOnly = allowAttachedOnly
 	nativeConfig.DeviceKVMode = deviceKVMode
@@ -176,6 +177,7 @@ func (b *rocmBackend) loadModelWithROCmConfigMode(path string, loadConfig infere
 		modelType:     modelInfo.Architecture,
 		modelInfo:     modelInfo,
 		modelLabels:   cloneStringMap(nativeConfig.ModelLabels),
+		contextLength: nativeConfig.ContextSize,
 		engineProfile: nativeConfig.EngineProfile.clone(),
 	}
 	if loadConfig.AdapterPath != "" {
@@ -315,6 +317,7 @@ type rocmModel struct {
 	modelType     string
 	modelInfo     inference.ModelInfo
 	modelLabels   map[string]string
+	contextLength int
 	engineProfile ROCmModelProfile
 
 	stateMutex  sync.Mutex
@@ -620,12 +623,7 @@ func (m *rocmModel) Info() inference.ModelInfo {
 	if m == nil {
 		return inference.ModelInfo{}
 	}
-	// Quarantine landing note: upstream returned
-	// m.modelInfoReport().Info, routed through the missing
-	// dappco.re/go/rocm/model package's ResolveModelInfo (see the landing
-	// commit body). This returns the raw stored field directly instead of
-	// that package's cross-referencing/enrichment step.
-	return m.modelInfo
+	return modelInfoFromIdentity(m.modelIdentity())
 }
 
 func (m *rocmModel) ModelIdentity() inference.ModelIdentity {
@@ -2117,6 +2115,8 @@ func (m *rocmModel) modelIdentity() inference.ModelIdentity {
 	}
 	if loaded, ok := m.native.(*hipLoadedModel); ok && loaded != nil {
 		identity.ContextLength = loaded.contextSize
+	} else {
+		identity.ContextLength = m.contextLength
 	}
 	if len(identity.Labels) > 0 && identity.QuantType == "" {
 		identity.QuantType = identity.Labels["quant_type"]
@@ -2180,6 +2180,7 @@ func rocmCapabilityReport(device nativeDeviceInfo, model inference.ModelIdentity
 		labels = ApplyROCmModelRoutePlanLabels(labels, routePlan)
 	}
 	if gemma4Model {
+		rocmApplyGemma4SizeQuantSupportLabels(labels, model)
 		rocmApplyGemma4EngineFeatureLabels(labels, gemma4Features, gemma4DeclaredFeatures)
 	}
 	rocmAddCapabilityAdapterLabels(labels, adapter)
@@ -2672,6 +2673,8 @@ func rocmDecodeCapabilityLabels(kernelStatus hipKernelStatus, model inference.Mo
 		labels["prefill_kernel"] = kernelStatus.Prefill
 		labels["prefill_kernel_name"] = hipKernelNamePrefill
 	}
+	rocmApplyGemma4SizeQuantSupportLabels(labels, model)
+	rocmApplyGemma4ProductionQuantLabels(labels, model)
 	if normalizeROCmArchitecture(model.Architecture) == "tiny" {
 		labels["decode_kernel_name"] = hipKernelNameTinyDecode
 		labels["prefill_kernel_name"] = hipKernelNameTinyPrefill
@@ -2879,6 +2882,207 @@ func resolveModelContextLength(requestedContextLength, modelContextLength int) i
 func modelInfoFromMetadata(metadata gguf.Metadata) inference.ModelInfo {
 	quantBits, quantGroup := quantisationFromFileType(metadata.FileType)
 	return inference.ModelInfo{Architecture: normalizeROCmArchitecture(metadata.Architecture), NumLayers: int(metadata.BlockCount), QuantBits: quantBits, QuantGroup: quantGroup}
+}
+
+func modelInfoFromGGUFInfo(metadata gguf.Metadata, tensors []nativeTensorInfo) inference.ModelInfo {
+	return inferModelInfoFromNativeTensorGeometry(modelInfoFromMetadata(metadata), tensors)
+}
+
+func nativeGemma4TextConfigFromGGUFMetadata(metadata gguf.Metadata) nativeGemma4TextConfig {
+	architecture := normalizeROCmArchitecture(metadata.Architecture)
+	if !isROCmGemma4Architecture(architecture) && !isROCmGemma4AssistantArchitecture(architecture) {
+		return nativeGemma4TextConfig{}
+	}
+	headDim := int(firstPositiveUint32(metadata.AttentionKeyLengthSWA, metadata.AttentionValueLengthSWA, metadata.AttentionKeyLength, metadata.AttentionValueLength))
+	globalHeadDim := int(firstPositiveUint32(metadata.AttentionKeyLength, metadata.AttentionValueLength, metadata.AttentionKeyLengthSWA, metadata.AttentionValueLengthSWA))
+	cfg := nativeGemma4TextConfig{
+		NumLayers:               int(metadata.BlockCount),
+		KVSharedLayers:          int(metadata.AttentionSharedKVLayers),
+		KVSharedLayersSet:       metadata.AttentionSharedKVLayersSet,
+		SlidingWindow:           int(metadata.AttentionSlidingWindow),
+		HeadDim:                 headDim,
+		GlobalHeadDim:           globalHeadDim,
+		HiddenSizePerLayerInput: int(metadata.EmbeddingLengthPerLayerInput),
+		FinalLogitSoftcap:       metadata.FinalLogitSoftcap,
+		EnableMoEBlock:          metadata.ExpertCount > 0,
+		NumExperts:              int(metadata.ExpertCount),
+		TopKExperts:             int(metadata.ExpertUsedCount),
+		MoEIntermediateSize:     int(metadata.ExpertFeedForwardLength),
+		RoPEParameters:          nativeGemma4RoPEParametersFromGGUFMetadata(metadata, headDim, globalHeadDim),
+	}
+	if nativeGemma4GGUFUsesSlidingWindowPattern(metadata) {
+		cfg.SlidingWindowPattern = nativeGemma4DefaultSlidingWindowPattern(metadata)
+		cfg.LayerTypes = nativeGemma4LayerTypesForPattern(int(metadata.BlockCount), cfg.SlidingWindowPattern)
+	}
+	return cfg
+}
+
+const defaultGemma4SlidingWindowPattern = 6
+
+func nativeGemma4DefaultSlidingWindowPattern(metadata gguf.Metadata) int {
+	switch metadata.BlockCount {
+	case productionLaneGemma4E2BLayers:
+		return 5
+	case 42:
+		return 6
+	default:
+		return defaultGemma4SlidingWindowPattern
+	}
+}
+
+func nativeGemma4GGUFUsesSlidingWindowPattern(metadata gguf.Metadata) bool {
+	return metadata.AttentionSlidingWindowPattern ||
+		(metadata.AttentionSlidingWindow > 0 &&
+			metadata.AttentionKeyLengthSWA > 0 &&
+			metadata.AttentionKeyLength > metadata.AttentionKeyLengthSWA)
+}
+
+func nativeGemma4LayerTypesForPattern(numLayers, pattern int) []string {
+	if numLayers <= 0 || pattern <= 0 {
+		return nil
+	}
+	layerTypes := make([]string, numLayers)
+	for index := range layerTypes {
+		if pattern > 1 && (index+1)%pattern != 0 {
+			layerTypes[index] = "sliding_attention"
+		} else {
+			layerTypes[index] = "full_attention"
+		}
+	}
+	layerTypes[len(layerTypes)-1] = "full_attention"
+	return layerTypes
+}
+
+func nativeGemma4RoPEParametersFromGGUFMetadata(metadata gguf.Metadata, headDim, globalHeadDim int) map[string]nativeGemma4RoPEParameters {
+	params := map[string]nativeGemma4RoPEParameters{}
+	if globalHeadDim > 0 {
+		params["full_attention"] = nativeGemma4RoPEParameters{
+			PartialRotaryFactor: nativeGemma4RoPEPartialFactor(metadata.RopeDimensionCount, globalHeadDim),
+			RopeTheta:           firstPositiveFloat64(metadata.RopeFreqBase, 1000000),
+		}
+	}
+	if headDim > 0 {
+		params["sliding_attention"] = nativeGemma4RoPEParameters{
+			PartialRotaryFactor: nativeGemma4RoPEPartialFactor(metadata.RopeDimensionCountSWA, headDim),
+			RopeTheta:           firstPositiveFloat64(metadata.RopeFreqBaseSWA, metadata.RopeFreqBase, 10000),
+		}
+	}
+	if len(params) == 0 {
+		return nil
+	}
+	return params
+}
+
+func nativeGemma4RoPEPartialFactor(rotary uint32, headDim int) float64 {
+	if rotary == 0 || headDim <= 0 {
+		return 0
+	}
+	factor := float64(rotary) / float64(headDim)
+	if factor <= 0 || factor > 1 {
+		return 0
+	}
+	return factor
+}
+
+func firstPositiveUint32(values ...uint32) uint32 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func firstPositiveFloat64(values ...float64) float64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func inferModelInfoFromNativeTensorGeometry(info inference.ModelInfo, tensors []nativeTensorInfo) inference.ModelInfo {
+	if info.VocabSize > 0 && info.HiddenSize > 0 {
+		return info
+	}
+	for _, tensor := range tensors {
+		name := core.Lower(tensor.Name)
+		if !isHIPEmbeddingTensor(name) && !isHIPOutputTensor(name) {
+			continue
+		}
+		vocab, hidden, ok := inferVocabHiddenFromTensorDimensions(info, tensor.Dimensions)
+		if !ok {
+			continue
+		}
+		if info.VocabSize <= 0 {
+			info.VocabSize = vocab
+		}
+		if info.HiddenSize <= 0 {
+			info.HiddenSize = hidden
+		}
+		if info.VocabSize > 0 && info.HiddenSize > 0 {
+			return info
+		}
+	}
+	return info
+}
+
+func inferTiedWordEmbeddingsFromNativeTensors(tensors []nativeTensorInfo) bool {
+	hasEmbedding := false
+	hasOutput := false
+	for _, tensor := range tensors {
+		name := core.Lower(tensor.Name)
+		if isHIPEmbeddingTensor(name) {
+			hasEmbedding = true
+		}
+		if isHIPOutputTensor(name) {
+			hasOutput = true
+		}
+	}
+	return hasEmbedding && !hasOutput
+}
+
+func inferVocabHiddenFromTensorDimensions(info inference.ModelInfo, dimensions []uint64) (int, int, bool) {
+	if len(dimensions) != 2 {
+		return 0, 0, false
+	}
+	left, ok := nativeTensorDimensionInt(dimensions[0])
+	if !ok {
+		return 0, 0, false
+	}
+	right, ok := nativeTensorDimensionInt(dimensions[1])
+	if !ok {
+		return 0, 0, false
+	}
+	if info.VocabSize > 0 {
+		switch info.VocabSize {
+		case left:
+			return left, right, true
+		case right:
+			return right, left, true
+		}
+	}
+	if info.HiddenSize > 0 {
+		switch info.HiddenSize {
+		case left:
+			return right, left, true
+		case right:
+			return left, right, true
+		}
+	}
+	if left >= right {
+		return left, right, true
+	}
+	return right, left, true
+}
+
+func nativeTensorDimensionInt(value uint64) (int, bool) {
+	maxInt := uint64(^uint(0) >> 1)
+	if value == 0 || value > maxInt {
+		return 0, false
+	}
+	return int(value), true
 }
 
 func modelInfoFromIdentity(model inference.ModelIdentity) inference.ModelInfo {

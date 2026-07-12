@@ -21,6 +21,7 @@ type hipGemma4Q4EngineConfig struct {
 	ChunkedAttention                 bool
 	PageAlignedLocalKV               bool
 	DisableInterleavedRowPages       bool
+	DisableBatchedDecode             bool
 	PrefillUBatchTokens              int
 	PrefillAttentionQueryChunkTokens int
 }

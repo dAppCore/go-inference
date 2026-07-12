@@ -11,7 +11,8 @@ import (
 	core "dappco.re/go"
 )
 
-const hipAttachedDrafterTargetVerifyBatchSuffixMinRows = 2
+const hipAttachedDrafterVerifiedMaxDraftTokens = 6
+const hipAttachedDrafterKQ8VQ4VerifiedChunkTokens = 1
 
 type hipAttachedDrafterAssistantDraftBlockRequest struct {
 	LastToken         int32
@@ -109,7 +110,10 @@ func hipAttachedDrafterResolveDraftTokensForTarget(target hipGemma4Q4ForwardConf
 		return 0
 	}
 	if maxProposals := hipAttachedDrafterMaxDraftProposalsForTarget(target); maxProposals > 0 && resolved > maxProposals {
-		return maxProposals
+		resolved = maxProposals
+	}
+	if resolved > hipAttachedDrafterVerifiedMaxDraftTokens {
+		return hipAttachedDrafterVerifiedMaxDraftTokens
 	}
 	return resolved
 }
@@ -136,6 +140,38 @@ func hipAttachedDrafterMaxDraftProposalsForTarget(target hipGemma4Q4ForwardConfi
 		}
 	}
 	return maxProposals
+}
+
+func hipAttachedDrafterTargetVerifyChunkTokens(req hipAttachedDrafterTargetVerifyBlockRequest) int {
+	mode := firstNonEmptyString(req.DeviceKVMode, req.EngineConfig.DeviceKVMode)
+	normalized, ok := normalizeROCmDeviceKVMode(mode)
+	if !ok {
+		return 0
+	}
+	if normalized == rocmKVCacheModeKQ8VQ4 {
+		return hipAttachedDrafterKQ8VQ4VerifiedChunkTokens
+	}
+	return 0
+}
+
+func hipAttachedDrafterAssistantSeenPosition(nextPosition int) int {
+	if nextPosition <= 0 {
+		return 0
+	}
+	return nextPosition - 1
+}
+
+func hipAttachedDrafterStableDeviceBufferView(buffer *hipDeviceByteBuffer) *hipDeviceByteBuffer {
+	if buffer == nil {
+		return nil
+	}
+	return hipBorrowDeviceByteBuffer(
+		buffer.driver,
+		firstNonEmptyString(buffer.label, "attached drafter stable device view"),
+		buffer.Pointer(),
+		buffer.SizeBytes(),
+		buffer.Count(),
+	)
 }
 
 func hipRunAttachedDrafterAssistantDraftBlock(ctx context.Context, driver nativeHIPDriver, req hipAttachedDrafterAssistantDraftBlockRequest) (hipAttachedDrafterAssistantDraftBlockResult, error) {
@@ -177,6 +213,7 @@ func hipRunAttachedDrafterAssistantDraftBlock(ctx context.Context, driver native
 	}
 	useDeviceTokenChain := req.Plan.Embedding.TableEncoding == hipEmbeddingTableEncodingMLXQ4
 	for len(tokens) < req.MaxDraftTokens {
+		draftPosition := hipAttachedDrafterAssistantSeenPosition(req.Position + len(tokens))
 		if useDeviceTokenChain {
 			proposal, err := hipRunAttachedDrafterAssistantDraftStepDeviceToken(ctx, driver, hipAttachedDrafterAssistantDraftStepProposalRequest{
 				LastToken:         currentToken,
@@ -186,7 +223,7 @@ func hipRunAttachedDrafterAssistantDraftBlock(ctx context.Context, driver native
 				TargetDeviceState: req.TargetDeviceState,
 				Plan:              req.Plan,
 				InputPlan:         req.InputPlan,
-				Position:          req.Position,
+				Position:          draftPosition,
 				Epsilon:           req.Epsilon,
 				Softcap:           req.Softcap,
 				SuppressTokens:    req.SuppressTokens,
@@ -223,7 +260,7 @@ func hipRunAttachedDrafterAssistantDraftBlock(ctx context.Context, driver native
 			TargetDeviceState: req.TargetDeviceState,
 			Plan:              req.Plan,
 			InputPlan:         req.InputPlan,
-			Position:          req.Position,
+			Position:          draftPosition,
 			Epsilon:           req.Epsilon,
 			Softcap:           req.Softcap,
 			SuppressTokens:    req.SuppressTokens,
@@ -324,6 +361,7 @@ func hipRunAttachedDrafterTargetVerifyBlock(ctx context.Context, driver nativeHI
 	if req.TargetDeviceState == nil || req.TargetDeviceState.closed {
 		return hipAttachedDrafterTargetVerifyBlockResult{}, core.E("rocm.hip.AttachedDrafterTargetVerifyBlock", "target device KV state is required", nil)
 	}
+	req.GreedyBuffer = hipAttachedDrafterStableDeviceBufferView(req.GreedyBuffer)
 	if int32(req.CurrentGreedy.TokenID) != req.DraftTokens[0] {
 		return hipAttachedDrafterTargetVerifyBlockResult{
 			AcceptedCount: 0,
@@ -333,11 +371,210 @@ func hipRunAttachedDrafterTargetVerifyBlock(ctx context.Context, driver nativeHI
 		}, nil
 	}
 	if len(req.DraftTokens) == 1 {
-		return hipRunAttachedDrafterTargetVerifyLeadTokenCompact(ctx, driver, req, hipAttachedDrafterTargetVerifyBlockResult{
+		return hipRunAttachedDrafterTargetVerifyLeadTokenBatch(ctx, driver, req, hipAttachedDrafterTargetVerifyBlockResult{
 			AcceptedCount: 1,
 			AllAccepted:   true,
 		})
 	}
+	if chunkTokens := hipAttachedDrafterTargetVerifyChunkTokens(req); chunkTokens > 0 && len(req.DraftTokens) > chunkTokens {
+		return hipRunAttachedDrafterTargetVerifyBlockBatchedChunks(ctx, driver, req, chunkTokens)
+	}
+	return hipRunAttachedDrafterTargetVerifyBlockBatched(ctx, driver, req)
+}
+
+func hipRunAttachedDrafterTargetVerifyBlockBatchedChunks(ctx context.Context, driver nativeHIPDriver, req hipAttachedDrafterTargetVerifyBlockRequest, chunkTokens int) (hipAttachedDrafterTargetVerifyBlockResult, error) {
+	if chunkTokens <= 0 {
+		return hipAttachedDrafterTargetVerifyBlockResult{}, core.E("rocm.hip.AttachedDrafterTargetVerifyBlock", "verify chunk size must be positive", nil)
+	}
+	currentGreedy := req.CurrentGreedy
+	currentDeviceState := req.TargetDeviceState
+	var latestDeviceState *hipGemma4Q4DeviceDecodeState
+	var latestHidden *hipDeviceByteBuffer
+	verified := make([]hipGreedySampleResult, 0, len(req.DraftTokens))
+	targetCalls := 0
+	priorFinalized := false
+	success := false
+	defer func() {
+		if success {
+			return
+		}
+		_ = latestDeviceState.Close()
+		_ = latestHidden.Close()
+	}()
+	for cursor := 0; cursor < len(req.DraftTokens); {
+		if int32(currentGreedy.TokenID) != req.DraftTokens[cursor] {
+			success = true
+			return hipAttachedDrafterTargetVerifyBlockResult{
+				AcceptedCount:             cursor,
+				RejectedCount:             len(req.DraftTokens) - cursor,
+				Replacement:               currentGreedy,
+				NextGreedy:                currentGreedy,
+				DeviceState:               latestDeviceState,
+				DeviceHidden:              latestHidden,
+				PriorDeviceStateFinalized: priorFinalized,
+				TargetCalls:               targetCalls,
+				VerifiedGreedies:          verified,
+			}, nil
+		}
+		end := cursor + chunkTokens
+		if end > len(req.DraftTokens) {
+			end = len(req.DraftTokens)
+		}
+		chunkReq := req
+		chunkReq.TargetDeviceState = currentDeviceState
+		chunkReq.CurrentGreedy = currentGreedy
+		chunkReq.DraftTokens = req.DraftTokens[cursor:end]
+		chunkReq.Position = req.Position + cursor
+		var chunk hipAttachedDrafterTargetVerifyBlockResult
+		var err error
+		if len(chunkReq.DraftTokens) == 1 {
+			chunk, err = hipRunAttachedDrafterTargetVerifyLeadTokenBatch(ctx, driver, chunkReq, hipAttachedDrafterTargetVerifyBlockResult{
+				AcceptedCount: 1,
+				AllAccepted:   true,
+			})
+		} else {
+			chunk, err = hipRunAttachedDrafterTargetVerifyBlockBatched(ctx, driver, chunkReq)
+		}
+		if err != nil {
+			return hipAttachedDrafterTargetVerifyBlockResult{}, err
+		}
+		targetCalls += chunk.TargetCalls
+		verified = append(verified, chunk.VerifiedGreedies...)
+		chunkAccepted := chunk.AcceptedCount
+		if chunk.DeviceState != nil {
+			previousDeviceState := currentDeviceState
+			if !chunk.PriorDeviceStateFinalized {
+				if err := hipFinalizeGemma4Q4ForwardDeviceState(previousDeviceState, chunk.DeviceState); err != nil {
+					_ = chunk.Close()
+					return hipAttachedDrafterTargetVerifyBlockResult{}, err
+				}
+			}
+			if previousDeviceState == req.TargetDeviceState {
+				priorFinalized = true
+			} else {
+				hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
+			}
+			currentDeviceState = chunk.DeviceState
+			latestDeviceState = chunk.DeviceState
+			chunk.DeviceState = nil
+		}
+		if chunk.DeviceHidden != nil {
+			_ = latestHidden.Close()
+			latestHidden = chunk.DeviceHidden
+			chunk.DeviceHidden = nil
+		}
+		currentGreedy = chunk.NextGreedy
+		if chunkAccepted == 0 || !chunk.AllAccepted {
+			success = true
+			result := hipAttachedDrafterTargetVerifyBlockResult{
+				AcceptedCount:             cursor + chunkAccepted,
+				RejectedCount:             len(req.DraftTokens) - cursor - chunkAccepted,
+				Replacement:               chunk.Replacement,
+				NextGreedy:                chunk.NextGreedy,
+				DeviceState:               latestDeviceState,
+				DeviceHidden:              latestHidden,
+				PriorDeviceStateFinalized: priorFinalized,
+				TargetCalls:               targetCalls,
+				VerifiedGreedies:          verified,
+			}
+			if err := chunk.Close(); err != nil {
+				_ = result.Close()
+				return hipAttachedDrafterTargetVerifyBlockResult{}, err
+			}
+			return result, nil
+		}
+		if err := chunk.Close(); err != nil {
+			return hipAttachedDrafterTargetVerifyBlockResult{}, err
+		}
+		cursor += chunkAccepted
+	}
+	success = true
+	return hipAttachedDrafterTargetVerifyBlockResult{
+		AcceptedCount:             len(req.DraftTokens),
+		RejectedCount:             0,
+		NextGreedy:                currentGreedy,
+		AllAccepted:               true,
+		DeviceState:               latestDeviceState,
+		DeviceHidden:              latestHidden,
+		PriorDeviceStateFinalized: priorFinalized,
+		TargetCalls:               targetCalls,
+		VerifiedGreedies:          verified,
+	}, nil
+}
+
+func hipRunAttachedDrafterTargetVerifyBlockCompactSequence(ctx context.Context, driver nativeHIPDriver, req hipAttachedDrafterTargetVerifyBlockRequest) (hipAttachedDrafterTargetVerifyBlockResult, error) {
+	currentGreedy := req.CurrentGreedy
+	currentDeviceState := req.TargetDeviceState
+	var latestDeviceState *hipGemma4Q4DeviceDecodeState
+	var latestHidden *hipDeviceByteBuffer
+	verified := make([]hipGreedySampleResult, 0, len(req.DraftTokens))
+	targetCalls := 0
+	success := false
+	defer func() {
+		if success {
+			return
+		}
+		_ = latestDeviceState.Close()
+		_ = latestHidden.Close()
+	}()
+	for index, draft := range req.DraftTokens {
+		if int32(currentGreedy.TokenID) != draft {
+			success = true
+			return hipAttachedDrafterTargetVerifyBlockResult{
+				AcceptedCount:             index,
+				RejectedCount:             len(req.DraftTokens) - index,
+				Replacement:               currentGreedy,
+				NextGreedy:                currentGreedy,
+				DeviceState:               latestDeviceState,
+				DeviceHidden:              latestHidden,
+				PriorDeviceStateFinalized: targetCalls > 0,
+				TargetCalls:               targetCalls,
+				VerifiedGreedies:          verified,
+			}, nil
+		}
+		stepReq := req
+		stepReq.TargetDeviceState = currentDeviceState
+		stepReq.CurrentGreedy = currentGreedy
+		stepReq.DraftTokens = req.DraftTokens[index : index+1]
+		stepReq.Position = req.Position + index
+		step, err := hipRunAttachedDrafterTargetVerifyLeadTokenCompact(ctx, driver, stepReq, hipAttachedDrafterTargetVerifyBlockResult{
+			AcceptedCount: 1,
+			AllAccepted:   true,
+		})
+		if err != nil {
+			return hipAttachedDrafterTargetVerifyBlockResult{}, err
+		}
+		if currentDeviceState != req.TargetDeviceState {
+			hipReleaseClosedGemma4Q4DeviceDecodeState(currentDeviceState)
+		}
+		_ = latestHidden.Close()
+		latestDeviceState = step.DeviceState
+		latestHidden = step.DeviceHidden
+		step.DeviceState = nil
+		step.DeviceHidden = nil
+		currentGreedy = step.NextGreedy
+		currentDeviceState = latestDeviceState
+		targetCalls += step.TargetCalls
+		verified = append(verified, step.NextGreedy)
+		if err := step.Close(); err != nil {
+			return hipAttachedDrafterTargetVerifyBlockResult{}, err
+		}
+	}
+	success = true
+	return hipAttachedDrafterTargetVerifyBlockResult{
+		AcceptedCount:             len(req.DraftTokens),
+		RejectedCount:             0,
+		NextGreedy:                currentGreedy,
+		AllAccepted:               true,
+		DeviceState:               latestDeviceState,
+		DeviceHidden:              latestHidden,
+		PriorDeviceStateFinalized: targetCalls > 0,
+		TargetCalls:               targetCalls,
+		VerifiedGreedies:          verified,
+	}, nil
+}
+
+func hipRunAttachedDrafterTargetVerifyBlockBatched(ctx context.Context, driver nativeHIPDriver, req hipAttachedDrafterTargetVerifyBlockRequest) (hipAttachedDrafterTargetVerifyBlockResult, error) {
 	priorLayerKV := hipGemma4Q4DeviceLayerCaches(req.TargetDeviceState, nil, len(req.TargetForward.Layers))
 	priorLayerDescriptors, err := hipGemma4Q4DeviceLayerDescriptorTableAliases(req.TargetDeviceState, nil, len(req.TargetForward.Layers))
 	if err != nil {
@@ -354,13 +591,6 @@ func hipRunAttachedDrafterTargetVerifyBlock(ctx context.Context, driver nativeHI
 		return hipAttachedDrafterTargetVerifyBlockResult{}, err
 	}
 	result.TargetCalls = 1
-	if result.AcceptedCount == 1 {
-		if closeErr := forward.Close(); closeErr != nil {
-			_ = result.Close()
-			return hipAttachedDrafterTargetVerifyBlockResult{}, closeErr
-		}
-		return hipRunAttachedDrafterTargetVerifyLeadTokenCompact(ctx, driver, req, result)
-	}
 	if result.AllAccepted {
 		nextState, err := hipGemma4Q4DeviceDecodeStateFromPrefillForward(forward, req.DeviceKVMode)
 		closeErr := forward.Close()
@@ -384,44 +614,66 @@ func hipRunAttachedDrafterTargetVerifyBlock(ctx context.Context, driver nativeHI
 		}
 		return result, nil
 	}
-	if err := hipTruncateAttachedDrafterVerifyForwardToAcceptedPrefix(forward, priorLayerKV, result.AcceptedCount); err == nil {
-		nextState, stateErr := hipGemma4Q4DeviceDecodeStateFromPrefillForward(forward, req.DeviceKVMode)
-		closeErr := forward.Close()
-		if stateErr != nil {
-			_ = result.Close()
-			return hipAttachedDrafterTargetVerifyBlockResult{}, stateErr
-		}
-		if closeErr != nil {
-			_ = nextState.Close()
-			_ = result.Close()
-			return hipAttachedDrafterTargetVerifyBlockResult{}, closeErr
-		}
-		result.DeviceState = nextState
-		return result, nil
-	}
 	closeErr := forward.Close()
 	if closeErr != nil {
 		_ = result.Close()
 		return hipAttachedDrafterTargetVerifyBlockResult{}, closeErr
 	}
-	prefixForward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, driver, req.TargetForward, req.DraftTokens[:result.AcceptedCount], req.Position, req.Epsilon, req.DeviceKVMode, priorLayerKV, priorLayerDescriptors, nil, nil, -1, nil, req.Workspace, req.EngineConfig)
+	_ = result.Close()
+	compact, err := hipRunAttachedDrafterTargetVerifyBlockBatchedChunks(ctx, driver, req, 1)
+	if err != nil {
+		return hipAttachedDrafterTargetVerifyBlockResult{}, err
+	}
+	compact.TargetCalls++
+	return compact, nil
+}
+
+func hipRunAttachedDrafterTargetVerifyLeadTokenBatch(ctx context.Context, driver nativeHIPDriver, req hipAttachedDrafterTargetVerifyBlockRequest, result hipAttachedDrafterTargetVerifyBlockResult) (hipAttachedDrafterTargetVerifyBlockResult, error) {
+	if result.AcceptedCount != 1 || len(req.DraftTokens) == 0 {
+		_ = result.Close()
+		return hipAttachedDrafterTargetVerifyBlockResult{}, core.E("rocm.hip.AttachedDrafterTargetVerifyBlock", "batch verify requires one accepted token", nil)
+	}
+	advanced, err := hipRunAttachedDrafterTargetAdvanceOneBatch(ctx, driver, hipAttachedDrafterTargetAdvanceOneRequest{
+		TargetForward:    req.TargetForward,
+		DeviceKVMode:     req.DeviceKVMode,
+		EngineConfig:     req.EngineConfig,
+		PriorDeviceState: req.TargetDeviceState,
+		TokenID:          req.DraftTokens[0],
+		Position:         req.Position,
+		Epsilon:          req.Epsilon,
+		SuppressTokens:   req.SuppressTokens,
+		GreedyBuffer:     req.GreedyBuffer,
+		Workspace:        req.Workspace,
+		ReturnHidden:     true,
+	})
 	if err != nil {
 		_ = result.Close()
 		return hipAttachedDrafterTargetVerifyBlockResult{}, err
 	}
-	nextState, err := hipGemma4Q4DeviceDecodeStateFromPrefillForward(prefixForward, req.DeviceKVMode)
-	closeErr = prefixForward.Close()
-	if err != nil {
+	_ = result.DeviceHidden.Close()
+	_ = result.DeviceState.Close()
+	result.DeviceHidden = advanced.Current.DeviceFinalHidden
+	advanced.Current.DeviceFinalHidden = nil
+	advanced.Current.DeviceFinalHiddenBorrowed = false
+	result.DeviceState = advanced.DeviceState
+	advanced.DeviceState = nil
+	if result.AllAccepted {
+		result.Replacement = hipGreedySampleResult{}
+	} else {
+		result.Replacement = advanced.Current.Greedy
+	}
+	result.NextGreedy = advanced.Current.Greedy
+	if len(result.VerifiedGreedies) == 0 {
+		result.VerifiedGreedies = []hipGreedySampleResult{advanced.Current.Greedy}
+	} else {
+		result.VerifiedGreedies[0] = advanced.Current.Greedy
+	}
+	result.PriorDeviceStateFinalized = true
+	result.TargetCalls += advanced.TargetCalls
+	if err := advanced.Close(); err != nil {
 		_ = result.Close()
 		return hipAttachedDrafterTargetVerifyBlockResult{}, err
 	}
-	if closeErr != nil {
-		_ = nextState.Close()
-		_ = result.Close()
-		return hipAttachedDrafterTargetVerifyBlockResult{}, closeErr
-	}
-	result.DeviceState = nextState
-	result.TargetCalls++
 	return result, nil
 }
 
@@ -430,6 +682,7 @@ func hipRunAttachedDrafterTargetVerifyLeadTokenCompact(ctx context.Context, driv
 		_ = result.Close()
 		return hipAttachedDrafterTargetVerifyBlockResult{}, core.E("rocm.hip.AttachedDrafterTargetVerifyBlock", "compact verify requires one accepted token", nil)
 	}
+	greedyBuffer := hipAttachedDrafterStableDeviceBufferView(req.GreedyBuffer)
 	compact, _, err := hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx, driver, req.TargetForward, hipGemma4Q4DecodeState{}, hipGemma4Q4ForwardRequest{
 		TokenID:                 req.DraftTokens[0],
 		Position:                req.Position,
@@ -440,7 +693,7 @@ func hipRunAttachedDrafterTargetVerifyLeadTokenCompact(ctx context.Context, driv
 		PriorDeviceState:        req.TargetDeviceState,
 		ReturnDeviceState:       true,
 		DeviceFinalSample:       true,
-		FinalGreedyBuffer:       req.GreedyBuffer,
+		FinalGreedyBuffer:       greedyBuffer,
 		SuppressTokens:          req.SuppressTokens,
 		AttentionWorkspace:      req.Workspace,
 		OmitDebugTensors:        true,
@@ -619,46 +872,23 @@ func hipResolveAttachedDrafterTargetVerifyBlock(ctx context.Context, driver nati
 			NextGreedy:    req.CurrentGreedy,
 		}, nil
 	}
-	greedyBuffer, err := hipAttachedDrafterTargetVerifyGreedyBuffer(driver, req)
-	if err != nil {
-		return hipAttachedDrafterTargetVerifyBlockResult{}, err
-	}
-	firstGreedy, err := hipRunGemma4Q4PrefillFinalGreedyForRowSuppressWorkspace(ctx, driver, last, forward.FinalHidden, len(req.DraftTokens), 0, req.Epsilon, greedyBuffer, req.SuppressTokens, req.Workspace)
+	allGreedies, err := hipRunGemma4Q4PrefillFinalGreedyBatchSuppressWorkspace(ctx, driver, last, forward.FinalHidden, len(req.DraftTokens), req.Epsilon, req.SuppressTokens, req.Workspace)
 	if err != nil {
 		return hipAttachedDrafterTargetVerifyBlockResult{}, err
 	}
 	rows := make([]hipGreedySampleResult, 0, len(req.DraftTokens))
-	rows = append(rows, firstGreedy)
-	accepted := 1
-	targetToken = int32(firstGreedy.TokenID)
-	if len(req.DraftTokens) > 1 && targetToken == req.DraftTokens[1] {
-		remainingRows := len(req.DraftTokens) - 1
-		var suffixGreedies []hipGreedySampleResult
-		if remainingRows >= hipAttachedDrafterTargetVerifyBatchSuffixMinRows {
-			suffixHidden := hipBorrowDeviceByteBufferValue(driver, "attached drafter target verify suffix hidden rows", forward.FinalHidden.Pointer()+nativeDevicePointer(last.HiddenSize*4), uint64(remainingRows*last.HiddenSize*4), remainingRows*last.HiddenSize)
-			suffixGreedies, err = hipRunGemma4Q4PrefillFinalGreedyBatchSuppressWorkspace(ctx, driver, last, &suffixHidden, remainingRows, req.Epsilon, req.SuppressTokens, req.Workspace)
-			if err != nil {
-				return hipAttachedDrafterTargetVerifyBlockResult{}, err
-			}
-		} else {
-			greedy, err := hipRunGemma4Q4PrefillFinalGreedyForRowSuppressWorkspace(ctx, driver, last, forward.FinalHidden, len(req.DraftTokens), 1, req.Epsilon, greedyBuffer, req.SuppressTokens, req.Workspace)
-			if err != nil {
-				return hipAttachedDrafterTargetVerifyBlockResult{}, err
-			}
-			suffixGreedies = []hipGreedySampleResult{greedy}
+	accepted := 0
+	for index, draftToken := range req.DraftTokens {
+		if targetToken != draftToken {
+			break
 		}
-		for index := 1; index < len(req.DraftTokens); index++ {
-			if targetToken != req.DraftTokens[index] {
-				break
-			}
-			suffixIndex := index - 1
-			if suffixIndex >= len(suffixGreedies) {
-				return hipAttachedDrafterTargetVerifyBlockResult{}, core.E("rocm.hip.AttachedDrafterTargetVerifyBlock", "target verify greedy suffix result is incomplete", nil)
-			}
-			rows = append(rows, suffixGreedies[suffixIndex])
-			targetToken = int32(suffixGreedies[suffixIndex].TokenID)
-			accepted++
+		if index >= len(allGreedies) {
+			return hipAttachedDrafterTargetVerifyBlockResult{}, core.E("rocm.hip.AttachedDrafterTargetVerifyBlock", "target verify greedy batch result is incomplete", nil)
 		}
+		greedy := allGreedies[index]
+		rows = append(rows, greedy)
+		targetToken = int32(greedy.TokenID)
+		accepted++
 	}
 	result := hipAttachedDrafterTargetVerifyBlockResult{
 		AcceptedCount:    accepted,
@@ -688,16 +918,6 @@ func hipResolveAttachedDrafterTargetVerifyBlock(ctx context.Context, driver nati
 	}
 	result.DeviceHidden = hidden
 	return result, nil
-}
-
-func hipAttachedDrafterTargetVerifyGreedyBuffer(driver nativeHIPDriver, req hipAttachedDrafterTargetVerifyBlockRequest) (*hipDeviceByteBuffer, error) {
-	if req.GreedyBuffer != nil {
-		return req.GreedyBuffer, nil
-	}
-	if req.Workspace != nil {
-		return req.Workspace.BorrowProjectionGreedyBest(driver)
-	}
-	return nil, nil
 }
 
 func hipCloneGemma4Q4PrefillFinalHiddenRow(ctx context.Context, driver nativeHIPDriver, hidden *hipDeviceByteBuffer, tokenCount, row, hiddenSize int, workspace *hipAttentionHeadsChunkedWorkspace) (*hipDeviceByteBuffer, error) {

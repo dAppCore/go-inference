@@ -44,6 +44,14 @@ func TestGguf_ReadMetadata_Good(t *testing.T) {
 	core.AssertNoError(t, err)
 	core.AssertEqual(t, int64(24), meta.FileSize)
 }
+
+func TestGguf_ReadMetadata_Good_Gemma4MoE(t *testing.T) {
+	meta, err := ReadMetadata(gemma4MoEMetadataGGUF(t))
+	core.AssertNoError(t, err)
+	core.AssertEqual(t, uint32(128), meta.ExpertCount)
+	core.AssertEqual(t, uint32(8), meta.ExpertUsedCount)
+	core.AssertEqual(t, uint32(704), meta.ExpertFeedForwardLength)
+}
 func TestGguf_ReadMetadata_Bad(t *testing.T) {
 	variant := "Bad"
 	core.AssertNotEmpty(t, variant)
@@ -197,6 +205,42 @@ func tensorGGUFWithType(t *testing.T, tensorType uint32) string {
 		buf.WriteByte(0)
 	}
 	buf.Write(make([]byte, 16))
+
+	result := core.WriteFile(path, buf.Bytes(), 0o644)
+	core.RequireTrue(t, result.OK)
+	return path
+}
+
+func gemma4MoEMetadataGGUF(t *testing.T) string {
+	t.Helper()
+	path := core.PathJoin(t.TempDir(), "gemma4-moe.gguf")
+	buf := core.NewBuffer()
+	writeUint32 := func(v uint32) { core.RequireNoError(t, binary.Write(buf, binary.LittleEndian, v)) }
+	writeUint64 := func(v uint64) { core.RequireNoError(t, binary.Write(buf, binary.LittleEndian, v)) }
+	writeString := func(v string) {
+		writeUint64(uint64(len(v)))
+		_, err := buf.Write([]byte(v))
+		core.RequireNoError(t, err)
+	}
+	writeKVString := func(key, value string) {
+		writeString(key)
+		writeUint32(typeString)
+		writeString(value)
+	}
+	writeKVUint32 := func(key string, value uint32) {
+		writeString(key)
+		writeUint32(typeUint32)
+		writeUint32(value)
+	}
+
+	writeUint32(ggufMagic)
+	writeUint32(3)
+	writeUint64(0)
+	writeUint64(4)
+	writeKVString("general.architecture", "gemma4")
+	writeKVUint32("gemma4.expert_count", 128)
+	writeKVUint32("gemma4.expert_used_count", 8)
+	writeKVUint32("gemma4.expert_feed_forward_length", 704)
 
 	result := core.WriteFile(path, buf.Bytes(), 0o644)
 	core.RequireTrue(t, result.OK)

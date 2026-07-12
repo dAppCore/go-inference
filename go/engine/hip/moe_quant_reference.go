@@ -34,10 +34,9 @@ func rocmReferenceRouteExperts(logits []float32, topK, layer int, sink inference
 	if !rocmFloat32SliceFinite(logits) {
 		return nil, core.E("rocm.MoE.Router", "router logits must be finite", nil)
 	}
-	probs := softmaxFloat32(logits)
 	routes := make([]rocmExpertRoute, len(logits))
 	for i, logit := range logits {
-		routes[i] = rocmExpertRoute{ID: i, Score: logit, Prob: probs[i]}
+		routes[i] = rocmExpertRoute{ID: i, Score: logit}
 	}
 	sort.SliceStable(routes, func(i, j int) bool {
 		if routes[i].Score == routes[j].Score {
@@ -46,6 +45,14 @@ func rocmReferenceRouteExperts(logits []float32, topK, layer int, sink inference
 		return routes[i].Score > routes[j].Score
 	})
 	routes = append([]rocmExpertRoute(nil), routes[:topK]...)
+	selected := make([]float32, len(routes))
+	for index, route := range routes {
+		selected[index] = route.Score
+	}
+	probs := softmaxFloat32(selected)
+	for index := range routes {
+		routes[index].Prob = probs[index]
+	}
 	if sink != nil {
 		ids := make([]int, len(routes))
 		routeProbs := make([]float32, len(routes))

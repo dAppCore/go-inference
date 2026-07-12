@@ -37,13 +37,35 @@ const (
 
 // Metadata holds the interesting fields extracted from a GGUF file header.
 type Metadata struct {
-	Architecture  string // "gemma3", "llama", "qwen2"
-	Name          string // human-readable model name
-	SizeLabel     string // "1B", "8B", etc.
-	ContextLength uint32 // native context window
-	BlockCount    uint32 // transformer layers
-	FileType      uint32 // GGML quantisation file type
-	FileSize      int64  // file size on disk in bytes
+	Architecture                  string // "gemma3", "llama", "qwen2"
+	Name                          string // human-readable model name
+	SizeLabel                     string // "1B", "8B", etc.
+	ContextLength                 uint32 // native context window
+	BlockCount                    uint32 // transformer layers
+	FileType                      uint32 // GGML quantisation file type
+	FileSize                      int64  // file size on disk in bytes
+	EmbeddingLength               uint32
+	EmbeddingLengthOut            uint32
+	FeedForwardLength             uint32
+	ExpertCount                   uint32
+	ExpertUsedCount               uint32
+	ExpertFeedForwardLength       uint32
+	AttentionHeadCount            uint32
+	AttentionHeadCountKV          uint32
+	AttentionKeyLength            uint32
+	AttentionValueLength          uint32
+	AttentionKeyLengthSWA         uint32
+	AttentionValueLengthSWA       uint32
+	AttentionSlidingWindow        uint32
+	AttentionSharedKVLayers       uint32
+	AttentionSharedKVLayersSet    bool
+	EmbeddingLengthPerLayerInput  uint32
+	AttentionSlidingWindowPattern bool
+	RopeFreqBase                  float64
+	RopeFreqBaseSWA               float64
+	RopeDimensionCount            uint32
+	RopeDimensionCountSWA         uint32
+	FinalLogitSoftcap             float64
 }
 
 // TensorInfo describes one GGUF tensor entry without loading tensor bytes.
@@ -298,6 +320,196 @@ func readInfo(path string, includeTensors bool) (
 				alignment = u
 			}
 
+		case core.HasSuffix(key, ".embedding_length"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.EmbeddingLength = u
+			}
+
+		case core.HasSuffix(key, ".embedding_length_out"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.EmbeddingLengthOut = u
+			}
+
+		case core.HasSuffix(key, ".feed_forward_length"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.FeedForwardLength = u
+			}
+
+		case core.HasSuffix(key, ".expert_count"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.ExpertCount = u
+			}
+
+		case core.HasSuffix(key, ".expert_used_count"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.ExpertUsedCount = u
+			}
+
+		case core.HasSuffix(key, ".expert_feed_forward_length"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.ExpertFeedForwardLength = u
+			}
+
+		case core.HasSuffix(key, ".attention.head_count"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.AttentionHeadCount = u
+			}
+
+		case core.HasSuffix(key, ".attention.head_count_kv"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.AttentionHeadCountKV = u
+			}
+
+		case core.HasSuffix(key, ".attention.key_length"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.AttentionKeyLength = u
+			}
+
+		case core.HasSuffix(key, ".attention.value_length"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.AttentionValueLength = u
+			}
+
+		case core.HasSuffix(key, ".attention.key_length_swa"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.AttentionKeyLengthSWA = u
+			}
+
+		case core.HasSuffix(key, ".attention.value_length_swa"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.AttentionValueLengthSWA = u
+			}
+
+		case core.HasSuffix(key, ".attention.sliding_window"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.AttentionSlidingWindow = u
+			}
+
+		case core.HasSuffix(key, ".attention.shared_kv_layers"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.AttentionSharedKVLayers = u
+				meta.AttentionSharedKVLayersSet = true
+			}
+
+		case core.HasSuffix(key, ".embedding_length_per_layer_input"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.EmbeddingLengthPerLayerInput = u
+			}
+
+		case core.HasSuffix(key, ".attention.sliding_window_pattern"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if b, ok := value.(bool); ok {
+				meta.AttentionSlidingWindowPattern = b
+			}
+
+		case core.HasSuffix(key, ".rope.freq_base"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if f, ok := metadataFloat64(value); ok {
+				meta.RopeFreqBase = f
+			}
+
+		case core.HasSuffix(key, ".rope.freq_base_swa"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if f, ok := metadataFloat64(value); ok {
+				meta.RopeFreqBaseSWA = f
+			}
+
+		case core.HasSuffix(key, ".rope.dimension_count"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.RopeDimensionCount = u
+			}
+
+		case core.HasSuffix(key, ".rope.dimension_count_swa"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if u, ok := metadataUint32(value); ok {
+				meta.RopeDimensionCountSWA = u
+			}
+
+		case core.HasSuffix(key, ".final_logit_softcapping"):
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if f, ok := metadataFloat64(value); ok {
+				meta.FinalLogitSoftcap = f
+			}
+
 		default:
 			// Skip uninteresting value.
 			if err := skipValue(reader, valType); err != nil {
@@ -380,17 +592,29 @@ func readString(r io.Reader) (
 }
 
 // readTypedValue reads a value of the given GGUF type and returns it as a Go
-// value. String, uint32, and uint64 types return typed values (uint64 is
-// downcast to uint32 when it fits). All others are read and discarded.
+// value for scalar metadata the engine consumes. Larger uint64 values stay
+// uint64; smaller ones downcast to uint32.
 func readTypedValue(r io.Reader, valType uint32) (
 	any,
 	error,
 ) {
 	switch valType {
+	case typeBool:
+		var v uint8
+		err := binary.Read(r, binary.LittleEndian, &v)
+		return v != 0, err
 	case typeString:
 		return readString(r)
 	case typeUint32:
 		var v uint32
+		err := binary.Read(r, binary.LittleEndian, &v)
+		return v, err
+	case typeInt32:
+		var v int32
+		err := binary.Read(r, binary.LittleEndian, &v)
+		return v, err
+	case typeFloat32:
+		var v float32
 		err := binary.Read(r, binary.LittleEndian, &v)
 		return v, err
 	case typeUint64:
@@ -402,11 +626,49 @@ func readTypedValue(r io.Reader, valType uint32) (
 			return uint32(v), nil
 		}
 		return v, nil
+	case typeInt64:
+		var v int64
+		err := binary.Read(r, binary.LittleEndian, &v)
+		return v, err
+	case typeFloat64:
+		var v float64
+		err := binary.Read(r, binary.LittleEndian, &v)
+		return v, err
 	default:
 		// Read and discard the value, returning nil.
 		err := skipValue(r, valType)
 		return nil, err
 	}
+}
+
+func metadataUint32(value any) (uint32, bool) {
+	switch v := value.(type) {
+	case uint32:
+		return v, true
+	case uint64:
+		if v <= math.MaxUint32 {
+			return uint32(v), true
+		}
+	case int32:
+		if v >= 0 {
+			return uint32(v), true
+		}
+	case int64:
+		if v >= 0 && v <= math.MaxUint32 {
+			return uint32(v), true
+		}
+	}
+	return 0, false
+}
+
+func metadataFloat64(value any) (float64, bool) {
+	switch v := value.(type) {
+	case float32:
+		return float64(v), true
+	case float64:
+		return v, true
+	}
+	return 0, false
 }
 
 // skipValue reads and discards a GGUF value of the given type from r.
