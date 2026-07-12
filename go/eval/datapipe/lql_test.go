@@ -72,3 +72,30 @@ DIFF base "base" tuned "fine";
 	core.AssertEqual(t, "base", statements[2].Base)
 	core.AssertEqual(t, "fine", statements[2].Tuned)
 }
+
+// TestLQL_LQLStatementSelect_Good pins the SELECT/COMPILE/EXTRACT branch: the
+// target is the rest of the line after the keyword (lqlRest joins the trailing
+// tokens), and a trailing LIMIT is still lifted out.
+func TestLQL_LQLStatementSelect_Good(t *core.T) {
+	stmt, err := ParseLQL(`SELECT layer.0.attn beta`)
+
+	core.AssertNoError(t, err)
+	core.AssertEqual(t, LQLStatementSelect, stmt.Kind)
+	core.AssertEqual(t, "layer.0.attn beta", stmt.Target)
+
+	extract, err := ParseLQL(`EXTRACT weights LIMIT 4`)
+	core.AssertNoError(t, err)
+	core.AssertEqual(t, LQLStatementExtract, extract.Kind)
+	core.AssertEqual(t, "weights LIMIT 4", extract.Target)
+	core.AssertEqual(t, 4, extract.Limit)
+}
+
+// TestLQL_LQLStatementSelect_Ugly pins the empty-rest edge: a bare SELECT has
+// no trailing tokens, so lqlRest returns "" rather than indexing out of range.
+func TestLQL_LQLStatementSelect_Ugly(t *core.T) {
+	stmt, err := ParseLQL(`SELECT`)
+
+	core.AssertNoError(t, err)
+	core.AssertEqual(t, LQLStatementSelect, stmt.Kind)
+	core.AssertEqual(t, "", stmt.Target)
+}
