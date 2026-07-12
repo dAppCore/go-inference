@@ -33,6 +33,240 @@ func idsEqual(a, b []int32) bool {
 	return true
 }
 
+func TestArchSessionAppendKnownResidentIDs_Good(t *testing.T) {
+	sess := &ArchSession{cachedIDs: []int32{3, 5, 8, 13}}
+
+	sess.appendKnownResidentIDs(2, []int32{21, 34}, []int32{55, 89})
+
+	want := []int32{3, 5, 21, 34, 55, 89}
+	if !idsEqual(sess.cachedIDs, want) {
+		t.Fatalf("cached IDs = %v, want %v", sess.cachedIDs, want)
+	}
+}
+
+func TestArchSessionAppendKnownResidentIDs_Bad(t *testing.T) {
+	var sess *ArchSession
+
+	sess.appendKnownResidentIDs(0, []int32{2, 3}, []int32{5})
+}
+
+func TestArchSessionAppendKnownResidentIDs_Ugly(t *testing.T) {
+	for _, startPos := range []int{-1, 4} {
+		sess := &ArchSession{cachedIDs: []int32{7, 11, 13}}
+
+		sess.appendKnownResidentIDs(startPos, []int32{17}, []int32{19})
+
+		if sess.cachedIDs != nil {
+			t.Fatalf("start position %d left cached IDs %v, want nil", startPos, sess.cachedIDs)
+		}
+	}
+}
+
+func TestArchSessionMTPProjectionScratch_Good(t *testing.T) {
+	sess := &ArchSession{}
+	first := sess.mtpProjectionScratch(5)
+	copy(first, []byte{2, 3, 5, 7, 11})
+
+	second := sess.mtpProjectionScratch(3)
+
+	if !bytes.Equal(second, []byte{2, 3, 5}) {
+		t.Fatalf("reused projection scratch = %v, want [2 3 5]", second)
+	}
+	if &second[0] != &first[0] {
+		t.Fatal("projection scratch did not reuse its backing allocation")
+	}
+}
+
+func TestArchSessionMTPProjectionScratch_Bad(t *testing.T) {
+	sess := &ArchSession{}
+
+	got := sess.mtpProjectionScratch(0)
+
+	if got != nil {
+		t.Fatalf("zero projection scratch = %#v, want nil", got)
+	}
+}
+
+func TestArchSessionMTPProjectionScratch_Ugly(t *testing.T) {
+	sess := &ArchSession{}
+	first := sess.mtpProjectionScratch(2)
+	copy(first, []byte{13, 17})
+
+	second := sess.mtpProjectionScratch(9)
+
+	if len(second) != 9 || cap(second) < 9 {
+		t.Fatalf("grown projection scratch len/cap = %d/%d, want 9/>=9", len(second), cap(second))
+	}
+	if !bytes.Equal(second[:2], []byte{0, 0}) {
+		t.Fatalf("grown projection scratch retained stale bytes: %v", second[:2])
+	}
+}
+
+func TestArchSessionMTPDraftTokenScratch_Good(t *testing.T) {
+	sess := &ArchSession{}
+	first := sess.mtpDraftTokenScratch(4)
+	first = append(first, 2, 3, 5, 7)
+
+	second := sess.mtpDraftTokenScratch(3)
+	second = append(second, 11, 13, 17)
+
+	if !idsEqual(second, []int32{11, 13, 17}) {
+		t.Fatalf("reused draft token scratch = %v, want [11 13 17]", second)
+	}
+	if &second[0] != &first[0] {
+		t.Fatal("draft token scratch did not reuse its backing allocation")
+	}
+}
+
+func TestArchSessionMTPDraftTokenScratch_Bad(t *testing.T) {
+	sess := &ArchSession{}
+
+	got := sess.mtpDraftTokenScratch(0)
+
+	if got != nil {
+		t.Fatalf("zero draft token scratch = %#v, want nil", got)
+	}
+}
+
+func TestArchSessionMTPDraftTokenScratch_Ugly(t *testing.T) {
+	sess := &ArchSession{}
+	first := sess.mtpDraftTokenScratch(2)
+	first = append(first, 19, 23)
+
+	second := sess.mtpDraftTokenScratch(7)
+
+	if len(second) != 0 || cap(second) < 7 {
+		t.Fatalf("grown draft token scratch len/cap = %d/%d, want 0/>=7", len(second), cap(second))
+	}
+	second = append(second, 29, 31, 37)
+	if !idsEqual(second, []int32{29, 31, 37}) {
+		t.Fatalf("grown draft token scratch = %v, want [29 31 37]", second)
+	}
+}
+
+func TestArchSessionMTPDraftScratch_Good(t *testing.T) {
+	sess := &ArchSession{}
+	var slot []byte
+	first := sess.mtpDraftScratch(&slot, 5)
+	copy(first, []byte{31, 37, 41, 43, 47})
+
+	second := sess.mtpDraftScratch(&slot, 3)
+
+	if !bytes.Equal(second, []byte{31, 37, 41}) {
+		t.Fatalf("reused draft scratch = %v, want [31 37 41]", second)
+	}
+	if &second[0] != &first[0] {
+		t.Fatal("draft scratch did not reuse its backing allocation")
+	}
+}
+
+func TestArchSessionMTPDraftScratch_Bad(t *testing.T) {
+	sess := &ArchSession{}
+	var slot []byte
+
+	got := sess.mtpDraftScratch(&slot, 0)
+
+	if got != nil {
+		t.Fatalf("zero draft scratch = %#v, want nil", got)
+	}
+}
+
+func TestArchSessionMTPDraftScratch_Ugly(t *testing.T) {
+	sess := &ArchSession{}
+	slot := []byte{53, 59}
+
+	got := sess.mtpDraftScratch(&slot, 7)
+
+	if len(got) != 7 || cap(got) < 7 {
+		t.Fatalf("grown draft scratch len/cap = %d/%d, want 7/>=7", len(got), cap(got))
+	}
+	if !bytes.Equal(got[:2], []byte{0, 0}) {
+		t.Fatalf("grown draft scratch retained stale bytes: %v", got[:2])
+	}
+}
+
+func TestArchSessionMTPDraftLogitScoreScratch_Good(t *testing.T) {
+	sess := &ArchSession{}
+	first := sess.mtpDraftLogitScoreScratch(4)
+	copy(first, []float32{0.125, 0.25, 0.5, 1})
+
+	second := sess.mtpDraftLogitScoreScratch(2)
+
+	if !slices.Equal(second, []float32{0.125, 0.25}) {
+		t.Fatalf("reused draft logit scores = %v, want [0.125 0.25]", second)
+	}
+	if &second[0] != &first[0] {
+		t.Fatal("draft logit score scratch did not reuse its backing allocation")
+	}
+}
+
+func TestArchSessionMTPDraftLogitScoreScratch_Bad(t *testing.T) {
+	sess := &ArchSession{}
+
+	got := sess.mtpDraftLogitScoreScratch(0)
+
+	if got != nil {
+		t.Fatalf("zero draft logit score scratch = %#v, want nil", got)
+	}
+}
+
+func TestArchSessionMTPDraftLogitScoreScratch_Ugly(t *testing.T) {
+	sess := &ArchSession{}
+	first := sess.mtpDraftLogitScoreScratch(2)
+	copy(first, []float32{-0.75, 1.25})
+
+	second := sess.mtpDraftLogitScoreScratch(8)
+
+	if len(second) != 8 || cap(second) < 8 {
+		t.Fatalf("grown draft logit score scratch len/cap = %d/%d, want 8/>=8", len(second), cap(second))
+	}
+	if !slices.Equal(second[:2], []float32{0, 0}) {
+		t.Fatalf("grown draft logit score scratch retained stale values: %v", second[:2])
+	}
+}
+
+func TestArchSessionMTPDraftLogitSelectedScratch_Good(t *testing.T) {
+	sess := &ArchSession{}
+	first := sess.mtpDraftLogitSelectedScratch(4)
+	first = append(first, 2, 5, 7, 11)
+
+	second := sess.mtpDraftLogitSelectedScratch(3)
+	second = append(second, 13, 17, 19)
+
+	if !slices.Equal(second, []int{13, 17, 19}) {
+		t.Fatalf("reused selected-index scratch = %v, want [13 17 19]", second)
+	}
+	if &second[0] != &first[0] {
+		t.Fatal("selected-index scratch did not reuse its backing allocation")
+	}
+}
+
+func TestArchSessionMTPDraftLogitSelectedScratch_Bad(t *testing.T) {
+	sess := &ArchSession{}
+
+	got := sess.mtpDraftLogitSelectedScratch(0)
+
+	if got != nil {
+		t.Fatalf("zero selected-index scratch = %#v, want nil", got)
+	}
+}
+
+func TestArchSessionMTPDraftLogitSelectedScratch_Ugly(t *testing.T) {
+	sess := &ArchSession{}
+	first := sess.mtpDraftLogitSelectedScratch(2)
+	first = append(first, 23, 29)
+
+	second := sess.mtpDraftLogitSelectedScratch(9)
+
+	if len(second) != 0 || cap(second) < 9 {
+		t.Fatalf("grown selected-index scratch len/cap = %d/%d, want 0/>=9", len(second), cap(second))
+	}
+	second = append(second, 31, 37, 41)
+	if !slices.Equal(second, []int{31, 37, 41}) {
+		t.Fatalf("grown selected-index scratch = %v, want [31 37 41]", second)
+	}
+}
+
 func TestArchSessionTruncateToRollsBackPositionAndResidentIDs_Good(t *testing.T) {
 	sess := &ArchSession{
 		pos:                5,
