@@ -186,6 +186,59 @@ func TestBlockForwardF32_Golden(t *testing.T) {
 	checkGoldenBits(t, "newSSM", ns, wantNS)
 }
 
+// TestBlockForwardScratchNoProjF32_Parity proves BlockForwardScratchNoProjF32 (everything up to but NOT
+// including out_proj) plus a host out_proj GEMM reproduces BlockForwardScratchF32's own output, advanced
+// conv-state and advanced SSM-state bit-for-bit. This is the split the composed session's projMixer path
+// relies on: mixerHidden (the returned `gated`) @ projW (OutProj) must equal what the full forward computes
+// internally, so folding the projection into the FFN-tail command buffer changes WHERE the GEMM runs, never
+// its result. H=4, G=2 exercises the non-trivial group expansion the same as TestBlockForwardGatedNormReference.
+func TestBlockForwardScratchNoProjF32_Parity(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 4, HeadDim: 4, StateDim: 4, NumGroups: 2, ConvKernel: 3, Eps: 1e-5}
+	const L, D = 5, 8
+	w := mkBlockWeights(cfg, D)
+	x := syn(L*D, 41)
+
+	wantOut, wantConv, wantSSM, err := BlockForwardF32(x, w, cfg, nil, nil, L, D)
+	if err != nil {
+		t.Fatalf("BlockForwardF32: %v", err)
+	}
+
+	gated, dInner, gotConv, gotSSM, err := BlockForwardScratchNoProjF32(x, w, cfg, nil, nil, L, D, nil)
+	if err != nil {
+		t.Fatalf("BlockForwardScratchNoProjF32: %v", err)
+	}
+	if dInner != cfg.dInner() {
+		t.Fatalf("dInner = %d, want %d", dInner, cfg.dInner())
+	}
+	gotOut := matNT(gated, w.OutProj, L, dInner, D)
+
+	if len(gotOut) != len(wantOut) {
+		t.Fatalf("out len %d, want %d", len(gotOut), len(wantOut))
+	}
+	for i := range wantOut {
+		if gotOut[i] != wantOut[i] {
+			t.Fatalf("out[%d] = %v, want %v (forwardNoProj+host out_proj diverged from full forward)", i, gotOut[i], wantOut[i])
+		}
+	}
+	if len(gotConv) != len(wantConv) {
+		t.Fatalf("newConv len %d, want %d", len(gotConv), len(wantConv))
+	}
+	for i := range wantConv {
+		if gotConv[i] != wantConv[i] {
+			t.Fatalf("newConv[%d] = %v, want %v", i, gotConv[i], wantConv[i])
+		}
+	}
+	if len(gotSSM) != len(wantSSM) {
+		t.Fatalf("newSSM len %d, want %d", len(gotSSM), len(wantSSM))
+	}
+	for i := range wantSSM {
+		if gotSSM[i] != wantSSM[i] {
+			t.Fatalf("newSSM[%d] = %v, want %v", i, gotSSM[i], wantSSM[i])
+		}
+	}
+	t.Logf("mamba2 forwardNoProj+host out_proj byte-identical to full BlockForwardF32 over [%d,%d], dInner=%d", L, D, dInner)
+}
+
 func checkGoldenBits(t *testing.T, name string, got []float32, want []uint32) {
 	t.Helper()
 	if len(got) != len(want) {
