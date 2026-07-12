@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"runtime"
+	"time"
 
 	core "dappco.re/go"
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -140,7 +141,7 @@ func (t *TrayService) StopAgent() {
 }
 
 // setupSystemTray configures the system tray icon and menu.
-func setupSystemTray(app *application.App, tray *TrayService, dashboard *DashboardService, docker *DockerService, contained *ContainerService) {
+func setupSystemTray(app *application.App, tray *TrayService, dashboard *DashboardService, docker *DockerService, contained *ContainerService, serveSvc *ServeService) {
 	systray := app.SystemTray.New()
 	systray.SetTooltip("LEM — Lethean Ethics Model")
 
@@ -206,6 +207,43 @@ func setupSystemTray(app *application.App, tray *TrayService, dashboard *Dashboa
 	statusItem.SetEnabled(false)
 
 	trayMenu.AddSeparator()
+
+	// ── Serve (lem serve — the OpenAI / Anthropic / Ollama HTTP host) ──
+	serveStatusItem := trayMenu.Add(serveStatusLabel(serveSvc.GetSnapshot()))
+	serveStatusItem.SetEnabled(false)
+
+	serveToggleItem := trayMenu.Add(serveToggleLabel(serveSvc.GetSnapshot()))
+	serveToggleItem.OnClick(func(ctx *application.Context) {
+		snap := serveSvc.GetSnapshot()
+		if snap.Up || snap.Managed {
+			serveSvc.Stop()
+		} else {
+			serveSvc.Start("")
+		}
+		serveToggleItem.SetLabel(serveToggleLabel(serveSvc.GetSnapshot()))
+	})
+
+	// Model picker — start serve against a specific discovered model.
+	serveModelsMenu := trayMenu.AddSubmenu("Serve Model")
+	if models := serveSvc.ListModels(); len(models) == 0 {
+		serveModelsMenu.Add("No models found").SetEnabled(false)
+	} else {
+		for _, m := range models {
+			model := m // capture per iteration for the closure
+			label := model.Name
+			if model.Type != "" {
+				label += "  (" + model.Type + ")"
+			}
+			serveModelsMenu.Add(label).OnClick(func(ctx *application.Context) {
+				serveSvc.Start(model.Path)
+			})
+		}
+	}
+
+	trayMenu.AddSeparator()
+
+	// Keep the serve status + toggle labels live from the background poll.
+	go serveMenuRefreshLoop(trayMenu, serveSvc, serveStatusItem, serveToggleItem)
 
 	// Stack control.
 	stackItem := trayMenu.Add("Start Services")
@@ -296,6 +334,54 @@ func setupSystemTray(app *application.App, tray *TrayService, dashboard *Dashboa
 	})
 
 	systray.SetMenu(trayMenu)
+}
+
+// serveStatusLabel renders the serve daemon's state as a disabled menu caption.
+func serveStatusLabel(snap ServeSnapshot) string {
+	switch {
+	case snap.Up && snap.ModelName != "":
+		return "Serve: " + snap.ModelName + " (running)"
+	case snap.Up:
+		return "Serve: running (no model)"
+	case snap.Managed:
+		return "Serve: starting…"
+	default:
+		return "Serve: stopped"
+	}
+}
+
+// serveToggleLabel renders the Start/Stop action for the current serve state.
+func serveToggleLabel(snap ServeSnapshot) string {
+	if snap.Up || snap.Managed {
+		return "Stop Serve"
+	}
+	return "Start Serve"
+}
+
+// serveMenuRefreshLoop keeps the serve status + toggle labels current from the
+// ServeService's background poll. Menu mutation must happen on the UI thread, so
+// updates are marshalled via application.InvokeAsync; the loop only touches the
+// menu when a rendered label actually changed. It runs for the app's lifetime.
+func serveMenuRefreshLoop(menu *application.Menu, svc *ServeService, statusItem, toggleItem *application.MenuItem) {
+	var lastStatus, lastToggle string
+	ticker := time.NewTicker(serveStatusPoll)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		snap := svc.GetSnapshot()
+		statusLabel := serveStatusLabel(snap)
+		toggleLabel := serveToggleLabel(snap)
+		if statusLabel == lastStatus && toggleLabel == lastToggle {
+			continue
+		}
+		lastStatus, lastToggle = statusLabel, toggleLabel
+
+		application.InvokeAsync(func() {
+			statusItem.SetLabel(statusLabel)
+			toggleItem.SetLabel(toggleLabel)
+			menu.Update()
+		})
+	}
 }
 
 // openBrowser launches the default browser.

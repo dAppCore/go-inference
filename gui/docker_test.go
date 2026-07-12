@@ -68,7 +68,7 @@ func TestDocker_DockerService_ServiceStartup_Good(t *core.T) {
 	cancel()
 
 	err := service.ServiceStartup(ctx, application.ServiceOptions{})
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, "DockerService", service.ServiceName())
 }
 
@@ -79,7 +79,7 @@ func TestDocker_DockerService_ServiceStartup_Bad(t *core.T) {
 	cancel()
 
 	err := service.ServiceStartup(ctx, application.ServiceOptions{})
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertFalse(t, service.IsRunning())
 }
 
@@ -89,7 +89,7 @@ func TestDocker_DockerService_ServiceStartup_Ugly(t *core.T) {
 	err := service.ServiceStartup(core.Background(), application.ServiceOptions{})
 	status := service.GetStatus()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertFalse(t, status.Running)
 }
 
@@ -258,28 +258,25 @@ func TestDocker_DockerService_RestartService_Ugly(t *core.T) {
 func TestDocker_DockerService_Logs_Good(t *core.T) {
 	t.Setenv("PATH", "")
 	service := NewDockerService(t.TempDir())
-	logs, err := service.Logs("db", 10)
+	r := service.Logs("db", 10)
 
-	core.AssertEqual(t, "", logs)
-	core.AssertError(t, err)
+	core.AssertFalse(t, r.OK)
 }
 
 func TestDocker_DockerService_Logs_Bad(t *core.T) {
 	t.Setenv("PATH", "")
 	service := NewDockerService("")
-	logs, err := service.Logs("", 0)
+	r := service.Logs("", 0)
 
-	core.AssertEqual(t, "", logs)
-	core.AssertError(t, err)
+	core.AssertFalse(t, r.OK)
 }
 
 func TestDocker_DockerService_Logs_Ugly(t *core.T) {
 	t.Setenv("PATH", "")
 	service := &DockerService{}
-	logs, err := service.Logs("db", -1)
+	r := service.Logs("db", -1)
 
-	core.AssertEqual(t, "", logs)
-	core.AssertError(t, err)
+	core.AssertFalse(t, r.OK)
 }
 
 func TestDocker_DockerService_GetStatus_Good(t *core.T) {
