@@ -62,7 +62,7 @@ func TestIndex_Match_Bad(t *testing.T) {
 func TestIndex_Publish_Ugly(t *testing.T) {
 	ix := prefixindex.New(prefixindex.Config{MaxEntries: 64})
 	ix.Publish(nil, prefixindex.Entry{BundleURI: "state://a", BlockSize: 4, TokenCount: 2})
-	ix.Publish(convA, prefixindex.Entry{BlockSize: 4, TokenCount: len(convA)})          // no URI
+	ix.Publish(convA, prefixindex.Entry{BlockSize: 4, TokenCount: len(convA)})           // no URI
 	ix.Publish(convA, prefixindex.Entry{BundleURI: "state://a", TokenCount: len(convA)}) // no block size
 	ix.Publish(convA, prefixindex.Entry{BundleURI: "state://a", BlockSize: 4})           // no token count
 	if n := ix.Len(); n != 0 {
