@@ -326,6 +326,63 @@ func TestChatMultimodal_Errors(t *testing.T) {
 	}
 }
 
+// chatMLVisionTokenModel is a fakeVisionTokenModel that ALSO declares a ChatML
+// chat dialect (engine.ChatTemplateDeclarer) — a stand-in for a non-gemma
+// vision family (a qwen-VL shape) riding the SAME shared multimodal path. It
+// exists to prove the multimodal turn is framed in the model's DECLARED dialect
+// rather than gemma's, exactly as the text-only Chat path already is.
+type chatMLVisionTokenModel struct {
+	fakeVisionTokenModel
+}
+
+func (chatMLVisionTokenModel) DeclaredChatTemplate() (ChatTemplate, bool) {
+	return ChatTemplate{
+		Open: "<|im_start|>", Close: "<|im_end|>",
+		UserRole: "user", AssistantRole: "assistant", SystemRole: "system",
+	}, true
+}
+
+// TestChatMultimodal_ArchNeutral_NonGemmaFraming pins arch-neutrality on the
+// shared multimodal path: a vision model that DECLARES a ChatML template must
+// have its image turn framed in ChatML, not gemma. The prefilled ids carry the
+// declared <|im_start|> marker (a real ChatML added-token id in this fixture),
+// which is absent when the path frames the turn in gemma's dialect and the
+// gemma markers vanish against a ChatML vocab. This guards the pre-tag question:
+// composed/qwen/hip vision checkpoints ride this code and must follow their own
+// declaration, not a baked-in gemma fallback.
+func TestChatMultimodal_ArchNeutral_NonGemmaFraming(t *testing.T) {
+	tok := newChatMLFixtureTokenizer(t)
+	imStart, ok := tok.TokenID("<|im_start|>")
+	if !ok {
+		t.Fatal("ChatML fixture tokenizer is missing <|im_start|>")
+	}
+	visionSess := &fakeVisionSession{fakeSession: fakeSession{genIDs: []int32{10, 11}}}
+	vtm := &chatMLVisionTokenModel{fakeVisionTokenModel{
+		accepts:           true,
+		placeholderID:     42, // the ChatML fixture tokenizer's "z" vocab entry
+		placeholderBlock:  "zzz",
+		projectFeatures:   []byte{9, 9},
+		projectSoftTokens: 3,
+		embedRows:         [][]byte{{0}, {1}, {2}, {3}},
+		session:           visionSess,
+	}}
+	m := NewTextModel(vtm, tok, "chatml-vision-fake", inference.ModelInfo{}, 4096)
+	messages := []inference.Message{{Role: "user", Content: "hi", Images: [][]byte{{1, 2, 3}}}}
+
+	for range m.Chat(context.Background(), messages, inference.WithMaxTokens(2)) {
+	}
+	if r := m.Err(); !r.OK {
+		t.Fatalf("ChatML vision turn failed: %+v", r)
+	}
+	if !visionSess.prefillEmbedCalled {
+		t.Fatal("multimodal path did not reach the token-embedding prefill")
+	}
+	if !tokenInSet(imStart, visionSess.embedIDs) {
+		t.Fatalf("multimodal prompt ids %v missing the declared ChatML <|im_start|> id %d — "+
+			"the shared multimodal path framed a non-gemma model in gemma's dialect", visionSess.embedIDs, imStart)
+	}
+}
+
 // TestChatMultimodal_SessionNotVisionCapable pins the session-side probe: an
 // engine session that does NOT implement VisionSession is rejected rather
 // than silently falling back to a text-only prefill.
