@@ -6,6 +6,7 @@ import (
 	"math"
 	"testing"
 
+	"dappco.re/go/inference/model/quant/mlxaffine"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -355,4 +356,122 @@ func TestLoadComposed(t *testing.T) {
 		t.Fatalf("generate: %v", err)
 	}
 	t.Logf("loaded synthetic Qwen 3.6-shaped hybrid checkpoint: 4 layers (linear|full|linear|full), decodes end-to-end → %v", gen)
+}
+
+// quantiseInPlace replaces ts[name] with its mlx-affine packed form (+ .scales/.biases
+// siblings) and returns the exact dequantised values the loader must reproduce.
+func quantiseInPlace(t *testing.T, ts map[string]safetensors.Tensor, name string, bits, gs int) []float32 {
+	t.Helper()
+	src := ts[name]
+	vals, err := tensorF32(src)
+	if err != nil {
+		t.Fatalf("decode %s: %v", name, err)
+	}
+	out, in := src.Shape[0], src.Shape[1]
+	packed, scales, biases, err := mlxaffine.QuantizeTensor(vals, out, in, bits, gs)
+	if err != nil {
+		t.Fatalf("quantise %s: %v", name, err)
+	}
+	ts[name] = safetensors.Tensor{Dtype: "U32", Shape: []int{out, mlxaffine.PackedWords(in, bits)}, Data: packed}
+	base := name[:len(name)-len(".weight")]
+	ts[base+".scales"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{out, in / gs}, Data: scales}
+	ts[base+".biases"] = safetensors.Tensor{Dtype: "BF16", Shape: []int{out, in / gs}, Data: biases}
+	want, err := mlxaffine.DequantizeTensor(packed, scales, biases, out, in, bits, gs)
+	if err != nil {
+		t.Fatalf("dequantise %s: %v", name, err)
+	}
+	return want
+}
+
+// TestLoadComposedQuantised pins the mlx-affine quantised path: packed-uint32 weights with
+// .scales/.biases siblings dequantise to EXACTLY mlxaffine.DequantizeTensor's output, the
+// per-module override (8-bit embed, language_model.-prefixed key) is honoured over the 4-bit
+// default, and the logical hidden width is recovered from the dequantised length (a packed
+// embed's Shape[1] is the compressed word count, not D).
+func TestLoadComposedQuantised(t *testing.T) {
+	ts, config := mkHybridCheckpoint()
+	wantEmbed := quantiseInPlace(t, ts, "model.embed_tokens.weight", 8, 8)
+	wantGate := quantiseInPlace(t, ts, "model.layers.0.mlp.gate_proj.weight", 4, 8)
+	quantiseInPlace(t, ts, "model.layers.0.linear_attn.in_proj_qkv.weight", 4, 8)
+	config = append(config[:len(config)-1], []byte(`,"quantization":{"group_size":8,"bits":4,"language_model.model.embed_tokens":{"group_size":8,"bits":8}}}`)...)
+
+	m, err := LoadComposed(ts, config)
+	if err != nil {
+		t.Fatalf("LoadComposed: %v", err)
+	}
+	if m.D != 8 || m.Vocab != 32 {
+		t.Fatalf("logical dims: got D=%d vocab=%d, want 8/32", m.D, m.Vocab)
+	}
+	if len(m.Embed) != len(wantEmbed) {
+		t.Fatalf("embed length: got %d want %d", len(m.Embed), len(wantEmbed))
+	}
+	for i := range wantEmbed {
+		if m.Embed[i] != wantEmbed[i] {
+			t.Fatalf("embed[%d]: got %v want %v (8-bit override not honoured?)", i, m.Embed[i], wantEmbed[i])
+		}
+	}
+	gate := m.Layers[0].MLP.(*MLP).Gate
+	if len(gate) != len(wantGate) {
+		t.Fatalf("gate length: got %d want %d", len(gate), len(wantGate))
+	}
+	for i := range wantGate {
+		if gate[i] != wantGate[i] {
+			t.Fatalf("gate[%d]: got %v want %v", i, gate[i], wantGate[i])
+		}
+	}
+}
+
+// TestLoadComposedLanguageModelModelPrefix pins the real Qwen 3.6 pack nesting: EVERY tensor
+// under language_model. (language_model.model.layers…, language_model.lm_head.weight). The
+// normaliser's stripped aliases must make the load identical to the flat layout.
+func TestLoadComposedLanguageModelModelPrefix(t *testing.T) {
+	flat, config := mkHybridCheckpoint()
+	wrapped := make(map[string]safetensors.Tensor, len(flat))
+	for k, v := range flat {
+		wrapped["language_model."+k] = v
+	}
+	got, err := LoadComposed(wrapped, config)
+	if err != nil {
+		t.Fatalf("LoadComposed(language_model.model. nesting): %v", err)
+	}
+	want, err := LoadComposed(flat, config)
+	if err != nil {
+		t.Fatalf("LoadComposed(flat): %v", err)
+	}
+	if got.D != want.D || got.Vocab != want.Vocab || len(got.Layers) != len(want.Layers) {
+		t.Fatalf("geometry mismatch: got D=%d vocab=%d layers=%d, want D=%d vocab=%d layers=%d",
+			got.D, got.Vocab, len(got.Layers), want.D, want.Vocab, len(want.Layers))
+	}
+	for i := range want.Embed {
+		if got.Embed[i] != want.Embed[i] {
+			t.Fatalf("embed[%d]: wrapped %v ≠ flat %v", i, got.Embed[i], want.Embed[i])
+		}
+	}
+	if got.Output == nil {
+		t.Fatal("untied lm_head lost through the language_model. nesting")
+	}
+}
+
+// TestLoadComposedMLXConvLayout pins the mlx depthwise-conv shape: [convDim, K, 1]
+// (channel-last) versus torch's [convDim, 1, K]. The flat bytes are identical, so the load
+// must derive the same geometry and weights from either shape.
+func TestLoadComposedMLXConvLayout(t *testing.T) {
+	ts, config := mkHybridCheckpoint()
+	for k, v := range ts {
+		if len(v.Shape) == 3 && v.Shape[1] == 1 {
+			ts[k] = safetensors.Tensor{Dtype: v.Dtype, Shape: []int{v.Shape[0], v.Shape[2], 1}, Data: v.Data}
+		}
+	}
+	got, err := LoadComposed(ts, config)
+	if err != nil {
+		t.Fatalf("LoadComposed(mlx conv layout): %v", err)
+	}
+	flat, _ := mkHybridCheckpoint()
+	want, err := LoadComposed(flat, config)
+	if err != nil {
+		t.Fatalf("LoadComposed(torch conv layout): %v", err)
+	}
+	if len(got.Layers) != len(want.Layers) {
+		t.Fatalf("layer count: got %d want %d", len(got.Layers), len(want.Layers))
+	}
 }
