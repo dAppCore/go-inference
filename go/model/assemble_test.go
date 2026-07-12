@@ -162,3 +162,56 @@ func TestAssemble_Assemble_Ugly(t *testing.T) {
 		t.Fatal("Assemble with an unsupported norm-bias dtype: expected an error")
 	}
 }
+
+func TestAssemble_TieWordEmbeddings_Good(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		declaration       *bool
+		includeHead, tied bool
+	}{
+		{name: "unspecified remains compatible", declaration: nil, tied: true},
+		{name: "declared tied", declaration: boolPointer(true), tied: true},
+		{name: "declared untied", declaration: boolPointer(false), includeHead: true, tied: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tensors := minimalDenseTensors("BF16")
+			names := minimalDenseNames()
+			names.LMHead = "head"
+			if tc.includeHead {
+				tensors["head.weight"] = safetensors.Tensor{Shape: []int{8, 4}, Data: make([]byte, 8*4*2)}
+			}
+			arch := minimalDenseArch()
+			arch.TieWordEmbeddings = tc.declaration
+			m, err := Assemble(tensors, arch, names)
+			if err != nil {
+				t.Fatalf("Assemble: %v", err)
+			}
+			if m.Tied() != tc.tied {
+				t.Fatalf("Tied() = %v, want %v", m.Tied(), tc.tied)
+			}
+		})
+	}
+}
+
+func TestAssemble_TieWordEmbeddings_Bad(t *testing.T) {
+	for _, tc := range []struct {
+		declaredTied, includeHead bool
+	}{
+		{declaredTied: true, includeHead: true},
+		{declaredTied: false, includeHead: false},
+	} {
+		tensors := minimalDenseTensors("BF16")
+		names := minimalDenseNames()
+		names.LMHead = "head"
+		if tc.includeHead {
+			tensors["head.weight"] = safetensors.Tensor{Shape: []int{8, 4}, Data: make([]byte, 8*4*2)}
+		}
+		arch := minimalDenseArch()
+		arch.TieWordEmbeddings = &tc.declaredTied
+		if _, err := Assemble(tensors, arch, names); err == nil {
+			t.Fatalf("declared tied %v accepted head presence %v", tc.declaredTied, tc.includeHead)
+		}
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
