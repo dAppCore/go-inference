@@ -45,6 +45,70 @@ func TestHIPHardwareAvailabilitySmoke_Good(t *testing.T) {
 	}
 }
 
+func TestHIPHardwarePackedTopKSamplerMatchesHostReference_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const vocabSize = 262144
+	logits := make([]float32, vocabSize)
+	packed := make([]byte, vocabSize*hipMLXQ4ProjectionBestBytes)
+	for token := range logits {
+		logits[token] = -100
+	}
+	for rank := 0; rank < 64; rank++ {
+		token := 200000 + rank*17
+		logits[token] = 60 - float32(rank)/2
+	}
+	for token, score := range logits {
+		binary.LittleEndian.PutUint64(packed[token*hipMLXQ4ProjectionBestBytes:], hipPackGreedyBest(score, token))
+	}
+	input, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.PackedTopKSampleOracle", "12B sampler oracle logits", uint64(len(packed)), vocabSize)
+	core.RequireNoError(t, err)
+	defer input.Close()
+	core.RequireNoError(t, hipRuntime.driver.CopyHostToDevice(input.Pointer(), packed))
+	workspace := &hipAttentionHeadsChunkedWorkspace{}
+	defer workspace.Close()
+
+	for _, topK := range []int{40, 64} {
+		for _, topP := range []float32{1, 0.95} {
+			for _, draw := range []float64{0, 0.1, 0.5, 0.9, 0.999999} {
+				name := core.Sprintf("topk%d-topp%.2f-draw%.6f", topK, topP, draw)
+				t.Run(name, func(t *testing.T) {
+					generate := inference.GenerateConfig{Temperature: 1, TopK: topK, TopP: topP, RepeatPenalty: 1}
+					hostLogits, err := hipGemma4Q4SoftcapLogits(append([]float32(nil), logits...), 30)
+					core.RequireNoError(t, err)
+					want, err := hipGemma4Q4HostSampleResult(hostLogits, generate, nil, nil, draw)
+					core.RequireNoError(t, err)
+					candidates, candidateCount, err := hipRunPackedTopKReduceKernelWithWorkspace(context.Background(), hipRuntime.driver, input, vocabSize, topK, workspace)
+					core.RequireNoError(t, err)
+					got, _, err := hipRunPackedTopKSampleKernel(context.Background(), hipRuntime.driver, candidates, candidateCount, topK, generate.Temperature, generate.TopP, draw, nil, workspace)
+					core.RequireNoError(t, err)
+					if got.TokenID != want.TokenID {
+						t.Fatalf("device token = %d (score %.6f), host softcap reference = %d (score %.6f)", got.TokenID, got.Score, want.TokenID, want.Score)
+					}
+				})
+			}
+		}
+	}
+
+	off := inference.GenerateConfig{Temperature: 1, TopK: 0, TopP: 0.95, RepeatPenalty: 1}
+	if hipGemma4Q4DeviceTopKSamplingRequested(off) {
+		t.Fatal("top-k off unexpectedly routes through the bounded device top-k sampler")
+	}
+}
+
 func TestHIPHardwareGemma4MoEGGUFHostResidency_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run ROCm model smoke tests")
