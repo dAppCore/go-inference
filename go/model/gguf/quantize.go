@@ -3,6 +3,7 @@
 package gguf
 
 import (
+	"math"
 	"context"
 	"sort"
 
@@ -339,13 +340,34 @@ func quantizeGGUFTensors(ctx context.Context, tensors []denseSafetensor, format 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		if isMultimodalTowerTensor(tensor.Name) {
+			// A text GGUF carries text tensors only — llama.cpp maps the text
+			// stack by name and rejects unknown tensors; multimodal towers ship
+			// separately in that ecosystem (the mmproj convention). Matches the
+			// text-only GGUFs the community publishes for these checkpoints.
+			continue
+		}
 		quantized, err := quantizeGGUFTensor(tensor, format)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, quantized)
 	}
+	if len(out) == 0 {
+		return nil, core.NewError("gguf: no text-stack tensors found in source")
+	}
 	return out, nil
+}
+
+// isMultimodalTowerTensor reports whether name belongs to a non-text tower a
+// text GGUF must exclude (audio/vision encoders and their embedding bridges).
+func isMultimodalTowerTensor(name string) bool {
+	for _, prefix := range []string{"audio_tower.", "vision_tower.", "embed_audio.", "embed_vision.", "multi_modal_projector."} {
+		if core.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func quantizeGGUFTensor(tensor denseSafetensor, format QuantizeFormat) (Tensor, error) {
@@ -353,11 +375,21 @@ func quantizeGGUFTensor(tensor denseSafetensor, format QuantizeFormat) (Tensor, 
 	if err != nil {
 		return Tensor{}, err
 	}
-	if len(tensor.Data)%blockSize != 0 {
-		return Tensor{}, core.NewError(core.Sprintf("gguf: tensor %s has %d values, not divisible by GGUF block size %d", tensor.Name, len(tensor.Data), blockSize))
-	}
-	if len(tensor.Shape) == 0 || tensor.Shape[0]%uint64(blockSize) != 0 {
-		return Tensor{}, core.NewError(core.Sprintf("gguf: tensor %s first dimension is not divisible by GGUF block size %d", tensor.Name, blockSize))
+	if len(tensor.Data)%blockSize != 0 || len(tensor.Shape) == 0 || tensor.Shape[0]%uint64(blockSize) != 0 {
+		// Block-incompatible tensors (scalar clips, tiny biases, odd norms)
+		// store as raw F32 — llama.cpp's own quantizer does the same rather
+		// than failing the model; readers dispatch per-tensor on Type.
+		raw := make([]byte, len(tensor.Data)*4)
+		for i, v := range tensor.Data {
+			bits := math.Float32bits(v)
+			raw[4*i], raw[4*i+1], raw[4*i+2], raw[4*i+3] = byte(bits), byte(bits>>8), byte(bits>>16), byte(bits>>24)
+		}
+		return Tensor{
+			Name:  tensor.Name,
+			Type:  ggufTensorTypeF32,
+			Shape: core.SliceClone(tensor.Shape),
+			Data:  raw,
+		}, nil
 	}
 	var data []byte
 	switch format {

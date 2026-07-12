@@ -3,6 +3,7 @@
 package gguf
 
 import (
+	"math"
 	"context"
 	"testing"
 
@@ -256,9 +257,37 @@ func TestQuantize_quantizeGGUFTensor_Good(t *testing.T) {
 }
 
 func TestQuantize_quantizeGGUFTensor_Bad(t *testing.T) {
-	tensor := denseSafetensor{Name: "t", Shape: []uint64{10}, Data: make([]float32, 10)}
-	if _, err := quantizeGGUFTensor(tensor, QuantizeQ8_0); err == nil {
-		t.Fatalf("quantizeGGUFTensor(non-block-aligned): want error, got nil")
+	// Block-incompatible tensors (a multimodal pack's scalar clips, tiny
+	// biases) fall back to raw F32 storage — llama.cpp's own quantizer does
+	// the same — rather than failing the whole model.
+	tensor := denseSafetensor{Name: "t", Shape: []uint64{10}, Data: []float32{0, 1, -2, 3.5, 4, 5, 6, 7, 8, 9}}
+	got, err := quantizeGGUFTensor(tensor, QuantizeQ8_0)
+	if err != nil {
+		t.Fatalf("quantizeGGUFTensor(non-block-aligned): want F32 fallback, got error %v", err)
+	}
+	if got.Type != ggufTensorTypeF32 {
+		t.Fatalf("fallback Type = %d, want F32 (%d)", got.Type, ggufTensorTypeF32)
+	}
+	if len(got.Data) != 40 {
+		t.Fatalf("fallback bytes = %d, want 40 (10 raw f32)", len(got.Data))
+	}
+	bits := uint32(got.Data[12]) | uint32(got.Data[13])<<8 | uint32(got.Data[14])<<16 | uint32(got.Data[15])<<24
+	if math.Float32frombits(bits) != 3.5 {
+		t.Fatalf("fallback data[3] = %v, want 3.5 (little-endian raw f32)", math.Float32frombits(bits))
+	}
+}
+
+func TestQuantize_isMultimodalTowerTensor_Good(t *testing.T) {
+	for name, want := range map[string]bool{
+		"audio_tower.layers.0.feed_forward1.ffw_layer_1.input_max": true,
+		"vision_tower.patch_embedder.input_proj.weight":            true,
+		"embed_audio.embedding_projection.weight":                  true,
+		"model.layers.0.self_attn.q_proj.weight":                   false,
+		"lm_head.weight":                                           false,
+	} {
+		if got := isMultimodalTowerTensor(name); got != want {
+			t.Fatalf("isMultimodalTowerTensor(%q) = %v, want %v", name, got, want)
+		}
 	}
 }
 
