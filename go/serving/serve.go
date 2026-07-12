@@ -55,6 +55,15 @@ type ServeConfig struct {
 	KVCacheMode string // requested KV cache mode; wired when the engine exposes it
 	Native      bool   // no-cgo native path (the default go-inference metal engine already is)
 
+	// Scheduler routes requests through a mode-selected request scheduler
+	// (serving/scheduler) between the HTTP handlers and the model. Empty (the
+	// default) leaves the request path byte-for-byte unchanged — NO scheduler
+	// is built and nothing new runs on the hot path. "serial" / "batch" /
+	// "interleave" select the discipline; an unknown value fails closed at boot.
+	// Single-model serve only in this slice; see docs/design-continuous-batching.md
+	// for how -models-config would carry a per-resident-model scheduler.
+	Scheduler string
+
 	// Multi-model serving lifecycle. Models empty = today's single-model
 	// behaviour, unchanged. When Models is non-empty, RunServe builds the
 	// multiModelResolver instead of the single-model hot-swap: ModelPath (the
@@ -220,6 +229,21 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 			},
 		},
 	}
+
+	// Optional request scheduler — wraps the resolver so every request routes
+	// through the mode's scheduler. Unset leaves host.resolver exactly as built
+	// above (the request path is byte-for-byte unchanged; nothing is built).
+	if core.Trim(cfg.Scheduler) != "" {
+		mode, err := parseSchedulerMode(cfg.Scheduler)
+		if err != nil {
+			return err
+		}
+		sched := newSchedulerResolver(host.resolver, schedulerServeConfig(mode))
+		host.resolver = sched
+		defer sched.close()
+		printServe(log, "serve: scheduler %s — requests route through the %s scheduler between the HTTP handlers and the model", mode, mode)
+	}
+
 	return hostServe(ctx, cfg, host, outboundPolicy, log)
 }
 

@@ -299,3 +299,72 @@ slice 3's actual priority.**
   `Submit`/`Cancel`/`Close`; unit-tested with fake generators (admission
   budget, both cancellation paths, per-request backpressure isolation, clean
   shutdown), `-race` clean; **not wired into `serve.go`**.
+
+## Resolution — one scheduler, three modes, wired (supersedes open question 1)
+
+Open question 1 ("which scheduler survives wiring?") was answered **modes, not a
+survivor pick**. The three dormant packages collapsed into ONE —
+`go/serving/scheduler` (the generic name, the most-tested base) — with a `Mode`
+selecting the discipline. `serving/schedule` and `serving/interleave` are
+DELETED; their behaviour + tests moved into the unified package.
+
+| Mode | source package | what it kept | admission | fairness | backpressure |
+|---|---|---|---|---|---|
+| `serial` | `serving/scheduler` (verbatim) | bounded-queue worker pool, `ProbeSink` events, `CancellableModel` fallback, all the perf-tuned alloc contracts | count only (`MaxConcurrent` workers + `MaxQueue`) | Go scheduler across N workers | per-request `StreamBuffer` channel |
+| `batch` | `serving/schedule` (algorithm + tests) | dual concurrency+token budget, oversize-prompt retirement, continuous top-up, the `MaxRunning` witness | dual: `MaxConcurrent` **and** `MaxBatchTokens` | lockstep — one coordinator advances the whole running set one token/round | **global** (one shared lane) |
+| `interleave` | `serving/interleave` (verbatim) | live async admission, per-request goroutine isolation, `findAndCancel`, close-drain | dual: `MaxConcurrent` **and** optional `MaxBatchTokens` | admission-level (FIFO queue) | **per-request** (isolated) |
+
+**Best-version-wins, losers deleted:**
+- The one submission surface is `inference.SchedulerModel.Schedule(ctx, req)` —
+  the mux already prefers it (`serving/compat/mux.go` `forEachCompatToken`), so
+  wiring is a resolver decorator, not a mux change.
+- The `source`/`stream` per-request-stream abstraction and the FIFO
+  `MaxQueue` bounded-queue backpressure are **shared** by batch and interleave —
+  batch adopted interleave's bounded queue (the better of the two; the former
+  `schedule.Engine` had none, its slice was the queue). `serial`'s
+  `generateOptions`/`cloneLabels`/`millis` request helpers are the package's one
+  copy, used by every mode.
+- Mode-specific requirement, **probed at construction, fail-closed**: `batch`
+  (and `interleave` with `MaxBatchTokens > 0`) needs the model to expose
+  `inference.TokenizerModel` so prompt tokens can be counted for the budget — a
+  model without `Encode` returns an error from `scheduler.New` (and, in serve,
+  from `ResolveModel`) rather than silently running an inert budget.
+
+**Serve wiring (`-scheduler serial|batch|interleave`):** a `Scheduler` field on
+`serving.ServeConfig` fed by the flag. Unset (default) leaves the request path
+**byte-for-byte unchanged** — `RunServe` builds NO wrapper, `host.resolver`
+stays the bare hot-swap resolver, nothing new runs on the hot path (the wrap is
+inside `if core.Trim(cfg.Scheduler) != ""`). Set = `host.resolver` is decorated
+with a `schedulerResolver` that presents every resolved model through a
+persistent `scheduler.Model` in the chosen mode; a boot notice prints the active
+mode. The scheduler is built once per underlying model and reused, so concurrent
+requests share its queue/running-set; `CloseEngine` tears the engine down
+without touching the model (whose lifecycle stays with the resolver beneath).
+
+**Multi-model (`-models-config`) — noted, not built.** The scheduler wrap lives
+only in `RunServe`'s single-model path; `runMultiModelServe` is untouched.
+Wiring it there needs a scheduler instance **per resident model** (the
+`multiModelResolver` returns a different model per id and evicts on LRU/idle-TTL),
+so a single shared `schedulerResolver` (one `lastModel` slot) is the wrong shape:
+the decorator would need a per-model-id scheduler cache keyed to the registry's
+residency, building on admit and calling `CloseEngine` on eviction so an evicted
+model's scheduler goroutine does not outlive it. That is a registry-lifecycle
+change (a scheduler is a live goroutine, unlike the stateless welfare/policy
+resolver wraps), deliberately out of this single-model slice.
+
+**One semantics the unification could NOT fully collapse (evidenced):** the
+former `schedule.Engine`'s int-based `Stepper` seam (`StepResult.Tokens
+map[string]int`, `go/serving/schedule/schedule.go:71` in the pre-merge tree) is a
+token-**count** scheduler; the live serve path needs token-**payload**
+(`inference.Token`) delivery per request. A static, slab-allocated count
+scheduler (`schedule.go`'s `seqStore`/`tokenSlab`, sized from `len(requests)` up
+front) and a live payload coordinator with unbounded submission cannot share
+buffer management without one regressing the other, so batch mode is a live
+coordinator (`go/serving/scheduler/batch.go`) that keeps schedule's admission
+**policy** (dual budget, oversize retirement, continuous top-up, cap clamping —
+all re-tested) while delivering real tokens via `iter.Pull`. Batch's lockstep
+also inherits schedule's structural cost the memo flagged above: a
+newly-admitted request's first pull pays its prefill inside the round (briefly
+stalling peers), and a stalled consumer backpressures the whole set — which is
+exactly why `interleave` (per-request goroutines) remains the other mode rather
+than being folded into batch.
