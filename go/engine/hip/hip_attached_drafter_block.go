@@ -12,7 +12,12 @@ import (
 )
 
 const hipAttachedDrafterVerifiedMaxDraftTokens = 6
-const hipAttachedDrafterKQ8VQ4VerifiedChunkTokens = 1
+
+// KQ8VQ4 verifies the whole draft block in one batched target forward and
+// truncates the device KV to the accepted prefix (the row-interleaved trim the
+// descriptor-append kernel supports), so the chunk size is the max draft block:
+// blocks within the cap take the batched path, only an over-cap block chunks.
+const hipAttachedDrafterKQ8VQ4VerifiedChunkTokens = hipAttachedDrafterVerifiedMaxDraftTokens
 
 type hipAttachedDrafterAssistantDraftBlockRequest struct {
 	LastToken         int32
@@ -614,18 +619,28 @@ func hipRunAttachedDrafterTargetVerifyBlockBatched(ctx context.Context, driver n
 		}
 		return result, nil
 	}
+	// Partial acceptance: the batched forward already holds the accepted-prefix
+	// hidden and KV, so truncate the device KV to the accepted prefix instead of
+	// re-running the accepted tokens through a single-token forward. The prior
+	// device state stays live (unfinalized) as the accepted-prefix rollback base.
+	if err := hipTruncateAttachedDrafterVerifyForwardToAcceptedPrefix(forward, priorLayerKV, result.AcceptedCount); err != nil {
+		_ = forward.Close()
+		_ = result.Close()
+		return hipAttachedDrafterTargetVerifyBlockResult{}, err
+	}
+	nextState, stateErr := hipGemma4Q4DeviceDecodeStateFromPrefillForward(forward, req.DeviceKVMode)
 	closeErr := forward.Close()
+	if stateErr != nil {
+		_ = result.Close()
+		return hipAttachedDrafterTargetVerifyBlockResult{}, stateErr
+	}
 	if closeErr != nil {
+		_ = nextState.Close()
 		_ = result.Close()
 		return hipAttachedDrafterTargetVerifyBlockResult{}, closeErr
 	}
-	_ = result.Close()
-	compact, err := hipRunAttachedDrafterTargetVerifyBlockBatchedChunks(ctx, driver, req, 1)
-	if err != nil {
-		return hipAttachedDrafterTargetVerifyBlockResult{}, err
-	}
-	compact.TargetCalls++
-	return compact, nil
+	result.DeviceState = nextState
+	return result, nil
 }
 
 func hipRunAttachedDrafterTargetVerifyLeadTokenBatch(ctx context.Context, driver nativeHIPDriver, req hipAttachedDrafterTargetVerifyBlockRequest, result hipAttachedDrafterTargetVerifyBlockResult) (hipAttachedDrafterTargetVerifyBlockResult, error) {
