@@ -34,10 +34,17 @@ func TestCoverage_NativeFallbackHelpers_Good(t *testing.T) {
 		{Role: "user", Content: "hello"},
 		{Role: "assistant", Content: "ok"},
 	}))
-	core.AssertEqual(t, "<bos><|turn>user\nhello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>", formatGemma4ChatTemplate([]inference.Message{
+	// Only the large-variant templates (12B/26B/31B) pre-close an empty thought
+	// channel on a thinking-off generation cue; the E2B/E4B chat_template.jinja
+	// has no such branch (see model/gemma4/chat_template.go), so the small-variant
+	// default must NOT emit it and the large-variant path MUST.
+	core.AssertEqual(t, "<bos><|turn>user\nhello<turn|>\n<|turn>model\n", formatGemma4ChatTemplate([]inference.Message{
 		{Role: "user", Content: " hello "},
 	}))
-	core.AssertEqual(t, "<bos><|turn>system\nbe concise<turn|>\n<|turn>user\nhello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>", formatGemma4ChatTemplate([]inference.Message{
+	core.AssertEqual(t, "<bos><|turn>user\nhello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>", formatGemma4ChatTemplateWithConfig([]inference.Message{
+		{Role: "user", Content: " hello "},
+	}, gemma4ChatTemplateConfig{LargeVariant: true}))
+	core.AssertEqual(t, "<bos><|turn>system\nbe concise<turn|>\n<|turn>user\nhello<turn|>\n<|turn>model\n", formatGemma4ChatTemplate([]inference.Message{
 		{Role: "developer", Content: " be concise "},
 		{Role: "user", Content: "hello"},
 	}))
@@ -51,7 +58,7 @@ func TestCoverage_NativeFallbackHelpers_Good(t *testing.T) {
 		{Role: "user", Content: "hi"},
 		{Role: "assistant", Content: "<|channel>thought\nprivate<channel|>visible"},
 	}, gemma4ChatTemplateConfig{NoGenerationPrompt: true}))
-	core.AssertEqual(t, "<bos><|turn>user\nhi<turn|>\n<|turn>model\none<turn|>\ntwo<turn|>\n<|turn>model\n<|channel>thought\n<channel|>", formatGemma4ChatTemplateWithConfig([]inference.Message{
+	core.AssertEqual(t, "<bos><|turn>user\nhi<turn|>\n<|turn>model\none<turn|>\ntwo<turn|>\n<|turn>model\n", formatGemma4ChatTemplateWithConfig([]inference.Message{
 		{Role: "user", Content: "hi"},
 		{Role: "assistant", Content: "one"},
 		{Role: "assistant", Content: "two"},
