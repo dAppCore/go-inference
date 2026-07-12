@@ -126,6 +126,58 @@ func (m *Model) scheduleInterleave(ctx context.Context, req inference.ScheduledR
 	return inference.RequestHandle{ID: id, Model: inference.ModelIdentity{ID: req.Model}, Labels: handleLabels}, out, nil
 }
 
+// cbEligible reports whether a request can be served on the continuous-batching
+// shared-lane-set path: a raw prompt (the neutral TextModel surface exposes no
+// chat rendering, so a chat turn keeps the plain interleave path) decoded
+// greedily (the slice-1 owner is greedy-only). Everything else falls back — a
+// real path, never a fake batch.
+func cbEligible(req inference.ScheduledRequest) bool {
+	return core.Trim(req.Prompt) != "" && len(req.Messages) == 0 && samplerGreedy(req.Sampler)
+}
+
+// samplerGreedy reports whether cfg selects greedy (temperature-0) decoding.
+func samplerGreedy(cfg inference.SamplerConfig) bool {
+	return cfg.Temperature == 0 && cfg.TopK == 0 && cfg.TopP == 0 && cfg.MinP == 0 && cfg.RepeatPenalty == 0
+}
+
+// scheduleCBStep tokenises a raw prompt and drives it through the shared lane
+// set, adapting the per-request inference.Token stream into the ScheduledToken
+// surface the mux consumes — the CB-step twin of scheduleInterleave.
+func (m *Model) scheduleCBStep(ctx context.Context, req inference.ScheduledRequest) (inference.RequestHandle, <-chan inference.ScheduledToken, error) {
+	id := core.Trim(req.ID)
+	if id == "" {
+		id = m.nextRequestID()
+	}
+	tok, ok := m.base.(inference.TokenizerModel)
+	if !ok { // gated at New, but stay defensive rather than panic
+		return m.scheduleInterleave(ctx, req)
+	}
+	promptIDs := tok.Encode(req.Prompt)
+	if len(promptIDs) == 0 {
+		return inference.RequestHandle{}, nil, core.E("scheduler.scheduleCBStep", "prompt encoded to no tokens", nil)
+	}
+	tokens, err := m.cbEngine.submit(ctx, id, promptIDs, req.Sampler.MaxTokens, req.Sampler.StopTokens)
+	if err != nil {
+		return inference.RequestHandle{}, nil, err
+	}
+	labels := cloneLabels(req.Labels)
+	out := make(chan inference.ScheduledToken, m.streamBuffer)
+	go func() {
+		defer close(out)
+		for t := range tokens {
+			if t.Text == "" {
+				t.Text = tok.Decode([]int32{t.ID})
+			}
+			out <- inference.ScheduledToken{RequestID: id, Token: t, Metrics: m.base.Metrics(), Labels: labels}
+		}
+	}()
+	var handleLabels map[string]string
+	if len(req.Labels) > 0 {
+		handleLabels = cloneLabels(req.Labels)
+	}
+	return inference.RequestHandle{ID: id, Model: inference.ModelIdentity{ID: req.Model}, Labels: handleLabels}, out, nil
+}
+
 // submit enqueues a request. promptTokens is the caller's prompt-length
 // estimate, used only for MaxBatchTokens admission budgeting (0 is fine when
 // the budget is unset). Submit blocks only while the queue is full (MaxQueue

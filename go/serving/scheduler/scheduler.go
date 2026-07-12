@@ -142,6 +142,14 @@ type Model struct {
 	// --- non-serial engines (exactly one is non-nil off serial) ---
 	batch *batchEngine
 	inter *interleaveEngine
+
+	// cbEngine is interleave mode's continuous-batching fast path — non-nil only
+	// when the base model exposes an AVAILABLE inference.BatchStepModel (metal's
+	// multi-session owner) AND an inference.TokenizerModel to tokenise prompts.
+	// When nil (the common case, and whenever LTHN_CB_STEP=0), interleave mode is
+	// byte-for-byte the plain per-request engine below. CB-eligible requests
+	// (raw prompt, greedy) route here; chat and non-greedy fall to m.inter.
+	cbEngine *cbStepEngine
 }
 
 // probeSinkBox wraps the sink interface so it can be stored in an
@@ -203,6 +211,15 @@ func New(model inference.TextModel, cfg Config) (*Model, error) {
 		m.batch = newBatchEngine(m, cfg)
 	case ModeInterleave:
 		m.inter = newInterleaveEngine(cfg)
+		// Probe the continuous-batching capability (optional-interface shape,
+		// like StepWithID/LMHead). Present + available + tokenisable ⇒ build the
+		// shared-lane-set coordinator; anything else leaves cbEngine nil and the
+		// plain per-request engine is the whole of interleave mode.
+		if bsm, ok := m.base.(inference.BatchStepModel); ok {
+			if _, hasTok := m.base.(inference.TokenizerModel); hasTok {
+				m.cbEngine = newCBStepEngine(bsm, cfg)
+			}
+		}
 	default: // serial
 		m.queue = make(chan *job, max(cfg.MaxQueue, 0))
 		m.closeCh = make(chan struct{})
@@ -241,6 +258,9 @@ func (m *Model) Schedule(ctx context.Context, req inference.ScheduledRequest) (i
 	case ModeBatch:
 		return m.scheduleBatch(ctx, req)
 	case ModeInterleave:
+		if m.cbEngine != nil && cbEligible(req) {
+			return m.scheduleCBStep(ctx, req)
+		}
 		return m.scheduleInterleave(ctx, req)
 	}
 	// serial
@@ -319,6 +339,11 @@ func (m *Model) CancelRequest(_ context.Context, id string) (inference.RequestCa
 	case ModeBatch:
 		return m.batch.cancel(id), nil
 	case ModeInterleave:
+		// The id lives in exactly one engine; cancel is an idempotent no-op in
+		// the other, so cancelling both reaches a CB-step or a plain request.
+		if m.cbEngine != nil {
+			m.cbEngine.cancel(id)
+		}
 		return m.inter.cancel(id), nil
 	}
 	// serial
@@ -349,7 +374,17 @@ func (m *Model) Stats() Stats {
 	case ModeBatch:
 		return m.batch.stats()
 	case ModeInterleave:
-		return m.inter.stats()
+		s := m.inter.stats()
+		if m.cbEngine != nil {
+			c := m.cbEngine.stats()
+			s.Submitted += c.Submitted
+			s.Admitted += c.Admitted
+			s.Completed += c.Completed
+			s.Cancelled += c.Cancelled
+			s.Active += c.Active
+			s.Queued += c.Queued
+		}
+		return s
 	}
 	queued := int64(0)
 	if m.queue != nil {
@@ -512,6 +547,9 @@ func (m *Model) CloseEngine() {
 			m.batch.close()
 		}
 	case ModeInterleave:
+		if m.cbEngine != nil {
+			m.cbEngine.close()
+		}
 		if m.inter != nil {
 			m.inter.close()
 		}
