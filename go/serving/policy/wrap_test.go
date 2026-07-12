@@ -139,11 +139,11 @@ func TestPolicy_WrapResolver_Audit(t *testing.T) {
 func TestPolicy_WrapResolverMediated_Rewrite_Good(t *testing.T) {
 	pol := mustCompile(t, `{"rules":[{"match":"term","value":"PROJECT-X","action":"rewrite"}]}`)
 	fake := &policyFakeModel{tokens: []string{"the PROJ", "ECT-X sh", "ips soon"}}
-	mediate := func(_ context.Context, _ int, span string) (string, error) {
-		return "«" + span + "»", nil
+	mediate := func(_ context.Context, _ int, _ string) (string, error) {
+		return "our flagship", nil
 	}
 	got := drain(t, WrapResolverMediated(resolverOf(fake), pol, nil, mediate))
-	if got != "the «PROJECT-X» ships soon" {
+	if got != "the our flagship ships soon" {
 		t.Fatalf("mediated wrapped reply = %q", got)
 	}
 }
@@ -159,6 +159,28 @@ func TestPolicy_WrapResolverMediated_MediatorError(t *testing.T) {
 	got := drain(t, WrapResolverMediated(resolverOf(fake), pol, nil, boom))
 	if got != "the [gone] here" {
 		t.Fatalf("degraded wrapped reply = %q, want the redact fallback", got)
+	}
+}
+
+// TestPolicy_WrapResolverMediated_AuditDegraded pins that a rewrite which had to
+// degrade (here an echoing mediator whose output is redacted by re-enforcement)
+// is audited as "degraded", never "enforced", and still never leaks the matched
+// content through the audit line.
+func TestPolicy_WrapResolverMediated_AuditDegraded(t *testing.T) {
+	pol := mustCompile(t, `{"rules":[{"match":"term","value":"PROJECT-X","action":"rewrite"}]}`)
+	fake := &policyFakeModel{tokens: []string{"the PROJ", "ECT-X here"}}
+	echo := func(_ context.Context, _ int, span string) (string, error) { return span, nil }
+	var log core.Builder
+	got := drain(t, WrapResolverMediated(resolverOf(fake), pol, &log, echo))
+	if got != "the [redacted] here" {
+		t.Fatalf("degraded wrapped reply = %q, want the residual term redacted", got)
+	}
+	audit := log.String()
+	if !core.Contains(audit, "rule #0 rewrite degraded on output") {
+		t.Fatalf("audit = %q, want a degraded rewrite line", audit)
+	}
+	if core.Contains(audit, "PROJECT-X") {
+		t.Fatalf("audit leaked matched content: %q", audit)
 	}
 }
 
