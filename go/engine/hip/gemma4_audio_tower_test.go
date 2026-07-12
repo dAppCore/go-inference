@@ -3,12 +3,15 @@
 package hip
 
 import (
+	"encoding/binary"
 	"math"
 	"os"
 	"testing"
 
 	enginegemma4 "dappco.re/go/inference/engine/hip/model/gemma4"
+	"dappco.re/go/inference/model"
 	_ "dappco.re/go/inference/model/gemma4" // register the gemma4 ArchSpec so model.Load assembles the tower
+	"dappco.re/go/inference/model/quant/mlxaffine"
 )
 
 // gemma4_audio_tower_test.go is the hip-side integration gate for the Conformer audio tower binding. It
@@ -90,6 +93,77 @@ func TestAudioTower_Project_Bad(t *testing.T) {
 	var tower *AudioTower
 	if _, _, err := tower.Project(syntheticWaveform(8000)); err == nil {
 		t.Fatal("Project on a nil tower must error")
+	}
+}
+
+func TestHipAudioProjectorF32_Good(t *testing.T) {
+	projector := audioQ4GoldenProjector()
+	features := []float32{1, -2, 3, -4, 5, -6, 7, -8, -1, 2, -3, 4, -5, 6, -7, 8}
+	weights, err := hipLoadAudioProjectorQ4(projector)
+	if err != nil {
+		t.Fatalf("hipLoadAudioProjectorQ4: %v", err)
+	}
+	got, err := hipAudioProjectorF32(features, 2, projector, weights, 1e-6)
+	if err != nil {
+		t.Fatalf("hipAudioProjectorF32: %v", err)
+	}
+	want := []float32{-1.584236, 3.5645308, -1.5594823, 1.584236, -3.5645308, 1.5594823}
+	for index := range want {
+		if delta := math.Abs(float64(got[index] - want[index])); delta > 1e-6 {
+			t.Fatalf("embedding[%d]=%.9f, want %.9f", index, got[index], want[index])
+		}
+	}
+}
+
+func TestAudioTower_ProjectEmbeddings_Bad(t *testing.T) {
+	if _, _, err := (*AudioTower)(nil).ProjectEmbeddings([]float32{1}); err == nil {
+		t.Fatal("ProjectEmbeddings on a nil tower must error")
+	}
+}
+
+func TestAudioTower_ProjectEmbeddings_Good(t *testing.T) {
+	dir := e2b4bitSnapshotDir()
+	if dir == "" {
+		t.Skip("e2b-it-4bit checkpoint not in HF cache — supervised integration test")
+	}
+	tower, err := LoadAudioTower(dir)
+	if err != nil {
+		t.Fatalf("LoadAudioTower(%s): %v", dir, err)
+	}
+	defer func() { _ = tower.Close() }()
+	embeddings, softTokens, err := tower.ProjectEmbeddings(syntheticWaveform(8000))
+	if err != nil {
+		t.Fatalf("ProjectEmbeddings: %v", err)
+	}
+	if softTokens <= 0 || len(embeddings)%softTokens != 0 {
+		t.Fatalf("ProjectEmbeddings geometry: embeddings=%d softTokens=%d", len(embeddings), softTokens)
+	}
+}
+
+func TestAudioTower_ProjectEmbeddings_Ugly(t *testing.T) {
+	if _, _, err := (&AudioTower{}).ProjectEmbeddings(nil); err == nil {
+		t.Fatal("ProjectEmbeddings on an empty tower must error")
+	}
+}
+
+func TestHipLoadAudioProjectorQ4_Ugly(t *testing.T) {
+	projector := audioQ4GoldenProjector()
+	projector.Biases = nil
+	if _, err := hipLoadAudioProjectorQ4(projector); err == nil {
+		t.Fatal("projector without affine biases must error")
+	}
+}
+
+func audioQ4GoldenProjector() model.LoadedAudioLinear {
+	const inDim, outDim, groupSize, bits = 8, 3, 8, 4
+	packed := make([]byte, outDim*4)
+	binary.LittleEndian.PutUint32(packed[0:], 0x76543210)
+	binary.LittleEndian.PutUint32(packed[4:], 0xfedcba98)
+	binary.LittleEndian.PutUint32(packed[8:], 0x13579bdf)
+	return model.LoadedAudioLinear{
+		Weight: packed, Scales: []byte{0x00, 0x3e, 0x80, 0xbe, 0x00, 0x3d},
+		Biases: []byte{0x80, 0x3f, 0x00, 0xbf, 0x00, 0x40}, OutDim: outDim, InDim: inDim,
+		GroupSize: groupSize, Bits: bits, Kind: mlxaffine.Mode,
 	}
 }
 
