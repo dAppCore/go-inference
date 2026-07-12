@@ -221,3 +221,86 @@ func TestStructured_Repair_Ugly(t *testing.T) {
 		t.Fatalf("ParseWithRepair maxAttempts<=0: expected 0 reprompt calls, got %d", rp.calls)
 	}
 }
+
+// --- ValidateWithRepair ---------------------------------------------------
+
+func TestStructured_ValidateWithRepair_Good(t *testing.T) {
+	// First payload is missing "age"; the reprompter serves a matching shape on
+	// the 2nd attempt. ValidateWithRepair must succeed and return that text.
+	schema := Schema{Fields: map[string]Kind{"name": KindString, "age": KindNumber}}
+	rp := &fakeReprompter{payloads: []string{`{"name":"Ada","age":36}`}}
+	got, err := ValidateWithRepair(`{"name":"Ada"}`, schema, rp, 3)
+	if err != nil {
+		t.Fatalf("ValidateWithRepair recovery: unexpected error: %v", err)
+	}
+	if got != `{"name":"Ada","age":36}` {
+		t.Fatalf("ValidateWithRepair recovery: got %q, want the repaired payload", got)
+	}
+	if rp.calls != 1 {
+		t.Fatalf("ValidateWithRepair: expected 1 reprompt call, got %d", rp.calls)
+	}
+}
+
+func TestStructured_ValidateWithRepair_Bad(t *testing.T) {
+	// The reprompter keeps serving shapes missing "age"; attempts exhausted ⇒
+	// the last attempt's text and error come back together.
+	schema := Schema{Fields: map[string]Kind{"name": KindString, "age": KindNumber}}
+	rp := &fakeReprompter{payloads: []string{`{"name":"still"}`, `{"name":"also"}`}}
+	got, err := ValidateWithRepair(`{"name":"bad"}`, schema, rp, 3)
+	if err == nil {
+		t.Fatal("ValidateWithRepair exhausted: expected error, got nil")
+	}
+	if got != `{"name":"also"}` {
+		t.Fatalf("ValidateWithRepair exhausted: got %q, want the last attempted payload", got)
+	}
+	// 3 attempts total: 1 initial Validate + 2 repair re-validates ⇒ 2 reprompts.
+	if rp.calls != 2 {
+		t.Fatalf("ValidateWithRepair exhausted: expected 2 reprompt calls, got %d", rp.calls)
+	}
+}
+
+func TestStructured_ValidateWithRepair_RepromptError_Bad(t *testing.T) {
+	// The model can't be reached: the reprompter errors on the first repair call.
+	// ValidateWithRepair surfaces that reprompt failure immediately, wrapping the
+	// last validation error as its cause for context.
+	schema := Schema{Fields: map[string]Kind{"name": KindString}}
+	rp := &fakeReprompter{} // empty queue ⇒ first Reprompt returns an error
+	got, err := ValidateWithRepair(`not json`, schema, rp, 3)
+	if err == nil {
+		t.Fatal("ValidateWithRepair reprompt failure: expected error, got nil")
+	}
+	if got != `not json` {
+		t.Fatalf("ValidateWithRepair reprompt failure: got %q, want the original text echoed back", got)
+	}
+	if rp.calls != 1 {
+		t.Fatalf("ValidateWithRepair reprompt failure: expected 1 reprompt call, got %d", rp.calls)
+	}
+}
+
+func TestStructured_ValidateWithRepair_Ugly(t *testing.T) {
+	schema := Schema{Fields: map[string]Kind{"name": KindString}}
+	// nil reprompter ⇒ single attempt, no repair. Bad input ⇒ error, text echoed.
+	got, err := ValidateWithRepair(`{"age":1}`, schema, nil, 5)
+	if err == nil {
+		t.Fatal("ValidateWithRepair nil reprompter on bad input: expected error, got nil")
+	}
+	if got != `{"age":1}` {
+		t.Fatalf("ValidateWithRepair nil reprompter: got %q, want the input echoed back", got)
+	}
+	// nil reprompter with good input ⇒ success on the single attempt.
+	got2, err := ValidateWithRepair(`{"name":"Linus"}`, schema, nil, 5)
+	if err != nil {
+		t.Fatalf("ValidateWithRepair nil reprompter on good input: unexpected error: %v", err)
+	}
+	if got2 != `{"name":"Linus"}` {
+		t.Fatalf("ValidateWithRepair nil reprompter: got %q, want the input echoed back", got2)
+	}
+	// maxAttempts <= 0 with a reprompter ⇒ still a single attempt (bounded).
+	rp := &fakeReprompter{payloads: []string{`{"name":"X"}`}}
+	if _, err := ValidateWithRepair(`{}`, schema, rp, 0); err == nil {
+		t.Fatal("ValidateWithRepair maxAttempts<=0 on bad input: expected error, got nil")
+	}
+	if rp.calls != 0 {
+		t.Fatalf("ValidateWithRepair maxAttempts<=0: expected 0 reprompt calls, got %d", rp.calls)
+	}
+}
