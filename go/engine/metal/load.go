@@ -199,6 +199,9 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 			tm.visionFeatureCfg, _ = LoadVisionImageFeatureConfig(dir)
 		}
 		tm.audio = lm.Audio
+		if lm.Audio != nil {
+			tm.audioExtractor = buildAudioExtractor(dir)
+		}
 		tm.diffusion = lm.Diffusion
 		return tm, nil
 	}
@@ -231,8 +234,29 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 		tm.visionFeatureCfg, _ = LoadVisionImageFeatureConfig(dir)
 	}
 	tm.audio = lm.Audio
+	if lm.Audio != nil {
+		tm.audioExtractor = buildAudioExtractor(dir)
+	}
 	tm.diffusion = lm.Diffusion
 	return tm, nil
+}
+
+// buildAudioExtractor builds the host mel front-end for a Conformer audio tower from the model
+// directory's processor_config.json. Best-effort, mirroring visionFeatureCfg: a missing or malformed
+// config returns nil (audio disabled, ProjectAudio then errors clearly) and never blocks the load. The
+// disable is traced so a broken front-end is diagnosable.
+func buildAudioExtractor(dir string) *AudioFeatureExtractor {
+	cfg, err := LoadAudioFeatureConfig(dir)
+	if err != nil || cfg == nil {
+		nativeTraceLog(core.Sprintf("audio: feature extractor disabled (config: %v)\n", err))
+		return nil
+	}
+	extractor, err := NewAudioFeatureExtractor(cfg)
+	if err != nil {
+		nativeTraceLog(core.Sprintf("audio: feature extractor disabled (build: %v)\n", err))
+		return nil
+	}
+	return extractor
 }
 
 func nativeTokenModelBackendOptions(cfg TokenModelLoadConfig) []BackendOption {

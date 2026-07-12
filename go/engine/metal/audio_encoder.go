@@ -74,7 +74,10 @@ type AudioEncoderWeights struct {
 	SubsampleC AudioSubsampleConfig
 	Layers     []*AudioLayerWeights
 	OutputProj []byte // [OutputDim, hidden]
-	OutputDim  int
+	// OutputProjBias is audio_tower.output_proj.bias [OutputDim] BF16, added to every projected row —
+	// HF's output_proj is a bias=True Linear. nil is a no-op (packs that omit it).
+	OutputProjBias []byte
+	OutputDim      int
 }
 
 // AudioEncode runs the full audio tower on log-mel features [frames, melBins] bf16, returning
@@ -95,7 +98,28 @@ func AudioEncode(features []byte, w *AudioEncoderWeights, cfg AudioConfig) ([]fl
 		}
 	}
 	T := len(h) / cfg.Hidden
-	return matF32MixedNT(h, w.OutputProj, T, w.OutputDim, cfg.Hidden) // OutputProj.Forward(f32)
+	out, err := matF32MixedNT(h, w.OutputProj, T, w.OutputDim, cfg.Hidden) // OutputProj.Forward(f32)
+	if err != nil {
+		return nil, err
+	}
+	addOutputProjBias(out, w.OutputProjBias, T, w.OutputDim)
+	return out, nil
+}
+
+// addOutputProjBias adds the audio_tower.output_proj.bias [outDim] (BF16) to every one of the rows
+// output rows in place — HF's Gemma4AudioModel.output_proj is a bias=True Linear. A nil/short bias is
+// a no-op (packs that omit it), so the tower stays byte-identical when there is no bias to apply.
+func addOutputProjBias(out []float32, bias []byte, rows, outDim int) {
+	if outDim <= 0 || len(bias) < outDim*2 {
+		return
+	}
+	b := bf16ToF32Slice(bias[:outDim*2])
+	for r := range rows {
+		row := out[r*outDim : (r+1)*outDim]
+		for c := range row {
+			row[c] += b[c]
+		}
+	}
 }
 
 // AudioPositionTable builds the [count, hidden] sinusoid relative-position table the Conformer
