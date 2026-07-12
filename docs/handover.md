@@ -1,5 +1,56 @@
 # NEXT WAKE (2026-07-16 — #381 SHIPPED: the skip is live, 2.1-2.6x at every depth)
 
+## UNFENCED EVENING (2026-07-12 late — hip lands, GGUF interop, the ratchet)
+
+- HIP UNFENCED (snider): scout run proved the lane workable → codex's stint
+  3eb3cf2 MERGED to dev (15.9k lines, hip-only) with ALL 11 aspirational
+  spec-tests implemented green: config-label veto root-caused; kernel-source
+  assertion retargeted; thought-suffix test repinned to runtime contract
+  (provenance in commit — orphan red predating the stint); attached-drafter
+  batching via scoped ForceBatchedProjection — incl. wiring codex's
+  built-but-UNWIRED accepted-prefix KV truncation into KQ8VQ4 verify. gfx1101
+  hsaco builds (-O3); MoE router + GGUF expert kernels PASS on the 7800 XT.
+  Box working rules: desk /home/claude/Code NEVER touched; fresh /tmp clones
+  + rsync for validation. OPEN: TestHIPHardwareTransformerKernelSource
+  numerical red (slice[0]=3.0 want 1.462, kernel-debug, inherent to stint);
+  on-device tok/s parity for the new verify path awaits a real-model run.
+- lem BUILDS ON LINUX for the first time (799fce8): cmd/lem imported
+  engine/metal unguarded — portable seam (engine_metal.go darwin /
+  engine_other.go) + tagged the untagged MLX example test. Receipted on a
+  fresh homelab clone: build + both packages green.
+- QUANT FEATURES RECEIPTED (oMLX parity): lem quant bf16→MLX-4bit —
+  E2B 9.54→2.71 GiB, loads + answers 143.7 tok/s. GGUF lane: multimodal
+  crash fixed (tower skip + F32 fallback, 8739e99) THEN the full
+  llama.cpp-interop layer landed (#28 merged): canonical blk.N.* names,
+  56-key gemma4.*+tokenizer.ggml.* metadata, per-tensor type policy,
+  rope_freqs mask, MatFormer double-wide FFN widths from tensors — and the
+  HIDDEN BLOCKER: quantizeQ4_K/Q5_K had wrong super-block geometry + never
+  applied sub-block scales (garbage, never validated running) — rewritten to
+  ggml reference. ACCEPTANCE: llama-completion generates coherently from our
+  file; type histogram identical to the unsloth oracle. JANG parked (snider:
+  experimental). Remainder: other gemma4 GGUF formats need own oracles;
+  K-quant fix warrants a consumer regression sweep.
+- QWEN FUSES MERGED (#23 ladder): gated-delta input CB (+3.8%) + attention
+  q/k/v CB (k/v host matmuls absorbed, +15%) = ~21.3 tok/s on 0.8B,
+  byte-identical text, thermal-honest interleaved A/B method banked.
+  Frontier: host glue (residual/RMSNorm/conv/recurrence/sdpa) between device
+  GEMMs. QWEN-LINE LANE RUNNING: 4B step-up + residual/RMSNorm on-device as
+  SHARED engine primitives (snider mandate: multi-arch shared kernels,
+  engine/ or model/ roots — no composed-only one-offs).
+- CODECOV RATCHET (#30 = pre-req for the #8 tag; snider doctrine: gap table
+  = how we find perf + underused features + gemma4-isms in shared code).
+  Measured: whole-repo CPU 67.8%; excluding hip 91.1%; metal 75.6%; hip ~1%
+  on darwin (12.6k stmts = 78% of the gap, needs box-measured coverage).
+  Rotation 1 MERGED: decode/generate 37.2→83.3 tagged (supervised idiom,
+  -state proven on real weights); eval/datapipe 75.1→89.5 + eval/score
+  82.6→92.8 (ScoreAll -race). Rotation 2 IN FLIGHT: modelmgmt, shared-roots
+  (arch-neutrality tests: non-gemma fakes drive shared surfaces), metal
+  interior r1 (per-file uncovered-mass ranking = deliverable).
+- MANTIS: #1840 noted fixed (2488; status flip needs a human — REST update
+  500s). #1839 open remainder = unit D (mask fidelity) + unit E (HIP
+  Conformer port — NOW DISPATCHABLE, board #31, acceptance kit = the audio
+  goldens).
+
 ## #23 COMPOSED DEVICE SEAM (2026-07-12 evening — 1.6 -> 16.7 tok/s in one day)
 
 - SLICE 1 (a36b11a): composed.ProjMatMulInto — the stack's OWN projections
