@@ -6,6 +6,7 @@ import (
 	"math"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 )
 
 // attention.go is the full_attention mixer for the hybrid stack — qwen3-style dense attention (per-head
@@ -21,6 +22,7 @@ type AttnConfig struct {
 	Heads, KVHeads, HeadDim, RotaryDim int
 	RopeTheta, NormEps                 float32
 	OutputGate                         bool
+	ALiBi                              bool
 }
 
 // AttnWeights is one layer's attention weights. QProj is [Heads*HeadDim, D] (or [2·Heads*HeadDim, D] when
@@ -204,6 +206,10 @@ func (m *attnMixer) continueFromQKV(qRaw, k, v []float32, L, D int, st attnState
 	pos0 := st.n
 	scale := 1.0 / math.Sqrt(float64(HD))
 	rep := H / KVH
+	var alibiSlopes []float32
+	if cfg.ALiBi {
+		alibiSlopes = model.ALiBiSlopes(H)
+	}
 
 	// q_proj raw → per-head q [L,H*HD] and (gated) the σ-gate [L,H*HD] ([q_h ; gate_h] within each head's
 	// 2·HD block, per the transformers qwen3_5 chunk).
@@ -274,6 +280,15 @@ func (m *attnMixer) continueFromQKV(qRaw, k, v []float32, L, D int, st attnState
 				scores[j] = dot
 				if dot > maxS {
 					maxS = dot
+				}
+			}
+			if cfg.ALiBi {
+				model.ApplyALiBi(scores[:last+1], alibiSlopes[hd], last, 0)
+				maxS = math.Inf(-1)
+				for j := 0; j <= last; j++ {
+					if scores[j] > maxS {
+						maxS = scores[j]
+					}
 				}
 			}
 			// softmax

@@ -9,6 +9,22 @@ import (
 	"dappco.re/go/inference/model/qwen3"
 )
 
+func TestAttnMixerALiBi_Forward_Golden(t *testing.T) {
+	const d = 4
+	identity := []float32{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1}
+	m := NewAttnMixer(&AttnWeights{QProj: identity, KProj: identity, VProj: identity, OProj: identity}, AttnConfig{Heads: 2, KVHeads: 2, HeadDim: 2, ALiBi: true})
+	got, _, err := m.Forward([]float32{0.2, -0.1, 0.4, 0.3, -0.3, 0.5, 0.1, -0.2}, 2, d, nil)
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+	want := []float32{0.2, -0.1, 0.4, 0.3, -0.09702073, 0.25642487, 0.24599567, 0.043326125}
+	for i := range want {
+		if math.Float32bits(got[i]) != math.Float32bits(want[i]) {
+			t.Errorf("output[%d] = %g (%08x), want %g (%08x)", i, got[i], math.Float32bits(got[i]), want[i], math.Float32bits(want[i]))
+		}
+	}
+}
+
 func TestRMSNormHeadWithoutWeights_Ugly(t *testing.T) {
 	x := []float32{1, -2, 3, -4}
 	want := append([]float32(nil), x...)
