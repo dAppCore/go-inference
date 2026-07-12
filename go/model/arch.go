@@ -111,6 +111,7 @@ type Arch struct {
 	PerLayerInputVocab, PerLayerInputHidden    int   // per-layer-input aux embedding (0 = absent)
 	AttentionKEqV                              bool  // K == V (shared projection)
 	ValueNorm                                  bool  // an arch may apply a no-scale per-head RMSNorm to V (metal's RMSNormNoScale); most don't
+	ParallelResidual                           bool  // attention and MLP consume the same normalised input, then both outputs join the residual
 	TieWordEmbeddings                          *bool // nil = checkpoint presence decides; non-nil validates lm_head against config.json
 	Layer                                      []LayerSpec
 }
