@@ -81,6 +81,54 @@ func TestRunQuantCommand_PositionalOrder(t *testing.T) {
 	}
 }
 
+// TestDefaultOutDir covers the mlx_lm.convert naming convention: strip a trailing
+// slash, drop a -bf16/-f32 dense tag, and append the quant suffix in the source's
+// parent directory. A name with no dense tag keeps its basename intact.
+func TestDefaultOutDir(t *testing.T) {
+	for _, tc := range []struct {
+		name, src, suffix, want string
+	}{
+		{"bf16 tag stripped", "/models/gemma-4-12B-it-bf16", "4bit", "/models/gemma-4-12B-it-4bit"},
+		{"f32 tag stripped", "/models/gemma-f32", "8bit", "/models/gemma-8bit"},
+		{"trailing slash", "/models/gemma-bf16/", "4bit", "/models/gemma-4bit"},
+		{"no dense tag kept", "/models/gemma-4bit", "gguf-q4_k_m", "/models/gemma-4bit-gguf-q4_k_m"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := defaultOutDir(tc.src, tc.suffix); got != tc.want {
+				t.Errorf("defaultOutDir(%q, %q) = %q, want %q", tc.src, tc.suffix, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHumanBytes covers all three magnitude branches of the summary formatter:
+// plain bytes below a MiB, one-decimal MiB, and two-decimal GiB — with the
+// boundary values that select each branch.
+func TestHumanBytes(t *testing.T) {
+	const (
+		mib = 1 << 20
+		gib = 1 << 30
+	)
+	for _, tc := range []struct {
+		name string
+		n    int64
+		want string
+	}{
+		{"zero bytes", 0, "0 B"},
+		{"sub-MiB", mib - 1, "1048575 B"},
+		{"exactly one MiB", mib, "1.0 MiB"},
+		{"mid MiB", 3*mib + mib/2, "3.5 MiB"},
+		{"exactly one GiB", gib, "1.00 GiB"},
+		{"mid GiB", 2*gib + gib/4, "2.25 GiB"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := humanBytes(tc.n); got != tc.want {
+				t.Errorf("humanBytes(%d) = %q, want %q", tc.n, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRunQuantCommand_Rejects covers the argument/validation failures: no positional,
 // an unsupported bit-width, and a source directory with no shards.
 func TestRunQuantCommand_Rejects(t *testing.T) {
