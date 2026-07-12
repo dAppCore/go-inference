@@ -358,6 +358,35 @@ func TestProviderRouter_ProviderRouter_Chat_Ugly(t *testing.T) {
 	}
 }
 
+func TestProviderRouter_normaliseProviderRoute_EmptyFieldFallbacks_Ugly(t *testing.T) {
+	// Every existing test supplies both Name and ModelID, so normaliseProviderRoute's
+	// empty-field fallback chain went untested. Drive each arm directly (the caller
+	// guarantees Model is non-nil, so a fake model is always safe here):
+	//   Name  empty -> Model.ModelType() -> "provider-<index+1>"
+	//   ModelID empty -> Model.Info().Architecture -> Name
+	// The fake's Info().Architecture mirrors its modelType, so a non-empty modelType
+	// fills both from the model, and an all-whitespace route falls all the way to the
+	// synthesised name (also exercising the core.Trim guards on every field).
+	t.Run("from_model", func(t *testing.T) {
+		out := normaliseProviderRoute(ProviderRoute{Model: &routerFakeModel{modelType: "gemma"}}, 0)
+		if out.Name != "gemma" || out.ModelID != "gemma" {
+			t.Fatalf("normaliseProviderRoute = {Name:%q ModelID:%q}, want both \"gemma\"", out.Name, out.ModelID)
+		}
+	})
+	t.Run("synthesised_from_index", func(t *testing.T) {
+		out := normaliseProviderRoute(ProviderRoute{Model: &routerFakeModel{modelType: ""}}, 2)
+		if out.Name != "provider-3" || out.ModelID != "provider-3" {
+			t.Fatalf("normaliseProviderRoute = {Name:%q ModelID:%q}, want both \"provider-3\"", out.Name, out.ModelID)
+		}
+	})
+	t.Run("whitespace_fields_trimmed", func(t *testing.T) {
+		out := normaliseProviderRoute(ProviderRoute{Name: "  ", ModelID: "\t", Model: &routerFakeModel{modelType: " "}}, 0)
+		if out.Name != "provider-1" || out.ModelID != "provider-1" {
+			t.Fatalf("normaliseProviderRoute = {Name:%q ModelID:%q}, want both \"provider-1\"", out.Name, out.ModelID)
+		}
+	})
+}
+
 func mustProviderRouter(t *testing.T, routes ...ProviderRoute) *ProviderRouter {
 	t.Helper()
 	result := NewProviderRouter(routes...)
