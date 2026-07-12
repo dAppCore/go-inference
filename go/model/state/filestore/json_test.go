@@ -314,6 +314,60 @@ func TestJsonSkipValue_Bad_MalformedInputs(t *testing.T) {
 	}
 }
 
+func TestJsonSkipValue_Good_HeterogeneousNesting(t *testing.T) {
+	// Objects nested in arrays and vice versa — the shapes the old
+	// fixed-pair depth counter false-mismatched on, because it only
+	// knew the OUTERMOST bracket type and flagged any inner closer of
+	// the other type. A proper LIFO closer stack accepts them. want is
+	// len(in) for every case (the value is consumed whole).
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"array-value-in-object", `{"a":[1]}`, 9},
+		{"object-in-array", `[{}]`, 4},
+		{"object-array-object", `{"a":[{"b":1}]}`, 15},
+		{"array-array-object-array", `[[{"x":[]}]]`, 12},
+		{"recordmeta-like-tags-and-labels", `{"tags":{"a":1},"labels":[1,2]}`, 31},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			end, err := jsonSkipValue([]byte(tc.in), 0)
+			if err != nil {
+				t.Fatalf("jsonSkipValue(%s) error = %v", tc.name, err)
+			}
+			if end != tc.want {
+				t.Fatalf("jsonSkipValue(%s) = %d, want %d", tc.name, end, tc.want)
+			}
+		})
+	}
+}
+
+func TestJsonSkipValue_Bad_HeterogeneousMismatch(t *testing.T) {
+	// Inner closers that do not match their nearest opener. The old
+	// fixed-pair counter false-ACCEPTED these: every closer equalled
+	// the outermost close byte, so the scalar depth reached zero even
+	// though an inner '[' was closed by '}' (or an inner '{' by ']').
+	// A LIFO closer stack rejects each on the offending byte.
+	cases := []struct {
+		name string
+		in   string
+	}{
+		{"array-opened-object-closed-in-object", `{[}}`},
+		{"array-opened-object-closed-after-key", `{"a":[}}`},
+		{"object-opened-array-closed-in-array", `[{]]`},
+		{"two-arrays-object-closed", `{[[}}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := jsonSkipValue([]byte(tc.in), 0); err == nil {
+				t.Fatalf("jsonSkipValue(%s) error = nil, want error", tc.name)
+			}
+		})
+	}
+}
+
 func TestExtractRecordURI_Good_UnusualShapes(t *testing.T) {
 	cases := []struct {
 		name string
@@ -329,9 +383,12 @@ func TestExtractRecordURI_Good_UnusualShapes(t *testing.T) {
 		// Flat tags object (matching the real recordMeta shape) sat
 		// before the uri key — proves jsonSkipValue's object-skip
 		// path is used to jump over a non-uri value before the scan
-		// reaches uri. Deliberately not a mixed {..[..]..} shape: see
-		// the jsonSkipValue depth-tracking note in the final report.
+		// reaches uri.
 		{"nested-value-before-uri", `{"tags":{"a":"1","b":"2"},"uri":"mlx://e"}`, "mlx://e"},
+		// Heterogeneous nested value (array-of-object) skipped before
+		// the uri key — exercises the LIFO closer stack through the
+		// real caller, the shape the old fixed-pair counter rejected.
+		{"mixed-nested-value-before-uri", `{"labels":[{"k":1}],"uri":"mlx://f"}`, "mlx://f"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
