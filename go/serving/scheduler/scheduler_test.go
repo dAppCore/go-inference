@@ -75,7 +75,7 @@ func TestModel_Schedule_Good(t *testing.T) {
 		copy(out, events)
 		return out
 	}
-	scheduled := New(base, Config{
+	scheduled, _ := New(base, Config{
 		MaxConcurrent:   1,
 		MaxQueue:        1,
 		StreamBuffer:    1,
@@ -128,7 +128,7 @@ func TestModel_Schedule_Good(t *testing.T) {
 
 func TestModel_Schedule_Bad(t *testing.T) {
 	base := newBlockingModel()
-	scheduled := New(base, Config{MaxConcurrent: 1, MaxQueue: 1})
+	scheduled, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 1})
 
 	_, _, err := scheduled.Schedule(context.Background(), inference.ScheduledRequest{ID: "active", Prompt: "active"})
 	if err != nil {
@@ -149,7 +149,7 @@ func TestModel_Schedule_Bad(t *testing.T) {
 
 func TestModel_CancelRequest_CancelsQueuedRequest_Good(t *testing.T) {
 	base := newBlockingModel()
-	scheduled := New(base, Config{MaxConcurrent: 1, MaxQueue: 1})
+	scheduled, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 1})
 
 	_, activeTokens, err := scheduled.Schedule(context.Background(), inference.ScheduledRequest{ID: "active", Prompt: "active"})
 	if err != nil {
@@ -240,7 +240,7 @@ func (m *immediateModel) seq() iter.Seq[inference.Token] {
 
 func TestModel_GenerateChatAndDelegates_Good(t *testing.T) {
 	base := &immediateModel{tokens: []inference.Token{{Text: "A"}, {Text: "B"}}}
-	scheduled := New(base, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 1})
+	scheduled, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 1})
 
 	var generated []string
 	for token := range scheduled.Generate(context.Background(), "prompt", inference.WithMaxTokens(2)) {
@@ -300,14 +300,14 @@ func TestModel_NilAndErrorPaths_Bad(t *testing.T) {
 		t.Fatalf("nil Generate tokens=%v err=%+v, want no tokens and no stored nil-scheduler err", generated, nilScheduler.Err())
 	}
 
-	scheduled := New(nil, Config{})
+	scheduled, _ := New(nil, Config{})
 	if _, _, err := scheduled.Schedule(context.Background(), inference.ScheduledRequest{}); err == nil {
 		t.Fatal("Schedule(nil base) error = nil")
 	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	base := &immediateModel{tokens: []inference.Token{{Text: "x"}}}
-	withBase := New(base, Config{MaxQueue: 1})
+	withBase, _ := New(base, Config{MaxQueue: 1})
 	if _, _, err := withBase.Schedule(cancelled, inference.ScheduledRequest{}); err == nil {
 		t.Fatal("Schedule(cancelled context) error = nil")
 	}
@@ -321,7 +321,7 @@ func TestModel_NilAndErrorPaths_Bad(t *testing.T) {
 
 func TestModel_generateOptions_Good(t *testing.T) {
 	base := &immediateModel{tokens: []inference.Token{{Text: "x"}}, err: core.NewError("base failed")}
-	scheduled := New(base, Config{RequestIDPrefix: "req", MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 1})
+	scheduled, _ := New(base, Config{RequestIDPrefix: "req", MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 1})
 	for range scheduled.Generate(context.Background(), "prompt") {
 	}
 	if r := scheduled.Err(); r.OK || r.Error() != "base failed" {
@@ -402,4 +402,145 @@ func hasSchedulerProbeEvent(events []inference.ProbeEvent, eventName string) boo
 		}
 	}
 	return false
+}
+
+// tokenizingModel is a TextModel that ALSO implements inference.TokenizerModel —
+// the capability batch mode (and interleave with a token budget) requires. Its
+// Generate/Chat yield a fixed token list so mode-routing tests can assert the
+// stream came back through the scheduler.
+type tokenizingModel struct {
+	tokens  []inference.Token
+	metrics inference.GenerateMetrics
+}
+
+func (m *tokenizingModel) Generate(ctx context.Context, _ string, _ ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return m.seq(ctx)
+}
+
+func (m *tokenizingModel) Chat(ctx context.Context, _ []inference.Message, _ ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return m.seq(ctx)
+}
+
+func (m *tokenizingModel) seq(ctx context.Context) iter.Seq[inference.Token] {
+	return func(yield func(inference.Token) bool) {
+		for _, token := range m.tokens {
+			if ctx.Err() != nil {
+				return
+			}
+			if !yield(token) {
+				return
+			}
+		}
+	}
+}
+
+func (m *tokenizingModel) Classify(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.ClassifyResult(nil))
+}
+
+func (m *tokenizingModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Ok([]inference.BatchResult(nil))
+}
+
+func (m *tokenizingModel) ModelType() string { return "tokenizing" }
+func (m *tokenizingModel) Info() inference.ModelInfo {
+	return inference.ModelInfo{Architecture: "gemma3"}
+}
+func (m *tokenizingModel) Metrics() inference.GenerateMetrics { return m.metrics }
+func (m *tokenizingModel) Err() core.Result                   { return core.Ok(nil) }
+func (m *tokenizingModel) Close() core.Result                 { return core.Ok(nil) }
+func (m *tokenizingModel) Encode(text string) []int32         { return make([]int32, len([]rune(text))) }
+func (m *tokenizingModel) Decode([]int32) string              { return "" }
+func (m *tokenizingModel) ApplyChatTemplate(messages []inference.Message) (string, error) {
+	out := ""
+	for _, msg := range messages {
+		out += msg.Content
+	}
+	return out, nil
+}
+
+func TestNew_UnknownMode_Bad(t *testing.T) {
+	if _, err := New(&tokenizingModel{}, Config{Mode: "bogus"}); err == nil {
+		t.Fatal("New(unknown mode) error = nil, want non-nil")
+	}
+}
+
+func TestNew_BatchRequiresTokenizer_Bad(t *testing.T) {
+	// immediateModel is a TextModel but NOT a TokenizerModel → batch fails closed.
+	if _, err := New(&immediateModel{}, Config{Mode: ModeBatch, MaxConcurrent: 2, MaxBatchTokens: 16}); err == nil {
+		t.Fatal("New(batch, non-tokenizer) error = nil, want fail-closed error")
+	}
+	// A TokenizerModel satisfies batch's prompt-token budgeting requirement.
+	m, err := New(&tokenizingModel{}, Config{Mode: ModeBatch, MaxConcurrent: 2, MaxBatchTokens: 16})
+	if err != nil {
+		t.Fatalf("New(batch, tokenizer) error = %v, want nil", err)
+	}
+	m.Close()
+}
+
+func TestNew_InterleaveTokenBudgetRequiresTokenizer_Bad(t *testing.T) {
+	// Interleave WITH a token budget needs the tokeniser too — fail closed.
+	if _, err := New(&immediateModel{}, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxBatchTokens: 16}); err == nil {
+		t.Fatal("New(interleave+budget, non-tokenizer) error = nil, want fail-closed error")
+	}
+	// Interleave WITHOUT a token budget (count-only) needs only a TextModel.
+	m, err := New(&immediateModel{}, Config{Mode: ModeInterleave, MaxConcurrent: 2})
+	if err != nil {
+		t.Fatalf("New(interleave, no budget) error = %v, want nil", err)
+	}
+	m.Close()
+}
+
+func TestModel_BatchMode_RoutesThroughBatch_Good(t *testing.T) {
+	base := &tokenizingModel{tokens: []inference.Token{{Text: "x0"}, {Text: "x1"}}}
+	m, err := New(base, Config{Mode: ModeBatch, MaxConcurrent: 2, MaxQueue: 4, MaxBatchTokens: 1024, StreamBuffer: 8})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer m.Close()
+	_, tokens, err := m.Schedule(context.Background(), inference.ScheduledRequest{ID: "r", Prompt: "hello"})
+	if err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+	var got []string
+	for tok := range tokens {
+		got = append(got, tok.Token.Text)
+	}
+	if len(got) != 2 || got[0] != "x0" || got[1] != "x1" {
+		t.Fatalf("batch-mode tokens = %v, want [x0 x1]", got)
+	}
+	if s := m.Stats(); s.Submitted != 1 {
+		t.Fatalf("batch Stats.Submitted = %d, want 1", s.Submitted)
+	}
+}
+
+func TestModel_InterleaveMode_RoutesThroughInterleave_Good(t *testing.T) {
+	base := &tokenizingModel{tokens: []inference.Token{{Text: "y0"}, {Text: "y1"}, {Text: "y2"}}}
+	m, err := New(base, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 4, StreamBuffer: 8})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer m.Close()
+	_, tokens, err := m.Schedule(context.Background(), inference.ScheduledRequest{ID: "r", Messages: []inference.Message{{Role: "user", Content: "hi"}}})
+	if err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+	var got []string
+	for tok := range tokens {
+		got = append(got, tok.Token.Text)
+	}
+	if len(got) != 3 {
+		t.Fatalf("interleave-mode tokens = %v, want 3", got)
+	}
+	waitStats(t, m.Stats, func(s Stats) bool { return s.Completed == 1 })
+}
+
+func TestModel_Stats_Serial_Good(t *testing.T) {
+	base := &immediateModel{tokens: []inference.Token{{Text: "z"}}}
+	m, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 1})
+	for range m.Generate(context.Background(), "p") {
+	}
+	if s := m.Stats(); s.Submitted != 1 || s.Completed != 1 {
+		t.Fatalf("serial Stats = %+v, want Submitted=1 Completed=1", s)
+	}
 }

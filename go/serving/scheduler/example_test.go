@@ -55,3 +55,18 @@ func ExampleModel_SetProbeSink() {
 	core.Println("Model_SetProbeSink")
 	// Output: Model_SetProbeSink
 }
+
+func ExampleMode() {
+	core.Println("Mode")
+	// Output: Mode
+}
+
+func ExampleStats() {
+	core.Println("Stats")
+	// Output: Stats
+}
+
+func ExampleModel_Stats() {
+	core.Println("Model_Stats")
+	// Output: Model_Stats
+}

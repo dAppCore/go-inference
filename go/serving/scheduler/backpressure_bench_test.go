@@ -48,7 +48,7 @@ import (
 // subsequent Schedule must reject.
 func BenchmarkScheduler_Backpressure_QueueFull_Reject(b *testing.B) {
 	base := &cancellableBenchModel{tokens: benchTokens(2), perTokenNs: 10 * time.Second}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 1})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 1, StreamBuffer: 1})
 	ctx, cancel := context.WithCancel(context.Background())
 	// Saturate the pipeline outside the timed loop. Drainers ensure
 	// no goroutines leak beyond the worker pool.
@@ -109,7 +109,7 @@ func BenchmarkScheduler_Backpressure_QueueFull_Reject(b *testing.B) {
 // the per-token select arm under contention.
 func BenchmarkScheduler_Backpressure_SlowConsumer_StreamBufferFull(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(64)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 1})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 1})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -139,7 +139,7 @@ func BenchmarkScheduler_Backpressure_SlowConsumer_StreamBufferFull(b *testing.B)
 // time.Sleep + select-on-channel-write pressure.
 func BenchmarkScheduler_Backpressure_FastProducer_FastConsumer_StreamBuffer1(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(64)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 1})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 1})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -165,7 +165,7 @@ func BenchmarkScheduler_Backpressure_FastProducer_FastConsumer_StreamBuffer1(b *
 // pre-allocated buffer).
 func BenchmarkScheduler_Backpressure_SyncHandoff_StreamBufferZero(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(32)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 0})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 0})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -197,7 +197,7 @@ func BenchmarkScheduler_Backpressure_SyncHandoff_StreamBufferZero(b *testing.B) 
 // for callers who forget the drain contract.
 func BenchmarkScheduler_Backpressure_AbortedDrain_4Of64(b *testing.B) {
 	base := &cancellableBenchModel{tokens: benchTokens(64), perTokenNs: 5 * time.Microsecond}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
