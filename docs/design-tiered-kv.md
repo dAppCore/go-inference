@@ -73,16 +73,53 @@ The RAM tier only helps a repeated-generate loop **inside one process** (the
 bench harness). Generate therefore keeps the file default; the RAM path is a
 harness/library option, not a flag flip.
 
-## What is genuinely unknown → measured
+## What was unknown → now measured
 
 Whether the per-turn disk tax actually matters at realistic sizes, and how big
-the wake-vs-re-prefill win is. Neither is knowable by reading; both are in the
-receipt tables in the lane report (real e2b checkpoint, engine/metal):
+the wake-vs-re-prefill win is. Neither is knowable by reading. The receipt
+harness (`serving/continuity/receipts_metal_test.go`, opt-in, real e2b
+checkpoint on engine/metal) drives the shipped `continuity.Manager` and reports:
 
-1. **Serve, RAM store vs file store** — per-turn wall + TTFT across a multi-turn
-   conversation (the sleep tax while resident; the wake+sleep tax once evicted).
-2. **Wake vs re-prefill** — TTFT for a revived long conversation (the value of
-   the continuity machinery itself, independent of the store backend).
+Receipt — gemma-4-e2b-it-4bit, ctx 4096, ~2K-token conversation, 3 reps (min):
+
+| Path | TTFT | Total turn |
+|---|---|---|
+| re-prefill (cold, full prefill) | 309 ms | 339 ms |
+| wake (file store) | 128 ms | 159 ms |
+| wake (RAM store) | 123 ms | 151 ms |
+| resident (warm, no store) | 41 ms | 68 ms |
+
+Two readings:
+
+1. **Wake vs re-prefill — REAL, and the bigger win.** Wake avoids ~186 ms of
+   re-prefill here (309 → 123 ms), and this grows with context: the prefill it
+   skips is O(tokens) while the restore is roughly flat (the continuity header
+   records 12 s of prefill at 32 K). This is the value of the continuity
+   machinery — and it already ships.
+2. **RAM store vs file store — MARGINAL on latency.** The store-backend tax is
+   ~5 ms TTFT / ~8 ms total-turn / ~3 ms sleep-write. It is small because the
+   file read hits the OS page cache within a live process — a cold read
+   (post-restart, cache evicted) or slower storage would widen it, which this
+   in-process harness cannot show.
+
+### Verdict
+
+- The continuity machinery (hot resident + cold spill + wake-not-re-prefill) is
+  a real win and is already shipped; the lane brief's proposed prototype was
+  already the behaviour.
+- The **RAM-store default is still the right default** — but for simplicity and
+  hygiene more than raw latency: it removes a per-turn disk write (SSD wear), the
+  whole ephemeral-file lifecycle (wipe-on-launch, remove-on-shutdown,
+  crash-leftover handling), and is strictly ≥ 0 versus the file (never a
+  regression). The latency win is single-digit ms warm, larger cold.
+
+### `lem generate -state`
+
+The same `SleepAgentMemory`/`WakeAgentMemory` tax (~5–8 ms/turn) applies, but
+generate is a one-shot process, so RAM cannot be its default without breaking
+cross-invocation continuity (see above). A RAM tier only helps a repeated-generate
+loop inside one process; the explicit per-invocation file-vs-RAM number is a
+follow-up harness, not shipped here.
 
 ## Shipped in this lane
 
