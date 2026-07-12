@@ -77,70 +77,45 @@ func quantizeQ4_0(values []float32) []byte {
 	return appendQuantizeQ4_0(make([]byte, 0, len(values)/32*18), values)
 }
 
+// appendQuantizeQ4_0 appends ggml block_q4_0 blocks (18 B/block) for values to
+// out. Faithful port of ggml's quantize_row_q4_0_ref: the scale is d =
+// max/-8 where max is the SIGNED value at the largest-magnitude position (not
+// maxAbs/7) — this is what lets the extremal element hit nibble 0 exactly and
+// use the full [0,15] nibble range, vs a naive maxAbs/N scheme that only ever
+// reaches nibbles [1,15]. Levels are truncated (not rounded) after a +8.5
+// bias: q = trunc(x*id + 8.5), clamped only on the top (MIN 15) — ggml has no
+// bottom clamp either, relying on id being derived from the block's own max.
 func appendQuantizeQ4_0(out []byte, values []float32) []byte {
 	for blockStart := 0; blockStart < len(values); blockStart += 32 {
 		block := values[blockStart : blockStart+32]
-		maxAbs := maxAbsFloat32(block)
+		amax, signedMax := maxAbsSignedFloat32(block)
 		scale := float32(0)
-		if maxAbs > 0 {
-			scale = maxAbs / 7
+		if amax > 0 {
+			scale = signedMax / -8
 		}
 		out = binary.LittleEndian.AppendUint16(out, float32ToFloat16(scale))
+		invScale := float32(0)
+		if scale != 0 {
+			invScale = 1 / scale
+		}
 		// Stack-allocated pack buffer instead of make([]byte, 16) per
-		// block — saves one heap alloc per 32 input floats.
+		// block — saves one heap alloc per 32 input floats. invScale==0
+		// (all-zero block) naturally quantises every element to nibble 8
+		// (trunc(0+8.5)=8), matching ggml's id=0 fast path without a
+		// separate branch.
 		var packed [16]byte
-		if scale == 0 {
-			// Zero-block fast path: q=0 → q+8=8 (Q4_0 stores
-			// (q+8) ∈ [0,15] unsigned). Both nibbles of each packed
-			// byte are 8, so the byte value is 0x88. Skips the
-			// per-element multiply + round + branch work.
-			for i := range packed {
-				packed[i] = 0x88
-			}
-			out = append(out, packed[:]...)
-			continue
-		}
-		invScale := 1 / scale
-		// Split the i<16 branch out of the inner loop — two clean
-		// 16-iter loops let the back-end keep the lower-nibble writes
-		// (packed[i] = q) and upper-nibble OR-writes (packed[i-16] |=
-		// q<<4) on independent memory dependencies. Same total work,
-		// less branch overhead and a cleaner dep chain.
 		for i := range 16 {
-			value := block[i]
-			scaled := value * invScale
-			var q int
-			// Round-half-away-from-zero in float32 — same optimisation
-			// as quantizeQ8_0. The +8 bias re-centres the signed
-			// quantised range into the [0,15] unsigned range Q4_0
-			// stores.
-			if scaled >= 0 {
-				q = int(scaled+0.5) + 8
-			} else {
-				q = int(scaled-0.5) + 8
+			x0 := block[i] * invScale
+			x1 := block[i+16] * invScale
+			q0 := int(x0 + 8.5)
+			if q0 > 15 {
+				q0 = 15
 			}
-			if q < 0 {
-				q = 0
-			} else if q > 15 {
-				q = 15
+			q1 := int(x1 + 8.5)
+			if q1 > 15 {
+				q1 = 15
 			}
-			packed[i] = byte(q)
-		}
-		for i := 16; i < 32; i++ {
-			value := block[i]
-			scaled := value * invScale
-			var q int
-			if scaled >= 0 {
-				q = int(scaled+0.5) + 8
-			} else {
-				q = int(scaled-0.5) + 8
-			}
-			if q < 0 {
-				q = 0
-			} else if q > 15 {
-				q = 15
-			}
-			packed[i-16] |= byte(q << 4)
+			packed[i] = byte(q0) | byte(q1)<<4
 		}
 		out = append(out, packed[:]...)
 	}
@@ -148,55 +123,49 @@ func appendQuantizeQ4_0(out []byte, values []float32) []byte {
 }
 
 func quantizeQ5_0(values []float32) []byte {
-	return appendQuantizeQ5_0(make([]byte, 0, len(values)/32*24), values)
+	return appendQuantizeQ5_0(make([]byte, 0, len(values)/32*22), values)
 }
 
+// appendQuantizeQ5_0 appends ggml block_q5_0 blocks (22 B/block: 2 d + 4 qh +
+// 16 qs — NOT an affine min/scale scheme) for values to out. Faithful port of
+// ggml's quantize_row_q5_0_ref: like Q4_0, d = max/-16 from the SIGNED
+// extremal value; each element's low 4 bits pack into qs the same
+// lower/upper-half-interleaved way as Q4_0, and the 5th (high) bit of every
+// element packs into a separate 32-bit qh field (bit j for element j).
 func appendQuantizeQ5_0(out []byte, values []float32) []byte {
 	for blockStart := 0; blockStart < len(values); blockStart += 32 {
 		block := values[blockStart : blockStart+32]
-		maxAbs := maxAbsFloat32(block)
-		minVal := minFloat32(block)
+		amax, signedMax := maxAbsSignedFloat32(block)
 		scale := float32(0)
-		if maxAbs > 0 {
-			scale = (maxAbs - minVal) / 31
+		if amax > 0 {
+			scale = signedMax / -16
 		}
 		out = binary.LittleEndian.AppendUint16(out, float32ToFloat16(scale))
-		out = binary.LittleEndian.AppendUint16(out, float32ToFloat16(minVal))
-
-		var packed [20]byte
-		if scale == 0 {
-			for i := range packed {
-				packed[i] = 0x44 // 0b01000100 → each 5-bit nibble is 4 (midpoint)
-			}
-		} else {
-			invScale := 1 / scale
-			bitBuf := uint64(0)
-			bitCount := 0
-			byteIdx := 0
-			for _, value := range block {
-				scaled := (value - minVal) * invScale
-				var q int
-				if scaled >= 0 {
-					q = int(scaled + 0.5)
-				} else {
-					q = int(scaled - 0.5)
-				}
-				if q < 0 {
-					q = 0
-				} else if q > 31 {
-					q = 31
-				}
-				bitBuf |= uint64(q) << bitCount
-				bitCount += 5
-				for bitCount >= 8 {
-					packed[byteIdx] = byte(bitBuf & 0xFF)
-					bitBuf >>= 8
-					bitCount -= 8
-					byteIdx++
-				}
-			}
+		invScale := float32(0)
+		if scale != 0 {
+			invScale = 1 / scale
 		}
-		out = append(out, packed[:]...)
+		var qh uint32
+		var qs [16]byte
+		for j := range 16 {
+			x0 := block[j] * invScale
+			x1 := block[j+16] * invScale
+			q0 := int(x0 + 16.5)
+			if q0 > 31 {
+				q0 = 31
+			}
+			q1 := int(x1 + 16.5)
+			if q1 > 31 {
+				q1 = 31
+			}
+			qs[j] = byte(q0&0xF) | byte(q1&0xF)<<4
+			qh |= uint32((q0>>4)&1) << uint(j)
+			qh |= uint32((q1>>4)&1) << uint(j+16)
+		}
+		var qhBytes [4]byte
+		binary.LittleEndian.PutUint32(qhBytes[:], qh)
+		out = append(out, qhBytes[:]...)
+		out = append(out, qs[:]...)
 	}
 	return out
 }
@@ -289,7 +258,7 @@ func kQuantSubBlockScales(block []float32, nmax int, weights []float32, levels [
 		for l := range sub {
 			weights[l] = avX + absFloat32(sub[l])
 		}
-		sc, mn := makeQKX2Quants(nmax, sub, weights, levels[start:start+kQuantSubBlockSize], rmin, rdelta, nstep)
+		sc, mn := makeQKX2Quants(nmax, sub, weights, levels[start:start+kQuantSubBlockSize], rmin, rdelta, nstep, false)
 		scales[j] = sc
 		mins[j] = mn
 		if sc > maxScale {
@@ -381,9 +350,12 @@ func kQuantRequantLevels(block []float32, packed *[12]byte, d, dmin float32, nma
 
 // makeQKX2Quants finds the sub-block scale and non-negative min that best fit x
 // under the importance weights, filling levels with [0,nmax] quant levels.
-// Faithful port of ggml's make_qkx2_quants (use_mad=false). Returns (scale,
-// min) such that the dequant is x ≈ scale*level - min.
-func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta float32, nstep int) (scale, theMin float32) {
+// Faithful port of ggml's make_qkx2_quants. Returns (scale, min) such that
+// the dequant is x ≈ scale*level - min. useMad selects the error metric: the
+// squared diff (Q4_K/Q5_K's use_mad=false) or |diff| (Q2_K's use_mad=true,
+// despite the "mad" name meaning "mean absolute deviation" either way — the
+// weighted accumulator is just named bestMad/mad in both ggml and here).
+func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta float32, nstep int, useMad bool) (scale, theMin float32) {
 	n := len(x)
 	minv, maxv := x[0], x[0]
 	sumW := weights[0]
@@ -415,7 +387,12 @@ func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta
 		l := clampInt(nearestIntGGML(iscale*(x[i]-minv)), 0, nmax)
 		levels[i] = uint8(l)
 		diff := scale*float32(l) + minv - x[i]
-		bestMad += weights[i] * diff * diff
+		if useMad {
+			diff = absFloat32(diff)
+		} else {
+			diff *= diff
+		}
+		bestMad += weights[i] * diff
 	}
 	if nstep < 1 {
 		return scale, -minv
@@ -444,7 +421,12 @@ func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta
 			var mad float32
 			for i := 0; i < n; i++ {
 				diff := thisScale*float32(laux[i]) + thisMin - x[i]
-				mad += weights[i] * diff * diff
+				if useMad {
+					diff = absFloat32(diff)
+				} else {
+					diff *= diff
+				}
+				mad += weights[i] * diff
 			}
 			if mad < bestMad {
 				for i := 0; i < n; i++ {
@@ -457,6 +439,134 @@ func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta
 		}
 	}
 	return scale, -minv
+}
+
+// groupMaxEPS is ggml's GROUP_MAX_EPS: below this magnitude a (super-)block
+// scale is treated as all-zero, guarding the -128/maxScale and 63/maxScale
+// style reciprocals from a divide-by-zero.
+const groupMaxEPS = 1e-15
+
+// makeQxQuantsRMSE1 returns the optimal SIGNED scale for a symmetric
+// (no-min) quantiser fitting x into the levels [-nmax,nmax-1], found by
+// least-squares refinement over a grid of candidate scales. Faithful port of
+// ggml's make_qx_quants specialised to the one call-site shape Q6_K actually
+// uses: rmse_type=1 (weight w=x[i]^2) and no importance-weight override. The
+// per-element level output (L in the C source) is discarded by every ggml
+// caller of this specific shape — Q6_K re-derives levels in a second pass
+// against the coarsened (f16 d * int8 scale) reconstructed scale — so this
+// port only returns the float scale.
+func makeQxQuantsRMSE1(x []float32, nmax int) float32 {
+	var amax, max float32
+	for _, v := range x {
+		if a := absFloat32(v); a > amax {
+			amax = a
+			max = v
+		}
+	}
+	if amax < groupMaxEPS {
+		return 0
+	}
+	iscale := float32(-nmax) / max
+	var sumlx, suml2 float32
+	for _, v := range x {
+		l := clampInt(nearestIntGGML(iscale*v), -nmax, nmax-1)
+		w := v * v
+		fl := float32(l)
+		sumlx += w * v * fl
+		suml2 += w * fl * fl
+	}
+	scale := float32(0)
+	if suml2 != 0 {
+		scale = sumlx / suml2
+	}
+	best := scale * sumlx
+	for is := -9; is <= 9; is++ {
+		if is == 0 {
+			continue
+		}
+		iscale = -(float32(nmax) + 0.1*float32(is)) / max
+		var sumlxTrial, suml2Trial float32
+		for _, v := range x {
+			l := clampInt(nearestIntGGML(iscale*v), -nmax, nmax-1)
+			w := v * v
+			fl := float32(l)
+			sumlxTrial += w * v * fl
+			suml2Trial += w * fl * fl
+		}
+		if suml2Trial > 0 && sumlxTrial*sumlxTrial > best*suml2Trial {
+			scale = sumlxTrial / suml2Trial
+			best = scale * sumlxTrial
+		}
+	}
+	return scale
+}
+
+// makeQ3QuantsRMSE returns the optimal signed scale for a symmetric
+// [-nmax,nmax-1] quantiser fitting x, via ggml's make_q3_quants (do_rmse=true
+// — the only shape quantize_row_q3_K_ref calls). Unlike makeQxQuantsRMSE1's
+// grid search, this coordinate-descends: seed levels from one argmax-derived
+// iscale, then up to 5 passes flip one element's level at a time whenever it
+// improves the weighted (w=x[i]^2) least-squares fit, stopping early once a
+// pass changes nothing. levels receives L[i]+nmax (Q3_K's [0,2*nmax-1]
+// unsigned packing range) — callers use it as the fallback for any sub-block
+// whose reconstructed (f16 d * int6 scale) rounds to exactly zero.
+func makeQ3QuantsRMSE(x []float32, nmax int, levels []uint8) float32 {
+	var amax, max float32
+	for _, v := range x {
+		if a := absFloat32(v); a > amax {
+			amax = a
+			max = v
+		}
+	}
+	if amax < groupMaxEPS {
+		for i := range levels {
+			levels[i] = 0
+		}
+		return 0
+	}
+	iscale := float32(-nmax) / max
+	var lw [qkSubBlockSize]int32
+	var sumlx, suml2 float32
+	for i, v := range x {
+		l := clampInt(nearestIntGGML(iscale*v), -nmax, nmax-1)
+		lw[i] = int32(l)
+		w := v * v
+		fl := float32(l)
+		sumlx += w * v * fl
+		suml2 += w * fl * fl
+	}
+	for range 5 {
+		nChanged := 0
+		for i, v := range x {
+			w := v * v
+			slx := sumlx - w*v*float32(lw[i])
+			if slx <= 0 {
+				continue
+			}
+			sl2 := suml2 - w*float32(lw[i])*float32(lw[i])
+			newL := clampInt(nearestIntGGML(v*sl2/slx), -nmax, nmax-1)
+			if newL == int(lw[i]) {
+				continue
+			}
+			slx += w * v * float32(newL)
+			sl2 += w * float32(newL) * float32(newL)
+			if sl2 > 0 && slx*slx*suml2 > sumlx*sumlx*sl2 {
+				lw[i] = int32(newL)
+				sumlx, suml2 = slx, sl2
+				nChanged++
+			}
+		}
+		if nChanged == 0 {
+			break
+		}
+	}
+	for i := range levels {
+		levels[i] = uint8(lw[i] + int32(nmax))
+	}
+	if suml2 > 0 {
+		return sumlx / suml2
+	}
+	return 0
 }
 
 func quantizeQ5_K(values []float32) []byte {
@@ -553,47 +663,57 @@ func appendQuantizeQ6_K(out []byte, values []float32) []byte {
 	for blockStart := 0; blockStart < len(values); blockStart += qkBlockSize {
 		block := values[blockStart : blockStart+qkBlockSize]
 
-		// Per-sub-block signed scale (max |value| / 32) and the global
-		// scale-of-scales that maps each into the int8 scale field.
-		maxScale := float32(0)
+		// Per-sub-block optimal SIGNED scale (least-squares fit via
+		// makeQxQuantsRMSE1, not a naive maxAbs/32) and the global
+		// scale-of-scales, picked from the sub-block scale with the
+		// largest MAGNITUDE so it maps to exactly int8 -128 — using the
+		// full signed scale-field range, the same edge-mapping pattern
+		// as Q4_0/Q5_0's d = max/-N.
+		var maxScale, maxAbsScale float32
 		for sb := range qkSubBlocks {
 			subStart := sb * qkSubBlockSize
-			maxAbs := float32(0)
-			for j := range qkSubBlockSize {
-				if a := absFloat32(block[subStart+j]); a > maxAbs {
-					maxAbs = a
-				}
-			}
-			scratch.scales[sb] = maxAbs / 32 // sub-block scale candidate
-			if scratch.scales[sb] > maxScale {
-				maxScale = scratch.scales[sb]
+			scale := makeQxQuantsRMSE1(block[subStart:subStart+qkSubBlockSize], 32)
+			scratch.scales[sb] = scale
+			if a := absFloat32(scale); a > maxAbsScale {
+				maxAbsScale = a
+				maxScale = scale
 			}
 		}
 		d := float32(0)
-		var iscale float32
-		if maxScale > 0 {
-			iscale = 127 / maxScale
-			d = maxScale / 127
-		}
-		for sb := range qkSubBlocks {
-			scales[sb] = int8(clampInt(int(roundFloat32(iscale*scratch.scales[sb])), -127, 127))
+		if maxAbsScale >= groupMaxEPS {
+			iscale := float32(-128) / maxScale
+			d = 1 / iscale
+			for sb := range qkSubBlocks {
+				l := nearestIntGGML(iscale * scratch.scales[sb])
+				if l > 127 {
+					l = 127
+				}
+				scales[sb] = int8(l)
+			}
+		} else {
+			for sb := range qkSubBlocks {
+				scales[sb] = 0
+			}
 		}
 
 		// Requantise every element against its reconstructed sub-scale,
-		// to q ∈ [0,63] (signed -32..31 re-centred by +32).
+		// to q ∈ [0,63] (signed -32..31 re-centred by +32). A sub-block
+		// whose rounded scale lands on exactly 0 leaves its levels at 0
+		// (Go's zero value) rather than ggml's carried-over previous-block
+		// state — numerically identical, since dequant is dsub*(level-32)
+		// which is 0 either way when dsub is 0.
+		for i := range levels {
+			levels[i] = 0
+		}
 		for sb := range qkSubBlocks {
-			subStart := sb * qkSubBlockSize
-			subScale := d * float32(scales[sb])
-			inv := float32(0)
-			if subScale != 0 {
-				inv = 1 / subScale
+			dsub := d * float32(scales[sb])
+			if dsub == 0 {
+				continue
 			}
+			subStart := sb * qkSubBlockSize
 			for j := range qkSubBlockSize {
-				q := 0
-				if inv != 0 {
-					q = clampInt(int(roundFloat32(block[subStart+j]*inv)), -32, 31)
-				}
-				levels[subStart+j] = byte(q + 32)
+				l := clampInt(nearestIntGGML(block[subStart+j]/dsub), -32, 31)
+				levels[subStart+j] = byte(l + 32)
 			}
 		}
 
@@ -685,46 +805,48 @@ func appendQuantizeQ3_K(out []byte, values []float32) []byte {
 	for blockStart := 0; blockStart < len(values); blockStart += qkBlockSize {
 		block := values[blockStart : blockStart+qkBlockSize]
 
-		// Per-sub-block signed scale (max |value| / 4 covers [-4,3]) and the
-		// scale-of-scales mapping into the 6-bit signed scale field.
-		maxScale := float32(0)
+		// Per-sub-block optimal SIGNED scale (makeQ3QuantsRMSE — a
+		// coordinate-descent least-squares fit, not a naive maxAbs/4) and
+		// the scale-of-scales mapping into the 6-bit signed scale field.
+		// makeQ3QuantsRMSE also writes its own best-effort levels into
+		// levels[]; those survive as the fallback for any sub-block whose
+		// reconstructed d rounds to exactly zero below.
+		var maxScale, maxAbsScale float32
 		for sb := range qkSubBlocks {
 			subStart := sb * qkSubBlockSize
-			maxAbs := float32(0)
-			for j := range qkSubBlockSize {
-				if a := absFloat32(block[subStart+j]); a > maxAbs {
-					maxAbs = a
-				}
-			}
-			scratch.scales[sb] = maxAbs / 4
-			if scratch.scales[sb] > maxScale {
-				maxScale = scratch.scales[sb]
+			scale := makeQ3QuantsRMSE(block[subStart:subStart+qkSubBlockSize], 4, levels[subStart:subStart+qkSubBlockSize])
+			scratch.scales[sb] = scale
+			if a := absFloat32(scale); a > maxAbsScale {
+				maxAbsScale = a
+				maxScale = scale
 			}
 		}
 		d := float32(0)
-		var iscale float32
-		if maxScale > 0 {
-			iscale = 31 / maxScale // signed scale range is [-32,31]
-			d = maxScale / 31
+		for i := range rawScales {
+			rawScales[i] = 0
 		}
-		for sb := range qkSubBlocks {
-			s := clampInt(int(roundFloat32(iscale*scratch.scales[sb])), -32, 31)
-			rawScales[sb] = uint8(s + 32)
+		if maxAbsScale != 0 {
+			iscale := float32(-32) / maxScale
+			for sb := range qkSubBlocks {
+				l := clampInt(nearestIntGGML(iscale*scratch.scales[sb]), -32, 31) + 32
+				rawScales[sb] = uint8(l)
+			}
+			d = 1 / iscale
 		}
 
-		// Requantise to signed L ∈ [-4,3]; store as unsigned Lq = L+4.
+		// Second pass: requantise to signed L ∈ [-4,3] (stored as unsigned
+		// Lq = L+4) against the reconstructed per-sub-block scale. A
+		// sub-block whose reconstructed d is exactly zero is left at its
+		// makeQ3QuantsRMSE fallback from above (matching ggml, which reuses
+		// its own first-pass L for that case rather than zeroing it).
 		for sb := range qkSubBlocks {
 			subStart := sb * qkSubBlockSize
-			subScale := d * float32(int(rawScales[sb])-32)
-			inv := float32(0)
-			if subScale != 0 {
-				inv = 1 / subScale
+			dsub := d * (float32(rawScales[sb]) - 32)
+			if dsub == 0 {
+				continue
 			}
 			for j := range qkSubBlockSize {
-				l := 0
-				if inv != 0 {
-					l = clampInt(int(roundFloat32(block[subStart+j]*inv)), -4, 3)
-				}
+				l := clampInt(nearestIntGGML(block[subStart+j]/dsub), -4, 3)
 				levels[subStart+j] = uint8(l + 4)
 			}
 		}
@@ -735,30 +857,14 @@ func appendQuantizeQ3_K(out []byte, values []float32) []byte {
 		for i := range qs {
 			qs[i] = 0
 		}
-		// hmask: high bit (Lq>3 → set) following the decoder's m/is walk.
-		// m = 1<<g, g advances per (n-half, j) group; hm byte index = l or
-		// l+16 within each 32-element pair. is selects the sub-block.
-		m := uint8(1)
-		is := 0
-		for n := 0; n < qkBlockSize; n += 128 {
-			for range 4 {
-				base := is * qkSubBlockSize
-				for l := range 16 {
-					if levels[base+l] > 3 {
-						hmask[l] |= m
-					}
-				}
-				is++
-				base = is * qkSubBlockSize
-				for l := range 16 {
-					if levels[base+l] > 3 {
-						hmask[16+l] |= m
-					}
-				}
-				is++
-				m <<= 1
+		// hmask: the high bit (Lq>3) of every one of the 256 elements,
+		// walked SEQUENTIALLY (not per-sub-block): byte index cycles
+		// 0..31 every element, bit index advances every 32 elements —
+		// hmask[j%32] |= 1<<(j/32). Matches dequantize_row_q3_K exactly.
+		for j := range qkBlockSize {
+			if levels[j] > 3 {
+				hmask[j%32] |= 1 << uint(j/32)
 			}
-			_ = n
 		}
 		// qs: low 2 bits (Lq&3). dequantize_row_q3_K reads, per 128-element
 		// half, q[l] at shift 2j (j=0..3, l=0..15) then q[l+16] at the same
@@ -804,29 +910,27 @@ func appendQuantizeQ2_K(out []byte, values []float32) []byte {
 	var scales [qkSubBlocks]byte
 	var qs [qkBlockSize / 4]byte
 	var levels [qkBlockSize]uint8 // q ∈ [0,3] per element
+	var weights [qkSubBlockSize]float32
 	for blockStart := 0; blockStart < len(values); blockStart += qkBlockSize {
 		block := values[blockStart : blockStart+qkBlockSize]
 
-		// Per-sub-block affine fit: scale = (max-min)/3, min = -minValue
-		// (the decoder subtracts dmin*min, so min is stored as a positive
-		// magnitude of the most-negative offset). Then the block-global d
-		// and dmin map each sub scale/min into a 4-bit field.
-		maxScale := float32(0)
-		maxMin := float32(0)
+		// Per-sub-block optimal (scale, min) via makeQKX2Quants — the same
+		// helper Q4_K/Q5_K use, called here with ggml's Q2_K parameters:
+		// nmax=3, plain |x| importance weights (not Q4_K's av_x+|x|),
+		// rmin=-0.5/rdelta=0.1/nstep=15, useMad=true. Faithful port of
+		// quantize_row_q2_K_ref, replacing the previous naive per-sub-block
+		// (max-min)/3 affine fit. makeQKX2Quants also writes its own
+		// best-effort levels directly into levels[]; those survive as the
+		// fallback for any sub-block whose reconstructed scale rounds to
+		// exactly zero below (ggml reuses its own first-pass L there too).
+		var maxScale, maxMin float32
 		for sb := range qkSubBlocks {
 			subStart := sb * qkSubBlockSize
-			lo, hi := block[subStart], block[subStart]
-			for j := 1; j < qkSubBlockSize; j++ {
-				v := block[subStart+j]
-				if v < lo {
-					lo = v
-				}
-				if v > hi {
-					hi = v
-				}
+			sub := block[subStart : subStart+qkSubBlockSize]
+			for l, v := range sub {
+				weights[l] = absFloat32(v)
 			}
-			sc := (hi - lo) / 3
-			mn := -lo // y = scale*q - min ⇒ min = -lo so q=0 → lo
+			sc, mn := makeQKX2Quants(3, sub, weights[:], levels[subStart:subStart+qkSubBlockSize], -0.5, 0.1, 15, true)
 			scratch.subMax[sb] = sc
 			scratch.subMin[sb] = mn
 			if sc > maxScale {
@@ -837,38 +941,39 @@ func appendQuantizeQ2_K(out []byte, values []float32) []byte {
 			}
 		}
 		d := float32(0)
-		dmin := float32(0)
-		var iscale, imin float32
 		if maxScale > 0 {
+			iscale := float32(15) / maxScale
+			for sb := range qkSubBlocks {
+				scales[sb] = byte(nearestIntGGML(iscale * scratch.subMax[sb]))
+			}
 			d = maxScale / 15
-			iscale = 15 / maxScale
+		} else {
+			for sb := range scales {
+				scales[sb] = 0
+			}
 		}
+		dmin := float32(0)
 		if maxMin > 0 {
+			iscale := float32(15) / maxMin
+			for sb := range qkSubBlocks {
+				scales[sb] |= byte(nearestIntGGML(iscale*scratch.subMin[sb])) << 4
+			}
 			dmin = maxMin / 15
-			imin = 15 / maxMin
-		}
-		for sb := range qkSubBlocks {
-			sc := clampInt(int(roundFloat32(iscale*scratch.subMax[sb])), 0, 15)
-			mn := clampInt(int(roundFloat32(imin*scratch.subMin[sb])), 0, 15)
-			scales[sb] = byte(sc) | byte(mn<<4)
 		}
 
 		// Requantise each element to q ∈ [0,3] against the reconstructed
-		// sub-scale/sub-min (exactly what the decoder reconstructs).
+		// sub-scale/sub-min. A sub-block whose reconstructed scale is
+		// exactly zero is left at its makeQKX2Quants fallback from above.
 		for sb := range qkSubBlocks {
 			subStart := sb * qkSubBlockSize
 			sc := d * float32(scales[sb]&0xF)
-			ml := dmin * float32(scales[sb]>>4)
-			inv := float32(0)
-			if sc != 0 {
-				inv = 1 / sc
+			if sc == 0 {
+				continue
 			}
+			ml := dmin * float32(scales[sb]>>4)
 			for j := range qkSubBlockSize {
-				q := 0
-				if inv != 0 {
-					q = clampInt(int(roundFloat32((block[subStart+j]+ml)*inv)), 0, 3)
-				}
-				levels[subStart+j] = uint8(q)
+				l := clampInt(nearestIntGGML((block[subStart+j]+ml)/sc), 0, 3)
+				levels[subStart+j] = uint8(l)
 			}
 		}
 
@@ -1006,14 +1111,21 @@ func maxAbsFloat32(values []float32) float32 {
 	return maxAbs
 }
 
-func minFloat32(values []float32) float32 {
-	minVal := values[0]
-	for i := 1; i < len(values); i++ {
-		if values[i] < minVal {
-			minVal = values[i]
+// maxAbsSignedFloat32 returns the largest |v| over values (amax) together
+// with the SIGNED v at that position (not just its magnitude) — the exact
+// amax/max pair ggml's quantize_row_q4_0_ref / q5_0_ref scan for. The sign
+// of the extremal element, not just its magnitude, drives those formats'
+// scale (d = max/-8 or max/-16), which is what lets the extremum map onto
+// the very edge of the nibble range instead of wasting one level.
+func maxAbsSignedFloat32(values []float32) (amax, signedMax float32) {
+	for _, v := range values {
+		a := absFloat32(v)
+		if a > amax {
+			amax = a
+			signedMax = v
 		}
 	}
-	return minVal
+	return amax, signedMax
 }
 
 func appendUint16LE(out []byte, value uint16) []byte {
