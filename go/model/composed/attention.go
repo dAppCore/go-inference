@@ -23,6 +23,8 @@ type AttnConfig struct {
 	RopeTheta, NormEps                 float32
 	OutputGate                         bool
 	ALiBi                              bool
+	QKNormalization                    model.QKNormalization
+	SlidingWindow                      int
 }
 
 // AttnWeights is one layer's attention weights. QProj is [Heads*HeadDim, D] (or [2·Heads*HeadDim, D] when
@@ -80,7 +82,12 @@ var ResidualNormMLPProjAttnInputDevice func(
 // NewAttnMixer builds a full-attention mixer for one layer.
 func NewAttnMixer(w *AttnWeights, cfg AttnConfig) Mixer { return &attnMixer{w: w, cfg: cfg} }
 
-func (m *attnMixer) Kind() string { return "full_attention" }
+func (m *attnMixer) Kind() string {
+	if m.cfg.SlidingWindow > 0 {
+		return "sliding_attention"
+	}
+	return "full_attention"
+}
 
 // rmsNormHead RMS-normalises a single [HeadDim] vector in place by weight w.
 func rmsNormHead(x, w []float32, eps float32) {
@@ -94,6 +101,28 @@ func rmsNormHead(x, w []float32, eps float32) {
 	r := math.Sqrt(ss/float64(len(x)) + float64(eps))
 	for i := range x {
 		x[i] = float32(float64(x[i]) / r * float64(w[i]))
+	}
+}
+
+// layerNormHead applies Cohere's learned per-head LayerNorm. Unlike RMSNorm it
+// centres each head before variance normalisation.
+func layerNormHead(x, w []float32, eps float32) {
+	if len(w) == 0 {
+		return
+	}
+	var mean float64
+	for _, value := range x {
+		mean += float64(value)
+	}
+	mean /= float64(len(x))
+	var variance float64
+	for _, value := range x {
+		delta := float64(value) - mean
+		variance += delta * delta
+	}
+	inv := 1 / math.Sqrt(variance/float64(len(x))+float64(eps))
+	for i := range x {
+		x[i] = float32((float64(x[i]) - mean) * inv * float64(w[i]))
 	}
 }
 
@@ -233,12 +262,20 @@ func (m *attnMixer) continueFromQKV(qRaw, k, v []float32, L, D int, st attnState
 	for t := range L {
 		for hd := range H {
 			row := q[t*H*HD+hd*HD : t*H*HD+hd*HD+HD]
-			rmsNormHead(row, m.w.QNorm, cfg.NormEps)
+			if cfg.QKNormalization == model.QKLayerNorm {
+				layerNormHead(row, m.w.QNorm, cfg.NormEps)
+			} else {
+				rmsNormHead(row, m.w.QNorm, cfg.NormEps)
+			}
 			applyRotaryHalf(row, pos0+t, RD, theta)
 		}
 		for hd := range KVH {
 			row := k[t*KVH*HD+hd*HD : t*KVH*HD+hd*HD+HD]
-			rmsNormHead(row, m.w.KNorm, cfg.NormEps)
+			if cfg.QKNormalization == model.QKLayerNorm {
+				layerNormHead(row, m.w.KNorm, cfg.NormEps)
+			} else {
+				rmsNormHead(row, m.w.KNorm, cfg.NormEps)
+			}
 			applyRotaryHalf(row, pos0+t, RD, theta)
 		}
 	}
@@ -265,12 +302,16 @@ func (m *attnMixer) continueFromQKV(qRaw, k, v []float32, L, D int, st attnState
 	scores := make([]float64, N)
 	for t := range L {
 		last := pos0 + t // inclusive
+		first := 0
+		if cfg.SlidingWindow > 0 && last+1 > cfg.SlidingWindow {
+			first = last + 1 - cfg.SlidingWindow
+		}
 		for hd := range H {
 			kvh := hd / rep
 			qrow := q[t*H*HD+hd*HD:]
 			// scores over keys 0..last
 			maxS := math.Inf(-1)
-			for j := 0; j <= last; j++ {
+			for j := first; j <= last; j++ {
 				krow := ck[j*KVH*HD+kvh*HD:]
 				var dot float64
 				for d := range HD {
@@ -285,7 +326,7 @@ func (m *attnMixer) continueFromQKV(qRaw, k, v []float32, L, D int, st attnState
 			if cfg.ALiBi {
 				model.ApplyALiBi(scores[:last+1], alibiSlopes[hd], last, 0)
 				maxS = math.Inf(-1)
-				for j := 0; j <= last; j++ {
+				for j := first; j <= last; j++ {
 					if scores[j] > maxS {
 						maxS = scores[j]
 					}
@@ -293,7 +334,7 @@ func (m *attnMixer) continueFromQKV(qRaw, k, v []float32, L, D int, st attnState
 			}
 			// softmax
 			var sum float64
-			for j := 0; j <= last; j++ {
+			for j := first; j <= last; j++ {
 				scores[j] = math.Exp(scores[j] - maxS)
 				sum += scores[j]
 			}
@@ -301,7 +342,7 @@ func (m *attnMixer) continueFromQKV(qRaw, k, v []float32, L, D int, st attnState
 			orow := out[t*H*HD+hd*HD:]
 			for d := range HD {
 				var acc float64
-				for j := 0; j <= last; j++ {
+				for j := first; j <= last; j++ {
 					acc += scores[j] * float64(cv[j*KVH*HD+kvh*HD+d])
 				}
 				orow[d] = float32(acc / sum)
