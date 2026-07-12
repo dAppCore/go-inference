@@ -128,6 +128,106 @@ func TestComposedStepperHeadFuseFastPath(t *testing.T) {
 	t.Logf("composedStepper.Head: cached fused-device logits reused exactly once (%d fuse call), then falls through cleanly", calls)
 }
 
+// TestComposedStepperPrefillBatchHeadFuseFiresOnceForWholeBatch is the receipted fix's own counter: before
+// PrefillBatch existed, composed's serve path (a per-turn stateless replay — see model/token.go's
+// generateStepwiseWithSession) called Step once per PROMPT token during prefill, so the head-fuse
+// (ResidualNormMLPProjHeadDevice, bound on the last layer) computed one vocab-row head GEMM per prefill
+// token — all but the very last immediately discarded. This pins the counterfactual (the per-token walk
+// still firing the fusion once per prompt token) against the fix (PrefillBatch firing it exactly ONCE for
+// the whole prompt), then confirms genuine decode steps afterwards still fire it once each — the waste
+// eliminated is per PREFILL TOKEN, not per real step.
+func TestComposedStepperPrefillBatchHeadFuseFiresOnceForWholeBatch(t *testing.T) {
+	const D, vocab, FF = 1024, 32, 1024 // L·D·FF ≥ deviceMinWork even at L=1 (mirrors TestComposedStepperHeadFuseFastPath)
+	m := mkComposedModel(1, D, vocab, FF)
+	tm := NewTokenModel(m)
+	prompt := []int32{1, 2, 3, 4, 5}
+
+	bindCountingHooks := func(calls *int) (restore func()) {
+		savedHead := ResidualNormMLPProjHeadDevice
+		ResidualNormMLPProjHeadDevice = func(mixerHidden, projW, h, normW, gate, up, down []float32, L, D, mixCols, FF int, eps float32, normF, head []float32, Vocab int) (y, logits []float32, err error) {
+			*calls++
+			yOut := make([]float32, len(h))
+			copy(yOut, h)
+			return yOut, make([]float32, Vocab), nil
+		}
+		savedProjTail := ResidualNormMLPProjDevice
+		ResidualNormMLPProjDevice = func(mixerHidden, projW, h, normW, gate, up, down []float32, L, D, mixCols, FF int, eps float32) ([]float32, error) {
+			t.Fatal("ResidualNormMLPProjDevice ran — the head-fuse should have short-circuited it via continue")
+			return nil, nil
+		}
+		return func() {
+			ResidualNormMLPProjHeadDevice = savedHead
+			ResidualNormMLPProjDevice = savedProjTail
+		}
+	}
+
+	// Counterfactual: the OLD per-token walk (one Step call per prompt token) over this prompt fires the
+	// fusion once per token — the waste this change eliminates.
+	var oldCalls int
+	restore := bindCountingHooks(&oldCalls)
+	sessOld, err := tm.OpenSession()
+	if err != nil {
+		t.Fatalf("OpenSession (old): %v", err)
+	}
+	for _, id := range prompt {
+		emb, err := tm.Embed(id)
+		if err != nil {
+			t.Fatalf("Embed: %v", err)
+		}
+		if _, err := sessOld.Step(emb); err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+	}
+	restore()
+	if oldCalls != len(prompt) {
+		t.Fatalf("per-token walk fired the head-fuse %d times for a %d-token prompt, want %d (once per Step call)", oldCalls, len(prompt), len(prompt))
+	}
+
+	// The fix: ONE PrefillBatch call over the whole prompt fires the fusion exactly once.
+	var newCalls int
+	restore = bindCountingHooks(&newCalls)
+	defer restore()
+	sess, err := tm.OpenSession()
+	if err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	bp, ok := sess.(model.BatchPrefillStepper)
+	if !ok {
+		t.Fatal("composedStepper does not implement model.BatchPrefillStepper")
+	}
+	embs := make([][]byte, len(prompt))
+	for i, id := range prompt {
+		e, err := tm.Embed(id)
+		if err != nil {
+			t.Fatalf("Embed: %v", err)
+		}
+		embs[i] = e
+	}
+	if _, err := bp.PrefillBatch(embs); err != nil {
+		t.Fatalf("PrefillBatch: %v", err)
+	}
+	if newCalls != 1 {
+		t.Fatalf("head-fuse fired %d times for a %d-token BATCH prefill, want exactly 1", newCalls, len(prompt))
+	}
+
+	// Genuine decode steps afterwards still fire the fusion once each — the fix stops it firing per
+	// PREFILL TOKEN, not per real decode step.
+	const decodeSteps = 3
+	for i := range decodeSteps {
+		emb, err := tm.Embed(int32(10 + i))
+		if err != nil {
+			t.Fatalf("Embed: %v", err)
+		}
+		if _, err := sess.Step(emb); err != nil {
+			t.Fatalf("Step %d: %v", i, err)
+		}
+	}
+	if want := 1 + decodeSteps; newCalls != want {
+		t.Fatalf("head-fuse fired %d times after batch prefill + %d decode steps, want %d (1 batch + 1/decode)", newCalls, decodeSteps, want)
+	}
+	t.Logf("head-fuse: per-token walk = %d calls for a %d-token prompt; batched prefill = 1 call + 1/decode step (%d total) — no per-prefill-token waste", oldCalls, len(prompt), newCalls)
+}
+
 // TestComposedTokenModelHeadVocab checks the bookends.
 func TestComposedTokenModelHeadVocab(t *testing.T) {
 	m := mkComposedModel(2, 8, 32, 16)
