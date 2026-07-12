@@ -71,6 +71,13 @@ type ServeConfig struct {
 	// deployment would otherwise emit. A load failure at boot is FATAL.
 	PolicyPath string
 
+	// PolicyMediator is the grade-G2 rewrite hook (serving/policy): a rewrite rule
+	// routes its matched span through this to transform rather than redact it. nil
+	// suits any redact/refuse-only policy; a policy that NeedsMediator loaded with
+	// a nil mediator is FATAL at boot (a rewrite would otherwise silently degrade
+	// to redact — the deployer who asked for mediation must get it or none).
+	PolicyMediator policy.Mediator
+
 	// HTTP + admin.
 	ReadTimeout     time.Duration
 	WriteTimeout    time.Duration
@@ -100,6 +107,9 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 		pol, err := policy.Load(cfg.PolicyPath)
 		if err != nil {
 			return core.E("serving.RunServe", core.Sprintf("outbound policy %q — refusing to serve unguarded", cfg.PolicyPath), err)
+		}
+		if pol.NeedsMediator() && cfg.PolicyMediator == nil {
+			return core.E("serving.RunServe", core.Sprintf("outbound policy %q declares rewrite rules but no mediator is wired — refusing to serve (a rewrite would silently degrade to redact)", cfg.PolicyPath), nil)
 		}
 		outboundPolicy = pol
 	}
@@ -219,8 +229,13 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 	if outboundPolicy != nil {
 		// Outermost on output: policy enforces on the final tokens (after any
 		// welfare rephrase/synthetic reply the deployment would otherwise emit).
-		resolver = policy.WrapResolver(resolver, outboundPolicy, log)
-		printServe(log, "serve: outbound policy ON — %d rule(s), hold-back %dB; redact/refuse on model output, audited per enforcement; -policy disables", outboundPolicy.Len(), outboundPolicy.HoldBack())
+		if outboundPolicy.NeedsMediator() {
+			resolver = policy.WrapResolverMediated(resolver, outboundPolicy, log, cfg.PolicyMediator)
+			printServe(log, "serve: outbound policy ON — %d rule(s), hold-back %dB, mediated rewrite (timeout %s); redact/refuse/rewrite on model output, audited per enforcement; -policy disables", outboundPolicy.Len(), outboundPolicy.HoldBack(), outboundPolicy.MediateTimeout())
+		} else {
+			resolver = policy.WrapResolver(resolver, outboundPolicy, log)
+			printServe(log, "serve: outbound policy ON — %d rule(s), hold-back %dB; redact/refuse on model output, audited per enforcement; -policy disables", outboundPolicy.Len(), outboundPolicy.HoldBack())
+		}
 	}
 	return Serve(ctx, cfg.Addr, resolver, opts...)
 }
