@@ -54,6 +54,16 @@ type ServeConfig struct {
 	KVCacheMode string // requested KV cache mode; wired when the engine exposes it
 	Native      bool   // no-cgo native path (the default go-inference metal engine already is)
 
+	// Multi-model serving lifecycle. Models empty = today's single-model
+	// behaviour, unchanged. When Models is non-empty, RunServe builds the
+	// multiModelResolver instead of the single-model hot-swap: ModelPath (the
+	// -model flag) becomes the pinned default, the extra Models load on demand,
+	// and residency is bounded by MemoryCeiling with LRU + IdleTTL eviction.
+	Models        []ModelSpec   // additional models beyond ModelPath (id, path, aliases, profiles, pin)
+	MemoryCeiling uint64        // max resident bytes across all models; 0 = unbounded
+	IdleTTL       time.Duration // evict a model idle longer than this (unpinned only); 0 = never
+	SweepInterval time.Duration // background idle-sweep tick; 0 = auto (min(IdleTTL, 30s))
+
 	// Conversation continuity.
 	StateConversations bool   // wake each chat from its slept state, no prompt replay
 	StateStorePath     string // durable per-project store file; empty = ephemeral default, wiped each serve run
@@ -102,16 +112,15 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 	// Outbound policy — loaded and compiled up front so a misconfigured
 	// deployment fails at BOOT, never mid-serve: a deployer who set -policy must
 	// never silently serve without the filter they asked for.
-	var outboundPolicy *policy.Policy
-	if core.Trim(cfg.PolicyPath) != "" {
-		pol, err := policy.Load(cfg.PolicyPath)
-		if err != nil {
-			return core.E("serving.RunServe", core.Sprintf("outbound policy %q — refusing to serve unguarded", cfg.PolicyPath), err)
-		}
-		if pol.NeedsMediator() && cfg.PolicyMediator == nil {
-			return core.E("serving.RunServe", core.Sprintf("outbound policy %q declares rewrite rules but no mediator is wired — refusing to serve (a rewrite would silently degrade to redact)", cfg.PolicyPath), nil)
-		}
-		outboundPolicy = pol
+	outboundPolicy, err := loadOutboundPolicy(cfg)
+	if err != nil {
+		return err
+	}
+
+	// Multi-model serving is a separate host path built on the multiModelResolver;
+	// the single-model hot-swap below is untouched and stays the default.
+	if len(cfg.Models) > 0 {
+		return runMultiModelServe(ctx, cfg, outboundPolicy, log)
 	}
 
 	// Reactive MTP pair resolution (the model declares, the serve reacts): an
@@ -158,7 +167,7 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 	// file (per-run scratch); an explicit -state-store survives as the durable
 	// per-project state.
 	if cfg.StateConversations {
-		defer wireContinuity(ctx, cfg, hotSwap, log)()
+		defer wireContinuity(ctx, cfg, hotSwap.setOnLoad, log)()
 	}
 
 	if armDrafter {
@@ -171,30 +180,30 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 	}
 	printServe(log, "serve: listening on %s (model=%s)", cfg.Addr, cfg.ModelPath)
 
-	admin := compat.AdminConfig{
-		Health: func(_ context.Context) (compat.Health, error) {
+	// Single-model host: /v1/models advertises the loaded model's basename,
+	// /v1/health reports its full path, and the hot-swap resolver drives
+	// serve/status + serve/reload. No multi-model control plane is mounted.
+	host := serveHost{
+		resolver:    hotSwap.openaiResolver(),
+		currentPath: hotSwap.CurrentPath,
+		setOnLoad:   hotSwap.setOnLoad,
+		reloader:    hotSwap,
+		listModels: func() []string {
+			if p := hotSwap.CurrentPath(); p != "" {
+				return []string{core.PathBase(p)}
+			}
+			return nil
+		},
+		healthModels: func() []string {
 			// Report the currently-loaded model (post-reload), or no models when
 			// the driver started model-less and none has been loaded yet.
 			models := []string{}
 			if p := hotSwap.CurrentPath(); p != "" {
 				models = append(models, p)
 			}
-			return compat.Health{Status: "ok", Runtime: "go-inference", Models: models, Time: time.Now().Unix()}, nil
+			return models
 		},
-		Models: func() []string {
-			if p := hotSwap.CurrentPath(); p != "" {
-				return []string{core.PathBase(p)}
-			}
-			return nil
-		},
-	}
-
-	// The /v1/admin/* control plane (machine identity, serve status, hot-swap
-	// reload) mounts behind the Bearer wall, driven by the same hot-swap
-	// resolver serving inference.
-	adminMux := adminpkg.NewMux(adminpkg.Config{
-		Reloader: hotSwap,
-		ServeStatus: adminpkg.ServeStatus{
+		status: adminpkg.ServeStatus{
 			ModelPath:    cfg.ModelPath,
 			Runtime:      "metal",
 			LoadedAtUnix: time.Now().Unix(),
@@ -203,7 +212,57 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 				CacheMode:     cfg.KVCacheMode,
 			},
 		},
-		Log: log,
+	}
+	return hostServe(ctx, cfg, host, outboundPolicy, log)
+}
+
+// serveHost bundles the resolver and per-mode wiring hostServe needs to stand up
+// the HTTP surface, so the single-model hot-swap and the multi-model registry
+// converge on one host path. controller is nil in single-model mode (no
+// /v1/admin/models routes); listModels/healthModels differ per mode (single-model
+// advertises the one model, multi-model the registry).
+type serveHost struct {
+	resolver     Resolver                        // base openai.Resolver, pre welfare/policy
+	currentPath  func() string                   // active/default model path (status + welfare gate)
+	setOnLoad    func(func(inference.TextModel)) // continuity hook registrar (wired by the caller)
+	reloader     adminpkg.Reloader               // serve/status + serve/reload
+	controller   adminpkg.ModelController        // multi-model control plane; nil = single-model
+	listModels   func() []string                 // /v1/models ids
+	healthModels func() []string                 // /v1/health resident models
+	status       adminpkg.ServeStatus            // boot status snapshot
+}
+
+// loadOutboundPolicy compiles the -policy file up front so a misconfigured
+// deployment fails at BOOT, never mid-serve. Empty path = no policy (nil).
+func loadOutboundPolicy(cfg ServeConfig) (*policy.Policy, error) {
+	if core.Trim(cfg.PolicyPath) == "" {
+		return nil, nil
+	}
+	pol, err := policy.Load(cfg.PolicyPath)
+	if err != nil {
+		return nil, core.E("serving.RunServe", core.Sprintf("outbound policy %q — refusing to serve unguarded", cfg.PolicyPath), err)
+	}
+	if pol.NeedsMediator() && cfg.PolicyMediator == nil {
+		return nil, core.E("serving.RunServe", core.Sprintf("outbound policy %q declares rewrite rules but no mediator is wired — refusing to serve (a rewrite would silently degrade to redact)", cfg.PolicyPath), nil)
+	}
+	return pol, nil
+}
+
+// hostServe composes the compatibility mux, the /v1/admin control plane, the
+// welfare + outbound-policy wraps, and runs the server. It is the shared tail
+// both serve modes reach after wiring their resolver + continuity.
+func hostServe(ctx context.Context, cfg ServeConfig, host serveHost, outboundPolicy *policy.Policy, log io.Writer) error {
+	admin := compat.AdminConfig{
+		Health: func(_ context.Context) (compat.Health, error) {
+			return compat.Health{Status: "ok", Runtime: "go-inference", Models: host.healthModels(), Time: time.Now().Unix()}, nil
+		},
+		Models: host.listModels,
+	}
+	adminMux := adminpkg.NewMux(adminpkg.Config{
+		Reloader:        host.reloader,
+		ServeStatus:     host.status,
+		ModelController: host.controller,
+		Log:             log,
 	})
 
 	opts := []ServeOption{
@@ -221,9 +280,9 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 	if cfg.ShutdownTimeout > 0 {
 		opts = append(opts, WithShutdownTimeout(cfg.ShutdownTimeout))
 	}
-	resolver := hotSwap.openaiResolver()
+	resolver := host.resolver
 	if cfg.Welfare {
-		resolver = wrapWelfareResolver(resolver, hotSwap, log)
+		resolver = wrapWelfareResolver(resolver, host.currentPath, log)
 		printServe(log, "serve: welfare guard ON — per-turn detect + mediation on every chat route (lem_end for Lemma checkpoints); -welfare=false disables")
 	}
 	if outboundPolicy != nil {
@@ -240,14 +299,131 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 	return Serve(ctx, cfg.Addr, resolver, opts...)
 }
 
+// runMultiModelServe hosts the multi-model registry. The -model ModelPath becomes
+// the pinned default (prepended), the extra cfg.Models load on demand under the
+// memory ceiling with LRU + idle-TTL eviction, and the /v1/admin/models control
+// plane mounts alongside the (default-model) serve/reload verb.
+func runMultiModelServe(ctx context.Context, cfg ServeConfig, outboundPolicy *policy.Policy, log io.Writer) error {
+	specs := cfg.Models
+	if p := core.Trim(cfg.ModelPath); p != "" {
+		// -model is the pinned default, prepended so it wins default selection.
+		specs = append([]ModelSpec{{Path: p, Pinned: true, LoadOptions: modelLoadOptions(cfg)}}, specs...)
+	}
+	mm, err := newMultiModelResolver(specs, MultiModelOptions{
+		MemoryCeiling: cfg.MemoryCeiling,
+		IdleTTL:       cfg.IdleTTL,
+		SweepInterval: cfg.SweepInterval,
+	})
+	if err != nil {
+		return core.E("serving.RunServe", "multi-model registry", err)
+	}
+	mm.setLoader(cfg.Loader) // nil-safe: keeps the registered-metal default
+	mm.setLog(log)
+	mm.startSweeper(ctx, resolveSweepInterval(cfg))
+
+	if cfg.StateConversations {
+		defer wireContinuity(ctx, cfg, mm.setOnLoad, log)()
+	}
+
+	printServe(log, "serve: multi-model — %d model(s), memory ceiling %d bytes, idle-ttl %s (per-model MTP/draft is not yet armed in this mode)", len(specs), cfg.MemoryCeiling, cfg.IdleTTL)
+	printServe(log, "serve: listening on %s (default model=%s)", cfg.Addr, mm.CurrentPath())
+
+	host := serveHost{
+		resolver:     mm.openaiResolver(),
+		currentPath:  mm.CurrentPath,
+		setOnLoad:    mm.setOnLoad,
+		reloader:     mm,
+		controller:   newMultiModelController(mm),
+		listModels:   mm.listedModelIDs,
+		healthModels: mm.residentModelIDs,
+		status: adminpkg.ServeStatus{
+			ModelPath:    mm.CurrentPath(),
+			Runtime:      "metal",
+			LoadedAtUnix: time.Now().Unix(),
+			Config: adminpkg.ServeStatusConfig{
+				ContextLength: cfg.ContextLen,
+				CacheMode:     cfg.KVCacheMode,
+			},
+		},
+	}
+	return hostServe(ctx, cfg, host, outboundPolicy, log)
+}
+
+// modelLoadOptions builds the loader options for the -model default in
+// multi-model mode: the shared LoadOptions plus a context override.
+func modelLoadOptions(cfg ServeConfig) []inference.LoadOption {
+	opts := append([]inference.LoadOption(nil), cfg.LoadOptions...)
+	if cfg.ContextLen > 0 {
+		opts = append(opts, inference.WithContextLen(cfg.ContextLen))
+	}
+	return opts
+}
+
+// resolveSweepInterval picks the idle-sweep tick: an explicit SweepInterval wins;
+// otherwise idle eviction ticks at min(IdleTTL, 30s) so a short TTL is honoured
+// promptly and a long one does not spin. 0 when idle eviction is off.
+func resolveSweepInterval(cfg ServeConfig) time.Duration {
+	if cfg.SweepInterval > 0 {
+		return cfg.SweepInterval
+	}
+	if cfg.IdleTTL <= 0 {
+		return 0
+	}
+	if cfg.IdleTTL < 30*time.Second {
+		return cfg.IdleTTL
+	}
+	return 30 * time.Second
+}
+
+// multiModelController adapts the multiModelResolver to the admin.ModelController
+// seam, converting the resolver's ModelStatus to the admin wire shape so the
+// admin package stays serving-free.
+type multiModelController struct {
+	r *multiModelResolver
+}
+
+// newMultiModelController wraps r as an admin.ModelController.
+func newMultiModelController(r *multiModelResolver) *multiModelController {
+	return &multiModelController{r: r}
+}
+
+func (c *multiModelController) ListModels() []adminpkg.ModelStatus {
+	statuses := c.r.list()
+	out := make([]adminpkg.ModelStatus, 0, len(statuses))
+	for _, s := range statuses {
+		out = append(out, adminpkg.ModelStatus{
+			ID:           s.ID,
+			Path:         s.Path,
+			Resident:     s.Resident,
+			Pinned:       s.Pinned,
+			EstBytes:     s.EstBytes,
+			Profiles:     s.Profiles,
+			LastUsedUnix: s.LastUsedUnix,
+		})
+	}
+	return out
+}
+
+func (c *multiModelController) LoadModel(id, path string, opts []inference.LoadOption, pinned bool) (string, error) {
+	return c.r.loadSpec(ModelSpec{ID: id, Path: path, Pinned: pinned, LoadOptions: opts})
+}
+
+func (c *multiModelController) UnloadModel(id string) error { return c.r.unloadModel(id) }
+
+func (c *multiModelController) SetPinned(id string, pinned bool) error {
+	return c.r.setPinned(id, pinned)
+}
+
 // wireContinuity opens the conversation state store and registers the per-load
-// continuity hook. When no ContinuityEnabler is injected (the registered engine
-// exposes no continuity attach), or the store can't open, serve degrades to
-// stateless with an honest notice rather than failing. The returned cleanup
-// (never nil) runs at serve shutdown: it closes the store, and when the store
-// was the DEFAULTED one it removes the file — the default store is a per-run
-// scratch cache, not an archive.
-func wireContinuity(ctx context.Context, cfg ServeConfig, hotSwap *hotSwapResolver, log io.Writer) func() {
+// continuity hook through setOnLoad (the single-model hot-swap resolver's or the
+// multi-model registry's — both expose the same registrar). When no
+// ContinuityEnabler is injected (the registered engine exposes no continuity
+// attach), or the store can't open, serve degrades to stateless with an honest
+// notice rather than failing. The returned cleanup (never nil) runs at serve
+// shutdown: it closes the store, and when the store was the DEFAULTED one it
+// removes the file — the default store is a per-run scratch cache, not an
+// archive.
+func wireContinuity(ctx context.Context, cfg ServeConfig, setOnLoad func(func(inference.TextModel)), log io.Writer) func() {
 	if cfg.EnableContinuity == nil {
 		printServe(log, "serve: conversation continuity unavailable on this engine — serving stateless")
 		return func() {}
@@ -259,7 +435,7 @@ func wireContinuity(ctx context.Context, cfg ServeConfig, hotSwap *hotSwapResolv
 		return func() {}
 	}
 	enable := cfg.EnableContinuity
-	hotSwap.setOnLoad(func(model inference.TextModel) {
+	setOnLoad(func(model inference.TextModel) {
 		if err := enable(model, store); err != nil {
 			printServe(log, "serve: conversation continuity unavailable (stateless serving continues): %v", err)
 			return
