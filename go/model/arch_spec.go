@@ -43,7 +43,9 @@ type ArchSpec struct {
 	// than a hardcoded model_type switch.
 	Composed  func(map[string]safetensors.Tensor, []byte) (TokenModel, error)
 	Normalize func(map[string]safetensors.Tensor) map[string]safetensors.Tensor
-	Vision    func(map[string]safetensors.Tensor, ArchConfig) (*LoadedVision, error)
+	// NormalizeConfig handles fused layouts whose split depends on parsed geometry.
+	NormalizeConfig func(map[string]safetensors.Tensor, ArchConfig) map[string]safetensors.Tensor
+	Vision          func(map[string]safetensors.Tensor, ArchConfig) (*LoadedVision, error)
 	// UnifiedVision assembles the encoder-free vision payload (gemma4_unified);
 	// packs with an encoder tower return nil here and populate Vision instead.
 	UnifiedVision func(map[string]safetensors.Tensor, ArchConfig) (*LoadedUnifiedVision, error)

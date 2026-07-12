@@ -257,6 +257,7 @@ type LoadedDiffusion struct {
 // LoadedModel is the whole backend-agnostic weight set: the Arch + every weight as a Linear or raw
 // norm bytes, viewing the source mmap. The single assembler output every backend consumes.
 type LoadedModel struct {
+	EmbedNorm []byte // optional layer norm applied immediately after token embedding (BLOOM)
 	Arch      Arch
 	Embed     *Linear // token embedding (also the tied LM head when LMHead is nil)
 	LMHead    *Linear // separate output projection, or nil ⇒ tied to Embed
