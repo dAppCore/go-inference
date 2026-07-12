@@ -1,5 +1,38 @@
 # NEXT WAKE (2026-07-16 — #381 SHIPPED: the skip is live, 2.1-2.6x at every depth)
 
+## QWEN-LINE SHARED FFN-TAIL FUSE (2026-07-12 — evidenced NEUTRAL, and why)
+
+- BUILT SHARED: engine/metal/residual_norm_mlp_device.go — ResidualNormMLPDevice,
+  an ARCH-NEUTRAL f32 primitive (named for the op, not for composed) that encodes
+  the whole pre-norm SwiGLU FFN sub-block into ONE command buffer: hplus = h +
+  mixOut → normed = RMSNorm(hplus, w) [plain rsqrt(mean²+eps)·w, the f32 rms
+  kernel] → SwiGLU(normed) → y = hplus + mlpOut. Every pre-norm SwiGLU stack
+  (llama/qwen/mistral) has exactly this tail, so it is a shared rung, not a
+  composed one-off. Reuses the existing emit helpers (emitBinary vv_Addfloat32,
+  emitRMSNormRows, emitSteelGemm, emitUnary sigmoid) + pooled pinned scratch.
+  composed declares the AX-8 hook (composed.ResidualNormMLPDevice); native binds
+  it; forwardEmb routes the dense-MLP layers above deviceMinWork through it, MoE
+  + sub-floor + device-fail fall back to the host add/norm/MLP/add path.
+- PARITY: TestComposedResidualNormMLPFuseDeviceVsHost (counter-guarded device-vs
+  -host, f32 tol, mirrors the q/k/v fuse test). Full metal suite 1554 green,
+  model/composed + model/qwen3 52 green, vet clean.
+- RECEIPT (interleaved same-thermal A/B, temp 0, sky-blue prompt): greedy text
+  BYTE-IDENTICAL before/after on BOTH models. tok/s NEUTRAL within thermal noise
+  — 0.8B before 21.3/22.0 -> after 23.0/21.9; 4B steady-state ~9.3 both (the lone
+  8.3 was the cold first run).
+- WHY NEUTRAL (the inventory correction): this fuse RELOCATES host glue onto the
+  GPU, it does NOT collapse a command buffer. The MLP was ALREADY one CB
+  (ComposedMLPDevice); the residual adds + RMSNorm were CPU work BETWEEN CBs, not
+  a CB each — and at L=1 that CPU glue is ~3 passes over [1,D], negligible. So
+  the CB-per-token count is UNCHANGED by this slice; it removes host glue (which
+  matters more at larger L, and cleans the boundary) and, crucially, is the
+  scaffold the real CB-collapse needs. The genuine collapse is merging the
+  mixer's FINAL-projection CB (o_proj / out_proj) INTO this tail CB — i.e. the
+  mixer hands a device-resident buffer to the tail instead of reading it back —
+  which is the GPU-resident whole-token orchestration flagged design-worthy
+  below. That is the next rung; this slice makes the tail a single shared entry
+  it can plug into.
+
 ## QWEN-LINE 4B STEP-UP (2026-07-12 — the family scales, zero loader fixes)
 
 - RECEIPT: mlx-community/Qwen3.5-4B-OptiQ-4bit loads through LoadComposed and
