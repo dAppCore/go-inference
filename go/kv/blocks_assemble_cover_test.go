@@ -428,3 +428,84 @@ func TestBlocksAssembleCover_RawBlock(t *testing.T) {
 		t.Fatalf("raw-block dtype mismatch error = %v, want errRawTensorDtypeMismatch", err)
 	}
 }
+
+// tokenBytes builds one token of width bytes, each byte set to fill — a
+// recognisable pattern so a compaction test can assert exactly which bytes
+// survived and which gap bytes were dropped.
+func tokenBytes(fill byte, width int) []byte {
+	out := make([]byte, width)
+	for i := range out {
+		out[i] = fill
+	}
+	return out
+}
+
+// TestBlocksAssembleCover_CompactLayerRawGaps_Good drives the gapped-placement
+// compaction path (the multi-head assembly fast path leaves a [B,H,capL,D]
+// buffer with capL > filledL when its token estimate overshoots). Compaction
+// must rewrite it to packed [B,H,filledL,D] form byte-for-byte, dropping only
+// the trailing gap tokens — a torn-state edge the single-head packed benches
+// never reach.
+func TestBlocksAssembleCover_CompactLayerRawGaps_Good(t *testing.T) {
+	// float32 → bytesPerValue 4; B=1, H=2 (bh=2), D=1, filledL=2, capL=4.
+	const bpv, bh, d, filledL = 4, 2, 1, 2
+	// row0: real tokens 1,2 then gap tokens (9); row1: real 3,4 then gap.
+	buf := make([]byte, 0, bh*4*d*bpv)
+	buf = append(buf, tokenBytes(1, bpv)...) // row0 t0 (real)
+	buf = append(buf, tokenBytes(2, bpv)...) // row0 t1 (real)
+	buf = append(buf, tokenBytes(9, bpv)...) // row0 t2 (gap)
+	buf = append(buf, tokenBytes(9, bpv)...) // row0 t3 (gap)
+	buf = append(buf, tokenBytes(3, bpv)...) // row1 t0 (real)
+	buf = append(buf, tokenBytes(4, bpv)...) // row1 t1 (real)
+	buf = append(buf, tokenBytes(9, bpv)...) // row1 t2 (gap)
+	buf = append(buf, tokenBytes(9, bpv)...) // row1 t3 (gap)
+
+	shape := []int32{1, 2, filledL, 1} // dstShape[2] carries the fill cursor
+	compactLayerRawGaps(&buf, shape, bh, d, bpv)
+
+	want := make([]byte, 0, bh*filledL*d*bpv)
+	want = append(want, tokenBytes(1, bpv)...)
+	want = append(want, tokenBytes(2, bpv)...)
+	want = append(want, tokenBytes(3, bpv)...)
+	want = append(want, tokenBytes(4, bpv)...)
+	if len(buf) != len(want) {
+		t.Fatalf("compacted length = %d, want %d (packed [B,H,filledL,D])", len(buf), len(want))
+	}
+	for i := range want {
+		if buf[i] != want[i] {
+			t.Fatalf("compacted byte %d = %d, want %d — gap tokens not dropped cleanly", i, buf[i], want[i])
+		}
+	}
+}
+
+// TestBlocksAssembleCover_CompactLayerRawGaps_NoOp pins the no-op guards: a
+// non-4D shape, an already-packed buffer (capL == filledL), and an undersized
+// buffer (reads as packed, not gapped) must all leave the bytes untouched.
+func TestBlocksAssembleCover_CompactLayerRawGaps_NoOp(t *testing.T) {
+	const bpv, bh, d = 4, 2, 1
+
+	// non-4D shape: returns immediately.
+	nb := append([]byte(nil), tokenBytes(7, bpv*4)...)
+	before := append([]byte(nil), nb...)
+	compactLayerRawGaps(&nb, []int32{2, 3, 4}, bh, d, bpv)
+	if len(nb) != len(before) {
+		t.Fatalf("non-4D shape mutated the buffer (len %d -> %d)", len(before), len(nb))
+	}
+
+	// packed: len == bh*filledL*d*bpv exactly, so layerRawGapStride reads capL ==
+	// filledL and compaction is skipped.
+	packed := make([]byte, bh*2*d*bpv) // filledL = 2
+	for i := range packed {
+		packed[i] = byte(i)
+	}
+	packedCopy := append([]byte(nil), packed...)
+	compactLayerRawGaps(&packed, []int32{1, 2, 2, 1}, bh, d, bpv)
+	if len(packed) != len(packedCopy) {
+		t.Fatalf("packed buffer truncated (len %d -> %d)", len(packedCopy), len(packed))
+	}
+	for i := range packedCopy {
+		if packed[i] != packedCopy[i] {
+			t.Fatalf("packed buffer byte %d mutated", i)
+		}
+	}
+}
