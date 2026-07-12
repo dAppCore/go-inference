@@ -4,7 +4,10 @@ package openai
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"io"
+	"math"
 	"net/http"
 
 	core "dappco.re/go"
@@ -58,6 +61,11 @@ type EmbeddingResponseDatum struct {
 	Object    string    `json:"object"`
 	Index     int       `json:"index"`
 	Embedding []float32 `json:"embedding"`
+	// EmbeddingBase64 holds the base64 form of the raw little-endian float32
+	// bytes when the request asked for encoding_format=base64. It is emitted
+	// under the "embedding" key in place of the number array (the OpenAI wire
+	// shape); the encoder picks the branch, so it carries no json tag.
+	EmbeddingBase64 string `json:"-"`
 }
 
 type RerankRequest struct {
@@ -147,13 +155,21 @@ func (h *EmbeddingsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "input must not be empty", "input")
 		return
 	}
+	base64Format, ok := embeddingEncodingFormat(w, req.EncodingFormat)
+	if !ok {
+		return
+	}
 	model, ok := h.resolve(w, r.Context(), req.Model)
 	if !ok {
 		return
 	}
-	embeddingModel, ok := model.(inference.EmbeddingModel)
+	// Unwrap welfare/policy decorators before the capability assertion — those
+	// guards police generated text and do not re-expose EmbeddingModel, so a
+	// wrapped embedder would otherwise be rejected here. Mirrors the AcceptsAudio
+	// gate: a model that genuinely cannot embed is a clean 400.
+	embeddingModel, ok := inference.BaseTextModel(model).(inference.EmbeddingModel)
 	if !ok {
-		writeError(w, http.StatusNotImplemented, "model does not support embeddings", "model")
+		writeError(w, http.StatusBadRequest, "model does not support embeddings", "model")
 		return
 	}
 	result, err := embeddingModel.Embed(r.Context(), inference.EmbeddingRequest{
@@ -167,7 +183,13 @@ func (h *EmbeddingsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	data := make([]EmbeddingResponseDatum, 0, len(result.Vectors))
 	for i, vector := range result.Vectors {
-		data = append(data, EmbeddingResponseDatum{Object: "embedding", Index: i, Embedding: vector})
+		datum := EmbeddingResponseDatum{Object: "embedding", Index: i}
+		if base64Format {
+			datum.EmbeddingBase64 = encodeEmbeddingBase64(vector)
+		} else {
+			datum.Embedding = vector
+		}
+		data = append(data, datum)
 	}
 	writeJSON(w, http.StatusOK, EmbeddingResponse{Object: "list", Data: data, Model: req.Model, Usage: result.Usage})
 }
@@ -196,9 +218,11 @@ func (h *RerankHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	rerankModel, ok := model.(inference.RerankModel)
+	// Same unwrap as embeddings: reach the base model's RerankModel past the
+	// welfare/policy text guards, which do not re-expose it.
+	rerankModel, ok := inference.BaseTextModel(model).(inference.RerankModel)
 	if !ok {
-		writeError(w, http.StatusNotImplemented, "model does not support rerank", "model")
+		writeError(w, http.StatusBadRequest, "model does not support rerank", "model")
 		return
 	}
 	result, err := rerankModel.Rerank(r.Context(), inference.RerankRequest{
@@ -397,4 +421,31 @@ func queryModel(r *http.Request) string {
 		return ""
 	}
 	return core.Trim(r.URL.Query().Get("model"))
+}
+
+// embeddingEncodingFormat validates the encoding_format field and reports
+// whether base64 was requested. "" and "float" produce the number-array wire
+// shape; "base64" produces the packed-bytes string shape. Any other value is a
+// clean 400, matching the OpenAI contract.
+func embeddingEncodingFormat(w http.ResponseWriter, format string) (base64Format, ok bool) {
+	switch core.Lower(core.Trim(format)) {
+	case "", "float":
+		return false, true
+	case "base64":
+		return true, true
+	default:
+		writeError(w, http.StatusBadRequest, "encoding_format must be \"float\" or \"base64\"", "encoding_format")
+		return false, false
+	}
+}
+
+// encodeEmbeddingBase64 packs a vector as little-endian float32 bytes and
+// base64-encodes them — the representation an OpenAI client decodes when it
+// requested encoding_format=base64.
+func encodeEmbeddingBase64(vector []float32) string {
+	raw := make([]byte, len(vector)*4)
+	for i, v := range vector {
+		binary.LittleEndian.PutUint32(raw[i*4:], math.Float32bits(v))
+	}
+	return base64.StdEncoding.EncodeToString(raw)
 }
