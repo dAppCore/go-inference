@@ -396,3 +396,67 @@ func TestTensors_Close_Good(t *testing.T) {
 		t.Fatalf("release func re-invoked on second Close (%d), want 1", closed)
 	}
 }
+
+// TestTensors_GgufLoadTensorData_Good decodes each supported native tensor type
+// directly through ggufLoadTensorData: an F32 dense view (bytes aliased from the
+// payload), a Q8_0 block widened to F16, and a Q4_0 block widened to F16. The
+// Q4_0 dispatch branch is reached only here — LoadTensors_Good exercises F32 +
+// Q8_0 but never Q4_0.
+func TestTensors_GgufLoadTensorData_Good(t *testing.T) {
+	f32 := make([]byte, 16)
+	for i, v := range []float32{1, 2, 3, 4} {
+		binary.LittleEndian.PutUint32(f32[i*4:i*4+4], math.Float32bits(v))
+	}
+
+	cases := []struct {
+		name      string
+		typ       uint32
+		shape     []uint64
+		payload   []byte
+		wantDtype string
+		wantLen   int
+	}{
+		{"f32", ggufTensorTypeF32, []uint64{4}, f32, "F32", 16},
+		{"q8_0", TensorTypeQ8_0, []uint64{32}, quantizeQ8_0(rampBlock(32)), "F16", 64},
+		{"q4_0", TensorTypeQ4_0, []uint64{32}, quantizeQ4_0(rampBlock(32)), "F16", 64},
+	}
+	for _, tc := range cases {
+		info := TensorInfo{Name: tc.name, Type: tc.typ, Shape: tc.shape}
+		got, err := ggufLoadTensorData(tc.payload, 0, info)
+		if err != nil {
+			t.Fatalf("%s: ggufLoadTensorData: %v", tc.name, err)
+		}
+		if got.Dtype != tc.wantDtype {
+			t.Errorf("%s: dtype = %q, want %q", tc.name, got.Dtype, tc.wantDtype)
+		}
+		if len(got.Data) != tc.wantLen {
+			t.Errorf("%s: data len = %d, want %d", tc.name, len(got.Data), tc.wantLen)
+		}
+	}
+}
+
+// TestTensors_GgufLoadTensorData_Ugly exercises the corruption guards on the
+// tensor-data load path: an offset that overflows dataStart, a payload end that
+// overflows, a payload range that runs past the available bytes, and an
+// unsupported native type. Each must return an error rather than a bad slice.
+func TestTensors_GgufLoadTensorData_Ugly(t *testing.T) {
+	f32Shape := []uint64{4} // 16 bytes when F32
+	cases := []struct {
+		name      string
+		typ       uint32
+		offset    uint64
+		dataStart uint64
+		dataLen   int
+	}{
+		{"offset-overflow", ggufTensorTypeF32, math.MaxUint64, 1, 64},
+		{"end-overflow", ggufTensorTypeF32, math.MaxUint64 - 10, 0, 64},
+		{"out-of-range", ggufTensorTypeF32, 0, 0, 8}, // F32[4] needs 16, only 8 present
+		{"unsupported-type", 999, 0, 0, 64},
+	}
+	for _, tc := range cases {
+		info := TensorInfo{Name: tc.name, Type: tc.typ, Shape: f32Shape, Offset: tc.offset}
+		if _, err := ggufLoadTensorData(make([]byte, tc.dataLen), tc.dataStart, info); err == nil {
+			t.Errorf("%s: ggufLoadTensorData: want error, got nil", tc.name)
+		}
+	}
+}
