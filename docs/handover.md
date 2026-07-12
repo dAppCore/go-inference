@@ -1025,3 +1025,33 @@ gate fusion + the thin-stage receipt.
 - Triage rule earned: **when generation misbehaves, A/B temp-0 vs default FIRST**
   — it separates forward from sampler in one run and would have saved rounds
   1–11. (lem generate defaults to temp 1.0, not greedy.)
+
+## 2026-07-13 — #52 CLOSED: the producer fork (fifteen rounds, one boolean)
+
+- **ROOT CAUSE (r15, 09168bd):** `useBatchedPrefill := … && !hostSampling` —
+  requesting SAMPLING switched the whole prompt/decode producer to the
+  token-at-a-time prefill, whose 12B logits are flattened (argmax mostly
+  preserved). Fifteen rounds of oracles stayed clean because greedy and
+  near-zero-temp only see the argmax; temp-1 sampling sees the spread.
+  Fix: batched prefill owns every compatible prompt; the sampler consumes the
+  SAME forward's final-hidden row (hipGemma4Q4SampleBatchedPrefillRow;
+  batched decode gained ReturnHidden). Receipts: 12B default CLI 120-tok
+  coherent 20.8 tok/s · greedy byte-unchanged 42.5 · E2B 56.1 · armed suite
+  green.
+- **En-route real fixes that weren't THE bug:** device sampler missing final
+  softcap (r12, oracle-caught); quadratic insertion sort over the 262144
+  vocab per sampled step → radix, 0.2→20.8 tok/s (r13); loader
+  WithBackend("metal") pin (0af1329); r8's cross-engine "divergence" exposed
+  as a pack-mismatch artefact (r9/r10).
+- **Residuals → #71:** explicit TopK-64 path still incoherent (device draws
+  match host reference — a third producer fork suspected; spread instrument
+  in-tree); generation_config sampling defaults ignored by BOTH engines
+  (declares-discipline follow-up); why metal's raw full-vocab temp-1 is
+  coherent (instrument).
+- **LESSONS (banked to memory):** sampler-vs-forward triage = A/B temp-0 vs
+  default FIRST. A knob must never select a different PRODUCER — eligibility
+  gates that fork the computation (not just the consumer) are the bug class
+  fifteen rounds of consumer-side oracles cannot see; grep eligibility
+  booleans for forward-path terms. Pre-change gates in fix briefs (r14's
+  "explicit-topk must be coherent first") pay for themselves — one fired and
+  saved a masking implementation.
