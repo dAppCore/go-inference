@@ -60,10 +60,62 @@ MORNING AFTER (2026-07-12) — the family round:
   SSDCommandConfig/SFTCommandConfig grew Backend -> WithBackend; under
   metal_runtime the metal engine had been winning selection and
   genuinely loading fixture paths).
+AFTERNOON (2026-07-12) — #375 flash routing + the Opus fleet round:
+- THE 8K CELL FLIPPED: e2b pp8K 10,048 tok/s (0.718-0.723s ×3, quiet
+  machine) vs mlx-lm true wall 0.730s SAME conditions — lem now leads
+  the measured field at EVERY depth. 32K 7,849->8,038; 62K/118K
+  unchanged. Two levers, both found by the NEW per-lane sdpa trace
+  (attn.sdpa -> .win/.gemm/.mq, permanent instrument, d8f8e24):
+  1. GEMM knee 4096->2048 (d8f8e24): chunk-1 globals rode the multiQ
+     vector kernel at 30.7ms where the composition runs deeper spans in
+     17.6ms. LTHN_SDPA_GEMM_MINKV overrides live. pp8K 9,315->9,641.
+  2. Window-flash occupancy cliff (e9e0935): one TG per (BQ-tile,head)
+     = 16 TGs at a 57-row boundary chunk — 35.7ms vs the ring kernel's
+     2.4ms (15x). flashWinMinRows=1024 gates small chunks to ring
+     (crossover receipted: 484->ring 1.7x, 1024 tie, 2048 flash 1.5x).
+     pp8K 9,641->10,058.
+  NUMERIC TIER, both levers: re-routed chunks change accumulation
+  order -> greedy forks at near-ties observed (both branches coherent).
+  Same tier the GEMM/flash lanes already trade at; kill switches:
+  LTHN_SDPA_GEMM_MINKV=4096 / LTHN_FLASH_WIN=0.
+  BANKED NEGATIVE: BQ16/BK32/WM2 steel shape (halve rescale/barrier
+  tax) ran 18% SLOWER — halving BQ doubles Q-tiles and each re-reads
+  its whole K/V span; the kernel is bandwidth-bound, not rescale-bound.
+  Reverted. (Also: the win flash at BD256 is ALREADY the max legal
+  shape — BQ32/BK32 blows the 32KB TG budget.)
+  mlx anatomy brief (Opus research, /private/tmp/lem-dev/
+  sdpa_anatomy_brief.md): mlx has NO fused attention at head_dim 256
+  (use_fallback fuses 64/80/128 only) — it runs the unfused composition
+  with a materialised mask tensor; our fused BD-256 steel port + window
+  flash are structurally AHEAD; mlx-lm caps sliding KV via
+  RotatingKVCache(512). NAX is an M5-era feature — nothing hiding on M3.
+- OPUS FLEET MERGED (d566736, 4 agents, worktrees cleaned):
+  #378 G2 mediated rewrite SHIPPED (5 commits): rewrite action +
+  streaming mediation (degrade lattice refuse>redact>rewrite, mediator
+  timeout per span, original span can never leak), WrapResolverMediated,
+  ServeConfig.PolicyMediator boot-fatal seam. 0 B/op clean path.
+  FOLLOW-UPS parked: mediator output is emitted verbatim (add a
+  non-recursive re-enforcement pass if the mediator is untrusted);
+  cmd/lem ships no default mediator (rewrite policies boot-fatal from
+  the CLI until one is injected); audit lacks a Degraded flag.
+  #379 composed -state SHIPPED: token-prefix kv.Snapshot (a stateless-
+  replay session's complete state IS its prefix; restore re-prefills,
+  deterministic host-f32 recomputes identical recurrent state).
+  generate -state + snapshot-strategy wake now work for composed.
+  PARKED: RangeKVBlocks (serve -state-conversations sleep lane) —
+  needs trusted-prefix block tiling + a LIVE multi-turn serve gate;
+  also confirm serve degrades gracefully when composed sleep declines.
+  #381 vision/bidir lane: skip is structurally VALID there (consumer
+  reads only boundary hidden — the "embeddings lane" is the VISION
+  lane; the pooling forward is engine/hip's) but UNARMED pending a
+  real unified-vision receipt; prefillSkipToLayer pinned 0 at entry
+  (load-bearing: no per-chunk reset there) + guard test.
 FOLLOW-UPS still open on #381: per-chunk seams + 2nd-queue overlap of
-the builder's ~2ms/chunk GPU work (~1-2%), embeddings/bidir chunk lane
-still full-stack. 26B/31B receipts DONE (above); 12B unified receipts
-ride the same lane.
+the builder's ~2ms/chunk GPU work (~1-2%). 26B/31B receipts DONE;
+12B unified receipts ride the same lane. #375 remaining slack: the
+win lane at big rows (~26ms/chunk vs ~15ms physics) and the global
+flash lane (67ms vs ~30) — genuinely diminishing; next likely lever is
+structural (fewer dispatches per chunk / 2nd queue), not tile shapes.
 
 **THE TRAP THAT ATE AN HOUR (bank it):** running engine/metal tests with
 go-mlx's dist metallib (the retired path my own notes carried) makes the
