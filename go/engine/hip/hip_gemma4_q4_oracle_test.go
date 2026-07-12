@@ -6,16 +6,157 @@ package hip
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/model/quant/mlxaffine"
+	"dappco.re/go/inference/model/safetensors"
 )
+
+// TestHIPGemma4Q4LoaderOracle is the round-7 independent loader cross-check.
+// It compares the checkpoint bytes with HIP's device-resident bytes, the shared
+// Go MLX-affine dequantiser, and tools/mlxaffine_dequant.py's NumPy result.
+func TestHIPGemma4Q4LoaderOracle(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" || os.Getenv("GO_ROCM_LOADER_ORACLE") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 and GO_ROCM_LOADER_ORACLE=1")
+	}
+	modelPath := hipOracleModelPath()
+	if modelPath == "" {
+		t.Skip("set GO_ROCM_ORACLE_MODEL_PATH")
+	}
+	runtime := newSystemNativeRuntime()
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(runtime).LoadModel(modelPath, inference.WithContextLen(4096)))
+	core.RequireNoError(t, err)
+	defer model.Close()
+	rocmLoaded := model.(*rocmModel)
+	loaded := rocmLoaded.native.(*hipLoadedModel)
+	mapping, err := safetensors.LoadDirMmap(modelPath)
+	core.RequireNoError(t, err)
+	defer mapping.Close()
+
+	python := filepath.Clean(filepath.Join("..", "..", "..", "tools", "mlxaffine_dequant.py"))
+	compareDense := func(label, name string) {
+		t.Helper()
+		host := mapping.Tensors[name]
+		want, err := safetensors.DecodeFloat32(host.Dtype, host.Data, tensorElementCount(host.Shape))
+		core.RequireNoError(t, err)
+		device := hipLoaderOracleDeviceBytes(t, loaded, name)
+		got, err := safetensors.DecodeFloat32(host.Dtype, device, len(want))
+		core.RequireNoError(t, err)
+		py := hipLoaderOraclePython(t, python, modelPath, name, true, -1, 0, 0)
+		hipLoaderOracleReport(t, label, want, got, py)
+	}
+	compareQuant := func(label, base string, cfg hipMLXQ4DeviceWeightConfig, row int) {
+		t.Helper()
+		weight := hipLoaderOraclePointerBytes(t, loaded.driver, cfg.WeightPointer, cfg.WeightBytes)
+		scales := hipLoaderOraclePointerBytes(t, loaded.driver, cfg.ScalePointer, cfg.ScaleBytes)
+		biases := hipLoaderOraclePointerBytes(t, loaded.driver, cfg.BiasPointer, cfg.BiasBytes)
+		for suffix, device := range map[string][]byte{".weight": weight, ".scales": scales, ".biases": biases} {
+			if want := mapping.Tensors[base+suffix].Data; !slices.Equal(want, device) {
+				t.Fatalf("%s%s device bytes differ from checkpoint", base, suffix)
+			}
+		}
+		shared, err := mlxaffine.DequantizeTensor(weight, scales, biases, cfg.Rows, cfg.Cols, cfg.Bits, cfg.GroupSize)
+		core.RequireNoError(t, err)
+		if row >= 0 {
+			shared = shared[row*cfg.Cols : (row+1)*cfg.Cols]
+		}
+		py := hipLoaderOraclePython(t, python, modelPath, base, false, row, cfg.GroupSize, cfg.Bits)
+		hipLoaderOracleReport(t, label, shared, shared, py)
+	}
+
+	for layer := 0; layer < loaded.modelInfo.NumLayers; layer++ {
+		compareDense(core.Sprintf("layer_scalar[%d]", layer), core.Sprintf("language_model.model.layers.%d.layer_scalar", layer))
+	}
+	compareDense("L29 input_norm", "language_model.model.layers.29.input_layernorm.weight")
+	forward, err := loaded.loadedGemma4Q4ForwardConfig(30)
+	core.RequireNoError(t, err)
+	compareQuant("L5 k_proj", "language_model.model.layers.5.self_attn.k_proj", forward.Layers[5].KeyProjection, -1)
+	compareQuant("L0 q_proj", "language_model.model.layers.0.self_attn.q_proj", forward.Layers[0].QueryProjection, -1)
+	tokens := rocmLoaded.Encode("Hi")
+	for _, token := range tokens {
+		compareQuant(core.Sprintf("embedding token Hi id=%d", token), "language_model.model.embed_tokens", hipEmbeddingAsProjection(forward.Layers[0].Embedding), int(token))
+	}
+}
+
+func tensorElementCount(shape []int) int {
+	count := 1
+	for _, dim := range shape {
+		count *= dim
+	}
+	return count
+}
+
+func hipEmbeddingAsProjection(cfg hipDeviceEmbeddingLookupConfig) hipMLXQ4DeviceWeightConfig {
+	return hipMLXQ4DeviceWeightConfig{WeightPointer: cfg.EmbeddingPointer, ScalePointer: cfg.ScalePointer, BiasPointer: cfg.BiasPointer, WeightBytes: cfg.EmbeddingBytes, ScaleBytes: cfg.ScaleBytes, BiasBytes: cfg.BiasBytes, Rows: cfg.VocabSize, Cols: cfg.HiddenSize, GroupSize: cfg.GroupSize, Bits: cfg.QuantBits}
+}
+
+func hipLoaderOracleDeviceBytes(t *testing.T, loaded *hipLoadedModel, name string) []byte {
+	t.Helper()
+	tensor, ok := loaded.tensors[name]
+	if !ok {
+		t.Fatalf("HIP did not load %s", name)
+	}
+	return hipLoaderOraclePointerBytes(t, loaded.driver, tensor.pointer, tensor.info.ByteSize)
+}
+
+func hipLoaderOraclePointerBytes(t *testing.T, driver nativeHIPDriver, pointer nativeDevicePointer, size uint64) []byte {
+	t.Helper()
+	out := make([]byte, int(size))
+	core.RequireNoError(t, driver.CopyDeviceToHost(pointer, out))
+	return out
+}
+
+func hipLoaderOraclePython(t *testing.T, script, modelPath, tensor string, dense bool, row, groupSize, bits int) []float32 {
+	t.Helper()
+	out := filepath.Join(t.TempDir(), "values.f32")
+	args := []string{script, modelPath, tensor, "--output", out}
+	if dense {
+		args = append(args, "--dense")
+	} else {
+		args = append(args, "--group-size", strconv.Itoa(groupSize), "--bits", strconv.Itoa(bits))
+	}
+	if row >= 0 {
+		args = append(args, "--row", strconv.Itoa(row))
+	}
+	printed, err := exec.Command("python3", args...).CombinedOutput()
+	if err != nil {
+		t.Fatalf("python independent dequant %s: %v: %s", tensor, err, printed)
+	}
+	payload, err := os.ReadFile(out)
+	core.RequireNoError(t, err)
+	if len(payload)%4 != 0 {
+		t.Fatalf("python output %s has %d bytes", tensor, len(payload))
+	}
+	values := make([]float32, len(payload)/4)
+	for i := range values {
+		values[i] = math.Float32frombits(binary.LittleEndian.Uint32(payload[i*4:]))
+	}
+	return values
+}
+
+func hipLoaderOracleReport(t *testing.T, label string, checkpoint, hip, python []float32) {
+	t.Helper()
+	if len(checkpoint) != len(hip) || len(checkpoint) != len(python) {
+		t.Fatalf("%s counts checkpoint=%d hip=%d python=%d", label, len(checkpoint), len(hip), len(python))
+	}
+	hipMax, _ := hipOracleMaxMeanDiff(checkpoint, hip)
+	pythonMax, _ := hipOracleMaxMeanDiff(checkpoint, python)
+	t.Logf("LOADER %-30s count=%d hip-v-checkpoint max=%g python-v-checkpoint max=%g", label, len(checkpoint), hipMax, pythonMax)
+	if hipMax != 0 || pythonMax != 0 {
+		t.Errorf("%s loader mismatch: hip=%g python=%g", label, hipMax, pythonMax)
+	}
+}
 
 // TestHIPGemma4Q4LayerOracle is the #52 layer-0 numerical oracle. It runs the
 // real batched-prefill attention sub-block for a chosen layer on the GPU, reads
