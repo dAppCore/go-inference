@@ -93,12 +93,27 @@ func applyRotaryHalf(x []float32, pos, rotaryDim int, theta float64) {
 }
 
 // Forward runs attention over hidden [L,D], appending the new K/V to the cache and attending causally over
-// all cached tokens. Returns out [L,D] and the grown cache.
+// all cached tokens, then applies o_proj. Returns out [L,D] and the grown cache. It is forwardNoProj (which
+// stops one GEMM short) plus the o_proj into the session-owned scratch — the projection is split out so the
+// session can instead fold it into the FFN-tail command buffer (see projMixer / ResidualNormMLPProjDevice).
 func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, error) {
+	attnOut, oProj, mixCols, next, err := m.forwardNoProj(h, L, D, prior)
+	if err != nil {
+		return nil, nil, err
+	}
+	st := next.(attnState)
+	st.sc.o = matNTInto(st.sc.o, attnOut, oProj, L, mixCols, D)
+	return st.sc.o, st, nil
+}
+
+// forwardNoProj runs attention over hidden [L,D] up to but NOT including o_proj, returning the pre-projection
+// attention output [L,H*HD], the o_proj weight OProj [D,H*HD] and mixCols=H*HD, plus the grown cache. The
+// state advances identically to Forward; only the final projection is deferred to the caller.
+func (m *attnMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidden, projW []float32, mixCols int, next any, err error) {
 	cfg := m.cfg
 	H, KVH, HD, RD := cfg.Heads, cfg.KVHeads, cfg.HeadDim, cfg.RotaryDim
 	if H <= 0 || KVH <= 0 || HD <= 0 || H%KVH != 0 {
-		return nil, nil, core.NewError("composed.attnMixer: bad geometry")
+		return nil, nil, 0, nil, core.NewError("composed.attnMixer: bad geometry")
 	}
 	theta := float64(cfg.RopeTheta)
 	if theta == 0 {
@@ -109,7 +124,7 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 		qCols = 2 * H * HD // q_proj emits [q ; gate] per head
 	}
 	if len(m.w.QProj) != qCols*D {
-		return nil, nil, core.NewError("composed.attnMixer: q_proj size mismatch (OutputGate?)")
+		return nil, nil, 0, nil, core.NewError("composed.attnMixer: q_proj size mismatch (OutputGate?)")
 	}
 	var st attnState
 	if p, ok := prior.(attnState); ok {
@@ -241,7 +256,5 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 			out[i] = float32(float64(out[i]) * s)
 		}
 	}
-	sc.o = matNTInto(sc.o, out, m.w.OProj, L, H*HD, D)
-	o := sc.o
-	return o, attnState{k: ck, v: cv, n: N, sc: sc}, nil
+	return out, m.w.OProj, H * HD, attnState{k: ck, v: cv, n: N, sc: sc}, nil
 }

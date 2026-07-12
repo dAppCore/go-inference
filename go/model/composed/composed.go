@@ -87,6 +87,28 @@ var MLPDevice func(gate, up, down, x []float32, L, D, FF int) ([]float32, error)
 // exactly this tail, so the backend primitive is named for the op, not for this stack.
 var ResidualNormMLPDevice func(h, mixOut, normW, gate, up, down []float32, L, D, FF int, eps float32) ([]float32, error)
 
+// ResidualNormMLPProjDevice is ResidualNormMLPDevice with the mixer's FINAL projection (attention o_proj /
+// gated-delta out_proj) folded onto the front: given the mixer's pre-projection hidden mixerHidden [L,mixCols]
+// and that projection's weight projW [D,mixCols], it computes mixOut = mixerHidden@projWᵀ, then the same
+// (h+mixOut) → RMSNorm → SwiGLU → (+mlpOut) tail, all in ONE command buffer. The projection's output never
+// crosses the host floor — where the unfused path runs it as its own command buffer (a commit+wait per
+// layer) before the tail's. The session uses this only for a mixer that implements projMixer AND a dense MLP
+// above the device floor; nil — or a MoE FFN, or an error — falls back to the mixer's own projection + the
+// standard tail (see forwardEmb). Same AX-8 shape as ResidualNormMLPDevice; arch-neutral (named for the op,
+// not the mixer).
+var ResidualNormMLPProjDevice func(mixerHidden, projW, h, normW, gate, up, down []float32, L, D, mixCols, FF int, eps float32) ([]float32, error)
+
+// projMixer is the OPTIONAL capability of a mixer whose output is produced by a single final GEMM (the
+// attention o_proj, the gated-delta out_proj): it runs the mixer up to but NOT including that projection and
+// hands back the pre-projection hidden [L,mixCols] plus the projection weight projW [D,mixCols], so the
+// session can fold the projection into the FFN-tail command buffer (one CB where the mixer-owned projection
+// would otherwise be a second). forwardNoProj advances the mixer state exactly as Forward does — the ONLY
+// difference is that the caller now owns the final projection. A mixer without a single-GEMM output does not
+// implement this and the session runs the standard Forward → tail path.
+type projMixer interface {
+	forwardNoProj(hidden []float32, L, D int, prior any) (mixerHidden, projW []float32, mixCols int, next any, err error)
+}
+
 // deviceMinWork is the M·K·N floor below which matNTInto ignores the device hook — a tiny GEMV's
 // command-buffer round-trip outweighs its compute, so sub-MMAC shapes stay on the host path.
 const deviceMinWork = 1 << 20
@@ -213,31 +235,72 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 	for li := range s.m.Layers {
 		layer := &s.m.Layers[li]
 		normed := rmsNormRowsPlain(h, layer.InputNorm, L, D, eps)
+
+		// Projection-fused tail: when the mixer can defer its final output projection (attn o_proj /
+		// gated-delta out_proj) AND the FFN is a dense MLP above the device floor, that projection rides
+		// the FFN-tail command buffer — o_proj → (h+mixOut) → post-attn RMSNorm → SwiGLU → (+mlpOut) in ONE
+		// CB, collapsing the standalone projection CB the mixer would otherwise commit per layer. The
+		// projection rides free whatever its own size (the tail CB is already paid for). forwardNoProj
+		// advances the mixer state; a nil hook / MoE / sub-floor MLP skips this and runs the standard
+		// Forward → tail path below.
+		if pm, isProj := layer.Mixer.(projMixer); isProj {
+			if mlp, isDense := layer.MLP.(*MLP); isDense && ResidualNormMLPProjDevice != nil && L*D*mlp.FF >= deviceMinWork {
+				mixerHidden, projW, mixCols, next, err := pm.forwardNoProj(normed, L, D, s.states[li])
+				if err != nil {
+					return nil, err
+				}
+				s.states[li] = next
+				if y, ferr := ResidualNormMLPProjDevice(mixerHidden, projW, h, layer.PostAttnNorm, mlp.Gate, mlp.Up, mlp.Down, L, D, mixCols, mlp.FF, eps); ferr == nil {
+					h = y
+					continue
+				}
+				// Fused proj-tail errored (missing kernel / OOM): the mixer state has already advanced, so
+				// complete on the host from the returned pre-projection hidden (NO second mixer call — the
+				// state must not double-advance): run the projection, then the standard tail selection.
+				mixOut := matNT(mixerHidden, projW, L, mixCols, D)
+				if ResidualNormMLPDevice != nil {
+					if y, err := ResidualNormMLPDevice(h, mixOut, layer.PostAttnNorm, mlp.Gate, mlp.Up, mlp.Down, L, D, mlp.FF, eps); err == nil {
+						h = y
+						continue
+					}
+				}
+				h = tailHost(h, mixOut, layer.PostAttnNorm, mlp, L, D, eps)
+				continue
+			}
+		}
+
+		// Standard path: the mixer owns its final projection; the FFN tail fuses on its own device CB
+		// (h += mixOut → RMSNorm → SwiGLU → h += mlpOut) for a dense MLP above the floor, else host.
 		mixOut, next, err := layer.Mixer.Forward(normed, L, D, s.states[li])
 		if err != nil {
 			return nil, err
 		}
 		s.states[li] = next
-		// Fused device tail: (h += mixOut) → RMSNorm(PostAttnNorm) → SwiGLU MLP → (h += mlpOut) in ONE
-		// command buffer, for the dense-MLP layers above the device floor. MoE FFNs and sub-floor shapes
-		// fall through to the host add/norm/MLP/add path below (a device failure does too — deterministic
-		// for the rest of the process either way).
 		if mlp, ok := layer.MLP.(*MLP); ok && ResidualNormMLPDevice != nil && L*D*mlp.FF >= deviceMinWork {
 			if y, err := ResidualNormMLPDevice(h, mixOut, layer.PostAttnNorm, mlp.Gate, mlp.Up, mlp.Down, L, D, mlp.FF, eps); err == nil {
 				h = y
 				continue
 			}
 		}
-		for i := range h {
-			h[i] += mixOut[i] // mixer residual
-		}
-		normed2 := rmsNormRowsPlain(h, layer.PostAttnNorm, L, D, eps)
-		mlpOut := layer.MLP.forward(normed2, L, D)
-		for i := range h {
-			h[i] += mlpOut[i] // MLP residual
-		}
+		h = tailHost(h, mixOut, layer.PostAttnNorm, layer.MLP, L, D, eps)
 	}
 	return h, nil
+}
+
+// tailHost runs the FFN tail on the host — the mixer-output residual add, the post-attn RMSNorm, the FFN
+// (dense SwiGLU or MoE) and the MLP residual add — returning the new hidden. It is the shared fallback for
+// both the projection-fused and standard paths when the device tail hook is nil or errors; a MoE FFN always
+// lands here (no fused-MLP device kernel).
+func tailHost(h, mixOut, normW []float32, ffn FFN, L, D int, eps float32) []float32 {
+	for i := range h {
+		h[i] += mixOut[i] // mixer residual
+	}
+	normed := rmsNormRowsPlain(h, normW, L, D, eps)
+	mlpOut := ffn.forward(normed, L, D)
+	for i := range h {
+		h[i] += mlpOut[i] // MLP residual
+	}
+	return h
 }
 
 // forward embeds tokens then runs the stack.
