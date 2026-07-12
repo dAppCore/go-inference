@@ -1447,6 +1447,224 @@ func TestArchSessionSampleTopKCandidatesFromLogitsMatchesFullSampler(t *testing.
 	}
 }
 
+// sampleSortedCandidatesFixture returns a small candidate set ALREADY sorted descending
+// by value — sampleSortedBF16Candidates (unlike model.Sampler.SampleCandidates, which
+// re-ranks defensively) trusts that ordering outright, exactly as the real GPU top-k
+// merge kernel hands it candidates. Feeding an already-descending set to both sides
+// keeps a stable re-sort a no-op, so the parity tests below never pin a byte computed
+// by hand — they compare against the independent, already-trusted model.Sampler.
+func sampleSortedCandidatesFixture() ([]int32, []byte) {
+	ids := []int32{7, 1, 9, 3, 5}
+	vals := []float32{5, 4.5, 3, 1, 0.2} // strictly descending, no ties
+	return ids, toBF16Bytes(vals)
+}
+
+// TestSampleSortedBF16CandidatesGuardErrors pins the four input-validation guards ahead
+// of any GPU/session state — sampleSortedBF16Candidates is pure host arithmetic over
+// caller-supplied candidate bytes (#30 r5, the pipelined-GPU sampling-tail cluster).
+func TestSampleSortedBF16CandidatesGuardErrors(t *testing.T) {
+	oneID := []int32{5}
+	oneLogit := toBF16Bytes([]float32{1})
+	t.Run("nil sampler", func(t *testing.T) {
+		if _, err := sampleSortedBF16Candidates(oneLogit, oneID, nil, model.SampleParams{Temperature: 1}); err == nil {
+			t.Fatal("nil sampler: want error, got nil")
+		}
+	})
+	t.Run("empty candidates", func(t *testing.T) {
+		if _, err := sampleSortedBF16Candidates(nil, nil, model.NewSampler(1), model.SampleParams{Temperature: 1}); err == nil {
+			t.Fatal("empty candidates: want error, got nil")
+		}
+	})
+	t.Run("too many candidates", func(t *testing.T) {
+		ids := make([]int32, headSampleTopKMaxK+1)
+		vals := make([]float32, len(ids))
+		for i := range ids {
+			ids[i] = int32(i)
+			vals[i] = float32(-i)
+		}
+		if _, err := sampleSortedBF16Candidates(toBF16Bytes(vals), ids, model.NewSampler(1), model.SampleParams{Temperature: 1}); err == nil {
+			t.Fatal("too many candidates: want error, got nil")
+		}
+	})
+	t.Run("logits ids length mismatch", func(t *testing.T) {
+		if _, err := sampleSortedBF16Candidates(oneLogit, []int32{1, 2}, model.NewSampler(1), model.SampleParams{Temperature: 1}); err == nil {
+			t.Fatal("length mismatch: want error, got nil")
+		}
+	})
+}
+
+// TestSampleSortedBF16CandidatesGreedyBranch pins the sampledGreedyParamsEligible arm
+// (Temperature<=0, MinP<=0, RepeatPenalty<=1): a best-of-unsuppressed scan across the
+// candidates, RNG-free, agreeing with model.Sampler.SampleCandidates run over the same
+// already-sorted candidates.
+func TestSampleSortedBF16CandidatesGreedyBranch(t *testing.T) {
+	t.Run("zero temperature", func(t *testing.T) {
+		ids, logits := sampleSortedCandidatesFixture()
+		params := model.SampleParams{Temperature: 0}
+		want, err := model.NewSampler(1).SampleCandidates(logits, ids, params)
+		if err != nil {
+			t.Fatalf("SampleCandidates: %v", err)
+		}
+		sampler := model.NewSampler(1)
+		got, err := sampleSortedBF16Candidates(logits, ids, sampler, params)
+		if err != nil {
+			t.Fatalf("sampleSortedBF16Candidates: %v", err)
+		}
+		if got != want {
+			t.Fatalf("greedy candidate = %d, want %d (SampleCandidates parity)", got, want)
+		}
+		if got != ids[0] {
+			t.Fatalf("greedy candidate = %d, want dominant candidate %d", got, ids[0])
+		}
+		if sampler.Draw() != model.NewSampler(1).Draw() {
+			t.Fatal("greedy branch consumed a draw — greedy must be RNG-free")
+		}
+	})
+	t.Run("negative temperature", func(t *testing.T) {
+		ids, logits := sampleSortedCandidatesFixture()
+		params := model.SampleParams{Temperature: -1}
+		want, err := model.NewSampler(2).SampleCandidates(logits, ids, params)
+		if err != nil {
+			t.Fatalf("SampleCandidates: %v", err)
+		}
+		got, err := sampleSortedBF16Candidates(logits, ids, model.NewSampler(2), params)
+		if err != nil {
+			t.Fatalf("sampleSortedBF16Candidates: %v", err)
+		}
+		if got != want {
+			t.Fatalf("greedy candidate = %d, want %d (SampleCandidates parity)", got, want)
+		}
+	})
+	t.Run("skips suppressed", func(t *testing.T) {
+		ids, logits := sampleSortedCandidatesFixture()
+		params := model.SampleParams{Temperature: 0, SuppressTokens: []int32{ids[0]}}
+		got, err := sampleSortedBF16Candidates(logits, ids, model.NewSampler(1), params)
+		if err != nil {
+			t.Fatalf("sampleSortedBF16Candidates: %v", err)
+		}
+		if got != ids[1] {
+			t.Fatalf("greedy suppressed candidate = %d, want next-highest %d", got, ids[1])
+		}
+	})
+	t.Run("all suppressed errors", func(t *testing.T) {
+		ids := []int32{7, 1}
+		logits := toBF16Bytes([]float32{5, 2})
+		params := model.SampleParams{Temperature: 0, SuppressTokens: []int32{7, 1}}
+		if _, err := sampleSortedBF16Candidates(logits, ids, model.NewSampler(1), params); err == nil {
+			t.Fatal("all candidates suppressed (greedy): want error, got nil")
+		}
+	})
+}
+
+// TestSampleSortedBF16CandidatesTopKOneBranch pins the params.TopK==1 arm: candidates
+// arrive pre-sorted descending, so TopK==1 takes the first unsuppressed entry outright
+// (no scan), but still consumes exactly one Draw so the sampler's RNG stream stays the
+// same length as the general branch would have used.
+func TestSampleSortedBF16CandidatesTopKOneBranch(t *testing.T) {
+	t.Run("takes first candidate", func(t *testing.T) {
+		ids, logits := sampleSortedCandidatesFixture()
+		params := model.SampleParams{Temperature: 1, TopK: 1}
+		sampler := model.NewSampler(1)
+		got, err := sampleSortedBF16Candidates(logits, ids, sampler, params)
+		if err != nil {
+			t.Fatalf("sampleSortedBF16Candidates: %v", err)
+		}
+		if got != ids[0] {
+			t.Fatalf("TopK==1 candidate = %d, want first candidate %d", got, ids[0])
+		}
+		control := model.NewSampler(1)
+		control.Draw() // the one draw sampleSortedBF16Candidates should have consumed
+		if sampler.Draw() != control.Draw() {
+			t.Fatal("TopK==1 branch did not consume exactly one draw")
+		}
+	})
+	t.Run("skips suppressed", func(t *testing.T) {
+		ids, logits := sampleSortedCandidatesFixture()
+		params := model.SampleParams{Temperature: 1, TopK: 1, SuppressTokens: []int32{ids[0]}}
+		got, err := sampleSortedBF16Candidates(logits, ids, model.NewSampler(1), params)
+		if err != nil {
+			t.Fatalf("sampleSortedBF16Candidates: %v", err)
+		}
+		if got != ids[1] {
+			t.Fatalf("TopK==1 suppressed candidate = %d, want next %d", got, ids[1])
+		}
+	})
+	t.Run("all suppressed errors", func(t *testing.T) {
+		ids := []int32{7, 1}
+		logits := toBF16Bytes([]float32{5, 2})
+		params := model.SampleParams{Temperature: 1, TopK: 1, SuppressTokens: []int32{7, 1}}
+		if _, err := sampleSortedBF16Candidates(logits, ids, model.NewSampler(1), params); err == nil {
+			t.Fatal("all candidates suppressed (TopK==1): want error, got nil")
+		}
+	})
+}
+
+// TestSampleSortedBF16CandidatesGeneralBranch pins the general temperature/top-k/top-p/
+// min-p arm against model.Sampler.SampleCandidates over the SAME already-sorted
+// candidates across several seeds — including the Temperature<=0-with-MinP>0 edge (NOT
+// greedy-eligible, since sampledGreedyParamsEligible also requires MinP<=0) that
+// exercises the temp-defaults-to-1 line.
+func TestSampleSortedBF16CandidatesGeneralBranch(t *testing.T) {
+	ids, _ := sampleSortedCandidatesFixture()
+	for _, tc := range []struct {
+		name   string
+		params model.SampleParams
+	}{
+		{"temperature only", model.SampleParams{Temperature: 0.7}},
+		{"topK keep window", model.SampleParams{Temperature: 0.7, TopK: 3}},
+		{"topP nucleus", model.SampleParams{Temperature: 0.9, TopP: 0.6}},
+		{"minP keep", model.SampleParams{Temperature: 0.9, MinP: 0.2}},
+		{"topP and minP", model.SampleParams{Temperature: 0.9, TopP: 0.8, MinP: 0.05}},
+		{"suppression zeroes a slot", model.SampleParams{Temperature: 0.7, SuppressTokens: []int32{ids[0]}}},
+		{"non-positive temperature defaults via MinP", model.SampleParams{Temperature: 0, MinP: 0.1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, logits := sampleSortedCandidatesFixture()
+			for _, seed := range []uint64{1, 7, 42} {
+				want, err := model.NewSampler(seed).SampleCandidates(logits, ids, tc.params)
+				if err != nil {
+					t.Fatalf("seed %d: SampleCandidates: %v", seed, err)
+				}
+				got, err := sampleSortedBF16Candidates(logits, ids, model.NewSampler(seed), tc.params)
+				if err != nil {
+					t.Fatalf("seed %d: sampleSortedBF16Candidates: %v", seed, err)
+				}
+				if got != want {
+					t.Fatalf("seed %d: candidate = %d, want %d (SampleCandidates parity)", seed, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestSampleSortedBF16CandidatesTopKWindowFullySuppressedErrors pins the ksum==0 guard
+// in the general branch: TopK truncates the kept window to candidates that are ALL
+// suppressed, while a higher-value candidate OUTSIDE that window stays unsuppressed —
+// so the earlier, whole-candidate-set "all suppressed" guard (computed over allowed
+// counted across every candidate, not just the kept window) does not fire, and only the
+// kept window's own probability mass is (correctly) recognised as empty.
+func TestSampleSortedBF16CandidatesTopKWindowFullySuppressedErrors(t *testing.T) {
+	ids := []int32{10, 11, 12, 99}
+	logits := toBF16Bytes([]float32{9, 8, 7, 1})
+	params := model.SampleParams{Temperature: 0.8, TopK: 3, SuppressTokens: []int32{10, 11, 12}}
+	if _, err := sampleSortedBF16Candidates(logits, ids, model.NewSampler(1), params); err == nil {
+		t.Fatal("fully-suppressed TopK window: want empty sampled distribution error, got nil")
+	}
+}
+
+// TestSampleSortedBF16CandidatesGeneralAllSuppressedErrors pins the general branch's OWN
+// whole-candidate-set "all suppressed" guard (allowed==0) — distinct from the greedy and
+// TopK==1 branches' own copies of the same guard, since Temperature>0 with TopK!=1 takes
+// neither of those and reaches this one instead.
+func TestSampleSortedBF16CandidatesGeneralAllSuppressedErrors(t *testing.T) {
+	ids := []int32{7, 1}
+	logits := toBF16Bytes([]float32{5, 2})
+	params := model.SampleParams{Temperature: 0.8, SuppressTokens: []int32{7, 1}}
+	if _, err := sampleSortedBF16Candidates(logits, ids, model.NewSampler(1), params); err == nil {
+		t.Fatal("all candidates suppressed (general branch): want error, got nil")
+	}
+}
+
 func TestArchSessionSampleTokenFromLogitsTopKRepeatPenaltyUsesCompactCandidates(t *testing.T) {
 	vals := []float32{-2.5, 3.25, 0.5, 2.75, 3.1, -1.5, 2.9, 0.25, 1.8, -0.75, 2.4}
 	logits := toBF16Bytes(vals)
@@ -3353,6 +3571,104 @@ func TestArchSessionStepSampleQuantICBWritesRetainedHiddenDirectly(t *testing.T)
 		}
 		if len(candidate.retainedHidden) == 0 || unsafe.Pointer(&gotHidden[0]) != unsafe.Pointer(&candidate.retainedHidden[0]) {
 			t.Fatal("sampled TopK-candidate path returned transient hidden instead of retained backing")
+		}
+	})
+}
+
+// TestArchSessionStepSampleHostChainMatchesGPUInputs pins the host embed/PLE fallback
+// body of stepSampleTopKCandidatesWithHistoryInPool and stepSampleLogitsTokenInPool (#30
+// r5, the pipelined-GPU sampling-tail cluster): with chainedGPUInputsDisabled forced,
+// both step onto their OWN encodeStepBody/perLayerInput path (host embedID readback, PLE
+// tensor compute, pinned-hidden direct-out encode) instead of delegating to the
+// GPU-next-inputs sibling (stepSampleTopKCandidatesGPUInputsWithHistoryInPool /
+// stepSampleLogitsTokenGPUInputsInPool) — every existing test on these two symbols
+// leaves this body dark, because chainedGPUInputsDisabled is always left at its zero
+// value (false) elsewhere, and the ICB/PLE fixture always wires the GPU next-inputs seam.
+// A PLE-bearing fixture (pleQuantModel) also exercises the `s.perLayerInput != nil`
+// branch that the no-PLE newQuantICBAllocationSession fixture cannot reach.
+func TestArchSessionStepSampleHostChainMatchesGPUInputs(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	g, arch := pleQuantModel(t, 2, 256, 32, 0)
+	const maxLen = 24
+	prefix := []int32{1, 5, 3}
+
+	buildPrimed := func(t *testing.T) *ArchSession {
+		t.Helper()
+		sess, err := NewArchQuantSession(g, arch, maxLen)
+		if err != nil {
+			t.Fatalf("NewArchQuantSession: %v", err)
+		}
+		if sess.state.icb == nil {
+			t.Skip("ICB replay unavailable")
+		}
+		if sess.encNextInputsGPU == nil {
+			t.Fatal("fixture did not wire GPU next-inputs seam")
+		}
+		if sess.perLayerInput == nil {
+			t.Fatal("fixture did not wire the PLE per-layer-input tower")
+		}
+		for _, id := range prefix {
+			if _, err := sess.stepID(id); err != nil {
+				t.Fatalf("prefix stepID(%d): %v", id, err)
+			}
+		}
+		return sess
+	}
+
+	t.Run("topk-candidates", func(t *testing.T) {
+		params := model.SampleParams{Temperature: 1, TopK: 7, SuppressTokens: []int32{2, 7}}
+		history := []int32{4, 5, 5, 31}
+
+		gpu := buildPrimed(t)
+		gpuHidden, gpuLogits, gpuIDs, ok, err := gpu.stepSampleTopKCandidatesWithHistoryInPool(9, params, history)
+		if err != nil || !ok {
+			t.Fatalf("GPU-inputs stepSampleTopKCandidatesWithHistoryInPool ok=%v err=%v", ok, err)
+		}
+
+		oldChainDisabled := chainedGPUInputsDisabled
+		defer func() { chainedGPUInputsDisabled = oldChainDisabled }()
+		chainedGPUInputsDisabled = true
+
+		host := buildPrimed(t)
+		hostHidden, hostLogits, hostIDs, ok, err := host.stepSampleTopKCandidatesWithHistoryInPool(9, params, history)
+		if err != nil || !ok {
+			t.Fatalf("host-chain stepSampleTopKCandidatesWithHistoryInPool ok=%v err=%v", ok, err)
+		}
+		if !bytes.Equal(hostHidden, gpuHidden) {
+			t.Fatal("host-chain hidden differs from GPU-inputs hidden")
+		}
+		if !bytes.Equal(hostLogits, gpuLogits) || !idsEqual(hostIDs, gpuIDs) {
+			t.Fatalf("host-chain candidates differ from GPU-inputs: ids got %v want %v", hostIDs, gpuIDs)
+		}
+	})
+
+	t.Run("logits-token", func(t *testing.T) {
+		params := model.SampleParams{Temperature: 0.8, MinP: 0.02, SuppressTokens: []int32{2, 7}}
+		history := []int32{4, 5, 5, 31}
+		draw := float32(0.37)
+
+		gpu := buildPrimed(t)
+		gpuHidden, gpuToken, ok, err := gpu.stepSampleLogitsTokenInPool(9, params, draw, history)
+		if err != nil || !ok {
+			t.Fatalf("GPU-inputs stepSampleLogitsTokenInPool ok=%v err=%v", ok, err)
+		}
+
+		oldChainDisabled := chainedGPUInputsDisabled
+		defer func() { chainedGPUInputsDisabled = oldChainDisabled }()
+		chainedGPUInputsDisabled = true
+
+		host := buildPrimed(t)
+		hostHidden, hostToken, ok, err := host.stepSampleLogitsTokenInPool(9, params, draw, history)
+		if err != nil || !ok {
+			t.Fatalf("host-chain stepSampleLogitsTokenInPool ok=%v err=%v", ok, err)
+		}
+		if !bytes.Equal(hostHidden, gpuHidden) {
+			t.Fatal("host-chain hidden differs from GPU-inputs hidden")
+		}
+		if hostToken != gpuToken {
+			t.Fatalf("host-chain token = %d, want GPU-inputs token %d", hostToken, gpuToken)
 		}
 	})
 }
