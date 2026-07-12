@@ -30,7 +30,8 @@ type gemma4Config struct {
 		LayerTypes              []string `json:"layer_types"`
 		RopeParameters          struct {
 			FullAttention struct {
-				RopeTheta float32 `json:"rope_theta"`
+				RopeTheta           float32 `json:"rope_theta"`
+				PartialRotaryFactor float32 `json:"partial_rotary_factor"`
 			} `json:"full_attention"`
 			SlidingAttention struct {
 				RopeTheta float32 `json:"rope_theta"`
@@ -47,9 +48,15 @@ type gemma4Config struct {
 // params from generation_config.json) are omitted — none are read by the graph
 // builder. modelName, when non-empty, is written as general.name.
 //
+// feedForward is the per-layer MLP width, one entry per block. gemma-4 uses a
+// MatFormer double-wide MLP (the deeper layers are 2x intermediate_size), so
+// the caller derives this from the actual per-layer ffn tensor shapes rather
+// than broadcasting config's intermediate_size — the widths are ground truth,
+// the double-wide split is not spelled out in config.json.
+//
 // The tokenizer.ggml.* set is built separately (gemma4Tokenizer); this covers
 // the architecture hyperparameters only.
-func gemma4Metadata(configJSON []byte, fileType uint32, modelName string) ([]MetadataEntry, error) {
+func gemma4Metadata(configJSON []byte, feedForward []int32, fileType uint32, modelName string) ([]MetadataEntry, error) {
 	var config gemma4Config
 	if r := core.JSONUnmarshal(configJSON, &config); !r.OK {
 		return nil, core.E("gemma4Metadata", "parse config.json", r.Err())
@@ -61,13 +68,10 @@ func gemma4Metadata(configJSON []byte, fileType uint32, modelName string) ([]Met
 	if len(text.LayerTypes) != text.NumHiddenLayers {
 		return nil, core.Errorf("gguf: gemma4 layer_types length %d != num_hidden_layers %d", len(text.LayerTypes), text.NumHiddenLayers)
 	}
-
-	// Per-layer feed_forward_length: gemma-4's MLP width is uniform, so the
-	// array broadcasts intermediate_size across every block.
-	feedForward := make([]int32, text.NumHiddenLayers)
-	for i := range feedForward {
-		feedForward[i] = int32(text.IntermediateSize)
+	if len(feedForward) != text.NumHiddenLayers {
+		return nil, core.Errorf("gguf: gemma4 feed_forward_length length %d != num_hidden_layers %d", len(feedForward), text.NumHiddenLayers)
 	}
+
 	// Sliding-window pattern: llama.cpp marks sliding-attention layers true and
 	// full-attention layers false (layer 4, 9, 14, … are full attention).
 	pattern := make([]bool, text.NumHiddenLayers)
