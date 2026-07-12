@@ -174,3 +174,28 @@ func TestGemmaChatTemplate_Fallback(t *testing.T) {
 		t.Fatalf("gemma3-era template = %+v, want no system turn and no thinking channel even with suppressor set", legacy)
 	}
 }
+
+// TestRenderChatTurns_StripsSystemAndThinking pins the exported plain-turns
+// render (the seam engine/metal's speculative pair frames its chat prompt
+// through): even on a gemma4 template that DECLARES a leading-system fold and a
+// thinking channel, RenderChatTurns emits only plain turns + the generation cue
+// — a leading system message spells as an ordinary (user) turn rather than a
+// folded system turn, and no thinking prelude/suffix appears. It must be
+// byte-identical to the unexported renderChatTurns it delegates to.
+func TestRenderChatTurns_StripsSystemAndThinking(t *testing.T) {
+	tmpl := GemmaChatTemplate(TurnTokens{Open: "<|turn>", Close: "<turn|>"}, true)
+	msgs := []inference.Message{
+		{Role: "system", Content: "Sys"},
+		{Role: "user", Content: "Hi"},
+	}
+	got := RenderChatTurns(tmpl, msgs)
+	want := "<|turn>user\nSys<turn|>\n" +
+		"<|turn>user\nHi<turn|>\n" +
+		"<|turn>model\n"
+	if got != want {
+		t.Fatalf("RenderChatTurns = %q, want plain turns with no system fold / no thinking %q", got, want)
+	}
+	if got != renderChatTurns(tmpl, msgs) {
+		t.Fatalf("RenderChatTurns diverged from renderChatTurns: %q", got)
+	}
+}
