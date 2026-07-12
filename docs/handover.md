@@ -17,6 +17,12 @@
   device f32 accumulation vs host f64 — same tier the gated-delta already
   served at; greedy text unchanged on the receipts prompt; -state contract
   is token-prefix, per-build deterministic.
+- SLICE 3 (0460e13): fused SwiGLU MLP — instrumented the round-trip first
+  (330us/call at decode shapes, ~10us of it compute); composed.MLPDevice
+  encodes gate+up GEMMs + sigmoid + 2 multiplies + down GEMM into ONE CB,
+  [L,FF] intermediates device-resident, pooled pinned scratch. 16.7 -> 18.6
+  tok/s, prefill 15 -> 19. Ladder next: same fuse for gated-delta
+  (in_proj_qkv/z/out) and attention (q/o) projections, then whole-layer.
 - THE CEILING NOW: ~70+ per-projection command-buffer round-trips per token.
   Next slice is the GPU-resident orchestration — weights uploaded once,
   whole token encoded in ONE CB (intermediates stay device-side), recurrence
