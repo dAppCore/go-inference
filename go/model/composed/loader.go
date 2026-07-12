@@ -204,7 +204,12 @@ func resolveKinds(cfg *loaderConfig) ([]string, error) {
 		}
 		return out, nil
 	}
-	return nil, core.NewError("composed.resolveKinds: need layer_types or full_attention_interval")
+	// Dense-attention families such as Llama and Mixtral omit both hybrid selectors:
+	// every layer is full attention.
+	for i := range out {
+		out[i] = "full_attention"
+	}
+	return out, nil
 }
 
 // buildAttn builds a full-attention mixer; geometry from the config.

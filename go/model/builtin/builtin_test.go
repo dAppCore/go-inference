@@ -39,3 +39,12 @@ func TestBuiltinRegistersLlama(t *testing.T) {
 		t.Fatal("llama unexpectedly registered as a composed architecture")
 	}
 }
+
+func TestBuiltinRegistersMoEFamilies(t *testing.T) {
+	for _, mt := range []string{"mixtral", "deepseek_v2", "deepseek_v3"} {
+		spec, ok := model.LookupArch(mt)
+		if !ok || spec.Composed == nil {
+			t.Fatalf("model_type %q = registered %v composed %v", mt, ok, spec.Composed != nil)
+		}
+	}
+}
