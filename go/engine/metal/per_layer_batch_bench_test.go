@@ -198,3 +198,86 @@ func BenchmarkPerLayerInputsBatchQuantDevice(b *testing.B) {
 		}
 	}
 }
+
+// BenchmarkPerLayerInputsBatchQuantDeviceBounded measures perLayerInputsBatchQuantDevice's #381
+// BOUNDED lane (outLayers < numLayers, per_layer_batch.go ~464-472) — newly reachable end-to-end
+// from a real session as of #30 r4 (TestPrefillRetainedTokensBatchedDenseChunksEngagesQuantPLE
+// BoundedSlab): a non-final shared-suffix prefill chunk gathers/projects only the OWNER layers'
+// per-layer-input rows, not every layer. Paired with
+// BenchmarkPerLayerInputsBatchQuantDeviceUnbounded4Layers (identical shape, outLayers==numLayers)
+// for an apples-to-apples read on what bounding buys: same scratch object either bench (allocs/op
+// should already be pool-flat), so the delta of interest is wall time and B/op from touching half
+// as many layers' worth of table + tower-projection weight.
+func BenchmarkPerLayerInputsBatchQuantDeviceBounded(b *testing.B) {
+	requireNativeRuntime(b)
+	const numLayers, outLayers, pliDim, dModel, vocabPLI = 4, 2, 32, 256, 64
+	const tableGS, tableBits = 64, 4
+	const embVocab, embGS, embBits = 128, 64, 4
+	const eps = float32(1e-5)
+	const k = steelGEMMMinRows
+	plDim := numLayers * pliDim
+	tPacked, tScales, tBiases := packAffineQuant(syntheticFloat32(vocabPLI*plDim, 9), vocabPLI, plDim, tableGS, tableBits)
+	projW := toBF16Bytes(syntheticFloat32(plDim*dModel, 3))
+	projNormW := toBF16Bytes(syntheticFloat32(pliDim, 4))
+	projView := copyView(projW)
+	ePacked, eScales, eBiases := embedGatherQuantFixture(embVocab, dModel, embGS, embBits)
+	mainEmb := &mainEmbedGather{
+		packed: residentBytes(ePacked), scales: residentBytes(eScales), biases: residentBytes(eBiases),
+		gs: embGS, bits: embBits, scale: float32(math.Sqrt(float64(dModel))),
+	}
+	ids := make([]int32, k)
+	for i := range ids {
+		ids[i] = int32((i*11 + 5) % min(vocabPLI, embVocab))
+	}
+	tablePacked, tableScales, tableBiases := residentBytes(tPacked), residentBytes(tScales), residentBytes(tBiases)
+	sc := &pleBatchScratch{}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, ok, err := perLayerInputsBatchQuantDevice(sc, tablePacked, tableScales, tableBiases, tableGS, tableBits,
+			projView.buf, projView.off, nil, nil, nil, 0, 0,
+			projNormW, ids, mainEmb, outLayers, numLayers, pliDim, dModel, eps); err != nil || !ok {
+			b.Fatalf("ok=%v err=%v", ok, err)
+		}
+	}
+}
+
+// BenchmarkPerLayerInputsBatchQuantDeviceUnbounded4Layers is BenchmarkPerLayerInputsBatchQuantDeviceBounded's
+// unbounded control at the SAME numLayers=4 shape (outLayers==numLayers, per_layer_batch.go's
+// nOut < numLayers gate never fires) — the apples-to-apples baseline the bounded bench's report
+// numbers are read against.
+func BenchmarkPerLayerInputsBatchQuantDeviceUnbounded4Layers(b *testing.B) {
+	requireNativeRuntime(b)
+	const numLayers, outLayers, pliDim, dModel, vocabPLI = 4, 4, 32, 256, 64
+	const tableGS, tableBits = 64, 4
+	const embVocab, embGS, embBits = 128, 64, 4
+	const eps = float32(1e-5)
+	const k = steelGEMMMinRows
+	plDim := numLayers * pliDim
+	tPacked, tScales, tBiases := packAffineQuant(syntheticFloat32(vocabPLI*plDim, 9), vocabPLI, plDim, tableGS, tableBits)
+	projW := toBF16Bytes(syntheticFloat32(plDim*dModel, 3))
+	projNormW := toBF16Bytes(syntheticFloat32(pliDim, 4))
+	projView := copyView(projW)
+	ePacked, eScales, eBiases := embedGatherQuantFixture(embVocab, dModel, embGS, embBits)
+	mainEmb := &mainEmbedGather{
+		packed: residentBytes(ePacked), scales: residentBytes(eScales), biases: residentBytes(eBiases),
+		gs: embGS, bits: embBits, scale: float32(math.Sqrt(float64(dModel))),
+	}
+	ids := make([]int32, k)
+	for i := range ids {
+		ids[i] = int32((i*11 + 5) % min(vocabPLI, embVocab))
+	}
+	tablePacked, tableScales, tableBiases := residentBytes(tPacked), residentBytes(tScales), residentBytes(tBiases)
+	sc := &pleBatchScratch{}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, ok, err := perLayerInputsBatchQuantDevice(sc, tablePacked, tableScales, tableBiases, tableGS, tableBits,
+			projView.buf, projView.off, nil, nil, nil, 0, 0,
+			projNormW, ids, mainEmb, outLayers, numLayers, pliDim, dModel, eps); err != nil || !ok {
+			b.Fatalf("ok=%v err=%v", ok, err)
+		}
+	}
+}

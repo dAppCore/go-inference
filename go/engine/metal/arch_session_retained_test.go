@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model"
+	g4 "dappco.re/go/inference/model/gemma4"
 )
 
 func TestArchSessionPrefillAppendGenerateFromCache(t *testing.T) {
@@ -328,5 +329,187 @@ func TestArchSessionGenerateSampledEachRecordsResidentIDs(t *testing.T) {
 	}
 	if !idsEqual(sess.cachedIDs, wantResident) {
 		t.Fatalf("cached ids after sampled generate = %v, want prompt plus generated %v", sess.cachedIDs, wantResident)
+	}
+}
+
+// TestArchSessionCloseRetainedHiddenPinned covers both closeRetainedHiddenPinned arms directly
+// (#30 r4): aliased with the prompt cache's pinned hidden (WarmPromptCache — must NOT Close() a
+// buffer the prompt cache still owns, only clear the session's own reference) and an ordinary
+// session-owned buffer (no alias — Close()s the Metal buffer and clears). A nil receiver is the
+// third arm (the method's own no-op guard, exercised the same way every nil-safe method in this
+// file is).
+func TestArchSessionCloseRetainedHiddenPinned(t *testing.T) {
+	requireNativeRuntime(t)
+
+	t.Run("aliased with prompt cache", func(t *testing.T) {
+		warm := newSessionStateFixture(t)
+		if err := warm.WarmPromptCache([]int32{1, 2, 3}); err != nil {
+			t.Fatalf("WarmPromptCache: %v", err)
+		}
+		if warm.cachedPromptHiddenPinned == nil || warm.retainedHiddenPinned != warm.cachedPromptHiddenPinned {
+			t.Fatal("fixture must alias retainedHiddenPinned with cachedPromptHiddenPinned to exercise the aliased arm")
+		}
+		aliased := warm.cachedPromptHiddenPinned
+		warm.closeRetainedHiddenPinned()
+		if warm.retainedHiddenPinned != nil || warm.retainedHidden != nil {
+			t.Fatal("closeRetainedHiddenPinned did not clear the session's own reference")
+		}
+		if warm.cachedPromptHiddenPinned != aliased || warm.cachedPromptHiddenPinned.buf == nil {
+			t.Fatal("closeRetainedHiddenPinned Close()d a buffer the prompt cache still owns")
+		}
+	})
+
+	t.Run("owned buffer", func(t *testing.T) {
+		sess := newSessionStateFixture(t)
+		pinned, ok := sess.ensureRetainedHiddenPinned(sess.arch.Hidden * bf16Size)
+		if !ok || pinned == nil || pinned.buf == nil {
+			t.Fatal("ensureRetainedHiddenPinned did not allocate a pinned buffer")
+		}
+		sess.retainedHidden = pinned.bytes
+		sess.closeRetainedHiddenPinned()
+		if sess.retainedHiddenPinned != nil || sess.retainedHidden != nil {
+			t.Fatal("closeRetainedHiddenPinned did not clear an owned buffer")
+		}
+	})
+
+	t.Run("nil receiver", func(t *testing.T) {
+		var sess *ArchSession
+		sess.closeRetainedHiddenPinned() // must not panic
+	})
+}
+
+// TestArchSessionCloseRetainedLogitsPinned is closeRetainedHiddenPinned's twin for the retained
+// logits pinned buffer — same three arms (aliased with the prompt cache, owned, nil receiver).
+func TestArchSessionCloseRetainedLogitsPinned(t *testing.T) {
+	requireNativeRuntime(t)
+
+	t.Run("aliased with prompt cache", func(t *testing.T) {
+		warm := newSessionStateFixture(t)
+		if err := warm.WarmPromptCache([]int32{1, 2, 3}); err != nil {
+			t.Fatalf("WarmPromptCache: %v", err)
+		}
+		if warm.cachedPromptLogitsPinned == nil || warm.retainedLogitsPinned != warm.cachedPromptLogitsPinned {
+			t.Fatal("fixture must alias retainedLogitsPinned with cachedPromptLogitsPinned to exercise the aliased arm")
+		}
+		aliased := warm.cachedPromptLogitsPinned
+		warm.closeRetainedLogitsPinned()
+		if warm.retainedLogitsPinned != nil || warm.retainedLogits != nil {
+			t.Fatal("closeRetainedLogitsPinned did not clear the session's own reference")
+		}
+		if warm.cachedPromptLogitsPinned != aliased || warm.cachedPromptLogitsPinned.buf == nil {
+			t.Fatal("closeRetainedLogitsPinned Close()d a buffer the prompt cache still owns")
+		}
+	})
+
+	t.Run("owned buffer", func(t *testing.T) {
+		sess := newSessionStateFixture(t)
+		pinned, ok := sess.ensureRetainedLogitsPinned(sess.arch.Vocab * bf16Size)
+		if !ok || pinned == nil || pinned.buf == nil {
+			t.Fatal("ensureRetainedLogitsPinned did not allocate a pinned buffer")
+		}
+		sess.retainedLogits = pinned.bytes
+		sess.closeRetainedLogitsPinned()
+		if sess.retainedLogitsPinned != nil || sess.retainedLogits != nil {
+			t.Fatal("closeRetainedLogitsPinned did not clear an owned buffer")
+		}
+	})
+
+	t.Run("nil receiver", func(t *testing.T) {
+		var sess *ArchSession
+		sess.closeRetainedLogitsPinned() // must not panic
+	})
+}
+
+// newBidirSpanFixture builds a plain (non-PLE) bf16 gemma4-shaped arch — WITH the q_norm/k_norm
+// towers AND numerically-varied weights. The bidirectional-span lane hard-errors without q_norm/
+// k_norm: stepTokensBatchedDenseResultWithInputViewsPLE requires the fused qknorm-rope fold
+// (foldAttn, gated on s.lb[li].qNorm.buf != nil) whenever s.rowAttnCaps is armed — "bidirectional
+// row caps need the batched-rope attention fold". bf16Gemma4TensorsVaried (not gemma4Tensors,
+// which fills every tensor with ONE repeated byte for field-mapping tests — every dimension of
+// every embedding row then collapses to the same constant, so attending to a different row count
+// changes nothing and any bidir/causal comparison passes vacuously) is load-bearing here: real
+// per-element variation is what makes the two attention patterns numerically distinguishable.
+func newBidirSpanFixture(t testing.TB) *ArchSession {
+	t.Helper()
+	requireNativeRuntime(t)
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 64, 256, 32
+	const numLayers, maxLen = 2, 32
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim,
+		VocabSize: vocab, RMSNormEps: 1e-6,
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	ts := bf16Gemma4TensorsVaried(t, arch)
+	lm, err := model.Assemble(ts, arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("model.Assemble: %v", err)
+	}
+	g := loadedToBF16(lm)
+	sess, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+	sess.state.icb = nil
+	return sess
+}
+
+// TestArchSessionPrefillTokenEmbeddingsBidirSpanEngages exercises the bidirectional image/video
+// span prefill lane (#30 r4): bidirSpanTokens marks a placeholder token id whose contiguous runs
+// attend BIDIRECTIONALLY (a span row sees through to the span's end, not just its own causal
+// prefix) — prefillRetainedEmbeddingsBidir/-Chunk + bidirTokenSpans's real caller-side wiring
+// (token_model.go sets bidirSpanTokens from a real unified-vision config; this test sets it
+// directly, the same in-package seam TestArchSessionPrefillTokenEmbeddingsKeepsFullStackIgnoresSkip
+// uses for the causal skip-suffix guard). No sliding window: the whole prompt lands in ONE
+// bidirectional chunk — prefillRetainedEmbeddingsBidir's per-span chunk-boundary adjustment loop
+// (shrink/grow to a span edge) only matters when a span straddles a windowed chunk split, which
+// this fixture never forces; that sub-branch is a remaining item (see the r4 report).
+func TestArchSessionPrefillTokenEmbeddingsBidirSpanEngages(t *testing.T) {
+	requireNativeRuntime(t)
+	const spanTok = 9
+	ids := []int32{1, 2, spanTok, spanTok, spanTok, 3, 4}
+
+	buildEmbeddings := func(sess *ArchSession) [][]byte {
+		embeddings := make([][]byte, len(ids))
+		for i, id := range ids {
+			emb, err := sess.embedID(id)
+			if err != nil {
+				t.Fatalf("embedID(%d): %v", id, err)
+			}
+			embeddings[i] = append([]byte(nil), emb...)
+		}
+		return embeddings
+	}
+
+	bidir := newBidirSpanFixture(t)
+	bidir.bidirSpanTokens = [2]int32{spanTok, 0}
+	bidirEmbeddings := buildEmbeddings(bidir)
+	if err := bidir.PrefillTokenEmbeddings(ids, bidirEmbeddings); err != nil {
+		t.Fatalf("PrefillTokenEmbeddings (bidir): %v", err)
+	}
+	if bidir.Pos() != len(ids) {
+		t.Fatalf("Pos after bidir prefill = %d, want %d", bidir.Pos(), len(ids))
+	}
+	if len(bidir.retainedHidden) != bidir.arch.Hidden*bf16Size {
+		t.Fatalf("bidir retained hidden len = %d, want %d", len(bidir.retainedHidden), bidir.arch.Hidden*bf16Size)
+	}
+
+	causal := newBidirSpanFixture(t) // bidirSpanTokens left zero — takes the ordinary causal lane
+	causalEmbeddings := buildEmbeddings(causal)
+	if err := causal.PrefillTokenEmbeddings(ids, causalEmbeddings); err != nil {
+		t.Fatalf("PrefillTokenEmbeddings (causal): %v", err)
+	}
+
+	// A real invariant, not a pinned byte value: bidirectional attention lets the span's own
+	// rows see FUTURE span tokens, which a strictly causal mask never does, so the two boundary
+	// hiddens (both fed by the same span's cache rows through the later layers) must differ — an
+	// accidental no-op bidir path (e.g. a caps slice that silently stays causal) would make them
+	// byte-identical.
+	if bytes.Equal(bidir.retainedHidden, causal.retainedHidden) {
+		t.Fatal("bidirectional-span prefill produced the SAME boundary hidden as the causal lane — the span caps had no effect")
 	}
 }
