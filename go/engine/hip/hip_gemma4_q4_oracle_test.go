@@ -1430,6 +1430,43 @@ func hipIncrOracleLogitLens(ctx context.Context, t *testing.T, driver nativeHIPD
 			for _, value := range attentionResidual {
 				attnDump = binary.LittleEndian.AppendUint32(attnDump, math.Float32bits(value))
 			}
+			if L == 6 {
+				layer := cfg.Layers[5]
+				preFF := forward.Layers[5].Body.PreFeedForward
+				preFFAll := hipOracleReadF32(t, preFF, tokenCount*hidden)
+				lastPayload, pErr := hipFloat32Payload(preFFAll[(tokenCount-1)*hidden:])
+				core.RequireNoError(t, pErr)
+				lastPreFF, pErr := hipUploadByteBuffer(driver, "rocm.hip.IncrOracle", "layer-5 last-token pre-FF", lastPayload, hidden)
+				core.RequireNoError(t, pErr)
+				gateBuf, pErr := hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx, driver, lastPreFF, layer.GateProjection)
+				core.RequireNoError(t, pErr)
+				upBuf, pErr := hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx, driver, lastPreFF, layer.UpProjection)
+				core.RequireNoError(t, pErr)
+				productBuf, pErr := hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInput(ctx, driver, lastPreFF, layer.GateProjection, layer.UpProjection)
+				core.RequireNoError(t, pErr)
+				gateAll := hipOracleReadF32(t, gateBuf, layer.GateProjection.Rows)
+				upAll := hipOracleReadF32(t, upBuf, layer.UpProjection.Rows)
+				productAll := hipOracleReadF32(t, productBuf, layer.GateProjection.Rows)
+				downAll := hipOracleReadF32(t, forward.Layers[5].Body.MLPOutput, tokenCount*hidden)[(tokenCount-1)*hidden:]
+				_ = lastPreFF.Close()
+				_ = gateBuf.Close()
+				_ = upBuf.Close()
+				_ = productBuf.Close()
+				writeLast := func(name string, all []float32, width int) {
+					payload := make([]byte, 0, width*4)
+					for _, value := range all {
+						payload = binary.LittleEndian.AppendUint32(payload, math.Float32bits(value))
+					}
+					core.RequireNoError(t, os.WriteFile(dumpPath+".mlp."+name+".bin", payload, 0o644))
+				}
+				writeLast("gate", gateAll, layer.GateProjection.Rows)
+				writeLast("up", upAll, layer.UpProjection.Rows)
+				writeLast("product", productAll, layer.GateProjection.Rows)
+				writeLast("down", downAll, hidden)
+				activation, aErr := hipGemma4Q4HostGELU(gateAll)
+				core.RequireNoError(t, aErr)
+				writeLast("activation", activation, layer.GateProjection.Rows)
+			}
 		}
 		_ = forward.Close()
 		rowH := all[(tokenCount-1)*hidden : tokenCount*hidden]
