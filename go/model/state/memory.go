@@ -275,6 +275,53 @@ func (s *InMemoryStore) Put(ctx context.Context, text string, opts PutOptions) (
 	return ref, nil
 }
 
+// Delete removes chunkID's text/bytes/ref and any URI that resolved to it. A
+// DedupStore over this store calls Delete to physically reclaim a content chunk
+// once its last reference is released, which is why InMemoryStore implements
+// state.Deleter. A missing id is a no-op. Delete never invalidates a still-live
+// chunk — the caller's reference count is the proof that chunkID is dead.
+//
+//	_ = store.Delete(ctx, ref.ChunkID) // after the last Release drops it to zero
+func (s *InMemoryStore) Delete(ctx context.Context, chunkID int) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.chunks, chunkID)
+	delete(s.data, chunkID)
+	delete(s.refs, chunkID)
+	// A block chunk carries a Put-time URI that is never read back (blocks
+	// resolve by ChunkRef), but drop any URI aliasing the freed id so the URI
+	// map cannot outgrow the live chunk set.
+	for uri, id := range s.uris {
+		if id == chunkID {
+			delete(s.uris, uri)
+		}
+	}
+	return nil
+}
+
+// ChunkCount reports the number of distinct chunks currently held — one entry
+// per live id, so it drops when Delete reclaims one. For tests and dedup
+// accounting.
+func (s *InMemoryStore) ChunkCount() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.refs)
+}
+
 func (s *InMemoryStore) PutBytes(ctx context.Context, data []byte, opts PutOptions) (ChunkRef, error) {
 	if ctx == nil {
 		ctx = context.Background()
