@@ -2,9 +2,19 @@
 
 package state
 
-import "context"
+import (
+	"context"
+	"sync"
+)
 
+// InMemoryStore is a pure-RAM state.Store: chunks live in maps, nothing touches
+// disk. It is the hot tier for `lem serve` when no durable -state-store is
+// requested. Every method guards the backing maps with an RWMutex — serve runs
+// concurrent chat turns and the continuity manager touches the store outside
+// its own lock (wake on acquire, sleep on finish), so the store must be safe to
+// share, exactly as filestore.Store is. Reads take RLock, writes take Lock.
 type InMemoryStore struct {
+	mu     sync.RWMutex
 	chunks map[int]string
 	data   map[int][]byte
 	refs   map[int]ChunkRef
@@ -79,6 +89,16 @@ func (s *InMemoryStore) Resolve(ctx context.Context, chunkID int) (Chunk, error)
 	if s == nil {
 		return Chunk{}, &ChunkNotFoundError{ID: chunkID}
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.resolveLocked(chunkID)
+}
+
+// resolveLocked is Resolve's map-access core; the caller holds at least RLock.
+// Get and ResolveURI route through it so a public read never nests a second
+// RLock (sync.RWMutex is not reentrant — a nested RLock can deadlock behind a
+// waiting writer).
+func (s *InMemoryStore) resolveLocked(chunkID int) (Chunk, error) {
 	text, ok := s.chunks[chunkID]
 	data, dataOK := s.data[chunkID]
 	if !ok && !dataOK {
@@ -110,6 +130,8 @@ func (s *InMemoryStore) ResolveBytes(ctx context.Context, chunkID int) (Chunk, e
 	if s == nil {
 		return Chunk{}, &ChunkNotFoundError{ID: chunkID}
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	ref := s.refs[chunkID]
 	if ref.ChunkID != chunkID {
 		ref.ChunkID = chunkID
@@ -129,7 +151,9 @@ func (s *InMemoryStore) ResolveBytes(ctx context.Context, chunkID int) (Chunk, e
 // they intend the mutation to be visible to later Resolve/Borrow calls.
 // Text-only chunks still convert (a Go string cannot be borrowed byte-for-
 // byte without unsafe aliasing), so only PutBytes-originated chunks get the
-// zero-copy path.
+// zero-copy path. The borrowed slice stays valid after the lock is released:
+// Put/PutBytes only ever write a fresh (monotonic) id and never mutate or drop
+// an existing entry's slice.
 func (s *InMemoryStore) BorrowBytes(ctx context.Context, chunkID int) (BorrowedChunk, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -142,6 +166,8 @@ func (s *InMemoryStore) BorrowBytes(ctx context.Context, chunkID int) (BorrowedC
 	if s == nil {
 		return BorrowedChunk{}, &ChunkNotFoundError{ID: chunkID}
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	ref := s.refs[chunkID]
 	if ref.ChunkID != chunkID {
 		ref.ChunkID = chunkID
@@ -158,7 +184,9 @@ func (s *InMemoryStore) BorrowBytes(ctx context.Context, chunkID int) (BorrowedC
 
 // BorrowRefBytes resolves ref.ChunkID via BorrowBytes and overlays any
 // frame-offset/codec/segment carried on ref onto the returned Ref — mirrors
-// the overlay semantics MergeRef documents, without a data copy.
+// the overlay semantics MergeRef documents, without a data copy. It calls the
+// public BorrowBytes (which takes the lock) and applies the overlays on the
+// returned local value, so it never nests a lock.
 func (s *InMemoryStore) BorrowRefBytes(ctx context.Context, ref ChunkRef) (BorrowedChunk, error) {
 	if ref.ChunkID == 0 {
 		return BorrowedChunk{}, &ChunkNotFoundError{ID: ref.ChunkID}
@@ -192,11 +220,13 @@ func (s *InMemoryStore) ResolveURI(ctx context.Context, uri string) (Chunk, erro
 	if s == nil {
 		return Chunk{}, &URIChunkNotFoundError{URI: uri}
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	id, ok := s.uris[uri]
 	if !ok {
 		return Chunk{}, &URIChunkNotFoundError{URI: uri}
 	}
-	return s.Resolve(ctx, id)
+	return s.resolveLocked(id)
 }
 
 func (s *InMemoryStore) Put(ctx context.Context, text string, opts PutOptions) (ChunkRef, error) {
@@ -211,6 +241,8 @@ func (s *InMemoryStore) Put(ctx context.Context, text string, opts PutOptions) (
 	if s == nil {
 		return ChunkRef{}, &ChunkNotFoundError{}
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.chunks == nil {
 		s.chunks = make(map[int]string)
 	}
@@ -255,6 +287,8 @@ func (s *InMemoryStore) PutBytes(ctx context.Context, data []byte, opts PutOptio
 	if s == nil {
 		return ChunkRef{}, &ChunkNotFoundError{}
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.chunks == nil {
 		s.chunks = make(map[int]string)
 	}
