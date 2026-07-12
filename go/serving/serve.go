@@ -166,10 +166,16 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 	// speculative loader; otherwise degrade to plain autoregressive with an
 	// honest notice, faithful to lthn-mlx (a drafter that can't load never
 	// blocks the serve — it surfaces the failure rather than refusing to boot).
-	armDrafter := detection.Active() && cfg.SpeculativeLoader != nil
+	// A DFlash block-diffusion drafter is recognised but never armed on the
+	// autoregressive MTP lane — the engine has no block-diffusion draft forward
+	// yet, so it degrades to plain autoregressive with a specific honest notice
+	// rather than misloading the checkpoint (docs/design-dflash.md).
+	armDrafter := detection.Active() && cfg.SpeculativeLoader != nil && !detection.IsDFlash()
 	draftPathForResolver := ""
 	if armDrafter {
 		draftPathForResolver = detection.DraftPath
+	} else if detection.IsDFlash() {
+		printServe(log, "serve: %s", DFlashDraftNotice(detection))
 	} else if detection.Active() {
 		printServe(log, "serve: drafter %s detected but this engine exposes no speculative path — serving plain autoregressive", detection.DraftPath)
 	}
