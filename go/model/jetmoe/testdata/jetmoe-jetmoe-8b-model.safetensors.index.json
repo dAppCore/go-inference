@@ -1,0 +1,18 @@
+{
+  "metadata": {"total_size": 17044475904},
+  "weight_map": {
+    "model.embed_tokens.weight": "model-00001-of-00004.safetensors",
+    "model.layers.0.input_layernorm.weight": "model-00001-of-00004.safetensors",
+    "model.layers.0.mlp.bias": "model-00001-of-00004.safetensors",
+    "model.layers.0.mlp.input_linear.weight": "model-00001-of-00004.safetensors",
+    "model.layers.0.mlp.output_linear.weight": "model-00001-of-00004.safetensors",
+    "model.layers.0.mlp.router.layer.weight": "model-00001-of-00004.safetensors",
+    "model.layers.0.post_attention_layernorm.weight": "model-00001-of-00004.safetensors",
+    "model.layers.0.self_attention.experts.bias": "model-00001-of-00004.safetensors",
+    "model.layers.0.self_attention.experts.input_linear.weight": "model-00001-of-00004.safetensors",
+    "model.layers.0.self_attention.experts.output_linear.weight": "model-00001-of-00004.safetensors",
+    "model.layers.0.self_attention.experts.router.layer.weight": "model-00001-of-00004.safetensors",
+    "model.layers.0.self_attention.kv_proj.weight": "model-00001-of-00004.safetensors",
+    "model.norm.weight": "model-00004-of-00004.safetensors"
+  }
+}
