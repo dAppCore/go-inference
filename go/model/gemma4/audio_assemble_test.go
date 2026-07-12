@@ -3,6 +3,7 @@
 package gemma4
 
 import (
+	"bytes"
 	"math"
 	"testing"
 
@@ -110,6 +111,39 @@ func TestAssembleAudio(t *testing.T) {
 		if a.OutputProjBias[i] != wantBias[i] {
 			t.Fatalf("output_proj.bias byte %d = %d, want %d", i, a.OutputProjBias[i], wantBias[i])
 		}
+	}
+}
+
+func TestAudioConv2dToOHWI(t *testing.T) {
+	// Defect-catcher: real mlx checkpoints ship the subsample conv already in OHWI [outC,kh,kw,inC]
+	// (layer0 [128,3,3,1], layer1 [32,3,3,128]). The assembler must pass them through byte-identical;
+	// transposing an already-OHWI weight (the old OIHW assumption) scrambles it into garbage audio.
+	for _, shape := range [][]int{{128, 3, 3, 1}, {32, 3, 3, 128}} {
+		src := audioBF16Tensor(shape...)
+		out, err := audioConv2dToOHWI(src)
+		if err != nil {
+			t.Fatalf("audioConv2dToOHWI(OHWI %v): %v", shape, err)
+		}
+		if !bytes.Equal(out, src.Data) {
+			t.Fatalf("OHWI conv %v was transposed; want byte-identical pass-through", shape)
+		}
+	}
+
+	// A synthetic torch OIHW [outC,inC,kh,kw] must still be transposed to OHWI.
+	const outC, inC, kh, kw = 2, 4, 3, 3
+	src := audioBF16Tensor(outC, inC, kh, kw)
+	out, err := audioConv2dToOHWI(src)
+	if err != nil {
+		t.Fatalf("audioConv2dToOHWI(OIHW): %v", err)
+	}
+	// element (oc=1, ic=3, y=2, x=1): OIHW source index vs OHWI destination index.
+	srcElem := ((1*inC+3)*kh+2)*kw + 1
+	dstElem := ((1*kh+2)*kw+1)*inC + 3
+	if out[dstElem*2] != src.Data[srcElem*2] || out[dstElem*2+1] != src.Data[srcElem*2+1] {
+		t.Fatal("torch OIHW conv was not transposed to native OHWI")
+	}
+	if bytes.Equal(out, src.Data) {
+		t.Fatal("torch OIHW conv unexpectedly passed through unchanged")
 	}
 }
 
