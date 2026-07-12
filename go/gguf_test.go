@@ -148,3 +148,23 @@ func TestGGUF_AllocBudget_ReadInfo_VocabHeavy(t *testing.T) {
 			avg, budget)
 	}
 }
+
+// TestGGUF_Valid_Good pins the metadata-validity read across all three shapes:
+// no issues is valid, warnings alone stay valid, and any error issue makes the
+// info invalid — so a caller gates a load on Valid() without re-walking the list.
+func TestGGUF_Valid_Good(t *testing.T) {
+	if !(GGUFInfo{}).Valid() {
+		t.Fatal("GGUFInfo with no issues should be valid")
+	}
+	warnOnly := GGUFInfo{ValidationIssues: []GGUFValidationIssue{{Severity: GGUFValidationWarning}}}
+	if !warnOnly.Valid() {
+		t.Fatal("warnings alone should not invalidate GGUF metadata")
+	}
+	withError := GGUFInfo{ValidationIssues: []GGUFValidationIssue{
+		{Severity: GGUFValidationWarning},
+		{Severity: GGUFValidationError},
+	}}
+	if withError.Valid() {
+		t.Fatal("an error issue must make GGUF metadata invalid")
+	}
+}
