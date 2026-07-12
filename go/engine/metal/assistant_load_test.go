@@ -3677,3 +3677,150 @@ func TestPrepareAssistantPromptRingSafety(t *testing.T) {
 		}
 	}
 }
+
+func TestNewAssistantGenerateResult_Good(t *testing.T) {
+	got := newAssistantGenerateResult(5, 7, 3)
+	if got.PromptTokens != 5 || cap(got.Tokens) != 7 || cap(got.DraftTokenSchedule) != 3 {
+		t.Fatalf("newAssistantGenerateResult = %+v, want prompt=5 token cap=7 schedule cap=3", got)
+	}
+}
+
+func TestNewAssistantGenerateResult_Bad(t *testing.T) {
+	got := newAssistantGenerateResult(2, -1, 3)
+	if len(got.Tokens) != 0 || cap(got.DraftTokenSchedule) != 0 {
+		t.Fatalf("newAssistantGenerateResult negative budget = %+v, want empty result", got)
+	}
+}
+
+func TestNewAssistantGenerateResult_Ugly(t *testing.T) {
+	got := newAssistantGenerateResult(0, 4, 0)
+	if got.PromptTokens != 0 || cap(got.Tokens) != 4 || cap(got.DraftTokenSchedule) != 0 {
+		t.Fatalf("newAssistantGenerateResult zero draft = %+v", got)
+	}
+}
+
+func TestNativeAssistantSuppressArg_Good(t *testing.T) {
+	want := []int32{7, 2, 9}
+	got := nativeAssistantSuppressArg([][]int32{want})
+	if !slices.Equal(got, want) {
+		t.Fatalf("nativeAssistantSuppressArg = %v, want %v", got, want)
+	}
+}
+
+func TestNativeAssistantSuppressArg_Bad(t *testing.T) {
+	first := []int32{4, 1}
+	got := nativeAssistantSuppressArg([][]int32{first, {8, 3}})
+	if !slices.Equal(got, first) {
+		t.Fatalf("nativeAssistantSuppressArg = %v, want only first argument %v", got, first)
+	}
+}
+
+func TestNativeAssistantSuppressArg_Ugly(t *testing.T) {
+	if got := nativeAssistantSuppressArg(nil); got != nil {
+		t.Fatalf("nativeAssistantSuppressArg(nil) = %v, want nil", got)
+	}
+}
+
+func TestAssistantTargetKVHasState_Good(t *testing.T) {
+	kv := AssistantTargetKV{Key: []byte{1, 4}, Value: []byte{2, 7}, Length: 1}
+	if !kv.HasState() {
+		t.Fatal("AssistantTargetKV.HasState = false, want true")
+	}
+}
+
+func TestAssistantTargetKVHasState_Bad(t *testing.T) {
+	kv := AssistantTargetKV{Key: []byte{1}, Value: nil, Length: 1}
+	if kv.HasState() {
+		t.Fatal("AssistantTargetKV.HasState accepted missing value state")
+	}
+}
+
+func TestAssistantTargetKVHasState_Ugly(t *testing.T) {
+	if (AssistantTargetKV{}).HasState() {
+		t.Fatal("empty AssistantTargetKV.HasState = true")
+	}
+}
+
+func TestNativeAssistantValidateOrdering_Good(t *testing.T) {
+	tensor := safetensors.Tensor{Dtype: "I32", Shape: []int{2, 2}, Data: make([]byte, 16)}
+	if err := nativeAssistantValidateOrdering(tensor, 4, 2, 2); err != nil {
+		t.Fatalf("nativeAssistantValidateOrdering: %v", err)
+	}
+}
+
+func TestNativeAssistantValidateOrdering_Bad(t *testing.T) {
+	tensor := safetensors.Tensor{Dtype: "F32", Shape: []int{4}, Data: make([]byte, 16)}
+	if err := nativeAssistantValidateOrdering(tensor, 4, 2, 2); err == nil {
+		t.Fatal("nativeAssistantValidateOrdering accepted floating-point ordering")
+	}
+}
+
+func TestNativeAssistantValidateOrdering_Ugly(t *testing.T) {
+	tensor := safetensors.Tensor{Dtype: "I64", Shape: []int{1, 4}, Data: make([]byte, 32)}
+	if err := nativeAssistantValidateOrdering(tensor, 4, 2, 2); err == nil {
+		t.Fatal("nativeAssistantValidateOrdering accepted malformed shape")
+	}
+}
+
+func TestNativeAssistantTopKInto_Good(t *testing.T) {
+	scores := []float32{0.25, -1.5, 3.75, 2.5}
+	got := nativeAssistantTopKInto(make([]int, 0, 2), scores, 2)
+	if !slices.Equal(got, []int{2, 3}) {
+		t.Fatalf("nativeAssistantTopKInto = %v, want [2 3]", got)
+	}
+}
+
+func TestNativeAssistantTopKInto_Bad(t *testing.T) {
+	scores := []float32{4, 1, 3}
+	got := nativeAssistantTopKInto([]int{99}, scores, 1)
+	if !slices.Equal(got, []int{0}) {
+		t.Fatalf("nativeAssistantTopKInto reused output = %v, want [0]", got)
+	}
+}
+
+func TestNativeAssistantTopKInto_Ugly(t *testing.T) {
+	if got := nativeAssistantTopKInto(nil, nil, 0); len(got) != 0 {
+		t.Fatalf("nativeAssistantTopKInto empty = %v, want empty", got)
+	}
+}
+
+func TestNativeAssistantEmitToken_Good(t *testing.T) {
+	result := newAssistantGenerateResult(1, 2, 1)
+	if stopped := nativeAssistantEmitToken(&result, 7, -1, nil); stopped || !slices.Equal(result.Tokens, []int32{7}) {
+		t.Fatalf("nativeAssistantEmitToken stopped=%v tokens=%v", stopped, result.Tokens)
+	}
+}
+
+func TestNativeAssistantEmitToken_Bad(t *testing.T) {
+	result := newAssistantGenerateResult(1, 2, 1)
+	if stopped := nativeAssistantEmitToken(&result, 6, 6, nil); !stopped || len(result.Tokens) != 0 {
+		t.Fatalf("nativeAssistantEmitToken EOS stopped=%v tokens=%v", stopped, result.Tokens)
+	}
+}
+
+func TestNativeAssistantEmitToken_Ugly(t *testing.T) {
+	result := newAssistantGenerateResult(1, 1, 1)
+	called := 0
+	stopped := nativeAssistantEmitToken(&result, 3, -1, func(id int32) bool { called++; return id != 3 })
+	if !stopped || called != 1 || !slices.Equal(result.Tokens, []int32{3}) {
+		t.Fatalf("nativeAssistantEmitToken yield stopped=%v called=%d tokens=%v", stopped, called, result.Tokens)
+	}
+}
+
+func TestNativeAssistantSuppressed_Good(t *testing.T) {
+	if !nativeAssistantSuppressed(5, []int32{2, 5, 8}) {
+		t.Fatal("nativeAssistantSuppressed missed present token")
+	}
+}
+
+func TestNativeAssistantSuppressed_Bad(t *testing.T) {
+	if nativeAssistantSuppressed(4, []int32{2, 5, 8}) {
+		t.Fatal("nativeAssistantSuppressed matched absent token")
+	}
+}
+
+func TestNativeAssistantSuppressed_Ugly(t *testing.T) {
+	if nativeAssistantSuppressed(-1, []int32{-1, 2}) {
+		t.Fatal("nativeAssistantSuppressed accepted negative sentinel")
+	}
+}
