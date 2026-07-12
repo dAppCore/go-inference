@@ -5,6 +5,7 @@
 package hip
 
 import (
+	"math"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -15,6 +16,7 @@ import (
 
 const hipDecodeRouteMetricsEnv = "GO_ROCM_HIP_DECODE_ROUTE_METRICS"
 const hipFeedbackReceiptsEnv = "GO_ROCM_HIP_FEEDBACK_RECEIPTS"
+const hipLogitSpreadReceiptsEnv = "GO_ROCM_HIP_LOGIT_SPREAD_RECEIPTS"
 
 type hipDecodeRoute string
 
@@ -64,6 +66,125 @@ type hipFeedbackReceipts struct {
 
 var hipFeedbackReceiptsActive atomic.Pointer[hipFeedbackReceipts]
 var hipFeedbackReceiptsArmed atomic.Bool
+
+type hipLogitSpreadPair struct {
+	TokenID int
+	Logit   float32
+}
+
+type hipLogitSpreadSummary struct {
+	Arm    string
+	Stage  string
+	Step   int
+	Count  int
+	Max    float32
+	Mean   float64
+	StdDev float64
+	Top    []hipLogitSpreadPair
+}
+
+type hipLogitSpreadReceipts struct {
+	mu      sync.Mutex
+	entries []hipLogitSpreadSummary
+	steps   map[string]int
+}
+
+var hipLogitSpreadReceiptsActive atomic.Pointer[hipLogitSpreadReceipts]
+var hipLogitSpreadReceiptsArmed atomic.Bool
+
+func hipActiveLogitSpreadReceipts() *hipLogitSpreadReceipts {
+	return hipLogitSpreadReceiptsActive.Load()
+}
+
+func hipBeginLogitSpreadReceipts() *hipLogitSpreadReceipts {
+	if core.Getenv(hipLogitSpreadReceiptsEnv) == "" || !hipLogitSpreadReceiptsArmed.CompareAndSwap(false, true) {
+		return nil
+	}
+	receipts := &hipLogitSpreadReceipts{entries: make([]hipLogitSpreadSummary, 0, 8), steps: make(map[string]int, 4)}
+	hipLogitSpreadReceiptsActive.Store(receipts)
+	return receipts
+}
+
+func hipFinishLogitSpreadReceipts(receipts *hipLogitSpreadReceipts) {
+	if receipts == nil {
+		return
+	}
+	hipLogitSpreadReceiptsActive.CompareAndSwap(receipts, nil)
+	core.Println("HIP_LOGIT_SPREAD_BEGIN")
+	core.Println("arm\tstage\tstep\tcount\tmax\tmean\tstddev\ttop20(token:logit)")
+	for _, entry := range receipts.snapshot() {
+		core.Println(hipFormatLogitSpreadSummary(entry))
+	}
+	core.Println("HIP_LOGIT_SPREAD_END")
+}
+
+func hipFormatLogitSpreadSummary(entry hipLogitSpreadSummary) string {
+	pairs := ""
+	for index, pair := range entry.Top {
+		if index > 0 {
+			pairs += ","
+		}
+		pairs += core.Sprintf("%d:%.9g", pair.TokenID, pair.Logit)
+	}
+	return core.Sprintf("%s\t%s\t%d\t%d\t%.9g\t%.9g\t%.9g\t%s", entry.Arm, entry.Stage, entry.Step, entry.Count, entry.Max, entry.Mean, entry.StdDev, pairs)
+}
+
+func (receipts *hipLogitSpreadReceipts) recordNext(arm, stage string, logits []float32) {
+	if receipts == nil {
+		return
+	}
+	receipts.mu.Lock()
+	step := receipts.steps[arm]
+	receipts.steps[arm] = step + 1
+	receipts.mu.Unlock()
+	if step != 0 && step != 5 {
+		return
+	}
+	summary := hipSummarizeLogitSpread(arm, stage, step, logits)
+	receipts.mu.Lock()
+	receipts.entries = append(receipts.entries, summary)
+	receipts.mu.Unlock()
+}
+
+func (receipts *hipLogitSpreadReceipts) snapshot() []hipLogitSpreadSummary {
+	receipts.mu.Lock()
+	defer receipts.mu.Unlock()
+	return append([]hipLogitSpreadSummary(nil), receipts.entries...)
+}
+
+func hipSummarizeLogitSpread(arm, stage string, step int, logits []float32) hipLogitSpreadSummary {
+	finite := make([]hipLogitSpreadPair, 0, len(logits))
+	mean := 0.0
+	m2 := 0.0
+	maxValue := float32(math.Inf(-1))
+	for tokenID, logit := range logits {
+		if math.IsNaN(float64(logit)) || math.IsInf(float64(logit), 0) {
+			continue
+		}
+		finite = append(finite, hipLogitSpreadPair{TokenID: tokenID, Logit: logit})
+		count := float64(len(finite))
+		delta := float64(logit) - mean
+		mean += delta / count
+		m2 += delta * (float64(logit) - mean)
+		if logit > maxValue {
+			maxValue = logit
+		}
+	}
+	sort.Slice(finite, func(i, j int) bool {
+		if finite[i].Logit == finite[j].Logit {
+			return finite[i].TokenID < finite[j].TokenID
+		}
+		return finite[i].Logit > finite[j].Logit
+	})
+	topCount := min(20, len(finite))
+	stddev := 0.0
+	if len(finite) > 0 {
+		stddev = math.Sqrt(m2 / float64(len(finite)))
+	} else {
+		maxValue = 0
+	}
+	return hipLogitSpreadSummary{Arm: arm, Stage: stage, Step: step, Count: len(finite), Max: maxValue, Mean: mean, StdDev: stddev, Top: append([]hipLogitSpreadPair(nil), finite[:topCount]...)}
+}
 
 func newHIPFeedbackReceipts() *hipFeedbackReceipts {
 	return &hipFeedbackReceipts{entries: make([]hipFeedbackReceipt, 0, 128)}
