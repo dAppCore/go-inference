@@ -60,6 +60,15 @@ var ProjMatMul func(x, w []float32, M, K, N int) ([]float32, error)
 // the legacy ProjMatMul stays the fallback, so a backend that wired only the old hook keeps working.
 var ProjMatMulInto func(out, x, w []float32, M, K, N int) ([]float32, error)
 
+// GatedDeltaInputDevice fuses the four x-reading input projections — in_proj_qkv, in_proj_z,
+// in_proj_a, in_proj_b — into ONE command buffer. They all read the same x [L,D], so the GEMMs are
+// independent (no barrier between them) and pay ONE command-buffer round-trip where projMatMulInto
+// pays four. in_proj_a/b are sub-floor standalone (a few KMACs each) but ride the fused CB for free.
+// The backend allocates and returns the four outputs (qkv [L,convDim], z [L,vDim], a/b [L,VH]); a nil
+// hook (or an error) leaves the per-projection path in charge — deterministic per build either way.
+// AX-8: the lib declares the hook, the backend binds it; the lib never imports the backend.
+var GatedDeltaInputDevice func(x, qkvW, zW, aW, bW []float32, L, D, convDim, vDim, VH int) (qkv, z, a, b []float32, err error)
+
 // deviceMinWork is the M·K·N floor below which the projections ignore the device hooks — a tiny
 // GEMV (the gated-delta in_proj_a/b are [ValueHeads, D] = a few KMACs) pays a full command-buffer
 // round-trip for microseconds of compute, so sub-MMAC shapes stay on the host path. Mirrors
@@ -197,11 +206,26 @@ func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDel
 	rep := VH / KH
 	scale := float32(1.0 / math.Sqrt(float64(HD)))
 
-	qkv, err := projMatMulInto(sc.qkv, x, w.InProjQKV, L, D, convDim)
-	if err != nil {
-		return nil, nil, nil, err
+	// Input fuse: in_proj_qkv/z/a/b all read x [L,D]. When the backend supplies the fused hook and the
+	// dominant qkv projection crosses the device floor, all four are computed up front in ONE command
+	// buffer (a/b ride free inside it); z's value depends only on x, so computing it here — before the
+	// conv/recurrence that consume it downstream — is identical to computing it at its use site. A nil
+	// hook or a device error leaves inputFused false and each projection runs at its original site.
+	var qkv, alpha, beta, zProj []float32
+	inputFused := false
+	if GatedDeltaInputDevice != nil && L*D*convDim >= deviceMinWork {
+		if fqkv, fz, fa, fb, ferr := GatedDeltaInputDevice(x, w.InProjQKV, w.InProjZ, w.InProjA, w.InProjB, L, D, convDim, vDim, VH); ferr == nil {
+			qkv, zProj, alpha, beta = fqkv, fz, fa, fb
+			inputFused = true
+		}
 	}
-	sc.qkv = qkv
+	if !inputFused {
+		qkv, err = projMatMulInto(sc.qkv, x, w.InProjQKV, L, D, convDim)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		sc.qkv = qkv
+	}
 	convOut, newConv, err := mamba2.CausalConv1dF32(qkv, w.ConvWeight, w.ConvBias, priorConv, L, convDim, K)
 	if err != nil {
 		return nil, nil, nil, err
@@ -244,16 +268,18 @@ func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDel
 	// two projection outputs are each read once and then dead, and α/β are the same [L,VH] shape, so
 	// map α over aProj and β over bProj in place — the element-wise transform (output i depends only
 	// on input i) makes this bit-identical and needs no separate α/β buffer.
-	alpha, err := projMatMulInto(sc.aProj, x, w.InProjA, L, D, VH)
-	if err != nil {
-		return nil, nil, nil, err
+	if !inputFused {
+		alpha, err = projMatMulInto(sc.aProj, x, w.InProjA, L, D, VH)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		sc.aProj = alpha
+		beta, err = projMatMulInto(sc.bProj, x, w.InProjB, L, D, VH)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		sc.bProj = beta
 	}
-	sc.aProj = alpha
-	beta, err := projMatMulInto(sc.bProj, x, w.InProjB, L, D, VH)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	sc.bProj = beta
 	for i := 0; i < L*VH; i++ {
 		h := i % VH
 		dt := gdSoftplus(float64(alpha[i]) + float64(w.DtBias[h]))
@@ -271,11 +297,13 @@ func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDel
 	// = [L·vDim], the gated shape, and is dead after this stage; each row's o is fully read (ss) then
 	// each element is read once more immediately before its own write, so the gated result is written
 	// in place over o — bit-identical, one fewer alloc per token.
-	zProj, err := projMatMulInto(sc.zProj, x, w.InProjZ, L, D, vDim)
-	if err != nil {
-		return nil, nil, nil, err
+	if !inputFused {
+		zProj, err = projMatMulInto(sc.zProj, x, w.InProjZ, L, D, vDim)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		sc.zProj = zProj
 	}
-	sc.zProj = zProj
 	gated := o
 	for row := 0; row < L*VH; row++ {
 		var ss float64

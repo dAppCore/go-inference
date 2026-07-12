@@ -16,4 +16,5 @@ import "dappco.re/go/inference/model/composed"
 func init() {
 	composed.ProjMatMulInto = MatMulF32NTInto
 	composed.MLPDevice = ComposedMLPDevice
+	composed.AttnQKVDevice = ComposedAttnQKVDevice // fuses the attention mixer's q/k/v (all read h) into one command buffer
 }
