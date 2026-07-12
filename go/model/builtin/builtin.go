@@ -64,6 +64,7 @@ import (
 	_ "dappco.re/go/inference/model/granite"    // IBM Granite dense (excludes Granite MoE/hybrid)
 	_ "dappco.re/go/inference/model/granitemoe" // IBM Granite sparse MoE
 	_ "dappco.re/go/inference/model/hunyuan"    // HunYuan v1 dense text
+	_ "dappco.re/go/inference/model/jetmoe"     // JetMoE routed FFN (MoA gap reported explicitly)
 	_ "dappco.re/go/inference/model/llama"      // llama (dense text)
 	_ "dappco.re/go/inference/model/llama"      // llama (dense text)
 	_ "dappco.re/go/inference/model/llama"      // llama (dense text)
