@@ -2328,10 +2328,10 @@ func hipRunGemma4Q4PrefillMLPBatch(ctx context.Context, driver nativeHIPDriver, 
 }
 
 func hipRunGemma4Q4PrefillMLPBatchWorkspace(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input *hipDeviceByteBuffer, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace) (*hipDeviceByteBuffer, error) {
-	return hipRunGemma4Q4PrefillMLPBatchWorkspaceView(ctx, driver, cfg, input, tokenCount, workspace, nil)
+	return hipRunGemma4Q4PrefillMLPBatchWorkspaceView(ctx, driver, cfg, input, tokenCount, workspace, nil, false)
 }
 
-func hipRunGemma4Q4PrefillMLPBatchWorkspaceView(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input *hipDeviceByteBuffer, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace, view *hipDeviceByteBuffer) (*hipDeviceByteBuffer, error) {
+func hipRunGemma4Q4PrefillMLPBatchWorkspaceView(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input *hipDeviceByteBuffer, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace, view *hipDeviceByteBuffer, forceBatchedProjection bool) (*hipDeviceByteBuffer, error) {
 	if err := hipContextErr(ctx); err != nil {
 		return nil, err
 	}
@@ -2394,16 +2394,16 @@ func hipRunGemma4Q4PrefillMLPBatchWorkspaceView(ctx context.Context, driver nati
 	if closeActivated {
 		defer activated.Close()
 	}
-	return hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx, driver, activated, cfg.DownProjection, tokenCount, workspace, "prefill MLP projection workspace view", view)
+	return hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx, driver, activated, cfg.DownProjection, tokenCount, workspace, "prefill MLP projection workspace view", view, forceBatchedProjection)
 }
 
 func hipRunGemma4Q4PrefillProjectionBatchWorkspace(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace, label string) (*hipDeviceByteBuffer, error) {
-	return hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx, driver, input, cfg, tokenCount, workspace, label, nil)
+	return hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx, driver, input, cfg, tokenCount, workspace, label, nil, false)
 }
 
-func hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace, label string, view *hipDeviceByteBuffer) (*hipDeviceByteBuffer, error) {
+func hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace, label string, view *hipDeviceByteBuffer, forceBatchedProjection bool) (*hipDeviceByteBuffer, error) {
 	if workspace == nil {
-		if tokenCount == 1 {
+		if tokenCount == 1 && !forceBatchedProjection {
 			return hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx, driver, input, cfg)
 		}
 		return hipRunMLXQ4ProjectionBatchKernelWithDeviceInput(ctx, driver, input, cfg, tokenCount)
@@ -2413,7 +2413,7 @@ func hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx context.Context, driv
 	if err != nil {
 		return nil, err
 	}
-	if tokenCount == 1 {
+	if tokenCount == 1 && !forceBatchedProjection {
 		err = hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, input, cfg, output, workspace)
 	} else {
 		err = hipRunMLXQ4ProjectionBatchKernelWithDeviceInputOutput(ctx, driver, input, cfg, tokenCount, output)
@@ -2433,11 +2433,11 @@ func hipRunGemma4Q4PrefillLayerBodyBatch(ctx context.Context, driver nativeHIPDr
 }
 
 func hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputWorkspace(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input *hipDeviceByteBuffer, layer *hipGemma4Q4PrefillLayerKVBatch, perLayerInput *hipDeviceByteBuffer, tokenCount int, queryStartToken int, epsilon float32, workspace *hipAttentionHeadsChunkedWorkspace) (*hipGemma4Q4PrefillLayerBodyBatch, error) {
-	return hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx, driver, cfg, input, layer, perLayerInput, tokenCount, queryStartToken, epsilon, workspace, nil, nil, nil)
+	return hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx, driver, cfg, input, layer, perLayerInput, tokenCount, queryStartToken, epsilon, workspace, nil, nil, nil, false)
 }
 
 func hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputWorkspaceInto(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input *hipDeviceByteBuffer, layer *hipGemma4Q4PrefillLayerKVBatch, perLayerInput *hipDeviceByteBuffer, tokenCount int, queryStartToken int, epsilon float32, workspace *hipAttentionHeadsChunkedWorkspace, out *hipGemma4Q4PrefillLayerBodyBatch) (*hipGemma4Q4PrefillLayerBodyBatch, error) {
-	return hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx, driver, cfg, input, layer, perLayerInput, tokenCount, queryStartToken, epsilon, workspace, out, nil, nil)
+	return hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx, driver, cfg, input, layer, perLayerInput, tokenCount, queryStartToken, epsilon, workspace, out, nil, nil, false)
 }
 
 func hipValidateGemma4Q4PrefillForwardBatch(cfg hipGemma4Q4ForwardConfig, tokens []int32, startPosition int, priorLayerKV []*rocmDeviceKVCache, perLayerInputs []*hipDeviceByteBuffer, outputRows []bool, outputRow int) error {
@@ -2665,7 +2665,7 @@ func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDevic
 			}
 			nextInputNormCfg = &nextCfg
 		}
-		body, err := hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx, driver, layerCfg, layerInput, layerKV, perLayerInput, tokenCount, queryStartToken, epsilon, workspace, layerBatch.Body, nextInputNormCfg, nextInputNormOutput)
+		body, err := hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx, driver, layerCfg, layerInput, layerKV, perLayerInput, tokenCount, queryStartToken, epsilon, workspace, layerBatch.Body, nextInputNormCfg, nextInputNormOutput, engineConfig.ForceBatchedProjection)
 		if err != nil {
 			return nil, err
 		}
@@ -2842,10 +2842,10 @@ func hipRunGemma4Q4PrefillPerLayerInputProjectionBatch(ctx context.Context, driv
 }
 
 func hipRunGemma4Q4PrefillPerLayerInputProjectionBatchWorkspace(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input, perLayerInput *hipDeviceByteBuffer, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace) (*hipDeviceByteBuffer, error) {
-	return hipRunGemma4Q4PrefillPerLayerInputProjectionBatchWorkspaceView(ctx, driver, cfg, input, perLayerInput, tokenCount, workspace, nil)
+	return hipRunGemma4Q4PrefillPerLayerInputProjectionBatchWorkspaceView(ctx, driver, cfg, input, perLayerInput, tokenCount, workspace, nil, false)
 }
 
-func hipRunGemma4Q4PrefillPerLayerInputProjectionBatchWorkspaceView(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input, perLayerInput *hipDeviceByteBuffer, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace, view *hipDeviceByteBuffer) (*hipDeviceByteBuffer, error) {
+func hipRunGemma4Q4PrefillPerLayerInputProjectionBatchWorkspaceView(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input, perLayerInput *hipDeviceByteBuffer, tokenCount int, workspace *hipAttentionHeadsChunkedWorkspace, view *hipDeviceByteBuffer, forceBatchedProjection bool) (*hipDeviceByteBuffer, error) {
 	if err := hipContextErr(ctx); err != nil {
 		return nil, err
 	}
@@ -2898,14 +2898,14 @@ func hipRunGemma4Q4PrefillPerLayerInputProjectionBatchWorkspaceView(ctx context.
 	if !activatedBorrowed {
 		defer activated.Close()
 	}
-	return hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx, driver, activated, cfg.PerLayerInput.Projection, tokenCount, workspace, "prefill per-layer projection workspace view", view)
+	return hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx, driver, activated, cfg.PerLayerInput.Projection, tokenCount, workspace, "prefill per-layer projection workspace view", view, forceBatchedProjection)
 }
 
 func hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInput(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input *hipDeviceByteBuffer, layer *hipGemma4Q4PrefillLayerKVBatch, perLayerInput *hipDeviceByteBuffer, tokenCount int, queryStartToken int, epsilon float32) (*hipGemma4Q4PrefillLayerBodyBatch, error) {
-	return hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx, driver, cfg, input, layer, perLayerInput, tokenCount, queryStartToken, epsilon, nil, nil, nil, nil)
+	return hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx, driver, cfg, input, layer, perLayerInput, tokenCount, queryStartToken, epsilon, nil, nil, nil, nil, false)
 }
 
-func hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input *hipDeviceByteBuffer, layer *hipGemma4Q4PrefillLayerKVBatch, perLayerInput *hipDeviceByteBuffer, tokenCount int, queryStartToken int, epsilon float32, workspace *hipAttentionHeadsChunkedWorkspace, out *hipGemma4Q4PrefillLayerBodyBatch, nextInputNormCfg *hipRMSNormDeviceWeightConfig, nextInputNormOutput *hipDeviceByteBuffer) (*hipGemma4Q4PrefillLayerBodyBatch, error) {
+func hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, input *hipDeviceByteBuffer, layer *hipGemma4Q4PrefillLayerKVBatch, perLayerInput *hipDeviceByteBuffer, tokenCount int, queryStartToken int, epsilon float32, workspace *hipAttentionHeadsChunkedWorkspace, out *hipGemma4Q4PrefillLayerBodyBatch, nextInputNormCfg *hipRMSNormDeviceWeightConfig, nextInputNormOutput *hipDeviceByteBuffer, forceBatchedProjection bool) (*hipGemma4Q4PrefillLayerBodyBatch, error) {
 	if err := hipContextErr(ctx); err != nil {
 		return nil, err
 	}
@@ -2976,7 +2976,7 @@ func hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx context.Co
 	if err != nil {
 		return nil, err
 	}
-	out.AttentionProjection, err = hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx, driver, out.AttentionOutput, cfg.OutputProjection, tokenCount, workspace, "prefill attention projection workspace view", &out.attentionProjectionView)
+	out.AttentionProjection, err = hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx, driver, out.AttentionOutput, cfg.OutputProjection, tokenCount, workspace, "prefill attention projection workspace view", &out.attentionProjectionView, forceBatchedProjection)
 	if err != nil {
 		return nil, err
 	}
@@ -2990,7 +2990,7 @@ func hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx context.Co
 	if err != nil {
 		return nil, err
 	}
-	out.MLPOutput, err = hipRunGemma4Q4PrefillMLPBatchWorkspaceView(ctx, driver, cfg, out.PreFeedForward, tokenCount, workspace, &out.mlpOutputView)
+	out.MLPOutput, err = hipRunGemma4Q4PrefillMLPBatchWorkspaceView(ctx, driver, cfg, out.PreFeedForward, tokenCount, workspace, &out.mlpOutputView, forceBatchedProjection)
 	if err != nil {
 		return nil, err
 	}
@@ -3047,7 +3047,7 @@ func hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx context.Co
 			out.postFeedForwardView = hipBorrowDeviceByteBufferValue(driver, postFeedForwardLabel, postFeedForwardOutput.Pointer(), postFeedForwardOutput.SizeBytes(), postFeedForwardOutput.Count())
 			out.PostFeedForward = &out.postFeedForwardView
 			activated := hipBorrowDeviceByteBufferValue(driver, "prefill fused per-layer activation workspace view", activatedOutput.Pointer(), activatedOutput.SizeBytes(), activatedOutput.Count())
-			out.PerLayerProjection, err = hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx, driver, &activated, cfg.PerLayerInput.Projection, tokenCount, workspace, "prefill per-layer projection workspace view", &out.perLayerProjectionView)
+			out.PerLayerProjection, err = hipRunGemma4Q4PrefillProjectionBatchWorkspaceView(ctx, driver, &activated, cfg.PerLayerInput.Projection, tokenCount, workspace, "prefill per-layer projection workspace view", &out.perLayerProjectionView, forceBatchedProjection)
 			if err != nil {
 				return nil, err
 			}
@@ -3058,7 +3058,7 @@ func hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx context.Co
 			if err != nil {
 				return nil, err
 			}
-			out.PerLayerProjection, err = hipRunGemma4Q4PrefillPerLayerInputProjectionBatchWorkspaceView(ctx, driver, cfg, out.PostFeedForward, perLayerInput, tokenCount, workspace, &out.perLayerProjectionView)
+			out.PerLayerProjection, err = hipRunGemma4Q4PrefillPerLayerInputProjectionBatchWorkspaceView(ctx, driver, cfg, out.PostFeedForward, perLayerInput, tokenCount, workspace, &out.perLayerProjectionView, forceBatchedProjection)
 			if err != nil {
 				return nil, err
 			}
