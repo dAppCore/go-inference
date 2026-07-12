@@ -16,7 +16,7 @@ import (
 //
 //	2534785211 ns/op   44.97 tok/s   25795105 B/op   13949 allocs/op
 //
-// Today's forward (bindWeights, forward, encoderLayer below) is naive host
+// The forward (bindWeights, forward, encoderLayer below) is naive host
 // float32/float64-accumulate, single-threaded, zero SIMD/BLAS, zero device
 // hook — every number above is pure Go scalar loops. 45 tok/s means a
 // realistic 100-doc reranking batch (~1.5K tokens) costs on the order of 30s;
@@ -26,26 +26,20 @@ import (
 // imported the other way per AX-8) is the house precedent for closing that
 // gap without coupling this package to any engine.
 //
-// The blocking prerequisite is NOT the missing hook — it's that encoderLayer
-// calls linear() ONE TOKEN AT A TIME (`for i := range seqLen { query[i] =
-// linear(hidden[i], ...) }`, likewise key/value/attnDense/intermediate/
-// output), i.e. seqLen separate M=1 GEMVs per projection per layer instead of
-// ONE M=seqLen GEMM. BERT's encoder is not autoregressive — every token's
-// projection at a given layer is independent of its neighbours — so batching
-// the row loop into a single [seqLen,hidden]×[hidden,hidden] matmul is a pure
-// host refactor (same maths, bit-identical accumulation order achievable),
-// and it is what makes a device hook profitable at all: composed.go gates its
+// encoderLayer now batches every projection across the whole sequence: each
+// weight is applied by one linearBatch call with shape
+// [seqLen,hidden]×[hidden,out]. BERT's encoder is not autoregressive — every
+// token's projection at a given layer is independent of its neighbours — so
+// the row batching preserves each dot product's accumulation order while
+// making a future device hook profitable. composed.go gates its
 // hooks behind deviceMinWork = 1<<20 (M·K·N), and bge-small's shapes (hidden
 // 384, intermediate 1536) never reach that floor at M=1 — Q/K/V/attnDense is
 // 1×384×384 = 147,456 and the FFN intermediate is 1×384×1536 = 589,824, both
 // sub-floor — but at M=seqLen (14 tokens, this benchmark's average) they
 // become 2,064,384 and 8,257,536, both comfortably above it. So the shape is:
 //
-//  1. Batch encoderLayer's per-token loops into per-layer [seqLen,·] matmuls
-//     (matNTInto in composed.go is the exact reusable primitive — it already
-//     shards output columns across cores for large shapes and is the natural
-//     home for a shared host GEMM if one doesn't already fit here).
-//  2. THEN add the hook seam: a package-level `var LinearDevice func(x, w,
+// The remaining device work is to add the hook seam: a package-level `var
+// LinearDevice func(x, w,
 //     bias []float32, M, K, N int) ([]float32, error)` that linear()-family
 //     call sites try first when bound and M·K·N is above the same floor,
 //     falling back to the host path on a nil hook or a device error — byte-
@@ -133,14 +127,9 @@ func encoderLayer(cfg Config, layer *layerWeights, hidden [][]float32) [][]float
 	seqLen := len(hidden)
 	scale := 1.0 / math.Sqrt(float64(headDim))
 
-	query := make([][]float32, seqLen)
-	key := make([][]float32, seqLen)
-	value := make([][]float32, seqLen)
-	for i := 0; i < seqLen; i++ {
-		query[i] = linear(hidden[i], layer.queryW, layer.queryB, hiddenSize, hiddenSize)
-		key[i] = linear(hidden[i], layer.keyW, layer.keyB, hiddenSize, hiddenSize)
-		value[i] = linear(hidden[i], layer.valueW, layer.valueB, hiddenSize, hiddenSize)
-	}
+	query := linearBatch(hidden, layer.queryW, layer.queryB, hiddenSize, hiddenSize)
+	key := linearBatch(hidden, layer.keyW, layer.keyB, hiddenSize, hiddenSize)
+	value := linearBatch(hidden, layer.valueW, layer.valueB, hiddenSize, hiddenSize)
 
 	context := make([][]float32, seqLen)
 	for i := 0; i < seqLen; i++ {
@@ -168,21 +157,67 @@ func encoderLayer(cfg Config, layer *layerWeights, hidden [][]float32) [][]float
 		}
 	}
 
-	out := make([][]float32, seqLen)
+	// Attention has consumed query and key, so reuse their storage for the
+	// attention projection and normalised residual respectively.
+	attnDense := query
+	linearBatchInto(attnDense, context, layer.attnDenseW, layer.attnDenseB, hiddenSize, hiddenSize)
+	attnNorm := key
 	for i := 0; i < seqLen; i++ {
-		attnDense := linear(context[i], layer.attnDenseW, layer.attnDenseB, hiddenSize, hiddenSize)
-		addInPlace(attnDense, hidden[i])
-		attnNorm := layerNorm(attnDense, layer.attnLNW, layer.attnLNB, cfg.LayerNormEps)
+		addInPlace(attnDense[i], hidden[i])
+		layerNormInto(attnNorm[i], attnDense[i], layer.attnLNW, layer.attnLNB, cfg.LayerNormEps)
+	}
 
-		intermediate := linear(attnNorm, layer.interW, layer.interB, hiddenSize, cfg.IntermediateSize)
-		for k := range intermediate {
-			intermediate[k] = gelu(intermediate[k])
+	intermediate := linearBatch(attnNorm, layer.interW, layer.interB, hiddenSize, cfg.IntermediateSize)
+	for i := range intermediate {
+		for k := range intermediate[i] {
+			intermediate[i][k] = gelu(intermediate[i][k])
 		}
-		ffn := linear(intermediate, layer.outW, layer.outB, cfg.IntermediateSize, hiddenSize)
-		addInPlace(ffn, attnNorm)
-		out[i] = layerNorm(ffn, layer.outLNW, layer.outLNB, cfg.LayerNormEps)
+	}
+	// Value and context are dead after attention; reuse them for the FFN output
+	// and the layer's final normalised rows.
+	ffn := value
+	linearBatchInto(ffn, intermediate, layer.outW, layer.outB, cfg.IntermediateSize, hiddenSize)
+	out := context
+	for i := 0; i < seqLen; i++ {
+		addInPlace(ffn[i], attnNorm[i])
+		layerNormInto(out[i], ffn[i], layer.outLNW, layer.outLNB, cfg.LayerNormEps)
 	}
 	return out
+}
+
+// linearBatch computes Y = X·Wᵀ + b for all input rows in one matrix
+// operation. Each result row retains linear's float64 accumulation order.
+func linearBatch(x [][]float32, weight, bias []float32, inDim, outDim int) [][]float32 {
+	out := makeRows(len(x), outDim)
+	linearBatchInto(out, x, weight, bias, inDim, outDim)
+	return out
+}
+
+func linearBatchInto(out, x [][]float32, weight, bias []float32, inDim, outDim int) {
+	for m := range x {
+		xRow := x[m]
+		outRow := out[m]
+		for o := 0; o < outDim; o++ {
+			row := weight[o*inDim : (o+1)*inDim]
+			var acc float64
+			for i := 0; i < inDim; i++ {
+				acc += float64(xRow[i]) * float64(row[i])
+			}
+			if bias != nil {
+				acc += float64(bias[o])
+			}
+			outRow[o] = float32(acc)
+		}
+	}
+}
+
+func makeRows(rowCount, columnCount int) [][]float32 {
+	rows := make([][]float32, rowCount)
+	data := make([]float32, rowCount*columnCount)
+	for i := range rows {
+		rows[i] = data[i*columnCount : (i+1)*columnCount]
+	}
+	return rows
 }
 
 // linear computes y = x·Wᵀ + b for a single vector. weight is the PyTorch
@@ -207,6 +242,12 @@ func linear(x, weight, bias []float32, inDim, outDim int) []float32 {
 // layerNorm normalises x over its full length with biased variance and applies
 // the affine weight/bias — torch.nn.LayerNorm with eps inside the sqrt.
 func layerNorm(x, weight, bias []float32, eps float64) []float32 {
+	out := make([]float32, len(x))
+	layerNormInto(out, x, weight, bias, eps)
+	return out
+}
+
+func layerNormInto(out, x, weight, bias []float32, eps float64) {
 	n := len(x)
 	var mean float64
 	for _, v := range x {
@@ -220,12 +261,10 @@ func layerNorm(x, weight, bias []float32, eps float64) []float32 {
 	}
 	variance /= float64(n)
 	denom := math.Sqrt(variance + eps)
-	out := make([]float32, n)
 	for i, v := range x {
 		normalised := (float64(v) - mean) / denom
 		out[i] = float32(normalised*float64(weight[i]) + float64(bias[i]))
 	}
-	return out
 }
 
 // gelu is the exact error-function GELU (config hidden_act "gelu"): the

@@ -24,6 +24,30 @@ func BenchmarkLinear(b *testing.B) {
 	}
 }
 
+// BenchmarkLinearBatch measures a sequence-wide bge-small projection.
+func BenchmarkLinearBatch(b *testing.B) {
+	const (
+		hidden = 384
+		rows   = 14
+	)
+	x := makeRows(rows, hidden)
+	weight := make([]float32, hidden*hidden)
+	bias := make([]float32, hidden)
+	for i := range x {
+		for j := range x[i] {
+			x[i][j] = float32((i+j)%7) * 0.1
+		}
+	}
+	for i := range weight {
+		weight[i] = float32(i%13) * 0.01
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = linearBatch(x, weight, bias, hidden, hidden)
+	}
+}
+
 // BenchmarkLayerNorm measures a single-vector LayerNorm at bge-small's width.
 func BenchmarkLayerNorm(b *testing.B) {
 	const hidden = 384
