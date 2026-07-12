@@ -6,6 +6,7 @@ package hip
 
 import (
 	"sync"
+	"time"
 
 	core "dappco.re/go"
 )
@@ -119,6 +120,10 @@ type nativeHIPKernelLauncher interface {
 	LaunchKernel(config hipKernelLaunchConfig) error
 }
 
+type nativeHIPDeviceSynchronizer interface {
+	DeviceSynchronize() error
+}
+
 type hipLaunchPacketPool struct {
 	sync.Mutex
 	packets [][]byte
@@ -197,7 +202,21 @@ func hipLaunchKernel(driver nativeHIPDriver, config hipKernelLaunchConfig) error
 	if !ok {
 		return core.E("rocm.hip.LaunchKernel", "native HIP kernel launcher is not linked yet", nil)
 	}
-	return launcher.LaunchKernel(config)
+	metrics := hipActiveDecodeRouteMetrics()
+	if metrics == nil {
+		return launcher.LaunchKernel(config)
+	}
+	start := time.Now()
+	if err := launcher.LaunchKernel(config); err != nil {
+		return err
+	}
+	if synchronizer, ok := driver.(nativeHIPDeviceSynchronizer); ok {
+		if err := synchronizer.DeviceSynchronize(); err != nil {
+			return err
+		}
+	}
+	metrics.record(config.Name, hipDecodeRouteDevice, time.Since(start))
+	return nil
 }
 
 func (config hipKernelLaunchConfig) Validate() error {
