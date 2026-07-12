@@ -3206,6 +3206,16 @@ func nativeTestGGUFAlignPadding(offset, alignment uint64) uint64 {
 
 func newNativeAssistantGenerateFixture(t testing.TB) (*AssistantPair, func() *ArchSession) {
 	t.Helper()
+	return newNativeAssistantGenerateFixtureMaxLen(t, 64)
+}
+
+// newNativeAssistantGenerateFixtureMaxLen is newNativeAssistantGenerateFixture
+// with a configurable session maxLen — the hardcoded 64 rows is too small for
+// a long multi-block generation that must run a patience streak, a
+// cooldown(32)+ plain stretch, and a re-engagement probe within one call (the
+// #299 re-engagement policy, mtp_reengage.go).
+func newNativeAssistantGenerateFixtureMaxLen(t testing.TB, maxLen int) (*AssistantPair, func() *ArchSession) {
+	t.Helper()
 	const hidden, heads, kvHeads, headDim, ff, vocab = 128, 2, 2, 64, 256, 8
 	layers := []DecodeLayerWeights{forwardLayer(hidden, heads, kvHeads, headDim, ff, 701)}
 	embed := toBF16Bytes(syntheticFloat32(vocab*hidden, 703))
@@ -3234,7 +3244,7 @@ func newNativeAssistantGenerateFixture(t testing.TB) (*AssistantPair, func() *Ar
 		t.Fatalf("validateNativeAssistantPair: %v", err)
 	}
 	mk := func() *ArchSession {
-		s, err := NewArchSession(g, arch, 64)
+		s, err := NewArchSession(g, arch, maxLen)
 		if err != nil {
 			t.Fatalf("NewArchSession: %v", err)
 		}
