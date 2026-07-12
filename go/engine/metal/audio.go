@@ -5,8 +5,6 @@
 package native
 
 import (
-	"math"
-
 	core "dappco.re/go"
 )
 
@@ -18,6 +16,22 @@ import (
 // model dtype (bf16); f32 clamp arrays would promote the projection to fp32 in metal — handle that
 // at load if a checkpoint is found to use them. Engine-neutral: no model name; geometry arrives as
 // AudioConfig. Shares the bf16↔fp32 + rmsNormVec + MatRowsBF16 helpers with vision.go.
+//
+// Split with the engine-neutral host tower (model/gemma4/audio, #44 convergence): that package is the
+// pure-host REFERENCE forward (no GPU dependency) plus the hip binding; this file (+ audio_f32.go,
+// audio_attention.go, audio_encoder.go) is the GPU-dispatch SPECIALISATION, byte-identical to the real
+// metal.Forward — its clamp/activation/matmul calls route through on-device kernels (RMSNormBF16,
+// MatRowsBF16, MatMulF32NT, Sigmoid, …), so its composed forwards cannot ride the shared home's plain
+// host loops without floating-point drift and stay local. The one piece that WAS provably duplicate and
+// genuinely GPU-free — the mel front-end — converged onto the shared home (audio_features.go is now a
+// thin alias/delegate). A handful of small pure-index-remap/host-arithmetic leaves inside this GPU tower
+// (audioBlockContextF32, audioRelShiftF32Into, audioBlockedMask, clampF32, reluF32, halveValidity, …in
+// audio_f32.go/audio_attention.go) are ALSO algorithmically identical to their shared-home counterparts,
+// but stay local rather than being exported from the reference package purely to serve this one GPU
+// consumer — the honest-partial-convergence call for #44 (see the worktree report). Four confirmed-dead
+// duplicate helpers (audioContextSize method, audioClamp, audioActivate, rmsRowsHost — never called
+// outside their own tests, fully superseded by audioContextSizeOf/clampF32|clampBF16/
+// audioActivateF32|audioActivateBF16/the GPU RMSNorm path) were deleted outright.
 
 // AudioConfig is the engine-neutral Conformer geometry the forward reads. ClipMin/ClipMax are the
 // ±gradient-clipping clamp every module borrows (ClipMin==ClipMax ⇒ no clamp). Act is the FF/conv
@@ -42,53 +56,6 @@ type AudioConfig struct {
 	KScale        float32
 	LogitCap      float32 // tanh soft-cap
 	InvalidLogit  float32 // masked-position fill
-}
-
-func (c AudioConfig) audioContextSize() int { return c.ChunkSize + c.PastHorizon + c.FutureHorizon }
-
-// audioClamp clamps v to [min,max] in place (metal's gradient-clipping Clip); min==max ⇒ no-op.
-func audioClamp(v []float32, min, max float32) {
-	if min == max {
-		return
-	}
-	for i := range v {
-		if v[i] < min {
-			v[i] = min
-		} else if v[i] > max {
-			v[i] = max
-		}
-	}
-}
-
-// audioActivate applies the Conformer activation, matching metal's gemma4AudioActivate.
-func audioActivate(v []float32, act string) {
-	switch act {
-	case "relu":
-		for i := range v {
-			if v[i] < 0 {
-				v[i] = 0
-			}
-		}
-	case "gelu", "gelu_pytorch_tanh":
-		for i := range v {
-			v[i] = geluTanhScalar(v[i])
-		}
-	default: // silu / swish / ""
-		for i := range v {
-			v[i] = v[i] / (1 + float32(math.Exp(float64(-v[i]))))
-		}
-	}
-}
-
-// rmsRowsHost RMS-normalises each [axis] row of [rows,axis] fp32 in place-returning, scaling by w
-// (nil ⇒ no scale) — the host sibling of RMSNormBF16, reusing rmsNormVec from vision.go.
-func rmsRowsHost(m, w []float32, rows, axis int, eps float32) []float32 {
-	o := make([]float32, len(m))
-	for r := range rows {
-		copy(o[r*axis:r*axis+axis], m[r*axis:r*axis+axis])
-		rmsNormVec(o[r*axis:r*axis+axis], w, eps)
-	}
-	return o
 }
 
 // AudioFeedForwardWeights is one Conformer FeedForward's bf16 weight views: pre/post RMSNorm [hidden]
