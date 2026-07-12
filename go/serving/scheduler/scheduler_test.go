@@ -5,6 +5,7 @@ package scheduler
 import (
 	"context"
 	"iter"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -542,5 +543,120 @@ func TestModel_Stats_Serial_Good(t *testing.T) {
 	}
 	if s := m.Stats(); s.Submitted != 1 || s.Completed != 1 {
 		t.Fatalf("serial Stats = %+v, want Submitted=1 Completed=1", s)
+	}
+}
+
+// waitGoroutineCount polls runtime.NumGoroutine until want is satisfied or the
+// deadline passes. A worker goroutine's own exit (the runtime's counter
+// decrement) trails the workerWG.Done() call that unblocks a joining Wait() by
+// a scheduling instant, so an immediate read right after a synchronous
+// CloseEngine call can occasionally observe a stale, still-draining count —
+// the same reason waitStats polls Stats rather than reading it once.
+func waitGoroutineCount(t *testing.T, want func(int) bool) int {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	for {
+		n := runtime.NumGoroutine()
+		if want(n) {
+			return n
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("goroutine count never satisfied predicate, last = %d", n)
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+}
+
+// TestModel_CloseEngine_Serial_DrainsWorkers_Good is the goroutine-leak guard
+// a per-resident-model scheduler depends on: serving.multiModelResolver
+// builds a fresh scheduler.Model on every model load and tears it down on
+// every eviction, so a serial-mode CloseEngine that does not actually join its
+// worker pool would leak MaxConcurrent goroutines per evict, forever, on the
+// DEFAULT scheduler mode (serial is Config.Mode's zero value). Before this
+// fix, CloseEngine's switch had no serial case at all — worker ranged over
+// m.queue, which nothing ever closed.
+func TestModel_CloseEngine_Serial_DrainsWorkers_Good(t *testing.T) {
+	before := runtime.NumGoroutine()
+	base := &immediateModel{tokens: []inference.Token{{Text: "x"}}}
+	m, err := New(base, Config{MaxConcurrent: 4, MaxQueue: 4, StreamBuffer: 4})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	waitGoroutineCount(t, func(n int) bool { return n >= before+4 })
+
+	m.CloseEngine()
+
+	waitGoroutineCount(t, func(n int) bool { return n <= before })
+}
+
+// TestModel_CloseEngine_Serial_ActiveAndQueued_NoHang_Good proves CloseEngine
+// on serial mode — the mode a per-resident-model scheduler builds by default —
+// neither hangs nor panics an in-flight (already running) job or one still
+// sitting in the queue: both output channels are guaranteed to close, and a
+// Schedule call after CloseEngine fails closed rather than being accepted into
+// an abandoned queue. This is the "an in-flight request on the evicting model
+// must complete or error cleanly, never hang" contract at the scheduler layer.
+func TestModel_CloseEngine_Serial_ActiveAndQueued_NoHang_Good(t *testing.T) {
+	base := newBlockingModel()
+	m, err := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, activeTokens, err := m.Schedule(context.Background(), inference.ScheduledRequest{ID: "active", Prompt: "active"})
+	if err != nil {
+		t.Fatalf("Schedule(active): %v", err)
+	}
+	if got := waitStartedPrompt(t, base.started); got != "active" {
+		t.Fatalf("started = %q, want active", got)
+	}
+	// active's source is now blocked on base.release, which nobody signals —
+	// the only way it unblocks is CloseEngine cancelling its context.
+	_, queuedTokens, err := m.Schedule(context.Background(), inference.ScheduledRequest{ID: "queued", Prompt: "queued"})
+	if err != nil {
+		t.Fatalf("Schedule(queued): %v", err)
+	}
+
+	closed := make(chan struct{})
+	go func() { m.CloseEngine(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("CloseEngine did not return — an active job blocked on the base model is not being cancelled")
+	}
+
+	assertClosedNoTokens(t, activeTokens, "active")
+	assertClosedNoTokens(t, queuedTokens, "queued")
+
+	if _, _, err := m.Schedule(context.Background(), inference.ScheduledRequest{ID: "after", Prompt: "after"}); err == nil {
+		t.Fatal("Schedule after CloseEngine error = nil, want a closed-engine error")
+	}
+}
+
+// TestModel_CloseEngine_Serial_Idempotent_Good proves calling CloseEngine
+// twice never panics — the shape a belt-and-braces caller (an explicit evict
+// plus a deferred teardown) can produce.
+func TestModel_CloseEngine_Serial_Idempotent_Good(t *testing.T) {
+	base := &immediateModel{tokens: []inference.Token{{Text: "x"}}}
+	m, err := New(base, Config{MaxConcurrent: 1, MaxQueue: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	m.CloseEngine()
+	m.CloseEngine() // must not panic (close of an already-closed channel)
+}
+
+// assertClosedNoTokens drains ch, failing if it yields a token or does not
+// close within the timeout — the "no hang" half of the eviction contract.
+func assertClosedNoTokens(t *testing.T, ch <-chan inference.ScheduledToken, label string) {
+	t.Helper()
+	select {
+	case tok, ok := <-ch:
+		if ok {
+			t.Fatalf("%s: got token %+v after CloseEngine, want a closed channel", label, tok)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s: channel did not close within 2s of CloseEngine — hang", label)
 	}
 }

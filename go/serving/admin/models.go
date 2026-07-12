@@ -34,15 +34,33 @@ const (
 
 // ModelStatus is one model's snapshot in the /v1/admin/models list. It is the
 // admin wire shape; the serving resolver supplies it via an adapter so this
-// package need not import serving (no cycle).
+// package need not import serving (no cycle). SchedulerMode/SchedulerStats are
+// populated only for a resident model whose serve process was started with
+// -scheduler — read-only: this slice adds no scheduler mutation endpoint.
 type ModelStatus struct {
-	ID           string   `json:"id"`
-	Path         string   `json:"path"`
-	Resident     bool     `json:"resident"`
-	Pinned       bool     `json:"pinned"`
-	EstBytes     uint64   `json:"est_bytes"`
-	Profiles     []string `json:"profiles,omitempty"`
-	LastUsedUnix int64    `json:"last_used_unix,omitempty"`
+	ID             string          `json:"id"`
+	Path           string          `json:"path"`
+	Resident       bool            `json:"resident"`
+	Pinned         bool            `json:"pinned"`
+	EstBytes       uint64          `json:"est_bytes"`
+	Profiles       []string        `json:"profiles,omitempty"`
+	LastUsedUnix   int64           `json:"last_used_unix,omitempty"`
+	SchedulerMode  string          `json:"scheduler_mode,omitempty"`
+	SchedulerStats *SchedulerStats `json:"scheduler_stats,omitempty"`
+}
+
+// SchedulerStats is the admin wire shape for a resident model's scheduler
+// counters — a serving-free mirror of scheduler.Stats's fields (this package
+// must not import serving/scheduler; ListModels' adapter copies field by
+// field, see serving.multiModelController.ListModels).
+type SchedulerStats struct {
+	Submitted  int64 `json:"submitted"`
+	Admitted   int64 `json:"admitted,omitempty"`
+	Completed  int64 `json:"completed"`
+	Cancelled  int64 `json:"cancelled"`
+	Active     int64 `json:"active"`
+	Queued     int64 `json:"queued"`
+	MaxRunning int64 `json:"max_running,omitempty"`
 }
 
 // ModelController is the multi-model registry seam the admin routes drive. The

@@ -43,7 +43,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	stateRAMBudget := fs.Int64("state-ram-budget", 0, "byte ceiling for the RAM conversation store (ignored when -state-store is set); 0 = unlimited; over budget the coldest conversation chunks spill to a scratch .kv file and wake back transparently")
 	nativeBackend := fs.Bool("native", false, "serve via the no-cgo native token-loop contract (the default go-inference metal engine already is native)")
 	modelsConfig := fs.String("models-config", "", "multi-model serving config (JSON): several models with aliases and named profiles, held resident under a memory ceiling with LRU + idle-TTL eviction; -model becomes the pinned default; empty = single-model serve")
-	schedulerMode := fs.String("scheduler", "", "request scheduler between the HTTP handlers and the model: 'serial' (bounded-queue worker pool), 'batch' (continuous in-flight batching), 'interleave' (live admission-budget CB); empty = no scheduler (request path unchanged). Single-model serve only")
+	schedulerMode := fs.String("scheduler", "", "request scheduler between the HTTP handlers and the model: 'serial' (bounded-queue worker pool), 'batch' (continuous in-flight batching), 'interleave' (live admission-budget CB); empty = no scheduler (request path unchanged). With -models-config, each resident model gets its own scheduler instance of this mode")
 	fs.Usage = func() {
 		name := cliName()
 		core.WriteString(stderr, core.Sprintf("Usage: %s serve [--model <path>] [flags]\n", name))
