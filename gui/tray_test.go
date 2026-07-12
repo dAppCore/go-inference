@@ -96,7 +96,7 @@ func TestTray_TrayService_ServiceStartup_Good(t *core.T) {
 	err := tray.ServiceStartup(core.Background(), application.ServiceOptions{})
 	got := tray.ServiceName()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, "TrayService", got)
 }
 
@@ -106,7 +106,7 @@ func TestTray_TrayService_ServiceStartup_Bad(t *core.T) {
 	cancel()
 
 	err := tray.ServiceStartup(ctx, application.ServiceOptions{})
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, TraySnapshot{}, tray.GetSnapshot())
 }
 
@@ -115,7 +115,7 @@ func TestTray_TrayService_ServiceStartup_Ugly(t *core.T) {
 	err := tray.ServiceStartup(core.Background(), application.ServiceOptions{})
 	snapshot := tray.GetSnapshot()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, TraySnapshot{}, snapshot)
 }
 
@@ -124,7 +124,7 @@ func TestTray_TrayService_ServiceShutdown_Good(t *core.T) {
 	err := tray.ServiceShutdown()
 	got := tray.ServiceName()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, "TrayService", got)
 }
 
@@ -133,7 +133,7 @@ func TestTray_TrayService_ServiceShutdown_Bad(t *core.T) {
 	err := tray.ServiceShutdown()
 	snapshot := tray.GetSnapshot()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, TraySnapshot{}, snapshot)
 }
 
@@ -142,7 +142,7 @@ func TestTray_TrayService_ServiceShutdown_Ugly(t *core.T) {
 	err := tray.ServiceShutdown()
 	got := tray.GetSnapshot()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, TraySnapshot{}, got)
 }
 
@@ -247,7 +247,7 @@ func TestTray_TrayService_StartAgent_Bad(t *core.T) {
 	tray.SetServices(nil, nil, nil, &AgentRunner{running: true})
 	err := tray.StartAgent()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertTrue(t, tray.agent.IsRunning())
 }
 
@@ -256,7 +256,7 @@ func TestTray_TrayService_StartAgent_Ugly(t *core.T) {
 	tray.SetServices(nil, nil, nil, &AgentRunner{running: true, task: "queued"})
 	err := tray.StartAgent()
 
-	core.AssertNoError(t, err)
+	core.AssertTrue(t, err.OK)
 	core.AssertEqual(t, "queued", tray.agent.CurrentTask())
 }
 
@@ -285,4 +285,41 @@ func TestTray_TrayService_StopAgent_Ugly(t *core.T) {
 
 	core.AssertFalse(t, tray.agent.IsRunning())
 	core.AssertEqual(t, "", tray.agent.CurrentTask())
+}
+
+// --- serve menu label rendering ---
+
+func TestTray_serveStatusLabel_Good(t *core.T) {
+	got := serveStatusLabel(ServeSnapshot{Up: true, ModelName: "gemma-4-e2b-it-4bit"})
+	core.AssertEqual(t, "Serve: gemma-4-e2b-it-4bit (running)", got)
+}
+
+func TestTray_serveStatusLabel_Bad(t *core.T) {
+	got := serveStatusLabel(ServeSnapshot{})
+	core.AssertEqual(t, "Serve: stopped", got)
+}
+
+func TestTray_serveStatusLabel_Ugly(t *core.T) {
+	got := serveStatusLabel(ServeSnapshot{Managed: true})
+	core.AssertEqual(t, "Serve: starting…", got)
+}
+
+func TestTray_serveStatusLabel_ModelLess(t *core.T) {
+	got := serveStatusLabel(ServeSnapshot{Up: true})
+	core.AssertEqual(t, "Serve: running (no model)", got)
+}
+
+func TestTray_serveToggleLabel_Good(t *core.T) {
+	got := serveToggleLabel(ServeSnapshot{})
+	core.AssertEqual(t, "Start Serve", got)
+}
+
+func TestTray_serveToggleLabel_Bad(t *core.T) {
+	got := serveToggleLabel(ServeSnapshot{Up: true})
+	core.AssertEqual(t, "Stop Serve", got)
+}
+
+func TestTray_serveToggleLabel_Ugly(t *core.T) {
+	got := serveToggleLabel(ServeSnapshot{Managed: true})
+	core.AssertEqual(t, "Stop Serve", got)
 }

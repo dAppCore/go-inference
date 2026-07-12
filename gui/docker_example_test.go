@@ -118,9 +118,9 @@ func ExampleDockerService_RestartService() {
 func ExampleDockerService_Logs() {
 	withDockerExamplePath(func() {
 		service := newExampleDockerService()
-		_, err := service.Logs("influxdb", 5)
+		r := service.Logs("influxdb", 5)
 
-		Println(!err.OK)
+		Println(!r.OK)
 	})
 	// Output:
 	// true
