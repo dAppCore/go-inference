@@ -179,10 +179,28 @@ func audioZerosBF16(n int) []byte {
 	return make([]byte, n*2)
 }
 
+// audioConv2dToOHWI returns the subsample conv weight in the OHWI [outC, kh, kw, inC] layout the
+// native conv kernels (Conv2dBF16/Conv2dF32) consume. Real mlx checkpoints already ship OHWI (layer0
+// [128,3,3,1], layer1 [32,3,3,128]) and must be passed through byte-identical; torch checkpoints ship
+// OIHW [outC, inC, kh, kw] and must be transposed. The gemma4 subsample conv is square (kh == kw), so
+// the equal spatial pair discriminates the layout: dims 1,2 equal => OHWI (the kernel is already in
+// the middle) => straight copy; otherwise OIHW => transpose. The dim-2/3 inequality guard keeps the
+// discriminator unambiguous, and the known shapes never make inC equal the kernel size (inC is 1 or
+// 128, kernel 3), so it cannot misfire on either the real checkpoints or the synthetic torch fixture.
 func audioConv2dToOHWI(t safetensors.Tensor) ([]byte, error) {
 	if len(t.Shape) != 4 {
 		return nil, core.NewError("gemma4.AssembleAudio: conv2d weight must be rank 4")
 	}
+	if t.Shape[1] == t.Shape[2] && t.Shape[2] != t.Shape[3] {
+		// Already OHWI [outC, kh, kw, inC] — copy through unchanged.
+		if len(t.Data) != t.Shape[0]*t.Shape[1]*t.Shape[2]*t.Shape[3]*2 {
+			return nil, core.NewError("gemma4.AssembleAudio: conv2d byte length mismatch")
+		}
+		out := make([]byte, len(t.Data))
+		copy(out, t.Data)
+		return out, nil
+	}
+	// torch OIHW [outC, inC, kh, kw] -> OHWI.
 	outC, inC, kh, kw := t.Shape[0], t.Shape[1], t.Shape[2], t.Shape[3]
 	if len(t.Data) != outC*inC*kh*kw*2 {
 		return nil, core.NewError("gemma4.AssembleAudio: conv2d byte length mismatch")
