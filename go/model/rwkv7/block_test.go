@@ -33,6 +33,34 @@ func TestBlockForwardShape(t *testing.T) {
 	t.Logf("rwkv7 block: [%d,%d] in → out, [H,K,V] state %d advanced", L, D, len(st))
 }
 
+func TestBlockForwardScratchFromInputF32_Parity(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
+	const L, D = 5, 8
+	w, x := mkBlockWeights(cfg, D), syn(L*D, 21)
+	want, _, wantState, err := BlockForwardScratchNoProjF32(x, w, cfg, nil, L, D, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hk, hv := cfg.hk(), cfg.hv()
+	r := matNT(x, w.RProj, L, D, hk)
+	wd := matNT(x, w.WProj, L, D, hk)
+	k := matNT(x, w.KProj, L, D, hk)
+	v := matNT(x, w.VProj, L, D, hv)
+	a := matNT(x, w.AProj, L, D, hk)
+	b := matNT(x, w.BProj, L, D, hk)
+	got, _, gotState, err := BlockForwardScratchFromInputF32(r, wd, k, v, a, b, w, cfg, nil, L, D, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, pair := range map[string][2][]float32{"hidden": {got, want}, "state": {gotState, wantState}} {
+		for i := range pair[0] {
+			if pair[0][i] != pair[1][i] {
+				t.Fatalf("%s[%d] = %v, want %v", name, i, pair[0][i], pair[1][i])
+			}
+		}
+	}
+}
+
 // TestBlockForwardCarry is the full-block decode invariant: one pass over a sequence is BIT-EXACT to two
 // chunks carrying the [H,K,V] state across the boundary — streaming RWKV-7 decode reproduces prefill.
 func TestBlockForwardCarry(t *testing.T) {

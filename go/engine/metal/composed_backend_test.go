@@ -9,7 +9,9 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model/composed"
+	"dappco.re/go/inference/model/mamba2"
 	"dappco.re/go/inference/model/qwen3"
+	"dappco.re/go/inference/model/rwkv7"
 )
 
 func cbSyn(n, seed int) []float32 {
@@ -18,6 +20,80 @@ func cbSyn(n, seed int) []float32 {
 		v[i] = float32((i*seed+11)%29-14) * 0.03
 	}
 	return v
+}
+
+// TestComposedMixerInputFusesDeviceVsFallback batches the Mamba-2 and RWKV-7 next-layer cases. Each
+// counter proves forwardEmb selected the new pending-resume fuse; disabling only that hook supplies the
+// same-device fallback reference, isolating the command-buffer fold from unrelated device/host drift.
+func TestComposedMixerInputFusesDeviceVsFallback(t *testing.T) {
+	const D, FF, heads, hd = 512, 2048, 4, 128
+	first := composed.Layer{
+		InputNorm: cbSyn(D, 10), PostAttnNorm: cbSyn(D, 11),
+		MLP: &composed.MLP{Gate: cbSyn(FF*D, 12), Up: cbSyn(FF*D, 13), Down: cbSyn(D*FF, 14), FF: FF},
+		Mixer: composed.NewAttnMixer(&composed.AttnWeights{
+			QProj: cbSyn(heads*hd*D, 15), KProj: cbSyn(heads*hd*D, 16), VProj: cbSyn(heads*hd*D, 17),
+			OProj: cbSyn(D*heads*hd, 18), QNorm: cbSyn(hd, 19), KNorm: cbSyn(hd, 20),
+		}, composed.AttnConfig{Heads: heads, KVHeads: heads, HeadDim: hd, RotaryDim: hd / 2, RopeTheta: 1e6, NormEps: 1e-6}),
+	}
+	t.Run("mamba2", func(t *testing.T) {
+		if composed.ResidualNormMLPProjMamba2InputDevice == nil {
+			t.Fatal("native init did not wire Mamba-2 input fuse")
+		}
+		cfg := mamba2.BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
+		dInner := cfg.NumHeads * cfg.HeadDim
+		convDim := dInner + 2*cfg.NumGroups*cfg.StateDim
+		projDim := 2*dInner + 2*cfg.NumGroups*cfg.StateDim + cfg.NumHeads
+		w := &mamba2.BlockWeights{InProj: cbSyn(projDim*D, 30), ConvWeight: cbSyn(convDim*cfg.ConvKernel, 31), ConvBias: cbSyn(convDim, 32), ALog: cbSyn(cfg.NumHeads, 33), D: cbSyn(cfg.NumHeads, 34), DtBias: cbSyn(cfg.NumHeads, 35), Norm: cbSyn(dInner, 36), OutProj: cbSyn(D*dInner, 37)}
+		second := composed.Layer{InputNorm: cbSyn(D, 38), PostAttnNorm: cbSyn(D, 39), MLP: &composed.MLP{Gate: cbSyn(FF*D, 40), Up: cbSyn(FF*D, 41), Down: cbSyn(D*FF, 42), FF: FF}, Mixer: composed.NewMamba2Mixer(w, cfg)}
+		m := &composed.ComposedModel{Embed: cbSyn(64*D, 43), D: D, Vocab: 64, Eps: 1e-6, Layers: []composed.Layer{first, second}}
+		calls := 0
+		saved := composed.ResidualNormMLPProjMamba2InputDevice
+		composed.ResidualNormMLPProjMamba2InputDevice = func(mh, pw, h, nw, g, u, d []float32, L, D, mc, FF int, eps float32, nn, iw []float32, pd int) ([]float32, []float32, error) {
+			calls++
+			return ResidualNormMLPProjMamba2InputDevice(mh, pw, h, nw, g, u, d, L, D, mc, FF, eps, nn, iw, pd)
+		}
+		got, err := composed.NewSession(m).Forward([]int32{1, 2, 3})
+		composed.ResidualNormMLPProjMamba2InputDevice = nil
+		want, werr := composed.NewSession(m).Forward([]int32{1, 2, 3})
+		composed.ResidualNormMLPProjMamba2InputDevice = saved
+		checkMixerInputFuse(t, calls, got, want, err, werr)
+	})
+	t.Run("rwkv7", func(t *testing.T) {
+		if composed.ResidualNormMLPProjRWKV7InputDevice == nil {
+			t.Fatal("native init did not wire RWKV-7 input fuse")
+		}
+		cfg := rwkv7.BlockConfig{NumHeads: 2, KeyDim: 4, ValueDim: 6}
+		hk, hv := cfg.NumHeads*cfg.KeyDim, cfg.NumHeads*cfg.ValueDim
+		w := &rwkv7.BlockWeights{RProj: cbSyn(hk*D, 50), WProj: cbSyn(hk*D, 51), KProj: cbSyn(hk*D, 52), VProj: cbSyn(hv*D, 53), AProj: cbSyn(hk*D, 54), BProj: cbSyn(hk*D, 55), OutProj: cbSyn(D*hv, 56)}
+		second := composed.Layer{InputNorm: cbSyn(D, 57), PostAttnNorm: cbSyn(D, 58), MLP: &composed.MLP{Gate: cbSyn(FF*D, 59), Up: cbSyn(FF*D, 60), Down: cbSyn(D*FF, 61), FF: FF}, Mixer: composed.NewRWKV7Mixer(w, cfg)}
+		m := &composed.ComposedModel{Embed: cbSyn(64*D, 62), D: D, Vocab: 64, Eps: 1e-6, Layers: []composed.Layer{first, second}}
+		calls := 0
+		saved := composed.ResidualNormMLPProjRWKV7InputDevice
+		composed.ResidualNormMLPProjRWKV7InputDevice = func(mh, pw, h, nw, g, u, d []float32, L, D, mc, FF int, eps float32, nn, rw, ww, kw, vw, aw, bw []float32, hk, hv int) ([]float32, []float32, []float32, []float32, []float32, []float32, []float32, error) {
+			calls++
+			return ResidualNormMLPProjRWKV7InputDevice(mh, pw, h, nw, g, u, d, L, D, mc, FF, eps, nn, rw, ww, kw, vw, aw, bw, hk, hv)
+		}
+		got, err := composed.NewSession(m).Forward([]int32{1, 2, 3})
+		composed.ResidualNormMLPProjRWKV7InputDevice = nil
+		want, werr := composed.NewSession(m).Forward([]int32{1, 2, 3})
+		composed.ResidualNormMLPProjRWKV7InputDevice = saved
+		checkMixerInputFuse(t, calls, got, want, err, werr)
+	})
+}
+
+func checkMixerInputFuse(t *testing.T, calls int, got, want []float32, err, wantErr error) {
+	t.Helper()
+	if err != nil || wantErr != nil {
+		t.Fatalf("forward errors: fused=%v fallback=%v", err, wantErr)
+	}
+	if calls == 0 {
+		t.Fatal("input-fuse hook never engaged")
+	}
+	for i := range got {
+		if math.Abs(float64(got[i]-want[i])) > 1e-2*(1+math.Abs(float64(want[i]))) {
+			t.Fatalf("hidden[%d]: fused %v fallback %v", i, got[i], want[i])
+		}
+	}
 }
 
 // TestComposedDeviceVsHost runs a one-layer composed forward (attention mixer + MLP) with native's

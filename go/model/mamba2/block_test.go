@@ -38,6 +38,28 @@ func TestBlockForwardShape(t *testing.T) {
 	t.Logf("mamba2 block: [%d,%d] in → out, conv-state %d + ssm-state %d advanced", L, D, len(nc), len(ns))
 }
 
+func TestBlockForwardScratchFromInputF32_Parity(t *testing.T) {
+	cfg := BlockConfig{NumHeads: 2, HeadDim: 8, StateDim: 8, NumGroups: 1, ConvKernel: 4, Eps: 1e-5}
+	const L, D = 5, 8
+	w, x := mkBlockWeights(cfg, D), syn(L*D, 21)
+	want, _, wantConv, wantSSM, err := BlockForwardScratchNoProjF32(x, w, cfg, nil, nil, L, D, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projected := matNT(x, w.InProj, L, D, cfg.projDim())
+	got, _, gotConv, gotSSM, err := BlockForwardScratchFromInputF32(projected, w, cfg, nil, nil, L, D, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, pair := range map[string][2][]float32{"hidden": {got, want}, "conv": {gotConv, wantConv}, "ssm": {gotSSM, wantSSM}} {
+		for i := range pair[0] {
+			if pair[0][i] != pair[1][i] {
+				t.Fatalf("%s[%d] = %v, want %v", name, i, pair[0][i], pair[1][i])
+			}
+		}
+	}
+}
+
 // TestBlockForwardGatedNormReference pins the block's glue stages — the projection split, the
 // B/C group→head expansion, dt = softplus(dt + dt_bias), A = −exp(A_log), and above all the
 // gated RMSNorm ORDERING — against an independent in-test pipeline. The two core ops
