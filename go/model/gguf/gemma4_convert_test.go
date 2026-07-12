@@ -112,12 +112,47 @@ func TestGemma4Convert_float32ToBF16(t *testing.T) {
 }
 
 // TestGemma4Convert_encodeGemma4TensorData_Unsupported errors on a type it has
-// no encoder for and on a K-quant tensor that is not a whole number of blocks.
+// no encoder for (Q2_K — out of scope for the gemma4 lane per
+// docs/design-quant-formats.md, gated on an operator decision) and on a
+// K-quant tensor that is not a whole number of blocks.
 func TestGemma4Convert_encodeGemma4TensorData_Unsupported(t *testing.T) {
-	if _, err := encodeGemma4TensorData([]float32{1, 2, 3}, TensorTypeQ8_0); err == nil {
+	if _, err := encodeGemma4TensorData([]float32{1, 2, 3}, ggufTensorTypeQ2K); err == nil {
 		t.Error("want error for unsupported encoder type")
 	}
 	if _, err := encodeGemma4TensorData(make([]float32, 100), ggufTensorTypeQ4K); err == nil {
 		t.Error("want error for non-block-aligned Q4_K tensor")
+	}
+}
+
+// TestGemma4Convert_encodeGemma4TensorData_Q8_0 checks the Q8_0 encoder
+// (added for #53's q8_0 export lane) accepts a block-aligned (32-element)
+// tensor and rejects a non-aligned one, mirroring the existing Q4_K/Q5_K/
+// Q6_K coverage above.
+func TestGemma4Convert_encodeGemma4TensorData_Q8_0(t *testing.T) {
+	data, err := encodeGemma4TensorData(make([]float32, 64), TensorTypeQ8_0)
+	if err != nil {
+		t.Fatalf("encodeGemma4TensorData(64 elements, Q8_0): %v", err)
+	}
+	if len(data) != 2*34 { // 64/32 blocks * 34 bytes/block.
+		t.Errorf("len(data) = %d, want %d", len(data), 2*34)
+	}
+	if _, err := encodeGemma4TensorData(make([]float32, 33), TensorTypeQ8_0); err == nil {
+		t.Error("want error for non-block-aligned (33-element) Q8_0 tensor")
+	}
+}
+
+// TestGemma4Convert_encodeGemma4TensorData_Q3_K checks the Q3_K encoder
+// (added for #53's q3_k_m export lane) accepts a block-aligned (256-element)
+// tensor and rejects a non-aligned one.
+func TestGemma4Convert_encodeGemma4TensorData_Q3_K(t *testing.T) {
+	data, err := encodeGemma4TensorData(make([]float32, 512), ggufTensorTypeQ3K)
+	if err != nil {
+		t.Fatalf("encodeGemma4TensorData(512 elements, Q3_K): %v", err)
+	}
+	if len(data) != 2*110 { // 512/256 blocks * 110 bytes/block.
+		t.Errorf("len(data) = %d, want %d", len(data), 2*110)
+	}
+	if _, err := encodeGemma4TensorData(make([]float32, 100), ggufTensorTypeQ3K); err == nil {
+		t.Error("want error for non-block-aligned (100-element) Q3_K tensor")
 	}
 }

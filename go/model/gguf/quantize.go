@@ -21,9 +21,11 @@ const (
 	QuantizeQ5_0   QuantizeFormat = "q5_0"
 	QuantizeQ4_K_M QuantizeFormat = "q4_k_m"
 	QuantizeQ4_K   QuantizeFormat = "q4_k"
+	QuantizeQ5_K_M QuantizeFormat = "q5_k_m"
 	QuantizeQ5_K   QuantizeFormat = "q5_k"
 	QuantizeQ6_K   QuantizeFormat = "q6_k"
 	QuantizeQ8_K   QuantizeFormat = "q8_k"
+	QuantizeQ3_K_M QuantizeFormat = "q3_k_m"
 	QuantizeQ3_K   QuantizeFormat = "q3_k"
 	QuantizeQ2_K   QuantizeFormat = "q2_k"
 
@@ -193,14 +195,15 @@ func QuantizeModelPack(ctx context.Context, opts QuantizeOptions) (*QuantizeResu
 	// gemma-4 checkpoints take a dedicated lane: llama.cpp maps the text stack
 	// by canonical names and needs the full gemma4.* hyperparameter set plus the
 	// embedded tokenizer, none of which the generic pipeline produces. Detected
-	// from config.json's model_type; the lane is calibrated to q4_k_m.
+	// from config.json's model_type; the lane covers the formats with an
+	// oracle-grade acceptance receipt (#28 q4_k_m; #53 q8_0/q6_k/q5_k_m/q3_k_m).
 	var quantized []Tensor
 	var metadata []MetadataEntry
 	if configRead := core.ReadFile(core.PathJoin(source.Root, "config.json")); configRead.OK && isGemma4Config(configRead.Value.([]byte)) {
-		if requested != QuantizeQ4_K_M {
-			return nil, core.NewError("gguf: gemma4 GGUF conversion currently supports only q4_k_m (requested " + string(requested) + ")")
+		if !isGemma4SupportedQuantizeFormat(requested) {
+			return nil, core.NewError("gguf: gemma4 GGUF conversion does not support " + string(requested) + " (supported: q4_k_m, q8_0, q6_k, q5_k_m, q3_k_m)")
 		}
-		quantized, metadata, err = quantizeGemma4ModelPack(source, configRead.Value.([]byte), tensors)
+		quantized, metadata, err = quantizeGemma4ModelPack(source, configRead.Value.([]byte), tensors, requested)
 		if err != nil {
 			return nil, err
 		}
@@ -254,12 +257,16 @@ func resolveGGUFQuantizeFormat(format QuantizeFormat) (requested, used QuantizeF
 		return normalized, QuantizeQ4_K, nil, nil
 	case QuantizeQ4_K:
 		return normalized, QuantizeQ4_K, nil, nil
+	case QuantizeQ5_K_M:
+		return normalized, QuantizeQ5_K, nil, nil
 	case QuantizeQ5_K:
 		return normalized, QuantizeQ5_K, nil, nil
 	case QuantizeQ6_K:
 		return normalized, QuantizeQ6_K, nil, nil
 	case QuantizeQ8_K:
 		return normalized, QuantizeQ8_K, nil, nil
+	case QuantizeQ3_K_M:
+		return normalized, QuantizeQ3_K, nil, nil
 	case QuantizeQ3_K:
 		return normalized, QuantizeQ3_K, nil, nil
 	case QuantizeQ2_K:
