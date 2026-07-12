@@ -128,27 +128,11 @@ func (m *Model) Embed(ctx context.Context, req inference.EmbeddingRequest) (*inf
 	}, nil
 }
 
-// Rerank scores each document against the query by cosine similarity of their
-// embeddings (higher is more relevant), sorts descending, and truncates to
-// TopN when positive. It is the embedding-cosine (bi-encoder) rerank — a
-// cross-encoder head is a later addition, mirroring the device path's two
-// rerank modes.
-//
-// Evidenced gap (item B of #50): a cross-encoder pack needs (1) config.go's
-// Config to carry a classifier width (HF's num_labels; absent today), (2)
-// weights.go's bindWeights to read a classifier head (classifier.{weight,bias}
-// [1,hidden]/[1], and usually a pooler.dense.{weight,bias} ahead of it —
-// neither is read; bindWeights only binds embeddings.* and encoder.layer.N.*),
-// (3) tokenizer.go's Encode(text string) to grow a paired form (query [SEP]
-// passage [SEP] in one sequence — no such method exists), and (4) encoder.go's
-// forward to accept per-token segment ids (today typeRow is hardcoded to
-// token_type_ids=0 for every position — see forward below — so even a paired
-// encoding would embed both segments identically). No cross-encoder snapshot
-// or parity fixture is available locally to verify any of this against (only
-// bge-small-en-v1.5, a bi-encoder, is cached; testdata/ carries only
-// bge_small_reference.json) — shipping the maths unverified risks a silently
-// wrong score with no test to catch it, so this slice documents the gap
-// rather than guessing at it.
+// Rerank selects its scoring path from the loaded HF config. A scalar
+// SequenceClassification model encodes each query/document pair with real
+// token type IDs and applies its optional pooler plus classifier head. Other
+// BERT models retain the embedding-cosine (bi-encoder) path. Both paths sort
+// descending and truncate to TopN when positive.
 //
 //	res, err := m.Rerank(ctx, inference.RerankRequest{Query: q, Documents: docs, TopN: 3})
 func (m *Model) Rerank(ctx context.Context, req inference.RerankRequest) (*inference.RerankResult, error) {
@@ -160,6 +144,9 @@ func (m *Model) Rerank(ctx context.Context, req inference.RerankRequest) (*infer
 	}
 	if len(req.Documents) == 0 {
 		return nil, core.E("bert.Rerank", "documents are required", nil)
+	}
+	if m.cfg.IsCrossEncoder() {
+		return m.rerankCrossEncoder(ctx, req)
 	}
 	inputs := make([]string, 0, len(req.Documents)+1)
 	inputs = append(inputs, req.Query)
@@ -193,6 +180,42 @@ func (m *Model) Rerank(ctx context.Context, req inference.RerankRequest) (*infer
 			"backend":             "host_f32",
 			"rerank_score_source": "embedding_cosine",
 		},
+	}, nil
+}
+
+func (m *Model) rerankCrossEncoder(ctx context.Context, req inference.RerankRequest) (*inference.RerankResult, error) {
+	results := make([]inference.RerankScore, len(req.Documents))
+	for i, document := range req.Documents {
+		if err := ctxErr(ctx); err != nil {
+			return nil, err
+		}
+		ids, tokenTypes := m.tokenizer.EncodePair(req.Query, document)
+		hidden, err := m.weights.forwardSegments(m.cfg, ids, tokenTypes)
+		if err != nil {
+			return nil, err
+		}
+		cls := hidden[0]
+		if m.weights.poolerW != nil {
+			cls = linear(cls, m.weights.poolerW, m.weights.poolerB, m.cfg.HiddenSize, m.cfg.HiddenSize)
+			for j := range cls {
+				cls[j] = float32(math.Tanh(float64(cls[j])))
+			}
+		}
+		score := linear(cls, m.weights.classifierW, m.weights.classifierB, m.cfg.HiddenSize, m.cfg.NumLabels)[0]
+		results[i] = inference.RerankScore{Index: i, Score: float64(score), Text: document}
+	}
+	sort.SliceStable(results, func(a, b int) bool {
+		if results[a].Score == results[b].Score {
+			return results[a].Index < results[b].Index
+		}
+		return results[a].Score > results[b].Score
+	})
+	if req.TopN > 0 && req.TopN < len(results) {
+		results = results[:req.TopN]
+	}
+	return &inference.RerankResult{
+		Model: m.identity(req.Model), Results: results,
+		Labels: map[string]string{"backend": "host_f32", "rerank_score_source": "cross_encoder_classifier"},
 	}, nil
 }
 

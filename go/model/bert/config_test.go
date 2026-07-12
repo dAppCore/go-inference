@@ -31,6 +31,29 @@ func TestParseConfig_Good(t *testing.T) {
 	}
 }
 
+func TestConfig_IsCrossEncoder_Good(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`{"architectures":["BertForSequenceClassification"],"id2label":{"0":"LABEL_0"},"hidden_size":8,"num_hidden_layers":1,"num_attention_heads":2,"intermediate_size":16,"vocab_size":10,"max_position_embeddings":16,"type_vocab_size":2}`))
+	if err != nil {
+		t.Fatalf("ParseConfig: %v", err)
+	}
+	if cfg.NumLabels != 1 || !cfg.IsCrossEncoder() {
+		t.Fatalf("config = %+v, want scalar cross-encoder", cfg)
+	}
+}
+
+func TestConfig_IsCrossEncoder_Bad(t *testing.T) {
+	cfg := Config{NumLabels: 2, Architectures: []string{"BertForSequenceClassification"}}
+	if cfg.IsCrossEncoder() {
+		t.Fatal("two-label classifier detected as scalar cross-encoder")
+	}
+}
+
+func TestConfig_IsCrossEncoder_Ugly(t *testing.T) {
+	if (Config{NumLabels: 1}).IsCrossEncoder() {
+		t.Fatal("architecture-free config detected as cross-encoder")
+	}
+}
+
 // TestParseConfig_Good_Defaults fills layer_norm_eps and hidden_act when absent.
 func TestParseConfig_Good_Defaults(t *testing.T) {
 	data := []byte(`{"hidden_size":8,"num_hidden_layers":1,"num_attention_heads":2,"intermediate_size":16,"vocab_size":10,"max_position_embeddings":16,"type_vocab_size":2}`)
