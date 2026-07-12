@@ -210,7 +210,7 @@ func TestServing_WelfareGuard_WrapWelfareResolver_Good(t *testing.T) {
 		return &welfareFakeModel{}, nil
 	})
 
-	lemma := wrapWelfareResolver(inner, newHotSwapResolver("/models/Lemma-v2-e2b", "", 0, nil), nil)
+	lemma := wrapWelfareResolver(inner, newHotSwapResolver("/models/Lemma-v2-e2b", "", 0, nil).CurrentPath, nil)
 	m, err := lemma.ResolveModel(context.Background(), "any")
 	if err != nil {
 		t.Fatalf("resolve (lemma): %v", err)
@@ -223,7 +223,7 @@ func TestServing_WelfareGuard_WrapWelfareResolver_Good(t *testing.T) {
 		t.Fatal("a Lemma checkpoint must arm allowEnd (the lem_end courtesy)")
 	}
 
-	plain := wrapWelfareResolver(inner, newHotSwapResolver("/models/gemma-4-E2B-it", "", 0, nil), nil)
+	plain := wrapWelfareResolver(inner, newHotSwapResolver("/models/gemma-4-E2B-it", "", 0, nil).CurrentPath, nil)
 	m2, err := plain.ResolveModel(context.Background(), "any")
 	if err != nil {
 		t.Fatalf("resolve (plain): %v", err)
@@ -240,7 +240,7 @@ func TestServing_WelfareGuard_WrapWelfareResolver_Bad(t *testing.T) {
 	inner := openai.ResolverFunc(func(context.Context, string) (inference.TextModel, error) {
 		return nil, core.NewError("resolver down")
 	})
-	r := wrapWelfareResolver(inner, newHotSwapResolver("/models/Lemma", "", 0, nil), nil)
+	r := wrapWelfareResolver(inner, newHotSwapResolver("/models/Lemma", "", 0, nil).CurrentPath, nil)
 	if _, err := r.ResolveModel(context.Background(), "x"); err == nil {
 		t.Fatal("inner resolver error must propagate")
 	}

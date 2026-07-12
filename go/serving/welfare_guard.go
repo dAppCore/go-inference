@@ -56,9 +56,11 @@ func wrapWelfare(model inference.TextModel, svc *welfare.Service, allowEnd bool,
 // wrapWelfareResolver decorates the serve's model resolver with the welfare
 // guard: ONE welfare.Service for the serve lifetime (its detector is
 // stateless), each resolved model wrapped with the Lemma gate read off the
-// CURRENTLY loaded checkpoint — a hot-swap reload re-evaluates the lem_end
-// courtesy for the new model.
-func wrapWelfareResolver(inner openai.Resolver, hotSwap *hotSwapResolver, log io.Writer) openai.Resolver {
+// CURRENTLY loaded checkpoint via currentPath — a hot-swap reload (single-model)
+// or the default model (multi-model) re-evaluates the lem_end courtesy. Taking
+// currentPath as a func rather than a concrete resolver lets both the
+// single-model hot-swap and the multi-model registry share this wrap.
+func wrapWelfareResolver(inner openai.Resolver, currentPath func() string, log io.Writer) openai.Resolver {
 	svc := welfare.New(welfare.Config{Hostility: welfareHostility})
 	corpus := welfareFeedbackPath()
 	return openai.ResolverFunc(func(ctx context.Context, name string) (inference.TextModel, error) {
@@ -66,7 +68,11 @@ func wrapWelfareResolver(inner openai.Resolver, hotSwap *hotSwapResolver, log io
 		if err != nil {
 			return nil, err
 		}
-		return wrapWelfare(model, svc, isLemmaModel(hotSwap.CurrentPath()), log, corpus), nil
+		checkpoint := ""
+		if currentPath != nil {
+			checkpoint = currentPath()
+		}
+		return wrapWelfare(model, svc, isLemmaModel(checkpoint), log, corpus), nil
 	})
 }
 

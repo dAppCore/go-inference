@@ -145,7 +145,7 @@ func TestOpenConversationStore_MakesParent_Ugly(t *testing.T) {
 // degraded (no-enabler) path returns a callable cleanup, so RunServe's
 // unconditional defer never panics.
 func TestWireContinuity_NilEnabler_Ugly(t *testing.T) {
-	cleanup := wireContinuity(context.Background(), ServeConfig{}, newHotSwapResolver("", "", 0, nil), nil)
+	cleanup := wireContinuity(context.Background(), ServeConfig{}, newHotSwapResolver("", "", 0, nil).setOnLoad, nil)
 	if cleanup == nil {
 		t.Fatal("wireContinuity returned a nil cleanup")
 	}
