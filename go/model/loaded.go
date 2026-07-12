@@ -314,7 +314,7 @@ func (m *LoadedModel) ValidateRequired(arch Arch) error {
 				if len(L.PostFFNorm) == 0 {
 					return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing post_feedforward_layernorm", i))
 				}
-			} else if len(L.MLPNorm) == 0 && !arch.NonParametricLayerNorm {
+			} else if len(L.MLPNorm) == 0 && !arch.NonParametricLayerNorm && !arch.ParallelResidual {
 				return core.NewError(core.Sprintf("model.LoadedModel: layer %d missing MLP norm", i))
 			}
 		}

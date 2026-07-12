@@ -23,6 +23,7 @@ type Config struct {
 	MultiQuery             bool    `json:"multi_query"`
 	NewDecoderArchitecture bool    `json:"new_decoder_architecture"`
 	ALiBi                  bool    `json:"alibi"`
+	ParallelAttn           bool    `json:"parallel_attn"`
 }
 
 func (c *Config) InferFromWeights(map[string]safetensors.Tensor) {}
@@ -51,5 +52,5 @@ func (c Config) Arch() (model.Arch, error) {
 	for i := range layers {
 		layers[i].HeadDim, layers[i].KVHeads = headDim, kv
 	}
-	return model.Arch{Hidden: c.HiddenSize, Heads: c.NumAttentionHeads, KVHeads: kv, HeadDim: headDim, GlobalHeadDim: headDim, GlobalKVHeads: kv, FF: 4 * c.HiddenSize, Vocab: c.VocabSize, Eps: eps, AttnScale: float32(1 / math.Sqrt(float64(headDim))), EmbedScale: 1, ALiBi: c.ALiBi, Layer: layers}, nil
+	return model.Arch{Hidden: c.HiddenSize, Heads: c.NumAttentionHeads, KVHeads: kv, HeadDim: headDim, GlobalHeadDim: headDim, GlobalKVHeads: kv, FF: 4 * c.HiddenSize, Vocab: c.VocabSize, Eps: eps, AttnScale: float32(1 / math.Sqrt(float64(headDim))), EmbedScale: 1, ALiBi: c.ALiBi, ParallelResidual: c.ParallelAttn, Layer: layers}, nil
 }

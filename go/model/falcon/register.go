@@ -9,7 +9,7 @@ import (
 )
 
 func init() {
-	w := model.WeightNames{Embed: "transformer.word_embeddings", LMHead: "lm_head", FinalNorm: "transformer.ln_f.weight", LayerPrefix: "transformer.h.%d", AttnNorm: ".input_layernorm.weight", Q: ".self_attention.query", K: ".self_attention.key", V: ".self_attention.value", O: ".self_attention.dense", Gate: ".mlp.dense_h_to_4h", Down: ".mlp.dense_4h_to_h"}
+	w := model.WeightNames{Embed: "transformer.word_embeddings", LMHead: "lm_head", FinalNorm: "transformer.ln_f.weight", LayerPrefix: "transformer.h.%d", AttnNorm: ".input_layernorm.weight", MLPNorm: ".post_attention_layernorm.weight", Q: ".self_attention.query", K: ".self_attention.key", V: ".self_attention.value", O: ".self_attention.dense", Gate: ".mlp.dense_h_to_4h", Down: ".mlp.dense_4h_to_h"}
 	model.RegisterArch(model.ArchSpec{ModelTypes: []string{"falcon"}, Parse: func(data []byte) (model.ArchConfig, error) {
 		var cfg Config
 		if r := core.JSONUnmarshal(data, &cfg); !r.OK {
