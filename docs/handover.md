@@ -1,5 +1,29 @@
 # NEXT WAKE (2026-07-16 — #381 SHIPPED: the skip is live, 2.1-2.6x at every depth)
 
+## #23 COMPOSED DEVICE SEAM (2026-07-12 evening — 1.6 -> 16.7 tok/s in one day)
+
+- SLICE 1 (a36b11a): composed.ProjMatMulInto — the stack's OWN projections
+  (attn q/k/v/o, MLP, LM head 155 MMAC) now ride the steel GEMM, same AX-8
+  seam as qwen3/mamba2/rwkv7; native binds at init; deviceMinWork 1<<20 keeps
+  sub-MMAC GEMVs on the sharded host path. Parity: TestComposedDeviceVsHost
+  (one-layer attn+MLP forward, f32 tol) + TestMatNTIntoDeviceHook (floor /
+  verbatim / error-fallback). 10.5 -> 14.9 tok/s.
+- SLICE 2 (5620c01): qwen3's hooks fired UNCONDITIONALLY — the gated-delta
+  in_proj_a/b ([16,1024] = 16 KMAC) each paid a full CB round-trip, 36
+  wasted/token. Floored to match. 14.9 -> 16.7 tok/s, same greedy text;
+  continuity gate PASS at the new tier (turn-2 now 4s, was 21s host-tier).
+- DAY TOTAL on the 0.8B hybrid: 1.6 -> 16.7 tok/s (10.4x): column-sharded
+  host GEMVs (574d179, 8325ee2) + device seam + floors. Numeric tier note:
+  device f32 accumulation vs host f64 — same tier the gated-delta already
+  served at; greedy text unchanged on the receipts prompt; -state contract
+  is token-prefix, per-build deterministic.
+- THE CEILING NOW: ~70+ per-projection command-buffer round-trips per token.
+  Next slice is the GPU-resident orchestration — weights uploaded once,
+  whole token encoded in ONE CB (intermediates stay device-side), recurrence
+  on device — the real composed decode session in engine/metal. Design-worthy;
+  brief a research pass before building. mamba2/rwkv7 hooks share the
+  no-floor issue but are not on today's receipt path (noted, not touched).
+
 ## SWEEP ROUNDS (2026-07-12 afternoon — 8 Opus lanes, 2 rounds; the wrapper bug)
 
 - THE BUG OF THE DAY (233fb4c): welfareTextModel + policyTextModel embed
