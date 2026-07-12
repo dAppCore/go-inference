@@ -11,8 +11,10 @@ import (
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/gguf"
 	"dappco.re/go/inference/model/quant/awq"
+	"dappco.re/go/inference/model/quant/fp8"
 	"dappco.re/go/inference/model/quant/gptq"
 	"dappco.re/go/inference/model/quant/mlxaffine"
+	"dappco.re/go/inference/model/quant/nf4"
 )
 
 // runQuantCommand wires the model quantisers as a thin CLI: hand it a dense (bf16/f32)
@@ -37,6 +39,8 @@ func runQuantCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	ggufFormat := fs.String("gguf", "", "instead of MLX affine, run the GGUF lane in this format (q4_k_m, q8_0, q5_k, q6_k, …)")
 	gptqFormat := fs.Bool("gptq", false, "instead of MLX affine, write HF GPTQ qweight/qzeros/scales/g_idx tensors")
 	awqFormat := fs.Bool("awq", false, "instead of MLX affine, write HF AutoAWQ GEMM qweight/qzeros/scales tensors (data-free approximation)")
+	fp8Format := fs.Bool("fp8", false, "instead of MLX affine, write compressed-tensors static per-tensor E4M3 weights")
+	nf4Format := fs.Bool("nf4", false, "instead of MLX affine, write bitsandbytes NF4 blockwise weights")
 	fs.Usage = quantUsage(fs, stderr)
 	// Two-phase parse so the <src-model-dir> positional may appear before OR after the
 	// flags (Go's flag stops at the first non-flag): the first Parse consumes any
@@ -60,17 +64,13 @@ func runQuantCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		return 1
 	}
 	formats := 0
-	if *gptqFormat {
-		formats++
-	}
-	if *awqFormat {
-		formats++
-	}
-	if core.Trim(*ggufFormat) != "" {
-		formats++
+	for _, selected := range []bool{*gptqFormat, *awqFormat, *fp8Format, *nf4Format, core.Trim(*ggufFormat) != ""} {
+		if selected {
+			formats++
+		}
 	}
 	if formats > 1 {
-		core.Print(stderr, "%s quant: -awq, -gptq, and -gguf are mutually exclusive", cliName())
+		core.Print(stderr, "%s quant: -gptq, -awq, -fp8, -nf4, and -gguf are mutually exclusive", cliName())
 		return 2
 	}
 
@@ -82,6 +82,12 @@ func runQuantCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	}
 	if *awqFormat {
 		return runQuantAWQ(ctx, src, *out, *bits, *groupSize, stdout, stderr)
+	}
+	if *fp8Format {
+		return runQuantFP8(ctx, src, *out, stdout, stderr)
+	}
+	if *nf4Format {
+		return runQuantNF4(ctx, src, *out, stdout, stderr)
 	}
 	return runQuantMLXAffine(ctx, src, *out, *bits, *groupSize, stdout, stderr)
 }
@@ -108,6 +114,46 @@ func runQuantAWQ(ctx context.Context, src, out string, bits, groupSize int, stdo
 	core.Print(stdout, "done: %d tensors (%d quantised, %d passed through), %s in -> %s out", result.TensorCount, result.QuantizedWeights, result.PassthroughCount, humanBytes(result.SourceBytes), humanBytes(result.OutputBytes))
 	core.Print(stdout, "wrote %s", result.WeightFile)
 	return 0
+}
+
+func runQuantFP8(ctx context.Context, src, out string, stdout, stderr io.Writer) int {
+	if core.Trim(out) == "" {
+		out = defaultOutDir(src, "fp8")
+	}
+	core.Print(stdout, "quant (compressed-tensors FP8 E4M3): %s -> %s", src, out)
+	result, err := fp8.ConvertSnapshot(ctx, src, out, quantProgress(stderr))
+	if err != nil {
+		core.Print(stderr, "%s quant: %s", cliName(), err.Error())
+		return 1
+	}
+	core.Print(stdout, "done: %d tensors (%d quantised, %d passed through)", result.TensorCount, result.QuantizedWeights, result.PassthroughCount)
+	core.Print(stdout, "wrote %s", result.WeightFile)
+	return 0
+}
+
+func runQuantNF4(ctx context.Context, src, out string, stdout, stderr io.Writer) int {
+	if core.Trim(out) == "" {
+		out = defaultOutDir(src, "nf4")
+	}
+	core.Print(stdout, "quant (bitsandbytes NF4, block 64, no double quantisation): %s -> %s", src, out)
+	result, err := nf4.ConvertSnapshot(ctx, src, out, quantProgress(stderr))
+	if err != nil {
+		core.Print(stderr, "%s quant: %s", cliName(), err.Error())
+		return 1
+	}
+	core.Print(stdout, "done: %d tensors (%d quantised, %d passed through)", result.TensorCount, result.QuantizedWeights, result.PassthroughCount)
+	core.Print(stdout, "wrote %s", result.WeightFile)
+	return 0
+}
+
+func quantProgress(stderr io.Writer) func(string, bool, int, int) {
+	return func(name string, quantised bool, index, total int) {
+		verb := "copy    "
+		if quantised {
+			verb = "quantise"
+		}
+		core.Print(stderr, "[%4d/%4d] %s  %s", index, total, verb, name)
+	}
 }
 
 func runQuantGPTQ(ctx context.Context, src, out string, bits, groupSize int, stdout, stderr io.Writer) int {

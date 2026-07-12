@@ -184,34 +184,34 @@ func TestRunQuantGPTQ(t *testing.T) {
 	})
 }
 
-func TestRunQuantAWQ(t *testing.T) {
-	t.Run("Good/explicit out", func(t *testing.T) {
-		src := writeToyModel(t)
-		out := filepath.Join(t.TempDir(), "awq-out")
-		var stdout, stderr bytes.Buffer
-		if code := runQuantCommand(context.Background(), []string{src, "-awq", "-group-size", "32", "-o", out}, &stdout, &stderr); code != 0 {
-			t.Fatalf("exit %d; stderr=%s", code, stderr.String())
-		}
-		idx, err := safetensors.IndexFiles([]string{filepath.Join(out, "model.safetensors")})
-		if err != nil {
-			t.Fatal(err)
-		}
-		ref, ok := idx.Tensors["language_model.model.layers.0.self_attn.q_proj.qweight"]
-		if !ok || ref.Shape[0] != 64 || ref.Shape[1] != 1 {
-			t.Fatalf("AWQ qweight = %v, present %v", ref.Shape, ok)
-		}
-		config, err := os.ReadFile(filepath.Join(out, "quantize_config.json"))
-		if err != nil || !bytes.Contains(config, []byte(`"data_free": true`)) {
-			t.Fatalf("AWQ disclosure config = %s, %v", config, err)
-		}
-	})
-	t.Run("Bad/mutually exclusive formats", func(t *testing.T) {
-		src := writeToyModel(t)
-		var stdout, stderr bytes.Buffer
-		if code := runQuantCommand(context.Background(), []string{src, "-awq", "-gptq"}, &stdout, &stderr); code != 2 {
-			t.Fatalf("exit %d, want 2; stderr=%s", code, stderr.String())
-		}
-	})
+func TestRunQuantFP8(t *testing.T) {
+	src, out := writeToyModel(t), filepath.Join(t.TempDir(), "fp8-out")
+	var stdout, stderr bytes.Buffer
+	if code := runQuantCommand(context.Background(), []string{src, "-fp8", "-o", out}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, stderr.String())
+	}
+	idx, err := safetensors.IndexFiles([]string{filepath.Join(out, "model.safetensors")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx.Tensors["language_model.model.layers.0.self_attn.q_proj.weight"].DType != "F8_E4M3" {
+		t.Fatal("FP8 weight was not written")
+	}
+}
+
+func TestRunQuantNF4(t *testing.T) {
+	src, out := writeToyModel(t), filepath.Join(t.TempDir(), "nf4-out")
+	var stdout, stderr bytes.Buffer
+	if code := runQuantCommand(context.Background(), []string{src, "-nf4", "-o", out}, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, stderr.String())
+	}
+	idx, err := safetensors.IndexFiles([]string{filepath.Join(out, "model.safetensors")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := idx.Tensors["language_model.model.layers.0.self_attn.q_proj.weight.quant_state.bitsandbytes__nf4"]; !ok {
+		t.Fatal("NF4 quant state was not written")
+	}
 }
 
 // TestDefaultOutDir covers the mlx_lm.convert naming convention: strip a trailing
@@ -282,4 +282,34 @@ func TestRunQuantCommand_Rejects(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunQuantAWQ(t *testing.T) {
+	t.Run("Good/explicit out", func(t *testing.T) {
+		src := writeToyModel(t)
+		out := filepath.Join(t.TempDir(), "awq-out")
+		var stdout, stderr bytes.Buffer
+		if code := runQuantCommand(context.Background(), []string{src, "-awq", "-group-size", "32", "-o", out}, &stdout, &stderr); code != 0 {
+			t.Fatalf("exit %d; stderr=%s", code, stderr.String())
+		}
+		idx, err := safetensors.IndexFiles([]string{filepath.Join(out, "model.safetensors")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref, ok := idx.Tensors["language_model.model.layers.0.self_attn.q_proj.qweight"]
+		if !ok || ref.Shape[0] != 64 || ref.Shape[1] != 1 {
+			t.Fatalf("AWQ qweight = %v, present %v", ref.Shape, ok)
+		}
+		config, err := os.ReadFile(filepath.Join(out, "quantize_config.json"))
+		if err != nil || !bytes.Contains(config, []byte(`"data_free": true`)) {
+			t.Fatalf("AWQ disclosure config = %s, %v", config, err)
+		}
+	})
+	t.Run("Bad/mutually exclusive formats", func(t *testing.T) {
+		src := writeToyModel(t)
+		var stdout, stderr bytes.Buffer
+		if code := runQuantCommand(context.Background(), []string{src, "-awq", "-gptq"}, &stdout, &stderr); code != 2 {
+			t.Fatalf("exit %d, want 2; stderr=%s", code, stderr.String())
+		}
+	})
 }

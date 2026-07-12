@@ -50,6 +50,7 @@ type headerEntry struct {
 // bf16/f32 weights, and the 4-bit-quant companions (u8/u32 packed codes + bf16 scales).
 var dtypeBytes = map[string]int{
 	"BF16": 2, "F16": 2, "F32": 4, "F64": 8,
+	"F8_E4M3": 1, "F8_E4M3FN": 1, "F8_E5M2": 1,
 	"I8": 1, "U8": 1, "I16": 2, "U16": 2, "I32": 4, "U32": 4, "I64": 8, "U64": 8, "BOOL": 1,
 }
 
