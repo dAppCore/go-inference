@@ -4,6 +4,7 @@ package qwen3
 
 import (
 	"math"
+	"runtime"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/deltanet"
@@ -88,14 +89,50 @@ func matNT(in, w []float32, M, K, N int) []float32 {
 // matNTInto is matNT writing into out, reusing it when cap(out) ≥ M·N (else it allocates a fresh M·N
 // slab). Identical f64 accumulation + write order to the fresh-buffer form — only WHERE the result lands
 // changes, so the output is bit-identical.
+//
+// Large shapes shard the OUTPUT COLUMNS across CPU cores (mirrors composed's matNTInto): each
+// out[m·N+n] keeps exactly the serial per-element k-accumulation order, so the sharded form stays
+// bit-identical; small shapes stay serial below the fan-out floor.
 func matNTInto(out, in, w []float32, M, K, N int) []float32 {
 	if cap(out) < M*N {
 		out = make([]float32, M*N)
 	} else {
 		out = out[:M*N]
 	}
+	if M*K*N < matNTParMinWork {
+		matNTCols(out, in, w, M, K, N, 0, N)
+		return out
+	}
+	workers := runtime.GOMAXPROCS(0)
+	if workers > N {
+		workers = N
+	}
+	span := (N + workers - 1) / workers
+	var wg core.WaitGroup
+	for lo := 0; lo < N; lo += span {
+		hi := lo + span
+		if hi > N {
+			hi = N
+		}
+		wg.Add(1)
+		go func(lo, hi int) {
+			defer wg.Done()
+			matNTCols(out, in, w, M, K, N, lo, hi)
+		}(lo, hi)
+	}
+	wg.Wait()
+	return out
+}
+
+// matNTParMinWork is the M·K·N floor below which matNTInto stays serial — under ~1 MMAC the
+// fan-out/join overhead exceeds the compute it spreads.
+const matNTParMinWork = 1 << 20
+
+// matNTCols is the serial kernel over output columns [n0,n1) — the one accumulation-order-defining
+// loop both the serial and sharded paths run.
+func matNTCols(out, in, w []float32, M, K, N, n0, n1 int) {
 	for m := range M {
-		for n := range N {
+		for n := n0; n < n1; n++ {
 			var acc float64
 			for k := range K {
 				acc += float64(in[m*K+k]) * float64(w[n*K+k])
@@ -103,7 +140,6 @@ func matNTInto(out, in, w []float32, M, K, N int) []float32 {
 			out[m*N+n] = float32(acc)
 		}
 	}
-	return out
 }
 
 func gdSilu(v float64) float64 { return v / (1 + math.Exp(-v)) }
