@@ -244,3 +244,41 @@ func TestHandler_ImageCapabilityGate_Good(t *testing.T) {
 		t.Fatalf("response body = %s", rec.Body.String())
 	}
 }
+
+// TestDecodeAudioBase64_Good decodes a well-formed bare base64 payload back to
+// its original bytes — the input_audio happy path.
+func TestDecodeAudioBase64_Good(t *testing.T) {
+	got, err := decodeAudioBase64(base64.StdEncoding.EncodeToString([]byte("WAVE")))
+	if err != nil {
+		t.Fatalf("decodeAudioBase64(valid) error = %v, want nil", err)
+	}
+	if string(got) != "WAVE" {
+		t.Fatalf("decodeAudioBase64 = %q, want %q", got, "WAVE")
+	}
+}
+
+// TestDecodeAudioBase64_Bad_Invalid rejects a payload that is not valid base64.
+func TestDecodeAudioBase64_Bad_Invalid(t *testing.T) {
+	if _, err := decodeAudioBase64("!!!not-base64!!!"); err == nil {
+		t.Fatal("decodeAudioBase64(invalid) error = nil, want base64 rejection")
+	}
+}
+
+// TestDecodeAudioBase64_Bad_EmptyPayload rejects a syntactically valid payload
+// that decodes to zero bytes — no audio to serve.
+func TestDecodeAudioBase64_Bad_EmptyPayload(t *testing.T) {
+	if _, err := decodeAudioBase64(""); err == nil {
+		t.Fatal("decodeAudioBase64(empty) error = nil, want empty-payload rejection")
+	}
+}
+
+// TestDecodeAudioBase64_Ugly_OversizedPayloadRejectedBeforeDecoding covers the
+// pre-decode length guard: an ENCODED payload longer than the cap is rejected
+// before the base64 decoder allocates the full decoded size (decode-bomb guard,
+// mirroring the image decoder).
+func TestDecodeAudioBase64_Ugly_OversizedPayloadRejectedBeforeDecoding(t *testing.T) {
+	oversized := strings.Repeat("A", (maxDecodedImageBytes/3+1)*4+1)
+	if _, err := decodeAudioBase64(oversized); err == nil {
+		t.Fatal("decodeAudioBase64(oversized) error = nil, want cap rejection")
+	}
+}
