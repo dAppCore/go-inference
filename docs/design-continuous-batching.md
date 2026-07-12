@@ -534,15 +534,59 @@ engine (52 existing scheduler tests still green; serial/batch modes untouched).
   dense ICB path IS submission-bound enough at K=4 that fusing lanes into one
   command buffer is a real win, even before weight-read-once GEMM batching.
 
+## Weight-read-once GEMM batching — BUILT (bf16), evidenced-BLOCKED (quant) (#35 rung 2)
+
+The compute-density rung on top of the 2.58× CB-count win. `engine/metal/lane_set_gemm.go`
+adds a phase-2 forward (`batchedGEMMForward`) that sweeps each weight matrix ONCE for
+all K lanes instead of K times.
+
+**The seam is the projection, and only the projection.** A dense decode layer's seven
+matmuls (qkv/o + mlp gate/up/down) are the only weight-heavy ops; rms, qk-norm+rope,
+value-norm, SDPA, the residuals, the swiglu are cheap per-row work. So the forward keeps
+EVERY non-projection op per-lane on its own single-row kernel — byte-identical to the ICB
+the merged path replays — and lifts ONLY the projections to the batched `projector.projectRows`:
+it gathers the K lanes' per-lane rms outputs into one `[K,D]` slab, sweeps the weight once,
+scatters the `[K,N]` result back. Attention stays per-lane: each lane ropes/stores/attends
+over its OWN icb KV caches at its OWN position. Byte-identity is per-op by construction —
+only the projection's DISPATCH shape changes (one weight sweep vs K), never a row's
+accumulation order. Kill switch `LTHN_CB_GEMM=0` restores the per-lane replay.
+
+**Receipts** (`engine/metal/lane_set_gemm_test.go`):
+- **Byte-identity, counter-guarded** — `TestLaneSetGEMMByteIdentityHiddens`: two lane sets
+  (GEMM armed vs replay) advanced in lockstep over varied-fill specs produce byte-for-byte
+  identical POST-STACK HIDDENS every step (not just argmax tokens); `gemmFwdCount>0` proves
+  the GEMM path fired, `==0` on the replay set.
+- **Weight-read-once A/B** — `TestLaneSetGEMMThroughputAB` (synthetic bf16, E2B-shape
+  dModel 1536 / 16 layers / qDim 2048 / dFF 8192, K=4): serial replay **173 tok/s** →
+  batched replay **178 tok/s** (1.03× — this bf16 decode is weight-bandwidth-bound, not
+  CB-count-bound, so the CB-count amortisation is small here) → **batched GEMM 267 tok/s =
+  1.51× vs batched replay, 1.55× vs serial**, output byte-identical across all three modes.
+  The win is real and dominant exactly where decode is weight-bound.
+
+**BLOCKED for the 4-bit quant path (evidenced STOP).** The quant ICB FUSES the entry/MLP
+rms INTO the qmv (`setRMSQMV`, `decode_forward_arch_icb_quant.go:677-694`), keeping the
+normed activation in fp32 through the matmul. Batching the weight read across lanes needs
+a separately materialised (bf16-rounded) normed slab fed to `qmv-rows`, which rounds one
+ulp differently and DIVERGES — a bisect showed byte-identical layer 0, one-ulp drift at
+layer 1, exploding by the first global layer. There is NO batched rms-qmv-rows kernel
+(`rms_qmv.go` is single-row only) and the metallib is read-only, so byte-identity AND
+weight-read-once cannot both hold for the fused-rms quant path this rung. `gemmEligible`
+gates on `bf16Projector` (the non-fused path) plus the proven envelope (no PLE tower, no
+KV-share, no sliding window — those single-row encoders are mirrored but await a bf16
+checkpoint to prove; both installed models are quant). E2B and every 4-bit model fall back
+to the per-lane ICB replay — the 2.58× stays safe (`TestLaneSetGEMMQuantFallsBackToReplay`).
+
+**The batched dense path already carries the same trade** (`decode_batched_session.go` uses
+`encRMSNormRowsBF16`+`projectRows`, separate rms — token-identity tier for the MTP verify);
+a real quant weight-read-once decode needs a **batched fused rms-qmv-rows Metal kernel**,
+the pinned next rung one level down.
+
 ### Pinned gaps (evidenced, the next rungs)
 
-1. **Weight-read-once GEMM batching.** The fused-ICB forward SHARES weights but
-   reads each weight matrix once per lane per layer (K reads/layer). Sweeping the
-   weight once for all K lanes needs the batched-projection + per-lane-SDPA
-   rewrite: `decode_batched_session.go:1108-1216` binds the batched attention to
-   ONE cache + a shared `basePos`, so per-lane KV bindings/positions/live-lengths
-   are new surface, not a parameter tweak. The 2.58× above is the CB-count win;
-   this is the compute-density ceiling on top of it.
+1. **Weight-read-once GEMM batching — DONE for bf16, quant needs a fused kernel.** See the
+   section above. The remaining quant work is a **batched rms-qmv-rows Metal shader** (fused
+   rms + quantised matvec over K rows, weight read once) — the only way to get byte-identity
+   AND weight-read-once for the fused-rms 4-bit path; needs a metallib rebuild (read-only here).
 2. **Non-ICB arches.** The external-encoder fusion needs the ICB `encodeStepBody`
    seam; a non-ICB `stepToken` opens its own command buffer. MoE (12B/26B) and
    COMPOSED/hybrid decode fall outside the owner today — `Prepare` refuses them.
