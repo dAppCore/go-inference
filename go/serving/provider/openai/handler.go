@@ -64,7 +64,25 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error(), "model")
 		return
 	}
-	messages := requestMessages(req.Messages, req.Tools)
+	offeredTools, err := resolveOfferedTools(req.Tools, req.ToolChoice)
+	if err != nil {
+		// A tool_choice naming an undeclared tool, or requiring one when none
+		// were declared — a caller error, same shape as any other bad request.
+		writeError(w, http.StatusBadRequest, err.Error(), "tool_choice")
+		return
+	}
+	// Capability honesty (#37): only a Gemma 4 checkpoint reads the tool
+	// declarations this package renders and only its output is scanned for
+	// <|tool_call> spans (parser.SupportsToolSyntax). Offering tools to any
+	// other architecture would silently no-op — the model was never told
+	// anything it could act on, so it just answers in prose and the caller
+	// gets an ordinary content response with no signal anything went wrong.
+	// Reject up front instead.
+	if len(offeredTools) > 0 && !supportsGemmaToolSyntax(model.Info()) {
+		writeError(w, http.StatusBadRequest, "model does not support tool calling: architecture "+model.Info().Architecture, "tools")
+		return
+	}
+	messages := requestMessages(req.Messages, offeredTools)
 	if messagesCarryImages(messages) {
 		vision, ok := model.(inference.VisionModel)
 		if !ok || !vision.AcceptsImages() {
@@ -102,6 +120,19 @@ func (h *Handler) serveNonStreaming(w http.ResponseWriter, r *http.Request, mode
 	}
 	metrics := model.Metrics()
 	content := TruncateAtStopSequence(extractor.Content(), stops)
+	if req.ResponseFormat.needsValidation() {
+		// ValidateRequest already rejected stream=true for a validating format
+		// (validateResponseFormat), so this path only ever runs non-streaming —
+		// the full content is already materialised above, exactly what
+		// validateStructuredOutput needs to check (and, on a mismatch, repair
+		// via fresh model turns built from the same messages/opts).
+		repaired, verr := validateStructuredOutput(r.Context(), model, messages, opts, content, req.ResponseFormat)
+		if verr != nil {
+			writeError(w, http.StatusUnprocessableEntity, verr.Error(), "response_format")
+			return
+		}
+		content = repaired
+	}
 	finishReason := "stop"
 	if isTokenLengthCapReached(req.MaxTokens, metrics.GeneratedTokens) {
 		finishReason = "length"

@@ -74,6 +74,84 @@ func TestChatCompletionRequest_DecodesTools(t *testing.T) {
 	}
 }
 
+// TestChatCompletionRequest_DecodesToolChoice_Good pins the two tool_choice
+// wire shapes: the bare-string form sets Mode directly, and a nil ToolChoice
+// (the field omitted) decodes as no override at all.
+func TestChatCompletionRequest_DecodesToolChoice_Good(t *testing.T) {
+	var req ChatCompletionRequest
+	if err := req.UnmarshalJSON([]byte(`{"model":"x","messages":[],"tool_choice":"required"}`)); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if req.ToolChoice == nil || req.ToolChoice.Mode != "required" {
+		t.Fatalf("tool_choice decode = %+v, want Mode=required", req.ToolChoice)
+	}
+
+	var reqOmitted ChatCompletionRequest
+	if err := reqOmitted.UnmarshalJSON([]byte(`{"model":"x","messages":[]}`)); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if reqOmitted.ToolChoice != nil {
+		t.Fatalf("tool_choice decode with the field omitted = %+v, want nil", reqOmitted.ToolChoice)
+	}
+}
+
+// TestChatCompletionRequest_DecodesToolChoice_Bad pins the object form —
+// {"type":"function","function":{"name":"X"}} — and that a JSON null decodes
+// to no override (distinct from an explicit "none").
+func TestChatCompletionRequest_DecodesToolChoice_Bad(t *testing.T) {
+	var req ChatCompletionRequest
+	data := []byte(`{"model":"x","messages":[],"tool_choice":{"type":"function","function":{"name":"get_weather"}}}`)
+	if err := req.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if req.ToolChoice == nil || req.ToolChoice.Mode != "function" || req.ToolChoice.Name != "get_weather" {
+		t.Fatalf("tool_choice object decode = %+v, want Mode=function Name=get_weather", req.ToolChoice)
+	}
+
+	var reqNull ChatCompletionRequest
+	if err := reqNull.UnmarshalJSON([]byte(`{"model":"x","messages":[],"tool_choice":null}`)); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if reqNull.ToolChoice != nil {
+		t.Fatalf("tool_choice:null decode = %+v, want nil", reqNull.ToolChoice)
+	}
+}
+
+// TestChatCompletionRequest_DecodesResponseFormat_Good pins the json_schema
+// wire shape lifting name/schema/strict, and that "text"/omitted both leave
+// ResponseFormat nil-or-plain rather than forcing validation.
+func TestChatCompletionRequest_DecodesResponseFormat_Good(t *testing.T) {
+	data := []byte(`{"model":"x","messages":[],"response_format":{"type":"json_schema","json_schema":` +
+		`{"name":"person","strict":true,"schema":{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}}}}`)
+	var req ChatCompletionRequest
+	if err := req.UnmarshalJSON(data); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if req.ResponseFormat == nil || req.ResponseFormat.Type != "json_schema" {
+		t.Fatalf("response_format decode = %+v, want Type=json_schema", req.ResponseFormat)
+	}
+	schema := req.ResponseFormat.JSONSchema
+	if schema == nil || schema.Name != "person" || schema.Strict == nil || !*schema.Strict {
+		t.Fatalf("json_schema decode = %+v, want name=person strict=true", schema)
+	}
+	if schema.Schema["type"] != "object" {
+		t.Fatalf("json_schema.schema decode = %+v, want the raw schema object preserved", schema.Schema)
+	}
+}
+
+// TestChatCompletionRequest_DecodesResponseFormat_Bad pins response_format
+// omitted from the request leaves ResponseFormat nil (never forcing
+// validation for a plain chat request — the pre-#37 behaviour, unchanged).
+func TestChatCompletionRequest_DecodesResponseFormat_Bad(t *testing.T) {
+	var req ChatCompletionRequest
+	if err := req.UnmarshalJSON([]byte(`{"model":"x","messages":[]}`)); err != nil {
+		t.Fatalf("UnmarshalJSON: %v", err)
+	}
+	if req.ResponseFormat != nil {
+		t.Fatalf("response_format decode with the field omitted = %+v, want nil", req.ResponseFormat)
+	}
+}
+
 // TestChatMessageDelta_ToolCallsMarshal pins that a streaming delta carrying
 // tool_calls marshals through the reflect path (index + id + function), while an
 // empty delta stays the zero-alloc {}.
