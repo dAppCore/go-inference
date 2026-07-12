@@ -1048,6 +1048,8 @@ func hipGemma4Q4GenerateTokenSeqWithEngineConfig(ctx context.Context, model *hip
 func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens []int32, generate inference.GenerateConfig, engineConfig hipGemma4Q4EngineConfig, initialDeviceState *hipGemma4Q4DeviceDecodeState, retainDeviceState func(*hipGemma4Q4DeviceDecodeState) error) (iter.Seq[inference.Token], func() error) {
 	var runErr error
 	return func(yield func(inference.Token) bool) {
+		feedbackReceipts := hipBeginFeedbackReceipts()
+		defer hipFinishFeedbackReceipts(feedbackReceipts)
 		deviceState := initialDeviceState
 		deviceStateRetained := false
 		defer func() {
@@ -1316,6 +1318,14 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 			if hipTokenIsStop(tokenID, generate.StopTokens) {
 				return
 			}
+			if feedbackReceipts != nil {
+				deviceArgmax, err := hipGemma4Q4FeedbackDeviceArgmax(model.driver, current, cfg.Layers[0].VocabSize)
+				if err != nil {
+					runErr = err
+					return
+				}
+				feedbackReceipts.record(generated, deviceArgmax, tokenID, position, deviceState.maxLayerTokenCount())
+			}
 			token := inference.Token{
 				ID:   tokenID,
 				Text: hipGeneratedTokenText(model, tokenID),
@@ -1430,6 +1440,7 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 
 func hipGemma4Q4DeviceGreedyUnrollEnabled(generate inference.GenerateConfig, hostSampling, deviceCandidateSampling, deviceTopKSampling bool, workspace *hipAttentionHeadsChunkedWorkspace, current hipGemma4Q4ForwardResult) bool {
 	return generate.MaxTokens > 1 &&
+		hipActiveFeedbackReceipts() == nil &&
 		len(generate.StopTokens) == 0 &&
 		!hostSampling &&
 		!deviceCandidateSampling &&
@@ -1437,6 +1448,20 @@ func hipGemma4Q4DeviceGreedyUnrollEnabled(generate inference.GenerateConfig, hos
 		workspace != nil &&
 		current.GreedyDevice != nil &&
 		current.GreedyDevice.Pointer() != 0
+}
+
+func hipGemma4Q4FeedbackDeviceArgmax(driver nativeHIPDriver, current hipGemma4Q4ForwardResult, vocabSize int) (int32, error) {
+	if current.GreedyDevice == nil {
+		return int32(current.Greedy.TokenID), nil
+	}
+	tokens, err := hipReadGreedyDeviceTokenIDs(driver, []*hipDeviceByteBuffer{current.GreedyDevice}, vocabSize)
+	if err != nil {
+		return 0, err
+	}
+	if len(tokens) != 1 {
+		return 0, core.E(hipGemma4Q4Layer0Operation, "feedback receipt device argmax count mismatch", nil)
+	}
+	return tokens[0], nil
 }
 
 func hipGemma4Q4BatchDeviceGreedyUnrollEnabled(generate inference.GenerateConfig, hostSampling, deviceCandidateSampling, deviceTopKSampling bool, workspace *hipAttentionHeadsChunkedWorkspace, current hipGemma4Q4ForwardResult) bool {
