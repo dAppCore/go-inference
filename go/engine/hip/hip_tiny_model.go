@@ -1050,6 +1050,8 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 	return func(yield func(inference.Token) bool) {
 		feedbackReceipts := hipBeginFeedbackReceipts()
 		defer hipFinishFeedbackReceipts(feedbackReceipts)
+		spreadReceipts := hipBeginLogitSpreadReceipts()
+		defer hipFinishLogitSpreadReceipts(spreadReceipts)
 		deviceState := initialDeviceState
 		deviceStateRetained := false
 		defer func() {
@@ -2559,6 +2561,9 @@ func hipGemma4Q4RepeatHistoryRequired(generate inference.GenerateConfig) bool {
 func hipGemma4Q4HostSampleResult(logits []float32, generate inference.GenerateConfig, suppressTokens []int32, history []int32, draw float64) (hipGreedySampleResult, error) {
 	if len(logits) == 0 {
 		return hipGreedySampleResult{}, core.E("rocm.hip.Gemma4Q4HostSampler", "logits are required", nil)
+	}
+	if receipts := hipActiveLogitSpreadReceipts(); receipts != nil {
+		receipts.recordNext("host-full-vocab", "sampler-input-softcapped", logits)
 	}
 	working := append([]float32(nil), logits...)
 	for _, id := range suppressTokens {

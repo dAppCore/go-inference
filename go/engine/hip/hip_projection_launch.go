@@ -4573,6 +4573,13 @@ func hipRunMLXQ4ProjectionSoftcapSampleKernelWithDeviceInputBufferSuppress(ctx c
 	if err := hipLaunchKernel(driver, config); err != nil {
 		return hipGreedySampleResult{}, nil, err
 	}
+	if receipts := hipActiveLogitSpreadReceipts(); receipts != nil {
+		rawScores, readErr := hipReadFloat32DeviceOutput(scores, "rocm.hip.LogitSpread", "packed sampler projection scores", cfg.Rows)
+		if readErr != nil {
+			return hipGreedySampleResult{}, nil, readErr
+		}
+		receipts.recordNext("device-topk", "sampler-input-pre-softcap", rawScores)
+	}
 	partial, partialCount, err := hipRunPackedTopKReduceKernelWithWorkspace(ctx, driver, scores, cfg.Rows, topK, workspace)
 	if err != nil {
 		return hipGreedySampleResult{}, nil, err

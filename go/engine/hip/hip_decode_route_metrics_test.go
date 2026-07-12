@@ -5,9 +5,41 @@
 package hip
 
 import (
+	"math"
 	"testing"
 	"time"
 )
+
+func TestHIPLogitSpreadSummary_Top20AndMoments(t *testing.T) {
+	logits := make([]float32, 24)
+	for index := range logits {
+		logits[index] = float32(index - 12)
+	}
+	summary := hipSummarizeLogitSpread("host", "sampler-input", 0, logits)
+	if summary.Arm != "host" || summary.Stage != "sampler-input" || summary.Step != 0 || summary.Count != 24 {
+		t.Fatalf("summary identity = %#v", summary)
+	}
+	if summary.Max != 11 || summary.Mean != -0.5 || math.Abs(summary.StdDev-6.92218655) > 1e-5 {
+		t.Fatalf("summary moments = max %g mean %g stddev %g", summary.Max, summary.Mean, summary.StdDev)
+	}
+	if len(summary.Top) != 20 || summary.Top[0].TokenID != 23 || summary.Top[0].Logit != 11 || summary.Top[19].TokenID != 4 {
+		t.Fatalf("summary top = %#v", summary.Top)
+	}
+}
+
+func TestHIPLogitSpreadSummary_IgnoresNonFiniteValues(t *testing.T) {
+	summary := hipSummarizeLogitSpread("oracle", "sampler-input", 5, []float32{1, float32(math.NaN()), 3, float32(math.Inf(1))})
+	if summary.Count != 2 || summary.Max != 3 || summary.Mean != 2 || summary.StdDev != 1 {
+		t.Fatalf("finite summary = %#v", summary)
+	}
+}
+
+func TestHIPLogitSpreadReceipts_DisabledIsZeroCost(t *testing.T) {
+	hipLogitSpreadReceiptsActive.Store(nil)
+	if got := hipActiveLogitSpreadReceipts(); got != nil {
+		t.Fatalf("inactive spread receipts = %#v, want nil", got)
+	}
+}
 
 func TestHIPDecodeRouteMetrics_RecordAndSnapshot(t *testing.T) {
 	metrics := newHIPDecodeRouteMetrics()
