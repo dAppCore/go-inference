@@ -28,7 +28,10 @@ Environment variables read once at process start. The load-bearing ones (non-exh
 | `LTHN_KV_Q8=1` | int8 paged KV cache with f32 group scales, opted in per layer on gqa2 geometry (`nHeads == 2*kvHeads`, `headDim ≤ 256`) — half the KV bytes at parity tok/s. Errors loudly at load if no layer qualifies. |
 | `LTHN_MTP_REENGAGE=0` | Restores the permanent low-acceptance bail for MTP speculative decoding. The default re-engagement gate is wall-clock-adaptive (probes plain-decode economics live), so paired runs are not byte-reproducible run-to-run; this switch is the reproducibility anchor. |
 | `LTHN_SDPA_SPLIT=N` | Overrides the paged-SDPA split-window grain (rows per pass-1 threadgroup window; default 256, halved on the GQA-shared route). A probe lever for kernel tuning, not a serving knob. |
+| `LTHN_SDPA_GEMM_MINKV=N` | Overrides the attended-length knee at which prompt-scale SDPA switches from the multiQ vector kernel to the steel-GEMM composition (compiled default 2048; `=4096` restores the previous knee). A probe/A-B lever, not a serving knob. |
+| `LTHN_FLASH_WIN=0` | Restores the multiQ ring kernel by disabling the sliding-window flash prompt-attention lane (an A/B lever). The window flash is otherwise gated by a 1024-row floor, so small chunks already stay on the ring kernel. |
 | `LTHN_MTP_DIAG=1` | Per-cycle MTP draft/accept diagnostics on stderr (any non-empty value). |
+| `LTHN_GPU_TRACE` | Per-stage GPU-time attribution for the batched dense pass (any non-empty value splits the pass's command buffer at named stage boundaries; the split serialises the stages, so the traced total runs slower than production and both the per-bucket shares and the total are printed). `=host` arms the host spans only (no command-buffer split), so wall-vs-seam decomposition reads at production GPU fidelity. |
 
 ### rocm — AMD ROCm
 
