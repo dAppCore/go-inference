@@ -189,7 +189,7 @@ captured rows (#97).
 | `-sample-min-p` | `0` | sampling min-p |
 | `-rep-penalty` | `1.0` | repetition penalty over self-samples |
 | `-filter-shortest` | `10` | drop the shortest N% of self-samples before the trace (0 keeps all) |
-| `-score-samples` | `false` | score every self-sample at birth — needs a scorer wired into go-inference (none yet, so this is an honest no-op) |
+| `-score-samples` | `false` | score every self-sample at birth with the LEK scorer — writes birth-scores alongside the captured trace |
 | `-checkpoint-dir` | `""` | output dir for the scored trace (`ssd-captures.jsonl`) |
 | `-context` | `0` | model context override; 0 uses the model default |
 
@@ -222,7 +222,7 @@ lem sft --model ~/models/gemma-4-E2B-it-bf16 \
 | `-eval-max-tokens` | `200` | tokens per eval generation |
 | `-eval-probes` | `4` | probes derived from `-valid` when `-eval-prompts` is absent |
 | `-eval-temp` | `0` | eval sampling temperature (0 = greedy) |
-| `-score-cascade` | `false` | score every eval pass — needs a scorer wired in (none yet; notes honestly and captures only) |
+| `-score-cascade` | `false` | score every eval pass with the LEK scorer and pick the best checkpoint by windowed composite |
 | `-score-window` | `3` | eval passes per windowed composite |
 | `-rank` | `16` | LoRA rank |
 | `-alpha` | `32` | LoRA alpha |
