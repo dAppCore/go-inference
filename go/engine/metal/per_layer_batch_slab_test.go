@@ -5,8 +5,10 @@
 package native
 
 import (
+	"bytes"
 	"math"
 	"testing"
+	"unsafe"
 )
 
 // per_layer_batch_slab_test.go gates the K-token PLE slab BUILDERS
@@ -246,6 +248,198 @@ func TestPleSlabOutLayersBounds(t *testing.T) {
 			}
 			if err != nil || got != tc.want {
 				t.Fatalf("%s: nOut=%d err=%v, want %d", tc.name, got, err, tc.want)
+			}
+		})
+	}
+}
+
+// TestPerLayerInputsBatchQuantIntoSlabPlainProjectionMatchesPerTokenReference is the "plain"
+// #381 e2b/e4b profile twin of TestPerLayerInputsBatchQuantIntoSlabMatchesPerTokenReference: a
+// quantised PLE table gathered against a BF16-RESIDENT tower projection (arch_session.go wires
+// this when the model projection ships bf16 — no proj scales), which drives
+// perLayerInputsBatchQuantEncode's OTHER matmul route (encGemmBF16NT, the resident-weight GEMM)
+// instead of the qmm_t route the QAT sibling above exercises. Untested before r3: every
+// existing quant-PLE fixture (this file's QAT test, TestLoadGemma4QuantPLE) quantises the tower
+// projection too, so the plain profile's own arch_session.go closures (#1022-1027) had never
+// driven this branch.
+func TestPerLayerInputsBatchQuantIntoSlabPlainProjectionMatchesPerTokenReference(t *testing.T) {
+	requireNativeRuntime(t)
+	if _, err := pleGatherRowsQuantPipeline(); err != nil {
+		t.Skip("ple gather-rows-quant kernel not loaded")
+	}
+	const numLayers, pliDim, dModel, vocabPLI = 2, 32, 256, 64
+	const tableGS, tableBits = 64, 4
+	const eps = float32(1e-5)
+	const k = steelGEMMMinRows
+	plDim := numLayers * pliDim
+	embScale := float32(math.Sqrt(float64(pliDim)))
+	projScale := float32(1 / math.Sqrt(float64(dModel)))
+
+	tPacked, tScales, tBiases := packAffineQuant(syntheticFloat32(vocabPLI*plDim, 17), vocabPLI, plDim, tableGS, tableBits)
+	projW := toBF16Bytes(syntheticFloat32(plDim*dModel, 19))
+	projView := copyView(projW)
+	projNormW := toBF16Bytes(syntheticFloat32(pliDim, 4))
+	ids := make([]int32, k)
+	embs := make([][]byte, k)
+	for i := range ids {
+		ids[i] = int32((i*11 + 5) % vocabPLI)
+		embs[i] = toBF16Bytes(syntheticFloat32(dModel, i+1))
+	}
+
+	sc := &pleBatchScratch{}
+	slab := make([]byte, k*plDim*bf16Size)
+	engaged, err := perLayerInputsBatchQuantIntoSlab(sc,
+		residentBytes(tPacked), residentBytes(tScales), residentBytes(tBiases), tableGS, tableBits,
+		projView.buf, projView.off, nil, nil, nil, 0, 0,
+		projNormW, ids, embs, slab, numLayers, pliDim, dModel, eps)
+	if err != nil {
+		t.Fatalf("perLayerInputsBatchQuantIntoSlab: %v", err)
+	}
+	if !engaged {
+		t.Skip("batched quant(plain-proj) slab path declined (steel unavailable)")
+	}
+
+	tableBF16, derr := dequantizeAffineRowsF32(tPacked, tScales, tBiases, vocabPLI, plDim, tableGS, tableBits)
+	if derr != nil {
+		t.Fatalf("dequantize PLE table: %v", derr)
+	}
+	table := toBF16Bytes(tableBF16)
+	projFn := func(hidden, perLayer []byte) []byte {
+		out, perr := perLayerProjBatched(projView, hidden, perLayer, projScale, projNormW, plDim, numLayers, pliDim, dModel, eps)
+		if perr != nil {
+			t.Fatalf("per-token reference perLayerProjBatched: %v", perr)
+		}
+		return out
+	}
+	want := pleSlabPerTokenReference(t, projFn, table, ids, embs, numLayers, pliDim, embScale)
+	if maxDiff := pleSlabMaxDiff(slab, want); maxDiff > 0.08 {
+		t.Fatalf("batched quant(plain-proj) slab vs per-token reference maxDiff = %.5f (> 0.08)", maxDiff)
+	}
+}
+
+// TestPerLayerInputsBatchQuantDeviceMatchesPerTokenReference gates the DEVICE-RESIDENT quant PLE
+// builder (#381 perLayerInputsBatchQuantDevice) — before r3 it had ZERO direct test callers (its
+// only production call sites are the two arch_session.go closures wired into
+// ArchSession.perLayerInputBatchDevice, themselves unreached by any existing session-level
+// test). It gathers the K main-embed rows AND the layer-major PLE tensor in one committed
+// command buffer, so this checks BOTH outputs against this package's own trusted oracles:
+// embedTokenQuant (the main-embed row, matching TestEmbedRowsBatchQuantDeviceMatchesEmbedTokenQuant's
+// convention) and the per-token pleSlabPerTokenReference (matching this file's QAT sibling) — a
+// QAT quantised tower projection here, distinct from both siblings above (mainEmb != nil combined
+// with a quantised proj is otherwise untested).
+func TestPerLayerInputsBatchQuantDeviceMatchesPerTokenReference(t *testing.T) {
+	requireNativeRuntime(t)
+	if _, err := pleGatherRowsQuantPipeline(); err != nil {
+		t.Skip("ple gather-rows-quant kernel not loaded")
+	}
+	const numLayers, pliDim, dModel, vocabPLI = 2, 32, 256, 64
+	const tableGS, tableBits = 64, 4
+	const projGS, projBits = 64, 4
+	const embVocab, embGS, embBits = 128, 64, 4
+	const eps = float32(1e-5)
+	const k = steelGEMMMinRows
+	plDim := numLayers * pliDim
+	embScale := float32(math.Sqrt(float64(pliDim)))
+	mainEmbScale := float32(math.Sqrt(float64(dModel)))
+	projScale := float32(1 / math.Sqrt(float64(dModel)))
+
+	tPacked, tScales, tBiases := packAffineQuant(syntheticFloat32(vocabPLI*plDim, 9), vocabPLI, plDim, tableGS, tableBits)
+	projQ := quantWeightFixture(t, plDim, dModel, projGS, projBits, 13)
+	projNormW := toBF16Bytes(syntheticFloat32(pliDim, 4))
+
+	ePacked, eScales, eBiases := embedGatherQuantFixture(embVocab, dModel, embGS, embBits)
+	mainEmb := &mainEmbedGather{
+		packed: residentBytes(ePacked), scales: residentBytes(eScales), biases: residentBytes(eBiases),
+		gs: embGS, bits: embBits, scale: mainEmbScale,
+	}
+
+	ids := make([]int32, k)
+	for i := range ids {
+		ids[i] = int32((i*11 + 5) % min(vocabPLI, embVocab))
+	}
+
+	sc := &pleBatchScratch{}
+	embBuf, pleBuf, engaged, err := perLayerInputsBatchQuantDevice(sc,
+		residentBytes(tPacked), residentBytes(tScales), residentBytes(tBiases), tableGS, tableBits,
+		nil, 0, residentBytes(projQ.Packed), residentBytes(projQ.Scales), residentBytes(projQ.Biases), projGS, projBits,
+		projNormW, ids, mainEmb, numLayers, numLayers, pliDim, dModel, eps)
+	if err != nil {
+		t.Fatalf("perLayerInputsBatchQuantDevice: %v", err)
+	}
+	if !engaged {
+		t.Skip("device quant PLE path declined (qmm_t instantiation unavailable)")
+	}
+	if embBuf == nil || pleBuf == nil {
+		t.Fatal("engaged but returned nil buffers")
+	}
+	// production ordering contract (matches TestEmbedRowsBatchQuantDeviceMatchesEmbedTokenQuant):
+	// the consumer's command buffer follows on the same queue, so an empty committed-and-waited
+	// buffer drains the builder before the host reads back.
+	withAutoreleasePool(func() {
+		cb := commandBufferFast(queue)
+		commitCommandBufferFast(cb)
+		waitUntilCompletedFast(cb)
+	})
+
+	rowBytes := dModel * bf16Size
+	gotEmb := unsafe.Slice((*byte)(embBuf.Contents()), k*rowBytes)
+	embs := make([][]byte, k)
+	for i, id := range ids {
+		want, rerr := embedTokenQuant(ePacked, eScales, eBiases, id, embVocab, dModel, embGS, embBits, mainEmbScale)
+		if rerr != nil {
+			t.Fatalf("row %d: embedTokenQuant: %v", i, rerr)
+		}
+		got := gotEmb[i*rowBytes : (i+1)*rowBytes]
+		if !bytes.Equal(got, want) {
+			t.Fatalf("row %d (tok %d): device emb gather differs from host embedTokenQuant", i, id)
+		}
+		embs[i] = append([]byte(nil), got...)
+	}
+
+	tableBF16, derr := dequantizeAffineRowsF32(tPacked, tScales, tBiases, vocabPLI, plDim, tableGS, tableBits)
+	if derr != nil {
+		t.Fatalf("dequantize PLE table: %v", derr)
+	}
+	table := toBF16Bytes(tableBF16)
+	projFn := func(hidden, perLayer []byte) []byte {
+		out, perr := perLayerProjQuantBatched(projQ, hidden, perLayer, projScale, projNormW, plDim, numLayers, pliDim, dModel, projGS, projBits, eps)
+		if perr != nil {
+			t.Fatalf("per-token reference perLayerProjQuantBatched: %v", perr)
+		}
+		return out
+	}
+	want := pleSlabPerTokenReference(t, projFn, table, ids, embs, numLayers, pliDim, embScale)
+	gotPLE := unsafe.Slice((*byte)(pleBuf.Contents()), len(want))
+	if maxDiff := pleSlabMaxDiff(gotPLE, want); maxDiff > 0.08 {
+		t.Fatalf("device PLE slab vs per-token reference maxDiff = %.5f (> 0.08)", maxDiff)
+	}
+}
+
+// TestPerLayerInputsBatchQuantDeviceDeclinesAndGuards pins perLayerInputsBatchQuantDevice's hard
+// guards — the outLayers bound and the mainEmb-required contract — all of which fire before any
+// GPU work, so the quant table/projection buffers are left nil.
+func TestPerLayerInputsBatchQuantDeviceDeclinesAndGuards(t *testing.T) {
+	requireNativeRuntime(t)
+	const numLayers, pliDim, dModel = 2, 8, 16
+	projNormW := toBF16Bytes(syntheticFloat32(pliDim, 4))
+	mainEmb := &mainEmbedGather{scale: 1}
+	sc := &pleBatchScratch{}
+	ids := make([]int32, steelGEMMMinRows)
+
+	for _, tc := range []struct {
+		name      string
+		outLayers int
+		mainEmb   *mainEmbedGather
+	}{
+		{"outLayers zero", 0, mainEmb},
+		{"outLayers too many", numLayers + 1, mainEmb},
+		{"nil mainEmb", numLayers, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, engaged, err := perLayerInputsBatchQuantDevice(sc,
+				nil, nil, nil, 8, 4, nil, 0, nil, nil, nil, 0, 0,
+				projNormW, ids, tc.mainEmb, tc.outLayers, numLayers, pliDim, dModel, 1e-5); engaged || err == nil {
+				t.Fatalf("%s: want error, got engaged=%v err=%v", tc.name, engaged, err)
 			}
 		})
 	}
