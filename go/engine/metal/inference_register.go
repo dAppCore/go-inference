@@ -234,12 +234,69 @@ func (s *composedEngineSession) CaptureKVWithOptions(kv.CaptureOptions) (*kv.Sna
 	}, nil
 }
 
-// RangeKVBlocks is unsupported for the composed hybrid: it streams the retained KV cache as per-token blocks
-// (the serve-continuity sleep lane), but a composed session holds no KV cache to stream. The token-prefix
-// snapshot path (CaptureKVWithOptions / RestoreFromKV) is composed's save/restore — `generate -state` and
-// the snapshot-strategy wake resume through it; the block-streaming sleep lane does not apply.
-func (s *composedEngineSession) RangeKVBlocks(int, kv.CaptureOptions, func(kv.Block) (bool, error)) error {
-	return core.NewError("native.composedEngineSession.RangeKVBlocks: composed has no KV cache to stream as blocks; save/restore uses the token-prefix snapshot (CaptureKV/RestoreFromKV)")
+// RangeKVBlocks streams the retained token prefix as contiguous TOKEN-ONLY blocks — the serve-continuity
+// sleep lane (SaveKVBlocksToState → SaveStateBlocksFromStream). A composed hybrid holds no persistent KV
+// cache to stream as K/V slabs, but its complete resumable state IS the token prefix (see the type doc), so
+// each block carries a token-prefix kv.Snapshot (Tokens, no Layers). The block-load reassembly folds the
+// tokens back into a Tokens-only snapshot and RestoreFromKV re-prefills it, resuming byte-identically.
+//
+// Tiling mirrors ArchSession's trusted-prefix contract (StateBlockSourceFrom / kvBlockFromStateBlock) so a
+// multi-turn re-sleep with prefix reuse tiles against grafted parent blocks: blocks partition [0, position)
+// on the uniform blockSize grid (boundaries 0, blockSize, 2·blockSize, …, position); block k covers
+// [k·blockSize, min((k+1)·blockSize, position)). opts.BlockStartToken skips whole blocks ending at or before
+// the trusted boundary, and yielded Index / TokenStart stay ABSOLUTE in that grid — so the first emitted
+// block's Index equals the grafted parent's block count and its TokenStart continues where the parent ended,
+// keeping the assembled bundle contiguous from index 0, token 0.
+func (s *composedEngineSession) RangeKVBlocks(blockSize int, opts kv.CaptureOptions, yield func(kv.Block) (bool, error)) error {
+	if s == nil {
+		return core.NewError("native.composedEngineSession.RangeKVBlocks: nil session")
+	}
+	if yield == nil {
+		return core.NewError("native.composedEngineSession.RangeKVBlocks: nil yield")
+	}
+	if blockSize <= 0 {
+		return core.NewError("native.composedEngineSession.RangeKVBlocks: block size must be > 0")
+	}
+	if opts.BlockStartToken < 0 {
+		return core.NewError("native.composedEngineSession.RangeKVBlocks: block start token must be >= 0")
+	}
+	position := len(s.prompt)
+	if position == 0 {
+		return core.NewError("native.composedEngineSession.RangeKVBlocks: empty session (nothing prefilled)")
+	}
+	// totalBlocks tiles [0, position) on the uniform blockSize grid — the last block is a partial when
+	// position is not a blockSize multiple.
+	totalBlocks := (position + blockSize - 1) / blockSize
+	// firstBlockIndex skips whole blocks whose end lands at or before the trusted boundary, exactly as
+	// ArchSession.stateBlockPlan advances firstBlock while boundaries[firstBlock+1] <= startToken. The
+	// serve path always passes a block-aligned boundary below position, but mirroring the loop keeps the
+	// contract exact for a mid-block boundary (the block spanning it is re-emitted whole).
+	firstBlockIndex := 0
+	for firstBlockIndex < totalBlocks && min((firstBlockIndex+1)*blockSize, position) <= opts.BlockStartToken {
+		firstBlockIndex++
+	}
+	for index := firstBlockIndex; index < totalBlocks; index++ {
+		start := index * blockSize
+		end := min(start+blockSize, position)
+		block := kv.Block{
+			Index:      index,
+			TokenStart: start,
+			TokenCount: end - start,
+			Snapshot: &kv.Snapshot{
+				Version:      kv.SnapshotVersion,
+				Architecture: s.arch,
+				Tokens:       append([]int32(nil), s.prompt[start:end]...),
+				TokenOffset:  end,
+				SeqLen:       end - start,
+				NumLayers:    s.numLayers,
+			},
+		}
+		ok, err := yield(block)
+		if err != nil || !ok {
+			return err
+		}
+	}
+	return nil
 }
 
 // RestoreFromKV reinstates a token-prefix snapshot captured by CaptureKVWithOptions: it takes the snapshot's
