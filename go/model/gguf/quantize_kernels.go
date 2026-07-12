@@ -77,70 +77,45 @@ func quantizeQ4_0(values []float32) []byte {
 	return appendQuantizeQ4_0(make([]byte, 0, len(values)/32*18), values)
 }
 
+// appendQuantizeQ4_0 appends ggml block_q4_0 blocks (18 B/block) for values to
+// out. Faithful port of ggml's quantize_row_q4_0_ref: the scale is d =
+// max/-8 where max is the SIGNED value at the largest-magnitude position (not
+// maxAbs/7) — this is what lets the extremal element hit nibble 0 exactly and
+// use the full [0,15] nibble range, vs a naive maxAbs/N scheme that only ever
+// reaches nibbles [1,15]. Levels are truncated (not rounded) after a +8.5
+// bias: q = trunc(x*id + 8.5), clamped only on the top (MIN 15) — ggml has no
+// bottom clamp either, relying on id being derived from the block's own max.
 func appendQuantizeQ4_0(out []byte, values []float32) []byte {
 	for blockStart := 0; blockStart < len(values); blockStart += 32 {
 		block := values[blockStart : blockStart+32]
-		maxAbs := maxAbsFloat32(block)
+		amax, signedMax := maxAbsSignedFloat32(block)
 		scale := float32(0)
-		if maxAbs > 0 {
-			scale = maxAbs / 7
+		if amax > 0 {
+			scale = signedMax / -8
 		}
 		out = binary.LittleEndian.AppendUint16(out, float32ToFloat16(scale))
+		invScale := float32(0)
+		if scale != 0 {
+			invScale = 1 / scale
+		}
 		// Stack-allocated pack buffer instead of make([]byte, 16) per
-		// block — saves one heap alloc per 32 input floats.
+		// block — saves one heap alloc per 32 input floats. invScale==0
+		// (all-zero block) naturally quantises every element to nibble 8
+		// (trunc(0+8.5)=8), matching ggml's id=0 fast path without a
+		// separate branch.
 		var packed [16]byte
-		if scale == 0 {
-			// Zero-block fast path: q=0 → q+8=8 (Q4_0 stores
-			// (q+8) ∈ [0,15] unsigned). Both nibbles of each packed
-			// byte are 8, so the byte value is 0x88. Skips the
-			// per-element multiply + round + branch work.
-			for i := range packed {
-				packed[i] = 0x88
-			}
-			out = append(out, packed[:]...)
-			continue
-		}
-		invScale := 1 / scale
-		// Split the i<16 branch out of the inner loop — two clean
-		// 16-iter loops let the back-end keep the lower-nibble writes
-		// (packed[i] = q) and upper-nibble OR-writes (packed[i-16] |=
-		// q<<4) on independent memory dependencies. Same total work,
-		// less branch overhead and a cleaner dep chain.
 		for i := range 16 {
-			value := block[i]
-			scaled := value * invScale
-			var q int
-			// Round-half-away-from-zero in float32 — same optimisation
-			// as quantizeQ8_0. The +8 bias re-centres the signed
-			// quantised range into the [0,15] unsigned range Q4_0
-			// stores.
-			if scaled >= 0 {
-				q = int(scaled+0.5) + 8
-			} else {
-				q = int(scaled-0.5) + 8
+			x0 := block[i] * invScale
+			x1 := block[i+16] * invScale
+			q0 := int(x0 + 8.5)
+			if q0 > 15 {
+				q0 = 15
 			}
-			if q < 0 {
-				q = 0
-			} else if q > 15 {
-				q = 15
+			q1 := int(x1 + 8.5)
+			if q1 > 15 {
+				q1 = 15
 			}
-			packed[i] = byte(q)
-		}
-		for i := 16; i < 32; i++ {
-			value := block[i]
-			scaled := value * invScale
-			var q int
-			if scaled >= 0 {
-				q = int(scaled+0.5) + 8
-			} else {
-				q = int(scaled-0.5) + 8
-			}
-			if q < 0 {
-				q = 0
-			} else if q > 15 {
-				q = 15
-			}
-			packed[i-16] |= byte(q << 4)
+			packed[i] = byte(q0) | byte(q1)<<4
 		}
 		out = append(out, packed[:]...)
 	}
@@ -148,55 +123,49 @@ func appendQuantizeQ4_0(out []byte, values []float32) []byte {
 }
 
 func quantizeQ5_0(values []float32) []byte {
-	return appendQuantizeQ5_0(make([]byte, 0, len(values)/32*24), values)
+	return appendQuantizeQ5_0(make([]byte, 0, len(values)/32*22), values)
 }
 
+// appendQuantizeQ5_0 appends ggml block_q5_0 blocks (22 B/block: 2 d + 4 qh +
+// 16 qs — NOT an affine min/scale scheme) for values to out. Faithful port of
+// ggml's quantize_row_q5_0_ref: like Q4_0, d = max/-16 from the SIGNED
+// extremal value; each element's low 4 bits pack into qs the same
+// lower/upper-half-interleaved way as Q4_0, and the 5th (high) bit of every
+// element packs into a separate 32-bit qh field (bit j for element j).
 func appendQuantizeQ5_0(out []byte, values []float32) []byte {
 	for blockStart := 0; blockStart < len(values); blockStart += 32 {
 		block := values[blockStart : blockStart+32]
-		maxAbs := maxAbsFloat32(block)
-		minVal := minFloat32(block)
+		amax, signedMax := maxAbsSignedFloat32(block)
 		scale := float32(0)
-		if maxAbs > 0 {
-			scale = (maxAbs - minVal) / 31
+		if amax > 0 {
+			scale = signedMax / -16
 		}
 		out = binary.LittleEndian.AppendUint16(out, float32ToFloat16(scale))
-		out = binary.LittleEndian.AppendUint16(out, float32ToFloat16(minVal))
-
-		var packed [20]byte
-		if scale == 0 {
-			for i := range packed {
-				packed[i] = 0x44 // 0b01000100 → each 5-bit nibble is 4 (midpoint)
-			}
-		} else {
-			invScale := 1 / scale
-			bitBuf := uint64(0)
-			bitCount := 0
-			byteIdx := 0
-			for _, value := range block {
-				scaled := (value - minVal) * invScale
-				var q int
-				if scaled >= 0 {
-					q = int(scaled + 0.5)
-				} else {
-					q = int(scaled - 0.5)
-				}
-				if q < 0 {
-					q = 0
-				} else if q > 31 {
-					q = 31
-				}
-				bitBuf |= uint64(q) << bitCount
-				bitCount += 5
-				for bitCount >= 8 {
-					packed[byteIdx] = byte(bitBuf & 0xFF)
-					bitBuf >>= 8
-					bitCount -= 8
-					byteIdx++
-				}
-			}
+		invScale := float32(0)
+		if scale != 0 {
+			invScale = 1 / scale
 		}
-		out = append(out, packed[:]...)
+		var qh uint32
+		var qs [16]byte
+		for j := range 16 {
+			x0 := block[j] * invScale
+			x1 := block[j+16] * invScale
+			q0 := int(x0 + 16.5)
+			if q0 > 31 {
+				q0 = 31
+			}
+			q1 := int(x1 + 16.5)
+			if q1 > 31 {
+				q1 = 31
+			}
+			qs[j] = byte(q0&0xF) | byte(q1&0xF)<<4
+			qh |= uint32((q0>>4)&1) << uint(j)
+			qh |= uint32((q1>>4)&1) << uint(j+16)
+		}
+		var qhBytes [4]byte
+		binary.LittleEndian.PutUint32(qhBytes[:], qh)
+		out = append(out, qhBytes[:]...)
+		out = append(out, qs[:]...)
 	}
 	return out
 }
@@ -1006,14 +975,21 @@ func maxAbsFloat32(values []float32) float32 {
 	return maxAbs
 }
 
-func minFloat32(values []float32) float32 {
-	minVal := values[0]
-	for i := 1; i < len(values); i++ {
-		if values[i] < minVal {
-			minVal = values[i]
+// maxAbsSignedFloat32 returns the largest |v| over values (amax) together
+// with the SIGNED v at that position (not just its magnitude) — the exact
+// amax/max pair ggml's quantize_row_q4_0_ref / q5_0_ref scan for. The sign
+// of the extremal element, not just its magnitude, drives those formats'
+// scale (d = max/-8 or max/-16), which is what lets the extremum map onto
+// the very edge of the nibble range instead of wasting one level.
+func maxAbsSignedFloat32(values []float32) (amax, signedMax float32) {
+	for _, v := range values {
+		a := absFloat32(v)
+		if a > amax {
+			amax = a
+			signedMax = v
 		}
 	}
-	return minVal
+	return amax, signedMax
 }
 
 func appendUint16LE(out []byte, value uint16) []byte {
