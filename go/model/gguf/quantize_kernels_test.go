@@ -496,6 +496,21 @@ func TestQuantizeKernels_QuantizeQ6_K_Bad(t *testing.T) {
 	}
 }
 
+// TestQuantizeKernels_QuantizeQ6_K_Ugly pins quantizeQ6_K(rampBlock(256))
+// against ggml's compiled quantize_row_q6_K_ref (see the Q8_0 pin for
+// methodology). Was broken before this fix: each sub-block's scale was a
+// naive maxAbs/32 (always non-negative) instead of ggml's make_qx_quants
+// least-squares fit, and the scale-of-scales used 127/maxScale (positive
+// only) instead of -128/maxScale (signed, hits the int8 range's edge
+// exactly) — every scale byte and every derived quant level differed.
+func TestQuantizeKernels_QuantizeQ6_K_Ugly(t *testing.T) {
+	const wantHex = "00001011212131324242525363637374001010213131425252627373839494a400102131415262728393a3b4c4d4e5f50020416181a2c2e30323446485a5c5e6606e5c5a474543313f2d2b1816140200505f4e4d4c3b3a3928272615141302014b4a4a3938382726262514141302020148373736362525242413131212010100000000000000000000000000000000000000000000000000404040404040404002010101010101010000000000000000010000000000000000000000000000008090a0b0c0d0e0f00f2031404f5f6f7ff78f"
+	got := hex.EncodeToString(quantizeQ6_K(rampBlock(qkBlockSize)))
+	if got != wantHex {
+		t.Errorf("quantizeQ6_K(rampBlock(256)) = %s, want ggml-ref %s", got, wantHex)
+	}
+}
+
 // --- Q3_K -----------------------------------------------------------------
 
 func testDequantQ3_K(data []byte) []float32 {

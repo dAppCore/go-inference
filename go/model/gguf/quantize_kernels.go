@@ -428,6 +428,66 @@ func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta
 	return scale, -minv
 }
 
+// groupMaxEPS is ggml's GROUP_MAX_EPS: below this magnitude a (super-)block
+// scale is treated as all-zero, guarding the -128/maxScale and 63/maxScale
+// style reciprocals from a divide-by-zero.
+const groupMaxEPS = 1e-15
+
+// makeQxQuantsRMSE1 returns the optimal SIGNED scale for a symmetric
+// (no-min) quantiser fitting x into the levels [-nmax,nmax-1], found by
+// least-squares refinement over a grid of candidate scales. Faithful port of
+// ggml's make_qx_quants specialised to the one call-site shape Q6_K actually
+// uses: rmse_type=1 (weight w=x[i]^2) and no importance-weight override. The
+// per-element level output (L in the C source) is discarded by every ggml
+// caller of this specific shape — Q6_K re-derives levels in a second pass
+// against the coarsened (f16 d * int8 scale) reconstructed scale — so this
+// port only returns the float scale.
+func makeQxQuantsRMSE1(x []float32, nmax int) float32 {
+	var amax, max float32
+	for _, v := range x {
+		if a := absFloat32(v); a > amax {
+			amax = a
+			max = v
+		}
+	}
+	if amax < groupMaxEPS {
+		return 0
+	}
+	iscale := float32(-nmax) / max
+	var sumlx, suml2 float32
+	for _, v := range x {
+		l := clampInt(nearestIntGGML(iscale*v), -nmax, nmax-1)
+		w := v * v
+		fl := float32(l)
+		sumlx += w * v * fl
+		suml2 += w * fl * fl
+	}
+	scale := float32(0)
+	if suml2 != 0 {
+		scale = sumlx / suml2
+	}
+	best := scale * sumlx
+	for is := -9; is <= 9; is++ {
+		if is == 0 {
+			continue
+		}
+		iscale = -(float32(nmax) + 0.1*float32(is)) / max
+		var sumlxTrial, suml2Trial float32
+		for _, v := range x {
+			l := clampInt(nearestIntGGML(iscale*v), -nmax, nmax-1)
+			w := v * v
+			fl := float32(l)
+			sumlxTrial += w * v * fl
+			suml2Trial += w * fl * fl
+		}
+		if suml2Trial > 0 && sumlxTrial*sumlxTrial > best*suml2Trial {
+			scale = sumlxTrial / suml2Trial
+			best = scale * sumlxTrial
+		}
+	}
+	return scale
+}
+
 func quantizeQ5_K(values []float32) []byte {
 	nBlocks := len(values) / qkBlockSize
 	return appendQuantizeQ5_K(make([]byte, 0, nBlocks*176), values)
@@ -522,47 +582,57 @@ func appendQuantizeQ6_K(out []byte, values []float32) []byte {
 	for blockStart := 0; blockStart < len(values); blockStart += qkBlockSize {
 		block := values[blockStart : blockStart+qkBlockSize]
 
-		// Per-sub-block signed scale (max |value| / 32) and the global
-		// scale-of-scales that maps each into the int8 scale field.
-		maxScale := float32(0)
+		// Per-sub-block optimal SIGNED scale (least-squares fit via
+		// makeQxQuantsRMSE1, not a naive maxAbs/32) and the global
+		// scale-of-scales, picked from the sub-block scale with the
+		// largest MAGNITUDE so it maps to exactly int8 -128 — using the
+		// full signed scale-field range, the same edge-mapping pattern
+		// as Q4_0/Q5_0's d = max/-N.
+		var maxScale, maxAbsScale float32
 		for sb := range qkSubBlocks {
 			subStart := sb * qkSubBlockSize
-			maxAbs := float32(0)
-			for j := range qkSubBlockSize {
-				if a := absFloat32(block[subStart+j]); a > maxAbs {
-					maxAbs = a
-				}
-			}
-			scratch.scales[sb] = maxAbs / 32 // sub-block scale candidate
-			if scratch.scales[sb] > maxScale {
-				maxScale = scratch.scales[sb]
+			scale := makeQxQuantsRMSE1(block[subStart:subStart+qkSubBlockSize], 32)
+			scratch.scales[sb] = scale
+			if a := absFloat32(scale); a > maxAbsScale {
+				maxAbsScale = a
+				maxScale = scale
 			}
 		}
 		d := float32(0)
-		var iscale float32
-		if maxScale > 0 {
-			iscale = 127 / maxScale
-			d = maxScale / 127
-		}
-		for sb := range qkSubBlocks {
-			scales[sb] = int8(clampInt(int(roundFloat32(iscale*scratch.scales[sb])), -127, 127))
+		if maxAbsScale >= groupMaxEPS {
+			iscale := float32(-128) / maxScale
+			d = 1 / iscale
+			for sb := range qkSubBlocks {
+				l := nearestIntGGML(iscale * scratch.scales[sb])
+				if l > 127 {
+					l = 127
+				}
+				scales[sb] = int8(l)
+			}
+		} else {
+			for sb := range qkSubBlocks {
+				scales[sb] = 0
+			}
 		}
 
 		// Requantise every element against its reconstructed sub-scale,
-		// to q ∈ [0,63] (signed -32..31 re-centred by +32).
+		// to q ∈ [0,63] (signed -32..31 re-centred by +32). A sub-block
+		// whose rounded scale lands on exactly 0 leaves its levels at 0
+		// (Go's zero value) rather than ggml's carried-over previous-block
+		// state — numerically identical, since dequant is dsub*(level-32)
+		// which is 0 either way when dsub is 0.
+		for i := range levels {
+			levels[i] = 0
+		}
 		for sb := range qkSubBlocks {
-			subStart := sb * qkSubBlockSize
-			subScale := d * float32(scales[sb])
-			inv := float32(0)
-			if subScale != 0 {
-				inv = 1 / subScale
+			dsub := d * float32(scales[sb])
+			if dsub == 0 {
+				continue
 			}
+			subStart := sb * qkSubBlockSize
 			for j := range qkSubBlockSize {
-				q := 0
-				if inv != 0 {
-					q = clampInt(int(roundFloat32(block[subStart+j]*inv)), -32, 31)
-				}
-				levels[subStart+j] = byte(q + 32)
+				l := clampInt(nearestIntGGML(block[subStart+j]/dsub), -32, 31)
+				levels[subStart+j] = byte(l + 32)
 			}
 		}
 
