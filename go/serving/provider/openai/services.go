@@ -167,7 +167,7 @@ func (h *EmbeddingsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// guards police generated text and do not re-expose EmbeddingModel, so a
 	// wrapped embedder would otherwise be rejected here. Mirrors the AcceptsAudio
 	// gate: a model that genuinely cannot embed is a clean 400.
-	embeddingModel, ok := inference.BaseTextModel(model).(inference.EmbeddingModel)
+	embeddingModel, ok := inference.As[inference.EmbeddingModel](model)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "model does not support embeddings", "model")
 		return
@@ -220,7 +220,7 @@ func (h *RerankHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	// Same unwrap as embeddings: reach the base model's RerankModel past the
 	// welfare/policy text guards, which do not re-expose it.
-	rerankModel, ok := inference.BaseTextModel(model).(inference.RerankModel)
+	rerankModel, ok := inference.As[inference.RerankModel](model)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "model does not support rerank", "model")
 		return
@@ -343,7 +343,7 @@ func (h *CancelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cancellable, ok := model.(inference.CancellableModel)
+	cancellable, ok := inference.As[inference.CancellableModel](model)
 	if !ok {
 		writeError(w, http.StatusNotImplemented, "model does not support request cancellation", "model")
 		return
@@ -379,7 +379,7 @@ func (h *serviceHandler) resolveCacheService(w http.ResponseWriter, ctx context.
 	if !ok {
 		return nil, false
 	}
-	cache, ok := model.(inference.CacheService)
+	cache, ok := inference.As[inference.CacheService](model)
 	if !ok {
 		writeError(w, http.StatusNotImplemented, "model does not support cache service operations", "model")
 		return nil, false

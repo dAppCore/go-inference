@@ -84,14 +84,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	messages := requestMessages(req.Messages, offeredTools)
 	if messagesCarryImages(messages) {
-		vision, ok := model.(inference.VisionModel)
+		vision, ok := inference.As[inference.VisionModel](model)
 		if !ok || !vision.AcceptsImages() {
 			writeError(w, http.StatusBadRequest, "model does not accept image input", "messages")
 			return
 		}
 	}
 	if messagesCarryAudios(messages) {
-		audio, ok := model.(inference.AudioModel)
+		audio, ok := inference.As[inference.AudioModel](model)
 		if !ok || !audio.AcceptsAudio() {
 			writeError(w, http.StatusBadRequest, "model does not accept audio input", "messages")
 			return
