@@ -365,6 +365,21 @@ func TestQuantizeKernels_QuantizeQ4_K_Bad(t *testing.T) {
 	}
 }
 
+// TestQuantizeKernels_QuantizeQ4_K_Ugly pins quantizeQ4_K(rampBlock(256))
+// against ggml's compiled quantize_row_q4_K_ref (see the Q8_0 pin for
+// methodology). This format was already fixed to the ggml reference
+// algorithm (makeQKX2Quants + get_scale_min_k4) before this pin existed;
+// the pin turns that self-consistent round-trip test into a real
+// conformance receipt against the compiled reference, not just proof the
+// encoder and the in-repo test decoder agree with each other.
+func TestQuantizeKernels_QuantizeQ4_K_Ugly(t *testing.T) {
+	const wantHex = "32180c284f4fcfcf3f2f1f10000f000f0000111122223333444455556666777788889999aaaabbbbccccddddeeeeffff00101021213232434354546565767687879899a9aababbcbccdcddedeefeffff80808191929293a3a4a4a5b5b6b6b7c7c8c8c9d9dadadaebebececfdfdfefeffcacacacbcbcbcbcbdbdcdcdcdcdcdcddedededededeeeeeefefefefeffffffff"
+	got := hex.EncodeToString(quantizeQ4_K(rampBlock(qkBlockSize)))
+	if got != wantHex {
+		t.Errorf("quantizeQ4_K(rampBlock(256)) = %s, want ggml-ref %s", got, wantHex)
+	}
+}
+
 // --- Q5_K -----------------------------------------------------------------
 
 func testDequantQ5_K(data []byte) []float32 {
@@ -432,6 +447,19 @@ func TestQuantizeKernels_QuantizeQ5_K_Good(t *testing.T) {
 		if got := absFloat32Diff(decoded[i], want); got > step*1.5+1e-6 {
 			t.Errorf("Q5_K[%d]: decoded %v want ~%v (err %v > tol %v)", i, decoded[i], want, got, step*1.5)
 		}
+	}
+}
+
+// TestQuantizeKernels_QuantizeQ5_K_Ugly pins quantizeQ5_K(rampBlock(256))
+// against ggml's compiled quantize_row_q5_K_ref (see the Q8_0 pin for
+// methodology). This format was already fixed to the ggml reference
+// algorithm before this pin existed; see the Q4_K pin for why the pin still
+// matters on top of the existing round-trip test.
+func TestQuantizeKernels_QuantizeQ5_K_Ugly(t *testing.T) {
+	const wantHex = "1e141028505090d03f2f2010000f0f0fe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e4fdffffffffffffffffffffffffffffff000112233445566778899aabbccddeeff000112233445566778899aabbccddee0112233445566778899aabbccddeeff001112233445566778899aabbccddeeff001112232435364748595a6b6c7d7e8f809191a2a3b4b5c6c7d8d9eaebfcfdfe8585868696979797a8a8a8a9b9b9babacacbcbcbdcdcdcddededeeeefeffffff"
+	got := hex.EncodeToString(quantizeQ5_K(rampBlock(qkBlockSize)))
+	if got != wantHex {
+		t.Errorf("quantizeQ5_K(rampBlock(256)) = %s, want ggml-ref %s", got, wantHex)
 	}
 }
 
@@ -660,6 +688,20 @@ func TestQuantizeKernels_QuantizeQ2_K_Bad(t *testing.T) {
 	}
 }
 
+// TestQuantizeKernels_QuantizeQ2_K_Ugly pins quantizeQ2_K(rampBlock(256))
+// against ggml's compiled quantize_row_q2_K_ref (see the Q8_0 pin for
+// methodology). Was broken before this fix: the per-sub-block (scale, min)
+// was a naive (max-min)/3 affine fit instead of ggml's make_qkx2_quants —
+// the same optimal-fit search already ported for Q4_K/Q5_K, called here
+// with Q2_K's own parameters (nmax=3, plain |x| weights, useMad=true).
+func TestQuantizeKernels_QuantizeQ2_K_Ugly(t *testing.T) {
+	const wantHex = "f1d1b1917161412102030507090b0e0f404040818185c6d6dadbebefffffffff10506060a1b1f5f6f6fafbfffffffffff8f8f8fdfdfdfdfdfdfefefefefefffffefefefefeffffffffffffffffffffff7b293830"
+	got := hex.EncodeToString(quantizeQ2_K(rampBlock(qkBlockSize)))
+	if got != wantHex {
+		t.Errorf("quantizeQ2_K(rampBlock(256)) = %s, want ggml-ref %s", got, wantHex)
+	}
+}
+
 // --- Q8_K -----------------------------------------------------------------
 
 func testDequantQ8_K(data []byte) ([]float32, []int16) {
@@ -721,6 +763,20 @@ func TestQuantizeKernels_QuantizeQ8_K_Bad(t *testing.T) {
 		if sum != 0 {
 			t.Fatalf("zero-block Q8_K bsums[%d] = %d, want 0", sb, sum)
 		}
+	}
+}
+
+// TestQuantizeKernels_QuantizeQ8_K_Ugly pins quantizeQ8_K(rampBlock(256))
+// against ggml's compiled quantize_row_q8_K_ref (see the Q8_0 pin for
+// methodology). Q8_K is never itself a GGUF tensor storage type — llama.cpp
+// only produces it as a matmul-intermediate quantisation of activations, not
+// a file format (llama-quantize's allowed-type list has no Q8_K entry) — but
+// the reference function is real and exported, so the same byte pin applies.
+func TestQuantizeKernels_QuantizeQ8_K_Ugly(t *testing.T) {
+	const wantHex = "0402813c8182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e88f888f988fa88fb78fc78fd78fe78ff78007801780278036904680568066807"
+	got := hex.EncodeToString(quantizeQ8_K(rampBlock(qkBlockSize)))
+	if got != wantHex {
+		t.Errorf("quantizeQ8_K(rampBlock(256)) = %s, want ggml-ref %s", got, wantHex)
 	}
 }
 
