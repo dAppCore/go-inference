@@ -88,7 +88,7 @@ func BenchmarkScheduler_ErrProp_Schedule_NilModel(b *testing.B) {
 // path doesn't hit a different cost shape. ---
 
 func BenchmarkScheduler_ErrProp_Schedule_NilBaseInsideScheduler(b *testing.B) {
-	sched := New(nil, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(nil, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -105,7 +105,7 @@ func BenchmarkScheduler_ErrProp_Schedule_NilBaseInsideScheduler(b *testing.B) {
 
 func BenchmarkScheduler_ErrProp_Err_Nil(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -122,7 +122,7 @@ func BenchmarkScheduler_ErrProp_Err_Nil(b *testing.B) {
 // Err() returns the cached lastErr without walking to base.Err. ---
 
 func BenchmarkScheduler_ErrProp_Err_LastErrCached(b *testing.B) {
-	sched := New(nil, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(nil, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	// Trigger setErr via Generate's nil-model failure path.
 	for range sched.Generate(context.Background(), "p") {
 		break
@@ -142,7 +142,7 @@ func BenchmarkScheduler_ErrProp_Err_LastErrCached(b *testing.B) {
 
 func BenchmarkScheduler_ErrProp_Err_BaseErrFallback(b *testing.B) {
 	base := &errBaseModel{tokens: benchTokens(1), err: core.NewError("scheduler-bench: base failed")}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -157,7 +157,7 @@ func BenchmarkScheduler_ErrProp_Err_BaseErrFallback(b *testing.B) {
 
 func BenchmarkScheduler_ErrProp_Generate_BaseReportsErrAtEnd_32Tokens(b *testing.B) {
 	base := &errBaseModel{tokens: benchTokens(32), err: core.NewError("scheduler-bench: base reported err")}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 32})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 32})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -176,7 +176,7 @@ func BenchmarkScheduler_ErrProp_Generate_BaseReportsErrAtEnd_32Tokens(b *testing
 
 func BenchmarkScheduler_ErrProp_Schedule_EmptyIDGeneratesID(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 32, StreamBuffer: 4, RequestIDPrefix: "errprop"})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 32, StreamBuffer: 4, RequestIDPrefix: "errprop"})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -195,7 +195,7 @@ func BenchmarkScheduler_ErrProp_Schedule_EmptyIDGeneratesID(b *testing.B) {
 
 func BenchmarkScheduler_ErrProp_Schedule_PreSetID(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 32, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 32, StreamBuffer: 4})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()

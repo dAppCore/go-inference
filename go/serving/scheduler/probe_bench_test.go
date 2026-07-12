@@ -77,7 +77,7 @@ func (s *slowProbeSink) EmitProbe(event inference.ProbeEvent) {
 
 func BenchmarkScheduler_Probe_NoSink_Generate_32Tokens(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(32)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 32, ProbeSink: nil})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 32, ProbeSink: nil})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -93,7 +93,7 @@ func BenchmarkScheduler_Probe_NoSink_Generate_32Tokens(b *testing.B) {
 func BenchmarkScheduler_Probe_FastSink_Generate_32Tokens(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(32)}
 	sink := &fastProbeSink{}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 32, ProbeSink: sink})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 32, ProbeSink: sink})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -111,7 +111,7 @@ func BenchmarkScheduler_Probe_FastSink_Generate_32Tokens(b *testing.B) {
 func BenchmarkScheduler_Probe_SlowSink_Generate_32Tokens(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(32)}
 	sink := &slowProbeSink{}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 32, ProbeSink: sink})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 32, ProbeSink: sink})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -135,7 +135,7 @@ func BenchmarkScheduler_Probe_SlowSink_Generate_32Tokens(b *testing.B) {
 
 func BenchmarkScheduler_Probe_NoSink_Generate_256Tokens(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(256)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 256, ProbeSink: nil})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 256, ProbeSink: nil})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -151,7 +151,7 @@ func BenchmarkScheduler_Probe_NoSink_Generate_256Tokens(b *testing.B) {
 func BenchmarkScheduler_Probe_FastSink_Generate_256Tokens(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(256)}
 	sink := &fastProbeSink{}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 256, ProbeSink: sink})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 256, ProbeSink: sink})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -174,7 +174,7 @@ func BenchmarkScheduler_Probe_FastSink_Generate_256Tokens(b *testing.B) {
 func BenchmarkScheduler_Probe_ManyProbeRequests_FastSink_ScheduleAndCancel(b *testing.B) {
 	base := &cancellableBenchModel{tokens: benchTokens(32), perTokenNs: 50 * 1000} // 50µs per token
 	sink := &fastProbeSink{}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4, ProbeSink: sink})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4, ProbeSink: sink})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -201,7 +201,7 @@ func BenchmarkScheduler_Probe_ProbeBusFanOut_3Sinks_Generate_32Tokens(b *testing
 	sinkB := &fastProbeSink{}
 	sinkC := &fastProbeSink{}
 	bus := inference.NewProbeBus(sinkA, sinkB, sinkC)
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 32, ProbeSink: bus})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 32, ProbeSink: bus})
 	ctx := context.Background()
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -222,7 +222,7 @@ func BenchmarkScheduler_Probe_ProbeBusFanOut_3Sinks_Generate_32Tokens(b *testing
 
 func BenchmarkScheduler_Probe_SetProbeSink(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	sink := &fastProbeSink{}
 	b.ReportAllocs()
 	b.ResetTimer()
@@ -233,7 +233,7 @@ func BenchmarkScheduler_Probe_SetProbeSink(b *testing.B) {
 
 func BenchmarkScheduler_Probe_SetProbeSink_Nil(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(1)}
-	sched := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
+	sched, _ := New(base, Config{MaxConcurrent: 1, MaxQueue: 4, StreamBuffer: 4})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

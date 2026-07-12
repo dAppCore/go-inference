@@ -46,7 +46,7 @@ func BenchmarkScheduler_Mixed_Sizes_4Workers_Parallel(b *testing.B) {
 		tokenSets[i] = benchTokens(size)
 	}
 	base := &mixedSizeBenchModel{tokenSets: tokenSets}
-	sched := New(base, Config{MaxConcurrent: 4, MaxQueue: 64, StreamBuffer: 2048})
+	sched, _ := New(base, Config{MaxConcurrent: 4, MaxQueue: 64, StreamBuffer: 2048})
 	ctx := context.Background()
 	var idx atomic.Int64
 	var total atomic.Int64
@@ -142,7 +142,7 @@ func (m *mixedSizeBenchModel) Close() core.Result                 { return core.
 // two kinds when interleaved.
 func BenchmarkScheduler_Mixed_Kinds_ChatAndGenerate(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(32)}
-	sched := New(base, Config{MaxConcurrent: 4, MaxQueue: 16, StreamBuffer: 32})
+	sched, _ := New(base, Config{MaxConcurrent: 4, MaxQueue: 16, StreamBuffer: 32})
 	ctx := context.Background()
 	messages := []inference.Message{{Role: "user", Content: "test"}}
 	var idx atomic.Int64
@@ -175,7 +175,7 @@ func BenchmarkScheduler_Mixed_Kinds_ChatAndGenerate(b *testing.B) {
 // token allocation density.
 func BenchmarkScheduler_Mixed_LabelCounts_0_5_20_Generate_32Tokens(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(32)}
-	sched := New(base, Config{MaxConcurrent: 4, MaxQueue: 16, StreamBuffer: 32})
+	sched, _ := New(base, Config{MaxConcurrent: 4, MaxQueue: 16, StreamBuffer: 32})
 	ctx := context.Background()
 	bigLabels := map[string]string{}
 	for i := range 20 {
@@ -217,7 +217,7 @@ func BenchmarkScheduler_Mixed_LabelCounts_0_5_20_Generate_32Tokens(b *testing.B)
 
 func BenchmarkScheduler_Mixed_Sustained_64RequestsPerOp_32Tokens(b *testing.B) {
 	base := &schedBenchModel{tokens: benchTokens(32)}
-	sched := New(base, Config{MaxConcurrent: 4, MaxQueue: 64, StreamBuffer: 32})
+	sched, _ := New(base, Config{MaxConcurrent: 4, MaxQueue: 64, StreamBuffer: 32})
 	ctx := context.Background()
 	const burstSize = 64
 	b.ReportAllocs()
