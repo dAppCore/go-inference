@@ -197,3 +197,40 @@ func TestGemmaTools_RenderGemmaToolCall_Ugly(t *testing.T) {
 		t.Fatalf("nested render = %q, want %q", got, want)
 	}
 }
+
+// TestGemmaTools_SupportsToolSyntax_Good pins the accepted Gemma 4 spellings —
+// the exact architecture strings engine/hip's own gemma4 detection matches
+// against (draft_detect.go's Contains(value, "gemma4")).
+func TestGemmaTools_SupportsToolSyntax_Good(t *testing.T) {
+	for _, arch := range []string{"gemma4", "gemma4_text", "gemma4_unified", "gemma4_unified_text", "GEMMA4_TEXT"} {
+		if !SupportsToolSyntax(arch) {
+			t.Fatalf("SupportsToolSyntax(%q) = false, want true", arch)
+		}
+	}
+}
+
+// TestGemmaTools_SupportsToolSyntax_Bad pins the rejected architectures — a
+// non-Gemma-4 family (including the coarser "gemma3" bucket, which shares
+// gemma_tools.go's reasoning markers but was never trained on this tool
+// syntax) and the empty string.
+func TestGemmaTools_SupportsToolSyntax_Bad(t *testing.T) {
+	for _, arch := range []string{"qwen3", "gemma3", "gemma3_text", "gpt_oss", "mistral", ""} {
+		if SupportsToolSyntax(arch) {
+			t.Fatalf("SupportsToolSyntax(%q) = true, want false", arch)
+		}
+	}
+}
+
+// TestGemmaTools_SupportsToolSyntax_Ugly pins that the check is a substring
+// match on the raw architecture string — no NormaliseKey hyphen/dot folding —
+// so a hyphenated form like "gemma-4-e4b" (which would fold to "gemma_4_e4b",
+// splitting the digit from the name) correctly does NOT match; only a
+// contiguous "gemma4" run does, wherever it sits in a longer identifier.
+func TestGemmaTools_SupportsToolSyntax_Ugly(t *testing.T) {
+	if SupportsToolSyntax("gemma-4-e4b") {
+		t.Fatal(`SupportsToolSyntax("gemma-4-e4b") = true, want false (hyphenated form, not a "gemma4" run)`)
+	}
+	if !SupportsToolSyntax("prefix_gemma4_suffix") {
+		t.Fatal(`SupportsToolSyntax("prefix_gemma4_suffix") = false, want true (contiguous "gemma4" run anywhere in the string)`)
+	}
+}

@@ -82,6 +82,7 @@ const (
 	CapabilityCacheWarm          CapabilityID = "cache.warm"
 	CapabilityToolParse          CapabilityID = "tool.parse"
 	CapabilityReasoningParse     CapabilityID = "reasoning.parse"
+	CapabilityStructuredOutput   CapabilityID = "structured.output"
 	CapabilitySpeculativeDecode  CapabilityID = "speculative.decode"
 	CapabilityPromptLookupDecode CapabilityID = "prompt.lookup.decode"
 	CapabilityMoERouting         CapabilityID = "moe.routing"
