@@ -52,13 +52,16 @@ type Layer struct {
 // ComposedModel is the loaded hybrid stack: token embedding, the per-layer blocks, the final norm and the
 // LM head (tied to Embed when Output is nil). All f32 (the loader widens the bf16 checkpoint).
 type ComposedModel struct {
-	Embed  []float32 // [Vocab, D]
-	Layers []Layer
-	NormF  []float32 // [D] final RMSNorm
-	Output []float32 // [Vocab, D] (nil ⇒ tied to Embed)
-	D      int
-	Vocab  int
-	Eps    float32
+	Embed            []float32 // [Vocab, D]
+	Layers           []Layer
+	NormF            []float32 // [D] final RMSNorm
+	Output           []float32 // [Vocab, D] (nil ⇒ tied to Embed)
+	D                int
+	Vocab            int
+	Eps              float32
+	LayerNorm        bool
+	ParallelResidual bool
+	LogitScale       float32
 }
 
 func silu(v float64) float64 { return v / (1 + math.Exp(-v)) }
@@ -213,6 +216,35 @@ func rmsNormRowsPlain(x, w []float32, rows, d int, eps float32) []float32 {
 	return out
 }
 
+func layerNormRowsPlain(x, w []float32, rows, d int, eps float32) []float32 {
+	out := make([]float32, rows*d)
+	for r := range rows {
+		xr := x[r*d : (r+1)*d]
+		var mean float64
+		for _, value := range xr {
+			mean += float64(value)
+		}
+		mean /= float64(d)
+		var variance float64
+		for _, value := range xr {
+			delta := float64(value) - mean
+			variance += delta * delta
+		}
+		inv := 1 / math.Sqrt(variance/float64(d)+float64(eps))
+		for i := range d {
+			out[r*d+i] = float32((float64(xr[i]) - mean) * inv * float64(w[i]))
+		}
+	}
+	return out
+}
+
+func (m *ComposedModel) normalise(x, w []float32, rows int) []float32 {
+	if m.LayerNorm {
+		return layerNormRowsPlain(x, w, rows, m.D, m.Eps)
+	}
+	return rmsNormRowsPlain(x, w, rows, m.D, m.Eps)
+}
+
 // swiglu runs the SwiGLU MLP over x [L,D] → [L,D].
 func (mlp *MLP) forward(x []float32, L, D int) []float32 {
 	if MLPDevice != nil && L*D*mlp.FF >= deviceMinWork {
@@ -284,6 +316,19 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 
 	for li := range s.m.Layers {
 		layer := &s.m.Layers[li]
+		if s.m.ParallelResidual {
+			normed := s.m.normalise(h, layer.InputNorm, L)
+			mixOut, next, err := layer.Mixer.Forward(normed, L, D, s.states[li])
+			if err != nil {
+				return nil, err
+			}
+			s.states[li] = next
+			mlpOut := layer.MLP.forward(normed, L, D)
+			for i := range h {
+				h[i] += mixOut[i] + mlpOut[i]
+			}
+			continue
+		}
 
 		// Resolve this layer's (mixerHidden, projW, mixCols, next-state): either resume from a pending
 		// input-fuse (skipping this layer's own RMSNorm + projection step — both mixer kinds implement
@@ -493,12 +538,18 @@ func (s *ComposedSession) Forward(tokens []int32) ([]float32, error) { return s.
 
 // headLogits maps a single hidden [D] to vocab logits via the final norm + LM head.
 func (s *ComposedSession) headLogits(hidden []float32) []float32 {
-	normed := rmsNormRowsPlain(hidden, s.m.NormF, 1, s.m.D, s.m.Eps)
+	normed := s.m.normalise(hidden, s.m.NormF, 1)
 	head := s.m.Output
 	if head == nil {
 		head = s.m.Embed
 	}
-	return matNT(normed, head, 1, s.m.D, s.m.Vocab)
+	logits := matNT(normed, head, 1, s.m.D, s.m.Vocab)
+	if s.m.LogitScale != 0 {
+		for i := range logits {
+			logits[i] *= s.m.LogitScale
+		}
+	}
+	return logits
 }
 
 // HeadLogitsHost is headLogits, exported: the reference final-RMSNorm + LM-head computation
