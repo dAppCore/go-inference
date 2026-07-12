@@ -24,18 +24,19 @@
 package builtin
 
 import (
-	_ "dappco.re/go/inference/model/bloom"    // bloom
-	_ "dappco.re/go/inference/model/composed" // qwen3_5 / qwen3_5_moe / qwen3_next hybrids (ArchSpec.Composed)
-	_ "dappco.re/go/inference/model/deepseek" // deepseek_v2 / deepseek_v3 (MLA declaration)
-	_ "dappco.re/go/inference/model/falcon"   // falcon (ALiBi transformer; excludes Falcon-H1)
-	_ "dappco.re/go/inference/model/gemma3"   // gemma3
-	_ "dappco.re/go/inference/model/gemma4"   // gemma4 / gemma4_text / gemma4_unified (+ assistant)
-	_ "dappco.re/go/inference/model/gpt2"     // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
-	_ "dappco.re/go/inference/model/gptneox"  // gpt_neox / gptj / gpt_neo
-	_ "dappco.re/go/inference/model/llama"    // llama (dense text)
-	_ "dappco.re/go/inference/model/mistral"  // mistral
-	_ "dappco.re/go/inference/model/mixtral"  // mixtral sparse MoE
-	_ "dappco.re/go/inference/model/phi"      // phi / phi3
-	_ "dappco.re/go/inference/model/qwen2"    // qwen2 / qwen2.5 dense text
-	_ "dappco.re/go/inference/model/qwen3"    // qwen3
+	_ "dappco.re/go/inference/model/bloom"      // bloom
+	_ "dappco.re/go/inference/model/composed"   // qwen3_5 / qwen3_5_moe / qwen3_next hybrids (ArchSpec.Composed)
+	_ "dappco.re/go/inference/model/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
+	_ "dappco.re/go/inference/model/falcon"     // falcon (ALiBi transformer; excludes Falcon-H1)
+	_ "dappco.re/go/inference/model/gemma3"     // gemma3
+	_ "dappco.re/go/inference/model/gemma4"     // gemma4 / gemma4_text / gemma4_unified (+ assistant)
+	_ "dappco.re/go/inference/model/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
+	_ "dappco.re/go/inference/model/gptneox"    // gpt_neox / gptj / gpt_neo
+	_ "dappco.re/go/inference/model/llama"      // llama (dense text)
+	_ "dappco.re/go/inference/model/mistral"    // mistral
+	_ "dappco.re/go/inference/model/mixtral"    // mixtral sparse MoE
+	_ "dappco.re/go/inference/model/phi"        // phi / phi3
+	_ "dappco.re/go/inference/model/qwen2"      // qwen2 / qwen2.5 dense text
+	_ "dappco.re/go/inference/model/qwen3"      // qwen3
+	_ "dappco.re/go/inference/model/starcoder2" // starcoder2
 )
