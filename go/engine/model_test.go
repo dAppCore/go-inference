@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"iter"
 	"strings"
 	"testing"
 	"time"
@@ -434,6 +435,96 @@ func TestModel_TextModel_Chat_Bad(t *testing.T) {
 	r := m.Err()
 	if r.OK || !core.Contains(r.Error(), "does not accept image input") {
 		t.Fatalf("Err() = %+v, want the image-rejection message", r)
+	}
+}
+
+// TestModel_SetChatInterceptor_Good pins the serve-layer chat hook end to end:
+// an installed interceptor that claims a text-only turn (ok=true) short-circuits
+// the stateless path and its sequence is served; uninstalling with nil falls
+// through to the stateless stream again; and the whole surface is nil-receiver
+// safe.
+func TestModel_SetChatInterceptor_Good(t *testing.T) {
+	m := NewTextModel(&fakeTokenModel{genIDs: []int32{10, 11}}, newFixtureTokenizer(t), "gemma-test", inference.ModelInfo{}, 4096)
+	intercepted := false
+	m.SetChatInterceptor(func(_ context.Context, _ []inference.Message, _ ...inference.GenerateOption) (iter.Seq[inference.Token], bool) {
+		intercepted = true
+		return seqOfOneToken("continuity"), true
+	})
+
+	var got []string
+	for tk := range m.Chat(context.Background(), []inference.Message{{Role: "user", Content: "hi"}}) {
+		got = append(got, tk.Text)
+	}
+	if !intercepted {
+		t.Fatal("installed interceptor was not offered the text-only turn")
+	}
+	if len(got) != 1 || got[0] != "continuity" {
+		t.Fatalf("Chat served %v, want the interceptor's sequence", got)
+	}
+
+	// Uninstall: nil restores the stateless path (the canned engine tokens).
+	m.SetChatInterceptor(nil)
+	var n int
+	for range m.Chat(context.Background(), []inference.Message{{Role: "user", Content: "hi"}}, inference.WithMaxTokens(2)) {
+		n++
+	}
+	if n != 2 {
+		t.Fatalf("post-uninstall Chat produced %d tokens, want the stateless stream's 2", n)
+	}
+
+	// nil receiver is a no-op, not a panic.
+	var nilModel *TextModel
+	nilModel.SetChatInterceptor(nil)
+}
+
+// seqOfOneToken yields a single-text token — the interceptor's canned reply.
+func seqOfOneToken(text string) iter.Seq[inference.Token] {
+	return func(yield func(inference.Token) bool) { yield(inference.Token{Text: text}) }
+}
+
+// TestModel_TextModel_Chat_MultimodalRejections pins every "the model cannot
+// serve this attachment kind" arm of Chat: each fails loud with its own named
+// error rather than silently dropping the attachment or answering against a
+// text-only prefill. These guard arch-neutrality too — the rejection is keyed on
+// the loaded checkpoint's DECLARED capability probes, not its architecture.
+func TestModel_TextModel_Chat_MultimodalRejections(t *testing.T) {
+	tok := newFixtureTokenizer(t)
+	cases := []struct {
+		name    string
+		tm      TokenModel
+		msg     inference.Message
+		wantErr string
+	}{
+		{
+			name:    "VideoOnTextOnlyModel",
+			tm:      &fakeTokenModel{},
+			msg:     inference.Message{Role: "user", Content: "watch", Videos: [][]byte{{1}}},
+			wantErr: "does not accept video input",
+		},
+		{
+			name:    "AudioOnNonAudioModel",
+			tm:      &fakeVisionTokenModel{accepts: true},
+			msg:     inference.Message{Role: "user", Content: "hear", Audios: [][]byte{{1}}},
+			wantErr: "does not accept audio input",
+		},
+		{
+			name:    "AudioOnlyWithoutVisionPrefillSurface",
+			tm:      &fakeAudioTokenModel{accepts: true},
+			msg:     inference.Message{Role: "user", Content: "hear", Audios: [][]byte{{1}}},
+			wantErr: "exposes no multimodal prefill surface",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewTextModel(tc.tm, tok, "gemma-test", inference.ModelInfo{}, 4096)
+			for range m.Chat(context.Background(), []inference.Message{tc.msg}) {
+				t.Fatal("expected no tokens from a rejected multimodal turn")
+			}
+			r := m.Err()
+			if r.OK || !core.Contains(r.Error(), tc.wantErr) {
+				t.Fatalf("Err() = %+v, want it to contain %q", r, tc.wantErr)
+			}
+		})
 	}
 }
 
