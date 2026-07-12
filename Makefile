@@ -58,6 +58,7 @@ RELEASE_SIDECARS = $(AMD_KERNEL_MODULE_NAME) $(CUDA_KERNEL_MODULE_NAME) $(CPU_X8
 HIPCC ?= hipcc
 AMD_HIP_ARCH ?= gfx1100
 AMD_HIP_STD ?= c++23
+AMD_HIP_OPT ?= -O3
 NVIDIA_HIP_ARCH ?= sm_75
 NVIDIA_HIP_STD ?= c++20
 ROCM_INCLUDE_DIR ?= /opt/rocm/include
@@ -291,7 +292,7 @@ compile-matrix: build-cli named-binaries
 
 hip-amd:
 	mkdir -p "$(KERNEL_BUILD_DIR_ABS)"
-	HIP_PLATFORM=amd $(HIPCC) --std=$(AMD_HIP_STD) --genco --offload-arch=$(AMD_HIP_ARCH) -O2 "$(KERNEL_SRC_ABS)" -o "$(KERNEL_BUILD_DIR_ABS)/rocm_kernels_$(AMD_HIP_ARCH).hsaco"
+	HIP_PLATFORM=amd $(HIPCC) --std=$(AMD_HIP_STD) --genco --offload-arch=$(AMD_HIP_ARCH) $(AMD_HIP_OPT) "$(KERNEL_SRC_ABS)" -o "$(KERNEL_BUILD_DIR_ABS)/rocm_kernels_$(AMD_HIP_ARCH).hsaco"
 
 hip-nvidia:
 	mkdir -p "$(KERNEL_BUILD_DIR_ABS)"

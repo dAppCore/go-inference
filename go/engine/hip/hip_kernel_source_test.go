@@ -15,8 +15,11 @@ import (
 	core "dappco.re/go"
 )
 
+const hipKernelSourcePathForTest = "kernels/rocm_kernels.hip"
+const hipKernelMakefilePathForTest = "../../../Makefile"
+
 func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile("../kernels/rocm_kernels.hip")
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -24,10 +27,14 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_prefill`,
 		`extern "C" __global__ void rocm_decode`,
 		`extern "C" __global__ void rocm_kv_encode_token`,
+		`extern "C" __global__ void rocm_kv_encode_token_value_norm`,
+		`extern "C" __global__ void rocm_kv_encode_token_value_norm_descriptor_append`,
 		`extern "C" __global__ void rocm_kv_descriptor_append`,
 		`extern "C" __global__ void rocm_projection`,
 		`extern "C" __global__ void rocm_projection_batch`,
 		`extern "C" __global__ void rocm_mlx_q4_projection`,
+		`extern "C" __global__ void rocm_mlx_q4_projection_cols256`,
+		`extern "C" __global__ void rocm_mlx_q4_projection_q6_g16_row16`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_q6_row16`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_q6_row32`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_q6_row64`,
@@ -49,6 +56,8 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_mlx_q4_triple_projection_q6_row64`,
 		`extern "C" __global__ void rocm_mlx_q4_pair_projection`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply`,
+		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_cols1536_row16`,
+		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_mlp_q4_g32_cols1536_persistent`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536_row32`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536_row64`,
@@ -56,11 +65,13 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_projection`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_projection_q6_row16`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_projection_batch`,
+		`extern "C" __global__ void rocm_rms_norm_residual_add_mlx_q4_gelu_tanh_projection`,
 		`extern "C" __global__ void rocm_rms_norm`,
 		`extern "C" __global__ void rocm_rms_norm_residual_add`,
 		`extern "C" __global__ void rocm_rms_norm_residual_add_norm`,
 		`extern "C" __global__ void rocm_rms_norm_heads`,
 		`extern "C" __global__ void rocm_rms_norm_rope_heads`,
+		`extern "C" __global__ void rocm_rms_norm_rope_heads_pair`,
 		`extern "C" __global__ void rocm_rms_norm_rope_heads_batch`,
 		`extern "C" __global__ void rocm_rope`,
 		`extern "C" __global__ void rocm_rope_heads`,
@@ -69,6 +80,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_attention`,
 		`extern "C" __global__ void rocm_attention_heads`,
 		`extern "C" __global__ void rocm_attention_heads_batch_causal`,
+		`extern "C" __global__ void rocm_attention_heads_batch_causal_query_rms_rope`,
 		`extern "C" __global__ void rocm_attention_heads_chunked_stage1`,
 		`extern "C" __global__ void rocm_attention_heads_chunked_stage2`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1`,
@@ -81,6 +93,13 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_gelu_tanh_multiply`,
 		`extern "C" __global__ void rocm_moe_router`,
 		`extern "C" __global__ void rocm_moe_lazy_experts`,
+		`extern "C" __global__ void rocm_gguf_q4_0_projection`,
+		`extern "C" __global__ void rocm_gguf_q4_0_gelu_tanh_gate_up`,
+		`extern "C" __global__ void rocm_gguf_q4_0_selected_expert_gate_up`,
+		`extern "C" __global__ void rocm_gguf_q4_0_selected_expert_down`,
+		`extern "C" __global__ void rocm_gguf_q4_k_selected_expert_gate_up`,
+		`extern "C" __global__ void rocm_gguf_q5_1_selected_expert_down`,
+		`extern "C" __global__ void rocm_gguf_q8_0_selected_expert_down`,
 		`extern "C" __global__ void rocm_jangtq_projection`,
 		`extern "C" __global__ void rocm_codebook_lookup`,
 		`extern "C" __global__ void rocm_lora_projection`,
@@ -117,6 +136,11 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		core.Sprintf("ROCM_DEVICE_KV_DESCRIPTOR_ENCODING_Q4_ROWS_INTERLEAVED = %d", rocmDeviceKVDescriptorEncodingQ4RowsI),
 		core.Sprintf("ROCM_KV_ENCODE_TOKEN_LAUNCH_ARGS_VERSION = %d", hipKVEncodeTokenLaunchArgsVersion),
 		core.Sprintf("ROCM_KV_ENCODE_TOKEN_LAUNCH_ARGS_BYTES = %d", hipKVEncodeTokenLaunchArgsBytes),
+		core.Sprintf("ROCM_KV_ENCODE_TOKEN_VALUE_NORM_LAUNCH_ARGS_VERSION = %d", hipKVEncodeTokenValueNormLaunchArgsVersion),
+		core.Sprintf("ROCM_KV_ENCODE_TOKEN_VALUE_NORM_LAUNCH_ARGS_BYTES = %d", hipKVEncodeTokenValueNormLaunchArgsBytes),
+		core.Sprintf("ROCM_KV_ENCODE_TOKEN_VALUE_NORM_DESCRIPTOR_APPEND_LAUNCH_ARGS_VERSION = %d", hipKVEncodeTokenValueNormDescriptorAppendLaunchArgsVersion),
+		core.Sprintf("ROCM_KV_ENCODE_TOKEN_VALUE_NORM_DESCRIPTOR_APPEND_LAUNCH_ARGS_BYTES = %d", hipKVEncodeTokenValueNormDescriptorAppendLaunchArgsBytes),
+		core.Sprintf("ROCM_KV_ENCODE_TOKEN_VALUE_NORM_MAX_HEADS = %d", hipKVEncodeTokenValueNormMaxHeads),
 		core.Sprintf("ROCM_KV_ENCODE_TOKEN_BLOCK_SIZE = %d", hipKVEncodeTokenBlockSize),
 		core.Sprintf("ROCM_KV_DESCRIPTOR_APPEND_LAUNCH_ARGS_VERSION = %d", hipKVDescriptorAppendLaunchArgsVersion),
 		core.Sprintf("ROCM_KV_DESCRIPTOR_APPEND_LAUNCH_ARGS_BYTES = %d", hipKVDescriptorAppendLaunchArgsBytes),
@@ -143,10 +167,14 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		core.Sprintf("ROCM_MLX_Q4_GELU_TANH_MUL_LAUNCH_ARGS_BYTES = %d", hipMLXQ4GELUTanhMulLaunchArgsBytes),
 		core.Sprintf("ROCM_MLX_Q4_GELU_TANH_MUL_BATCH_LAUNCH_ARGS_VERSION = %d", hipMLXQ4GELUTanhMulBatchLaunchArgsVersion),
 		core.Sprintf("ROCM_MLX_Q4_GELU_TANH_MUL_BATCH_LAUNCH_ARGS_BYTES = %d", hipMLXQ4GELUTanhMulBatchLaunchArgsBytes),
+		core.Sprintf("ROCM_MLX_Q4_GELU_TANH_MLP_PERSISTENT_LAUNCH_ARGS_VERSION = %d", hipMLXQ4GELUTanhMLPPersistentLaunchArgsVersion),
+		core.Sprintf("ROCM_MLX_Q4_GELU_TANH_MLP_PERSISTENT_LAUNCH_ARGS_BYTES = %d", hipMLXQ4GELUTanhMLPPersistentLaunchArgsBytes),
 		core.Sprintf("ROCM_MLX_Q4_GELU_TANH_PROJ_LAUNCH_ARGS_VERSION = %d", hipMLXQ4GELUTanhProjLaunchArgsVersion),
 		core.Sprintf("ROCM_MLX_Q4_GELU_TANH_PROJ_LAUNCH_ARGS_BYTES = %d", hipMLXQ4GELUTanhProjLaunchArgsBytes),
 		core.Sprintf("ROCM_MLX_Q4_GELU_TANH_PROJ_BATCH_LAUNCH_ARGS_VERSION = %d", hipMLXQ4GELUTanhProjBatchLaunchArgsVersion),
 		core.Sprintf("ROCM_MLX_Q4_GELU_TANH_PROJ_BATCH_LAUNCH_ARGS_BYTES = %d", hipMLXQ4GELUTanhProjBatchLaunchArgsBytes),
+		core.Sprintf("ROCM_RMS_NORM_RESIDUAL_ADD_GELU_TANH_PROJ_LAUNCH_ARGS_VERSION = %d", hipRMSResidualAddGELUTanhProjLaunchArgsVersion),
+		core.Sprintf("ROCM_RMS_NORM_RESIDUAL_ADD_GELU_TANH_PROJ_LAUNCH_ARGS_BYTES = %d", hipRMSResidualAddGELUTanhProjLaunchArgsBytes),
 		core.Sprintf("ROCM_MLX_Q4_PROJECTION_BITS = %d", hipMLXQ4ProjectionBits),
 		core.Sprintf("ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE = %d", hipMLXQ4ProjectionBlockSize),
 		core.Sprintf("ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK = %d", hipMLXQ4ProjectionRowsPerBlock),
@@ -173,6 +201,8 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		core.Sprintf("ROCM_RMS_NORM_HEADS_LAUNCH_ARGS_BYTES = %d", hipRMSNormHeadsLaunchArgsBytes),
 		core.Sprintf("ROCM_RMS_NORM_ROPE_HEADS_LAUNCH_ARGS_VERSION = %d", hipRMSNormRoPEHeadsLaunchArgsVersion),
 		core.Sprintf("ROCM_RMS_NORM_ROPE_HEADS_LAUNCH_ARGS_BYTES = %d", hipRMSNormRoPEHeadsLaunchArgsBytes),
+		core.Sprintf("ROCM_RMS_NORM_ROPE_HEADS_PAIR_LAUNCH_ARGS_VERSION = %d", hipRMSNormRoPEHeadsPairLaunchArgsVersion),
+		core.Sprintf("ROCM_RMS_NORM_ROPE_HEADS_PAIR_LAUNCH_ARGS_BYTES = %d", hipRMSNormRoPEHeadsPairLaunchArgsBytes),
 		core.Sprintf("ROCM_RMS_NORM_ROPE_HEADS_BATCH_LAUNCH_ARGS_VERSION = %d", hipRMSNormRoPEHeadsBatchLaunchArgsVersion),
 		core.Sprintf("ROCM_RMS_NORM_ROPE_HEADS_BATCH_LAUNCH_ARGS_BYTES = %d", hipRMSNormRoPEHeadsBatchLaunchArgsBytes),
 		core.Sprintf("ROCM_RMS_NORM_WEIGHT_ENCODING_NONE = %d", hipRMSNormWeightEncodingNone),
@@ -195,6 +225,8 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		core.Sprintf("ROCM_ATTENTION_HEADS_LAUNCH_ARGS_BYTES = %d", hipAttentionHeadsLaunchArgsBytes),
 		core.Sprintf("ROCM_ATTENTION_HEADS_BATCH_CAUSAL_LAUNCH_ARGS_VERSION = %d", hipAttentionHeadsBatchCausalLaunchArgsVersion),
 		core.Sprintf("ROCM_ATTENTION_HEADS_BATCH_CAUSAL_LAUNCH_ARGS_BYTES = %d", hipAttentionHeadsBatchCausalLaunchArgsBytes),
+		core.Sprintf("ROCM_ATTENTION_HEADS_BATCH_CAUSAL_QUERY_RMS_ROPE_LAUNCH_ARGS_VERSION = %d", hipAttentionHeadsBatchCausalQueryRMSRoPELaunchArgsVersion),
+		core.Sprintf("ROCM_ATTENTION_HEADS_BATCH_CAUSAL_QUERY_RMS_ROPE_LAUNCH_ARGS_BYTES = %d", hipAttentionHeadsBatchCausalQueryRMSRoPELaunchArgsBytes),
 		core.Sprintf("ROCM_ATTENTION_HEADS_SHARED_MAX_TOKENS = %d", hipAttentionHeadsSharedMaxTokens),
 		core.Sprintf("ROCM_ATTENTION_HEADS_CHUNKED_LAUNCH_ARGS_VERSION = %d", hipAttentionHeadsChunkedLaunchArgsVersion),
 		core.Sprintf("ROCM_ATTENTION_HEADS_CHUNKED_LAUNCH_ARGS_BYTES = %d", hipAttentionHeadsChunkedLaunchArgsBytes),
@@ -220,6 +252,15 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		core.Sprintf("ROCM_MOE_ROUTER_LAUNCH_ARGS_BYTES = %d", hipMoERouterLaunchArgsBytes),
 		core.Sprintf("ROCM_MOE_LAZY_LAUNCH_ARGS_VERSION = %d", hipMoELazyLaunchArgsVersion),
 		core.Sprintf("ROCM_MOE_LAZY_LAUNCH_ARGS_BYTES = %d", hipMoELazyLaunchArgsBytes),
+		core.Sprintf("ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_VERSION = %d", hipGGUFQ4_0ProjectionLaunchArgsVersion),
+		core.Sprintf("ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_BYTES = %d", hipGGUFQ4_0ProjectionLaunchArgsBytes),
+		core.Sprintf("ROCM_GGUF_Q4_0_SELECTED_EXPERTS_LAUNCH_ARGS_VERSION = %d", hipGGUFQ4_0SelectedExpertsLaunchArgsVersion),
+		core.Sprintf("ROCM_GGUF_Q4_0_SELECTED_EXPERTS_LAUNCH_ARGS_BYTES = %d", hipGGUFQ4_0SelectedExpertsLaunchArgsBytes),
+		core.Sprintf("ROCM_GGUF_Q4_0_SELECTED_EXPERTS_MAX_TOP_K = %d", hipGGUFQ4_0SelectedExpertsMaxTopK),
+		core.Sprintf("ROCM_GGUF_EXPERT_FORMAT_Q4_0 = %d", hipGGUFExpertFormatQ4_0),
+		core.Sprintf("ROCM_GGUF_EXPERT_FORMAT_Q4_K = %d", hipGGUFExpertFormatQ4K),
+		core.Sprintf("ROCM_GGUF_EXPERT_FORMAT_Q5_1 = %d", hipGGUFExpertFormatQ5_1),
+		core.Sprintf("ROCM_GGUF_EXPERT_FORMAT_Q8_0 = %d", hipGGUFExpertFormatQ8_0),
 		core.Sprintf("ROCM_JANGTQ_LAUNCH_ARGS_VERSION = %d", hipJANGTQLaunchArgsVersion),
 		core.Sprintf("ROCM_JANGTQ_LAUNCH_ARGS_BYTES = %d", hipJANGTQLaunchArgsBytes),
 		core.Sprintf("ROCM_CODEBOOK_LAUNCH_ARGS_VERSION = %d", hipCodebookLaunchArgsVersion),
@@ -265,8 +306,17 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 	}
 }
 
+func TestHIPKernelSource_AMDBuildDefaultsO3_Good(t *testing.T) {
+	makefileBytes, err := os.ReadFile(hipKernelMakefilePathForTest)
+	core.RequireNoError(t, err)
+	makefile := string(makefileBytes)
+
+	core.AssertTrue(t, strings.Contains(makefile, "AMD_HIP_OPT ?= -O3"), "AMD HIP kernels should default to the measured O3 optimization level")
+	core.AssertTrue(t, strings.Contains(makefile, "$(AMD_HIP_OPT)"), "hip-amd target should use the configurable AMD HIP optimization flag")
+}
+
 func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile("../kernels/rocm_kernels.hip")
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -288,7 +338,8 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 	core.AssertTrue(t, !strings.Contains(projection, `ROCM_MLX_Q4_PROJECTION_GREEDY_THREADS_PER_ROW`), "projection must not use greedy row threads")
 
 	cols256 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_cols256`)
-	core.AssertTrue(t, strings.Contains(cols256, `args.cols != 256u || args.group_size != 64u`), "cols256 projection must guard its specialized tensor shape")
+	core.AssertTrue(t, strings.Contains(cols256, `args.bits == 8u && args.group_size == 32u`), "cols256 projection must allow GGUF q8 group32 tensors")
+	core.AssertTrue(t, strings.Contains(cols256, `args.bits == 4u || args.bits == 6u`), "cols256 projection must retain q4/q6 tensor support")
 	core.AssertTrue(t, strings.Contains(cols256, `threadIdx.x / ROCM_MLX_Q4_PROJECTION_COLS256_THREADS_PER_ROW`), "cols256 projection rows use narrow row geometry")
 	core.AssertTrue(t, strings.Contains(cols256, `blockIdx.x * ROCM_MLX_Q4_PROJECTION_COLS256_ROWS_PER_BLOCK + row_lane`), "cols256 projection grid uses narrow row blocks")
 
@@ -344,6 +395,12 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 	core.AssertTrue(t, strings.Contains(gelu, `args.group_size == 64u`), "GELU multiply must keep the Gemma group64 index fast path")
 	core.AssertTrue(t, strings.Contains(gelu, `const uint32_t row_group_base = row * groups_per_row`), "GELU multiply must hoist the row group base")
 	core.AssertTrue(t, strings.Contains(gelu, `row_group_base + (packed >> 3u)`), "GELU multiply group64 path must avoid runtime group division")
+
+	geluQ4G32Cols1536Row16 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_cols1536_row16`)
+	core.AssertTrue(t, strings.Contains(geluQ4G32Cols1536Row16, `args.bits != 4u || args.group_size != 32u || args.cols < 1536u || (args.cols % 32u) != 0u`), "q4 group32 row16 GELU multiply must guard its specialized tensor shape")
+	core.AssertTrue(t, strings.Contains(geluQ4G32Cols1536Row16, `threadIdx.x / ROCM_MLX_Q4_GELU_TANH_Q4_G32_COLS1536_ROW16_THREADS_PER_ROW`), "q4 group32 cols1536 row16 GELU multiply rows use row16 geometry")
+	core.AssertTrue(t, strings.Contains(geluQ4G32Cols1536Row16, `blockIdx.x * ROCM_MLX_Q4_GELU_TANH_Q4_G32_COLS1536_ROW16_ROWS_PER_BLOCK + row_lane`), "q4 group32 cols1536 row16 GELU multiply grid uses row16 blocks")
+	core.AssertTrue(t, strings.Contains(geluQ4G32Cols1536Row16, `rocm_mlx_q4_gelu_tanh_q4_g32_cols1536_row16_reduce`), "q4 group32 cols1536 row16 GELU multiply uses matching row reduction width")
 
 	geluQ6Cols1536 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536`)
 	core.AssertTrue(t, strings.Contains(geluQ6Cols1536, `args.bits != 6u || args.group_size != 64u || args.cols != 1536u`), "q6 cols1536 GELU multiply must guard its specialized tensor shape")
@@ -433,7 +490,7 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 }
 
 func TestHIPKernelSource_AutoRoundQuantizeGroupPacking_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile("../kernels/rocm_kernels.hip")
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -446,7 +503,7 @@ func TestHIPKernelSource_AutoRoundQuantizeGroupPacking_Good(t *testing.T) {
 }
 
 func TestHIPKernelSource_EmbeddingGreedyTokenReadsPackedBest_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile("../kernels/rocm_kernels.hip")
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -456,6 +513,16 @@ func TestHIPKernelSource_EmbeddingGreedyTokenReadsPackedBest_Good(t *testing.T) 
 	core.AssertTrue(t, strings.Contains(embedding, `~static_cast<uint32_t>(*best)`), "greedy-token embedding must unpack the token ID from the q4 greedy result")
 	core.AssertTrue(t, strings.Contains(embedding, `args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits)`), "greedy-token embedding must support fused output scaling")
 	core.AssertTrue(t, strings.Contains(embedding, `rocm_embedding_lookup_store(args, index, token_id, index, output_scale)`), "greedy-token embedding must reuse the normal embedding table path")
+}
+
+func TestHIPKernelSource_MoERouterRanksExpertsInParallel_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	router := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_moe_router`)
+	core.AssertTrue(t, strings.Contains(router, "const uint32_t expert = threadIdx.x;"))
+	core.AssertTrue(t, strings.Contains(router, "for (uint32_t candidate = 0; candidate < args.expert_count; ++candidate)"))
+	core.AssertTrue(t, strings.Contains(router, "rank < args.top_k"))
+	core.AssertTrue(t, strings.Contains(router, "__syncthreads();"))
 }
 
 func TestHIPDriverCGOSource_HotOutputPointersUseResultWrappers_Good(t *testing.T) {
@@ -486,7 +553,7 @@ func TestHIPDriverCGOSource_HotOutputPointersUseResultWrappers_Good(t *testing.T
 }
 
 func TestHIPKernelSource_KVDescriptorAppendInPlaceSkipsSelfCopy_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile("../kernels/rocm_kernels.hip")
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -499,7 +566,7 @@ func TestHIPKernelSource_KVDescriptorAppendInPlaceSkipsSelfCopy_Good(t *testing.
 }
 
 func TestHIPKernelSource_AttentionChunkedStage1ScoreLaneReduction_Good(t *testing.T) {
-	sourceBytes, err := os.ReadFile("../kernels/rocm_kernels.hip")
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	source := string(sourceBytes)
 
@@ -554,7 +621,7 @@ func TestHIPKernelSource_NVIDIAHIPCompile_Good(t *testing.T) {
 		"cu",
 		"-I/opt/rocm/include",
 		"-arch="+arch,
-		"../kernels/rocm_kernels.hip",
+		hipKernelSourcePathForTest,
 		"-o",
 		outputPath,
 	)
@@ -581,14 +648,15 @@ func TestHIPKernelSource_AMDHIPCompile_Good(t *testing.T) {
 	hipcc := rocmNVIDIATestLookPath(t, "hipcc")
 	arch := rocmNVIDIATestEnvDefault("GO_ROCM_AMD_HIP_ARCH", "gfx1100")
 	std := rocmNVIDIATestEnvDefault("GO_ROCM_AMD_HIP_STD", "c++23")
+	opt := rocmNVIDIATestEnvDefault("GO_ROCM_AMD_HIP_OPT", "-O3")
 	outputPath := filepath.Join(t.TempDir(), "rocm_kernels_"+arch+".hsaco")
 	cmd := rocmCompileTestCommand(t,
 		hipcc,
 		"--std="+std,
 		"--genco",
 		"--offload-arch="+arch,
-		"-O2",
-		"../kernels/rocm_kernels.hip",
+		opt,
+		hipKernelSourcePathForTest,
 		"-o",
 		outputPath,
 	)
@@ -604,7 +672,7 @@ func TestHIPKernelSource_AMDHIPCompile_Good(t *testing.T) {
 	if info.Size() == 0 {
 		t.Fatalf("AMD HIP code object is empty: %s", outputPath)
 	}
-	t.Logf("compiled HIP kernels for AMD backend std=%s arch=%s hsaco_bytes=%d", std, arch, info.Size())
+	t.Logf("compiled HIP kernels for AMD backend std=%s arch=%s opt=%s hsaco_bytes=%d", std, arch, opt, info.Size())
 }
 
 func TestHIPKernelSource_HIPCPUCompile_Good(t *testing.T) {
@@ -626,7 +694,7 @@ func TestHIPKernelSource_HIPCPUCompile_Good(t *testing.T) {
 				"-I" + includeDir,
 			}
 			args = append(args, target.extraCompileFlags...)
-			args = append(args, "-c", "../kernels/rocm_kernels.hip", "-o", outputPath)
+			args = append(args, "-c", hipKernelSourcePathForTest, "-o", outputPath)
 			cmd := rocmCompileTestCommand(t, compiler, args...)
 			output, err := cmd.CombinedOutput()
 			if err != nil {
@@ -689,7 +757,7 @@ func TestHIPKernelSource_HIPCPUProductionKernelRuntimeSmoke_Good(t *testing.T) {
 
 	includeDir := rocmHIPCPUTestIncludeDir(t)
 	compiler := rocmHIPCPUTestCompiler(t, rocmHIPCPUTestTarget{name: "x86_64", compilerEnv: "GO_ROCM_HIP_CPU_CXX", compilerFallback: "g++"})
-	kernelPath, err := filepath.Abs("../kernels/rocm_kernels.hip")
+	kernelPath, err := filepath.Abs(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
 	tempDir := t.TempDir()
 	sourcePath := filepath.Join(tempDir, "hip_cpu_rocm_kernel_smoke.cpp")
