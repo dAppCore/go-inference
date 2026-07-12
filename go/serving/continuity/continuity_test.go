@@ -10,6 +10,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/kv"
+	"dappco.re/go/inference/model/spine"
 	state "dappco.re/go/inference/model/state"
 	"dappco.re/go/inference/model/state/session"
 )
@@ -136,5 +137,42 @@ func TestManagerFinishTurnSleepDeclineStaysResident(t *testing.T) {
 	}
 	if conv.busy {
 		t.Fatal("finishTurn must clear busy even when the sleep declines")
+	}
+}
+
+// TestSpineModelInfo checks the neutral-to-spine field mapping and the context
+// length default: the seven mapped fields carry across verbatim, and a
+// non-positive context length falls back to 4096 (the spine's minimum window).
+func TestSpineModelInfo(t *testing.T) {
+	info := inference.ModelInfo{
+		Architecture: "gemma3",
+		VocabSize:    262144,
+		NumLayers:    34,
+		HiddenSize:   3840,
+		QuantBits:    4,
+		QuantGroup:   64,
+	}
+	got := spineModelInfo(info, 8192)
+	want := spine.ModelInfo{
+		Architecture:  "gemma3",
+		VocabSize:     262144,
+		NumLayers:     34,
+		HiddenSize:    3840,
+		QuantBits:     4,
+		QuantGroup:    64,
+		ContextLength: 8192,
+	}
+	if got.Architecture != want.Architecture || got.VocabSize != want.VocabSize ||
+		got.NumLayers != want.NumLayers || got.HiddenSize != want.HiddenSize ||
+		got.QuantBits != want.QuantBits || got.QuantGroup != want.QuantGroup ||
+		got.ContextLength != want.ContextLength {
+		t.Fatalf("spineModelInfo mapping = %+v, want the seven fields of %+v", got, want)
+	}
+
+	// A non-positive context length falls back to the default.
+	for _, in := range []int{0, -1} {
+		if cl := spineModelInfo(info, in).ContextLength; cl != 4096 {
+			t.Errorf("spineModelInfo(contextLen=%d).ContextLength = %d, want 4096", in, cl)
+		}
 	}
 }
