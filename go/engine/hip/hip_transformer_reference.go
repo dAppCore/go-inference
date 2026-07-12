@@ -500,13 +500,41 @@ func splitHIPReferenceVectors(flat []float32, width int) ([][]float32, error) {
 }
 
 func sortHIPReferenceCandidates(candidates []hipReferenceCandidate) {
-	for i := 1; i < len(candidates); i++ {
-		current := candidates[i]
-		j := i - 1
-		for j >= 0 && (candidates[j].value < current.value || (candidates[j].value == current.value && candidates[j].index > current.index)) {
-			candidates[j+1] = candidates[j]
-			j--
-		}
-		candidates[j+1] = current
+	// Full-vocabulary host sampling depends on this exact total order. Keep the
+	// softcapped score descending and token ID ascending. A four-pass radix sort
+	// makes the 262144-candidate Gemma 4 TopK=0 path linear without changing its
+	// draw mapping.
+	if len(candidates) < 2 {
+		return
 	}
+	scratch := make([]hipReferenceCandidate, len(candidates))
+	counts := make([]int, 1<<16)
+	input, output := candidates, scratch
+	for shift := uint(0); shift < 64; shift += 16 {
+		clear(counts)
+		for _, candidate := range input {
+			counts[uint16(hipReferenceCandidateSortKey(candidate)>>shift)]++
+		}
+		offset := 0
+		for bucket, count := range counts {
+			counts[bucket] = offset
+			offset += count
+		}
+		for _, candidate := range input {
+			bucket := uint16(hipReferenceCandidateSortKey(candidate) >> shift)
+			output[counts[bucket]] = candidate
+			counts[bucket]++
+		}
+		input, output = output, input
+	}
+}
+
+func hipReferenceCandidateSortKey(candidate hipReferenceCandidate) uint64 {
+	bits := math.Float32bits(candidate.value)
+	if bits&(1<<31) != 0 {
+		bits = ^bits
+	} else {
+		bits ^= 1 << 31
+	}
+	return uint64(^bits)<<32 | uint64(uint32(candidate.index))
 }
