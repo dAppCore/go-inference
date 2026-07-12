@@ -18,6 +18,24 @@ import (
 	"dappco.re/go/inference/jsonenc"
 )
 
+// SupportsToolSyntax reports whether architecture — a loaded model's
+// inference.ModelInfo.Architecture — is a Gemma 4 checkpoint, the only family
+// RenderGemmaToolDeclarations / ParseGemmaToolCalls actually round-trip tool
+// calls for. Both functions speak Gemma 4's native special-token vocabulary
+// (<|tool>, <tool|>, <|tool_call>, <tool_call|>, <|"|>) rather than a generic
+// convention any instruction-tuned model would recognise, so declaring tools to
+// an unsupported architecture would inject bytes its tokenizer has never seen
+// as special tokens — the model would see ordinary text, not a tool menu, and
+// no reliable tool_calls would ever come back. Callers (the OpenAI/Anthropic
+// serving handlers, capability reporting) use this to gate tool declarations
+// honestly instead of silently rendering a menu the model can't read.
+//
+//	parser.SupportsToolSyntax("gemma4_text") // true
+//	parser.SupportsToolSyntax("qwen3")       // false
+func SupportsToolSyntax(architecture string) bool {
+	return core.Contains(core.Lower(architecture), "gemma4")
+}
+
 // ToolDecl is one tool a caller offers the model — the engine-neutral form both
 // the Anthropic and OpenAI providers convert their wire tools into, so the Gemma
 // 4 declaration syntax has a single renderer (RenderGemmaToolDeclarations).

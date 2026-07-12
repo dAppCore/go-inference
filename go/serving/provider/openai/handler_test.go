@@ -424,3 +424,243 @@ func TestErrorParam_Good_Bad(t *testing.T) {
 		t.Fatalf("errorParam(generic error) = %q, want empty", got)
 	}
 }
+
+// --- #37: tool_choice / capability gate / response_format, HTTP round-trip -
+
+// TestHandler_ServeHTTP_Good_ToolsRenderedForGemma4 pins the declare half of
+// the round trip: a tools request against a Gemma 4 architecture renders the
+// declarations into the model's prompt (a system turn) in Gemma 4's native
+// syntax — asserted on what the fake model actually received, not just the
+// HTTP response.
+func TestHandler_ServeHTTP_Good_ToolsRenderedForGemma4(t *testing.T) {
+	model := &recordingModel{arch: "gemma4_text", stubModel: stubModel{tokens: []inference.Token{{Text: "sunny"}}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"gemma": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"gemma","messages":[{"role":"user","content":"weather?"}],` +
+		`"tools":[{"type":"function","function":{"name":"get_weather","description":"d","parameters":{"type":"object"}}}]}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if len(model.received) == 0 || !strings.Contains(model.received[0].Content, "<|tool>declaration:get_weather") {
+		t.Fatalf("model received %+v, want the get_weather declaration in the system turn", model.received)
+	}
+}
+
+// TestHandler_ServeHTTP_Bad_ToolsRejectedForUnsupportedArchitecture pins the
+// capability-honesty gate (#37): a tools request against an architecture with
+// no Gemma 4 tool syntax is rejected with a clear 4xx instead of silently
+// rendering a declaration menu the model could never read.
+func TestHandler_ServeHTTP_Bad_ToolsRejectedForUnsupportedArchitecture(t *testing.T) {
+	model := &recordingModel{arch: "qwen3", stubModel: stubModel{tokens: []inference.Token{{Text: "ok"}}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"qwen","messages":[{"role":"user","content":"weather?"}],` +
+		`"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}]}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"param":"tools"`) {
+		t.Fatalf("status = %d body=%s, want 400 param=tools", rec.Code, rec.Body.String())
+	}
+	if model.calls != 0 {
+		t.Fatal("model was invoked despite the capability gate rejecting the request")
+	}
+}
+
+// TestHandler_ServeHTTP_Good_ToolChoiceNoneSuppressesDeclarations pins that
+// tool_choice:"none" keeps the model from ever seeing the tool menu this turn
+// — and, since nothing is offered, the capability gate does not fire even
+// though the model's architecture could not have served them anyway.
+func TestHandler_ServeHTTP_Good_ToolChoiceNoneSuppressesDeclarations(t *testing.T) {
+	model := &recordingModel{arch: "qwen3", stubModel: stubModel{tokens: []inference.Token{{Text: "plain answer"}}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"qwen","messages":[{"role":"user","content":"weather?"}],"tool_choice":"none",` +
+		`"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}]}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 (tool_choice:none offers nothing, so the gate never fires)", rec.Code, rec.Body.String())
+	}
+	if len(model.received) != 1 || strings.Contains(model.received[0].Content, "declaration") {
+		t.Fatalf("model received %+v, want the plain user turn with no tool declaration", model.received)
+	}
+}
+
+// TestHandler_ServeHTTP_Bad_ToolChoiceUndeclaredTool pins that naming a tool
+// that was never declared is a 400 (agent/tools.Resolve's caller-error case),
+// not a silently-ignored choice.
+func TestHandler_ServeHTTP_Bad_ToolChoiceUndeclaredTool(t *testing.T) {
+	model := &recordingModel{arch: "gemma4_text", stubModel: stubModel{tokens: []inference.Token{{Text: "x"}}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"gemma": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"gemma","messages":[{"role":"user","content":"hi"}],` +
+		`"tool_choice":{"type":"function","function":{"name":"not_declared"}},` +
+		`"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}]}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"param":"tool_choice"`) {
+		t.Fatalf("status = %d body=%s, want 400 param=tool_choice", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandler_ServeHTTP_Good_ToolChoiceNamedNarrowsDeclarations pins that a
+// named function tool_choice narrows the rendered menu to just that tool, even
+// though two were declared.
+func TestHandler_ServeHTTP_Good_ToolChoiceNamedNarrowsDeclarations(t *testing.T) {
+	model := &recordingModel{arch: "gemma4_text", stubModel: stubModel{tokens: []inference.Token{{Text: "x"}}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"gemma": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"gemma","messages":[{"role":"user","content":"hi"}],` +
+		`"tool_choice":{"type":"function","function":{"name":"get_weather"}},` +
+		`"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}},` +
+		`{"type":"function","function":{"name":"search","parameters":{"type":"object"}}}]}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	prompt := model.received[0].Content
+	if !strings.Contains(prompt, "declaration:get_weather") || strings.Contains(prompt, "declaration:search") {
+		t.Fatalf("prompt = %q, want only get_weather declared", prompt)
+	}
+}
+
+// TestHandler_ServeStreaming_Good_ToolChoiceNoneSuppressesDeclarations pins
+// that tool_choice filtering applies identically on the streaming dispatch
+// path — the offered-tools resolution happens once in ServeHTTP ahead of the
+// stream/non-stream branch, not duplicated per path.
+func TestHandler_ServeStreaming_Good_ToolChoiceNoneSuppressesDeclarations(t *testing.T) {
+	model := &recordingModel{arch: "gemma4_text", stubModel: stubModel{tokens: []inference.Token{{Text: "plain"}}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"gemma": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"gemma","messages":[{"role":"user","content":"hi"}],"stream":true,"tool_choice":"none",` +
+		`"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}]}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if len(model.received) != 1 || strings.Contains(model.received[0].Content, "declaration") {
+		t.Fatalf("model received %+v, want the plain user turn with no tool declaration", model.received)
+	}
+	if !strings.Contains(rec.Body.String(), "data: [DONE]") {
+		t.Fatalf("body=%s, want a well-formed stream close", rec.Body.String())
+	}
+}
+
+// TestHandler_ServeHTTP_Good_ResponseFormatJSONObjectPassthrough pins the
+// no-repair-needed path: already-valid JSON passes straight through response_format
+// validation with no repair re-call.
+func TestHandler_ServeHTTP_Good_ResponseFormatJSONObjectPassthrough(t *testing.T) {
+	model := &recordingModel{stubModel: stubModel{tokens: []inference.Token{{Text: `{"ok":true}`}}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"qwen","messages":[{"role":"user","content":"give me json"}],"response_format":{"type":"json_object"}}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"content":"{\"ok\":true}"`) {
+		t.Fatalf("status = %d body=%s, want 200 with the JSON content unchanged", rec.Code, rec.Body.String())
+	}
+	if model.calls != 1 {
+		t.Fatalf("model calls = %d, want exactly 1 (no repair re-call for already-valid JSON)", model.calls)
+	}
+}
+
+// TestHandler_ServeHTTP_Good_ResponseFormatJSONSchemaRepairs pins the repair
+// path end-to-end: the first generation misses a required field,
+// validateStructuredOutput re-prompts the model, and the repaired second
+// attempt is what the client receives.
+func TestHandler_ServeHTTP_Good_ResponseFormatJSONSchemaRepairs(t *testing.T) {
+	model := &recordingModel{sequenced: [][]inference.Token{
+		{{Text: `{"name":"Ada"}`}},          // first generation — missing "age"
+		{{Text: `{"name":"Ada","age":36}`}}, // repair re-call — matches the schema
+	}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"qwen","messages":[{"role":"user","content":"describe Ada"}],"response_format":` +
+		`{"type":"json_schema","json_schema":{"name":"person","schema":{"required":["name","age"],` +
+		`"properties":{"name":{"type":"string"},"age":{"type":"integer"}}}}}}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `{\"name\":\"Ada\",\"age\":36}`) {
+		t.Fatalf("status = %d body=%s, want 200 with the repaired payload", rec.Code, rec.Body.String())
+	}
+	if model.calls != 2 {
+		t.Fatalf("model calls = %d, want exactly 2 (the original generation plus one repair)", model.calls)
+	}
+}
+
+// TestHandler_ServeHTTP_Bad_ResponseFormatExhaustedRepair pins that a model
+// which never produces a matching shape surfaces a 422, not a 200 carrying
+// invalid content or a silently-dropped constraint.
+func TestHandler_ServeHTTP_Bad_ResponseFormatExhaustedRepair(t *testing.T) {
+	model := &recordingModel{sequenced: [][]inference.Token{
+		{{Text: `not json`}},
+		{{Text: `still not json`}},
+		{{Text: `also not json`}},
+	}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"qwen","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_object"}}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d body=%s, want 422", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandler_ServeHTTP_Bad_ResponseFormatStreamingRejected pins the
+// documented streaming gap (#37): response_format that requires validation
+// combined with stream=true is a clean 400 rather than a half-built feature
+// (skipped validation, or a fake single-chunk "stream").
+func TestHandler_ServeHTTP_Bad_ResponseFormatStreamingRejected(t *testing.T) {
+	model := &stubModel{tokens: []inference.Token{{Text: `{"ok":true}`}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"qwen","messages":[{"role":"user","content":"hi"}],"stream":true,"response_format":{"type":"json_object"}}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"param":"response_format"`) {
+		t.Fatalf("status = %d body=%s, want 400 param=response_format", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandler_ServeHTTP_Bad_ResponseFormatInvalidType covers ValidateRequest's
+// response_format.type allow-list.
+func TestHandler_ServeHTTP_Bad_ResponseFormatInvalidType(t *testing.T) {
+	model := &stubModel{tokens: []inference.Token{{Text: "x"}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"qwen","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"yaml"}}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"param":"response_format"`) {
+		t.Fatalf("status = %d body=%s, want 400 param=response_format", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandler_ServeHTTP_Bad_ResponseFormatJSONSchemaMissingSchema covers
+// ValidateRequest rejecting a json_schema format with no schema to validate
+// against.
+func TestHandler_ServeHTTP_Bad_ResponseFormatJSONSchemaMissingSchema(t *testing.T) {
+	model := &stubModel{tokens: []inference.Token{{Text: "x"}}}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"qwen","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema"}}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"param":"response_format"`) {
+		t.Fatalf("status = %d body=%s, want 400 param=response_format", rec.Code, rec.Body.String())
+	}
+}

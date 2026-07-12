@@ -658,6 +658,23 @@ func (h *anthropicMessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		writeOpenAIError(w, http.StatusNotFound, err.Error(), "model")
 		return
 	}
+	offeredTools, err := anthropiccompat.ResolveOfferedTools(req.Tools, req.ToolChoice)
+	if err != nil {
+		// A tool_choice naming an undeclared tool, or requiring one when none
+		// were declared — a caller error, same shape as any other bad request
+		// (mirrors the OpenAI provider's handler.go gate, #37).
+		writeOpenAIError(w, http.StatusBadRequest, err.Error(), "tool_choice")
+		return
+	}
+	// Capability honesty (#37): only a Gemma 4 checkpoint reads the tool
+	// declarations InferenceMessages renders and only its output is scanned for
+	// <|tool_call> spans (parser.SupportsToolSyntax) below. Offering tools to
+	// any other architecture would silently no-op — reject up front instead of
+	// letting the model answer in prose with no signal anything went wrong.
+	if len(offeredTools) > 0 && !parser.SupportsToolSyntax(model.Info().Architecture) {
+		writeOpenAIError(w, http.StatusBadRequest, "model does not support tool calling: architecture "+model.Info().Architecture, "tools")
+		return
+	}
 	messages := anthropiccompat.InferenceMessages(req)
 	opts := anthropiccompat.GenerateOptions(req)
 	if req.Stream {

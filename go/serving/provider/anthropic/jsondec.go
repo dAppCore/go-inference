@@ -134,6 +134,23 @@ func (r *MessageRequest) unmarshalField(data []byte, i int, key []byte) (int, er
 			return end, res.Err()
 		}
 		return end, nil
+	case "tool_choice":
+		// tool_choice is always a small object ({"type":".."} or {"type":"tool",
+		// "name":".."}) on the same cold agentic-request path as tools — reflect-
+		// decodes the captured span rather than hand-rolling the branch here.
+		if jsonenc.IsJSONNull(data, i) {
+			return i + 4, nil
+		}
+		end, err := jsonenc.SkipJSONValue(data, i)
+		if err != nil {
+			return end, err
+		}
+		var choice ToolChoice
+		if res := core.JSONUnmarshal(data[i:end], &choice); !res.OK {
+			return end, res.Err()
+		}
+		r.ToolChoice = &choice
+		return end, nil
 	case "max_tokens":
 		n, next, err := jsonenc.ParseJSONInt(data, i)
 		if err != nil {
