@@ -188,6 +188,16 @@ batching, tiered KV, OpenAI+Anthropic routes, menu-bar service — but a
 Python stack where lem is one contained binary) rides mlx-lm's kernels
 and lands 6,696 even through its HTTP serving path.
 
+The skip generalises across the family by construction — it proves the
+arch's own suffix at load rather than pattern-matching a model. E4B
+(18 of 42 layers shared): 8K prefill 1,987 → 3,423 tok/s (1.72×), 32K
+3,182, 62K 2,807, byte-identical continuations at 8K and 62K. The dense
+and MoE models (12B/26B/31B) share no KV and skip nothing — for them
+the engine ships the same device embed gather instead (only token ids
+cross the host boundary during prefill, every arch), and their 8K walls
+sit at 740 / 1,447 / 290 tok/s — the 31B within 1.13× of mlx-lm's true
+wall on the identical snapshot.
+
 Honest reading: mlx-lm's true wall still leads cold 8K ingest by ~1.11×
 (what remains is the prompt pass itself and per-chunk seams, open on
 the tracker). Everywhere else this table has data, lem now leads the field

@@ -38,10 +38,32 @@ the projection reads them in place of host staging, and the pass takes
 the same buffer as its input rows. Only token ids cross to the GPU.
 embed span 17.6->0ms; pp8K 8,708->9,016 (0.801s; mlx gap 1.11x).
 NIGHT TOTAL pp8K 3,190 -> 9,016 (2.83x), token-identical at every step.
+MORNING AFTER (2026-07-12) — the family round:
+- E4B RECEIPTED (zero code): 18-of-42 kv-shared -> the skip engages
+  by construction. pp8K 1,987->3,423 (1.72x, off=LTHN_PREFILL_SKIP_SHARED=0),
+  32K 3,182, 62K 2,807; 32-token greedy identity at 8K AND 62K.
+- DENSE/MoE EMBED GATHER PORTED (c470d19): the rows kernel gathers a
+  whole chunk's embed rows in one committed-not-waited CB; dense archs
+  have no PLE so the closure hands back (embBuf, nil). 31B qat 289->290
+  (embed span ~71ms->0), 26B-A4B 1,440->1,447, 12B ENGAGES (inputsDev
+  spans replace host embed; ~0.5% under bench noise). e2b-qat unchanged
+  at ~9,250 (E-series untouched). Bytes identical pre/post on ALL FOUR.
+  Gate: TestEmbedRowsBatchQuantDeviceMatchesEmbedTokenQuant (host-oracle
+  byte identity 4/8-bit) + decline-contract test.
+- 31B mlx GAP MEASURED: mlx-lm true wall 22.16s vs our 24.99s = 1.13x —
+  same shape as e2b's 1.11x. The gap is SYSTEMATIC across archs; the 31B
+  chunk trace says GEMM-bound (mlp gate/up/down 60%, qkv 16% —
+  proportionate to FLOPs at head_dim 256, checked), sdpa 11.6% -> the
+  likely gap home is the flash prompt SDPA (#375's campaign).
+- WHOLE-REPO metal_runtime SWEEP NOW GREEN (10,754 tests / 122 pkgs):
+  train's command tests/examples pinned their fake backend (514297e —
+  SSDCommandConfig/SFTCommandConfig grew Backend -> WithBackend; under
+  metal_runtime the metal engine had been winning selection and
+  genuinely loading fixture paths).
 FOLLOW-UPS still open on #381: per-chunk seams + 2nd-queue overlap of
 the builder's ~2ms/chunk GPU work (~1-2%), embeddings/bidir chunk lane
-still full-stack, dense-arch (12B/31B) device embed gather (the closure
-pattern ports directly), 31B/26B family receipts.
+still full-stack. 26B/31B receipts DONE (above); 12B unified receipts
+ride the same lane.
 
 **THE TRAP THAT ATE AN HOUR (bank it):** running engine/metal tests with
 go-mlx's dist metallib (the retired path my own notes carried) makes the
