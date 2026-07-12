@@ -40,6 +40,7 @@ type loaderConfig struct {
 	HiddenSize            int      `json:"hidden_size"`
 	NumHiddenLayers       int      `json:"num_hidden_layers"`
 	IntermediateSize      int      `json:"intermediate_size"`
+	IntermediateSizeMLP   int      `json:"intermediate_size_mlp"`
 	NumAttentionHeads     int      `json:"num_attention_heads"`
 	NumKeyValueHeads      int      `json:"num_key_value_heads"`
 	HeadDim               int      `json:"head_dim"`
@@ -73,6 +74,7 @@ type loaderConfig struct {
 	// MoE (qwen3_5_moe). NormTopKProb is a pointer so an absent key defaults to true (the reference
 	// renormalises the top-k router weights) while an explicit false is honoured — normTopKProb().
 	NumExperts                   int   `json:"num_experts"`
+	NumLocalExperts              int   `json:"num_local_experts"`
 	NumExpertsPerTok             int   `json:"num_experts_per_tok"`
 	MoEIntermediateSize          int   `json:"moe_intermediate_size"`
 	SharedExpertIntermediateSize int   `json:"shared_expert_intermediate_size"`

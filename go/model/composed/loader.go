@@ -200,7 +200,11 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 
 		var mixer Mixer
 		if kinds[i] == "full_attention" || kinds[i] == "sliding_attention" {
+<<<<<<< HEAD
 			mixer, err = buildAttn(f32, f32opt, lp+"self_attn.", cfg, arch, D, kinds[i])
+=======
+			mixer, err = buildAttn(f32, f32opt, lp+"self_attn.", cfg, arch, i, D, kinds[i])
+>>>>>>> lane/llama4-text
 		} else {
 			mixer, err = buildGatedDelta(get, f32, f32opt, lp+"linear_attn.", cfg, D)
 		}
@@ -255,7 +259,11 @@ func resolveKinds(cfg *loaderConfig) ([]string, error) {
 }
 
 // buildAttn builds a full-attention mixer; geometry from the config.
+<<<<<<< HEAD
 func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, cfg *loaderConfig, arch *model.Arch, D int, kind string) (Mixer, error) {
+=======
+func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, cfg *loaderConfig, arch *model.Arch, layer, D int, kind string) (Mixer, error) {
+>>>>>>> lane/llama4-text
 	q, err := f32(sp + "q_proj.weight")
 	if err != nil {
 		return nil, err
@@ -294,6 +302,12 @@ func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float3
 	qk := model.QKNone
 	if cfg.ModelType == "cohere" && cfg.UseQKNorm != nil && *cfg.UseQKNorm {
 		qk = model.QKLayerNorm
+	}
+	if arch != nil {
+		qk = arch.QKNormalization
+		if layer < len(arch.Layer) && arch.Layer[layer].DisableRotary {
+			rd = 0
+		}
 	}
 	window := 0
 	if kind == "sliding_attention" {
@@ -449,7 +463,7 @@ func buildMoE(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]f
 		return nil, core.NewError("composed.buildMoE: experts.0 present but none loaded")
 	}
 	if arch != nil {
-		if arch.MoEGating != "" && arch.MoEGating != model.MoEGatingSoftmax {
+		if arch.MoEGating != "" && arch.MoEGating != model.MoEGatingSoftmax && arch.MoEGating != model.MoEGatingSigmoid {
 			return nil, core.NewError("composed.buildMoE: unsupported router score function " + string(arch.MoEGating))
 		}
 		if arch.Experts > 0 && len(experts) != arch.Experts {
@@ -489,5 +503,9 @@ func buildMoE(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]f
 	if topK <= 0 {
 		topK = 8
 	}
-	return &MoEMLP{Router: router, Experts: experts, Shared: shared, SharedGate: sharedGate, TopK: topK, NormTopKProb: normTopK}, nil
+	gating := model.MoEGatingSoftmax
+	if arch != nil && arch.MoEGating != "" {
+		gating = arch.MoEGating
+	}
+	return &MoEMLP{Router: router, Experts: experts, Shared: shared, SharedGate: sharedGate, TopK: topK, NormTopKProb: normTopK, Gating: gating}, nil
 }
