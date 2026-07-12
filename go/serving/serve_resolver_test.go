@@ -210,11 +210,11 @@ func TestHotSwapResolver_ReloadDetection_NonGemmaStandsDown(t *testing.T) {
 	}
 }
 
-// TestMetalTextModelLoader_NoBackend_Bad proves the default metal loader fails
-// cleanly (no panic) when no "metal" backend is registered — the case a non-
-// Apple host or a composition that forgot the engine blank-import hits.
-func TestMetalTextModelLoader_NoBackend_Bad(t *testing.T) {
-	if _, err := metalTextModelLoader("/models/nope"); err == nil {
-		t.Skip("a metal backend is registered in this test binary — nothing to assert")
+// TestDefaultTextModelLoader_NoBackend_Bad proves the default loader fails
+// cleanly (no panic) when no backend is registered — the case a composition
+// that forgot the engine blank-import hits.
+func TestDefaultTextModelLoader_NoBackend_Bad(t *testing.T) {
+	if _, err := defaultTextModelLoader("/models/nope"); err == nil {
+		t.Skip("a backend is registered in this test binary — nothing to assert")
 	}
 }
