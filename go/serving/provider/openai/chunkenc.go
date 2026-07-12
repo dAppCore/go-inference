@@ -246,6 +246,13 @@ func appendEmbeddingResponseDatum(buf []byte, datum EmbeddingResponseDatum) []by
 	buf = append(buf, '{')
 	buf = jsonenc.AppendStringField(buf, "object", datum.Object, false)
 	buf = jsonenc.AppendIntField(buf, "index", datum.Index, true)
+	if datum.EmbeddingBase64 != "" {
+		// encoding_format=base64: the embedding is a base64 string of the raw
+		// little-endian float32 bytes under the same "embedding" key (the
+		// OpenAI wire shape), not a JSON number array.
+		buf = jsonenc.AppendStringField(buf, "embedding", datum.EmbeddingBase64, true)
+		return append(buf, '}')
+	}
 	buf = append(buf, ',', '"', 'e', 'm', 'b', 'e', 'd', 'd', 'i', 'n', 'g', '"', ':', '[')
 	for i, v := range datum.Embedding {
 		if i > 0 {
@@ -303,7 +310,11 @@ func embeddingResponseSize(resp EmbeddingResponse) int {
 		size += 12 + len(datum.Object) // {"object":"X"
 		size += 11 + 20                // "index":N
 		size += 14                     // "embedding":[]
-		size += len(datum.Embedding) * 9
+		if datum.EmbeddingBase64 != "" {
+			size += len(datum.EmbeddingBase64) + 2 // quoted base64 string
+		} else {
+			size += len(datum.Embedding) * 9
+		}
 		size += 2 // }
 	}
 	size += 10 + len(resp.Model)

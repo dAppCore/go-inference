@@ -266,3 +266,13 @@ func (m *welfareTextModel) AcceptsAudio() bool {
 	a, ok := m.TextModel.(inference.AudioModel)
 	return ok && a.AcceptsAudio()
 }
+
+// Unwrap exposes the wrapped model so the serving layer can reach optional
+// capabilities this guard does not itself re-expose (embeddings, rerank). The
+// welfare guard polices generated text; an embedding call has no text stream to
+// guard, so serving it through the base model is correct. Without this, a
+// welfare-wrapped embedder is stripped of its EmbeddingModel/RerankModel
+// interface at the /v1/embeddings and /v1/rerank capability gate.
+func (m *welfareTextModel) Unwrap() inference.TextModel {
+	return m.TextModel
+}
