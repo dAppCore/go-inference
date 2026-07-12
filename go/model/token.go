@@ -187,6 +187,14 @@ func generateStepwiseWithSession(m SessionModel, sess DecodeStepper, promptIDs [
 		}
 		return sess.Step(emb)
 	}
+	// A stepper MAY implement LMHead itself when its last Step call already produced the next logits as
+	// a side effect (a fused device fast path folding the head GEMM onto the final layer's own tail
+	// command buffer) — headOf prefers that cached fast path over the model's Head, which always
+	// recomputes from scratch. Same optional-capability shape as StepWithID/Close.
+	headOf := m.Head
+	if sh, ok := sess.(LMHead); ok {
+		headOf = sh.Head
+	}
 
 	var hidden []byte
 	for _, id := range promptIDs { // prefill the prompt over the growing cache
@@ -198,7 +206,7 @@ func generateStepwiseWithSession(m SessionModel, sess DecodeStepper, promptIDs [
 	gen := make([]int32, 0, maxNew)
 	history := make([]int32, 0, maxNew)
 	for len(gen) < maxNew {
-		logits, err := m.Head(hidden) // the last token's state drives the next id
+		logits, err := headOf(hidden) // the last token's state drives the next id
 		if err != nil {
 			return nil, err
 		}

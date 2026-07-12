@@ -220,8 +220,14 @@ func TestComposedResidualNormMLPProjFuseDeviceVsHost(t *testing.T) {
 		calls++
 		return ResidualNormMLPProjDevice(mixerHidden, projW, h, normW, gate, up, down, L, D, mixCols, FF, eps)
 	}
+	// A 1-layer model's only layer is also the LAST layer, so the head-fuse (which also folds onto the
+	// back of this same tail, taking priority when it applies) would otherwise intercept before this
+	// wrapped hook ever fires — nil it out to isolate the plain proj-fused tail this test targets.
+	savedHeadFuse := composed.ResidualNormMLPProjHeadDevice
+	composed.ResidualNormMLPProjHeadDevice = nil
 	dev, err := composed.NewSession(m).Forward(tokens)
 	composed.ResidualNormMLPProjDevice = savedProjTail
+	composed.ResidualNormMLPProjHeadDevice = savedHeadFuse
 	if err != nil {
 		t.Fatalf("device (proj-fused tail) forward: %v", err)
 	}
@@ -289,8 +295,14 @@ func TestComposedGatedDeltaProjFuseDeviceVsHost(t *testing.T) {
 		calls++
 		return ResidualNormMLPProjDevice(mixerHidden, projW, h, normW, gate, up, down, L, D, mixCols, FF, eps)
 	}
+	// A 1-layer model's only layer is also the LAST layer, so the head-fuse (which also folds onto the
+	// back of this same tail, taking priority when it applies) would otherwise intercept before this
+	// wrapped hook ever fires — nil it out to isolate the plain proj-fused tail this test targets.
+	savedHeadFuse := composed.ResidualNormMLPProjHeadDevice
+	composed.ResidualNormMLPProjHeadDevice = nil
 	dev, err := composed.NewSession(m).Forward(tokens)
 	composed.ResidualNormMLPProjDevice = savedProjTail
+	composed.ResidualNormMLPProjHeadDevice = savedHeadFuse
 	if err != nil {
 		t.Fatalf("device (proj-fused tail) forward: %v", err)
 	}
@@ -469,4 +481,90 @@ func TestComposedResidualNormMLPProjGatedDeltaInputFuseDeviceVsHost(t *testing.T
 		}
 	}
 	t.Logf("composed proj-tail+gated-delta-input fuse: %d fused-CB call(s); device matches host within f32 tol over %d values", calls, len(dev))
+}
+
+// TestComposedResidualNormMLPProjHeadFuseDeviceVsHost exercises the terminal (OUTPUT-side) fuse: the LAST
+// layer's proj-fused tail command buffer additionally folds in the model's own final RMSNorm + LM head
+// GEMM — the mirror of TestComposedResidualNormMLPProjAttnInputFuseDeviceVsHost at the OTHER end of the
+// stack (that one folds the NEXT layer's input on; here there is no next layer, so the model's own head
+// goes on instead). A call-counter around the hook asserts the head-fuse actually fired; the fused logits
+// must match composed.HeadLogitsHost's pure-host reference within f32 tolerance. L·D·FF = 3·512·2048 =
+// 3,145,728 ≥ 1<<20 opens the tail's fuse gate; the head GEMM (1·D·Vocab) rides on top regardless of its
+// own size.
+func TestComposedResidualNormMLPProjHeadFuseDeviceVsHost(t *testing.T) {
+	if composed.ResidualNormMLPProjHeadDevice == nil {
+		t.Fatal("native init did not wire composed.ResidualNormMLPProjHeadDevice")
+	}
+	const D, FF, vocab, heads, hd = 512, 2048, 4096, 4, 128
+	m := &composed.ComposedModel{
+		Embed: cbSyn(vocab*D, 1), NormF: cbSyn(D, 2), D: D, Vocab: vocab, Eps: 1e-6,
+		Layers: []composed.Layer{{
+			InputNorm:    cbSyn(D, 3),
+			PostAttnNorm: cbSyn(D, 4),
+			MLP:          &composed.MLP{Gate: cbSyn(FF*D, 5), Up: cbSyn(FF*D, 6), Down: cbSyn(D*FF, 7), FF: FF},
+			Mixer: composed.NewAttnMixer(&composed.AttnWeights{
+				QProj: cbSyn(heads*hd*D, 8), KProj: cbSyn(heads*hd*D, 9),
+				VProj: cbSyn(heads*hd*D, 10), OProj: cbSyn(D*heads*hd, 11),
+				QNorm: cbSyn(hd, 12), KNorm: cbSyn(hd, 13),
+			}, composed.AttnConfig{Heads: heads, KVHeads: heads, HeadDim: hd, RotaryDim: hd / 2, RopeTheta: 1e6, NormEps: 1e-6}),
+		}},
+	}
+	tokens := []int32{5, 9, 21}
+
+	calls := 0
+	saved := composed.ResidualNormMLPProjHeadDevice
+	composed.ResidualNormMLPProjHeadDevice = func(
+		mixerHidden, projW, h, normW, gate, up, down []float32, L, D, mixCols, FF int, eps float32,
+		normF, head []float32, Vocab int,
+	) ([]float32, []float32, error) {
+		calls++
+		return ResidualNormMLPProjHeadDevice(mixerHidden, projW, h, normW, gate, up, down, L, D, mixCols, FF, eps, normF, head, Vocab)
+	}
+	sess := composed.NewSession(m)
+	dev, err := sess.Forward(tokens)
+	devLogits := sess.PendingHeadLogits()
+	composed.ResidualNormMLPProjHeadDevice = saved
+	if err != nil {
+		t.Fatalf("device (head-fused) forward: %v", err)
+	}
+	if calls == 0 {
+		t.Fatal("head-fuse hook never engaged — last layer not seen as terminal?")
+	}
+	if devLogits == nil {
+		t.Fatal("head-fuse fired but PendingHeadLogits is nil")
+	}
+	if len(devLogits) != vocab {
+		t.Fatalf("logits length: got %d want %d", len(devLogits), vocab)
+	}
+
+	// Host reference: every device hook nil'd, then the model's own headLogits over the LAST row — the
+	// exact computation the fused path replaces.
+	savedHead, savedProjTail, savedTail, savedProj, savedMLP, savedFuse :=
+		composed.ResidualNormMLPProjHeadDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice
+	composed.ResidualNormMLPProjHeadDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice =
+		nil, nil, nil, nil, nil, nil
+	host, herr := composed.NewSession(m).Forward(tokens)
+	composed.ResidualNormMLPProjHeadDevice, composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPDevice, composed.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice =
+		savedHead, savedProjTail, savedTail, savedProj, savedMLP, savedFuse
+	if herr != nil {
+		t.Fatalf("host forward: %v", herr)
+	}
+	if len(dev) != len(host) {
+		t.Fatalf("length: device %d host %d", len(dev), len(host))
+	}
+	for i := range dev {
+		if math.Abs(float64(dev[i]-host[i])) > 1e-2*(1+math.Abs(float64(host[i]))) {
+			t.Fatalf("hidden[%d]: device %v host %v (head-fused tail diverged)", i, dev[i], host[i])
+		}
+	}
+	hostLogits := composed.HeadLogitsHost(m, host[(len(tokens)-1)*D:])
+	if len(hostLogits) != vocab {
+		t.Fatalf("host logits length: got %d want %d", len(hostLogits), vocab)
+	}
+	for i := range devLogits {
+		if math.Abs(float64(devLogits[i]-hostLogits[i])) > 1e-2*(1+math.Abs(float64(hostLogits[i]))) {
+			t.Fatalf("logits[%d]: device %v host %v (head-fuse GEMM/RMSNorm diverged)", i, devLogits[i], hostLogits[i])
+		}
+	}
+	t.Logf("composed proj-tail+head fuse: %d fused-CB call(s); device matches host within f32 tol over %d hiddens + %d logits", calls, len(dev), len(devLogits))
 }

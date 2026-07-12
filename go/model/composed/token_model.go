@@ -3,6 +3,7 @@
 package composed
 
 import (
+	"bytes"
 	"math"
 
 	core "dappco.re/go"
@@ -97,10 +98,21 @@ func (tm *ComposedTokenModel) OpenSession() (model.DecodeStepper, error) {
 	return &composedStepper{s: NewSession(tm.m)}, nil
 }
 
-type composedStepper struct{ s *ComposedSession }
+// composedStepper is a stateful hybrid decode session (SessionModel.OpenSession) — plus, when the last
+// Step's forwardEmb call fused the model's final RMSNorm + LM head GEMM onto the LAST layer's tail command
+// buffer, the logits that fuse already computed. headHidden/headLogits cache them keyed to the exact
+// hidden bytes Step just returned: Head reuses the cache for THAT hidden (the shared generation loop's
+// usage pattern is at most one Head call between two Step calls — see model.generateStepwiseWithSession)
+// and falls through to the ordinary host-RMSNorm + device-GEMM recompute for any other hidden (a
+// mismatched/stale hidden, or a session whose last Step didn't fuse).
+type composedStepper struct {
+	s                    *ComposedSession
+	headHidden, headBF16 []byte
+}
 
 // Step decodes one token embedding (bf16) over the resident per-layer state, returning the output hidden
-// (bf16).
+// (bf16). When the fused device path just computed this token's logits as a side effect (the terminal
+// head-fuse on the LAST layer's tail), they are cached for the Head call that follows.
 func (st *composedStepper) Step(emb []byte) ([]byte, error) {
 	D := st.s.m.D
 	if len(emb) != D*2 {
@@ -110,11 +122,31 @@ func (st *composedStepper) Step(emb []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return f32ToBF16Bytes(out), nil
+	outBytes := f32ToBF16Bytes(out)
+	if lg := st.s.PendingHeadLogits(); lg != nil {
+		st.headHidden, st.headBF16 = outBytes, f32ToBF16Bytes(lg)
+	} else {
+		st.headHidden, st.headBF16 = nil, nil
+	}
+	return outBytes, nil
+}
+
+// Head maps a final hidden (dModel bf16) to vocab logits (vocab bf16) — the SessionModel fast path's
+// optional LMHead capability (model.generateStepwiseWithSession prefers it over ComposedTokenModel.Head
+// when a stepper implements it). Reuses the last Step call's fused-device logits when hidden matches
+// exactly what that Step returned; recomputes via the model's own (session-independent) path otherwise.
+func (st *composedStepper) Head(hidden []byte) ([]byte, error) {
+	if st.headBF16 != nil && bytes.Equal(hidden, st.headHidden) {
+		out := st.headBF16
+		st.headHidden, st.headBF16 = nil, nil
+		return out, nil
+	}
+	return f32ToBF16Bytes(NewSession(st.s.m).headLogits(bf16BytesToF32(hidden))), nil
 }
 
 var (
 	_ model.TokenModel    = (*ComposedTokenModel)(nil)
 	_ model.SessionModel  = (*ComposedTokenModel)(nil)
 	_ model.DecodeStepper = (*composedStepper)(nil)
+	_ model.LMHead        = (*composedStepper)(nil)
 )
