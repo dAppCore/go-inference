@@ -8,6 +8,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/state"
+	"dappco.re/go/inference/model/state/filestore"
 )
 
 // statSize returns path's byte size via core.Stat (os.FileInfo behind Result).
@@ -20,75 +21,89 @@ func statSize(t *testing.T, path string) int64 {
 	return r.Value.(interface{ Size() int64 }).Size()
 }
 
-// TestResolveStateStorePath_Ephemeral_Good pins the defaulted lane: an empty
-// -state-store resolves to the home-relative conversations.kv AND marks it
-// ephemeral — serve made the store, so serve wipes it per run.
-func TestResolveStateStorePath_Ephemeral_Good(t *testing.T) {
-	path, ephemeral := resolveStateStorePath("")
-	if path == "" || !core.Contains(path, "conversations.kv") {
-		t.Fatalf("default path = %q, want the home conversations.kv", path)
-	}
-	if !ephemeral {
-		t.Fatal("defaulted store must be ephemeral")
-	}
-}
-
-// TestResolveStateStorePath_Explicit_Bad pins the durable lane: any explicit
-// path — even one equal to the default's literal location — is per-project
-// state and is never marked ephemeral.
-func TestResolveStateStorePath_Explicit_Bad(t *testing.T) {
-	path, ephemeral := resolveStateStorePath("/tmp/project-a.kv")
-	if path != "/tmp/project-a.kv" || ephemeral {
-		t.Fatalf("explicit path = (%q, ephemeral=%v), want it kept verbatim and durable", path, ephemeral)
-	}
-}
-
-// TestResolveStateStorePath_Whitespace_Ugly pins trimming: a whitespace-only
-// flag is the unset flag, not a store named " ".
-func TestResolveStateStorePath_Whitespace_Ugly(t *testing.T) {
-	path, ephemeral := resolveStateStorePath("   ")
-	if !ephemeral || !core.Contains(path, "conversations.kv") {
-		t.Fatalf("whitespace flag resolved to (%q, ephemeral=%v), want the ephemeral default", path, ephemeral)
-	}
-}
-
-// TestOpenConversationStore_EphemeralWipes_Good proves the launch wipe: a
-// store re-opened as ephemeral comes back EMPTY — whatever a previous run (or
-// crash) accumulated is gone.
-func TestOpenConversationStore_EphemeralWipes_Good(t *testing.T) {
-	ctx := context.Background()
-	path := t.TempDir() + "/conversations.kv"
-
-	first, err := openConversationStore(ctx, path, true)
+// TestOpenContinuityStore_RAMDefault_Good pins the inverted default: an unset
+// -state-store holds conversations in a pure-RAM store — no path, no file
+// touched, and a cleanup that is safe to call. This is the MacBook-class
+// default (no per-turn disk round-trip for a cache discarded at shutdown).
+func TestOpenContinuityStore_RAMDefault_Good(t *testing.T) {
+	store, cleanup, where, err := openContinuityStore(context.Background(), "")
 	if err != nil {
-		t.Fatalf("first open: %v", err)
+		t.Fatalf("openContinuityStore(unset): %v", err)
 	}
-	if _, err := first.PutBytes(ctx, []byte("stale-turn-block"), state.PutOptions{}); err != nil {
+	if _, ok := store.(*state.InMemoryStore); !ok {
+		t.Fatalf("unset -state-store gave %T, want a *state.InMemoryStore (RAM tier)", store)
+	}
+	if !core.Contains(where, "RAM") {
+		t.Fatalf("boot notice = %q, want it to mention RAM", where)
+	}
+	if cleanup == nil {
+		t.Fatal("cleanup must never be nil")
+	}
+	cleanup() // a RAM store's cleanup is a no-op; it must not panic.
+}
+
+// TestOpenContinuityStore_Unopenable_Bad pins the degrade: an explicit durable
+// path that cannot be opened (its parent is a regular file, so the store dir
+// can't be made) returns an error and no store — serve then falls back to
+// stateless rather than crashing.
+func TestOpenContinuityStore_Unopenable_Bad(t *testing.T) {
+	blocker := t.TempDir() + "/not-a-dir"
+	if r := core.WriteFile(blocker, []byte("x"), 0o644); !r.OK {
+		t.Fatalf("seed blocker file: %v", r.Value)
+	}
+	// A store path UNDER the regular file: mkdir of the parent must fail.
+	_, _, _, err := openContinuityStore(context.Background(), blocker+"/store.kv")
+	if err == nil {
+		t.Fatal("a durable store under a regular file must error, not succeed")
+	}
+}
+
+// TestOpenContinuityStore_DurableFile_Ugly pins the opt-in durable lane: an
+// explicit path is the per-project file store, so the file is created on disk
+// and the boot notice names it — chats that asked for durability keep .kv.
+func TestOpenContinuityStore_DurableFile_Ugly(t *testing.T) {
+	path := t.TempDir() + "/project.kv"
+	store, cleanup, where, err := openContinuityStore(context.Background(), path)
+	if err != nil {
+		t.Fatalf("openContinuityStore(%q): %v", path, err)
+	}
+	defer cleanup()
+	if _, ok := store.(*filestore.Store); !ok {
+		t.Fatalf("explicit -state-store gave %T, want a *filestore.Store (durable tier)", store)
+	}
+	if !core.Stat(path).OK {
+		t.Fatalf("durable store did not create the file at %s", path)
+	}
+	if !core.Contains(where, path) {
+		t.Fatalf("boot notice = %q, want it to name the store path", where)
+	}
+}
+
+// TestOpenConversationStore_Create_Good proves the durable opener creates a
+// usable store at a fresh path.
+func TestOpenConversationStore_Create_Good(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir() + "/fresh.kv"
+	store, err := openConversationStore(ctx, path)
+	if err != nil {
+		t.Fatalf("open fresh: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.PutBytes(ctx, []byte("turn-block"), state.PutOptions{}); err != nil {
 		t.Fatalf("put: %v", err)
 	}
-	if err := first.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	grown := statSize(t, path)
-
-	second, err := openConversationStore(ctx, path, true)
-	if err != nil {
-		t.Fatalf("second open: %v", err)
-	}
-	defer second.Close()
-	wiped := statSize(t, path)
-	if wiped >= grown {
-		t.Fatalf("ephemeral reopen kept old bytes: %d -> %d, want a fresh (smaller) store", grown, wiped)
+	if !core.Stat(path).OK {
+		t.Fatalf("store file not created at %s", path)
 	}
 }
 
-// TestOpenConversationStore_DurableSurvives_Bad proves the explicit lane keeps
+// TestOpenConversationStore_DurableSurvives_Bad proves the durable lane keeps
 // its bytes across reopens — per-project state is never wiped.
 func TestOpenConversationStore_DurableSurvives_Bad(t *testing.T) {
 	ctx := context.Background()
 	path := t.TempDir() + "/project.kv"
 
-	first, err := openConversationStore(ctx, path, false)
+	first, err := openConversationStore(ctx, path)
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
@@ -100,7 +115,7 @@ func TestOpenConversationStore_DurableSurvives_Bad(t *testing.T) {
 	}
 	grown := statSize(t, path)
 
-	second, err := openConversationStore(ctx, path, false)
+	second, err := openConversationStore(ctx, path)
 	if err != nil {
 		t.Fatalf("second open: %v", err)
 	}
@@ -108,6 +123,21 @@ func TestOpenConversationStore_DurableSurvives_Bad(t *testing.T) {
 	kept := statSize(t, path)
 	if kept != grown {
 		t.Fatalf("durable reopen changed the file: %d -> %d, want untouched", grown, kept)
+	}
+}
+
+// TestOpenConversationStore_MakesParent_Ugly proves a store path in a
+// not-yet-existing directory is created (the parent is mkdir'd on first use).
+func TestOpenConversationStore_MakesParent_Ugly(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir() + "/nested/dir/project.kv"
+	store, err := openConversationStore(ctx, path)
+	if err != nil {
+		t.Fatalf("open with missing parent: %v", err)
+	}
+	defer store.Close()
+	if !core.Stat(path).OK {
+		t.Fatalf("store file not created at %s (parent dir not made)", path)
 	}
 }
 
