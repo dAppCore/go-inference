@@ -100,6 +100,8 @@ type Arch struct {
 	Eps                                        float32
 	AttnScale                                  float32   // attention SDPA scale the model DECLARES (the engine applies it, never assumes): e.g. 1.0 when a QK-norm IS the scaling, else 1/√headDim
 	EmbedScale                                 float32   // token-embedding multiplier the model DECLARES (gemma-family √hidden; llama-family 1.0); 0 = undeclared → backends fall back to √hidden
+	LogitsScaling                              float32   // final-logit divisor the model DECLARES; 0 = no division
+	ResidualMultiplier                         float32   // attention and MLP residual-branch multiplier; 0 = undeclared → 1
 	RopeBase, RopeScale                        float32   // RopeBase = global-attention RoPE theta
 	RopeLocalBase                              float32   // sliding-attention RoPE theta (an arch may use a smaller local theta)
 	RotaryDim, RotaryDimLocal                  int       // rotated dims/head (partial rotary, e.g. full_attention=0.25·GlobalHeadDim); global / sliding
