@@ -3,10 +3,31 @@
 package safetensors
 
 import (
+	"bytes"
 	"testing"
 
 	core "dappco.re/go"
 )
+
+// TestSafetensors_Encode_Golden pins the EXACT encoded byte stream (length prefix + header JSON +
+// name-sorted data section) for a fixed multi-tensor input, gating the codec's buffer restructure on
+// byte-identical output — the round-trip test above only proves the tensors survive, not that the
+// wire bytes are unchanged.
+func TestSafetensors_Encode_Golden(t *testing.T) {
+	in := map[string]Tensor{
+		"w":     {Dtype: "BF16", Shape: []int{2, 3}, Data: []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}},
+		"norm":  {Dtype: "F32", Shape: []int{2}, Data: []byte{13, 14, 15, 16, 17, 18, 19, 20}},
+		"codes": {Dtype: "U8", Shape: []int{4}, Data: []byte{21, 22, 23, 24}},
+	}
+	got, err := Encode(in)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	wantBlob := []byte{172, 0, 0, 0, 0, 0, 0, 0, 123, 34, 99, 111, 100, 101, 115, 34, 58, 123, 34, 100, 116, 121, 112, 101, 34, 58, 34, 85, 56, 34, 44, 34, 115, 104, 97, 112, 101, 34, 58, 91, 52, 93, 44, 34, 100, 97, 116, 97, 95, 111, 102, 102, 115, 101, 116, 115, 34, 58, 91, 48, 44, 52, 93, 125, 44, 34, 110, 111, 114, 109, 34, 58, 123, 34, 100, 116, 121, 112, 101, 34, 58, 34, 70, 51, 50, 34, 44, 34, 115, 104, 97, 112, 101, 34, 58, 91, 50, 93, 44, 34, 100, 97, 116, 97, 95, 111, 102, 102, 115, 101, 116, 115, 34, 58, 91, 52, 44, 49, 50, 93, 125, 44, 34, 119, 34, 58, 123, 34, 100, 116, 121, 112, 101, 34, 58, 34, 66, 70, 49, 54, 34, 44, 34, 115, 104, 97, 112, 101, 34, 58, 91, 50, 44, 51, 93, 44, 34, 100, 97, 116, 97, 95, 111, 102, 102, 115, 101, 116, 115, 34, 58, 91, 49, 50, 44, 50, 52, 93, 125, 125, 21, 22, 23, 24, 13, 14, 15, 16, 17, 18, 19, 20, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	if !bytes.Equal(got, wantBlob) {
+		t.Fatalf("Encode blob diverged: got %d bytes, want %d bytes\n got=%v\nwant=%v", len(got), len(wantBlob), got, wantBlob)
+	}
+}
 
 // blob builds a safetensors byte stream from a header JSON string + the data section
 // (8-byte little-endian header length, the JSON, then the data).

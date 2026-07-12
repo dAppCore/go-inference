@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	core "dappco.re/go"
@@ -117,6 +118,60 @@ func TestVision_TextModel_AcceptsImages_Ugly(t *testing.T) {
 	var nilModel *TextModel
 	if nilModel.AcceptsImages() {
 		t.Fatal("AcceptsImages() on a nil *TextModel = true, want false")
+	}
+}
+
+// --- AcceptsAudio ------------------------------------------------------
+
+// fakeAudioTokenModel is a configurable [AudioInputTokenModel] double layered
+// over fakeTokenModel — the audio sibling of fakeVisionTokenModel. Only
+// AcceptsAudioInput drives the AcceptsAudio probe; the other three methods are
+// present to satisfy the interface (a checkpoint that carries an audio head
+// declares all four).
+type fakeAudioTokenModel struct {
+	fakeTokenModel
+
+	accepts bool
+}
+
+func (f *fakeAudioTokenModel) AcceptsAudioInput() bool            { return f.accepts }
+func (f *fakeAudioTokenModel) AudioPlaceholderTokenID() int32     { return 0 }
+func (f *fakeAudioTokenModel) AudioPlaceholderBlock(n int) string { return "" }
+func (f *fakeAudioTokenModel) ProjectAudio(a []byte) ([]byte, int, error) {
+	return nil, 0, nil
+}
+
+var _ AudioInputTokenModel = (*fakeAudioTokenModel)(nil)
+
+// TestVision_TextModel_AcceptsAudio_Good pins the positive probe: an engine
+// whose loaded checkpoint shipped an audio head reports true.
+func TestVision_TextModel_AcceptsAudio_Good(t *testing.T) {
+	m := &TextModel{tm: &fakeAudioTokenModel{accepts: true}}
+	if !m.AcceptsAudio() {
+		t.Fatal("AcceptsAudio() = false, want true for an audio-capable loaded checkpoint")
+	}
+}
+
+// TestVision_TextModel_AcceptsAudio_Bad pins the no-seam case: an engine
+// TokenModel that does not implement AudioInputTokenModel at all reports false.
+func TestVision_TextModel_AcceptsAudio_Bad(t *testing.T) {
+	m := &TextModel{tm: &fakeTokenModel{}}
+	if m.AcceptsAudio() {
+		t.Fatal("AcceptsAudio() = true, want false for an engine with no audio seam")
+	}
+}
+
+// TestVision_TextModel_AcceptsAudio_Ugly pins the live-probe distinction (a
+// FAMILY supporting audio does not mean THIS checkpoint shipped the head) and
+// the nil-receiver guard, mirroring AcceptsImages.
+func TestVision_TextModel_AcceptsAudio_Ugly(t *testing.T) {
+	m := &TextModel{tm: &fakeAudioTokenModel{accepts: false}}
+	if m.AcceptsAudio() {
+		t.Fatal("AcceptsAudio() = true, want false: the family supports audio but this checkpoint has no head")
+	}
+	var nilModel *TextModel
+	if nilModel.AcceptsAudio() {
+		t.Fatal("AcceptsAudio() on a nil *TextModel = true, want false")
 	}
 }
 
@@ -269,6 +324,164 @@ func TestChatMultimodal_Errors(t *testing.T) {
 				t.Fatalf("Err() = %q, want it to contain %q", r.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+// chatMLVisionTokenModel is a fakeVisionTokenModel that ALSO declares a ChatML
+// chat dialect (engine.ChatTemplateDeclarer) — a stand-in for a non-gemma
+// vision family (a qwen-VL shape) riding the SAME shared multimodal path. It
+// exists to prove the multimodal turn is framed in the model's DECLARED dialect
+// rather than gemma's, exactly as the text-only Chat path already is.
+type chatMLVisionTokenModel struct {
+	fakeVisionTokenModel
+}
+
+func (chatMLVisionTokenModel) DeclaredChatTemplate() (ChatTemplate, bool) {
+	return ChatTemplate{
+		Open: "<|im_start|>", Close: "<|im_end|>",
+		UserRole: "user", AssistantRole: "assistant", SystemRole: "system",
+	}, true
+}
+
+// TestChatMultimodal_ArchNeutral_NonGemmaFraming pins arch-neutrality on the
+// shared multimodal path: a vision model that DECLARES a ChatML template must
+// have its image turn framed in ChatML, not gemma. The prefilled ids carry the
+// declared <|im_start|> marker (a real ChatML added-token id in this fixture),
+// which is absent when the path frames the turn in gemma's dialect and the
+// gemma markers vanish against a ChatML vocab. This guards the pre-tag question:
+// composed/qwen/hip vision checkpoints ride this code and must follow their own
+// declaration, not a baked-in gemma fallback.
+func TestChatMultimodal_ArchNeutral_NonGemmaFraming(t *testing.T) {
+	tok := newChatMLFixtureTokenizer(t)
+	imStart, ok := tok.TokenID("<|im_start|>")
+	if !ok {
+		t.Fatal("ChatML fixture tokenizer is missing <|im_start|>")
+	}
+	visionSess := &fakeVisionSession{fakeSession: fakeSession{genIDs: []int32{10, 11}}}
+	vtm := &chatMLVisionTokenModel{fakeVisionTokenModel{
+		accepts:           true,
+		placeholderID:     42, // the ChatML fixture tokenizer's "z" vocab entry
+		placeholderBlock:  "zzz",
+		projectFeatures:   []byte{9, 9},
+		projectSoftTokens: 3,
+		embedRows:         [][]byte{{0}, {1}, {2}, {3}},
+		session:           visionSess,
+	}}
+	m := NewTextModel(vtm, tok, "chatml-vision-fake", inference.ModelInfo{}, 4096)
+	messages := []inference.Message{{Role: "user", Content: "hi", Images: [][]byte{{1, 2, 3}}}}
+
+	for range m.Chat(context.Background(), messages, inference.WithMaxTokens(2)) {
+	}
+	if r := m.Err(); !r.OK {
+		t.Fatalf("ChatML vision turn failed: %+v", r)
+	}
+	if !visionSess.prefillEmbedCalled {
+		t.Fatal("multimodal path did not reach the token-embedding prefill")
+	}
+	if !tokenInSet(imStart, visionSess.embedIDs) {
+		t.Fatalf("multimodal prompt ids %v missing the declared ChatML <|im_start|> id %d — "+
+			"the shared multimodal path framed a non-gemma model in gemma's dialect", visionSess.embedIDs, imStart)
+	}
+}
+
+// multimodalFake composes the vision, video and audio token-model capabilities
+// over the shared fakeVisionTokenModel so chatMultimodal's video- and audio-
+// splice paths are exercised. Video/audio placeholder blocks are runs of the
+// fixture's "z" (id 42) so a block of N tokenises to exactly N placeholder ids;
+// the image placeholder id stays 0 so the image-count check no-ops on the
+// video-/audio-only turns these tests drive.
+type multimodalFake struct {
+	fakeVisionTokenModel
+	videoPlaceholderID int32
+	audioPlaceholderID int32
+	audioSoftTokens    int
+}
+
+func (f *multimodalFake) VideoPlaceholderTokenID() int32     { return f.videoPlaceholderID }
+func (f *multimodalFake) VideoPlaceholderBlock(n int) string { return strings.Repeat("z", n) }
+func (f *multimodalFake) AcceptsAudioInput() bool            { return true }
+func (f *multimodalFake) AudioPlaceholderTokenID() int32     { return f.audioPlaceholderID }
+func (f *multimodalFake) AudioPlaceholderBlock(n int) string { return strings.Repeat("z", n) }
+func (f *multimodalFake) ProjectAudio([]byte) ([]byte, int, error) {
+	return []byte{7}, f.audioSoftTokens, nil
+}
+
+var (
+	_ VideoTokenModel      = (*multimodalFake)(nil)
+	_ AudioInputTokenModel = (*multimodalFake)(nil)
+	_ VisionTokenModel     = (*multimodalFake)(nil)
+)
+
+// TestChatMultimodal_VideoTurn_Good walks the video-frame path: each frame
+// projects through the SAME vision tower, splices at the video placeholder as
+// one timestamped block per frame, and the templated placeholder run must
+// survive tokenisation exactly before the embeddings prefill.
+func TestChatMultimodal_VideoTurn_Good(t *testing.T) {
+	tok := newFixtureTokenizer(t)
+	visionSess := &fakeVisionSession{fakeSession: fakeSession{genIDs: []int32{10, 11}}}
+	fake := &multimodalFake{
+		fakeVisionTokenModel: fakeVisionTokenModel{
+			accepts:           true,
+			placeholderID:     0, // image-count check no-ops (video-only turn)
+			projectFeatures:   []byte{9},
+			projectSoftTokens: 2,
+			embedRows:         [][]byte{{0}, {1}, {2}, {3}},
+			session:           visionSess,
+		},
+		videoPlaceholderID: 42,
+	}
+	m := NewTextModel(fake, tok, "gemma-test", inference.ModelInfo{}, 4096)
+	msgs := []inference.Message{{Role: "user", Content: "describe", Videos: [][]byte{{1}, {2}}}}
+
+	var got int
+	for range m.Chat(context.Background(), msgs, inference.WithMaxTokens(2)) {
+		got++
+	}
+	if r := m.Err(); !r.OK {
+		t.Fatalf("video turn failed: %+v", r)
+	}
+	if !visionSess.prefillEmbedCalled {
+		t.Fatal("video path did not reach the token-embedding prefill")
+	}
+	if got != 2 {
+		t.Fatalf("video turn produced %d tokens, want 2", got)
+	}
+}
+
+// TestChatMultimodal_AudioTurn_Good walks the audio path: the audio head projects
+// the attachment to soft-token features, the placeholder block FOLLOWS the turn
+// text (the gemma4 audio-after-text convention), and the placeholder run is
+// verified against the tokenised prompt before the embeddings prefill.
+func TestChatMultimodal_AudioTurn_Good(t *testing.T) {
+	tok := newFixtureTokenizer(t)
+	visionSess := &fakeVisionSession{fakeSession: fakeSession{genIDs: []int32{10, 11}}}
+	fake := &multimodalFake{
+		fakeVisionTokenModel: fakeVisionTokenModel{
+			accepts:           true,
+			placeholderID:     0, // image-count check no-ops (audio-only turn)
+			projectFeatures:   []byte{9},
+			projectSoftTokens: 2,
+			embedRows:         [][]byte{{0}, {1}, {2}},
+			session:           visionSess,
+		},
+		audioPlaceholderID: 42,
+		audioSoftTokens:    2,
+	}
+	m := NewTextModel(fake, tok, "gemma-test", inference.ModelInfo{}, 4096)
+	msgs := []inference.Message{{Role: "user", Content: "transcribe", Audios: [][]byte{{1}}}}
+
+	var got int
+	for range m.Chat(context.Background(), msgs, inference.WithMaxTokens(2)) {
+		got++
+	}
+	if r := m.Err(); !r.OK {
+		t.Fatalf("audio turn failed: %+v", r)
+	}
+	if !visionSess.prefillEmbedCalled {
+		t.Fatal("audio path did not reach the token-embedding prefill")
+	}
+	if got != 2 {
+		t.Fatalf("audio turn produced %d tokens, want 2", got)
 	}
 }
 

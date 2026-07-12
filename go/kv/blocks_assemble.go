@@ -43,6 +43,7 @@ func AssembleBlocks(blocks []Block) (*Snapshot, error) {
 			return nil, err
 		}
 	}
+	finalizeAssembledLayerRaw(assembled)
 	last := blocks[len(blocks)-1].Snapshot
 	assembled.Generated = core.SliceClone(last.Generated)
 	assembled.TokenOffset = last.TokenOffset
@@ -63,6 +64,17 @@ func preSizeAssembledRawBytes(assembled *Snapshot, blocks []Block) {
 	}
 	for layerIndex := range assembled.Layers {
 		var layerKeyTotal, layerValueTotal int
+		dstLayer := &assembled.Layers[layerIndex]
+		// A windowed (sliding-cache) layer is empty in the leading blocks — its
+		// data begins only once the block range enters the window, so block 0 is
+		// the WRONG shape donor for it. emptyKVSnapshotLayers copied block 0's
+		// empty KeyShape/KeyDType, leaving the assembled layer with no 4D shape
+		// for presizeLayerRaw to size a placement buffer from; without it
+		// appendKVSnapshotLayerRawBlock falls to the O(N^2) merged-rebuild path
+		// (a full-tensor recopy per data block). Adopt the first non-empty
+		// block's shape+dtype so the strided placement buffer is built and each
+		// block folds in O(block). Full-attention layers already carry a 4D
+		// shape from block 0 (len==4), so they skip this and are unchanged.
 		for _, block := range blocks {
 			if block.Snapshot == nil || layerIndex >= len(block.Snapshot.Layers) {
 				continue
@@ -70,13 +82,20 @@ func preSizeAssembledRawBytes(assembled *Snapshot, blocks []Block) {
 			srcLayer := block.Snapshot.Layers[layerIndex]
 			layerKeyTotal += len(srcLayer.KeyBytes)
 			layerValueTotal += len(srcLayer.ValueBytes)
+			if len(dstLayer.KeyShape) != 4 && len(srcLayer.KeyShape) == 4 && len(srcLayer.KeyBytes) > 0 {
+				dstLayer.KeyShape = core.SliceClone(srcLayer.KeyShape)
+				dstLayer.KeyDType = srcLayer.KeyDType
+			}
+			if len(dstLayer.ValueShape) != 4 && len(srcLayer.ValueShape) == 4 && len(srcLayer.ValueBytes) > 0 {
+				dstLayer.ValueShape = core.SliceClone(srcLayer.ValueShape)
+				dstLayer.ValueDType = srcLayer.ValueDType
+			}
 		}
-		dstLayer := &assembled.Layers[layerIndex]
 		if layerKeyTotal > 0 {
-			dstLayer.KeyBytes = make([]byte, 0, layerKeyTotal)
+			dstLayer.KeyBytes = presizeLayerRaw(dstLayer.KeyShape, dstLayer.KeyDType, layerKeyTotal)
 		}
 		if layerValueTotal > 0 {
-			dstLayer.ValueBytes = make([]byte, 0, layerValueTotal)
+			dstLayer.ValueBytes = presizeLayerRaw(dstLayer.ValueShape, dstLayer.ValueDType, layerValueTotal)
 		}
 		for headIndex := range assembled.Layers[layerIndex].Heads {
 			var keyTotal, valueTotal int
@@ -301,6 +320,31 @@ func appendKVSnapshotLayerRawBlock(dstDType *string, dstBytes *[]byte, dstShape 
 		*dstShape = core.SliceClone(shape)
 		return nil
 	}
+	// Placement fast path (multi-head): when the destination was pre-sized to a
+	// full strided buffer (see presizeLayerRaw — "gapped"), drop this block's
+	// B*H rows straight into the fill cursor. O(block) with no re-interleave of
+	// already-placed data, versus the merged rebuild below which recopies the
+	// whole accumulated tensor on every block — O(N^2) across N blocks. The
+	// driver compacts the gaps once via finalizeAssembledLayerRaw. The gapped
+	// marker (byte length exceeds the packed size implied by the fill cursor)
+	// never matches a packed legacy buffer, so legacy assembly is unaffected.
+	if B*H != 1 {
+		filledL := int((*dstShape)[2])
+		if capL, ok := layerRawGapStride(*dstBytes, filledL, B*H, D, bytesPerValue); ok {
+			if len(*dstShape) != 4 || int((*dstShape)[0]) != B || int((*dstShape)[1]) != H || int((*dstShape)[3]) != D {
+				return errLayerRawTensorShape
+			}
+			if filledL+L <= capL {
+				placeLayerRawRows(*dstBytes, raw, B*H, filledL, L, capL, D, bytesPerValue)
+				(*dstShape)[2] = int32(filledL + L)
+				return nil
+			}
+			// Estimate undershoot (does not occur for block-aligned splits, where
+			// every later block's window <= the first): compact the gaps to
+			// packed form so the merged rebuild below reads a packed destination.
+			compactLayerRawGaps(dstBytes, *dstShape, B*H, D, bytesPerValue)
+		}
+	}
 	if len(*dstShape) != 4 || int((*dstShape)[0]) != B || int((*dstShape)[1]) != H || int((*dstShape)[3]) != D {
 		return errLayerRawTensorShape
 	}
@@ -334,6 +378,113 @@ func appendKVSnapshotLayerRawBlock(dstDType *string, dstBytes *[]byte, dstShape 
 	*dstBytes = merged
 	(*dstShape)[2] = int32(totalLen)
 	return nil
+}
+
+// presizeLayerRaw returns the pre-allocated destination byte buffer for an
+// assembled multi-head layer-raw tensor. For a [B,H,L,D] tensor with B*H>1 it
+// returns a full-length strided buffer and zeroes the shape's sequence
+// dimension, so appendKVSnapshotLayerRawBlock places each block at a fill
+// cursor (O(block)) instead of rebuilding the whole interleaved tensor on every
+// block (the O(N^2) merged path). Single-head or non-4D tensors keep the plain
+// capacity hint the linear fast-append path consumes. shape is the assembled
+// layer's own (already-cloned) KeyShape/ValueShape, safe to mutate.
+func presizeLayerRaw(shape []int32, dtype string, totalBytes int) []byte {
+	if len(shape) == 4 {
+		if _, bytesPerValue := normalizeKVSnapshotTensorDType(dtype); bytesPerValue > 0 {
+			bh := int(shape[0]) * int(shape[1])
+			stride := bh * int(shape[3]) * bytesPerValue
+			if bh > 1 && stride > 0 && totalBytes%stride == 0 {
+				shape[2] = 0
+				return make([]byte, totalBytes)
+			}
+		}
+	}
+	return make([]byte, 0, totalBytes)
+}
+
+// layerRawGapStride reports the strided token capacity (capL) of a placement
+// destination buffer, or ok=false for a packed (legacy) buffer. A placement
+// buffer is pre-allocated to its full B*H*capL*D*bpv length with the fill
+// cursor tracked in shape[2]; its byte length therefore exceeds the packed size
+// B*H*filledL*D*bpv while gaps remain. A packed buffer holds exactly the packed
+// size, so it never reads as gapped — the two modes are unambiguous.
+func layerRawGapStride(dstBytes []byte, filledL, bh, d, bytesPerValue int) (int, bool) {
+	stride := bh * d * bytesPerValue
+	if stride <= 0 {
+		return 0, false
+	}
+	packed := stride * filledL
+	if len(dstBytes) <= packed || len(dstBytes)%stride != 0 {
+		return 0, false
+	}
+	return len(dstBytes) / stride, true
+}
+
+// placeLayerRawRows copies one block's B*H rows into a strided placement buffer
+// at the fill cursor, leaving prior rows untouched — O(block), no re-interleave.
+// Each row r spans capL tokens; the block's L tokens for row r land at token
+// offset filledL within that row.
+func placeLayerRawRows(dstBytes, raw []byte, bh, filledL, l, capL, d, bytesPerValue int) {
+	rowBytesDst := capL * d * bytesPerValue
+	rowBytesNew := l * d * bytesPerValue
+	cursorBytes := filledL * d * bytesPerValue
+	for r := range bh {
+		dstStart := r*rowBytesDst + cursorBytes
+		srcStart := r * rowBytesNew
+		copy(dstBytes[dstStart:dstStart+rowBytesNew], raw[srcStart:srcStart+rowBytesNew])
+	}
+}
+
+// compactLayerRawGaps rewrites a gapped placement buffer to its packed
+// [B,H,filledL,D] form and truncates it. Called once per assembled tensor via
+// finalizeAssembledLayerRaw (and on the rare estimate-undershoot fallback).
+// Rows compact front-to-back; each row's destination offset is <= its source
+// offset (filledL <= capL), so the in-place copy is memmove-safe and never
+// overwrites a not-yet-read later row. A no-op for packed buffers.
+func compactLayerRawGaps(dstBytes *[]byte, dstShape []int32, bh, d, bytesPerValue int) {
+	if len(dstShape) != 4 {
+		return
+	}
+	filledL := int(dstShape[2])
+	capL, ok := layerRawGapStride(*dstBytes, filledL, bh, d, bytesPerValue)
+	if !ok || capL == filledL {
+		return
+	}
+	rowBytesSrc := capL * d * bytesPerValue
+	rowBytesDst := filledL * d * bytesPerValue
+	buf := *dstBytes
+	for r := range bh {
+		dstStart := r * rowBytesDst
+		srcStart := r * rowBytesSrc
+		copy(buf[dstStart:dstStart+rowBytesDst], buf[srcStart:srcStart+rowBytesDst])
+	}
+	*dstBytes = buf[:bh*rowBytesDst]
+}
+
+// finalizeAssembledLayerRaw compacts any gapped placement-mode layer-raw
+// tensors produced by the multi-head assembly fast path back to their packed
+// form. A no-op for packed tensors (single-head fast-append, legacy merged, or
+// exact-fit placement), so it is safe to call unconditionally after every
+// block-assembly loop.
+func finalizeAssembledLayerRaw(assembled *Snapshot) {
+	if assembled == nil {
+		return
+	}
+	for layerIndex := range assembled.Layers {
+		layer := &assembled.Layers[layerIndex]
+		if len(layer.KeyShape) == 4 {
+			if _, bytesPerValue := normalizeKVSnapshotTensorDType(layer.KeyDType); bytesPerValue > 0 {
+				bh := int(layer.KeyShape[0]) * int(layer.KeyShape[1])
+				compactLayerRawGaps(&layer.KeyBytes, layer.KeyShape, bh, int(layer.KeyShape[3]), bytesPerValue)
+			}
+		}
+		if len(layer.ValueShape) == 4 {
+			if _, bytesPerValue := normalizeKVSnapshotTensorDType(layer.ValueDType); bytesPerValue > 0 {
+				bh := int(layer.ValueShape[0]) * int(layer.ValueShape[1])
+				compactLayerRawGaps(&layer.ValueBytes, layer.ValueShape, bh, int(layer.ValueShape[3]), bytesPerValue)
+			}
+		}
+	}
 }
 
 func appendKVSnapshotRawBlock(dstDType *string, dstBytes *[]byte, dtype string, raw []byte) error {

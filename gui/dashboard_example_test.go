@@ -83,9 +83,9 @@ func ExampleDashboardService_Refresh() {
 
 func ExampleDashboardService_RunQuery() {
 	service := NewDashboardService("", "", "")
-	_, err := service.RunQuery("select 1")
+	r := service.RunQuery("select 1")
 
-	core.Println(err != nil)
+	core.Println(!r.OK)
 	// Output:
 	// true
 }

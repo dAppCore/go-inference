@@ -20,6 +20,8 @@ var (
 	benchResult  core.Result
 	benchString  string
 	benchInt     int
+	benchFloat   float64
+	benchStrings []string
 	benchOpts    []inference.GenerateOption
 	benchOAI     []openai.ChatMessage
 	benchMetrics *inference.GenerateMetrics
@@ -320,5 +322,43 @@ func BenchmarkHTTPTextModel_BatchGenerate(b *testing.B) {
 	b.ReportAllocs()
 	for range b.N {
 		benchResult = model.BatchGenerate(ctx, prompts)
+	}
+}
+
+// --- welfare guard (per guarded chat request) ---
+
+// benchWelfareConversation is a realistic multi-turn chat (four user turns
+// interleaved with assistant replies) — the shape welfareUserTurns splits on
+// every request the welfare guard decorates.
+func benchWelfareConversation() []Message {
+	return []Message{
+		{Role: "system", Content: "You are a concise, helpful assistant."},
+		{Role: "user", Content: "Summarise the key points of distributed consensus."},
+		{Role: "assistant", Content: "Consensus protocols ensure replicas agree on an ordered log."},
+		{Role: "user", Content: "How does leader election work in Raft?"},
+		{Role: "assistant", Content: "A candidate wins a term by collecting a majority of votes."},
+		{Role: "user", Content: "And how is log replication kept consistent?"},
+		{Role: "assistant", Content: "The leader appends entries and advances the commit index on quorum."},
+		{Role: "user", Content: "What happens during a network partition?"},
+	}
+}
+
+// BenchmarkWelfareUserTurns measures the per-request conversation splitter the
+// welfare guard runs ahead of every chat turn (latest user turn + priors).
+func BenchmarkWelfareUserTurns(b *testing.B) {
+	msgs := benchWelfareConversation()
+	b.ReportAllocs()
+	for range b.N {
+		benchString, benchStrings = welfareUserTurns(msgs)
+	}
+}
+
+// BenchmarkWelfareHostility measures the per-request production hostility hook
+// (the lek composite forward) the detector calls on the latest user turn.
+func BenchmarkWelfareHostility(b *testing.B) {
+	text := "could you please help me reverse this string, it is a fairly long and detailed request"
+	b.ReportAllocs()
+	for range b.N {
+		benchFloat = welfareHostility(text)
 	}
 }

@@ -58,6 +58,7 @@ RELEASE_SIDECARS = $(AMD_KERNEL_MODULE_NAME) $(CUDA_KERNEL_MODULE_NAME) $(CPU_X8
 HIPCC ?= hipcc
 AMD_HIP_ARCH ?= gfx1100
 AMD_HIP_STD ?= c++23
+AMD_HIP_OPT ?= -O3
 NVIDIA_HIP_ARCH ?= sm_75
 NVIDIA_HIP_STD ?= c++20
 ROCM_INCLUDE_DIR ?= /opt/rocm/include
@@ -105,7 +106,7 @@ HIP_CPU_STD ?= c++20
 .PHONY: all help build build-cli lthn-rocm named-binaries release-binaries release-dependency-guard release-artifacts dist static-hip-binaries rocr-cmake-shims hsa-static-archive hip-static-archive require-static-hip-archive hip-link-info lthn-amd lthn-cuda lthn-cpu-x86 lthn-cpu-aarch64 test test-cli test-all clean \
 	hip hip-amd hip-nvidia hip-cpu hip-cpu-x86_64 hip-cpu-aarch64 \
 	test-hip-amd test-hip-nvidia test-hip-cpu test-hip-cpu-runtime test-hip-cpu-kernel-runtime test-zluda-cuda \
-	compile-matrix
+	compile-matrix test-matrix
 
 all: build
 
@@ -120,6 +121,7 @@ help:
 		'  named-binaries     build all named release binaries' \
 		'  release-artifacts  build archives and checksums under $(DIST_DIR)' \
 		'  test               run the Go module test suite' \
+		'  test-matrix        run the host suite plus every hip toolchain smoke, skipping what is absent' \
 		'  clean              remove $(BUILD_DIR)'
 
 build: build-cli
@@ -291,7 +293,7 @@ compile-matrix: build-cli named-binaries
 
 hip-amd:
 	mkdir -p "$(KERNEL_BUILD_DIR_ABS)"
-	HIP_PLATFORM=amd $(HIPCC) --std=$(AMD_HIP_STD) --genco --offload-arch=$(AMD_HIP_ARCH) -O2 "$(KERNEL_SRC_ABS)" -o "$(KERNEL_BUILD_DIR_ABS)/rocm_kernels_$(AMD_HIP_ARCH).hsaco"
+	HIP_PLATFORM=amd $(HIPCC) --std=$(AMD_HIP_STD) --genco --offload-arch=$(AMD_HIP_ARCH) $(AMD_HIP_OPT) "$(KERNEL_SRC_ABS)" -o "$(KERNEL_BUILD_DIR_ABS)/rocm_kernels_$(AMD_HIP_ARCH).hsaco"
 
 hip-nvidia:
 	mkdir -p "$(KERNEL_BUILD_DIR_ABS)"
@@ -324,6 +326,36 @@ test-hip-cpu-kernel-runtime:
 
 test-zluda-cuda:
 	GO_ROCM_RUN_ZLUDA_CUDA_TESTS=1 CUDA_PATH="$(CUDA_PATH)" CUDA_HOME="$(CUDA_HOME)" $(GO) -C "$(GO_SUBTREE)" test ./... -run TestHIPKernelSource_ZLUDACUDARuntimeSmoke_Good -count=1
+
+# test-matrix aggregates the host suite plus every hip toolchain smoke behind
+# one command. Each leg probes its own toolchain first and skips with a
+# one-line reason when it is absent, so the verb runs unattended on any box
+# (a full ROCm+CUDA+ZLUDA+HIP-CPU rig, a bare AMD/linux box, or darwin, where
+# every hip leg skips and only the host suite runs).
+test-matrix: test
+	@if command -v $(HIPCC) >/dev/null 2>&1; then \
+		$(MAKE) --no-print-directory test-hip-amd; \
+	else \
+		echo "SKIP test-hip-amd: $(HIPCC) not found in PATH"; \
+	fi
+	@if command -v $(HIPCC) >/dev/null 2>&1 && { [ -x "$(CUDA_PATH)/bin/nvcc" ] || command -v nvcc >/dev/null 2>&1; }; then \
+		$(MAKE) --no-print-directory test-hip-nvidia; \
+	else \
+		echo "SKIP test-hip-nvidia: $(HIPCC) and/or a CUDA toolkit (nvcc) not found"; \
+	fi
+	@if { [ -x "$(CUDA_PATH)/bin/nvcc" ] || command -v nvcc >/dev/null 2>&1; } && \
+		{ [ -f "$${GO_ROCM_ZLUDA_DIR:-/opt/zluda/v5/zluda}/libcuda.so" ] || [ -f /tmp/zluda-v5/zluda/libcuda.so ]; }; then \
+		$(MAKE) --no-print-directory test-zluda-cuda; \
+	else \
+		echo "SKIP test-zluda-cuda: nvcc and/or a ZLUDA v5 unpack (libcuda.so) not found"; \
+	fi
+	@if grep -qs __HIP_CPU_RT__ "$${GO_ROCM_HIP_CPU_INCLUDE:-$(HIP_CPU_INCLUDE)}/hip/hip_defines.h" 2>/dev/null; then \
+		$(MAKE) --no-print-directory test-hip-cpu; \
+		$(MAKE) --no-print-directory test-hip-cpu-runtime; \
+		$(MAKE) --no-print-directory test-hip-cpu-kernel-runtime; \
+	else \
+		echo "SKIP test-hip-cpu/test-hip-cpu-runtime/test-hip-cpu-kernel-runtime: HIP-CPU headers not found under $${GO_ROCM_HIP_CPU_INCLUDE:-$(HIP_CPU_INCLUDE)} (clone https://github.com/ROCm/HIP-CPU or set GO_ROCM_HIP_CPU_INCLUDE)"; \
+	fi
 
 clean:
 	rm -rf "$(BUILD_DIR)"

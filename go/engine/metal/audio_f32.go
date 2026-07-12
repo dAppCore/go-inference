@@ -100,23 +100,34 @@ func reluF32(x []float32) []float32 {
 // AudioSubsampleF32 runs the gemma4 audio subsampler returning FP32 [ceil(frames/4), hidden] — byte-
 // identical to metal's Gemma4AudioSubSampleConvProjection.Forward, which promotes to fp32 at the first
 // ReLU. Layer0's conv + LayerNorm stay bf16 (the input is bf16 log-mel); the ReLU promotes; Layer1 and
-// the InputProj run fp32. The fp32 entry the encoder feeds into the Conformer layers.
-func AudioSubsampleF32(features []byte, w *AudioSubsampleWeights, cfg AudioSubsampleConfig) ([]float32, error) {
+// the InputProj run fp32. The fp32 entry the encoder feeds into the Conformer layers. The second return
+// is the per-soft-token validity mask: HF's SubSampleConvProjection halves the input mask (mask[:, ::2])
+// at each stride-2 conv, so validity is halved twice; nil validity ⇒ nil (a fully-valid clip). Values
+// are NOT re-zeroed here — the mel extractor already zeros padding frames, so the subsampler activations
+// stay byte-identical to the mask-free path; the halved mask only feeds the attention key-padding AND.
+//
+// NB: HF additionally zeros the layer0 output between the two convs (`hidden_states * mask` in
+// Gemma4AudioSubSampleConvProjectionLayer). This port omits that inter-layer zeroing to keep single-clip
+// output byte-identical (a single clip's halved mask has a trailing-false entry, so zeroing would shift
+// its boundary soft-token). The only observable consequence is the LAST valid soft-token of a padded clip
+// whose ceil(valid_frames/2) is odd, which then carries one conv-tap of boundary bleed vs HF (measured
+// ~max|Δ| 5; see TestAudioTowerMaskGolden). Closing it is a follow-up gated on the single-clip regression.
+func AudioSubsampleF32(features []byte, w *AudioSubsampleWeights, cfg AudioSubsampleConfig, validity []bool) ([]float32, []bool, error) {
 	if err := ensureInit(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(features) != cfg.Frames*cfg.MelBins*bf16Size {
-		return nil, core.NewError("native.AudioSubsampleF32: len(features) must equal Frames*MelBins*2 bytes")
+		return nil, nil, core.NewError("native.AudioSubsampleF32: len(features) must equal Frames*MelBins*2 bytes")
 	}
 	t0, f0 := convOut(cfg.Frames), convOut(cfg.MelBins)
 	// Layer0: bf16 conv + scale-only LayerNorm, then the fp32-promoting ReLU.
 	c0, err := Conv2dBF16(features, w.Conv0, 1, cfg.Frames, cfg.MelBins, 1, cfg.OutC0, 3, 3, 2, 2, 1, 1)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	n0, err := LayerNormBF16(c0, w.Norm0W, w.Norm0B, t0*f0, cfg.OutC0, cfg.Eps)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	r0 := reluF32(bf16ToF32Slice(n0))
 
@@ -124,16 +135,34 @@ func AudioSubsampleF32(features []byte, w *AudioSubsampleWeights, cfg AudioSubsa
 	t1, f1 := convOut(t0), convOut(f0)
 	c1, err := Conv2dF32(r0, bf16ToF32Slice(w.Conv1), 1, t0, f0, cfg.OutC0, cfg.OutC1, 3, 3, 2, 2, 1, 1)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	n1, err := LayerNormF32(c1, bf16ToF32Slice(w.Norm1W), bf16ToF32Slice(w.Norm1B), t1*f1, cfg.OutC1, cfg.Eps)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	r1 := reluF32(n1)
 
 	// flatten [t1, f1·outC1] → InputProj (fp32 mixed-dtype matmul).
-	return clippedMatF32(r1, w.InputProj, t1, cfg.Hidden, f1*cfg.OutC1, w.InputProjClip)
+	out, err := clippedMatF32(r1, w.InputProj, t1, cfg.Hidden, f1*cfg.OutC1, w.InputProjClip)
+	if err != nil {
+		return nil, nil, err
+	}
+	return out, halveValidity(halveValidity(validity)), nil
+}
+
+// halveValidity is HF's mask[:, ::2]: a stride-2 conv halves the time axis, so the validity mask keeps
+// every other entry (index 2i). nil (a fully-valid clip) stays nil. len(out) == (len(v)+1)/2 == the
+// conv's output time length convOut(len(v)), so two halvings track the subsampler's two stride-2 convs.
+func halveValidity(v []bool) []bool {
+	if v == nil {
+		return nil
+	}
+	out := make([]bool, (len(v)+1)/2)
+	for i := range out {
+		out[i] = v[2*i]
+	}
+	return out
 }
 
 // sliceColsF32 extracts columns [c0:c1) from each row of [rows,cols] fp32.

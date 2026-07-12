@@ -15,4 +15,5 @@ import "dappco.re/go/inference/model/mamba2"
 // metal's projection matmul, so the device path matches a metal serve.
 func init() {
 	mamba2.ProjMatMul = MatMulF32NT
+	mamba2.ProjMatMulInto = MatMulF32NTInto // write-into sibling: skips the projection-output alloc, byte-identical
 }

@@ -461,3 +461,74 @@ func TestPerLayerProjBatchedInputGuards(t *testing.T) {
 		})
 	}
 }
+
+// TestEmbedRowsBatchQuantDeviceMatchesEmbedTokenQuant gates the dense-arch
+// device embed gather (#381): the one-dispatch rows kernel must reproduce the
+// host embedTokenQuant oracle byte-for-byte for every row of the chunk, at
+// every affine width the models ship — the batched pass binds these bytes as
+// its input rows, so exactness is the whole contract.
+func TestEmbedRowsBatchQuantDeviceMatchesEmbedTokenQuant(t *testing.T) {
+	requireNativeRuntime(t)
+	if _, err := pleGatherRowsQuantPipeline(); err != nil {
+		t.Skip("rows-quant kernel not loaded")
+	}
+	const vocab, dModel, gs = 256, 512, 64
+	const scale = float32(0.5)
+	for _, bits := range []int{4, 8} {
+		packed, scales, biases := embedGatherQuantFixture(vocab, dModel, gs, bits)
+		mainEmb := &mainEmbedGather{
+			packed: residentBytes(packed), scales: residentBytes(scales), biases: residentBytes(biases),
+			gs: gs, bits: bits, scale: scale,
+		}
+		ids := make([]int32, steelGEMMMinRows+3)
+		for i := range ids {
+			ids[i] = int32((i*37 + 5) % vocab)
+		}
+		sc := &embedRowsScratch{}
+		embBuf, ok, err := embedRowsBatchQuantDevice(sc, ids, mainEmb, dModel)
+		if err != nil || !ok || embBuf == nil {
+			t.Fatalf("b%d: embedRowsBatchQuantDevice ok=%v err=%v", bits, ok, err)
+		}
+		// the production ordering contract: the consumer's command buffer follows
+		// on the same queue, so an empty committed-and-waited buffer drains the
+		// builder before the host reads the rows.
+		withAutoreleasePool(func() {
+			cb := commandBufferFast(queue)
+			commitCommandBufferFast(cb)
+			waitUntilCompletedFast(cb)
+		})
+		rowBytes := dModel * bf16Size
+		got := unsafe.Slice((*byte)(embBuf.Contents()), len(ids)*rowBytes)
+		for i, id := range ids {
+			want, refErr := embedTokenQuant(packed, scales, biases, id, vocab, dModel, gs, bits, scale)
+			if refErr != nil {
+				t.Fatalf("b%d row %d: embedTokenQuant: %v", bits, i, refErr)
+			}
+			if !bytes.Equal(got[i*rowBytes:(i+1)*rowBytes], want) {
+				t.Fatalf("b%d row %d (tok %d): device rows gather differs from host embedTokenQuant", bits, i, id)
+			}
+		}
+	}
+}
+
+// TestEmbedRowsBatchQuantDeviceDeclinesBelowFloor pins the fallback contract:
+// a chunk below the batch floor (and a nil table) reports no-work — never an
+// error — so the caller keeps the proven per-token host loop.
+func TestEmbedRowsBatchQuantDeviceDeclinesBelowFloor(t *testing.T) {
+	requireNativeRuntime(t)
+	const vocab, dModel, gs, bits = 64, 128, 64, 4
+	packed, scales, biases := embedGatherQuantFixture(vocab, dModel, gs, bits)
+	mainEmb := &mainEmbedGather{
+		packed: residentBytes(packed), scales: residentBytes(scales), biases: residentBytes(biases),
+		gs: gs, bits: bits, scale: 1,
+	}
+	sc := &embedRowsScratch{}
+	ids := make([]int32, steelGEMMMinRows-1)
+	if buf, ok, err := embedRowsBatchQuantDevice(sc, ids, mainEmb, dModel); buf != nil || ok || err != nil {
+		t.Fatalf("below-floor chunk: want decline, got buf=%v ok=%v err=%v", buf != nil, ok, err)
+	}
+	full := make([]int32, steelGEMMMinRows)
+	if buf, ok, err := embedRowsBatchQuantDevice(sc, full, nil, dModel); buf != nil || ok || err != nil {
+		t.Fatalf("nil mainEmb: want decline, got buf=%v ok=%v err=%v", buf != nil, ok, err)
+	}
+}

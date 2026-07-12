@@ -35,18 +35,18 @@ func hipLoadedGemma4Q4GenerateLinked(model *hipLoadedModel) bool {
 	if model == nil {
 		return false
 	}
+	if model.gemma4TextConfig.EnableMoEBlock {
+		return hipLoadedGemma4MoERuntimeReady(model)
+	}
+	if rocmGemma4LabelsVetoGenerateLinked(model.modelLabels) {
+		return false
+	}
+	identity := model.modelIdentity()
+	if rocmGemma4LabelsVetoGenerateLinked(identity.Labels) {
+		return false
+	}
 	if model.engineProfile.Matched() && model.engineProfile.Family == "gemma4" {
 		return model.engineProfile.Gemma4EngineFeatures.GenerateLinked()
-	}
-	identity := inference.ModelIdentity{
-		Architecture:  model.modelInfo.Architecture,
-		VocabSize:     model.modelInfo.VocabSize,
-		NumLayers:     model.modelInfo.NumLayers,
-		HiddenSize:    model.modelInfo.HiddenSize,
-		QuantBits:     model.modelInfo.QuantBits,
-		QuantGroup:    model.modelInfo.QuantGroup,
-		ContextLength: model.contextSize,
-		Labels:        model.modelLabels,
 	}
 	if isROCmGemma4Architecture(identity.Architecture) {
 		identity.QuantType = model.modelLabels["gemma4_quant_mode"]

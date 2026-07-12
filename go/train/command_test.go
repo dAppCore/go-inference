@@ -107,6 +107,7 @@ func TestCommand_RunSSDCommand_Good(t *testing.T) {
 
 	err := RunSSDCommand(context.Background(), SSDCommandConfig{
 		ModelPath:      "unused-model-path",
+		Backend:        commandFakeBackendName, // a linked real engine (metal) must not win selection
 		DataPath:       dataPath,
 		SampleTemp:     0.7,
 		FilterShortest: 0,
@@ -138,6 +139,7 @@ func TestCommand_RunSSDCommand_Ugly(t *testing.T) {
 
 	err := RunSSDCommand(context.Background(), SSDCommandConfig{
 		ModelPath:    "unused-model-path",
+		Backend:      commandFakeBackendName, // a linked real engine (metal) must not win selection
 		DataPath:     dataPath,
 		SampleTemp:   0.7,
 		ScoreSamples: true, // Score left nil
@@ -164,6 +166,7 @@ func TestCommand_RunSFTCommand_Good(t *testing.T) {
 
 	err := RunSFTCommand(context.Background(), SFTCommandConfig{
 		ModelPath: modelPath,
+		Backend:   commandFakeBackendName, // a linked real engine (metal) must not win selection
 		DataPath:  dataPath,
 		Epochs:    1,
 		BatchSize: 1,
@@ -199,6 +202,7 @@ func TestCommand_RunSFTCommand_Ugly(t *testing.T) {
 
 	err := RunSFTCommand(context.Background(), SFTCommandConfig{
 		ModelPath: modelPath,
+		Backend:   commandFakeBackendName, // a linked real engine (metal) must not win selection
 		DataPath:  dataPath,
 		Epochs:    1,
 		BatchSize: 1,
@@ -217,5 +221,130 @@ func TestCommand_RunSFTCommand_Ugly(t *testing.T) {
 	}
 	if core.Index(logged, "--merge is not supported") < 0 {
 		t.Fatalf("log = %q, want the merge-not-supported notice", logged)
+	}
+}
+
+// --- sftProbesFromValid ---
+
+// Good: the first n distinct user turns of the validation JSONL become the
+// probe set, one per row, stopping once n are gathered (the fourth row here is
+// never read because n=3 is already satisfied).
+func TestCommand_SftProbesFromValid_Good(t *testing.T) {
+	path := writeCommandJSONLDataset(t,
+		`{"messages":[{"role":"system","content":"be terse"},{"role":"user","content":"first"},{"role":"assistant","content":"a"}]}`,
+		`{"messages":[{"role":"user","content":"second"}]}`,
+		`{"messages":[{"role":"user","content":"third"}]}`,
+		`{"messages":[{"role":"user","content":"fourth"}]}`,
+	)
+	got, err := sftProbesFromValid(path, 3)
+	if err != nil {
+		t.Fatalf("sftProbesFromValid: %v", err)
+	}
+	want := []string{"first", "second", "third"}
+	if len(got) != len(want) {
+		t.Fatalf("probes = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("probe %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// Bad: a missing validation file surfaces the read error rather than an empty
+// probe set.
+func TestCommand_SftProbesFromValid_Bad(t *testing.T) {
+	missing := core.PathJoin(t.TempDir(), "does-not-exist.jsonl")
+	if _, err := sftProbesFromValid(missing, 4); err == nil {
+		t.Fatalf("expected a read error for a missing validation file")
+	}
+}
+
+// Ugly: n<=0 falls back to 4, blank and malformed-JSON lines are skipped, and
+// a row whose only turns are non-user is skipped entirely — but a file with no
+// user turns at all is an error, not a silent empty set.
+func TestCommand_SftProbesFromValid_Ugly(t *testing.T) {
+	// n<=0 default + skip-blank + skip-malformed + skip-assistant-only, then
+	// two real user turns survive.
+	mixed := writeCommandJSONLDataset(t,
+		``,
+		`{ not valid json`,
+		`{"messages":[{"role":"assistant","content":"no user here"}]}`,
+		`{"messages":[{"role":"user","content":"  "}]}`, // whitespace-only user turn skipped
+		`{"messages":[{"role":"user","content":"real one"}]}`,
+		`{"messages":[{"role":"user","content":"real two"}]}`,
+	)
+	got, err := sftProbesFromValid(mixed, 0)
+	if err != nil {
+		t.Fatalf("sftProbesFromValid: %v", err)
+	}
+	want := []string{"real one", "real two"}
+	if len(got) != len(want) {
+		t.Fatalf("probes = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("probe %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+
+	// No user turns anywhere → the explicit "no user turns" error.
+	empty := writeCommandJSONLDataset(t, `{"messages":[{"role":"assistant","content":"only me"}]}`)
+	if _, err := sftProbesFromValid(empty, 4); err == nil {
+		t.Fatalf("expected an error when the validation set has no user turns")
+	}
+}
+
+// --- sftEvalProbes ---
+
+// Good: an explicit --eval-prompts file wins, returning its trimmed, non-blank
+// lines verbatim (no JSONL parse — one prompt per line).
+func TestCommand_SftEvalProbes_Good(t *testing.T) {
+	path := writeCommandJSONLDataset(t, "  what is 2+2?  ", "", "capital of France?")
+	got, err := sftEvalProbes(SFTCommandConfig{EvalPromptsPath: path})
+	if err != nil {
+		t.Fatalf("sftEvalProbes: %v", err)
+	}
+	want := []string{"what is 2+2?", "capital of France?"}
+	if len(got) != len(want) {
+		t.Fatalf("probes = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("probe %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// ValidPathDelegates: with no --eval-prompts but a --valid set, the probes are
+// derived from the validation JSONL's user turns (the sftProbesFromValid path).
+func TestCommand_SftEvalProbes_ValidPathDelegates(t *testing.T) {
+	valid := writeCommandJSONLDataset(t, `{"messages":[{"role":"user","content":"derived"}]}`)
+	got, err := sftEvalProbes(SFTCommandConfig{ValidPath: valid, EvalProbes: 1})
+	if err != nil {
+		t.Fatalf("sftEvalProbes: %v", err)
+	}
+	if len(got) != 1 || got[0] != "derived" {
+		t.Fatalf("probes = %v, want [derived]", got)
+	}
+}
+
+// Bad: --eval-prompts naming a missing file surfaces the read error.
+func TestCommand_SftEvalProbes_Bad(t *testing.T) {
+	missing := core.PathJoin(t.TempDir(), "no-prompts.txt")
+	if _, err := sftEvalProbes(SFTCommandConfig{EvalPromptsPath: missing}); err == nil {
+		t.Fatalf("expected a read error for a missing --eval-prompts file")
+	}
+}
+
+// Ugly: neither --eval-prompts nor --valid set is the honest no-probes
+// boundary — (nil, nil), not an error.
+func TestCommand_SftEvalProbes_Ugly(t *testing.T) {
+	got, err := sftEvalProbes(SFTCommandConfig{})
+	if err != nil {
+		t.Fatalf("sftEvalProbes: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("probes = %v, want nil when no probe source is configured", got)
 	}
 }

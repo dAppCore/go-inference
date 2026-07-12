@@ -397,6 +397,31 @@ func TestMetrics_sanitizeMetricsData_Ugly_NilInputReturnsNilMap(t *testing.T) {
 	}
 }
 
+func TestMetrics_needsMetricsSanitization_Ugly_SensitiveBuriedInSlice(t *testing.T) {
+	// The pre-scan gate must descend through []any to find a sensitive key that
+	// NO top-level key reveals — otherwise sanitizeMetricsData short-circuits and
+	// returns the payload UNREDACTED, a leak. Every prior test carried a top-level
+	// sensitive key, so the []any arm of nestedHasSensitive (this leak-prevention
+	// path) went unexercised.
+	buried := map[string]any{
+		"payload": []any{"plain", map[string]any{"api_key": "leak"}},
+	}
+	if !needsMetricsSanitization(buried) {
+		t.Fatal("needsMetricsSanitization missed a sensitive key buried in a slice")
+	}
+	inner := sanitizeMetricsData(buried)["payload"].([]any)[1].(map[string]any)
+	if _, ok := inner["api_key"]; ok {
+		t.Fatal("api_key buried in a slice was not redacted end-to-end")
+	}
+
+	// Mirror arm: a slice and nested map with nothing sensitive must scan clean
+	// (ContainsFunc false -> the final return false), so the gate does not clone.
+	clean := map[string]any{"list": []any{"a", "b", 3}, "meta": map[string]any{"ok": 1}}
+	if needsMetricsSanitization(clean) {
+		t.Fatal("needsMetricsSanitization false-positived on clean nested data")
+	}
+}
+
 // --- AX-7 canonical triplets ---
 
 func TestMetrics_Record_Good(t *core.T) {

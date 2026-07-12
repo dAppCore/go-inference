@@ -69,6 +69,7 @@ func ExampleRunSSDCommand() {
 	err := train.RunSSDCommand(context.Background(), train.SSDCommandConfig{
 		ModelPath:  "example-model",
 		DataPath:   dataPath,
+		Backend:    exampleCommandBackendName, // pin the fake — a linked real engine (metal) must not win selection
 		SampleTemp: 0.7,
 		Out:        os.Stdout,
 	})
@@ -100,6 +101,7 @@ func ExampleRunSFTCommand() {
 	err := train.RunSFTCommand(context.Background(), train.SFTCommandConfig{
 		ModelPath: dir,
 		DataPath:  dataPath,
+		Backend:   exampleCommandBackendName, // pin the fake — a linked real engine (metal) must not win selection
 		Epochs:    1,
 		BatchSize: 1,
 		GradAccum: 1,

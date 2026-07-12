@@ -42,6 +42,14 @@ func NewTokenModel(m *ComposedModel) *ComposedTokenModel { return &ComposedToken
 
 func (tm *ComposedTokenModel) Vocab() int { return tm.m.Vocab }
 
+// HiddenSize is the model hidden dimension D — the width of an embedding / hidden row. The serve wrap
+// reports it on inference.ModelInfo.
+func (tm *ComposedTokenModel) HiddenSize() int { return tm.m.D }
+
+// NumLayers is the composed block count (each a config-dispatched sequence mixer + feed-forward). The
+// serve wrap reports it on inference.ModelInfo.
+func (tm *ComposedTokenModel) NumLayers() int { return len(tm.m.Layers) }
+
 // Embed maps a token id to its input embedding (dModel bf16 bytes).
 func (tm *ComposedTokenModel) Embed(id int32) ([]byte, error) {
 	if int(id) < 0 || int(id) >= tm.m.Vocab {

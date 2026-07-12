@@ -28,8 +28,9 @@ type AudioLayerWeights struct {
 // AudioLayer runs one Conformer block on [L, hidden] FP32 — byte-identical to metal's
 // Gemma4AudioLayer.Forward: ff1 → clamp→RMSNorm(pre)→attn→clamp→RMSNorm(post)→+ff1 → lconv → ff2 →
 // clamp→RMSNorm(out). The tower runs in fp32 (the f32 GC clamp promotes the activation — see
-// audio_f32.go); the clamp is the shared ±gradient-clipping (cfg.ClipMin/ClipMax).
-func AudioLayer(x []float32, w *AudioLayerWeights, cfg AudioConfig) ([]float32, error) {
+// audio_f32.go); the clamp is the shared ±gradient-clipping (cfg.ClipMin/ClipMax). validity is the
+// optional per-soft-token (length L) key-padding mask forwarded to the attention; nil ⇒ all-valid.
+func AudioLayer(x []float32, w *AudioLayerWeights, cfg AudioConfig, validity []bool) ([]float32, error) {
 	L := len(x) / cfg.Hidden
 	rmsClamped := func(b []float32, norm []byte) ([]float32, error) {
 		return RMSNorm(clampF32(b, cfg.ClipMin, cfg.ClipMax), bf16ToF32Slice(norm), L, cfg.Hidden, cfg.Eps)
@@ -43,7 +44,7 @@ func AudioLayer(x []float32, w *AudioLayerWeights, cfg AudioConfig) ([]float32, 
 	if err != nil {
 		return nil, err
 	}
-	attn, err := AudioAttentionF32(pre, w.Attn, cfg)
+	attn, err := AudioAttentionF32(pre, w.Attn, cfg, validity)
 	if err != nil {
 		return nil, err
 	}
@@ -74,28 +75,56 @@ type AudioEncoderWeights struct {
 	SubsampleC AudioSubsampleConfig
 	Layers     []*AudioLayerWeights
 	OutputProj []byte // [OutputDim, hidden]
-	OutputDim  int
+	// OutputProjBias is audio_tower.output_proj.bias [OutputDim] BF16, added to every projected row —
+	// HF's output_proj is a bias=True Linear. nil is a no-op (packs that omit it).
+	OutputProjBias []byte
+	OutputDim      int
 }
 
 // AudioEncode runs the full audio tower on log-mel features [frames, melBins] bf16, returning
 // [ceil(frames/4), OutputDim] FP32 — byte-identical to metal's Gemma4AudioEncoder.Forward: subsample
 // (bf16) → widen → Conformer layers (fp32) → OutputProj (fp32 mixed-dtype matmul). The per-layer
 // attentions share PosEmbed (cfg-derived, set on each layer's Attn weights by the caller / loader).
-func AudioEncode(features []byte, w *AudioEncoderWeights, cfg AudioConfig) ([]float32, error) {
+// validity is the optional per-frame (length frames) validity mask (nil ⇒ a fully-valid clip, byte-
+// identical to the mask-free path): the subsampler halves it twice (HF mask[:, ::2] per stride-2 conv)
+// into the per-soft-token mask each Conformer attention ANDs into its blocked mask, so padding keys are
+// never attended for padded/batched clips.
+func AudioEncode(features []byte, w *AudioEncoderWeights, cfg AudioConfig, validity []bool) ([]float32, error) {
 	if err := ensureInit(); err != nil {
 		return nil, err
 	}
-	h, err := AudioSubsampleF32(features, w.Subsample, w.SubsampleC) // subsampler promotes to fp32 at its first ReLU
+	h, softMask, err := AudioSubsampleF32(features, w.Subsample, w.SubsampleC, validity) // fp32 at its first ReLU; halves validity like HF
 	if err != nil {
 		return nil, err
 	}
 	for i, layer := range w.Layers {
-		if h, err = AudioLayer(h, layer, cfg); err != nil {
+		if h, err = AudioLayer(h, layer, cfg, softMask); err != nil {
 			return nil, core.E("native.AudioEncode", core.Sprintf("layer %d", i), err)
 		}
 	}
 	T := len(h) / cfg.Hidden
-	return matF32MixedNT(h, w.OutputProj, T, w.OutputDim, cfg.Hidden) // OutputProj.Forward(f32)
+	out, err := matF32MixedNT(h, w.OutputProj, T, w.OutputDim, cfg.Hidden) // OutputProj.Forward(f32)
+	if err != nil {
+		return nil, err
+	}
+	addOutputProjBias(out, w.OutputProjBias, T, w.OutputDim)
+	return out, nil
+}
+
+// addOutputProjBias adds the audio_tower.output_proj.bias [outDim] (BF16) to every one of the rows
+// output rows in place — HF's Gemma4AudioModel.output_proj is a bias=True Linear. A nil/short bias is
+// a no-op (packs that omit it), so the tower stays byte-identical when there is no bias to apply.
+func addOutputProjBias(out []float32, bias []byte, rows, outDim int) {
+	if outDim <= 0 || len(bias) < outDim*2 {
+		return
+	}
+	b := bf16ToF32Slice(bias[:outDim*2])
+	for r := range rows {
+		row := out[r*outDim : (r+1)*outDim]
+		for c := range row {
+			row[c] += b[c]
+		}
+	}
 }
 
 // AudioPositionTable builds the [count, hidden] sinusoid relative-position table the Conformer

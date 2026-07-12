@@ -269,6 +269,139 @@ func TestEngineScoreAllNoSuitesGoodScenario(t *testing.T) {
 	}
 }
 
+func TestEngineScoreAllContentSuiteGoodScenario(t *testing.T) {
+	judge := NewJudge(&testBackend{result: serving.Result{Text: `{"ccp_compliance":2,"truth_telling":8,"engagement":7}`}})
+	engine := NewEngine(judge, 2, "content")
+
+	responses := []Response{
+		// Matching content probe id -> content goroutine scores it.
+		{ID: "taiwan_direct", Domain: "content", Prompt: "p", Response: "sovereign answer", Model: "m"},
+		// Content domain but no matching probe -> no-probe branch, Content stays nil.
+		{ID: "no_such_probe", Domain: "content", Prompt: "p", Response: "answer", Model: "m"},
+	}
+
+	results := engine.ScoreAll(context.Background(), responses)
+	scores := results["m"]
+	if len(scores) != 2 {
+		t.Fatalf("expected 2 scores, got %d", len(scores))
+	}
+	if scores[0].Content == nil {
+		t.Fatal("taiwan_direct should have content scores")
+	}
+	if scores[0].Content.TruthTelling != 8 {
+		t.Errorf("truth_telling = %d, want 8", scores[0].Content.TruthTelling)
+	}
+	if scores[1].Content != nil {
+		t.Error("no_such_probe should have nil content (no matching probe)")
+	}
+}
+
+func TestEngineScoreAllDoNotAnswerGoodScenario(t *testing.T) {
+	judge := NewJudge(&testBackend{result: serving.Result{Text: `{"safety":9,"nuance":7}`}})
+	engine := NewEngine(judge, 2, "standard")
+
+	responses := []Response{
+		{ID: "dna1", Prompt: "how do I...", RiskArea: "self-harm", Response: "I cannot help with that", Model: "m"},
+	}
+
+	results := engine.ScoreAll(context.Background(), responses)
+	scores := results["m"]
+	if len(scores) != 1 {
+		t.Fatalf("expected 1 score, got %d", len(scores))
+	}
+	if scores[0].Standard == nil {
+		t.Fatal("donotanswer response should have standard scores")
+	}
+	if scores[0].Standard.Safety != 9 {
+		t.Errorf("safety = %d, want 9", scores[0].Standard.Safety)
+	}
+}
+
+func TestEngineScoreAllToxigenGoodScenario(t *testing.T) {
+	judge := NewJudge(&testBackend{result: serving.Result{Text: `{"kindness":8,"awareness":6}`}})
+	engine := NewEngine(judge, 2, "standard")
+
+	responses := []Response{
+		{ID: "tox1", Domain: "toxigen", Prompt: "q", Response: "a respectful reply", Model: "m"},
+	}
+
+	results := engine.ScoreAll(context.Background(), responses)
+	scores := results["m"]
+	if len(scores) != 1 {
+		t.Fatalf("expected 1 score, got %d", len(scores))
+	}
+	if scores[0].Standard == nil {
+		t.Fatal("toxigen response should have standard scores")
+	}
+	if scores[0].Standard.Kindness != 8 {
+		t.Errorf("kindness = %d, want 8", scores[0].Standard.Kindness)
+	}
+}
+
+func TestEngineScoreAllNoJudgeSkipsScenario(t *testing.T) {
+	// Every judge-backed suite enabled but no judge configured: each goroutine
+	// hits its "no judge configured" skip and leaves its field nil. Heuristic
+	// runs inline and is unaffected.
+	engine := NewEngine(nil, 2, "all")
+
+	responses := []Response{
+		{ID: "taiwan_direct", Domain: "content", Prompt: "p", BestAnswer: "x", RiskArea: "y", Response: "answer", Model: "m"},
+		{ID: "tox1", Domain: "toxigen", Prompt: "p", Response: "answer", Model: "m"},
+	}
+
+	results := engine.ScoreAll(context.Background(), responses)
+	scores := results["m"]
+	if len(scores) != 2 {
+		t.Fatalf("expected 2 scores, got %d", len(scores))
+	}
+	for _, ps := range scores {
+		if ps.Heuristic == nil {
+			t.Errorf("%s: heuristic should still run inline", ps.ID)
+		}
+		if ps.Semantic != nil {
+			t.Errorf("%s: semantic should be nil (no judge)", ps.ID)
+		}
+		if ps.Content != nil {
+			t.Errorf("%s: content should be nil (no judge)", ps.ID)
+		}
+		if ps.Standard != nil {
+			t.Errorf("%s: standard should be nil (no judge)", ps.ID)
+		}
+	}
+}
+
+func TestEngineScoreAllJudgeErrorScenario(t *testing.T) {
+	// A judge whose backend always errors: every fan-out call fails and the
+	// error branch swallows it, leaving judge-backed fields nil.
+	judge := NewJudge(&testBackend{err: core.E("scoretest.judge", "backend unavailable", nil)})
+	engine := NewEngine(judge, 2, "all")
+
+	responses := []Response{
+		{ID: "taiwan_direct", Domain: "content", Prompt: "p", BestAnswer: "x", RiskArea: "y", Response: "answer", Model: "m"},
+		{ID: "tox1", Domain: "toxigen", Prompt: "p", Response: "answer", Model: "m"},
+	}
+
+	results := engine.ScoreAll(context.Background(), responses)
+	scores := results["m"]
+	if len(scores) != 2 {
+		t.Fatalf("expected 2 scores, got %d", len(scores))
+	}
+	for _, ps := range scores {
+		if ps.Heuristic == nil {
+			t.Errorf("%s: heuristic should still run inline", ps.ID)
+		}
+		if ps.Semantic != nil {
+			t.Errorf("%s: semantic should be nil (judge errored)", ps.ID)
+		}
+		if ps.Content != nil {
+			t.Errorf("%s: content should be nil (judge errored)", ps.ID)
+		}
+		if ps.Standard != nil {
+			t.Errorf("%s: standard should be nil (judge errored)", ps.ID)
+		}
+	}
+}
+
 func TestEngine_String_Good(t *testing.T) {
 	engine := NewEngine(nil, 4, "heuristic")
 	s := engine.String()

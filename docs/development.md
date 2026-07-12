@@ -19,6 +19,31 @@ For the `lem` verbs see [cmd-lem.md](cmd-lem.md); for the Metal build chain see
 - The **HIP engine** (`engine/hip`) carries cgo and is built from this same repo
   on the AMD/linux box.
 
+### Windows
+
+`engine/hip`'s portable-stub build tag (`!linux || !amd64`, see
+[backends.md](backends.md)) covers Windows, so the engine package itself
+cross-compiles cleanly:
+
+```bash
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./engine/hip/...   # OK
+```
+
+The full `lem` binary does not: `go build ./cmd/lem/...` under the same
+`GOOS=windows CGO_ENABLED=0` fails in `github.com/marcboeker/go-duckdb`'s
+generated Windows bindings (`undefined: bindings.Type` and friends) —
+`eval/datapipe`, `serving/chathistory`, and the agent execute-history path all
+import `go-duckdb` unconditionally, and go-duckdb needs cgo linked against
+libduckdb; its pure-Go Windows binding stub does not stand alone. Two ways to
+unblock a Windows `lem`, neither attempted here:
+
+1. **Build on Windows with cgo** — `CGO_ENABLED=1` plus a Windows C toolchain
+   and the DuckDB Windows library (`CGO_LDFLAGS` pointed at it), per
+   go-duckdb's own cross-compile instructions.
+2. **A pure-Go store behind a build tag** — swap the DuckDB-backed store for a
+   pure-Go implementation on `!cgo`/Windows builds, so `CGO_ENABLED=0` stays
+   viable. This is real work (a new store implementation), not a config flip.
+
 ## Module layout
 
 The repository holds two Go modules plus vendored externals:

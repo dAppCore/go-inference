@@ -9,7 +9,6 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/decode/generate"
-	native "dappco.re/go/inference/engine/metal"
 )
 
 // stringListFlag is a repeatable string flag: each occurrence appends, so
@@ -42,7 +41,7 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 	promptFile := fs.String("prompt-file", "", "read the user prompt from a file (long-context runs exceed argv limits); overrides -prompt")
 	maxTokens := fs.Int("max-tokens", 128, "tokens to generate")
 	draftPath := fs.String("draft", "auto", "MTP drafter: 'auto' detects one beside a Gemma 4 target (assistant/ pair layout, MTP/ gguf), a path forces it, '' disables")
-	draftBlock := fs.Int("draft-block", 0, "MTP draft block (verify forward = carried lead + block-1 proposals); 0 = engine default 4")
+	draftBlock := fs.Int("draft-block", 0, "MTP draft block (verify forward = carried lead + block-1 proposals); 0 = engine default 5")
 	temp := fs.Float64("temp", 1.0, "sampling temperature (0 = greedy/argmax — fastest, fair vs llama-bench)")
 	think := fs.Bool("think", false, "enable the thinking channel (off keeps the decode rate clean)")
 	contextLen := fs.Int("context", 0, "context length override (0 = model default)")
@@ -109,7 +108,7 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 		promptText = string(bytes)
 	}
 
-	native.SetPipelinedGPUDecode(*pipeline) // engine-level: -pipeline=false forces the chained serial loop
+	setPipelinedGPUDecode(*pipeline) // engine-level: -pipeline=false forces the chained serial loop
 	err := generate.RunGenerate(ctx, generate.Config{
 		ModelPath:  fs.Arg(0),
 		Prompt:     promptText,
@@ -122,7 +121,7 @@ func runGenerateCommand(ctx context.Context, args []string, stdout, stderr io.Wr
 		// Inject the metal engine's speculative loader so a detected drafter arms
 		// the MTP lane instead of degrading to plain — the composition root is the
 		// one place that may import the engine (keeps decode/generate neutral).
-		SpeculativeLoader: native.LoadSpeculativePair,
+		SpeculativeLoader: speculativeLoader,
 		KVCacheMode:       *kvCacheMode,
 		KVStorage:         *kvStorage,
 		Pipeline:          *pipeline,

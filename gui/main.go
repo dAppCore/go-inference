@@ -54,6 +54,7 @@ func main() {
 	dockerService := NewDockerService(deployDir)
 	containerService := NewContainerService(envOr("LEM_CONTAINER_NAME", "lem-contained"), envOr("LEM_CONTAINER_IMAGE", ""))
 	agentRunner := NewAgentRunner(apiURL, influxURL, influxDB, m3Host, baseModel, workDir)
+	serveService := NewServeService(envOr("LEM_SERVE_ADDR", ":36911"), envOr("LEM_BINARY", ""), envOr("LEM_MODELS_DIR", ""))
 	trayService := NewTrayService(nil)
 
 	services := []application.Service{
@@ -61,6 +62,7 @@ func main() {
 		application.NewService(dockerService),
 		application.NewService(containerService),
 		application.NewService(agentRunner),
+		application.NewService(serveService),
 		application.NewService(trayService),
 	}
 
@@ -82,7 +84,7 @@ func main() {
 	trayService.SetServices(dashboardService, dockerService, containerService, agentRunner)
 
 	// Set up system tray.
-	setupSystemTray(app, trayService, dashboardService, dockerService, containerService)
+	setupSystemTray(app, trayService, dashboardService, dockerService, containerService, serveService)
 
 	// Show dashboard on first launch.
 	app.Event.RegisterApplicationEventHook(events.Common.ApplicationStarted, func(event *application.ApplicationEvent) {

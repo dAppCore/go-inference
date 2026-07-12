@@ -87,6 +87,45 @@ func TestSession_NewSessionHandle_Ugly(t *testing.T) {
 	}
 }
 
+// --- Pos ---------------------------------------------------------------
+
+// TestSession_SessionHandle_Pos_Good pins the retained-position accessor the
+// continuity layer measures per-turn prefill with: it reports the wrapped
+// session's position, and reflects a prefill's advance (the delta the
+// no-replay per-turn token count is derived from).
+func TestSession_SessionHandle_Pos_Good(t *testing.T) {
+	m := newTestModel(t, &fakeTokenModel{})
+	handle := NewSessionHandle(m, &fakeSession{pos: 5})
+	if got := handle.Pos(); got != 5 {
+		t.Fatalf("Pos() = %d, want the wrapped session's retained 5", got)
+	}
+	before := handle.Pos()
+	if err := handle.Prefill(context.Background(), "hi"); err != nil {
+		t.Fatalf("Prefill: %v", err)
+	}
+	if handle.Pos() == before {
+		t.Fatalf("Pos() = %d unchanged after Prefill, want the advanced position", handle.Pos())
+	}
+}
+
+// TestSession_SessionHandle_Pos_Bad pins the nil-session guard: a handle
+// wrapping a nil Session reports 0 rather than dereferencing nil.
+func TestSession_SessionHandle_Pos_Bad(t *testing.T) {
+	m := newTestModel(t, &fakeTokenModel{})
+	if got := NewSessionHandle(m, nil).Pos(); got != 0 {
+		t.Fatalf("Pos() on a nil-session handle = %d, want 0", got)
+	}
+}
+
+// TestSession_SessionHandle_Pos_Ugly pins the nil-receiver guard: a nil
+// *SessionHandle reports 0, never a panic.
+func TestSession_SessionHandle_Pos_Ugly(t *testing.T) {
+	var handle *SessionHandle
+	if got := handle.Pos(); got != 0 {
+		t.Fatalf("Pos() on a nil *SessionHandle = %d, want 0", got)
+	}
+}
+
 // --- Prefill -----------------------------------------------------------
 
 // TestSession_SessionHandle_Prefill_Good pins the happy path: tokenising and

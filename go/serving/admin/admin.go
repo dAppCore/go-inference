@@ -50,6 +50,10 @@ type Config struct {
 	Reloader    Reloader
 	ServeStatus ServeStatus
 	Log         io.Writer // admin audit lines (auth denies, reload attempts)
+	// ModelController, when set, mounts the multi-model control plane
+	// (/v1/admin/models*: list/load/unload/pin). nil leaves those routes
+	// unmounted — the single-model serve keeps only serve/reload.
+	ModelController ModelController
 }
 
 // NewMux mounts the /v1/admin/* control-plane handlers. Returns a Handler that
@@ -68,6 +72,7 @@ func NewMux(cfg Config) http.Handler {
 	} else {
 		mux.HandleFunc(PathReload, notImplementedHandler("serve/reload", "no resolver wired — admin mux built without a Reloader"))
 	}
+	mountModelRoutes(mux, cfg.ModelController, cfg.Log)
 	return mux
 }
 

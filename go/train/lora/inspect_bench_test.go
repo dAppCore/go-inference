@@ -209,3 +209,36 @@ func BenchmarkAdapter_HashAdapter_TypicalWeights(b *testing.B) {
 		loraAdapterBenchSinkString = hashAdapter(dir, config)
 	}
 }
+
+// BenchmarkAdapter_HashAdapter_MultiShard hashes a sharded adapter — several
+// > streamHashMinBytes safetensors files in one directory, the shape a
+// large-rank or multi-target adapter takes on disk. Each shard streams
+// through the shared hashWriter, so this is where reusing the copy buffer
+// across shards (rather than io.Copy allocating a fresh 32KiB scratch per
+// file) shows up.
+func BenchmarkAdapter_HashAdapter_MultiShard(b *testing.B) {
+	dir := b.TempDir()
+	if result := core.WriteFile(core.PathJoin(dir, "adapter_config.json"), []byte(`{"rank":8,"alpha":16}`), 0o600); !result.OK {
+		b.Fatalf("WriteFile adapter_config: %v", result.Value)
+	}
+	shard := make([]byte, 256*1024)
+	for i := range shard {
+		shard[i] = byte(i)
+	}
+	for s := 0; s < 3; s++ {
+		name := core.PathJoin(dir, "adapter-0000"+string(rune('1'+s))+"-of-00003.safetensors")
+		if result := core.WriteFile(name, shard, 0o600); !result.OK {
+			b.Fatalf("WriteFile shard %d: %v", s, result.Value)
+		}
+	}
+	read := core.ReadFile(core.PathJoin(dir, "adapter_config.json"))
+	if !read.OK {
+		b.Fatalf("read config: %v", read.Value)
+	}
+	config := read.Value.([]byte)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		loraAdapterBenchSinkString = hashAdapter(dir, config)
+	}
+}

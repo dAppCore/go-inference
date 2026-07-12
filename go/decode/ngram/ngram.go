@@ -86,6 +86,18 @@ func (d *Drafter) Draft(context []int) []int {
 // lookup is the pure prompt-lookup core shared by Draft and DraftNext. It holds
 // no state and reads nothing but its arguments, so it is trivially deterministic
 // and race-free.
+//
+// It scans ONCE, anchored on the suffix's last token. The tokens an accepted match
+// proposes always begin one past the earlier occurrence's END position, so the only
+// thing the search decides is WHICH end position wins: the one supporting the
+// longest suffix, and — among equally-long matches — the most recent. Every earlier
+// occurrence ends on a token equal to context[L-1], so a single backwards scan over
+// just those anchor positions finds the winner. The previous shape re-scanned the
+// whole context once per suffix length n (maxNgram × L work on a miss); anchoring
+// pays one L-length pass plus a short backwards extend only where the last token
+// actually recurs — byte-identical drafts (gated by TestNgram_Lookup_Matches
+// ReferenceFuzz against the naive reference), ~maxNgram× less scanning on the
+// dominant no-repeat miss.
 func lookup(context []int, maxNgram, maxDraft int) []int {
 	L := len(context)
 	if L < 2 {
@@ -97,43 +109,47 @@ func lookup(context []int, maxNgram, maxDraft int) []int {
 	// Cap the suffix length to what the context can actually hold while still
 	// leaving room for an earlier occurrence (suffix can be at most L-1 long).
 	maxN := min(maxNgram, L-1)
+	last := context[L-1] // every earlier occurrence ends on this same token
 
-	// Longest suffix first: a longer match is the more specific prediction.
-	for n := maxN; n >= 1; n-- {
-		suffixStart := L - n // the trailing n-gram occupies [suffixStart, L)
-
-		// Scan candidate start positions backwards (most-recent earlier
-		// occurrence first). A candidate at i must end strictly before the
-		// suffix begins (i+n <= suffixStart), otherwise it would overlap or BE
-		// the suffix itself — guarding the self-match off-by-one.
-		for i := suffixStart - n; i >= 0; i-- {
-			if !matchAt(context, i, suffixStart, n) {
-				continue
+	bestN := 0
+	bestFrom := -1
+	// Candidate END positions, most-recent first. e is where an earlier occurrence
+	// of the suffix would END; its match extends backwards while tokens keep
+	// agreeing with the suffix's tail.
+	for e := L - 2; e >= 0; e-- {
+		if context[e] != last {
+			continue
+		}
+		// Longest suffix this anchor supports: extend backwards while the tokens
+		// agree, capped at maxN and stopping before the context start.
+		n := 1
+		for n < maxN && e-n >= 0 && context[e-n] == context[L-1-n] {
+			n++
+		}
+		// Non-overlap: the n tokens ending at e occupy [e-n+1, e] and must end
+		// strictly before the suffix [L-n, L) begins → e < L-n → n <= L-1-e.
+		if lim := L - 1 - e; n > lim {
+			n = lim
+		}
+		// Longest wins; most-recent breaks ties (we scan recent-first, so the first
+		// anchor to reach a given n keeps it). Once an anchor hits the cap maxN no
+		// earlier, less-recent anchor can beat it — stop.
+		if n > bestN {
+			bestN = n
+			bestFrom = e + 1
+			if bestN == maxN {
+				break
 			}
-			// Match: the tokens following this occurrence start at i+n. The loop
-			// bound (i <= suffixStart-n) guarantees i+n <= suffixStart < L, so at
-			// least one token always follows the match — propose up to maxDraft of
-			// them, clamped to what the context holds.
-			from := i + n
-			end := min(from+maxDraft, L)
-			out := make([]int, end-from)
-			copy(out, context[from:end])
-			return out
 		}
 	}
-	return nil
-}
-
-// matchAt reports whether the n tokens at context[i:i+n] equal the suffix at
-// context[suffixStart:suffixStart+n]. Caller guarantees both windows are in
-// range. Pulled out so the scan reads as "find where the suffix occurred".
-func matchAt(context []int, i, suffixStart, n int) bool {
-	for j := range n {
-		if context[i+j] != context[suffixStart+j] {
-			return false
-		}
+	if bestFrom < 0 {
+		return nil
 	}
-	return true
+	// The proposed tokens start one past the winning occurrence's end position.
+	end := min(bestFrom+maxDraft, L)
+	out := make([]int, end-bestFrom)
+	copy(out, context[bestFrom:end])
+	return out
 }
 
 // Update appends accepted tokens to the running context so later DraftNext calls

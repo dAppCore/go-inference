@@ -13,7 +13,22 @@ import core "dappco.re/go"
 //
 //	packed, err := gguf.Quantize(gguf.QuantizeQ4_K, block)
 func Quantize(format QuantizeFormat, values []float32) ([]byte, error) {
-	return AppendQuantize(format, nil, values)
+	// Pre-size the destination to the format's exact packed length so
+	// AppendQuantize fills it in one allocation instead of growing a nil slice
+	// as the kernel appends block by block (~log2(nblocks) reallocations). The
+	// packed length is deterministic — (values/blockSize)·bytesPerBlock — so
+	// this is byte-identical to appending from nil; only the allocation count
+	// differs. An unknown format or a non-block-multiple length leaves dst nil
+	// and lets AppendQuantize surface the identical error.
+	_, blockSize, bytesPerBlock, err := ggufQuantizeLayout(format)
+	if err != nil {
+		return nil, err
+	}
+	var dst []byte
+	if blockSize > 0 && len(values)%blockSize == 0 {
+		dst = make([]byte, 0, (len(values)/blockSize)*bytesPerBlock)
+	}
+	return AppendQuantize(format, dst, values)
 }
 
 // AppendQuantize appends the quantised payload for values onto dst and

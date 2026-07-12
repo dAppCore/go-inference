@@ -127,7 +127,7 @@ brought into go-inference:
   + MTP tuning (`train/`), the `lem` binary (`cmd/lem`), and the LEM desktop GUI
   (`gui/`).
 - **The Metal build chain moved in** too: `external/mlx` (Apple MLX pinned at
-  v0.31.2) plus the lthn patch set in `patches/mlx/`, built by `task metallib`
+  v0.32.0) plus the lthn patch set in `patches/mlx/`, built by `task metallib`
   and optionally baked into a self-contained binary by `task build:embed`. See
   [build.md](build.md).
 - **Go 1.26**, workspace-mode development against `external/` submodules, and the

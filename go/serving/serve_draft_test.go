@@ -127,6 +127,37 @@ func TestServeDraft_DraftDetection_Active_Ugly(t *testing.T) {
 	}
 }
 
+// TestServeDraft_SpeculativeServeNotice_Good proves an active detection renders
+// a notice naming the drafter path, the operator note, and the resolved block.
+func TestServeDraft_SpeculativeServeNotice_Good(t *testing.T) {
+	det := DraftDetection{Source: DraftSourceFlag, DraftPath: "/models/drafter", Note: "flag override"}
+	notice := speculativeServeNotice(det, 8)
+	for _, want := range []string{"/models/drafter", "flag override", "block 8"} {
+		if !core.Contains(notice, want) {
+			t.Errorf("notice %q missing %q", notice, want)
+		}
+	}
+}
+
+// TestServeDraft_SpeculativeServeNotice_Bad proves a stood-down detector serves
+// no notice — a drafterless serve prints nothing.
+func TestServeDraft_SpeculativeServeNotice_Bad(t *testing.T) {
+	if notice := speculativeServeNotice(DraftDetection{}, 8); notice != "" {
+		t.Fatalf("inactive detection notice = %q, want empty", notice)
+	}
+}
+
+// TestServeDraft_SpeculativeServeNotice_Ugly proves a non-positive draft block
+// falls back to MTPDefaultDraftBlock in the rendered notice rather than
+// printing "block 0".
+func TestServeDraft_SpeculativeServeNotice_Ugly(t *testing.T) {
+	det := DraftDetection{Source: DraftSourceFlag, DraftPath: "/models/drafter", Note: "flag override"}
+	notice := speculativeServeNotice(det, 0)
+	if !core.Contains(notice, core.Sprintf("block %d", MTPDefaultDraftBlock)) {
+		t.Fatalf("notice %q should fall back to the default block %d", notice, MTPDefaultDraftBlock)
+	}
+}
+
 // TestServeDraft_DetectGemma4DraftPath_Good proves the MTP/ subdirectory rung
 // (rung 3a, the unsloth GGUF convention) fires when it carries exactly one
 // gguf.

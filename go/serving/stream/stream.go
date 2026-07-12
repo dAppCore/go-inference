@@ -202,9 +202,9 @@ type Assembler struct {
 	resp    Response
 	tools   []ToolCall
 	toolIdx map[string]int // ToolCallID → index into tools, for interleaved calls
-	text    []string       // text-delta payloads, joined on Result
-	reason  []string       // reasoning-delta payloads
-	refuse  []string       // refusal-delta payloads
+	text    core.Builder   // text-delta payloads, folded as they arrive
+	reason  core.Builder   // reasoning-delta payloads, folded as they arrive
+	refuse  core.Builder   // refusal-delta payloads, folded as they arrive
 	failed  bool
 	failErr *StreamError
 }
@@ -228,11 +228,11 @@ func NewAssembler() *Assembler {
 func (a *Assembler) Add(ev Event) error {
 	switch ev.Kind {
 	case KindTextDelta:
-		a.text = append(a.text, ev.Text)
+		a.text.WriteString(ev.Text)
 	case KindReasoningDelta:
-		a.reason = append(a.reason, ev.Text)
+		a.reason.WriteString(ev.Text)
 	case KindRefusalDelta:
-		a.refuse = append(a.refuse, ev.Text)
+		a.refuse.WriteString(ev.Text)
 	case KindFunctionCallArgsDelta:
 		a.appendToolArgs(ev)
 	case KindFunctionCallArgsDone:
@@ -314,14 +314,16 @@ func (a *Assembler) streamErr() error {
 
 // Result returns the assembled Response from the events seen so far. It is safe
 // to call at any point — mid-stream for a running view, or at the end for the
-// final value. Joining is done here so Add stays cheap per event.
+// final value. Add folds each delta into a builder as it arrives, so reading
+// the assembled text here is a zero-copy view of the folded buffer rather than
+// a per-call join of the delta slices.
 //
 //	resp := a.Result()
 func (a *Assembler) Result() Response {
 	r := a.resp
-	r.Text = core.Join("", a.text...)
-	r.Reasoning = core.Join("", a.reason...)
-	r.Refusal = core.Join("", a.refuse...)
+	r.Text = a.text.String()
+	r.Reasoning = a.reason.String()
+	r.Refusal = a.refuse.String()
 	if len(a.tools) > 0 {
 		r.ToolCalls = a.tools
 	}
@@ -349,32 +351,33 @@ func Collect(events []Event) (Response, error) {
 	return a.Result(), nil
 }
 
-// presize reserves exact capacity for the delta accumulators from the full
-// event sequence Collect holds, so the Add loop never grows them. Live
-// streaming (Add fed one event at a time) cannot do this — it has no length
-// hint — but the batch path knows every count up front. The counts are exact,
-// so no accumulator is over-allocated. Indexing events (not ranging by value)
-// avoids copying the large Event struct per element.
+// presize reserves the exact byte budget for the delta accumulators from the
+// full event sequence Collect holds, so each builder allocates its backing once
+// and the Add loop never grows it. Live streaming (Add fed one event at a time)
+// cannot do this — it has no length hint — but the batch path sums every
+// delta's bytes up front. The totals are exact, so no accumulator is
+// over-allocated. Indexing events (not ranging by value) avoids copying the
+// large Event struct per element.
 func (a *Assembler) presize(events []Event) {
 	var nText, nReason, nRefuse int
 	for i := range events {
 		switch events[i].Kind {
 		case KindTextDelta:
-			nText++
+			nText += len(events[i].Text)
 		case KindReasoningDelta:
-			nReason++
+			nReason += len(events[i].Text)
 		case KindRefusalDelta:
-			nRefuse++
+			nRefuse += len(events[i].Text)
 		}
 	}
 	if nText > 0 {
-		a.text = make([]string, 0, nText)
+		a.text.Grow(nText)
 	}
 	if nReason > 0 {
-		a.reason = make([]string, 0, nReason)
+		a.reason.Grow(nReason)
 	}
 	if nRefuse > 0 {
-		a.refuse = make([]string, 0, nRefuse)
+		a.refuse.Grow(nRefuse)
 	}
 }
 

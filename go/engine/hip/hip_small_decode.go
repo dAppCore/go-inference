@@ -1699,6 +1699,85 @@ func hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScale
 	return nil
 }
 
+func hipRunRMSNormRoPEHeadsPairKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx context.Context, driver nativeHIPDriver, queryInput, keyInput *hipDeviceByteBuffer, queryCfg, keyCfg hipRMSNormDeviceWeightConfig, queryHeadCount, keyHeadCount int, position int, base float32, frequencyDim int, rotaryCount int, frequencyScale float32, queryOutput, keyOutput *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	if driver == nil || !driver.Available() {
+		return core.E("rocm.hip.RMSNormRoPEHeadsPairLaunch", "HIP driver is not available", nil)
+	}
+	if queryInput == nil || queryInput.Pointer() == 0 || keyInput == nil || keyInput.Pointer() == 0 {
+		return core.E("rocm.hip.RMSNormRoPEHeadsPairLaunch", "RMSNorm RoPE pair input device buffers are required", nil)
+	}
+	if queryCfg.Count <= 0 || queryCfg.Count%2 != 0 || queryCfg.Count != keyCfg.Count || queryHeadCount <= 0 || keyHeadCount <= 0 {
+		return core.E("rocm.hip.RMSNormRoPEHeadsPairLaunch", "head dim must be positive/even/equal and head counts must be positive", nil)
+	}
+	if queryInput.Count() != queryCfg.Count*queryHeadCount || queryInput.SizeBytes() != uint64(queryInput.Count()*4) {
+		return core.E("rocm.hip.RMSNormRoPEHeadsPairLaunch", "query input device buffer shape mismatch", nil)
+	}
+	if keyInput.Count() != keyCfg.Count*keyHeadCount || keyInput.SizeBytes() != uint64(keyInput.Count()*4) {
+		return core.E("rocm.hip.RMSNormRoPEHeadsPairLaunch", "key input device buffer shape mismatch", nil)
+	}
+	if queryOutput == nil || queryOutput.Pointer() == 0 || queryOutput.Count() != queryInput.Count() || queryOutput.SizeBytes() != queryInput.SizeBytes() {
+		return core.E("rocm.hip.RMSNormRoPEHeadsPairLaunch", "query output device buffer shape mismatch", nil)
+	}
+	if keyOutput == nil || keyOutput.Pointer() == 0 || keyOutput.Count() != keyInput.Count() || keyOutput.SizeBytes() != keyInput.SizeBytes() {
+		return core.E("rocm.hip.RMSNormRoPEHeadsPairLaunch", "key output device buffer shape mismatch", nil)
+	}
+	launchArgs := hipRMSNormRoPEHeadsPairLaunchArgs{
+		QueryInputPointer:   queryInput.Pointer(),
+		QueryWeightPointer:  queryCfg.WeightPointer,
+		QueryOutputPointer:  queryOutput.Pointer(),
+		KeyInputPointer:     keyInput.Pointer(),
+		KeyWeightPointer:    keyCfg.WeightPointer,
+		KeyOutputPointer:    keyOutput.Pointer(),
+		HeadDim:             queryCfg.Count,
+		QueryHeadCount:      queryHeadCount,
+		KeyHeadCount:        keyHeadCount,
+		QueryInputBytes:     queryInput.SizeBytes(),
+		QueryWeightBytes:    queryCfg.WeightBytes,
+		QueryOutputBytes:    queryOutput.SizeBytes(),
+		KeyInputBytes:       keyInput.SizeBytes(),
+		KeyWeightBytes:      keyCfg.WeightBytes,
+		KeyOutputBytes:      keyOutput.SizeBytes(),
+		QueryEpsilon:        queryCfg.Epsilon,
+		QueryWeightEncoding: queryCfg.WeightEncoding,
+		QueryFlags:          queryCfg.Flags,
+		KeyEpsilon:          keyCfg.Epsilon,
+		KeyWeightEncoding:   keyCfg.WeightEncoding,
+		KeyFlags:            keyCfg.Flags,
+		Position:            position,
+		Base:                base,
+		FrequencyDim:        frequencyDim,
+		RotaryCount:         rotaryCount,
+		FrequencyScale:      frequencyScale,
+	}
+	var launchBytes []byte
+	var err error
+	if workspace != nil {
+		launchBytes, err = launchArgs.BinaryInto(workspace.RMSNormRoPEHeadsPairArgs[:])
+	} else {
+		launchBytes, err = launchArgs.Binary()
+	}
+	if err != nil {
+		return err
+	}
+	config := hipKernelLaunchConfig{
+		Name:   hipKernelNameRMSNormRoPEHeadsPair,
+		Args:   launchBytes,
+		GridX:  uint32(queryHeadCount + keyHeadCount),
+		GridY:  1,
+		GridZ:  1,
+		BlockX: 256,
+		BlockY: 1,
+		BlockZ: 1,
+	}
+	if err := config.Validate(); err != nil {
+		return err
+	}
+	return hipLaunchKernel(driver, config)
+}
+
 func hipRunRMSNormRoPEHeadsBatchKernelWithDeviceInputWeightConfig(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipRMSNormDeviceWeightConfig, headCount int, batch int, startPosition int, base float32, frequencyDim int, rotaryCount int) (*hipDeviceByteBuffer, error) {
 	return hipRunRMSNormRoPEHeadsBatchKernelWithDeviceInputWeightConfigFrequencyScale(ctx, driver, input, cfg, headCount, batch, startPosition, base, frequencyDim, rotaryCount, 1)
 }
@@ -2190,6 +2269,184 @@ func hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernel(ctx cont
 	return hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernelWorkspace(ctx, driver, req, query, output, nil)
 }
 
+func hipRunAttentionHeadsBatchCausalQueryRMSRoPEOutputFromDeviceQueryToDeviceKernel(ctx context.Context, driver nativeHIPDriver, req hipAttentionHeadsBatchCausalDeviceRequest, query *hipDeviceByteBuffer, queryNormCfg hipRMSNormDeviceWeightConfig, ropeStartPosition int, ropeBase float32, ropeFrequencyDim, ropeRotaryCount int, ropeFrequencyScale float32, output *hipDeviceByteBuffer) error {
+	return hipRunAttentionHeadsBatchCausalQueryRMSRoPEOutputFromDeviceQueryToDeviceKernelWorkspace(ctx, driver, req, query, queryNormCfg, ropeStartPosition, ropeBase, ropeFrequencyDim, ropeRotaryCount, ropeFrequencyScale, output, nil)
+}
+
+func hipRunAttentionHeadsBatchCausalQueryRMSRoPEOutputFromDeviceQueryToDeviceKernelWorkspace(ctx context.Context, driver nativeHIPDriver, req hipAttentionHeadsBatchCausalDeviceRequest, query *hipDeviceByteBuffer, queryNormCfg hipRMSNormDeviceWeightConfig, ropeStartPosition int, ropeBase float32, ropeFrequencyDim, ropeRotaryCount int, ropeFrequencyScale float32, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	const operation = "AttentionHeadsBatchCausalQueryRMSRoPELaunch"
+	if req.Dim <= 0 || req.Dim%2 != 0 || req.TokenCount <= 0 || req.HeadCount <= 0 || req.QueryCount <= 0 {
+		return core.E("rocm.hip."+operation, "attention batch dimensions must be positive and dimension must be even", nil)
+	}
+	keyHeads := firstPositiveInt(req.KeyHeads, 1)
+	if keyHeads <= 0 || keyHeads > req.HeadCount || req.HeadCount%keyHeads != 0 {
+		return core.E("rocm.hip."+operation, "key head count must divide query head count", nil)
+	}
+	if req.QueryStartToken < 0 || uint64(req.QueryStartToken)+uint64(req.QueryCount) > uint64(req.TokenCount) {
+		return core.E("rocm.hip."+operation, "causal query window exceeds token count", nil)
+	}
+	if req.WindowSize < 0 {
+		return core.E("rocm.hip."+operation, "window size must be non-negative", nil)
+	}
+	if req.Scale < 0 || math.IsNaN(float64(req.Scale)) || math.IsInf(float64(req.Scale), 0) {
+		return core.E("rocm.hip."+operation, "scale must be non-negative and finite", nil)
+	}
+	if queryNormCfg.Count != req.Dim {
+		return core.E("rocm.hip."+operation, "query RMSNorm weight count must match dimension", nil)
+	}
+	if err := hipValidateRMSNormDeviceWeightConfig(operation, queryNormCfg); err != nil {
+		return err
+	}
+	if queryNormCfg.Epsilon < 0 || math.IsNaN(float64(queryNormCfg.Epsilon)) || math.IsInf(float64(queryNormCfg.Epsilon), 0) {
+		return core.E("rocm.hip."+operation, "query epsilon must be non-negative and finite", nil)
+	}
+	if ropeStartPosition < 0 || ropeBase <= 0 || math.IsNaN(float64(ropeBase)) || math.IsInf(float64(ropeBase), 0) {
+		return core.E("rocm.hip."+operation, "RoPE position and base are invalid", nil)
+	}
+	if ropeFrequencyDim < 0 || (ropeFrequencyDim > 0 && ropeFrequencyDim < req.Dim) {
+		return core.E("rocm.hip."+operation, "RoPE frequency dimension must be zero or at least dimension", nil)
+	}
+	if ropeRotaryCount < 0 || ropeRotaryCount > req.Dim || ropeRotaryCount%2 != 0 {
+		return core.E("rocm.hip."+operation, "RoPE rotary count must be zero or an even count no larger than dimension", nil)
+	}
+	if ropeFrequencyScale == 0 {
+		ropeFrequencyScale = 1
+	}
+	if ropeFrequencyScale <= 0 || math.IsNaN(float64(ropeFrequencyScale)) || math.IsInf(float64(ropeFrequencyScale), 0) {
+		return core.E("rocm.hip."+operation, "RoPE frequency scale must be positive and finite", nil)
+	}
+	queryCount := req.QueryCount * req.HeadCount * req.Dim
+	if query == nil || query.Pointer() == 0 || query.Count() != queryCount || query.SizeBytes() != uint64(queryCount*4) {
+		return core.E("rocm.hip."+operation, "attention query device buffer shape mismatch", nil)
+	}
+	if output == nil || output.Pointer() == 0 || output.Count() != queryCount || output.SizeBytes() != uint64(queryCount*4) {
+		return core.E("rocm.hip."+operation, "attention output device buffer shape mismatch", nil)
+	}
+	launch := hipAttentionHeadsBatchCausalQueryRMSRoPELaunchArgs{
+		QueryInputPointer:   query.Pointer(),
+		QueryWeightPointer:  queryNormCfg.WeightPointer,
+		OutputPointer:       output.Pointer(),
+		Dim:                 req.Dim,
+		TokenCount:          req.TokenCount,
+		HeadCount:           req.HeadCount,
+		KeyHeads:            keyHeads,
+		QueryCount:          req.QueryCount,
+		QueryStartToken:     req.QueryStartToken,
+		WindowSize:          req.WindowSize,
+		QueryInputBytes:     query.SizeBytes(),
+		QueryWeightBytes:    queryNormCfg.WeightBytes,
+		OutputBytes:         output.SizeBytes(),
+		Scale:               req.Scale,
+		QueryEpsilon:        queryNormCfg.Epsilon,
+		QueryWeightEncoding: queryNormCfg.WeightEncoding,
+		QueryFlags:          queryNormCfg.Flags,
+		RoPEStartPosition:   ropeStartPosition,
+		RoPEBase:            ropeBase,
+		RoPEFrequencyDim:    ropeFrequencyDim,
+		RoPERotaryCount:     ropeRotaryCount,
+		RoPEFrequencyScale:  ropeFrequencyScale,
+	}
+	if req.DeviceKV == nil {
+		if req.DescriptorTable != nil {
+			return core.E("rocm.hip."+operation, "descriptor table requires device KV cache", nil)
+		}
+		if req.Key == nil || req.Key.Pointer() == 0 || req.Value == nil || req.Value.Pointer() == 0 {
+			return core.E("rocm.hip."+operation, "attention key and value device buffers are required", nil)
+		}
+		kvCount := req.TokenCount * keyHeads * req.Dim
+		if req.Key.Count() != kvCount || req.Value.Count() != kvCount ||
+			req.Key.SizeBytes() != uint64(kvCount*4) || req.Value.SizeBytes() != uint64(kvCount*4) {
+			return core.E("rocm.hip."+operation, "attention key/value device buffer shape mismatch", nil)
+		}
+		launch.KVSource = hipAttentionKVSourceContiguous
+		launch.KeyPointer = req.Key.Pointer()
+		launch.ValuePointer = req.Value.Pointer()
+		launch.KeyBytes = req.Key.SizeBytes()
+		launch.ValueBytes = req.Value.SizeBytes()
+	} else {
+		if req.Key != nil || req.Value != nil {
+			return core.E("rocm.hip."+operation, "device KV attention must not set contiguous KV buffers", nil)
+		}
+		if req.DescriptorTable == nil {
+			return core.E("rocm.hip."+operation, "device KV attention requires descriptor table", nil)
+		}
+		if err := req.DescriptorTable.CompatibleWith(req.DeviceKV); err != nil {
+			return core.E("rocm.hip."+operation, "descriptor table does not match device KV cache", err)
+		}
+		keyWidth, valueWidth, ok := req.DeviceKV.LastVectorWidths()
+		if !ok {
+			return core.E("rocm.hip."+operation, "device KV cache has no pages", nil)
+		}
+		if keyWidth != req.Dim*keyHeads || valueWidth != req.Dim*keyHeads {
+			return core.E("rocm.hip."+operation, "device KV widths must match attention dimension", nil)
+		}
+		if req.DeviceKV.TokenCount() != req.TokenCount {
+			return core.E("rocm.hip."+operation, "device KV token count mismatch", nil)
+		}
+		launch.KVSource = hipAttentionKVSourceDevice
+		launch.DescriptorPointer = req.DescriptorTable.Pointer()
+		launch.DescriptorBytes = req.DescriptorTable.SizeBytes()
+	}
+	useSharedWeights := req.TokenCount <= hipAttentionHeadsSharedMaxTokens
+	var attentionSharedMemBytes uint32
+	var kernelSharedMemBytes uint32
+	var weights *hipDeviceByteBuffer
+	var err error
+	if useSharedWeights {
+		attentionSharedMemBytes, err = hipAttentionHeadsSharedMemBytes(req.TokenCount, req.DeviceKV != nil)
+		if err != nil {
+			return err
+		}
+		kernelSharedMemBytes, err = hipAttentionHeadsQueryRMSRoPESharedMemBytes(attentionSharedMemBytes, req.Dim)
+		if err != nil {
+			return err
+		}
+		launch.SharedMemBytes = uint64(attentionSharedMemBytes)
+	} else {
+		weightCount := req.QueryCount * req.HeadCount * req.TokenCount
+		if workspace != nil && weightCount <= hipAttentionHeadsBatchWorkspaceMaxWeights {
+			weights, err = workspace.EnsureBatchAttentionWeights(driver, weightCount)
+			if err != nil {
+				return err
+			}
+		} else {
+			weights, err = hipAllocateByteBuffer(driver, "rocm.hip."+operation, "attention batch head weights", uint64(weightCount)*4, weightCount)
+			if err != nil {
+				return err
+			}
+			defer weights.Close()
+		}
+		launch.AttentionWeightPointer = weights.Pointer()
+		launch.AttentionWeightBytes = uint64(weightCount) * 4
+		kernelSharedMemBytes, err = hipAttentionHeadsQueryRMSRoPESharedMemBytes(0, req.Dim)
+		if err != nil {
+			return err
+		}
+	}
+	launchBytes, err := launch.Binary()
+	if err != nil {
+		return err
+	}
+	config := hipKernelLaunchConfig{
+		Name:           hipKernelNameAttentionHeadsBatchCausalQueryRMSRoPE,
+		Args:           launchBytes,
+		GridX:          uint32(req.HeadCount),
+		GridY:          uint32(req.QueryCount),
+		GridZ:          1,
+		BlockX:         hipAttentionHeadsBlockSize(req.TokenCount),
+		BlockY:         1,
+		BlockZ:         1,
+		SharedMemBytes: kernelSharedMemBytes,
+	}
+	if err := config.Validate(); err != nil {
+		return err
+	}
+	return hipLaunchKernel(driver, config)
+}
+
 func hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernelWorkspace(ctx context.Context, driver nativeHIPDriver, req hipAttentionHeadsBatchCausalDeviceRequest, query *hipDeviceByteBuffer, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
 	if err := hipContextErr(ctx); err != nil {
 		return err
@@ -2503,155 +2760,161 @@ func hipAttentionHeadsBatchChunkedActiveRange(queryStartToken, queryCount, token
 }
 
 type hipAttentionHeadsChunkedWorkspace struct {
-	Partial                        *hipDeviceByteBuffer
-	Stats                          *hipDeviceByteBuffer
-	ChunkedStage1Args              [hipAttentionHeadsChunkedLaunchArgsBytes]byte
-	ChunkedStage2Args              [hipAttentionHeadsChunkedLaunchArgsBytes]byte
-	BatchChunkedStage1Args         [hipAttentionHeadsBatchChunkedLaunchArgsBytes]byte
-	BatchChunkedStage2Args         [hipAttentionHeadsBatchChunkedLaunchArgsBytes]byte
-	VectorAddScaledArgs            [hipVectorAddScaledLaunchArgsBytes]byte
-	VectorScaleArgs                [hipVectorScaleLaunchArgsBytes]byte
-	RMSNormArgs                    [hipRMSNormLaunchArgsBytes]byte
-	RMSResidualAddArgs             [hipRMSNormResidualAddArgsBytes]byte
-	RMSResidualAddNormArgs         [hipRMSNormResAddNormArgsBytes]byte
-	RMSNormHeadsArgs               [hipRMSNormHeadsLaunchArgsBytes]byte
-	RMSNormRoPEHeadsArgs           [hipRMSNormRoPEHeadsLaunchArgsBytes]byte
-	EmbeddingLookupArgs            [hipEmbeddingLookupLaunchArgsBytes]byte
-	KVEncodeTokenArgs              [hipKVEncodeTokenLaunchArgsBytes]byte
-	KVDescriptorAppendArgs         [hipKVDescriptorAppendLaunchArgsBytes]byte
-	TokenID                        *hipDeviceByteBuffer
-	TokenIDLoaded                  bool
-	TokenIDValue                   int32
-	EmbeddingOutputs               map[int]*hipDeviceByteBuffer
-	ScaledEmbeddings               map[int]*hipDeviceByteBuffer
-	ScaledEmbeddingFixed           hipDeviceByteBuffer
-	ScaledEmbeddingFixedCap        int
-	ScaledEmbeddingView            hipDeviceByteBuffer
-	PerLayerEmbeddings             map[int]*hipDeviceByteBuffer
-	PerLayerProjected              map[int]*hipDeviceByteBuffer
-	PerLayerProjectedFixed         hipDeviceByteBuffer
-	PerLayerProjectedCap           int
-	PerLayerProjectedView          hipDeviceByteBuffer
-	PerLayerScaled                 map[int]*hipDeviceByteBuffer
-	PerLayerScaledFixed            hipDeviceByteBuffer
-	PerLayerScaledFixedCap         int
-	PerLayerScaledView             hipDeviceByteBuffer
-	PerLayerProjScaled             map[int]*hipDeviceByteBuffer
-	PerLayerNorm                   map[int]*hipDeviceByteBuffer
-	PerLayerCombined               map[int]*hipDeviceByteBuffer
-	PerLayerOutput                 map[int]*hipDeviceByteBuffer
-	PerLayerOutputFixed            hipDeviceByteBuffer
-	PerLayerOutputFixedCap         int
-	PerLayerOutputView             hipDeviceByteBuffer
-	AttentionOutputs               map[int]*hipDeviceByteBuffer
-	AttentionOutputFixed           hipDeviceByteBuffer
-	AttentionOutputFixedCap        int
-	AttentionOutputView            hipDeviceByteBuffer
-	ProjectionOutputs              map[int]*hipDeviceByteBuffer
-	ProjectionOutputFixed          hipDeviceByteBuffer
-	ProjectionOutputCap            int
-	ProjectionArgs                 [hipMLXQ4ProjectionLaunchArgsBytes]byte
-	TripleProjectionArgs           [hipMLXQ4TripleProjLaunchArgsBytes]byte
-	GELUTanhMulArgs                [hipMLXQ4GELUTanhMulLaunchArgsBytes]byte
-	GELUTanhProjArgs               [hipMLXQ4GELUTanhProjLaunchArgsBytes]byte
-	KVProjectionOutputs            [2]map[int]*hipDeviceByteBuffer
-	KVProjectionPairOutputs        map[int]*hipDeviceByteBuffer
-	KVProjectionPairFixed          hipDeviceByteBuffer
-	KVProjectionPairCap            int
-	KVProjectionOutputViews        [2]hipDeviceByteBuffer
-	PrefillInputNormOutput         map[int]*hipDeviceByteBuffer
-	PrefillInputNormFixed          hipDeviceByteBuffer
-	PrefillInputNormCap            int
-	PrefillInputNormView           hipDeviceByteBuffer
-	ActivationOutputs              map[int]*hipDeviceByteBuffer
-	ActivationOutputFixed          hipDeviceByteBuffer
-	ActivationOutputCap            int
-	RMSResidualOutputs             map[int]*hipDeviceByteBuffer
-	RMSNormOutputs                 map[int]*hipDeviceByteBuffer
-	RMSResidualNormOutputs         map[int]*hipDeviceByteBuffer
-	RMSResidualNormFixed           hipDeviceByteBuffer
-	RMSResidualNormCap             int
-	RMSRoPEOutputs                 map[int]*hipDeviceByteBuffer
-	RMSRoPEFixed                   hipDeviceByteBuffer
-	RMSRoPEFixedCap                int
-	RMSRoPEOutputView              hipDeviceByteBuffer
-	KeyRMSRoPEOutputs              map[int]*hipDeviceByteBuffer
-	KeyRMSRoPEOutputView           hipDeviceByteBuffer
-	RMSNoScaleOutputs              map[int]*hipDeviceByteBuffer
-	RMSNoScaleOutputView           hipDeviceByteBuffer
-	KeyValueNormOutputs            map[int]*hipDeviceByteBuffer
-	KeyValueNormFixed              hipDeviceByteBuffer
-	KeyValueNormCap                int
-	KeyValueNormViews              [2]hipDeviceByteBuffer
-	IntermediateOutputs            map[int]*hipDeviceByteBuffer
-	IntermediateFixed              hipDeviceByteBuffer
-	IntermediateFixedCap           int
-	QKVOutputs                     map[int]*hipDeviceByteBuffer
-	QKVOutputFixed                 hipDeviceByteBuffer
-	QKVOutputCap                   int
-	ProjectionScore                *hipDeviceByteBuffer
-	ProjectionScoresArgs           [hipMLXQ4ProjectionLaunchArgsBytes]byte
-	ProjectionScoreBytes           []byte
-	ProjectionTopK                 *hipDeviceByteBuffer
-	ProjectionTopKCap              int
-	ProjectionTopKView             hipDeviceByteBuffer
-	ProjectionTopKWork             *hipDeviceByteBuffer
-	ProjectionTopKWorkCap          int
-	ProjectionTopKWorkView         hipDeviceByteBuffer
-	ProjectionTopKArgs             [hipPackedTopKLaunchArgsBytes]byte
-	ProjectionTopKSampleArgs       [hipPackedTopKSampleLaunchArgsBytes]byte
-	OrderedEmbeddingCandidatesArgs [hipOrderedEmbeddingCandidatesLaunchArgsBytes]byte
-	ProjectionTopKBytes            []byte
-	ProjectionTopPacked            []uint64
-	ProjectionCandidates           []hipGreedySampleResult
-	ProjectionCandidateTokens      []int32
-	ProjectionCandidateTokenOutput *hipDeviceByteBuffer
-	ProjectionCandidateTokenCap    int
-	ProjectionCandidateTokenView   hipDeviceTokenBuffer
-	ProjectionGreedyBest           []*hipDeviceByteBuffer
-	ProjectionGreedyView           hipDeviceByteBuffer
-	ProjectionGreedyNext           int
-	GreedyFirstSlabSlots           int
-	ProjectionOutputView           hipDeviceByteBuffer
-	ActivationOutputView           hipDeviceByteBuffer
-	QKVOutputView                  hipDeviceByteBuffer
-	RMSResidualNormViews           [2]hipDeviceByteBuffer
-	RMSResidualOutputView          hipDeviceByteBuffer
-	RMSNormOutputView              hipDeviceByteBuffer
-	IntermediateOutputView         hipDeviceByteBuffer
-	SampleCandidates               []hipReferenceCandidate
-	SampleWeights                  []float64
-	BatchAttentionWeight           *hipDeviceByteBuffer
-	FinalHiddenOutputs             [2]map[int]*hipDeviceByteBuffer
-	FinalHiddenPairOutputs         map[int]*hipDeviceByteBuffer
-	FinalHiddenPairFixed           hipDeviceByteBuffer
-	FinalHiddenPairFixedCap        int
-	FinalHiddenOutputViews         [2]hipDeviceByteBuffer
-	NextInputOutputs               [2]map[int]*hipDeviceByteBuffer
-	NextInputPairOutputs           map[int]*hipDeviceByteBuffer
-	NextInputPairFixed             hipDeviceByteBuffer
-	NextInputPairFixedCap          int
-	NextInputOutputViews           [2]hipDeviceByteBuffer
-	PerLayerInputSet               hipGemma4Q4PerLayerInputDeviceSet
-	PerLayerInputBacking           [1]*hipDeviceByteBuffer
-	AssistantDraftCombinedFixed    hipDeviceByteBuffer
-	AssistantDraftCombinedCap      int
-	AssistantDraftCombinedView     hipDeviceByteBuffer
-	AssistantDraftInputHiddenFixed hipDeviceByteBuffer
-	AssistantDraftInputHiddenCap   int
-	AssistantDraftInputHiddenView  hipDeviceByteBuffer
-	PrefillTokenBuffer             *hipDeviceTokenBuffer
-	PrefillTokenView               hipDeviceTokenBuffer
-	PrefillTokenPayload            []byte
-	SuppressTokenIDs               []int32
-	SuppressTokenBuffer            *hipDeviceTokenBuffer
-	SuppressTokenView              hipDeviceTokenBuffer
-	SuppressTokenPayload           []byte
-	SuppressTokenInlineIDs         [hipProjectionGreedySuppressReserveBytes / 4]int32
-	SuppressTokenInlineData        [hipProjectionGreedySuppressReserveBytes]byte
-	partialCap                     int
-	statsCap                       int
-	batchWeightCap                 int
+	Partial                                    *hipDeviceByteBuffer
+	Stats                                      *hipDeviceByteBuffer
+	ChunkedStage1Args                          [hipAttentionHeadsChunkedLaunchArgsBytes]byte
+	ChunkedStage2Args                          [hipAttentionHeadsChunkedLaunchArgsBytes]byte
+	BatchChunkedStage1Args                     [hipAttentionHeadsBatchChunkedLaunchArgsBytes]byte
+	BatchChunkedStage2Args                     [hipAttentionHeadsBatchChunkedLaunchArgsBytes]byte
+	VectorAddScaledArgs                        [hipVectorAddScaledLaunchArgsBytes]byte
+	VectorScaleArgs                            [hipVectorScaleLaunchArgsBytes]byte
+	RMSNormArgs                                [hipRMSNormLaunchArgsBytes]byte
+	RMSResidualAddArgs                         [hipRMSNormResidualAddArgsBytes]byte
+	RMSResidualAddNormArgs                     [hipRMSNormResAddNormArgsBytes]byte
+	RMSNormHeadsArgs                           [hipRMSNormHeadsLaunchArgsBytes]byte
+	RMSNormRoPEHeadsArgs                       [hipRMSNormRoPEHeadsLaunchArgsBytes]byte
+	RMSNormRoPEHeadsPairArgs                   [hipRMSNormRoPEHeadsPairLaunchArgsBytes]byte
+	RMSResidualAddGELUTanhProjArgs             [hipRMSResidualAddGELUTanhProjLaunchArgsBytes]byte
+	EmbeddingLookupArgs                        [hipEmbeddingLookupLaunchArgsBytes]byte
+	KVEncodeTokenArgs                          [hipKVEncodeTokenLaunchArgsBytes]byte
+	KVEncodeTokenValueNormArgs                 [hipKVEncodeTokenValueNormLaunchArgsBytes]byte
+	KVEncodeTokenValueNormDescriptorAppendArgs [hipKVEncodeTokenValueNormDescriptorAppendLaunchArgsBytes]byte
+	KVDescriptorAppendArgs                     [hipKVDescriptorAppendLaunchArgsBytes]byte
+	TokenID                                    *hipDeviceByteBuffer
+	TokenIDLoaded                              bool
+	TokenIDValue                               int32
+	EmbeddingOutputs                           map[int]*hipDeviceByteBuffer
+	ScaledEmbeddings                           map[int]*hipDeviceByteBuffer
+	ScaledEmbeddingFixed                       hipDeviceByteBuffer
+	ScaledEmbeddingFixedCap                    int
+	ScaledEmbeddingView                        hipDeviceByteBuffer
+	PerLayerEmbeddings                         map[int]*hipDeviceByteBuffer
+	PerLayerProjected                          map[int]*hipDeviceByteBuffer
+	PerLayerProjectedFixed                     hipDeviceByteBuffer
+	PerLayerProjectedCap                       int
+	PerLayerProjectedView                      hipDeviceByteBuffer
+	PerLayerScaled                             map[int]*hipDeviceByteBuffer
+	PerLayerScaledFixed                        hipDeviceByteBuffer
+	PerLayerScaledFixedCap                     int
+	PerLayerScaledView                         hipDeviceByteBuffer
+	PerLayerProjScaled                         map[int]*hipDeviceByteBuffer
+	PerLayerNorm                               map[int]*hipDeviceByteBuffer
+	PerLayerCombined                           map[int]*hipDeviceByteBuffer
+	PerLayerOutput                             map[int]*hipDeviceByteBuffer
+	PerLayerOutputFixed                        hipDeviceByteBuffer
+	PerLayerOutputFixedCap                     int
+	PerLayerOutputView                         hipDeviceByteBuffer
+	AttentionOutputs                           map[int]*hipDeviceByteBuffer
+	AttentionOutputFixed                       hipDeviceByteBuffer
+	AttentionOutputFixedCap                    int
+	AttentionOutputView                        hipDeviceByteBuffer
+	ProjectionOutputs                          map[int]*hipDeviceByteBuffer
+	ProjectionOutputFixed                      hipDeviceByteBuffer
+	ProjectionOutputCap                        int
+	ProjectionArgs                             [hipMLXQ4ProjectionLaunchArgsBytes]byte
+	TripleProjectionArgs                       [hipMLXQ4TripleProjLaunchArgsBytes]byte
+	GELUTanhMulArgs                            [hipMLXQ4GELUTanhMulLaunchArgsBytes]byte
+	GELUTanhMLPPersistentArgs                  [hipMLXQ4GELUTanhMLPPersistentLaunchArgsBytes]byte
+	GELUTanhProjArgs                           [hipMLXQ4GELUTanhProjLaunchArgsBytes]byte
+	GELUTanhMLPBarrier                         *hipDeviceByteBuffer
+	KVProjectionOutputs                        [2]map[int]*hipDeviceByteBuffer
+	KVProjectionPairOutputs                    map[int]*hipDeviceByteBuffer
+	KVProjectionPairFixed                      hipDeviceByteBuffer
+	KVProjectionPairCap                        int
+	KVProjectionOutputViews                    [2]hipDeviceByteBuffer
+	PrefillInputNormOutput                     map[int]*hipDeviceByteBuffer
+	PrefillInputNormFixed                      hipDeviceByteBuffer
+	PrefillInputNormCap                        int
+	PrefillInputNormView                       hipDeviceByteBuffer
+	ActivationOutputs                          map[int]*hipDeviceByteBuffer
+	ActivationOutputFixed                      hipDeviceByteBuffer
+	ActivationOutputCap                        int
+	RMSResidualOutputs                         map[int]*hipDeviceByteBuffer
+	RMSNormOutputs                             map[int]*hipDeviceByteBuffer
+	RMSResidualNormOutputs                     map[int]*hipDeviceByteBuffer
+	RMSResidualNormFixed                       hipDeviceByteBuffer
+	RMSResidualNormCap                         int
+	RMSRoPEOutputs                             map[int]*hipDeviceByteBuffer
+	RMSRoPEFixed                               hipDeviceByteBuffer
+	RMSRoPEFixedCap                            int
+	RMSRoPEOutputView                          hipDeviceByteBuffer
+	KeyRMSRoPEOutputs                          map[int]*hipDeviceByteBuffer
+	KeyRMSRoPEOutputView                       hipDeviceByteBuffer
+	RMSNoScaleOutputs                          map[int]*hipDeviceByteBuffer
+	RMSNoScaleOutputView                       hipDeviceByteBuffer
+	KeyValueNormOutputs                        map[int]*hipDeviceByteBuffer
+	KeyValueNormFixed                          hipDeviceByteBuffer
+	KeyValueNormCap                            int
+	KeyValueNormViews                          [2]hipDeviceByteBuffer
+	IntermediateOutputs                        map[int]*hipDeviceByteBuffer
+	IntermediateFixed                          hipDeviceByteBuffer
+	IntermediateFixedCap                       int
+	QKVOutputs                                 map[int]*hipDeviceByteBuffer
+	QKVOutputFixed                             hipDeviceByteBuffer
+	QKVOutputCap                               int
+	ProjectionScore                            *hipDeviceByteBuffer
+	ProjectionScoresArgs                       [hipMLXQ4ProjectionLaunchArgsBytes]byte
+	ProjectionScoreBytes                       []byte
+	ProjectionTopK                             *hipDeviceByteBuffer
+	ProjectionTopKCap                          int
+	ProjectionTopKView                         hipDeviceByteBuffer
+	ProjectionTopKWork                         *hipDeviceByteBuffer
+	ProjectionTopKWorkCap                      int
+	ProjectionTopKWorkView                     hipDeviceByteBuffer
+	ProjectionTopKArgs                         [hipPackedTopKLaunchArgsBytes]byte
+	ProjectionTopKSampleArgs                   [hipPackedTopKSampleLaunchArgsBytes]byte
+	OrderedEmbeddingCandidatesArgs             [hipOrderedEmbeddingCandidatesLaunchArgsBytes]byte
+	ProjectionTopKBytes                        []byte
+	ProjectionTopPacked                        []uint64
+	ProjectionCandidates                       []hipGreedySampleResult
+	ProjectionCandidateTokens                  []int32
+	ProjectionCandidateTokenOutput             *hipDeviceByteBuffer
+	ProjectionCandidateTokenCap                int
+	ProjectionCandidateTokenView               hipDeviceTokenBuffer
+	ProjectionGreedyBest                       []*hipDeviceByteBuffer
+	ProjectionGreedyView                       hipDeviceByteBuffer
+	ProjectionGreedyNext                       int
+	GreedyFirstSlabSlots                       int
+	ProjectionOutputView                       hipDeviceByteBuffer
+	ActivationOutputView                       hipDeviceByteBuffer
+	QKVOutputView                              hipDeviceByteBuffer
+	RMSResidualNormViews                       [2]hipDeviceByteBuffer
+	RMSResidualOutputView                      hipDeviceByteBuffer
+	RMSNormOutputView                          hipDeviceByteBuffer
+	IntermediateOutputView                     hipDeviceByteBuffer
+	SampleCandidates                           []hipReferenceCandidate
+	SampleWeights                              []float64
+	BatchAttentionWeight                       *hipDeviceByteBuffer
+	FinalHiddenOutputs                         [2]map[int]*hipDeviceByteBuffer
+	FinalHiddenPairOutputs                     map[int]*hipDeviceByteBuffer
+	FinalHiddenPairFixed                       hipDeviceByteBuffer
+	FinalHiddenPairFixedCap                    int
+	FinalHiddenOutputViews                     [2]hipDeviceByteBuffer
+	NextInputOutputs                           [2]map[int]*hipDeviceByteBuffer
+	NextInputPairOutputs                       map[int]*hipDeviceByteBuffer
+	NextInputPairFixed                         hipDeviceByteBuffer
+	NextInputPairFixedCap                      int
+	NextInputOutputViews                       [2]hipDeviceByteBuffer
+	PerLayerInputSet                           hipGemma4Q4PerLayerInputDeviceSet
+	PerLayerInputBacking                       [1]*hipDeviceByteBuffer
+	AssistantDraftCombinedFixed                hipDeviceByteBuffer
+	AssistantDraftCombinedCap                  int
+	AssistantDraftCombinedView                 hipDeviceByteBuffer
+	AssistantDraftInputHiddenFixed             hipDeviceByteBuffer
+	AssistantDraftInputHiddenCap               int
+	AssistantDraftInputHiddenView              hipDeviceByteBuffer
+	PrefillTokenBuffer                         *hipDeviceTokenBuffer
+	PrefillTokenView                           hipDeviceTokenBuffer
+	PrefillTokenPayload                        []byte
+	SuppressTokenIDs                           []int32
+	SuppressTokenBuffer                        *hipDeviceTokenBuffer
+	SuppressTokenView                          hipDeviceTokenBuffer
+	SuppressTokenPayload                       []byte
+	SuppressTokenInlineIDs                     [hipProjectionGreedySuppressReserveBytes / 4]int32
+	SuppressTokenInlineData                    [hipProjectionGreedySuppressReserveBytes]byte
+	partialCap                                 int
+	statsCap                                   int
+	batchWeightCap                             int
 }
 
 var hipAttentionHeadsChunkedWorkspacePool = struct {
@@ -3704,6 +3967,34 @@ func (workspace *hipAttentionHeadsChunkedWorkspace) EnsureActivationOutput(drive
 	return workspace.ensureFixedOutputReusableCapacity(driver, &workspace.ActivationOutputFixed, &workspace.ActivationOutputCap, &workspace.ActivationOutputView, count, "activation output", "activation output view")
 }
 
+func (workspace *hipAttentionHeadsChunkedWorkspace) EnsureGELUTanhMLPBarrier(driver nativeHIPDriver) (*hipDeviceByteBuffer, error) {
+	if workspace == nil {
+		return nil, core.E("rocm.hip.MLXQ4GELUTanhMLPPersistentLaunch", "attention workspace is required", nil)
+	}
+	if driver == nil || !driver.Available() {
+		return nil, core.E("rocm.hip.MLXQ4GELUTanhMLPPersistentLaunch", "HIP driver is not available", nil)
+	}
+	if workspace.GELUTanhMLPBarrier != nil &&
+		workspace.GELUTanhMLPBarrier.Pointer() != 0 &&
+		workspace.GELUTanhMLPBarrier.driver == driver &&
+		workspace.GELUTanhMLPBarrier.SizeBytes() >= 8 {
+		return workspace.GELUTanhMLPBarrier, nil
+	}
+	if err := workspace.GELUTanhMLPBarrier.Close(); err != nil {
+		return nil, err
+	}
+	barrier, err := hipAllocateByteBuffer(driver, "rocm.hip.MLXQ4GELUTanhMLPPersistentLaunch", "MLX q4 GELU tanh MLP persistent barrier", 8, 2)
+	if err != nil {
+		return nil, err
+	}
+	if err := hipMemsetDevice(driver, barrier.Pointer(), 0, barrier.SizeBytes()); err != nil {
+		_ = barrier.Close()
+		return nil, core.E("rocm.hip.MLXQ4GELUTanhMLPPersistentLaunch", "initialize persistent barrier", err)
+	}
+	workspace.GELUTanhMLPBarrier = barrier
+	return barrier, nil
+}
+
 func (workspace *hipAttentionHeadsChunkedWorkspace) EnsureRMSResidualOutput(driver nativeHIPDriver, count int) (*hipDeviceByteBuffer, error) {
 	return workspace.ensureRMSResidualNormOutput(driver, count, 0, "RMS residual/norm output pair", "RMS residual output view")
 }
@@ -4088,6 +4379,9 @@ func (workspace *hipAttentionHeadsChunkedWorkspace) Close() error {
 		}
 	}
 	if err := workspace.ActivationOutputFixed.Close(); err != nil {
+		lastErr = err
+	}
+	if err := workspace.GELUTanhMLPBarrier.Close(); err != nil {
 		lastErr = err
 	}
 	for _, output := range workspace.RMSResidualOutputs {
@@ -4476,6 +4770,19 @@ func hipAttentionHeadsSharedMemBytes(tokenCount int, deviceKV bool) (uint32, err
 	}
 	if bytes > math.MaxUint32 {
 		return 0, core.E("rocm.hip.AttentionHeadsLaunch", "attention shared memory byte count is out of uint32 range", nil)
+	}
+	return uint32(bytes), nil
+}
+
+func hipAttentionHeadsQueryRMSRoPESharedMemBytes(attentionBytes uint32, dim int) (uint32, error) {
+	dimension, err := rocmDeviceKVPositiveUint32("attention query dimension", dim)
+	if err != nil {
+		return 0, err
+	}
+	bytes := hipAttentionHeadsAlignSharedBytes(uint64(attentionBytes), 4)
+	bytes += uint64(dimension) * 4
+	if bytes > math.MaxUint32 {
+		return 0, core.E("rocm.hip.AttentionHeadsBatchCausalQueryRMSRoPELaunch", "attention fused shared memory byte count is out of uint32 range", nil)
 	}
 	return uint32(bytes), nil
 }

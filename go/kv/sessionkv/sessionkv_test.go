@@ -87,6 +87,54 @@ func TestStatusAndChunkRefRoutes(t *testing.T) {
 	}
 }
 
+// TestDescribeMatchesRegisteredRoutes gates route-description drift: every route
+// RegisterRoutes mounts must have a matching Describe entry and every Describe
+// entry must name a registered route. A route added to one but not the other (a
+// new endpoint left out of the OpenAPI spec, or a documented route that was
+// never wired) fails here instead of shipping a lying spec.
+func TestDescribeMatchesRegisteredRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	host, err := Open(context.Background(), core.PathJoin(t.TempDir(), "session.kv"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer host.Close()
+
+	r := gin.New()
+	host.RegisterRoutes(r.Group(host.BasePath()))
+
+	// registered: the gin engine's actually-mounted routes, keyed by their full
+	// path (BasePath + relative).
+	registered := map[string]bool{}
+	for _, ri := range r.Routes() {
+		registered[ri.Method+" "+ri.Path] = false
+	}
+	if len(registered) == 0 {
+		t.Fatal("RegisterRoutes mounted no routes")
+	}
+
+	// described: each Describe entry prefixed with BasePath to match gin's
+	// full-path form — concatenation, not trimming, so the comparison is exact
+	// in both directions.
+	described := host.Describe()
+	if len(described) == 0 {
+		t.Fatal("Describe returned no route descriptions")
+	}
+	for _, d := range described {
+		key := d.Method + " " + host.BasePath() + d.Path
+		if _, ok := registered[key]; !ok {
+			t.Errorf("Describe advertises %q but no route is registered for it", key)
+			continue
+		}
+		registered[key] = true
+	}
+	for key, matched := range registered {
+		if !matched {
+			t.Errorf("route %q is registered but Describe does not advertise it", key)
+		}
+	}
+}
+
 func doGet(r *gin.Engine, path string) (int, string) {
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	w := httptest.NewRecorder()

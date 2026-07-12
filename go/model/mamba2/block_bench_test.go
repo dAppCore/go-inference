@@ -25,18 +25,21 @@ func BenchmarkBlockForwardF32Prefill(b *testing.B) {
 	}
 }
 
-// BenchmarkBlockForwardF32Decode measures one decode step (L=1) with carried conv + SSM state.
+// BenchmarkBlockForwardF32Decode measures one decode step (L=1) with carried conv + SSM state on the
+// steady-state scratch path: a caller-owned BlockScratch (sized by the warmup call) is reused every token
+// so the in-proj and out-proj outputs write into resident buffers — the real session's per-token path.
 func BenchmarkBlockForwardF32Decode(b *testing.B) {
 	w := mkBlockWeights(blockBenchCfg, blockBenchD)
 	x := syn(blockBenchD, 1)
-	_, nc, ns, err := BlockForwardF32(x, w, blockBenchCfg, nil, nil, 1, blockBenchD)
+	sc := &BlockScratch{}
+	_, nc, ns, err := BlockForwardScratchF32(x, w, blockBenchCfg, nil, nil, 1, blockBenchD, sc)
 	if err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, nc, ns, err = BlockForwardF32(x, w, blockBenchCfg, nc, ns, 1, blockBenchD); err != nil {
+		if _, nc, ns, err = BlockForwardScratchF32(x, w, blockBenchCfg, nc, ns, 1, blockBenchD, sc); err != nil {
 			b.Fatal(err)
 		}
 	}

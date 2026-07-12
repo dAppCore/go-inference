@@ -1,5 +1,5 @@
 [![Go Reference](https://pkg.go.dev/badge/dappco.re/go/inference.svg)](https://pkg.go.dev/dappco.re/go/inference)
-[![License: EUPL-1.2](https://img.shields.io/badge/License-EUPL--1.2-blue.svg)](LICENSE.md)
+[![Licence: EUPL-1.2](https://img.shields.io/badge/Licence-EUPL--1.2-blue.svg)](LICENCE)
 [![Go Version](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat&logo=go)](go.mod)
 
 # go-inference
@@ -19,7 +19,7 @@ go-inference** — one repo, and (with `task build:embed`) one self-contained bi
 | **Engines** | `engine/metal` | Apple-GPU engine — **no cgo**, dispatches Apple MLX's compiled kernels + go-inference's own fused `lthn_` kernels via the Objective-C runtime; the ICB replay path replaces MLX's per-step re-encode (darwin/arm64) |
 | | `engine/hip` | AMD-GPU engine (linux/amd64, ROCm) — built on the AMD box from this same repo |
 | **Serving** | `serving/` | Native OpenAI / Anthropic / Ollama HTTP servers backed by the local engine (`/v1/chat/completions`, `/v1/messages`, `/api/chat`, …) + scheduler, sessions, chat history |
-| **Binary** | `cmd/lem` | `lem` — `serve`, `generate`, `ssd`/`sft`/`tune` (training), `pack`/`ebook` |
+| **Binary** | `cmd/lem` | `lem` — `serve`, `generate`, `ssd`/`sft`/`tune` (training), `pack`/`ebook`, `quant`, `spec` |
 | **Training** | `train/`, `eval/` | LoRA SFT, self-distillation (SSD), MTP tuning, the score cascade + capture, DuckDB/Influx metrics |
 | **Core lib** | `inference`, `model/`, `kv/`, `decode/` | `TextModel`/`Backend`/`Token`/`Message` contracts, model loading, KV cache + portable snapshots, tokenizer + sampler |
 | **GUI** | `gui/` | The LEM desktop app (Wails v3 — system tray + dashboard), a side module (`dappco.re/go/inference/gui`) |
@@ -45,7 +45,7 @@ The Apple engine dispatches two compiled kernel libraries, both **built from sou
 this repo** (no go-mlx dependency):
 
 - **`mlx.metallib`** — Apple's MLX kernels (`steel_gemm`, `affine_qmv`, `vv_*`, rms, rope).
-  Built by CMake from `external/mlx` (Apple's `ml-explore/mlx` pinned at v0.31.2) with the
+  Built by CMake from `external/mlx` (Apple's `ml-explore/mlx` pinned at v0.32.0) with the
   10 **lthn patches** in `patches/mlx/` applied on top (decode-replay, `MLX_METALLIB_PATH`
   override, 512-dim sdpa). Patch-not-vendor: bump the pin + rebase to pull MLX updates.
 - **`lthn_kernels.metallib`** — go-inference's own fused kernels (`engine/metal/kernels/*.metal`).

@@ -180,3 +180,120 @@ func TestRequireVision_VisionModelDeclines_Ugly(t *testing.T) {
 		t.Fatal("requireVision on a declining vision model: want rejection, got nil")
 	}
 }
+
+// wavMagic is a minimal byte sequence standing in for audio content — like the
+// image resolver, resolveAudioInputs carries the bytes through unchanged (the
+// engine validates the WAV shape), so any non-empty payload exercises the path.
+var wavMagic = []byte{'R', 'I', 'F', 'F', 0x24, 0x00, 0x00, 0x00, 'W', 'A', 'V', 'E'}
+
+// TestResolveAudioInputs_FileAndDataURL_Good proves a local file path and a
+// base64 data: URL both resolve to their raw bytes, in order, with the blank
+// entry skipped — the audio sibling of resolveImageInputs' Good case.
+func TestResolveAudioInputs_FileAndDataURL_Good(t *testing.T) {
+	path := writeTempImage(t, "clip.wav", wavMagic)
+	dataURL := "data:audio/wav;base64," + core.Base64Encode(wavMagic)
+
+	audios, err := resolveAudioInputs([]string{path, "  ", dataURL})
+	if err != nil {
+		t.Fatalf("resolveAudioInputs: %v", err)
+	}
+	if len(audios) != 2 {
+		t.Fatalf("got %d audios, want 2 (blank entry should be skipped)", len(audios))
+	}
+	for i, got := range audios {
+		if string(got) != string(wavMagic) {
+			t.Fatalf("audio[%d] = %v, want %v", i, got, wavMagic)
+		}
+	}
+}
+
+// TestResolveAudioInputs_Empty_Good proves nil/blank inputs yield no audio and
+// no error — the no-audio path.
+func TestResolveAudioInputs_Empty_Good(t *testing.T) {
+	for _, in := range [][]string{nil, {}, {"", "   "}} {
+		audios, err := resolveAudioInputs(in)
+		if err != nil {
+			t.Fatalf("resolveAudioInputs(%v): %v", in, err)
+		}
+		if audios != nil {
+			t.Fatalf("resolveAudioInputs(%v) = %v, want nil", in, audios)
+		}
+	}
+}
+
+// TestResolveAudioInputs_RemoteURL_Bad proves a remote http(s) URL is refused —
+// a local engine never fetches audio over the network.
+func TestResolveAudioInputs_RemoteURL_Bad(t *testing.T) {
+	for _, url := range []string{"http://example.com/clip.wav", "https://example.com/clip.wav"} {
+		if _, err := resolveAudioInputs([]string{url}); err == nil {
+			t.Fatalf("resolveAudioInputs(%q): want refusal, got nil", url)
+		}
+	}
+}
+
+// TestResolveAudioInputs_TooMany_Bad proves the per-request cap rejects an
+// oversized batch rather than loading unbounded audio work.
+func TestResolveAudioInputs_TooMany_Bad(t *testing.T) {
+	path := writeTempImage(t, "one.wav", wavMagic)
+	sources := make([]string, maxImagesPerRequest+1)
+	for i := range sources {
+		sources[i] = path
+	}
+	if _, err := resolveAudioInputs(sources); err == nil {
+		t.Fatalf("resolveAudioInputs of %d clips: want cap error, got nil", len(sources))
+	}
+}
+
+// TestResolveAudioInputs_MissingFile_Ugly proves a nonexistent path errors
+// rather than silently yielding empty audio bytes.
+func TestResolveAudioInputs_MissingFile_Ugly(t *testing.T) {
+	if _, err := resolveAudioInputs([]string{core.PathJoin(t.TempDir(), "nope.wav")}); err == nil {
+		t.Fatal("resolveAudioInputs of a missing path: want error, got nil")
+	}
+}
+
+// fakeAudioModel adds the neutral audio capability so requireAudio's gate can be
+// exercised for both an accepting and a declining checkpoint — the audio sibling
+// of fakeVisionModel.
+type fakeAudioModel struct {
+	inference.TextModel
+	accepts bool
+}
+
+func (f fakeAudioModel) AcceptsAudio() bool { return f.accepts }
+
+// Compile-time proof the fake carries the interface requireAudio asserts.
+var _ inference.AudioModel = fakeAudioModel{}
+
+// TestRequireAudio_NoAudio_Good proves the gate is a no-op with no audio — even
+// a text-only model generates when the turn carries no audio.
+func TestRequireAudio_NoAudio_Good(t *testing.T) {
+	if err := requireAudio(fakeTextModel{}, nil); err != nil {
+		t.Fatalf("requireAudio with no audio: %v", err)
+	}
+}
+
+// TestRequireAudio_NonAudioModelRejects_Bad proves an audio turn against a model
+// that does not implement inference.AudioModel is rejected rather than dropped.
+func TestRequireAudio_NonAudioModelRejects_Bad(t *testing.T) {
+	if err := requireAudio(fakeTextModel{}, [][]byte{wavMagic}); err == nil {
+		t.Fatal("requireAudio on a non-audio model: want rejection, got nil")
+	}
+}
+
+// TestRequireAudio_AudioModelAccepts_Good proves an audio turn is admitted when
+// the loaded checkpoint reports it accepts audio.
+func TestRequireAudio_AudioModelAccepts_Good(t *testing.T) {
+	if err := requireAudio(fakeAudioModel{accepts: true}, [][]byte{wavMagic}); err != nil {
+		t.Fatalf("requireAudio on an accepting audio model: %v", err)
+	}
+}
+
+// TestRequireAudio_AudioModelDeclines_Ugly proves an AudioModel that reports
+// this checkpoint shipped no audio head still rejects the audio turn
+// (AcceptsAudio is a live probe, not a static family declaration).
+func TestRequireAudio_AudioModelDeclines_Ugly(t *testing.T) {
+	if err := requireAudio(fakeAudioModel{accepts: false}, [][]byte{wavMagic}); err == nil {
+		t.Fatal("requireAudio on a declining audio model: want rejection, got nil")
+	}
+}

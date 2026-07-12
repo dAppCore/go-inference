@@ -10,16 +10,35 @@ import (
 	"dappco.re/go/inference/model/safetensors"
 )
 
+// TestMoEMLP_Forward_Golden pins the exact f32 bit-pattern of MoEMLP.forward over a fixed
+// multi-token input with TopK=2 (selection + renormalise exercised), gating scratch-fusion
+// refactors on bit-identical output — the mixture reference test above is 1e-4 tolerant.
+func TestMoEMLP_Forward_Golden(t *testing.T) {
+	const D, FF, nE, L = 8, 12, 6, 3
+	m := mkMoEMLP(D, FF, nE, 2, 77)
+	out := m.forward(syn(L*D, 1), L, D)
+	wantOut := []uint32{0x40a18d25, 0xc0ddb35e, 0xc07b560b, 0xc0429d7a, 0xbf856967, 0x3f8221e8, 0x40810437, 0x40d86fb8, 0x4030bf64, 0xc07fb44e, 0xc00f4752, 0xbfe04404, 0xbf1c2100, 0x3f1306dc, 0x401c40fd, 0x40811fa2, 0x3fa03aa7, 0xbff74426, 0xbf877803, 0xbf58a28e, 0xbe9b0363, 0x3e898cde, 0x3fa28473, 0x4003ed40}
+	if len(out) != len(wantOut) {
+		t.Fatalf("out len %d, want %d", len(out), len(wantOut))
+	}
+	for i, v := range out {
+		if b := math.Float32bits(v); b != wantOut[i] {
+			t.Fatalf("out[%d] bits 0x%08x, want 0x%08x", i, b, wantOut[i])
+		}
+	}
+}
+
 func mkMoEMLP(D, FF, nE, topK, seed int) *MoEMLP {
 	experts := make([]MoEExpert, nE)
 	for e := range experts {
 		experts[e] = MoEExpert{Gate: syn(FF*D, seed+e*10+1), Up: syn(FF*D, seed+e*10+2), Down: syn(D*FF, seed+e*10+3)}
 	}
 	return &MoEMLP{
-		Router:  syn(nE*D, seed),
-		Experts: experts,
-		Shared:  &MoEExpert{Gate: syn(FF*D, seed+500), Up: syn(FF*D, seed+501), Down: syn(D*FF, seed+502)},
-		TopK:    topK,
+		Router:       syn(nE*D, seed),
+		Experts:      experts,
+		Shared:       &MoEExpert{Gate: syn(FF*D, seed+500), Up: syn(FF*D, seed+501), Down: syn(D*FF, seed+502)},
+		TopK:         topK,
+		NormTopKProb: true, // the reference default; the golden + reference tests renormalise the selection
 	}
 }
 
@@ -160,6 +179,170 @@ func TestMoETruncatedMixture(t *testing.T) {
 		}
 	}
 	t.Logf("MoE truncation verified: experts {%d,%d} of %d selected + renormalised, others excluded", best, second, nE)
+}
+
+// TestMoENormTopKProbFalse pins the norm_topk_prob=false routing against an INDEPENDENT reference: the
+// top-k experts are combined by their RAW full-softmax weights (denominator over ALL experts), not
+// renormalised over the selection. It also guards that the flag actually changes the output vs the
+// renormalised path — a silent no-op would pass a self-referential test.
+func TestMoENormTopKProbFalse(t *testing.T) {
+	const D, FF, nE, topK = 8, 12, 5, 2
+	experts := make([]MoEExpert, nE)
+	for e := range experts {
+		experts[e] = MoEExpert{Gate: syn(FF*D, 200+e*10+1), Up: syn(FF*D, 200+e*10+2), Down: syn(D*FF, 200+e*10+3)}
+	}
+	m := &MoEMLP{Router: syn(nE*D, 200), Experts: experts, TopK: topK, NormTopKProb: false}
+	x := syn(D, 99)
+	got := m.forward(x, 1, D)
+
+	// independent reference: full softmax over ALL experts, top-k selected, summed WITHOUT renormalisation.
+	logits := make([]float64, nE)
+	maxL := math.Inf(-1)
+	for e := range nE {
+		var acc float64
+		for d := range D {
+			acc += float64(x[d]) * float64(m.Router[e*D+d])
+		}
+		logits[e] = acc
+		if acc > maxL {
+			maxL = acc
+		}
+	}
+	probs := make([]float64, nE)
+	var sumAll float64
+	for e := range nE {
+		probs[e] = math.Exp(logits[e] - maxL)
+		sumAll += probs[e]
+	}
+	used := make([]bool, nE)
+	sel := make([]int, 0, topK)
+	for range topK {
+		best := -1
+		for e := range nE {
+			if !used[e] && (best < 0 || probs[e] > probs[best]) {
+				best = e
+			}
+		}
+		used[best] = true
+		sel = append(sel, best)
+	}
+	want := make([]float64, D)
+	for _, e := range sel {
+		w := probs[e] / sumAll // full-softmax weight — no top-k renormalisation
+		eo := swigluExpert(x, m.Experts[e], D)
+		for d := range D {
+			want[d] += w * float64(eo[d])
+		}
+	}
+	for d := range D {
+		if math.Abs(float64(got[d])-want[d]) > 1e-4*(1+math.Abs(want[d])) {
+			t.Errorf("out[%d] = %v, want %v (full-softmax weights, no top-k renorm)", d, got[d], want[d])
+		}
+	}
+	mNorm := *m
+	mNorm.NormTopKProb = true
+	gotNorm := mNorm.forward(x, 1, D)
+	for d := range D {
+		if gotNorm[d] != got[d] {
+			t.Logf("norm_topk_prob flips behaviour: renormalised[0]=%v raw[0]=%v", gotNorm[0], got[0])
+			return
+		}
+	}
+	t.Fatal("norm_topk_prob false vs true produced identical output — the flag is not wired")
+}
+
+// TestMoESharedExpertGate pins the reference's sigmoid gate on the shared expert (σ(shared_expert_gate·x)):
+// the gated and ungated variants differ by exactly (σ−1)·SwiGLU_shared(x), isolating the gate from the
+// (identical) expert mixture. A precondition ensures σ is meaningfully below 1 so the gate is observable.
+func TestMoESharedExpertGate(t *testing.T) {
+	const D, FF, nE, sharedFF, topK = 8, 12, 4, 10, 2
+	m := mkMoEMLP(D, FF, nE, topK, 33)
+	m.Shared = &MoEExpert{Gate: syn(sharedFF*D, 700), Up: syn(sharedFF*D, 701), Down: syn(D*sharedFF, 702)}
+	m.SharedGate = syn(D, 750)
+	x := syn(D, 99)
+	got := m.forward(x, 1, D)
+
+	var dot float64
+	for d := range D {
+		dot += float64(x[d]) * float64(m.SharedGate[d])
+	}
+	g := 1.0 / (1.0 + math.Exp(-dot))
+	if g >= 0.999 {
+		t.Fatalf("test precondition: gate σ=%v too close to 1 to observe — pick a different seed", g)
+	}
+	so := swigluExpert(x, *m.Shared, D)
+	mNo := *m
+	mNo.SharedGate = nil
+	gotUngated := mNo.forward(x, 1, D)
+	for d := range D {
+		delta := float64(got[d]) - float64(gotUngated[d]) // (σ−1)·SwiGLU_shared, the mixture cancels
+		want := (g - 1) * float64(so[d])
+		if math.Abs(delta-want) > 1e-4*(1+math.Abs(want)) {
+			t.Errorf("shared-gate delta[%d] = %v, want %v (=(σ−1)·SwiGLU_shared)", d, delta, want)
+		}
+	}
+	t.Logf("shared-expert sigmoid gate verified: σ(shared_expert_gate·x)=%v scales the shared contribution", g)
+}
+
+// TestLoadComposedMoEGatedShared loads a synthetic MoE checkpoint carrying mlp.shared_expert_gate.weight
+// and a config with norm_topk_prob:false, and asserts BOTH flow into the built MoEMLP — the shared gate is
+// bound and the routing flag is config-driven, not assumed.
+func TestLoadComposedMoEGatedShared(t *testing.T) {
+	const D, vocab = 8, 32
+	const VH, HD, convDim, K, vDim = 4, 8, 64, 4, 32
+	const moeFF, nE, sharedFF = 10, 6, 12
+	ts := map[string]safetensors.Tensor{
+		"model.embed_tokens.weight": bf16T(syn(vocab*D, 1), vocab, D),
+		"model.norm.weight":         bf16T(syn(D, 2), D),
+		"lm_head.weight":            bf16T(syn(vocab*D, 3), vocab, D),
+	}
+	lp := "model.layers.0."
+	ts[lp+"input_layernorm.weight"] = bf16T(syn(D, 1), D)
+	ts[lp+"post_attention_layernorm.weight"] = bf16T(syn(D, 2), D)
+	gp := lp + "linear_attn."
+	ts[gp+"in_proj_qkv.weight"] = bf16T(syn(convDim*D, 20), convDim, D)
+	ts[gp+"conv1d.weight"] = bf16T(syn(convDim*K, 21), convDim, 1, K)
+	ts[gp+"conv1d.bias"] = bf16T(syn(convDim, 22), convDim)
+	ts[gp+"in_proj_a.weight"] = bf16T(syn(VH*D, 23), VH, D)
+	ts[gp+"A_log"] = bf16T(syn(VH, 24), VH)
+	ts[gp+"dt_bias"] = bf16T(syn(VH, 25), VH)
+	ts[gp+"in_proj_b.weight"] = bf16T(syn(VH*D, 26), VH, D)
+	ts[gp+"in_proj_z.weight"] = bf16T(syn(vDim*D, 27), vDim, D)
+	ts[gp+"norm.weight"] = bf16T(syn(HD, 28), HD)
+	ts[gp+"out_proj.weight"] = bf16T(syn(D*vDim, 29), D, vDim)
+	mp := lp + "mlp."
+	ts[mp+"gate.weight"] = bf16T(syn(nE*D, 30), nE, D)
+	for e := range nE {
+		ep := mp + "experts." + itoa(e) + "."
+		ts[ep+"gate_proj.weight"] = bf16T(syn(moeFF*D, e*5+40), moeFF, D)
+		ts[ep+"up_proj.weight"] = bf16T(syn(moeFF*D, e*5+41), moeFF, D)
+		ts[ep+"down_proj.weight"] = bf16T(syn(D*moeFF, e*5+42), D, moeFF)
+	}
+	sp := mp + "shared_expert."
+	ts[sp+"gate_proj.weight"] = bf16T(syn(sharedFF*D, 90), sharedFF, D)
+	ts[sp+"up_proj.weight"] = bf16T(syn(sharedFF*D, 91), sharedFF, D)
+	ts[sp+"down_proj.weight"] = bf16T(syn(D*sharedFF, 92), D, sharedFF)
+	ts[mp+"shared_expert_gate.weight"] = bf16T(syn(D, 93), 1, D)
+
+	config := []byte(`{"hidden_size":8,"num_hidden_layers":1,"intermediate_size":10,"num_attention_heads":4,"num_key_value_heads":2,"head_dim":8,"vocab_size":32,"rms_norm_eps":1e-5,"num_experts_per_tok":2,"norm_topk_prob":false,"rope_theta":1000000,"partial_rotary_factor":0.5,"layer_types":["linear_attention"]}`)
+	m, err := LoadComposed(ts, config)
+	if err != nil {
+		t.Fatalf("LoadComposed: %v", err)
+	}
+	moe, ok := m.Layers[0].MLP.(*MoEMLP)
+	if !ok {
+		t.Fatalf("layer 0 FFN is %T, want *MoEMLP", m.Layers[0].MLP)
+	}
+	if len(moe.SharedGate) != D {
+		t.Fatalf("SharedGate len = %d, want %d (shared_expert_gate.weight must bind)", len(moe.SharedGate), D)
+	}
+	if moe.NormTopKProb {
+		t.Fatal("NormTopKProb = true, want false (config norm_topk_prob:false must flow through)")
+	}
+	if _, err := NewSession(m).Forward([]int32{1, 2, 3}); err != nil {
+		t.Fatalf("forward: %v", err)
+	}
+	t.Log("MoE checkpoint with shared_expert_gate + norm_topk_prob:false loaded — both flow into MoEMLP")
 }
 
 // TestComposedMoEDecodeEqualsPrefill checks the orchestration with MoE FFN layers decodes bit-exact to

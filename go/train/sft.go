@@ -355,9 +355,21 @@ func sftTokenise(encode EncodeFunc, sample dataset.Sample, maxSeqLen int) []int3
 // messages when present, else prompt+response, else the raw text.
 func sftSampleText(sample dataset.Sample) string {
 	if len(sample.Messages) > 0 {
-		var text strings.Builder
+		// Grow once to the exact rendered size, then write the "role: content\n"
+		// parts directly — the previous `m.Role + ": " + m.Content + "\n"`
+		// concatenation allocated a throwaway string per message before copying
+		// it into the builder, on a per-sample-per-epoch path.
+		size := 0
 		for _, m := range sample.Messages {
-			text.WriteString(m.Role + ": " + m.Content + "\n")
+			size += len(m.Role) + len(": ") + len(m.Content) + len("\n")
+		}
+		var text strings.Builder
+		text.Grow(size)
+		for _, m := range sample.Messages {
+			text.WriteString(m.Role)
+			text.WriteString(": ")
+			text.WriteString(m.Content)
+			text.WriteByte('\n')
 		}
 		return text.String()
 	}
