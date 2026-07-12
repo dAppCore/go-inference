@@ -474,6 +474,85 @@ func TestRadix_Snapshot(t *testing.T) {
 	}
 }
 
+// TestRadix_LongestPrefix_Good is the cross-conversation share Match cannot do:
+// one cached sequence lives on a single edge, and a second query sharing its
+// leading run — but diverging mid-edge — must still report the shared length and
+// hand back the cached value. Match returns 0 here (no whole edge walked);
+// LongestPrefix returns the true shared run.
+func TestRadix_LongestPrefix_Good(t *testing.T) {
+	tr := radix.New(radix.Config{MaxNodes: 16})
+	leaf := tr.Insert(toks(1, 2, 3, 4, 5), "bundle-a")
+
+	// Match discards the mid-edge run — the contrast this method exists for.
+	if _, m := tr.Match(toks(1, 2, 3, 9)); m != 0 {
+		t.Fatalf("Match mid-edge = %d, want 0 (whole-edge only) — LongestPrefix contrast is void", m)
+	}
+
+	node, matched, ok := tr.LongestPrefix(toks(1, 2, 3, 9))
+	if !ok {
+		t.Fatal("LongestPrefix ok=false, want true for a shared leading run")
+	}
+	if matched != 3 {
+		t.Fatalf("LongestPrefix matched = %d, want 3 (shared [1,2,3])", matched)
+	}
+	if node != leaf || node.Value != "bundle-a" {
+		t.Fatalf("LongestPrefix node value = %v, want the cached bundle-a leaf", nodeValue(node))
+	}
+
+	// Exact and over-length queries agree with Match on whole-edge lengths.
+	if _, matched, _ = tr.LongestPrefix(toks(1, 2, 3, 4, 5)); matched != 5 {
+		t.Fatalf("exact LongestPrefix = %d, want 5", matched)
+	}
+	if _, matched, _ = tr.LongestPrefix(toks(1, 2, 3, 4, 5, 6)); matched != 5 {
+		t.Fatalf("over-length LongestPrefix = %d, want 5 (cached prefix only)", matched)
+	}
+}
+
+// TestRadix_LongestPrefix_Bad walks past a valueless split node to a
+// representative value: a query landing exactly on an internal split point (no
+// value of its own) still resolves to a leaf beneath it, because every leaf in
+// that subtree shares the matched prefix byte-for-byte.
+func TestRadix_LongestPrefix_Bad(t *testing.T) {
+	tr := radix.New(radix.Config{MaxNodes: 16})
+	tr.Insert(toks(1, 2, 3, 4), "a") // [1,2] split parent forms when the
+	tr.Insert(toks(1, 2, 9, 9), "b") // second insert diverges at index 2
+
+	// Query ends on the valueless split node [1,2]; a representative value from
+	// the subtree must still come back so the shared span is reusable.
+	node, matched, ok := tr.LongestPrefix(toks(1, 2))
+	if !ok || matched != 2 {
+		t.Fatalf("LongestPrefix([1,2]) = (matched %d, ok %v), want (2, true)", matched, ok)
+	}
+	if node == nil || node.Value == nil {
+		t.Fatalf("split-node LongestPrefix returned no representative value: %v", nodeValue(node))
+	}
+	if v := node.Value; v != "a" && v != "b" {
+		t.Fatalf("representative value = %v, want one of the subtree leaves a/b", v)
+	}
+
+	// A query diverging just past the split still resolves to length 2.
+	if _, matched, ok = tr.LongestPrefix(toks(1, 2, 5)); !ok || matched != 2 {
+		t.Fatalf("LongestPrefix([1,2,5]) = (matched %d, ok %v), want (2, true)", matched, ok)
+	}
+}
+
+// TestRadix_LongestPrefix_Ugly rejects the empty query and a first-token miss —
+// the caller must fall back to a fresh prefill, never a phantom graft.
+func TestRadix_LongestPrefix_Ugly(t *testing.T) {
+	tr := radix.New(radix.Config{MaxNodes: 16})
+	tr.Insert(toks(1, 2, 3), "a")
+
+	if _, matched, ok := tr.LongestPrefix(nil); ok || matched != 0 {
+		t.Fatalf("LongestPrefix(nil) = (matched %d, ok %v), want (0, false)", matched, ok)
+	}
+	if _, matched, ok := tr.LongestPrefix(toks(9, 9)); ok || matched != 0 {
+		t.Fatalf("LongestPrefix(first-token miss) = (matched %d, ok %v), want (0, false)", matched, ok)
+	}
+	if _, _, ok := tr.LongestPrefix(toks(1, 2, 3)); !ok {
+		t.Fatal("LongestPrefix on empty tree branch regressed for a valid key")
+	}
+}
+
 // parentOf reaches a leaf's internal split parent for the EvictNode non-leaf
 // rejection test.
 func parentOf(n *radix.Node) *radix.Node { return n.Parent() }
