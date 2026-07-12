@@ -19,7 +19,7 @@ func init() {
 		Detect:         isGemma4Config,
 		SupportsFormat: isGemma4SupportedQuantizeFormat,
 		UnsupportedFormatError: func(format basegguf.QuantizeFormat) error {
-			return core.NewError("gguf: gemma4 GGUF conversion does not support " + string(format) + " (supported: q4_k_m, q8_0, q6_k, q5_k_m, q3_k_m)")
+			return core.NewError("gguf: gemma4 GGUF conversion does not support " + string(format) + " (supported: q4_k_m, q8_0, q6_k, q5_k_m, q3_k_m, q2_k)")
 		},
 		Quantize: quantizeGemma4ModelPack,
 	})
