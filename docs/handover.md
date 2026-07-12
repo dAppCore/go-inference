@@ -110,8 +110,50 @@ AFTERNOON (2026-07-12) — #375 flash routing + the Opus fleet round:
   lane; the pooling forward is engine/hip's) but UNARMED pending a
   real unified-vision receipt; prefillSkipToLayer pinned 0 at entry
   (load-bearing: no per-chunk reset there) + guard test.
-FOLLOW-UPS still open on #381: per-chunk seams + 2nd-queue overlap of
-the builder's ~2ms/chunk GPU work (~1-2%). 26B/31B receipts DONE;
+EVENING (2026-07-12) — the scraps round (fleet ×4 again, all merged):
+- SEAMS + 2ND-QUEUE: BOTH CLOSED NEGATIVE, receipted (e97056d). The new
+  LTHN_GPU_TRACE=host mode (host spans at production GPU fidelity — no
+  segment-splitting tax) + chunk/chunk.step spans show chunk==chunk.step
+  within 0.1ms on every chunk at 10,039 tok/s UNDER the instrument: the
+  #381 device-input levers already ate the host seams. The 2nd queue was
+  FULLY BUILT (builder queue + MTLEvent + double-buffered scratch pairs
+  + one-ahead pipeline), held byte identity, measured 10,053 vs 10,051 —
+  parity; the builder's GPU work is ~0.2ms/chunk post-#381 (the ~2ms
+  estimate was stale). Machinery reverted; instrument kept.
+- #380 LIVE RECEIPT CLOSED: served e2b decode 162.6/165.4/165.1 tok/s
+  (512-tok completions, temp0, think off) through the full HTTP +
+  streaming path — at/above the generate-measured board's 161.3. No
+  streaming tax; the emittedContent fix stands end-to-end.
+- G2 HARDENED (be440c0, merged c486c9c): mediator output re-enforced
+  (one non-recursive pass; residual hits — INCLUDING refuse — degrade
+  to redact, stream never killed by mediator output; mediator called
+  exactly once) + audit Event.Degraded flag. Clean path still 0 B/op.
+  Contract change: span-echoing mediators now get echoes redacted.
+- Mantis #1840 FIXED (148044d, merged 9435b26): jsonSkipValue fixed
+  bracket pair -> LIFO closer stack ([16]byte local, no heap on shallow
+  metadata); 9 pinned heterogeneous-nesting cases; sibling audit clean.
+- #379 COMPOSED BLOCK SLEEP, CPU HALF (1403fd4, merged 9f412b1):
+  RangeKVBlocks streams token-only blocks on ArchSession's exact tiling
+  contract (uniform grid, absolute contiguous Index/TokenStart,
+  BlockStartToken skips whole blocks, graft alignment); multi-turn
+  re-sleep vs trusted parent bundles CPU-tested; serve degrade confirmed
+  already graceful (finishTurn logs + stays RAM-resident). LIVE GATE
+  STILL OWED: multi-turn `lem serve -state-conversations` on a real
+  composed checkpoint — NONE CACHED locally (needs a Qwen3-Next-class
+  download decision).
+- AUDIO TOWER RECON (Mantis #1839, /private/tmp/lem-dev/
+  audio_tower_brief.md): THE TICKET IS STALE — the full Conformer
+  already lives in engine/metal (ported from go-mlx in b142528:
+  encoder/attention/subsample/mel extractor/assembly all real). Actual
+  gaps: (A) ~40-80 LOC serve wiring (build+hold the feature extractor at
+  load; Conformer branch in NativeTokenModel.ProjectAudio — today only
+  the 12B-unified raw-waveform path exists, so E2B/E4B audio gates true
+  then fails); (C) two probable parity defects — output_proj.bias
+  [1536] dropped by AssembleAudio/AudioEncode, and audioConv2dToOHWI
+  may double-transpose mlx checkpoints' already-OHWI conv weights
+  ("wrong = garbage audio", confirm empirically first); (B) HF
+  fixture-parity harness gates it. HIP port = codex's lane.
+FOLLOW-UPS still open on #381: (none — seams + 2nd-queue closed above). 26B/31B receipts DONE;
 12B unified receipts ride the same lane. #375 remaining slack: the
 win lane at big rows (~26ms/chunk vs ~15ms physics) and the global
 flash lane (67ms vs ~30) — genuinely diminishing; next likely lever is
