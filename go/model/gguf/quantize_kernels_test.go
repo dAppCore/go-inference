@@ -253,11 +253,11 @@ func TestQuantizeKernels_QuantizeQ5_0_Bad(t *testing.T) {
 
 // --- Q4_K -----------------------------------------------------------------
 //
-// appendQuantizeQ4_K packs a 12-byte per-sub-block scale table into the
-// file for format compliance, but (per the encoder) quantises every
-// element against the single super-block d/dmin, so decoding via d/dmin
-// alone (ignoring the packed sub-scales) matches what was actually
-// encoded.
+// testDequantQ4_K decodes a block_q4_K the ggml way: unpack the 8 per-sub-block
+// 6-bit scale/min pairs (get_scale_min_k4), unpack the 4-bit levels from the
+// 64-element-interleaved qs field, and reconstruct y = d*sc*q - dmin*m. The
+// definitive correctness check for the encoder is llama.cpp loading the file;
+// this round-trip guards against regressions in Go.
 
 func testDequantQ4_K(data []byte) []float32 {
 	const blockBytes = 144
@@ -267,15 +267,25 @@ func testDequantQ4_K(data []byte) []float32 {
 		block := data[b*blockBytes:]
 		d := testFloat16Decode(binary.LittleEndian.Uint16(block[0:2]))
 		dmin := testFloat16Decode(binary.LittleEndian.Uint16(block[2:4]))
-		quants := block[16:144]
-		for j := range qkBlockSize {
-			var q byte
-			if j%2 == 0 {
-				q = quants[j/2] & 0xF
-			} else {
-				q = quants[j/2] >> 4
+		var packed [12]byte
+		copy(packed[:], block[4:16])
+		qs := block[16:144]
+		var levels [qkBlockSize]uint8
+		li := 0
+		for j := 0; j < qkBlockSize; j += 64 {
+			for l := 0; l < 32; l++ {
+				levels[j+l] = qs[li] & 0xF
+				levels[j+l+32] = qs[li] >> 4
+				li++
 			}
-			out = append(out, dmin+d*float32(q))
+		}
+		for j := 0; j < kQuantSubBlocks; j++ {
+			sc, m := getScaleMinK4(j, &packed)
+			dl := d * float32(sc)
+			ml := dmin * float32(m)
+			for ii := 0; ii < kQuantSubBlockSize; ii++ {
+				out = append(out, dl*float32(levels[j*kQuantSubBlockSize+ii])-ml)
+			}
 		}
 	}
 	return out
@@ -306,11 +316,12 @@ func TestQuantizeKernels_QuantizeQ4_K_Good(t *testing.T) {
 }
 
 func TestQuantizeKernels_QuantizeQ4_K_Bad(t *testing.T) {
+	// An all-zero block quantises to all-zero levels (scale 0, min 0), so both
+	// the packed scales and the qs field are zero.
 	data := quantizeQ4_K(make([]float32, qkBlockSize))
-	quants := data[16:144]
-	for _, b := range quants {
-		if b != 0x88 {
-			t.Fatalf("zero-block Q4_K quant bytes = %x, want all 0x88", quants)
+	for _, b := range data[4:144] {
+		if b != 0x00 {
+			t.Fatalf("zero-block Q4_K scale+quant bytes = %x, want all zero", data[4:144])
 		}
 	}
 }
@@ -325,10 +336,37 @@ func testDequantQ5_K(data []byte) []float32 {
 		block := data[b*blockBytes:]
 		d := testFloat16Decode(binary.LittleEndian.Uint16(block[0:2]))
 		dmin := testFloat16Decode(binary.LittleEndian.Uint16(block[2:4]))
-		quants := block[16:176]
-		qs := testUnpack5BitLSB(quants, qkBlockSize)
-		for _, q := range qs {
-			out = append(out, dmin+d*float32(q))
+		var packed [12]byte
+		copy(packed[:], block[4:16])
+		qh := block[16:48]
+		qs := block[48:176]
+		var levels [qkBlockSize]uint8
+		qi := 0
+		u1, u2 := uint8(1), uint8(2)
+		for n := 0; n < qkBlockSize; n += 64 {
+			for j := 0; j < 32; j++ {
+				v1 := qs[qi+j] & 0xF
+				v2 := qs[qi+j] >> 4
+				if qh[j]&u1 != 0 {
+					v1 += 16
+				}
+				if qh[j]&u2 != 0 {
+					v2 += 16
+				}
+				levels[n+j] = v1
+				levels[n+j+32] = v2
+			}
+			u1 <<= 2
+			u2 <<= 2
+			qi += 32
+		}
+		for j := 0; j < kQuantSubBlocks; j++ {
+			sc, m := getScaleMinK4(j, &packed)
+			dl := d * float32(sc)
+			ml := dmin * float32(m)
+			for ii := 0; ii < kQuantSubBlockSize; ii++ {
+				out = append(out, dl*float32(levels[j*kQuantSubBlockSize+ii])-ml)
+			}
 		}
 	}
 	return out
