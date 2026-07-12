@@ -366,6 +366,10 @@ func AssembleAudio(weights map[string]safetensors.Tensor, textCfg *Gemma4TextCon
 	if out.OutputProj == nil {
 		return nil, core.NewError("gemma4: audio tower missing output_proj")
 	}
+	// output_proj is a bias=True Linear in HF; the mlx checkpoint ships audio_tower.output_proj.bias
+	// [OutputDim] BF16 (non-negligible — e2b max|abs| 14.875). Load it so AudioEncode adds it; nil is
+	// tolerated for packs that omit it.
+	out.OutputProjBias = audioWeight(weights, "audio_tower.output_proj.bias", "audio_tower.output_proj.linear.bias")
 	headDim := int(audioCfg.HiddenSize / audioCfg.NumAttentionHeads)
 	pos := audioPositionTable(int(audioCfg.AttentionContextLeft), int(audioCfg.HiddenSize))
 	out.Layers = make([]model.LoadedAudioLayer, int(audioCfg.NumHiddenLayers))

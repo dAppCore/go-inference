@@ -618,9 +618,10 @@ func nativeAudioFromLoaded(loaded *model.LoadedAudio, frames, melBins int) (*Aud
 			Frames: frames, MelBins: melBins, OutC0: outC0, OutC1: outC1,
 			Hidden: loaded.Cfg.Hidden, Eps: loaded.Cfg.Eps,
 		},
-		Layers:     make([]*AudioLayerWeights, len(loaded.Layers)),
-		OutputProj: loaded.OutputProj,
-		OutputDim:  loaded.Cfg.OutputDim,
+		Layers:         make([]*AudioLayerWeights, len(loaded.Layers)),
+		OutputProj:     loaded.OutputProj,
+		OutputProjBias: loaded.OutputProjBias,
+		OutputDim:      loaded.Cfg.OutputDim,
 	}
 	for i := range loaded.Layers {
 		src := &loaded.Layers[i]
