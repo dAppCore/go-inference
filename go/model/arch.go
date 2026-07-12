@@ -19,6 +19,17 @@ const (
 	SlidingAttention                      // sliding_attention — windowed
 )
 
+// QKNormalization declares the per-head operation applied to projected queries
+// and keys before rotary position encoding. It is an architecture property, not
+// inferred from the presence of weights: Cohere's LayerNorm may be enabled by a
+// config switch, while most families use no QK operation.
+type QKNormalization string
+
+const (
+	QKNone      QKNormalization = ""
+	QKLayerNorm QKNormalization = "layer_norm"
+)
+
 // LayerSpec declares one decode layer's structure, backend-agnostic.
 type LayerSpec struct {
 	Attention   AttentionType
@@ -148,6 +159,34 @@ type Arch struct {
 	LearnedAbsolutePositions                                 bool   // token embeddings are offset by a learned position table
 	MultiQueryAttention                                      bool   // one K/V head is shared by every query head
 	Activation                                               string // declared feed-forward activation (for example gelu_new)
+	Layer                                                    []LayerSpec
+	Hidden, Heads, KVHeads, HeadDim, FF, Vocab               int       // HeadDim / KVHeads are the sliding/default geometry; full_attention layers use GlobalHeadDim / GlobalKVHeads
+	GlobalHeadDim, GlobalKVHeads                             int       // full_attention head_dim / kv-head count (== HeadDim / KVHeads when the config draws no distinction)
+	Experts, TopK, ExpertFF                                  int       // MoE dims (Experts == 0 → dense model); ExpertFF is the experts' intermediate size
+	MoEGating                                                MoEGating // router expert-scoring method the model DECLARES (empty → softmax); see MoEGating
+	FuseExpertGateUp                                         bool      // model opts its MoE experts into the fused gate+up path — a separate-gate/up checkpoint gets ExpGateUp synthesised at load (~34% MoE speed, trades the weights' mmap zero-copy for a heap copy)
+	Eps                                                      float32
+	AttnScale                                                float32   // attention SDPA scale the model DECLARES (the engine applies it, never assumes): e.g. 1.0 when a QK-norm IS the scaling, else 1/√headDim
+	EmbedScale                                               float32   // token-embedding multiplier the model DECLARES (gemma-family √hidden; llama-family 1.0); 0 = undeclared → backends fall back to √hidden
+	RopeBase, RopeScale                                      float32   // RopeBase = global-attention RoPE theta
+	RopeLocalBase                                            float32   // sliding-attention RoPE theta (an arch may use a smaller local theta)
+	RotaryDim, RotaryDimLocal                                int       // rotated dims/head (partial rotary, e.g. full_attention=0.25·GlobalHeadDim); global / sliding
+	RopeFreqs                                                []float32 // explicit per-dim inverse frequencies (YaRN long-context remap); len RotaryDim/2; nil ⇒ derive uniformly from RopeBase
+	RopeShortFreqs                                           []float32 // short-context inverse frequencies for position-dependent LongRoPE
+	RopeOriginalContext                                      int       // positions below this boundary use RopeShortFreqs; 0 = one static table
+	SoftCap                                                  float32   // final logit soft-cap (0 = none)
+	SlidingWindow                                            int
+	PerLayerInputVocab, PerLayerInputHidden                  int             // per-layer-input aux embedding (0 = absent)
+	AttentionKEqV                                            bool            // K == V (shared projection)
+	ValueNorm                                                bool            // an arch may apply a no-scale per-head RMSNorm to V (metal's RMSNormNoScale); most don't
+	ParallelResidual                                         bool            // attention and MLP consume the same normalised input, then both outputs join the residual
+	ALiBi                                                    bool            // attention uses linear position bias instead of rotary embeddings
+	TieWordEmbeddings                                        *bool           // nil = checkpoint presence decides; non-nil validates lm_head against config.json
+	LearnedAbsolutePositions                                 bool            // token embeddings are offset by a learned position table
+	MultiQueryAttention                                      bool            // one K/V head is shared by every query head
+	Activation                                               string          // declared feed-forward activation (for example gelu_new)
+	QKNormalization                                          QKNormalization // per-head Q/K normalisation before position encoding
+	LogitScale                                               float32         // final LM-head multiplier (0 = backend default 1)
 	Layer                                                    []LayerSpec
 }
 
