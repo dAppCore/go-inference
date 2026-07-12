@@ -48,8 +48,11 @@ No top-k clamp or forced 12B host/device reroute is applied. Exact top-k-off
 sampling requires a full-vocabulary device distribution (or an equivalent exact
 multi-stage normalisation and draw kernel); substituting top-k 40/64 would
 change public sampling semantics and is the forbidden mitigation. The remaining
-120-token 12B transcript, greedy byte comparison, E2B transcript, and full armed
-suite are therefore not claimed as passing done gates.
+120-token 12B transcript, greedy byte comparison, and E2B transcript are
+therefore not claimed as passing done gates. The full armed HIP suite is green
+(`ok .../engine/hip 2.746s`). `go vet ./engine/hip/` reports only the four
+acknowledged `unsafe.Pointer` findings in `hip_driver_cgo.go` at lines 1255,
+1290, 1317, and 1381; none is in an r12 file.
 
 ## Receipts
 
