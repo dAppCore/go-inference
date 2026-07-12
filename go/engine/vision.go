@@ -224,7 +224,13 @@ func (m *TextModel) chatMultimodal(ctx context.Context, messages []inference.Mes
 			rendered[i].Content = prefix.String() + msg.Content + suffix.String()
 		}
 
-		ids := m.encode(formatChatPrompt(m.turnTokens(), rendered, cfg.EnableThinking, m.thoughtSuppressor))
+		// Frame the multimodal turn through the model's DECLARED chat template —
+		// the same neutral seam the text-only [TextModel.Chat] path drives — so a
+		// non-gemma vision family (a qwen-VL / ChatML shape) is framed in its own
+		// dialect rather than gemma's. For a gemma model chatTemplate() resolves to
+		// GemmaChatTemplate(m.turns, m.thoughtSuppressor), byte-identical to the
+		// former formatChatPrompt(m.turnTokens(), …, m.thoughtSuppressor) call.
+		ids := m.encode(renderChatTemplate(m.chatTemplate(), rendered, cfg.EnableThinking))
 		if len(ids) == 0 {
 			m.setErr(core.NewError("engine.TextModel.Chat: empty prompt after tokenisation"))
 			return
