@@ -51,7 +51,7 @@ var gemma4LayerTensorNames = map[string]string{
 // gemma4CanonicalTensorName maps a gemma-4 source checkpoint tensor name to the
 // canonical GGUF tensor name llama.cpp maps the text stack by (token_embd.weight,
 // blk.N.attn_q.weight, …). It covers the text stack only; multimodal-tower
-// tensors are excluded before this call (isMultimodalTowerTensor) and never
+// tensors are excluded before this call (basegguf.IsMultimodalTowerTensor) and never
 // reach it. An unrecognised text-stack name is an error rather than a silent
 // drop — a checkpoint carrying a text tensor this mapping has not seen must fail
 // loudly so the mapping can be extended, not produce a GGUF missing a weight.

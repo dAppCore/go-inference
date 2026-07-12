@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	core "dappco.re/go"
+	basegguf "dappco.re/go/inference/model/gguf"
 )
 
 // gemma4ModelType is the config.json model_type that selects the gemma-4
@@ -36,9 +37,9 @@ func isGemma4Config(configJSON []byte) bool {
 // own quantize source as the reference — no oracle on disk for those three).
 // q2_k and the GPTQ/AWQ/fp8/NF4/MX family remain gated on an operator
 // decision (docs/design-quant-formats.md).
-func isGemma4SupportedQuantizeFormat(format QuantizeFormat) bool {
+func isGemma4SupportedQuantizeFormat(format basegguf.QuantizeFormat) bool {
 	switch format {
-	case QuantizeQ4_K_M, QuantizeQ8_0, QuantizeQ6_K, QuantizeQ5_K_M, QuantizeQ3_K_M:
+	case basegguf.QuantizeQ4_K_M, basegguf.QuantizeQ8_0, basegguf.QuantizeQ6_K, basegguf.QuantizeQ5_K_M, basegguf.QuantizeQ3_K_M:
 		return true
 	default:
 		return false
@@ -69,8 +70,9 @@ func gemma4CanonicalLayerIndex(canonical string) int {
 // (gemma4TensorType), and the full gemma4.* + tokenizer.ggml.* header. The
 // multimodal towers are excluded (a text GGUF carries the language model
 // only). format must be one of isGemma4SupportedQuantizeFormat's set — the
-// caller (QuantizeModelPack) gates this before calling in.
-func quantizeGemma4ModelPack(source Source, configJSON []byte, tensors []denseSafetensor, format QuantizeFormat) ([]Tensor, []MetadataEntry, error) {
+// caller (basegguf.QuantizeModelPack, via the registered QuantizeLane) gates
+// this before calling in.
+func quantizeGemma4ModelPack(source basegguf.Source, configJSON []byte, tensors []basegguf.DenseSafetensor, format basegguf.QuantizeFormat) ([]basegguf.Tensor, []basegguf.MetadataEntry, error) {
 	var config gemma4Config
 	if r := core.JSONUnmarshal(configJSON, &config); !r.OK {
 		return nil, nil, core.E("quantizeGemma4ModelPack", "parse config.json", r.Err())
@@ -85,9 +87,9 @@ func quantizeGemma4ModelPack(source Source, configJSON []byte, tensors []denseSa
 	// from the tensors (ground truth) rather than broadcast from config.
 	feedForward := make([]int32, layerCount)
 
-	quantized := make([]Tensor, 0, len(tensors))
+	quantized := make([]basegguf.Tensor, 0, len(tensors))
 	for _, tensor := range tensors {
-		if isMultimodalTowerTensor(tensor.Name) {
+		if basegguf.IsMultimodalTowerTensor(tensor.Name) {
 			continue
 		}
 		canonical, err := gemma4CanonicalTensorName(tensor.Name)
@@ -96,8 +98,8 @@ func quantizeGemma4ModelPack(source Source, configJSON []byte, tensors []denseSa
 		}
 		layerIndex := gemma4CanonicalLayerIndex(canonical)
 		if layerIndex >= 0 && layerIndex < layerCount && core.HasSuffix(canonical, ".ffn_gate.weight") && len(tensor.Shape) > 0 {
-			// Source ffn_gate shape is [out_width, hidden]; the out width is the
-			// per-layer feed_forward_length.
+			// The source ffn_gate shape is [out_width, hidden]; the out width is
+			// the per-layer feed_forward_length.
 			feedForward[layerIndex] = int32(tensor.Shape[0])
 		}
 		tensorType := gemma4TensorType(format, canonical, layerIndex, layerCount)
@@ -105,7 +107,7 @@ func quantizeGemma4ModelPack(source Source, configJSON []byte, tensors []denseSa
 		if err != nil {
 			return nil, nil, core.E("quantizeGemma4ModelPack", "encode "+canonical, err)
 		}
-		quantized = append(quantized, Tensor{
+		quantized = append(quantized, basegguf.Tensor{
 			Name:  canonical,
 			Type:  tensorType,
 			Shape: gemma4GGUFShape(tensor.Shape),
@@ -144,17 +146,17 @@ func quantizeGemma4ModelPack(source Source, configJSON []byte, tensors []denseSa
 // gemma-4-E2B-it-Q4_K_M.gguf (15) and gemma-4-E2B-it-Q8_0.gguf (7) oracles,
 // and against gguf-py's LlamaFileType table (pip gguf==0.17.1) for q6_k/
 // q5_k_m/q3_k_m, which have no oracle on disk to read the key from directly.
-func gemma4FileType(format QuantizeFormat) uint32 {
+func gemma4FileType(format basegguf.QuantizeFormat) uint32 {
 	switch format {
-	case QuantizeQ8_0:
+	case basegguf.QuantizeQ8_0:
 		return 7
-	case QuantizeQ3_K_M:
+	case basegguf.QuantizeQ3_K_M:
 		return 12
-	case QuantizeQ5_K_M:
+	case basegguf.QuantizeQ5_K_M:
 		return 17
-	case QuantizeQ6_K:
+	case basegguf.QuantizeQ6_K:
 		return 18
-	default: // QuantizeQ4_K_M
+	default: // basegguf.QuantizeQ4_K_M
 		return 15
 	}
 }
@@ -163,7 +165,7 @@ func gemma4FileType(format QuantizeFormat) uint32 {
 // hyperparameters from config.json (with per-layer feed_forward_length taken
 // from the tensor widths) and the tokenizer block from tokenizer.json (read
 // from the checkpoint root). general.file_type follows format (gemma4FileType).
-func gemma4FullMetadata(root string, configJSON []byte, feedForward []int32, format QuantizeFormat) ([]MetadataEntry, error) {
+func gemma4FullMetadata(root string, configJSON []byte, feedForward []int32, format basegguf.QuantizeFormat) ([]basegguf.MetadataEntry, error) {
 	metadata, err := gemma4Metadata(configJSON, feedForward, gemma4FileType(format), gemma4ModelName(root))
 	if err != nil {
 		return nil, err
@@ -183,9 +185,9 @@ func gemma4FullMetadata(root string, configJSON []byte, feedForward []int32, for
 	// without it a raw prompt yields an immediate end-of-turn). Best-effort:
 	// the file is optional and its absence just omits the key.
 	if tmpl := core.ReadFile(core.PathJoin(root, "chat_template.jinja")); tmpl.OK {
-		metadata = append(metadata, MetadataEntry{
+		metadata = append(metadata, basegguf.MetadataEntry{
 			Key:       "tokenizer.chat_template",
-			ValueType: ValueTypeString,
+			ValueType: basegguf.ValueTypeString,
 			Value:     core.AsString(tmpl.Value.([]byte)),
 		})
 	}
@@ -214,12 +216,12 @@ const gemma4RopeFreqsDisabled = 1e30
 // are disabled (scale 1e30). For gemma-4-E2B (dimensionCount 512,
 // partial_rotary_factor 0.25) this yields 64 ones followed by 192 sentinels,
 // matching the oracle exactly. Derived from config; no source tensor exists.
-func gemma4RopeFreqsTensor(dimensionCount int, partialRotaryFactor float32) (Tensor, error) {
+func gemma4RopeFreqsTensor(dimensionCount int, partialRotaryFactor float32) (basegguf.Tensor, error) {
 	if dimensionCount <= 0 || dimensionCount%2 != 0 {
-		return Tensor{}, core.Errorf("gguf: gemma4 rope dimension_count %d must be a positive even number", dimensionCount)
+		return basegguf.Tensor{}, core.Errorf("gguf: gemma4 rope dimension_count %d must be a positive even number", dimensionCount)
 	}
 	if partialRotaryFactor <= 0 || partialRotaryFactor > 1 {
-		return Tensor{}, core.Errorf("gguf: gemma4 partial_rotary_factor %g must be in (0,1]", partialRotaryFactor)
+		return basegguf.Tensor{}, core.Errorf("gguf: gemma4 partial_rotary_factor %g must be in (0,1]", partialRotaryFactor)
 	}
 	length := dimensionCount / 2
 	rotaryPairs := int(float64(dimensionCount)*float64(partialRotaryFactor)) / 2
@@ -231,9 +233,9 @@ func gemma4RopeFreqsTensor(dimensionCount int, partialRotaryFactor float32) (Ten
 			freqs[i] = gemma4RopeFreqsDisabled
 		}
 	}
-	return Tensor{
+	return basegguf.Tensor{
 		Name:  "rope_freqs.weight",
-		Type:  ggufTensorTypeF32,
+		Type:  basegguf.TensorTypeF32,
 		Shape: []uint64{uint64(length)},
 		Data:  encodeGemma4F32(freqs),
 	}, nil
@@ -243,38 +245,42 @@ func gemma4RopeFreqsTensor(dimensionCount int, partialRotaryFactor float32) (Ten
 // bytes for tensorType: raw little-endian F32, truncated BF16, the Q8_0
 // 32-element block stream, or a 256-element-superblock K-quant stream. A
 // block-quantised tensor whose element count is not a whole number of blocks
-// is an error rather than a silently mis-encoded tensor.
+// is an error rather than a silently mis-encoded tensor. The block-quantised
+// cases route through basegguf.Quantize — this package's own copy of the
+// nine quantise kernels retired with the relocation (#59); Quantize is
+// byte-identical (same kernel, same pre-sized capacity) and is the format
+// package's intended public entry, not a private implementation detail.
 func encodeGemma4TensorData(data []float32, tensorType uint32) ([]byte, error) {
 	switch tensorType {
-	case ggufTensorTypeF32:
+	case basegguf.TensorTypeF32:
 		return encodeGemma4F32(data), nil
-	case ggufTensorTypeBF16:
+	case basegguf.TensorTypeBF16:
 		return encodeGemma4BF16(data), nil
-	case TensorTypeQ8_0:
+	case basegguf.TensorTypeQ8_0:
 		if len(data)%32 != 0 {
 			return nil, core.Errorf("gguf: Q8_0 tensor has %d elements, not a multiple of 32", len(data))
 		}
-		return quantizeQ8_0(data), nil
-	case ggufTensorTypeQ3K:
+		return basegguf.Quantize(basegguf.QuantizeQ8_0, data)
+	case basegguf.TensorTypeQ3K:
 		if len(data)%256 != 0 {
 			return nil, core.Errorf("gguf: Q3_K tensor has %d elements, not a multiple of 256", len(data))
 		}
-		return quantizeQ3_K(data), nil
-	case ggufTensorTypeQ4K:
+		return basegguf.Quantize(basegguf.QuantizeQ3_K, data)
+	case basegguf.TensorTypeQ4K:
 		if len(data)%256 != 0 {
 			return nil, core.Errorf("gguf: Q4_K tensor has %d elements, not a multiple of 256", len(data))
 		}
-		return quantizeQ4_K(data), nil
-	case ggufTensorTypeQ5K:
+		return basegguf.Quantize(basegguf.QuantizeQ4_K, data)
+	case basegguf.TensorTypeQ5K:
 		if len(data)%256 != 0 {
 			return nil, core.Errorf("gguf: Q5_K tensor has %d elements, not a multiple of 256", len(data))
 		}
-		return quantizeQ5_K(data), nil
-	case ggufTensorTypeQ6K:
+		return basegguf.Quantize(basegguf.QuantizeQ5_K, data)
+	case basegguf.TensorTypeQ6K:
 		if len(data)%256 != 0 {
 			return nil, core.Errorf("gguf: Q6_K tensor has %d elements, not a multiple of 256", len(data))
 		}
-		return quantizeQ6_K(data), nil
+		return basegguf.Quantize(basegguf.QuantizeQ6_K, data)
 	default:
 		return nil, core.Errorf("gguf: gemma4 has no encoder for tensor type %d", tensorType)
 	}

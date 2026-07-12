@@ -2,13 +2,17 @@
 
 package gguf
 
-import "testing"
+import (
+	"testing"
+
+	basegguf "dappco.re/go/inference/model/gguf"
+)
 
 // BenchmarkGemma4Types_gemma4TensorType measures the per-tensor type-policy
 // lookup — it runs once per source tensor during a conversion.
 func BenchmarkGemma4Types_gemma4TensorType(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_ = gemma4TensorType(QuantizeQ4_K_M, "blk.6.ffn_down.weight", 6, 35)
+		_ = gemma4TensorType(basegguf.QuantizeQ4_K_M, "blk.6.ffn_down.weight", 6, 35)
 	}
 }

@@ -2,7 +2,10 @@
 
 package gguf
 
-import core "dappco.re/go"
+import (
+	core "dappco.re/go"
+	basegguf "dappco.re/go/inference/model/gguf"
+)
 
 // gemma-4 GGML token-type codes (llama.cpp's llama_token_type). Norm tokens are
 // NORMAL, the SentencePiece byte-fallback tokens (<0xHH>) are BYTE, and added /
@@ -63,7 +66,7 @@ type gemma4TokenizerJSON struct {
 // that split comes from the original SentencePiece proto's per-token type,
 // which tokenizer.json does not carry (it marks every added token special). The
 // difference does not affect tokenisation of ordinary text.
-func gemma4Tokenizer(tokenizerJSON []byte) ([]MetadataEntry, error) {
+func gemma4Tokenizer(tokenizerJSON []byte) ([]basegguf.MetadataEntry, error) {
 	var tok gemma4TokenizerJSON
 	if r := core.JSONUnmarshal(tokenizerJSON, &tok); !r.OK {
 		return nil, core.E("gemma4Tokenizer", "parse tokenizer.json", r.Err())
@@ -148,22 +151,22 @@ func gemma4Tokenizer(tokenizerJSON []byte) ([]MetadataEntry, error) {
 		return nil, err
 	}
 
-	u32 := func(key string, v int) MetadataEntry {
-		return MetadataEntry{Key: key, ValueType: ValueTypeUint32, Value: uint32(v)}
+	u32 := func(key string, v int) basegguf.MetadataEntry {
+		return basegguf.MetadataEntry{Key: key, ValueType: basegguf.ValueTypeUint32, Value: uint32(v)}
 	}
-	return []MetadataEntry{
-		{Key: "tokenizer.ggml.model", ValueType: ValueTypeString, Value: gemma4Arch},
-		{Key: "tokenizer.ggml.tokens", ValueType: ggufValueTypeArray, Value: tokens},
-		{Key: "tokenizer.ggml.scores", ValueType: ggufValueTypeArray, Value: scores},
-		{Key: "tokenizer.ggml.token_type", ValueType: ggufValueTypeArray, Value: tokenType},
-		{Key: "tokenizer.ggml.merges", ValueType: ggufValueTypeArray, Value: merges},
+	return []basegguf.MetadataEntry{
+		{Key: "tokenizer.ggml.model", ValueType: basegguf.ValueTypeString, Value: gemma4Arch},
+		{Key: "tokenizer.ggml.tokens", ValueType: basegguf.ValueTypeArray, Value: tokens},
+		{Key: "tokenizer.ggml.scores", ValueType: basegguf.ValueTypeArray, Value: scores},
+		{Key: "tokenizer.ggml.token_type", ValueType: basegguf.ValueTypeArray, Value: tokenType},
+		{Key: "tokenizer.ggml.merges", ValueType: basegguf.ValueTypeArray, Value: merges},
 		u32("tokenizer.ggml.bos_token_id", bos),
 		u32("tokenizer.ggml.eos_token_id", eos),
 		u32("tokenizer.ggml.unknown_token_id", unk),
 		u32("tokenizer.ggml.padding_token_id", pad),
 		u32("tokenizer.ggml.mask_token_id", mask),
-		{Key: "tokenizer.ggml.add_bos_token", ValueType: ggufValueTypeBool, Value: gemma4DefaultAddBOSToken},
-		{Key: "tokenizer.ggml.add_space_prefix", ValueType: ggufValueTypeBool, Value: gemma4DefaultAddSpacePrefix},
+		{Key: "tokenizer.ggml.add_bos_token", ValueType: basegguf.ValueTypeBool, Value: gemma4DefaultAddBOSToken},
+		{Key: "tokenizer.ggml.add_space_prefix", ValueType: basegguf.ValueTypeBool, Value: gemma4DefaultAddSpacePrefix},
 	}, nil
 }
 

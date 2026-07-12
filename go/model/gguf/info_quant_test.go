@@ -22,13 +22,13 @@ func TestInfoQuant_ggufTensorBits_Good(t *testing.T) {
 	if got := ggufTensorBits(TensorTypeQ4_0); got != 4 {
 		t.Errorf("ggufTensorBits(Q4_0) = %d, want 4", got)
 	}
-	if got := ggufTensorBits(ggufTensorTypeF32); got != 0 {
+	if got := ggufTensorBits(TensorTypeF32); got != 0 {
 		t.Errorf("ggufTensorBits(F32) = %d, want 0 (not quantised)", got)
 	}
 }
 
 func TestInfoQuant_ggufTensorTypeDetails_Good(t *testing.T) {
-	details := ggufTensorTypeDetails(ggufTensorTypeQ6K)
+	details := ggufTensorTypeDetails(TensorTypeQ6K)
 	if !details.Known || !details.Quantized || details.Bits != 6 || details.BlockSize != 256 {
 		t.Errorf("ggufTensorTypeDetails(Q6_K) = %+v, want Known+Quantized bits=6 block=256", details)
 	}
@@ -98,13 +98,13 @@ func TestInfoQuant_buildGGUFTensorInfos_Ugly(t *testing.T) {
 		t.Errorf("issues = %+v, want tensor_shape_not_block_aligned", issues)
 	}
 
-	empty := []TensorInfo{{Name: "no-shape", Type: ggufTensorTypeF32}}
+	empty := []TensorInfo{{Name: "no-shape", Type: TensorTypeF32}}
 	_, issues = buildGGUFTensorInfos(empty)
 	if !ggufValidationHasCode(issues, "invalid_tensor_shape") {
 		t.Errorf("issues = %+v, want invalid_tensor_shape", issues)
 	}
 
-	zeroDim := []TensorInfo{{Name: "zero-dim", Type: ggufTensorTypeF32, Shape: []uint64{4, 0}}}
+	zeroDim := []TensorInfo{{Name: "zero-dim", Type: TensorTypeF32, Shape: []uint64{4, 0}}}
 	_, issues = buildGGUFTensorInfos(zeroDim)
 	if !ggufValidationHasCode(issues, "invalid_tensor_dimension") {
 		t.Errorf("issues = %+v, want invalid_tensor_dimension", issues)
@@ -127,7 +127,7 @@ func TestInfoQuant_summarizeGGUFTensorTypes_Good(t *testing.T) {
 	tensors, _ := buildGGUFTensorInfos([]TensorInfo{
 		{Name: "a", Type: TensorTypeQ4_0, Shape: []uint64{32}},
 		{Name: "b", Type: TensorTypeQ4_0, Shape: []uint64{32}},
-		{Name: "c", Type: ggufTensorTypeF32, Shape: []uint64{4}},
+		{Name: "c", Type: TensorTypeF32, Shape: []uint64{4}},
 	})
 	summaries := summarizeGGUFTensorTypes(tensors)
 	if len(summaries) != 2 {
