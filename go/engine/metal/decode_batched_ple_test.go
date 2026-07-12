@@ -93,6 +93,72 @@ func newBatchedPLEBF16FixtureShared(t testing.TB, kvShared int) *ArchSession {
 	return sess
 }
 
+// newBatchedPLEQuantFixture builds a 4-bit gemma4 arch WITH the per-layer-input tower — the
+// quant twin of newBatchedPLEBF16Fixture. addPLETensors (per_layer_session_test.go) quantises
+// the PLE table AND every per-layer gate/projection weight while the TOWER projection
+// (model.per_layer_model_projection.weight) stays bf16-resident — the #381 "plain" e2b/e4b
+// profile arch_session.go wires into ArchSession.perLayerInputBatch/-Device at
+// NewArchQuantSession's affineBitsSupported && EmbedPerLayerScales>0 && PerLayerModelProjScales==0
+// gate. Before r3 nothing drove a quantised-PLE model through the SESSION at batch scale: only
+// the bare perLayerInputsBatchQuantIntoSlab/-Device builders (per_layer_batch_slab_test.go) or
+// the 3-4 token per-token TestLoadGemma4QuantPLE chain — decode_batched_session.go's PLE-suffixed
+// batched dense paths never saw a quant arch, and steelGEMMMinRows(32) was never reached PLE-side.
+func newBatchedPLEQuantFixture(t testing.TB) *ArchSession {
+	t.Helper()
+	requireNativeRuntime(t)
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 64, 256, 32
+	const numLayers, pliDim, gs, bits = 2, 64, 64, 4
+	const maxLen = 96
+	cfg := g4.Config{
+		HiddenSize: dModel, NumHiddenLayers: numLayers, IntermediateSize: dFF,
+		NumAttentionHeads: nHeads, NumKeyValueHeads: nKV, HeadDim: headDim,
+		VocabSize: vocab, RMSNormEps: 1e-6,
+		HiddenSizePerLayerInput: pliDim, VocabSizePerLayerInput: vocab,
+		Quantization: &model.QuantConfig{GroupSize: gs, Bits: bits},
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	ts := quantGemma4Tensors(t, arch, gs, bits)
+	addPLETensors(t, ts, arch, gs, bits)
+	lm, err := model.Assemble(ts, arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("model.Assemble: %v", err)
+	}
+	g, err := loadedToQuant(lm, gs, bits)
+	if err != nil {
+		t.Fatalf("loadedToQuant: %v", err)
+	}
+	if !g.HasPLE() {
+		t.Fatal("fixture model should have PLE")
+	}
+	sess, err := NewArchQuantSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchQuantSession: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+	// Recorded-ICB (quant) sessions batch prompt-scale runs too, but short appends decline the
+	// batched-dense lane before any host PLE work (prefillRetainedTokensBatchedDenseOne's
+	// icb!=nil guard) — force it off so THIS suite pins the batched-dense body itself, mirroring
+	// newBatchedPLEBF16FixtureShared's forced sess.state.icb = nil above.
+	sess.state.icb = nil
+	return sess
+}
+
+// quantBatchedPLEIDs returns a token batch at/above steelGEMMMinRows: below that floor
+// perLayerInputsBatchQuantEncode declines and the quant slab builders never engage, silently
+// degrading this suite back to the already-tested per-token PerLayerInputs chain
+// (TestLoadGemma4QuantPLE) instead of exercising the batched builders r3 targets.
+func quantBatchedPLEIDs() []int32 {
+	const vocab = 32
+	ids := make([]int32, steelGEMMMinRows+8)
+	for i := range ids {
+		ids[i] = int32((i*7 + 3) % vocab)
+	}
+	return ids
+}
+
 // TestPrefillRetainedTokensBatchedDenseEngagesPLEAndMatchesSequential pins the
 // #252 fix: the batched dense prefill must ENGAGE on a PLE (E2B/E4B-shaped)
 // bf16 arch and produce results byte-identical to the sequential per-token
@@ -552,5 +618,149 @@ func batchedPLEParity(t *testing.T, control, candidate *ArchSession) {
 				t.Fatalf("layer %d V diverges at byte %d", i, j)
 			}
 		}
+	}
+}
+
+// TestPrefillRetainedTokensBatchedDenseEngagesQuantPLEAndMatchesSequential is the quant twin of
+// TestPrefillRetainedTokensBatchedDenseEngagesPLEAndMatchesSequential (#252/#381): the batched
+// dense prefill must ENGAGE on a 4-bit quant PLE (E2B/E4B-shaped) arch, at a batch width
+// (quantBatchedPLEIDs, steelGEMMMinRows+8) that actually drives perLayerInputsBatchQuantIntoSlab/
+// -Device instead of declining below the steel floor, and must stay CLOSE to genuinely sequential
+// per-token stepping. The control walks stepIDInPool/stepIDRetainedInPool directly rather than
+// reusing batchedPLEParity's prefillPromptRetainedInPool helper: once state.icb is forced nil
+// (this fixture, like newBatchedPLEBF16FixtureShared, forces it so the batched lane isn't
+// declined by the short-append ICB guard), prefillPromptRetainedInPool's own pos==0 branch tries
+// the batched-dense lane FIRST on both sides, which would make a "control vs candidate"
+// comparison self-referential. stepIDInPool/stepIDRetainedInPool skip that branch entirely and
+// always call the original per-token stepToken/stepTokenInto.
+//
+// Unlike the bf16 sibling this is a TOLERANCE, not byte-identity, check — measured, not assumed:
+// forcing candidate.perLayerInputBatch/-Device off (so BOTH sides build the PLE slab through the
+// identical per-token PerLayerInputs loop) reproduces the exact same divergence, and an equivalent
+// non-PLE quant fixture (no per-layer-input tower at all) diverges by the same bounded amount —
+// so the source is the general quant batched-dense fold's qmm_t/qmv accumulation-order difference
+// (the same class of variance per_layer_batch_slab_test.go's own steel-vs-per-token tests already
+// tolerate at 0.05-0.08), not anything specific to the PLE tower or a defect this fixture
+// introduced. No prior test drove the quant batched-dense fold at a steel-engaged width
+// (K>=steelGEMMMinRows) against sequential at all — the closest existing coverage
+// (arch_session_test.go's quant + prefillRetainedTokensBatchedDense tests) stays at K<=5.
+func TestPrefillRetainedTokensBatchedDenseEngagesQuantPLEAndMatchesSequential(t *testing.T) {
+	requireNativeRuntime(t)
+	ids := quantBatchedPLEIDs()
+	control := newBatchedPLEQuantFixture(t)
+	candidate := newBatchedPLEQuantFixture(t)
+	if candidate.arch.PerLayerInputHidden == 0 {
+		t.Fatal("fixture lost its per-layer-input tower — this parity no longer exercises quant PLE")
+	}
+	if candidate.perLayerInputBatch == nil || candidate.perLayerInputBatchDevice == nil {
+		t.Fatal("fixture lost its quant PLE batch closures — arch_session's #381 plain-quant gate no longer wires them")
+	}
+
+	var ctrlHidden []byte
+	var err error
+	for _, id := range ids[:len(ids)-1] {
+		if _, err = control.stepIDInPool(id); err != nil {
+			t.Fatalf("control step: %v", err)
+		}
+	}
+	if ctrlHidden, err = control.stepIDRetainedInPool(ids[len(ids)-1]); err != nil {
+		t.Fatalf("control last step: %v", err)
+	}
+
+	hidden, ok, err := candidate.prefillRetainedTokensBatchedDense(ids, "test.batchedQuantPLE")
+	if err != nil {
+		t.Fatalf("batched dense prefill: %v", err)
+	}
+	if !ok {
+		t.Fatal("batched dense prefill DECLINED the quant PLE arch")
+	}
+	if candidate.Pos() != control.Pos() {
+		t.Fatalf("pos after prefill: batched=%d sequential=%d", candidate.Pos(), control.Pos())
+	}
+	if len(hidden) != len(ctrlHidden) {
+		t.Fatalf("hidden sizes differ: batched=%d sequential=%d", len(hidden), len(ctrlHidden))
+	}
+	// 0.25 gives 2x margin over the measured maxDiff (0.125, bf16-adjacent-bucket-sized, absolute
+	// not relative — values up to magnitude ~12 diverge by the same ~0.03-0.125 the near-zero ones
+	// do) — tight enough to catch a real regression, loose enough not to flake on kernel updates.
+	const hiddenTol = 0.25
+	if maxDiff := pleSlabMaxDiff(hidden, ctrlHidden); maxDiff > hiddenTol {
+		t.Fatalf("boundary hidden diverges from sequential: maxDiff=%.5f (> %.2f)", maxDiff, hiddenTol)
+	}
+
+	// the caches must stay close too — every layer, both slabs (same tolerance class; measured
+	// maxDiff sits under 0.04 for both K and V, comfortably inside the hidden-state bound).
+	va, err := control.stateLayerViews()
+	if err != nil {
+		t.Fatalf("control views: %v", err)
+	}
+	vb, err := candidate.stateLayerViews()
+	if err != nil {
+		t.Fatalf("candidate views: %v", err)
+	}
+	if len(va) != len(vb) {
+		t.Fatalf("view counts differ: sequential=%d batched=%d", len(va), len(vb))
+	}
+	for i := range va {
+		if kd := pleSlabMaxDiff(va[i].keyBytes, vb[i].keyBytes); kd > hiddenTol {
+			t.Fatalf("layer %d K diverges from sequential: maxDiff=%.5f (> %.2f)", i, kd, hiddenTol)
+		}
+		if vd := pleSlabMaxDiff(va[i].valueBytes, vb[i].valueBytes); vd > hiddenTol {
+			t.Fatalf("layer %d V diverges from sequential: maxDiff=%.5f (> %.2f)", i, vd, hiddenTol)
+		}
+	}
+}
+
+// TestVerifyBatchedEngagesQuantPLE exercises the MTP-verify batched lane (verifyBatchedHiddens /
+// verifyBatchedInto) on a quant PLE session directly. In production these run only inside a real
+// AssistantPair's verify step, but they are plain *ArchSession methods and the PLE-suffixed
+// switch arms they select (stepTokensBatchedDenseIntoPLE / -NoResultPLE / -PLE, decode_batched_
+// session.go) key on the same s.state.ple tower this fixture carries, so driving them directly is
+// a legitimate — not shimmed — way to reach the quant PLE arms of the verify lane. Output is
+// checked for real invariants (row/token counts, vocab range, no position mutation) rather than
+// pinned bytes: there is no independent oracle for MTP-verify greedy output at this level.
+func TestVerifyBatchedEngagesQuantPLE(t *testing.T) {
+	requireNativeRuntime(t)
+	ids := quantBatchedPLEIDs()
+
+	hiddenSess := newBatchedPLEQuantFixture(t)
+	hiddens, ok, err := hiddenSess.verifyBatchedHiddens(ids)
+	if err != nil {
+		t.Fatalf("verifyBatchedHiddens: %v", err)
+	}
+	if !ok {
+		t.Fatal("verifyBatchedHiddens DECLINED the quant PLE arch")
+	}
+	if len(hiddens) != len(ids) {
+		t.Fatalf("verifyBatchedHiddens returned %d hidden rows, want %d", len(hiddens), len(ids))
+	}
+	rowBytes := hiddenSess.arch.Hidden * bf16Size
+	for i, h := range hiddens {
+		if len(h) != rowBytes {
+			t.Fatalf("hidden row %d size = %d, want %d", i, len(h), rowBytes)
+		}
+	}
+	if hiddenSess.Pos() != 0 {
+		t.Fatalf("verifyBatchedHiddens advanced pos to %d, want 0 (verify must not commit)", hiddenSess.Pos())
+	}
+
+	greedySess := newBatchedPLEQuantFixture(t)
+	greedys, ok, err := greedySess.verifyBatchedInto(ids, nil)
+	if err != nil {
+		t.Fatalf("verifyBatchedInto: %v", err)
+	}
+	if !ok {
+		t.Fatal("verifyBatchedInto DECLINED the quant PLE arch")
+	}
+	if len(greedys) != len(ids) {
+		t.Fatalf("verifyBatchedInto returned %d tokens, want %d", len(greedys), len(ids))
+	}
+	for i, tok := range greedys {
+		if tok < 0 || int(tok) >= greedySess.arch.Vocab {
+			t.Fatalf("greedy token[%d] = %d outside vocab %d", i, tok, greedySess.arch.Vocab)
+		}
+	}
+	if greedySess.Pos() != 0 {
+		t.Fatalf("verifyBatchedInto advanced pos to %d, want 0 (verify must not commit)", greedySess.Pos())
 	}
 }
