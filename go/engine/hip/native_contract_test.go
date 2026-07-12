@@ -9,6 +9,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"iter"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	rocmmodel "dappco.re/go/inference/engine/hip/model"
+	"dappco.re/go/inference/serving/provider/openai"
 )
 
 func TestNativeContract_RocmBackendImplementsSharedPlanner_Good(t *testing.T) {
@@ -2582,6 +2585,47 @@ func TestNativeContract_ChatPreflightRejectsInvalidMessages_Bad(t *testing.T) {
 
 	if len(native.generatePrompts) != 0 {
 		t.Fatalf("generate prompts = %+v, want no native dispatch for invalid chat messages", native.generatePrompts)
+	}
+}
+
+func TestNativeContract_AudioServeCapability_Good(t *testing.T) {
+	native := &fakeNativeAudioTowerModel{fakeNativeModel: &fakeNativeModel{tokens: []inference.Token{{ID: 7, Text: "heard"}}}, accepts: true}
+	model := &rocmModel{modelType: "gemma4", modelInfo: inference.ModelInfo{Architecture: "gemma4"}, contextLength: 4096, native: native}
+	messages := []inference.Message{{Role: "user", Content: "transcribe", Audios: [][]byte{{'R', 'I', 'F', 'F'}}}}
+
+	if !model.AcceptsAudio() {
+		t.Fatal("AcceptsAudio() = false for loaded audio-capable HIP runtime")
+	}
+	core.AssertEqual(t, []string{"heard"}, collectTokenText(model.Chat(context.Background(), messages)))
+	core.AssertEqual(t, 1, native.towerInvocations)
+}
+
+func TestNativeContract_AudioServeHTTP_Good(t *testing.T) {
+	native := &fakeNativeAudioTowerModel{fakeNativeModel: &fakeNativeModel{tokens: []inference.Token{{ID: 7, Text: "heard"}}}, accepts: true}
+	model := &rocmModel{modelType: "gemma4", modelInfo: inference.ModelInfo{Architecture: "gemma4"}, contextLength: 4096, native: native}
+	handler := openai.NewHandler(openai.NewStaticResolver(map[string]inference.TextModel{"hip": model}))
+	recorder := httptest.NewRecorder()
+	body := `{"model":"hip","max_tokens":1,"messages":[{"role":"user","content":[{"type":"text","text":"transcribe"},{"type":"input_audio","input_audio":{"data":"UklGRg==","format":"wav"}}]}]}`
+
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, openai.DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("audio serve status = %d body=%s, want 200", recorder.Code, recorder.Body.String())
+	}
+	core.AssertEqual(t, 1, native.towerInvocations)
+}
+
+func TestNativeContract_AudioServeCapability_Bad(t *testing.T) {
+	model := &rocmModel{modelType: "gemma4", modelInfo: inference.ModelInfo{Architecture: "gemma4"}, native: &fakeNativeModel{}}
+	messages := []inference.Message{{Role: "user", Content: "transcribe", Audios: [][]byte{{'R', 'I', 'F', 'F'}}}}
+
+	for range model.Chat(context.Background(), messages) {
+		t.Fatal("audio turn yielded a token without the neutral capability")
+	}
+	if err := resultError(model.Err()); err == nil {
+		t.Fatal("audio turn Err() = nil without the neutral capability")
+	} else {
+		core.AssertContains(t, err.Error(), "does not accept audio input")
 	}
 }
 
@@ -5196,6 +5240,25 @@ type fakeNativeModel struct {
 	chatMutatesInput         bool
 	chatTemplateMutatesInput bool
 	mutatePromptInputs       bool
+}
+
+type fakeNativeAudioTowerModel struct {
+	*fakeNativeModel
+	accepts          bool
+	towerInvocations int
+}
+
+func (model *fakeNativeAudioTowerModel) AcceptsAudioInput() bool {
+	return model != nil && model.accepts
+}
+
+func (model *fakeNativeAudioTowerModel) Chat(ctx context.Context, messages []inference.Message, cfg inference.GenerateConfig) (iter.Seq[inference.Token], func() error) {
+	for i := range messages {
+		if len(messages[i].Audios) > 0 {
+			model.towerInvocations++
+		}
+	}
+	return model.fakeNativeModel.Chat(ctx, messages, cfg)
 }
 
 func (model *fakeNativeModel) Generate(ctx context.Context, prompt string, cfg inference.GenerateConfig) (iter.Seq[inference.Token], func() error) {
