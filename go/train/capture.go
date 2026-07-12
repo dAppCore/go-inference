@@ -36,7 +36,15 @@ func appendCaptureRows(path string, evals []SFTEvalResult) int {
 		return 0
 	}
 	now := time.Now().Unix()
-	var out []byte
+	// Presize the accumulator from the raw field sizes so the per-row appends
+	// don't regrow it geometrically: each row's JSON is the two text fields
+	// plus a fixed scaffold of keys/quoting/newline (~64 bytes covers the
+	// step/at digits and the {"step":,"prompt":,"text":,"at_unix":} frame).
+	estimate := 0
+	for _, ev := range evals {
+		estimate += len(ev.Prompt) + len(ev.Text) + 64
+	}
+	out := make([]byte, 0, estimate)
 	rows := 0
 	for _, ev := range evals {
 		encoded := core.JSONMarshal(CaptureRow{Step: ev.Step, Prompt: ev.Prompt, Text: ev.Text, At: now})
