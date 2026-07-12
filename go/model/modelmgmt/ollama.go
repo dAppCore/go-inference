@@ -12,6 +12,10 @@ import (
 )
 
 // OllamaBaseModelMap maps model tags to Ollama model names.
+//
+// Gemma 4 and Qwen 3.5/3.6 have no entries: nothing in this repo confirms an
+// Ollama library name for either family (unlike Gemma 3, which ships as
+// "gemma3:<size>" on ollama.com) — left absent rather than guessed.
 var OllamaBaseModelMap = map[string]string{
 	"gemma-3-1b":  "gemma3:1b",
 	"gemma-3-4b":  "gemma3:4b",
@@ -20,11 +24,21 @@ var OllamaBaseModelMap = map[string]string{
 }
 
 // HFBaseModelMap maps model tags to HuggingFace model IDs.
+//
+// Only gemma-4-e2b is added for Gemma 4: it is the one size with a verified
+// base HF id in this repo (engine/hip/model/gemma4.OfficialE2BTargetModelID
+// = "google/gemma-4-E2B-it", pinned there with a revision hash and a
+// config.json SHA256). The 12B/26B-A4B/31B sizes only appear here as
+// mlx-community pre-quantized derivatives, never a confirmed base
+// "google/..." repo, so they're left absent rather than guessed. Qwen
+// 3.5/3.6 has no HF id anywhere in this repo (only model_type /
+// transformers-class strings), so it's absent too.
 var HFBaseModelMap = map[string]string{
 	"gemma-3-1b":  "google/gemma-3-1b-it",
 	"gemma-3-4b":  "google/gemma-3-4b-it",
 	"gemma-3-12b": "google/gemma-3-12b-it",
 	"gemma-3-27b": "google/gemma-3-27b-it",
+	"gemma-4-e2b": "google/gemma-4-E2B-it",
 }
 
 // ollamaUploadBlob uploads a local file to Ollama's blob store.

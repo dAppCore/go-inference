@@ -143,3 +143,28 @@ func TestOllama_OllamaDeleteModel_Ugly(t *core.T) {
 	defer server.Close()
 	assertResultError(t, OllamaDeleteModel(server.URL, "tmp-model"))
 }
+
+func TestOllama_HFBaseModelMap_Good(t *core.T) {
+	// gemma-4-e2b is the one Gemma 4 size with a verified base HF id
+	// (engine/hip/model/gemma4.OfficialE2BTargetModelID).
+	core.AssertEqual(t, "google/gemma-4-E2B-it", HFBaseModelMap["gemma-4-e2b"])
+}
+
+func TestOllama_HFBaseModelMap_Bad(t *core.T) {
+	// The other Gemma 4 sizes only appear in this repo as mlx-community
+	// pre-quantized derivatives, never a confirmed base "google/..." repo —
+	// they stay absent rather than guessed.
+	for _, tag := range []string{"gemma-4-12b", "gemma-4-26b-a4b", "gemma-4-31b"} {
+		_, ok := HFBaseModelMap[tag]
+		core.AssertFalse(t, ok, tag)
+	}
+}
+
+func TestOllama_OllamaBaseModelMap_Ugly(t *core.T) {
+	// Nothing in this repo confirms an Ollama library name for Gemma 4 or
+	// Qwen 3.5/3.6 — they stay absent rather than guessed.
+	for _, tag := range []string{"gemma-4-e2b", "gemma-4-12b", "qwen-3-5"} {
+		_, ok := OllamaBaseModelMap[tag]
+		core.AssertFalse(t, ok, tag)
+	}
+}
