@@ -779,3 +779,31 @@ func TestOptions_WithMinTokensBeforeStop_Good(t *testing.T) {
 		})
 	}
 }
+
+// TestOptions_WithEnableThinking_Good pins the reasoning toggle: nil is the
+// model default, &true forces on, &false forces off — the pointer identity is
+// carried through so a downstream Chat can distinguish "unset" from "off".
+func TestOptions_WithEnableThinking_Good(t *testing.T) {
+	if cfg := ApplyGenerateOpts([]GenerateOption{WithEnableThinking(nil)}); cfg.EnableThinking != nil {
+		t.Fatalf("WithEnableThinking(nil) set %v, want nil (model default)", cfg.EnableThinking)
+	}
+	on := true
+	if cfg := ApplyGenerateOpts([]GenerateOption{WithEnableThinking(&on)}); cfg.EnableThinking == nil || !*cfg.EnableThinking {
+		t.Fatalf("WithEnableThinking(&true) = %v, want forced on", cfg.EnableThinking)
+	}
+	off := false
+	if cfg := ApplyGenerateOpts([]GenerateOption{WithEnableThinking(&off)}); cfg.EnableThinking == nil || *cfg.EnableThinking {
+		t.Fatalf("WithEnableThinking(&false) = %v, want forced off", cfg.EnableThinking)
+	}
+}
+
+// TestOptions_WithThinkingBudget_Good pins the thought-channel token cap: 0 is
+// unlimited, a positive value bounds the reasoning span.
+func TestOptions_WithThinkingBudget_Good(t *testing.T) {
+	if cfg := ApplyGenerateOpts([]GenerateOption{WithThinkingBudget(0)}); cfg.ThinkingBudget != 0 {
+		t.Fatalf("WithThinkingBudget(0) = %d, want 0 (unlimited)", cfg.ThinkingBudget)
+	}
+	if cfg := ApplyGenerateOpts([]GenerateOption{WithThinkingBudget(256)}); cfg.ThinkingBudget != 256 {
+		t.Fatalf("WithThinkingBudget(256) = %d, want 256", cfg.ThinkingBudget)
+	}
+}

@@ -336,3 +336,194 @@ func TestCapability_AllocBudget_TextModelCapabilities_FullSurface(t *testing.T) 
 			avg, budget)
 	}
 }
+
+// --- AlgorithmProfile -> Capability (arch-neutral) ---------------------------
+
+// TestCapability_AlgorithmProfile_Capability_Good pins the profile->portable
+// conversion AND its arch-neutrality: a backend declares which architectures an
+// algorithm serves through AlgorithmProfile.Architectures, and the portable
+// Capability must carry that declaration verbatim in its labels — no gemma
+// assumption, whatever the backend lists (here a non-gemma qwen3-moe/llama pair).
+func TestCapability_AlgorithmProfile_Capability_Good(t *testing.T) {
+	profile := AlgorithmProfile{
+		ID:               CapabilityMoERouting,
+		Group:            CapabilityGroupModel,
+		CapabilityStatus: CapabilityStatusExperimental,
+		RuntimeStatus:    FeatureRuntimeMetadataOnly,
+		Algorithm:        "top-k-router",
+		Detail:           "expert routing",
+		Architectures:    []string{"qwen3-moe", "llama"},
+		Requires:         []CapabilityID{CapabilityTokenizer, CapabilityChatTemplate},
+		Provides:         []string{"router-logits"},
+	}
+
+	capability := profile.Capability()
+	if capability.ID != CapabilityMoERouting || capability.Status != CapabilityStatusExperimental {
+		t.Fatalf("capability head = %+v, want id=moe.routing status=experimental", capability)
+	}
+	if got := capability.Labels["architectures"]; got != "qwen3-moe,llama" {
+		t.Fatalf("architectures label = %q, want the declared non-gemma pair verbatim", got)
+	}
+	if got := capability.Labels["runtime_status"]; got != string(FeatureRuntimeMetadataOnly) {
+		t.Fatalf("runtime_status label = %q, want metadata_only", got)
+	}
+	if got := capability.Labels["algorithm"]; got != "top-k-router" {
+		t.Fatalf("algorithm label = %q, want top-k-router", got)
+	}
+	if got := capability.Labels["requires"]; got != "tokenizer,chat.template" {
+		t.Fatalf("requires label = %q, want the joined capability ids", got)
+	}
+	if got := capability.Labels["provides"]; got != "router-logits" {
+		t.Fatalf("provides label = %q, want router-logits", got)
+	}
+}
+
+// TestCapability_AlgorithmProfile_Capability_Bad pins the sparse-profile arm: a
+// profile with no algorithm / architectures / requires / provides emits only the
+// mandatory runtime_status label, so a bare declaration stays minimal.
+func TestCapability_AlgorithmProfile_Capability_Bad(t *testing.T) {
+	capability := AlgorithmProfile{
+		ID:            CapabilityGenerate,
+		Group:         CapabilityGroupModel,
+		RuntimeStatus: FeatureRuntimeNative,
+	}.Capability()
+	if len(capability.Labels) != 1 {
+		t.Fatalf("sparse profile labels = %v, want only runtime_status", capability.Labels)
+	}
+	if capability.Labels["runtime_status"] != string(FeatureRuntimeNative) {
+		t.Fatalf("runtime_status = %q, want native", capability.Labels["runtime_status"])
+	}
+}
+
+// TestCapability_CloneAlgorithmProfile_Ugly pins the deep copy: mutating any
+// slice of the clone must not reach back into the original's backing arrays.
+func TestCapability_CloneAlgorithmProfile_Ugly(t *testing.T) {
+	original := AlgorithmProfile{
+		ID:            CapabilitySplitInference,
+		Architectures: []string{"qwen3"},
+		Requires:      []CapabilityID{CapabilityModelLoad},
+		Provides:      []string{"shard-plan"},
+		Notes:         []string{"n"},
+	}
+	clone := CloneAlgorithmProfile(original)
+	clone.Architectures[0] = "MUTATED"
+	clone.Requires[0] = "MUTATED"
+	clone.Provides[0] = "MUTATED"
+	clone.Notes[0] = "MUTATED"
+	if original.Architectures[0] != "qwen3" || original.Requires[0] != CapabilityModelLoad ||
+		original.Provides[0] != "shard-plan" || original.Notes[0] != "n" {
+		t.Fatalf("CloneAlgorithmProfile shares backing arrays: original = %+v", original)
+	}
+}
+
+// TestCapability_CapabilityIDLabel_Good pins the id-join helper directly,
+// including the empty-slice edge (no ids -> empty label).
+func TestCapability_CapabilityIDLabel_Good(t *testing.T) {
+	if got := capabilityIDLabel([]CapabilityID{CapabilityChat, CapabilityGenerate}); got != "chat,generate" {
+		t.Fatalf("capabilityIDLabel = %q, want chat,generate", got)
+	}
+	if got := capabilityIDLabel(nil); got != "" {
+		t.Fatalf("capabilityIDLabel(nil) = %q, want empty", got)
+	}
+}
+
+// --- report / CapabilitiesOf / BackendCapabilities edges ---------------------
+
+// TestCapability_Report_Capability_NotFound_Bad pins the miss arm: a report
+// that lacks an id returns the zero capability and false.
+func TestCapability_Report_Capability_NotFound_Bad(t *testing.T) {
+	report := CapabilityReport{Capabilities: []Capability{SupportedCapability(CapabilityGenerate, CapabilityGroupModel)}}
+	got, ok := report.Capability(CapabilityGRPO)
+	if ok || got.ID != "" {
+		t.Fatalf("Capability(absent) = (%+v, %v), want (zero, false)", got, ok)
+	}
+}
+
+// TestCapability_CapabilitiesOf_Nil_Bad pins the nil-value arm: no report, false.
+func TestCapability_CapabilitiesOf_Nil_Bad(t *testing.T) {
+	if report, ok := CapabilitiesOf(nil); ok || report.Available {
+		t.Fatalf("CapabilitiesOf(nil) = (%+v, %v), want (empty, false)", report, ok)
+	}
+}
+
+// TestCapability_CapabilitiesOf_PlainTextModel_Good pins the TextModel inference
+// arm: a plain model that does NOT implement CapabilityReporter still yields an
+// inferred report through the TextModel case.
+func TestCapability_CapabilitiesOf_PlainTextModel_Good(t *testing.T) {
+	report, ok := CapabilitiesOf(&stubTextModel{backend: "plain"})
+	if !ok || !report.Available {
+		t.Fatalf("CapabilitiesOf(plain TextModel) = (%+v, %v), want an inferred available report", report, ok)
+	}
+	if !report.Supports(CapabilityGenerate) {
+		t.Fatal("inferred TextModel report must support generate")
+	}
+}
+
+// TestCapability_BackendCapabilities_Nil_Bad pins the nil-backend guard: an empty
+// report, no panic.
+func TestCapability_BackendCapabilities_Nil_Bad(t *testing.T) {
+	if report := BackendCapabilities(nil); report.Available || len(report.Capabilities) != 0 {
+		t.Fatalf("BackendCapabilities(nil) = %+v, want an empty report", report)
+	}
+}
+
+// fitBackend is a Backend that also plans model fit, so BackendCapabilities
+// reports the CapabilityModelFit branch.
+type fitBackend struct{ stubBackend }
+
+func (*fitBackend) PlanModelFit(context.Context, ModelIdentity, uint64) (*ModelFitReport, error) {
+	return &ModelFitReport{Fits: true}, nil
+}
+
+// TestCapability_BackendCapabilities_ModelFit_Good pins the ModelFitPlanner
+// branch: a backend that plans fit advertises model.fit alongside model.load.
+func TestCapability_BackendCapabilities_ModelFit_Good(t *testing.T) {
+	report := BackendCapabilities(&fitBackend{stubBackend{name: "gpu", available: true}})
+	if !report.Supports(CapabilityModelLoad) || !report.Supports(CapabilityModelFit) {
+		t.Fatalf("fit backend report = %+v, want model.load + model.fit", report.CapabilityIDs())
+	}
+}
+
+// TestCapability_TextModelCapabilities_Nil_Bad pins the nil-model guard: a
+// runtime-only report with no capabilities.
+func TestCapability_TextModelCapabilities_Nil_Bad(t *testing.T) {
+	report := TextModelCapabilities(RuntimeIdentity{Backend: "metal"}, nil)
+	if report.Runtime.Backend != "metal" || report.Available || len(report.Capabilities) != 0 {
+		t.Fatalf("TextModelCapabilities(nil model) = %+v, want a runtime-only empty report", report)
+	}
+}
+
+// probeArchModel is a TextModel that implements AttentionInspector + Evaluator
+// AND reports a NON-gemma architecture, so TextModelCapabilities exercises those
+// two optional branches and the arch passes through the capability layer
+// unaltered.
+type probeArchModel struct {
+	*stubTextModel
+	arch string
+}
+
+func (m probeArchModel) Info() ModelInfo { return ModelInfo{Architecture: m.arch, NumLayers: 32} }
+func (probeArchModel) InspectAttention(context.Context, string, ...GenerateOption) (*AttentionSnapshot, error) {
+	return &AttentionSnapshot{}, nil
+}
+func (probeArchModel) Evaluate(context.Context, DatasetStream, EvalConfig) (*EvalReport, error) {
+	return &EvalReport{}, nil
+}
+
+// TestCapability_TextModelCapabilities_ProbeSurface_Good pins the
+// AttentionInspector + Evaluator branches and arch-neutrality together: a model
+// declaring a non-gemma architecture surfaces probe.attention + evaluation, and
+// the report's Model.Architecture is the model's own declaration, not a default.
+func TestCapability_TextModelCapabilities_ProbeSurface_Good(t *testing.T) {
+	model := probeArchModel{stubTextModel: &stubTextModel{}, arch: "qwen3-moe"}
+	report := TextModelCapabilities(RuntimeIdentity{Backend: "metal"}, model)
+	if report.Model.Architecture != "qwen3-moe" {
+		t.Fatalf("report Model.Architecture = %q, want the model's declared qwen3-moe", report.Model.Architecture)
+	}
+	if !report.Supports(CapabilityAttentionProbe) {
+		t.Fatal("AttentionInspector model must advertise probe.attention")
+	}
+	if !report.Supports(CapabilityEvaluation) {
+		t.Fatal("Evaluator model must advertise evaluation")
+	}
+}
