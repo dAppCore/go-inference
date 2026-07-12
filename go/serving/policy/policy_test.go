@@ -4,6 +4,7 @@ package policy
 
 import (
 	"testing"
+	"time"
 
 	core "dappco.re/go"
 )
@@ -136,5 +137,94 @@ func TestPolicy_Load_Bad(t *testing.T) {
 	}
 	if !core.Contains(err.Error(), "read policy file") {
 		t.Fatalf("error = %q, want it to mention the read failure", err.Error())
+	}
+}
+
+// TestPolicy_Compile_Rewrite pins the grade-G2 action compiling: rewrite shares
+// redact's shape — the replacement is the safe-floor fallback (defaulted or
+// explicit) — and the policy reports NeedsMediator.
+func TestPolicy_Compile_Rewrite(t *testing.T) {
+	pol, err := Compile([]byte(`{"rules":[
+		{"match":"term","value":"PROJECT-X","action":"rewrite"},
+		{"match":"pattern","value":"rc[0-9]+","action":"rewrite","replacement":"[fallback]","window":16}
+	]}`))
+	if err != nil {
+		t.Fatalf("Compile of a valid rewrite policy failed: %v", err)
+	}
+	if !pol.NeedsMediator() {
+		t.Fatal("a policy with rewrite rules must report NeedsMediator")
+	}
+	if pol.rules[0].Action != ActionRewrite {
+		t.Fatalf("rule #0 action = %q, want rewrite", pol.rules[0].Action)
+	}
+	if pol.rules[0].Replacement != DefaultReplacement {
+		t.Fatalf("defaulted rewrite fallback = %q, want %q", pol.rules[0].Replacement, DefaultReplacement)
+	}
+	if pol.rules[1].Replacement != "[fallback]" {
+		t.Fatalf("explicit rewrite fallback = %q, want [fallback]", pol.rules[1].Replacement)
+	}
+}
+
+// TestPolicy_Compile_Rewrite_Bad pins the rewrite-specific load rejections: a
+// rewrite must not carry a refuse message, and mediate_timeout_ms is range-checked
+// at load like the pattern window.
+func TestPolicy_Compile_Rewrite_Bad(t *testing.T) {
+	cases := []struct {
+		name string
+		json string
+		want string
+	}{
+		{"rewrite carrying message", `{"rules":[{"match":"term","value":"x","action":"rewrite","message":"no"}]}`, "must not carry a refuse message"},
+		{"mediate timeout too large", `{"mediate_timeout_ms":99999999,"rules":[]}`, "mediate_timeout_ms"},
+		{"mediate timeout negative", `{"mediate_timeout_ms":-5,"rules":[]}`, "mediate_timeout_ms"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pol, err := Compile([]byte(tc.json))
+			if err == nil {
+				t.Fatalf("expected a load error, got a policy with %d rule(s)", pol.Len())
+			}
+			if !core.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want it to contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// TestPolicy_NeedsMediator pins the boot gate: only a policy declaring a rewrite
+// rule needs a mediator wired.
+func TestPolicy_NeedsMediator(t *testing.T) {
+	with, err := Compile([]byte(`{"rules":[{"match":"term","value":"x","action":"rewrite"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !with.NeedsMediator() {
+		t.Fatal("a rewrite policy must need a mediator")
+	}
+	without, err := Compile([]byte(`{"rules":[{"match":"term","value":"x","action":"redact"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if without.NeedsMediator() {
+		t.Fatal("a redact-only policy must not need a mediator")
+	}
+}
+
+// TestPolicy_MediateTimeout pins the config knob: the default applies when unset,
+// and an explicit mediate_timeout_ms is honoured.
+func TestPolicy_MediateTimeout(t *testing.T) {
+	def, err := Compile([]byte(`{"rules":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.MediateTimeout() != DefaultMediateTimeout {
+		t.Fatalf("default mediate timeout = %s, want %s", def.MediateTimeout(), DefaultMediateTimeout)
+	}
+	set, err := Compile([]byte(`{"mediate_timeout_ms":250,"rules":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.MediateTimeout() != 250*time.Millisecond {
+		t.Fatalf("configured mediate timeout = %s, want 250ms", set.MediateTimeout())
 	}
 }
