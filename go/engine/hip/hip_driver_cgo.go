@@ -805,6 +805,13 @@ func (cgoHIPDriver) Available() bool {
 	return cgoHIPAvailability.available
 }
 
+func (cgoHIPDriver) DeviceSynchronize() error {
+	if rc := C.core_rocm_hip_device_synchronize(); rc != 0 {
+		return hipReturnError("hipDeviceSynchronize", int(rc))
+	}
+	return nil
+}
+
 func (driver cgoHIPDriver) DeviceInfo() nativeDeviceInfo {
 	var freeBytes C.size_t
 	var totalBytes C.size_t

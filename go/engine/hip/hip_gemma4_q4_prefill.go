@@ -2540,6 +2540,11 @@ func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithE
 }
 
 func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowGreedyTokenWithEngineConfig(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, tokens []int32, startPosition int, epsilon float32, mode string, priorLayerKV []*rocmDeviceKVCache, priorLayerDescriptorTables []*rocmDeviceKVDescriptorTable, perLayerInputs []*hipDeviceByteBuffer, outputRows []bool, outputRow int, best *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace, engineConfig hipGemma4Q4EngineConfig, greedyToken *hipDeviceByteBuffer) (*hipGemma4Q4PrefillForwardBatch, error) {
+	var routeMetrics *hipDecodeRouteMetrics
+	if len(tokens) == 1 {
+		routeMetrics = hipBeginDecodeRouteMetrics()
+		defer hipFinishDecodeRouteMetrics(routeMetrics)
+	}
 	return hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDeviceTokenWithEngineConfig(ctx, driver, cfg, tokens, startPosition, epsilon, mode, priorLayerKV, priorLayerDescriptorTables, perLayerInputs, outputRows, outputRow, best, workspace, engineConfig, nil, greedyToken)
 }
 
@@ -2608,6 +2613,9 @@ func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDevic
 	sharedSources := hipGemma4Q4SharedKVSourceByLayer(cfg)
 	var precomputedInputNorm *hipDeviceByteBuffer
 	for index, layerCfg := range cfg.Layers {
+		if metrics := hipActiveDecodeRouteMetrics(); metrics != nil {
+			metrics.setLayer(index, layerCfg.LayerType)
+		}
 		out.Layers = append(out.Layers, hipGemma4Q4PrefillForwardLayerBatch{})
 		layerBatch := &out.Layers[index]
 		layerBatch.KV = &layerBatch.kvStorage
