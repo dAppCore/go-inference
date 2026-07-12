@@ -41,7 +41,7 @@ func ExampleAudioAttentionF32() {
 	cfg := audioAttentionCfgFixture(hid, H, D, chunk, past, future)
 	x := syntheticFloat32(T*hid, 17)
 
-	out, err := AudioAttentionF32(x, w, cfg)
+	out, err := AudioAttentionF32(x, w, cfg, nil)
 	if err != nil {
 		return
 	}

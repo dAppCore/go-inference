@@ -122,21 +122,21 @@ func TestAudioTowerModuleGoldens(t *testing.T) {
 	}
 
 	// Defect-catcher 1 — real conv layout: subsample output collapses on a double-transposed conv.
-	sub, err := AudioSubsampleF32(mel, weights.Subsample, weights.SubsampleC)
+	sub, _, err := AudioSubsampleF32(mel, weights.Subsample, weights.SubsampleC, nil)
 	if err != nil {
 		t.Fatalf("AudioSubsampleF32: %v", err)
 	}
 	assertCosineGE(t, "subsample", sub, decodeF32LE(t, g.SubsampleB64), 0.999)
 
 	// Layer-0 Conformer block vs HF.
-	lay0, err := AudioLayer(sub, weights.Layers[0], cfg)
+	lay0, err := AudioLayer(sub, weights.Layers[0], cfg, nil)
 	if err != nil {
 		t.Fatalf("AudioLayer(0): %v", err)
 	}
 	assertCosineGE(t, "layer0", lay0, decodeF32LE(t, g.Layer0B64), 0.999)
 
 	// Defect-catcher 2 — output_proj.bias: full tower last_hidden_state carries the [1536] bias.
-	tower, err := AudioEncode(mel, weights, cfg)
+	tower, err := AudioEncode(mel, weights, cfg, nil)
 	if err != nil {
 		t.Fatalf("AudioEncode: %v", err)
 	}
