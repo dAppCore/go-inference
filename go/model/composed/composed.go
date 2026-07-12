@@ -98,6 +98,19 @@ var ResidualNormMLPDevice func(h, mixOut, normW, gate, up, down []float32, L, D,
 // not the mixer).
 var ResidualNormMLPProjDevice func(mixerHidden, projW, h, normW, gate, up, down []float32, L, D, mixCols, FF int, eps float32) ([]float32, error)
 
+// ResidualNormMLPProjHeadDevice is ResidualNormMLPProjDevice with the MODEL's own terminal stage folded
+// onto the BACK of that same tail instead of a next layer's input (there is no next layer — this hook
+// only ever applies to the LAST layer): given the tail's output y [L,D], it also runs the final RMSNorm
+// (NormF) over y's LAST row and the LM head GEMM (tied Embed or untied Output) against it, returning y
+// [L,D] (still needed — the DecodeStepper/DecodeForward contract returns hidden, not logits) AND logits
+// [Vocab] for that last row only — mirroring headLogits' single-row contract exactly. This is the mirror,
+// at the OTHER end of the stack, of the next-layer INPUT fuses (…AttnInputDevice / …GatedDeltaInputDevice):
+// those fold the NEXT layer's input norm+projections on; this folds the model's OWN output norm+head on,
+// collapsing the head's own command buffer that ran after forwardEmb returned (N+1 → N per token). Same
+// AX-8 shape; nil, an error, or any non-last layer all leave the plain proj-fused tail running with the
+// head computed separately as today (see forwardEmb + ComposedSession.headLogits).
+var ResidualNormMLPProjHeadDevice func(mixerHidden, projW, h, normW, gate, up, down []float32, L, D, mixCols, FF int, eps float32, normF, head []float32, Vocab int) (y, logits []float32, err error)
+
 // projMixer is the OPTIONAL capability of a mixer whose output is produced by a single final GEMM (the
 // attention o_proj, the gated-delta out_proj): it runs the mixer up to but NOT including that projection and
 // hands back the pre-projection hidden [L,mixCols] plus the projection weight projW [D,mixCols], so the
@@ -221,7 +234,21 @@ func (mlp *MLP) forward(x []float32, L, D int) []float32 {
 type ComposedSession struct {
 	m      *ComposedModel
 	states []any // per-layer opaque mixer state; nil ⇒ fresh
+
+	// pendingHeadLogits is set by forwardEmb only when the LAST layer's tail fused the model's final
+	// RMSNorm + LM head GEMM in (ResidualNormMLPProjHeadDevice succeeded) — the vocab logits for that
+	// call's last row, ready for the caller to reuse instead of paying a second head command buffer.
+	// Reset to nil at the top of every forwardEmb call, so a stale value never survives past the call
+	// that didn't produce one. See PendingHeadLogits.
+	pendingHeadLogits []float32
 }
+
+// PendingHeadLogits returns the vocab logits the MOST RECENT forwardEmb call (Forward/forward) computed
+// as a side effect of fusing the model's final RMSNorm + LM head GEMM onto the LAST layer's tail command
+// buffer — nil when that fuse didn't apply (hook unbound, a sub-floor MLP, a device error, or the model
+// has no layers). A stepper that wants the fused fast path reads this right after its own forwardEmb call
+// (see composed/token_model.go's composedStepper.Step); the native backend's parity test reads it too.
+func (s *ComposedSession) PendingHeadLogits() []float32 { return s.pendingHeadLogits }
 
 // NewSession builds a fresh session (each layer's mixer state starts empty).
 func NewSession(m *ComposedModel) *ComposedSession {
@@ -242,6 +269,7 @@ type pendingGatedDeltaInput struct{ qkv, z, a, b []float32 }
 // returns the output hiddens [L,D]. Serves both prefill (L>1) and decode (L=1).
 func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 	D, eps := s.m.D, s.m.Eps
+	s.pendingHeadLogits = nil // cleared every call; set only when the last layer's tail fuses the head in
 
 	// pendingAttn / pendingGD carry a NEXT layer's already-computed input RMSNorm + input projections —
 	// folded into the PREVIOUS layer's proj-fused tail command buffer, the symmetric collapse to the
@@ -329,9 +357,28 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 							}
 						}
 					}
+				} else if ResidualNormMLPProjHeadDevice != nil {
+					// Terminal collapse: this IS the last layer, so there is no next-layer input to
+					// fuse — fold the MODEL's own final RMSNorm + LM head GEMM onto the back of this
+					// tail instead. The head's own separate command buffer (today's
+					// ComposedSession.headLogits, called by the caller once this returns) disappears —
+					// N+1 → N command buffers per token. A nil hook or a device error leaves the plain
+					// proj-fused tail below to run and the head computed separately as today.
+					headW := s.m.Output
+					if headW == nil {
+						headW = s.m.Embed // tied head
+					}
+					if y, logits, ferr := ResidualNormMLPProjHeadDevice(
+						mixerHidden, projW, h, layer.PostAttnNorm, mlp.Gate, mlp.Up, mlp.Down, L, D, mixCols, mlp.FF, eps,
+						s.m.NormF, headW, s.m.Vocab,
+					); ferr == nil {
+						h = y
+						s.pendingHeadLogits = logits
+						continue
+					}
 				}
-				// Plain proj-fused tail (no next-input fuse applies): o_proj/out_proj → residual →
-				// post-attn RMSNorm → SwiGLU → residual, in one command buffer.
+				// Plain proj-fused tail (no next-input fuse, no head fuse, or either failed): o_proj/
+				// out_proj → residual → post-attn RMSNorm → SwiGLU → residual, in one command buffer.
 				if y, ferr := ResidualNormMLPProjDevice(mixerHidden, projW, h, layer.PostAttnNorm, mlp.Gate, mlp.Up, mlp.Down, L, D, mixCols, mlp.FF, eps); ferr == nil {
 					h = y
 					continue
@@ -411,6 +458,15 @@ func (s *ComposedSession) headLogits(hidden []float32) []float32 {
 		head = s.m.Embed
 	}
 	return matNT(normed, head, 1, s.m.D, s.m.Vocab)
+}
+
+// HeadLogitsHost is headLogits, exported: the reference final-RMSNorm + LM-head computation
+// ResidualNormMLPProjHeadDevice's fused path is checked against, reachable across the package boundary
+// without a throwaway session of one's own (headLogits needs none of a session's per-layer mixer state —
+// it is a pure function of hidden + the model's own weights). Exists for the native backend's
+// device-vs-host parity test.
+func HeadLogitsHost(m *ComposedModel, hidden []float32) []float32 {
+	return NewSession(m).headLogits(hidden)
 }
 
 // Generate greedily decodes up to maxNew tokens after prefilling prompt, threading every layer's mixer
