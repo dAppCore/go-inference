@@ -5,7 +5,9 @@ package audio
 import (
 	"math"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/quant/mlxaffine"
 )
 
 // primitives.go is the pure-host float32 numeric kernel set the Conformer tower composes: GEMM, conv2d,
@@ -99,6 +101,48 @@ func linear(in []float32, w model.LoadedAudioLinear, l, inDim, outDim int) []flo
 	clipped := applyClip(in, w.Clip.In)
 	out := matMulMixedNT(clipped, w.Weight, l, inDim, outDim)
 	return applyClip(out, w.Clip.Out)
+}
+
+// projectorReference is the engine-neutral embed_audio oracle: no-scale RMS norm followed by the
+// projector's row-major linear transform. Quantised projectors are widened with the canonical MLX
+// affine dequantiser before the host float32 multiply.
+func projectorReference(in []float32, rows int, projector model.LoadedAudioLinear, eps float32) ([]float32, error) {
+	if rows <= 0 || projector.InDim <= 0 || projector.OutDim <= 0 || len(in) != rows*projector.InDim {
+		return nil, core.NewError("audio.projectorReference: invalid projector geometry")
+	}
+	if eps < 0 || math.IsNaN(float64(eps)) || math.IsInf(float64(eps), 0) {
+		return nil, core.NewError("audio.projectorReference: epsilon must be non-negative and finite")
+	}
+	normed := append([]float32(nil), in...)
+	for row := range rows {
+		values := normed[row*projector.InDim : (row+1)*projector.InDim]
+		var squares float32
+		for _, value := range values {
+			squares += value * value
+		}
+		invRMS := float32(1 / math.Sqrt(float64(squares/float32(projector.InDim)+eps)))
+		for index := range values {
+			values[index] *= invRMS
+		}
+	}
+	var weights []float32
+	var err error
+	if len(projector.Scales) > 0 || len(projector.Biases) > 0 {
+		if projector.Kind != mlxaffine.Mode || len(projector.Scales) == 0 || len(projector.Biases) == 0 {
+			return nil, core.NewError("audio.projectorReference: incomplete MLX affine projector")
+		}
+		weights, err = mlxaffine.DequantizeTensor(projector.Weight, projector.Scales, projector.Biases,
+			projector.OutDim, projector.InDim, projector.Bits, projector.GroupSize)
+		if err != nil {
+			return nil, core.E("audio.projectorReference", "dequantise projector", err)
+		}
+	} else {
+		if len(projector.Weight) != projector.OutDim*projector.InDim*bf16Size {
+			return nil, core.NewError("audio.projectorReference: BF16 projector size mismatch")
+		}
+		weights = bf16ToF32Slice(projector.Weight)
+	}
+	return matMulNT(normed, weights, rows, projector.InDim, projector.OutDim), nil
 }
 
 // mulScalar scales every element of x by s (fresh slice).

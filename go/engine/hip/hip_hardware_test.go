@@ -507,6 +507,68 @@ func hipHardwareGGUFQ8_0Dot(input []float32, row []byte) float32 {
 	return sum
 }
 
+// TestHIPHardwareAudioQ4ProjectorGolden_Good runs embed_audio's packed q4 weights through the real HIP
+// projection kernel and compares both soft-token rows with the engine-neutral host golden.
+func TestHIPHardwareAudioQ4ProjectorGolden_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+	projector := audioQ4GoldenProjector()
+	weights := []uint32{
+		binary.LittleEndian.Uint32(projector.Weight[0:4]),
+		binary.LittleEndian.Uint32(projector.Weight[4:8]),
+		binary.LittleEndian.Uint32(projector.Weight[8:12]),
+	}
+	scales := []uint16{
+		binary.LittleEndian.Uint16(projector.Scales[0:2]),
+		binary.LittleEndian.Uint16(projector.Scales[2:4]),
+		binary.LittleEndian.Uint16(projector.Scales[4:6]),
+	}
+	biases := []uint16{
+		binary.LittleEndian.Uint16(projector.Biases[0:2]),
+		binary.LittleEndian.Uint16(projector.Biases[2:4]),
+		binary.LittleEndian.Uint16(projector.Biases[4:6]),
+	}
+	features := []float32{1, -2, 3, -4, 5, -6, 7, -8, -1, 2, -3, 4, -5, 6, -7, 8}
+	want := []float32{-1.584236, 3.5645308, -1.5594823, 1.584236, -3.5645308, 1.5594823}
+	for row := range 2 {
+		input := append([]float32(nil), features[row*projector.InDim:(row+1)*projector.InDim]...)
+		var squares float32
+		for _, value := range input {
+			squares += value * value
+		}
+		invRMS := float32(1 / math.Sqrt(float64(squares/float32(projector.InDim)+1e-6)))
+		for col := range input {
+			input[col] *= invRMS
+		}
+		got, err := hipRunMLXQ4ProjectionKernel(context.Background(), hipRuntime.driver, hipMLXQ4ProjectionRequest{
+			Input: input, Weight: weights, Scales: scales, Biases: biases,
+			Rows: projector.OutDim, Cols: projector.InDim, GroupSize: projector.GroupSize, Bits: projector.Bits,
+		})
+		if err != nil {
+			t.Fatalf("embed_audio row %d: %v", row, err)
+		}
+		for output := range projector.OutDim {
+			expected := want[row*projector.OutDim+output]
+			if delta := math.Abs(float64(got[output] - expected)); delta > 1e-5 {
+				t.Fatalf("row=%d output=%d GPU=%.9f golden=%.9f delta=%.9g", row, output, got[output], expected, delta)
+			}
+		}
+		t.Logf("embed_audio row=%d GPU=%v golden=%v", row, got, want[row*projector.OutDim:(row+1)*projector.OutDim])
+	}
+}
+
 func TestHIPHardwareAttentionHeadsDeviceKVGQA_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")

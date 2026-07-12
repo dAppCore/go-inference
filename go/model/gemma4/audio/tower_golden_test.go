@@ -4,6 +4,7 @@ package audio
 
 import (
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"math"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"dappco.re/go/inference/model"
 	_ "dappco.re/go/inference/model/gemma4" // register the gemma4 ArchSpec so model.Load assembles the audio tower
+	"dappco.re/go/inference/model/quant/mlxaffine"
 )
 
 // tower_golden_test.go pins the host Conformer tower to HF Gemma4AudioModel goldens computed on the REAL
@@ -31,6 +33,61 @@ type moduleGolden struct {
 	SubsampleB64 string `json:"subsample_f32le_b64"`
 	Layer0B64    string `json:"layer0_f32le_b64"`
 	TowerB64     string `json:"tower_f32le_b64"`
+}
+
+// TestProjectorReferenceQuantizedGolden pins embed_audio's affine-q4 semantics independently of any
+// GPU: no-scale RMS-normalise each tower row, dequantise w = scale*q+bias, then multiply by W transpose.
+// The deliberately non-zero biases catch the common q*scale-only implementation defect.
+func TestProjectorReferenceQuantizedGolden(t *testing.T) {
+	const rows, inDim, outDim, groupSize, bits = 2, 8, 3, 8, 4
+	input := []float32{1, -2, 3, -4, 5, -6, 7, -8, -1, 2, -3, 4, -5, 6, -7, 8}
+	packed := make([]byte, outDim*4)
+	binary.LittleEndian.PutUint32(packed[0:], 0x76543210)
+	binary.LittleEndian.PutUint32(packed[4:], 0xfedcba98)
+	binary.LittleEndian.PutUint32(packed[8:], 0x13579bdf)
+	scales := []byte{0x00, 0x3e, 0x80, 0xbe, 0x00, 0x3d} // 0.125, -0.25, 0.03125 bf16
+	biases := []byte{0x80, 0x3f, 0x00, 0xbf, 0x00, 0x40} // 1, -0.5, 2 bf16
+	projector := model.LoadedAudioLinear{
+		Weight: packed, Scales: scales, Biases: biases,
+		OutDim: outDim, InDim: inDim, GroupSize: groupSize, Bits: bits, Kind: mlxaffine.Mode,
+	}
+
+	got, err := projectorReference(input, rows, projector, 1e-6)
+	if err != nil {
+		t.Fatalf("projectorReference: %v", err)
+	}
+	dequant, err := mlxaffine.DequantizeTensor(packed, scales, biases, outDim, inDim, bits, groupSize)
+	if err != nil {
+		t.Fatalf("DequantizeTensor: %v", err)
+	}
+	normed := append([]float32(nil), input...)
+	for row := range rows {
+		var squares float32
+		for _, value := range normed[row*inDim : (row+1)*inDim] {
+			squares += value * value
+		}
+		invRMS := float32(1 / math.Sqrt(float64(squares/float32(inDim)+1e-6)))
+		for col := range inDim {
+			normed[row*inDim+col] *= invRMS
+		}
+	}
+	want := make([]float32, rows*outDim)
+	for row := range rows {
+		for out := range outDim {
+			for col := range inDim {
+				want[row*outDim+out] += normed[row*inDim+col] * dequant[out*inDim+col]
+			}
+		}
+	}
+	if len(got) != len(want) {
+		t.Fatalf("projector output len=%d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if delta := math.Abs(float64(got[i] - want[i])); delta > 1e-6 {
+			t.Fatalf("projector[%d]=%.9f, want %.9f (delta %.9g)", i, got[i], want[i], delta)
+		}
+	}
+	t.Logf("embed_audio q4 golden: %v", got)
 }
 
 func e2b4bitSnapshotDir() string {
