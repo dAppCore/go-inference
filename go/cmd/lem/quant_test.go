@@ -159,6 +159,31 @@ func TestRunQuantGGUF(t *testing.T) {
 	})
 }
 
+func TestRunQuantGPTQ(t *testing.T) {
+	t.Run("Good/explicit out", func(t *testing.T) {
+		src := writeToyModel(t)
+		out := filepath.Join(t.TempDir(), "gptq-out")
+		var stdout, stderr bytes.Buffer
+		if code := runQuantCommand(context.Background(), []string{src, "-gptq", "-group-size", "32", "-o", out}, &stdout, &stderr); code != 0 {
+			t.Fatalf("exit %d; stderr=%s", code, stderr.String())
+		}
+		idx, err := safetensors.IndexFiles([]string{filepath.Join(out, "model.safetensors")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := idx.Tensors["language_model.model.layers.0.self_attn.q_proj.qweight"]; !ok {
+			t.Fatal("GPTQ qweight was not written")
+		}
+	})
+	t.Run("Bad/mutually exclusive formats", func(t *testing.T) {
+		src := writeToyModel(t)
+		var stdout, stderr bytes.Buffer
+		if code := runQuantCommand(context.Background(), []string{src, "-gptq", "-gguf", "q8_0"}, &stdout, &stderr); code != 2 {
+			t.Fatalf("exit %d, want 2; stderr=%s", code, stderr.String())
+		}
+	})
+}
+
 // TestDefaultOutDir covers the mlx_lm.convert naming convention: strip a trailing
 // slash, drop a -bf16/-f32 dense tag, and append the quant suffix in the source's
 // parent directory. A name with no dense tag keeps its basename intact.
