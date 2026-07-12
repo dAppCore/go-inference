@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 )
 
 // writeGemma4Pack writes a minimal gemma4 model pack (config.json declaring a
@@ -254,5 +255,98 @@ func TestServeDraft_ResolveServeDraft_Ugly(t *testing.T) {
 	det := ResolveServeDraft("/models/target", "/models/forced-drafter", false)
 	if det.Source != DraftSourceFlag || det.DraftPath != "/models/forced-drafter" {
 		t.Fatalf("ResolveServeDraft(explicit path) should force that drafter: %+v", det)
+	}
+}
+
+// writeDFlashDraft writes a minimal DFlash speculator checkpoint dir (config.json
+// carrying the speculators_model_type marker + the drafter contract fields).
+func writeDFlashDraft(t *testing.T, dir string) {
+	t.Helper()
+	cfg := `{"speculators_model_type":"dflash","block_size":8,` +
+		`"aux_hidden_state_layer_ids":[3,13,23,32,42],` +
+		`"speculators_config":{"verifier":{"name":"deepseek-ai/DeepSeek-V4-Flash"}}}`
+	if r := core.WriteFile(core.PathJoin(dir, "config.json"), []byte(cfg), 0o644); !r.OK {
+		t.Fatalf("write dflash config: %v", r.Value)
+	}
+}
+
+// TestDetectDFlashDraft_Good proves a DFlash checkpoint is recognised by its
+// config marker and its drafter contract (block, fused layers, verifier) read.
+func TestDetectDFlashDraft_Good(t *testing.T) {
+	dir := t.TempDir()
+	writeDFlashDraft(t, dir)
+	cfg, ok := DetectDFlashDraft(dir)
+	if !ok {
+		t.Fatal("a speculators_model_type=dflash checkpoint must be recognised")
+	}
+	if cfg.BlockSize != 8 || len(cfg.AuxHiddenLayerIDs) != 5 || cfg.Verifier != "deepseek-ai/DeepSeek-V4-Flash" {
+		t.Fatalf("drafter contract not read: %+v", cfg)
+	}
+}
+
+// TestDetectDFlashDraft_Bad proves a non-DFlash pack (a plain gemma4 target) and a
+// path with no config.json are both declined — recognition is marker-driven.
+func TestDetectDFlashDraft_Bad(t *testing.T) {
+	dir := t.TempDir()
+	writeGemma4Pack(t, dir)
+	if _, ok := DetectDFlashDraft(dir); ok {
+		t.Fatal("a gemma4 pack is not a DFlash drafter")
+	}
+	if _, ok := DetectDFlashDraft(t.TempDir()); ok {
+		t.Fatal("a dir with no config.json is not a DFlash drafter")
+	}
+	if _, ok := DetectDFlashDraft(""); ok {
+		t.Fatal("an empty path is not a DFlash drafter")
+	}
+}
+
+// TestResolveServeDraft_DFlash_StampsMethod proves an explicit --draft path to a
+// DFlash checkpoint resolves to an Active detection stamped model.MTPDFlash, so
+// the boot path recognises it (IsDFlash) and declines the MTP lane.
+func TestResolveServeDraft_DFlash_StampsMethod(t *testing.T) {
+	dir := t.TempDir()
+	writeDFlashDraft(t, dir)
+	det := ResolveServeDraft("/models/target", dir, true)
+	if !det.Active() {
+		t.Fatalf("an explicit DFlash --draft path should be Active: %+v", det)
+	}
+	if det.Method != model.MTPDFlash || !det.IsDFlash() {
+		t.Fatalf("a DFlash drafter must be stamped MTPDFlash: %+v", det)
+	}
+}
+
+// TestResolveServeDraft_NonDFlash_NoStamp proves an explicit non-DFlash drafter
+// path is left unstamped (empty method, IsDFlash false) so the MTP lane still
+// arms for the ordinary draft-model case.
+func TestResolveServeDraft_NonDFlash_NoStamp(t *testing.T) {
+	dir := t.TempDir()
+	writeGemma4Pack(t, dir) // a plain pack, not a DFlash checkpoint
+	det := ResolveServeDraft("/models/target", dir, true)
+	if det.IsDFlash() {
+		t.Fatalf("a non-DFlash drafter must not be stamped MTPDFlash: %+v", det)
+	}
+}
+
+// TestDFlashDraftNotice_Good proves the honest notice names the block, the fused
+// layer count, and the verifier, and states the plain-autoregressive degrade with
+// a pointer to the design memo — the declared-not-linked posture, not a faked lane.
+func TestDFlashDraftNotice_Good(t *testing.T) {
+	dir := t.TempDir()
+	writeDFlashDraft(t, dir)
+	det := ResolveServeDraft("/models/target", dir, true)
+	notice := DFlashDraftNotice(det)
+	for _, want := range []string{"DFlash", "block 8", "5 fused", "deepseek-ai/DeepSeek-V4-Flash", "plain autoregressive", "docs/design-dflash.md"} {
+		if !core.Contains(notice, want) {
+			t.Fatalf("notice missing %q: %s", want, notice)
+		}
+	}
+}
+
+// TestDFlashDraftNotice_Bad proves the notice is empty for a detection that is not
+// a DFlash drafter (nothing to announce).
+func TestDFlashDraftNotice_Bad(t *testing.T) {
+	det := DraftDetection{Source: DraftSourceFlag, DraftPath: "/models/plain-drafter"}
+	if notice := DFlashDraftNotice(det); notice != "" {
+		t.Fatalf("a non-DFlash detection yields no DFlash notice: %q", notice)
 	}
 }
