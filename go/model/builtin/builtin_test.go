@@ -44,10 +44,11 @@ func TestBuiltinRegistersGranite(t *testing.T) {
 	if _, ok := model.LookupArch("granite"); !ok {
 		t.Fatal("model_type granite not registered through builtin")
 	}
-	for _, modelType := range []string{"granitemoe", "granitemoehybrid"} {
-		if _, ok := model.LookupArch(modelType); ok {
-			t.Fatalf("out-of-scope %s registered through builtin", modelType)
-		}
+	if spec, ok := model.LookupArch("granitemoe"); !ok || spec.Composed == nil {
+		t.Fatalf("granitemoe = registered %v composed %v, want composed architecture", ok, spec.Composed != nil)
+	}
+	if _, ok := model.LookupArch("granitemoehybrid"); ok {
+		t.Fatal("out-of-scope granitemoehybrid registered through builtin")
 	}
 }
 
