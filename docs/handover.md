@@ -1,5 +1,56 @@
 # NEXT WAKE (2026-07-16 — #381 SHIPPED: the skip is live, 2.1-2.6x at every depth)
 
+## HEATWAVE ROUND (2026-07-12 midday — Opus fleet rolling; composed lands for real)
+
+- EMBED PAYLOADS REFRESHED (79ed05e): the tracked cmd/lem/*.metallib.gz had
+  drifted from build/dist (a fresh-clone `task build:embed` baked stale
+  kernels). Smoke: bin/lem 154M runs generate + serve with NO
+  MLX_METALLIB_PATH. /bin/ gitignored. Release pre-flight DONE — snider's
+  edit pass on docs/release-v0.12.0-DRAFT.md is the only step left before
+  tag (rebuild binaries at tag time; today's bin/ predates 886d2b7).
+- COMPOSED LOADS REAL PACKS (787ada6): Qwen3.5-0.8B-OptiQ-4bit (867MB,
+  hybrid 18 linear + 6 full attention, qwen3_5) pulled to the HF cache;
+  LoadComposed gained language_model.* normalisation
+  (model.NormalizeWrapperNames), mlx-affine host dequant
+  (mlxaffine.DequantizeTensor; per-module bits/gs overrides honoured,
+  packed-shape cross-check fails loudly), and the mlx [convDim,K,1]
+  depthwise-conv shape. 3 loader pins added. Loads + greedy-generates on
+  engine/metal (host-f32 mixers ~1.6 tok/s — composed GPU speed is future
+  work, by design).
+- #379 LIVE GATE PASS (#10 closed): two-turn serve -state-conversations on
+  the real hybrid — turn 2 recalled turn 1's fact AND prompt_tokens 25 vs
+  29+ full-history replay (wake + append-only proven live). Gate script:
+  /private/tmp/lem-dev/composed_gate.py.
+- TOKENIZER CHATML PARITY (886d2b7): the gate's two leaks root-caused to
+  ENCODE defects, not templates — <|im_start|> was wrongly mapped as a BOS
+  (ghost im_start at the head of every continuation → 'assistant' echo on
+  woken turns) and only special:true added tokens joined the atomic
+  matcher, so qwen's special:false <think>/</think> BPE-split into text
+  (the model never saw its pre-closed think channel → reasoning leaked
+  into content). Fix: added = the full atomic matcher, special = the
+  decode-side skip; qwen BOS mapping removed with rationale. Receipts:
+  Go == HF token-for-token on the real qwen tokenizer (19-id continuation
+  identical); gate turn 1 36→4 tokens clean 'OK Wibble', turn 2 clean
+  'Wibble'. Gemma blast radius zero (no special:false added tokens in
+  gemma packs; <bos> untouched): engine/metal 1547 green, tokenizer 123
+  green (+2 pins). <think> is already in decode/parser's paired reasoning
+  markers, so think-ON requests now split into reasoning_content properly.
+- G2 DEFAULT-MEDIATOR DECISION (deferred item closed): cmd/lem ships NO
+  default mediator — a rewrite-rule policy without a wired mediator
+  refuses to boot (loud + correct, serving/serve.go:111); redact/refuse
+  policies work with plain -policy.
+- FLEET (Opus 4.8, worktree protocol): docs drift sweep MERGED (2c08372 —
+  lem verb/flag surface, campaign env knobs LTHN_SDPA_GEMM_MINKV /
+  LTHN_FLASH_WIN / LTHN_GPU_TRACE=host, MLX pin v0.32.0 confirmed via
+  gitlink, 8 files). QA honest-tests MERGED (570dd34 — gguf
+  dequant-on-load path 20 tests, train/tune 0→100%, welfare, eval bits;
+  the 28-flag fake-coverage class adjudicated as analyser false-positives
+  on 4-slot scenario names — honest tests left alone; analyser-upgrade
+  noted as the real fix). Audio lane (A+C+B per
+  /private/tmp/lem-dev/audio_tower_brief.md) still in flight at write time.
+- dev pushed through 886d2b7 (d412158 → 79ed05e, 787ada6, 2c08372,
+  570dd34, 886d2b7).
+
 **The kv-shared layer skip is BUILT, receipted, and pushed (473c242).**
 sharedLayerSuffixStart validates the non-owner suffix at state build;
 prefillRetainedTokensBatchedDenseChunks arms prefillSkipToLayer on
