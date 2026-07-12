@@ -18,3 +18,15 @@ func BenchmarkTokenizer_Encode(b *testing.B) {
 		_ = tk.Encode(text)
 	}
 }
+
+func BenchmarkTokenizer_EncodePair(b *testing.B) {
+	tk, err := NewTokenizer([]byte(syntheticVocab), true)
+	if err != nil {
+		b.Fatalf("NewTokenizer: %v", err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = tk.EncodePair("reset password?", "the quick brown fox")
+	}
+}

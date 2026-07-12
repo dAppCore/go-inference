@@ -14,48 +14,54 @@ func bindWeights(cfg Config, tensors map[string]safetensors.Tensor) (*Weights, e
 	hiddenSize := cfg.HiddenSize
 	weights := &Weights{}
 	var err error
+	prefix := ""
+	if _, ok := tensors["embeddings.word_embeddings.weight"]; !ok {
+		if _, prefixed := tensors["bert.embeddings.word_embeddings.weight"]; prefixed {
+			prefix = "bert."
+		}
+	}
 
-	if weights.wordEmbeddings, err = tensorFloats(tensors, "embeddings.word_embeddings.weight", cfg.VocabSize*hiddenSize); err != nil {
+	if weights.wordEmbeddings, err = tensorFloats(tensors, prefix+"embeddings.word_embeddings.weight", cfg.VocabSize*hiddenSize); err != nil {
 		return nil, err
 	}
-	if weights.posEmbeddings, err = tensorFloats(tensors, "embeddings.position_embeddings.weight", cfg.MaxPositionEmbeddings*hiddenSize); err != nil {
+	if weights.posEmbeddings, err = tensorFloats(tensors, prefix+"embeddings.position_embeddings.weight", cfg.MaxPositionEmbeddings*hiddenSize); err != nil {
 		return nil, err
 	}
-	if weights.typeEmbeddings, err = tensorFloats(tensors, "embeddings.token_type_embeddings.weight", cfg.TypeVocabSize*hiddenSize); err != nil {
+	if weights.typeEmbeddings, err = tensorFloats(tensors, prefix+"embeddings.token_type_embeddings.weight", cfg.TypeVocabSize*hiddenSize); err != nil {
 		return nil, err
 	}
-	if weights.embLNW, err = tensorFloats(tensors, "embeddings.LayerNorm.weight", hiddenSize); err != nil {
+	if weights.embLNW, err = tensorFloats(tensors, prefix+"embeddings.LayerNorm.weight", hiddenSize); err != nil {
 		return nil, err
 	}
-	if weights.embLNB, err = tensorFloats(tensors, "embeddings.LayerNorm.bias", hiddenSize); err != nil {
+	if weights.embLNB, err = tensorFloats(tensors, prefix+"embeddings.LayerNorm.bias", hiddenSize); err != nil {
 		return nil, err
 	}
 
 	weights.layers = make([]layerWeights, cfg.NumHiddenLayers)
 	for i := 0; i < cfg.NumHiddenLayers; i++ {
-		prefix := core.Sprintf("encoder.layer.%d.", i)
+		layerPrefix := prefix + core.Sprintf("encoder.layer.%d.", i)
 		layer := &weights.layers[i]
 		binds := []struct {
 			dst   *[]float32
 			name  string
 			count int
 		}{
-			{&layer.queryW, prefix + "attention.self.query.weight", hiddenSize * hiddenSize},
-			{&layer.queryB, prefix + "attention.self.query.bias", hiddenSize},
-			{&layer.keyW, prefix + "attention.self.key.weight", hiddenSize * hiddenSize},
-			{&layer.keyB, prefix + "attention.self.key.bias", hiddenSize},
-			{&layer.valueW, prefix + "attention.self.value.weight", hiddenSize * hiddenSize},
-			{&layer.valueB, prefix + "attention.self.value.bias", hiddenSize},
-			{&layer.attnDenseW, prefix + "attention.output.dense.weight", hiddenSize * hiddenSize},
-			{&layer.attnDenseB, prefix + "attention.output.dense.bias", hiddenSize},
-			{&layer.attnLNW, prefix + "attention.output.LayerNorm.weight", hiddenSize},
-			{&layer.attnLNB, prefix + "attention.output.LayerNorm.bias", hiddenSize},
-			{&layer.interW, prefix + "intermediate.dense.weight", cfg.IntermediateSize * hiddenSize},
-			{&layer.interB, prefix + "intermediate.dense.bias", cfg.IntermediateSize},
-			{&layer.outW, prefix + "output.dense.weight", hiddenSize * cfg.IntermediateSize},
-			{&layer.outB, prefix + "output.dense.bias", hiddenSize},
-			{&layer.outLNW, prefix + "output.LayerNorm.weight", hiddenSize},
-			{&layer.outLNB, prefix + "output.LayerNorm.bias", hiddenSize},
+			{&layer.queryW, layerPrefix + "attention.self.query.weight", hiddenSize * hiddenSize},
+			{&layer.queryB, layerPrefix + "attention.self.query.bias", hiddenSize},
+			{&layer.keyW, layerPrefix + "attention.self.key.weight", hiddenSize * hiddenSize},
+			{&layer.keyB, layerPrefix + "attention.self.key.bias", hiddenSize},
+			{&layer.valueW, layerPrefix + "attention.self.value.weight", hiddenSize * hiddenSize},
+			{&layer.valueB, layerPrefix + "attention.self.value.bias", hiddenSize},
+			{&layer.attnDenseW, layerPrefix + "attention.output.dense.weight", hiddenSize * hiddenSize},
+			{&layer.attnDenseB, layerPrefix + "attention.output.dense.bias", hiddenSize},
+			{&layer.attnLNW, layerPrefix + "attention.output.LayerNorm.weight", hiddenSize},
+			{&layer.attnLNB, layerPrefix + "attention.output.LayerNorm.bias", hiddenSize},
+			{&layer.interW, layerPrefix + "intermediate.dense.weight", cfg.IntermediateSize * hiddenSize},
+			{&layer.interB, layerPrefix + "intermediate.dense.bias", cfg.IntermediateSize},
+			{&layer.outW, layerPrefix + "output.dense.weight", hiddenSize * cfg.IntermediateSize},
+			{&layer.outB, layerPrefix + "output.dense.bias", hiddenSize},
+			{&layer.outLNW, layerPrefix + "output.LayerNorm.weight", hiddenSize},
+			{&layer.outLNB, layerPrefix + "output.LayerNorm.bias", hiddenSize},
 		}
 		for _, bind := range binds {
 			values, bindErr := tensorFloats(tensors, bind.name, bind.count)
@@ -65,7 +71,30 @@ func bindWeights(cfg Config, tensors map[string]safetensors.Tensor) (*Weights, e
 			*bind.dst = values
 		}
 	}
+	if cfg.IsCrossEncoder() {
+		if weights.poolerW, err = optionalTensorFloats(tensors, prefix+"pooler.dense.weight", hiddenSize*hiddenSize); err != nil {
+			return nil, err
+		}
+		if weights.poolerW != nil {
+			if weights.poolerB, err = tensorFloats(tensors, prefix+"pooler.dense.bias", hiddenSize); err != nil {
+				return nil, err
+			}
+		}
+		if weights.classifierW, err = tensorFloats(tensors, "classifier.weight", cfg.NumLabels*hiddenSize); err != nil {
+			return nil, err
+		}
+		if weights.classifierB, err = tensorFloats(tensors, "classifier.bias", cfg.NumLabels); err != nil {
+			return nil, err
+		}
+	}
 	return weights, nil
+}
+
+func optionalTensorFloats(tensors map[string]safetensors.Tensor, name string, want int) ([]float32, error) {
+	if _, ok := tensors[name]; !ok {
+		return nil, nil
+	}
+	return tensorFloats(tensors, name, want)
 }
 
 // tensorFloats decodes one named tensor to float32 and checks its element count.
