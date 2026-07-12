@@ -61,6 +61,14 @@ func TestBuiltinRegistersQwen2(t *testing.T) {
 	}
 }
 
+func TestBuiltinRegistersOLMo(t *testing.T) {
+	for _, mt := range []string{"olmo", "olmo2"} {
+		if spec, ok := model.LookupArch(mt); !ok || spec.Composed != nil {
+			t.Fatalf("model_type %q = registered %v composed %v", mt, ok, spec.Composed != nil)
+		}
+	}
+}
+
 func TestBuiltinRegistersPhi(t *testing.T) {
 	for _, mt := range []string{"phi", "phi3"} {
 		if spec, ok := model.LookupArch(mt); !ok || spec.Composed != nil {

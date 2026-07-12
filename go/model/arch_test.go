@@ -23,6 +23,25 @@ func TestArch_QKNormalization_Ugly(t *testing.T) {
 	}
 }
 
+func TestArch_NormPlacement_Good(t *testing.T) {
+	if NormPlacementPre != NormPlacement("pre") {
+		t.Fatalf("NormPlacementPre = %q", NormPlacementPre)
+	}
+}
+
+func TestArch_NormPlacement_Bad(t *testing.T) {
+	if NormPlacementPost != NormPlacement("post") {
+		t.Fatalf("NormPlacementPost = %q", NormPlacementPost)
+	}
+}
+
+func TestArch_NormPlacement_Ugly(t *testing.T) {
+	var placement NormPlacement
+	if placement != NormPlacementUnspecified {
+		t.Fatalf("zero NormPlacement = %q", placement)
+	}
+}
+
 // TestResolveMoEGating covers the gating default: an unset gating resolves to
 // MoEGatingSoftmax (the only router variant the metal engine ships, and gemma4's
 // method), while an explicitly-declared gating passes through unchanged — the path

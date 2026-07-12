@@ -82,3 +82,18 @@ func TestLoaded_LoadedModel_ValidateRequired_Ugly(t *testing.T) {
 		t.Fatal("ValidateRequired: a cache-owning layer with no k_proj: expected an error")
 	}
 }
+
+func TestLoaded_LoadedModel_ValidateRequired_OLMoNormPlacement(t *testing.T) {
+	linear := &Linear{Weight: []byte{1}}
+	baseLayer := LoadedLayer{Q: linear, K: linear, V: linear, O: linear, Gate: linear, Up: linear, Down: linear}
+	baseArch := Arch{NormPlacement: NormPlacementPre, NonParametricLayerNorm: true, Layer: []LayerSpec{{CacheIndex: 0}}}
+	if err := (&LoadedModel{Embed: linear, Layers: []LoadedLayer{baseLayer}}).ValidateRequired(baseArch); err != nil {
+		t.Fatalf("OLMo non-parametric norms rejected: %v", err)
+	}
+	postLayer := baseLayer
+	postLayer.PostAttnNorm, postLayer.PostFFNorm = []byte{1}, []byte{1}
+	postArch := Arch{NormPlacement: NormPlacementPost, Layer: []LayerSpec{{CacheIndex: 0}}}
+	if err := (&LoadedModel{Embed: linear, FinalNorm: []byte{1}, Layers: []LoadedLayer{postLayer}}).ValidateRequired(postArch); err != nil {
+		t.Fatalf("OLMo2 post norms rejected: %v", err)
+	}
+}
