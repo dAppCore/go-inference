@@ -46,10 +46,25 @@
   dequant-on-load path 20 tests, train/tune 0→100%, welfare, eval bits;
   the 28-flag fake-coverage class adjudicated as analyser false-positives
   on 4-slot scenario names — honest tests left alone; analyser-upgrade
-  noted as the real fix). Audio lane (A+C+B per
-  /private/tmp/lem-dev/audio_tower_brief.md) still in flight at write time.
-- dev pushed through 886d2b7 (d412158 → 79ed05e, 787ada6, 2c08372,
-  570dd34, 886d2b7).
+  noted as the real fix).
+- AUDIO LANE LANDED (fded3d4, Mantis #1839 note 2487): E2B/E4B Conformer
+  audio LIVE on metal. Both suspected parity defects were REAL and are
+  fixed — output_proj.bias (max|abs| 14.875) was silently dropped;
+  real-pack OHWI convs were double-scrambled by the torch-OIHW assumption
+  (shape discriminator now routes both). Serve seam wired (audioExtractor
+  held at load; ProjectAudio Conformer bytes-in branch) — CLI -audio +
+  OpenAI input_audio light up with zero serve changes. HF harness: mel
+  golden max|Δ| 4.768e-7 (the go-mlx 1-ULP bar), tower goldens subsample
+  0.999999 / layer0 1.000000 / tower 0.999995 cosine (supervised — skips
+  without the cached e2b). E2E receipt reproduced independently in the
+  main tree: say→afconvert→lem generate -audio transcribes "the quick
+  brown fox jumps over the lazy dog" EXACTLY at 128.7 tok/s decode. NB
+  the ASR prompt from capabilities-audio.md is required — generic
+  "transcribe this" truncates (prompt-shape, not code). Deferred: D
+  (batch/pad mask fidelity), E (HIP port — codex's lane). Post-merge
+  gates: engine/metal + model/gemma4 1,631 green.
+- dev pushed through fded3d4 (d412158 → 79ed05e, 787ada6, 2c08372,
+  570dd34, 886d2b7, 8c828a9, audio 3c614b3..322590b, fded3d4).
 
 **The kv-shared layer skip is BUILT, receipted, and pushed (473c242).**
 sharedLayerSuffixStart validates the non-owner suffix at state build;
