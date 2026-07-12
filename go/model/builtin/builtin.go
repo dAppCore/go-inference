@@ -34,6 +34,8 @@ import (
 	_ "dappco.re/go/inference/model/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
 	_ "dappco.re/go/inference/model/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
 	_ "dappco.re/go/inference/model/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
+	_ "dappco.re/go/inference/model/ernie45"    // ERNIE 4.5 dense text
+	_ "dappco.re/go/inference/model/exaone4"    // EXAONE 4 dense text
 	_ "dappco.re/go/inference/model/falcon"     // falcon (ALiBi transformer; excludes Falcon-H1)
 	_ "dappco.re/go/inference/model/falcon"     // falcon (ALiBi transformer; excludes Falcon-H1)
 	_ "dappco.re/go/inference/model/falcon"     // falcon (ALiBi transformer; excludes Falcon-H1)
@@ -43,6 +45,7 @@ import (
 	_ "dappco.re/go/inference/model/gemma4"     // gemma4 / gemma4_text / gemma4_unified (+ assistant)
 	_ "dappco.re/go/inference/model/gemma4"     // gemma4 / gemma4_text / gemma4_unified (+ assistant)
 	_ "dappco.re/go/inference/model/gemma4"     // gemma4 / gemma4_text / gemma4_unified (+ assistant)
+	_ "dappco.re/go/inference/model/glm4"       // GLM-4 dense text
 	_ "dappco.re/go/inference/model/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
 	_ "dappco.re/go/inference/model/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
 	_ "dappco.re/go/inference/model/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
@@ -50,6 +53,7 @@ import (
 	_ "dappco.re/go/inference/model/gptneox"    // gpt_neox / gptj / gpt_neo
 	_ "dappco.re/go/inference/model/gptneox"    // gpt_neox / gptj / gpt_neo
 	_ "dappco.re/go/inference/model/granite"    // IBM Granite dense (excludes Granite MoE/hybrid)
+	_ "dappco.re/go/inference/model/hunyuan"    // HunYuan v1 dense text
 	_ "dappco.re/go/inference/model/llama"      // llama (dense text)
 	_ "dappco.re/go/inference/model/llama"      // llama (dense text)
 	_ "dappco.re/go/inference/model/llama"      // llama (dense text)
