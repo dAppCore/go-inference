@@ -120,6 +120,60 @@ func TestVision_TextModel_AcceptsImages_Ugly(t *testing.T) {
 	}
 }
 
+// --- AcceptsAudio ------------------------------------------------------
+
+// fakeAudioTokenModel is a configurable [AudioInputTokenModel] double layered
+// over fakeTokenModel — the audio sibling of fakeVisionTokenModel. Only
+// AcceptsAudioInput drives the AcceptsAudio probe; the other three methods are
+// present to satisfy the interface (a checkpoint that carries an audio head
+// declares all four).
+type fakeAudioTokenModel struct {
+	fakeTokenModel
+
+	accepts bool
+}
+
+func (f *fakeAudioTokenModel) AcceptsAudioInput() bool            { return f.accepts }
+func (f *fakeAudioTokenModel) AudioPlaceholderTokenID() int32     { return 0 }
+func (f *fakeAudioTokenModel) AudioPlaceholderBlock(n int) string { return "" }
+func (f *fakeAudioTokenModel) ProjectAudio(a []byte) ([]byte, int, error) {
+	return nil, 0, nil
+}
+
+var _ AudioInputTokenModel = (*fakeAudioTokenModel)(nil)
+
+// TestVision_TextModel_AcceptsAudio_Good pins the positive probe: an engine
+// whose loaded checkpoint shipped an audio head reports true.
+func TestVision_TextModel_AcceptsAudio_Good(t *testing.T) {
+	m := &TextModel{tm: &fakeAudioTokenModel{accepts: true}}
+	if !m.AcceptsAudio() {
+		t.Fatal("AcceptsAudio() = false, want true for an audio-capable loaded checkpoint")
+	}
+}
+
+// TestVision_TextModel_AcceptsAudio_Bad pins the no-seam case: an engine
+// TokenModel that does not implement AudioInputTokenModel at all reports false.
+func TestVision_TextModel_AcceptsAudio_Bad(t *testing.T) {
+	m := &TextModel{tm: &fakeTokenModel{}}
+	if m.AcceptsAudio() {
+		t.Fatal("AcceptsAudio() = true, want false for an engine with no audio seam")
+	}
+}
+
+// TestVision_TextModel_AcceptsAudio_Ugly pins the live-probe distinction (a
+// FAMILY supporting audio does not mean THIS checkpoint shipped the head) and
+// the nil-receiver guard, mirroring AcceptsImages.
+func TestVision_TextModel_AcceptsAudio_Ugly(t *testing.T) {
+	m := &TextModel{tm: &fakeAudioTokenModel{accepts: false}}
+	if m.AcceptsAudio() {
+		t.Fatal("AcceptsAudio() = true, want false: the family supports audio but this checkpoint has no head")
+	}
+	var nilModel *TextModel
+	if nilModel.AcceptsAudio() {
+		t.Fatal("AcceptsAudio() on a nil *TextModel = true, want false")
+	}
+}
+
 // --- chatMultimodal (reached only via TextModel.Chat on an image turn) -----
 
 // TestChatMultimodal_Good walks the full image-turn path: project each image,
