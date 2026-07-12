@@ -3,8 +3,8 @@
 package gguf
 
 import (
-	"math"
 	"context"
+	"math"
 	"sort"
 
 	core "dappco.re/go"
@@ -189,13 +189,30 @@ func QuantizeModelPack(ctx context.Context, opts QuantizeOptions) (*QuantizeResu
 	if err != nil {
 		return nil, core.E("QuantizeModelPack", "load dense safetensors", err)
 	}
-	quantized, err := quantizeGGUFTensors(ctx, tensors, format)
-	if err != nil {
-		return nil, err
+
+	// gemma-4 checkpoints take a dedicated lane: llama.cpp maps the text stack
+	// by canonical names and needs the full gemma4.* hyperparameter set plus the
+	// embedded tokenizer, none of which the generic pipeline produces. Detected
+	// from config.json's model_type; the lane is calibrated to q4_k_m.
+	var quantized []Tensor
+	var metadata []MetadataEntry
+	if configRead := core.ReadFile(core.PathJoin(source.Root, "config.json")); configRead.OK && isGemma4Config(configRead.Value.([]byte)) {
+		if requested != QuantizeQ4_K_M {
+			return nil, core.NewError("gguf: gemma4 GGUF conversion currently supports only q4_k_m (requested " + string(requested) + ")")
+		}
+		quantized, metadata, err = quantizeGemma4ModelPack(source, configRead.Value.([]byte), tensors)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		quantized, err = quantizeGGUFTensors(ctx, tensors, format)
+		if err != nil {
+			return nil, err
+		}
+		metadata = ggufQuantizeMetadata(source, format, opts.Labels)
 	}
 
 	weightPath := core.PathJoin(output, ggufQuantizeOutputWeights)
-	metadata := ggufQuantizeMetadata(source, format, opts.Labels)
 	if err := writeQuantizedGGUF(weightPath, metadata, quantized); err != nil {
 		return nil, core.E("QuantizeModelPack", "write GGUF", err)
 	}

@@ -45,10 +45,14 @@ func gemma4FindEntry(t *testing.T, entries []MetadataEntry, key string) Metadata
 	return MetadataEntry{}
 }
 
+// gemma4TestFeedForward is a six-layer uniform feed-forward width, matching
+// gemma4TestConfig's block count.
+var gemma4TestFeedForward = []int32{6144, 6144, 6144, 6144, 6144, 6144}
+
 // TestGemma4Metadata_gemma4Metadata_Scalars checks the scalar hyperparameters
 // map from config.json to the canonical gemma4.* keys with correct types.
 func TestGemma4Metadata_gemma4Metadata_Scalars(t *testing.T) {
-	entries, err := gemma4Metadata([]byte(gemma4TestConfig), 15, "Gemma-4-E2B-It")
+	entries, err := gemma4Metadata([]byte(gemma4TestConfig), gemma4TestFeedForward, 15, "Gemma-4-E2B-It")
 	if err != nil {
 		t.Fatalf("gemma4Metadata: %v", err)
 	}
@@ -99,10 +103,12 @@ func TestGemma4Metadata_gemma4Metadata_Scalars(t *testing.T) {
 }
 
 // TestGemma4Metadata_gemma4Metadata_Arrays checks the per-layer feed-forward
-// length array (broadcast intermediate_size) and the sliding-window pattern
-// (sliding true / full false) are built at block_count length.
+// length array is carried through verbatim (including a MatFormer double-wide
+// tail) and the sliding-window pattern (sliding true / full false) is built at
+// block_count length.
 func TestGemma4Metadata_gemma4Metadata_Arrays(t *testing.T) {
-	entries, err := gemma4Metadata([]byte(gemma4TestConfig), 15, "")
+	doubleWide := []int32{6144, 6144, 6144, 12288, 12288, 12288}
+	entries, err := gemma4Metadata([]byte(gemma4TestConfig), doubleWide, 15, "")
 	if err != nil {
 		t.Fatalf("gemma4Metadata: %v", err)
 	}
@@ -111,9 +117,9 @@ func TestGemma4Metadata_gemma4Metadata_Arrays(t *testing.T) {
 	if !ok || len(ffnArr) != 6 {
 		t.Fatalf("feed_forward_length = %v (%T), want []int32 len 6", ffn.Value, ffn.Value)
 	}
-	for i, v := range ffnArr {
-		if v != 6144 {
-			t.Errorf("feed_forward_length[%d] = %d, want 6144", i, v)
+	for i := range doubleWide {
+		if ffnArr[i] != doubleWide[i] {
+			t.Errorf("feed_forward_length[%d] = %d, want %d", i, ffnArr[i], doubleWide[i])
 		}
 	}
 	pat := gemma4FindEntry(t, entries, "gemma4.attention.sliding_window_pattern")
@@ -132,7 +138,7 @@ func TestGemma4Metadata_gemma4Metadata_Arrays(t *testing.T) {
 // TestGemma4Metadata_gemma4Metadata_NoName omits general.name when modelName is
 // empty rather than writing a blank string.
 func TestGemma4Metadata_gemma4Metadata_NoName(t *testing.T) {
-	entries, err := gemma4Metadata([]byte(gemma4TestConfig), 15, "")
+	entries, err := gemma4Metadata([]byte(gemma4TestConfig), gemma4TestFeedForward, 15, "")
 	if err != nil {
 		t.Fatalf("gemma4Metadata: %v", err)
 	}
@@ -151,8 +157,12 @@ func TestGemma4Metadata_gemma4Metadata_Bad(t *testing.T) {
 		"missing hyperparams":  `{"text_config": {}}`,
 		"layer_types mismatch": `{"text_config": {"num_hidden_layers": 6, "hidden_size": 1536, "num_attention_heads": 8, "layer_types": ["full_attention"]}}`,
 	} {
-		if _, err := gemma4Metadata([]byte(cfg), 15, ""); err == nil {
+		if _, err := gemma4Metadata([]byte(cfg), gemma4TestFeedForward, 15, ""); err == nil {
 			t.Errorf("gemma4Metadata(%s): want error, got nil", name)
 		}
+	}
+	// A feed_forward_length that does not match block_count is rejected.
+	if _, err := gemma4Metadata([]byte(gemma4TestConfig), []int32{6144, 6144}, 15, ""); err == nil {
+		t.Error("gemma4Metadata(short feed_forward_length): want error, got nil")
 	}
 }
