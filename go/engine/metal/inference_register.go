@@ -87,7 +87,7 @@ func (metalBackend) LoadModel(path string, opts ...inference.LoadOption) core.Re
 			NumLayers:    loaded.NumLayers(),
 			HiddenSize:   loaded.HiddenSize(),
 		}
-		src := &composedTextModel{sm: loaded, tok: tok, modelType: modelType}
+		src := &composedTextModel{sm: loaded, tok: tok, modelType: modelType, numLayers: loaded.NumLayers()}
 		return core.Ok(engine.NewTextModel(src, tok, modelType, info, serveLen))
 	default:
 		if closer, closeOK := tm.(interface{ Close() error }); closeOK {
@@ -108,6 +108,7 @@ type composedTextModel struct {
 	sm        model.SessionModel
 	tok       *tokenizer.Tokenizer
 	modelType string
+	numLayers int
 }
 
 var (
@@ -121,7 +122,7 @@ func (m *composedTextModel) OpenEngineSession() (engine.Session, error) {
 	if m == nil || m.sm == nil {
 		return nil, core.NewError("native.composedTextModel: model is not initialised")
 	}
-	return &composedEngineSession{sm: m.sm}, nil
+	return &composedEngineSession{sm: m.sm, arch: m.modelType, numLayers: m.numLayers}, nil
 }
 
 // Close releases the composed model's resident weights. The composed loader widens the checkpoint to f32
@@ -159,15 +160,23 @@ func chatMLChatTemplate() engine.ChatTemplate {
 	}
 }
 
-// composedEngineSession bridges a composed model.SessionModel to engine.Session for the stateless serve
-// path (engine.TextModel.Generate / Chat): PrefillTokens stores the prompt, and the two generate methods
+// composedEngineSession bridges a composed model.SessionModel to engine.Session for the serve path
+// (engine.TextModel.Generate / Chat): PrefillTokens stores the prompt, and the two generate methods
 // delegate to the composed model's own tested token loop (model.GenerateSampledWithStopTokensTransformEach),
-// which opens the recurrent session and threads every layer's state. The composed recurrent state is not a
-// portable kv.Snapshot, so the KV-capture methods report an explicit unsupported error rather than a wrong
-// snapshot — an honest capability boundary the -state / continuity paths detect and skip.
+// which opens the recurrent session and threads every layer's state.
+//
+// A composed hybrid decodes STATELESS-REPLAY: each generate opens a fresh recurrent composed.ComposedSession
+// and re-prefills the whole token prefix, so the session never holds persistent KV/recurrent tensors — its
+// COMPLETE resumable state is the token prefix. The recurrent conv/delta state (gated-delta layers) is not a
+// transformer KV cache and has no kv.Snapshot Layers representation, so -state capture/restore is a
+// TOKEN-PREFIX snapshot (Tokens, no Layers): on restore the deterministic host-f32 forward recomputes
+// byte-identical recurrent state from the identical prefix, so a resumed conversation continues exactly as an
+// unbroken one — the -state acceptance semantics, expressed through the state the arch actually has.
 type composedEngineSession struct {
-	sm     model.SessionModel
-	prompt []int32
+	sm        model.SessionModel
+	prompt    []int32
+	arch      string // config.json model_type — stamped on the snapshot (informational; restore is token-based)
+	numLayers int    // composed block count — stamped on the snapshot for parity with the native path
 }
 
 var _ engine.Session = (*composedEngineSession)(nil)
@@ -205,21 +214,50 @@ func (s *composedEngineSession) GenerateSampledFromCacheEach(maxNew int, stopTok
 	return model.GenerateSampledWithStopTokensTransformEach(s.sm, sampler, params, s.prompt, maxNew, stopTokens, transform, yield)
 }
 
-// CaptureKVWithOptions is unsupported: the composed hybrid's per-layer recurrent state has no portable KV
-// snapshot representation, so it reports the boundary rather than emitting a wrong one.
+// CaptureKVWithOptions captures the session's resumable state as a TOKEN-PREFIX kv.Snapshot: the retained
+// token prefix, no Layers (the composed hybrid holds no persistent KV/recurrent tensors — see the type doc).
+// RestoreFromKV reinstates the prefix and the next generate recomputes byte-identical recurrent state, so
+// the snapshot resumes the conversation exactly. opts are ignored: there is no KV cache to window or de-float.
 func (s *composedEngineSession) CaptureKVWithOptions(kv.CaptureOptions) (*kv.Snapshot, error) {
-	return nil, core.NewError("native.composedEngineSession: composed recurrent state has no portable KV snapshot")
+	if s == nil {
+		return nil, core.NewError("native.composedEngineSession.CaptureKV: nil session")
+	}
+	if len(s.prompt) == 0 {
+		return nil, core.NewError("native.composedEngineSession.CaptureKV: empty session (nothing prefilled)")
+	}
+	return &kv.Snapshot{
+		Version:      kv.SnapshotVersion,
+		Architecture: s.arch,
+		Tokens:       append([]int32(nil), s.prompt...),
+		TokenOffset:  len(s.prompt),
+		NumLayers:    s.numLayers,
+	}, nil
 }
 
-// RangeKVBlocks is unsupported for the composed hybrid (no portable KV snapshot — see CaptureKVWithOptions).
+// RangeKVBlocks is unsupported for the composed hybrid: it streams the retained KV cache as per-token blocks
+// (the serve-continuity sleep lane), but a composed session holds no KV cache to stream. The token-prefix
+// snapshot path (CaptureKVWithOptions / RestoreFromKV) is composed's save/restore — `generate -state` and
+// the snapshot-strategy wake resume through it; the block-streaming sleep lane does not apply.
 func (s *composedEngineSession) RangeKVBlocks(int, kv.CaptureOptions, func(kv.Block) (bool, error)) error {
-	return core.NewError("native.composedEngineSession: composed recurrent state has no portable KV snapshot")
+	return core.NewError("native.composedEngineSession.RangeKVBlocks: composed has no KV cache to stream as blocks; save/restore uses the token-prefix snapshot (CaptureKV/RestoreFromKV)")
 }
 
-// RestoreFromKV is unsupported for the composed hybrid (its recurrent state cannot be rebuilt from a KV
-// snapshot — see CaptureKVWithOptions).
-func (s *composedEngineSession) RestoreFromKV(context.Context, *kv.Snapshot) error {
-	return core.NewError("native.composedEngineSession: composed recurrent state cannot be restored from a KV snapshot")
+// RestoreFromKV reinstates a token-prefix snapshot captured by CaptureKVWithOptions: it takes the snapshot's
+// token prefix as the session prefix; the next generate re-prefills it and recomputes byte-identical
+// recurrent state (composed decode is deterministic host f32). Layers, if any, are ignored — a composed
+// snapshot never carries KV slabs.
+func (s *composedEngineSession) RestoreFromKV(_ context.Context, snapshot *kv.Snapshot) error {
+	if s == nil {
+		return core.NewError("native.composedEngineSession.RestoreFromKV: nil session")
+	}
+	if snapshot == nil {
+		return core.NewError("native.composedEngineSession.RestoreFromKV: nil snapshot")
+	}
+	if len(snapshot.Tokens) == 0 {
+		return core.NewError("native.composedEngineSession.RestoreFromKV: snapshot carries no token prefix")
+	}
+	s.prompt = append(s.prompt[:0], snapshot.Tokens...)
+	return nil
 }
 
 // Close releases the session state (none held beyond the stored prompt).
