@@ -1175,9 +1175,13 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 		if trackHistory {
 			history = make([]int32, 0, generate.MaxTokens)
 		}
-		useBatchedPrefill := hipGemma4Q4CanUseBatchedGeneratePrefill(cfg) && !hostSampling
+		// Prompt-state production is independent of how the final logits are
+		// sampled. Sampling used to force the token-at-a-time prefill producer,
+		// flattening 12B logits while preserving many argmaxes. Batched prefill
+		// owns every compatible prompt; the selected sampler consumes its last row.
+		useBatchedPrefill := hipGemma4Q4CanUseBatchedGeneratePrefill(cfg)
 		disableBatchedDecode := engineConfig.DisableBatchedDecode || core.Env("GO_ROCM_GEMMA4_Q4_DISABLE_BATCHED_DECODE") == "1"
-		useBatchedDecode := useBatchedPrefill && !disableBatchedDecode && !deviceCandidateSampling && !deviceTopKSampling
+		useBatchedDecode := useBatchedPrefill && !disableBatchedDecode && !deviceCandidateSampling
 		if attentionWorkspace != nil {
 			if err := hipGemma4Q4EnsureAttentionWorkspacePrefillCapacity(model.driver, attentionWorkspace, cfg, prefillPlan, useBatchedPrefill); err != nil {
 				runErr = err
@@ -1286,6 +1290,19 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 				}
 				haveCurrent = true
 			}
+			if hostSampling {
+				outputRow := ubatch.OutputRow
+				if outputRow < 0 {
+					outputRow = len(ubatch.Tokens) - 1
+				}
+				current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], forward.FinalHidden, len(ubatch.Tokens), outputRow, req.Epsilon, generate, suppressTokens, history, rand.Float64(), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
+				if err != nil {
+					_ = forward.Close()
+					runErr = err
+					return
+				}
+				haveCurrent = true
+			}
 			nextDeviceState, err := hipGemma4Q4DeviceDecodeStateFromPrefillForward(forward, deviceKVMode)
 			closeErr := forward.Close()
 			if err != nil {
@@ -1361,6 +1378,7 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 					SuppressTokens:   suppressTokens,
 					GreedyBuffer:     finalGreedyBuffer,
 					Workspace:        attentionWorkspace,
+					ReturnHidden:     hostSampling,
 				})
 				if err != nil {
 					runErr = err
@@ -1369,7 +1387,16 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 				previousDeviceState := deviceState
 				deviceState = advanced.DeviceState
 				advanced.DeviceState = nil
-				current = advanced.Current
+				if hostSampling {
+					current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], advanced.Current.DeviceFinalHidden, 1, 0, req.Epsilon, generate, suppressTokens, history, rand.Float64(), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
+					if err != nil {
+						_ = advanced.Close()
+						runErr = err
+						return
+					}
+				} else {
+					current = advanced.Current
+				}
 				position = advanced.Position
 				hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
 				if err := advanced.Close(); err != nil {
@@ -1438,6 +1465,39 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 			position++
 		}
 	}, func() error { return runErr }
+}
+
+func hipGemma4Q4SampleBatchedPrefillRow(ctx context.Context, driver nativeHIPDriver, last hipGemma4Q4Layer0Config, finalHidden *hipDeviceByteBuffer, tokenCount, row int, epsilon float32, generate inference.GenerateConfig, suppressTokens, history []int32, draw float64, finalGreedyBuffer *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace, deviceTopK bool) (hipGemma4Q4ForwardResult, error) {
+	if finalHidden == nil || row < 0 || row >= tokenCount || finalHidden.Count() != tokenCount*last.HiddenSize {
+		return hipGemma4Q4ForwardResult{}, core.E(hipGemma4Q4Layer0Operation, "batched prefill sample row is invalid", nil)
+	}
+	rowHidden := &hipDeviceByteBuffer{driver: driver, pointer: finalHidden.Pointer() + nativeDevicePointer(row*last.HiddenSize*4), count: last.HiddenSize, sizeBytes: uint64(last.HiddenSize * 4), borrowed: true, label: "batched prefill final hidden row"}
+	finalNormCfg := last.FinalNorm
+	finalNormCfg.Epsilon = epsilon
+	finalNorm, err := hipRunRMSNormKernelWithDeviceInputWeightConfig(ctx, driver, rowHidden, finalNormCfg)
+	if err != nil {
+		return hipGemma4Q4ForwardResult{}, err
+	}
+	defer finalNorm.Close()
+	if deviceTopK {
+		greedy, greedyDevice, err := hipRunMLXQ4ProjectionSoftcapSampleKernelWithDeviceInputBufferSuppress(ctx, driver, finalNorm, last.LMHeadProjection, last.FinalLogitSoftcap, generate.TopK, generate.Temperature, generate.TopP, draw, finalGreedyBuffer, suppressTokens, workspace)
+		return hipGemma4Q4ForwardResult{Greedy: greedy, GreedyDevice: greedyDevice}, err
+	}
+	logitsBuffer, err := hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx, driver, finalNorm, last.LMHeadProjection)
+	if err != nil {
+		return hipGemma4Q4ForwardResult{}, err
+	}
+	defer logitsBuffer.Close()
+	logits, err := hipReadFloat32DeviceOutput(logitsBuffer, hipGemma4Q4Layer0Operation, "batched prefill logits", last.LMHeadProjection.Rows)
+	if err != nil {
+		return hipGemma4Q4ForwardResult{}, err
+	}
+	logits, err = hipGemma4Q4SoftcapLogits(logits, last.FinalLogitSoftcap)
+	if err != nil {
+		return hipGemma4Q4ForwardResult{}, err
+	}
+	greedy, err := hipGemma4Q4HostSampleResult(logits, generate, suppressTokens, history, draw)
+	return hipGemma4Q4ForwardResult{Logits: logits, Greedy: greedy}, err
 }
 
 func hipGemma4Q4DeviceGreedyUnrollEnabled(generate inference.GenerateConfig, hostSampling, deviceCandidateSampling, deviceTopKSampling bool, workspace *hipAttentionHeadsChunkedWorkspace, current hipGemma4Q4ForwardResult) bool {

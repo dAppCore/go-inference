@@ -113,16 +113,20 @@ func hipFinishLogitSpreadReceipts(receipts *hipLogitSpreadReceipts) {
 	core.Println("HIP_LOGIT_SPREAD_BEGIN")
 	core.Println("arm\tstage\tstep\tcount\tmax\tmean\tstddev\ttop20(token:logit)")
 	for _, entry := range receipts.snapshot() {
-		pairs := ""
-		for index, pair := range entry.Top {
-			if index > 0 {
-				pairs += ","
-			}
-			pairs += core.Sprintf("%d:%.9g", pair.TokenID, pair.Logit)
-		}
-		core.Println(core.Sprintf("%s\t%s\t%d\t%d\t%.9g\t%.9g\t%.9g\t%s", entry.Arm, entry.Stage, entry.Step, entry.Count, entry.Max, entry.Mean, entry.StdDev, pairs))
+		core.Println(hipFormatLogitSpreadSummary(entry))
 	}
 	core.Println("HIP_LOGIT_SPREAD_END")
+}
+
+func hipFormatLogitSpreadSummary(entry hipLogitSpreadSummary) string {
+	pairs := ""
+	for index, pair := range entry.Top {
+		if index > 0 {
+			pairs += ","
+		}
+		pairs += core.Sprintf("%d:%.9g", pair.TokenID, pair.Logit)
+	}
+	return core.Sprintf("%s\t%s\t%d\t%d\t%.9g\t%.9g\t%.9g\t%s", entry.Arm, entry.Stage, entry.Step, entry.Count, entry.Max, entry.Mean, entry.StdDev, pairs)
 }
 
 func (receipts *hipLogitSpreadReceipts) recordNext(arm, stage string, logits []float32) {
