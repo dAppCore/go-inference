@@ -10,6 +10,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/gguf"
+	"dappco.re/go/inference/model/quant/gptq"
 	"dappco.re/go/inference/model/quant/mlxaffine"
 )
 
@@ -33,6 +34,7 @@ func runQuantCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	groupSize := fs.Int("group-size", 64, "affine quantisation group size — MLX lane")
 	out := fs.String("o", "", "output model directory (default: <src>-<bits>bit, or <src>-gguf-<format>)")
 	ggufFormat := fs.String("gguf", "", "instead of MLX affine, run the GGUF lane in this format (q4_k_m, q8_0, q5_k, q6_k, …)")
+	gptqFormat := fs.Bool("gptq", false, "instead of MLX affine, write HF GPTQ qweight/qzeros/scales/g_idx tensors")
 	fs.Usage = quantUsage(fs, stderr)
 	// Two-phase parse so the <src-model-dir> positional may appear before OR after the
 	// flags (Go's flag stops at the first non-flag): the first Parse consumes any
@@ -55,11 +57,41 @@ func runQuantCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		core.Print(stderr, "%s quant: %s has no *.safetensors shards", cliName(), src)
 		return 1
 	}
+	if *gptqFormat && core.Trim(*ggufFormat) != "" {
+		core.Print(stderr, "%s quant: -gptq and -gguf are mutually exclusive", cliName())
+		return 2
+	}
 
 	if core.Trim(*ggufFormat) != "" {
 		return runQuantGGUF(ctx, src, *out, *ggufFormat, stdout, stderr)
 	}
+	if *gptqFormat {
+		return runQuantGPTQ(ctx, src, *out, *bits, *groupSize, stdout, stderr)
+	}
 	return runQuantMLXAffine(ctx, src, *out, *bits, *groupSize, stdout, stderr)
+}
+
+func runQuantGPTQ(ctx context.Context, src, out string, bits, groupSize int, stdout, stderr io.Writer) int {
+	outDir := out
+	if core.Trim(outDir) == "" {
+		outDir = defaultOutDir(src, core.Sprintf("gptq-%dbit", bits))
+	}
+	core.Print(stdout, "quant (GPTQ %d-bit, group %d): %s -> %s", bits, groupSize, src, outDir)
+	progress := func(name string, quantised bool, index, total int) {
+		verb := "copy    "
+		if quantised {
+			verb = "quantise"
+		}
+		core.Print(stderr, "[%4d/%4d] %s  %s", index, total, verb, name)
+	}
+	result, err := gptq.ConvertSnapshot(ctx, src, outDir, gptq.Options{Bits: bits, GroupSize: groupSize, Symmetric: true}, progress)
+	if err != nil {
+		core.Print(stderr, "%s quant: %s", cliName(), err.Error())
+		return 1
+	}
+	core.Print(stdout, "done: %d tensors (%d quantised, %d passed through), %s in -> %s out", result.TensorCount, result.QuantizedWeights, result.PassthroughCount, humanBytes(result.SourceBytes), humanBytes(result.OutputBytes))
+	core.Print(stdout, "wrote %s", result.WeightFile)
+	return 0
 }
 
 // parseWithPositional parses fs allowing the single positional argument to sit before
