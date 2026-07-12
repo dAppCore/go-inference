@@ -72,6 +72,12 @@ func silu(v float64) float64 { return v / (1 + math.Exp(-v)) }
 // deterministic per build either way.
 var ProjMatMulInto func(out, x, w []float32, M, K, N int) ([]float32, error)
 
+// MLPDevice is the fused-SwiGLU device hook: gate/up GEMMs, the silu-and-multiply glue, and the
+// down GEMM encoded into ONE command buffer with device-resident intermediates — one round-trip
+// where the per-projection hook pays three. Same AX-8 shape as ProjMatMulInto; nil runs the
+// per-projection path.
+var MLPDevice func(gate, up, down, x []float32, L, D, FF int) ([]float32, error)
+
 // deviceMinWork is the M·K·N floor below which matNTInto ignores the device hook — a tiny GEMV's
 // command-buffer round-trip outweighs its compute, so sub-MMAC shapes stay on the host path.
 const deviceMinWork = 1 << 20
@@ -165,6 +171,11 @@ func rmsNormRowsPlain(x, w []float32, rows, d int, eps float32) []float32 {
 
 // swiglu runs the SwiGLU MLP over x [L,D] → [L,D].
 func (mlp *MLP) forward(x []float32, L, D int) []float32 {
+	if MLPDevice != nil && L*D*mlp.FF >= deviceMinWork {
+		if out, err := MLPDevice(mlp.Gate, mlp.Up, mlp.Down, x, L, D, mlp.FF); err == nil {
+			return out
+		}
+	}
 	g := matNT(x, mlp.Gate, L, D, mlp.FF) // [L,FF]
 	u := matNT(x, mlp.Up, L, D, mlp.FF)   // [L,FF]
 	h := make([]float32, L*mlp.FF)

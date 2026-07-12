@@ -15,4 +15,5 @@ import "dappco.re/go/inference/model/composed"
 // command-buffer round-trip outweighs its compute.
 func init() {
 	composed.ProjMatMulInto = MatMulF32NTInto
+	composed.MLPDevice = ComposedMLPDevice
 }
