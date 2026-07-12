@@ -27,6 +27,7 @@ type AudioTower struct {
 	loaded    *model.LoadedAudio
 	extractor *audio.FeatureExtractor
 	mapping   *safetensors.DirMapping
+	gemm      audio.GEMM
 }
 
 // LoadAudioTower assembles the Gemma 4 audio tower + mel extractor from a safetensors model directory.
@@ -63,7 +64,7 @@ func LoadAudioTower(dir string) (*AudioTower, error) {
 		}
 		return nil, core.E("hip.LoadAudioTower", "build mel feature extractor", err)
 	}
-	return &AudioTower{loaded: loaded.Audio, extractor: extractor, mapping: mapping}, nil
+	return &AudioTower{loaded: loaded.Audio, extractor: extractor, mapping: mapping, gemm: newSystemHIPAudioGEMM()}, nil
 }
 
 // Project runs one decoded waveform (16 kHz mono float32, [-1,1]) through the tower: mel extract →
@@ -78,7 +79,7 @@ func (a *AudioTower) Project(waveform []float32) (features []float32, softTokens
 	if err != nil {
 		return nil, 0, core.E("hip.AudioTower.Project", "mel feature extraction", err)
 	}
-	features, err = audio.Encode(mel, frames, melBins, a.loaded, nil)
+	features, err = audio.EncodeWithGEMM(mel, frames, melBins, a.loaded, nil, a.gemm)
 	if err != nil {
 		return nil, 0, core.E("hip.AudioTower.Project", "conformer encode", err)
 	}
