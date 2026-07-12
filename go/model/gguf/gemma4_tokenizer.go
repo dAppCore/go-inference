@@ -153,17 +153,17 @@ func gemma4Tokenizer(tokenizerJSON []byte) ([]MetadataEntry, error) {
 	}
 	return []MetadataEntry{
 		{Key: "tokenizer.ggml.model", ValueType: ValueTypeString, Value: gemma4Arch},
-		{Key: "tokenizer.ggml.tokens", ValueType: ggufValueTypeArray, Value: tokens},
-		{Key: "tokenizer.ggml.scores", ValueType: ggufValueTypeArray, Value: scores},
-		{Key: "tokenizer.ggml.token_type", ValueType: ggufValueTypeArray, Value: tokenType},
-		{Key: "tokenizer.ggml.merges", ValueType: ggufValueTypeArray, Value: merges},
+		{Key: "tokenizer.ggml.tokens", ValueType: ValueTypeArray, Value: tokens},
+		{Key: "tokenizer.ggml.scores", ValueType: ValueTypeArray, Value: scores},
+		{Key: "tokenizer.ggml.token_type", ValueType: ValueTypeArray, Value: tokenType},
+		{Key: "tokenizer.ggml.merges", ValueType: ValueTypeArray, Value: merges},
 		u32("tokenizer.ggml.bos_token_id", bos),
 		u32("tokenizer.ggml.eos_token_id", eos),
 		u32("tokenizer.ggml.unknown_token_id", unk),
 		u32("tokenizer.ggml.padding_token_id", pad),
 		u32("tokenizer.ggml.mask_token_id", mask),
-		{Key: "tokenizer.ggml.add_bos_token", ValueType: ggufValueTypeBool, Value: gemma4DefaultAddBOSToken},
-		{Key: "tokenizer.ggml.add_space_prefix", ValueType: ggufValueTypeBool, Value: gemma4DefaultAddSpacePrefix},
+		{Key: "tokenizer.ggml.add_bos_token", ValueType: ValueTypeBool, Value: gemma4DefaultAddBOSToken},
+		{Key: "tokenizer.ggml.add_space_prefix", ValueType: ValueTypeBool, Value: gemma4DefaultAddSpacePrefix},
 	}, nil
 }
 

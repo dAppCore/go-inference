@@ -15,9 +15,9 @@ import "testing"
 func benchTensorInfos(n int) []TensorInfo {
 	out := make([]TensorInfo, n)
 	for i := range out {
-		var typ uint32 = ggufTensorTypeQ4K
+		var typ uint32 = TensorTypeQ4K
 		if i%4 == 0 {
-			typ = ggufTensorTypeF32 // a few dense tensors alongside the quantised majority
+			typ = TensorTypeF32 // a few dense tensors alongside the quantised majority
 		}
 		out[i] = TensorInfo{Name: "blk.weight", Type: typ, Shape: []uint64{256, 2048}}
 	}

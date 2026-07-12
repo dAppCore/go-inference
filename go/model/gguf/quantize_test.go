@@ -246,7 +246,7 @@ func TestQuantize_loadDenseSafetensors_Ugly(t *testing.T) {
 }
 
 func TestQuantize_quantizeGGUFTensor_Good(t *testing.T) {
-	tensor := denseSafetensor{Name: "t", Shape: []uint64{32}, Data: rampBlock(32)}
+	tensor := DenseSafetensor{Name: "t", Shape: []uint64{32}, Data: rampBlock(32)}
 	quantized, err := quantizeGGUFTensor(tensor, QuantizeQ8_0)
 	if err != nil {
 		t.Fatalf("quantizeGGUFTensor: %v", err)
@@ -260,13 +260,13 @@ func TestQuantize_quantizeGGUFTensor_Bad(t *testing.T) {
 	// Block-incompatible tensors (a multimodal pack's scalar clips, tiny
 	// biases) fall back to raw F32 storage — llama.cpp's own quantizer does
 	// the same — rather than failing the whole model.
-	tensor := denseSafetensor{Name: "t", Shape: []uint64{10}, Data: []float32{0, 1, -2, 3.5, 4, 5, 6, 7, 8, 9}}
+	tensor := DenseSafetensor{Name: "t", Shape: []uint64{10}, Data: []float32{0, 1, -2, 3.5, 4, 5, 6, 7, 8, 9}}
 	got, err := quantizeGGUFTensor(tensor, QuantizeQ8_0)
 	if err != nil {
 		t.Fatalf("quantizeGGUFTensor(non-block-aligned): want F32 fallback, got error %v", err)
 	}
-	if got.Type != ggufTensorTypeF32 {
-		t.Fatalf("fallback Type = %d, want F32 (%d)", got.Type, ggufTensorTypeF32)
+	if got.Type != TensorTypeF32 {
+		t.Fatalf("fallback Type = %d, want F32 (%d)", got.Type, TensorTypeF32)
 	}
 	if len(got.Data) != 40 {
 		t.Fatalf("fallback bytes = %d, want 40 (10 raw f32)", len(got.Data))
@@ -285,8 +285,8 @@ func TestQuantize_isMultimodalTowerTensor_Good(t *testing.T) {
 		"model.layers.0.self_attn.q_proj.weight":                   false,
 		"lm_head.weight":                                           false,
 	} {
-		if got := isMultimodalTowerTensor(name); got != want {
-			t.Fatalf("isMultimodalTowerTensor(%q) = %v, want %v", name, got, want)
+		if got := IsMultimodalTowerTensor(name); got != want {
+			t.Fatalf("IsMultimodalTowerTensor(%q) = %v, want %v", name, got, want)
 		}
 	}
 }
@@ -296,8 +296,8 @@ func TestQuantize_ggufQuantizeLayout_Good(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ggufQuantizeLayout(Q6_K): %v", err)
 	}
-	if tensorType != ggufTensorTypeQ6K || blockSize != 256 || bytesPerBlock != 210 {
-		t.Errorf("ggufQuantizeLayout(Q6_K) = (%d,%d,%d), want (%d,256,210)", tensorType, blockSize, bytesPerBlock, ggufTensorTypeQ6K)
+	if tensorType != TensorTypeQ6K || blockSize != 256 || bytesPerBlock != 210 {
+		t.Errorf("ggufQuantizeLayout(Q6_K) = (%d,%d,%d), want (%d,256,210)", tensorType, blockSize, bytesPerBlock, TensorTypeQ6K)
 	}
 }
 

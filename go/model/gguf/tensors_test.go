@@ -175,9 +175,9 @@ func TestTensors_GgufTensorNativeStorage_Good(t *testing.T) {
 		wantDtype string
 		wantSize  uint64
 	}{
-		{ggufTensorTypeF32, 4, "F32", 16},
+		{TensorTypeF32, 4, "F32", 16},
 		{ggufTensorTypeF16, 4, "F16", 8},
-		{ggufTensorTypeBF16, 4, "BF16", 8},
+		{TensorTypeBF16, 4, "BF16", 8},
 		{TensorTypeQ4_0, 32, "F16", 18}, // 1 block × 18 bytes on-disk
 		{TensorTypeQ8_0, 32, "F16", 34}, // 1 block × 34 bytes on-disk
 	}
@@ -311,7 +311,7 @@ func TestTensors_LoadTensors_Good(t *testing.T) {
 
 	path := core.PathJoin(t.TempDir(), "load.gguf")
 	tensors := []Tensor{
-		{Name: "dense.weight", Type: ggufTensorTypeF32, Shape: []uint64{4}, Data: denseBytes},
+		{Name: "dense.weight", Type: TensorTypeF32, Shape: []uint64{4}, Data: denseBytes},
 		{Name: "quant.weight", Type: TensorTypeQ8_0, Shape: []uint64{32}, Data: quantizeQ8_0(rampBlock(32))},
 	}
 	metadata := []MetadataEntry{
@@ -416,7 +416,7 @@ func TestTensors_GgufLoadTensorData_Good(t *testing.T) {
 		wantDtype string
 		wantLen   int
 	}{
-		{"f32", ggufTensorTypeF32, []uint64{4}, f32, "F32", 16},
+		{"f32", TensorTypeF32, []uint64{4}, f32, "F32", 16},
 		{"q8_0", TensorTypeQ8_0, []uint64{32}, quantizeQ8_0(rampBlock(32)), "F16", 64},
 		{"q4_0", TensorTypeQ4_0, []uint64{32}, quantizeQ4_0(rampBlock(32)), "F16", 64},
 	}
@@ -448,9 +448,9 @@ func TestTensors_GgufLoadTensorData_Ugly(t *testing.T) {
 		dataStart uint64
 		dataLen   int
 	}{
-		{"offset-overflow", ggufTensorTypeF32, math.MaxUint64, 1, 64},
-		{"end-overflow", ggufTensorTypeF32, math.MaxUint64 - 10, 0, 64},
-		{"out-of-range", ggufTensorTypeF32, 0, 0, 8}, // F32[4] needs 16, only 8 present
+		{"offset-overflow", TensorTypeF32, math.MaxUint64, 1, 64},
+		{"end-overflow", TensorTypeF32, math.MaxUint64 - 10, 0, 64},
+		{"out-of-range", TensorTypeF32, 0, 0, 8}, // F32[4] needs 16, only 8 present
 		{"unsupported-type", 999, 0, 0, 64},
 	}
 	for _, tc := range cases {

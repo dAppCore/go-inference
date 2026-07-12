@@ -9,8 +9,8 @@ import "fmt"
 // leaving that same tensor at the Q8_0 bulk on every layer.
 func Example_gemma4TensorType() {
 	fmt.Println(
-		gemma4TensorType(QuantizeQ4_K_M, "blk.6.ffn_down.weight", 6, 35) == ggufTensorTypeQ6K,
-		gemma4TensorType(QuantizeQ4_K_M, "blk.5.ffn_down.weight", 5, 35) == ggufTensorTypeQ4K,
+		gemma4TensorType(QuantizeQ4_K_M, "blk.6.ffn_down.weight", 6, 35) == TensorTypeQ6K,
+		gemma4TensorType(QuantizeQ4_K_M, "blk.5.ffn_down.weight", 5, 35) == TensorTypeQ4K,
 		gemma4TensorType(QuantizeQ8_0, "blk.6.ffn_down.weight", 6, 35) == TensorTypeQ8_0,
 	)
 	// Output: true true true

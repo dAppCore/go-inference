@@ -54,7 +54,7 @@ func TestGemma4Convert_gemma4RopeFreqsTensor_Gemma4E2B(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gemma4RopeFreqsTensor: %v", err)
 	}
-	if tensor.Name != "rope_freqs.weight" || tensor.Type != ggufTensorTypeF32 {
+	if tensor.Name != "rope_freqs.weight" || tensor.Type != TensorTypeF32 {
 		t.Errorf("tensor name/type = %q/%d, want rope_freqs.weight/F32", tensor.Name, tensor.Type)
 	}
 	if len(tensor.Shape) != 1 || tensor.Shape[0] != 256 {
@@ -116,10 +116,10 @@ func TestGemma4Convert_float32ToBF16(t *testing.T) {
 // docs/design-quant-formats.md, gated on an operator decision) and on a
 // K-quant tensor that is not a whole number of blocks.
 func TestGemma4Convert_encodeGemma4TensorData_Unsupported(t *testing.T) {
-	if _, err := encodeGemma4TensorData([]float32{1, 2, 3}, ggufTensorTypeQ2K); err == nil {
+	if _, err := encodeGemma4TensorData([]float32{1, 2, 3}, TensorTypeQ2K); err == nil {
 		t.Error("want error for unsupported encoder type")
 	}
-	if _, err := encodeGemma4TensorData(make([]float32, 100), ggufTensorTypeQ4K); err == nil {
+	if _, err := encodeGemma4TensorData(make([]float32, 100), TensorTypeQ4K); err == nil {
 		t.Error("want error for non-block-aligned Q4_K tensor")
 	}
 }
@@ -145,14 +145,14 @@ func TestGemma4Convert_encodeGemma4TensorData_Q8_0(t *testing.T) {
 // (added for #53's q3_k_m export lane) accepts a block-aligned (256-element)
 // tensor and rejects a non-aligned one.
 func TestGemma4Convert_encodeGemma4TensorData_Q3_K(t *testing.T) {
-	data, err := encodeGemma4TensorData(make([]float32, 512), ggufTensorTypeQ3K)
+	data, err := encodeGemma4TensorData(make([]float32, 512), TensorTypeQ3K)
 	if err != nil {
 		t.Fatalf("encodeGemma4TensorData(512 elements, Q3_K): %v", err)
 	}
 	if len(data) != 2*110 { // 512/256 blocks * 110 bytes/block.
 		t.Errorf("len(data) = %d, want %d", len(data), 2*110)
 	}
-	if _, err := encodeGemma4TensorData(make([]float32, 100), ggufTensorTypeQ3K); err == nil {
+	if _, err := encodeGemma4TensorData(make([]float32, 100), TensorTypeQ3K); err == nil {
 		t.Error("want error for non-block-aligned (100-element) Q3_K tensor")
 	}
 }

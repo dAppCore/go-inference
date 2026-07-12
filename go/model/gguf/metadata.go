@@ -148,7 +148,7 @@ func skipGGUFValue(reader *core.BufReader, valueType uint32, scratch []byte) err
 			return errGGUFStringTooLong
 		}
 		return discardGGUFBytes(reader, length)
-	case ggufValueTypeArray:
+	case ValueTypeArray:
 		if _, err := io.ReadFull(reader, scratch[:4]); err != nil {
 			return core.Errorf("gguf: read gguf array element type: %w", err)
 		}
@@ -181,7 +181,7 @@ func skipGGUFValue(reader *core.BufReader, valueType uint32, scratch []byte) err
 // unknown ids.
 func ggufValueFixedSize(valueType uint32) int {
 	switch valueType {
-	case ggufValueTypeUint8, ggufValueTypeInt8, ggufValueTypeBool:
+	case ggufValueTypeUint8, ggufValueTypeInt8, ValueTypeBool:
 		return 1
 	case ggufValueTypeUint16, ggufValueTypeInt16:
 		return 2
