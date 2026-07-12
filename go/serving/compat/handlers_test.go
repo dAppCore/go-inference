@@ -24,6 +24,10 @@ type fakeTextModel struct {
 	tokens []inference.Token
 	info   inference.ModelInfo
 	mtype  string
+	// received captures the last Chat call's messages — nil unless a test
+	// reads it, and never inspected by the existing happy-path tests, so this
+	// is purely additive (#37: tool_choice / capability-gate coverage).
+	received []inference.Message
 }
 
 func newFakeTextModel() *fakeTextModel {
@@ -48,7 +52,8 @@ func (m *fakeTextModel) Generate(context.Context, string, ...inference.GenerateO
 	return m.stream()
 }
 
-func (m *fakeTextModel) Chat(context.Context, []inference.Message, ...inference.GenerateOption) iter.Seq[inference.Token] {
+func (m *fakeTextModel) Chat(_ context.Context, messages []inference.Message, _ ...inference.GenerateOption) iter.Seq[inference.Token] {
+	m.received = messages
 	return m.stream()
 }
 
@@ -280,6 +285,84 @@ func TestAnthropicMessagesHandler_Streaming_Good(t *testing.T) {
 	body := rec.Body.String()
 	if !core.Contains(body, "event:") || !core.Contains(body, "Hello") {
 		t.Fatalf("stream /v1/messages body = %s, want SSE event frames with content", body)
+	}
+}
+
+// TestAnthropicMessagesHandler_Good_ToolsRenderedForGemma4 pins the declare
+// half of the tool round trip through serving/compat's own handler (as
+// opposed to the openai package's unit-level coverage): a tools request
+// against the default gemma4 fakeTextModel renders the declaration into the
+// model's prompt (asserted on what the fake actually received).
+func TestAnthropicMessagesHandler_Good_ToolsRenderedForGemma4(t *testing.T) {
+	model := newFakeTextModel() // gemma4 by default
+	mux := NewMux(openaicompat.NewStaticResolver(map[string]inference.TextModel{"test-model": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"test-model","max_tokens":128,"messages":[{"role":"user","content":[{"type":"text","text":"weather?"}]}],` +
+		`"tools":[{"name":"get_weather","input_schema":{"type":"object"}}]}`
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body))))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if len(model.received) == 0 || !core.Contains(model.received[0].Content, "<|tool>declaration:get_weather") {
+		t.Fatalf("model received %+v, want the get_weather declaration in the system turn", model.received)
+	}
+}
+
+// TestAnthropicMessagesHandler_Bad_ToolsRejectedForUnsupportedArchitecture
+// pins the capability-honesty gate (#37) on the Anthropic Messages surface: a
+// tools request against a non-Gemma-4 architecture is a clean 400, not a
+// silent no-op.
+func TestAnthropicMessagesHandler_Bad_ToolsRejectedForUnsupportedArchitecture(t *testing.T) {
+	model := &fakeTextModel{tokens: []inference.Token{{Text: "ok"}}, info: inference.ModelInfo{Architecture: "qwen3"}}
+	mux := NewMux(openaicompat.NewStaticResolver(map[string]inference.TextModel{"test-model": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"test-model","max_tokens":128,"messages":[{"role":"user","content":[{"type":"text","text":"weather?"}]}],` +
+		`"tools":[{"name":"get_weather","input_schema":{"type":"object"}}]}`
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body))))
+
+	if rec.Code != http.StatusBadRequest || !core.Contains(rec.Body.String(), `"param":"tools"`) {
+		t.Fatalf("status = %d body=%s, want 400 param=tools", rec.Code, rec.Body.String())
+	}
+	if model.received != nil {
+		t.Fatal("model was invoked despite the capability gate rejecting the request")
+	}
+}
+
+// TestAnthropicMessagesHandler_Good_ToolChoiceNoneSuppressesDeclarations pins
+// that tool_choice:{"type":"none"} keeps the model from ever seeing the tool
+// menu this turn — and, since nothing is offered, the capability gate does
+// not fire even against a non-gemma4 architecture.
+func TestAnthropicMessagesHandler_Good_ToolChoiceNoneSuppressesDeclarations(t *testing.T) {
+	model := &fakeTextModel{tokens: []inference.Token{{Text: "plain answer"}}, info: inference.ModelInfo{Architecture: "qwen3"}}
+	mux := NewMux(openaicompat.NewStaticResolver(map[string]inference.TextModel{"test-model": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"test-model","max_tokens":128,"tool_choice":{"type":"none"},` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"weather?"}]}],` +
+		`"tools":[{"name":"get_weather","input_schema":{"type":"object"}}]}`
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body))))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200 (tool_choice:none offers nothing, so the gate never fires)", rec.Code, rec.Body.String())
+	}
+	if len(model.received) != 1 || core.Contains(model.received[0].Content, "declaration") {
+		t.Fatalf("model received %+v, want the plain user turn with no tool declaration", model.received)
+	}
+}
+
+// TestAnthropicMessagesHandler_Bad_ToolChoiceUndeclaredTool pins that naming a
+// tool that was never declared is a 400, not a silently-ignored choice.
+func TestAnthropicMessagesHandler_Bad_ToolChoiceUndeclaredTool(t *testing.T) {
+	model := newFakeTextModel()
+	mux := NewMux(openaicompat.NewStaticResolver(map[string]inference.TextModel{"test-model": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"test-model","max_tokens":128,"tool_choice":{"type":"tool","name":"not_declared"},` +
+		`"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}],` +
+		`"tools":[{"name":"get_weather","input_schema":{"type":"object"}}]}`
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader([]byte(body))))
+
+	if rec.Code != http.StatusBadRequest || !core.Contains(rec.Body.String(), `"param":"tool_choice"`) {
+		t.Fatalf("status = %d body=%s, want 400 param=tool_choice", rec.Code, rec.Body.String())
 	}
 }
 
