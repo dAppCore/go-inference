@@ -39,6 +39,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	openai "dappco.re/go/inference/serving/provider/openai"
+	"dappco.re/go/inference/serving/scheduler"
 )
 
 // ModelSpec declares one model in the multi-model registry.
@@ -74,6 +75,9 @@ type MultiModelOptions struct {
 
 // modelEntry is one registry slot. model is nil until the first resolve (lazy
 // load); lastUsed drives both LRU victim selection and idle-TTL eviction.
+// sched is non-nil only when the registry is configured with a scheduler mode
+// (setScheduler) AND the entry is resident — it wraps model, one scheduler
+// instance per resident model, built on load and torn down on evict.
 type modelEntry struct {
 	id       string
 	path     string
@@ -82,6 +86,7 @@ type modelEntry struct {
 	loadOpts []inference.LoadOption
 	profiles map[string][]inference.GenerateOption
 	model    inference.TextModel
+	sched    *scheduler.Model
 	lastUsed time.Time
 }
 
@@ -104,6 +109,14 @@ type multiModelResolver struct {
 	onLoad func(inference.TextModel)
 	now    func() time.Time
 	log    io.Writer
+
+	// schedCfg configures the per-resident-model scheduler every future load
+	// attaches; nil (the default) leaves ensureResident's fast path untouched —
+	// no scheduler package type is even constructed — matching the flag-unset
+	// byte-identical contract the single-model schedulerResolver already holds.
+	// A pointer (not a bare scheduler.Config) so "unset" is distinguishable from
+	// an explicit, validly-zero Config.
+	schedCfg *scheduler.Config
 }
 
 // newMultiModelResolver builds the registry from specs. It validates that at
@@ -195,6 +208,16 @@ func (r *multiModelResolver) setLog(w io.Writer) {
 	r.log = w
 }
 
+// setScheduler configures the per-resident-model scheduler mode + sizing every
+// future load attaches (ensureResident). nil (the default, and the only value
+// RunServe passes when -scheduler is unset) leaves the registry's behaviour
+// exactly as it was before schedulers existed — no scheduler.Model is ever
+// constructed, matching the single-model schedulerResolver's byte-unchanged
+// contract when its flag is unset.
+func (r *multiModelResolver) setScheduler(cfg *scheduler.Config) {
+	r.schedCfg = cfg
+}
+
 // ResolveModel routes name to a resident model, loading (and evicting to fit)
 // when required. name is the OpenAI-API `model` field: an exact id/alias match
 // wins; a `model:profile` id resolves the model and applies the named preset; an
@@ -249,9 +272,16 @@ func (r *multiModelResolver) route(name string) (*modelEntry, []inference.Genera
 }
 
 // ensureResident returns the entry's loaded model, loading it (after making room
-// within the budget) when it is not yet resident.
+// within the budget) when it is not yet resident. When the registry carries a
+// scheduler config (setScheduler), a freshly loaded model is wrapped in its own
+// scheduler.Model instance before it is served — served is what callers get
+// back, entry.model always stays the raw model so evict/Close and residency
+// byte-accounting keep operating on the thing that actually owns the engine.
 func (r *multiModelResolver) ensureResident(entry *modelEntry) (inference.TextModel, error) {
 	if entry.model != nil {
+		if entry.sched != nil {
+			return entry.sched, nil
+		}
 		return entry.model, nil
 	}
 	if err := r.makeRoom(entry); err != nil {
@@ -265,8 +295,26 @@ func (r *multiModelResolver) ensureResident(entry *modelEntry) (inference.TextMo
 		r.onLoad(model)
 	}
 	entry.model = model
+	served := inference.TextModel(model)
+	if r.schedCfg != nil {
+		sched, schedErr := scheduler.New(model, *r.schedCfg)
+		if schedErr != nil {
+			// Fail THIS load, fail closed — never silently serve the model
+			// unscheduled. Roll the entry back to non-resident (residentBytes
+			// only counts entry.model != nil) and release what was just
+			// loaded, since nothing else can reach it: we still hold r.mu, so
+			// no concurrent resolve has observed entry.model between the two
+			// assignments above and this rollback.
+			entry.model = nil
+			model.Close()
+			return nil, core.E("serving.multiModelResolver", core.Sprintf("model %q: cannot attach the %s scheduler", entry.id, r.schedCfg.Mode), schedErr)
+		}
+		entry.sched = sched
+		served = sched
+		printServe(r.log, "serve: model %s scheduler %s attached", entry.id, r.schedCfg.Mode)
+	}
 	printServe(r.log, "serve: loaded model %s (~%d bytes, resident ~%d/%d)", entry.id, entry.estBytes, r.residentBytes(), r.opts.MemoryCeiling)
-	return model, nil
+	return served, nil
 }
 
 // makeRoom evicts LRU-unpinned residents until incoming fits under the ceiling.
@@ -318,14 +366,42 @@ func (r *multiModelResolver) lruUnpinnedResident(excludeID string) *modelEntry {
 }
 
 // evict drops the entry's resident model and Closes it to reclaim GPU memory.
-// The spec stays registered, so a later resolve reloads it from disk.
+// The spec stays registered, so a later resolve reloads it from disk. When the
+// entry carries a scheduler, CloseEngine runs FIRST and is allowed to finish
+// draining before the base model is closed: CloseEngine cancels every queued
+// or active request's context (an in-flight caller observes that exactly as
+// it would an explicit cancel — its stream ends, never hangs) and blocks until
+// every scheduler goroutine has actually exited, so closing the base model out
+// from under a still-running generation call — which could crash the engine
+// rather than cancel cleanly — never happens.
 func (r *multiModelResolver) evict(e *modelEntry, reason string) {
 	m := e.model
+	sched := e.sched
 	e.model = nil
+	e.sched = nil
+	if sched != nil {
+		sched.CloseEngine()
+	}
 	if m != nil {
 		m.Close()
 	}
 	printServe(r.log, "serve: evicted model %s (%s), ~%d bytes freed", e.id, reason, e.estBytes)
+}
+
+// closeSchedulers drains every currently-resident model's scheduler engine —
+// the multi-model teardown twin of the single-model schedulerResolver.close().
+// RunServe defers this for the multi-model path so a scheduler-mode serve
+// leaves no goroutines behind at shutdown, matching the single-model path's
+// guarantee. A no-op when no scheduler is configured (schedCfg nil) or no
+// model ever attached one.
+func (r *multiModelResolver) closeSchedulers() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, id := range r.order {
+		if sched := r.entries[id].sched; sched != nil {
+			sched.CloseEngine()
+		}
+	}
 }
 
 // sweepIdle evicts every unpinned resident idle at least IdleTTL as of now, and
@@ -437,14 +513,20 @@ func (r *multiModelResolver) canonical(id string) string {
 }
 
 // ModelStatus is the per-model snapshot for /v1/admin/models and /v1/models.
+// SchedulerMode and SchedulerStats are populated only for a resident model
+// that carries a scheduler (registry configured via setScheduler AND this
+// entry has loaded) — read-only, mirroring exactly what that model's live
+// scheduler.Model.Stats() reports at snapshot time.
 type ModelStatus struct {
-	ID           string   `json:"id"`
-	Path         string   `json:"path"`
-	Resident     bool     `json:"resident"`
-	Pinned       bool     `json:"pinned"`
-	EstBytes     uint64   `json:"est_bytes"`
-	Profiles     []string `json:"profiles,omitempty"`
-	LastUsedUnix int64    `json:"last_used_unix,omitempty"`
+	ID             string           `json:"id"`
+	Path           string           `json:"path"`
+	Resident       bool             `json:"resident"`
+	Pinned         bool             `json:"pinned"`
+	EstBytes       uint64           `json:"est_bytes"`
+	Profiles       []string         `json:"profiles,omitempty"`
+	LastUsedUnix   int64            `json:"last_used_unix,omitempty"`
+	SchedulerMode  string           `json:"scheduler_mode,omitempty"`
+	SchedulerStats *scheduler.Stats `json:"scheduler_stats,omitempty"`
 }
 
 // list returns a per-model status snapshot in registration order.
@@ -464,6 +546,11 @@ func (r *multiModelResolver) list() []ModelStatus {
 		}
 		if !e.lastUsed.IsZero() {
 			status.LastUsedUnix = e.lastUsed.Unix()
+		}
+		if e.sched != nil {
+			status.SchedulerMode = string(r.schedCfg.Mode)
+			stats := e.sched.Stats()
+			status.SchedulerStats = &stats
 		}
 		out = append(out, status)
 	}

@@ -126,6 +126,19 @@ type Model struct {
 	completed atomic.Int64
 	cancelled atomic.Int64
 
+	// serial-mode shutdown: closeCh signals "stop admitting / stop working"
+	// without ever closing m.queue itself (a send to a closed channel would
+	// panic a racing Schedule call — batch/interleave avoid this the same way,
+	// see batchEngine.closeCh/interleaveEngine.closeCh). workerWG lets
+	// CloseEngine block until every worker goroutine started at New has
+	// actually returned, the same synchronous-join guarantee batch.close and
+	// interleave.close already give (needed so a per-resident-model scheduler
+	// — serving.multiModelResolver's eviction — can reclaim serial's worker
+	// pool exactly as reliably as the other two modes).
+	closeCh   chan struct{}
+	closeOnce sync.Once
+	workerWG  sync.WaitGroup
+
 	// --- non-serial engines (exactly one is non-nil off serial) ---
 	batch *batchEngine
 	inter *interleaveEngine
@@ -192,6 +205,8 @@ func New(model inference.TextModel, cfg Config) (*Model, error) {
 		m.inter = newInterleaveEngine(cfg)
 	default: // serial
 		m.queue = make(chan *job, max(cfg.MaxQueue, 0))
+		m.closeCh = make(chan struct{})
+		m.workerWG.Add(m.maxConcurrent)
 		for worker := range m.maxConcurrent {
 			go m.worker(worker)
 		}
@@ -238,6 +253,16 @@ func (m *Model) Schedule(ctx context.Context, req inference.ScheduledRequest) (i
 	if core.Trim(req.ID) == "" {
 		req.ID = m.nextRequestID()
 	}
+	// Up-front check makes rejection deterministic for the common case
+	// (Schedule called after CloseEngine returned); the main select's own
+	// closeCh case below still catches the narrow window where a close races
+	// concurrently with this call — mirrors batch.submit/interleave.submit's
+	// identical up-front-plus-select closeCh pattern.
+	select {
+	case <-m.closeCh:
+		return inference.RequestHandle{}, nil, core.E("scheduler.Schedule", "engine is closed", nil)
+	default:
+	}
 	reqCtx, cancel := context.WithCancel(ctx)
 	j := &job{
 		req:      req,
@@ -266,6 +291,11 @@ func (m *Model) Schedule(ctx context.Context, req inference.ScheduledRequest) (i
 		cancel()
 		close(j.out)
 		return inference.RequestHandle{}, nil, ctx.Err()
+	case <-m.closeCh:
+		m.unregister(req.ID)
+		cancel()
+		close(j.out)
+		return inference.RequestHandle{}, nil, core.E("scheduler.Schedule", "engine is closed", nil)
 	default:
 		m.unregister(req.ID)
 		cancel()
@@ -483,6 +513,44 @@ func (m *Model) CloseEngine() {
 		if m.inter != nil {
 			m.inter.close()
 		}
+	default: // serial
+		m.closeSerialEngine()
+	}
+}
+
+// closeSerialEngine stops the serial worker pool, synchronously: it signals
+// closeCh, cancels every job still tracked in active (queued or running) so
+// run() unblocks promptly rather than waiting on the model's own stream to
+// end naturally, waits for every worker goroutine started at New to actually
+// return, then drains anything left sitting in the queue's buffer — a job
+// that raced the close and landed in the buffer with no worker left to read
+// it would otherwise wait forever on a channel nobody will ever service
+// again. This gives serial the same synchronous-join, no-leaked-goroutine,
+// no-orphaned-request contract batch.close/interleave.close already hold —
+// required so a per-resident-model scheduler (serving.multiModelResolver's
+// load/evict lifecycle) can reclaim ANY mode's goroutines on eviction, serial
+// included (serial is the default -scheduler value). Idempotent (closeOnce)
+// and nil-safe when New built no worker pool.
+func (m *Model) closeSerialEngine() {
+	if m.queue == nil {
+		return
+	}
+	m.closeOnce.Do(func() { close(m.closeCh) })
+	m.active.Range(func(_, value any) bool {
+		value.(*job).cancel()
+		return true
+	})
+	m.workerWG.Wait()
+	for {
+		select {
+		case j := <-m.queue:
+			m.unregister(j.req.ID)
+			j.cancel()
+			close(j.out)
+			m.cancelled.Add(1)
+		default:
+			return
+		}
 	}
 }
 
@@ -516,8 +584,14 @@ func (m *Model) SetProbeSink(sink inference.ProbeSink) {
 }
 
 func (m *Model) worker(_ int) {
-	for j := range m.queue {
-		m.run(j)
+	defer m.workerWG.Done()
+	for {
+		select {
+		case j := <-m.queue:
+			m.run(j)
+		case <-m.closeCh:
+			return
+		}
 	}
 }
 
