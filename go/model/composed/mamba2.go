@@ -4,6 +4,13 @@ package composed
 
 import "dappco.re/go/inference/model/mamba2"
 
+// ResidualNormMLPProjMamba2InputDevice folds a predecessor's projection-fused tail together with this
+// layer's input RMSNorm and single Mamba-2 InProj GEMM. A nil hook or error keeps the ordinary path.
+var ResidualNormMLPProjMamba2InputDevice func(
+	mixerHidden, projW, h, normW, gate, up, down []float32, L, D, mixCols, FF int, eps float32,
+	nextNormW, nextInProjW []float32, nextProjDim int,
+) (y, projected []float32, err error)
+
 // mamba2.go adapts the Mamba-2 SSD block (model/mamba2) to the composed Mixer interface — Cut 3 of the
 // composed-mixer roster (mixers.go's gated-delta is Cut 1, attention.go's full-attention Cut 2): a
 // breadth extension, not a depth one — the proj-fused tail these cuts share already serves attention and
@@ -62,6 +69,22 @@ func (m *mamba2Mixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidd
 		sc = &mamba2.BlockScratch{}
 	}
 	gated, dInner, nc, ns, err := mamba2.BlockForwardScratchNoProjF32(h, m.w, m.cfg, pc, ps, L, D, sc)
+	if err != nil {
+		return nil, nil, 0, nil, err
+	}
+	return gated, m.w.OutProj, dInner, mamba2State{conv: nc, ssm: ns, sc: sc}, nil
+}
+
+func (m *mamba2Mixer) forwardFromInput(projected []float32, L, D int, prior any) (mixerHidden, projW []float32, mixCols int, next any, err error) {
+	var pc, ps []float32
+	var sc *mamba2.BlockScratch
+	if st, ok := prior.(mamba2State); ok {
+		pc, ps, sc = st.conv, st.ssm, st.sc
+	}
+	if sc == nil {
+		sc = &mamba2.BlockScratch{}
+	}
+	gated, dInner, nc, ns, err := mamba2.BlockForwardScratchFromInputF32(projected, m.w, m.cfg, pc, ps, L, D, sc)
 	if err != nil {
 		return nil, nil, 0, nil, err
 	}
