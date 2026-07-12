@@ -91,36 +91,7 @@ func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 	eo := make([]float32, D)
 	for t := range L {
 		xt := x[t*D : (t+1)*D]
-		// router logits → softmax numerators (the denominator cancels in the top-k renormalisation).
-		maxL := math.Inf(-1)
-		for e := range nE {
-			rr := m.Router[e*D : e*D+D]
-			var acc float64
-			for d := range D {
-				acc += float64(xt[d]) * float64(rr[d])
-			}
-			probs[e] = acc
-			if acc > maxL {
-				maxL = acc
-			}
-		}
-		for e := range nE {
-			probs[e] = math.Exp(probs[e] - maxL)
-		}
-		sel := topKInto(probs, m.TopK, idx)
-		// The router weight denominator: over the SELECTED experts when norm_topk_prob (each
-		// selected softmax prob renormalised to sum 1 over the selection), else over ALL experts
-		// (the raw full-softmax weights, no renormalisation).
-		var denom float64
-		if m.NormTopKProb {
-			for _, e := range sel {
-				denom += probs[e]
-			}
-		} else {
-			for e := range nE {
-				denom += probs[e]
-			}
-		}
+		sel, denom := m.routeInto(xt, D, probs, idx)
 		ot := out[t*D : (t+1)*D]
 		for _, e := range sel {
 			w := probs[e] / denom
@@ -145,6 +116,40 @@ func (m *MoEMLP) forward(x []float32, L, D int) []float32 {
 		}
 	}
 	return out
+}
+
+// routeInto is the allocation-free production router shared by forward and
+// distribution receipts. It returns the selected experts and their softmax
+// denominator, using the model-declared top-k normalisation policy.
+func (m *MoEMLP) routeInto(xt []float32, D int, probs []float64, idx []int) ([]int, float64) {
+	nE := len(m.Experts)
+	maxL := math.Inf(-1)
+	for e := range nE {
+		rr := m.Router[e*D : e*D+D]
+		var acc float64
+		for d := range D {
+			acc += float64(xt[d]) * float64(rr[d])
+		}
+		probs[e] = acc
+		if acc > maxL {
+			maxL = acc
+		}
+	}
+	for e := range nE {
+		probs[e] = math.Exp(probs[e] - maxL)
+	}
+	sel := topKInto(probs, m.TopK, idx)
+	var denom float64
+	if m.NormTopKProb {
+		for _, e := range sel {
+			denom += probs[e]
+		}
+	} else {
+		for e := range nE {
+			denom += probs[e]
+		}
+	}
+	return sel, denom
 }
 
 // topKInto selects the indices of the k largest values in v into the caller-provided idx
