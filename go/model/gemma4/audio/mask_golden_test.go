@@ -37,6 +37,29 @@ func TestHalveValidity_Good(t *testing.T) {
 	}
 }
 
+// TestZeroInvalidTimeRows_OddCeil pins HF's inter-conv boundary mask: after an odd valid prefix is
+// ceil-halved, the first invalid time row is zeroed before the next convolution can mix it back into
+// the valid boundary.
+func TestZeroInvalidTimeRows_OddCeil(t *testing.T) {
+	got := []float32{1, 2, 3, 4, 5, 6}
+	zeroInvalidTimeRows(got, 3, 2, []bool{true, true, false})
+	want := []float32{1, 2, 3, 4, 0, 0}
+	if !slices.Equal(got, want) {
+		t.Fatalf("zeroInvalidTimeRows odd-ceil boundary = %v, want %v", got, want)
+	}
+}
+
+// TestZeroInvalidTimeRows_EvenAllValid proves the inter-conv mask is byte-identical for an even,
+// fully-valid time axis.
+func TestZeroInvalidTimeRows_EvenAllValid(t *testing.T) {
+	got := []float32{1, 2, 3, 4}
+	want := slices.Clone(got)
+	zeroInvalidTimeRows(got, 2, 2, []bool{true, true})
+	if !slices.Equal(got, want) {
+		t.Fatalf("zeroInvalidTimeRows even all-valid = %v, want byte-identical %v", got, want)
+	}
+}
+
 // TestBlockedMask_NilEqualsAllValid pins the validity-AND no-op: a nil validity vector and an all-true
 // validity of length seqLen both produce the purely-positional blocked mask, so a fully-valid clip is
 // byte-identical whether the caller threads a mask or not.
