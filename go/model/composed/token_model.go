@@ -98,16 +98,28 @@ func (tm *ComposedTokenModel) OpenSession() (model.DecodeStepper, error) {
 	return &composedStepper{s: NewSession(tm.m)}, nil
 }
 
-// composedStepper is a stateful hybrid decode session (SessionModel.OpenSession) — plus, when the last
-// Step's forwardEmb call fused the model's final RMSNorm + LM head GEMM onto the LAST layer's tail command
-// buffer, the logits that fuse already computed. headHidden/headLogits cache them keyed to the exact
-// hidden bytes Step just returned: Head reuses the cache for THAT hidden (the shared generation loop's
-// usage pattern is at most one Head call between two Step calls — see model.generateStepwiseWithSession)
-// and falls through to the ordinary host-RMSNorm + device-GEMM recompute for any other hidden (a
-// mismatched/stale hidden, or a session whose last Step didn't fuse).
+// composedStepper is a stateful hybrid decode session (SessionModel.OpenSession) — plus, when the most
+// recent Step/PrefillBatch's forwardEmb call fused the model's final RMSNorm + LM head GEMM onto the LAST
+// layer's tail command buffer, the logits that fuse already computed. headHidden/headLogits cache them
+// keyed to the exact hidden bytes that call just returned: Head reuses the cache for THAT hidden (the
+// shared generation loop's usage pattern is at most one Head call between two Step calls — see
+// model.generateStepwiseWithSession) and falls through to the ordinary host-RMSNorm + device-GEMM
+// recompute for any other hidden (a mismatched/stale hidden, or a session whose last call didn't fuse).
 type composedStepper struct {
 	s                    *ComposedSession
 	headHidden, headBF16 []byte
+}
+
+// cacheHeadFuse records st.s.PendingHeadLogits() (if the tail just fused it) keyed to hidden — the
+// bookkeeping Step and PrefillBatch share after their own forwardEmb call, so the Head call that follows
+// either one can reuse a just-fused head GEMM instead of recomputing it. Clears the cache when this call
+// didn't fuse, so a stale entry never survives past the call that didn't produce one.
+func (st *composedStepper) cacheHeadFuse(hidden []byte) {
+	if lg := st.s.PendingHeadLogits(); lg != nil {
+		st.headHidden, st.headBF16 = hidden, f32ToBF16Bytes(lg)
+	} else {
+		st.headHidden, st.headBF16 = nil, nil
+	}
 }
 
 // Step decodes one token embedding (bf16) over the resident per-layer state, returning the output hidden
@@ -123,12 +135,41 @@ func (st *composedStepper) Step(emb []byte) ([]byte, error) {
 		return nil, err
 	}
 	outBytes := f32ToBF16Bytes(out)
-	if lg := st.s.PendingHeadLogits(); lg != nil {
-		st.headHidden, st.headBF16 = outBytes, f32ToBF16Bytes(lg)
-	} else {
-		st.headHidden, st.headBF16 = nil, nil
-	}
+	st.cacheHeadFuse(outBytes)
 	return outBytes, nil
+}
+
+// PrefillBatch runs the WHOLE prompt through the resident per-layer state in ONE forwardEmb call (L =
+// len(embs)) instead of the len(embs) Step calls model.generateStepwiseWithSession otherwise makes during
+// prefill — implements model.BatchPrefillStepper. Every mixer's Forward already accepts L>1 (the attention
+// mixer's causal KV-cache growth carried via pos0, the gated-delta/mamba2/rwkv7 recurrences) and the FFN
+// tail is row-independent (no cross-row mixing — only the mixer itself is sequential), so one L-token
+// forwardEmb call advances every layer's state identically to L single-token calls; the only observable
+// difference is that a device fusion bound to the LAST layer's tail (e.g. the head-fuse,
+// ResidualNormMLPProjHeadDevice) now runs ONCE for the whole batch instead of once per prompt token — see
+// forwardEmb's terminal-collapse branch. Returns the LAST token's hidden state (dModel bf16), matching
+// Step's contract, and caches that row's fused head logits exactly as Step does, so the Head call for the
+// first sampled token (immediately following prefill) still gets the fast path.
+func (st *composedStepper) PrefillBatch(embs [][]byte) ([]byte, error) {
+	D := st.s.m.D
+	L := len(embs)
+	if L == 0 {
+		return nil, core.NewError("composed.PrefillBatch: empty batch")
+	}
+	hidden := make([]float32, L*D)
+	for i, e := range embs {
+		if len(e) != D*2 {
+			return nil, core.NewError("composed.PrefillBatch: each input must be dModel bf16 bytes")
+		}
+		copy(hidden[i*D:(i+1)*D], bf16BytesToF32(e))
+	}
+	out, err := st.s.forwardEmb(hidden, L)
+	if err != nil {
+		return nil, err
+	}
+	last := f32ToBF16Bytes(out[(L-1)*D : L*D])
+	st.cacheHeadFuse(last)
+	return last, nil
 }
 
 // Head maps a final hidden (dModel bf16) to vocab logits (vocab bf16) — the SessionModel fast path's
@@ -145,8 +186,9 @@ func (st *composedStepper) Head(hidden []byte) ([]byte, error) {
 }
 
 var (
-	_ model.TokenModel    = (*ComposedTokenModel)(nil)
-	_ model.SessionModel  = (*ComposedTokenModel)(nil)
-	_ model.DecodeStepper = (*composedStepper)(nil)
-	_ model.LMHead        = (*composedStepper)(nil)
+	_ model.TokenModel          = (*ComposedTokenModel)(nil)
+	_ model.SessionModel        = (*ComposedTokenModel)(nil)
+	_ model.DecodeStepper       = (*composedStepper)(nil)
+	_ model.LMHead              = (*composedStepper)(nil)
+	_ model.BatchPrefillStepper = (*composedStepper)(nil)
 )
