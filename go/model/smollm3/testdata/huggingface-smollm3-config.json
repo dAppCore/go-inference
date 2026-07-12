@@ -1,0 +1,1 @@
+{"model_type":"smollm3","hidden_size":2048,"intermediate_size":11008,"num_hidden_layers":8,"num_attention_heads":16,"num_key_value_heads":4,"rms_norm_eps":0.000001,"rope_theta":5000000,"tie_word_embeddings":true,"vocab_size":128256,"no_rope_layer_interval":4,"no_rope_layers":[1,1,1,0,1,1,1,0]}
