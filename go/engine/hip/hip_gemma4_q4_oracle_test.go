@@ -440,6 +440,15 @@ type hipOracleReport struct {
 // Env: the common HIP oracle variables above. GO_ROCM_ORACLE_TOKEN_COUNT
 // defaults to 1 because a full 12B host reference is intentionally expensive.
 // GO_ROCM_CHAIN_TOL defaults to 0.005 (0.5% of reference RMS).
+//
+// Round-6 finding: the apparent length threshold is content-dependent, not a
+// token-axis boundary. Distinct synthetic IDs are clean at one and two rows,
+// then cross tolerance at L29/P2 input_norm with three rows (and L29/P2,P5
+// with eight); three repetitions of the same ID remain clean through L47.
+// At L28/P2 attention is still clean (max/refRMS 0.000534), as are final_hidden
+// (0.000469) and every earlier tensor. L29 input_norm's large coordinate weight
+// amplifies that ordinary chained drift at dim 2467 to 0.005468. Thus neither
+// causal attention, RoPE, nor a row/tile stride is the first bad operation.
 func TestHIPGemma4Q4ChainedLayerOracle(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware oracle tests")
@@ -472,6 +481,11 @@ func TestHIPGemma4Q4ChainedLayerOracle(t *testing.T) {
 		tokens[i] = int32((i*2654435761 + 12345) % cfg.Layers[0].VocabSize)
 		if tokens[i] < 0 {
 			tokens[i] += int32(cfg.Layers[0].VocabSize)
+		}
+	}
+	if os.Getenv("GO_ROCM_ORACLE_REPEAT_TOKEN") == "1" {
+		for i := range tokens {
+			tokens[i] = tokens[0]
 		}
 	}
 
@@ -530,6 +544,27 @@ func TestHIPGemma4Q4ChainedLayerOracle(t *testing.T) {
 		var layerMax, layerMean, layerRatio float32
 		for _, tensor := range tensors {
 			hip := hipOracleReadF32(t, tensor.hip, len(tensor.ref))
+			if index >= 27 && index <= 31 {
+				rowWidth := len(tensor.ref) / tokenCount
+				for position := 0; position < tokenCount; position++ {
+					start, end := position*rowWidth, (position+1)*rowWidth
+					rowMax, rowMean := hipOracleMaxMeanDiff(tensor.ref[start:end], hip[start:end])
+					rowRMS := hipOracleRMS(tensor.ref[start:end])
+					rowRatio := float32(0)
+					if rowRMS > 0 {
+						rowRatio = rowMax / rowRMS
+					}
+					if rowRatio > tolRatio || tensor.name == "attention" || (index == 28 && position == 2) {
+						maxDim := 0
+						for dim := 1; dim < rowWidth; dim++ {
+							if math.Abs(float64(tensor.ref[start+dim]-hip[start+dim])) > math.Abs(float64(tensor.ref[start+maxDim]-hip[start+maxDim])) {
+								maxDim = dim
+							}
+						}
+						rows = append(rows, fmt.Sprintf("    POS L%02d P%02d %-20s dim=%-5d ref=%-11.6g hip=%-11.6g maxAbs=%-11.6g meanAbs=%-11.6g refRMS=%-9.5g max/refRMS=%.6g", index, position, tensor.name, maxDim, tensor.ref[start+maxDim], hip[start+maxDim], rowMax, rowMean, rowRMS, rowRatio))
+					}
+				}
+			}
 			maxAbs, meanAbs := hipOracleMaxMeanDiff(tensor.ref, hip)
 			ratio := float32(0)
 			if rms := hipOracleRMS(tensor.ref); rms > 0 {
