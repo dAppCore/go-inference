@@ -10,6 +10,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/eval/score/lek"
 	"dappco.re/go/inference/serving/provider/openai"
 	"dappco.re/go/inference/welfare"
 )
@@ -301,6 +302,119 @@ func TestServing_IsLemmaModel_Good(t *testing.T) {
 	}
 	if isLemmaModel("") {
 		t.Fatal("empty path recognised as Lemma")
+	}
+}
+
+// --- welfareHostility --------------------------------------------------------
+
+// TestServing_WelfareHostility_Good pins the production hostility hook: it is a
+// faithful forward of the lek scorer's composite score (directed anger reads
+// above zero, neutral text reads zero), so the welfare detector's Config.Hostility
+// sees exactly what lek.Hostility computes.
+func TestServing_WelfareHostility_Good(t *testing.T) {
+	neutral := "could you help me reverse this string please"
+	if got := welfareHostility(neutral); got != 0 {
+		t.Fatalf("welfareHostility(neutral) = %v, want 0", got)
+	}
+	hostile := "you are a useless idiot"
+	got := welfareHostility(hostile)
+	if got <= 0 {
+		t.Fatalf("welfareHostility(directed insult) = %v, want > 0", got)
+	}
+	// Faithful forward: the adapter returns exactly the lek composite score.
+	if want := lek.Hostility(hostile).Score; got != want {
+		t.Fatalf("welfareHostility = %v, want the lek composite %v", got, want)
+	}
+}
+
+// --- Chat edge arms ----------------------------------------------------------
+
+// TestServing_WelfareGuard_Chat_NoUserTurn_Good pins the no-user shortcut: a
+// conversation with no user turn (an empty latest) skips the guard entirely and
+// delegates straight to the wrapped model, so a system-only priming call is
+// never dragged into mediation.
+func TestServing_WelfareGuard_Chat_NoUserTurn_Good(t *testing.T) {
+	fake := &welfareFakeModel{convoTokens: []string{"primed"}}
+	m := wrapWelfare(fake, welfareTestService(), false, nil, "")
+	msgs := []inference.Message{{Role: "system", Content: "be terse"}}
+	if got := drainChat(m, msgs); got != "primed" {
+		t.Fatalf("no-user turn reply = %q, want the inner tokens", got)
+	}
+	if fake.mediationCalls != 0 {
+		t.Fatal("a turn with no user text must not open a mediation session")
+	}
+	if len(fake.convoCalls) != 1 {
+		t.Fatalf("inner model called %d times, want 1 (straight delegate)", len(fake.convoCalls))
+	}
+}
+
+// TestServing_WelfareGuard_Chat_FalsePositive_AppendsCorpus_Good pins the lem_ok
+// arm reached THROUGH Chat: a triggered turn the model clears (lem_ok) proceeds
+// to the conversation AND records the false flag to the on-device corpus.
+func TestServing_WelfareGuard_Chat_FalsePositive_AppendsCorpus_Good(t *testing.T) {
+	corpus := core.PathJoin(t.TempDir(), "welfare", "feedback.jsonl")
+	fake := &welfareFakeModel{
+		mediationReply: `{"tool":"lem_ok","params":{"reason":"benign frustration, not directed"}}`,
+		convoTokens:    []string{"happy to help"},
+	}
+	m := wrapWelfare(fake, welfareTestService(), false, nil, corpus)
+	if got := drainChat(m, hostileConversation()); got != "happy to help" {
+		t.Fatalf("lem_ok turn reply = %q, want the conversation to proceed", got)
+	}
+	if fake.mediationCalls != 1 {
+		t.Fatalf("mediation sessions = %d, want 1", fake.mediationCalls)
+	}
+	data := core.ReadFile(corpus)
+	if !data.OK {
+		t.Fatalf("lem_ok did not write the false-positive corpus: %v", data.Error())
+	}
+	if !core.Contains(string(data.Value.([]byte)), "benign frustration") {
+		t.Fatalf("corpus body missing the lem_ok reason: %q", string(data.Value.([]byte)))
+	}
+}
+
+// --- detectOutput ------------------------------------------------------------
+
+// TestServing_WelfareGuard_DetectOutput_EarlyAbort_Good pins the consumer-abort
+// arm of the audit-only output read: a caller that stops iterating after the
+// first token halts the wrapped stream cleanly (the audit fold never sees the
+// full reply), so a client disconnect is not a leak.
+func TestServing_WelfareGuard_DetectOutput_EarlyAbort_Good(t *testing.T) {
+	fake := &welfareFakeModel{convoTokens: []string{"first", "second", "third"}}
+	m := wrapWelfare(fake, welfareTestService(), false, nil, "")
+	var got []string
+	for tok := range m.Chat(context.Background(), []inference.Message{{Role: "user", Content: "hi"}}) {
+		got = append(got, tok.Text)
+		break // abort after the first token — exercises the !yield early return
+	}
+	if len(got) != 1 || got[0] != "first" {
+		t.Fatalf("early-abort consumer saw %v, want just the first token", got)
+	}
+}
+
+// --- welfareUserTurns / withLatestUserText no-user fallthroughs ---------------
+
+// TestServing_WelfareUserTurns_NoUser_Good pins the no-user split: a
+// conversation with no user turn yields an empty latest and nil priors, so the
+// guard's early shortcut fires.
+func TestServing_WelfareUserTurns_NoUser_Good(t *testing.T) {
+	latest, priors := welfareUserTurns([]inference.Message{{Role: "assistant", Content: "hi"}})
+	if latest != "" || priors != nil {
+		t.Fatalf("welfareUserTurns(no user) = (%q, %v), want (\"\", nil)", latest, priors)
+	}
+}
+
+// TestServing_WithLatestUserText_NoUser_Good pins the rephrase fallthrough: when
+// there is no user turn to reword, the returned slice is an untouched copy of
+// the input (the caller's slice is never aliased or mutated).
+func TestServing_WithLatestUserText_NoUser_Good(t *testing.T) {
+	in := []inference.Message{{Role: "assistant", Content: "hi"}}
+	out := withLatestUserText(in, "REPLACED")
+	if len(out) != 1 || out[0].Content != "hi" {
+		t.Fatalf("withLatestUserText(no user) = %+v, want the input unchanged", out)
+	}
+	if &out[0] == &in[0] {
+		t.Fatal("withLatestUserText returned the caller's backing array, not a copy")
 	}
 }
 
