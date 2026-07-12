@@ -101,6 +101,38 @@ func (t *Tokenizer) Encode(text string) []int32 {
 	return ids
 }
 
+// EncodePair tokenises a query and passage as [CLS] query [SEP] passage [SEP]
+// and returns matching BERT token_type_ids (zero for the first segment and one
+// for the passage). This is the sequence shape used by cross-encoder rerankers.
+func (t *Tokenizer) EncodePair(query, passage string) ([]int32, []int32) {
+	first := t.wordPieceAll(t.basicTokenize(query))
+	second := t.wordPieceAll(t.basicTokenize(passage))
+	ids := make([]int32, 0, len(first)+len(second)+3)
+	types := make([]int32, 0, cap(ids))
+	ids = append(ids, t.clsID)
+	types = append(types, 0)
+	for _, piece := range first {
+		ids = append(ids, t.pieceID(piece))
+		types = append(types, 0)
+	}
+	ids = append(ids, t.sepID)
+	types = append(types, 0)
+	for _, piece := range second {
+		ids = append(ids, t.pieceID(piece))
+		types = append(types, 1)
+	}
+	ids = append(ids, t.sepID)
+	types = append(types, 1)
+	return ids, types
+}
+
+func (t *Tokenizer) pieceID(piece string) int32 {
+	if id, ok := t.vocab[piece]; ok {
+		return id
+	}
+	return t.unkID
+}
+
 // basicTokenize is HF's BasicTokenizer: clean control characters, space out CJK
 // ideographs, split on whitespace, then lower-case + strip accents and split
 // punctuation per whitespace-delimited word.
