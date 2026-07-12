@@ -9,7 +9,6 @@ import (
 	"time"
 
 	core "dappco.re/go"
-	native "dappco.re/go/inference/engine/metal"
 	"dappco.re/go/inference/serving"
 	"dappco.re/go/inference/serving/continuity"
 )
@@ -121,7 +120,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		DraftPath:          *draftPath,
 		DraftDetect:        *draftDetect,
 		DraftBlock:         *draftBlock,
-		SpeculativeLoader:  native.LoadSpeculativePair,
+		SpeculativeLoader:  speculativeLoader,
 		EnableContinuity:   continuity.Enable,
 		NoAutoProfile:      *noAutoProfile,
 		ProfileDir:         *profileDir,
