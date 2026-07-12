@@ -4,6 +4,7 @@ package gemma4
 
 import (
 	"dappco.re/go/inference/model"
+	_ "dappco.re/go/inference/model/gemma4/gguf" // registers the gemma-4 GGUF export lane (model/gguf.RegisterQuantizeLane)
 	"dappco.re/go/inference/model/safetensors"
 )
 

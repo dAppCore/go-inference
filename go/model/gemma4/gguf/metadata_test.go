@@ -2,7 +2,11 @@
 
 package gguf
 
-import "testing"
+import (
+	"testing"
+
+	basegguf "dappco.re/go/inference/model/gguf"
+)
 
 // gemma4TestConfig is a compact but structurally faithful gemma-4 config.json:
 // six text layers with full attention at index 4 (as the real 35-layer model
@@ -34,7 +38,7 @@ const gemma4TestConfig = `{
   }
 }`
 
-func gemma4FindEntry(t *testing.T, entries []MetadataEntry, key string) MetadataEntry {
+func gemma4FindEntry(t *testing.T, entries []basegguf.MetadataEntry, key string) basegguf.MetadataEntry {
 	t.Helper()
 	for _, e := range entries {
 		if e.Key == key {
@@ -42,7 +46,7 @@ func gemma4FindEntry(t *testing.T, entries []MetadataEntry, key string) Metadata
 		}
 	}
 	t.Fatalf("metadata key %q not found", key)
-	return MetadataEntry{}
+	return basegguf.MetadataEntry{}
 }
 
 // gemma4TestFeedForward is a six-layer uniform feed-forward width, matching
@@ -76,7 +80,7 @@ func TestGemma4Metadata_gemma4Metadata_Scalars(t *testing.T) {
 	}
 	for key, want := range wantU32 {
 		e := gemma4FindEntry(t, entries, key)
-		if e.ValueType != ValueTypeUint32 || e.Value.(uint32) != want {
+		if e.ValueType != basegguf.ValueTypeUint32 || e.Value.(uint32) != want {
 			t.Errorf("%s = %v (type %d), want uint32 %d", key, e.Value, e.ValueType, want)
 		}
 	}
@@ -88,7 +92,7 @@ func TestGemma4Metadata_gemma4Metadata_Scalars(t *testing.T) {
 	}
 	for key, want := range wantF32 {
 		e := gemma4FindEntry(t, entries, key)
-		if e.ValueType != ValueTypeFloat32 || e.Value.(float32) != want {
+		if e.ValueType != basegguf.ValueTypeFloat32 || e.Value.(float32) != want {
 			t.Errorf("%s = %v (type %d), want float32 %g", key, e.Value, e.ValueType, want)
 		}
 	}

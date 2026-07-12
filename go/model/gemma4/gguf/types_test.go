@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
+	basegguf "dappco.re/go/inference/model/gguf"
 )
 
 // TestGemma4Types_gemma4UseMoreBits_Gemma4E2B checks the selector reproduces the
@@ -28,15 +29,15 @@ func TestGemma4Types_gemma4UseMoreBits_Gemma4E2B(t *testing.T) {
 // under q4_k_m — the unsloth oracle-matched policy.
 func TestGemma4Types_gemma4TensorType_WholeModel(t *testing.T) {
 	cases := map[string]uint32{
-		"token_embd.weight":           TensorTypeQ4K,
-		"per_layer_token_embd.weight": TensorTypeQ5K,
-		"per_layer_model_proj.weight": TensorTypeBF16,
-		"output_norm.weight":          TensorTypeF32,
-		"per_layer_proj_norm.weight":  TensorTypeF32,
-		"rope_freqs.weight":           TensorTypeF32,
+		"token_embd.weight":           basegguf.TensorTypeQ4K,
+		"per_layer_token_embd.weight": basegguf.TensorTypeQ5K,
+		"per_layer_model_proj.weight": basegguf.TensorTypeBF16,
+		"output_norm.weight":          basegguf.TensorTypeF32,
+		"per_layer_proj_norm.weight":  basegguf.TensorTypeF32,
+		"rope_freqs.weight":           basegguf.TensorTypeF32,
 	}
 	for name, want := range cases {
-		if got := gemma4TensorType(QuantizeQ4_K_M, name, -1, 35); got != want {
+		if got := gemma4TensorType(basegguf.QuantizeQ4_K_M, name, -1, 35); got != want {
 			t.Errorf("gemma4TensorType(q4_k_m, %q) = %d, want %d", name, got, want)
 		}
 	}
@@ -59,10 +60,10 @@ func TestGemma4Types_gemma4TensorType_PerLayerF32(t *testing.T) {
 		"blk.7.proj.weight",
 		"blk.7.layer_output_scale.weight",
 	}
-	for _, format := range []QuantizeFormat{QuantizeQ4_K_M, QuantizeQ8_0, QuantizeQ6_K, QuantizeQ5_K_M, QuantizeQ3_K_M} {
+	for _, format := range []basegguf.QuantizeFormat{basegguf.QuantizeQ4_K_M, basegguf.QuantizeQ8_0, basegguf.QuantizeQ6_K, basegguf.QuantizeQ5_K_M, basegguf.QuantizeQ3_K_M} {
 		for _, name := range names {
-			if got := gemma4TensorType(format, name, 7, 35); got != TensorTypeF32 {
-				t.Errorf("gemma4TensorType(%s, %q) = %d, want F32(%d)", format, name, got, TensorTypeF32)
+			if got := gemma4TensorType(format, name, 7, 35); got != basegguf.TensorTypeF32 {
+				t.Errorf("gemma4TensorType(%s, %q) = %d, want F32(%d)", format, name, got, basegguf.TensorTypeF32)
 			}
 		}
 	}
@@ -78,8 +79,8 @@ func TestGemma4Types_gemma4TensorType_PerLayerQ4K(t *testing.T) {
 		"blk.5.ffn_gate.weight",
 		"blk.5.ffn_up.weight",
 	} {
-		if got := gemma4TensorType(QuantizeQ4_K_M, name, 5, 35); got != TensorTypeQ4K {
-			t.Errorf("gemma4TensorType(q4_k_m, %q) = %d, want Q4_K(%d)", name, got, TensorTypeQ4K)
+		if got := gemma4TensorType(basegguf.QuantizeQ4_K_M, name, 5, 35); got != basegguf.TensorTypeQ4K {
+			t.Errorf("gemma4TensorType(q4_k_m, %q) = %d, want Q4_K(%d)", name, got, basegguf.TensorTypeQ4K)
 		}
 	}
 }
@@ -88,13 +89,13 @@ func TestGemma4Types_gemma4TensorType_PerLayerQ4K(t *testing.T) {
 // bump to Q6_K on a use_more_bits layer and stay Q4_K on a non-bump layer.
 func TestGemma4Types_gemma4TensorType_AttnVFfnDownBump(t *testing.T) {
 	for _, name := range []string{"blk.6.attn_v.weight", "blk.6.ffn_down.weight"} {
-		if got := gemma4TensorType(QuantizeQ4_K_M, name, 6, 35); got != TensorTypeQ6K {
-			t.Errorf("gemma4TensorType(q4_k_m, %q, layer 6) = %d, want Q6_K(%d)", name, got, TensorTypeQ6K)
+		if got := gemma4TensorType(basegguf.QuantizeQ4_K_M, name, 6, 35); got != basegguf.TensorTypeQ6K {
+			t.Errorf("gemma4TensorType(q4_k_m, %q, layer 6) = %d, want Q6_K(%d)", name, got, basegguf.TensorTypeQ6K)
 		}
 	}
 	for _, name := range []string{"blk.5.attn_v.weight", "blk.5.ffn_down.weight"} {
-		if got := gemma4TensorType(QuantizeQ4_K_M, name, 5, 35); got != TensorTypeQ4K {
-			t.Errorf("gemma4TensorType(q4_k_m, %q, layer 5) = %d, want Q4_K(%d)", name, got, TensorTypeQ4K)
+		if got := gemma4TensorType(basegguf.QuantizeQ4_K_M, name, 5, 35); got != basegguf.TensorTypeQ4K {
+			t.Errorf("gemma4TensorType(q4_k_m, %q, layer 5) = %d, want Q4_K(%d)", name, got, basegguf.TensorTypeQ4K)
 		}
 	}
 }
@@ -107,13 +108,13 @@ func TestGemma4Types_gemma4TensorType_AttnVFfnDownBump(t *testing.T) {
 // type present.
 func TestGemma4Types_gemma4TensorType_Q8_0(t *testing.T) {
 	wholeModel := map[string]uint32{
-		"token_embd.weight":           TensorTypeQ8_0,
-		"per_layer_token_embd.weight": TensorTypeQ8_0,
-		"per_layer_model_proj.weight": TensorTypeBF16,
-		"output_norm.weight":          TensorTypeF32,
+		"token_embd.weight":           basegguf.TensorTypeQ8_0,
+		"per_layer_token_embd.weight": basegguf.TensorTypeQ8_0,
+		"per_layer_model_proj.weight": basegguf.TensorTypeBF16,
+		"output_norm.weight":          basegguf.TensorTypeF32,
 	}
 	for name, want := range wholeModel {
-		if got := gemma4TensorType(QuantizeQ8_0, name, -1, 35); got != want {
+		if got := gemma4TensorType(basegguf.QuantizeQ8_0, name, -1, 35); got != want {
 			t.Errorf("gemma4TensorType(q8_0, %q) = %d, want %d", name, got, want)
 		}
 	}
@@ -127,8 +128,8 @@ func TestGemma4Types_gemma4TensorType_Q8_0(t *testing.T) {
 	for _, layer := range []int{0, 1, 2, 6, 17, 34} {
 		for _, suffix := range perLayer {
 			name := core.Concat("blk.", core.Itoa(layer), ".", suffix)
-			if got := gemma4TensorType(QuantizeQ8_0, name, layer, 35); got != TensorTypeQ8_0 {
-				t.Errorf("gemma4TensorType(q8_0, %q) = %d, want Q8_0(%d)", name, got, TensorTypeQ8_0)
+			if got := gemma4TensorType(basegguf.QuantizeQ8_0, name, layer, 35); got != basegguf.TensorTypeQ8_0 {
+				t.Errorf("gemma4TensorType(q8_0, %q) = %d, want Q8_0(%d)", name, got, basegguf.TensorTypeQ8_0)
 			}
 		}
 	}
@@ -139,11 +140,11 @@ func TestGemma4Types_gemma4TensorType_Q8_0(t *testing.T) {
 // Q6_K, so every quantisable tensor is Q6_K on every layer.
 func TestGemma4Types_gemma4TensorType_Q6_K(t *testing.T) {
 	wholeModel := map[string]uint32{
-		"token_embd.weight":           TensorTypeQ6K,
-		"per_layer_token_embd.weight": TensorTypeQ6K,
+		"token_embd.weight":           basegguf.TensorTypeQ6K,
+		"per_layer_token_embd.weight": basegguf.TensorTypeQ6K,
 	}
 	for name, want := range wholeModel {
-		if got := gemma4TensorType(QuantizeQ6_K, name, -1, 35); got != want {
+		if got := gemma4TensorType(basegguf.QuantizeQ6_K, name, -1, 35); got != want {
 			t.Errorf("gemma4TensorType(q6_k, %q) = %d, want %d", name, got, want)
 		}
 	}
@@ -151,8 +152,8 @@ func TestGemma4Types_gemma4TensorType_Q6_K(t *testing.T) {
 	for _, layer := range []int{0, 1, 6, 34} {
 		for _, suffix := range perLayer {
 			name := core.Concat("blk.", core.Itoa(layer), ".", suffix)
-			if got := gemma4TensorType(QuantizeQ6_K, name, layer, 35); got != TensorTypeQ6K {
-				t.Errorf("gemma4TensorType(q6_k, %q) = %d, want Q6_K(%d)", name, got, TensorTypeQ6K)
+			if got := gemma4TensorType(basegguf.QuantizeQ6_K, name, layer, 35); got != basegguf.TensorTypeQ6K {
+				t.Errorf("gemma4TensorType(q6_k, %q) = %d, want Q6_K(%d)", name, got, basegguf.TensorTypeQ6K)
 			}
 		}
 	}
@@ -165,22 +166,22 @@ func TestGemma4Types_gemma4TensorType_Q6_K(t *testing.T) {
 // stays at the Q5_K bulk (no override table entry for those categories).
 func TestGemma4Types_gemma4TensorType_Q5_K_M(t *testing.T) {
 	wholeModel := map[string]uint32{
-		"token_embd.weight":           TensorTypeQ5K,
-		"per_layer_token_embd.weight": TensorTypeQ5K,
+		"token_embd.weight":           basegguf.TensorTypeQ5K,
+		"per_layer_token_embd.weight": basegguf.TensorTypeQ5K,
 	}
 	for name, want := range wholeModel {
-		if got := gemma4TensorType(QuantizeQ5_K_M, name, -1, 35); got != want {
+		if got := gemma4TensorType(basegguf.QuantizeQ5_K_M, name, -1, 35); got != want {
 			t.Errorf("gemma4TensorType(q5_k_m, %q) = %d, want %d", name, got, want)
 		}
 	}
 	for _, name := range []string{"blk.6.attn_v.weight", "blk.6.ffn_down.weight"} {
-		if got := gemma4TensorType(QuantizeQ5_K_M, name, 6, 35); got != TensorTypeQ6K {
-			t.Errorf("gemma4TensorType(q5_k_m, %q, layer 6) = %d, want Q6_K(%d)", name, got, TensorTypeQ6K)
+		if got := gemma4TensorType(basegguf.QuantizeQ5_K_M, name, 6, 35); got != basegguf.TensorTypeQ6K {
+			t.Errorf("gemma4TensorType(q5_k_m, %q, layer 6) = %d, want Q6_K(%d)", name, got, basegguf.TensorTypeQ6K)
 		}
 	}
 	for _, name := range []string{"blk.5.attn_v.weight", "blk.5.ffn_down.weight", "blk.5.attn_output.weight", "blk.5.ffn_gate.weight"} {
-		if got := gemma4TensorType(QuantizeQ5_K_M, name, 5, 35); got != TensorTypeQ5K {
-			t.Errorf("gemma4TensorType(q5_k_m, %q, layer 5) = %d, want Q5_K(%d)", name, got, TensorTypeQ5K)
+		if got := gemma4TensorType(basegguf.QuantizeQ5_K_M, name, 5, 35); got != basegguf.TensorTypeQ5K {
+			t.Errorf("gemma4TensorType(q5_k_m, %q, layer 5) = %d, want Q5_K(%d)", name, got, basegguf.TensorTypeQ5K)
 		}
 	}
 }
@@ -193,11 +194,11 @@ func TestGemma4Types_gemma4TensorType_Q3_K_M(t *testing.T) {
 	const layerCount = 35 // 35/16 == 2: layers 0,1 get ffn_down's Q5_K bump.
 
 	wholeModel := map[string]uint32{
-		"token_embd.weight":           TensorTypeQ3K,
-		"per_layer_token_embd.weight": TensorTypeQ3K,
+		"token_embd.weight":           basegguf.TensorTypeQ3K,
+		"per_layer_token_embd.weight": basegguf.TensorTypeQ3K,
 	}
 	for name, want := range wholeModel {
-		if got := gemma4TensorType(QuantizeQ3_K_M, name, -1, layerCount); got != want {
+		if got := gemma4TensorType(basegguf.QuantizeQ3_K_M, name, -1, layerCount); got != want {
 			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want %d", name, got, want)
 		}
 	}
@@ -205,44 +206,44 @@ func TestGemma4Types_gemma4TensorType_Q3_K_M(t *testing.T) {
 	// attn_v: hardcoded "first two layers" rule, independent of layerCount.
 	for _, layer := range []int{0, 1} {
 		name := core.Concat("blk.", core.Itoa(layer), ".attn_v.weight")
-		if got := gemma4TensorType(QuantizeQ3_K_M, name, layer, layerCount); got != TensorTypeQ5K {
-			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want Q5_K(%d)", name, got, TensorTypeQ5K)
+		if got := gemma4TensorType(basegguf.QuantizeQ3_K_M, name, layer, layerCount); got != basegguf.TensorTypeQ5K {
+			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want Q5_K(%d)", name, got, basegguf.TensorTypeQ5K)
 		}
 	}
 	for _, layer := range []int{2, 17, 34} {
 		name := core.Concat("blk.", core.Itoa(layer), ".attn_v.weight")
-		if got := gemma4TensorType(QuantizeQ3_K_M, name, layer, layerCount); got != TensorTypeQ4K {
-			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want Q4_K(%d)", name, got, TensorTypeQ4K)
+		if got := gemma4TensorType(basegguf.QuantizeQ3_K_M, name, layer, layerCount); got != basegguf.TensorTypeQ4K {
+			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want Q4_K(%d)", name, got, basegguf.TensorTypeQ4K)
 		}
 	}
 
 	// ffn_down: proportional "< layerCount/16" rule — 35/16 == 2.
 	for _, layer := range []int{0, 1} {
 		name := core.Concat("blk.", core.Itoa(layer), ".ffn_down.weight")
-		if got := gemma4TensorType(QuantizeQ3_K_M, name, layer, layerCount); got != TensorTypeQ5K {
-			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want Q5_K(%d)", name, got, TensorTypeQ5K)
+		if got := gemma4TensorType(basegguf.QuantizeQ3_K_M, name, layer, layerCount); got != basegguf.TensorTypeQ5K {
+			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want Q5_K(%d)", name, got, basegguf.TensorTypeQ5K)
 		}
 	}
 	for _, layer := range []int{2, 17, 34} {
 		name := core.Concat("blk.", core.Itoa(layer), ".ffn_down.weight")
-		if got := gemma4TensorType(QuantizeQ3_K_M, name, layer, layerCount); got != TensorTypeQ4K {
-			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want Q4_K(%d)", name, got, TensorTypeQ4K)
+		if got := gemma4TensorType(basegguf.QuantizeQ3_K_M, name, layer, layerCount); got != basegguf.TensorTypeQ4K {
+			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want Q4_K(%d)", name, got, basegguf.TensorTypeQ4K)
 		}
 	}
 
 	// attn_output: always bumped to Q4_K, every layer.
 	for _, layer := range []int{0, 5, 34} {
 		name := core.Concat("blk.", core.Itoa(layer), ".attn_output.weight")
-		if got := gemma4TensorType(QuantizeQ3_K_M, name, layer, layerCount); got != TensorTypeQ4K {
-			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want Q4_K(%d)", name, got, TensorTypeQ4K)
+		if got := gemma4TensorType(basegguf.QuantizeQ3_K_M, name, layer, layerCount); got != basegguf.TensorTypeQ4K {
+			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want Q4_K(%d)", name, got, basegguf.TensorTypeQ4K)
 		}
 	}
 
 	// attn_q/attn_k/ffn_gate/ffn_up: no override, stay at the Q3_K bulk.
 	for _, suffix := range []string{"attn_q.weight", "attn_k.weight", "ffn_gate.weight", "ffn_up.weight"} {
 		name := "blk.10." + suffix
-		if got := gemma4TensorType(QuantizeQ3_K_M, name, 10, layerCount); got != TensorTypeQ3K {
-			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want Q3_K(%d)", name, got, TensorTypeQ3K)
+		if got := gemma4TensorType(basegguf.QuantizeQ3_K_M, name, 10, layerCount); got != basegguf.TensorTypeQ3K {
+			t.Errorf("gemma4TensorType(q3_k_m, %q) = %d, want Q3_K(%d)", name, got, basegguf.TensorTypeQ3K)
 		}
 	}
 }
