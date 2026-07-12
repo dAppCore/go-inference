@@ -488,6 +488,74 @@ func makeQxQuantsRMSE1(x []float32, nmax int) float32 {
 	return scale
 }
 
+// makeQ3QuantsRMSE returns the optimal signed scale for a symmetric
+// [-nmax,nmax-1] quantiser fitting x, via ggml's make_q3_quants (do_rmse=true
+// — the only shape quantize_row_q3_K_ref calls). Unlike makeQxQuantsRMSE1's
+// grid search, this coordinate-descends: seed levels from one argmax-derived
+// iscale, then up to 5 passes flip one element's level at a time whenever it
+// improves the weighted (w=x[i]^2) least-squares fit, stopping early once a
+// pass changes nothing. levels receives L[i]+nmax (Q3_K's [0,2*nmax-1]
+// unsigned packing range) — callers use it as the fallback for any sub-block
+// whose reconstructed (f16 d * int6 scale) rounds to exactly zero.
+func makeQ3QuantsRMSE(x []float32, nmax int, levels []uint8) float32 {
+	var amax, max float32
+	for _, v := range x {
+		if a := absFloat32(v); a > amax {
+			amax = a
+			max = v
+		}
+	}
+	if amax < groupMaxEPS {
+		for i := range levels {
+			levels[i] = 0
+		}
+		return 0
+	}
+	iscale := float32(-nmax) / max
+	var lw [qkSubBlockSize]int32
+	var sumlx, suml2 float32
+	for i, v := range x {
+		l := clampInt(nearestIntGGML(iscale*v), -nmax, nmax-1)
+		lw[i] = int32(l)
+		w := v * v
+		fl := float32(l)
+		sumlx += w * v * fl
+		suml2 += w * fl * fl
+	}
+	for range 5 {
+		nChanged := 0
+		for i, v := range x {
+			w := v * v
+			slx := sumlx - w*v*float32(lw[i])
+			if slx <= 0 {
+				continue
+			}
+			sl2 := suml2 - w*float32(lw[i])*float32(lw[i])
+			newL := clampInt(nearestIntGGML(v*sl2/slx), -nmax, nmax-1)
+			if newL == int(lw[i]) {
+				continue
+			}
+			slx += w * v * float32(newL)
+			sl2 += w * float32(newL) * float32(newL)
+			if sl2 > 0 && slx*slx*suml2 > sumlx*sumlx*sl2 {
+				lw[i] = int32(newL)
+				sumlx, suml2 = slx, sl2
+				nChanged++
+			}
+		}
+		if nChanged == 0 {
+			break
+		}
+	}
+	for i := range levels {
+		levels[i] = uint8(lw[i] + int32(nmax))
+	}
+	if suml2 > 0 {
+		return sumlx / suml2
+	}
+	return 0
+}
+
 func quantizeQ5_K(values []float32) []byte {
 	nBlocks := len(values) / qkBlockSize
 	return appendQuantizeQ5_K(make([]byte, 0, nBlocks*176), values)
@@ -724,46 +792,48 @@ func appendQuantizeQ3_K(out []byte, values []float32) []byte {
 	for blockStart := 0; blockStart < len(values); blockStart += qkBlockSize {
 		block := values[blockStart : blockStart+qkBlockSize]
 
-		// Per-sub-block signed scale (max |value| / 4 covers [-4,3]) and the
-		// scale-of-scales mapping into the 6-bit signed scale field.
-		maxScale := float32(0)
+		// Per-sub-block optimal SIGNED scale (makeQ3QuantsRMSE — a
+		// coordinate-descent least-squares fit, not a naive maxAbs/4) and
+		// the scale-of-scales mapping into the 6-bit signed scale field.
+		// makeQ3QuantsRMSE also writes its own best-effort levels into
+		// levels[]; those survive as the fallback for any sub-block whose
+		// reconstructed d rounds to exactly zero below.
+		var maxScale, maxAbsScale float32
 		for sb := range qkSubBlocks {
 			subStart := sb * qkSubBlockSize
-			maxAbs := float32(0)
-			for j := range qkSubBlockSize {
-				if a := absFloat32(block[subStart+j]); a > maxAbs {
-					maxAbs = a
-				}
-			}
-			scratch.scales[sb] = maxAbs / 4
-			if scratch.scales[sb] > maxScale {
-				maxScale = scratch.scales[sb]
+			scale := makeQ3QuantsRMSE(block[subStart:subStart+qkSubBlockSize], 4, levels[subStart:subStart+qkSubBlockSize])
+			scratch.scales[sb] = scale
+			if a := absFloat32(scale); a > maxAbsScale {
+				maxAbsScale = a
+				maxScale = scale
 			}
 		}
 		d := float32(0)
-		var iscale float32
-		if maxScale > 0 {
-			iscale = 31 / maxScale // signed scale range is [-32,31]
-			d = maxScale / 31
+		for i := range rawScales {
+			rawScales[i] = 0
 		}
-		for sb := range qkSubBlocks {
-			s := clampInt(int(roundFloat32(iscale*scratch.scales[sb])), -32, 31)
-			rawScales[sb] = uint8(s + 32)
+		if maxAbsScale != 0 {
+			iscale := float32(-32) / maxScale
+			for sb := range qkSubBlocks {
+				l := clampInt(nearestIntGGML(iscale*scratch.scales[sb]), -32, 31) + 32
+				rawScales[sb] = uint8(l)
+			}
+			d = 1 / iscale
 		}
 
-		// Requantise to signed L ∈ [-4,3]; store as unsigned Lq = L+4.
+		// Second pass: requantise to signed L ∈ [-4,3] (stored as unsigned
+		// Lq = L+4) against the reconstructed per-sub-block scale. A
+		// sub-block whose reconstructed d is exactly zero is left at its
+		// makeQ3QuantsRMSE fallback from above (matching ggml, which reuses
+		// its own first-pass L for that case rather than zeroing it).
 		for sb := range qkSubBlocks {
 			subStart := sb * qkSubBlockSize
-			subScale := d * float32(int(rawScales[sb])-32)
-			inv := float32(0)
-			if subScale != 0 {
-				inv = 1 / subScale
+			dsub := d * (float32(rawScales[sb]) - 32)
+			if dsub == 0 {
+				continue
 			}
 			for j := range qkSubBlockSize {
-				l := 0
-				if inv != 0 {
-					l = clampInt(int(roundFloat32(block[subStart+j]*inv)), -4, 3)
-				}
+				l := clampInt(nearestIntGGML(block[subStart+j]/dsub), -4, 3)
 				levels[subStart+j] = uint8(l + 4)
 			}
 		}
@@ -774,30 +844,14 @@ func appendQuantizeQ3_K(out []byte, values []float32) []byte {
 		for i := range qs {
 			qs[i] = 0
 		}
-		// hmask: high bit (Lq>3 → set) following the decoder's m/is walk.
-		// m = 1<<g, g advances per (n-half, j) group; hm byte index = l or
-		// l+16 within each 32-element pair. is selects the sub-block.
-		m := uint8(1)
-		is := 0
-		for n := 0; n < qkBlockSize; n += 128 {
-			for range 4 {
-				base := is * qkSubBlockSize
-				for l := range 16 {
-					if levels[base+l] > 3 {
-						hmask[l] |= m
-					}
-				}
-				is++
-				base = is * qkSubBlockSize
-				for l := range 16 {
-					if levels[base+l] > 3 {
-						hmask[16+l] |= m
-					}
-				}
-				is++
-				m <<= 1
+		// hmask: the high bit (Lq>3) of every one of the 256 elements,
+		// walked SEQUENTIALLY (not per-sub-block): byte index cycles
+		// 0..31 every element, bit index advances every 32 elements —
+		// hmask[j%32] |= 1<<(j/32). Matches dequantize_row_q3_K exactly.
+		for j := range qkBlockSize {
+			if levels[j] > 3 {
+				hmask[j%32] |= 1 << uint(j/32)
 			}
-			_ = n
 		}
 		// qs: low 2 bits (Lq&3). dequantize_row_q3_K reads, per 128-element
 		// half, q[l] at shift 2j (j=0..3, l=0..15) then q[l+16] at the same
