@@ -24,8 +24,10 @@
 package builtin
 
 import (
+	_ "dappco.re/go/inference/model/bloom"    // bloom
 	_ "dappco.re/go/inference/model/composed" // qwen3_5 / qwen3_5_moe / qwen3_next hybrids (ArchSpec.Composed)
 	_ "dappco.re/go/inference/model/deepseek" // deepseek_v2 / deepseek_v3 (MLA declaration)
+	_ "dappco.re/go/inference/model/falcon"   // falcon (ALiBi transformer; excludes Falcon-H1)
 	_ "dappco.re/go/inference/model/gemma3"   // gemma3
 	_ "dappco.re/go/inference/model/gemma4"   // gemma4 / gemma4_text / gemma4_unified (+ assistant)
 	_ "dappco.re/go/inference/model/gpt2"     // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder

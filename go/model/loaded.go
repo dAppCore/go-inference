@@ -259,6 +259,7 @@ type LoadedDiffusion struct {
 type LoadedModel struct {
 	Arch          Arch
 	Embed         *Linear // token embedding (also the tied LM head when LMHead is nil)
+	EmbedNorm     []byte  // optional layer norm applied immediately after token embedding (BLOOM)
 	PositionEmbed *Linear // learned absolute position table; nil for rotary architectures
 	LMHead        *Linear // separate output projection, or nil ⇒ tied to Embed
 	FinalNorm     []byte
