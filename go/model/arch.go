@@ -28,6 +28,7 @@ type QKNormalization string
 const (
 	QKNone      QKNormalization = ""
 	QKLayerNorm QKNormalization = "layer_norm"
+	QKRMSNorm   QKNormalization = "rms_norm"
 )
 
 // LayerSpec declares one decode layer's structure, backend-agnostic.

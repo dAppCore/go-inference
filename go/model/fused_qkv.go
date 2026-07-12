@@ -4,6 +4,25 @@ package model
 
 import "dappco.re/go/inference/model/safetensors"
 
+// SplitContiguousGateUp exposes a fused [gate; up] row tensor under the two
+// canonical dense-MLP roles consumed by Assemble.
+func SplitContiguousGateUp(tensors map[string]safetensors.Tensor, fused, gate, up string) map[string]safetensors.Tensor {
+	t, ok := tensors[fused+".weight"]
+	if !ok || len(t.Shape) < 2 || t.Shape[0]%2 != 0 || len(t.Data)%2 != 0 {
+		return tensors
+	}
+	out := make(map[string]safetensors.Tensor, len(tensors)+2)
+	for name, tensor := range tensors {
+		out[name] = tensor
+	}
+	rows, size := t.Shape[0]/2, len(t.Data)/2
+	shape := append([]int(nil), t.Shape...)
+	shape[0] = rows
+	out[gate+".weight"] = safetensors.Tensor{Dtype: t.Dtype, Shape: append([]int(nil), shape...), Data: t.Data[:size]}
+	out[up+".weight"] = safetensors.Tensor{Dtype: t.Dtype, Shape: shape, Data: t.Data[size:]}
+	return out
+}
+
 // SplitContiguousQKV splits a fused tensor laid out as all Q rows, then K, then V.
 func SplitContiguousQKV(tensors map[string]safetensors.Tensor, fused, query, key, value string, qRows, kvRows int) map[string]safetensors.Tensor {
 	t, ok := tensors[fused+".weight"]
