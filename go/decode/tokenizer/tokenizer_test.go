@@ -131,8 +131,9 @@ const arrayMergesTokenizerJSON = `{
 
 // qwenLlamaSpecialsTokenizerJSON carries the Qwen3 / Llama-3 special tokens so
 // the corresponding BOS/EOS-assignment branches in LoadTokenizer fire:
-// <|im_start|> (BOS), <|im_end|> (EOS), <|begin_of_text|> (BOS), <|eot_id|>
-// (EOS). The later assignments win, matching production precedence.
+// <|im_end|> (EOS), <|begin_of_text|> (BOS), <|eot_id|> (EOS). The later
+// assignments win, matching production precedence. (<|im_start|> is present
+// but deliberately NOT a BOS — see the LoadTokenizer note.)
 const qwenLlamaSpecialsTokenizerJSON = `{
   "model": {
     "type": "BPE",
@@ -1852,5 +1853,79 @@ func TestTokenizer_nextSpecialBoundary_AnchorScanMatchesNaive_Good(t *testing.T)
 		if got, want := tok.nextSpecialBoundary(input), naive(input); got != want {
 			t.Fatalf("nextSpecialBoundary(%q) = %d, naive = %d", input, got, want)
 		}
+	}
+}
+
+// qwenChatMLTokenizerJSON mirrors the real qwen3.5 shape on the GPT-2 byte-level
+// path: <|im_start|>/<|im_end|> are special:true, <think>/</think> are
+// special:false (as the real pack ships them), and there is NO <bos> or
+// <|begin_of_text|> — HF never auto-prepends for this family.
+const qwenChatMLTokenizerJSON = `{
+  "model": {
+    "type": "BPE",
+    "vocab": {
+      "t": 0,
+      "h": 1,
+      "e": 2,
+      "th": 3,
+      "the": 4,
+      "Ġ": 5,
+      "Ġthe": 7,
+      "x": 8
+    },
+    "merges": ["t h", "th e"],
+    "byte_fallback": false
+  },
+  "added_tokens": [
+    {"id": 151644, "content": "<|im_start|>", "special": true},
+    {"id": 151645, "content": "<|im_end|>", "special": true},
+    {"id": 151667, "content": "<think>", "special": false},
+    {"id": 151668, "content": "</think>", "special": false}
+  ]
+}`
+
+// TestTokenizer_LoadTokenizer_QwenChatMLNoBOS_Good: a ChatML tokenizer without
+// <bos>/<|begin_of_text|> must NOT treat <|im_start|> as a BOS — the template
+// supplies every <|im_start|>, and the old mapping injected a ghost one at the
+// head of any encode not already starting with it (woken-conversation
+// continuations begin with <|im_end|>).
+func TestTokenizer_LoadTokenizer_QwenChatMLNoBOS_Good(t *testing.T) {
+	tok, err := LoadTokenizer(writeTokenizerJSON(t, qwenChatMLTokenizerJSON))
+	if err != nil {
+		t.Fatalf("LoadTokenizer: %v", err)
+	}
+	if tok.HasBOSToken() {
+		t.Fatalf("HasBOSToken() = true, want false (<|im_start|> is not a BOS)")
+	}
+	got := tok.Encode("<|im_end|>")
+	if len(got) != 1 || got[0] != 151645 {
+		t.Fatalf("Encode(<|im_end|>) = %v, want [151645] with no prepended <|im_start|>", got)
+	}
+}
+
+// TestTokenizer_Encode_NonSpecialAddedTokenAtomic_Good: special:false added
+// tokens (qwen's <think>/</think>) are still atomic added tokens on encode —
+// HF matches ALL added tokens as single ids; the special flag only governs the
+// decode-side skip. BPE-splitting them corrupts the reasoning-channel framing.
+func TestTokenizer_Encode_NonSpecialAddedTokenAtomic_Good(t *testing.T) {
+	tok, err := LoadTokenizer(writeTokenizerJSON(t, qwenChatMLTokenizerJSON))
+	if err != nil {
+		t.Fatalf("LoadTokenizer: %v", err)
+	}
+	got := tok.Encode("<think>the</think>")
+	want := []int32{151667, 4, 151668}
+	if len(got) != len(want) {
+		t.Fatalf("Encode(<think>the</think>) = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("Encode(<think>the</think>) = %v, want %v", got, want)
+		}
+	}
+	// Decode keeps the special:false tags visible (the reasoning splitter needs
+	// them) while special:true ChatML markers stay silenced.
+	text := tok.Decode([]int32{151644, 151667, 4, 151668, 151645})
+	if text != "<think>the</think>" {
+		t.Fatalf("Decode = %q, want %q (<think> visible, <|im_*|> silenced)", text, "<think>the</think>")
 	}
 }
