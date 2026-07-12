@@ -344,7 +344,11 @@ func hipRunAttachedDrafterTargetAdvanceOneBatch(ctx context.Context, driver nati
 	}
 	defer hipCloseGemma4Q4DeviceLayerDescriptorTables(priorLayerDescriptors)
 	greedyBuffer := hipAttachedDrafterStableDeviceBufferView(req.GreedyBuffer)
-	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, driver, req.TargetForward, []int32{req.TokenID}, req.Position, req.Epsilon, req.DeviceKVMode, priorLayerKV, priorLayerDescriptors, nil, nil, 0, greedyBuffer, req.Workspace, req.EngineConfig)
+	// A single-token target advance keeps the retained decode state on the
+	// batched projection path so it matches the batched prefill/verify kernels.
+	forwardEngineConfig := req.EngineConfig
+	forwardEngineConfig.ForceBatchedProjection = true
+	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, driver, req.TargetForward, []int32{req.TokenID}, req.Position, req.Epsilon, req.DeviceKVMode, priorLayerKV, priorLayerDescriptors, nil, nil, 0, greedyBuffer, req.Workspace, forwardEngineConfig)
 	if err != nil {
 		return hipAttachedDrafterTargetAdvanceOneResult{}, err
 	}
