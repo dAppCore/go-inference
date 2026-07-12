@@ -1,5 +1,53 @@
 # NEXT WAKE (2026-07-16 — #381 SHIPPED: the skip is live, 2.1-2.6x at every depth)
 
+## SWEEP ROUNDS (2026-07-12 afternoon — 8 Opus lanes, 2 rounds; the wrapper bug)
+
+- THE BUG OF THE DAY (233fb4c): welfareTextModel + policyTextModel embed
+  inference.TextModel, which does NOT widen the wrapper's method set — so the
+  serve handler's VisionModel/AudioModel assertions failed on EVERY wrapped
+  serve (welfare is default-on): all image_url AND input_audio requests 400'd
+  while the same checkpoint worked over the CLI. Nothing could trip it until
+  the first audio-capable serve existed (today). Failing tests first, then
+  explicit AcceptsImages/AcceptsAudio forwards on both wrappers. LIVE RECEIPT:
+  base64-WAV input_audio chat completion on e2b → exact fox transcript, 2.8s.
+  LESSON (bug class): a serving wrapper must forward every capability
+  interface the handler gates on; embedding forwards calls, not assertions.
+- COMPOSED CPU LEVERS (574d179 composed, 8325ee2 qwen3): both host GEMVs now
+  shard output columns across cores — bit-identical (per-element f64
+  accumulation order untouched; serial floor 1<<20 MACs). MLP fwd 12.47→1.15ms
+  (10.9x), attn 4.00→1.43ms, gated-delta 4.48→1.25ms. 0.8B live decode
+  1.6→10.5 tok/s quiet-machine (35-tok coherent answer). Next order of
+  magnitude = the GPU lane (ProjMatMulInto seam ready) — board task open.
+- FLEET ROUND 1 (4 Opus, merged 7c04584): cmd/lem 18.7→85.4% (25→133 tests,
+  every verb family); train 89.4→91.1% + sftSampleText 8→1 allocs
+  (928→240 B/op, per-sample-per-epoch); serving policy MATCH path 7→3 allocs
+  (clean path 0-alloc now bench-pinned); engine-neutral 80.3→82.2% (six 0%
+  fns). TWO honest premise-corrections: my bench-presence instrument was
+  broken by zsh glob noise — engine + policy were ALREADY benched; both
+  agents verified reality and refused theatre benches.
+- FLEET ROUND 2 (4 Opus, merged 3b43573): train2 — appendSidecar −37% B/op
+  (named lead confirmed), lora multi-shard hash −63% B/op, distill cache-key
+  byte-identity pinned; serve2 — five named 0% gaps with real fakes
+  (sessionkv route-drift gate, continuity fake session factory), kv floored
+  97.3%, one perf hypothesis benchstat-FALSIFIED and reverted clean;
+  modeldeep — gguf metadata 41→97%, tar-slip guard tested with hostile
+  containers, ggufLoadTensorData corruption guards; decodedeep — spec-decode
+  path evidenced at the floor (0-1 inherent allocs), redaction-gate slice
+  descent leak-pinned, json.Number grammar parity 100%.
+- MY FINDING CLOSES (e1c1de1, 61a6725): decode/parser Flush's residue
+  branches removed after independently verifying drain(true)'s postcondition
+  (holdback only arms mid-stream); TestProcessorDrainFinalConsumesPending
+  pins it. Orphaned Err doc comment rehomed.
+- PARKED DESIGN CALLS: safetensors Parse (reflection, 1819 allocs/shard) vs
+  parseHeaderInto (6-8) unification — divergent validation semantics
+  (zero-dim, dtype case), wall impact at load is small; eval ScoreAll
+  fake-judge harness; DuckDB ingest fixtures.
+- Round-close gates: 9,537 CPU (122 pkgs) + 1,550 metal green.
+- GATE-SCRIPT SCAR: serve boot pings need ≥120s timeouts (cold first request
+  pays welfare probe + PSO warmup); kill stray serves BY PORT
+  (lsof -ti:PORT | xargs kill -9) — go run children live in the build cache,
+  name-pattern pkill misses them.
+
 ## HEATWAVE ROUND (2026-07-12 midday — Opus fleet rolling; composed lands for real)
 
 - EMBED PAYLOADS REFRESHED (79ed05e): the tracked cmd/lem/*.metallib.gz had
