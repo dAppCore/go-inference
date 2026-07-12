@@ -221,146 +221,242 @@ func quantizeQ4_K(values []float32) []byte {
 	return appendQuantizeQ4_K(make([]byte, 0, nBlocks*144), values)
 }
 
-func appendQuantizeQ4_K(out []byte, values []float32) []byte {
-	scratch := qkScratchPool.Get().(*qkScratch)
-	defer qkScratchPool.Put(scratch)
+// kQuantSubBlocks / kQuantSubBlockSize are the Q4_K / Q5_K super-block geometry:
+// 8 sub-blocks of 32 elements each (distinct from Q6_K's 16 sub-blocks of 16).
+const (
+	kQuantSubBlocks    = 8
+	kQuantSubBlockSize = qkBlockSize / kQuantSubBlocks // 32
+)
 
+// appendQuantizeQ4_K appends ggml block_q4_K super-blocks (144 B/block) for
+// values to out. It is a faithful port of ggml's quantize_row_q4_K_ref: each of
+// the 8 sub-blocks gets an optimal (scale, min) from makeQKX2Quants, the 8
+// scales/mins are quantised to 6 bits against the super-block d/dmin and packed
+// in the get_scale_min_k4 layout, and every element is requantised to a 4-bit
+// level against its reconstructed sub-scale. Dequant is d*sc*q - dmin*m.
+func appendQuantizeQ4_K(out []byte, values []float32) []byte {
+	var (
+		levels  [qkBlockSize]uint8
+		weights [kQuantSubBlockSize]float32
+		scales  [kQuantSubBlocks]float32
+		mins    [kQuantSubBlocks]float32
+		ls, lm  [kQuantSubBlocks]uint8
+		packed  [12]byte
+		qs      [qkBlockSize / 2]byte
+	)
 	for blockStart := 0; blockStart < len(values); blockStart += qkBlockSize {
 		block := values[blockStart : blockStart+qkBlockSize]
-		scratch.minBlock, scratch.maxBlock = block[0], block[0]
-		for _, v := range block[1:] {
-			if v < scratch.minBlock {
-				scratch.minBlock = v
-			}
-			if v > scratch.maxBlock {
-				scratch.maxBlock = v
-			}
+		maxScale, maxMin := kQuantSubBlockScales(block, 15, weights[:], levels[:], scales[:], mins[:], -1.0, 0.1, 20)
+
+		invScale, invMin := kQuantSuperInverses(maxScale, maxMin)
+		for j := range kQuantSubBlocks {
+			ls[j] = uint8(clampInt(nearestIntGGML(invScale*scales[j]), 0, 63))
+			lm[j] = uint8(clampInt(nearestIntGGML(invMin*mins[j]), 0, 63))
 		}
-		d := float32(0)
-		if scratch.maxBlock > scratch.minBlock {
-			d = (scratch.maxBlock - scratch.minBlock) / 15
-		}
-		dmin := scratch.minBlock
+		packQ4Q5Scales(ls, lm, &packed)
+		d := maxScale / 63
+		dmin := maxMin / 63
+		kQuantRequantLevels(block, &packed, d, dmin, 15, levels[:])
+
 		out = binary.LittleEndian.AppendUint16(out, float32ToFloat16(d))
 		out = binary.LittleEndian.AppendUint16(out, float32ToFloat16(dmin))
-
-		var quants [qkBlockSize / 2]byte
-		if d == 0 {
-			for i := range quants {
-				quants[i] = 0x88
-			}
-		} else {
-			invD := 1 / d
-			for sb := range qkSubBlocks {
-				subStart := sb * qkSubBlockSize
-				scratch.subMin[sb] = block[subStart]
-				scratch.subMax[sb] = block[subStart]
-				for j := 1; j < qkSubBlockSize; j++ {
-					v := block[subStart+j]
-					if v < scratch.subMin[sb] {
-						scratch.subMin[sb] = v
-					}
-					if v > scratch.subMax[sb] {
-						scratch.subMax[sb] = v
-					}
-				}
-				if scratch.subMax[sb] > scratch.subMin[sb] {
-					scratch.scales[sb] = (scratch.subMax[sb] - scratch.subMin[sb]) / 63
-				} else {
-					scratch.scales[sb] = 0
-				}
-			}
-			for sb := range qkSubBlocks {
-				subStart := sb * qkSubBlockSize
-				for j := range qkSubBlockSize {
-					scaled := (block[subStart+j] - dmin) * invD
-					q := clampInt(int(scaled+0.5), 0, 15)
-					if j%2 == 0 {
-						quants[(subStart+j)/2] = byte(q)
-					} else {
-						quants[(subStart+j)/2] |= byte(q << 4)
-					}
-				}
+		out = append(out, packed[:]...)
+		qi := 0
+		for j := 0; j < qkBlockSize; j += 64 {
+			for l := range 32 {
+				qs[qi] = levels[j+l] | (levels[j+l+32] << 4)
+				qi++
 			}
 		}
-		packKScales(scratch.scales[:], &scratch.scalesPacked)
-		out = append(out, scratch.scalesPacked[:]...)
-		out = append(out, quants[:]...)
+		out = append(out, qs[:]...)
 	}
 	return out
 }
 
-func packKScales(scales []float32, packed *[12]byte) {
-	var scMin, scMax float32 = scales[0], scales[0]
-	for _, s := range scales[1:] {
-		if s < scMin {
-			scMin = s
+// kQuantSubBlockScales runs makeQKX2Quants over the 8 sub-blocks of block,
+// filling levels/scales/mins and returning the largest scale and min (the
+// super-block d/dmin numerators). The ggml importance weights (av_x + |x|) are
+// computed per sub-block.
+func kQuantSubBlockScales(block []float32, nmax int, weights []float32, levels []uint8, scales, mins []float32, rmin, rdelta float32, nstep int) (maxScale, maxMin float32) {
+	for j := range kQuantSubBlocks {
+		start := j * kQuantSubBlockSize
+		sub := block[start : start+kQuantSubBlockSize]
+		var sumX2 float32
+		for _, v := range sub {
+			sumX2 += v * v
 		}
-		if s > scMax {
-			scMax = s
+		avX := float32(math.Sqrt(float64(sumX2 / kQuantSubBlockSize)))
+		for l := range sub {
+			weights[l] = avX + absFloat32(sub[l])
+		}
+		sc, mn := makeQKX2Quants(nmax, sub, weights, levels[start:start+kQuantSubBlockSize], rmin, rdelta, nstep)
+		scales[j] = sc
+		mins[j] = mn
+		if sc > maxScale {
+			maxScale = sc
+		}
+		if mn > maxMin {
+			maxMin = mn
 		}
 	}
-	if scMax <= scMin {
-		return
+	return maxScale, maxMin
+}
+
+// nearestIntGGML rounds like ggml's nearest_int — round half to even via the
+// 12582912.0 magic-number bit trick. |fval| must be <= 4194303.
+func nearestIntGGML(fval float32) int {
+	val := fval + 12582912.0
+	i := int32(math.Float32bits(val))
+	return int((i & 0x007fffff) - 0x00400000)
+}
+
+// kQuantSuperInverses returns the 63/max reciprocals used to quantise the 8
+// sub-block scales and mins into 6-bit fields (0 when the numerator is 0).
+func kQuantSuperInverses(maxScale, maxMin float32) (invScale, invMin float32) {
+	if maxScale > 0 {
+		invScale = 63 / maxScale
 	}
-	dScale := (scMax - scMin) / 63
-	invDScale := 1 / dScale
-	bitBuf := uint64(0)
-	bitCount := 0
-	byteIdx := 0
-	for _, s := range scales {
-		scaled := (s - scMin) * invDScale
-		q := clampInt(int(scaled+0.5), 0, 63)
-		bitBuf |= uint64(q) << bitCount
-		bitCount += 6
-		for bitCount >= 8 && byteIdx < 12 {
-			packed[byteIdx] = byte(bitBuf & 0xFF)
-			bitBuf >>= 8
-			bitCount -= 8
-			byteIdx++
+	if maxMin > 0 {
+		invMin = 63 / maxMin
+	}
+	return invScale, invMin
+}
+
+// packQ4Q5Scales packs the 8 6-bit sub-block scales (ls) and mins (lm) into the
+// 12-byte block_q4_K / block_q5_K scales field, the exact inverse of ggml's
+// get_scale_min_k4: sub-blocks 0..3 keep their 6 bits in bytes 0..3 (scale) and
+// 4..7 (min); sub-blocks 4..7 split into a low nibble in bytes 8..11 and a high
+// 2 bits folded into the top of bytes 0..3 / 4..7.
+func packQ4Q5Scales(ls, lm [kQuantSubBlocks]uint8, packed *[12]byte) {
+	for i := range packed {
+		packed[i] = 0
+	}
+	for j := range kQuantSubBlocks {
+		if j < 4 {
+			packed[j] = ls[j]
+			packed[j+4] = lm[j]
+		} else {
+			packed[j+4] = (ls[j] & 0xF) | ((lm[j] & 0xF) << 4)
+			packed[j-4] |= (ls[j] >> 4) << 6
+			packed[j] |= (lm[j] >> 4) << 6
 		}
 	}
 }
 
-func quantizeKBlock(values []float32, quants []byte, bits int, d, dmin float32, scratch *qkScratch) {
-	if d == 0 {
-		return
+// getScaleMinK4 reads sub-block j's 6-bit scale and min back out of a packed
+// block_q4_K / block_q5_K scales field (ggml's get_scale_min_k4).
+func getScaleMinK4(j int, packed *[12]byte) (scale, min uint8) {
+	if j < 4 {
+		return packed[j] & 63, packed[j+4] & 63
 	}
-	invD := 1 / d
-	bitBuf := uint64(0)
-	bitCount := 0
-	byteIdx := 0
-	for idx, value := range values {
-		if idx%qkSubBlockSize == 0 {
-			sb := idx / qkSubBlockSize
-			scratch.subMin[sb] = value
-			scratch.subMax[sb] = value
-			for j := 1; j < qkSubBlockSize && idx+j < len(values); j++ {
-				v := values[idx+j]
-				if v < scratch.subMin[sb] {
-					scratch.subMin[sb] = v
-				}
-				if v > scratch.subMax[sb] {
-					scratch.subMax[sb] = v
-				}
+	scale = (packed[j+4] & 0xF) | ((packed[j-4] >> 6) << 4)
+	min = (packed[j+4] >> 4) | ((packed[j] >> 6) << 4)
+	return scale, min
+}
+
+// kQuantRequantLevels requantises every element of block to an [0,nmax] level
+// against its reconstructed sub-scale, matching ggml's second pass:
+// L = clamp(round((x + dmin*m) / (d*sc))). d/dmin are rounded through f16 first,
+// exactly as ggml reads them back from the stored block.
+func kQuantRequantLevels(block []float32, packed *[12]byte, d, dmin float32, nmax int, levels []uint8) {
+	dF16 := ggufFloat16ToFloat32(float32ToFloat16(d))
+	dminF16 := ggufFloat16ToFloat32(float32ToFloat16(dmin))
+	for j := range kQuantSubBlocks {
+		sc, m := getScaleMinK4(j, packed)
+		dsub := dF16 * float32(sc)
+		subStart := j * kQuantSubBlockSize
+		if dsub == 0 {
+			for ii := range kQuantSubBlockSize {
+				levels[subStart+ii] = 0
 			}
-			if scratch.subMax[sb] > scratch.subMin[sb] {
-				scratch.scales[sb] = (scratch.subMax[sb] - scratch.subMin[sb]) / 63
-			} else {
-				scratch.scales[sb] = 0
-			}
+			continue
 		}
-		scaled := (value - dmin) * invD
-		q := clampInt(int(scaled+0.5), 0, (1<<bits)-1)
-		bitBuf |= uint64(q) << bitCount
-		bitCount += bits
-		for bitCount >= 8 && byteIdx < len(quants) {
-			quants[byteIdx] = byte(bitBuf & 0xFF)
-			bitBuf >>= 8
-			bitCount -= 8
-			byteIdx++
+		dm := dminF16 * float32(m)
+		for ii := range kQuantSubBlockSize {
+			l := nearestIntGGML((block[subStart+ii] + dm) / dsub)
+			levels[subStart+ii] = uint8(clampInt(l, 0, nmax))
 		}
 	}
+}
+
+// makeQKX2Quants finds the sub-block scale and non-negative min that best fit x
+// under the importance weights, filling levels with [0,nmax] quant levels.
+// Faithful port of ggml's make_qkx2_quants (use_mad=false). Returns (scale,
+// min) such that the dequant is x ≈ scale*level - min.
+func makeQKX2Quants(nmax int, x, weights []float32, levels []uint8, rmin, rdelta float32, nstep int) (scale, theMin float32) {
+	n := len(x)
+	minv, maxv := x[0], x[0]
+	sumW := weights[0]
+	sumX := sumW * x[0]
+	for i := 1; i < n; i++ {
+		if x[i] < minv {
+			minv = x[i]
+		}
+		if x[i] > maxv {
+			maxv = x[i]
+		}
+		w := weights[i]
+		sumW += w
+		sumX += w * x[i]
+	}
+	if minv > 0 {
+		minv = 0
+	}
+	if maxv == minv {
+		for i := range levels[:n] {
+			levels[i] = 0
+		}
+		return 0, -minv
+	}
+	iscale := float32(nmax) / (maxv - minv)
+	scale = 1 / iscale
+	var bestMad float32
+	for i := 0; i < n; i++ {
+		l := clampInt(nearestIntGGML(iscale*(x[i]-minv)), 0, nmax)
+		levels[i] = uint8(l)
+		diff := scale*float32(l) + minv - x[i]
+		bestMad += weights[i] * diff * diff
+	}
+	if nstep < 1 {
+		return scale, -minv
+	}
+	var laux [kQuantSubBlockSize]uint8
+	for is := 0; is <= nstep; is++ {
+		iscale = (rmin + rdelta*float32(is) + float32(nmax)) / (maxv - minv)
+		var sumL, sumL2, sumXL float32
+		for i := 0; i < n; i++ {
+			l := clampInt(nearestIntGGML(iscale*(x[i]-minv)), 0, nmax)
+			laux[i] = uint8(l)
+			w := weights[i]
+			fl := float32(l)
+			sumL += w * fl
+			sumL2 += w * fl * fl
+			sumXL += w * fl * x[i]
+		}
+		det := sumW*sumL2 - sumL*sumL
+		if det > 0 {
+			thisScale := (sumW*sumXL - sumX*sumL) / det
+			thisMin := (sumL2*sumX - sumL*sumXL) / det
+			if thisMin > 0 {
+				thisMin = 0
+				thisScale = sumXL / sumL2
+			}
+			var mad float32
+			for i := 0; i < n; i++ {
+				diff := thisScale*float32(laux[i]) + thisMin - x[i]
+				mad += weights[i] * diff * diff
+			}
+			if mad < bestMad {
+				for i := 0; i < n; i++ {
+					levels[i] = laux[i]
+				}
+				bestMad = mad
+				scale = thisScale
+				minv = thisMin
+			}
+		}
+	}
+	return scale, -minv
 }
 
 func quantizeQ5_K(values []float32) []byte {
@@ -368,32 +464,63 @@ func quantizeQ5_K(values []float32) []byte {
 	return appendQuantizeQ5_K(make([]byte, 0, nBlocks*176), values)
 }
 
+// appendQuantizeQ5_K appends ggml block_q5_K super-blocks (176 B/block) for
+// values to out — the same super-block/scale machinery as Q4_K with 5-bit
+// levels split into a 4-bit qs field (128 B) and a 1-bit qh field (32 B). A
+// faithful port of ggml's quantize_row_q5_K_ref; dequant is d*sc*q - dmin*m.
 func appendQuantizeQ5_K(out []byte, values []float32) []byte {
-	scratch := qkScratchPool.Get().(*qkScratch)
-	defer qkScratchPool.Put(scratch)
+	var (
+		levels  [qkBlockSize]uint8
+		weights [kQuantSubBlockSize]float32
+		scales  [kQuantSubBlocks]float32
+		mins    [kQuantSubBlocks]float32
+		ls, lm  [kQuantSubBlocks]uint8
+		packed  [12]byte
+		qh      [qkBlockSize / 8]byte
+		qs      [qkBlockSize / 2]byte
+	)
 	for blockStart := 0; blockStart < len(values); blockStart += qkBlockSize {
 		block := values[blockStart : blockStart+qkBlockSize]
-		scratch.minBlock, scratch.maxBlock = block[0], block[0]
-		for _, v := range block[1:] {
-			if v < scratch.minBlock {
-				scratch.minBlock = v
-			}
-			if v > scratch.maxBlock {
-				scratch.maxBlock = v
-			}
+		maxScale, maxMin := kQuantSubBlockScales(block, 31, weights[:], levels[:], scales[:], mins[:], -0.5, 0.1, 15)
+
+		invScale, invMin := kQuantSuperInverses(maxScale, maxMin)
+		for j := range kQuantSubBlocks {
+			ls[j] = uint8(clampInt(nearestIntGGML(invScale*scales[j]), 0, 63))
+			lm[j] = uint8(clampInt(nearestIntGGML(invMin*mins[j]), 0, 63))
 		}
-		d := float32(0)
-		if scratch.maxBlock > scratch.minBlock {
-			d = (scratch.maxBlock - scratch.minBlock) / 31
-		}
-		dmin := scratch.minBlock
+		packQ4Q5Scales(ls, lm, &packed)
+		d := maxScale / 63
+		dmin := maxMin / 63
+		kQuantRequantLevels(block, &packed, d, dmin, 31, levels[:])
+
 		out = binary.LittleEndian.AppendUint16(out, float32ToFloat16(d))
 		out = binary.LittleEndian.AppendUint16(out, float32ToFloat16(dmin))
-		var quants [qkBlockSize * 5 / 8]byte
-		quantizeKBlock(block, quants[:], 5, d, dmin, scratch)
-		packKScales(scratch.scales[:], &scratch.scalesPacked)
-		out = append(out, scratch.scalesPacked[:]...)
-		out = append(out, quants[:]...)
+		out = append(out, packed[:]...)
+		for i := range qh {
+			qh[i] = 0
+		}
+		qi := 0
+		m1, m2 := uint8(1), uint8(2)
+		for n := 0; n < qkBlockSize; n += 64 {
+			for j := range 32 {
+				l1 := int(levels[n+j])
+				if l1 > 15 {
+					l1 -= 16
+					qh[j] |= m1
+				}
+				l2 := int(levels[n+j+32])
+				if l2 > 15 {
+					l2 -= 16
+					qh[j] |= m2
+				}
+				qs[qi+j] = uint8(l1) | (uint8(l2) << 4)
+			}
+			m1 <<= 2
+			m2 <<= 2
+			qi += 32
+		}
+		out = append(out, qh[:]...)
+		out = append(out, qs[:]...)
 	}
 	return out
 }

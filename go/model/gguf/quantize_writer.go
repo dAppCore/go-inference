@@ -210,9 +210,95 @@ func writeGGUFMetadataValue(file *core.OSFile, valueType uint32, value any) erro
 		binary.LittleEndian.PutUint32(buf[:], math.Float32bits(floatValue))
 		_, err := file.Write(buf[:])
 		return err
+	case ggufValueTypeInt32:
+		var v int32
+		switch concrete := value.(type) {
+		case int32:
+			v = concrete
+		case int:
+			v = int32(concrete)
+		default:
+			return core.NewError("gguf: GGUF metadata value is not int32")
+		}
+		var buf [4]byte
+		binary.LittleEndian.PutUint32(buf[:], uint32(v))
+		_, err := file.Write(buf[:])
+		return err
+	case ggufValueTypeBool:
+		boolValue, ok := value.(bool)
+		if !ok {
+			return core.NewError("gguf: GGUF metadata value is not bool")
+		}
+		var buf [1]byte
+		if boolValue {
+			buf[0] = 1
+		}
+		_, err := file.Write(buf[:])
+		return err
+	case ggufValueTypeArray:
+		return writeGGUFArrayValue(file, value)
 	default:
 		return core.NewError("gguf: unsupported GGUF metadata write type " + strconv.FormatUint(uint64(valueType), 10))
 	}
+}
+
+// writeGGUFArrayValue writes a GGUF array metadata value: the element wire type
+// (uint32), the element count (uint64), then the packed elements. The element
+// type is inferred from the concrete Go slice — []string, []float32, []int32
+// and []bool cover the gemma-4 metadata (token list, scores, token types /
+// per-layer feed-forward lengths, sliding-window pattern). The element payload
+// is built into one buffer and written in a single call rather than one write
+// per element, so a 262 144-entry token array costs two writes, not a quarter
+// million.
+func writeGGUFArrayValue(file *core.OSFile, value any) error {
+	var head [12]byte
+	var payload []byte
+	switch arr := value.(type) {
+	case []string:
+		binary.LittleEndian.PutUint32(head[:4], ValueTypeString)
+		binary.LittleEndian.PutUint64(head[4:12], uint64(len(arr)))
+		total := 0
+		for _, s := range arr {
+			total += 8 + len(s)
+		}
+		payload = make([]byte, 0, total)
+		var lenBuf [8]byte
+		for _, s := range arr {
+			binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(s)))
+			payload = append(payload, lenBuf[:]...)
+			payload = append(payload, s...)
+		}
+	case []float32:
+		binary.LittleEndian.PutUint32(head[:4], ValueTypeFloat32)
+		binary.LittleEndian.PutUint64(head[4:12], uint64(len(arr)))
+		payload = make([]byte, len(arr)*4)
+		for i, f := range arr {
+			binary.LittleEndian.PutUint32(payload[i*4:], math.Float32bits(f))
+		}
+	case []int32:
+		binary.LittleEndian.PutUint32(head[:4], ggufValueTypeInt32)
+		binary.LittleEndian.PutUint64(head[4:12], uint64(len(arr)))
+		payload = make([]byte, len(arr)*4)
+		for i, n := range arr {
+			binary.LittleEndian.PutUint32(payload[i*4:], uint32(n))
+		}
+	case []bool:
+		binary.LittleEndian.PutUint32(head[:4], ggufValueTypeBool)
+		binary.LittleEndian.PutUint64(head[4:12], uint64(len(arr)))
+		payload = make([]byte, len(arr))
+		for i, b := range arr {
+			if b {
+				payload[i] = 1
+			}
+		}
+	default:
+		return core.NewError("gguf: unsupported GGUF array element type")
+	}
+	if _, err := file.Write(head[:]); err != nil {
+		return err
+	}
+	_, err := file.Write(payload)
+	return err
 }
 
 func writeGGUFTensorInfo(file *core.OSFile, tensor Tensor) error {

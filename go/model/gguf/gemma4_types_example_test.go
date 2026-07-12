@@ -1,0 +1,15 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+package gguf
+
+import "fmt"
+
+// Example shows the q4_k_m policy bumping ffn_down to Q6_K on a use_more_bits
+// layer while a plain projection weight stays Q4_K.
+func Example_gemma4TensorType() {
+	fmt.Println(
+		gemma4TensorType("blk.6.ffn_down.weight", 6, 35) == ggufTensorTypeQ6K,
+		gemma4TensorType("blk.5.ffn_down.weight", 5, 35) == ggufTensorTypeQ4K,
+	)
+	// Output: true true
+}
