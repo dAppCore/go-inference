@@ -252,16 +252,9 @@ func wireContinuity(ctx context.Context, cfg ServeConfig, hotSwap *hotSwapResolv
 		printServe(log, "serve: conversation continuity unavailable on this engine — serving stateless")
 		return func() {}
 	}
-	storePath, ephemeral := resolveStateStorePath(cfg.StateStorePath)
-	var store *filestore.Store
-	if storePath != "" {
-		if opened, err := openConversationStore(ctx, storePath, ephemeral); err == nil {
-			store = opened
-		} else {
-			printServe(log, "serve: conversation state store %s: %v", storePath, err)
-		}
-	}
-	if store == nil {
+	store, cleanup, where, err := openContinuityStore(ctx, cfg.StateStorePath)
+	if err != nil {
+		printServe(log, "serve: conversation state store: %v", err)
 		printServe(log, "serve: conversation continuity unavailable — serving stateless")
 		return func() {}
 	}
@@ -271,46 +264,36 @@ func wireContinuity(ctx context.Context, cfg ServeConfig, hotSwap *hotSwapResolv
 			printServe(log, "serve: conversation continuity unavailable (stateless serving continues): %v", err)
 			return
 		}
-		if ephemeral {
-			printServe(log, "serve: conversation continuity ON — chats wake from %s (ephemeral: wiped each serve run; set -state-store for durable per-project state), no prompt replay", storePath)
-			return
-		}
-		printServe(log, "serve: conversation continuity ON — chats wake from %s, no prompt replay", storePath)
+		printServe(log, "serve: conversation continuity ON — %s, no prompt replay", where)
 	})
-	return func() {
-		_ = store.Close()
-		if ephemeral {
-			core.Remove(storePath)
-		}
-	}
+	return cleanup
 }
 
-// resolveStateStorePath maps the -state-store flag to the store path and its
-// lifetime: an EMPTY flag means serve made the store itself — the defaulted
-// conversations.kv is ephemeral (wiped fresh at launch, removed at shutdown),
-// so per-turn tail-block rewrites never accumulate across runs. Any explicit
-// path — even the default's literal location — is the durable per-project
-// store and is never wiped.
-func resolveStateStorePath(flagPath string) (path string, ephemeral bool) {
-	if p := core.Trim(flagPath); p != "" {
-		return p, false
-	}
-	if homeR := core.UserHomeDir(); homeR.OK {
-		if home, ok := homeR.Value.(string); ok {
-			return core.PathJoin(home, "Lethean", "lem", "state", "conversations.kv"), true
+// openContinuityStore selects the conversation state tier from the -state-store
+// flag. Unset (the default) holds conversations in a pure-RAM store: a
+// long-lived server has no reason to pay a per-turn disk round-trip for a cache
+// it would discard at shutdown anyway (the previous default wrote — and wiped —
+// a conversations.kv file). Any explicit path is the durable per-project file
+// store, so chats that asked for durability keep their .kv semantics untouched.
+//
+// It returns the store, a shutdown cleanup (closes a file store; a no-op for
+// RAM), a phrase for the boot notice, and an error only when a requested
+// durable store could not be opened — serve then degrades to stateless.
+func openContinuityStore(ctx context.Context, flagPath string) (store state.Store, cleanup func(), where string, err error) {
+	if path := core.Trim(flagPath); path != "" {
+		opened, openErr := openConversationStore(ctx, path)
+		if openErr != nil {
+			return nil, func() {}, "", openErr
 		}
+		return opened, func() { _ = opened.Close() }, "chats wake from " + path, nil
 	}
-	return "", false
+	return state.NewInMemoryStore(nil), func() {}, "conversations held in RAM (set -state-store for a durable per-project store)", nil
 }
 
-// openConversationStore opens the conversation state store at path. An
-// ephemeral (defaulted) store is created FRESH every time — filestore.Create's
-// O_TRUNC wipes whatever a previous run (or crash) left behind. A durable
-// (explicit) store opens in place, created on first use.
-func openConversationStore(ctx context.Context, path string, ephemeral bool) (*filestore.Store, error) {
-	if ephemeral {
-		return filestore.Create(ctx, path)
-	}
+// openConversationStore opens (or creates) the durable conversation state store
+// at path — per-project state opened in place, created on first use, never
+// wiped. A missing parent directory is created.
+func openConversationStore(ctx context.Context, path string) (*filestore.Store, error) {
 	if core.Stat(path).OK {
 		return filestore.Open(ctx, path)
 	}
