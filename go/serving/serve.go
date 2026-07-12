@@ -12,6 +12,7 @@ import (
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/model/state"
 	"dappco.re/go/inference/model/state/filestore"
+	"dappco.re/go/inference/model/state/ramspill"
 	adminpkg "dappco.re/go/inference/serving/admin"
 	"dappco.re/go/inference/serving/compat"
 	"dappco.re/go/inference/serving/policy"
@@ -67,6 +68,12 @@ type ServeConfig struct {
 	// Conversation continuity.
 	StateConversations bool   // wake each chat from its slept state, no prompt replay
 	StateStorePath     string // durable per-project store file; empty = ephemeral default, wiped each serve run
+	// StateRAMBudget caps resident bytes in the RAM conversation store (only
+	// meaningful when StateStorePath is unset — an explicit durable store is
+	// already disk-backed). <= 0 is unlimited, byte-identical to pre-#48
+	// behaviour. Over budget, the coldest chunks spill to a scratch .kv file
+	// (model/state/ramspill) and wake back transparently on the next turn.
+	StateRAMBudget int64
 
 	// Welfare guard (go/welfare): per-turn detect + engine-model mediation on
 	// every chat route; lem_end is additionally offered to Lemma checkpoints.
@@ -428,7 +435,7 @@ func wireContinuity(ctx context.Context, cfg ServeConfig, setOnLoad func(func(in
 		printServe(log, "serve: conversation continuity unavailable on this engine — serving stateless")
 		return func() {}
 	}
-	store, cleanup, where, err := openContinuityStore(ctx, cfg.StateStorePath)
+	store, cleanup, where, err := openContinuityStore(ctx, cfg.StateStorePath, cfg.StateRAMBudget, log)
 	if err != nil {
 		printServe(log, "serve: conversation state store: %v", err)
 		printServe(log, "serve: conversation continuity unavailable — serving stateless")
@@ -445,25 +452,58 @@ func wireContinuity(ctx context.Context, cfg ServeConfig, setOnLoad func(func(in
 	return cleanup
 }
 
-// openContinuityStore selects the conversation state tier from the -state-store
-// flag. Unset (the default) holds conversations in a pure-RAM store: a
-// long-lived server has no reason to pay a per-turn disk round-trip for a cache
-// it would discard at shutdown anyway (the previous default wrote — and wiped —
-// a conversations.kv file). Any explicit path is the durable per-project file
-// store, so chats that asked for durability keep their .kv semantics untouched.
+// openContinuityStore selects the conversation state tier from the
+// -state-store and -state-ram-budget flags. An explicit path is the durable
+// per-project file store, so chats that asked for durability keep their .kv
+// semantics untouched — -state-ram-budget is meaningless there (already
+// disk-backed) and only logs a notice. Unset holds conversations in RAM: a
+// long-lived server has no reason to pay a per-turn disk round-trip for a
+// cache it would discard at shutdown anyway. RAM is unbounded when
+// ramBudget <= 0 (byte-identical to pre-#48 behaviour); above zero it is a
+// ramspill.Store instead, so the coldest chunks page out to a scratch .kv
+// file once resident bytes cross the ceiling, and page back in transparently.
 //
-// It returns the store, a shutdown cleanup (closes a file store; a no-op for
-// RAM), a phrase for the boot notice, and an error only when a requested
-// durable store could not be opened — serve then degrades to stateless.
-func openContinuityStore(ctx context.Context, flagPath string) (store state.Store, cleanup func(), where string, err error) {
+// It returns the store, a shutdown cleanup (closes/removes the backing file;
+// a no-op for unbounded RAM), a phrase for the boot notice, and an error only
+// when a requested durable store — or the spill scratch store — could not be
+// opened; serve then degrades to stateless.
+func openContinuityStore(ctx context.Context, flagPath string, ramBudget int64, log io.Writer) (store state.Store, cleanup func(), where string, err error) {
 	if path := core.Trim(flagPath); path != "" {
 		opened, openErr := openConversationStore(ctx, path)
 		if openErr != nil {
 			return nil, func() {}, "", openErr
 		}
+		if ramBudget > 0 {
+			printServe(log, "serve: -state-ram-budget ignored — %s is already disk-backed", path)
+		}
 		return opened, func() { _ = opened.Close() }, "chats wake from " + path, nil
 	}
-	return state.NewInMemoryStore(nil), func() {}, "conversations held in RAM (set -state-store for a durable per-project store)", nil
+	if ramBudget <= 0 {
+		return state.NewInMemoryStore(nil), func() {}, "conversations held in RAM (set -state-store for a durable per-project store)", nil
+	}
+	spillPath := ramSpillPath()
+	cold, openErr := filestore.Create(ctx, spillPath)
+	if openErr != nil {
+		return nil, func() {}, "", core.E("serving.openContinuityStore", "open ram-spill scratch store", openErr)
+	}
+	tiered, newErr := ramspill.New(ramspill.Options{Budget: ramBudget, Cold: cold, Log: log})
+	if newErr != nil {
+		_ = cold.Close()
+		return nil, func() {}, "", core.E("serving.openContinuityStore", "build ram-spill store", newErr)
+	}
+	cleanup = func() {
+		_ = cold.Close()
+		core.Remove(spillPath)
+	}
+	where = core.Sprintf("conversations held in RAM under a %d-byte budget (coldest chunks spill to %s)", ramBudget, spillPath)
+	return tiered, cleanup, where, nil
+}
+
+// ramSpillPath is the scratch file a budgeted RAM store pages its coldest
+// chunks to — the same per-run-scratch lifecycle the old defaulted
+// conversation store used: truncated fresh at Create, removed at shutdown.
+func ramSpillPath() string {
+	return core.PathJoin(core.Env("HOME"), "Lethean", "lem", "conversations.spill.kv")
 }
 
 // openConversationStore opens (or creates) the durable conversation state store
