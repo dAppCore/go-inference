@@ -55,6 +55,7 @@ func TestRunEbookCommand_Bad(t *testing.T) {
 	}{
 		{"missing model", nil, 2},
 		{"unknown flag", []string{"-nonsense"}, 2},
+		{"help", []string{"-h"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

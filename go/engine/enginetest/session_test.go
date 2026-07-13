@@ -87,3 +87,44 @@ func TestSessionHandle_SuiteSelfTest_Good(t *testing.T) {
 		return &fakeSession{}
 	})
 }
+
+// sessionWithoutRestore is conformant but deliberately does not advertise the
+// optional KVRestorer capability. Engines that lack snapshot restore are still
+// valid conformance-suite consumers.
+type sessionWithoutRestore struct{ state fakeSession }
+
+func (s *sessionWithoutRestore) Prefill(ctx context.Context, prompt string) error {
+	return s.state.Prefill(ctx, prompt)
+}
+
+func (s *sessionWithoutRestore) AppendPrompt(ctx context.Context, prompt string) error {
+	return s.state.AppendPrompt(ctx, prompt)
+}
+
+func (s *sessionWithoutRestore) Generate(ctx context.Context, cfg inference.GenerateConfig) iter.Seq[inference.Token] {
+	return s.state.Generate(ctx, cfg)
+}
+
+func (s *sessionWithoutRestore) CaptureKV(ctx context.Context) (*kv.Snapshot, error) {
+	return s.state.CaptureKV(ctx)
+}
+
+func (s *sessionWithoutRestore) RangeKVBlocks(ctx context.Context, blockSize int, opts kv.CaptureOptions, yield func(kv.Block) (bool, error)) error {
+	return s.state.RangeKVBlocks(ctx, blockSize, opts, yield)
+}
+
+func (s *sessionWithoutRestore) Fork(ctx context.Context) (inference.SessionHandle, error) {
+	return &sessionWithoutRestore{state: s.state}, nil
+}
+
+func (s *sessionWithoutRestore) Reset()       { s.state.Reset() }
+func (s *sessionWithoutRestore) Close() error { return s.state.Close() }
+func (s *sessionWithoutRestore) Err() error   { return s.state.Err() }
+
+// TestSessionHandle_OptionalKVRestoreUnavailable_Ugly proves the conformance
+// suite accepts an engine that omits its documented optional restore surface.
+func TestSessionHandle_OptionalKVRestoreUnavailable_Ugly(t *testing.T) {
+	SessionHandle(t, func(*testing.T) inference.SessionHandle {
+		return &sessionWithoutRestore{}
+	})
+}

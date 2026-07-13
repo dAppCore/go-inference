@@ -272,6 +272,7 @@ func TestRunQuantCommand_Rejects(t *testing.T) {
 		wantCode int
 	}{
 		{"no positional", []string{"-bits", "4"}, 2},
+		{"help", []string{"-h"}, 0},
 		{"unsupported bits", []string{src, "-bits", "3"}, 1},
 		{"no shards", []string{filepath.Join(t.TempDir(), "empty")}, 1},
 	} {
