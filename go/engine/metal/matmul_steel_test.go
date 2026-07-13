@@ -17,6 +17,107 @@ func matMulF32NTFixture(M, K, N int) ([]float32, []float32) {
 	return a, b
 }
 
+func matMulF32HostReference(a, b []float32, M, K, N int, transposeB bool) []float32 {
+	out := make([]float32, M*N)
+	for row := range M {
+		for col := range N {
+			var sum float32
+			for k := range K {
+				bIndex := k*N + col
+				if transposeB {
+					bIndex = col*K + k
+				}
+				sum += a[row*K+k] * b[bIndex]
+			}
+			out[row*N+col] = sum
+		}
+	}
+	return out
+}
+
+func TestMatMulF32Core_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const M, K, N = 3, 72, 7 // bounds-checked NN kernel path
+	a := syntheticFloat32(M*K, 3)
+	b := syntheticFloat32(K*N, 5)
+	got, err := matMulF32Core(a, b, M, K, N, steelNN, false)
+	if err != nil {
+		t.Fatalf("matMulF32Core: %v", err)
+	}
+	// The f32 kernel may fuse multiply-adds differently from Go's scalar loop;
+	// 2e-4 covers that last-bit ordering difference without masking a layout error.
+	assertFloat32Near(t, "matMulF32Core", got, matMulF32HostReference(a, b, M, K, N, false), 2e-4)
+}
+
+func TestMatMulF32SplitKNT_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const M, K, N = 3, 128, 128 // the public NT dispatcher selects split-K here
+	a, b := matMulF32NTFixture(M, K, N)
+	got, err := matMulF32SplitKNT(a, b, M, K, N)
+	if err != nil {
+		t.Fatalf("matMulF32SplitKNT: %v", err)
+	}
+	// Split-K sums partition partials rather than the host loop's serial sum;
+	// use the same tight f32 accumulation allowance as the core parity test.
+	assertFloat32Near(t, "matMulF32SplitKNT", got, matMulF32HostReference(a, b, M, K, N, true), 2e-4)
+}
+
+func TestMatMulF32SteelScratch_Close_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	scratch, err := newMatMulF32SteelScratch(3, 5, 7, 7, steelNN)
+	if err != nil {
+		t.Fatalf("newMatMulF32SteelScratch: %v", err)
+	}
+	if _, _, _, err := scratch.buffers(syntheticFloat32(15, 3)); err != nil {
+		t.Fatalf("matMulF32SteelScratch.buffers: %v", err)
+	}
+	scratch.Close()
+	scratch.Close()
+	if scratch.a != nil || scratch.out != nil || scratch.params != nil || scratch.M != 0 || scratch.K != 0 || scratch.N != 0 || scratch.ldb != 0 || scratch.paramsFilled {
+		t.Fatalf("matMulF32SteelScratch.Close retained state: %#v", scratch)
+	}
+	if scratch.aView.buf != nil || scratch.outView != nil || scratch.outViewPinned != nil {
+		t.Fatal("matMulF32SteelScratch.Close retained a caller-buffer view")
+	}
+}
+
+func TestMatMulF32SplitKParamsScratch_Close_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	scratch, err := newMatMulF32SplitKParamsScratch(3, 128, 128, 4, 1, 2, 384, 64, 4)
+	if err != nil {
+		t.Fatalf("newMatMulF32SplitKParamsScratch: %v", err)
+	}
+	if _, err := scratch.buffer(); err != nil {
+		t.Fatalf("matMulF32SplitKParamsScratch.buffer: %v", err)
+	}
+	scratch.Close()
+	scratch.Close()
+	if scratch.params != nil || scratch.M != 0 || scratch.K != 0 || scratch.N != 0 || scratch.tilesN != 0 || scratch.tilesM != 0 || scratch.partitions != 0 || scratch.stride != 0 || scratch.partSize != 0 || scratch.kIterations != 0 || scratch.paramsFilled {
+		t.Fatalf("matMulF32SplitKParamsScratch.Close retained state: %#v", scratch)
+	}
+}
+
+func TestMatMulF32SplitKAccumScratch_Close_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	scratch, err := newMatMulF32SplitKAccumScratch(3, 128, 2)
+	if err != nil {
+		t.Fatalf("newMatMulF32SplitKAccumScratch: %v", err)
+	}
+	if _, err := scratch.buffer(); err != nil {
+		t.Fatalf("matMulF32SplitKAccumScratch.buffer: %v", err)
+	}
+	scratch.Close()
+	scratch.Close()
+	if scratch.split != nil || scratch.M != 0 || scratch.N != 0 || scratch.partitions != 0 {
+		t.Fatalf("matMulF32SplitKAccumScratch.Close retained state: %#v", scratch)
+	}
+}
+
 func TestMatMulF32NTAllocationBudget(t *testing.T) {
 	requireNativeRuntime(t)
 

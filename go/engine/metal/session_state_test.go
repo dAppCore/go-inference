@@ -119,6 +119,110 @@ func newICBSessionStateFixture(t testing.TB, g *QuantModel, arch model.Arch, max
 	return s
 }
 
+func TestLoadStateBlock_Good(t *testing.T) {
+	// A full block is a zero-copy range into each fixed cache's row-major slab.
+	keys := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	values := []byte{10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+	block, err := loadStateBlock(1, 2, 3, 5, []sessionStateLayerView{{
+		layer: 3, cacheIndex: 7, cacheMode: nativeStateCacheModeFixed,
+		maxSize: 0, kvHeads: 1, headDim: 1, rowBytes: 2, cacheRows: 5,
+		keyBytes: keys, valueBytes: values,
+	}})
+	if err != nil {
+		t.Fatalf("loadStateBlock: %v", err)
+	}
+	if block.Index != 1 || block.TokenStart != 2 || block.TokenCount != 2 || len(block.Layers) != 1 {
+		t.Fatalf("loadStateBlock metadata = %#v, want block 1 at tokens [2,4) with one layer", block)
+	}
+	if got, want := block.Layers[0].KeyBytes, keys[4:8]; !bytes.Equal(got, want) {
+		t.Fatalf("loadStateBlock key range = %v, want %v", got, want)
+	}
+	if got, want := block.Layers[0].ValueBytes, values[4:8]; !bytes.Equal(got, want) {
+		t.Fatalf("loadStateBlock value range = %v, want %v", got, want)
+	}
+}
+
+func TestLoadStateBlock_Bad(t *testing.T) {
+	if _, err := loadStateBlock(3, 2, 3, 5, nil); err == nil {
+		t.Fatal("loadStateBlock accepted an index beyond the block count")
+	}
+}
+
+func TestLoadStateBlock_Ugly(t *testing.T) {
+	// Position 6 with a four-row ring makes block [3,6) wrap slots 3,0,1.
+	// The implementation must materialise that non-contiguous range in token order.
+	keys := []byte{0, 1, 2, 3, 4, 5, 6, 7}
+	values := []byte{10, 11, 12, 13, 14, 15, 16, 17}
+	block, err := loadStateBlock(1, 3, 2, 6, []sessionStateLayerView{{
+		layer: 0, cacheIndex: 0, cacheMode: nativeStateCacheModeFixed,
+		maxSize: 4, kvHeads: 1, headDim: 1, rowBytes: 2, cacheRows: 4,
+		keyBytes: keys, valueBytes: values,
+	}})
+	if err != nil {
+		t.Fatalf("loadStateBlock wrapped range: %v", err)
+	}
+	if got, want := block.Layers[0].KeyBytes, []byte{6, 7, 0, 1, 2, 3}; !bytes.Equal(got, want) {
+		t.Fatalf("loadStateBlock wrapped key range = %v, want %v", got, want)
+	}
+	if got, want := block.Layers[0].ValueBytes, []byte{16, 17, 10, 11, 12, 13}; !bytes.Equal(got, want) {
+		t.Fatalf("loadStateBlock wrapped value range = %v, want %v", got, want)
+	}
+
+	targetKeys := make([]byte, len(keys))
+	targetValues := make([]byte, len(values))
+	target := []sessionStateLayerView{{
+		layer: 0, cacheIndex: 0, cacheMode: nativeStateCacheModeFixed,
+		maxSize: 4, kvHeads: 1, headDim: 1, rowBytes: 2, cacheRows: 4,
+		keyBytes: targetKeys, valueBytes: targetValues,
+	}}
+	if err := restoreStateBlock(1, 3, 6, 1, target, block); err != nil {
+		t.Fatalf("restoreStateBlock wrapped range: %v", err)
+	}
+	if got, want := targetKeys, keys; !bytes.Equal(got, want) {
+		t.Fatalf("restoreStateBlock wrapped keys = %v, want %v", got, want)
+	}
+	if got, want := targetValues, values; !bytes.Equal(got, want) {
+		t.Fatalf("restoreStateBlock wrapped values = %v, want %v", got, want)
+	}
+}
+
+func TestArchSession_refreshPagedStateLayerViews_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	s := newSessionStateFixture(t)
+	if err := s.PrefillTokens([]int32{1, 2, 3, 4}); err != nil {
+		t.Fatalf("PrefillTokens: %v", err)
+	}
+	views, err := s.stateLayerViews()
+	if err != nil {
+		t.Fatalf("stateLayerViews: %v", err)
+	}
+	if len(views) < 2 || views[0].cacheIndex == views[1].cacheIndex {
+		t.Fatalf("fixture cache indexes = %v/%v, want distinct paged owners", views[0].cacheIndex, views[1].cacheIndex)
+	}
+	// Keep a known current snapshot, then replace the cached view slices. The
+	// requested cache index must be re-materialised while the unrequested view
+	// stays untouched; this is the MTP selective-refresh contract.
+	wantKeys := append([]byte(nil), views[0].keyBytes...)
+	wantValues := append([]byte(nil), views[0].valueBytes...)
+	views[0].keyBytes, views[0].valueBytes = []byte{0xde}, []byte{0xad}
+	views[1].keyBytes, views[1].valueBytes = []byte{0xbe}, []byte{0xef}
+	if err := s.refreshPagedStateLayerViews(views, map[int]bool{views[0].cacheIndex: true}); err != nil {
+		t.Fatalf("refreshPagedStateLayerViews: %v", err)
+	}
+	if got := views[0].keyBytes; !bytes.Equal(got, wantKeys) {
+		t.Fatalf("selected paged key snapshot = %v, want current cache bytes %v", got, wantKeys)
+	}
+	if got := views[0].valueBytes; !bytes.Equal(got, wantValues) {
+		t.Fatalf("selected paged value snapshot = %v, want current cache bytes %v", got, wantValues)
+	}
+	if got := views[1].keyBytes; !bytes.Equal(got, []byte{0xbe}) {
+		t.Fatalf("unrequested paged key snapshot changed to %v", got)
+	}
+	if got := views[1].valueBytes; !bytes.Equal(got, []byte{0xef}) {
+		t.Fatalf("unrequested paged value snapshot changed to %v", got)
+	}
+}
+
 func firstOwnedCacheLayer(t testing.TB, s *ArchSession) int {
 	t.Helper()
 	for li, spec := range s.state.specs {
