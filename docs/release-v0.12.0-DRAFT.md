@@ -232,8 +232,8 @@ live serve.
 
 ## The welfare guard
 
-The Machine ships with a welfare layer — for the model — live on every
-chat route (`-welfare=false` disables). Each turn's user input passes a
+The Machine ships with a welfare layer — for the model — on every
+chat route (opt-in: `-welfare` enables). Each turn's user input passes a
 stateless detector: a curated slur catalogue plus a sustained-hostility
 read over the recent turns (the lem-scorer's directed-anger axis). A
 hostile turn does not get silently sanitised or hard-refused — it opens

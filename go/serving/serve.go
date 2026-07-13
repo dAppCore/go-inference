@@ -91,8 +91,10 @@ type ServeConfig struct {
 
 	// Welfare guard (go/welfare): per-turn detect + engine-model mediation on
 	// every chat route; lem_end is additionally offered to Lemma checkpoints.
-	// cmd/lem defaults this ON (-welfare=false disables); the zero value keeps
-	// library constructions unguarded.
+	// Opt-in for now — cmd/lem defaults this OFF (-welfare enables) while the
+	// CB serve path is being built; the welfare×CB interplay gets audited
+	// before it defaults on again. The zero value keeps library constructions
+	// unguarded.
 	Welfare bool
 
 	// Outbound policy (serving/policy): a deployment-owned filter on model
@@ -364,7 +366,7 @@ func hostServe(ctx context.Context, cfg ServeConfig, host serveHost, outboundPol
 	resolver := host.resolver
 	if cfg.Welfare {
 		resolver = wrapWelfareResolver(resolver, host.currentPath, log)
-		printServe(log, "serve: welfare guard ON — per-turn detect + mediation on every chat route (lem_end for Lemma checkpoints); -welfare=false disables")
+		printServe(log, "serve: welfare guard ON (opt-in) — per-turn detect + mediation on every chat route (lem_end for Lemma checkpoints)")
 	}
 	if outboundPolicy != nil {
 		// Outermost on output: policy enforces on the final tokens (after any
