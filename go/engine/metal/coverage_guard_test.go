@@ -110,6 +110,10 @@ func (p failingProjector) rowsByteTier(int) bool { return true }
 
 func (p failingProjector) foldProfitable() bool { return true }
 
+func (p failingProjector) projectRowsByteTier(enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, inOff, outOff uint, rows int, idx projIndex) (bool, error) {
+	return p.projectRows(enc, in, out, inOff, outOff, rows, idx)
+}
+
 func (p failingProjector) projectRows(_ metal.MTLComputeCommandEncoder, _, _ metal.MTLBuffer, _, _ uint, _ int, idx projIndex) (bool, error) {
 	if p.err != nil && idx == p.fail {
 		return true, p.err
