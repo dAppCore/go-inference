@@ -611,6 +611,9 @@ func (ls *laneSet) chainRoundCommit(lane *decodeLane, fromXA bool) (metal.MTLCom
 // and drops the cross-pool pin chainRoundCommit took.
 func waitReleaseChainedCB(cb metal.MTLCommandBufferObject) {
 	waitUntilCompletedFast(cb)
+	if pieceTimingOn {
+		laneGPUSpanNs += int64(float64(cb.GPUEndTime()-cb.GPUStartTime()) * 1e9)
+	}
 	cb.Release()
 }
 
