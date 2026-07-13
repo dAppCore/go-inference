@@ -1,3 +1,32 @@
+# NEXT WAKE (2026-07-14 evening — usage race closed; welfare opt-in)
+
+## 2026-07-14 (post-restart session, both on dev, pushed)
+
+- WELFARE OPT-IN (6840d9a): -welfare defaults FALSE while CB is built
+  (snider). Guard untouched behind the flag; the welfare×CB audit gates
+  default-on returning (the guard decorates TextModel.Chat — CB never calls
+  it, so default-on never covered CB chats anyway).
+- USAGE RACE CLOSED (b578008): GenerateConfig.MetricsSink (+ WithMetricsSink,
+  json:"-" — train marshals configs in SSD reports and encoding/json rejects
+  func fields) delivers each generation's final metrics request-scoped.
+  ScheduledRequest.MetricsSink carries it across the scheduler's
+  opts→SamplerConfig fold (which drops non-sampler opts — the reason a
+  handler-installed option alone could never work); serial/batch/interleave
+  re-arm it at dispatch, the CB route delivers its own scheduler-built
+  counts, continuity delivers the RecordChatMetrics numbers. The openai
+  handler prefers sink delivery on both serve paths; global Metrics() stays
+  as fallback (HTTP backend, engine/hip's own scheduler — codex's lane,
+  untouched, drops the sink exactly like the old facade did).
+  Receipts: 12 tests across the 5 seams (handler tests discriminate sink vs
+  global with different numbers); -race green on all 5 pkgs (63 + 1448 —
+  the 600s scheduler "hang" was TestBatch_Cancel_Active flaking under
+  triple-package race load, passes 0.00s alone); full sweep green; live
+  4-concurrent usage-isolation probe (distinct max_tokens 4/8/16/24 +
+  distinct prompt sizes, all finish=length) 5/5 rounds exact on BOTH the
+  plain boot and the -scheduler interleave boot.
+- Next rungs unchanged otherwise: welfare×CB audit · concurrent lane
+  admission · CB lane metric durations · batched head · MoE arches.
+
 # NEXT WAKE (2026-07-14 — CB serve integration LIVE end-to-end; restart handover)
 
 ## THE 2026-07-13 MARATHON (all pushed, dev @ 2be27d9 — tracker #385 holds the full detail)
