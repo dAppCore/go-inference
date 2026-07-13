@@ -556,6 +556,11 @@ accumulation order. Kill switch `LTHN_CB_GEMM=0` restores the per-lane replay.
   (GEMM armed vs replay) advanced in lockstep over varied-fill specs produce byte-for-byte
   identical POST-STACK HIDDENS every step (not just argmax tokens); `gemmFwdCount>0` proves
   the GEMM path fired, `==0` on the replay set.
+- **Ragged-join byte-identity** — `TestLaneSetGEMMRaggedJoinByteIdentity`: lanes admitted
+  in WAVES (K grows 2→3→4 under a live set) keep byte-for-byte identical hiddens/tokens
+  vs the replay path at every step, exercising the `gemmSlabs` reallocation and a GEMM
+  sweep over lanes at heterogeneous positions — a joiner perturbs neither the incumbents'
+  bytes nor its own forward.
 - **Weight-read-once A/B** — `TestLaneSetGEMMThroughputAB` (synthetic bf16, E2B-shape
   dModel 1536 / 16 layers / qDim 2048 / dFF 8192, K=4): serial replay **173 tok/s** →
   batched replay **178 tok/s** (1.03× — this bf16 decode is weight-bandwidth-bound, not

@@ -98,6 +98,111 @@ func TestLaneSetGEMMByteIdentityHiddens(t *testing.T) {
 	}
 }
 
+// TestLaneSetGEMMRaggedJoinByteIdentity extends the byte-identity receipt across the
+// RAGGED-JOIN surface: lanes are admitted in WAVES (two at step 0, one at step 2, one
+// at step 4) into a GEMM-armed set and a replay set driven in lockstep, so the batched
+// GEMM forward runs at a K that GROWS under a live set (2 → 3 → 4). This exercises two
+// code paths the up-front-admission receipts do not: the gemmSlabs REALLOCATION when a
+// later wave pushes K past the current staging (ensureGemmSlabs' grow branch), and a
+// GEMM sweep over lanes at HETEROGENEOUS positions (a fresh joiner sits at pos = its
+// prompt length while incumbents have already decoded several tokens). Every lane's
+// post-stack hidden and token stream must stay byte-identical to the replay path at
+// every step, before AND after each join — a joining lane must neither perturb the
+// incumbents' bytes nor take a divergent forward for itself. The counter guard proves
+// the GEMM path actually fired across the joins (else the proof is vacuous).
+func TestLaneSetGEMMRaggedJoinByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	m := laneSetFixtureModel(t)
+	defer m.Close()
+	specs := laneSpecFixtures()
+	ctx := context.Background()
+
+	// waveAt[i] is the step at which spec i is admitted. Lanes 0,1 start together;
+	// lane 2 joins after two steps; lane 3 after four — so the GEMM forward runs at
+	// K = 2, then 3, then 4, forcing the slab to reallocate under a live set. MaxNew
+	// (8) exceeds the last join step, so every lane is admitted well before any
+	// retires — the loop covers both ragged JOIN and ragged LEAVE.
+	waveAt := []int{0, 0, 2, 4}
+
+	open := func(mode int) *laneSet {
+		lsi, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+		if err != nil {
+			t.Fatalf("OpenLaneSet(mode %d): %v", mode, err)
+		}
+		ls, ok := lsi.(*laneSet)
+		if !ok {
+			t.Fatalf("OpenLaneSet returned %T, not *laneSet", lsi)
+		}
+		ls.gemmMode = mode // 1 = batched GEMM armed, 2 = ICB replay only
+		return ls
+	}
+	lsG, lsR := open(1), open(2)
+	defer lsG.Close()
+	defer lsR.Close()
+
+	admitted := make([]bool, len(specs))
+	hG := make([]inference.LaneHandle, len(specs))
+	hR := make([]inference.LaneHandle, len(specs))
+	admitWave := func(step int) {
+		for i := range specs {
+			if admitted[i] || waveAt[i] != step {
+				continue
+			}
+			var err error
+			if hG[i], err = lsG.Prepare(ctx, specs[i]); err != nil {
+				t.Fatalf("GEMM Prepare(lane %d @ step %d): %v", i, step, err)
+			}
+			if hR[i], err = lsR.Prepare(ctx, specs[i]); err != nil {
+				t.Fatalf("replay Prepare(lane %d @ step %d): %v", i, step, err)
+			}
+			admitted[i] = true
+		}
+	}
+
+	for step := 0; ; step++ {
+		admitWave(step)
+		sg, err := lsG.Step(ctx)
+		if err != nil {
+			t.Fatalf("step %d GEMM Step: %v", step, err)
+		}
+		sr, err := lsR.Step(ctx)
+		if err != nil {
+			t.Fatalf("step %d replay Step: %v", step, err)
+		}
+		allAdmitted := !slices.Contains(admitted, false)
+		if len(sg) == 0 && len(sr) == 0 && allAdmitted {
+			break
+		}
+		// Per-lane hidden + token byte-identity for every lane live in BOTH sets.
+		for i := range specs {
+			if !admitted[i] {
+				continue
+			}
+			lg, lr := lsG.lanes[hG[i].ID], lsR.lanes[hR[i].ID]
+			if lg == nil || lr == nil {
+				continue // retired this step in one/both sets
+			}
+			if !bytes.Equal(lg.hidden, lr.hidden) {
+				t.Fatalf("step %d lane %d: post-stack hidden bytes differ between GEMM and replay after ragged join (len %d vs %d)", step, i, len(lg.hidden), len(lr.hidden))
+			}
+		}
+		if tokG, tokR := stepTokens(sg, hG), stepTokens(sr, hR); !slices.Equal(tokG, tokR) {
+			t.Fatalf("step %d: token vector diverges GEMM %v vs replay %v", step, tokG, tokR)
+		}
+		retireTerminal(t, lsG, sg)
+		retireTerminal(t, lsR, sr)
+	}
+
+	if lsG.gemmFwdCount == 0 {
+		t.Fatal("gemmFwdCount is zero — the GEMM forward never fired across the ragged joins (proof vacuous)")
+	}
+	if lsR.gemmFwdCount != 0 {
+		t.Fatalf("replay set ran %d GEMM forwards — it should be pure ICB replay", lsR.gemmFwdCount)
+	}
+}
+
 // TestLaneSetGEMMQuantFallsBackToReplay documents the evidenced quant blocker as a
 // passing guard: a 4-bit checkpoint (E2B) is NOT batched-GEMM-eligible, so even with
 // the forward armed (gemmMode 1) the lane set runs the per-lane ICB replay — the
