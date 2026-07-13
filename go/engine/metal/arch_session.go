@@ -2772,6 +2772,35 @@ func (s *ArchSession) StepWithID(id int32, emb []byte) ([]byte, error) {
 	return res, nil
 }
 
+// sharedStepEligible reports whether this session's one-token forward can
+// encode into a caller-owned shared submission (see sharedEncodeEligible for
+// the state-level conditions; PLE models additionally decline — their
+// per-token prologue is host-produced and stays on the per-lane path).
+func (s *ArchSession) sharedStepEligible() bool {
+	return s != nil && s.perLayerInput == nil && s.state.sharedEncodeEligible()
+}
+
+// stepIDEncodeShared encodes this session's next token's forward into the
+// owner's shared submission — no commit, no wait, no position bump. The final
+// hidden's buffer lands in sink.finalOut, readable only after the owner's
+// wait; the owner bumps s.pos itself once the shared submission completes (a
+// failed shared attempt must leave the session untouched for the per-lane
+// retry).
+func (s *ArchSession) stepIDEncodeShared(id int32, sink *sharedStepSink) error {
+	if s.pos >= s.maxLen {
+		return core.NewError("native.ArchSession.stepIDEncodeShared: sequence would exceed maxLen cache rows")
+	}
+	if s.perLayerInput != nil {
+		return core.NewError("native.ArchSession.stepIDEncodeShared: PLE models keep the per-lane step")
+	}
+	emb, err := s.embedID(id)
+	if err != nil {
+		return err
+	}
+	_, err = s.state.stepTokenEncode(emb, s.pos, false, true, nil, sink)
+	return err
+}
+
 func (s *ArchSession) stepIDInPool(id int32) ([]byte, error) {
 	emb, err := s.embedID(id)
 	if err != nil {

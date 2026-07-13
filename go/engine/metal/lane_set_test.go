@@ -192,9 +192,10 @@ func laneSetMoEFixtureModel(t *testing.T) *NativeTokenModel {
 }
 
 // TestLaneSetMoEReencodeByteIdentity is the conformance proof for RE-ENCODE
-// lanes (MoE — no recorded ICB): the SAME lane specs produce the SAME per-lane
+// lanes on the PER-LANE path (bf16 MoE keeps the host handoff, so it is
+// shared-submission INELIGIBLE): the SAME lane specs produce the SAME per-lane
 // token streams run alone (K==1) and all together (K>1). No shared submission
-// is claimed for re-encode lanes, so BatchForwardCount must stay ZERO on both
+// fires for ineligible lanes, so BatchForwardCount must stay ZERO on both
 // runs — an honest counter, not a disguised one.
 func TestLaneSetMoEReencodeByteIdentity(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
@@ -246,6 +247,167 @@ func TestLaneSetMoEReencodeByteIdentity(t *testing.T) {
 	}
 	if batchedFwd != 0 {
 		t.Fatalf("batched MoE set claimed %d batched forwards, want 0 (re-encode lanes share no submission)", batchedFwd)
+	}
+}
+
+// laneSetQuantMoEFixtureModel builds a synthetic QUANT gemma4 model whose
+// second layer is MoE on the fully-encoded device-router lane — no recorded
+// ICB (re-encode lanes), but shared-submission ELIGIBLE: the 26B-A4B shape.
+// The probes pin both properties, else the shared-path proof is vacuous.
+func laneSetQuantMoEFixtureModel(t *testing.T) *NativeTokenModel {
+	t.Helper()
+	const dModel, nHeads, nKV, headDim, dFF, vocab, nLayers = 128, 2, 1, 64, 256, 48, 2
+	const gs, bits = 32, 4
+	arch := archFixture(t, dModel, nHeads, nKV, headDim, dFF, vocab, nLayers)
+	arch.Layer[1].MoE = true
+	qlayers := make([]QuantizedLayerWeights, nLayers)
+	for i := range qlayers {
+		qlayers[i] = quantizedLayerFixture(t, dModel, nHeads, nKV, headDim, dFF, gs, bits, (i+1)*100)
+	}
+	moe := quantMoELayerWeightsGuard(t, 4, 2, dModel, dFF, 96, gs, bits)
+	qlayers[1].MoE = &moe
+	embed := quantWeightFixture(t, vocab, dModel, gs, bits, 11)
+	g := &QuantModel{
+		Layers: qlayers,
+		Embed:  embed.Packed, EmbedScales: embed.Scales, EmbedBiases: embed.Biases,
+		// tied: the head reuses the embedding triple (loadedToQuant's shape)
+		LMHead: embed.Packed, LMHeadScales: embed.Scales, LMHeadBiases: embed.Biases,
+		FinalNorm: toBF16Bytes(syntheticFloat32(dModel, 7)),
+		Tied:      true, GroupSize: gs, Bits: bits,
+	}
+	m, err := NewQuantTokenModel(g, arch, 32)
+	if err != nil {
+		t.Fatalf("NewQuantTokenModel(MoE): %v", err)
+	}
+	probe, err := m.OpenSession()
+	if err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	as, ok := probe.(*ArchSession)
+	if !ok {
+		t.Fatal("quant MoE fixture session is not an ArchSession")
+	}
+	if as.state.icb != nil {
+		_ = as.Close()
+		t.Fatal("quant MoE fixture recorded an ICB — re-encode lanes would be vacuous")
+	}
+	if !as.sharedStepEligible() {
+		_ = as.Close()
+		t.Fatal("quant MoE fixture is not shared-encode eligible — the shared-submission proof would be vacuous")
+	}
+	_ = as.Close()
+	return m
+}
+
+// TestLaneSetMoESharedSubmissionByteIdentity is the conformance proof for the
+// SHARED re-encode submission (quant device-router MoE — the 26B-A4B lane):
+// identical per-lane token streams run alone (K==1) and all together (K>1),
+// with the counter guard proving the shared path actually fired — the batched
+// run advances K lanes with a SINGLE lane's forward count, not K× it.
+func TestLaneSetMoESharedSubmissionByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	m := laneSetQuantMoEFixtureModel(t)
+	defer m.Close()
+	specs := laneSpecFixtures()
+	ctx := context.Background()
+
+	serialTokens := make([][]int32, len(specs))
+	var serialFwdSingle uint64
+	for i, spec := range specs {
+		ls, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: 1})
+		if err != nil {
+			t.Fatalf("OpenLaneSet(serial %d): %v", i, err)
+		}
+		h, err := ls.Prepare(ctx, spec)
+		if err != nil {
+			t.Fatalf("Prepare(serial %d): %v", i, err)
+		}
+		got, fwd := drainLaneSet(t, ls)
+		serialTokens[i] = got[h.ID]
+		if len(serialTokens[i]) == 0 {
+			t.Fatalf("serial quant MoE lane %d produced no tokens", i)
+		}
+		if i == 0 {
+			serialFwdSingle = fwd
+		}
+		_ = ls.Close()
+	}
+
+	ls, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+	if err != nil {
+		t.Fatalf("OpenLaneSet(batched): %v", err)
+	}
+	handles := make([]inference.LaneHandle, len(specs))
+	for i, spec := range specs {
+		if handles[i], err = ls.Prepare(ctx, spec); err != nil {
+			t.Fatalf("Prepare(batched %d): %v", i, err)
+		}
+	}
+	batchedTokens, batchedFwd := drainLaneSet(t, ls)
+	_ = ls.Close()
+
+	for i := range specs {
+		if !slices.Equal(batchedTokens[handles[i].ID], serialTokens[i]) {
+			t.Fatalf("quant MoE lane %d: batched tokens %v != serial %v", i, batchedTokens[handles[i].ID], serialTokens[i])
+		}
+	}
+	if batchedFwd == 0 {
+		t.Fatal("BatchForwardCount is zero — the shared re-encode submission never fired")
+	}
+	if batchedFwd > serialFwdSingle {
+		t.Fatalf("batched forwards %d exceed a single lane's %d — lanes were not sharing a submission", batchedFwd, serialFwdSingle)
+	}
+	if serialTotal := uint64(len(specs)) * serialFwdSingle; batchedFwd >= serialTotal {
+		t.Fatalf("batched forwards %d not fewer than serial total %d — no sharing occurred", batchedFwd, serialTotal)
+	}
+}
+
+// TestLaneSetMoESharedMatchesProductionGreedy pins the shared submission to
+// the engine's serial decode on the HOST-headed arm (chain disabled): the
+// lane's phase 1 is a host-loop head, so its oracle is the host loop. The
+// chained-live tail (GPU argmax + GPU-produced next embed) is a DIFFERENT
+// production arm that diverges from the host loop on near-tie logits — a
+// pre-existing engine-level condition (same family as the ICB-parity scar:
+// chained paths differ from host re-encode), receipted by the lane diag
+// during this rung and tracked in the batching task, not a lane artefact.
+func TestLaneSetMoESharedMatchesProductionGreedy(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	m := laneSetQuantMoEFixtureModel(t)
+	defer m.Close()
+	ctx := context.Background()
+	stepGreedyChainDisabled = true
+	defer func() { stepGreedyChainDisabled = false }()
+
+	for i, spec := range laneSpecFixtures() {
+		prod, err := m.OpenSession()
+		if err != nil {
+			t.Fatalf("OpenSession(%d): %v", i, err)
+		}
+		as := prod.(*ArchSession)
+		want, err := as.Generate(spec.PromptIDs, spec.MaxNew, -1)
+		if err != nil {
+			t.Fatalf("Generate(%d): %v", i, err)
+		}
+		_ = as.Close()
+
+		ls, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: 1})
+		if err != nil {
+			t.Fatalf("OpenLaneSet(%d): %v", i, err)
+		}
+		h, err := ls.Prepare(ctx, spec)
+		if err != nil {
+			t.Fatalf("Prepare(%d): %v", i, err)
+		}
+		got, _ := drainLaneSet(t, ls)
+		_ = ls.Close()
+
+		if !slices.Equal(got[h.ID], want) {
+			t.Fatalf("quant MoE lane %d: owner tokens %v != production Generate %v", i, got[h.ID], want)
+		}
 	}
 }
 
