@@ -352,9 +352,14 @@ func TestLaneSetMoESharedSubmissionByteIdentity(t *testing.T) {
 		}
 	}
 	batchedTokens, batchedFwd := drainLaneSet(t, ls)
-	// Engagement guard for the batched Phase-1 head (see the dense twin).
+	// Engagement guards: the batched Phase-1 head must fire for the arming
+	// step, and the CHAINED forward (fused forward+head+embed per lane cb)
+	// must carry the steady state — silent declines cannot pass as either.
 	if rows := ls.(*laneSet).headRowsCount; rows == 0 {
 		t.Fatal("batched Phase-1 head never engaged (headRowsCount == 0)")
+	}
+	if chained := ls.(*laneSet).chainedSteps; chained == 0 {
+		t.Fatal("chained lane forward never engaged (chainedSteps == 0)")
 	}
 	_ = ls.Close()
 
