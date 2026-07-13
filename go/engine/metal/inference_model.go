@@ -19,16 +19,17 @@ import (
 )
 
 var (
-	_ engine.TokenModel              = (*NativeTokenModel)(nil)
-	_ engine.PromptReuseCapableModel = (*NativeTokenModel)(nil)
-	_ engine.Session                 = (*ArchSession)(nil)
-	_ engine.PromptReuseSession      = (*ArchSession)(nil)
-	_ engine.TrainerModel            = (*NativeTokenModel)(nil)
-	_ engine.Trainer                 = (*LoRATrainer)(nil)
-	_ engine.CacheModeReporter       = (*NativeTokenModel)(nil)
-	_ engine.StopTokenDeclarer       = (*NativeTokenModel)(nil)
-	_ engine.ChatTemplateDeclarer    = (*NativeTokenModel)(nil)
-	_ engine.DecodePhaseTracer       = (*ArchSession)(nil)
+	_ engine.TokenModel               = (*NativeTokenModel)(nil)
+	_ engine.PromptReuseCapableModel  = (*NativeTokenModel)(nil)
+	_ engine.Session                  = (*ArchSession)(nil)
+	_ engine.PromptReuseSession       = (*ArchSession)(nil)
+	_ engine.TrainerModel             = (*NativeTokenModel)(nil)
+	_ engine.Trainer                  = (*LoRATrainer)(nil)
+	_ engine.CacheModeReporter        = (*NativeTokenModel)(nil)
+	_ engine.StopTokenDeclarer        = (*NativeTokenModel)(nil)
+	_ engine.SamplingDefaultsDeclarer = (*NativeTokenModel)(nil)
+	_ engine.ChatTemplateDeclarer     = (*NativeTokenModel)(nil)
+	_ engine.DecodePhaseTracer        = (*ArchSession)(nil)
 )
 
 // DeclaredChatTemplate declares this checkpoint's chat dialect
