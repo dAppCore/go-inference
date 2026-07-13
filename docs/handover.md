@@ -1,3 +1,29 @@
+# NEXT WAKE (2026-07-16 — THE GAP IS CLOSED: the K-sweep verdict)
+
+## 2026-07-16 (K-sweep — cad6b59, pushed)
+
+- -scheduler-concurrency flag (cmd/lem → ServeConfig → scheduler
+  Config.MaxConcurrent; 0 = default 4) — the lane count was hardcoded
+  4, capping K>4 measurement and deployment alike.
+- THE SWEEP (26B ctx4096, salted unique prompts, warm discarded, two
+  measured rounds per point):
+      K=1: CB 106.7/106.3 | plain-stateless 89/93   | plain-cont 102/100
+      K=2: CB 130.0/130.3 | 107/133                 | 130/131
+      K=4: CB 150.7/148.7 | 164/150                 | 147/154
+      K=8: CB 167.1/166.2 | 164/154                 | 159/167
+- READS: CB leads K=1-2, parity at K=4, equal-or-ahead at K=8 — with
+  ±1% round pairs at EVERY K while plain wobbles ±10-20% between
+  rounds (goroutine scheduling variance). The old '151-vs-161 plain
+  boot spread' was that variance, not boot shape. THE CB-vs-PLAIN
+  THROUGHPUT GAP IS CLOSED like-for-like — and CB keeps determinism
+  under concurrency, race-free usage, admission control, bounded
+  lanes, and cross-route byte-identity.
+- The CAMPAIGN'S PERF FRONTIER IS CLOSED. What remains on #385 is
+  serve productisation: the welfare×CB + continuity×CB audits (the
+  gates before -scheduler defaults ON), admission overlap (TTFT under
+  load), CB lane metric durations, sampled-set batched logits rows,
+  and the K≥8 tail re-check (probe committed).
+
 # NEXT WAKE (2026-07-16 — batched tail refuted by probe; K-sweep is the next move)
 
 ## 2026-07-16 (the tail-share probe — 20c48e0, pushed)
