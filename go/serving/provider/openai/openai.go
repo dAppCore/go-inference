@@ -12,9 +12,6 @@ import (
 const DefaultChatCompletionsPath = "/v1/chat/completions"
 
 const (
-	DefaultTemperature = 1.0
-	DefaultTopP        = 0.95
-	DefaultTopK        = 64
 	// DefaultMaxTokens applies when a request omits max_tokens. gemma4 thinks by default and
 	// regularly spends >2k tokens inside the thought channel before the visible answer — at
 	// the old 2048 default the most common client failure was an EMPTY reply with

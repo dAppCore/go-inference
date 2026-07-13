@@ -45,9 +45,11 @@ func ExampleGenerateOptions() {
 	}
 
 	cfg := inference.ApplyGenerateOpts(opts)
-	core.Println(cfg.Temperature)
+	// An omitted temperature stays unset (flag false, zero value) so the
+	// model's declared generation_config default wins downstream.
+	core.Println(cfg.Temperature, cfg.TemperatureSet)
 	// Output:
-	// 1
+	// 0 false
 }
 
 func ExampleNormalizeStopSequences() {

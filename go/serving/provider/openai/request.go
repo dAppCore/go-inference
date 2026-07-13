@@ -102,16 +102,27 @@ func validateResponseFormat(format *ResponseFormat, stream bool) error {
 }
 
 // GenerateOptions converts request sampling fields into inference options.
+// Sampling scalars are forwarded only when the request carries them: an
+// omitted field leaves its explicit-set flag false so the model's declared
+// generation_config defaults (then the engine fallback) win downstream.
 func GenerateOptions(req ChatCompletionRequest) ([]inference.GenerateOption, error) {
 	if err := ValidateRequest(req); err != nil {
 		return nil, err
 	}
 	opts := []inference.GenerateOption{
-		inference.WithTemperature(resolvedFloat(req.Temperature, DefaultTemperature)),
-		inference.WithTopP(resolvedFloat(req.TopP, DefaultTopP)),
-		inference.WithMinP(resolvedFloat(req.MinP, 0)),
-		inference.WithTopK(resolvedInt(req.TopK, DefaultTopK)),
 		inference.WithMaxTokens(resolvedInt(req.MaxTokens, DefaultMaxTokens)),
+	}
+	if req.Temperature != nil {
+		opts = append(opts, inference.WithTemperature(*req.Temperature))
+	}
+	if req.TopP != nil {
+		opts = append(opts, inference.WithTopP(*req.TopP))
+	}
+	if req.MinP != nil {
+		opts = append(opts, inference.WithMinP(*req.MinP))
+	}
+	if req.TopK != nil {
+		opts = append(opts, inference.WithTopK(*req.TopK))
 	}
 	if et := req.thinkingOverride(); et != nil {
 		opts = append(opts, inference.WithEnableThinking(et))
@@ -134,13 +145,6 @@ func (req ChatCompletionRequest) thinkingOverride() *bool {
 		return &off
 	}
 	return nil
-}
-
-func resolvedFloat(value *float32, fallback float32) float32 {
-	if value == nil {
-		return fallback
-	}
-	return *value
 }
 
 func resolvedInt(value *int, fallback int) int {

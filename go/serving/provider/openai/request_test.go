@@ -156,7 +156,13 @@ func TestRequest_DecodeRequest_Good(t *testing.T) {
 		t.Fatalf("GenerateOptions() error = %v", err)
 	}
 	cfg := inference.ApplyGenerateOpts(opts)
-	if cfg.Temperature != DefaultTemperature || cfg.TopP != DefaultTopP || cfg.TopK != DefaultTopK || cfg.MaxTokens != DefaultMaxTokens {
+	// Omitted sampling scalars stay UNSET (flags false, zero values) so the
+	// model's declared generation_config defaults win downstream; only
+	// max_tokens carries a provider default.
+	if cfg.TemperatureSet || cfg.TopPSet || cfg.TopKSet || cfg.MinPSet {
+		t.Fatalf("omitted sampling fields raised set flags: %+v", cfg)
+	}
+	if cfg.Temperature != 0 || cfg.TopP != 0 || cfg.TopK != 0 || cfg.MaxTokens != DefaultMaxTokens {
 		t.Fatalf("defaults = %+v", cfg)
 	}
 }
