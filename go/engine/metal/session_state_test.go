@@ -2048,6 +2048,235 @@ func TestNativeTurboQuantKVPayloadEstimateCountsSectionsAndPadding(t *testing.T)
 	}
 }
 
+func TestNativeTurboQuantKVLayerPrefixSlabs_Good(t *testing.T) {
+	const heads, tokens, prefixTokens, headDim = 2, 3, 2, 4
+	raw := nativeKVSeededTurboQuantPayload(t, heads, tokens, headDim)
+	view := sessionStateLayerView{layer: 0, cacheIndex: 0, kvHeads: heads, headDim: headDim}
+
+	key, value, seqLen, err := nativeTurboQuantKVLayerPrefixSlabs([][]byte{raw}, view, prefixTokens)
+	if err != nil {
+		t.Fatalf("nativeTurboQuantKVLayerPrefixSlabs: %v", err)
+	}
+	if seqLen != prefixTokens || len(key) != heads*prefixTokens*headDim*bf16Size || len(value) != len(key) {
+		t.Fatalf("prefix slab geometry = key %d value %d seq %d", len(key), len(value), seqLen)
+	}
+	if bytes.Equal(key, make([]byte, len(key))) || bytes.Equal(value, make([]byte, len(value))) {
+		t.Fatal("seeded TurboQuant prefix slabs decoded to all zero bytes")
+	}
+}
+
+func TestNativeTurboQuantKVLayerRows_Good(t *testing.T) {
+	const heads, tokens, headDim = 2, 3, 4
+	raw := nativeKVSeededTurboQuantPayload(t, heads, tokens, headDim)
+	view := sessionStateLayerView{layer: 0, cacheIndex: 0, kvHeads: heads, headDim: headDim}
+
+	key, value, seqLen, err := nativeTurboQuantKVLayerRows([][]byte{raw}, view)
+	if err != nil {
+		t.Fatalf("nativeTurboQuantKVLayerRows: %v", err)
+	}
+	if seqLen != tokens || len(key) != heads*tokens*headDim*bf16Size || len(value) != len(key) {
+		t.Fatalf("row geometry = key %d value %d seq %d", len(key), len(value), seqLen)
+	}
+}
+
+func TestNativeTurboQuantKVLayerPrefixRows_Good(t *testing.T) {
+	const heads, tokens, prefixTokens, headDim = 2, 3, 1, 4
+	raw := nativeKVSeededTurboQuantPayload(t, heads, tokens, headDim)
+	view := sessionStateLayerView{layer: 0, cacheIndex: 0, kvHeads: heads, headDim: headDim}
+
+	key, value, seqLen, err := nativeTurboQuantKVLayerPrefixRows([][]byte{raw}, view, prefixTokens)
+	if err != nil {
+		t.Fatalf("nativeTurboQuantKVLayerPrefixRows: %v", err)
+	}
+	if seqLen != prefixTokens || len(key) != heads*prefixTokens*headDim*bf16Size || len(value) != len(key) {
+		t.Fatalf("prefix row geometry = key %d value %d seq %d", len(key), len(value), seqLen)
+	}
+}
+
+func TestNativeTurboQuantKVLayerDecodeLimit_Good(t *testing.T) {
+	const heads, tokens, prefixTokens, headDim = 2, 3, 2, 4
+	raw := nativeKVSeededTurboQuantPayload(t, heads, tokens, headDim)
+	view := sessionStateLayerView{layer: 0, cacheIndex: 0, kvHeads: heads, headDim: headDim}
+
+	key, value, seqLen, err := nativeTurboQuantKVLayerDecodeLimit([][]byte{raw}, view, prefixTokens, false)
+	if err != nil {
+		t.Fatalf("nativeTurboQuantKVLayerDecodeLimit: %v", err)
+	}
+	if seqLen != prefixTokens || len(key) != heads*prefixTokens*headDim*bf16Size || len(value) != len(key) {
+		t.Fatalf("decode limit geometry = key %d value %d seq %d", len(key), len(value), seqLen)
+	}
+}
+
+func TestNativeTurboQuantKVLayerRowsInto_Good(t *testing.T) {
+	const heads, tokens, prefixTokens, headDim = 2, 3, 2, 4
+	raw := nativeKVSeededTurboQuantPayload(t, heads, tokens, headDim)
+	view := sessionStateLayerView{layer: 0, cacheIndex: 0, kvHeads: heads, headDim: headDim}
+	key := make([]byte, heads*prefixTokens*headDim*bf16Size)
+	value := make([]byte, len(key))
+
+	seqLen, err := nativeTurboQuantKVLayerRowsInto([][]byte{raw}, view, prefixTokens, key, value)
+	if err != nil {
+		t.Fatalf("nativeTurboQuantKVLayerRowsInto: %v", err)
+	}
+	if seqLen != prefixTokens || bytes.Equal(key, make([]byte, len(key))) || bytes.Equal(value, make([]byte, len(value))) {
+		t.Fatalf("rows-into result = seq %d key-zero %v value-zero %v", seqLen, bytes.Equal(key, make([]byte, len(key))), bytes.Equal(value, make([]byte, len(value))))
+	}
+}
+
+func TestNativeTurboQuantKVLayerRowsIntoScratch_Good(t *testing.T) {
+	const heads, tokens, prefixTokens, headDim = 2, 3, 2, 4
+	raw := nativeKVSeededTurboQuantPayload(t, heads, tokens, headDim)
+	view := sessionStateLayerView{layer: 0, cacheIndex: 0, kvHeads: heads, headDim: headDim}
+	key := make([]byte, heads*prefixTokens*headDim*bf16Size)
+	value := make([]byte, len(key))
+	rotated := make([]float64, headDim)
+	normalised := make([]float64, headDim)
+
+	seqLen, err := nativeTurboQuantKVLayerRowsIntoScratch([][]byte{raw}, view, prefixTokens, key, value, rotated, normalised)
+	if err != nil {
+		t.Fatalf("nativeTurboQuantKVLayerRowsIntoScratch: %v", err)
+	}
+	if seqLen != prefixTokens || bytes.Equal(key, make([]byte, len(key))) || bytes.Equal(value, make([]byte, len(value))) {
+		t.Fatalf("rows-into-scratch result = seq %d", seqLen)
+	}
+}
+
+func TestNativeTurboQuantKVPagePayloadDecodeBaseBF16Into_Good(t *testing.T) {
+	const heads, tokens, headDim = 2, 3, 4
+	raw := nativeKVSeededTurboQuantPayload(t, heads, tokens, headDim)
+	payload, err := nativeTurboQuantKVParsePayload(raw, 0)
+	if err != nil {
+		t.Fatalf("parse seeded TurboQuant payload: %v", err)
+	}
+	key := make([]byte, heads*tokens*headDim*bf16Size)
+	value := make([]byte, len(key))
+	rotated := make([]float64, headDim)
+	normalised := make([]float64, headDim)
+	if err := payload.decodeBaseBF16Into(key, value, tokens, 0, rotated, normalised); err != nil {
+		t.Fatalf("decodeBaseBF16Into: %v", err)
+	}
+	if bytes.Equal(key, make([]byte, len(key))) || bytes.Equal(value, make([]byte, len(value))) {
+		t.Fatal("decodeBaseBF16Into returned all zero seeded payload bytes")
+	}
+}
+
+func TestNativeTurboQuantKVMaskBytes_Good(t *testing.T) {
+	if got := nativeTurboQuantKVMaskBytes(9); got != 2 {
+		t.Fatalf("nativeTurboQuantKVMaskBytes(9) = %d, want 2", got)
+	}
+	if got := nativeTurboQuantKVMaskBytes(0); got != 0 {
+		t.Fatalf("nativeTurboQuantKVMaskBytes(0) = %d, want 0", got)
+	}
+}
+
+func TestNativeTurboQuantKVOutlierMask_Good(t *testing.T) {
+	got := nativeTurboQuantKVOutlierMask(10, 3)
+	if !bytes.Equal(got, []byte{0x80, 0x03}) {
+		t.Fatalf("nativeTurboQuantKVOutlierMask = %08b, want 10000000 00000011", got)
+	}
+	if got := nativeTurboQuantKVOutlierMask(4, 8); !bytes.Equal(got, []byte{0x0f}) {
+		t.Fatalf("clamped outlier mask = %08b, want 00001111", got)
+	}
+}
+
+func TestNativeTurboQuantKVBytesEqual_Good(t *testing.T) {
+	if !nativeTurboQuantKVBytesEqual([]byte{1, 2, 3}, []byte{1, 2, 3}) {
+		t.Fatal("identical payload bytes were not equal")
+	}
+	if nativeTurboQuantKVBytesEqual([]byte{1, 2, 3}, []byte{1, 2, 4}) {
+		t.Fatal("different payload bytes were equal")
+	}
+	if nativeTurboQuantKVBytesEqual([]byte{1}, []byte{1, 0}) {
+		t.Fatal("different payload lengths were equal")
+	}
+}
+
+func TestNativeTurboQuantKVRotate_Good(t *testing.T) {
+	source := []float64{1, -2, 3, -4}
+	rotated := make([]float64, len(source))
+	restored := make([]float64, len(source))
+	nativeTurboQuantKVRotate(rotated, source, 124, false)
+	nativeTurboQuantKVRotate(restored, rotated, 124, true)
+	for idx := range source {
+		if math.Abs(restored[idx]-source[idx]) > 1e-9 {
+			t.Fatalf("rotation round-trip[%d] = %.12f, want %.12f", idx, restored[idx], source[idx])
+		}
+	}
+}
+
+func TestNativeTurboQuantKVCodecOutlierChannels_Good(t *testing.T) {
+	codec := nativeTurboQuantKVCodec{OutlierMask: []byte{0x81, 0x01}}
+	if got := codec.outlierChannels(9); got != 3 {
+		t.Fatalf("outlierChannels = %d, want 3", got)
+	}
+	if got := codec.outlierChannels(0); got != 0 {
+		t.Fatalf("outlierChannels(0) = %d, want 0", got)
+	}
+}
+
+func TestNativeTurboQuantKVCodecBitsForChannel_Good(t *testing.T) {
+	codec := nativeTurboQuantKVCodec{NormalBits: 3, OutlierBits: 7, OutlierMask: []byte{0x81}}
+	want := map[int32]int{0: 7, 1: 3, 7: 7, 8: 3, -1: 3}
+	for channel, expected := range want {
+		if got := codec.bitsForChannel(channel); got != expected {
+			t.Fatalf("bitsForChannel(%d) = %d, want %d", channel, got, expected)
+		}
+	}
+}
+
+func TestArchSessionTurboQuantKVPayloadEstimate_Good(t *testing.T) {
+	raw := nativeKVSeededTurboQuantPayload(t, 2, 2, 4)
+	payload, err := nativeTurboQuantKVParsePayload(raw, 0)
+	if err != nil {
+		t.Fatalf("parse seeded TurboQuant payload: %v", err)
+	}
+	session := &ArchSession{turboQuantPayloads: []nativeTurboQuantKVPagePayload{payload}}
+	estimate, err := session.TurboQuantKVPayloadEstimate()
+	if err != nil {
+		t.Fatalf("TurboQuantKVPayloadEstimate: %v", err)
+	}
+	if estimate == nil || estimate.Pages != 1 || estimate.PayloadBytes == 0 || estimate.FP16BaselineBytes == 0 {
+		t.Fatalf("TurboQuantKVPayloadEstimate = %+v, want one non-empty estimate", estimate)
+	}
+}
+
+func TestArchSessionTurboQuantKVPayloadEstimate_Bad(t *testing.T) {
+	session := &ArchSession{turboQuantPayloads: []nativeTurboQuantKVPagePayload{{}}}
+	if estimate, err := session.TurboQuantKVPayloadEstimate(); err == nil || estimate != nil {
+		t.Fatalf("TurboQuantKVPayloadEstimate malformed payload = %+v/%v, want error", estimate, err)
+	}
+}
+
+func TestArchSessionTurboQuantKVPayloadEstimate_Ugly(t *testing.T) {
+	var session *ArchSession
+	if estimate, err := session.TurboQuantKVPayloadEstimate(); err != nil || estimate != nil {
+		t.Fatalf("TurboQuantKVPayloadEstimate(nil) = %+v/%v, want nil/nil", estimate, err)
+	}
+	if estimate, err := (&ArchSession{}).TurboQuantKVPayloadEstimate(); err != nil || estimate != nil {
+		t.Fatalf("TurboQuantKVPayloadEstimate(empty) = %+v/%v, want nil/nil", estimate, err)
+	}
+}
+
+func nativeKVSeededTurboQuantPayload(t testing.TB, heads, tokenCount, headDim int) []byte {
+	t.Helper()
+	return nativeKVTestTurboQuantPayload(t, heads, tokenCount, headDim, 1, func(name string, section []byte) {
+		switch name {
+		case "key_centroids", "value_centroids":
+			for vector := range section {
+				if vector%2 == 0 {
+					section[vector] = 0x03
+				} else {
+					section[vector] = 0x00
+				}
+			}
+		case "key_norms_bf16", "value_norms_bf16":
+			for offset := 0; offset < len(section); offset += bf16Size {
+				binary.LittleEndian.PutUint16(section[offset:offset+bf16Size], 0x3f80)
+			}
+		}
+	})
+}
+
 func TestNativeKVValidateLayerMetadataAllowsPortableSourceModes(t *testing.T) {
 	view := sessionStateLayerView{
 		layer:      0,
