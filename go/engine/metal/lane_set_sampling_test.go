@@ -265,12 +265,19 @@ func TestLaneSetSampledLogitsRowsByteIdentity(t *testing.T) {
 	// Temperature+TopP with TopK 0: on the fixture's small vocab this is
 	// CPU-preferred past the GPU logits-token lane and TopK-ineligible past
 	// the candidates lane — the ladder's FINAL fallback, the same routing
-	// big-vocab serve params reach via hostTopKSamplePreferred.
+	// big-vocab serve params reach via hostTopKSamplePreferred. Eight lanes:
+	// the K=8 serve shape, and the widest exercise of the PARALLEL host
+	// tails (one goroutine per lane) — this gate under -race is the tails'
+	// data-race proof.
 	specs := []inference.LaneSpec{
 		{PromptIDs: []int32{1, 5, 3, 2}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 0.9, TopP: 0.9}, SampleSeed: 7},
 		{PromptIDs: []int32{7, 7, 1}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 1.2, TopP: 0.8}, SampleSeed: 21},
 		{PromptIDs: []int32{2, 9, 4, 6, 8, 3}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 0.8, TopP: 0.95}, SampleSeed: 3},
 		{PromptIDs: []int32{4}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 1.0, TopP: 0.7}, SampleSeed: 11},
+		{PromptIDs: []int32{9, 2, 7}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 1.1, TopP: 0.85}, SampleSeed: 31},
+		{PromptIDs: []int32{3, 3, 8, 1}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 0.7, TopP: 0.9}, SampleSeed: 43},
+		{PromptIDs: []int32{6, 4, 2, 9, 5}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 0.95, TopP: 0.75}, SampleSeed: 5},
+		{PromptIDs: []int32{8}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 1.3, TopP: 0.92}, SampleSeed: 17},
 	}
 
 	serialTokens := make([][]int32, len(specs))
