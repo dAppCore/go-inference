@@ -45,6 +45,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	nativeBackend := fs.Bool("native", false, "serve via the no-cgo native token-loop contract (the default go-inference metal engine already is native)")
 	modelsConfig := fs.String("models-config", "", "multi-model serving config (JSON): several models with aliases and named profiles, held resident under a memory ceiling with LRU + idle-TTL eviction; -model becomes the pinned default; empty = single-model serve")
 	schedulerMode := fs.String("scheduler", "", "request scheduler between the HTTP handlers and the model: 'serial' (bounded-queue worker pool), 'batch' (continuous in-flight batching), 'interleave' (live admission-budget CB); empty = no scheduler (request path unchanged). With -models-config, each resident model gets its own scheduler instance of this mode")
+	schedulerConcurrency := fs.Int("scheduler-concurrency", 0, "scheduler's concurrently running requests (interleave/CB lane count, serial pool width); 0 = the serve default (4)")
 	embedModel := fs.String("embed-model", "", "embeddings/rerank model: a bert/BGE-class host encoder snapshot directory (config.json + vocab.txt + model.safetensors); served at /v1/embeddings and /v1/rerank under -embed-model-id alongside (or, with -model \"\", instead of) the chat model; empty = those routes serve only what the chat model itself implements (a clean 4xx today). A load failure is fatal at boot")
 	embedModelID := fs.String("embed-model-id", "", "request name for -embed-model's `model` field; empty derives the pack's basename")
 	fs.Usage = func() {
@@ -158,7 +159,8 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		ProfileDir:         *profileDir,
 		KVCacheMode:        *kvCacheMode,
 		Native:             *nativeBackend,
-		Scheduler:          *schedulerMode,
+		Scheduler:            *schedulerMode,
+		SchedulerConcurrency: *schedulerConcurrency,
 		StateConversations: *stateConversations,
 		Welfare:            *welfareOn,
 		PolicyPath:         *policyPath,

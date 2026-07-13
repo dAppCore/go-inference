@@ -98,6 +98,7 @@ re-runs the reactive drafter ladder over the new target).
 | `--state-store` | `""` | conversation state store file (default `~/Lethean/lem/state/conversations.kv`) |
 | `--welfare` | `false` | welfare guard (opt-in): per-turn hostility detect + engine-model mediation on every chat route; Lemma checkpoints additionally carry `lem_end` (enable with `-welfare`) |
 | `--policy` | `""` | outbound policy file (JSON): deployment-owned redact/refuse rules on model output; unset disables the layer, a load failure is fatal at boot |
+| `--scheduler-concurrency` | `0` | scheduler's concurrently running requests (interleave/CB lane count, serial pool width); 0 = the serve default (4) |
 | `--native` | `false` | serve via the no-cgo native token-loop contract (the default metal engine already is native) |
 | `--read-timeout` | `30s` | HTTP read-header timeout |
 | `--write-timeout` | `5m` | HTTP write timeout (covers a full streaming response) |

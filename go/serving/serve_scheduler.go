@@ -32,10 +32,13 @@ func parseSchedulerMode(flag string) (scheduler.Mode, error) {
 // mode comes from the -scheduler flag (set by the caller). The model's own
 // tokeniser supplies the prompt-token count for the batch/interleave budget, so
 // no byte-cost model is fabricated here.
-func schedulerServeConfig(mode scheduler.Mode) scheduler.Config {
+func schedulerServeConfig(mode scheduler.Mode, concurrency int) scheduler.Config {
+	if concurrency <= 0 {
+		concurrency = 4
+	}
 	return scheduler.Config{
 		Mode:            mode,
-		MaxConcurrent:   4,
+		MaxConcurrent:   concurrency,
 		MaxQueue:        64,
 		StreamBuffer:    16,
 		MaxBatchTokens:  0, // count-only by default; a token budget is a future flag
