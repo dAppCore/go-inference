@@ -110,6 +110,14 @@ type ArchSession struct {
 	// paged→linear sync assumptions do not hold for restored state (the
 	// decode-parity carve-out): restored sessions append on the token path.
 	restoredKV bool
+	// prefillChunkRowsCap, when > 0, bounds every batched-dense prefill chunk
+	// to that many rows AND forces prompts above it onto the chunked route —
+	// an overlapped lane admission sets it so its prefill's command buffers
+	// stay short enough for in-flight lanes' rounds to interleave on the
+	// shared queue (buffers execute in submission order; one whole-prompt
+	// buffer freezes every stream for its duration). 0 = uncapped, the
+	// throughput-tuned default. Byte-identical either way (#381 chunk parity).
+	prefillChunkRowsCap int
 	// bidirSpanTokens, when non-zero, mark the placeholder token ids whose
 	// runs attend BIDIRECTIONALLY during embedding prefill (gemma4_unified
 	// image + video spans; use_bidirectional_attention == "vision"). Set at
@@ -2040,7 +2048,7 @@ func (s *ArchSession) prefillRetainedTokensBatchedDense(ids []int32, scope strin
 	if s.pos+len(ids) > s.maxLen {
 		return nil, false, core.NewError(scope + ": sequence would exceed maxLen cache rows")
 	}
-	if s.verifyBatchedCrossesSlidingRingWrap(len(ids)) {
+	if s.verifyBatchedCrossesSlidingRingWrap(len(ids)) || (s.prefillChunkRowsCap > 0 && len(ids) > s.prefillChunkRowsCap) {
 		return s.prefillRetainedTokensBatchedDenseChunks(ids, scope)
 	}
 	return s.prefillRetainedTokensBatchedDenseOne(ids, scope)
@@ -2147,6 +2155,18 @@ func prefillChunkWindowsFor(slidingWindow int) int {
 }
 
 func (s *ArchSession) batchedDensePrefillChunkLen(limit int) int {
+	if s != nil && s.prefillChunkRowsCap > 0 && limit > s.prefillChunkRowsCap {
+		// Overlapped-admission cap: shorter buffers so in-flight lanes' rounds
+		// interleave on the shared queue. The clamp keeps the base policy's
+		// absorb-the-tail invariant — a runt final chunk must never split off
+		// (DenseOne declines ≤batchedDenseICBMaxRows rows on a recorded-ICB
+		// session, and a mid-loop decline after committed chunks would corrupt)
+		// — so the tail rides the last capped chunk unless it exceeds slack.
+		slack := max(s.arch.SlidingWindow/2, batchedDenseICBMaxRows+1)
+		if limit > s.prefillChunkRowsCap+slack {
+			limit = s.prefillChunkRowsCap
+		}
+	}
 	if limit <= 1 || s == nil || s.arch.SlidingWindow <= 0 || s.arch.SlidingWindow >= s.maxLen {
 		return limit
 	}

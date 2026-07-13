@@ -909,6 +909,123 @@ func TestArchSessionPrefillRetainedTokensBatchedDenseChunksSlidingRingWrap(t *te
 	}
 }
 
+// TestArchSessionBatchedDensePrefillChunkLenCapped pins the overlapped-
+// admission chunk policy (prefillChunkRowsCap): capped chunks bound every
+// command buffer near the cap so in-flight lanes interleave on the queue,
+// while the absorb-the-tail invariant holds — no runt final chunk ever splits
+// off (DenseOne declines ≤batchedDenseICBMaxRows rows on a recorded-ICB
+// session, and a mid-loop decline after committed chunks would corrupt).
+func TestArchSessionBatchedDensePrefillChunkLenCapped(t *testing.T) {
+	t.Setenv("LTHN_PREFILL_WINDOWS", "4") // pin wide = 4×512 = 2048
+	walk := func(cap, total int) []int {
+		s := &ArchSession{maxLen: 1 << 20}
+		s.arch.SlidingWindow = 512
+		s.prefillChunkRowsCap = cap
+		var seq []int
+		for total > 0 {
+			n := s.batchedDensePrefillChunkLen(total)
+			if n <= 0 || n > total {
+				t.Fatalf("walk(cap=%d): chunk %d of remaining %d", cap, n, total)
+			}
+			if n <= batchedDenseICBMaxRows {
+				t.Fatalf("walk(cap=%d): runt chunk %d would decline on an ICB session", cap, n)
+			}
+			seq = append(seq, n)
+			s.pos += n
+			total -= n
+		}
+		return seq
+	}
+	cases := []struct {
+		name       string
+		cap, total int
+		want       []int
+	}{
+		{"the 2k serve prompt chunks at the cap", 512, 2011, []int{512, 512, 512, 475}},
+		{"a would-be runt tail absorbs into the final chunk", 512, 2050, []int{512, 512, 512, 514}},
+		{"just over the cap stays one buffer", 512, 530, []int{530}},
+		{"tail beyond slack splits clean", 512, 769, []int{512, 257}},
+		{"uncapped absorbs the whole prompt", 0, 2011, []int{2011}},
+	}
+	for _, tc := range cases {
+		if got := walk(tc.cap, tc.total); !slices.Equal(got, tc.want) {
+			t.Errorf("%s: chunks = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestArchSessionPrefillRetainedTokensBatchedDenseCapped proves a cap-forced
+// chunked prefill is byte-identical to serial stepping — boundary hidden AND
+// the cache state the next token decodes from — the GPU-side twin of the
+// chunk-policy walk above, mirroring the sliding-ring-wrap parity test's
+// construction.
+func TestArchSessionPrefillRetainedTokensBatchedDenseCapped(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 64, 256, 64
+	const maxLen = 32
+	g, arch := gemma4BF16Fixture(t, dModel, nHeads, nKV, headDim, dFF, vocab, 1)
+	arch.SlidingWindow = 4
+	arch.Layer[0].Attention = model.SlidingAttention
+	serial, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession serial: %v", err)
+	}
+	capped, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession capped: %v", err)
+	}
+	serial.state.icb = nil
+	capped.state.icb = nil
+	capped.prefillChunkRowsCap = 2 // fixture-scale cap: 20 ids → chunks [2 2 16]
+
+	ids := make([]int32, 20)
+	for i := range ids {
+		ids[i] = int32((i*7 + 3) % vocab)
+	}
+	var serialHidden []byte
+	withAutoreleasePool(func() {
+		for _, id := range ids {
+			serialHidden, err = serial.stepIDInPool(id)
+			if err != nil {
+				return
+			}
+		}
+	})
+	if err != nil {
+		t.Fatalf("serial stepIDInPool: %v", err)
+	}
+
+	hidden, ok, err := capped.prefillRetainedTokensBatchedDense(ids, "test")
+	if err != nil {
+		t.Fatalf("prefillRetainedTokensBatchedDense capped: %v", err)
+	}
+	if !ok {
+		t.Fatal("prefillRetainedTokensBatchedDense capped ok = false")
+	}
+	if capped.Pos() != len(ids) {
+		t.Fatalf("capped pos = %d, want %d", capped.Pos(), len(ids))
+	}
+	if !bytes.Equal(hidden, serialHidden) {
+		t.Fatal("cap-chunked dense prefill hidden differs from serial")
+	}
+	var serialNext, cappedNext []byte
+	withAutoreleasePool(func() {
+		serialNext, err = serial.stepIDInPool(6)
+		if err != nil {
+			return
+		}
+		cappedNext, err = capped.stepIDInPool(6)
+	})
+	if err != nil {
+		t.Fatalf("post-prefill stepIDInPool: %v", err)
+	}
+	if !bytes.Equal(cappedNext, serialNext) {
+		t.Fatal("cap-chunked dense prefill cache differs from serial on next token")
+	}
+}
+
 func TestArchSessionBatchedDensePrefillChunkLenSkip(t *testing.T) {
 	t.Setenv("LTHN_PREFILL_WINDOWS", "4") // pin wide = 4×512 = 2048
 	walk := func(pos, total int) []int {

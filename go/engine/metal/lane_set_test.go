@@ -470,6 +470,133 @@ func TestLaneSetMoEReencodeMatchesProductionGreedy(t *testing.T) {
 // decode also equals the production single-session greedy path (ArchSession.
 // Generate) token-for-token, so the batched owner is not merely self-consistent
 // but tracks the engine's own serial decode.
+// TestLaneSetOverlappedAdmissionByteIdentity is the admission-overlap
+// conformance proof (inference.LaneSetOverlappedAdmitter): lanes whose
+// BeginPrepare runs on ANOTHER goroutine WHILE the owner goroutine keeps
+// Stepping — the scheduler's overlapped-admission shape — produce streams
+// byte-identical to each spec run alone through plain Prepare. The first spec
+// is admitted inline and stepped from the start (a long budget, so real Steps
+// overlap the later prefills); each later spec is prefilled concurrently and
+// spliced in with CommitPrepare between rounds.
+func TestLaneSetOverlappedAdmissionByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	m := laneSetFixtureModel(t)
+	defer m.Close()
+	specs := laneSpecFixtures()
+	specs[0].MaxNew = 24 // keep the first lane stepping while the others prefill
+	ctx := context.Background()
+
+	// Serial oracle: each spec alone through plain Prepare (which is itself the
+	// single-goroutine BeginPrepare+CommitPrepare composition).
+	serialTokens := make([][]int32, len(specs))
+	for i, spec := range specs {
+		ls, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: 1})
+		if err != nil {
+			t.Fatalf("OpenLaneSet(serial %d): %v", i, err)
+		}
+		h, err := ls.Prepare(ctx, spec)
+		if err != nil {
+			t.Fatalf("Prepare(serial %d): %v", i, err)
+		}
+		got, _ := drainLaneSet(t, ls)
+		serialTokens[i] = got[h.ID]
+		if len(serialTokens[i]) == 0 {
+			t.Fatalf("serial lane %d produced no tokens", i)
+		}
+		_ = ls.Close()
+	}
+
+	// Overlapped: spec 0 inline, specs 1.. prefilled off-thread mid-stepping.
+	lsIface, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+	if err != nil {
+		t.Fatalf("OpenLaneSet(overlapped): %v", err)
+	}
+	defer func() { _ = lsIface.Close() }()
+	adm, ok := lsIface.(inference.LaneSetOverlappedAdmitter)
+	if !ok {
+		t.Fatal("metal lane set does not implement LaneSetOverlappedAdmitter")
+	}
+	h0, err := lsIface.Prepare(ctx, specs[0])
+	if err != nil {
+		t.Fatalf("Prepare(overlapped 0): %v", err)
+	}
+
+	type prepResult struct {
+		p   inference.PendingLane
+		err error
+	}
+	prepCh := make(chan prepResult, len(specs))
+	go func() {
+		for _, spec := range specs[1:] {
+			p, err := adm.BeginPrepare(ctx, spec)
+			prepCh <- prepResult{p: p, err: err}
+		}
+	}()
+
+	tokens := map[int][]int32{}
+	handleSpec := map[int]int{h0.ID: 0} // lane id → spec index (commits arrive in spec order)
+	admitted, retired := 1, 0
+	commit := func(pr prepResult) {
+		if pr.err != nil {
+			t.Fatalf("BeginPrepare(overlapped %d): %v", admitted, pr.err)
+		}
+		h, err := adm.CommitPrepare(pr.p)
+		if err != nil {
+			t.Fatalf("CommitPrepare(overlapped %d): %v", admitted, err)
+		}
+		handleSpec[h.ID] = admitted
+		admitted++
+	}
+	for rounds := 0; retired < len(specs); rounds++ {
+		if rounds > 10000 {
+			t.Fatalf("bail: owner loop did not converge (admitted %d, retired %d)", admitted, retired)
+		}
+		// Splice every prefill that has finished, without blocking the round.
+		for admitted < len(specs) {
+			select {
+			case pr := <-prepCh:
+				commit(pr)
+				continue
+			default:
+			}
+			break
+		}
+		steps, err := lsIface.Step(ctx)
+		if err != nil {
+			t.Fatalf("Step(overlapped): %v", err)
+		}
+		if len(steps) == 0 {
+			if admitted < len(specs) {
+				commit(<-prepCh) // current lanes drained — wait for the next prefill
+				continue
+			}
+			break
+		}
+		for _, s := range steps {
+			if s.HasToken {
+				tokens[s.Lane.ID] = append(tokens[s.Lane.ID], s.Token)
+			}
+			if s.Terminal {
+				if err := lsIface.Retire(s.Lane); err != nil {
+					t.Fatalf("Retire(overlapped): %v", err)
+				}
+				retired++
+			}
+		}
+	}
+	if admitted != len(specs) || retired != len(specs) {
+		t.Fatalf("overlapped run incomplete: admitted %d retired %d of %d", admitted, retired, len(specs))
+	}
+
+	for id, specIdx := range handleSpec {
+		if !slices.Equal(tokens[id], serialTokens[specIdx]) {
+			t.Fatalf("spec %d: overlapped-admission tokens %v != serial %v", specIdx, tokens[id], serialTokens[specIdx])
+		}
+	}
+}
+
 func TestLaneSetMatchesProductionGreedy(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set — GPU decode fixture")

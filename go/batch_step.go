@@ -92,6 +92,8 @@ type LaneStep struct {
 // A LaneSet is single-goroutine per instance (the lanes' decode state is
 // mutated without synchronisation, exactly as a single engine Session is): the
 // step coordinator that owns it drives Prepare/Step/Retire from one goroutine.
+// A set whose admission prefill can safely OVERLAP that goroutine's Steps
+// additionally implements LaneSetOverlappedAdmitter.
 type LaneSet interface {
 	// Prepare admits a new lane, prefilling its prompt, and returns its handle.
 	// Safe to call between Steps (ragged admission). Errors if the lane set is
@@ -114,4 +116,38 @@ type LaneSet interface {
 	BatchForwardCount() uint64
 	// Close retires every remaining lane and releases the owner.
 	Close() error
+}
+
+// PendingLane is a lane whose heavy admission work (session open + prompt
+// prefill) has completed but which is not yet attached to a running set —
+// the intermediate of LaneSetOverlappedAdmitter's two-stage admission.
+// Exactly one of CommitPrepare or Discard consumes it.
+type PendingLane interface {
+	// Discard releases the pending lane's session without attaching it — the
+	// request was cancelled between prefill and attach, or the set is closing.
+	Discard()
+}
+
+// LaneSetOverlappedAdmitter is the OPTIONAL capability of a LaneSet whose
+// admission prefill can run CONCURRENTLY with Step — the admission-overlap
+// seam. Without it, a new lane's whole prompt prefill runs inline in the
+// coordinator's drive loop, stalling every in-flight lane's stream for the
+// prefill's duration (seconds on a large model with a long prompt).
+//
+// BeginPrepare performs the heavy admission work (session open + the prompt's
+// chunked prefill) and is safe to call from another goroutine while the owning
+// goroutine keeps Stepping — each pending lane is an independent session, the
+// same isolation that lets concurrent plain-path generations coexist with a
+// stepping lane set. CommitPrepare attaches the prepared lane to the running
+// set and MUST be called from the owning goroutine (it is the cheap splice:
+// id assignment + bookkeeping, no GPU work).
+//
+// Composition contract: CommitPrepare(BeginPrepare(spec)) from the owning
+// goroutine is byte-identical to Prepare(spec). CommitPrepare fails —
+// releasing the pending lane — when the set is at MaxLanes; a caller avoids
+// paying a discarded prefill by counting its in-flight BeginPrepares against
+// the same slot budget it admits under.
+type LaneSetOverlappedAdmitter interface {
+	BeginPrepare(ctx context.Context, spec LaneSpec) (PendingLane, error)
+	CommitPrepare(p PendingLane) (LaneHandle, error)
 }
