@@ -685,6 +685,13 @@ func stateLayerViewKVHeads(spec model.LayerSpec, archKVHeads, headDim, rowBytes 
 	return kvHeadsOf(spec, archKVHeads)
 }
 
+// refreshPagedStateLayerViews re-materialises the paged caches' linear
+// snapshots in place. It passes the view's FULL cacheRows as the snapshot
+// extent deliberately: linearSnapshot's rows parameter sizes the destination
+// (populated pages alone carry data, the remainder is cleared), and a constant
+// extent keeps snapshotBytes stable so the shared snapshot buffers are reused
+// rather than reallocated as position grows. Contrast reloadPagedStateLayerViews,
+// whose tokens parameter is a valid-row COUNT and must stay position-bounded.
 func (s *ArchSession) refreshPagedStateLayerViews(views []sessionStateLayerView, needed map[int]bool) error {
 	for i := range views {
 		cache := views[i].paged
@@ -705,6 +712,14 @@ func (s *ArchSession) refreshPagedStateLayerViews(views []sessionStateLayerView,
 	return nil
 }
 
+// reloadPagedStateLayerViews restores the paged caches from the views' linear
+// snapshot bytes. tokens = min(position, cacheRows) is load-bearing: unlike
+// linearSnapshot's extent parameter, loadLinearSnapshot's tokens is the count
+// of rows it claims as populated (it becomes the cache length and, on q8, the
+// quantisation span) — raw cacheRows here would resurrect garbage rows beyond
+// the session position. The asymmetry with refreshPagedStateLayerViews is by
+// design; TestDevicePagedKVCacheLinearSnapshotRoundTrip pins the pair
+// (snapshot at full extent, reload at populated count).
 func (s *ArchSession) reloadPagedStateLayerViews(position int, views []sessionStateLayerView) error {
 	for i := range views {
 		cache := views[i].paged
