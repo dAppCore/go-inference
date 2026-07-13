@@ -568,18 +568,20 @@ accumulation order. Kill switch `LTHN_CB_GEMM=0` restores the per-lane replay.
   1.51× vs batched replay, 1.55× vs serial**, output byte-identical across all three modes.
   The win is real and dominant exactly where decode is weight-bound.
 
-**BLOCKED for the 4-bit quant path (evidenced STOP).** The quant ICB FUSES the entry/MLP
-rms INTO the qmv (`setRMSQMV`, `decode_forward_arch_icb_quant.go:677-694`), keeping the
-normed activation in fp32 through the matmul. Batching the weight read across lanes needs
-a separately materialised (bf16-rounded) normed slab fed to `qmv-rows`, which rounds one
-ulp differently and DIVERGES — a bisect showed byte-identical layer 0, one-ulp drift at
-layer 1, exploding by the first global layer. There is NO batched rms-qmv-rows kernel
-(`rms_qmv.go` is single-row only) and the metallib is read-only, so byte-identity AND
-weight-read-once cannot both hold for the fused-rms quant path this rung. `gemmEligible`
-gates on `bf16Projector` (the non-fused path) plus the proven envelope (no PLE tower, no
-KV-share, no sliding window — those single-row encoders are mirrored but await a bf16
-checkpoint to prove; both installed models are quant). E2B and every 4-bit model fall back
-to the per-lane ICB replay — the 2.58× stays safe (`TestLaneSetGEMMQuantFallsBackToReplay`).
+**The historical quant/envelope stops, both since dissolved (2026-07-13).** The "fused
+rms-qmv" stop above was a misdiagnosis (that fusion has been dormant since the M2 port);
+the real quant blocker was the tiled kernel mirroring the wrong per-row twin plus the
+fast-math metallib build — fixed, see pinned gap 1. The "proven envelope" exclusions
+(no PLE tower, no KV-share, no sliding window) were then held pending receipts; the arms
+were never broken — the real E2B fires-and-diverges receipt was root-caused to the
+gate/up/gated slab under-sizing on MatFormer double-wide deep layers (`gemmDims` maxFF;
+those layers own no caches, so the corruption left no cache trail) and the live-n SDPA
+routing vs the recorded fixed fan (`gemmLayer`'s plain-arm 2-pass mirror). Both fixed;
+the exclusions are lifted. Receipts: per-feature fixtures
+(`TestLaneSetGEMM{Sliding,KVShare,MixedHeadDim,PLE,LayerScalar,SplitRope,AllArms}ByteIdentity`),
+the partial-advance shape (`TestLaneSetGEMM{,AllArms}PartialAdvanceByteIdentity` — the
+K-drops-mid-set shape the always-advancing fixtures never hit), and full identity on real
+E2B to completion (`TestLaneSetGEMME2BByteIdentityHiddens`).
 
 **The batched dense path already carries the same trade** (`decode_batched_session.go` uses
 `encRMSNormRowsBF16`+`projectRows`, separate rms — token-identity tier for the MTP verify);
@@ -609,11 +611,10 @@ kernel**, the pinned next rung one level down.
    into bf16 staging → emitKVQ8StoreAt, V-first on the K==V alias → q8-read SDPA,
    single-pass and fixed-fan two-pass; TestLaneSetGEMMQ8KVByteIdentityHiddens isolates the
    q8 ops on bf16, TestLaneSetGEMMQ8KVQuantByteIdentityHiddens runs the full quant+q8
-   combination). E2B-class now stays on the replay for ONE evidenced reason: with q8
-   disabled and the envelope experimentally lifted, the forward FIRES and DIVERGES at
-   step 0 — the mirrored single-row PLE/sliding/KV-share arms are not byte-identical
-   (TestLaneSetGEMMEnvelopeExclusionLoadBearing pins this; gemmEnvelopeLiftForTest re-arms
-   the receipt run after any fix). Those arms are the last blocker before E2B-class folds.
+   combination). **E2B-class FOLDS** — the envelope exclusions are lifted; the historical
+   fires-and-diverges was the slab under-sizing + live-n SDPA routing (see the dissolved
+   stops above), and TestLaneSetGEMME2BByteIdentityHiddens holds the real-checkpoint
+   full-identity receipt to completion.
 2. **Non-ICB arches.** The external-encoder fusion needs the ICB `encodeStepBody`
    seam; a non-ICB `stepToken` opens its own command buffer. MoE (12B/26B) and
    COMPOSED/hybrid decode fall outside the owner today — `Prepare` refuses them.

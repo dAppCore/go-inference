@@ -12,9 +12,11 @@ import (
 	"testing"
 	"time"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
+	"dappco.re/go/inference/model/safetensors"
 )
 
 // TestLaneSetGEMMByteIdentityHiddens is the counter-guarded byte-identity receipt for
@@ -205,97 +207,13 @@ func TestLaneSetGEMMRaggedJoinByteIdentity(t *testing.T) {
 	}
 }
 
-// TestLaneSetGEMMQuantFallsBackToReplay pins the PROVEN-ENVELOPE fallback: E2B is a
-// 4-bit checkpoint whose PLE tower (and sliding window / KV-share layers) sit outside
-// the fold's demonstrated envelope, so even with the forward armed (gemmMode 1) the
-// lane set runs the per-lane ICB replay — the merged 2.58× path — byte-for-byte, and
-// the GEMM counter stays zero. E2B's projections themselves sit ON the fast-twin
-// envelope (hidden 2048 — TestLaneSetGEMMQuantByteIdentityHiddens is the positive
-// projection receipt), so the mirrored PLE/sliding/KV-share arms are the ONLY thing
-// keeping it on the replay; TestLaneSetGEMMEnvelopeExclusionLoadBearing proves those
-// exclusions load-bearing, and TestLaneSetGEMMQuantOffEnvelopeDeclinesFold guards the
-// twin boundary for dims off the envelope.
-func TestLaneSetGEMMQuantFallsBackToReplay(t *testing.T) {
-	if os.Getenv(MetallibPathEnv) == "" {
-		t.Skip("metallib not set — GPU decode fixture")
-	}
-	if _, err := os.Stat(laneSetABModelDir); err != nil {
-		t.Skipf("E2B model dir not present (%s) — set LTHN_CB_AB_MODEL", laneSetABModelDir)
-	}
-	tm, err := LoadTokenModelDir(laneSetABModelDir, 4096)
-	if err != nil {
-		t.Fatalf("LoadTokenModelDir: %v", err)
-	}
-	m, ok := tm.(*NativeTokenModel)
-	if !ok {
-		if c, ok := tm.(interface{ Close() error }); ok {
-			_ = c.Close()
-		}
-		t.Skipf("loaded model is %T, not *NativeTokenModel", tm)
-	}
-	defer m.Close()
-
-	const k, maxNew = 4, 6
-	ctx := context.Background()
-	specs := make([]inference.LaneSpec, k)
-	for i := range specs {
-		ids := make([]int32, 12)
-		for j := range ids {
-			ids[j] = int32(2 + (i*29+j*5)%1500)
-		}
-		specs[i] = inference.LaneSpec{PromptIDs: ids, MaxNew: maxNew}
-	}
-
-	run := func(mode int) (map[int][]int32, uint64) {
-		lsi, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: k})
-		if err != nil {
-			t.Fatalf("OpenLaneSet(mode %d): %v", mode, err)
-		}
-		ls := lsi.(*laneSet)
-		ls.gemmMode = mode
-		handles := make([]inference.LaneHandle, k)
-		for i, spec := range specs {
-			if handles[i], err = ls.Prepare(ctx, spec); err != nil {
-				t.Fatalf("Prepare(mode %d lane %d): %v", mode, i, err)
-			}
-		}
-		toks, _ := drainLaneSet(t, ls)
-		fwd := ls.gemmFwdCount
-		byID := map[int][]int32{}
-		for i := range specs {
-			byID[i] = toks[handles[i].ID]
-		}
-		_ = ls.Close()
-		return byID, fwd
-	}
-
-	armedTok, armedFwd := run(1) // GEMM armed — must fall back for quant
-	replayTok, replayFwd := run(2)
-
-	if armedFwd != 0 {
-		t.Fatalf("quant E2B ran %d batched-GEMM forwards — it must fall back to the replay (PLE/sliding/KV-share proven-envelope exclusion)", armedFwd)
-	}
-	if replayFwd != 0 {
-		t.Fatalf("replay ran %d GEMM forwards", replayFwd)
-	}
-	for i := range specs {
-		if len(armedTok[i]) == 0 {
-			t.Fatalf("lane %d produced no tokens", i)
-		}
-		if !slices.Equal(armedTok[i], replayTok[i]) {
-			t.Fatalf("lane %d: armed %v != replay %v (fallback must be transparent)", i, armedTok[i], replayTok[i])
-		}
-	}
-	t.Logf("quant E2B correctly falls back to the ICB replay (0 GEMM forwards), output byte-identical")
-}
-
 // TestLaneSetGEMMThroughputAB is the weight-read-once receipt on a realistic-scale
 // bf16 gemma4 (E2B-shaped dims: dModel 1536, 16 layers, qDim 2048, dFF 8192 — big
 // enough that decode is weight-bandwidth-bound, where reading each weight ONCE for K
 // lanes instead of K times is the win). Synthetic weights (the tokens are arbitrary
 // but the GPU work and timings are real), so it stands in for a real bf16 checkpoint
-// the box does not carry — both installed checkpoints are 4-bit quant, which is
-// GEMM-ineligible (see TestLaneSetGEMMQuantFallsBackToReplay). Three modes, K=4:
+// the box does not carry (the quant fold has its own receipts —
+// TestLaneSetGEMMQuantByteIdentityHiddens et al). Three modes, K=4:
 //
 //	serial (1 lane at a time, ICB replay)     — the pre-batching baseline
 //	batched replay (K lanes, 1 CB, K weights) — the merged 2.58× CB-count win
@@ -523,20 +441,47 @@ func laneSetQuantFixtureModelMax(t *testing.T, maxLen int) *NativeTokenModel {
 // is not recorded-ICB eligible or this metallib lacks the tiled kernel.
 func laneSetQuantFastFixtureModelMax(t *testing.T, maxLen int) *NativeTokenModel {
 	t.Helper()
-	const gs, bits = 32, 4
-	if _, ok := lthnQMVRowsPipeline(lthnQMVRowsKey{groupSize: gs, bits: bits, m: 2}); !ok {
-		t.Skip("register-tiled lthn_qmv_rows unavailable on this metallib")
-	}
-	cfg := g4.Config{
+	return laneSetQuantFixtureFromConfig(t, laneSetQuantFastConfig(), maxLen)
+}
+
+// laneSetQuantFastConfig is the fast-twin base geometry: hidden 512, dFF 1024,
+// HeadDim 256 — every projection inDim a 512-multiple, every outDim an
+// 8-multiple. The lifted-arm fixtures mutate one feature at a time on top.
+func laneSetQuantFastConfig() g4.Config {
+	return g4.Config{
 		HiddenSize: 512, NumHiddenLayers: 2, IntermediateSize: 1024,
 		NumAttentionHeads: 2, NumKeyValueHeads: 1, HeadDim: 256, VocabSize: 48, RMSNormEps: 1e-6,
-		Quantization: &model.QuantConfig{GroupSize: gs, Bits: bits},
+		Quantization: &model.QuantConfig{GroupSize: 32, Bits: 4},
+	}
+}
+
+// laneSetQuantFixtureFromConfig assembles a synthetic 4-bit quant gemma4 from
+// an explicit config — the shared body behind the fast-twin fixture and the
+// single-feature lifted-arm fixtures (sliding / KV-share / PLE). mutate hooks
+// run over the tensor map before Assemble (extra weight classes: layer_scalar).
+// Skips when the tiled kernel or recorded-ICB eligibility is missing on this
+// metallib.
+func laneSetQuantFixtureFromConfig(t *testing.T, cfg g4.Config, maxLen int, mutate ...func(map[string]safetensors.Tensor)) *NativeTokenModel {
+	t.Helper()
+	if err := ensureInit(); err != nil {
+		t.Fatalf("ensureInit: %v", err)
+	}
+	gs, bits := cfg.Quantization.GroupSize, cfg.Quantization.Bits
+	if _, ok := lthnQMVRowsPipeline(lthnQMVRowsKey{groupSize: gs, bits: bits, m: 2}); !ok {
+		t.Skip("register-tiled lthn_qmv_rows unavailable on this metallib")
 	}
 	arch, err := cfg.Arch()
 	if err != nil {
 		t.Fatalf("Arch: %v", err)
 	}
-	lm, err := model.Assemble(quantGemma4Tensors(t, arch, gs, bits), arch, model.StandardWeightNames())
+	ts := quantGemma4Tensors(t, arch, gs, bits)
+	if arch.PerLayerInputHidden > 0 {
+		addPLETensors(t, ts, arch, gs, bits)
+	}
+	for _, m := range mutate {
+		m(ts)
+	}
+	lm, err := model.Assemble(ts, arch, model.StandardWeightNames())
 	if err != nil {
 		t.Fatalf("model.Assemble: %v", err)
 	}
@@ -556,7 +501,7 @@ func laneSetQuantFastFixtureModelMax(t *testing.T, maxLen int) *NativeTokenModel
 	if !ok || as.state.icb == nil {
 		_ = probe.(interface{ Close() error }).Close()
 		_ = m.Close()
-		t.Skip("quant fast-twin fixture is not recorded-ICB eligible on this metallib")
+		t.Skip("quant fixture is not recorded-ICB eligible on this metallib")
 	}
 	_ = as.Close()
 	return m
@@ -724,46 +669,16 @@ func TestLaneSetGEMMQuantByteIdentityHiddens(t *testing.T) {
 	}
 }
 
-// TestLaneSetGEMMEnvelopeExclusionLoadBearing pins that the proven-envelope
-// exclusions in gemmEligible protect REAL output (receipt 2026-07-13): with
-// gemmEnvelopeLiftForTest armed on real E2B — a 4-bit checkpoint carrying all
-// three excluded features at once (PLE tower, sliding windows, KV-share
-// layers), q8 KV disabled so this run isolates exactly those arms — the
-// weight-read-once forward FIRES and its post-stack hiddens DIVERGE from the
-// per-lane ICB replay at step 0. The mirrored single-row PLE/sliding/KV-share
-// arms are not byte-identical yet, so the exclusions stay. If this test ever
-// finds full identity instead, the arms got fixed: lift the exclusions and
-// convert this into the positive promotion receipt.
-func TestLaneSetGEMMEnvelopeExclusionLoadBearing(t *testing.T) {
-	if os.Getenv(MetallibPathEnv) == "" {
-		t.Skip("metallib not set — GPU decode fixture")
-	}
-	if _, err := os.Stat(laneSetABModelDir); err != nil {
-		t.Skipf("E2B model dir not present (%s) — set LTHN_CB_AB_MODEL", laneSetABModelDir)
-	}
-	// The q8 KV cache is its own separate fold rung (gemmEligible declines
-	// icb.kvQ8 outright) — load this receipt's model with bf16 KV so the run
-	// isolates exactly the three envelope arms under test.
-	kvQ8ICBOffForTest = true
-	t.Cleanup(func() { kvQ8ICBOffForTest = false })
-	tm, err := LoadTokenModelDir(laneSetABModelDir, 4096)
-	if err != nil {
-		t.Fatalf("LoadTokenModelDir: %v", err)
-	}
-	m, ok := tm.(*NativeTokenModel)
-	if !ok {
-		if c, ok := tm.(interface{ Close() error }); ok {
-			_ = c.Close()
-		}
-		t.Skipf("loaded model is %T, not *NativeTokenModel", tm)
-	}
-	defer m.Close()
-
-	gemmEnvelopeLiftForTest = true
-	defer func() { gemmEnvelopeLiftForTest = false }()
-
+// laneSetArmByteIdentity drives a GEMM-armed set and a replay set in lockstep
+// on m and asserts fires + byte-identical hiddens and tokens at every step —
+// the shared receipt body behind the per-feature arm tests (sliding / KV-share
+// / mixed head dims / PLE / layer scalar / split rope / all combined) and the
+// real-E2B receipt.
+func laneSetArmByteIdentity(t *testing.T, m *NativeTokenModel) {
+	t.Helper()
 	specs := laneSpecFixtures()
 	ctx := context.Background()
+
 	open := func(mode int) (*laneSet, []inference.LaneHandle) {
 		lsi, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
 		if err != nil {
@@ -788,8 +703,7 @@ func TestLaneSetGEMMEnvelopeExclusionLoadBearing(t *testing.T) {
 	defer lsG.Close()
 	defer lsR.Close()
 
-	diverged := false
-	for step := 0; !diverged; step++ {
+	for step := 0; ; step++ {
 		sg, err := lsG.Step(ctx)
 		if err != nil {
 			t.Fatalf("step %d GEMM Step: %v", step, err)
@@ -807,20 +721,318 @@ func TestLaneSetGEMMEnvelopeExclusionLoadBearing(t *testing.T) {
 				continue
 			}
 			if !bytes.Equal(lg.hidden, lr.hidden) {
-				diverged = true
+				t.Fatalf("step %d lane %d: post-stack hidden bytes differ between lifted-arm GEMM and replay", step, i)
 			}
+		}
+		tokG := stepTokens(sg, hG)
+		tokR := stepTokens(sr, hR)
+		if !slices.Equal(tokG, tokR) {
+			t.Fatalf("step %d: token vector diverges GEMM %v vs replay %v", step, tokG, tokR)
 		}
 		retireTerminal(t, lsG, sg)
 		retireTerminal(t, lsR, sr)
 	}
 
 	if lsG.gemmFwdCount == 0 {
-		t.Fatal("gemmFwdCount is zero — the lifted-envelope forward never fired (pin vacuous)")
+		t.Fatal("gemmFwdCount is zero — the lifted-arm forward never fired (proof vacuous)")
 	}
-	if !diverged {
-		t.Fatal("lifted-envelope forward matched the replay byte-for-byte — the mirrored arms appear fixed: lift the proven-envelope exclusions and promote this test to the positive receipt")
+	if lsR.gemmFwdCount != 0 {
+		t.Fatalf("replay set ran %d GEMM forwards — it should be pure ICB replay", lsR.gemmFwdCount)
 	}
-	t.Logf("envelope exclusion is load-bearing: lifted forward fired (%d) and diverged from the replay", lsG.gemmFwdCount)
+}
+
+// TestLaneSetGEMMSlidingByteIdentity isolates the fold's SLIDING-RING
+// arm: one sliding layer (window 8 — wraps within the fixture decode) + one
+// global layer, quant fast-twin dims, no PLE, no KV-share. With the envelope
+// lifted the fold must reproduce the recorded sliding-ring store and windowed
+// read byte-for-byte against the per-lane replay.
+func TestLaneSetGEMMSlidingByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	cfg := laneSetQuantFastConfig()
+	cfg.LayerTypes = []string{"sliding_attention", "full_attention"}
+	cfg.SlidingWindow = 8
+	m := laneSetQuantFixtureFromConfig(t, cfg, 32)
+	defer m.Close()
+	laneSetArmByteIdentity(t, m)
+}
+
+// TestLaneSetGEMMMixedHeadDimByteIdentity isolates the fold's MIXED
+// per-layer geometry arm — the gemma4 shape where the global layer runs a
+// wider head than the sliding one (E2B/E4B/12B/31B/26B: global 512 vs sliding
+// 256) so per-layer q/kv dims, slab strides and cache offsets all vary by
+// layer. Sliding window + fast-twin dims; no PLE, no KV-share.
+func TestLaneSetGEMMMixedHeadDimByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	cfg := laneSetQuantFastConfig()
+	cfg.LayerTypes = []string{"sliding_attention", "full_attention"}
+	cfg.SlidingWindow = 8
+	cfg.GlobalHeadDim = 512
+	m := laneSetQuantFixtureFromConfig(t, cfg, 32)
+	defer m.Close()
+	laneSetArmByteIdentity(t, m)
+}
+
+// TestLaneSetGEMMPLEByteIdentity isolates the fold's PLE arm — the
+// per-layer-input tower (E2B/E4B): per-lane PLE embed prep into the input
+// slab, the gemmLayerEpilogue gate + per-layer output scale, quant fast-twin
+// dims; no sliding, no KV-share. The fold must reproduce the recorded PLE
+// ops byte-for-byte against the per-lane replay.
+func TestLaneSetGEMMPLEByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	cfg := laneSetQuantFastConfig()
+	cfg.HiddenSizePerLayerInput = 64
+	cfg.VocabSizePerLayerInput = cfg.VocabSize
+	m := laneSetQuantFixtureFromConfig(t, cfg, 32)
+	defer m.Close()
+	laneSetArmByteIdentity(t, m)
+}
+
+// TestLaneSetGEMMAllArmsByteIdentity runs the E2B feature set combined
+// in one fixture — sliding window + KV-share + PLE tower + mixed head dims
+// over four layers (sliding/global owners, then one sharer of each type via
+// DeriveLayers) — the interaction receipt the single-feature tests cannot
+// give. Divergence here with all singles green = an arm interaction bug.
+func TestLaneSetGEMMAllArmsByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	cfg := laneSetQuantFastConfig()
+	cfg.NumHiddenLayers = 4
+	cfg.LayerTypes = []string{"sliding_attention", "full_attention", "sliding_attention", "full_attention"}
+	cfg.NumKVSharedLayers = 2
+	cfg.SlidingWindow = 8
+	cfg.GlobalHeadDim = 512
+	cfg.HiddenSizePerLayerInput = 64
+	cfg.VocabSizePerLayerInput = cfg.VocabSize
+	m := laneSetQuantFixtureFromConfig(t, cfg, 32)
+	defer m.Close()
+	laneSetArmByteIdentity(t, m)
+}
+
+// laneSetAddLayerScalars emits a per-layer .layer_scalar tensor (dModel bf16
+// weights, varying values) for every layer — the per-layer output scale the
+// gemmLayerEpilogue multiplies in (encMulBF16To). Real E2B carries one on all
+// 35 layers; the base fixture builder never emits it.
+func laneSetAddLayerScalars(arch model.Arch) func(map[string]safetensors.Tensor) {
+	return func(ts map[string]safetensors.Tensor) {
+		for i := range arch.Layer {
+			f := make([]float32, arch.Hidden)
+			for j := range f {
+				f[j] = 1 + float32((i*31+j*7)%13-6)*0.05
+			}
+			ts[core.Sprintf("model.layers.%d.layer_scalar", i)] = safetensors.Tensor{
+				Dtype: "BF16", Shape: []int{arch.Hidden}, Data: toBF16Bytes(f),
+			}
+		}
+	}
+}
+
+// TestLaneSetGEMMLayerScalarByteIdentity isolates the fold's per-layer
+// OUTPUT-SCALAR arm (gemmLayerEpilogue's encMulBF16To): quant fast-twin dims
+// with a .layer_scalar on every layer — real E2B carries one on all 35 layers
+// and no other lifted-arm fixture emits the tensor. No sliding/share/PLE.
+func TestLaneSetGEMMLayerScalarByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	cfg := laneSetQuantFastConfig()
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	m := laneSetQuantFixtureFromConfig(t, cfg, 32, laneSetAddLayerScalars(arch))
+	defer m.Close()
+	laneSetArmByteIdentity(t, m)
+}
+
+// TestLaneSetGEMMSplitRopeByteIdentity isolates the fold's per-type
+// RoPE arm with E2B's real parameters: full_attention runs PARTIAL rotary
+// (factor 0.25 of the 512 global head) at theta 1e6 with the "proportional"
+// type while sliding runs the default at theta 1e4 — so rbase/rotDim differ
+// per layer type. Sliding + global layers, mixed head dims, no PLE/share.
+func TestLaneSetGEMMSplitRopeByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	cfg := laneSetQuantFastConfig()
+	cfg.LayerTypes = []string{"sliding_attention", "full_attention"}
+	cfg.SlidingWindow = 8
+	cfg.GlobalHeadDim = 512
+	cfg.RopeParameters = map[string]g4.RopeParam{
+		"full_attention":    {RopeTheta: 1000000, PartialRotaryFactor: 0.25, RopeType: "proportional"},
+		"sliding_attention": {RopeTheta: 10000, RopeType: "default"},
+	}
+	m := laneSetQuantFixtureFromConfig(t, cfg, 32)
+	defer m.Close()
+	laneSetArmByteIdentity(t, m)
+}
+
+// TestLaneSetGEMMKVShareByteIdentity isolates the fold's KV-SHARE arm:
+// layer 1 owns no cache and attends layer 0's (DeriveLayers with
+// num_kv_shared_layers=1), quant fast-twin dims, no PLE, no sliding. The fold
+// must reproduce the recorded shared-attention read byte-for-byte against the
+// per-lane replay.
+func TestLaneSetGEMMKVShareByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	cfg := laneSetQuantFastConfig()
+	cfg.LayerTypes = []string{"full_attention", "full_attention"}
+	cfg.NumKVSharedLayers = 1
+	m := laneSetQuantFixtureFromConfig(t, cfg, 32)
+	defer m.Close()
+	laneSetArmByteIdentity(t, m)
+}
+
+// TestLaneSetGEMME2BByteIdentityHiddens is the real-checkpoint promotion
+// receipt (2026-07-13): E2B — a 4-bit MatFormer carrying every arm at once
+// (PLE tower, sliding windows, KV-share layers, mixed head dims, double-wide
+// deep FFN, split rope, layer scalars) — folds by DEFAULT, no test hooks, and
+// must stay byte-identical to the per-lane ICB replay to completion. This test
+// previously pinned fires-and-diverges as the envelope-exclusion receipt; the
+// divergence was never the mirrored arms (each has its own green fixture) but
+// the gate/up/gated slab under-sizing on the double-wide deep layers (gemmDims
+// maxFF — layers that own no caches, hence the trail-free signature) plus the
+// live-n SDPA routing vs the recorded fixed fan (gemmLayer's plain-arm
+// mirror), both fixed the same day the pin flipped.
+func TestLaneSetGEMME2BByteIdentityHiddens(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	if _, err := os.Stat(laneSetABModelDir); err != nil {
+		t.Skipf("E2B model dir not present (%s) — set LTHN_CB_AB_MODEL", laneSetABModelDir)
+	}
+	tm, err := LoadTokenModelDir(laneSetABModelDir, 4096)
+	if err != nil {
+		t.Fatalf("LoadTokenModelDir: %v", err)
+	}
+	m, ok := tm.(*NativeTokenModel)
+	if !ok {
+		if c, ok := tm.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+		t.Skipf("loaded model is %T, not *NativeTokenModel", tm)
+	}
+	defer m.Close()
+	laneSetArmByteIdentity(t, m)
+}
+
+// TestLaneSetGEMMPartialAdvanceByteIdentity pins the fold's PARTIAL-ADVANCE
+// shape: two lanes retire at step 0 (MaxNew 1) so the batched forward runs at
+// K=2 while the set holds 4 lanes — the shape real models produce whenever a
+// lane hits its stop mid-set, and one the always-advancing fixtures never
+// exercised (every earlier receipt ran K = full set at every step). The
+// surviving lanes' hiddens and tokens must stay byte-identical to the
+// replay's at every subsequent step.
+func TestLaneSetGEMMPartialAdvanceByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	m := laneSetQuantFastFixtureModelMax(t, 32)
+	defer m.Close()
+	laneSetPartialAdvanceByteIdentity(t, m)
+}
+
+// TestLaneSetGEMMAllArmsPartialAdvanceByteIdentity crosses the two
+// receipt axes: the full E2B feature set (sliding + KV-share + PLE + mixed
+// head dims) UNDER the partial-advance shape (two lanes retire at step 0,
+// the fold drops to K=2 of a 4-lane set).
+func TestLaneSetGEMMAllArmsPartialAdvanceByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	cfg := laneSetQuantFastConfig()
+	cfg.NumHiddenLayers = 4
+	cfg.LayerTypes = []string{"sliding_attention", "full_attention", "sliding_attention", "full_attention"}
+	cfg.NumKVSharedLayers = 2
+	cfg.SlidingWindow = 8
+	cfg.GlobalHeadDim = 512
+	cfg.HiddenSizePerLayerInput = 64
+	cfg.VocabSizePerLayerInput = cfg.VocabSize
+	m := laneSetQuantFixtureFromConfig(t, cfg, 32)
+	defer m.Close()
+	laneSetPartialAdvanceByteIdentity(t, m)
+}
+
+// laneSetPartialAdvanceByteIdentity drives the partial-advance lockstep body:
+// lanes 0/1 retire at step 0 (MaxNew 1), lanes 2/3 decode on — the fold runs
+// K=2 of a 4-lane set from the first advance.
+func laneSetPartialAdvanceByteIdentity(t *testing.T, m *NativeTokenModel) {
+	t.Helper()
+	specs := []inference.LaneSpec{
+		{PromptIDs: []int32{1, 5, 3, 2}, MaxNew: 1},
+		{PromptIDs: []int32{7, 7, 1}, MaxNew: 1},
+		{PromptIDs: []int32{2, 9, 4, 6, 8, 3}, MaxNew: 8},
+		{PromptIDs: []int32{4}, MaxNew: 8},
+	}
+	ctx := context.Background()
+
+	open := func(mode int) (*laneSet, []inference.LaneHandle) {
+		lsi, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+		if err != nil {
+			t.Fatalf("OpenLaneSet(mode %d): %v", mode, err)
+		}
+		ls, ok := lsi.(*laneSet)
+		if !ok {
+			t.Fatalf("OpenLaneSet returned %T, not *laneSet", lsi)
+		}
+		ls.gemmMode = mode
+		handles := make([]inference.LaneHandle, len(specs))
+		for i, spec := range specs {
+			if handles[i], err = ls.Prepare(ctx, spec); err != nil {
+				t.Fatalf("Prepare(mode %d lane %d): %v", mode, i, err)
+			}
+		}
+		return ls, handles
+	}
+
+	lsG, hG := open(1)
+	lsR, hR := open(2)
+	defer lsG.Close()
+	defer lsR.Close()
+
+	for step := 0; ; step++ {
+		sg, err := lsG.Step(ctx)
+		if err != nil {
+			t.Fatalf("step %d GEMM Step: %v", step, err)
+		}
+		sr, err := lsR.Step(ctx)
+		if err != nil {
+			t.Fatalf("step %d replay Step: %v", step, err)
+		}
+		if len(sg) == 0 && len(sr) == 0 {
+			break
+		}
+		for i := range specs {
+			lg, lr := lsG.lanes[hG[i].ID], lsR.lanes[hR[i].ID]
+			if lg == nil || lr == nil {
+				continue
+			}
+			if !bytes.Equal(lg.hidden, lr.hidden) {
+				t.Fatalf("step %d lane %d: post-stack hidden bytes differ between partial-advance GEMM and replay", step, i)
+			}
+		}
+		tokG := stepTokens(sg, hG)
+		tokR := stepTokens(sr, hR)
+		if !slices.Equal(tokG, tokR) {
+			t.Fatalf("step %d: token vector diverges GEMM %v vs replay %v", step, tokG, tokR)
+		}
+		retireTerminal(t, lsG, sg)
+		retireTerminal(t, lsR, sr)
+	}
+
+	if lsG.gemmFwdCount == 0 {
+		t.Fatal("gemmFwdCount is zero — the partial-advance GEMM forward never fired (proof vacuous)")
+	}
+	if lsR.gemmFwdCount != 0 {
+		t.Fatalf("replay set ran %d GEMM forwards — it should be pure ICB replay", lsR.gemmFwdCount)
+	}
 }
 
 // laneSetBF16Q8FixtureMax builds a synthetic BF16-weight gemma4 at HeadDim 256
