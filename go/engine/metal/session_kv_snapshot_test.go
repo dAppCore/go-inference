@@ -5,6 +5,7 @@
 package native
 
 import (
+	"bytes"
 	"math"
 	"testing"
 
@@ -98,6 +99,192 @@ func TestNativeKVLayerSlabPrefix_Bad(t *testing.T) {
 func TestNativeKVLayerSlabPrefix_Ugly(t *testing.T) {
 	if _, err := nativeKVLayerSlabPrefix(seededKVBytes(7, 5), 2, 1, 1, 2); err == nil {
 		t.Fatal("malformed slab size must fail")
+	}
+}
+
+func TestNativeKVSliceBlockPrefix_Good(t *testing.T) {
+	const heads, seqLen, headDim = 2, 4, 2
+	key := seededKVBytes(heads*seqLen*headDim*bf16Size, 201)
+	value := seededKVBytes(heads*seqLen*headDim*bf16Size, 203)
+	snapshot := &kv.Snapshot{
+		Tokens:   []int32{10, 11, 12, 13},
+		SeqLen:   seqLen,
+		NumHeads: heads,
+		HeadDim:  headDim,
+		Layers: []kv.LayerSnapshot{{
+			Layer:      0,
+			CacheIndex: 0,
+			CacheMode:  nativeStateCacheModeFixed,
+			KeyDType:   nativeKVSnapshotDTypeBF16,
+			KeyBytes:   key,
+			KeyShape:   []int32{1, heads, seqLen, headDim},
+			ValueDType: nativeKVSnapshotDTypeBF16,
+			ValueBytes: value,
+			ValueShape: []int32{1, heads, seqLen, headDim},
+		}},
+	}
+
+	got, err := nativeKVSliceBlockPrefix(snapshot, 2, 1)
+	if err != nil {
+		t.Fatalf("nativeKVSliceBlockPrefix: %v", err)
+	}
+	if !idsEqual(got.Tokens, []int32{10, 11}) || got.TokenOffset != 3 || got.SeqLen != 2 {
+		t.Fatalf("prefix metadata = tokens %v offset %d seq %d", got.Tokens, got.TokenOffset, got.SeqLen)
+	}
+	wantKey, err := nativeKVLayerSlabPrefix(key, seqLen, 2, heads, headDim)
+	if err != nil {
+		t.Fatalf("nativeKVLayerSlabPrefix(key): %v", err)
+	}
+	wantValue, err := nativeKVLayerSlabPrefix(value, seqLen, 2, heads, headDim)
+	if err != nil {
+		t.Fatalf("nativeKVLayerSlabPrefix(value): %v", err)
+	}
+	if !bytes.Equal(got.Layers[0].KeyBytes, wantKey) || !bytes.Equal(got.Layers[0].ValueBytes, wantValue) {
+		t.Fatal("nativeKVSliceBlockPrefix did not preserve the expected raw prefix")
+	}
+}
+
+func TestNativeKVSliceBlockPrefix_Bad(t *testing.T) {
+	snapshot := &kv.Snapshot{
+		Tokens: []int32{1, 2},
+		SeqLen: 2,
+		Layers: []kv.LayerSnapshot{{TurboQuantPayloads: [][]byte{{1, 2, 3}}}},
+	}
+	if _, err := nativeKVSliceBlockPrefix(snapshot, 1, 0); err == nil {
+		t.Fatal("partial TurboQuant block prefix must remain unsupported")
+	}
+}
+
+func TestNativeKVLayerSnapshotPrefixSlabs_Good(t *testing.T) {
+	const heads, seqLen, prefixTokens, headDim = 2, 4, 2, 2
+	key := seededKVBytes(heads*seqLen*headDim*bf16Size, 211)
+	value := seededKVBytes(heads*seqLen*headDim*bf16Size, 223)
+	view := sessionStateLayerView{kvHeads: heads, headDim: headDim}
+	layer := kv.LayerSnapshot{
+		KeyDType:   nativeKVSnapshotDTypeBF16,
+		KeyBytes:   key,
+		KeyShape:   []int32{1, heads, seqLen, headDim},
+		ValueDType: nativeKVSnapshotDTypeBF16,
+		ValueBytes: value,
+		ValueShape: []int32{1, heads, seqLen, headDim},
+	}
+
+	gotKey, gotValue, err := nativeKVLayerSnapshotPrefixSlabs(layer, view, prefixTokens)
+	if err != nil {
+		t.Fatalf("nativeKVLayerSnapshotPrefixSlabs: %v", err)
+	}
+	wantKey, err := nativeKVLayerSlabPrefix(key, seqLen, prefixTokens, heads, headDim)
+	if err != nil {
+		t.Fatalf("nativeKVLayerSlabPrefix(key): %v", err)
+	}
+	wantValue, err := nativeKVLayerSlabPrefix(value, seqLen, prefixTokens, heads, headDim)
+	if err != nil {
+		t.Fatalf("nativeKVLayerSlabPrefix(value): %v", err)
+	}
+	if !bytes.Equal(gotKey, wantKey) || !bytes.Equal(gotValue, wantValue) {
+		t.Fatal("nativeKVLayerSnapshotPrefixSlabs returned bytes outside the requested token prefix")
+	}
+}
+
+func TestNativeKVLayerSnapshotPrefixSlabs_Bad(t *testing.T) {
+	view := sessionStateLayerView{kvHeads: 1, headDim: 2}
+	layer := kv.LayerSnapshot{
+		KeyDType:   nativeKVSnapshotDTypeBF16,
+		KeyBytes:   seededKVBytes(8, 227),
+		KeyShape:   []int32{1, 1, 2, 2},
+		ValueDType: nativeKVSnapshotDTypeBF16,
+		ValueBytes: seededKVBytes(8, 229),
+		ValueShape: []int32{1, 1, 2, 2},
+	}
+	if _, _, err := nativeKVLayerSnapshotPrefixSlabs(layer, view, 3); err == nil {
+		t.Fatal("prefix outside the raw layer window must fail")
+	}
+}
+
+func TestArchSessionRestoreKVSnapshotBlockLayers_Good(t *testing.T) {
+	const heads, tokens, headDim, start = 2, 2, 2, 1
+	rowBytes := heads * headDim * bf16Size
+	view := sessionStateLayerView{
+		layer: 0, cacheIndex: 0, cacheMode: nativeStateCacheModeFixed,
+		kvHeads: heads, headDim: headDim, rowBytes: rowBytes, cacheRows: 5,
+		keyBytes: seededKVBytes(5*rowBytes, 233), valueBytes: seededKVBytes(5*rowBytes, 239),
+	}
+	beforeKey := append([]byte(nil), view.keyBytes...)
+	beforeValue := append([]byte(nil), view.valueBytes...)
+	keySlab := seededKVBytes(heads*tokens*headDim*bf16Size, 241)
+	valueSlab := seededKVBytes(heads*tokens*headDim*bf16Size, 251)
+	block := kv.Block{
+		TokenStart: start,
+		TokenCount: tokens,
+		Snapshot: &kv.Snapshot{Layers: []kv.LayerSnapshot{{
+			Layer: 0, CacheIndex: 0, CacheMode: nativeStateCacheModeFixed,
+			KeyDType: nativeKVSnapshotDTypeBF16, KeyBytes: keySlab, KeyShape: []int32{1, heads, tokens, headDim},
+			ValueDType: nativeKVSnapshotDTypeBF16, ValueBytes: valueSlab, ValueShape: []int32{1, heads, tokens, headDim},
+		}}},
+	}
+
+	if err := (&ArchSession{}).restoreKVSnapshotBlockLayers(block, start+tokens, []sessionStateLayerView{view}); err != nil {
+		t.Fatalf("restoreKVSnapshotBlockLayers: %v", err)
+	}
+	wantKey := append([]byte(nil), beforeKey...)
+	wantValue := append([]byte(nil), beforeValue...)
+	keyRows := make([]byte, len(keySlab))
+	valueRows := make([]byte, len(valueSlab))
+	nativeKVLayerSlabToTokenRows(keyRows, keySlab, tokens, heads, headDim)
+	nativeKVLayerSlabToTokenRows(valueRows, valueSlab, tokens, heads, headDim)
+	copy(wantKey[start*rowBytes:], keyRows)
+	copy(wantValue[start*rowBytes:], valueRows)
+	if !bytes.Equal(view.keyBytes, wantKey) || !bytes.Equal(view.valueBytes, wantValue) {
+		t.Fatal("restoreKVSnapshotBlockLayers changed bytes outside the requested block")
+	}
+}
+
+func TestArchSessionRestoreKVSnapshotBlockLayersPrefix_Good(t *testing.T) {
+	const heads, blockTokens, prefixTokens, headDim, start = 2, 4, 2, 2, 1
+	rowBytes := heads * headDim * bf16Size
+	view := sessionStateLayerView{
+		layer: 0, cacheIndex: 0, cacheMode: nativeStateCacheModeFixed,
+		kvHeads: heads, headDim: headDim, rowBytes: rowBytes, cacheRows: 6,
+		keyBytes: seededKVBytes(6*rowBytes, 257), valueBytes: seededKVBytes(6*rowBytes, 263),
+	}
+	beforeKey := append([]byte(nil), view.keyBytes...)
+	beforeValue := append([]byte(nil), view.valueBytes...)
+	keySlab := seededKVBytes(heads*blockTokens*headDim*bf16Size, 269)
+	valueSlab := seededKVBytes(heads*blockTokens*headDim*bf16Size, 271)
+	block := kv.Block{
+		TokenStart: start,
+		TokenCount: blockTokens,
+		Snapshot: &kv.Snapshot{
+			Tokens: []int32{1, 2, 3, 4}, SeqLen: blockTokens,
+			Layers: []kv.LayerSnapshot{{
+				Layer: 0, CacheIndex: 0, CacheMode: nativeStateCacheModeFixed,
+				KeyDType: nativeKVSnapshotDTypeBF16, KeyBytes: keySlab, KeyShape: []int32{1, heads, blockTokens, headDim},
+				ValueDType: nativeKVSnapshotDTypeBF16, ValueBytes: valueSlab, ValueShape: []int32{1, heads, blockTokens, headDim},
+			}},
+		},
+	}
+
+	if err := (&ArchSession{}).restoreKVSnapshotBlockLayersPrefix(block, prefixTokens, start+prefixTokens, []sessionStateLayerView{view}); err != nil {
+		t.Fatalf("restoreKVSnapshotBlockLayersPrefix: %v", err)
+	}
+	wantKey := append([]byte(nil), beforeKey...)
+	wantValue := append([]byte(nil), beforeValue...)
+	prefixKey, err := nativeKVLayerSlabPrefix(keySlab, blockTokens, prefixTokens, heads, headDim)
+	if err != nil {
+		t.Fatalf("nativeKVLayerSlabPrefix(key): %v", err)
+	}
+	prefixValue, err := nativeKVLayerSlabPrefix(valueSlab, blockTokens, prefixTokens, heads, headDim)
+	if err != nil {
+		t.Fatalf("nativeKVLayerSlabPrefix(value): %v", err)
+	}
+	keyRows := make([]byte, len(prefixKey))
+	valueRows := make([]byte, len(prefixValue))
+	nativeKVLayerSlabToTokenRows(keyRows, prefixKey, prefixTokens, heads, headDim)
+	nativeKVLayerSlabToTokenRows(valueRows, prefixValue, prefixTokens, heads, headDim)
+	copy(wantKey[start*rowBytes:], keyRows)
+	copy(wantValue[start*rowBytes:], valueRows)
+	if !bytes.Equal(view.keyBytes, wantKey) || !bytes.Equal(view.valueBytes, wantValue) {
+		t.Fatal("restoreKVSnapshotBlockLayersPrefix changed bytes outside the requested prefix")
 	}
 }
 
