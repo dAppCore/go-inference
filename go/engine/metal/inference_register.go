@@ -70,6 +70,7 @@ func (metalBackend) LoadModel(path string, opts ...inference.LoadOption) core.Re
 	case *NativeTokenModel:
 		loaded.AttachTokenizer(tok)
 		loaded.declaredStops = loadGenerationConfigStops(path)
+		loaded.declaredSampling = loadGenerationConfigSamplingDefaults(path)
 		return core.Ok(newNativeTextModel(loaded, modelType))
 	case *composed.ComposedTokenModel:
 		// A composed/hybrid checkpoint (host-f32 gated-delta + full attention, e.g. Qwen 3.6) is not the

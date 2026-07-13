@@ -9,6 +9,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/decode/tokenizer"
+	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/model"
 )
 
@@ -35,6 +36,10 @@ type NativeTokenModel struct {
 	// declaredStops is the checkpoint's generation_config eos_token_id set
 	// (engine.StopTokenDeclarer) — nil when the checkpoint declares none.
 	declaredStops []int32
+	// declaredSampling is the checkpoint's generation_config sampling intent
+	// (engine.SamplingDefaultsDeclarer) — the zero value when the checkpoint
+	// declares none.
+	declaredSampling engine.SamplingDefaults
 	// openSession builds a fresh persistent-cache decode session (ArchSession /
 	// ArchQuantSession) — the incremental O(1)/token path model.Generate prefers
 	// over the whole-sequence NativeBackend.DecodeForward. It takes the model's shardBuffers so the

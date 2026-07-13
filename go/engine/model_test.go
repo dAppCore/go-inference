@@ -5,6 +5,7 @@ package engine
 import (
 	"context"
 	"iter"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1317,6 +1318,65 @@ func TestModel_TextModel_StopTokens_Declared(t *testing.T) {
 	}
 	if seen != 1 {
 		t.Fatalf("stop set %v holds id 106 %d times, want exactly once", stop, seen)
+	}
+}
+
+// samplingDeclarerTokenModel is a fake TokenModel that declares checkpoint
+// sampling defaults (engine.SamplingDefaultsDeclarer), for the sampling-fold
+// tests.
+type samplingDeclarerTokenModel struct {
+	TokenModel
+	defaults SamplingDefaults
+}
+
+func (s samplingDeclarerTokenModel) DeclaredSamplingDefaults() SamplingDefaults { return s.defaults }
+
+// TestModel_TextModel_SuppressTokens_Declared pins the one sampling field the
+// declares-discipline precedence (request-set > model-declared > engine
+// fallback) can safely fold: a request supplying its own suppress list wins
+// outright; an unset request gets the checkpoint's declared list; with no
+// declarer at all, the resolved config carries no suppression — unchanged from
+// before this capability existed.
+func TestModel_TextModel_SuppressTokens_Declared(t *testing.T) {
+	declared := SamplingDefaults{SuppressTokens: []int32{9, 10}}
+	m := NewTextModel(samplingDeclarerTokenModel{defaults: declared}, newGemma4FixtureTokenizer(t), "gemma4", inference.ModelInfo{}, 8)
+
+	// request-set wins outright.
+	got := m.applyDeclaredSuppressTokens(inference.GenerateConfig{SuppressTokens: []int32{1}})
+	if !slices.Equal(got.SuppressTokens, []int32{1}) {
+		t.Fatalf("request-set suppress = %v, want the request's own [1]", got.SuppressTokens)
+	}
+
+	// declared applies when the request leaves the field unset.
+	got = m.applyDeclaredSuppressTokens(inference.GenerateConfig{})
+	if !slices.Equal(got.SuppressTokens, declared.SuppressTokens) {
+		t.Fatalf("unset suppress = %v, want declared %v", got.SuppressTokens, declared.SuppressTokens)
+	}
+
+	// no declarer at all: engine fallback (no suppression), byte-identical to
+	// the pre-capability behaviour.
+	bare := NewTextModel(&fakeTokenModel{}, newGemma4FixtureTokenizer(t), "gemma4", inference.ModelInfo{}, 8)
+	got = bare.applyDeclaredSuppressTokens(inference.GenerateConfig{})
+	if len(got.SuppressTokens) != 0 {
+		t.Fatalf("no-declarer suppress = %v, want none", got.SuppressTokens)
+	}
+}
+
+// TestModel_TextModel_SamplingScalarsNotFolded pins the documented gap on
+// SamplingDefaultsDeclarer: a checkpoint's declared do_sample/temperature/
+// top_p/top_k are NEVER folded into a request's resolved GenerateConfig, even
+// when every one of the request's own fields sits at its zero value.
+// GenerateConfig represents "unset" and "explicit zero" identically for these
+// fields (Temperature 0 = greedy, TopP/TopK 0 = disabled — both meaningful,
+// documented values), so folding on sight would silently override an explicit
+// caller request. Only SuppressTokens (tested above) can fold safely today.
+func TestModel_TextModel_SamplingScalarsNotFolded(t *testing.T) {
+	temp, topP, topK, doSample := float32(0.7), float32(0.95), 64, true
+	declared := SamplingDefaults{DoSample: &doSample, Temperature: &temp, TopP: &topP, TopK: &topK}
+	m := NewTextModel(samplingDeclarerTokenModel{defaults: declared}, newGemma4FixtureTokenizer(t), "gemma4", inference.ModelInfo{}, 8)
+	got := m.applyDeclaredSuppressTokens(inference.GenerateConfig{})
+	if got.Temperature != 0 || got.TopP != 0 || got.TopK != 0 {
+		t.Fatalf("resolved cfg = %+v, want Temperature/TopP/TopK left at their zero value", got)
 	}
 }
 
