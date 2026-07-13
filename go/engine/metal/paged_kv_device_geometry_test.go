@@ -8,6 +8,8 @@ import (
 	"os"
 	"testing"
 	"unsafe"
+
+	"github.com/tmc/apple/metal"
 )
 
 // TestDevicePagedKVGeometrySchedule pins the geometric page schedule's closed
@@ -127,5 +129,175 @@ func TestDevicePagedKVGeometryRoundTrip(t *testing.T) {
 	}
 	if c.pageLens[1] != 1 {
 		t.Fatalf("re-extend pageLens = %v", c.pageLens)
+	}
+}
+
+func TestDevicePagedKVCache_Close_Good(t *testing.T) {
+	c := &devicePagedKVCache{
+		kPages: []metal.MTLBuffer{nil}, vPages: []metal.MTLBuffer{nil},
+		kPagePtrs: []*byte{nil}, vPagePtrs: []*byte{nil}, pageLens: []int{1},
+		keyScratch: []metal.MTLBuffer{nil}, valueScratch: []metal.MTLBuffer{nil}, lensScratch: []int{1},
+		kHeadStrides: []int{1}, kSeqStrides: []int{2}, vHeadStrides: []int{3}, vSeqStrides: []int{4},
+		kScalePages: []metal.MTLBuffer{nil}, vScalePages: []metal.MTLBuffer{nil},
+		kScalePtrs: []*byte{nil}, vScalePtrs: []*byte{nil},
+		kScaleScratch: []metal.MTLBuffer{nil}, vScaleScratch: []metal.MTLBuffer{nil},
+		snapshotBytes: 9, sdpaScratch: []*sdpaPagedDecodeScratch{{}}, sdpaScratchCursor: 1,
+		length: 3, offset: 4, linearSynced: 2,
+	}
+	c.Close()
+	if c.kPages != nil || c.vPages != nil || c.pageLens != nil || c.kScalePages != nil || c.vScalePages != nil || c.sdpaScratch != nil {
+		t.Fatalf("Close retained page ownership: %#v", c)
+	}
+	if c.snapshotBytes != 0 || c.sdpaScratchCursor != 0 || c.length != 0 || c.offset != 0 || c.linearSynced != 0 {
+		t.Fatalf("Close retained scalar state: %#v", c)
+	}
+	var nilCache *devicePagedKVCache
+	nilCache.Close()
+}
+
+func TestDevicePagedKVCache_Slot_Bad(t *testing.T) {
+	var nilCache *devicePagedKVCache
+	if _, _, _, err := nilCache.slot(0); err == nil {
+		t.Fatal("slot accepted a nil cache")
+	}
+	c := &devicePagedKVCache{maxSize: 2, pageSize: 1}
+	if _, _, _, err := c.slot(-1); err == nil {
+		t.Fatal("slot accepted a negative position")
+	}
+	if _, _, _, err := c.slot(2); err == nil {
+		t.Fatal("slot accepted a position at maxSize")
+	}
+}
+
+func TestDevicePagedKVCache_LinearSnapshot_Bad(t *testing.T) {
+	var nilCache *devicePagedKVCache
+	if _, _, _, _, err := nilCache.linearSnapshot(1); err == nil {
+		t.Fatal("linearSnapshot accepted a nil cache")
+	}
+	if _, _, _, _, err := (&devicePagedKVCache{length: 2}).linearSnapshot(1); err == nil {
+		t.Fatal("linearSnapshot accepted fewer rows than the cache length")
+	}
+	if _, _, _, _, err := (&devicePagedKVCache{}).linearSnapshot(-1); err == nil {
+		t.Fatal("linearSnapshot accepted a negative row count")
+	}
+}
+
+func TestDevicePagedKVCache_LoadLinearSnapshot_Bad(t *testing.T) {
+	var nilCache *devicePagedKVCache
+	if err := nilCache.loadLinearSnapshot(nil, nil, 0); err == nil {
+		t.Fatal("loadLinearSnapshot accepted a nil cache")
+	}
+	c := &devicePagedKVCache{kvDim: 2, maxSize: 2}
+	if err := c.loadLinearSnapshot(nil, nil, -1); err == nil {
+		t.Fatal("loadLinearSnapshot accepted negative tokens")
+	}
+	if err := c.loadLinearSnapshot(nil, nil, 3); err == nil {
+		t.Fatal("loadLinearSnapshot accepted tokens beyond maxSize")
+	}
+	if err := c.loadLinearSnapshot([]byte{0}, []byte{0}, 1); err == nil {
+		t.Fatal("loadLinearSnapshot accepted short snapshot rows")
+	}
+}
+
+func TestDevicePagedKVCache_Truncate_Good(t *testing.T) {
+	c := &devicePagedKVCache{
+		pageSize: 2, pageLens: []int{2, 4, 6}, length: 12, offset: 12, linearSynced: 9,
+	}
+	if err := c.truncate(4); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	// The geometric schedule gives page starts 0, 2, 6. Token 4 fully keeps
+	// page 0, partly keeps page 1, and clears every later page.
+	if got, want := c.pageLens, []int{2, 2, 0}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("truncate pageLens = %v, want %v", got, want)
+	}
+	if c.length != 4 || c.offset != 4 || c.linearSynced != 4 {
+		t.Fatalf("truncate state = len %d offset %d synced %d, want 4/4/4", c.length, c.offset, c.linearSynced)
+	}
+}
+
+func TestDevicePagedKVCache_Truncate_Bad(t *testing.T) {
+	var nilCache *devicePagedKVCache
+	if err := nilCache.truncate(0); err == nil {
+		t.Fatal("truncate accepted a nil cache")
+	}
+	c := &devicePagedKVCache{maxSize: 2, length: 1}
+	if err := c.truncate(-1); err == nil {
+		t.Fatal("truncate accepted negative tokens")
+	}
+	if err := c.truncate(3); err == nil {
+		t.Fatal("truncate accepted tokens beyond maxSize")
+	}
+	if err := c.truncate(2); err == nil {
+		t.Fatal("truncate extended a cache")
+	}
+}
+
+func TestDevicePagedKVCache_State_Good(t *testing.T) {
+	c := &devicePagedKVCache{
+		kPages: []metal.MTLBuffer{nil}, vPages: []metal.MTLBuffer{nil}, pageLens: []int{3},
+		headDim: 8, kvDim: 16,
+	}
+	keys, values, lens, kHead, kSeq, vHead, vSeq, err := c.state()
+	if err != nil {
+		t.Fatalf("state: %v", err)
+	}
+	if len(keys) != 1 || len(values) != 1 || lens[0] != 3 || kHead[0] != 8 || kSeq[0] != 16 || vHead[0] != 8 || vSeq[0] != 16 {
+		t.Fatalf("state = keys=%d values=%d lens=%v k=(%v,%v) v=(%v,%v)", len(keys), len(values), lens, kHead, kSeq, vHead, vSeq)
+	}
+}
+
+func TestDevicePagedKVCache_State_Bad(t *testing.T) {
+	if _, _, _, _, _, _, _, err := (&devicePagedKVCache{}).state(); err == nil {
+		t.Fatal("state accepted empty page slices")
+	}
+	if _, _, _, _, _, _, _, err := (&devicePagedKVCache{kPages: []metal.MTLBuffer{nil}, vPages: []metal.MTLBuffer{nil}}).state(); err == nil {
+		t.Fatal("state accepted a missing page length")
+	}
+}
+
+func TestDevicePagedKVCache_ScaleState_Good(t *testing.T) {
+	c := &devicePagedKVCache{
+		quantQ8: true, kPages: []metal.MTLBuffer{nil},
+		kScalePages: []metal.MTLBuffer{nil}, vScalePages: []metal.MTLBuffer{nil},
+	}
+	k, v := c.scaleState()
+	if len(k) != 1 || len(v) != 1 {
+		t.Fatalf("scaleState lengths = %d/%d, want 1/1", len(k), len(v))
+	}
+	if k[0] != c.kScalePages[0] || v[0] != c.vScalePages[0] {
+		t.Fatal("scaleState did not preserve scale-page membership")
+	}
+}
+
+func TestDevicePagedKVCache_ScaleState_Bad(t *testing.T) {
+	if k, v := (&devicePagedKVCache{}).scaleState(); k != nil || v != nil {
+		t.Fatal("scaleState returned scales for a non-quantised cache")
+	}
+	if k, v := (&devicePagedKVCache{quantQ8: true, kPages: []metal.MTLBuffer{nil}}).scaleState(); k != nil || v != nil {
+		t.Fatal("scaleState returned scales with missing scale pages")
+	}
+}
+
+func TestEncAttnHalfKVPaged_Bad(t *testing.T) {
+	var enc metal.MTLComputeCommandEncoderObject
+	var cb metal.MTLCommandBufferObject
+	got, concurrent, err := encAttnHalfKVPaged(enc, cb, nil, false, nil, nil, nil, nil, 0, bufView{}, bufView{}, bufView{}, bufView{}, nil, attnScratch{}, nil, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, nil)
+	if err == nil {
+		t.Fatal("encAttnHalfKVPaged accepted a sliding window without a cache")
+	}
+	if got != enc || concurrent {
+		t.Fatal("encAttnHalfKVPaged changed the incoming encoder while declining")
+	}
+}
+
+func TestEncAttnHalfSharedPaged_Bad(t *testing.T) {
+	var enc metal.MTLComputeCommandEncoderObject
+	if err := encAttnHalfSharedPaged(enc, nil, nil, nil, nil, 0, bufView{}, bufView{}, bufView{}, attnScratch{}, nil, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, nil); err == nil {
+		t.Fatal("encAttnHalfSharedPaged accepted a nil cache")
+	}
+	c := &devicePagedKVCache{}
+	if err := encAttnHalfSharedPaged(enc, nil, c, nil, nil, 0, bufView{}, bufView{}, bufView{}, attnScratch{}, nil, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, nil); err == nil {
+		t.Fatal("encAttnHalfSharedPaged accepted a cache shorter than the requested position")
 	}
 }
