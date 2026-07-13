@@ -160,9 +160,14 @@ type Model struct {
 
 	// cbRender renders a chat turn to the model's own template string (the
 	// engine TextModel's FormatChatPrompt — byte-identical to what Chat itself
-	// encodes on the scheduler path, where EnableThinking is never set). nil =
-	// chat turns keep the plain interleave path.
+	// encodes for a request with no thinking override). nil = chat turns keep
+	// the plain interleave path.
 	cbRender cbChatRenderer
+	// cbRenderThinking is cbRender's thinking-aware twin (the engine
+	// TextModel's FormatChatPromptWithThinking): a chat carrying an
+	// EnableThinking override rides CB only through this renderer — absent
+	// it, the override keeps the plain path, where engine Chat honours it.
+	cbRenderThinking cbThinkingRenderer
 	// cbDecode is the streaming per-token decode for CB stream text; nil falls
 	// back to Decode-of-one on the tokenizer.
 	cbDecode cbStreamDecoder
@@ -194,6 +199,15 @@ type Model struct {
 // (engine.TextModel.FormatChatPrompt satisfies it).
 type cbChatRenderer interface {
 	FormatChatPrompt(messages []inference.Message) string
+}
+
+// cbThinkingRenderer is the optional THINKING-AWARE chat-template capability
+// (engine.TextModel.FormatChatPromptWithThinking satisfies it): the same
+// framing as cbChatRenderer for a nil flag, the request's reasoning override
+// applied otherwise — byte-identical to what engine Chat itself encodes for
+// that flag.
+type cbThinkingRenderer interface {
+	FormatChatPromptWithThinking(messages []inference.Message, enableThinking *bool) string
 }
 
 // cbStopResolver is the optional stop-resolution capability the CB path probes
@@ -519,8 +533,10 @@ func (m *Model) Chat(ctx context.Context, messages []inference.Message, opts ...
 		if len(opts) > 0 {
 			cfg := inference.ApplyGenerateOpts(opts)
 			req.Sampler = inference.SamplerConfigFromGenerateConfig(cfg)
-			// See Generate: the sink rides the request across the fold.
+			// See Generate: the sink rides the request across the fold — and so
+			// does the thinking override (the fold cannot hold either).
 			req.MetricsSink = cfg.MetricsSink
+			req.EnableThinking = cfg.EnableThinking
 		}
 		_, tokens, err := m.Schedule(ctx, req)
 		if err != nil {
@@ -961,6 +977,9 @@ func (m *Model) ensureCBEngine() *cbStepEngine {
 		m.cbEngine = e
 		if r, ok := inference.As[cbChatRenderer](m.base); ok {
 			m.cbRender = r
+		}
+		if r, ok := inference.As[cbThinkingRenderer](m.base); ok {
+			m.cbRenderThinking = r
 		}
 		if s, ok := inference.As[cbStopResolver](m.base); ok {
 			m.cbStops = s

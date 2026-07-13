@@ -702,6 +702,120 @@ func TestCBStepSampledRequestRidesLaneSet(t *testing.T) {
 	}
 }
 
+// cbThinkingCapableModel adds the thinking-aware renderer capability and
+// records the flag every render received.
+type cbThinkingCapableModel struct {
+	cbChatCapableModel
+	mu          sync.Mutex
+	gotThinking []*bool
+}
+
+func (m *cbThinkingCapableModel) FormatChatPromptWithThinking(messages []inference.Message, enableThinking *bool) string {
+	m.mu.Lock()
+	m.gotThinking = append(m.gotThinking, enableThinking)
+	m.mu.Unlock()
+	out := m.FormatChatPrompt(messages)
+	if enableThinking != nil && !*enableThinking {
+		out += "|think:off" // the override visibly changes the rendered prompt
+	}
+	return out
+}
+
+// thinkingRecordingModel is the chat-capable fake WITHOUT the thinking
+// renderer, recording the EnableThinking its Chat receives — the plain-route
+// re-arm observer.
+type thinkingRecordingModel struct {
+	cbChatCapableModel
+	mu           sync.Mutex
+	chatThinking *bool
+	chatCalled   bool
+}
+
+func (m *thinkingRecordingModel) Chat(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
+	cfg := inference.ApplyGenerateOpts(opts)
+	m.mu.Lock()
+	m.chatThinking = cfg.EnableThinking
+	m.chatCalled = true
+	m.mu.Unlock()
+	return m.cbChatCapableModel.Chat(ctx, messages, opts...)
+}
+
+// TestCBStepThinkingOverride pins the EnableThinking seam across the
+// scheduler: with the thinking-aware renderer, an override rides CB and the
+// lane's prompt is the override's OWN framing (the renderer receives the
+// flag); without the renderer, the override declines CB and the plain route
+// re-arms it onto base.Chat — and the facade's Chat fold lifts the option
+// onto the request end to end. Before this seam the fold silently dropped
+// the override on every scheduler route.
+func TestCBStepThinkingOverride(t *testing.T) {
+	off := false
+
+	// (a) Thinking renderer present: the override rides CB with its framing.
+	simA := newSimLaneSet()
+	modelA := &cbThinkingCapableModel{cbChatCapableModel: cbChatCapableModel{cbCapableModel{sim: simA, available: true}}}
+	schedA, err := New(modelA, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 4})
+	if err != nil {
+		t.Fatalf("New(a): %v", err)
+	}
+	defer schedA.CloseEngine()
+	msgs := []inference.Message{{Role: "user", Content: "hi"}}
+	_, ch, err := schedA.Schedule(context.Background(), inference.ScheduledRequest{
+		ID: "think-cb", Messages: msgs, Sampler: inference.SamplerConfig{MaxTokens: 1}, EnableThinking: &off,
+	})
+	if err != nil {
+		t.Fatalf("Schedule(a): %v", err)
+	}
+	collectStream(ch)
+	if simA.prepareCalls != 1 {
+		t.Fatalf("override with a thinking renderer must ride CB, got %d prepares", simA.prepareCalls)
+	}
+	wantIDs := modelA.Encode(modelA.FormatChatPromptWithThinking(msgs, &off))
+	if !slices.Equal(simA.specs[0].PromptIDs, wantIDs) {
+		t.Fatalf("lane prompt must be the OVERRIDE's framing: got %v want %v", simA.specs[0].PromptIDs, wantIDs)
+	}
+	modelA.mu.Lock()
+	sawOff := false
+	for _, g := range modelA.gotThinking {
+		if g != nil && !*g {
+			sawOff = true
+		}
+	}
+	modelA.mu.Unlock()
+	if !sawOff {
+		t.Fatal("the thinking renderer never received the override flag")
+	}
+
+	// (b) No thinking renderer: the override declines CB; the plain route
+	// re-arms it onto base.Chat — driven through the FACADE's Chat so the
+	// opts→request fold is proven end to end.
+	simB := newSimLaneSet()
+	modelB := &thinkingRecordingModel{cbChatCapableModel: cbChatCapableModel{cbCapableModel{sim: simB, available: true, chatSeq: []inference.Token{{ID: 7}}}}}
+	schedB, err := New(modelB, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 4})
+	if err != nil {
+		t.Fatalf("New(b): %v", err)
+	}
+	defer schedB.CloseEngine()
+	n := 0
+	for range schedB.Chat(context.Background(), msgs, inference.WithEnableThinking(&off), inference.WithMaxTokens(1)) {
+		n++
+	}
+	if n != 1 {
+		t.Fatalf("plain-route chat should stream the fake's 1 token, got %d", n)
+	}
+	if simB.prepareCalls != 0 {
+		t.Fatalf("override WITHOUT a thinking renderer must not ride CB, got %d prepares", simB.prepareCalls)
+	}
+	modelB.mu.Lock()
+	got, called := modelB.chatThinking, modelB.chatCalled
+	modelB.mu.Unlock()
+	if !called {
+		t.Fatal("plain route never reached base.Chat")
+	}
+	if got == nil || *got {
+		t.Fatalf("base.Chat received EnableThinking=%v, want the re-armed false override", got)
+	}
+}
+
 // TestCBStepUsageMetrics pins the per-request usage accounting on the CB
 // stream: the scheduler builds PromptTokens/GeneratedTokens itself (the base
 // model's global Metrics snapshot is never updated by a lane), so the openai

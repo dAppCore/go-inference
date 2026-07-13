@@ -100,6 +100,11 @@ func (m *Model) scheduleInterleave(ctx context.Context, req inference.ScheduledR
 		// fold — the base engine delivers this request's own final metrics.
 		opts = append(opts, inference.WithMetricsSink(req.MetricsSink))
 	}
+	if req.EnableThinking != nil {
+		// Re-arm the thinking override the fold cannot hold — engine Chat
+		// frames the turn with it (and continuity keys the conversation by it).
+		opts = append(opts, inference.WithEnableThinking(req.EnableThinking))
+	}
 	messages := append([]inference.Message(nil), req.Messages...)
 	prompt := req.Prompt
 	src := func(rc context.Context) stream {
@@ -140,9 +145,10 @@ func (m *Model) scheduleInterleave(ctx context.Context, req inference.ScheduledR
 // shared-lane-set path. Raw prompts ride at any sampling discipline (the lane
 // owner runs per-lane sampler state token-identical to the plain sampled
 // generate). A TEXT-ONLY chat turn rides when the model exposes the chat
-// renderer capability (its own FormatChatPrompt — the same template string
-// Chat itself encodes on this path, where EnableThinking is never set);
-// multimodal turns and renderer-less models keep the plain interleave path.
+// renderer capability (its own FormatChatPrompt / FormatChatPromptWithThinking
+// — the same template string Chat itself encodes for the request's thinking
+// flag); multimodal turns and renderer-less models keep the plain interleave
+// path.
 //
 // Continuity handoff (the continuity×CB contract): when the engine carries a
 // chat interceptor (conversation continuity, -state-conversations), a
@@ -171,6 +177,11 @@ func (m *Model) cbEligible(req inference.ScheduledRequest) bool {
 		if len(msg.Images) > 0 || len(msg.Audios) > 0 || len(msg.Videos) > 0 {
 			return false
 		}
+	}
+	if req.EnableThinking != nil && m.cbRenderThinking == nil {
+		// A reasoning override needs the thinking-aware renderer to ride CB;
+		// without it the plain path serves the override through engine Chat.
+		return false
 	}
 	if m.cbIntercept != nil && m.cbIntercept.ChatInterceptorInstalled() && messagesCarryAssistantTurn(req.Messages) {
 		return false
@@ -208,7 +219,14 @@ func (m *Model) scheduleCBStep(ctx context.Context, req inference.ScheduledReque
 	}
 	prompt := req.Prompt
 	if len(req.Messages) > 0 {
-		prompt = m.cbRender.FormatChatPrompt(req.Messages)
+		if m.cbRenderThinking != nil {
+			// The thinking-aware render: byte-identical to FormatChatPrompt for
+			// a nil override, the request's reasoning flag applied otherwise —
+			// exactly the framing engine Chat would encode for this request.
+			prompt = m.cbRenderThinking.FormatChatPromptWithThinking(req.Messages, req.EnableThinking)
+		} else {
+			prompt = m.cbRender.FormatChatPrompt(req.Messages)
+		}
 	}
 	promptIDs := tok.Encode(prompt)
 	if len(promptIDs) == 0 {

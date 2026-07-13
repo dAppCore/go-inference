@@ -39,6 +39,14 @@ type ScheduledRequest struct {
 	// scheduler facade lifts it here and re-arms it at dispatch). In-process
 	// only; never serialised.
 	MetricsSink func(GenerateMetrics) `json:"-"`
+	// EnableThinking is a chat request's reasoning override —
+	// GenerateConfig.EnableThinking carried across the scheduling seam (the
+	// opts→SamplerConfig fold cannot hold it, so the facade lifts it here and
+	// re-arms it at dispatch: the plain route as a GenerateOption, the CB
+	// route through the model's thinking-aware chat renderer). nil = the
+	// model default; meaningful only when Messages is populated (a raw
+	// Prompt renders no chat template).
+	EnableThinking *bool `json:"enable_thinking,omitempty"`
 }
 
 // ScheduledToken carries a streamed token plus request-local telemetry.
