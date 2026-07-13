@@ -1,3 +1,24 @@
+# NEXT WAKE (2026-07-16 — batched tail refuted by probe; K-sweep is the next move)
+
+## 2026-07-16 (the tail-share probe — 20c48e0, pushed)
+
+- BATCHED CHAINED TAIL: REFUTED AT K≤4 by a 20-minute probe instead of
+  a day's build. TestProbeChainedTailShare (permanent, LTHN_PROBE_MODEL
+  -gated): chained round 7.18 ms GPU vs bare forward 6.51 ms → the
+  head+embed tail is 0.67 ms/round (9.3%), the head sweep dominant
+  (369MB weight read at bandwidth — the arithmetic matches). The
+  rendezvous ceiling at K=4 is (K-1)/K × head ≈ 0.5 ms/round, roughly
+  cancelled by the slowest-lane alignment a rendezvous re-introduces —
+  and it architecturally reverses the ragged free-run that just banked
+  +6%. Revisit only at K≥8 (near-synchronised lanes tilt the trade;
+  the probe is the re-check).
+- NEXT MOVES (in order): the consistent-boot K-SWEEP — K=1,2,4,8 on
+  BOTH arms, salted prompts, one boot shape per arm — pins plain's
+  151-vs-161 boot spread AND gives the K≥8 data the tail re-check
+  needs. Then admission overlap (Prepare currently serialises in the
+  drive loop). Then the parked serve audits (welfare×CB, continuity×
+  CB) before CB can default on.
+
 # NEXT WAKE (2026-07-16 — ragged harvest live: 146 tok/s; lanes free-run)
 
 ## 2026-07-16 (ragged harvest — 1df07a9, pushed)
