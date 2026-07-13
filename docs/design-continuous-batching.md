@@ -583,19 +583,28 @@ to the per-lane ICB replay — the 2.58× stays safe (`TestLaneSetGEMMQuantFalls
 
 **The batched dense path already carries the same trade** (`decode_batched_session.go` uses
 `encRMSNormRowsBF16`+`projectRows`, separate rms — token-identity tier for the MTP verify);
-a real quant weight-read-once decode needs a **batched fused rms-qmv-rows Metal kernel**,
-the pinned next rung one level down.
+a real quant weight-read-once decode needs a **byte-identical batched qmv-rows Metal
+kernel**, the pinned next rung one level down.
 
 ### Pinned gaps (evidenced, the next rungs)
 
-1. **Weight-read-once GEMM batching — DONE for bf16 AND plain dense quant** (2026-07-13,
-   9b6b9d2). The "fused rms-qmv kernel" story above was a misdiagnosis: that fusion has been
-   dormant since the M2 port (enableInputRMSFusion=false); the historical one-ulp drift was
-   projectRows silently falling through to MLX qmm_t (token-identity tier). The byte-tier
-   kernel already existed — register-tiled lthn_qmv_rows — and projector.rowsByteTier now
-   routes quant through it at K ≤ lthnQMVRowsMaxM (TestLaneSetGEMMQuantByteIdentityHiddens).
-   E2B-class stays on the replay for TWO evidenced reasons: (a) its q8-default KV is the
-   separate staging rung, and (b) with q8 disabled and the envelope experimentally lifted,
+1. **Weight-read-once GEMM batching — DONE for bf16; quant SAFETY-GATED** (2026-07-13).
+   The arc, honestly: the "fused rms-qmv kernel" story was a misdiagnosis (that fusion has
+   been dormant since the M2 port, enableInputRMSFusion=false) and 9b6b9d2 then claimed the
+   byte tier by routing quant through the register-tiled lthn_qmv_rows — but that claim was
+   fixture-limited. At production dims the tiled kernel's register tiling re-orders the
+   quantised dot's accumulation vs the per-row qmv_impl: value-dependent ~1 ulp bf16 drift,
+   receipted per-projection on M3 Ultra (Q/K/V 1–3 rows in 800, O 10/800, down 6/800 at
+   gs32 b4, inDim 256/512; forcing the per-row path restores byte identity — sole cause).
+   Genuine quant weights now DECLINE the fold (rowsByteTier false → byte-identical merged
+   replay; TestLaneSetGEMMDenseQuantDeclinesFold pins the gate), closing the silent-drift
+   exposure 9b6b9d2 opened. The pinned rung is a byte-identical batched quant kernel in
+   the metallib (accumulation order matched to qmv_impl).
+   **The q8-KV staging rung is BUILT and receipted on bf16 weights** (rope/norm into bf16
+   staging → emitKVQ8StoreAt, V-first on the K==V alias → q8-read SDPA, single-pass and
+   fixed-fan two-pass; TestLaneSetGEMMQ8KVByteIdentityHiddens on laneSetBF16Q8FixtureMax).
+   E2B-class stays on the replay for TWO evidenced reasons: (a) its quant weights hit the
+   safety gate above, and (b) with q8 disabled and the envelope experimentally lifted,
    the forward FIRES and DIVERGES at step 0 — the mirrored single-row PLE/sliding/KV-share
    arms are not byte-identical (TestLaneSetGEMMEnvelopeExclusionLoadBearing pins this;
    gemmEnvelopeLiftForTest re-arms the receipt run after any fix).
