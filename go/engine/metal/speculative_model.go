@@ -52,6 +52,11 @@ type speculativeModel struct {
 	// mirrored from the plain path so a speculative serve terminates turns
 	// identically.
 	declaredStops []int32
+	// declaredSampling is the target checkpoint's generation_config sampling
+	// intent, folded per request exactly as the plain engine seam folds it
+	// (engine.SamplingDefaults.Apply) so a speculative serve honours the
+	// model's declared temperature/top-p/top-k/min-p defaults identically.
+	declaredSampling engine.SamplingDefaults
 
 	mu          sync.Mutex
 	lastErr     error
@@ -117,14 +122,15 @@ func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...i
 	// truthfully as the plain path does.
 	modelType := probeModelType(targetPath)
 	return &speculativeModel{
-		target:        target,
-		pair:          pair,
-		dflash:        dflashDrafter,
-		tok:           tok,
-		modelType:     modelType,
-		draftBlock:    draftBlock,
-		turns:         engine.DetectTurnTokens(tok),
-		declaredStops: loadGenerationConfigStops(targetPath),
+		target:           target,
+		pair:             pair,
+		dflash:           dflashDrafter,
+		tok:              tok,
+		modelType:        modelType,
+		draftBlock:       draftBlock,
+		turns:            engine.DetectTurnTokens(tok),
+		declaredStops:    loadGenerationConfigStops(targetPath),
+		declaredSampling: loadGenerationConfigSamplingDefaults(targetPath),
 		info: inference.ModelInfo{
 			Architecture: modelType,
 			VocabSize:    pair.TargetArch.Vocab,
@@ -163,6 +169,12 @@ func (m *speculativeModel) speculate(ctx context.Context, ids []int32, cfg infer
 			m.setErr(core.NewError("native.speculativeModel.Generate: empty prompt after tokenisation"))
 			return
 		}
+		// Fold the target checkpoint's declared sampling defaults (request-set >
+		// model-declared > engine fallback) before the sample-vs-greedy decision
+		// below reads cfg.Temperature/MinP — the same seam the plain engine path
+		// folds at, so a speculative serve honours a declared temperature 0.7
+		// instead of falling to greedy.
+		cfg = m.declaredSampling.Apply(cfg)
 		maxNew := cfg.MaxTokens
 		if maxNew <= 0 {
 			maxNew = 256

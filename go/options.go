@@ -9,11 +9,26 @@ import (
 // inference.GenerateConfig{MaxTokens: 256, Temperature: 0.7, TopK: 40}
 // inference.GenerateConfig{MaxTokens: 64, StopTokens: []int32{2}, RepeatPenalty: 1.1}
 type GenerateConfig struct {
-	MaxTokens      int
-	Temperature    float32
-	TopK           int
-	TopP           float32
-	MinP           float32
+	MaxTokens   int
+	Temperature float32
+	TopK        int
+	TopP        float32
+	MinP        float32
+	// Temperature/TopK/TopP/MinP each carry a companion "was this set" flag
+	// (the SeedSet precedent below): the field's zero value is ALSO a
+	// meaningful explicit request — Temperature 0 = greedy, TopK/TopP/MinP 0 =
+	// disabled — so the zero value alone cannot distinguish "caller asked for
+	// this" from "caller said nothing". A backend folding a model's declared
+	// generation_config defaults reads the flag, not the value: a false flag
+	// means the caller left the field unset, so the declared default may apply;
+	// a true flag means honour the request's value verbatim (even a zero). The
+	// [WithTemperature]/[WithTopK]/[WithTopP]/[WithMinP] setters set these; a
+	// direct struct literal leaves them false (unset) unless it sets them
+	// explicitly, exactly as Seed/SeedSet already behave.
+	TemperatureSet bool
+	TopKSet        bool
+	TopPSet        bool
+	MinPSet        bool
 	Seed           uint64
 	SeedSet        bool
 	StopTokens     []int32
@@ -78,28 +93,40 @@ func WithMaxTokens(n int) GenerateOption {
 //	inference.WithTemperature(0.7) // balanced creativity
 //	inference.WithTemperature(1.5) // high variance
 func WithTemperature(t float32) GenerateOption {
-	return func(c *GenerateConfig) { c.Temperature = t }
+	return func(c *GenerateConfig) {
+		c.Temperature = t
+		c.TemperatureSet = true
+	}
 }
 
 // WithTopK limits sampling to the top-k highest-probability tokens. 0 = disabled.
 //
 //	inference.WithTopK(40) // typical value for creative generation
 func WithTopK(k int) GenerateOption {
-	return func(c *GenerateConfig) { c.TopK = k }
+	return func(c *GenerateConfig) {
+		c.TopK = k
+		c.TopKSet = true
+	}
 }
 
 // WithTopP sets nucleus sampling — only tokens covering cumulative probability p are considered. 0 = disabled.
 //
 //	inference.WithTopP(0.9) // typical nucleus sampling threshold
 func WithTopP(p float32) GenerateOption {
-	return func(c *GenerateConfig) { c.TopP = p }
+	return func(c *GenerateConfig) {
+		c.TopP = p
+		c.TopPSet = true
+	}
 }
 
 // WithMinP sets minimum-probability sampling relative to the best token.
 //
 //	inference.WithMinP(0.05) // drop tokens below 5% of the top-token probability
 func WithMinP(p float32) GenerateOption {
-	return func(c *GenerateConfig) { c.MinP = p }
+	return func(c *GenerateConfig) {
+		c.MinP = p
+		c.MinPSet = true
+	}
 }
 
 // WithSeed makes stochastic sampling reproducible for this request.

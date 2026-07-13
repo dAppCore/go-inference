@@ -71,19 +71,22 @@ func (m *NativeTokenModel) DeclaredStopTokens() []int32 {
 }
 
 // generationConfigSampling is the on-the-wire shape of generation_config.json's
-// sampling block — the do_sample/temperature/top_p/top_k/suppress_tokens
+// sampling block — the do_sample/temperature/top_p/top_k/min_p/suppress_tokens
 // siblings of eos_token_id above. Pointer fields recover "the file declared
 // this key" (json.Unmarshal only allocates a target when the key is present),
 // distinct from a request's separate unset-vs-zero problem (see
 // engine.SamplingDefaultsDeclarer). Unlike eos_token_id, none of these fields
 // are documented or observed (across the cached mlx-community gemma4/Qwen3.5
 // snapshots) to ship in a scalar-or-array dual form, so plain typed fields
-// suffice — no any-typed switch needed.
+// suffice — no any-typed switch needed. min_p ships in the Qwen3.5 configs
+// (as 0.0); it carries the same zero-ambiguity as top_p/top_k, so a declared
+// 0.0 folds onto an unset request as a no-op (min-p disabled either way).
 type generationConfigSampling struct {
 	DoSample       *bool    `json:"do_sample"`
 	Temperature    *float32 `json:"temperature"`
 	TopP           *float32 `json:"top_p"`
 	TopK           *int     `json:"top_k"`
+	MinP           *float32 `json:"min_p"`
 	SuppressTokens []int32  `json:"suppress_tokens"`
 }
 
@@ -101,6 +104,7 @@ func generationConfigSamplingDefaults(data []byte) engine.SamplingDefaults {
 		Temperature:    cfg.Temperature,
 		TopP:           cfg.TopP,
 		TopK:           cfg.TopK,
+		MinP:           cfg.MinP,
 		SuppressTokens: cfg.SuppressTokens,
 	}
 }

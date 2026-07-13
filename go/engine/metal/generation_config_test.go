@@ -76,6 +76,38 @@ func TestGenerationConfigSamplingDefaults_Good(t *testing.T) {
 	if got.SuppressTokens != nil {
 		t.Fatalf("SuppressTokens = %v, want nil (key absent)", got.SuppressTokens)
 	}
+	if got.MinP != nil {
+		t.Fatalf("MinP = %v, want nil (key absent from gemma4 config)", got.MinP)
+	}
+}
+
+// TestGenerationConfigSamplingDefaults_MinP pins the shape the cached Qwen3.5
+// snapshots ship (e.g. Qwen3.5-4B-OptiQ-4bit): min_p present as 0.0 — a
+// declared key whose value is the zero, so the pointer is non-nil (declared)
+// even though the value is disabled. This is the field that most exercises the
+// declared-vs-zero distinction on the model side.
+func TestGenerationConfigSamplingDefaults_MinP(t *testing.T) {
+	got := generationConfigSamplingDefaults([]byte(`{
+		"do_sample": true,
+		"temperature": 0.7,
+		"top_p": 0.8,
+		"top_k": 20,
+		"min_p": 0.0,
+		"repetition_penalty": 1.0,
+		"presence_penalty": 1.5
+	}`))
+	if got.MinP == nil {
+		t.Fatal("MinP = nil, want a non-nil pointer to 0.0 (the key is declared)")
+	}
+	if *got.MinP != 0.0 {
+		t.Fatalf("MinP = %v, want 0.0", *got.MinP)
+	}
+	if got.Temperature == nil || *got.Temperature != 0.7 {
+		t.Fatalf("Temperature = %v, want 0.7", got.Temperature)
+	}
+	if got.TopK == nil || *got.TopK != 20 {
+		t.Fatalf("TopK = %v, want 20", got.TopK)
+	}
 }
 
 // TestGenerationConfigSamplingDefaults_Bad pins the guard paths: malformed
@@ -84,7 +116,7 @@ func TestGenerationConfigSamplingDefaults_Good(t *testing.T) {
 func TestGenerationConfigSamplingDefaults_Bad(t *testing.T) {
 	for _, data := range []string{`not json`, `{}`} {
 		got := generationConfigSamplingDefaults([]byte(data))
-		if got.DoSample != nil || got.Temperature != nil || got.TopP != nil || got.TopK != nil || got.SuppressTokens != nil {
+		if got.DoSample != nil || got.Temperature != nil || got.TopP != nil || got.TopK != nil || got.MinP != nil || got.SuppressTokens != nil {
 			t.Fatalf("sampling(%q) = %+v, want the zero value", data, got)
 		}
 	}
@@ -119,7 +151,7 @@ func TestGenerationConfigSamplingDefaults_Ugly(t *testing.T) {
 // TestLoadGenerationConfigStops).
 func TestLoadGenerationConfigSamplingDefaults(t *testing.T) {
 	got := loadGenerationConfigSamplingDefaults(t.TempDir())
-	if got.DoSample != nil || got.Temperature != nil || got.TopP != nil || got.TopK != nil || got.SuppressTokens != nil {
+	if got.DoSample != nil || got.Temperature != nil || got.TopP != nil || got.TopK != nil || got.MinP != nil || got.SuppressTokens != nil {
 		t.Fatalf("absent file sampling = %+v, want the zero value", got)
 	}
 }

@@ -121,21 +121,33 @@ func GenerateOptions(options Options) []inference.GenerateOption {
 	if options.NumPredict <= 0 && options.Temperature == 0 && options.TopK <= 0 && options.TopP <= 0 && options.MinP <= 0 {
 		return nil
 	}
+	// Each set field also raises its GenerateConfig *Set flag (the fused closure
+	// bypasses the With* setters that would otherwise raise them), so a value
+	// the request genuinely carried wins over the model's declared
+	// generation_config default. A field left at Ollama's zero default stays
+	// unset (flag false), letting the model default apply. (Ollama's Options
+	// carries non-pointer scalars, so an explicit request of 0 reads identically
+	// to "omitted" here — the pre-existing limit of that wire struct, not this
+	// fold.)
 	return []inference.GenerateOption{func(c *inference.GenerateConfig) {
 		if options.NumPredict > 0 {
 			c.MaxTokens = options.NumPredict
 		}
 		if options.Temperature != 0 {
 			c.Temperature = options.Temperature
+			c.TemperatureSet = true
 		}
 		if options.TopK > 0 {
 			c.TopK = options.TopK
+			c.TopKSet = true
 		}
 		if options.TopP > 0 {
 			c.TopP = options.TopP
+			c.TopPSet = true
 		}
 		if options.MinP > 0 {
 			c.MinP = options.MinP
+			c.MinPSet = true
 		}
 	}}
 }
