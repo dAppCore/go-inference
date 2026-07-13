@@ -213,6 +213,18 @@ type archDecodeState struct {
 	denseBatch   denseBatchScratch
 	offBuf       metal.MTLBuffer
 	offPtr       *int32
+	// offRing rotates the position buffer across step encodes. offBuf holds
+	// ONE int32 the kernels read at EXECUTION time (RoPE position, KV append
+	// row); the submit-ahead chained decode keeps a committed-not-waited link
+	// in flight while the host encodes the next, so writing the next position
+	// into the SAME buffer corrupts the in-flight link (the chain-vs-host
+	// fork's root: the fixture receipt was token-3-right, token-4-on wrong).
+	// Each step encode claims the next ring slot, so a committed link's
+	// offset is immutable for its lifetime. Slots are lazily built; index 0
+	// is the coreScratch's own offBuf.
+	offRingBufs [4]metal.MTLBuffer
+	offRingPtrs [4]*int32
+	offRingIdx  int
 	hBufPtr      *byte
 	xAPtr, xBPtr *byte
 	// verifyFoldSmallK lets the MTP verify take the batched fold on a
@@ -1232,6 +1244,8 @@ func newArchDecodeState(specs []model.LayerSpec, lb []archLayerBufs, moeWeights 
 		xB:             coreScratch.xB,
 		offBuf:         coreScratch.offBuf,
 		offPtr:         coreScratch.offPtr,
+		offRingBufs:    coreScratch.offRingBufs,
+		offRingPtrs:    coreScratch.offRingPtrs,
 		hBufPtr:        coreScratch.hBufPtr,
 		xAPtr:          coreScratch.xAPtr,
 		xBPtr:          coreScratch.xBPtr,
@@ -1340,6 +1354,21 @@ func (s *archDecodeState) sharedEncodeEligible() bool {
 	return true
 }
 
+// rotateOffBuf advances the position-buffer ring and points s.offBuf/s.offPtr
+// at the claimed slot (see offRing on the struct): every step encode gets its
+// own execution-read position buffer, so a committed-not-waited link's offset
+// can never be clobbered by the next link's encode. The ring is pre-built by
+// the core scratch (slot 0 is its offBuf) — no allocation on the step path; a
+// state without a ring (offRingBufs unset) keeps its single buffer, the
+// wait-per-token shape where rotation is unnecessary.
+func (s *archDecodeState) rotateOffBuf() {
+	if s.offRingBufs[0] == nil {
+		return
+	}
+	s.offRingIdx = (s.offRingIdx + 1) % len(s.offRingBufs)
+	s.offBuf, s.offPtr = s.offRingBufs[s.offRingIdx], s.offRingPtrs[s.offRingIdx]
+}
+
 func (s *archDecodeState) stepToken(inputEmb []byte, pos int) ([]byte, error) {
 	return s.stepTokenResultWithInput(inputEmb, pos, true, true)
 }
@@ -1385,6 +1414,7 @@ func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, 
 			return nil, err
 		}
 	}
+	s.rotateOffBuf()
 	*s.offPtr = int32(pos)
 	inputBuf := s.xA
 	if copyInput {

@@ -176,6 +176,12 @@ type archDecodeCoreScratch struct {
 	offPtr                                   *int32
 	hBufPtr, xAPtr, xBPtr                    *byte
 	hostPinned                               *pinnedNoCopyBytes
+	// offRing pre-builds the position-buffer rotation (slot 0 is offBuf):
+	// each step encode claims a slot so a committed-not-waited chained link's
+	// execution-read position is immutable (see archDecodeState.rotateOffBuf).
+	// Built here, once, pooled — the step loop never allocates.
+	offRingBufs [4]metal.MTLBuffer
+	offRingPtrs [4]*int32
 }
 
 var archDecodeCoreScratchPool sync.Pool
@@ -197,6 +203,12 @@ func newArchDecodeCoreScratch(dModel, qDim, kvDim, nHeads, maxLen, dFF int) *arc
 		hBufPtr: (*byte)(hBuf.Contents()),
 		xAPtr:   (*byte)(xA.Contents()),
 		xBPtr:   (*byte)(xB.Contents()),
+	}
+	sc.offRingBufs[0], sc.offRingPtrs[0] = sc.offBuf, sc.offPtr
+	for i := 1; i < len(sc.offRingBufs); i++ {
+		buf := device.NewBufferWithLengthOptions(4, metal.MTLResourceStorageModeShared)
+		sc.offRingBufs[i] = buf
+		sc.offRingPtrs[i] = (*int32)(buf.Contents())
 	}
 	return sc.reset()
 }

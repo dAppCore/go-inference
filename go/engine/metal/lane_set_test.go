@@ -375,13 +375,12 @@ func TestLaneSetMoESharedSubmissionByteIdentity(t *testing.T) {
 }
 
 // TestLaneSetMoESharedMatchesProductionGreedy pins the shared submission to
-// the engine's serial decode on the HOST-headed arm (chain disabled): the
-// lane's phase 1 is a host-loop head, so its oracle is the host loop. The
-// chained-live tail (GPU argmax + GPU-produced next embed) is a DIFFERENT
-// production arm that diverges from the host loop on near-tie logits — a
-// pre-existing engine-level condition (same family as the ICB-parity scar:
-// chained paths differ from host re-encode), receipted by the lane diag
-// during this rung and tracked in the batching task, not a lane artefact.
+// the engine's own DEFAULT serial decode — the chained-live tail included.
+// (This oracle briefly had to pin the host arm: the submit-ahead link's
+// shared position buffer corrupted in-flight links, forking the chain from
+// the host loop. rotateOffBuf closed the fork — TestChainedDecodeArmsAgree
+// holds the arms together — so the lane gates face the production default
+// again.)
 func TestLaneSetMoESharedMatchesProductionGreedy(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set — GPU decode fixture")
@@ -389,8 +388,6 @@ func TestLaneSetMoESharedMatchesProductionGreedy(t *testing.T) {
 	m := laneSetQuantMoEFixtureModel(t)
 	defer m.Close()
 	ctx := context.Background()
-	stepGreedyChainDisabled = true
-	defer func() { stepGreedyChainDisabled = false }()
 
 	for i, spec := range laneSpecFixtures() {
 		prod, err := m.OpenSession()
