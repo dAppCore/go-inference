@@ -5,6 +5,8 @@
 package native
 
 import (
+	"sync"
+
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/model"
@@ -255,29 +257,45 @@ func (ls *laneSet) phase1SampledLogitsRows(lanes []*decodeLane) ([]int32, bool, 
 	if err := he.encodeLogitsRowsInPool(hiddenBufs, false, outs); err != nil {
 		return nil, false, err
 	}
+	// Host tails in PARALLEL — each lane's tail (repeat penalty, top-k scan,
+	// draw) touches only its OWN session scratch and its OWN sampler's RNG
+	// stream, so cross-lane scheduling can never change a lane's draw
+	// sequence: tokens are identical to the serial loop by construction. At
+	// real vocab each tail scans ~vocab bf16 logits; serially they stacked
+	// K-deep on the drive thread after the ONE batched GPU submission — the
+	// sampled path's last host serialisation. An error on any lane fails the
+	// whole batch exactly as the serial loop's first-error return did (a hard
+	// error either way — no fallback, so no sampler desync).
 	out := make([]int32, len(lanes))
+	errs := make([]error, len(lanes))
+	var wg sync.WaitGroup
 	for i, lane := range lanes {
-		sess := lane.sess
-		p := lane.sampleParams
-		pickLogits := outs[i]
-		if p.RepeatPenalty > 1 {
-			var err error
-			pickLogits, err = sess.repeatPenaltyLogitsScratch(outs[i], sess.arch.Vocab, lane.sampleHistory, p.RepeatPenalty)
-			if err != nil {
-				return nil, false, err
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sess := lane.sess
+			p := lane.sampleParams
+			pickLogits := outs[i]
+			if p.RepeatPenalty > 1 {
+				var err error
+				pickLogits, err = sess.repeatPenaltyLogitsScratch(outs[i], sess.arch.Vocab, lane.sampleHistory, p.RepeatPenalty)
+				if err != nil {
+					errs[i] = err
+					return
+				}
 			}
-		}
-		var tok int32
-		var err error
-		if sampleLogitsTokenCPUPreferred(p, sess.arch.Vocab) {
-			tok, err = sampleSmallVocabBF16(pickLogits, sess.arch.Vocab, lane.sampler, p)
-		} else {
-			tok, err = sess.sampleVocabBF16(pickLogits, sess.arch.Vocab, lane.sampler, p)
-		}
+			if sampleLogitsTokenCPUPreferred(p, sess.arch.Vocab) {
+				out[i], errs[i] = sampleSmallVocabBF16(pickLogits, sess.arch.Vocab, lane.sampler, p)
+			} else {
+				out[i], errs[i] = sess.sampleVocabBF16(pickLogits, sess.arch.Vocab, lane.sampler, p)
+			}
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
 		if err != nil {
 			return nil, false, err
 		}
-		out[i] = tok
 	}
 	ls.sampledRowsCount++
 	return out, true, nil
