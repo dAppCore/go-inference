@@ -1,3 +1,31 @@
+# NEXT WAKE (2026-07-15 — chained lanes live; the gap is lockstep now)
+
+## 2026-07-15 (chained lane step — e533450, pushed)
+
+- CHAINED LANE STEP (e533450): greedy re-encode lanes carry
+  [forward → head argmax → next-embed into xA] in ONE cb per lane, the
+  serial chained decode's shape. Armed steps emit a 4-byte token; no
+  head submission, no hidden readback, no host embed. Arming keeps the
+  batched K-row head; head-decline demotes the lane two-phase (forward
+  stays valid); chainedSteps is the engagement counter (asserted).
+  38 lane+fork gates green FIRST RUN through the chained path; suite
+  2275/0; live 26B 120.6 → 123.5 tok/s, cross-route hashes unchanged.
+- WHY ONLY +2.4%: the chained shape pays K per-lane head sweeps — the
+  SAME head work plain's K goroutine streams pay — so the bubble win
+  mostly cancels at K=4 on the 369MB 26B head. The remaining gap (123
+  vs plain 161) is LOCKSTEP vs FREE-RUNNING: the plain path keeps ~2
+  cbs in flight per stream (its submit-ahead), while lane Steps
+  synchronise all K lanes every round (slowest-lane gating + a host
+  gap per step).
+- NEXT RUNGS (order): lane SUBMIT-AHEAD — one speculative round in
+  flight (commit round N+1's cbs before reading round N's tokens; the
+  scheduler consumes a round late). SAFE now the position-buffer ring
+  exists (b6a4147 fixed exactly this class). Closes the lockstep gap.
+  Then the BATCHED CHAINED TAIL: device-pack the K finalOut hiddens
+  into a rows buffer (K tiny copy kernels), ONE K-row fused head sweep
+  + per-row embed gathers, all in a trailing cb ordered by hazard
+  tracking — head-sweep economy that matters as K grows.
+
 # NEXT WAKE (2026-07-15 — THE FORK IS FIXED: submit-ahead position clobber)
 
 ## 2026-07-15 (the fork hunt — b6a4147, pushed)
