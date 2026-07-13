@@ -1,3 +1,32 @@
+# NEXT WAKE (2026-07-16 — parallel host sample tails: +2%, the sampled lever spent)
+
+## 2026-07-16 (parallel host sample tails)
+
+- THE SERIALISATION: after phase1SampledLogitsRows' ONE batched GPU
+  submission, the per-lane host tails (repeat penalty → top-k scan →
+  draw over vocab bf16 logits) ran serially in lane order on the drive
+  thread — K deep at K lanes, the sampled path's last host stack.
+- THE FIX: one goroutine per lane. Each tail touches only its OWN
+  session scratch (repeatPenaltyLogitsScratch, sampleVocabBF16's
+  sampleOrder/Probs) and its OWN sampler's RNG stream (sampleHostTopKBF16
+  is pure — stack scratch), so cross-lane scheduling can never change a
+  lane's draw sequence: token-identical to the serial loop by
+  construction. Any lane's error fails the whole batch exactly as the
+  serial first-error return did (hard error either way — no fallback, no
+  desync).
+- GATES: TestLaneSetSampledLogitsRowsByteIdentity widened to EIGHT lanes
+  (the K=8 serve shape) — serial-alone oracle byte identity + engagement;
+  the whole sampled family green under -race (the tails' data-race
+  proof). Module 12897/0.
+- LIVE A/B (26B ctx4096, t0.7/k40 salted, K=4/8, warm+2 rounds):
+      serial tails:   134.7/134.4   156.2/156.1
+      parallel tails: 137.0/136.9   158.8/159.2
+  +1.8% at both K, ±0.2% pairs. Below the ~3-5% estimate — the honest
+  size of the tail at real vocab (~0.5 ms/token recovered) — but real,
+  repeatable, and the LAST sampled lever: the remaining sampled-vs-greedy
+  gap is the structural no-chain residual (host RNG → no from-xA feed).
+- REMAINDER ON #385: EnableThinking seam (the one item left).
+
 # NEXT WAKE (2026-07-16 — K≥8 tail re-check: batched tail REFUTED at all K)
 
 ## 2026-07-16 (the K≥8 batched-chained-tail re-check — closed by A/B)
