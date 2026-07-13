@@ -1,3 +1,28 @@
+# NEXT WAKE (2026-07-15 late — depth-2 refuted; the residual needs the GPU-span split)
+
+## 2026-07-15 (the residual hunt — refutation banked, nothing committed)
+
+- K=1 DISCRIMINATOR (zero new code): CB single-lane 127.7 tok/s vs plain
+  single-stream 136.6 — HALF the K=4 gap exists at K=1, so it is
+  per-lane overhead vs the serial chain, not batch-boundary sync.
+- DEPTH-2 REFUTED LIVE: a two-deep pending queue (the serial chain's
+  fill+push steady shape, entry fills to 2, terminal unwinds n rounds)
+  went through all 38 gates green — and measured FLAT at K=1 (127.0)
+  and NEGATIVE at K=4 (135.9 vs 139.2). Reverted (uncommitted). This
+  falsifies the GPU-idle-gap theory for the residual: a queued second
+  round covers any idle window (rounds hazard-serialise on session
+  buffers within a lane but still queue back-to-back), so the ~0.5ms/
+  token K=1 residual lives in the ROUND ITSELF or the per-token serve
+  path (2 channel hops with goroutine wakes, DecodeToken, per-Step
+  allocs, pool-per-Step vs the chain's pool-per-generation).
+- NEXT INSTRUMENT (first move next session): cb.GPUStartTime/GPUEndTime
+  spans on CB rounds vs serial-chain links, same boot — one run splits
+  GPU-span from host-path. pieceTimingOn already does this for the
+  chain (chainedGPUSpanNs); mirror it for lane rounds.
+- Shipped state stands at 47c23e9: 26B ladder 93→118→120→123→139 vs
+  plain 161 (0.86×), cross-route parity, all receipts in the previous
+  blocks.
+
 # NEXT WAKE (2026-07-15 — submit-ahead lanes: 139 tok/s, 0.86× plain)
 
 ## 2026-07-15 (lane submit-ahead — 47c23e9, pushed)
