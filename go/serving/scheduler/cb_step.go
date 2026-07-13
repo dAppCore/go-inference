@@ -29,6 +29,7 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
@@ -55,6 +56,36 @@ type cbReq struct {
 	finishFn  func(inference.GenerateMetrics) // stream-end delivery (facade lastMetrics + MetricsSink)
 	ctx       context.Context
 	cancel    context.CancelFunc
+
+	// Duration anchors (drive-loop-owned like metrics): start is the submit
+	// instant (TotalDuration's zero), prefillDur the admission prefill's own
+	// span (BeginPrepare / inline Prepare — the CB path knows it EXACTLY,
+	// where the plain path only reports a coarse total), decodeStart the
+	// admission-complete instant (DecodeDuration's zero).
+	start       time.Time
+	prefillDur  time.Duration
+	decodeStart time.Time
+}
+
+// stampMetrics refreshes the request's duration + throughput fields from its
+// anchors — called before every token send and at stream end, so streamed
+// per-token snapshots grow monotonically and the final delivery carries the
+// full honest split (counts were always real; timings were zero before #35's
+// durations rung).
+func (r *cbReq) stampMetrics() {
+	r.metrics.PrefillDuration = r.prefillDur
+	if !r.start.IsZero() {
+		r.metrics.TotalDuration = time.Since(r.start)
+	}
+	if !r.decodeStart.IsZero() {
+		r.metrics.DecodeDuration = time.Since(r.decodeStart)
+	}
+	if r.prefillDur > 0 && r.metrics.PromptTokens > 0 {
+		r.metrics.PrefillTokensPerSec = float64(r.metrics.PromptTokens) / r.prefillDur.Seconds()
+	}
+	if r.metrics.DecodeDuration > 0 && r.metrics.GeneratedTokens > 0 {
+		r.metrics.DecodeTokensPerSec = float64(r.metrics.GeneratedTokens) / r.metrics.DecodeDuration.Seconds()
+	}
 }
 
 // end fires the stream-end delivery and closes the request's stream — the
@@ -62,6 +93,7 @@ type cbReq struct {
 // metrics-sink consumers rely on: the handler reads its sink-written locals
 // only after its range over the stream ends.
 func (r *cbReq) end() {
+	r.stampMetrics()
 	if r.finishFn != nil {
 		r.finishFn(r.metrics)
 	}
@@ -163,6 +195,7 @@ func (e *cbStepEngine) submit(ctx context.Context, id string, promptIDs []int32,
 		finishFn:  d.finish,
 		ctx:       reqCtx,
 		cancel:    cancel,
+		start:     time.Now(),
 	}
 	select {
 	case e.submitCh <- req:
@@ -209,9 +242,10 @@ func (e *cbStepEngine) close() {
 // cbPrepared is one BeginPrepare's result, delivered back to the drive loop:
 // the prepared-but-unattached lane (or the error that ended the attempt).
 type cbPrepared struct {
-	req *cbReq
-	p   inference.PendingLane
-	err error
+	req     *cbReq
+	p       inference.PendingLane
+	err     error
+	prepDur time.Duration // the BeginPrepare span — the request's honest PrefillDuration
 }
 
 // run is the single drive-loop goroutine: it owns the lane set, the pending
@@ -253,6 +287,7 @@ func (e *cbStepEngine) run() {
 	// admitInline is the capability-less path: the whole Prepare (prefill
 	// included) runs here in the drive loop, stalling the round.
 	admitInline := func(req *cbReq) {
+		prepStart := time.Now()
 		h, err := e.ls.Prepare(req.ctx, inference.LaneSpec{PromptIDs: req.promptIDs, MaxNew: req.maxNew, StopTokens: req.stops, Sampler: req.sampler})
 		if err != nil || !h.Valid() {
 			// Prefill failed (e.g. arch not ICB-eligible) — end the request's
@@ -263,6 +298,8 @@ func (e *cbStepEngine) run() {
 			e.cancelled.Add(1)
 			return
 		}
+		req.prefillDur = time.Since(prepStart)
+		req.decodeStart = time.Now()
 		byLane[h.ID] = req
 		e.admitted.Add(1)
 		e.active.Store(int64(len(byLane)))
@@ -284,8 +321,9 @@ func (e *cbStepEngine) run() {
 			}
 			preparing[req.id] = req
 			go func(req *cbReq) {
+				prepStart := time.Now()
 				p, err := overlap.BeginPrepare(req.ctx, inference.LaneSpec{PromptIDs: req.promptIDs, MaxNew: req.maxNew, StopTokens: req.stops, Sampler: req.sampler})
-				prepCh <- cbPrepared{req: req, p: p, err: err}
+				prepCh <- cbPrepared{req: req, p: p, err: err, prepDur: time.Since(prepStart)}
 			}(req)
 		}
 		e.queued.Store(int64(len(pending)))
@@ -316,6 +354,8 @@ func (e *cbStepEngine) run() {
 			e.cancelled.Add(1)
 			return
 		}
+		pr.req.prefillDur = pr.prepDur
+		pr.req.decodeStart = time.Now()
 		byLane[h.ID] = pr.req
 		e.admitted.Add(1)
 		e.active.Store(int64(len(byLane)))
@@ -447,6 +487,7 @@ func (e *cbStepEngine) deliver(steps []inference.LaneStep, byLane map[int]*cbReq
 				t.Text = req.decode(t.ID)
 			}
 			req.metrics.GeneratedTokens++
+			req.stampMetrics()
 			select {
 			case req.out <- inference.ScheduledToken{RequestID: req.id, Token: t, Metrics: req.metrics, Labels: req.labels}:
 			case <-req.ctx.Done():

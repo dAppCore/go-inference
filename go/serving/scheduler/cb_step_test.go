@@ -739,6 +739,77 @@ func TestCBStepUsageMetrics(t *testing.T) {
 	}
 }
 
+// TestCBStepMetricsDurations pins the CB route's duration accounting (the
+// counts-real-timings-zero gap): the final sink delivery carries a non-zero
+// TotalDuration, DecodeDuration, and PrefillDuration (the admission prefill's
+// own span — measured exactly, where the plain path only reports a coarse
+// total) plus both derived throughput rates, and streamed per-token snapshots
+// grow monotonically. Proven on BOTH admission paths — inline Prepare and the
+// overlapped BeginPrepare/CommitPrepare.
+func TestCBStepMetricsDurations(t *testing.T) {
+	run := func(t *testing.T, model inference.TextModel) {
+		t.Helper()
+		sched, err := New(model, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 4})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		defer sched.CloseEngine()
+
+		var final inference.GenerateMetrics
+		fired := false
+		_, ch, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+			ID:      "durations",
+			Prompt:  "abc",
+			Sampler: inference.SamplerConfig{MaxTokens: 3},
+			MetricsSink: func(gm inference.GenerateMetrics) {
+				final, fired = gm, true
+			},
+		})
+		if err != nil {
+			t.Fatalf("Schedule: %v", err)
+		}
+		var snapshots []inference.GenerateMetrics
+		for st := range ch {
+			snapshots = append(snapshots, st.Metrics)
+		}
+		if len(snapshots) != 3 {
+			t.Fatalf("stream should carry 3 tokens, got %d", len(snapshots))
+		}
+		if !fired {
+			t.Fatal("MetricsSink never fired")
+		}
+		if final.PrefillDuration <= 0 {
+			t.Fatalf("final PrefillDuration = %v, want > 0 (the admission prefill span)", final.PrefillDuration)
+		}
+		if final.DecodeDuration <= 0 || final.TotalDuration <= 0 {
+			t.Fatalf("final durations Total=%v Decode=%v, want both > 0", final.TotalDuration, final.DecodeDuration)
+		}
+		if final.TotalDuration < final.DecodeDuration {
+			t.Fatalf("TotalDuration %v < DecodeDuration %v — total must cover decode", final.TotalDuration, final.DecodeDuration)
+		}
+		if final.PrefillTokensPerSec <= 0 || final.DecodeTokensPerSec <= 0 {
+			t.Fatalf("throughput rates = prefill %f decode %f, want both > 0", final.PrefillTokensPerSec, final.DecodeTokensPerSec)
+		}
+		for i, snap := range snapshots {
+			if snap.TotalDuration <= 0 || snap.DecodeDuration <= 0 {
+				t.Fatalf("token %d snapshot durations Total=%v Decode=%v, want both > 0", i, snap.TotalDuration, snap.DecodeDuration)
+			}
+			if i > 0 && snap.TotalDuration < snapshots[i-1].TotalDuration {
+				t.Fatalf("token %d TotalDuration %v regressed below token %d's %v", i, snap.TotalDuration, i-1, snapshots[i-1].TotalDuration)
+			}
+		}
+	}
+
+	t.Run("inline", func(t *testing.T) {
+		run(t, &cbCapableModel{sim: newSimLaneSet(), available: true})
+	})
+	t.Run("overlapped", func(t *testing.T) {
+		async := &asyncSimLaneSet{simLaneSet: *newSimLaneSet(), gate: make(chan struct{}, 1)}
+		async.gate <- struct{}{}
+		run(t, &cbAsyncCapableModel{cbCapableModel: cbCapableModel{available: true}, async: async})
+	})
+}
+
 // TestCBStepMetricsSink pins the request-scoped delivery on the CB route: a
 // lane never touches the base engine's Metrics(), so the scheduler delivers
 // its own per-request counts to ScheduledRequest.MetricsSink as the stream
