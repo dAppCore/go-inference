@@ -176,6 +176,36 @@ func TestMTPReengageEngagedCycleExitsBelowPlain(t *testing.T) {
 	}
 }
 
+// TestMTPReengageEngagedCycleRateExitEmitsDiagTrace covers the one statement
+// TestMTPReengageEngagedCycleExitsBelowPlain leaves dark: the mtpDiagForTest
+// trace inside engagedCycle's rate-exit branch (mtp_reengage.go). The sibling
+// asserts the exit verdict with diag OFF; this one turns diag on so the
+// "reengage rate-exit: emitted=<tokensNow>" line is printed from the machine's
+// own fields, and reads it back -- the tokensNow passed at the exit call.
+func TestMTPReengageEngagedCycleRateExitEmitsDiagTrace(t *testing.T) {
+	prevDiag := mtpDiagForTest
+	mtpDiagForTest = true
+	defer func() { mtpDiagForTest = prevDiag }()
+
+	const exitEmitted = 4242
+	var bailed bool
+	trace := captureNativeTraceLog(t, func() {
+		r := reengageAfterPlain(100, 0)
+		r.probeLeft = 0 // engaged, not probing
+		for i := range len(r.winTok) - 1 {
+			r.engagedCycle(1, 0.1, i) // fill the window without a verdict
+		}
+		// filled at 1 token per 100ms = 10 tok/s < 100: exit and trace.
+		bailed = r.engagedCycle(1, 0.1, exitEmitted)
+	})
+	if !bailed {
+		t.Fatal("filled window below plain must exit")
+	}
+	if want := core.Sprintf("reengage rate-exit: emitted=%d", exitEmitted); !core.Contains(trace, want) {
+		t.Fatalf("trace missing the rate-exit line %q:\n%s", want, trace)
+	}
+}
+
 func TestMTPReengageEngagedCycleHoldsAtOrAbovePlain(t *testing.T) {
 	r := reengageAfterPlain(100, 0)
 	r.probeLeft = 0
@@ -395,6 +425,189 @@ func TestAssistantPairGenerateSampledFromSessionEachReengageCooldownEscalatesOnR
 		t.Fatalf("draft calls = %d, want > %d patience blocks -- probing must have resumed after the plain stretch", got.DraftCalls, nativeAssistantLowAcceptPatience)
 	}
 	assertReengageCooldownEscalationTrace(t, trace)
+}
+
+// --- What the tests below and their siblings in assistant_load_test.go
+// (Flushes/BreaksWhen/RollsBack/BreaksOnYieldStopped/RecordsDraftConfidence)
+// deliberately LEAVE uncovered in Generate{,Sampled}FromSessionEach, traced not
+// guessed (from -coverprofile block ranges), all needing GPU wall-clock
+// economics or fault injection no unit fixture can honestly fake:
+//
+//   - The `err != nil` return arm of every GPU/IO call in the loop (draft,
+//     verify, rollbackAccepted, commitAssistantReplacement, stepID,
+//     runPlainStretch, FinishLowAccept*). The success path of each is covered;
+//     only the failure return is dark, and there is no seam to make a committed
+//     Metal op fail mid-generation without corrupting the session under test.
+//   - The AllAccepted-while-probing arms (the `if wasProbing { probeCycle }`
+//     and its bail inside `if verify.AllAccepted`). Reaching them needs a fully
+//     accepted block to land during an OPEN probe window; the probe only opens
+//     after a patience bail + plain stretch, and the reject-oriented search
+//     fixtures cannot position a full-accept run at that exact later depth.
+//     Same class as the engage-verdict remainder documented above.
+//   - The AllAccepted-PATH deep bootstrap (the accept branch's needsDeepBootstrap
+//     call). The reject-path twin IS covered by the depth test below; the accept
+//     path additionally needs the target's greedy continuation to BE the all-zero
+//     drafter's proposal for a whole block at depth >= 8192, which the fixture
+//     cannot script.
+
+// TestAssistantPairGenerateFromSessionEachDeepBootstrapArmsAtDepth covers the
+// deep-context bootstrap arm (#358): past nativeAssistantDeepBootstrapPos an
+// engaged pair with no measured plain rate spends one bounded plain stretch to
+// arm the economics gate, because deep-context verify costs (SDPA + KV sync
+// scale with position; drafting does not) can leave the pair engaged at half
+// the plain rate. needsDeepBootstrap is inert at every other test's shallow
+// depth, so this wiring stayed dark. A prompt at exactly the bootstrap depth
+// makes the first speculative block trip it; the diag trace names the position
+// the machine itself read. This is the one honest way to reach the arm -- the
+// gate is a hard-coded depth constant with no seam, so a real deep prefill is
+// required.
+func TestAssistantPairGenerateFromSessionEachDeepBootstrapArmsAtDepth(t *testing.T) {
+	requireNativeRuntime(t)
+	const promptLen = nativeAssistantDeepBootstrapPos
+	const maxNew = 4*nativeAssistantDeepBootstrapTokens + 12
+	const draftTokens = 2
+	pair, mk := newNativeAssistantGenerateFixtureMaxLen(t, promptLen+maxNew+8)
+	defer pair.Close()
+	prompt := make([]int32, promptLen)
+	for i := range prompt {
+		prompt[i] = int32(i%7 + 1)
+	}
+	target := mk()
+
+	prevDiag := mtpDiagForTest
+	mtpDiagForTest = true
+	defer func() { mtpDiagForTest = prevDiag }()
+
+	var err error
+	trace := captureNativeTraceLog(t, func() {
+		_, err = pair.GenerateFromSessionEach(target, prompt, maxNew, -1, draftTokens, nil, nil)
+	})
+	if err != nil {
+		t.Fatalf("GenerateFromSessionEach: %v", err)
+	}
+	if want := core.Sprintf("reengage deep-bootstrap: pos=%d", nativeAssistantDeepBootstrapPos); !core.Contains(trace, want) {
+		t.Fatalf("trace missing the deep-bootstrap arm %q:\n%s", want, trace)
+	}
+}
+
+// TestAssistantPairGenerateSampledFromSessionEachDeepBootstrapArmsAtDepth is
+// the sampled twin. model.SampleParams{} routes model.Sampler through its
+// greedy branch, so the same deep prefill trips needsDeepBootstrap on the first
+// speculative block of the sampled loop.
+func TestAssistantPairGenerateSampledFromSessionEachDeepBootstrapArmsAtDepth(t *testing.T) {
+	requireNativeRuntime(t)
+	const promptLen = nativeAssistantDeepBootstrapPos
+	const maxNew = 4*nativeAssistantDeepBootstrapTokens + 12
+	const draftTokens = 2
+	pair, mk := newNativeAssistantGenerateFixtureMaxLen(t, promptLen+maxNew+8)
+	defer pair.Close()
+	prompt := make([]int32, promptLen)
+	for i := range prompt {
+		prompt[i] = int32(i%7 + 1)
+	}
+	params := model.SampleParams{}
+	target := mk()
+
+	prevDiag := mtpDiagForTest
+	mtpDiagForTest = true
+	defer func() { mtpDiagForTest = prevDiag }()
+
+	var err error
+	trace := captureNativeTraceLog(t, func() {
+		_, err = pair.GenerateSampledFromSessionEach(target, prompt, maxNew, nil, model.NewSampler(1), params, draftTokens, nil)
+	})
+	if err != nil {
+		t.Fatalf("GenerateSampledFromSessionEach: %v", err)
+	}
+	if want := core.Sprintf("reengage deep-bootstrap: pos=%d", nativeAssistantDeepBootstrapPos); !core.Contains(trace, want) {
+		t.Fatalf("trace missing the deep-bootstrap arm %q:\n%s", want, trace)
+	}
+}
+
+// TestAssistantPairGenerateFromSessionEachDisabledReengagePermanentlyBails
+// covers the LTHN_MTP_REENGAGE=0 escape hatch (mtpReengageDisabled): with
+// re-engagement off, a patience bail no longer runs a bounded plain stretch and
+// re-probes -- it retires the drafter for the whole request via
+// nativeAssistantFinishLowAcceptFromTargetCache. Driving the same all-reject
+// cadence as the escalation test above but with the flag set, the loop drafts
+// exactly nativeAssistantLowAcceptPatience blocks and then never drafts again,
+// so DraftCalls stays pinned at the patience count across a long maxNew (the
+// escalation twin, by contrast, keeps re-probing so its DraftCalls climbs well
+// past it). Output stays target-identical either way.
+func TestAssistantPairGenerateFromSessionEachDisabledReengagePermanentlyBails(t *testing.T) {
+	requireNativeRuntime(t)
+	const maxNew = 300
+	const draftTokens = 2
+	prevDisabled := mtpReengageDisabled
+	mtpReengageDisabled = true
+	defer func() { mtpReengageDisabled = prevDisabled }()
+
+	pair, mk := newNativeAssistantGenerateFixtureMaxLen(t, maxNew+20)
+	defer pair.Close()
+	prompt := nativeAssistantPromptWhoseTargetTokensAvoid(t, mk, 0, maxNew)
+	want, err := mk().Generate(prompt, maxNew, -1)
+	if err != nil {
+		t.Fatalf("reference Generate: %v", err)
+	}
+	target := mk()
+
+	got, err := pair.GenerateFromSessionEach(target, prompt, maxNew, -1, draftTokens, nil, nil)
+	if err != nil {
+		t.Fatalf("GenerateFromSessionEach: %v", err)
+	}
+	if !idsEqual(got.Tokens, want) {
+		t.Fatalf("tokens = %v, want target-identical %v", got.Tokens, want)
+	}
+	if got.DraftCalls != nativeAssistantLowAcceptPatience {
+		t.Fatalf("draft calls = %d, want exactly %d (permanent bail, no re-probe)", got.DraftCalls, nativeAssistantLowAcceptPatience)
+	}
+	if got.AcceptedTokens != 0 {
+		t.Fatalf("accepted tokens = %d, want 0", got.AcceptedTokens)
+	}
+	if got.TargetTokens != maxNew {
+		t.Fatalf("target tokens = %d, want %d", got.TargetTokens, maxNew)
+	}
+}
+
+// TestAssistantPairGenerateSampledFromSessionEachDisabledReengagePermanentlyBails
+// is the sampled twin. model.SampleParams{} routes model.Sampler through its
+// greedy branch, so the same avoid-0 prompt yields the same all-reject cadence
+// and the same permanent bail via
+// nativeAssistantFinishLowAcceptSampledFromTargetCache.
+func TestAssistantPairGenerateSampledFromSessionEachDisabledReengagePermanentlyBails(t *testing.T) {
+	requireNativeRuntime(t)
+	const maxNew = 300
+	const draftTokens = 2
+	prevDisabled := mtpReengageDisabled
+	mtpReengageDisabled = true
+	defer func() { mtpReengageDisabled = prevDisabled }()
+
+	pair, mk := newNativeAssistantGenerateFixtureMaxLen(t, maxNew+20)
+	defer pair.Close()
+	prompt := nativeAssistantPromptWhoseTargetTokensAvoid(t, mk, 0, maxNew)
+	params := model.SampleParams{}
+	want, err := mk().GenerateSampledEach(prompt, maxNew, nil, model.NewSampler(1), params, nil, nil)
+	if err != nil {
+		t.Fatalf("reference GenerateSampledEach: %v", err)
+	}
+	target := mk()
+
+	got, err := pair.GenerateSampledFromSessionEach(target, prompt, maxNew, nil, model.NewSampler(1), params, draftTokens, nil)
+	if err != nil {
+		t.Fatalf("GenerateSampledFromSessionEach: %v", err)
+	}
+	if !idsEqual(got.Tokens, want) {
+		t.Fatalf("tokens = %v, want target-identical %v", got.Tokens, want)
+	}
+	if got.DraftCalls != nativeAssistantLowAcceptPatience {
+		t.Fatalf("draft calls = %d, want exactly %d (permanent bail, no re-probe)", got.DraftCalls, nativeAssistantLowAcceptPatience)
+	}
+	if got.AcceptedTokens != 0 {
+		t.Fatalf("accepted tokens = %d, want 0", got.AcceptedTokens)
+	}
+	if got.TargetTokens != maxNew {
+		t.Fatalf("target tokens = %d, want %d", got.TargetTokens, maxNew)
+	}
 }
 
 // TestAssistantPairGenerateFromSessionEachCoversFirstAllAcceptedCycleBeforeAnyPlainRate
