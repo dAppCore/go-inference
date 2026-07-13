@@ -21,6 +21,19 @@ func mtpConfTestRow(logits []float32) []byte {
 	return row
 }
 
+func TestMTPConfEnabled_ReflectsCapturePath(t *testing.T) {
+	saved := mtpConfCapturePath
+	defer func() { mtpConfCapturePath = saved }()
+	mtpConfCapturePath = ""
+	if mtpConfEnabled() {
+		t.Fatal("mtpConfEnabled true with an empty capture path")
+	}
+	mtpConfCapturePath = "capture.jsonl"
+	if !mtpConfEnabled() {
+		t.Fatal("mtpConfEnabled false with a configured capture path")
+	}
+}
+
 // TestMTPConfProb pins the softmax probability against a hand-computed
 // distribution on a 4-token row (all values exactly representable in bf16).
 func TestMTPConfProb(t *testing.T) {

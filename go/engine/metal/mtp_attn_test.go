@@ -20,6 +20,15 @@ import (
 
 func sdpaScale(D int) float32 { return float32(1.0 / math.Sqrt(float64(D))) }
 
+func TestBF16ToF32Into_Converts(t *testing.T) {
+	in := toBF16Bytes([]float32{-1.5, 0, 2.25})
+	out := make([]float32, 3)
+	bf16ToF32Into(out, in)
+	if out[0] != -1.5 || out[1] != 0 || out[2] != 2.25 {
+		t.Fatalf("bf16ToF32Into = %v", out)
+	}
+}
+
 // sdpaCausalBF16Reference computes causal scaled-dot-product attention on bf16 q/k/v in the
 // same head-major [H,L,D] layout SDPACausalBF16 expects, entirely in float64 host maths — an
 // independent implementation from the package's own f32 GPU composition (matMulF32NT +

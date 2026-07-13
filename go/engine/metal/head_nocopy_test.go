@@ -24,6 +24,44 @@ func TestNewHeadEncoderNilShardBuffersFallsBack(t *testing.T) {
 	}
 }
 
+func TestTokenSuppressed_Membership(t *testing.T) {
+	if !tokenSuppressed(7, []int32{2, 7, 9}) {
+		t.Fatal("tokenSuppressed did not find a present token")
+	}
+	if tokenSuppressed(8, []int32{2, 7, 9}) {
+		t.Fatal("tokenSuppressed reported an absent token")
+	}
+}
+
+func TestGreedyBF16Suppressed_SelectsBestAllowed(t *testing.T) {
+	logits := toBF16Bytes([]float32{1, 5, 3, 4})
+	got, err := greedyBF16Suppressed(logits, 4, []int32{1, 3})
+	if err != nil || got != 2 {
+		t.Fatalf("greedyBF16Suppressed = %d, %v; want 2, nil", got, err)
+	}
+}
+
+func TestGreedyBF16Suppressed_AllSuppressed(t *testing.T) {
+	if _, err := greedyBF16Suppressed(toBF16Bytes([]float32{1, 2}), 2, []int32{0, 1}); err == nil {
+		t.Fatal("greedyBF16Suppressed accepted an entirely suppressed vocabulary")
+	}
+}
+
+func TestBF16NaNScanBytes_Mixed(t *testing.T) {
+	b := []byte{0, 0, 0xc1, 0x7f, 0, 0x7f, 1}
+	count, first := bf16NaNScanBytes(b)
+	if count != 1 || first != 1 {
+		t.Fatalf("bf16NaNScanBytes = (%d, %d), want (1, 1)", count, first)
+	}
+}
+
+func TestHeadEncoderHiddenBufferOffsetInRange_InvalidReceiver(t *testing.T) {
+	var h *headEncoder
+	if h.hiddenBufferOffsetInRange(nil, 0) {
+		t.Fatal("hiddenBufferOffsetInRange accepted a nil receiver and buffer")
+	}
+}
+
 func TestHeadScratchCachesSharedContentsPointers(t *testing.T) {
 	requireNativeRuntime(t)
 

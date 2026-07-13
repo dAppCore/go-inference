@@ -87,3 +87,15 @@ func TestMTPDraftLenNextRespectsRemaining(t *testing.T) {
 		t.Fatalf("next(50) = %d, want 8", got)
 	}
 }
+
+func TestMTPDraftLenCycle_Disabled(t *testing.T) {
+	saved := mtpDraftLenDisabled
+	mtpDraftLenDisabled = true
+	defer func() { mtpDraftLenDisabled = saved }()
+
+	d := mtpDraftLen{base: 4, cap: 6, hot: 1}
+	d.cycle(false, mtpDraftLenDeepPos)
+	if d.cap != 6 || d.hot != 1 {
+		t.Fatalf("disabled cycle changed state to cap=%d hot=%d", d.cap, d.hot)
+	}
+}
