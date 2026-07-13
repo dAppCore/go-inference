@@ -166,6 +166,11 @@ type Model struct {
 	// cbDecode is the streaming per-token decode for CB stream text; nil falls
 	// back to Decode-of-one on the tokenizer.
 	cbDecode cbStreamDecoder
+	// cbIntercept sees whether a serve-layer chat interceptor (conversation
+	// continuity) is installed on the base engine — consulted per request so a
+	// continuity attach that lands AFTER the CB engine binds still routes. nil =
+	// the model exposes no interceptor seam; chats route as if none is installed.
+	cbIntercept cbChatInterceptProbe
 
 	// lastMetrics is the most recent completed scheduled stream's final
 	// metrics, stored by the route that OWNS the correct numbers at stream end
@@ -203,6 +208,16 @@ type cbStopResolver interface {
 // "hello world" — Decode-of-one strips it (label semantics).
 type cbStreamDecoder interface {
 	DecodeToken(id int32) string
+}
+
+// cbChatInterceptProbe is the optional chat-interceptor visibility the CB
+// router probes (engine.TextModel.ChatInterceptorInstalled satisfies it).
+// Installed means conversation continuity holds the engine's Chat seam: a
+// continuation-shaped chat then declines the lane path so the interceptor can
+// wake its slept KV (append-only prefill) instead of the lane re-paying the
+// whole conversation's prefill.
+type cbChatInterceptProbe interface {
+	ChatInterceptorInstalled() bool
 }
 
 // probeSinkBox wraps the sink interface so it can be stored in an
@@ -952,6 +967,9 @@ func (m *Model) ensureCBEngine() *cbStepEngine {
 		}
 		if d, ok := inference.As[cbStreamDecoder](m.base); ok {
 			m.cbDecode = d
+		}
+		if p, ok := inference.As[cbChatInterceptProbe](m.base); ok {
+			m.cbIntercept = p
 		}
 	}
 	return m.cbEngine
