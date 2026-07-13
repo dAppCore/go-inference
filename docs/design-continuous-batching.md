@@ -588,10 +588,17 @@ the pinned next rung one level down.
 
 ### Pinned gaps (evidenced, the next rungs)
 
-1. **Weight-read-once GEMM batching — DONE for bf16, quant needs a fused kernel.** See the
-   section above. The remaining quant work is a **batched rms-qmv-rows Metal shader** (fused
-   rms + quantised matvec over K rows, weight read once) — the only way to get byte-identity
-   AND weight-read-once for the fused-rms 4-bit path; needs a metallib rebuild (read-only here).
+1. **Weight-read-once GEMM batching — DONE for bf16 AND plain dense quant** (2026-07-13,
+   9b6b9d2). The "fused rms-qmv kernel" story above was a misdiagnosis: that fusion has been
+   dormant since the M2 port (enableInputRMSFusion=false); the historical one-ulp drift was
+   projectRows silently falling through to MLX qmm_t (token-identity tier). The byte-tier
+   kernel already existed — register-tiled lthn_qmv_rows — and projector.rowsByteTier now
+   routes quant through it at K ≤ lthnQMVRowsMaxM (TestLaneSetGEMMQuantByteIdentityHiddens).
+   E2B-class stays on the replay for TWO evidenced reasons: (a) its q8-default KV is the
+   separate staging rung, and (b) with q8 disabled and the envelope experimentally lifted,
+   the forward FIRES and DIVERGES at step 0 — the mirrored single-row PLE/sliding/KV-share
+   arms are not byte-identical (TestLaneSetGEMMEnvelopeExclusionLoadBearing pins this;
+   gemmEnvelopeLiftForTest re-arms the receipt run after any fix).
 2. **Non-ICB arches.** The external-encoder fusion needs the ICB `encodeStepBody`
    seam; a non-ICB `stepToken` opens its own command buffer. MoE (12B/26B) and
    COMPOSED/hybrid decode fall outside the owner today — `Prepare` refuses them.
