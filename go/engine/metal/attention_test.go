@@ -6,8 +6,11 @@ package native
 
 import (
 	"bytes"
+	"runtime"
 	"testing"
 	"unsafe"
+
+	"dappco.re/go/inference/engine/scheme"
 )
 
 // TestAttention_AttentionBlock_Good proves the fused on-device attention block (rmsnorm ->
@@ -402,5 +405,225 @@ func TestAttentionBlockAllocationBudget(t *testing.T) {
 	}
 	if allocs > 10 {
 		t.Fatalf("AttentionBlock allocations = %.0f, want <= 10", allocs)
+	}
+}
+
+func TestAttentionBlockKVScratch_Close_Good(t *testing.T) {
+	// Close is deliberately safe for a partially built scratch: cleanup may run
+	// after its second pinned allocation fails.
+	s := &attentionBlockKVScratch{
+		kBytes: 8, vBytes: 12,
+		k:        &pinnedNoCopyBytes{bytes: []byte{1}},
+		v:        &pinnedNoCopyBytes{bytes: []byte{2}},
+		kViewPtr: 1, kViewLen: 2, kViewPinned: &pinnedNoCopyBytes{bytes: []byte{3}},
+		vViewPtr: 4, vViewLen: 5, vViewPinned: &pinnedNoCopyBytes{bytes: []byte{6}},
+	}
+	s.Close()
+	if s.k != nil || s.v != nil || s.kBytes != 0 || s.vBytes != 0 {
+		t.Fatalf("Close left KV ownership behind: %#v", s)
+	}
+	if s.kView != nil || s.vView != nil || s.kViewPinned != nil || s.vViewPinned != nil || s.kViewPtr != 0 || s.vViewPtr != 0 || s.kViewLen != 0 || s.vViewLen != 0 {
+		t.Fatalf("Close left cache views behind: %#v", s)
+	}
+	var nilScratch *attentionBlockKVScratch
+	nilScratch.Close()
+}
+
+func TestTemporaryPinnedNoCopyBytes_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	src := []byte{3, 1, 4, 1}
+	var pinner runtime.Pinner
+	buf, err := temporaryPinnedNoCopyBytes(src, &pinner)
+	if err != nil {
+		t.Fatalf("temporaryPinnedNoCopyBytes: %v", err)
+	}
+	defer func() {
+		pinner.Unpin()
+		runtime.KeepAlive(src)
+	}()
+	if buf == nil || buf.GetID() == 0 || unsafe.Pointer(buf.Contents()) != unsafe.Pointer(&src[0]) {
+		t.Fatal("temporaryPinnedNoCopyBytes did not return a live view of the caller bytes")
+	}
+}
+
+func TestTemporaryPinnedNoCopyBytes_Bad(t *testing.T) {
+	var pinner runtime.Pinner
+	if _, err := temporaryPinnedNoCopyBytes(nil, &pinner); err == nil {
+		t.Fatal("temporaryPinnedNoCopyBytes accepted an empty slice")
+	}
+}
+
+func TestPinnedNoCopyBytes_CopyPrefixBuffer_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	p, err := newPinnedNoCopyBytes(6)
+	if err != nil {
+		t.Fatalf("newPinnedNoCopyBytes: %v", err)
+	}
+	defer p.Close()
+	buf, err := p.copyPrefixBuffer([]byte{9, 8, 7})
+	if err != nil {
+		t.Fatalf("copyPrefixBuffer: %v", err)
+	}
+	if buf != p.buf {
+		t.Fatal("copyPrefixBuffer returned a buffer other than the pinned backing")
+	}
+	eqBytes(t, "copyPrefixBuffer backing", p.bytes, []byte{9, 8, 7, 0, 0, 0})
+}
+
+func TestPinnedNoCopyBytes_CopyPrefixBuffer_Bad(t *testing.T) {
+	var nilPinned *pinnedNoCopyBytes
+	if _, err := nilPinned.copyPrefixBuffer([]byte{1}); err == nil {
+		t.Fatal("copyPrefixBuffer accepted nil pinned storage")
+	}
+	requireNativeRuntime(t)
+	p, err := newPinnedNoCopyBytes(2)
+	if err != nil {
+		t.Fatalf("newPinnedNoCopyBytes: %v", err)
+	}
+	defer p.Close()
+	if _, err := p.copyPrefixBuffer([]byte{1, 2, 3}); err == nil {
+		t.Fatal("copyPrefixBuffer accepted a source larger than its backing")
+	}
+}
+
+func TestSharedOrNil_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	if got := sharedOrNil(nil); got != nil {
+		t.Fatal("sharedOrNil(nil) returned a buffer")
+	}
+	src := []byte{7, 11, 13}
+	buf := sharedOrNil(src)
+	if buf == nil || buf.GetID() == 0 {
+		t.Fatal("sharedOrNil(non-empty) returned no buffer")
+	}
+	eqBytes(t, "sharedOrNil contents", unsafe.Slice((*byte)(buf.Contents()), len(src)), src)
+}
+
+func TestEncBinaryDT_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	a := sharedBytes(toBF16Bytes([]float32{1, 2}))
+	b := sharedBytes(toBF16Bytes([]float32{3, 4}))
+	out := scratchBF16(2)
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	if err := encBinaryDT(enc, "Add", scheme.BFloat16, a, b, out, 2); err != nil {
+		endEncodingFast(enc)
+		t.Fatalf("encBinaryDT: %v", err)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	eqBytes(t, "encBinaryDT Add", unsafe.Slice((*byte)(out.Contents()), 2*bf16Size), toBF16Bytes([]float32{4, 6}))
+}
+
+func TestEncBinaryDTTo_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	a := sharedBytes(toBF16Bytes([]float32{99, 1, 2}))
+	b := sharedBytes(toBF16Bytes([]float32{88, 3, 4}))
+	out := scratchBF16(3)
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	if err := encBinaryDTTo(enc, "Add", scheme.BFloat16, a, b, out, bf16Size, bf16Size, bf16Size, 2); err != nil {
+		endEncodingFast(enc)
+		t.Fatalf("encBinaryDTTo: %v", err)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	// The encoder promises only the requested output range; no ordering or
+	// contents outside [outOff, outOff+n) are implied by the implementation.
+	got := unsafe.Slice((*byte)(unsafe.Add(out.Contents(), bf16Size)), 2*bf16Size)
+	eqBytes(t, "encBinaryDTTo output range", got, toBF16Bytes([]float32{4, 6}))
+}
+
+func TestEncUnaryDTObject_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	in := sharedBytes(toBF16Bytes([]float32{0, 0}))
+	out := scratchBF16(2)
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	if err := encUnaryDTObject(enc, "Tanh", scheme.BFloat16, in, out, 2); err != nil {
+		endEncodingFast(enc)
+		t.Fatalf("encUnaryDTObject: %v", err)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	eqBytes(t, "encUnaryDTObject Tanh", unsafe.Slice((*byte)(out.Contents()), 2*bf16Size), toBF16Bytes([]float32{0, 0}))
+}
+
+func TestEncSDPADecodeAt_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const headDim = 64
+	rowBytes := headDim * bf16Size
+	q := sharedBytes(make([]byte, 2*rowBytes))
+	k := sharedBytes(make([]byte, rowBytes))
+	want := toBF16Bytes(syntheticFloat32(headDim, 23))
+	v := sharedBytes(want)
+	out := scratchBF16(2 * headDim)
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	if err := encSDPADecodeAt(enc, attnScratch{}, q, uint(rowBytes), k, v, out, uint(rowBytes), 1, 1, headDim, 1, headDim, headDim, headDim, headDim, 1, 0); err != nil {
+		endEncodingFast(enc)
+		t.Fatalf("encSDPADecodeAt: %v", err)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	// With one key/value row, softmax has exactly one member, so the output is
+	// that value row irrespective of the zero query or scale.
+	got := unsafe.Slice((*byte)(unsafe.Add(out.Contents(), rowBytes)), rowBytes)
+	eqBytes(t, "encSDPADecodeAt output range", got, want)
+}
+
+func TestEncSDPADecodeAt_Ugly(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const headDim = 64
+	const n = sdpa2PassMinKV
+	rowBytes := headDim * bf16Size
+	q := sharedBytes(make([]byte, rowBytes))
+	k := sharedBytes(make([]byte, n*rowBytes))
+	want := toBF16Bytes(syntheticFloat32(headDim, 29))
+	vBytes := make([]byte, n*rowBytes)
+	for row := range n {
+		copy(vBytes[row*rowBytes:(row+1)*rowBytes], want)
+	}
+	v := sharedBytes(vBytes)
+	out := scratchBF16(headDim)
+	// The implementation selects the two-pass route only when both the length
+	// reaches its knee and this scratch carries all three intermediates.
+	sc := newAttnScratch(headDim, headDim, headDim, 1, n)
+	if sc.p2Partials == nil || sc.p2Sums == nil || sc.p2Maxs == nil {
+		t.Fatal("newAttnScratch did not provision two-pass intermediates at the SDPA knee")
+	}
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	if err := encSDPADecodeAt(enc, sc, q, 0, k, v, out, 0, 1, 1, headDim, n, headDim, headDim, headDim, headDim, 1, 0); err != nil {
+		endEncodingFast(enc)
+		t.Fatalf("encSDPADecodeAt two-pass: %v", err)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	// Every value row is identical, so the softmax weighting and its reduction
+	// order cannot change the expected output.
+	eqBytes(t, "encSDPADecodeAt two-pass output", unsafe.Slice((*byte)(out.Contents()), rowBytes), want)
+}
+
+func TestEncSDPADecodeAt_Bad(t *testing.T) {
+	requireNativeRuntime(t)
+
+	// An unsupported head dimension declines while selecting the pipeline, before
+	// it can dereference the deliberately absent encoder and buffers.
+	if err := encSDPADecodeAt(nil, attnScratch{}, nil, 0, nil, nil, nil, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0); err == nil {
+		t.Fatal("encSDPADecodeAt accepted an unsupported head dimension")
 	}
 }
