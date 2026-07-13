@@ -6,6 +6,8 @@ package native
 
 import (
 	"bytes"
+	"errors"
+	"image/color"
 	"os"
 	"slices"
 	"testing"
@@ -159,6 +161,83 @@ func TestNativeTokenModelImagePlaceholderBlock_Good(t *testing.T) {
 	}
 }
 
+func TestNativeTokenModelImagePlaceholderTokenID_Good(t *testing.T) {
+	tm := &NativeTokenModel{
+		vision:        &model.LoadedVision{Cfg: model.LoadedVisionConfig{ImageTokenID: 11}},
+		unifiedVision: &model.LoadedUnifiedVision{Cfg: model.LoadedUnifiedVisionConfig{ImageTokenID: 22}},
+	}
+	if got := tm.ImagePlaceholderTokenID(); got != 22 {
+		t.Fatalf("ImagePlaceholderTokenID unified value = %d, want 22", got)
+	}
+}
+
+func TestNativeTokenModelImagePlaceholderTokenID_Ugly(t *testing.T) {
+	var nilModel *NativeTokenModel
+	if got := nilModel.ImagePlaceholderTokenID(); got != 0 {
+		t.Fatalf("nil ImagePlaceholderTokenID = %d, want 0", got)
+	}
+	if got := (&NativeTokenModel{}).ImagePlaceholderTokenID(); got != 0 {
+		t.Fatalf("text-only ImagePlaceholderTokenID = %d, want 0", got)
+	}
+}
+
+func TestNativeTokenModelVideoPlaceholderTokenID_Good(t *testing.T) {
+	tm := &NativeTokenModel{
+		vision:        &model.LoadedVision{Cfg: model.LoadedVisionConfig{VideoTokenID: 13}},
+		unifiedVision: &model.LoadedUnifiedVision{Cfg: model.LoadedUnifiedVisionConfig{VideoTokenID: 23}},
+	}
+	if got := tm.VideoPlaceholderTokenID(); got != 23 {
+		t.Fatalf("VideoPlaceholderTokenID unified value = %d, want 23", got)
+	}
+}
+
+func TestNativeTokenModelVideoPlaceholderTokenID_Ugly(t *testing.T) {
+	var nilModel *NativeTokenModel
+	if got := nilModel.VideoPlaceholderTokenID(); got != 0 {
+		t.Fatalf("nil VideoPlaceholderTokenID = %d, want 0", got)
+	}
+	if got := (&NativeTokenModel{}).VideoPlaceholderTokenID(); got != 0 {
+		t.Fatalf("text-only VideoPlaceholderTokenID = %d, want 0", got)
+	}
+}
+
+func TestNativeTokenModelProjectImage_Bad(t *testing.T) {
+	if features, tokens, err := (&NativeTokenModel{}).ProjectImage([]byte("not an image")); err == nil || features != nil || tokens != 0 {
+		t.Fatalf("ProjectImage text-only = features=%v tokens=%d err=%v, want clean decline", features, tokens, err)
+	}
+	// With a tower declared, malformed bytes must fail in preprocessing rather
+	// than being accepted as an empty image. This reaches the post-capability
+	// branch without inventing a tower output ordering.
+	tm := &NativeTokenModel{vision: &model.LoadedVision{}}
+	if features, tokens, err := tm.ProjectImage([]byte("not an image")); err == nil || features != nil || tokens != 0 {
+		t.Fatalf("ProjectImage malformed bytes = features=%v tokens=%d err=%v, want preprocessing error", features, tokens, err)
+	}
+}
+
+func TestNativeTokenModelProjectImage_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	tm := &NativeTokenModel{
+		vision: &model.LoadedVision{
+			PatchEmbedding: toBF16Bytes([]float32{1, 0, 0, 0, 1, 0}),
+			Cfg: model.LoadedVisionConfig{
+				Hidden: 2, PatchDim: 3, NumHeads: 1, NumKVHeads: 1, HeadDim: 2,
+				RMSNormEps: 1e-6, PoolKernel: 1,
+			},
+		},
+		visionFeatureCfg: &VisionImageFeatureConfig{PatchSize: 1, PoolingKernelSize: 1, MaxSoftTokens: 1},
+	}
+	features, tokens, err := tm.ProjectImage(unifiedTestPNG(t, 1, 1, color.RGBA{R: 200, G: 100, B: 50, A: 255}))
+	if err != nil {
+		t.Fatalf("ProjectImage: %v", err)
+	}
+	// A 1x1 input with PatchSize=PoolingKernelSize=1 is exactly one
+	// preprocessed patch. The projection contract guarantees one hidden row;
+	// it does not promise an independently meaningful ordering of its values.
+	if tokens != 1 || len(features) != tm.vision.Cfg.Hidden*bf16Size {
+		t.Fatalf("ProjectImage = %d tokens, %d bytes; want 1 token and %d bytes", tokens, len(features), tm.vision.Cfg.Hidden*bf16Size)
+	}
+}
+
 func TestNativeAudioFromLoadedMapsPayload_Good(t *testing.T) {
 	loaded := &model.LoadedAudio{
 		Subsample: model.LoadedAudioSubsample{
@@ -259,6 +338,91 @@ func TestNativeTokenModelAudioPlaceholderBlock_Good(t *testing.T) {
 	}
 	if got := tm.AudioPlaceholderBlock(0); got != "" {
 		t.Fatalf("AudioPlaceholderBlock(0) = %q, want empty", got)
+	}
+}
+
+func TestNativeTokenModelAudioPlaceholderTokenID_Good(t *testing.T) {
+	tm := &NativeTokenModel{
+		audio: &model.LoadedAudio{Cfg: model.LoadedAudioConfig{AudioTokenID: 17}},
+		unifiedVision: &model.LoadedUnifiedVision{Cfg: model.LoadedUnifiedVisionConfig{
+			AudioSamplesPerToken: 320,
+			AudioTokenID:         27,
+		}},
+	}
+	if got := tm.AudioPlaceholderTokenID(); got != 27 {
+		t.Fatalf("AudioPlaceholderTokenID unified value = %d, want 27", got)
+	}
+}
+
+func TestNativeTokenModelAudioPlaceholderTokenID_Ugly(t *testing.T) {
+	var nilModel *NativeTokenModel
+	if got := nilModel.AudioPlaceholderTokenID(); got != 0 {
+		t.Fatalf("nil AudioPlaceholderTokenID = %d, want 0", got)
+	}
+	if got := (&NativeTokenModel{}).AudioPlaceholderTokenID(); got != 0 {
+		t.Fatalf("text-only AudioPlaceholderTokenID = %d, want 0", got)
+	}
+}
+
+func TestNativeTokenModelProjectAudio_Bad(t *testing.T) {
+	validWAV := wavFile(1, 16000, 0, 100, -100)
+	if features, tokens, err := (&NativeTokenModel{}).ProjectAudio(validWAV); err == nil || features != nil || tokens != 0 {
+		t.Fatalf("ProjectAudio text-only = features=%v tokens=%d err=%v, want clean decline", features, tokens, err)
+	}
+	if features, tokens, err := (&NativeTokenModel{audio: &model.LoadedAudio{}}).ProjectAudio(validWAV); err == nil || features != nil || tokens != 0 {
+		t.Fatalf("ProjectAudio without extractor = features=%v tokens=%d err=%v, want clean decline", features, tokens, err)
+	}
+}
+
+func TestNativeTokenModelProjectAudioFeatures_Bad(t *testing.T) {
+	if _, err := (&NativeTokenModel{}).ProjectAudioFeatures(nil, nil, 0, 0); err == nil {
+		t.Fatal("ProjectAudioFeatures text-only error = nil")
+	}
+	// nativeAudioFromLoaded accepts a non-nil output projection. The feature
+	// shape check is therefore reached before any incomplete fixture weights
+	// could be read.
+	tm := &NativeTokenModel{audio: &model.LoadedAudio{OutputProj: []byte{}, Cfg: model.LoadedAudioConfig{}}}
+	if _, err := tm.ProjectAudioFeatures([]byte{0}, nil, 1, 1); err == nil {
+		t.Fatal("ProjectAudioFeatures wrong-shape bytes error = nil")
+	}
+}
+
+func TestNativeTokenModelEmbedInto_Good(t *testing.T) {
+	tm := &NativeTokenModel{embed: func(id int32) ([]byte, error) {
+		if id != 7 {
+			t.Fatalf("EmbedInto fallback id = %d, want 7", id)
+		}
+		return []byte{1, 2, 3, 4}, nil
+	}}
+	dst := make([]byte, 4)
+	got, err := tm.EmbedInto(dst, 7)
+	if err != nil {
+		t.Fatalf("EmbedInto fallback: %v", err)
+	}
+	if len(got) == 0 || &got[0] != &dst[0] {
+		t.Fatal("EmbedInto fallback did not return caller-owned destination")
+	}
+	if !bytes.Equal(got, []byte{1, 2, 3, 4}) {
+		t.Fatalf("EmbedInto fallback bytes = %v, want [1 2 3 4]", got)
+	}
+}
+
+func TestNativeTokenModelEmbedInto_Bad(t *testing.T) {
+	var nilModel *NativeTokenModel
+	if _, err := nilModel.EmbedInto(nil, 0); err == nil {
+		t.Fatal("EmbedInto nil model error = nil")
+	}
+	tm := &NativeTokenModel{embed: func(int32) ([]byte, error) { return []byte{1, 2}, nil }}
+	if _, err := tm.EmbedInto(make([]byte, 1), 0); err == nil {
+		t.Fatal("EmbedInto mismatched destination error = nil")
+	}
+}
+
+func TestNativeTokenModelEmbedInto_Ugly(t *testing.T) {
+	wantErr := errors.New("embedding unavailable")
+	tm := &NativeTokenModel{embedInto: func([]byte, int32) ([]byte, error) { return nil, wantErr }}
+	if got, err := tm.EmbedInto(make([]byte, 2), 7); !errors.Is(err, wantErr) || got != nil {
+		t.Fatalf("EmbedInto delegated error = result %v, err %v; want nil and %v", got, err, wantErr)
 	}
 }
 
