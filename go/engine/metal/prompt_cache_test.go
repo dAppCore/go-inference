@@ -916,3 +916,81 @@ func TestCompactCacheAllocationBudget(t *testing.T) {
 		t.Fatalf("CompactCache allocations = %.0f, want <= 22973", allocs)
 	}
 }
+
+func TestSameByteBacking_Good(t *testing.T) {
+	backing := make([]byte, 8)
+	if !sameByteBacking(backing[:2], backing[:5]) {
+		t.Fatal("sameByteBacking slices with the same first byte = false, want true")
+	}
+}
+
+func TestSameByteBacking_Bad(t *testing.T) {
+	if sameByteBacking(make([]byte, 2), make([]byte, 2)) {
+		t.Fatal("sameByteBacking independent allocations = true, want false")
+	}
+}
+
+func TestSameByteBacking_Ugly(t *testing.T) {
+	// A zero-length slice with capacity has backing storage, but no data byte
+	// to compare against. The helper must decline it without indexing it.
+	if sameByteBacking(make([]byte, 0, 2), make([]byte, 0, 2)) {
+		t.Fatal("sameByteBacking zero-length slices = true, want false")
+	}
+}
+
+func TestByteBackingPointer_Good(t *testing.T) {
+	b := make([]byte, 0, 3)
+	if got := byteBackingPointer(b); got == nil {
+		t.Fatal("byteBackingPointer zero-length slice with capacity = nil, want backing pointer")
+	}
+}
+
+func TestByteBackingPointer_Bad(t *testing.T) {
+	if got := byteBackingPointer(nil); got != nil {
+		t.Fatalf("byteBackingPointer(nil) = %p, want nil", got)
+	}
+}
+
+func TestByteBackingPointer_Ugly(t *testing.T) {
+	if got := byteBackingPointer(make([]byte, 0)); got != nil {
+		t.Fatalf("byteBackingPointer zero-capacity slice = %p, want nil", got)
+	}
+}
+
+func TestPrefillCachedIDs_Bad(t *testing.T) {
+	sess := &ArchSession{pos: 1, maxLen: 1}
+	if err := sess.prefillCachedIDs([]int32{1}); err == nil {
+		t.Fatal("prefillCachedIDs beyond maxLen error = nil")
+	}
+}
+
+func TestPromptCacheLogitsFromRetainedHidden_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	sess := newSessionStateFixture(t)
+	var hidden, logits []byte
+	var err error
+	withAutoreleasePool(func() {
+		hidden, err = sess.prefillPromptRetainedInPool([]int32{1, 2, 3})
+		if err != nil {
+			return
+		}
+		logits, err = sess.promptCacheLogitsFromRetainedHidden(hidden)
+	})
+	if err != nil {
+		t.Fatalf("promptCacheLogitsFromRetainedHidden: %v", err)
+	}
+	if len(logits) != sess.arch.Vocab*bf16Size {
+		t.Fatalf("prompt-cache logits bytes = %d, want %d", len(logits), sess.arch.Vocab*bf16Size)
+	}
+	if !bytes.Equal(logits, sess.retainedLogits) {
+		t.Fatal("promptCacheLogitsFromRetainedHidden did not retain the returned logits")
+	}
+}
+
+func TestPromptCacheLogitsFromRetainedHidden_Ugly(t *testing.T) {
+	requireNativeRuntime(t)
+	sess := newSessionStateFixture(t)
+	if _, err := sess.promptCacheLogitsFromRetainedHidden([]byte{0}); err == nil {
+		t.Fatal("promptCacheLogitsFromRetainedHidden short hidden error = nil")
+	}
+}
