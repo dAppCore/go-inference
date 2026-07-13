@@ -1,3 +1,40 @@
+# NEXT WAKE (2026-07-15 — THE FORK IS FIXED: submit-ahead position clobber)
+
+## 2026-07-15 (the fork hunt — b6a4147, pushed)
+
+- ROOT CAUSE: the chain-vs-host fork was never precision or tie-breaks.
+  The submit-ahead chained decode commits link N without waiting, then
+  encodes link N+1 — and stepTokenEncode wrote pos_N+1 into the ONE
+  shared offBuf (a single int32 the kernels read at EXECUTION: RoPE
+  position + KV append row). Link N's kernels then read the clobbered
+  position: its OWN token computed fine, but its KV row landed at the
+  NEXT slot → every later token read stale/shifted KV. Fixture
+  signature: token 3 right, token 4 on wrong, deterministic.
+- THE HUNT (method receipt): forced-token step-vs-step diag exonerated
+  the shared encode; three-arm greedy diag (oracle/per-lane/shared)
+  showed BOTH lane arms == host, oracle alone diverging; the chain
+  kill-switch (stepGreedyChainDisabled) proved chain-vs-host WITHIN
+  Generate; embed-twin + argmax-twin probes exonerated the primitives
+  byte-identically; liveSubmitAheadDisabled isolated the speculative
+  link; the offBuf single-int32 execution-read shape closed it.
+  Enumerate the arms, THEN compare pairs — kill-switches are the
+  fastest scalpel.
+- FIX: position-buffer ring pre-built in the pooled core scratch
+  (slot 0 = the old offBuf; step path allocation-free — the AX-11
+  budget gates caught the lazy-alloc first draft immediately).
+  rotateOffBuf claims a slot per step encode; a committed link's
+  offset is immutable for its lifetime.
+- RECEIPTS: TestChainedDecodeArmsAgree (permanent — chain+spec ==
+  chain-nospec == host) + TestChainedDecodeEmbedTwins; lane MoE oracle
+  back on DEFAULT Generate (un-pinned); metal suite 2275/0. LIVE 26B:
+  plain-boot 0 wobbles in 12 rounds (the parked 45-vs-53 variance was
+  THIS bug — dissolved); CROSS-ROUTE PARITY first time (CB and plain
+  boots hash-identical content: 8efeafbf/a6a40bdd/ada2b84e/9ce3bd42);
+  plain aggregate ROSE to ~161 tok/s (correct KV rows), CB 120.
+- NEXT: the lane-wide chained step is UNBLOCKED (the arms agree) —
+  fuse head argmax + next-embed into the lane forward cbs, kill the
+  per-step GPU/host bubbles, close the 26B CB gap (120 vs 161).
+
 # NEXT WAKE (2026-07-15 — batched head live; the 26B gap fully root-caused)
 
 ## 2026-07-15 (batched head — 8a1a2a0, pushed)
