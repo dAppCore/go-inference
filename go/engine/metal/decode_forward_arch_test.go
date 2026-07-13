@@ -281,6 +281,266 @@ func TestArchDecodeStateSetupAllocationBudget(t *testing.T) {
 	})
 }
 
+// TestArchDecodeStateStepTokenNoResult_CommitsCache pins the prefill form of
+// stepToken: it deliberately declines a host readback, but it must still write
+// token zero's KV rows. Token one therefore has to equal a state that read token
+// zero normally. This is a stateful invariant, not an output-only smoke test.
+func TestArchDecodeStateStepTokenNoResult_CommitsCache(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const dModel, nHeads, nKV, headDim, dFF, maxLen = 64, 1, 1, 64, 128, 4
+	const base, scale, eps = float32(10000), float32(0.125), float32(1e-5)
+	specs := []model.LayerSpec{{Attention: model.GlobalAttention, KVShareFrom: 0, CacheIndex: 0, HeadDim: headDim, KVHeads: nKV}}
+	layers := []DecodeLayerWeights{decodeLayerFixture(dModel, nHeads, nKV, headDim, dFF, 31)}
+	inputs := decodeInputsFixture(2, dModel)
+
+	var testErr error
+	withAutoreleasePool(func() {
+		newState := func() (*archDecodeState, error) {
+			lb, moe, err := buildBF16ArchLayerBufs(layers, specs, dModel, nHeads, nKV, headDim, dFF, maxLen, 0, nil)
+			if err != nil {
+				return nil, err
+			}
+			state := newArchDecodeState(specs, lb, moe, dModel, nHeads, nKV, headDim, dFF, 0, headDim, headDim, base, base, scale, eps, false, maxLen)
+			return &state, nil
+		}
+		prefill, err := newState()
+		if err != nil {
+			testErr = err
+			return
+		}
+		defer prefill.Close()
+		if err := prefill.stepTokenNoResult(inputs[0], 0); err != nil {
+			testErr = err
+			return
+		}
+		got, err := prefill.stepToken(inputs[1], 1)
+		if err != nil {
+			testErr = err
+			return
+		}
+
+		ref, err := newState()
+		if err != nil {
+			testErr = err
+			return
+		}
+		defer ref.Close()
+		if _, err := ref.stepToken(inputs[0], 0); err != nil {
+			testErr = err
+			return
+		}
+		want, err := ref.stepToken(inputs[1], 1)
+		if err != nil {
+			testErr = err
+			return
+		}
+		eqBytes(t, "stepTokenNoResult cache continuation", got, want)
+	})
+	if testErr != nil {
+		t.Fatal(testErr)
+	}
+}
+
+// TestArchDecodeStateStepTokenResult_NoReadback pins readResult=false: the
+// wrapper returns no transient host slice, while its GPU work remains a normal
+// cache-growing step for the next token.
+func TestArchDecodeStateStepTokenResult_NoReadback(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const dModel, nHeads, nKV, headDim, dFF, maxLen = 64, 1, 1, 64, 128, 4
+	const base, scale, eps = float32(10000), float32(0.125), float32(1e-5)
+	specs := []model.LayerSpec{{Attention: model.GlobalAttention, KVShareFrom: 0, CacheIndex: 0, HeadDim: headDim, KVHeads: nKV}}
+	layers := []DecodeLayerWeights{decodeLayerFixture(dModel, nHeads, nKV, headDim, dFF, 37)}
+	inputs := decodeInputsFixture(2, dModel)
+
+	var testErr error
+	withAutoreleasePool(func() {
+		newState := func() (*archDecodeState, error) {
+			lb, moe, err := buildBF16ArchLayerBufs(layers, specs, dModel, nHeads, nKV, headDim, dFF, maxLen, 0, nil)
+			if err != nil {
+				return nil, err
+			}
+			state := newArchDecodeState(specs, lb, moe, dModel, nHeads, nKV, headDim, dFF, 0, headDim, headDim, base, base, scale, eps, false, maxLen)
+			return &state, nil
+		}
+		noRead, err := newState()
+		if err != nil {
+			testErr = err
+			return
+		}
+		defer noRead.Close()
+		if got, err := noRead.stepTokenResult(inputs[0], 0, false); err != nil {
+			testErr = err
+			return
+		} else if got != nil {
+			testErr = core.NewError("stepTokenResult(readResult=false) returned a host result")
+			return
+		}
+		got, err := noRead.stepToken(inputs[1], 1)
+		if err != nil {
+			testErr = err
+			return
+		}
+
+		ref, err := newState()
+		if err != nil {
+			testErr = err
+			return
+		}
+		defer ref.Close()
+		if _, err := ref.stepToken(inputs[0], 0); err != nil {
+			testErr = err
+			return
+		}
+		want, err := ref.stepToken(inputs[1], 1)
+		if err != nil {
+			testErr = err
+			return
+		}
+		eqBytes(t, "stepTokenResult no-read cache continuation", got, want)
+	})
+	if testErr != nil {
+		t.Fatal(testErr)
+	}
+}
+
+// TestArchDecodeStateStepTokenLoaded_UsesPreloadedInput pins the transient
+// prefill hand-off: stepTokenLoaded must consume xA as already populated, not
+// copy its argument into xA again. The deliberately unrelated argument makes
+// the source of the decoded embedding observable.
+func TestArchDecodeStateStepTokenLoaded_UsesPreloadedInput(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const dModel, nHeads, nKV, headDim, dFF, maxLen = 64, 1, 1, 64, 128, 4
+	const base, scale, eps = float32(10000), float32(0.125), float32(1e-5)
+	specs := []model.LayerSpec{{Attention: model.GlobalAttention, KVShareFrom: 0, CacheIndex: 0, HeadDim: headDim, KVHeads: nKV}}
+	layers := []DecodeLayerWeights{decodeLayerFixture(dModel, nHeads, nKV, headDim, dFF, 41)}
+	input := decodeInputsFixture(1, dModel)[0]
+	ignoredArgument := bytes.Repeat([]byte{0xa5}, len(input))
+
+	var testErr error
+	withAutoreleasePool(func() {
+		newState := func() (*archDecodeState, error) {
+			lb, moe, err := buildBF16ArchLayerBufs(layers, specs, dModel, nHeads, nKV, headDim, dFF, maxLen, 0, nil)
+			if err != nil {
+				return nil, err
+			}
+			state := newArchDecodeState(specs, lb, moe, dModel, nHeads, nKV, headDim, dFF, 0, headDim, headDim, base, base, scale, eps, false, maxLen)
+			return &state, nil
+		}
+		loaded, err := newState()
+		if err != nil {
+			testErr = err
+			return
+		}
+		defer loaded.Close()
+		copy(loaded.bufferBytes(loaded.xA, dModel*bf16Size), input)
+		got, err := loaded.stepTokenLoaded(ignoredArgument, 0)
+		if err != nil {
+			testErr = err
+			return
+		}
+
+		ref, err := newState()
+		if err != nil {
+			testErr = err
+			return
+		}
+		defer ref.Close()
+		want, err := ref.stepToken(input, 0)
+		if err != nil {
+			testErr = err
+			return
+		}
+		eqBytes(t, "stepTokenLoaded preloaded input", got, want)
+	})
+	if testErr != nil {
+		t.Fatal(testErr)
+	}
+}
+
+// TestArchPLEBF16Runtime_ResidentProjection exercises both transient forms the
+// runtime installs for a model projection: compute returns host-readable PLE
+// rows, while computeBuffer returns their resident buffer for the preloaded
+// decode path. Both forms represent the same nLayers*pliDim bf16 tensor.
+func TestArchPLEBF16Runtime_ResidentProjection(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const nLayers, tokens, dModel, vocabPLI, pliDim = 2, 2, 64, 8, 4
+	payload := &ArchPLEBF16{
+		TokenIDs:           []int32{2, 5},
+		VocabPLI:           vocabPLI,
+		PliDim:             pliDim,
+		EmbedPerLayer:      toBF16Bytes(syntheticFloat32(vocabPLI*nLayers*pliDim, 101)),
+		PerLayerModelProjW: toBF16Bytes(syntheticFloat32(nLayers*pliDim*dModel, 103)),
+		PerLayerProjNormW:  toBF16Bytes(fillConst(pliDim, 1)),
+	}
+	runtime, dim, err := archPLEBF16Runtime("TestArchPLEBF16Runtime", payload, nLayers, tokens, dModel, 1e-5)
+	if err != nil {
+		t.Fatalf("archPLEBF16Runtime: %v", err)
+	}
+	if runtime == nil || dim != pliDim {
+		t.Fatalf("archPLEBF16Runtime = (%v, %d), want runtime and dim %d", runtime, dim, pliDim)
+	}
+	emb := toBF16Bytes(syntheticFloat32(dModel, 107))
+	host, err := runtime.compute(payload.TokenIDs[0], emb)
+	if err != nil {
+		t.Fatalf("archPLEBF16Runtime.compute: %v", err)
+	}
+	wantBytes := nLayers * pliDim * bf16Size
+	if len(host) != wantBytes || runtime.buffer == nil {
+		t.Fatalf("archPLEBF16Runtime.compute = %d bytes, buffer=%v; want %d resident bytes", len(host), runtime.buffer, wantBytes)
+	}
+	n, buf, transientHost, err := runtime.computeBuffer(payload.TokenIDs[1], emb, nil)
+	if err != nil {
+		t.Fatalf("archPLEBF16Runtime.computeBuffer: %v", err)
+	}
+	if n != wantBytes || buf == nil || transientHost != nil {
+		t.Fatalf("archPLEBF16Runtime.computeBuffer = (n=%d, buf=%v, host=%d), want (%d, resident buffer, nil host)", n, buf, len(transientHost), wantBytes)
+	}
+}
+
+// TestArchDecodeStatePLESlabBuffer_ReusesAndResizes pins the transient
+// batched-prefill PLE upload: equal-shaped slabs retain their no-copy backing,
+// while a new shape replaces it and copies the new tensor bytes.
+func TestArchDecodeStatePLESlabBuffer_ReusesAndResizes(t *testing.T) {
+	requireNativeRuntime(t)
+
+	state := &archDecodeState{}
+	t.Cleanup(state.Close)
+	first := toBF16Bytes(syntheticFloat32(8, 113))
+	buf, err := state.pleSlabBuffer(first)
+	if err != nil {
+		t.Fatalf("pleSlabBuffer(first): %v", err)
+	}
+	if state.pleSlabScratch == nil || buf == nil || buf.Contents() != unsafe.Pointer(&state.pleSlabScratch.bytes[0]) {
+		t.Fatal("pleSlabBuffer(first) did not return the pinned slab backing")
+	}
+	if got := unsafe.Slice((*byte)(buf.Contents()), len(first)); !bytes.Equal(got, first) {
+		t.Fatal("pleSlabBuffer(first) did not copy the PLE slab")
+	}
+	firstID := buf.GetID()
+	buf, err = state.pleSlabBuffer(bytes.Repeat([]byte{0x5a}, len(first)))
+	if err != nil {
+		t.Fatalf("pleSlabBuffer(reuse): %v", err)
+	}
+	if buf.GetID() != firstID {
+		t.Fatal("pleSlabBuffer rebuilt an equal-sized pinned slab")
+	}
+	larger := toBF16Bytes(syntheticFloat32(12, 127))
+	buf, err = state.pleSlabBuffer(larger)
+	if err != nil {
+		t.Fatalf("pleSlabBuffer(larger): %v", err)
+	}
+	if len(state.pleSlabScratch.bytes) != len(larger) || buf.Contents() != unsafe.Pointer(&state.pleSlabScratch.bytes[0]) {
+		t.Fatal("pleSlabBuffer(larger) did not replace the pinned backing for the new shape")
+	}
+	if got := unsafe.Slice((*byte)(buf.Contents()), len(larger)); !bytes.Equal(got, larger) {
+		t.Fatal("pleSlabBuffer(larger) did not copy the resized PLE slab")
+	}
+}
+
 func TestArchDecodeStateDevicePagedKVOwnerShareMatchesLinearState(t *testing.T) {
 	requireSDPAPagedKernel(t)
 
