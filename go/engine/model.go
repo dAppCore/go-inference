@@ -662,6 +662,15 @@ func (m *TextModel) SetChatInterceptor(fn func(ctx context.Context, messages []i
 	m.chatIntercept.Store(&fn)
 }
 
+// ChatInterceptorInstalled reports whether a serve-layer chat hook is
+// currently installed (conversation continuity). The scheduler's CB router
+// consults it per request: a continuation-shaped chat declines the lane path
+// so the interceptor can wake its slept KV instead of re-paying the whole
+// conversation's prefill on a lane.
+func (m *TextModel) ChatInterceptorInstalled() bool {
+	return m != nil && m.chatIntercept.Load() != nil
+}
+
 // RecordChatMetrics records a chat turn's usage served OUTSIDE the stateless
 // stream (the continuity interceptor): promptTokens = tokens actually
 // prefilled this turn (the appended tail — no replay, so the count is the

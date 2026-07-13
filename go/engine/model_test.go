@@ -483,6 +483,31 @@ func seqOfOneToken(text string) iter.Seq[inference.Token] {
 	return func(yield func(inference.Token) bool) { yield(inference.Token{Text: text}) }
 }
 
+// TestModel_ChatInterceptorInstalled_Good pins the CB router's visibility seam:
+// false on a fresh model, true while a hook is installed, false again after the
+// nil uninstall, and false (not a panic) on a nil receiver — the exact per-
+// request reads the scheduler's continuity handoff makes.
+func TestModel_ChatInterceptorInstalled_Good(t *testing.T) {
+	m := NewTextModel(&fakeTokenModel{}, newFixtureTokenizer(t), "gemma-test", inference.ModelInfo{}, 4096)
+	if m.ChatInterceptorInstalled() {
+		t.Fatal("fresh model reports an installed chat interceptor")
+	}
+	m.SetChatInterceptor(func(_ context.Context, _ []inference.Message, _ ...inference.GenerateOption) (iter.Seq[inference.Token], bool) {
+		return nil, false
+	})
+	if !m.ChatInterceptorInstalled() {
+		t.Fatal("installed interceptor not reported")
+	}
+	m.SetChatInterceptor(nil)
+	if m.ChatInterceptorInstalled() {
+		t.Fatal("uninstalled interceptor still reported")
+	}
+	var nilModel *TextModel
+	if nilModel.ChatInterceptorInstalled() {
+		t.Fatal("nil receiver reports an installed interceptor")
+	}
+}
+
 // TestModel_TextModel_Chat_MultimodalRejections pins every "the model cannot
 // serve this attachment kind" arm of Chat: each fails loud with its own named
 // error rather than silently dropping the attachment or answering against a

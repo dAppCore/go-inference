@@ -143,13 +143,23 @@ func (m *Model) scheduleInterleave(ctx context.Context, req inference.ScheduledR
 // renderer capability (its own FormatChatPrompt — the same template string
 // Chat itself encodes on this path, where EnableThinking is never set);
 // multimodal turns and renderer-less models keep the plain interleave path.
+//
+// Continuity handoff (the continuity×CB contract): when the engine carries a
+// chat interceptor (conversation continuity, -state-conversations), a
+// CONTINUATION-shaped conversation — one with a prior assistant turn — keeps
+// the plain path, where base.Chat offers it to the interceptor to wake slept
+// KV and prefill only the new turn. Fresh chats stay on CB: continuity would
+// pay the identical full prefill for those anyway, and lanes batch it better.
+// A conversation whose first turn rode CB pays one catch-up prefill at its
+// second turn (continuity misses, prefills the whole history once, sleeps),
+// then appends forever — either route is always token-correct; the split only
+// decides who pays which prefill. Without an interceptor, continuations ride
+// CB and simply full-prefill (correct, never wrong-token).
+//
 // NOTE: the serve-level welfare guard decorates TextModel.Chat, which the CB
 // route does not call — the welfare×CB interplay is deliberately un-audited
 // for now (tracked in the batching task); deployments running -welfare should
-// keep chat off CB by not enabling the scheduler, or accept the gap. The
-// engine-level continuity interceptor is the same shape: CB chats always
-// full-prefill (correct, never wrong-token — a repeat turn just pays its
-// prefill again instead of waking slept KV).
+// keep chat off CB by not enabling the scheduler, or accept the gap.
 func (m *Model) cbEligible(req inference.ScheduledRequest) bool {
 	if len(req.Messages) == 0 {
 		return core.Trim(req.Prompt) != ""
@@ -162,7 +172,24 @@ func (m *Model) cbEligible(req inference.ScheduledRequest) bool {
 			return false
 		}
 	}
+	if m.cbIntercept != nil && m.cbIntercept.ChatInterceptorInstalled() && messagesCarryAssistantTurn(req.Messages) {
+		return false
+	}
 	return true
+}
+
+// messagesCarryAssistantTurn reports whether the conversation already holds a
+// model reply ("assistant" in the OpenAI/Anthropic wire convention, "model" in
+// gemma's native spelling) — the shape whose prefix a prior continuity turn
+// could have slept state for.
+func messagesCarryAssistantTurn(messages []inference.Message) bool {
+	for _, msg := range messages {
+		switch core.Lower(core.Trim(msg.Role)) {
+		case "assistant", "model":
+			return true
+		}
+	}
+	return false
 }
 
 // scheduleCBStep resolves a request to prompt tokens — a raw prompt directly,

@@ -350,6 +350,83 @@ func TestCBStepChatRequestRidesLaneSet(t *testing.T) {
 	}
 }
 
+// cbInterceptCapableModel is the chat-capable fake plus the chat-interceptor
+// visibility seam (engine.TextModel.ChatInterceptorInstalled) — installed is
+// flipped per test to model continuity attaching (or not) to the engine.
+type cbInterceptCapableModel struct {
+	cbChatCapableModel
+	installed bool
+}
+
+func (m *cbInterceptCapableModel) ChatInterceptorInstalled() bool { return m.installed }
+
+// TestCBStepContinuationHandsOffToContinuity pins the continuity×CB routing
+// contract: with a chat interceptor installed, a FRESH chat (no assistant turn)
+// rides the lane set while a CONTINUATION (a prior assistant turn) keeps the
+// plain path — where base.Chat offers it to the interceptor to wake slept KV —
+// and with no interceptor installed a continuation rides the lane set exactly
+// as before the handoff existed.
+func TestCBStepContinuationHandsOffToContinuity(t *testing.T) {
+	fresh := []inference.Message{{Role: "user", Content: "hi"}}
+	continuation := []inference.Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", Content: "hello"},
+		{Role: "user", Content: "and?"},
+	}
+	schedule := func(t *testing.T, installed bool, msgs []inference.Message) (*simLaneSet, []int32) {
+		t.Helper()
+		sim := newSimLaneSet()
+		model := &cbInterceptCapableModel{
+			cbChatCapableModel: cbChatCapableModel{cbCapableModel{sim: sim, available: true, chatSeq: []inference.Token{{ID: 7}}}},
+			installed:          installed,
+		}
+		sched, err := New(model, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 4})
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		defer sched.CloseEngine()
+		_, ch, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+			ID:       "conv",
+			Messages: msgs,
+			Sampler:  inference.SamplerConfig{MaxTokens: 1},
+		})
+		if err != nil {
+			t.Fatalf("Schedule: %v", err)
+		}
+		return sim, collectStream(ch)
+	}
+
+	// Interceptor installed + fresh chat: CB lane (continuity would pay the
+	// same full prefill; lanes batch it).
+	sim, ids := schedule(t, true, fresh)
+	if sim.prepareCalls != 1 {
+		t.Fatalf("fresh chat with interceptor installed must ride CB, got %d prepares", sim.prepareCalls)
+	}
+	if len(ids) != 1 || ids[0] == 7 {
+		t.Fatalf("fresh chat should stream the lane's scripted token, got %v", ids)
+	}
+
+	// Interceptor installed + continuation: plain path (the interceptor wakes
+	// slept KV there — a lane would re-pay the whole conversation's prefill).
+	sim, ids = schedule(t, true, continuation)
+	if sim.prepareCalls != 0 {
+		t.Fatalf("continuation with interceptor installed must NOT admit a CB lane, got %d prepares", sim.prepareCalls)
+	}
+	if len(ids) != 1 || ids[0] != 7 {
+		t.Fatalf("continuation should stream via the plain path's Chat, got %v", ids)
+	}
+
+	// No interceptor: continuations ride CB, full-prefilling — the pre-handoff
+	// contract, still token-correct.
+	sim, ids = schedule(t, false, continuation)
+	if sim.prepareCalls != 1 {
+		t.Fatalf("continuation without an interceptor must ride CB, got %d prepares", sim.prepareCalls)
+	}
+	if len(ids) != 1 || ids[0] == 7 {
+		t.Fatalf("uninstalled-interceptor continuation should stream the lane's scripted token, got %v", ids)
+	}
+}
+
 // TestCBStepMultimodalChatFallsBack proves a chat turn carrying media keeps the
 // plain interleave path even when the renderer capability is present — the CB
 // route serves text-only turns.
