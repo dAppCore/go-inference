@@ -13,6 +13,7 @@ import (
 
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
+	"github.com/tmc/apple/metal"
 )
 
 func TestNewHeadEncoderNilShardBuffersFallsBack(t *testing.T) {
@@ -564,6 +565,91 @@ func TestHeadEncoderRejectsHiddenShapeMismatch(t *testing.T) {
 	if _, err := h.encode(toBF16Bytes([]float32{1}), false); err == nil {
 		t.Fatal("expected headEncoder.encode to reject hidden shape mismatch")
 	}
+}
+
+func TestHeadEncoderEncodeBufferInto_RejectsMissingHiddenBuffer(t *testing.T) {
+	h := &headEncoder{vocab: 3}
+	if _, err := h.encodeBufferInto(nil, false, nil); err == nil {
+		t.Fatal("encodeBufferInto accepted a nil hidden buffer")
+	}
+}
+
+func TestHeadEncoderGreedyBufferAtInPool_RejectsMissingHiddenBuffer(t *testing.T) {
+	h := &headEncoder{dModel: 4, vocab: 8}
+	if _, ok, err := h.greedyBufferAtInPool(nil, 0, nil); err == nil || !ok {
+		t.Fatalf("greedyBufferAtInPool(nil) = ok=%v err=%v, want handled error", ok, err)
+	}
+}
+
+func TestHeadEncoderSampleLogitsTokenBufferAtInPool_RejectsMissingHiddenBuffer(t *testing.T) {
+	h := &headEncoder{dModel: 4, vocab: 8}
+	if _, ok, err := h.sampleLogitsTokenBufferAtInPool(nil, 0, model.SampleParams{}, 0, nil); err == nil || !ok {
+		t.Fatalf("sampleLogitsTokenBufferAtInPool(nil) = ok=%v err=%v, want handled error", ok, err)
+	}
+}
+
+func TestHeadEncoderSampleTopKTokenBufferAtInPool_RejectsMissingHiddenBuffer(t *testing.T) {
+	h := &headEncoder{dModel: 4, vocab: 8}
+	if _, ok, err := h.sampleTopKTokenBufferAtInPool(nil, 0, model.SampleParams{TopK: 1}, 0, nil); err == nil || !ok {
+		t.Fatalf("sampleTopKTokenBufferAtInPool(nil) = ok=%v err=%v, want handled error", ok, err)
+	}
+}
+
+func TestHeadEncoderSampleTopKCandidatesBufferWithHistoryInto_RejectsMissingHiddenBuffer(t *testing.T) {
+	h := &headEncoder{dModel: 4, vocab: 8}
+	if _, _, ok, err := h.sampleTopKCandidatesBufferWithHistoryInto(nil, 1, nil, nil, 1, nil, nil, false); err == nil || !ok {
+		t.Fatalf("sampleTopKCandidatesBufferWithHistoryInto(nil) = ok=%v err=%v, want handled error", ok, err)
+	}
+}
+
+func TestHeadEncoderEncodeTopKCandidateRows_DeclinesUnusableHead(t *testing.T) {
+	h := &headEncoder{dModel: 4, vocab: 8}
+	scratch, candidates, ok, err := h.encodeTopKCandidateRows(nil, nil, 1, nil, nil, 1, false)
+	if scratch != nil || candidates != 0 || ok || err != nil {
+		t.Fatalf("encodeTopKCandidateRows unusable head = scratch=%v candidates=%d ok=%v err=%v, want nil/0/false/nil", scratch, candidates, ok, err)
+	}
+}
+
+func TestHeadEncoderEncodeTopKCandidateRowsObjectAt_DeclinesInvalidTopK(t *testing.T) {
+	h := &headEncoder{vocab: 8}
+	var enc metal.MTLComputeCommandEncoderObject
+	scratch, candidates, ok, err := h.encodeTopKCandidateRowsObjectAt(enc, nil, 0, 0, nil, nil, 1, false)
+	if scratch != nil || candidates != 0 || ok || err != nil {
+		t.Fatalf("encodeTopKCandidateRowsObjectAt invalid topK = scratch=%v candidates=%d ok=%v err=%v, want nil/0/false/nil", scratch, candidates, ok, err)
+	}
+}
+
+func TestHeadEncoderReadTopKCandidatesInto_RejectsMissingScratch(t *testing.T) {
+	h := &headEncoder{vocab: 8}
+	if _, _, ok, err := h.readTopKCandidatesInto(nil, 1, nil, nil); err == nil || !ok {
+		t.Fatalf("readTopKCandidatesInto(nil) = ok=%v err=%v, want handled error", ok, err)
+	}
+}
+
+func TestHeadEncoderGreedyRowsBufferInPool_RejectsInvalidBatch(t *testing.T) {
+	var h *headEncoder
+	if ok, err := h.greedyRowsBufferInPool(nil, 0, 0, nil, nil); err == nil || ok {
+		t.Fatalf("greedyRowsBufferInPool invalid batch = ok=%v err=%v, want false/error", ok, err)
+	}
+}
+
+func TestHeadEncoderEncodeTopKCandidateRows_WrongMetallibReturnsError(t *testing.T) {
+	requireNativeRuntime(t)
+	h, hidden, _ := covSampleHeadFixture(t)
+	withWrongMainLibrary(t, func() {
+		cb := queue.CommandBuffer()
+		enc := cb.ComputeCommandEncoder()
+		scratch, _, ok, err := h.encodeTopKCandidateRows(enc, sharedBytes(hidden), 1, nil, nil, 1, false)
+		enc.EndEncoding()
+		if scratch != nil {
+			h.putTopKScratch(scratch)
+		}
+		// RMSNorm is the first encode stage and lives in the main metallib. A
+		// real but wrong library must surface that lookup failure, not decline.
+		if !ok || err == nil {
+			t.Fatalf("encodeTopKCandidateRows wrong metallib = ok=%v err=%v, want handled error", ok, err)
+		}
+	})
 }
 
 func TestGreedyBF16Suppressed_Good(t *testing.T) {

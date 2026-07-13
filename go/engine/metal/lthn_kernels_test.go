@@ -6,8 +6,11 @@ package native
 
 import (
 	"bytes"
+	"sync"
 	"testing"
 	"unsafe"
+
+	"github.com/tmc/apple/metal"
 )
 
 func TestGeluKernelCapabilityReflectsLoadedFlag(t *testing.T) {
@@ -63,6 +66,137 @@ func TestQMVLogitsTopKUsable_InvalidTopK(t *testing.T) {
 func TestQ4LMHeadTopKUsable_InvalidBits(t *testing.T) {
 	if q4LMHeadTopKUsable(128, 64, 64, 8, 4) {
 		t.Fatal("q4LMHeadTopKUsable accepted a non-q4 weight")
+	}
+}
+
+func TestEncMulScalarBF16_RejectsNegativeAndAcceptsZeroLength(t *testing.T) {
+	if err := encMulScalarBF16(nil, nil, nil, nil, 0, -1); err == nil {
+		t.Fatal("encMulScalarBF16 accepted a negative length")
+	}
+	if err := encMulScalarBF16(nil, nil, nil, nil, 0, 0); err != nil {
+		t.Fatalf("encMulScalarBF16 zero length: %v", err)
+	}
+}
+
+func TestEncMulScalarBF16Object_RejectsNegativeAndAcceptsZeroLength(t *testing.T) {
+	var enc metal.MTLComputeCommandEncoderObject
+	if err := encMulScalarBF16Object(enc, nil, nil, nil, 0, -1); err == nil {
+		t.Fatal("encMulScalarBF16Object accepted a negative length")
+	}
+	if err := encMulScalarBF16Object(enc, nil, nil, nil, 0, 0); err != nil {
+		t.Fatalf("encMulScalarBF16Object zero length: %v", err)
+	}
+}
+
+func TestEncRouterTopKBF16_RejectsOutOfRangeTopK(t *testing.T) {
+	if err := encRouterTopKBF16(nil, nil, nil, nil, nil, 0, 4, 0, false); err == nil {
+		t.Fatal("encRouterTopKBF16 accepted topK zero")
+	}
+	if err := encRouterTopKBF16(nil, nil, nil, nil, nil, 0, 4, 5, false); err == nil {
+		t.Fatal("encRouterTopKBF16 accepted topK above numExperts")
+	}
+}
+
+func TestEncBF16LogitsArgmaxTilesBF16At_RejectsNonPositiveVocab(t *testing.T) {
+	if err := encBF16LogitsArgmaxTilesBF16At(nil, nil, nil, nil, nil, 0, 0, 0, 0, 0); err == nil {
+		t.Fatal("encBF16LogitsArgmaxTilesBF16At accepted vocab zero")
+	}
+}
+
+func TestEncBF16LMHeadArgmaxTilesBF16_RejectsNonPositiveDimensions(t *testing.T) {
+	if err := encBF16LMHeadArgmaxTilesBF16(nil, nil, nil, nil, nil, nil, 0, 0, 0, 8, 0); err == nil {
+		t.Fatal("encBF16LMHeadArgmaxTilesBF16 accepted dModel zero")
+	}
+	if err := encBF16LMHeadArgmaxTilesBF16(nil, nil, nil, nil, nil, nil, 0, 0, 8, 0, 0); err == nil {
+		t.Fatal("encBF16LMHeadArgmaxTilesBF16 accepted vocab zero")
+	}
+}
+
+func TestEncBF16LMHeadArgmaxTilesRowsBF16_RejectsBatchFloorAndCeiling(t *testing.T) {
+	if err := encBF16LMHeadArgmaxTilesRowsBF16(nil, nil, nil, nil, nil, nil, 0, 0, 8, 8, 0, 0, 1); err == nil {
+		t.Fatal("encBF16LMHeadArgmaxTilesRowsBF16 accepted k zero")
+	}
+	if err := encBF16LMHeadArgmaxTilesRowsBF16(nil, nil, nil, nil, nil, nil, 0, 0, 8, 8, 0, 9, 1); err == nil {
+		t.Fatal("encBF16LMHeadArgmaxTilesRowsBF16 accepted k above eight")
+	}
+}
+
+func TestEncArgmaxMergeRowsF32_RejectsNonPositiveDimensions(t *testing.T) {
+	if err := encArgmaxMergeRowsF32(nil, nil, nil, nil, 0, 1); err == nil {
+		t.Fatal("encArgmaxMergeRowsF32 accepted n zero")
+	}
+	if err := encArgmaxMergeRowsF32(nil, nil, nil, nil, 1, 0); err == nil {
+		t.Fatal("encArgmaxMergeRowsF32 accepted k zero")
+	}
+}
+
+func TestEncBF16LogitsTopKTilesBF16_RejectsTopKOutsideKernelLimit(t *testing.T) {
+	if err := encBF16LogitsTopKTilesBF16(nil, nil, nil, nil, nil, nil, 1, 0, 0, 0, 1, 0); err == nil {
+		t.Fatal("encBF16LogitsTopKTilesBF16 accepted topK zero")
+	}
+	if err := encBF16LogitsTopKTilesBF16(nil, nil, nil, nil, nil, nil, 1, 0, 0, headSampleTopKMaxK+1, 1, 0); err == nil {
+		t.Fatal("encBF16LogitsTopKTilesBF16 accepted topK above the kernel limit")
+	}
+}
+
+func TestEncBF16LogitsTopKTilesBF16Object_RejectsTopKOutsideKernelLimit(t *testing.T) {
+	var enc metal.MTLComputeCommandEncoderObject
+	if err := encBF16LogitsTopKTilesBF16Object(enc, nil, nil, nil, nil, nil, 1, 0, 0, 0, 1, 0); err == nil {
+		t.Fatal("encBF16LogitsTopKTilesBF16Object accepted topK zero")
+	}
+}
+
+func TestEncQ4LMHeadTopKTilesBF16_RejectsCandidateAndDimensionEdges(t *testing.T) {
+	if err := encQ4LMHeadTopKTilesBF16(nil, nil, nil, nil, nil, nil, nil, nil, nil, 0, 0, 0, 0, q4LMHeadTopKBlockSize, 8, 64, 0, 0, 4, 0, 1, 0); err == nil {
+		t.Fatal("encQ4LMHeadTopKTilesBF16 accepted candidatesPerTile zero")
+	}
+	if err := encQ4LMHeadTopKTilesBF16(nil, nil, nil, nil, nil, nil, nil, nil, nil, 0, 0, 0, 0, q4LMHeadTopKBlockSize, 8, 16, 0, 0, 4, 4, 1, 0); err == nil {
+		t.Fatal("encQ4LMHeadTopKTilesBF16 accepted an unsupported group size")
+	}
+	if err := encQ4LMHeadTopKTilesBF16(nil, nil, nil, nil, nil, nil, nil, nil, nil, 0, 0, 0, 0, q4LMHeadTopKBlockSize+64, 8, 64, 0, 0, 4, 4, 1, 0); err == nil {
+		t.Fatal("encQ4LMHeadTopKTilesBF16 accepted dModel outside the 512-byte block")
+	}
+}
+
+func TestEncTopKMergeF32_RejectsInvalidDimensions(t *testing.T) {
+	if err := encTopKMergeF32(nil, nil, nil, nil, nil, 0, 1); err == nil {
+		t.Fatal("encTopKMergeF32 accepted n zero")
+	}
+	if err := encTopKMergeF32(nil, nil, nil, nil, nil, 1, 0); err == nil {
+		t.Fatal("encTopKMergeF32 accepted topK zero")
+	}
+}
+
+func TestEncTopKMergeF32Object_RejectsInvalidDimensions(t *testing.T) {
+	var enc metal.MTLComputeCommandEncoderObject
+	if err := encTopKMergeF32Object(enc, nil, nil, nil, nil, 1, headSampleTopKMaxK+1); err == nil {
+		t.Fatal("encTopKMergeF32Object accepted topK above the kernel limit")
+	}
+}
+
+func TestEncTopKMergeSampleF32_RejectsMissingParams(t *testing.T) {
+	if err := encTopKMergeSampleF32(nil, nil, nil, nil, nil); err == nil {
+		t.Fatal("encTopKMergeSampleF32 accepted a nil params buffer")
+	}
+}
+
+func TestEncTopKMergeSampleF32Object_RejectsMissingParams(t *testing.T) {
+	var enc metal.MTLComputeCommandEncoderObject
+	if err := encTopKMergeSampleF32Object(enc, nil, nil, nil, nil); err == nil {
+		t.Fatal("encTopKMergeSampleF32Object accepted a nil params buffer")
+	}
+}
+
+func TestEncLogitsSampleBF16_RejectsMissingParams(t *testing.T) {
+	if err := encLogitsSampleBF16(nil, nil, nil, nil, nil, nil); err == nil {
+		t.Fatal("encLogitsSampleBF16 accepted a nil params buffer")
+	}
+}
+
+func TestEncLogitsSampleBF16Object_RejectsMissingParams(t *testing.T) {
+	var enc metal.MTLComputeCommandEncoderObject
+	if err := encLogitsSampleBF16Object(enc, nil, nil, nil, nil, nil); err == nil {
+		t.Fatal("encLogitsSampleBF16Object accepted a nil params buffer")
 	}
 }
 
@@ -424,4 +558,192 @@ func TestEncTopKMergeSampleF32_ReturnsTopCandidateForZeroDraw(t *testing.T) {
 	if got := *(*int32)(out.Contents()); got != 40 {
 		t.Fatalf("encTopKMergeSampleF32 output = %d, want 40", got)
 	}
+}
+
+func resetLTHNKernelsPSOsForTest() {
+	mulRowsPSOOnce, mulRowsPSO, mulRowsPSOErr = sync.Once{}, nil, nil
+	mulRowsICBPSOOnce, mulRowsICBPSO, mulRowsICBPSOErr = sync.Once{}, nil, nil
+	bf16MulScalarPSOOnce, bf16MulScalarPSO, bf16MulScalarPSOErr = sync.Once{}, nil, nil
+	moeWeightedSumPSOOnce, moeWeightedSumPSO, moeWeightedSumPSOErr = sync.Once{}, nil, nil
+	moeCombineNormsPSOOnce, moeCombineNormsPSO, moeCombineNormsPSOErr = sync.Once{}, nil, nil
+	argmaxMergeRowsF32PSOOnce, argmaxMergeRowsF32PSO, argmaxMergeRowsF32PSOErr = sync.Once{}, nil, nil
+	bf16LMHeadArgmaxTilesPSOOnce, bf16LMHeadArgmaxTilesPSO, bf16LMHeadArgmaxTilesPSOErr = sync.Once{}, nil, nil
+	bf16LogitsArgmaxTilesPSOOnce, bf16LogitsArgmaxTilesPSO, bf16LogitsArgmaxTilesPSOErr = sync.Once{}, nil, nil
+	argmaxMergeF32PSOOnce, argmaxMergeF32PSO, argmaxMergeF32PSOErr = sync.Once{}, nil, nil
+	bf16LMHeadCandidatesPSOOnce, bf16LMHeadCandidatesPSO, bf16LMHeadCandidatesPSOErr = sync.Once{}, nil, nil
+	bf16LogitsCandidatesPSOOnce, bf16LogitsCandidatesPSO, bf16LogitsCandidatesPSOErr = sync.Once{}, nil, nil
+	bf16LogitsTopKTilesPSOOnce, bf16LogitsTopKTilesPSO, bf16LogitsTopKTilesPSOErr = sync.Once{}, nil, nil
+	q4LMHeadTopKTilesPSOOnce, q4LMHeadTopKTilesPSO, q4LMHeadTopKTilesPSOErr = sync.Once{}, nil, nil
+	topKMergeF32PSOOnce, topKMergeF32PSO, topKMergeF32PSOErr = sync.Once{}, nil, nil
+	topKMergeSampleF32PSOOnce, topKMergeSampleF32PSO, topKMergeSampleF32PSOErr = sync.Once{}, nil, nil
+	logitsSampleBF16PSOOnce, logitsSampleBF16PSO, logitsSampleBF16PSOErr = sync.Once{}, nil, nil
+	ffnMegaBitsPSOMu.Lock()
+	ffnMegaBitsPSOCache = map[int]metal.MTLComputePipelineState{}
+	ffnMegaBitsPSOMu.Unlock()
+	routerTopKPSOMu.Lock()
+	routerTopKPSOCache = map[int]metal.MTLComputePipelineState{}
+	routerTopKPSOMu.Unlock()
+	bf16LMHeadArgmaxTilesRowsPSOMu.Lock()
+	bf16LMHeadArgmaxTilesRowsPSOCache = map[int]metal.MTLComputePipelineState{}
+	bf16LMHeadArgmaxTilesRowsPSOMu.Unlock()
+}
+
+func withWrongLTHNKernelsLibrary(t *testing.T, fn func()) {
+	t.Helper()
+	requireNativeRuntime(t)
+	resetLTHNKernelsPSOsForTest()
+	t.Cleanup(resetLTHNKernelsPSOsForTest)
+	withWrongCustomLibrary(t, fn)
+}
+
+func TestMulRowsPipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := mulRowsPipeline(); err == nil {
+			t.Fatal("mulRowsPipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestMulRowsPipelineICB_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := mulRowsPipelineICB(); err == nil {
+			t.Fatal("mulRowsPipelineICB accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestBF16MulScalarPipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := bf16MulScalarPipeline(); err == nil {
+			t.Fatal("bf16MulScalarPipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestMoeWeightedSumPipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := moeWeightedSumPipeline(); err == nil {
+			t.Fatal("moeWeightedSumPipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestMoeCombineNormsPipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := moeCombineNormsPipeline(); err == nil {
+			t.Fatal("moeCombineNormsPipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestArgmaxMergeRowsF32Pipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := argmaxMergeRowsF32Pipeline(); err == nil {
+			t.Fatal("argmaxMergeRowsF32Pipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestBF16LMHeadArgmaxTilesPipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := bf16LMHeadArgmaxTilesPipeline(); err == nil {
+			t.Fatal("bf16LMHeadArgmaxTilesPipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestBF16LogitsArgmaxTilesPipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := bf16LogitsArgmaxTilesPipeline(); err == nil {
+			t.Fatal("bf16LogitsArgmaxTilesPipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestArgmaxMergeF32Pipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := argmaxMergeF32Pipeline(); err == nil {
+			t.Fatal("argmaxMergeF32Pipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestBF16LMHeadCandidatesPipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := bf16LMHeadCandidatesPipeline(); err == nil {
+			t.Fatal("bf16LMHeadCandidatesPipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestBF16LogitsCandidatesPipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := bf16LogitsCandidatesPipeline(); err == nil {
+			t.Fatal("bf16LogitsCandidatesPipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestBF16LogitsTopKTilesPipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := bf16LogitsTopKTilesPipeline(); err == nil {
+			t.Fatal("bf16LogitsTopKTilesPipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestQ4LMHeadTopKTilesPipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := q4LMHeadTopKTilesPipeline(); err == nil {
+			t.Fatal("q4LMHeadTopKTilesPipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestTopKMergeF32Pipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := topKMergeF32Pipeline(); err == nil {
+			t.Fatal("topKMergeF32Pipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestTopKMergeSampleF32Pipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := topKMergeSampleF32Pipeline(); err == nil {
+			t.Fatal("topKMergeSampleF32Pipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestLogitsSampleBF16Pipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := logitsSampleBF16Pipeline(); err == nil {
+			t.Fatal("logitsSampleBF16Pipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestFFNMegaPipelineBits_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := ffnMegaPipelineBits(4); err == nil {
+			t.Fatal("ffnMegaPipelineBits accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestRouterTopKPipelineK_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := routerTopKPipelineK(2); err == nil {
+			t.Fatal("routerTopKPipelineK accepted the main metallib as a custom-kernel library")
+		}
+	})
+}
+
+func TestBF16LMHeadArgmaxTilesRowsPipeline_WrongMetallib(t *testing.T) {
+	withWrongLTHNKernelsLibrary(t, func() {
+		if _, err := bf16LMHeadArgmaxTilesRowsPipeline(2); err == nil {
+			t.Fatal("bf16LMHeadArgmaxTilesRowsPipeline accepted the main metallib as a custom-kernel library")
+		}
+	})
 }
