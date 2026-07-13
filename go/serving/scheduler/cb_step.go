@@ -206,14 +206,40 @@ func (e *cbStepEngine) close() {
 	<-e.doneCh
 }
 
+// cbPrepared is one BeginPrepare's result, delivered back to the drive loop:
+// the prepared-but-unattached lane (or the error that ended the attempt).
+type cbPrepared struct {
+	req *cbReq
+	p   inference.PendingLane
+	err error
+}
+
 // run is the single drive-loop goroutine: it owns the lane set, the pending
 // queue, and the lane→request map outright (single-writer, no lock).
+//
+// Admission overlap: when the lane set implements inference.
+// LaneSetOverlappedAdmitter, each admission's heavy prefill (BeginPrepare)
+// runs on its own goroutine while this loop keeps Stepping the in-flight
+// lanes — a newcomer's multi-second prompt prefill no longer freezes every
+// active stream. The finished prefill comes back on prepCh and the loop
+// splices it in with CommitPrepare (µs). In-flight prefills count against the
+// slot budget exactly as active lanes do, so a full set never pays a prefill
+// CommitPrepare would have to throw away. Without the capability, admission
+// is the original inline Prepare, unchanged.
 func (e *cbStepEngine) run() {
 	defer close(e.doneCh)
 	defer func() { _ = e.ls.Close() }()
 
+	overlap, _ := e.ls.(inference.LaneSetOverlappedAdmitter)
+
 	var pending []*cbReq
 	byLane := make(map[int]*cbReq, e.maxActive)
+	preparing := make(map[string]*cbReq, e.maxActive)
+	// prepCh is buffered to the slot budget: at most maxActive BeginPrepares
+	// are ever in flight, so a prep goroutine's send NEVER blocks — it can
+	// always run to completion, which is what lets drain() collect every
+	// outstanding prefill before the deferred ls.Close() releases the owner.
+	prepCh := make(chan cbPrepared, e.maxActive)
 
 	// finish closes a request's stream and clears its bookkeeping.
 	finish := func(laneID int, req *cbReq, counter *atomic.Int64) {
@@ -224,8 +250,26 @@ func (e *cbStepEngine) run() {
 		e.active.Store(int64(len(byLane)))
 	}
 
+	// admitInline is the capability-less path: the whole Prepare (prefill
+	// included) runs here in the drive loop, stalling the round.
+	admitInline := func(req *cbReq) {
+		h, err := e.ls.Prepare(req.ctx, inference.LaneSpec{PromptIDs: req.promptIDs, MaxNew: req.maxNew, StopTokens: req.stops, Sampler: req.sampler})
+		if err != nil || !h.Valid() {
+			// Prefill failed (e.g. arch not ICB-eligible) — end the request's
+			// stream cleanly rather than hang it; the caller sees an empty
+			// completion, never a wrong-token one.
+			req.cancel()
+			req.end()
+			e.cancelled.Add(1)
+			return
+		}
+		byLane[h.ID] = req
+		e.admitted.Add(1)
+		e.active.Store(int64(len(byLane)))
+	}
+
 	admit := func() {
-		for len(pending) > 0 && e.ls.Active() < e.maxActive {
+		for len(pending) > 0 && e.ls.Active()+len(preparing) < e.maxActive {
 			req := pending[0]
 			pending = pending[1:]
 			if req.ctx.Err() != nil {
@@ -234,21 +278,47 @@ func (e *cbStepEngine) run() {
 				e.cancelled.Add(1)
 				continue
 			}
-			h, err := e.ls.Prepare(req.ctx, inference.LaneSpec{PromptIDs: req.promptIDs, MaxNew: req.maxNew, StopTokens: req.stops, Sampler: req.sampler})
-			if err != nil || !h.Valid() {
-				// Prefill failed (e.g. arch not ICB-eligible) — end the request's
-				// stream cleanly rather than hang it; the caller sees an empty
-				// completion, never a wrong-token one.
-				req.cancel()
-				req.end()
-				e.cancelled.Add(1)
+			if overlap == nil {
+				admitInline(req)
 				continue
 			}
-			byLane[h.ID] = req
-			e.admitted.Add(1)
-			e.active.Store(int64(len(byLane)))
+			preparing[req.id] = req
+			go func(req *cbReq) {
+				p, err := overlap.BeginPrepare(req.ctx, inference.LaneSpec{PromptIDs: req.promptIDs, MaxNew: req.maxNew, StopTokens: req.stops, Sampler: req.sampler})
+				prepCh <- cbPrepared{req: req, p: p, err: err}
+			}(req)
 		}
 		e.queued.Store(int64(len(pending)))
+	}
+
+	// handlePrepared splices a finished BeginPrepare into the running set (or
+	// ends the request when the prefill failed / the consumer cancelled while
+	// it ran — the pending lane is discarded, never attached).
+	handlePrepared := func(pr cbPrepared) {
+		delete(preparing, pr.req.id)
+		if pr.err != nil || pr.p == nil {
+			pr.req.cancel()
+			pr.req.end()
+			e.cancelled.Add(1)
+			return
+		}
+		if pr.req.ctx.Err() != nil {
+			pr.p.Discard()
+			pr.req.cancel()
+			pr.req.end()
+			e.cancelled.Add(1)
+			return
+		}
+		h, err := overlap.CommitPrepare(pr.p)
+		if err != nil || !h.Valid() {
+			pr.req.cancel()
+			pr.req.end()
+			e.cancelled.Add(1)
+			return
+		}
+		byLane[h.ID] = pr.req
+		e.admitted.Add(1)
+		e.active.Store(int64(len(byLane)))
 	}
 
 	handleCancel := func(id string) {
@@ -261,6 +331,13 @@ func (e *cbStepEngine) run() {
 				e.queued.Store(int64(len(pending)))
 				return
 			}
+		}
+		if req := preparing[id]; req != nil {
+			// Mid-prefill: cancel the request's ctx (BeginPrepare aborts or its
+			// result arrives already-cancelled); handlePrepared ends the stream
+			// and discards the lane when the result lands on prepCh.
+			req.cancel()
+			return
 		}
 		for laneID, req := range byLane {
 			if req.id == id {
@@ -277,6 +354,23 @@ func (e *cbStepEngine) run() {
 			req.end()
 		}
 		pending = nil
+		// Every in-flight BeginPrepare MUST complete before the deferred
+		// ls.Close() runs (its session prefill is live GPU work against the
+		// owner). Cancel their contexts, then collect each result off prepCh —
+		// the buffered channel guarantees the goroutines all finish.
+		for _, req := range preparing {
+			req.cancel()
+		}
+		for len(preparing) > 0 {
+			pr := <-prepCh
+			delete(preparing, pr.req.id)
+			if pr.p != nil {
+				pr.p.Discard()
+			}
+			pr.req.cancel()
+			pr.req.end()
+			e.cancelled.Add(1)
+		}
 		for laneID, req := range byLane {
 			_ = e.ls.Retire(inference.LaneHandle{ID: laneID})
 			req.cancel()
@@ -288,10 +382,13 @@ func (e *cbStepEngine) run() {
 	for {
 		admit()
 		if len(byLane) == 0 {
-			// Nothing running — block until a submit, cancel, or close arrives.
+			// Nothing running — block until a submit, a finished prefill, a
+			// cancel, or a close arrives.
 			select {
 			case req := <-e.submitCh:
 				pending = append(pending, req)
+			case pr := <-prepCh:
+				handlePrepared(pr)
 			case id := <-e.cancelCh:
 				handleCancel(id)
 			case <-e.closeCh:
@@ -300,11 +397,14 @@ func (e *cbStepEngine) run() {
 			}
 			continue
 		}
-		// Lanes are running — service pending control messages without blocking,
-		// then take one batched step.
+		// Lanes are running — service pending control messages and finished
+		// prefills without blocking, then take one batched step.
 		select {
 		case req := <-e.submitCh:
 			pending = append(pending, req)
+			continue
+		case pr := <-prepCh:
+			handlePrepared(pr)
 			continue
 		case id := <-e.cancelCh:
 			handleCancel(id)

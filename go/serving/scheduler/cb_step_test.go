@@ -8,7 +8,9 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
@@ -347,6 +349,186 @@ func TestCBStepChatRequestRidesLaneSet(t *testing.T) {
 	}
 	if !slices.Equal(spec.StopTokens, []int32{41, 99}) {
 		t.Fatalf("lane stops must be the FULL resolution (request + model): got %v want [41 99]", spec.StopTokens)
+	}
+}
+
+// asyncSimLaneSet is simLaneSet plus the overlapped-admission capability
+// (inference.LaneSetOverlappedAdmitter): BeginPrepare blocks until the test
+// feeds gate — a controllable slow prefill running off the drive loop — and
+// CommitPrepare performs the sim's real admission. Discards are counted so a
+// test can prove an abandoned prefill was released, never attached.
+type asyncSimLaneSet struct {
+	simLaneSet
+	gate     chan struct{}
+	begins   atomic.Int64
+	discards atomic.Int64
+}
+
+type simPendingLane struct {
+	owner *asyncSimLaneSet
+	spec  inference.LaneSpec
+}
+
+func (p *simPendingLane) Discard() { p.owner.discards.Add(1) }
+
+func (s *asyncSimLaneSet) BeginPrepare(ctx context.Context, spec inference.LaneSpec) (inference.PendingLane, error) {
+	s.begins.Add(1)
+	select {
+	case <-s.gate:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return &simPendingLane{owner: s, spec: spec}, nil
+}
+
+func (s *asyncSimLaneSet) CommitPrepare(p inference.PendingLane) (inference.LaneHandle, error) {
+	pl, ok := p.(*simPendingLane)
+	if !ok {
+		return inference.LaneHandle{}, core.NewError("asyncSimLaneSet: not a sim pending lane")
+	}
+	return s.Prepare(context.Background(), pl.spec)
+}
+
+// cbAsyncCapableModel hands the scheduler the async-admission sim.
+type cbAsyncCapableModel struct {
+	cbCapableModel
+	async *asyncSimLaneSet
+}
+
+func (m *cbAsyncCapableModel) OpenLaneSet(inference.LaneSetConfig) (inference.LaneSet, error) {
+	return m.async, nil
+}
+
+// TestCBStepAdmissionOverlapsStep pins the admission-overlap contract: while a
+// newcomer's BeginPrepare is gated (a slow prompt prefill), the in-flight
+// lane's stream KEEPS PRODUCING — the drive loop steps through the prefill
+// instead of freezing every active stream for its duration. Once the gate
+// releases, the newcomer is spliced in and completes normally, with nothing
+// discarded.
+func TestCBStepAdmissionOverlapsStep(t *testing.T) {
+	async := &asyncSimLaneSet{simLaneSet: *newSimLaneSet(), gate: make(chan struct{}, 2)}
+	model := &cbAsyncCapableModel{cbCapableModel: cbCapableModel{available: true}, async: async}
+	sched, err := New(model, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sched.CloseEngine()
+
+	async.gate <- struct{}{} // A's prefill passes immediately
+	_, chA, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+		ID: "inflight", Prompt: "aaaa", Sampler: inference.SamplerConfig{MaxTokens: 64},
+	})
+	if err != nil {
+		t.Fatalf("Schedule(A): %v", err)
+	}
+	// A drains on its own goroutine — the drive loop must never be gated on
+	// this test's main goroutine (a stalled consumer is backpressure, not the
+	// admission stall under test).
+	var aTokens atomic.Int64
+	aDone := make(chan struct{})
+	go func() {
+		for range chA {
+			aTokens.Add(1)
+		}
+		close(aDone)
+	}()
+	waitTokens := func(want int64) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for aTokens.Load() < want {
+			if time.Now().After(deadline) {
+				t.Fatalf("A stalled at %d tokens waiting for %d — the drive loop is not stepping (admission prefill ran inline?)", aTokens.Load(), want)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	waitTokens(1) // A is admitted and streaming
+
+	// B's BeginPrepare now blocks on the gate — the slow prefill in flight.
+	_, chB, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+		ID: "newcomer", Prompt: "bb", Sampler: inference.SamplerConfig{MaxTokens: 2},
+	})
+	if err != nil {
+		t.Fatalf("Schedule(B): %v", err)
+	}
+
+	// THE RECEIPT: with B's prefill still gated, A streams all the way to its
+	// 64-token budget and its stream closes — every one of those Steps ran
+	// while the admission was in flight. Pre-overlap, the drive loop sat
+	// inside Prepare(B) and A would never receive another token.
+	waitTokens(64)
+	select {
+	case <-aDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("A's stream did not close at its budget while B's prefill was gated")
+	}
+
+	async.gate <- struct{}{} // release B's prefill
+	if ids := collectStream(chB); len(ids) != 2 {
+		t.Fatalf("B should stream its 2 scripted tokens after the gated prefill, got %v", ids)
+	}
+	// B has fully streamed, so its admission provably went through the
+	// overlapped route (checked only now — the prep goroutine's scheduling is
+	// asynchronous, so an earlier read would race it).
+	if got := async.begins.Load(); got != 2 {
+		t.Fatalf("BeginPrepare calls = %d, want 2 (both admissions overlapped)", got)
+	}
+	if got := async.discards.Load(); got != 0 {
+		t.Fatalf("no pending lane should be discarded on the happy path, got %d", got)
+	}
+}
+
+// TestCBStepOverlappedPrefillCancelAndClose pins the two abandonment paths of
+// an in-flight overlapped prefill: a cancelled request's gated BeginPrepare
+// aborts via its ctx and the stream closes cleanly; and close() drains a
+// gated prefill without deadlock — in both cases nothing is attached to the
+// lane set.
+func TestCBStepOverlappedPrefillCancelAndClose(t *testing.T) {
+	async := &asyncSimLaneSet{simLaneSet: *newSimLaneSet(), gate: make(chan struct{}, 1)}
+	model := &cbAsyncCapableModel{cbCapableModel: cbCapableModel{available: true}, async: async}
+	sched, err := New(model, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 1})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Cancel while gated: BeginPrepare aborts on ctx, the stream closes.
+	_, chC, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+		ID: "cancel-me", Prompt: "cc", Sampler: inference.SamplerConfig{MaxTokens: 2},
+	})
+	if err != nil {
+		t.Fatalf("Schedule(C): %v", err)
+	}
+	if _, err := sched.CancelRequest(context.Background(), "cancel-me"); err != nil {
+		t.Fatalf("CancelRequest: %v", err)
+	}
+	select {
+	case _, ok := <-chC:
+		if ok {
+			t.Fatal("cancelled request should not stream a token")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled request's stream did not close")
+	}
+	if got := async.simLaneSet.prepareCalls; got != 0 {
+		t.Fatalf("cancelled prefill must never attach a lane, got %d admissions", got)
+	}
+
+	// Close while gated: drain collects the aborted prefill; close returns.
+	_, chD, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+		ID: "close-over-me", Prompt: "dd", Sampler: inference.SamplerConfig{MaxTokens: 2},
+	})
+	if err != nil {
+		t.Fatalf("Schedule(D): %v", err)
+	}
+	closed := make(chan struct{})
+	go func() { sched.CloseEngine(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CloseEngine deadlocked on an in-flight overlapped prefill")
+	}
+	if _, ok := <-chD; ok {
+		t.Fatal("request open at close should end with a closed stream, not a token")
 	}
 }
 

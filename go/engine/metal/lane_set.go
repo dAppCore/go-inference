@@ -6,6 +6,7 @@ package native
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	core "dappco.re/go"
@@ -54,6 +55,12 @@ type laneSet struct {
 	lanes  map[int]*decodeLane
 	order  []int // stable admission order → deterministic Step iteration
 	nextID int
+
+	// liveLanes mirrors len(lanes) atomically — the ONE laneSet datum an
+	// off-goroutine BeginPrepare may read (advisory: it picks the overlapped
+	// prefill's chunk cap, never a correctness decision). Written only by the
+	// owning goroutine (CommitPrepare / Retire / Close).
+	liveLanes atomic.Int64
 
 	fwdCount uint64 // monotonic: +1 per batched forward (one per Step that advances ≥1 lane)
 
@@ -126,6 +133,7 @@ type decodeLane struct {
 }
 
 var _ inference.LaneSet = (*laneSet)(nil)
+var _ inference.LaneSetOverlappedAdmitter = (*laneSet)(nil)
 
 // OpenLaneSet builds the multi-session owner over this model's shared weights.
 // It is the engine.LaneSetOpener capability engine.TextModel surfaces to the
@@ -157,7 +165,10 @@ const defaultLaneSetMaxLanes = 8
 // prefills the prompt through the session's production prefill route (so the
 // lane's decode caches are populated exactly as the plain path populates them),
 // and leaves the lane holding its prefill hidden — ready to produce its first
-// token on the next Step. Ragged admission: safe to call between Steps.
+// token on the next Step. Ragged admission: safe to call between Steps. It is
+// the single-goroutine composition of BeginPrepare + CommitPrepare (the
+// overlapped-admission split), with a fail-fast MaxLanes check up front so a
+// full set never pays a prefill it must throw away.
 func (ls *laneSet) Prepare(ctx context.Context, spec inference.LaneSpec) (inference.LaneHandle, error) {
 	if ls == nil || ls.model == nil {
 		return inference.LaneHandle{}, core.NewError("native.laneSet.Prepare: nil lane set")
@@ -165,19 +176,69 @@ func (ls *laneSet) Prepare(ctx context.Context, spec inference.LaneSpec) (infere
 	if len(ls.lanes) >= ls.maxLanes {
 		return inference.LaneHandle{}, core.NewError("native.laneSet.Prepare: lane set is at MaxLanes")
 	}
+	pending, err := ls.BeginPrepare(ctx, spec)
+	if err != nil {
+		return inference.LaneHandle{}, err
+	}
+	return ls.CommitPrepare(pending)
+}
+
+// pendingLane is the metal inference.PendingLane: a fully prefilled decodeLane
+// awaiting its splice into the set (CommitPrepare) or release (Discard).
+type pendingLane struct {
+	lane   *decodeLane
+	dModel int
+}
+
+// Discard releases the pending lane's session without attaching it.
+func (p *pendingLane) Discard() {
+	if p == nil || p.lane == nil {
+		return
+	}
+	_ = p.lane.sess.Close()
+	p.lane = nil
+}
+
+// BeginPrepare runs the heavy half of admission — session open + the prompt's
+// production chunked prefill — WITHOUT touching the set's lane bookkeeping, so
+// it is safe to run from another goroutine while the owning goroutine keeps
+// Stepping: the pending lane's session is independent state, the same isolation
+// that lets concurrent plain-path generations coexist with a stepping lane set
+// (the continuity handoff's proven-live pattern). The MaxLanes bound is
+// CommitPrepare's to enforce (this side cannot read the lane map racelessly);
+// callers budget their in-flight BeginPrepares against the same slot count.
+func (ls *laneSet) BeginPrepare(ctx context.Context, spec inference.LaneSpec) (inference.PendingLane, error) {
+	if ls == nil || ls.model == nil {
+		return nil, core.NewError("native.laneSet.Prepare: nil lane set")
+	}
 	if len(spec.PromptIDs) == 0 {
-		return inference.LaneHandle{}, core.NewError("native.laneSet.Prepare: empty prompt")
+		return nil, core.NewError("native.laneSet.Prepare: empty prompt")
 	}
 	if spec.MaxNew <= 0 {
-		return inference.LaneHandle{}, core.NewError("native.laneSet.Prepare: MaxNew must be > 0")
+		return nil, core.NewError("native.laneSet.Prepare: MaxNew must be > 0")
 	}
 	if err := ctx.Err(); err != nil {
-		return inference.LaneHandle{}, err
+		return nil, err
 	}
 
 	sess, err := ls.openLaneSession()
 	if err != nil {
-		return inference.LaneHandle{}, err
+		return nil, err
+	}
+	// Joining a set that is ALREADY streaming: cap the newcomer's prefill
+	// chunks so the shared command queue interleaves lane rounds between them
+	// — one whole-prompt command buffer would freeze every in-flight stream
+	// for its full duration (the queue executes buffers in order). An empty
+	// set keeps the uncapped whole-prompt prefill (burst admissions and solo
+	// boots lose nothing). Advisory read; byte-identical either way (the #381
+	// chunk-parity receipts — chunked ≡ one-shot ≡ stepping).
+	if live := ls.liveLanes.Load(); live > 0 {
+		sess.prefillChunkRowsCap = laneOverlapPrefillChunkRows
+		if gpuTraceEnabled() {
+			nativeTraceLog(core.Sprintf("gpu-trace: lane  begin-prepare  live=%d cap=%d rows=%d\n", live, sess.prefillChunkRowsCap, len(spec.PromptIDs)))
+		}
+	} else if gpuTraceEnabled() {
+		nativeTraceLog(core.Sprintf("gpu-trace: lane  begin-prepare  live=0 cap=0 rows=%d\n", len(spec.PromptIDs)))
 	}
 	// A session without a recorded ICB (MoE — icbEligible declines the router
 	// block) is admitted as a RE-ENCODE lane: Phase 2 advances it through the
@@ -186,16 +247,12 @@ func (ls *laneSet) Prepare(ctx context.Context, spec inference.LaneSpec) (infere
 	// per-request accounting — the shared-submission win stays ICB-only.
 	icb := sess.state.icb
 	reencode := icb == nil || !icb.hasFinalOut
-	if ls.dModel == 0 {
-		ls.dModel = sess.arch.Hidden
-	}
 	if len(spec.PromptIDs) > sess.maxLen {
 		_ = sess.Close()
-		return inference.LaneHandle{}, core.NewError("native.laneSet.Prepare: prompt exceeds model context window")
+		return nil, core.NewError("native.laneSet.Prepare: prompt exceeds model context window")
 	}
 
 	lane := &decodeLane{
-		id:       ls.nextID + 1,
 		sess:     sess,
 		hasPLE:   sess.perLayerInput != nil,
 		maxNew:   spec.MaxNew,
@@ -208,14 +265,48 @@ func (ls *laneSet) Prepare(ctx context.Context, spec inference.LaneSpec) (infere
 	}
 	if err := ls.prefillLane(lane, spec.PromptIDs); err != nil {
 		_ = sess.Close()
-		return inference.LaneHandle{}, err
+		return nil, err
 	}
+	return &pendingLane{lane: lane, dModel: sess.arch.Hidden}, nil
+}
 
+// CommitPrepare splices a prepared lane into the running set — id assignment +
+// bookkeeping only, no GPU work — and MUST run on the owning goroutine (it
+// mutates the lane map Step iterates). At MaxLanes the pending lane is
+// released and an error returned; the scheduler's slot budget keeps that from
+// happening in practice.
+func (ls *laneSet) CommitPrepare(p inference.PendingLane) (inference.LaneHandle, error) {
+	if ls == nil {
+		return inference.LaneHandle{}, core.NewError("native.laneSet.CommitPrepare: nil lane set")
+	}
+	pl, ok := p.(*pendingLane)
+	if !ok || pl == nil || pl.lane == nil {
+		return inference.LaneHandle{}, core.NewError("native.laneSet.CommitPrepare: not a pending metal lane")
+	}
+	if len(ls.lanes) >= ls.maxLanes {
+		pl.Discard()
+		return inference.LaneHandle{}, core.NewError("native.laneSet.Prepare: lane set is at MaxLanes")
+	}
+	if ls.dModel == 0 {
+		ls.dModel = pl.dModel
+	}
+	lane := pl.lane
+	pl.lane = nil
 	ls.nextID++
+	lane.id = ls.nextID
 	ls.lanes[lane.id] = lane
 	ls.order = append(ls.order, lane.id)
+	ls.liveLanes.Store(int64(len(ls.lanes)))
 	return inference.LaneHandle{ID: lane.id}, nil
 }
+
+// laneOverlapPrefillChunkRows caps an overlapped admission's prefill chunk
+// width (rows per command buffer) while other lanes are streaming. 512 rows ≈
+// one 26B chunk of ~0.35s — the in-flight streams' worst inter-token gap —
+// versus ~1.2s for the whole-prompt buffer; the joiner's own prefill pays the
+// per-chunk seams (~6% by the #367 depth-ladder receipts), a TTFT tax of tens
+// of milliseconds on a joiner that is by definition not the only request.
+const laneOverlapPrefillChunkRows = 512
 
 // prefillLane runs the lane's prompt through the session's PRODUCTION prefill
 // route (prefillRetainedTokens: chunked batched-dense forward, flash prompt
@@ -839,6 +930,7 @@ func (ls *laneSet) Retire(h inference.LaneHandle) error {
 		return core.NewError("native.laneSet.Retire: unknown lane")
 	}
 	delete(ls.lanes, h.ID)
+	ls.liveLanes.Store(int64(len(ls.lanes)))
 	for i, id := range ls.order {
 		if id == h.ID {
 			ls.order = append(ls.order[:i], ls.order[i+1:]...)
@@ -881,6 +973,7 @@ func (ls *laneSet) Close() error {
 	ls.gemm = nil
 	ls.lanes = nil
 	ls.order = nil
+	ls.liveLanes.Store(0)
 	return firstErr
 }
 
