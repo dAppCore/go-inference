@@ -87,7 +87,7 @@ func TestSchedulerResolver_RoutesThroughScheduler(t *testing.T) {
 	base := openai.ResolverFunc(func(context.Context, string) (inference.TextModel, error) {
 		return &fakeChatModel{tokens: []inference.Token{{Text: "hello"}, {Text: " world"}}}, nil
 	})
-	sched := newSchedulerResolver(base, schedulerServeConfig(scheduler.ModeSerial))
+	sched := newSchedulerResolver(base, schedulerServeConfig(scheduler.ModeSerial, 0))
 	defer sched.close()
 
 	mux := compat.NewMuxWithAdmin(sched, compat.AdminConfig{})
@@ -130,7 +130,7 @@ func TestSchedulerResolver_Unset_NoWrapper(t *testing.T) {
 	}
 
 	// Wrapped resolver (flag set): the resolved model IS a scheduler.
-	sched := newSchedulerResolver(base, schedulerServeConfig(scheduler.ModeSerial))
+	sched := newSchedulerResolver(base, schedulerServeConfig(scheduler.ModeSerial, 0))
 	defer sched.close()
 	wrapped, err := sched.ResolveModel(context.Background(), "m")
 	if err != nil {

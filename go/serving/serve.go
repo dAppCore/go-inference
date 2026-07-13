@@ -69,6 +69,11 @@ type ServeConfig struct {
 	// docs/design-continuous-batching.md for the design rationale.
 	Scheduler string
 
+	// SchedulerConcurrency caps the scheduler's concurrently running requests
+	// (the interleave/CB lane count, the serial worker pool width). <= 0
+	// keeps the serve default (4).
+	SchedulerConcurrency int
+
 	// Multi-model serving lifecycle. Models empty = today's single-model
 	// behaviour, unchanged. When Models is non-empty, RunServe builds the
 	// multiModelResolver instead of the single-model hot-swap: ModelPath (the
@@ -270,7 +275,7 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 		if err != nil {
 			return err
 		}
-		sched := newSchedulerResolver(host.resolver, schedulerServeConfig(mode))
+		sched := newSchedulerResolver(host.resolver, schedulerServeConfig(mode, cfg.SchedulerConcurrency))
 		host.resolver = sched
 		defer sched.close()
 		printServe(log, "serve: scheduler %s — requests route through the %s scheduler between the HTTP handlers and the model", mode, mode)
@@ -425,7 +430,7 @@ func runMultiModelServe(ctx context.Context, cfg ServeConfig, outboundPolicy *po
 		if err != nil {
 			return err
 		}
-		schedCfg := schedulerServeConfig(mode)
+		schedCfg := schedulerServeConfig(mode, cfg.SchedulerConcurrency)
 		mm.setScheduler(&schedCfg)
 		defer mm.closeSchedulers()
 		printServe(log, "serve: scheduler %s — each resident model gets its own %s scheduler on load", mode, mode)
