@@ -1,3 +1,36 @@
+# NEXT WAKE (2026-07-16 — the picture corrected: CB WINS K=1; the gap is scaling)
+
+## 2026-07-15 (hop collapse + the inversion — 21c062f, pushed)
+
+- HOP COLLAPSE (21c062f): the CB per-request consumer goroutine is gone
+  — cbReq carries its delivery spec and the drive loop emits FINISHED
+  ScheduledTokens (decode, stop-blank, usage counts, stream-end
+  lastMetrics+sink via cbReq.end() on every close path). 63+549 tests
+  green, -race clean. Wall-FLAT live — the hop theory refuted as the
+  residual's cause; kept as structural (fewer goroutines/channels under
+  load).
+- THE INVERSION (the day's second measurement artefact caught): the
+  'K=1 CB gap' existed only because the K=1 probe reused ONE prompt —
+  plain's engine prompt-reuse cache skipped prefill. SALTED plain K=1 =
+  117 tok/s vs CB 127: on unique traffic CB's per-lane baseline BEATS
+  plain by ~9% (consistent with the GPU-span receipt: the lane round is
+  leaner than the chain, 7.11 vs 7.55 ms/tok). Bench rule now twice
+  learned TODAY: salt every prompt unless reuse is the thing measured
+  (continuity AND engine prompt-reuse both contaminate).
+- WHAT ACTUALLY TRAILS: cross-lane SCALING. K=1→4: CB 127→138 (1.09×)
+  vs plain 117→151/161 (1.3×+). The Step's batch boundary harvests ALL
+  lanes each round (slowest gates; head sweeps serialise); plain's
+  goroutines interleave freely. Refutations banked: depth-2 queue,
+  per-token hops.
+- NEXT LEVERS (scaling-shaped): 1) RAGGED HARVEST — emit whichever
+  lanes' pending rounds completed (poll cb status / per-lane
+  readiness) instead of waiting all K per Step; restructures Step's
+  contract (partial results) + the drive loop. The biggest lever.
+  2) Batched chained tail (one head sweep for all K — grows with K).
+  3) One consistent-boot K-sweep (K=1,2,4,8 both arms, salted) — the
+  151-vs-161 plain boot-shape spread needs pinning before more ladder
+  claims.
+
 # NEXT WAKE (2026-07-16 — residual LOCATED: it's the CB serve layer, not the engine)
 
 ## 2026-07-15 (the GPU-span split — b6acd09, pushed)
