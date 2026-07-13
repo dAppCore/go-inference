@@ -5,12 +5,104 @@
 package native
 
 import (
+	"math"
 	"sync"
 	"testing"
 	"unsafe"
 
 	"github.com/tmc/apple/metal"
 )
+
+func TestNewAttentionBlockICBScratch_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const dModel, qDim, nHeads, nKVHeads, headDim, kvLen = 64, 64, 1, 1, 64, 2
+	const base, scale, offset, eps = float32(10000), float32(0.125), 3, float32(1e-5)
+	scratch, err := newAttentionBlockICBScratch(dModel, qDim, nHeads, nKVHeads, headDim, kvLen, base, scale, offset, eps)
+	if err != nil {
+		t.Fatalf("newAttentionBlockICBScratch: %v", err)
+	}
+	defer scratch.Close()
+	if !scratch.matches(dModel, qDim, nHeads, nKVHeads, headDim, kvLen) {
+		t.Fatal("newAttentionBlockICBScratch did not create a reusable scratch shape")
+	}
+	if scratch.rng.Length != 6 || scratch.offPtr == nil || *scratch.offPtr != offset {
+		t.Fatalf("ICB command range/offset = %#v/%v, want six commands and offset %d", scratch.rng, scratch.offPtr, offset)
+	}
+	if scratch.epsPtr == nil || *scratch.epsPtr != eps || scratch.ropeScalePtr == nil || *scratch.ropeScalePtr != scale || scratch.sdpaScalePtr == nil || *scratch.sdpaScalePtr != scale {
+		t.Fatal("newAttentionBlockICBScratch did not initialise the scalar storage used by recorded commands")
+	}
+	if scratch.ropeBasePtr == nil || math.Float32bits(*scratch.ropeBasePtr) != math.Float32bits(float32(math.Log2(float64(base)))) {
+		t.Fatalf("rope-base scalar = %v, want log2(%v)", scratch.ropeBasePtr, base)
+	}
+}
+
+func TestAttentionBlockICBScratch_buffers_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	const dModel, qDim, nHeads, nKVHeads, headDim, kvLen = 64, 64, 1, 1, 64, 2
+	scratch, err := newAttentionBlockICBScratch(dModel, qDim, nHeads, nKVHeads, headDim, kvLen, 10000, 0.125, 0, 1e-5)
+	if err != nil {
+		t.Fatalf("newAttentionBlockICBScratch: %v", err)
+	}
+	defer scratch.Close()
+	x := toBF16Bytes(syntheticFloat32(dModel, 3))
+	k := toBF16Bytes(syntheticFloat32(nKVHeads*kvLen*headDim, 5))
+	v := toBF16Bytes(syntheticFloat32(nKVHeads*kvLen*headDim, 7))
+	xBuf, kBuf, vBuf, outBuf, err := scratch.buffers(x, k, v)
+	if err != nil {
+		t.Fatalf("attentionBlockICBScratch.buffers: %v", err)
+	}
+	if xBuf == nil || kBuf == nil || vBuf == nil || outBuf == nil {
+		t.Fatal("attentionBlockICBScratch.buffers returned a nil ICB binding")
+	}
+	if got, want := uintptr(xBuf.Contents()), uintptr(unsafe.Pointer(&x[0])); got != want {
+		t.Fatalf("x buffer backing = %#x, want caller backing %#x", got, want)
+	}
+	if got, want := uintptr(kBuf.Contents()), uintptr(unsafe.Pointer(&k[0])); got != want {
+		t.Fatalf("k buffer backing = %#x, want caller backing %#x", got, want)
+	}
+	if got, want := uintptr(vBuf.Contents()), uintptr(unsafe.Pointer(&v[0])); got != want {
+		t.Fatalf("v buffer backing = %#x, want caller backing %#x", got, want)
+	}
+}
+
+func TestAttentionBlockICBScratch_buffers_Bad(t *testing.T) {
+	requireNativeRuntime(t)
+
+	scratch, err := newAttentionBlockICBScratch(64, 64, 1, 1, 64, 2, 10000, 0.125, 0, 1e-5)
+	if err != nil {
+		t.Fatalf("newAttentionBlockICBScratch: %v", err)
+	}
+	defer scratch.Close()
+	if _, _, _, _, err := scratch.buffers(nil, make([]byte, 256), make([]byte, 256)); err == nil {
+		t.Fatal("attentionBlockICBScratch.buffers accepted an empty caller input")
+	}
+}
+
+func TestAttentionBlockICBScratch_Close_Good(t *testing.T) {
+	requireNativeRuntime(t)
+
+	scratch, err := newAttentionBlockICBScratch(64, 64, 1, 1, 64, 2, 10000, 0.125, 0, 1e-5)
+	if err != nil {
+		t.Fatalf("newAttentionBlockICBScratch: %v", err)
+	}
+	x := toBF16Bytes(syntheticFloat32(64, 3))
+	k := toBF16Bytes(syntheticFloat32(128, 5))
+	v := toBF16Bytes(syntheticFloat32(128, 7))
+	if _, _, _, _, err := scratch.buffers(x, k, v); err != nil {
+		t.Fatalf("attentionBlockICBScratch.buffers: %v", err)
+	}
+	scratch.residentRes = []metal.MTLResource{scratch.normed}
+	scratch.Close()
+	scratch.Close()
+	if scratch.x != nil || scratch.k != nil || scratch.v != nil || scratch.out != nil || scratch.normed != nil || scratch.q != nil || scratch.qr != nil || scratch.attn != nil || scratch.attnOut != nil || scratch.icb != nil || scratch.residentRes != nil {
+		t.Fatalf("Close retained ICB scratch resources: %#v", scratch)
+	}
+	if scratch.xView.buf != nil || scratch.kView.buf != nil || scratch.vView.buf != nil {
+		t.Fatal("Close retained caller-buffer views")
+	}
+}
 
 func TestNormProjectICBMatchesReencode(t *testing.T) {
 	requireNativeRuntime(t)
