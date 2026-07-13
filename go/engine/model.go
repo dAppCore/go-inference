@@ -63,12 +63,13 @@ type TextModel struct {
 	// for an empty result).
 	modelStops []int32
 
-	// declaredSuppressTokens is the model's declared generation_config
-	// suppress_tokens (SamplingDefaultsDeclarer), resolved once because its
-	// input (the checkpoint's declaration) is fixed for the model's lifetime.
-	// applyDeclaredSuppressTokens folds it into a request that carries none of
-	// its own. nil when the model declares none or does not declare at all.
-	declaredSuppressTokens []int32
+	// declaredSampling is the model's declared generation_config sampling
+	// intent (SamplingDefaultsDeclarer), resolved once because its input (the
+	// checkpoint's declaration) is fixed for the model's lifetime.
+	// applyDeclaredSampling folds it into a request under the request-set >
+	// model-declared > engine fallback precedence. Zero value when the model
+	// declares none or does not declare at all.
+	declaredSampling SamplingDefaults
 
 	mu          sync.Mutex
 	lastErr     core.Result
@@ -178,7 +179,7 @@ func NewTextModel(tm TokenModel, tok *tokenizer.Tokenizer, modelType string, inf
 			tmpl = declared
 		}
 	}
-	m := &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, turns: turns, thoughtSuppressor: suppressor, chatTmpl: tmpl, declaredSuppressTokens: declaredSuppressTokens(tm), lastErr: core.Ok(nil)}
+	m := &TextModel{tm: tm, tok: tok, modelType: modelType, info: info, maxLen: maxLen, turns: turns, thoughtSuppressor: suppressor, chatTmpl: tmpl, declaredSampling: resolveDeclaredSampling(tm), lastErr: core.Ok(nil)}
 	// The model-derived stop set never changes after construction (its inputs —
 	// tokenizer, template, StopTokenDeclarer — are all fixed now), so resolve it
 	// once here instead of rebuilding the slice and re-scanning the tokenizer on
@@ -444,10 +445,12 @@ func (m *TextModel) stream(ctx context.Context, ids []int32, cfg inference.Gener
 // promptLen is the prompt token count (metrics); start is when the whole
 // operation began.
 func (m *TextModel) decodeFromPrefilled(ctx context.Context, sess Session, promptLen int, cfg inference.GenerateConfig, start time.Time, yield func(inference.Token) bool) {
-	// Declares-discipline precedence for suppress_tokens (request-set > model-
-	// declared > engine fallback) — see SamplingDefaultsDeclarer for why this is
-	// the one sampling field folded here.
-	cfg = m.applyDeclaredSuppressTokens(cfg)
+	// Declares-discipline precedence for the model's declared sampling defaults
+	// (request-set > model-declared > engine fallback). Folded here, before the
+	// sample-vs-greedy decision below reads cfg.Temperature/MinP, so a model
+	// declaring temperature 0.7 on a request that left it unset samples at 0.7
+	// rather than falling to the greedy engine default.
+	cfg = m.applyDeclaredSampling(cfg)
 	maxNew := cfg.MaxTokens
 	if maxNew <= 0 {
 		maxNew = 256

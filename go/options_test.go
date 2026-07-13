@@ -756,6 +756,34 @@ func TestOptions_WithSeed_Good(t *testing.T) {
 	checkEqual(t, false, ApplyGenerateOpts(nil).SeedSet)
 }
 
+// TestOptions_SamplingScalars_SetFlags pins the SeedSet-style companion flags:
+// each sampling scalar's With* setter raises its "was this set" flag (so a
+// backend folding a model's declared defaults honours the request's value even
+// when it is the zero value — an explicit greedy/disabled request), while an
+// absent option leaves the flag false so the declared default may apply.
+func TestOptions_SamplingScalars_SetFlags(t *testing.T) {
+	// Explicit zero still raises the flag — the whole point of the design: a
+	// caller asking Temperature 0 (greedy) or TopK/TopP/MinP 0 (disabled) must
+	// be distinguishable from a caller who said nothing.
+	set := ApplyGenerateOpts([]GenerateOption{WithTemperature(0), WithTopK(0), WithTopP(0), WithMinP(0)})
+	checkEqual(t, true, set.TemperatureSet)
+	checkEqual(t, true, set.TopKSet)
+	checkEqual(t, true, set.TopPSet)
+	checkEqual(t, true, set.MinPSet)
+
+	// Absent options leave every flag false (unset).
+	unset := ApplyGenerateOpts(nil)
+	checkEqual(t, false, unset.TemperatureSet)
+	checkEqual(t, false, unset.TopKSet)
+	checkEqual(t, false, unset.TopPSet)
+	checkEqual(t, false, unset.MinPSet)
+
+	// A direct struct literal leaves the flags false unless it sets them —
+	// mirroring Seed/SeedSet, so existing literal users keep old behaviour.
+	literal := GenerateConfig{Temperature: 0.7}
+	checkEqual(t, false, literal.TemperatureSet)
+}
+
 func TestOptions_WithSuppressTokens_Good(t *testing.T) {
 	cfg := ApplyGenerateOpts([]GenerateOption{WithSuppressTokens(1, 2, 3)})
 	checkEqual(t, 3, len(cfg.SuppressTokens))

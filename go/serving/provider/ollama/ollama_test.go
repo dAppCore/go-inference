@@ -24,6 +24,26 @@ func TestOllama_GenerateOptions_Good(t *testing.T) {
 	if cfg.MaxTokens != 12 || cfg.Temperature != 0.4 || cfg.TopK != 8 || cfg.TopP != 0.7 || cfg.MinP != 0.05 {
 		t.Fatalf("cfg = %+v", cfg)
 	}
+	// The fused closure bypasses the With* setters, so it must raise the *Set
+	// flags itself — otherwise a genuinely-carried Ollama value would be
+	// silently overridden by the model's declared generation_config default.
+	if !cfg.TemperatureSet || !cfg.TopKSet || !cfg.TopPSet || !cfg.MinPSet {
+		t.Fatalf("cfg flags = %+v, want every carried field's *Set flag raised", cfg)
+	}
+}
+
+// TestOllama_GenerateOptions_SetFlags pins that only the fields the request
+// genuinely carried raise their flag: an Options with just Temperature set
+// leaves TopK/TopP/MinP unset (flag false) so their model-declared defaults
+// still apply.
+func TestOllama_GenerateOptions_SetFlags(t *testing.T) {
+	cfg := inference.ApplyGenerateOpts(GenerateOptions(Options{Temperature: 0.4}))
+	if !cfg.TemperatureSet {
+		t.Fatal("TemperatureSet = false, want true (Temperature was carried)")
+	}
+	if cfg.TopKSet || cfg.TopPSet || cfg.MinPSet {
+		t.Fatalf("cfg = %+v, want TopK/TopP/MinP flags false (fields omitted)", cfg)
+	}
 }
 
 // TestOllama_GenerateOptions_Bad covers the all-zero-Options fast

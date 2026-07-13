@@ -1331,24 +1331,24 @@ type samplingDeclarerTokenModel struct {
 
 func (s samplingDeclarerTokenModel) DeclaredSamplingDefaults() SamplingDefaults { return s.defaults }
 
-// TestModel_TextModel_SuppressTokens_Declared pins the one sampling field the
-// declares-discipline precedence (request-set > model-declared > engine
-// fallback) can safely fold: a request supplying its own suppress list wins
-// outright; an unset request gets the checkpoint's declared list; with no
-// declarer at all, the resolved config carries no suppression — unchanged from
-// before this capability existed.
+// TestModel_TextModel_SuppressTokens_Declared pins the suppress_tokens fold
+// under the declares-discipline precedence (request-set > model-declared >
+// engine fallback): a request supplying its own suppress list wins outright; an
+// unset request gets the checkpoint's declared list; with no declarer at all,
+// the resolved config carries no suppression — unchanged from before this
+// capability existed.
 func TestModel_TextModel_SuppressTokens_Declared(t *testing.T) {
 	declared := SamplingDefaults{SuppressTokens: []int32{9, 10}}
 	m := NewTextModel(samplingDeclarerTokenModel{defaults: declared}, newGemma4FixtureTokenizer(t), "gemma4", inference.ModelInfo{}, 8)
 
 	// request-set wins outright.
-	got := m.applyDeclaredSuppressTokens(inference.GenerateConfig{SuppressTokens: []int32{1}})
+	got := m.applyDeclaredSampling(inference.GenerateConfig{SuppressTokens: []int32{1}})
 	if !slices.Equal(got.SuppressTokens, []int32{1}) {
 		t.Fatalf("request-set suppress = %v, want the request's own [1]", got.SuppressTokens)
 	}
 
 	// declared applies when the request leaves the field unset.
-	got = m.applyDeclaredSuppressTokens(inference.GenerateConfig{})
+	got = m.applyDeclaredSampling(inference.GenerateConfig{})
 	if !slices.Equal(got.SuppressTokens, declared.SuppressTokens) {
 		t.Fatalf("unset suppress = %v, want declared %v", got.SuppressTokens, declared.SuppressTokens)
 	}
@@ -1356,27 +1356,60 @@ func TestModel_TextModel_SuppressTokens_Declared(t *testing.T) {
 	// no declarer at all: engine fallback (no suppression), byte-identical to
 	// the pre-capability behaviour.
 	bare := NewTextModel(&fakeTokenModel{}, newGemma4FixtureTokenizer(t), "gemma4", inference.ModelInfo{}, 8)
-	got = bare.applyDeclaredSuppressTokens(inference.GenerateConfig{})
+	got = bare.applyDeclaredSampling(inference.GenerateConfig{})
 	if len(got.SuppressTokens) != 0 {
 		t.Fatalf("no-declarer suppress = %v, want none", got.SuppressTokens)
 	}
 }
 
-// TestModel_TextModel_SamplingScalarsNotFolded pins the documented gap on
-// SamplingDefaultsDeclarer: a checkpoint's declared do_sample/temperature/
-// top_p/top_k are NEVER folded into a request's resolved GenerateConfig, even
-// when every one of the request's own fields sits at its zero value.
-// GenerateConfig represents "unset" and "explicit zero" identically for these
-// fields (Temperature 0 = greedy, TopP/TopK 0 = disabled — both meaningful,
-// documented values), so folding on sight would silently override an explicit
-// caller request. Only SuppressTokens (tested above) can fold safely today.
-func TestModel_TextModel_SamplingScalarsNotFolded(t *testing.T) {
-	temp, topP, topK, doSample := float32(0.7), float32(0.95), 64, true
-	declared := SamplingDefaults{DoSample: &doSample, Temperature: &temp, TopP: &topP, TopK: &topK}
+// TestModel_TextModel_SamplingScalars_Declared pins the per-field precedence
+// the SeedSet-style *Set flags unlock: for each of temperature/top_p/top_k/
+// min_p, an explicit request (flag true) is honoured even at its zero value
+// (explicit greedy/disabled), an unset request (flag false) receives the
+// checkpoint's declared default, and with neither declarer nor request the
+// engine fallback (the zero value) stands.
+func TestModel_TextModel_SamplingScalars_Declared(t *testing.T) {
+	temp, topP, topK, minP, doSample := float32(0.7), float32(0.95), 64, float32(0.05), true
+	declared := SamplingDefaults{DoSample: &doSample, Temperature: &temp, TopP: &topP, TopK: &topK, MinP: &minP}
 	m := NewTextModel(samplingDeclarerTokenModel{defaults: declared}, newGemma4FixtureTokenizer(t), "gemma4", inference.ModelInfo{}, 8)
-	got := m.applyDeclaredSuppressTokens(inference.GenerateConfig{})
-	if got.Temperature != 0 || got.TopP != 0 || got.TopK != 0 {
-		t.Fatalf("resolved cfg = %+v, want Temperature/TopP/TopK left at their zero value", got)
+
+	// unset request → declared defaults apply.
+	unset := m.applyDeclaredSampling(inference.GenerateConfig{})
+	if unset.Temperature != 0.7 || unset.TopP != 0.95 || unset.TopK != 64 || unset.MinP != 0.05 {
+		t.Fatalf("unset request = %+v, want declared 0.7/0.95/64/0.05", unset)
+	}
+
+	// explicit request (flags true) wins — INCLUDING explicit zero: a request
+	// asking Temperature 0 on a model declaring 0.7 stays greedy.
+	explicit := inference.GenerateConfig{
+		Temperature: 0, TemperatureSet: true,
+		TopP: 0, TopPSet: true,
+		TopK: 0, TopKSet: true,
+		MinP: 0, MinPSet: true,
+	}
+	kept := m.applyDeclaredSampling(explicit)
+	if kept.Temperature != 0 || kept.TopP != 0 || kept.TopK != 0 || kept.MinP != 0 {
+		t.Fatalf("explicit-zero request = %+v, want the request's own zeros honoured", kept)
+	}
+
+	// neither declarer nor request → engine fallback (zero values stand).
+	bare := NewTextModel(&fakeTokenModel{}, newGemma4FixtureTokenizer(t), "gemma4", inference.ModelInfo{}, 8)
+	fallback := bare.applyDeclaredSampling(inference.GenerateConfig{})
+	if fallback.Temperature != 0 || fallback.TopP != 0 || fallback.TopK != 0 || fallback.MinP != 0 {
+		t.Fatalf("no-declarer request = %+v, want engine fallback zeros", fallback)
+	}
+}
+
+// TestModel_TextModel_SamplingDefaults_DoSampleNotFolded pins that do_sample is
+// carried but never folded: it has no GenerateConfig counterpart (the engine
+// derives sample-vs-greedy from resolved Temperature/MinP/RepeatPenalty), so a
+// declarer setting only do_sample leaves the resolved config untouched.
+func TestModel_TextModel_SamplingDefaults_DoSampleNotFolded(t *testing.T) {
+	doSample := true
+	m := NewTextModel(samplingDeclarerTokenModel{defaults: SamplingDefaults{DoSample: &doSample}}, newGemma4FixtureTokenizer(t), "gemma4", inference.ModelInfo{}, 8)
+	got := m.applyDeclaredSampling(inference.GenerateConfig{})
+	if got.Temperature != 0 || got.TopP != 0 || got.TopK != 0 || got.MinP != 0 {
+		t.Fatalf("do_sample-only declarer = %+v, want the resolved config untouched", got)
 	}
 }
 
