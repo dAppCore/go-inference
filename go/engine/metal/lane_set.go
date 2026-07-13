@@ -61,6 +61,11 @@ type laneSet struct {
 	gemmMode     int
 	gemm         *gemmSlabs
 	gemmFwdCount uint64 // monotonic: +1 per weight-read-once GEMM forward (the counter guard)
+
+	// headRowsCount is monotonic: +1 per batched Phase-1 head submission (the
+	// K-row fused lm_head+argmax). The engagement discriminator for tests — a
+	// silent fall-through to the per-lane ladder must not pass as batched.
+	headRowsCount uint64
 }
 
 // decodeLane is one lane's owned mutable state.
@@ -229,16 +234,23 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 	withAutoreleasePool(func() {
 		// Phase 1 — produce one token per active lane from its current hidden:
 		// the lane's own sampler for a non-greedy discipline (the classic sampled
-		// route ladder, one draw per token), else head+greedy.
-		for _, lane := range active {
+		// route ladder, one draw per token), else head+greedy. An ALL-GREEDY set
+		// takes ONE batched head submission (the MTP verify's K-row fused
+		// lm_head+argmax — one weight sweep for all K on quant heads) instead of
+		// K commit+waits; any decline falls to the per-lane ladder.
+		batchedToks, batchedHead := ls.phase1GreedyRows(active)
+		for i, lane := range active {
 			var tok int32
 			var err error
-			if lane.sampler != nil {
+			switch {
+			case batchedHead:
+				tok = batchedToks[i]
+			case lane.sampler != nil:
 				tok, err = lane.sess.sampledNextFromHiddenInPool(lane.hidden, lane.sampler, lane.sampleParams, lane.sampleHistory)
 				if err == nil && lane.sampleParams.RepeatPenalty > 1 {
 					lane.sampleHistory = append(lane.sampleHistory, tok)
 				}
-			} else {
+			default:
 				tok, err = lane.sess.greedyFromHiddenInPool(lane.hidden, nil)
 			}
 			if err != nil {
@@ -345,36 +357,77 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 	return results, nil
 }
 
-// sharedReencodeForward advances the re-encode lanes through ONE shared
-// submission: each lane's full one-token forward encodes into the same
-// command buffer (per-session buffers never alias), committed and waited
-// once — the submission shape that lets the GPU overlap K independent
-// forwards instead of paying K serial commit+wait round-trips. Returns false
-// WITHOUT advancing any lane when a session is ineligible (bf16/host-router
-// MoE, trace, PLE) or an encode declines mid-way — the caller then runs the
-// per-lane path; an uncommitted cb mutates no session state, so the retry is
+// phase1GreedyRows runs Phase 1's head for an ALL-GREEDY active set as one
+// batched submission: every lane's hidden rides the K-row fused
+// lm_head+argmax (ArchSession.greedyRowsFromHiddensInPool — the MTP verify
+// head), one command buffer, one wait, and on quant heads ONE weight sweep
+// scoring all K rows. The rows buffer and head encoder are shared model
+// state, so ANY lane's session can host the call. ok=false — a sampled lane
+// in the set, K==1 (nothing to batch), no direct-greedy head, or the
+// helper's own declines — keeps the per-lane ladder, byte-identically.
+func (ls *laneSet) phase1GreedyRows(active []*decodeLane) ([]int32, bool) {
+	if len(active) < 2 {
+		return nil, false
+	}
+	for _, lane := range active {
+		if lane.sampler != nil {
+			return nil, false
+		}
+	}
+	hiddens := make([][]byte, len(active))
+	for i, lane := range active {
+		hiddens[i] = lane.hidden
+	}
+	out := make([]int32, len(active))
+	ok, err := active[0].sess.greedyRowsFromHiddensInPool(hiddens, nil, out)
+	if err != nil || !ok {
+		return nil, false
+	}
+	ls.headRowsCount++
+	return out, true
+}
+
+// sharedReencodeForward advances the re-encode lanes through ONE grouped
+// submission round: each lane's full one-token forward encodes into its OWN
+// command buffer, all K are committed back-to-back, and only then does the
+// owner wait — the waits pipeline (the first absorbs the bulk; the rest are
+// already near-complete), and the queue overlaps the K independent cbs
+// exactly as the plain path's per-request goroutines do. One cb for ALL K
+// was measured slower here: the step's pass-edge memory barriers are global
+// to the encoder chain, so a single cb serialises the lanes against each
+// other and forfeits the overlap it was meant to buy. Returns false WITHOUT
+// advancing any lane when a session is ineligible (bf16/host-router MoE,
+// trace, PLE) or an encode declines mid-way — the caller then runs the
+// per-lane path; uncommitted cbs mutate no session state, so the retry is
 // clean. On success every lane's hidden and position are advanced and the
-// step counts one batched forward.
+// step counts one batched forward round.
 func (ls *laneSet) sharedReencodeForward(reenc []*decodeLane) bool {
 	for _, lane := range reenc {
 		if !lane.sess.sharedStepEligible() {
 			return false
 		}
 	}
-	sink := &sharedStepSink{cb: commandBufferFast(queue)}
-	sink.enc = computeCommandEncoderFast(sink.cb)
+	cbs := make([]metal.MTLCommandBufferObject, len(reenc))
 	finalOut := make([]metal.MTLBuffer, len(reenc))
 	for i, lane := range reenc {
+		sink := &sharedStepSink{cb: commandBufferFast(queue)}
+		sink.enc = computeCommandEncoderFast(sink.cb)
 		if err := lane.sess.stepIDEncodeShared(lane.pendingToken, sink); err != nil {
-			// The failing step already ended the encoder; drop the cb
-			// uncommitted and let the caller retry every lane per-lane.
+			// The failing step already ended its encoder; nothing committed
+			// yet on THIS lane — but earlier lanes' cbs are committed below
+			// only after every encode succeeds, so drop everything and let
+			// the caller retry per-lane.
 			return false
 		}
-		finalOut[i] = sink.finalOut
+		endEncodingFast(sink.enc)
+		cbs[i], finalOut[i] = sink.cb, sink.finalOut
 	}
-	endEncodingFast(sink.enc)
-	commitCommandBufferFast(sink.cb)
-	waitUntilCompletedFast(sink.cb)
+	for _, cb := range cbs {
+		commitCommandBufferFast(cb)
+	}
+	for _, cb := range cbs {
+		waitUntilCompletedFast(cb)
+	}
 	ls.fwdCount++
 	for i, lane := range reenc {
 		if cap(lane.hidden) < ls.dModel*bf16Size {

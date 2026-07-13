@@ -133,6 +133,12 @@ func TestLaneSetByteIdentity(t *testing.T) {
 		}
 	}
 	batchedTokens, batchedFwd := drainLaneSet(t, ls)
+	// Engagement guard for the batched Phase-1 head: the K-way greedy must
+	// have taken the K-row fused submission at least once — a silent decline
+	// to the per-lane ladder would make this proof vacuous.
+	if rows := ls.(*laneSet).headRowsCount; rows == 0 {
+		t.Fatal("batched Phase-1 head never engaged (headRowsCount == 0)")
+	}
 	_ = ls.Close()
 
 	// Per-lane byte-identity: batched stream == serial stream, for every lane.
@@ -346,6 +352,10 @@ func TestLaneSetMoESharedSubmissionByteIdentity(t *testing.T) {
 		}
 	}
 	batchedTokens, batchedFwd := drainLaneSet(t, ls)
+	// Engagement guard for the batched Phase-1 head (see the dense twin).
+	if rows := ls.(*laneSet).headRowsCount; rows == 0 {
+		t.Fatal("batched Phase-1 head never engaged (headRowsCount == 0)")
+	}
 	_ = ls.Close()
 
 	for i := range specs {
