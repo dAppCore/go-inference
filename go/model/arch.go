@@ -57,6 +57,16 @@ type LayerSpec struct {
 	// the key weight when set. Also true for a KV-shared layer (it projects to a discarded buffer
 	// and attends the owner's cache), which likewise carries no value weight of its own.
 	AttentionKEqV bool
+	// Norm-op selections (the #57 slice-3 declarations). Each declares that this layer carries
+	// the named normalisation op, resolved once in model.Assemble from checkpoint weight
+	// presence — backends bind the declared selection instead of re-probing weight buffers.
+	// Shared across families: gemma4 declares all four, qwen-class declares QK-norm,
+	// exaone4/gptneox-class declare the post ("sandwich") norms. Declaring a norm without its
+	// weight is a caller bug (the op would bind a nil buffer).
+	AttentionQNorm bool // self_attn.q_norm present
+	AttentionKNorm bool // self_attn.k_norm present
+	PostAttnNorm   bool // post_attention_layernorm present
+	PostFFNorm     bool // post feed-forward norm present (dense MLP layers)
 }
 
 // OwnsCache reports whether this layer holds its own KV cache (vs sharing).
