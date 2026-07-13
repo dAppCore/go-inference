@@ -1,3 +1,35 @@
+# NEXT WAKE (2026-07-15 — shared submission live; the chain/host fork found)
+
+## 2026-07-14 (final rung of the session — de239ac, pushed)
+
+- SHARED SUBMISSION (de239ac): K re-encode (MoE) forwards encode into ONE
+  command buffer per lane-set Step — sharedStepSink threaded through
+  stepTokenEncode (nil sink = the classic own-cb shape, byte-for-byte
+  untouched); sharedEncodeEligible gates the device-router quant MoE lane
+  up front AND at step entry; the MoE break-out under a sink fails clean
+  and the owner retries per-lane off an uncommitted cb. Live 26B-A4B
+  (-context 4096): 4-concurrent unique-prompt aggregate 93 → 118 tok/s
+  (+27%); plain 151. The residual gap is PHASE 1 — K separate head
+  submissions per step (greedyFromHiddenInPool per lane) — i.e. the
+  batched-head remainder rung. Suite 2273/0.
+- THE REAL FIND (pre-existing, now tracked): on the quant MoE fixture,
+  Generate's CHAINED-LIVE tail (GPU argmax head + GPU-produced next embed,
+  arch_session.go ~4989) diverges from the HOST loop on near-tie logits —
+  oracle [15 42 7 26…] vs oracle-nochain [15 42 7 34…], where nochain ==
+  both lane arms byte-for-byte. Two production arms disagree WITHIN
+  Generate; the ICB-parity-scar family ("chained paths differ from host
+  re-encode"). Consequence: plain serve (chain) vs CB lanes (host loop)
+  can pick different tokens at temp 0 on near-ties on REAL weights.
+  Next: root-cause GPU-vs-host embed dequant rounding / argmax tie-break,
+  unify or declare. The lane oracles pin the HOST arm
+  (stepGreedyChainDisabled) — like-for-like.
+- Method note (cost an hour): my first shared-vs-plain diag compared
+  stepIDInPool vs stepIDEncodeShared with FORCED tokens — equal, correctly
+  exonerating the shared encode — but the failing test compared lane
+  GREEDY LOOPS vs Generate. The three-arm diag (oracle / per-lane loop /
+  shared loop) + the chain kill-switch found the fork in two runs.
+  Enumerate the arms BEFORE comparing pairs.
+
 # NEXT WAKE (2026-07-14 night — MoE rides CB; 26B live)
 
 ## 2026-07-14 (later the same session — edd3249, pushed)
