@@ -90,6 +90,21 @@ func TestMTPDecodeEach_Ugly(t *testing.T) {
 	}
 }
 
+func TestMTPDecodeEach_DraftCapacityBad(t *testing.T) {
+	target := &ArchSession{maxLen: 3}
+	draft := &ArchSession{maxLen: 2}
+	if _, err := MTPDecodeEach(target, draft, []int32{3}, 2, -1, 1, nil); err == nil {
+		t.Fatal("MTPDecodeEach accepted a draft session without the committed-token budget")
+	}
+}
+
+func TestMTPDecodeEach_KBad(t *testing.T) {
+	session := &ArchSession{maxLen: 8}
+	if _, err := MTPDecodeEach(session, session, []int32{3}, 1, -1, 0, nil); err == nil {
+		t.Fatal("MTPDecodeEach accepted a zero draft length")
+	}
+}
+
 func TestMTPDecodeSampled_Bad(t *testing.T) {
 	session := &ArchSession{maxLen: 8}
 	if _, err := MTPDecodeSampled(session, session, []int32{3}, 1, nil, nil, model.NewSampler(2), model.SampleParams{}, 1); err == nil {
@@ -148,6 +163,21 @@ func TestMTPDecodeSampledEach_Ugly(t *testing.T) {
 	session := &ArchSession{maxLen: 1}
 	if _, err := MTPDecodeSampledEach(session, session, []int32{3}, 1, nil, model.NewSampler(1), model.NewSampler(2), model.SampleParams{}, 1, nil); err == nil {
 		t.Fatal("MTPDecodeSampledEach(cache overflow) error = nil")
+	}
+}
+
+func TestMTPDecodeSampledEach_DraftCapacityBad(t *testing.T) {
+	target := &ArchSession{maxLen: 3}
+	draft := &ArchSession{maxLen: 2}
+	if _, err := MTPDecodeSampledEach(target, draft, []int32{3}, 2, nil, model.NewSampler(1), model.NewSampler(2), model.SampleParams{}, 1, nil); err == nil {
+		t.Fatal("MTPDecodeSampledEach accepted a draft session without the committed-token budget")
+	}
+}
+
+func TestMTPDecodeSampledEach_KBad(t *testing.T) {
+	session := &ArchSession{maxLen: 8}
+	if _, err := MTPDecodeSampledEach(session, session, []int32{3}, 1, nil, model.NewSampler(1), model.NewSampler(2), model.SampleParams{}, 0, nil); err == nil {
+		t.Fatal("MTPDecodeSampledEach accepted a zero draft length")
 	}
 }
 

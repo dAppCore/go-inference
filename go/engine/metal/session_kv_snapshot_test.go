@@ -239,6 +239,61 @@ func TestArchSessionRestoreKVSnapshotBlockLayers_Good(t *testing.T) {
 	}
 }
 
+func TestArchSessionRestoreKVSnapshotBlockLayers_Bad(t *testing.T) {
+	const heads, tokens, headDim = 1, 1, 2
+	rowBytes := heads * headDim * bf16Size
+	view := sessionStateLayerView{
+		layer: 0, cacheIndex: 3, cacheMode: nativeStateCacheModeFixed,
+		kvHeads: heads, headDim: headDim, rowBytes: rowBytes, cacheRows: 2,
+		keyBytes: make([]byte, 2*rowBytes), valueBytes: make([]byte, 2*rowBytes),
+	}
+	beforeKey := append([]byte(nil), view.keyBytes...)
+	block := kv.Block{TokenCount: tokens, Snapshot: &kv.Snapshot{Layers: []kv.LayerSnapshot{{
+		Layer: 0, CacheIndex: 4, CacheMode: nativeStateCacheModeFixed,
+		KeyDType: nativeKVSnapshotDTypeBF16, KeyBytes: seededKVBytes(rowBytes, 271), KeyShape: []int32{1, heads, tokens, headDim},
+		ValueDType: nativeKVSnapshotDTypeBF16, ValueBytes: seededKVBytes(rowBytes, 277), ValueShape: []int32{1, heads, tokens, headDim},
+	}}}}
+
+	if err := (&ArchSession{}).restoreKVSnapshotBlockLayers(block, tokens, []sessionStateLayerView{view}); err == nil {
+		t.Fatal("restoreKVSnapshotBlockLayers accepted a mismatched cache index")
+	}
+	// Metadata is checked before the raw slab is decoded or any resident row is
+	// written, so a declined block cannot partially mutate the destination.
+	if !bytes.Equal(view.keyBytes, beforeKey) {
+		t.Fatal("restoreKVSnapshotBlockLayers mutated rows after metadata rejection")
+	}
+}
+
+func TestArchSessionRestoreKVSnapshotBlockLayers_Ugly(t *testing.T) {
+	const heads, tokens, headDim, start, position = 1, 2, 1, 3, 5
+	rowBytes := heads * headDim * bf16Size
+	view := sessionStateLayerView{
+		layer: 0, cacheIndex: 0, cacheMode: nativeStateCacheModeFixed, maxSize: 3,
+		kvHeads: heads, headDim: headDim, rowBytes: rowBytes, cacheRows: 3,
+		keyBytes: seededKVBytes(3*rowBytes, 281), valueBytes: seededKVBytes(3*rowBytes, 283),
+	}
+	keySlab := seededKVBytes(tokens*rowBytes, 293)
+	valueSlab := seededKVBytes(tokens*rowBytes, 307)
+	block := kv.Block{TokenStart: start, TokenCount: tokens, Snapshot: &kv.Snapshot{Layers: []kv.LayerSnapshot{{
+		Layer: 0, CacheIndex: 0, CacheMode: nativeStateCacheModeFixed, MaxSize: 3,
+		KeyDType: nativeKVSnapshotDTypeBF16, KeyBytes: keySlab, KeyShape: []int32{1, heads, tokens, headDim},
+		ValueDType: nativeKVSnapshotDTypeBF16, ValueBytes: valueSlab, ValueShape: []int32{1, heads, tokens, headDim},
+	}}}}
+
+	if err := (&ArchSession{}).restoreKVSnapshotBlockLayers(block, position, []sessionStateLayerView{view}); err != nil {
+		t.Fatalf("restoreKVSnapshotBlockLayers wrapped restore: %v", err)
+	}
+	// At absolute rows 3 and 4, a three-row sliding ring writes physical slots
+	// 0 and 1. The slab is head-major, but one head preserves token order here.
+	keyRows := make([]byte, len(keySlab))
+	valueRows := make([]byte, len(valueSlab))
+	nativeKVLayerSlabToTokenRows(keyRows, keySlab, tokens, heads, headDim)
+	nativeKVLayerSlabToTokenRows(valueRows, valueSlab, tokens, heads, headDim)
+	if !bytes.Equal(view.keyBytes[:2*rowBytes], keyRows) || !bytes.Equal(view.valueBytes[:2*rowBytes], valueRows) {
+		t.Fatal("restoreKVSnapshotBlockLayers did not wrap rows to the leading ring slots")
+	}
+}
+
 func TestArchSessionRestoreKVSnapshotBlockLayersPrefix_Good(t *testing.T) {
 	const heads, blockTokens, prefixTokens, headDim, start = 2, 4, 2, 2, 1
 	rowBytes := heads * headDim * bf16Size
