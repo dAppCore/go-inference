@@ -1,3 +1,35 @@
+# NEXT WAKE (2026-07-15 — submit-ahead lanes: 139 tok/s, 0.86× plain)
+
+## 2026-07-15 (lane submit-ahead — 47c23e9, pushed)
+
+- LANE SUBMIT-AHEAD (47c23e9): one speculative round in flight per
+  chained lane ACROSS the Step boundary. Step = (1) speculatively
+  encode+commit each continuing lane's next round (from-xA input is
+  GPU-produced — no token value needed), (2) wait the pending round,
+  emit its 4-byte token. Budget-terminal emits skip speculation; a stop
+  token wastes ONE round (waited, discarded, pos rewound,
+  truncateSpeculativeKV — the serial chain's unwind). Entry rounds
+  commit-not-wait into the pipeline; Retire/Close drain in-flight.
+- THE TRAP (10-minute hang on the first gate run): the pending cb
+  crosses the Step autorelease-pool boundary — the pool drains at Step
+  end and FREES the autoreleased cb; the next Step's wait hangs
+  forever. Exactly the trap stepGreedyLiveCommit's no-pool comment
+  documents, now met from the other side. chainRoundCommit RETAINS the
+  committed cb; waitReleaseChainedCB drops the pin at every consuming
+  wait (harvest, unwind, drains).
+- RECEIPTS: 38 lane+fork gates green (byte-identity + default-Generate
+  oracle through the full pipeline; every lane ending exercises the
+  truncation unwind); suite 2275/0. Live 26B: 123.5 → 139.2 tok/s
+  (+12%). Campaign ladder: 93 → 118 → 120 → 123 → 139 vs plain 161
+  (0.86×). Cross-route hashes STILL identical (8efeafbf/a6a40bdd/
+  ada2b84e/9ce3bd42), 0 wobbles ×12, usage isolation exact.
+- REMAINING ~14%: candidates in likely order — per-Step host
+  bookkeeping between harvest and the next speculative commits
+  (results assembly, scheduler drive-loop channel sends between
+  Steps); the batched chained tail (device-packed rows head: one head
+  sweep for all K instead of K per-lane sweeps — grows with K);
+  deeper speculation (depth 2) if profiled worth it.
+
 # NEXT WAKE (2026-07-15 — chained lanes live; the gap is lockstep now)
 
 ## 2026-07-15 (chained lane step — e533450, pushed)
