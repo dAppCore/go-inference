@@ -193,47 +193,40 @@ func (m *Model) scheduleCBStep(ctx context.Context, req inference.ScheduledReque
 	if m.cbStops != nil {
 		stops = m.cbStops.ResolvedStopTokens(req.Sampler.StopTokens)
 	}
-	tokens, err := m.cbEngine.submit(ctx, id, promptIDs, req.Sampler.MaxTokens, stops, req.Sampler)
-	if err != nil {
-		return inference.RequestHandle{}, nil, err
-	}
 	stopSet := make(map[int32]bool, len(stops))
 	for _, s := range stops {
 		stopSet[s] = true
 	}
-	labels := cloneLabels(req.Labels)
-	out := make(chan inference.ScheduledToken, m.streamBuffer)
-	go func() {
-		defer close(out)
-		// Per-REQUEST metrics: the base model's Metrics() is the last plain
-		// generation's global snapshot — a lane never updates it, so usage
-		// accounting (the openai handler's prompt/completion counts) read zero.
-		// The scheduler knows both counts itself.
-		metrics := inference.GenerateMetrics{PromptTokens: len(promptIDs)}
-		for t := range tokens {
-			if t.Text == "" && !stopSet[t.ID] {
-				// Terminator text is never content — the plain path yields the
-				// stop token with empty text (engine decodeFromPrefilled). The
-				// streaming decode keeps word boundaries; Decode-of-one is the
-				// fallback for models without it.
-				if m.cbDecode != nil {
-					t.Text = m.cbDecode.DecodeToken(t.ID)
-				} else {
-					t.Text = tok.Decode([]int32{t.ID})
-				}
+	// The streaming decode keeps word boundaries; Decode-of-one is the
+	// fallback for models without it.
+	decode := func(id int32) string { return tok.Decode([]int32{id}) }
+	if m.cbDecode != nil {
+		decode = m.cbDecode.DecodeToken
+	}
+	sink := req.MetricsSink
+	// Per-REQUEST metrics: the base model's Metrics() is the last plain
+	// generation's global snapshot — a lane never updates it, so the drive
+	// loop counts per request and delivers at stream end (facade lastMetrics
+	// + the request's MetricsSink; counts real, timings zero — the CB lane
+	// timing gap is tracked). The drive loop delivers FINISHED
+	// ScheduledTokens straight into the returned stream: no per-request
+	// goroutine, one channel send per token end to end.
+	out, err := m.cbEngine.submit(ctx, id, promptIDs, req.Sampler.MaxTokens, stops, req.Sampler, cbDeliver{
+		decode:  decode,
+		stopSet: stopSet,
+		labels:  cloneLabels(req.Labels),
+		metrics: inference.GenerateMetrics{PromptTokens: len(promptIDs)},
+		finish: func(final inference.GenerateMetrics) {
+			f := final
+			m.lastMetrics.Store(&f)
+			if sink != nil {
+				sink(f)
 			}
-			metrics.GeneratedTokens++
-			out <- inference.ScheduledToken{RequestID: id, Token: t, Metrics: metrics, Labels: labels}
-		}
-		final := metrics
-		m.lastMetrics.Store(&final)
-		if req.MetricsSink != nil {
-			// A lane never touches the base engine's Metrics(); the scheduler
-			// itself owns this request's counts, so it delivers them (counts
-			// real, timings zero — the CB lane timing gap is tracked).
-			req.MetricsSink(final)
-		}
-	}()
+		},
+	})
+	if err != nil {
+		return inference.RequestHandle{}, nil, err
+	}
 	var handleLabels map[string]string
 	if len(req.Labels) > 0 {
 		handleLabels = cloneLabels(req.Labels)
