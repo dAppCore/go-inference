@@ -583,12 +583,16 @@ func forEachCompatToken(ctx context.Context, model inference.TextModel, requestI
 	// silently drop back to plain Chat/Generate for a wrapped scheduled model
 	// (the capability-stripping bug class; see inference.WrappedModel).
 	if scheduler, ok := inference.As[inference.SchedulerModel](model); ok {
+		cfg := inference.ApplyGenerateOpts(opts)
 		handle, stream, err := scheduler.Schedule(ctx, inference.ScheduledRequest{
 			ID:       requestID,
 			Model:    modelName,
 			Prompt:   prompt,
 			Messages: append([]inference.Message(nil), messages...),
-			Sampler:  inference.SamplerConfigFromGenerateConfig(inference.ApplyGenerateOpts(opts)),
+			Sampler:  inference.SamplerConfigFromGenerateConfig(cfg),
+			// The fold cannot hold the thinking override — lift it onto the
+			// request so the scheduler re-arms it at dispatch.
+			EnableThinking: cfg.EnableThinking,
 		})
 		if err != nil {
 			return err
