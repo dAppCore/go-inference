@@ -166,6 +166,11 @@ type Model struct {
 	// cbDecode is the streaming per-token decode for CB stream text; nil falls
 	// back to Decode-of-one on the tokenizer.
 	cbDecode cbStreamDecoder
+
+	// lastMetrics is the final ScheduledToken metrics of the most recent
+	// completed Generate/Chat stream — what Metrics() reports (last-generation
+	// semantics; a CB lane never updates the base model's global snapshot).
+	lastMetrics atomic.Pointer[inference.GenerateMetrics]
 	// cbStops resolves the FULL per-generation stop set (request stops + EOS +
 	// turn-close + template + checkpoint-declared — engine
 	// TextModel.ResolvedStopTokens) so a lane terminates exactly where the
@@ -465,7 +470,15 @@ func (m *Model) Generate(ctx context.Context, prompt string, opts ...inference.G
 			m.setErr(err)
 			return
 		}
+		var last inference.GenerateMetrics
+		got := false
+		defer func() {
+			if got {
+				m.lastMetrics.Store(&last)
+			}
+		}()
 		for scheduled := range tokens {
+			last, got = scheduled.Metrics, true
 			if !yield(scheduled.Token) {
 				_, _ = m.CancelRequest(ctx, scheduled.RequestID)
 				return
@@ -493,7 +506,15 @@ func (m *Model) Chat(ctx context.Context, messages []inference.Message, opts ...
 			m.setErr(err)
 			return
 		}
+		var last inference.GenerateMetrics
+		got := false
+		defer func() {
+			if got {
+				m.lastMetrics.Store(&last)
+			}
+		}()
 		for scheduled := range tokens {
+			last, got = scheduled.Metrics, true
 			if !yield(scheduled.Token) {
 				_, _ = m.CancelRequest(ctx, scheduled.RequestID)
 				return
@@ -546,12 +567,19 @@ func (m *Model) Info() inference.ModelInfo {
 	return m.base.Info()
 }
 
-// Metrics returns the wrapped model's last reported metrics.
+// Metrics returns the last completed scheduled stream's metrics (the same
+// last-generation semantics the engine's own Metrics carries — the openai
+// handler reads it after consuming a stream). The scheduler records them
+// itself because a CB-served lane never updates the base model's global
+// snapshot; before any stream completes, the wrapped model's metrics answer.
 //
 //	metrics := model.Metrics()
 func (m *Model) Metrics() inference.GenerateMetrics {
 	if m == nil || m.base == nil {
 		return inference.GenerateMetrics{}
+	}
+	if p := m.lastMetrics.Load(); p != nil {
+		return *p
 	}
 	return m.base.Metrics()
 }

@@ -443,6 +443,43 @@ func TestCBStepSampledRequestRidesLaneSet(t *testing.T) {
 	}
 }
 
+// TestCBStepUsageMetrics pins the per-request usage accounting on the CB
+// stream: the scheduler builds PromptTokens/GeneratedTokens itself (the base
+// model's global Metrics snapshot is never updated by a lane), so the openai
+// handler's usage counts are real on CB-served responses.
+func TestCBStepUsageMetrics(t *testing.T) {
+	sim := newSimLaneSet()
+	model := &cbCapableModel{sim: sim, available: true}
+	sched, err := New(model, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 4})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sched.CloseEngine()
+
+	_, ch, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+		ID:      "usage1",
+		Prompt:  "abc",
+		Sampler: inference.SamplerConfig{MaxTokens: 3},
+	})
+	if err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+	var last inference.ScheduledToken
+	n := 0
+	for st := range ch {
+		n++
+		last = st
+	}
+	if n != 3 {
+		t.Fatalf("stream should carry 3 tokens, got %d", n)
+	}
+	wantPrompt := len(model.Encode("abc"))
+	if last.Metrics.PromptTokens != wantPrompt || last.Metrics.GeneratedTokens != 3 {
+		t.Fatalf("final token metrics = prompt %d gen %d, want prompt %d gen 3",
+			last.Metrics.PromptTokens, last.Metrics.GeneratedTokens, wantPrompt)
+	}
+}
+
 // TestCBStepLateCapabilityBind pins the lazy rebind: a model whose
 // BatchStepAvailable reports false at New (the observed live shape — the
 // scheduler's construction racing the model load) must NOT pin the server to
