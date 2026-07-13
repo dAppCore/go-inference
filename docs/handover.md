@@ -1,3 +1,31 @@
+# NEXT WAKE (2026-07-16 — K≥8 tail re-check: batched tail REFUTED at all K)
+
+## 2026-07-16 (the K≥8 batched-chained-tail re-check — closed by A/B)
+
+- THE LEVER: LTHN_CB_CHAIN=0 (cbChainDisabled, same receipted-off switch
+  convention as LTHN_CB_STEP/LTHN_CB_GEMM) forces every lane two-phase —
+  rendezvous'd batched Phase-1 heads instead of the chained free-run.
+  Gate: TestLaneSetChainDisabledByteIdentity (quant MoE fixture — the
+  chain only engages on shared-encode-eligible re-encode lanes;
+  chainedSteps==0 + headRowsCount>0 engagement + byte identity vs the
+  chained default).
+- PROBE REPRODUCED: tail (head+embed) 0.563 ms/round (7.9%) vs the banked
+  0.67 ms/9.3% — theoretical batched-tail ceiling ~8% at K=8 IF the
+  rendezvous were free.
+- THE A/B VERDICT (26B ctx4096, salted ksweep, quiescent):
+      K:          1      2      4      8
+      chained:  107.2  143.2  173.4  195.8   tok/s aggregate
+      two-phase: 97.6  115.8  137.4  168.2
+  The rendezvous LOSES at every K — −14% at K=8. Giving up the ragged
+  free-run + submit-ahead costs ~2× the tail's whole budget. REFUTED at
+  all K ≤ 8; banked in the probe's comment — do not revisit without a
+  no-rendezvous batched-tail design.
+- SIDE RECEIPT: the chained baseline itself is UP vs the K-sweep rung
+  (K=8 196 vs 166; K=4 173 vs 150) — the admission-overlap rung feeds
+  straight into sweep wall-clock (admissions overlap decode now).
+- Module 12897/0. REMAINDER ON #385: parallel host sample tails ·
+  EnableThinking seam.
+
 # NEXT WAKE (2026-07-16 — lane metric durations: timings now real on CB)
 
 ## 2026-07-16 (CB metric durations + the ollama wire mapping)
