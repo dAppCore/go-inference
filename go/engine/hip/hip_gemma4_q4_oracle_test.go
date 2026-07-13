@@ -566,8 +566,17 @@ func TestHIPGemma4Q4DecodeKVMode(t *testing.T) {
 }
 
 // TestHIPGemma4Q4LogitSpreadProbe drives the fixed-prompt production path used
-// by the r15 spread receipt. GO_ROCM_SPREAD_ARM selects host, device, or greedy;
-// GO_ROCM_HIP_LOGIT_SPREAD_RECEIPTS arms the nil-gated production collector.
+// by the r15/r16 spread receipts. GO_ROCM_SPREAD_ARM selects host, device, or
+// greedy; GO_ROCM_HIP_LOGIT_SPREAD_RECEIPTS arms the nil-gated production
+// collector.
+//
+// The prompt is chat-framed (model.Chat, thinking off) by default — the SAME
+// path the coherent `generate` CLI uses. The r16 hunt found that the raw
+// completion path (model.Generate on a bare prompt) flattens 12B decode even
+// under greedy, so a raw-path transcript is NOT a verdict on the sampler:
+// greedy, default and top-k all degenerate on the raw prompt, and coherence
+// returns for every arm once the turn is framed. GO_ROCM_SPREAD_RAW=1 restores
+// the old raw path for A/B, but a coherence claim must come from the framed run.
 func TestHIPGemma4Q4LogitSpreadProbe(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" || os.Getenv(hipLogitSpreadReceiptsEnv) == "" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 and GO_ROCM_HIP_LOGIT_SPREAD_RECEIPTS=1")
@@ -581,19 +590,27 @@ func TestHIPGemma4Q4LogitSpreadProbe(t *testing.T) {
 	core.RequireNoError(t, err)
 	defer model.Close()
 	maxTokens := hipOracleEnvInt("GO_ROCM_GEN_MAX_TOKENS", 6)
-	options := []inference.GenerateOption{inference.WithMaxTokens(maxTokens), inference.WithTemperature(1)}
+	thinkOff := false
+	options := []inference.GenerateOption{inference.WithMaxTokens(maxTokens), inference.WithEnableThinking(&thinkOff), inference.WithTemperature(1)}
 	switch os.Getenv("GO_ROCM_SPREAD_ARM") {
 	case "device":
 		options = append(options, inference.WithTopK(64), inference.WithTopP(0.95))
 	case "greedy":
-		options = []inference.GenerateOption{inference.WithMaxTokens(maxTokens), inference.WithTemperature(0)}
+		options = []inference.GenerateOption{inference.WithMaxTokens(maxTokens), inference.WithEnableThinking(&thinkOff), inference.WithTemperature(0)}
 	case "", "host":
 	default:
 		t.Fatalf("unknown GO_ROCM_SPREAD_ARM %q", os.Getenv("GO_ROCM_SPREAD_ARM"))
 	}
-	text := strings.Join(collectTokenText(model.Generate(context.Background(), "why the sky is blue", options...)), "")
+	const prompt = "why is the sky blue"
+	framed := os.Getenv("GO_ROCM_SPREAD_RAW") != "1"
+	var text string
+	if framed {
+		text = strings.Join(collectTokenText(model.Chat(context.Background(), []inference.Message{{Role: "user", Content: prompt}}, options...)), "")
+	} else {
+		text = strings.Join(collectTokenText(model.Generate(context.Background(), prompt, options...)), "")
+	}
 	core.RequireNoError(t, resultError(model.Err()))
-	t.Logf("SPREAD_TRANSCRIPT arm=%s model=%s text=%q", os.Getenv("GO_ROCM_SPREAD_ARM"), modelPath, text)
+	t.Logf("SPREAD_TRANSCRIPT arm=%s framed=%v model=%s text=%q", os.Getenv("GO_ROCM_SPREAD_ARM"), framed, modelPath, text)
 }
 
 type hipOracleReport struct {
