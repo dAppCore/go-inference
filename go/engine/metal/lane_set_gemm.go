@@ -34,13 +34,13 @@ import (
 // ICB replay does. Byte-identity is per-op by construction — only the projection's
 // DISPATCH shape changes (one weight sweep vs K), never a row's accumulation order.
 //
-// SCOPE (byte-identity envelope, gemmEligible): the bf16 projection path only. The
-// 4-bit quant ICB FUSES the entry/MLP rms INTO the qmv (setRMSQMV — fp32-internal
-// normed, decode_forward_arch_icb_quant.go:677), so a separately-normed batched
-// qmv-rows rounds one ulp differently and diverges; there is no batched rms-qmv-rows
-// kernel and the metallib is read-only, so a quant model falls back to the per-lane
-// ICB replay. Kill switch LTHN_CB_GEMM=0 disables the forward entirely (the merged
-// 2.58× path, byte-for-byte).
+// SCOPE (byte-identity envelope, gemmEligible): projections whose batched dispatch
+// is byte-identical per row (projector.rowsByteTier) — bf16 at any K, quant through
+// the register-tiled lthn_qmv_rows at K ≤ lthnQMVRowsMaxM. Beyond the tiled plan
+// quant's batched dispatch is MLX qmm_t (token-identity tier — simdgroup-MMA
+// accumulation), so larger K keeps the per-lane ICB replay. Kill switch
+// LTHN_CB_GEMM=0 disables the forward entirely (the merged 2.58× path,
+// byte-for-byte).
 
 // gemmForwardEnabled reports whether the weight-read-once GEMM forward is armed.
 // LTHN_CB_GEMM=0 forces the per-lane ICB replay (the merged 2.58× path). Any other
@@ -90,15 +90,19 @@ func (ls *laneSet) gemmEligible(advancing []*decodeLane) bool {
 				return false // KV-share layers: proven-envelope exclusion (see above)
 			}
 			lb := s.lb[li]
-			// BYTE-IDENTITY GATE: only the bf16 projection path is batched here. The
-			// quant ICB FUSES the entry/MLP rms INTO the qmv (setRMSQMV, fp32-internal
-			// normed — decode_forward_arch_icb_quant.go:677), so a separate batched rms
-			// + qmv-rows rounds one ulp differently and DIVERGES (no batched
-			// rms-qmv-rows kernel exists; the metallib is read-only). bf16 records the
-			// rms separately (recordProj), so batching its projection is byte-identical
-			// (proven: lane_set_gemm_test.go). A quant model falls back to the per-lane
-			// ICB replay — the merged 2.58×, byte-for-byte safe.
-			if _, ok := lb.proj.(bf16Projector); !ok {
+			// BYTE-IDENTITY GATE: a projection is batched only when its batched
+			// dispatch reproduces the per-row decode projection byte for byte
+			// (projector.rowsByteTier). bf16's batched gemv qualifies at any K;
+			// the quant path qualifies at K ≤ lthnQMVRowsMaxM through the
+			// register-tiled lthn_qmv_rows (qdot + simd_sum order match qmv_impl
+			// row for row); beyond that quant's batched dispatch is MLX qmm_t —
+			// token-identity tier (simdgroup-MMA accumulation) — so larger K
+			// keeps the per-lane ICB replay, byte-for-byte safe. (Historical
+			// note: an earlier bisect blamed a fused rms→qmv for a one-ulp
+			// drift, but that fusion has been dormant since the M2 port
+			// (enableInputRMSFusion=false); the drift was the silent qmm_t
+			// fallthrough at shapes the tiled plan declined.)
+			if !lb.proj.rowsByteTier(len(advancing)) {
 				return false
 			}
 			if !lb.proj.rowsCapable() {

@@ -46,6 +46,14 @@ type projector interface {
 	// rowsCapable reports whether EVERY present projection has a batched dispatch —
 	// the fold's upfront eligibility probe (slab sizing happens before any encode).
 	rowsCapable() bool
+	// rowsByteTier reports whether projectRows at this row count reproduces the
+	// per-row decode projection BYTE for byte for every present weight — the
+	// laneSet GEMM fold's eligibility tier. Token-tier batched dispatches (MLX
+	// qmm_t: simdgroup-MMA accumulation re-orders the dot) do NOT qualify; the
+	// register-tiled lthn_qmv_rows (qdot + simd_sum order match qmv_impl row for
+	// row) and the bf16 batched gemv (z-slices run the single-row tile loop
+	// unchanged) do.
+	rowsByteTier(rows int) bool
 	// hasV reports whether a distinct V projection weight exists. gemma4 K==V layers
 	// (12B/31B: attention_k_eq_v) carry NO v_proj — V is the k-proj output (pre-knorm/
 	// rope) value-normed — so the decode projects V via wK; hasV()==false signals that.
@@ -94,6 +102,10 @@ func (b bf16Projector) projectRows(enc metal.MTLComputeCommandEncoder, in, out m
 }
 
 func (b bf16Projector) rowsCapable() bool { return true } // batched gemv covers every dim
+
+// rowsByteTier: the batched gemv's z-slices run the single-row tile loop
+// unchanged, so every row count is byte-identical to the per-row decode gemv.
+func (b bf16Projector) rowsByteTier(int) bool { return true }
 
 func (b bf16Projector) project(enc metal.MTLComputeCommandEncoder, vec, out metal.MTLBuffer, outOff uint, p projIndex) error {
 	switch p {
@@ -208,6 +220,31 @@ func (m qmvProjector) rowsCapable() bool {
 			return false
 		}
 		if _, err := pipelineFor(qmmTKernelName(outDim, gs, bits)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// rowsByteTier: quant qualifies only through the register-tiled lthn_qmv_rows
+// plan (byte-identical per row to the decode qmv); the qmm_t fallback in
+// projectRows is token-tier, so any weight that would take it declines the
+// byte tier and the caller keeps its per-lane path.
+func (m qmvProjector) rowsByteTier(rows int) bool {
+	for p := projQ; p <= projDown; p++ {
+		w, outDim, inDim, _ := m.weightDims(p)
+		if !w.present() {
+			continue
+		}
+		if w.dense() {
+			continue // batched gemv: byte-identical at any row count
+		}
+		gs, bits := m.groupSize, m.bits
+		if w.bits > 0 {
+			gs, bits = w.gs, w.bits
+		}
+		plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits)
+		if !ok || !plan.tiled {
 			return false
 		}
 	}
