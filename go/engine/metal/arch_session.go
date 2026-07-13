@@ -2340,6 +2340,20 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseOne(ids []int32, scope st
 	return hidden, true, nil
 }
 
+// prefillEmbedDeviceEnabled gates prefillInputsDevice's device-first prefill
+// build (#381: the E-series PLE gather and its dense/MoE embed-rows port
+// alike) — the K main-embed rows (and, on a PLE arch, the layer-major PLE
+// tensor) built in one committed-not-waited command buffer from just the
+// token ids. Default ON; LTHN_PREFILL_EMBED_DEVICE=0 restores the per-token
+// host embed-dequant loop on every arch this seam touches (same shape as
+// LTHN_PREFILL_SKIP_SHARED in flash_prompt.go).
+var prefillEmbedDeviceEnabled = os.Getenv("LTHN_PREFILL_EMBED_DEVICE") != "0"
+
+// prefillEmbedDeviceOffForTest pins the host embed loop in-process — the
+// byte-identity A/B flips it instead of restarting the process with the env
+// var unset (mirrors prefillSkipSharedOffForTest).
+var prefillEmbedDeviceOffForTest bool
+
 // prefillInputsDevice builds a prefill chunk's inputs DEVICE-first (#381): one
 // committed-not-waited command buffer gathers the K main-embed rows AND — on a
 // PLE arch — the PLE tensor at the chunk's exact layer bound, from just the
@@ -2347,9 +2361,10 @@ func (s *ArchSession) prefillRetainedTokensBatchedDenseOne(ids []int32, scope st
 // The batched pass reads the buffers GPU-ordered on the shared queue, so the
 // host skips the per-token embed dequant, the builder wait, the slab copy-out
 // and the re-uploads. (nil, nil, nil) when the lane is not available (no
-// device closure, stale metallib, small K) — the host paths take over.
+// device closure, stale metallib, small K) or the kill switch is off — the
+// host paths take over.
 func (s *ArchSession) prefillInputsDevice(ids []int32) (metal.MTLBuffer, metal.MTLBuffer, error) {
-	if s.perLayerInputBatchDevice == nil {
+	if !prefillEmbedDeviceEnabled || prefillEmbedDeviceOffForTest || s.perLayerInputBatchDevice == nil {
 		return nil, nil, nil
 	}
 	plePresent := s.perLayerInput != nil && len(s.state.ple) > 0
