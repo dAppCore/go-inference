@@ -66,6 +66,10 @@ type laneSet struct {
 	// K-row fused lm_head+argmax). The engagement discriminator for tests — a
 	// silent fall-through to the per-lane ladder must not pass as batched.
 	headRowsCount uint64
+	// chainedSteps is monotonic: +1 per chained forward round (the fused
+	// forward+head+embed lane submissions) — the chained path's engagement
+	// discriminator.
+	chainedSteps uint64
 }
 
 // decodeLane is one lane's owned mutable state.
@@ -87,6 +91,19 @@ type decodeLane struct {
 	// instead of the shared ICB replay. Byte-identical to the plain path by
 	// construction — it IS the plain path's step.
 	reencode bool
+
+	// Chained lane state (greedy re-encode lanes only): each step's forward
+	// carries the head argmax + the next token's embed gather in the SAME
+	// command buffer — the serial chained-live decode's shape, per lane. Once
+	// armed, a step emits chainTok (produced by the previous step's
+	// submission, a 4-byte readback) and the session's xA already holds its
+	// embedding on-GPU: no head submission, no hidden readback, no host
+	// embed — the per-step GPU/host bubbles die.
+	chainArmed      bool          // chainTok is valid (emitted by the next Step's Phase 1)
+	chainInputReady bool          // xA holds embed(pendingToken) on-GPU (the chained entry)
+	chainTok        int32         // the chain-produced NEXT token
+	chainSc         *plGPUScratch // next-inputs gather scratch (zero-value for non-PLE)
+	chainDead       bool          // the head declined once — the lane stays two-phase
 
 	// Non-greedy discipline (lane_set_sampling.go): the lane's OWN sampler RNG
 	// stream + params + repeat-penalty history; nil sampler = greedy phase 1.
@@ -232,19 +249,31 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 	var advancing []*decodeLane
 	var stepErr error
 	withAutoreleasePool(func() {
-		// Phase 1 — produce one token per active lane from its current hidden:
-		// the lane's own sampler for a non-greedy discipline (the classic sampled
-		// route ladder, one draw per token), else head+greedy. An ALL-GREEDY set
-		// takes ONE batched head submission (the MTP verify's K-row fused
-		// lm_head+argmax — one weight sweep for all K on quant heads) instead of
-		// K commit+waits; any decline falls to the per-lane ladder.
-		batchedToks, batchedHead := ls.phase1GreedyRows(active)
-		for i, lane := range active {
+		// Phase 1 — produce one token per active lane. A chain-armed lane's
+		// token was already produced ON GPU by the previous step's submission
+		// (chainTok — a 4-byte readback, no head here). The rest come from the
+		// lane's current hidden: the lane's own sampler for a non-greedy
+		// discipline, else head+greedy — with an ALL-GREEDY remainder taking
+		// ONE batched head submission (the MTP verify's K-row fused
+		// lm_head+argmax) instead of K commit+waits.
+		var headLanes []*decodeLane
+		for _, lane := range active {
+			if !lane.chainArmed {
+				headLanes = append(headLanes, lane)
+			}
+		}
+		batchedToks, batchedHead := ls.phase1GreedyRows(headLanes)
+		hi := 0
+		for _, lane := range active {
 			var tok int32
 			var err error
 			switch {
+			case lane.chainArmed:
+				tok = lane.chainTok
+				lane.chainArmed = false // consumed; this step's submission re-arms
 			case batchedHead:
-				tok = batchedToks[i]
+				tok = batchedToks[hi]
+				hi++
 			case lane.sampler != nil:
 				tok, err = lane.sess.sampledNextFromHiddenInPool(lane.hidden, lane.sampler, lane.sampleParams, lane.sampleHistory)
 				if err == nil && lane.sampleParams.RepeatPenalty > 1 {
@@ -277,18 +306,27 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 			return
 		}
 		// Phase 2 partition: recorded-ICB lanes ride the shared replay (fold or
-		// one-encoder batch); re-encode lanes (MoE) advance through the plain
-		// path's per-token machinery — K forwards encoded into ONE shared
-		// submission when every session is shared-encode eligible (the 26B
-		// device-router lane), else each lane's own step. One model per set
-		// makes the partition all-or-nothing in practice; the split keeps a
-		// hybrid correct anyway.
-		var replay, reenc []*decodeLane
+		// one-encoder batch); greedy re-encode lanes CHAIN (the forward carries
+		// the head argmax + next-embed in the same cb — the serial chained
+		// decode's shape, per lane); the remaining re-encode lanes advance
+		// through the plain per-token machinery, grouped when shared-encode
+		// eligible. One model per set makes the partition near-uniform in
+		// practice; the split keeps every mix correct.
+		var replay, reenc, chain []*decodeLane
 		for _, lane := range advancing {
-			if lane.reencode {
-				reenc = append(reenc, lane)
-			} else {
+			switch {
+			case !lane.reencode:
 				replay = append(replay, lane)
+			case ls.laneChainable(lane):
+				chain = append(chain, lane)
+			default:
+				reenc = append(reenc, lane)
+			}
+		}
+		if len(chain) > 0 {
+			if err := ls.chainedForward(chain); err != nil {
+				stepErr = err
+				return
 			}
 		}
 		if len(reenc) > 0 && !ls.sharedReencodeForward(reenc) {
@@ -385,6 +423,119 @@ func (ls *laneSet) phase1GreedyRows(active []*decodeLane) ([]int32, bool) {
 	}
 	ls.headRowsCount++
 	return out, true
+}
+
+// laneChainable reports whether a re-encode lane can run the CHAINED step:
+// greedy discipline (the chain's head is a GPU argmax), a shared-encode
+// eligible session (the chain encodes into a grouped submission), the GPU
+// next-inputs seam present (the chain's embed producer), and the head not
+// having declined before. Sampled lanes and declined lanes keep the
+// two-phase path.
+func (ls *laneSet) laneChainable(lane *decodeLane) bool {
+	return lane.sampler == nil && !lane.chainDead &&
+		lane.sess.sharedStepEligible() &&
+		lane.sess.encNextInputsGPU != nil && lane.sess.plScratchNew != nil &&
+		lane.sess.headEnc != nil
+}
+
+// chainedForward advances the chained lanes through one grouped submission
+// round in the serial chained-live decode's per-lane shape: each lane's cb
+// carries [forward → head argmax → next-token embed gather into xA], all K
+// committed back-to-back, waits pipelined. After the waits a lane holds its
+// NEXT token (chainTok, a 4-byte readback) and its next input already on-GPU
+// — the following Step emits the token with no head submission, no hidden
+// readback and no host embed. A lane whose head declines mid-encode is
+// DEMOTED (chainDead): its forward is still valid, so it commits and reads
+// the hidden classically, staying two-phase from then on. A session-encode
+// error abandons that lane's uncommitted cb and retries it per-lane —
+// encode-time work mutates no session state.
+func (ls *laneSet) chainedForward(chain []*decodeLane) error {
+	type outcome struct {
+		cb      metal.MTLCommandBufferObject
+		scratch *headGreedyScratch
+		final   metal.MTLBuffer
+	}
+	outs := make([]outcome, len(chain))
+	for i, lane := range chain {
+		sink := &sharedStepSink{cb: commandBufferFast(queue)}
+		sink.enc = computeCommandEncoderFast(sink.cb)
+		var err error
+		if lane.chainSc == nil {
+			lane.chainSc = lane.sess.plScratchNew()
+		}
+		if lane.chainInputReady {
+			// Chained entry: the previous link's gather left this token's
+			// embed in xA on-GPU — bind it in place, no host embed.
+			lane.chainInputReady = false
+			err = lane.sess.stepEncodeSharedChained(sink)
+		} else {
+			// First chained step for this lane: the token came from Phase 1's
+			// head, so the input is a host embed (the probe-link shape).
+			err = lane.sess.stepIDEncodeShared(lane.pendingToken, sink)
+		}
+		if err != nil {
+			// Uncommitted cb — retry this lane per-lane, demoted.
+			lane.chainDead = true
+			h, serr := lane.sess.stepIDInPool(lane.pendingToken)
+			if serr != nil {
+				return serr
+			}
+			lane.hidden = append(lane.hidden[:0], h...)
+			lane.pos = lane.sess.pos
+			continue
+		}
+		scr, gok, gerr := lane.sess.headEnc.encodeGreedy(sink.enc, sink.finalOut, nil)
+		if gerr != nil {
+			endEncodingFast(sink.enc)
+			return gerr
+		}
+		if gok {
+			if nerr := lane.sess.encNextInputsGPU(sink.enc, scr.outToken, lane.sess.state.xA, lane.chainSc); nerr != nil {
+				lane.sess.headEnc.putGreedyScratch(scr)
+				endEncodingFast(sink.enc)
+				return nerr
+			}
+		} else {
+			// Head declined: the forward is valid — commit it classically and
+			// keep this lane two-phase from now on.
+			lane.chainDead = true
+			scr = nil
+		}
+		endEncodingFast(sink.enc)
+		outs[i] = outcome{cb: sink.cb, scratch: scr, final: sink.finalOut}
+	}
+	for i := range outs {
+		if outs[i].cb.GetID() != 0 {
+			commitCommandBufferFast(outs[i].cb)
+		}
+	}
+	for i, lane := range chain {
+		if outs[i].cb.GetID() == 0 {
+			continue // retried per-lane above
+		}
+		waitUntilCompletedFast(outs[i].cb)
+		lane.sess.pos++
+		if scr := outs[i].scratch; scr != nil {
+			tok := scr.token()
+			lane.sess.headEnc.putGreedyScratch(scr)
+			if tok < 0 || int(tok) >= ls.vocab {
+				return core.NewError("native.laneSet.chainedForward: chained head returned an invalid token")
+			}
+			lane.chainTok, lane.chainArmed, lane.chainInputReady = tok, true, true
+			lane.pos = lane.sess.pos
+		} else {
+			// Demoted lane: classic advance — read the hidden for Phase 1.
+			if cap(lane.hidden) < ls.dModel*bf16Size {
+				lane.hidden = make([]byte, ls.dModel*bf16Size)
+			}
+			lane.hidden = lane.hidden[:ls.dModel*bf16Size]
+			copy(lane.hidden, lane.sess.state.bufferBytes(outs[i].final, ls.dModel*bf16Size))
+			lane.pos = lane.sess.pos
+		}
+	}
+	ls.fwdCount++
+	ls.chainedSteps++
+	return nil
 }
 
 // sharedReencodeForward advances the re-encode lanes through ONE grouped

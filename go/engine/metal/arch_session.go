@@ -2801,6 +2801,19 @@ func (s *ArchSession) stepIDEncodeShared(id int32, sink *sharedStepSink) error {
 	return err
 }
 
+// stepEncodeSharedChained is stepIDEncodeShared's steady-state chained twin:
+// the input embedding is ALREADY in the session's xA — written on-GPU by the
+// previous chained link's next-inputs gather — so the encode binds it in
+// place (copyInput=false, no host embed). Same no-commit/no-wait/no-pos-bump
+// contract.
+func (s *ArchSession) stepEncodeSharedChained(sink *sharedStepSink) error {
+	if s.pos >= s.maxLen {
+		return core.NewError("native.ArchSession.stepEncodeSharedChained: sequence would exceed maxLen cache rows")
+	}
+	_, err := s.state.stepTokenEncode(nil, s.pos, false, false, nil, sink)
+	return err
+}
+
 func (s *ArchSession) stepIDInPool(id int32) ([]byte, error) {
 	emb, err := s.embedID(id)
 	if err != nil {
