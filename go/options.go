@@ -61,6 +61,16 @@ type GenerateConfig struct {
 	// ProbeSink receives research-telemetry events emitted while generating
 	// (attention/logit probes). nil = probing off.
 	ProbeSink probe.Sink
+	// MetricsSink, when set, receives THIS generation's final GenerateMetrics
+	// as its stream completes — request-scoped delivery, immune to the
+	// last-writer-wins race a global Metrics() read carries under concurrent
+	// generations. A backend invokes it at most once per generation, on the
+	// generation's own goroutine, after its metrics snapshot is complete
+	// (DecodePhases attached when traced). nil = not reported; callers keep
+	// the Metrics() read as their fallback. The json tag matters: configs are
+	// embedded in marshalled reports (train's SSD eval), and encoding/json
+	// rejects func fields it is asked to encode.
+	MetricsSink func(GenerateMetrics) `json:"-"`
 }
 
 // cfg := inference.DefaultGenerateConfig() // Temperature=0.0 (greedy), RepeatPenalty=1.0
@@ -198,6 +208,18 @@ func WithThinkingBudget(tokens int) GenerateOption {
 //	m.Generate(ctx, prompt, inference.WithThinking(inference.ThinkingConfig{Mode: inference.ThinkingHide}))
 func WithThinking(cfg ThinkingConfig) GenerateOption {
 	return func(c *GenerateConfig) { c.Thinking = cfg }
+}
+
+// WithMetricsSink registers a request-scoped receiver for this generation's
+// final GenerateMetrics, delivered as the stream completes. Unlike the global
+// Metrics() read — which under concurrent generations is last-writer-wins —
+// the sink is invoked with the metrics of exactly the generation it was
+// passed to.
+//
+//	var usage inference.GenerateMetrics
+//	seq := m.Chat(ctx, msgs, inference.WithMetricsSink(func(gm inference.GenerateMetrics) { usage = gm }))
+func WithMetricsSink(fn func(GenerateMetrics)) GenerateOption {
+	return func(c *GenerateConfig) { c.MetricsSink = fn }
 }
 
 // cfg := inference.ApplyGenerateOpts(opts) // used internally by backends

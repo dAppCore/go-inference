@@ -305,6 +305,18 @@ func (m *Manager) Chat(ctx context.Context, messages []inference.Message, opts .
 		if m.metrics != nil {
 			m.metrics.RecordChatMetrics(promptTokens, generated, turnStart, decodeStart)
 		}
+		if cfg.MetricsSink != nil {
+			// Request-scoped delivery, same numbers RecordChatMetrics banks
+			// globally (and the same construction the engine's setMetrics
+			// uses) — a continuity turn otherwise bypasses the engine's own
+			// sink point, being served from the woken session.
+			cfg.MetricsSink(inference.GenerateMetrics{
+				PromptTokens:    promptTokens,
+				GeneratedTokens: generated,
+				TotalDuration:   time.Since(turnStart),
+				DecodeDuration:  time.Since(decodeStart),
+			})
+		}
 		if err := conv.handle.Err(); err != nil {
 			core.Error("continuity generation failed", "error", err)
 			conv.dead = true

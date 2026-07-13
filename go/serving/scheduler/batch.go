@@ -109,6 +109,11 @@ func (m *Model) scheduleBatch(ctx context.Context, req inference.ScheduledReques
 		id = m.nextRequestID()
 	}
 	opts := generateOptions(req.Sampler)
+	if req.MetricsSink != nil {
+		// Re-arm the request-scoped metrics sink dropped by the SamplerConfig
+		// fold — the base engine delivers this request's own final metrics.
+		opts = append(opts, inference.WithMetricsSink(req.MetricsSink))
+	}
 	messages := append([]inference.Message(nil), req.Messages...)
 	prompt := req.Prompt
 	src := func(rc context.Context) stream {

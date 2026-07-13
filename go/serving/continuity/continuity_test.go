@@ -283,3 +283,34 @@ func TestSpineModelInfo(t *testing.T) {
 		}
 	}
 }
+
+// TestManagerChat_MetricsSink_Good pins the request-scoped usage delivery on
+// a continuity-served turn: the woken-session path bypasses the engine's own
+// sink point, so the manager delivers this turn's counts to
+// GenerateConfig.MetricsSink itself (the same numbers RecordChatMetrics banks
+// globally).
+func TestManagerChat_MetricsSink_Good(t *testing.T) {
+	ctx := context.Background()
+	store := state.NewInMemoryStore(nil)
+	handle := &graftHandle{genTokens: []inference.Token{{Text: "a"}, {Text: "b"}, {Text: "c"}}}
+	m := shareManager(store, handle, nil, false)
+
+	var got inference.GenerateMetrics
+	fired := 0
+	streamed, ok := m.Chat(ctx, []inference.Message{{Role: "user", Content: "hi"}},
+		inference.WithMaxTokens(4),
+		inference.WithMetricsSink(func(gm inference.GenerateMetrics) {
+			got = gm
+			fired++
+		}))
+	if !ok {
+		t.Fatal("continuity declined a plain text turn")
+	}
+	drain(streamed)
+	if fired != 1 {
+		t.Fatalf("MetricsSink fired %d times, want exactly once", fired)
+	}
+	if got.GeneratedTokens != 3 {
+		t.Fatalf("sink GeneratedTokens = %d, want the 3 served tokens", got.GeneratedTokens)
+	}
+}

@@ -860,6 +860,43 @@ func TestModel_TextModel_Metrics_Ugly(t *testing.T) {
 	}
 }
 
+// TestModel_TextModel_Generate_MetricsSink_Good pins the request-scoped
+// delivery: WithMetricsSink fires exactly once as the stream completes, with
+// the same final snapshot the global Metrics() read reports — the seam that
+// lets a handler read its own request's usage instead of racing concurrent
+// generations through the shared readback.
+func TestModel_TextModel_Generate_MetricsSink_Good(t *testing.T) {
+	m := NewTextModel(&fakeTokenModel{genIDs: []int32{10, 11, 12}}, newFixtureTokenizer(t), "gemma-test", inference.ModelInfo{}, 4096)
+	var got inference.GenerateMetrics
+	fired := 0
+	sink := inference.WithMetricsSink(func(gm inference.GenerateMetrics) {
+		got = gm
+		fired++
+	})
+	for range m.Generate(context.Background(), "hi", inference.WithMaxTokens(3), sink) {
+	}
+	if fired != 1 {
+		t.Fatalf("MetricsSink fired %d times, want exactly once", fired)
+	}
+	if got.GeneratedTokens != 3 {
+		t.Fatalf("sink GeneratedTokens = %d, want 3", got.GeneratedTokens)
+	}
+	if global := m.Metrics(); got != global {
+		t.Fatalf("sink metrics = %+v, want the Metrics() snapshot %+v", got, global)
+	}
+}
+
+// TestModel_TextModel_Generate_MetricsSink_Bad pins the absent sink: a plain
+// generation with no sink neither panics nor loses the global readback.
+func TestModel_TextModel_Generate_MetricsSink_Bad(t *testing.T) {
+	m := NewTextModel(&fakeTokenModel{genIDs: []int32{10, 11}}, newFixtureTokenizer(t), "gemma-test", inference.ModelInfo{}, 4096)
+	for range m.Generate(context.Background(), "hi", inference.WithMaxTokens(2)) {
+	}
+	if got := m.Metrics().GeneratedTokens; got != 2 {
+		t.Fatalf("Metrics().GeneratedTokens = %d, want 2", got)
+	}
+}
+
 // --- Capabilities ----------------------------------------------------------
 
 // TestModel_TextModel_Capabilities_Good pins the capability seam: a

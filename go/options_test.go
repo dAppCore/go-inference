@@ -835,3 +835,30 @@ func TestOptions_WithThinkingBudget_Good(t *testing.T) {
 		t.Fatalf("WithThinkingBudget(256) = %d, want 256", cfg.ThinkingBudget)
 	}
 }
+
+// TestOptions_WithMetricsSink_Good pins the request-scoped metrics receiver:
+// the sink lands on the config and is invoked with exactly the metrics a
+// backend delivers at stream end.
+func TestOptions_WithMetricsSink_Good(t *testing.T) {
+	var got GenerateMetrics
+	fired := 0
+	cfg := ApplyGenerateOpts([]GenerateOption{WithMetricsSink(func(gm GenerateMetrics) {
+		got = gm
+		fired++
+	})})
+	checkNotNil(t, cfg.MetricsSink)
+	cfg.MetricsSink(GenerateMetrics{PromptTokens: 7, GeneratedTokens: 3})
+	checkEqual(t, 1, fired)
+	checkEqual(t, 7, got.PromptTokens)
+	checkEqual(t, 3, got.GeneratedTokens)
+}
+
+// TestOptions_WithMetricsSink_Bad pins the nil sink: the default config
+// carries none, and passing nil explicitly keeps it absent (not reported).
+func TestOptions_WithMetricsSink_Bad(t *testing.T) {
+	checkNil(t, DefaultGenerateConfig().MetricsSink)
+	cfg := ApplyGenerateOpts([]GenerateOption{WithMetricsSink(nil)})
+	if cfg.MetricsSink != nil {
+		t.Fatalf("WithMetricsSink(nil) set a sink, want none")
+	}
+}
