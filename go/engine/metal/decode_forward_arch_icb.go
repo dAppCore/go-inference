@@ -1644,12 +1644,16 @@ func recordArchICB(
 		}
 		resident = append(resident, hBufs...)
 
-		// gemma4 norm presence (uniform across layers): each present norm adds one op per
-		// layer, so the layout grows but stays uniform → a single running op counter.
-		hasQN := len(qNormBufs) > 0 && qNormBufs[0] != nil
-		hasKN := len(kNormBufs) > 0 && kNormBufs[0] != nil
-		hasPA := len(postAttnBufs) > 0 && postAttnBufs[0] != nil
-		hasPF := len(postFFBufs) > 0 && postFFBufs[0] != nil
+		// Norm-op selection is family-declared (LayerSpec.Attention{Q,K}Norm /
+		// Post{Attn,FF}Norm, resolved once in model.Assemble) with a buffer-presence
+		// self-heal for hand-built callers that do not declare — the slice-2 K==V
+		// pattern. Uniform across layers by contract (layer 0 speaks for the stack);
+		// each present norm adds one op per layer, so the layout grows but stays
+		// uniform → a single running op counter.
+		hasQN := specs[0].AttentionQNorm || (len(qNormBufs) > 0 && qNormBufs[0] != nil)
+		hasKN := specs[0].AttentionKNorm || (len(kNormBufs) > 0 && kNormBufs[0] != nil)
+		hasPA := specs[0].PostAttnNorm || (len(postAttnBufs) > 0 && postAttnBufs[0] != nil)
+		hasPF := specs[0].PostFFNorm || (len(postFFBufs) > 0 && postFFBufs[0] != nil)
 		extra := 0
 		for _, h := range []bool{hasQN, hasKN, hasPA, hasPF} {
 			if h {

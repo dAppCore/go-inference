@@ -23,10 +23,14 @@
 //     record boundary (recordArchICB* in package native) reads the declared selection instead of an
 //     arch-supplied v-proj-index hook. A hand-built caller that does not declare falls back to
 //     weight presence at the record boundary, never inside the neutral core.
+//   - norm-op selection (LayerSpec.Attention{Q,K}Norm / Post{Attn,FF}Norm) — slice 3:
+//     model.Assemble resolves each from checkpoint weight presence, so every family that flows
+//     through Assemble (gemma4, qwen-class QK-norm, exaone4/gptneox sandwich norms) declares for
+//     free; the record boundary reads the declared selections with the same buffer-presence
+//     self-heal for hand-built callers. Declaring a norm without its weight is a caller bug.
 //
 // STILL ENGINE-INFERRED (candidates for later slices — inferred from weight-buffer presence at the
 // record boundary, shared across families):
-//   - norm-op selection: QK-norm, post-attention and post-feed-forward ("sandwich") norms
 //   - the fixed per-layer op LAYOUT (opsPerLayer) and the per-layer-input record hooks
 package icb
 

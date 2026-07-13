@@ -316,3 +316,71 @@ func TestAssemble_AttentionKEqV_Ugly(t *testing.T) {
 		t.Fatal("KV-shared layer 1 carries no v_proj — must be declared K==V")
 	}
 }
+
+// normOpNames extends the minimal dense names with the four norm-op suffixes so
+// their weights load when the tensors carry them.
+func normOpNames() WeightNames {
+	n := minimalDenseNames()
+	n.QNorm = ".q_norm.weight"
+	n.KNorm = ".k_norm.weight"
+	n.PostAttnNorm = ".post_attn_norm.weight"
+	n.PostFFNorm = ".post_ff_norm.weight"
+	return n
+}
+
+// TestAssemble_NormOpSelections_Good: a checkpoint carrying all four norm weights has every
+// norm-op selection declared true — backends bind the declared selections (#57 slice 3)
+// instead of re-probing weight buffers.
+func TestAssemble_NormOpSelections_Good(t *testing.T) {
+	vec := func(n int) safetensors.Tensor {
+		return safetensors.Tensor{Shape: []int{n}, Data: make([]byte, n*2), Dtype: "BF16"}
+	}
+	tensors := minimalDenseTensors("BF16")
+	tensors["layer.0.q_norm.weight"] = vec(4)
+	tensors["layer.0.k_norm.weight"] = vec(4)
+	tensors["layer.0.post_attn_norm.weight"] = vec(4)
+	tensors["layer.0.post_ff_norm.weight"] = vec(4)
+	m, err := Assemble(tensors, minimalDenseArch(), normOpNames())
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	spec := m.Arch.Layer[0]
+	if !spec.AttentionQNorm || !spec.AttentionKNorm || !spec.PostAttnNorm || !spec.PostFFNorm {
+		t.Fatalf("norm-op selections = %+v, want all true", spec)
+	}
+}
+
+// TestAssemble_NormOpSelections_Bad: a checkpoint with NO norm weights declares every norm-op
+// selection false — an absent weight can never select an op.
+func TestAssemble_NormOpSelections_Bad(t *testing.T) {
+	m, err := Assemble(minimalDenseTensors("BF16"), minimalDenseArch(), minimalDenseNames())
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	spec := m.Arch.Layer[0]
+	if spec.AttentionQNorm || spec.AttentionKNorm || spec.PostAttnNorm || spec.PostFFNorm {
+		t.Fatalf("norm-op selections = %+v, want all false", spec)
+	}
+}
+
+// TestAssemble_NormOpSelections_Ugly: the selections are independent per norm — a checkpoint
+// carrying q_norm but no k_norm (the name is mapped, the tensor is absent) declares exactly
+// the present one. Proves declaration follows weight presence, not the name mapping.
+func TestAssemble_NormOpSelections_Ugly(t *testing.T) {
+	vec := func(n int) safetensors.Tensor {
+		return safetensors.Tensor{Shape: []int{n}, Data: make([]byte, n*2), Dtype: "BF16"}
+	}
+	tensors := minimalDenseTensors("BF16")
+	tensors["layer.0.q_norm.weight"] = vec(4)
+	m, err := Assemble(tensors, minimalDenseArch(), normOpNames())
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	spec := m.Arch.Layer[0]
+	if !spec.AttentionQNorm {
+		t.Fatal("q_norm weight present, selection must be declared")
+	}
+	if spec.AttentionKNorm || spec.PostAttnNorm || spec.PostFFNorm {
+		t.Fatalf("absent norms declared: %+v", spec)
+	}
+}

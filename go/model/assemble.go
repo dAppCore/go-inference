@@ -146,6 +146,11 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 		// by the KEY projection. Resolving it here, once, is the DECLARES discipline — backends read
 		// this per-layer selection instead of re-inferring "V rides the k-proj" from v_proj absence.
 		m.Arch.Layer[i].AttentionKEqV = L.V == nil
+		// Declare the norm-op selections the same way (#57 slice 3): resolved once from
+		// checkpoint weight presence, bound by backends instead of re-probed per buffer.
+		m.Arch.Layer[i].AttentionQNorm = len(L.QNorm) > 0
+		m.Arch.Layer[i].AttentionKNorm = len(L.KNorm) > 0
+		m.Arch.Layer[i].PostAttnNorm = len(L.PostAttnNorm) > 0
 		L.O = lin(p+names.O, qDim)
 
 		if spec.MoE {
@@ -160,6 +165,7 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 			}
 			L.Down = lin(p+names.Down, ff)
 			L.PostFFNorm = norm(p + names.PostFFNorm)
+			m.Arch.Layer[i].PostFFNorm = len(L.PostFFNorm) > 0
 		}
 
 		if arch.PerLayerInputHidden > 0 {
