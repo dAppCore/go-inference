@@ -6,6 +6,7 @@ package native
 
 import (
 	"context"
+	"time"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
@@ -95,19 +96,23 @@ type decodeLane struct {
 	// Chained lane state (greedy re-encode lanes only): each round's forward
 	// carries the head argmax + the next token's embed gather in the SAME
 	// command buffer — the serial chained-live decode's shape, per lane —
-	// and runs SUBMIT-AHEAD: the round stays committed-not-waited across the
-	// Step boundary while the next round's encode overlaps its execution
-	// (the from-xA input is produced on-GPU by the round's own tail, so the
-	// host never needs the token value to encode the next round). A Step
-	// harvests the pending round's token (a 4-byte readback), speculatively
-	// commits the round after, and only then waits — the lockstep bubble
-	// dies. A stop token wastes exactly one speculative round (waited,
-	// discarded, KV truncated by one — the serial chain's unwind).
-	pendingCB      metal.MTLCommandBufferObject
-	pendingScratch *headGreedyScratch
-	pendingLive    bool
-	chainSc        *plGPUScratch // next-inputs gather scratch (zero-value for non-PLE)
-	chainDead      bool          // the head declined once — the lane stays two-phase
+	// and free-runs RAGGED: one COMMITTED round in flight (inFlight*) plus
+	// one PRE-ENCODED round held UNCOMMITTED behind it (held*). A Step polls
+	// completion per lane and, the instant a lane's round finishes, reads its
+	// 4-byte token, then COMMITS the held round (µs — the lane rolls on
+	// without waiting any other lane or the Step boundary) and pre-encodes
+	// the next held one overlapped with the new in-flight round. A stop
+	// token just DROPS the held round un-committed: zero speculation waste,
+	// no position rewind, no KV truncation.
+	inFlightCB   metal.MTLCommandBufferObject
+	inFlightScr  *headGreedyScratch
+	inFlightLive bool
+	heldCB       metal.MTLCommandBufferObject
+	heldScr      *headGreedyScratch
+	heldLive     bool
+	needAdvance  bool          // exited the chain with an emitted-but-unadvanced token (defensive)
+	chainSc      *plGPUScratch // next-inputs gather scratch (zero-value for non-PLE)
+	chainDead    bool          // the head declined once — the lane stays two-phase
 
 	// Non-greedy discipline (lane_set_sampling.go): the lane's OWN sampler RNG
 	// stream + params + repeat-penalty history; nil sampler = greedy phase 1.
@@ -253,74 +258,43 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 	var advancing []*decodeLane
 	var stepErr error
 	withAutoreleasePool(func() {
-		// PART A — submit-ahead harvest for pipelined chained lanes: FIRST
-		// speculatively encode+commit each continuing lane's next round (its
-		// from-xA input is produced on-GPU by the pending round's own tail,
-		// so no token value is needed; hazard tracking orders the rounds),
-		// THEN wait the pending round and emit its token. The next round's
-		// encode overlaps the pending round's execution — the lockstep
-		// bubble this rung exists to kill. Speculation is skipped when the
-		// pending emit is budget-guaranteed terminal; a stop token wastes
-		// exactly one round (waited, discarded, KV truncated by one).
+		// PART A — RAGGED harvest for free-running chained lanes: poll each
+		// lane's in-flight round and, the instant one completes, read its
+		// 4-byte token, commit-or-drop the pre-encoded held round (commit is
+		// µs — the lane rolls on without waiting any other lane or the Step
+		// boundary; a terminal token drops the held round un-committed: zero
+		// waste, no rewind), then pre-encode the next held round overlapped
+		// with the new in-flight one. The Step returns whichever lanes
+		// completed — the slowest lane no longer gates the batch.
 		var pipeline, classic []*decodeLane
 		for _, lane := range active {
-			if lane.pendingLive {
+			if lane.inFlightLive {
 				pipeline = append(pipeline, lane)
 			} else {
 				classic = append(classic, lane)
 			}
 		}
-		nextCBs := make([]metal.MTLCommandBufferObject, len(pipeline))
-		nextScr := make([]*headGreedyScratch, len(pipeline))
-		specAdvanced := make([]bool, len(pipeline))
-		drainAll := func() {
-			for i, lane := range pipeline {
-				if lane.pendingLive {
-					waitReleaseChainedCB(lane.pendingCB)
-					lane.sess.headEnc.putGreedyScratch(lane.pendingScratch)
-					lane.pendingLive, lane.pendingScratch = false, nil
-				}
-				if nextScr[i] != nil {
-					waitReleaseChainedCB(nextCBs[i])
-					lane.sess.headEnc.putGreedyScratch(nextScr[i])
-					nextScr[i] = nil
-				}
+		harvest := func(lane *decodeLane) bool {
+			if lane.inFlightCB.Status() < metal.MTLCommandBufferStatusCompleted {
+				return false
 			}
-		}
-		speculated := false
-		for i, lane := range pipeline {
-			if lane.generated+1 >= lane.maxNew {
-				continue // the pending emit terminates by budget — knowledge, not speculation
+			tok := lane.inFlightScr.token()
+			terminal := tok < 0 || int(tok) >= ls.vocab || lane.stops[tok] || lane.generated+1 >= lane.maxNew
+			// Commit-or-drop the held round FIRST (µs) so the lane's GPU work
+			// resumes before any host bookkeeping.
+			if terminal {
+				ls.dropHeldRound(lane)
+			} else if lane.heldLive {
+				ls.commitChainedRound(lane, lane.heldCB)
 			}
-			cb, scr, demoted, err := ls.chainRoundCommit(lane, true)
-			if err != nil {
-				stepErr = err
-				drainAll()
-				return
-			}
-			if demoted {
-				specAdvanced[i] = true
-				continue
-			}
-			nextCBs[i], nextScr[i], specAdvanced[i] = cb, scr, true
-			speculated = true
-		}
-		if speculated {
-			ls.fwdCount++
-			ls.chainedSteps++
-		}
-		for i, lane := range pipeline {
-			waitReleaseChainedCB(lane.pendingCB)
-			tok := lane.pendingScratch.token()
-			lane.sess.headEnc.putGreedyScratch(lane.pendingScratch)
-			lane.pendingLive, lane.pendingScratch = false, nil
+			waitReleaseChainedCB(lane.inFlightCB) // complete — returns immediately; span instrument
+			lane.sess.headEnc.putGreedyScratch(lane.inFlightScr)
+			lane.inFlightCB, lane.inFlightScr, lane.inFlightLive = metal.MTLCommandBufferObject{}, nil, false
 			if tok < 0 || int(tok) >= ls.vocab {
 				stepErr = core.NewError("native.laneSet.Step: chained head returned an invalid token")
-				drainAll()
-				return
+				return true
 			}
 			lane.generated++
-			terminal := lane.stops[tok] || lane.generated >= lane.maxNew
 			results = append(results, inference.LaneStep{
 				Lane:     inference.LaneHandle{ID: lane.id},
 				Token:    tok,
@@ -329,37 +303,95 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 			})
 			if terminal {
 				lane.terminal = true
-				if specAdvanced[i] {
-					// The speculative round advanced the just-emitted terminal
-					// token — unwind it (the serial chain's discard shape).
-					if nextScr[i] != nil {
-						waitReleaseChainedCB(nextCBs[i])
-						lane.sess.headEnc.putGreedyScratch(nextScr[i])
-						nextScr[i] = nil
+				lane.pos = lane.sess.pos
+				return true
+			}
+			if lane.heldLive {
+				// The held round became the in-flight round at the commit above;
+				// pre-encode the next one overlapped with its execution.
+				lane.inFlightCB, lane.inFlightScr, lane.inFlightLive = lane.heldCB, lane.heldScr, true
+				lane.heldCB, lane.heldScr, lane.heldLive = metal.MTLCommandBufferObject{}, nil, false
+				if herr := ls.holdNextRound(lane); herr != nil {
+					stepErr = herr
+					return true
+				}
+			} else if lane.chainDead {
+				// Mid-stream demote (defensive — a head that chained at entry
+				// declines mid-stream only under test hooks): the emitted token
+				// is not yet advanced; Phase 2 advances it per-lane next Step.
+				lane.pendingToken = tok
+				lane.needAdvance = true
+			}
+			lane.pos = lane.sess.pos
+			return true
+		}
+		if len(pipeline) > 0 {
+			progress := false
+			for _, lane := range pipeline {
+				if harvest(lane) {
+					progress = true
+				}
+				if stepErr != nil {
+					return
+				}
+			}
+			// Block until at least one lane completes when nothing else will
+			// produce a token this Step — the Step contract stays "progress or
+			// the set is done". A single in-flight lane blocks directly on its
+			// cb (polling only pays when there are lanes to rag between).
+			for !progress && len(classic) == 0 {
+				if err := ctx.Err(); err != nil {
+					stepErr = err
+					return
+				}
+				live := 0
+				var sole *decodeLane
+				for _, lane := range pipeline {
+					if lane.inFlightLive {
+						live++
+						sole = lane
 					}
-					lane.sess.pos--
-					if terr := lane.sess.truncateSpeculativeKV(lane.sess.pos); terr != nil {
-						stepErr = terr
-						drainAll()
+				}
+				if live == 0 {
+					break
+				}
+				if live == 1 {
+					waitUntilCompletedFast(sole.inFlightCB) // harvest re-checks status and releases
+				} else {
+					lanePollWait()
+				}
+				for _, lane := range pipeline {
+					if lane.inFlightLive && harvest(lane) {
+						progress = true
+					}
+					if stepErr != nil {
 						return
 					}
 				}
-				lane.pos = lane.sess.pos
-				continue
 			}
-			if nextScr[i] != nil {
-				// Shift: the speculative round becomes the pending round.
-				lane.pendingCB, lane.pendingScratch, lane.pendingLive = nextCBs[i], nextScr[i], true
-				nextScr[i] = nil
+			if progress {
+				ls.fwdCount++
+				ls.chainedSteps++
 			}
-			lane.pos = lane.sess.pos
 		}
 
 		// PART B — entry/classic lanes: one token each from the lane's
 		// current hidden — the lane's own sampler for a non-greedy
 		// discipline, else head+greedy, with an ALL-GREEDY set taking ONE
 		// batched head submission (the MTP verify's K-row fused
-		// lm_head+argmax) instead of K commit+waits.
+		// lm_head+argmax) instead of K commit+waits. A needAdvance lane
+		// (chain exit with its token already emitted) skips the emit and
+		// goes straight to Phase 2's advance.
+		var emitLanes []*decodeLane
+		for _, lane := range classic {
+			if lane.needAdvance {
+				lane.needAdvance = false
+				advancing = append(advancing, lane)
+				continue
+			}
+			emitLanes = append(emitLanes, lane)
+		}
+		classic = emitLanes
 		batchedToks, batchedHead := ls.phase1GreedyRows(classic)
 		hi := 0
 		for _, lane := range classic {
@@ -548,13 +580,17 @@ func (ls *laneSet) laneChainable(lane *decodeLane) bool {
 // argmax → next-token embed gather into xA] — and COMMITS it without
 // waiting. fromXA binds the input the previous round's tail gathered into xA
 // on-GPU; the entry round embeds lane.pendingToken on host instead. The
-// session position advances at commit (the serial chain's shape); a
-// discarded speculative round rewinds it. demoted=true means the head
-// declined: the forward is still a valid advance, so it was committed,
-// WAITED, and the lane's hidden read back — the lane leaves the chained path
-// (chainDead) with its session consistent. An error before commit leaves the
-// cb uncommitted and the session untouched.
-func (ls *laneSet) chainRoundCommit(lane *decodeLane, fromXA bool) (metal.MTLCommandBufferObject, *headGreedyScratch, bool, error) {
+// chainRoundEncode encodes ONE chained round for the lane — [forward → head
+// argmax → next-token embed gather into xA] — and returns it PRE-ENCODED,
+// retained, UNCOMMITTED: the caller commits it (µs) the instant the previous
+// round completes, so the encode cost always overlaps an executing round and
+// a terminal token just drops the held cb (no advance happened — no rewind,
+// no truncation). fromXA binds the input the previous round's tail gathers
+// into xA at execution; the entry round embeds lane.pendingToken on host.
+// ok=false means the head declined (no side effects — nothing committed):
+// the lane leaves the chained path. The session position is NOT advanced
+// here; commitChainedRound bumps it.
+func (ls *laneSet) chainRoundEncode(lane *decodeLane, fromXA bool) (metal.MTLCommandBufferObject, *headGreedyScratch, bool, error) {
 	var none metal.MTLCommandBufferObject
 	sink := &sharedStepSink{cb: commandBufferFast(queue)}
 	sink.enc = computeCommandEncoderFast(sink.cb)
@@ -575,40 +611,35 @@ func (ls *laneSet) chainRoundCommit(lane *decodeLane, fromXA bool) (metal.MTLCom
 		endEncodingFast(sink.enc)
 		return none, nil, false, gerr
 	}
-	if gok {
-		if nerr := lane.sess.encNextInputsGPU(sink.enc, scr.outToken, lane.sess.state.xA, lane.chainSc); nerr != nil {
-			lane.sess.headEnc.putGreedyScratch(scr)
-			endEncodingFast(sink.enc)
-			return none, nil, false, nerr
-		}
+	if !gok {
+		endEncodingFast(sink.enc)
+		return none, nil, false, nil
+	}
+	if nerr := lane.sess.encNextInputsGPU(sink.enc, scr.outToken, lane.sess.state.xA, lane.chainSc); nerr != nil {
+		lane.sess.headEnc.putGreedyScratch(scr)
+		endEncodingFast(sink.enc)
+		return none, nil, false, nerr
 	}
 	endEncodingFast(sink.enc)
-	commitCommandBufferFast(sink.cb)
-	lane.sess.pos++
-	if !gok {
-		// Head declined: commit stands (the forward is valid) — wait it,
-		// read the hidden, and keep this lane two-phase from now on.
-		lane.chainDead = true
-		waitUntilCompletedFast(sink.cb)
-		if cap(lane.hidden) < ls.dModel*bf16Size {
-			lane.hidden = make([]byte, ls.dModel*bf16Size)
-		}
-		lane.hidden = lane.hidden[:ls.dModel*bf16Size]
-		copy(lane.hidden, lane.sess.state.bufferBytes(sink.finalOut, ls.dModel*bf16Size))
-		lane.pos = lane.sess.pos
-		return none, nil, true, nil
-	}
-	// The round crosses the Step autorelease-pool boundary: the pool drains
-	// at Step end and would free the autoreleased cb — the next Step's wait
-	// would then hang forever (the exact trap stepGreedyLiveCommit's no-pool
-	// comment documents). Pin it; waitReleaseChainedCB drops the pin at the
-	// consuming wait.
+	// The round crosses the Step autorelease-pool boundary: pin it (the pool
+	// drains at Step end and would free the autoreleased cb — a later wait
+	// then hangs forever, the stepGreedyLiveCommit no-pool trap).
 	sink.cb.Retain()
-	return sink.cb, scr, false, nil
+	return sink.cb, scr, true, nil
 }
 
-// waitReleaseChainedCB completes a retained chained round's command buffer
-// and drops the cross-pool pin chainRoundCommit took.
+// commitChainedRound submits a pre-encoded round and advances the session
+// position — the µs step that keeps a lane rolling the instant its previous
+// round completes.
+func (ls *laneSet) commitChainedRound(lane *decodeLane, cb metal.MTLCommandBufferObject) {
+	commitCommandBufferFast(cb)
+	lane.sess.pos++
+}
+
+// waitReleaseChainedCB completes a retained, COMMITTED chained round's
+// command buffer and drops the cross-pool pin chainRoundEncode took. Never
+// call it on a held (uncommitted) round — the wait would hang forever;
+// dropHeldRound is that path.
 func waitReleaseChainedCB(cb metal.MTLCommandBufferObject) {
 	waitUntilCompletedFast(cb)
 	if pieceTimingOn {
@@ -617,16 +648,54 @@ func waitReleaseChainedCB(cb metal.MTLCommandBufferObject) {
 	cb.Release()
 }
 
-// chainEnterForward starts each chainable lane's pipeline: one chained round
-// per lane (host-embed entry), committed WITHOUT waiting — the round crosses
-// the Step boundary as the lane's pending round, its token harvested by the
-// NEXT Step overlapped with that step's speculative commits. An encode error
-// leaves the cb uncommitted; the lane retries per-lane, demoted.
+// lanePollWait is the ragged harvest's completion-poll interval: rounds run
+// milliseconds, so a 50µs sleep costs <1%% of one core while keeping harvest
+// latency negligible against round time.
+func lanePollWait() { time.Sleep(50 * time.Microsecond) }
+
+// dropHeldRound discards a lane's pre-encoded, never-committed round — the
+// terminal path. Nothing executed, nothing advanced: no rewind, no KV
+// truncation, just the pin and the scratch.
+func (ls *laneSet) dropHeldRound(lane *decodeLane) {
+	if !lane.heldLive {
+		return
+	}
+	lane.heldCB.Release()
+	lane.sess.headEnc.putGreedyScratch(lane.heldScr)
+	lane.heldCB, lane.heldScr, lane.heldLive = metal.MTLCommandBufferObject{}, nil, false
+}
+
+// holdNextRound pre-encodes the lane's next chained round when the budget
+// still has room for its emission (in-flight emits generated+1; the held
+// round emits generated+2). A head decline demotes the lane chainDead with
+// no side effects.
+func (ls *laneSet) holdNextRound(lane *decodeLane) error {
+	if lane.chainDead || lane.generated+2 > lane.maxNew {
+		return nil
+	}
+	cb, scr, ok, err := ls.chainRoundEncode(lane, true)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		lane.chainDead = true
+		return nil
+	}
+	lane.heldCB, lane.heldScr, lane.heldLive = cb, scr, true
+	return nil
+}
+
+// chainEnterForward starts each chainable lane's free-running pipeline: the
+// entry round (host-embed) is encoded and committed immediately (inFlight),
+// and the next round is pre-encoded and HELD uncommitted behind it — from
+// here the lane self-sustains: each harvest commits the held round and
+// pre-encodes another. A decline or encode error before the entry commit has
+// no side effects; the lane advances per-lane instead, demoted.
 func (ls *laneSet) chainEnterForward(chain []*decodeLane) error {
 	entered := false
 	for _, lane := range chain {
-		cb, scr, demoted, err := ls.chainRoundCommit(lane, false)
-		if err != nil {
+		cb, scr, ok, err := ls.chainRoundEncode(lane, false)
+		if err != nil || !ok {
 			lane.chainDead = true
 			h, serr := lane.sess.stepIDInPool(lane.pendingToken)
 			if serr != nil {
@@ -636,12 +705,13 @@ func (ls *laneSet) chainEnterForward(chain []*decodeLane) error {
 			lane.pos = lane.sess.pos
 			continue
 		}
-		if demoted {
-			continue
-		}
-		lane.pendingCB, lane.pendingScratch, lane.pendingLive = cb, scr, true
+		ls.commitChainedRound(lane, cb)
+		lane.inFlightCB, lane.inFlightScr, lane.inFlightLive = cb, scr, true
 		lane.pos = lane.sess.pos
 		entered = true
+		if herr := ls.holdNextRound(lane); herr != nil {
+			return herr
+		}
 	}
 	if entered {
 		ls.fwdCount++
@@ -650,16 +720,20 @@ func (ls *laneSet) chainEnterForward(chain []*decodeLane) error {
 	return nil
 }
 
-// drainLanePending completes and discards a lane's in-flight pending round —
-// the Retire/Close path for a lane leaving mid-pipeline. The round's advance
-// stays in the session (the lane is being torn down; its KV dies with it).
+// drainLanePending completes and discards a lane's chained rounds — the
+// Retire/Close/error path for a lane leaving mid-pipeline: the committed
+// in-flight round must finish before its session closes; the held round was
+// never committed and is simply dropped.
 func (ls *laneSet) drainLanePending(lane *decodeLane) {
-	if lane == nil || !lane.pendingLive {
+	if lane == nil {
 		return
 	}
-	waitReleaseChainedCB(lane.pendingCB)
-	lane.sess.headEnc.putGreedyScratch(lane.pendingScratch)
-	lane.pendingLive, lane.pendingScratch = false, nil
+	if lane.inFlightLive {
+		waitReleaseChainedCB(lane.inFlightCB)
+		lane.sess.headEnc.putGreedyScratch(lane.inFlightScr)
+		lane.inFlightCB, lane.inFlightScr, lane.inFlightLive = metal.MTLCommandBufferObject{}, nil, false
+	}
+	ls.dropHeldRound(lane)
 }
 
 // sharedReencodeForward advances the re-encode lanes through ONE grouped

@@ -369,13 +369,16 @@ func TestLaneSetMoESharedSubmissionByteIdentity(t *testing.T) {
 		}
 	}
 	if batchedFwd == 0 {
-		t.Fatal("BatchForwardCount is zero — the shared re-encode submission never fired")
+		t.Fatal("BatchForwardCount is zero — the chained forward never fired")
 	}
-	if batchedFwd > serialFwdSingle {
-		t.Fatalf("batched forwards %d exceed a single lane's %d — lanes were not sharing a submission", batchedFwd, serialFwdSingle)
-	}
-	if serialTotal := uint64(len(specs)) * serialFwdSingle; batchedFwd >= serialTotal {
-		t.Fatalf("batched forwards %d not fewer than serial total %d — no sharing occurred", batchedFwd, serialTotal)
+	// No shared-submission counter shape here: RAGGED chained lanes free-run
+	// (a Step returns whichever lanes completed, so the batched run takes
+	// MORE Steps with fewer lanes each — that is the design, not a failure).
+	// Engagement is pinned by chainedSteps above; correctness by the
+	// byte-identity compare. serialFwdSingle stays only as the "serial ran"
+	// sanity anchor.
+	if serialFwdSingle == 0 {
+		t.Fatal("serial run recorded no forwards")
 	}
 }
 
