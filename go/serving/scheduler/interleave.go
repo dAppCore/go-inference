@@ -162,8 +162,8 @@ func (m *Model) scheduleCBStep(ctx context.Context, req inference.ScheduledReque
 	if id == "" {
 		id = m.nextRequestID()
 	}
-	tok, ok := m.base.(inference.TokenizerModel)
-	if !ok { // gated at New, but stay defensive rather than panic
+	tok, ok := inference.As[inference.TokenizerModel](m.base)
+	if !ok { // gated at bind, but stay defensive rather than panic
 		return m.scheduleInterleave(ctx, req)
 	}
 	prompt := req.Prompt
@@ -195,8 +195,14 @@ func (m *Model) scheduleCBStep(ctx context.Context, req inference.ScheduledReque
 		for t := range tokens {
 			if t.Text == "" && !stopSet[t.ID] {
 				// Terminator text is never content — the plain path yields the
-				// stop token with empty text (engine decodeFromPrefilled).
-				t.Text = tok.Decode([]int32{t.ID})
+				// stop token with empty text (engine decodeFromPrefilled). The
+				// streaming decode keeps word boundaries; Decode-of-one is the
+				// fallback for models without it.
+				if m.cbDecode != nil {
+					t.Text = m.cbDecode.DecodeToken(t.ID)
+				} else {
+					t.Text = tok.Decode([]int32{t.ID})
+				}
 			}
 			out <- inference.ScheduledToken{RequestID: id, Token: t, Metrics: m.base.Metrics(), Labels: labels}
 		}

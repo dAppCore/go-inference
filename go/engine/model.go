@@ -374,6 +374,46 @@ func (m *TextModel) Tokenize(text string) ([]int32, error) {
 	return m.tok.Encode(text), nil
 }
 
+// Encode implements [inference.TokenizerModel]: the model's own tokenizer
+// encode. nil-safe — the interface shape carries no error, so a model with no
+// tokenizer encodes to nothing; Tokenize is the error-carrying sibling. This
+// (with Decode and ApplyChatTemplate) is what lets the serve scheduler's
+// continuous-batching coordinator bind to a real engine model: the CB gate
+// probes inference.TokenizerModel, and until these were exported the engine
+// never satisfied it — CB silently served the plain path on every live boot
+// (found 2026-07-13).
+func (m *TextModel) Encode(text string) []int32 {
+	if m == nil || m.tok == nil {
+		return nil
+	}
+	return m.tok.Encode(text)
+}
+
+// Decode implements [inference.TokenizerModel]: the batch detokenise. For
+// per-token STREAM text use DecodeToken — Decode of a single id strips the
+// SentencePiece boundary space (label semantics), which reassembles
+// "helloworld" from a stream.
+func (m *TextModel) Decode(ids []int32) string {
+	if m == nil || m.tok == nil {
+		return ""
+	}
+	return m.tok.Decode(ids)
+}
+
+// DecodeToken is the exported STREAMING per-token decode (see decode below):
+// the word boundary survives as a leading space so concatenated stream chunks
+// reassemble correctly. The CB-step scheduler prefers this for stream text.
+func (m *TextModel) DecodeToken(id int32) string { return m.decode(id) }
+
+// ApplyChatTemplate implements [inference.TokenizerModel]: the model's own
+// turn-template render, FormatChatPrompt's error-carrying interface shape.
+func (m *TextModel) ApplyChatTemplate(messages []inference.Message) (string, error) {
+	if m == nil {
+		return "", core.NewError("engine.TextModel.ApplyChatTemplate: nil model")
+	}
+	return m.FormatChatPrompt(messages), nil
+}
+
 // decode is the STREAMING per-token decode: DecodeToken keeps the SentencePiece
 // ▁ word boundary as a leading space (so concatenated stream chunks reassemble
 // "hello world", not "helloworld") and preserves the gemma4 channel markers the
