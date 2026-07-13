@@ -34,16 +34,38 @@ import (
 	"dappco.re/go/inference"
 )
 
-// cbReq is one admitted-or-queued unit of CB-step work.
+// cbReq is one admitted-or-queued unit of CB-step work. The drive loop
+// delivers FINISHED ScheduledTokens straight into out — per-token text
+// decode, stop blanking, running metrics and labels all happen in deliver —
+// so a request costs ONE channel send per token end to end (the previous
+// shape ran a per-request goroutine re-reading an intermediate token channel:
+// one extra hop + goroutine wake per token, ~0.5ms/tok of the K=1 CB-vs-plain
+// residual by the GPU-span split receipt).
 type cbReq struct {
 	id        string
 	promptIDs []int32
 	maxNew    int
 	stops     []int32
 	sampler   inference.SamplerConfig
-	out       chan inference.Token
+	out       chan inference.ScheduledToken
+	decode    func(int32) string // per-token stream text; nil = ids only
+	stopSet   map[int32]bool     // terminator ids — their text stays blank
+	labels    map[string]string
+	metrics   inference.GenerateMetrics       // running per-request counts (drive-loop-owned)
+	finishFn  func(inference.GenerateMetrics) // stream-end delivery (facade lastMetrics + MetricsSink)
 	ctx       context.Context
 	cancel    context.CancelFunc
+}
+
+// end fires the stream-end delivery and closes the request's stream — the
+// finish order (finishFn BEFORE close) is the happens-before edge the
+// metrics-sink consumers rely on: the handler reads its sink-written locals
+// only after its range over the stream ends.
+func (r *cbReq) end() {
+	if r.finishFn != nil {
+		r.finishFn(r.metrics)
+	}
+	close(r.out)
 }
 
 // cbStepEngine owns one inference.LaneSet and drives all admitted requests
@@ -96,11 +118,22 @@ func newCBStepEngine(bsm inference.BatchStepModel, cfg Config) *cbStepEngine {
 // cbDefaultMaxNew caps generation for a request that names no MaxTokens.
 const cbDefaultMaxNew = 512
 
+// cbDeliver is the per-request delivery spec the caller hands submit: how the
+// drive loop turns lane tokens into the consumer's ScheduledTokens and what
+// fires at stream end.
+type cbDeliver struct {
+	decode  func(int32) string
+	stopSet map[int32]bool
+	labels  map[string]string
+	metrics inference.GenerateMetrics
+	finish  func(inference.GenerateMetrics)
+}
+
 // submit enqueues a CB-step request. Blocks only while the queue is full or
 // until ctx is cancelled; once admitted the request's lane is advanced by the
 // shared Step loop and its tokens stream on the returned channel, which closes
 // when the stream ends, the request is cancelled, or the engine is closed.
-func (e *cbStepEngine) submit(ctx context.Context, id string, promptIDs []int32, maxNew int, stops []int32, sampler inference.SamplerConfig) (<-chan inference.Token, error) {
+func (e *cbStepEngine) submit(ctx context.Context, id string, promptIDs []int32, maxNew int, stops []int32, sampler inference.SamplerConfig, d cbDeliver) (<-chan inference.ScheduledToken, error) {
 	if len(promptIDs) == 0 {
 		return nil, core.E("scheduler.cbstep.submit", "empty prompt", nil)
 	}
@@ -122,7 +155,12 @@ func (e *cbStepEngine) submit(ctx context.Context, id string, promptIDs []int32,
 		maxNew:    maxNew,
 		stops:     stops,
 		sampler:   sampler,
-		out:       make(chan inference.Token, e.streamBuffer),
+		out:       make(chan inference.ScheduledToken, e.streamBuffer),
+		decode:    d.decode,
+		stopSet:   d.stopSet,
+		labels:    d.labels,
+		metrics:   d.metrics,
+		finishFn:  d.finish,
 		ctx:       reqCtx,
 		cancel:    cancel,
 	}
@@ -180,7 +218,7 @@ func (e *cbStepEngine) run() {
 	// finish closes a request's stream and clears its bookkeeping.
 	finish := func(laneID int, req *cbReq, counter *atomic.Int64) {
 		req.cancel()
-		close(req.out)
+		req.end()
 		delete(byLane, laneID)
 		counter.Add(1)
 		e.active.Store(int64(len(byLane)))
@@ -192,7 +230,7 @@ func (e *cbStepEngine) run() {
 			pending = pending[1:]
 			if req.ctx.Err() != nil {
 				req.cancel()
-				close(req.out)
+				req.end()
 				e.cancelled.Add(1)
 				continue
 			}
@@ -202,7 +240,7 @@ func (e *cbStepEngine) run() {
 				// stream cleanly rather than hang it; the caller sees an empty
 				// completion, never a wrong-token one.
 				req.cancel()
-				close(req.out)
+				req.end()
 				e.cancelled.Add(1)
 				continue
 			}
@@ -218,7 +256,7 @@ func (e *cbStepEngine) run() {
 			if req.id == id {
 				pending = append(pending[:i], pending[i+1:]...)
 				req.cancel()
-				close(req.out)
+				req.end()
 				e.cancelled.Add(1)
 				e.queued.Store(int64(len(pending)))
 				return
@@ -236,13 +274,13 @@ func (e *cbStepEngine) run() {
 	drain := func() {
 		for _, req := range pending {
 			req.cancel()
-			close(req.out)
+			req.end()
 		}
 		pending = nil
 		for laneID, req := range byLane {
 			_ = e.ls.Retire(inference.LaneHandle{ID: laneID})
 			req.cancel()
-			close(req.out)
+			req.end()
 			delete(byLane, laneID)
 		}
 	}
@@ -282,7 +320,7 @@ func (e *cbStepEngine) run() {
 			for laneID, req := range byLane {
 				_ = e.ls.Retire(inference.LaneHandle{ID: laneID})
 				req.cancel()
-				close(req.out)
+				req.end()
 				delete(byLane, laneID)
 			}
 			e.active.Store(0)
@@ -302,8 +340,15 @@ func (e *cbStepEngine) deliver(steps []inference.LaneStep, byLane map[int]*cbReq
 		}
 		cancelled := false
 		if s.HasToken {
+			t := inference.Token{ID: s.Token}
+			if !req.stopSet[t.ID] && req.decode != nil {
+				// Terminator text is never content — the plain path yields the
+				// stop token with empty text (engine decodeFromPrefilled).
+				t.Text = req.decode(t.ID)
+			}
+			req.metrics.GeneratedTokens++
 			select {
-			case req.out <- inference.Token{ID: s.Token}:
+			case req.out <- inference.ScheduledToken{RequestID: req.id, Token: t, Metrics: req.metrics, Labels: req.labels}:
 			case <-req.ctx.Done():
 				cancelled = true
 			}
