@@ -738,3 +738,260 @@ func TestMoEBlockBF16CachesLocalDenseWeightsWithExperts(t *testing.T) {
 		t.Fatalf("resident weights = %d, want at least %d local dense + whole expert tensors", got, len(required))
 	}
 }
+
+type encMoEBlockQuantDeviceFixture struct {
+	h             []byte
+	w             MoEQuantLayerWeights
+	input, output *pinnedNoCopyBytes
+	router        *routerDeviceScratch
+	scratch       *moeBlockBF16Scratch
+}
+
+func newEncMoEBlockQuantDeviceFixture(t *testing.T, bits int, fusedExperts bool) *encMoEBlockQuantDeviceFixture {
+	t.Helper()
+	const dModel, dFF, expertDFF, numExperts, topK, groupSize = 64, 128, 96, 4, 2, 32
+	f := &encMoEBlockQuantDeviceFixture{
+		h: toBF16Bytes(syntheticFloat32(dModel, 29)),
+		w: quantMoELayerWeightsGuard(t, numExperts, topK, dModel, dFF, expertDFF, groupSize, bits),
+	}
+	if fusedExperts {
+		f.w.ExpGateUp = fuseExpertGateUpQuant(f.w.ExpGate, f.w.ExpUp, numExperts, expertDFF, dModel, groupSize, bits)
+		f.w.ExpGate, f.w.ExpUp = QuantWeight{}, QuantWeight{}
+	}
+	var err error
+	f.input, err = newPinnedNoCopyBytes(len(f.h))
+	if err != nil {
+		t.Fatalf("new pinned MoE input: %v", err)
+	}
+	if _, err := f.input.copyBuffer(f.h); err != nil {
+		f.input.Close()
+		t.Fatalf("copy MoE input: %v", err)
+	}
+	f.output, err = newPinnedNoCopyBytes(dModel * bf16Size)
+	if err != nil {
+		f.input.Close()
+		t.Fatalf("new pinned MoE output: %v", err)
+	}
+	f.router, err = getRouterDeviceScratch(dModel, numExperts, topK)
+	if err != nil {
+		f.input.Close()
+		f.output.Close()
+		t.Fatalf("get router device scratch: %v", err)
+	}
+	f.scratch, err = getMoEBlockBF16Scratch(dModel, dFF, expertDFF, topK)
+	if err != nil {
+		putRouterDeviceScratch(f.router)
+		f.input.Close()
+		f.output.Close()
+		t.Fatalf("get MoE block scratch: %v", err)
+	}
+	return f
+}
+
+func (f *encMoEBlockQuantDeviceFixture) Close() {
+	if f == nil {
+		return
+	}
+	putMoEBlockBF16Scratch(f.scratch)
+	putRouterDeviceScratch(f.router)
+	if f.output != nil {
+		f.output.Close()
+	}
+	if f.input != nil {
+		f.input.Close()
+	}
+}
+
+func assertEncMoEBlockQuantDeviceOutput(t *testing.T, f *encMoEBlockQuantDeviceFixture) {
+	t.Helper()
+	const dModel, dFF = 64, 128
+	want, err := MoEBlockQuant(f.h, f.w, dModel, dFF, 1e-5)
+	if err != nil {
+		t.Fatalf("MoEBlockQuant host reference: %v", err)
+	}
+	if cos := cosineBF16(f.output.bytes, want); cos < 0.9999 {
+		t.Fatalf("encoded device MoE block cosine = %.6f, want >= 0.9999", cos)
+	}
+}
+
+func TestEncMoEBlockQuantDevice_B2(t *testing.T) {
+	requireNativeRuntime(t)
+	f := newEncMoEBlockQuantDeviceFixture(t, 2, false)
+	defer f.Close()
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	before := moeConcurrentBlocks.Load()
+	enc, encConc, handled, err := encMoEBlockQuantDevice(enc, cb, nil, false, f.router, f.scratch, f.input.buf, f.output.buf, f.w, 64, 128, 1e-5)
+	if err != nil || !handled {
+		endEncodingFast(enc)
+		t.Fatalf("encMoEBlockQuantDevice b2: handled=%v err=%v", handled, err)
+	}
+	if !encConc || moeConcurrentBlocks.Load() == before {
+		endEncodingFast(enc)
+		t.Fatalf("encMoEBlockQuantDevice b2 did not engage the concurrent encoder (encConc=%v)", encConc)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	assertEncMoEBlockQuantDeviceOutput(t, f)
+}
+
+func TestEncMoEBlockQuantDevice_B3(t *testing.T) {
+	requireNativeRuntime(t)
+	f := newEncMoEBlockQuantDeviceFixture(t, 3, false)
+	defer f.Close()
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	enc, _, handled, err := encMoEBlockQuantDevice(enc, cb, nil, false, f.router, f.scratch, f.input.buf, f.output.buf, f.w, 64, 128, 1e-5)
+	if err != nil || !handled {
+		endEncodingFast(enc)
+		t.Fatalf("encMoEBlockQuantDevice b3: handled=%v err=%v", handled, err)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	assertEncMoEBlockQuantDeviceOutput(t, f)
+}
+
+func TestEncMoEBlockQuantDevice_B4(t *testing.T) {
+	requireNativeRuntime(t)
+	f := newEncMoEBlockQuantDeviceFixture(t, 4, false)
+	defer f.Close()
+	oldConcurrentDisabled := moeConcurrentDisabled
+	moeConcurrentDisabled = true
+	defer func() { moeConcurrentDisabled = oldConcurrentDisabled }()
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	enc, encConc, handled, err := encMoEBlockQuantDevice(enc, cb, nil, false, f.router, f.scratch, f.input.buf, f.output.buf, f.w, 64, 128, 1e-5)
+	if err != nil || !handled {
+		endEncodingFast(enc)
+		t.Fatalf("encMoEBlockQuantDevice b4: handled=%v err=%v", handled, err)
+	}
+	if encConc {
+		endEncodingFast(enc)
+		t.Fatal("encMoEBlockQuantDevice b4 left a concurrent encoder open while concurrency was disabled")
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	assertEncMoEBlockQuantDeviceOutput(t, f)
+}
+
+func TestEncMoEBlockQuantDevice_B5(t *testing.T) {
+	requireNativeRuntime(t)
+	f := newEncMoEBlockQuantDeviceFixture(t, 5, false)
+	defer f.Close()
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	enc, _, handled, err := encMoEBlockQuantDevice(enc, cb, nil, false, f.router, f.scratch, f.input.buf, f.output.buf, f.w, 64, 128, 1e-5)
+	if err != nil || !handled {
+		endEncodingFast(enc)
+		t.Fatalf("encMoEBlockQuantDevice b5: handled=%v err=%v", handled, err)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	assertEncMoEBlockQuantDeviceOutput(t, f)
+}
+
+func TestEncMoEBlockQuantDevice_B6(t *testing.T) {
+	requireNativeRuntime(t)
+	f := newEncMoEBlockQuantDeviceFixture(t, 6, false)
+	defer f.Close()
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	enc, _, handled, err := encMoEBlockQuantDevice(enc, cb, nil, false, f.router, f.scratch, f.input.buf, f.output.buf, f.w, 64, 128, 1e-5)
+	if err != nil || !handled {
+		endEncodingFast(enc)
+		t.Fatalf("encMoEBlockQuantDevice b6: handled=%v err=%v", handled, err)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	assertEncMoEBlockQuantDeviceOutput(t, f)
+}
+
+func TestEncMoEBlockQuantDevice_B8(t *testing.T) {
+	requireNativeRuntime(t)
+	f := newEncMoEBlockQuantDeviceFixture(t, 8, false)
+	defer f.Close()
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	enc, _, handled, err := encMoEBlockQuantDevice(enc, cb, nil, false, f.router, f.scratch, f.input.buf, f.output.buf, f.w, 64, 128, 1e-5)
+	if err != nil || !handled {
+		endEncodingFast(enc)
+		t.Fatalf("encMoEBlockQuantDevice b8: handled=%v err=%v", handled, err)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	assertEncMoEBlockQuantDeviceOutput(t, f)
+}
+
+func TestEncMoEBlockQuantDevice_FusedExpertGateUp(t *testing.T) {
+	requireNativeRuntime(t)
+	f := newEncMoEBlockQuantDeviceFixture(t, 4, true)
+	defer f.Close()
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	enc, _, handled, err := encMoEBlockQuantDevice(enc, cb, nil, false, f.router, f.scratch, f.input.buf, f.output.buf, f.w, 64, 128, 1e-5)
+	if err != nil || !handled {
+		endEncodingFast(enc)
+		t.Fatalf("encMoEBlockQuantDevice fused gate_up: handled=%v err=%v", handled, err)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	assertEncMoEBlockQuantDeviceOutput(t, f)
+}
+
+func TestEncMoEBlockQuantDevice_NilBuffersDecline(t *testing.T) {
+	var inputEnc metal.MTLComputeCommandEncoderObject
+	var cb metal.MTLCommandBufferObject
+	enc, encConc, handled, err := encMoEBlockQuantDevice(inputEnc, cb, nil, true, nil, nil, nil, nil, MoEQuantLayerWeights{}, 64, 128, 1e-5)
+	if enc.GetID() != 0 || !encConc || handled || err != nil {
+		t.Fatalf("encMoEBlockQuantDevice nil buffers = encoder id=%d encConc=%v handled=%v err=%v, want 0/true/false/nil", enc.GetID(), encConc, handled, err)
+	}
+}
+
+func TestEncMoEBlockQuantDevice_SizeFloorDeclines(t *testing.T) {
+	requireNativeRuntime(t)
+	f := newEncMoEBlockQuantDeviceFixture(t, 4, false)
+	defer f.Close()
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	enc, _, handled, err := encMoEBlockQuantDevice(enc, cb, nil, false, f.router, f.scratch, f.input.buf, f.output.buf, f.w, 0, 128, 1e-5)
+	endEncodingFast(enc)
+	if handled || err != nil {
+		t.Fatalf("encMoEBlockQuantDevice zero dModel = handled=%v err=%v, want decline", handled, err)
+	}
+}
+
+func TestEncMoEBlockQuantDevice_InvalidLocalWeightDeclines(t *testing.T) {
+	requireNativeRuntime(t)
+	f := newEncMoEBlockQuantDeviceFixture(t, 4, false)
+	defer f.Close()
+	f.w.LocalGate.Packed = f.w.LocalGate.Packed[:len(f.w.LocalGate.Packed)-1]
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	enc, _, handled, err := encMoEBlockQuantDevice(enc, cb, nil, false, f.router, f.scratch, f.input.buf, f.output.buf, f.w, 64, 128, 1e-5)
+	endEncodingFast(enc)
+	if handled || err != nil {
+		t.Fatalf("encMoEBlockQuantDevice malformed local weight = handled=%v err=%v, want decline", handled, err)
+	}
+}
+
+func TestEncMoEBlockQuantDevice_MissingPipelineDeclines(t *testing.T) {
+	requireNativeRuntime(t)
+	f := newEncMoEBlockQuantDeviceFixture(t, 4, false)
+	defer f.Close()
+	withWrongMainLibrary(t, func() {
+		cb := commandBufferFast(queue)
+		enc := computeCommandEncoderFast(cb)
+		enc, _, handled, err := encMoEBlockQuantDevice(enc, cb, nil, false, f.router, f.scratch, f.input.buf, f.output.buf, f.w, 64, 128, 1e-5)
+		endEncodingFast(enc)
+		if handled || err != nil {
+			t.Fatalf("encMoEBlockQuantDevice missing pipeline = handled=%v err=%v, want decline", handled, err)
+		}
+	})
+}
