@@ -152,24 +152,34 @@ func GenerateOptions(options Options) []inference.GenerateOption {
 	}}
 }
 
-// NewChatResponse builds an Ollama chat response from metrics.
+// NewChatResponse builds an Ollama chat response from metrics. Durations map
+// nanosecond-for-nanosecond onto Ollama's fields (total_duration,
+// prompt_eval_duration, eval_duration); a zero duration is omitted on the
+// wire, so a serving stack that doesn't time a span simply doesn't claim it.
 func NewChatResponse(model, text string, metrics inference.GenerateMetrics) ChatResponse {
 	return ChatResponse{
-		Model:           model,
-		Message:         Message{Role: "assistant", Content: text},
-		Done:            true,
-		PromptEvalCount: metrics.PromptTokens,
-		EvalCount:       metrics.GeneratedTokens,
+		Model:              model,
+		Message:            Message{Role: "assistant", Content: text},
+		Done:               true,
+		PromptEvalCount:    metrics.PromptTokens,
+		EvalCount:          metrics.GeneratedTokens,
+		TotalDuration:      metrics.TotalDuration.Nanoseconds(),
+		PromptEvalDuration: metrics.PrefillDuration.Nanoseconds(),
+		EvalDuration:       metrics.DecodeDuration.Nanoseconds(),
 	}
 }
 
-// NewGenerateResponse builds an Ollama generate response from metrics.
+// NewGenerateResponse builds an Ollama generate response from metrics — the
+// same duration mapping as NewChatResponse.
 func NewGenerateResponse(model, text string, metrics inference.GenerateMetrics) GenerateResponse {
 	return GenerateResponse{
-		Model:           model,
-		Response:        text,
-		Done:            true,
-		PromptEvalCount: metrics.PromptTokens,
-		EvalCount:       metrics.GeneratedTokens,
+		Model:              model,
+		Response:           text,
+		Done:               true,
+		PromptEvalCount:    metrics.PromptTokens,
+		EvalCount:          metrics.GeneratedTokens,
+		TotalDuration:      metrics.TotalDuration.Nanoseconds(),
+		PromptEvalDuration: metrics.PrefillDuration.Nanoseconds(),
+		EvalDuration:       metrics.DecodeDuration.Nanoseconds(),
 	}
 }
