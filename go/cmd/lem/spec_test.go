@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -38,5 +39,18 @@ func TestRunSpecCommand_WritesFullSurface(t *testing.T) {
 		if !core.Contains(spec, want) {
 			t.Fatalf("spec missing %q — a route group did not reach the definition", want)
 		}
+	}
+}
+
+// TestRunSpecCommand_BadFormat asserts exporter failures are reported as a
+// command error and do not leave a successful artifact behind.
+func TestRunSpecCommand_BadFormat(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "openapi.invalid")
+	var stdout, stderr bytes.Buffer
+	if code := runSpecCommand(context.Background(), []string{"-format", "invalid", "-o", out}, &stdout, &stderr); code != 1 {
+		t.Fatalf("runSpecCommand invalid format exit = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("invalid format created %s, stat error=%v", out, err)
 	}
 }

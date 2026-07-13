@@ -57,6 +57,23 @@ func TestRunPackCommand_Dispatch(t *testing.T) {
 	}
 }
 
+// TestRunPackCommand_HelpSubcommands proves every routed pack subcommand
+// exposes its own flag contract without creating a container or loading a
+// model.
+func TestRunPackCommand_HelpSubcommands(t *testing.T) {
+	for _, subcommand := range []string{"create", "inspect", "list", "extract", "hash"} {
+		t.Run(subcommand, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := runPackCommand(context.Background(), []string{subcommand, "-h"}, &stdout, &stderr); code != 0 {
+				t.Fatalf("%s help exit %d, want 0; stderr=%s", subcommand, code, stderr.String())
+			}
+			if !core.Contains(stdout.String()+stderr.String(), "Usage:") {
+				t.Errorf("%s help omitted usage; stdout=%q stderr=%q", subcommand, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
 // TestRunPackCreate proves the create verb tars a model dir into a readable
 // .model container (Good), rejects the wrong positional count (Bad), and fails
 // on a missing source directory (Ugly).

@@ -73,3 +73,24 @@ func TestTextModel_SuiteSelfTest_Good(t *testing.T) {
 		return &fakeTextModel{}
 	})
 }
+
+// batchUnsupportedTextModel is a valid text model whose fixture does not
+// serve optional classification or batched generation.
+type batchUnsupportedTextModel struct{ *fakeTextModel }
+
+func (m *batchUnsupportedTextModel) Classify(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Fail(core.E("classify", "fixture does not serve classification", nil))
+}
+
+func (m *batchUnsupportedTextModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) core.Result {
+	return core.Fail(core.E("batch generate", "fixture does not serve batching", nil))
+}
+
+// TestTextModel_OptionalBatchCapabilitiesUnavailable_Ugly proves a clean
+// unsupported Result skips optional shape checks instead of rejecting an
+// otherwise conformant engine.
+func TestTextModel_OptionalBatchCapabilitiesUnavailable_Ugly(t *testing.T) {
+	TextModel(t, func(*testing.T) inference.TextModel {
+		return &batchUnsupportedTextModel{fakeTextModel: &fakeTextModel{}}
+	})
+}

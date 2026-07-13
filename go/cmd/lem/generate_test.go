@@ -69,6 +69,7 @@ func TestRunGenerateCommand_Rejects(t *testing.T) {
 		{"two positionals", []string{"model-a", "model-b"}, 2},
 		{"prompt-file missing", []string{"-prompt-file", filepath.Join(t.TempDir(), "nope.txt"), "model"}, 1},
 		{"prompt-file empty", []string{"-prompt-file", emptyFile, "model"}, 1},
+		{"help", []string{"-h"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

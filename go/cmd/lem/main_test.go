@@ -8,7 +8,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	core "dappco.re/go"
@@ -101,5 +104,58 @@ func TestCliCommandName(t *testing.T) {
 	}
 	if got := cliCommandName("serve"); got != "lem serve" {
 		t.Errorf("cliCommandName(\"serve\") = %q, want \"lem serve\"", got)
+	}
+}
+
+// TestMain_main_Helper isolates main because it terminates through core.Exit.
+func TestMain_main_Helper(t *testing.T) {
+	if os.Getenv("LEM_MAIN_HELPER") != "1" {
+		return
+	}
+	args := os.Getenv("LEM_MAIN_ARGS")
+	if args == "" {
+		os.Args = []string{"lem"}
+	} else {
+		os.Args = append([]string{"lem"}, strings.Split(args, "\x1f")...)
+	}
+	main()
+}
+
+func runMainProcess(t *testing.T, args ...string) (int, string) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMain_main_Helper$")
+	cmd.Env = append(os.Environ(), "LEM_MAIN_HELPER=1", "LEM_MAIN_ARGS="+strings.Join(args, "\x1f"))
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return 0, string(out)
+	}
+	exit, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("run main helper: %v; output=%s", err, out)
+	}
+	return exit.ExitCode(), string(out)
+}
+
+// TestMain_main_Good_NoArguments checks the actual binary prints its command
+// usage and exits successfully when no command was selected.
+func TestMain_main_Good_NoArguments(t *testing.T) {
+	code, output := runMainProcess(t)
+	if code != 0 {
+		t.Fatalf("main exit %d, want 0; output=%s", code, output)
+	}
+	if !core.Contains(output, "Usage: lem") {
+		t.Errorf("main usage missing from output %q", output)
+	}
+}
+
+// TestMain_main_Bad_UnknownCommand checks the actual binary returns the CLI
+// error exit status and names the rejected command.
+func TestMain_main_Bad_UnknownCommand(t *testing.T) {
+	code, output := runMainProcess(t, "unknown")
+	if code != 2 {
+		t.Fatalf("main exit %d, want 2; output=%s", code, output)
+	}
+	if !core.Contains(output, `unknown command "unknown"`) {
+		t.Errorf("unknown-command diagnostic missing from %q", output)
 	}
 }

@@ -15,6 +15,8 @@ package main
 
 import (
 	"os"
+	"os/exec"
+	"strings"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/pack"
@@ -49,6 +51,62 @@ func TestMain_main_Good_Help(t *core.T) {
 	defer restore()
 
 	main()
+}
+
+// TestMain_main_Helper is the child-process entry point for the exit paths in
+// main. Those paths deliberately call os.Exit, so they cannot be exercised in
+// the parent test process.
+func TestMain_main_Helper(t *core.T) {
+	if os.Getenv("LTHN_MODEL_PACK_MAIN_HELPER") != "1" {
+		return
+	}
+	args := os.Getenv("LTHN_MODEL_PACK_MAIN_ARGS")
+	if args == "" {
+		os.Args = []string{"lthn-model-pack"}
+	} else {
+		os.Args = append([]string{"lthn-model-pack"}, strings.Split(args, "\x1f")...)
+	}
+	main()
+}
+
+// runMainProcess runs main's process-terminating branches in an isolated test
+// binary and returns the observable exit status and combined terminal output.
+func runMainProcess(t *core.T, args ...string) (int, string) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestMain_main_Helper$")
+	cmd.Env = append(os.Environ(),
+		"LTHN_MODEL_PACK_MAIN_HELPER=1",
+		"LTHN_MODEL_PACK_MAIN_ARGS="+strings.Join(args, "\x1f"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return 0, string(out)
+	}
+	exit, ok := err.(*exec.ExitError)
+	if !ok {
+		t.Fatalf("run main helper: %v; output=%s", err, out)
+	}
+	return exit.ExitCode(), string(out)
+}
+
+func TestMain_main_Bad_MissingVerb(t *core.T) {
+	code, output := runMainProcess(t)
+	core.AssertEqual(t, 2, code)
+	core.AssertContains(t, output, "Usage:")
+}
+
+func TestMain_main_Bad_UnknownVerb(t *core.T) {
+	code, output := runMainProcess(t, "unknown")
+	core.AssertEqual(t, 2, code)
+	core.AssertContains(t, output, `unknown verb "unknown"`)
+	core.AssertContains(t, output, "Usage:")
+}
+
+func TestMain_main_Ugly_FailedVerb(t *core.T) {
+	missing := core.JoinPath(t.TempDir(), "missing.model")
+	code, output := runMainProcess(t, "list", missing)
+	core.AssertEqual(t, 1, code)
+	core.AssertContains(t, output, "lthn-model-pack:")
 }
 
 // buildFixtureSrcDir writes a small but realistic unpacked model pack dir —
