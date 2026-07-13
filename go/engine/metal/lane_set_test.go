@@ -597,6 +597,72 @@ func TestLaneSetOverlappedAdmissionByteIdentity(t *testing.T) {
 	}
 }
 
+// TestLaneSetChainDisabledByteIdentity pins the LTHN_CB_CHAIN=0 A/B lever:
+// with chaining forced off, every lane runs the two-phase path (chainedSteps
+// stays 0, the batched Phase-1 head engages) and streams byte-identical
+// tokens to the chained default — the lever changes economics, never output.
+func TestLaneSetChainDisabledByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	// The quant MoE fixture: chaining engages only on shared-encode-eligible
+	// re-encode lanes (the 26B-class serve shape) — the recorded-ICB dense
+	// fixture rides ICB replay and never chains.
+	m := laneSetQuantMoEFixtureModel(t)
+	defer m.Close()
+	specs := laneSpecFixtures()
+	ctx := context.Background()
+
+	admitAll := func(ls inference.LaneSet) []inference.LaneHandle {
+		t.Helper()
+		handles := make([]inference.LaneHandle, len(specs))
+		for i, spec := range specs {
+			h, err := ls.Prepare(ctx, spec)
+			if err != nil {
+				t.Fatalf("Prepare(%d): %v", i, err)
+			}
+			handles[i] = h
+		}
+		return handles
+	}
+
+	// Chained default.
+	lsA, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+	if err != nil {
+		t.Fatalf("OpenLaneSet(chained): %v", err)
+	}
+	hA := admitAll(lsA)
+	chainedTokens, _ := drainLaneSet(t, lsA)
+	if lsA.(*laneSet).chainedSteps == 0 {
+		t.Fatal("chained default never chained (chainedSteps == 0) — the A arm is vacuous")
+	}
+	_ = lsA.Close()
+
+	// Two-phase forced.
+	cbChainDisabled = true
+	defer func() { cbChainDisabled = false }()
+	lsB, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+	if err != nil {
+		t.Fatalf("OpenLaneSet(two-phase): %v", err)
+	}
+	hB := admitAll(lsB)
+	twoPhaseTokens, _ := drainLaneSet(t, lsB)
+	set := lsB.(*laneSet)
+	if set.chainedSteps != 0 {
+		t.Fatalf("LTHN_CB_CHAIN=0 must keep every lane two-phase, got %d chained steps", set.chainedSteps)
+	}
+	if set.headRowsCount == 0 {
+		t.Fatal("two-phase run never engaged the batched Phase-1 head (headRowsCount == 0)")
+	}
+	_ = lsB.Close()
+
+	for i := range specs {
+		if !slices.Equal(twoPhaseTokens[hB[i].ID], chainedTokens[hA[i].ID]) {
+			t.Fatalf("lane %d: two-phase tokens %v != chained %v", i, twoPhaseTokens[hB[i].ID], chainedTokens[hA[i].ID])
+		}
+	}
+}
+
 func TestLaneSetMatchesProductionGreedy(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set — GPU decode fixture")

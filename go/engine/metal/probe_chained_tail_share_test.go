@@ -20,7 +20,16 @@ import (
 // alignment it re-introduces. The 26B receipt (2026-07-16): round 7.18 ms,
 // bare 6.51 ms, tail 0.67 ms (9.3%) — at K=4 the ~0.5 ms/round ceiling is
 // roughly cancelled by re-introduced alignment, and the rendezvous reverses
-// the ragged free-run that banked +6%: REFUTED at K≤4, revisit at K≥8.
+// the ragged free-run that banked +6%: REFUTED at K≤4.
+//
+// K≥8 RE-CHECK (2026-07-16, closes the question): probe reproduced at
+// 0.563 ms (7.9%); the LIVE A/B (LTHN_CB_CHAIN=0 — two-phase rendezvous'd
+// batched Phase-1 heads — vs the chained default; 26B ctx4096, salted
+// ksweep) measured chained 107/143/173/196 tok/s at K=1/2/4/8 vs two-phase
+// 98/116/137/168: the rendezvous LOSES at every K, −14% at K=8. The ~8%
+// theoretical tail ceiling never survives giving up the ragged free-run +
+// submit-ahead. REFUTED at all K ≤ 8; do not revisit without a design that
+// batches the tail WITHOUT a rendezvous.
 func TestProbeChainedTailShare(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")

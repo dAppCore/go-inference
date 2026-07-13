@@ -6,6 +6,7 @@ package native
 
 import (
 	"context"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -670,14 +671,20 @@ func (ls *laneSet) phase1GreedyRows(active []*decodeLane) ([]int32, bool) {
 	return out, true
 }
 
+// cbChainDisabled forces every lane onto the two-phase path (batched Phase-1
+// heads + rendezvous'd Phase-2) — LTHN_CB_CHAIN=0, the A/B lever for the
+// chained-free-run-vs-batched-tail economics (the K≥8 tail re-check). Same
+// receipted-off switch convention as LTHN_CB_STEP / LTHN_CB_GEMM.
+var cbChainDisabled = os.Getenv("LTHN_CB_CHAIN") == "0"
+
 // laneChainable reports whether a re-encode lane can run the CHAINED step:
 // greedy discipline (the chain's head is a GPU argmax), a shared-encode
 // eligible session (the chain encodes into a grouped submission), the GPU
 // next-inputs seam present (the chain's embed producer), and the head not
 // having declined before. Sampled lanes and declined lanes keep the
-// two-phase path.
+// two-phase path, as does the whole set under LTHN_CB_CHAIN=0.
 func (ls *laneSet) laneChainable(lane *decodeLane) bool {
-	return lane.sampler == nil && !lane.chainDead &&
+	return !cbChainDisabled && lane.sampler == nil && !lane.chainDead &&
 		lane.sess.sharedStepEligible() &&
 		lane.sess.encNextInputsGPU != nil && lane.sess.plScratchNew != nil &&
 		lane.sess.headEnc != nil
