@@ -35,15 +35,13 @@ import (
 // DISPATCH shape changes (one weight sweep vs K), never a row's accumulation order.
 //
 // SCOPE (byte-identity envelope, gemmEligible): projections whose batched dispatch
-// is byte-identical per row (projector.rowsByteTier) — only bf16's batched gemv
-// qualifies. Genuinely-quantised weights do NOT: the register-tiled lthn_qmv_rows
-// kernel re-orders the quantised dot vs the per-row qmv_impl the replay records (a
-// ~1 ulp value-dependent drift — the hd-256 fold divergence, proven 2026-07-13),
-// so a quant model DECLINES the fold and keeps the merged per-lane ICB replay. The
-// q8 KV rung below rides ON TOP of a byte-identical projection path (so it is
-// receipted on bf16 weights); q8 KV over quant weights waits on a byte-identical
-// batched quant kernel (a metallib change). Kill switch LTHN_CB_GEMM=0 disables the
-// forward entirely (the merged 2.58× path, byte-for-byte).
+// is byte-identical per row (projector.rowsByteTier) — bf16's batched gemv at any
+// K, and quant through the register-tiled lthn_qmv_rows (qmv_fast_impl's M-variant
+// under the -fno-fast-math metallib) on fast-twin dims, one dispatch at K ≤ 4 and
+// chunked dispatches of 2..4 rows past it (projectRowsByteTier). The q8 KV rung
+// rides on top, receipted on bf16 AND quant. LTHN_CB_GEMM: 0 = replay only, 1 =
+// force the fold wherever byte-eligible, unset = AUTO (byte-eligible AND
+// profitable — quant keeps the replay, a receipted wall win at K=4 and K=6).
 
 // gemmForwardEnabled reports whether the weight-read-once GEMM forward is armed.
 // LTHN_CB_GEMM=0 forces the per-lane ICB replay (the merged path); LTHN_CB_GEMM=1
@@ -223,6 +221,21 @@ func (s *archDecodeState) gemmDims() (maxQDim, maxKVDim, maxFF int) {
 		}
 	}
 	return maxQDim, maxKVDim, maxFF
+}
+
+// projectRowsByteTierRequired is projectRowsRequired on the fold's BYTE tier —
+// the chunked tiled route past lthnQMVRowsMaxM rows — and hard-errors on a
+// mid-fold decline exactly like its throughput sibling (rowsByteTier
+// pre-checked the route, so a decline here is a wrong-bytes hazard).
+func projectRowsByteTierRequired(proj projector, enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, inOff, outOff uint, rows int, p projIndex) error {
+	handled, err := proj.projectRowsByteTier(enc, in, out, inOff, outOff, rows, p)
+	if err != nil {
+		return err
+	}
+	if !handled {
+		return core.NewError("native.batchedGEMMForward: byte-tier projection declined mid-encode")
+	}
+	return nil
 }
 
 // gemmSlabs is the K-row staging the batched-GEMM forward gathers into and scatters
@@ -409,17 +422,17 @@ func (ls *laneSet) gemmLayer(enc metal.MTLComputeCommandEncoder, advancing []*de
 	}
 
 	// --- batched projections (one weight sweep each): Q always; K/V only on owners ---
-	if err := projectRowsRequired(proj, enc, g.normed, g.q, 0, 0, k, projQ); err != nil {
+	if err := projectRowsByteTierRequired(proj, enc, g.normed, g.q, 0, 0, k, projQ); err != nil {
 		return err
 	}
 	vSrc := g.vProj
 	if ownsCache {
-		if err := projectRowsRequired(proj, enc, g.normed, g.kProj, 0, 0, k, projK); err != nil {
+		if err := projectRowsByteTierRequired(proj, enc, g.normed, g.kProj, 0, 0, k, projK); err != nil {
 			return err
 		}
 		if !proj.hasV() {
 			vSrc = g.kProj // gemma4 K==V: V rides the k-proj output (value-normed), no weight
-		} else if err := projectRowsRequired(proj, enc, g.normed, g.vProj, 0, 0, k, projV); err != nil {
+		} else if err := projectRowsByteTierRequired(proj, enc, g.normed, g.vProj, 0, 0, k, projV); err != nil {
 			return err
 		}
 	}
@@ -568,7 +581,7 @@ func (ls *laneSet) gemmLayer(enc metal.MTLComputeCommandEncoder, advancing []*de
 		}
 	}
 	// --- batched O projection (one weight sweep) → g.attnOut ---
-	if err := projectRowsRequired(proj, enc, g.attn, g.attnOut, 0, 0, k, projO); err != nil {
+	if err := projectRowsByteTierRequired(proj, enc, g.attn, g.attnOut, 0, 0, k, projO); err != nil {
 		return err
 	}
 	// --- per-lane residual (+ gemma4 post-attention norm) → g.h ---
@@ -590,10 +603,10 @@ func (ls *laneSet) gemmLayer(enc metal.MTLComputeCommandEncoder, advancing []*de
 			return err
 		}
 	}
-	if err := projectRowsRequired(proj, enc, g.mlpNormed, g.gate, 0, 0, k, projGate); err != nil {
+	if err := projectRowsByteTierRequired(proj, enc, g.mlpNormed, g.gate, 0, 0, k, projGate); err != nil {
 		return err
 	}
-	if err := projectRowsRequired(proj, enc, g.mlpNormed, g.up, 0, 0, k, projUp); err != nil {
+	if err := projectRowsByteTierRequired(proj, enc, g.mlpNormed, g.up, 0, 0, k, projUp); err != nil {
 		return err
 	}
 	for i := range advancing {
@@ -602,7 +615,7 @@ func (ls *laneSet) gemmLayer(enc metal.MTLComputeCommandEncoder, advancing []*de
 			return err
 		}
 	}
-	if err := projectRowsRequired(proj, enc, g.gated, g.down, 0, 0, k, projDown); err != nil {
+	if err := projectRowsByteTierRequired(proj, enc, g.gated, g.down, 0, 0, k, projDown); err != nil {
 		return err
 	}
 	for i, lane := range advancing {

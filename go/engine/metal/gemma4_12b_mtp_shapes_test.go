@@ -142,13 +142,15 @@ func TestUnalignedNoCopyGPURead(t *testing.T) {
 	}
 }
 
-// TestLthnQMVRowsParity gates the multi-row qmv routes (encQMVRowsBF16At)
-// against the production per-row qmv on synthetic quant weights with
-// per-group VARYING scales/biases (uniform values are blind to group/row
-// indexing defects). At fast-twin dims (outDim%8, inDim%512) the plan takes
-// the register-tiled lthn_qmv_rows — qmv_fast_impl's M-variant — and every
-// row must be BYTE-identical to the per-row qmv. Off-envelope dims route the
-// gather fallback (throughput tier): tolerance comparison only.
+// TestLthnQMVRowsParity gates the multi-row qmv routes against the production
+// per-row qmv on synthetic quant weights with per-group VARYING scales/biases
+// (uniform values are blind to group/row indexing defects). At fast-twin dims
+// (outDim%8, inDim%512) rows ≤ 4 take the register-tiled lthn_qmv_rows —
+// qmv_fast_impl's M-variant — through encQMVRowsBF16At and must be
+// BYTE-identical to the per-row qmv; rows 5..8 byte-assert through the
+// byte-tier chunked route (encQMVRowsBF16ChunkedAt — the fold's K>4 entry)
+// while the PLAIN route keeps the gather there (throughput winner at small
+// dims, tolerance tier). Off-envelope dims: gather, tolerance only.
 func TestLthnQMVRowsParity(t *testing.T) {
 	requireNativeRuntime(t)
 	rng := rand.New(rand.NewSource(29))
@@ -162,7 +164,7 @@ func TestLthnQMVRowsParity(t *testing.T) {
 		groups := inDim / gs
 		scales := mtpShapeRandBF16(rng, outDim*groups)
 		biases := mtpShapeRandBF16(rng, outDim*groups)
-		for rows := 2; rows <= lthnQMVRowsMaxM; rows++ {
+		for rows := 2; rows <= 2*lthnQMVRowsMaxM; rows++ { // past MaxM exercises the chunked route
 			x := mtpShapeRandBF16(rng, rows*inDim)
 			want := make([]byte, rows*outDim*bf16Size)
 			for m := range rows {
@@ -172,6 +174,8 @@ func TestLthnQMVRowsParity(t *testing.T) {
 				}
 				copy(want[m*outDim*bf16Size:], row)
 			}
+			fast := outDim%8 == 0 && inDim%512 == 0
+			byteTier := fast && rows > lthnQMVRowsMaxM // rows 5..8 byte-assert the chunked fold route
 			got := make([]byte, rows*outDim*bf16Size)
 			var handled bool
 			var encErr error
@@ -180,26 +184,37 @@ func TestLthnQMVRowsParity(t *testing.T) {
 				xBuf, outBuf := sharedBytes(x), scratchBF16(rows*outDim)
 				cb := commandBufferFast(queue)
 				enc := computeCommandEncoderFast(cb)
-				handled, encErr = encQMVRowsBF16At(enc, wqBuf, sBuf, bBuf, xBuf, outBuf, 0, 0, 0, 0, 0, rows, outDim, inDim, gs, bits)
+				if byteTier {
+					handled, encErr = encQMVRowsBF16ChunkedAt(enc, wqBuf, sBuf, bBuf, xBuf, outBuf, 0, 0, 0, 0, 0, rows, outDim, inDim, gs, bits)
+				} else {
+					handled, encErr = encQMVRowsBF16At(enc, wqBuf, sBuf, bBuf, xBuf, outBuf, 0, 0, 0, 0, 0, rows, outDim, inDim, gs, bits)
+				}
 				endEncodingFast(enc)
 				commitCommandBufferFast(cb)
 				waitUntilCompletedFast(cb)
 				copy(got, unsafe.Slice((*byte)(outBuf.Contents()), len(got)))
 			})
 			if encErr != nil {
-				t.Fatalf("encQMVRowsBF16At out=%d rows=%d: %v", outDim, rows, encErr)
+				t.Fatalf("multi-row qmv out=%d rows=%d: %v", outDim, rows, encErr)
 			}
 			if !handled {
-				t.Fatalf("encQMVRowsBF16At declined out=%d in=%d rows=%d", outDim, inDim, rows)
+				t.Fatalf("multi-row qmv declined out=%d in=%d rows=%d (byteTier=%v)", outDim, inDim, rows, byteTier)
 			}
 			nan, _ := bf16NaNScanBytes(got)
 			if nan > 0 {
 				t.Fatalf("out=%d rows=%d produced %d NaN", outDim, rows, nan)
 			}
-			if outDim%8 == 0 && inDim%512 == 0 {
-				// Fast-twin dims: the tiled route is byte-identical to per-row.
+			if fast && rows <= lthnQMVRowsMaxM {
+				// Fast-twin dims, single tiled dispatch: byte-identical to per-row.
 				if !bytes.Equal(got, want) {
 					t.Errorf("out=%d in=%d rows=%d: tiled route not byte-identical to per-row qmv", outDim, inDim, rows)
+				}
+				continue
+			}
+			if byteTier {
+				// Fast-twin dims, chunked route: byte-identical per chunk.
+				if !bytes.Equal(got, want) {
+					t.Errorf("out=%d in=%d rows=%d: chunked byte-tier route not byte-identical to per-row qmv", outDim, inDim, rows)
 				}
 				continue
 			}

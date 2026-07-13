@@ -5,6 +5,7 @@
 package native
 
 import (
+	"os"
 	"sync"
 	"unsafe"
 
@@ -104,9 +105,77 @@ func lthnQMVRowsPipeline(key lthnQMVRowsKey) (metal.MTLComputePipelineState, boo
 // records exactly the dispatch the live path encodes (record==live by
 // construction, never by parallel logic).
 type qmvRowsPlan struct {
-	tiled     bool // register-tiled lthn_qmv_rows (rows ≤ lthnQMVRowsMaxM)
+	tiled     bool // register-tiled lthn_qmv_rows, one dispatch (rows ≤ lthnQMVRowsMaxM)
 	tiledKey  lthnQMVRowsKey
 	gatherKey lthnGatherQMVKey
+}
+
+var (
+	qmvChunksOnce sync.Once
+	qmvChunksOn   bool
+)
+
+// qmvChunksEnabled reads the LTHN_QMV_CHUNKS kill switch once: "0" removes the
+// chunked byte-tier route (the laneSet GEMM fold then declines quant at K >
+// lthnQMVRowsMaxM); anything else (including unset) keeps it.
+func qmvChunksEnabled() bool {
+	qmvChunksOnce.Do(func() { qmvChunksOn = os.Getenv("LTHN_QMV_CHUNKS") != "0" })
+	return qmvChunksOn
+}
+
+// qmvRowsChunks decomposes rows (> lthnQMVRowsMaxM) into tiled chunk sizes in
+// {2,3,4} — never 1: a 1-row remainder converts the final [4,1] into [3,2] so
+// every chunk rides lthn_qmv_rows. Each chunk's rows are byte-identical to the
+// per-row qmv (row math is row-independent), which is what extends the laneSet
+// GEMM byte tier past K=4 (encQMVRowsBF16ChunkedAt). This is a BYTE-TIER route
+// only: for pure throughput the gather beats it at small dims (e2b MTP verify
+// A/B 2026-07-13 — chunked 178/180 vs gather 222 tok/s; grid-Z L2-amortises a
+// small weight stream better than two half-parallel tiled dispatches), so the
+// plain encQMVRowsBF16At keeps the gather for rows > lthnQMVRowsMaxM.
+func qmvRowsChunks(rows int) []int {
+	if rows <= lthnQMVRowsMaxM {
+		return nil
+	}
+	var out []int
+	r := rows
+	for r > lthnQMVRowsMaxM+1 {
+		out = append(out, lthnQMVRowsMaxM)
+		r -= lthnQMVRowsMaxM
+	}
+	if r == lthnQMVRowsMaxM+1 {
+		out = append(out, 3, 2)
+	} else {
+		out = append(out, r)
+	}
+	return out
+}
+
+// encQMVRowsBF16ChunkedAt is the BYTE-TIER multi-row qmv for rows >
+// lthnQMVRowsMaxM: qmvRowsChunks tiled dispatches of 2..4 rows each, every
+// chunk byte-identical to the per-row qmv on the fast-twin envelope
+// (outDim%8==0 && inDim%512==0). handled=false when the envelope, a chunk
+// PSO, or the kill switch declines — the caller keeps its throughput route.
+// Only the laneSet GEMM fold (projectRowsByteTier) takes this: the plain
+// encQMVRowsBF16At keeps the gather, which wins on throughput at small dims.
+func encQMVRowsBF16ChunkedAt(enc metal.MTLComputeCommandEncoder, wq, scales, biases, in, out metal.MTLBuffer, wqOff, scalesOff, biasesOff, inOff, outOff uint, rows, outDim, inDim, gs, bits int) (bool, error) {
+	if rows <= lthnQMVRowsMaxM || rows > qmvRowsMax || outDim%8 != 0 || inDim%512 != 0 || !qmvChunksEnabled() {
+		return false, nil
+	}
+	chunks := qmvRowsChunks(rows)
+	psos := make([]metal.MTLComputePipelineState, len(chunks))
+	for i, m := range chunks {
+		pso, ok := lthnQMVRowsPipeline(lthnQMVRowsKey{groupSize: gs, bits: bits, m: m})
+		if !ok {
+			return false, nil
+		}
+		psos[i] = pso
+	}
+	row := 0
+	for i, m := range chunks {
+		emitQMVRowsTiled(encSink{enc}, psos[i], wq, wqOff, scales, scalesOff, biases, biasesOff, in, inOff+uint(row*inDim*bf16Size), out, outOff+uint(row*outDim*bf16Size), inDim, outDim)
+		row += m
+	}
+	return true, nil
 }
 
 // qmvRowsPlanFor reports the multi-row route for a geometry: ok=false means no
@@ -202,9 +271,11 @@ func lthnQMVRowsPipelineICB(key lthnQMVRowsKey) (metal.MTLComputePipelineState, 
 // encQMVRowsBF16At encodes the multi-row qmv, reporting handled=false (no
 // encode) when the geometry has no kernel so the caller keeps its
 // qmm_t/per-row route. in rows are contiguous bf16 at inOff + z·inDim·2; out
-// rows land at outOff + z·outDim·2. Rows 2..lthnQMVRowsMaxM take the
-// register-tiled lthn_qmv_rows (the weight stream read ONCE); wider rows ride
-// the lean gather kernel (grid-Z, qmv_fast bytes, weight re-streamed per row).
+// rows land at outOff + z·outDim·2. Rows 2..lthnQMVRowsMaxM take one
+// register-tiled lthn_qmv_rows dispatch (the weight stream read ONCE); wider
+// rows ride the lean gather kernel (grid-Z, qmv_fast bytes, weight re-streamed
+// per row — the THROUGHPUT winner at small dims; the byte-tier chunked variant
+// is encQMVRowsBF16ChunkedAt, fold-only).
 // Byte identity: the tiled kernel is qmv_fast_impl's M-variant and the plan
 // gate admits it only on fast-twin dims (outDim%8==0 && inDim%512==0 — the
 // same rule qmvBF16KernelName routes the per-row decode by), so a tiled encode

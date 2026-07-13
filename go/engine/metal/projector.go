@@ -43,6 +43,11 @@ type projector interface {
 	// projector (or this weight's geometry) has no batched kernel — the caller keeps
 	// its per-row path.
 	projectRows(enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, inOff, outOff uint, rows int, p projIndex) (bool, error)
+	// projectRowsByteTier is projectRows on the BYTE tier — identical routing up
+	// to lthnQMVRowsMaxM rows, the chunked tiled route past it (quant), so the
+	// laneSet GEMM fold stays byte-identical to the per-lane replay at any K the
+	// byte tier admits. Throughput callers (the MTP verify) keep projectRows.
+	projectRowsByteTier(enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, inOff, outOff uint, rows int, p projIndex) (bool, error)
 	// rowsCapable reports whether EVERY present projection has a batched dispatch —
 	// the fold's upfront eligibility probe (slab sizing happens before any encode).
 	rowsCapable() bool
@@ -80,6 +85,12 @@ func (b bf16Projector) hasV() bool { return b.wV.buf != nil }
 // foldProfitable: bf16 decode is weight-bandwidth-bound — reading each weight
 // once for K lanes is the receipted 1.51× win.
 func (b bf16Projector) foldProfitable() bool { return true }
+
+// projectRowsByteTier: the batched bf16 gemv is byte-identical at any row
+// count — the byte tier IS the plain route.
+func (b bf16Projector) projectRowsByteTier(enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, inOff, outOff uint, rows int, p projIndex) (bool, error) {
+	return b.projectRows(enc, in, out, inOff, outOff, rows, p)
+}
 
 func (b bf16Projector) weightDims(p projIndex) (bufView, int, int, bool) {
 	switch p {
@@ -281,12 +292,51 @@ func (m qmvProjector) rowsByteTier(rows int) bool {
 		if w.bits > 0 {
 			gs, bits = w.gs, w.bits
 		}
+		if rows > lthnQMVRowsMaxM {
+			// The chunked byte-tier route (projectRowsByteTier): every chunk size
+			// must resolve a tiled PSO on the fast-twin envelope.
+			if rows > qmvRowsMax || outDim%8 != 0 || inDim%512 != 0 || !qmvChunksEnabled() {
+				return false
+			}
+			for _, cm := range qmvRowsChunks(rows) {
+				if _, ok := lthnQMVRowsPipeline(lthnQMVRowsKey{groupSize: gs, bits: bits, m: cm}); !ok {
+					return false
+				}
+			}
+			continue
+		}
 		plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits)
 		if !ok || !plan.tiled {
 			return false // gather/qmm_t route: throughput tier, not byte tier
 		}
 	}
 	return true
+}
+
+// projectRowsByteTier is projectRows on the BYTE tier: identical routing for
+// rows ≤ lthnQMVRowsMaxM, and the chunked tiled route (encQMVRowsBF16ChunkedAt)
+// past it — the laneSet GEMM fold's projection entry, where byte identity with
+// the per-lane replay outranks the gather's throughput. Callers gate on
+// rowsByteTier first; a false return here means the byte route fell through.
+func (m qmvProjector) projectRowsByteTier(enc metal.MTLComputeCommandEncoder, in, out metal.MTLBuffer, inOff, outOff uint, rows int, p projIndex) (bool, error) {
+	if rows <= lthnQMVRowsMaxM {
+		return m.projectRows(enc, in, out, inOff, outOff, rows, p)
+	}
+	w, outDim, inDim, ok := m.weightDims(p)
+	if !ok {
+		return false, core.NewError("native: bad projIndex")
+	}
+	if !w.present() {
+		return false, nil
+	}
+	if w.dense() {
+		return true, encGemvBF16BatchedAt(enc, w.wq.buf, in, out, w.wq.off, inOff, outOff, outDim, inDim, rows)
+	}
+	gs, bits := m.groupSize, m.bits
+	if w.bits > 0 {
+		gs, bits = w.gs, w.bits
+	}
+	return encQMVRowsBF16ChunkedAt(enc, w.wq.buf, w.scales.buf, w.biases.buf, in, out, w.wq.off, w.scales.off, w.biases.off, inOff, outOff, rows, outDim, inDim, gs, bits)
 }
 
 func (m qmvProjector) project(enc metal.MTLComputeCommandEncoder, vec, out metal.MTLBuffer, outOff uint, p projIndex) error {

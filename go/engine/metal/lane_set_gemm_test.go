@@ -669,6 +669,89 @@ func TestLaneSetGEMMQuantByteIdentityHiddens(t *testing.T) {
 	}
 }
 
+// TestLaneSetGEMMQuantK6ByteIdentityHiddens extends the quant byte-identity
+// receipt past the single-dispatch tile cap: SIX lanes, so every advancing
+// sweep runs the CHUNKED tiled route (qmvRowsChunks: [4,2] at K=6, dropping
+// through [3,2]/[4]/[3]/[2] as lanes retire) — each chunk a byte-identical
+// lthn_qmv_rows dispatch. Fires + byte-identical to the replay at every step.
+func TestLaneSetGEMMQuantK6ByteIdentityHiddens(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	m := laneSetQuantFastFixtureModelMax(t, 32)
+	defer m.Close()
+	specs := []inference.LaneSpec{
+		{PromptIDs: []int32{1, 5, 3, 2}, MaxNew: 8},
+		{PromptIDs: []int32{7, 7, 1}, MaxNew: 8},
+		{PromptIDs: []int32{2, 9, 4, 6, 8, 3}, MaxNew: 8},
+		{PromptIDs: []int32{4}, MaxNew: 8},
+		{PromptIDs: []int32{6, 2}, MaxNew: 5},
+		{PromptIDs: []int32{9, 1, 8}, MaxNew: 3},
+	}
+	ctx := context.Background()
+
+	open := func(mode int) (*laneSet, []inference.LaneHandle) {
+		lsi, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+		if err != nil {
+			t.Fatalf("OpenLaneSet(mode %d): %v", mode, err)
+		}
+		ls, ok := lsi.(*laneSet)
+		if !ok {
+			t.Fatalf("OpenLaneSet returned %T, not *laneSet", lsi)
+		}
+		ls.gemmMode = mode
+		handles := make([]inference.LaneHandle, len(specs))
+		for i, spec := range specs {
+			if handles[i], err = ls.Prepare(ctx, spec); err != nil {
+				t.Fatalf("Prepare(mode %d lane %d): %v", mode, i, err)
+			}
+		}
+		return ls, handles
+	}
+
+	lsG, hG := open(1)
+	lsR, hR := open(2)
+	defer lsG.Close()
+	defer lsR.Close()
+
+	for step := 0; ; step++ {
+		sg, err := lsG.Step(ctx)
+		if err != nil {
+			t.Fatalf("step %d GEMM Step: %v", step, err)
+		}
+		sr, err := lsR.Step(ctx)
+		if err != nil {
+			t.Fatalf("step %d replay Step: %v", step, err)
+		}
+		if len(sg) == 0 && len(sr) == 0 {
+			break
+		}
+		for i := range specs {
+			lg, lr := lsG.lanes[hG[i].ID], lsR.lanes[hR[i].ID]
+			if lg == nil || lr == nil {
+				continue
+			}
+			if !bytes.Equal(lg.hidden, lr.hidden) {
+				t.Fatalf("step %d lane %d: post-stack hidden bytes differ between K=6 chunked GEMM and replay", step, i)
+			}
+		}
+		tokG := stepTokens(sg, hG)
+		tokR := stepTokens(sr, hR)
+		if !slices.Equal(tokG, tokR) {
+			t.Fatalf("step %d: token vector diverges GEMM %v vs replay %v", step, tokG, tokR)
+		}
+		retireTerminal(t, lsG, sg)
+		retireTerminal(t, lsR, sr)
+	}
+
+	if lsG.gemmFwdCount == 0 {
+		t.Fatal("gemmFwdCount is zero — the K=6 chunked forward never fired (proof vacuous)")
+	}
+	if lsR.gemmFwdCount != 0 {
+		t.Fatalf("replay set ran %d GEMM forwards — it should be pure ICB replay", lsR.gemmFwdCount)
+	}
+}
+
 // TestLaneSetGEMMQuantAutoPrefersReplay pins the fold's PROFIT gate: in AUTO
 // mode (gemmMode unset, LTHN_CB_GEMM unset) a quant model keeps the per-lane
 // ICB replay even though the fold is byte-eligible on its fast-twin dims —
