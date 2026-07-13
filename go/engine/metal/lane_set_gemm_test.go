@@ -271,7 +271,7 @@ func TestLaneSetGEMMQuantFallsBackToReplay(t *testing.T) {
 	replayTok, replayFwd := run(2)
 
 	if armedFwd != 0 {
-		t.Fatalf("quant E2B ran %d batched-GEMM forwards — it must fall back to the replay (fused rms-qmv is not byte-identical to batched qmv-rows)", armedFwd)
+		t.Fatalf("quant E2B ran %d batched-GEMM forwards — it must fall back to the replay (PLE/sliding/KV-share proven-envelope exclusion)", armedFwd)
 	}
 	if replayFwd != 0 {
 		t.Fatalf("replay ran %d GEMM forwards", replayFwd)
@@ -573,4 +573,104 @@ func TestLaneSetGEMMQuantByteIdentityHiddens(t *testing.T) {
 	if lsR.gemmFwdCount != 0 {
 		t.Fatalf("replay set ran %d GEMM forwards — it should be pure ICB replay", lsR.gemmFwdCount)
 	}
+}
+
+
+// TestLaneSetGEMMEnvelopeExclusionLoadBearing pins that the proven-envelope
+// exclusions in gemmEligible protect REAL output (receipt 2026-07-13): with
+// gemmEnvelopeLiftForTest armed on real E2B — a 4-bit checkpoint carrying all
+// three excluded features at once (PLE tower, sliding windows, KV-share
+// layers), q8 KV disabled so this run isolates exactly those arms — the
+// weight-read-once forward FIRES and its post-stack hiddens DIVERGE from the
+// per-lane ICB replay at step 0. The mirrored single-row PLE/sliding/KV-share
+// arms are not byte-identical yet, so the exclusions stay. If this test ever
+// finds full identity instead, the arms got fixed: lift the exclusions and
+// convert this into the positive promotion receipt.
+func TestLaneSetGEMMEnvelopeExclusionLoadBearing(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	if _, err := os.Stat(laneSetABModelDir); err != nil {
+		t.Skipf("E2B model dir not present (%s) — set LTHN_CB_AB_MODEL", laneSetABModelDir)
+	}
+	// The q8 KV cache is its own separate fold rung (gemmEligible declines
+	// icb.kvQ8 outright) — load this receipt's model with bf16 KV so the run
+	// isolates exactly the three envelope arms under test.
+	kvQ8ICBOffForTest = true
+	t.Cleanup(func() { kvQ8ICBOffForTest = false })
+	tm, err := LoadTokenModelDir(laneSetABModelDir, 4096)
+	if err != nil {
+		t.Fatalf("LoadTokenModelDir: %v", err)
+	}
+	m, ok := tm.(*NativeTokenModel)
+	if !ok {
+		if c, ok := tm.(interface{ Close() error }); ok {
+			_ = c.Close()
+		}
+		t.Skipf("loaded model is %T, not *NativeTokenModel", tm)
+	}
+	defer m.Close()
+
+	gemmEnvelopeLiftForTest = true
+	defer func() { gemmEnvelopeLiftForTest = false }()
+
+	specs := laneSpecFixtures()
+	ctx := context.Background()
+	open := func(mode int) (*laneSet, []inference.LaneHandle) {
+		lsi, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+		if err != nil {
+			t.Fatalf("OpenLaneSet(mode %d): %v", mode, err)
+		}
+		ls, ok := lsi.(*laneSet)
+		if !ok {
+			t.Fatalf("OpenLaneSet returned %T, not *laneSet", lsi)
+		}
+		ls.gemmMode = mode
+		handles := make([]inference.LaneHandle, len(specs))
+		for i, spec := range specs {
+			if handles[i], err = ls.Prepare(ctx, spec); err != nil {
+				t.Fatalf("Prepare(mode %d lane %d): %v", mode, i, err)
+			}
+		}
+		return ls, handles
+	}
+
+	lsG, hG := open(1)
+	lsR, hR := open(2)
+	defer lsG.Close()
+	defer lsR.Close()
+
+	diverged := false
+	for step := 0; !diverged; step++ {
+		sg, err := lsG.Step(ctx)
+		if err != nil {
+			t.Fatalf("step %d GEMM Step: %v", step, err)
+		}
+		sr, err := lsR.Step(ctx)
+		if err != nil {
+			t.Fatalf("step %d replay Step: %v", step, err)
+		}
+		if len(sg) == 0 && len(sr) == 0 {
+			break
+		}
+		for i := range specs {
+			lg, lr := lsG.lanes[hG[i].ID], lsR.lanes[hR[i].ID]
+			if lg == nil || lr == nil {
+				continue
+			}
+			if !bytes.Equal(lg.hidden, lr.hidden) {
+				diverged = true
+			}
+		}
+		retireTerminal(t, lsG, sg)
+		retireTerminal(t, lsR, sr)
+	}
+
+	if lsG.gemmFwdCount == 0 {
+		t.Fatal("gemmFwdCount is zero — the lifted-envelope forward never fired (pin vacuous)")
+	}
+	if !diverged {
+		t.Fatal("lifted-envelope forward matched the replay byte-for-byte — the mirrored arms appear fixed: lift the proven-envelope exclusions and promote this test to the positive receipt")
+	}
+	t.Logf("envelope exclusion is load-bearing: lifted forward fired (%d) and diverged from the replay", lsG.gemmFwdCount)
 }

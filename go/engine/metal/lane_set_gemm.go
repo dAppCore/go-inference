@@ -55,6 +55,11 @@ func (ls *laneSet) gemmForwardEnabled() bool {
 	return ls.gemmMode == 1
 }
 
+// gemmEnvelopeLiftForTest arms the unproven envelope arms (PLE tower, sliding
+// window, KV-share layers) for a byte-identity receipt run on a real checkpoint —
+// the promotion gate for lifting the proven-envelope exclusions below. Test-only.
+var gemmEnvelopeLiftForTest bool
+
 // gemmEligible reports whether every advancing lane can take the batched-GEMM
 // forward. All lanes share the model, so this is really a model-feature check made
 // once per Step: recorded-ICB, bf16 projections (the byte-identity envelope — see the
@@ -76,17 +81,17 @@ func (ls *laneSet) gemmEligible(advancing []*decodeLane) bool {
 			return false // the forward mirrors the fused qk-norm+rope / rms-residual path
 		}
 		// PROVEN ENVELOPE: byte-identity is demonstrated (lane_set_gemm_test.go) for
-		// the dense bf16 path — no PLE tower, no KV-share layers, no sliding window.
-		// The forward mirrors the ICB's single-row PLE gate / shared-attention /
-		// sliding-ring encoders too, but no bf16 checkpoint on this box carries them
-		// (both installed models are 4-bit quant, GEMM-ineligible), so those paths are
-		// unproven — declined here rather than served armed-by-default on an unproven
-		// path. A bf16 PLE/sliding checkpoint + its receipt lifts this gate.
-		if len(s.ple) > 0 || s.slidingWindow > 0 {
+		// the dense path — no PLE tower, no KV-share layers, no sliding window. The
+		// forward mirrors the ICB's single-row PLE gate / shared-attention /
+		// sliding-ring encoders too, but those arms lack a byte-identity receipt on a
+		// real checkpoint, so they are declined here rather than served armed-by-
+		// default on an unproven path. gemmEnvelopeLiftForTest arms them for the
+		// receipt run that would lift this gate.
+		if !gemmEnvelopeLiftForTest && (len(s.ple) > 0 || s.slidingWindow > 0) {
 			return false
 		}
 		for li := range s.specs {
-			if !s.specs[li].OwnsCache() {
+			if !gemmEnvelopeLiftForTest && !s.specs[li].OwnsCache() {
 				return false // KV-share layers: proven-envelope exclusion (see above)
 			}
 			lb := s.lb[li]
