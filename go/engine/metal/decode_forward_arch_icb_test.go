@@ -604,3 +604,88 @@ func TestDecodeForwardArchICBMixedKEqV(t *testing.T) {
 	}
 	t.Logf("arch ICB mixed K==V (sliding-with-V + global-without-V) ≡ re-encode oracle byte-for-byte over %d tokens", T)
 }
+
+// TestDecodeForwardArchICB_DeclaredAttentionKEqV pins the recorder's declared
+// per-layer selection. A declared K==V layer must use K for V even if a stale
+// dense V weight is present at the API boundary; the re-encode oracle removes
+// that ignored V weight so it represents the same declared operation.
+func TestDecodeForwardArchICB_DeclaredAttentionKEqV(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, nKV, headDim, dFF = 512, 8, 4, 64, 1024
+	const base, scale, eps = float32(10000), float32(0.125), float32(1e-5)
+	const maxLen, tokens = 8, 4
+	inputs := make([][]byte, tokens)
+	for i := range inputs {
+		inputs[i] = toBF16Bytes(syntheticFloat32(dModel, i+61))
+	}
+	layers := []DecodeLayerWeights{
+		forwardLayer(dModel, nHeads, nKV, headDim, dFF, 100),
+		forwardLayer(dModel, nHeads, nKV, headDim, dFF, 200),
+	}
+	specs := model.DeriveLayers([]string{"full_attention", "full_attention"}, 0)
+	specs[1].AttentionKEqV = true
+
+	got, err := DecodeForwardArchICB(inputs, layers, specs, dModel, nHeads, nKV, headDim, maxLen, dFF, 0, base, scale, eps, false)
+	if err != nil {
+		t.Fatalf("DecodeForwardArchICB declared K==V: %v", err)
+	}
+	refLayers := append([]DecodeLayerWeights(nil), layers...)
+	refLayers[1].WV = nil // DecodeForwardArch derives K==V from the absent V projection.
+	want, err := DecodeForwardArch(inputs, refLayers, specs, dModel, nHeads, nKV, headDim, maxLen, dFF, 0, base, scale, eps, false)
+	if err != nil {
+		t.Fatalf("DecodeForwardArch declared K==V reference: %v", err)
+	}
+	for tok := range tokens {
+		eqBytes(t, core.Sprintf("declared K==V tok%d", tok), got[tok], want[tok])
+	}
+	if !specs[1].AttentionKEqV {
+		t.Fatal("DecodeForwardArchICB mutated the caller's declared K==V selection")
+	}
+}
+
+// TestDecodeForwardArchICB_SelfHealsMissingValueWeight pins the record-boundary
+// compatibility path for a hand-built spec that has not declared K==V. A missing
+// V projection still records V from K, and the caller-owned spec remains unchanged.
+func TestDecodeForwardArchICB_SelfHealsMissingValueWeight(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	const dModel, nHeads, nKV, headDim, dFF = 512, 8, 4, 64, 1024
+	const base, scale, eps = float32(10000), float32(0.125), float32(1e-5)
+	const maxLen, tokens = 8, 4
+	inputs := make([][]byte, tokens)
+	for i := range inputs {
+		inputs[i] = toBF16Bytes(syntheticFloat32(dModel, i+71))
+	}
+	layers := []DecodeLayerWeights{
+		forwardLayer(dModel, nHeads, nKV, headDim, dFF, 300),
+		forwardLayer(dModel, nHeads, nKV, headDim, dFF, 400),
+	}
+	layers[1].WV = nil
+	specs := model.DeriveLayers([]string{"full_attention", "full_attention"}, 0)
+
+	got, err := DecodeForwardArchICB(inputs, layers, specs, dModel, nHeads, nKV, headDim, maxLen, dFF, 0, base, scale, eps, false)
+	if err != nil {
+		t.Fatalf("DecodeForwardArchICB missing V: %v", err)
+	}
+	want, err := DecodeForwardArch(inputs, layers, specs, dModel, nHeads, nKV, headDim, maxLen, dFF, 0, base, scale, eps, false)
+	if err != nil {
+		t.Fatalf("DecodeForwardArch missing V reference: %v", err)
+	}
+	for tok := range tokens {
+		eqBytes(t, core.Sprintf("self-healed missing V tok%d", tok), got[tok], want[tok])
+	}
+	if specs[1].AttentionKEqV {
+		t.Fatal("DecodeForwardArchICB mutated the caller's undeclared K==V spec")
+	}
+}
+
+func TestArchICBReplayEncodeStepBodyNoInputIntoBuffer_Invalid(t *testing.T) {
+	var replay *archICBReplay
+	var enc metal.MTLComputeCommandEncoderObject
+	if got, ok := replay.encodeStepBodyNoInputIntoBuffer(enc, 0, nil); got != nil || ok {
+		t.Fatalf("encodeStepBodyNoInputIntoBuffer(nil) = (%v, %t), want (nil, false)", got, ok)
+	}
+}
