@@ -209,11 +209,12 @@ func TestLaneSetGEMMRaggedJoinByteIdentity(t *testing.T) {
 // 4-bit checkpoint whose PLE tower (and sliding window / KV-share layers) sit outside
 // the fold's demonstrated envelope, so even with the forward armed (gemmMode 1) the
 // lane set runs the per-lane ICB replay — the merged 2.58× path — byte-for-byte, and
-// the GEMM counter stays zero. E2B declines for TWO reasons now: the envelope
-// exclusions AND the quant projection safety gate — the register-tiled lthn_qmv_rows
-// is NOT byte-identical to the per-lane qmv (the hd-256 fold divergence, root-caused
-// 2026-07-13), so ANY quant model declines the fold (TestLaneSetGEMMDenseQuantDeclinesFold
-// pins the dense-quant case with no envelope features).
+// the GEMM counter stays zero. E2B's projections themselves sit ON the fast-twin
+// envelope (hidden 2048 — TestLaneSetGEMMQuantByteIdentityHiddens is the positive
+// projection receipt), so the mirrored PLE/sliding/KV-share arms are the ONLY thing
+// keeping it on the replay; TestLaneSetGEMMEnvelopeExclusionLoadBearing proves those
+// exclusions load-bearing, and TestLaneSetGEMMQuantOffEnvelopeDeclinesFold guards the
+// twin boundary for dims off the envelope.
 func TestLaneSetGEMMQuantFallsBackToReplay(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set — GPU decode fixture")
@@ -452,21 +453,20 @@ func retireTerminal(t *testing.T, ls *laneSet, steps []inference.LaneStep) {
 	}
 }
 
-// laneSetQuantFixtureModel builds a synthetic 4-bit quant gemma4 whose seven
-// projection dims all satisfy the register-tiled lthn_qmv_rows plan
-// (inDim%256==0, outDim%8==0) at gs=32 — the quant byte-identity fixture for
-// the weight-read-once fold. Skips (not fails) when the fixture is not
-// recorded-ICB eligible or the tiled plan is unavailable on this metallib.
+// laneSetQuantFixtureModel builds a synthetic 4-bit quant gemma4 whose hidden
+// width (256) sits OFF the fast-twin envelope: Q/K/V/gate/up read inDim 256,
+// and 256%512 != 0 routes their per-row oracle to the qmv_impl twin the tiled
+// kernel does not reproduce — so the byte tier must DECLINE this model. The
+// off-envelope decline fixture for TestLaneSetGEMMQuantOffEnvelopeDeclinesFold;
+// the positive quant byte-identity receipt rides the fast-twin fixture
+// (laneSetQuantFastFixtureModelMax, every inDim a 512-multiple).
 func laneSetQuantFixtureModel(t *testing.T) *NativeTokenModel {
 	return laneSetQuantFixtureModelMax(t, 32)
 }
 
-// laneSetQuantFixtureModelMax builds the DENSE 4-bit quant fixture at a
-// caller-chosen maxLen (maxLen >= sdpa2PassMinKV records the fixed-fan 2-pass SDPA
-// layout on global layers). Used to pin that dense quant DECLINES the fold (the
-// register-tiled projection is not byte-identical — see
-// TestLaneSetGEMMDenseQuantDeclinesFold); the q8-KV byte-identity receipt runs on
-// bf16 weights instead (laneSetBF16Q8FixtureMax).
+// laneSetQuantFixtureModelMax builds the DENSE 4-bit quant OFF-ENVELOPE fixture
+// at a caller-chosen maxLen (maxLen >= sdpa2PassMinKV records the fixed-fan
+// 2-pass SDPA layout on global layers).
 func laneSetQuantFixtureModelMax(t *testing.T, maxLen int) *NativeTokenModel {
 	t.Helper()
 	const gs, bits = 32, 4
@@ -504,29 +504,75 @@ func laneSetQuantFixtureModelMax(t *testing.T, maxLen int) *NativeTokenModel {
 		_ = m.Close()
 		t.Skip("quant fixture is not recorded-ICB eligible on this metallib")
 	}
-	// No rowsByteTier guard: it is now always false for a quant projector (the
-	// register-tiled kernel is not byte-identical), which is precisely the safety
-	// gate the sole caller (TestLaneSetGEMMDenseQuantDeclinesFold) pins. The fold's
-	// byte-tier gate declines this fixture regardless of the tiled kernel's
-	// availability, so recorded-ICB eligibility is the only precondition.
+	// No rowsByteTier guard: this fixture's inDim 256 fails the fast-twin
+	// envelope (inDim%512), so the byte tier declines it regardless of the
+	// tiled kernel's availability — precisely what the sole caller
+	// (TestLaneSetGEMMQuantOffEnvelopeDeclinesFold) pins. Recorded-ICB
+	// eligibility is the only precondition.
 	_ = as.Close()
 	return m
 }
 
-// TestLaneSetGEMMDenseQuantDeclinesFold pins the projection SAFETY GATE (receipt
-// 2026-07-13): a DENSE 4-bit quant model — no PLE, no sliding, no KV-share, so
-// the proven-envelope exclusions do NOT apply — STILL declines the weight-read-
-// once fold, because the register-tiled lthn_qmv_rows kernel is not byte-identical
-// to the per-lane qmv the replay records (proven 2026-07-13: batched projectRows
-// vs per-row project diverged ~1 ulp value-dependently on every projection; the
-// divergence surfaced as the hd-256 fold failure at step 6). So even with the
-// forward armed (gemmMode 1)
-// the lane set falls back to the per-lane ICB replay byte-for-byte and the GEMM
-// counter stays zero. This is the load-bearing pin for the gate that protects
-// production 12B/31B dense-quant (hd 256/512): if it ever finds the fold firing,
-// a byte-identical batched quant kernel landed — lift the gate and restore this
-// to the positive byte-identity receipt.
-func TestLaneSetGEMMDenseQuantDeclinesFold(t *testing.T) {
+// laneSetQuantFastFixtureModelMax builds the DENSE 4-bit quant FAST-TWIN
+// fixture: hidden 512, dFF 1024, HeadDim 256 — every projection's inDim
+// (512/512/512/512/512/512/1024) is a 512-multiple and every outDim an
+// 8-multiple, so each per-row oracle routes to qmv_fast and the register-tiled
+// lthn_qmv_rows (its M-variant) is byte-identical row for row. The positive
+// quant byte-identity fixture for the weight-read-once fold; HeadDim 256 also
+// arms the q8 KV cache for the q8-over-quant receipt. Skips when the fixture
+// is not recorded-ICB eligible or this metallib lacks the tiled kernel.
+func laneSetQuantFastFixtureModelMax(t *testing.T, maxLen int) *NativeTokenModel {
+	t.Helper()
+	const gs, bits = 32, 4
+	if _, ok := lthnQMVRowsPipeline(lthnQMVRowsKey{groupSize: gs, bits: bits, m: 2}); !ok {
+		t.Skip("register-tiled lthn_qmv_rows unavailable on this metallib")
+	}
+	cfg := g4.Config{
+		HiddenSize: 512, NumHiddenLayers: 2, IntermediateSize: 1024,
+		NumAttentionHeads: 2, NumKeyValueHeads: 1, HeadDim: 256, VocabSize: 48, RMSNormEps: 1e-6,
+		Quantization: &model.QuantConfig{GroupSize: gs, Bits: bits},
+	}
+	arch, err := cfg.Arch()
+	if err != nil {
+		t.Fatalf("Arch: %v", err)
+	}
+	lm, err := model.Assemble(quantGemma4Tensors(t, arch, gs, bits), arch, model.StandardWeightNames())
+	if err != nil {
+		t.Fatalf("model.Assemble: %v", err)
+	}
+	g, err := loadedToQuant(lm, gs, bits)
+	if err != nil {
+		t.Fatalf("loadedToQuant: %v", err)
+	}
+	m, err := NewQuantTokenModel(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewQuantTokenModel: %v", err)
+	}
+	probe, err := m.OpenSession()
+	if err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	as, ok := probe.(*ArchSession)
+	if !ok || as.state.icb == nil {
+		_ = probe.(interface{ Close() error }).Close()
+		_ = m.Close()
+		t.Skip("quant fast-twin fixture is not recorded-ICB eligible on this metallib")
+	}
+	_ = as.Close()
+	return m
+}
+
+// TestLaneSetGEMMQuantOffEnvelopeDeclinesFold pins the projection SAFETY GATE:
+// a DENSE 4-bit quant model whose dims sit OFF the fast-twin envelope (hidden
+// 256 → inDim 256, 256%512 != 0) — no PLE, no sliding, no KV-share, so the
+// proven-envelope exclusions do NOT apply — declines the weight-read-once
+// fold, because its per-row oracle routes to the qmv_impl twin (safe-loaded
+// final block, moved-back out-tile) that the tiled qmv_fast M-variant does not
+// reproduce. Even with the forward armed (gemmMode 1) the lane set falls back
+// to the per-lane ICB replay byte-for-byte and the GEMM counter stays zero.
+// The positive fast-twin receipt is TestLaneSetGEMMQuantByteIdentityHiddens;
+// this pin guards the boundary between the twins.
+func TestLaneSetGEMMQuantOffEnvelopeDeclinesFold(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set — GPU decode fixture")
 	}
@@ -592,7 +638,86 @@ func TestLaneSetGEMMDenseQuantDeclinesFold(t *testing.T) {
 	}
 
 	if lsG.gemmFwdCount != 0 {
-		t.Fatalf("dense quant ran %d batched-GEMM forwards — the projection safety gate must decline it (register-tiled lthn_qmv_rows is not byte-identical)", lsG.gemmFwdCount)
+		t.Fatalf("off-envelope quant ran %d batched-GEMM forwards — the projection safety gate must decline dims whose per-row oracle routes to the qmv_impl twin", lsG.gemmFwdCount)
+	}
+	if lsR.gemmFwdCount != 0 {
+		t.Fatalf("replay set ran %d GEMM forwards — it should be pure ICB replay", lsR.gemmFwdCount)
+	}
+}
+
+// TestLaneSetGEMMQuantByteIdentityHiddens is the positive quant receipt for the
+// weight-read-once fold (the receipt 9b6b9d2 claimed and the 2026-07-13 root
+// cause revoked, restored on the fast-twin kernel): on a DENSE 4-bit quant
+// model whose every projection sits on the fast-twin envelope (inDim%512==0,
+// outDim%8==0 — production routing), the armed fold must FIRE and produce
+// post-stack hiddens and tokens byte-identical to the per-lane ICB replay at
+// every step. The register-tiled lthn_qmv_rows is qmv_fast_impl's M-variant,
+// so each batched row reproduces the per-row decode qmv bit for bit.
+func TestLaneSetGEMMQuantByteIdentityHiddens(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	m := laneSetQuantFastFixtureModelMax(t, 32)
+	defer m.Close()
+	specs := laneSpecFixtures()
+	ctx := context.Background()
+
+	open := func(mode int) (*laneSet, []inference.LaneHandle) {
+		lsi, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+		if err != nil {
+			t.Fatalf("OpenLaneSet(mode %d): %v", mode, err)
+		}
+		ls, ok := lsi.(*laneSet)
+		if !ok {
+			t.Fatalf("OpenLaneSet returned %T, not *laneSet", lsi)
+		}
+		ls.gemmMode = mode
+		handles := make([]inference.LaneHandle, len(specs))
+		for i, spec := range specs {
+			if handles[i], err = ls.Prepare(ctx, spec); err != nil {
+				t.Fatalf("Prepare(mode %d lane %d): %v", mode, i, err)
+			}
+		}
+		return ls, handles
+	}
+
+	lsG, hG := open(1) // weight-read-once GEMM forward
+	lsR, hR := open(2) // per-lane ICB replay
+	defer lsG.Close()
+	defer lsR.Close()
+
+	for step := 0; ; step++ {
+		sg, err := lsG.Step(ctx)
+		if err != nil {
+			t.Fatalf("step %d GEMM Step: %v", step, err)
+		}
+		sr, err := lsR.Step(ctx)
+		if err != nil {
+			t.Fatalf("step %d replay Step: %v", step, err)
+		}
+		if len(sg) == 0 && len(sr) == 0 {
+			break
+		}
+		for i := range specs {
+			lg, lr := lsG.lanes[hG[i].ID], lsR.lanes[hR[i].ID]
+			if lg == nil || lr == nil {
+				continue
+			}
+			if !bytes.Equal(lg.hidden, lr.hidden) {
+				t.Fatalf("step %d lane %d: post-stack hidden bytes differ between quant GEMM and replay", step, i)
+			}
+		}
+		tokG := stepTokens(sg, hG)
+		tokR := stepTokens(sr, hR)
+		if !slices.Equal(tokG, tokR) {
+			t.Fatalf("step %d: token vector diverges GEMM %v vs replay %v", step, tokG, tokR)
+		}
+		retireTerminal(t, lsG, sg)
+		retireTerminal(t, lsR, sr)
+	}
+
+	if lsG.gemmFwdCount == 0 {
+		t.Fatal("gemmFwdCount is zero — the quant weight-read-once forward never fired (proof vacuous)")
 	}
 	if lsR.gemmFwdCount != 0 {
 		t.Fatalf("replay set ran %d GEMM forwards — it should be pure ICB replay", lsR.gemmFwdCount)
@@ -702,10 +827,11 @@ func TestLaneSetGEMMEnvelopeExclusionLoadBearing(t *testing.T) {
 // (global attention, gqa2) so the recorded ICB arms the q8 KV cache
 // (allocArchICBCaches: q8 on lhd 256/512 globals). BF16 weights are DELIBERATE:
 // the fold's bf16 batched gemv is byte-identical to the per-lane replay
-// (bf16Projector.rowsByteTier), so this fixture isolates the q8-KV staging rung
-// from the register-tiled QUANT projection, which is NOT byte-identical (the
-// hd-256 fold divergence, root-caused 2026-07-13 — see gemmEligible's safety
-// gate). A quant-weight q8 fold waits on a byte-identical batched quant kernel.
+// (bf16Projector.rowsByteTier) at ANY dims, so this fixture isolates the q8-KV
+// staging rung from the quant projection entirely — it was the instrument that
+// proved the q8 ops correct while the 2026-07-13 tiled-kernel divergence was
+// open. The quant-weight sibling receipt is
+// TestLaneSetGEMMQ8KVQuantByteIdentityHiddens (fast-twin dims).
 func laneSetBF16Q8FixtureMax(t *testing.T, maxLen int) *NativeTokenModel {
 	t.Helper()
 	const dModel, nHeads, nKV, headDim, dFF, vocab, nLayers = 256, 2, 1, 256, 512, 48, 2
@@ -735,9 +861,10 @@ func laneSetBF16Q8FixtureMax(t *testing.T, maxLen int) *NativeTokenModel {
 // counter-guarded. Runs at two maxLens: below the 2-pass knee (single-pass q8
 // SDPA layout) and at it (the recorder bakes the fixed 2-pass fan on global
 // layers — the fold must reproduce the identical fan for the reduction order
-// to match). Weights are BF16 (byte-identical projection path) so the receipt
-// isolates the q8 KV ops from the non-byte-identical quant tiled kernel — see
-// laneSetBF16Q8FixtureMax.
+// to match). Weights are BF16 (byte-identical projection path at any dims) so
+// the receipt isolates the q8 KV ops from the quant projection — see
+// laneSetBF16Q8FixtureMax; TestLaneSetGEMMQ8KVQuantByteIdentityHiddens is the
+// quant-weight sibling.
 func TestLaneSetGEMMQ8KVByteIdentityHiddens(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set — GPU decode fixture")
@@ -818,6 +945,101 @@ func TestLaneSetGEMMQ8KVByteIdentityHiddens(t *testing.T) {
 
 			if lsG.gemmFwdCount == 0 {
 				t.Fatal("gemmFwdCount is zero — the q8 weight-read-once forward never fired (proof vacuous)")
+			}
+			if lsR.gemmFwdCount != 0 {
+				t.Fatalf("replay set ran %d GEMM forwards, want 0", lsR.gemmFwdCount)
+			}
+		})
+	}
+}
+
+// TestLaneSetGEMMQ8KVQuantByteIdentityHiddens is the QUANT-weight sibling of
+// TestLaneSetGEMMQ8KVByteIdentityHiddens: on the fast-twin 4-bit fixture the
+// fold runs BOTH proven rungs at once — register-tiled quant projections
+// (byte-identical on fast-twin dims) over the q8 KV mirror ops — and must stay
+// byte-for-byte with the per-lane ICB replay at every step, counter-guarded,
+// at both q8 SDPA layouts. This is the receipt that q8-over-quant no longer
+// waits on anything: the E2B-class combination minus the envelope arms.
+func TestLaneSetGEMMQ8KVQuantByteIdentityHiddens(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	for _, tc := range []struct {
+		name   string
+		maxLen int
+	}{
+		{"singlePass", 32},
+		{"twoPassFixedFan", sdpa2PassMinKV},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kvQ8ICBForTest = true
+			t.Cleanup(func() { kvQ8ICBForTest = false })
+			m := laneSetQuantFastFixtureModelMax(t, tc.maxLen)
+			defer m.Close()
+			specs := laneSpecFixtures()
+			ctx := context.Background()
+
+			open := func(mode int) (*laneSet, []inference.LaneHandle) {
+				lsi, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+				if err != nil {
+					t.Fatalf("OpenLaneSet(mode %d): %v", mode, err)
+				}
+				ls, ok := lsi.(*laneSet)
+				if !ok {
+					t.Fatalf("OpenLaneSet returned %T, not *laneSet", lsi)
+				}
+				ls.gemmMode = mode
+				handles := make([]inference.LaneHandle, len(specs))
+				for i, spec := range specs {
+					if handles[i], err = ls.Prepare(ctx, spec); err != nil {
+						t.Fatalf("Prepare(mode %d lane %d): %v", mode, i, err)
+					}
+				}
+				return ls, handles
+			}
+
+			lsG, hG := open(1)
+			lsR, hR := open(2)
+			defer lsG.Close()
+			defer lsR.Close()
+
+			// Pin that the sessions really carry q8 KV — else the receipt is vacuous.
+			if st := lsG.lanes[hG[0].ID].sess.state; st.icb == nil || st.icb.kvQ8 == nil {
+				t.Fatal("fixture sessions did not arm the q8 KV cache")
+			}
+
+			for step := 0; ; step++ {
+				sg, err := lsG.Step(ctx)
+				if err != nil {
+					t.Fatalf("step %d GEMM Step: %v", step, err)
+				}
+				sr, err := lsR.Step(ctx)
+				if err != nil {
+					t.Fatalf("step %d replay Step: %v", step, err)
+				}
+				if len(sg) == 0 && len(sr) == 0 {
+					break
+				}
+				for i := range specs {
+					lg, lr := lsG.lanes[hG[i].ID], lsR.lanes[hR[i].ID]
+					if lg == nil || lr == nil {
+						continue
+					}
+					if !bytes.Equal(lg.hidden, lr.hidden) {
+						t.Fatalf("step %d lane %d: post-stack hidden bytes differ between q8-quant GEMM and replay", step, i)
+					}
+				}
+				tokG := stepTokens(sg, hG)
+				tokR := stepTokens(sr, hR)
+				if !slices.Equal(tokG, tokR) {
+					t.Fatalf("step %d: token vector diverges GEMM %v vs replay %v", step, tokG, tokR)
+				}
+				retireTerminal(t, lsG, sg)
+				retireTerminal(t, lsR, sr)
+			}
+
+			if lsG.gemmFwdCount == 0 {
+				t.Fatal("gemmFwdCount is zero — the q8-over-quant forward never fired (proof vacuous)")
 			}
 			if lsR.gemmFwdCount != 0 {
 				t.Fatalf("replay set ran %d GEMM forwards, want 0", lsR.gemmFwdCount)

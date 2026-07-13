@@ -186,10 +186,11 @@ func (m qmvProjector) projectRows(enc metal.MTLComputeCommandEncoder, in, out me
 		gs, bits = w.gs, w.bits
 	}
 	// Small row counts (the MTP verify's draft blocks) take the multi-row qmv:
-	// weight streamed once by Z-concurrent threadgroups at qmv occupancy, each
-	// row's bytes identical to the per-row decode qmv (the qmm_t below reads
-	// the weight once too, but at small-M GEMM occupancy — ~5× off the qmv
-	// floor on dense 12B/31B verifies).
+	// weight streamed once at qmv occupancy. On the tiled plan (fast-twin dims,
+	// outDim%8 && inDim%512) each row's bytes are identical to the per-row
+	// decode qmv; the gather fallback is throughput-tier only (the qmm_t below
+	// reads the weight once too, but at small-M GEMM occupancy — ~5× off the
+	// qmv floor on dense 12B/31B verifies).
 	if handled, err := encQMVRowsBF16At(enc, w.wq.buf, w.scales.buf, w.biases.buf, in, out, w.wq.off, w.scales.off, w.biases.off, inOff, outOff, rows, outDim, inDim, gs, bits); handled || err != nil {
 		return handled, err
 	}
@@ -226,27 +227,35 @@ func (m qmvProjector) rowsCapable() bool {
 	return true
 }
 
-// rowsByteTier: only the bf16 batched gemv reproduces the per-lane replay byte
-// for byte. A genuinely-quantised weight has NO byte-identical batched dispatch:
-// the register-tiled lthn_qmv_rows kernel re-orders the quantised dot's
-// accumulation relative to the per-row qmv_impl the replay records, so its rows
-// drift by ~1 ulp value-dependently (rate grows with inDim — proven 2026-07-13:
-// batched projectRows vs per-row project diverged on every projection, O/down @
-// inDim=512 worst; it surfaced as the hd-256 fold failure at step 6). The earlier
-// "qdot + simd_sum order match qmv_impl row for row" claim was wrong. So a present
-// quant weight declines the byte tier and the fold falls back to the byte-
-// identical merged ICB replay; only an all-dense (mixed-pack bf16) quant projector
-// still qualifies.
-func (m qmvProjector) rowsByteTier(int) bool {
+// rowsByteTier: the bf16 batched gemv reproduces the per-lane replay byte for
+// byte at any row count. A quantised weight qualifies only when EVERY present
+// quant weight routes to the register-tiled lthn_qmv_rows — qmv_fast_impl's
+// M-variant, byte-identical to the per-row decode qmv precisely where the
+// per-row oracle itself routes fast (outDim%8==0 && inDim%512==0; the plan
+// gate carries the rule). Any weight the plan would send to the gather or
+// qmm_t fallback declines the byte tier and the fold keeps the byte-identical
+// merged ICB replay. History: the packs=1 predecessor claimed qmv_impl parity
+// for ALL 256-multiples and was refuted 2026-07-13 (value-dependent ~1 ulp
+// accumulation drift — surfaced as the hd-256 fold failure at step 6); the
+// fast-twin match + this per-weight plan check replaced the blanket decline
+// that closed that exposure.
+func (m qmvProjector) rowsByteTier(rows int) bool {
 	for p := projQ; p <= projDown; p++ {
-		w, _, _, _ := m.weightDims(p)
+		w, outDim, inDim, _ := m.weightDims(p)
 		if !w.present() {
 			continue
 		}
 		if w.dense() {
 			continue // batched gemv: byte-identical at any row count
 		}
-		return false // quantised weight: no byte-identical batched dispatch
+		gs, bits := m.groupSize, m.bits
+		if w.bits > 0 {
+			gs, bits = w.gs, w.bits
+		}
+		plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits)
+		if !ok || !plan.tiled {
+			return false // gather/qmm_t route: throughput tier, not byte tier
+		}
 	}
 	return true
 }

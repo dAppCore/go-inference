@@ -118,10 +118,12 @@ func qmvRowsPlanFor(rows, outDim, inDim, gs, bits int) (qmvRowsPlan, bool) {
 	if rows < 2 || rows > qmvRowsMax || inDim <= 0 || gs <= 0 || inDim%gs != 0 || (inDim*bits)%32 != 0 {
 		return qmvRowsPlan{}, false
 	}
-	// The register-tiled kernel ports qmv_impl's MAIN loop only (no in-tail):
-	// every production projection dim is a 256-multiple (block_size = 8 values
-	// × 32 lanes), anything else keeps the gather fallback.
-	if rows <= lthnQMVRowsMaxM && outDim%8 == 0 && inDim%256 == 0 {
+	// The register-tiled kernel is qmv_fast_impl's M-variant, so it may fire
+	// ONLY where the per-row oracle itself routes fast — outDim%8==0 &&
+	// inDim%512==0, the qmvBF16KernelName rule (which also keeps the plain
+	// k-loop tail-free at packs=2). Other dims route per-row to the qmv_impl
+	// twin this kernel does not reproduce; they keep the gather fallback.
+	if rows <= lthnQMVRowsMaxM && outDim%8 == 0 && inDim%512 == 0 {
 		key := lthnQMVRowsKey{groupSize: gs, bits: bits, m: rows}
 		if _, ok := lthnQMVRowsPipeline(key); ok {
 			return qmvRowsPlan{tiled: true, tiledKey: key}, true
@@ -203,11 +205,14 @@ func lthnQMVRowsPipelineICB(key lthnQMVRowsKey) (metal.MTLComputePipelineState, 
 // rows land at outOff + z·outDim·2. Rows 2..lthnQMVRowsMaxM take the
 // register-tiled lthn_qmv_rows (the weight stream read ONCE); wider rows ride
 // the lean gather kernel (grid-Z, qmv_fast bytes, weight re-streamed per row).
-// NOTE: the tiled kernel is NOT byte-identical to the per-row qmv_impl — its
-// register-tiling re-orders the quantised dot's accumulation, drifting ~1 ulp
-// value-dependently (proven 2026-07-13). It is a THROUGHPUT batching (MTP
-// verify draft blocks), not a byte-identity path — see qmvProjector.rowsByteTier,
-// which declines it for the laneSet GEMM fold.
+// Byte identity: the tiled kernel is qmv_fast_impl's M-variant and the plan
+// gate admits it only on fast-twin dims (outDim%8==0 && inDim%512==0 — the
+// same rule qmvBF16KernelName routes the per-row decode by), so a tiled encode
+// is byte-identical to the per-row qmv row for row. Its packs=1 predecessor
+// claimed qmv_impl parity and was refuted 2026-07-13 (~1 ulp value-dependent
+// accumulation drift); the fast-twin match replaced it. The gather fallback
+// remains a THROUGHPUT route (MTP verify draft blocks), not a byte-identity
+// claim — qmvProjector.rowsByteTier accepts tiled plans only.
 func encQMVRowsBF16At(enc metal.MTLComputeCommandEncoder, wq, scales, biases, in, out metal.MTLBuffer, wqOff, scalesOff, biasesOff, inOff, outOff uint, rows, outDim, inDim, gs, bits int) (bool, error) {
 	plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits)
 	if !ok {

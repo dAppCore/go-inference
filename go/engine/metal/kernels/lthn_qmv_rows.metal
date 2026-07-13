@@ -7,8 +7,18 @@
 // verify measured ~2× the single-sweep floor at M=5. Here the batch lives
 // INSIDE the threadgroup: each thread holds M x-slices in registers, the
 // weight pack is loaded per k-block once and qdot'ed against all M rows.
-// Loop structure, qdot and simd_sum order match qmv_impl (packs_per_thread=1)
-// row for row, so each output row is byte-identical to MLX's plain qmv.
+//
+// Byte identity: this is qmv_fast_impl's M-variant — packs_per_thread, loop
+// structure, qdot and simd_sum order match qmv_fast_impl row for row, so each
+// output row is byte-identical to the per-row decode qmv EXACTLY where the
+// per-row path itself routes fast: outDim%8==0 && inDim%512==0 (the
+// qmvBF16KernelName rule; %512 also keeps the plain k-loop tail-free at both
+// packs). Other dims route per-row to qmv_impl — a DIFFERENT twin (packs=1,
+// safe-loaded final block, moved-back last out-tile) this kernel does not
+// reproduce; the Go plan gate (qmvRowsPlanFor) must never send them here.
+// History: this kernel originally shipped at packs_per_thread=1 claiming
+// qmv_impl parity — refuted 2026-07-13 (value-dependent ~1 ulp accumulation
+// drift on production dims, which route fast); matched to the fast twin since.
 //
 // M bakes as a function constant (2..6 — the MTP verify's draft block +
 // carry; larger blocks keep the gather path). Same include chain as
@@ -34,7 +44,7 @@ METAL_FUNC void lthn_qmv_rows_impl(
     uint3 tid,
     uint simd_gid,
     uint simd_lid) {
-  constexpr int packs_per_thread = 1;
+  constexpr int packs_per_thread = bits == 2 ? 1 : 2; // qmv_fast_impl's choice — byte parity
   constexpr int num_simdgroups = 2;
   constexpr int results_per_simdgroup = 4;
   constexpr int pack_factor = get_pack_factor<bits, 32>();
