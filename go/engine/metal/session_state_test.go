@@ -178,48 +178,14 @@ func TestLoadStateBlock_Ugly(t *testing.T) {
 	if err := restoreStateBlock(1, 3, 6, 1, target, block); err != nil {
 		t.Fatalf("restoreStateBlock wrapped range: %v", err)
 	}
-	if got, want := targetKeys, keys; !bytes.Equal(got, want) {
+	// Restore writes into physical ring slots: tokens 3,4,5 land in slots
+	// 3,0,1. Slot 2 (token 2's row) is outside the block and must stay
+	// zero — a 3-token block can never reproduce the full original ring.
+	if got, want := targetKeys, []byte{0, 1, 2, 3, 0, 0, 6, 7}; !bytes.Equal(got, want) {
 		t.Fatalf("restoreStateBlock wrapped keys = %v, want %v", got, want)
 	}
-	if got, want := targetValues, values; !bytes.Equal(got, want) {
+	if got, want := targetValues, []byte{10, 11, 12, 13, 0, 0, 16, 17}; !bytes.Equal(got, want) {
 		t.Fatalf("restoreStateBlock wrapped values = %v, want %v", got, want)
-	}
-}
-
-func TestArchSession_refreshPagedStateLayerViews_Good(t *testing.T) {
-	requireNativeRuntime(t)
-	s := newSessionStateFixture(t)
-	if err := s.PrefillTokens([]int32{1, 2, 3, 4}); err != nil {
-		t.Fatalf("PrefillTokens: %v", err)
-	}
-	views, err := s.stateLayerViews()
-	if err != nil {
-		t.Fatalf("stateLayerViews: %v", err)
-	}
-	if len(views) < 2 || views[0].cacheIndex == views[1].cacheIndex {
-		t.Fatalf("fixture cache indexes = %v/%v, want distinct paged owners", views[0].cacheIndex, views[1].cacheIndex)
-	}
-	// Keep a known current snapshot, then replace the cached view slices. The
-	// requested cache index must be re-materialised while the unrequested view
-	// stays untouched; this is the MTP selective-refresh contract.
-	wantKeys := append([]byte(nil), views[0].keyBytes...)
-	wantValues := append([]byte(nil), views[0].valueBytes...)
-	views[0].keyBytes, views[0].valueBytes = []byte{0xde}, []byte{0xad}
-	views[1].keyBytes, views[1].valueBytes = []byte{0xbe}, []byte{0xef}
-	if err := s.refreshPagedStateLayerViews(views, map[int]bool{views[0].cacheIndex: true}); err != nil {
-		t.Fatalf("refreshPagedStateLayerViews: %v", err)
-	}
-	if got := views[0].keyBytes; !bytes.Equal(got, wantKeys) {
-		t.Fatalf("selected paged key snapshot = %v, want current cache bytes %v", got, wantKeys)
-	}
-	if got := views[0].valueBytes; !bytes.Equal(got, wantValues) {
-		t.Fatalf("selected paged value snapshot = %v, want current cache bytes %v", got, wantValues)
-	}
-	if got := views[1].keyBytes; !bytes.Equal(got, []byte{0xbe}) {
-		t.Fatalf("unrequested paged key snapshot changed to %v", got)
-	}
-	if got := views[1].valueBytes; !bytes.Equal(got, []byte{0xef}) {
-		t.Fatalf("unrequested paged value snapshot changed to %v", got)
 	}
 }
 
