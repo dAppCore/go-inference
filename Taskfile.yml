@@ -50,8 +50,11 @@ tasks:
       - |-
         set -e
         airdir="$(mktemp -d)"
+        # -fno-fast-math matches MLX's own kernel build (external/mlx .../kernels/CMakeLists.txt):
+        # the byte-identity twins (lthn_qmv_rows et al) must not let the compiler reassociate
+        # fp chains the oracle kernels keep in source order (M=4 drift receipt, 2026-07-13).
         for m in go/engine/metal/kernels/*.metal; do
-          xcrun -sdk macosx metal -std=metal4.0 -I external/mlx -c "$m" -o "$airdir/$(basename "${m%.metal}").air"
+          xcrun -sdk macosx metal -std=metal4.0 -fno-fast-math -I external/mlx -c "$m" -o "$airdir/$(basename "${m%.metal}").air"
         done
         xcrun -sdk macosx metallib "$airdir"/*.air -o build/dist/lib/lthn_kernels.metallib
         rm -rf "$airdir"

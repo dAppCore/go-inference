@@ -588,26 +588,32 @@ kernel**, the pinned next rung one level down.
 
 ### Pinned gaps (evidenced, the next rungs)
 
-1. **Weight-read-once GEMM batching — DONE for bf16; quant SAFETY-GATED** (2026-07-13).
+1. **Weight-read-once GEMM batching — DONE for bf16 AND fast-twin quant** (2026-07-13).
    The arc, honestly: the "fused rms-qmv kernel" story was a misdiagnosis (that fusion has
-   been dormant since the M2 port, enableInputRMSFusion=false) and 9b6b9d2 then claimed the
-   byte tier by routing quant through the register-tiled lthn_qmv_rows — but that claim was
-   fixture-limited. At production dims the tiled kernel's register tiling re-orders the
-   quantised dot's accumulation vs the per-row qmv_impl: value-dependent ~1 ulp bf16 drift,
-   receipted per-projection on M3 Ultra (Q/K/V 1–3 rows in 800, O 10/800, down 6/800 at
-   gs32 b4, inDim 256/512; forcing the per-row path restores byte identity — sole cause).
-   Genuine quant weights now DECLINE the fold (rowsByteTier false → byte-identical merged
-   replay; TestLaneSetGEMMDenseQuantDeclinesFold pins the gate), closing the silent-drift
-   exposure 9b6b9d2 opened. The pinned rung is a byte-identical batched quant kernel in
-   the metallib (accumulation order matched to qmv_impl).
-   **The q8-KV staging rung is BUILT and receipted on bf16 weights** (rope/norm into bf16
-   staging → emitKVQ8StoreAt, V-first on the K==V alias → q8-read SDPA, single-pass and
-   fixed-fan two-pass; TestLaneSetGEMMQ8KVByteIdentityHiddens on laneSetBF16Q8FixtureMax).
-   E2B-class stays on the replay for TWO evidenced reasons: (a) its quant weights hit the
-   safety gate above, and (b) with q8 disabled and the envelope experimentally lifted,
-   the forward FIRES and DIVERGES at step 0 — the mirrored single-row PLE/sliding/KV-share
-   arms are not byte-identical (TestLaneSetGEMMEnvelopeExclusionLoadBearing pins this;
-   gemmEnvelopeLiftForTest re-arms the receipt run after any fix).
+   been dormant since the M2 port, enableInputRMSFusion=false); 9b6b9d2 claimed the byte
+   tier by routing quant through the register-tiled lthn_qmv_rows, but that kernel shipped
+   at packs_per_thread=1 — it mirrored the qmv_impl twin while the per-row oracle routes
+   PRODUCTION dims (outDim%8==0 && inDim%512==0, the qmvBF16KernelName rule) to
+   qmv_fast_impl (packs=2). Different packs → different thread-to-k mapping → different
+   simd_sum grouping: value-dependent ~1 ulp bf16 drift, receipted per-projection on
+   M3 Ultra (forcing the per-row path restored byte identity — sole cause of the hd-256
+   fold divergence). The fix: lthn_qmv_rows is now qmv_fast_impl's M-variant (packs
+   matched), the plan gate admits it only on fast-twin dims, and rowsByteTier accepts a
+   quant weight per-weight through that plan. Receipts: TestLaneSetGEMMQuantByteIdentityHiddens
+   (positive, fires + byte-identical), TestLaneSetGEMMQuantOffEnvelopeDeclinesFold (the
+   twin boundary declines), TestLaneSetGEMMQ8KVQuantByteIdentityHiddens (q8-over-quant,
+   both SDPA layouts). Off-envelope dims (any inDim%512!=0) keep the byte-identical
+   merged replay — mirroring the qmv_impl twin (safe-loaded tail, moved-back out-tile)
+   is not worth the surface for shapes production never routes.
+   **The q8-KV staging rung is BUILT and receipted on bf16 AND quant weights** (rope/norm
+   into bf16 staging → emitKVQ8StoreAt, V-first on the K==V alias → q8-read SDPA,
+   single-pass and fixed-fan two-pass; TestLaneSetGEMMQ8KVByteIdentityHiddens isolates the
+   q8 ops on bf16, TestLaneSetGEMMQ8KVQuantByteIdentityHiddens runs the full quant+q8
+   combination). E2B-class now stays on the replay for ONE evidenced reason: with q8
+   disabled and the envelope experimentally lifted, the forward FIRES and DIVERGES at
+   step 0 — the mirrored single-row PLE/sliding/KV-share arms are not byte-identical
+   (TestLaneSetGEMMEnvelopeExclusionLoadBearing pins this; gemmEnvelopeLiftForTest re-arms
+   the receipt run after any fix). Those arms are the last blocker before E2B-class folds.
 2. **Non-ICB arches.** The external-encoder fusion needs the ICB `encodeStepBody`
    seam; a non-ICB `stepToken` opens its own command buffer. MoE (12B/26B) and
    COMPOSED/hybrid decode fall outside the owner today — `Prepare` refuses them.

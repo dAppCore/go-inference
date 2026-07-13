@@ -457,7 +457,7 @@ func (r *archICBReplay) quantiseQ8From(mirror, cache, scales metal.MTLBuffer, ro
 				m = f
 			}
 		}
-		scale := m * (1.0 / 127.0) // the store kernel's fast-math reciprocal form
+		scale := m / 127 // true division — the store kernel's form under -fno-fast-math (and kvQ8QuantRows's)
 		inv := float32(0)
 		if scale > 0 {
 			inv = 1 / scale

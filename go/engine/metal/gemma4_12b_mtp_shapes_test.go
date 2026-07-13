@@ -5,6 +5,7 @@
 package native
 
 import (
+	"bytes"
 	"math"
 	"math/rand"
 	"testing"
@@ -141,12 +142,13 @@ func TestUnalignedNoCopyGPURead(t *testing.T) {
 	}
 }
 
-// TestLthnQMVRowsParity gates the register-tiled M-row qmv (lthn_qmv_rows)
+// TestLthnQMVRowsParity gates the multi-row qmv routes (encQMVRowsBF16At)
 // against the production per-row qmv on synthetic quant weights with
 // per-group VARYING scales/biases (uniform values are blind to group/row
-// indexing defects). At dims where QMVBF16 picks the plain qmv the rows must
-// be byte-identical (same qdot + simd_sum order); at fast-qmv dims the
-// comparison is tolerance-tier.
+// indexing defects). At fast-twin dims (outDim%8, inDim%512) the plan takes
+// the register-tiled lthn_qmv_rows — qmv_fast_impl's M-variant — and every
+// row must be BYTE-identical to the per-row qmv. Off-envelope dims route the
+// gather fallback (throughput tier): tolerance comparison only.
 func TestLthnQMVRowsParity(t *testing.T) {
 	requireNativeRuntime(t)
 	rng := rand.New(rand.NewSource(29))
@@ -193,6 +195,13 @@ func TestLthnQMVRowsParity(t *testing.T) {
 			nan, _ := bf16NaNScanBytes(got)
 			if nan > 0 {
 				t.Fatalf("out=%d rows=%d produced %d NaN", outDim, rows, nan)
+			}
+			if outDim%8 == 0 && inDim%512 == 0 {
+				// Fast-twin dims: the tiled route is byte-identical to per-row.
+				if !bytes.Equal(got, want) {
+					t.Errorf("out=%d in=%d rows=%d: tiled route not byte-identical to per-row qmv", outDim, inDim, rows)
+				}
+				continue
 			}
 			var maxDiff float64
 			for i := 0; i < rows*outDim; i++ {

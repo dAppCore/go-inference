@@ -107,16 +107,18 @@ func (ls *laneSet) gemmEligible(advancing []*decodeLane) bool {
 			// BYTE-IDENTITY / SAFETY GATE: a projection is batched only when its
 			// batched dispatch reproduces the per-lane replay byte for byte
 			// (projector.rowsByteTier). bf16's batched gemv qualifies at any K.
-			// Quant does NOT: the register-tiled lthn_qmv_rows kernel re-orders
-			// the quantised dot vs the per-row qmv_impl the replay records, so it
-			// drifts by ~1 ulp value-dependently (proven 2026-07-13 — THE hd-256
-			// fold divergence, root-caused to this kernel, not the q8 KV ops).
-			// A byte-identical fix needs a metallib change, so dense-quant
-			// declines here and falls back to the byte-identical merged replay;
-			// 9b6b9d2 had armed it by default — a live exposure on production
-			// 12B/31B dense-quant (hd 256/512 globals). gemmEnvelopeLiftForTest
-			// forces the fold past this gate for the divergence-observation
-			// receipt only.
+			// Quant qualifies per weight: the register-tiled lthn_qmv_rows is
+			// qmv_fast_impl's M-variant, byte-identical exactly where the per-row
+			// oracle routes fast (outDim%8==0 && inDim%512==0 — production dims);
+			// any weight off that envelope declines and the lane set keeps the
+			// byte-identical merged replay. History: the kernel's packs=1
+			// predecessor drifted ~1 ulp value-dependently vs the replay (proven
+			// 2026-07-13 — THE hd-256 fold divergence, root-caused to the
+			// projection kernel, not the q8 KV ops; 9b6b9d2 had armed it by
+			// default, a live exposure on production dense-quant). The fast-twin
+			// kernel + per-weight plan check replaced the interim blanket quant
+			// decline. gemmEnvelopeLiftForTest forces the fold past this gate for
+			// receipt runs only.
 			if !gemmEnvelopeLiftForTest && !lb.proj.rowsByteTier(len(advancing)) {
 				return false
 			}

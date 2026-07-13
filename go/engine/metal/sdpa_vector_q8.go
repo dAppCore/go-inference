@@ -184,9 +184,12 @@ func kvQ8QuantiseRows(rows []byte, kvDim int) (codes []byte, scales []float32) {
 				m = a
 			}
 		}
-		// Metal fast-math compiles /127.0f as a reciprocal multiply — match it
-		// exactly so the kernel and this host twin agree bit-for-bit.
-		scale := m * (1.0 / 127.0)
+		// True IEEE division, matching the kernel's `m / 127.0f` under the
+		// -fno-fast-math build (Taskfile metallib:kernels; MLX builds its own
+		// kernels the same way). The old reciprocal-multiply form here matched a
+		// fast-math compile artefact — and disagreed with kvQ8QuantRows, the
+		// paged host quantiser, by a last ulp on some groups.
+		scale := m / 127
 		inv := float32(0)
 		if scale > 0 {
 			inv = 1 / scale
