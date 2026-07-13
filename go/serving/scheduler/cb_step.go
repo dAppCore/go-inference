@@ -40,6 +40,7 @@ type cbReq struct {
 	promptIDs []int32
 	maxNew    int
 	stops     []int32
+	sampler   inference.SamplerConfig
 	out       chan inference.Token
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -99,7 +100,7 @@ const cbDefaultMaxNew = 512
 // until ctx is cancelled; once admitted the request's lane is advanced by the
 // shared Step loop and its tokens stream on the returned channel, which closes
 // when the stream ends, the request is cancelled, or the engine is closed.
-func (e *cbStepEngine) submit(ctx context.Context, id string, promptIDs []int32, maxNew int, stops []int32) (<-chan inference.Token, error) {
+func (e *cbStepEngine) submit(ctx context.Context, id string, promptIDs []int32, maxNew int, stops []int32, sampler inference.SamplerConfig) (<-chan inference.Token, error) {
 	if len(promptIDs) == 0 {
 		return nil, core.E("scheduler.cbstep.submit", "empty prompt", nil)
 	}
@@ -120,6 +121,7 @@ func (e *cbStepEngine) submit(ctx context.Context, id string, promptIDs []int32,
 		promptIDs: promptIDs,
 		maxNew:    maxNew,
 		stops:     stops,
+		sampler:   sampler,
 		out:       make(chan inference.Token, e.streamBuffer),
 		ctx:       reqCtx,
 		cancel:    cancel,
@@ -194,7 +196,7 @@ func (e *cbStepEngine) run() {
 				e.cancelled.Add(1)
 				continue
 			}
-			h, err := e.ls.Prepare(req.ctx, inference.LaneSpec{PromptIDs: req.promptIDs, MaxNew: req.maxNew, StopTokens: req.stops})
+			h, err := e.ls.Prepare(req.ctx, inference.LaneSpec{PromptIDs: req.promptIDs, MaxNew: req.maxNew, StopTokens: req.stops, Sampler: req.sampler})
 			if err != nil || !h.Valid() {
 				// Prefill failed (e.g. arch not ICB-eligible) — end the request's
 				// stream cleanly rather than hang it; the caller sees an empty

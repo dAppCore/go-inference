@@ -9,6 +9,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/model"
 )
 
 // laneSet is the metal multi-session state owner: K decode lanes that SHARE the
@@ -67,13 +68,19 @@ type decodeLane struct {
 	sess *ArchSession // owns KV/pos/scratch/ICB; shares weights via the model's shards + residentBufs
 
 	pos          int    // tokens resident in this lane's cache (next token decodes here)
-	hidden       []byte // the current post-stack hidden — head+greedy over this yields the next token
+	hidden       []byte // the current post-stack hidden — the per-lane head over this yields the next token
 	pendingToken int32  // Phase 1's produced token, fed into the Phase 2 batched forward
 	hasPLE       bool
 	maxNew       int
 	generated    int
 	stops        map[int32]bool
 	terminal     bool
+
+	// Non-greedy discipline (lane_set_sampling.go): the lane's OWN sampler RNG
+	// stream + params + repeat-penalty history; nil sampler = greedy phase 1.
+	sampler       *model.Sampler
+	sampleParams  model.SampleParams
+	sampleHistory []int32
 }
 
 var _ inference.LaneSet = (*laneSet)(nil)
@@ -122,9 +129,6 @@ func (ls *laneSet) Prepare(ctx context.Context, spec inference.LaneSpec) (infere
 	if spec.MaxNew <= 0 {
 		return inference.LaneHandle{}, core.NewError("native.laneSet.Prepare: MaxNew must be > 0")
 	}
-	if !samplerIsGreedy(spec.Sampler) {
-		return inference.LaneHandle{}, core.NewError("native.laneSet.Prepare: slice-1 owner is greedy only (temperature 0); non-greedy sampling not yet supported")
-	}
 	if err := ctx.Err(); err != nil {
 		return inference.LaneHandle{}, err
 	}
@@ -152,6 +156,10 @@ func (ls *laneSet) Prepare(ctx context.Context, spec inference.LaneSpec) (infere
 		hasPLE: sess.perLayerInput != nil,
 		maxNew: spec.MaxNew,
 		stops:  buildStopSet(spec.StopTokens),
+	}
+	if laneSampled(spec.Sampler) {
+		lane.sampler = model.NewSampler(spec.SampleSeed)
+		lane.sampleParams = laneSampleParams(spec.Sampler)
 	}
 	if err := ls.prefillLane(lane, spec.PromptIDs); err != nil {
 		_ = sess.Close()
@@ -220,9 +228,20 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 	var advancing []*decodeLane
 	var stepErr error
 	withAutoreleasePool(func() {
-		// Phase 1 — produce one token per active lane from its current hidden.
+		// Phase 1 — produce one token per active lane from its current hidden:
+		// the lane's own sampler for a non-greedy discipline (the classic sampled
+		// route ladder, one draw per token), else head+greedy.
 		for _, lane := range active {
-			tok, err := lane.sess.greedyFromHiddenInPool(lane.hidden, nil)
+			var tok int32
+			var err error
+			if lane.sampler != nil {
+				tok, err = lane.sess.sampledNextFromHiddenInPool(lane.hidden, lane.sampler, lane.sampleParams, lane.sampleHistory)
+				if err == nil && lane.sampleParams.RepeatPenalty > 1 {
+					lane.sampleHistory = append(lane.sampleHistory, tok)
+				}
+			} else {
+				tok, err = lane.sess.greedyFromHiddenInPool(lane.hidden, nil)
+			}
 			if err != nil {
 				stepErr = err
 				return
@@ -378,12 +397,6 @@ func (ls *laneSet) openLaneSession() (*ArchSession, error) {
 		return nil, core.NewError("native.laneSet: engine session is not a recorded-ICB ArchSession")
 	}
 	return sess, nil
-}
-
-// samplerIsGreedy reports whether cfg selects greedy (temperature-0) decoding —
-// the only discipline slice 1 serves. The zero value is greedy.
-func samplerIsGreedy(cfg inference.SamplerConfig) bool {
-	return cfg.Temperature == 0 && cfg.TopK == 0 && cfg.TopP == 0 && cfg.MinP == 0 && cfg.RepeatPenalty == 0
 }
 
 // buildStopSet indexes the request's stop tokens. The caller resolves any

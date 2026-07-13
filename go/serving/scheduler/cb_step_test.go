@@ -25,6 +25,7 @@ type simLaneSet struct {
 	nextID       int
 	fwd          uint64
 	prepareCalls int
+	specs        []inference.LaneSpec
 	closed       bool
 }
 
@@ -52,6 +53,7 @@ func (s *simLaneSet) Prepare(_ context.Context, spec inference.LaneSpec) (infere
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.prepareCalls++
+	s.specs = append(s.specs, spec)
 	s.nextID++
 	id := s.nextID
 	s.lanes[id] = &simLane{script: scriptFor(spec)}
@@ -145,13 +147,15 @@ func (m *cbCapableModel) Classify(context.Context, []string, ...inference.Genera
 func (m *cbCapableModel) BatchGenerate(context.Context, []string, ...inference.GenerateOption) core.Result {
 	return core.Ok([]inference.BatchResult(nil))
 }
-func (m *cbCapableModel) ModelType() string                   { return "cbcapable" }
-func (m *cbCapableModel) Info() inference.ModelInfo           { return inference.ModelInfo{Architecture: "gemma4"} }
-func (m *cbCapableModel) Metrics() inference.GenerateMetrics  { return inference.GenerateMetrics{} }
-func (m *cbCapableModel) Err() core.Result                    { return core.Ok(nil) }
-func (m *cbCapableModel) Close() core.Result                  { return core.Ok(nil) }
-func (m *cbCapableModel) Encode(text string) []int32 { return []int32{int32(len([]rune(text)))} }
-func (m *cbCapableModel) Decode(ids []int32) string  { return core.Sprintf("t%d", ids[0]) }
+func (m *cbCapableModel) ModelType() string { return "cbcapable" }
+func (m *cbCapableModel) Info() inference.ModelInfo {
+	return inference.ModelInfo{Architecture: "gemma4"}
+}
+func (m *cbCapableModel) Metrics() inference.GenerateMetrics { return inference.GenerateMetrics{} }
+func (m *cbCapableModel) Err() core.Result                   { return core.Ok(nil) }
+func (m *cbCapableModel) Close() core.Result                 { return core.Ok(nil) }
+func (m *cbCapableModel) Encode(text string) []int32         { return []int32{int32(len([]rune(text)))} }
+func (m *cbCapableModel) Decode(ids []int32) string          { return core.Sprintf("t%d", ids[0]) }
 func (m *cbCapableModel) ApplyChatTemplate(messages []inference.Message) (string, error) {
 	out := ""
 	for _, msg := range messages {
@@ -282,6 +286,41 @@ func TestCBStepFallbackForChatAndUnavailable(t *testing.T) {
 	defer sched2.CloseEngine()
 	if sched2.cbEngine != nil {
 		t.Fatal("cbEngine must be nil when the capability is unavailable")
+	}
+}
+
+// TestCBStepSampledRequestRidesLaneSet proves a SAMPLED raw-prompt request now
+// routes to the continuous-batching path (the per-lane sampler rung) with its
+// SamplerConfig carried intact onto the LaneSpec — sampling is no longer a
+// fallback wall; only chat turns keep the plain interleave path.
+func TestCBStepSampledRequestRidesLaneSet(t *testing.T) {
+	sim := newSimLaneSet()
+	model := &cbCapableModel{sim: sim, available: true}
+	sched, err := New(model, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 4})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sched.CloseEngine()
+
+	cfg := inference.SamplerConfig{Temperature: 0.8, TopK: 40, TopP: 0.95, MaxTokens: 3}
+	_, ch, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+		ID:      "sampled1",
+		Prompt:  "abc",
+		Sampler: cfg,
+	})
+	if err != nil {
+		t.Fatalf("Schedule(sampled): %v", err)
+	}
+	ids := collectStream(ch)
+	if len(ids) != 3 {
+		t.Fatalf("sampled request should stream 3 scripted tokens via the lane set, got %v", ids)
+	}
+	if sim.prepareCalls != 1 {
+		t.Fatalf("sampled raw-prompt request must admit exactly one CB lane, got %d prepares", sim.prepareCalls)
+	}
+	got := sim.specs[0].Sampler
+	if got.Temperature != cfg.Temperature || got.TopK != cfg.TopK || got.TopP != cfg.TopP {
+		t.Fatalf("LaneSpec.Sampler must carry the request's config intact: got %+v want %+v", got, cfg)
 	}
 }
 

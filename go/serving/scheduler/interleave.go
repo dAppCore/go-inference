@@ -128,16 +128,11 @@ func (m *Model) scheduleInterleave(ctx context.Context, req inference.ScheduledR
 
 // cbEligible reports whether a request can be served on the continuous-batching
 // shared-lane-set path: a raw prompt (the neutral TextModel surface exposes no
-// chat rendering, so a chat turn keeps the plain interleave path) decoded
-// greedily (the slice-1 owner is greedy-only). Everything else falls back — a
-// real path, never a fake batch.
+// chat rendering, so a chat turn keeps the plain interleave path). Sampling is
+// no longer a wall: the lane owner runs per-lane sampler state token-identical
+// to the plain sampled generate, so greedy and sampled raw prompts both ride.
 func cbEligible(req inference.ScheduledRequest) bool {
-	return core.Trim(req.Prompt) != "" && len(req.Messages) == 0 && samplerGreedy(req.Sampler)
-}
-
-// samplerGreedy reports whether cfg selects greedy (temperature-0) decoding.
-func samplerGreedy(cfg inference.SamplerConfig) bool {
-	return cfg.Temperature == 0 && cfg.TopK == 0 && cfg.TopP == 0 && cfg.MinP == 0 && cfg.RepeatPenalty == 0
+	return core.Trim(req.Prompt) != "" && len(req.Messages) == 0
 }
 
 // scheduleCBStep tokenises a raw prompt and drives it through the shared lane
@@ -156,7 +151,7 @@ func (m *Model) scheduleCBStep(ctx context.Context, req inference.ScheduledReque
 	if len(promptIDs) == 0 {
 		return inference.RequestHandle{}, nil, core.E("scheduler.scheduleCBStep", "prompt encoded to no tokens", nil)
 	}
-	tokens, err := m.cbEngine.submit(ctx, id, promptIDs, req.Sampler.MaxTokens, req.Sampler.StopTokens)
+	tokens, err := m.cbEngine.submit(ctx, id, promptIDs, req.Sampler.MaxTokens, req.Sampler.StopTokens, req.Sampler)
 	if err != nil {
 		return inference.RequestHandle{}, nil, err
 	}
