@@ -1149,13 +1149,22 @@ func recordArchICB(
 	layerScalarBufs []metal.MTLBuffer, ple *archICBPLEPlan,
 	recordProj func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer, outOff uint, p projIndex),
 	recordFusedRMSProj func(li int, c metal.MTLIndirectComputeCommand, rawIn, normW, epsB, out metal.MTLBuffer, outOff uint, p projIndex),
-	vOutBind uint, valueNormOnes metal.MTLBuffer, vProjIdxOf func(li int) projIndex,
+	vOutBind uint, valueNormOnes metal.MTLBuffer,
 	dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int,
 	perLayerDFF []int,
 	rope icbRope, scale, eps float32,
 	kvQ8 *archICBKVQ8,
 ) (*archICBReplay, error) {
 	nLayers := len(anwBufs)
+	// The value projection reads the DECLARED per-layer op selection (model.LayerSpec.AttentionKEqV):
+	// a K==V layer (or a KV-shared layer) has no own v_proj, so V rides the k-proj output. The arch
+	// no longer hands the engine a v-proj-index hook — the family declares this on the spec.
+	vProjOf := func(li int) projIndex {
+		if specs[li].AttentionKEqV {
+			return projK
+		}
+		return projV
+	}
 	// per-layer head dim AND kv heads (gemma4 full_attention layers attend with a LARGER head_dim than
 	// sliding, and the 12B/31B global layers use MQA — kvHeads=1 — vs GQA on the sliding layers): hdOf(li)
 	// / kvOf(li) are the layer's geometry; maxHd·maxKv size the shared attention scratch; each layer binds a
@@ -1873,7 +1882,7 @@ func recordArchICB(
 				emitKVQ8Store(fastICBSink{cks}, kvQ8StoreICB, kStageQ8, kCaches[li], 0, kvQ8.kScales[li], 0, kvdOf(li))
 				kStoreIdx[li] = opIdx - 1
 				cv := emitNB() // 2nd consumer of `normed` (q barriered it) — overlap
-				recInputProj(cv, li, inBuf, anwBufs[li], normed, vStageQ8, 0, vProjIdxOf(li))
+				recInputProj(cv, li, inBuf, anwBufs[li], normed, vStageQ8, 0, vProjOf(li))
 				if valueNormOnes != nil { // gemma4 value-norm on the staged V row (fixed bind)
 					setRMSRows(emit(), vStageQ8, valueNormOnes, vStageQ8, kvOf(li), hdOf(li))
 				}
@@ -1894,7 +1903,7 @@ func recordArchICB(
 					kRopeIdx[li] = opIdx - 1
 				}
 				cv := emitNB()                                                                   // 2nd consumer of `normed` (q barriered it) — overlap
-				recInputProj(cv, li, inBuf, anwBufs[li], normed, vCaches[li], 0, vProjIdxOf(li)) // -> vCache @ row pos (rebound/token); K==V layers project via wK
+				recInputProj(cv, li, inBuf, anwBufs[li], normed, vCaches[li], 0, vProjOf(li)) // -> vCache @ row pos (rebound/token); K==V layers project via wK
 				vIdx[li] = opIdx - 1
 				if valueNormOnes != nil { // gemma4 value-norm on the new V row (per head; rebound/token)
 					cvn := emit()
@@ -1910,7 +1919,7 @@ func recordArchICB(
 					}
 					setRope(emit(), kProj, kThrow, kvOf(li), li) // discarded
 				}
-				recInputProj(emitNB(), li, inBuf, anwBufs[li], normed, vThrow, 0, vProjIdxOf(li)) // discarded; 2nd consumer of `normed` — overlap
+				recInputProj(emitNB(), li, inBuf, anwBufs[li], normed, vThrow, 0, vProjOf(li)) // discarded; 2nd consumer of `normed` — overlap
 				if valueNormOnes != nil {
 					setRMSRows(emit(), vThrow, valueNormOnes, vThrow, kvOf(li), hdOf(li)) // discarded (keeps the op layout uniform)
 				}
@@ -2131,13 +2140,13 @@ func decodeForwardArchICBCore(
 	layerScalarBufs []metal.MTLBuffer, ple *archICBPLEPlan,
 	recordProj func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer, outOff uint, p projIndex),
 	recordFusedRMSProj func(li int, c metal.MTLIndirectComputeCommand, rawIn, normW, epsB, out metal.MTLBuffer, outOff uint, p projIndex),
-	vOutBind uint, valueNormOnes metal.MTLBuffer, vProjIdxOf func(li int) projIndex,
+	vOutBind uint, valueNormOnes metal.MTLBuffer,
 	dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow int,
 	perLayerDFF []int,
 	base, scale, eps float32,
 	useCallerOut bool,
 ) ([][]byte, error) {
-	r, err := recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, ple, recordProj, recordFusedRMSProj, vOutBind, valueNormOnes, vProjIdxOf, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, perLayerDFF, simpleICBRope(base, headDim), scale, eps, nil)
+	r, err := recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, ple, recordProj, recordFusedRMSProj, vOutBind, valueNormOnes, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, perLayerDFF, simpleICBRope(base, headDim), scale, eps, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -2481,13 +2490,16 @@ func decodeForwardArchICBInto(
 			}
 		}
 		valueNormOnes := valueNormOnesBuf(valueNorm, maxHeadDimOf(specs, headDim))
-		vProjIdxOf := func(li int) projIndex { // gemma4 K==V is PER-LAYER (12B: sliding layers carry V, global layers don't)
-			if len(layers[li].WV) == 0 {
-				return projK // V rides the k-proj
-			}
-			return projV
+		// Resolve the per-layer K==V op selection (LayerSpec.AttentionKEqV) that recordArchICB reads:
+		// models loaded through model.Assemble DECLARE it (authoritative); a hand-built caller of this
+		// whole-seq API that did not declare falls back to weight presence — a layer with no v_proj has
+		// its value ride the k-proj (12B: sliding layers carry V, global layers don't). Cloned so the
+		// caller's specs stay untouched.
+		keqvSpecs := slices.Clone(specs)
+		for li := range keqvSpecs {
+			keqvSpecs[li].AttentionKEqV = keqvSpecs[li].AttentionKEqV || len(layers[li].WV) == 0
 		}
-		outputs, coreErr = decodeForwardArchICBCore(outputs, inputs, specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, plePlan, recordProj, nil, 3, valueNormOnes, vProjIdxOf, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, lFF, base, scale, eps, useCallerOut)
+		outputs, coreErr = decodeForwardArchICBCore(outputs, inputs, keqvSpecs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, plePlan, recordProj, nil, 3, valueNormOnes, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, lFF, base, scale, eps, useCallerOut)
 	})
 	if coreErr != nil {
 		return nil, coreErr

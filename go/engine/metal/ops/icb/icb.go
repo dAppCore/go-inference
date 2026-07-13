@@ -5,6 +5,29 @@
 // Package icb owns the Metal indirect-command-buffer recording primitive.
 // Architecture packages supply the operations to record; this package owns the
 // architecture-neutral buffer shape and allocation.
+//
+// # Declared-ops seam (the #57 ops-homes migration)
+//
+// The goal of the ops-homes slices is that model families DECLARE their op selections on the
+// neutral model contract (model.Arch / model.LayerSpec) and the engine BINDS them, so the ICB
+// record/replay machinery that lands here carries no architecture-specific knowledge. This ledger
+// tracks which replay-state items are already family-declared versus still inferred in the engine,
+// so each slice starts from truth.
+//
+// DECLARED BY THE FAMILY (read from model.Arch / model.LayerSpec; the engine only binds):
+//   - attention SDPA scale, embedding scale (Arch.AttnScale / Arch.EmbedScale)
+//   - per-layer attention geometry (LayerSpec.HeadDim / LayerSpec.KVHeads)
+//   - value normalisation, sliding window, RoPE bases/dims, MoE gating, per-layer-input dims
+//   - K==V value-projection sharing (LayerSpec.AttentionKEqV) — slice 2: model.Assemble resolves
+//     it from the checkpoint (a layer with no v_proj has its value ride the key projection); the
+//     record boundary (recordArchICB* in package native) reads the declared selection instead of an
+//     arch-supplied v-proj-index hook. A hand-built caller that does not declare falls back to
+//     weight presence at the record boundary, never inside the neutral core.
+//
+// STILL ENGINE-INFERRED (candidates for later slices — inferred from weight-buffer presence at the
+// record boundary, shared across families):
+//   - norm-op selection: QK-norm, post-attention and post-feed-forward ("sandwich") norms
+//   - the fixed per-layer op LAYOUT (opsPerLayer) and the per-layer-input record hooks
 package icb
 
 import (

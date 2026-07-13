@@ -141,6 +141,11 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 			L.K = lin(p+names.K, d)
 			L.V = lin(p+names.V, d)
 		}
+		// Declare the per-layer K==V op selection from the checkpoint: a layer with no value weight
+		// (a K==V layer, or a KV-shared layer that attends the owner's cache) has its value produced
+		// by the KEY projection. Resolving it here, once, is the DECLARES discipline — backends read
+		// this per-layer selection instead of re-inferring "V rides the k-proj" from v_proj absence.
+		m.Arch.Layer[i].AttentionKEqV = L.V == nil
 		L.O = lin(p+names.O, qDim)
 
 		if spec.MoE {

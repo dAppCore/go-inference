@@ -233,3 +233,86 @@ func TestAssemble_TieWordEmbeddings_Bad(t *testing.T) {
 }
 
 func boolPointer(value bool) *bool { return &value }
+
+// kEqVNames extends the minimal dense names with a value-projection suffix, so a fixture can choose
+// to carry or omit the v_proj — the input to Assemble's per-layer K==V op-selection resolution.
+func kEqVNames() WeightNames {
+	n := minimalDenseNames()
+	n.V = ".v"
+	return n
+}
+
+// TestAssemble_AttentionKEqV_Good: a layer that CARRIES a v_proj weight is not K==V — Assemble
+// declares LayerSpec.AttentionKEqV false, so a backend records a separate value projection.
+func TestAssemble_AttentionKEqV_Good(t *testing.T) {
+	tensors := minimalDenseTensors("BF16")
+	tensors["layer.0.v.weight"] = safetensors.Tensor{Shape: []int{4, 4}, Data: make([]byte, 4*4*2)}
+	m, err := Assemble(tensors, minimalDenseArch(), kEqVNames())
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if m.Layers[0].V == nil {
+		t.Fatal("the v_proj weight should have loaded")
+	}
+	if m.Arch.Layer[0].AttentionKEqV {
+		t.Fatal("a layer carrying a v_proj must not be declared K==V")
+	}
+}
+
+// TestAssemble_AttentionKEqV_Bad: a cache-owning layer with NO v_proj weight IS K==V — Assemble
+// declares LayerSpec.AttentionKEqV true, so a backend routes the value through the key projection
+// (gemma4's global_attention layers). minimalDenseNames carries no V suffix, so no v_proj loads.
+func TestAssemble_AttentionKEqV_Bad(t *testing.T) {
+	m, err := Assemble(minimalDenseTensors("BF16"), minimalDenseArch(), minimalDenseNames())
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if m.Layers[0].V != nil {
+		t.Fatal("no v_proj weight should have loaded")
+	}
+	if !m.Arch.Layer[0].AttentionKEqV {
+		t.Fatal("a cache-owning layer with no v_proj must be declared K==V")
+	}
+}
+
+// TestAssemble_AttentionKEqV_Ugly: a KV-SHARED layer carries no v_proj of its own (it attends the
+// owner's cache), so it too resolves to AttentionKEqV true — even alongside an owner that DOES carry
+// a v_proj (false). Proves the resolution is per-layer and driven by weight presence, not a single
+// whole-model flag.
+func TestAssemble_AttentionKEqV_Ugly(t *testing.T) {
+	vec := func(n int) safetensors.Tensor {
+		return safetensors.Tensor{Shape: []int{n}, Data: make([]byte, n*2), Dtype: "BF16"}
+	}
+	mat := func(rows, cols int) safetensors.Tensor {
+		return safetensors.Tensor{Shape: []int{rows, cols}, Data: make([]byte, rows*cols*2)}
+	}
+	tensors := map[string]safetensors.Tensor{
+		"embed.weight": mat(8, 4), "norm.weight": vec(4),
+		// layer 0 OWNS its cache and carries q/k/v/o.
+		"layer.0.attn_norm.weight": vec(4),
+		"layer.0.q.weight":         mat(4, 4), "layer.0.k.weight": mat(4, 4),
+		"layer.0.v.weight": mat(4, 4), "layer.0.o.weight": mat(4, 4),
+		"layer.0.mlp_norm.weight": vec(4),
+		"layer.0.gate.weight":     mat(8, 4), "layer.0.up.weight": mat(8, 4), "layer.0.down.weight": mat(4, 8),
+		// layer 1 SHARES layer 0's cache — no k/v of its own.
+		"layer.1.attn_norm.weight": vec(4),
+		"layer.1.q.weight":         mat(4, 4), "layer.1.o.weight": mat(4, 4),
+		"layer.1.mlp_norm.weight":  vec(4),
+		"layer.1.gate.weight":      mat(8, 4), "layer.1.up.weight": mat(8, 4), "layer.1.down.weight": mat(4, 8),
+	}
+	arch := minimalDenseArch()
+	arch.Layer = []LayerSpec{
+		{Attention: GlobalAttention, CacheIndex: 0, KVShareFrom: 0, HeadDim: 2, KVHeads: 2},
+		{Attention: GlobalAttention, CacheIndex: -1, KVShareFrom: 0, HeadDim: 2, KVHeads: 2},
+	}
+	m, err := Assemble(tensors, arch, kEqVNames())
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if m.Arch.Layer[0].AttentionKEqV {
+		t.Fatal("owner layer 0 carries a v_proj — must not be declared K==V")
+	}
+	if !m.Arch.Layer[1].AttentionKEqV {
+		t.Fatal("KV-shared layer 1 carries no v_proj — must be declared K==V")
+	}
+}

@@ -5,6 +5,7 @@
 package native
 
 import (
+	"slices"
 	"sync"
 
 	core "dappco.re/go"
@@ -219,6 +220,15 @@ func recordArchICBQuant(
 	kvQ8 *archICBKVQ8,
 ) (*archICBReplay, error) {
 	nLayers := len(qlayers)
+	// Resolve the per-layer K==V op selection (LayerSpec.AttentionKEqV) that recordArchICB reads: a
+	// loaded model DECLARES it (model.Assemble), and that declaration is authoritative; a hand-built
+	// caller (this shared core also serves the SESSION path) that did not declare falls back to weight
+	// presence — a layer with no v_proj has its value ride the k-proj. Cloned so the caller's specs
+	// stay untouched.
+	specs = slices.Clone(specs)
+	for li := range specs {
+		specs[li].AttentionKEqV = specs[li].AttentionKEqV || len(qlayers[li].V.Packed) == 0
+	}
 	setup := getArchICBQuantSetupScratch(nLayers)
 	defer putArchICBQuantSetupScratch(setup)
 
@@ -696,13 +706,10 @@ func recordArchICBQuant(
 			}
 		}
 		valueNormOnes := valueNormOnesBuf(valueNorm, maxHeadDimOf(specs, headDim))
-		vProjIdxOf := func(li int) projIndex { // gemma4 K==V is PER-LAYER (12B: sliding layers carry V, global layers don't)
-			if len(qlayers[li].V.Packed) == 0 {
-				return projK // V rides the k-proj
-			}
-			return projV
-		}
-		r, coreErr = recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, plePlan, recordProj, recordFusedRMSProj, vOutBind, valueNormOnes, vProjIdxOf, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, lFF, rope, scale, eps, kvQ8)
+		// recordArchICB reads the DECLARED per-layer K==V op selection (specs[li].AttentionKEqV),
+		// resolved at the top of this function (from the model.Assemble declaration, or weight presence
+		// for a hand-built caller).
+		r, coreErr = recordArchICB(specs, anwBufs, mnwBufs, kCaches, vCaches, projResident, qNormBufs, kNormBufs, postAttnBufs, postFFBufs, layerScalarBufs, plePlan, recordProj, recordFusedRMSProj, vOutBind, valueNormOnes, dModel, nHeads, nKVHeads, headDim, dFF, maxLen, slidingWindow, lFF, rope, scale, eps, kvQ8)
 	})
 	if coreErr != nil {
 		return nil, coreErr
