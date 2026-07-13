@@ -172,38 +172,26 @@ func (ls *laneSet) Prepare(ctx context.Context, spec inference.LaneSpec) (infere
 	return inference.LaneHandle{ID: lane.id}, nil
 }
 
-// prefillLane feeds the prompt through the lane's recorded ICB one token at a
-// time — the same stepBody the fused decode replays, so the lane's caches are
-// populated identically to how the decode reads them (no dependence on which of
-// the several production prefill routes a batched prefill would have taken).
-// Batched prefill admission is the pinned slice-2 next rung.
+// prefillLane runs the lane's prompt through the session's PRODUCTION prefill
+// route (prefillRetainedTokens: chunked batched-dense forward, flash prompt
+// SDPA, the kv-share skip — everything the plain serve path prefills with)
+// and takes the boundary hidden as the lane's decode seed. This replaced the
+// original one-token-at-a-time stepBody loop: byte-compatible (the sampled
+// and E2B oracle receipts compare lanes against classic sessions prefilled by
+// exactly this route) but ~40× cheaper on admission — the serial loop paid
+// one commit+wait per prompt token (measured live 2026-07-13: 4 concurrent
+// 1161-token chat admissions took 29.8s serial vs 0.6s on this route).
 func (ls *laneSet) prefillLane(lane *decodeLane, promptIDs []int32) error {
-	icb := lane.sess.state.icb
-	var perr error
-	withAutoreleasePool(func() {
-		for i, id := range promptIDs {
-			emb, err := lane.sess.embedID(id)
-			if err != nil {
-				perr = err
-				return
-			}
-			var pli []byte
-			if lane.hasPLE {
-				if pli, err = lane.sess.perLayerInput(id, emb); err != nil {
-					perr = err
-					return
-				}
-				lane.sess.state.perLayerInput = pli
-			}
-			if i == len(promptIDs)-1 {
-				lane.hidden = append(lane.hidden[:0], icb.stepBody(emb, lane.pos, pli)...)
-			} else {
-				icb.stepBodyNoResult(emb, lane.pos, pli)
-			}
-			lane.pos++
-		}
-	})
-	return perr
+	hidden, err := lane.sess.prefillRetainedTokens(promptIDs, "native.laneSet.Prepare")
+	if err != nil {
+		return err
+	}
+	if len(hidden) == 0 {
+		return core.NewError("native.laneSet.Prepare: prefill returned no boundary hidden")
+	}
+	lane.hidden = append(lane.hidden[:0], hidden...)
+	lane.pos = lane.sess.pos
+	return nil
 }
 
 // Step advances every active, non-terminal lane by one token through ONE shared

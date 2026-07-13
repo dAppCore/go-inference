@@ -192,6 +192,11 @@ func (m *Model) scheduleCBStep(ctx context.Context, req inference.ScheduledReque
 	out := make(chan inference.ScheduledToken, m.streamBuffer)
 	go func() {
 		defer close(out)
+		// Per-REQUEST metrics: the base model's Metrics() is the last plain
+		// generation's global snapshot — a lane never updates it, so usage
+		// accounting (the openai handler's prompt/completion counts) read zero.
+		// The scheduler knows both counts itself.
+		metrics := inference.GenerateMetrics{PromptTokens: len(promptIDs)}
 		for t := range tokens {
 			if t.Text == "" && !stopSet[t.ID] {
 				// Terminator text is never content — the plain path yields the
@@ -204,7 +209,8 @@ func (m *Model) scheduleCBStep(ctx context.Context, req inference.ScheduledReque
 					t.Text = tok.Decode([]int32{t.ID})
 				}
 			}
-			out <- inference.ScheduledToken{RequestID: id, Token: t, Metrics: m.base.Metrics(), Labels: labels}
+			metrics.GeneratedTokens++
+			out <- inference.ScheduledToken{RequestID: id, Token: t, Metrics: metrics, Labels: labels}
 		}
 	}()
 	var handleLabels map[string]string
