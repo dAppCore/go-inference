@@ -4857,3 +4857,387 @@ func TestBidirTokenSpans(t *testing.T) {
 		})
 	}
 }
+
+// TestArchSessionRetainHiddenReadbackFrom pins the retained-hidden readback wrapper the ICB step
+// paths hand back as `hidden`: it copies arch.Hidden*bf16Size bytes from ptr into the session's
+// retained-hidden backing (via rememberRetainedHiddenFrom) and RETURNS that same backing — not the
+// source. Pure: no metal device needed. With a device the pinned no-copy path may back the bytes;
+// without one it declines to a plain make/copy — either way the return is the retained backing and
+// a copy of the source, so the invariants below hold in both lanes.
+func TestArchSessionRetainHiddenReadbackFrom(t *testing.T) {
+	sess := &ArchSession{arch: model.Arch{Hidden: 4}}
+	src := []byte{10, 20, 30, 40, 50, 60, 70, 80} // four bf16 elements
+	got := sess.retainHiddenReadbackFrom(&src[0])
+	if !bytes.Equal(got, src) {
+		t.Fatalf("retainHiddenReadbackFrom = %v, want a copy of %v", got, src)
+	}
+	if len(sess.retainedHidden) != len(src) || unsafe.Pointer(&got[0]) != unsafe.Pointer(&sess.retainedHidden[0]) {
+		t.Fatal("retainHiddenReadbackFrom did not return the session retained-hidden backing")
+	}
+	src[0] = 99 // mutating the source must not touch the readback — it is a copy, not an alias
+	if got[0] == 99 {
+		t.Fatal("retainHiddenReadbackFrom aliases the source pointer instead of copying")
+	}
+}
+
+// TestPrefillChunkWindowsFor pins the pure chunk-width resolver (no env override in play): the width
+// is batchedDensePrefillTargetRows (2048) / slidingWindow WHOLE windows, forced to a single window
+// below four and capped at eight above. A zero sliding window resolves against the 512 the family
+// ships. LTHN_PREFILL_WINDOWS is neutralised so an ambient value cannot skew the default resolution.
+func TestPrefillChunkWindowsFor(t *testing.T) {
+	t.Setenv("LTHN_PREFILL_WINDOWS", "") // empty reads as unset — force the default resolution
+	cases := []struct {
+		name    string
+		sliding int
+		want    int
+	}{
+		{"zero sliding uses the 512 default: four windows", 0, 4},
+		{"512 window divides into exactly four", 512, 4},
+		{"256 window: eight windows (2048/256)", 256, 8},
+		{"128 window capped at eight (2048/128=16)", 128, 8},
+		{"1024 window divides into two: below four keeps a single window", 1024, 1},
+		{"4096 window wider than the target: single window", 4096, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := prefillChunkWindowsFor(tc.sliding); got != tc.want {
+				t.Fatalf("prefillChunkWindowsFor(%d) = %d, want %d", tc.sliding, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPrefillChunkWindowsForEnvOverride pins the LTHN_PREFILL_WINDOWS override arm: an in-range
+// integer (1..8) wins outright, while an out-of-range integer or a non-integer is ignored and the
+// sliding-window default resolves instead.
+func TestPrefillChunkWindowsForEnvOverride(t *testing.T) {
+	t.Setenv("LTHN_PREFILL_WINDOWS", "3")
+	if got := prefillChunkWindowsFor(512); got != 3 {
+		t.Fatalf("in-range override = %d, want 3", got)
+	}
+	t.Setenv("LTHN_PREFILL_WINDOWS", "9") // above the 1..8 clamp — ignored
+	if got := prefillChunkWindowsFor(512); got != 4 {
+		t.Fatalf("out-of-range override = %d, want 4 (default resolution)", got)
+	}
+	t.Setenv("LTHN_PREFILL_WINDOWS", "wide") // not an integer — ignored
+	if got := prefillChunkWindowsFor(256); got != 8 {
+		t.Fatalf("non-integer override = %d, want 8 (default resolution)", got)
+	}
+}
+
+// TestPrefillChunkWindows pins the zero-arg helper: it is prefillChunkWindowsFor(0), i.e. the 512
+// default resolving to four windows when no override is set.
+func TestPrefillChunkWindows(t *testing.T) {
+	t.Setenv("LTHN_PREFILL_WINDOWS", "") // empty reads as unset
+	if got := prefillChunkWindows(); got != 4 {
+		t.Fatalf("prefillChunkWindows() = %d, want 4", got)
+	}
+}
+
+// TestSampleOrderMinPKeep pins the pure min-p prefix cut. order indexes into probs and is walked in
+// its given (already ranked) sequence; the kept prefix is every leading entry at or above
+// probs[order[0]]*minP. Cases cover the two early-return guards (min-p disabled, non-positive keep),
+// the trimming path, and the n==0 fallback (a min-p above 1 pushes the threshold past even the head,
+// so nothing clears it and the full keep is returned unchanged).
+func TestSampleOrderMinPKeep(t *testing.T) {
+	cases := []struct {
+		name  string
+		order []int32
+		probs []float32
+		keep  int
+		minP  float32
+		want  int
+	}{
+		{"min-p disabled returns keep unchanged", []int32{0, 1, 2}, []float32{1, 0.5, 0.1}, 3, 0, 3},
+		{"non-positive keep returns keep unchanged", []int32{0, 1}, []float32{1, 0.5}, 0, 0.5, 0},
+		{"threshold trims the low tail", []int32{0, 1, 2, 3}, []float32{1.0, 0.5, 0.1, 0.05}, 4, 0.4, 2},
+		{"threshold above the head keeps everything", []int32{0, 1, 2}, []float32{1.0, 0.5, 0.1}, 3, 2.0, 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sampleOrderMinPKeep(tc.order, tc.probs, tc.keep, tc.minP); got != tc.want {
+				t.Fatalf("sampleOrderMinPKeep(%v, keep=%d, minP=%v) = %d, want %d", tc.order, tc.keep, tc.minP, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSortSampleOrderByProbShortInputIsNoOp pins the len(order) < 2 guard: a single element (and an
+// empty slice) sorts to itself without touching the range partitioner.
+func TestSortSampleOrderByProbShortInputIsNoOp(t *testing.T) {
+	one := []int32{7}
+	sortSampleOrderByProb(one, make([]float32, 8))
+	if !slices.Equal(one, []int32{7}) {
+		t.Fatalf("single-element sort mutated order: %v", one)
+	}
+	sortSampleOrderByProb(nil, nil) // empty must not panic
+}
+
+// TestSortSampleOrderByProbRangeQuicksortPath drives the introsort partition arm: 32 entries clear
+// the hi-lo > 12 threshold, exercising the median-of-three pivot, the two recursion-size branches
+// and the insertion-sort tail. sampleOrderLess is a TOTAL order (probability descending, ties broken
+// by ascending id), so the output is uniquely determined and must equal a stable reference sort by
+// the same key.
+func TestSortSampleOrderByProbRangeQuicksortPath(t *testing.T) {
+	const n = 32
+	order := make([]int32, n)
+	probs := make([]float32, n)
+	for i := range order {
+		order[i] = int32(i)
+		probs[i] = float32((i*7+3)%11) * 0.1 // deliberate ties across ids exercise the id tiebreak
+	}
+	want := append([]int32(nil), order...)
+	sort.SliceStable(want, func(a, b int) bool {
+		ia, ib := want[a], want[b]
+		if probs[ia] != probs[ib] {
+			return probs[ia] > probs[ib]
+		}
+		return ia < ib
+	})
+	sortSampleOrderByProb(order, probs)
+	if !slices.Equal(order, want) {
+		t.Fatalf("sortSampleOrderByProb = %v, want %v", order, want)
+	}
+}
+
+// TestArchSessionGenerateFromHiddenMatchesGenerateFromCache pins the greedy generate-from-hidden
+// entry point (the unexported wrapper the assistant/drafter seams reach through). Both this path and
+// GenerateFromCache feed the SAME boundary hidden into generateFromHiddenInPool — PrefillTokens
+// remembers the boundary hidden and clears the retained logits, so GenerateFromCache takes its
+// hidden arm — so on two identically prefilled sessions the two must decode the same tokens.
+func TestArchSessionGenerateFromHiddenMatchesGenerateFromCache(t *testing.T) {
+	requireNativeRuntime(t)
+	prompt := []int32{1, 2, 3, 4}
+	const maxNew = 4
+
+	fromHidden := newSessionStateFixture(t)
+	if err := fromHidden.PrefillTokens(prompt); err != nil {
+		t.Fatalf("PrefillTokens: %v", err)
+	}
+	if len(fromHidden.retainedHidden) != fromHidden.arch.Hidden*bf16Size {
+		t.Fatalf("retained hidden len = %d, want %d", len(fromHidden.retainedHidden), fromHidden.arch.Hidden*bf16Size)
+	}
+	// copy the boundary hidden before generation overwrites the retained backing.
+	hidden := append([]byte(nil), fromHidden.retainedHidden...)
+	got, err := fromHidden.generateFromHidden(hidden, maxNew, -1, nil)
+	if err != nil {
+		t.Fatalf("generateFromHidden: %v", err)
+	}
+
+	fromCache := newSessionStateFixture(t)
+	if err := fromCache.PrefillTokens(prompt); err != nil {
+		t.Fatalf("PrefillTokens (cache): %v", err)
+	}
+	want, err := fromCache.GenerateFromCache(maxNew, -1)
+	if err != nil {
+		t.Fatalf("GenerateFromCache: %v", err)
+	}
+	if len(got) != maxNew || !idsEqual(got, want) {
+		t.Fatalf("generateFromHidden = %v, want GenerateFromCache continuation %v", got, want)
+	}
+}
+
+// TestArchSessionGenerateFromHiddenSuppressedMatchesCacheSuppression pins the suppressed sibling:
+// masking a handful of ids before argmax must match GenerateFromCacheEachWithSuppression on the same
+// boundary hidden and suppression set.
+func TestArchSessionGenerateFromHiddenSuppressedMatchesCacheSuppression(t *testing.T) {
+	requireNativeRuntime(t)
+	prompt := []int32{1, 2, 3, 4}
+	const maxNew = 3
+	suppress := []int32{0, 1, 2, 3, 4, 5}
+
+	fromHidden := newSessionStateFixture(t)
+	if err := fromHidden.PrefillTokens(prompt); err != nil {
+		t.Fatalf("PrefillTokens: %v", err)
+	}
+	hidden := append([]byte(nil), fromHidden.retainedHidden...)
+	got, err := fromHidden.generateFromHiddenSuppressed(hidden, maxNew, -1, nil, suppress)
+	if err != nil {
+		t.Fatalf("generateFromHiddenSuppressed: %v", err)
+	}
+
+	fromCache := newSessionStateFixture(t)
+	if err := fromCache.PrefillTokens(prompt); err != nil {
+		t.Fatalf("PrefillTokens (cache): %v", err)
+	}
+	want, err := fromCache.GenerateFromCacheEachWithSuppression(maxNew, -1, suppress, nil)
+	if err != nil {
+		t.Fatalf("GenerateFromCacheEachWithSuppression: %v", err)
+	}
+	if !idsEqual(got, want) {
+		t.Fatalf("generateFromHiddenSuppressed = %v, want suppressed cache continuation %v", got, want)
+	}
+	for _, id := range got {
+		if slices.Contains(suppress, id) {
+			t.Fatalf("generateFromHiddenSuppressed emitted a suppressed token %d in %v", id, got)
+		}
+	}
+}
+
+// TestArchSessionGenerateFromHiddenRejectsInvalidInputs pins the four validation arms shared by
+// generateFromHidden / generateFromHiddenSuppressed (via generateFromHiddenSuppressedEach): a
+// non-positive maxNew, a hidden that is not exactly arch.Hidden*bf16Size, a firstLogits that is not
+// exactly arch.Vocab*bf16Size, and a request that would overflow the maxLen cache rows.
+func TestArchSessionGenerateFromHiddenRejectsInvalidInputs(t *testing.T) {
+	requireNativeRuntime(t)
+	sess := newSessionStateFixture(t)
+	if err := sess.PrefillTokens([]int32{1, 2}); err != nil {
+		t.Fatalf("PrefillTokens: %v", err)
+	}
+	hidden := append([]byte(nil), sess.retainedHidden...)
+	if _, err := sess.generateFromHidden(hidden, 0, -1, nil); err == nil {
+		t.Fatal("generateFromHidden accepted maxNew=0")
+	}
+	if _, err := sess.generateFromHidden(hidden[:len(hidden)-2], 2, -1, nil); err == nil {
+		t.Fatal("generateFromHidden accepted a short hidden vector")
+	}
+	if _, err := sess.generateFromHidden(hidden, 2, -1, []byte{0, 0}); err == nil {
+		t.Fatal("generateFromHidden accepted a wrong-size firstLogits")
+	}
+	if _, err := sess.generateFromHidden(hidden, sess.maxLen+1, -1, nil); err == nil {
+		t.Fatal("generateFromHidden accepted a maxNew that overflows the cache rows")
+	}
+}
+
+// TestArchSessionGenerateEachWithSuppressionStreamsSurvivor pins the streamed suppressed entry
+// point: masking every id but one lone survivor makes greedy decode deterministic, so every yielded
+// and returned token must be that survivor.
+func TestArchSessionGenerateEachWithSuppressionStreamsSurvivor(t *testing.T) {
+	requireNativeRuntime(t)
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 64, 256, 32
+	const maxLen = 16
+	g, arch := gemma4BF16Fixture(t, dModel, nHeads, nKV, headDim, dFF, vocab, 1)
+	sess, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession: %v", err)
+	}
+	const survivor int32 = 7
+	suppress := make([]int32, 0, vocab-1)
+	for id := range int32(vocab) {
+		if id != survivor {
+			suppress = append(suppress, id)
+		}
+	}
+	var yielded []int32
+	got, err := sess.GenerateEachWithSuppression([]int32{1, 5, 3}, 3, -1, suppress, func(id int32) bool {
+		yielded = append(yielded, id)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("GenerateEachWithSuppression: %v", err)
+	}
+	if len(got) != 3 || !idsEqual(yielded, got) {
+		t.Fatalf("GenerateEachWithSuppression got/yielded = %v/%v, want three matching streamed tokens", got, yielded)
+	}
+	for _, id := range got {
+		if id != survivor {
+			t.Fatalf("GenerateEachWithSuppression emitted %d, want the lone unsuppressed token %d (%v)", id, survivor, got)
+		}
+	}
+}
+
+// TestArchSessionGenerateEachTransformedMatchesGenerateEach pins the committed-token transform
+// entry point: an identity transform is a no-op, so the decoded tokens must equal a plain
+// GenerateEach on an identical session, AND the transform must be invoked exactly once per generated
+// token (proving the wrapper actually wired it through, not silently dropped it).
+func TestArchSessionGenerateEachTransformedMatchesGenerateEach(t *testing.T) {
+	requireNativeRuntime(t)
+	const dModel, nHeads, nKV, headDim, dFF, vocab = 128, 2, 1, 64, 256, 32
+	const maxLen = 16
+	g, arch := gemma4BF16Fixture(t, dModel, nHeads, nKV, headDim, dFF, vocab, 1)
+	prompt := []int32{1, 5, 3}
+	const maxNew = 4
+
+	transformed, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession (transformed): %v", err)
+	}
+	calls := 0
+	var yielded []int32
+	got, err := transformed.GenerateEachTransformed(prompt, maxNew, -1, func(id int32) int32 {
+		calls++
+		return id
+	}, func(id int32) bool {
+		yielded = append(yielded, id)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("GenerateEachTransformed: %v", err)
+	}
+
+	plain, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession (plain): %v", err)
+	}
+	want, err := plain.GenerateEach(prompt, maxNew, -1, nil)
+	if err != nil {
+		t.Fatalf("GenerateEach: %v", err)
+	}
+	if !idsEqual(got, want) {
+		t.Fatalf("GenerateEachTransformed (identity) = %v, want GenerateEach %v", got, want)
+	}
+	if calls != len(got) {
+		t.Fatalf("transform invoked %d times, want once per generated token (%d)", calls, len(got))
+	}
+	if !idsEqual(yielded, got) {
+		t.Fatalf("streamed tokens %v differ from returned %v", yielded, got)
+	}
+}
+
+// TestArchSessionStepSampleTopKCandidatesGPUInputsInPoolMatchesSerial pins the no-history GPU-inputs
+// top-k candidate step (the wrapper the sampled decode reaches when history is empty): with the GPU
+// next-inputs seam wired and the host embed/PLE closures fenced off (they must NOT be called), it
+// must return byte-identical hidden and candidate (logits, ids) to the serial host-input reference
+// on the same step.
+func TestArchSessionStepSampleTopKCandidatesGPUInputsInPoolMatchesSerial(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set")
+	}
+	g, arch := pleQuantModel(t, 2, 256, 32, 0)
+	serial, err := NewArchQuantSession(g, arch, 16)
+	if err != nil {
+		t.Fatalf("serial session: %v", err)
+	}
+	chained, err := NewArchQuantSession(g, arch, 16)
+	if err != nil {
+		t.Fatalf("chained session: %v", err)
+	}
+	if chained.encNextInputsGPU == nil {
+		t.Fatal("fixture did not wire GPU next-inputs seam")
+	}
+	for _, id := range []int32{1, 5, 3} {
+		if _, err := serial.stepID(id); err != nil {
+			t.Fatalf("serial prefix stepID(%d): %v", id, err)
+		}
+		if _, err := chained.stepID(id); err != nil {
+			t.Fatalf("chained prefix stepID(%d): %v", id, err)
+		}
+	}
+	params := model.SampleParams{Temperature: 1, TopK: 7, TopP: 0.75, SuppressTokens: []int32{2, 7}}
+	serialHidden, err := serial.stepID(9)
+	if err != nil {
+		t.Fatalf("serial stepID: %v", err)
+	}
+	wantLogits, wantIDs, ok, err := serial.sampleTopKCandidatesFromHiddenInPool(serialHidden, params)
+	if err != nil || !ok {
+		t.Fatalf("serial sampleTopKCandidatesFromHiddenInPool ok=%v err=%v", ok, err)
+	}
+
+	chained.embed = func(int32) ([]byte, error) {
+		return nil, errors.New("host embed should not be called")
+	}
+	chained.embedInto = nil
+	chained.perLayerInput = func(int32, []byte) ([]byte, error) {
+		return nil, errors.New("host PLE should not be called")
+	}
+	gotHidden, gotLogits, gotIDs, ok, err := chained.stepSampleTopKCandidatesGPUInputsInPool(9, params)
+	if err != nil || !ok {
+		t.Fatalf("chained stepSampleTopKCandidatesGPUInputsInPool ok=%v err=%v", ok, err)
+	}
+	if !bytes.Equal(gotHidden, serialHidden) {
+		t.Fatal("GPU-input no-history candidate hidden differs from serial host-input hidden")
+	}
+	if !bytes.Equal(gotLogits, wantLogits) || !idsEqual(gotIDs, wantIDs) {
+		t.Fatalf("GPU-input no-history candidates differ from serial: ids got %v want %v", gotIDs, wantIDs)
+	}
+}
