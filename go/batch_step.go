@@ -52,9 +52,6 @@ type LaneHandle struct {
 func (h LaneHandle) Valid() bool { return h.ID > 0 }
 
 // LaneSpec admits one lane: its prompt token ids and per-lane decode params.
-// The honest slice-1 owner decodes greedily (temperature 0); Sampler is carried
-// for forward-compatibility and, when it requests non-greedy sampling, a
-// slice-1 owner rejects the lane rather than silently sampling greedily.
 type LaneSpec struct {
 	// PromptIDs is the lane's prompt, already tokenised. Prefilled at admission.
 	PromptIDs []int32
@@ -62,8 +59,15 @@ type LaneSpec struct {
 	MaxNew int
 	// StopTokens end the lane when produced (in addition to the model's own).
 	StopTokens []int32
-	// Sampler selects the decode discipline. The zero value is greedy.
+	// Sampler selects the decode discipline. The zero value is greedy; a
+	// non-greedy config (temperature, min-p, or repeat-penalty engaged — the
+	// same pick the plain serve path makes) gives the lane its OWN sampler
+	// state, token-identical to the plain sampled generate at the same seed.
 	Sampler SamplerConfig
+	// SampleSeed seeds the lane's sampler RNG stream when Sampler selects a
+	// non-greedy discipline. Greedy lanes ignore it. The zero seed is a valid
+	// seed, mirroring GenerateConfig.Seed semantics.
+	SampleSeed uint64
 }
 
 // LaneStep is one lane's result from a single batched Step.
