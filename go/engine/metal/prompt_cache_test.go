@@ -994,3 +994,34 @@ func TestPromptCacheLogitsFromRetainedHidden_Ugly(t *testing.T) {
 		t.Fatal("promptCacheLogitsFromRetainedHidden short hidden error = nil")
 	}
 }
+
+func TestArchSessionCachedPrefixLen_Good(t *testing.T) {
+	sess := &ArchSession{arch: model.Arch{Hidden: 2}, cachedIDs: []int32{4, 5, 6}, cachedPromptIDs: []int32{4, 5, 6}, cachedPromptHidden: []byte{1, 2, 3, 4}}
+	if got := sess.CachedPrefixLen([]int32{4, 5, 6}); got != 3 {
+		t.Fatalf("CachedPrefixLen(exact retained prompt) = %d, want 3", got)
+	}
+}
+
+func TestArchSessionCachedPrefixLen_Bad(t *testing.T) {
+	sess := &ArchSession{arch: model.Arch{Hidden: 2}, cachedIDs: []int32{4, 5, 6}, cachedPromptIDs: []int32{4, 5, 6}}
+	if got := sess.CachedPrefixLen([]int32{4, 5, 6}); got != 2 {
+		t.Fatalf("CachedPrefixLen(exact prompt without retained hidden) = %d, want 2", got)
+	}
+}
+
+func TestArchSessionCachedPromptLogitsForSampledReplay_Good(t *testing.T) {
+	logits := []byte{1, 2, 3, 4}
+	sess := &ArchSession{arch: model.Arch{Vocab: 2}, cachedPromptIDs: []int32{4, 5}, cachedPromptLogits: logits}
+	// With no soft-cap, the cached boundary logits preserve the sampled replay
+	// path even for non-greedy parameters; the head has no extra transform.
+	if got := sess.cachedPromptLogitsForSampledReplay([]int32{4, 5}, model.SampleParams{Temperature: 1}); !bytes.Equal(got, logits) {
+		t.Fatalf("cachedPromptLogitsForSampledReplay(no soft-cap) = %v, want %v", got, logits)
+	}
+}
+
+func TestArchSessionCachedPromptLogitsForSampledReplay_Bad(t *testing.T) {
+	sess := &ArchSession{arch: model.Arch{Vocab: 2, SoftCap: 1}, cachedPromptIDs: []int32{4, 5}, cachedPromptLogits: []byte{1, 2, 3, 4}}
+	if got := sess.cachedPromptLogitsForSampledReplay([]int32{4, 5}, model.SampleParams{Temperature: 1}); got != nil {
+		t.Fatalf("cachedPromptLogitsForSampledReplay(transformed sampled replay) = %v, want nil", got)
+	}
+}
