@@ -160,6 +160,135 @@ func TestLaneSetByteIdentity(t *testing.T) {
 	}
 }
 
+// laneSetMoEFixtureModel builds a synthetic gemma4 model whose second layer is
+// MoE — icbEligible declines the router block, so no session records an ICB and
+// every lane the owner admits is a RE-ENCODE lane: the arch shape the 26B-class
+// checkpoints serve. The probe pins that the fixture really lacks the ICB (a
+// recorded fixture would exercise the replay path and prove nothing here).
+func laneSetMoEFixtureModel(t *testing.T) *NativeTokenModel {
+	t.Helper()
+	const dModel, nHeads, nKV, headDim, dFF, vocab, nLayers = 128, 2, 1, 64, 256, 48, 2
+	g, arch := gemma4BF16Fixture(t, dModel, nHeads, nKV, headDim, dFF, vocab, nLayers)
+	g.Layers[1].MoE = buildMoEWeights(4, 2, dModel, dFF, 192, 700)
+	arch.Layer[1].MoE = true
+	m, err := NewBF16TokenModel(g, arch, 32)
+	if err != nil {
+		t.Fatalf("NewBF16TokenModel(MoE): %v", err)
+	}
+	probe, err := m.OpenSession()
+	if err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	as, ok := probe.(*ArchSession)
+	if !ok {
+		t.Fatal("MoE fixture session is not an ArchSession")
+	}
+	if as.state.icb != nil {
+		_ = as.Close()
+		t.Fatal("MoE fixture recorded an ICB — the re-encode lane path would be vacuous")
+	}
+	_ = as.Close()
+	return m
+}
+
+// TestLaneSetMoEReencodeByteIdentity is the conformance proof for RE-ENCODE
+// lanes (MoE — no recorded ICB): the SAME lane specs produce the SAME per-lane
+// token streams run alone (K==1) and all together (K>1). No shared submission
+// is claimed for re-encode lanes, so BatchForwardCount must stay ZERO on both
+// runs — an honest counter, not a disguised one.
+func TestLaneSetMoEReencodeByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	m := laneSetMoEFixtureModel(t)
+	defer m.Close()
+	specs := laneSpecFixtures()
+	ctx := context.Background()
+
+	serialTokens := make([][]int32, len(specs))
+	for i, spec := range specs {
+		ls, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: 1})
+		if err != nil {
+			t.Fatalf("OpenLaneSet(serial %d): %v", i, err)
+		}
+		h, err := ls.Prepare(ctx, spec)
+		if err != nil {
+			t.Fatalf("Prepare(serial %d): %v", i, err)
+		}
+		got, fwd := drainLaneSet(t, ls)
+		serialTokens[i] = got[h.ID]
+		if len(serialTokens[i]) == 0 {
+			t.Fatalf("serial MoE lane %d produced no tokens", i)
+		}
+		if fwd != 0 {
+			t.Fatalf("serial MoE lane %d claimed %d batched forwards, want 0 (re-encode lanes share no submission)", i, fwd)
+		}
+		_ = ls.Close()
+	}
+
+	ls, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+	if err != nil {
+		t.Fatalf("OpenLaneSet(batched): %v", err)
+	}
+	handles := make([]inference.LaneHandle, len(specs))
+	for i, spec := range specs {
+		if handles[i], err = ls.Prepare(ctx, spec); err != nil {
+			t.Fatalf("Prepare(batched %d): %v", i, err)
+		}
+	}
+	batchedTokens, batchedFwd := drainLaneSet(t, ls)
+	_ = ls.Close()
+
+	for i := range specs {
+		if !slices.Equal(batchedTokens[handles[i].ID], serialTokens[i]) {
+			t.Fatalf("MoE lane %d: batched tokens %v != serial %v", i, batchedTokens[handles[i].ID], serialTokens[i])
+		}
+	}
+	if batchedFwd != 0 {
+		t.Fatalf("batched MoE set claimed %d batched forwards, want 0 (re-encode lanes share no submission)", batchedFwd)
+	}
+}
+
+// TestLaneSetMoEReencodeMatchesProductionGreedy pins re-encode lanes to the
+// engine's own serial decode: an MoE lane's stream equals ArchSession.Generate
+// token-for-token — it IS the plain path's step, run under the owner.
+func TestLaneSetMoEReencodeMatchesProductionGreedy(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	m := laneSetMoEFixtureModel(t)
+	defer m.Close()
+	ctx := context.Background()
+
+	for i, spec := range laneSpecFixtures() {
+		prod, err := m.OpenSession()
+		if err != nil {
+			t.Fatalf("OpenSession(%d): %v", i, err)
+		}
+		as := prod.(*ArchSession)
+		want, err := as.Generate(spec.PromptIDs, spec.MaxNew, -1)
+		if err != nil {
+			t.Fatalf("Generate(%d): %v", i, err)
+		}
+		_ = as.Close()
+
+		ls, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: 1})
+		if err != nil {
+			t.Fatalf("OpenLaneSet(%d): %v", i, err)
+		}
+		h, err := ls.Prepare(ctx, spec)
+		if err != nil {
+			t.Fatalf("Prepare(%d): %v", i, err)
+		}
+		got, _ := drainLaneSet(t, ls)
+		_ = ls.Close()
+
+		if !slices.Equal(got[h.ID], want) {
+			t.Fatalf("MoE lane %d: owner tokens %v != production Generate %v", i, got[h.ID], want)
+		}
+	}
+}
+
 // TestLaneSetMatchesProductionGreedy is the secondary oracle: the owner's greedy
 // decode also equals the production single-session greedy path (ArchSession.
 // Generate) token-for-token, so the batched owner is not merely self-consistent
