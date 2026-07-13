@@ -16,16 +16,22 @@ import (
 // than a Parse + Weights layout; model.Load routes a Composed arch to LoadComposedDir instead of Assemble.
 //
 // Registered ids: the wrapper model_types (qwen3_5, qwen3_5_moe) and their nested text_config aliases
-// (qwen3_5_text, qwen3_5_moe_text) so probeModelTypes resolves either, plus qwen3_next — Qwen 3.6's
-// predecessor, the same gated-delta/full-attention hybrid the composed loader already builds.
+// (qwen3_5_text, qwen3_5_moe_text), qwen3_6 / qwen3_6_moe (the same hybrid under its other released name),
+// qwen3_next (Qwen 3.6's predecessor, the same gated-delta/full-attention hybrid), and the generic
+// "composed"/"hybrid" ids a checkpoint without a qwen-family model_type may carry. This is every id
+// engine/metal's hardcoded model_type switch used to name directly — registering them here is what let
+// that switch be deleted rather than merely bypassed.
 //
 // The registration lives here, not in model/qwen3: composed imports qwen3 for the gated-delta block, so
 // qwen3 cannot import composed — the hook that reaches LoadComposed must sit on the composed side of that
-// edge. (A serve composition still needs to import this package for the init() to run; the engine/metal
-// switch covers the current serve path, so this is the forward-looking neutral wiring.)
+// edge.
 func init() {
 	model.RegisterArch(model.ArchSpec{
-		ModelTypes: []string{"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next"},
+		ModelTypes: []string{
+			"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text",
+			"qwen3_6", "qwen3_6_moe", "qwen3_next",
+			"composed", "hybrid",
+		},
 		Composed: func(tensors map[string]safetensors.Tensor, configJSON []byte) (model.TokenModel, error) {
 			cm, err := LoadComposed(tensors, configJSON)
 			if err != nil {
