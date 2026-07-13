@@ -1,3 +1,33 @@
+# NEXT WAKE (2026-07-16 — sampled batches in; the sampled residual is structural)
+
+## 2026-07-16 (sampled Phase-1 batches — 5afe1db, pushed)
+
+- SAMPLED BATCHES (5afe1db): two batched sampled Phase-1 paths, one
+  submission for K lanes each — phase1SampledTopKRows (GPU topK-token
+  chains; per-lane draws in lane order BEFORE encode, post-draw
+  failures are ERRORS never fallbacks — an abandoned post-draw batch
+  would desync the samplers) and phase1SampledLogitsRows (K full-vocab
+  logits chains via emitLogitsChainAt, factored from
+  encodeBufferIntoPool so per-row kernels are IDENTICAL → logits
+  byte-equal; host tails per lane in lane order). Engagement-asserted
+  byte-identity gates for both routes; suite 2277/0.
+- ROUTE MAP LEARNED (the fixture-vs-live trap, again): on the REAL 26B
+  (vocab 262144 ≥ hostTopKSampleVocabMin 4096) hostTopKSamplePreferred
+  declines EVERY GPU-select lane (topK-token, logits-token, candidates)
+  — serve-shaped sampled params land on the ladder's FINAL fallback
+  (full logits + host top-k + draw). The fixture (vocab 48) routes
+  topK-token for the same params. Gates must pin the route by
+  construction (the logits-rows gate uses temp+TopP to force the final
+  fallback on the fixture).
+- LIVE: sampled t0.7/k40 K=8 132 → 136 (+3%), K=4 ~117 (+2%). The
+  remaining sampled-vs-greedy gap (136 vs 169 at K=8) is STRUCTURAL:
+  a sampled next-token depends on a host RNG draw → no from-xA GPU
+  feed → no chaining/submit-ahead for sampled lanes (and GPU k-select
+  loses 4-20× to the host scan at real vocab, so a pre-drawn GPU-select
+  chain only pays at small vocab). Host top-k scans serialise on the
+  drive thread — parallelising those tails across workers is the one
+  cheap lever left (~+3-5%); the rest is physics.
+
 # NEXT WAKE (2026-07-16 — THE GAP IS CLOSED: the K-sweep verdict)
 
 ## 2026-07-16 (K-sweep — cad6b59, pushed)
