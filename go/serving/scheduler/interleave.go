@@ -146,7 +146,10 @@ func (m *Model) scheduleInterleave(ctx context.Context, req inference.ScheduledR
 // NOTE: the serve-level welfare guard decorates TextModel.Chat, which the CB
 // route does not call — the welfare×CB interplay is deliberately un-audited
 // for now (tracked in the batching task); deployments running -welfare should
-// keep chat off CB by not enabling the scheduler, or accept the gap.
+// keep chat off CB by not enabling the scheduler, or accept the gap. The
+// engine-level continuity interceptor is the same shape: CB chats always
+// full-prefill (correct, never wrong-token — a repeat turn just pays its
+// prefill again instead of waking slept KV).
 func (m *Model) cbEligible(req inference.ScheduledRequest) bool {
 	if len(req.Messages) == 0 {
 		return core.Trim(req.Prompt) != ""

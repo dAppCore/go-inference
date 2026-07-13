@@ -75,6 +75,12 @@ type decodeLane struct {
 	generated    int
 	stops        map[int32]bool
 	terminal     bool
+	// reencode marks a lane whose session has no recorded ICB (MoE — the host
+	// router / device-router block is not recorder-supported): Phase 2 advances
+	// it through the session's own one-token re-encode step (stepIDInPool)
+	// instead of the shared ICB replay. Byte-identical to the plain path by
+	// construction — it IS the plain path's step.
+	reencode bool
 
 	// Non-greedy discipline (lane_set_sampling.go): the lane's OWN sampler RNG
 	// stream + params + repeat-penalty history; nil sampler = greedy phase 1.
@@ -112,8 +118,8 @@ func (m *NativeTokenModel) OpenLaneSet(cfg inference.LaneSetConfig) (inference.L
 const defaultLaneSetMaxLanes = 8
 
 // Prepare admits a new lane: it opens a fresh session sharing the model weights,
-// prefills the prompt through the SAME recorded-ICB step the decode uses (so the
-// lane's decode caches are populated exactly as the fused Step will read them),
+// prefills the prompt through the session's production prefill route (so the
+// lane's decode caches are populated exactly as the plain path populates them),
 // and leaves the lane holding its prefill hidden — ready to produce its first
 // token on the next Step. Ragged admission: safe to call between Steps.
 func (ls *laneSet) Prepare(ctx context.Context, spec inference.LaneSpec) (inference.LaneHandle, error) {
@@ -137,11 +143,13 @@ func (ls *laneSet) Prepare(ctx context.Context, spec inference.LaneSpec) (infere
 	if err != nil {
 		return inference.LaneHandle{}, err
 	}
+	// A session without a recorded ICB (MoE — icbEligible declines the router
+	// block) is admitted as a RE-ENCODE lane: Phase 2 advances it through the
+	// session's own one-token step rather than the shared ICB replay. The set
+	// still owns admission, the batched Phase-1 head, ragged retirement and
+	// per-request accounting — the shared-submission win stays ICB-only.
 	icb := sess.state.icb
-	if icb == nil || !icb.hasFinalOut {
-		_ = sess.Close()
-		return inference.LaneHandle{}, core.NewError("native.laneSet.Prepare: model is not recorded-ICB eligible — multi-session batched step needs the dense/PLE recorded-ICB decode path")
-	}
+	reencode := icb == nil || !icb.hasFinalOut
 	if ls.dModel == 0 {
 		ls.dModel = sess.arch.Hidden
 	}
@@ -151,11 +159,12 @@ func (ls *laneSet) Prepare(ctx context.Context, spec inference.LaneSpec) (infere
 	}
 
 	lane := &decodeLane{
-		id:     ls.nextID + 1,
-		sess:   sess,
-		hasPLE: sess.perLayerInput != nil,
-		maxNew: spec.MaxNew,
-		stops:  buildStopSet(spec.StopTokens),
+		id:       ls.nextID + 1,
+		sess:     sess,
+		hasPLE:   sess.perLayerInput != nil,
+		maxNew:   spec.MaxNew,
+		stops:    buildStopSet(spec.StopTokens),
+		reencode: reencode,
 	}
 	if laneSampled(spec.Sampler) {
 		lane.sampler = model.NewSampler(spec.SampleSeed)
@@ -194,12 +203,13 @@ func (ls *laneSet) prefillLane(lane *decodeLane, promptIDs []int32) error {
 	return nil
 }
 
-// Step advances every active, non-terminal lane by one token through ONE shared
-// command buffer. Phase 1 produces this round's token per lane (head + greedy on
-// the lane's current hidden — the same per-lane op the serial loop runs). Phase 2
-// feeds each still-live lane's just-produced token into its recorded ICB, all
-// replayed into a single encoder, committed and waited ONCE — the batched
-// forward that advances the whole set to its next hidden.
+// Step advances every active, non-terminal lane by one token. Phase 1 produces
+// this round's token per lane (head + greedy/sampled on the lane's current
+// hidden — the same per-lane op the serial loop runs). Phase 2 feeds each
+// still-live recorded-ICB lane's just-produced token into its ICB, all replayed
+// into a single encoder, committed and waited ONCE — the batched forward that
+// advances the whole set to its next hidden; re-encode lanes (MoE) advance
+// through their session's own one-token step instead.
 func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 	if ls == nil {
 		return nil, core.NewError("native.laneSet.Step: nil lane set")
@@ -253,20 +263,44 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 		if len(advancing) == 0 {
 			return
 		}
-		// Phase 2 — ONE batched forward that advances the whole set. The
+		// Phase 2 partition: recorded-ICB lanes ride the shared replay (fold or
+		// one-encoder batch); re-encode lanes (MoE) advance through their
+		// session's own one-token step — the plain path's exact per-token
+		// machinery, so the lane's arithmetic is the plain path's. One model
+		// per set makes the partition all-or-nothing in practice; the split
+		// keeps a hybrid correct anyway. Shared-submission across re-encode
+		// lanes (K forwards into one command buffer) is the next rung.
+		var replay []*decodeLane
+		for _, lane := range advancing {
+			if !lane.reencode {
+				replay = append(replay, lane)
+				continue
+			}
+			h, err := lane.sess.stepIDInPool(lane.pendingToken)
+			if err != nil {
+				stepErr = err
+				return
+			}
+			lane.hidden = append(lane.hidden[:0], h...)
+			lane.pos = lane.sess.pos
+		}
+		if len(replay) == 0 {
+			return
+		}
+		// ONE batched forward that advances the whole replay set. The
 		// weight-read-once GEMM forward (lane_set_gemm.go) sweeps each weight once
 		// for all K lanes; LTHN_CB_GEMM=0 or an ineligible arch falls back to the
 		// per-lane ICB replay (byte-for-byte the merged 2.58× path).
-		if ls.gemmForwardEnabled() && ls.gemmEligible(advancing) &&
-			(ls.gemmMode == 1 || ls.gemmProfitable(advancing)) {
-			if err := ls.batchedGEMMForward(advancing); err != nil {
+		if ls.gemmForwardEnabled() && ls.gemmEligible(replay) &&
+			(ls.gemmMode == 1 || ls.gemmProfitable(replay)) {
+			if err := ls.batchedGEMMForward(replay); err != nil {
 				stepErr = err
 			}
 			return
 		}
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
-		for _, lane := range advancing {
+		for _, lane := range replay {
 			emb, err := lane.sess.embedID(lane.pendingToken)
 			if err != nil {
 				endEncodingFast(enc)
@@ -289,7 +323,7 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 		waitUntilCompletedFast(cb)
 		ls.fwdCount++
 		// Read each advanced lane's new hidden and move its position on.
-		for _, lane := range advancing {
+		for _, lane := range replay {
 			icb := lane.sess.state.icb
 			if cap(lane.hidden) < ls.dModel*bf16Size {
 				lane.hidden = make([]byte, ls.dModel*bf16Size)
