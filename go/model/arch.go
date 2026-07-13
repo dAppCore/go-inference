@@ -48,6 +48,15 @@ type LayerSpec struct {
 	// distinction (synthetic + uniform packs).
 	HeadDim int
 	KVHeads int
+	// AttentionKEqV declares that this layer has NO separate value projection — the value is
+	// produced by the KEY projection weight rather than its own weight (the per-layer refinement
+	// of Arch.AttentionKEqV: gemma4's global_attention layers share K==V while its sliding layers
+	// carry their own V). It is a DECLARED op selection, not inferred by a backend from the
+	// presence of a v_proj weight: the loader resolves it once from the checkpoint (a layer with
+	// no value weight rides the key projection) and backends record the value projection against
+	// the key weight when set. Also true for a KV-shared layer (it projects to a discarded buffer
+	// and attends the owner's cache), which likewise carries no value weight of its own.
+	AttentionKEqV bool
 }
 
 // OwnsCache reports whether this layer holds its own KV cache (vs sharing).
