@@ -1,3 +1,42 @@
+# NEXT WAKE (2026-07-14 night — MoE rides CB; 26B live)
+
+## 2026-07-14 (later the same session — edd3249, pushed)
+
+- MOE RIDES CB (edd3249): laneSet.Prepare admits no-ICB sessions (MoE —
+  icbEligible declines the router block) as RE-ENCODE lanes; phase 2
+  advances them via the session's own stepIDInPool (embed→PLE→stepToken→
+  pos++ — the plain path's per-token machinery, byte-identical by
+  construction). ICB lanes keep the shared replay + GEMM fold, partitioned.
+  BatchForwardCount stays honest (re-encode lanes claim no shared
+  submission — MoE lane tests assert fwd==0).
+- THE BEFORE (live receipt): 26B + -scheduler interleave chat returned an
+  EMPTY completion on the prior binary — the coordinator CANCELS a request
+  whose Prepare fails ("not recorded-ICB eligible"), stream closes with 0
+  tokens, finish "stop". Silent serve breakage on every MoE model, not a
+  fallback.
+- THE AFTER (26B-A4B qat-4bit, -context 4096, quiescent box): 'OK' with
+  real usage; 4-concurrent usage isolation 3/3 exact; CB counts identical
+  every round. Unique-prompt aggregate (salted prompts — continuity AND
+  the engine prompt-reuse cache both hit on repeats and contaminate
+  repeat-round A/Bs): CB 93 tok/s vs plain 151 (0.62×) — re-encode lanes
+  SERIALISE in the drive loop (own commit+wait per lane per step) while
+  plain overlaps 4 goroutines' submissions on the GPU queue. NEXT RUNG:
+  the stepToken encode-into-caller-CB split so K re-encode forwards share
+  ONE submission (the 26B quant device-router forward already encodes
+  break-free — encMoEBlockQuantDevice); that closes the gap and then some.
+- OPS (snider's catch): each lane session allocates the FULL context
+  window's KV — a big-model CB boot at the model default can exceed device
+  memory with K lanes. Set -context on CB serve boots (4096 for bench
+  shapes). The durable fix is kv/budget.FitsMemory admission gating
+  (already noted on defaultLaneSetMaxLanes).
+- PARKED OBSERVATION: plain-path 26B same-prompt temp-0 completion COUNTS
+  varied under 4-concurrency (45 vs 53, stateless boot); CB was identical
+  every round. Counts ≠ hashes — needs the content-hash probe shape on 26B
+  plain before calling it a wobble (e2b was hash-clean yesterday).
+- Metal suite 2271 PASS / 0 FAIL (up 2: the MoE lane gates). Gate hygiene:
+  the first full-suite run died exit 144 — it shared the GPU with my 26B
+  serve boots; run the suite QUIESCENT.
+
 # NEXT WAKE (2026-07-14 evening — usage race closed; welfare opt-in)
 
 ## 2026-07-14 (post-restart session, both on dev, pushed)
