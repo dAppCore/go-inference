@@ -58,17 +58,18 @@ func (ls *laneSet) gemmForwardEnabled() bool {
 	return ls.gemmMode == 1
 }
 
-// gemmEnvelopeLiftForTest arms the unproven envelope arms (PLE tower, sliding
-// window, KV-share layers) for a byte-identity receipt run on a real checkpoint —
-// the promotion gate for lifting the proven-envelope exclusions below. Test-only.
-var gemmEnvelopeLiftForTest bool
-
 // gemmEligible reports whether every advancing lane can take the batched-GEMM
 // forward. All lanes share the model, so this is really a model-feature check made
-// once per Step: recorded-ICB, bf16 projections (the byte-identity envelope — a
-// quant projection has no byte-identical batched dispatch, see the gate below),
-// q8 KV only when the fold's q8 mirror pipelines resolve (the #367 rung), and ≥2
-// lanes (one lane has nothing to batch — the merged replay is already optimal).
+// once per Step: recorded-ICB, byte-tier projections (bf16 at any K; quant on
+// fast-twin dims — see the gate below), q8 KV only when the fold's q8 mirror
+// pipelines resolve (the #367 rung), and ≥2 lanes (one lane has nothing to batch —
+// the merged replay is already optimal). The PLE / sliding-window / KV-share arms
+// were once excluded pending receipts; they are receipted now — per-feature and
+// combined fixtures (TestLaneSetGEMM{Sliding,KVShare,MixedHeadDim,PLE,LayerScalar,
+// SplitRope,AllArms}ByteIdentity) plus full-identity on real E2B
+// (TestLaneSetGEMME2BByteIdentityHiddens; the historical fires-and-diverges was a
+// slab under-sizing on MatFormer deep layers — see gemmDims — plus the live-n SDPA
+// routing, both fixed 2026-07-13).
 func (ls *laneSet) gemmEligible(advancing []*decodeLane) bool {
 	if len(advancing) < 2 {
 		return false
@@ -89,20 +90,7 @@ func (ls *laneSet) gemmEligible(advancing []*decodeLane) bool {
 		if !gpuHasGeluKernel() {
 			return false // the forward mirrors the fused qk-norm+rope / rms-residual path
 		}
-		// PROVEN ENVELOPE: byte-identity is demonstrated (lane_set_gemm_test.go) for
-		// the dense path — no PLE tower, no KV-share layers, no sliding window. The
-		// forward mirrors the ICB's single-row PLE gate / shared-attention /
-		// sliding-ring encoders too, but those arms lack a byte-identity receipt on a
-		// real checkpoint, so they are declined here rather than served armed-by-
-		// default on an unproven path. gemmEnvelopeLiftForTest arms them for the
-		// receipt run that would lift this gate.
-		if !gemmEnvelopeLiftForTest && (len(s.ple) > 0 || s.slidingWindow > 0) {
-			return false
-		}
 		for li := range s.specs {
-			if !gemmEnvelopeLiftForTest && !s.specs[li].OwnsCache() {
-				return false // KV-share layers: proven-envelope exclusion (see above)
-			}
 			lb := s.lb[li]
 			// BYTE-IDENTITY / SAFETY GATE: a projection is batched only when its
 			// batched dispatch reproduces the per-lane replay byte for byte
@@ -117,9 +105,8 @@ func (ls *laneSet) gemmEligible(advancing []*decodeLane) bool {
 			// projection kernel, not the q8 KV ops; 9b6b9d2 had armed it by
 			// default, a live exposure on production dense-quant). The fast-twin
 			// kernel + per-weight plan check replaced the interim blanket quant
-			// decline. gemmEnvelopeLiftForTest forces the fold past this gate for
-			// receipt runs only.
-			if !gemmEnvelopeLiftForTest && !lb.proj.rowsByteTier(len(advancing)) {
+			// decline.
+			if !lb.proj.rowsByteTier(len(advancing)) {
 				return false
 			}
 			if !lb.proj.rowsCapable() {
@@ -189,9 +176,14 @@ func gemmQ8Eligible(s archDecodeState) bool {
 }
 
 // gemmDims scans the model's layers for the widest per-layer projection dims, so the
-// staging slabs are sized once for the largest layer (gemma4 global layers carry a
-// wider head than sliding ones). Every lane shares the arch, so one lane answers.
-func (s *archDecodeState) gemmDims() (maxQDim, maxKVDim int) {
+// staging slabs are sized once for the largest layer: gemma4 global layers carry a
+// wider head than sliding ones, and the MatFormer E-series carries a wider FFN on its
+// deep layers (E2B: 12288 on layers 15-34 vs the config's 6144 — sizing gate/up/gated
+// from s.dFF alone sent row 1's batched projection past the slab, THE lifted-envelope
+// E2B divergence: deep layers own no caches, so the corruption left no cache trail).
+// Every lane shares the arch, so one lane answers.
+func (s *archDecodeState) gemmDims() (maxQDim, maxKVDim, maxFF int) {
+	maxFF = s.dFF
 	for li := range s.specs {
 		lhd := headDimOf(s.specs[li], s.headDim)
 		lkv := kvHeadsOf(s.specs[li], s.nKVHeads)
@@ -201,8 +193,11 @@ func (s *archDecodeState) gemmDims() (maxQDim, maxKVDim int) {
 		if kv := lkv * lhd; kv > maxKVDim {
 			maxKVDim = kv
 		}
+		if li < len(s.lb) && s.lb[li].dFF > maxFF {
+			maxFF = s.lb[li].dFF
+		}
 	}
-	return maxQDim, maxKVDim
+	return maxQDim, maxKVDim, maxFF
 }
 
 // gemmSlabs is the K-row staging the batched-GEMM forward gathers into and scatters
@@ -289,9 +284,9 @@ func slabReadRow(buf metal.MTLBuffer, i, rowElems int, dst []byte) {
 func (ls *laneSet) batchedGEMMForward(advancing []*decodeLane) (err error) {
 	k := len(advancing)
 	s0 := advancing[0].sess.state
-	dModel, dFF := s0.dModel, s0.dFF
-	maxQDim, maxKVDim := s0.gemmDims()
-	g, err := ls.ensureGemmSlabs(k, dModel, maxQDim, maxKVDim, dFF)
+	dModel := s0.dModel
+	maxQDim, maxKVDim, maxFF := s0.gemmDims()
+	g, err := ls.ensureGemmSlabs(k, dModel, maxQDim, maxKVDim, maxFF)
 	if err != nil {
 		return err
 	}
@@ -524,6 +519,25 @@ func (ls *laneSet) gemmLayer(enc metal.MTLComputeCommandEncoder, advancing []*de
 				}
 				emitSDPAVectorQ8At(encSink{enc}, pso, g.q, qOff, attendK, attendV, g.attn, qOff, kSc, vSc, 0, 0, nil, s0.nHeads, lkv, n, int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s0.scale)
 			}
+		} else if blocks := gemmQ8Blocks(lane.sess.state); blocks > 0 && s0.specs[li].Attention == model.GlobalAttention {
+			// Mirror the recorder's FIXED 2-pass fan on plain bf16 reads too — the
+			// recorded ICB bakes its global-layer SDPA layout (and block count) from
+			// maxLen, not the live n. Routing by live n here (single-pass below the
+			// knee, blocks-from-n above it) changes the reduction bracketing vs the
+			// replay: value-dependent bf16 drift on global layers — THE lifted-envelope
+			// E2B divergence (2026-07-13; only shared-region globals leave no cache
+			// trail, which is why caches stayed equal while hiddens diverged).
+			pso1, perr := sdpaVector2Pass1PipelineForHeadDim(lhd, int32(blocks))
+			if perr != nil {
+				return perr
+			}
+			pso2, perr := sdpaVector2Pass2PipelineForHeadDim(lhd)
+			if perr != nil {
+				return perr
+			}
+			sink := encSink{enc}
+			emitSDPA2Pass1At(sink, pso1, g.q, qOff, attendK, attendV, asc.p2Partials, asc.p2Sums, asc.p2Maxs, 0, 1, s0.nHeads, lkv, n, blocks, int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s0.scale)
+			emitSDPA2Pass2At(sink, pso2, asc.p2Partials, asc.p2Sums, asc.p2Maxs, g.attn, qOff, 1, s0.nHeads, blocks)
 		} else if err := encSDPADecodeAt(enc, asc, g.q, qOff, attendK, attendV, g.attn, qOff, s0.nHeads, lkv, lhd, n, int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s0.scale, 0); err != nil {
 			return err
 		}
