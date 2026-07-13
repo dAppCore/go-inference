@@ -7,6 +7,7 @@ package native
 import (
 	"bytes"
 	"sort"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -1370,6 +1371,351 @@ func TestHeadEncoderBF16GreedySuppressesIDs(t *testing.T) {
 	if got != want {
 		t.Fatalf("headEncoder suppressed direct bf16 greedy = %d, want full-logits suppressed greedy %d", got, want)
 	}
+}
+
+func covSampleHeadFixture(t *testing.T) (*headEncoder, []byte, []byte) {
+	t.Helper()
+	const dModel, vocab = 64, 19
+	h := &headEncoder{
+		finalNorm: copyView(toBF16Bytes(syntheticFloat32(dModel, 53))),
+		weight:    copyView(toBF16Bytes(syntheticFloat32(vocab*dModel, 57))),
+		dModel:    dModel,
+		vocab:     vocab,
+		eps:       1e-6,
+	}
+	hidden := toBF16Bytes(syntheticFloat32(dModel, 73))
+	full, err := h.encode(hidden, true)
+	if err != nil {
+		t.Fatalf("head fixture encode: %v", err)
+	}
+	return h, hidden, full
+}
+
+func covAssertCandidateSet(t *testing.T, gotLogits []byte, gotIDs []int32, full []byte, vocab, topK int, suppress []int32) {
+	t.Helper()
+	vals := make([]byte, topK*bf16Size)
+	ids := make([]int32, topK)
+	wantLogits, wantIDs := hostTopKCandidatesBF16(full, vocab, topK, suppress, vals, ids)
+	want := make(map[int32][]byte, len(wantIDs))
+	for i, id := range wantIDs {
+		want[id] = append([]byte(nil), wantLogits[i*bf16Size:(i+1)*bf16Size]...)
+	}
+	if len(gotIDs) != len(want) {
+		t.Fatalf("candidate count = %d, want %d (got ids %v want %v)", len(gotIDs), len(want), gotIDs, wantIDs)
+	}
+	for i, id := range gotIDs {
+		wantBytes, ok := want[id]
+		if !ok {
+			t.Fatalf("candidate id[%d] = %d, want one of %v", i, id, wantIDs)
+		}
+		if !bytes.Equal(gotLogits[i*bf16Size:(i+1)*bf16Size], wantBytes) {
+			t.Fatalf("candidate logits for id %d = %v, want %v", id, gotLogits[i*bf16Size:(i+1)*bf16Size], wantBytes)
+		}
+		delete(want, id)
+	}
+}
+
+func TestHeadEncoderArgmaxInvalidDiagReportsStages(t *testing.T) {
+	requireNativeRuntime(t)
+	h := &headEncoder{quant: true, dModel: 2, vocab: 5}
+	scratch := newHeadGreedyScratch(1, h.dModel, h.vocab, true, false)
+	if scratch == nil || scratch.normed == nil || scratch.logits == nil || scratch.tileValues == nil || scratch.tileIndices == nil {
+		t.Fatal("newHeadGreedyScratch did not allocate diagnostic buffers")
+	}
+	defer h.putGreedyScratch(scratch)
+	unsafe.Slice((*float32)(scratch.tileValues.Contents()), 1)[0] = 4.5
+	unsafe.Slice((*int32)(scratch.tileIndices.Contents()), 1)[0] = 3
+	diag := h.argmaxInvalidDiag(scratch, sharedBytes(toBF16Bytes([]float32{1, 2})), 0)
+	for _, want := range []string{"hidden NaN=0", "normed NaN=0", "logits NaN=0", "tiles=1", "tile0=(4.5,3)"} {
+		if !strings.Contains(diag, want) {
+			t.Fatalf("argmaxInvalidDiag = %q, missing %q", diag, want)
+		}
+	}
+}
+
+func TestHeadEncoderSampleLogitsTokenMatchesHostReference(t *testing.T) {
+	requireNativeRuntime(t)
+	h, hidden, full := covSampleHeadFixture(t)
+	params := model.SampleParams{Temperature: 0.8, MinP: 0.01, SuppressTokens: []int32{2, 7}}
+	draw := model.NewSampler(123).Draw()
+	want, err := sampleBF16VocabOrderForTest(full, h.vocab, params, draw, nil)
+	if err != nil {
+		t.Fatalf("host sample: %v", err)
+	}
+	got, ok, err := h.sampleLogitsToken(hidden, params, draw, nil)
+	if err != nil {
+		t.Fatalf("sampleLogitsToken: %v", err)
+	}
+	if !ok {
+		t.Fatal("sampleLogitsToken declined the BF16 fixture")
+	}
+	if got != want {
+		t.Fatalf("sampleLogitsToken = %d, want host reference %d", got, want)
+	}
+}
+
+func TestHeadEncoderEncodeLogitsSampleAtMatchesHostReference(t *testing.T) {
+	requireNativeRuntime(t)
+	h, hidden, full := covSampleHeadFixture(t)
+	params := model.SampleParams{Temperature: 0.8, MinP: 0.01, SuppressTokens: []int32{2, 7}}
+	draw := model.NewSampler(123).Draw()
+	want, err := sampleBF16VocabOrderForTest(full, h.vocab, params, draw, nil)
+	if err != nil {
+		t.Fatalf("host sample: %v", err)
+	}
+	cb := queue.CommandBuffer()
+	enc := cb.ComputeCommandEncoder()
+	scratch, ok, err := h.encodeLogitsSampleAt(enc, sharedBytes(hidden), 0, params, draw, nil)
+	if err != nil || !ok {
+		enc.EndEncoding()
+		if scratch != nil {
+			h.putGreedyScratch(scratch)
+		}
+		t.Fatalf("encodeLogitsSampleAt ok=%v err=%v", ok, err)
+	}
+	enc.EndEncoding()
+	cb.Commit()
+	cb.WaitUntilCompleted()
+	got := scratch.token()
+	h.putGreedyScratch(scratch)
+	if got != want {
+		t.Fatalf("encodeLogitsSampleAt = %d, want host reference %d", got, want)
+	}
+}
+
+func TestHeadEncoderEncodeLogitsSampleObjectMatchesHostReference(t *testing.T) {
+	requireNativeRuntime(t)
+	h, hidden, full := covSampleHeadFixture(t)
+	params := model.SampleParams{Temperature: 0.8, MinP: 0.01, SuppressTokens: []int32{2, 7}}
+	draw := model.NewSampler(123).Draw()
+	want, err := sampleBF16VocabOrderForTest(full, h.vocab, params, draw, nil)
+	if err != nil {
+		t.Fatalf("host sample: %v", err)
+	}
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	scratch, ok, err := h.encodeLogitsSampleObject(enc, sharedBytes(hidden), params, draw, nil)
+	if err != nil || !ok {
+		endEncodingFast(enc)
+		if scratch != nil {
+			h.putGreedyScratch(scratch)
+		}
+		t.Fatalf("encodeLogitsSampleObject ok=%v err=%v", ok, err)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	got := scratch.token()
+	h.putGreedyScratch(scratch)
+	if got != want {
+		t.Fatalf("encodeLogitsSampleObject = %d, want host reference %d", got, want)
+	}
+}
+
+func TestHeadEncoderSampleTopKTokenReturnsHostArgmaxAtZeroDraw(t *testing.T) {
+	requireNativeRuntime(t)
+	h, hidden, full := covSampleHeadFixture(t)
+	params := model.SampleParams{Temperature: 1, TopK: 5, TopP: 1, SuppressTokens: []int32{2, 7}}
+	vals := make([]byte, params.TopK*bf16Size)
+	ids := make([]int32, params.TopK)
+	vals, ids = hostTopKCandidatesBF16(full, h.vocab, params.TopK, params.SuppressTokens, vals, ids)
+	var want int32 = -1
+	var best float32
+	for i, id := range ids {
+		v := bf16ToF32(vals[i*bf16Size], vals[i*bf16Size+1])
+		if want < 0 || v > best {
+			want, best = id, v
+		}
+	}
+	got, ok, err := h.sampleTopKToken(hidden, params, 0, nil)
+	if err != nil {
+		t.Fatalf("sampleTopKToken: %v", err)
+	}
+	if !ok {
+		t.Fatal("sampleTopKToken declined the BF16 fixture")
+	}
+	if got != want {
+		t.Fatalf("sampleTopKToken = %d, want top candidate %d", got, want)
+	}
+}
+
+func TestHeadEncoderSampleTopKCandidatesBufferIntoMatchesHostSort(t *testing.T) {
+	requireNativeRuntime(t)
+	h, hidden, full := covSampleHeadFixture(t)
+	const topK = 5
+	suppress := []int32{2, 7}
+	outLogits := make([]byte, topK*bf16Size)
+	outIDs := make([]int32, 0, topK)
+	gotLogits, gotIDs, ok, err := h.sampleTopKCandidatesBufferInto(sharedBytes(hidden), topK, suppress, outLogits, outIDs, false)
+	if err != nil {
+		t.Fatalf("sampleTopKCandidatesBufferInto: %v", err)
+	}
+	if !ok {
+		t.Fatal("sampleTopKCandidatesBufferInto declined the BF16 fixture")
+	}
+	covAssertCandidateSet(t, gotLogits, gotIDs, full, h.vocab, topK, suppress)
+}
+
+func TestHeadEncoderEncodeTopKSampleMatchesHostArgmax(t *testing.T) {
+	requireNativeRuntime(t)
+	h, hidden, full := covSampleHeadFixture(t)
+	params := model.SampleParams{Temperature: 1, TopK: 5, TopP: 1, SuppressTokens: []int32{2, 7}}
+	vals := make([]byte, params.TopK*bf16Size)
+	ids := make([]int32, params.TopK)
+	vals, ids = hostTopKCandidatesBF16(full, h.vocab, params.TopK, params.SuppressTokens, vals, ids)
+	var want int32 = -1
+	var best float32
+	for i, id := range ids {
+		v := bf16ToF32(vals[i*bf16Size], vals[i*bf16Size+1])
+		if want < 0 || v > best {
+			want, best = id, v
+		}
+	}
+	cb := queue.CommandBuffer()
+	enc := cb.ComputeCommandEncoder()
+	scratch, ok, err := h.encodeTopKSample(enc, sharedBytes(hidden), params, 0, nil, false)
+	if err != nil || !ok {
+		enc.EndEncoding()
+		if scratch != nil {
+			h.putTopKScratch(scratch)
+		}
+		t.Fatalf("encodeTopKSample ok=%v err=%v", ok, err)
+	}
+	enc.EndEncoding()
+	cb.Commit()
+	cb.WaitUntilCompleted()
+	got := scratch.token()
+	h.putTopKScratch(scratch)
+	if got != want {
+		t.Fatalf("encodeTopKSample = %d, want top candidate %d", got, want)
+	}
+}
+
+func TestHeadEncoderEncodeTopKSampleObjectMatchesHostArgmax(t *testing.T) {
+	requireNativeRuntime(t)
+	h, hidden, full := covSampleHeadFixture(t)
+	params := model.SampleParams{Temperature: 1, TopK: 5, TopP: 1, SuppressTokens: []int32{2, 7}}
+	vals := make([]byte, params.TopK*bf16Size)
+	ids := make([]int32, params.TopK)
+	vals, ids = hostTopKCandidatesBF16(full, h.vocab, params.TopK, params.SuppressTokens, vals, ids)
+	var want int32 = -1
+	var best float32
+	for i, id := range ids {
+		v := bf16ToF32(vals[i*bf16Size], vals[i*bf16Size+1])
+		if want < 0 || v > best {
+			want, best = id, v
+		}
+	}
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	scratch, ok, err := h.encodeTopKSampleObject(enc, sharedBytes(hidden), params, 0, nil, false)
+	if err != nil || !ok {
+		endEncodingFast(enc)
+		if scratch != nil {
+			h.putTopKScratch(scratch)
+		}
+		t.Fatalf("encodeTopKSampleObject ok=%v err=%v", ok, err)
+	}
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	got := scratch.token()
+	h.putTopKScratch(scratch)
+	if got != want {
+		t.Fatalf("encodeTopKSampleObject = %d, want top candidate %d", got, want)
+	}
+}
+
+func TestHeadEncoderEncodeTopKCandidatesReadsHostSortedCandidates(t *testing.T) {
+	requireNativeRuntime(t)
+	h, hidden, full := covSampleHeadFixture(t)
+	const topK = 5
+	cb := queue.CommandBuffer()
+	enc := cb.ComputeCommandEncoder()
+	scratch, ok, err := h.encodeTopKCandidates(enc, sharedBytes(hidden), topK, []int32{2, 7}, false)
+	if err != nil || !ok {
+		enc.EndEncoding()
+		if scratch != nil {
+			h.putTopKScratch(scratch)
+		}
+		t.Fatalf("encodeTopKCandidates ok=%v err=%v", ok, err)
+	}
+	enc.EndEncoding()
+	cb.Commit()
+	cb.WaitUntilCompleted()
+	gotLogits, gotIDs, ok, err := h.readTopKCandidates(scratch, topK)
+	h.putTopKScratch(scratch)
+	if err != nil || !ok {
+		t.Fatalf("readTopKCandidates ok=%v err=%v", ok, err)
+	}
+	covAssertCandidateSet(t, gotLogits, gotIDs, full, h.vocab, topK, []int32{2, 7})
+}
+
+func TestHeadEncoderEncodeTopKCandidatesWithHistoryMatchesPenalizedHostSort(t *testing.T) {
+	requireNativeRuntime(t)
+	h, hidden, full := covSampleHeadFixture(t)
+	const topK = 5
+	history := []int32{3, 5, 8}
+	penalized, err := nativeApplyRepeatPenaltyBF16(full, h.vocab, history, 1.4)
+	if err != nil {
+		t.Fatalf("nativeApplyRepeatPenaltyBF16: %v", err)
+	}
+	cb := queue.CommandBuffer()
+	enc := cb.ComputeCommandEncoder()
+	scratch, ok, err := h.encodeTopKCandidatesWithHistory(enc, sharedBytes(hidden), topK, []int32{2, 7}, history, 1.4, false)
+	if err != nil || !ok {
+		enc.EndEncoding()
+		if scratch != nil {
+			h.putTopKScratch(scratch)
+		}
+		t.Fatalf("encodeTopKCandidatesWithHistory ok=%v err=%v", ok, err)
+	}
+	enc.EndEncoding()
+	cb.Commit()
+	cb.WaitUntilCompleted()
+	gotLogits, gotIDs, ok, err := h.readTopKCandidates(scratch, topK)
+	h.putTopKScratch(scratch)
+	if err != nil || !ok {
+		t.Fatalf("readTopKCandidates ok=%v err=%v", ok, err)
+	}
+	covAssertCandidateSet(t, gotLogits, gotIDs, penalized, h.vocab, topK, []int32{2, 7})
+}
+
+func TestHeadEncoderEncodeTopKCandidateRowsMatchesFullLogits(t *testing.T) {
+	requireNativeRuntime(t)
+	h, hidden, full := covSampleHeadFixture(t)
+	const topK = 5
+	cb := queue.CommandBuffer()
+	enc := cb.ComputeCommandEncoder()
+	scratch, candidateCount, ok, err := h.encodeTopKCandidateRows(enc, sharedBytes(hidden), topK, []int32{2, 7}, nil, 1, false)
+	if err != nil || !ok {
+		enc.EndEncoding()
+		if scratch != nil {
+			h.putTopKScratch(scratch)
+		}
+		t.Fatalf("encodeTopKCandidateRows ok=%v err=%v", ok, err)
+	}
+	enc.EndEncoding()
+	cb.Commit()
+	cb.WaitUntilCompleted()
+	values := unsafe.Slice((*float32)(scratch.candidateValues.Contents()), candidateCount)
+	ids := unsafe.Slice((*int32)(scratch.candidateIndices.Contents()), candidateCount)
+	for i := 0; i < h.vocab; i++ {
+		if i == 2 || i == 7 {
+			if ids[i] != -1 {
+				t.Fatalf("candidate row %d id = %d, want suppressed -1", i, ids[i])
+			}
+			continue
+		}
+		if ids[i] != int32(i) {
+			t.Fatalf("candidate row %d id = %d, want %d", i, ids[i], i)
+		}
+		want := bf16ToF32(full[i*bf16Size], full[i*bf16Size+1])
+		if d := values[i] - want; d < -0.08 || d > 0.08 {
+			t.Fatalf("candidate row %d value = %v, want %v", i, values[i], want)
+		}
+	}
+	h.putTopKScratch(scratch)
 }
 
 // TestGreedyRowsQuantFusedMatchesPerRow gates the quant K-row fused greedy
