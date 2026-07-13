@@ -1,3 +1,72 @@
+# NEXT WAKE (2026-07-14 — CB serve integration LIVE end-to-end; restart handover)
+
+## THE 2026-07-13 MARATHON (all pushed, dev @ 2be27d9 — tracker #385 holds the full detail)
+
+**Where the CB campaign stands — carry on from here:**
+
+- FOLD COMPLETE: bf16 AND quant weight-read-once byte-identical (072e0cd —
+  lthn_qmv_rows is now qmv_fast_impl's M-variant, packs matched, and the lthn
+  metallib builds -fno-fast-math like MLX's own kernels; the plan gate is the
+  fast-twin rule outDim%8 && inDim%512). Envelope exclusions LIFTED (09bf08a):
+  the E2B fires-and-diverges was NEVER the mirrored arms — it was gemmDims
+  sizing gate/up/gated slabs from s.dFF while MatFormer deep layers run 12288
+  (no-cache layers → trail-free corruption) + the plain SDPA routing by live n
+  vs the recorded fixed 2-pass fan. E2B folds byte-identically to completion.
+  PROFIT GATE (d3f8035): the fold is a wall LOSS on quant (K=4 AND K=6
+  receipts) — LTHN_CB_GEMM unset=AUTO folds bf16 only, 1=force, 0=off.
+  K>4 = chunked byte tier (85abaab, fold-only; chunking the PLAIN multi-row
+  route was measured −20% e2b MTP and reverted; LTHN_QMV_CHUNKS=0).
+- SERVE INTEGRATION LIVE (the real story): per-lane sampling (44acef5,
+  token-identical to GenerateSampledEach) + chat via FormatChatPrompt
+  capability + ResolvedStopTokens (f2ceaff — also fixed raw lanes decoding
+  past EOS) + THE WIRING FIX (72c9565): engine.TextModel had never satisfied
+  inference.TokenizerModel, so cbEngine NEVER bound on any live boot — CPU
+  tests bound to fakes. Encode/Decode/ApplyChatTemplate + streaming
+  DecodeToken now exported; scheduler probes via inference.As; lazy rebind
+  heals the construct-during-load race. **The "2.10× CB live receipt" from
+  earlier that day is WITHDRAWN — it was plain-vs-plain boot variance.**
+- BATCHED PREFILL (38d0faa): prefillLane runs the production prefill route
+  (prefillRetainedTokens) — 4×1161-tok cold admissions 29.83s → 0.70s (42×),
+  TTFT at plain parity. Per-request usage on CB responses.
+- WOBBLE CLOSED (2be27d9): temp-0 outputs were ALWAYS deterministic (probe:
+  identical content hashes, seq+conc, two boots). The variance was usage
+  accounting — the openai handler reads GLOBAL model.Metrics() after its
+  stream, racing concurrent generations (pre-existing, engine-wide under
+  concurrency) + a one-day facade shift-by-one (fixed). CB-served usage is
+  scheduler-built per-request and immune; the plain path keeps the race
+  until metrics can flow request-scoped through iter.Seq (API change).
+
+**Honest live state (quant e2b, K=4):** CB aggregate ≈ plain-interleave on
+short chats — the density fold is profit-gated off on quant and this box
+parallelises 4 independent streams about as well as one batched submission.
+CB's wins today: admission cost, one-submission-per-step CPU, scaling
+headroom, race-free usage. Decode-aggregate wins live on bf16 (1.51× fold)
+and higher K.
+
+**Next rungs (in rough value order):** welfare×CB audit (snider parked it —
+"make the thing first"; the guard decorates TextModel.Chat which CB never
+calls; audit before CB defaults on) · request-scoped metrics through the
+handler surface (kills the plain-path usage race) · concurrent lane
+admission (Prepares serialise in the drive loop — fine at production prefill
+speeds, revisit at higher K) · batched head · non-ICB arches (MoE 12B/26B).
+Also open elsewhere: #386 family-row catalogue (snider: "the catalog comes
+later"); #382 release folds (default-stance declaration, whole-repo
+remeasure).
+
+**Environment gotchas (cost real time today):**
+- engine/metal TestMain exits 0 SILENTLY without MLX_METALLIB_PATH — an
+  "ok …0.3s" ran ZERO tests; always count "--- PASS" lines in gate receipts.
+- lem serve needs MLX_METALLIB_PATH too or the backend registry is empty
+  ("no backends available" 404). lem.sh exports it; a bare binary boot must.
+- lem.sh build outputs /private/tmp/lem-dev/bin/lem-dev (NOT under the skill
+  dir).
+- rtk filters -v test output; receipts go to a file (rtk proxy) and get
+  grepped for --- PASS/FAIL counts.
+- Serve bench harness shapes (recreate freely): 4-concurrent chat POSTs to
+  /v1/chat/completions with temperature 0 + usage sums for aggregate; the
+  same with max_tokens=1 and a ~1161-token prompt for TTFT; content-hash
+  rounds (seq+conc) for determinism. LTHN_CB_STEP=0 = the plain arm.
+
 # NEXT WAKE (2026-07-16 — #381 SHIPPED: the skip is live, 2.1-2.6x at every depth)
 
 ## LATER THE SAME NIGHT (2026-07-12 — schedulers become modes; the CB physics receipt)
