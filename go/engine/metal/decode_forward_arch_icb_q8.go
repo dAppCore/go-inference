@@ -250,8 +250,15 @@ func sdpaVector2Pass1Q8PipelineICB(headDim int, blocks int32) (metal.MTLComputeP
 // token), kvDim=3 (the kvQ8StoreDims struct is one uint32 — a memoised
 // scalar buffer serves it on the ICB). One 32-lane threadgroup per 64-group.
 func emitKVQ8Store[S dispatchSink](sink S, pso metal.MTLComputePipelineState, row metal.MTLBuffer, out metal.MTLBuffer, outOff uint, scales metal.MTLBuffer, scaleOff uint, kvDim int) {
+	emitKVQ8StoreAt(sink, pso, row, 0, out, outOff, scales, scaleOff, kvDim)
+}
+
+// emitKVQ8StoreAt is emitKVQ8Store with a byte offset into the bf16 input row —
+// the laneSet GEMM fold stages rows inside its [K,kvDim] slabs rather than in a
+// dedicated staging buffer at offset 0.
+func emitKVQ8StoreAt[S dispatchSink](sink S, pso metal.MTLComputePipelineState, row metal.MTLBuffer, rowOff uint, out metal.MTLBuffer, outOff uint, scales metal.MTLBuffer, scaleOff uint, kvDim int) {
 	sink.setPSO(pso)
-	sink.setBuf(row, 0, 0)
+	sink.setBuf(row, rowOff, 0)
 	sink.setBuf(out, outOff, 1)
 	sink.setBuf(scales, scaleOff, 2)
 	sink.setI32(int32(kvDim), 3)

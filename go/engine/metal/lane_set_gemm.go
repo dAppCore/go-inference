@@ -35,12 +35,15 @@ import (
 // DISPATCH shape changes (one weight sweep vs K), never a row's accumulation order.
 //
 // SCOPE (byte-identity envelope, gemmEligible): projections whose batched dispatch
-// is byte-identical per row (projector.rowsByteTier) — bf16 at any K, quant through
-// the register-tiled lthn_qmv_rows at K ≤ lthnQMVRowsMaxM. Beyond the tiled plan
-// quant's batched dispatch is MLX qmm_t (token-identity tier — simdgroup-MMA
-// accumulation), so larger K keeps the per-lane ICB replay. Kill switch
-// LTHN_CB_GEMM=0 disables the forward entirely (the merged 2.58× path,
-// byte-for-byte).
+// is byte-identical per row (projector.rowsByteTier) — only bf16's batched gemv
+// qualifies. Genuinely-quantised weights do NOT: the register-tiled lthn_qmv_rows
+// kernel re-orders the quantised dot vs the per-row qmv_impl the replay records (a
+// ~1 ulp value-dependent drift — the hd-256 fold divergence, proven 2026-07-13),
+// so a quant model DECLINES the fold and keeps the merged per-lane ICB replay. The
+// q8 KV rung below rides ON TOP of a byte-identical projection path (so it is
+// receipted on bf16 weights); q8 KV over quant weights waits on a byte-identical
+// batched quant kernel (a metallib change). Kill switch LTHN_CB_GEMM=0 disables the
+// forward entirely (the merged 2.58× path, byte-for-byte).
 
 // gemmForwardEnabled reports whether the weight-read-once GEMM forward is armed.
 // LTHN_CB_GEMM=0 forces the per-lane ICB replay (the merged 2.58× path). Any other
@@ -62,9 +65,10 @@ var gemmEnvelopeLiftForTest bool
 
 // gemmEligible reports whether every advancing lane can take the batched-GEMM
 // forward. All lanes share the model, so this is really a model-feature check made
-// once per Step: recorded-ICB, bf16 projections (the byte-identity envelope — see the
-// gate below), no q8 KV cache, and ≥2 lanes (one lane has nothing to batch — the
-// merged replay is already optimal there).
+// once per Step: recorded-ICB, bf16 projections (the byte-identity envelope — a
+// quant projection has no byte-identical batched dispatch, see the gate below),
+// q8 KV only when the fold's q8 mirror pipelines resolve (the #367 rung), and ≥2
+// lanes (one lane has nothing to batch — the merged replay is already optimal).
 func (ls *laneSet) gemmEligible(advancing []*decodeLane) bool {
 	if len(advancing) < 2 {
 		return false
@@ -72,9 +76,14 @@ func (ls *laneSet) gemmEligible(advancing []*decodeLane) bool {
 	for _, lane := range advancing {
 		s := lane.sess.state
 		icb := s.icb
-		// icb != nil already guarantees no MoE / no trace (icbEligible); q8 KV cache
-		// staging is a separate rung, so decline it here.
-		if icb == nil || !icb.hasFinalOut || icb.kvQ8 != nil {
+		// icb != nil already guarantees no MoE / no trace (icbEligible).
+		if icb == nil || !icb.hasFinalOut {
+			return false
+		}
+		// q8 KV: the fold mirrors the recorded quantise-store + q8-read SDPA ops
+		// per lane (the #367 staging rung) — eligible only when every pipeline
+		// the mirror needs resolves on this metallib.
+		if icb.kvQ8 != nil && !gemmQ8Eligible(s) {
 			return false
 		}
 		if !gpuHasGeluKernel() {
@@ -95,19 +104,20 @@ func (ls *laneSet) gemmEligible(advancing []*decodeLane) bool {
 				return false // KV-share layers: proven-envelope exclusion (see above)
 			}
 			lb := s.lb[li]
-			// BYTE-IDENTITY GATE: a projection is batched only when its batched
-			// dispatch reproduces the per-row decode projection byte for byte
-			// (projector.rowsByteTier). bf16's batched gemv qualifies at any K;
-			// the quant path qualifies at K ≤ lthnQMVRowsMaxM through the
-			// register-tiled lthn_qmv_rows (qdot + simd_sum order match qmv_impl
-			// row for row); beyond that quant's batched dispatch is MLX qmm_t —
-			// token-identity tier (simdgroup-MMA accumulation) — so larger K
-			// keeps the per-lane ICB replay, byte-for-byte safe. (Historical
-			// note: an earlier bisect blamed a fused rms→qmv for a one-ulp
-			// drift, but that fusion has been dormant since the M2 port
-			// (enableInputRMSFusion=false); the drift was the silent qmm_t
-			// fallthrough at shapes the tiled plan declined.)
-			if !lb.proj.rowsByteTier(len(advancing)) {
+			// BYTE-IDENTITY / SAFETY GATE: a projection is batched only when its
+			// batched dispatch reproduces the per-lane replay byte for byte
+			// (projector.rowsByteTier). bf16's batched gemv qualifies at any K.
+			// Quant does NOT: the register-tiled lthn_qmv_rows kernel re-orders
+			// the quantised dot vs the per-row qmv_impl the replay records, so it
+			// drifts by ~1 ulp value-dependently (proven 2026-07-13 — THE hd-256
+			// fold divergence, root-caused to this kernel, not the q8 KV ops).
+			// A byte-identical fix needs a metallib change, so dense-quant
+			// declines here and falls back to the byte-identical merged replay;
+			// 9b6b9d2 had armed it by default — a live exposure on production
+			// 12B/31B dense-quant (hd 256/512 globals). gemmEnvelopeLiftForTest
+			// forces the fold past this gate for the divergence-observation
+			// receipt only.
+			if !gemmEnvelopeLiftForTest && !lb.proj.rowsByteTier(len(advancing)) {
 				return false
 			}
 			if !lb.proj.rowsCapable() {
@@ -116,6 +126,59 @@ func (ls *laneSet) gemmEligible(advancing []*decodeLane) bool {
 			// qk-norm rides the fused qk-norm+rope kernel; without gelu the model would
 			// need the rms-then-rope branch this forward doesn't mirror — keep it on the replay.
 			if (lb.qNorm.buf != nil || lb.kNorm.buf != nil) && !gpuHasGeluKernel() {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// gemmQ8Blocks reproduces the recorder's fixed 2-pass fan for q8 SDPA reads —
+// blocks bake into the RECORDED pipelines from maxLen and the most-starved
+// GLOBAL layer's KV heads (decode_forward_arch_icb.go), so the fold must run
+// the identical fan for byte-identity with the replay. 0 = single-pass layout.
+func gemmQ8Blocks(s archDecodeState) int {
+	if s.maxLen < sdpa2PassMinKV {
+		return 0
+	}
+	minKV := 0
+	for li := range s.specs {
+		if s.specs[li].Attention != model.GlobalAttention {
+			continue
+		}
+		if kv := kvHeadsOf(s.specs[li], s.nKVHeads); minKV == 0 || kv < minKV {
+			minKV = kv
+		}
+	}
+	return int(sdpa2PassBlocks(s.maxLen, minKV))
+}
+
+// gemmQ8Eligible probes every pipeline the fold's q8 mirror needs: the
+// quantise-store op and, per q8-read layer head-dim, the 1-pass q8 SDPA (plus
+// the fixed-fan 2-pass pair on global layers when the recorded layout uses it).
+// The Once-backed getters make repeat probes cheap.
+func gemmQ8Eligible(s archDecodeState) bool {
+	if _, err := kvQ8StorePipelineICB(); err != nil {
+		return false
+	}
+	blocks := gemmQ8Blocks(s)
+	for li := range s.specs {
+		ownerIdx := li
+		if !s.specs[li].OwnsCache() {
+			ownerIdx = s.specs[li].KVShareFrom
+		}
+		if s.icb == nil || s.icb.kvQ8 == nil || !s.icb.kvQ8.on(ownerIdx) {
+			continue
+		}
+		hd := headDimOf(s.specs[li], s.headDim)
+		if _, err := sdpaVectorQ8PipelineICB(hd); err != nil {
+			return false
+		}
+		if blocks > 0 && s.specs[li].Attention == model.GlobalAttention {
+			if _, err := sdpaVector2Pass1Q8PipelineICB(hd, int32(blocks)); err != nil {
+				return false
+			}
+			if _, err := sdpaVector2Pass2PipelineForHeadDim(hd); err != nil {
 				return false
 			}
 		}
@@ -145,13 +208,13 @@ func (s *archDecodeState) gemmDims() (maxQDim, maxKVDim int) {
 // embeddings and reads the final hiddens). x/h ping-pong the running hidden across
 // layers; the rest stage one layer's projection I/O.
 type gemmSlabs struct {
-	k                        int
+	k                              int
 	dModel, maxQDim, maxKVDim, dFF int
-	x, h, normed             metal.MTLBuffer // [K,dModel]
-	q, attn                  metal.MTLBuffer // [K,maxQDim]
-	kProj, vProj             metal.MTLBuffer // [K,maxKVDim]
-	attnOut, down, mlpNormed metal.MTLBuffer // [K,dModel]
-	gate, up, gated          metal.MTLBuffer // [K,dFF]
+	x, h, normed                   metal.MTLBuffer // [K,dModel]
+	q, attn                        metal.MTLBuffer // [K,maxQDim]
+	kProj, vProj                   metal.MTLBuffer // [K,maxKVDim]
+	attnOut, down, mlpNormed       metal.MTLBuffer // [K,dModel]
+	gate, up, gated                metal.MTLBuffer // [K,dFF]
 }
 
 // ensureGemmSlabs (re)allocates the staging for K lanes and the model's dims.
@@ -367,27 +430,64 @@ func (ls *laneSet) gemmLayer(enc metal.MTLComputeCommandEncoder, advancing []*de
 			if ownRows > 0 {
 				slot = pos % ownRows
 			}
-			rowOff := uint(slot * ownRowStride)
-			// K: store the k-proj row into the cache slot, then rope IN PLACE there —
-			// exactly encAttnHalfKVInputAt (project straight into cache, rope in place),
-			// so partial rotary's untouched tail keeps the projected value in the cache.
-			if err := encCopyBF16Contig(enc, g.kProj, attendK, vOff, rowOff, kvDim); err != nil {
-				return err
-			}
-			if lb.kNorm.buf != nil {
-				if err := encQKNormRopeAt(enc, attendK, lb.kNorm.buf, attendK, rowOff, lb.kNorm.off, rowOff, offBuf, 0, layerRopeFreqs, lkv, lhd, rotDim, rbase, s0.scale, eps); err != nil {
+			if icb.kvQ8 != nil && icb.kvQ8.on(li) {
+				// q8 owner (#367 staging rung): mirror the recorded sequence —
+				// rope/norm in bf16 staging, then ONE quantise-store per row into
+				// the int8 cache row + f32 scale row. The fold's slab rows ARE the
+				// staging. V stores FIRST from the pre-rope row: on K==V layers
+				// vSrc aliases the k slab row, and roping K in place would
+				// corrupt the value source (the bf16 path dodges this by roping
+				// in-cache; q8 cannot rope an int8 row).
+				storePSO, err := kvQ8StorePipelineICB()
+				if err != nil {
 					return err
 				}
-			} else if err := encRopeDecodeAt(enc, attendK, attendK, rowOff, rowOff, offBuf, 0, layerRopeFreqs, lkv, lhd, rotDim, rbase, s0.scale); err != nil {
-				return err
-			}
-			// V: value-norm (gemma4 no-scale rms) FROM the v source slab row INTO the slot.
-			if s0.valueNormOnes != nil {
-				if err := encRMSNormRowsBF16(enc, vSrc, s0.valueNormOnes, attendV, vOff, 0, rowOff, lkv, lhd, eps); err != nil {
+				cacheOff := uint(slot * kvDim)                    // int8: 1 byte/elem
+				scOff := uint(slot * (kvDim / kvQ8GroupSize) * 4) // f32 scale row
+				vRow, vRowOff := vSrc, vOff
+				if s0.valueNormOnes != nil {
+					dst, dstOff := vSrc, vOff
+					if !proj.hasV() { // aliased with the k slab row — norm into the unused vProj row
+						dst, dstOff = g.vProj, vOff
+					}
+					if err := encRMSNormRowsBF16(enc, vSrc, s0.valueNormOnes, dst, vOff, 0, dstOff, lkv, lhd, eps); err != nil {
+						return err
+					}
+					vRow, vRowOff = dst, dstOff
+				}
+				emitKVQ8StoreAt(encSink{enc}, storePSO, vRow, vRowOff, attendV, cacheOff, icb.kvQ8.vScales[li], scOff, kvDim)
+				// K: norm+rope the slab row in place (bf16 staging), then quantise-store.
+				if lb.kNorm.buf != nil {
+					if err := encQKNormRopeAt(enc, g.kProj, lb.kNorm.buf, g.kProj, vOff, lb.kNorm.off, vOff, offBuf, 0, layerRopeFreqs, lkv, lhd, rotDim, rbase, s0.scale, eps); err != nil {
+						return err
+					}
+				} else if err := encRopeDecodeAt(enc, g.kProj, g.kProj, vOff, vOff, offBuf, 0, layerRopeFreqs, lkv, lhd, rotDim, rbase, s0.scale); err != nil {
 					return err
 				}
-			} else if err := encCopyBF16Contig(enc, vSrc, attendV, vOff, rowOff, kvDim); err != nil {
-				return err
+				emitKVQ8StoreAt(encSink{enc}, storePSO, g.kProj, vOff, attendK, cacheOff, icb.kvQ8.kScales[li], scOff, kvDim)
+			} else {
+				rowOff := uint(slot * ownRowStride)
+				// K: store the k-proj row into the cache slot, then rope IN PLACE there —
+				// exactly encAttnHalfKVInputAt (project straight into cache, rope in place),
+				// so partial rotary's untouched tail keeps the projected value in the cache.
+				if err := encCopyBF16Contig(enc, g.kProj, attendK, vOff, rowOff, kvDim); err != nil {
+					return err
+				}
+				if lb.kNorm.buf != nil {
+					if err := encQKNormRopeAt(enc, attendK, lb.kNorm.buf, attendK, rowOff, lb.kNorm.off, rowOff, offBuf, 0, layerRopeFreqs, lkv, lhd, rotDim, rbase, s0.scale, eps); err != nil {
+						return err
+					}
+				} else if err := encRopeDecodeAt(enc, attendK, attendK, rowOff, rowOff, offBuf, 0, layerRopeFreqs, lkv, lhd, rotDim, rbase, s0.scale); err != nil {
+					return err
+				}
+				// V: value-norm (gemma4 no-scale rms) FROM the v source slab row INTO the slot.
+				if s0.valueNormOnes != nil {
+					if err := encRMSNormRowsBF16(enc, vSrc, s0.valueNormOnes, attendV, vOff, 0, rowOff, lkv, lhd, eps); err != nil {
+						return err
+					}
+				} else if err := encCopyBF16Contig(enc, vSrc, attendV, vOff, rowOff, kvDim); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -398,7 +498,31 @@ func (ls *laneSet) gemmLayer(enc metal.MTLComputeCommandEncoder, advancing []*de
 		if slideW > 0 && n > slideW {
 			n = slideW
 		}
-		if err := encSDPADecodeAt(enc, asc, g.q, qOff, attendK, attendV, g.attn, qOff, s0.nHeads, lkv, lhd, n, int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s0.scale, 0); err != nil {
+		if icb.kvQ8 != nil && icb.kvQ8.on(ownerIdx) { // sharers of a q8 owner read q8 too
+			kSc, vSc := icb.kvQ8.kScales[ownerIdx], icb.kvQ8.vScales[ownerIdx]
+			blocks := gemmQ8Blocks(lane.sess.state)
+			if blocks > 0 && s0.specs[li].Attention == model.GlobalAttention {
+				// Mirror the recorder's FIXED 2-pass fan (blocks bake from maxLen,
+				// not the live n) so the reduction order matches the replay.
+				pso1, err := sdpaVector2Pass1Q8PipelineICB(lhd, int32(blocks))
+				if err != nil {
+					return err
+				}
+				pso2, err := sdpaVector2Pass2PipelineForHeadDim(lhd)
+				if err != nil {
+					return err
+				}
+				sink := encSink{enc}
+				emitSDPAVector2Pass1Q8At(sink, pso1, g.q, qOff, attendK, attendV, asc.p2Partials, asc.p2Sums, asc.p2Maxs, kSc, vSc, 0, 0, nil, s0.nHeads, lkv, n, blocks, int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s0.scale)
+				emitSDPA2Pass2At(sink, pso2, asc.p2Partials, asc.p2Sums, asc.p2Maxs, g.attn, qOff, 1, s0.nHeads, blocks)
+			} else {
+				pso, err := sdpaVectorQ8PipelineICB(lhd)
+				if err != nil {
+					return err
+				}
+				emitSDPAVectorQ8At(encSink{enc}, pso, g.q, qOff, attendK, attendV, g.attn, qOff, kSc, vSc, 0, 0, nil, s0.nHeads, lkv, n, int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s0.scale)
+			}
+		} else if err := encSDPADecodeAt(enc, asc, g.q, qOff, attendK, attendV, g.attn, qOff, s0.nHeads, lkv, lhd, n, int64(lhd), int64(kvDim), int64(lhd), int64(kvDim), s0.scale, 0); err != nil {
 			return err
 		}
 	}

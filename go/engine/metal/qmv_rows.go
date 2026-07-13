@@ -201,10 +201,13 @@ func lthnQMVRowsPipelineICB(key lthnQMVRowsKey) (metal.MTLComputePipelineState, 
 // encode) when the geometry has no kernel so the caller keeps its
 // qmm_t/per-row route. in rows are contiguous bf16 at inOff + z·inDim·2; out
 // rows land at outOff + z·outDim·2. Rows 2..lthnQMVRowsMaxM take the
-// register-tiled lthn_qmv_rows (the weight stream read ONCE, rows
-// byte-identical to MLX's plain qmv); wider rows ride the lean gather kernel
-// (grid-Z, qmv_fast bytes, weight re-streamed per row but still ~2× the
-// serialised per-row interleave).
+// register-tiled lthn_qmv_rows (the weight stream read ONCE); wider rows ride
+// the lean gather kernel (grid-Z, qmv_fast bytes, weight re-streamed per row).
+// NOTE: the tiled kernel is NOT byte-identical to the per-row qmv_impl — its
+// register-tiling re-orders the quantised dot's accumulation, drifting ~1 ulp
+// value-dependently (proven 2026-07-13). It is a THROUGHPUT batching (MTP
+// verify draft blocks), not a byte-identity path — see qmvProjector.rowsByteTier,
+// which declines it for the laneSet GEMM fold.
 func encQMVRowsBF16At(enc metal.MTLComputeCommandEncoder, wq, scales, biases, in, out metal.MTLBuffer, wqOff, scalesOff, biasesOff, inOff, outOff uint, rows, outDim, inDim, gs, bits int) (bool, error) {
 	plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits)
 	if !ok {

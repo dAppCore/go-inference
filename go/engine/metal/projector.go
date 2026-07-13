@@ -46,13 +46,13 @@ type projector interface {
 	// rowsCapable reports whether EVERY present projection has a batched dispatch —
 	// the fold's upfront eligibility probe (slab sizing happens before any encode).
 	rowsCapable() bool
-	// rowsByteTier reports whether projectRows at this row count reproduces the
-	// per-row decode projection BYTE for byte for every present weight — the
-	// laneSet GEMM fold's eligibility tier. Token-tier batched dispatches (MLX
-	// qmm_t: simdgroup-MMA accumulation re-orders the dot) do NOT qualify; the
-	// register-tiled lthn_qmv_rows (qdot + simd_sum order match qmv_impl row for
-	// row) and the bf16 batched gemv (z-slices run the single-row tile loop
-	// unchanged) do.
+	// rowsByteTier reports whether projectRows reproduces the per-lane replay
+	// projection BYTE for byte for every present weight — the laneSet GEMM fold's
+	// eligibility tier. Only the bf16 batched gemv qualifies (z-slices run the
+	// single-row tile loop unchanged). NO batched quant dispatch qualifies: both
+	// MLX qmm_t (simdgroup-MMA) AND the register-tiled lthn_qmv_rows re-order the
+	// quantised dot vs the per-row qmv_impl the replay records (proven 2026-07-13
+	// — a value-dependent ~1 ulp drift), so a quant weight declines the byte tier.
 	rowsByteTier(rows int) bool
 	// hasV reports whether a distinct V projection weight exists. gemma4 K==V layers
 	// (12B/31B: attention_k_eq_v) carry NO v_proj — V is the k-proj output (pre-knorm/
@@ -226,27 +226,27 @@ func (m qmvProjector) rowsCapable() bool {
 	return true
 }
 
-// rowsByteTier: quant qualifies only through the register-tiled lthn_qmv_rows
-// plan (byte-identical per row to the decode qmv); the qmm_t fallback in
-// projectRows is token-tier, so any weight that would take it declines the
-// byte tier and the caller keeps its per-lane path.
-func (m qmvProjector) rowsByteTier(rows int) bool {
+// rowsByteTier: only the bf16 batched gemv reproduces the per-lane replay byte
+// for byte. A genuinely-quantised weight has NO byte-identical batched dispatch:
+// the register-tiled lthn_qmv_rows kernel re-orders the quantised dot's
+// accumulation relative to the per-row qmv_impl the replay records, so its rows
+// drift by ~1 ulp value-dependently (rate grows with inDim — proven 2026-07-13:
+// batched projectRows vs per-row project diverged on every projection, O/down @
+// inDim=512 worst; it surfaced as the hd-256 fold failure at step 6). The earlier
+// "qdot + simd_sum order match qmv_impl row for row" claim was wrong. So a present
+// quant weight declines the byte tier and the fold falls back to the byte-
+// identical merged ICB replay; only an all-dense (mixed-pack bf16) quant projector
+// still qualifies.
+func (m qmvProjector) rowsByteTier(int) bool {
 	for p := projQ; p <= projDown; p++ {
-		w, outDim, inDim, _ := m.weightDims(p)
+		w, _, _, _ := m.weightDims(p)
 		if !w.present() {
 			continue
 		}
 		if w.dense() {
 			continue // batched gemv: byte-identical at any row count
 		}
-		gs, bits := m.groupSize, m.bits
-		if w.bits > 0 {
-			gs, bits = w.gs, w.bits
-		}
-		plan, ok := qmvRowsPlanFor(rows, outDim, inDim, gs, bits)
-		if !ok || !plan.tiled {
-			return false
-		}
+		return false // quantised weight: no byte-identical batched dispatch
 	}
 	return true
 }
