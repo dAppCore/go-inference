@@ -403,19 +403,43 @@ func (h *headEncoder) encodeBufferIntoPool(hiddenBuf metal.MTLBuffer, skipSoftca
 	}
 	cb := commandBufferFast(queue)
 	enc := computeCommandEncoderFast(cb)
-	sink := encObjectSink{enc: enc}
-	rmsPSO, err := pipelineFor(rmsKernelBF16(h.dModel))
-	if err != nil {
+	if err := h.emitLogitsChainAt(enc, hiddenBuf, 0, skipSoftcap, scratch, normed, logits); err != nil {
 		endEncodingFast(enc)
 		h.putGreedyScratch(scratch)
 		return err
 	}
-	emitRMSNorm(sink, rmsPSO, hiddenBuf, h.finalNorm.buf, normed, h.finalNorm.off, h.dModel, h.eps, rmsThreadgroup(h.dModel, rmsPSO))
+	endEncodingFast(enc)
+	commitCommandBufferFast(cb)
+	waitUntilCompletedFast(cb)
+	if !directOut {
+		copy(out, unsafe.Slice(scratch.logitsPtr, h.vocab*bf16Size))
+	}
+	h.putGreedyScratch(scratch)
+	return nil
+}
+
+// emitLogitsChainAt encodes the full-vocab logits chain — final RMSNorm, the
+// lm_head matvec, and the optional softcap triple — into the CALLER's live
+// encoder, against the given hidden buffer/offset and the scratch's staging
+// buffers. Factored from encodeBufferIntoPool so a batched caller can encode
+// K rows into ONE command buffer with the IDENTICAL per-row kernels (the
+// per-lane and batched logits stay byte-identical by construction).
+func (h *headEncoder) emitLogitsChainAt(enc metal.MTLComputeCommandEncoderObject, hiddenBuf metal.MTLBuffer, hiddenOff uint, skipSoftcap bool, scratch *headGreedyScratch, normed, logits metal.MTLBuffer) error {
+	sink := encObjectSink{enc: enc}
+	rmsPSO, err := pipelineFor(rmsKernelBF16(h.dModel))
+	if err != nil {
+		return err
+	}
+	if hiddenOff == 0 {
+		emitRMSNorm(sink, rmsPSO, hiddenBuf, h.finalNorm.buf, normed, h.finalNorm.off, h.dModel, h.eps, rmsThreadgroup(h.dModel, rmsPSO))
+	} else {
+		if err := encRMSNormRowsBF16(enc, hiddenBuf, h.finalNorm.buf, normed, hiddenOff, h.finalNorm.off, 0, 1, h.dModel, h.eps); err != nil {
+			return err
+		}
+	}
 	if h.quant {
 		qmvPSO, err := pipelineFor(qmvBF16KernelName(h.vocab, h.dModel, h.groupSize, h.bits))
 		if err != nil {
-			endEncodingFast(enc)
-			h.putGreedyScratch(scratch)
 			return err
 		}
 		emitQMV(sink, qmvPSO, h.weight.buf, h.weight.off, h.scales.buf, h.scales.off, h.biases.buf, h.biases.off, normed, logits, 0, h.dModel, h.vocab)
@@ -423,8 +447,6 @@ func (h *headEncoder) encodeBufferIntoPool(hiddenBuf metal.MTLBuffer, skipSoftca
 		bm, bn, sm, sn, tm, tn := gemvTiles(h.dModel, h.vocab)
 		gemvPSO, err := pipelineFor(gemvKernelName("bfloat16", bm, bn, sm, sn, tm, tn))
 		if err != nil {
-			endEncodingFast(enc)
-			h.putGreedyScratch(scratch)
 			return err
 		}
 		emitGemv(sink, gemvPSO, h.weight.buf, h.weight.off, normed, logits, 0, h.dModel, h.vocab, bm, bn, sm, tm)
@@ -436,13 +458,9 @@ func (h *headEncoder) encodeBufferIntoPool(hiddenBuf metal.MTLBuffer, skipSoftca
 			invScale = bufView{buf: bf16ConstBuffer(1, 1/h.softCap)}
 		}
 		if err := encScaleBF16Object(enc, logits, invScale.buf, scratch.softcapA, invScale.off, invBytes[:], h.vocab); err != nil {
-			endEncodingFast(enc)
-			h.putGreedyScratch(scratch)
 			return err
 		}
 		if err := encTanhBF16Object(enc, scratch.softcapA, scratch.softcapB, h.vocab); err != nil {
-			endEncodingFast(enc)
-			h.putGreedyScratch(scratch)
 			return err
 		}
 		capBytes := bf16ScalarBytes(h.softCap)
@@ -451,18 +469,53 @@ func (h *headEncoder) encodeBufferIntoPool(hiddenBuf metal.MTLBuffer, skipSoftca
 			capScale = bufView{buf: bf16ConstBuffer(1, h.softCap)}
 		}
 		if err := encScaleBF16Object(enc, scratch.softcapB, capScale.buf, logits, capScale.off, capBytes[:], h.vocab); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// encodeLogitsRowsInPool encodes K independent full-vocab logits chains — one
+// per hidden buffer — into a SINGLE command buffer with a single wait,
+// copying each row's logits into outs[i]. The per-row kernels are exactly
+// encodeBufferIntoPool's (emitLogitsChainAt), so each row's bytes equal the
+// per-lane path's; only the submission count changes (K commit+wait
+// round-trips become one — the sampled Phase-1 tax the lane probe measured).
+func (h *headEncoder) encodeLogitsRowsInPool(hiddenBufs []metal.MTLBuffer, skipSoftcap bool, outs [][]byte) error {
+	k := len(hiddenBufs)
+	if k == 0 || len(outs) != k {
+		return core.NewError("native.headEncoder.encodeLogitsRows: mismatched batch")
+	}
+	needSoftcap := h.softCap > 0 && !skipSoftcap && h.vocab > 0
+	scratches := make([]*headGreedyScratch, 0, k)
+	release := func() {
+		for _, sc := range scratches {
+			h.putGreedyScratch(sc)
+		}
+	}
+	cb := commandBufferFast(queue)
+	enc := computeCommandEncoderFast(cb)
+	for i := range hiddenBufs {
+		scratch := h.getGreedyScratch(1, true, needSoftcap)
+		scratches = append(scratches, scratch)
+		if err := h.emitLogitsChainAt(enc, hiddenBufs[i], 0, skipSoftcap, scratch, scratch.normed, scratch.logits); err != nil {
 			endEncodingFast(enc)
-			h.putGreedyScratch(scratch)
+			release()
 			return err
 		}
 	}
 	endEncodingFast(enc)
 	commitCommandBufferFast(cb)
 	waitUntilCompletedFast(cb)
-	if !directOut {
-		copy(out, unsafe.Slice(scratch.logitsPtr, h.vocab*bf16Size))
+	outLen := h.vocab * bf16Size
+	for i, scratch := range scratches {
+		if len(outs[i]) != outLen {
+			release()
+			return core.NewError("native.headEncoder.encodeLogitsRows: out row must be vocab bf16 bytes")
+		}
+		copy(outs[i], unsafe.Slice(scratch.logitsPtr, outLen))
 	}
-	h.putGreedyScratch(scratch)
+	release()
 	return nil
 }
 

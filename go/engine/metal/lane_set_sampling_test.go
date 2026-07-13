@@ -185,3 +185,131 @@ func TestLaneSetSampledMixedDisciplineByteIdentity(t *testing.T) {
 		t.Fatalf("replay set ran %d GEMM forwards — it should be pure ICB replay", lsR.gemmFwdCount)
 	}
 }
+
+// TestLaneSetSampledTopKRowsByteIdentity is the conformance proof for the
+// BATCHED sampled Phase 1 (K topK-token chains in one submission): the SAME
+// sampled specs produce the SAME per-lane token streams run alone (K==1 —
+// the per-lane ladder, the batch requires two lanes) and all together (K>1 —
+// the batched submission). sampledRowsCount is the engagement discriminator:
+// a silent decline to the per-lane ladder cannot pass as batched.
+func TestLaneSetSampledTopKRowsByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	m := laneSetFixtureModel(t)
+	defer m.Close()
+	ctx := context.Background()
+	// Four lanes, all on the topK-token route (temperature + TopK, no
+	// repeat penalty), distinct prompts and seeds.
+	specs := []inference.LaneSpec{
+		{PromptIDs: []int32{1, 5, 3, 2}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 0.8, TopK: 8}, SampleSeed: 7},
+		{PromptIDs: []int32{7, 7, 1}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 0.9, TopK: 8}, SampleSeed: 21},
+		{PromptIDs: []int32{2, 9, 4, 6, 8, 3}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 0.7, TopK: 12}, SampleSeed: 3},
+		{PromptIDs: []int32{4}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 1.1, TopK: 6}, SampleSeed: 11},
+	}
+
+	serialTokens := make([][]int32, len(specs))
+	for i, spec := range specs {
+		ls, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: 1})
+		if err != nil {
+			t.Fatalf("OpenLaneSet(serial %d): %v", i, err)
+		}
+		h, err := ls.Prepare(ctx, spec)
+		if err != nil {
+			t.Fatalf("Prepare(serial %d): %v", i, err)
+		}
+		got, _ := drainLaneSet(t, ls)
+		serialTokens[i] = got[h.ID]
+		if len(serialTokens[i]) == 0 {
+			t.Fatalf("serial sampled lane %d produced no tokens", i)
+		}
+		_ = ls.Close()
+	}
+
+	ls, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+	if err != nil {
+		t.Fatalf("OpenLaneSet(batched): %v", err)
+	}
+	handles := make([]inference.LaneHandle, len(specs))
+	for i, spec := range specs {
+		if handles[i], err = ls.Prepare(ctx, spec); err != nil {
+			t.Fatalf("Prepare(batched %d): %v", i, err)
+		}
+	}
+	batchedTokens, _ := drainLaneSet(t, ls)
+	if rows := ls.(*laneSet).sampledRowsCount; rows == 0 {
+		t.Fatal("batched sampled Phase 1 never engaged (sampledRowsCount == 0)")
+	}
+	_ = ls.Close()
+
+	for i := range specs {
+		if !slices.Equal(batchedTokens[handles[i].ID], serialTokens[i]) {
+			t.Fatalf("sampled lane %d: batched tokens %v != serial %v", i, batchedTokens[handles[i].ID], serialTokens[i])
+		}
+	}
+}
+
+// TestLaneSetSampledLogitsRowsByteIdentity is the conformance proof for the
+// batched FINAL-FALLBACK sampled Phase 1 (K full-vocab logits chains in one
+// submission + per-lane host tails): pure-temperature params route past every
+// GPU-select lane on the fixture, exactly as big-vocab serve params do via
+// hostTopKSamplePreferred. Same K==1-vs-K>1 byte identity + engagement shape
+// as the topK-rows gate.
+func TestLaneSetSampledLogitsRowsByteIdentity(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	m := laneSetFixtureModel(t)
+	defer m.Close()
+	ctx := context.Background()
+	// Temperature+TopP with TopK 0: on the fixture's small vocab this is
+	// CPU-preferred past the GPU logits-token lane and TopK-ineligible past
+	// the candidates lane — the ladder's FINAL fallback, the same routing
+	// big-vocab serve params reach via hostTopKSamplePreferred.
+	specs := []inference.LaneSpec{
+		{PromptIDs: []int32{1, 5, 3, 2}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 0.9, TopP: 0.9}, SampleSeed: 7},
+		{PromptIDs: []int32{7, 7, 1}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 1.2, TopP: 0.8}, SampleSeed: 21},
+		{PromptIDs: []int32{2, 9, 4, 6, 8, 3}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 0.8, TopP: 0.95}, SampleSeed: 3},
+		{PromptIDs: []int32{4}, MaxNew: 8, Sampler: inference.SamplerConfig{Temperature: 1.0, TopP: 0.7}, SampleSeed: 11},
+	}
+
+	serialTokens := make([][]int32, len(specs))
+	for i, spec := range specs {
+		ls, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: 1})
+		if err != nil {
+			t.Fatalf("OpenLaneSet(serial %d): %v", i, err)
+		}
+		h, err := ls.Prepare(ctx, spec)
+		if err != nil {
+			t.Fatalf("Prepare(serial %d): %v", i, err)
+		}
+		got, _ := drainLaneSet(t, ls)
+		serialTokens[i] = got[h.ID]
+		if len(serialTokens[i]) == 0 {
+			t.Fatalf("serial lane %d produced no tokens", i)
+		}
+		_ = ls.Close()
+	}
+
+	ls, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+	if err != nil {
+		t.Fatalf("OpenLaneSet(batched): %v", err)
+	}
+	handles := make([]inference.LaneHandle, len(specs))
+	for i, spec := range specs {
+		if handles[i], err = ls.Prepare(ctx, spec); err != nil {
+			t.Fatalf("Prepare(batched %d): %v", i, err)
+		}
+	}
+	batchedTokens, _ := drainLaneSet(t, ls)
+	if rows := ls.(*laneSet).sampledRowsCount; rows == 0 {
+		t.Fatal("batched sampled Phase 1 never engaged (sampledRowsCount == 0)")
+	}
+	_ = ls.Close()
+
+	for i := range specs {
+		if !slices.Equal(batchedTokens[handles[i].ID], serialTokens[i]) {
+			t.Fatalf("sampled lane %d: batched tokens %v != serial %v", i, batchedTokens[handles[i].ID], serialTokens[i])
+		}
+	}
+}

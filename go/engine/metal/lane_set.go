@@ -71,6 +71,10 @@ type laneSet struct {
 	// forward+head+embed lane submissions) — the chained path's engagement
 	// discriminator.
 	chainedSteps uint64
+	// sampledRowsCount is monotonic: +1 per batched sampled Phase-1
+	// submission (K topK-token chains in one command buffer) — the sampled
+	// batch's engagement discriminator.
+	sampledRowsCount uint64
 }
 
 // decodeLane is one lane's owned mutable state.
@@ -393,6 +397,23 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 		}
 		classic = emitLanes
 		batchedToks, batchedHead := ls.phase1GreedyRows(classic)
+		var sampledToks []int32
+		batchedSampled := false
+		if !batchedHead {
+			var serr error
+			sampledToks, batchedSampled, serr = ls.phase1SampledTopKRows(classic)
+			if serr != nil {
+				stepErr = serr
+				return
+			}
+			if !batchedSampled {
+				sampledToks, batchedSampled, serr = ls.phase1SampledLogitsRows(classic)
+				if serr != nil {
+					stepErr = serr
+					return
+				}
+			}
+		}
 		hi := 0
 		for _, lane := range classic {
 			var tok int32
@@ -401,6 +422,12 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 			case batchedHead:
 				tok = batchedToks[hi]
 				hi++
+			case batchedSampled:
+				tok = sampledToks[hi]
+				hi++
+				if lane.sampleParams.RepeatPenalty > 1 {
+					lane.sampleHistory = append(lane.sampleHistory, tok)
+				}
 			case lane.sampler != nil:
 				tok, err = lane.sess.sampledNextFromHiddenInPool(lane.hidden, lane.sampler, lane.sampleParams, lane.sampleHistory)
 				if err == nil && lane.sampleParams.RepeatPenalty > 1 {
