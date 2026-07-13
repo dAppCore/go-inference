@@ -1,3 +1,51 @@
+# NEXT WAKE (2026-07-16 — admission overlap: a joiner no longer freezes the set)
+
+## 2026-07-16 (admission overlap — BeginPrepare/CommitPrepare + the chunk cap)
+
+- THE DEFECT: cb_step's admit() ran the WHOLE lane admission (session open +
+  prompt prefill) INLINE in the drive loop — a 2k-prompt joiner at 26B froze
+  every in-flight stream ~2.1s (measured 2082ms, the fat's exact admission
+  window). Cold boots were worse: first-touch session opens (~2s KV alloc)
+  also sat in the loop.
+- THE SEAM: inference.LaneSetOverlappedAdmitter (optional, probed like every
+  CB capability) — BeginPrepare(spec) does the heavy half (session open +
+  production chunked prefill) SAFE OFF-GOROUTINE while the owner keeps
+  Stepping (independent-session isolation, the continuity handoff's proven
+  pattern); CommitPrepare splices (id + maps, µs, owner-only). metal Prepare
+  is now literally the composition, byte-identical by construction.
+- SCHEDULER: overlapped admit dispatches BeginPrepare goroutines (in-flight
+  prepares count against the slot budget; prepCh buffered=budget so sends
+  never block → drain() collects everything before ls.Close). Cancel mid-
+  prefill = ctx abort → Discard; close mid-prefill drains clean. No-capability
+  lane sets keep the inline path byte-for-byte.
+- THE SECOND STALL (GPU, not loop): one whole-prompt command buffer executes
+  atomically — streams still gapped ~1.2s behind it. Fix: sessions carry
+  prefillChunkRowsCap; BeginPrepare stamps 512 ONLY when liveLanes > 0
+  (atomic mirror — empty-set bursts and solo boots keep the uncapped
+  throughput shape). Chunk policy keeps the absorb-the-tail invariant (never
+  split a ≤batchedDenseICBMaxRows runt — DenseOne declines those on ICB
+  sessions and a mid-loop decline after committed chunks would corrupt):
+  slack = max(w/2, 17).
+- GATES: TestCBStepAdmissionOverlapsStep (A streams to its FULL budget while
+  B's prefill is gated — pre-overlap this deadlocks) +
+  TestCBStepOverlappedPrefillCancelAndClose + metal
+  TestLaneSetOverlappedAdmissionByteIdentity (off-thread Begin mid-Stepping ≡
+  serial-alone) + ChunkLenCapped walk (runt-guard) + BatchedDenseCapped GPU
+  parity. Full module 12893/0; scheduler suite under -race.
+- LIVE (26B ctx4096, 2 streams + 2k joiner, warm):
+      pre:  streams freeze 2082ms (joiner inline)
+      post: worst gap 544/538ms; trace: begin-prepare live=2 cap=512
+            rows=1999 → chunks [512 512 975] (the walk's exact absorb shape);
+            joiner wall unchanged (1.49s). 3.8× better worst-gap; the loop
+            never blocks.
+- PROBE LESSON (cost an hour): a fixed-sleep "mid-stream" inject lands in the
+  ADMISSION BURST on a cold boot (session opens ~2s serialise everything) —
+  live=0 was TRUE at the joiner's Begin. Wait for first frames, or read the
+  begin-prepare trace (LTHN_GPU_TRACE=host now logs live/cap/rows per lane
+  admission).
+- REMAINDER ON #385: CB lane metric durations · parallel host sample tails ·
+  K≥8 batched-tail re-check · EnableThinking seam (facade fold drops it).
+
 # NEXT WAKE (2026-07-16 — continuity×CB audited + wired: the continuation handoff)
 
 ## 2026-07-16 (continuity×CB — audit findings + the routing fix)
