@@ -837,6 +837,49 @@ func TestVerifyBatchedEngagesQuantPLE(t *testing.T) {
 	}
 }
 
+// TestPrefillInputsDeviceEmbedDeviceKillSwitch pins the #381 dense/MoE port's
+// kill switch (prefillEmbedDeviceOffForTest, the in-process twin of
+// LTHN_PREFILL_EMBED_DEVICE=0 — same shape as flash_prompt.go's
+// prefillSkipSharedOffForTest): a fixture whose perLayerInputBatchDevice
+// closure is wired and would otherwise engage must still fall back to the nil
+// (host-path) result the instant the switch is off, and re-engage the moment
+// it's back on.
+func TestPrefillInputsDeviceEmbedDeviceKillSwitch(t *testing.T) {
+	requireNativeRuntime(t)
+	sess := newBatchedPLEQuantFixture(t)
+	if sess.perLayerInputBatchDevice == nil {
+		t.Fatal("fixture lost its quant PLE device closure — arch_session's #381 gate no longer wires it")
+	}
+	ids := quantBatchedPLEIDs()
+
+	embBuf, pleBuf, err := sess.prefillInputsDevice(ids)
+	if err != nil {
+		t.Fatalf("prefillInputsDevice (switch on): %v", err)
+	}
+	if embBuf == nil || pleBuf == nil {
+		t.Fatal("prefillInputsDevice (switch on) declined a fixture that should engage")
+	}
+
+	prefillEmbedDeviceOffForTest = true
+	defer func() { prefillEmbedDeviceOffForTest = false }()
+	embBufOff, pleBufOff, err := sess.prefillInputsDevice(ids)
+	if err != nil {
+		t.Fatalf("prefillInputsDevice (switch off): %v", err)
+	}
+	if embBufOff != nil || pleBufOff != nil {
+		t.Fatal("prefillInputsDevice (switch off) engaged the device path — kill switch had no effect")
+	}
+
+	prefillEmbedDeviceOffForTest = false
+	embBufBack, pleBufBack, err := sess.prefillInputsDevice(ids)
+	if err != nil {
+		t.Fatalf("prefillInputsDevice (switch back on): %v", err)
+	}
+	if embBufBack == nil || pleBufBack == nil {
+		t.Fatal("prefillInputsDevice (switch back on) stayed declined")
+	}
+}
+
 // TestPrefillRetainedTokensBatchedDenseChunksEngagesQuantPLEBoundedSlab is the quant-PLE
 // analogue of arch_session_test.go's TestArchSessionPrefillChunksSkipSharedSuffix (#30 r4): a
 // 4-bit gemma4 arch WITH the per-layer-input tower, a clean 2-of-4 trailing KV-shared suffix, and
