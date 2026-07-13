@@ -20,6 +20,39 @@ func seededKVBytes(n int, seed uint32) []byte {
 	return out
 }
 
+func TestArchSessionCaptureKV_Nil(t *testing.T) {
+	var session *ArchSession
+	if _, err := session.CaptureKV(); err == nil {
+		t.Fatal("CaptureKV accepted a nil session")
+	}
+}
+
+func TestArchSessionCaptureKVWithOptions_InvalidBlockStart(t *testing.T) {
+	session := &ArchSession{}
+	if _, err := session.CaptureKVWithOptions(kv.CaptureOptions{BlockStartToken: -1}); err == nil {
+		t.Fatal("CaptureKVWithOptions accepted a negative block start")
+	}
+}
+
+func TestArchSessionKVBlockSource_Nil(t *testing.T) {
+	var session *ArchSession
+	if _, err := session.KVBlockSource(4, kv.CaptureOptions{}); err == nil {
+		t.Fatal("KVBlockSource accepted a nil session")
+	}
+}
+
+func TestArchSessionRangeKVBlocks_NilYield(t *testing.T) {
+	if err := (&ArchSession{}).RangeKVBlocks(4, kv.CaptureOptions{}, nil); err == nil {
+		t.Fatal("RangeKVBlocks accepted a nil yield function")
+	}
+}
+
+func TestArchSessionRestoreKV_NilSnapshot(t *testing.T) {
+	if err := (&ArchSession{}).RestoreKV(nil); err == nil {
+		t.Fatal("RestoreKV accepted a nil snapshot")
+	}
+}
+
 func TestNativeKVTokenRowsToLayerSlab_Good(t *testing.T) {
 	src := seededKVBytes(3*2*2*bf16Size, 17)
 	got := make([]byte, len(src))

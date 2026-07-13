@@ -80,6 +80,16 @@ func TestMTPReengageProbeCycleAbortsOnFullyRejected(t *testing.T) {
 	}
 }
 
+func TestMTPReengageProbeCycle_ClosedWindow(t *testing.T) {
+	r := &mtpReengage{probeLeft: 0, cooldown: 77}
+	if r.probeCycle(0, 10) {
+		t.Fatal("closed probe window requested a bail")
+	}
+	if r.cooldown != 77 || r.probeLeft != 0 {
+		t.Fatalf("closed probe mutated state: cooldown=%d probeLeft=%d", r.cooldown, r.probeLeft)
+	}
+}
+
 func TestMTPReengageProbeCycleNoEngageOnCycleOne(t *testing.T) {
 	// 60 tokens in 50ms = 1200 tok/s, far above any bar — but cycle 1 never
 	// engages on its own (burst bias); the window stays open instead.
@@ -174,6 +184,18 @@ func TestMTPReengageEngagedCycleHoldsAtOrAbovePlain(t *testing.T) {
 		if bail := r.engagedCycle(20, 0.1, i*20); bail {
 			t.Fatal("above-plain window must stay engaged")
 		}
+	}
+}
+
+func TestMTPReengageEngagedCycle_ZeroDurationWindow(t *testing.T) {
+	r := &mtpReengage{plainRate: 100}
+	for i := range len(r.winTok) {
+		if r.engagedCycle(1, 0, i+1) {
+			t.Fatal("zero-duration window must not trigger a rate exit")
+		}
+	}
+	if r.winN != len(r.winTok) {
+		t.Fatalf("engagedCycle recorded %d rows, want %d", r.winN, len(r.winTok))
 	}
 }
 

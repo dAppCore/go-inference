@@ -24,6 +24,13 @@ func TestMTPDiagBF16Stats_Ugly(t *testing.T) {
 	}
 }
 
+func TestMTPDiagBF16Stats_NaN(t *testing.T) {
+	got := mtpDiagBF16Stats([]byte{0xc1, 0x7f, 0x00, 0x40})
+	if got != "sum|x|=2.0 max|x|=2.000 nan=1 n=2" {
+		t.Fatalf("mtpDiagBF16Stats(NaN) = %q", got)
+	}
+}
+
 func TestMTPDecode_Bad(t *testing.T) {
 	if _, err := MTPDecode(nil, &ArchSession{}, []int32{3}, 1, -1, 1); err == nil {
 		t.Fatal("MTPDecode(nil target) error = nil")
