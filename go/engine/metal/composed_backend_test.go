@@ -6,13 +6,113 @@ package native
 
 import (
 	"math"
+	"os"
+	"slices"
 	"testing"
+	"time"
 
+	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/mamba2"
 	"dappco.re/go/inference/model/qwen3"
 	"dappco.re/go/inference/model/rwkv7"
 )
+
+const composedPrefillABDefaultDir = "/Users/snider/.cache/huggingface/hub/models--mlx-community--Qwen3.5-0.8B-OptiQ-4bit/snapshots/9affd71fc70de2bb08a666ac2d08a3fff5c858e0"
+
+// TestComposedLongPromptPrefillAB is the real-checkpoint receipt: batched prefill with the normal
+// composed hook family versus the exact binding state selected by LTHN_OPROJ_FUSE=0. It reports
+// prefill throughput for both arms and requires greedy continuation token identity. The checkpoint may
+// be overridden for another small composed model with LTHN_COMPOSED_AB_MODEL.
+func TestComposedLongPromptPrefillAB(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — composed GPU prefill receipt")
+	}
+	if err := ensureInit(); err != nil {
+		t.Skipf("Metal runtime unavailable — composed GPU prefill receipt: %v", err)
+	}
+	dir := os.Getenv("LTHN_COMPOSED_AB_MODEL")
+	if dir == "" {
+		dir = composedPrefillABDefaultDir
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Skipf("composed A/B checkpoint absent (%s)", dir)
+	}
+	tm, err := LoadTokenModelDir(dir, 1024)
+	if err != nil {
+		t.Fatalf("LoadTokenModelDir(%s): %v", dir, err)
+	}
+
+	const promptLen, maxNew = 256, 8
+	prompt := make([]int32, promptLen)
+	for i := range prompt {
+		prompt[i] = int32(16 + (i*37)%2048)
+	}
+	prefill := func(label string) (float64, ComposedHookCounts) {
+		sm, ok := tm.(model.SessionModel)
+		if !ok {
+			t.Fatalf("loaded model is %T, want model.SessionModel", tm)
+		}
+		sess, err := sm.OpenSession()
+		if err != nil {
+			t.Fatalf("OpenSession(%s): %v", label, err)
+		}
+		embs := make([][]byte, len(prompt))
+		for i, id := range prompt {
+			embs[i], err = tm.Embed(id)
+			if err != nil {
+				t.Fatalf("Embed(%s,%d): %v", label, id, err)
+			}
+		}
+		bp, ok := sess.(model.BatchPrefillStepper)
+		if !ok {
+			t.Fatalf("session %T lacks BatchPrefillStepper", sess)
+		}
+		receipts := EnableComposedHookReceipts()
+		start := time.Now()
+		if _, err := bp.PrefillBatch(embs); err != nil {
+			receipts.Close()
+			t.Fatalf("PrefillBatch(%s): %v", label, err)
+		}
+		elapsed := time.Since(start)
+		counts := receipts.Snapshot()
+		receipts.Close()
+		return float64(len(prompt)) / elapsed.Seconds(), counts
+	}
+
+	onTokS, onCounts := prefill("hooks-on")
+	onTokens, err := model.Generate(tm, prompt, maxNew, -1)
+	if err != nil {
+		t.Fatalf("Generate(hooks-on): %v", err)
+	}
+
+	// This is the runtime equivalent of init under LTHN_OPROJ_FUSE=0: the base projection-tail hook
+	// and every extension which depends on it are unbound; lower-level projection/QKV/MLP hooks remain.
+	savedTail, savedAttn, savedGD := composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPProjAttnInputDevice, composed.ResidualNormMLPProjGatedDeltaInputDevice
+	savedMamba, savedRWKV, savedHead := composed.ResidualNormMLPProjMamba2InputDevice, composed.ResidualNormMLPProjRWKV7InputDevice, composed.ResidualNormMLPProjHeadDevice
+	composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPProjAttnInputDevice, composed.ResidualNormMLPProjGatedDeltaInputDevice = nil, nil, nil
+	composed.ResidualNormMLPProjMamba2InputDevice, composed.ResidualNormMLPProjRWKV7InputDevice, composed.ResidualNormMLPProjHeadDevice = nil, nil, nil
+	defer func() {
+		composed.ResidualNormMLPProjDevice, composed.ResidualNormMLPProjAttnInputDevice, composed.ResidualNormMLPProjGatedDeltaInputDevice = savedTail, savedAttn, savedGD
+		composed.ResidualNormMLPProjMamba2InputDevice, composed.ResidualNormMLPProjRWKV7InputDevice, composed.ResidualNormMLPProjHeadDevice = savedMamba, savedRWKV, savedHead
+	}()
+	offTokS, offCounts := prefill("OPROJ_FUSE=0")
+	offTokens, err := model.Generate(tm, prompt, maxNew, -1)
+	if err != nil {
+		t.Fatalf("Generate(OPROJ_FUSE=0): %v", err)
+	}
+	if !slices.Equal(onTokens, offTokens) {
+		t.Fatalf("greedy output tokens differ: hooks-on=%v OPROJ_FUSE=0=%v", onTokens, offTokens)
+	}
+	if onCounts.AttentionInput.Prefill+onCounts.GatedDeltaFold.Prefill == 0 || onCounts.Head.Prefill == 0 {
+		t.Fatalf("hooks-on prefill did not engage composed folds: %+v", onCounts)
+	}
+	if offCounts.ProjectionTail.Prefill+offCounts.AttentionInput.Prefill+offCounts.GatedDeltaFold.Prefill+offCounts.Head.Prefill != 0 {
+		t.Fatalf("OPROJ_FUSE=0 arm engaged a disabled fold: %+v", offCounts)
+	}
+	t.Logf("composed long-prompt A/B (%d prompt tokens): hooks-on %.2f tok/s counts=%+v; OPROJ_FUSE=0 %.2f tok/s counts=%+v; output tokens identical=%v",
+		promptLen, onTokS, onCounts, offTokS, offCounts, onTokens)
+}
 
 // TestComposedPrefillBatchDeviceEngagement receipts the L>1 composed path itself, rather than calling
 // ComposedSession.Forward directly. L=16, D=128 and FF=512 put the dense tail exactly at the 1<<20 device
@@ -51,11 +151,13 @@ func TestComposedPrefillBatchDeviceEngagement(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name   string
-		layers []composed.Layer
+		name       string
+		layers     []composed.Layer
+		wantAttnIn uint64
+		wantGDIn   uint64
 	}{
-		{name: "attention", layers: []composed.Layer{attnLayer(20), attnLayer(40)}},
-		{name: "gated_delta", layers: []composed.Layer{attnLayer(60), gdLayer(80)}},
+		{name: "attention", layers: []composed.Layer{attnLayer(20), attnLayer(40)}, wantAttnIn: 1},
+		{name: "gated_delta", layers: []composed.Layer{attnLayer(60), gdLayer(80)}, wantGDIn: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &composed.ComposedModel{Embed: cbSyn(vocab*D, 1), NormF: cbSyn(D, 2), D: D, Vocab: vocab, Eps: 1e-6, Layers: tc.layers}
@@ -116,6 +218,7 @@ func TestComposedPrefillBatchDeviceEngagement(t *testing.T) {
 				}
 				return y, logits, err
 			}
+			receipts := EnableComposedHookReceipts()
 
 			stepper, err := tm.OpenSession()
 			if err != nil {
@@ -134,6 +237,27 @@ func TestComposedPrefillBatchDeviceEngagement(t *testing.T) {
 			if projTailCalls == 0 && (projCalls != 0 || mlpCalls != 0) {
 				t.Fatalf("successful folds reached superseded hooks: projection=%d mlp=%d, want 0,0", projCalls, mlpCalls)
 			}
+			prefill := receipts.Snapshot()
+			if prefill.AttentionInput.Prefill != tc.wantAttnIn || prefill.GatedDeltaFold.Prefill != tc.wantGDIn || prefill.Head.Prefill != 1 {
+				t.Fatalf("prefill hook receipt = attn-input:%d gated-delta-input:%d head:%d, want %d,%d,1; full=%+v",
+					prefill.AttentionInput.Prefill, prefill.GatedDeltaFold.Prefill, prefill.Head.Prefill, tc.wantAttnIn, tc.wantGDIn, prefill)
+			}
+			if prefill.AttentionInput.Decode != 0 || prefill.GatedDeltaFold.Decode != 0 || prefill.Head.Decode != 0 {
+				t.Fatalf("prefill contaminated decode counters: %+v", prefill)
+			}
+
+			// The same session's next single-token step is deliberately below the
+			// 1<<20 device floor (1*128*512), so it must leave the decode buckets at
+			// zero. Wider decode parity tests cover the engaged L=1 path.
+			if _, err := stepper.Step(embs[0]); err != nil {
+				t.Fatalf("decode Step after prefill: %v", err)
+			}
+			decode := receipts.Snapshot()
+			if decode.AttentionInput.Decode != 0 || decode.GatedDeltaFold.Decode != 0 || decode.Head.Decode != 0 {
+				t.Fatalf("sub-floor decode unexpectedly engaged hooks: %+v", decode)
+			}
+			t.Logf("hook receipt prefill=%+v decode=%+v", prefill, decode)
+			receipts.Close()
 
 			composed.ResidualNormMLPProjAttnInputDevice, composed.ResidualNormMLPProjGatedDeltaInputDevice, composed.ResidualNormMLPProjHeadDevice = nil, nil, nil
 			stepper, err = tm.OpenSession()
