@@ -175,7 +175,7 @@ func TestStepTokensBatchedDenseIntoWritesPinnedOutputRowsDirectly(t *testing.T) 
 	pinned := make([]*pinnedNoCopyBytes, K)
 	for i := range embs {
 		emb := toBF16Bytes(syntheticFloat32(dModel, i+1))
-		embs[i] = emb
+		embs[i] = append([]byte(nil), emb...)
 		pinned[i], err = newPinnedNoCopyBytes(dModel * bf16Size)
 		if err != nil {
 			t.Fatalf("newPinnedNoCopyBytes(%d): %v", i, err)
@@ -299,6 +299,247 @@ func TestStepTokensBatchedDenseSyncsLinearCacheAfterPagedStep(t *testing.T) {
 	}
 	for i := range K {
 		eqBytes(t, core.Sprintf("batched after paged row %d vs stepToken", i), batOut[i], seqOut[i])
+	}
+}
+
+// TestStepTokensBatchedDensePLE_Good pins the PLE wrapper itself, not just the
+// session prefill route that normally reaches it. The sequential PLE step is
+// the oracle: every batch row and every owner cache byte must match because
+// the wrapper promises the same per-row gate and cache mutation ordering.
+func TestStepTokensBatchedDensePLE_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	ids := []int32{3, 9, 17, 24}
+	control := newBatchedPLEBF16Fixture(t)
+	candidate := newBatchedPLEBF16Fixture(t)
+
+	want := make([][]byte, len(ids))
+	for i, id := range ids {
+		hidden, err := control.stepID(id)
+		if err != nil {
+			t.Fatalf("control stepID(%d): %v", id, err)
+		}
+		want[i] = append([]byte(nil), hidden...)
+	}
+
+	rowBytes := candidate.arch.Hidden * bf16Size
+	embs := make([][]byte, len(ids))
+	pinned := make([]*pinnedNoCopyBytes, len(ids))
+	for i, id := range ids {
+		emb, err := candidate.embed(id)
+		if err != nil {
+			t.Fatalf("candidate embed(%d): %v", id, err)
+		}
+		pinned[i], err = newPinnedNoCopyBytes(rowBytes)
+		if err != nil {
+			t.Fatalf("newPinnedNoCopyBytes(input %d): %v", i, err)
+		}
+		defer pinned[i].Close()
+		copy(pinned[i].bytes, emb)
+		embs[i] = pinned[i].bytes
+	}
+	pleSlab, err := candidate.pleSlabFor(ids, embs)
+	if err != nil {
+		t.Fatalf("pleSlabFor: %v", err)
+	}
+
+	var got [][]byte
+	var ok bool
+	withAutoreleasePool(func() {
+		got, ok, err = candidate.state.stepTokensBatchedDensePLE(embs, pleSlab, candidate.Pos())
+	})
+	if err != nil {
+		t.Fatalf("stepTokensBatchedDensePLE: %v", err)
+	}
+	if !ok {
+		t.Fatal("stepTokensBatchedDensePLE declined a complete bf16 PLE slab")
+	}
+	if candidate.Pos() != 0 {
+		t.Fatalf("direct state batch advanced session pos to %d, want 0", candidate.Pos())
+	}
+	if len(got) != len(want) {
+		t.Fatalf("stepTokensBatchedDensePLE returned %d rows, want %d", len(got), len(want))
+	}
+	for i := range got {
+		eqBytes(t, core.Sprintf("PLE batch row %d vs sequential", i), got[i], want[i])
+		// The implementation binds a registered pinned embedding directly. This
+		// checks the binding identity, rather than inferring it from the output.
+		if candidate.state.denseBatch.inputViewStack[i].buf == nil || candidate.state.denseBatch.inputViewStack[i].buf.GetID() != pinned[i].buf.GetID() {
+			t.Fatalf("PLE input row %d was not bound to its registered pinned buffer", i)
+		}
+	}
+	controlViews, err := control.stateLayerViews()
+	if err != nil {
+		t.Fatalf("control stateLayerViews: %v", err)
+	}
+	candidateViews, err := candidate.stateLayerViews()
+	if err != nil {
+		t.Fatalf("candidate stateLayerViews: %v", err)
+	}
+	if len(candidateViews) != len(controlViews) {
+		t.Fatalf("owner cache view count = %d, want %d", len(candidateViews), len(controlViews))
+	}
+	for li := range controlViews {
+		eqBytes(t, core.Sprintf("PLE layer %d K cache", li), candidateViews[li].keyBytes, controlViews[li].keyBytes)
+		eqBytes(t, core.Sprintf("PLE layer %d V cache", li), candidateViews[li].valueBytes, controlViews[li].valueBytes)
+	}
+}
+
+// TestStepTokensBatchedDenseIntoPLE_Good pins the final-layer direct-output
+// binding on the PLE path. The returned rows must alias the caller's pinned
+// buffers, while their bytes still equal independent sequential PLE steps.
+func TestStepTokensBatchedDenseIntoPLE_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	ids := []int32{6, 11, 29}
+	control := newBatchedPLEBF16Fixture(t)
+	candidate := newBatchedPLEBF16Fixture(t)
+
+	want := make([][]byte, len(ids))
+	for i, id := range ids {
+		hidden, err := control.stepID(id)
+		if err != nil {
+			t.Fatalf("control stepID(%d): %v", id, err)
+		}
+		want[i] = append([]byte(nil), hidden...)
+	}
+
+	rowBytes := candidate.arch.Hidden * bf16Size
+	embs := make([][]byte, len(ids))
+	for i, id := range ids {
+		emb, err := candidate.embed(id)
+		if err != nil {
+			t.Fatalf("candidate embed(%d): %v", id, err)
+		}
+		embs[i] = append([]byte(nil), emb...)
+	}
+	pleSlab, err := candidate.pleSlabFor(ids, embs)
+	if err != nil {
+		t.Fatalf("pleSlabFor: %v", err)
+	}
+	dstRows := make([][]byte, len(ids))
+	pinned := make([]*pinnedNoCopyBytes, len(ids))
+	for i := range dstRows {
+		pinned[i], err = newPinnedNoCopyBytes(rowBytes)
+		if err != nil {
+			t.Fatalf("newPinnedNoCopyBytes(output %d): %v", i, err)
+		}
+		defer pinned[i].Close()
+		dstRows[i] = pinned[i].bytes
+	}
+
+	var got [][]byte
+	var ok bool
+	withAutoreleasePool(func() {
+		got, ok, err = candidate.state.stepTokensBatchedDenseIntoPLE(embs, pleSlab, candidate.Pos(), dstRows)
+	})
+	if err != nil {
+		t.Fatalf("stepTokensBatchedDenseIntoPLE: %v", err)
+	}
+	if !ok {
+		t.Fatal("stepTokensBatchedDenseIntoPLE declined a complete bf16 PLE slab")
+	}
+	if len(got) != len(ids) {
+		t.Fatalf("stepTokensBatchedDenseIntoPLE returned %d rows, want %d", len(got), len(ids))
+	}
+	for i := range got {
+		if unsafe.Pointer(&got[i][0]) != unsafe.Pointer(&dstRows[i][0]) {
+			t.Fatalf("PLE output row %d did not reuse the caller's pinned backing", i)
+		}
+		if candidate.state.denseBatch.directOutRows[i] == nil || candidate.state.denseBatch.directOutRows[i].GetID() != pinned[i].buf.GetID() {
+			t.Fatalf("PLE output row %d was not bound to its registered pinned buffer", i)
+		}
+		eqBytes(t, core.Sprintf("PLE direct output row %d vs sequential", i), got[i], want[i])
+	}
+}
+
+// TestStepTokensBatchedDenseNoResultPLE_Good pins the no-readback PLE route:
+// it still has to mutate exactly the same owner caches and publish K final rows
+// for the direct-head caller, despite deliberately returning no hidden slices.
+func TestStepTokensBatchedDenseNoResultPLE_Good(t *testing.T) {
+	requireNativeRuntime(t)
+	ids := []int32{2, 21, 14}
+	control := newBatchedPLEBF16Fixture(t)
+	candidate := newBatchedPLEBF16Fixture(t)
+
+	for _, id := range ids {
+		if _, err := control.stepID(id); err != nil {
+			t.Fatalf("control stepID(%d): %v", id, err)
+		}
+	}
+	embs := make([][]byte, len(ids))
+	for i, id := range ids {
+		emb, err := candidate.embed(id)
+		if err != nil {
+			t.Fatalf("candidate embed(%d): %v", id, err)
+		}
+		embs[i] = emb
+	}
+	pleSlab, err := candidate.pleSlabFor(ids, embs)
+	if err != nil {
+		t.Fatalf("pleSlabFor: %v", err)
+	}
+
+	var ok bool
+	withAutoreleasePool(func() {
+		ok, err = candidate.state.stepTokensBatchedDenseNoResultPLE(embs, pleSlab, candidate.Pos())
+	})
+	if err != nil {
+		t.Fatalf("stepTokensBatchedDenseNoResultPLE: %v", err)
+	}
+	if !ok {
+		t.Fatal("stepTokensBatchedDenseNoResultPLE declined a complete bf16 PLE slab")
+	}
+	if candidate.state.denseBatch.lastK != len(ids) || candidate.state.denseBatch.lastRows == nil {
+		t.Fatalf("no-result PLE batch did not publish %d final rows (lastK=%d rows=%v)", len(ids), candidate.state.denseBatch.lastK, candidate.state.denseBatch.lastRows != nil)
+	}
+	controlViews, err := control.stateLayerViews()
+	if err != nil {
+		t.Fatalf("control stateLayerViews: %v", err)
+	}
+	candidateViews, err := candidate.stateLayerViews()
+	if err != nil {
+		t.Fatalf("candidate stateLayerViews: %v", err)
+	}
+	for li := range controlViews {
+		eqBytes(t, core.Sprintf("no-result PLE layer %d K cache", li), candidateViews[li].keyBytes, controlViews[li].keyBytes)
+		eqBytes(t, core.Sprintf("no-result PLE layer %d V cache", li), candidateViews[li].valueBytes, controlViews[li].valueBytes)
+	}
+}
+
+// TestStepTokensBatchedDensePLE_Bad derives its failure from the layer-major
+// contract: a one-row, one-layer PLE state needs exactly pliDim bf16 values.
+// A shorter slab must fail before any command buffer can encode a partial gate.
+func TestStepTokensBatchedDensePLE_Bad(t *testing.T) {
+	state := &archDecodeState{
+		specs:  []model.LayerSpec{{}},
+		ple:    []pleLayer{{}},
+		dModel: 1,
+		pliDim: 1,
+	}
+	_, ok, err := state.stepTokensBatchedDensePLE([][]byte{{0, 0}}, []byte{0}, 0)
+	if err == nil {
+		t.Fatal("stepTokensBatchedDensePLE accepted a PLE slab shorter than one layer row")
+	}
+	if ok {
+		t.Fatal("stepTokensBatchedDensePLE reported ok with a malformed PLE slab")
+	}
+}
+
+// TestStepTokensBatchedDensePLE_Ugly pins the deliberate decline rather than
+// guessing at a fallback: an otherwise PLE-shaped state without a host or
+// device slab returns !ok and no error, leaving sequential stepping authoritative.
+func TestStepTokensBatchedDensePLE_Ugly(t *testing.T) {
+	state := &archDecodeState{
+		specs:  []model.LayerSpec{{}},
+		ple:    []pleLayer{{}},
+		dModel: 1,
+		pliDim: 1,
+	}
+	_, ok, err := state.stepTokensBatchedDensePLE([][]byte{{0, 0}}, nil, 0)
+	if err != nil {
+		t.Fatalf("stepTokensBatchedDensePLE without a slab: %v", err)
+	}
+	if ok {
+		t.Fatal("stepTokensBatchedDensePLE accepted a PLE arch without a slab")
 	}
 }
 
