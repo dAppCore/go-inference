@@ -1,3 +1,54 @@
+# NEXT WAKE (2026-07-16 — continuity×CB audited + wired: the continuation handoff)
+
+## 2026-07-16 (continuity×CB — audit findings + the routing fix)
+
+- THE AUDIT FACT: with -scheduler interleave on a renderer model,
+  cbEligible took EVERY text-only chat → the engine-level continuity
+  interceptor (SetChatInterceptor, engine Chat offers text turns to it
+  first) NEVER fired. State store idled, every turn re-paid full
+  prefill (12s/turn at 32K per the continuity package's own numbers),
+  boot notice still said "continuity ON". Silent loss, not wrong
+  tokens — CB full-prefill is always token-correct.
+- THE FIX (the continuation handoff): engine.TextModel gained
+  ChatInterceptorInstalled(); the scheduler probes it via inference.As
+  at CB bind (cbChatInterceptProbe, cached like cbRender — the
+  INSTALLED state is read per request, atomic, so a late continuity
+  attach still routes). cbEligible now declines a CONTINUATION-shaped
+  chat (a prior assistant/model turn) when an interceptor is installed
+  → it rides plain interleave → base.Chat → interceptor → wake+append.
+  Fresh chats stay on CB (continuity would pay the identical full
+  prefill anyway; lanes batch it). A conversation whose turn 1 rode CB
+  pays ONE catch-up prefill at turn 2 (continuity misses, prefills the
+  whole history, sleeps), then appends forever.
+- GATES: TestCBStepContinuationHandsOffToContinuity (fresh+interceptor
+  → lane; continuation+interceptor → plain Chat; continuation without
+  interceptor → lane, the pre-handoff contract) +
+  TestModel_ChatInterceptorInstalled_Good. Full module 12888/0.
+- LIVE RECEIPT (26B ctx4096, -scheduler interleave, continuity default
+  on; the 3-turn staircase from usage.prompt_tokens — continuity
+  reports tokens ACTUALLY prefilled): turn1 fresh 2011 toks 3.84s (CB
+  lane) → turn2 first continuation 2030 toks 1.56s (the one-time
+  catch-up — ALSO proves turn1 didn't write state) → turn3 25 toks
+  0.58s (resident wake, tail-only append despite the longest history),
+  fact recall through slept KV intact ("Wombat"→"Marsupial"). Fresh-
+  chat K-sweep with continuity attached: 108.7 / 129.7 / 150.3±0.0 /
+  157 — the CB signature (tight rounds), no regression.
+- CONCURRENCY NOTE (audited, no change needed): plain interleave runs
+  each admitted source on its OWN goroutine (up to concurrency), so
+  concurrent engine session decodes already exist on that path — the
+  same shape a no-scheduler serve runs at K=8 live. Continuity turns on
+  the plain route + CB lanes = independent ArchSessions submitting to
+  the same queue, the proven-live pattern.
+- BANKED SEAM GAP (separate rung): the scheduler facade's opts→
+  SamplerConfig fold DROPS EnableThinking on BOTH routes (ScheduledRequest
+  carries no field for it) — a vLLM-convention enable_thinking override
+  never survives -scheduler. Fix shape: field on ScheduledRequest +
+  fold both directions + a WithThinking render for CB.
+- REMAINDER ON #385: welfare×CB audit (the last default-on gate),
+  admission overlap (TTFT under load), CB lane metric durations,
+  parallel host sample tails (~+3-5%), K≥8 batched-tail re-check,
+  the EnableThinking seam above.
+
 # NEXT WAKE (2026-07-16 — sampled batches in; the sampled residual is structural)
 
 ## 2026-07-16 (sampled Phase-1 batches — 5afe1db, pushed)
