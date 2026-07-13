@@ -1,3 +1,34 @@
+# NEXT WAKE (2026-07-16 — EnableThinking seam closed: #385 / goinf #35 COMPLETE)
+
+## 2026-07-16 (the EnableThinking seam — the batching task's last item)
+
+- THE SEAM: the facade's opts→SamplerConfig fold cannot hold
+  EnableThinking, so a reasoning override (vLLM enable_thinking /
+  reasoning_effort:none) silently died on BOTH scheduler routes.
+  (ThinkingBudget checked too: INERT — no decode path consumes it, only
+  the API surface carries it. Nothing real lost there.)
+- THE FIX: ScheduledRequest.EnableThinking *bool; the facade Chat fold
+  and the compat mux builder lift it; the plain interleave route re-arms
+  it as WithEnableThinking (engine Chat frames it, continuity keys by
+  it); the CB route renders through the new cbThinkingRenderer probe
+  (FormatChatPromptWithThinking — nil flag ≡ FormatChatPrompt by
+  construction). An override WITHOUT the thinking renderer declines CB
+  (cbEligible) and is served correctly on the plain path.
+- GATES: TestCBStepThinkingOverride — (a) override + thinking renderer
+  rides CB, the lane prompt IS the override's framing, the renderer
+  receives the flag; (b) via the FACADE's Chat end to end: override
+  without the renderer declines CB and base.Chat receives the re-armed
+  flag. -race ×3. Serving tree 2343/0; module 12898/0.
+- LIVE (26B, -scheduler interleave, enable_thinking:true): pre-fix
+  prompt_tokens 16 (== default — dropped); post-fix 19 (the <|think|>
+  switch rendered). enable_thinking:false ≡ default on this checkpoint
+  (correct: its default is non-thinking, no ghost suppressor).
+- #385 / goinf #35 IS COMPLETE. The scheduler serves: greedy + sampled
+  CB (byte-identical, deterministic), continuity handoff, admission
+  overlap, honest usage + timings, thinking overrides, welfare-by-policy.
+  Final live state (26B ctx4096, salted): greedy K=1/2/4/8 =
+  107/143/173/196 aggregate; sampled t0.7/k40 K=4/8 = 137/159.
+
 # NEXT WAKE (2026-07-16 — parallel host sample tails: +2%, the sampled lever spent)
 
 ## 2026-07-16 (parallel host sample tails)
