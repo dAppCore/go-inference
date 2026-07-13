@@ -2,7 +2,10 @@
 
 package engine
 
-import "dappco.re/go/inference"
+import (
+	core "dappco.re/go"
+	"dappco.re/go/inference"
+)
 
 // sampling_defaults.go is the sampling sibling of the generation_config stop
 // set (StopTokenDeclarer, model.go): HF checkpoints ship generation_config.json
@@ -26,6 +29,53 @@ type SamplingDefaults struct {
 	TopK           *int
 	MinP           *float32
 	SuppressTokens []int32
+}
+
+// generationConfigSampling is the on-the-wire shape of generation_config.json's
+// sampling block — the do_sample/temperature/top_p/top_k/min_p/suppress_tokens
+// siblings of the eos_token_id stop set. Pointer fields recover "the file
+// declared this key" (json.Unmarshal only allocates a target when the key is
+// present), which is exactly the non-nil-vs-nil signal [SamplingDefaults]
+// carries. Across the observed HF checkpoints (mlx-community gemma4 / Qwen3.5
+// snapshots) none of these fields ship in the scalar-or-array dual form
+// eos_token_id does, so plain typed fields suffice — no any-typed switch needed.
+// min_p ships in the Qwen3.5 configs as 0.0; that declared 0.0 folds onto an
+// unset request as a no-op ([SamplingDefaults.Apply]).
+type generationConfigSampling struct {
+	DoSample       *bool    `json:"do_sample"`
+	Temperature    *float32 `json:"temperature"`
+	TopP           *float32 `json:"top_p"`
+	TopK           *int     `json:"top_k"`
+	MinP           *float32 `json:"min_p"`
+	SuppressTokens []int32  `json:"suppress_tokens"`
+}
+
+// ParseGenerationConfigSampling parses generation_config.json bytes into the
+// checkpoint's declared [SamplingDefaults]. It is the single, engine-owned home
+// of the parse so every backend (engine/metal, engine/hip) folds the same
+// generation_config.json shape rather than re-deriving the pointer-presence
+// semantics per-engine — the parse belongs beside the type it produces
+// (lib-never-imports-consumer: the engine package owns [SamplingDefaults], the
+// backends consume this). A field absent from the file, or the whole file
+// unparseable, comes back as that field's zero value (nil pointer / nil slice) —
+// "the file said nothing", never "the file said zero".
+//
+// It reads bytes only; locating and reading generation_config.json from a
+// checkpoint directory is the backend's concern (the engine package does no file
+// I/O), so each engine keeps the thin ReadFile shell that feeds this.
+func ParseGenerationConfigSampling(data []byte) SamplingDefaults {
+	var cfg generationConfigSampling
+	if r := core.JSONUnmarshal(data, &cfg); !r.OK {
+		return SamplingDefaults{}
+	}
+	return SamplingDefaults{
+		DoSample:       cfg.DoSample,
+		Temperature:    cfg.Temperature,
+		TopP:           cfg.TopP,
+		TopK:           cfg.TopK,
+		MinP:           cfg.MinP,
+		SuppressTokens: cfg.SuppressTokens,
+	}
 }
 
 // Apply folds these declared defaults into a request's resolved GenerateConfig

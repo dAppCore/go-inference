@@ -27,21 +27,34 @@ import (
 	"dappco.re/go/inference/engine"
 )
 
-var _ engine.TokenModel = (*hipTokenModel)(nil)
+var (
+	_ engine.TokenModel               = (*hipTokenModel)(nil)
+	_ engine.SamplingDefaultsDeclarer = (*hipTokenModel)(nil)
+)
 
 // hipTokenModel wraps a loaded Gemma4-Q4 hip model as the shared
 // engine.TokenModel: OpenEngineSession opens a retained hipEngineSession (the
 // engine.Session the shared adapters drive), and Close releases the resident
-// weights.
+// weights. declaredSampling carries the checkpoint's generation_config sampling
+// intent, parsed once at load, which engine.TextModel folds into each request
+// (engine.SamplingDefaultsDeclarer — see generation_config.go).
 type hipTokenModel struct {
-	loaded    *hipLoadedModel
-	tokenizer *tokenizer.Tokenizer
-	modelType string
+	loaded           *hipLoadedModel
+	tokenizer        *tokenizer.Tokenizer
+	modelType        string
+	declaredSampling engine.SamplingDefaults
 }
 
-// newHipTokenModel binds a loaded model + tokenizer as an engine.TokenModel.
+// newHipTokenModel binds a loaded model + tokenizer as an engine.TokenModel,
+// parsing the checkpoint's generation_config sampling defaults from the loaded
+// model's directory so DeclaredSamplingDefaults reports the model's declared
+// intent (the zero value when the file is absent or declares none).
 func newHipTokenModel(loaded *hipLoadedModel, tok *tokenizer.Tokenizer, modelType string) *hipTokenModel {
-	return &hipTokenModel{loaded: loaded, tokenizer: tok, modelType: modelType}
+	m := &hipTokenModel{loaded: loaded, tokenizer: tok, modelType: modelType}
+	if loaded != nil {
+		m.declaredSampling = loadGenerationConfigSamplingDefaults(loaded.modelPath)
+	}
+	return m
 }
 
 // OpenEngineSession opens a fresh retained Gemma4-Q4 decode session as the

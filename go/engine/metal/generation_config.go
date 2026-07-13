@@ -70,48 +70,13 @@ func (m *NativeTokenModel) DeclaredStopTokens() []int32 {
 	return m.declaredStops
 }
 
-// generationConfigSampling is the on-the-wire shape of generation_config.json's
-// sampling block — the do_sample/temperature/top_p/top_k/min_p/suppress_tokens
-// siblings of eos_token_id above. Pointer fields recover "the file declared
-// this key" (json.Unmarshal only allocates a target when the key is present),
-// distinct from a request's separate unset-vs-zero problem (see
-// engine.SamplingDefaultsDeclarer). Unlike eos_token_id, none of these fields
-// are documented or observed (across the cached mlx-community gemma4/Qwen3.5
-// snapshots) to ship in a scalar-or-array dual form, so plain typed fields
-// suffice — no any-typed switch needed. min_p ships in the Qwen3.5 configs
-// (as 0.0); it carries the same zero-ambiguity as top_p/top_k, so a declared
-// 0.0 folds onto an unset request as a no-op (min-p disabled either way).
-type generationConfigSampling struct {
-	DoSample       *bool    `json:"do_sample"`
-	Temperature    *float32 `json:"temperature"`
-	TopP           *float32 `json:"top_p"`
-	TopK           *int     `json:"top_k"`
-	MinP           *float32 `json:"min_p"`
-	SuppressTokens []int32  `json:"suppress_tokens"`
-}
-
-// generationConfigSamplingDefaults parses generation_config.json bytes for the
-// checkpoint's declared sampling intent. A field absent from the file, or the
-// whole file unparseable, comes back as that field's zero value (nil pointer /
-// nil slice) — "the file said nothing", never "the file said zero".
-func generationConfigSamplingDefaults(data []byte) engine.SamplingDefaults {
-	var cfg generationConfigSampling
-	if r := core.JSONUnmarshal(data, &cfg); !r.OK {
-		return engine.SamplingDefaults{}
-	}
-	return engine.SamplingDefaults{
-		DoSample:       cfg.DoSample,
-		Temperature:    cfg.Temperature,
-		TopP:           cfg.TopP,
-		TopK:           cfg.TopK,
-		MinP:           cfg.MinP,
-		SuppressTokens: cfg.SuppressTokens,
-	}
-}
-
 // loadGenerationConfigSamplingDefaults reads dir/generation_config.json and
 // returns its declared sampling defaults, or the zero value when the file is
-// absent — the same soft-optional convention as loadGenerationConfigStops.
+// absent — the same soft-optional convention as loadGenerationConfigStops. The
+// byte-level parse (the pointer-presence semantics, the scalar-eos-beside-
+// suppress_tokens shape) lives in the shared engine package so engine/metal and
+// engine/hip fold the identical generation_config.json shape; this shell only
+// locates and reads the file (the engine package does no file I/O).
 func loadGenerationConfigSamplingDefaults(dir string) engine.SamplingDefaults {
 	read := core.ReadFile(core.PathJoin(dir, "generation_config.json"))
 	if !read.OK {
@@ -121,7 +86,7 @@ func loadGenerationConfigSamplingDefaults(dir string) engine.SamplingDefaults {
 	if !ok {
 		return engine.SamplingDefaults{}
 	}
-	return generationConfigSamplingDefaults(data)
+	return engine.ParseGenerationConfigSampling(data)
 }
 
 // DeclaredSamplingDefaults reports the checkpoint's generation_config sampling
