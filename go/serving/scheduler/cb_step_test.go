@@ -6,6 +6,7 @@ import (
 	"context"
 	"iter"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 
@@ -253,7 +254,9 @@ func TestCBStepCoordinatorBatchesRequests(t *testing.T) {
 // fake batches: a chat request is served by the plain interleave path (no lane
 // admitted), and an unavailable capability leaves cbEngine unbuilt entirely.
 func TestCBStepFallbackForChatAndUnavailable(t *testing.T) {
-	// Chat request → interleave fallback (the CB path needs a raw prompt).
+	// Chat request against a RENDERER-LESS model → interleave fallback (the CB
+	// chat route needs the model's FormatChatPrompt capability; this fake has
+	// none, so its chat turns keep the plain path).
 	sim := newSimLaneSet()
 	model := &cbCapableModel{sim: sim, available: true, chatSeq: []inference.Token{{ID: 7}, {ID: 8}}}
 	sched, err := New(model, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 4})
@@ -286,6 +289,122 @@ func TestCBStepFallbackForChatAndUnavailable(t *testing.T) {
 	defer sched2.CloseEngine()
 	if sched2.cbEngine != nil {
 		t.Fatal("cbEngine must be nil when the capability is unavailable")
+	}
+}
+
+// cbChatCapableModel is cbCapableModel plus the chat renderer + stop resolver
+// capabilities the CB chat route probes (engine.TextModel's shape).
+type cbChatCapableModel struct {
+	cbCapableModel
+}
+
+func (m *cbChatCapableModel) FormatChatPrompt(messages []inference.Message) string {
+	out := "R"
+	for _, msg := range messages {
+		out += "|" + msg.Role + ":" + msg.Content
+	}
+	return out
+}
+
+func (m *cbChatCapableModel) ResolvedStopTokens(requestStops []int32) []int32 {
+	return append(append([]int32(nil), requestStops...), 99) // 99 = the fake's EOS
+}
+
+// TestCBStepChatRequestRidesLaneSet proves a TEXT-ONLY chat turn rides the
+// continuous-batching path when the model exposes the chat renderer: the lane's
+// prompt is Encode(FormatChatPrompt(messages)) — the model's own template
+// string — and its stop set is the FULL resolution (request stops + the
+// model's own), so the lane terminates exactly where the plain path would.
+func TestCBStepChatRequestRidesLaneSet(t *testing.T) {
+	sim := newSimLaneSet()
+	model := &cbChatCapableModel{cbCapableModel{sim: sim, available: true}}
+	sched, err := New(model, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 4})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sched.CloseEngine()
+
+	msgs := []inference.Message{{Role: "user", Content: "hi"}}
+	_, ch, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+		ID:       "chat-cb",
+		Messages: msgs,
+		Sampler:  inference.SamplerConfig{MaxTokens: 2, StopTokens: []int32{41}},
+	})
+	if err != nil {
+		t.Fatalf("Schedule(chat): %v", err)
+	}
+	ids := collectStream(ch)
+	if len(ids) != 2 {
+		t.Fatalf("chat request should stream 2 scripted tokens via the lane set, got %v", ids)
+	}
+	if sim.prepareCalls != 1 {
+		t.Fatalf("text-only chat with a renderer must admit exactly one CB lane, got %d prepares", sim.prepareCalls)
+	}
+	spec := sim.specs[0]
+	wantIDs := model.Encode(model.FormatChatPrompt(msgs))
+	if !slices.Equal(spec.PromptIDs, wantIDs) {
+		t.Fatalf("lane prompt must be the rendered template's tokens: got %v want %v", spec.PromptIDs, wantIDs)
+	}
+	if !slices.Equal(spec.StopTokens, []int32{41, 99}) {
+		t.Fatalf("lane stops must be the FULL resolution (request + model): got %v want [41 99]", spec.StopTokens)
+	}
+}
+
+// TestCBStepMultimodalChatFallsBack proves a chat turn carrying media keeps the
+// plain interleave path even when the renderer capability is present — the CB
+// route serves text-only turns.
+func TestCBStepMultimodalChatFallsBack(t *testing.T) {
+	sim := newSimLaneSet()
+	model := &cbChatCapableModel{cbCapableModel{sim: sim, available: true, chatSeq: []inference.Token{{ID: 7}}}}
+	sched, err := New(model, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 4})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sched.CloseEngine()
+
+	_, ch, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+		ID:       "chat-img",
+		Messages: []inference.Message{{Role: "user", Content: "what is this", Images: [][]byte{{1, 2, 3}}}},
+	})
+	if err != nil {
+		t.Fatalf("Schedule(multimodal chat): %v", err)
+	}
+	ids := collectStream(ch)
+	if len(ids) != 1 || ids[0] != 7 {
+		t.Fatalf("multimodal chat should stream via interleave fallback, got %v", ids)
+	}
+	if sim.prepareCalls != 0 {
+		t.Fatalf("multimodal chat must NOT admit a CB lane, got %d prepares", sim.prepareCalls)
+	}
+}
+
+// TestCBStepRawStopsResolved proves the raw-prompt CB route ALSO arms the full
+// stop resolution when the model exposes it — a raw lane terminates on the
+// model's EOS exactly as the plain Generate path does, not only on request
+// stops.
+func TestCBStepRawStopsResolved(t *testing.T) {
+	sim := newSimLaneSet()
+	model := &cbChatCapableModel{cbCapableModel{sim: sim, available: true}}
+	sched, err := New(model, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 4})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sched.CloseEngine()
+
+	_, ch, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+		ID:      "raw-stops",
+		Prompt:  "abc",
+		Sampler: inference.SamplerConfig{MaxTokens: 1},
+	})
+	if err != nil {
+		t.Fatalf("Schedule(raw): %v", err)
+	}
+	collectStream(ch)
+	if sim.prepareCalls != 1 {
+		t.Fatalf("raw request must admit one CB lane, got %d prepares", sim.prepareCalls)
+	}
+	if !slices.Equal(sim.specs[0].StopTokens, []int32{99}) {
+		t.Fatalf("raw lane stops must carry the model's resolved set: got %v want [99]", sim.specs[0].StopTokens)
 	}
 }
 

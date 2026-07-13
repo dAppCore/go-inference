@@ -147,9 +147,33 @@ type Model struct {
 	// when the base model exposes an AVAILABLE inference.BatchStepModel (metal's
 	// multi-session owner) AND an inference.TokenizerModel to tokenise prompts.
 	// When nil (the common case, and whenever LTHN_CB_STEP=0), interleave mode is
-	// byte-for-byte the plain per-request engine below. CB-eligible requests
-	// (raw prompt, greedy) route here; chat and non-greedy fall to m.inter.
+	// byte-for-byte the plain per-request engine below. Raw-prompt requests
+	// (greedy or sampled) route here; a text-only chat turn routes here too when
+	// the model exposes cbChatRenderer; everything else falls to m.inter.
 	cbEngine *cbStepEngine
+
+	// cbRender renders a chat turn to the model's own template string (the
+	// engine TextModel's FormatChatPrompt — byte-identical to what Chat itself
+	// encodes on the scheduler path, where EnableThinking is never set). nil =
+	// chat turns keep the plain interleave path.
+	cbRender cbChatRenderer
+	// cbStops resolves the FULL per-generation stop set (request stops + EOS +
+	// turn-close + template + checkpoint-declared — engine
+	// TextModel.ResolvedStopTokens) so a lane terminates exactly where the
+	// plain path would. nil = lanes see only the request's own stop tokens.
+	cbStops cbStopResolver
+}
+
+// cbChatRenderer is the optional chat-template capability the CB path probes
+// (engine.TextModel.FormatChatPrompt satisfies it).
+type cbChatRenderer interface {
+	FormatChatPrompt(messages []inference.Message) string
+}
+
+// cbStopResolver is the optional stop-resolution capability the CB path probes
+// (engine.TextModel.ResolvedStopTokens satisfies it).
+type cbStopResolver interface {
+	ResolvedStopTokens(requestStops []int32) []int32
 }
 
 // probeSinkBox wraps the sink interface so it can be stored in an
@@ -220,6 +244,14 @@ func New(model inference.TextModel, cfg Config) (*Model, error) {
 				m.cbEngine = newCBStepEngine(bsm, cfg)
 			}
 		}
+		if m.cbEngine != nil {
+			if r, ok := m.base.(cbChatRenderer); ok {
+				m.cbRender = r
+			}
+			if s, ok := m.base.(cbStopResolver); ok {
+				m.cbStops = s
+			}
+		}
 	default: // serial
 		m.queue = make(chan *job, max(cfg.MaxQueue, 0))
 		m.closeCh = make(chan struct{})
@@ -258,7 +290,7 @@ func (m *Model) Schedule(ctx context.Context, req inference.ScheduledRequest) (i
 	case ModeBatch:
 		return m.scheduleBatch(ctx, req)
 	case ModeInterleave:
-		if m.cbEngine != nil && cbEligible(req) {
+		if m.cbEngine != nil && m.cbEligible(req) {
 			return m.scheduleCBStep(ctx, req)
 		}
 		return m.scheduleInterleave(ctx, req)

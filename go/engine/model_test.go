@@ -1036,6 +1036,23 @@ func TestStopTokens(t *testing.T) {
 	}
 }
 
+// TestResolvedStopTokens pins the exported serve-facing stop resolution (the
+// CB-step coordinator's capability): identical to the internal per-generation
+// set — request stops first, then the model-derived defaults.
+func TestResolvedStopTokens(t *testing.T) {
+	m := &TextModel{tok: newFixtureTokenizer(t)}
+	got := m.ResolvedStopTokens([]int32{99})
+	want := m.stopTokens(inference.GenerateConfig{StopTokens: []int32{99}})
+	if len(got) != len(want) {
+		t.Fatalf("ResolvedStopTokens = %v, want %v (the plain path's own resolution)", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("ResolvedStopTokens = %v, want %v (the plain path's own resolution)", got, want)
+		}
+	}
+}
+
 // TestStopTokensNoTokenizer pins the nil-tokenizer edge: with no tokenizer to
 // ask, only the caller-supplied stop tokens are honoured.
 func TestStopTokensNoTokenizer(t *testing.T) {
