@@ -6,6 +6,8 @@ package native
 
 import (
 	"math"
+	"os"
+	"path/filepath"
 	"slices"
 
 	g4 "dappco.re/go/inference/model/gemma4"
@@ -2465,6 +2467,352 @@ func TestAssistantPairGenerateSampledFromSessionCommitsReplacementStop(t *testin
 	}
 	if target.Pos() != ref.Pos() {
 		t.Fatalf("target Pos after sampled replacement stop = %d, want reference %d", target.Pos(), ref.Pos())
+	}
+}
+
+// TestAssistantPairGenerateFromSessionEachRejectsInvalidInputs covers the
+// greedy loop's argument guards, dark until now because every other test hands
+// it a well-formed call. Each check drives one guard in source order: nil
+// target, empty prompt, non-positive maxNew, a session built for a different
+// backbone (validateTargetSessionArch), and a prompt longer than the session's
+// cache rows (prepareAssistantPrompt). The nil-pair guard is exercised
+// elsewhere and left alone here.
+func TestAssistantPairGenerateFromSessionEachRejectsInvalidInputs(t *testing.T) {
+	requireNativeRuntime(t)
+	pair, mk := newNativeAssistantGenerateFixture(t)
+	defer pair.Close()
+	const draftTokens = 2
+	prompt := []int32{1, 5, 3}
+
+	if _, err := pair.GenerateFromSessionEach(nil, prompt, 4, -1, draftTokens, nil, nil); err == nil || !core.Contains(err.Error(), "target session is nil") {
+		t.Fatalf("nil target err = %v, want target-session-nil", err)
+	}
+	if _, err := pair.GenerateFromSessionEach(mk(), nil, 4, -1, draftTokens, nil, nil); err == nil || !core.Contains(err.Error(), "prompt tokens are required") {
+		t.Fatalf("empty prompt err = %v, want prompt-required", err)
+	}
+	if _, err := pair.GenerateFromSessionEach(mk(), prompt, 0, -1, draftTokens, nil, nil); err == nil || !core.Contains(err.Error(), "maxNew must be > 0") {
+		t.Fatalf("non-positive maxNew err = %v, want maxNew-positive", err)
+	}
+	mismatched := mk()
+	mismatched.arch.Hidden = pair.TargetArch.Hidden / 2 // as if built for a narrower model
+	if _, err := pair.GenerateFromSessionEach(mismatched, prompt, 4, -1, draftTokens, nil, nil); err == nil || !core.Contains(err.Error(), "hidden_size") {
+		t.Fatalf("arch mismatch err = %v, want hidden_size mismatch", err)
+	}
+	tooLong := make([]int32, mk().maxLen+1)
+	if _, err := pair.GenerateFromSessionEach(mk(), tooLong, 4, -1, draftTokens, nil, nil); err == nil || !core.Contains(err.Error(), "exceed maxLen") {
+		t.Fatalf("over-long prompt err = %v, want maxLen exceeded", err)
+	}
+}
+
+// TestAssistantPairGenerateSampledFromSessionEachRejectsInvalidInputs is the
+// sampled twin, plus the nil-sampler guard that lane carries (the target
+// sampler decides every committed token, so a nil one is fatal). Same source
+// order: nil target, nil sampler, empty prompt, non-positive maxNew, arch
+// mismatch, over-long prompt.
+func TestAssistantPairGenerateSampledFromSessionEachRejectsInvalidInputs(t *testing.T) {
+	requireNativeRuntime(t)
+	pair, mk := newNativeAssistantGenerateFixture(t)
+	defer pair.Close()
+	const draftTokens = 2
+	prompt := []int32{1, 5, 3}
+	params := model.SampleParams{}
+	sampler := model.NewSampler(1)
+
+	if _, err := (*AssistantPair)(nil).GenerateSampledFromSessionEach(mk(), prompt, 4, nil, sampler, params, draftTokens, nil); err == nil || !core.Contains(err.Error(), "requires a validated pair") {
+		t.Fatalf("nil pair err = %v, want requires-validated-pair", err)
+	}
+	if _, err := pair.GenerateSampledFromSessionEach(nil, prompt, 4, nil, sampler, params, draftTokens, nil); err == nil || !core.Contains(err.Error(), "target session is nil") {
+		t.Fatalf("nil target err = %v, want target-session-nil", err)
+	}
+	if _, err := pair.GenerateSampledFromSessionEach(mk(), prompt, 4, nil, nil, params, draftTokens, nil); err == nil || !core.Contains(err.Error(), "sampler is nil") {
+		t.Fatalf("nil sampler err = %v, want sampler-nil", err)
+	}
+	if _, err := pair.GenerateSampledFromSessionEach(mk(), nil, 4, nil, sampler, params, draftTokens, nil); err == nil || !core.Contains(err.Error(), "prompt tokens are required") {
+		t.Fatalf("empty prompt err = %v, want prompt-required", err)
+	}
+	if _, err := pair.GenerateSampledFromSessionEach(mk(), prompt, 0, nil, sampler, params, draftTokens, nil); err == nil || !core.Contains(err.Error(), "maxNew must be > 0") {
+		t.Fatalf("non-positive maxNew err = %v, want maxNew-positive", err)
+	}
+	mismatched := mk()
+	mismatched.arch.Hidden = pair.TargetArch.Hidden / 2
+	if _, err := pair.GenerateSampledFromSessionEach(mismatched, prompt, 4, nil, sampler, params, draftTokens, nil); err == nil || !core.Contains(err.Error(), "hidden_size") {
+		t.Fatalf("arch mismatch err = %v, want hidden_size mismatch", err)
+	}
+	tooLong := make([]int32, mk().maxLen+1)
+	if _, err := pair.GenerateSampledFromSessionEach(mk(), tooLong, 4, nil, sampler, params, draftTokens, nil); err == nil || !core.Contains(err.Error(), "exceed maxLen") {
+		t.Fatalf("over-long prompt err = %v, want maxLen exceeded", err)
+	}
+}
+
+// TestAssistantPairGenerateFromSessionEachFlushesCarriedLeadOnMaxNewBoundary
+// covers the loop's final carry flush: when a block accepts a prefix then
+// rejects, the replacement is emitted but its forward is DEFERRED as the next
+// block's carryLead. If maxNew is reached on that very replacement the loop
+// exits with the lead still pending, and the tail `if carryLead >= 0 &&
+// !stopped && yield == nil` must commit it with a step so the session cache is
+// whole. StartThenAvoid(0, 0) with draftTokens=2 gives a block that accepts the
+// all-zero drafter's first proposal (token 0) then rejects the second; maxNew=2
+// lands the exit exactly on the replacement, yield=nil so the flush runs. Pos
+// advancing to len(prompt)+maxNew is the proof the deferred lead was committed
+// (without the flush it would sit one row short).
+func TestAssistantPairGenerateFromSessionEachFlushesCarriedLeadOnMaxNewBoundary(t *testing.T) {
+	requireNativeRuntime(t)
+	pair, mk := newNativeAssistantGenerateFixture(t)
+	defer pair.Close()
+	const maxNew, draftTokens = 2, 2
+	prompt := nativeAssistantPromptWhoseTargetTokensStartThenAvoid(t, mk, 0, 0, maxNew)
+	want, err := mk().Generate(prompt, maxNew, -1)
+	if err != nil {
+		t.Fatalf("reference Generate: %v", err)
+	}
+	target := mk()
+
+	got, err := pair.GenerateFromSessionEach(target, prompt, maxNew, -1, draftTokens, nil, nil)
+	if err != nil {
+		t.Fatalf("GenerateFromSessionEach: %v", err)
+	}
+	if !idsEqual(got.Tokens, want) {
+		t.Fatalf("tokens = %v, want target-identical %v", got.Tokens, want)
+	}
+	if got.AcceptedTokens != 1 {
+		t.Fatalf("accepted tokens = %d, want the single accepted prefix token", got.AcceptedTokens)
+	}
+	if target.Pos() != len(prompt)+maxNew {
+		t.Fatalf("target Pos = %d, want %d (carried lead flushed at the boundary)", target.Pos(), len(prompt)+maxNew)
+	}
+}
+
+// TestAssistantPairGenerateSampledFromSessionEachFlushesCarriedLeadOnMaxNewBoundary
+// is the sampled twin. model.SampleParams{} routes model.Sampler through its
+// greedy branch, so the same StartThenAvoid(0, 0) prompt yields the same
+// accept-then-reject block; it additionally covers the sampled reject path's
+// `else { lowAcceptStreak = 0 }` (a 1-of-2 block is NOT a low-accept block, so
+// the streak resets rather than climbs) and the sampled tail carry flush.
+func TestAssistantPairGenerateSampledFromSessionEachFlushesCarriedLeadOnMaxNewBoundary(t *testing.T) {
+	requireNativeRuntime(t)
+	pair, mk := newNativeAssistantGenerateFixture(t)
+	defer pair.Close()
+	const maxNew, draftTokens = 2, 2
+	params := model.SampleParams{}
+	prompt := nativeAssistantPromptWhoseTargetTokensStartThenAvoid(t, mk, 0, 0, maxNew)
+	want, err := mk().GenerateSampledEach(prompt, maxNew, nil, model.NewSampler(1), params, nil, nil)
+	if err != nil {
+		t.Fatalf("reference GenerateSampledEach: %v", err)
+	}
+	target := mk()
+
+	got, err := pair.GenerateSampledFromSessionEach(target, prompt, maxNew, nil, model.NewSampler(1), params, draftTokens, nil)
+	if err != nil {
+		t.Fatalf("GenerateSampledFromSessionEach: %v", err)
+	}
+	if !idsEqual(got.Tokens, want) {
+		t.Fatalf("tokens = %v, want target-identical %v", got.Tokens, want)
+	}
+	if got.AcceptedTokens != 1 {
+		t.Fatalf("accepted tokens = %d, want the single accepted prefix token", got.AcceptedTokens)
+	}
+	if target.Pos() != len(prompt)+maxNew {
+		t.Fatalf("target Pos = %d, want %d (carried lead flushed at the boundary)", target.Pos(), len(prompt)+maxNew)
+	}
+}
+
+// TestAssistantPairGenerateFromSessionEachBreaksWhenAcceptedTokensFillMaxNew
+// covers the `if len(result.Tokens) >= maxNew { break }` guard that sits
+// BETWEEN the accept loop and the AllAccepted handling: a fully-accepted block
+// whose accepts alone reach maxNew must break there, never running dl.cycle or
+// the re-engagement dispatch for that final block. draftTokens=1 + maxNew=1 +
+// an accepted-first-draft prompt makes the single accepted proposal fill the
+// budget on the spot.
+func TestAssistantPairGenerateFromSessionEachBreaksWhenAcceptedTokensFillMaxNew(t *testing.T) {
+	requireNativeRuntime(t)
+	pair, mk := newNativeAssistantGenerateFixture(t)
+	defer pair.Close()
+	prompt := nativeAssistantPromptWithAcceptedFirstDraft(t, pair, mk)
+	const maxNew, draftTokens = 1, 1
+	want, err := mk().Generate(prompt, maxNew, -1)
+	if err != nil {
+		t.Fatalf("reference Generate: %v", err)
+	}
+	target := mk()
+
+	got, err := pair.GenerateFromSessionEach(target, prompt, maxNew, -1, draftTokens, nil, nil)
+	if err != nil {
+		t.Fatalf("GenerateFromSessionEach: %v", err)
+	}
+	if !idsEqual(got.Tokens, want) {
+		t.Fatalf("tokens = %v, want %v", got.Tokens, want)
+	}
+	if got.AcceptedTokens != 1 || len(got.Tokens) != maxNew {
+		t.Fatalf("accepted=%d tokens=%d, want 1 accepted filling maxNew=%d", got.AcceptedTokens, len(got.Tokens), maxNew)
+	}
+}
+
+// TestAssistantPairGenerateSampledFromSessionEachBreaksWhenAcceptedTokensFillMaxNew
+// is the sampled twin, reusing the zero-temperature greedy branch so the
+// accepted-first-draft prompt applies unchanged.
+func TestAssistantPairGenerateSampledFromSessionEachBreaksWhenAcceptedTokensFillMaxNew(t *testing.T) {
+	requireNativeRuntime(t)
+	pair, mk := newNativeAssistantGenerateFixture(t)
+	defer pair.Close()
+	prompt := nativeAssistantPromptWithAcceptedFirstDraft(t, pair, mk)
+	const maxNew, draftTokens = 1, 1
+	params := model.SampleParams{}
+	want, err := mk().GenerateSampledEach(prompt, maxNew, nil, model.NewSampler(1), params, nil, nil)
+	if err != nil {
+		t.Fatalf("reference GenerateSampledEach: %v", err)
+	}
+	target := mk()
+
+	got, err := pair.GenerateSampledFromSessionEach(target, prompt, maxNew, nil, model.NewSampler(1), params, draftTokens, nil)
+	if err != nil {
+		t.Fatalf("GenerateSampledFromSessionEach: %v", err)
+	}
+	if !idsEqual(got.Tokens, want) {
+		t.Fatalf("tokens = %v, want %v", got.Tokens, want)
+	}
+	if got.AcceptedTokens != 1 || len(got.Tokens) != maxNew {
+		t.Fatalf("accepted=%d tokens=%d, want 1 accepted filling maxNew=%d", got.AcceptedTokens, len(got.Tokens), maxNew)
+	}
+}
+
+// TestAssistantPairGenerateFromSessionEachRollsBackAcceptedOnYieldStop covers
+// the `if stopped { rollbackAccepted }` arm inside the accept loop: a consumer
+// that stops the stream mid-block must not leave the just-accepted draft rows
+// committed past the emitted tokens. An accepted-first-draft block with a yield
+// that returns false on the first token stops right after that token is
+// appended, so the loop rolls the accepted prefix back to what was actually
+// kept.
+func TestAssistantPairGenerateFromSessionEachRollsBackAcceptedOnYieldStop(t *testing.T) {
+	requireNativeRuntime(t)
+	pair, mk := newNativeAssistantGenerateFixture(t)
+	defer pair.Close()
+	prompt := nativeAssistantPromptWithAcceptedFirstDraft(t, pair, mk)
+	target := mk()
+	var yielded []int32
+
+	got, err := pair.GenerateFromSessionEach(target, prompt, 4, -1, 1, nil, func(id int32) bool {
+		yielded = append(yielded, id)
+		return false // stop after the first emitted token
+	})
+	if err != nil {
+		t.Fatalf("GenerateFromSessionEach: %v", err)
+	}
+	if len(got.Tokens) != 1 || len(yielded) != 1 || got.Tokens[0] != yielded[0] {
+		t.Fatalf("tokens=%v yielded=%v, want one matching accepted token", got.Tokens, yielded)
+	}
+	if got.AcceptedTokens != 1 {
+		t.Fatalf("accepted tokens = %d, want the one accepted-then-stopped token", got.AcceptedTokens)
+	}
+}
+
+// TestAssistantPairGenerateSampledFromSessionEachRollsBackAcceptedOnYieldStop is
+// the sampled twin (zero-temperature greedy branch).
+func TestAssistantPairGenerateSampledFromSessionEachRollsBackAcceptedOnYieldStop(t *testing.T) {
+	requireNativeRuntime(t)
+	pair, mk := newNativeAssistantGenerateFixture(t)
+	defer pair.Close()
+	prompt := nativeAssistantPromptWithAcceptedFirstDraft(t, pair, mk)
+	params := model.SampleParams{}
+	target := mk()
+	var yielded []int32
+
+	got, err := pair.GenerateSampledFromSessionEach(target, prompt, 4, nil, model.NewSampler(1), params, 1, func(id int32) bool {
+		yielded = append(yielded, id)
+		return false
+	})
+	if err != nil {
+		t.Fatalf("GenerateSampledFromSessionEach: %v", err)
+	}
+	if len(got.Tokens) != 1 || len(yielded) != 1 || got.Tokens[0] != yielded[0] {
+		t.Fatalf("tokens=%v yielded=%v, want one matching accepted token", got.Tokens, yielded)
+	}
+	if got.AcceptedTokens != 1 {
+		t.Fatalf("accepted tokens = %d, want the one accepted-then-stopped token", got.AcceptedTokens)
+	}
+}
+
+// TestAssistantPairGenerateSampledFromSessionEachBreaksOnYieldStoppedReplacement
+// covers the sampled reject path's `carryLead = replacement; if stopped {
+// break }` arm reached only when the yield stops on a REPLACEMENT that is not a
+// stop token (so the stop-token commit branch above it is skipped). The yield
+// keeps the accepted prefix flowing (returns true) and stops on the reject's
+// replacement (returns false).
+func TestAssistantPairGenerateSampledFromSessionEachBreaksOnYieldStoppedReplacement(t *testing.T) {
+	requireNativeRuntime(t)
+	pair, mk := newNativeAssistantGenerateFixture(t)
+	defer pair.Close()
+	const maxNew, draftTokens = 4, 2
+	params := model.SampleParams{}
+	prompt := nativeAssistantPromptWhoseTargetTokensStartThenAvoid(t, mk, 0, 0, maxNew)
+	target := mk()
+	var yielded []int32
+
+	got, err := pair.GenerateSampledFromSessionEach(target, prompt, maxNew, nil, model.NewSampler(1), params, draftTokens, func(id int32) bool {
+		yielded = append(yielded, id)
+		return len(yielded) < 2 // continue on the accepted prefix, stop on the replacement
+	})
+	if err != nil {
+		t.Fatalf("GenerateSampledFromSessionEach: %v", err)
+	}
+	if len(got.Tokens) != 2 || len(yielded) != 2 {
+		t.Fatalf("tokens=%v yielded=%v, want the accepted token then the stop-on replacement", got.Tokens, yielded)
+	}
+	if got.AcceptedTokens != 1 {
+		t.Fatalf("accepted tokens = %d, want the single accepted prefix token", got.AcceptedTokens)
+	}
+}
+
+// TestAssistantPairGenerateFromSessionEachRecordsDraftConfidence covers the
+// greedy loop's `if draft.Probs != nil { mtpConfRecordCycle(...) }` wiring,
+// dark unless the LTHN_MTP_CONF capture is armed (mtp_conf_diag.go). With a
+// capture path set, the draft path fills per-token probabilities and the loop
+// appends one JSONL row per verify cycle; a partial-accept cadence
+// (StartThenAvoid) produces a carried lead so the `carryPresent` offset branch
+// inside the record is taken too. The captured file being non-empty and the
+// output staying target-identical is the proof the recording path ran without
+// disturbing generation.
+func TestAssistantPairGenerateFromSessionEachRecordsDraftConfidence(t *testing.T) {
+	requireNativeRuntime(t)
+	pair, mk := newNativeAssistantGenerateFixture(t)
+	defer pair.Close()
+	const maxNew, draftTokens = 6, 2
+	prompt := nativeAssistantPromptWhoseTargetTokensStartThenAvoid(t, mk, 0, 0, maxNew)
+	want, err := mk().Generate(prompt, maxNew, -1)
+	if err != nil {
+		t.Fatalf("reference Generate: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "conf.jsonl")
+	savedPath := mtpConfCapturePath
+	mtpConfCapturePath = path
+	mtpConfOut.mu.Lock()
+	savedF, savedDead := mtpConfOut.f, mtpConfOut.dead
+	mtpConfOut.f, mtpConfOut.dead = nil, false
+	mtpConfOut.mu.Unlock()
+	defer func() {
+		mtpConfOut.mu.Lock()
+		if mtpConfOut.f != nil {
+			mtpConfOut.f.Close()
+		}
+		mtpConfOut.f, mtpConfOut.dead = savedF, savedDead
+		mtpConfOut.mu.Unlock()
+		mtpConfCapturePath = savedPath
+	}()
+
+	target := mk()
+	got, err := pair.GenerateFromSessionEach(target, prompt, maxNew, -1, draftTokens, nil, nil)
+	if err != nil {
+		t.Fatalf("GenerateFromSessionEach: %v", err)
+	}
+	if !idsEqual(got.Tokens, want) {
+		t.Fatalf("tokens = %v, want target-identical %v (capture must not disturb generation)", got.Tokens, want)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read capture: %v", err)
+	}
+	if len(data) == 0 || !core.Contains(string(data), `"probs":`) {
+		t.Fatalf("capture file = %q, want per-cycle confidence rows", string(data))
 	}
 }
 
