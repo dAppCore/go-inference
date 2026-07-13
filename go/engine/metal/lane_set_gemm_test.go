@@ -669,6 +669,57 @@ func TestLaneSetGEMMQuantByteIdentityHiddens(t *testing.T) {
 	}
 }
 
+// TestLaneSetGEMMQuantAutoPrefersReplay pins the fold's PROFIT gate: in AUTO
+// mode (gemmMode unset, LTHN_CB_GEMM unset) a quant model keeps the per-lane
+// ICB replay even though the fold is byte-eligible on its fast-twin dims —
+// the 4-bit weight stream is too thin for weight-read-once to beat the
+// replay's recorded-op economics (live E2B K=4: fold ~114 vs replay ~118
+// tok/s, 2026-07-13). Forced mode (gemmMode 1) still folds — that is every
+// byte-identity receipt in this file.
+func TestLaneSetGEMMQuantAutoPrefersReplay(t *testing.T) {
+	if os.Getenv(MetallibPathEnv) == "" {
+		t.Skip("metallib not set — GPU decode fixture")
+	}
+	if os.Getenv("LTHN_CB_GEMM") != "" {
+		t.Skip("LTHN_CB_GEMM set — this pin needs the AUTO default")
+	}
+	m := laneSetQuantFastFixtureModelMax(t, 32)
+	defer m.Close()
+	specs := laneSpecFixtures()
+	ctx := context.Background()
+	lsi, err := m.OpenLaneSet(inference.LaneSetConfig{MaxLanes: len(specs)})
+	if err != nil {
+		t.Fatalf("OpenLaneSet: %v", err)
+	}
+	ls, ok := lsi.(*laneSet)
+	if !ok {
+		t.Fatalf("OpenLaneSet returned %T, not *laneSet", lsi)
+	}
+	defer ls.Close()
+	handles := make([]inference.LaneHandle, len(specs))
+	for i, spec := range specs {
+		if handles[i], err = ls.Prepare(ctx, spec); err != nil {
+			t.Fatalf("Prepare(lane %d): %v", i, err)
+		}
+	}
+	for {
+		steps, err := ls.Step(ctx)
+		if err != nil {
+			t.Fatalf("Step: %v", err)
+		}
+		if len(steps) == 0 {
+			break
+		}
+		retireTerminal(t, ls, steps)
+	}
+	if ls.gemmFwdCount != 0 {
+		t.Fatalf("AUTO mode ran %d GEMM forwards on a quant model — the profit gate must keep the replay", ls.gemmFwdCount)
+	}
+	if ls.fwdCount == 0 {
+		t.Fatal("no batched forwards at all — the replay never ran (pin vacuous)")
+	}
+}
+
 // laneSetArmByteIdentity drives a GEMM-armed set and a replay set in lockstep
 // on m and asserts fires + byte-identical hiddens and tokens at every step —
 // the shared receipt body behind the per-feature arm tests (sliding / KV-share

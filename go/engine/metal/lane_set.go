@@ -250,7 +250,8 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 		// weight-read-once GEMM forward (lane_set_gemm.go) sweeps each weight once
 		// for all K lanes; LTHN_CB_GEMM=0 or an ineligible arch falls back to the
 		// per-lane ICB replay (byte-for-byte the merged 2.58× path).
-		if ls.gemmForwardEnabled() && ls.gemmEligible(advancing) {
+		if ls.gemmForwardEnabled() && ls.gemmEligible(advancing) &&
+			(ls.gemmMode == 1 || ls.gemmProfitable(advancing)) {
 			if err := ls.batchedGEMMForward(advancing); err != nil {
 				stepErr = err
 			}
