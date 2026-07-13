@@ -141,17 +141,11 @@ func LoadTokenModelDirWithConfig(dir string, maxLen int, loadCfg TokenModelLoadC
 		// ArchSpec.Composed hook, and model.LoadComposedDir looks it up and builds the
 		// serve-ready TokenModel. A future qwenX checkpoint therefore loads with ZERO edits
 		// here — it is a new model-package init(), not an engine change. ok=false means the
-		// model_type is a plain transformer (or a composed type not yet registered): fall through.
+		// model_type is a plain transformer (no composed arch registered for it): fall through.
 		if tm, ok, cerr := model.LoadComposedDir(dir); cerr != nil {
 			return nil, cerr
 		} else if ok {
 			return tm, nil
-		}
-		// Fallback for the historical composed model_types the registry does not (yet)
-		// cover, so every type the old hardcoded switch loaded still loads identically.
-		switch mt {
-		case "qwen3_6", "qwen3_6_moe", "composed", "hybrid":
-			return loadComposedTokenModel(dir, cfg)
 		}
 	}
 	lm, dm, err := loadRegistered(dir)
@@ -312,6 +306,11 @@ func mamba2EpsFromConfig(cfg []byte) float32 {
 // ComposedModel and wraps it as a model.SessionModel. LoadComposed widens every weight to f32, so the
 // shard mmap is unmapped before return. Host f32 today (correct, the orchestration scaffold); a device
 // path (the projections already have a GEMM seam; attention is a later device kernel) is the perf follow-up.
+//
+// NOT called from LoadTokenModelDirWithConfig any more: every model_type this once served as the switch's
+// fallback arm (qwen3_6/qwen3_6_moe/composed/hybrid) now registers a Composed hook in model/composed, so
+// model.LoadComposedDir reaches the identical LoadComposed+NewTokenModel pair through the registry. Kept for
+// TestNativeTokenModelSpecialLoaderErrors, which exercises it directly.
 func loadComposedTokenModel(dir string, cfg []byte) (model.TokenModel, error) {
 	dm, err := safetensors.LoadDirMmap(dir)
 	if err != nil {

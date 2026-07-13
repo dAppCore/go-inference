@@ -12,10 +12,15 @@ import (
 )
 
 // TestComposedArchRegistered confirms init() registered every Qwen 3.6 hybrid model_type (the wrapper ids,
-// their nested text_config aliases, and qwen3_next) with a Composed hook — the reactive loader can resolve
-// each to the composed loader.
+// their nested text_config aliases, qwen3_6/qwen3_6_moe, qwen3_next, and the generic composed/hybrid ids)
+// with a Composed hook — the reactive loader can resolve each to the composed loader, and engine/metal's
+// former hardcoded fallback switch (which named this exact id set) needs no equivalent any more.
 func TestComposedArchRegistered(t *testing.T) {
-	for _, mt := range []string{"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next"} {
+	for _, mt := range []string{
+		"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text",
+		"qwen3_6", "qwen3_6_moe", "qwen3_next",
+		"composed", "hybrid",
+	} {
 		spec, ok := model.LookupArch(mt)
 		if !ok {
 			t.Fatalf("model_type %q not registered — composed init() did not run", mt)
@@ -105,7 +110,11 @@ func TestLoadComposedDirRoundTrip(t *testing.T) {
 func TestLoadComposedDir_RoutingContract(t *testing.T) {
 	// Every registered composed arch is reachable through the registry — this is the coverage the engine
 	// switch used to hardcode. qwen3_5 additionally has the full dir round-trip above.
-	for _, mt := range []string{"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next"} {
+	for _, mt := range []string{
+		"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text",
+		"qwen3_6", "qwen3_6_moe", "qwen3_next",
+		"composed", "hybrid",
+	} {
 		if spec, ok := model.LookupArch(mt); !ok || spec.Composed == nil {
 			t.Fatalf("composed model_type %q not reachable through the registry (LoadComposedDir would miss it)", mt)
 		}
