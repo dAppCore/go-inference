@@ -1,3 +1,29 @@
+# NEXT WAKE (2026-07-16 — residual LOCATED: it's the CB serve layer, not the engine)
+
+## 2026-07-15 (the GPU-span split — b6acd09, pushed)
+
+- THE INSTRUMENT: laneGPUSpanNs (chainedGPUSpanNs's lane twin, gated by
+  pieceTimingOn, accumulated in waitReleaseChainedCB) +
+  TestProbe26BLaneVsChainGPUSpan (LTHN_PROBE_MODEL-gated, two-pass warm
+  — the first pass pays scratch/PSO warm-up and MUST be discarded; the
+  cold first run inverted the chain's numbers by +1.3ms/tok).
+- THE RECEIPT (real 26B, warm): chain 7.69 ms/tok wall = 7.55 GPU +
+  0.13 host; lane 7.62 ms/tok wall = 7.11 GPU + 0.52 host. ENGINE
+  WALLS EQUAL — the lane round's GPU span is actually LEANER. The K=1
+  serve-level residual (CB 7.83 vs plain 7.32 live) is therefore
+  ENTIRELY the CB serve layer: coordinator deliver → request channel →
+  scheduleCBStep goroutine (DecodeToken + metrics) → facade Chat
+  channel → handler — ~0.5ms/token of channel hops and goroutine
+  wakes that the plain path (engine yields straight into the handler)
+  never pays.
+- NEXT RUNG (first move): collapse the serve-layer hops in
+  serving/scheduler — candidates: deliver tokens straight into the
+  request's output stream from the drive loop (fold the two channels
+  into one), move/batch DecodeToken, cut per-token ScheduledToken
+  overhead. Target: recover ~0.4ms/token → K=1 parity and most of the
+  K=4 gap (139 → ~155 of plain's 161).
+- Depth-2 refutation + the ladder stand in the previous blocks.
+
 # NEXT WAKE (2026-07-15 late — depth-2 refuted; the residual needs the GPU-span split)
 
 ## 2026-07-15 (the residual hunt — refutation banked, nothing committed)
