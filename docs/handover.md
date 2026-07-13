@@ -1,3 +1,32 @@
+# NEXT WAKE (2026-07-16 — lane metric durations: timings now real on CB)
+
+## 2026-07-16 (CB metric durations + the ollama wire mapping)
+
+- THE GAP: CB-served metrics had real COUNTS but zero TIMINGS (the plain
+  path fills TotalDuration/DecodeDuration — coarsely, same-instant split —
+  and never fills PrefillDuration/rates on metal).
+- THE FIX (cb_step): cbReq carries duration anchors — start (submit),
+  prefillDur (the admission prefill's OWN span: the BeginPrepare goroutine's
+  measured wall, or the inline Prepare span — the CB path knows it EXACTLY),
+  decodeStart (admission complete). stampMetrics() refreshes durations +
+  PrefillTokensPerSec/DecodeTokensPerSec before every token send and at
+  stream end, so streamed snapshots grow monotonically and the final sink
+  delivery carries the full honest split. CB now reports RICHER timings than
+  the plain metal path.
+- OLLAMA WIRE: NewChatResponse/NewGenerateResponse map TotalDuration→
+  total_duration, PrefillDuration→prompt_eval_duration, DecodeDuration→
+  eval_duration (ns-for-ns; zero omitted). Benefits any path that fills them.
+- GATES: TestCBStepMetricsDurations (final sink: all three durations > 0,
+  Total ≥ Decode, both rates > 0; per-token snapshots monotone; proven on
+  BOTH admission paths — inline and overlapped). Module 12896/0; scheduler
+  suite under -race.
+- LIVE (26B, /api/chat via CB): warm 500-token prompt → prefill 535ms
+  (934 tok/s — the real chunked-prefill rate), decode 58ms/7 toks
+  (120 tok/s — the known K=1 lane rate), total = prefill + decode. The
+  implied rates CROSS-CHECK the campaign's measured numbers exactly.
+- REMAINDER ON #385: parallel host sample tails · K≥8 batched-tail re-check ·
+  EnableThinking seam.
+
 # NEXT WAKE (2026-07-16 — admission overlap: a joiner no longer freezes the set)
 
 ## 2026-07-16 (admission overlap — BeginPrepare/CommitPrepare + the chunk cap)
