@@ -143,6 +143,12 @@ type Model struct {
 	batch *batchEngine
 	inter *interleaveEngine
 
+	// cbMu guards the lazy continuous-batching bind below; cbCfg is the New-time
+	// config the rebind reuses; cbClosed stops rebinding after CloseEngine.
+	cbMu     sync.Mutex
+	cbCfg    Config
+	cbClosed bool
+
 	// cbEngine is interleave mode's continuous-batching fast path — non-nil only
 	// when the base model exposes an AVAILABLE inference.BatchStepModel (metal's
 	// multi-session owner) AND an inference.TokenizerModel to tokenise prompts.
@@ -157,6 +163,9 @@ type Model struct {
 	// encodes on the scheduler path, where EnableThinking is never set). nil =
 	// chat turns keep the plain interleave path.
 	cbRender cbChatRenderer
+	// cbDecode is the streaming per-token decode for CB stream text; nil falls
+	// back to Decode-of-one on the tokenizer.
+	cbDecode cbStreamDecoder
 	// cbStops resolves the FULL per-generation stop set (request stops + EOS +
 	// turn-close + template + checkpoint-declared — engine
 	// TextModel.ResolvedStopTokens) so a lane terminates exactly where the
@@ -174,6 +183,14 @@ type cbChatRenderer interface {
 // (engine.TextModel.ResolvedStopTokens satisfies it).
 type cbStopResolver interface {
 	ResolvedStopTokens(requestStops []int32) []int32
+}
+
+// cbStreamDecoder is the optional STREAMING per-token decode the CB path
+// prefers for stream text (engine.TextModel.DecodeToken satisfies it): the
+// word boundary survives as a leading space, so concatenated chunks reassemble
+// "hello world" — Decode-of-one strips it (label semantics).
+type cbStreamDecoder interface {
+	DecodeToken(id int32) string
 }
 
 // probeSinkBox wraps the sink interface so it can be stored in an
@@ -237,21 +254,15 @@ func New(model inference.TextModel, cfg Config) (*Model, error) {
 		m.inter = newInterleaveEngine(cfg)
 		// Probe the continuous-batching capability (optional-interface shape,
 		// like StepWithID/LMHead). Present + available + tokenisable ⇒ build the
-		// shared-lane-set coordinator; anything else leaves cbEngine nil and the
-		// plain per-request engine is the whole of interleave mode.
-		if bsm, ok := m.base.(inference.BatchStepModel); ok {
-			if _, hasTok := m.base.(inference.TokenizerModel); hasTok {
-				m.cbEngine = newCBStepEngine(bsm, cfg)
-			}
-		}
-		if m.cbEngine != nil {
-			if r, ok := m.base.(cbChatRenderer); ok {
-				m.cbRender = r
-			}
-			if s, ok := m.base.(cbStopResolver); ok {
-				m.cbStops = s
-			}
-		}
+		// shared-lane-set coordinator; anything else leaves cbEngine nil and
+		// Schedule RE-PROBES cheaply per eligible request (ensureCBEngine) — a
+		// model resolved mid-load reports the capability unavailable at New and
+		// flips available once loaded; without the rebind that first racing
+		// probe would pin the whole server to the plain path (observed live:
+		// a cold boot whose first traffic was 4 concurrent chats served plain
+		// forever, while a warmed boot served CB — 2026-07-13).
+		m.cbCfg = cfg
+		m.ensureCBEngine()
 	default: // serial
 		m.queue = make(chan *job, max(cfg.MaxQueue, 0))
 		m.closeCh = make(chan struct{})
@@ -290,7 +301,7 @@ func (m *Model) Schedule(ctx context.Context, req inference.ScheduledRequest) (i
 	case ModeBatch:
 		return m.scheduleBatch(ctx, req)
 	case ModeInterleave:
-		if m.cbEngine != nil && m.cbEligible(req) {
+		if m.ensureCBEngine() != nil && m.cbEligible(req) {
 			return m.scheduleCBStep(ctx, req)
 		}
 		return m.scheduleInterleave(ctx, req)
@@ -579,8 +590,12 @@ func (m *Model) CloseEngine() {
 			m.batch.close()
 		}
 	case ModeInterleave:
-		if m.cbEngine != nil {
-			m.cbEngine.close()
+		m.cbMu.Lock()
+		m.cbClosed = true // no rebind after close (ensureCBEngine checks this)
+		cb := m.cbEngine
+		m.cbMu.Unlock()
+		if cb != nil {
+			cb.close()
 		}
 		if m.inter != nil {
 			m.inter.close()
@@ -869,4 +884,44 @@ func millis(duration time.Duration) float64 {
 		return 0
 	}
 	return float64(duration) / float64(time.Millisecond)
+}
+
+// ensureCBEngine returns the continuous-batching coordinator, binding it
+// lazily when the New-time probe raced a model load. The retry is cheap for
+// models that will never bind (two interface asserts + an availability bool);
+// OpenLaneSet runs only when availability actually flips true, and a
+// successful bind is permanent. Nil off interleave mode and after CloseEngine.
+func (m *Model) ensureCBEngine() *cbStepEngine {
+	if m == nil || m.mode != ModeInterleave {
+		return nil
+	}
+	m.cbMu.Lock()
+	defer m.cbMu.Unlock()
+	if m.cbEngine != nil || m.cbClosed {
+		return m.cbEngine
+	}
+	// Probe through inference.As, not a direct assert: a welfare/policy
+	// decorator embeds the TextModel interface, which hides every optional
+	// capability from a type assertion; As walks Unwrap to the model that
+	// really carries it.
+	bsm, ok := inference.As[inference.BatchStepModel](m.base)
+	if !ok {
+		return nil
+	}
+	if _, hasTok := inference.As[inference.TokenizerModel](m.base); !hasTok {
+		return nil
+	}
+	if e := newCBStepEngine(bsm, m.cbCfg); e != nil {
+		m.cbEngine = e
+		if r, ok := inference.As[cbChatRenderer](m.base); ok {
+			m.cbRender = r
+		}
+		if s, ok := inference.As[cbStopResolver](m.base); ok {
+			m.cbStops = s
+		}
+		if d, ok := inference.As[cbStreamDecoder](m.base); ok {
+			m.cbDecode = d
+		}
+	}
+	return m.cbEngine
 }

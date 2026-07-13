@@ -443,6 +443,42 @@ func TestCBStepSampledRequestRidesLaneSet(t *testing.T) {
 	}
 }
 
+// TestCBStepLateCapabilityBind pins the lazy rebind: a model whose
+// BatchStepAvailable reports false at New (the observed live shape — the
+// scheduler's construction racing the model load) must NOT pin the server to
+// the plain path forever; once availability flips true, the next eligible
+// Schedule binds the coordinator and rides the lane set.
+func TestCBStepLateCapabilityBind(t *testing.T) {
+	sim := newSimLaneSet()
+	model := &cbCapableModel{sim: sim, available: false}
+	sched, err := New(model, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 4})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sched.CloseEngine()
+	if sched.cbEngine != nil {
+		t.Fatal("cbEngine must be nil while the capability reports unavailable")
+	}
+
+	model.available = true // the load completed; the capability now probes true
+
+	_, ch, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+		ID:      "late1",
+		Prompt:  "abc",
+		Sampler: inference.SamplerConfig{MaxTokens: 2},
+	})
+	if err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+	ids := collectStream(ch)
+	if len(ids) != 2 {
+		t.Fatalf("late-bound request should stream 2 scripted tokens via the lane set, got %v", ids)
+	}
+	if sim.prepareCalls != 1 {
+		t.Fatalf("late-bound request must admit exactly one CB lane, got %d prepares", sim.prepareCalls)
+	}
+}
+
 // TestCBStepKillSwitchUnbindsScheduler proves LTHN_CB_STEP=0 leaves the coordinator
 // unbuilt, so interleave mode is the plain per-request engine.
 func TestCBStepKillSwitchUnbinds(t *testing.T) {
