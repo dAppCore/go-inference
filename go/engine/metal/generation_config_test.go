@@ -47,104 +47,11 @@ func TestLoadGenerationConfigStops(t *testing.T) {
 	}
 }
 
-// TestGenerationConfigSamplingDefaults_Good pins the shape every cached
-// mlx-community gemma4 snapshot ships (e.g. gemma-4-E4B-it-qat-4bit): do_sample
-// true, temperature 1.0, top_k 64, top_p 0.95, no suppress_tokens key at all.
-func TestGenerationConfigSamplingDefaults_Good(t *testing.T) {
-	got := generationConfigSamplingDefaults([]byte(`{
-		"bos_token_id": 2,
-		"do_sample": true,
-		"eos_token_id": [1, 106, 50],
-		"pad_token_id": 0,
-		"temperature": 1.0,
-		"top_k": 64,
-		"top_p": 0.95,
-		"transformers_version": "5.6.2"
-	}`))
-	if got.DoSample == nil || *got.DoSample != true {
-		t.Fatalf("DoSample = %v, want true", got.DoSample)
-	}
-	if got.Temperature == nil || *got.Temperature != 1.0 {
-		t.Fatalf("Temperature = %v, want 1.0", got.Temperature)
-	}
-	if got.TopK == nil || *got.TopK != 64 {
-		t.Fatalf("TopK = %v, want 64", got.TopK)
-	}
-	if got.TopP == nil || *got.TopP != 0.95 {
-		t.Fatalf("TopP = %v, want 0.95", got.TopP)
-	}
-	if got.SuppressTokens != nil {
-		t.Fatalf("SuppressTokens = %v, want nil (key absent)", got.SuppressTokens)
-	}
-	if got.MinP != nil {
-		t.Fatalf("MinP = %v, want nil (key absent from gemma4 config)", got.MinP)
-	}
-}
-
-// TestGenerationConfigSamplingDefaults_MinP pins the shape the cached Qwen3.5
-// snapshots ship (e.g. Qwen3.5-4B-OptiQ-4bit): min_p present as 0.0 — a
-// declared key whose value is the zero, so the pointer is non-nil (declared)
-// even though the value is disabled. This is the field that most exercises the
-// declared-vs-zero distinction on the model side.
-func TestGenerationConfigSamplingDefaults_MinP(t *testing.T) {
-	got := generationConfigSamplingDefaults([]byte(`{
-		"do_sample": true,
-		"temperature": 0.7,
-		"top_p": 0.8,
-		"top_k": 20,
-		"min_p": 0.0,
-		"repetition_penalty": 1.0,
-		"presence_penalty": 1.5
-	}`))
-	if got.MinP == nil {
-		t.Fatal("MinP = nil, want a non-nil pointer to 0.0 (the key is declared)")
-	}
-	if *got.MinP != 0.0 {
-		t.Fatalf("MinP = %v, want 0.0", *got.MinP)
-	}
-	if got.Temperature == nil || *got.Temperature != 0.7 {
-		t.Fatalf("Temperature = %v, want 0.7", got.Temperature)
-	}
-	if got.TopK == nil || *got.TopK != 20 {
-		t.Fatalf("TopK = %v, want 20", got.TopK)
-	}
-}
-
-// TestGenerationConfigSamplingDefaults_Bad pins the guard paths: malformed
-// JSON and a wholly empty object both return the zero value (every field
-// absent), matching generationConfigStops' guard behaviour.
-func TestGenerationConfigSamplingDefaults_Bad(t *testing.T) {
-	for _, data := range []string{`not json`, `{}`} {
-		got := generationConfigSamplingDefaults([]byte(data))
-		if got.DoSample != nil || got.Temperature != nil || got.TopP != nil || got.TopK != nil || got.MinP != nil || got.SuppressTokens != nil {
-			t.Fatalf("sampling(%q) = %+v, want the zero value", data, got)
-		}
-	}
-}
-
-// TestGenerationConfigSamplingDefaults_Ugly pins the real shape a gemma4 large
-// variant ships (gemma-4-12B-it-assistant-bf16): a SCALAR eos_token_id
-// (unrelated to this parser, but present in the real file) alongside a
-// suppress_tokens array — the one cached snapshot that actually declares it.
-func TestGenerationConfigSamplingDefaults_Ugly(t *testing.T) {
-	got := generationConfigSamplingDefaults([]byte(`{
-		"bos_token_id": 2,
-		"do_sample": true,
-		"eos_token_id": 1,
-		"pad_token_id": 0,
-		"suppress_tokens": [258883, 258882],
-		"temperature": 1.0,
-		"top_k": 64,
-		"top_p": 0.95,
-		"transformers_version": "5.10.0.dev0"
-	}`))
-	if got.DoSample == nil || *got.DoSample != true {
-		t.Fatalf("DoSample = %v, want true", got.DoSample)
-	}
-	if len(got.SuppressTokens) != 2 || got.SuppressTokens[0] != 258883 || got.SuppressTokens[1] != 258882 {
-		t.Fatalf("SuppressTokens = %v, want [258883 258882]", got.SuppressTokens)
-	}
-}
+// The byte-level parser table (Good / MinP / Bad / scalar-eos Ugly) now lives
+// beside the shared engine.SamplingDefaults it produces —
+// engine.ParseGenerationConfigSampling, tested in engine/sampling_defaults_test.go.
+// engine/metal keeps the file-locating shell (loadGenerationConfigSamplingDefaults)
+// and the capability method below, which are the metal-specific seams.
 
 // TestLoadGenerationConfigSamplingDefaults pins the file path: an absent file
 // returns the zero value rather than an error (soft-optional, mirroring
