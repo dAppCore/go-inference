@@ -118,6 +118,11 @@ func (m *Model) scheduleInterleave(ctx context.Context, req inference.ScheduledR
 		for tok := range tokens {
 			out <- inference.ScheduledToken{RequestID: id, Token: tok, Metrics: m.base.Metrics(), Labels: labels}
 		}
+		// The engine's post-generation snapshot is fresh HERE (the source seq
+		// has fully drained), so the facade's last-stream Metrics stays honest
+		// on the plain route too.
+		final := m.base.Metrics()
+		m.lastMetrics.Store(&final)
 	}()
 	var handleLabels map[string]string
 	if len(req.Labels) > 0 {
@@ -212,6 +217,8 @@ func (m *Model) scheduleCBStep(ctx context.Context, req inference.ScheduledReque
 			metrics.GeneratedTokens++
 			out <- inference.ScheduledToken{RequestID: id, Token: t, Metrics: metrics, Labels: labels}
 		}
+		final := metrics
+		m.lastMetrics.Store(&final)
 	}()
 	var handleLabels map[string]string
 	if len(req.Labels) > 0 {

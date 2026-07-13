@@ -167,9 +167,14 @@ type Model struct {
 	// back to Decode-of-one on the tokenizer.
 	cbDecode cbStreamDecoder
 
-	// lastMetrics is the final ScheduledToken metrics of the most recent
-	// completed Generate/Chat stream — what Metrics() reports (last-generation
-	// semantics; a CB lane never updates the base model's global snapshot).
+	// lastMetrics is the most recent completed scheduled stream's final
+	// metrics, stored by the route that OWNS the correct numbers at stream end
+	// (CB: the scheduler's own per-request counts; plain: the engine's fresh
+	// post-generation snapshot) — what Metrics() reports, the engine's own
+	// last-generation semantics. NOTE: per-REQUEST usage under CONCURRENT
+	// streams remains last-writer-wins exactly as it always was on the bare
+	// engine (the openai handler reads a global Metrics() after its stream) —
+	// a pre-existing accounting race, tracked in the batching task.
 	lastMetrics atomic.Pointer[inference.GenerateMetrics]
 	// cbStops resolves the FULL per-generation stop set (request stops + EOS +
 	// turn-close + template + checkpoint-declared — engine
@@ -470,15 +475,7 @@ func (m *Model) Generate(ctx context.Context, prompt string, opts ...inference.G
 			m.setErr(err)
 			return
 		}
-		var last inference.GenerateMetrics
-		got := false
-		defer func() {
-			if got {
-				m.lastMetrics.Store(&last)
-			}
-		}()
 		for scheduled := range tokens {
-			last, got = scheduled.Metrics, true
 			if !yield(scheduled.Token) {
 				_, _ = m.CancelRequest(ctx, scheduled.RequestID)
 				return
@@ -506,15 +503,7 @@ func (m *Model) Chat(ctx context.Context, messages []inference.Message, opts ...
 			m.setErr(err)
 			return
 		}
-		var last inference.GenerateMetrics
-		got := false
-		defer func() {
-			if got {
-				m.lastMetrics.Store(&last)
-			}
-		}()
 		for scheduled := range tokens {
-			last, got = scheduled.Metrics, true
 			if !yield(scheduled.Token) {
 				_, _ = m.CancelRequest(ctx, scheduled.RequestID)
 				return
