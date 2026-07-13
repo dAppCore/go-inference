@@ -1,3 +1,34 @@
+# NEXT WAKE (2026-07-16 — ragged harvest live: 146 tok/s; lanes free-run)
+
+## 2026-07-16 (ragged harvest — 1df07a9, pushed)
+
+- RAGGED HARVEST (1df07a9): chained lanes free-run — one COMMITTED
+  round in flight + one PRE-ENCODED round HELD uncommitted per lane.
+  On completion (50µs poll; a sole lane blocks directly on its cb):
+  read the 4-byte token, COMMIT the held round (µs — the lane rolls on
+  independent of every other lane and the Step boundary), pre-encode
+  the next held round overlapped with the new in-flight one. Step
+  returns whichever lanes completed. Terminal waste is ZERO now: a
+  stop token DROPS the held cb un-committed — no advance, no rewind,
+  no truncation (the committed-speculation unwind machinery left this
+  path entirely).
+- THE COUNTER EARNED ITS KEEP: the port initially returned ok=false on
+  chainRoundEncode's SUCCESS path (the old tuple's demoted slot) —
+  every lane silently demoted per-lane, tokens still byte-identical,
+  chainedSteps==0 the ONLY tell. Engagement counters are not optional
+  decoration; they are the difference between 'passes' and 'proves'.
+- Numbers (salted, 26B, -context 4096): K=4 137.7 → 145.7 (+6%); K=1
+  121-124 vs salted plain 117 (CB ahead per-lane). Ladder:
+  93→118→120→123→139→146 vs plain 151-161. Hashes unchanged, 0
+  wobbles, suite 2275/0, 38 lane+fork gates.
+- The MoE byte-identity gate's shared-submission counter shape is
+  retired for chained lanes (ragged takes MORE Steps with fewer lanes
+  each, by design); engagement = chainedSteps>0, correctness = the
+  byte compare.
+- NEXT: batched chained tail (one head sweep for all K — the K-scaling
+  economy); the consistent-boot K-sweep (pin plain's 151-vs-161 boot
+  spread before further ladder claims); admission overlap.
+
 # NEXT WAKE (2026-07-16 — the picture corrected: CB WINS K=1; the gap is scaling)
 
 ## 2026-07-15 (hop collapse + the inversion — 21c062f, pushed)
