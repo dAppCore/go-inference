@@ -48,12 +48,19 @@ type projector interface {
 	rowsCapable() bool
 	// rowsByteTier reports whether projectRows reproduces the per-lane replay
 	// projection BYTE for byte for every present weight — the laneSet GEMM fold's
-	// eligibility tier. Only the bf16 batched gemv qualifies (z-slices run the
-	// single-row tile loop unchanged). NO batched quant dispatch qualifies: both
-	// MLX qmm_t (simdgroup-MMA) AND the register-tiled lthn_qmv_rows re-order the
-	// quantised dot vs the per-row qmv_impl the replay records (proven 2026-07-13
-	// — a value-dependent ~1 ulp drift), so a quant weight declines the byte tier.
+	// eligibility tier. The bf16 batched gemv qualifies at any row count (z-slices
+	// run the single-row tile loop unchanged); a quant weight qualifies when the
+	// tiled plan admits it — the register-tiled lthn_qmv_rows is qmv_fast_impl's
+	// M-variant, byte-identical on fast-twin dims (outDim%8==0 && inDim%512==0)
+	// under the -fno-fast-math metallib. qmm_t (simdgroup-MMA) never qualifies.
 	rowsByteTier(rows int) bool
+	// foldProfitable reports whether the weight-read-once fold is a WALL win for
+	// this projector, not just byte-correct: bf16/dense weights are weight-bound
+	// (fold receipted 1.51× vs batched replay); 4-bit quant streams are 4× thinner
+	// and the fold's re-encode tax outweighs the saving at K ≤ lthnQMVRowsMaxM
+	// (live E2B K=4: fold ~114 vs replay ~118 tok/s, 2026-07-13). AUTO mode
+	// consults this; forced mode (receipts) does not.
+	foldProfitable() bool
 	// hasV reports whether a distinct V projection weight exists. gemma4 K==V layers
 	// (12B/31B: attention_k_eq_v) carry NO v_proj — V is the k-proj output (pre-knorm/
 	// rope) value-normed — so the decode projects V via wK; hasV()==false signals that.
@@ -69,6 +76,10 @@ type bf16Projector struct {
 }
 
 func (b bf16Projector) hasV() bool { return b.wV.buf != nil }
+
+// foldProfitable: bf16 decode is weight-bandwidth-bound — reading each weight
+// once for K lanes is the receipted 1.51× win.
+func (b bf16Projector) foldProfitable() bool { return true }
 
 func (b bf16Projector) weightDims(p projIndex) (bufView, int, int, bool) {
 	switch p {
@@ -239,6 +250,24 @@ func (m qmvProjector) rowsCapable() bool {
 // accumulation drift — surfaced as the hd-256 fold failure at step 6); the
 // fast-twin match + this per-weight plan check replaced the blanket decline
 // that closed that exposure.
+// foldProfitable: a genuinely-quantised weight keeps the replay in AUTO mode —
+// the 4-bit stream is 4× thinner than bf16, so weight-read-once saves little
+// while the fold pays the re-encode tax the recorded replay avoids (live E2B
+// K=4: fold ~114 vs replay ~118 tok/s aggregate, 2026-07-13). An all-dense
+// mixed pack is bf16 in practice and keeps the win. Revisit at K>4 tiled-M.
+func (m qmvProjector) foldProfitable() bool {
+	for p := projQ; p <= projDown; p++ {
+		w, _, _, _ := m.weightDims(p)
+		if !w.present() {
+			continue
+		}
+		if !w.dense() {
+			return false
+		}
+	}
+	return true
+}
+
 func (m qmvProjector) rowsByteTier(rows int) bool {
 	for p := projQ; p <= projDown; p++ {
 		w, outDim, inDim, _ := m.weightDims(p)

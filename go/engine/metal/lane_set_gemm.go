@@ -46,16 +46,41 @@ import (
 // forward entirely (the merged 2.58× path, byte-for-byte).
 
 // gemmForwardEnabled reports whether the weight-read-once GEMM forward is armed.
-// LTHN_CB_GEMM=0 forces the per-lane ICB replay (the merged 2.58× path). Any other
-// value (including unset) arms it. Read once and cached on the lane set.
+// LTHN_CB_GEMM=0 forces the per-lane ICB replay (the merged path); LTHN_CB_GEMM=1
+// FORCES the fold wherever it is byte-eligible; unset = AUTO — fold only where it
+// is byte-eligible AND profitable (gemmProfitable). Read once and cached on the
+// lane set; tests set gemmMode directly (1 = forced, 2 = replay-only).
 func (ls *laneSet) gemmForwardEnabled() bool {
 	if ls.gemmMode == 0 {
-		ls.gemmMode = 1
-		if os.Getenv("LTHN_CB_GEMM") == "0" {
+		switch os.Getenv("LTHN_CB_GEMM") {
+		case "0":
 			ls.gemmMode = 2 // disabled
+		case "1":
+			ls.gemmMode = 1 // forced
+		default:
+			ls.gemmMode = 3 // auto: eligible AND profitable
 		}
 	}
-	return ls.gemmMode == 1
+	return ls.gemmMode == 1 || ls.gemmMode == 3
+}
+
+// gemmProfitable reports whether the fold is a WALL win for this model, not just
+// byte-correct. The weight-read-once saving scales with the weight-stream bytes:
+// on bf16 checkpoints decode is weight-bound and the fold is a receipted 1.51×
+// over the batched replay (TestLaneSetGEMMThroughputAB); on 4-bit quant the
+// stream is 4× thinner and the fold's re-encode tax outweighs the saving at
+// K ≤ lthnQMVRowsMaxM — live E2B K=4: fold 114.0/114.3/114.4 vs replay
+// 117.0/117.6/117.8 tok/s aggregate (2026-07-13, interleaved runs). So AUTO
+// folds bf16/dense projectors and keeps quant on the replay; LTHN_CB_GEMM=1
+// (or gemmMode 1) forces the fold for receipts. Revisit with K>4 tiled-M.
+func (ls *laneSet) gemmProfitable(advancing []*decodeLane) bool {
+	s := advancing[0].sess.state // all lanes share the model
+	for li := range s.specs {
+		if !s.lb[li].proj.foldProfitable() {
+			return false
+		}
+	}
+	return true
 }
 
 // gemmEligible reports whether every advancing lane can take the batched-GEMM
