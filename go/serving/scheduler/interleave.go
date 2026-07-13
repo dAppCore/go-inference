@@ -95,6 +95,11 @@ func (m *Model) scheduleInterleave(ctx context.Context, req inference.ScheduledR
 		id = m.nextRequestID()
 	}
 	opts := generateOptions(req.Sampler)
+	if req.MetricsSink != nil {
+		// Re-arm the request-scoped metrics sink dropped by the SamplerConfig
+		// fold — the base engine delivers this request's own final metrics.
+		opts = append(opts, inference.WithMetricsSink(req.MetricsSink))
+	}
 	messages := append([]inference.Message(nil), req.Messages...)
 	prompt := req.Prompt
 	src := func(rc context.Context) stream {
@@ -219,6 +224,12 @@ func (m *Model) scheduleCBStep(ctx context.Context, req inference.ScheduledReque
 		}
 		final := metrics
 		m.lastMetrics.Store(&final)
+		if req.MetricsSink != nil {
+			// A lane never touches the base engine's Metrics(); the scheduler
+			// itself owns this request's counts, so it delivers them (counts
+			// real, timings zero — the CB lane timing gap is tracked).
+			req.MetricsSink(final)
+		}
 	}()
 	var handleLabels map[string]string
 	if len(req.Labels) > 0 {

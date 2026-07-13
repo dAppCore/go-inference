@@ -222,6 +222,74 @@ func TestHandler_ServeNonStreaming_Ugly_LengthCapReached(t *testing.T) {
 	}
 }
 
+// sinkStubModel is a stubModel honouring the MetricsSink contract: Chat
+// applies its opts and delivers `delivered` to the sink as the stream
+// completes, while the global Metrics() readback stays the (different)
+// stubModel value — the discriminator that proves the handler reads the
+// request-scoped delivery, not the racy global.
+type sinkStubModel struct {
+	stubModel
+	delivered inference.GenerateMetrics
+}
+
+func (m *sinkStubModel) Chat(_ context.Context, _ []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return func(yield func(inference.Token) bool) {
+		for token := range m.seq() {
+			if !yield(token) {
+				return
+			}
+		}
+		if cfg := inference.ApplyGenerateOpts(opts); cfg.MetricsSink != nil {
+			cfg.MetricsSink(m.delivered)
+		}
+	}
+}
+
+// TestHandler_ServeNonStreaming_Good_MetricsSinkUsage pins the usage source:
+// when the serving stack delivers request-scoped metrics, the response usage
+// carries THOSE numbers, not the global last-writer-wins Metrics() snapshot.
+func TestHandler_ServeNonStreaming_Good_MetricsSinkUsage(t *testing.T) {
+	model := &sinkStubModel{
+		stubModel: stubModel{
+			tokens:  []inference.Token{{Text: "hello"}},
+			metrics: inference.GenerateMetrics{PromptTokens: 1, GeneratedTokens: 1},
+		},
+		delivered: inference.GenerateMetrics{PromptTokens: 7, GeneratedTokens: 3},
+	}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"qwen","messages":[{"role":"user","content":"hi"}]}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"prompt_tokens":7`) || !strings.Contains(rec.Body.String(), `"completion_tokens":3`) {
+		t.Fatalf("body = %s, want the sink-delivered usage (prompt 7, completion 3), not the global snapshot", rec.Body.String())
+	}
+}
+
+// TestHandler_ServeStreaming_Ugly_MetricsSinkLengthCap pins the streaming
+// length-cap read on the same seam: the finish_reason="length" decision uses
+// the sink-delivered GeneratedTokens when present (the global here reports 0
+// and would wrongly finish "stop").
+func TestHandler_ServeStreaming_Ugly_MetricsSinkLengthCap(t *testing.T) {
+	model := &sinkStubModel{
+		stubModel: stubModel{tokens: []inference.Token{{Text: "clipped"}}},
+		delivered: inference.GenerateMetrics{PromptTokens: 1, GeneratedTokens: 2},
+	}
+	handler := NewHandler(NewStaticResolver(map[string]inference.TextModel{"qwen": model}))
+	rec := httptest.NewRecorder()
+	body := `{"model":"qwen","messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":2}`
+
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, DefaultChatCompletionsPath, strings.NewReader(body)))
+
+	if !strings.Contains(rec.Body.String(), `"finish_reason":"length"`) {
+		t.Fatalf("body=%s, want finish_reason=length from the sink-delivered token count", rec.Body.String())
+	}
+}
+
 // stopModel is a stubModel whose Chat replays a fixed token sequence
 // through the streaming path — used to drive serveStreaming's
 // stop-sequence mid-stream cut, which the plain stubModel.Chat (a

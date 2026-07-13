@@ -108,6 +108,16 @@ func (h *Handler) serveNonStreaming(w http.ResponseWriter, r *http.Request, mode
 	created := time.Now().Unix()
 	completionID := completionID()
 	extractor := NewThinkingExtractor()
+	// Request-scoped usage: the sink receives THIS generation's final metrics
+	// as its stream completes (delivered before the stream-end the range loop
+	// observes, so the locals are safely read after it). The global Metrics()
+	// read below stays as the fallback for serving stacks that don't deliver
+	// — it is last-writer-wins under concurrent generations.
+	var reqMetrics inference.GenerateMetrics
+	sinkFired := false
+	opts = append(opts, inference.WithMetricsSink(func(gm inference.GenerateMetrics) {
+		reqMetrics, sinkFired = gm, true
+	}))
 	for token := range model.Chat(r.Context(), messages, opts...) {
 		extractor.Process(token)
 	}
@@ -119,6 +129,9 @@ func (h *Handler) serveNonStreaming(w http.ResponseWriter, r *http.Request, mode
 		return
 	}
 	metrics := model.Metrics()
+	if sinkFired {
+		metrics = reqMetrics
+	}
 	content := TruncateAtStopSequence(extractor.Content(), stops)
 	if req.ResponseFormat.needsValidation() {
 		// ValidateRequest already rejected stream=true for a validating format
@@ -226,6 +239,13 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 	// them byte-for-byte to that old path.
 	cs := newContentStreamer(stops, model.Info().Architecture)
 	finishReason := "stop"
+	// Request-scoped usage for the length-cap check below — see
+	// serveNonStreaming; the global Metrics() read stays as the fallback.
+	var reqMetrics inference.GenerateMetrics
+	sinkFired := false
+	opts = append(opts, inference.WithMetricsSink(func(gm inference.GenerateMetrics) {
+		reqMetrics, sinkFired = gm, true
+	}))
 	for token := range model.Chat(r.Context(), messages, opts...) {
 		contentDelta, thoughtDelta := extractor.Process(token)
 		out := cs.step(contentDelta)
@@ -289,7 +309,11 @@ func (h *Handler) serveStreaming(w http.ResponseWriter, r *http.Request, model i
 	if r := model.Err(); !r.OK {
 		finishReason = "error"
 	}
-	if finishReason != "error" && isTokenLengthCapReached(req.MaxTokens, model.Metrics().GeneratedTokens) {
+	generatedTokens := model.Metrics().GeneratedTokens
+	if sinkFired {
+		generatedTokens = reqMetrics.GeneratedTokens
+	}
+	if finishReason != "error" && isTokenLengthCapReached(req.MaxTokens, generatedTokens) {
 		finishReason = "length"
 	}
 	// Lift any buffered <|tool_call> span into streamed tool_calls deltas — per

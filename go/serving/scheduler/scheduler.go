@@ -171,10 +171,12 @@ type Model struct {
 	// metrics, stored by the route that OWNS the correct numbers at stream end
 	// (CB: the scheduler's own per-request counts; plain: the engine's fresh
 	// post-generation snapshot) — what Metrics() reports, the engine's own
-	// last-generation semantics. NOTE: per-REQUEST usage under CONCURRENT
-	// streams remains last-writer-wins exactly as it always was on the bare
-	// engine (the openai handler reads a global Metrics() after its stream) —
-	// a pre-existing accounting race, tracked in the batching task.
+	// last-generation semantics. Per-REQUEST usage under CONCURRENT streams is
+	// served race-free through GenerateConfig.MetricsSink (lifted onto
+	// ScheduledRequest.MetricsSink across the sampler fold, re-armed at
+	// dispatch; the openai handler installs one per request); this global
+	// readback stays last-writer-wins as the fallback for callers without a
+	// sink, exactly the bare engine's semantics.
 	lastMetrics atomic.Pointer[inference.GenerateMetrics]
 	// cbStops resolves the FULL per-generation stop set (request stops + EOS +
 	// turn-close + template + checkpoint-declared — engine
@@ -468,7 +470,11 @@ func (m *Model) Generate(ctx context.Context, prompt string, opts ...inference.G
 		// DefaultGenerateConfig re-applies RepeatPenalty:1.0 either way.
 		req := inference.ScheduledRequest{Prompt: prompt}
 		if len(opts) > 0 {
-			req.Sampler = inference.SamplerConfigFromGenerateConfig(inference.ApplyGenerateOpts(opts))
+			cfg := inference.ApplyGenerateOpts(opts)
+			req.Sampler = inference.SamplerConfigFromGenerateConfig(cfg)
+			// The opts→SamplerConfig fold cannot hold a func; the sink rides
+			// the request and is re-armed at dispatch (baseTokens et al).
+			req.MetricsSink = cfg.MetricsSink
 		}
 		_, tokens, err := m.Schedule(ctx, req)
 		if err != nil {
@@ -496,7 +502,10 @@ func (m *Model) Chat(ctx context.Context, messages []inference.Message, opts ...
 		// at the base).
 		req := inference.ScheduledRequest{Messages: append([]inference.Message(nil), messages...)}
 		if len(opts) > 0 {
-			req.Sampler = inference.SamplerConfigFromGenerateConfig(inference.ApplyGenerateOpts(opts))
+			cfg := inference.ApplyGenerateOpts(opts)
+			req.Sampler = inference.SamplerConfigFromGenerateConfig(cfg)
+			// See Generate: the sink rides the request across the fold.
+			req.MetricsSink = cfg.MetricsSink
 		}
 		_, tokens, err := m.Schedule(ctx, req)
 		if err != nil {
@@ -752,6 +761,11 @@ func (m *Model) run(j *job) {
 
 func (m *Model) baseTokens(j *job) iter.Seq[inference.Token] {
 	opts := generateOptions(j.req.Sampler)
+	if j.req.MetricsSink != nil {
+		// Re-arm the request-scoped metrics sink dropped by the SamplerConfig
+		// fold — the base engine delivers this request's own final metrics.
+		opts = append(opts, inference.WithMetricsSink(j.req.MetricsSink))
+	}
 	if len(j.req.Messages) > 0 {
 		messages := append([]inference.Message(nil), j.req.Messages...)
 		return m.base.Chat(j.ctx, messages, opts...)

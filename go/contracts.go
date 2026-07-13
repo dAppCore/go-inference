@@ -33,6 +33,12 @@ type ScheduledRequest struct {
 	Messages []Message         `json:"messages,omitempty"`
 	Sampler  SamplerConfig     `json:"sampler"`
 	Labels   map[string]string `json:"labels,omitempty"`
+	// MetricsSink, when set, receives this request's final GenerateMetrics as
+	// its stream completes — GenerateConfig.MetricsSink carried across the
+	// scheduling seam (the opts→SamplerConfig fold cannot hold a func, so a
+	// scheduler facade lifts it here and re-arms it at dispatch). In-process
+	// only; never serialised.
+	MetricsSink func(GenerateMetrics) `json:"-"`
 }
 
 // ScheduledToken carries a streamed token plus request-local telemetry.

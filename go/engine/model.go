@@ -547,6 +547,13 @@ func (m *TextModel) decodeFromPrefilled(ctx context.Context, sess Session, promp
 			m.setDecodePhases(&budget)
 		}
 	}
+	if cfg.MetricsSink != nil {
+		// Request-scoped delivery: the final snapshot (phases attached) goes
+		// to exactly the caller that asked, so concurrent generations cannot
+		// cross-read usage through the global Metrics(). Fires on every
+		// outcome, mirroring what Metrics() would report.
+		cfg.MetricsSink(m.Metrics())
+	}
 	if gerr != nil {
 		m.setErr(gerr)
 		return

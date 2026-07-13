@@ -480,6 +480,50 @@ func TestCBStepUsageMetrics(t *testing.T) {
 	}
 }
 
+// TestCBStepMetricsSink pins the request-scoped delivery on the CB route: a
+// lane never touches the base engine's Metrics(), so the scheduler delivers
+// its own per-request counts to ScheduledRequest.MetricsSink as the stream
+// completes — the same seam the plain modes re-arm onto the engine.
+func TestCBStepMetricsSink(t *testing.T) {
+	sim := newSimLaneSet()
+	model := &cbCapableModel{sim: sim, available: true}
+	sched, err := New(model, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 4})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sched.CloseEngine()
+
+	var got inference.GenerateMetrics
+	fired := 0
+	_, ch, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+		ID:      "sink1",
+		Prompt:  "abc",
+		Sampler: inference.SamplerConfig{MaxTokens: 3},
+		MetricsSink: func(gm inference.GenerateMetrics) {
+			got = gm
+			fired++
+		},
+	})
+	if err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+	n := 0
+	for range ch {
+		n++
+	}
+	if n != 3 {
+		t.Fatalf("stream should carry 3 tokens, got %d", n)
+	}
+	if fired != 1 {
+		t.Fatalf("MetricsSink fired %d times, want exactly once", fired)
+	}
+	wantPrompt := len(model.Encode("abc"))
+	if got.PromptTokens != wantPrompt || got.GeneratedTokens != 3 {
+		t.Fatalf("sink metrics = prompt %d gen %d, want prompt %d gen 3",
+			got.PromptTokens, got.GeneratedTokens, wantPrompt)
+	}
+}
+
 // TestCBStepLateCapabilityBind pins the lazy rebind: a model whose
 // BatchStepAvailable reports false at New (the observed live shape — the
 // scheduler's construction racing the model load) must NOT pin the server to
