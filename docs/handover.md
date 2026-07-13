@@ -1,3 +1,36 @@
+# NEXT WAKE (2026-07-15 — batched head live; the 26B gap fully root-caused)
+
+## 2026-07-15 (batched head — 8a1a2a0, pushed)
+
+- BATCHED HEAD (8a1a2a0): all-greedy phase 1 = ONE K-row fused
+  lm_head+argmax via ArchSession.greedyRowsFromHiddensInPool (the MTP
+  verify head — on quant heads ONE weight sweep scores all K rows).
+  headRowsCount is the engagement counter, asserted in both byte-identity
+  gates (the CB-never-live lesson: no silent fallback may pass as
+  batched). sharedReencodeForward switched to per-lane cbs + pipelined
+  waits — the single shared cb's pass-edge memory barriers serialised
+  the lanes against each other (measured flat).
+- Live 26B: 120.6 tok/s (+2% over the shared rung) — EXACTLY the head's
+  share of step bytes at K=4 (~369MB head sweep vs ~16GB of expert/dense
+  reads per 4-token step). The probe receipt pinned live engagement:
+  canUseDirectHeadGreedy=true, qmm_t pipeline present for
+  vocab=262144/gs=64/bits=4, sharedStepEligible=true. The head win
+  SCALES WITH K; at K=4 on 26B it is small by physics, not by defect.
+- THE RESIDUAL GAP (120 vs plain 151) IS NOW MECHANICALLY UNDERSTOOD:
+  plain 26B serve decodes on the CHAINED-LIVE tail — GPU argmax feeds
+  GPU embed, ONE cb per token, zero host round-trips, 4 goroutines'
+  cbs overlapping freely. The lane step alternates GPU and host phases
+  (wait forwards → host pack rows → head cb → wait → host embedID ×K →
+  encode forwards → commit) — a pipeline bubble every step. The
+  gap-closer is a lane-wide CHAINED step (fuse head+next-embed into the
+  forward cbs), but it changes the lane's head arm from host-loop to
+  chain — BLOCKED ON the chain-vs-host token fork (previous block).
+  Resolve the fork first (GPU-vs-host embed dequant rounding / argmax
+  tie-break; unify or declare), then build the chained lane step
+  against the unified arm.
+- Bench-shape note: the 26B agg_bench warm round pays first-boot
+  page-ins (10-50 tok/s noise) — read measured-1/2 only.
+
 # NEXT WAKE (2026-07-15 — shared submission live; the chain/host fork found)
 
 ## 2026-07-14 (final rung of the session — de239ac, pushed)
