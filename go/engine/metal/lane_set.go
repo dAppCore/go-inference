@@ -10,6 +10,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/model"
+	"github.com/tmc/apple/metal"
 )
 
 // laneSet is the metal multi-session state owner: K decode lanes that SHARE the
@@ -264,25 +265,30 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 			return
 		}
 		// Phase 2 partition: recorded-ICB lanes ride the shared replay (fold or
-		// one-encoder batch); re-encode lanes (MoE) advance through their
-		// session's own one-token step — the plain path's exact per-token
-		// machinery, so the lane's arithmetic is the plain path's. One model
-		// per set makes the partition all-or-nothing in practice; the split
-		// keeps a hybrid correct anyway. Shared-submission across re-encode
-		// lanes (K forwards into one command buffer) is the next rung.
-		var replay []*decodeLane
+		// one-encoder batch); re-encode lanes (MoE) advance through the plain
+		// path's per-token machinery — K forwards encoded into ONE shared
+		// submission when every session is shared-encode eligible (the 26B
+		// device-router lane), else each lane's own step. One model per set
+		// makes the partition all-or-nothing in practice; the split keeps a
+		// hybrid correct anyway.
+		var replay, reenc []*decodeLane
 		for _, lane := range advancing {
-			if !lane.reencode {
+			if lane.reencode {
+				reenc = append(reenc, lane)
+			} else {
 				replay = append(replay, lane)
-				continue
 			}
-			h, err := lane.sess.stepIDInPool(lane.pendingToken)
-			if err != nil {
-				stepErr = err
-				return
+		}
+		if len(reenc) > 0 && !ls.sharedReencodeForward(reenc) {
+			for _, lane := range reenc {
+				h, err := lane.sess.stepIDInPool(lane.pendingToken)
+				if err != nil {
+					stepErr = err
+					return
+				}
+				lane.hidden = append(lane.hidden[:0], h...)
+				lane.pos = lane.sess.pos
 			}
-			lane.hidden = append(lane.hidden[:0], h...)
-			lane.pos = lane.sess.pos
 		}
 		if len(replay) == 0 {
 			return
@@ -337,6 +343,49 @@ func (ls *laneSet) Step(ctx context.Context) ([]inference.LaneStep, error) {
 		return nil, stepErr
 	}
 	return results, nil
+}
+
+// sharedReencodeForward advances the re-encode lanes through ONE shared
+// submission: each lane's full one-token forward encodes into the same
+// command buffer (per-session buffers never alias), committed and waited
+// once — the submission shape that lets the GPU overlap K independent
+// forwards instead of paying K serial commit+wait round-trips. Returns false
+// WITHOUT advancing any lane when a session is ineligible (bf16/host-router
+// MoE, trace, PLE) or an encode declines mid-way — the caller then runs the
+// per-lane path; an uncommitted cb mutates no session state, so the retry is
+// clean. On success every lane's hidden and position are advanced and the
+// step counts one batched forward.
+func (ls *laneSet) sharedReencodeForward(reenc []*decodeLane) bool {
+	for _, lane := range reenc {
+		if !lane.sess.sharedStepEligible() {
+			return false
+		}
+	}
+	sink := &sharedStepSink{cb: commandBufferFast(queue)}
+	sink.enc = computeCommandEncoderFast(sink.cb)
+	finalOut := make([]metal.MTLBuffer, len(reenc))
+	for i, lane := range reenc {
+		if err := lane.sess.stepIDEncodeShared(lane.pendingToken, sink); err != nil {
+			// The failing step already ended the encoder; drop the cb
+			// uncommitted and let the caller retry every lane per-lane.
+			return false
+		}
+		finalOut[i] = sink.finalOut
+	}
+	endEncodingFast(sink.enc)
+	commitCommandBufferFast(sink.cb)
+	waitUntilCompletedFast(sink.cb)
+	ls.fwdCount++
+	for i, lane := range reenc {
+		if cap(lane.hidden) < ls.dModel*bf16Size {
+			lane.hidden = make([]byte, ls.dModel*bf16Size)
+		}
+		lane.hidden = lane.hidden[:ls.dModel*bf16Size]
+		copy(lane.hidden, lane.sess.state.bufferBytes(finalOut[i], ls.dModel*bf16Size))
+		lane.sess.pos++
+		lane.pos = lane.sess.pos
+	}
+	return true
 }
 
 // activeLanes returns the non-terminal lanes in stable admission order.

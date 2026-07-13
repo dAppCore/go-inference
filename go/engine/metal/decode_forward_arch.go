@@ -1292,6 +1292,54 @@ type capturedMLPInternal struct {
 // KV-sharing, sliding-window, the gemma4 norms, and MoE (the mid-token command-buffer flush
 // because the router does host top-k). The caches persist across calls, so successive
 // positions extend the same sequence. MUST be called inside a withAutoreleasePool.
+// sharedStepSink is the caller-owned submission a re-encode step encodes into
+// instead of running its own commit+wait — the seam that lets a lane owner
+// fold K independent one-token forwards into ONE command buffer (each session
+// binds only its own buffers: offBuf, xA/xB, scratches, KV — so K encodes
+// before one commit never alias). The step updates enc as it works (encoder
+// forks/joins live on the same cb) and hands back an OPEN serial encoder plus
+// finalOut, the buffer holding this token's final hidden — readable only
+// after the owner's wait. On error the step has already ended the encoder;
+// the owner must drop the cb UNCOMMITTED and stop using the sink (encode-time
+// work mutates no session state, so a per-lane retry from the same position
+// is clean).
+type sharedStepSink struct {
+	cb       metal.MTLCommandBufferObject
+	enc      metal.MTLComputeCommandEncoderObject
+	finalOut metal.MTLBuffer
+}
+
+// sharedEncodeEligible reports whether this state's one-token forward encodes
+// break-free into a caller-owned command buffer: no trace / probe / capture
+// flushes, no GPU profiler seams, no chain tail, no PLE prologue, and every
+// MoE layer on the fully-encoded device-router lane (bf16 MoE and non-device
+// router shapes keep the host handoff — a mid-token commit the shared
+// submission cannot absorb). Checked by the step itself at entry in sink mode,
+// so owner-side drift can never poison a shared command buffer.
+func (s *archDecodeState) sharedEncodeEligible() bool {
+	if s.trace || s.gpuProf != nil || s.chainTail != nil || len(s.ple) > 0 {
+		return false
+	}
+	if layerSpanProbeForTest != nil || captureLayerHiddens {
+		return false
+	}
+	for li := range s.specs {
+		if !s.specs[li].MoE {
+			continue
+		}
+		var moeQ *MoEQuantLayerWeights
+		if li < len(s.moeQuant) {
+			moeQ = s.moeQuant[li]
+		}
+		if moeQ == nil || !s.moeScratchOwnable ||
+			!quantMoEDeviceRouterBuffersUsable(*moeQ, s.dModel) ||
+			!routerTopKUsable(moeQ.NumExperts, moeQ.TopK) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *archDecodeState) stepToken(inputEmb []byte, pos int) ([]byte, error) {
 	return s.stepTokenResultWithInput(inputEmb, pos, true, true)
 }
@@ -1318,6 +1366,20 @@ func (s *archDecodeState) stepTokenResultWithInput(inputEmb []byte, pos int, rea
 }
 
 func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int, readResult, copyInput bool, dst []byte) ([]byte, error) {
+	return s.stepTokenEncode(inputEmb, pos, readResult, copyInput, dst, nil)
+}
+
+// stepTokenEncode is the one-token forward body. sink == nil is the classic
+// shape: own command buffer, commit, wait, read the final hidden. A non-nil
+// sink encodes into the CALLER's live cb/enc and returns without committing —
+// sink.finalOut names the buffer holding this token's final hidden and
+// sink.enc the still-open serial encoder (see sharedStepSink).
+func (s *archDecodeState) stepTokenEncode(inputEmb []byte, pos int, readResult, copyInput bool, dst []byte, sink *sharedStepSink) ([]byte, error) {
+	if sink != nil && !s.sharedEncodeEligible() {
+		// The owner pre-checks eligibility; re-check at entry so a hook armed
+		// between the check and the call can never poison the shared cb.
+		return nil, core.NewError("native.archDecodeState.stepTokenEncode: state is not shared-encode eligible")
+	}
 	if !s.hasDevicePagedKV() { // no paged pool ⇒ owners bind the deferred linear lb caches below
 		if err := s.ensureLBKVCaches(); err != nil {
 			return nil, err
@@ -1352,12 +1414,17 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 			}
 		}
 	}
-	cb := commandBufferFast(queue)
+	var cb metal.MTLCommandBufferObject
 	var enc metal.MTLComputeCommandEncoderObject
-	if s.gpuProf != nil {
-		enc = s.gpuProf.encoderFor(cb, "attn")
+	if sink != nil { // shared submission: encode into the caller's live cb/enc
+		cb, enc = sink.cb, sink.enc
 	} else {
-		enc = computeCommandEncoderFast(cb)
+		cb = commandBufferFast(queue)
+		if s.gpuProf != nil {
+			enc = s.gpuProf.encoderFor(cb, "attn")
+		} else {
+			enc = computeCommandEncoderFast(cb)
+		}
 	}
 	s.resetDevicePagedAttentionScratch()
 	in, out := inputBuf, s.xB
@@ -1466,6 +1533,15 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 				}
 			}
 			if !handledMoE {
+				if sink != nil {
+					// A shared submission cannot absorb the break-out flow (it
+					// commits the live cb mid-token). Eligibility pre-checks the
+					// router predicates, but encMoEBlockQuantDevice carries its
+					// own finer declines — fail the shared encode cleanly and
+					// let the owner retry this lane on the per-lane path.
+					endEncodingFast(enc)
+					return nil, core.NewError("native.archDecodeState.stepTokenEncode: MoE block declined the fully-encoded lane under a shared submission")
+				}
 				// The MoE stages run their own command buffers over h's SHARED buffer. The quant
 				// happy path (device router + device index + buffer output) never reads the host
 				// bytes, so the live buffer commits WITHOUT a wait — the queue orders the MoE
@@ -1623,6 +1699,14 @@ func (s *archDecodeState) stepTokenResultWithInputInto(inputEmb []byte, pos int,
 		}
 	}
 	toSerial() // the chain tail and everything after expect the tracked serial encoder
+	if sink != nil {
+		// Shared submission: hand the still-open serial encoder back to the
+		// owner with the buffer holding this token's final hidden. The owner
+		// encodes its remaining lanes, then commits and waits ONCE; only then
+		// is finalOut readable. (chainTail is nil here — eligibility.)
+		sink.enc, sink.finalOut = enc, in
+		return nil, nil
+	}
 	if s.chainTail != nil && !cbBroken {
 		// The tail encodes the head argmax + the NEXT token's input production into THIS
 		// command buffer; the commit + wait below stay the token's single sync. When the
