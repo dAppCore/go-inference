@@ -713,6 +713,17 @@ func (m *TextModel) Close() core.Result {
 	return core.Ok(nil)
 }
 
+// ResolvedStopTokens is the exported per-generation stop resolution — the
+// exact set the plain Generate/Chat paths arm: the request's stop tokens,
+// then the tokenizer EOS, the template turn-close id, template-implied stop
+// strings, and the checkpoint-declared set (generation_config eos_token_id),
+// each once. The serve scheduler's continuous-batching coordinator consults
+// this so a lane terminates exactly where the plain path would — without it a
+// lane knows only the request's stops and decodes past EOS to its budget.
+func (m *TextModel) ResolvedStopTokens(requestStops []int32) []int32 {
+	return m.stopTokens(inference.GenerateConfig{StopTokens: requestStops})
+}
+
 // stopTokens is the per-generation stop set: the request's own stop tokens
 // followed by the model-derived defaults. The common serve case carries no
 // request stop tokens, so it returns the set resolved once at construction with

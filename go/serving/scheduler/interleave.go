@@ -127,17 +127,36 @@ func (m *Model) scheduleInterleave(ctx context.Context, req inference.ScheduledR
 }
 
 // cbEligible reports whether a request can be served on the continuous-batching
-// shared-lane-set path: a raw prompt (the neutral TextModel surface exposes no
-// chat rendering, so a chat turn keeps the plain interleave path). Sampling is
-// no longer a wall: the lane owner runs per-lane sampler state token-identical
-// to the plain sampled generate, so greedy and sampled raw prompts both ride.
-func cbEligible(req inference.ScheduledRequest) bool {
-	return core.Trim(req.Prompt) != "" && len(req.Messages) == 0
+// shared-lane-set path. Raw prompts ride at any sampling discipline (the lane
+// owner runs per-lane sampler state token-identical to the plain sampled
+// generate). A TEXT-ONLY chat turn rides when the model exposes the chat
+// renderer capability (its own FormatChatPrompt — the same template string
+// Chat itself encodes on this path, where EnableThinking is never set);
+// multimodal turns and renderer-less models keep the plain interleave path.
+// NOTE: the serve-level welfare guard decorates TextModel.Chat, which the CB
+// route does not call — the welfare×CB interplay is deliberately un-audited
+// for now (tracked in the batching task); deployments running -welfare should
+// keep chat off CB by not enabling the scheduler, or accept the gap.
+func (m *Model) cbEligible(req inference.ScheduledRequest) bool {
+	if len(req.Messages) == 0 {
+		return core.Trim(req.Prompt) != ""
+	}
+	if m.cbRender == nil {
+		return false
+	}
+	for _, msg := range req.Messages {
+		if len(msg.Images) > 0 || len(msg.Audios) > 0 || len(msg.Videos) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
-// scheduleCBStep tokenises a raw prompt and drives it through the shared lane
-// set, adapting the per-request inference.Token stream into the ScheduledToken
-// surface the mux consumes — the CB-step twin of scheduleInterleave.
+// scheduleCBStep resolves a request to prompt tokens — a raw prompt directly,
+// a text-only chat turn through the model's own template renderer — and drives
+// it through the shared lane set, adapting the per-request inference.Token
+// stream into the ScheduledToken surface the mux consumes — the CB-step twin
+// of scheduleInterleave.
 func (m *Model) scheduleCBStep(ctx context.Context, req inference.ScheduledRequest) (inference.RequestHandle, <-chan inference.ScheduledToken, error) {
 	id := core.Trim(req.ID)
 	if id == "" {
@@ -147,20 +166,36 @@ func (m *Model) scheduleCBStep(ctx context.Context, req inference.ScheduledReque
 	if !ok { // gated at New, but stay defensive rather than panic
 		return m.scheduleInterleave(ctx, req)
 	}
-	promptIDs := tok.Encode(req.Prompt)
+	prompt := req.Prompt
+	if len(req.Messages) > 0 {
+		prompt = m.cbRender.FormatChatPrompt(req.Messages)
+	}
+	promptIDs := tok.Encode(prompt)
 	if len(promptIDs) == 0 {
 		return inference.RequestHandle{}, nil, core.E("scheduler.scheduleCBStep", "prompt encoded to no tokens", nil)
 	}
-	tokens, err := m.cbEngine.submit(ctx, id, promptIDs, req.Sampler.MaxTokens, req.Sampler.StopTokens, req.Sampler)
+	// The full stop resolution the plain path arms (EOS, turn-close, template,
+	// checkpoint-declared) — without it a lane decodes past EOS to its budget.
+	stops := req.Sampler.StopTokens
+	if m.cbStops != nil {
+		stops = m.cbStops.ResolvedStopTokens(req.Sampler.StopTokens)
+	}
+	tokens, err := m.cbEngine.submit(ctx, id, promptIDs, req.Sampler.MaxTokens, stops, req.Sampler)
 	if err != nil {
 		return inference.RequestHandle{}, nil, err
+	}
+	stopSet := make(map[int32]bool, len(stops))
+	for _, s := range stops {
+		stopSet[s] = true
 	}
 	labels := cloneLabels(req.Labels)
 	out := make(chan inference.ScheduledToken, m.streamBuffer)
 	go func() {
 		defer close(out)
 		for t := range tokens {
-			if t.Text == "" {
+			if t.Text == "" && !stopSet[t.ID] {
+				// Terminator text is never content — the plain path yields the
+				// stop token with empty text (engine decodeFromPrefilled).
 				t.Text = tok.Decode([]int32{t.ID})
 			}
 			out <- inference.ScheduledToken{RequestID: id, Token: t, Metrics: m.base.Metrics(), Labels: labels}
