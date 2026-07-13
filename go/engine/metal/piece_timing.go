@@ -19,6 +19,10 @@ var (
 	// pieceTimingOn). Σ span vs wall is the remaining per-token host/sync gap — the headroom a submit-ahead
 	// pipeline could overlap. Reset before a measured run.
 	chainedGPUSpanNs int64
+	// laneGPUSpanNs is chainedGPUSpanNs's lane-set twin: the GPU execution span of harvested chained lane
+	// rounds (gated by pieceTimingOn; accumulated in waitReleaseChainedCB). Lane wall − Σ span = the lane
+	// path's per-token host/sync gap, directly comparable with the serial chain's on the same boot.
+	laneGPUSpanNs int64
 	// allBarriersOffForTest records the ICB with NO barriers — a TIMING-ONLY ceiling probe (output is racy
 	// garbage). The no-barrier GPU span is the floor fusion chases: span_with_barriers − span_no_barriers
 	// is the barrier-serialisation cost. Never true in production.
