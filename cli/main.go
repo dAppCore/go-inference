@@ -10,6 +10,8 @@
 package main
 
 import (
+	"dappco.re/go/inference/cli/tui"
+
 	"context"
 	"io"
 	"os/signal"
@@ -82,6 +84,8 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runSpecCommand(ctx, args[1:], stdout, stderr)
 	case "ebook":
 		return runEbookCommand(ctx, args[1:], stdout, stderr)
+	case "tui":
+		return tui.Run(ctx, args[1:], stdout, stderr)
 	case "version", "-v", "--version":
 		core.WriteString(stdout, cliName()+" "+version+"\n")
 		return 0
@@ -102,6 +106,7 @@ func printUsage(w io.Writer) {
 	core.WriteString(w, "Run inference\n")
 	core.WriteString(w, "  serve               host OpenAI/Anthropic/Ollama HTTP API for a loaded model\n")
 	core.WriteString(w, "  generate            one-shot generate + decode tok/s (no serve; like-for-like bench)\n")
+	core.WriteString(w, "  tui                 chat with a model in the terminal (picker, streaming, thinking channel)\n")
 	core.WriteString(w, "\n")
 	core.WriteString(w, "Train\n")
 	core.WriteString(w, "  ssd                 self-distillation sampling: sample the frozen base, capture the trace\n")
