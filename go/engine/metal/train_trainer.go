@@ -176,7 +176,7 @@ func (t *LoRATrainer) seqGrads(ids []int32) (loss float32, dA, dB []float32, err
 	for i := range logits {
 		logits[i] = baseLogits[i] + delta[i]
 	}
-	loss, dLogits, err := CrossEntropyBackwardF32(logits, targets, rows, t.vocab)
+	loss, dLogits, err := CrossEntropyBackwardF32Auto(logits, targets, rows, t.vocab)
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -305,7 +305,7 @@ func (t *LoRATrainer) Loss(batch inference.Batch) (float64, error) {
 		for i := range logits {
 			logits[i] = baseLogits[i] + delta[i]
 		}
-		loss, _, err := CrossEntropyBackwardF32(logits, targets, rows, t.vocab)
+		loss, _, err := CrossEntropyBackwardF32Auto(logits, targets, rows, t.vocab)
 		if err != nil {
 			return 0, err
 		}
