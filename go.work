@@ -8,6 +8,7 @@ go 1.26.2
 // CI: GOWORK=off uses go/go.mod tags for reproducible resolution.
 
 use (
+	./examples
 	./go
 	./gui
 )
