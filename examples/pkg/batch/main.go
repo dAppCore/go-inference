@@ -28,10 +28,13 @@ func main() {
 		os.Exit(2)
 	}
 
+	// BatchGenerate continues RAW text (no chat template), so shape each
+	// prompt as an unfinished sentence — a completed sentence tends to close
+	// the turn immediately and yield nothing (see pkg/generate).
 	prompts := []string{
-		"Name one duty of a lighthouse keeper.",
-		"Name one hazard of the open sea.",
-		"Name one tool a navigator relies on.",
+		"A lighthouse keeper's first duty each evening is",
+		"The greatest hazard of the open sea is",
+		"The one tool every navigator relies on is",
 	}
 
 	r := inference.LoadModel(*model)

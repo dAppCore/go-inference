@@ -354,6 +354,12 @@ func (m *speculativeModel) record(res AssistantGenerateResult, promptLen int, du
 		TotalDuration:   dur,
 		DecodeDuration:  dur,
 	}
+	// The speculative run has no prefill/decode split (dur spans the whole
+	// verify loop), so the decode rate is tokens over the whole run — filled
+	// so Metrics() honours the interface's documented throughput field.
+	if dur > 0 {
+		m.lastMetrics.DecodeTokensPerSec = float64(len(res.Tokens)) / dur.Seconds()
+	}
 	spec := inference.SpeculativeMetrics{
 		DraftTokenSchedule: res.DraftTokenSchedule,
 		ProposedTokens:     res.DraftTokens,

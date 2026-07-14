@@ -13,11 +13,35 @@ library; the comments in each file are the documentation.
 | `pkg/chat/basic` | load a model, one chat turn, print the reply |
 | `pkg/chat/stream` | per-token streaming (the iterator IS the stream) |
 | `pkg/chat/thinking` | the Gemma 4 thought channel, split into thought + answer |
+| `pkg/chat/multiturn` | conversation history — the message slice IS the memory |
+| `pkg/chat/sampling` | temperature/top-k/top-p/min-p/seed, seeded reproducibility |
+| `pkg/chat/stop` | stop tokens, suppression, min-tokens-before-stop |
+| `pkg/chat/cancel` | cancelling generation: ctx cancel vs iterator break |
+| `pkg/chat/budget` | `WithThinkingBudget` — capped thought channel |
 | `pkg/chat/vision` | attach an image to a turn, with the capability probe |
+| `pkg/chat/audio` | attach WAV audio, with the `AudioModel` probe |
+| `pkg/chat/video` | attach video frames in time order |
+| `pkg/chat/mtp` | MTP speculative pair (target + assistant drafter, darwin) |
+| `pkg/generate` | raw completion — no chat template |
+| `pkg/batch` | `BatchGenerate` with per-prompt error handling |
+| `pkg/classify` | `Classify` + `WithLogits` — labels and margins |
+| `pkg/discover` | scan a directory for loadable model snapshots |
+| `pkg/info` | `Info()`, `ModelType()`, capability report |
+| `pkg/trace` | per-token decode phase timing (`DecodePhases`) |
+| `pkg/metrics-sink` | request-scoped usage under concurrent generations |
+| `pkg/adapter` | load a LoRA adapter produced by `train/sft` |
 | `pkg/benchmark` | `Metrics()` — prefill/decode tok/s, token counts, peak GPU memory |
 | `pkg/eval` | `Classify()` — batched one-token labels as a minimal eval harness |
+| `pkg/backends` | the backend registry; pinning with `WithBackend` |
+| `pkg/serve` | embed the OpenAI-compatible server in your own app |
+| `pkg/state` | durable KV-state turns — the no-prompt-replay loop |
 | `pkg/train/ssd` | self-distillation sampling: capture a trace (no training) |
 | `pkg/train/sft` | LoRA fine-tuning on `{"messages"}` rows, adapter out |
+
+Every folder carries its own README (generated from the `main.go` doc comment
+— `python3 gen-readmes.py` after adding examples). Backend builds
+(`<example>-{mlx,amd,cuda,cpu}`) are `make`-driven — see
+[pkg/README.md](pkg/README.md) and the [Makefile](Makefile).
 
 `cli/` is reserved for examples that drive the `lem` binary rather than the
 library.
