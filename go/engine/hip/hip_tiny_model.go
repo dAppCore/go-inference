@@ -1382,7 +1382,7 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 				if outputRow < 0 {
 					outputRow = len(ubatch.Tokens) - 1
 				}
-				current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], forward.FinalHidden, len(ubatch.Tokens), outputRow, req.Epsilon, generate, suppressTokens, history, float64(sampler.Draw()), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
+				current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], cfg.HeadLoRA, forward.FinalHidden, len(ubatch.Tokens), outputRow, req.Epsilon, generate, suppressTokens, history, float64(sampler.Draw()), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
 				if err != nil {
 					_ = forward.Close()
 					runErr = err
@@ -1475,7 +1475,7 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 				deviceState = advanced.DeviceState
 				advanced.DeviceState = nil
 				if hostSampling {
-					current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], advanced.Current.DeviceFinalHidden, 1, 0, req.Epsilon, generate, suppressTokens, history, float64(sampler.Draw()), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
+					current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], cfg.HeadLoRA, advanced.Current.DeviceFinalHidden, 1, 0, req.Epsilon, generate, suppressTokens, history, float64(sampler.Draw()), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
 					if err != nil {
 						_ = advanced.Close()
 						runErr = err
@@ -1554,7 +1554,7 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 	}, func() error { return runErr }
 }
 
-func hipGemma4Q4SampleBatchedPrefillRow(ctx context.Context, driver nativeHIPDriver, last hipGemma4Q4Layer0Config, finalHidden *hipDeviceByteBuffer, tokenCount, row int, epsilon float32, generate inference.GenerateConfig, suppressTokens, history []int32, draw float64, finalGreedyBuffer *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace, deviceTopK bool) (hipGemma4Q4ForwardResult, error) {
+func hipGemma4Q4SampleBatchedPrefillRow(ctx context.Context, driver nativeHIPDriver, last hipGemma4Q4Layer0Config, headLoRA *hipLoadedSmallLoRAAdapter, finalHidden *hipDeviceByteBuffer, tokenCount, row int, epsilon float32, generate inference.GenerateConfig, suppressTokens, history []int32, draw float64, finalGreedyBuffer *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace, deviceTopK bool) (hipGemma4Q4ForwardResult, error) {
 	if finalHidden == nil || row < 0 || row >= tokenCount || finalHidden.Count() != tokenCount*last.HiddenSize {
 		return hipGemma4Q4ForwardResult{}, core.E(hipGemma4Q4Layer0Operation, "batched prefill sample row is invalid", nil)
 	}
@@ -1578,6 +1578,16 @@ func hipGemma4Q4SampleBatchedPrefillRow(ctx context.Context, driver nativeHIPDri
 	logits, err := hipReadFloat32DeviceOutput(logitsBuffer, hipGemma4Q4Layer0Operation, "batched prefill logits", last.LMHeadProjection.Rows)
 	if err != nil {
 		return hipGemma4Q4ForwardResult{}, err
+	}
+	if headLoRA != nil {
+		normed, err := hipReadFloat32DeviceOutput(finalNorm, hipGemma4Q4Layer0Operation, "batched prefill final norm", last.HiddenSize)
+		if err != nil {
+			return hipGemma4Q4ForwardResult{}, err
+		}
+		logits, err = hipApplyHeadLoRA(normed, logits, headLoRA.a, headLoRA.b, last.VocabSize, last.HiddenSize, headLoRA.rank, headLoRA.alpha)
+		if err != nil {
+			return hipGemma4Q4ForwardResult{}, err
+		}
 	}
 	logits, err = hipGemma4Q4SoftcapLogits(logits, last.FinalLogitSoftcap)
 	if err != nil {

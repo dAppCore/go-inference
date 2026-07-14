@@ -43,6 +43,7 @@ var (
 	_ engine.ThoughtSuppressorDeclarer = (*hipTokenModel)(nil)
 	_ engine.ChatTemplateDeclarer      = (*hipTokenModel)(nil)
 	_ engine.LaneSetOpener             = (*hipTokenModel)(nil)
+	_ engine.TrainerModel              = (*hipTokenModel)(nil)
 )
 
 // hipTokenModel wraps a loaded Gemma4-Q4 hip model as the shared
@@ -58,17 +59,6 @@ type hipTokenModel struct {
 	declaredStops    []int32
 	declaredSampling engine.SamplingDefaults
 }
-
-// Training boundary: hipTokenModel deliberately does not implement
-// engine.TrainerModel yet. The Gemma4-Q4 package forward remains experimental,
-// and its exposed logits/final-hidden buffers do not form a retained Batch
-// forward with response loss masking. RunNativeLoRABackwardPass consumes
-// caller-provided activations and upstream gradients rather than gradients from
-// that model forward, while the current adapter loader supports only tiny,
-// small dense Qwen/Gemma LM-head, and BERT classifier adapters, not Gemma4.
-// Adding OpenTrainer before those paths compose through Batch -> loss ->
-// backward -> AdamW -> Save -> reload would advertise synthetic-array updates
-// as model training.
 
 // newHipTokenModel binds a loaded model + tokenizer as an engine.TokenModel,
 // parsing the checkpoint's generation_config sampling defaults from the loaded
@@ -106,6 +96,15 @@ func (m *hipTokenModel) OpenEngineSession() (engine.Session, error) {
 		return nil, core.NewError("hip.TokenModel: model is not initialised")
 	}
 	return newHipEngineSession(m.loaded)
+}
+
+// OpenTrainer opens a retained Gemma4 output-head LoRA lifecycle through the
+// shared engine.TrainerModel contract.
+func (m *hipTokenModel) OpenTrainer(cfg inference.TrainingConfig) (engine.Trainer, error) {
+	if m == nil {
+		return nil, core.NewError("hip.TokenModel: model is not initialised")
+	}
+	return newHIPLoRATrainer(m.loaded, cfg)
 }
 
 // Close releases the loaded model's resident weights.
@@ -445,6 +444,11 @@ func (m *rocmModel) ResolvedStopTokens(requestStops []int32) []int32 {
 }
 
 func (m *rocmModel) BatchStepAvailable() bool {
+	if m != nil {
+		if loaded, ok := m.native.(*hipLoadedModel); ok && loaded.gemma4LoRA != nil {
+			return false
+		}
+	}
 	return m != nil && m.engineModel != nil && m.engineModel.BatchStepAvailable()
 }
 

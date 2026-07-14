@@ -119,9 +119,13 @@ type hipGemma4Q4ForwardConfig struct {
 	Layers          []hipGemma4Q4Layer0Config
 	KVSharedLayers  int
 	SharedKVSources []int
+	HeadLoRA        *hipLoadedSmallLoRAAdapter
 }
 
 func (cfg hipGemma4Q4ForwardConfig) usesDenseProjectionWeights() bool {
+	if cfg.HeadLoRA != nil {
+		return true
+	}
 	for _, layer := range cfg.Layers {
 		projections := [...]hipMLXQ4DeviceWeightConfig{
 			layer.QueryProjection,
@@ -604,7 +608,12 @@ func (model *hipLoadedModel) cachedGemma4Q4ForwardConfig(layerCount int) (hipGem
 	model.q4ConfigMu.Lock()
 	defer model.q4ConfigMu.Unlock()
 	if model.q4ConfigOK && model.q4Layers == layerCount {
-		return model.q4Config, nil
+		cfg := model.q4Config
+		cfg.HeadLoRA = model.gemma4LoRA
+		if err := cfg.validateHeadLoRA(); err != nil {
+			return hipGemma4Q4ForwardConfig{}, err
+		}
+		return cfg, nil
 	}
 	cfg, err := model.loadedGemma4Q4ForwardConfig(layerCount)
 	if err != nil {
@@ -613,6 +622,10 @@ func (model *hipLoadedModel) cachedGemma4Q4ForwardConfig(layerCount int) (hipGem
 	model.q4Config = cfg
 	model.q4Layers = layerCount
 	model.q4ConfigOK = true
+	cfg.HeadLoRA = model.gemma4LoRA
+	if err := cfg.validateHeadLoRA(); err != nil {
+		return hipGemma4Q4ForwardConfig{}, err
+	}
 	return cfg, nil
 }
 
@@ -1015,7 +1028,7 @@ func hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx context.Context, driv
 	if req.SkipFinalSample {
 		// Prompt prefill only needs updated KV state; sampling every intermediate
 		// prompt token wastes a full LM-head projection.
-	} else if req.DeviceFinalSample || req.DeviceFinalScores || req.DeviceFinalTopKSample {
+	} else if cfg.HeadLoRA == nil && (req.DeviceFinalSample || req.DeviceFinalScores || req.DeviceFinalTopKSample) {
 		finalHiddenBuffer := hiddenBuffer
 		if finalHiddenBuffer == nil {
 			finalHiddenBuffer, err = hipUploadGemma4Q4Float32Input(driver, "Gemma4 q4 final hidden", hidden)
@@ -1085,6 +1098,12 @@ func hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx context.Context, driv
 		logits, err = hipRunMLXQ4ProjectionKernelWithDeviceWeightConfig(ctx, driver, finalNorm, last.LMHeadProjection)
 		if err != nil {
 			return hipGemma4Q4ForwardResult{}, hipGemma4Q4DecodeState{}, err
+		}
+		if cfg.HeadLoRA != nil {
+			logits, err = hipApplyHeadLoRA(finalNorm, logits, cfg.HeadLoRA.a, cfg.HeadLoRA.b, last.VocabSize, last.HiddenSize, cfg.HeadLoRA.rank, cfg.HeadLoRA.alpha)
+			if err != nil {
+				return hipGemma4Q4ForwardResult{}, hipGemma4Q4DecodeState{}, err
+			}
 		}
 		logits, err = hipGemma4Q4SoftcapLogits(logits, last.FinalLogitSoftcap)
 		if err != nil {
@@ -2570,6 +2589,9 @@ func (cfg hipGemma4Q4ForwardConfig) validate() error {
 	if err := first.validate(); err != nil {
 		return err
 	}
+	if err := cfg.validateHeadLoRA(); err != nil {
+		return err
+	}
 	for index, layer := range cfg.Layers[1:] {
 		if err := layer.validate(); err != nil {
 			return err
@@ -2582,6 +2604,23 @@ func (cfg hipGemma4Q4ForwardConfig) validate() error {
 		if first.PerLayerInput.hasGlobalPrecompute() && !layer.PerLayerInput.hasLayerApply() {
 			return core.E(hipGemma4Q4Layer0Operation, core.Sprintf("layer %d per-layer input config is missing", index+1), nil)
 		}
+	}
+	return nil
+}
+
+func (cfg hipGemma4Q4ForwardConfig) validateHeadLoRA() error {
+	if cfg.HeadLoRA == nil {
+		return nil
+	}
+	if len(cfg.Layers) == 0 {
+		return core.E(hipGemma4Q4Layer0Operation, "Gemma4 head LoRA requires model layers", nil)
+	}
+	first := cfg.Layers[0]
+	adapter := cfg.HeadLoRA
+	if adapter.rank <= 0 || !hipQ8ScaleIsPositiveFinite(adapter.alpha) ||
+		len(adapter.a) != adapter.rank*first.HiddenSize ||
+		len(adapter.b) != first.VocabSize*adapter.rank {
+		return core.E(hipGemma4Q4Layer0Operation, "Gemma4 head LoRA shape does not match the model head", nil)
 	}
 	return nil
 }
@@ -3433,6 +3472,12 @@ func hipGemma4Q4ForwardLabels(cfg hipGemma4Q4ForwardConfig, req hipGemma4Q4Forwa
 	if cfg.KVSharedLayers > 0 {
 		labels["gemma4_q4_kv_shared_layers"] = core.Sprintf("%d", cfg.KVSharedLayers)
 		labels["decode_primitives"] += ",gemma4_shared_kv"
+	}
+	if cfg.HeadLoRA != nil {
+		labels["adapter_runtime"] = "hip_gemma4_lm_head"
+		labels["adapter_hash"] = cfg.HeadLoRA.identity.Hash
+		labels["lora_model_status"] = "gemma4_head_linked"
+		labels["decode_primitives"] += ",lora_head_delta"
 	}
 	return labels
 }

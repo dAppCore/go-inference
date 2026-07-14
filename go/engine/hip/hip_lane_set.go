@@ -112,6 +112,9 @@ func (m *hipTokenModel) OpenLaneSet(cfg inference.LaneSetConfig) (inference.Lane
 	if !hipLoadedGemma4Q4GenerateLinked(m.loaded) || m.loaded.modelInfo.NumLayers <= 0 {
 		return nil, core.NewError("hip.TokenModel.OpenLaneSet: model is not a linked Gemma4 runtime")
 	}
+	if m.loaded.gemma4LoRA != nil {
+		return nil, core.NewError("hip.TokenModel.OpenLaneSet: Gemma4 head LoRA currently requires the serial host-sampling lane")
+	}
 	forward, err := m.loaded.cachedGemma4Q4ForwardConfig(m.loaded.modelInfo.NumLayers)
 	if err != nil {
 		return nil, err
@@ -535,7 +538,7 @@ func (executor *hipGemma4Q4LaneExecutor) sampleHiddenRowWithWorkspace(ctx contex
 	}
 	last := executor.forward.Layers[len(executor.forward.Layers)-1]
 	result, err := hipGemma4Q4SampleBatchedPrefillRow(
-		ctx, executor.loaded.driver, last, hidden, rows, row, 1e-6,
+		ctx, executor.loaded.driver, last, executor.forward.HeadLoRA, hidden, rows, row, 1e-6,
 		sample.generate, nil, sample.history, sample.draw(), nil, workspace, false,
 	)
 	if err != nil {

@@ -697,6 +697,7 @@ type hipLoadedModel struct {
 	adapter               inference.AdapterIdentity
 	tinyLoRA              *hipLoadedTinyLoRAAdapter
 	smallLoRA             *hipLoadedSmallLoRAAdapter
+	gemma4LoRA            *hipLoadedSmallLoRAAdapter
 	classLoRA             *hipLoadedClassifierLoRAAdapter
 	tokenText             *hipTokenTextDecoder
 	audio                 *AudioTower
@@ -1010,6 +1011,18 @@ func (model *hipLoadedModel) LoadAdapter(path string) (inference.AdapterIdentity
 	if core.Trim(path) == "" {
 		return inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "adapter path is required", nil)
 	}
+	if model != nil && hipLoadedGemma4Q4GenerateLinked(model) && isROCmGemma4Architecture(model.modelInfo.Architecture) {
+		adapter, identity, err := model.loadGemma4HeadLoRAAdapter(path)
+		if err != nil {
+			return inference.AdapterIdentity{}, err
+		}
+		model.gemma4LoRA = adapter
+		model.smallLoRA = nil
+		model.tinyLoRA = nil
+		model.classLoRA = nil
+		model.adapter = cloneAdapterIdentity(identity)
+		return cloneAdapterIdentity(identity), nil
+	}
 	if model == nil || normalizeHIPKernelStatus(model.KernelStatus()).LoRA != hipKernelStatusLinked {
 		return inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "native LoRA adapter application is not linked yet: "+path, nil)
 	}
@@ -1019,6 +1032,7 @@ func (model *hipLoadedModel) LoadAdapter(path string) (inference.AdapterIdentity
 			return inference.AdapterIdentity{}, err
 		}
 		model.smallLoRA = adapter
+		model.gemma4LoRA = nil
 		model.tinyLoRA = nil
 		model.classLoRA = nil
 		model.adapter = cloneAdapterIdentity(identity)
@@ -1031,6 +1045,7 @@ func (model *hipLoadedModel) LoadAdapter(path string) (inference.AdapterIdentity
 		}
 		model.tinyLoRA = adapter
 		model.smallLoRA = nil
+		model.gemma4LoRA = nil
 		model.classLoRA = nil
 		model.adapter = cloneAdapterIdentity(identity)
 		return cloneAdapterIdentity(identity), nil
@@ -1047,6 +1062,7 @@ func (model *hipLoadedModel) LoadAdapter(path string) (inference.AdapterIdentity
 		model.classLoRA = adapter
 		model.tinyLoRA = nil
 		model.smallLoRA = nil
+		model.gemma4LoRA = nil
 		model.adapter = cloneAdapterIdentity(identity)
 		return cloneAdapterIdentity(identity), nil
 	}
@@ -1057,6 +1073,7 @@ func (model *hipLoadedModel) UnloadAdapter() error {
 	model.adapter = inference.AdapterIdentity{}
 	model.tinyLoRA = nil
 	model.smallLoRA = nil
+	model.gemma4LoRA = nil
 	model.classLoRA = nil
 	return nil
 }
@@ -1430,6 +1447,7 @@ func (model *hipLoadedModel) Close() error {
 	model.adapter = inference.AdapterIdentity{}
 	model.tinyLoRA = nil
 	model.smallLoRA = nil
+	model.gemma4LoRA = nil
 	model.classLoRA = nil
 	model.storeAttachedDrafterRuntime(nil)
 	model.closed = true

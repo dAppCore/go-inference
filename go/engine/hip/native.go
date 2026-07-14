@@ -2416,6 +2416,16 @@ func rocmCapabilityReport(device nativeDeviceInfo, model inference.ModelIdentity
 			"supported_adapter_scopes":       "tiny_output_head,qwen_gemma_dense_small_lm_head,bert_sequence_classifier",
 		}
 	}
+	if option.Gemma4Q4GenerateLinked && isROCmGemma4Architecture(model.Architecture) {
+		loraCapability = inference.ExperimentalCapability(inference.CapabilityLoRAInference, inference.CapabilityGroupModel, "Metal-compatible lm_head LoRA adapters load onto the linked Gemma4 runtime and apply before logit softcap")
+		loraCapability.Labels = map[string]string{
+			"kernel_scope":                   "loaded_gemma4_head_adapter",
+			"lora_kernel":                    "gemma4_q4_projection_plus_host_delta",
+			"production_adapter_application": hipKernelStatusLinked,
+			"runtime_status":                 string(inference.FeatureRuntimeExperimental),
+			"supported_adapter_scopes":       "gemma4_lm_head",
+		}
+	}
 	loraCapability.Labels = rocmApplyGemma4LoRAAdapterCapabilityLabels(loraCapability.Labels, model)
 	embeddingCapability := inference.PlannedCapability(inference.CapabilityEmbeddings, inference.CapabilityGroupModel, "embedding contract is available; native ROCm embedding kernels are pending")
 	if kernelStatus.Embedding == hipKernelStatusLinked {
@@ -2528,6 +2538,19 @@ func rocmCapabilityReport(device nativeDeviceInfo, model inference.ModelIdentity
 	modelMergeCapability := inference.ExperimentalCapability(inference.CapabilityModelMerge, inference.CapabilityGroupRuntime, "dense F32 safetensors LoRA model-pack merge is linked; quantized production Gemma4 merge remains pending")
 	modelMergeCapability.Labels = rocmApplyGemma4LoRAAdapterCapabilityLabels(modelMergeCapability.Labels, model)
 	loraTrainingCapability := rocmPlannedTrainingCapability(inference.CapabilityLoRATraining, "native ROCm LoRA backward/update kernels are not linked yet", "lora_backward", kernelStatus)
+	if option.Gemma4Q4GenerateLinked && isROCmGemma4Architecture(model.Architecture) {
+		loraTrainingCapability = inference.ExperimentalCapability(inference.CapabilityLoRATraining, inference.CapabilityGroupTraining, "retained Gemma4 head-LoRA SFT is linked through the shared engine.TrainerModel lifecycle with packed AdamW and Metal-compatible save/reload")
+		loraTrainingCapability.Labels = map[string]string{
+			"adapter_artifact":   "adapter.safetensors+adapter_config.json",
+			"adapter_target":     "lm_head",
+			"backward_backend":   "reference",
+			"optimizer_backend":  "hip_or_reference",
+			"optimizer_layout":   "packed_contiguous_parameters_m_v",
+			"runtime_status":     string(inference.FeatureRuntimeExperimental),
+			"training_interface": "engine.TrainerModel",
+			"training_kernel":    hipKernelStatusLinked,
+		}
+	}
 	loraTrainingCapability.Labels = rocmApplyGemma4LoRAAdapterCapabilityLabels(loraTrainingCapability.Labels, model)
 	agentMemoryCapability := rocmAgentMemoryCapability()
 	quantizationCapability := inference.ExperimentalCapability(inference.CapabilityQuantization, inference.CapabilityGroupRuntime, "TurboQuant KV-cache compression has a CPU reference codec for research validation; model weight quantisation remains owned by model-pack metadata and production HIP KV compression is pending")

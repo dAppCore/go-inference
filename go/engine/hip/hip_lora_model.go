@@ -13,11 +13,198 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/model/safetensors"
+	coreio "dappco.re/go/io"
 )
 
 const rocmTinyLoRAFormat = "rocm-tiny-lora"
 const rocmSmallLoRAFormat = "rocm-small-lm-head-lora"
 const rocmClassifierLoRAFormat = "rocm-classifier-lora"
+
+type metalLoRAAdapterConfig struct {
+	Rank       int      `json:"rank"`
+	Alpha      float32  `json:"alpha"`
+	NumLayers  int      `json:"num_layers"`
+	LoRALayers []string `json:"lora_layers"`
+}
+
+type metalHeadLoRAAdapter struct {
+	a          []float32
+	b          []float32
+	rank       int
+	hiddenSize int
+	vocabSize  int
+	alpha      float32
+}
+
+// saveMetalHeadLoRAAdapter writes the adapter.safetensors plus
+// adapter_config.json package emitted by engine/metal's LoRATrainer.
+func saveMetalHeadLoRAAdapter(path string, loraA, loraB []float32, rows, cols, rank int, alpha float32) error {
+	if core.Trim(path) == "" {
+		return core.NewError("rocm: Metal LoRA adapter path is required")
+	}
+	if rows <= 0 || cols <= 0 || rank <= 0 {
+		return core.NewError("rocm: Metal LoRA adapter rows, cols, and rank must be positive")
+	}
+	if !hipQ8ScaleIsPositiveFinite(alpha) {
+		return core.NewError("rocm: Metal LoRA adapter alpha must be positive and finite")
+	}
+	if len(loraA) != rank*cols || len(loraB) != rows*rank {
+		return core.NewError("rocm: Metal LoRA adapter factor shapes do not match the declared head")
+	}
+	if !rocmFloat32SliceFinite(loraA) || !rocmFloat32SliceFinite(loraB) {
+		return core.NewError("rocm: Metal LoRA adapter factors must be finite")
+	}
+	if result := core.MkdirAll(path, core.FileMode(0o755)); !result.OK {
+		return core.E("rocm.SaveMetalHeadLoRAAdapter", "ensure adapter directory", result.Value.(error))
+	}
+	blob, err := safetensors.Encode(map[string]safetensors.Tensor{
+		"lm_head.lora_a": {Dtype: "F32", Shape: []int{rank, cols}, Data: safetensors.EncodeFloat32(loraA)},
+		"lm_head.lora_b": {Dtype: "F32", Shape: []int{rows, rank}, Data: safetensors.EncodeFloat32(loraB)},
+	})
+	if err != nil {
+		return core.E("rocm.SaveMetalHeadLoRAAdapter", "encode adapter.safetensors", err)
+	}
+	if err := coreio.Local.Write(core.PathJoin(path, "adapter.safetensors"), string(blob)); err != nil {
+		return core.E("rocm.SaveMetalHeadLoRAAdapter", "write adapter.safetensors", err)
+	}
+	encoded := core.JSONMarshal(metalLoRAAdapterConfig{Rank: rank, Alpha: alpha, NumLayers: 0, LoRALayers: []string{"lm_head"}})
+	if !encoded.OK {
+		return core.E("rocm.SaveMetalHeadLoRAAdapter", "marshal adapter_config.json", encoded.Value.(error))
+	}
+	if err := coreio.Local.Write(core.PathJoin(path, "adapter_config.json"), string(encoded.Value.([]byte))); err != nil {
+		return core.E("rocm.SaveMetalHeadLoRAAdapter", "write adapter_config.json", err)
+	}
+	return nil
+}
+
+// loadMetalHeadLoRAAdapter decodes the lm_head factors in Metal's portable
+// layout: A [rank,hidden] and B [vocab,rank].
+func loadMetalHeadLoRAAdapter(path string) (*metalHeadLoRAAdapter, error) {
+	if core.Trim(path) == "" {
+		return nil, core.NewError("rocm: Metal LoRA adapter path is required")
+	}
+	configText, err := coreio.Local.Read(core.PathJoin(path, "adapter_config.json"))
+	if err != nil {
+		return nil, core.E("rocm.LoadMetalHeadLoRAAdapter", "read adapter_config.json", err)
+	}
+	var config metalLoRAAdapterConfig
+	if result := core.JSONUnmarshal([]byte(configText), &config); !result.OK {
+		return nil, core.E("rocm.LoadMetalHeadLoRAAdapter", "parse adapter_config.json", result.Value.(error))
+	}
+	tensors, err := safetensors.Load(core.PathJoin(path, "adapter.safetensors"))
+	if err != nil {
+		return nil, core.E("rocm.LoadMetalHeadLoRAAdapter", "load adapter.safetensors", err)
+	}
+	a, hasA := tensors["lm_head.lora_a"]
+	b, hasB := tensors["lm_head.lora_b"]
+	if !hasA || !hasB {
+		return nil, core.NewError("rocm: Metal LoRA adapter must contain lm_head factors")
+	}
+	if len(a.Shape) != 2 || len(b.Shape) != 2 || a.Shape[0] <= 0 || a.Shape[1] <= 0 || b.Shape[0] <= 0 || b.Shape[1] != a.Shape[0] {
+		return nil, core.NewError("rocm: Metal LoRA adapter lm_head factor shapes are invalid")
+	}
+	rank, hiddenSize, vocabSize := a.Shape[0], a.Shape[1], b.Shape[0]
+	if config.Rank > 0 && config.Rank != rank {
+		return nil, core.NewError("rocm: Metal LoRA adapter rank does not match lm_head factors")
+	}
+	alpha := config.Alpha
+	if alpha == 0 {
+		alpha = float32(rank)
+	}
+	if !hipQ8ScaleIsPositiveFinite(alpha) {
+		return nil, core.NewError("rocm: Metal LoRA adapter alpha must be positive and finite")
+	}
+	loraA, err := safetensors.DecodeFloat32(a.Dtype, a.Data, rank*hiddenSize)
+	if err != nil {
+		return nil, core.E("rocm.LoadMetalHeadLoRAAdapter", "decode lm_head.lora_a", err)
+	}
+	loraB, err := safetensors.DecodeFloat32(b.Dtype, b.Data, vocabSize*rank)
+	if err != nil {
+		return nil, core.E("rocm.LoadMetalHeadLoRAAdapter", "decode lm_head.lora_b", err)
+	}
+	if !rocmFloat32SliceFinite(loraA) || !rocmFloat32SliceFinite(loraB) {
+		return nil, core.NewError("rocm: Metal LoRA adapter factors must be finite")
+	}
+	return &metalHeadLoRAAdapter{a: loraA, b: loraB, rank: rank, hiddenSize: hiddenSize, vocabSize: vocabSize, alpha: alpha}, nil
+}
+
+func loadMetalHeadLoRAAdapterIfPresent(path string) (*metalHeadLoRAAdapter, bool, error) {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return nil, false, nil
+	}
+	_, tensorErr := os.Stat(filepath.Join(path, "adapter.safetensors"))
+	_, configErr := os.Stat(filepath.Join(path, "adapter_config.json"))
+	if os.IsNotExist(tensorErr) && os.IsNotExist(configErr) {
+		return nil, false, nil
+	}
+	adapter, err := loadMetalHeadLoRAAdapter(path)
+	return adapter, true, err
+}
+
+func (model *hipLoadedModel) loadGemma4HeadLoRAAdapter(path string) (*hipLoadedSmallLoRAAdapter, inference.AdapterIdentity, error) {
+	if model == nil || !isROCmGemma4Architecture(model.modelInfo.Architecture) {
+		return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "Gemma4 model is required for a Gemma4 head adapter", nil)
+	}
+	metal, present, err := loadMetalHeadLoRAAdapterIfPresent(path)
+	if err != nil {
+		return nil, inference.AdapterIdentity{}, err
+	}
+	if !present {
+		return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "Gemma4 head adapter requires adapter.safetensors and adapter_config.json", nil)
+	}
+	file := metalHeadLoRAAdapterFile(metal)
+	adapter, err := validateSmallLoRAAdapterFile(file, hipLoadedSmallDecodeConfig{
+		Architecture: model.modelInfo.Architecture,
+		HiddenSize:   model.modelInfo.HiddenSize,
+		VocabSize:    model.modelInfo.VocabSize,
+	})
+	if err != nil {
+		return nil, inference.AdapterIdentity{}, err
+	}
+	adapterPath := core.PathJoin(path, "adapter.safetensors")
+	read := core.ReadFile(adapterPath)
+	if !read.OK {
+		return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "read adapter", read.Value.(error))
+	}
+	sum := sha256.Sum256(read.Value.([]byte))
+	identity := inference.AdapterIdentity{
+		Path:       path,
+		Hash:       hex.EncodeToString(sum[:]),
+		Format:     rocmSmallLoRAFormat,
+		Rank:       adapter.rank,
+		Alpha:      adapter.alpha,
+		TargetKeys: []string{"lm_head.weight"},
+		Labels: map[string]string{
+			"adapter_file":        adapterPath,
+			"adapter_name":        "metal-lm-head-lora",
+			"adapter_runtime":     "hip_gemma4_lm_head",
+			"decode_architecture": model.modelInfo.Architecture,
+			"lora_kernel":         hipKernelStatusLinked,
+			"lora_model_status":   "gemma4_head_linked",
+			"target":              "lm_head.weight",
+			"target_hidden_size":  core.Sprintf("%d", model.modelInfo.HiddenSize),
+			"target_vocab_size":   core.Sprintf("%d", model.modelInfo.VocabSize),
+		},
+	}
+	adapter.identity = identity
+	return adapter, identity, nil
+}
+
+func metalHeadLoRAAdapterFile(adapter *metalHeadLoRAAdapter) hipTinyLoRAAdapterFile {
+	return hipTinyLoRAAdapterFile{
+		Format:     rocmSmallLoRAFormat,
+		Name:       "metal-lm-head-lora",
+		Target:     "lm_head.weight",
+		Rank:       adapter.rank,
+		Alpha:      adapter.alpha,
+		HiddenSize: adapter.hiddenSize,
+		VocabSize:  adapter.vocabSize,
+		LoRAA:      adapter.a,
+		LoRAB:      adapter.b,
+	}
+}
 
 type hipTinyLoRAAdapterFile struct {
 	Format     string    `json:"format,omitempty"`
@@ -77,15 +264,29 @@ func (model *hipLoadedModel) loadTinyLoRAAdapter(path string) (*hipLoadedTinyLoR
 	if err != nil {
 		return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "load tiny model config", err)
 	}
-	adapterPath := resolveTinyLoRAAdapterPath(path)
-	read := core.ReadFile(adapterPath)
-	if !read.OK {
-		return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "read adapter", read.Value.(error))
-	}
-	payload := read.Value.([]byte)
 	var file hipTinyLoRAAdapterFile
-	if result := core.JSONUnmarshal(payload, &file); !result.OK {
-		return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "parse adapter", result.Value.(error))
+	var payload []byte
+	adapterPath := resolveTinyLoRAAdapterPath(path)
+	if metal, present, err := loadMetalHeadLoRAAdapterIfPresent(path); present {
+		if err != nil {
+			return nil, inference.AdapterIdentity{}, err
+		}
+		file = metalHeadLoRAAdapterFile(metal)
+		adapterPath = core.PathJoin(path, "adapter.safetensors")
+		read := core.ReadFile(adapterPath)
+		if !read.OK {
+			return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "read adapter", read.Value.(error))
+		}
+		payload = read.Value.([]byte)
+	} else {
+		read := core.ReadFile(adapterPath)
+		if !read.OK {
+			return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "read adapter", read.Value.(error))
+		}
+		payload = read.Value.([]byte)
+		if result := core.JSONUnmarshal(payload, &file); !result.OK {
+			return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "parse adapter", result.Value.(error))
+		}
 	}
 	adapter, err := validateTinyLoRAAdapterFile(file, cfg)
 	if err != nil {
@@ -190,15 +391,29 @@ func validateTinyLoRAAdapterFile(file hipTinyLoRAAdapterFile, cfg hipLoadedTinyL
 }
 
 func (model *hipLoadedModel) loadSmallLoRAAdapter(path string, cfg hipLoadedSmallDecodeConfig) (*hipLoadedSmallLoRAAdapter, inference.AdapterIdentity, error) {
-	adapterPath := resolveSmallLoRAAdapterPath(path)
-	read := core.ReadFile(adapterPath)
-	if !read.OK {
-		return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "read adapter", read.Value.(error))
-	}
-	payload := read.Value.([]byte)
 	var file hipTinyLoRAAdapterFile
-	if result := core.JSONUnmarshal(payload, &file); !result.OK {
-		return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "parse adapter", result.Value.(error))
+	var payload []byte
+	adapterPath := resolveSmallLoRAAdapterPath(path)
+	if metal, present, err := loadMetalHeadLoRAAdapterIfPresent(path); present {
+		if err != nil {
+			return nil, inference.AdapterIdentity{}, err
+		}
+		file = metalHeadLoRAAdapterFile(metal)
+		adapterPath = core.PathJoin(path, "adapter.safetensors")
+		read := core.ReadFile(adapterPath)
+		if !read.OK {
+			return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "read adapter", read.Value.(error))
+		}
+		payload = read.Value.([]byte)
+	} else {
+		read := core.ReadFile(adapterPath)
+		if !read.OK {
+			return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "read adapter", read.Value.(error))
+		}
+		payload = read.Value.([]byte)
+		if result := core.JSONUnmarshal(payload, &file); !result.OK {
+			return nil, inference.AdapterIdentity{}, core.E("rocm.hip.LoadAdapter", "parse adapter", result.Value.(error))
+		}
 	}
 	adapter, err := validateSmallLoRAAdapterFile(file, cfg)
 	if err != nil {
