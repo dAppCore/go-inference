@@ -1,3 +1,33 @@
+# NEXT WAKE (2026-07-17 — coverage closed: 33 examples across every lane; #1847 thinking default flipped to vendor ON; RenderGemmaToolResponse dedup)
+
+## 2026-07-17 (late — the coverage fan-out + two more example-found defects)
+
+- EXAMPLES COVERAGE COMPLETE (33): the RAG lane (embed/rerank via host
+  bert.Load — bge-small, no GPU), the agent lane (tools — the flagship
+  round trip: declare → ParseGemmaToolCalls → execute a Go func →
+  RenderGemmaToolResponse → final answer, live on e2b), model-ops
+  (tokenizer, quantise → q4_k gguf 600/600 tensors, serve/multimodel —
+  aliases small/big from one process). chat/thinking rides parser.Filter +
+  HintFromInference now (the real reasoning parser, not a hand-rolled
+  split). HOUSE RULE banked to memory: a public feature ships WITH its
+  examples/pkg/ proof (project_prove_features_in_examples_pkg).
+- SEAM DEDUP: decode/parser gains ToolResponse markers +
+  RenderGemmaToolResponse; the <|tool_response> literal was duplicated in
+  the openai AND anthropic handlers — both now call the helper.
+- #1847 CLOSED (fa4f0bf): gemma4 thinking now DEFAULTS ON — the vendor
+  family default. ChatThinking.DefaultOn + ChatTemplate.ResolveThinking
+  (one resolver: explicit wins, unset takes the dialect default, gemma3/
+  ChatML stay off). Ghost-suppressor arms only on explicit opt-out.
+  Goldens updated; vision smoke opts out (one-word answer vs a 64-token
+  budget). LIVE: default E2B serve thought len 1377 / opt-out 0.
+  **RELEASE NOTE v0.12.0: default behaviour change** — gemma4 replies
+  think unless opted out; short-budget requests can hit length mid-thought
+  (raise max_tokens or enable_thinking:false). Bench convention unchanged
+  (all benches pass explicit no-think).
+- Open cluster: #1846 (reuse under q8 — canonical landing), #392 dense-CB
+  fold, #390 SFT GPU half, #382 release (waits codex hip parity).
+  examples/cli/ still reserved (lem-binary genre).
+
 # NEXT WAKE (2026-07-17 — #1845 CLOSED by evidence: the q8 store amplifies the batch-shape numeric tier; reuse declines on q8 sessions)
 
 ## 2026-07-17 (evening — #1845 root-caused with a five-hypothesis elimination chain)
