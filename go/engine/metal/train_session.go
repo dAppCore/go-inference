@@ -14,6 +14,14 @@ import core "dappco.re/go"
 // already wires into stepToken (captureLayerHiddens), so the captured hiddens are exactly the engine's
 // real layer outputs, not a re-derivation. Single-goroutine (the ArchSession contract).
 
+// KNOWN DIVERGENCE (2026-07-14, probe_train_forward_split_test.go): on a real PLE arch
+// (E2B bf16) this serial capture's hiddens DISAGREE with the engine's serving forward —
+// against the batched prefill's boundary hidden the serial ICB capture was off by |Δ|≈34
+// while ForwardCaptureFinalHidden matched byte-for-byte. Until that is root-caused, the
+// per-layer hiddens below are NOT serving-exact on PLE archs; the head-LoRA trainer rides
+// ForwardCaptureFinalHidden instead, and the full-stack backward must re-verify this
+// capture against the batched route before trusting per-layer hiddens on a PLE model.
+//
 // ForwardCaptureHiddens forwards ids[0:T] over a FRESH session (it resets pos to 0, overwriting the
 // cache, so a training loop can re-run it each step) and returns the residual stream:
 //
@@ -83,6 +91,154 @@ func (s *ArchSession) ForwardCaptureHiddens(ids []int32) (embeds [][]byte, perLa
 		perLayerOut[l] = buf
 	}
 	return embeds, perLayerOut, nil
+}
+
+// captureFinalHiddenBatchedChunksForTest counts batched-route chunks the capture forward
+// engaged — the engagement receipt for its parity test (a fallback that silently went
+// serial would still be byte-identical, so identity alone can't prove the fast path ran).
+var captureFinalHiddenBatchedChunksForTest int
+
+// ForwardCaptureFinalHidden forwards ids[0:T] over a FRESH session (pos reset to 0, the
+// cache overwritten — the training re-prefill, exactly ForwardCaptureHiddens' contract)
+// and returns the FINAL residual hidden of every token ([T·dModel] bf16 — layer
+// nLayers-1's output, the rows the head reads). The HEAD-LoRA trainer needs only these
+// rows, so this forward rides the engine's batched-dense prefill route (weight-read-once
+// GEMMs; the wall-split probe measured the serial walk 17.8× slower at T=128 on E2B
+// bf16) with per-row result scatter, chunked under the same policy as the retained
+// prefill but with the shared-suffix layer skip OFF — a skipped chunk's late layers
+// would fabricate the very rows this capture returns. Any decline falls back to the
+// serial ForwardCaptureHiddens walk; both routes are byte-identical (the #381
+// prefill-parity spine). The full per-layer capture (ForwardCaptureHiddens) remains the
+// full-stack backward's forward.
+func (s *ArchSession) ForwardCaptureFinalHidden(ids []int32) ([]byte, error) {
+	if len(ids) == 0 {
+		return nil, core.NewError("native.ForwardCaptureFinalHidden: empty ids")
+	}
+	T := len(ids)
+	if T > s.maxLen {
+		return nil, core.NewError("native.ForwardCaptureFinalHidden: sequence exceeds maxLen")
+	}
+	rowBytes := s.arch.Hidden * bf16Size
+	out := make([]byte, T*rowBytes)
+	s.pos = 0
+	done := 0
+	for done < T {
+		n := s.batchedDensePrefillChunkLen(T - done)
+		if n <= 0 || n > T-done {
+			n = T - done
+		}
+		chunk := ids[done : done+n]
+		dstRows := make([][]byte, n)
+		for i := range dstRows {
+			dstRows[i] = out[(done+i)*rowBytes : (done+i+1)*rowBytes]
+		}
+		ok, err := s.captureFinalHiddenChunkBatched(chunk, dstRows)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			// The batched body declined (session shape, kernel availability, test lever).
+			// Cold path: re-run the WHOLE sequence on the proven serial capture — pos and
+			// the cache are reset by ForwardCaptureHiddens itself, so partial batched
+			// progress is simply discarded rather than spliced.
+			_, perLayer, serr := s.ForwardCaptureHiddens(ids)
+			if serr != nil {
+				return nil, serr
+			}
+			if len(perLayer) == 0 {
+				return nil, core.NewError("native.ForwardCaptureFinalHidden: serial capture returned no layers")
+			}
+			last := perLayer[len(perLayer)-1]
+			if len(last) != len(out) {
+				return nil, core.NewError("native.ForwardCaptureFinalHidden: serial capture size mismatch")
+			}
+			copy(out, last)
+			return out, nil
+		}
+		captureFinalHiddenBatchedChunksForTest++
+		done += n
+	}
+	return out, nil
+}
+
+// captureFinalHiddenChunkBatched runs ONE capture chunk through the batched-dense body
+// with per-row result scatter. It mirrors prefillRetainedTokensBatchedDenseOne's input
+// plumbing (device-first inputs, embed scratch, the PLE slab) — kept in lockstep with it;
+// only the result shape differs (all rows scattered to dstRows vs last-row-into). ok=false
+// is the body's decline, never an error: the caller owns the serial fallback.
+func (s *ArchSession) captureFinalHiddenChunkBatched(ids []int32, dstRows [][]byte) (bool, error) {
+	if s.state.icb != nil && (len(ids) <= batchedDenseICBMaxRows || batchedMLPFoldDisabledForTest || !gpuHasGeluKernel()) {
+		return false, nil
+	}
+	embBuf, pleBuf, devErr := s.prefillInputsDevice(ids)
+	if devErr != nil {
+		return false, devErr
+	}
+	embs := make([][]byte, len(ids))
+	var pleSlab []byte
+	if embBuf == nil {
+		if s.canUseEmbedScratch() {
+			rowBytes := s.arch.Hidden * bf16Size
+			need := len(ids) * rowBytes
+			if cap(s.embedScratch) < need {
+				s.embedScratch = make([]byte, need)
+			} else {
+				s.embedScratch = s.embedScratch[:need]
+			}
+			for i, id := range ids {
+				dst := s.embedScratch[i*rowBytes : (i+1)*rowBytes]
+				emb, err := s.embedInto(dst, id)
+				if err != nil {
+					return false, err
+				}
+				if len(emb) != rowBytes {
+					return false, core.NewError("native.ForwardCaptureFinalHidden: embedInto returned wrong hidden size")
+				}
+				embs[i] = emb
+			}
+		} else {
+			for i, id := range ids {
+				emb, err := s.embed(id)
+				if err != nil {
+					return false, err
+				}
+				embs[i] = emb
+			}
+		}
+		var slabErr error
+		pleSlab, slabErr = s.pleSlabFor(ids, embs)
+		if slabErr != nil {
+			return false, slabErr
+		}
+	}
+	var (
+		ok  bool
+		err error
+	)
+	withAutoreleasePool(func() {
+		if pleBuf != nil {
+			s.state.prefillPLESlabDevice = pleBuf
+			s.state.prefillEmbedDevice = embBuf
+			defer func() {
+				s.state.prefillPLESlabDevice = nil
+				s.state.prefillEmbedDevice = nil
+			}()
+			_, ok, err = s.state.stepTokensBatchedDenseIntoPLE(embs, nil, s.pos, dstRows)
+		} else if embBuf != nil {
+			s.state.prefillEmbedDevice = embBuf
+			defer func() { s.state.prefillEmbedDevice = nil }()
+			_, ok, err = s.state.stepTokensBatchedDenseInto(embs, s.pos, dstRows)
+		} else if pleSlab != nil {
+			_, ok, err = s.state.stepTokensBatchedDenseIntoPLE(embs, pleSlab, s.pos, dstRows)
+		} else {
+			_, ok, err = s.state.stepTokensBatchedDenseInto(embs, s.pos, dstRows)
+		}
+	})
+	if err != nil || !ok {
+		return ok, err
+	}
+	s.pos += len(ids)
+	return true, nil
 }
 
 func (s *ArchSession) forwardCaptureHiddensICB(ids []int32, T, N int) (embeds [][]byte, perLayerOut [][]byte, err error) {

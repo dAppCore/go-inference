@@ -132,17 +132,17 @@ func initLoRAFactorA(n, dModel int) []float32 {
 // forwardFrozen runs the engine's real forward over ids and returns the post-final-norm hidden
 // (normed [T,dModel]) and the frozen base head logits (baseLogits [T,vocab]) — the frozen half of every
 // step. The base weights never change, so this is the model's own (PLE-correct) forward; the LoRA delta
-// is added on top of baseLogits.
+// is added on top of baseLogits. The head LoRA needs only the FINAL hidden, so the forward rides the
+// batched-dense capture (ForwardCaptureFinalHidden — 17.8× over the serial walk at T=128 on E2B bf16,
+// which was 88% of the SFT step's wall); the serial per-layer capture stays the full-stack backward's
+// forward.
 func (t *LoRATrainer) forwardFrozen(ids []int32) (normed, baseLogits []float32, rows int, err error) {
-	_, perLayer, err := t.sess.ForwardCaptureHiddens(ids)
+	lastHidden, err := t.sess.ForwardCaptureFinalHidden(ids)
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	if len(perLayer) == 0 {
-		return nil, nil, 0, core.NewError("native.LoRATrainer: ForwardCaptureHiddens returned no layers")
-	}
 	tokens := len(ids)
-	hLast := bf16ToF32Slice(perLayer[len(perLayer)-1]) // [T,dModel]
+	hLast := bf16ToF32Slice(lastHidden) // [T,dModel]
 	normed = rmsNormForwardF32(hLast, t.finalNorm, tokens, t.dModel, t.eps)
 	baseLogits, err = MatMulF32NT(normed, t.lmHead, tokens, t.dModel, t.vocab)
 	if err != nil {
