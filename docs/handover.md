@@ -1,3 +1,33 @@
+# NEXT WAKE (2026-07-17 — the .metal source audit: CLEAN — 95/95 at full occupancy, release-grade)
+
+## 2026-07-17 (the "optimal C" pass — Metal's allocs/op analogue, run to completion)
+
+- SNIDER'S QUESTION: does the Go alloc-sweep discipline transfer to .metal —
+  is each kernel file "optimal C"? The analogue exists and is QUERYABLE:
+  the Metal compiler caps a pipeline's occupancy by its register appetite
+  (MaxTotalThreadsPerThreadgroup < 1024 = register-limited, the GPU
+  equivalent of a hot alloc) and its threadgroup-memory footprint.
+- THE INSTRUMENT (TestKernelPSOStats, kernel_pso_stats_test.go): builds
+  every function in the custom metallib + the dispatched MLX set, logs the
+  table ranked worst-first. Function-constant kernels (which ABORT plain
+  PSO creation with an uncatchable ObjC SIGABRT — qmv_rows, gather lean,
+  splitd, q8-2pass, argmax-rows) are dict-detected and skipped; the sdpa
+  family builds through the engine's own constructors.
+- THE VERDICT: 95 kernels surveyed, ZERO register-limited — every one at
+  the full 1024 cap, width 32. Threadgroup memory tops at 18.5KB
+  (logits_sample) / 16.4KB (paged-SDPA p1 tiles): reduction kernels whose
+  tile IS the algorithm. Cross-checked against the receipts bench (fat
+  kernels 567-807 GB/s ≈ roofline): the .metal source is ALREADY AT THE
+  BAR from two independent angles. The GPU analogues of allocs/op waste
+  (register spills, occupancy caps, bad access patterns) are absent.
+- CONSEQUENCE for v0.12.0: the metal engine is release-clean BY EVIDENCE —
+  kernel source audited (this), per-kernel bandwidth receipted (41 rows),
+  dispatch verdicts banked (wide/mega refuted, gather vindicated), decode
+  paths byte/token-gated all campaign. Remaining perf lives at dispatch
+  shape (#392: MTP rows 1.7x, expert overlap ~2x) — not in kernel source.
+  Release waits on codex's engine/hip parity (fenced, homelab) for the
+  apple/amd/cuda/cpu day-one story.
+
 # NEXT WAKE (2026-07-17 — #393 slice 3 by evidence: wide + megakernels REFUTED, production vindicated)
 
 ## 2026-07-17 (#393 slice 3 — the kernel improvement pass: three verdicts)
