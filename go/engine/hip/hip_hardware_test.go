@@ -916,6 +916,108 @@ func TestHIPHardwareAttentionHeadsLaneBatchIndependentKV_Good(t *testing.T) {
 	assertFloat32SlicesNear(t, want, got, 0.005)
 }
 
+func TestHIPHardwareRMSNormRoPEHeadsPairMatchesSeparateKernels_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	queryValues := []float32{1, 2, 3, 4, 4, 3, 2, 1}
+	keyValues := []float32{2, -1, 0.5, 3}
+	queryRawWeights := []float32{0.25, -0.5, 1, -0.25}
+	queryBF16Weights := make([]uint16, len(queryRawWeights))
+	for index, weight := range queryRawWeights {
+		queryBF16Weights[index] = hipFloat32ToBFloat16(weight)
+	}
+	keyWeights := []float32{0.5, 1.5, 0.75, 1.25}
+
+	query, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.RMSNormRoPEHeadsPairHardware", "query input", mustHIPFloat32Payload(t, queryValues), len(queryValues))
+	core.RequireNoError(t, err)
+	defer query.Close()
+	key, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.RMSNormRoPEHeadsPairHardware", "key input", mustHIPFloat32Payload(t, keyValues), len(keyValues))
+	core.RequireNoError(t, err)
+	defer key.Close()
+	queryWeightPayload, err := hipUint16Payload(queryBF16Weights)
+	core.RequireNoError(t, err)
+	queryWeight, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.RMSNormRoPEHeadsPairHardware", "query BF16 weight", queryWeightPayload, len(queryBF16Weights))
+	core.RequireNoError(t, err)
+	defer queryWeight.Close()
+	keyWeight, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.RMSNormRoPEHeadsPairHardware", "key F32 weight", mustHIPFloat32Payload(t, keyWeights), len(keyWeights))
+	core.RequireNoError(t, err)
+	defer keyWeight.Close()
+
+	queryCfg := hipRMSNormDeviceWeightConfig{
+		WeightPointer:  queryWeight.Pointer(),
+		WeightBytes:    queryWeight.SizeBytes(),
+		Count:          4,
+		Epsilon:        1e-6,
+		WeightEncoding: hipRMSNormWeightEncodingBF16,
+		Flags:          hipRMSNormLaunchFlagAddUnitWeight | hipRMSNormLaunchFlagRoPENeoX,
+	}
+	keyCfg := hipRMSNormDeviceWeightConfig{
+		WeightPointer:  keyWeight.Pointer(),
+		WeightBytes:    keyWeight.SizeBytes(),
+		Count:          4,
+		Epsilon:        1e-5,
+		WeightEncoding: hipRMSNormWeightEncodingF32,
+		Flags:          hipRMSNormLaunchFlagRoPENeoX,
+	}
+	pairedQuery, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.RMSNormRoPEHeadsPairHardware", "paired query output", query.SizeBytes(), query.Count())
+	core.RequireNoError(t, err)
+	defer pairedQuery.Close()
+	pairedKey, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.RMSNormRoPEHeadsPairHardware", "paired key output", key.SizeBytes(), key.Count())
+	core.RequireNoError(t, err)
+	defer pairedKey.Close()
+	separateQuery, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.RMSNormRoPEHeadsPairHardware", "separate query output", query.SizeBytes(), query.Count())
+	core.RequireNoError(t, err)
+	defer separateQuery.Close()
+	separateKey, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.RMSNormRoPEHeadsPairHardware", "separate key output", key.SizeBytes(), key.Count())
+	core.RequireNoError(t, err)
+	defer separateKey.Close()
+
+	core.RequireNoError(t, hipRunRMSNormRoPEHeadsPairKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(context.Background(), hipRuntime.driver, query, key, queryCfg, keyCfg, 2, 1, 7, 10000, 4, 2, 0.5, pairedQuery, pairedKey, nil))
+	core.RequireNoError(t, hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScale(context.Background(), hipRuntime.driver, query, queryCfg, 2, 7, 10000, 4, 2, 0.5, separateQuery))
+	core.RequireNoError(t, hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScale(context.Background(), hipRuntime.driver, key, keyCfg, 1, 7, 10000, 4, 2, 0.5, separateKey))
+
+	gotQuery, err := hipReadFloat32DeviceOutput(pairedQuery, "rocm.hip.RMSNormRoPEHeadsPairHardware", "paired query output", len(queryValues))
+	core.RequireNoError(t, err)
+	gotKey, err := hipReadFloat32DeviceOutput(pairedKey, "rocm.hip.RMSNormRoPEHeadsPairHardware", "paired key output", len(keyValues))
+	core.RequireNoError(t, err)
+	wantSeparateQuery, err := hipReadFloat32DeviceOutput(separateQuery, "rocm.hip.RMSNormRoPEHeadsPairHardware", "separate query output", len(queryValues))
+	core.RequireNoError(t, err)
+	wantSeparateKey, err := hipReadFloat32DeviceOutput(separateKey, "rocm.hip.RMSNormRoPEHeadsPairHardware", "separate key output", len(keyValues))
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, wantSeparateQuery, gotQuery, 0.0001)
+	assertFloat32SlicesNear(t, wantSeparateKey, gotKey, 0.0001)
+
+	queryWeights := []float32{1.25, 0.5, 2, 0.75}
+	var wantQuery []float32
+	for head := 0; head < 2; head++ {
+		start := head * 4
+		normalized, err := hipReferenceRMSNorm(queryValues[start:start+4], queryWeights, queryCfg.Epsilon)
+		core.RequireNoError(t, err)
+		rotated, err := hipReferenceRoPENeoXWithFrequencyDimScale(normalized, 7, 10000, 4, 2, 0.5)
+		core.RequireNoError(t, err)
+		wantQuery = append(wantQuery, rotated...)
+	}
+	normalizedKey, err := hipReferenceRMSNorm(keyValues, keyWeights, keyCfg.Epsilon)
+	core.RequireNoError(t, err)
+	wantKey, err := hipReferenceRoPENeoXWithFrequencyDimScale(normalizedKey, 7, 10000, 4, 2, 0.5)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, wantQuery, gotQuery, 0.0005)
+	assertFloat32SlicesNear(t, wantKey, gotKey, 0.0001)
+}
+
 func TestHIPHardwareRMSNormRoPEHeadsPairLaneBatch_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")

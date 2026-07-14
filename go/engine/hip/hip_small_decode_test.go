@@ -4525,6 +4525,8 @@ func TestHIPGemma4Q4DecoderLayerAttentionKEqVUsesPairProjection_Good(t *testing.
 	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameMLXQ4PairProj))
 	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameMLXQ4TripleProj))
 	core.AssertEqual(t, 2, countLaunchName(launches, hipKernelNameMLXQ4Proj))
+	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameRMSNormRoPEHeadsPair))
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameRMSNormRoPEHeads))
 	core.AssertEqual(t, 1, countKVEncodeTokenLaunches(launches))
 	queryRoPE := &workspace.RMSRoPEOutputView
 	if queryRoPE.Pointer() == 0 || queryRoPE.Count() != cfg.QueryProjection.Rows {
@@ -4543,6 +4545,63 @@ func TestHIPGemma4Q4DecoderLayerAttentionKEqVUsesPairProjection_Good(t *testing.
 	if countDeviceAttentionLaunches(launches) == 0 {
 		t.Fatalf("Gemma4 q4 K=V decoder layer launched no descriptor-backed attention kernels")
 	}
+}
+
+func TestHIPGemma4Q4DecoderLayerPairsQKRoPE_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	cfg, cleanup := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)
+	defer cleanup()
+	cfg.LayerType = "full_attention"
+	cfg.SlidingWindow = 0
+	cfg.RoPERotaryDim = cfg.HeadDim / 2
+	cfg.PerLayerInput = hipGemma4Q4PerLayerInputConfig{}
+	input, err := hipUploadGemma4Q4Float32Input(driver, "Gemma4 q4 paired Q/K RoPE decoder input", []float32{1, 2, 3, 4, 5, 6, 7, 8})
+	core.RequireNoError(t, err)
+	defer input.Close()
+	workspace := &hipAttentionHeadsChunkedWorkspace{}
+	defer workspace.Close()
+
+	launchStart := len(driver.launches)
+	layer, err := hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(context.Background(), driver, cfg, nil, input, hipGemma4Q4DecoderLayerRequest{
+		Position:           3,
+		Epsilon:            1e-6,
+		DeviceKVAttention:  true,
+		DeviceKVMode:       rocmKVCacheModeKQ8VQ4,
+		KeepDeviceKV:       true,
+		OmitHostKV:         true,
+		OmitDebugTensors:   true,
+		ReturnDeviceHidden: true,
+		AttentionWorkspace: workspace,
+	}, true)
+	core.RequireNoError(t, err)
+	if layer.DeviceLayerValid {
+		defer layer.DeviceLayer.Close()
+	}
+	if layer.DeviceFinalHidden != nil && !layer.DeviceFinalHiddenBorrowed {
+		defer layer.DeviceFinalHidden.Close()
+	}
+	if layer.DeviceNextLayerInput != nil && !layer.DeviceNextLayerInputBorrowed {
+		defer layer.DeviceNextLayerInput.Close()
+	}
+
+	launches := driver.launches[launchStart:]
+	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameMLXQ4TripleProj))
+	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameRMSNormRoPEHeadsPair))
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameRMSNormRoPEHeads))
+	var pairLaunch *hipKernelLaunchConfig
+	for index := range launches {
+		if launches[index].Name == hipKernelNameRMSNormRoPEHeadsPair {
+			pairLaunch = &launches[index]
+			break
+		}
+	}
+	if pairLaunch == nil {
+		t.Fatal("Gemma4 q4 decoder layer launched no paired Q/K RMSNorm RoPE kernel")
+	}
+	core.AssertEqual(t, uint32(cfg.QueryHeads+firstPositiveInt(cfg.KeyHeads, 1)), pairLaunch.GridX)
+	core.AssertEqual(t, uint32(cfg.HeadDim), binary.LittleEndian.Uint32(pairLaunch.Args[56:]))
+	core.AssertEqual(t, uint32(cfg.HeadDim), binary.LittleEndian.Uint32(pairLaunch.Args[124:]))
+	core.AssertEqual(t, uint32(cfg.RoPERotaryDim), binary.LittleEndian.Uint32(pairLaunch.Args[128:]))
 }
 
 func TestHIPGemma4Q4DecoderLayerOmitHostKVRejectsHostSharedFallback_Good(t *testing.T) {

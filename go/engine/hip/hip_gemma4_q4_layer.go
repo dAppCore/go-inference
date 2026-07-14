@@ -1451,13 +1451,16 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 	queryNormCfg := hipGemma4Q4RoPENormConfig(cfg.QueryNorm, req.Epsilon, cfg.HeadDim)
 	ropeFrequencyDim, ropeRotaryCount := hipGemma4Q4RoPEKernelDims(cfg)
 	ropeFrequencyScale := cfg.effectiveRoPEFrequencyScale()
+	pairLocalQKNormRoPE := projectLocalKV && req.AttentionWorkspace != nil && req.OmitDebugTensors
 	if req.AttentionWorkspace != nil && req.OmitDebugTensors {
 		ropeQueryBuffer, err = req.AttentionWorkspace.EnsureRMSRoPEOutput(driver, queryBuffer.Count())
 		if err != nil {
 			return hipGemma4Q4DecoderLayerResult{}, err
 		}
-		if err := hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, queryBuffer, queryNormCfg, cfg.QueryHeads, req.Position, ropeBase, ropeFrequencyDim, ropeRotaryCount, ropeFrequencyScale, ropeQueryBuffer, req.AttentionWorkspace); err != nil {
-			return hipGemma4Q4DecoderLayerResult{}, err
+		if !pairLocalQKNormRoPE {
+			if err := hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, queryBuffer, queryNormCfg, cfg.QueryHeads, req.Position, ropeBase, ropeFrequencyDim, ropeRotaryCount, ropeFrequencyScale, ropeQueryBuffer, req.AttentionWorkspace); err != nil {
+				return hipGemma4Q4DecoderLayerResult{}, err
+			}
 		}
 	} else {
 		ropeQueryBuffer, err = hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigFrequencyScale(ctx, driver, queryBuffer, queryNormCfg, cfg.QueryHeads, req.Position, ropeBase, ropeFrequencyDim, ropeRotaryCount, ropeFrequencyScale)
@@ -1532,8 +1535,14 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 			if err != nil {
 				return hipGemma4Q4DecoderLayerResult{}, err
 			}
-			if err := hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, keyBuffer, keyNormCfg, keyHeads, req.Position, ropeBase, 0, 0, ropeFrequencyScale, ropeKeyBuffer, req.AttentionWorkspace); err != nil {
-				return hipGemma4Q4DecoderLayerResult{}, err
+			if pairLocalQKNormRoPE {
+				if err := hipRunRMSNormRoPEHeadsPairKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, queryBuffer, keyBuffer, queryNormCfg, keyNormCfg, cfg.QueryHeads, keyHeads, req.Position, ropeBase, ropeFrequencyDim, ropeRotaryCount, ropeFrequencyScale, ropeQueryBuffer, ropeKeyBuffer, req.AttentionWorkspace); err != nil {
+					return hipGemma4Q4DecoderLayerResult{}, err
+				}
+			} else {
+				if err := hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, keyBuffer, keyNormCfg, keyHeads, req.Position, ropeBase, 0, 0, ropeFrequencyScale, ropeKeyBuffer, req.AttentionWorkspace); err != nil {
+					return hipGemma4Q4DecoderLayerResult{}, err
+				}
 			}
 		} else {
 			ropeKeyBuffer, err = hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigFrequencyScale(ctx, driver, keyBuffer, keyNormCfg, keyHeads, req.Position, ropeBase, 0, 0, ropeFrequencyScale)
@@ -1602,8 +1611,14 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 			if err != nil {
 				return hipGemma4Q4DecoderLayerResult{}, err
 			}
-			if err := hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, keyBuffer, keyNormCfg, keyHeads, req.Position, ropeBase, cfg.HeadDim, cfg.RoPERotaryDim, ropeFrequencyScale, ropeKeyBuffer, req.AttentionWorkspace); err != nil {
-				return hipGemma4Q4DecoderLayerResult{}, err
+			if pairLocalQKNormRoPE {
+				if err := hipRunRMSNormRoPEHeadsPairKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, queryBuffer, keyBuffer, queryNormCfg, keyNormCfg, cfg.QueryHeads, keyHeads, req.Position, ropeBase, ropeFrequencyDim, ropeRotaryCount, ropeFrequencyScale, ropeQueryBuffer, ropeKeyBuffer, req.AttentionWorkspace); err != nil {
+					return hipGemma4Q4DecoderLayerResult{}, err
+				}
+			} else {
+				if err := hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigOutputFrequencyScaleWithWorkspace(ctx, driver, keyBuffer, keyNormCfg, keyHeads, req.Position, ropeBase, cfg.HeadDim, cfg.RoPERotaryDim, ropeFrequencyScale, ropeKeyBuffer, req.AttentionWorkspace); err != nil {
+					return hipGemma4Q4DecoderLayerResult{}, err
+				}
 			}
 		} else {
 			ropeKeyBuffer, err = hipRunRMSNormRoPEHeadsKernelWithDeviceInputWeightConfigFrequencyScale(ctx, driver, keyBuffer, keyNormCfg, keyHeads, req.Position, ropeBase, cfg.HeadDim, cfg.RoPERotaryDim, ropeFrequencyScale)
