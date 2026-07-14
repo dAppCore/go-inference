@@ -15,6 +15,8 @@ import (
 	"runtime"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/quant/mlxaffine"
 )
 
 // Mixer is one layer's sequence mixer (the attention slot). A mixer owns its WEIGHTS (shared across
@@ -35,10 +37,12 @@ type FFN interface {
 }
 
 // MLP is a per-layer SwiGLU feed-forward: out = (SiLU(x·Gateᵀ) ⊙ x·Upᵀ)·Downᵀ. Gate/Up are [FF,D],
-// Down is [D,FF].
+// Down is [D,FF]. GateQ/UpQ/DownQ are their packed forms in a quant checkpoint (nil ⇒ dense f32); when
+// set, forward dispatches the three matmuls to the quant matvec seam instead of the f32 matNT.
 type MLP struct {
-	Gate, Up, Down []float32
-	FF             int
+	Gate, Up, Down    []float32
+	GateQ, UpQ, DownQ *model.QuantWeight
+	FF                int
 }
 
 // Layer is one pre-norm block: InputNorm → Mixer → residual, PostAttnNorm → MLP → residual.
@@ -52,10 +56,12 @@ type Layer struct {
 // ComposedModel is the loaded hybrid stack: token embedding, the per-layer blocks, the final norm and the
 // LM head (tied to Embed when Output is nil). All f32 (the loader widens the bf16 checkpoint).
 type ComposedModel struct {
-	Embed            []float32 // [Vocab, D]
+	Embed            []float32          // [Vocab, D] (nil ⇒ EmbedQ packed)
+	EmbedQ           *model.QuantWeight // packed embedding table (dequantised one row per token at gather; never widened whole)
 	Layers           []Layer
-	NormF            []float32 // [D] final RMSNorm
-	Output           []float32 // [Vocab, D] (nil ⇒ tied to Embed)
+	NormF            []float32          // [D] final RMSNorm
+	Output           []float32          // [Vocab, D] (nil ⇒ tied to Embed, or OutputQ packed)
+	OutputQ          *model.QuantWeight // packed untied LM head (served by the quant matvec)
 	D                int
 	Vocab            int
 	Eps              float32
@@ -65,6 +71,11 @@ type ComposedModel struct {
 	EmbedScale       float32
 	LogitsScaling    float32
 	ResidualScale    float32
+	// Quantised marks a checkpoint whose projections are kept PACKED: forwardEmb then runs the plain
+	// per-projection path (the mixer's own Forward + the host FFN tail), where the big matmuls dispatch to
+	// the quant matvec seam. The f32 device tail-fusion hooks (ResidualNormMLPProj*Device) are bypassed —
+	// they take f32 weights, and quant fused tails are a later slice.
+	Quantised bool
 }
 
 func silu(v float64) float64 { return v / (1 + math.Exp(-v)) }
@@ -77,6 +88,88 @@ func silu(v float64) float64 { return v / (1 + math.Exp(-v)) }
 // already serve at — the composed -state contract (a token-prefix snapshot, recomputed on wake) is
 // deterministic per build either way.
 var ProjMatMulInto func(out, x, w []float32, M, K, N int) ([]float32, error)
+
+// ProjQuantMatMulInto is the quant twin of ProjMatMulInto: out[M,N] = x[M,K] @ dequant(w)ᵀ for an MLX
+// affine-packed weight (packed uint32 codes + bf16 scales/biases, one scale+bias per group per row).
+// N=outDim, K=inDim, groupSize divides K, bits is a shipped kernel width (2/3/4/5/6/8 — Bonsai's 1-bit is
+// repacked to 2-bit at load). Same AX-8 shape as ProjMatMulInto: composed declares the hook and runs the
+// host dequant-row fallback by default; importing the native backend binds it to the metallib's affine_qmv
+// (M=1 decode) / affine_qmm_t (M>1 prefill) bf16 kernels — the composed serve boundary is already bf16 and
+// bf16's mantissa is finer than the packed weight, so the weight quantisation, not the activation dtype,
+// bounds the error. nil, or a device error, falls to matNTQuantHost — correct on any build, memory-safe
+// (never widens the whole weight), but not fast.
+var ProjQuantMatMulInto func(out, x []float32, packed, scales, biases []byte, M, K, N, groupSize, bits int) ([]float32, error)
+
+// matNTQuant computes out[M,N] = x[M,K] @ dequant(qw)ᵀ for a packed projection weight, preferring the
+// device quant seam and falling back to the host dequant-row path — a device failure (missing kernel, no
+// Metal device) is deterministic for the rest of the process either way, mirroring matNTInto. qw's
+// (OutDim, InDim) equal (N, K).
+func matNTQuant(out, x []float32, qw *model.QuantWeight, M, K, N int) []float32 {
+	if ProjQuantMatMulInto != nil {
+		if res, err := ProjQuantMatMulInto(out, x, qw.Packed, qw.Scales, qw.Biases, M, K, N, qw.GroupSize, qw.Bits); err == nil {
+			return res
+		}
+	}
+	return matNTQuantHost(out, x, qw, M, K, N)
+}
+
+// matNTQuantHost is the host reference for a packed projection: for each output column n it dequantises
+// that weight ROW (qw's row n, [K]) and dots it with each input row — never materialising the whole [N,K]
+// f32 weight (a 27B head widened is ~5 GB). It is the device seam's error fallback and the whole quant
+// forward on a non-metal build: correct, memory-safe, but slow (per-row dequant per call) — a correctness
+// floor, not a serving path. f64 accumulation in ascending-k order, matching matNTCols so each out[m,n] is
+// the same tier as the dense host GEMM (the device qmv differs only at quantisation precision — the parity
+// gate's tolerance).
+func matNTQuantHost(out, x []float32, qw *model.QuantWeight, M, K, N int) []float32 {
+	if cap(out) < M*N {
+		out = make([]float32, M*N)
+	} else {
+		out = out[:M*N]
+	}
+	wordsPerRow := mlxaffine.PackedWords(K, qw.Bits)
+	groupsPerRow := K / qw.GroupSize
+	for n := range N {
+		wr, err := mlxaffine.DequantizeTensor(
+			qw.Packed[n*wordsPerRow*4:(n+1)*wordsPerRow*4],
+			qw.Scales[n*groupsPerRow*2:(n+1)*groupsPerRow*2],
+			qw.Biases[n*groupsPerRow*2:(n+1)*groupsPerRow*2],
+			1, K, qw.Bits, qw.GroupSize)
+		if err != nil { // geometry is validated at load; a mismatch here means a caller passed the wrong K/N
+			return out
+		}
+		for m := range M {
+			xr := x[m*K : m*K+K]
+			var acc float64
+			for k := range K {
+				acc += float64(xr[k]) * float64(wr[k])
+			}
+			out[m*N+n] = float32(acc)
+		}
+	}
+	return out
+}
+
+// embedRow writes token id's embedding row [D] into dst (len D). Dense: a slice copy. Packed: a per-row
+// host dequant of the embedding table — one row per token (cheap), never widening the whole [Vocab, D]
+// table (~5 GB widened even at 4-bit). EmbedScale is applied by the caller.
+func (m *ComposedModel) embedRow(dst []float32, id int) error {
+	if m.EmbedQ != nil {
+		wordsPerRow := mlxaffine.PackedWords(m.D, m.EmbedQ.Bits)
+		groupsPerRow := m.D / m.EmbedQ.GroupSize
+		wr, err := mlxaffine.DequantizeTensor(
+			m.EmbedQ.Packed[id*wordsPerRow*4:(id+1)*wordsPerRow*4],
+			m.EmbedQ.Scales[id*groupsPerRow*2:(id+1)*groupsPerRow*2],
+			m.EmbedQ.Biases[id*groupsPerRow*2:(id+1)*groupsPerRow*2],
+			1, m.D, m.EmbedQ.Bits, m.EmbedQ.GroupSize)
+		if err != nil {
+			return err
+		}
+		copy(dst, wr)
+		return nil
+	}
+	copy(dst, m.Embed[id*m.D:id*m.D+m.D])
+	return nil
+}
 
 // MLPDevice is the fused-SwiGLU device hook: gate/up GEMMs, the silu-and-multiply glue, and the
 // down GEMM encoded into ONE command buffer with device-resident intermediates — one round-trip
@@ -250,6 +343,15 @@ func (m *ComposedModel) normalise(x, w []float32, rows int) []float32 {
 
 // swiglu runs the SwiGLU MLP over x [L,D] → [L,D].
 func (mlp *MLP) forward(x []float32, L, D int) []float32 {
+	if mlp.GateQ != nil { // packed MLP: gate/up/down through the quant matvec seam (the fused MLPDevice is f32-only)
+		g := matNTQuant(nil, x, mlp.GateQ, L, D, mlp.FF)
+		u := matNTQuant(nil, x, mlp.UpQ, L, D, mlp.FF)
+		h := make([]float32, L*mlp.FF)
+		for i := range h {
+			h[i] = float32(silu(float64(g[i])) * float64(u[i]))
+		}
+		return matNTQuant(nil, h, mlp.DownQ, L, mlp.FF, D)
+	}
 	if MLPDevice != nil && L*D*mlp.FF >= deviceMinWork {
 		if out, err := MLPDevice(mlp.Gate, mlp.Up, mlp.Down, x, L, D, mlp.FF); err == nil {
 			return out
@@ -331,6 +433,22 @@ func (s *ComposedSession) forwardEmb(h []float32, L int) ([]float32, error) {
 			for i := range h {
 				h[i] += scale * (mixOut[i] + mlpOut[i])
 			}
+			continue
+		}
+
+		if s.m.Quantised {
+			// Packed checkpoint: the fused device tails (ResidualNormMLPProj*Device) take f32 weights and
+			// are a later slice, so run the plain per-projection path — the mixer's own Forward (its q/k/v/o
+			// or in_proj/out_proj dispatch to the quant matvec seam) then the host FFN tail (MLP.forward
+			// dispatches gate/up/down to the seam too). The big matmuls still hit the device quant kernels;
+			// only the tail-fusion optimisation is skipped (correctness first).
+			normed := rmsNormRowsPlain(h, layer.InputNorm, L, D, eps)
+			mixOut, next, err := layer.Mixer.Forward(normed, L, D, s.states[li])
+			if err != nil {
+				return nil, err
+			}
+			s.states[li] = next
+			h = tailHost(h, mixOut, layer.PostAttnNorm, layer.MLP, L, D, eps, s.m.residualScale())
 			continue
 		}
 
@@ -539,7 +657,9 @@ func (s *ComposedSession) forward(tokens []int32) ([]float32, error) {
 		if int(tok) < 0 || int(tok) >= s.m.Vocab {
 			return nil, core.NewError("composed.forward: token out of range")
 		}
-		copy(h[t*D:(t+1)*D], s.m.Embed[int(tok)*D:int(tok)*D+D])
+		if err := s.m.embedRow(h[t*D:(t+1)*D], int(tok)); err != nil {
+			return nil, err
+		}
 		if s.m.EmbedScale != 0 && s.m.EmbedScale != 1 {
 			for i := t * D; i < (t+1)*D; i++ {
 				h[i] *= s.m.EmbedScale
@@ -555,11 +675,19 @@ func (s *ComposedSession) Forward(tokens []int32) ([]float32, error) { return s.
 // headLogits maps a single hidden [D] to vocab logits via the final norm + LM head.
 func (s *ComposedSession) headLogits(hidden []float32) []float32 {
 	normed := s.m.normalise(hidden, s.m.NormF, 1)
-	head := s.m.Output
-	if head == nil {
-		head = s.m.Embed
+	var logits []float32
+	switch {
+	case s.m.OutputQ != nil: // packed untied head
+		logits = matNTQuant(nil, normed, s.m.OutputQ, 1, s.m.D, s.m.Vocab)
+	case s.m.Output == nil && s.m.EmbedQ != nil: // packed embed, tied head
+		logits = matNTQuant(nil, normed, s.m.EmbedQ, 1, s.m.D, s.m.Vocab)
+	default:
+		head := s.m.Output
+		if head == nil {
+			head = s.m.Embed
+		}
+		logits = matNT(normed, head, 1, s.m.D, s.m.Vocab)
 	}
-	logits := matNT(normed, head, 1, s.m.D, s.m.Vocab)
 	if s.m.LogitScale != 0 {
 		for i := range logits {
 			logits[i] *= s.m.LogitScale
