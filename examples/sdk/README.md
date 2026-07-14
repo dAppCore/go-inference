@@ -3,7 +3,7 @@
 `lem spec` exports go-inference's HTTP surface as an OpenAPI 3.1 document, and
 [openapi-generator](https://openapi-generator.tech/docs/generators) turns that
 document into a typed client in **any of its ~90 languages** — SDKs for free,
-no hand-written client code. The sixteen lanes here are the proof: the same
+no hand-written client code. The seventeen lanes here are the proof: the same
 API driven past hello world (models, a two-turn conversation that proves
 memory, the thinking toggle, token usage, friendly errors) through one
 generated client per language, each run LIVE against a local `lem serve`.
@@ -39,6 +39,7 @@ Every example reads `LEM_BASE_URL` (default `http://localhost:36911`).
 | Python | [`python/`](python/) | `pip install ../../../build/sdk/python && python3 main.py` |
 | TypeScript (fetch) | [`typescript/`](typescript/) | `npm install && npm start` |
 | TypeScript (axios) | [`typescript-axios/`](typescript-axios/) | `npm install && npm start` — interceptor timing demo |
+| Angular | [`typescript-angular/`](typescript-angular/) | `npx ng serve` — injectable services, dev-proxy to the serve |
 | JavaScript (Node) | [`javascript/`](javascript/) | `npm install && npm start` |
 | Rust | [`rust/`](rust/) | `cargo run` |
 | Java | [`java/`](java/) | `mvn -f ../../../build/sdk/java install -DskipTests && mvn exec:java` |
@@ -60,7 +61,7 @@ override, `/v1/messages` rejecting Anthropic's string-content shorthand,
 the spec mis-placing `thought` under `message` when the wire puts it on the
 response root, and multi-tagged routes generating duplicate Go types.
 
-All sixteen planned lanes are live — the C# lane joined once `dotnet-sdk`
+All seventeen lanes are live — the C# lane joined once `dotnet-sdk`
 was installed, and being generated after the spec fixes it was the first
 with the thinking channel fully typed (`response.Thought`), no raw-JSON
 workaround.
