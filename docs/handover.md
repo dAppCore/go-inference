@@ -1,4 +1,48 @@
-# NEXT WAKE (2026-07-17 — coverage closed: 33 examples across every lane; #1847 thinking default flipped to vendor ON; RenderGemmaToolResponse dedup)
+# NEXT WAKE (2026-07-18 — three-lane batch merge landed: GPU CE 16x, 26B-gap verdict, q8 reuse restored; TUI grew Service tab + tool loop)
+
+## 2026-07-18 (the batch merge + the TUI campaign)
+
+- THREE OPUS LANES MERGED to dev (7e36495 / cc6e96f / eaacd00), worktrees
+  gone, branches deleted, repo back to one tree. Board is now BETA-ONLY
+  (#382) — snider adds new ideas from here.
+- #390 GPU CE (fdd3d5b+3206cc2): lthn_softmax_xent_rows_f32 (one
+  threadgroup/row, 1024 threads striding vocab, tree-reduced, precise
+  exp) + CrossEntropyBackwardF32Auto + LTHN_TRAIN_GPU_CE=0 oracle.
+  MERGE-TIME RECEIPTS (quiescent, canonical lib): host 457ms vs GPU
+  28.6ms = 16.0x at T=128; loss rel 1e-07, dLogits worst 7.9e-09; full
+  SFT step 356ms (3.64s at campaign start). REMEMBER THE COUPLING:
+  metallib rebuilt (task metallib:kernels) AND cli embed gz refreshed
+  (task build:embed) at 102af74 — the kernel must exist in BOTH or the
+  trainer silently host-falls-back.
+- #392 26B K=1 gap (c8a2376): REFUTED all round-surgery levers with the
+  new per-op-class round split + exact dispatch counts (also fixed a
+  pre-existing profiler counter-cap saturation bug). matvec/gather 73.5%
+  of GPU, 483 dispatches/token, host gap 0.18ms/token (2.6%). K=1→K=8 is
+  weight-stream amortisation across rows — not overhead to shave.
+- #397 q8 reuse RESTORED (82b5134, mantis #1846 closed): root is
+  intra-batch TILE-POSITION sensitivity (upstream of q8 — bf16 caches
+  differ with q8 off; census killed the gather-vs-qmm_t theory).
+  reuseCanonicalLanding routes q8 reuse-session prefills through the
+  position-invariant per-token lane — TestProbeCanonicalLanding:
+  BYTE-IDENTICAL vs fresh (batched contrast K 0.0078 / V 0.104); 31B@6144
+  reuse arms ENGAGED with parity. Opt-in: engine.CanonicalLandingSession,
+  wired on the resident reuse lane only (cost = decode-speed prefill
+  dispatches, amortised over reused turns). LEFT OPEN: the -state
+  persistent lane can adopt SetReuseCanonicalLanding if it shows the same
+  wobble; the plain-vet tag skew (my #1845 debt) died with this lane.
+- TUI (cli/tui, Charm stack): tabbed shell d333604, then b827299 grew the
+  SERVICE TAB — hosts the OpenAI/Anthropic/Ollama API on the model
+  ALREADY LOADED in the TUI (same weights, no second load), TUI turns and
+  HTTP sharing ONE serial scheduler lane (capacity 1 — the #1842 lesson
+  applied preventively). Address presets (:36911/:11434/:8080/0.0.0.0),
+  live request counter, opencode/codex/Claude-Code wiring hints in-tab.
+  LIVE RECEIPT: TestAppLiveServiceAPI loads e2b through the Update loop,
+  starts the API from the tab, real completion over HTTP ("OK",
+  finish=stop, counter=1), clean stop. cli/ + cli/tui/ READMEs added.
+- OPEN MANTIS: #1843 (Metrics memory counters), #1844 (continuity decode
+  skips applyDeclaredSampling). Both small, both example-found.
+
+# PREVIOUS WAKE (2026-07-17 — coverage closed: 33 examples across every lane; #1847 thinking default flipped to vendor ON; RenderGemmaToolResponse dedup)
 
 ## 2026-07-17 (late — the coverage fan-out + two more example-found defects)
 
