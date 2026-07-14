@@ -43,7 +43,10 @@ func TestHIPInferenceModel_EmbeddedTokenizer_Good(t *testing.T) {
 	model, err := newHipEngineTextModel(loaded, decoder, "gemma4")
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, []int32{2, 7}, model.Encode("hello"))
-	core.AssertEqual(t, "<|turn>model\n", model.FormatChatPrompt([]inference.Message{}))
+	core.AssertEqual(t,
+		"<|turn>system\n<|think|>\n<turn|>\n<|turn>model\n",
+		model.FormatChatPrompt([]inference.Message{}),
+	)
 }
 
 func TestHIPInferenceModel_PromptReuseDeclaration_Good(t *testing.T) {
@@ -71,8 +74,13 @@ func TestHIPInferenceModel_DeclaredGemma4ChatTemplate_Good(t *testing.T) {
 	largeTextModel, err := newHipEngineTextModel(large, decoder, "gemma4")
 	core.RequireNoError(t, err)
 	core.AssertEqual(t,
-		"<|turn>user\nhello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+		"<|turn>system\n<|think|>\n<turn|>\n<|turn>user\nhello<turn|>\n<|turn>model\n",
 		largeTextModel.FormatChatPromptWithThinking([]inference.Message{{Role: "user", Content: "hello"}}, nil),
+	)
+	thinkingOff := false
+	core.AssertEqual(t,
+		"<|turn>user\nhello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
+		largeTextModel.FormatChatPromptWithThinking([]inference.Message{{Role: "user", Content: "hello"}}, &thinkingOff),
 	)
 
 	embedded := newHipTokenModel(&hipLoadedModel{
@@ -111,5 +119,8 @@ func TestHIPInferenceModel_ROCmProductionBridge_Good(t *testing.T) {
 	})
 	got := slices.Collect(model.Chat(context.Background(), []inference.Message{{Role: "user", Content: "hello"}}))
 	core.AssertEqual(t, []inference.Token{{ID: 7, Text: "bridge"}}, got)
-	core.AssertEqual(t, "<|turn>user\nhello<turn|>\n<|turn>model\n", model.FormatChatPromptWithThinking([]inference.Message{{Role: "user", Content: "hello"}}, nil))
+	core.AssertEqual(t,
+		"<|turn>system\n<|think|>\n<turn|>\n<|turn>user\nhello<turn|>\n<|turn>model\n",
+		model.FormatChatPromptWithThinking([]inference.Message{{Role: "user", Content: "hello"}}, nil),
+	)
 }
