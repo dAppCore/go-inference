@@ -9,6 +9,7 @@ import (
 
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
+	"dappco.re/go/inference/model/vision"
 )
 
 func BenchmarkNativeTokenModelEmbed(b *testing.B) {
@@ -67,7 +68,7 @@ func BenchmarkNativeTokenModelTokenEmbeddingsWithFeatures(b *testing.B) {
 	}
 	tm := &NativeTokenModel{
 		NativeBackend: &NativeBackend{arch: model.Arch{Hidden: hidden}},
-		vision: &model.LoadedVision{Cfg: model.LoadedVisionConfig{
+		vision: &vision.Loaded{Cfg: vision.Config{
 			ImageTokenID: imageTok,
 			VideoTokenID: videoTok,
 		}},

@@ -425,7 +425,7 @@ func vNormHeadMajor(proj []byte, L, N, headDim int, eps float32) []byte {
 }
 
 // VisionLayerWeights is one SigLIP encoder layer's weights as bf16 byte views — the native-side,
-// engine-neutral mirror of gemma4.LoadedVisionLayer (an adapter fills it; native imports no model).
+// engine-neutral mirror of vision.Layer (an adapter fills it; native imports no model).
 // The four norms are [hidden]; QNorm/KNorm are [headDim]; the projections are row-major bf16.
 type VisionLayerWeights struct {
 	InputNorm, PostAttnNorm, PreFFNorm, PostFFNorm []byte
@@ -595,7 +595,7 @@ type VisionProjectorWeights struct {
 }
 
 // VisionWeights is the whole SigLIP tower + projector as bf16 byte views — the native-side neutral
-// mirror of gemma4.LoadedVision (an adapter fills it; native imports no model). PositionEmbeddings,
+// mirror of vision.Loaded (an adapter fills it; native imports no model). PositionEmbeddings,
 // PostLayernorm and StdBias/StdScale are nil when the checkpoint omits them.
 type VisionWeights struct {
 	PatchEmbedding     []byte

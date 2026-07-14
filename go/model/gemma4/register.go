@@ -6,6 +6,7 @@ import (
 	"dappco.re/go/inference/model"
 	_ "dappco.re/go/inference/model/gemma4/gguf" // registers the gemma-4 GGUF export lane (model/gguf.RegisterQuantizeLane)
 	"dappco.re/go/inference/model/safetensors"
+	"dappco.re/go/inference/model/vision"
 )
 
 // init registers gemma4's ArchSpec for the model_type ids the family declares, so the engine's reactive
@@ -28,14 +29,14 @@ func init() {
 		Normalize: func(tensors map[string]safetensors.Tensor) map[string]safetensors.Tensor {
 			return canonicalTextWeights("gemma4", tensors)
 		},
-		Vision: func(tensors map[string]safetensors.Tensor, cfg model.ArchConfig) (*model.LoadedVision, error) {
+		Vision: func(tensors map[string]safetensors.Tensor, cfg model.ArchConfig) (*vision.Loaded, error) {
 			textCfg, ok := cfg.(*Gemma4TextConfig)
 			if !ok {
 				return nil, nil
 			}
 			return AssembleVision(SanitizeVisionWeights(tensors), textCfg)
 		},
-		UnifiedVision: func(tensors map[string]safetensors.Tensor, cfg model.ArchConfig) (*model.LoadedUnifiedVision, error) {
+		UnifiedVision: func(tensors map[string]safetensors.Tensor, cfg model.ArchConfig) (*vision.Unified, error) {
 			textCfg, ok := cfg.(*Gemma4TextConfig)
 			if !ok {
 				return nil, nil

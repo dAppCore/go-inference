@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/vision"
 )
 
 // vision_unified_test.go gates the encoder-free (gemma4_unified) vision
@@ -142,20 +143,20 @@ func TestUnifiedVisionProjectParity(t *testing.T) {
 	}
 	ref = unifiedRefMatmul(ref, projW, n, mm, hidden, nil)
 
-	uv := &model.LoadedUnifiedVision{
+	uv := &vision.Unified{
 		PatchLN1W: unifiedTestBF16(ln1w), PatchLN1B: unifiedTestBF16(ln1b),
-		PatchDense: model.LoadedVisionLinear{
+		PatchDense: vision.Linear{
 			Weight: unifiedTestBF16(denseW), Bias: unifiedTestBF16(denseB),
 			OutDim: mm, InDim: patchDim,
 		},
 		PatchLN2W: unifiedTestBF16(ln2w), PatchLN2B: unifiedTestBF16(ln2b),
 		PosEmbedding: unifiedTestBF16(pos),
 		PosNormW:     unifiedTestBF16(posw), PosNormB: unifiedTestBF16(posb),
-		Projection: model.LoadedVisionLinear{
+		Projection: vision.Linear{
 			Weight: unifiedTestBF16(projW),
 			OutDim: hidden, InDim: mm,
 		},
-		Cfg: model.LoadedUnifiedVisionConfig{
+		Cfg: vision.UnifiedConfig{
 			MMEmbedDim: mm, TextHidden: hidden, PosembSize: posemb,
 			PatchSize: 16, ModelPatchSize: 13, PoolKernel: 3, MaxSoftTokens: 280,
 			LayerNormEps: lnEps, RMSNormEps: rmsEps,

@@ -4,8 +4,8 @@ package gemma4
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/safetensors"
+	"dappco.re/go/inference/model/vision"
 )
 
 // unified_vision_assemble.go gathers the ENCODER-FREE vision embedder the
@@ -16,10 +16,10 @@ import (
 // (gemma4VisionShouldBuildEncoderTower == false); this is their assembler.
 
 // AssembleUnifiedVision gathers the gemma4_unified vision embedder into a
-// LoadedUnifiedVision. Returns (nil, nil) when the pack carries no unified
+// vision.Unified. Returns (nil, nil) when the pack carries no unified
 // embedder (tower packs populate LoadedModel.Vision instead; text-only packs
 // carry neither).
-func AssembleUnifiedVision(weights map[string]safetensors.Tensor, textCfg *Gemma4TextConfig) (*model.LoadedUnifiedVision, error) {
+func AssembleUnifiedVision(weights map[string]safetensors.Tensor, textCfg *Gemma4TextConfig) (*vision.Unified, error) {
 	if gemma4VisionShouldBuildEncoderTower(textCfg) {
 		return nil, nil
 	}
@@ -58,7 +58,7 @@ func AssembleUnifiedVision(weights map[string]safetensors.Tensor, textCfg *Gemma
 		return nil, core.E("gemma4.AssembleUnifiedVision", "missing or malformed vision_embedder.pos_embedding (want [positions, 2, mm_embed_dim])", nil)
 	}
 
-	uv := &model.LoadedUnifiedVision{
+	uv := &vision.Unified{
 		PatchLN1W:    visionWeight(weights, "vision_embedder.patch_ln1.weight"),
 		PatchLN1B:    visionWeight(weights, "vision_embedder.patch_ln1.bias"),
 		PatchDense:   dense,
@@ -93,7 +93,7 @@ func AssembleUnifiedVision(weights map[string]safetensors.Tensor, textCfg *Gemma
 	if posemb <= 0 {
 		posemb = pos.Shape[0]
 	}
-	uv.Cfg = model.LoadedUnifiedVisionConfig{
+	uv.Cfg = vision.UnifiedConfig{
 		MMEmbedDim:     mmEmbed,
 		TextHidden:     textHidden,
 		PosembSize:     posemb,
