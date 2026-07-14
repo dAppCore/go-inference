@@ -456,6 +456,22 @@ func TestDecodeHelpers_Good_AttachedDrafterTextModelGenerateUsesNativeAttachedRo
 	core.AssertEqual(t, 1, mtp.RejectedTokens)
 	core.AssertEqual(t, 3, mtp.ProposedTokens)
 	core.AssertEqual(t, 1, mtp.VerifyCalls)
+	serial, ok := any(model).(inference.SerialModel)
+	if !ok || !serial.SerialGeneration() {
+		t.Fatal("attached drafter model must declare its shared generation lane serial")
+	}
+	provider, ok := any(model).(inference.SpeculativeMetricsProvider)
+	if !ok {
+		t.Fatal("attached drafter model does not expose shared speculative metrics")
+	}
+	speculative := provider.SpeculativeMetrics()
+	core.AssertEqual(t, 3, speculative.ProposedTokens)
+	core.AssertEqual(t, 2, speculative.AcceptedTokens)
+	core.AssertEqual(t, 1, speculative.RejectedTokens)
+	core.AssertEqual(t, 1, speculative.TargetVerifyCalls)
+	core.AssertEqual(t, 3, speculative.TargetCalls)
+	core.AssertEqual(t, 1, speculative.DraftCalls)
+	core.AssertEqual(t, float64(2)/3, speculative.AcceptanceRate)
 	core.AssertEqual(t, true, IsAttachedDrafterTextModel(model))
 }
 
