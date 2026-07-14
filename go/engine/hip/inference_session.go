@@ -85,8 +85,13 @@ type hipEngineSession struct {
 	pendingEmbeddings []byte
 	tokens            []int32
 	generated         []int32
-	closed            bool
+	// drive replaces the combined HIP entry point in focused session tests. A
+	// nil value always uses the native runtime path below.
+	drive  hipSessionDrive
+	closed bool
 }
+
+type hipSessionDrive func(context.Context, []int32, []byte, inference.GenerateConfig, *model.Sampler, *hipGemma4Q4DeviceDecodeState, func(int32) bool) ([]int32, *hipGemma4Q4DeviceDecodeState, error)
 
 // newHipEngineSession opens a retained Gemma4-Q4 session over a loaded model.
 // It requires a Gemma4-Q4-linked model — the retained-KV fast path is q4
@@ -458,6 +463,11 @@ func hipTokenPrefixLen(a, b []int32) int {
 func (s *hipEngineSession) driveLocked(ctx context.Context, promptTokens []int32, promptEmbeddings []byte, generate inference.GenerateConfig, sampler *model.Sampler, emit func(int32) bool) ([]int32, error) {
 	initial := s.device
 	s.device = nil
+	if s.drive != nil {
+		out, device, err := s.drive(ctx, promptTokens, promptEmbeddings, generate, sampler, initial, emit)
+		s.device = device
+		return out, err
+	}
 	var out []int32
 	stopped := false
 	seq, errFn := hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx, s.loaded, s.cfg, promptTokens, promptEmbeddings, generate, s.engine, initial, func(state *hipGemma4Q4DeviceDecodeState) error {
@@ -598,6 +608,11 @@ func (s *hipEngineSession) RestoreFromKV(ctx context.Context, snapshot *kv.Snaps
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.restoreFromKVLocked(ctx, snapshot)
+}
+
+// restoreFromKVLocked is RestoreFromKV with the session lock held.
+func (s *hipEngineSession) restoreFromKVLocked(ctx context.Context, snapshot *kv.Snapshot) error {
 	if s.closed {
 		return core.NewError("hip.EngineSession.RestoreFromKV: session is closed")
 	}

@@ -481,3 +481,75 @@ func TestHipEngineSession_ClearPromptCache_Ugly_IsIdempotentOnBufferedState(t *t
 	core.AssertFalse(t, session.closed)
 	core.RequireNoError(t, session.PrefillTokens([]int32{8}))
 }
+
+// TestHipEngineSession_RestoreStateBlocks_Good_SuffixPreservesNextDecode proves
+// that a target holding the shared raw-KV prefix can graft the source's suffix
+// blocks and enter HIP's combined decode with the same state as the source.
+func TestHipEngineSession_RestoreStateBlocks_Good_SuffixPreservesNextDecode(t *testing.T) {
+	source := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
+	defer func() { _ = source.Close() }()
+	source.tokens = []int32{1, 2, 3}
+	source.pending = []int32{3}
+
+	all, err := source.StateBlockSource(1)
+	core.RequireNoError(t, err)
+	prefix := all
+	prefix.Position = 2
+	prefix.Tokens = []int32{1, 2}
+	prefix.Blocks = append([]kv.Block(nil), all.Blocks[:2]...)
+	target := &hipEngineSession{cfg: source.cfg, mode: source.mode, driver: source.driver}
+	defer func() { _ = target.Close() }()
+	core.RequireNoError(t, target.RestoreStateBlocks(prefix))
+
+	suffix, err := source.StateBlockSourceFrom(2, 1)
+	core.RequireNoError(t, err)
+	core.RequireNoError(t, target.RestoreStateBlocks(suffix))
+
+	decode := func(_ context.Context, _ []int32, _ []byte, _ inference.GenerateConfig, _ *model.Sampler, state *hipGemma4Q4DeviceDecodeState, _ func(int32) bool) ([]int32, *hipGemma4Q4DeviceDecodeState, error) {
+		if state == nil || len(state.layers) != 1 {
+			return nil, nil, core.NewError("test decode state is unavailable")
+		}
+		host, err := state.HostState()
+		if err != nil {
+			return nil, nil, err
+		}
+		if len(host.Layers) != 1 || len(host.Layers[0].Keys) == 0 || len(host.Layers[0].Values) == 0 {
+			return nil, nil, core.NewError("test decode K/V state is unavailable")
+		}
+		return []int32{int32((host.Layers[0].Keys[0] + host.Layers[0].Values[0]) * 1000)}, state, nil
+	}
+	source.drive = decode
+	target.drive = decode
+
+	want, err := source.GenerateFromCacheEach(1, -1, nil)
+	core.RequireNoError(t, err)
+	got, err := target.GenerateFromCacheEach(1, -1, nil)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, want, got)
+}
+
+// TestHipEngineSession_WarmPromptCache_Good_AvoidsRepeatedNativePrefill pins
+// HIP's honest warm lifecycle: warming itself performs no speculative native
+// work, while each later decode forwards only the unmaterialized final seed
+// token instead of the already resident prompt prefix.
+func TestHipEngineSession_WarmPromptCache_Good_AvoidsRepeatedNativePrefill(t *testing.T) {
+	session := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
+	defer func() { _ = session.Close() }()
+	var nativePrefillPrompts [][]int32
+	session.drive = func(_ context.Context, prompt []int32, _ []byte, _ inference.GenerateConfig, _ *model.Sampler, state *hipGemma4Q4DeviceDecodeState, _ func(int32) bool) ([]int32, *hipGemma4Q4DeviceDecodeState, error) {
+		nativePrefillPrompts = append(nativePrefillPrompts, append([]int32(nil), prompt...))
+		return []int32{9}, state, nil
+	}
+
+	core.RequireNoError(t, session.WarmPromptCache([]int32{1, 2, 3}))
+	core.AssertEqual(t, 0, len(nativePrefillPrompts))
+	_, err := session.GenerateFromCacheEach(1, -1, nil)
+	core.RequireNoError(t, err)
+
+	core.RequireNoError(t, session.WarmPromptCache([]int32{1, 2, 3}))
+	core.AssertEqual(t, 1, len(nativePrefillPrompts))
+	_, err = session.GenerateFromCacheEach(1, -1, nil)
+	core.RequireNoError(t, err)
+
+	core.AssertEqual(t, [][]int32{{3}, {3}}, nativePrefillPrompts)
+}
