@@ -441,6 +441,31 @@ func TestHIPGemma4ExpertCache_Good_AdaptsToLiveHeadroom(t *testing.T) {
 	core.RequireTrue(t, cache.entries[hipGemma4ExpertCacheKey{Layer: 0, Expert: 2}] != nil)
 }
 
+func TestHIPGemma4ExpertCache_Good_AdaptiveCacheSuppressesTransientPool(t *testing.T) {
+	t.Setenv("GO_ROCM_DISABLE_DEVICE_BUFFER_POOL", "")
+	driver := &fakeHIPDriver{available: true}
+	hipDeviceByteBufferPool.Lock()
+	hipDeviceByteBufferPool.single = [hipDeviceByteBufferPoolSingleSlots]hipDeviceByteBufferPoolSingleSlot{}
+	hipDeviceByteBufferPool.entries = make(map[uint64][]hipDeviceByteBufferPoolEntry)
+	hipDeviceByteBufferPool.bytes = 0
+	hipDeviceByteBufferPool.Unlock()
+	t.Cleanup(func() {
+		hipDeviceByteBufferPool.Lock()
+		hipDeviceByteBufferPool.single = [hipDeviceByteBufferPoolSingleSlots]hipDeviceByteBufferPoolSingleSlot{}
+		hipDeviceByteBufferPool.entries = make(map[uint64][]hipDeviceByteBufferPoolEntry)
+		hipDeviceByteBufferPool.bytes = 0
+		hipDeviceByteBufferPool.Unlock()
+	})
+	core.RequireTrue(t, hipDeviceByteBufferPoolPut(driver, 42, 4096))
+
+	cache := newHIPGemma4AdaptiveExpertCache(driver, 1)
+	core.RequireTrue(t, !hipDeviceByteBufferPoolEnabled())
+	core.AssertEqual(t, []nativeDevicePointer{42}, driver.frees)
+	core.RequireTrue(t, !hipDeviceByteBufferPoolPut(driver, 43, 4096))
+	core.RequireNoError(t, cache.Close())
+	core.RequireTrue(t, hipDeviceByteBufferPoolEnabled())
+}
+
 func TestHIPGemma4ExpertCacheBudget_Good(t *testing.T) {
 	core.AssertEqual(t, uint64(8*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 12 * memoryGiB}}))
 	core.AssertEqual(t, uint64(8*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 11 * memoryGiB}}))

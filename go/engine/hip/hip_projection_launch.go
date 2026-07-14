@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
@@ -134,6 +135,8 @@ var hipDeviceByteBufferPool = struct {
 }{
 	entries: make(map[uint64][]hipDeviceByteBufferPoolEntry),
 }
+
+var hipDeviceByteBufferPoolSuppressions atomic.Int64
 
 const (
 	hipDeviceByteBufferPoolMaxBytes           = 768 << 20
@@ -5484,7 +5487,45 @@ func hipRecordDeviceAllocationLabel(driver nativeHIPDriver, sizeBytes uint64, op
 }
 
 func hipDeviceByteBufferPoolEnabled() bool {
-	return os.Getenv("GO_ROCM_DISABLE_DEVICE_BUFFER_POOL") != "1"
+	return os.Getenv("GO_ROCM_DISABLE_DEVICE_BUFFER_POOL") != "1" && hipDeviceByteBufferPoolSuppressions.Load() == 0
+}
+
+func hipSuppressDeviceByteBufferPool() func() {
+	hipDeviceByteBufferPoolSuppressions.Add(1)
+	hipDrainDeviceByteBufferPool()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			hipDeviceByteBufferPoolSuppressions.Add(-1)
+		})
+	}
+}
+
+func hipDrainDeviceByteBufferPool() {
+	hipDeviceByteBufferPool.Lock()
+	entries := make([]hipDeviceByteBufferPoolEntry, 0)
+	for index := range hipDeviceByteBufferPool.single {
+		slot := &hipDeviceByteBufferPool.single[index]
+		for entryIndex := 0; entryIndex < int(slot.count); entryIndex++ {
+			if entry := slot.entries[entryIndex]; entry.driver != nil && entry.pointer != 0 {
+				entries = append(entries, entry)
+			}
+		}
+	}
+	for _, bucket := range hipDeviceByteBufferPool.entries {
+		for _, entry := range bucket {
+			if entry.driver != nil && entry.pointer != 0 {
+				entries = append(entries, entry)
+			}
+		}
+	}
+	hipDeviceByteBufferPool.single = [hipDeviceByteBufferPoolSingleSlots]hipDeviceByteBufferPoolSingleSlot{}
+	hipDeviceByteBufferPool.entries = make(map[uint64][]hipDeviceByteBufferPoolEntry)
+	hipDeviceByteBufferPool.bytes = 0
+	hipDeviceByteBufferPool.Unlock()
+	for _, entry := range entries {
+		_ = entry.driver.Free(entry.pointer)
+	}
 }
 
 func hipPrewarmDeviceByteBufferPool(driver nativeHIPDriver, sizeBytes uint64, count int) {
@@ -5562,6 +5603,9 @@ func hipDeviceByteBufferPoolPut(driver nativeHIPDriver, pointer nativeDevicePoin
 	}
 	hipDeviceByteBufferPool.Lock()
 	defer hipDeviceByteBufferPool.Unlock()
+	if !hipDeviceByteBufferPoolEnabled() {
+		return false
+	}
 	if hipDeviceByteBufferPool.bytes+sizeBytes > hipDeviceByteBufferPoolMaxBytes {
 		return false
 	}

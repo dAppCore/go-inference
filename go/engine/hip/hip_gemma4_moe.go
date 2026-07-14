@@ -130,16 +130,17 @@ type hipGemma4MoELayerConfig struct {
 }
 
 type hipGemma4ExpertCache struct {
-	driver         nativeHIPDriver
-	maxBytes       uint64
-	bytes          uint64
-	clock          uint64
-	adaptive       bool
-	minimumEntries int
-	entries        map[hipGemma4ExpertCacheKey]*hipGemma4ExpertCacheEntry
-	sources        map[string]*hipGemma4MappedExpertSource
-	stats          hipGemma4ExpertCacheStats
-	mu             sync.Mutex
+	driver                          nativeHIPDriver
+	maxBytes                        uint64
+	bytes                           uint64
+	clock                           uint64
+	adaptive                        bool
+	minimumEntries                  int
+	entries                         map[hipGemma4ExpertCacheKey]*hipGemma4ExpertCacheEntry
+	sources                         map[string]*hipGemma4MappedExpertSource
+	stats                           hipGemma4ExpertCacheStats
+	releaseTransientPoolSuppression func()
+	mu                              sync.Mutex
 }
 
 const hipGemma4MoERouterMaximumOutputBytes = hipGGUFQ4_0SelectedExpertsMaxTopK*8 + 4
@@ -796,6 +797,7 @@ func newHIPGemma4AdaptiveExpertCache(driver nativeHIPDriver, minimumEntries int)
 	cache := newHIPGemma4ExpertCache(driver, hipGemma4ExpertCacheBudget(driver))
 	cache.adaptive = true
 	cache.minimumEntries = minimumEntries
+	cache.releaseTransientPoolSuppression = hipSuppressDeviceByteBufferPool()
 	return cache
 }
 
@@ -1026,6 +1028,10 @@ func (cache *hipGemma4ExpertCache) Close() error {
 		delete(cache.sources, path)
 	}
 	cache.bytes = 0
+	if cache.releaseTransientPoolSuppression != nil {
+		cache.releaseTransientPoolSuppression()
+		cache.releaseTransientPoolSuppression = nil
+	}
 	return lastErr
 }
 
