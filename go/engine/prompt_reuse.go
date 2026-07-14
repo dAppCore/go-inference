@@ -49,6 +49,19 @@ type PromptReuseCapableModel interface {
 	SessionsReusePrompts() bool
 }
 
+// CanonicalLandingSession is an optional [PromptReuseSession] capability
+// (#1846): a session that can switch to POSITION-INVARIANT landing so its
+// cached prefills stay answer-stable under a quantised KV store. Quantised KV
+// amplifies the batched forward's intra-batch numeric wobble into token flips,
+// which otherwise forces a cached prefill to decline (re-prefill cold) rather
+// than reuse. The resident reuse lane enables it on its session so reuse
+// engages there; the cost is a per-token (decode-speed) prefill, paid once and
+// amortised across the conversation's reused turns. Engines without the
+// capability keep their default landing and their own reuse/decline policy.
+type CanonicalLandingSession interface {
+	SetReuseCanonicalLanding(on bool)
+}
+
 // acquireReuseSession hands back the resident reuse session when the lane is
 // available: enabled, no continuity layer installed, not held by a concurrent
 // request, and the engine session implements [PromptReuseSession] (probed once
@@ -77,6 +90,13 @@ func (m *TextModel) acquireReuseSession() (PromptReuseSession, func(), bool) {
 			m.reuseUnsupported.Store(true)
 			m.reuseMu.Unlock()
 			return nil, nil, false
+		}
+		// #1846: the resident reuse session lands canonically so cached prefills
+		// engage (not decline) under a quantised KV store. Set before any
+		// prefill so the whole session lands uniformly; a no-op on engines
+		// without the capability and on non-q8 sessions.
+		if cl, ok := rs.(CanonicalLandingSession); ok {
+			cl.SetReuseCanonicalLanding(true)
 		}
 		m.reuseSess = rs
 	}

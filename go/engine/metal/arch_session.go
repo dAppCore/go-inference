@@ -118,6 +118,22 @@ type ArchSession struct {
 	// buffer freezes every stream for its duration). 0 = uncapped, the
 	// throughput-tuned default. Byte-identical either way (#381 chunk parity).
 	prefillChunkRowsCap int
+	// reuseCanonicalLanding opts a q8-ICB session into POSITION-INVARIANT
+	// landing (#1846): every prefill/append lands each row through the
+	// per-token chained lane rather than the batched-dense forward. The
+	// batched forward is intra-batch TILE-POSITION sensitive — the same
+	// absolute row lands a few bf16 ulps apart depending on its offset within
+	// the projection/rope/norm batch — and the q8 store quantises that wobble
+	// DISCONTINUOUSLY, so a reused prefix+suffix landing answers differently
+	// from a fresh whole prefill (the #1845 decline). The per-token lane lands
+	// every row at batch offset 0, so a resident prefix, an appended suffix,
+	// and a fresh whole prefill are byte-identical row-for-row — reuse is then
+	// answer-stable under q8. The cost is a decode-speed (per-token, host-
+	// synced) prefill, so this is opt-in via SetReuseCanonicalLanding: the
+	// resident prompt-reuse lane (engine.CanonicalLandingSession) sets it;
+	// throughput-first one-shot q8 prefills leave it off and PrefillTokensCached
+	// keeps declining reuse for them.
+	reuseCanonicalLanding bool
 	// bidirSpanTokens, when non-zero, mark the placeholder token ids whose
 	// runs attend BIDIRECTIONALLY during embedding prefill (gemma4_unified
 	// image + video spans; use_bidirectional_attention == "vision"). Set at
@@ -2047,6 +2063,16 @@ func (s *ArchSession) prefillRetainedTokensBatchedDense(ids []int32, scope strin
 	}
 	if s.pos+len(ids) > s.maxLen {
 		return nil, false, core.NewError(scope + ": sequence would exceed maxLen cache rows")
+	}
+	// #1846: a q8-KV session in canonical-landing mode declines the batched
+	// forward outright so every row lands through the position-invariant
+	// per-token lane — the only shape whose reused prefix+suffix is byte-
+	// identical to a fresh whole prefill (the batched forward is tile-position
+	// sensitive). Gated on hasKVQ8: bf16 caches absorb the batch-shape wobble
+	// inside greedy margins, so non-q8 reuse stays on the fast batched path.
+	// The caller falls through to prefillPromptRetainedGPUInputsInPool.
+	if s.reuseCanonicalLanding && s.state.icb != nil && s.state.icb.hasKVQ8() {
+		return nil, false, nil
 	}
 	if s.verifyBatchedCrossesSlidingRingWrap(len(ids)) || (s.prefillChunkRowsCap > 0 && len(ids) > s.prefillChunkRowsCap) {
 		return s.prefillRetainedTokensBatchedDenseChunks(ids, scope)
