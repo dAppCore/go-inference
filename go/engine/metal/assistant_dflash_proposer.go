@@ -65,15 +65,14 @@ func (p *dflashProposer) ProposeBlock(context []int) []int {
 // engine's real per-layer capture (ForwardCaptureHiddens / captureLayerHiddens), so
 // the hiddens are the engine's actual layer outputs, not a re-derivation.
 //
-// This is the THROWAWAY-session extractor: ForwardCaptureHiddens resets the session to
+// EVIDENCED GAP (docs/design-dflash.md): ForwardCaptureHiddens resets the session to
 // pos 0 and re-runs the whole sequence, OVERWRITING the KV cache — fine for a fresh /
 // throwaway session (verification-time extraction, tests), but it cannot tap a LIVE
-// incrementally-decoding serving session without corrupting its cache. The
-// non-corrupting boundary tap for a live session is ExtractAuxHiddensLive
-// (assistant_dflash_livetap.go), which captures the aux-layer hiddens for the current
-// boundary token without resetting pos or perturbing the running cache. The block
-// forward itself takes the hiddens as input, so it is agnostic to which extractor fed
-// it.
+// incrementally-decoding serving session without corrupting its cache. A cheap,
+// non-corrupting boundary tap (capturing the aux-layer hiddens during the ordinary
+// decode step, the way retainedHidden already captures the final one) is the one
+// engine seam DFlash still needs before the live HTTP lane can extract cheaply; the
+// forward itself is complete and takes the hiddens as input.
 func ExtractAuxHiddens(target *ArchSession, ids []int32, auxLayers []int) ([][]byte, error) {
 	if target == nil {
 		return nil, core.NewError("native.dflash: aux extraction target session is nil")
