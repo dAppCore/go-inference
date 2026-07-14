@@ -6,12 +6,12 @@ go 1.26.2
 // pure library; cli/ consumes it. Inside the repository the root go.work
 // overrides this require with the live ./go tree; standalone builds resolve
 // the released module (tag go/v0.12.0).
-require dappco.re/go/inference v0.12.0
+require dappco.re/go/inference v0.13.0
 
 require (
 	dappco.re/go v0.11.0
-	dappco.re/go/api v0.18.0
-	dappco.re/go/io v0.14.0
+	dappco.re/go/api v0.19.0
+	dappco.re/go/io v0.15.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
