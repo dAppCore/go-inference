@@ -31,6 +31,51 @@ func TestComposedArchRegistered(t *testing.T) {
 	}
 }
 
+// TestLoadComposedEosTokenList pins the eos_token_id polymorphism: the real Qwen 3.6 multimodal wrapper
+// ships a top-level eos_token_id LIST ([248046, 248044]) while the nested text_config's is a scalar — a
+// plain int field would fail the whole config parse (the load-blocker fixed for the live 27B checkpoints).
+func TestLoadComposedEosTokenList(t *testing.T) {
+	ts, _ := mkHybridCheckpoint()
+	cfg := []byte(`{"model_type":"qwen3_5","eos_token_id":[248046,248044],"text_config":{"hidden_size":8,` +
+		`"num_hidden_layers":4,"intermediate_size":16,"num_attention_heads":4,"num_key_value_heads":2,` +
+		`"head_dim":8,"vocab_size":32,"rms_norm_eps":1e-5,"rope_theta":1000000,"partial_rotary_factor":0.5,` +
+		`"full_attention_interval":2,"eos_token_id":248044,"bos_token_id":248044}}`)
+	m, err := LoadComposed(ts, cfg)
+	if err != nil {
+		t.Fatalf("LoadComposed with a top-level eos_token_id list: %v", err)
+	}
+	if m.Vocab != 32 {
+		t.Fatalf("Vocab = %d, want 32", m.Vocab)
+	}
+}
+
+// TestComposedMTPRefusal pins the qwen3_5_mtp drafter contract: it is a REGISTERED model_type (so a user
+// pointing lem at the MTP submodule gets direction, not "unknown model architecture"), whose Composed hook
+// refuses at load with a message that says WHY — the MTP head has no standalone forward; it serves paired
+// with its base. Pairing is a later slice; today the refusal must be clean and self-explaining.
+func TestComposedMTPRefusal(t *testing.T) {
+	for _, mt := range []string{"qwen3_5_mtp", "qwen3_5_mtp_text", "qwen3_6_mtp"} {
+		spec, ok := model.LookupArch(mt)
+		if !ok {
+			t.Fatalf("model_type %q not registered — an MTP drafter must be a known arch, not fall to 'unknown model architecture'", mt)
+		}
+		if spec.Composed == nil {
+			t.Fatalf("model_type %q registered without a Composed hook", mt)
+		}
+		ts, cfg := mkHybridCheckpoint()
+		tm, err := spec.Composed(ts, cfg)
+		if err == nil {
+			t.Fatalf("%q: expected a clean refusal, got a model", mt)
+		}
+		if tm != nil {
+			t.Fatalf("%q: refusal must return a nil model", mt)
+		}
+		if !core.Contains(err.Error(), "MTP drafter") {
+			t.Fatalf("%q: refusal message %q must explain the MTP-drafter pairing", mt, err.Error())
+		}
+	}
+}
+
 // TestComposedArchRoundTrip is the registration round-trip: model_type → LookupArch → ArchSpec → the
 // Composed hook builds a serve-ready TokenModel from a synthetic hybrid checkpoint, and the two bookends +
 // the decode seam drive it (Embed → DecodeForward → Head → vocab logits). No engine/metal switch.
