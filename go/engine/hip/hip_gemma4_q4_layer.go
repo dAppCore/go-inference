@@ -71,6 +71,7 @@ type hipGemma4Q4PerLayerInputConfig struct {
 	ModelProjectionScale float32
 	Embedding            hipDeviceEmbeddingLookupConfig
 	ModelProjection      hipBF16DeviceWeightConfig
+	ModelProjectionQ4    hipMLXQ4DeviceWeightConfig
 	ProjectionNorm       hipRMSNormDeviceWeightConfig
 	InputGate            hipMLXQ4DeviceWeightConfig
 	Projection           hipMLXQ4DeviceWeightConfig
@@ -2363,15 +2364,19 @@ func (cfg hipGemma4Q4Layer0Config) validatePerLayerInput() error {
 		if err := perLayer.Embedding.validate([]int32{0}); err != nil {
 			return core.E(hipGemma4Q4Layer0Operation, "per-layer embedding config", err)
 		}
-		if err := perLayer.ModelProjection.validate(hipProjectionWeightEncodingBF16); err != nil {
+		if perLayer.modelProjectionQuantized() {
+			if err := perLayer.ModelProjectionQ4.validateInputCount(perLayer.modelProjectionCols()); err != nil {
+				return core.E(hipGemma4Q4Layer0Operation, "per-layer model projection config", err)
+			}
+		} else if err := perLayer.ModelProjection.validate(hipProjectionWeightEncodingBF16); err != nil {
 			return core.E(hipGemma4Q4Layer0Operation, "per-layer model projection config", err)
 		}
-		if perLayer.ModelProjection.Rows != perLayer.Embedding.HiddenSize ||
-			perLayer.ModelProjection.Cols != cfg.HiddenSize ||
-			perLayer.ModelProjection.Rows%perLayer.InputSize != 0 {
+		if perLayer.modelProjectionRows() != perLayer.Embedding.HiddenSize ||
+			perLayer.modelProjectionCols() != cfg.HiddenSize ||
+			perLayer.modelProjectionRows()%perLayer.InputSize != 0 {
 			return core.E(hipGemma4Q4Layer0Operation, "per-layer global projection shape does not match layer geometry", nil)
 		}
-		if layerCount := perLayer.ModelProjection.Rows / perLayer.InputSize; cfg.Layer >= layerCount {
+		if layerCount := perLayer.modelProjectionRows() / perLayer.InputSize; cfg.Layer >= layerCount {
 			return core.E(hipGemma4Q4Layer0Operation, "per-layer input layer index is outside global projection rows", nil)
 		}
 		if err := hipValidateGemma4Q4NormConfig("per_layer_projection_norm", perLayer.ProjectionNorm, perLayer.InputSize); err != nil {
@@ -2412,6 +2417,9 @@ func (cfg hipGemma4Q4PerLayerInputConfig) globalPrecomputeConfigured() bool {
 		cfg.Embedding.ScalePointer != 0 ||
 		cfg.Embedding.BiasPointer != 0 ||
 		cfg.ModelProjection.WeightPointer != 0 ||
+		cfg.ModelProjectionQ4.WeightPointer != 0 ||
+		cfg.ModelProjectionQ4.ScalePointer != 0 ||
+		cfg.ModelProjectionQ4.BiasPointer != 0 ||
 		cfg.ProjectionNorm.WeightPointer != 0
 }
 
@@ -2419,8 +2427,33 @@ func (cfg hipGemma4Q4PerLayerInputConfig) hasGlobalPrecompute() bool {
 	return cfg.Embedding.EmbeddingPointer != 0 &&
 		cfg.Embedding.ScalePointer != 0 &&
 		cfg.Embedding.BiasPointer != 0 &&
-		cfg.ModelProjection.WeightPointer != 0 &&
+		cfg.modelProjectionConfigured() &&
 		cfg.ProjectionNorm.WeightPointer != 0
+}
+
+func (cfg hipGemma4Q4PerLayerInputConfig) modelProjectionQuantized() bool {
+	return cfg.ModelProjectionQ4.WeightPointer != 0 || cfg.ModelProjectionQ4.ScalePointer != 0 || cfg.ModelProjectionQ4.BiasPointer != 0
+}
+
+func (cfg hipGemma4Q4PerLayerInputConfig) modelProjectionConfigured() bool {
+	if cfg.modelProjectionQuantized() {
+		return cfg.ModelProjectionQ4.WeightPointer != 0 && cfg.ModelProjectionQ4.ScalePointer != 0 && cfg.ModelProjectionQ4.BiasPointer != 0
+	}
+	return cfg.ModelProjection.WeightPointer != 0
+}
+
+func (cfg hipGemma4Q4PerLayerInputConfig) modelProjectionRows() int {
+	if cfg.modelProjectionQuantized() {
+		return cfg.ModelProjectionQ4.Rows
+	}
+	return cfg.ModelProjection.Rows
+}
+
+func (cfg hipGemma4Q4PerLayerInputConfig) modelProjectionCols() int {
+	if cfg.modelProjectionQuantized() {
+		return cfg.ModelProjectionQ4.Cols
+	}
+	return cfg.ModelProjection.Cols
 }
 
 func (cfg *hipGemma4Q4Layer0Config) finalizeScales() {
@@ -2443,8 +2476,8 @@ func (cfg *hipGemma4Q4PerLayerInputConfig) finalizeScales() {
 		return
 	}
 	cfg.EmbeddingScale = hipGemma4Q4EmbeddingScale(cfg.InputSize)
-	if cfg.ModelProjection.Cols > 0 {
-		cfg.ModelProjectionScale = float32(math.Pow(float64(cfg.ModelProjection.Cols), -0.5))
+	if cols := cfg.modelProjectionCols(); cols > 0 {
+		cfg.ModelProjectionScale = float32(math.Pow(float64(cols), -0.5))
 	} else {
 		cfg.ModelProjectionScale = 0
 	}
@@ -2461,10 +2494,11 @@ func (cfg hipGemma4Q4PerLayerInputConfig) modelProjectionScale() float32 {
 	if cfg.ModelProjectionScale != 0 {
 		return cfg.ModelProjectionScale
 	}
-	if cfg.ModelProjection.Cols <= 0 {
+	cols := cfg.modelProjectionCols()
+	if cols <= 0 {
 		return 0
 	}
-	return float32(math.Pow(float64(cfg.ModelProjection.Cols), -0.5))
+	return float32(math.Pow(float64(cols), -0.5))
 }
 
 func hipGemma4Q4EmbeddingScale(hiddenSize int) float32 {
@@ -3022,14 +3056,16 @@ func hipRunGemma4Q4PerLayerInputSet(ctx context.Context, driver nativeHIPDriver,
 	if !cfg.hasLayerApply() {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input precompute requires per-layer gate/projection tensors", nil)
 	}
-	if len(hidden) != cfg.ModelProjection.Cols {
+	rows := cfg.modelProjectionRows()
+	cols := cfg.modelProjectionCols()
+	if len(hidden) != cols {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input hidden length must match model projection cols", nil)
 	}
-	if cfg.InputSize <= 0 || cfg.ModelProjection.Rows%cfg.InputSize != 0 {
+	if cfg.InputSize <= 0 || rows%cfg.InputSize != 0 {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input rows must align with input size", nil)
 	}
-	layerCount := cfg.ModelProjection.Rows / cfg.InputSize
-	if layerCount <= 0 || cfg.Embedding.HiddenSize != cfg.ModelProjection.Rows {
+	layerCount := rows / cfg.InputSize
+	if layerCount <= 0 || cfg.Embedding.HiddenSize != rows {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input global shape mismatch", nil)
 	}
 	perLayerEmbedding, err := hipRunEmbeddingLookupKernelWithDeviceTable(ctx, driver, []int32{tokenID}, cfg.Embedding)
@@ -3043,16 +3079,21 @@ func hipRunGemma4Q4PerLayerInputSet(ctx context.Context, driver nativeHIPDriver,
 	if err != nil {
 		return nil, err
 	}
-	projected, err := hipRunProjectionKernelWithDeviceWeightEncoding(
-		ctx,
-		driver,
-		hidden,
-		cfg.ModelProjection.WeightPointer,
-		cfg.ModelProjection.WeightBytes,
-		cfg.ModelProjection.Rows,
-		cfg.ModelProjection.Cols,
-		hipProjectionWeightEncodingBF16,
-	)
+	var projected []float32
+	if cfg.modelProjectionQuantized() {
+		projected, err = hipRunMLXQ4ProjectionKernelWithDeviceWeightConfig(ctx, driver, hidden, cfg.ModelProjectionQ4)
+	} else {
+		projected, err = hipRunProjectionKernelWithDeviceWeightEncoding(
+			ctx,
+			driver,
+			hidden,
+			cfg.ModelProjection.WeightPointer,
+			cfg.ModelProjection.WeightBytes,
+			rows,
+			cols,
+			hipProjectionWeightEncodingBF16,
+		)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -3120,20 +3161,22 @@ func hipRunGemma4Q4PerLayerInputConfigDeviceSet(ctx context.Context, driver nati
 	if !cfg.hasLayerApply() {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input precompute requires per-layer gate/projection tensors", nil)
 	}
-	if hidden == nil || hidden.Pointer() == 0 || hidden.Count() != cfg.ModelProjection.Cols || hidden.SizeBytes() != uint64(cfg.ModelProjection.Cols*4) {
+	rows := cfg.modelProjectionRows()
+	cols := cfg.modelProjectionCols()
+	if hidden == nil || hidden.Pointer() == 0 || hidden.Count() != cols || hidden.SizeBytes() != uint64(cols*4) {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input hidden device buffer shape mismatch", nil)
 	}
-	if cfg.InputSize <= 0 || cfg.ModelProjection.Rows%cfg.InputSize != 0 {
+	if cfg.InputSize <= 0 || rows%cfg.InputSize != 0 {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input rows must align with input size", nil)
 	}
-	layerCount := cfg.ModelProjection.Rows / cfg.InputSize
-	if layerCount <= 0 || cfg.Embedding.HiddenSize != cfg.ModelProjection.Rows {
+	layerCount := rows / cfg.InputSize
+	if layerCount <= 0 || cfg.Embedding.HiddenSize != rows {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input global shape mismatch", nil)
 	}
 	var err error
 	var perLayerEmbeddingScaled *hipDeviceByteBuffer
 	if workspace != nil {
-		perLayerEmbeddingScaled, err = workspace.EnsurePerLayerScaled(driver, cfg.ModelProjection.Rows)
+		perLayerEmbeddingScaled, err = workspace.EnsurePerLayerScaled(driver, rows)
 		if err == nil && tokenIDDeviceBuffer != nil {
 			err = hipRunEmbeddingLookupKernelWithDeviceTableGreedyTokenScaledOutputWithWorkspace(ctx, driver, cfg.Embedding, tokenIDDeviceBuffer, perLayerEmbeddingScaled, cfg.embeddingScale(), workspace)
 		} else if err == nil {
@@ -3161,20 +3204,26 @@ func hipRunGemma4Q4PerLayerInputConfigDeviceSet(ctx context.Context, driver nati
 	}
 	var projected *hipDeviceByteBuffer
 	if workspace != nil {
-		projected, err = workspace.EnsurePerLayerProjected(driver, cfg.ModelProjection.Rows)
+		projected, err = workspace.EnsurePerLayerProjected(driver, rows)
 		if err == nil {
-			err = hipRunProjectionKernelWithDeviceInputWeightEncodingOutput(
-				ctx,
-				driver,
-				hidden,
-				cfg.ModelProjection.WeightPointer,
-				cfg.ModelProjection.WeightBytes,
-				cfg.ModelProjection.Rows,
-				cfg.ModelProjection.Cols,
-				hipProjectionWeightEncodingBF16,
-				projected,
-			)
+			if cfg.modelProjectionQuantized() {
+				err = hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx, driver, hidden, cfg.ModelProjectionQ4, projected, workspace)
+			} else {
+				err = hipRunProjectionKernelWithDeviceInputWeightEncodingOutput(
+					ctx,
+					driver,
+					hidden,
+					cfg.ModelProjection.WeightPointer,
+					cfg.ModelProjection.WeightBytes,
+					rows,
+					cols,
+					hipProjectionWeightEncodingBF16,
+					projected,
+				)
+			}
 		}
+	} else if cfg.modelProjectionQuantized() {
+		projected, err = hipRunMLXQ4ProjectionKernelWithDeviceInput(ctx, driver, hidden, cfg.ModelProjectionQ4)
 	} else {
 		projected, err = hipRunProjectionKernelWithDeviceInputWeightEncoding(
 			ctx,
@@ -3182,8 +3231,8 @@ func hipRunGemma4Q4PerLayerInputConfigDeviceSet(ctx context.Context, driver nati
 			hidden,
 			cfg.ModelProjection.WeightPointer,
 			cfg.ModelProjection.WeightBytes,
-			cfg.ModelProjection.Rows,
-			cfg.ModelProjection.Cols,
+			rows,
+			cols,
 			hipProjectionWeightEncodingBF16,
 		)
 	}
@@ -3486,14 +3535,28 @@ func (model *hipLoadedModel) loadedGemma4Q4PerLayerInputConfig(layerPrefix strin
 	if err != nil {
 		return hipGemma4Q4PerLayerInputConfig{}, err
 	}
-	modelProjection, err := model.loadedGemma4BF16ProjectionConfig(
-		"language_model.model.per_layer_model_projection.weight",
-		"per_layer_model_projection",
-		embedding.HiddenSize,
-		hidden,
-	)
+	modelProjection := hipBF16DeviceWeightConfig{}
+	modelProjectionQ4 := hipMLXQ4DeviceWeightConfig{}
+	modelProjectionRows := 0
+	modelProjectionCols := 0
+	const modelProjectionBase = "language_model.model.per_layer_model_projection"
+	if model.hasHIPTensor(modelProjectionBase + ".scales") {
+		modelProjectionQ4, modelProjectionRows, modelProjectionCols, err = model.loadedGemma4Q4ProjectionConfig(modelProjectionBase, "per_layer_model_projection", groupSize)
+	} else {
+		modelProjection, err = model.loadedGemma4BF16ProjectionConfig(
+			modelProjectionBase+".weight",
+			"per_layer_model_projection",
+			embedding.HiddenSize,
+			hidden,
+		)
+		modelProjectionRows = modelProjection.Rows
+		modelProjectionCols = modelProjection.Cols
+	}
 	if err != nil {
 		return hipGemma4Q4PerLayerInputConfig{}, err
+	}
+	if modelProjectionRows != embedding.HiddenSize || modelProjectionCols != hidden {
+		return hipGemma4Q4PerLayerInputConfig{}, core.E(hipGemma4Q4Layer0Operation, "per_layer_model_projection tensor shape/type mismatch", nil)
 	}
 	projectionNorm, err := model.loadedGemma4NormConfig("language_model.model.per_layer_projection_norm.weight", "per_layer_projection_norm", inputSize)
 	if err != nil {
@@ -3517,13 +3580,14 @@ func (model *hipLoadedModel) loadedGemma4Q4PerLayerInputConfig(layerPrefix strin
 		return hipGemma4Q4PerLayerInputConfig{}, core.E(hipGemma4Q4Layer0Operation, "per-layer input tensor shapes are inconsistent", nil)
 	}
 	cfg := hipGemma4Q4PerLayerInputConfig{
-		InputSize:       inputSize,
-		Embedding:       embedding,
-		ModelProjection: modelProjection,
-		ProjectionNorm:  projectionNorm,
-		InputGate:       inputGate,
-		Projection:      projection,
-		PostInputNorm:   postNorm,
+		InputSize:         inputSize,
+		Embedding:         embedding,
+		ModelProjection:   modelProjection,
+		ModelProjectionQ4: modelProjectionQ4,
+		ProjectionNorm:    projectionNorm,
+		InputGate:         inputGate,
+		Projection:        projection,
+		PostInputNorm:     postNorm,
 	}
 	cfg.finalizeScales()
 	if err := (hipGemma4Q4Layer0Config{

@@ -221,32 +221,49 @@ func loadHIPDefaultNativeModel(runtime *hipRuntime, path string, cfg nativeLoadC
 		}
 	}
 	if cfg.VisionModelPath != "" {
-		tower, err := loadUnifiedVisionTowerWithGEMM(cfg.VisionModelPath, newHIPAudioGEMM(runtime.driver))
+		gemm := newHIPAudioGEMM(runtime.driver)
+		tower, err := loadUnifiedVisionTowerWithGEMM(cfg.VisionModelPath, gemm)
 		if err != nil {
 			model.Close()
 			return nil, core.E("rocm.hip.LoadModel", "load Gemma 4 unified vision tower", err)
 		}
-		if tower == nil {
-			model.Close()
-			return nil, core.E("rocm.hip.LoadModel", "vision model path has no Gemma 4 unified vision tower", nil)
-		}
-		if cfg.ModelInfo.HiddenSize <= 0 || tower.loaded.Cfg.TextHidden != cfg.ModelInfo.HiddenSize {
-			_ = tower.Close()
-			model.Close()
-			return nil, core.E("rocm.hip.LoadModel", "vision projector output does not match text hidden size", nil)
-		}
-		model.unifiedVision = tower
-		if tower.loaded.Cfg.BidirectionalImages {
-			model.gemma4Q4Config.BidirectionalSpanTokens = [2]int32{
-				tower.loaded.Cfg.ImageTokenID,
-				tower.loaded.Cfg.VideoTokenID,
+		visionRuntime := "gemma4_unified"
+		if tower != nil {
+			if cfg.ModelInfo.HiddenSize <= 0 || tower.loaded.Cfg.TextHidden != cfg.ModelInfo.HiddenSize {
+				_ = tower.Close()
+				model.Close()
+				return nil, core.E("rocm.hip.LoadModel", "vision projector output does not match text hidden size", nil)
 			}
+			model.unifiedVision = tower
+			if tower.loaded.Cfg.BidirectionalImages {
+				model.gemma4Q4Config.BidirectionalSpanTokens = [2]int32{
+					tower.loaded.Cfg.ImageTokenID,
+					tower.loaded.Cfg.VideoTokenID,
+				}
+			}
+		} else {
+			encoder, err := loadHIPVisionEncoderTowerWithGEMM(cfg.VisionModelPath, gemm)
+			if err != nil {
+				model.Close()
+				return nil, core.E("rocm.hip.LoadModel", "load Gemma 4 encoder vision tower", err)
+			}
+			if encoder == nil {
+				model.Close()
+				return nil, core.E("rocm.hip.LoadModel", "vision model path has no supported Gemma 4 vision tower", nil)
+			}
+			if cfg.ModelInfo.HiddenSize <= 0 || encoder.outputDim() != cfg.ModelInfo.HiddenSize {
+				_ = encoder.Close()
+				model.Close()
+				return nil, core.E("rocm.hip.LoadModel", "vision projector output does not match text hidden size", nil)
+			}
+			model.vision = encoder
+			visionRuntime = "gemma4_siglip"
 		}
 		if model.modelLabels == nil {
 			model.modelLabels = map[string]string{}
 		}
 		model.modelLabels["vision_model_path"] = cfg.VisionModelPath
-		model.modelLabels["vision_runtime"] = "gemma4_unified"
+		model.modelLabels["vision_runtime"] = visionRuntime
 	}
 	if cfg.AudioModelPath != "" {
 		tower, err := loadAudioTowerWithGEMM(cfg.AudioModelPath, newHIPAudioGEMM(runtime.driver))
@@ -683,6 +700,7 @@ type hipLoadedModel struct {
 	classLoRA             *hipLoadedClassifierLoRAAdapter
 	tokenText             *hipTokenTextDecoder
 	audio                 *AudioTower
+	vision                *HIPVisionEncoderTower
 	unifiedVision         *UnifiedVisionTower
 	q4ConfigMu            sync.Mutex
 	q4Config              hipGemma4Q4ForwardConfig
@@ -708,7 +726,8 @@ func (model *hipLoadedModel) AcceptsAudioInput() bool {
 }
 
 func (model *hipLoadedModel) AcceptsImageInput() bool {
-	return model != nil && model.unifiedVision != nil && model.unifiedVision.loaded != nil
+	return model != nil && ((model.unifiedVision != nil && model.unifiedVision.loaded != nil) ||
+		(model.vision != nil && model.vision.loaded != nil))
 }
 
 func (model *hipLoadedModel) gemma4Q4EngineConfig() hipGemma4Q4EngineConfig {
@@ -1385,6 +1404,10 @@ func (model *hipLoadedModel) Close() error {
 		lastErr = core.E("rocm.hip.Close", "close audio tower", err)
 	}
 	model.audio = nil
+	if err := model.vision.Close(); err != nil {
+		lastErr = core.E("rocm.hip.Close", "close vision encoder tower", err)
+	}
+	model.vision = nil
 	if err := model.unifiedVision.Close(); err != nil {
 		lastErr = core.E("rocm.hip.Close", "close unified vision tower", err)
 	}

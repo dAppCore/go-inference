@@ -1947,8 +1947,8 @@ func hipGemma4Q4EnsureAttentionWorkspaceDecodeHotCapacity(driver nativeHIPDriver
 		maxHiddenRows = max(maxHiddenRows, layer.PreFeedForwardNorm.Count)
 		maxHiddenRows = max(maxHiddenRows, layer.PostFeedForwardNorm.Count)
 		maxHiddenRows = max(maxHiddenRows, layer.FinalNorm.Count)
-		if layer.PerLayerInput.hasGlobalPrecompute() && layer.PerLayerInput.ModelProjection.Rows > maxPerLayerRows {
-			maxPerLayerRows = layer.PerLayerInput.ModelProjection.Rows
+		if rows := layer.PerLayerInput.modelProjectionRows(); layer.PerLayerInput.hasGlobalPrecompute() && rows > maxPerLayerRows {
+			maxPerLayerRows = rows
 		}
 	}
 	if maxHiddenRows > 0 {
@@ -2001,8 +2001,8 @@ func hipGemma4Q4EnsureAttentionWorkspacePrefillCapacity(driver nativeHIPDriver, 
 		if layer.PerLayerInput.hasLayerApply() && layer.PerLayerInput.InputGate.Rows > maxGateRows {
 			maxGateRows = layer.PerLayerInput.InputGate.Rows
 		}
-		if layer.PerLayerInput.hasGlobalPrecompute() && layer.PerLayerInput.ModelProjection.Rows > maxPerLayerOutputRows {
-			maxPerLayerOutputRows = layer.PerLayerInput.ModelProjection.Rows
+		if rows := layer.PerLayerInput.modelProjectionRows(); layer.PerLayerInput.hasGlobalPrecompute() && rows > maxPerLayerOutputRows {
+			maxPerLayerOutputRows = rows
 		}
 		if layer.HiddenSize > maxHiddenRows {
 			maxHiddenRows = layer.HiddenSize

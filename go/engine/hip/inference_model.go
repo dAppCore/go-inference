@@ -123,21 +123,28 @@ func (m *hipTokenModel) SupportedCacheModes() []string {
 }
 
 func (m *hipTokenModel) AcceptsImageInput() bool {
-	return m != nil && m.loaded != nil && m.loaded.unifiedVision != nil && m.loaded.unifiedVision.loaded != nil
+	return m != nil && m.loaded != nil && m.loaded.AcceptsImageInput()
 }
 
 func (m *hipTokenModel) ImagePlaceholderTokenID() int32 {
 	if !m.AcceptsImageInput() {
 		return 0
 	}
-	return m.loaded.unifiedVision.loaded.Cfg.ImageTokenID
+	if m.loaded.unifiedVision != nil {
+		return m.loaded.unifiedVision.loaded.Cfg.ImageTokenID
+	}
+	return m.loaded.vision.loaded.Cfg.ImageTokenID
 }
 
 func (m *hipTokenModel) ImagePlaceholderBlock(softTokens int) string {
 	if !m.AcceptsImageInput() {
 		return ""
 	}
-	cfg := m.loaded.unifiedVision.loaded.Cfg
+	if m.loaded.unifiedVision != nil {
+		cfg := m.loaded.unifiedVision.loaded.Cfg
+		return hipMultimodalPlaceholderBlock(cfg.ImageBeginToken, cfg.ImageToken, cfg.ImageEndToken, softTokens)
+	}
+	cfg := m.loaded.vision.loaded.Cfg
 	return hipMultimodalPlaceholderBlock(cfg.ImageBeginToken, cfg.ImageToken, cfg.ImageEndToken, softTokens)
 }
 
@@ -145,7 +152,14 @@ func (m *hipTokenModel) ProjectImage(payload []byte) ([]byte, int, error) {
 	if !m.AcceptsImageInput() {
 		return nil, 0, core.NewError("hip.TokenModel.ProjectImage: loaded model has no vision tower")
 	}
-	embeddings, softTokens, err := m.loaded.unifiedVision.ProjectImage(payload)
+	var embeddings []float32
+	var softTokens int
+	var err error
+	if m.loaded.unifiedVision != nil {
+		embeddings, softTokens, err = m.loaded.unifiedVision.ProjectImage(payload)
+	} else {
+		embeddings, softTokens, err = m.loaded.vision.ProjectImage(payload)
+	}
 	if err != nil {
 		return nil, 0, core.E("hip.TokenModel.ProjectImage", "project image", err)
 	}
@@ -160,14 +174,21 @@ func (m *hipTokenModel) VideoPlaceholderTokenID() int32 {
 	if !m.AcceptsImageInput() {
 		return 0
 	}
-	return m.loaded.unifiedVision.loaded.Cfg.VideoTokenID
+	if m.loaded.unifiedVision != nil {
+		return m.loaded.unifiedVision.loaded.Cfg.VideoTokenID
+	}
+	return m.loaded.vision.loaded.Cfg.VideoTokenID
 }
 
 func (m *hipTokenModel) VideoPlaceholderBlock(softTokens int) string {
 	if !m.AcceptsImageInput() {
 		return ""
 	}
-	cfg := m.loaded.unifiedVision.loaded.Cfg
+	if m.loaded.unifiedVision != nil {
+		cfg := m.loaded.unifiedVision.loaded.Cfg
+		return hipMultimodalPlaceholderBlock(cfg.ImageBeginToken, cfg.VideoToken, cfg.ImageEndToken, softTokens)
+	}
+	cfg := m.loaded.vision.loaded.Cfg
 	return hipMultimodalPlaceholderBlock(cfg.ImageBeginToken, cfg.VideoToken, cfg.ImageEndToken, softTokens)
 }
 

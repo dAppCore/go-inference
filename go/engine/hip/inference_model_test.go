@@ -110,6 +110,24 @@ func TestHIPInferenceModel_UnifiedVisionContract_Good(t *testing.T) {
 	core.AssertEqual(t, "<|audio><|audio|><|audio|><audio|>", tokenModel.AudioPlaceholderBlock(2))
 }
 
+func TestHIPInferenceModel_EncoderVisionContract_Good(t *testing.T) {
+	tokenModel := newHipTokenModel(&hipLoadedModel{
+		vision: &HIPVisionEncoderTower{loaded: &sharedmodel.LoadedVision{Cfg: sharedmodel.LoadedVisionConfig{
+			ImageTokenID:    31,
+			ImageBeginToken: "<|image>",
+			ImageToken:      "<|image|>",
+			ImageEndToken:   "<image|>",
+			VideoTokenID:    32,
+			VideoToken:      "<|video|>",
+		}}},
+	}, hipInferenceModelFixtureTokenizer(), "gemma4")
+	core.AssertTrue(t, tokenModel.AcceptsImageInput())
+	core.AssertEqual(t, int32(31), tokenModel.ImagePlaceholderTokenID())
+	core.AssertEqual(t, "<|image><|image|><image|>", tokenModel.ImagePlaceholderBlock(1))
+	core.AssertEqual(t, int32(32), tokenModel.VideoPlaceholderTokenID())
+	core.AssertEqual(t, "<|image><|video|><image|>", tokenModel.VideoPlaceholderBlock(1))
+}
+
 func TestHIPInferenceModel_SpliceTokenFeatures_Good(t *testing.T) {
 	stream := []byte{
 		1, 1, 1, 1,

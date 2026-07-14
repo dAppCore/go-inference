@@ -5,8 +5,12 @@
 package hip
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
+	"image"
+	"image/color"
+	"image/png"
 	"math"
 	"os"
 	"strconv"
@@ -89,6 +93,54 @@ func TestHIPHardwareGemma4AudioChat_Good(t *testing.T) {
 	}
 	if generated != 1 {
 		t.Fatalf("audio Chat generated %d tokens, want 1", generated)
+	}
+}
+
+func TestHIPHardwareGemma4VisionChat_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_VISION_CHAT_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_VISION_CHAT_TESTS=1 to run the Gemma 4 vision chat smoke")
+	}
+	modelPath := strings.TrimSpace(os.Getenv("GO_ROCM_ENCODER_VISION_MODEL_PATH"))
+	if modelPath == "" {
+		t.Fatal("GO_ROCM_ENCODER_VISION_MODEL_PATH is required")
+	}
+	if strings.TrimSpace(os.Getenv("GO_ROCM_KERNEL_HSACO")) == "" {
+		t.Fatal("GO_ROCM_KERNEL_HSACO is required")
+	}
+
+	textModel, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModelWithConfig(
+		modelPath,
+		ROCmLoadConfig{VisionModelPath: modelPath},
+		inference.WithContextLen(4096),
+	)
+	if err != nil {
+		t.Fatalf("LoadModelWithConfig vision: %v", err)
+	}
+	defer textModel.Close()
+	visionModel, ok := textModel.(inference.VisionModel)
+	if !ok || !visionModel.AcceptsImages() {
+		t.Fatalf("loaded model vision capability = %T/%v, want true", textModel, ok)
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, 96, 96))
+	for y := range 96 {
+		for x := range 96 {
+			img.SetRGBA(x, y, color.RGBA{R: uint8(x * 2), G: uint8(y * 2), B: 80, A: 255})
+		}
+	}
+	var encoded bytes.Buffer
+	core.RequireNoError(t, png.Encode(&encoded, img))
+	generated := 0
+	for range textModel.Chat(context.Background(), []inference.Message{{
+		Role: "user", Content: "Describe this image briefly.", Images: [][]byte{encoded.Bytes()},
+	}}, inference.WithMaxTokens(1), inference.WithTemperature(0)) {
+		generated++
+	}
+	if err := resultError(textModel.Err()); err != nil {
+		t.Fatalf("vision Chat: %v", err)
+	}
+	if generated != 1 {
+		t.Fatalf("vision Chat generated %d tokens, want 1", generated)
 	}
 }
 

@@ -3949,6 +3949,118 @@ func TestHIPGemma4Q4PerLayerInputConfigScalesCached_Good(t *testing.T) {
 	core.AssertEqual(t, float32(0), cfg.ModelProjectionScale)
 }
 
+func TestHIPGemma4Q4PerLayerInputQuantizedModelProjection_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	layer0, cleanup0 := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)
+	defer cleanup0()
+	layer1, cleanup1 := hipGemma4Q4FixtureConfig(t, driver, 1, 4, 2, 8)
+	defer cleanup1()
+	layers, cleanupPerLayer := hipGemma4Q4GlobalPerLayerInputFixture(t, driver, []hipGemma4Q4Layer0Config{layer0, layer1})
+	defer cleanupPerLayer()
+
+	rows := layer0.HiddenSize * len(layers)
+	cols := layer0.HiddenSize
+	groupSize := layer0.GroupSize
+	uploadU32 := func(label string, count int) *hipDeviceByteBuffer {
+		payload, err := hipUint32Payload(make([]uint32, count))
+		core.RequireNoError(t, err)
+		buffer, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, label, payload, count)
+		core.RequireNoError(t, err)
+		return buffer
+	}
+	uploadU16 := func(label string, count int) *hipDeviceByteBuffer {
+		payload, err := hipUint16Payload(make([]uint16, count))
+		core.RequireNoError(t, err)
+		buffer, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, label, payload, count)
+		core.RequireNoError(t, err)
+		return buffer
+	}
+	weights := uploadU32("quantized per-layer model projection weights", rows*(cols/8))
+	defer weights.Close()
+	scales := uploadU16("quantized per-layer model projection scales", rows*(cols/groupSize))
+	defer scales.Close()
+	biases := uploadU16("quantized per-layer model projection biases", rows*(cols/groupSize))
+	defer biases.Close()
+	projection := hipMLXQ4DeviceWeightConfig{
+		WeightPointer: weights.Pointer(),
+		ScalePointer:  scales.Pointer(),
+		BiasPointer:   biases.Pointer(),
+		WeightBytes:   weights.SizeBytes(),
+		ScaleBytes:    scales.SizeBytes(),
+		BiasBytes:     biases.SizeBytes(),
+		Rows:          rows,
+		Cols:          cols,
+		GroupSize:     groupSize,
+		Bits:          4,
+	}
+	for index := range layers {
+		layers[index].PerLayerInput.ModelProjection = hipBF16DeviceWeightConfig{}
+		layers[index].PerLayerInput.ModelProjectionQ4 = projection
+		layers[index].finalizeScales()
+		core.RequireNoError(t, layers[index].validatePerLayerInput())
+	}
+
+	assertQuantizedProjectionLaunch := func(start int) {
+		t.Helper()
+		quantized := 0
+		dense := 0
+		for _, launch := range driver.launches[start:] {
+			switch launch.Name {
+			case hipKernelNameMLXQ4Proj:
+				quantized++
+			case hipKernelNameProjection:
+				dense++
+			}
+		}
+		core.AssertEqual(t, 1, quantized)
+		core.AssertEqual(t, 0, dense)
+	}
+
+	start := len(driver.launches)
+	hostSet, err := hipRunGemma4Q4PerLayerInputSet(context.Background(), driver, layers[0].PerLayerInput, 0, make([]float32, cols), 1e-6)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, len(layers), len(hostSet))
+	assertQuantizedProjectionLaunch(start)
+
+	hiddenPayload, err := hipFloat32Payload(make([]float32, cols))
+	core.RequireNoError(t, err)
+	hidden, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "quantized per-layer hidden", hiddenPayload, cols)
+	core.RequireNoError(t, err)
+	defer hidden.Close()
+	workspace := &hipAttentionHeadsChunkedWorkspace{}
+	defer workspace.Close()
+	start = len(driver.launches)
+	deviceSet, err := hipRunGemma4Q4PerLayerInputConfigDeviceSet(context.Background(), driver, layers[0].PerLayerInput, 0, nil, hidden, 1e-6, workspace)
+	core.RequireNoError(t, err)
+	defer deviceSet.Close()
+	core.AssertEqual(t, len(layers), deviceSet.LayerCount())
+	assertQuantizedProjectionLaunch(start)
+
+	tokens := []int32{0, 1}
+	hiddenBatchPayload, err := hipFloat32Payload(make([]float32, cols*len(tokens)))
+	core.RequireNoError(t, err)
+	hiddenBatch, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "quantized per-layer hidden batch", hiddenBatchPayload, cols*len(tokens))
+	core.RequireNoError(t, err)
+	defer hiddenBatch.Close()
+	start = len(driver.launches)
+	prefillSet, err := hipRunGemma4Q4PrefillPerLayerInputDeviceSetBatchWorkspace(context.Background(), driver, hipGemma4Q4ForwardConfig{Layers: layers}, tokens, hiddenBatch, 1e-6, workspace)
+	core.RequireNoError(t, err)
+	defer prefillSet.Close()
+	core.AssertEqual(t, len(layers), prefillSet.LayerCount())
+	quantizedBatch := 0
+	denseBatch := 0
+	for _, launch := range driver.launches[start:] {
+		switch launch.Name {
+		case hipKernelNameMLXQ4ProjBatch:
+			quantizedBatch++
+		case hipKernelNameProjectionBatch:
+			denseBatch++
+		}
+	}
+	core.AssertEqual(t, 1, quantizedBatch)
+	core.AssertEqual(t, 0, denseBatch)
+}
+
 func TestHIPGemma4Q4PerLayerInputConfigDeviceSetWorkspaceScalesProjectionInPlace_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	layer0, cleanup0 := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)

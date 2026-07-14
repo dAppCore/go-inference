@@ -982,14 +982,16 @@ func hipRunGemma4Q4PrefillPerLayerInputDeviceSetBatchWorkspaceDeviceToken(ctx co
 	if !perLayer.hasLayerApply() {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input precompute requires per-layer gate/projection tensors", nil)
 	}
-	if perLayer.InputSize <= 0 || perLayer.ModelProjection.Rows%perLayer.InputSize != 0 {
+	rows := perLayer.modelProjectionRows()
+	cols := perLayer.modelProjectionCols()
+	if perLayer.InputSize <= 0 || rows%perLayer.InputSize != 0 {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "per-layer input rows must align with input size", nil)
 	}
-	layerCount := perLayer.ModelProjection.Rows / perLayer.InputSize
+	layerCount := rows / perLayer.InputSize
 	if layerCount < len(cfg.Layers) {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "computed per-layer input count is smaller than forward layer count", nil)
 	}
-	if hidden.Count() != len(tokens)*perLayer.ModelProjection.Cols || hidden.SizeBytes() != uint64(hidden.Count()*4) {
+	if hidden.Count() != len(tokens)*cols || hidden.SizeBytes() != uint64(hidden.Count()*4) {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "prefill per-layer input hidden batch shape mismatch", nil)
 	}
 	if tokenBuffer != nil && greedyToken != nil {
@@ -1001,7 +1003,7 @@ func hipRunGemma4Q4PrefillPerLayerInputDeviceSetBatchWorkspaceDeviceToken(ctx co
 	if greedyToken != nil && (len(tokens) != 1 || greedyToken.Pointer() == 0 || greedyToken.Count() != 1 || greedyToken.SizeBytes() != hipMLXQ4ProjectionBestBytes) {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "prefill per-layer input greedy token buffer shape mismatch", nil)
 	}
-	outputCount := perLayer.ModelProjection.Rows * len(tokens)
+	outputCount := rows * len(tokens)
 	var err error
 	var transposed *hipDeviceByteBuffer
 	var perLayerEmbeddingScaled *hipDeviceByteBuffer
@@ -1061,19 +1063,25 @@ func hipRunGemma4Q4PrefillPerLayerInputDeviceSetBatchWorkspaceDeviceToken(ctx co
 	if workspace != nil {
 		projected, err = workspace.EnsurePerLayerProjected(driver, outputCount)
 		if err == nil {
-			err = hipRunProjectionBatchKernelWithDeviceInputWeightEncodingOutput(
-				ctx,
-				driver,
-				hidden,
-				perLayer.ModelProjection.WeightPointer,
-				perLayer.ModelProjection.WeightBytes,
-				perLayer.ModelProjection.Rows,
-				perLayer.ModelProjection.Cols,
-				hipProjectionWeightEncodingBF16,
-				len(tokens),
-				projected,
-			)
+			if perLayer.modelProjectionQuantized() {
+				err = hipRunMLXQ4ProjectionBatchKernelWithDeviceInputOutput(ctx, driver, hidden, perLayer.ModelProjectionQ4, len(tokens), projected)
+			} else {
+				err = hipRunProjectionBatchKernelWithDeviceInputWeightEncodingOutput(
+					ctx,
+					driver,
+					hidden,
+					perLayer.ModelProjection.WeightPointer,
+					perLayer.ModelProjection.WeightBytes,
+					rows,
+					cols,
+					hipProjectionWeightEncodingBF16,
+					len(tokens),
+					projected,
+				)
+			}
 		}
+	} else if perLayer.modelProjectionQuantized() {
+		projected, err = hipRunMLXQ4ProjectionBatchKernelWithDeviceInput(ctx, driver, hidden, perLayer.ModelProjectionQ4, len(tokens))
 	} else {
 		projected, err = hipRunProjectionBatchKernelWithDeviceInputWeightEncoding(
 			ctx,
@@ -1081,8 +1089,8 @@ func hipRunGemma4Q4PrefillPerLayerInputDeviceSetBatchWorkspaceDeviceToken(ctx co
 			hidden,
 			perLayer.ModelProjection.WeightPointer,
 			perLayer.ModelProjection.WeightBytes,
-			perLayer.ModelProjection.Rows,
-			perLayer.ModelProjection.Cols,
+			rows,
+			cols,
 			hipProjectionWeightEncodingBF16,
 			len(tokens),
 		)
