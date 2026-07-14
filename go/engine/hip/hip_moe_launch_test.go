@@ -312,9 +312,88 @@ func TestHIPGemma4ExpertCache_Good(t *testing.T) {
 	core.AssertEqual(t, uint64(0), model.expertCache.bytes)
 }
 
+func TestHIPGemma4ExpertCache_Good_EvictsOnDevicePressure(t *testing.T) {
+	t.Setenv("GO_ROCM_DISABLE_DEVICE_BUFFER_POOL", "1")
+	const (
+		experts  = 2
+		hidden   = 32
+		expertFF = 32
+	)
+	gateUpSliceBytes := 2 * expertFF * (hidden / hipGGUFQ4_0BlockSize) * hipGGUFQ4_0BlockBytes
+	downSliceBytes := hidden * (expertFF / hipGGUFQ4_0BlockSize) * hipGGUFQ4_0BlockBytes
+	entryBytes := gateUpSliceBytes + downSliceBytes
+	gateUpPayload := make([]byte, experts*gateUpSliceBytes)
+	downPayload := make([]byte, experts*downSliceBytes)
+	for index := range gateUpPayload {
+		gateUpPayload[index] = byte(index/gateUpSliceBytes + 1)
+	}
+	for index := range downPayload {
+		downPayload[index] = byte(index/downSliceBytes + 11)
+	}
+	filePayload := append(append(make([]byte, 0, len(gateUpPayload)+len(downPayload)), gateUpPayload...), downPayload...)
+	path := core.PathJoin(t.TempDir(), "experts.gguf")
+	core.RequireTrue(t, core.WriteFile(path, filePayload, 0o644).OK)
+	driver := &fakeHIPDriver{available: true, maxLiveBytes: uint64(entryBytes)}
+	cache := newHIPGemma4ExpertCache(driver, uint64(2*entryBytes))
+	t.Cleanup(func() { core.AssertNoError(t, cache.Close()) })
+	gateUpInfo := nativeTensorInfo{
+		Name: "blk.0.ffn_gate_up_exps.weight", Type: hipGGUFQ4_0TensorType, TypeName: "Q4_0",
+		Dimensions: []uint64{hidden, 2 * expertFF, experts}, SourcePath: path,
+		ByteSize: uint64(len(gateUpPayload)),
+	}
+	downInfo := nativeTensorInfo{
+		Name: "blk.0.ffn_down_exps.weight", Type: hipGGUFQ4_0TensorType, TypeName: "Q4_0",
+		Dimensions: []uint64{expertFF, hidden, experts}, SourcePath: path,
+		Offset: uint64(len(gateUpPayload)), ByteSize: uint64(len(downPayload)),
+	}
+
+	entry0, err := cache.entry(hipGemma4ExpertCacheKey{Layer: 0, Expert: 0}, gateUpInfo, downInfo, experts)
+	core.RequireNoError(t, err)
+	entry1, err := cache.entry(hipGemma4ExpertCacheKey{Layer: 0, Expert: 1}, gateUpInfo, downInfo, experts)
+	core.RequireNoError(t, err)
+	core.AssertNotEqual(t, entry0, entry1)
+	core.AssertEqual(t, 1, len(cache.entries))
+	core.AssertEqual(t, uint64(1), cache.stats.Evictions)
+	core.AssertEqual(t, uint64(1), cache.stats.AllocationRetries)
+	core.AssertEqual(t, uint64(entryBytes), cache.bytes)
+	core.AssertEqual(t, uint64(entryBytes), driver.liveBytes)
+	core.AssertEqual(t, gateUpPayload[gateUpSliceBytes:], driver.memory[entry1.GateUp.Pointer()])
+	core.AssertEqual(t, downPayload[downSliceBytes:], driver.memory[entry1.Down.Pointer()])
+}
+
+func TestHIPGemma4ExpertCache_Good_AdaptsToLiveHeadroom(t *testing.T) {
+	t.Setenv("GO_ROCM_DISABLE_DEVICE_BUFFER_POOL", "1")
+	const entryBytes = uint64(1024)
+	driver := &fakeHIPDriver{
+		available: true,
+		device:    nativeDeviceInfo{FreeBytes: 12 * memoryGiB},
+	}
+	cache := newHIPGemma4AdaptiveExpertCache(driver, 1)
+	t.Cleanup(func() { core.AssertNoError(t, cache.Close()) })
+	for expert := 0; expert < 3; expert++ {
+		gateUp, err := hipAllocateByteBuffer(driver, "rocm.hip.Gemma4ExpertCache", "adaptive gate/up", entryBytes/2, int(entryBytes/2))
+		core.RequireNoError(t, err)
+		down, err := hipAllocateByteBuffer(driver, "rocm.hip.Gemma4ExpertCache", "adaptive down", entryBytes/2, int(entryBytes/2))
+		core.RequireNoError(t, err)
+		cache.entries[hipGemma4ExpertCacheKey{Layer: 0, Expert: expert}] = &hipGemma4ExpertCacheEntry{
+			GateUp: gateUp, Down: down, bytes: entryBytes, lastUse: uint64(expert + 1),
+		}
+		cache.bytes += entryBytes
+	}
+	driver.device.FreeBytes = hipGemma4ExpertCacheReserveBytes - 2*entryBytes
+	core.RequireNoError(t, cache.refreshAdaptiveBudget(entryBytes))
+	core.AssertEqual(t, 1, len(cache.entries))
+	core.AssertEqual(t, uint64(entryBytes), cache.bytes)
+	core.AssertEqual(t, uint64(entryBytes), cache.maxBytes)
+	core.AssertEqual(t, uint64(2), cache.stats.Evictions)
+	core.AssertEqual(t, uint64(1), cache.stats.BudgetRefreshes)
+	core.RequireTrue(t, cache.entries[hipGemma4ExpertCacheKey{Layer: 0, Expert: 2}] != nil)
+}
+
 func TestHIPGemma4ExpertCacheBudget_Good(t *testing.T) {
 	core.AssertEqual(t, uint64(8*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 12 * memoryGiB}}))
-	core.AssertEqual(t, uint64(5*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 7 * memoryGiB}}))
+	core.AssertEqual(t, uint64(7*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 11 * memoryGiB}}))
+	core.AssertEqual(t, uint64(3*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 7 * memoryGiB}}))
 	core.AssertEqual(t, uint64(6*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true}))
 }
 

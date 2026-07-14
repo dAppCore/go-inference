@@ -2734,6 +2734,9 @@ type fakeHIPDriver struct {
 	skipLaunchRecording      bool
 	skipDriverRecording      bool
 	releaseLaunchPackets     bool
+	maxLiveBytes             uint64
+	liveBytes                uint64
+	allocationBytes          map[nativeDevicePointer]uint64
 }
 
 func (driver *fakeHIPDriver) Available() bool { return driver.available }
@@ -2744,6 +2747,9 @@ func (driver *fakeHIPDriver) Malloc(size uint64) (nativeDevicePointer, error) {
 	if !driver.skipDriverRecording {
 		driver.allocations = append(driver.allocations, size)
 	}
+	if driver.maxLiveBytes > 0 && driver.liveBytes+size > driver.maxLiveBytes {
+		return 0, core.E("rocm.hip.hipMalloc", "HIP returned 2", nil)
+	}
 	if driver.nextPointer == 0 {
 		driver.nextPointer = 0x1000
 	}
@@ -2752,12 +2758,25 @@ func (driver *fakeHIPDriver) Malloc(size uint64) (nativeDevicePointer, error) {
 	if driver.memory == nil {
 		driver.memory = map[nativeDevicePointer][]byte{}
 	}
+	if driver.allocationBytes == nil {
+		driver.allocationBytes = map[nativeDevicePointer]uint64{}
+	}
 	driver.memory[pointer] = make([]byte, int(size))
+	driver.allocationBytes[pointer] = size
+	driver.liveBytes += size
 	return pointer, nil
 }
 func (driver *fakeHIPDriver) Free(pointer nativeDevicePointer) error {
 	if !driver.skipDriverRecording {
 		driver.frees = append(driver.frees, pointer)
+	}
+	if size := driver.allocationBytes[pointer]; size > 0 {
+		if driver.liveBytes >= size {
+			driver.liveBytes -= size
+		} else {
+			driver.liveBytes = 0
+		}
+		delete(driver.allocationBytes, pointer)
 	}
 	delete(driver.memory, pointer)
 	return nil

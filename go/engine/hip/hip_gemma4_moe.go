@@ -68,7 +68,8 @@ type hipGGUFQ4_0SelectedExpertsLaunchArgs struct {
 const (
 	hipGemma4ExpertCacheDefaultBytes = 6 * memoryGiB
 	hipGemma4ExpertCacheMaximumBytes = 8 * memoryGiB
-	hipGemma4ExpertCacheReserveBytes = 2 * memoryGiB
+	hipGemma4ExpertCacheReserveBytes = 4 * memoryGiB
+	hipGemma4ExpertCacheRefreshEvery = 256
 )
 
 type hipGemma4ExpertCacheKey struct {
@@ -95,12 +96,14 @@ type hipGemma4MappedExpertSource struct {
 }
 
 type hipGemma4ExpertCacheStats struct {
-	Hits            uint64
-	Misses          uint64
-	Evictions       uint64
-	HostMappings    uint64
-	HostMappedBytes uint64
-	H2DBytes        uint64
+	Hits              uint64
+	Misses            uint64
+	Evictions         uint64
+	HostMappings      uint64
+	HostMappedBytes   uint64
+	H2DBytes          uint64
+	AllocationRetries uint64
+	BudgetRefreshes   uint64
 }
 
 type hipGemma4MoERouterProjectionConfig struct {
@@ -127,14 +130,16 @@ type hipGemma4MoELayerConfig struct {
 }
 
 type hipGemma4ExpertCache struct {
-	driver   nativeHIPDriver
-	maxBytes uint64
-	bytes    uint64
-	clock    uint64
-	entries  map[hipGemma4ExpertCacheKey]*hipGemma4ExpertCacheEntry
-	sources  map[string]*hipGemma4MappedExpertSource
-	stats    hipGemma4ExpertCacheStats
-	mu       sync.Mutex
+	driver         nativeHIPDriver
+	maxBytes       uint64
+	bytes          uint64
+	clock          uint64
+	adaptive       bool
+	minimumEntries int
+	entries        map[hipGemma4ExpertCacheKey]*hipGemma4ExpertCacheEntry
+	sources        map[string]*hipGemma4MappedExpertSource
+	stats          hipGemma4ExpertCacheStats
+	mu             sync.Mutex
 }
 
 const hipGemma4MoERouterMaximumOutputBytes = hipGGUFQ4_0SelectedExpertsMaxTopK*8 + 4
@@ -423,7 +428,7 @@ func (model *hipLoadedModel) loadedGemma4MoELayerConfig(layer, hidden int) (*hip
 	}
 	model.expertCacheMu.Lock()
 	if model.expertCache == nil {
-		model.expertCache = newHIPGemma4ExpertCache(model.driver, hipGemma4ExpertCacheBudget(model.driver))
+		model.expertCache = newHIPGemma4AdaptiveExpertCache(model.driver, text.TopKExperts)
 	}
 	cache := model.expertCache
 	model.expertCacheMu.Unlock()
@@ -784,6 +789,16 @@ func newHIPGemma4ExpertCache(driver nativeHIPDriver, maxBytes uint64) *hipGemma4
 	}
 }
 
+func newHIPGemma4AdaptiveExpertCache(driver nativeHIPDriver, minimumEntries int) *hipGemma4ExpertCache {
+	if minimumEntries < 1 {
+		minimumEntries = 1
+	}
+	cache := newHIPGemma4ExpertCache(driver, hipGemma4ExpertCacheBudget(driver))
+	cache.adaptive = true
+	cache.minimumEntries = minimumEntries
+	return cache
+}
+
 func hipGemma4ExpertCacheBudget(driver nativeHIPDriver) uint64 {
 	if driver == nil {
 		return hipGemma4ExpertCacheDefaultBytes
@@ -808,7 +823,7 @@ func (model *hipLoadedModel) gemma4ExpertCacheEntry(layer, expert int) (*hipGemm
 	}
 	model.expertCacheMu.Lock()
 	if model.expertCache == nil {
-		model.expertCache = newHIPGemma4ExpertCache(model.driver, hipGemma4ExpertCacheBudget(model.driver))
+		model.expertCache = newHIPGemma4AdaptiveExpertCache(model.driver, model.gemma4TextConfig.TopKExperts)
 	}
 	cache := model.expertCache
 	model.expertCacheMu.Unlock()
@@ -833,6 +848,11 @@ func (cache *hipGemma4ExpertCache) entry(key hipGemma4ExpertCacheKey, gateUpInfo
 	if entry := cache.entries[key]; entry != nil {
 		cache.stats.Hits++
 		entry.lastUse = cache.clock
+		if cache.clock%hipGemma4ExpertCacheRefreshEvery == 0 {
+			if err := cache.refreshAdaptiveBudget(entry.bytes); err != nil {
+				return nil, err
+			}
+		}
 		return entry, nil
 	}
 	cache.stats.Misses++
@@ -845,6 +865,9 @@ func (cache *hipGemma4ExpertCache) entry(key hipGemma4ExpertCacheKey, gateUpInfo
 		return nil, core.E("rocm.hip.Gemma4ExpertCache", "resolve expert down slice", err)
 	}
 	entryBytes := uint64(len(gateUpSlice)) + uint64(len(downSlice))
+	if err := cache.refreshAdaptiveBudget(entryBytes); err != nil {
+		return nil, err
+	}
 	if entryBytes > cache.maxBytes {
 		return nil, core.E("rocm.hip.Gemma4ExpertCache", "one expert exceeds the cache byte limit", nil)
 	}
@@ -853,17 +876,15 @@ func (cache *hipGemma4ExpertCache) entry(key hipGemma4ExpertCacheKey, gateUpInfo
 			return nil, err
 		}
 	}
-	gateUpBuffer, err := hipUploadByteBuffer(cache.driver, "rocm.hip.Gemma4ExpertCache", "expert gate/up", gateUpSlice, len(gateUpSlice))
+	gateUpBuffer, err := cache.uploadExpertBuffer("expert gate/up", gateUpSlice, len(gateUpSlice))
 	if err != nil {
 		return nil, err
 	}
-	cache.stats.H2DBytes += uint64(len(gateUpSlice))
-	downBuffer, err := hipUploadByteBuffer(cache.driver, "rocm.hip.Gemma4ExpertCache", "expert down", downSlice, len(downSlice))
+	downBuffer, err := cache.uploadExpertBuffer("expert down", downSlice, len(downSlice))
 	if err != nil {
 		_ = gateUpBuffer.Close()
 		return nil, err
 	}
-	cache.stats.H2DBytes += uint64(len(downSlice))
 	entry := &hipGemma4ExpertCacheEntry{
 		GateUp: gateUpBuffer, Down: downBuffer,
 		GateUpRows: gateUpRows, GateUpCols: gateUpCols,
@@ -874,6 +895,78 @@ func (cache *hipGemma4ExpertCache) entry(key hipGemma4ExpertCacheKey, gateUpInfo
 	cache.entries[key] = entry
 	cache.bytes += entryBytes
 	return entry, nil
+}
+
+func (cache *hipGemma4ExpertCache) uploadExpertBuffer(label string, payload []byte, count int) (*hipDeviceByteBuffer, error) {
+	const operation = "rocm.hip.Gemma4ExpertCache"
+	for {
+		buffer, err := hipAllocateByteBuffer(cache.driver, operation, label, uint64(len(payload)), count)
+		if err != nil {
+			if len(cache.entries) == 0 {
+				return nil, err
+			}
+			cache.stats.AllocationRetries++
+			if evictErr := cache.evictOldest(); evictErr != nil {
+				return nil, evictErr
+			}
+			continue
+		}
+		buffer.pooled = false
+		if err := hipCopyHostToDeviceLabeled(cache.driver, buffer.pointer, payload, operation, label); err != nil {
+			_ = buffer.Close()
+			return nil, core.E(operation, "copy "+label, err)
+		}
+		cache.stats.H2DBytes += uint64(len(payload))
+		return buffer, nil
+	}
+}
+
+func (cache *hipGemma4ExpertCache) refreshAdaptiveBudget(entryBytes uint64) error {
+	if cache == nil || !cache.adaptive || cache.driver == nil {
+		return nil
+	}
+	freeBytes := cache.driver.DeviceInfo().FreeBytes
+	if freeBytes == 0 {
+		return nil
+	}
+	minimumEntries := cache.minimumEntries
+	if minimumEntries < 1 {
+		minimumEntries = 1
+	}
+	if entryBytes > ^uint64(0)/uint64(minimumEntries) {
+		return core.E("rocm.hip.Gemma4ExpertCache", "minimum route byte size overflows", nil)
+	}
+	minimumBytes := entryBytes * uint64(minimumEntries)
+	targetBytes := cache.bytes
+	if freeBytes >= hipGemma4ExpertCacheReserveBytes {
+		headroom := freeBytes - hipGemma4ExpertCacheReserveBytes
+		if headroom > ^uint64(0)-targetBytes {
+			targetBytes = ^uint64(0)
+		} else {
+			targetBytes += headroom
+		}
+	} else {
+		deficit := hipGemma4ExpertCacheReserveBytes - freeBytes
+		if deficit >= targetBytes {
+			targetBytes = 0
+		} else {
+			targetBytes -= deficit
+		}
+	}
+	if targetBytes > hipGemma4ExpertCacheMaximumBytes {
+		targetBytes = hipGemma4ExpertCacheMaximumBytes
+	}
+	if targetBytes < minimumBytes {
+		targetBytes = minimumBytes
+	}
+	cache.maxBytes = targetBytes
+	cache.stats.BudgetRefreshes++
+	for cache.bytes > cache.maxBytes {
+		if err := cache.evictOldest(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (cache *hipGemma4ExpertCache) evictOldest() error {
