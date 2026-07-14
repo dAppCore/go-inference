@@ -1,3 +1,34 @@
+# NEXT WAKE (2026-07-18c — codex hip stint merged to github; CORS + thinking blocks + #1843/#1844 all landed same day)
+
+## 2026-07-18 (evening — the hip merge)
+
+- CODEX HIP STINT MERGED (66ec198, pushed github dev+main): two commits
+  fetched OVER SSH from the box's dev (f9f1975 parity + d1a7244 expert
+  decode; git remote homelab-box = ssh://homelab/home/claude/Code/core/
+  go-inference). 53 files, +11k — mostly engine/hip (q4 lane forward,
+  lane set, moe combine norms, 1.2k new kernel lines, internal/gguf
+  minimal reader, big bench/hardware test growth) + Makefile/Taskfile
+  build fixes + TWO SHARED-LAYER SEAMS, fence-reviewed as legitimate:
+  engine.TextTokenizer (interface loosening so hip's GGUF-carried
+  tokenizer fits NewTextModel — *tokenizer.Tokenizer satisfies it, call
+  sites unchanged) and engine.ContextDecodeSession (cancellation-aware
+  decode, legacy fallback). Both auto-merged clean around today's
+  MemoryReporter + declared-sampling work (verified coexistence).
+  ONE Makefile conflict: their require-static-hip-archive guard applied
+  onto MY lem-* target names (theirs still said lthn-*).
+- GATES: Mac untagged vet 0; engine+serving 2593/2593; box-side
+  throwaway worktree at d1a7244: hip BUILDS clean, but `go vet
+  ./engine/hip` EXITS 1 — unsafe.Pointer findings in hip_driver_cgo.go,
+  4 pre-existing + 1 NEW from this stint. Codex-lane debt (not shared
+  layers) — did not block the merge; FLAG FOR CODEX next contact.
+  WATCH ITEM: hip now carries internal/gguf (minimal GGUF reader for
+  in-checkpoint tokenizers) — acceptable as engine-internal, but watch
+  for drift vs the shared gguf format home (format-pkgs-stay-arch-free
+  rule cuts the other way here: an ENGINE carrying a format READER).
+- The box tree was left untouched (3 hip files sat uncommitted mid-
+  stint — codex still resident); it fast-forwards from origin/dev per
+  the standing flow. Its dirty files are NOT in this merge.
+
 # NEXT WAKE (2026-07-18b — the 15-lane SDK fleet: every lane live, four serving defects found by friction and fixed same-day)
 
 ## 2026-07-18 (later — the SDK fleet campaign)
