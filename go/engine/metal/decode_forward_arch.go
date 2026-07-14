@@ -2043,6 +2043,18 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 		}
 		return view(b)
 	}
+	// normView resolves a NORM weight (required or optional): a no-copy shard view when it IS one, or a
+	// small resident copy when it is synthesised (a gemma (1+w)-folded norm is fresh heap, never a shard
+	// view — see shardBuffers.bufForNorm). Norms are tiny per-session vectors, so the copy costs nothing.
+	normView := func(b []byte) bufView {
+		if sb != nil {
+			return sb.bufForNorm(b)
+		}
+		if len(b) == 0 {
+			return bufView{}
+		}
+		return bufView{buf: residentBytes(b)}
+	}
 	for li := range layers {
 		w := layers[li]
 		// per-attention-type geometry: gemma4 full_attention layers use a larger head_dim
@@ -2058,11 +2070,11 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 			cacheLen = slidingWindow
 		}
 		cacheBytes := uint(cacheLen * kvDim * bf16Size)
-		lb[li].anw = view(w.AttnNormW)
-		lb[li].postAttnNorm = viewOrNil(w.PostAttnNormW)
-		lb[li].postFFNorm = viewOrNil(w.PostFFNormW)
-		lb[li].qNorm = viewOrNil(w.QNormW)
-		lb[li].kNorm = viewOrNil(w.KNormW)
+		lb[li].anw = normView(w.AttnNormW)
+		lb[li].postAttnNorm = normView(w.PostAttnNormW)
+		lb[li].postFFNorm = normView(w.PostFFNormW)
+		lb[li].qNorm = normView(w.QNormW)
+		lb[li].kNorm = normView(w.KNormW)
 		lb[li].layerScalar = layerScalarBuf(w.LayerScalarW, dModel) // synthesised broadcast (not a shard view)
 		if specs[li].OwnsCache() {
 			if setup != nil {
@@ -2094,7 +2106,7 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 			dModel: dModel, qDim: qDim, kvDim: kvDim, dFF: lFF,
 		}
 		if layers[li].MoE == nil {
-			lb[li].mnw = view(w.MLPNormW)
+			lb[li].mnw = normView(w.MLPNormW)
 			p.wGate = view(w.WGate)
 			p.wUp = view(w.WUp)
 			p.wDown = view(w.WDown)

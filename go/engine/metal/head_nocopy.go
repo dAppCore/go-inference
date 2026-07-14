@@ -229,8 +229,11 @@ func newHeadEncoder(sb *shardBuffers, finalNormW, weight, scales, biases []byte,
 	// (measured: 248/281 bf16 tensors in e2b-bf16 sit ≡2/4/6 mod 8; the tied embedding only
 	// escapes by being the file's first tensor). A misaligned weight falls back to a private
 	// copy of just that tensor inside bufForAligned rather than feeding the vec loads garbage.
-	fn, err := sb.bufFor(finalNormW)
-	if err != nil || fn.buf == nil {
+	// The final norm is a gemma (1+w)-folded fresh heap buffer for gemma3 (NormBiasOne) — not a shard
+	// view — so bufForNorm binds it resident (a tiny vector, no balloon) rather than erroring the whole
+	// head onto the per-token upload fallback. A non-folded arch (qwen/gemma4) still binds it zero-copy.
+	fn := sb.bufForNorm(finalNormW)
+	if fn.buf == nil {
 		return nil, nil
 	}
 	w, err := sb.bufForAligned(weight, 8)

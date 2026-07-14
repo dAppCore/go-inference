@@ -277,11 +277,18 @@ func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLay
 		}
 		return bufView{buf: residentBytes(b)}
 	}
-	viewOrNil := func(b []byte) bufView {
+	// normView resolves a NORM weight to a no-copy shard view when it IS one, or a small resident copy
+	// when it is synthesised (a gemma (1+w)-folded norm is fresh heap, never a shard view — see
+	// shardBuffers.bufForNorm). The 4-bit sibling of the bf16 build's normView: norms stay bf16 either
+	// way (the norms are not quantised), so a folded norm's resident copy carries no per-token balloon.
+	normView := func(b []byte) bufView {
+		if sb != nil {
+			return sb.bufForNorm(b)
+		}
 		if len(b) == 0 {
 			return bufView{}
 		}
-		return view(b)
+		return bufView{buf: residentBytes(b)}
 	}
 	// mkW resolves one 4-bit triple to bufViews (no-copy shard views or copies); an absent
 	// projection (gemma4 K==V: no v_proj) ⇒ the zero qmvWeight, hasV()==false.
@@ -333,11 +340,11 @@ func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLay
 			cacheLen = slidingWindow
 		}
 		cacheBytes := uint(cacheLen * kvDim * bf16Size)
-		lb[li].anw = view(ql.AttnNormW)
-		lb[li].postAttnNorm = viewOrNil(ql.PostAttnNormW)
-		lb[li].postFFNorm = viewOrNil(ql.PostFFNormW)
-		lb[li].qNorm = viewOrNil(ql.QNormW)
-		lb[li].kNorm = viewOrNil(ql.KNormW)
+		lb[li].anw = normView(ql.AttnNormW)
+		lb[li].postAttnNorm = normView(ql.PostAttnNormW)
+		lb[li].postFFNorm = normView(ql.PostFFNormW)
+		lb[li].qNorm = normView(ql.QNormW)
+		lb[li].kNorm = normView(ql.KNormW)
 		lb[li].layerScalar = layerScalarBuf(ql.LayerScalarW, dModel) // synthesised broadcast (not a shard view)
 		if specs[li].OwnsCache() {
 			if setup != nil {
@@ -386,7 +393,7 @@ func buildQuantArchLayerBufsInternal(lb []archLayerBufs, moeQuant []*MoEQuantLay
 			mw.perExpertScaleView = viewOptional(mw.PerExpertScale)
 			moeQuant[li] = mw
 		} else {
-			lb[li].mnw = view(ql.MLPNormW)
+			lb[li].mnw = normView(ql.MLPNormW)
 			proj.gate, proj.up, proj.down = mkW(ql.Gate), mkW(ql.Up), mkW(ql.Down)
 		}
 		lb[li].proj = proj
