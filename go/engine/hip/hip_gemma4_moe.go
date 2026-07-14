@@ -17,6 +17,8 @@ import (
 const (
 	hipGGUFQ4_0ProjectionLaunchArgsVersion        uint32 = 1
 	hipGGUFQ4_0ProjectionLaunchArgsBytes                 = 64
+	hipGGUFQ4KExpandLaunchArgsVersion             uint32 = 1
+	hipGGUFQ4KExpandLaunchArgsBytes                      = 48
 	hipGGUFQ4_0ProjectionBlockSize                uint32 = 256
 	hipGGUFQ4_0ProjectionRowsPerBlock             uint32 = 8
 	hipGGUFQ4_0SelectedExpertsLaunchArgsVersion   uint32 = 1
@@ -25,16 +27,19 @@ const (
 	hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock  uint32 = 16
 	hipGGUFQ4KSelectedExpertsSplitRowsPerBlock    uint32 = 8
 	hipGGUFQ5_1SelectedExpertsExpert8RowsPerBlock uint32 = 2
+	hipGGUFQ4KExpandedBlockBytes                         = 152
 	hipGGUFExpertFormatQ4_0                       uint32 = 1
 	hipGGUFExpertFormatQ4K                        uint32 = 2
 	hipGGUFExpertFormatQ5_1                       uint32 = 3
 	hipGGUFExpertFormatQ8_0                       uint32 = 4
+	hipGGUFExpertFormatQ4KExpanded                uint32 = 5
 )
 
 const (
 	hipGemma4SelectedExpertPair16Env      = "GO_ROCM_GEMMA4_Q4_SELECTED_EXPERT_PAIR16"
 	hipGemma4SelectedExpertGateUpSplitEnv = "GO_ROCM_GEMMA4_Q4_K_GATE_UP_SPLIT"
 	hipGemma4SelectedExpertDownExpert8Env = "GO_ROCM_GEMMA4_Q5_1_DOWN_EXPERT8"
+	hipGemma4Q4KExpandedEnv               = "GO_ROCM_GEMMA4_Q4_K_EXPANDED"
 )
 
 type hipGGUFQ4_0ProjectionLaunchArgs struct {
@@ -48,6 +53,14 @@ type hipGGUFQ4_0ProjectionLaunchArgs struct {
 	InputBytes    uint64
 	WeightBytes   uint64
 	OutputBytes   uint64
+}
+
+type hipGGUFQ4KExpandLaunchArgs struct {
+	RawPointer      nativeDevicePointer
+	ExpandedPointer nativeDevicePointer
+	BlockCount      int
+	RawBytes        uint64
+	ExpandedBytes   uint64
 }
 
 type hipGGUFQ4_0SelectedExpertsLaunchArgs struct {
@@ -143,6 +156,8 @@ type hipGemma4ExpertCache struct {
 	adaptive                        bool
 	minimumEntries                  int
 	entries                         map[hipGemma4ExpertCacheKey]*hipGemma4ExpertCacheEntry
+	gateUpStaging                   *hipDeviceByteBuffer
+	expandedGPUDisabled             bool
 	sources                         map[string]*hipGemma4MappedExpertSource
 	stats                           hipGemma4ExpertCacheStats
 	releaseTransientPoolSuppression func()
@@ -375,6 +390,8 @@ func hipGGUFExpertBlockGeometry(format uint32) (int, uint64, bool) {
 		return hipGGUFQ4_0BlockSize, hipGGUFQ4_0BlockBytes, true
 	case hipGGUFExpertFormatQ4K:
 		return hipGGUFQ4KBlockSize, hipGGUFQ4KBlockBytes, true
+	case hipGGUFExpertFormatQ4KExpanded:
+		return hipGGUFQ4KBlockSize, hipGGUFQ4KExpandedBlockBytes, true
 	case hipGGUFExpertFormatQ5_1:
 		return hipGGUFQ5_1BlockSize, hipGGUFQ5_1BlockBytes, true
 	case hipGGUFExpertFormatQ8_0:
@@ -872,7 +889,11 @@ func (cache *hipGemma4ExpertCache) entry(key hipGemma4ExpertCacheKey, gateUpInfo
 	if err != nil {
 		return nil, core.E("rocm.hip.Gemma4ExpertCache", "resolve expert down slice", err)
 	}
-	entryBytes := uint64(len(gateUpSlice)) + uint64(len(downSlice))
+	gateUpBytes := uint64(len(gateUpSlice))
+	if gateUpFormat == hipGGUFExpertFormatQ4K && cache.q4KExpansionEnabled() {
+		gateUpBytes = uint64(len(gateUpSlice)/hipGGUFQ4KBlockBytes) * hipGGUFQ4KExpandedBlockBytes
+	}
+	entryBytes := gateUpBytes + uint64(len(downSlice))
 	if err := cache.refreshAdaptiveBudget(entryBytes); err != nil {
 		return nil, err
 	}
@@ -884,10 +905,11 @@ func (cache *hipGemma4ExpertCache) entry(key hipGemma4ExpertCacheKey, gateUpInfo
 			return nil, err
 		}
 	}
-	gateUpBuffer, err := cache.uploadExpertBuffer("expert gate/up", gateUpSlice, len(gateUpSlice))
+	gateUpBuffer, gateUpFormat, err := cache.uploadGateUpBuffer(gateUpSlice, gateUpFormat)
 	if err != nil {
 		return nil, err
 	}
+	entryBytes = gateUpBuffer.SizeBytes() + uint64(len(downSlice))
 	downBuffer, err := cache.uploadExpertBuffer("expert down", downSlice, len(downSlice))
 	if err != nil {
 		_ = gateUpBuffer.Close()
@@ -903,6 +925,85 @@ func (cache *hipGemma4ExpertCache) entry(key hipGemma4ExpertCacheKey, gateUpInfo
 	cache.entries[key] = entry
 	cache.bytes += entryBytes
 	return entry, nil
+}
+
+func (cache *hipGemma4ExpertCache) q4KExpansionEnabled() bool {
+	if cache == nil || cache.expandedGPUDisabled || core.Env(hipGemma4Q4KExpandedEnv) == "0" {
+		return false
+	}
+	_, ok := cache.driver.(nativeHIPKernelLauncher)
+	return ok
+}
+
+func (cache *hipGemma4ExpertCache) uploadGateUpBuffer(payload []byte, format uint32) (*hipDeviceByteBuffer, uint32, error) {
+	if format != hipGGUFExpertFormatQ4K || !cache.q4KExpansionEnabled() {
+		buffer, err := cache.uploadExpertBuffer("expert gate/up", payload, len(payload))
+		return buffer, format, err
+	}
+	if len(payload) == 0 || len(payload)%hipGGUFQ4KBlockBytes != 0 {
+		return nil, 0, core.E("rocm.hip.Gemma4ExpertCache", "Q4_K gate/up payload must contain complete blocks", nil)
+	}
+	blockCount := len(payload) / hipGGUFQ4KBlockBytes
+	if blockCount > int(^uint(0)>>1)/hipGGUFQ4KExpandedBlockBytes {
+		return nil, 0, core.E("rocm.hip.Gemma4ExpertCache", "expanded Q4_K gate/up byte count overflows", nil)
+	}
+	expandedByteCount := blockCount * hipGGUFQ4KExpandedBlockBytes
+	expandedBytes := uint64(expandedByteCount)
+	expanded, err := cache.allocateExpertBuffer("expanded expert gate/up", expandedBytes, expandedByteCount)
+	if err != nil {
+		return nil, 0, err
+	}
+	staging, err := cache.ensureGateUpStaging(uint64(len(payload)))
+	if err != nil {
+		_ = expanded.Close()
+		return nil, 0, err
+	}
+	if err := hipCopyHostToDeviceLabeled(cache.driver, staging.Pointer(), payload, "rocm.hip.Gemma4ExpertCache", "raw expert gate/up staging"); err != nil {
+		_ = expanded.Close()
+		return nil, 0, core.E("rocm.hip.Gemma4ExpertCache", "copy raw expert gate/up staging", err)
+	}
+	cache.stats.H2DBytes += uint64(len(payload))
+	if err := hipRunGGUFQ4KExpandMetadataKernel(context.Background(), cache.driver, staging, uint64(len(payload)), expanded, blockCount); err != nil {
+		_ = expanded.Close()
+		cache.expandedGPUDisabled = true
+		raw, uploadErr := cache.uploadExpertBuffer("expert gate/up", payload, len(payload))
+		return raw, format, uploadErr
+	}
+	return expanded, hipGGUFExpertFormatQ4KExpanded, nil
+}
+
+func (cache *hipGemma4ExpertCache) allocateExpertBuffer(label string, sizeBytes uint64, count int) (*hipDeviceByteBuffer, error) {
+	const operation = "rocm.hip.Gemma4ExpertCache"
+	for {
+		buffer, err := hipAllocateByteBuffer(cache.driver, operation, label, sizeBytes, count)
+		if err == nil {
+			buffer.pooled = false
+			return buffer, nil
+		}
+		if len(cache.entries) == 0 {
+			return nil, err
+		}
+		cache.stats.AllocationRetries++
+		if evictErr := cache.evictOldest(); evictErr != nil {
+			return nil, evictErr
+		}
+	}
+}
+
+func (cache *hipGemma4ExpertCache) ensureGateUpStaging(sizeBytes uint64) (*hipDeviceByteBuffer, error) {
+	if cache.gateUpStaging != nil && cache.gateUpStaging.SizeBytes() >= sizeBytes {
+		return cache.gateUpStaging, nil
+	}
+	staging, err := cache.allocateExpertBuffer("raw expert gate/up staging", sizeBytes, int(sizeBytes))
+	if err != nil {
+		return nil, err
+	}
+	if err := cache.gateUpStaging.Close(); err != nil {
+		_ = staging.Close()
+		return nil, err
+	}
+	cache.gateUpStaging = staging
+	return staging, nil
 }
 
 func (cache *hipGemma4ExpertCache) uploadExpertBuffer(label string, payload []byte, count int) (*hipDeviceByteBuffer, error) {
@@ -1033,6 +1134,10 @@ func (cache *hipGemma4ExpertCache) Close() error {
 		}
 		delete(cache.sources, path)
 	}
+	if err := cache.gateUpStaging.Close(); err != nil {
+		lastErr = err
+	}
+	cache.gateUpStaging = nil
 	cache.bytes = 0
 	if cache.releaseTransientPoolSuppression != nil {
 		cache.releaseTransientPoolSuppression()
@@ -1145,6 +1250,56 @@ func (cache *hipGemma4ExpertCache) expertTensorSlice(info nativeTensorInfo, expe
 	}
 	payload := source.data[int(start):int(end)]
 	return payload, rows, cols, format, nil
+}
+
+func (args hipGGUFQ4KExpandLaunchArgs) Binary() ([]byte, error) {
+	if args.RawPointer == 0 || args.ExpandedPointer == 0 {
+		return nil, core.E("rocm.hip.GGUFQ4KExpand", "raw and expanded pointers are required", nil)
+	}
+	blockCount, err := rocmDeviceKVPositiveUint32("Q4_K block count", args.BlockCount)
+	if err != nil {
+		return nil, err
+	}
+	if args.RawBytes != uint64(blockCount)*hipGGUFQ4KBlockBytes || args.ExpandedBytes != uint64(blockCount)*hipGGUFQ4KExpandedBlockBytes {
+		return nil, core.E("rocm.hip.GGUFQ4KExpand", "Q4_K raw or expanded byte count is invalid", nil)
+	}
+	payload := make([]byte, hipGGUFQ4KExpandLaunchArgsBytes)
+	binary.LittleEndian.PutUint32(payload[0:], hipGGUFQ4KExpandLaunchArgsVersion)
+	binary.LittleEndian.PutUint32(payload[4:], uint32(hipGGUFQ4KExpandLaunchArgsBytes))
+	binary.LittleEndian.PutUint64(payload[8:], uint64(args.RawPointer))
+	binary.LittleEndian.PutUint64(payload[16:], uint64(args.ExpandedPointer))
+	binary.LittleEndian.PutUint32(payload[24:], blockCount)
+	binary.LittleEndian.PutUint64(payload[32:], args.RawBytes)
+	binary.LittleEndian.PutUint64(payload[40:], args.ExpandedBytes)
+	return payload, nil
+}
+
+func hipRunGGUFQ4KExpandMetadataKernel(ctx context.Context, driver nativeHIPDriver, raw *hipDeviceByteBuffer, rawBytes uint64, expanded *hipDeviceByteBuffer, blockCount int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if raw == nil || expanded == nil || rawBytes > raw.SizeBytes() {
+		return core.E("rocm.hip.GGUFQ4KExpand", "raw and expanded device buffers are required", nil)
+	}
+	args := hipGGUFQ4KExpandLaunchArgs{
+		RawPointer:      raw.Pointer(),
+		ExpandedPointer: expanded.Pointer(),
+		BlockCount:      blockCount,
+		RawBytes:        rawBytes,
+		ExpandedBytes:   expanded.SizeBytes(),
+	}
+	payload, err := args.Binary()
+	if err != nil {
+		return err
+	}
+	if blockCount > int(^uint(0)>>1)/32 {
+		return core.E("rocm.hip.GGUFQ4KExpand", "Q4_K expansion work size overflows", nil)
+	}
+	config, err := hipOneDimensionalLaunchConfig(hipKernelNameGGUFQ4KExpandMetadata, payload, blockCount*32)
+	if err != nil {
+		return err
+	}
+	return hipLaunchKernel(driver, config)
 }
 
 func (args hipGGUFQ4_0ProjectionLaunchArgs) Binary() ([]byte, error) {
@@ -1355,8 +1510,22 @@ func hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(ctx c
 		downKernel = hipKernelNameGGUFQ4_0SelectedExpertDownPair16
 		gateRowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
 		downRowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
-	} else if args.GateUpFormat == hipGGUFExpertFormatQ4K && (args.DownFormat == hipGGUFExpertFormatQ5_1 || args.DownFormat == hipGGUFExpertFormatQ8_0) {
-		if core.Env(hipGemma4SelectedExpertPair16Env) != "0" {
+	} else if (args.GateUpFormat == hipGGUFExpertFormatQ4K || args.GateUpFormat == hipGGUFExpertFormatQ4KExpanded) &&
+		(args.DownFormat == hipGGUFExpertFormatQ5_1 || args.DownFormat == hipGGUFExpertFormatQ8_0) {
+		if args.GateUpFormat == hipGGUFExpertFormatQ4KExpanded {
+			gateKernel = hipKernelNameGGUFQ4KExpandedSelectedGateUpSplitPair16
+			gateRowsPerBlock = hipGGUFQ4KSelectedExpertsSplitRowsPerBlock
+			downRowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
+			if args.DownFormat == hipGGUFExpertFormatQ5_1 {
+				downKernel = hipKernelNameGGUFQ5_1SelectedExpertDownPair16
+				if args.TopK == hipGGUFQ4_0SelectedExpertsMaxTopK && core.Env(hipGemma4SelectedExpertDownExpert8Env) != "0" {
+					downKernel = hipKernelNameGGUFQ5_1SelectedExpertDownExpert8Pair16
+					downRowsPerBlock = hipGGUFQ5_1SelectedExpertsExpert8RowsPerBlock
+				}
+			} else {
+				downKernel = hipKernelNameGGUFQ8_0SelectedExpertDownPair16
+			}
+		} else if core.Env(hipGemma4SelectedExpertPair16Env) != "0" {
 			gateKernel = hipKernelNameGGUFQ4KSelectedExpertGateUpPair16
 			gateRowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
 			downRowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock

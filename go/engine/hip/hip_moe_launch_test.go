@@ -70,6 +70,27 @@ func TestHIPGGUFQ4_0ProjectionLaunchArgs_Good(t *testing.T) {
 	core.AssertEqual(t, uint32(704*4), binary.LittleEndian.Uint32(payload[56:]))
 }
 
+func TestHIPGGUFQ4KExpandLaunchArgs_Good(t *testing.T) {
+	args := hipGGUFQ4KExpandLaunchArgs{
+		RawPointer:      11,
+		ExpandedPointer: 22,
+		BlockCount:      17,
+		RawBytes:        17 * hipGGUFQ4KBlockBytes,
+		ExpandedBytes:   17 * hipGGUFQ4KExpandedBlockBytes,
+	}
+	payload, err := args.Binary()
+	core.RequireNoError(t, err)
+
+	core.AssertEqual(t, hipGGUFQ4KExpandLaunchArgsBytes, len(payload))
+	core.AssertEqual(t, hipGGUFQ4KExpandLaunchArgsVersion, binary.LittleEndian.Uint32(payload[0:]))
+	core.AssertEqual(t, uint32(hipGGUFQ4KExpandLaunchArgsBytes), binary.LittleEndian.Uint32(payload[4:]))
+	core.AssertEqual(t, uint64(11), binary.LittleEndian.Uint64(payload[8:]))
+	core.AssertEqual(t, uint64(22), binary.LittleEndian.Uint64(payload[16:]))
+	core.AssertEqual(t, uint32(17), binary.LittleEndian.Uint32(payload[24:]))
+	core.AssertEqual(t, uint64(17*hipGGUFQ4KBlockBytes), binary.LittleEndian.Uint64(payload[32:]))
+	core.AssertEqual(t, uint64(17*hipGGUFQ4KExpandedBlockBytes), binary.LittleEndian.Uint64(payload[40:]))
+}
+
 func TestHIPGGUFQ4_0SelectedExpertsLaunchArgs_Good(t *testing.T) {
 	args := hipGGUFQ4_0SelectedExpertsLaunchArgs{
 		InputPointer:      11,
@@ -218,20 +239,26 @@ func TestHIPGGUFMixedSelectedExpertsLaunch_Good_Pair16ProductionShape(t *testing
 	)
 	for _, test := range []struct {
 		name       string
+		gateFormat uint32
+		gateBlock  int
+		gateKernel string
+		gateGrid   uint32
 		downFormat uint32
 		downBlock  int
 		downKernel string
 		downGrid   uint32
 	}{
-		{name: "Q5_1", downFormat: hipGGUFExpertFormatQ5_1, downBlock: hipGGUFQ5_1BlockBytes, downKernel: "rocm_gguf_q5_1_selected_expert_down_expert8_pair16", downGrid: 1408},
-		{name: "Q8_0", downFormat: hipGGUFExpertFormatQ8_0, downBlock: hipGGUFQ8_0BlockBytes, downKernel: "rocm_gguf_q8_0_selected_expert_down_pair16", downGrid: 176},
+		{name: "Q4_K_Q5_1", gateFormat: hipGGUFExpertFormatQ4K, gateBlock: hipGGUFQ4KBlockBytes, gateKernel: "rocm_gguf_q4_k_selected_expert_gate_up_split_pair16", gateGrid: 704, downFormat: hipGGUFExpertFormatQ5_1, downBlock: hipGGUFQ5_1BlockBytes, downKernel: "rocm_gguf_q5_1_selected_expert_down_expert8_pair16", downGrid: 1408},
+		{name: "Q4_K_Q8_0", gateFormat: hipGGUFExpertFormatQ4K, gateBlock: hipGGUFQ4KBlockBytes, gateKernel: "rocm_gguf_q4_k_selected_expert_gate_up_split_pair16", gateGrid: 704, downFormat: hipGGUFExpertFormatQ8_0, downBlock: hipGGUFQ8_0BlockBytes, downKernel: "rocm_gguf_q8_0_selected_expert_down_pair16", downGrid: 176},
+		{name: "Q4_K_expanded_Q5_1", gateFormat: hipGGUFExpertFormatQ4KExpanded, gateBlock: hipGGUFQ4KExpandedBlockBytes, gateKernel: "rocm_gguf_q4_k_expanded_selected_expert_gate_up_split_pair16", gateGrid: 704, downFormat: hipGGUFExpertFormatQ5_1, downBlock: hipGGUFQ5_1BlockBytes, downKernel: "rocm_gguf_q5_1_selected_expert_down_expert8_pair16", downGrid: 1408},
+		{name: "Q4_K_expanded_Q8_0", gateFormat: hipGGUFExpertFormatQ4KExpanded, gateBlock: hipGGUFQ4KExpandedBlockBytes, gateKernel: "rocm_gguf_q4_k_expanded_selected_expert_gate_up_split_pair16", gateGrid: 704, downFormat: hipGGUFExpertFormatQ8_0, downBlock: hipGGUFQ8_0BlockBytes, downKernel: "rocm_gguf_q8_0_selected_expert_down_pair16", downGrid: 176},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			driver := &fakeHIPDriver{available: true}
 			input := hipBorrowDeviceByteBufferValue(driver, "input", 11, hidden*4, hidden)
 			activation := hipBorrowDeviceByteBufferValue(driver, "activation", 22, topK*expertFF*4, topK*expertFF)
 			output := hipBorrowDeviceByteBufferValue(driver, "output", 33, hidden*4, hidden)
-			gateUpBytes := uint64(2 * expertFF * (hidden / hipGGUFQ4KBlockSize) * hipGGUFQ4KBlockBytes)
+			gateUpBytes := uint64(2 * expertFF * (hidden / hipGGUFQ4KBlockSize) * test.gateBlock)
 			downBytes := uint64(hidden * (expertFF / hipGGUFQ4_0BlockSize) * test.downBlock)
 			entries := make([]*hipGemma4ExpertCacheEntry, topK)
 			routeWeights := make([]float32, topK)
@@ -242,16 +269,16 @@ func TestHIPGGUFMixedSelectedExpertsLaunch_Good_Pair16ProductionShape(t *testing
 					GateUp: &gateUp, Down: &down,
 					GateUpRows: 2 * expertFF, GateUpCols: hidden,
 					DownRows: hidden, DownCols: expertFF,
-					GateUpFormat: hipGGUFExpertFormatQ4K, DownFormat: test.downFormat,
+					GateUpFormat: test.gateFormat, DownFormat: test.downFormat,
 				}
 				routeWeights[index] = 1 / float32(topK)
 			}
 
 			core.RequireNoError(t, hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(context.Background(), driver, &input, entries, routeWeights, hidden, expertFF, &activation, &output))
 			core.AssertEqual(t, 2, len(driver.launches))
-			core.AssertEqual(t, "rocm_gguf_q4_k_selected_expert_gate_up_split_pair16", driver.launches[0].Name)
+			core.AssertEqual(t, test.gateKernel, driver.launches[0].Name)
 			core.AssertEqual(t, test.downKernel, driver.launches[1].Name)
-			core.AssertEqual(t, uint32(704), driver.launches[0].GridX)
+			core.AssertEqual(t, test.gateGrid, driver.launches[0].GridX)
 			core.AssertEqual(t, test.downGrid, driver.launches[1].GridX)
 			core.AssertEqual(t, uint32(256), driver.launches[0].BlockX)
 			core.AssertEqual(t, uint32(256), driver.launches[1].BlockX)
@@ -642,6 +669,7 @@ func TestHIPGemma4ExpertCache_Good_MixedKQuant(t *testing.T) {
 		prefix   = 32
 	)
 	gateUpSliceBytes := 2 * expertFF * (hidden / hipGGUFQ4KBlockSize) * hipGGUFQ4KBlockBytes
+	expandedGateUpSliceBytes := 2 * expertFF * (hidden / hipGGUFQ4KBlockSize) * hipGGUFQ4KExpandedBlockBytes
 	downSliceBytes := hidden * (expertFF / hipGGUFQ5_1BlockSize) * hipGGUFQ5_1BlockBytes
 	gateUpPayload := make([]byte, experts*gateUpSliceBytes)
 	downPayload := make([]byte, experts*downSliceBytes)
@@ -651,7 +679,7 @@ func TestHIPGemma4ExpertCache_Good_MixedKQuant(t *testing.T) {
 	path := core.PathJoin(t.TempDir(), "mixed-experts.gguf")
 	core.RequireTrue(t, core.WriteFile(path, filePayload, 0o644).OK)
 	driver := &fakeHIPDriver{available: true}
-	cache := newHIPGemma4ExpertCache(driver, uint64(gateUpSliceBytes+downSliceBytes))
+	cache := newHIPGemma4ExpertCache(driver, uint64(expandedGateUpSliceBytes+downSliceBytes))
 	entry, err := cache.entry(hipGemma4ExpertCacheKey{Layer: 0, Expert: 1}, nativeTensorInfo{
 		Type: hipGGUFQ4KTensorType, TypeName: "Q4_K", Dimensions: []uint64{hidden, 2 * expertFF, experts},
 		SourcePath: path, DataOffset: prefix, ByteSize: uint64(len(gateUpPayload)),
@@ -661,13 +689,36 @@ func TestHIPGemma4ExpertCache_Good_MixedKQuant(t *testing.T) {
 	}, experts)
 	core.RequireNoError(t, err)
 	defer cache.Close()
-	core.AssertEqual(t, uint32(hipGGUFExpertFormatQ4K), entry.GateUpFormat)
+	core.AssertEqual(t, uint32(hipGGUFExpertFormatQ4KExpanded), entry.GateUpFormat)
 	core.AssertEqual(t, uint32(hipGGUFExpertFormatQ5_1), entry.DownFormat)
-	core.AssertEqual(t, uint64(gateUpSliceBytes), entry.GateUp.SizeBytes())
+	core.AssertEqual(t, uint64(expandedGateUpSliceBytes), entry.GateUp.SizeBytes())
 	core.AssertEqual(t, uint64(downSliceBytes), entry.Down.SizeBytes())
+	core.AssertEqual(t, 1, countLaunchName(driver.launches, hipKernelNameGGUFQ4KExpandMetadata))
+	core.AssertEqual(t, uint64(gateUpSliceBytes+downSliceBytes), cache.stats.H2DBytes)
+}
+
+func TestHIPGemma4ExpertCache_Good_Q4KExpansionFallback(t *testing.T) {
+	driver := &fakeHIPDriver{
+		available: true,
+		launchErr: core.E("rocm.hip.Test", "expanded kernel unavailable", nil),
+	}
+	cache := newHIPGemma4ExpertCache(driver, 1<<20)
+	defer cache.Close()
+	payload := make([]byte, hipGGUFQ4KBlockBytes)
+
+	buffer, format, err := cache.uploadGateUpBuffer(payload, hipGGUFExpertFormatQ4K)
+	core.RequireNoError(t, err)
+	defer buffer.Close()
+
+	core.AssertEqual(t, uint32(hipGGUFExpertFormatQ4K), format)
+	core.AssertEqual(t, uint64(hipGGUFQ4KBlockBytes), buffer.SizeBytes())
+	core.AssertEqual(t, true, cache.expandedGPUDisabled)
+	core.AssertEqual(t, 1, countLaunchName(driver.launches, hipKernelNameGGUFQ4KExpandMetadata))
+	core.AssertEqual(t, uint64(2*hipGGUFQ4KBlockBytes), cache.stats.H2DBytes)
 }
 
 func TestHIPGemma4ExpertCache_Good_MixedKQuantQ8_0Down(t *testing.T) {
+	t.Setenv(hipGemma4Q4KExpandedEnv, "0")
 	const (
 		experts  = 2
 		hidden   = 256

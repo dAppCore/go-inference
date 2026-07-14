@@ -99,6 +99,8 @@ const (
 	hipKernelNameGGUFQ8_0SelectedExpertDown                 = "rocm_gguf_q8_0_selected_expert_down"
 	hipKernelNameGGUFQ4KSelectedExpertGateUpPair16          = "rocm_gguf_q4_k_selected_expert_gate_up_pair16"
 	hipKernelNameGGUFQ4KSelectedExpertGateUpSplitPair16     = "rocm_gguf_q4_k_selected_expert_gate_up_split_pair16"
+	hipKernelNameGGUFQ4KExpandMetadata                      = "rocm_gguf_q4_k_expand_metadata"
+	hipKernelNameGGUFQ4KExpandedSelectedGateUpSplitPair16   = "rocm_gguf_q4_k_expanded_selected_expert_gate_up_split_pair16"
 	hipKernelNameGGUFQ5_1SelectedExpertDownPair16           = "rocm_gguf_q5_1_selected_expert_down_pair16"
 	hipKernelNameGGUFQ5_1SelectedExpertDownExpert8Pair16    = "rocm_gguf_q5_1_selected_expert_down_expert8_pair16"
 	hipKernelNameGGUFQ8_0SelectedExpertDownPair16           = "rocm_gguf_q8_0_selected_expert_down_pair16"

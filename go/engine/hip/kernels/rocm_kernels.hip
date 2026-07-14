@@ -189,12 +189,15 @@ constexpr uint32_t ROCM_MOE_LAZY_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_MOE_LAZY_LAUNCH_ARGS_BYTES = 64;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_BYTES = 64;
+constexpr uint32_t ROCM_GGUF_Q4_K_EXPAND_LAUNCH_ARGS_VERSION = 1;
+constexpr uint32_t ROCM_GGUF_Q4_K_EXPAND_LAUNCH_ARGS_BYTES = 48;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE = 256;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_ROWS_PER_BLOCK = 8;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_THREADS_PER_ROW = ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE / ROCM_GGUF_Q4_0_PROJECTION_ROWS_PER_BLOCK;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_ROWS_PER_BLOCK = 16;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW = ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE / ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_ROWS_PER_BLOCK;
 constexpr uint32_t ROCM_GGUF_Q4_K_SELECTED_EXPERT_GATE_UP_SPLIT_ROWS_PER_BLOCK = 8;
+constexpr uint32_t ROCM_GGUF_Q4_K_EXPANDED_BLOCK_BYTES = 152;
 constexpr uint32_t ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_ROWS_PER_BLOCK = 2;
 constexpr uint32_t ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_EXPERTS = 8;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERTS_LAUNCH_ARGS_VERSION = 1;
@@ -204,6 +207,7 @@ constexpr uint32_t ROCM_GGUF_EXPERT_FORMAT_Q4_0 = 1;
 constexpr uint32_t ROCM_GGUF_EXPERT_FORMAT_Q4_K = 2;
 constexpr uint32_t ROCM_GGUF_EXPERT_FORMAT_Q5_1 = 3;
 constexpr uint32_t ROCM_GGUF_EXPERT_FORMAT_Q8_0 = 4;
+constexpr uint32_t ROCM_GGUF_EXPERT_FORMAT_Q4_K_EXPANDED = 5;
 constexpr uint32_t ROCM_JANGTQ_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_JANGTQ_LAUNCH_ARGS_BYTES = 96;
 constexpr uint32_t ROCM_JANGTQ_LAUNCH_FLAG_BIAS = 1;
@@ -1417,6 +1421,17 @@ struct rocm_gguf_q4_0_projection_launch_args {
 	uint32_t reserved;
 };
 
+struct rocm_gguf_q4_k_expand_launch_args {
+	uint32_t version;
+	uint32_t total_bytes;
+	uint64_t raw_pointer;
+	uint64_t expanded_pointer;
+	uint32_t block_count;
+	uint32_t reserved;
+	uint64_t raw_bytes;
+	uint64_t expanded_bytes;
+};
+
 struct rocm_gguf_q4_0_selected_experts_launch_args {
 	uint32_t version;
 	uint32_t total_bytes;
@@ -1658,6 +1673,7 @@ static_assert(sizeof(rocm_gelu_tanh_mul_launch_args) == ROCM_GELU_TANH_MUL_LAUNC
 static_assert(sizeof(rocm_moe_router_launch_args) == ROCM_MOE_ROUTER_LAUNCH_ARGS_BYTES, "MoE router launch ABI drift");
 static_assert(sizeof(rocm_moe_lazy_launch_args) == ROCM_MOE_LAZY_LAUNCH_ARGS_BYTES, "MoE lazy expert launch ABI drift");
 static_assert(sizeof(rocm_gguf_q4_0_projection_launch_args) == ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_BYTES, "GGUF Q4_0 projection launch ABI drift");
+static_assert(sizeof(rocm_gguf_q4_k_expand_launch_args) == ROCM_GGUF_Q4_K_EXPAND_LAUNCH_ARGS_BYTES, "GGUF Q4_K expansion launch ABI drift");
 static_assert(sizeof(rocm_gguf_q4_0_selected_experts_launch_args) == ROCM_GGUF_Q4_0_SELECTED_EXPERTS_LAUNCH_ARGS_BYTES, "GGUF Q4_0 selected experts launch ABI drift");
 static_assert(sizeof(rocm_jangtq_launch_args) == ROCM_JANGTQ_LAUNCH_ARGS_BYTES, "JANGTQ launch ABI drift");
 static_assert(sizeof(rocm_codebook_launch_args) == ROCM_CODEBOOK_LAUNCH_ARGS_BYTES, "codebook launch ABI drift");
@@ -4395,14 +4411,27 @@ __device__ bool rocm_valid_gguf_q4_0_projection_args(const rocm_gguf_q4_0_projec
 	return required_rows <= args.weight_rows;
 }
 
+__device__ bool rocm_valid_gguf_q4_k_expand_args(const rocm_gguf_q4_k_expand_launch_args &args)
+{
+	return args.version == ROCM_GGUF_Q4_K_EXPAND_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_GGUF_Q4_K_EXPAND_LAUNCH_ARGS_BYTES &&
+		args.raw_pointer != 0 &&
+		args.expanded_pointer != 0 &&
+		args.block_count > 0 &&
+		args.raw_bytes == static_cast<uint64_t>(args.block_count) * 144u &&
+		args.expanded_bytes == static_cast<uint64_t>(args.block_count) * ROCM_GGUF_Q4_K_EXPANDED_BLOCK_BYTES;
+}
+
 __device__ bool rocm_valid_gguf_q4_0_selected_experts_args(const rocm_gguf_q4_0_selected_experts_launch_args &args)
 {
 	const bool q4_0_pair = args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_0 && args.down_format == ROCM_GGUF_EXPERT_FORMAT_Q4_0;
-	const bool mixed_pair = args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_K &&
+	const bool q4_k_gate = args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_K || args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_K_EXPANDED;
+	const bool mixed_pair = q4_k_gate &&
 		(args.down_format == ROCM_GGUF_EXPERT_FORMAT_Q5_1 || args.down_format == ROCM_GGUF_EXPERT_FORMAT_Q8_0);
 	const bool gate_bytes_valid =
 		(args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_0 && (args.hidden_size & 31u) == 0u && args.gate_up_bytes == args.gate_up_rows * (args.hidden_size >> 5u) * 18u) ||
-		(args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_K && (args.hidden_size & 255u) == 0u && args.gate_up_bytes == args.gate_up_rows * (args.hidden_size >> 8u) * 144u);
+		(args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_K && (args.hidden_size & 255u) == 0u && args.gate_up_bytes == args.gate_up_rows * (args.hidden_size >> 8u) * 144u) ||
+		(args.gate_up_format == ROCM_GGUF_EXPERT_FORMAT_Q4_K_EXPANDED && (args.hidden_size & 255u) == 0u && args.gate_up_bytes == args.gate_up_rows * (args.hidden_size >> 8u) * ROCM_GGUF_Q4_K_EXPANDED_BLOCK_BYTES);
 	const bool down_bytes_valid =
 		(args.down_format == ROCM_GGUF_EXPERT_FORMAT_Q4_0 && (args.expert_ff & 31u) == 0u && args.down_bytes == args.down_rows * (args.expert_ff >> 5u) * 18u) ||
 		(args.down_format == ROCM_GGUF_EXPERT_FORMAT_Q5_1 && (args.expert_ff & 31u) == 0u && args.down_bytes == args.down_rows * (args.expert_ff >> 5u) * 24u) ||
@@ -5845,6 +5874,42 @@ __device__ void rocm_gguf_q4_k_projection_row_pair16_sums(
 	}
 }
 
+__device__ void rocm_gguf_q4_k_expanded_projection_row_pair16_sums(
+	const float *input,
+	const unsigned char *weights,
+	uint32_t row,
+	uint32_t cols,
+	uint32_t col_lane,
+	float &low_sum,
+	float &high_sum)
+{
+	const uint32_t blocks_per_row = cols >> 8u;
+	const uint64_t row_base = static_cast<uint64_t>(row) * blocks_per_row * ROCM_GGUF_Q4_K_EXPANDED_BLOCK_BYTES;
+	low_sum = 0.0f;
+	high_sum = 0.0f;
+	for (uint32_t block_index = 0; block_index < blocks_per_row; ++block_index) {
+		const unsigned char *block = weights + row_base + static_cast<uint64_t>(block_index) * ROCM_GGUF_Q4_K_EXPANDED_BLOCK_BYTES;
+		const float *metadata = reinterpret_cast<const float *>(block);
+		const float d = metadata[0];
+		const float dmin = metadata[1];
+		const uint32_t block_col = block_index << 8u;
+		for (uint32_t group = 0; group < 8u; ++group) {
+			const uint32_t scale = block[8u + group];
+			const uint32_t minimum = block[16u + group];
+			const uint32_t quant_base = 24u + (group >> 1u) * 32u;
+			const unsigned char packed_low = block[quant_base + col_lane];
+			const unsigned char packed_high = block[quant_base + 16u + col_lane];
+			const uint32_t quant_low = (group & 1u) == 0u ? (packed_low & 0x0fu) : (packed_low >> 4u);
+			const uint32_t quant_high = (group & 1u) == 0u ? (packed_high & 0x0fu) : (packed_high >> 4u);
+			const float low_value = d * static_cast<float>(scale * quant_low) - dmin * static_cast<float>(minimum);
+			const float high_value = d * static_cast<float>(scale * quant_high) - dmin * static_cast<float>(minimum);
+			const uint32_t group_col = block_col + (group << 5u);
+			low_sum += input[group_col + col_lane] * low_value;
+			high_sum += input[group_col + 16u + col_lane] * high_value;
+		}
+	}
+}
+
 __device__ float rocm_gguf_q5_1_projection_row_sum(
 	const float *input,
 	const unsigned char *weights,
@@ -5954,6 +6019,42 @@ __device__ void rocm_gguf_q8_0_projection_row_pair16_sums(
 		const uint32_t col_base = block_index << 5u;
 		low_sum += input[col_base + col_lane] * d * static_cast<float>(quant_low);
 		high_sum += input[col_base + 16u + col_lane] * d * static_cast<float>(quant_high);
+	}
+}
+
+extern "C" __global__ void rocm_gguf_q4_k_expand_metadata(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_gguf_q4_k_expand_launch_args &args = *reinterpret_cast<const rocm_gguf_q4_k_expand_launch_args *>(packet);
+	if (!rocm_valid_gguf_q4_k_expand_args(args) || (blockDim.x & 31u) != 0u) {
+		return;
+	}
+	const uint32_t linear = blockIdx.x * blockDim.x + threadIdx.x;
+	const uint32_t block_index = linear >> 5u;
+	if (block_index >= args.block_count) {
+		return;
+	}
+	const uint32_t lane = linear & 31u;
+	const unsigned char *raw = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(args.raw_pointer)) + static_cast<uint64_t>(block_index) * 144u;
+	unsigned char *expanded = reinterpret_cast<unsigned char *>(static_cast<uintptr_t>(args.expanded_pointer)) + static_cast<uint64_t>(block_index) * ROCM_GGUF_Q4_K_EXPANDED_BLOCK_BYTES;
+	if (lane == 0u) {
+		const uint16_t d_bits = static_cast<uint16_t>(raw[0]) | (static_cast<uint16_t>(raw[1]) << 8u);
+		const uint16_t dmin_bits = static_cast<uint16_t>(raw[2]) | (static_cast<uint16_t>(raw[3]) << 8u);
+		float *metadata = reinterpret_cast<float *>(expanded);
+		metadata[0] = rocm_half_to_float(d_bits);
+		metadata[1] = rocm_half_to_float(dmin_bits);
+		for (uint32_t group = 0; group < 8u; ++group) {
+			uint32_t scale = 0;
+			uint32_t minimum = 0;
+			rocm_gguf_q4_k_scale_min(raw + 4u, group, scale, minimum);
+			expanded[8u + group] = static_cast<unsigned char>(scale);
+			expanded[16u + group] = static_cast<unsigned char>(minimum);
+		}
+	}
+	for (uint32_t offset = lane; offset < 128u; offset += 32u) {
+		expanded[24u + offset] = raw[16u + offset];
 	}
 }
 
@@ -6289,6 +6390,44 @@ extern "C" __global__ void rocm_gguf_q4_k_selected_expert_gate_up_split_pair16(c
 		const uint32_t row = selected_row - expert * args.expert_ff;
 		const unsigned char *weights = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(args.gate_up_pointers[expert]));
 		rocm_gguf_q4_k_projection_row_pair16_sums(input, weights, projection * args.expert_ff + row, args.hidden_size, col_lane, low_sum, high_sum);
+	}
+	const float projection_sum = rocm_gguf_q4_0_projection_row_pair16_reduce(low_sum, high_sum);
+	__shared__ float projection_sums[ROCM_GGUF_Q4_K_SELECTED_EXPERT_GATE_UP_SPLIT_ROWS_PER_BLOCK * 2u];
+	if (col_lane == 0u) {
+		projection_sums[group] = projection_sum;
+	}
+	__syncthreads();
+	if (col_lane == 0u && projection == 0u && selected_row < selected_rows) {
+		activation[selected_row] = rocm_gelu_tanh_value(projection_sums[group]) * projection_sums[group + 1u];
+	}
+}
+
+extern "C" __global__ void rocm_gguf_q4_k_expanded_selected_expert_gate_up_split_pair16(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_gguf_q4_0_selected_experts_launch_args &args = *reinterpret_cast<const rocm_gguf_q4_0_selected_experts_launch_args *>(packet);
+	if (!rocm_valid_gguf_q4_0_selected_experts_args(args) ||
+		args.gate_up_format != ROCM_GGUF_EXPERT_FORMAT_Q4_K_EXPANDED ||
+		blockDim.x != ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+	const uint32_t col_lane = threadIdx.x & (ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW - 1u);
+	const uint32_t group = threadIdx.x / ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW;
+	const uint32_t row_lane = group >> 1u;
+	const uint32_t projection = group & 1u;
+	const uint32_t selected_row = blockIdx.x * ROCM_GGUF_Q4_K_SELECTED_EXPERT_GATE_UP_SPLIT_ROWS_PER_BLOCK + row_lane;
+	const uint32_t selected_rows = args.top_k * args.expert_ff;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *activation = reinterpret_cast<float *>(static_cast<uintptr_t>(args.activation_pointer));
+	float low_sum = 0.0f;
+	float high_sum = 0.0f;
+	if (selected_row < selected_rows) {
+		const uint32_t expert = selected_row / args.expert_ff;
+		const uint32_t row = selected_row - expert * args.expert_ff;
+		const unsigned char *weights = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(args.gate_up_pointers[expert]));
+		rocm_gguf_q4_k_expanded_projection_row_pair16_sums(input, weights, projection * args.expert_ff + row, args.hidden_size, col_lane, low_sum, high_sum);
 	}
 	const float projection_sum = rocm_gguf_q4_0_projection_row_pair16_reduce(low_sum, high_sum);
 	__shared__ float projection_sums[ROCM_GGUF_Q4_K_SELECTED_EXPERT_GATE_UP_SPLIT_ROWS_PER_BLOCK * 2u];

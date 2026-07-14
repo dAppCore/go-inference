@@ -423,6 +423,8 @@ func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {
 	expertGateUpRows := make([][][]byte, selectedExperts)
 	expertDownRows := make([][][]byte, selectedExperts)
 	entries := make([]*hipGemma4ExpertCacheEntry, selectedExperts)
+	rawGateUps := make([]*hipDeviceByteBuffer, selectedExperts)
+	expandedGateUps := make([]*hipDeviceByteBuffer, selectedExperts)
 	for expert := 0; expert < selectedExperts; expert++ {
 		expertGateUpRows[expert] = make([][]byte, 2*expertFF)
 		gateUpPayload := make([]byte, 0, 2*expertFF*hipGGUFQ4KBlockBytes)
@@ -439,9 +441,19 @@ func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {
 		gateUpBuffer, uploadErr := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed gate/up", gateUpPayload, len(gateUpPayload))
 		core.RequireNoError(t, uploadErr)
 		defer gateUpBuffer.Close()
+		expandedGateUpPayload := hipHardwareExpandGGUFQ4KMetadata(t, gateUpPayload)
+		expandedGateUpBuffer, allocateErr := hipAllocateByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware expanded mixed gate/up", uint64(len(expandedGateUpPayload)), len(expandedGateUpPayload))
+		core.RequireNoError(t, allocateErr)
+		defer expandedGateUpBuffer.Close()
+		core.RequireNoError(t, hipRunGGUFQ4KExpandMetadataKernel(context.Background(), runtime.(*hipRuntime).driver, gateUpBuffer, uint64(len(gateUpPayload)), expandedGateUpBuffer, len(gateUpPayload)/hipGGUFQ4KBlockBytes))
+		expandedGateUpGot := make([]byte, len(expandedGateUpPayload))
+		core.RequireNoError(t, runtime.(*hipRuntime).driver.CopyDeviceToHost(expandedGateUpBuffer.Pointer(), expandedGateUpGot))
+		core.AssertEqual(t, expandedGateUpPayload, expandedGateUpGot)
 		downBuffer, uploadErr := hipUploadByteBuffer(runtime.(*hipRuntime).driver, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed down", downPayload, len(downPayload))
 		core.RequireNoError(t, uploadErr)
 		defer downBuffer.Close()
+		rawGateUps[expert] = gateUpBuffer
+		expandedGateUps[expert] = expandedGateUpBuffer
 		entries[expert] = &hipGemma4ExpertCacheEntry{
 			GateUp: gateUpBuffer, Down: downBuffer,
 			GateUpRows: 2 * expertFF, GateUpCols: hidden, DownRows: hidden, DownCols: expertFF,
@@ -465,10 +477,19 @@ func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {
 		core.RequireNoError(t, readErr)
 		return got
 	}
+	useGateUps := func(buffers []*hipDeviceByteBuffer, format uint32) {
+		t.Helper()
+		for expert := range entries {
+			entries[expert].GateUp = buffers[expert]
+			entries[expert].GateUpFormat = format
+		}
+	}
 	gotBaseline := runMixed("0", "0", "0")
 	gotPair16 := runMixed("1", "0", "0")
 	gotExpert8 := runMixed("1", "1", "0")
 	got := runMixed("1", "1", "1")
+	useGateUps(expandedGateUps, hipGGUFExpertFormatQ4KExpanded)
+	gotExpanded := runMixed("1", "1", "1")
 	for index := range gotBaseline {
 		if math.Float32bits(gotBaseline[index]) != math.Float32bits(gotPair16[index]) {
 			t.Fatalf("mixed Q5_1 pair16 output[%d] = %08x, baseline = %08x", index, math.Float32bits(gotPair16[index]), math.Float32bits(gotBaseline[index]))
@@ -478,6 +499,9 @@ func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {
 		}
 		if math.Float32bits(gotBaseline[index]) != math.Float32bits(got[index]) {
 			t.Fatalf("mixed Q4_K gate/up split output[%d] = %08x, baseline = %08x", index, math.Float32bits(got[index]), math.Float32bits(gotBaseline[index]))
+		}
+		if math.Float32bits(gotBaseline[index]) != math.Float32bits(gotExpanded[index]) {
+			t.Fatalf("expanded mixed Q4_K gate/up output[%d] = %08x, raw baseline = %08x", index, math.Float32bits(gotExpanded[index]), math.Float32bits(gotBaseline[index]))
 		}
 	}
 
@@ -493,7 +517,7 @@ func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {
 			want[row] += routeWeights[expert] * hipHardwareGGUFQ5_1Dot(activationValues, expertDownRows[expert][row])
 		}
 	}
-	assertFloat32SlicesNear(t, want, got, 2e-3)
+	assertFloat32SlicesNear(t, want, gotExpanded, 2e-3)
 
 	q8DownRows := make([][][]byte, selectedExperts)
 	for expert := 0; expert < selectedExperts; expert++ {
@@ -509,15 +533,21 @@ func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {
 		entries[expert].Down = downBuffer
 		entries[expert].DownFormat = hipGGUFExpertFormatQ8_0
 	}
+	useGateUps(rawGateUps, hipGGUFExpertFormatQ4K)
 	gotQ8Baseline := runMixed("0", "0", "0")
 	gotQ8Pair16 := runMixed("1", "0", "0")
 	gotQ8 := runMixed("1", "0", "1")
+	useGateUps(expandedGateUps, hipGGUFExpertFormatQ4KExpanded)
+	gotQ8Expanded := runMixed("1", "0", "1")
 	for index := range gotQ8Baseline {
 		if math.Float32bits(gotQ8Baseline[index]) != math.Float32bits(gotQ8Pair16[index]) {
 			t.Fatalf("mixed Q8_0 pair16 output[%d] = %08x, baseline = %08x", index, math.Float32bits(gotQ8Pair16[index]), math.Float32bits(gotQ8Baseline[index]))
 		}
 		if math.Float32bits(gotQ8Baseline[index]) != math.Float32bits(gotQ8[index]) {
 			t.Fatalf("mixed Q8_0 gate/up split output[%d] = %08x, baseline = %08x", index, math.Float32bits(gotQ8[index]), math.Float32bits(gotQ8Baseline[index]))
+		}
+		if math.Float32bits(gotQ8Baseline[index]) != math.Float32bits(gotQ8Expanded[index]) {
+			t.Fatalf("expanded mixed Q4_K/Q8_0 output[%d] = %08x, raw baseline = %08x", index, math.Float32bits(gotQ8Expanded[index]), math.Float32bits(gotQ8Baseline[index]))
 		}
 	}
 	wantQ8 := make([]float32, hidden)
@@ -532,7 +562,7 @@ func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {
 			wantQ8[row] += routeWeights[expert] * hipHardwareGGUFQ8_0Dot(activationValues, q8DownRows[expert][row])
 		}
 	}
-	assertFloat32SlicesNear(t, wantQ8, gotQ8, 2e-3)
+	assertFloat32SlicesNear(t, wantQ8, gotQ8Expanded, 2e-3)
 }
 
 func TestHIPHardwareMoERouterParallel_Good(t *testing.T) {
@@ -611,6 +641,28 @@ func hipHardwareGGUFQ4KRow(scale, minimumScale float32, salt int) []byte {
 		}
 	}
 	return row
+}
+
+func hipHardwareExpandGGUFQ4KMetadata(t *testing.T, payload []byte) []byte {
+	t.Helper()
+	if len(payload) == 0 || len(payload)%hipGGUFQ4KBlockBytes != 0 {
+		t.Fatalf("Q4_K payload bytes = %d, want complete non-empty blocks", len(payload))
+	}
+	blockCount := len(payload) / hipGGUFQ4KBlockBytes
+	expanded := make([]byte, blockCount*hipGGUFQ4KExpandedBlockBytes)
+	for blockIndex := 0; blockIndex < blockCount; blockIndex++ {
+		rawBlock := payload[blockIndex*hipGGUFQ4KBlockBytes : (blockIndex+1)*hipGGUFQ4KBlockBytes]
+		expandedBlock := expanded[blockIndex*hipGGUFQ4KExpandedBlockBytes : (blockIndex+1)*hipGGUFQ4KExpandedBlockBytes]
+		binary.LittleEndian.PutUint32(expandedBlock[0:], math.Float32bits(hipFloat16ToFloat32(binary.LittleEndian.Uint16(rawBlock[0:]))))
+		binary.LittleEndian.PutUint32(expandedBlock[4:], math.Float32bits(hipFloat16ToFloat32(binary.LittleEndian.Uint16(rawBlock[2:]))))
+		for group := 0; group < hipGGUFQ4KGroupsPerBlock; group++ {
+			scale, minimum := hipGGUFQ4KScaleMin(rawBlock[4:16], group)
+			expandedBlock[8+group] = scale
+			expandedBlock[16+group] = minimum
+		}
+		copy(expandedBlock[24:], rawBlock[16:])
+	}
+	return expanded
 }
 
 func hipHardwareGGUFQ4KDot(input []float32, row []byte) float32 {
