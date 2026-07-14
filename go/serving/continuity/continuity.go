@@ -247,6 +247,17 @@ func (m *Manager) Chat(ctx context.Context, messages []inference.Message, opts .
 		return m.declineStat(), false
 	}
 	cfg := inference.ApplyGenerateOpts(opts)
+	if cfg.EnableThinking != nil {
+		// An explicit thinking override (chat_template_kwargs.enable_thinking or
+		// reasoning_effort) rides the stateless path, as the package contract
+		// promises: the woken-continuation framing this lane applies is only
+		// guaranteed byte-identical to the stateless handler for the model's
+		// DEFAULT thinking mode, so a request that overrides the mode declines
+		// rather than risk a lane-vs-stateless divergence. Without this the lane
+		// silently served every deterministic enable_thinking=false request,
+		// coupling it to serving history the stateless path never sees (#1841).
+		return m.declineStat(), false
+	}
 	// The thinking mode is a conversation-level property (the first system
 	// turn's <|think|> switch, retained in the woken prefix), so it is part
 	// of the conversation key: a mid-conversation flip misses the resident
