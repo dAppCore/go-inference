@@ -38,8 +38,16 @@
   snake_case where fetch camelCases the SAME spec.
 - FOLLOW-UP MATERIAL: the Anthropic route does not split thinking into
   content blocks (reasoning rides the text block; real Anthropic has
-  thinking blocks); csharp lane deferred (dotnet cask wants interactive
-  sudo — one brew command from joining).
+  thinking blocks). csharp JOINED after snider installed dotnet (c386aff
+  — first lane with response.Thought fully TYPED, proving the spec fix;
+  DOTNET_ROLL_FORWARD=LatestMajor needed on runtime-10-only machines).
+  typescript-angular JOINED on request for the next area (d297d5e):
+  injectable services + dev proxy, ng build + through-proxy receipts.
+  *** WEB-AREA INTEL: lem serve sends NO CORS HEADERS — browser apps on
+  another origin cannot call it; dev uses Angular's proxy, production
+  needs CORS middleware on the serve or same-origin hosting. *** Also:
+  generated Angular source must be ng-packagr-built (not raw-consumed),
+  TS 6 hard-errors on baseUrl, ngVersion caps at 21 but runs under 22.
 - Board task #398 closed with the full account.
 
 # PREVIOUS WAKE (2026-07-18 — three-lane batch merge landed: GPU CE 16x, 26B-gap verdict, q8 reuse restored; TUI grew Service tab + tool loop)
