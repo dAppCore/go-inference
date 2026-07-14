@@ -52,6 +52,15 @@ func loadedToQuant(m *model.LoadedModel, gs, bits int) (*QuantModel, error) {
 		ql.QNormW, ql.KNormW, ql.LayerScalarW = L.QNorm, L.KNorm, L.LayerScalar
 		ql.GroupSize, ql.Bits = gs, bits
 		ql.Q, ql.K, ql.V, ql.O = qw(L.Q), qw(L.K), qw(L.V), qw(L.O)
+		if L.Q != nil {
+			ql.BQ = L.Q.Bias // Qwen2/2.5 additive QKV bias — plain bf16 beside the packed weights
+		}
+		if L.K != nil {
+			ql.BK = L.K.Bias
+		}
+		if L.V != nil {
+			ql.BV = L.V.Bias
+		}
 		ql.PerLayerGate, ql.PerLayerProjection = qw(L.PerLayerGate), qw(L.PerLayerProjection)
 		ql.PostPerLayerInputNormW = L.PostPerLayerInputNorm
 		if L.MoE != nil {
@@ -163,6 +172,14 @@ func loadedToBF16(m *model.LoadedModel) *BF16Model {
 		}
 		return lin.Weight
 	}
+	// bb takes a dense Linear's ADDITIVE bias bytes (Qwen2/2.5 q/k/v bias; nil for the
+	// bias-free arches and for weights without an adjacent .bias tensor).
+	bb := func(lin *model.Linear) []byte {
+		if lin == nil {
+			return nil
+		}
+		return lin.Bias
+	}
 	g := &BF16Model{FinalNorm: m.FinalNorm, Embed: bw(m.Embed)}
 	if m.LMHead != nil {
 		g.LMHead = bw(m.LMHead)
@@ -183,6 +200,7 @@ func loadedToBF16(m *model.LoadedModel) *BF16Model {
 		l.QNormW, l.KNormW, l.LayerScalarW = L.QNorm, L.KNorm, L.LayerScalar
 		l.MLPNormW, l.PostFFNormW = L.MLPNorm, L.PostFFNorm
 		l.WQ, l.WK, l.WV, l.WO = bw(L.Q), bw(L.K), bw(L.V), bw(L.O)
+		l.BQ, l.BK, l.BV = bb(L.Q), bb(L.K), bb(L.V) // Qwen2/2.5 additive QKV bias (nil otherwise)
 		l.WGate, l.WUp, l.WDown = bw(L.Gate), bw(L.Up), bw(L.Down)
 		if L.Gate != nil { // per-layer MatFormer FFN width, read from the gate's output rows
 			l.DFF = L.Gate.OutDim

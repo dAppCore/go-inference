@@ -32,7 +32,12 @@ import (
 // dModel), wK/wV are (nKVHeads·headDim × dModel), wO is (dModel × nHeads·headDim),
 // wGate/wUp are (dFF × dModel), wDown is (dModel × dFF).
 type DecodeLayerWeights struct {
-	AttnNormW, WQ, WK, WV, WO   []byte
+	AttnNormW, WQ, WK, WV, WO []byte
+	// BQ/BK/BV are the ADDITIVE q/k/v projection biases (bf16, [outDim]) — Qwen2/2.5's
+	// distinguishing trait (bias=True on q_proj/k_proj/v_proj; o_proj and the MLP carry
+	// none, so there is no BO). nil for the bias-free arches (llama/gemma/mistral/qwen3).
+	// Added after the projection matvec, before QK-norm/RoPE (see bf16Projector.project).
+	BQ, BK, BV                  []byte
 	MLPNormW, WGate, WUp, WDown []byte
 	// MoE, when non-nil, replaces the dense MLP half with the gemma4 dual-branch MoE
 	// feed-forward (MoEBlockBF16) for this layer. The dense MLPNormW/WGate/WUp/WDown

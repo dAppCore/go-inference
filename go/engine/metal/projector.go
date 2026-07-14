@@ -17,6 +17,38 @@ import (
 // way: bf16Projector drives the bf16 gemv, qmvProjector drives the bf16-activation
 // 4-bit qmv. (This is also the projection seam pkg/model will extract.)
 
+// encProjBias adds the additive projection bias into out[outOff:outOff+outDim] (bf16),
+// after the projection matvec — Qwen2/2.5's q/k/v bias (bias=True on q_proj/k_proj/v_proj;
+// o_proj and the MLP carry none). A zero bufView (a bias-free projection) is a no-op, so
+// bias-free arches (llama/gemma/mistral/qwen3) pay only one nil check. outOff is a BYTE
+// offset matching the matvec's own write (K/V project straight into their seq-major cache
+// row), so the bias lands on exactly the elements the matvec just produced. The add reads
+// then writes out on the same encoder as the matvec, hazard-ordered like the project→RoPE
+// chain the caller already relies on.
+func encProjBias(enc metal.MTLComputeCommandEncoder, bias bufView, out metal.MTLBuffer, outOff uint, outDim int) error {
+	if bias.buf == nil {
+		return nil
+	}
+	return encAddBF16To(enc, out, bias.buf, out, outOff, bias.off, outOff, outDim)
+}
+
+// encProjBiasRows broadcasts the additive projection bias over rows contiguous [outDim] rows
+// at outOff — the batched prefill fold, one bf16 add per row (before RoPE). A zero bufView is
+// a no-op. Prefill-only, so the per-row loop is off the per-token decode hot path.
+func encProjBiasRows(enc metal.MTLComputeCommandEncoder, bias bufView, out metal.MTLBuffer, outOff uint, rows, outDim int) error {
+	if bias.buf == nil {
+		return nil
+	}
+	rowBytes := uint(outDim * bf16Size)
+	for r := 0; r < rows; r++ {
+		ro := outOff + uint(r)*rowBytes
+		if err := encAddBF16To(enc, out, bias.buf, out, ro, bias.off, ro, outDim); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type projIndex int
 
 const (
@@ -85,10 +117,25 @@ type projector interface {
 // (off 0) or a no-copy view into a shared shard mmap at its offset, transparently.
 type bf16Projector struct {
 	wQ, wK, wV, wO, wGate, wUp, wDown bufView
+	bQ, bK, bV                        bufView // Qwen2/2.5 additive q/k/v projection bias (zero bufView ⇒ none)
 	dModel, qDim, kvDim, dFF          int
 }
 
 func (b bf16Projector) hasV() bool { return b.wV.buf != nil }
+
+// biasView returns the additive projection bias for q/k/v (a zero bufView for every other
+// projection — o_proj and the MLP never carry one in the supported arches).
+func (b bf16Projector) biasView(p projIndex) bufView {
+	switch p {
+	case projQ:
+		return b.bQ
+	case projK:
+		return b.bK
+	case projV:
+		return b.bV
+	}
+	return bufView{}
+}
 
 // foldProfitable: bf16 decode is weight-bandwidth-bound — reading each weight
 // once for K lanes is the receipted 1.51× win.
@@ -128,7 +175,10 @@ func (b bf16Projector) projectRows(enc metal.MTLComputeCommandEncoder, in, out m
 	if w.buf == nil {
 		return false, nil
 	}
-	return true, encGemvBF16BatchedAt(enc, w.buf, in, out, w.off, inOff, outOff, outDim, inDim, rows)
+	if err := encGemvBF16BatchedAt(enc, w.buf, in, out, w.off, inOff, outOff, outDim, inDim, rows); err != nil {
+		return true, err
+	}
+	return true, encProjBiasRows(enc, b.biasView(p), out, outOff, rows, outDim)
 }
 
 func (b bf16Projector) rowsCapable() bool { return true } // batched gemv covers every dim
@@ -138,23 +188,14 @@ func (b bf16Projector) rowsCapable() bool { return true } // batched gemv covers
 func (b bf16Projector) rowsByteTier(int) bool { return true }
 
 func (b bf16Projector) project(enc metal.MTLComputeCommandEncoder, vec, out metal.MTLBuffer, outOff uint, p projIndex) error {
-	switch p {
-	case projQ:
-		return encGemvBF16To(enc, b.wQ.buf, vec, out, b.wQ.off, outOff, b.qDim, b.dModel)
-	case projK:
-		return encGemvBF16To(enc, b.wK.buf, vec, out, b.wK.off, outOff, b.kvDim, b.dModel)
-	case projV:
-		return encGemvBF16To(enc, b.wV.buf, vec, out, b.wV.off, outOff, b.kvDim, b.dModel)
-	case projO:
-		return encGemvBF16To(enc, b.wO.buf, vec, out, b.wO.off, outOff, b.dModel, b.qDim)
-	case projGate:
-		return encGemvBF16To(enc, b.wGate.buf, vec, out, b.wGate.off, outOff, b.dFF, b.dModel)
-	case projUp:
-		return encGemvBF16To(enc, b.wUp.buf, vec, out, b.wUp.off, outOff, b.dFF, b.dModel)
-	case projDown:
-		return encGemvBF16To(enc, b.wDown.buf, vec, out, b.wDown.off, outOff, b.dModel, b.dFF)
+	w, outDim, inDim, ok := b.weightDims(p)
+	if !ok {
+		return core.NewError("native: bad projIndex")
 	}
-	return core.NewError("native: bad projIndex")
+	if err := encGemvBF16To(enc, w.buf, vec, out, w.off, outOff, outDim, inDim); err != nil {
+		return err
+	}
+	return encProjBias(enc, b.biasView(p), out, outOff, outDim)
 }
 
 // qmvWeight is one affine-quantised projection weight: packed codes + bf16 scales + bf16
@@ -174,11 +215,26 @@ func (w qmvWeight) dense() bool { return w.present() && w.scales.buf == nil && w
 // qmvProjector drives a bf16-activation 4-bit qmv per projection.
 type qmvProjector struct {
 	q, k, v, o, gate, up, down qmvWeight
+	bQ, bK, bV                 bufView // Qwen2/2.5 additive q/k/v bias (plain bf16; zero bufView ⇒ none)
 	dModel, qDim, kvDim, dFF   int
 	groupSize, bits            int
 }
 
 func (m qmvProjector) hasV() bool { return m.v.present() }
+
+// biasView returns the additive projection bias for q/k/v (a zero bufView otherwise) — the
+// same q/k/v-only bias as the bf16 path; the affine pack still ships it as a plain bf16 vector.
+func (m qmvProjector) biasView(p projIndex) bufView {
+	switch p {
+	case projQ:
+		return m.bQ
+	case projK:
+		return m.bK
+	case projV:
+		return m.bV
+	}
+	return bufView{}
+}
 
 func (m qmvProjector) weightDims(p projIndex) (qmvWeight, int, int, bool) {
 	switch p {
@@ -209,7 +265,10 @@ func (m qmvProjector) projectRows(enc metal.MTLComputeCommandEncoder, in, out me
 		return false, nil
 	}
 	if w.dense() { // mixed packs carry the odd bf16 weight: batch it as a plain gemv
-		return true, encGemvBF16BatchedAt(enc, w.wq.buf, in, out, w.wq.off, inOff, outOff, outDim, inDim, rows)
+		if err := encGemvBF16BatchedAt(enc, w.wq.buf, in, out, w.wq.off, inOff, outOff, outDim, inDim, rows); err != nil {
+			return true, err
+		}
+		return true, encProjBiasRows(enc, m.biasView(p), out, outOff, rows, outDim)
 	}
 	gs, bits := m.groupSize, m.bits
 	if w.bits > 0 {
@@ -222,7 +281,10 @@ func (m qmvProjector) projectRows(enc metal.MTLComputeCommandEncoder, in, out me
 	// reads the weight once too, but at small-M GEMM occupancy — ~5× off the
 	// qmv floor on dense 12B/31B verifies).
 	if handled, err := encQMVRowsBF16At(enc, w.wq.buf, w.scales.buf, w.biases.buf, in, out, w.wq.off, w.scales.off, w.biases.off, inOff, outOff, rows, outDim, inDim, gs, bits); handled || err != nil {
-		return handled, err
+		if err != nil {
+			return handled, err
+		}
+		return true, encProjBiasRows(enc, m.biasView(p), out, outOff, rows, outDim)
 	}
 	// MLX's qmm_t needs K%group_size==0 (whole groups per row); anything else keeps per-row.
 	if inDim <= 0 || gs <= 0 || inDim%gs != 0 {
@@ -231,7 +293,10 @@ func (m qmvProjector) projectRows(enc metal.MTLComputeCommandEncoder, in, out me
 	if _, perr := pipelineFor(qmmTKernelName(outDim, gs, bits)); perr != nil {
 		return false, nil // older metallib without this gs/bits variant — per-row fallback
 	}
-	return true, encQMMTBF16At(enc, w.wq.buf, w.scales.buf, w.biases.buf, in, out, w.wq.off, w.scales.off, w.biases.off, inOff, outOff, rows, outDim, inDim, gs, bits)
+	if err := encQMMTBF16At(enc, w.wq.buf, w.scales.buf, w.biases.buf, in, out, w.wq.off, w.scales.off, w.biases.off, inOff, outOff, rows, outDim, inDim, gs, bits); err != nil {
+		return true, err
+	}
+	return true, encProjBiasRows(enc, m.biasView(p), out, outOff, rows, outDim)
 }
 
 func (m qmvProjector) rowsCapable() bool {
@@ -338,13 +403,20 @@ func (m qmvProjector) projectRowsByteTier(enc metal.MTLComputeCommandEncoder, in
 		return false, nil
 	}
 	if w.dense() {
-		return true, encGemvBF16BatchedAt(enc, w.wq.buf, in, out, w.wq.off, inOff, outOff, outDim, inDim, rows)
+		if err := encGemvBF16BatchedAt(enc, w.wq.buf, in, out, w.wq.off, inOff, outOff, outDim, inDim, rows); err != nil {
+			return true, err
+		}
+		return true, encProjBiasRows(enc, m.biasView(p), out, outOff, rows, outDim)
 	}
 	gs, bits := m.groupSize, m.bits
 	if w.bits > 0 {
 		gs, bits = w.gs, w.bits
 	}
-	return encQMVRowsBF16ChunkedAt(enc, w.wq.buf, w.scales.buf, w.biases.buf, in, out, w.wq.off, w.scales.off, w.biases.off, inOff, outOff, rows, outDim, inDim, gs, bits)
+	handled, err := encQMVRowsBF16ChunkedAt(enc, w.wq.buf, w.scales.buf, w.biases.buf, in, out, w.wq.off, w.scales.off, w.biases.off, inOff, outOff, rows, outDim, inDim, gs, bits)
+	if !handled || err != nil {
+		return handled, err
+	}
+	return true, encProjBiasRows(enc, m.biasView(p), out, outOff, rows, outDim)
 }
 
 func (m qmvProjector) project(enc metal.MTLComputeCommandEncoder, vec, out metal.MTLBuffer, outOff uint, p projIndex) error {
@@ -369,11 +441,17 @@ func (m qmvProjector) project(enc metal.MTLComputeCommandEncoder, vec, out metal
 		return core.NewError("native: bad projIndex")
 	}
 	if w.dense() {
-		return encGemvBF16To(enc, w.wq.buf, vec, out, w.wq.off, outOff, outDim, inDim)
+		if err := encGemvBF16To(enc, w.wq.buf, vec, out, w.wq.off, outOff, outDim, inDim); err != nil {
+			return err
+		}
+		return encProjBias(enc, m.biasView(p), out, outOff, outDim)
 	}
 	gs, bits := m.groupSize, m.bits // per-weight geometry (mixed-precision packs); fall back to the layer default
 	if w.bits > 0 {
 		gs, bits = w.gs, w.bits
 	}
-	return encQMVBF16(enc, w.wq.buf, w.scales.buf, w.biases.buf, vec, out, w.wq.off, w.scales.off, w.biases.off, outOff, outDim, inDim, gs, bits)
+	if err := encQMVBF16(enc, w.wq.buf, w.scales.buf, w.biases.buf, vec, out, w.wq.off, w.scales.off, w.biases.off, outOff, outDim, inDim, gs, bits); err != nil {
+		return err
+	}
+	return encProjBias(enc, m.biasView(p), out, outOff, outDim)
 }

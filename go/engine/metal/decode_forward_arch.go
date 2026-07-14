@@ -2103,6 +2103,7 @@ func buildBF16ArchLayerBufsInternal(lb []archLayerBufs, moeWeights []*MoELayerWe
 		}
 		p := bf16Projector{
 			wQ: view(w.WQ), wK: wK, wV: wV, wO: view(w.WO),
+			bQ: normView(w.BQ), bK: normView(w.BK), bV: normView(w.BV), // Qwen2/2.5 QKV bias (zero bufView otherwise)
 			dModel: dModel, qDim: qDim, kvDim: kvDim, dFF: lFF,
 		}
 		if layers[li].MoE == nil {

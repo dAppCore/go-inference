@@ -31,7 +31,12 @@ type QuantWeight struct {
 type QuantizedLayerWeights struct {
 	AttnNormW, MLPNormW        []byte
 	Q, K, V, O, Gate, Up, Down QuantWeight
-	GroupSize, Bits            int
+	// BQ/BK/BV are the ADDITIVE q/k/v projection biases (bf16, [outDim]) — the affine
+	// packs still carry Qwen2/2.5's bias=True q/k/v biases as plain (unquantised) bf16
+	// vectors beside the packed weights. Added after the qmv, before QK-norm/RoPE (see
+	// qmvProjector.project). nil for bias-free arches; o_proj/MLP carry none (no BO).
+	BQ, BK, BV      []byte
+	GroupSize, Bits int
 	// DFF is this layer's FFN width — gemma4 E2B/E4B (MatFormer) vary it per layer, so the decode
 	// can't assume a single arch.FF. 0 ⇒ use the arch default (uniform models).
 	DFF int
