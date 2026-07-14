@@ -107,6 +107,15 @@ func EnableWithManager(model inference.TextModel, store state.Store) (*Manager, 
 	return enable(model, store, false)
 }
 
+// EnableSharingWithManager is EnableSharing returning the manager — the sharing
+// sibling of EnableWithManager, so the cross-conversation share-graft path is
+// stats-introspectable (SharedGrafts) in receipts and diagnostics. Sharing still
+// falls back to a fresh prefill byte-identically whenever a share is missing,
+// stale, or the model exposes no tokeniser.
+func EnableSharingWithManager(model inference.TextModel, store state.Store) (*Manager, error) {
+	return enable(model, store, true)
+}
+
 func enable(model inference.TextModel, store state.Store, sharePrefix bool) (*Manager, error) {
 	if model == nil {
 		return nil, core.E("continuity.Enable", "model is nil", nil)
@@ -269,14 +278,34 @@ func (m *Manager) Chat(ctx context.Context, messages []inference.Message, opts .
 	}
 	cfg := inference.ApplyGenerateOpts(opts)
 	if cfg.EnableThinking != nil {
-		// An explicit thinking override (chat_template_kwargs.enable_thinking or
-		// reasoning_effort) rides the stateless path, as the package contract
-		// promises: the woken-continuation framing this lane applies is only
-		// guaranteed byte-identical to the stateless handler for the model's
-		// DEFAULT thinking mode, so a request that overrides the mode declines
-		// rather than risk a lane-vs-stateless divergence. Without this the lane
-		// silently served every deterministic enable_thinking=false request,
-		// coupling it to serving history the stateless path never sees (#1841).
+		// DECLINED CLASS — thinking override (chat_template_kwargs.enable_thinking
+		// or reasoning_effort). This stays declined; the reason is NOT the typed
+		// thinking work made stale. Fresh framing IS now byte-identical for any
+		// flag — FormatChatPromptWithThinking(messages, flag) renders exactly the
+		// stateless renderChatTemplate(..., flag) — so the lane COULD frame a fresh
+		// override correctly. The gate is load-bearing anyway:
+		//   1. A fresh override wakes nothing, so serving it here costs the same
+		//      full prefill as the stateless path — zero latency to win.
+		//   2. Accepting it is not free: finishTurn always sleeps the turn, makes
+		//      it RAM-resident, and (under -state-share-prefix) publishes its
+		//      framed prefix. A LATER continuation that wakes that state reframes
+		//      via FormatChatContinuationWithThinking, but the woken KV prefix has
+		//      the conversation's ORIGINAL mode baked in; a stateless whole-reframe
+		//      under a different override writes a system turn with/without the
+		//      thinking prelude the baked prefix can never match — the exact
+		//      lane-vs-stateless divergence #1841 fixed. A cross-conversation
+		//      share-graft has the same hazard: it would adopt a default-framed
+		//      prefix under an override that wanted a different mode.
+		// ROOT CAUSE: conversationKey hashes the RAW override bool (enableThinking
+		// != nil && *enableThinking), not the RESOLVED framing mode — so a nil
+		// request that a default-on model frames thinking-ON keys as false and
+		// COLLIDES with an override=false request that frames thinking-OFF, waking
+		// a mismatched prefix. The scoped lift is to key on the resolved mode
+		// (t.ResolveThinking) so an override only ever wakes a same-mode prefix;
+		// that needs the template's default-mode seam this lane does not hold, so
+		// it is flagged, not attempted here. Until then overrides ride the
+		// stateless path, which reframes the whole prompt per request and cannot
+		// drift.
 		return m.declineStat(), false
 	}
 	// The thinking mode is a conversation-level property (the first system
@@ -390,6 +419,25 @@ func (m *Manager) acquire(ctx context.Context, messages []inference.Message, ena
 	thinking := enableThinking != nil && *enableThinking
 	split := conversationTurnSplit(messages)
 	if split == len(messages) {
+		// DECLINED CLASS — one-shot / no conversation shape: the request has no
+		// trailing user/tool turn (it ends on an assistant or system message: an
+		// assistant-prefill, or a headerless completion). This stays declined.
+		// The lane opens a fresh conversation by FRAMING a new model turn
+		// (FormatChatPromptWithThinking appends the assistant header), which makes
+		// the model START a fresh assistant turn — not CONTINUE the trailing
+		// partial one the caller sent. The stateless path renders that
+		// continuation correctly, so declining preserves byte-identity rather than
+		// silently answering a different prompt shape.
+		//
+		// The REPEATED one-shot the agent loop actually emits — a shared system
+		// prompt with a fresh trailing USER turn — is split==0, not this branch,
+		// and IS served: a fresh turn read-side-grafts the shared system prefix
+		// via -state-share-prefix (see tryShareGraft / TestManagerChat_ShareGraft_Good),
+		// so that win already lands on existing machinery. Its own turn-1 sleep is
+		// inherent — a turn-1 is indistinguishable from a never-continued one-shot,
+		// so it must be slept in case the conversation continues; the orphaned
+		// bundles a pure one-shot stream leaves are a store-GC concern, not a
+		// prefill-latency gap.
 		return nil, 0, core.E("continuity", "request has no trailing user turn", nil)
 	}
 
@@ -398,6 +446,20 @@ func (m *Manager) acquire(ctx context.Context, messages []inference.Message, ena
 		m.mu.Lock()
 		if conv := m.resident[key]; conv != nil {
 			if conv.busy {
+				// DECLINED CLASS — mid-turn: a second request for a conversation
+				// whose session is CURRENTLY generating. This is a DEFENSIVE
+				// concurrency guard, not a caching gap, and under the current
+				// acquire discipline it is unreachable: the take below sets
+				// busy AND deletes conv from the resident map inside one held
+				// mu, so a concurrent same-conversation request observes
+				// resident[key]==nil and routes to the store-wake / share-graft /
+				// fresh tiers instead — its prior turn's slept state is woken,
+				// never re-prefilled (TestManagerChat_MidTurnConcurrent_StoreWakes).
+				// The branch trips only if a future change ever leaves a busy
+				// conv in the map; declining then is correct — two turns must
+				// never share one in-flight SessionHandle. So a re-prefill here
+				// is the safe fallback for a state the live discipline never
+				// produces, not the common concurrent path (which already wakes).
 				m.mu.Unlock()
 				return nil, 0, core.E("continuity", "conversation is mid-turn", nil)
 			}

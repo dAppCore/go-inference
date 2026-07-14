@@ -195,6 +195,50 @@ func TestTieredKVReceipts(t *testing.T) {
 	t.Logf("%-22s TTFT     =%-8s                    TOTAL     =%-8s", "resident (warm)",
 		rTTFT.Round(time.Millisecond), rTotal.Round(time.Millisecond))
 
+	// --- Share-graft lane (repeated one-shot / agent-loop) ---
+	// The one-shot class's win vector is NOT a per-conversation store-wake — a
+	// one-shot's exact prompt rarely returns — but a cross-conversation SHARE of
+	// the system prefix: a second one-shot opening with the same long system
+	// prompt and a fresh user tail grafts that prefix's KV (-state-share-prefix)
+	// instead of re-prefilling it. This measures that graft's TTFT against a cold
+	// re-prefill of the same second prompt, isolating the system-prefix saving.
+	// The real gemma checkpoint exposes the tokeniser the graft key needs.
+	userB := inference.Message{Role: "user", Content: "In one word, which animal is lazy?"}
+	shareGTTFT := func() (graft, cold time.Duration, grafts int) {
+		// Cold baseline: B on a sharing manager whose index is empty -> fresh full
+		// prefill of [system, userB], system prefix and all.
+		coldMgr, err := continuity.EnableSharingWithManager(model, state.NewInMemoryStore(nil))
+		if err != nil {
+			t.Fatalf("EnableSharingWithManager (cold): %v", err)
+		}
+		cold, _, _, ok := turn(coldMgr, []inference.Message{system, userB})
+		if !ok {
+			t.Fatal("cold one-shot B declined")
+		}
+		// Graft: A publishes the shared system prefix, then B grafts it.
+		shareMgr, err := continuity.EnableSharingWithManager(model, state.NewInMemoryStore(nil))
+		if err != nil {
+			t.Fatalf("EnableSharingWithManager (graft): %v", err)
+		}
+		if _, _, _, ok := turn(shareMgr, []inference.Message{system, user1}); !ok {
+			t.Fatal("share-seed A declined — a fresh [system,user] one-shot must be served")
+		}
+		graft, _, _, ok = turn(shareMgr, []inference.Message{system, userB})
+		if !ok {
+			t.Fatal("share-graft B declined")
+		}
+		return graft, cold, shareMgr.Stats().SharedGrafts
+	}
+	graftTTFT, coldTTFT, grafts := shareGTTFT()
+	if grafts != 1 {
+		// A short system prompt whose shared span aligns below one KV block cannot
+		// graft; report rather than fail — the harness is a measure, not a gate.
+		t.Logf("share-graft did not fire (SharedGrafts=%d): shared span below one KV block after alignment", grafts)
+	}
+	t.Logf("%-22s TTFT graft=%-8s cold=%-8s (saved ~%s, SharedGrafts=%d)", "share-graft (one-shot)",
+		graftTTFT.Round(time.Millisecond), coldTTFT.Round(time.Millisecond),
+		(coldTTFT - graftTTFT).Round(time.Millisecond), grafts)
+
 	// --- Decomposition receipt ---
 	t.Logf("")
 	t.Logf("=== TIERED-KV RECEIPT (gemma-4-e2b-it-4bit, ctx 4096, %d reps) ===", reps)
@@ -207,4 +251,7 @@ func TestTieredKVReceipts(t *testing.T) {
 	t.Logf("sleep-write+decode tail: file=%s ram=%s  (store tax ~%s)",
 		fileTail.Round(time.Millisecond), ramTail.Round(time.Millisecond), (fileTail - ramTail).Round(time.Millisecond))
 	t.Logf("total-turn tax (file-RAM):        %s", (wakeFile.minTotal - wakeRAM.minTotal).Round(time.Millisecond))
+	t.Logf("one-shot system-prefix share (TTFT): cold=%s -> graft=%s  (saved ~%s)",
+		coldTTFT.Round(time.Millisecond), graftTTFT.Round(time.Millisecond),
+		(coldTTFT - graftTTFT).Round(time.Millisecond))
 }

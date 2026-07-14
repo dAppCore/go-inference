@@ -409,6 +409,98 @@ func TestSpineModelInfo(t *testing.T) {
 	}
 }
 
+// TestManagerChat_MidTurnConcurrent_StoreWakes is the mid-turn receipt: while a
+// conversation's turn is IN FLIGHT (acquired busy and removed from the resident
+// map), a concurrent request for the SAME conversation does NOT hit the
+// "conversation is mid-turn" decline — it observes an empty resident slot and
+// wakes the prior turn's slept state from the store instead. This is the win the
+// mid-turn class was assumed to miss: the reachable concurrent path re-uses KV,
+// it does not re-prefill. GOOD case for the documented busy-guard reasoning.
+func TestManagerChat_MidTurnConcurrent_StoreWakes(t *testing.T) {
+	ctx := context.Background()
+	store := state.NewInMemoryStore(nil)
+	// A capturing handle so turn 1's sleep is durable and a later wake can restore.
+	handle := &graftHandle{kvSnap: synthSnapshot(6), genTokens: []inference.Token{{Text: "ok"}}}
+	m := shareManager(store, handle, nil, false)
+
+	// Turn 1: a fresh [system,user] turn, served and slept to the store, then left
+	// RAM-resident under the conversation key turn 2 looks up.
+	turn1 := []inference.Message{{Role: "system", Content: "S"}, {Role: "user", Content: "U1"}}
+	streamed, ok := m.Chat(ctx, turn1, inference.WithMaxTokens(4))
+	if !ok {
+		t.Fatal("seed turn declined — a fresh [system,user] turn must be served")
+	}
+	drain(streamed)
+	if s := m.Stats(); s.FreshConversations != 1 || s.Sleeps != 1 {
+		t.Fatalf("seed stats = %+v, want one FreshConversation and one Sleep", s)
+	}
+
+	turn2 := []inference.Message{
+		{Role: "system", Content: "S"},
+		{Role: "user", Content: "U1"},
+		{Role: "assistant", Content: "ok"},
+		{Role: "user", Content: "U2"},
+	}
+
+	// Put turn 2 IN FLIGHT: acquire takes the resident conversation (busy=true) and
+	// removes it from the map — exactly the state a concurrent second request races.
+	inflight, split, err := m.acquire(ctx, turn2, nil)
+	if err != nil {
+		t.Fatalf("in-flight acquire errored: %v", err)
+	}
+	if !inflight.busy || split != 3 {
+		t.Fatalf("in-flight acquire = (busy=%v, split=%d), want a busy take at split 3", inflight.busy, split)
+	}
+	if _, held := m.resident[conversationKey(turn2[:3], false)]; held {
+		t.Fatal("a taken conversation must be removed from the resident map for the turn's duration")
+	}
+
+	// The concurrent second request for the SAME conversation now acquires: it must
+	// STORE-WAKE the slept state, never trip the mid-turn decline.
+	woken, split2, err := m.acquire(ctx, turn2, nil)
+	if err != nil {
+		t.Fatalf("concurrent acquire declined with %q; a same-conversation race must store-wake, not hit the busy guard", err)
+	}
+	if woken == inflight {
+		t.Fatal("the concurrent request must get its OWN woken session, not the in-flight one")
+	}
+	if split2 != 3 {
+		t.Fatalf("concurrent acquire split = %d, want 3 (the new user turn)", split2)
+	}
+	if s := m.Stats(); s.StoreWakes != 1 || s.StatelessFallbacks != 0 {
+		t.Fatalf("concurrent acquire stats = %+v, want one StoreWake and zero StatelessFallbacks", s)
+	}
+	inflight.close()
+	woken.close()
+}
+
+// TestManagerAcquire_BusyGuardDefensive is the UGLY case: the only way to reach
+// the "conversation is mid-turn" decline is to hand-place a busy conversation IN
+// the resident map — a state the live acquire/finishTurn discipline never
+// produces (a take sets busy AND deletes under one lock; finishTurn clears busy
+// before re-adding). When tripped, the guard declines rather than hand two turns
+// one in-flight SessionHandle. This pins that the branch is a defensive backstop,
+// not the concurrent path (which TestManagerChat_MidTurnConcurrent_StoreWakes wakes).
+func TestManagerAcquire_BusyGuardDefensive(t *testing.T) {
+	m := &Manager{resident: map[string]*residentConversation{}}
+	turn := []inference.Message{
+		{Role: "user", Content: "U1"},
+		{Role: "assistant", Content: "A1"},
+		{Role: "user", Content: "U2"},
+	}
+	key := conversationKey(turn[:2], false)
+	m.resident[key] = &residentConversation{busy: true} // the state the live flow never leaves behind
+
+	conv, _, err := m.acquire(context.Background(), turn, nil)
+	if err == nil {
+		t.Fatal("a busy conversation in the map must decline, never hand back an in-flight session")
+	}
+	if conv != nil {
+		t.Fatal("a declined acquire must return a nil conversation")
+	}
+	core.AssertContains(t, err.Error(), "conversation is mid-turn")
+}
+
 // TestManagerChat_MetricsSink_Good pins the request-scoped usage delivery on
 // a continuity-served turn: the woken-session path bypasses the engine's own
 // sink point, so the manager delivers this turn's counts to
