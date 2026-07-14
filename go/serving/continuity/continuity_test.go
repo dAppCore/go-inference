@@ -201,12 +201,85 @@ func TestManagerChatDeclines(t *testing.T) {
 	if _, ok := m.Chat(t.Context(), media); ok {
 		t.Fatal("media turns must decline to the stateless multimodal lane")
 	}
+	// An explicit thinking override (either polarity) rides the stateless path —
+	// the lane only guarantees byte-identity for the model's default thinking
+	// mode (#1841).
+	thinkOff, thinkOn := false, true
+	for _, et := range []*bool{&thinkOff, &thinkOn} {
+		if _, ok := m.Chat(t.Context(), []inference.Message{{Role: "user", Content: "hi"}}, inference.WithEnableThinking(et)); ok {
+			t.Fatalf("explicit thinking override (=%v) must decline to the stateless path", *et)
+		}
+	}
 	noTail := []inference.Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "hey"}}
 	if _, ok := m.Chat(t.Context(), noTail); ok {
 		t.Fatal("no trailing user turn must decline")
 	}
-	if got := m.Stats().StatelessFallbacks; got != 2 {
-		t.Fatalf("StatelessFallbacks = %d, want 2 (media, no-tail; the empty request short-circuits uncounted)", got)
+	if got := m.Stats().StatelessFallbacks; got != 4 {
+		t.Fatalf("StatelessFallbacks = %d, want 4 (media, two thinking overrides, no-tail; the empty request short-circuits uncounted)", got)
+	}
+}
+
+// TestManagerChat_ThinkingOverride_IsolatesFromHistory is the RECEIPT 2 guard
+// (#1841): a request that is a genuine continuation of a resident conversation
+// but carries an explicit thinking override must NOT wake that conversation's
+// state — it declines to the stateless path, so its answer cannot depend on
+// serving history. Before the decline landed, the override continuation woke the
+// resident prefix (a ResidentTurn), coupling the two conversations.
+func TestManagerChat_ThinkingOverride_IsolatesFromHistory(t *testing.T) {
+	ctx := context.Background()
+	store := state.NewInMemoryStore(nil)
+	h := &graftHandle{kvSnap: synthSnapshot(8), genTokens: []inference.Token{{Text: "ok"}}}
+	m := shareManager(store, h, nil, false)
+
+	// Turn 1 (no override) establishes a resident conversation whose
+	// [user, assistant] prefix a continuation would wake.
+	streamed, ok := m.Chat(ctx, []inference.Message{{Role: "user", Content: "A"}}, inference.WithMaxTokens(4))
+	if !ok {
+		t.Fatal("a fresh no-override turn must be served")
+	}
+	drain(streamed)
+	if s := m.Stats(); s.FreshConversations != 1 {
+		t.Fatalf("turn 1 stats = %+v, want one fresh conversation", s)
+	}
+
+	// Turn 2 shares turn 1's prefix (its reply was "ok") but overrides thinking.
+	off := false
+	continuation := []inference.Message{
+		{Role: "user", Content: "A"},
+		{Role: "assistant", Content: "ok"},
+		{Role: "user", Content: "B"},
+	}
+	if _, ok := m.Chat(ctx, continuation, inference.WithMaxTokens(4), inference.WithEnableThinking(&off)); ok {
+		t.Fatal("an override continuation must decline, not wake the resident conversation")
+	}
+	if s := m.Stats(); s.ResidentTurns != 0 || s.StoreWakes != 0 {
+		t.Fatalf("override continuation coupled to history: stats = %+v, want no ResidentTurns/StoreWakes", s)
+	}
+}
+
+// TestManagerChat_ThinkingOverride_RepeatDeclines is the RECEIPT 3 guard
+// (#1841): a byte-identical deterministic request carrying an explicit thinking
+// override is answered fresh every time — the lane declines it to the stateless
+// path on each repeat rather than continuing an earlier identical turn. Before
+// the decline landed, the lane served every such request itself.
+func TestManagerChat_ThinkingOverride_RepeatDeclines(t *testing.T) {
+	ctx := context.Background()
+	store := state.NewInMemoryStore(nil)
+	h := &graftHandle{kvSnap: synthSnapshot(8), genTokens: []inference.Token{{Text: "ok"}}}
+	m := shareManager(store, h, nil, false)
+
+	req := []inference.Message{{Role: "user", Content: "Write the integers from 1 to 800"}}
+	off := false
+	for i := 0; i < 2; i++ {
+		if _, ok := m.Chat(ctx, req, inference.WithMaxTokens(48), inference.WithEnableThinking(&off)); ok {
+			t.Fatalf("repeat %d: a deterministic override request must decline to stateless, not be served by the lane", i)
+		}
+	}
+	if s := m.Stats(); s.StatelessFallbacks != 2 || s.FreshConversations != 0 || s.ResidentTurns != 0 {
+		t.Fatalf("stats = %+v, want two stateless fallbacks and no lane turns", s)
+	}
+	if h.prefillCalls != 0 || h.appendCalls != 0 {
+		t.Fatalf("the lane touched its session for a declined request: prefill=%d append=%d", h.prefillCalls, h.appendCalls)
 	}
 }
 

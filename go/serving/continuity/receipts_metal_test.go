@@ -57,11 +57,13 @@ func TestTieredKVReceipts(t *testing.T) {
 	system := inference.Message{Role: "system", Content: "You are a concise assistant. Reference material follows.\n" + filler}
 	user1 := inference.Message{Role: "user", Content: "In one word, which animal jumps?"}
 
-	noThink := false
+	// No explicit thinking override: the continuity lane declines any request
+	// that overrides the model's default thinking mode (#1841), so this harness
+	// measures the lane's wake/prefill paths on the model's default framing. The
+	// tiered-KV wall it reports is independent of the thinking mode.
 	opts := []inference.GenerateOption{
 		inference.WithMaxTokens(8),
 		inference.WithTemperature(0),
-		inference.WithEnableThinking(&noThink),
 	}
 
 	// turn measures one continuity turn end to end: the wall from Chat() (which
