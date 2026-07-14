@@ -739,3 +739,93 @@ func TestSession_SessionHandle_Err_Ugly(t *testing.T) {
 		t.Fatal("want Err() to still reflect the pre-Close failure — a clean Close does not clear it")
 	}
 }
+
+// blockRestoreFakeSession records the neutral streamed-block restore the
+// durable wake path drives through the handle.
+type blockRestoreFakeSession struct {
+	fakeSession
+	restoreSource kv.BlockSource
+	restoreCalls  int
+	blockErr      error
+}
+
+func (s *blockRestoreFakeSession) RestoreKVBlockSource(_ context.Context, source kv.BlockSource) error {
+	s.restoreCalls++
+	s.restoreSource = source
+	if s.blockErr != nil {
+		return s.blockErr
+	}
+	// Drain the loader the way the engine does, so the handle's token
+	// collector sees every block; a real restore leaves the session position
+	// at the woken prefix.
+	for i := 0; i < source.BlockCount; i++ {
+		if _, err := source.Load(context.Background(), i); err != nil {
+			return err
+		}
+	}
+	s.pos = source.PrefixTokens
+	if s.pos <= 0 {
+		s.pos = source.TokenCount
+	}
+	return nil
+}
+
+// The state-layer wake probes this exact shape on the handle (model/state/
+// session nativeSessionKVBlockRestorer); losing it demotes every durable wake
+// to the assembled-snapshot fallback, which cannot carry raw-q8 blocks.
+var _ interface {
+	RestoreKVBlocks(context.Context, kv.BlockSource) error
+} = (*SessionHandle)(nil)
+
+func TestSession_SessionHandle_RestoreKVBlocks_Good(t *testing.T) {
+	sess := &blockRestoreFakeSession{}
+	handle := NewSessionHandle(newTestModel(t, &fakeTokenModel{}), sess)
+	source := kv.BlockSource{
+		TokenCount:   4,
+		PrefixTokens: 4,
+		BlockCount:   2,
+		Load: func(_ context.Context, index int) (kv.Block, error) {
+			snap := &kv.Snapshot{Tokens: []int32{int32(index*2 + 1), int32(index*2 + 2)}}
+			return kv.Block{Index: index, TokenStart: index * 2, TokenCount: 2, Snapshot: snap}, nil
+		},
+	}
+	if err := handle.RestoreKVBlocks(context.Background(), source); err != nil {
+		t.Fatalf("RestoreKVBlocks: %v", err)
+	}
+	if sess.restoreCalls != 1 {
+		t.Fatalf("engine restorer calls = %d, want 1", sess.restoreCalls)
+	}
+	if got := handle.Pos(); got != 4 {
+		t.Fatalf("Pos() = %d, want 4 (the woken prefix)", got)
+	}
+}
+
+func TestSession_SessionHandle_RestoreKVBlocks_Bad(t *testing.T) {
+	// An engine session without the capability refuses rather than faking a
+	// restore — the caller then takes the assembled-snapshot fallback.
+	handle := NewSessionHandle(newTestModel(t, &fakeTokenModel{}), &fakeSession{})
+	err := handle.RestoreKVBlocks(context.Background(), kv.BlockSource{
+		TokenCount: 1, PrefixTokens: 1, BlockCount: 1,
+		Load: func(context.Context, int) (kv.Block, error) { return kv.Block{}, nil },
+	})
+	if err == nil {
+		t.Fatal("RestoreKVBlocks on a non-streaming session = nil error, want refusal")
+	}
+}
+
+func TestSession_SessionHandle_RestoreKVBlocks_Ugly(t *testing.T) {
+	// Nil loader refuses before touching the engine; an engine error surfaces
+	// and parks the handle error.
+	sess := &blockRestoreFakeSession{blockErr: core.NewError("boom")}
+	handle := NewSessionHandle(newTestModel(t, &fakeTokenModel{}), sess)
+	if err := handle.RestoreKVBlocks(context.Background(), kv.BlockSource{}); err == nil {
+		t.Fatal("nil loader accepted")
+	}
+	err := handle.RestoreKVBlocks(context.Background(), kv.BlockSource{
+		TokenCount: 1, PrefixTokens: 1, BlockCount: 1,
+		Load: func(context.Context, int) (kv.Block, error) { return kv.Block{}, nil },
+	})
+	if err == nil || !core.Contains(err.Error(), "boom") {
+		t.Fatalf("engine error not surfaced: %v", err)
+	}
+}

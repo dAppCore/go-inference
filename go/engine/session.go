@@ -392,6 +392,67 @@ func (s *SessionHandle) RestoreFromKV(ctx context.Context, snapshot *kv.Snapshot
 	return ctx.Err()
 }
 
+// sessionKVBlockRestorer is the optional engine-session capability behind
+// [SessionHandle.RestoreKVBlocks] — the streamed per-block wake. engine/metal's
+// ArchSession implements it; an engine session without it keeps the
+// assembled-snapshot fallback.
+type sessionKVBlockRestorer interface {
+	RestoreKVBlockSource(ctx context.Context, source kv.BlockSource) error
+}
+
+// RestoreKVBlocks streams a durable block source into the retained cache — the
+// per-block wake path (model/state/session probes this exact shape on the
+// handle). It exists so the engine's own block restorer is reachable THROUGH
+// the handle: without it the durable wake fell back to a CPU-assembled whole
+// snapshot, which cannot carry raw-q8 block payloads (kv.KVNativeDTypeQ8) —
+// every store-slept q8 conversation then declined its wake and re-prefilled.
+func (s *SessionHandle) RestoreKVBlocks(ctx context.Context, source kv.BlockSource) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if source.Load == nil {
+		return core.NewError("engine.SessionHandle.RestoreKVBlocks: nil block loader")
+	}
+	restorer, ok := s.sess.(sessionKVBlockRestorer)
+	if !ok {
+		return core.NewError("engine.SessionHandle.RestoreKVBlocks: engine session does not stream block restores")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.readyLocked("engine.SessionHandle.RestoreKVBlocks"); err != nil {
+		s.err = err
+		return err
+	}
+	prefix := source.PrefixTokens
+	if prefix <= 0 || prefix > source.TokenCount {
+		prefix = source.TokenCount
+	}
+	// Collect the woken ids as blocks stream (the handle's token mirror is what
+	// AppendPrompt continues from); the engine may trim the final block to the
+	// prefix, so the collector caps at prefix rather than trusting block sizes.
+	tokens := make([]int32, 0, prefix)
+	inner := source.Load
+	source.Load = func(loadCtx context.Context, index int) (kv.Block, error) {
+		block, err := inner(loadCtx, index)
+		if err == nil && block.Snapshot != nil && len(tokens) < prefix {
+			tokens = append(tokens, block.Snapshot.Tokens...)
+		}
+		return block, err
+	}
+	if err := restorer.RestoreKVBlockSource(ctx, source); err != nil {
+		s.err = err
+		return err
+	}
+	if len(tokens) > prefix {
+		tokens = tokens[:prefix]
+	}
+	s.tokens = tokens
+	s.generated = nil
+	s.prefillDuration = 0
+	s.err = nil
+	return ctx.Err()
+}
+
 // Fork creates an independent session from the same retained state by capturing
 // this session's KV and restoring it into a fresh one.
 func (s *SessionHandle) Fork(ctx context.Context) (inference.SessionHandle, error) {

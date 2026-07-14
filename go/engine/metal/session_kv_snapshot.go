@@ -5,6 +5,7 @@
 package native
 
 import (
+	"context"
 	"encoding/binary"
 	"math"
 
@@ -402,6 +403,29 @@ func restoreNativeKVLayerSlabs(scope string, view sessionStateLayerView, start, 
 // RestoreKVBlocks restores root KV snapshot blocks directly into the resident
 // native cache. It avoids assembling the blocks into a monolithic CPU snapshot
 // before writing cache rows.
+// RestoreKVBlockSource adapts the engine-neutral streamed block source
+// (kv.BlockSource — the durable-store wake path) onto RestoreKVBlocks. The
+// neutral source is the untrusted from-disk shape: no trusted prefix, no
+// resident ids, no retained logits, blocks indexed from zero. This is the
+// seam that lets a raw-q8 block bundle wake bit-exactly — the CPU-assembled
+// snapshot fallback cannot carry kv.KVNativeDTypeQ8 payloads.
+func (s *ArchSession) RestoreKVBlockSource(ctx context.Context, source kv.BlockSource) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.RestoreKVBlocks(KVBlockSource{
+		TokenCount:   source.TokenCount,
+		PrefixTokens: source.PrefixTokens,
+		BlockCount:   source.BlockCount,
+		Load: func(index int) (kv.Block, error) {
+			if err := ctx.Err(); err != nil {
+				return kv.Block{}, err
+			}
+			return source.Load(ctx, index)
+		},
+	})
+}
+
 func (s *ArchSession) RestoreKVBlocks(source KVBlockSource) error {
 	// A raw q8-native block landing writes int8 codes straight into the store; the
 	// restore target's stateLayerViews already materialised the bf16 mirror, so
