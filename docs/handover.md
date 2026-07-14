@@ -1,3 +1,34 @@
+# NEXT WAKE (2026-07-17 — #393 slice 3 by evidence: wide + megakernels REFUTED, production vindicated)
+
+## 2026-07-17 (#393 slice 3 — the kernel improvement pass: three verdicts)
+
+- qmv_wide (MLX's gen-15+ variant, 32 instances shipped in our metallib,
+  never dispatched): raced at every 26B shape at M=1 — LOSES uniformly,
+  −7% to −18%. Its M-tiling burns half the nv_2 tile at M=1 (nv_1 not
+  instantiated). The engine's existing variant choice is CORRECT.
+  Do-not-revisit for M=1 banked; only the M=2–5 batch shapes (MTP verify)
+  are an interesting revisit. Sentinel rows stay in the receipts.
+- THE PRODUCTION EXPERT DISPATCH (lean lthn_gather_qmv, engagement-
+  logged): all 8 routes in ONE launch — gate/up 21.5µs @ 415 GB/s, down
+  23.8µs @ 378 — ~4× the naive per-expert loop, half-roofline through
+  the route indirection. The synthetic 109 GB/s thin-expert row was the
+  worst-case bound only: production was already right. Remaining
+  headroom ~2× (415 vs 790), not the 7× the thin row implied.
+- FFN MEGAKERNEL REFUTED: at its own receipted shape (1536×6144) the
+  live lthn_ffn_megakernel runs 1330µs @ 12 GB/s vs the composed chain's
+  60µs @ 268 — 22× SLOWER. Persistent-tg grid-sync (64×128 threads) ≈ 5%
+  occupancy on the 80-core M3 Ultra by construction. Production only
+  reaches it via moe_block's megaLocal gate, which the 26B's inverted
+  local shape FAILS — the gate accidentally protects us. Audit: the
+  other three megakernels (attn/layer/gemv2) are TEST-ONLY, never wired.
+  The megakernel class is closed on this GPU; future fusion budget goes
+  to barrier-elision priced off the 2–5µs floor table.
+- NET: the kernel-improvement pass VALIDATED the engine's choices
+  (wide-rejected, gather-adopted, mega-gated) — the K=1 gains stay where
+  the levers ranked them: MTP rows (1.7× kernel-priced), overlap, then
+  floor-priced fusion. All three verdicts live as receipt rows + doc
+  verdicts in kernel_receipts_bench_test.go.
+
 # NEXT WAKE (2026-07-17 — #393 slice 2 FULL: 37 receipts — every curve the fixes will need)
 
 ## 2026-07-17 (#393 slice 2 expanded — "add all the measurements now")

@@ -6,6 +6,7 @@ package native
 
 import (
 	"testing"
+	"unsafe"
 
 	core "dappco.re/go"
 	"github.com/tmc/apple/metal"
@@ -55,6 +56,19 @@ import (
 //   - the floor table: add/mul 2.1µs · kvq8-store 3.2µs · gelu 3.6µs · rope 3.6µs ·
 //     rmsnorm 4.6–5.2µs · embed row gather 2.4µs. ~700 barriered ops/round at these
 //     floors is the serialisation tax fusion must be priced against.
+//   - the PRODUCTION expert dispatch (lean lthn_gather_qmv, all 8 routes in one launch):
+//     gate/up 21.5µs @ 415 GB/s, down 23.8µs @ 378 — ~4× the naive per-expert loop and
+//     half-roofline through the route indirection. The thin single-expert rows above are
+//     the worst-case bound only; production was already right.
+//   - FFN MEGAKERNEL REFUTED (2026-07-14): at its own receipted shape (1536×6144) the
+//     live lthn_ffn_megakernel runs 1330µs @ 12 GB/s vs the composed 4-dispatch chain's
+//     60µs @ 268 — 22× SLOWER. Its persistent-threadgroup grid-sync (64 tgs × 128
+//     threads) is ~5% occupancy by construction on an 80-core M3 Ultra. Production only
+//     reaches it through the MoE block's megaLocal gate, which the 26B's inverted local
+//     shape fails — the geometry gate is (accidentally) saving us. Do not widen the
+//     gate; the whole persistent-tg megakernel class is the wrong shape for this GPU,
+//     and any fusion revisit should be barrier-elision (the 2–5µs floor table), never
+//     grid-sync.
 //
 // NOT COVERED HERE (no clean standalone seam — measured in-situ via the capture):
 // lthn_gather_qmv + the MoE router/weighted-sum set (closure-bound metas inside
@@ -556,5 +570,151 @@ func BenchmarkKernelReceipt_EmbedGatherRow(b *testing.B) {
 	benchKernelReceipt(b, bytes, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
 		emitEmbedGatherRowBF16(encSink{enc}, pso, token, table, out, 0, 0, dModel, 1.0)
 		return nil
+	})
+}
+
+// --- MoE + megakernel family ---------------------------------------------------
+
+// gatherRouteIdxBuf builds a [routes] int32 device buffer of expert ids / iota.
+func gatherRouteIdxBuf(vals []int32) metal.MTLBuffer {
+	buf := sharedBuf(len(vals) * 4)
+	copy(unsafe.Slice((*byte)(bufferContentsFast(buf)), len(vals)*4), unsafe.Slice((*byte)(unsafe.Pointer(&vals[0])), len(vals)*4))
+	return buf
+}
+
+// BenchmarkKernelReceipt_GatherQMVAllRoutes measures the PRODUCTION expert dispatch — one
+// gather_qmv whose grid.z carries all topK routed experts (the lean lthn_gather_qmv when
+// the custom lib ships it, MLX's steel gather otherwise; the log line says which ran).
+// This is what the 26B MoE decode actually fires (moe_block.go all-routes lane), against
+// which the synthetic per-expert qmv rows above are the worst-case bound. 26B shapes:
+// 128 experts, topK 8, dModel 2816, expert dFF 704.
+func BenchmarkKernelReceipt_GatherQMVAllRoutes(b *testing.B) {
+	requireNativeRuntime(b)
+	const numExperts, topK, dModel, expertDFF, gs, bits = 128, 8, 2816, 704, 64, 4
+	routeIdx := gatherRouteIdxBuf([]int32{3, 17, 42, 63, 80, 99, 110, 127})
+	routeZeros := gatherRouteIdxBuf(make([]int32, topK))
+	iota := make([]int32, topK)
+	for i := range iota {
+		iota[i] = int32(i)
+	}
+	routeIota := gatherRouteIdxBuf(iota)
+
+	expertWeights := func(outDim, inDim int) (wq, sc, bi metal.MTLBuffer, bytesPerExpert int64) {
+		wqB, scB, biB := qmvWeightBytes(outDim, inDim, gs)
+		return sharedBuf(int(wqB) * numExperts), sharedBuf(int(scB) * numExperts), sharedBuf(int(biB) * numExperts), wqB + scB + biB
+	}
+
+	b.Run("gateUp_2816x704_routes8", func(b *testing.B) {
+		requireNativeRuntime(b)
+		lean0 := leanGatherDispatches.Load()
+		meta, err := gatherQMVAllRoutesMetadata(numExperts, expertDFF, dModel, gs, bits, expertDFF, topK, 1, false)
+		if err != nil {
+			b.Fatalf("meta: %v", err)
+		}
+		key := gatherQMVAllRoutesMetaKey{numExperts: numExperts, outDim: expertDFF, inDim: dModel, groupSize: gs, bits: bits, expertRows: expertDFF, routes: topK, xRows: 1, batchedX: false}
+		pso, err := gatherQMVBF16SteelPipeline(expertDFF, dModel, gs, bits)
+		if err != nil {
+			b.Fatalf("steel pso: %v", err)
+		}
+		wq, sc, bi, perExpert := expertWeights(expertDFF, dModel)
+		x := sharedBuf(dModel * bf16Size)
+		out := sharedBuf(topK * expertDFF * bf16Size)
+		bytes := int64(topK)*perExpert + int64(dModel+topK*expertDFF)*bf16Size
+		benchKernelReceipt(b, bytes, 32, func(enc metal.MTLComputeCommandEncoderObject) error {
+			emitGatherQMVAllRoutes(encSink{enc}, pso, meta, key, x, 0, wq, 0, sc, 0, bi, 0, routeZeros, routeIdx, 0, out, 0, expertDFF, dModel, gs, bits, 0, topK)
+			return nil
+		})
+		if leanGatherDispatches.Load() > lean0 {
+			b.Logf("path: lean lthn_gather_qmv")
+		} else {
+			b.Logf("path: MLX steel gather_qmv (lean unavailable)")
+		}
+	})
+
+	b.Run("down_704x2816_routes8", func(b *testing.B) {
+		requireNativeRuntime(b)
+		meta, err := gatherQMVAllRoutesMetadata(numExperts, dModel, expertDFF, gs, bits, dModel, topK, topK, true)
+		if err != nil {
+			b.Fatalf("meta: %v", err)
+		}
+		key := gatherQMVAllRoutesMetaKey{numExperts: numExperts, outDim: dModel, inDim: expertDFF, groupSize: gs, bits: bits, expertRows: dModel, routes: topK, xRows: topK, batchedX: true}
+		pso, err := gatherQMVBF16SteelPipeline(dModel, expertDFF, gs, bits)
+		if err != nil {
+			b.Fatalf("steel pso: %v", err)
+		}
+		wq, sc, bi, perExpert := expertWeights(dModel, expertDFF)
+		x := sharedBuf(topK * expertDFF * bf16Size)
+		out := sharedBuf(topK * dModel * bf16Size)
+		bytes := int64(topK)*perExpert + int64(topK*(expertDFF+dModel))*bf16Size
+		benchKernelReceipt(b, bytes, 32, func(enc metal.MTLComputeCommandEncoderObject) error {
+			emitGatherQMVAllRoutes(encSink{enc}, pso, meta, key, x, 0, wq, 0, sc, 0, bi, 0, routeIota, routeIdx, 0, out, 0, dModel, expertDFF, gs, bits, 0, topK)
+			return nil
+		})
+	})
+}
+
+// BenchmarkKernelReceipt_FFNMega races the LIVE ffn megakernel (one grid-synced dispatch
+// covering gate+up+gelu+down — engaged in production behind ffnMegaDefaultGeometry) against
+// the composed 4-dispatch chain, at the receipted shape family (E2B-class 1536×6144,
+// ratio-4; the 26B's inverted local 2816×2112 FAILS the geometry gate by design). One
+// dispatch per command buffer: the mega's grid-barrier arrive counter is host-reset at
+// encode time, which is only safe before the cb runs.
+func BenchmarkKernelReceipt_FFNMega(b *testing.B) {
+	requireNativeRuntime(b)
+	const dModel, dFF, gs, bits = 1536, 6144, 64, 4
+	mkView := func(outDim, inDim int) (quantMLPProjView, int64) {
+		wqB, scB, biB := qmvWeightBytes(outDim, inDim, gs)
+		return quantMLPProjView{
+			packed:    bufView{buf: sharedBuf(int(wqB))},
+			scales:    bufView{buf: sharedBuf(int(scB))},
+			biases:    bufView{buf: sharedBuf(int(biB))},
+			groupSize: gs, bits: bits,
+		}, wqB + scB + biB
+	}
+	gate, gateB := mkView(dFF, dModel)
+	up, upB := mkView(dFF, dModel)
+	down, downB := mkView(dModel, dFF)
+	x := sharedBuf(dModel * bf16Size)
+	gated := sharedBuf(dFF * bf16Size)
+	out := sharedBuf(dModel * bf16Size)
+	bytes := gateB + upB + downB + int64(2*dModel+2*dFF)*bf16Size
+
+	b.Run("mega_1536x6144", func(b *testing.B) {
+		requireNativeRuntime(b)
+		if !ffnMegaDefaultGeometry(dModel, dFF) {
+			b.Fatal("shape must pass the mega geometry gate")
+		}
+		pso, err := ffnMegaPipelineBits(bits)
+		if err != nil {
+			b.Skip("lthn_ffn_megakernel unavailable (custom metallib not loaded)")
+		}
+		arrive := sharedBuf(4)
+		arrivePtr := (*uint32)(bufferContentsFast(arrive))
+		benchKernelReceipt(b, bytes, 1, func(enc metal.MTLComputeCommandEncoderObject) error {
+			*arrivePtr = 0 // encode-time reset — the cb has not run yet
+			emitFFNMega(encSink{enc}, pso, x, 0, gate, up, down, gated, out, 0, arrive, dModel, dFF)
+			return nil
+		})
+	})
+	b.Run("composed_4dispatch_1536x6144", func(b *testing.B) {
+		requireNativeRuntime(b)
+		geluPSO, err := geluPipelineICB()
+		if err != nil {
+			b.Skip("lthn_gelu_gate_mul unavailable (custom metallib not loaded)")
+		}
+		gateOut := sharedBuf(dFF * bf16Size)
+		upOut := sharedBuf(dFF * bf16Size)
+		benchKernelReceipt(b, bytes, 1, func(enc metal.MTLComputeCommandEncoderObject) error {
+			if err := encQMVBF16(enc, gate.packed.buf, gate.scales.buf, gate.biases.buf, x, gateOut, 0, 0, 0, 0, dFF, dModel, gs, bits); err != nil {
+				return err
+			}
+			if err := encQMVBF16(enc, up.packed.buf, up.scales.buf, up.biases.buf, x, upOut, 0, 0, 0, 0, dFF, dModel, gs, bits); err != nil {
+				return err
+			}
+			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+			emitBinary(encSink{enc}, geluPSO, gateOut, 0, upOut, 0, gated, 0, dFF)
+			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+			return encQMVBF16(enc, down.packed.buf, down.scales.buf, down.biases.buf, gated, out, 0, 0, 0, 0, dModel, dFF, gs, bits)
+		})
 	})
 }
