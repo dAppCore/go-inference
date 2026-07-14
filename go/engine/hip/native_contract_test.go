@@ -1607,11 +1607,15 @@ func TestNativeContract_LoadModelBadEmptyAdapterPathDoesNotLoadNativeModel_Bad(t
 	core.AssertEqual(t, "", runtime.loadPath)
 }
 
-func TestNativeContract_LoadModelSafetensorsGemma4UsesNativeRuntime_Good(t *testing.T) {
+func TestNativeContract_LoadModelSafetensorsGemma4AutoAttachesMedia_Good(t *testing.T) {
 	dir := t.TempDir()
 	writeNativeContractFile(t, core.PathJoin(dir, "config.json"), `{
 		"architectures":["Gemma4ForConditionalGeneration"],
 		"model_type":"gemma4",
+		"image_token_id":4,
+		"audio_token_id":5,
+		"vision_config":{"model_type":"gemma4_vision","hidden_size":8},
+		"audio_config":{"model_type":"gemma4_audio","hidden_size":8},
 		"tie_word_embeddings":true,
 		"quantization_config":{"bits":6,"group_size":64,"mode":"affine"},
 		"text_config":{
@@ -1655,6 +1659,15 @@ func TestNativeContract_LoadModelSafetensorsGemma4UsesNativeRuntime_Good(t *test
 	}
 	if !runtime.loadConfig.TiedWordEmbeddings || runtime.loadConfig.ContextSize != 128 || len(runtime.loadConfig.Tensors) != 6 {
 		t.Fatalf("load config = %+v, want tied Gemma4 safetensors tensor plan", runtime.loadConfig)
+	}
+	if runtime.loadConfig.VisionModelPath != dir || runtime.loadConfig.AudioModelPath != dir {
+		t.Fatalf("attached media paths = vision %q audio %q, want same-checkpoint root %q", runtime.loadConfig.VisionModelPath, runtime.loadConfig.AudioModelPath, dir)
+	}
+	if runtime.loadConfig.ModelLabels["vision_runtime"] != hipKernelStatusLinked ||
+		runtime.loadConfig.ModelLabels["vision_projector_runtime"] != hipKernelStatusLinked ||
+		runtime.loadConfig.ModelLabels["audio_runtime"] != hipKernelStatusLinked ||
+		runtime.loadConfig.ModelLabels["audio_projector_runtime"] != hipKernelStatusLinked {
+		t.Fatalf("media runtime labels = %+v, want linked same-checkpoint vision and audio", runtime.loadConfig.ModelLabels)
 	}
 	if !runtime.loadConfig.Gemma4Architecture.Matched() {
 		t.Fatalf("shared architecture = %+v, want matched Gemma4 declaration", runtime.loadConfig.Gemma4Architecture)

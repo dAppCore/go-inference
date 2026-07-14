@@ -793,8 +793,12 @@ func applyROCmMultimodalConfigLabels(inspection *inference.ModelPackInspection, 
 		labels["gemma4_multimodal"] = "true"
 	}
 	if hasVision {
-		labels["vision_runtime"] = hipKernelStatusNotLinked
-		labels["vision_projector_runtime"] = hipKernelStatusNotLinked
+		visionRuntime := hipKernelStatusNotLinked
+		if isROCmGemma4Architecture(architecture) {
+			visionRuntime = hipKernelStatusLinked
+		}
+		labels["vision_runtime"] = visionRuntime
+		labels["vision_projector_runtime"] = visionRuntime
 		switch {
 		case isROCmGemma4Architecture(architecture):
 			labels["vision_reference"] = "go_mlx_gemma4_vision"
@@ -830,11 +834,20 @@ func applyROCmMultimodalConfigLabels(inspection *inference.ModelPackInspection, 
 			}
 			applyROCmVisionTowerLabels(labels, cfg.VisionConfig)
 		}
-		inspection.Notes = append(inspection.Notes, "multimodal vision metadata is recognised; native ROCm vision tower and projector kernels are pending")
+		if isROCmGemma4Architecture(architecture) {
+			inspection.Notes = append(inspection.Notes, "Gemma4 vision tower and projector are auto-attached from the model pack")
+		} else {
+			inspection.Notes = append(inspection.Notes, "multimodal vision metadata is recognised; native ROCm vision tower and projector kernels are pending")
+		}
 	}
 	if hasAudio {
-		labels["audio_runtime"] = hipKernelStatusNotLinked
-		labels["audio_projector_runtime"] = hipKernelStatusNotLinked
+		audioRuntime := hipKernelStatusNotLinked
+		if isROCmGemma4Architecture(architecture) {
+			audioRuntime = hipKernelStatusLinked
+		}
+		labels["audio_runtime"] = audioRuntime
+		labels["audio_projector_runtime"] = audioRuntime
+		labels["audio_frontend_runtime"] = audioRuntime
 		if isROCmGemma4Architecture(architecture) {
 			labels["audio_reference"] = "go_mlx_gemma4_audio"
 		} else {
@@ -860,7 +873,11 @@ func applyROCmMultimodalConfigLabels(inspection *inference.ModelPackInspection, 
 			}
 			applyROCMAudioTowerLabels(labels, cfg.AudioConfig)
 		}
-		inspection.Notes = append(inspection.Notes, "multimodal audio metadata is recognised; native ROCm audio front-end, tower, and projector kernels are pending")
+		if isROCmGemma4Architecture(architecture) {
+			inspection.Notes = append(inspection.Notes, "Gemma4 audio frontend, tower, and projector are auto-attached from the model pack")
+		} else {
+			inspection.Notes = append(inspection.Notes, "multimodal audio metadata is recognised; native ROCm audio front-end, tower, and projector kernels are pending")
+		}
 	}
 }
 
@@ -1573,6 +1590,21 @@ func (b *rocmBackend) safetensorsNativeLoadConfig(ctx context.Context, path stri
 		Gemma4TextConfig:   rocmNativeGemma4TextConfig(path),
 		Tensors:            tensors,
 		TiedWordEmbeddings: inspection.Labels["tied_word_embeddings"] == "true",
+	}
+	// Gemma4 checkpoints may carry their text model and media towers in the
+	// same safetensors pack. Keep the pack root as the default tower source;
+	// explicit ROCm load paths and environment overrides are applied later.
+	if cfg.Gemma4TextConfig.Vision || cfg.Gemma4TextConfig.Audio {
+		mediaRoot, rootErr := rocmModelPackRoot(path)
+		if rootErr != nil {
+			return "", nativeLoadConfig{}, core.E("rocm.safetensorsNativeLoadConfig", "resolve attached media root", rootErr)
+		}
+		if cfg.Gemma4TextConfig.Vision {
+			cfg.VisionModelPath = mediaRoot
+		}
+		if cfg.Gemma4TextConfig.Audio {
+			cfg.AudioModelPath = mediaRoot
+		}
 	}
 	if isROCmGemma4Architecture(inspection.Model.Architecture) {
 		cfg.Gemma4Architecture, err = resolveGemma4ModelPackArchitectureDeclaration(path)

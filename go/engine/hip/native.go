@@ -188,8 +188,8 @@ func (b *rocmBackend) loadModelWithROCmConfigMode(path string, loadConfig infere
 	}
 	nativeConfig.AllowAttachedOnly = allowAttachedOnly
 	nativeConfig.DeviceKVMode = deviceKVMode
-	nativeConfig.AudioModelPath = firstNonEmptyString(strings.TrimSpace(rocmConfig.AudioModelPath), strings.TrimSpace(core.Getenv("GO_ROCM_AUDIO_MODEL_PATH")))
-	nativeConfig.VisionModelPath = firstNonEmptyString(strings.TrimSpace(rocmConfig.VisionModelPath), strings.TrimSpace(core.Getenv("GO_ROCM_VISION_MODEL_PATH")))
+	nativeConfig.AudioModelPath = firstNonEmptyString(strings.TrimSpace(rocmConfig.AudioModelPath), strings.TrimSpace(core.Getenv("GO_ROCM_AUDIO_MODEL_PATH")), nativeConfig.AudioModelPath)
+	nativeConfig.VisionModelPath = firstNonEmptyString(strings.TrimSpace(rocmConfig.VisionModelPath), strings.TrimSpace(core.Getenv("GO_ROCM_VISION_MODEL_PATH")), nativeConfig.VisionModelPath)
 	nativeConfig.ModelLabels = rocmApplyNativeLoadDeviceKVModeLabels(nativeConfig.ModelLabels, deviceKVMode)
 	rocmApplyNativeLoadModelProfile(path, &nativeConfig)
 
