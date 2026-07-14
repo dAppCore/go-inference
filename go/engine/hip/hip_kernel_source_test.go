@@ -545,6 +545,15 @@ func TestHIPKernelSource_MLXQ8Group32FusedGELUUsesPackedPairDot_Good(t *testing.
 	core.AssertContains(t, gelu, "args.bits == 8u && args.group_size == 32u")
 }
 
+func TestHIPKernelSource_ProjectionUsesCoalescedBlockPerRow_Good(t *testing.T) {
+	source, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	kernel := hipKernelSourceFunctionBodyForTest(t, string(source), `extern "C" __global__ void rocm_projection`)
+	core.AssertContains(t, kernel, "const uint32_t row = blockIdx.x")
+	core.AssertContains(t, kernel, "for (uint32_t col = threadIdx.x; col < args.cols; col += blockDim.x)")
+	core.AssertContains(t, kernel, "rocm_block_reduce_sum")
+}
+
 func TestHIPKernelSource_AutoRoundQuantizeGroupPacking_Good(t *testing.T) {
 	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)

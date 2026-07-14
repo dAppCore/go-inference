@@ -480,6 +480,14 @@ func TestHIPKernels_ProjectionLaunchArgs_Good(t *testing.T) {
 	core.AssertEqual(t, uint64(8), binary.LittleEndian.Uint64(f32LaunchBytes[32:]))
 }
 
+func TestHIPKernels_ProjectionLaunchConfig_Good(t *testing.T) {
+	config, err := hipProjectionLaunchConfig([]byte{1}, 128)
+	core.AssertNoError(t, err)
+	core.AssertEqual(t, hipKernelNameProjection, config.Name)
+	core.AssertEqual(t, uint32(128), config.GridX)
+	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, config.BlockX)
+}
+
 func TestHIPKernels_ProjectionLaunchArgs_Bad(t *testing.T) {
 	t.Setenv("GO_ROCM_DISABLE_DEVICE_BUFFER_POOL", "1")
 	req := hipProjectionRequest{Input: []float32{1}, FP16: []uint16{0x3c00}, Rows: 1, Cols: 1}
@@ -7301,7 +7309,7 @@ func (kernels fakeLinkedHIPKernelSet) Project(ctx context.Context, model *hipLoa
 		if err != nil {
 			return nil, err
 		}
-		config, err := hipOneDimensionalLaunchConfig(hipKernelNameProjection, launchBytes, req.Rows)
+		config, err := hipProjectionLaunchConfig(launchBytes, req.Rows)
 		if err != nil {
 			return nil, err
 		}

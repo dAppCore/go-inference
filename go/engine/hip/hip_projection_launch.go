@@ -4883,6 +4883,24 @@ func hipPackedTopKLaunchConfig(args []byte, chunkCount int) (hipKernelLaunchConf
 	return config, config.Validate()
 }
 
+func hipProjectionLaunchConfig(args []byte, rows int) (hipKernelLaunchConfig, error) {
+	gridX, err := rocmDeviceKVPositiveUint32("projection rows", rows)
+	if err != nil {
+		return hipKernelLaunchConfig{}, err
+	}
+	config := hipKernelLaunchConfig{
+		Name:   hipKernelNameProjection,
+		Args:   args,
+		GridX:  gridX,
+		GridY:  1,
+		GridZ:  1,
+		BlockX: hipMLXQ4ProjectionBlockSize,
+		BlockY: 1,
+		BlockZ: 1,
+	}
+	return config, config.Validate()
+}
+
 func hipProjectionBatchLaunchConfig(args []byte, rows, batch int) (hipKernelLaunchConfig, error) {
 	gridX, err := rocmDeviceKVPositiveUint32("projection batch row blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
 	if err != nil {

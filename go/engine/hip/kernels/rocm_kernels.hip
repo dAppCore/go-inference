@@ -4708,6 +4708,8 @@ extern "C" __global__ void rocm_decode(const unsigned char *packet)
 	}
 }
 
+__device__ float rocm_block_reduce_sum(float value, float *scratch);
+
 extern "C" __global__ void rocm_projection(const unsigned char *packet)
 {
 	if (packet == nullptr) {
@@ -4718,7 +4720,10 @@ extern "C" __global__ void rocm_projection(const unsigned char *packet)
 		return;
 	}
 
-	const uint32_t row = blockIdx.x * blockDim.x + threadIdx.x;
+	if (blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+	const uint32_t row = blockIdx.x;
 	if (row >= args.rows) {
 		return;
 	}
@@ -4728,31 +4733,35 @@ extern "C" __global__ void rocm_projection(const unsigned char *packet)
 	float sum = 0.0f;
 	if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_FP16) {
 		const uint16_t *weights = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.weight_pointer));
-		for (uint32_t col = 0; col < args.cols; ++col) {
+		for (uint32_t col = threadIdx.x; col < args.cols; col += blockDim.x) {
 			sum += input[col] * rocm_half_to_float(weights[row * args.cols + col]);
 		}
 	} else if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_BF16) {
 		const uint16_t *weights = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.weight_pointer));
-		for (uint32_t col = 0; col < args.cols; ++col) {
+		for (uint32_t col = threadIdx.x; col < args.cols; col += blockDim.x) {
 			sum += input[col] * rocm_bfloat16_to_float(weights[row * args.cols + col]);
 		}
 	} else if (args.weight_encoding == ROCM_PROJECTION_WEIGHT_ENCODING_Q8) {
 		const int8_t *weights = reinterpret_cast<const int8_t *>(static_cast<uintptr_t>(args.weight_pointer));
 		const float scale = rocm_float_from_bits(args.q8_scale_bits);
-		for (uint32_t col = 0; col < args.cols; ++col) {
+		for (uint32_t col = threadIdx.x; col < args.cols; col += blockDim.x) {
 			sum += input[col] * static_cast<float>(weights[row * args.cols + col]) * scale;
 		}
 	} else {
 		const float *weights = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.weight_pointer));
-		for (uint32_t col = 0; col < args.cols; ++col) {
+		for (uint32_t col = threadIdx.x; col < args.cols; col += blockDim.x) {
 			sum += input[col] * weights[row * args.cols + col];
 		}
 	}
-	if ((args.flags & ROCM_PROJECTION_LAUNCH_FLAG_BIAS) != 0 && args.bias_pointer != 0) {
+	__shared__ float scratch[ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE / 32u];
+	sum = rocm_block_reduce_sum(sum, scratch);
+	if (threadIdx.x == 0u && (args.flags & ROCM_PROJECTION_LAUNCH_FLAG_BIAS) != 0 && args.bias_pointer != 0) {
 		const float *bias = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.bias_pointer));
 		sum += bias[row];
 	}
-	output[row] = sum;
+	if (threadIdx.x == 0u) {
+		output[row] = sum;
+	}
 }
 
 __device__ float rocm_mlx_q4_row_reduce(float value);

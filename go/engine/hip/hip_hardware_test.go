@@ -4477,7 +4477,7 @@ func assertLoadedGemma4BF16ProjectionTensorSmoke(t *testing.T, model *hipLoadedM
 		WeightEncoding: hipProjectionWeightEncodingBF16,
 	}).Binary()
 	core.RequireNoError(t, err)
-	config, err := hipOneDimensionalLaunchConfig(hipKernelNameProjection, launch, spec.rows)
+	config, err := hipProjectionLaunchConfig(launch, spec.rows)
 	core.RequireNoError(t, err)
 	core.RequireNoError(t, hipLaunchKernel(model.driver, config))
 	output, err := (&hipProjectionDeviceBuffers{Output: outputBuffer, Rows: spec.rows}).ReadOutput()
@@ -5774,7 +5774,7 @@ func TestHIPHardwareProjectionKernelSource_Good(t *testing.T) {
 	core.RequireNoError(t, err)
 	launchBytes, err := launch.Binary()
 	core.RequireNoError(t, err)
-	config, err := hipOneDimensionalLaunchConfig(hipKernelNameProjection, launchBytes, req.Rows)
+	config, err := hipProjectionLaunchConfig(launchBytes, req.Rows)
 	core.RequireNoError(t, err)
 	core.RequireNoError(t, hipLaunchKernel(hipRuntime.driver, config))
 	output, err := buffers.ReadOutput()
@@ -5797,7 +5797,7 @@ func TestHIPHardwareProjectionKernelSource_Good(t *testing.T) {
 	core.RequireNoError(t, err)
 	q8LaunchBytes, err := q8Launch.Binary()
 	core.RequireNoError(t, err)
-	q8Config, err := hipOneDimensionalLaunchConfig(hipKernelNameProjection, q8LaunchBytes, q8Req.Rows)
+	q8Config, err := hipProjectionLaunchConfig(q8LaunchBytes, q8Req.Rows)
 	core.RequireNoError(t, err)
 	core.RequireNoError(t, hipLaunchKernel(hipRuntime.driver, q8Config))
 	q8Output, err := q8Buffers.ReadOutput()
@@ -5818,12 +5818,35 @@ func TestHIPHardwareProjectionKernelSource_Good(t *testing.T) {
 	core.RequireNoError(t, err)
 	bf16LaunchBytes, err := bf16Launch.Binary()
 	core.RequireNoError(t, err)
-	bf16Config, err := hipOneDimensionalLaunchConfig(hipKernelNameProjection, bf16LaunchBytes, bf16Req.Rows)
+	bf16Config, err := hipProjectionLaunchConfig(bf16LaunchBytes, bf16Req.Rows)
 	core.RequireNoError(t, err)
 	core.RequireNoError(t, hipLaunchKernel(hipRuntime.driver, bf16Config))
 	bf16Output, err := bf16Buffers.ReadOutput()
 	core.RequireNoError(t, err)
 	assertFloat32SlicesNear(t, []float32{5.75, 1.5}, bf16Output, 0.0001)
+
+	t.Run("f32-router-shape", func(t *testing.T) {
+		const rows = 128
+		const cols = 2816
+		input := make([]float32, cols)
+		weights := make([]float32, rows*cols)
+		for col := range input {
+			input[col] = float32(col%29-14) / 17
+		}
+		for index := range weights {
+			weights[index] = float32(index%31-15) / 19
+		}
+		want, err := hipReferenceF32Projection(input, weights, rows, cols, nil)
+		core.RequireNoError(t, err)
+		got, err := hipRunProjectionKernel(context.Background(), hipRuntime.driver, hipProjectionRequest{
+			Input: input,
+			F32:   weights,
+			Rows:  rows,
+			Cols:  cols,
+		})
+		core.RequireNoError(t, err)
+		assertFloat32SlicesNear(t, want, got, 0.001)
+	})
 
 	t.Run("mlx-q4-projection", func(t *testing.T) {
 		q4Req := hipMLXQ4ProjectionRequest{

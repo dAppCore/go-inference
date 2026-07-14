@@ -746,7 +746,7 @@ func hipRunProjectionKernel(ctx context.Context, driver nativeHIPDriver, req hip
 	if err != nil {
 		return nil, err
 	}
-	config, err := hipOneDimensionalLaunchConfig(hipKernelNameProjection, launchBytes, req.Rows)
+	config, err := hipProjectionLaunchConfig(launchBytes, req.Rows)
 	if err != nil {
 		return nil, err
 	}
@@ -800,7 +800,7 @@ func hipRunProjectionKernelWithDeviceWeightEncoding(ctx context.Context, driver 
 	if err != nil {
 		return nil, err
 	}
-	config, err := hipOneDimensionalLaunchConfig(hipKernelNameProjection, launchBytes, rows)
+	config, err := hipProjectionLaunchConfig(launchBytes, rows)
 	if err != nil {
 		return nil, err
 	}
@@ -889,7 +889,7 @@ func hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(ctx 
 	if err != nil {
 		return err
 	}
-	config, err := hipOneDimensionalLaunchConfig(hipKernelNameProjection, launchBytes, rows)
+	config, err := hipProjectionLaunchConfig(launchBytes, rows)
 	if err != nil {
 		return err
 	}
