@@ -79,6 +79,25 @@ type CancellableModel interface {
 	CancelRequest(ctx context.Context, id string) (RequestCancelResult, error)
 }
 
+// SerialModel is implemented by a TextModel whose Generate/Chat lane is
+// single-session — one KV cache, one drafter command buffer — and therefore
+// MUST NOT run concurrently. A scheduler serialises such a model's requests
+// (one generation in flight, the rest queue) rather than driving them in
+// parallel; a model that opens a fresh session per call does not implement it
+// and runs concurrently. The MTP speculative pair is the canonical case: its
+// target session and fused drafter are pair-level singletons, so two concurrent
+// generations race the shared GPU scratch (a nil drafter-KV SIGSEGV observed
+// under -scheduler interleave).
+//
+//	if sm, ok := inference.As[inference.SerialModel](model); ok && sm.SerialGeneration() {
+//	    // serialise this model's generation lane
+//	}
+type SerialModel interface {
+	// SerialGeneration reports that this model's generation lane is
+	// single-session and must run one request at a time.
+	SerialGeneration() bool
+}
+
 // CacheBlockRef is a portable reference to a prompt/KV cache block.
 type CacheBlockRef struct {
 	ID            string            `json:"id,omitempty"`

@@ -147,7 +147,10 @@ func (m *Model) scheduleBatch(ctx context.Context, req inference.ScheduledReques
 // what the model actually prefixes; a template failure falls back to the raw
 // concatenation rather than failing the request.
 func (m *Model) countPromptTokens(req inference.ScheduledRequest) int {
-	tok, ok := m.base.(inference.TokenizerModel)
+	// inference.As, not a direct assert: the base may be wrapped (serialModel
+	// for a single-session model, or a welfare/policy decorator), which does not
+	// re-declare TokenizerModel — As reaches it through Unwrap.
+	tok, ok := inference.As[inference.TokenizerModel](m.base)
 	if !ok {
 		return 0
 	}

@@ -67,7 +67,18 @@ type speculativeModel struct {
 var (
 	_ inference.TextModel                  = (*speculativeModel)(nil)
 	_ inference.SpeculativeMetricsProvider = (*speculativeModel)(nil)
+	_ inference.SerialModel                = (*speculativeModel)(nil)
 )
+
+// SerialGeneration marks the speculative pair as single-session
+// (inference.SerialModel): the target ArchSession (its KV cache and decode
+// scratch) and the pair's fused drafter (one draft command buffer, one resident
+// drafter-KV set built once per pair via fusedDraft) are shared singletons, so
+// two concurrent Generate/Chat calls race that GPU scratch and crash — the
+// loadKV nil drafter-KV SIGSEGV seen under -scheduler interleave (#1842). A
+// scheduler serialises this model's generation lane on the strength of this
+// declaration; it always returns true because the pair is never per-request.
+func (m *speculativeModel) SerialGeneration() bool { return true }
 
 // LoadSpeculativePair loads a target checkpoint + drafter as one speculative
 // inference.TextModel running draftBlock-wide MTP verify forwards — the

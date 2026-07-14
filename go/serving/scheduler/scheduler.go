@@ -277,6 +277,17 @@ func New(model inference.TextModel, cfg Config) (*Model, error) {
 		}
 	}
 
+	// A single-session base model (one KV cache / one drafter command buffer —
+	// the MTP speculative pair) cannot run concurrent generations: every mode
+	// below drives requests in parallel (interleave drive goroutines, batch
+	// lanes, serial workers), which would race the shared GPU scratch and crash
+	// (#1842). Wrap it so its generation lane serialises. inference.As reaches
+	// the SerialModel declaration past any welfare/policy decorator, and the
+	// wrapper's own Unwrap keeps the base's other capabilities reachable.
+	if sm, ok := inference.As[inference.SerialModel](model); ok && sm.SerialGeneration() {
+		model = newSerialModel(model)
+	}
+
 	m := &Model{
 		base:            model,
 		mode:            mode,
