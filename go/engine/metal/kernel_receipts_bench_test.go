@@ -137,6 +137,73 @@ func BenchmarkKernelReceipt_QMV(b *testing.B) {
 	}
 }
 
+// BenchmarkKernelReceipt_QMVWide races MLX's affine_qmv_wide (k_lanes=8 splitting each
+// row's K-reduction across lanes — shipped in our metallib since v0.32.0, gated by MLX to
+// gen-15+ GPUs, and NEVER dispatched by this engine) against the qmv variants the engine
+// uses today, at the same shapes as the thinness sweep above. The wide impl clamps both
+// M and the row index, and its group loop needs only group_size|K — so it is LEGAL at
+// every shape the fast variant's %512 gate rejects (2816, 2112, 704). Its shuffle-ladder
+// reduction sums in a different order, so adoption would be token-identity tier, not
+// byte tier. M=1 rides the nv_2 instance half-idle (nv_1 is not instantiated).
+//
+// VERDICT (2026-07-14, M3 Ultra, M=1): REFUTED — wide loses at EVERY shape, −7% to −18%
+// (attnQ 13.7µs/474 vs 11.2/581; expertDown 6.9/164 vs 5.8/192; pleProj a wash). Its
+// M-tiling is the whole design and M=1 burns half the nv_2 tile, so MLX's gen-15 gate
+// does not transfer to single-token decode: the engine's existing variant choice is
+// CORRECT. Do not revisit for M=1; a revisit is only interesting for the M=2–5 batch
+// shapes (MTP verify / small-K fold) where nv_2..5 tiles run full. The rows stay as
+// regression sentinels documenting the choice. NOTE the thin-EXPERT story is separate:
+// production MoE decode does NOT dispatch these per-expert qmvs — it batches all topK
+// experts in one gather_qmv (grid.z = topK, moe_block.go) — so the expert rows above
+// bound the WORST case, not the production dispatch; the production number comes from
+// the .gputrace capture.
+func BenchmarkKernelReceipt_QMVWide(b *testing.B) {
+	const gs, bits = 64, 4
+	shapes := []struct {
+		name          string
+		inDim, outDim int
+	}{
+		{"attnQ_2816x4096", 2816, 4096},
+		{"attnKV_2816x2048", 2816, 2048},
+		{"denseGate_2816x2112", 2816, 2112},
+		{"expertGate_2816x704", 2816, 704},
+		{"expertDown_704x2816", 704, 2816},
+		{"pleProj_256x2048", 256, 2048},
+	}
+	for _, s := range shapes {
+		b.Run(s.name, func(b *testing.B) {
+			requireNativeRuntime(b)
+			pso, err := pipelineFor(core.Sprintf("affine_qmv_wide_bfloat16_t_gs_%d_b_%d_nv_2_kl_8_batch_0", gs, bits))
+			if err != nil {
+				b.Skipf("affine_qmv_wide unavailable: %v", err)
+			}
+			wqB, scB, biB := qmvWeightBytes(s.outDim, s.inDim, gs)
+			wq, sc, bi := sharedBuf(int(wqB)), sharedBuf(int(scB)), sharedBuf(int(biB))
+			x, out := sharedBuf(s.inDim*bf16Size), sharedBuf(s.outDim*bf16Size)
+			bytes := wqB + scB + biB + int64(s.inDim+s.outDim)*bf16Size
+			// dispatch geometry per MLX's qmv_wide dispatcher at M=1: grid x = ceil(M/nv)=1
+			// threadgroup column, y = ceil(N / rows_per_tg) with rows_per_tg = (32/kl_8)*2 = 8;
+			// threadgroup = (SIMD_SIZE, num_simdgroups) = (32, 2).
+			grid := metal.MTLSize{Width: 1, Height: uint((s.outDim + 7) / 8), Depth: 1}
+			tg := metal.MTLSize{Width: 32, Height: 2, Depth: 1}
+			benchKernelReceipt(b, bytes, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
+				sink := encSink{enc}
+				sink.setPSO(pso)
+				sink.setBuf(wq, 0, 0)
+				sink.setBuf(sc, 0, 1)
+				sink.setBuf(bi, 0, 2)
+				sink.setBuf(x, 0, 3)
+				sink.setBuf(out, 0, 4)
+				sink.setI32(int32(s.inDim), 5)
+				sink.setI32(int32(s.outDim), 6)
+				sink.setI32(1, 7) // M — one decode row
+				sink.dispatchThreadgroups(grid, tg)
+				return nil
+			})
+		})
+	}
+}
+
 // BenchmarkKernelReceipt_QMVRows sweeps the register-tiled M-row qmv (lthn_qmv_rows) at
 // M=2..4 (its occupancy cap) — the FATTENING CURVE: how much bandwidth each extra
 // speculative/batched row buys on the same weight read. This directly prices MTP rows
