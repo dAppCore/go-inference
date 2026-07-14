@@ -1,3 +1,64 @@
+# NEXT WAKE (2026-07-17 — tg512 fleet matrix @6k: two serving defects found + filed; MTP is content-dependent)
+
+## 2026-07-17 (the fleet matrix — e2b/e4b/12b/26b/31b × {plain, MTP} × {K=1, CB-8} @ -context 6144)
+
+- THE NUMBERS (clean method: `-state-conversations=false`, story prompt, fully
+  greedy + no-think, two-point tg48→tg512 singles / 8-way salted burst CB,
+  4-bit targets — 26b=qat, binary @ 096d797):
+
+  | model | plain | MTP | CB-8 aggregate (per-stream) | MTP+CB-8 |
+  |-------|-------|-----|------------------------------|----------|
+  | e2b   | 180.8 | 163.9 | 163.0 (20.5) | CRASH #1842 |
+  | e4b   | 125.8 | 116.0 | 115.7 (14.5) | CRASH |
+  | 12b   |  75.4 |  67.9 |  72.1 (9.0)  | CRASH |
+  | 26b   | 140.9 | 117.1 | 220.7 (28.0) | CRASH |
+  | 31b   |  35.6 |  32.2 |  33.6 (4.2)  | CRASH |
+
+- MTP IS CONTENT-DEPENDENT, not a flat win: the SAME cells on the integer-
+  counting prompt (drafter's best case — ultra-predictable continuation) gave
+  e2b 219 (+28%), e4b 164 (+38%), 12b 89 (+27%); on free prose ALL FIVE LOSE
+  (−7..−17%) — acceptance drops below the verify cost. The reference-table
+  "+32%/+34%" numbers are the predictable-output ceiling (lem.sh's counting
+  BENCH_PROMPT), not the prose floor. Consequence for lem-as-agent: MTP pays
+  on code/JSON/structured output; measure per workload before arming it.
+  (26b MoE stays a loss in BOTH: 42.8 counting / 117.1 prose vs 140.9 plain — #372.)
+- CB-8 SCALES ONLY THE MoE: 26b aggregate 220.7 = 1.57× plain (per-stream 28.0
+  ≈ 8 users at a third of a dedicated stream each); all four DENSE models sit
+  at 0.90–0.96× plain — the interleave lane behaves as time-slicing for dense
+  (per-stream ≈ plain/8, aggregate ≈ plain minus overhead). The dense fold is
+  the missing rung; #392's expert-overlap/row-batching levers are where the
+  dense aggregate lives.
+- DEFECT #1841 (mantis, GO): serve responses depend on the continuity lane +
+  serving history. 31B receipts, all deterministic: (a) VIRGIN request answers
+  differently continuity-on vs off — the "byte-identical to the stateless
+  path" claim in continuity.go is refuted; (b) two conversations sharing only
+  a MID-TURN literal token prefix ("Write the integers from ") bleed — a
+  90001-counting warmup makes the 1..800 request REFUSE; (c) an identical
+  repeated request is answered as a follow-up turn of its own previous
+  conversation. Suspects ordered: kv/prefixindex token-granular matching
+  waking another conversation's mid-turn state; the continuity lane's framing
+  under chat_template_kwargs.enable_thinking=false (the "declines on thinking
+  overrides" path appears not to fire for chat_template_kwargs). Smaller
+  models likely shift SILENTLY — 31B just surfaces it as a refusal flip.
+- DEFECT #1842 (mantis, GO, crash): MTP pair + interleave scheduler SIGSEGVs
+  the WHOLE serve on 2+ concurrent requests — assistantFusedDraft.loadKV nil
+  (assistant_draft_fused.go:279) via speculativeModel.speculate ←
+  interleave.drive. Single request through the same config works (receipt:
+  HTTP 200, drafter ACTIVE). 5/5 models crashed identically. This blocks the
+  #392 MTP×CB composition lever; fix shapes enumerated in the ticket.
+- BENCH-METHOD RULES BANKED (they cost the morning): (1) bench through
+  `-state-conversations=false` — continuity turns same-prompt repeats into
+  regen-as-continuation and poisons two-point measurement; (2) the counting
+  prompt is a REFUSAL trigger on 31B stateless ("cannot… character limit") —
+  the story prompt runs 512/length on all five; (3) salt the two points
+  differently (7001/7002) so neither continuity nor engine APC couples them;
+  (4) `lem.sh build` produces an EXTERNAL-metallib binary — export
+  MLX_METALLIB_PATH or serve dies "no backends available" (embed is a
+  separate -tags embed_metallib build).
+- Receipts: scratchpad tg512_matrix.sh + .tsv + run logs (session-local);
+  panic stack + repro bodies in mantis #1842/#1841; Claude tasks #394/#395
+  mirror them.
+
 # NEXT WAKE (2026-07-17 — the .metal source audit: CLEAN — 95/95 at full occupancy, release-grade)
 
 ## 2026-07-17 (the "optimal C" pass — Metal's allocs/op analogue, run to completion)
