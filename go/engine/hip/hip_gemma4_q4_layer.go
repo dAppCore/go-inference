@@ -492,6 +492,49 @@ func (model *hipLoadedModel) loadedGemma4Q4ForwardConfig(layerCount int) (hipGem
 	if model.modelInfo.NumLayers > 0 && layerCount > model.modelInfo.NumLayers {
 		return hipGemma4Q4ForwardConfig{}, core.E(hipGemma4Q4Layer0Operation, "layer count exceeds loaded model layer count", nil)
 	}
+	if sharedSpecs, ok := model.sharedGemma4LayerSpecs(layerCount); ok {
+		layers := make([]hipGemma4Q4Layer0Config, 0, layerCount)
+		sharedSources := make([]int, layerCount)
+		kvSharedLayers := 0
+		for layer, spec := range sharedSpecs {
+			source := spec.KVShareFrom
+			if source < 0 || source > layer {
+				return hipGemma4Q4ForwardConfig{}, core.E(hipGemma4Q4Layer0Operation, core.Sprintf("shared Arch layer %d has invalid KV owner %d", layer, source), nil)
+			}
+			sharedSources[layer] = source
+			var sharedKV *hipGemma4Q4Layer0Config
+			if source != layer {
+				kvSharedLayers++
+				sharedKV = &layers[source]
+			}
+			cfg, err := model.loadedGemma4Q4LayerConfigWithSharedKV(layer, sharedKV)
+			if err != nil {
+				return hipGemma4Q4ForwardConfig{}, core.E(hipGemma4Q4Layer0Operation, core.Sprintf("load shared-Arch layer %d config", layer), err)
+			}
+			if cfg.LayerType != spec.TypeName() {
+				return hipGemma4Q4ForwardConfig{}, core.E(hipGemma4Q4Layer0Operation, core.Sprintf("layer %d type %s does not match shared Arch %s", layer, cfg.LayerType, spec.TypeName()), nil)
+			}
+			if spec.HeadDim > 0 && cfg.HeadDim != spec.HeadDim {
+				return hipGemma4Q4ForwardConfig{}, core.E(hipGemma4Q4Layer0Operation, core.Sprintf("layer %d head dim %d does not match shared Arch %d", layer, cfg.HeadDim, spec.HeadDim), nil)
+			}
+			if spec.KVHeads > 0 && cfg.KeyHeads != spec.KVHeads {
+				return hipGemma4Q4ForwardConfig{}, core.E(hipGemma4Q4Layer0Operation, core.Sprintf("layer %d KV heads %d does not match shared Arch %d", layer, cfg.KeyHeads, spec.KVHeads), nil)
+			}
+			if (cfg.MoE != nil) != spec.MoE {
+				return hipGemma4Q4ForwardConfig{}, core.E(hipGemma4Q4Layer0Operation, core.Sprintf("layer %d MoE route does not match shared Arch", layer), nil)
+			}
+			layers = append(layers, cfg)
+		}
+		forward := hipGemma4Q4ForwardConfig{
+			Layers:          layers,
+			KVSharedLayers:  kvSharedLayers,
+			SharedKVSources: sharedSources,
+		}
+		if err := forward.validate(); err != nil {
+			return hipGemma4Q4ForwardConfig{}, err
+		}
+		return forward, nil
+	}
 	kvSharedLayers := model.loadedGemma4Q4KVSharedLayers(layerCount)
 	firstSharedLayer := layerCount - kvSharedLayers
 	layers := make([]hipGemma4Q4Layer0Config, 0, layerCount)
@@ -1813,7 +1856,7 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 	}
 	var mlpOutputBuffer *hipDeviceByteBuffer
 	if cfg.MoE != nil {
-		mlpOutputBuffer, err = hipRunGemma4MoEDeviceMLP(ctx, driver, attentionResidualBuffer, preFeedForwardBuffer, cfg, req.Epsilon)
+		mlpOutputBuffer, err = hipRunGemma4MoEDeviceMLPWithWorkspace(ctx, driver, attentionResidualBuffer, preFeedForwardBuffer, cfg, req.Epsilon, req.AttentionWorkspace)
 		if err != nil {
 			return hipGemma4Q4DecoderLayerResult{}, err
 		}

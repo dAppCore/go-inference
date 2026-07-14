@@ -295,9 +295,14 @@ func (session *StateSession) SleepState(ctx context.Context, req inference.Agent
 	req.Encoding = encoding
 	labels := mergeStringMaps(session.labels, req.Labels)
 	rocmAddStateBundleAdapterLabels(labels, req.Adapter)
+	delete(labels, "kv_block_bundle_reused")
 	ref, stateRefs, encoding, sizeBytes, tokens, blocks, err := session.sleepStatePayload(ctx, req, bundleURI, blockSize, labels)
 	if err != nil {
 		return nil, err
+	}
+	blocksReused := 0
+	if parsedBlocksReused, parseErr := strconv.Atoi(labels["kv_block_bundle_reused"]); parseErr == nil && parsedBlocksReused > 0 {
+		blocksReused = parsedBlocksReused
 	}
 	if parsedBlockSize, parseErr := strconv.Atoi(labels["kv_cache_block_size"]); parseErr == nil && parsedBlockSize > 0 {
 		blockSize = parsedBlockSize
@@ -331,6 +336,7 @@ func (session *StateSession) SleepState(ctx context.Context, req inference.Agent
 		TokenCount:    tokens,
 		BlockSize:     blockSize,
 		BlocksWritten: blocks,
+		BlocksReused:  blocksReused,
 		Encoding:      encoding,
 		Labels:        cloneStringMap(labels),
 	}, nil
@@ -1413,10 +1419,30 @@ func sleepKVCacheBlockBundle(ctx context.Context, req inference.AgentMemorySleep
 	labels["kv_block_bundle"] = "state_refs"
 	labels["kv_restore_path"] = "block_stream"
 	labels["cache_mode"] = cache.mode
+	reusedBlocks, err := reusableROCmKVBlockBundleRefs(ctx, req, cache)
+	if err != nil {
+		return state.ChunkRef{}, nil, "", 0, 0, 0, err
+	}
 	refs := make([]inference.StateRef, 0, len(cache.blocks))
 	bundleRefs := make([]rocmKVBlockBundleRef, 0, len(cache.blocks))
 	var totalBytes uint64
+	blocksReused := 0
 	for index, block := range cache.blocks {
+		if index < len(reusedBlocks) {
+			reused := cloneROCmKVBlockBundleRef(reusedBlocks[index])
+			reused.Index = index
+			refs = append(refs, inference.StateRef{
+				Kind:      "kv-block",
+				URI:       reused.URI,
+				SizeBytes: reused.SizeBytes,
+				Encoding:  reused.Encoding,
+				Labels:    cloneStringMap(reused.Labels),
+			})
+			bundleRefs = append(bundleRefs, reused)
+			totalBytes += reused.SizeBytes
+			blocksReused++
+			continue
+		}
 		payload, err := cache.rawBlock(block)
 		if err != nil {
 			return state.ChunkRef{}, nil, "", 0, 0, 0, err
@@ -1463,6 +1489,7 @@ func sleepKVCacheBlockBundle(ctx context.Context, req inference.AgentMemorySleep
 	}
 	labels["kv_block_bundle_blocks"] = core.Sprintf("%d", len(refs))
 	labels["kv_block_bundle_block_bytes"] = core.Sprintf("%d", totalBytes)
+	labels["kv_block_bundle_reused"] = core.Sprintf("%d", blocksReused)
 	bundle := rocmKVBlockBundleSnapshot{
 		Version:     1,
 		Kind:        rocmKVBlockBundleKind,
@@ -1490,4 +1517,107 @@ func sleepKVCacheBlockBundle(ctx context.Context, req inference.AgentMemorySleep
 	totalBytes += uint64(len(payload))
 	labels["kv_block_bundle_bytes"] = core.Sprintf("%d", totalBytes)
 	return ref, refs, rocmKVBlockBundleEncoding, uint64(len(payload)), cache.TokenCount(), len(cache.blocks), nil
+}
+
+func reusableROCmKVBlockBundleRefs(ctx context.Context, req inference.AgentMemorySleepRequest, cache *rocmKVCache) ([]rocmKVBlockBundleRef, error) {
+	if !req.ReuseParentPrefix {
+		return nil, nil
+	}
+	store, ok := req.Store.(state.Store)
+	if !ok || store == nil {
+		return nil, core.E("rocm.SleepState", "state store is not readable for parent prefix reuse", nil)
+	}
+	parent, err := loadROCmKVBlockBundleReuseParent(ctx, store, req.ParentBundleURI)
+	if err != nil {
+		return nil, err
+	}
+	if cache == nil || parent.Mode != cache.mode || parent.BlockSize != cache.blockSize {
+		return nil, nil
+	}
+	reused := make([]rocmKVBlockBundleRef, 0, len(cache.blocks))
+	for index, block := range cache.blocks {
+		if index >= len(parent.Blocks) {
+			break
+		}
+		parentRef := parent.Blocks[index]
+		if parentRef.TokenStart != block.tokenStart || parentRef.TokenCount != block.tokenCount || parentRef.Encoding != rocmKVBlockRawEncoding {
+			break
+		}
+		parentPayload, release, err := borrowROCmKVBlockBundleRefBytes(ctx, store, rocmKVBlockBundleWakeRef{
+			URI:        parentRef.URI,
+			ChunkID:    parentRef.ChunkID,
+			State:      parentRef.State,
+			TokenStart: parentRef.TokenStart,
+			TokenCount: parentRef.TokenCount,
+			KeyWidth:   parentRef.KeyWidth,
+			ValueWidth: parentRef.ValueWidth,
+			SizeBytes:  parentRef.SizeBytes,
+			Encoding:   parentRef.Encoding,
+		})
+		if err != nil {
+			return nil, err
+		}
+		payload, err := cache.rawBlock(block)
+		if err != nil {
+			if release != nil {
+				release()
+			}
+			return nil, err
+		}
+		matches := rocmKVBlockPayloadsEqual(parentPayload, payload)
+		if release != nil {
+			release()
+		}
+		if !matches {
+			break
+		}
+		reused = append(reused, parentRef)
+	}
+	return reused, nil
+}
+
+func loadROCmKVBlockBundleReuseParent(ctx context.Context, store state.Store, uri string) (*rocmKVBlockBundleSnapshot, error) {
+	chunk, err := state.ResolveURI(ctx, store, uri)
+	if err != nil {
+		return nil, core.E("rocm.SleepState", "resolve parent KV block bundle", err)
+	}
+	data := chunk.Data
+	if len(data) == 0 && chunk.Text != "" {
+		data = []byte(chunk.Text)
+	}
+	var bundle rocmKVBlockBundleSnapshot
+	if err := json.Unmarshal(data, &bundle); err != nil {
+		return nil, core.E("rocm.SleepState", "parse parent KV block bundle", err)
+	}
+	if bundle.Version != 1 || bundle.Kind != rocmKVBlockBundleKind || bundle.Mode == "" || bundle.BlockSize <= 0 || bundle.TokenCount <= 0 || len(bundle.Blocks) == 0 {
+		return nil, core.E("rocm.SleepState", "parent KV block bundle is invalid", nil)
+	}
+	nextStart := 0
+	for _, ref := range bundle.Blocks {
+		if ref.TokenStart != nextStart || ref.TokenCount <= 0 || ref.TokenStart+ref.TokenCount > bundle.TokenCount {
+			return nil, core.E("rocm.SleepState", "parent KV block bundle is invalid", nil)
+		}
+		nextStart += ref.TokenCount
+	}
+	if nextStart != bundle.TokenCount {
+		return nil, core.E("rocm.SleepState", "parent KV block bundle is invalid", nil)
+	}
+	return &bundle, nil
+}
+
+func cloneROCmKVBlockBundleRef(ref rocmKVBlockBundleRef) rocmKVBlockBundleRef {
+	ref.Labels = cloneStringMap(ref.Labels)
+	return ref
+}
+
+func rocmKVBlockPayloadsEqual(left, right []byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

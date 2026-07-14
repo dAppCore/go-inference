@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"math"
 	"os"
+	"strconv"
 	"sync"
 
 	core "dappco.re/go"
@@ -35,6 +36,10 @@ const (
 	hipMLXQ4GELUTanhMLPPersistentLaunchArgsVersion uint32 = 1
 	hipMLXQ4GELUTanhMLPPersistentLaunchArgsBytes          = 184
 	hipMLXQ4GELUTanhMLPPersistentRouteEnv                 = "GO_ROCM_ENABLE_EXPERIMENTAL_PERSISTENT_MLP"
+	hipMLXQ4Projection12BDownRouteEnv                     = "GO_ROCM_ENABLE_EXPERIMENTAL_12B_DOWN_PROJECTION"
+	hipMLXQ4GELUTanh12BGateUpRouteEnv                     = "GO_ROCM_ENABLE_EXPERIMENTAL_12B_GATE_UP"
+	hipMLXQ4GELUTanh12BGateUpGeometryEnv                  = "GO_ROCM_EXPERIMENTAL_12B_GATE_UP_GEOMETRY"
+	hipMLXQ4Projection12BHeadGridEnv                      = "GO_ROCM_EXPERIMENTAL_12B_HEAD_GRID"
 	hipMLXQ4GELUTanhProjLaunchArgsVersion          uint32 = 1
 	hipMLXQ4GELUTanhProjLaunchArgsBytes                   = 96
 	hipMLXQ4GELUTanhProjBatchLaunchArgsVersion     uint32 = 1
@@ -57,6 +62,7 @@ const (
 	hipMLXQ4ProjectionQ6Row64RowsPerBlock                 = 64
 	hipMLXQ4GELUTanhQ6Cols1536RowsPerBlock                = 16
 	hipMLXQ4GELUTanhQ4G32Cols1536Row16RowsPerBlock        = 16
+	hipMLXQ4GELUTanh12BRow8RowsPerBlock                   = 8
 	hipMLXQ4GELUTanhMLPPersistentBlocks            uint32 = 120
 	hipMLXQ4GELUTanhQ6Cols1536Row32RowsPerBlock           = 32
 	hipMLXQ4GELUTanhQ6Cols1536Row64RowsPerBlock           = 64
@@ -69,7 +75,21 @@ const (
 	hipPackedTopKChunkSize                                = 4096
 )
 
-var hipMLXQ4GELUTanhMLPPersistentRouteEnabled = os.Getenv(hipMLXQ4GELUTanhMLPPersistentRouteEnv) == "1"
+var (
+	hipMLXQ4GELUTanhMLPPersistentRouteEnabled = os.Getenv(hipMLXQ4GELUTanhMLPPersistentRouteEnv) == "1"
+	hipMLXQ4Projection12BDownRouteEnabled     = os.Getenv(hipMLXQ4Projection12BDownRouteEnv) == "1"
+	hipMLXQ4GELUTanh12BGateUpRouteEnabled     = os.Getenv(hipMLXQ4GELUTanh12BGateUpRouteEnv) == "1"
+	hipMLXQ4GELUTanh12BGateUpGeometry         = os.Getenv(hipMLXQ4GELUTanh12BGateUpGeometryEnv)
+	hipMLXQ4Projection12BHeadGridBlocks       = hipExperimentalProjectionGridBlocks(hipMLXQ4Projection12BHeadGridEnv)
+)
+
+func hipExperimentalProjectionGridBlocks(name string) int {
+	blocks, err := strconv.Atoi(os.Getenv(name))
+	if err != nil || blocks <= 0 {
+		return 0
+	}
+	return blocks
+}
 
 const (
 	hipProjectionWeightEncodingFP16 uint32 = 1
@@ -4711,6 +4731,23 @@ func hipMLXQ4ProjectionLaunchConfig(args []byte, rows int) (hipKernelLaunchConfi
 }
 
 func hipMLXQ4ProjectionLaunchConfigForShape(args []byte, rows, cols, groupSize, bits int) (hipKernelLaunchConfig, error) {
+	if hipMLXQ4Projection12BDownRouteEnabled && rows == 3840 && cols == 15360 && groupSize == 32 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group32 12B down projection row blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  1,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
 	if cols == 256 && hipMLXQ4ProjectionCols256Supported(groupSize, hipMLXQ4ProjectionBitsOrDefault(bits)) {
 		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 cols256 projection row blocks", (rows+hipMLXQ4ProjectionCols256RowsPerBlock-1)/hipMLXQ4ProjectionCols256RowsPerBlock)
 		if err != nil {
@@ -4951,7 +4988,15 @@ func hipMLXQ4ProjectionGreedyLaunchConfigForShape(args []byte, rows, cols, group
 		}
 		return config, config.Validate()
 	}
-	return hipMLXQ4ProjectionGreedyLaunchConfig(args, rows)
+	config, err := hipMLXQ4ProjectionGreedyLaunchConfig(args, rows)
+	if err != nil {
+		return hipKernelLaunchConfig{}, err
+	}
+	if rows == 262144 && cols == 3840 && groupSize == 16 && hipMLXAffineSupportedBits(bits) && hipMLXQ4Projection12BHeadGridBlocks > 0 {
+		gridBlocks := min(hipMLXQ4Projection12BHeadGridBlocks, int(config.GridX))
+		config.GridX = uint32(gridBlocks)
+	}
+	return config, config.Validate()
 }
 
 func hipMLXQ4ProjectionSelectedGreedyLaunchConfig(args []byte, selectedCount int) (hipKernelLaunchConfig, error) {
@@ -5151,6 +5196,29 @@ func hipMLXQ4GELUTanhMultiplyLaunchConfig(args []byte, rows int) (hipKernelLaunc
 }
 
 func hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(args []byte, rows, cols, groupSize, bits int) (hipKernelLaunchConfig, error) {
+	if hipMLXQ4GELUTanh12BGateUpRouteEnabled && rows == 15360 && cols == 3840 && groupSize == 32 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
+		rowsPerBlock := hipMLXQ4GELUTanhQ4G32Cols1536Row16RowsPerBlock
+		name := hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840
+		if hipMLXQ4GELUTanh12BGateUpGeometry == "row8" {
+			rowsPerBlock = hipMLXQ4GELUTanh12BRow8RowsPerBlock
+			name = hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8
+		}
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group32 12B GELU tanh multiply row blocks", (rows+rowsPerBlock-1)/rowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   name,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  1,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
 	if cols >= 1536 && groupSize == 32 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
 		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 GELU tanh multiply q4 group32 cols1536 row16 row blocks", (rows+hipMLXQ4GELUTanhQ4G32Cols1536Row16RowsPerBlock-1)/hipMLXQ4GELUTanhQ4G32Cols1536Row16RowsPerBlock)
 		if err != nil {

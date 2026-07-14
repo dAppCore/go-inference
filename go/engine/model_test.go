@@ -268,6 +268,20 @@ func newTestModel(t *testing.T, tm TokenModel) *TextModel {
 	return NewTextModel(tm, newFixtureTokenizer(t), "gemma-test", inference.ModelInfo{}, 4096)
 }
 
+// interfaceTokenizer proves the engine adapter depends on tokenizer behavior,
+// not the concrete Hugging Face tokenizer implementation. Backends that carry
+// an equivalent tokenizer inside another model format (for example GGUF) can
+// therefore use the shared TextModel/session path without a tokenizer.json
+// sidecar.
+type interfaceTokenizer struct{}
+
+func (interfaceTokenizer) Encode(string) []int32        { return []int32{1, 7} }
+func (interfaceTokenizer) Decode([]int32) string        { return "decoded" }
+func (interfaceTokenizer) DecodeToken(int32) string     { return " streamed" }
+func (interfaceTokenizer) DecodeOne(int32) string       { return "label" }
+func (interfaceTokenizer) TokenID(string) (int32, bool) { return 9, true }
+func (interfaceTokenizer) EOS() int32                   { return 2 }
+
 // --- NewTextModel ------------------------------------------------------------
 
 // TestModel_NewTextModel_Good pins the constructor: every argument lands on
@@ -284,6 +298,14 @@ func TestModel_NewTextModel_Good(t *testing.T) {
 	}
 	if r := m.Err(); !r.OK {
 		t.Fatalf("fresh model Err() = %+v, want OK", r)
+	}
+}
+
+func TestModel_NewTextModel_TokenizerInterface_Good(t *testing.T) {
+	m := NewTextModel(&fakeTokenModel{genIDs: []int32{7}}, interfaceTokenizer{}, "gemma-test", inference.ModelInfo{}, 4096)
+	got := slices.Collect(m.Generate(context.Background(), "hello", inference.WithMaxTokens(1)))
+	if len(got) != 1 || got[0].ID != 7 || got[0].Text != " streamed" {
+		t.Fatalf("Generate() = %+v, want one token decoded by the interface tokenizer", got)
 	}
 }
 

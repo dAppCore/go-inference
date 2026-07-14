@@ -14,6 +14,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/engine/hip/internal/gguf"
 )
 
@@ -52,7 +53,9 @@ type nativeLoadConfig struct {
 	DeviceKVMode       string
 	SequenceMixerPlan  *SequenceMixerLoadPlan
 	TokenizerPath      string
+	TokenText          *hipTokenTextDecoder
 	Gemma4TextConfig   nativeGemma4TextConfig
+	Gemma4Architecture Gemma4ArchitectureDeclaration
 	DataOffset         int64
 	Tensors            []nativeTensorInfo
 	TiedWordEmbeddings bool
@@ -133,6 +136,21 @@ func (b *rocmBackend) loadModelWithROCmConfigMode(path string, loadConfig infere
 		metadata := modelPack.Metadata
 		tensors := nativeTensorInfos(modelPack.Tensors)
 		modelInfo = modelInfoFromGGUFInfo(metadata, tensors)
+		var tokenText *hipTokenTextDecoder
+		if len(metadata.TokenizerTokens) > 0 {
+			tokenText, err = newHIPTokenTextDecoderFromGGUF(metadata)
+			if err != nil {
+				return nil, core.E("rocm.LoadModel", "load GGUF tokenizer", err)
+			}
+		}
+		textConfig := nativeGemma4TextConfigFromGGUFMetadata(metadata)
+		architecture := Gemma4ArchitectureDeclaration{}
+		if isROCmGemma4Architecture(modelInfo.Architecture) && modelInfo.HiddenSize > 0 && modelInfo.VocabSize > 0 && metadata.AttentionHeadCount > 0 {
+			architecture, err = resolveGemma4GGUFArchitectureDeclarationWithTensors(metadata, modelInfo, tensors)
+			if err != nil {
+				return nil, core.E("rocm.LoadModel", "resolve shared Gemma4 GGUF architecture", err)
+			}
+		}
 		nativeConfig = nativeLoadConfig{
 			ContextSize:        resolveContextLength(loadConfig.ContextLen, metadata),
 			GPULayerCount:      loadConfig.GPULayers,
@@ -141,8 +159,10 @@ func (b *rocmBackend) loadModelWithROCmConfigMode(path string, loadConfig infere
 			AllowAttachedOnly:  allowAttachedOnly,
 			ModelInfo:          modelInfo,
 			ModelLabels:        rocmGGUFNativeLoadLabels(modelInfo, path, metadata),
+			TokenText:          tokenText,
 			DeviceKVMode:       deviceKVMode,
-			Gemma4TextConfig:   nativeGemma4TextConfigFromGGUFMetadata(metadata),
+			Gemma4TextConfig:   textConfig,
+			Gemma4Architecture: architecture,
 			DataOffset:         modelPack.DataOffset,
 			Tensors:            tensors,
 			TiedWordEmbeddings: inferTiedWordEmbeddingsFromNativeTensors(tensors),
@@ -187,6 +207,16 @@ func (b *rocmBackend) loadModelWithROCmConfigMode(path string, loadConfig infere
 		modelLabels:   cloneStringMap(nativeConfig.ModelLabels),
 		contextLength: nativeConfig.ContextSize,
 		engineProfile: nativeConfig.EngineProfile.clone(),
+	}
+	if hipModel, ok := loaded.(*hipLoadedModel); ok &&
+		hipLoadedGemma4Q4GenerateLinked(hipModel) &&
+		hipModel.tokenText != nil {
+		shared, err := newHipEngineTextModel(hipModel, hipModel.tokenText, model.modelType)
+		if err != nil {
+			_ = model.closeModel()
+			return nil, core.E("rocm.LoadModel", "compose shared engine model", err)
+		}
+		model.engineModel = shared
 	}
 	if loadConfig.AdapterPath != "" {
 		if _, err := model.LoadAdapter(loadConfig.AdapterPath); err != nil {
@@ -321,6 +351,7 @@ func nativeRuntimeKernelStatus(runtime nativeRuntime) hipKernelStatus {
 
 type rocmModel struct {
 	native        nativeModel
+	engineModel   *engine.TextModel
 	modelPath     string
 	modelType     string
 	modelInfo     inference.ModelInfo
@@ -328,14 +359,15 @@ type rocmModel struct {
 	contextLength int
 	engineProfile ROCmModelProfile
 
-	stateMutex  sync.Mutex
-	lastError   error
-	lastMetrics inference.GenerateMetrics
-	probeSink   inference.ProbeSink
-	adapter     inference.AdapterIdentity
-	cache       *BlockCacheService
-	state       *StateSession
-	promptCache *ROCmPromptCacheEntry
+	stateMutex    sync.Mutex
+	lastError     error
+	lastMetrics   inference.GenerateMetrics
+	probeSink     inference.ProbeSink
+	adapter       inference.AdapterIdentity
+	cache         *BlockCacheService
+	state         *StateSession
+	promptCache   *ROCmPromptCacheEntry
+	chatIntercept func(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) (iter.Seq[inference.Token], bool)
 }
 
 var _ inference.AudioModel = (*rocmModel)(nil)
@@ -399,6 +431,9 @@ func (m *rocmModel) Chat(ctx context.Context, messages []inference.Message, opts
 	if err := rocmContextErr(ctx); err != nil {
 		m.setLastFailure(err)
 		return emptyTokenSeq
+	}
+	if stream, handled := m.interceptChat(ctx, messages, opts...); handled {
+		return stream
 	}
 	if m == nil || m.native == nil {
 		if m != nil {
@@ -788,6 +823,7 @@ func (m *rocmModel) closeModel() (err error) {
 	}()
 	m.stateMutex.Lock()
 	native := m.native
+	engineModel := m.engineModel
 	cache := m.cache
 	state := m.state
 	if native == nil && cache == nil && state == nil {
@@ -801,13 +837,22 @@ func (m *rocmModel) closeModel() (err error) {
 	if err := cache.Close(); err != nil {
 		return err
 	}
-	if native != nil {
+	if engineModel != nil {
+		result := engineModel.Close()
+		if !result.OK {
+			if closeErr, ok := result.Value.(error); ok {
+				return closeErr
+			}
+			return core.NewError("rocm.Close: shared engine close failed")
+		}
+	} else if native != nil {
 		if err := native.Close(); err != nil {
 			return err
 		}
 	}
 	m.stateMutex.Lock()
 	m.native = nil
+	m.engineModel = nil
 	m.adapter = inference.AdapterIdentity{}
 	m.cache = nil
 	m.state = nil

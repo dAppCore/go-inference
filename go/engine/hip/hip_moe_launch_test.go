@@ -258,6 +258,166 @@ func TestHIPGemma4ExpertCacheBudget_Good(t *testing.T) {
 	core.AssertEqual(t, uint64(6*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true}))
 }
 
+func TestHIPGemma4MoEWorkspace_Good_ReusesDeviceBuffers(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	workspace := hipNewAttentionHeadsChunkedWorkspace()
+	defer workspace.Close()
+
+	expertInput, err := workspace.EnsureMoEHiddenOutput(driver, 2816, 0)
+	core.RequireNoError(t, err)
+	routerInput, err := workspace.EnsureMoEHiddenOutput(driver, 2816, 1)
+	core.RequireNoError(t, err)
+	routerScores, err := workspace.EnsureMoERouterScores(driver, 8)
+	core.RequireNoError(t, err)
+	allocationsAfterWarm := len(driver.allocations)
+
+	expertInputAgain, err := workspace.EnsureMoEHiddenOutput(driver, 2816, 0)
+	core.RequireNoError(t, err)
+	routerInputAgain, err := workspace.EnsureMoEHiddenOutput(driver, 2816, 1)
+	core.RequireNoError(t, err)
+	routerScoresAgain, err := workspace.EnsureMoERouterScores(driver, 8)
+	core.RequireNoError(t, err)
+
+	core.AssertEqual(t, allocationsAfterWarm, len(driver.allocations))
+	core.AssertEqual(t, expertInput.Pointer(), expertInputAgain.Pointer())
+	core.AssertEqual(t, routerInput.Pointer(), routerInputAgain.Pointer())
+	core.AssertEqual(t, routerScores.Pointer(), routerScoresAgain.Pointer())
+	core.AssertNotEqual(t, expertInput.Pointer(), routerInput.Pointer())
+}
+
+func TestHIPMoERouterLaunch_Good_DeviceInputWorkspaceReusesPackedOutput(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	logitPayload, err := hipFloat32Payload([]float32{0.1, 2, 1, -1})
+	core.RequireNoError(t, err)
+	logits, err := hipUploadByteBuffer(driver, "test", "router logits", logitPayload, 4)
+	core.RequireNoError(t, err)
+	defer logits.Close()
+	workspace := hipNewAttentionHeadsChunkedWorkspace()
+	defer workspace.Close()
+
+	first, err := hipRunMoERouterKernelWithDeviceInputWorkspace(context.Background(), driver, logits, 2, 7, workspace)
+	core.RequireNoError(t, err)
+	allocationsAfterWarm := len(driver.allocations)
+	copyCountAfterWarm := len(driver.copies)
+	second, err := hipRunMoERouterKernelWithDeviceInputWorkspace(context.Background(), driver, logits, 2, 7, workspace)
+	core.RequireNoError(t, err)
+
+	core.AssertEqual(t, allocationsAfterWarm, len(driver.allocations))
+	core.AssertEqual(t, []uint64{20}, driver.copies[copyCountAfterWarm:])
+	core.AssertEqual(t, first, second)
+	core.AssertEqual(t, 2, len(second.Routes))
+	core.AssertEqual(t, 1, second.Routes[0].ID)
+	core.AssertEqual(t, 2, second.Routes[1].ID)
+}
+
+func TestHIPGemma4MoEWorkspace_Good_WarmForwardReusesDeviceBuffers(t *testing.T) {
+	const (
+		hidden   = 32
+		localFF  = 32
+		experts  = 2
+		topK     = 2
+		expertFF = 32
+	)
+	driver := &hipGemma4MoEWorkspaceTestDriver{fakeHIPDriver: &fakeHIPDriver{available: true}}
+	workspace := hipNewAttentionHeadsChunkedWorkspace()
+	defer workspace.Close()
+	attentionResidual, err := hipAllocateByteBuffer(driver, "test", "attention residual", hidden*4, hidden)
+	core.RequireNoError(t, err)
+	defer attentionResidual.Close()
+	localInput, err := hipAllocateByteBuffer(driver, "test", "local input", hidden*4, hidden)
+	core.RequireNoError(t, err)
+	defer localInput.Close()
+
+	expertCache := newHIPGemma4ExpertCache(driver, 1<<20)
+	defer expertCache.Close()
+	gateUpBytes := uint64(2 * expertFF * (hidden / hipGGUFQ4_0BlockSize) * hipGGUFQ4_0BlockBytes)
+	downBytes := uint64(hidden * (expertFF / hipGGUFQ4_0BlockSize) * hipGGUFQ4_0BlockBytes)
+	for expert := 0; expert < experts; expert++ {
+		gateUp, allocErr := hipAllocateByteBuffer(driver, "test", "expert gate/up", gateUpBytes, int(gateUpBytes))
+		core.RequireNoError(t, allocErr)
+		down, allocErr := hipAllocateByteBuffer(driver, "test", "expert down", downBytes, int(downBytes))
+		core.RequireNoError(t, allocErr)
+		expertCache.entries[hipGemma4ExpertCacheKey{Layer: 0, Expert: expert}] = &hipGemma4ExpertCacheEntry{
+			GateUp: gateUp, Down: down,
+			GateUpRows: 2 * expertFF, GateUpCols: hidden,
+			DownRows: hidden, DownCols: expertFF,
+			GateUpFormat: hipGGUFExpertFormatQ4_0, DownFormat: hipGGUFExpertFormatQ4_0,
+			bytes: gateUpBytes + downBytes,
+		}
+	}
+	norm := hipRMSNormDeviceWeightConfig{
+		WeightPointer: 0x4000, WeightBytes: hidden * 4, Count: hidden,
+		Epsilon: 1e-6, WeightEncoding: hipRMSNormWeightEncodingF32,
+	}
+	projection := func(rows, cols int, pointer nativeDevicePointer) hipMLXQ4DeviceWeightConfig {
+		groups := rows * (cols / 32)
+		return hipMLXQ4DeviceWeightConfig{
+			WeightPointer: pointer, ScalePointer: pointer + 0x100, BiasPointer: pointer + 0x200,
+			WeightBytes: uint64(rows * cols / 2), ScaleBytes: uint64(groups * 2), BiasBytes: uint64(groups * 2),
+			Rows: rows, Cols: cols, GroupSize: 32, Bits: 4,
+		}
+	}
+	layer := hipGemma4Q4Layer0Config{
+		HiddenSize:     hidden,
+		GateProjection: projection(localFF, hidden, 0x10000),
+		UpProjection:   projection(localFF, hidden, 0x20000),
+		DownProjection: projection(hidden, localFF, 0x30000),
+		MoE: &hipGemma4MoELayerConfig{
+			Layer: 0, NumExperts: experts, TopKExperts: topK, ExpertIntermediateSize: expertFF,
+			PreFeedForwardNorm2: norm, PostFeedForwardNorm1: norm, PostFeedForwardNorm2: norm, RouterNorm: norm,
+			RouterProjection: hipGemma4MoERouterProjectionConfig{WeightPointer: 0x50000, WeightBytes: experts * hidden * 4, Rows: experts, Cols: hidden},
+			PerExpertScale:   []float32{1, 1}, ExpertCache: expertCache,
+			GateUpInfo: nativeTensorInfo{Type: hipGGUFQ4_0TensorType, TypeName: "Q4_0", Dimensions: []uint64{hidden, 2 * expertFF, experts}, ByteSize: uint64(experts) * gateUpBytes},
+			DownInfo:   nativeTensorInfo{Type: hipGGUFQ4_0TensorType, TypeName: "Q4_0", Dimensions: []uint64{expertFF, hidden, experts}, ByteSize: uint64(experts) * downBytes},
+		},
+	}
+
+	first, err := hipRunGemma4MoEDeviceMLPWithWorkspace(context.Background(), driver, attentionResidual, localInput, layer, 1e-6, workspace)
+	if err != nil {
+		t.Fatalf("warm MoE forward: %v", err)
+	}
+	core.RequireNoError(t, first.Close())
+	allocationsAfterWarm := len(driver.allocations)
+	driver.launches = driver.launches[:0]
+	second, err := hipRunGemma4MoEDeviceMLPWithWorkspace(context.Background(), driver, attentionResidual, localInput, layer, 1e-6, workspace)
+	if err != nil {
+		t.Fatalf("reused MoE forward: %v", err)
+	}
+	core.RequireNoError(t, second.Close())
+
+	core.AssertEqual(t, allocationsAfterWarm, len(driver.allocations))
+	combineLaunches := 0
+	postNormLaunches := 0
+	vectorAddLaunches := 0
+	for _, launch := range driver.launches {
+		switch launch.Name {
+		case hipKernelNameMoECombineNorms:
+			combineLaunches++
+		case hipKernelNameRMSNorm:
+			postNormLaunches++
+		case hipKernelNameVectorAddScaled:
+			vectorAddLaunches++
+		}
+	}
+	core.AssertEqual(t, 1, combineLaunches)
+	core.AssertEqual(t, 2, postNormLaunches)
+	core.AssertEqual(t, 0, vectorAddLaunches)
+}
+
+type hipGemma4MoEWorkspaceTestDriver struct {
+	*fakeHIPDriver
+}
+
+func (driver *hipGemma4MoEWorkspaceTestDriver) LaunchKernel(config hipKernelLaunchConfig) error {
+	if config.Name == hipKernelNameMoERouter {
+		return driver.fakeHIPDriver.LaunchKernel(config)
+	}
+	copied := config
+	copied.Args = append([]byte(nil), config.Args...)
+	driver.launches = append(driver.launches, copied)
+	return nil
+}
+
 func TestHIPGemma4ExpertCache_Good_MixedKQuant(t *testing.T) {
 	const (
 		experts  = 2

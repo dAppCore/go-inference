@@ -60,6 +60,29 @@ type Session interface {
 	Close() error
 }
 
+// ContextDecodeSession is the optional cancellation-aware decode extension.
+// Engines whose driver can observe a caller context implement it; the shared
+// adapter falls back to Session's legacy methods for engines that cannot.
+type ContextDecodeSession interface {
+	Session
+	GenerateFromCacheEachContext(ctx context.Context, maxNew, eosID int, yield func(int32) bool) ([]int32, error)
+	GenerateSampledFromCacheEachContext(ctx context.Context, maxNew int, stopTokens []int32, sampler *model.Sampler, params model.SampleParams, transform model.TokenTransform, yield func(int32) bool) ([]int32, error)
+}
+
+func generateFromCacheEach(ctx context.Context, sess Session, maxNew, eosID int, yield func(int32) bool) ([]int32, error) {
+	if contextual, ok := sess.(ContextDecodeSession); ok {
+		return contextual.GenerateFromCacheEachContext(ctx, maxNew, eosID, yield)
+	}
+	return sess.GenerateFromCacheEach(maxNew, eosID, yield)
+}
+
+func generateSampledFromCacheEach(ctx context.Context, sess Session, maxNew int, stopTokens []int32, sampler *model.Sampler, params model.SampleParams, transform model.TokenTransform, yield func(int32) bool) ([]int32, error) {
+	if contextual, ok := sess.(ContextDecodeSession); ok {
+		return contextual.GenerateSampledFromCacheEachContext(ctx, maxNew, stopTokens, sampler, params, transform, yield)
+	}
+	return sess.GenerateSampledFromCacheEach(maxNew, stopTokens, sampler, params, transform, yield)
+}
+
 // DecodePhaseTracer is the optional [Session] seam a concrete engine implements
 // to report where the per-token decode wall goes. When GenerateConfig
 // .TraceTokenPhases is set, [TextModel] begins a trace before decoding and folds
@@ -247,9 +270,9 @@ func (s *SessionHandle) Generate(ctx context.Context, cfg inference.GenerateConf
 				RepeatPenalty:  cfg.RepeatPenalty,
 				SuppressTokens: cfg.SuppressTokens,
 			}
-			out, gerr = s.sess.GenerateSampledFromCacheEach(maxNew, stop, model.NewSampler(cfg.Seed), params, nil, emit)
+			out, gerr = generateSampledFromCacheEach(ctx, s.sess, maxNew, stop, model.NewSampler(cfg.Seed), params, nil, emit)
 		} else {
-			out, gerr = s.sess.GenerateFromCacheEach(maxNew, -1, emit)
+			out, gerr = generateFromCacheEach(ctx, s.sess, maxNew, -1, emit)
 		}
 		if gerr != nil {
 			s.err = gerr
@@ -303,7 +326,20 @@ func (s *SessionHandle) RangeKVBlocks(ctx context.Context, blockSize int, opts k
 		s.err = err
 		return err
 	}
-	if err := s.sess.RangeKVBlocks(blockSize, opts, yield); err != nil {
+	contextYield := func(block kv.Block) (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		cont, err := yield(block)
+		if err != nil {
+			return false, err
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return cont, nil
+	}
+	if err := s.sess.RangeKVBlocks(blockSize, opts, contextYield); err != nil {
 		s.err = err
 		return err
 	}

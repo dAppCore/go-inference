@@ -266,17 +266,26 @@ func (buffers *hipMoERouterDeviceBuffers) ReadOutput() (hipMoERouterResult, erro
 	if buffers.Output == nil || buffers.Output.Pointer() == 0 {
 		return hipMoERouterResult{}, core.E("rocm.hip.MoERouterLaunch", "packed router output buffer is required", nil)
 	}
+	routes := make([]rocmExpertRoute, buffers.TopK)
 	payload := make([]byte, int(buffers.Output.SizeBytes()))
+	return buffers.ReadPackedOutputInto(routes, payload)
+}
+
+func (buffers *hipMoERouterDeviceBuffers) ReadPackedOutputInto(routes []rocmExpertRoute, payload []byte) (hipMoERouterResult, error) {
+	if buffers == nil || buffers.Output == nil || buffers.Output.Pointer() == 0 {
+		return hipMoERouterResult{}, core.E("rocm.hip.MoERouterLaunch", "packed router output buffer is required", nil)
+	}
+	payloadBytes := int(buffers.Output.SizeBytes())
+	if len(routes) < buffers.TopK || len(payload) < payloadBytes {
+		return hipMoERouterResult{}, core.E("rocm.hip.MoERouterLaunch", "packed router result buffer is too small", nil)
+	}
+	payload = payload[:payloadBytes]
 	if err := buffers.Output.driver.CopyDeviceToHost(buffers.Output.Pointer(), payload); err != nil {
 		return hipMoERouterResult{}, core.E("rocm.hip.MoERouterLaunch", "copy packed router output", err)
 	}
 	idBytes := buffers.TopK * 4
 	probBytes := buffers.TopK * 4
-	idPayload := payload[:idBytes]
-	probPayload := payload[idBytes : idBytes+probBytes]
-	statusPayload := payload[idBytes+probBytes:]
-	routes := make([]rocmExpertRoute, buffers.TopK)
-	return buffers.parseOutput(routes, idPayload, probPayload, statusPayload)
+	return buffers.parseOutput(routes, payload[:idBytes], payload[idBytes:idBytes+probBytes], payload[idBytes+probBytes:])
 }
 
 func (buffers *hipMoERouterDeviceBuffers) ReadOutputInto(routes []rocmExpertRoute, idPayload, probPayload, statusPayload []byte) (hipMoERouterResult, error) {
@@ -366,6 +375,10 @@ func hipRunMoERouterKernel(ctx context.Context, driver nativeHIPDriver, req hipM
 }
 
 func hipRunMoERouterKernelWithDeviceInput(ctx context.Context, driver nativeHIPDriver, logits *hipDeviceByteBuffer, topK, layer int) (hipMoERouterResult, error) {
+	return hipRunMoERouterKernelWithDeviceInputWorkspace(ctx, driver, logits, topK, layer, nil)
+}
+
+func hipRunMoERouterKernelWithDeviceInputWorkspace(ctx context.Context, driver nativeHIPDriver, logits *hipDeviceByteBuffer, topK, layer int, workspace *hipAttentionHeadsChunkedWorkspace) (hipMoERouterResult, error) {
 	if err := hipContextErr(ctx); err != nil {
 		return hipMoERouterResult{}, err
 	}
@@ -378,14 +391,23 @@ func hipRunMoERouterKernelWithDeviceInput(ctx context.Context, driver nativeHIPD
 	if topK <= 0 || topK > logits.Count() || layer < 0 {
 		return hipMoERouterResult{}, core.E("rocm.hip.MoERouterLaunch", "top-k and layer must fit the router geometry", nil)
 	}
-	buffers := &hipMoERouterDeviceBuffers{
-		Logits: logits, ExpertCount: logits.Count(), TopK: topK, Layer: layer, BorrowedLogits: true,
+	var buffers *hipMoERouterDeviceBuffers
+	if workspace != nil {
+		var err error
+		buffers, err = workspace.prepareMoERouterBuffers(driver, logits, topK, layer)
+		if err != nil {
+			return hipMoERouterResult{}, err
+		}
+	} else {
+		buffers = &hipMoERouterDeviceBuffers{
+			Logits: logits, ExpertCount: logits.Count(), TopK: topK, Layer: layer, BorrowedLogits: true,
+		}
+		defer buffers.Close()
+		if err := buffers.allocateOutput(driver); err != nil {
+			return hipMoERouterResult{}, err
+		}
 	}
-	defer buffers.Close()
-	if err := buffers.allocateOutput(driver); err != nil {
-		return hipMoERouterResult{}, err
-	}
-	launchBytes, err := (hipMoERouterLaunchArgs{
+	launchArgs := hipMoERouterLaunchArgs{
 		LogitPointer:  logits.Pointer(),
 		IDPointer:     buffers.IDs.Pointer(),
 		ProbPointer:   buffers.Probs.Pointer(),
@@ -396,7 +418,14 @@ func hipRunMoERouterKernelWithDeviceInput(ctx context.Context, driver nativeHIPD
 		LogitBytes:    logits.SizeBytes(),
 		IDBytes:       buffers.IDs.SizeBytes(),
 		ProbBytes:     buffers.Probs.SizeBytes(),
-	}).Binary()
+	}
+	var launchBytes []byte
+	var err error
+	if workspace != nil {
+		launchBytes, err = launchArgs.BinaryInto(workspace.MoE.RouterArgs[:])
+	} else {
+		launchBytes, err = launchArgs.Binary()
+	}
 	if err != nil {
 		return hipMoERouterResult{}, err
 	}
@@ -406,6 +435,10 @@ func hipRunMoERouterKernelWithDeviceInput(ctx context.Context, driver nativeHIPD
 	}
 	if err := hipLaunchKernel(driver, config); err != nil {
 		return hipMoERouterResult{}, err
+	}
+	if workspace != nil {
+		payloadBytes := topK*8 + 4
+		return buffers.ReadPackedOutputInto(workspace.MoE.Routes[:topK], workspace.MoE.RouterPayload[:payloadBytes])
 	}
 	return buffers.ReadOutput()
 }

@@ -26,6 +26,8 @@ const (
 	hipRMSNormRoPEHeadsPairLaunchArgsBytes                           = 144
 	hipRMSNormRoPEHeadsBatchLaunchArgsVersion                 uint32 = 2
 	hipRMSNormRoPEHeadsBatchLaunchArgsBytes                          = 96
+	hipRMSNormRoPEHeadsPairLaneBatchLaunchArgsVersion         uint32 = 1
+	hipRMSNormRoPEHeadsPairLaneBatchLaunchArgsBytes                  = 152
 	hipRoPELaunchArgsVersion                                  uint32 = 1
 	hipRoPELaunchArgsBytes                                           = 64
 	hipRoPEHeadsLaunchArgsVersion                             uint32 = 1
@@ -41,12 +43,15 @@ const (
 	hipAttentionHeadsLaunchArgsBytes                                 = 128
 	hipAttentionHeadsBatchCausalLaunchArgsVersion             uint32 = 1
 	hipAttentionHeadsBatchCausalLaunchArgsBytes                      = 144
+	hipAttentionHeadsLaneBatchLaunchArgsVersion               uint32 = 1
+	hipAttentionHeadsLaneBatchLaunchArgsBytes                        = 112
+	hipAttentionHeadsLaneDescriptorBytes                             = 32
 	hipAttentionHeadsBatchCausalQueryRMSRoPELaunchArgsVersion uint32 = 1
 	hipAttentionHeadsBatchCausalQueryRMSRoPELaunchArgsBytes          = 184
 	hipAttentionHeadsSharedMaxTokens                                 = 2048
 	hipAttentionHeadsChunkedLaunchArgsVersion                 uint32 = 1
 	hipAttentionHeadsChunkedLaunchArgsBytes                          = 128
-	hipAttentionHeadsBatchChunkedLaunchArgsVersion            uint32 = 1
+	hipAttentionHeadsBatchChunkedLaunchArgsVersion            uint32 = 2
 	hipAttentionHeadsBatchChunkedLaunchArgsBytes                     = 136
 	hipAttentionHeadsChunkedBlockSize                                = 512
 	hipAttentionHeadsChunkSize                                       = 64
@@ -240,6 +245,37 @@ type hipRMSNormRoPEHeadsBatchLaunchArgs struct {
 	FrequencyScale float32
 }
 
+type hipRMSNormRoPEHeadsPairLaneBatchLaunchArgs struct {
+	QueryInputPointer   nativeDevicePointer
+	QueryWeightPointer  nativeDevicePointer
+	QueryOutputPointer  nativeDevicePointer
+	KeyInputPointer     nativeDevicePointer
+	KeyWeightPointer    nativeDevicePointer
+	KeyOutputPointer    nativeDevicePointer
+	PositionsPointer    nativeDevicePointer
+	HeadDim             int
+	QueryHeadCount      int
+	KeyHeadCount        int
+	Batch               int
+	QueryInputBytes     uint64
+	QueryWeightBytes    uint64
+	QueryOutputBytes    uint64
+	KeyInputBytes       uint64
+	KeyWeightBytes      uint64
+	KeyOutputBytes      uint64
+	QueryEpsilon        float32
+	QueryWeightEncoding uint32
+	QueryFlags          uint32
+	KeyEpsilon          float32
+	KeyWeightEncoding   uint32
+	KeyFlags            uint32
+	PositionsBytes      uint64
+	Base                float32
+	FrequencyDim        int
+	RotaryCount         int
+	FrequencyScale      float32
+}
+
 type hipRoPERequest struct {
 	Input        []float32
 	Position     int
@@ -402,6 +438,24 @@ type hipAttentionHeadsBatchCausalLaunchArgs struct {
 	DescriptorBytes   uint64
 	SharedMemBytes    uint64
 	WindowSize        int
+}
+
+type hipAttentionHeadsLaneBatchLaunchArgs struct {
+	QueryPointer   nativeDevicePointer
+	OutputPointer  nativeDevicePointer
+	WeightPointer  nativeDevicePointer
+	LanePointer    nativeDevicePointer
+	Dim            int
+	LaneCount      int
+	HeadCount      int
+	KeyHeads       int
+	MaxTokenCount  int
+	QueryBytes     uint64
+	OutputBytes    uint64
+	WeightBytes    uint64
+	LaneBytes      uint64
+	Scale          float32
+	SharedMemBytes uint64
 }
 
 type hipAttentionHeadsBatchCausalQueryRMSRoPELaunchArgs struct {
@@ -1503,6 +1557,134 @@ func (args hipRMSNormRoPEHeadsBatchLaunchArgs) BinaryInto(payload []byte) ([]byt
 	return payload, nil
 }
 
+func (args hipRMSNormRoPEHeadsPairLaneBatchLaunchArgs) Binary() ([]byte, error) {
+	return args.BinaryInto(nil)
+}
+
+func (args hipRMSNormRoPEHeadsPairLaneBatchLaunchArgs) BinaryInto(payload []byte) ([]byte, error) {
+	const operation = "RMSNormRoPEHeadsPairLaneBatchLaunch"
+	if args.QueryInputPointer == 0 || args.QueryOutputPointer == 0 || args.KeyInputPointer == 0 || args.KeyOutputPointer == 0 || args.PositionsPointer == 0 {
+		return nil, core.E("rocm.hip."+operation, "query/key input/output and positions pointers are required", nil)
+	}
+	headDim, err := rocmDeviceKVPositiveUint32("head dim", args.HeadDim)
+	if err != nil {
+		return nil, err
+	}
+	if headDim%2 != 0 {
+		return nil, core.E("rocm.hip."+operation, "head dim must be even", nil)
+	}
+	queryHeadCount, err := rocmDeviceKVPositiveUint32("query head count", args.QueryHeadCount)
+	if err != nil {
+		return nil, err
+	}
+	keyHeadCount, err := rocmDeviceKVPositiveUint32("key head count", args.KeyHeadCount)
+	if err != nil {
+		return nil, err
+	}
+	batch, err := rocmDeviceKVPositiveUint32("batch", args.Batch)
+	if err != nil {
+		return nil, err
+	}
+	if args.QueryEpsilon < 0 || math.IsNaN(float64(args.QueryEpsilon)) || math.IsInf(float64(args.QueryEpsilon), 0) ||
+		args.KeyEpsilon < 0 || math.IsNaN(float64(args.KeyEpsilon)) || math.IsInf(float64(args.KeyEpsilon), 0) {
+		return nil, core.E("rocm.hip."+operation, "epsilon must be non-negative and finite", nil)
+	}
+	if args.Base <= 0 || math.IsNaN(float64(args.Base)) || math.IsInf(float64(args.Base), 0) {
+		return nil, core.E("rocm.hip."+operation, "base must be positive and finite", nil)
+	}
+	frequencyScale := args.FrequencyScale
+	if frequencyScale == 0 {
+		frequencyScale = 1
+	}
+	if frequencyScale <= 0 || math.IsNaN(float64(frequencyScale)) || math.IsInf(float64(frequencyScale), 0) {
+		return nil, core.E("rocm.hip."+operation, "frequency scale must be positive and finite", nil)
+	}
+	if args.FrequencyDim < 0 || (args.FrequencyDim > 0 && args.FrequencyDim < args.HeadDim) {
+		return nil, core.E("rocm.hip."+operation, "frequency dimension must be zero or at least head dim", nil)
+	}
+	frequencyDim, err := rocmDeviceKVUint32("frequency dimension", args.FrequencyDim)
+	if err != nil {
+		return nil, err
+	}
+	if args.RotaryCount < 0 || args.RotaryCount > args.HeadDim || args.RotaryCount%2 != 0 {
+		return nil, core.E("rocm.hip."+operation, "rotary count must be zero or an even count no larger than head dim", nil)
+	}
+	rotaryCount, err := rocmDeviceKVUint32("rotary count", args.RotaryCount)
+	if err != nil {
+		return nil, err
+	}
+	queryCount := uint64(headDim) * uint64(queryHeadCount) * uint64(batch)
+	keyCount := uint64(headDim) * uint64(keyHeadCount) * uint64(batch)
+	if queryCount > uint64(^uint32(0)) || keyCount > uint64(^uint32(0)) {
+		return nil, core.E("rocm.hip."+operation, "total count is out of range", nil)
+	}
+	queryInputBytes, err := hipAlignedFloat32Bytes("query input", args.QueryInputBytes, uint32(queryCount))
+	if err != nil {
+		return nil, core.E("rocm.hip."+operation, "query input byte count", err)
+	}
+	queryWeightBytes, err := hipRMSNormLaunchWeightBytes(operation, "query weight", args.QueryWeightPointer, args.QueryWeightBytes, headDim, args.QueryWeightEncoding, args.QueryFlags)
+	if err != nil {
+		return nil, err
+	}
+	queryOutputBytes, err := hipAlignedFloat32Bytes("query output", args.QueryOutputBytes, uint32(queryCount))
+	if err != nil {
+		return nil, core.E("rocm.hip."+operation, "query output byte count", err)
+	}
+	keyInputBytes, err := hipAlignedFloat32Bytes("key input", args.KeyInputBytes, uint32(keyCount))
+	if err != nil {
+		return nil, core.E("rocm.hip."+operation, "key input byte count", err)
+	}
+	keyWeightBytes, err := hipRMSNormLaunchWeightBytes(operation, "key weight", args.KeyWeightPointer, args.KeyWeightBytes, headDim, args.KeyWeightEncoding, args.KeyFlags)
+	if err != nil {
+		return nil, err
+	}
+	keyOutputBytes, err := hipAlignedFloat32Bytes("key output", args.KeyOutputBytes, uint32(keyCount))
+	if err != nil {
+		return nil, core.E("rocm.hip."+operation, "key output byte count", err)
+	}
+	positionsBytes, err := hipAlignedFloat32Bytes("positions", args.PositionsBytes, batch)
+	if err != nil {
+		return nil, core.E("rocm.hip."+operation, "positions byte count", err)
+	}
+	if cap(payload) < hipRMSNormRoPEHeadsPairLaneBatchLaunchArgsBytes {
+		payload = hipBorrowLaunchPacket(hipRMSNormRoPEHeadsPairLaneBatchLaunchArgsBytes)
+	} else {
+		payload = payload[:hipRMSNormRoPEHeadsPairLaneBatchLaunchArgsBytes]
+		clear(payload)
+	}
+	binary.LittleEndian.PutUint32(payload[0:], hipRMSNormRoPEHeadsPairLaneBatchLaunchArgsVersion)
+	binary.LittleEndian.PutUint32(payload[4:], uint32(len(payload)))
+	binary.LittleEndian.PutUint64(payload[8:], uint64(args.QueryInputPointer))
+	binary.LittleEndian.PutUint64(payload[16:], uint64(args.QueryWeightPointer))
+	binary.LittleEndian.PutUint64(payload[24:], uint64(args.QueryOutputPointer))
+	binary.LittleEndian.PutUint64(payload[32:], uint64(args.KeyInputPointer))
+	binary.LittleEndian.PutUint64(payload[40:], uint64(args.KeyWeightPointer))
+	binary.LittleEndian.PutUint64(payload[48:], uint64(args.KeyOutputPointer))
+	binary.LittleEndian.PutUint64(payload[56:], uint64(args.PositionsPointer))
+	binary.LittleEndian.PutUint32(payload[64:], headDim)
+	binary.LittleEndian.PutUint32(payload[68:], queryHeadCount)
+	binary.LittleEndian.PutUint32(payload[72:], keyHeadCount)
+	binary.LittleEndian.PutUint32(payload[76:], batch)
+	binary.LittleEndian.PutUint32(payload[80:], queryInputBytes)
+	binary.LittleEndian.PutUint32(payload[84:], queryWeightBytes)
+	binary.LittleEndian.PutUint32(payload[88:], queryOutputBytes)
+	binary.LittleEndian.PutUint32(payload[92:], keyInputBytes)
+	binary.LittleEndian.PutUint32(payload[96:], keyWeightBytes)
+	binary.LittleEndian.PutUint32(payload[100:], keyOutputBytes)
+	binary.LittleEndian.PutUint32(payload[104:], math.Float32bits(args.QueryEpsilon))
+	binary.LittleEndian.PutUint32(payload[108:], args.QueryWeightEncoding)
+	binary.LittleEndian.PutUint32(payload[112:], args.QueryFlags)
+	binary.LittleEndian.PutUint32(payload[116:], math.Float32bits(args.KeyEpsilon))
+	binary.LittleEndian.PutUint32(payload[120:], args.KeyWeightEncoding)
+	binary.LittleEndian.PutUint32(payload[124:], args.KeyFlags)
+	binary.LittleEndian.PutUint32(payload[128:], positionsBytes)
+	binary.LittleEndian.PutUint32(payload[132:], math.Float32bits(args.Base))
+	binary.LittleEndian.PutUint32(payload[136:], frequencyDim)
+	binary.LittleEndian.PutUint32(payload[140:], rotaryCount)
+	binary.LittleEndian.PutUint32(payload[144:], math.Float32bits(frequencyScale))
+	return payload, nil
+}
+
 func hipRMSNormWeightEncoding(req hipRMSNormRequest) (uint32, error) {
 	switch {
 	case len(req.Weight) > 0 && len(req.WeightBF16) == 0:
@@ -2485,6 +2667,95 @@ func (args hipAttentionHeadsBatchCausalLaunchArgs) BinaryInto(payload []byte) ([
 	return payload, nil
 }
 
+func (args hipAttentionHeadsLaneBatchLaunchArgs) Binary() ([]byte, error) {
+	return args.BinaryInto(nil)
+}
+
+func (args hipAttentionHeadsLaneBatchLaunchArgs) BinaryInto(payload []byte) ([]byte, error) {
+	const operation = "AttentionHeadsLaneBatchLaunch"
+	if args.QueryPointer == 0 || args.OutputPointer == 0 || args.LanePointer == 0 {
+		return nil, core.E("rocm.hip."+operation, "query, output, and lane pointers are required", nil)
+	}
+	if args.Scale < 0 || math.IsNaN(float64(args.Scale)) || math.IsInf(float64(args.Scale), 0) {
+		return nil, core.E("rocm.hip."+operation, "scale must be non-negative and finite", nil)
+	}
+	dim, err := rocmDeviceKVPositiveUint32("dimension", args.Dim)
+	if err != nil {
+		return nil, err
+	}
+	laneCount, err := rocmDeviceKVPositiveUint32("lane count", args.LaneCount)
+	if err != nil {
+		return nil, err
+	}
+	headCount, err := rocmDeviceKVPositiveUint32("head count", args.HeadCount)
+	if err != nil {
+		return nil, err
+	}
+	keyHeads, err := rocmDeviceKVPositiveUint32("key head count", firstPositiveInt(args.KeyHeads, 1))
+	if err != nil {
+		return nil, err
+	}
+	if keyHeads > headCount || headCount%keyHeads != 0 {
+		return nil, core.E("rocm.hip."+operation, "key head count must divide query head count", nil)
+	}
+	maxTokenCount, err := rocmDeviceKVPositiveUint32("maximum token count", args.MaxTokenCount)
+	if err != nil {
+		return nil, err
+	}
+	queryElements := uint64(dim) * uint64(headCount) * uint64(laneCount)
+	queryBytes, err := hipExactUint32Bytes("query", args.QueryBytes, queryElements*4)
+	if err != nil {
+		return nil, core.E("rocm.hip."+operation, "query byte count", err)
+	}
+	outputBytes, err := hipExactUint32Bytes("output", args.OutputBytes, queryElements*4)
+	if err != nil {
+		return nil, core.E("rocm.hip."+operation, "output byte count", err)
+	}
+	laneBytes, err := hipExactUint32Bytes("lane descriptor", args.LaneBytes, uint64(laneCount)*hipAttentionHeadsLaneDescriptorBytes)
+	if err != nil {
+		return nil, core.E("rocm.hip."+operation, "lane descriptor byte count", err)
+	}
+	var weightBytes uint32
+	if args.WeightPointer == 0 {
+		if args.WeightBytes != 0 {
+			return nil, core.E("rocm.hip."+operation, "shared attention weights must not set weight bytes", nil)
+		}
+		if args.MaxTokenCount > hipAttentionHeadsSharedMaxTokens {
+			return nil, core.E("rocm.hip."+operation, "shared attention weights token count exceeds limit", nil)
+		}
+	} else {
+		weightElements := uint64(laneCount) * uint64(headCount) * uint64(maxTokenCount)
+		weightBytes, err = hipExactUint32Bytes("weight", args.WeightBytes, weightElements*4)
+		if err != nil {
+			return nil, core.E("rocm.hip."+operation, "weight byte count", err)
+		}
+	}
+	if cap(payload) < hipAttentionHeadsLaneBatchLaunchArgsBytes {
+		payload = hipBorrowLaunchPacket(hipAttentionHeadsLaneBatchLaunchArgsBytes)
+	} else {
+		payload = payload[:hipAttentionHeadsLaneBatchLaunchArgsBytes]
+		clear(payload)
+	}
+	binary.LittleEndian.PutUint32(payload[0:], hipAttentionHeadsLaneBatchLaunchArgsVersion)
+	binary.LittleEndian.PutUint32(payload[4:], uint32(len(payload)))
+	binary.LittleEndian.PutUint64(payload[8:], uint64(args.QueryPointer))
+	binary.LittleEndian.PutUint64(payload[16:], uint64(args.OutputPointer))
+	binary.LittleEndian.PutUint64(payload[24:], uint64(args.WeightPointer))
+	binary.LittleEndian.PutUint64(payload[32:], uint64(args.LanePointer))
+	binary.LittleEndian.PutUint32(payload[40:], dim)
+	binary.LittleEndian.PutUint32(payload[44:], laneCount)
+	binary.LittleEndian.PutUint32(payload[48:], headCount)
+	binary.LittleEndian.PutUint32(payload[52:], keyHeads)
+	binary.LittleEndian.PutUint32(payload[56:], maxTokenCount)
+	binary.LittleEndian.PutUint32(payload[60:], queryBytes)
+	binary.LittleEndian.PutUint32(payload[64:], outputBytes)
+	binary.LittleEndian.PutUint32(payload[68:], weightBytes)
+	binary.LittleEndian.PutUint32(payload[72:], laneBytes)
+	binary.LittleEndian.PutUint32(payload[76:], math.Float32bits(args.Scale))
+	binary.LittleEndian.PutUint64(payload[80:], args.SharedMemBytes)
+	return payload, nil
+}
+
 func (args hipAttentionHeadsBatchCausalQueryRMSRoPELaunchArgs) Binary() ([]byte, error) {
 	return args.BinaryInto(nil)
 }
@@ -2696,6 +2967,9 @@ func (args hipAttentionHeadsChunkedLaunchArgs) BinaryInto(payload []byte) ([]byt
 	if keyHeads > headCount || headCount%keyHeads != 0 {
 		return nil, core.E("rocm.hip.AttentionHeadsChunkedLaunch", "key head count must divide query head count", nil)
 	}
+	if keyHeads > 1 && dim&1 != 0 {
+		return nil, core.E("rocm.hip.AttentionHeadsChunkedLaunch", "multi-KV q4 attention requires an even head dimension", nil)
+	}
 	chunkSize, err := rocmDeviceKVPositiveUint32("attention chunk size", args.ChunkSize)
 	if err != nil {
 		return nil, err
@@ -2790,6 +3064,9 @@ func (args hipAttentionHeadsBatchChunkedLaunchArgs) BinaryInto(payload []byte) (
 	}
 	if keyHeads > headCount || headCount%keyHeads != 0 {
 		return nil, core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "key head count must divide query head count", nil)
+	}
+	if keyHeads > 1 && dim&1 != 0 {
+		return nil, core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "multi-KV q4 attention requires an even head dimension", nil)
 	}
 	queryCount, err := rocmDeviceKVPositiveUint32("query count", args.QueryCount)
 	if err != nil {

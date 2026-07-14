@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"math"
 	"math/bits"
+	"os"
 	"sync"
 
 	core "dappco.re/go"
@@ -844,6 +845,10 @@ func hipRunProjectionKernelWithDeviceInputWeightEncoding(ctx context.Context, dr
 }
 
 func hipRunProjectionKernelWithDeviceInputWeightEncodingOutput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, weightPointer nativeDevicePointer, weightBytes uint64, rows, cols int, encoding uint32, output *hipDeviceByteBuffer) error {
+	return hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(ctx, driver, input, weightPointer, weightBytes, rows, cols, encoding, output, nil)
+}
+
+func hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, weightPointer nativeDevicePointer, weightBytes uint64, rows, cols int, encoding uint32, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
 	if err := hipContextErr(ctx); err != nil {
 		return err
 	}
@@ -863,7 +868,7 @@ func hipRunProjectionKernelWithDeviceInputWeightEncodingOutput(ctx context.Conte
 	if output == nil || output.Pointer() == 0 || output.Count() != rows || output.SizeBytes() != uint64(rows*4) {
 		return core.E("rocm.hip.ProjectionLaunch", "projection output shape mismatch", nil)
 	}
-	launchBytes, err := (hipProjectionLaunchArgs{
+	launchArgs := hipProjectionLaunchArgs{
 		InputPointer:   input.Pointer(),
 		InputCount:     input.Count(),
 		InputBytes:     input.SizeBytes(),
@@ -874,7 +879,13 @@ func hipRunProjectionKernelWithDeviceInputWeightEncodingOutput(ctx context.Conte
 		Rows:           rows,
 		Cols:           cols,
 		WeightEncoding: encoding,
-	}).Binary()
+	}
+	var launchBytes []byte
+	if workspace != nil {
+		launchBytes, err = launchArgs.BinaryInto(workspace.MoE.RouterProjectionArgs[:])
+	} else {
+		launchBytes, err = launchArgs.Binary()
+	}
 	if err != nil {
 		return err
 	}
@@ -1866,6 +1877,89 @@ func hipRunRMSNormRoPEHeadsBatchKernelWithDeviceInputWeightConfigFrequencyScaleO
 	return nil
 }
 
+func hipRunRMSNormRoPEHeadsPairLaneBatchKernelWithDeviceInputWeightConfigFrequencyScaleOutput(ctx context.Context, driver nativeHIPDriver, queryInput, keyInput *hipDeviceByteBuffer, queryCfg, keyCfg hipRMSNormDeviceWeightConfig, queryHeadCount, keyHeadCount int, positions *hipDeviceTokenBuffer, base float32, frequencyDim int, rotaryCount int, frequencyScale float32, queryOutput, keyOutput *hipDeviceByteBuffer) error {
+	const operation = "rocm.hip.RMSNormRoPEHeadsPairLaneBatchLaunch"
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	if driver == nil || !driver.Available() {
+		return core.E(operation, "HIP driver is not available", nil)
+	}
+	if queryInput == nil || queryInput.Pointer() == 0 || keyInput == nil || keyInput.Pointer() == 0 {
+		return core.E(operation, "query and key input device buffers are required", nil)
+	}
+	if queryCfg.Count <= 0 || queryCfg.Count%2 != 0 || queryCfg.Count != keyCfg.Count || queryHeadCount <= 0 || keyHeadCount <= 0 {
+		return core.E(operation, "head dim must be positive/even/equal and head counts must be positive", nil)
+	}
+	if positions == nil || positions.Pointer() == 0 || positions.Count() <= 0 || positions.SizeBytes() != uint64(positions.Count()*4) {
+		return core.E(operation, "positions device buffer is required and must contain int32 rows", nil)
+	}
+	batch := positions.Count()
+	if queryInput.Count() != queryCfg.Count*queryHeadCount*batch || queryInput.SizeBytes() != uint64(queryInput.Count()*4) {
+		return core.E(operation, "query input device buffer shape mismatch", nil)
+	}
+	if keyInput.Count() != keyCfg.Count*keyHeadCount*batch || keyInput.SizeBytes() != uint64(keyInput.Count()*4) {
+		return core.E(operation, "key input device buffer shape mismatch", nil)
+	}
+	if queryOutput == nil || queryOutput.Pointer() == 0 || queryOutput.Count() != queryInput.Count() || queryOutput.SizeBytes() != queryInput.SizeBytes() {
+		return core.E(operation, "query output device buffer shape mismatch", nil)
+	}
+	if keyOutput == nil || keyOutput.Pointer() == 0 || keyOutput.Count() != keyInput.Count() || keyOutput.SizeBytes() != keyInput.SizeBytes() {
+		return core.E(operation, "key output device buffer shape mismatch", nil)
+	}
+	launchBytes, err := (hipRMSNormRoPEHeadsPairLaneBatchLaunchArgs{
+		QueryInputPointer:   queryInput.Pointer(),
+		QueryWeightPointer:  queryCfg.WeightPointer,
+		QueryOutputPointer:  queryOutput.Pointer(),
+		KeyInputPointer:     keyInput.Pointer(),
+		KeyWeightPointer:    keyCfg.WeightPointer,
+		KeyOutputPointer:    keyOutput.Pointer(),
+		PositionsPointer:    positions.Pointer(),
+		HeadDim:             queryCfg.Count,
+		QueryHeadCount:      queryHeadCount,
+		KeyHeadCount:        keyHeadCount,
+		Batch:               batch,
+		QueryInputBytes:     queryInput.SizeBytes(),
+		QueryWeightBytes:    queryCfg.WeightBytes,
+		QueryOutputBytes:    queryOutput.SizeBytes(),
+		KeyInputBytes:       keyInput.SizeBytes(),
+		KeyWeightBytes:      keyCfg.WeightBytes,
+		KeyOutputBytes:      keyOutput.SizeBytes(),
+		QueryEpsilon:        queryCfg.Epsilon,
+		QueryWeightEncoding: queryCfg.WeightEncoding,
+		QueryFlags:          queryCfg.Flags,
+		KeyEpsilon:          keyCfg.Epsilon,
+		KeyWeightEncoding:   keyCfg.WeightEncoding,
+		KeyFlags:            keyCfg.Flags,
+		PositionsBytes:      positions.SizeBytes(),
+		Base:                base,
+		FrequencyDim:        frequencyDim,
+		RotaryCount:         rotaryCount,
+		FrequencyScale:      frequencyScale,
+	}).Binary()
+	if err != nil {
+		return err
+	}
+	gridX := queryHeadCount
+	if keyHeadCount > gridX {
+		gridX = keyHeadCount
+	}
+	config := hipKernelLaunchConfig{
+		Name:   hipKernelNameRMSNormRoPEHeadsPairLaneBatch,
+		Args:   launchBytes,
+		GridX:  uint32(gridX),
+		GridY:  uint32(batch),
+		GridZ:  1,
+		BlockX: 256,
+		BlockY: 1,
+		BlockZ: 1,
+	}
+	if err := config.Validate(); err != nil {
+		return err
+	}
+	return hipLaunchKernel(driver, config)
+}
+
 func hipRunRoPEKernel(ctx context.Context, driver nativeHIPDriver, req hipRoPERequest) ([]float32, error) {
 	if err := hipContextErr(ctx); err != nil {
 		return nil, err
@@ -2263,10 +2357,140 @@ type hipAttentionHeadsBatchCausalDeviceRequest struct {
 	Scale           float32
 }
 
+type hipAttentionHeadsLaneBatchLane struct {
+	DeviceKV        *rocmDeviceKVCache
+	DescriptorTable *rocmDeviceKVDescriptorTable
+	WindowSize      int
+}
+
+type hipAttentionHeadsLaneBatchDeviceRequest struct {
+	Lanes     []hipAttentionHeadsLaneBatchLane
+	Dim       int
+	HeadCount int
+	KeyHeads  int
+	Scale     float32
+}
+
 const hipAttentionHeadsBatchWorkspaceMaxWeights = 64 * 1024
 
 func hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernel(ctx context.Context, driver nativeHIPDriver, req hipAttentionHeadsBatchCausalDeviceRequest, query *hipDeviceByteBuffer, output *hipDeviceByteBuffer) error {
 	return hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernelWorkspace(ctx, driver, req, query, output, nil)
+}
+
+func hipRunAttentionHeadsLaneBatchOutputFromDeviceQueryToDeviceKernel(ctx context.Context, driver nativeHIPDriver, req hipAttentionHeadsLaneBatchDeviceRequest, query *hipDeviceByteBuffer, output *hipDeviceByteBuffer) error {
+	if err := hipContextErr(ctx); err != nil {
+		return err
+	}
+	const operation = "AttentionHeadsLaneBatchLaunch"
+	if driver == nil || !driver.Available() {
+		return core.E("rocm.hip."+operation, "HIP driver is not available", nil)
+	}
+	if req.Dim <= 0 || req.HeadCount <= 0 || len(req.Lanes) == 0 {
+		return core.E("rocm.hip."+operation, "attention lane dimensions must be positive", nil)
+	}
+	keyHeads := firstPositiveInt(req.KeyHeads, 1)
+	if keyHeads <= 0 || keyHeads > req.HeadCount || req.HeadCount%keyHeads != 0 {
+		return core.E("rocm.hip."+operation, "key head count must divide query head count", nil)
+	}
+	if req.Scale < 0 || math.IsNaN(float64(req.Scale)) || math.IsInf(float64(req.Scale), 0) {
+		return core.E("rocm.hip."+operation, "scale must be non-negative and finite", nil)
+	}
+	queryCount := len(req.Lanes) * req.HeadCount * req.Dim
+	if query == nil || query.Pointer() == 0 || query.Count() != queryCount || query.SizeBytes() != uint64(queryCount*4) {
+		return core.E("rocm.hip."+operation, "attention query device buffer shape mismatch", nil)
+	}
+	if output == nil || output.Pointer() == 0 || output.Count() != queryCount || output.SizeBytes() != uint64(queryCount*4) {
+		return core.E("rocm.hip."+operation, "attention output device buffer shape mismatch", nil)
+	}
+	lanePayload := make([]byte, len(req.Lanes)*hipAttentionHeadsLaneDescriptorBytes)
+	maxTokenCount := 0
+	for index, lane := range req.Lanes {
+		if lane.WindowSize < 0 {
+			return core.E("rocm.hip."+operation, "lane window size must be non-negative", nil)
+		}
+		if lane.DeviceKV == nil || lane.DescriptorTable == nil {
+			return core.E("rocm.hip."+operation, "lane device KV and descriptor table are required", nil)
+		}
+		if err := lane.DescriptorTable.CompatibleWith(lane.DeviceKV); err != nil {
+			return core.E("rocm.hip."+operation, "lane descriptor table does not match device KV cache", err)
+		}
+		tokenCount := lane.DeviceKV.TokenCount()
+		if tokenCount <= 0 {
+			return core.E("rocm.hip."+operation, "lane device KV cache has no tokens", nil)
+		}
+		keyWidth, valueWidth, ok := lane.DeviceKV.LastVectorWidths()
+		if !ok || keyWidth != req.Dim*keyHeads || valueWidth != req.Dim*keyHeads {
+			return core.E("rocm.hip."+operation, "lane device KV widths must match attention dimension", nil)
+		}
+		if tokenCount > maxTokenCount {
+			maxTokenCount = tokenCount
+		}
+		offset := index * hipAttentionHeadsLaneDescriptorBytes
+		binary.LittleEndian.PutUint64(lanePayload[offset:], uint64(lane.DescriptorTable.Pointer()))
+		binary.LittleEndian.PutUint64(lanePayload[offset+8:], lane.DescriptorTable.SizeBytes())
+		binary.LittleEndian.PutUint32(lanePayload[offset+16:], uint32(tokenCount))
+		binary.LittleEndian.PutUint32(lanePayload[offset+20:], uint32(lane.WindowSize))
+	}
+	laneBuffer, err := hipUploadByteBuffer(driver, "rocm.hip."+operation, "attention lane descriptors", lanePayload, len(lanePayload))
+	if err != nil {
+		return err
+	}
+	defer laneBuffer.Close()
+
+	launch := hipAttentionHeadsLaneBatchLaunchArgs{
+		QueryPointer:  query.Pointer(),
+		OutputPointer: output.Pointer(),
+		LanePointer:   laneBuffer.Pointer(),
+		Dim:           req.Dim,
+		LaneCount:     len(req.Lanes),
+		HeadCount:     req.HeadCount,
+		KeyHeads:      keyHeads,
+		MaxTokenCount: maxTokenCount,
+		QueryBytes:    query.SizeBytes(),
+		OutputBytes:   output.SizeBytes(),
+		LaneBytes:     laneBuffer.SizeBytes(),
+		Scale:         req.Scale,
+	}
+	var sharedMemBytes uint32
+	var weights *hipDeviceByteBuffer
+	if maxTokenCount <= hipAttentionHeadsSharedMaxTokens {
+		sharedMemBytes, err = hipAttentionHeadsSharedMemBytes(maxTokenCount, true)
+		if err != nil {
+			return err
+		}
+		launch.SharedMemBytes = uint64(sharedMemBytes)
+	} else {
+		weightCount64 := uint64(len(req.Lanes)) * uint64(req.HeadCount) * uint64(maxTokenCount)
+		if weightCount64 > uint64(int(^uint(0)>>1))/4 {
+			return core.E("rocm.hip."+operation, "attention lane weight buffer is too large", nil)
+		}
+		weights, err = hipAllocateByteBuffer(driver, "rocm.hip."+operation, "attention lane weights", weightCount64*4, int(weightCount64))
+		if err != nil {
+			return err
+		}
+		defer weights.Close()
+		launch.WeightPointer = weights.Pointer()
+		launch.WeightBytes = weights.SizeBytes()
+	}
+	launchBytes, err := launch.Binary()
+	if err != nil {
+		return err
+	}
+	config := hipKernelLaunchConfig{
+		Name:           hipKernelNameAttentionHeadsLaneBatch,
+		Args:           launchBytes,
+		GridX:          uint32(req.HeadCount),
+		GridY:          uint32(len(req.Lanes)),
+		GridZ:          1,
+		BlockX:         hipAttentionHeadsBlockSize(maxTokenCount),
+		BlockY:         1,
+		BlockZ:         1,
+		SharedMemBytes: sharedMemBytes,
+	}
+	if err := config.Validate(); err != nil {
+		return err
+	}
+	return hipLaunchKernel(driver, config)
 }
 
 func hipRunAttentionHeadsBatchCausalQueryRMSRoPEOutputFromDeviceQueryToDeviceKernel(ctx context.Context, driver nativeHIPDriver, req hipAttentionHeadsBatchCausalDeviceRequest, query *hipDeviceByteBuffer, queryNormCfg hipRMSNormDeviceWeightConfig, ropeStartPosition int, ropeBase float32, ropeFrequencyDim, ropeRotaryCount int, ropeFrequencyScale float32, output *hipDeviceByteBuffer) error {
@@ -2580,27 +2804,128 @@ func hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernelWorkspace
 	return hipLaunchKernel(driver, config)
 }
 
-func hipAttentionHeadsBatchChunkedEligible(req hipAttentionHeadsBatchCausalDeviceRequest, workspace *hipAttentionHeadsChunkedWorkspace) bool {
-	if firstPositiveInt(req.KeyHeads, 1) != 1 {
+type hipAttentionHeadsBatchChunkedEligibilityReason uint8
+
+const hipAttentionHeadsBatchChunkedGQA2Env = "GO_ROCM_ENABLE_EXPERIMENTAL_GQA2_CHUNKED_ATTENTION"
+
+var hipAttentionHeadsBatchChunkedGQA2Enabled = os.Getenv(hipAttentionHeadsBatchChunkedGQA2Env) == "1"
+
+func hipAttentionHeadsBatchChunkedGQA2Eligible(headCount, keyHeads int) bool {
+	if !hipAttentionHeadsBatchChunkedGQA2Enabled || headCount <= 0 || keyHeads <= 0 || headCount%keyHeads != 0 {
 		return false
 	}
-	if workspace == nil || req.DeviceKV == nil || req.DescriptorTable == nil {
-		return false
+	queryHeadsPerKV := headCount / keyHeads
+	return queryHeadsPerKV >= 2 && queryHeadsPerKV%2 == 0
+}
+
+func hipAttentionHeadsBatchChunkedStage1LaunchConfig(args []byte, queryCount, headCount, keyHeads, chunkCount, chunkSize, dim int) (hipKernelLaunchConfig, error) {
+	name := hipKernelNameAttentionHeadsBatchChunkedStage1
+	stage1HeadRows := queryCount * headCount
+	sharedMemBytes, err := hipAttentionHeadsChunkedSharedMemBytes(chunkSize, dim)
+	if err != nil {
+		return hipKernelLaunchConfig{}, err
 	}
-	if req.Dim <= 0 || req.Dim > hipAttentionHeadsChunkedBlockSize {
-		return false
+	if hipAttentionHeadsBatchChunkedGQA2Eligible(headCount, keyHeads) {
+		name = hipKernelNameAttentionHeadsBatchChunkedStage1GQA2
+		stage1HeadRows = queryCount * (headCount / 2)
+		sharedMemBytes, err = hipAttentionHeadsBatchChunkedGQA2SharedMemBytes(chunkSize, dim)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+	}
+	blocks, err := rocmDeviceKVPositiveUint32("attention batch chunked stage1 blocks", stage1HeadRows*chunkCount)
+	if err != nil {
+		return hipKernelLaunchConfig{}, err
+	}
+	config := hipKernelLaunchConfig{
+		Name:           name,
+		Args:           args,
+		GridX:          blocks,
+		GridY:          1,
+		GridZ:          1,
+		BlockX:         hipAttentionHeadsChunkedBlockSize,
+		BlockY:         1,
+		BlockZ:         1,
+		SharedMemBytes: sharedMemBytes,
+	}
+	return config, config.Validate()
+}
+
+func hipAttentionHeadsBatchChunkedGQA2SharedMemBytes(chunkSize, dim int) (uint32, error) {
+	chunk, err := rocmDeviceKVPositiveUint32("attention GQA2 chunked chunk size", chunkSize)
+	if err != nil {
+		return 0, err
+	}
+	width, err := rocmDeviceKVPositiveUint32("attention GQA2 chunked query dim", dim)
+	if err != nil {
+		return 0, err
+	}
+	bytes := uint64(chunk) * 4
+	bytes = hipAttentionHeadsAlignSharedBytes(bytes, 4)
+	bytes += uint64(chunk) * 4
+	bytes = hipAttentionHeadsAlignSharedBytes(bytes, 8)
+	bytes += uint64(chunk) * 8
+	bytes = hipAttentionHeadsAlignSharedBytes(bytes, 4)
+	bytes += uint64(chunk) * 4
+	bytes = hipAttentionHeadsAlignSharedBytes(bytes, 4)
+	bytes += uint64(width) * 4
+	bytes = hipAttentionHeadsAlignSharedBytes(bytes, 4)
+	bytes += uint64(width) * 4
+	if bytes > math.MaxUint32 {
+		return 0, core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "attention GQA2 chunked shared memory byte count is out of uint32 range", nil)
+	}
+	return uint32(bytes), nil
+}
+
+const (
+	hipAttentionHeadsBatchChunkedEligibilityEligible hipAttentionHeadsBatchChunkedEligibilityReason = iota
+	hipAttentionHeadsBatchChunkedEligibilityInvalidHeads
+	hipAttentionHeadsBatchChunkedEligibilityMissingWorkspace
+	hipAttentionHeadsBatchChunkedEligibilityMissingDeviceKV
+	hipAttentionHeadsBatchChunkedEligibilityMissingDescriptor
+	hipAttentionHeadsBatchChunkedEligibilityInvalidDimension
+	hipAttentionHeadsBatchChunkedEligibilityBelowTokenThreshold
+	hipAttentionHeadsBatchChunkedEligibilityUnsupportedKVMode
+	hipAttentionHeadsBatchChunkedEligibilityTokenCountMismatch
+)
+
+func hipAttentionHeadsBatchChunkedEligibilityReasonFor(req hipAttentionHeadsBatchCausalDeviceRequest, workspace *hipAttentionHeadsChunkedWorkspace) hipAttentionHeadsBatchChunkedEligibilityReason {
+	keyHeads := firstPositiveInt(req.KeyHeads, 1)
+	if keyHeads <= 0 || keyHeads > req.HeadCount || req.HeadCount%keyHeads != 0 {
+		return hipAttentionHeadsBatchChunkedEligibilityInvalidHeads
+	}
+	if workspace == nil {
+		return hipAttentionHeadsBatchChunkedEligibilityMissingWorkspace
+	}
+	if req.DeviceKV == nil {
+		return hipAttentionHeadsBatchChunkedEligibilityMissingDeviceKV
+	}
+	if req.DescriptorTable == nil {
+		return hipAttentionHeadsBatchChunkedEligibilityMissingDescriptor
+	}
+	if req.Dim <= 0 || req.Dim > hipAttentionHeadsChunkedBlockSize || (keyHeads > 1 && req.Dim&1 != 0) {
+		return hipAttentionHeadsBatchChunkedEligibilityInvalidDimension
 	}
 	minTokenCount := hipAttentionHeadsSharedMaxTokens
 	if req.Dim == hipAttentionHeadsChunkedBlockSize {
-		minTokenCount = 512
+		minTokenCount = hipAttentionHeadsChunkedBlockSize
+	} else if req.Dim == hipAttentionHeadsChunkedBlockSize/2 && req.WindowSize > 0 {
+		minTokenCount = hipAttentionHeadsChunkedBlockSize
 	}
 	if req.TokenCount <= minTokenCount {
-		return false
+		return hipAttentionHeadsBatchChunkedEligibilityBelowTokenThreshold
 	}
 	if req.DeviceKV.mode != rocmKVCacheModeKQ8VQ4 {
-		return false
+		return hipAttentionHeadsBatchChunkedEligibilityUnsupportedKVMode
 	}
-	return req.DeviceKV.TokenCount() == req.TokenCount
+	if req.DeviceKV.TokenCount() != req.TokenCount {
+		return hipAttentionHeadsBatchChunkedEligibilityTokenCountMismatch
+	}
+	return hipAttentionHeadsBatchChunkedEligibilityEligible
+}
+
+func hipAttentionHeadsBatchChunkedEligible(req hipAttentionHeadsBatchCausalDeviceRequest, workspace *hipAttentionHeadsChunkedWorkspace) bool {
+	return hipAttentionHeadsBatchChunkedEligibilityReasonFor(req, workspace) == hipAttentionHeadsBatchChunkedEligibilityEligible
 }
 
 func hipRunAttentionHeadsBatchChunkedOutputFromDeviceQueryToDeviceKernelWorkspace(ctx context.Context, driver nativeHIPDriver, req hipAttentionHeadsBatchCausalDeviceRequest, query *hipDeviceByteBuffer, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
@@ -2617,8 +2942,11 @@ func hipRunAttentionHeadsBatchChunkedOutputFromDeviceQueryToDeviceKernelWorkspac
 		return core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "attention batch dimensions are unsupported", nil)
 	}
 	keyHeads := firstPositiveInt(req.KeyHeads, 1)
-	if keyHeads != 1 {
-		return core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "multi-head KV chunked attention is not linked", nil)
+	if keyHeads <= 0 || keyHeads > req.HeadCount || req.HeadCount%keyHeads != 0 {
+		return core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "key head count must divide query head count", nil)
+	}
+	if keyHeads > 1 && req.Dim&1 != 0 {
+		return core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "multi-KV q4 attention requires an even head dimension", nil)
 	}
 	if req.QueryStartToken < 0 || uint64(req.QueryStartToken)+uint64(req.QueryCount) > uint64(req.TokenCount) {
 		return core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "causal query window exceeds token count", nil)
@@ -2643,7 +2971,8 @@ func hipRunAttentionHeadsBatchChunkedOutputFromDeviceQueryToDeviceKernelWorkspac
 	if !ok {
 		return core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "device KV cache has no pages", nil)
 	}
-	if req.DeviceKV.mode != rocmKVCacheModeKQ8VQ4 || keyWidth != req.Dim || valueWidth != req.Dim || req.DeviceKV.TokenCount() != req.TokenCount {
+	kvWidth := req.Dim * keyHeads
+	if req.DeviceKV.mode != rocmKVCacheModeKQ8VQ4 || keyWidth != kvWidth || valueWidth != kvWidth || req.DeviceKV.TokenCount() != req.TokenCount {
 		return core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "device KV cache shape is unsupported", nil)
 	}
 
@@ -2683,26 +3012,8 @@ func hipRunAttentionHeadsBatchChunkedOutputFromDeviceQueryToDeviceKernelWorkspac
 	}
 	stage2LaunchBytes := workspace.BatchChunkedStage2Args[:len(launchBytes)]
 	copy(stage2LaunchBytes, launchBytes)
-	sharedMemBytes, err := hipAttentionHeadsChunkedSharedMemBytes(chunkSize, req.Dim)
+	stage1, err := hipAttentionHeadsBatchChunkedStage1LaunchConfig(launchBytes, req.QueryCount, req.HeadCount, keyHeads, chunkCount, chunkSize, req.Dim)
 	if err != nil {
-		return err
-	}
-	stage1Blocks, err := rocmDeviceKVPositiveUint32("attention batch chunked stage1 blocks", workspaceHeadRows*chunkCount)
-	if err != nil {
-		return err
-	}
-	stage1 := hipKernelLaunchConfig{
-		Name:           hipKernelNameAttentionHeadsBatchChunkedStage1,
-		Args:           launchBytes,
-		GridX:          stage1Blocks,
-		GridY:          1,
-		GridZ:          1,
-		BlockX:         hipAttentionHeadsChunkedBlockSize,
-		BlockY:         1,
-		BlockZ:         1,
-		SharedMemBytes: sharedMemBytes,
-	}
-	if err := stage1.Validate(); err != nil {
 		return err
 	}
 	if err := hipLaunchKernel(driver, stage1); err != nil {
@@ -2903,6 +3214,7 @@ type hipAttentionHeadsChunkedWorkspace struct {
 	AssistantDraftInputHiddenFixed             hipDeviceByteBuffer
 	AssistantDraftInputHiddenCap               int
 	AssistantDraftInputHiddenView              hipDeviceByteBuffer
+	MoE                                        hipGemma4MoEWorkspace
 	PrefillTokenBuffer                         *hipDeviceTokenBuffer
 	PrefillTokenView                           hipDeviceTokenBuffer
 	PrefillTokenPayload                        []byte
@@ -3049,6 +3361,7 @@ func (workspace *hipAttentionHeadsChunkedWorkspace) resetBorrowedViews() {
 	workspace.PerLayerInputBacking = [1]*hipDeviceByteBuffer{}
 	workspace.AssistantDraftCombinedView = hipDeviceByteBuffer{}
 	workspace.AssistantDraftInputHiddenView = hipDeviceByteBuffer{}
+	workspace.MoE.resetBorrowedViews()
 }
 
 const (
@@ -4260,6 +4573,9 @@ func (workspace *hipAttentionHeadsChunkedWorkspace) Close() error {
 	if err := workspace.BatchAttentionWeight.Close(); err != nil {
 		lastErr = err
 	}
+	if err := workspace.MoE.Close(); err != nil {
+		lastErr = err
+	}
 	if err := workspace.ProjectionScore.Close(); err != nil {
 		lastErr = err
 	}
@@ -4623,7 +4939,7 @@ func hipRunAttentionHeadsOutputFromDeviceQueryToDeviceKernelWithWorkspace(ctx co
 	if err != nil {
 		return err
 	}
-	if !hipAttentionHeadsChunkedEligible(req, dim, tokenCount) {
+	if !hipAttentionHeadsChunkedEligible(req, headCount, dim, tokenCount) {
 		return hipRunAttentionHeadsOutputFromDeviceQueryToDeviceKernel(ctx, driver, req, query, headCount, output)
 	}
 	if headCount <= 0 {
@@ -4638,8 +4954,15 @@ func hipRunAttentionHeadsOutputFromDeviceQueryToDeviceKernelWithWorkspace(ctx co
 	return hipRunAttentionHeadsChunked(ctx, driver, req, query, headCount, dim, tokenCount, output, workspace)
 }
 
-func hipAttentionHeadsChunkedEligible(req hipAttentionRequest, dim, tokenCount int) bool {
-	if req.keyHeadsOrDefault() != 1 {
+func hipAttentionHeadsChunkedEligible(req hipAttentionRequest, headCount, dim, tokenCount int) bool {
+	keyHeads := req.keyHeadsOrDefault()
+	if headCount <= 0 || keyHeads <= 0 || keyHeads > headCount || headCount%keyHeads != 0 {
+		return false
+	}
+	if keyHeads > 1 && dim&1 != 0 {
+		return false
+	}
+	if uint64(dim)*uint64(keyHeads) > uint64(^uint32(0)) {
 		return false
 	}
 	if dim <= 0 || dim > hipAttentionHeadsChunkedBlockSize || tokenCount < hipAttentionHeadsChunkSize {

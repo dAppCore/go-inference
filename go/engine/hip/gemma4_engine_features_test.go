@@ -1204,6 +1204,13 @@ func TestLoadModelGemma4GGUFForwardsNativeTextConfig_Good(t *testing.T) {
 		sliding.PartialRotaryFactor != 1 {
 		t.Fatalf("Gemma4 RoPE params = %+v, want full/sliding GGUF RoPE metadata", cfg.RoPEParameters)
 	}
+	declaration := runtime.loadConfig.Gemma4Architecture
+	if !declaration.Matched() || declaration.Arch.Hidden != productionLaneGemma4E2BHiddenSize || declaration.Arch.Vocab != productionLaneGemma4E2BVocabSize {
+		t.Fatalf("Gemma4 shared architecture = %+v, want matched GGUF declaration", declaration)
+	}
+	if declaration.Topology.KVShareFrom[15] != 13 || declaration.Topology.KVShareFrom[19] != 14 || declaration.Topology.KVShareFrom[34] != 14 {
+		t.Fatalf("Gemma4 shared topology = %+v, want E2B cache owners", declaration.Topology.KVShareFrom)
+	}
 }
 
 func TestNativeGemma4TextConfigFromGGUFMetadataAssistant_Good(t *testing.T) {

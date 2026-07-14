@@ -118,6 +118,153 @@ type hipGemma4ExpertCache struct {
 	mu       sync.Mutex
 }
 
+const hipGemma4MoERouterMaximumOutputBytes = hipGGUFQ4_0SelectedExpertsMaxTopK*8 + 4
+
+type hipGemma4MoEWorkspace struct {
+	HiddenPairFixed      hipDeviceByteBuffer
+	HiddenPairCap        int
+	HiddenViews          [2]hipDeviceByteBuffer
+	RouterScoresFixed    hipDeviceByteBuffer
+	RouterScoresCap      int
+	RouterScoresView     hipDeviceByteBuffer
+	RouterOutputFixed    hipDeviceByteBuffer
+	RouterOutputView     hipDeviceByteBuffer
+	RouterIDView         hipDeviceByteBuffer
+	RouterProbView       hipDeviceByteBuffer
+	RouterStatusView     hipDeviceByteBuffer
+	RouterBuffers        hipMoERouterDeviceBuffers
+	RouterArgs           [hipMoERouterLaunchArgsBytes]byte
+	RouterProjectionArgs [hipProjectionLaunchArgsBytes]byte
+	SelectedExpertArgs   [hipGGUFQ4_0SelectedExpertsLaunchArgsBytes]byte
+	CombineNormsArgs     [hipMoECombineNormsLaunchArgsBytes]byte
+	RouterPayload        [hipGemma4MoERouterMaximumOutputBytes]byte
+	Routes               [hipGGUFQ4_0SelectedExpertsMaxTopK]rocmExpertRoute
+	Entries              [hipGGUFQ4_0SelectedExpertsMaxTopK]*hipGemma4ExpertCacheEntry
+	RouteWeights         [hipGGUFQ4_0SelectedExpertsMaxTopK]float32
+}
+
+func (workspace *hipAttentionHeadsChunkedWorkspace) EnsureMoEHiddenOutput(driver nativeHIPDriver, count, slot int) (*hipDeviceByteBuffer, error) {
+	if workspace == nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "attention workspace is required", nil)
+	}
+	if slot < 0 || slot >= len(workspace.MoE.HiddenViews) {
+		return nil, core.E("rocm.hip.Gemma4MoE", "MoE hidden output slot is out of range", nil)
+	}
+	return workspace.ensureFixedPairOutputReusableCapacity(
+		driver,
+		&workspace.MoE.HiddenPairFixed,
+		&workspace.MoE.HiddenPairCap,
+		&workspace.MoE.HiddenViews,
+		count,
+		slot,
+		"MoE hidden output pair",
+		"MoE hidden output view",
+	)
+}
+
+func (workspace *hipAttentionHeadsChunkedWorkspace) EnsureMoERouterScores(driver nativeHIPDriver, count int) (*hipDeviceByteBuffer, error) {
+	if workspace == nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "attention workspace is required", nil)
+	}
+	return workspace.ensureFixedOutputReusableCapacity(
+		driver,
+		&workspace.MoE.RouterScoresFixed,
+		&workspace.MoE.RouterScoresCap,
+		&workspace.MoE.RouterScoresView,
+		count,
+		"MoE router scores",
+		"MoE router score view",
+	)
+}
+
+func (workspace *hipAttentionHeadsChunkedWorkspace) prepareMoERouterBuffers(driver nativeHIPDriver, logits *hipDeviceByteBuffer, topK, layer int) (*hipMoERouterDeviceBuffers, error) {
+	if workspace == nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "attention workspace is required", nil)
+	}
+	if driver == nil || !driver.Available() {
+		return nil, core.E("rocm.hip.MoERouterLaunch", "HIP driver is not available", nil)
+	}
+	if logits == nil || logits.Pointer() == 0 || logits.Count() <= 0 || logits.SizeBytes() != uint64(logits.Count()*4) {
+		return nil, core.E("rocm.hip.MoERouterLaunch", "router logits device buffer shape mismatch", nil)
+	}
+	if topK <= 0 || topK > logits.Count() || topK > hipGGUFQ4_0SelectedExpertsMaxTopK || layer < 0 {
+		return nil, core.E("rocm.hip.MoERouterLaunch", "top-k and layer must fit the router workspace", nil)
+	}
+	moe := &workspace.MoE
+	if moe.RouterOutputFixed.Pointer() == 0 || moe.RouterOutputFixed.driver != driver ||
+		moe.RouterOutputFixed.SizeBytes() < hipGemma4MoERouterMaximumOutputBytes {
+		if err := moe.RouterOutputFixed.Close(); err != nil {
+			return nil, err
+		}
+		output, err := hipAllocateByteBufferValue(
+			driver,
+			"rocm.hip.MoERouterLaunch",
+			"packed router output workspace",
+			hipGemma4MoERouterMaximumOutputBytes,
+			hipGemma4MoERouterMaximumOutputBytes,
+		)
+		if err != nil {
+			return nil, err
+		}
+		moe.RouterOutputFixed = output
+	}
+	idBytes := uint64(topK * 4)
+	probBytes := uint64(topK * 4)
+	totalBytes := idBytes + probBytes + 4
+	moe.RouterOutputView = hipBorrowDeviceByteBufferValue(driver, "packed router output view", moe.RouterOutputFixed.Pointer(), totalBytes, int(totalBytes))
+	moe.RouterIDView = hipBorrowDeviceByteBufferValue(driver, "router id output view", moe.RouterOutputView.Pointer(), idBytes, topK)
+	moe.RouterProbView = hipBorrowDeviceByteBufferValue(driver, "router probability output view", moe.RouterOutputView.Pointer()+nativeDevicePointer(idBytes), probBytes, topK)
+	moe.RouterStatusView = hipBorrowDeviceByteBufferValue(driver, "router status output view", moe.RouterOutputView.Pointer()+nativeDevicePointer(idBytes+probBytes), 4, 1)
+	moe.RouterBuffers = hipMoERouterDeviceBuffers{
+		Logits:         logits,
+		Output:         &moe.RouterOutputView,
+		IDs:            &moe.RouterIDView,
+		Probs:          &moe.RouterProbView,
+		Status:         &moe.RouterStatusView,
+		ExpertCount:    logits.Count(),
+		TopK:           topK,
+		Layer:          layer,
+		BorrowedLogits: true,
+	}
+	return &moe.RouterBuffers, nil
+}
+
+func (workspace *hipGemma4MoEWorkspace) resetBorrowedViews() {
+	if workspace == nil {
+		return
+	}
+	workspace.HiddenViews = [2]hipDeviceByteBuffer{}
+	workspace.RouterScoresView = hipDeviceByteBuffer{}
+	workspace.RouterOutputView = hipDeviceByteBuffer{}
+	workspace.RouterIDView = hipDeviceByteBuffer{}
+	workspace.RouterProbView = hipDeviceByteBuffer{}
+	workspace.RouterStatusView = hipDeviceByteBuffer{}
+	workspace.RouterBuffers = hipMoERouterDeviceBuffers{}
+}
+
+func (workspace *hipGemma4MoEWorkspace) Close() error {
+	if workspace == nil {
+		return nil
+	}
+	var lastErr error
+	if err := workspace.HiddenPairFixed.Close(); err != nil {
+		lastErr = err
+	}
+	if err := workspace.RouterScoresFixed.Close(); err != nil {
+		lastErr = err
+	}
+	if err := workspace.RouterOutputFixed.Close(); err != nil {
+		lastErr = err
+	}
+	workspace.HiddenPairFixed = hipDeviceByteBuffer{}
+	workspace.HiddenPairCap = 0
+	workspace.RouterScoresFixed = hipDeviceByteBuffer{}
+	workspace.RouterScoresCap = 0
+	workspace.RouterOutputFixed = hipDeviceByteBuffer{}
+	workspace.resetBorrowedViews()
+	return lastErr
+}
+
 func hipLoadedGemma4MoERuntimeReady(model *hipLoadedModel) bool {
 	return hipLoadedGemma4MoERuntimeError(model) == nil
 }
@@ -404,6 +551,115 @@ func (cfg *hipGemma4MoELayerConfig) expertEntry(expert int) (*hipGemma4ExpertCac
 }
 
 func hipRunGemma4MoEDeviceMLP(ctx context.Context, driver nativeHIPDriver, attentionResidual, localInput *hipDeviceByteBuffer, layer hipGemma4Q4Layer0Config, epsilon float32) (*hipDeviceByteBuffer, error) {
+	return hipRunGemma4MoEDeviceMLPWithWorkspace(ctx, driver, attentionResidual, localInput, layer, epsilon, nil)
+}
+
+func hipRunGemma4MoEDeviceMLPWithWorkspace(ctx context.Context, driver nativeHIPDriver, attentionResidual, localInput *hipDeviceByteBuffer, layer hipGemma4Q4Layer0Config, epsilon float32, workspace *hipAttentionHeadsChunkedWorkspace) (*hipDeviceByteBuffer, error) {
+	if workspace == nil {
+		return hipRunGemma4MoEDeviceMLPAllocated(ctx, driver, attentionResidual, localInput, layer, epsilon)
+	}
+	moe := layer.MoE
+	if moe == nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "MoE layer config is required", nil)
+	}
+	if err := moe.validate(layer.HiddenSize); err != nil {
+		return nil, err
+	}
+	if attentionResidual == nil || localInput == nil || attentionResidual.Count() != layer.HiddenSize || localInput.Count() != layer.HiddenSize {
+		return nil, core.E("rocm.hip.Gemma4MoE", "attention residual and local input must match the hidden size", nil)
+	}
+
+	localOutput, err := workspace.EnsureProjectionOutput(driver, layer.HiddenSize)
+	if err != nil {
+		return nil, err
+	}
+	if err := hipRunGemma4Q4DeviceGELUTanhMLPWithDeviceInputOutput(
+		ctx, driver, localInput, layer.GateProjection, layer.UpProjection, layer.DownProjection, localOutput, workspace,
+	); err != nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "run local MLP branch", err)
+	}
+
+	expertInput, err := workspace.EnsureMoEHiddenOutput(driver, layer.HiddenSize, 0)
+	if err != nil {
+		return nil, err
+	}
+	expertNormCfg := moe.PreFeedForwardNorm2
+	expertNormCfg.Epsilon = epsilon
+	if err := hipRunRMSNormDeviceToDeviceKernelWithWorkspace(
+		ctx, driver, attentionResidual.Pointer(), attentionResidual.SizeBytes(), expertInput.Pointer(), expertInput.SizeBytes(), expertNormCfg, workspace,
+	); err != nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "run expert input norm", err)
+	}
+
+	routerInput, err := workspace.EnsureMoEHiddenOutput(driver, layer.HiddenSize, 1)
+	if err != nil {
+		return nil, err
+	}
+	routerNormCfg := moe.RouterNorm
+	routerNormCfg.Epsilon = epsilon
+	if err := hipRunRMSNormDeviceToDeviceKernelWithWorkspace(
+		ctx, driver, attentionResidual.Pointer(), attentionResidual.SizeBytes(), routerInput.Pointer(), routerInput.SizeBytes(), routerNormCfg, workspace,
+	); err != nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "run router norm", err)
+	}
+	routerScores, err := workspace.EnsureMoERouterScores(driver, moe.NumExperts)
+	if err != nil {
+		return nil, err
+	}
+	if err := hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(
+		ctx, driver, routerInput,
+		moe.RouterProjection.WeightPointer, moe.RouterProjection.WeightBytes,
+		moe.RouterProjection.Rows, moe.RouterProjection.Cols,
+		hipProjectionWeightEncodingF32, routerScores, workspace,
+	); err != nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "run router projection", err)
+	}
+	routed, err := hipRunMoERouterKernelWithDeviceInputWorkspace(ctx, driver, routerScores, moe.TopKExperts, moe.Layer, workspace)
+	if err != nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "select experts", err)
+	}
+
+	entries := workspace.MoE.Entries[:len(routed.Routes)]
+	routeWeights := workspace.MoE.RouteWeights[:len(routed.Routes)]
+	for index, route := range routed.Routes {
+		entry, entryErr := moe.expertEntry(route.ID)
+		if entryErr != nil {
+			return nil, core.E("rocm.hip.Gemma4MoE", core.Sprintf("load expert %d", route.ID), entryErr)
+		}
+		entries[index] = entry
+		routeWeights[index] = route.Prob * moe.PerExpertScale[route.ID]
+	}
+	expertOutput, err := workspace.EnsureMoEHiddenOutput(driver, layer.HiddenSize, 1)
+	if err != nil {
+		return nil, err
+	}
+	activationCount := len(entries) * moe.ExpertIntermediateSize
+	activation, err := workspace.EnsureActivationOutput(driver, activationCount)
+	if err != nil {
+		return nil, err
+	}
+	if err := hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(
+		ctx, driver, expertInput, entries, routeWeights,
+		layer.HiddenSize, moe.ExpertIntermediateSize, activation, expertOutput, workspace,
+	); err != nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "run selected experts", err)
+	}
+
+	combined, err := workspace.EnsureActivationOutput(driver, layer.HiddenSize)
+	if err != nil {
+		return nil, err
+	}
+	localPostCfg := moe.PostFeedForwardNorm1
+	localPostCfg.Epsilon = epsilon
+	expertPostCfg := moe.PostFeedForwardNorm2
+	expertPostCfg.Epsilon = epsilon
+	if err := hipRunMoECombineNormsDeviceKernelOutputWithWorkspace(ctx, driver, localOutput, expertOutput, localPostCfg, expertPostCfg, combined, workspace); err != nil {
+		return nil, core.E("rocm.hip.Gemma4MoE", "combine local and expert branches", err)
+	}
+	return combined, nil
+}
+
+func hipRunGemma4MoEDeviceMLPAllocated(ctx context.Context, driver nativeHIPDriver, attentionResidual, localInput *hipDeviceByteBuffer, layer hipGemma4Q4Layer0Config, epsilon float32) (*hipDeviceByteBuffer, error) {
 	moe := layer.MoE
 	if moe == nil {
 		return nil, core.E("rocm.hip.Gemma4MoE", "MoE layer config is required", nil)
@@ -848,6 +1104,10 @@ func (args hipGGUFQ4_0SelectedExpertsLaunchArgs) BinaryInto(payload []byte) ([]b
 }
 
 func hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, entries []*hipGemma4ExpertCacheEntry, routeWeights []float32, hidden, expertFF int, activation, output *hipDeviceByteBuffer) error {
+	return hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(ctx, driver, input, entries, routeWeights, hidden, expertFF, activation, output, nil)
+}
+
+func hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, entries []*hipGemma4ExpertCacheEntry, routeWeights []float32, hidden, expertFF int, activation, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
 	if err := hipContextErr(ctx); err != nil {
 		return err
 	}
@@ -888,7 +1148,13 @@ func hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(ctx context.Contex
 		args.DownPointers[index] = entry.Down.Pointer()
 		args.RouteWeights[index] = routeWeights[index]
 	}
-	launchBytes, err := args.Binary()
+	var launchBytes []byte
+	var err error
+	if workspace != nil {
+		launchBytes, err = args.BinaryInto(workspace.MoE.SelectedExpertArgs[:])
+	} else {
+		launchBytes, err = args.Binary()
+	}
 	if err != nil {
 		return err
 	}

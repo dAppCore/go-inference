@@ -80,7 +80,10 @@ ROCR_RUNTIME_BUILD_JOBS ?= $(shell nproc 2>/dev/null || echo 4)
 HIP_RUNTIME_CMAKE_ARGS ?=
 ROCR_RUNTIME_CMAKE_ARGS ?=
 HIP_DIRECT_GO_TAGS ?= rocm_static_hip
-HIP_STATIC_ARCHIVE ?= $(firstword $(wildcard $(HIP_RUNTIME_STATIC_ARCHIVE) $(ROCM_LIB_DIR)/libamdhip64.a $(ROCM_FALLBACK_LIB_DIR)/libamdhip64.a /usr/lib/x86_64-linux-gnu/libamdhip64.a /lib/x86_64-linux-gnu/libamdhip64.a))
+# Release targets build this archive themselves, so its link path must not
+# depend on whether it happened to exist while Make was planning the build.
+# Callers may still provide HIP_STATIC_ARCHIVE=/path/to/libamdhip64.a.
+HIP_STATIC_ARCHIVE ?= $(HIP_RUNTIME_STATIC_ARCHIVE)
 ROCR_CLANG ?= $(firstword $(wildcard $(ROCM_PATH)/lib/llvm/bin/clang $(ROCM_FALLBACK_PATH)/lib/llvm/bin/clang /usr/lib/llvm-18/bin/clang /usr/bin/clang-18 /usr/bin/clang))
 ROCR_LLVM_OBJCOPY ?= $(firstword $(wildcard $(ROCM_PATH)/lib/llvm/bin/llvm-objcopy $(ROCM_FALLBACK_PATH)/lib/llvm/bin/llvm-objcopy /usr/lib/llvm-18/bin/llvm-objcopy /usr/bin/llvm-objcopy-18 /usr/bin/llvm-objcopy))
 HOST_LIBSTDCXX_STATIC ?= $(shell $(HOST_CXX) -print-file-name=libstdc++.a 2>/dev/null || true)
@@ -249,7 +252,7 @@ hip-static-archive:
 	@test -s "$(HIP_RUNTIME_STATIC_ARCHIVE)" || { echo "expected static HIP archive was not produced: $(HIP_RUNTIME_STATIC_ARCHIVE)"; exit 1; }
 
 require-static-hip-archive: hip-static-archive
-	@test -n "$(HIP_STATIC_ARCHIVE)" || { echo "libamdhip64.a was not found; set HIP_STATIC_ARCHIVE=/path/to/libamdhip64.a for static HIP release binaries."; exit 1; }
+	@test -s "$(HIP_STATIC_ARCHIVE)" || { echo "expected static HIP archive was not produced: $(HIP_STATIC_ARCHIVE)"; exit 1; }
 
 hip-link-info:
 	@if [ -n "$(HIP_STATIC_ARCHIVE)" ]; then \
@@ -260,13 +263,13 @@ hip-link-info:
 		echo "HIP link mode: direct shared ROCm link ($(HIP_DIRECT_CGO_LDFLAGS)); install libamdhip64.a for static HIP release binaries."; \
 	fi
 
-lthn-amd: hsa-static-archive hip-static-archive hip-amd
+lthn-amd: hsa-static-archive require-static-hip-archive hip-amd
 	mkdir -p "$(BIN_DIR_ABS)"
 	$(MAKE) --no-print-directory hip-link-info
 	CGO_ENABLED=$(AMD_CGO_ENABLED) CGO_LDFLAGS="$(HIP_RELEASE_CGO_LDFLAGS)" GOOS=$(TARGET_GOOS) GOARCH=$(AMD_GOARCH) $(GO) -C "$(GO_SUBTREE)" build -tags "$(HIP_DIRECT_GO_TAGS)" -o "$(BIN_DIR_ABS)/lthn-amd" "$(CLI_CMD)"
 	cp "$(AMD_KERNEL_MODULE)" "$(BIN_DIR_ABS)/$(AMD_KERNEL_MODULE_NAME)"
 
-lthn-cuda: hsa-static-archive hip-static-archive hip-nvidia
+lthn-cuda: hsa-static-archive require-static-hip-archive hip-nvidia
 	mkdir -p "$(BIN_DIR_ABS)"
 	$(MAKE) --no-print-directory hip-link-info
 	CGO_ENABLED=$(CUDA_CGO_ENABLED) CGO_LDFLAGS="$(HIP_RELEASE_CGO_LDFLAGS)" GOOS=$(TARGET_GOOS) GOARCH=$(CUDA_GOARCH) $(GO) -C "$(GO_SUBTREE)" build -tags "$(HIP_DIRECT_GO_TAGS)" -o "$(BIN_DIR_ABS)/lthn-cuda" "$(CLI_CMD)"
@@ -310,22 +313,22 @@ hip-cpu-aarch64:
 	$(HIP_CPU_AARCH64_CXX) -std=$(HIP_CPU_STD) -O2 -x c++ -I"$(HIP_CPU_INCLUDE)" -D'VALGRIND_STACK_REGISTER(a,b)=((void)0)' -c "$(KERNEL_SRC_ABS)" -o "$(CPU_AARCH64_KERNEL_MODULE)"
 
 test-hip-amd:
-	GO_ROCM_RUN_AMD_HIP_COMPILE_TESTS=1 $(GO) -C "$(GO_SUBTREE)" test ./... -run TestHIPKernelSource_AMDHIPCompile_Good -count=1
+	GO_ROCM_RUN_AMD_HIP_COMPILE_TESTS=1 $(GO) -C "$(GO_SUBTREE)" test ./engine/hip -run TestHIPKernelSource_AMDHIPCompile_Good -count=1
 
 test-hip-nvidia:
-	GO_ROCM_RUN_NVIDIA_HIP_COMPILE_TESTS=1 CUDA_PATH="$(CUDA_PATH)" CUDA_HOME="$(CUDA_HOME)" $(GO) -C "$(GO_SUBTREE)" test ./... -run TestHIPKernelSource_NVIDIAHIPCompile_Good -count=1
+	GO_ROCM_RUN_NVIDIA_HIP_COMPILE_TESTS=1 CUDA_PATH="$(CUDA_PATH)" CUDA_HOME="$(CUDA_HOME)" $(GO) -C "$(GO_SUBTREE)" test ./engine/hip -run TestHIPKernelSource_NVIDIAHIPCompile_Good -count=1
 
 test-hip-cpu:
-	GO_ROCM_RUN_HIP_CPU_COMPILE_TESTS=1 GO_ROCM_HIP_CPU_INCLUDE="$(HIP_CPU_INCLUDE)" GO_ROCM_HIP_CPU_CXX="$(HIP_CPU_CXX)" GO_ROCM_HIP_CPU_AARCH64_CXX="$(HIP_CPU_AARCH64_CXX)" $(GO) -C "$(GO_SUBTREE)" test ./... -run TestHIPKernelSource_HIPCPUCompile_Good -count=1
+	GO_ROCM_RUN_HIP_CPU_COMPILE_TESTS=1 GO_ROCM_HIP_CPU_INCLUDE="$(HIP_CPU_INCLUDE)" GO_ROCM_HIP_CPU_CXX="$(HIP_CPU_CXX)" GO_ROCM_HIP_CPU_AARCH64_CXX="$(HIP_CPU_AARCH64_CXX)" $(GO) -C "$(GO_SUBTREE)" test ./engine/hip -run TestHIPKernelSource_HIPCPUCompile_Good -count=1
 
 test-hip-cpu-runtime:
-	GO_ROCM_RUN_HIP_CPU_RUNTIME_TESTS=1 GO_ROCM_HIP_CPU_INCLUDE="$(HIP_CPU_INCLUDE)" GO_ROCM_HIP_CPU_CXX="$(HIP_CPU_CXX)" $(GO) -C "$(GO_SUBTREE)" test ./... -run TestHIPKernelSource_HIPCPURuntimeSmoke_Good -count=1
+	GO_ROCM_RUN_HIP_CPU_RUNTIME_TESTS=1 GO_ROCM_HIP_CPU_INCLUDE="$(HIP_CPU_INCLUDE)" GO_ROCM_HIP_CPU_CXX="$(HIP_CPU_CXX)" $(GO) -C "$(GO_SUBTREE)" test ./engine/hip -run TestHIPKernelSource_HIPCPURuntimeSmoke_Good -count=1
 
 test-hip-cpu-kernel-runtime:
-	GO_ROCM_RUN_HIP_CPU_KERNEL_RUNTIME_TESTS=1 GO_ROCM_HIP_CPU_INCLUDE="$(HIP_CPU_INCLUDE)" GO_ROCM_HIP_CPU_CXX="$(HIP_CPU_CXX)" $(GO) -C "$(GO_SUBTREE)" test ./... -run TestHIPKernelSource_HIPCPUProductionKernelRuntimeSmoke_Good -count=1
+	GO_ROCM_RUN_HIP_CPU_KERNEL_RUNTIME_TESTS=1 GO_ROCM_HIP_CPU_INCLUDE="$(HIP_CPU_INCLUDE)" GO_ROCM_HIP_CPU_CXX="$(HIP_CPU_CXX)" $(GO) -C "$(GO_SUBTREE)" test ./engine/hip -run TestHIPKernelSource_HIPCPUProductionKernelRuntimeSmoke_Good -count=1
 
 test-zluda-cuda:
-	GO_ROCM_RUN_ZLUDA_CUDA_TESTS=1 CUDA_PATH="$(CUDA_PATH)" CUDA_HOME="$(CUDA_HOME)" $(GO) -C "$(GO_SUBTREE)" test ./... -run TestHIPKernelSource_ZLUDACUDARuntimeSmoke_Good -count=1
+	GO_ROCM_RUN_ZLUDA_CUDA_TESTS=1 CUDA_PATH="$(CUDA_PATH)" CUDA_HOME="$(CUDA_HOME)" $(GO) -C "$(GO_SUBTREE)" test ./engine/hip -run TestHIPKernelSource_ZLUDACUDARuntimeSmoke_Good -count=1
 
 # test-matrix aggregates the host suite plus every hip toolchain smoke behind
 # one command. Each leg probes its own toolchain first and skips with a

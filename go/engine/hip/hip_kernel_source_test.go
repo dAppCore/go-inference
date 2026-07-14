@@ -33,6 +33,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_projection`,
 		`extern "C" __global__ void rocm_projection_batch`,
 		`extern "C" __global__ void rocm_mlx_q4_projection`,
+		`extern "C" __global__ void rocm_mlx_q4_projection_q4_g32_rows3840_cols15360`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_cols256`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_q6_g16_row16`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_q6_row16`,
@@ -57,6 +58,8 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_mlx_q4_pair_projection`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_cols1536_row16`,
+		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840`,
+		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840_row8`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_mlp_q4_g32_cols1536_persistent`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536_row32`,
@@ -73,6 +76,8 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_rms_norm_rope_heads`,
 		`extern "C" __global__ void rocm_rms_norm_rope_heads_pair`,
 		`extern "C" __global__ void rocm_rms_norm_rope_heads_batch`,
+		`extern "C" __global__ void rocm_rms_norm_rope_heads_pair_lane_batch`,
+		`extern "C" __global__ void rocm_moe_combine_norms`,
 		`extern "C" __global__ void rocm_rope`,
 		`extern "C" __global__ void rocm_rope_heads`,
 		`extern "C" __global__ void rocm_greedy_sample`,
@@ -80,10 +85,12 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_attention`,
 		`extern "C" __global__ void rocm_attention_heads`,
 		`extern "C" __global__ void rocm_attention_heads_batch_causal`,
+		`extern "C" __global__ void rocm_attention_heads_lane_batch`,
 		`extern "C" __global__ void rocm_attention_heads_batch_causal_query_rms_rope`,
 		`extern "C" __global__ void rocm_attention_heads_chunked_stage1`,
 		`extern "C" __global__ void rocm_attention_heads_chunked_stage2`,
-		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1`,
+		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_v2`,
+		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa2`,
 		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage2`,
 		`extern "C" __global__ void rocm_vector_add`,
 		`extern "C" __global__ void rocm_vector_add_scaled`,
@@ -205,6 +212,10 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		core.Sprintf("ROCM_RMS_NORM_ROPE_HEADS_PAIR_LAUNCH_ARGS_BYTES = %d", hipRMSNormRoPEHeadsPairLaunchArgsBytes),
 		core.Sprintf("ROCM_RMS_NORM_ROPE_HEADS_BATCH_LAUNCH_ARGS_VERSION = %d", hipRMSNormRoPEHeadsBatchLaunchArgsVersion),
 		core.Sprintf("ROCM_RMS_NORM_ROPE_HEADS_BATCH_LAUNCH_ARGS_BYTES = %d", hipRMSNormRoPEHeadsBatchLaunchArgsBytes),
+		core.Sprintf("ROCM_RMS_NORM_ROPE_HEADS_PAIR_LANE_BATCH_LAUNCH_ARGS_VERSION = %d", hipRMSNormRoPEHeadsPairLaneBatchLaunchArgsVersion),
+		core.Sprintf("ROCM_RMS_NORM_ROPE_HEADS_PAIR_LANE_BATCH_LAUNCH_ARGS_BYTES = %d", hipRMSNormRoPEHeadsPairLaneBatchLaunchArgsBytes),
+		core.Sprintf("ROCM_MOE_COMBINE_NORMS_LAUNCH_ARGS_VERSION = %d", hipMoECombineNormsLaunchArgsVersion),
+		core.Sprintf("ROCM_MOE_COMBINE_NORMS_LAUNCH_ARGS_BYTES = %d", hipMoECombineNormsLaunchArgsBytes),
 		core.Sprintf("ROCM_RMS_NORM_WEIGHT_ENCODING_NONE = %d", hipRMSNormWeightEncodingNone),
 		core.Sprintf("ROCM_RMS_NORM_WEIGHT_ENCODING_F32 = %d", hipRMSNormWeightEncodingF32),
 		core.Sprintf("ROCM_RMS_NORM_WEIGHT_ENCODING_BF16 = %d", hipRMSNormWeightEncodingBF16),
@@ -225,6 +236,9 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		core.Sprintf("ROCM_ATTENTION_HEADS_LAUNCH_ARGS_BYTES = %d", hipAttentionHeadsLaunchArgsBytes),
 		core.Sprintf("ROCM_ATTENTION_HEADS_BATCH_CAUSAL_LAUNCH_ARGS_VERSION = %d", hipAttentionHeadsBatchCausalLaunchArgsVersion),
 		core.Sprintf("ROCM_ATTENTION_HEADS_BATCH_CAUSAL_LAUNCH_ARGS_BYTES = %d", hipAttentionHeadsBatchCausalLaunchArgsBytes),
+		core.Sprintf("ROCM_ATTENTION_HEADS_LANE_BATCH_LAUNCH_ARGS_VERSION = %d", hipAttentionHeadsLaneBatchLaunchArgsVersion),
+		core.Sprintf("ROCM_ATTENTION_HEADS_LANE_BATCH_LAUNCH_ARGS_BYTES = %d", hipAttentionHeadsLaneBatchLaunchArgsBytes),
+		core.Sprintf("ROCM_ATTENTION_HEADS_LANE_DESCRIPTOR_BYTES = %d", hipAttentionHeadsLaneDescriptorBytes),
 		core.Sprintf("ROCM_ATTENTION_HEADS_BATCH_CAUSAL_QUERY_RMS_ROPE_LAUNCH_ARGS_VERSION = %d", hipAttentionHeadsBatchCausalQueryRMSRoPELaunchArgsVersion),
 		core.Sprintf("ROCM_ATTENTION_HEADS_BATCH_CAUSAL_QUERY_RMS_ROPE_LAUNCH_ARGS_BYTES = %d", hipAttentionHeadsBatchCausalQueryRMSRoPELaunchArgsBytes),
 		core.Sprintf("ROCM_ATTENTION_HEADS_SHARED_MAX_TOKENS = %d", hipAttentionHeadsSharedMaxTokens),
@@ -313,6 +327,19 @@ func TestHIPKernelSource_AMDBuildDefaultsO3_Good(t *testing.T) {
 
 	core.AssertTrue(t, strings.Contains(makefile, "AMD_HIP_OPT ?= -O3"), "AMD HIP kernels should default to the measured O3 optimization level")
 	core.AssertTrue(t, strings.Contains(makefile, "$(AMD_HIP_OPT)"), "hip-amd target should use the configurable AMD HIP optimization flag")
+}
+
+func TestHIPKernelSource_MoECombineNormsFusesIndependentRMSNorms_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	source := string(sourceBytes)
+
+	kernel := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_moe_combine_norms`)
+	core.AssertTrue(t, strings.Contains(kernel, `local_sum_squares`), "fused kernel must reduce the local vector independently")
+	core.AssertTrue(t, strings.Contains(kernel, `expert_sum_squares`), "fused kernel must reduce the expert vector independently")
+	core.AssertTrue(t, strings.Count(kernel, `rocm_block_reduce_sum`) == 2, "fused kernel must perform one reduction per input")
+	core.AssertTrue(t, strings.Contains(kernel, `args.local_weight_pointer`), "fused kernel must use local RMS weights")
+	core.AssertTrue(t, strings.Contains(kernel, `args.expert_weight_pointer`), "fused kernel must use expert RMS weights")
 }
 
 func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *testing.T) {
@@ -444,10 +471,17 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 
 	greedy := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_greedy`)
 	core.AssertTrue(t, strings.Contains(greedy, `threadIdx.x / ROCM_MLX_Q4_PROJECTION_GREEDY_THREADS_PER_ROW`), "greedy rows use greedy row geometry")
-	core.AssertTrue(t, strings.Contains(greedy, `blockIdx.x * ROCM_MLX_Q4_PROJECTION_GREEDY_ROWS_PER_BLOCK + row_lane`), "greedy grid uses greedy row blocks")
+	core.AssertTrue(t, strings.Contains(greedy, `const uint32_t row_stride = gridDim.x * ROCM_MLX_Q4_PROJECTION_GREEDY_ROWS_PER_BLOCK`), "greedy blocks must stride over row chunks")
+	core.AssertTrue(t, strings.Contains(greedy, `for (uint32_t row_base = blockIdx.x * ROCM_MLX_Q4_PROJECTION_GREEDY_ROWS_PER_BLOCK; row_base < args.rows; row_base += row_stride)`), "greedy blocks must visit their assigned row chunks")
+	core.AssertTrue(t, strings.Contains(greedy, `const uint32_t row = row_base + row_lane`), "greedy rows must be derived from each row chunk")
 	core.AssertTrue(t, strings.Contains(greedy, `args.suppress_pointer`), "greedy fallback must accept device suppress tokens")
 	core.AssertTrue(t, strings.Contains(greedy, `!rocm_mlx_q4_token_suppressed(row, suppress_tokens, args.suppress_count)`), "greedy fallback must filter suppressed rows on device")
 	core.AssertTrue(t, strings.Contains(greedy, `for (uint32_t index = 1u; index < ROCM_MLX_Q4_PROJECTION_GREEDY_ROWS_PER_BLOCK; ++index)`), "greedy best reduction uses one post-sync serial pass")
+	core.AssertEqual(t, 1, strings.Count(greedy, `__syncthreads();`), "greedy must synchronize only for the final shared-memory reduction")
+	core.AssertTrue(t, strings.Contains(greedy, `unsigned long long persistent_best = 0;`), "greedy must retain the exact packed maximum across chunks")
+	core.AssertTrue(t, strings.Contains(greedy, `if (packed > persistent_best)`), "each row leader must update its packed maximum exactly")
+	core.AssertTrue(t, strings.Contains(greedy, `block_best[row_lane] = persistent_best;`), "row leaders must publish their maximum after visiting every assigned chunk")
+	core.AssertEqual(t, 1, strings.Count(greedy, `atomicMax(best, best_value)`), "greedy must issue one atomic maximum per block")
 	core.AssertTrue(t, !strings.Contains(greedy, `ROCM_MLX_Q4_PROJECTION_GREEDY_ROWS_PER_BLOCK / 2u`), "greedy best reduction must not reintroduce repeated block barriers")
 
 	greedyQ6Row64 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_greedy_q6_row64`)
@@ -579,6 +613,10 @@ func TestHIPKernelSource_AttentionChunkedStage1ScoreLaneReduction_Good(t *testin
 
 	stage1 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_chunked_stage1`)
 	core.AssertTrue(t, strings.Contains(stage1, `device_kv_header->block_size == 1u`), "stage1 direct token-page fast path must reject mixed block/page MP4 KV streams")
+	core.AssertTrue(t, strings.Contains(stage1, `rocm_attention_kv_head_for_query(head, args.head_count, args.key_heads)`), "stage1 must map each query head to its KV head")
+	core.AssertTrue(t, strings.Contains(stage1, `const uint32_t kv_dim_offset = kv_head * args.dim`), "stage1 must offset K/V rows to the mapped KV head")
+	core.AssertTrue(t, strings.Contains(stage1, `const uint32_t kv_width = args.key_heads * args.dim`), "stage1 must validate the complete multi-head KV row width")
+	core.AssertTrue(t, strings.Contains(stage1, `rocm_attention_device_kv_dot_from_page_offset(page, true, token, query_values, args.dim, kv_dim_offset)`), "stage1 fallback must apply the mapped KV-head offset")
 	core.AssertTrue(t, strings.Contains(stage1, `(score_lanes & (score_lanes - 1u)) == 0u`), "stage1 score lanes must stay shuffle-width safe")
 	core.AssertTrue(t, strings.Contains(stage1, `local < local_count && lane == 0u`), "stage1 score lanes must resolve KV pages once per token")
 	core.AssertTrue(t, strings.Contains(stage1, `key_pointer = rocm_shfl_u64(key_pointer, 0, static_cast<int>(score_lanes))`), "stage1 score lanes must broadcast key pointers from lane zero")
@@ -589,18 +627,136 @@ func TestHIPKernelSource_AttentionChunkedStage1ScoreLaneReduction_Good(t *testin
 	core.AssertTrue(t, strings.Contains(stage1, `value_scratch1[tid] = partial1`), "stage1 value reduction must write dim1 before the shared barrier")
 	core.AssertTrue(t, strings.Contains(stage1, `out1 += value_scratch1[value_group * pair_count + tid]`), "stage1 value reduction must reduce dim1 from the second scratch buffer")
 	core.AssertTrue(t, !strings.Contains(stage1, `scratch[tid] = partial1`), "stage1 value reduction must not reintroduce the second shared-memory pass")
+	validation := hipKernelSourceFunctionBodyForTest(t, source, `__device__ bool rocm_valid_attention_heads_chunked_args`)
+	core.AssertTrue(t, strings.Contains(validation, `args.key_heads == 0`), "chunked validation must reject an empty KV-head topology")
+	core.AssertTrue(t, strings.Contains(validation, `args.key_heads > args.head_count`), "chunked validation must reject more KV heads than query heads")
+	core.AssertTrue(t, strings.Contains(validation, `args.head_count % args.key_heads != 0`), "chunked validation must require an integral GQA ratio")
+	core.AssertTrue(t, strings.Contains(validation, `args.dim > (~0u) / args.key_heads`), "chunked validation must reject KV-row width overflow")
+	core.AssertTrue(t, strings.Contains(validation, `args.key_heads > 1u && (args.dim & 1u) != 0u`), "chunked validation must reject odd packed-Q4 KV-head offsets")
 
 	stage2 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_chunked_stage2`)
 	core.AssertTrue(t, strings.Contains(stage2, `const bool cached_chunk_weights = chunk_count <= threads`), "stage2 must cache per-chunk softmax weights when they fit in shared scratch")
 	core.AssertTrue(t, strings.Contains(stage2, `scratch[tid] = chunk_sum == 0.0f ? 0.0f : rocm_fast_expf`), "stage2 must compute each cached chunk weight once")
-	batchStage1 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1`)
+	batchStage1 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_v2`)
 	core.AssertTrue(t, strings.Contains(batchStage1, `device_kv_header->block_size == 1u`), "batch stage1 direct token-page fast path must reject mixed block/page MP4 KV streams")
+	core.AssertTrue(t, strings.Contains(source, `uint32_t key_heads;`), "batch chunked launch ABI must expose the host-written key-head count")
+	core.AssertTrue(t, strings.Contains(batchStage1, `rocm_attention_kv_head_for_query(head, args.head_count, kv_head_count)`), "batch stage1 must map each query head to its KV head")
+	core.AssertTrue(t, strings.Contains(batchStage1, `const uint32_t kv_dim_offset = kv_head * args.dim`), "batch stage1 must offset K/V rows to the mapped KV head")
+	gqa2Stage1 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa2`)
+	core.AssertTrue(t, strings.Contains(gqa2Stage1, `const uint32_t head0 = pair_index << 1u`), "GQA2 stage1 must map each block to two adjacent query heads")
+	core.AssertTrue(t, strings.Contains(gqa2Stage1, `if (kv_head0 != kv_head1)`), "GQA2 stage1 must reject adjacent heads that do not share one KV head")
+	core.AssertTrue(t, strings.Contains(gqa2Stage1, `float *partials1 =`), "GQA2 stage1 must preserve a distinct partial workspace row for the second head")
+	core.AssertTrue(t, strings.Contains(gqa2Stage1, `float *stats1 =`), "GQA2 stage1 must preserve a distinct stats workspace row for the second head")
+	core.AssertEqual(t, 2, strings.Count(gqa2Stage1, `rocm_attention_heads_batch_chunked_device_kv_page(args, token)`))
+	core.AssertTrue(t, strings.Contains(gqa2Stage1, `query_values0[dim] * quantized_key`), "GQA2 stage1 must reuse each K element for the first query head")
+	core.AssertTrue(t, strings.Contains(gqa2Stage1, `query_values1[dim] * quantized_key`), "GQA2 stage1 must reuse each K element for the second query head")
+	core.AssertTrue(t, strings.Contains(gqa2Stage1, `const unsigned char packed = values[dim0 >> 1u]`), "GQA2 stage1 must load each packed V pair once")
 	batchStage2 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_batch_chunked_stage2`)
 	core.AssertTrue(t, strings.Contains(batchStage2, `const bool cached_chunk_weights = chunk_count <= threads`), "batch stage2 must cache per-chunk softmax weights when they fit in shared scratch")
 	heads := hipKernelSourceFunctionBodyForTest(t, source, `__device__ void rocm_run_single_head_attention_token_parallel`)
 	core.AssertTrue(t, strings.Contains(heads, `device_kv_header->block_size == 1u`), "shared attention direct token-page fast path must reject mixed block/page MP4 KV streams")
+	core.AssertTrue(t, strings.Contains(heads, `first_device_kv_page->key_width == args.dim`), "shared attention metadata caching must reject multi-KV descriptor rows")
+	core.AssertTrue(t, strings.Contains(heads, `single_head_device_kv_width &&`), "shared attention direct Q4 fast paths must require a one-head-wide descriptor row")
 	core.AssertTrue(t, strings.Contains(heads, `cached_pointer = reinterpret_cast<uint64_t>(rocm_device_kv_row_payload_pointer(bytes, page->value_encoding, page->token_count, page->value_width, local_token)) + (value_base >> 1u)`), "shared attention must cache MP4 block q4 value row payload pointers")
 	core.AssertTrue(t, strings.Contains(heads, `const unsigned char *values = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(cached_pointer));`), "shared attention cached value pointers must already point at the q4 row payload")
+}
+
+func TestHIPKernelSource_RMSNormRoPEHeadsPairLaneBatchUsesDevicePositions_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	source := string(sourceBytes)
+	body := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_rms_norm_rope_heads_pair_lane_batch`)
+
+	core.AssertTrue(t, strings.Contains(body, `const uint32_t position = positions[batch]`), "paired lane batch must load each position from the device buffer")
+	core.AssertTrue(t, strings.Contains(body, `if (head < args.query_head_count)`), "paired lane batch must support query heads independently")
+	core.AssertTrue(t, strings.Contains(body, `if (head < args.key_head_count)`), "paired lane batch must support key heads independently")
+	core.AssertTrue(t, !strings.Contains(body, `start_position + batch`), "paired lane batch must not derive positions from a consecutive range")
+	core.AssertTrue(t, strings.Contains(source, `static_assert(sizeof(rocm_rms_norm_rope_heads_pair_lane_batch_launch_args) == ROCM_RMS_NORM_ROPE_HEADS_PAIR_LANE_BATCH_LAUNCH_ARGS_BYTES`), "paired lane batch launch ABI must be statically checked")
+}
+
+func TestHIPKernelSource_HIPCPUFusedAttentionRouting_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	source := string(sourceBytes)
+
+	guardMarker := "#if defined(__HIP_CPU_RT__)\n// HIP-CPU does not provide the dynamically-sized extern shared-memory symbol"
+	guardStart := strings.Index(source, guardMarker)
+	if guardStart < 0 {
+		t.Fatalf("HIP-CPU fused-attention guard not found")
+	}
+	elseOffset := strings.Index(source[guardStart:], "#else")
+	if elseOffset < 0 {
+		t.Fatalf("HIP-CPU fused-attention guard has no non-CPU branch")
+	}
+	elseStart := guardStart + elseOffset
+	endOffset := strings.Index(source[elseStart:], "#endif")
+	if endOffset < 0 {
+		t.Fatalf("HIP-CPU fused-attention guard has no terminator")
+	}
+	end := elseStart + endOffset
+	cpuBranch := source[guardStart:elseStart]
+	nonCPUBranch := source[elseStart:end]
+
+	core.AssertTrue(t, strings.Contains(cpuBranch, `extern "C" __global__ void rocm_attention_heads_batch_causal_query_rms_rope(const unsigned char *)`), "HIP-CPU must retain the fused-attention symbol for ABI lookup")
+	core.AssertTrue(t, strings.Contains(cpuBranch, `__builtin_trap();`), "HIP-CPU fused-attention entry must decline execution")
+	core.AssertTrue(t, !strings.Contains(cpuBranch, `extern __shared__`), "HIP-CPU fused-attention branch must not reference dynamic shared memory")
+	core.AssertTrue(t, strings.Contains(nonCPUBranch, `extern "C" __global__ void rocm_attention_heads_batch_causal_query_rms_rope(const unsigned char *packet)`), "AMD/NVIDIA must retain the fused-attention implementation")
+	core.AssertTrue(t, strings.Contains(nonCPUBranch, `extern __shared__ unsigned char fused_attention_shared[]`), "AMD/NVIDIA fused attention must own its dynamic shared-memory path")
+	core.AssertTrue(t, strings.Contains(nonCPUBranch, `rocm_attention_align_shared_offset(args.shared_mem_bytes, sizeof(float))`), "fused attention must align the dynamic shared query region")
+}
+
+func TestHIPKernelSource_AttentionLaneBatchUsesIndependentDescriptors_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	source := string(sourceBytes)
+	body := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_attention_heads_lane_batch`)
+
+	for _, marker := range []string{
+		`const uint64_t lane_index = blockIdx.y`,
+		`const rocm_attention_heads_lane_descriptor lane = lanes[lane_index]`,
+		`single.token_count = lane.token_count`,
+		`single.descriptor_pointer = lane.descriptor_pointer`,
+		`single.descriptor_bytes = lane.descriptor_bytes`,
+		`const uint64_t batch_head_index = lane_index * args.head_count + head`,
+	} {
+		core.AssertTrue(t, strings.Contains(body, marker), "lane attention must route each row through its own KV descriptor")
+	}
+	core.AssertTrue(t, strings.Contains(source, `static_assert(sizeof(rocm_attention_heads_lane_descriptor) == ROCM_ATTENTION_HEADS_LANE_DESCRIPTOR_BYTES`), "lane descriptor ABI must be statically checked")
+	core.AssertTrue(t, strings.Contains(source, `static_assert(sizeof(rocm_attention_heads_lane_batch_launch_args) == ROCM_ATTENTION_HEADS_LANE_BATCH_LAUNCH_ARGS_BYTES`), "lane launch ABI must be statically checked")
+}
+
+func TestHIPKernelSource_AttentionReductionBlockSizeGuards_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	source := string(sourceBytes)
+
+	for _, marker := range []string{
+		`__device__ void rocm_run_single_head_attention_range_token_parallel`,
+		`__device__ void rocm_run_single_head_attention_token_parallel`,
+		`__device__ void rocm_run_single_head_attention_parallel`,
+	} {
+		body := hipKernelSourceFunctionBodyForTest(t, source, marker)
+		core.AssertTrue(t, strings.Contains(body, `if (threads > 512 || (threads & (threads - 1u)) != 0u)`), "attention reduction path must reject non-power-of-two block sizes")
+	}
+	for _, marker := range []string{
+		`__device__ void rocm_run_single_head_attention_token_parallel`,
+		`__device__ void rocm_run_single_head_attention_parallel`,
+	} {
+		body := hipKernelSourceFunctionBodyForTest(t, source, marker)
+		core.AssertTrue(t, strings.Contains(body, `rocm_run_single_head_attention(args)`), "attention reduction guard must fall back to scalar attention")
+	}
+
+	for _, marker := range []string{
+		`extern "C" __global__ void rocm_attention_heads_chunked_stage1`,
+		`extern "C" __global__ void rocm_attention_heads_chunked_stage2`,
+		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_v2`,
+		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa2`,
+		`extern "C" __global__ void rocm_attention_heads_batch_chunked_stage2`,
+	} {
+		body := hipKernelSourceFunctionBodyForTest(t, source, marker)
+		core.AssertTrue(t, strings.Contains(body, `if (threads != ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE)`), "chunked attention reduction path must reject non-contract block sizes")
+		core.AssertTrue(t, strings.Contains(body, "return;"), "chunked attention reduction guard must decline the invalid launch")
+	}
 }
 
 func TestHIPKernelSource_NVIDIAHIPCompile_Good(t *testing.T) {
@@ -768,7 +924,7 @@ func TestHIPKernelSource_HIPCPUProductionKernelRuntimeSmoke_Good(t *testing.T) {
 	compile := rocmCompileTestCommand(t,
 		compiler,
 		"-std=c++20",
-		"-O2",
+		"-O0",
 		"-I"+includeDir,
 		sourcePath,
 		"-ltbb",
