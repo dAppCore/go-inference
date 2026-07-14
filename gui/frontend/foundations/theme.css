@@ -1,0 +1,203 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Lethean Design System — Tailwind CSS v4 @theme
+   ───────────────────────────────────────────────────────────────────────────
+   Drop-in for resources/css/app.css on the Laravel apps (lthn.ai, host.uk.com).
+   This is the Tailwind-native expression of the palette; foundations/tokens/*.css
+   is the same palette as framework-agnostic CSS vars (Lit, slides, vanilla web).
+   Keep the two in sync — they are one design, two syntaxes.
+
+   Usage
+     1. This file assumes Tailwind v4. If your app.css already does
+        `@import "tailwindcss";`, delete the import line below.
+     2. Put data-brand="hostuk" | "lethean" | "ofm" on <html> (or any ancestor).
+        Optionally data-mode="light" (Lethean only) and
+        data-platform="darwin" | "ios" | "ipad" for native (Wails) chrome.
+     3. Utilities follow the token names: bg-ink-1, text-fg-2, bg-brand-500,
+        border-line-1, rounded-lg, shadow-2, font-mono, text-success-400, …
+
+   Dark is the default and the identity. Never pure black / pure white;
+   hairlines (border-line-*) over shadows; colour only where it carries meaning.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+@import "tailwindcss";
+
+@theme {
+  /* ── Type families ────────────────────────────────────────────────────── */
+  --font-sans:  "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono:  "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --font-serif: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+
+  /* ── Neutrals — ink with a barely-warm purple cast (hue 285) ──────────── */
+  --color-ink-0: oklch(0.14 0.012 285);   /* deepest — page bg            */
+  --color-ink-1: oklch(0.18 0.012 285);   /* canvas / app background      */
+  --color-ink-2: oklch(0.22 0.013 285);   /* card / surface 1             */
+  --color-ink-3: oklch(0.26 0.014 285);   /* surface 2 (elevated)         */
+  --color-ink-4: oklch(0.32 0.014 285);   /* hover, popover, raised input */
+  --color-ink-5: oklch(0.42 0.012 285);   /* subtle border                */
+  --color-ink-6: oklch(0.55 0.010 285);   /* muted icon / divider strong  */
+
+  /* ── Foreground — paper-soft, never pure white ───────────────────────── */
+  --color-fg-0: oklch(0.97 0.005 285);    /* primary text                 */
+  --color-fg-1: oklch(0.88 0.006 285);    /* body text                    */
+  --color-fg-2: oklch(0.74 0.008 285);    /* secondary                    */
+  --color-fg-3: oklch(0.60 0.008 285);    /* tertiary, captions           */
+  --color-fg-4: oklch(0.48 0.008 285);    /* placeholder, disabled        */
+
+  /* ── Hairlines — fg mixed into transparency (border-line-1/2/3) ───────── */
+  --color-line-1: color-mix(in oklch, var(--color-fg-0) 8%, transparent);
+  --color-line-2: color-mix(in oklch, var(--color-fg-0) 14%, transparent);
+  --color-line-3: color-mix(in oklch, var(--color-fg-0) 22%, transparent);
+
+  /* ── Brand accent ramp — DEFAULT = Host UK / Vi purple (hue 305 ≈ #663399)
+       [data-brand] overrides the ramp below; one accent slot is held for OFM. */
+  --color-brand-50:  oklch(0.96 0.020 305);
+  --color-brand-100: oklch(0.90 0.045 305);
+  --color-brand-200: oklch(0.82 0.080 305);
+  --color-brand-300: oklch(0.72 0.115 305);
+  --color-brand-400: oklch(0.62 0.145 305);
+  --color-brand-500: oklch(0.54 0.160 305);
+  --color-brand-600: oklch(0.46 0.155 305);
+  --color-brand-700: oklch(0.38 0.130 305);
+  --color-brand-800: oklch(0.30 0.105 305);
+  --color-brand-900: oklch(0.22 0.075 305);
+
+  /* ── Warm accents — Vi's gold eye + ember beak (callouts, warmth) ─────── */
+  --color-gold-300: oklch(0.90 0.110 88);
+  --color-gold-400: oklch(0.84 0.130 88);
+  --color-gold-500: oklch(0.76 0.135 80);
+  --color-gold-600: oklch(0.66 0.135 70);
+  --color-ember-400: oklch(0.78 0.140 55);
+  --color-ember-500: oklch(0.70 0.155 50);
+  --color-ember-600: oklch(0.60 0.155 45);
+
+  /* ── State — desaturated for dark-calm ───────────────────────────────── */
+  --color-success-400: oklch(0.78 0.110 165);
+  --color-success-500: oklch(0.68 0.115 165);
+  --color-warning-400: oklch(0.82 0.115 78);
+  --color-warning-500: oklch(0.74 0.130 70);
+  --color-danger-400:  oklch(0.74 0.140 22);
+  --color-danger-500:  oklch(0.64 0.150 22);
+  --color-info-400:    oklch(0.78 0.090 230);
+  --color-info-500:    oklch(0.68 0.105 230);
+
+  /* ── Flux UI Pro accent — maps Flux's <flux:*> accent onto the brand ramp.
+       var()-valued so it follows [data-brand] automatically (lazy resolution). */
+  --color-accent: var(--color-brand-500);
+  --color-accent-content: var(--color-brand-300);
+  --color-accent-foreground: var(--color-fg-0);
+
+  /* ── Radii — 4 → 6 → 8 (base) → 12 → 16 → 22 → pill ───────────────────── */
+  --radius-xs:  4px;
+  --radius-sm:  6px;
+  --radius-md:  8px;
+  --radius-lg:  12px;
+  --radius-xl:  16px;
+  --radius-2xl: 22px;
+  --radius-pill: 999px;
+
+  /* ── Elevation — inset top-hairline + soft dark drop (dark-tuned) ─────── */
+  --shadow-1: 0 1px 0 0 var(--color-line-1) inset, 0 1px 2px rgba(0,0,0,.25);
+  --shadow-2: 0 1px 0 0 var(--color-line-1) inset, 0 4px 14px rgba(0,0,0,.35);
+  --shadow-3: 0 1px 0 0 var(--color-line-2) inset, 0 12px 40px rgba(0,0,0,.5);
+}
+
+/* ═══ Brand variants ═══════════════════════════════════════════════════════
+   Re-declare the accent ramp within a [data-brand] scope. Tailwind utilities
+   compile to var(--color-brand-*), so they re-resolve inside the scope. */
+
+[data-brand="hostuk"] { --brand-name: "Host UK"; --brand-hue: 305; --color-brand-secondary: var(--color-ember-500); }
+
+[data-brand="lethean"] {
+  /* Hue ~195 calibrated so --color-brand-400 lands on canonical #40c1c5. */
+  --color-brand-50:  oklch(0.97 0.020 195);
+  --color-brand-100: oklch(0.91 0.038 195);
+  --color-brand-200: oklch(0.84 0.060 195);
+  --color-brand-300: oklch(0.78 0.085 195);
+  --color-brand-400: oklch(0.74 0.105 195);
+  --color-brand-500: oklch(0.66 0.115 195);
+  --color-brand-600: oklch(0.56 0.110 195);
+  --color-brand-700: oklch(0.46 0.090 195);
+  --color-brand-800: oklch(0.36 0.070 195);
+  --color-brand-900: oklch(0.26 0.050 195);
+  --brand-name: "Lethean"; --brand-hue: 195; --color-brand-secondary: var(--color-info-500);
+}
+
+[data-brand="ofm"] {
+  /* Reserved slot — warm rose-amber (creator-agency). Placeholder until its pass. */
+  --color-brand-50:  oklch(0.96 0.022 28);
+  --color-brand-100: oklch(0.90 0.050 28);
+  --color-brand-200: oklch(0.82 0.085 28);
+  --color-brand-300: oklch(0.74 0.120 28);
+  --color-brand-400: oklch(0.66 0.145 28);
+  --color-brand-500: oklch(0.58 0.160 28);
+  --color-brand-600: oklch(0.50 0.150 28);
+  --color-brand-700: oklch(0.42 0.125 28);
+  --color-brand-800: oklch(0.34 0.100 28);
+  --color-brand-900: oklch(0.26 0.075 28);
+  --brand-name: "OFM"; --brand-hue: 28; --color-brand-secondary: var(--color-gold-500);
+}
+
+/* ═══ Light mode — opt-in, Lethean only. Same colour maths, accessibility-first. */
+[data-mode="light"] {
+  --color-ink-0: oklch(0.99 0.003 285);
+  --color-ink-1: oklch(0.985 0.004 285);
+  --color-ink-2: oklch(0.97 0.005 285);
+  --color-ink-3: oklch(0.94 0.006 285);
+  --color-ink-4: oklch(0.90 0.007 285);
+  --color-ink-5: oklch(0.84 0.008 285);
+  --color-ink-6: oklch(0.62 0.010 285);
+  --color-fg-0: oklch(0.18 0.012 285);
+  --color-fg-1: oklch(0.28 0.012 285);
+  --color-fg-2: oklch(0.42 0.010 285);
+  --color-fg-3: oklch(0.54 0.010 285);
+  --color-fg-4: oklch(0.66 0.010 285);
+  --color-line-1: color-mix(in oklch, var(--color-fg-0) 6%, transparent);
+  --color-line-2: color-mix(in oklch, var(--color-fg-0) 12%, transparent);
+  --color-line-3: color-mix(in oklch, var(--color-fg-0) 22%, transparent);
+  --shadow-1: 0 1px 0 0 rgba(255,255,255,.6) inset, 0 1px 2px rgba(20,18,30,.06);
+  --shadow-2: 0 1px 0 0 rgba(255,255,255,.6) inset, 0 4px 14px rgba(20,18,30,.08);
+  --shadow-3: 0 1px 0 0 rgba(255,255,255,.6) inset, 0 12px 40px rgba(20,18,30,.12);
+}
+
+/* ═══ Native platform profiles — swap fonts + tighten radii so a single tree
+       feels native inside Wails. Web (default) = Geist · 8px base radius. */
+[data-platform="darwin"] {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro", "Helvetica Neue", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "Menlo", monospace;
+  --radius-xs: 3px; --radius-sm: 4px; --radius-md: 6px; --radius-lg: 8px; --radius-xl: 10px; --radius-2xl: 14px;
+  --color-line-1: color-mix(in oklch, var(--color-fg-0) 7%, transparent);
+  --color-line-2: color-mix(in oklch, var(--color-fg-0) 13%, transparent);
+}
+[data-platform="ios"], [data-platform="ipad"] {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro", "Helvetica Neue", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+  --radius-xs: 4px; --radius-sm: 6px; --radius-md: 10px; --radius-lg: 14px; --radius-xl: 18px; --radius-2xl: 22px;
+}
+
+/* ═══ Base — dark-calm defaults on the document. Utilities do the rest. ═══ */
+@layer base {
+  html { background: var(--color-ink-1); color: var(--color-fg-1); }
+  body {
+    font-family: var(--font-sans);
+    font-size: 15px; line-height: 1.55; letter-spacing: -0.005em;
+    -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  }
+  h1, h2, h3, h4 { color: var(--color-fg-0); font-weight: 600; letter-spacing: -0.025em; line-height: 1.1; }
+  .num, code, kbd { font-family: var(--font-mono); font-feature-settings: "tnum","ss01"; }
+  .editorial { font-family: var(--font-serif); font-style: italic; font-weight: 400; letter-spacing: -0.015em; }
+  /* brand-mark falls back to the --brand-name token when no name is passed */
+  .lthn-brand-name:empty::before { content: var(--brand-name); }
+}
+
+/* ═══ Functional keyframes — pulsing status dots + streaming cursor. ═══ */
+@keyframes lthn-pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.55;transform:scale(1.18)} }
+@keyframes lthn-cursor { 0%,100%{opacity:1} 50%{opacity:0} }
+@keyframes lthn-spin { to { transform: rotate(360deg) } }
+@keyframes lthn-shimmer { 0%{background-position:-200% 0} 100%{background-position:200% 0} }
+
+/* ═══ Accessibility — keyboard-only focus ring + reduced motion. ═══ */
+:focus-visible { outline: 2px solid var(--color-brand-400); outline-offset: 2px; }
+:focus:not(:focus-visible) { outline: none; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; }
+}

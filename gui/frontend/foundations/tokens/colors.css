@@ -1,0 +1,67 @@
+/* ─────────────────────────────────────────────────────────
+   Colours — the dark-calm core. Everything is oklch so the
+   brand variants and light mode reuse the same colour maths.
+   Never pure black, never pure white.
+   Brand ramp here = Host UK / Vi purple (the default brand);
+   [data-brand] overrides the ramp per variant (see brands.css).
+   ───────────────────────────────────────────────────────── */
+:root {
+  /* Neutrals — ink with a barely-warm purple cast */
+  --ink-0:   oklch(0.14 0.012 285);   /* deepest — page bg            */
+  --ink-1:   oklch(0.18 0.012 285);   /* canvas / app background      */
+  --ink-2:   oklch(0.22 0.013 285);   /* card / surface 1             */
+  --ink-3:   oklch(0.26 0.014 285);   /* surface 2 (elevated)         */
+  --ink-4:   oklch(0.32 0.014 285);   /* hover, popover, raised input */
+  --ink-5:   oklch(0.42 0.012 285);   /* subtle border                */
+  --ink-6:   oklch(0.55 0.010 285);   /* muted icon / divider strong  */
+
+  /* Foreground — paper-soft, never pure white */
+  --fg-0:    oklch(0.97 0.005 285);   /* primary text                 */
+  --fg-1:    oklch(0.88 0.006 285);   /* body text                    */
+  --fg-2:    oklch(0.74 0.008 285);   /* secondary                    */
+  --fg-3:    oklch(0.60 0.008 285);   /* tertiary, captions           */
+  --fg-4:    oklch(0.48 0.008 285);   /* placeholder, disabled        */
+
+  /* Hairlines — foreground mixed into transparency */
+  --line-1:  color-mix(in oklch, var(--fg-0) 8%, transparent);
+  --line-2:  color-mix(in oklch, var(--fg-0) 14%, transparent);
+  --line-3:  color-mix(in oklch, var(--fg-0) 22%, transparent);
+
+  /* Brand accent ramp — default = Host UK / Vi purple (hue 305, ≈ #663399) */
+  --brand-50:  oklch(0.96 0.020 305);
+  --brand-100: oklch(0.90 0.045 305);
+  --brand-200: oklch(0.82 0.080 305);
+  --brand-300: oklch(0.72 0.115 305);
+  --brand-400: oklch(0.62 0.145 305);
+  --brand-500: oklch(0.54 0.160 305);   /* ≈ #663399 lineage */
+  --brand-600: oklch(0.46 0.155 305);
+  --brand-700: oklch(0.38 0.130 305);
+  --brand-800: oklch(0.30 0.105 305);
+  --brand-900: oklch(0.22 0.075 305);
+
+  /* Vi's gold eye-highlight → universal warm accent */
+  --gold-300: oklch(0.90 0.110 88);
+  --gold-400: oklch(0.84 0.130 88);
+  --gold-500: oklch(0.76 0.135 80);
+  --gold-600: oklch(0.66 0.135 70);
+
+  /* Vi's beak/feet ember — callouts, badges, "British warmth" */
+  --ember-400: oklch(0.78 0.140 55);
+  --ember-500: oklch(0.70 0.155 50);
+  --ember-600: oklch(0.60 0.155 45);
+
+  /* State colours — desaturated for dark-calm */
+  --success-400: oklch(0.78 0.110 165);
+  --success-500: oklch(0.68 0.115 165);
+  --warning-400: oklch(0.82 0.115 78);
+  --warning-500: oklch(0.74 0.130 70);
+  --danger-400:  oklch(0.74 0.140 22);
+  --danger-500:  oklch(0.64 0.150 22);
+  --info-400:    oklch(0.78 0.090 230);
+  --info-500:    oklch(0.68 0.105 230);
+
+  /* Legacy aliases used by the Lit desktop layer */
+  --err-400: var(--danger-400);
+  --err-300: oklch(0.82 0.120 22);
+  --surf-0: var(--ink-1);
+}

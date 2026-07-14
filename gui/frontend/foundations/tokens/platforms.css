@@ -1,0 +1,40 @@
+/* ─────────────────────────────────────────────────────────
+   Native platform profiles. The web is one platform. Darwin
+   (Wails / WebView), iOS and iPadOS are separate platforms —
+   same brand DNA, but type, density and chrome must FEEL native.
+   Swap fonts + a few radii via [data-platform] so a single component
+   tree renders correctly on every surface.
+
+   Web (default) → Geist · 15px body · 8px radii
+   Darwin        → SF Pro · 13px body · 6px radii · denser
+   iOS           → SF Pro Text · 17pt body · 10px radii
+   iPadOS        → SF Pro Text · 15pt body · 10px radii
+   ───────────────────────────────────────────────────────── */
+
+[data-platform="darwin"] {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro", "Helvetica Neue", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, "Menlo", monospace;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro", sans-serif;
+  --r-xs: 3px; --r-sm: 4px; --r-md: 6px; --r-lg: 8px; --r-xl: 10px; --r-2xl: 14px;
+  --line-1: color-mix(in oklch, var(--fg-0) 7%, transparent);
+  --line-2: color-mix(in oklch, var(--fg-0) 13%, transparent);
+}
+
+[data-platform="ios"], [data-platform="ipad"] {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro", "Helvetica Neue", sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, monospace;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro", sans-serif;
+  --r-xs: 4px; --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-xl: 18px; --r-2xl: 22px;
+}
+
+/* Native list-row chrome — used by Darwin/iOS/iPad shells.
+   Body data stays identical; only the row height + separators change. */
+.native-list { background: var(--ink-2); border: 1px solid var(--line-1); border-radius: var(--r-lg); overflow: hidden; }
+.native-list .row { display: flex; align-items: center; gap: 12px; padding: 0 14px; border-top: 1px solid var(--line-1); }
+.native-list .row:first-child { border-top: none; }
+.native-list .row .label { color: var(--fg-1); }
+.native-list .row .value { color: var(--fg-2); margin-left: auto; }
+[data-platform="darwin"] .native-list .row { height: 30px; font-size: 13px; }
+[data-platform="ios"] .native-list { border-radius: 14px; }
+[data-platform="ios"] .native-list .row { height: 50px; font-size: 17px; padding: 0 16px; }
+[data-platform="ipad"] .native-list .row { height: 44px; font-size: 15px; padding: 0 16px; }

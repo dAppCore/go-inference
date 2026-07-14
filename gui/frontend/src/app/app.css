@@ -1,0 +1,38 @@
+/* SPDX-Licence-Identifier: EUPL-1.2
+   The design pack's native window shell (angular/native/dashboard.component.css)
+   adapted for LEM Desktop — window chrome, rail, tiles, panels, statusbar.
+   Plain CSS on the foundations tokens. */
+:host { display: block; padding: 14px; }
+.win { border-radius: 12px; overflow: hidden; border: 1px solid var(--line-2); box-shadow: var(--shadow-3); background: var(--ink-1); }
+.titlebar { height: 40px; display: flex; align-items: center; gap: 12px; padding: 0 14px; background: color-mix(in oklch, var(--ink-2) 80%, transparent); border-bottom: 1px solid var(--line-1); --wails-draggable: drag; }
+.lights { display: flex; gap: 8px; }
+.lights i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+.lights i:nth-child(1) { background: #ff5f57; } .lights i:nth-child(2) { background: #febc2e; } .lights i:nth-child(3) { background: #28c840; }
+.wtitle { font-size: 12.5px; color: var(--fg-2); font-weight: 500; }
+.wtools { margin-left: auto; display: flex; gap: 14px; color: var(--fg-3); }
+.winbody { display: grid; grid-template-columns: 56px 1fr; min-height: 520px; }
+.rail { background: var(--ink-2); border-right: 1px solid var(--line-1); display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 12px 0; }
+.rail a { width: 36px; height: 36px; border-radius: 8px; display: grid; place-items: center; color: var(--fg-3); cursor: pointer; }
+.rail a.on { background: color-mix(in oklch, var(--brand-500) 20%, transparent); color: var(--brand-200); }
+.rail a.last { margin-top: auto; }
+.content { padding: 16px 20px; }
+.ctoolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.ctoolbar h1 { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; color: var(--fg-0); margin: 0; }
+.updated { font-family: var(--font-mono); font-size: 11px; color: var(--fg-3); }
+.sp { flex: 1; }
+.nbtn { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 12px; border-radius: 6px; font-size: 12.5px; font-weight: 500; background: var(--brand-500); color: var(--fg-0); border: 1px solid var(--brand-400); cursor: pointer; }
+.nbtn.danger { background: var(--danger-500, #b3403f); border-color: var(--danger-400, #c85a58); }
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+.panel { background: var(--ink-2); border: 1px solid var(--line-1); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+.panel .h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.panel .h b { font-size: 12.5px; color: var(--fg-1); font-weight: 600; }
+.panel .h span { font-family: var(--font-mono); font-size: 11px; color: var(--fg-3); display: inline-flex; align-items: center; gap: 6px; }
+.list { background: var(--ink-2); border: 1px solid var(--line-1); border-radius: 10px; margin-bottom: 14px; }
+.mrow { display: flex; align-items: center; gap: 12px; height: 40px; padding: 0 12px; border-top: 1px solid var(--line-1); font-size: 13px; }
+.mrow:first-child { border-top: 0; }
+.mrow .nm { color: var(--fg-1); min-width: 150px; }
+.mrow .meta { color: var(--fg-3); font-size: 12px; }
+.mrow .rate { margin-left: auto; font-family: var(--font-mono); color: var(--fg-2); }
+.statusbar { height: 26px; display: flex; align-items: center; gap: 8px; padding: 0 14px; border-top: 1px solid var(--line-1); background: var(--ink-2); font-size: 11px; color: var(--fg-3); }
+.statusbar .v { margin-left: auto; font-family: var(--font-mono); }
+.statusbar .warn { color: var(--warning-400, #d9a03f); }

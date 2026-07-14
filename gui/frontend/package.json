@@ -1,0 +1,29 @@
+{
+  "name": "lem-desktop",
+  "version": "0.1.0",
+  "description": "LEM Desktop dashboard — the Lethean design system's Angular shell over the <lthn-*> Lit elements, fed by Wails bindings.",
+  "license": "EUPL-1.2",
+  "private": true,
+  "scripts": {
+    "start": "ng serve",
+    "build": "ng build"
+  },
+  "dependencies": {
+    "@angular/common": "^20.3.0",
+    "@angular/compiler": "^20.3.0",
+    "@angular/core": "^20.3.0",
+    "@angular/forms": "^20.3.0",
+    "@angular/platform-browser": "^20.3.0",
+    "@angular/router": "^20.3.0",
+    "lit": "^3.1.4",
+    "rxjs": "^7.8.0",
+    "tslib": "^2.6.0",
+    "zone.js": "~0.15.0"
+  },
+  "devDependencies": {
+    "@angular/build": "^20.3.0",
+    "@angular/cli": "^20.3.0",
+    "@angular/compiler-cli": "^20.3.0",
+    "typescript": "~5.9.0"
+  }
+}

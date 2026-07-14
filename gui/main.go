@@ -21,7 +21,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
 
-//go:embed all:frontend
+//go:embed all:frontend/dist/browser
 var assets embed.FS
 
 // Tray icon data — placeholders until real icons are generated.
@@ -33,7 +33,7 @@ var (
 
 func main() {
 	// Strip embed prefix so files serve from root.
-	staticAssets, err := fs.Sub(assets, "frontend")
+	staticAssets, err := fs.Sub(assets, "frontend/dist/browser")
 	if err != nil {
 		core.Print(core.Stderr(), "%v\n", err)
 		core.Exit(1)

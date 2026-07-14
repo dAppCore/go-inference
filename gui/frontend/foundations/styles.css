@@ -1,0 +1,13 @@
+/* ═══════════════════════════════════════════════════════════
+   Lethean Design System — global CSS entry point.
+   Consumers link THIS one file. Everything it @imports ships.
+   Order matters: fonts first, then tokens, then the scoped base.
+   ═══════════════════════════════════════════════════════════ */
+@import "tokens/fonts.css";
+@import "tokens/colors.css";
+@import "tokens/typography.css";
+@import "tokens/spacing.css";
+@import "tokens/brands.css";
+@import "tokens/platforms.css";
+@import "tokens/modes.css";
+@import "base.css";
