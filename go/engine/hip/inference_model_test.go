@@ -80,6 +80,57 @@ func TestHIPInferenceModel_AudioContract_Good(t *testing.T) {
 	core.AssertEqual(t, "", tokenModel.AudioPlaceholderBlock(0))
 }
 
+func TestHIPInferenceModel_UnifiedVisionContract_Good(t *testing.T) {
+	tokenModel := newHipTokenModel(&hipLoadedModel{
+		unifiedVision: &UnifiedVisionTower{
+			loaded: &sharedmodel.LoadedUnifiedVision{Cfg: sharedmodel.LoadedUnifiedVisionConfig{
+				ImageTokenID:         22,
+				ImageBeginToken:      "<|image>",
+				ImageToken:           "<|image|>",
+				ImageEndToken:        "<image|>",
+				VideoTokenID:         23,
+				VideoToken:           "<|video|>",
+				AudioSamplesPerToken: 2,
+				AudioTokenID:         24,
+				AudioBeginToken:      "<|audio>",
+				AudioToken:           "<|audio|>",
+				AudioEndToken:        "<audio|>",
+			}},
+			audioProjection: []float32{1},
+		},
+	}, hipInferenceModelFixtureTokenizer(), "gemma4")
+	var _ engine.VideoTokenModel = tokenModel
+	core.AssertTrue(t, tokenModel.AcceptsImageInput())
+	core.AssertTrue(t, tokenModel.AcceptsAudioInput())
+	core.AssertEqual(t, int32(22), tokenModel.ImagePlaceholderTokenID())
+	core.AssertEqual(t, "<|image><|image|><|image|><image|>", tokenModel.ImagePlaceholderBlock(2))
+	core.AssertEqual(t, int32(23), tokenModel.VideoPlaceholderTokenID())
+	core.AssertEqual(t, "<|image><|video|><|video|><image|>", tokenModel.VideoPlaceholderBlock(2))
+	core.AssertEqual(t, int32(24), tokenModel.AudioPlaceholderTokenID())
+	core.AssertEqual(t, "<|audio><|audio|><|audio|><audio|>", tokenModel.AudioPlaceholderBlock(2))
+}
+
+func TestHIPInferenceModel_SpliceTokenFeatures_Good(t *testing.T) {
+	stream := []byte{
+		1, 1, 1, 1,
+		2, 2, 2, 2,
+		3, 3, 3, 3,
+		4, 4, 4, 4,
+	}
+	features := []byte{
+		9, 8, 7, 6,
+		5, 4, 3, 2,
+	}
+	err := (&hipTokenModel{}).spliceTokenFeaturesInto(stream, []int32{1, 22, 2, 22}, features, 4, 22, "image")
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, []byte{
+		1, 1, 1, 1,
+		9, 8, 7, 6,
+		3, 3, 3, 3,
+		5, 4, 3, 2,
+	}, stream)
+}
+
 func TestHIPInferenceModel_DeclaredGemma4ChatTemplate_Good(t *testing.T) {
 	decoder := hipInferenceModelFixtureTokenizer()
 	large := &hipLoadedModel{

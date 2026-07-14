@@ -92,6 +92,16 @@ func TestHIPRuntime_LoadModelCarriesDeviceKVMode_Good(t *testing.T) {
 	}
 }
 
+func TestHIPRuntime_Gemma4EngineConfigCarriesBidirectionalSpans_Good(t *testing.T) {
+	loaded := &hipLoadedModel{gemma4Q4Config: hipGemma4Q4EngineConfig{
+		DeviceKVMode:            rocmKVCacheModeQ8,
+		BidirectionalSpanTokens: [2]int32{22, 23},
+	}}
+	cfg := loaded.gemma4Q4EngineConfig()
+	core.AssertEqual(t, rocmKVCacheModeQ8, cfg.DeviceKVMode)
+	core.AssertEqual(t, [2]int32{22, 23}, cfg.BidirectionalSpanTokens)
+}
+
 func TestHIPRuntime_LoadModelClonesSequenceMixerPlan_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	runtime := newHIPRuntime(driver)

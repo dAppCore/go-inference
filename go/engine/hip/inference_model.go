@@ -34,6 +34,7 @@ import (
 var (
 	_ engine.TokenModel                = (*hipTokenModel)(nil)
 	_ engine.VisionTokenModel          = (*hipTokenModel)(nil)
+	_ engine.VideoTokenModel           = (*hipTokenModel)(nil)
 	_ engine.AudioInputTokenModel      = (*hipTokenModel)(nil)
 	_ engine.CacheModeReporter         = (*hipTokenModel)(nil)
 	_ engine.PromptReuseCapableModel   = (*hipTokenModel)(nil)
@@ -121,23 +122,65 @@ func (m *hipTokenModel) SupportedCacheModes() []string {
 	return []string{rocmKVCacheModeFP16, rocmKVCacheModeQ8, rocmKVCacheModeKQ8VQ4}
 }
 
-func (m *hipTokenModel) AcceptsImageInput() bool { return false }
+func (m *hipTokenModel) AcceptsImageInput() bool {
+	return m != nil && m.loaded != nil && m.loaded.unifiedVision != nil && m.loaded.unifiedVision.loaded != nil
+}
 
-func (m *hipTokenModel) ImagePlaceholderTokenID() int32 { return 0 }
+func (m *hipTokenModel) ImagePlaceholderTokenID() int32 {
+	if !m.AcceptsImageInput() {
+		return 0
+	}
+	return m.loaded.unifiedVision.loaded.Cfg.ImageTokenID
+}
 
-func (m *hipTokenModel) ImagePlaceholderBlock(int) string { return "" }
+func (m *hipTokenModel) ImagePlaceholderBlock(softTokens int) string {
+	if !m.AcceptsImageInput() {
+		return ""
+	}
+	cfg := m.loaded.unifiedVision.loaded.Cfg
+	return hipMultimodalPlaceholderBlock(cfg.ImageBeginToken, cfg.ImageToken, cfg.ImageEndToken, softTokens)
+}
 
-func (m *hipTokenModel) ProjectImage([]byte) ([]byte, int, error) {
-	return nil, 0, core.NewError("hip.TokenModel.ProjectImage: loaded model has no vision tower")
+func (m *hipTokenModel) ProjectImage(payload []byte) ([]byte, int, error) {
+	if !m.AcceptsImageInput() {
+		return nil, 0, core.NewError("hip.TokenModel.ProjectImage: loaded model has no vision tower")
+	}
+	embeddings, softTokens, err := m.loaded.unifiedVision.ProjectImage(payload)
+	if err != nil {
+		return nil, 0, core.E("hip.TokenModel.ProjectImage", "project image", err)
+	}
+	features, err := hipFloat32Payload(embeddings)
+	if err != nil {
+		return nil, 0, core.E("hip.TokenModel.ProjectImage", "encode projected embeddings", err)
+	}
+	return features, softTokens, nil
+}
+
+func (m *hipTokenModel) VideoPlaceholderTokenID() int32 {
+	if !m.AcceptsImageInput() {
+		return 0
+	}
+	return m.loaded.unifiedVision.loaded.Cfg.VideoTokenID
+}
+
+func (m *hipTokenModel) VideoPlaceholderBlock(softTokens int) string {
+	if !m.AcceptsImageInput() {
+		return ""
+	}
+	cfg := m.loaded.unifiedVision.loaded.Cfg
+	return hipMultimodalPlaceholderBlock(cfg.ImageBeginToken, cfg.VideoToken, cfg.ImageEndToken, softTokens)
 }
 
 func (m *hipTokenModel) AcceptsAudioInput() bool {
-	return m != nil && m.loaded != nil && m.loaded.audio != nil && m.loaded.audio.loaded != nil
+	return m != nil && m.loaded != nil && m.loaded.AcceptsAudioInput()
 }
 
 func (m *hipTokenModel) AudioPlaceholderTokenID() int32 {
 	if !m.AcceptsAudioInput() {
 		return 0
+	}
+	if m.loaded.unifiedVision != nil && m.loaded.unifiedVision.AcceptsAudio() {
+		return m.loaded.unifiedVision.loaded.Cfg.AudioTokenID
 	}
 	return int32(m.loaded.audio.loaded.Cfg.AudioTokenID)
 }
@@ -146,14 +189,12 @@ func (m *hipTokenModel) AudioPlaceholderBlock(softTokens int) string {
 	if !m.AcceptsAudioInput() || softTokens <= 0 {
 		return ""
 	}
-	cfg := m.loaded.audio.loaded.Cfg
-	var block core.Builder
-	block.WriteString(cfg.AudioBeginToken)
-	for range softTokens {
-		block.WriteString(cfg.AudioToken)
+	if m.loaded.unifiedVision != nil && m.loaded.unifiedVision.AcceptsAudio() {
+		cfg := m.loaded.unifiedVision.loaded.Cfg
+		return hipMultimodalPlaceholderBlock(cfg.AudioBeginToken, cfg.AudioToken, cfg.AudioEndToken, softTokens)
 	}
-	block.WriteString(cfg.AudioEndToken)
-	return block.String()
+	cfg := m.loaded.audio.loaded.Cfg
+	return hipMultimodalPlaceholderBlock(cfg.AudioBeginToken, cfg.AudioToken, cfg.AudioEndToken, softTokens)
 }
 
 func (m *hipTokenModel) ProjectAudio(payload []byte) ([]byte, int, error) {
@@ -163,6 +204,17 @@ func (m *hipTokenModel) ProjectAudio(payload []byte) ([]byte, int, error) {
 	waveform, err := hipDecodeWAVMono16k(payload)
 	if err != nil {
 		return nil, 0, core.E("hip.TokenModel.ProjectAudio", "decode WAV", err)
+	}
+	if m.loaded.unifiedVision != nil && m.loaded.unifiedVision.AcceptsAudio() {
+		embeddings, softTokens, err := m.loaded.unifiedVision.ProjectAudioSamples(waveform)
+		if err != nil {
+			return nil, 0, core.E("hip.TokenModel.ProjectAudio", "project unified audio", err)
+		}
+		features, err := hipFloat32Payload(embeddings)
+		if err != nil {
+			return nil, 0, core.E("hip.TokenModel.ProjectAudio", "encode projected embeddings", err)
+		}
+		return features, softTokens, nil
 	}
 	embeddings, softTokens, err := m.loaded.audio.ProjectEmbeddings(waveform)
 	if err != nil {
@@ -186,9 +238,6 @@ func (m *hipTokenModel) TokenEmbeddingsWithFeatures(ids []int32, imageFeatures, 
 	if len(ids) == 0 {
 		return nil, core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: empty token ids")
 	}
-	if len(imageFeatures) > 0 || len(videoFeatures) > 0 {
-		return nil, core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: loaded model has no image or video tower")
-	}
 	if m.loaded.modelInfo.NumLayers <= 0 {
 		return nil, core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: loaded model layer count is required")
 	}
@@ -210,8 +259,18 @@ func (m *hipTokenModel) TokenEmbeddingsWithFeatures(ids []int32, imageFeatures, 
 	if err := m.loaded.driver.CopyDeviceToHost(device.Pointer(), stream); err != nil {
 		return nil, core.E("hip.TokenModel.TokenEmbeddingsWithFeatures", "copy token embeddings", err)
 	}
+	if len(imageFeatures) > 0 {
+		if err := m.spliceTokenFeaturesInto(stream, ids, imageFeatures, rowBytes, m.ImagePlaceholderTokenID(), "image"); err != nil {
+			return nil, err
+		}
+	}
 	if len(audioFeatures) > 0 {
-		if err := m.spliceAudioFeatures(stream, ids, audioFeatures, rowBytes); err != nil {
+		if err := m.spliceTokenFeaturesInto(stream, ids, audioFeatures, rowBytes, m.AudioPlaceholderTokenID(), "audio"); err != nil {
+			return nil, err
+		}
+	}
+	if len(videoFeatures) > 0 {
+		if err := m.spliceTokenFeaturesInto(stream, ids, videoFeatures, rowBytes, m.VideoPlaceholderTokenID(), "video"); err != nil {
 			return nil, err
 		}
 	}
@@ -222,13 +281,12 @@ func (m *hipTokenModel) TokenEmbeddingsWithFeatures(ids []int32, imageFeatures, 
 	return rows, nil
 }
 
-func (m *hipTokenModel) spliceAudioFeatures(stream []byte, ids []int32, features []byte, rowBytes int) error {
-	tokenID := m.AudioPlaceholderTokenID()
+func (m *hipTokenModel) spliceTokenFeaturesInto(stream []byte, ids []int32, features []byte, rowBytes int, tokenID int32, label string) error {
 	if tokenID == 0 {
-		return core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: audio token id is not configured")
+		return core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: " + label + " token id is not configured")
 	}
 	if rowBytes <= 0 || len(stream) != len(ids)*rowBytes || len(features)%rowBytes != 0 {
-		return core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: invalid audio feature geometry")
+		return core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: invalid " + label + " feature geometry")
 	}
 	slots := 0
 	for _, id := range ids {
@@ -237,7 +295,7 @@ func (m *hipTokenModel) spliceAudioFeatures(stream []byte, ids []int32, features
 		}
 	}
 	if slots != len(features)/rowBytes {
-		return core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: audio feature count must equal token slots")
+		return core.NewError("hip.TokenModel.TokenEmbeddingsWithFeatures: " + label + " feature count must equal token slots")
 	}
 	featureIndex := 0
 	for position, id := range ids {
@@ -248,6 +306,20 @@ func (m *hipTokenModel) spliceAudioFeatures(stream []byte, ids []int32, features
 		featureIndex++
 	}
 	return nil
+}
+
+func hipMultimodalPlaceholderBlock(begin, token, end string, softTokens int) string {
+	if token == "" || softTokens <= 0 {
+		return ""
+	}
+	var block core.Builder
+	block.Grow(len(begin) + len(end) + softTokens*len(token))
+	block.WriteString(begin)
+	for range softTokens {
+		block.WriteString(token)
+	}
+	block.WriteString(end)
+	return block.String()
 }
 
 // newHipEngineTextModel assembles a loaded Gemma4-Q4 hip model as the shared

@@ -54,6 +54,7 @@ type nativeLoadConfig struct {
 	SequenceMixerPlan  *SequenceMixerLoadPlan
 	TokenizerPath      string
 	AudioModelPath     string
+	VisionModelPath    string
 	TokenText          *hipTokenTextDecoder
 	Gemma4TextConfig   nativeGemma4TextConfig
 	Gemma4Architecture Gemma4ArchitectureDeclaration
@@ -95,6 +96,10 @@ type nativeModel interface {
 // an audio-capable model family.
 type nativeAudioInputModel interface {
 	AcceptsAudioInput() bool
+}
+
+type nativeVisionInputModel interface {
+	AcceptsImageInput() bool
 }
 
 func newROCmBackendWithRuntime(runtime nativeRuntime) *rocmBackend {
@@ -178,6 +183,7 @@ func (b *rocmBackend) loadModelWithROCmConfigMode(path string, loadConfig infere
 	nativeConfig.AllowAttachedOnly = allowAttachedOnly
 	nativeConfig.DeviceKVMode = deviceKVMode
 	nativeConfig.AudioModelPath = firstNonEmptyString(strings.TrimSpace(rocmConfig.AudioModelPath), strings.TrimSpace(core.Getenv("GO_ROCM_AUDIO_MODEL_PATH")))
+	nativeConfig.VisionModelPath = firstNonEmptyString(strings.TrimSpace(rocmConfig.VisionModelPath), strings.TrimSpace(core.Getenv("GO_ROCM_VISION_MODEL_PATH")))
 	nativeConfig.ModelLabels = rocmApplyNativeLoadDeviceKVModeLabels(nativeConfig.ModelLabels, deviceKVMode)
 	rocmApplyNativeLoadModelProfile(path, &nativeConfig)
 
@@ -372,7 +378,20 @@ type rocmModel struct {
 	chatIntercept func(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) (iter.Seq[inference.Token], bool)
 }
 
-var _ inference.AudioModel = (*rocmModel)(nil)
+var (
+	_ inference.AudioModel  = (*rocmModel)(nil)
+	_ inference.VisionModel = (*rocmModel)(nil)
+)
+
+// AcceptsImages reports whether the loaded HIP payload carries a usable image
+// projector. Video frames use the same projector and capability gate.
+func (m *rocmModel) AcceptsImages() bool {
+	if m == nil || m.native == nil {
+		return false
+	}
+	vision, ok := m.native.(nativeVisionInputModel)
+	return ok && vision.AcceptsImageInput()
+}
 
 // AcceptsAudio reports the capability of the loaded HIP runtime.  Serving
 // probes this inference.AudioModel seam before forwarding input_audio turns;
@@ -451,7 +470,11 @@ func (m *rocmModel) Chat(ctx context.Context, messages []inference.Message, opts
 		m.setLastFailure(core.E("rocm.Chat", "model does not accept audio input", nil))
 		return emptyTokenSeq
 	}
-	if messagesHaveROCMAudio(messages) && m.engineModel != nil {
+	if messagesHaveROCMVision(messages) && !m.AcceptsImages() {
+		m.setLastFailure(core.E("rocm.Chat", "model does not accept image or video input", nil))
+		return emptyTokenSeq
+	}
+	if messagesHaveROCMMultimodal(messages) && m.engineModel != nil {
 		start := time.Now()
 		stream := m.engineModel.Chat(ctx, messages, opts...)
 		return m.wrapTokenStream(stream, func() error { return resultError(m.engineModel.Err()) }, 0, start, nil)
@@ -459,7 +482,7 @@ func (m *rocmModel) Chat(ctx context.Context, messages []inference.Message, opts
 	cfg := m.applyGenerateOpts(opts)
 	loaded, loadedOK := m.native.(*hipLoadedModel)
 	directGemma4Q4Linked := false
-	if loadedOK && !messagesHaveROCMAudio(messages) && hipLoadedGemma4Q4GenerateLinked(loaded) {
+	if loadedOK && !messagesHaveROCMMultimodal(messages) && hipLoadedGemma4Q4GenerateLinked(loaded) {
 		_, directGemma4Q4Linked = loaded.kernelSet().(hipNativeProjectionKernelSet)
 	}
 	var session *StateSession
@@ -503,6 +526,19 @@ func messagesHaveROCMAudio(messages []inference.Message) bool {
 		}
 	}
 	return false
+}
+
+func messagesHaveROCMVision(messages []inference.Message) bool {
+	for i := range messages {
+		if len(messages[i].Images) > 0 || len(messages[i].Videos) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func messagesHaveROCMMultimodal(messages []inference.Message) bool {
+	return messagesHaveROCMAudio(messages) || messagesHaveROCMVision(messages)
 }
 
 func (m *rocmModel) hipGemma4Q4GenerateTokenSeq(ctx context.Context, session *StateSession, loaded *hipLoadedModel, q4Cfg hipGemma4Q4ForwardConfig, promptTokenIDs []int32, cfg inference.GenerateConfig) (iter.Seq[inference.Token], func() error) {

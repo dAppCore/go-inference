@@ -1442,6 +1442,25 @@ func TestLoadModelWithConfigForwardsAudioModelPath(t *testing.T) {
 	}
 }
 
+func TestLoadModelWithConfigForwardsVisionModelPath(t *testing.T) {
+	runtime := &fakeNativeRuntime{available: true}
+	const visionPath = "/models/gemma-4-12b-it-4bit"
+	model, err := newROCmBackendWithRuntime(runtime).LoadModelWithConfig(
+		writeGemma4ModelPackGGUF(t),
+		ROCmLoadConfig{VisionModelPath: visionPath},
+	)
+	if err != nil {
+		t.Fatalf("LoadModelWithConfig Gemma4 vision: %v", err)
+	}
+	defer model.Close()
+	if runtime.loadConfig.VisionModelPath != visionPath {
+		t.Fatalf("load config vision path = %q, want %q", runtime.loadConfig.VisionModelPath, visionPath)
+	}
+	if !(ROCmLoadConfig{VisionModelPath: visionPath}).active() {
+		t.Fatal("vision-only ROCm load config must be active")
+	}
+}
+
 func TestLoadModelWithConfigRejectsPlannedKVMode(t *testing.T) {
 	runtime := &fakeNativeRuntime{available: true}
 	_, err := newROCmBackendWithRuntime(runtime).LoadModelWithConfig("unused", ROCmLoadConfig{CacheMode: "turboquant"})

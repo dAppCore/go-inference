@@ -2656,6 +2656,32 @@ func TestNativeContract_AudioServeCapability_Bad(t *testing.T) {
 	}
 }
 
+func TestNativeContract_VisionServeCapability_Good(t *testing.T) {
+	native := &fakeNativeVisionTowerModel{fakeNativeModel: &fakeNativeModel{tokens: []inference.Token{{ID: 7, Text: "seen"}}}, accepts: true}
+	model := &rocmModel{modelType: "gemma4", modelInfo: inference.ModelInfo{Architecture: "gemma4"}, contextLength: 4096, native: native}
+	messages := []inference.Message{{Role: "user", Images: [][]byte{{0x89, 'P', 'N', 'G'}}}}
+
+	if !model.AcceptsImages() {
+		t.Fatal("AcceptsImages() = false for loaded vision-capable HIP runtime")
+	}
+	core.AssertEqual(t, []string{"seen"}, collectTokenText(model.Chat(context.Background(), messages)))
+	core.AssertEqual(t, 1, native.towerInvocations)
+}
+
+func TestNativeContract_VisionServeCapability_Bad(t *testing.T) {
+	model := &rocmModel{modelType: "gemma4", modelInfo: inference.ModelInfo{Architecture: "gemma4"}, native: &fakeNativeModel{}}
+	messages := []inference.Message{{Role: "user", Content: "describe", Videos: [][]byte{{'f', 'r', 'a', 'm', 'e'}}}}
+
+	for range model.Chat(context.Background(), messages) {
+		t.Fatal("vision turn yielded a token without the neutral capability")
+	}
+	if err := resultError(model.Err()); err == nil {
+		t.Fatal("vision turn Err() = nil without the neutral capability")
+	} else {
+		core.AssertContains(t, err.Error(), "does not accept image or video input")
+	}
+}
+
 func TestNativeContract_BatchGenerateRecordsNativeError_Bad(t *testing.T) {
 	nativeErr := core.NewError("native batch failure")
 	model := &rocmModel{
@@ -5273,6 +5299,25 @@ type fakeNativeAudioTowerModel struct {
 	*fakeNativeModel
 	accepts          bool
 	towerInvocations int
+}
+
+type fakeNativeVisionTowerModel struct {
+	*fakeNativeModel
+	accepts          bool
+	towerInvocations int
+}
+
+func (model *fakeNativeVisionTowerModel) AcceptsImageInput() bool {
+	return model != nil && model.accepts
+}
+
+func (model *fakeNativeVisionTowerModel) Chat(ctx context.Context, messages []inference.Message, cfg inference.GenerateConfig) (iter.Seq[inference.Token], func() error) {
+	for i := range messages {
+		if len(messages[i].Images) > 0 || len(messages[i].Videos) > 0 {
+			model.towerInvocations++
+		}
+	}
+	return model.fakeNativeModel.Chat(ctx, messages, cfg)
 }
 
 func (model *fakeNativeAudioTowerModel) AcceptsAudioInput() bool {

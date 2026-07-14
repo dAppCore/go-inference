@@ -200,9 +200,10 @@ type OfficialGemma4E2BLock struct {
 }
 
 type ROCmLoadConfig struct {
-	CacheMode      string `json:"cache_mode,omitempty"`
-	DeviceKVMode   string `json:"device_kv_mode,omitempty"`
-	AudioModelPath string `json:"audio_model_path,omitempty"`
+	CacheMode       string `json:"cache_mode,omitempty"`
+	DeviceKVMode    string `json:"device_kv_mode,omitempty"`
+	AudioModelPath  string `json:"audio_model_path,omitempty"`
+	VisionModelPath string `json:"vision_model_path,omitempty"`
 }
 
 func LoadModelWithConfig(string, ROCmLoadConfig, ...inference.LoadOption) (inference.TextModel, error) {
