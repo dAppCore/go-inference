@@ -3,9 +3,12 @@
 package tui
 
 import (
+	"io"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -64,6 +67,23 @@ func TestAppUpdateTransitions(t *testing.T) {
 	if !a.tools.enabled || a.tools.declarations() == "" {
 		t.Fatal("tools enter did not arm declarations")
 	}
+	// service: enter with no model declines with a note, never starts
+	a.activeTab = tabService
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	if a.svc.running || a.svc.note == "" {
+		t.Fatalf("service start without a model: running=%v note=%q", a.svc.running, a.svc.note)
+	}
+	// address presets cycle while stopped and render in the tab
+	before = a.svc.addrIdx
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyRight})
+	a = m.(app)
+	if a.svc.addrIdx == before {
+		t.Fatal("service right-adjust did not change the address preset")
+	}
+	if v := a.View(); !strings.Contains(v, a.svc.addr()) {
+		t.Fatalf("service tab does not render the listen address %q", a.svc.addr())
+	}
 }
 
 // TestAppLiveChatDrive (LTHN_PROBE_MODEL-gated) is the headless end-to-end
@@ -116,6 +136,82 @@ func TestAppLiveChatDrive(t *testing.T) {
 		t.Fatalf("decode tok/s not recorded: %v", a.lastTokS)
 	}
 	t.Logf("live drive: %q at %.1f tok/s", strings.TrimSpace(last.text), a.lastTokS)
+}
+
+// TestAppLiveServiceAPI (LTHN_PROBE_MODEL-gated) is the Service tab's
+// end-to-end receipt: load a real checkpoint through the Update loop, start
+// the API from the Service tab, drive a real OpenAI chat completion at it
+// over HTTP (through the shared serial lane), then stop it cleanly.
+func TestAppLiveServiceAPI(t *testing.T) {
+	dir := os.Getenv("LTHN_PROBE_MODEL")
+	if dir == "" || os.Getenv("MLX_METALLIB_PATH") == "" {
+		t.Skip("needs LTHN_PROBE_MODEL + MLX_METALLIB_PATH")
+	}
+	a := newApp(dir, 0, 128)
+	m, _ := a.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	a = m.(app)
+
+	msg := loadModel(dir, 0)()
+	loaded, ok := msg.(loadedMsg)
+	if !ok {
+		t.Fatalf("loadModel returned %#v", msg)
+	}
+	m, _ = a.Update(loaded)
+	a = m.(app)
+	defer a.model.Close()
+
+	const addr = "127.0.0.1:36917"
+	a.svc.custom = addr
+	a.activeTab = tabService
+	m, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	if !a.svc.running || cmd == nil {
+		t.Fatalf("service did not start: running=%v note=%q", a.svc.running, a.svc.note)
+	}
+	if v := a.View(); !strings.Contains(v, addr) {
+		t.Fatal("service tab does not render the live address")
+	}
+
+	// wait for the listener, then a real OpenAI request through the lane
+	client := &http.Client{Timeout: 120 * time.Second}
+	body := `{"model":"lem","max_tokens":48,"chat_template_kwargs":{"enable_thinking":false},` +
+		`"messages":[{"role":"user","content":"Reply with the single word OK."}]}`
+	var resp *http.Response
+	var err error
+	for i := 0; i < 100; i++ {
+		resp, err = client.Post("http://"+addr+"/v1/chat/completions", "application/json", strings.NewReader(body))
+		if err == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("API never answered: %v", err)
+	}
+	defer resp.Body.Close()
+	payload, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("chat completion status %d: %s", resp.StatusCode, payload)
+	}
+	if !strings.Contains(string(payload), `"content"`) {
+		t.Fatalf("no content in completion: %s", payload)
+	}
+	if a.svc.requests.Load() == 0 {
+		t.Fatal("request counter did not move")
+	}
+	t.Logf("live API: %d req · %s", a.svc.requests.Load(), payload)
+
+	// stop from the tab and drain Serve's return through the update loop
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	if !a.svc.stopping {
+		t.Fatal("enter while running did not begin the stop")
+	}
+	m, _ = a.Update(waitService(a.svc.events)())
+	a = m.(app)
+	if a.svc.running || a.svc.sched != nil {
+		t.Fatal("service did not finish cleanly")
+	}
 }
 
 // errFor builds a plain error for transition tests.

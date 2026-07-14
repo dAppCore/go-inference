@@ -16,13 +16,14 @@ type tabID int
 const (
 	tabChat tabID = iota
 	tabModels
+	tabService
 	tabSettings
 	tabTools
 	tabModes
 	tabCount
 )
 
-var tabNames = [tabCount]string{"Chat", "Models", "Settings", "Tools", "Modes"}
+var tabNames = [tabCount]string{"Chat", "Models", "Service", "Settings", "Tools", "Modes"}
 
 func tabBorder(left, middle, right string) lipgloss.Border {
 	b := lipgloss.RoundedBorder()

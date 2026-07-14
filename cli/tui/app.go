@@ -43,6 +43,7 @@ type app struct {
 	cfg   settings
 	modes modeState
 	tools toolState
+	svc   serviceState
 
 	turns      []turn
 	gen        *generation
@@ -106,6 +107,7 @@ func newApp(modelPath string, ctxLen, maxTokens int) app {
 		cfg:       cfg,
 		modes:     modeState{},
 		tools:     newTools(),
+		svc:       newService(),
 	}
 	if modelPath != "" {
 		a.activeTab = tabChat
@@ -161,6 +163,16 @@ func (a app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamMsg:
 		return a.onStream(msg)
+
+	case serviceMsg:
+		a.svc.finish(msg.ev.err)
+		return a, nil
+
+	case serviceTickMsg:
+		if a.svc.running {
+			return a, serviceTick() // re-arm: keeps the requests counter live
+		}
+		return a, nil
 
 	case tea.KeyMsg:
 		return a.onKey(msg)
@@ -223,7 +235,7 @@ func (a *app) runToolLoop() tea.Cmd {
 	a.turns = append(a.turns, turn{role: "assistant"})
 	a.toolHops++
 	a.generating = true
-	a.gen = startGeneration(a.model, a.history(), a.generateOpts())
+	a.gen = startGeneration(a.chatModel(), a.history(), a.generateOpts())
 	return waitEvent(a.gen)
 }
 
@@ -233,6 +245,7 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if a.gen != nil {
 			a.gen.cancel()
 		}
+		a.svc.teardown("stopped (quit)")
 		if a.model != nil {
 			_ = a.model.Close()
 		}
@@ -266,8 +279,33 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tabModels:
 		if msg.String() == "enter" && a.loading == "" {
 			if item, ok := a.picker.SelectedItem().(modelItem); ok {
+				// the service serves THIS model's weights — stop it before they change
+				a.svc.teardown("stopped — model changing")
 				a.loading = item.path
 				return a, tea.Batch(a.spin.Tick, loadModel(item.path, a.cfg.contextLen()))
+			}
+			return a, nil
+		}
+	case tabService:
+		switch msg.String() {
+		case "enter":
+			if a.svc.running {
+				if a.generating {
+					a.svc.note = "a reply is streaming — esc it or let it finish, then stop"
+					return a, nil
+				}
+				a.svc.stop()
+				return a, nil
+			}
+			return a, a.svc.start(a.model)
+		case "left", "h":
+			if !a.svc.running {
+				a.svc.addrIdx = (a.svc.addrIdx + len(serviceAddrs) - 1) % len(serviceAddrs)
+			}
+			return a, nil
+		case "right", "l":
+			if !a.svc.running {
+				a.svc.addrIdx = (a.svc.addrIdx + 1) % len(serviceAddrs)
 			}
 			return a, nil
 		}
@@ -311,7 +349,7 @@ func (a app) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.generating = true
 			a.toolHops = 0
 			a.errText = ""
-			a.gen = startGeneration(a.model, a.history(), a.generateOpts())
+			a.gen = startGeneration(a.chatModel(), a.history(), a.generateOpts())
 			a.refreshTranscript()
 			return a, waitEvent(a.gen)
 		}
@@ -333,6 +371,16 @@ func (a app) route(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return a, cmd
+}
+
+// chatModel is the model TUI turns generate on: the service's serial lane
+// while the API is up (so terminal turns and HTTP requests queue, never race),
+// the raw model otherwise.
+func (a app) chatModel() inference.TextModel {
+	if a.svc.running && a.svc.sched != nil {
+		return a.svc.sched
+	}
+	return a.model
 }
 
 // generateOpts folds the Modes preset with the Settings overrides — an
@@ -426,6 +474,9 @@ func (a app) statusLine() string {
 	if a.tools.enabled {
 		parts = append(parts, "tools on")
 	}
+	if a.svc.running {
+		parts = append(parts, core.Sprintf("api %s · %d req", a.svc.addr(), a.svc.requests.Load()))
+	}
 	if a.lastTokS > 0 {
 		parts = append(parts, core.Sprintf("%.1f tok/s", a.lastTokS))
 	}
@@ -447,6 +498,8 @@ func (a app) View() string {
 	switch a.activeTab {
 	case tabModels:
 		content = a.picker.View()
+	case tabService:
+		content = a.svc.view(a.modelName, a.width)
 	case tabSettings:
 		content = a.cfg.view(a.width)
 	case tabTools:
