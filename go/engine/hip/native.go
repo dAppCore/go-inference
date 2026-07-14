@@ -133,6 +133,9 @@ func (b *rocmBackend) loadModelWithROCmConfigMode(path string, loadConfig infere
 	if loadConfig.AdapterPath != "" && core.Trim(loadConfig.AdapterPath) == "" {
 		return nil, core.E("rocm.LoadModel", "adapter path is required", nil)
 	}
+	if composedModel, matched, err := loadHIPComposedTextModel(path, loadConfig); err != nil || matched {
+		return composedModel, err
+	}
 	modelPack, err := gguf.ReadInfo(path)
 	loadedGGUF := err == nil
 	modelPath := path

@@ -101,6 +101,10 @@ func hipArchitectureChatTemplate(architecture string) (engine.ChatTemplate, bool
 	if !ok || templateID != "qwen" {
 		return engine.ChatTemplate{}, false
 	}
+	return hipQwenChatTemplate(), true
+}
+
+func hipQwenChatTemplate() engine.ChatTemplate {
 	return engine.ChatTemplate{
 		Open:          "<|im_start|>",
 		Close:         "<|im_end|>",
@@ -109,7 +113,7 @@ func hipArchitectureChatTemplate(architecture string) (engine.ChatTemplate, bool
 		SystemRole:    "system",
 		Thinking:      &engine.ChatThinking{OffSuffix: "<think>\n\n</think>\n\n"},
 		Stops:         []string{"<|im_end|>"},
-	}, true
+	}
 }
 
 func formatHIPArchitectureChatTemplate(messages []inference.Message, architecture string, enableThinking *bool) (string, bool) {
