@@ -1,0 +1,7 @@
+generatorName: ruby
+additionalProperties:
+  gemName: lem_sdk
+  moduleName: LemSdk
+  gemVersion: "0.1.0"
+  library: faraday
+  gemRequiredRubyVersion: ">= 2.6"
