@@ -20,9 +20,8 @@ import (
 // soft-token policy so E2B/E4B audio is reachable through the hip build. hip previously had audio policy
 // + labels only and no path to the tower weights (its text load is GGUF); this is that first path.
 //
-// The tower forward and embed_audio affine-q4 projector are implemented here. WAV bytes-in decode and
-// the serve token-model seam (implementing engine.AudioInputTokenModel over a hip token model, with a
-// combined GGUF-text + safetensors-audio load) remain separate integration work.
+// The tower forward and embed_audio affine-q4 projector are implemented here; inference_model.go binds
+// them to the shared audio serving contract and retained HIP prefill.
 
 // AudioTower holds the assembled Gemma 4 audio tower payload and the mel feature extractor, plus the
 // mmap the tower weight byte-views reference. Close it once the tower is no longer needed.
@@ -38,6 +37,10 @@ type AudioTower struct {
 // Returns (nil, nil) when the checkpoint ships no Conformer audio tower (text-only or non-gemma4), so a
 // caller can probe without special-casing. The returned tower owns the checkpoint mmap; Close releases it.
 func LoadAudioTower(dir string) (*AudioTower, error) {
+	return loadAudioTowerWithGEMM(dir, newSystemHIPAudioGEMM())
+}
+
+func loadAudioTowerWithGEMM(dir string, gemm audio.GEMM) (*AudioTower, error) {
 	loaded, mapping, err := model.Load(dir)
 	if err != nil {
 		return nil, core.E("hip.LoadAudioTower", "load model", err)
@@ -75,7 +78,7 @@ func LoadAudioTower(dir string) (*AudioTower, error) {
 		}
 		return nil, core.E("hip.LoadAudioTower", "load embed_audio projector", err)
 	}
-	return &AudioTower{loaded: loaded.Audio, extractor: extractor, projectorWeights: projectorWeights, mapping: mapping, gemm: newSystemHIPAudioGEMM()}, nil
+	return &AudioTower{loaded: loaded.Audio, extractor: extractor, projectorWeights: projectorWeights, mapping: mapping, gemm: gemm}, nil
 }
 
 // Project runs one decoded waveform (16 kHz mono float32, [-1,1]) through the tower: mel extract →

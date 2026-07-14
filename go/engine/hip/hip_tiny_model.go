@@ -1050,6 +1050,10 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 }
 
 func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens []int32, generate inference.GenerateConfig, engineConfig hipGemma4Q4EngineConfig, initialDeviceState *hipGemma4Q4DeviceDecodeState, retainDeviceState func(*hipGemma4Q4DeviceDecodeState) error, sampler *sharedmodel.Sampler) (iter.Seq[inference.Token], func() error) {
+	return hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx, model, cfg, promptTokens, nil, generate, engineConfig, initialDeviceState, retainDeviceState, sampler)
+}
+
+func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens []int32, promptEmbeddings []byte, generate inference.GenerateConfig, engineConfig hipGemma4Q4EngineConfig, initialDeviceState *hipGemma4Q4DeviceDecodeState, retainDeviceState func(*hipGemma4Q4DeviceDecodeState) error, sampler *sharedmodel.Sampler) (iter.Seq[inference.Token], func() error) {
 	var runErr error
 	return func(yield func(inference.Token) bool) {
 		feedbackReceipts := hipBeginFeedbackReceipts()
@@ -1111,6 +1115,17 @@ func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hip
 		if err := cfg.validate(); err != nil {
 			runErr = err
 			return
+		}
+		if len(promptEmbeddings) > 0 {
+			hidden := cfg.Layers[0].HiddenSize
+			if hidden <= 0 || len(promptEmbeddings) != len(promptTokens)*hidden*4 {
+				runErr = core.E(hipGemma4Q4Layer0Operation, "custom prefill embedding geometry mismatch", nil)
+				return
+			}
+			if !hipGemma4Q4CanUseBatchedGeneratePrefill(cfg) {
+				runErr = core.E(hipGemma4Q4Layer0Operation, "custom prefill embeddings require the batched Gemma4 path", nil)
+				return
+			}
 		}
 		suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(model, generate.StopTokens)
 		hostSampling := hipGemma4Q4HostSamplingRequested(generate)
@@ -1195,6 +1210,19 @@ func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hip
 				return
 			}
 		}
+		var customEmbeddingBuffer *hipDeviceByteBuffer
+		if len(promptEmbeddings) > 0 {
+			customEmbeddingBuffer, err = hipUploadByteBuffer(model.driver, hipGemma4Q4Layer0Operation, "custom prefill embeddings", promptEmbeddings, len(promptEmbeddings)/4)
+			if err != nil {
+				runErr = err
+				return
+			}
+			defer func() {
+				if err := customEmbeddingBuffer.Close(); err != nil && runErr == nil {
+					runErr = err
+				}
+			}()
+		}
 		var priorLayerKVScratch []*rocmDeviceKVCache
 		var priorLayerDescriptorScratch []*rocmDeviceKVDescriptorTable
 		for batchIndex := 0; batchIndex < prefillPlan.LenBatches(); batchIndex++ {
@@ -1276,7 +1304,15 @@ func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hip
 				priorLayerDescriptorScratch = hipGemma4Q4DeviceLayerDescriptorTables(deviceState, priorLayerDescriptorScratch, len(cfg.Layers))
 				priorLayerDescriptorTables = priorLayerDescriptorScratch
 			}
-			forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx, model.driver, cfg, ubatch.Tokens, ubatch.Position, req.Epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, ubatch.OutputTokens, ubatch.OutputRow, finalGreedyBuffer, attentionWorkspace, engineConfig)
+			var initialHidden *hipDeviceByteBuffer
+			if customEmbeddingBuffer != nil {
+				hidden := cfg.Layers[0].HiddenSize
+				byteOffset := ubatch.Start * hidden * 4
+				byteCount := len(ubatch.Tokens) * hidden * 4
+				view := hipBorrowDeviceByteBufferValue(model.driver, "custom prefill embedding ubatch", customEmbeddingBuffer.Pointer()+nativeDevicePointer(byteOffset), uint64(byteCount), len(ubatch.Tokens)*hidden)
+				initialHidden = &view
+			}
+			forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(ctx, model.driver, cfg, ubatch.Tokens, ubatch.Position, req.Epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, ubatch.OutputTokens, ubatch.OutputRow, finalGreedyBuffer, attentionWorkspace, engineConfig, initialHidden)
 			if err != nil {
 				runErr = err
 				return

@@ -2426,6 +2426,44 @@ func TestHIPGemma4Q4PrefillForwardBatch_Good(t *testing.T) {
 	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameMLXQ4ProjGreedy))
 }
 
+func TestHIPGemma4Q4PrefillForwardBatchInitialHidden_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	layer, cleanup := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)
+	defer cleanup()
+	tokens := []int32{0, 1}
+	cfg := hipGemma4Q4ForwardConfig{Layers: []hipGemma4Q4Layer0Config{layer}}
+
+	initialValues := make([]float32, len(tokens)*layer.HiddenSize)
+	for index := range initialValues {
+		initialValues[index] = float32(index + 1)
+	}
+	initialPayload, err := hipFloat32Payload(initialValues)
+	core.RequireNoError(t, err)
+	initialHidden, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "prefill initial hidden fixture", initialPayload, len(initialValues))
+	core.RequireNoError(t, err)
+	defer initialHidden.Close()
+
+	perLayerValues := make([]float32, len(tokens)*layer.PerLayerInput.InputSize)
+	perLayerPayload, err := hipFloat32Payload(perLayerValues)
+	core.RequireNoError(t, err)
+	perLayerInput, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "prefill initial hidden per-layer input fixture", perLayerPayload, len(perLayerValues))
+	core.RequireNoError(t, err)
+	defer perLayerInput.Close()
+
+	start := len(driver.launches)
+	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(
+		context.Background(), driver, cfg, tokens, 0, 1e-6, rocmKVCacheModeKQ8VQ4,
+		nil, nil, []*hipDeviceByteBuffer{perLayerInput}, nil, -1, nil, nil,
+		defaultHIPGemma4Q4EngineConfig(), initialHidden,
+	)
+	core.RequireNoError(t, err)
+	defer forward.Close()
+	core.AssertEqual(t, initialHidden.Pointer(), forward.Embedding.Pointer())
+	launches := driver.launches[start:]
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameEmbedLookup))
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameVectorScale))
+}
+
 func TestHIPGemma4Q4PrefillForwardBatchWithPrior_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	layer0, cleanup0 := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)

@@ -53,6 +53,7 @@ type nativeLoadConfig struct {
 	DeviceKVMode       string
 	SequenceMixerPlan  *SequenceMixerLoadPlan
 	TokenizerPath      string
+	AudioModelPath     string
 	TokenText          *hipTokenTextDecoder
 	Gemma4TextConfig   nativeGemma4TextConfig
 	Gemma4Architecture Gemma4ArchitectureDeclaration
@@ -176,6 +177,7 @@ func (b *rocmBackend) loadModelWithROCmConfigMode(path string, loadConfig infere
 	}
 	nativeConfig.AllowAttachedOnly = allowAttachedOnly
 	nativeConfig.DeviceKVMode = deviceKVMode
+	nativeConfig.AudioModelPath = firstNonEmptyString(strings.TrimSpace(rocmConfig.AudioModelPath), strings.TrimSpace(core.Getenv("GO_ROCM_AUDIO_MODEL_PATH")))
 	nativeConfig.ModelLabels = rocmApplyNativeLoadDeviceKVModeLabels(nativeConfig.ModelLabels, deviceKVMode)
 	rocmApplyNativeLoadModelProfile(path, &nativeConfig)
 
@@ -448,6 +450,11 @@ func (m *rocmModel) Chat(ctx context.Context, messages []inference.Message, opts
 	if messagesHaveROCMAudio(messages) && !m.AcceptsAudio() {
 		m.setLastFailure(core.E("rocm.Chat", "model does not accept audio input", nil))
 		return emptyTokenSeq
+	}
+	if messagesHaveROCMAudio(messages) && m.engineModel != nil {
+		start := time.Now()
+		stream := m.engineModel.Chat(ctx, messages, opts...)
+		return m.wrapTokenStream(stream, func() error { return resultError(m.engineModel.Err()) }, 0, start, nil)
 	}
 	cfg := m.applyGenerateOpts(opts)
 	loaded, loadedOK := m.native.(*hipLoadedModel)

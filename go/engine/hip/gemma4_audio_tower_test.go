@@ -151,6 +151,45 @@ func TestAudioTower_ProjectEmbeddings_Ugly(t *testing.T) {
 	}
 }
 
+func TestHIPDecodeWAVMono16k_Good(t *testing.T) {
+	wav := hipTestPCM16WAV(16000, 2, []int16{16384, 16384, -16384, -16384})
+	got, err := hipDecodeWAVMono16k(wav)
+	if err != nil {
+		t.Fatalf("hipDecodeWAVMono16k: %v", err)
+	}
+	want := []float32{0.5, -0.5}
+	if len(got) != len(want) {
+		t.Fatalf("decoded samples=%d, want %d", len(got), len(want))
+	}
+	for index := range want {
+		if delta := math.Abs(float64(got[index] - want[index])); delta > 1e-6 {
+			t.Fatalf("sample[%d]=%g, want %g", index, got[index], want[index])
+		}
+	}
+}
+
+func TestHIPDecodeWAVMono16k_Bad(t *testing.T) {
+	if _, err := hipDecodeWAVMono16k([]byte("not a wave")); err == nil {
+		t.Fatal("malformed WAV error = nil")
+	}
+}
+
+func TestHIPDecodeWAVMono16k_Ugly(t *testing.T) {
+	wav := hipTestPCM16WAV(8000, 1, []int16{0, 4096, 8192, 4096, 0, -4096, -8192, -4096})
+	got, err := hipDecodeWAVMono16k(wav)
+	if err != nil {
+		t.Fatalf("hipDecodeWAVMono16k resample: %v", err)
+	}
+	if len(got) != 16 {
+		t.Fatalf("8 kHz -> 16 kHz samples=%d, want 16", len(got))
+	}
+	for index, sample := range got {
+		if math.IsNaN(float64(sample)) || math.IsInf(float64(sample), 0) {
+			t.Fatalf("sample[%d]=%g, want finite", index, sample)
+		}
+	}
+}
+
 func TestHipLoadAudioProjectorQ4_Ugly(t *testing.T) {
 	projector := audioQ4GoldenProjector()
 	projector.Biases = nil
@@ -170,6 +209,28 @@ func audioQ4GoldenProjector() model.LoadedAudioLinear {
 		Biases: []byte{0x80, 0x3f, 0x00, 0xbf, 0x00, 0x40}, OutDim: outDim, InDim: inDim,
 		GroupSize: groupSize, Bits: bits, Kind: mlxaffine.Mode,
 	}
+}
+
+func hipTestPCM16WAV(rate, channels int, samples []int16) []byte {
+	dataBytes := len(samples) * 2
+	wav := make([]byte, 44+dataBytes)
+	copy(wav[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(wav[4:8], uint32(36+dataBytes))
+	copy(wav[8:12], "WAVE")
+	copy(wav[12:16], "fmt ")
+	binary.LittleEndian.PutUint32(wav[16:20], 16)
+	binary.LittleEndian.PutUint16(wav[20:22], 1)
+	binary.LittleEndian.PutUint16(wav[22:24], uint16(channels))
+	binary.LittleEndian.PutUint32(wav[24:28], uint32(rate))
+	binary.LittleEndian.PutUint32(wav[28:32], uint32(rate*channels*2))
+	binary.LittleEndian.PutUint16(wav[32:34], uint16(channels*2))
+	binary.LittleEndian.PutUint16(wav[34:36], 16)
+	copy(wav[36:40], "data")
+	binary.LittleEndian.PutUint32(wav[40:44], uint32(dataBytes))
+	for index, sample := range samples {
+		binary.LittleEndian.PutUint16(wav[44+index*2:], uint16(sample))
+	}
+	return wav
 }
 
 // TestAudioTower_softTokenPolicy pins the binding's soft-token count to hip's shared audio policy so the

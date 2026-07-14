@@ -13,6 +13,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/engine"
+	sharedmodel "dappco.re/go/inference/model"
 )
 
 func hipInferenceModelFixtureTokenizer() *hipTokenTextDecoder {
@@ -52,6 +53,25 @@ func TestHIPInferenceModel_EmbeddedTokenizer_Good(t *testing.T) {
 func TestHIPInferenceModel_PromptReuseDeclaration_Good(t *testing.T) {
 	var declaration engine.PromptReuseCapableModel = newHipTokenModel(&hipLoadedModel{}, hipInferenceModelFixtureTokenizer(), "gemma4")
 	core.AssertTrue(t, declaration.SessionsReusePrompts())
+}
+
+func TestHIPInferenceModel_AudioContract_Good(t *testing.T) {
+	tokenModel := newHipTokenModel(&hipLoadedModel{}, hipInferenceModelFixtureTokenizer(), "gemma4")
+	var _ engine.AudioInputTokenModel = tokenModel
+	var _ engine.VisionTokenModel = tokenModel
+	core.AssertFalse(t, tokenModel.AcceptsAudioInput())
+	core.AssertFalse(t, tokenModel.AcceptsImageInput())
+
+	tokenModel.loaded.audio = &AudioTower{loaded: &sharedmodel.LoadedAudio{Cfg: sharedmodel.LoadedAudioConfig{
+		AudioTokenID:    77,
+		AudioBeginToken: "<|audio><|",
+		AudioToken:      "audio|>",
+		AudioEndToken:   "<audio|>",
+	}}}
+	core.AssertTrue(t, tokenModel.AcceptsAudioInput())
+	core.AssertEqual(t, int32(77), tokenModel.AudioPlaceholderTokenID())
+	core.AssertEqual(t, "<|audio><|audio|>audio|><audio|>", tokenModel.AudioPlaceholderBlock(2))
+	core.AssertEqual(t, "", tokenModel.AudioPlaceholderBlock(0))
 }
 
 func TestHIPInferenceModel_DeclaredGemma4ChatTemplate_Good(t *testing.T) {

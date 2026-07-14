@@ -2564,7 +2564,11 @@ func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRow(ctx 
 }
 
 func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowWithEngineConfig(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, tokens []int32, startPosition int, epsilon float32, mode string, priorLayerKV []*rocmDeviceKVCache, priorLayerDescriptorTables []*rocmDeviceKVDescriptorTable, perLayerInputs []*hipDeviceByteBuffer, outputRows []bool, outputRow int, best *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace, engineConfig hipGemma4Q4EngineConfig) (*hipGemma4Q4PrefillForwardBatch, error) {
-	return hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDeviceTokenWithEngineConfig(ctx, driver, cfg, tokens, startPosition, epsilon, mode, priorLayerKV, priorLayerDescriptorTables, perLayerInputs, outputRows, outputRow, best, workspace, engineConfig, nil, nil)
+	return hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDeviceTokenWithEngineConfig(ctx, driver, cfg, tokens, startPosition, epsilon, mode, priorLayerKV, priorLayerDescriptorTables, perLayerInputs, outputRows, outputRow, best, workspace, engineConfig, nil, nil, nil)
+}
+
+func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, tokens []int32, startPosition int, epsilon float32, mode string, priorLayerKV []*rocmDeviceKVCache, priorLayerDescriptorTables []*rocmDeviceKVDescriptorTable, perLayerInputs []*hipDeviceByteBuffer, outputRows []bool, outputRow int, best *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace, engineConfig hipGemma4Q4EngineConfig, initialHidden *hipDeviceByteBuffer) (*hipGemma4Q4PrefillForwardBatch, error) {
+	return hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDeviceTokenWithEngineConfig(ctx, driver, cfg, tokens, startPosition, epsilon, mode, priorLayerKV, priorLayerDescriptorTables, perLayerInputs, outputRows, outputRow, best, workspace, engineConfig, nil, nil, initialHidden)
 }
 
 func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowGreedyTokenWithEngineConfig(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, tokens []int32, startPosition int, epsilon float32, mode string, priorLayerKV []*rocmDeviceKVCache, priorLayerDescriptorTables []*rocmDeviceKVDescriptorTable, perLayerInputs []*hipDeviceByteBuffer, outputRows []bool, outputRow int, best *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace, engineConfig hipGemma4Q4EngineConfig, greedyToken *hipDeviceByteBuffer) (*hipGemma4Q4PrefillForwardBatch, error) {
@@ -2573,10 +2577,10 @@ func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowGreed
 		routeMetrics = hipBeginDecodeRouteMetrics()
 		defer hipFinishDecodeRouteMetrics(routeMetrics)
 	}
-	return hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDeviceTokenWithEngineConfig(ctx, driver, cfg, tokens, startPosition, epsilon, mode, priorLayerKV, priorLayerDescriptorTables, perLayerInputs, outputRows, outputRow, best, workspace, engineConfig, nil, greedyToken)
+	return hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDeviceTokenWithEngineConfig(ctx, driver, cfg, tokens, startPosition, epsilon, mode, priorLayerKV, priorLayerDescriptorTables, perLayerInputs, outputRows, outputRow, best, workspace, engineConfig, nil, greedyToken, nil)
 }
 
-func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDeviceTokenWithEngineConfig(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, tokens []int32, startPosition int, epsilon float32, mode string, priorLayerKV []*rocmDeviceKVCache, priorLayerDescriptorTables []*rocmDeviceKVDescriptorTable, perLayerInputs []*hipDeviceByteBuffer, outputRows []bool, outputRow int, best *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace, engineConfig hipGemma4Q4EngineConfig, tokenBuffer *hipDeviceTokenBuffer, greedyToken *hipDeviceByteBuffer) (*hipGemma4Q4PrefillForwardBatch, error) {
+func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDeviceTokenWithEngineConfig(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, tokens []int32, startPosition int, epsilon float32, mode string, priorLayerKV []*rocmDeviceKVCache, priorLayerDescriptorTables []*rocmDeviceKVDescriptorTable, perLayerInputs []*hipDeviceByteBuffer, outputRows []bool, outputRow int, best *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace, engineConfig hipGemma4Q4EngineConfig, tokenBuffer *hipDeviceTokenBuffer, greedyToken, initialHidden *hipDeviceByteBuffer) (*hipGemma4Q4PrefillForwardBatch, error) {
 	if err := hipContextErr(ctx); err != nil {
 		return nil, err
 	}
@@ -2597,6 +2601,12 @@ func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDevic
 	if tokenBuffer != nil && greedyToken != nil {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "prefill forward requires one token buffer format", nil)
 	}
+	if initialHidden != nil {
+		wantCount := len(tokens) * cfg.Layers[0].HiddenSize
+		if greedyToken != nil || initialHidden.Pointer() == 0 || initialHidden.Count() != wantCount || initialHidden.SizeBytes() != uint64(wantCount*4) {
+			return nil, core.E(hipGemma4Q4Layer0Operation, "prefill forward initial hidden shape mismatch", nil)
+		}
+	}
 	if greedyToken != nil && (len(tokens) != 1 || greedyToken.Pointer() == 0 || greedyToken.Count() != 1 || greedyToken.SizeBytes() != hipMLXQ4ProjectionBestBytes) {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "prefill forward greedy token buffer shape mismatch", nil)
 	}
@@ -2616,7 +2626,10 @@ func hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowDevic
 		defer tokenBuffer.Close()
 	}
 	var hidden *hipDeviceByteBuffer
-	if greedyToken != nil {
+	if initialHidden != nil {
+		out.embeddingView = hipBorrowDeviceByteBufferValue(driver, "prefill initial hidden view", initialHidden.Pointer(), initialHidden.SizeBytes(), initialHidden.Count())
+		hidden = &out.embeddingView
+	} else if greedyToken != nil {
 		hidden, err = hipRunGemma4Q4PrefillEmbeddingBatchGreedyTokenWorkspaceView(ctx, driver, cfg.Layers[0], tokens, greedyToken, workspace, &out.embeddingView)
 	} else {
 		hidden, err = hipRunGemma4Q4PrefillEmbeddingBatchTokenBufferWorkspaceView(ctx, driver, cfg.Layers[0], tokens, tokenBuffer, workspace, &out.embeddingView)

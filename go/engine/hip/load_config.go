@@ -14,8 +14,9 @@ import (
 // ROCmLoadConfig carries ROCm-specific load decisions that are intentionally
 // narrower than the backend-neutral go-inference LoadConfig.
 type ROCmLoadConfig struct {
-	CacheMode    string `json:"cache_mode,omitempty"`
-	DeviceKVMode string `json:"device_kv_mode,omitempty"`
+	CacheMode      string `json:"cache_mode,omitempty"`
+	DeviceKVMode   string `json:"device_kv_mode,omitempty"`
+	AudioModelPath string `json:"audio_model_path,omitempty"`
 }
 
 // LoadModelWithConfig loads a model with ROCm-specific native runtime settings.
@@ -28,7 +29,7 @@ func (b *rocmBackend) LoadModelWithConfig(path string, cfg ROCmLoadConfig, opts 
 }
 
 func (cfg ROCmLoadConfig) active() bool {
-	return strings.TrimSpace(cfg.CacheMode) != "" || strings.TrimSpace(cfg.DeviceKVMode) != ""
+	return strings.TrimSpace(cfg.CacheMode) != "" || strings.TrimSpace(cfg.DeviceKVMode) != "" || strings.TrimSpace(cfg.AudioModelPath) != ""
 }
 
 func (cfg ROCmLoadConfig) deviceKVMode() (string, error) {

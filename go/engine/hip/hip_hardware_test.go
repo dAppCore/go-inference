@@ -45,6 +45,53 @@ func TestHIPHardwareAvailabilitySmoke_Good(t *testing.T) {
 	}
 }
 
+func TestHIPHardwareGemma4AudioChat_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_AUDIO_CHAT_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_AUDIO_CHAT_TESTS=1 to run the Gemma 4 audio chat smoke")
+	}
+	textPath := strings.TrimSpace(os.Getenv("GO_ROCM_AUDIO_TEXT_MODEL_PATH"))
+	audioPath := strings.TrimSpace(os.Getenv("GO_ROCM_AUDIO_MODEL_PATH"))
+	if textPath == "" || audioPath == "" {
+		t.Fatal("GO_ROCM_AUDIO_TEXT_MODEL_PATH and GO_ROCM_AUDIO_MODEL_PATH are required")
+	}
+	if strings.TrimSpace(os.Getenv("GO_ROCM_KERNEL_HSACO")) == "" {
+		t.Fatal("GO_ROCM_KERNEL_HSACO is required")
+	}
+
+	textModel, err := newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModelWithConfig(
+		textPath,
+		ROCmLoadConfig{AudioModelPath: audioPath},
+		inference.WithContextLen(4096),
+	)
+	if err != nil {
+		t.Fatalf("LoadModelWithConfig audio: %v", err)
+	}
+	defer textModel.Close()
+	audioModel, ok := textModel.(inference.AudioModel)
+	if !ok || !audioModel.AcceptsAudio() {
+		t.Fatalf("loaded model audio capability = %T/%v, want true", textModel, ok)
+	}
+
+	waveform := syntheticWaveform(8000)
+	samples := make([]int16, len(waveform))
+	for index, value := range waveform {
+		samples[index] = int16(value * 32767)
+	}
+	wav := hipTestPCM16WAV(16000, 1, samples)
+	generated := 0
+	for range textModel.Chat(context.Background(), []inference.Message{{
+		Role: "user", Content: "Describe this sound briefly.", Audios: [][]byte{wav},
+	}}, inference.WithMaxTokens(1), inference.WithTemperature(0)) {
+		generated++
+	}
+	if err := resultError(textModel.Err()); err != nil {
+		t.Fatalf("audio Chat: %v", err)
+	}
+	if generated != 1 {
+		t.Fatalf("audio Chat generated %d tokens, want 1", generated)
+	}
+}
+
 func TestHIPHardwareMoECombineNormsMatchesRMSNormAndVectorAdd_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")

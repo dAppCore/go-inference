@@ -53,7 +53,10 @@ import (
 	"dappco.re/go/inference/model"
 )
 
-var _ engine.Session = (*hipEngineSession)(nil)
+var (
+	_ engine.Session       = (*hipEngineSession)(nil)
+	_ engine.VisionSession = (*hipEngineSession)(nil)
+)
 
 // hipKVSnapshotDevicePayloadMode marks the opaque per-layer payloads that
 // retain HIP's device-page encoding alongside the portable float32 snapshot.
@@ -64,17 +67,21 @@ const hipKVSnapshotDevicePayloadMode = "turboquant"
 // Session. It is single-goroutine-guarded by mu (engine.SessionHandle already
 // serialises calls; the lock guards the device/pending/tokens invariant).
 type hipEngineSession struct {
-	mu        sync.Mutex
-	loaded    *hipLoadedModel
-	cfg       hipGemma4Q4ForwardConfig
-	engine    hipGemma4Q4EngineConfig
-	mode      string
-	driver    nativeHIPDriver
-	device    *hipGemma4Q4DeviceDecodeState
-	pending   []int32
-	tokens    []int32
-	generated []int32
-	closed    bool
+	mu      sync.Mutex
+	loaded  *hipLoadedModel
+	cfg     hipGemma4Q4ForwardConfig
+	engine  hipGemma4Q4EngineConfig
+	mode    string
+	driver  nativeHIPDriver
+	device  *hipGemma4Q4DeviceDecodeState
+	pending []int32
+	// pendingEmbeddings contains one float32 hidden row per pending token when
+	// the prompt entered through the multimodal prefill contract. Nil means the
+	// ordinary token-embedding lookup path.
+	pendingEmbeddings []byte
+	tokens            []int32
+	generated         []int32
+	closed            bool
 }
 
 // newHipEngineSession opens a retained Gemma4-Q4 session over a loaded model.
@@ -128,6 +135,45 @@ func (s *hipEngineSession) PrefillTokens(ids []int32) error {
 		return err
 	}
 	s.pending = append([]int32(nil), ids...)
+	s.pendingEmbeddings = nil
+	s.tokens = append([]int32(nil), ids...)
+	s.generated = nil
+	return nil
+}
+
+// PrefillTokenEmbeddings replaces retained state with a multimodal prompt whose
+// already-spliced float32 rows must enter layer zero directly.
+func (s *hipEngineSession) PrefillTokenEmbeddings(ids []int32, embeddings [][]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return core.NewError("hip.EngineSession.PrefillTokenEmbeddings: session is closed")
+	}
+	if len(ids) == 0 {
+		return core.NewError("hip.EngineSession.PrefillTokenEmbeddings: empty prompt tokens")
+	}
+	if len(ids) != len(embeddings) {
+		return core.NewError("hip.EngineSession.PrefillTokenEmbeddings: token and embedding counts differ")
+	}
+	if len(ids) > s.contextLimitLocked() {
+		return core.NewError("hip.EngineSession.PrefillTokenEmbeddings: prompt exceeds model context window")
+	}
+	rowBytes := s.embeddingRowBytesLocked()
+	if rowBytes <= 0 {
+		return core.NewError("hip.EngineSession.PrefillTokenEmbeddings: invalid embedding width")
+	}
+	stream := make([]byte, len(ids)*rowBytes)
+	for index, row := range embeddings {
+		if len(row) != rowBytes {
+			return core.NewError("hip.EngineSession.PrefillTokenEmbeddings: embedding row width mismatch")
+		}
+		copy(stream[index*rowBytes:(index+1)*rowBytes], row)
+	}
+	if err := s.closeDeviceLocked(); err != nil {
+		return err
+	}
+	s.pending = append([]int32(nil), ids...)
+	s.pendingEmbeddings = stream
 	s.tokens = append([]int32(nil), ids...)
 	s.generated = nil
 	return nil
@@ -143,6 +189,9 @@ func (s *hipEngineSession) AppendTokens(ids []int32) error {
 	}
 	if len(ids) == 0 {
 		return core.NewError("hip.EngineSession.AppendTokens: empty prompt tokens")
+	}
+	if len(s.pendingEmbeddings) > 0 {
+		return core.NewError("hip.EngineSession.AppendTokens: cannot append token ids before custom embeddings are forwarded")
 	}
 	if limit := s.contextLimitLocked(); len(s.tokens) > limit-len(ids) {
 		return core.NewError("hip.EngineSession.AppendTokens: sequence exceeds model context window")
@@ -218,7 +267,9 @@ func (s *hipEngineSession) generate(ctx context.Context, generate inference.Gene
 		return nil, core.NewError("hip.EngineSession.Generate: no buffered tokens to seed decode (hip decodes from a forwarded prompt, not a bare cache — append a prompt first)")
 	}
 	prompt := s.pending
+	promptEmbeddings := s.pendingEmbeddings
 	s.pending = nil
+	s.pendingEmbeddings = nil
 	emit := func(id int32) bool {
 		out := id
 		if transform != nil {
@@ -233,7 +284,7 @@ func (s *hipEngineSession) generate(ctx context.Context, generate inference.Gene
 		}
 		return keep
 	}
-	out, err := s.driveLocked(ctx, prompt, generate, sampler, emit)
+	out, err := s.driveLocked(ctx, prompt, promptEmbeddings, generate, sampler, emit)
 	s.tokens = append(s.tokens, out...)
 	s.generated = append(s.generated, out...)
 	if err == nil {
@@ -272,6 +323,9 @@ func (s *hipEngineSession) PrefillTokensCached(ids []int32) (int, error) {
 	if limit := s.contextLimitLocked(); len(ids) > limit {
 		return 0, core.NewError("hip.EngineSession.PrefillTokensCached: prompt exceeds model context window")
 	}
+	if len(s.pendingEmbeddings) > 0 {
+		return 0, s.prefillTokensLocked(ids)
+	}
 
 	lcp := hipTokenPrefixLen(s.tokens, ids)
 	if lcp == len(ids) {
@@ -308,6 +362,16 @@ func (s *hipEngineSession) contextLimitLocked() int {
 	return defaultContextLengthCap
 }
 
+func (s *hipEngineSession) embeddingRowBytesLocked() int {
+	if s.loaded != nil && s.loaded.modelInfo.HiddenSize > 0 {
+		return s.loaded.modelInfo.HiddenSize * 4
+	}
+	if len(s.cfg.Layers) > 0 && s.cfg.Layers[0].HiddenSize > 0 {
+		return s.cfg.Layers[0].HiddenSize * 4
+	}
+	return 0
+}
+
 func (s *hipEngineSession) ringRollbackUnsafeLocked(forwarded int) bool {
 	limit := s.contextLimitLocked()
 	for _, layer := range s.cfg.Layers {
@@ -324,6 +388,7 @@ func (s *hipEngineSession) prefillTokensLocked(ids []int32) error {
 		return err
 	}
 	s.pending = append([]int32(nil), ids...)
+	s.pendingEmbeddings = nil
 	s.tokens = append([]int32(nil), ids...)
 	s.generated = nil
 	return nil
@@ -370,12 +435,12 @@ func hipTokenPrefixLen(a, b []int32) int {
 // continuing from the retained device state. Ownership of s.device moves into
 // the driver (which transfers/closes it) and the retain callback re-installs the
 // final state. Must be called with mu held.
-func (s *hipEngineSession) driveLocked(ctx context.Context, promptTokens []int32, generate inference.GenerateConfig, sampler *model.Sampler, emit func(int32) bool) ([]int32, error) {
+func (s *hipEngineSession) driveLocked(ctx context.Context, promptTokens []int32, promptEmbeddings []byte, generate inference.GenerateConfig, sampler *model.Sampler, emit func(int32) bool) ([]int32, error) {
 	initial := s.device
 	s.device = nil
 	var out []int32
 	stopped := false
-	seq, errFn := hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx, s.loaded, s.cfg, promptTokens, generate, s.engine, initial, func(state *hipGemma4Q4DeviceDecodeState) error {
+	seq, errFn := hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx, s.loaded, s.cfg, promptTokens, promptEmbeddings, generate, s.engine, initial, func(state *hipGemma4Q4DeviceDecodeState) error {
 		s.device = state
 		return nil
 	}, sampler)
@@ -405,6 +470,9 @@ func (s *hipEngineSession) CaptureKVWithOptions(opts kv.CaptureOptions) (*kv.Sna
 	defer s.mu.Unlock()
 	if s.closed {
 		return nil, core.NewError("hip.EngineSession.CaptureKVWithOptions: session is closed")
+	}
+	if len(s.pendingEmbeddings) > 0 {
+		return nil, core.NewError("hip.EngineSession.CaptureKVWithOptions: custom embeddings must be forwarded before state capture")
 	}
 	host, err := s.hostStateLocked()
 	if err != nil {
@@ -447,6 +515,9 @@ func (s *hipEngineSession) RangeKVBlocks(blockSize int, opts kv.CaptureOptions, 
 	defer s.mu.Unlock()
 	if s.closed {
 		return core.NewError("hip.EngineSession.RangeKVBlocks: session is closed")
+	}
+	if len(s.pendingEmbeddings) > 0 {
+		return core.NewError("hip.EngineSession.RangeKVBlocks: custom embeddings must be forwarded before state capture")
 	}
 	host, err := s.hostStateLocked()
 	if err != nil {
@@ -515,6 +586,7 @@ func (s *hipEngineSession) RestoreFromKV(ctx context.Context, snapshot *kv.Snaps
 	}
 	s.device = device
 	s.tokens = append([]int32(nil), snapshot.Tokens...)
+	s.pendingEmbeddings = nil
 	if forwarded < len(s.tokens) {
 		s.pending = append([]int32(nil), s.tokens[forwarded:]...)
 	} else {
@@ -533,6 +605,7 @@ func (s *hipEngineSession) Close() error {
 	}
 	s.closed = true
 	s.pending = nil
+	s.pendingEmbeddings = nil
 	return s.closeDeviceLocked()
 }
 

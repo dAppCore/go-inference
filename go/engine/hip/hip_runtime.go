@@ -220,6 +220,28 @@ func loadHIPDefaultNativeModel(runtime *hipRuntime, path string, cfg nativeLoadC
 			return nil, core.E("rocm.hip.LoadModel", "bind sequence mixer plan", err)
 		}
 	}
+	if cfg.AudioModelPath != "" {
+		tower, err := loadAudioTowerWithGEMM(cfg.AudioModelPath, newHIPAudioGEMM(runtime.driver))
+		if err != nil {
+			model.Close()
+			return nil, core.E("rocm.hip.LoadModel", "load Gemma 4 audio tower", err)
+		}
+		if tower == nil {
+			model.Close()
+			return nil, core.E("rocm.hip.LoadModel", "audio model path has no Gemma 4 audio tower", nil)
+		}
+		if cfg.ModelInfo.HiddenSize <= 0 || tower.loaded.Projector.OutDim != cfg.ModelInfo.HiddenSize {
+			_ = tower.Close()
+			model.Close()
+			return nil, core.E("rocm.hip.LoadModel", "audio projector output does not match text hidden size", nil)
+		}
+		model.audio = tower
+		if model.modelLabels == nil {
+			model.modelLabels = map[string]string{}
+		}
+		model.modelLabels["audio_model_path"] = cfg.AudioModelPath
+		model.modelLabels["audio_runtime"] = "gemma4_conformer"
+	}
 	hipPrewarmGemma4Q4TokenFilters(model)
 	hipPrewarmGemma4Q4KernelFunctions(model.driver)
 	hipPrewarmGemma4Q4LaunchPacketPools()
@@ -632,6 +654,7 @@ type hipLoadedModel struct {
 	smallLoRA             *hipLoadedSmallLoRAAdapter
 	classLoRA             *hipLoadedClassifierLoRAAdapter
 	tokenText             *hipTokenTextDecoder
+	audio                 *AudioTower
 	q4ConfigMu            sync.Mutex
 	q4Config              hipGemma4Q4ForwardConfig
 	q4Layers              int
@@ -648,6 +671,10 @@ type hipLoadedModel struct {
 	tinyPriorValues       []float32
 	createdAt             time.Time
 	closed                bool
+}
+
+func (model *hipLoadedModel) AcceptsAudioInput() bool {
+	return model != nil && model.audio != nil && model.audio.loaded != nil
 }
 
 func (model *hipLoadedModel) gemma4Q4EngineConfig() hipGemma4Q4EngineConfig {
@@ -1317,6 +1344,10 @@ func (model *hipLoadedModel) Close() error {
 		return nil
 	}
 	var lastErr error
+	if err := model.audio.Close(); err != nil {
+		lastErr = core.E("rocm.hip.Close", "close audio tower", err)
+	}
+	model.audio = nil
 	model.expertCacheMu.Lock()
 	if err := model.expertCache.Close(); err != nil {
 		lastErr = core.E("rocm.hip.Close", "close expert cache", err)

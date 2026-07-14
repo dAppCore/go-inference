@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference"
+	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/kv"
 	"dappco.re/go/inference/model"
 )
@@ -107,6 +109,40 @@ func TestHipEngineSession_Generate_Good_KeepsUnforwardedFinalTokenPending(t *tes
 
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, []int32{3}, session.pending)
+}
+
+func TestHipEngineSession_PrefillTokenEmbeddings_Good(t *testing.T) {
+	session := &hipEngineSession{
+		loaded: &hipLoadedModel{modelInfo: inference.ModelInfo{HiddenSize: 2}, contextSize: 8},
+	}
+	var _ engine.VisionSession = session
+	rows := [][]byte{{1, 2, 3, 4, 5, 6, 7, 8}, {9, 10, 11, 12, 13, 14, 15, 16}}
+	core.RequireNoError(t, session.PrefillTokenEmbeddings([]int32{4, 77}, rows))
+	core.AssertEqual(t, []int32{4, 77}, session.pending)
+	core.AssertEqual(t, []int32{4, 77}, session.tokens)
+	core.AssertEqual(t, []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}, session.pendingEmbeddings)
+	rows[0][0] = 99
+	core.AssertEqual(t, byte(1), session.pendingEmbeddings[0])
+}
+
+func TestHipEngineSession_PrefillTokenEmbeddings_Bad(t *testing.T) {
+	session := &hipEngineSession{
+		loaded: &hipLoadedModel{modelInfo: inference.ModelInfo{HiddenSize: 2}, contextSize: 8},
+	}
+	core.AssertError(t, session.PrefillTokenEmbeddings([]int32{1, 2}, [][]byte{{1, 2, 3, 4, 5, 6, 7, 8}}))
+	core.AssertError(t, session.PrefillTokenEmbeddings([]int32{1}, [][]byte{{1, 2, 3}}))
+}
+
+func TestHipEngineSession_CaptureKVWithOptions_Bad_RejectsUnforwardedEmbeddings(t *testing.T) {
+	session := &hipEngineSession{
+		loaded:            &hipLoadedModel{modelInfo: inference.ModelInfo{HiddenSize: 1}, contextSize: 8},
+		pending:           []int32{77},
+		tokens:            []int32{77},
+		pendingEmbeddings: []byte{0, 0, 0, 0},
+	}
+	_, err := session.CaptureKVWithOptions(kv.CaptureOptions{})
+	core.AssertError(t, err)
+	core.AssertContains(t, err.Error(), "custom embeddings")
 }
 
 func hipEngineSessionWithNonCanonicalDeviceKVForTest(t testing.TB) *hipEngineSession {

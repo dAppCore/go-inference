@@ -1423,6 +1423,25 @@ func TestLoadModelWithConfigForwardsDeviceKVMode(t *testing.T) {
 	}
 }
 
+func TestLoadModelWithConfigForwardsAudioModelPath(t *testing.T) {
+	runtime := &fakeNativeRuntime{available: true}
+	const audioPath = "/models/gemma-4-e2b-it-4bit"
+	model, err := newROCmBackendWithRuntime(runtime).LoadModelWithConfig(
+		writeGemma4ModelPackGGUF(t),
+		ROCmLoadConfig{AudioModelPath: audioPath},
+	)
+	if err != nil {
+		t.Fatalf("LoadModelWithConfig Gemma4 audio: %v", err)
+	}
+	defer model.Close()
+	if runtime.loadConfig.AudioModelPath != audioPath {
+		t.Fatalf("load config audio path = %q, want %q", runtime.loadConfig.AudioModelPath, audioPath)
+	}
+	if !(ROCmLoadConfig{AudioModelPath: audioPath}).active() {
+		t.Fatal("audio-only ROCm load config must be active")
+	}
+}
+
 func TestLoadModelWithConfigRejectsPlannedKVMode(t *testing.T) {
 	runtime := &fakeNativeRuntime{available: true}
 	_, err := newROCmBackendWithRuntime(runtime).LoadModelWithConfig("unused", ROCmLoadConfig{CacheMode: "turboquant"})
