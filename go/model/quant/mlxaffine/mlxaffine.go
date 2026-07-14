@@ -45,10 +45,13 @@ const Mode = "affine"
 const affineEps float32 = 1e-7
 
 // SupportedBits reports whether bits is a width this package packs byte-exactly.
-// MLX's clean LSB-first uint32 packing needs 32 % bits == 0 (2, 4, 8); the 3/5/6-bit
+// MLX's clean LSB-first uint32 packing needs 32 % bits == 0 (1, 2, 4, 8); the 3/5/6-bit
 // MLX layouts split codes across word boundaries and are NOT reproduced here (no
 // reference snapshot to verify them against — refusing beats emitting wrong bytes).
-func SupportedBits(bits int) bool { return bits == 2 || bits == 4 || bits == 8 }
+// 1-bit codes are {0,1}: the composed quant lane reads Bonsai's b1 packs through
+// DequantizeTensor and bridges them to the stock b_2 device kernels with RepackB1ToB2
+// (repack.go), an exact code-widening (w = scale·q + bias is unchanged).
+func SupportedBits(bits int) bool { return bits == 1 || bits == 2 || bits == 4 || bits == 8 }
 
 // EligibleShape reports whether a tensor of the given shape is quantised by the MLX
 // convention: a 2-D matrix whose inner (inDim) dimension is a whole number of groups.

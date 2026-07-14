@@ -231,10 +231,11 @@ func TestEligibleShape(t *testing.T) {
 	}
 }
 
-// TestSupportedBits pins the byte-exact bit-widths (2, 4, 8) and the refusal of MLX's
-// cross-word 3/5/6-bit layouts this package does not reproduce.
+// TestSupportedBits pins the byte-exact bit-widths (1, 2, 4, 8) and the refusal of MLX's
+// cross-word 3/5/6-bit layouts this package does not reproduce. 1-bit joins the set for the
+// composed quant lane's b1→b2 repack read path (RepackB1ToB2).
 func TestSupportedBits(t *testing.T) {
-	for bits, want := range map[int]bool{1: false, 2: true, 3: false, 4: true, 5: false, 6: false, 8: true, 16: false} {
+	for bits, want := range map[int]bool{1: true, 2: true, 3: false, 4: true, 5: false, 6: false, 8: true, 16: false} {
 		if got := mlxaffine.SupportedBits(bits); got != want {
 			t.Errorf("SupportedBits(%d) = %v, want %v", bits, got, want)
 		}
