@@ -1,0 +1,7 @@
+generatorName: kotlin
+additionalProperties:
+  packageName: re.dappco.lem
+  groupId: re.dappco
+  artifactId: lem-sdk
+  artifactVersion: "0.1.0"
+  library: jvm-okhttp4
