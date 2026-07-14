@@ -5,6 +5,7 @@
 package native
 
 import (
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -203,4 +204,56 @@ func TestProbeTrainForwardWallSplit(t *testing.T) {
 	t.Logf("T=%d  A2 batched-capture-forward = %v  (engaged=%v, A/A2 = %.1fx)", T, a2Wall, a2Engaged, float64(aWall)/float64(a2Wall))
 	t.Logf("T=%d  C  full SFT step           = %v  (loss %.4f, was 3.64s pre-batched-capture)", T, cWall, loss)
 	t.Logf("T=%d  C-A2 host half             = %v  (%.0f%% of the step)", T, host, 100*float64(host)/float64(cWall))
+
+	// D — the #390 rung: softmax cross-entropy FORWARD+BACKWARD, host reference vs the GPU kernel, over
+	// the SAME real training logits (frozen head + LoRA delta) at the causal prediction rows. This
+	// [T,vocab] softmax backward is the block that dominates the C-A2 host half; the split lets the
+	// orchestrator measure the GPU win on the quiescent box and confirm the loss agreement on the REAL
+	// model (the synthetic fixture proves parity in train_xent_device_test.go). host−device is the
+	// rung's saving; the loss/grad deltas are the correctness receipt.
+	normedD, baseLogitsD, tokensD, err := trainer.forwardFrozen(ids)
+	if err != nil {
+		t.Fatalf("forwardFrozen(D): %v", err)
+	}
+	predRows := tokensD - 1
+	targetsD := make([]int32, predRows)
+	for i := range targetsD {
+		targetsD[i] = ids[i+1]
+	}
+	_, deltaD, err := LoRAForwardF32(normedD[:predRows*trainer.dModel], trainer.a, trainer.b,
+		predRows, trainer.dModel, trainer.vocab, trainer.rank, trainer.scaling)
+	if err != nil {
+		t.Fatalf("LoRAForwardF32(D): %v", err)
+	}
+	logitsD := make([]float32, predRows*trainer.vocab)
+	for i := range logitsD {
+		logitsD[i] = baseLogitsD[i] + deltaD[i]
+	}
+	start = time.Now()
+	hostLoss, hostDL, err := CrossEntropyBackwardF32(logitsD, targetsD, predRows, trainer.vocab)
+	if err != nil {
+		t.Fatalf("host CE(D): %v", err)
+	}
+	hostCEWall := time.Since(start)
+	if !gpuHasSoftmaxXent() {
+		t.Logf("T=%d  D  CE softmax bwd host = %v  (GPU kernel unavailable — build lthn_kernels.metallib)", T, hostCEWall)
+		return
+	}
+	start = time.Now()
+	devLoss, devDL, err := crossEntropyBackwardF32Device(logitsD, targetsD, predRows, trainer.vocab)
+	if err != nil {
+		t.Fatalf("device CE(D): %v", err)
+	}
+	devCEWall := time.Since(start)
+	worstDL := 0.0
+	for i := range hostDL {
+		if d := math.Abs(float64(devDL[i] - hostDL[i])); d > worstDL {
+			worstDL = d
+		}
+	}
+	lossRel := math.Abs(float64(devLoss-hostLoss)) / (1 + math.Abs(float64(hostLoss)))
+	t.Logf("T=%d  D  CE softmax bwd  host = %v vs GPU = %v  (%.1fx; host CE is %.0f%% of the host half)",
+		T, hostCEWall, devCEWall, float64(hostCEWall)/float64(devCEWall), 100*float64(hostCEWall)/float64(host))
+	t.Logf("T=%d  D  CE agreement: loss host %.6f vs GPU %.6f (rel %.2g), dLogits worst |Δ| %.2g",
+		T, hostLoss, devLoss, lossRel, worstDL)
 }
