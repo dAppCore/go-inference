@@ -21,7 +21,14 @@ import (
 type gpuCounterProfiler struct {
 	buf    metal.MTLCounterSampleBuffer
 	labels []string
-	max    int
+	// countAt[i] is the dispatchCountForTest snapshot taken when labelled encoder i opened, so
+	// encoder i's live-encoder dispatch count is countAt[i+1]-countAt[i] (the last uses the
+	// final total). Populated only when pieceTimingOn armed dispatchCountForTest for the run;
+	// see dispatchCountsByLabel. Counts the encSink funnel — exact for the MoE labels (the whole
+	// block dispatches through encSink) and a lower bound for attn (which also uses the Object
+	// funnel dispatchThreadsObject, which the test counter deliberately leaves untouched).
+	countAt []int64
+	max     int
 }
 
 // newGPUCounterProfiler builds a profiler with capacity for maxEncoders sampled encoders
@@ -64,6 +71,7 @@ func (p *gpuCounterProfiler) encoderFor(cb metal.MTLCommandBufferObject, label s
 	}
 	i := len(p.labels)
 	p.labels = append(p.labels, label)
+	p.countAt = append(p.countAt, dispatchCountForTest)
 	pd := metal.NewMTLComputePassDescriptor()
 	att := pd.SampleBufferAttachments().ObjectAtIndexedSubscript(0)
 	att.SetSampleBuffer(p.buf)
@@ -100,8 +108,30 @@ func (p *gpuCounterProfiler) spans() (map[string]uint64, error) {
 	return out, nil
 }
 
+// dispatchCountsByLabel attributes live-encoder dispatches to each sampled encoder's label —
+// the structural companion to spans (GPU time). Pass the final dispatchCountForTest so the
+// last encoder's tail is attributed. Same-label encoders (the per-layer seams repeat every
+// layer) accumulate. Meaningful only when the run armed pieceTimingOn; otherwise every
+// countAt snapshot is 0 and the map is empty.
+func (p *gpuCounterProfiler) dispatchCountsByLabel(finalCount int64) map[string]int64 {
+	out := make(map[string]int64, 8)
+	for i, label := range p.labels {
+		next := finalCount
+		if i+1 < len(p.countAt) {
+			next = p.countAt[i+1]
+		}
+		if d := next - p.countAt[i]; d > 0 {
+			out[label] += d
+		}
+	}
+	return out
+}
+
 // reset clears the label cursor so the next sampled encoder reuses the buffer from index 0.
-func (p *gpuCounterProfiler) reset() { p.labels = p.labels[:0] }
+func (p *gpuCounterProfiler) reset() {
+	p.labels = p.labels[:0]
+	p.countAt = p.countAt[:0]
+}
 
 // profSeam ends enc and opens a new counter-sampled encoder labelled label when the GPU
 // profiler is armed; with the profiler nil (every prod decode) it returns enc unchanged and
