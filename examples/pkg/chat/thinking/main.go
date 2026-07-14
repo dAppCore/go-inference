@@ -2,13 +2,11 @@
 
 // The Gemma 4 thought channel: with thinking ON (the model default) the raw
 // token stream carries the model's reasoning between channel markers, then
-// the visible answer:
-//
-//	<|channel>thought ...reasoning... <channel|> ...answer...
-//
-// The serve layer splits this automatically (the reply's `thought` field);
-// a library caller sees the raw stream and splits it with the markers, as
-// below. Compare pkg/chat/basic, which disables the channel entirely.
+// the visible answer. The serve layer splits this automatically (the reply's
+// `thought` field); a library caller does the same with decode/parser —
+// parser.Filter for collected text (below), parser.NewProcessor for streams —
+// which knows every family's markers via the model-info hint. Compare
+// pkg/chat/basic, which disables the channel entirely.
 //
 //	go run ./pkg/chat/thinking -model ~/models/gemma-4-e2b-it-4bit
 package main
@@ -21,13 +19,8 @@ import (
 	"strings"
 
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/decode/parser"
 	_ "dappco.re/go/inference/examples/internal/engine" // registers the platform engine
-)
-
-// The gemma4 channel markers as they appear in decoded text.
-const (
-	channelOpen  = "<|channel>thought"
-	channelClose = "<channel|>"
 )
 
 func main() {
@@ -61,16 +54,22 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Split reasoning from answer on the channel markers.
-	text := raw.String()
-	thought, answer := "", text
-	if rest, ok := strings.CutPrefix(strings.TrimSpace(text), channelOpen); ok {
-		if t, a, found := strings.Cut(rest, channelClose); found {
-			thought, answer = strings.TrimSpace(t), strings.TrimSpace(a)
-		}
+	// Split reasoning from answer with the family-aware parser: the hint from
+	// ModelInfo selects the right marker set (gemma channel tokens here), and
+	// ThinkingCapture strips reasoning from the visible text while handing it
+	// back on the Result. parser.NewProcessor does the same incrementally for
+	// per-token streams.
+	hint := parser.HintFromInference(m.Info())
+	res := parser.Filter(raw.String(), parser.Config{Mode: inference.ThinkingCapture}, hint)
+	// Whether a reply carries a thought channel is the MODEL's choice per
+	// prompt — small models often answer easy questions directly. The parser
+	// is a no-op on channel-free text, so this handles both outcomes.
+	if thought := strings.TrimSpace(res.Reasoning); thought != "" {
+		fmt.Println("— thought —")
+		fmt.Println(thought)
+	} else {
+		fmt.Println("— thought — (none: the model answered directly this run)")
 	}
-	fmt.Println("— thought —")
-	fmt.Println(thought)
 	fmt.Println("— answer —")
-	fmt.Println(answer)
+	fmt.Println(strings.TrimSpace(res.Text))
 }
