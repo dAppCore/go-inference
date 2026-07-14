@@ -102,7 +102,8 @@ func TestHIPGemma4ExactStateContinuityHardware_Good(t *testing.T) {
 		t.Fatalf("CaptureKV produced incomplete state: %+v", snapshot)
 	}
 	var rangedTokens int
-	if err := source.RangeKVBlocks(ctx, 2, kv.CaptureOptions{}, func(block kv.Block) (bool, error) {
+	var rangedBlocks []kv.Block
+	if err := source.RangeKVBlocks(ctx, 2, kv.CaptureOptions{RawKVOnly: true}, func(block kv.Block) (bool, error) {
 		if block.TokenCount <= 0 || block.Snapshot == nil {
 			t.Fatalf("RangeKVBlocks produced invalid block: %+v", block)
 		}
@@ -110,13 +111,38 @@ func TestHIPGemma4ExactStateContinuityHardware_Good(t *testing.T) {
 			t.Fatalf("RangeKVBlocks block start = %d, want contiguous %d", block.TokenStart, rangedTokens)
 		}
 		rangedTokens += block.TokenCount
+		rangedBlocks = append(rangedBlocks, block)
 		return true, nil
 	}); err != nil {
 		t.Fatalf("RangeKVBlocks: %v", err)
 	}
-	if rangedTokens != snapshot.SeqLen {
-		t.Fatalf("RangeKVBlocks covered %d KV tokens, CaptureKV exported %d", rangedTokens, snapshot.SeqLen)
+	if rangedTokens != len(snapshot.Tokens) {
+		t.Fatalf("RangeKVBlocks covered %d retained tokens, CaptureKV exported %d", rangedTokens, len(snapshot.Tokens))
 	}
+	assembled, err := kv.AssembleBlocks(rangedBlocks)
+	if err != nil {
+		t.Fatalf("AssembleBlocks: %v", err)
+	}
+	if assembled.SeqLen != snapshot.SeqLen {
+		t.Fatalf("assembled native blocks contain %d KV rows, want %d", assembled.SeqLen, snapshot.SeqLen)
+	}
+	blockRestored := model.NewSession()
+	if blockRestored == nil {
+		t.Fatal("NewSession for native block state returned nil")
+	}
+	defer func() { _ = blockRestored.Close() }()
+	blockRestorer, ok := blockRestored.(inference.KVRestorer)
+	if !ok {
+		t.Fatal("shared engine session does not restore assembled native blocks")
+	}
+	if err := blockRestorer.RestoreFromKV(ctx, assembled); err != nil {
+		t.Fatalf("RestoreFromKV assembled native blocks: %v", err)
+	}
+	blockRestoredSnapshot, err := blockRestored.CaptureKV(ctx)
+	if err != nil {
+		t.Fatalf("CaptureKV after native block restore: %v", err)
+	}
+	assertHIPHardwareSnapshotEqual(t, assembled, blockRestoredSnapshot)
 
 	restored := model.NewSession()
 	if restored == nil {
@@ -143,6 +169,9 @@ func TestHIPGemma4ExactStateContinuityHardware_Good(t *testing.T) {
 	if err := restored.AppendPrompt(ctx, continuation); err != nil {
 		t.Fatalf("restored AppendPrompt continuation: %v", err)
 	}
+	if err := blockRestored.AppendPrompt(ctx, continuation); err != nil {
+		t.Fatalf("block-restored AppendPrompt continuation: %v", err)
+	}
 	want := collectHIPHardwareTokens(source.Generate(ctx, inference.GenerateConfig{MaxTokens: 4}))
 	if err := source.Err(); err != nil {
 		t.Fatalf("source continuation Generate: %v", err)
@@ -158,6 +187,13 @@ func TestHIPGemma4ExactStateContinuityHardware_Good(t *testing.T) {
 		if got[index] != want[index] {
 			t.Fatalf("continuation token %d after restore = %d, want %d", index, got[index], want[index])
 		}
+	}
+	got = collectHIPHardwareTokens(blockRestored.Generate(ctx, inference.GenerateConfig{MaxTokens: 4}))
+	if err := blockRestored.Err(); err != nil {
+		t.Fatalf("block-restored continuation Generate: %v", err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("continuation after native block restore = %v, want %v", got, want)
 	}
 
 	canceled, cancel := context.WithCancel(ctx)

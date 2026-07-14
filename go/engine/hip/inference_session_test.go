@@ -100,6 +100,66 @@ func TestHipEngineSession_RestoreFromKV_Good_PreservesMultiHeadRawDevicePageStat
 	}
 }
 
+func TestHipEngineSession_RangeKVBlocks_Good_PreservesRawDevicePageWindows(t *testing.T) {
+	source := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
+	defer func() { _ = source.Close() }()
+	source.tokens = append(source.tokens, 3)
+
+	var blocks []kv.Block
+	err := source.RangeKVBlocks(1, kv.CaptureOptions{RawKVOnly: true}, func(block kv.Block) (bool, error) {
+		blocks = append(blocks, block)
+		return true, nil
+	})
+	core.RequireNoError(t, err)
+	if len(blocks) != 3 {
+		t.Fatalf("RangeKVBlocks yielded %d blocks, want 3", len(blocks))
+	}
+
+	wantKeyScales := []float32{0.1, 0.2}
+	wantKeyCodes := [][]int8{{5, 7}, {-4, 6}}
+	wantValueScales := []float32{0.25, 0.5}
+	wantValueCodes := [][]int8{{2, 3}, {-2, 4}}
+	for index, block := range blocks[:2] {
+		if block.Snapshot == nil || len(block.Snapshot.Layers) != 1 {
+			t.Fatalf("block %d has no layer snapshot", index)
+		}
+		layer := block.Snapshot.Layers[0]
+		core.AssertEqual(t, hipKVSnapshotDevicePayloadMode, layer.CacheMode)
+		if len(layer.TurboQuantPayloads) != 1 {
+			t.Fatalf("block %d raw device payload count = %d, want 1", index, len(layer.TurboQuantPayloads))
+		}
+		raw, err := rocmKVCacheBlockFromRawPayload(layer.TurboQuantPayloads[0])
+		core.RequireNoError(t, err)
+		core.AssertEqual(t, index, raw.tokenStart)
+		core.AssertEqual(t, 1, raw.tokenCount)
+		core.AssertEqual(t, []float32{wantKeyScales[index]}, raw.key.scales)
+		core.AssertEqual(t, wantKeyCodes[index], raw.key.q8)
+		core.AssertEqual(t, []float32{wantValueScales[index]}, raw.value.scales)
+		core.AssertEqual(t, wantValueCodes[index][0], unpackSignedQ4(raw.value.packedQ4[0]&0x0f))
+		core.AssertEqual(t, wantValueCodes[index][1], unpackSignedQ4(raw.value.packedQ4[0]>>4))
+	}
+	core.AssertEqual(t, []int32{3}, blocks[2].Snapshot.Tokens)
+	core.AssertEqual(t, 0, blocks[2].Snapshot.SeqLen)
+	core.AssertEqual(t, 0, len(blocks[2].Snapshot.Layers[0].TurboQuantPayloads))
+
+	assembled, err := kv.AssembleBlocks(blocks)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, []int32{1, 2, 3}, assembled.Tokens)
+	core.AssertEqual(t, 2, assembled.SeqLen)
+	restored := &hipEngineSession{cfg: source.cfg, mode: source.mode, driver: source.driver}
+	defer func() { _ = restored.Close() }()
+	core.RequireNoError(t, restored.RestoreFromKV(context.Background(), assembled))
+	roundTrip, err := restored.CaptureKVWithOptions(kv.CaptureOptions{})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, []int32{1, 2, 3}, roundTrip.Tokens)
+	core.AssertEqual(t, 2, len(roundTrip.Layers[0].TurboQuantPayloads))
+	for index := range blocks[:2] {
+		if !bytes.Equal(blocks[index].Snapshot.Layers[0].TurboQuantPayloads[0], roundTrip.Layers[0].TurboQuantPayloads[index]) {
+			t.Fatalf("restored raw device KV block %d changed encoded bytes", index)
+		}
+	}
+}
+
 func TestHipEngineSession_Generate_Good_KeepsUnforwardedFinalTokenPending(t *testing.T) {
 	session := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
 	defer func() { _ = session.Close() }()

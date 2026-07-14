@@ -542,21 +542,33 @@ func (s *hipEngineSession) RangeKVBlocks(blockSize int, opts kv.CaptureOptions, 
 	if err != nil {
 		return err
 	}
-	total := host.tokenCountForConfig(s.cfg)
-	if total <= 0 {
-		total = len(s.tokens)
+	forwarded := host.tokenCountForConfig(s.cfg)
+	if forwarded > len(s.tokens) {
+		return core.NewError("hip.EngineSession.RangeKVBlocks: retained KV exceeds token history")
 	}
+	total := len(s.tokens)
 	firstIndex := opts.BlockStartToken / blockSize
 	for index, start := firstIndex, firstIndex*blockSize; start < total; index, start = index+1, start+blockSize {
 		count := blockSize
 		if start+count > total {
 			count = total - start
 		}
-		blockHost := hipSliceDecodeStateTokens(host, s.cfg, start, count)
+		kvCount := count
+		if start >= forwarded {
+			kvCount = 0
+		} else if start+kvCount > forwarded {
+			kvCount = forwarded - start
+		}
+		blockHost := hipSliceDecodeStateTokens(host, s.cfg, start, kvCount)
 		blockTokens := hipTokenWindow(s.tokens, start, count)
 		snapshot, err := hipDecodeStateToSnapshot(blockHost, s.cfg, blockTokens, nil, opts)
 		if err != nil {
 			return err
+		}
+		if opts.RawKVOnly && kvCount > 0 {
+			if err := hipAttachDeviceKVPayloadRange(snapshot, s.device, start, kvCount); err != nil {
+				return err
+			}
 		}
 		snapshot.TokenOffset = start + count
 		cont, yieldErr := yield(kv.Block{Index: index, TokenStart: start, TokenCount: count, Snapshot: snapshot})
@@ -668,6 +680,32 @@ func hipAttachDeviceKVPayloads(snapshot *kv.Snapshot, device *hipGemma4Q4DeviceD
 		}
 		if len(payloads) == 0 {
 			return core.E("rocm.hip.KVSnapshot.Capture", "device layer KV cache has no pages", nil)
+		}
+		snapshot.Layers[index].CacheIndex = layer.cache.blockSize
+		snapshot.Layers[index].CacheMode = hipKVSnapshotDevicePayloadMode
+		snapshot.Layers[index].TurboQuantPayloads = payloads
+	}
+	return nil
+}
+
+func hipAttachDeviceKVPayloadRange(snapshot *kv.Snapshot, device *hipGemma4Q4DeviceDecodeState, tokenStart, tokenCount int) error {
+	if snapshot == nil || device == nil {
+		return nil
+	}
+	if len(snapshot.Layers) != len(device.layers) {
+		return core.E("rocm.hip.KVSnapshot.Range", "device state layer count must match snapshot", nil)
+	}
+	for index, layer := range device.layers {
+		if layer.cache == nil {
+			return core.E("rocm.hip.KVSnapshot.Range", "device layer KV cache is nil", nil)
+		}
+		host, err := layer.cache.hostCache()
+		if err != nil {
+			return core.E("rocm.hip.KVSnapshot.Range", core.Sprintf("copy raw device KV layer %d", index), err)
+		}
+		payloads, err := host.rawRange(tokenStart, tokenCount)
+		if err != nil {
+			return core.E("rocm.hip.KVSnapshot.Range", core.Sprintf("slice raw device KV layer %d", index), err)
 		}
 		snapshot.Layers[index].CacheIndex = layer.cache.blockSize
 		snapshot.Layers[index].CacheMode = hipKVSnapshotDevicePayloadMode
