@@ -114,11 +114,26 @@ func hostArchQuantReferenceRope(t *testing.T, inputs [][]byte, qlayers []Quantiz
 			lhd := headDimOf(specs[li], headDim)
 			lkv := kvHeadsOf(specs[li], nKVHeads)
 			normed := rmsNormHostReference(x, bf16ToF32s(qlayers[li].AttnNormW), 1, dModel, eps)
+			// addBiasHost adds the additive projection bias (Qwen2/2.5 q/k/v bias) after the
+			// matvec, before qk-norm/rope — the same station the GPU projector uses. nil bias
+			// (bias-free arches: the pre-existing fixtures) is a no-op.
+			addBiasHost := func(dst []float32, bias []byte) {
+				if len(bias) == 0 {
+					return
+				}
+				b := bf16ToF32s(bias)
+				for i := range dst {
+					dst[i] += b[i]
+				}
+			}
 			q := matvec(ws[li].q, normed)
+			addBiasHost(q, qlayers[li].BQ)
 			k := matvec(ws[li].k, normed)
+			addBiasHost(k, qlayers[li].BK)
 			var v []float32
 			if ws[li].v.w != nil {
 				v = matvec(ws[li].v, normed)
+				addBiasHost(v, qlayers[li].BV)
 			} else {
 				// k_eq_v: V is the k-proj output PRE-norm/rope — copy before k norms/rotates
 				v = append([]float32(nil), k...)
