@@ -27,7 +27,7 @@
    |   +-------------------+    +-------------------+          |
    |                                                          |
    |   serving/  - OpenAI / Anthropic / Ollama HTTP           |
-   |   cmd/lem/  - the lem binary                             |
+   |   cli/  - the lem binary (own module)                             |
    +----------------------------------------------------------+
                                 |  consumed by
                  +--------------+---------------+

@@ -11,7 +11,7 @@ to a durable medium and restoring it later** — what the wider stack
 calls "agent memory" or "book state". Everything in here is interfaces
 and DTOs; no runtime code. The in-repo engines (`engine/metal`,
 `engine/hip`) implement these contracts; consumers in `agent/`,
-`serving/` and `cmd/lem` use them. (go-mlx / go-rocm are retired; their
+`serving/` and `cli/` use them. (go-mlx / go-rocm are retired; their
 proven state code lives here now.)
 
 This package was hoisted out of the root `dappco.re/go/inference` package

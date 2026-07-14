@@ -3,11 +3,11 @@
 // Package compat is the assembled OpenAI / Anthropic / Ollama compatibility
 // server: it mounts the per-protocol handlers from go-inference's
 // provider/{openai,anthropic,ollama} packages over a single resolver so a host
-// (cmd/lem serve, tests, an embedding app) gets one drop-in HTTP surface.
+// (lem serve, tests, an embedding app) gets one drop-in HTTP surface.
 //
 // It is the go-inference home of the assembled mux that lived in go-mlx's
 // dappco.re/go/mlx/openai package — lifted here so the serving library owns the
-// composed server and cmd/lem compiles from go-inference alone (no go-mlx
+// composed server and the lem CLI compiles from go-inference alone (no go-mlx
 // import). The package depends only on go-inference provider packages, so it
 // carries no engine coupling.
 //

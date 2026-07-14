@@ -6,9 +6,9 @@ training and packaging verbs — and it compiles from **go-inference alone** (no
 go-mlx, no go-rocm). Each subcommand is deliberately thin: flag parsing plus one
 call into a go-inference library package. The business logic lives in the
 libraries (`serving`, `decode/generate`, `train`, `train/tune`, `model/pack`,
-`model/quant`, `model/modelmgmt`), not in `cmd/lem`.
+`model/quant`, `model/modelmgmt`), not in `cli/`.
 
-Source: `go/cmd/lem/`. Build instructions: [build.md](build.md).
+Source: `cli/`. Build instructions: [build.md](build.md).
 
 ## Backends registered at compile time
 

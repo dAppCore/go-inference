@@ -5,7 +5,7 @@ description: Token, Message, config structs, functional options, and all support
 
 # Types
 
-The types below are defined in the root `inference` package (`dappco.re/go/inference`) — the shared contract. The repository has many other packages (`engine/metal`, `engine/hip`, `serving/`, `model/`, `kv/`, `decode/`, `train/`, `eval/`, `model/state`, `cmd/lem`), but the contract types every engine and consumer share live at the root.
+The types below are defined in the root `inference` package (`dappco.re/go/inference`) — the shared contract. The repository has many other packages (`engine/metal`, `engine/hip`, `serving/`, `model/`, `kv/`, `decode/`, `train/`, `eval/`, `model/state`, and the `cli/` module), but the contract types every engine and consumer share live at the root.
 
 Fallible operations in this package return `core.Result` (from `dappco.re/go`), not `(T, error)` — see [Interfaces](interfaces.md).
 

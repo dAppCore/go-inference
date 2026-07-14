@@ -29,7 +29,7 @@ cross-compiles cleanly:
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./engine/hip/...   # OK
 ```
 
-The full `lem` binary does not: `go build ./cmd/lem/...` under the same
+The full `lem` binary does not: `go build ./lem/... (from cli/)` under the same
 `GOOS=windows CGO_ENABLED=0` fails in `github.com/marcboeker/go-duckdb`'s
 generated Windows bindings (`undefined: bindings.Type` and friends) —
 `eval/datapipe`, `serving/chathistory`, and the agent execute-history path all
@@ -58,7 +58,7 @@ The repository holds two Go modules plus vendored externals:
 ```
 go-inference/
 ├── go/                      # module dappco.re/go/inference
-│   ├── cmd/lem/             # the `lem` binary (thin verb wiring)
+│   ├── (moved) cli/     # the `lem` binary (thin verb wiring — own module at the repo root)
 │   ├── engine/
 │   │   ├── metal/           # Apple GPU engine — NO cgo (tmc/apple bindings)
 │   │   │   └── kernels/     # the fused *.metal sources

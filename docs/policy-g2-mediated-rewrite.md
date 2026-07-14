@@ -195,7 +195,7 @@ settles, never per chunk. `BenchmarkPolicy_MediatingEnforcer_NoMatch` pins the
 
 ## Open questions (for orchestrator review before merge)
 
-1. **No default mediator in `cmd/lem`.** The seam is wired and boot-fatal, but
+1. **No default mediator in `cli/`.** The seam is wired and boot-fatal, but
    the CLI does not yet supply a mediator, so a rewrite policy is boot-fatal from
    `lem serve`. A model-reword mediator is a follow-up.
 2. **Empty mediator result = failure.** A mediator that wants to delete a span

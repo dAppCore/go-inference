@@ -43,6 +43,8 @@ func TestRunCommand_Dispatch(t *testing.T) {
 		{"quant route", []string{"quant"}, 2, false},
 		{"ebook route", []string{"ebook"}, 2, false},
 		{"spec route", []string{"spec", "-o", specOut}, 0, false},
+		{"version route", []string{"version"}, 0, false},
+		{"version flag", []string{"--version"}, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

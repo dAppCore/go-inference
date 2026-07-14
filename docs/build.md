@@ -111,11 +111,11 @@ This is the "you only need go-inference" build. It:
 
 1. Checks `build/dist/lib/{mlx,lthn_kernels}.metallib` exist (errors telling you
    to run `task metallib` if not).
-2. `gzip -9`s both into `go/cmd/lem/{mlx,lthn_kernels}.metallib.gz` next to
+2. `gzip -9`s both into `cli/{mlx,lthn_kernels}.metallib.gz` next to
    `embed_metallib.go`.
 3. Builds `bin/lem` with `-tags "metal_runtime embed_metallib"`.
 
-Under `-tags embed_metallib`, `go/cmd/lem/embed_metallib.go` is compiled in and
+Under `-tags embed_metallib`, `cli/embed_metallib.go` is compiled in and
 `//go:embed`s both gzipped libraries into the binary. At process start (before
 any Metal device init) its `init()`:
 

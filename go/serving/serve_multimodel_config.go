@@ -2,7 +2,7 @@
 
 // serve_multimodel_config.go loads the declarative multi-model config a serve
 // reads from a --models-config JSON file. Keeping the parse in the library (not
-// cmd/lem) means the model-list + profile + budget business logic is tested here
+// cli/lem — the CLI module) means the model-list + profile + budget business logic is tested here
 // and cmd stays a thin flag-to-library shim.
 
 package serving

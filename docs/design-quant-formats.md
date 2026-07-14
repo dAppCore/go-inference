@@ -21,7 +21,7 @@ not the format landscape in the abstract.
   (`quantize_writer.go`, `gguf.QuantizeModelPack`) and a READER that dequants on load
   (`tensors.go`: `ggufDequantizeQ8_0ToF16`, `ggufDequantizeQ4_0ToF16`). q4_k_m is
   llama-validated for gemma4. `lem quant -gguf <format>` is the CLI escape hatch from
-  the native-affine default (`go/cmd/lem/quant.go`).
+  the native-affine default (`cli/quant.go`).
 - **`go/model/quant/jang`** — MiniMax M2's JANGTQ/MXTQ profile: per-role (attention /
   shared-expert / routed-expert / embed / lm_head) mixed bit-width, 1/2/4/8-bit packed,
   LSB0, affine encoding. Reader + reference-dequant only, no writer — mirrors

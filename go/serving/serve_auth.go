@@ -15,12 +15,12 @@ import (
 // adminTokenPrefix marks the token as a Lethean serve admin secret so secret
 // scanners (gitleaks, trufflehog) recognise leaked tokens in repos. Matches the
 // gh_pat_/sk-/ghp_ convention. Kept as the lthn-mlx_ value so a token already
-// minted by lthn-mlx stays a drop-in secret for cmd/lem.
+// minted by lthn-mlx stays a drop-in secret for the lem CLI.
 const adminTokenPrefix = "lthn-mlx_"
 
 // AdminTokenPath returns ~/Lethean/lem/admin.token — the canonical location
 // for the Bearer auth secret. Mode 0600 is enforced on write so other local
-// users can't read it. This is the same path lthn-mlx used, so cmd/lem is a
+// users can't read it. This is the same path lthn-mlx used, so the lem CLI is a
 // drop-in for any tool (lem.sh harness, launchd job) that reads the token file.
 //
 //	tok, _, _ := serving.EnsureAdminToken(serving.AdminTokenPath())

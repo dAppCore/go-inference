@@ -38,6 +38,11 @@ func main() {
 // lines so `lem` and any renamed copy print their own name.
 var commandName = "lem"
 
+// version is stamped by the build (-ldflags "-X main.version=<v>" — the
+// Taskfile's VERSION variable and the Makefile's CLI_VERSION both thread it);
+// an unstamped build reports "dev".
+var version = "dev"
+
 func cliName() string {
 	name := core.Trim(commandName)
 	if name == "" {
@@ -77,6 +82,9 @@ func runCommand(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runSpecCommand(ctx, args[1:], stdout, stderr)
 	case "ebook":
 		return runEbookCommand(ctx, args[1:], stdout, stderr)
+	case "version", "-v", "--version":
+		core.WriteString(stdout, cliName()+" "+version+"\n")
+		return 0
 	case "-h", "--help", "help":
 		printUsage(stdout)
 		return 0
@@ -103,6 +111,7 @@ func printUsage(w io.Writer) {
 	core.WriteString(w, "Package\n")
 	core.WriteString(w, "  pack                build/inspect/list/extract .model containers (no weights loaded)\n")
 	core.WriteString(w, "  ebook               render a model directory as a valid EPUB3 (weights as base64 plates)\n")
+	core.WriteString(w, "  version             print the binary name and stamped version\n")
 	core.WriteString(w, "\n")
 	core.WriteString(w, "Convert\n")
 	core.WriteString(w, "  quant               quantise a dense model dir (MLX, GPTQ, FP8, NF4, or GGUF)\n")

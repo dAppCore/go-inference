@@ -106,7 +106,7 @@ events emitted during wake) rather than by this DTO.
 
 ## Used by
 
-- `cmd/lem` — the CLI's serve/ask paths wake and sleep session state
+- `cli/` — the CLI's serve/ask paths wake and sleep session state
 - LTHN project seeds — app/CLI orchestration can wake a per-project context,
   append observations, then sleep a child state or fall back to a text summary
   (see [project_seed.md](project_seed.md))

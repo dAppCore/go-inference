@@ -12,6 +12,11 @@ version: '3'
 #                                    *.metal), loaded beside mlx.metallib.
 vars:
   GO_BUILD_CACHE: '{{default "/private/tmp/lem-dev/gocache" .GOCACHE}}'
+  # BIN_NAME names every produced binary and VERSION stamps main.version —
+  # both overridable per invocation: task build BIN_NAME=mybrand VERSION=1.2.3
+  BIN_NAME: lem
+  VERSION: dev
+  GO_VERSION_LDFLAGS: '-X main.version={{.VERSION}}'
   GO_DARWIN_LDFLAGS: '-extldflags=-mmacosx-version-min=26.0'
   NCPU:
     sh: sysctl -n hw.ncpu
@@ -66,7 +71,7 @@ tasks:
       - mkdir -p bin {{.GO_BUILD_CACHE}}
       - >-
         env GOCACHE={{.GO_BUILD_CACHE}} go build -tags metal_runtime -trimpath
-        -ldflags "{{.GO_DARWIN_LDFLAGS}}" -o bin/lem ./go/cmd/lem
+        -ldflags "{{.GO_DARWIN_LDFLAGS}} {{.GO_VERSION_LDFLAGS}}" -o bin/{{.BIN_NAME}} ./cli
       - 'echo "  lem -> bin/lem (needs build/dist/lib/*.metallib at runtime via MLX_METALLIB_PATH; run task metallib first)"'
 
   build:embed:
@@ -76,19 +81,19 @@ tasks:
         set -e
         for m in mlx lthn_kernels; do
           [ -f build/dist/lib/$m.metallib ] || { echo "missing build/dist/lib/$m.metallib — run: task metallib"; exit 1; }
-          gzip -9 -c build/dist/lib/$m.metallib > go/cmd/lem/$m.metallib.gz
+          gzip -9 -c build/dist/lib/$m.metallib > cli/$m.metallib.gz
         done
       - mkdir -p bin {{.GO_BUILD_CACHE}}
       - >-
         env GOCACHE={{.GO_BUILD_CACHE}} go build -tags "metal_runtime embed_metallib" -trimpath
-        -ldflags "{{.GO_DARWIN_LDFLAGS}}" -o bin/lem ./go/cmd/lem
+        -ldflags "{{.GO_DARWIN_LDFLAGS}} {{.GO_VERSION_LDFLAGS}}" -o bin/{{.BIN_NAME}} ./cli
       - 'echo "  lem (self-contained): bin/lem — $(du -h bin/lem | cut -f1), embeds mlx + lthn_kernels metallibs; run from anywhere"'
 
   build:native:
     desc: "Build lem to bin/lem for the host platform WITHOUT the metal engine (CGO for the duckdb store) — the linux/windows/arm build. One binary; the GPU backend loads its kernel sidecar at runtime."
     cmds:
       - mkdir -p bin {{.GO_BUILD_CACHE}}
-      - env GOCACHE={{.GO_BUILD_CACHE}} CGO_ENABLED=1 go build -trimpath -o bin/lem{{if eq OS "windows"}}.exe{{end}} ./go/cmd/lem
+      - env GOCACHE={{.GO_BUILD_CACHE}} CGO_ENABLED=1 go build -trimpath -ldflags "{{.GO_VERSION_LDFLAGS}}" -o bin/{{.BIN_NAME}}{{if eq OS "windows"}}.exe{{end}} ./cli
       - 'echo "  lem -> bin/lem"'
 
   # --- GPU capture (the kernel instrument) ------------------------------------
@@ -181,7 +186,7 @@ tasks:
     desc: "Export lem's OpenAPI 3.1 document to build/sdk/openapi.json (the machine-readable API definition the SDKs generate from)."
     cmds:
       - mkdir -p build/sdk
-      - go run ./go/cmd/lem spec -o build/sdk/openapi.json
+      - go run ./cli spec -o build/sdk/openapi.json
 
   sdk:
     desc: "Generate typed client SDKs from lem's OpenAPI spec into build/sdk/<lang>/. Add a language by dropping a sdk-config/<lang>.yaml. Needs openapi-generator-cli."

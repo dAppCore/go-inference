@@ -14,8 +14,15 @@ STRIP_CUDA ?= $(STRIP)
 STRIP_CPU_X86 ?= $(STRIP)
 STRIP_CPU_AARCH64 ?= aarch64-linux-gnu-strip
 GO_SUBTREE ?= go
-CLI_CMD ?= ./cmd/lem
-CLI_NAME ?= lthn-rocm
+# The CLI moved to its own module (cli/lem): go/ is a pure library. The four
+# release builds run -C $(CLI_SUBTREE); module tests keep GO_SUBTREE.
+CLI_SUBTREE ?= cli
+CLI_CMD ?= .
+# CLI_NAME names every produced binary (dev + release variants get
+# -amd/-cuda/-cpu-* suffixes); CLI_VERSION threads into main.version.
+CLI_NAME ?= lem
+CLI_VERSION ?= dev
+CLI_GO_LDFLAGS = -X main.version=$(CLI_VERSION)
 BUILD_DIR ?= build
 BIN_DIR ?= $(BUILD_DIR)/bin
 DIST_DIR ?= $(BUILD_DIR)/dist
@@ -51,7 +58,7 @@ CPU_AARCH64_GOARCH ?= arm64
 AMD_CGO_ENABLED ?= 1
 CUDA_CGO_ENABLED ?= 1
 CPU_CGO_ENABLED ?= 0
-RELEASE_BINS := lthn-amd lthn-cuda lthn-cpu-x86 lthn-cpu-aarch64
+RELEASE_BINS := $(CLI_NAME)-amd $(CLI_NAME)-cuda $(CLI_NAME)-cpu-x86 $(CLI_NAME)-cpu-aarch64
 RELEASE_ARCHIVES := $(addsuffix -linux.tar.gz,$(RELEASE_BINS))
 RELEASE_SIDECARS = $(AMD_KERNEL_MODULE_NAME) $(CUDA_KERNEL_MODULE_NAME) $(CPU_X86_KERNEL_MODULE_NAME) $(CPU_AARCH64_KERNEL_MODULE_NAME)
 
@@ -103,7 +110,7 @@ HIP_CPU_CXX ?= g++
 HIP_CPU_AARCH64_CXX ?= aarch64-linux-gnu-g++
 HIP_CPU_STD ?= c++20
 
-.PHONY: all help build build-cli lthn-rocm named-binaries release-binaries release-dependency-guard release-artifacts dist static-hip-binaries rocr-cmake-shims hsa-static-archive hip-static-archive require-static-hip-archive hip-link-info lthn-amd lthn-cuda lthn-cpu-x86 lthn-cpu-aarch64 test test-cli test-all clean \
+.PHONY: all help build build-cli lem-rocm lthn-rocm named-binaries release-binaries release-dependency-guard release-artifacts dist static-hip-binaries rocr-cmake-shims hsa-static-archive hip-static-archive require-static-hip-archive hip-link-info lem-amd lem-cuda lem-cpu-x86 lem-cpu-aarch64 lthn-amd lthn-cuda lthn-cpu-x86 lthn-cpu-aarch64 test test-cli test-all clean \
 	hip hip-amd hip-nvidia hip-cpu hip-cpu-x86_64 hip-cpu-aarch64 \
 	test-hip-amd test-hip-nvidia test-hip-cpu test-hip-cpu-runtime test-hip-cpu-kernel-runtime test-zluda-cuda \
 	compile-matrix test-matrix
@@ -113,11 +120,11 @@ all: build
 help:
 	@printf '%s\n' \
 		'Targets:' \
-		'  lthn-rocm          build the local development CLI binary plus AMD HSACO sidecar' \
-		'  lthn-amd           build the AMD ROCm release binary plus HSACO sidecar' \
-		'  lthn-cuda          build the HIP/CUDA release binary' \
-		'  lthn-cpu-x86       build the Linux amd64 CPU release binary' \
-		'  lthn-cpu-aarch64   build the Linux arm64 CPU release binary' \
+		'  lem-rocm           build the local development CLI binary plus AMD HSACO sidecar' \
+		'  lem-amd            build the AMD ROCm release binary plus HSACO sidecar' \
+		'  lem-cuda           build the HIP/CUDA release binary' \
+		'  lem-cpu-x86        build the Linux amd64 CPU release binary' \
+		'  lem-cpu-aarch64    build the Linux arm64 CPU release binary' \
 		'  named-binaries     build all named release binaries' \
 		'  release-artifacts  build archives and checksums under $(DIST_DIR)' \
 		'  test               run the Go module test suite' \
@@ -128,17 +135,24 @@ build: build-cli
 
 build-cli:
 	mkdir -p "$(BIN_DIR_ABS)"
-	$(GO) -C "$(GO_SUBTREE)" build -o "$(BIN_DIR_ABS)/$(CLI_NAME)" "$(CLI_CMD)"
+	$(GO) -C "$(CLI_SUBTREE)" build -ldflags "$(CLI_GO_LDFLAGS)" -o "$(BIN_DIR_ABS)/$(CLI_NAME)" "$(CLI_CMD)"
 
-lthn-rocm: build-cli hip-amd
+# Deprecated aliases (the lthn-* spellings) — the canonical verbs are lem-*.
+lthn-rocm: lem-rocm
+lthn-amd: lem-amd
+lthn-cuda: lem-cuda
+lthn-cpu-x86: lem-cpu-x86
+lthn-cpu-aarch64: lem-cpu-aarch64
+
+lem-rocm: build-cli hip-amd
 	cp "$(AMD_KERNEL_MODULE)" "$(BIN_DIR_ABS)/$(AMD_KERNEL_MODULE_NAME)"
 
-named-binaries: lthn-amd lthn-cuda lthn-cpu-x86 lthn-cpu-aarch64
+named-binaries: lem-amd lem-cuda lem-cpu-x86 lem-cpu-aarch64
 
 release-binaries: named-binaries
 
 release-dependency-guard: release-binaries
-	@for bin in lthn-amd lthn-cuda; do \
+	@for bin in $(CLI_NAME)-amd $(CLI_NAME)-cuda; do \
 		echo "checking release deps: $$bin"; \
 		if $(READELF) -d "$(BIN_DIR_ABS)/$$bin" | grep -E 'NEEDED.*\[(libamdhip64|libhsa-runtime64|libhsakmt|libdrm|libelf|libnuma|libstdc\+\+|libgcc_s)' ; then \
 			echo "forbidden shared ROCm/HIP dependency in $(BIN_DIR_ABS)/$$bin"; \
@@ -149,7 +163,7 @@ release-dependency-guard: release-binaries
 			exit 1; \
 		fi; \
 	done
-	@for bin in lthn-cpu-x86 lthn-cpu-aarch64; do \
+	@for bin in $(CLI_NAME)-cpu-x86 $(CLI_NAME)-cpu-aarch64; do \
 		echo "checking static release deps: $$bin"; \
 		if $(READELF) -d "$(BIN_DIR_ABS)/$$bin" 2>/dev/null | grep -E 'NEEDED|\((RPATH|RUNPATH)\)' ; then \
 			echo "CPU release binary must be fully static: $(BIN_DIR_ABS)/$$bin"; \
@@ -171,18 +185,18 @@ release-artifacts: release-binaries release-dependency-guard
 	for sidecar in $(RELEASE_SIDECARS); do \
 		chmod 0644 "$(DIST_DIR_ABS)/$$sidecar"; \
 	done
-	$(STRIP_AMD) "$(DIST_DIR_ABS)/lthn-amd"
-	$(STRIP_CUDA) "$(DIST_DIR_ABS)/lthn-cuda"
-	$(STRIP_CPU_X86) "$(DIST_DIR_ABS)/lthn-cpu-x86"
-	$(STRIP_CPU_AARCH64) "$(DIST_DIR_ABS)/lthn-cpu-aarch64"
+	$(STRIP_AMD) "$(DIST_DIR_ABS)/$(CLI_NAME)-amd"
+	$(STRIP_CUDA) "$(DIST_DIR_ABS)/$(CLI_NAME)-cuda"
+	$(STRIP_CPU_X86) "$(DIST_DIR_ABS)/$(CLI_NAME)-cpu-x86"
+	$(STRIP_CPU_AARCH64) "$(DIST_DIR_ABS)/$(CLI_NAME)-cpu-aarch64"
 	for bin in $(RELEASE_BINS); do \
-		if [ "$$bin" = "lthn-amd" ]; then \
+		if [ "$$bin" = "$(CLI_NAME)-amd" ]; then \
 			(cd "$(DIST_DIR_ABS)" && $(TAR) -czf "$$bin-linux.tar.gz" "$$bin" "$(AMD_KERNEL_MODULE_NAME)"); \
-		elif [ "$$bin" = "lthn-cuda" ]; then \
+		elif [ "$$bin" = "$(CLI_NAME)-cuda" ]; then \
 			(cd "$(DIST_DIR_ABS)" && $(TAR) -czf "$$bin-linux.tar.gz" "$$bin" "$(CUDA_KERNEL_MODULE_NAME)"); \
-		elif [ "$$bin" = "lthn-cpu-x86" ]; then \
+		elif [ "$$bin" = "$(CLI_NAME)-cpu-x86" ]; then \
 			(cd "$(DIST_DIR_ABS)" && $(TAR) -czf "$$bin-linux.tar.gz" "$$bin" "$(CPU_X86_KERNEL_MODULE_NAME)"); \
-		elif [ "$$bin" = "lthn-cpu-aarch64" ]; then \
+		elif [ "$$bin" = "$(CLI_NAME)-cpu-aarch64" ]; then \
 			(cd "$(DIST_DIR_ABS)" && $(TAR) -czf "$$bin-linux.tar.gz" "$$bin" "$(CPU_AARCH64_KERNEL_MODULE_NAME)"); \
 		else \
 			(cd "$(DIST_DIR_ABS)" && $(TAR) -czf "$$bin-linux.tar.gz" "$$bin"); \
@@ -192,7 +206,7 @@ release-artifacts: release-binaries release-dependency-guard
 
 dist: release-artifacts
 
-static-hip-binaries: lthn-amd lthn-cuda
+static-hip-binaries: lem-amd lem-cuda
 
 rocr-cmake-shims:
 	@test -x "$(ROCR_CLANG)" || { echo "missing ROCr clang; install rocm-llvm or set ROCR_CLANG=/path/to/clang"; exit 1; }
@@ -260,30 +274,30 @@ hip-link-info:
 		echo "HIP link mode: direct shared ROCm link ($(HIP_DIRECT_CGO_LDFLAGS)); install libamdhip64.a for static HIP release binaries."; \
 	fi
 
-lthn-amd: hsa-static-archive hip-static-archive hip-amd
+lem-amd: hsa-static-archive hip-static-archive hip-amd
 	mkdir -p "$(BIN_DIR_ABS)"
 	$(MAKE) --no-print-directory hip-link-info
-	CGO_ENABLED=$(AMD_CGO_ENABLED) CGO_LDFLAGS="$(HIP_RELEASE_CGO_LDFLAGS)" GOOS=$(TARGET_GOOS) GOARCH=$(AMD_GOARCH) $(GO) -C "$(GO_SUBTREE)" build -tags "$(HIP_DIRECT_GO_TAGS)" -o "$(BIN_DIR_ABS)/lthn-amd" "$(CLI_CMD)"
+	CGO_ENABLED=$(AMD_CGO_ENABLED) CGO_LDFLAGS="$(HIP_RELEASE_CGO_LDFLAGS)" GOOS=$(TARGET_GOOS) GOARCH=$(AMD_GOARCH) $(GO) -C "$(CLI_SUBTREE)" build -tags "$(HIP_DIRECT_GO_TAGS)" -ldflags "$(CLI_GO_LDFLAGS)" -o "$(BIN_DIR_ABS)/$(CLI_NAME)-amd" "$(CLI_CMD)"
 	cp "$(AMD_KERNEL_MODULE)" "$(BIN_DIR_ABS)/$(AMD_KERNEL_MODULE_NAME)"
 
-lthn-cuda: hsa-static-archive hip-static-archive hip-nvidia
+lem-cuda: hsa-static-archive hip-static-archive hip-nvidia
 	mkdir -p "$(BIN_DIR_ABS)"
 	$(MAKE) --no-print-directory hip-link-info
-	CGO_ENABLED=$(CUDA_CGO_ENABLED) CGO_LDFLAGS="$(HIP_RELEASE_CGO_LDFLAGS)" GOOS=$(TARGET_GOOS) GOARCH=$(CUDA_GOARCH) $(GO) -C "$(GO_SUBTREE)" build -tags "$(HIP_DIRECT_GO_TAGS)" -o "$(BIN_DIR_ABS)/lthn-cuda" "$(CLI_CMD)"
+	CGO_ENABLED=$(CUDA_CGO_ENABLED) CGO_LDFLAGS="$(HIP_RELEASE_CGO_LDFLAGS)" GOOS=$(TARGET_GOOS) GOARCH=$(CUDA_GOARCH) $(GO) -C "$(CLI_SUBTREE)" build -tags "$(HIP_DIRECT_GO_TAGS)" -ldflags "$(CLI_GO_LDFLAGS)" -o "$(BIN_DIR_ABS)/$(CLI_NAME)-cuda" "$(CLI_CMD)"
 
-lthn-cpu-x86: hip-cpu-x86_64
+lem-cpu-x86: hip-cpu-x86_64
 	mkdir -p "$(BIN_DIR_ABS)"
-	CGO_ENABLED=$(CPU_CGO_ENABLED) GOOS=$(TARGET_GOOS) GOARCH=$(CPU_X86_GOARCH) $(GO) -C "$(GO_SUBTREE)" build -o "$(BIN_DIR_ABS)/lthn-cpu-x86" "$(CLI_CMD)"
+	CGO_ENABLED=$(CPU_CGO_ENABLED) GOOS=$(TARGET_GOOS) GOARCH=$(CPU_X86_GOARCH) $(GO) -C "$(CLI_SUBTREE)" build -ldflags "$(CLI_GO_LDFLAGS)" -o "$(BIN_DIR_ABS)/$(CLI_NAME)-cpu-x86" "$(CLI_CMD)"
 
-lthn-cpu-aarch64: hip-cpu-aarch64
+lem-cpu-aarch64: hip-cpu-aarch64
 	mkdir -p "$(BIN_DIR_ABS)"
-	CGO_ENABLED=$(CPU_CGO_ENABLED) GOOS=$(TARGET_GOOS) GOARCH=$(CPU_AARCH64_GOARCH) $(GO) -C "$(GO_SUBTREE)" build -o "$(BIN_DIR_ABS)/lthn-cpu-aarch64" "$(CLI_CMD)"
+	CGO_ENABLED=$(CPU_CGO_ENABLED) GOOS=$(TARGET_GOOS) GOARCH=$(CPU_AARCH64_GOARCH) $(GO) -C "$(CLI_SUBTREE)" build -ldflags "$(CLI_GO_LDFLAGS)" -o "$(BIN_DIR_ABS)/$(CLI_NAME)-cpu-aarch64" "$(CLI_CMD)"
 
 test:
 	$(GO) -C "$(GO_SUBTREE)" test ./... -count=1
 
 test-cli:
-	$(GO) -C "$(GO_SUBTREE)" test ./cmd/lthn-rocm -count=1
+	$(GO) -C "$(CLI_SUBTREE)" test ./... -count=1
 
 test-all: test test-cli
 

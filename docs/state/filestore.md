@@ -97,7 +97,7 @@ the partial bytes are overwritten on the next Put.
 
 ## Consumed by
 
-- `cmd/lem` — when configured with a local bundles directory
+- `cli/` — when configured with a local bundles directory
 - `model/state/session/` — preferred Store for the Wake/Sleep loop
   when State video output isn't requested
 - Test harnesses that need cross-test persistence (filestore lives,
