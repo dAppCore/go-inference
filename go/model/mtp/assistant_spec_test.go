@@ -1,8 +1,12 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-package model
+package mtp
 
-import "testing"
+import (
+	"testing"
+
+	"dappco.re/go/inference/model"
+)
 
 // TestRegisterAssistantAliasesAndLookup proves the reactive assistant registry: every
 // ModelTypes alias resolves, the GGUFArch resolves under its "gguf:" prefix, and an
@@ -98,9 +102,9 @@ func TestParseAssistantConfigDispatch(t *testing.T) {
 func TestAssistantConfigLayerType(t *testing.T) {
 	c := AssistantConfig{
 		LayerTypes: []string{"sliding_attention", ""},
-		Arch: Arch{Layer: []LayerSpec{
-			{Attention: SlidingAttention},
-			{Attention: GlobalAttention},
+		Arch: model.Arch{Layer: []model.LayerSpec{
+			{Attention: model.SlidingAttention},
+			{Attention: model.GlobalAttention},
 		}},
 	}
 	if got := c.LayerType(0); got != "sliding_attention" {
@@ -326,7 +330,7 @@ func TestAssistantSpec_AssistantConfig_LayerType_Good(t *testing.T) {
 func TestAssistantSpec_AssistantConfig_LayerType_Bad(t *testing.T) {
 	c := AssistantConfig{
 		LayerTypes: []string{""},
-		Arch:       Arch{Layer: []LayerSpec{{Attention: GlobalAttention}}},
+		Arch:       model.Arch{Layer: []model.LayerSpec{{Attention: model.GlobalAttention}}},
 	}
 	if got := c.LayerType(0); got != "full_attention" {
 		t.Fatalf("LayerType(0) blank declared entry = %q, want the Arch fallback %q", got, "full_attention")

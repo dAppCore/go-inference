@@ -18,6 +18,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/gguf"
+	"dappco.re/go/inference/model/mtp"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
 )
@@ -4200,7 +4201,7 @@ func TestNativeAssistantDequantizeTensors_Good(t *testing.T) {
 	want := f32ToBf16Slice(wantF32)
 
 	m := &AssistantModel{
-		Config: model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: groupSize, Bits: bits}},
+		Config: mtp.AssistantConfig{Quant: &model.QuantConfig{GroupSize: groupSize, Bits: bits}},
 		Tensors: map[string]safetensors.Tensor{
 			"layer.weight": {Dtype: "U32", Shape: []int{rows, words}, Data: packed},
 			"layer.scales": {Dtype: "BF16", Shape: []int{rows, cols / groupSize}, Data: scales},
@@ -4238,7 +4239,7 @@ func TestNativeAssistantDequantizeTensors_Bad(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			m := &AssistantModel{
-				Config: model.AssistantConfig{Quant: &c.quant},
+				Config: mtp.AssistantConfig{Quant: &c.quant},
 				Tensors: map[string]safetensors.Tensor{
 					"layer.weight": {Dtype: "U32", Shape: c.shape, Data: make([]byte, 4)},
 					"layer.scales": {Dtype: "BF16", Shape: []int{1, 1}, Data: make([]byte, 2)},
@@ -4266,7 +4267,7 @@ func TestNativeAssistantDequantizeTensors_Ugly(t *testing.T) {
 	})
 	t.Run("non_affine_mode_is_noop", func(t *testing.T) {
 		m := &AssistantModel{
-			Config:  model.AssistantConfig{Quant: &model.QuantConfig{Mode: "mxfp4", GroupSize: 4, Bits: 4}},
+			Config:  mtp.AssistantConfig{Quant: &model.QuantConfig{Mode: "mxfp4", GroupSize: 4, Bits: 4}},
 			Tensors: map[string]safetensors.Tensor{"layer.weight": untouched},
 		}
 		if err := nativeAssistantDequantizeTensors(m); err != nil {
@@ -4278,7 +4279,7 @@ func TestNativeAssistantDequantizeTensors_Ugly(t *testing.T) {
 	})
 	t.Run("missing_sibling_is_skipped", func(t *testing.T) {
 		m := &AssistantModel{
-			Config: model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 4}},
+			Config: mtp.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 4}},
 			Tensors: map[string]safetensors.Tensor{
 				"layer.weight": untouched,
 				"layer.scales": {Dtype: "BF16", Shape: []int{1, 1}, Data: make([]byte, 2)},
@@ -4294,7 +4295,7 @@ func TestNativeAssistantDequantizeTensors_Ugly(t *testing.T) {
 	})
 	t.Run("wrong_rank_is_skipped", func(t *testing.T) {
 		m := &AssistantModel{
-			Config: model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 4}},
+			Config: mtp.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 4}},
 			Tensors: map[string]safetensors.Tensor{
 				"layer.weight": {Dtype: "U32", Shape: []int{4}, Data: make([]byte, 4)},
 				"layer.scales": {Dtype: "BF16", Shape: []int{1}, Data: make([]byte, 2)},
@@ -4323,9 +4324,9 @@ func TestNativeAssistantLinearInputMatches_Bad(t *testing.T) {
 		m    *AssistantModel
 	}{
 		{"quant_nil", &AssistantModel{}},
-		{"bits_zero", &AssistantModel{Config: model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4}}}},
+		{"bits_zero", &AssistantModel{Config: mtp.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4}}}},
 		{"missing_scales", &AssistantModel{
-			Config:  model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 4}},
+			Config:  mtp.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 4}},
 			Tensors: map[string]safetensors.Tensor{},
 		}},
 	}
@@ -4342,7 +4343,7 @@ func TestNativeAssistantLinearInputMatches_Ugly(t *testing.T) {
 	// bits=4 packs 8 codes/word (packFactor=32/4=8): wantIn=8 divides evenly,
 	// so a packed gotIn of wantIn/packFactor=1 word is accepted.
 	packed := &AssistantModel{
-		Config:  model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 4}},
+		Config:  mtp.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 4}},
 		Tensors: map[string]safetensors.Tensor{"layer.scales": {Dtype: "BF16", Data: make([]byte, 2)}},
 	}
 	if !nativeAssistantLinearInputMatches(packed, "layer", 1, 8) {
@@ -4351,7 +4352,7 @@ func TestNativeAssistantLinearInputMatches_Ugly(t *testing.T) {
 	// bits=3: packFactor=32/3=10 does not divide wantIn=8, so the packer falls
 	// back to the byte-packed-row formula gotIn == (wantIn*bits+31)/32.
 	fallback := &AssistantModel{
-		Config:  model.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 3}},
+		Config:  mtp.AssistantConfig{Quant: &model.QuantConfig{GroupSize: 4, Bits: 3}},
 		Tensors: map[string]safetensors.Tensor{"layer.scales": {Dtype: "BF16", Data: make([]byte, 2)}},
 	}
 	const wantIn = 8

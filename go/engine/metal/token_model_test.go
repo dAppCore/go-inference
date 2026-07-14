@@ -14,6 +14,7 @@ import (
 
 	"dappco.re/go/inference/model"
 	g4 "dappco.re/go/inference/model/gemma4"
+	"dappco.re/go/inference/model/vision"
 )
 
 func TestNativeTokenModelAcceptsImageInput_Good(t *testing.T) {
@@ -21,7 +22,7 @@ func TestNativeTokenModelAcceptsImageInput_Good(t *testing.T) {
 	if tm.AcceptsImageInput() {
 		t.Fatal("AcceptsImageInput = true without a vision payload, want false")
 	}
-	tm.vision = &model.LoadedVision{}
+	tm.vision = &vision.Loaded{}
 	if !tm.AcceptsImageInput() {
 		t.Fatal("AcceptsImageInput = false with a vision payload, want true")
 	}
@@ -54,39 +55,39 @@ func TestNativeTokenModelBlockDiffusionCapable_Good(t *testing.T) {
 }
 
 func TestNativeVisionFromLoadedMapsPayload_Good(t *testing.T) {
-	loaded := &model.LoadedVision{
+	loaded := &vision.Loaded{
 		PatchEmbedding:     []byte{1, 2},
 		PatchConvWeight:    []byte{31, 32},
 		PositionEmbeddings: []byte{3, 4},
 		PostLayernorm:      []byte{5, 6},
 		StdBias:            []byte{7, 8},
 		StdScale:           []byte{9, 10},
-		Cfg: model.LoadedVisionConfig{
+		Cfg: vision.Config{
 			Hidden: 64, PatchDim: 48, NumLayers: 1, NumHeads: 2, NumKVHeads: 1,
 			HeadDim: 32, PatchSize: 4, NumChannels: 3, PositionEmbeddingSize: 16, RopeBase: 100, RMSNormEps: 1e-6, PoolKernel: 3,
 			Standardize: true, EmbeddingScale: 8,
 			ImageTokenID: 262145, ImageBeginToken: "<|image>", ImageToken: "<|image|>", ImageEndToken: "<image|>",
 			VideoTokenID: 258884, VideoToken: "<|video|>",
 		},
-		Layers: []model.LoadedVisionLayer{{
+		Layers: []vision.Layer{{
 			InputNorm:    []byte{11},
 			PostAttnNorm: []byte{12},
 			PreFFNorm:    []byte{13},
 			PostFFNorm:   []byte{14},
-			Q:            model.LoadedVisionLinear{Weight: []byte{15}, Bias: []byte{115}},
-			K:            model.LoadedVisionLinear{Weight: []byte{16}, Bias: []byte{116}},
-			V:            model.LoadedVisionLinear{Weight: []byte{17}, Bias: []byte{117}},
-			O:            model.LoadedVisionLinear{Weight: []byte{18}, Bias: []byte{118}},
+			Q:            vision.Linear{Weight: []byte{15}, Bias: []byte{115}},
+			K:            vision.Linear{Weight: []byte{16}, Bias: []byte{116}},
+			V:            vision.Linear{Weight: []byte{17}, Bias: []byte{117}},
+			O:            vision.Linear{Weight: []byte{18}, Bias: []byte{118}},
 			QNorm:        []byte{19},
 			KNorm:        []byte{20},
-			Gate:         model.LoadedVisionLinear{Weight: []byte{21}, Bias: []byte{121}},
-			Up:           model.LoadedVisionLinear{Weight: []byte{22}, Bias: []byte{122}},
-			Down:         model.LoadedVisionLinear{Weight: []byte{23}, Bias: []byte{123}},
+			Gate:         vision.Linear{Weight: []byte{21}, Bias: []byte{121}},
+			Up:           vision.Linear{Weight: []byte{22}, Bias: []byte{122}},
+			Down:         vision.Linear{Weight: []byte{23}, Bias: []byte{123}},
 		}},
-		Projector: model.LoadedVisionProjector{
-			Projection: model.LoadedVisionLinear{Weight: []byte{24}, Bias: []byte{124}},
-			Linear1:    model.LoadedVisionLinear{Weight: []byte{25}, Bias: []byte{125}},
-			Linear2:    model.LoadedVisionLinear{Weight: []byte{26}, Bias: []byte{126}},
+		Projector: vision.Projector{
+			Projection: vision.Linear{Weight: []byte{24}, Bias: []byte{124}},
+			Linear1:    vision.Linear{Weight: []byte{25}, Bias: []byte{125}},
+			Linear2:    vision.Linear{Weight: []byte{26}, Bias: []byte{126}},
 		},
 	}
 
@@ -137,7 +138,7 @@ func TestNativeVisionFromLoadedMapsPayload_Good(t *testing.T) {
 }
 
 func TestNativeTokenModelImagePlaceholderBlock_Good(t *testing.T) {
-	tm := &NativeTokenModel{vision: &model.LoadedVision{Cfg: model.LoadedVisionConfig{
+	tm := &NativeTokenModel{vision: &vision.Loaded{Cfg: vision.Config{
 		ImageTokenID: 262145, ImageBeginToken: "<|image>", ImageToken: "<|image|>", ImageEndToken: "<image|>",
 		VideoTokenID: 258884, VideoToken: "<|video|>",
 	}}}
@@ -163,8 +164,8 @@ func TestNativeTokenModelImagePlaceholderBlock_Good(t *testing.T) {
 
 func TestNativeTokenModelImagePlaceholderTokenID_Good(t *testing.T) {
 	tm := &NativeTokenModel{
-		vision:        &model.LoadedVision{Cfg: model.LoadedVisionConfig{ImageTokenID: 11}},
-		unifiedVision: &model.LoadedUnifiedVision{Cfg: model.LoadedUnifiedVisionConfig{ImageTokenID: 22}},
+		vision:        &vision.Loaded{Cfg: vision.Config{ImageTokenID: 11}},
+		unifiedVision: &vision.Unified{Cfg: vision.UnifiedConfig{ImageTokenID: 22}},
 	}
 	if got := tm.ImagePlaceholderTokenID(); got != 22 {
 		t.Fatalf("ImagePlaceholderTokenID unified value = %d, want 22", got)
@@ -183,8 +184,8 @@ func TestNativeTokenModelImagePlaceholderTokenID_Ugly(t *testing.T) {
 
 func TestNativeTokenModelVideoPlaceholderTokenID_Good(t *testing.T) {
 	tm := &NativeTokenModel{
-		vision:        &model.LoadedVision{Cfg: model.LoadedVisionConfig{VideoTokenID: 13}},
-		unifiedVision: &model.LoadedUnifiedVision{Cfg: model.LoadedUnifiedVisionConfig{VideoTokenID: 23}},
+		vision:        &vision.Loaded{Cfg: vision.Config{VideoTokenID: 13}},
+		unifiedVision: &vision.Unified{Cfg: vision.UnifiedConfig{VideoTokenID: 23}},
 	}
 	if got := tm.VideoPlaceholderTokenID(); got != 23 {
 		t.Fatalf("VideoPlaceholderTokenID unified value = %d, want 23", got)
@@ -208,7 +209,7 @@ func TestNativeTokenModelProjectImage_Bad(t *testing.T) {
 	// With a tower declared, malformed bytes must fail in preprocessing rather
 	// than being accepted as an empty image. This reaches the post-capability
 	// branch without inventing a tower output ordering.
-	tm := &NativeTokenModel{vision: &model.LoadedVision{}}
+	tm := &NativeTokenModel{vision: &vision.Loaded{}}
 	if features, tokens, err := tm.ProjectImage([]byte("not an image")); err == nil || features != nil || tokens != 0 {
 		t.Fatalf("ProjectImage malformed bytes = features=%v tokens=%d err=%v, want preprocessing error", features, tokens, err)
 	}
@@ -217,9 +218,9 @@ func TestNativeTokenModelProjectImage_Bad(t *testing.T) {
 func TestNativeTokenModelProjectImage_Good(t *testing.T) {
 	requireNativeRuntime(t)
 	tm := &NativeTokenModel{
-		vision: &model.LoadedVision{
+		vision: &vision.Loaded{
 			PatchEmbedding: toBF16Bytes([]float32{1, 0, 0, 0, 1, 0}),
-			Cfg: model.LoadedVisionConfig{
+			Cfg: vision.Config{
 				Hidden: 2, PatchDim: 3, NumHeads: 1, NumKVHeads: 1, HeadDim: 2,
 				RMSNormEps: 1e-6, PoolKernel: 1,
 			},
@@ -344,7 +345,7 @@ func TestNativeTokenModelAudioPlaceholderBlock_Good(t *testing.T) {
 func TestNativeTokenModelAudioPlaceholderTokenID_Good(t *testing.T) {
 	tm := &NativeTokenModel{
 		audio: &model.LoadedAudio{Cfg: model.LoadedAudioConfig{AudioTokenID: 17}},
-		unifiedVision: &model.LoadedUnifiedVision{Cfg: model.LoadedUnifiedVisionConfig{
+		unifiedVision: &vision.Unified{Cfg: vision.UnifiedConfig{
 			AudioSamplesPerToken: 320,
 			AudioTokenID:         27,
 		}},
@@ -497,7 +498,7 @@ func TestNativeTokenModelInjectImageFeatures_Good(t *testing.T) {
 	const imageTok = int32(88)
 	tm := &NativeTokenModel{
 		NativeBackend: &NativeBackend{arch: model.Arch{Hidden: H}},
-		vision:        &model.LoadedVision{Cfg: model.LoadedVisionConfig{ImageTokenID: imageTok}},
+		vision:        &vision.Loaded{Cfg: vision.Config{ImageTokenID: imageTok}},
 	}
 	tokenIDs := []int32{10, imageTok, 11, imageTok}
 	emb := toBF16Bytes(syntheticFloat32(4*H, 3))
@@ -525,7 +526,7 @@ func TestNativeTokenModelInjectVideoFeatures_Good(t *testing.T) {
 	const videoTok = int32(99)
 	tm := &NativeTokenModel{
 		NativeBackend: &NativeBackend{arch: model.Arch{Hidden: H}},
-		vision:        &model.LoadedVision{Cfg: model.LoadedVisionConfig{VideoTokenID: videoTok}},
+		vision:        &vision.Loaded{Cfg: vision.Config{VideoTokenID: videoTok}},
 	}
 	tokenIDs := []int32{10, videoTok, 11, videoTok}
 	emb := toBF16Bytes(syntheticFloat32(4*H, 5))
@@ -556,7 +557,7 @@ func TestNativeTokenModelTokenEmbeddingsWithFeatures_Good(t *testing.T) {
 	tokenIDs := []int32{12, imageTok, 13, audioTok, videoTok, 14}
 	tm := &NativeTokenModel{
 		NativeBackend: &NativeBackend{arch: model.Arch{Hidden: H}},
-		vision: &model.LoadedVision{Cfg: model.LoadedVisionConfig{
+		vision: &vision.Loaded{Cfg: vision.Config{
 			ImageTokenID: imageTok,
 			VideoTokenID: videoTok,
 		}},
@@ -611,9 +612,9 @@ func TestNativeTokenModelProjectImageFeatures_Good(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
 	}
-	tm := &NativeTokenModel{vision: &model.LoadedVision{
+	tm := &NativeTokenModel{vision: &vision.Loaded{
 		PatchEmbedding: toBF16Bytes([]float32{1, 0, 0, 1}),
-		Cfg: model.LoadedVisionConfig{
+		Cfg: vision.Config{
 			Hidden: 2, PatchDim: 2, NumHeads: 1, NumKVHeads: 1, HeadDim: 2,
 			RMSNormEps: 1e-6, PoolKernel: 1,
 		},
@@ -631,14 +632,14 @@ func TestNativeTokenModelProjectImagePixelsNHWC_Good(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")
 	}
-	tm := &NativeTokenModel{vision: &model.LoadedVision{
+	tm := &NativeTokenModel{vision: &vision.Loaded{
 		PatchConvWeight: toBF16Bytes([]float32{
 			1, 1,
 			1, 1,
 			1, 0,
 			0, 0,
 		}),
-		Cfg: model.LoadedVisionConfig{
+		Cfg: vision.Config{
 			Hidden: 2, PatchDim: 4, PatchSize: 2, NumChannels: 1, NumHeads: 1, NumKVHeads: 1, HeadDim: 2,
 			RMSNormEps: 1e-6, PoolKernel: 1,
 		},

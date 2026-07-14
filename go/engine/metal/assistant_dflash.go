@@ -6,7 +6,7 @@ package native
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/mtp"
 )
 
 // assistant_dflash.go is the block-parallel twin of the autoregressive MTP draft
@@ -282,5 +282,5 @@ const (
 // resolveDFlashMethod reports whether a loaded drafter is a DFlash block-diffusion
 // checkpoint — the method the neutral config was stamped with by the reactive spec.
 func resolveDFlashMethod(m *AssistantModel) bool {
-	return m != nil && m.Config.Method == model.MTPDFlash
+	return m != nil && m.Config.Method == mtp.MTPDFlash
 }

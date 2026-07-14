@@ -15,6 +15,7 @@ import (
 	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/gguf"
+	"dappco.re/go/inference/model/mtp"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
 	"github.com/tmc/apple/metal"
@@ -38,11 +39,11 @@ var nativeAssistantByteScratchPools sync.Map
 // AssistantModel is the native, CGO-free assistant-only checkpoint
 // handle. The decode integration uses the mmap-backed tensors directly in a
 // later slice; this loader owns the mmap and validates the attached-drafter
-// tensor layout up front. The config arrives as the NEUTRAL model.AssistantConfig
-// a registered model package parsed (model.RegisterAssistant) — the engine never
+// tensor layout up front. The config arrives as the NEUTRAL mtp.AssistantConfig
+// a registered model package parsed (mtp.RegisterAssistant) — the engine never
 // keys on which model family the drafter belongs to.
 type AssistantModel struct {
-	Config                   model.AssistantConfig
+	Config                   mtp.AssistantConfig
 	Arch                     model.Arch
 	Tensors                  map[string]safetensors.Tensor
 	BackboneHiddenSize       int
@@ -97,18 +98,18 @@ type AssistantPair struct {
 }
 
 // Method reports the speculative-decode method inferred from the drafter (see
-// model.MTPMethod), so the decode driver dispatches on the method rather than
+// mtp.MTPMethod), so the decode driver dispatches on the method rather than
 // assuming the separate draft-model path. An unstamped config (e.g. a GGUF load
-// that has not carried the field) defaults to model.MTPDraftModel — the only
+// that has not carried the field) defaults to mtp.MTPDraftModel — the only
 // method shipped today.
-func (pair *AssistantPair) Method() model.MTPMethod {
+func (pair *AssistantPair) Method() mtp.MTPMethod {
 	if pair == nil || pair.Assistant == nil {
-		return model.MTPDraftModel
+		return mtp.MTPDraftModel
 	}
 	if m := pair.Assistant.Config.Method; m != "" {
 		return m
 	}
-	return model.MTPDraftModel
+	return mtp.MTPDraftModel
 }
 
 // AssistantDraftStepResult is one native assistant proposal from a target
@@ -376,8 +377,8 @@ func LoadAssistantDir(dir string) (*AssistantModel, error) {
 		return nil, core.E("native.assistant.Load", "read config.json", err)
 	}
 	// the reactive parse: probe model_type → the registered model package's parser
-	// (model.RegisterAssistant) → the neutral, already-validated config + derived arch.
-	cfg, err := model.ParseAssistantConfig([]byte(cfgStr))
+	// (mtp.RegisterAssistant) → the neutral, already-validated config + derived arch.
+	cfg, err := mtp.ParseAssistantConfig([]byte(cfgStr))
 	if err != nil {
 		return nil, core.E("native.assistant.Load", "parse config", err)
 	}
@@ -731,7 +732,7 @@ func (m *AssistantModel) ModelType() string {
 	// report the claiming spec's CANONICAL id (its first ModelTypes entry) so checkpoint
 	// variants (e.g. a unified assistant) normalise to the public id their model package
 	// declares — the registry is the normalisation table, never a hardcoded model list.
-	if spec, ok := model.LookupAssistant(m.Config.ModelType); ok && len(spec.ModelTypes) > 0 && spec.ModelTypes[0] != "" {
+	if spec, ok := mtp.LookupAssistant(m.Config.ModelType); ok && len(spec.ModelTypes) > 0 && spec.ModelTypes[0] != "" {
 		return spec.ModelTypes[0]
 	}
 	return m.Config.ModelType

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/mtp"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -119,8 +120,8 @@ func synthTokensInVocab(t *testing.T, what string, ids []int32) {
 
 func TestSyntheticAssistantPairMethodAndPrepareAssistantPrompt(t *testing.T) {
 	sess, pair, prompt := newSyntheticAssistantPair(t)
-	if m := pair.Method(); m != model.MTPDraftModel {
-		t.Fatalf("Method = %q, want %q (unstamped config defaults to draft-model)", m, model.MTPDraftModel)
+	if m := pair.Method(); m != mtp.MTPDraftModel {
+		t.Fatalf("Method = %q, want %q (unstamped config defaults to draft-model)", m, mtp.MTPDraftModel)
 	}
 	if err := sess.PrepareAssistantPrompt(prompt); err != nil {
 		t.Fatalf("PrepareAssistantPrompt: %v", err)

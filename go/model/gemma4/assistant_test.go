@@ -5,7 +5,7 @@ package gemma4
 import (
 	"testing"
 
-	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/mtp"
 )
 
 // realisticAssistantTextConfigJSON is a small but shape-faithful drafter text_config: a
@@ -402,11 +402,11 @@ func TestGgufMetaFloat(t *testing.T) {
 // TestRegistersArch pins for the (non-assistant) arch registry.
 func TestAssistantRegistersInEngine(t *testing.T) {
 	for _, mt := range []string{"gemma4_assistant", "gemma4_unified_assistant", ""} {
-		if _, ok := model.LookupAssistant(mt); !ok {
+		if _, ok := mtp.LookupAssistant(mt); !ok {
 			t.Fatalf("gemma4's assistant init() should register an AssistantSpec for model_type %q", mt)
 		}
 	}
-	if _, ok := model.LookupAssistantGGUF(assistantGGUFArch); !ok {
+	if _, ok := mtp.LookupAssistantGGUF(assistantGGUFArch); !ok {
 		t.Fatalf("gemma4's assistant init() should register for GGUF architecture %q", assistantGGUFArch)
 	}
 }

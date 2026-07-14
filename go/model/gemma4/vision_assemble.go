@@ -8,26 +8,15 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/safetensors"
+	"dappco.re/go/inference/model/vision"
 )
 
 // vision_assemble.go is the gemma4 vision tower's loader output: it gathers the SigLIP tower's weights
-// off a checkpoint's tensors into a LoadedVision — byte views by role, the vision parallel of
+// off a checkpoint's tensors into a vision.Loaded — byte views by role, the vision parallel of
 // model.LoadedModel. A backend uploads these views to its device at encode time (native splits the
 // loader (byte views) from the forward (device upload), unlike metal which couples the upload into the
 // build), so this stays pure Go with no driver type. Lifted from buildGemma4VisionModel in
 // pkg/metal/model/gemma4/vision_load.go, reusing the canonicalise + infer front + model.WeightAny.
-
-// LoadedVisionLinear is one vision linear's weight + optional bias byte views (nil bias = none).
-type LoadedVisionLinear = model.LoadedVisionLinear
-
-// LoadedVisionLayer is one SigLIP encoder layer's weights: pre/post norms, QK-normed attention, gated MLP.
-type LoadedVisionLayer = model.LoadedVisionLayer
-
-// LoadedVisionProjector is the vision-to-text projector's weights (a single projection, or fc1+fc2).
-type LoadedVisionProjector = model.LoadedVisionProjector
-
-// LoadedVision is the whole SigLIP tower + projector as byte views — the loader output a backend uploads.
-type LoadedVision = model.LoadedVision
 
 const (
 	Gemma4BOIToken   = "<|image>"
@@ -131,23 +120,23 @@ func visionPositionEmbeddingTable(weights map[string]safetensors.Tensor) ([]byte
 
 // visionLinear gathers a vision linear's weight + bias from the first present prefix (.weight or
 // .linear.weight, with the matching .bias / .linear.bias).
-func visionLinear(weights map[string]safetensors.Tensor, prefixes ...string) LoadedVisionLinear {
+func visionLinear(weights map[string]safetensors.Tensor, prefixes ...string) vision.Linear {
 	for _, p := range prefixes {
 		if w := visionWeight(weights, p+".weight", p+".linear.weight"); w != nil {
-			return LoadedVisionLinear{Weight: w, Bias: visionWeight(weights, p+".bias", p+".linear.bias")}
+			return vision.Linear{Weight: w, Bias: visionWeight(weights, p+".bias", p+".linear.bias")}
 		}
 	}
-	return LoadedVisionLinear{}
+	return vision.Linear{}
 }
 
-func visionLinearWithInputDim(weights map[string]safetensors.Tensor, inDim int, prefixes ...string) LoadedVisionLinear {
+func visionLinearWithInputDim(weights map[string]safetensors.Tensor, inDim int, prefixes ...string) vision.Linear {
 	for _, p := range prefixes {
 		for _, candidate := range []string{p, p + ".linear"} {
 			lin := model.LoadLinear(weights, candidate, inDim, "affine")
 			if lin == nil {
 				continue
 			}
-			return LoadedVisionLinear{
+			return vision.Linear{
 				Weight:    lin.Weight,
 				Scales:    lin.Scales,
 				Biases:    lin.Biases,
@@ -160,12 +149,12 @@ func visionLinearWithInputDim(weights map[string]safetensors.Tensor, inDim int, 
 			}
 		}
 	}
-	return LoadedVisionLinear{}
+	return vision.Linear{}
 }
 
-// AssembleVision gathers the gemma4 vision tower (when the pack carries one) into a LoadedVision, with the
+// AssembleVision gathers the gemma4 vision tower (when the pack carries one) into a vision.Loaded, with the
 // config inferred from the weight shapes. Returns (nil, nil) when the pack is text-only / projector-only.
-func AssembleVision(weights map[string]safetensors.Tensor, textCfg *Gemma4TextConfig) (*LoadedVision, error) {
+func AssembleVision(weights map[string]safetensors.Tensor, textCfg *Gemma4TextConfig) (*vision.Loaded, error) {
 	if !gemma4VisionShouldBuildEncoderTower(textCfg) || !HasVisionTowerWeights(weights) {
 		return nil, nil
 	}
@@ -181,14 +170,14 @@ func AssembleVision(weights map[string]safetensors.Tensor, textCfg *Gemma4TextCo
 	}
 	positionTable, positionSlots := visionPositionEmbeddingTable(weights)
 
-	v := &LoadedVision{
+	v := &vision.Loaded{
 		PatchEmbedding:     patch,
 		PatchConvWeight:    patchConv,
 		PositionEmbeddings: positionTable,
 		PostLayernorm:      visionWeight(weights, "post_layernorm.weight", "post_layer_norm.weight", "encoder.post_layernorm.weight", "vision_model.post_layernorm.weight"),
 		StdBias:            visionWeight(weights, "std_bias"),
 		StdScale:           visionWeight(weights, "std_scale"),
-		Layers:             make([]LoadedVisionLayer, int(visionCfg.NumHiddenLayers)),
+		Layers:             make([]vision.Layer, int(visionCfg.NumHiddenLayers)),
 		Cfg:                loadedVisionConfig(visionCfg, textCfg),
 	}
 	if v.Cfg.PositionEmbeddingSize == 0 {
@@ -225,14 +214,14 @@ func AssembleVision(weights map[string]safetensors.Tensor, textCfg *Gemma4TextCo
 	return v, nil
 }
 
-func loadedVisionConfig(cfg *Gemma4VisionConfig, textCfg *Gemma4TextConfig) model.LoadedVisionConfig {
+func loadedVisionConfig(cfg *Gemma4VisionConfig, textCfg *Gemma4TextConfig) vision.Config {
 	if cfg == nil {
-		return model.LoadedVisionConfig{}
+		return vision.Config{}
 	}
 	hidden := int(cfg.HiddenSize)
 	patch := int(cfg.PatchSize)
 	channels := int(cfg.NumChannels)
-	out := model.LoadedVisionConfig{
+	out := vision.Config{
 		Hidden:                hidden,
 		PatchDim:              channels * patch * patch,
 		NumLayers:             int(cfg.NumHiddenLayers),
@@ -261,7 +250,7 @@ func loadedVisionConfig(cfg *Gemma4VisionConfig, textCfg *Gemma4TextConfig) mode
 
 // validateLoadedVisionLayer fails loud on a missing required weight in an encoder layer — a malformed
 // vision pack, surfaced at load rather than as a nil view deep in the encode.
-func validateLoadedVisionLayer(L *LoadedVisionLayer, idx int) error {
+func validateLoadedVisionLayer(L *vision.Layer, idx int) error {
 	for _, c := range []struct {
 		b    []byte
 		name string

@@ -5,6 +5,7 @@ package model
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/safetensors"
+	"dappco.re/go/inference/model/vision"
 )
 
 // arch_spec.go is the REACTIVE architecture contract: a model package declares itself once — its config
@@ -45,10 +46,10 @@ type ArchSpec struct {
 	Normalize func(map[string]safetensors.Tensor) map[string]safetensors.Tensor
 	// NormalizeConfig handles fused layouts whose split depends on parsed geometry.
 	NormalizeConfig func(map[string]safetensors.Tensor, ArchConfig) map[string]safetensors.Tensor
-	Vision          func(map[string]safetensors.Tensor, ArchConfig) (*LoadedVision, error)
+	Vision          func(map[string]safetensors.Tensor, ArchConfig) (*vision.Loaded, error)
 	// UnifiedVision assembles the encoder-free vision payload (gemma4_unified);
 	// packs with an encoder tower return nil here and populate Vision instead.
-	UnifiedVision func(map[string]safetensors.Tensor, ArchConfig) (*LoadedUnifiedVision, error)
+	UnifiedVision func(map[string]safetensors.Tensor, ArchConfig) (*vision.Unified, error)
 	Audio         func(map[string]safetensors.Tensor, ArchConfig) (*LoadedAudio, error)
 	Diffusion     func(map[string]safetensors.Tensor, ArchConfig) (*LoadedDiffusion, error)
 }

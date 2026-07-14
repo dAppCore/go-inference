@@ -12,10 +12,10 @@ import (
 
 // assistant_dflash_load.go builds a DFlashDrafter from a checkpoint on disk. It
 // hand-rolls NO loader: the drafter's decoder stack loads through the ordinary
-// reactive pack loader (LoadAssistantDir → model.ParseAssistantConfig →
+// reactive pack loader (LoadAssistantDir → mtp.ParseAssistantConfig →
 // safetensors.LoadDirMmap), exactly as an MTP -assistant does; the reactive spec
 // (model/gemma4/assistant_dflash.go) recognises the DFlash config and stamps
-// model.MTPDFlash onto the neutral config. This file only reads the DFlash-specific
+// mtp.MTPDFlash onto the neutral config. This file only reads the DFlash-specific
 // parameters the block forward needs — the block size and fused verifier layers via
 // the model-free decode/dflash.ParseConfig contract, and the reduced-vocab d2t map —
 // and validates the DFlash injection tensors the ordinary assistant validation does
@@ -51,7 +51,7 @@ func LoadDFlashDrafter(dir string) (*DFlashDrafter, error) {
 
 // newDFlashDrafter validates a loaded AssistantModel against the DFlash contract and
 // resolves the block forward's parameters. It fails unless the reactive spec stamped
-// model.MTPDFlash (so an ordinary MTP drafter can never be mistaken for a DFlash one)
+// mtp.MTPDFlash (so an ordinary MTP drafter can never be mistaken for a DFlash one)
 // and every DFlash injection tensor is present and correctly shaped.
 func newDFlashDrafter(m *AssistantModel, cfg dflash.Config) (*DFlashDrafter, error) {
 	if m == nil {

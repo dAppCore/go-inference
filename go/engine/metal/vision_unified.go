@@ -10,7 +10,7 @@ import (
 	"unsafe"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/vision"
 )
 
 // unifiedVisionDiag prints per-stage magnitude stats (#351 instrument; env LTHN_VISION_DIAG).
@@ -54,7 +54,7 @@ func unifiedVisionStats(label string, b []byte, dim int) {
 // unifiedLinearRows projects rows [n × inDim] through a loaded linear
 // (affine-quant or plain bf16), returning [n × OutDim] bf16. Bias, when the
 // linear carries one, is added on the host.
-func unifiedLinearRows(lin model.LoadedVisionLinear, x []byte, n int) ([]byte, error) {
+func unifiedLinearRows(lin vision.Linear, x []byte, n int) ([]byte, error) {
 	if lin.Weight == nil || n <= 0 {
 		return nil, core.NewError("native.unifiedLinearRows: missing weight or empty rows")
 	}
@@ -244,7 +244,7 @@ func UnifiedVisionImagePatches(data []byte, cfg *VisionImageFeatureConfig) ([]by
 // token's samples projected straight into the backbone (scale-free RMSNorm →
 // embed_audio) — no mel front-end, no Conformer. Returns the [n × TextHidden]
 // soft-token features and n.
-func UnifiedAudioProject(uv *model.LoadedUnifiedVision, samples []float32) ([]byte, int, error) {
+func UnifiedAudioProject(uv *vision.Unified, samples []float32) ([]byte, int, error) {
 	if uv == nil || uv.AudioProjection.Weight == nil || uv.Cfg.AudioSamplesPerToken <= 0 {
 		return nil, 0, core.NewError("native.UnifiedAudioProject: model carries no unified audio head")
 	}
@@ -403,7 +403,7 @@ func kaiserI0(x float64) float64 {
 // ([n × ModelPatchSize²·3] bf16, kernel-grouped) with their per-patch (row,
 // col) position indices, returning the [n × TextHidden] soft-token features
 // ready for placeholder injection.
-func UnifiedVisionProject(uv *model.LoadedUnifiedVision, patches []byte, positions []int32, n int) ([]byte, error) {
+func UnifiedVisionProject(uv *vision.Unified, patches []byte, positions []int32, n int) ([]byte, error) {
 	if uv == nil {
 		return nil, core.NewError("native.UnifiedVisionProject: nil payload")
 	}

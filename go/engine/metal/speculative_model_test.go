@@ -15,7 +15,7 @@ import (
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/engine"
-	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/mtp"
 )
 
 func speculativeTestTokenizer(t *testing.T) *tokenizer.Tokenizer {
@@ -264,7 +264,7 @@ func TestSpeculativeChatFraming(t *testing.T) {
 // TestDFlashSpeculativeMethodRoute proves a DFlash-stamped pair selects the
 // block-diffusion driver and never enters the legacy MTP loop.
 func TestDFlashSpeculativeMethodRoute(t *testing.T) {
-	pair := &AssistantPair{Assistant: &AssistantModel{Config: model.AssistantConfig{Method: model.MTPDFlash}}}
+	pair := &AssistantPair{Assistant: &AssistantModel{Config: mtp.AssistantConfig{Method: mtp.MTPDFlash}}}
 	mtpCalls, dflashCalls := 0, 0
 	got, err := speculativeMethodRoute(pair,
 		func() (AssistantGenerateResult, error) {
@@ -286,8 +286,8 @@ func TestDFlashSpeculativeMethodRoute(t *testing.T) {
 // TestDFlashSpeculativeMethodRouteKeepsMTP pins the pre-existing MTP behaviour:
 // explicit MTP and the historical unstamped default both select only that loop.
 func TestDFlashSpeculativeMethodRouteKeepsMTP(t *testing.T) {
-	for _, method := range []model.MTPMethod{model.MTPDraftModel, ""} {
-		pair := &AssistantPair{Assistant: &AssistantModel{Config: model.AssistantConfig{Method: method}}}
+	for _, method := range []mtp.MTPMethod{mtp.MTPDraftModel, ""} {
+		pair := &AssistantPair{Assistant: &AssistantModel{Config: mtp.AssistantConfig{Method: method}}}
 		mtpCalls, dflashCalls := 0, 0
 		got, err := speculativeMethodRoute(pair,
 			func() (AssistantGenerateResult, error) {

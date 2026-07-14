@@ -11,6 +11,7 @@ import (
 	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/vision"
 )
 
 // NativeTokenModel binds the no-cgo decode backend + the embed/head bookend
@@ -58,10 +59,10 @@ type NativeTokenModel struct {
 	// uses the upload closure). Concurrency-safe (no shared mutable state), so the shared model can
 	// serve many request goroutines. Set by LoadGemma4TokenModelDir.
 	headEnc *headEncoder
-	vision  *model.LoadedVision
+	vision  *vision.Loaded
 	// unifiedVision is the encoder-free vision embedder (gemma4_unified, 12B):
 	// packs carry either the SigLIP tower (vision) or this — never both.
-	unifiedVision *model.LoadedUnifiedVision
+	unifiedVision *vision.Unified
 	// visionFeatureCfg is the image_processor preprocessing config (patch size,
 	// soft-token budget, pooling, rescale) read from processor_config.json at load
 	// time — ProjectImage needs it to patchify before the tower. nil for a
@@ -514,7 +515,7 @@ func (m *NativeTokenModel) spliceTokenFeaturesInto(stream []byte, tokenIDs []int
 	return nil
 }
 
-func nativeVisionFromLoaded(loaded *model.LoadedVision) (*VisionWeights, VisionConfig, bool) {
+func nativeVisionFromLoaded(loaded *vision.Loaded) (*VisionWeights, VisionConfig, bool) {
 	if loaded == nil {
 		return nil, VisionConfig{}, false
 	}
@@ -585,7 +586,7 @@ func nativeVisionFromLoaded(loaded *model.LoadedVision) (*VisionWeights, VisionC
 	return weights, cfg, true
 }
 
-func nativeVisionProjectorLinear(l model.LoadedVisionLinear) VisionProjectorLinear {
+func nativeVisionProjectorLinear(l vision.Linear) VisionProjectorLinear {
 	return VisionProjectorLinear{
 		Weight:    l.Weight,
 		Scales:    l.Scales,

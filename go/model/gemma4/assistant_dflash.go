@@ -4,14 +4,14 @@ package gemma4
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/mtp"
 )
 
 // assistant_dflash.go declares the DFlash block-diffusion drafter to the reactive
 // assistant loader, the block-diffusion sibling of assistant.go's MTP -assistant.
 // A DFlash speculator (arXiv 2602.06036) carries speculators_model_type "dflash"
 // plus its own decoder arch; the engine loads that decoder through the ordinary
-// assistant pack loader and this spec stamps model.MTPDFlash onto the neutral config
+// assistant pack loader and this spec stamps mtp.MTPDFlash onto the neutral config
 // so the decode path dispatches to the block-parallel draft forward rather than the
 // autoregressive MTP one. The block size, fused verifier layers and reduced-vocab
 // maps ride in the checkpoint and are read model-free by decode/dflash.ParseConfig —
@@ -25,9 +25,9 @@ import (
 // forward are already method-generic.
 
 func init() {
-	model.RegisterAssistant(model.AssistantSpec{
+	mtp.RegisterAssistant(mtp.AssistantSpec{
 		ModelTypes: []string{"gemma4_dflash_assistant"},
-		Method:     model.MTPDFlash, // the block-diffusion draft forward, not the MTP one
+		Method:     mtp.MTPDFlash, // the block-diffusion draft forward, not the MTP one
 		Parse:      ParseDFlashAssistantConfig,
 	})
 }
@@ -42,37 +42,37 @@ type dflashAssistantConfig struct {
 	TextConfig         Config `json:"text_config"`
 }
 
-// ParseDFlashAssistantConfig derives the neutral model.AssistantConfig for a DFlash
+// ParseDFlashAssistantConfig derives the neutral mtp.AssistantConfig for a DFlash
 // drafter: it resolves the decoder arch (nested-or-flat text_config) and validates
-// the load-bearing dims, leaving the method to be stamped model.MTPDFlash by the
+// the load-bearing dims, leaving the method to be stamped mtp.MTPDFlash by the
 // registered spec. Registered as that spec's config.json parser.
-func ParseDFlashAssistantConfig(data []byte) (model.AssistantConfig, error) {
+func ParseDFlashAssistantConfig(data []byte) (mtp.AssistantConfig, error) {
 	var raw dflashAssistantConfig
 	if r := core.JSONUnmarshal(data, &raw); !r.OK {
-		return model.AssistantConfig{}, core.NewError("gemma4.dflash config parse failed: " + r.Error())
+		return mtp.AssistantConfig{}, core.NewError("gemma4.dflash config parse failed: " + r.Error())
 	}
 	text := raw.TextConfig
 	if text.HiddenSize <= 0 && text.NumHiddenLayers <= 0 {
 		// early exports carry the decoder arch FLAT rather than under text_config.
 		var flat Config
 		if r := core.JSONUnmarshal(data, &flat); !r.OK {
-			return model.AssistantConfig{}, core.NewError("gemma4.dflash config parse failed: " + r.Error())
+			return mtp.AssistantConfig{}, core.NewError("gemma4.dflash config parse failed: " + r.Error())
 		}
 		if flat.HiddenSize > 0 || flat.NumHiddenLayers > 0 {
 			text = flat
 		}
 	}
 	if raw.BackboneHiddenSize <= 0 {
-		return model.AssistantConfig{}, core.NewError("gemma4.dflash config has invalid backbone_hidden_size")
+		return mtp.AssistantConfig{}, core.NewError("gemma4.dflash config has invalid backbone_hidden_size")
 	}
 	if text.HiddenSize <= 0 || text.NumHiddenLayers <= 0 || text.NumAttentionHeads <= 0 || text.HeadDim <= 0 {
-		return model.AssistantConfig{}, core.NewError("gemma4.dflash config has invalid decoder arch (hidden_size / num_hidden_layers / num_attention_heads / head_dim)")
+		return mtp.AssistantConfig{}, core.NewError("gemma4.dflash config has invalid decoder arch (hidden_size / num_hidden_layers / num_attention_heads / head_dim)")
 	}
 	arch, err := text.Arch()
 	if err != nil {
-		return model.AssistantConfig{}, core.E("gemma4.dflash", "derive decoder arch", err)
+		return mtp.AssistantConfig{}, core.E("gemma4.dflash", "derive decoder arch", err)
 	}
-	return model.AssistantConfig{
+	return mtp.AssistantConfig{
 		ModelType:      "gemma4_dflash_assistant",
 		BackboneHidden: raw.BackboneHiddenSize,
 		LayerTypes:     text.LayerTypes,

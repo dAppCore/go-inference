@@ -1,8 +1,11 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-package model
+package mtp
 
-import core "dappco.re/go"
+import (
+	core "dappco.re/go"
+	"dappco.re/go/inference/model"
+)
 
 // ExampleRegisterAssistant shows the reactive assistant registration: a model package's
 // init() claims its config.json model_type(s) AND, when it also exports GGUF, its
@@ -67,7 +70,7 @@ func ExampleParseAssistantConfig() {
 func ExampleAssistantConfig_LayerType() {
 	c := AssistantConfig{
 		LayerTypes: []string{"sliding_attention", ""},
-		Arch:       Arch{Layer: []LayerSpec{{}, {Attention: GlobalAttention}}},
+		Arch:       model.Arch{Layer: []model.LayerSpec{{}, {Attention: model.GlobalAttention}}},
 	}
 	core.Println(c.LayerType(0)) // the declared entry
 	core.Println(c.LayerType(1)) // blank declared entry → falls back to the Arch layer
