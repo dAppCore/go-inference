@@ -7,33 +7,60 @@ package native
 import (
 	"testing"
 
+	core "dappco.re/go"
 	"github.com/tmc/apple/metal"
 )
 
-// kernel_receipts_bench_test.go — per-kernel perf receipts (#393 slice 2). Each benchmark
-// dispatches ONE kernel back-to-back (barriered, so dispatches serialise) in its own
-// command buffer at the REAL shapes the engine dispatches, then reports the GPU span per
-// dispatch and the achieved GB/s. This is the in-tree half of the kernel instrument (the
-// .gputrace capture is the in-situ half): it answers "what does this kernel achieve
-// running alone" without opening Xcode.
-//
-// FIRST RECEIPTS (2026-07-14, M3 Ultra): the fat bf16 head gemv measured 792 GB/s — THAT
-// is the box's real roofline (the ~650 napkin was low). QMV at the fat attention shape:
-// 567. The THIN MoE expert down (704→2816): 178 — a quarter of the fat qmv's rate, the
-// kernel-level confirmation of #392's occupancy suspicion. SDPA vector @ kv 4096: 326.
-// RMSNorm 2816: ~3.8µs/op — the serialisation floor every thin barriered op pays (the
-// round is ~700 of them). K=1 decode streams ~2.2GB/9.3ms ≈ 237 GB/s ≈ 30% of the
-// MEASURED roofline: the gap is thin-dispatch occupancy + the per-op floor, now with
-// numbers attached.
+// kernel_receipts_bench_test.go — per-kernel perf receipts (#393 slice 2): the SIGHT.
+// Every kernel family with a clean encode seam is measured here at the REAL shapes the
+// engine dispatches, with sweeps wherever the interesting answer is a curve (row count,
+// kv depth, matrix thinness, axis width) — so no future fix has to guess which view it
+// needs. Each benchmark dispatches ONE kernel back-to-back (barriered, so dispatches
+// serialise) in its own command buffer and reports the GPU span per dispatch plus the
+// achieved GB/s. This is the in-tree half of the kernel instrument (the .gputrace
+// capture — `task capture:serve` / `task capture:fire` — is the in-situ half).
 //
 //	MLX_METALLIB_PATH=…/mlx.metallib go test -tags metal_runtime -run '^$' \
-//	  -bench BenchmarkKernelReceipt -benchtime 1x ./engine/metal/
+//	  -bench BenchmarkKernelReceipt -benchtime 3x ./engine/metal/
 //
 // GPU time comes from the command buffer's own GPUStart/EndTime (whole-cb span over N
-// serialised dispatches ÷ N) — deliberately NOT MTLCounterSampleBuffer: the cb span needs
-// no counter resolution or CPU/GPU timestamp calibration, and for an isolated single-kernel
-// cb it measures the same thing. Counter sampling stays reserved for per-dispatch splits
-// inside MIXED production rounds (a later slice, likely via the dappcore/apple fork).
+// serialised dispatches ÷ N) — deliberately NOT MTLCounterSampleBuffer: an isolated
+// single-kernel cb measures the same thing with no counter resolution or CPU/GPU
+// timestamp calibration. Counter sampling stays reserved for per-dispatch splits inside
+// MIXED production rounds (a later slice, likely via the dappcore/apple fork).
+//
+// READING THE NUMBERS:
+//   - GB/s vs the DRAM roofline is only meaningful when the working set exceeds the
+//     system-level cache — the 1–1.9GB HEAD rows are the true roofline receipts
+//     (~790–810 GB/s). Small-weight rows (attnQ bf16 at 23MB reads "1412") measure SLC
+//     re-reads across the barriered loop; their value is the CURVE against siblings at
+//     matched sizes, not the absolute GB/s.
+//   - the QMVRows fattening curve reads as gpu-ns/op vs M × the single-row qmv's
+//     gpu-ns/op (weight bytes are shared, so reported GB/s falls with M by construction).
+//
+// FIRST RECEIPTS (2026-07-14, M3 Ultra, -benchtime 3x):
+//   - roofline: bf16 head gemv 262k×2048 = 807 GB/s, 262k×2816 = 789 (the ~650 napkin
+//     was low). K=1 decode streams ~237 GB/s ≈ 30% of it.
+//   - the thinness curve (qmv, 4-bit): attnO 4096→2816 = 651 · attnQ = 567 · dense
+//     2112/2816 ≈ 320–373 · expert down 704→2816 = 174 · expert gate 2816→704 = 109 ·
+//     PLE 256-wide = 50. The 26B's MoE expert dispatches run at ~⅕–¼ of the fat shapes —
+//     #392's occupancy gap, now a curve.
+//   - the fattening curve (lthn_qmv_rows M=2/3/4): 13.4/19.3/26.6µs vs 11.4µs single-row
+//     ⇒ verify-4 ≈ 1.7× the projection throughput of serial rows — the kernel-level
+//     price of MTP, consistent with its +26–38% e2e receipts.
+//   - deep attention: single-pass sdpa_vector @ kv32768 = 1037µs/259 GB/s; the 2-pass
+//     pair = 342µs/785 GB/s — 3× and near-roofline (#365 confirmed at kernel level).
+//   - fusion receipts: qknorm+rope fused 4.5µs vs composed 7.5µs; rms+residual fused
+//     4.7µs vs composed 7.2µs — each fusion buys ≈ one thin-op floor, as theorised.
+//   - the floor table: add/mul 2.1µs · kvq8-store 3.2µs · gelu 3.6µs · rope 3.6µs ·
+//     rmsnorm 4.6–5.2µs · embed row gather 2.4µs. ~700 barriered ops/round at these
+//     floors is the serialisation tax fusion must be priced against.
+//
+// NOT COVERED HERE (no clean standalone seam — measured in-situ via the capture):
+// lthn_gather_qmv + the MoE router/weighted-sum set (closure-bound metas inside
+// moe_block), the q4 LM-head argmax (bespoke no-copy ABI), paged SDPA (page tables),
+// steel attention / flash prompt (prefill-only shapes), and the four dormant
+// megakernels (slice 3 — priced against the thin-op floor this file measures).
 
 // benchKernelReceipt encodes `iters` barriered dispatches via encode into one command
 // buffer, waits, and reports gpu-ns/op and GB/s from bytesPerDispatch.
@@ -75,89 +102,392 @@ func qmvWeightBytes(outDim, inDim, groupSize int) (wq, scales, biases int64) {
 	return wq, groups * 2, groups * 2
 }
 
-// BenchmarkKernelReceipt_QMV_Attn26B: the 4-bit affine qmv at the 26B's fattest dense
-// attention shape (Q projection, dModel 2816 → qDim 4096, gs 64) — the weight-stream
-// workhorse of every decode round.
-func BenchmarkKernelReceipt_QMV_Attn26B(b *testing.B) {
-	const inDim, outDim, gs, bits = 2816, 4096, 64, 4
-	wqB, scB, biB := qmvWeightBytes(outDim, inDim, gs)
-	wq, sc, bi := sharedBuf(int(wqB)), sharedBuf(int(scB)), sharedBuf(int(biB))
-	x, out := sharedBuf(inDim*bf16Size), sharedBuf(outDim*bf16Size)
-	bytes := wqB + scB + biB + int64(inDim+outDim)*bf16Size
-	benchKernelReceipt(b, bytes, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
-		return encQMVBF16(enc, wq, sc, bi, x, out, 0, 0, 0, 0, outDim, inDim, gs, bits)
-	})
+// --- matmul family -----------------------------------------------------------
+
+// BenchmarkKernelReceipt_QMV sweeps the 4-bit affine qmv across every projection shape a
+// decode round dispatches (26B dims; E2B PLE dims) — the THINNESS CURVE. The fat shapes
+// should sit near the roofline; how far the thin expert/PLE shapes fall below it is the
+// occupancy loss #392 chases.
+func BenchmarkKernelReceipt_QMV(b *testing.B) {
+	const gs, bits = 64, 4
+	shapes := []struct {
+		name           string
+		inDim, outDim  int
+	}{
+		{"attnQ_2816x4096", 2816, 4096},
+		{"attnKV_2816x2048", 2816, 2048},
+		{"attnO_4096x2816", 4096, 2816},
+		{"denseGate_2816x2112", 2816, 2112},
+		{"denseDown_2112x2816", 2112, 2816},
+		{"expertGate_2816x704", 2816, 704},
+		{"expertDown_704x2816", 704, 2816},
+		{"pleGate_2048x256", 2048, 256},
+		{"pleProj_256x2048", 256, 2048},
+	}
+	for _, s := range shapes {
+		b.Run(s.name, func(b *testing.B) {
+			wqB, scB, biB := qmvWeightBytes(s.outDim, s.inDim, gs)
+			wq, sc, bi := sharedBuf(int(wqB)), sharedBuf(int(scB)), sharedBuf(int(biB))
+			x, out := sharedBuf(s.inDim*bf16Size), sharedBuf(s.outDim*bf16Size)
+			bytes := wqB + scB + biB + int64(s.inDim+s.outDim)*bf16Size
+			benchKernelReceipt(b, bytes, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
+				return encQMVBF16(enc, wq, sc, bi, x, out, 0, 0, 0, 0, s.outDim, s.inDim, gs, bits)
+			})
+		})
+	}
 }
 
-// BenchmarkKernelReceipt_QMV_ExpertDown26B: the 26B MoE expert's down projection
-// (704 → 2816, gs 64) — the THIN per-expert dispatch that fires k× per MoE layer; the
-// occupancy question for the K=1 gap (#392) is whether a matrix this small can ever
-// stream near the roofline.
-func BenchmarkKernelReceipt_QMV_ExpertDown26B(b *testing.B) {
-	const inDim, outDim, gs, bits = 704, 2816, 64, 4
-	wqB, scB, biB := qmvWeightBytes(outDim, inDim, gs)
-	wq, sc, bi := sharedBuf(int(wqB)), sharedBuf(int(scB)), sharedBuf(int(biB))
-	x, out := sharedBuf(inDim*bf16Size), sharedBuf(outDim*bf16Size)
-	bytes := wqB + scB + biB + int64(inDim+outDim)*bf16Size
-	benchKernelReceipt(b, bytes, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
-		return encQMVBF16(enc, wq, sc, bi, x, out, 0, 0, 0, 0, outDim, inDim, gs, bits)
-	})
+// BenchmarkKernelReceipt_QMVRows sweeps the register-tiled M-row qmv (lthn_qmv_rows) at
+// M=2..4 (its occupancy cap) — the FATTENING CURVE: how much bandwidth each extra
+// speculative/batched row buys on the same weight read. This directly prices MTP rows
+// and the CB fold at the kernel level.
+func BenchmarkKernelReceipt_QMVRows(b *testing.B) {
+	const gs, bits = 64, 4
+	shapes := []struct {
+		name          string
+		inDim, outDim int
+	}{
+		{"attnQ_2816x4096", 2816, 4096},
+		{"expertDown_704x2816", 704, 2816},
+	}
+	for _, s := range shapes {
+		for m := 2; m <= lthnQMVRowsMaxM; m++ {
+			b.Run(core.Sprintf("%s/rows_%d", s.name, m), func(b *testing.B) {
+				requireNativeRuntime(b)
+				pso, ok := lthnQMVRowsPipeline(lthnQMVRowsKey{groupSize: gs, bits: bits, m: m})
+				if !ok {
+					b.Skip("lthn_qmv_rows unavailable (custom metallib not loaded)")
+				}
+				wqB, scB, biB := qmvWeightBytes(s.outDim, s.inDim, gs)
+				wq, sc, bi := sharedBuf(int(wqB)), sharedBuf(int(scB)), sharedBuf(int(biB))
+				in, out := sharedBuf(m*s.inDim*bf16Size), sharedBuf(m*s.outDim*bf16Size)
+				bytes := wqB + scB + biB + int64(m)*int64(s.inDim+s.outDim)*bf16Size
+				benchKernelReceipt(b, bytes, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
+					emitQMVRowsTiled(encSink{enc}, pso, wq, 0, sc, 0, bi, 0, in, 0, out, 0, s.inDim, s.outDim)
+					return nil
+				})
+			})
+		}
+	}
 }
 
-// BenchmarkKernelReceipt_GEMVBF16_HeadE2B: the bf16 LM head at E2B shape (262144-token
-// vocab × 2048 hidden) — the single fattest dispatch of a bf16 decode round (~1.07 GB of
-// weights per token). Its achieved GB/s IS the head's share of the round.
-func BenchmarkKernelReceipt_GEMVBF16_HeadE2B(b *testing.B) {
-	const inDim, outDim = 2048, 262144
-	mat := sharedBuf(outDim * inDim * bf16Size)
-	vec, out := sharedBuf(inDim*bf16Size), sharedBuf(outDim*bf16Size)
-	bytes := int64(outDim)*int64(inDim)*bf16Size + int64(inDim+outDim)*bf16Size
-	benchKernelReceipt(b, bytes, 8, func(enc metal.MTLComputeCommandEncoderObject) error {
-		return encGemvBF16VecAt(enc, mat, vec, out, 0, 0, 0, outDim, inDim)
-	})
+// BenchmarkKernelReceipt_GEMVBF16 measures the bf16 tiled gemv at the head shapes (the
+// fattest single dispatches of a bf16 round) and a projection shape for contrast.
+func BenchmarkKernelReceipt_GEMVBF16(b *testing.B) {
+	shapes := []struct {
+		name          string
+		inDim, outDim int
+	}{
+		{"headE2B_262144x2048", 2048, 262144},
+		{"head26B_262144x2816", 2816, 262144},
+		{"attnQ_2816x4096", 2816, 4096},
+	}
+	for _, s := range shapes {
+		b.Run(s.name, func(b *testing.B) {
+			mat := sharedBuf(s.outDim * s.inDim * bf16Size)
+			vec, out := sharedBuf(s.inDim*bf16Size), sharedBuf(s.outDim*bf16Size)
+			bytes := int64(s.outDim)*int64(s.inDim)*bf16Size + int64(s.inDim+s.outDim)*bf16Size
+			benchKernelReceipt(b, bytes, 8, func(enc metal.MTLComputeCommandEncoderObject) error {
+				return encGemvBF16VecAt(enc, mat, vec, out, 0, 0, 0, s.outDim, s.inDim)
+			})
+		})
+	}
 }
 
-// BenchmarkKernelReceipt_SDPAVector26B: single-token decode attention at the 26B's
-// global-layer shape (16 heads / 8 KV heads / head_dim 256) over a 4096-row cache —
-// the "attn pass" itself. Bytes = the K+V rows the kernel streams.
-func BenchmarkKernelReceipt_SDPAVector26B(b *testing.B) {
-	const nHeads, nKV, hd, n = 16, 8, 256, 4096
+// BenchmarkKernelReceipt_GEMVBF16Batched sweeps the grid-Z batched gemv (one weight read
+// shared by `batch` independent rows — the MTP verify / small-K fold shape) at the fat
+// attention projection: the bf16 fattening curve.
+func BenchmarkKernelReceipt_GEMVBF16Batched(b *testing.B) {
+	const inDim, outDim = 2816, 4096
+	bm, bn, sm, sn, tm, tn := gemvTiles(inDim, outDim)
+	for _, batch := range []int{2, 4, 8} {
+		b.Run(core.Sprintf("attnQ_2816x4096/batch_%d", batch), func(b *testing.B) {
+			requireNativeRuntime(b)
+			pso, err := pipelineFor(gemvKernelName("bfloat16", bm, bn, sm, sn, tm, tn))
+			if err != nil {
+				b.Fatalf("gemv pso: %v", err)
+			}
+			mat := sharedBuf(outDim * inDim * bf16Size)
+			vec := sharedBuf(batch * inDim * bf16Size)
+			out := sharedBuf(batch * outDim * bf16Size)
+			bytes := int64(outDim)*int64(inDim)*bf16Size + int64(batch)*int64(inDim+outDim)*bf16Size
+			benchKernelReceipt(b, bytes, 32, func(enc metal.MTLComputeCommandEncoderObject) error {
+				emitGemvBatchedVecAt(encSink{enc}, pso, mat, 0, vec, 0, out, 0, inDim, outDim, batch, bm, bn, sm, tm)
+				return nil
+			})
+		})
+	}
+}
+
+// --- attention family --------------------------------------------------------
+
+// BenchmarkKernelReceipt_SDPAVector sweeps single-token decode attention over kv depth
+// at the 26B global-layer shape — where the single-pass kernel's one-threadgroup-per-head
+// reduction stops scaling is exactly why the 2-pass exists.
+func BenchmarkKernelReceipt_SDPAVector(b *testing.B) {
+	const nHeads, nKV, hd = 16, 8, 256
+	const kvd = nKV * hd
+	for _, n := range []int{512, 4096, 32768} {
+		b.Run(core.Sprintf("g16h8kv256/kv_%d", n), func(b *testing.B) {
+			requireNativeRuntime(b)
+			pso, err := sdpaVectorPipelineForHeadDim(hd)
+			if err != nil {
+				b.Fatalf("sdpa pso: %v", err)
+			}
+			q := sharedBuf(nHeads * hd * bf16Size)
+			k := sharedBuf(n * kvd * bf16Size)
+			v := sharedBuf(n * kvd * bf16Size)
+			out := sharedBuf(nHeads * hd * bf16Size)
+			nBuf := scalarI32(int32(n))
+			bytes := int64(2*n*kvd)*bf16Size + int64(2*nHeads*hd)*bf16Size
+			benchKernelReceipt(b, bytes, 32, func(enc metal.MTLComputeCommandEncoderObject) error {
+				emitSDPA(encSink{enc}, pso, q, k, v, out, 0, nBuf, nHeads, nKV, n,
+					int64(hd), int64(kvd), int64(hd), int64(kvd), 0.0625)
+				return nil
+			})
+		})
+	}
+}
+
+// BenchmarkKernelReceipt_SDPA2Pass prices the deep-decode pair (pass-1 blocks fan +
+// pass-2 merge) at kv 32768 — comparable directly against SDPAVector/kv_32768 above:
+// the two rows together ARE the 2-pass go/no-go receipt.
+func BenchmarkKernelReceipt_SDPA2Pass(b *testing.B) {
+	const nHeads, nKV, hd, n = 16, 8, 256, 32768
 	const kvd = nKV * hd
 	requireNativeRuntime(b)
-	pso, err := sdpaVectorPipelineForHeadDim(hd)
+	blocks := int(sdpa2PassBlocks(n, nKV))
+	pso1, err := sdpaVector2Pass1Pipeline(core.Sprintf("sdpa_vector_2pass_1_bfloat16_t_%d_%d", hd, hd), int32(blocks))
 	if err != nil {
-		b.Fatalf("sdpa pso: %v", err)
+		b.Fatalf("2pass1 pso: %v", err)
+	}
+	pso2, err := sdpaVector2Pass2Pipeline(core.Sprintf("sdpa_vector_2pass_2_bfloat16_t_%d", hd))
+	if err != nil {
+		b.Fatalf("2pass2 pso: %v", err)
 	}
 	q := sharedBuf(nHeads * hd * bf16Size)
 	k := sharedBuf(n * kvd * bf16Size)
 	v := sharedBuf(n * kvd * bf16Size)
 	out := sharedBuf(nHeads * hd * bf16Size)
+	partials := sharedBuf(nHeads * blocks * hd * 4)
+	sums := sharedBuf(nHeads * blocks * 4)
+	maxs := sharedBuf(nHeads * blocks * 4)
 	nBuf := scalarI32(int32(n))
 	bytes := int64(2*n*kvd)*bf16Size + int64(2*nHeads*hd)*bf16Size
+	b.Run(core.Sprintf("g16h8kv256/kv_%d_blocks_%d", n, blocks), func(b *testing.B) {
+		benchKernelReceipt(b, bytes, 32, func(enc metal.MTLComputeCommandEncoderObject) error {
+			emitSDPA2Pass1NAt(encSink{enc}, pso1, q, 0, k, v, partials, sums, maxs, 0,
+				nBuf, 1, nHeads, nKV, n, blocks, int64(hd), int64(kvd), int64(hd), int64(kvd), 0.0625)
+			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+			emitSDPA2Pass2(encSink{enc}, pso2, partials, sums, maxs, out, 1, nHeads, blocks)
+			return nil
+		})
+	})
+}
+
+// BenchmarkKernelReceipt_QKNormRope prices the fused per-head QK-norm+RoPE against its
+// composed pair (rms-rows then rope) at the 26B Q shape — a live fusion receipt: the
+// difference is exactly one thin-op floor if the fusion theory holds.
+func BenchmarkKernelReceipt_QKNormRope(b *testing.B) {
+	const nHeads, hd = 16, 256
+	requireNativeRuntime(b)
+	x := sharedBuf(nHeads * hd * bf16Size)
+	w := bf16ConstBuffer(hd, 1.0)
+	out := sharedBuf(nHeads * hd * bf16Size)
+	pos := scalarI32(64)
+	dummy := scalarI32(0)
+	bytes := int64(2*nHeads*hd+hd) * bf16Size
+
+	b.Run("fused", func(b *testing.B) {
+		pso, err := qkNormRopePipelineICB()
+		if err != nil {
+			b.Skip("lthn_qknorm_rope unavailable (custom metallib not loaded)")
+		}
+		benchKernelReceipt(b, bytes, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
+			emitQKNormRope(encSink{enc}, pso, x, w, out, 0, 0, 0, pos, nil, dummy,
+				nHeads, hd, hd, 1e-5, 1.0, 13.2877)
+			return nil
+		})
+	})
+	b.Run("composed_rms_then_rope", func(b *testing.B) {
+		rmsPSO, err := pipelineFor("rmsbfloat16")
+		if err != nil {
+			b.Fatalf("rms pso: %v", err)
+		}
+		ropePSO, err := ropePipelineBF16(false)
+		if err != nil {
+			b.Fatalf("rope pso: %v", err)
+		}
+		tg := uint(rmsSimdSize * ((((hd + rmsNReads - 1) / rmsNReads) + rmsSimdSize - 1) / rmsSimdSize))
+		mid := sharedBuf(nHeads * hd * bf16Size)
+		benchKernelReceipt(b, bytes, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
+			emitRMSNormRows(encSink{enc}, rmsPSO, x, w, mid, 0, 0, 0, hd, 1e-5, nHeads, tg)
+			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+			emitRope(encSink{enc}, ropePSO, mid, out, 0, 0, pos, nil, nHeads, hd, hd, 1.0, 13.2877)
+			return nil
+		})
+	})
+}
+
+// --- thin-op family (the serialisation floor table) ---------------------------
+
+// BenchmarkKernelReceipt_RMSNorm sweeps the full-width RMSNorm across the model widths
+// we ship (E2B 2048, 26B 2816, 31B 5376 — the last takes the looped kernel) plus the
+// fused residual variant against its composed pair. gpu-ns/op here IS the floor each of
+// the round's ~700 barriered thin ops pays.
+func BenchmarkKernelReceipt_RMSNorm(b *testing.B) {
+	for _, dModel := range []int{2048, 2816, 5376} {
+		b.Run(core.Sprintf("width_%d", dModel), func(b *testing.B) {
+			requireNativeRuntime(b)
+			pso, err := pipelineFor(rmsKernelBF16(dModel))
+			if err != nil {
+				b.Fatalf("rms pso: %v", err)
+			}
+			in := sharedBuf(dModel * bf16Size)
+			w := bf16ConstBuffer(dModel, 1.0)
+			out := sharedBuf(dModel * bf16Size)
+			tg := rmsThreadgroup(dModel, pso)
+			benchKernelReceipt(b, int64(3*dModel)*bf16Size, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
+				emitRMSNorm(encSink{enc}, pso, in, w, out, 0, dModel, 1e-5, tg)
+				return nil
+			})
+		})
+	}
+	const dModel = 2816
+	b.Run("residual_fused_2816", func(b *testing.B) {
+		requireNativeRuntime(b)
+		pso, err := rmsResidualPipelineICB(dModel)
+		if err != nil {
+			b.Skip("lthn_rmsnorm_residual unavailable (custom metallib not loaded)")
+		}
+		x := sharedBuf(dModel * bf16Size)
+		w := bf16ConstBuffer(dModel, 1.0)
+		res := sharedBuf(dModel * bf16Size)
+		out := sharedBuf(dModel * bf16Size)
+		tg := rmsThreadgroup(dModel, pso)
+		benchKernelReceipt(b, int64(4*dModel)*bf16Size, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
+			emitRMSNormResidual(encSink{enc}, pso, x, w, res, out, 0, dModel, 1e-5, tg)
+			return nil
+		})
+	})
+	b.Run("residual_composed_2816", func(b *testing.B) {
+		requireNativeRuntime(b)
+		rmsPSO, err := pipelineFor(rmsKernelBF16(dModel))
+		if err != nil {
+			b.Fatalf("rms pso: %v", err)
+		}
+		addPSO, err := pipelineFor("vv_Addbfloat16")
+		if err != nil {
+			b.Fatalf("add pso: %v", err)
+		}
+		x := sharedBuf(dModel * bf16Size)
+		w := bf16ConstBuffer(dModel, 1.0)
+		res := sharedBuf(dModel * bf16Size)
+		mid := sharedBuf(dModel * bf16Size)
+		out := sharedBuf(dModel * bf16Size)
+		tg := rmsThreadgroup(dModel, rmsPSO)
+		benchKernelReceipt(b, int64(4*dModel)*bf16Size, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
+			emitRMSNorm(encSink{enc}, rmsPSO, x, w, mid, 0, dModel, 1e-5, tg)
+			memoryBarrierObject(enc, metal.MTLBarrierScopeBuffers)
+			emitBinary(encSink{enc}, addPSO, res, 0, mid, 0, out, 0, dModel)
+			return nil
+		})
+	})
+}
+
+// BenchmarkKernelReceipt_ThinOps is the floor table for the round's small elementwise
+// and rope ops — each row's gpu-ns/op is pure launch+barrier tax at these sizes.
+func BenchmarkKernelReceipt_ThinOps(b *testing.B) {
+	const dModel = 2816
+	const nHeads, hd = 16, 256
+	b.Run("add_2816", func(b *testing.B) {
+		requireNativeRuntime(b)
+		pso, err := pipelineFor("vv_Addbfloat16")
+		if err != nil {
+			b.Fatalf("add pso: %v", err)
+		}
+		x, y, out := sharedBuf(dModel*bf16Size), sharedBuf(dModel*bf16Size), sharedBuf(dModel*bf16Size)
+		benchKernelReceipt(b, int64(3*dModel)*bf16Size, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
+			emitBinary(encSink{enc}, pso, x, 0, y, 0, out, 0, dModel)
+			return nil
+		})
+	})
+	b.Run("mul_2816", func(b *testing.B) {
+		requireNativeRuntime(b)
+		pso, err := pipelineFor("vv_Multiplybfloat16")
+		if err != nil {
+			b.Fatalf("mul pso: %v", err)
+		}
+		x, y, out := sharedBuf(dModel*bf16Size), sharedBuf(dModel*bf16Size), sharedBuf(dModel*bf16Size)
+		benchKernelReceipt(b, int64(3*dModel)*bf16Size, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
+			emitBinary(encSink{enc}, pso, x, 0, y, 0, out, 0, dModel)
+			return nil
+		})
+	})
+	b.Run("rope_16x256", func(b *testing.B) {
+		requireNativeRuntime(b)
+		pso, err := ropePipelineBF16(false)
+		if err != nil {
+			b.Fatalf("rope pso: %v", err)
+		}
+		x, out := sharedBuf(nHeads*hd*bf16Size), sharedBuf(nHeads*hd*bf16Size)
+		pos := scalarI32(64)
+		benchKernelReceipt(b, int64(2*nHeads*hd)*bf16Size, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
+			emitRope(encSink{enc}, pso, x, out, 0, 0, pos, nil, nHeads, hd, hd, 1.0, 13.2877)
+			return nil
+		})
+	})
+	b.Run("gelu_gate_mul_2112", func(b *testing.B) {
+		requireNativeRuntime(b)
+		pso, err := geluPipelineICB()
+		if err != nil {
+			b.Skip("lthn_gelu_gate_mul unavailable (custom metallib not loaded)")
+		}
+		const dFF = 2112
+		gate, up, out := sharedBuf(dFF*bf16Size), sharedBuf(dFF*bf16Size), sharedBuf(dFF*bf16Size)
+		benchKernelReceipt(b, int64(3*dFF)*bf16Size, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
+			emitBinary(encSink{enc}, pso, gate, 0, up, 0, out, 0, dFF)
+			return nil
+		})
+	})
+}
+
+// --- cache + embedding family --------------------------------------------------
+
+// BenchmarkKernelReceipt_KVQ8Store prices the q8 owner layers' per-token quantise-store
+// (one K or V row → int8 cache row + f32 group scales) at the 26B kv width.
+func BenchmarkKernelReceipt_KVQ8Store(b *testing.B) {
+	const kvd = 2048
+	requireNativeRuntime(b)
+	pso, err := kvQ8StorePipeline()
+	if err != nil {
+		b.Skip("kv q8 store kernel unavailable")
+	}
+	row := sharedBuf(kvd * bf16Size)
+	out := sharedBuf(kvd)
+	scales := sharedBuf(kvd / kvQ8GroupSize * 4)
+	bytes := int64(kvd)*bf16Size + int64(kvd) + int64(kvd/kvQ8GroupSize*4)
 	benchKernelReceipt(b, bytes, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
-		emitSDPA(encSink{enc}, pso, q, k, v, out, 0, nBuf, nHeads, nKV, n,
-			int64(hd), int64(kvd), int64(hd), int64(kvd), 0.0625)
+		emitKVQ8Store(encSink{enc}, pso, row, out, 0, scales, 0, kvd)
 		return nil
 	})
 }
 
-// BenchmarkKernelReceipt_RMSNorm26B: the full-dModel RMSNorm at 26B width (2816) — a
-// THIN op. Its gpu-ns/op is the launch/serialisation floor every one of the round's
-// ~700 barriered ops pays; the GB/s here is expected to be tiny and that is the point.
-func BenchmarkKernelReceipt_RMSNorm26B(b *testing.B) {
-	const dModel = 2816
+// BenchmarkKernelReceipt_EmbedGatherRow prices the single-token bf16 embedding row
+// gather at the 262k-vocab table — the first op of every decode round.
+func BenchmarkKernelReceipt_EmbedGatherRow(b *testing.B) {
+	const vocab, dModel = 262144, 2048
 	requireNativeRuntime(b)
-	pso, err := pipelineFor(rmsKernelBF16(dModel))
+	pso, err := embedGatherPipeline()
 	if err != nil {
-		b.Fatalf("rms pso: %v", err)
+		b.Skip("embed gather kernel unavailable")
 	}
-	in := sharedBuf(dModel * bf16Size)
-	w := bf16ConstBuffer(dModel, 1.0)
+	table := sharedBuf(vocab * dModel * bf16Size)
+	token := scalarI32(12345)
 	out := sharedBuf(dModel * bf16Size)
-	tg := rmsThreadgroup(dModel, pso)
-	bytes := int64(3*dModel) * bf16Size
+	bytes := int64(2*dModel) * bf16Size // one row read + one row written
 	benchKernelReceipt(b, bytes, 64, func(enc metal.MTLComputeCommandEncoderObject) error {
-		emitRMSNorm(encSink{enc}, pso, in, w, out, 0, dModel, 1e-5, tg)
+		emitEmbedGatherRowBF16(encSink{enc}, pso, token, table, out, 0, 0, dModel, 1.0)
 		return nil
 	})
 }

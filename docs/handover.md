@@ -1,3 +1,35 @@
+# NEXT WAKE (2026-07-17 — #393 slice 2 FULL: 37 receipts — every curve the fixes will need)
+
+## 2026-07-17 (#393 slice 2 expanded — "add all the measurements now")
+
+- SNIDER'S DIRECTIVE: "give me sight and i can fix anything — add all the
+  measurements now, so we don't guess what views we need." The harness
+  went table-driven: 37 receipts across every kernel family with a clean
+  encode seam, sweeps wherever the answer is a curve.
+- COVERAGE: qmv thinness sweep (9 shapes, attn/dense/expert/PLE) ·
+  qmv_rows fattening M=2..4 × 2 shapes · bf16 gemv heads + proj · batched
+  gemv batch=2/4/8 · sdpa_vector kv=512/4K/32K · the 2-pass pair @32K ·
+  qknorm_rope fused-vs-composed · rmsnorm widths 2048/2816/5376 +
+  residual fused-vs-composed · thin-op floor table (add/mul/rope/gelu) ·
+  kvq8 store · embed row gather. NOT covered (no standalone seam,
+  measured in-situ via capture): gather_qmv + MoE router set, q4 head
+  argmax, paged SDPA, steel attn/flash prompt, the megakernels (slice 3).
+- HEADLINE RECEIPTS:
+  * roofline 807 GB/s (1GB+ head gemvs — the only honest DRAM rows;
+    small-weight rows measure SLC, caveat documented in the header).
+  * thinness curve: attnO 651 → attnQ 567 → dense ~320-373 → expert down
+    174 → expert gate 109 → PLE 50. The MoE dispatches run at ⅕-¼ rate.
+  * fattening curve: qmv_rows M=2/3/4 = 13.4/19.3/26.6µs vs 11.4 single
+    ⇒ verify-4 ≈ 1.7× projection throughput — MTP's kernel-level price.
+  * 2-pass @ kv32K: 342µs/785 GB/s vs single-pass 1037µs/259 — 3×,
+    near-roofline (#365 confirmed).
+  * fusion = one thin-op floor each (qknorm_rope 4.5 vs 7.5µs;
+    rms_residual 4.7 vs 7.2µs); floor table 2.1-5.2µs/op.
+- THE #392 LEVER RANKING, NOW NUMBER-BACKED: MTP rows (1.7× on
+  projections) → expert-dispatch overlap (8 × 109-174 GB/s independent
+  streams under a 790 roofline) → fusion (price = floors removed × op
+  count; the megakernel question inherits these numbers).
+
 # NEXT WAKE (2026-07-17 — #393 slice 2: per-kernel receipts — the roofline is 792, the gap has numbers)
 
 ## 2026-07-17 (#393 slice 2 — the in-tree kernel receipts)
