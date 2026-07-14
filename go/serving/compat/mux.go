@@ -578,10 +578,14 @@ func forEachOpenAIResponseToken(ctx context.Context, model inference.TextModel, 
 }
 
 func forEachCompatToken(ctx context.Context, model inference.TextModel, requestID, modelName, prompt string, messages []inference.Message, opts []inference.GenerateOption, yield func(inference.Token) bool) error {
-	// inference.As walks past a welfare/policy/profile decorator to the
-	// scheduler-capable base model — a direct assertion against model would
-	// silently drop back to plain Chat/Generate for a wrapped scheduled model
-	// (the capability-stripping bug class; see inference.WrappedModel).
+	// inference.As finds the scheduler capability through the resolver's decorator
+	// stack — a direct assertion against model would silently drop back to plain
+	// Chat/Generate for a wrapped scheduled model (the capability-stripping bug
+	// class; see inference.WrappedModel). The welfare and policy guards implement
+	// Schedule themselves, so As stops AT them (their guard runs at the Schedule
+	// boundary — welfareSchedulerModel, policySchedulerModel); a decorator that
+	// does not re-expose Schedule (e.g. profile) is unwrapped past to the
+	// scheduler-capable base model beneath.
 	if scheduler, ok := inference.As[inference.SchedulerModel](model); ok {
 		cfg := inference.ApplyGenerateOpts(opts)
 		handle, stream, err := scheduler.Schedule(ctx, inference.ScheduledRequest{
