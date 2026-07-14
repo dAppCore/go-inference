@@ -11,6 +11,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/engine"
+	rocmprofile "dappco.re/go/inference/engine/hip/profile"
 	"dappco.re/go/inference/kv"
 	sharedmodel "dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/composed"
@@ -115,11 +116,14 @@ func TestHIPComposedEngineSession_RangeHonorsTrustedPrefix_Ugly(t *testing.T) {
 
 func TestHIPComposedTextModel_DeclaresQwenChatML_Good(t *testing.T) {
 	source := &hipComposedTextModel{model: hipComposedTestTokenModel(1), modelType: "qwen3_6", numLayers: 1}
+	var memory engine.MemoryReporter = source
 	template, ok := source.DeclaredChatTemplate()
 	core.RequireTrue(t, ok)
 	core.AssertEqual(t, "<|im_start|>", template.Open)
 	core.AssertEqual(t, "assistant", template.AssistantRole)
 	core.AssertEqual(t, []string{"<|im_end|>"}, template.Stops)
+	core.AssertEqual(t, uint64(0), memory.ActiveMemoryBytes())
+	core.AssertEqual(t, uint64(0), memory.PeakMemoryBytes())
 }
 
 type hipComposedRouteRuntime struct{ calls int }
@@ -189,4 +193,8 @@ func TestReactiveSequenceMixerReport_ComposedRunnerLinked_Good(t *testing.T) {
 	report := baseReactiveSequenceMixerReport("/models/qwen", nil)
 	core.AssertTrue(t, report.RunnerReady)
 	core.AssertEqual(t, "portable_composed_session_model", report.Labels["sequence_mixer_runner_status"])
+	core.AssertEqual(t,
+		[]string{"portable composed incremental runner is linked; projection hooks remain available for HIP++ acceleration"},
+		rocmprofile.ArchitectureProfileNotes("qwen3_6"),
+	)
 }

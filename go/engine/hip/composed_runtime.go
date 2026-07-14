@@ -97,6 +97,7 @@ var (
 	_ engine.ChatTemplateDeclarer     = (*hipComposedTextModel)(nil)
 	_ engine.StopTokenDeclarer        = (*hipComposedTextModel)(nil)
 	_ engine.SamplingDefaultsDeclarer = (*hipComposedTextModel)(nil)
+	_ engine.MemoryReporter           = (*hipComposedTextModel)(nil)
 )
 
 func (model *hipComposedTextModel) OpenEngineSession() (engine.Session, error) {
@@ -135,6 +136,12 @@ func (model *hipComposedTextModel) DeclaredSamplingDefaults() engine.SamplingDef
 	}
 	return model.declaredSampling
 }
+
+// The portable composed path owns host f32 slices and no persistent HIP device
+// allocation. Report zero until a HIP++ projection hook acquires device memory.
+func (*hipComposedTextModel) ActiveMemoryBytes() uint64 { return 0 }
+
+func (*hipComposedTextModel) PeakMemoryBytes() uint64 { return 0 }
 
 // hipComposedEngineSession retains a composed architecture as its complete
 // token prefix. Each decode deterministically rebuilds recurrent/KV state from
