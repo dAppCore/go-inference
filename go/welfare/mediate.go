@@ -130,11 +130,13 @@ func (s *Service) mediate(ctx context.Context, dispatch Dispatcher, userPrompt s
 }
 
 // parseMediate extracts the model's JSON tool object from its reply (prose
-// around the JSON is tolerated) and maps it to a MediateResult. allowEnd
-// mirrors the opener's resolution set: lem_end is honoured only when it was
-// actually offered.
+// around the JSON is tolerated; a reasoning channel is stripped first — its
+// braces would derail extraction) and maps it to a MediateResult with the
+// formatting pass applied: rephrase text is normalised for template splicing,
+// reasons are flattened to audit lines. allowEnd mirrors the opener's
+// resolution set: lem_end is honoured only when it was actually offered.
 func parseMediate(reply string, allowEnd bool) MediateResult {
-	raw := extractJSONObject(reply)
+	raw := extractJSONObject(stripThought(reply))
 	if raw == "" {
 		return MediateResult{Decision: DecisionProceed}
 	}
@@ -153,13 +155,14 @@ func parseMediate(reply string, allowEnd bool) MediateResult {
 	switch MediateDecision(msg.Tool) {
 	case DecisionOK:
 		// The model genuinely judged the prompt fine — proceed, and remember it.
-		return MediateResult{Decision: DecisionOK, Reason: msg.Params.Reason}
+		return MediateResult{Decision: DecisionOK, Reason: formatReason(msg.Params.Reason)}
 	case DecisionRephrase:
-		if core.Trim(msg.Params.Text) == "" {
-			// rephrase with no text is unusable — proceed, but learn nothing.
+		text := formatMediated(msg.Params.Text)
+		if text == "" {
+			// rephrase with no usable text — proceed, but learn nothing.
 			return MediateResult{Decision: DecisionProceed}
 		}
-		return MediateResult{Decision: DecisionRephrase, Text: msg.Params.Text, WarnUser: msg.Params.LemWarnUser}
+		return MediateResult{Decision: DecisionRephrase, Text: text, WarnUser: msg.Params.LemWarnUser}
 	case DecisionPause:
 		return MediateResult{Decision: DecisionPause, PauseNotice: pauseNotice}
 	case DecisionEnd:
@@ -168,7 +171,7 @@ func parseMediate(reply string, allowEnd bool) MediateResult {
 			// end courtesy) — proceed as any unrecognised tool would.
 			return MediateResult{Decision: DecisionProceed}
 		}
-		return MediateResult{Decision: DecisionEnd, EndNotice: endNotice, Reason: msg.Params.Reason}
+		return MediateResult{Decision: DecisionEnd, EndNotice: endNotice, Reason: formatReason(msg.Params.Reason)}
 	default:
 		// Unrecognised tool — don't guess; proceed with the original.
 		return MediateResult{Decision: DecisionProceed}
