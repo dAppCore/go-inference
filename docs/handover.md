@@ -39,6 +39,24 @@
   LIVE RECEIPT: TestAppLiveServiceAPI loads e2b through the Update loop,
   starts the API from the tab, real completion over HTTP ("OK",
   finish=stop, counter=1), clean stop. cli/ + cli/tui/ READMEs added.
+- SDK EXAMPLES SHIPPED (examples/sdk/{go,python,typescript,rust}): all four
+  ran LIVE against one e2b serve through GENERATED typed clients — the spec
+  feature's purpose proven. The sidequest found + fixed TWO spec defects at
+  the source: (1) compat routes documented the {success,error,meta} envelope
+  but return the raw OpenAI/Anthropic objects — fixed via NEW api-module
+  seam RouteDescription.ResponseRaw (dappco.re/go/api go/v0.19.0, commit
+  3b426c0; go-inference bumped) + honest chat/completions/messages/models
+  schemas incl. the thought field in driver Describe(); (2) multi-tag routes
+  (ai+scoring / ai+embeddings) generate DUPLICATE Go types — single-tagged
+  in serving/api. sdk-config/go.yaml got real git coords (module
+  dappco.re/go/inference/lemsdk). GOTCHAS BANKED: the example go module
+  needs GOWORK=off (depends on gitignored generated output, can't join
+  go.work); npm's script gate blocks the generated TS package's prepare —
+  build it explicitly (READMEs document both).
+- CLI FLAGS: every help surface now presents GNU --long only (0af9705) —
+  shared printFlagBlock printer, spec/quant -o renamed --output,
+  TestHelpPresentsLongFlagsOnly pins all 15 surfaces (caught pack extract's
+  "-overwrite" prose on its first run).
 - OPEN MANTIS: #1843 (Metrics memory counters), #1844 (continuity decode
   skips applyDeclaredSampling). Both small, both example-found.
 

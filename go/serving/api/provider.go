@@ -64,7 +64,7 @@ func (p *AIProvider) Describe() []coreapi.RouteDescription {
 			Path:        "/embeddings/behavioural",
 			Summary:     "Create a behavioural embedding",
 			Description: "Accepts text and returns the grammar imprint as a fixed-order behavioural fingerprint vector (the lem-scorer imprint dimensions). No model required.",
-			Tags:        []string{"ai", "embeddings"},
+			Tags:        []string{"embeddings"},
 			RequestBody: map[string]any{
 				"type":     "object",
 				"required": []string{"text"},
@@ -79,7 +79,7 @@ func (p *AIProvider) Describe() []coreapi.RouteDescription {
 			Path:        "/score/content",
 			Summary:     "Score content",
 			Description: "Runs the in-process lem-scorer (sycophancy, LEK, hostility, grammar imprint). Send text for a single-text ScoreResult, or prompt+response for a DiffResult with cross-text differential and authority signal. No model required.",
-			Tags:        []string{"ai", "scoring"},
+			Tags:        []string{"scoring"},
 			RequestBody: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -95,7 +95,7 @@ func (p *AIProvider) Describe() []coreapi.RouteDescription {
 			Path:        "/score/imprint",
 			Summary:     "Score imprint",
 			Description: "Accepts text and returns the 14-dimensional grammar+phonetic imprint (imprint is null when the text produces no tokens). No model required.",
-			Tags:        []string{"ai", "scoring"},
+			Tags:        []string{"scoring"},
 			RequestBody: map[string]any{
 				"type":     "object",
 				"required": []string{"text"},
@@ -113,7 +113,7 @@ func (p *AIProvider) Describe() []coreapi.RouteDescription {
 			Path:        "/score/session",
 			Summary:     "Score session history",
 			Description: "Runs the lem-scorer after the fact over a conversation's turns: each assistant turn is scored against the preceding user turn (the same pairing the live pipeline applies). Stateless — the caller supplies the turns loaded from session history. No model required.",
-			Tags:        []string{"ai", "scoring"},
+			Tags:        []string{"scoring"},
 			RequestBody: map[string]any{
 				"type":     "object",
 				"required": []string{"turns"},
@@ -140,7 +140,7 @@ func (p *AIProvider) Describe() []coreapi.RouteDescription {
 			Path:        "/score/:id",
 			Summary:     "Get score result",
 			Description: "Retrieves a stored score result once persistence for the the inference stack provider surface is selected.",
-			Tags:        []string{"ai", "scoring"},
+			Tags:        []string{"scoring"},
 			Response:    notImplementedSchema(),
 		},
 		{

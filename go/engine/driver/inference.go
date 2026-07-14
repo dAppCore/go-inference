@@ -81,17 +81,129 @@ func (p *InferenceProvider) RegisterRoutes(rg *gin.RouterGroup) {
 }
 
 // Describe implements coreprovider.Describable so the gated inference routes
-// appear in the OpenAPI document when core/api mounts the provider. Request
-// bodies are forwarded verbatim to the active driver, so the schemas describe
-// the OpenAI-compatible surface the driver expects.
+// appear in the OpenAPI document when core/api mounts the provider. These
+// routes speak the OpenAI/Anthropic wire formats verbatim — request bodies are
+// forwarded to the active driver and its response streams back untouched — so
+// every description declares ResponseRaw with the real compat shapes (a typed
+// SDK client deserialises exactly what arrives; the house envelope never
+// appears on this surface).
 func (p *InferenceProvider) Describe() []coreapi.RouteDescription {
 	chatBody := map[string]any{
 		"type":     "object",
 		"required": []string{"model", "messages"},
 		"properties": map[string]any{
-			"model":    map[string]any{"type": "string"},
-			"messages": map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
-			"stream":   map[string]any{"type": "boolean"},
+			"model": map[string]any{"type": "string", "description": "cosmetic on a single-model serve — the loaded model answers every name"},
+			"messages": map[string]any{"type": "array", "items": map[string]any{
+				"type":     "object",
+				"required": []string{"role"},
+				"properties": map[string]any{
+					"role":    map[string]any{"type": "string"},
+					"content": map[string]any{"description": "string, or an array of typed content parts (text / image_url data: URLs)"},
+				},
+			}},
+			"max_tokens":           map[string]any{"type": "integer", "description": "per-reply token budget — a thinking model spends from it"},
+			"temperature":          map[string]any{"type": "number"},
+			"top_p":                map[string]any{"type": "number"},
+			"stream":               map[string]any{"type": "boolean"},
+			"chat_template_kwargs": map[string]any{"type": "object", "description": "vendor template kwargs, e.g. {\"enable_thinking\": false}"},
+		},
+	}
+	usageSchema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"prompt_tokens":     map[string]any{"type": "integer"},
+			"completion_tokens": map[string]any{"type": "integer"},
+			"total_tokens":      map[string]any{"type": "integer"},
+		},
+	}
+	chatResponse := map[string]any{
+		"type":     "object",
+		"required": []string{"id", "object", "choices"},
+		"properties": map[string]any{
+			"id":      map[string]any{"type": "string"},
+			"object":  map[string]any{"type": "string"},
+			"created": map[string]any{"type": "integer"},
+			"model":   map[string]any{"type": "string"},
+			"choices": map[string]any{"type": "array", "items": map[string]any{
+				"type":     "object",
+				"required": []string{"index", "message"},
+				"properties": map[string]any{
+					"index": map[string]any{"type": "integer"},
+					"message": map[string]any{
+						"type":     "object",
+						"required": []string{"role"},
+						"properties": map[string]any{
+							"role":    map[string]any{"type": "string"},
+							"content": map[string]any{"type": "string"},
+							"thought": map[string]any{"type": "string", "description": "the reasoning channel, split from content (thinking models)"},
+						},
+					},
+					"finish_reason": map[string]any{"type": "string"},
+				},
+			}},
+			"usage": usageSchema,
+		},
+	}
+	completionResponse := map[string]any{
+		"type":     "object",
+		"required": []string{"id", "object", "choices"},
+		"properties": map[string]any{
+			"id":      map[string]any{"type": "string"},
+			"object":  map[string]any{"type": "string"},
+			"created": map[string]any{"type": "integer"},
+			"model":   map[string]any{"type": "string"},
+			"choices": map[string]any{"type": "array", "items": map[string]any{
+				"type":     "object",
+				"required": []string{"index"},
+				"properties": map[string]any{
+					"index":         map[string]any{"type": "integer"},
+					"text":          map[string]any{"type": "string"},
+					"finish_reason": map[string]any{"type": "string"},
+				},
+			}},
+			"usage": usageSchema,
+		},
+	}
+	messagesResponse := map[string]any{
+		"type":     "object",
+		"required": []string{"id", "type", "role", "content"},
+		"properties": map[string]any{
+			"id":   map[string]any{"type": "string"},
+			"type": map[string]any{"type": "string"},
+			"role": map[string]any{"type": "string"},
+			"content": map[string]any{"type": "array", "items": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"type": map[string]any{"type": "string"},
+					"text": map[string]any{"type": "string"},
+				},
+			}},
+			"model":       map[string]any{"type": "string"},
+			"stop_reason": map[string]any{"type": "string"},
+			"usage": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"input_tokens":  map[string]any{"type": "integer"},
+					"output_tokens": map[string]any{"type": "integer"},
+				},
+			},
+		},
+	}
+	modelsResponse := map[string]any{
+		"type":     "object",
+		"required": []string{"object", "data"},
+		"properties": map[string]any{
+			"object": map[string]any{"type": "string"},
+			"data": map[string]any{"type": "array", "items": map[string]any{
+				"type":     "object",
+				"required": []string{"id"},
+				"properties": map[string]any{
+					"id":       map[string]any{"type": "string"},
+					"object":   map[string]any{"type": "string"},
+					"created":  map[string]any{"type": "integer"},
+					"owned_by": map[string]any{"type": "string"},
+				},
+			}},
 		},
 	}
 	return []coreapi.RouteDescription{
@@ -99,9 +211,11 @@ func (p *InferenceProvider) Describe() []coreapi.RouteDescription {
 			Method:      http.MethodPost,
 			Path:        "/chat/completions",
 			Summary:     "Create a chat completion",
-			Description: "Capacity-gated OpenAI-compatible chat completion, proxied to the active driver. Streams when stream is true.",
+			Description: "Capacity-gated OpenAI-compatible chat completion, proxied to the active driver. Streams when stream is true (SSE chunks; the documented schema is the non-streaming body).",
 			Tags:        []string{"inference"},
 			RequestBody: chatBody,
+			Response:    chatResponse,
+			ResponseRaw: true,
 		},
 		{
 			Method:      http.MethodPost,
@@ -110,14 +224,18 @@ func (p *InferenceProvider) Describe() []coreapi.RouteDescription {
 			Description: "Capacity-gated completion, proxied to the active driver.",
 			Tags:        []string{"inference"},
 			RequestBody: chatBody,
+			Response:    completionResponse,
+			ResponseRaw: true,
 		},
 		{
 			Method:      http.MethodPost,
 			Path:        "/messages",
 			Summary:     "Create a messages completion",
-			Description: "Capacity-gated messages-style completion, proxied to the active driver.",
+			Description: "Capacity-gated Anthropic-style messages completion, proxied to the active driver.",
 			Tags:        []string{"inference"},
 			RequestBody: chatBody,
+			Response:    messagesResponse,
+			ResponseRaw: true,
 		},
 		{
 			Method:      http.MethodGet,
@@ -125,6 +243,8 @@ func (p *InferenceProvider) Describe() []coreapi.RouteDescription {
 			Summary:     "List the active driver's loaded models",
 			Description: "Ungated passthrough of the active driver's loaded-model list (what the desktop polls for its model picker).",
 			Tags:        []string{"inference"},
+			Response:    modelsResponse,
+			ResponseRaw: true,
 		},
 	}
 }

@@ -4,7 +4,7 @@ go 1.26.2
 
 require (
 	dappco.re/go v0.11.0
-	dappco.re/go/api v0.18.0
+	dappco.re/go/api v0.19.0
 	dappco.re/go/cgo v0.11.2
 	dappco.re/go/cli v0.11.1
 	dappco.re/go/i18n v0.12.1
