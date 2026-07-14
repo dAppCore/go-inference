@@ -1,0 +1,10 @@
+{
+  "name": "lem-sdk-example",
+  "private": true,
+  "scripts": {
+    "start": "node main.js"
+  },
+  "dependencies": {
+    "lem-sdk-js": "file:../../../build/sdk/javascript"
+  }
+}
