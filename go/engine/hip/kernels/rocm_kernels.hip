@@ -194,6 +194,7 @@ constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_ROWS_PER_BLOCK = 8;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_THREADS_PER_ROW = ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE / ROCM_GGUF_Q4_0_PROJECTION_ROWS_PER_BLOCK;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_ROWS_PER_BLOCK = 16;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW = ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE / ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_ROWS_PER_BLOCK;
+constexpr uint32_t ROCM_GGUF_Q4_K_SELECTED_EXPERT_GATE_UP_SPLIT_ROWS_PER_BLOCK = 8;
 constexpr uint32_t ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_ROWS_PER_BLOCK = 2;
 constexpr uint32_t ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_EXPERTS = 8;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERTS_LAUNCH_ARGS_VERSION = 1;
@@ -6259,6 +6260,44 @@ extern "C" __global__ void rocm_gguf_q4_k_selected_expert_gate_up_pair16(const u
 	const float up_sum = rocm_gguf_q4_0_projection_row_pair16_reduce(up_low, up_high);
 	if (col_lane == 0u && selected_row < selected_rows) {
 		activation[selected_row] = rocm_gelu_tanh_value(gate_sum) * up_sum;
+	}
+}
+
+extern "C" __global__ void rocm_gguf_q4_k_selected_expert_gate_up_split_pair16(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_gguf_q4_0_selected_experts_launch_args &args = *reinterpret_cast<const rocm_gguf_q4_0_selected_experts_launch_args *>(packet);
+	if (!rocm_valid_gguf_q4_0_selected_experts_args(args) ||
+		args.gate_up_format != ROCM_GGUF_EXPERT_FORMAT_Q4_K ||
+		blockDim.x != ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+	const uint32_t col_lane = threadIdx.x & (ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW - 1u);
+	const uint32_t group = threadIdx.x / ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW;
+	const uint32_t row_lane = group >> 1u;
+	const uint32_t projection = group & 1u;
+	const uint32_t selected_row = blockIdx.x * ROCM_GGUF_Q4_K_SELECTED_EXPERT_GATE_UP_SPLIT_ROWS_PER_BLOCK + row_lane;
+	const uint32_t selected_rows = args.top_k * args.expert_ff;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *activation = reinterpret_cast<float *>(static_cast<uintptr_t>(args.activation_pointer));
+	float low_sum = 0.0f;
+	float high_sum = 0.0f;
+	if (selected_row < selected_rows) {
+		const uint32_t expert = selected_row / args.expert_ff;
+		const uint32_t row = selected_row - expert * args.expert_ff;
+		const unsigned char *weights = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(args.gate_up_pointers[expert]));
+		rocm_gguf_q4_k_projection_row_pair16_sums(input, weights, projection * args.expert_ff + row, args.hidden_size, col_lane, low_sum, high_sum);
+	}
+	const float projection_sum = rocm_gguf_q4_0_projection_row_pair16_reduce(low_sum, high_sum);
+	__shared__ float projection_sums[ROCM_GGUF_Q4_K_SELECTED_EXPERT_GATE_UP_SPLIT_ROWS_PER_BLOCK * 2u];
+	if (col_lane == 0u) {
+		projection_sums[group] = projection_sum;
+	}
+	__syncthreads();
+	if (col_lane == 0u && projection == 0u && selected_row < selected_rows) {
+		activation[selected_row] = rocm_gelu_tanh_value(projection_sums[group]) * projection_sums[group + 1u];
 	}
 }
 

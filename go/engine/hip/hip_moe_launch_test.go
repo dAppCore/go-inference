@@ -249,9 +249,9 @@ func TestHIPGGUFMixedSelectedExpertsLaunch_Good_Pair16ProductionShape(t *testing
 
 			core.RequireNoError(t, hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(context.Background(), driver, &input, entries, routeWeights, hidden, expertFF, &activation, &output))
 			core.AssertEqual(t, 2, len(driver.launches))
-			core.AssertEqual(t, "rocm_gguf_q4_k_selected_expert_gate_up_pair16", driver.launches[0].Name)
+			core.AssertEqual(t, "rocm_gguf_q4_k_selected_expert_gate_up_split_pair16", driver.launches[0].Name)
 			core.AssertEqual(t, test.downKernel, driver.launches[1].Name)
-			core.AssertEqual(t, uint32(352), driver.launches[0].GridX)
+			core.AssertEqual(t, uint32(704), driver.launches[0].GridX)
 			core.AssertEqual(t, test.downGrid, driver.launches[1].GridX)
 			core.AssertEqual(t, uint32(256), driver.launches[0].BlockX)
 			core.AssertEqual(t, uint32(256), driver.launches[1].BlockX)

@@ -455,24 +455,29 @@ func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {
 	core.RequireNoError(t, err)
 	defer output.Close()
 	routeWeights := []float32{0.25, 0.2, 0.15, 0.12, 0.1, 0.08, 0.06, 0.04}
-	runMixed := func(pair16, expert8 string) []float32 {
+	runMixed := func(pair16, expert8, gateUpSplit string) []float32 {
 		t.Helper()
 		t.Setenv(hipGemma4SelectedExpertPair16Env, pair16)
 		t.Setenv(hipGemma4SelectedExpertDownExpert8Env, expert8)
+		t.Setenv(hipGemma4SelectedExpertGateUpSplitEnv, gateUpSplit)
 		core.RequireNoError(t, hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(context.Background(), runtime.(*hipRuntime).driver, inputBuffer, entries, routeWeights, hidden, expertFF, activation, output))
 		got, readErr := hipReadFloat32DeviceOutput(output, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed output", hidden)
 		core.RequireNoError(t, readErr)
 		return got
 	}
-	gotBaseline := runMixed("0", "0")
-	gotPair16 := runMixed("1", "0")
-	got := runMixed("1", "1")
+	gotBaseline := runMixed("0", "0", "0")
+	gotPair16 := runMixed("1", "0", "0")
+	gotExpert8 := runMixed("1", "1", "0")
+	got := runMixed("1", "1", "1")
 	for index := range gotBaseline {
 		if math.Float32bits(gotBaseline[index]) != math.Float32bits(gotPair16[index]) {
 			t.Fatalf("mixed Q5_1 pair16 output[%d] = %08x, baseline = %08x", index, math.Float32bits(gotPair16[index]), math.Float32bits(gotBaseline[index]))
 		}
+		if math.Float32bits(gotBaseline[index]) != math.Float32bits(gotExpert8[index]) {
+			t.Fatalf("mixed Q5_1 expert8 output[%d] = %08x, baseline = %08x", index, math.Float32bits(gotExpert8[index]), math.Float32bits(gotBaseline[index]))
+		}
 		if math.Float32bits(gotBaseline[index]) != math.Float32bits(got[index]) {
-			t.Fatalf("mixed Q5_1 expert8 output[%d] = %08x, baseline = %08x", index, math.Float32bits(got[index]), math.Float32bits(gotBaseline[index]))
+			t.Fatalf("mixed Q4_K gate/up split output[%d] = %08x, baseline = %08x", index, math.Float32bits(got[index]), math.Float32bits(gotBaseline[index]))
 		}
 	}
 
@@ -504,11 +509,15 @@ func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {
 		entries[expert].Down = downBuffer
 		entries[expert].DownFormat = hipGGUFExpertFormatQ8_0
 	}
-	gotQ8Baseline := runMixed("0", "0")
-	gotQ8 := runMixed("1", "0")
+	gotQ8Baseline := runMixed("0", "0", "0")
+	gotQ8Pair16 := runMixed("1", "0", "0")
+	gotQ8 := runMixed("1", "0", "1")
 	for index := range gotQ8Baseline {
+		if math.Float32bits(gotQ8Baseline[index]) != math.Float32bits(gotQ8Pair16[index]) {
+			t.Fatalf("mixed Q8_0 pair16 output[%d] = %08x, baseline = %08x", index, math.Float32bits(gotQ8Pair16[index]), math.Float32bits(gotQ8Baseline[index]))
+		}
 		if math.Float32bits(gotQ8Baseline[index]) != math.Float32bits(gotQ8[index]) {
-			t.Fatalf("mixed Q8_0 pair16 output[%d] = %08x, baseline = %08x", index, math.Float32bits(gotQ8[index]), math.Float32bits(gotQ8Baseline[index]))
+			t.Fatalf("mixed Q8_0 gate/up split output[%d] = %08x, baseline = %08x", index, math.Float32bits(gotQ8[index]), math.Float32bits(gotQ8Baseline[index]))
 		}
 	}
 	wantQ8 := make([]float32, hidden)

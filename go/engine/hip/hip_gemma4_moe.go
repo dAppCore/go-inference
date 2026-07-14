@@ -23,6 +23,7 @@ const (
 	hipGGUFQ4_0SelectedExpertsLaunchArgsBytes            = 240
 	hipGGUFQ4_0SelectedExpertsMaxTopK                    = 8
 	hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock  uint32 = 16
+	hipGGUFQ4KSelectedExpertsSplitRowsPerBlock    uint32 = 8
 	hipGGUFQ5_1SelectedExpertsExpert8RowsPerBlock uint32 = 2
 	hipGGUFExpertFormatQ4_0                       uint32 = 1
 	hipGGUFExpertFormatQ4K                        uint32 = 2
@@ -32,6 +33,7 @@ const (
 
 const (
 	hipGemma4SelectedExpertPair16Env      = "GO_ROCM_GEMMA4_Q4_SELECTED_EXPERT_PAIR16"
+	hipGemma4SelectedExpertGateUpSplitEnv = "GO_ROCM_GEMMA4_Q4_K_GATE_UP_SPLIT"
 	hipGemma4SelectedExpertDownExpert8Env = "GO_ROCM_GEMMA4_Q5_1_DOWN_EXPERT8"
 )
 
@@ -1358,6 +1360,10 @@ func hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(ctx c
 			gateKernel = hipKernelNameGGUFQ4KSelectedExpertGateUpPair16
 			gateRowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
 			downRowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
+			if core.Env(hipGemma4SelectedExpertGateUpSplitEnv) != "0" {
+				gateKernel = hipKernelNameGGUFQ4KSelectedExpertGateUpSplitPair16
+				gateRowsPerBlock = hipGGUFQ4KSelectedExpertsSplitRowsPerBlock
+			}
 			if args.DownFormat == hipGGUFExpertFormatQ5_1 {
 				downKernel = hipKernelNameGGUFQ5_1SelectedExpertDownPair16
 				if args.TopK == hipGGUFQ4_0SelectedExpertsMaxTopK && core.Env(hipGemma4SelectedExpertDownExpert8Env) != "0" {
