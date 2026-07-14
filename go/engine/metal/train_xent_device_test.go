@@ -7,6 +7,8 @@ package native
 import (
 	"math"
 	"testing"
+
+	"dappco.re/go/inference/model"
 )
 
 // TestCrossEntropyBackwardF32Device is the #390 correctness receipt: the fused GPU softmax-xent
@@ -131,4 +133,128 @@ func TestCrossEntropyBackwardF32Auto(t *testing.T) {
 	}
 	t.Logf("dispatcher: gate off = host exactly; gate on rel %.2g, dLogits worst |Δ| %.2g (kernel=%v)",
 		lossRel, worstDL, gpuHasSoftmaxXent())
+}
+
+// TestCrossEntropyBackwardF32DeviceInRealSessionSFT is the #390 loss-trajectory receipt: the GPU CE
+// dropped into the FULL head-LoRA SFT loop over a real (synthetic-weight) gemma ArchSession — the same
+// engine forward + LoRA + AdamW as TestRealSessionHeadLoRASFT — must track the host-CE trajectory
+// step-for-step. Two adapters train from identical init, one on the host CE, one on the device CE; the
+// step-0 CE must agree within #390's 1e-5 bar (same first-step loss at B=0), the whole trajectory must
+// stay in agreement, and both must fall. No model download — a small synthetic gemma stack.
+func TestCrossEntropyBackwardF32DeviceInRealSessionSFT(t *testing.T) {
+	requireNativeRuntime(t)
+	if !gpuHasSoftmaxXent() {
+		t.Skip("lthn_softmax_xent kernel unavailable (custom metallib not loaded)")
+	}
+	const dModel, nHeads, nKV, headDim, dFF = 512, 8, 4, 64, 1024
+	const vocab, nL, maxLen, rank, steps = 64, 3, 64, 8, 80
+	scaling := float32(16.0 / rank)
+	eps := float32(1e-5)
+
+	layers := make([]DecodeLayerWeights, nL)
+	types := make([]string, nL)
+	for li := range layers {
+		layers[li] = forwardLayer(dModel, nHeads, nKV, headDim, dFF, (li+1)*100)
+		types[li] = "full_attention"
+	}
+	g := &BF16Model{Layers: layers, Embed: toBF16Bytes(syntheticFloat32(vocab*dModel, 21)),
+		FinalNorm: toBF16Bytes(syntheticFloat32(dModel, 22))}
+	g.LMHead, g.Tied = g.Embed, true
+	arch := model.Arch{
+		Hidden: dModel, Heads: nHeads, KVHeads: nKV, HeadDim: headDim, FF: dFF, Vocab: vocab,
+		GlobalHeadDim: headDim, GlobalKVHeads: nKV,
+		Eps: eps, AttnScale: 0.125, RopeBase: 10000, RopeScale: 1, RopeLocalBase: 10000,
+		RotaryDim: headDim, RotaryDimLocal: headDim, Layer: model.DeriveLayers(types, 0),
+	}
+	sess, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession: %v", err)
+	}
+	ids := []int32{1, 2, 3, 4, 5, 6, 7, 8}
+	T := len(ids)
+
+	_, perLayer, err := sess.ForwardCaptureHiddens(ids)
+	if err != nil {
+		t.Fatalf("ForwardCaptureHiddens: %v", err)
+	}
+	normed := rmsNormForwardF32(bf16ToF32Slice(perLayer[nL-1]), bf16ToF32Slice(g.FinalNorm), T, dModel, eps)
+	baseLogits, err := MatMulF32NT(normed, bf16ToF32Slice(g.LMHead), T, dModel, vocab)
+	if err != nil {
+		t.Fatalf("base logits: %v", err)
+	}
+	targets := make([]int32, T)
+	for i := range targets {
+		targets[i] = int32((i * 7) % vocab)
+	}
+
+	// Two adapters from IDENTICAL init: one trained on the host CE, one on the device CE.
+	a0 := syntheticFloat32(rank*dModel, 11)
+	for i := range a0 {
+		a0[i] *= 0.2
+	}
+	aHost := append([]float32(nil), a0...)
+	aDev := append([]float32(nil), a0...)
+	bHost := make([]float32, vocab*rank)
+	bDev := make([]float32, vocab*rank)
+	optAHost, optBHost := NewAdamW(rank*dModel, 0.05, 0.0), NewAdamW(vocab*rank, 0.05, 0.0)
+	optADev, optBDev := NewAdamW(rank*dModel, 0.05, 0.0), NewAdamW(vocab*rank, 0.05, 0.0)
+
+	// stepCE runs one SFT step with the given CE implementation and returns the step loss.
+	stepCE := func(a, b []float32, optA, optB *AdamW, ce func([]float32, []int32, int, int) (float32, []float32, error)) (float32, error) {
+		xA, delta, e := LoRAForwardF32(normed, a, b, T, dModel, vocab, rank, scaling)
+		if e != nil {
+			return 0, e
+		}
+		logits := make([]float32, T*vocab)
+		for i := range logits {
+			logits[i] = baseLogits[i] + delta[i]
+		}
+		loss, dLogits, e := ce(logits, targets, T, vocab)
+		if e != nil {
+			return 0, e
+		}
+		dA, dB, _, e := LoRABackwardF32(dLogits, normed, a, b, xA, T, dModel, vocab, rank, scaling)
+		if e != nil {
+			return 0, e
+		}
+		if e := optA.Step(a, dA); e != nil {
+			return 0, e
+		}
+		if e := optB.Step(b, dB); e != nil {
+			return 0, e
+		}
+		return loss, nil
+	}
+
+	var firstHost, firstDev, lastHost, lastDev float32
+	var worstRel float64
+	for s := range steps {
+		lh, e := stepCE(aHost, bHost, optAHost, optBHost, CrossEntropyBackwardF32)
+		if e != nil {
+			t.Fatalf("host step %d: %v", s, e)
+		}
+		ld, e := stepCE(aDev, bDev, optADev, optBDev, crossEntropyBackwardF32Device)
+		if e != nil {
+			t.Fatalf("device step %d: %v", s, e)
+		}
+		rel := math.Abs(float64(ld-lh)) / (1 + math.Abs(float64(lh)))
+		if rel > worstRel {
+			worstRel = rel
+		}
+		if s == 0 {
+			firstHost, firstDev = lh, ld
+			if rel > 1e-5 {
+				t.Fatalf("step-0 CE host %.8f vs GPU %.8f: relative %.3g > 1e-5", lh, ld, rel)
+			}
+		}
+		lastHost, lastDev = lh, ld
+	}
+	if lastHost >= firstHost || lastDev >= firstDev {
+		t.Fatalf("SFT did not reduce loss: host %.4f→%.4f, device %.4f→%.4f", firstHost, lastHost, firstDev, lastDev)
+	}
+	if worstRel > 1e-3 {
+		t.Fatalf("host/device loss trajectories diverged: worst per-step relative %.3g > 1e-3 over %d steps", worstRel, steps)
+	}
+	t.Logf("trajectory intact over %d steps: host %.4f→%.4f, device %.4f→%.4f, worst per-step rel %.2g",
+		steps, firstHost, lastHost, firstDev, lastDev, worstRel)
 }
