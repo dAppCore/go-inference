@@ -48,9 +48,11 @@
   DOTNET_ROLL_FORWARD=LatestMajor needed on runtime-10-only machines).
   typescript-angular JOINED on request for the next area (d297d5e):
   injectable services + dev proxy, ng build + through-proxy receipts.
-  *** WEB-AREA INTEL: lem serve sends NO CORS HEADERS — browser apps on
-  another origin cannot call it; dev uses Angular's proxy, production
-  needs CORS middleware on the serve or same-origin hosting. *** Also:
+  *** WEB-AREA READY: `lem serve --cors <origins|*>` shipped — opt-in
+  CORS middleware wrapping OUTSIDE the admin Bearer wall (preflight
+  carries no Authorization); specific-origin echo + Vary: Origin,
+  wildcard as literal *, disallowed origins get no headers. Angular GUI
+  can call the serve directly or keep the dev proxy. *** Also:
   generated Angular source must be ng-packagr-built (not raw-consumed),
   TS 6 hard-errors on baseUrl, ngVersion caps at 21 but runs under 22.
 - Board task #398 closed with the full account.

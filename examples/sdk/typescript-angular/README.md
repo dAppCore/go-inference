@@ -18,10 +18,12 @@ npx ng serve                                         # http://localhost:4200 aga
 
 ## Friction
 
-- **lem serve sends no CORS headers** — a browser app on a different origin
-  cannot call it directly; the Angular dev proxy is the standard dev answer.
-  A production web UI needs CORS middleware on the serve (or same-origin
-  hosting). This is the load-bearing finding for any browser-based area.
+- **CORS**: this lane's first build found lem serve sent no CORS headers —
+  now it does, opt-in: `lem serve --cors http://localhost:4200` lets a
+  browser app on that origin call the serve directly (no proxy needed);
+  `--cors '*'` allows any origin. The committed example keeps the dev proxy
+  (works with or without the flag); production picks --cors or same-origin
+  hosting.
 - The generated source can't be consumed raw across directories (its
   `@angular/*` imports don't resolve outside a node_modules tree, and
   tsconfig `paths` aliases don't rescue esbuild's resolution of package

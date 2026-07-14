@@ -48,6 +48,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	schedulerConcurrency := fs.Int("scheduler-concurrency", 0, "scheduler's concurrently running requests (interleave/CB lane count, serial pool width); 0 = the serve default (4)")
 	embedModel := fs.String("embed-model", "", "embeddings/rerank model: a bert/BGE-class host encoder snapshot directory (config.json + vocab.txt + model.safetensors); served at /v1/embeddings and /v1/rerank under --embed-model-id alongside (or, with --model \"\", instead of) the chat model; empty = those routes serve only what the chat model itself implements (a clean 4xx today). A load failure is fatal at boot")
 	embedModelID := fs.String("embed-model-id", "", "request name for --embed-model's `model` field; empty derives the pack's basename")
+	corsOrigins := fs.String("cors", "", "browser origins allowed via CORS: comma-separated exact origins (e.g. http://localhost:4200) or '*' for any; empty (the default) sends no CORS headers — a browser app on another origin then cannot call the serve")
 	fs.Usage = func() {
 		name := cliName()
 		core.WriteString(stderr, core.Sprintf("Usage: %s serve [--model <path>] [flags]\n", name))
@@ -166,6 +167,7 @@ func runServeCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		WriteTimeout:         *writeTimeout,
 		ShutdownTimeout:      *shutdownTimeout,
 		AdminToken:           adminToken,
+		CORSOrigins:          *corsOrigins,
 		Log:                  stderr,
 	})
 	if err != nil {

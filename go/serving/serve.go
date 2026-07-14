@@ -136,6 +136,7 @@ type ServeConfig struct {
 	WriteTimeout    time.Duration
 	ShutdownTimeout time.Duration
 	AdminToken      string    // Bearer token for /v1/admin/*; "" leaves the subtree open
+	CORSOrigins     string    // browser origins allowed via CORS ("*" = any, comma-separated list, "" = off)
 	Log             io.Writer // boot notices + admin auth-deny audit (cmd passes os.Stderr)
 
 	// Injected engine seams (nil = use the registered-metal defaults / degrade).
@@ -375,6 +376,10 @@ func hostServe(ctx context.Context, cfg ServeConfig, host serveHost, outboundPol
 	}
 	if cfg.ShutdownTimeout > 0 {
 		opts = append(opts, WithShutdownTimeout(cfg.ShutdownTimeout))
+	}
+	if core.Trim(cfg.CORSOrigins) != "" {
+		opts = append(opts, WithCORS(cfg.CORSOrigins))
+		printServe(log, "serve: CORS ON — browser origins %s (preflight answered before the admin wall)", cfg.CORSOrigins)
 	}
 	resolver := host.resolver
 	if cfg.Welfare {
@@ -670,6 +675,7 @@ type serveConfig struct {
 	adminHandler      http.Handler
 	admin             compat.AdminConfig
 	audit             io.Writer
+	cors              *corsPolicy
 }
 
 // ServeOption tunes Serve. Unset options fall back to the serve defaults (30s
@@ -754,6 +760,11 @@ func Serve(ctx context.Context, addr string, resolver Resolver, opts ...ServeOpt
 	var handler http.Handler = root
 	if cfg.adminToken != "" {
 		handler = RequireBearerOnAdmin(root, cfg.adminToken, cfg.audit)
+	}
+	// CORS wraps OUTSIDE the Bearer wall: preflight OPTIONS carries no
+	// Authorization, so it must be answered before auth is consulted.
+	if cfg.cors != nil {
+		handler = corsMiddleware(handler, cfg.cors)
 	}
 
 	srv := &http.Server{
