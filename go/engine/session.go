@@ -211,6 +211,12 @@ func (s *SessionHandle) Generate(ctx context.Context, cfg inference.GenerateConf
 			s.err = err
 			return
 		}
+		// The same declares-discipline fold the stateless decode applies
+		// (request-set > model-declared > engine fallback), before the
+		// sample-vs-greedy branch below reads cfg.Temperature/MinP — without
+		// it a continuity-woken turn decoded GREEDY where the stateless lane
+		// sampled at the checkpoint's declared temperature (#1844).
+		cfg = s.model.applyDeclaredSampling(cfg)
 		maxNew := cfg.MaxTokens
 		if maxNew <= 0 || s.sess.Pos()+maxNew > s.model.maxLen {
 			maxNew = s.model.maxLen - s.sess.Pos()

@@ -274,6 +274,46 @@ func TestSessionHandleGenerateUsesSampledPath(t *testing.T) {
 	}
 }
 
+// TestSessionHandleGenerateAppliesDeclaredSampling pins #1844: the continuity
+// lane folds the checkpoint's declared sampling defaults exactly as the
+// stateless decode does (request-set > model-declared > engine fallback). A
+// request with NO sampling fields against a model declaring temperature 0.7
+// must take the SAMPLED branch; an explicit Temperature 0 (flag set) stays
+// greedy even with the declaration; and with no declarer the engine fallback
+// (greedy) stands — before the fix the first case decoded greedy on this lane
+// while the stateless lane sampled.
+func TestSessionHandleGenerateAppliesDeclaredSampling(t *testing.T) {
+	temp := float32(0.7)
+	declared := SamplingDefaults{Temperature: &temp}
+
+	// (a) unset request + declared temperature → sampled, same as stateless.
+	m := NewTextModel(samplingDeclarerTokenModel{TokenModel: &fakeTokenModel{}, defaults: declared},
+		newFixtureTokenizer(t), "gemma-test", inference.ModelInfo{}, 4096)
+	sess := &fakeSession{pos: 1, genIDs: []int32{10, 11}}
+	for range NewSessionHandle(m, sess).Generate(context.Background(), inference.GenerateConfig{MaxTokens: 2}) {
+	}
+	if sess.sampledCalls != 1 {
+		t.Fatalf("declared 0.7 + unset request: sampledCalls = %d, want 1 (the #1844 divergence)", sess.sampledCalls)
+	}
+
+	// (b) explicit greedy wins over the declaration (the *Set flag honoured).
+	sess = &fakeSession{pos: 1, genIDs: []int32{10, 11}}
+	for range NewSessionHandle(m, sess).Generate(context.Background(), inference.GenerateConfig{MaxTokens: 2, Temperature: 0, TemperatureSet: true}) {
+	}
+	if sess.sampledCalls != 0 {
+		t.Fatalf("explicit Temperature 0: sampledCalls = %d, want 0 (request-set wins)", sess.sampledCalls)
+	}
+
+	// (c) no declarer: the engine fallback (greedy) stands, unchanged.
+	bare := newTestModel(t, &fakeTokenModel{})
+	sess = &fakeSession{pos: 1, genIDs: []int32{10, 11}}
+	for range NewSessionHandle(bare, sess).Generate(context.Background(), inference.GenerateConfig{MaxTokens: 2}) {
+	}
+	if sess.sampledCalls != 0 {
+		t.Fatalf("no declarer + unset request: sampledCalls = %d, want 0 (greedy fallback)", sess.sampledCalls)
+	}
+}
+
 // --- CaptureKV -----------------------------------------------------------
 
 // TestSession_SessionHandle_CaptureKV_Good pins the populated-snapshot path
