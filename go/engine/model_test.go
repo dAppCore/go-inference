@@ -853,13 +853,24 @@ func TestModel_TextModel_Info_Ugly(t *testing.T) {
 // --- Metrics -----------------------------------------------------------
 
 // TestModel_TextModel_Metrics_Good pins the snapshot readback after a
-// generation records prompt/generated token counts.
+// generation: token counts, the prefill/decode partition of the total, and
+// the derived per-phase throughputs the interface documents.
 func TestModel_TextModel_Metrics_Good(t *testing.T) {
 	m := &TextModel{}
-	m.setMetrics(5, 3, 2*time.Millisecond, time.Now())
+	decodeStart := time.Now().Add(-time.Millisecond) // decode ran ~1ms of a 5ms operation
+	m.setMetrics(5, 3, 5*time.Millisecond, decodeStart)
 	got := m.Metrics()
 	if got.PromptTokens != 5 || got.GeneratedTokens != 3 {
 		t.Fatalf("Metrics() = %+v, want PromptTokens=5 GeneratedTokens=3", got)
+	}
+	if got.PrefillDuration <= 0 || got.DecodeDuration <= 0 {
+		t.Fatalf("Metrics() durations = prefill %v decode %v, want both positive", got.PrefillDuration, got.DecodeDuration)
+	}
+	if got.PrefillDuration+got.DecodeDuration != got.TotalDuration {
+		t.Fatalf("Metrics() split %v + %v != total %v", got.PrefillDuration, got.DecodeDuration, got.TotalDuration)
+	}
+	if got.PrefillTokensPerSec <= 0 || got.DecodeTokensPerSec <= 0 {
+		t.Fatalf("Metrics() rates = prefill %.1f decode %.1f tok/s, want both positive", got.PrefillTokensPerSec, got.DecodeTokensPerSec)
 	}
 }
 
@@ -1148,16 +1159,6 @@ func TestChatTurnRole(t *testing.T) {
 		if got := chatTurnRole(in); got != want {
 			t.Fatalf("chatTurnRole(%q) = %q, want %q", in, got, want)
 		}
-	}
-}
-
-// TestPrefillSplit pins the coarse duration accessor: it reflects elapsed
-// wall time since start, never negative.
-func TestPrefillSplit(t *testing.T) {
-	m := &TextModel{}
-	start := time.Now()
-	if d := m.prefillSplit(start); d < 0 {
-		t.Fatalf("prefillSplit = %v, want >= 0", d)
 	}
 }
 

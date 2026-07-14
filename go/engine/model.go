@@ -490,6 +490,9 @@ func (m *TextModel) decodeFromPrefilled(ctx context.Context, sess Session, promp
 	// sample-vs-greedy decision below reads cfg.Temperature/MinP, so a model
 	// declaring temperature 0.7 on a request that left it unset samples at 0.7
 	// rather than falling to the greedy engine default.
+	// The session arrives prefilled, so entry here IS the decode boundary —
+	// the split setMetrics derives (prefill = total − decode) hangs off it.
+	decodeStart := time.Now()
 	cfg = m.applyDeclaredSampling(cfg)
 	maxNew := cfg.MaxTokens
 	if maxNew <= 0 {
@@ -540,7 +543,7 @@ func (m *TextModel) decodeFromPrefilled(ctx context.Context, sess Session, promp
 		// is always surfaced and generation is bounded by maxNew.
 		_, gerr = sess.GenerateFromCacheEach(maxNew, -1, emit)
 	}
-	m.setMetrics(promptLen, count, m.prefillSplit(start), start)
+	m.setMetrics(promptLen, count, time.Since(start), decodeStart)
 	if stopTrace != nil {
 		budget := stopTrace()
 		if budget.Tokens > 0 {
@@ -563,13 +566,6 @@ func (m *TextModel) decodeFromPrefilled(ctx context.Context, sess Session, promp
 		return
 	}
 	m.setOK()
-}
-
-// prefillSplit is a coarse prefill/decode duration split — the conformance
-// contract only reads GeneratedTokens, but real callers read the durations, so
-// they are populated rather than left zero.
-func (m *TextModel) prefillSplit(start time.Time) time.Duration {
-	return time.Since(start)
 }
 
 // Classify runs prefill-only inference over each prompt and samples the single
@@ -853,14 +849,30 @@ func (m *TextModel) setDecodePhases(budget *inference.DecodePhaseBudget) {
 	m.mu.Unlock()
 }
 
-func (m *TextModel) setMetrics(promptTokens, generated int, total time.Duration, start time.Time) {
-	m.mu.Lock()
-	m.lastMetrics = inference.GenerateMetrics{
+func (m *TextModel) setMetrics(promptTokens, generated int, total time.Duration, decodeStart time.Time) {
+	decode := time.Since(decodeStart)
+	if decode > total {
+		decode = total
+	}
+	// The prefill share is what the operation spent before decoding began —
+	// the two durations partition the total, so the derived rates below are
+	// the honest per-phase throughputs the interface documents.
+	prefill := total - decode
+	mt := inference.GenerateMetrics{
 		PromptTokens:    promptTokens,
 		GeneratedTokens: generated,
 		TotalDuration:   total,
-		DecodeDuration:  time.Since(start),
+		PrefillDuration: prefill,
+		DecodeDuration:  decode,
 	}
+	if prefill > 0 {
+		mt.PrefillTokensPerSec = float64(promptTokens) / prefill.Seconds()
+	}
+	if decode > 0 {
+		mt.DecodeTokensPerSec = float64(generated) / decode.Seconds()
+	}
+	m.mu.Lock()
+	m.lastMetrics = mt
 	m.mu.Unlock()
 }
 
