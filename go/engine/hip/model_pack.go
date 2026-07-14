@@ -1591,6 +1591,21 @@ func (b *rocmBackend) safetensorsNativeLoadConfig(ctx context.Context, path stri
 		Tensors:            tensors,
 		TiedWordEmbeddings: inspection.Labels["tied_word_embeddings"] == "true",
 	}
+	declaredVision := cfg.Gemma4TextConfig.Vision
+	declaredAudio := cfg.Gemma4TextConfig.Audio
+	cfg.Gemma4TextConfig.Vision = declaredVision && rocmNativeTensorPlanHasVision(tensors)
+	cfg.Gemma4TextConfig.Audio = declaredAudio && rocmNativeTensorPlanHasAudio(tensors)
+	if declaredVision && !cfg.Gemma4TextConfig.Vision {
+		cfg.ModelLabels["vision_runtime"] = hipKernelStatusNotLinked
+		cfg.ModelLabels["vision_projector_runtime"] = hipKernelStatusNotLinked
+		cfg.ModelLabels["vision_payload"] = "absent"
+	}
+	if declaredAudio && !cfg.Gemma4TextConfig.Audio {
+		cfg.ModelLabels["audio_runtime"] = hipKernelStatusNotLinked
+		cfg.ModelLabels["audio_projector_runtime"] = hipKernelStatusNotLinked
+		cfg.ModelLabels["audio_frontend_runtime"] = hipKernelStatusNotLinked
+		cfg.ModelLabels["audio_payload"] = "absent"
+	}
 	// Gemma4 checkpoints may carry their text model and media towers in the
 	// same safetensors pack. Keep the pack root as the default tower source;
 	// explicit ROCm load paths and environment overrides are applied later.
@@ -1616,6 +1631,29 @@ func (b *rocmBackend) safetensorsNativeLoadConfig(ctx context.Context, path stri
 		cfg.DataOffset = tensors[0].DataOffset
 	}
 	return loadPath, cfg, nil
+}
+
+func rocmNativeTensorPlanHasVision(tensors []nativeTensorInfo) bool {
+	for _, tensor := range tensors {
+		name := strings.ToLower(tensor.Name)
+		if strings.Contains(name, "vision_embedder.") ||
+			strings.Contains(name, "embed_vision.") ||
+			strings.Contains(name, "vision_tower.") ||
+			strings.Contains(name, "vision_model.") {
+			return true
+		}
+	}
+	return false
+}
+
+func rocmNativeTensorPlanHasAudio(tensors []nativeTensorInfo) bool {
+	for _, tensor := range tensors {
+		name := strings.ToLower(tensor.Name)
+		if strings.Contains(name, "audio_tower.") || strings.Contains(name, "embed_audio.") {
+			return true
+		}
+	}
+	return false
 }
 
 func rocmModelPackRoot(path string) (string, error) {

@@ -1632,8 +1632,8 @@ func TestNativeContract_LoadModelSafetensorsGemma4AutoAttachesMedia_Good(t *test
 			"vocab_size":8
 		}
 	}`)
-	header := `{"language_model.model.embed_tokens.weight":{"dtype":"U32","shape":[8,2],"data_offsets":[0,64]},"language_model.model.layers.0.input_layernorm.weight":{"dtype":"BF16","shape":[16],"data_offsets":[64,96]},"model.layers.0.self_attn.q_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[96,608]},"model.layers.0.self_attn.k_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[608,1120]},"model.layers.0.self_attn.v_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1120,1632]},"model.layers.0.self_attn.o_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1632,2144]}}`
-	writeNativeContractSafetensorsHeaderWithPayload(t, core.PathJoin(dir, "model.safetensors"), header, 2144)
+	header := `{"language_model.model.embed_tokens.weight":{"dtype":"U32","shape":[8,2],"data_offsets":[0,64]},"language_model.model.layers.0.input_layernorm.weight":{"dtype":"BF16","shape":[16],"data_offsets":[64,96]},"model.layers.0.self_attn.q_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[96,608]},"model.layers.0.self_attn.k_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[608,1120]},"model.layers.0.self_attn.v_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1120,1632]},"model.layers.0.self_attn.o_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1632,2144]},"vision_embedder.patch_dense.weight":{"dtype":"BF16","shape":[1],"data_offsets":[2144,2146]},"audio_tower.output_proj.weight":{"dtype":"BF16","shape":[1],"data_offsets":[2146,2148]}}`
+	writeNativeContractSafetensorsHeaderWithPayload(t, core.PathJoin(dir, "model.safetensors"), header, 2148)
 	runtime := &fakeNativeRuntime{
 		available: true,
 		device:    nativeDeviceInfo{Name: "AMD Radeon RX 7800 XT", MemoryBytes: 16 * memoryGiB, FreeBytes: 12 * memoryGiB, Driver: "hip-test"},
@@ -1657,7 +1657,7 @@ func TestNativeContract_LoadModelSafetensorsGemma4AutoAttachesMedia_Good(t *test
 		runtime.loadConfig.ModelInfo.QuantGroup != 64 {
 		t.Fatalf("load config model = %+v, want Gemma4 text_config identity", runtime.loadConfig.ModelInfo)
 	}
-	if !runtime.loadConfig.TiedWordEmbeddings || runtime.loadConfig.ContextSize != 128 || len(runtime.loadConfig.Tensors) != 6 {
+	if !runtime.loadConfig.TiedWordEmbeddings || runtime.loadConfig.ContextSize != 128 || len(runtime.loadConfig.Tensors) != 8 {
 		t.Fatalf("load config = %+v, want tied Gemma4 safetensors tensor plan", runtime.loadConfig)
 	}
 	if runtime.loadConfig.VisionModelPath != dir || runtime.loadConfig.AudioModelPath != dir {
@@ -1875,6 +1875,23 @@ func TestNativeContract_Gemma4NativeConfigDeclaresMultimodalTowers_Good(t *testi
 	textOnly := rocmNativeGemma4TextConfigFromProbe(rocmModelPackConfigProbe{ModelType: "gemma4"})
 	core.AssertEqual(t, false, textOnly.Vision)
 	core.AssertEqual(t, false, textOnly.Audio)
+
+	assistant := rocmNativeGemma4TextConfigFromProbe(rocmModelPackConfigProbe{
+		ModelType:    "gemma4_assistant",
+		ImageTokenID: 258880,
+		AudioTokenID: 258881,
+	})
+	core.AssertEqual(t, false, assistant.Vision)
+	core.AssertEqual(t, false, assistant.Audio)
+}
+
+func TestNativeContract_SamePackMediaRequiresTowerTensors_Ugly(t *testing.T) {
+	textOnly := []nativeTensorInfo{{Name: "language_model.model.embed_tokens.weight"}}
+	core.AssertEqual(t, false, rocmNativeTensorPlanHasVision(textOnly))
+	core.AssertEqual(t, false, rocmNativeTensorPlanHasAudio(textOnly))
+	core.AssertEqual(t, true, rocmNativeTensorPlanHasVision(append(textOnly, nativeTensorInfo{Name: "vision_embedder.patch_dense.weight"})))
+	core.AssertEqual(t, true, rocmNativeTensorPlanHasVision(append(textOnly, nativeTensorInfo{Name: "model.vision_tower.embeddings.patch_embedding.weight"})))
+	core.AssertEqual(t, true, rocmNativeTensorPlanHasAudio(append(textOnly, nativeTensorInfo{Name: "audio_tower.output_proj.weight"})))
 }
 
 func TestNativeContract_Gemma4LayerTypesDefaultPatternForcesFinalFull_Good(t *testing.T) {
