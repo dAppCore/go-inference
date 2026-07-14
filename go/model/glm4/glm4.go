@@ -8,6 +8,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/attn"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -32,7 +33,7 @@ func (c *Config) Arch() (model.Arch, error) {
 	if c.ModelType != "glm4" || c.HiddenSize <= 0 || c.IntermediateSize <= 0 || c.NumHiddenLayers <= 0 || c.NumAttentionHeads <= 0 || c.NumKeyValueHeads <= 0 || c.HeadDim <= 0 || c.VocabSize <= 0 || c.RMSNormEps <= 0 || c.RopeTheta <= 0 || c.NumAttentionHeads%c.NumKeyValueHeads != 0 {
 		return model.Arch{}, core.NewError("glm4.Config.Arch: invalid dense GLM-4 declaration")
 	}
-	rd, err := (model.RopeParams{HeadDim: c.HeadDim, PartialRotaryFactor: c.PartialRotaryFactor}).RotaryDim()
+	rd, err := (attn.RopeParams{HeadDim: c.HeadDim, PartialRotaryFactor: c.PartialRotaryFactor}).RotaryDim()
 	if err != nil {
 		return model.Arch{}, core.E("glm4.Config.Arch", "partial rotary", err)
 	}
@@ -56,7 +57,7 @@ func init() {
 			if _, ok := out[p+"gate_up_proj.weight"]; !ok {
 				break
 			}
-			out = model.SplitContiguousGateUp(out, p+"gate_up_proj", p+"gate_proj", p+"up_proj")
+			out = attn.SplitContiguousGateUp(out, p+"gate_up_proj", p+"gate_proj", p+"up_proj")
 		}
 		return out
 	}})

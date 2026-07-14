@@ -5,6 +5,7 @@ package dbrx
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/attn"
 	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/safetensors"
 )
@@ -33,7 +34,7 @@ func NormalizeWeights(in map[string]safetensors.Tensor, cfg Config) map[string]s
 		alias(dst+"input_layernorm.weight", src+"norm_attn_norm.norm_1.weight")
 		alias(dst+"post_attention_layernorm.weight", src+"norm_attn_norm.norm_2.weight")
 		alias(dst+"self_attn.o_proj.weight", src+"norm_attn_norm.attn.out_proj.weight")
-		out = model.SplitContiguousQKV(out, src+"norm_attn_norm.attn.Wqkv", dst+"self_attn.q_proj", dst+"self_attn.k_proj", dst+"self_attn.v_proj", cfg.Heads*headDim, cfg.Attention.KVHeads*headDim)
+		out = attn.SplitContiguousQKV(out, src+"norm_attn_norm.attn.Wqkv", dst+"self_attn.q_proj", dst+"self_attn.k_proj", dst+"self_attn.v_proj", cfg.Heads*headDim, cfg.Attention.KVHeads*headDim)
 		alias(dst+"mlp.gate.weight", src+"ffn.router.layer.weight")
 		for _, part := range []struct{ source, target string }{{"w1", "gate_proj.weight"}, {"v1", "up_proj.weight"}, {"w2", "down_proj.weight"}} {
 			tensor, ok := in[src+"ffn.experts.mlp."+part.source]

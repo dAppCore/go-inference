@@ -8,6 +8,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/attn"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -44,7 +45,7 @@ func (c *Config) Arch() (model.Arch, error) {
 	if kv <= 0 || c.NumAttentionHeads%kv != 0 {
 		return model.Arch{}, core.E("stablelm.Config.Arch", "invalid key/value heads", nil)
 	}
-	rd, err := (model.RopeParams{HeadDim: hd, PartialRotaryFactor: c.PartialRotaryFactor}).RotaryDim()
+	rd, err := (attn.RopeParams{HeadDim: hd, PartialRotaryFactor: c.PartialRotaryFactor}).RotaryDim()
 	if err != nil {
 		return model.Arch{}, core.E("stablelm.Config.Arch", "resolve partial rotary", err)
 	}

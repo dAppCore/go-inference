@@ -1,6 +1,6 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-package model
+package attn
 
 import (
 	"slices"
