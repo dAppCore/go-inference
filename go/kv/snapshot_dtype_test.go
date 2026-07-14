@@ -3,6 +3,7 @@
 package kv
 
 import (
+	"bytes"
 	"math"
 	"testing"
 )
@@ -35,6 +36,76 @@ func TestKVSnapshot_Q8ValidateBitTricks(t *testing.T) {
 		if ok && maxAbs != probe.max {
 			t.Fatalf("%s: maxAbs = %v, want %v", probe.name, maxAbs, probe.max)
 		}
+	}
+}
+
+// TestKVSnapshot_Q8NativeRoundTrip pins the wire coherence of the raw q8 KV
+// block dtype (#1846 state lane): kv carries KVNativeDTypeQ8 as an opaque native
+// tensor (one byte per element), so a q8 layer's codes+scales survive
+// encode→decode byte-exact and HashSnapshot does not choke on them. Pre-existing
+// bf16 snapshots never carry the dtype, so this is purely additive.
+func TestKVSnapshot_Q8NativeRoundTrip(t *testing.T) {
+	kBlock := make([]byte, 30)
+	vBlock := make([]byte, 30)
+	for i := range kBlock {
+		kBlock[i] = byte(i*7 + 1)
+		vBlock[i] = byte(i*11 + 3)
+	}
+	snap := &Snapshot{
+		Version:       SnapshotVersion,
+		Architecture:  "gemma4_text",
+		Tokens:        []int32{1, 2, 3},
+		TokenOffset:   3,
+		NumLayers:     1,
+		NumHeads:      2,
+		SeqLen:        3,
+		HeadDim:       4,
+		NumQueryHeads: 2,
+		Layers: []LayerSnapshot{{
+			Layer:      0,
+			CacheIndex: 0,
+			CacheMode:  "fixed",
+			KeyDType:   KVNativeDTypeQ8,
+			KeyBytes:   kBlock,
+			KeyShape:   []int32{1, 2, 3, 4},
+			ValueDType: KVNativeDTypeQ8,
+			ValueBytes: vBlock,
+			ValueShape: []int32{1, 2, 3, 4},
+		}},
+	}
+
+	data, err := snap.bytesWithOptions(SaveOptions{KVEncoding: EncodingNative})
+	if err != nil {
+		t.Fatalf("encode q8-native snapshot: %v", err)
+	}
+	got, err := parseKVSnapshotWithOptions(data, LoadOptions{RawKVOnly: true})
+	if err != nil {
+		t.Fatalf("decode q8-native snapshot: %v", err)
+	}
+	if len(got.Layers) != 1 {
+		t.Fatalf("decoded layers = %d, want 1", len(got.Layers))
+	}
+	layer := got.Layers[0]
+	if layer.KeyDType != KVNativeDTypeQ8 || layer.ValueDType != KVNativeDTypeQ8 {
+		t.Fatalf("decoded dtype key=%q value=%q, want %q", layer.KeyDType, layer.ValueDType, KVNativeDTypeQ8)
+	}
+	if !bytes.Equal(layer.KeyBytes, kBlock) {
+		t.Fatalf("decoded K block diverges: got %v want %v", layer.KeyBytes, kBlock)
+	}
+	if !bytes.Equal(layer.ValueBytes, vBlock) {
+		t.Fatalf("decoded V block diverges: got %v want %v", layer.ValueBytes, vBlock)
+	}
+
+	if _, err := HashSnapshot(snap); err != nil {
+		t.Fatalf("HashSnapshot(q8-native): %v", err)
+	}
+
+	// Validation guards: element count is the byte count, so a mismatch rejects.
+	if _, err := validateKVSnapshotNativeTensor(KVNativeDTypeQ8, kBlock, len(kBlock)+1); err == nil {
+		t.Fatal("validateKVSnapshotNativeTensor(q8-native length mismatch) error = nil")
+	}
+	if _, _, _, _, err := kvSnapshotNativeTensorInfo([]float32{1}, KVNativeDTypeQ8, kBlock); err == nil {
+		t.Fatal("kvSnapshotNativeTensorInfo(q8-native with float values) error = nil")
 	}
 }
 

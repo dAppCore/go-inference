@@ -431,6 +431,14 @@ func kvSnapshotEncodedTensorSize(values []float32, dtype string, raw []byte, enc
 }
 
 func kvSnapshotNativeTensorInfo(values []float32, dtype string, raw []byte) (string, int, int, bool, error) {
+	if len(raw) > 0 && dtype == KVNativeDTypeQ8 {
+		// Opaque q8 block: one "element" per byte, no fixed value width. The
+		// engine's raw codes+scales, carried verbatim (see KVNativeDTypeQ8).
+		if len(values) > 0 {
+			return "", 0, 0, false, errNativeElementCount
+		}
+		return KVNativeDTypeQ8, len(raw), len(raw), true, nil
+	}
 	if len(raw) > 0 {
 		dtype, bytesPerValue := normalizeKVSnapshotTensorDType(dtype)
 		if dtype == "" || bytesPerValue <= 0 {
