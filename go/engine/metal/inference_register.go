@@ -138,8 +138,11 @@ func (m *composedTextModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
 	if m != nil && composed.ChatMLDialect(m.modelType) {
 		return chatMLChatTemplate(), true
 	}
-	var tok *tokenizer.Tokenizer
-	if m != nil {
+	// Assign through the interface only when the concrete tokenizer exists: a
+	// typed-nil *tokenizer.Tokenizer passes DetectTurnTokens' nil guard and
+	// crashes its vocab lookup.
+	var tok engine.TextTokenizer
+	if m != nil && m.tok != nil {
 		tok = m.tok
 	}
 	return engine.GemmaChatTemplate(engine.DetectTurnTokens(tok), false), true
