@@ -1,0 +1,16 @@
+{
+  "name": "lem-sdk-axios-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsc && node dist/main.js"
+  },
+  "dependencies": {
+    "@lethean/lem-sdk-axios": "file:../../../build/sdk/typescript-axios",
+    "axios": "^1.16.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0",
+    "@types/node": "^24"
+  }
+}
