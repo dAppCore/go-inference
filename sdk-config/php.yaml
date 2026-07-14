@@ -1,0 +1,6 @@
+generatorName: php-nextgen
+additionalProperties:
+  invokerPackage: Lethean\LemSdk
+  packageName: LemSdk
+  composerPackageName: lethean/lem-sdk
+  artifactVersion: "0.1.0"

@@ -1,0 +1,15 @@
+{
+    "name": "lethean/lem-sdk-example",
+    "description": "Example: gemma4 via the generated PHP client",
+    "license": "EUPL-1.2",
+    "require": {
+        "php": "^8.1",
+        "lethean/lem-sdk": "*"
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../../../build/sdk/php"
+        }
+    ]
+}
