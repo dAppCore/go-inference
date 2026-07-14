@@ -228,3 +228,59 @@ func TestPrefillTokensCached_Bad(t *testing.T) {
 		t.Fatal("want an error for a prompt beyond maxLen")
 	}
 }
+
+// TestPrefillTokensCached_Q8Declines_Ugly pins the #1845 decline: a session
+// whose recorded ICB carries the q8 KV store never takes the cached path —
+// batch-shape landing wobble is amplified discontinuously by q8 quantisation
+// (probed on real 31B: knife-edge tokens flip), so the reuse contract is only
+// honest as a cold prefill there. reused must be 0 on the turn-2 shape the
+// Good case reuses, and the decode must equal a cold session's.
+func TestPrefillTokensCached_Q8Declines_Ugly(t *testing.T) {
+	requireNativeRuntime(t)
+	kvQ8ICBForTest = true
+	t.Cleanup(func() { kvQ8ICBForTest = false })
+
+	warm := newKVQ8ICBFixtureLen(t, 256)
+	defer warm.Close()
+	if !warm.state.icb.hasKVQ8() {
+		t.Fatal("q8 fixture did not arm the q8 KV store — the decline was never exercised")
+	}
+	turn1 := []int32{1, 2, 3, 4, 5}
+	reused, err := warm.PrefillTokensCached(turn1)
+	if err != nil {
+		t.Fatalf("turn 1 PrefillTokensCached: %v", err)
+	}
+	if reused != 0 {
+		t.Fatalf("turn 1 reused = %d, want 0 (cold session)", reused)
+	}
+	reply, err := warm.GenerateFromCache(4, -1)
+	if err != nil {
+		t.Fatalf("turn 1 GenerateFromCache: %v", err)
+	}
+	turn2 := append(append(append([]int32(nil), turn1...), reply...), 6, 7, 8)
+	reused, err = warm.PrefillTokensCached(turn2)
+	if err != nil {
+		t.Fatalf("turn 2 PrefillTokensCached: %v", err)
+	}
+	if reused != 0 {
+		t.Fatalf("turn 2 reused = %d on a q8-ICB session, want 0 (declined to the cold path)", reused)
+	}
+	got, err := warm.GenerateFromCache(8, -1)
+	if err != nil {
+		t.Fatalf("turn 2 GenerateFromCache: %v", err)
+	}
+	cold := newKVQ8ICBFixtureLen(t, 256)
+	defer cold.Close()
+	if err := cold.PrefillTokens(turn2); err != nil {
+		t.Fatalf("cold PrefillTokens: %v", err)
+	}
+	want, err := cold.GenerateFromCache(8, -1)
+	if err != nil {
+		t.Fatalf("cold GenerateFromCache: %v", err)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("token %d diverged on the declined path: warm=%d cold=%d", i, got[i], want[i])
+		}
+	}
+}
