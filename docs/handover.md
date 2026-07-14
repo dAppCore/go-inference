@@ -1,3 +1,38 @@
+# NEXT WAKE (2026-07-17 — bf16-as-op = the batched training forward: SFT 4.8×, and the serial capture was WRONG)
+
+## 2026-07-17 (ops-homes final item — the bf16 training forward)
+
+- THE STEER (snider): "we train in bf16, so we need it + to be performant —
+  it's for lemma training speed vs inference gains." So the bf16-as-op-option
+  remainder is the TRAINING lane's forward, not an inference flag.
+- THE EVIDENCE (probe_train_forward_split_test.go, LTHN_PROBE_MODEL-gated,
+  E2B-it-bf16, T=128): the head-LoRA SFT step was 3.64s, of which the
+  trainer's forward — a SERIAL per-token walk re-prefilled every step — was
+  3.08s (88%); the engine's batched-dense prefill over the SAME ids: 155ms
+  (~20×). The host LoRA/head half: 0.44s (12%).
+- THE FIX: ArchSession.ForwardCaptureFinalHidden — the head trainer needs
+  ONLY the final residual rows, so the training forward rides the batched
+  route with per-row scatter (stepTokensBatchedDenseInto[PLE]), chunked
+  under the retained-prefill policy with the shared-suffix layer skip OFF,
+  declining to the serial walk gracefully. NO fold surgery. forwardFrozen
+  switches to it; ForwardCaptureHiddens (per-layer) stays for the future
+  full-stack backward.
+- RECEIPTS: capture forward 3.08s → 67ms (46×, engagement-counter-proven);
+  SFT step 3.64s → 0.77s (4.8×). Fixture gate TestForwardCaptureFinalHidden:
+  byte-identical to serial + engaged + rerun-stable.
+- THE FIND (the probe's serving-truth check): on the REAL E2B the serial
+  capture was DIVERGENT — vs the serving prefill's boundary hidden the
+  batched capture matches EXACTLY (|Δ|=0) while the serial ICB walk is off
+  |Δ|≈34 (all 128 rows differ, worst 48.6). At B=0 first-step CE: 15.15
+  (serial) vs 10.10 (serving-exact) — the trainer had been fitting hiddens
+  the served model never produces. KNOWN DIVERGENCE note on
+  ForwardCaptureHiddens; root-cause filed as task #391 (blocks the
+  full-stack backward trusting per-layer hiddens on PLE archs; likely the
+  #371 replay PLE-interleave territory).
+- NEXT LEVER filed as #390: the step is now 91% HOST (f32 head matmul
+  [262144×2048], [T,vocab] softmax backward, LoRA grads) — GPU head/loss
+  ops. #386 itself is COMPLETE with this rung.
+
 # NEXT WAKE (2026-07-17 — #386 slice 4: op layout + PLE hooks — the ICB record path is family-clean)
 
 ## 2026-07-17 (ops-homes slice 4 — opsPerLayer layout + per-layer-input hooks)

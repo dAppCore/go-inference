@@ -244,3 +244,66 @@ func TestForwardCaptureHiddensICBUsesEmbedInto(t *testing.T) {
 		eqBytes(t, "ForwardCaptureHiddens ICB embedInto layer tensor", gotLayers[i], wantLayers[i])
 	}
 }
+
+// TestForwardCaptureFinalHidden verifies the batched training forward on a real (synthetic)
+// dense ArchSession: the final residual rows it returns are BYTE-IDENTICAL to the serial
+// per-token capture's last layer, the batched route actually ENGAGED (identity alone can't
+// distinguish the fast path from its silent serial fallback), and re-running on the same
+// session reproduces the rows (the pos-reset re-prefill contract the trainer relies on).
+func TestForwardCaptureFinalHidden(t *testing.T) {
+	requireNativeRuntime(t)
+	const dModel, nHeads, nKV, headDim, dFF = 512, 8, 4, 64, 1024
+	const vocab, nL, maxLen = 64, 3, 64
+	layers := make([]DecodeLayerWeights, nL)
+	types := make([]string, nL)
+	for li := range layers {
+		layers[li] = forwardLayer(dModel, nHeads, nKV, headDim, dFF, (li+1)*100)
+		types[li] = "full_attention"
+	}
+	specs := model.DeriveLayers(types, 0)
+	embed := toBF16Bytes(syntheticFloat32(vocab*dModel, 21))
+	g := &BF16Model{Layers: layers, Embed: embed, FinalNorm: toBF16Bytes(syntheticFloat32(dModel, 22)), LMHead: embed, Tied: true}
+	arch := model.Arch{
+		Hidden: dModel, Heads: nHeads, KVHeads: nKV, HeadDim: headDim, FF: dFF, Vocab: vocab,
+		GlobalHeadDim: headDim, GlobalKVHeads: nKV,
+		Eps: 1e-5, AttnScale: 0.125, RopeBase: 10000, RopeScale: 1, RopeLocalBase: 10000,
+		RotaryDim: headDim, RotaryDimLocal: headDim, Layer: specs,
+	}
+	ids := make([]int32, 24)
+	for i := range ids {
+		ids[i] = int32(1 + i%vocab)
+	}
+
+	serialSess, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession(serial): %v", err)
+	}
+	defer serialSess.Close()
+	_, perLayer, err := serialSess.ForwardCaptureHiddens(ids)
+	if err != nil {
+		t.Fatalf("ForwardCaptureHiddens: %v", err)
+	}
+	want := perLayer[len(perLayer)-1]
+
+	batchSess, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession(batched): %v", err)
+	}
+	defer batchSess.Close()
+	before := captureFinalHiddenBatchedChunksForTest
+	got, err := batchSess.ForwardCaptureFinalHidden(ids)
+	if err != nil {
+		t.Fatalf("ForwardCaptureFinalHidden: %v", err)
+	}
+	if captureFinalHiddenBatchedChunksForTest == before {
+		t.Fatal("batched capture route never engaged — the forward fell to the serial path on a session that must batch")
+	}
+	eqBytes(t, "final hidden (batched vs serial)", got, want)
+
+	// Re-run on the SAME session: the training loop re-prefills every step.
+	got2, err := batchSess.ForwardCaptureFinalHidden(ids)
+	if err != nil {
+		t.Fatalf("ForwardCaptureFinalHidden(rerun): %v", err)
+	}
+	eqBytes(t, "final hidden (re-prefill rerun)", got2, want)
+}
