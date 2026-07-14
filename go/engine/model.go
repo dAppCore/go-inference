@@ -337,7 +337,7 @@ func (m *TextModel) FormatChatPromptWithThinking(messages []inference.Message, e
 // exactly as the stateless path does per request.
 func (m *TextModel) FormatChatContinuationWithThinking(messages []inference.Message, enableThinking *bool) string {
 	t := m.chatTemplate()
-	thinking := enableThinking != nil && *enableThinking
+	thinking := t.ResolveThinking(enableThinking)
 	tail := ""
 	if !thinking && t.Thinking != nil {
 		tail = t.Thinking.OffSuffix

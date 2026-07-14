@@ -86,6 +86,25 @@ type ChatThinking struct {
 	Prelude string
 	// OffSuffix is appended after the generation cue when thinking is off.
 	OffSuffix string
+	// DefaultOn is the dialect's OWN thinking default, applied when a request
+	// leaves the flag unset (nil): gemma4 declares true — the vendor family
+	// default ("thinking is on by default") — so an explicit false is what
+	// renders the off cue, matching the shipped chat_template.jinja. Dialects
+	// whose vendor default is off leave it false (#1847).
+	DefaultOn bool
+}
+
+// ResolveThinking resolves a request's thinking flag against the dialect's own
+// default: an explicit flag always wins; unset (nil) takes the template's
+// ChatThinking.DefaultOn; a dialect with no reasoning channel is always off.
+//
+//	on := t.ResolveThinking(nil)    // gemma4: true, gemma3/ChatML: false
+//	on = t.ResolveThinking(&off)    // explicit flag wins everywhere
+func (t ChatTemplate) ResolveThinking(enableThinking *bool) bool {
+	if enableThinking != nil {
+		return *enableThinking
+	}
+	return t.Thinking != nil && t.Thinking.DefaultOn
 }
 
 // ChatTemplateDeclarer is the optional [TokenModel] capability a loaded token
@@ -120,7 +139,10 @@ func GemmaChatTemplate(turns TurnTokens, suppressor bool) ChatTemplate {
 		InlineSystemAsUser: true,
 	}
 	if turns.Open == "<|turn>" {
-		th := &ChatThinking{Prelude: "<|think|>\n"}
+		// DefaultOn: gemma4's vendor default is thinking ON — an unset request
+		// flag renders the <|think|> switch; only an explicit false turns the
+		// channel off (and arms the suppressor on large variants). #1847.
+		th := &ChatThinking{Prelude: "<|think|>\n", DefaultOn: true}
 		if suppressor {
 			th.OffSuffix = "<|channel>thought\n<channel|>"
 		}
@@ -184,7 +206,7 @@ func writePlainTurns(out *strings.Builder, t ChatTemplate, messages []inference.
 // t.Thinking (nil = the dialect frames no reasoning channel). The gemma dialect
 // routed through here is byte-for-byte the old formatChatPrompt output.
 func renderChatTemplate(t ChatTemplate, messages []inference.Message, enableThinking *bool) string {
-	thinking := enableThinking != nil && *enableThinking
+	thinking := t.ResolveThinking(enableThinking)
 	prelude, offSuffix := "", ""
 	if t.Thinking != nil {
 		if thinking {

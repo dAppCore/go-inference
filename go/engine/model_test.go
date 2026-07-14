@@ -1228,7 +1228,9 @@ func TestModel_DetectTurnTokens_Ugly(t *testing.T) {
 func TestModel_TextModel_FormatChatPrompt_Gemma4Dialect(t *testing.T) {
 	m := NewTextModel(nil, newGemma4FixtureTokenizer(t), "gemma4", inference.ModelInfo{}, 8)
 	got := m.FormatChatPrompt([]inference.Message{{Role: "user", Content: "hi"}})
-	want := "<|turn>user\nhi<turn|>\n<|turn>model\n"
+	// The unset flag takes gemma4's OWN default — thinking ON (#1847) — so the
+	// leading system turn carries the <|think|> switch, per the vendor jinja.
+	want := "<|turn>system\n<|think|>\n<turn|>\n<|turn>user\nhi<turn|>\n<|turn>model\n"
 	if got != want {
 		t.Fatalf("FormatChatPrompt = %q, want %q", got, want)
 	}
@@ -1276,8 +1278,10 @@ func TestModel_FormatChatPrompt_ThinkPrelude(t *testing.T) {
 func TestModel_FormatChatPrompt_SystemTurn(t *testing.T) {
 	turns := TurnTokens{Open: "<|turn>", Close: "<turn|>"}
 	msgs := []inference.Message{{Role: "system", Content: "Be terse."}, {Role: "user", Content: "Hi"}}
+	// nil = the gemma4 family default (thinking ON, #1847): the folded system
+	// turn opens with the think switch exactly like the explicit-on case.
 	if got, want := formatChatPrompt(turns, msgs, nil, false),
-		"<|turn>system\nBe terse.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"; got != want {
+		"<|turn>system\n<|think|>\nBe terse.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"; got != want {
 		t.Fatalf("system turn = %q, want %q", got, want)
 	}
 	on := true
@@ -1287,10 +1291,11 @@ func TestModel_FormatChatPrompt_SystemTurn(t *testing.T) {
 	}
 }
 
-// TestModel_FormatChatPrompt_NoPreludeDefault pins the default paths: thinking
-// unset (or off) with no system message renders the plain turn history on
-// gemma4, and the legacy dialect NEVER gains a system turn or think marker
-// (gemma3-era templates have neither).
+// TestModel_FormatChatPrompt_NoPreludeDefault pins the opt-out + legacy paths:
+// thinking explicitly OFF with no system message renders the plain turn
+// history on gemma4 (unset now defaults ON — #1847), and the legacy dialect
+// NEVER gains a system turn or think marker (gemma3-era templates have
+// neither).
 func TestModel_FormatChatPrompt_NoPreludeDefault(t *testing.T) {
 	gemma4 := TurnTokens{Open: "<|turn>", Close: "<turn|>"}
 	msgs := []inference.Message{{Role: "user", Content: "Hi"}}
@@ -1318,17 +1323,20 @@ func TestModel_FormatChatPrompt_NoPreludeDefault(t *testing.T) {
 func TestModel_FormatChatPrompt_GhostSuppressor(t *testing.T) {
 	turns := TurnTokens{Open: "<|turn>", Close: "<turn|>"}
 	msgs := []inference.Message{{Role: "user", Content: "Hi"}}
-	want := "<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
-	if got := formatChatPrompt(turns, msgs, nil, true); got != want {
-		t.Fatalf("suppressor thinking-off = %q, want %q", got, want)
+	// nil = the family default (ON, #1847): the suppressor must NOT arm — it is
+	// the explicit opt-out cue, matching the jinja's `if not enable_thinking`.
+	wantOn := "<|turn>system\n<|think|>\n<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n"
+	if got := formatChatPrompt(turns, msgs, nil, true); got != wantOn {
+		t.Fatalf("suppressor default(nil) = %q, want the thinking-on framing %q", got, wantOn)
 	}
 	off := false
+	want := "<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
 	if got := formatChatPrompt(turns, msgs, &off, true); got != want {
 		t.Fatalf("suppressor explicit-off = %q, want %q", got, want)
 	}
 	sysMsgs := []inference.Message{{Role: "system", Content: "Be terse."}, {Role: "user", Content: "Hi"}}
 	wantSys := "<|turn>system\nBe terse.<turn|>\n<|turn>user\nHi<turn|>\n<|turn>model\n<|channel>thought\n<channel|>"
-	if got := formatChatPrompt(turns, sysMsgs, nil, true); got != wantSys {
+	if got := formatChatPrompt(turns, sysMsgs, &off, true); got != wantSys {
 		t.Fatalf("suppressor system-turn = %q, want %q", got, wantSys)
 	}
 	on := true
@@ -1356,8 +1364,14 @@ func TestModel_NewTextModel_ThoughtSuppressorDeclared(t *testing.T) {
 	tok := newGemma4FixtureTokenizer(t)
 	msgs := []inference.Message{{Role: "user", Content: "Hi"}}
 	declared := NewTextModel(thoughtSuppressorTokenModel{suppressor: true}, tok, "x", inference.ModelInfo{}, 8)
-	if got := declared.FormatChatPrompt(msgs); !strings.HasSuffix(got, "<|turn>model\n<|channel>thought\n<channel|>") {
+	// The suppressor arms on the EXPLICIT opt-out; the unset default is the
+	// family's thinking-ON (#1847), which renders no pre-closed channel.
+	off := false
+	if got := declared.FormatChatPromptWithThinking(msgs, &off); !strings.HasSuffix(got, "<|turn>model\n<|channel>thought\n<channel|>") {
 		t.Fatalf("declared suppressor prompt = %q, want the pre-closed thought channel suffix", got)
+	}
+	if got := declared.FormatChatPrompt(msgs); !strings.HasSuffix(got, "<|turn>model\n") {
+		t.Fatalf("declared default(nil) prompt = %q, want no pre-closed channel (thinking defaults on)", got)
 	}
 	small := NewTextModel(thoughtSuppressorTokenModel{suppressor: false}, tok, "x", inference.ModelInfo{}, 8)
 	if got := small.FormatChatPrompt(msgs); !strings.HasSuffix(got, "<|turn>model\n") {
@@ -1556,12 +1570,12 @@ func TestModel_FormatChatContinuationWithThinking(t *testing.T) {
 		t.Fatalf("thinking-off suppressor continuation = %q, want the pre-closed channel %q", got, wantOff)
 	}
 
-	// Ugly: a nil flag defaults to OFF (so a suppressor still emits the tail),
-	// while a checkpoint whose template frames no reasoning channel appends
-	// nothing even when off — the tail is suppressor-specific, not a blanket
-	// rewrite.
-	if got := suppressor.FormatChatContinuationWithThinking(msgs, nil); got != wantOff {
-		t.Fatalf("nil-flag suppressor continuation = %q, want the default-off tail %q", got, wantOff)
+	// Ugly: a nil flag takes the family default — thinking ON (#1847) — so even
+	// a suppressor checkpoint appends NO tail; and a checkpoint whose template
+	// frames no reasoning channel appends nothing even when explicitly off —
+	// the tail is suppressor-specific AND opt-out-specific.
+	if got := suppressor.FormatChatContinuationWithThinking(msgs, nil); got != base {
+		t.Fatalf("nil-flag suppressor continuation = %q, want the default-on plain continuation %q", got, base)
 	}
 	legacy := NewTextModel(&fakeTokenModel{}, newFixtureTokenizer(t), "gemma", inference.ModelInfo{}, 4096)
 	if got := legacy.FormatChatContinuationWithThinking(msgs, &off); got != legacy.FormatChatContinuation(msgs) {

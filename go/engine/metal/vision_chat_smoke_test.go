@@ -87,8 +87,12 @@ func TestEngineVisionChatAnswersImageE2B(t *testing.T) {
 		Images:  [][]byte{red},
 	}}
 
+	// Thinking off explicitly: the smoke wants the one-word answer inside a
+	// 64-token budget, and gemma4's family default (thinking ON, #1847) would
+	// spend the whole budget in the thought channel.
+	off := false
 	var b strings.Builder
-	for tok := range model.Chat(context.Background(), messages, inference.WithMaxTokens(64)) {
+	for tok := range model.Chat(context.Background(), messages, inference.WithMaxTokens(64), inference.WithEnableThinking(&off)) {
 		b.WriteString(tok.Text)
 	}
 	if r := model.Err(); !r.OK {

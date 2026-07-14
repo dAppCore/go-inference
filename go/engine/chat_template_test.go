@@ -199,3 +199,35 @@ func TestRenderChatTurns_StripsSystemAndThinking(t *testing.T) {
 		t.Fatalf("RenderChatTurns diverged from renderChatTurns: %q", got)
 	}
 }
+
+// TestChatTemplate_ResolveThinking_Good pins the family-default resolution: an
+// unset flag takes the dialect's DefaultOn (gemma4 → ON, #1847).
+func TestChatTemplate_ResolveThinking_Good(t *testing.T) {
+	g4 := GemmaChatTemplate(TurnTokens{Open: "<|turn>", Close: "<turn|>"}, false)
+	if !g4.ResolveThinking(nil) {
+		t.Fatal("gemma4 ResolveThinking(nil) = false, want the family default ON")
+	}
+}
+
+// TestChatTemplate_ResolveThinking_Bad pins the explicit override: a set flag
+// always wins over the dialect default, both directions.
+func TestChatTemplate_ResolveThinking_Bad(t *testing.T) {
+	g4 := GemmaChatTemplate(TurnTokens{Open: "<|turn>", Close: "<turn|>"}, true)
+	off, on := false, true
+	if g4.ResolveThinking(&off) {
+		t.Fatal("explicit false lost to the dialect default")
+	}
+	if !g4.ResolveThinking(&on) {
+		t.Fatal("explicit true did not resolve on")
+	}
+}
+
+// TestChatTemplate_ResolveThinking_Ugly pins the no-channel dialects: a
+// template without a Thinking framing (gemma3-era) resolves off on an unset
+// flag regardless of anything else.
+func TestChatTemplate_ResolveThinking_Ugly(t *testing.T) {
+	legacy := GemmaChatTemplate(TurnTokens{Open: "<start_of_turn>", Close: "<end_of_turn>"}, true)
+	if legacy.ResolveThinking(nil) {
+		t.Fatal("legacy dialect ResolveThinking(nil) = true, want off (no reasoning channel)")
+	}
+}
