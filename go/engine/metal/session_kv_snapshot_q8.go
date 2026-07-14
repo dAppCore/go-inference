@@ -109,6 +109,18 @@ func (r *archICBReplay) restoreQ8LayerRaw(li, start, tokenCount int, kPacked, vP
 	return nil
 }
 
+// armCanonicalLandingForKVQ8 arms the position-invariant per-token wake landing
+// on a woken q8 session, so a resident prefix + appended suffix is byte-identical
+// to a fresh whole prefill. The batched append is tile-position sensitive and the
+// q8 store amplifies that wobble into token flips; the restore is the engine-owned
+// seam, so a woken q8 session is answer-stable without the caller opting in
+// (#1846 wake landing). Mirrors RestoreKV's auto-arm for the block wake path.
+func (s *ArchSession) armCanonicalLandingForKVQ8() {
+	if s != nil && s.state.icb != nil && s.state.icb.hasKVQ8() {
+		s.reuseCanonicalLanding = true
+	}
+}
+
 // q8LayerGeometry returns layer li's (kvd, cacheRows) after validating it is a
 // live q8 layer with allocated code + scale buffers.
 func (r *archICBReplay) q8LayerGeometry(li int) (kvd, rows int, err error) {
@@ -163,6 +175,54 @@ func q8NativeToTokenRowsBF16(packed []byte, tokenCount, kvd int) ([]byte, error)
 // block on both K and V.
 func nativeKVLayerIsQ8Native(layer kv.LayerSnapshot) bool {
 	return layer.KeyDType == kv.KVNativeDTypeQ8 && layer.ValueDType == kv.KVNativeDTypeQ8
+}
+
+// restoreQ8NativeBlockLayer lands one q8-native block layer for view at the
+// absolute window [start, start+tokenCount). Into a q8-armed store it writes the
+// int8 codes + f32 scales VERBATIM (bit-exact) and returns landedRaw=true so the
+// caller skips the requantise flush — the restore target's stateLayerViews
+// materialised the bf16 mirror, so a flush would clobber the just-written codes
+// with a requantise of the stale mirror. Into a non-q8 store it dequantises the
+// block into bf16 token rows (documented lossy: the bytes match a live q8 read,
+// but the store keeps the bf16 view). Mirrors RestoreKV's q8-native arm for the
+// block lane (#1846). start is the block's absolute TokenStart, not position-len.
+func (s *ArchSession) restoreQ8NativeBlockLayer(layer kv.LayerSnapshot, view sessionStateLayerView, start, tokenCount, position int) (landedRaw bool, err error) {
+	windowTokens, kvd, err := nativeKVQ8NativeWindow(layer, view)
+	if err != nil {
+		return false, err
+	}
+	if windowTokens != tokenCount {
+		return false, core.NewError("native.RestoreKVBlocks: q8-native block window length mismatch")
+	}
+	if s.state.icb != nil && s.state.icb.kvQ8.on(view.layer) {
+		if err := s.state.icb.restoreQ8LayerRaw(view.layer, start, tokenCount, layer.KeyBytes, layer.ValueBytes); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	keyRows, err := q8NativeToTokenRowsBF16(layer.KeyBytes, tokenCount, kvd)
+	if err != nil {
+		return false, err
+	}
+	valueRows, err := q8NativeToTokenRowsBF16(layer.ValueBytes, tokenCount, kvd)
+	if err != nil {
+		return false, err
+	}
+	block := SessionStateLayerBlock{
+		Layer:      view.layer,
+		CacheIndex: view.cacheIndex,
+		CacheMode:  view.cacheMode,
+		MaxSize:    view.maxSize,
+		KVHeads:    view.kvHeads,
+		HeadDim:    view.headDim,
+		RowBytes:   view.rowBytes,
+		KeyBytes:   keyRows,
+		ValueBytes: valueRows,
+	}
+	if err := restoreStateBlockLayer(view, start, tokenCount, position, block); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // nativeKVQ8NativeWindow validates a q8-native layer's [1, heads, seq, headDim]

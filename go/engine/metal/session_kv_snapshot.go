@@ -403,8 +403,18 @@ func restoreNativeKVLayerSlabs(scope string, view sessionStateLayerView, start, 
 // native cache. It avoids assembling the blocks into a monolithic CPU snapshot
 // before writing cache rows.
 func (s *ArchSession) RestoreKVBlocks(source KVBlockSource) error {
+	// A raw q8-native block landing writes int8 codes straight into the store; the
+	// restore target's stateLayerViews already materialised the bf16 mirror, so
+	// flushing (requantising the stale mirror into the codes) would clobber the
+	// just-written codes — skip it for those layers (#1846 block lane). A bf16
+	// block into a q8 store still lands through the mirror and needs the flush.
+	var rawQ8Restore bool
 	if s != nil && s.state.icb != nil {
-		defer func() { s.state.icb.flushQ8Mirrors(s.pos) }() // requantise the restored rows (pos set by the restore)
+		defer func() {
+			if !rawQ8Restore {
+				s.state.icb.flushQ8Mirrors(s.pos) // requantise the restored rows (pos set by the restore)
+			}
+		}()
 	}
 	if s == nil {
 		return core.NewError("native.RestoreKVBlocks: nil session")
@@ -446,6 +456,7 @@ func (s *ArchSession) RestoreKVBlocks(source KVBlockSource) error {
 		if err := s.RestoreStateBlocks(stateSource); err != nil {
 			return core.E("native.RestoreKVBlocks", "native state source", err)
 		}
+		s.armCanonicalLandingForKVQ8() // woken q8 append lands position-invariant (#1846)
 		return nil
 	}
 	targetViews, err := s.stateLayerViews()
@@ -508,8 +519,12 @@ func (s *ArchSession) RestoreKVBlocks(source KVBlockSource) error {
 		if len(block.Snapshot.Tokens) != block.TokenCount {
 			return core.NewError("native.RestoreKVBlocks: block token count mismatch")
 		}
-		if err := s.restoreKVSnapshotBlockLayers(block, prefixTokens, targetViews); err != nil {
+		landedRawQ8, err := s.restoreKVSnapshotBlockLayers(block, prefixTokens, targetViews)
+		if err != nil {
 			return err
+		}
+		if landedRawQ8 {
+			rawQ8Restore = true
 		}
 		cachedIDs = append(cachedIDs, block.Snapshot.Tokens...)
 		expectedStart += block.TokenCount
@@ -529,6 +544,7 @@ func (s *ArchSession) RestoreKVBlocks(source KVBlockSource) error {
 	if err := s.reloadPagedStateLayerViews(prefixTokens, targetViews); err != nil {
 		return err
 	}
+	s.armCanonicalLandingForKVQ8() // woken q8 append lands position-invariant (#1846)
 	if prefixTokens == source.TokenCount && len(source.RetainedLogits) > 0 {
 		return s.restoreKVBlockMetadataRetainedLogits(cachedIDs, generated, source.RetainedLogits, prefixTokens)
 	}
@@ -733,6 +749,26 @@ func (s *ArchSession) kvBlockFromStateBlock(source SessionStateBlockSource, bloc
 		if err != nil {
 			return kv.Block{}, err
 		}
+		// q8-armed layers carry the store's RAW int8 codes + f32 scales verbatim
+		// under kv.KVNativeDTypeQ8 so a q8→q8 block sleep/wake is bit-exact — the
+		// bf16 slab above double-quantises on restore, perturbing every prefix row
+		// (#1846 block lane, mirroring the snapshot lane). Gated on RawKVOnly:
+		// that is the native (uncompressed) lane whose block is wire-encoded
+		// as-is, so the raw dtype is carried. The non-native lane keeps its
+		// dequantised per-head float32 (TurboQuant / kv.Analyze / blocks_save
+		// re-quantise it) — the wire codec cannot carry a raw tensor alongside a
+		// non-native encoding (errRawTensorNeedsNative), and RawKVOnly is only
+		// set for EncodingNative (SaveKVBlocksToState), so the two never collide.
+		if opts.RawKVOnly && s.state.icb != nil && s.state.icb.kvQ8.on(layerBlock.Layer) {
+			kPacked, vPacked, err := s.state.icb.captureQ8LayerRaw(layerBlock.Layer, block.TokenStart, block.TokenCount)
+			if err != nil {
+				return kv.Block{}, err
+			}
+			layer.KeyDType = kv.KVNativeDTypeQ8
+			layer.KeyBytes = kPacked
+			layer.ValueDType = kv.KVNativeDTypeQ8
+			layer.ValueBytes = vPacked
+		}
 		layers[layerBlock.Layer] = layer
 	}
 	snapshot := &kv.Snapshot{
@@ -803,14 +839,28 @@ func nativeKVLayerBlockSnapshot(block SessionStateLayerBlock, tokenCount int, ra
 	return layer, nil
 }
 
-func (s *ArchSession) restoreKVSnapshotBlockLayers(block kv.Block, position int, targetViews []sessionStateLayerView) error {
+// restoreKVSnapshotBlockLayers lands one block's layers into the resident cache
+// and reports landedRawQ8 = at least one layer took the bit-exact q8-native path
+// (int8 codes written straight into a q8 store), so the caller skips the mirror
+// requantise flush that would otherwise clobber those codes (#1846 block lane).
+func (s *ArchSession) restoreKVSnapshotBlockLayers(block kv.Block, position int, targetViews []sessionStateLayerView) (landedRawQ8 bool, err error) {
 	for _, view := range targetViews {
 		layer, ok := nativeKVSnapshotLayer(block.Snapshot, view.layer)
 		if !ok {
-			return core.NewError("native.RestoreKVBlocks: missing layer")
+			return landedRawQ8, core.NewError("native.RestoreKVBlocks: missing layer")
 		}
 		if err := nativeKVValidateLayerMetadata("native.RestoreKVBlocks", layer, view); err != nil {
-			return err
+			return landedRawQ8, err
+		}
+		if nativeKVLayerIsQ8Native(layer) {
+			raw, err := s.restoreQ8NativeBlockLayer(layer, view, block.TokenStart, block.TokenCount, position)
+			if err != nil {
+				return landedRawQ8, err
+			}
+			if raw {
+				landedRawQ8 = true
+			}
+			continue
 		}
 		if !nativeKVLayerHasPayload(layer) {
 			empty := SessionStateLayerBlock{
@@ -823,18 +873,18 @@ func (s *ArchSession) restoreKVSnapshotBlockLayers(block kv.Block, position int,
 				RowBytes:   view.rowBytes,
 			}
 			if err := restoreStateBlockLayer(view, block.TokenStart, block.TokenCount, position, empty); err != nil {
-				return err
+				return landedRawQ8, err
 			}
 			continue
 		}
 		if keySlab, valueSlab, tokenCount, ok, err := nativeKVLayerSnapshotDirectBF16Slabs("native.RestoreKVBlocks", layer, view); err != nil {
-			return err
+			return landedRawQ8, err
 		} else if ok {
 			if tokenCount != block.TokenCount {
-				return core.NewError("native.RestoreKVBlocks: layer window length mismatch")
+				return landedRawQ8, core.NewError("native.RestoreKVBlocks: layer window length mismatch")
 			}
 			if err := restoreNativeKVLayerSlabs("native.RestoreKVBlocks", view, block.TokenStart, tokenCount, position, keySlab, valueSlab); err != nil {
-				return err
+				return landedRawQ8, err
 			}
 			continue
 		}
@@ -842,19 +892,19 @@ func (s *ArchSession) restoreKVSnapshotBlockLayers(block kv.Block, position int,
 		var tokenCount int
 		if len(layer.TurboQuantPayloads) > 0 {
 			if ok, err := s.restoreTurboQuantKVLayerRowsInto(view, block.TokenStart, block.TokenCount, position, layer.TurboQuantPayloads, 0); err != nil {
-				return err
+				return landedRawQ8, err
 			} else if ok {
 				continue
 			}
 			var err error
 			keyRows, valueRows, tokenCount, err = nativeTurboQuantKVLayerRows(layer.TurboQuantPayloads, view)
 			if err != nil {
-				return err
+				return landedRawQ8, err
 			}
 		} else {
 			keySlab, valueSlab, seqLen, err := nativeKVLayerSnapshotSlabs(layer, view)
 			if err != nil {
-				return err
+				return landedRawQ8, err
 			}
 			tokenCount = seqLen
 			keyRows = make([]byte, tokenCount*view.rowBytes)
@@ -863,7 +913,7 @@ func (s *ArchSession) restoreKVSnapshotBlockLayers(block kv.Block, position int,
 			nativeKVLayerSlabToTokenRows(valueRows, valueSlab, tokenCount, view.kvHeads, view.headDim)
 		}
 		if tokenCount != block.TokenCount {
-			return core.NewError("native.RestoreKVBlocks: layer window length mismatch")
+			return landedRawQ8, core.NewError("native.RestoreKVBlocks: layer window length mismatch")
 		}
 		layerBlock := SessionStateLayerBlock{
 			Layer:      view.layer,
@@ -877,10 +927,10 @@ func (s *ArchSession) restoreKVSnapshotBlockLayers(block kv.Block, position int,
 			ValueBytes: valueRows,
 		}
 		if err := restoreStateBlockLayer(view, block.TokenStart, block.TokenCount, position, layerBlock); err != nil {
-			return err
+			return landedRawQ8, err
 		}
 	}
-	return nil
+	return landedRawQ8, nil
 }
 
 func (s *ArchSession) restoreKVSnapshotBlockLayersPrefix(block kv.Block, tokenCount, position int, targetViews []sessionStateLayerView) error {

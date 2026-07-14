@@ -3,6 +3,7 @@
 package kv
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
@@ -143,6 +144,73 @@ func TestBlocksSave_SaveStateBlocksFromStream_Good(t *testing.T) {
 	}
 	if len(bundle.Blocks) == 0 || bundle.SnapshotHash == "" {
 		t.Fatalf("SaveStateBlocksFromStream() bundle = %+v, want at least one block + hash", bundle)
+	}
+}
+
+// TestBlocksSave_Q8NativeStreamRoundTrip pins the DISK block round trip for the
+// raw q8 KV payload (#1846 block lane): a q8-native block streamed through
+// SaveStateBlocksFromStream (the native sleep lane) and loaded back per block
+// carries the opaque int8-codes+f32-scales payload byte-exact, and the bundle
+// hash is produced. The engine restores native blocks one at a time (never
+// AssembleBlocks), so this locks the blocks_save / blocks_load codec that lane
+// depends on — the encoded-size, stream-write, and decode arms of KVNativeDTypeQ8.
+func TestBlocksSave_Q8NativeStreamRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store := state.NewInMemoryStore(nil)
+
+	kBlock := make([]byte, 30)
+	vBlock := make([]byte, 30)
+	for i := range kBlock {
+		kBlock[i] = byte(i*7 + 1)
+		vBlock[i] = byte(i*11 + 3)
+	}
+	block := Block{Index: 0, TokenStart: 0, TokenCount: 3, Snapshot: &Snapshot{
+		Version:       SnapshotVersion,
+		Architecture:  "gemma4_text",
+		Tokens:        []int32{1, 2, 3},
+		TokenOffset:   3,
+		NumLayers:     1,
+		NumHeads:      2,
+		SeqLen:        3,
+		HeadDim:       4,
+		NumQueryHeads: 2,
+		Layers: []LayerSnapshot{{
+			Layer:      0,
+			CacheIndex: 0,
+			CacheMode:  "fixed",
+			KeyDType:   KVNativeDTypeQ8,
+			KeyBytes:   kBlock,
+			KeyShape:   []int32{1, 2, 3, 4},
+			ValueDType: KVNativeDTypeQ8,
+			ValueBytes: vBlock,
+			ValueShape: []int32{1, 2, 3, 4},
+		}},
+	}}
+
+	bundle, err := SaveStateBlocksFromStream(ctx, store, StateBlockOptions{BlockSize: 4, KVEncoding: EncodingNative}, func(yield func(Block) (bool, error)) error {
+		_, err := yield(block)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("SaveStateBlocksFromStream(q8-native) error = %v", err)
+	}
+	if len(bundle.Blocks) != 1 || bundle.SnapshotHash == "" {
+		t.Fatalf("bundle = %+v, want one block + hash", bundle)
+	}
+
+	loaded, err := LoadStateBlockWithOptions(ctx, store, bundle.Blocks[0], LoadOptions{RawKVOnly: true})
+	if err != nil {
+		t.Fatalf("LoadStateBlockWithOptions(q8-native) error = %v", err)
+	}
+	if loaded.Snapshot == nil || len(loaded.Snapshot.Layers) != 1 {
+		t.Fatalf("loaded block = %+v, want one layer", loaded)
+	}
+	layer := loaded.Snapshot.Layers[0]
+	if layer.KeyDType != KVNativeDTypeQ8 || layer.ValueDType != KVNativeDTypeQ8 {
+		t.Fatalf("loaded dtype key=%q value=%q, want %q", layer.KeyDType, layer.ValueDType, KVNativeDTypeQ8)
+	}
+	if !bytes.Equal(layer.KeyBytes, kBlock) || !bytes.Equal(layer.ValueBytes, vBlock) {
+		t.Fatal("q8-native block payload diverged across the disk round trip")
 	}
 }
 

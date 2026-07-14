@@ -223,7 +223,7 @@ func TestArchSessionRestoreKVSnapshotBlockLayers_Good(t *testing.T) {
 		}}},
 	}
 
-	if err := (&ArchSession{}).restoreKVSnapshotBlockLayers(block, start+tokens, []sessionStateLayerView{view}); err != nil {
+	if _, err := (&ArchSession{}).restoreKVSnapshotBlockLayers(block, start+tokens, []sessionStateLayerView{view}); err != nil {
 		t.Fatalf("restoreKVSnapshotBlockLayers: %v", err)
 	}
 	wantKey := append([]byte(nil), beforeKey...)
@@ -254,7 +254,7 @@ func TestArchSessionRestoreKVSnapshotBlockLayers_Bad(t *testing.T) {
 		ValueDType: nativeKVSnapshotDTypeBF16, ValueBytes: seededKVBytes(rowBytes, 277), ValueShape: []int32{1, heads, tokens, headDim},
 	}}}}
 
-	if err := (&ArchSession{}).restoreKVSnapshotBlockLayers(block, tokens, []sessionStateLayerView{view}); err == nil {
+	if _, err := (&ArchSession{}).restoreKVSnapshotBlockLayers(block, tokens, []sessionStateLayerView{view}); err == nil {
 		t.Fatal("restoreKVSnapshotBlockLayers accepted a mismatched cache index")
 	}
 	// Metadata is checked before the raw slab is decoded or any resident row is
@@ -280,7 +280,7 @@ func TestArchSessionRestoreKVSnapshotBlockLayers_Ugly(t *testing.T) {
 		ValueDType: nativeKVSnapshotDTypeBF16, ValueBytes: valueSlab, ValueShape: []int32{1, heads, tokens, headDim},
 	}}}}
 
-	if err := (&ArchSession{}).restoreKVSnapshotBlockLayers(block, position, []sessionStateLayerView{view}); err != nil {
+	if _, err := (&ArchSession{}).restoreKVSnapshotBlockLayers(block, position, []sessionStateLayerView{view}); err != nil {
 		t.Fatalf("restoreKVSnapshotBlockLayers wrapped restore: %v", err)
 	}
 	// At absolute rows 3 and 4, a three-row sliding ring writes physical slots
