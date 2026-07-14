@@ -168,6 +168,7 @@ func TestHIPGGUFQ4_0SelectedExpertsLaunch_Good_Pair16ProductionShape(t *testing.
 }
 
 func TestHIPGGUFMixedSelectedExpertsLaunch_Good(t *testing.T) {
+	t.Setenv(hipGemma4SelectedExpertPair16Env, "0")
 	driver := &fakeHIPDriver{available: true}
 	input := hipBorrowDeviceByteBufferValue(driver, "input", 11, 256*4, 256)
 	activation := hipBorrowDeviceByteBufferValue(driver, "activation", 22, 2*32*4, 2*32)
@@ -188,6 +189,7 @@ func TestHIPGGUFMixedSelectedExpertsLaunch_Good(t *testing.T) {
 }
 
 func TestHIPGGUFMixedSelectedExpertsQ8_0DownLaunch_Good(t *testing.T) {
+	t.Setenv(hipGemma4SelectedExpertPair16Env, "0")
 	driver := &fakeHIPDriver{available: true}
 	input := hipBorrowDeviceByteBufferValue(driver, "input", 11, 256*4, 256)
 	activation := hipBorrowDeviceByteBufferValue(driver, "activation", 22, 2*32*4, 2*32)
@@ -205,6 +207,55 @@ func TestHIPGGUFMixedSelectedExpertsQ8_0DownLaunch_Good(t *testing.T) {
 	core.AssertEqual(t, 2, len(driver.launches))
 	core.AssertEqual(t, hipKernelNameGGUFQ4KSelectedExpertGateUp, driver.launches[0].Name)
 	core.AssertEqual(t, hipKernelNameGGUFQ8_0SelectedExpertDown, driver.launches[1].Name)
+}
+
+func TestHIPGGUFMixedSelectedExpertsLaunch_Good_Pair16ProductionShape(t *testing.T) {
+	t.Setenv(hipGemma4SelectedExpertPair16Env, "")
+	const (
+		topK     = 8
+		hidden   = 2816
+		expertFF = 704
+	)
+	for _, test := range []struct {
+		name       string
+		downFormat uint32
+		downBlock  int
+		downKernel string
+	}{
+		{name: "Q5_1", downFormat: hipGGUFExpertFormatQ5_1, downBlock: hipGGUFQ5_1BlockBytes, downKernel: "rocm_gguf_q5_1_selected_expert_down_pair16"},
+		{name: "Q8_0", downFormat: hipGGUFExpertFormatQ8_0, downBlock: hipGGUFQ8_0BlockBytes, downKernel: "rocm_gguf_q8_0_selected_expert_down_pair16"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			driver := &fakeHIPDriver{available: true}
+			input := hipBorrowDeviceByteBufferValue(driver, "input", 11, hidden*4, hidden)
+			activation := hipBorrowDeviceByteBufferValue(driver, "activation", 22, topK*expertFF*4, topK*expertFF)
+			output := hipBorrowDeviceByteBufferValue(driver, "output", 33, hidden*4, hidden)
+			gateUpBytes := uint64(2 * expertFF * (hidden / hipGGUFQ4KBlockSize) * hipGGUFQ4KBlockBytes)
+			downBytes := uint64(hidden * (expertFF / hipGGUFQ4_0BlockSize) * test.downBlock)
+			entries := make([]*hipGemma4ExpertCacheEntry, topK)
+			routeWeights := make([]float32, topK)
+			for index := range entries {
+				gateUp := hipBorrowDeviceByteBufferValue(driver, "gate up", nativeDevicePointer(101+index), gateUpBytes, int(gateUpBytes))
+				down := hipBorrowDeviceByteBufferValue(driver, "down", nativeDevicePointer(201+index), downBytes, int(downBytes))
+				entries[index] = &hipGemma4ExpertCacheEntry{
+					GateUp: &gateUp, Down: &down,
+					GateUpRows: 2 * expertFF, GateUpCols: hidden,
+					DownRows: hidden, DownCols: expertFF,
+					GateUpFormat: hipGGUFExpertFormatQ4K, DownFormat: test.downFormat,
+				}
+				routeWeights[index] = 1 / float32(topK)
+			}
+
+			core.RequireNoError(t, hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(context.Background(), driver, &input, entries, routeWeights, hidden, expertFF, &activation, &output))
+			core.AssertEqual(t, 2, len(driver.launches))
+			core.AssertEqual(t, "rocm_gguf_q4_k_selected_expert_gate_up_pair16", driver.launches[0].Name)
+			core.AssertEqual(t, test.downKernel, driver.launches[1].Name)
+			core.AssertEqual(t, uint32(352), driver.launches[0].GridX)
+			core.AssertEqual(t, uint32(176), driver.launches[1].GridX)
+			core.AssertEqual(t, uint32(256), driver.launches[0].BlockX)
+			core.AssertEqual(t, uint32(256), driver.launches[1].BlockX)
+		})
+	}
 }
 
 func TestHIPGGUFQ4_0ProjectionLaunch_Good(t *testing.T) {
@@ -392,8 +443,8 @@ func TestHIPGemma4ExpertCache_Good_AdaptsToLiveHeadroom(t *testing.T) {
 
 func TestHIPGemma4ExpertCacheBudget_Good(t *testing.T) {
 	core.AssertEqual(t, uint64(8*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 12 * memoryGiB}}))
-	core.AssertEqual(t, uint64(7*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 11 * memoryGiB}}))
-	core.AssertEqual(t, uint64(3*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 7 * memoryGiB}}))
+	core.AssertEqual(t, uint64(8*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 11 * memoryGiB}}))
+	core.AssertEqual(t, uint64(5*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true, device: nativeDeviceInfo{FreeBytes: 7 * memoryGiB}}))
 	core.AssertEqual(t, uint64(6*memoryGiB), hipGemma4ExpertCacheBudget(&fakeHIPDriver{available: true}))
 }
 

@@ -68,7 +68,7 @@ type hipGGUFQ4_0SelectedExpertsLaunchArgs struct {
 const (
 	hipGemma4ExpertCacheDefaultBytes = 6 * memoryGiB
 	hipGemma4ExpertCacheMaximumBytes = 8 * memoryGiB
-	hipGemma4ExpertCacheReserveBytes = 4 * memoryGiB
+	hipGemma4ExpertCacheReserveBytes = 2 * memoryGiB
 	hipGemma4ExpertCacheRefreshEvery = 256
 )
 
@@ -1342,11 +1342,21 @@ func hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(ctx c
 		downKernel = hipKernelNameGGUFQ4_0SelectedExpertDownPair16
 		rowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
 	} else if args.GateUpFormat == hipGGUFExpertFormatQ4K && (args.DownFormat == hipGGUFExpertFormatQ5_1 || args.DownFormat == hipGGUFExpertFormatQ8_0) {
-		gateKernel = hipKernelNameGGUFQ4KSelectedExpertGateUp
-		if args.DownFormat == hipGGUFExpertFormatQ5_1 {
-			downKernel = hipKernelNameGGUFQ5_1SelectedExpertDown
+		if core.Env(hipGemma4SelectedExpertPair16Env) != "0" {
+			gateKernel = hipKernelNameGGUFQ4KSelectedExpertGateUpPair16
+			if args.DownFormat == hipGGUFExpertFormatQ5_1 {
+				downKernel = hipKernelNameGGUFQ5_1SelectedExpertDownPair16
+			} else {
+				downKernel = hipKernelNameGGUFQ8_0SelectedExpertDownPair16
+			}
+			rowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
 		} else {
-			downKernel = hipKernelNameGGUFQ8_0SelectedExpertDown
+			gateKernel = hipKernelNameGGUFQ4KSelectedExpertGateUp
+			if args.DownFormat == hipGGUFExpertFormatQ5_1 {
+				downKernel = hipKernelNameGGUFQ5_1SelectedExpertDown
+			} else {
+				downKernel = hipKernelNameGGUFQ8_0SelectedExpertDown
+			}
 		}
 	} else if args.GateUpFormat != hipGGUFExpertFormatQ4_0 || args.DownFormat != hipGGUFExpertFormatQ4_0 {
 		return core.E("rocm.hip.GGUFQ4_0SelectedExpertsLaunch", "selected expert format pair is unsupported", nil)

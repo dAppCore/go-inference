@@ -455,9 +455,21 @@ func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {
 	core.RequireNoError(t, err)
 	defer output.Close()
 	routeWeights := []float32{0.625, 0.375}
-	core.RequireNoError(t, hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(context.Background(), runtime.(*hipRuntime).driver, inputBuffer, entries, routeWeights, hidden, expertFF, activation, output))
-	got, err := hipReadFloat32DeviceOutput(output, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed output", hidden)
-	core.RequireNoError(t, err)
+	runMixed := func(pair16 string) []float32 {
+		t.Helper()
+		t.Setenv(hipGemma4SelectedExpertPair16Env, pair16)
+		core.RequireNoError(t, hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(context.Background(), runtime.(*hipRuntime).driver, inputBuffer, entries, routeWeights, hidden, expertFF, activation, output))
+		got, readErr := hipReadFloat32DeviceOutput(output, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed output", hidden)
+		core.RequireNoError(t, readErr)
+		return got
+	}
+	gotBaseline := runMixed("0")
+	got := runMixed("1")
+	for index := range gotBaseline {
+		if math.Float32bits(gotBaseline[index]) != math.Float32bits(got[index]) {
+			t.Fatalf("mixed Q5_1 pair16 output[%d] = %08x, baseline = %08x", index, math.Float32bits(got[index]), math.Float32bits(gotBaseline[index]))
+		}
+	}
 
 	want := make([]float32, hidden)
 	for expert := 0; expert < selectedExperts; expert++ {
@@ -487,9 +499,13 @@ func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {
 		entries[expert].Down = downBuffer
 		entries[expert].DownFormat = hipGGUFExpertFormatQ8_0
 	}
-	core.RequireNoError(t, hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(context.Background(), runtime.(*hipRuntime).driver, inputBuffer, entries, routeWeights, hidden, expertFF, activation, output))
-	gotQ8, err := hipReadFloat32DeviceOutput(output, "rocm.hip.GGUFMixedSelectedExpertsLaunch", "hardware mixed Q8_0 output", hidden)
-	core.RequireNoError(t, err)
+	gotQ8Baseline := runMixed("0")
+	gotQ8 := runMixed("1")
+	for index := range gotQ8Baseline {
+		if math.Float32bits(gotQ8Baseline[index]) != math.Float32bits(gotQ8[index]) {
+			t.Fatalf("mixed Q8_0 pair16 output[%d] = %08x, baseline = %08x", index, math.Float32bits(gotQ8[index]), math.Float32bits(gotQ8Baseline[index]))
+		}
+	}
 	wantQ8 := make([]float32, hidden)
 	for expert := 0; expert < selectedExperts; expert++ {
 		activationValues := make([]float32, expertFF)

@@ -5723,6 +5723,44 @@ __device__ float rocm_gguf_q4_k_projection_row_sum(
 	return sum;
 }
 
+__device__ void rocm_gguf_q4_k_projection_row_pair16_sums(
+	const float *input,
+	const unsigned char *weights,
+	uint32_t row,
+	uint32_t cols,
+	uint32_t col_lane,
+	float &low_sum,
+	float &high_sum)
+{
+	const uint32_t blocks_per_row = cols >> 8u;
+	const uint64_t row_base = static_cast<uint64_t>(row) * blocks_per_row * 144u;
+	low_sum = 0.0f;
+	high_sum = 0.0f;
+	for (uint32_t block_index = 0; block_index < blocks_per_row; ++block_index) {
+		const unsigned char *block = weights + row_base + static_cast<uint64_t>(block_index) * 144u;
+		const uint16_t d_bits = static_cast<uint16_t>(block[0]) | (static_cast<uint16_t>(block[1]) << 8u);
+		const uint16_t dmin_bits = static_cast<uint16_t>(block[2]) | (static_cast<uint16_t>(block[3]) << 8u);
+		const float d = rocm_half_to_float(d_bits);
+		const float dmin = rocm_half_to_float(dmin_bits);
+		const uint32_t block_col = block_index << 8u;
+		for (uint32_t group = 0; group < 8u; ++group) {
+			uint32_t scale = 0;
+			uint32_t minimum = 0;
+			rocm_gguf_q4_k_scale_min(block + 4u, group, scale, minimum);
+			const uint32_t quant_base = 16u + (group >> 1u) * 32u;
+			const unsigned char packed_low = block[quant_base + col_lane];
+			const unsigned char packed_high = block[quant_base + 16u + col_lane];
+			const uint32_t quant_low = (group & 1u) == 0u ? (packed_low & 0x0fu) : (packed_low >> 4u);
+			const uint32_t quant_high = (group & 1u) == 0u ? (packed_high & 0x0fu) : (packed_high >> 4u);
+			const float low_value = d * static_cast<float>(scale * quant_low) - dmin * static_cast<float>(minimum);
+			const float high_value = d * static_cast<float>(scale * quant_high) - dmin * static_cast<float>(minimum);
+			const uint32_t group_col = block_col + (group << 5u);
+			low_sum += input[group_col + col_lane] * low_value;
+			high_sum += input[group_col + 16u + col_lane] * high_value;
+		}
+	}
+}
+
 __device__ float rocm_gguf_q5_1_projection_row_sum(
 	const float *input,
 	const unsigned char *weights,
@@ -5752,6 +5790,40 @@ __device__ float rocm_gguf_q5_1_projection_row_sum(
 	return sum;
 }
 
+__device__ void rocm_gguf_q5_1_projection_row_pair16_sums(
+	const float *input,
+	const unsigned char *weights,
+	uint32_t row,
+	uint32_t cols,
+	uint32_t col_lane,
+	float &low_sum,
+	float &high_sum)
+{
+	const uint32_t blocks_per_row = cols >> 5u;
+	const uint64_t row_base = static_cast<uint64_t>(row) * blocks_per_row * 24u;
+	low_sum = 0.0f;
+	high_sum = 0.0f;
+	for (uint32_t block_index = 0; block_index < blocks_per_row; ++block_index) {
+		const unsigned char *block = weights + row_base + static_cast<uint64_t>(block_index) * 24u;
+		const uint16_t d_bits = static_cast<uint16_t>(block[0]) | (static_cast<uint16_t>(block[1]) << 8u);
+		const uint16_t m_bits = static_cast<uint16_t>(block[2]) | (static_cast<uint16_t>(block[3]) << 8u);
+		const uint32_t qh = static_cast<uint32_t>(block[4]) |
+			(static_cast<uint32_t>(block[5]) << 8u) |
+			(static_cast<uint32_t>(block[6]) << 16u) |
+			(static_cast<uint32_t>(block[7]) << 24u);
+		const unsigned char packed = block[8u + col_lane];
+		uint32_t quant_low = packed & 0x0fu;
+		uint32_t quant_high = packed >> 4u;
+		quant_low |= ((qh >> col_lane) & 1u) << 4u;
+		quant_high |= ((qh >> (16u + col_lane)) & 1u) << 4u;
+		const float d = rocm_half_to_float(d_bits);
+		const float m = rocm_half_to_float(m_bits);
+		const uint32_t col_base = block_index << 5u;
+		low_sum += input[col_base + col_lane] * (d * static_cast<float>(quant_low) + m);
+		high_sum += input[col_base + 16u + col_lane] * (d * static_cast<float>(quant_high) + m);
+	}
+}
+
 __device__ float rocm_gguf_q8_0_projection_row_sum(
 	const float *input,
 	const unsigned char *weights,
@@ -5772,6 +5844,33 @@ __device__ float rocm_gguf_q8_0_projection_row_sum(
 		sum += input[col] * rocm_half_to_float(d_bits) * static_cast<float>(quant);
 	}
 	return sum;
+}
+
+__device__ void rocm_gguf_q8_0_projection_row_pair16_sums(
+	const float *input,
+	const unsigned char *weights,
+	uint32_t row,
+	uint32_t cols,
+	uint32_t col_lane,
+	float &low_sum,
+	float &high_sum)
+{
+	const uint32_t blocks_per_row = cols >> 5u;
+	const uint64_t row_base = static_cast<uint64_t>(row) * blocks_per_row * 34u;
+	low_sum = 0.0f;
+	high_sum = 0.0f;
+	for (uint32_t block_index = 0; block_index < blocks_per_row; ++block_index) {
+		const unsigned char *block = weights + row_base + static_cast<uint64_t>(block_index) * 34u;
+		const uint16_t d_bits = static_cast<uint16_t>(block[0]) | (static_cast<uint16_t>(block[1]) << 8u);
+		const uint32_t raw_low = block[2u + col_lane];
+		const uint32_t raw_high = block[18u + col_lane];
+		const int32_t quant_low = raw_low < 128u ? static_cast<int32_t>(raw_low) : static_cast<int32_t>(raw_low) - 256;
+		const int32_t quant_high = raw_high < 128u ? static_cast<int32_t>(raw_high) : static_cast<int32_t>(raw_high) - 256;
+		const float d = rocm_half_to_float(d_bits);
+		const uint32_t col_base = block_index << 5u;
+		low_sum += input[col_base + col_lane] * d * static_cast<float>(quant_low);
+		high_sum += input[col_base + 16u + col_lane] * d * static_cast<float>(quant_high);
+	}
 }
 
 extern "C" __global__ void rocm_gguf_q4_0_projection(const unsigned char *packet)
@@ -6038,6 +6137,103 @@ extern "C" __global__ void rocm_gguf_q8_0_selected_expert_down(const unsigned ch
 			sum = rocm_gguf_q8_0_projection_row_sum(activation + expert * args.expert_ff, weights, row, args.expert_ff, col_lane);
 		}
 		sum = rocm_mlx_q4_row_reduce(sum);
+		if (col_lane == 0u) {
+			combined += args.route_weights[expert] * sum;
+		}
+	}
+	if (col_lane == 0u && row < args.hidden_size) {
+		output[row] = combined;
+	}
+}
+
+extern "C" __global__ void rocm_gguf_q4_k_selected_expert_gate_up_pair16(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_gguf_q4_0_selected_experts_launch_args &args = *reinterpret_cast<const rocm_gguf_q4_0_selected_experts_launch_args *>(packet);
+	if (!rocm_valid_gguf_q4_0_selected_experts_args(args) || args.gate_up_format != ROCM_GGUF_EXPERT_FORMAT_Q4_K || blockDim.x != ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+	const uint32_t row_lane = threadIdx.x / ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW;
+	const uint32_t selected_row = blockIdx.x * ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_ROWS_PER_BLOCK + row_lane;
+	const uint32_t selected_rows = args.top_k * args.expert_ff;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *activation = reinterpret_cast<float *>(static_cast<uintptr_t>(args.activation_pointer));
+	float gate_low = 0.0f;
+	float gate_high = 0.0f;
+	float up_low = 0.0f;
+	float up_high = 0.0f;
+	if (selected_row < selected_rows) {
+		const uint32_t expert = selected_row / args.expert_ff;
+		const uint32_t row = selected_row - expert * args.expert_ff;
+		const unsigned char *weights = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(args.gate_up_pointers[expert]));
+		rocm_gguf_q4_k_projection_row_pair16_sums(input, weights, row, args.hidden_size, col_lane, gate_low, gate_high);
+		rocm_gguf_q4_k_projection_row_pair16_sums(input, weights, args.expert_ff + row, args.hidden_size, col_lane, up_low, up_high);
+	}
+	const float gate_sum = rocm_gguf_q4_0_projection_row_pair16_reduce(gate_low, gate_high);
+	const float up_sum = rocm_gguf_q4_0_projection_row_pair16_reduce(up_low, up_high);
+	if (col_lane == 0u && selected_row < selected_rows) {
+		activation[selected_row] = rocm_gelu_tanh_value(gate_sum) * up_sum;
+	}
+}
+
+extern "C" __global__ void rocm_gguf_q5_1_selected_expert_down_pair16(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_gguf_q4_0_selected_experts_launch_args &args = *reinterpret_cast<const rocm_gguf_q4_0_selected_experts_launch_args *>(packet);
+	if (!rocm_valid_gguf_q4_0_selected_experts_args(args) || args.down_format != ROCM_GGUF_EXPERT_FORMAT_Q5_1 || blockDim.x != ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+	const uint32_t row_lane = threadIdx.x / ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_ROWS_PER_BLOCK + row_lane;
+	const float *activation = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.activation_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	float combined = 0.0f;
+	for (uint32_t expert = 0; expert < args.top_k; ++expert) {
+		float low_sum = 0.0f;
+		float high_sum = 0.0f;
+		if (row < args.hidden_size) {
+			const unsigned char *weights = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(args.down_pointers[expert]));
+			rocm_gguf_q5_1_projection_row_pair16_sums(activation + expert * args.expert_ff, weights, row, args.expert_ff, col_lane, low_sum, high_sum);
+		}
+		const float sum = rocm_gguf_q4_0_projection_row_pair16_reduce(low_sum, high_sum);
+		if (col_lane == 0u) {
+			combined += args.route_weights[expert] * sum;
+		}
+	}
+	if (col_lane == 0u && row < args.hidden_size) {
+		output[row] = combined;
+	}
+}
+
+extern "C" __global__ void rocm_gguf_q8_0_selected_expert_down_pair16(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_gguf_q4_0_selected_experts_launch_args &args = *reinterpret_cast<const rocm_gguf_q4_0_selected_experts_launch_args *>(packet);
+	if (!rocm_valid_gguf_q4_0_selected_experts_args(args) || args.down_format != ROCM_GGUF_EXPERT_FORMAT_Q8_0 || blockDim.x != ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+	const uint32_t row_lane = threadIdx.x / ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_ROWS_PER_BLOCK + row_lane;
+	const float *activation = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.activation_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	float combined = 0.0f;
+	for (uint32_t expert = 0; expert < args.top_k; ++expert) {
+		float low_sum = 0.0f;
+		float high_sum = 0.0f;
+		if (row < args.hidden_size) {
+			const unsigned char *weights = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(args.down_pointers[expert]));
+			rocm_gguf_q8_0_projection_row_pair16_sums(activation + expert * args.expert_ff, weights, row, args.expert_ff, col_lane, low_sum, high_sum);
+		}
+		const float sum = rocm_gguf_q4_0_projection_row_pair16_reduce(low_sum, high_sum);
 		if (col_lane == 0u) {
 			combined += args.route_weights[expert] * sum;
 		}
