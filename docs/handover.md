@@ -1,4 +1,48 @@
-# NEXT WAKE (2026-07-18 — three-lane batch merge landed: GPU CE 16x, 26B-gap verdict, q8 reuse restored; TUI grew Service tab + tool loop)
+# NEXT WAKE (2026-07-18b — the 15-lane SDK fleet: every lane live, four serving defects found by friction and fixed same-day)
+
+## 2026-07-18 (later — the SDK fleet campaign)
+
+- FIFTEEN SDK LANES LIVE, merged to dev (2d885fd): go, python, rust,
+  typescript-fetch (the original four) + nine Sonnet lanes (java, kotlin,
+  swift6, php, ruby, javascript, typescript-axios, perl, c) + two
+  orchestrator lanes (bash curl client, jetbrains .http). Every lane ran
+  PAST hello world (models, two-turn memory, thinking toggle, usage,
+  friendly errors) against one e2b qat-4bit serve on :36911 (serial
+  scheduler). All 15 sdk-config/*.yaml regenerate clean via task sdk.
+  Snider's frame proven: "friction points show us whats missing" — FOUR
+  REAL DEFECTS found by the fleet and fixed same-day:
+  1. 1194ec4 — serial+batch scheduler lanes DROPPED EnableThinking (mux
+     lifted it onto ScheduledRequest, only interleave re-armed). Found by
+     the bash lane's first live call; TestSerialThinkingOverride +
+     TestBatchThinkingOverride pin it.
+  2. 49cc6bd — /v1/messages rejected Anthropic's string-content shorthand
+     with a misleading "invalid JSON" (decoder took blocks only). Found by
+     the http-client lane.
+  3. e71d7f7 — the spec placed thought under choices[].message; the wire
+     puts it on the RESPONSE ROOT. SIX lanes confirmed independently;
+     Java's strict Gson THREW on every thinking response
+     (disallowAdditionalPropertiesIfNotPresent default) — the strictest
+     deserialiser found what loose ones swallowed.
+  4. (earlier same day) multi-tag routes generated duplicate Go types —
+     single-tagged in serving/api.
+  GENERATOR INTEL BANKED (in each lane's README Friction section): the C
+  generator's output DOESN'T COMPILE stock (any_type_t undefined,
+  empty-prefix helpers — committed postgen-fix.sh); SwiftPM path-dep
+  identity = directory BASENAME (both dirs named swift collided — symlink
+  fix); kotlin needs JDK 21; php-nextgen vs php both pin ^8.1 (the
+  "newer floor" assumption is false); generated php client rewraps
+  Guzzle's ConnectException as ApiException (naive catch never fires);
+  the plain-JS generated package's prepare fails unless its own deps are
+  installed first (worse than the TS gate); perl's CPAN reputation
+  unearned here (2 missing deps, seconds); typescript-axios keeps
+  snake_case where fetch camelCases the SAME spec.
+- FOLLOW-UP MATERIAL: the Anthropic route does not split thinking into
+  content blocks (reasoning rides the text block; real Anthropic has
+  thinking blocks); csharp lane deferred (dotnet cask wants interactive
+  sudo — one brew command from joining).
+- Board task #398 closed with the full account.
+
+# PREVIOUS WAKE (2026-07-18 — three-lane batch merge landed: GPU CE 16x, 26B-gap verdict, q8 reuse restored; TUI grew Service tab + tool loop)
 
 ## 2026-07-18 (the batch merge + the TUI campaign)
 
