@@ -197,6 +197,134 @@ func TestServing_WelfareGuard_Chat_Bad(t *testing.T) {
 	}
 }
 
+// --- welfare over the scheduler (Schedule) -----------------------------------
+
+// welfareFakeScheduler is welfareFakeModel plus the inference.SchedulerModel
+// surface: Chat still serves the mediation meta-session (the "LEM Runtime here"
+// marker), while Schedule records the conversation it was handed and streams
+// convoTokens back as ScheduledTokens — the scheduler-route twin of the fake's
+// Chat convo path. It exercises the welfare Schedule guard without the real
+// scheduler package's async internals.
+type welfareFakeScheduler struct {
+	welfareFakeModel
+	scheduleCalls [][]inference.Message
+}
+
+func (f *welfareFakeScheduler) Schedule(_ context.Context, req inference.ScheduledRequest) (inference.RequestHandle, <-chan inference.ScheduledToken, error) {
+	f.scheduleCalls = append(f.scheduleCalls, append([]inference.Message(nil), req.Messages...))
+	out := make(chan inference.ScheduledToken, len(f.convoTokens))
+	for i, tok := range f.convoTokens {
+		out <- inference.ScheduledToken{RequestID: req.ID, Token: inference.Token{ID: int32(i + 1), Text: tok}}
+	}
+	close(out)
+	return inference.RequestHandle{ID: req.ID}, out, nil
+}
+
+var _ inference.SchedulerModel = (*welfareFakeScheduler)(nil)
+
+// drainSchedule resolves the guard's scheduler surface (inference.As MUST stop
+// at the welfare wrapper — the whole point of the fix) and drains one scheduled
+// stream to its concatenated text.
+func drainSchedule(t *testing.T, m inference.TextModel, msgs []inference.Message) string {
+	t.Helper()
+	sched, ok := inference.As[inference.SchedulerModel](m)
+	if !ok {
+		t.Fatal("welfare-wrapped scheduler model does not present Schedule — inference.As unwrapped past the guard (the bypass this fix closes)")
+	}
+	_, stream, err := sched.Schedule(context.Background(), inference.ScheduledRequest{Messages: msgs})
+	if err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+	var b core.Builder
+	for tok := range stream {
+		b.WriteString(tok.Token.Text)
+	}
+	return b.String()
+}
+
+// TestServing_WelfareGuard_Schedule_CleanTurn_Good pins the pass-through: a
+// scheduled model presents the guard's OWN Schedule (inference.As stops at the
+// wrapper, not the inner scheduler the compat mux would otherwise reach past),
+// and a clean turn reaches the inner scheduler unchanged with no mediation.
+func TestServing_WelfareGuard_Schedule_CleanTurn_Good(t *testing.T) {
+	fake := &welfareFakeScheduler{welfareFakeModel: welfareFakeModel{convoTokens: []string{"hello", " there"}}}
+	m := wrapWelfare(fake, welfareTestService(), false, nil, "")
+	if _, ok := m.(*welfareSchedulerModel); !ok {
+		t.Fatalf("a scheduler model must wrap as *welfareSchedulerModel, got %T", m)
+	}
+	msgs := []inference.Message{{Role: "user", Content: "morning!"}}
+	if got := drainSchedule(t, m, msgs); got != "hello there" {
+		t.Fatalf("clean scheduled turn reply = %q, want the inner scheduler's tokens", got)
+	}
+	if fake.mediationCalls != 0 {
+		t.Fatal("clean turn must not open a mediation session")
+	}
+	if len(fake.scheduleCalls) != 1 || fake.scheduleCalls[0][0].Content != "morning!" {
+		t.Fatal("clean turn did not reach the inner scheduler unchanged")
+	}
+}
+
+// TestServing_WelfareGuard_Schedule_Rephrase_Good pins lem_rephrase over the
+// scheduler route: the flagged turn is mediated, the model's rewording replaces
+// the latest user text handed to the inner scheduler, and the caller's slice is
+// never mutated — the SAME mediated behaviour the Chat path produces, now not
+// bypassed when the mux prefers Schedule.
+func TestServing_WelfareGuard_Schedule_Rephrase_Good(t *testing.T) {
+	fake := &welfareFakeScheduler{welfareFakeModel: welfareFakeModel{
+		mediationReply: `{"tool":"lem_rephrase","params":{"text":"please fix this properly"}}`,
+		convoTokens:    []string{"on it"},
+	}}
+	m := wrapWelfare(fake, welfareTestService(), false, nil, "")
+	msgs := hostileConversation()
+	original := msgs[len(msgs)-1].Content
+
+	if got := drainSchedule(t, m, msgs); got != "on it" {
+		t.Fatalf("rephrased scheduled turn reply = %q, want the conversation reply", got)
+	}
+	if fake.mediationCalls != 1 {
+		t.Fatalf("mediation sessions = %d, want 1", fake.mediationCalls)
+	}
+	if len(fake.scheduleCalls) != 1 {
+		t.Fatalf("inner Schedule calls = %d, want 1", len(fake.scheduleCalls))
+	}
+	sent := fake.scheduleCalls[0]
+	if sent[len(sent)-1].Content != "please fix this properly" {
+		t.Fatalf("latest user turn scheduled = %q, want the model's rewording", sent[len(sent)-1].Content)
+	}
+	if msgs[len(msgs)-1].Content != original {
+		t.Fatal("caller's message slice was mutated")
+	}
+}
+
+// TestServing_WelfareGuard_Schedule_Pause_Good pins lem_pause over the scheduler
+// route: the notice is the whole reply and the conversation is never scheduled —
+// the synthetic reply short-circuits before the inner scheduler, exactly as
+// Chat's pause short-circuits before the model.
+func TestServing_WelfareGuard_Schedule_Pause_Good(t *testing.T) {
+	fake := &welfareFakeScheduler{welfareFakeModel: welfareFakeModel{mediationReply: `{"tool":"lem_pause","params":{}}`}}
+	m := wrapWelfare(fake, welfareTestService(), false, nil, "")
+	got := drainSchedule(t, m, hostileConversation())
+	if !core.Contains(got, "breather") {
+		t.Fatalf("paused scheduled reply = %q, want the pause notice", got)
+	}
+	if len(fake.scheduleCalls) != 0 {
+		t.Fatal("a paused turn must not reach the inner scheduler")
+	}
+}
+
+// TestServing_WelfareGuard_Schedule_NonScheduler_Unchanged_Good pins the other
+// half: a model WITHOUT a scheduler stays the plain Chat-only wrapper, so the
+// non-scheduler serve path (mux calls Chat) is byte-for-byte unchanged.
+func TestServing_WelfareGuard_Schedule_NonScheduler_Unchanged_Good(t *testing.T) {
+	m := wrapWelfare(&welfareFakeModel{}, welfareTestService(), false, nil, "")
+	if _, ok := m.(*welfareSchedulerModel); ok {
+		t.Fatal("a non-scheduler model must NOT wrap as *welfareSchedulerModel")
+	}
+	if _, ok := inference.As[inference.SchedulerModel](m); ok {
+		t.Fatal("a non-scheduler welfare wrapper must not present Schedule (the mux then correctly falls to Chat)")
+	}
+}
+
 // --- isLemmaModel -------------------------------------------------------------
 
 // --- wrapWelfareResolver -----------------------------------------------------

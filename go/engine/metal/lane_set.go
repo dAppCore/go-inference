@@ -38,12 +38,15 @@ import (
 // BatchForwardCount advances by the number of Steps (one batched forward per
 // Step), not by Steps×K (which K separate single-session steps would give).
 //
-// Scope (slice 1): the recorded-ICB dense/PLE decode path (gemma4 dense, E2B/
-// E4B) and greedy (temperature-0) sampling. A non-ICB arch (MoE 12B/26B,
-// COMPOSED/hybrid) or a non-greedy sampler is refused rather than served on a
-// path that could not be proven byte-identical here — see docs/design-
-// continuous-batching.md for the pinned next rungs (batched-projection weight-
-// read-once GEMMs; non-ICB arches; batched head/prefill).
+// Scope: the recorded-ICB dense/PLE decode path (gemma4 dense, E2B/E4B) rides
+// the shared ICB replay (fold or one-encoder batch — the shared-submission
+// win). A non-ICB arch (MoE 12B/26B; the router block is not ICB-recordable) is
+// admitted as a RE-ENCODE or CHAINED lane and advanced through the session's
+// own one-token step — byte-identical (it IS the plain path's step), just
+// without the ICB shared-submission fold. Greedy AND per-lane non-greedy
+// sampling are both served (lane_set_sampling.go: each lane owns its sampler
+// RNG + params). Prepare refuses only an empty, over-length or cancelled
+// prompt — never an architecture.
 //
 // A laneSet is single-goroutine, exactly as an ArchSession is: the step
 // coordinator that owns it drives Prepare/Step/Retire from one goroutine.

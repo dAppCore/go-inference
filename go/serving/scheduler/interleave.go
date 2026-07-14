@@ -162,10 +162,11 @@ func (m *Model) scheduleInterleave(ctx context.Context, req inference.ScheduledR
 // decides who pays which prefill. Without an interceptor, continuations ride
 // CB and simply full-prefill (correct, never wrong-token).
 //
-// NOTE: the serve-level welfare guard decorates TextModel.Chat, which the CB
-// route does not call — the welfare×CB interplay is deliberately un-audited
-// for now (tracked in the batching task); deployments running -welfare should
-// keep chat off CB by not enabling the scheduler, or accept the gap.
+// Welfare: the serve-level welfare guard now wraps the scheduler's Schedule
+// entry (serving.welfareSchedulerModel), so every scheduled chat turn — CB or
+// plain interleave — is gated ABOVE this router: the inbound detect + mediation
+// (rephrase / pause / end) has already run before Schedule dispatches here. The
+// CB route never calls TextModel.Chat, but no longer needs to.
 func (m *Model) cbEligible(req inference.ScheduledRequest) bool {
 	if len(req.Messages) == 0 {
 		return core.Trim(req.Prompt) != ""

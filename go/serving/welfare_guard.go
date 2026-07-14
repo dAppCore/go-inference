@@ -49,8 +49,18 @@ type welfareTextModel struct {
 
 // wrapWelfare decorates model with the welfare guard. corpus is the
 // false-positive feedback file (welfare.FalsePositive JSONL, on-device only).
+//
+// A model that routes through a request scheduler (inference.SchedulerModel —
+// the -scheduler serve modes) is wrapped as a welfareSchedulerModel so the
+// guard runs at the Schedule boundary; a model with no scheduler keeps the
+// plain Chat-only wrapper (byte-for-byte unchanged). See welfareSchedulerModel
+// for why a plain Chat decorator alone would be bypassed under the scheduler.
 func wrapWelfare(model inference.TextModel, svc *welfare.Service, allowEnd bool, log io.Writer, corpus string) inference.TextModel {
-	return &welfareTextModel{TextModel: model, svc: svc, allowEnd: allowEnd, log: log, corpus: corpus}
+	w := &welfareTextModel{TextModel: model, svc: svc, allowEnd: allowEnd, log: log, corpus: corpus}
+	if sched, ok := inference.As[inference.SchedulerModel](model); ok {
+		return &welfareSchedulerModel{welfareTextModel: w, inner: sched}
+	}
+	return w
 }
 
 // wrapWelfareResolver decorates the serve's model resolver with the welfare
@@ -106,6 +116,96 @@ func (m *welfareTextModel) Chat(ctx context.Context, messages []inference.Messag
 		messages = withLatestUserText(messages, g.Rephrased)
 	}
 	return m.detectOutput(m.TextModel.Chat(ctx, messages, opts...), priors)
+}
+
+// welfareSchedulerModel is welfareTextModel extended with the
+// inference.SchedulerModel surface. When the wrapped model routes through a
+// request scheduler, the compat mux prefers inference.SchedulerModel.Schedule
+// (serving/compat/mux.go forEachCompatToken), and inference.As walks Unwrap to
+// find it — so a PLAIN welfareTextModel would be unwrapped straight past and
+// its Chat guard would never run for ANY scheduled request (serial, batch and
+// interleave, plain AND continuous-batching alike — not merely the CB route an
+// earlier note flagged). Implementing Schedule here makes inference.As stop at
+// this wrapper (depth 0, before any Unwrap): the same per-turn welfare gate
+// runs at the Schedule boundary — BEFORE the scheduler decides plain-vs-CB
+// routing or renders a chat template past this decorator — then delegates to
+// the inner scheduler. A model with no scheduler is wrapped as a plain
+// welfareTextModel, so the non-scheduler path is byte-for-byte unchanged.
+type welfareSchedulerModel struct {
+	*welfareTextModel
+	inner inference.SchedulerModel
+}
+
+var _ inference.SchedulerModel = (*welfareSchedulerModel)(nil)
+
+// Schedule runs the welfare gate on the request's latest user turn, then routes
+// through the inner scheduler exactly as Chat routes through the inner model: a
+// clean or turn-less request passes through unchanged (a raw Prompt has no user
+// turn to police, welfare's Chat-only remit); lem_rephrase rewrites the latest
+// user turn; lem_pause / lem_end return the synthetic notice without ever
+// scheduling the conversation. The guard runs synchronously before Schedule
+// returns, the same shape Chat holds — the mediation meta-session is dispatched
+// on the inner model (never this wrapper), so a flagged turn cannot recurse.
+//
+// The model's own OUTPUT is read audit-only through detectOutputScheduled, the
+// ScheduledToken twin of Chat's detectOutput.
+func (m *welfareSchedulerModel) Schedule(ctx context.Context, req inference.ScheduledRequest) (inference.RequestHandle, <-chan inference.ScheduledToken, error) {
+	latest, priors := welfareUserTurns(req.Messages)
+	if core.Trim(latest) == "" {
+		return m.inner.Schedule(ctx, req)
+	}
+	g := m.svc.Guard(ctx, latest, priors, m.dispatch, m.allowEnd)
+	if g.FalsePositive != nil {
+		m.appendCorpus(*g.FalsePositive)
+	}
+	if g.Triggered {
+		m.audit(g)
+	}
+	if g.Synthetic != "" {
+		// lem_pause / lem_end: the notice IS the reply, the conversation is
+		// never scheduled.
+		return welfareSyntheticSchedule(req, g.Synthetic)
+	}
+	if g.Rephrased != "" {
+		req.Messages = withLatestUserText(req.Messages, g.Rephrased)
+	}
+	handle, stream, err := m.inner.Schedule(ctx, req)
+	if err != nil {
+		return handle, stream, err
+	}
+	return handle, m.detectOutputScheduled(stream, priors), nil
+}
+
+// welfareSyntheticSchedule delivers notice as a single ScheduledToken on a
+// closed channel — the Schedule twin of syntheticTokenSeq (the lem_pause rest
+// and the lem_end close, served without a model call).
+func welfareSyntheticSchedule(req inference.ScheduledRequest, notice string) (inference.RequestHandle, <-chan inference.ScheduledToken, error) {
+	out := make(chan inference.ScheduledToken, 1)
+	out <- inference.ScheduledToken{RequestID: req.ID, Token: inference.Token{Text: notice}}
+	close(out)
+	return inference.RequestHandle{ID: req.ID, Model: inference.ModelIdentity{ID: req.Model}}, out, nil
+}
+
+// detectOutputScheduled forwards the scheduled stream while folding its text,
+// then runs the detector once the stream drains — audit-only, the ScheduledToken
+// twin of detectOutput (the tokens are already with the client; post-send the
+// honest action is telemetry, never a retro-redact). The forwarding goroutine
+// mirrors the scheduleInterleave adapter's shape; it ends when the inner stream
+// closes (completion or the mux's per-request cancel).
+func (m *welfareSchedulerModel) detectOutputScheduled(in <-chan inference.ScheduledToken, priors []string) <-chan inference.ScheduledToken {
+	out := make(chan inference.ScheduledToken, cap(in))
+	go func() {
+		defer close(out)
+		var reply core.Builder
+		for tok := range in {
+			reply.WriteString(tok.Token.Text)
+			out <- tok
+		}
+		if res := m.svc.Detect(reply.String(), priors); res.Triggered {
+			m.auditf("welfare: output read triggered (audit-only) — anger=%.2f sustained=%.2f", res.AngerScore, res.SustainedHostility)
+		}
+	}()
+	return out
 }
 
 // dispatch is the mediation transport: the engine opener + the user's flagged

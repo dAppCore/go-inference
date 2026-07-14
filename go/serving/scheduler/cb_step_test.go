@@ -187,6 +187,91 @@ func collectStream(ch <-chan inference.ScheduledToken) []int32 {
 	return ids
 }
 
+// cbChannelModel is cbCapableModel plus the streaming-detok capability (the CB
+// path's cbStreamDecoder — engine.TextModel.DecodeToken satisfies it): its
+// DecodeToken wraps every token id in the gemma4 channel markers
+// <|channel>…<channel|>, so a test can prove the CB deliver transform
+// reproduces the plain decode path exactly — a content token decoded verbatim
+// (markers survive), a stop token blanked.
+type cbChannelModel struct {
+	cbCapableModel
+}
+
+func (m *cbChannelModel) DecodeToken(id int32) string {
+	return core.Sprintf("<|channel>seg%d<channel|>", id)
+}
+
+var _ inference.TextModel = (*cbChannelModel)(nil)
+var _ inference.TokenizerModel = (*cbChannelModel)(nil)
+var _ inference.BatchStepModel = (*cbChannelModel)(nil)
+
+// TestCBStepDetokByteStreamMatchesPlainTransform pins rung-2 detok parity at the
+// deliver seam: the CB lane's Token.Text is the SAME transform the plain decode
+// path applies (engine decodeFromPrefilled's emit) — DecodeToken(id) for a
+// content token, blank for a stop token. Combined with the metal ByteIdentity
+// fixtures (lane token ids == plain generate ids) and ResolvedStopTokens ==
+// stopTokens (identical stop set), the lane's Token.Text byte stream equals the
+// plain path's on the same prompt. The gemma4 channel markers <|channel>/
+// <channel|> are plain vocab, never stops, so they survive verbatim on both
+// paths — ThinkingExtractor downstream reads the identical literal.
+func TestCBStepDetokByteStreamMatchesPlainTransform(t *testing.T) {
+	sim := newSimLaneSet()
+	model := &cbChannelModel{cbCapableModel{sim: sim, available: true}}
+	sched, err := New(model, Config{Mode: ModeInterleave, MaxConcurrent: 2, MaxQueue: 8, StreamBuffer: 8})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer sched.CloseEngine()
+
+	// The sim scripts each lane's tokens from its prompt (scriptFor); the last
+	// scripted id doubles as the request's stop token — the terminator the plain
+	// path blanks.
+	promptIDs := model.Encode("abc")
+	script := scriptFor(inference.LaneSpec{PromptIDs: promptIDs, MaxNew: 3})
+	stopID := script[len(script)-1]
+	stopSet := map[int32]bool{stopID: true}
+
+	_, ch, err := sched.Schedule(context.Background(), inference.ScheduledRequest{
+		ID:      "detok",
+		Prompt:  "abc",
+		Sampler: inference.SamplerConfig{MaxTokens: 3, StopTokens: []int32{stopID}},
+	})
+	if err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+
+	sawMarker, stopBlanked, n := false, false, 0
+	for st := range ch {
+		n++
+		// The plain emit rule, replayed over the streamed id: content decodes
+		// verbatim, a stop token blanks. The CB stream must equal it exactly.
+		want := ""
+		if !stopSet[st.Token.ID] {
+			want = model.DecodeToken(st.Token.ID)
+		}
+		if st.Token.Text != want {
+			t.Fatalf("token %d text = %q, want the plain transform %q", st.Token.ID, st.Token.Text, want)
+		}
+		if stopSet[st.Token.ID] {
+			stopBlanked = true
+			continue
+		}
+		if !core.Contains(st.Token.Text, "<|channel>") || !core.Contains(st.Token.Text, "<channel|>") {
+			t.Fatalf("content token text = %q, want the channel markers surviving verbatim", st.Token.Text)
+		}
+		sawMarker = true
+	}
+	if n != 3 {
+		t.Fatalf("streamed %d tokens, want 3", n)
+	}
+	if !sawMarker {
+		t.Fatal("no content token carried the channel markers — detok stripped them")
+	}
+	if !stopBlanked {
+		t.Fatal("the stop token was never observed blanked")
+	}
+}
+
 // TestCBStepCoordinatorBatchesRequests proves interleave mode, over a
 // CB-capable model, drives K raw-prompt greedy requests through ONE shared lane
 // set: each request gets its full scripted token stream, and the sim's batched
