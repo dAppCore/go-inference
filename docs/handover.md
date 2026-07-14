@@ -1,3 +1,40 @@
+# NEXT WAKE (2026-07-17 — #393 slice 1: the GPU capture trigger — kernel-level sight, first 26B trace on the Desktop)
+
+## 2026-07-17 (#393 — the kernel instrument, slice 1: programmatic Metal capture)
+
+- THE BLIND SPOT (snider): every receipt to date is a Go wall-clock or a
+  whole-cb GPU span; the 39 custom kernels (engine/metal/kernels/) have
+  never been measured individually — occupancy, limiter, register
+  pressure, per-line cost are invisible from the host.
+- THE TRIGGER (gpu_capture.go): LTHN_GPU_CAPTURE=/path.gputrace arms a
+  ONE-SHOT MTLCaptureManager capture of the next N funnel submissions
+  (LTHN_GPU_CAPTURE_CBS, default 2); LTHN_GPU_CAPTURE_TRIGGER=<file>
+  defers arming until the file appears (boot + warm a serve first, then
+  `touch` → the trace opens on a REAL decode round, not boot cbs). The
+  capture object is the shared queue so every submission between
+  start/stop is traced regardless of commit path; hook = one atomic load
+  in commitCommandBufferFast when off. Needs MTL_CAPTURE_ENABLED=1 in the
+  env (a refused start logs the hint + disarms cleanly).
+- GATES: TestGPUCaptureTrigger — decode byte-identical under capture,
+  one-shot disarm on success AND on refusal; real-write proven (the trace
+  lands on disk with the env up). Bindings had everything (tmc/apple
+  v0.6.12: capture manager/descriptor/destination + NSURL) — the
+  dappcore/apple fork stays in reserve for slice 2's counter APIs.
+- LIVE RECEIPT: ~/Desktop/26b_round.gputrace — 17GB (embeds resident
+  weights for replay), a real 26B qat-4bit decode round captured mid-serve
+  via the trigger-file flow. Open in Xcode → Metal Debugger.
+- REMAINDER (#393): slice 2 — per-kernel perf receipts in-tree
+  (MTLCounterSampleBuffer GPU timestamps at real dispatch shapes,
+  achieved GB/s vs the ~650GB/s roofline, go test -bench harness); then
+  the megakernel revisit (attn/ffn/layer/gemv2 dormant kernels) WITH
+  limiter evidence; kernels/README.md stale note ("no Taskfile yet" —
+  Taskfile ships metallib verbs). Feeds #392 (the 26B K=1 split is
+  readable straight off the trace now).
+- ALSO THIS SESSION: dev↔main converged (527d05d — the GitHub squash-PR
+  drift reconciled as a history join; the AX series content was fully
+  superseded by the root→go/ module move). Future dev→main: merge-commit
+  PRs or local ff push; flip the GitHub default branch to dev.
+
 # NEXT WAKE (2026-07-17 — #391 closed: the capture carve was the bug — 2-pass extras misaligned it)
 
 ## 2026-07-17 (#391 — serial ICB capture divergence: root-caused + fixed)

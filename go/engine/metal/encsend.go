@@ -497,13 +497,16 @@ func endBlitEncodingFast(enc metal.MTLBlitCommandEncoderObject) {
 }
 
 func commitCommandBufferFast(cb metal.MTLCommandBufferObject) {
+	gpuCaptureBeforeCommit() // one atomic load when the capture trigger is off (#393)
 	objcMsgSendOnce.Do(initObjCMsgSendStubs)
 	if objcMsgSendAddr != 0 && puregoSyscall15XABI0 != 0 {
 		objcMsgSendRaw0(objcMsgSendAddr, uintptr(cb.GetID()), uintptr(selCommit))
 		runtime.KeepAlive(cb)
+		gpuCaptureAfterCommit()
 		return
 	}
 	cb.Commit()
+	gpuCaptureAfterCommit()
 }
 
 func waitUntilCompletedFast(cb metal.MTLCommandBufferObject) {
