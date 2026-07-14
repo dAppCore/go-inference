@@ -4,3 +4,7 @@ target/
 .venv/
 .bundle/
 vendor/
+.gradle/
+build/
+.build/
+local/
