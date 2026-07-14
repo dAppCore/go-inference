@@ -112,6 +112,19 @@ type composedTextModel struct {
 	numLayers int
 }
 
+// composedTextModel deliberately does NOT implement engine.LaneSetOpener — the
+// absence IS the composed-in-laneSet verdict, not a gap. With no opener,
+// engine.TextModel.BatchStepAvailable reports false and the scheduler keeps
+// composed requests on their per-session paths instead of the continuous-
+// batching laneSet. That is terminal by design: a composed decode step is a
+// host-f32 recurrence — each layer's mixer Forward consumes host []float32 and
+// threads host-side state (conv + delta for the gated-delta layers), so every
+// token crosses device→host→device at every layer no matter how far the tail
+// fuse family (composed_backend.go) folds the device work. laneSet's entire win
+// is advancing K lanes through ONE shared recorded submission per round
+// (lane_set.go); a per-layer host mix can never sit inside that submission.
+// Only a device-resident recurrence port — mixer state and the delta rule
+// recorded on device, a full arch campaign — would change this verdict.
 var (
 	_ engine.TokenModel           = (*composedTextModel)(nil)
 	_ engine.ChatTemplateDeclarer = (*composedTextModel)(nil)
