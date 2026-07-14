@@ -5,6 +5,7 @@ package mpt
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/attn"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -21,7 +22,7 @@ func init() {
 		rows := c.DModel
 		for i := 0; i < c.NLayers; i++ {
 			p := core.Sprintf("transformer.blocks.%d.attn.", i)
-			t = model.SplitContiguousQKV(t, p+"Wqkv.weight", p+"q_proj.weight", p+"k_proj.weight", p+"v_proj.weight", rows, rows)
+			t = attn.SplitContiguousQKV(t, p+"Wqkv.weight", p+"q_proj.weight", p+"k_proj.weight", p+"v_proj.weight", rows, rows)
 		}
 		return t
 	}})

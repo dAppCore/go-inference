@@ -5,6 +5,7 @@ package falcon
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/attn"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -27,11 +28,11 @@ func init() {
 			}
 			headDim := cfg.HiddenSize / cfg.NumAttentionHeads
 			if cfg.NewDecoderArchitecture && cfg.NumKVHeads > 0 {
-				tensors = model.SplitGroupedQKV(tensors, p+"query_key_value", p+"query", p+"key", p+"value", cfg.NumAttentionHeads, cfg.NumKVHeads, headDim)
+				tensors = attn.SplitGroupedQKV(tensors, p+"query_key_value", p+"query", p+"key", p+"value", cfg.NumAttentionHeads, cfg.NumKVHeads, headDim)
 			} else if cfg.MultiQuery {
-				tensors = model.SplitContiguousQKV(tensors, p+"query_key_value", p+"query", p+"key", p+"value", cfg.NumAttentionHeads*headDim, headDim)
+				tensors = attn.SplitContiguousQKV(tensors, p+"query_key_value", p+"query", p+"key", p+"value", cfg.NumAttentionHeads*headDim, headDim)
 			} else {
-				tensors = model.SplitInterleavedQKV(tensors, p+"query_key_value", p+"query", p+"key", p+"value", cfg.NumAttentionHeads, headDim)
+				tensors = attn.SplitInterleavedQKV(tensors, p+"query_key_value", p+"query", p+"key", p+"value", cfg.NumAttentionHeads, headDim)
 			}
 		}
 		return tensors

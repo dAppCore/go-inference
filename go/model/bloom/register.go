@@ -5,6 +5,7 @@ package bloom
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/attn"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -25,7 +26,7 @@ func init() {
 				break
 			}
 			headDim := cfg.HiddenSize / cfg.NumAttentionHeads
-			tensors = model.SplitInterleavedQKV(tensors, p+"query_key_value", p+"query", p+"key", p+"value", cfg.NumAttentionHeads, headDim)
+			tensors = attn.SplitInterleavedQKV(tensors, p+"query_key_value", p+"query", p+"key", p+"value", cfg.NumAttentionHeads, headDim)
 		}
 		return tensors
 	}})

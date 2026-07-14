@@ -8,6 +8,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/attn"
 	"dappco.re/go/inference/model/safetensors"
 )
 
@@ -57,7 +58,7 @@ func (c *Config) Arch() (model.Arch, error) {
 	if c.ModelType == "phi3" && kvHeads != c.NumAttentionHeads {
 		return model.Arch{}, core.NewError("phi.Config.Arch: Phi-3 fused qkv requires equal query and key/value head counts")
 	}
-	rotaryDim, err := (model.RopeParams{HeadDim: headDim, PartialRotaryFactor: c.PartialRotaryFactor}).RotaryDim()
+	rotaryDim, err := (attn.RopeParams{HeadDim: headDim, PartialRotaryFactor: c.PartialRotaryFactor}).RotaryDim()
 	if err != nil {
 		return model.Arch{}, core.E("phi.Config.Arch", "resolve partial rotary", err)
 	}
