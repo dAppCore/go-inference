@@ -45,8 +45,11 @@ The classes mean:
 
 ## What is already covered
 
-The repository already contains `go/model/gemma3`, `gemma4`, `llama`, `mistral`,
-`qwen3`, `mamba2`, `rwkv7`, `deltanet`, `composed`, and `bert`.  In registry terms,
+*(Refreshed 14 July 2026 — the family lanes landed 26 further packages between the
+12 July survey and this refresh; each has source and tests under `go/model/`.)*
+
+The original base: `go/model/gemma3`, `gemma4`, `llama`, `mistral`, `qwen3`,
+`mamba2`, `rwkv7`, `deltanet`, `composed`, and `bert`.  In registry terms,
 cross off:
 
 - ~~`llama`; `mistral`, `ministral`, `ministral3`; `qwen3`; `mamba2`; `bert`~~;
@@ -57,9 +60,23 @@ cross off:
   capabilities rather than matching upstream registry keys (`rwkv` is RWKV4/5 and
   is therefore not crossed off).
 
-~~`mixtral` and `deepseek_v2`, `deepseek_v3`, `deepseek_v32`, `deepseek_v4`~~ are
-in flight on `lane/moe-family`.  Their result is a prerequisite, not an excuse to
-duplicate router code in another lane.
+The MoE prerequisite landed: ~~`mixtral`; `deepseek`~~ (`lane/moe-family` merged),
+and the generalised MoE seam unlocked rank 14 in one sweep.
+
+The family lanes then landed, from the ready queue: ~~`phi` (rank 1, partial-RoPE
+as a declared op param); `gpt2` (rank 2); `opt` (rank 3); `falcon` (rank 4);
+`bloom` (rank 5, with the neutral `model/alibi.go` primitive); `gptneox` (rank 6);
+`qwen2` (rank 7); `starcoder2` (rank 8); `granite` (rank 9); `olmo` (rank 10);
+`cohere` (rank 11)~~ — and from the template/demand-gated tiers: ~~`llama4` (rank
+13); `dbrx`, `jetmoe`, `olmoe`, `granitemoe`, `qwenmoe` (rank 14, all five);
+`glm4`, `exaone4`, `ernie45`, `hunyuan` (rank 18); `mpt`, `stablelm`, `smollm3`
+(rank 19)~~.  Exact sub-architecture and registry-alias support follows each
+package's own documented contract — a crossed-off family here is a landed package,
+not a claim that every alias of it loads.
+
+Still open from the ready queue: rank 12 (Gemma/Gemma2 compatibility lane).  Ranks
+15–17 (hybrids/recurrent), the remaining rank-18/19 dense one-offs, and ranks
+20–25 (towers and exotics) remain gated exactly as the queue below records.
 
 ## Usage signal
 
@@ -124,6 +141,12 @@ traffic.
 Ranks 1–12 are the ready queue.  Ranks 13–19 are template or demand gated.
 Ranks 20–25 must not be pulled as “just another decoder” work.
 
+*Status refresh (14 July 2026):* ranks 1–11 landed (see “What is already
+covered”), as did 13, all of 14, and the glm4/exaone4/ernie45/hunyuan (18) and
+mpt/stablelm/smollm3 (19) one-offs.  The LIVE remainder of this queue: rank 12
+(Gemma/Gemma2 compatibility), ranks 15–17 (hybrids, Mamba1, RecurrentGemma),
+the rest of 18–19, and the gated 20–25.
+
 ## Complete classified inventory
 
 The following groups account for every registry key at the surveyed commit.
@@ -133,10 +156,11 @@ so that later registry diffs remain mechanical.
 | Class/status | Registry families | Prerequisite or reason |
 |---|---|---|
 | **SHIPPED** | `bert`; `gemma3`, `gemma3_text`; `gemma4`, `gemma4_assistant`, `gemma4_text`, `gemma4_unified`, `gemma4_unified_assistant`, `gemma4_unified_text`; `llama`; `mamba2`; `ministral`, `ministral3`, `mistral`; `qwen3` | Existing packages; exact sub-architecture support still follows their own contracts. |
-| **IN FLIGHT** | `deepseek_v2`, `deepseek_v3`, `deepseek_v32`, `deepseek_v4`; `mixtral` | `lane/moe-family`. |
-| **DIRECT** | `apertus`; `arcee`; `biogpt`; `bloom`; `codegen`; `cohere`, `cohere2`; `cpmant`; `ctrl`; `dots1`; `ernie`; `ernie4_5`; `exaone4`; `falcon`; `flex_olmo`; `gemma`, `gemma2`; `glm`, `glm4`; `gpt-sw3`, `gpt2`, `gpt_bigcode`, `gpt_neo`, `gpt_neox`, `gpt_neox_japanese`, `gptj`; `granite`; `helium`; `hunyuan_v1_dense`; `hyperclovax`; `jais2`; `laguna`; `lfm2`; `mellum`; `minicpm3`; `mimo_v2_flash`; `modernbert-decoder`; `mpt`; `nanochat`; `nemotron`; `olmo`, `olmo2`, `olmo3`; `openai-gpt`; `opt`; `persimmon`; `phi`, `phi3`; `qwen2`; `seed_oss`; `smollm3`; `solar_open`; `stablelm`; `starcoder2`; `vaultgemma`; `xglm`; `youtu`; `zaya` | Existing dense primitives, but every row inherits the quirks register below. |
+| **SHIPPED (family lanes, 12–14 Jul 2026)** | `bloom`; `cohere`, `cohere2`; `dbrx`; `deepseek_v2`, `deepseek_v3`; `ernie4_5`; `exaone4`; `falcon`; `glm4`; `gpt2`, `gpt_bigcode`, `starcoder`; `gpt_neo`, `gpt_neox`, `gptj`; `granite`; `granitemoe`; `hunyuan_v1_dense`; `jetmoe`; `llama4`, `llama4_text`; `mixtral`; `mpt`; `olmo`, `olmo2`; `olmoe`; `opt`; `phi`, `phi3`; `qwen2`; `qwen2_moe`, `qwen3_moe`; `smollm3`; `stablelm`; `starcoder2` | Keys as each package's `RegisterArch` declares them (the authoritative list); same per-package contract caveat as the row above. |
+| **IN FLIGHT** | — | Nothing currently in flight.  `deepseek_v32`, `deepseek_v4` did NOT land with the DeepSeek lane (only v2/v3 register) — they move to the MoE template row below (v32's DSA attention is the named gap). |
+| **DIRECT** | `apertus`; `arcee`; `biogpt`; ~~`bloom`~~; `codegen`; ~~`cohere`, `cohere2`~~; `cpmant`; `ctrl`; `dots1`; `ernie`; ~~`ernie4_5`~~; ~~`exaone4`~~; ~~`falcon`~~; `flex_olmo`; `gemma`, `gemma2`; `glm`, ~~`glm4`~~; `gpt-sw3`, ~~`gpt2`, `gpt_bigcode`, `gpt_neo`, `gpt_neox`~~, `gpt_neox_japanese`, ~~`gptj`~~; ~~`granite`~~; `helium`; ~~`hunyuan_v1_dense`~~; `hyperclovax`; `jais2`; `laguna`; `lfm2`; `mellum`; `minicpm3`; `mimo_v2_flash`; `modernbert-decoder`; ~~`mpt`~~; `nanochat`; `nemotron`; ~~`olmo`, `olmo2`~~, `olmo3`; `openai-gpt`; ~~`opt`~~; `persimmon`; ~~`phi`, `phi3`~~; ~~`qwen2`~~; `seed_oss`; ~~`smollm3`~~; `solar_open`; ~~`stablelm`~~; ~~`starcoder2`~~; `vaultgemma`; `xglm`; `youtu`; `zaya` | Existing dense primitives, but every row inherits the quirks register below.  Crossed-off keys shipped via the 12–14 Jul family lanes (see SHIPPED row). |
 | **DIRECT, legacy/low priority** | `bart`; `bert-generation`; `blenderbot`, `blenderbot-small`; `camembert`; `data2vec-text`; `electra`; `marian`; `mbart`; `megatron-bert`; `mvp`; `pegasus`; `plbart`; `prophetnet`; `rembert`; `roberta`, `roberta-prelayernorm`; `roc_bert`; `roformer`; `xmod`; `xlm`, `xlm-roberta`, `xlm-roberta-xl` | Causal compatibility heads on encoder or encoder-decoder families.  Require a real causal checkpoint before dispatch; otherwise their principal task belongs outside this queue. |
-| **TEMPLATE-EXISTS — MoE** | `afmoe`; `cohere2_moe`; `dbrx`; `ernie4_5_moe`; `exaone_moe`; `glm4_moe`, `glm4_moe_lite`, `glm_moe_dsa`; `gpt_oss`; `granitemoe`, `granitemoeshared`; `hunyuan_v1_moe`; `jetmoe`; `lfm2_moe`; `llama4`, `llama4_text`; `longcat_flash`; `minimax`, `minimax_m2`; `olmoe`; `phimoe`; `qwen2_moe`, `qwen3_moe`; `qwen3_5_moe`, `qwen3_5_moe_text`; `qwen3_next` | Land and stabilise Mixtral/DeepSeek router, expert and shared-expert templates; add DSA/MoE attention only where required.  Qwen3.5/Next also require their gated-DeltaNet schedule. |
+| **TEMPLATE-EXISTS — MoE** | `afmoe`; `cohere2_moe`; ~~`dbrx`~~; `deepseek_v32`, `deepseek_v4`; `ernie4_5_moe`; `exaone_moe`; `glm4_moe`, `glm4_moe_lite`, `glm_moe_dsa`; `gpt_oss`; ~~`granitemoe`~~, `granitemoeshared`; `hunyuan_v1_moe`; ~~`jetmoe`~~; `lfm2_moe`; ~~`llama4`, `llama4_text`~~; `longcat_flash`; `minimax`, `minimax_m2`; ~~`olmoe`~~; `phimoe`; ~~`qwen2_moe`, `qwen3_moe`~~; `qwen3_5_moe`, `qwen3_5_moe_text`; `qwen3_next` | The Mixtral/DeepSeek router + expert templates landed and the generalised MoE seam shipped the crossed-off keys (see SHIPPED row).  Remaining keys need their family lane; add DSA/MoE attention only where required (deepseek_v32/glm_moe_dsa).  Qwen3.5/Next also require their gated-DeltaNet schedule. |
 | **TEMPLATE-EXISTS — SSM/recurrent/hybrid** | `bamba`; `doge`; `falcon_h1`, `falcon_mamba`; `granitemoehybrid`; `jamba`; `mamba`; `nemotron_h`; `olmo_hybrid`; `qwen3_5`, `qwen3_5_text`; `recurrent_gemma`; `rwkv`; `zamba`, `zamba2` | Existing Mamba2/RWKV7/DeltaNet/composition experience, but version-specific state equations and attention schedules need dedicated implementations.  Qwen3.5 alternates gated DeltaNet and full-attention layers. |
 | **TOWER-WORK — vision/document** | `aria_text`; `emu3`; `fuyu`; `gemma3n`, `gemma3n_text`; `git`; `got_ocr2`; `minimax_m3_vl_text`; `mllama`; `trocr` | Vision/document encoder, projector, processor and modality-token contract.  A `_text` key only removes the tower at runtime; it does not prove useful standalone checkpoints. |
 | **TOWER-WORK — audio/music** | `moshi`; `musicgen`, `musicgen_melody`; `phi4_multimodal`; `whisper` | Audio encoder/codec, feature processor, delay/stream schedule and modality cache. |
