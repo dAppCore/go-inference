@@ -30,6 +30,7 @@ import (
 	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/engine"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/mtp"
 	coreio "dappco.re/go/io"
 )
 
@@ -102,7 +103,7 @@ func LoadSpeculativePair(targetPath, draftPath string, draftBlock int, opts ...i
 		return nil, core.E("native.LoadSpeculativePair", "attach drafter", err)
 	}
 	var dflashDrafter *DFlashDrafter
-	if pair.Method() == model.MTPDFlash {
+	if pair.Method() == mtp.MTPDFlash {
 		cfgJSON, readErr := coreio.Local.Read(core.PathJoin(draftPath, "config.json"))
 		if readErr != nil {
 			_ = target.Close()
@@ -252,11 +253,11 @@ func (m *speculativeModel) speculate(ctx context.Context, ids []int32, cfg infer
 // independent of either engine loop lets scripted-engine tests prove that the
 // pair's declared method, rather than checkpoint naming or caller state, is the
 // sole routing input.
-func speculativeMethodRoute(pair *AssistantPair, mtp, dfl func() (AssistantGenerateResult, error)) (AssistantGenerateResult, error) {
-	if pair != nil && pair.Method() == model.MTPDFlash {
+func speculativeMethodRoute(pair *AssistantPair, runMTP, dfl func() (AssistantGenerateResult, error)) (AssistantGenerateResult, error) {
+	if pair != nil && pair.Method() == mtp.MTPDFlash {
 		return dfl()
 	}
-	return mtp()
+	return runMTP()
 }
 
 // generateDFlash drives the block-diffusion proposer through the model-free,

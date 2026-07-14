@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/mtp"
 )
 
 // writeGemma4Pack writes a minimal gemma4 model pack (config.json declaring a
@@ -301,7 +301,7 @@ func TestDetectDFlashDraft_Bad(t *testing.T) {
 }
 
 // TestResolveServeDraft_DFlash_StampsMethod proves an explicit --draft path to a
-// DFlash checkpoint resolves to an Active detection stamped model.MTPDFlash, so
+// DFlash checkpoint resolves to an Active detection stamped mtp.MTPDFlash, so
 // the boot path recognises it (IsDFlash) and declines the MTP lane.
 func TestResolveServeDraft_DFlash_StampsMethod(t *testing.T) {
 	dir := t.TempDir()
@@ -310,7 +310,7 @@ func TestResolveServeDraft_DFlash_StampsMethod(t *testing.T) {
 	if !det.Active() {
 		t.Fatalf("an explicit DFlash --draft path should be Active: %+v", det)
 	}
-	if det.Method != model.MTPDFlash || !det.IsDFlash() {
+	if det.Method != mtp.MTPDFlash || !det.IsDFlash() {
 		t.Fatalf("a DFlash drafter must be stamped MTPDFlash: %+v", det)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/decode/dflash"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/mtp"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
 )
@@ -64,8 +65,8 @@ func dflashSyntheticDrafter(t testing.TB) (*DFlashDrafter, [][]byte, []byte) {
 		Layer: model.DeriveLayers([]string{"full_attention"}, 0),
 	}
 	m := &AssistantModel{
-		Config: model.AssistantConfig{
-			ModelType: "gemma4_dflash_assistant", Method: model.MTPDFlash,
+		Config: mtp.AssistantConfig{
+			ModelType: "gemma4_dflash_assistant", Method: mtp.MTPDFlash,
 			BackboneHidden: dflBackbone, Arch: arch, LayerTypes: []string{"full_attention"},
 		},
 		Arch:               arch,

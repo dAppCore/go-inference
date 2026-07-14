@@ -7,7 +7,7 @@ package native
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/decode/tokenizer"
-	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/mtp"
 	"dappco.re/go/inference/model/gguf"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
@@ -48,7 +48,7 @@ func nativeHasGGUFSuffix(path string) bool {
 
 // loadNativeAssistantFromGGUF loads a single-file GGUF drafter export through the
 // reactive assistant registry: general.architecture picks the registered model package's
-// spec (model.RegisterAssistant), whose weight-name map and metadata parser turn the GGUF
+// spec (mtp.RegisterAssistant), whose weight-name map and metadata parser turn the GGUF
 // into the same neutral config + canonical tensor names the safetensors path produces —
 // the engine itself knows nothing about any drafter's format.
 func loadNativeAssistantFromGGUF(file string, tok *tokenizer.Tokenizer) (*AssistantModel, error) {
@@ -60,7 +60,7 @@ func loadNativeAssistantFromGGUF(file string, tok *tokenizer.Tokenizer) (*Assist
 		return nil, core.E("native.assistant.gguf", "read gguf metadata", err)
 	}
 	arch, _ := meta["general.architecture"].(string)
-	spec, ok := model.LookupAssistantGGUF(arch)
+	spec, ok := mtp.LookupAssistantGGUF(arch)
 	if !ok {
 		return nil, core.E("native.assistant.gguf", "no registered assistant spec for gguf architecture "+arch, nil)
 	}
@@ -76,7 +76,7 @@ func loadNativeAssistantFromGGUF(file string, tok *tokenizer.Tokenizer) (*Assist
 	return m, nil
 }
 
-func buildNativeAssistantFromGGUFTensors(spec model.AssistantSpec, meta map[string]any, raw *gguf.TensorMapping, tok *tokenizer.Tokenizer) (*AssistantModel, error) {
+func buildNativeAssistantFromGGUFTensors(spec mtp.AssistantSpec, meta map[string]any, raw *gguf.TensorMapping, tok *tokenizer.Tokenizer) (*AssistantModel, error) {
 	if raw == nil {
 		return nil, core.NewError("native.assistant.gguf tensor map is nil")
 	}

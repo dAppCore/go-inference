@@ -22,7 +22,7 @@ package serving
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/decode/dflash"
-	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/mtp"
 )
 
 // MTPDefaultDraftBlock is the engine-default MTP draft block (verify forward =
@@ -55,11 +55,11 @@ type DraftDetection struct {
 	Source    DraftDetectionSource
 	DraftPath string
 	// Method is the speculative method the detected drafter uses. It is left
-	// empty for the ordinary MTP draft-model path (model.MTPDraftModel, the
-	// default the loader assumes); it is stamped model.MTPDFlash when the drafter
+	// empty for the ordinary MTP draft-model path (mtp.MTPDraftModel, the
+	// default the loader assumes); it is stamped mtp.MTPDFlash when the drafter
 	// is a DFlash block-diffusion checkpoint — a method this engine cannot yet
 	// run, so serve declines to arm it (see IsDFlash).
-	Method model.MTPMethod
+	Method mtp.MTPMethod
 	// Note carries the operator-facing wording for the serve boot notice
 	// (why this drafter engaged, or why detection stood down).
 	Note string
@@ -77,7 +77,7 @@ func (d DraftDetection) Active() bool {
 // plain autoregressive with an honest notice rather than misloading it on the
 // autoregressive MTP lane.
 func (d DraftDetection) IsDFlash() bool {
-	return d.Method == model.MTPDFlash
+	return d.Method == mtp.MTPDFlash
 }
 
 // DetectGemma4DraftPath resolves the drafter for modelPath through the reactive
@@ -142,7 +142,7 @@ func ResolveServeDraft(modelPath, draftFlag string, detect bool) DraftDetection 
 	return stampDFlashMethod(DetectGemma4DraftPath(modelPath, explicit, opts))
 }
 
-// stampDFlashMethod tags a resolved detection with model.MTPDFlash when its
+// stampDFlashMethod tags a resolved detection with mtp.MTPDFlash when its
 // drafter path is a DFlash block-diffusion checkpoint, so a serve/generate boot
 // tells the truth (the engine cannot yet run it) instead of announcing an MTP
 // lane over a drafter that would misload. A non-DFlash (or drafterless)
@@ -152,7 +152,7 @@ func stampDFlashMethod(det DraftDetection) DraftDetection {
 		return det
 	}
 	if _, ok := DetectDFlashDraft(det.DraftPath); ok {
-		det.Method = model.MTPDFlash
+		det.Method = mtp.MTPDFlash
 	}
 	return det
 }

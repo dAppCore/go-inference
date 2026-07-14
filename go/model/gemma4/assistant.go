@@ -5,25 +5,26 @@ package gemma4
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/mtp"
 )
 
 // assistant.go declares the gemma4 MTP assistant (attached speculative drafter) to the
-// engine's reactive assistant loader (model.RegisterAssistant) — the checkpoint-format
+// engine's reactive assistant loader (mtp.RegisterAssistant) — the checkpoint-format
 // knowledge that used to squat inside the engine: which model_type ids are gemma4
 // assistants, how their config.json parses (backbone_hidden_size + the ordered-embedding
 // head + a nested/flat text_config), how the GGUF export of the same drafter spells its
 // metadata (general.architecture "gemma4-assistant", keys under that prefix) and tensor
-// names. The engine consumes only the neutral model.AssistantConfig this produces — it
+// names. The engine consumes only the neutral mtp.AssistantConfig this produces — it
 // never keys on "gemma4".
 
 const assistantGGUFArch = "gemma4-assistant"
 
 func init() {
-	model.RegisterAssistant(model.AssistantSpec{
+	mtp.RegisterAssistant(mtp.AssistantSpec{
 		// "" claims checkpoints that predate the model_type field — the legacy default
 		// this format shipped with.
 		ModelTypes:     []string{"gemma4_assistant", "gemma4_unified_assistant", ""},
-		Method:         model.MTPDraftModel, // gemma4 -assistant is a separate draft model
+		Method:         mtp.MTPDraftModel, // gemma4 -assistant is a separate draft model
 		Parse:          ParseAssistantConfig,
 		GGUFArch:       assistantGGUFArch,
 		ParseGGUF:      AssistantConfigFromGGUF,
@@ -45,20 +46,20 @@ type assistantConfig struct {
 }
 
 // ParseAssistantConfig parses a gemma4 assistant config.json into the neutral
-// model.AssistantConfig: resolves the nested-or-flat text_config, validates the
+// mtp.AssistantConfig: resolves the nested-or-flat text_config, validates the
 // load-bearing dims, and derives the drafter's own Arch. Registered as the spec's
 // config.json parser.
-func ParseAssistantConfig(data []byte) (model.AssistantConfig, error) {
+func ParseAssistantConfig(data []byte) (mtp.AssistantConfig, error) {
 	var raw assistantConfig
 	if r := core.JSONUnmarshal(data, &raw); !r.OK {
-		return model.AssistantConfig{}, core.NewError("gemma4.assistant config parse failed: " + r.Error())
+		return mtp.AssistantConfig{}, core.NewError("gemma4.assistant config parse failed: " + r.Error())
 	}
 	textConfig := raw.TextConfig
 	if textConfig.HiddenSize <= 0 && textConfig.NumHiddenLayers <= 0 {
 		// early exports carry the text arch FLAT rather than under text_config.
 		var flatText Config
 		if r := core.JSONUnmarshal(data, &flatText); !r.OK {
-			return model.AssistantConfig{}, core.NewError("gemma4.assistant config parse failed: " + r.Error())
+			return mtp.AssistantConfig{}, core.NewError("gemma4.assistant config parse failed: " + r.Error())
 		}
 		if flatText.HiddenSize > 0 || flatText.NumHiddenLayers > 0 {
 			textConfig = flatText
@@ -71,7 +72,7 @@ func ParseAssistantConfig(data []byte) (model.AssistantConfig, error) {
 	cfg, err := buildAssistantConfig(modelType, raw.BackboneHiddenSize, raw.NumCentroids,
 		raw.CentroidIntermediateTopK, raw.UseOrderedEmbeddings, textConfig)
 	if err != nil {
-		return model.AssistantConfig{}, err
+		return mtp.AssistantConfig{}, err
 	}
 	if raw.Quantization != nil {
 		// the top-level block outranks a nested text_config one, matching
@@ -83,33 +84,33 @@ func ParseAssistantConfig(data []byte) (model.AssistantConfig, error) {
 
 // buildAssistantConfig validates the parsed dims and derives the neutral config — shared
 // by the config.json and GGUF paths so both enforce the same invariants.
-func buildAssistantConfig(modelType string, backbone, numCentroids, centroidTopK int, ordered bool, text Config) (model.AssistantConfig, error) {
+func buildAssistantConfig(modelType string, backbone, numCentroids, centroidTopK int, ordered bool, text Config) (mtp.AssistantConfig, error) {
 	if modelType != "gemma4_assistant" && modelType != "gemma4_unified_assistant" {
-		return model.AssistantConfig{}, core.NewError("gemma4.assistant config has unsupported model_type: " + modelType)
+		return mtp.AssistantConfig{}, core.NewError("gemma4.assistant config has unsupported model_type: " + modelType)
 	}
 	if backbone <= 0 {
-		return model.AssistantConfig{}, core.NewError("gemma4.assistant config has invalid backbone_hidden_size")
+		return mtp.AssistantConfig{}, core.NewError("gemma4.assistant config has invalid backbone_hidden_size")
 	}
 	if text.HiddenSize <= 0 {
-		return model.AssistantConfig{}, core.NewError("gemma4.assistant config has invalid hidden_size")
+		return mtp.AssistantConfig{}, core.NewError("gemma4.assistant config has invalid hidden_size")
 	}
 	if text.NumHiddenLayers <= 0 {
-		return model.AssistantConfig{}, core.NewError("gemma4.assistant config has invalid num_hidden_layers")
+		return mtp.AssistantConfig{}, core.NewError("gemma4.assistant config has invalid num_hidden_layers")
 	}
 	if text.NumAttentionHeads <= 0 {
-		return model.AssistantConfig{}, core.NewError("gemma4.assistant config has invalid num_attention_heads")
+		return mtp.AssistantConfig{}, core.NewError("gemma4.assistant config has invalid num_attention_heads")
 	}
 	if text.HeadDim <= 0 {
-		return model.AssistantConfig{}, core.NewError("gemma4.assistant config has invalid head_dim")
+		return mtp.AssistantConfig{}, core.NewError("gemma4.assistant config has invalid head_dim")
 	}
 	if ordered && numCentroids <= 0 {
-		return model.AssistantConfig{}, core.NewError("gemma4.assistant ordered embeddings require num_centroids")
+		return mtp.AssistantConfig{}, core.NewError("gemma4.assistant ordered embeddings require num_centroids")
 	}
 	arch, err := text.Arch()
 	if err != nil {
-		return model.AssistantConfig{}, core.E("gemma4.assistant", "derive arch", err)
+		return mtp.AssistantConfig{}, core.E("gemma4.assistant", "derive arch", err)
 	}
-	return model.AssistantConfig{
+	return mtp.AssistantConfig{
 		ModelType:         modelType,
 		BackboneHidden:    backbone,
 		NumCentroids:      numCentroids,
@@ -125,9 +126,9 @@ func buildAssistantConfig(modelType string, backbone, numCentroids, centroidTopK
 // (general.architecture "gemma4-assistant", dims under that prefix). vocabHint carries the
 // embed-tensor-derived vocab for exports that omit vocab_size (0 = no hint). Registered as
 // the spec's GGUF parser.
-func AssistantConfigFromGGUF(meta map[string]any, vocabHint int) (model.AssistantConfig, error) {
+func AssistantConfigFromGGUF(meta map[string]any, vocabHint int) (mtp.AssistantConfig, error) {
 	if arch, _ := meta["general.architecture"].(string); arch != assistantGGUFArch {
-		return model.AssistantConfig{}, core.E("gemma4.assistant.gguf", "general.architecture is not gemma4-assistant", nil)
+		return mtp.AssistantConfig{}, core.E("gemma4.assistant.gguf", "general.architecture is not gemma4-assistant", nil)
 	}
 	const p = assistantGGUFArch + "."
 	layers := ggufMetaInt(meta, p+"block_count")
@@ -135,7 +136,7 @@ func AssistantConfigFromGGUF(meta map[string]any, vocabHint int) (model.Assistan
 	heads := ggufMetaInt(meta, p+"attention.head_count")
 	headDim := ggufMetaInt(meta, p+"attention.key_length")
 	if layers <= 0 || hidden <= 0 || heads <= 0 || headDim <= 0 {
-		return model.AssistantConfig{}, core.E("gemma4.assistant.gguf",
+		return mtp.AssistantConfig{}, core.E("gemma4.assistant.gguf",
 			"drafter gguf is missing block_count / embedding_length / head_count / key_length metadata", nil)
 	}
 	backbone := ggufMetaInt(meta, p+"embedding_length_out")

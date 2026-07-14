@@ -1,11 +1,12 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-package model
+package mtp
 
 import (
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 )
 
 // The assistant-spec benches baseline the attached-drafter contract (AX-11).
@@ -14,9 +15,23 @@ import (
 // is the per-layer KV-stream-matching lookup a decode pairing runs, expected alloc-free.
 // Synthetic — a bench-only assistant spec registered with a real JSON parse.
 
+// benchLayerTypes builds a realistic 5-sliding-1-global attention pattern (the gemma-style
+// layout) for the bench fixture — a bench-only helper, mirroring the arch benches' input.
+func benchLayerTypes(n int) []string {
+	lt := make([]string, n)
+	for i := range lt {
+		if (i+1)%6 == 0 {
+			lt[i] = "full_attention"
+		} else {
+			lt[i] = "sliding_attention"
+		}
+	}
+	return lt
+}
+
 func benchAssistantConfig() AssistantConfig {
 	lt := benchLayerTypes(48)
-	return AssistantConfig{ModelType: "bench-assistant", LayerTypes: lt, Arch: Arch{Layer: DeriveLayers(lt, 0)}}
+	return AssistantConfig{ModelType: "bench-assistant", LayerTypes: lt, Arch: model.Arch{Layer: model.DeriveLayers(lt, 0)}}
 }
 
 func registerBenchAssistant() {

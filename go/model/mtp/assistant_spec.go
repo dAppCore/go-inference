@@ -1,13 +1,14 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-package model
+package mtp
 
 import (
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 )
 
 // assistant_spec.go is the REACTIVE attached-drafter contract, the assistant-side twin of
-// arch_spec.go: a model package declares how its MTP assistant checkpoints parse (config.json
+// model.arch_spec.go: a model package declares how its MTP assistant checkpoints parse (config.json
 // and/or GGUF metadata) and the engine's assistant loader REACTS to that declaration. An
 // attached drafter (an "assistant" in the HF assisted-generation sense) is the speculative
 // draft head that projects from the TARGET model's hidden state ([token embed ⊕ target
@@ -66,9 +67,9 @@ type AssistantConfig struct {
 	NumCentroids      int          // ordered-embedding head: centroid count (0 = plain LM head)
 	CentroidTopK      int          // ordered-embedding head: intermediate top-K
 	OrderedEmbeddings bool         // logits via the ordered-embedding (centroid) head
-	LayerTypes        []string     // per-layer attention type names — matched against the target's KV streams
-	Arch              Arch         // the drafter's OWN decode architecture, fully derived
-	Quant             *QuantConfig // quantization block (nil = bf16) — quantised tensor-shape validation reads it
+	LayerTypes        []string           // per-layer attention type names — matched against the target's KV streams
+	Arch              model.Arch         // the drafter's OWN decode architecture, fully derived
+	Quant             *model.QuantConfig // quantization block (nil = bf16) — quantised tensor-shape validation reads it
 }
 
 // LayerType returns the declared attention-type name for layer idx, falling back to the
