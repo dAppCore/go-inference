@@ -135,13 +135,16 @@ func (p *InferenceProvider) Describe() []coreapi.RouteDescription {
 						"properties": map[string]any{
 							"role":    map[string]any{"type": "string"},
 							"content": map[string]any{"type": "string"},
-							"thought": map[string]any{"type": "string", "description": "the reasoning channel, split from content (thinking models)"},
 						},
 					},
 					"finish_reason": map[string]any{"type": "string"},
 				},
 			}},
 			"usage": usageSchema,
+			// The reasoning channel rides the RESPONSE root, split from
+			// content — the SDK fleet found the earlier message-level
+			// placement wrong against the wire.
+			"thought": map[string]any{"type": "string", "description": "the reasoning channel, split from content (thinking models)"},
 		},
 	}
 	completionResponse := map[string]any{
