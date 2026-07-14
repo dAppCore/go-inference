@@ -59,6 +59,7 @@ var (
 	_ engine.PromptReuseSession      = (*hipEngineSession)(nil)
 	_ engine.CanonicalLandingSession = (*hipEngineSession)(nil)
 	_ engine.VisionSession           = (*hipEngineSession)(nil)
+	_ inference.PromptCacheClearer   = (*hipEngineSession)(nil)
 )
 
 // hipKVSnapshotDevicePayloadMode marks the opaque per-layer payloads that
@@ -644,6 +645,21 @@ func (s *hipEngineSession) Close() error {
 	s.pending = nil
 	s.pendingEmbeddings = nil
 	return s.closeDeviceLocked()
+}
+
+// ClearPromptCache releases retained KV and forgets the buffered prompt and
+// generated continuation while leaving the session open for a cold prefill.
+func (s *hipEngineSession) ClearPromptCache() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_ = s.closeDeviceLocked()
+	s.pending = nil
+	s.pendingEmbeddings = nil
+	s.tokens = nil
+	s.generated = nil
 }
 
 func (s *hipEngineSession) closeDeviceLocked() error {

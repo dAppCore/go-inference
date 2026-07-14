@@ -436,3 +436,48 @@ func TestHipEngineSession_RingRollbackUnsafe_Good(t *testing.T) {
 	core.AssertFalse(t, session.ringRollbackUnsafeLocked(3))
 	core.AssertTrue(t, session.ringRollbackUnsafeLocked(4))
 }
+
+func TestHipEngineSession_ClearPromptCache_Good(t *testing.T) {
+	session := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
+	device := session.device
+	session.pending = []int32{3}
+	session.pendingEmbeddings = []byte{1, 2, 3, 4}
+	session.generated = []int32{5}
+	var clearer inference.PromptCacheClearer = session
+
+	clearer.ClearPromptCache()
+
+	if session.device != nil {
+		t.Fatal("ClearPromptCache retained the device KV state")
+	}
+	core.AssertTrue(t, device.closed)
+	core.AssertEqual(t, []int32(nil), session.pending)
+	core.AssertEqual(t, []byte(nil), session.pendingEmbeddings)
+	core.AssertEqual(t, []int32(nil), session.tokens)
+	core.AssertEqual(t, []int32(nil), session.generated)
+	core.AssertFalse(t, session.closed)
+	core.RequireNoError(t, session.PrefillTokens([]int32{7}))
+}
+
+func TestHipEngineSession_ClearPromptCache_Bad_NilReceiver(t *testing.T) {
+	var session *hipEngineSession
+	var clearer inference.PromptCacheClearer = session
+
+	clearer.ClearPromptCache()
+}
+
+func TestHipEngineSession_ClearPromptCache_Ugly_IsIdempotentOnBufferedState(t *testing.T) {
+	session := hipEngineSessionForTest([]int32{1, 2})
+	session.pendingEmbeddings = []byte{1, 2, 3, 4}
+	var clearer inference.PromptCacheClearer = session
+
+	clearer.ClearPromptCache()
+	clearer.ClearPromptCache()
+
+	core.AssertEqual(t, []int32(nil), session.pending)
+	core.AssertEqual(t, []byte(nil), session.pendingEmbeddings)
+	core.AssertEqual(t, []int32(nil), session.tokens)
+	core.AssertEqual(t, []int32(nil), session.generated)
+	core.AssertFalse(t, session.closed)
+	core.RequireNoError(t, session.PrefillTokens([]int32{8}))
+}
