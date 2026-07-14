@@ -279,6 +279,14 @@ func RunServe(ctx context.Context, cfg ServeConfig) error {
 		host.resolver = sched
 		defer sched.close()
 		printServe(log, "serve: scheduler %s — requests route through the %s scheduler between the HTTP handlers and the model", mode, mode)
+		if armDrafter {
+			// Composition semantics: the MTP speculative pair is single-session
+			// (one target KV cache, one drafter command buffer), so the scheduler
+			// serialises its generation lane — concurrent requests queue and run
+			// one at a time rather than N-way. Operators arming a drafter under a
+			// concurrent scheduler must know throughput here is per-request (#1842).
+			printServe(log, "serve: MTP drafter under the %s scheduler — speculative generation is single-session; concurrent requests serialise (queue and run one at a time)", mode)
+		}
 	}
 
 	return hostServe(ctx, cfg, host, outboundPolicy, log)
