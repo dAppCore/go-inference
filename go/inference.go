@@ -161,7 +161,11 @@ type GenerateMetrics struct {
 	PrefillTokensPerSec float64 // PromptTokens / PrefillDuration
 	DecodeTokensPerSec  float64 // GeneratedTokens / DecodeDuration
 
-	// Memory (Metal/GPU)
+	// Memory (device allocation, engine capability). Populated only when the
+	// engine reports its device's allocation state (the metal engine does);
+	// engines without the capability leave both at zero — absent, not
+	// measured-as-zero. Peak is the device-global high-water since the
+	// operation began; Active is the device's allocated bytes at read time.
 	PeakMemoryBytes   uint64 // Peak GPU memory during this operation
 	ActiveMemoryBytes uint64 // Active GPU memory after operation
 

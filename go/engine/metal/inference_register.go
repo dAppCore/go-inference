@@ -185,12 +185,14 @@ var _ engine.Session = (*composedEngineSession)(nil)
 // PrefillTokens stores the prompt tokens; the composed loop re-runs prefill inside the generate delegate
 // (one prefill per stateless request), so the stored prompt is the whole retained state.
 func (s *composedEngineSession) PrefillTokens(ids []int32) error {
+	memWatermarkReset() // the operation's memory high-water starts here (#1843)
 	s.prompt = append(s.prompt[:0], ids...)
 	return nil
 }
 
 // AppendTokens extends the stored prompt (the recurrent state carries no separate replay-free append).
 func (s *composedEngineSession) AppendTokens(ids []int32) error {
+	memWatermarkReset() // a continuity turn's high-water starts here (#1843)
 	s.prompt = append(s.prompt, ids...)
 	return nil
 }

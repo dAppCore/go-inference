@@ -871,6 +871,13 @@ func (m *TextModel) setMetrics(promptTokens, generated int, total time.Duration,
 	if decode > 0 {
 		mt.DecodeTokensPerSec = float64(generated) / decode.Seconds()
 	}
+	// Memory is an optional engine capability — an engine that can read its
+	// device's allocation state fills the counters; the rest stay zero
+	// (honestly absent, never fabricated). See MemoryReporter.
+	if r, ok := m.tm.(MemoryReporter); ok {
+		mt.PeakMemoryBytes = r.PeakMemoryBytes()
+		mt.ActiveMemoryBytes = r.ActiveMemoryBytes()
+	}
 	m.mu.Lock()
 	m.lastMetrics = mt
 	m.mu.Unlock()

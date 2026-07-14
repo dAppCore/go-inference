@@ -1251,6 +1251,7 @@ func (s *ArchSession) PrefillTokens(ids []int32) error {
 	if len(ids) > s.maxLen {
 		return core.NewError("native.ArchSession.PrefillTokens: sequence would exceed maxLen cache rows")
 	}
+	memWatermarkReset() // the operation's memory high-water starts here (#1843)
 	s.pos = 0
 	s.resetCachedPromptEntry()
 	s.resetRetainedHidden()
@@ -1266,6 +1267,7 @@ func (s *ArchSession) PrefillTokens(ids []int32) error {
 	s.cachedIDs = append(resident, ids...)
 	s.rememberRetainedHidden(hidden)
 	s.releaseQ8PrefillMirrors()
+	memWatermarkSample()
 	return nil
 }
 
@@ -1294,6 +1296,7 @@ func (s *ArchSession) PrefillTokenEmbeddings(ids []int32, embeddings [][]byte) e
 	if len(ids) > s.maxLen {
 		return core.NewError("native.ArchSession.PrefillTokenEmbeddings: sequence would exceed maxLen cache rows")
 	}
+	memWatermarkReset() // the multimodal operation's high-water starts here (#1843)
 	s.pos = 0
 	s.resetCachedPromptEntry()
 	s.resetRetainedHidden()
@@ -1309,6 +1312,7 @@ func (s *ArchSession) PrefillTokenEmbeddings(ids []int32, embeddings [][]byte) e
 	s.cachedIDs = append(resident, ids...)
 	s.rememberRetainedHidden(hidden)
 	s.releaseQ8PrefillMirrors()
+	memWatermarkSample()
 	return nil
 }
 
@@ -1324,6 +1328,7 @@ func (s *ArchSession) AppendTokens(ids []int32) error {
 	if s.pos+len(ids) > s.maxLen {
 		return core.NewError("native.ArchSession.AppendTokens: sequence would exceed maxLen cache rows")
 	}
+	memWatermarkReset() // a continuity turn's high-water starts here (#1843)
 	s.resetRetainedLogits()
 	hidden, err := s.prefillRetainedTokens(ids, "native.ArchSession.AppendTokens")
 	if err != nil {
@@ -1334,6 +1339,7 @@ func (s *ArchSession) AppendTokens(ids []int32) error {
 	s.cachedIDs = append(s.cachedIDs, ids...)
 	s.clearCachedPromptHidden()
 	s.rememberRetainedHidden(hidden)
+	memWatermarkSample()
 	return nil
 }
 
