@@ -83,6 +83,7 @@ var supportedNativeArchitectures = map[string]struct{}{
 	"hybrid":              {},
 	"kimi":                {},
 	"llama":               {},
+	"mamba2":              {},
 	"minimax":             {},
 	"minimax_m2":          {},
 	"mistral":             {},
@@ -531,7 +532,7 @@ func ArchitectureProfileGeneration(id string) bool {
 	}
 	switch id {
 	case "bert", "bert_rerank", "composed", "hybrid",
-		"deltanet", "gla", "gsa", "mamba2", "mla", "moba", "nsa", "retnet", "rwkv7",
+		"deltanet", "gla", "gsa", "mla", "moba", "nsa", "retnet", "rwkv7",
 		"deepseek", "deepseek_r1", "gpt-oss", "kimi", "minimax_m2",
 		"mixtral", "qwen3_6", "qwen3_6_moe", "qwen3_moe":
 		return false
@@ -873,7 +874,9 @@ func ArchitectureProfileNotes(id string) []string {
 		return []string{"native staged cross-encoder loader; scorer kernels pending"}
 	case "composed", "hybrid":
 		return []string{"portable composed incremental runner is linked; projection hooks remain available for HIP++ acceleration"}
-	case "deltanet", "gla", "gsa", "mamba2", "mla", "moba", "nsa", "retnet", "rwkv7":
+	case "mamba2":
+		return []string{"portable recurrent Mamba2 runner is linked; projection hooks remain available for HIP++ acceleration"}
+	case "deltanet", "gla", "gsa", "mla", "moba", "nsa", "retnet", "rwkv7":
 		return []string{"go-mlx metal model family recognised for reactive route parity; ROCm runtime loader remains metadata-only"}
 	case "diffusion_gemma":
 		return []string{"block-diffusion Gemma model; trunk metadata is recognised and diffusion sampler is routed through the diffuse command"}
