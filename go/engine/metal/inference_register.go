@@ -138,11 +138,16 @@ func (m *composedTextModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
 	if m != nil && composed.ChatMLDialect(m.modelType) {
 		return chatMLChatTemplate(), true
 	}
-	var tok *tokenizer.Tokenizer
-	if m != nil {
-		tok = m.tok
+	// A composed model built without a tokenizer (or a nil receiver) declares the
+	// gemma fallback on the DEFAULT turn dialect. DetectTurnTokens must see a true
+	// nil interface here, not a typed-nil *Tokenizer: a typed-nil passes its
+	// `tok != nil` guard and then nil-derefs inside TokenID. So only hand it the
+	// tokenizer when a real one is attached; otherwise pass an untyped nil.
+	turns := engine.DetectTurnTokens(nil)
+	if m != nil && m.tok != nil {
+		turns = engine.DetectTurnTokens(m.tok)
 	}
-	return engine.GemmaChatTemplate(engine.DetectTurnTokens(tok), false), true
+	return engine.GemmaChatTemplate(turns, false), true
 }
 
 // chatMLChatTemplate is the ChatML dialect as an engine.ChatTemplate: <|im_start|>role\n…<|im_end|> turns,

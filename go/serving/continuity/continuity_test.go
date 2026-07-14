@@ -320,6 +320,58 @@ func TestManagerFinishTurnSleepDeclineStaysResident(t *testing.T) {
 	}
 }
 
+// TestManagerChat_StoreWakeDeclineServesStateless is the WAKE half of the composed
+// graceful-degrade contract (handover item: "graceful degrade when composed sleep
+// declines" names capture AND restore; TestManagerFinishTurnSleepDeclineStaysResident
+// covers the capture/sleep decline, this covers the restore/wake decline). A
+// conversation is slept to the store by a capturing manager; its next turn then
+// arrives at a fresh manager whose session CANNOT restore (a composed hybrid whose
+// wake declines, or any genuine restore failure). The manager must decline that turn
+// to the stateless path — (nil, false), counted, an honest log line — never surfacing
+// the wake error to the client and never a silent wrong answer: the caller re-prefills
+// the whole conversation statelessly, which is always correct, just slower.
+func TestManagerChat_StoreWakeDeclineServesStateless(t *testing.T) {
+	ctx := context.Background()
+	store := state.NewInMemoryStore(nil)
+
+	// Turn 1 through a capturing manager: a fresh [system,user] turn is served,
+	// generates "ok", and sleeps its state to the store under the conversation key
+	// the next turn looks up.
+	seeder := shareManager(store, &graftHandle{kvSnap: synthSnapshot(6), genTokens: []inference.Token{{Text: "ok"}}}, nil, false)
+	turn1 := []inference.Message{{Role: "system", Content: "S"}, {Role: "user", Content: "U1"}}
+	streamed, ok := seeder.Chat(ctx, turn1, inference.WithMaxTokens(4))
+	if !ok {
+		t.Fatal("seed turn declined — a fresh [system,user] turn must be served")
+	}
+	drain(streamed)
+	if s := seeder.Stats(); s.FreshConversations != 1 || s.Sleeps != 1 {
+		t.Fatalf("seed stats = %+v, want one FreshConversation and one Sleep (state is in the store)", s)
+	}
+
+	// Turn 2 arrives at a FRESH manager (the conversation is not RAM-resident here,
+	// so it must wake from the store) whose session cannot restore. WakeAgentMemory
+	// fails, so acquire errors and Chat declines to the stateless path — ok=false
+	// tells the caller to re-prefill statelessly (a fresh conversation would instead
+	// return ok=true, so ok=false uniquely proves the wake was attempted and declined).
+	waker := shareManager(store, decliningSessionHandle{}, nil, false)
+	turn2 := []inference.Message{
+		{Role: "system", Content: "S"},
+		{Role: "user", Content: "U1"},
+		{Role: "assistant", Content: "ok"},
+		{Role: "user", Content: "U2"},
+	}
+	seq2, ok := waker.Chat(ctx, turn2, inference.WithMaxTokens(4))
+	if ok {
+		t.Fatal("a turn whose store-wake declines must decline to the stateless path, not be served on a half-woken session")
+	}
+	if seq2 != nil {
+		t.Fatal("a declined turn must return a nil token sequence")
+	}
+	if s := waker.Stats(); s.StatelessFallbacks != 1 || s.StoreWakes != 0 {
+		t.Fatalf("wake-decline stats = %+v, want one StatelessFallback and no StoreWakes", s)
+	}
+}
+
 // TestSpineModelInfo checks the neutral-to-spine field mapping and the context
 // length default: the seven mapped fields carry across verbatim, and a
 // non-positive context length falls back to 4096 (the spine's minimum window).
