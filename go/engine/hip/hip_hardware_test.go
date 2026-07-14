@@ -166,6 +166,61 @@ func TestHIPHardwareMoECombineNormsMatchesRMSNormAndVectorAdd_Good(t *testing.T)
 	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "MoE combine norms", want, got, 0.00001, 0.00001)
 }
 
+func TestHIPHardwareAttentionHeadsBatchCapped_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || !runtime.Available() || hipRuntime.driver == nil {
+		t.Fatal("native ROCm runtime is not available")
+	}
+
+	queryValues := []float32{1, 0, 0, 1}
+	keyValues := []float32{1, 0, 0, 1, 1, 1}
+	valueValues := []float32{2, 0, 0, 4, 8, 8}
+	upload := func(label string, values []float32) *hipDeviceByteBuffer {
+		t.Helper()
+		payload, err := hipFloat32Payload(values)
+		core.RequireNoError(t, err)
+		buffer, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsBatchCappedLaunch", label, payload, len(values))
+		core.RequireNoError(t, err)
+		t.Cleanup(func() { _ = buffer.Close() })
+		return buffer
+	}
+	query := upload("capped attention query", queryValues)
+	keys := upload("capped attention keys", keyValues)
+	values := upload("capped attention values", valueValues)
+	caps, err := hipUploadTokenIDs(hipRuntime.driver, []int32{2, 2})
+	core.RequireNoError(t, err)
+	defer caps.Close()
+	output, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsBatchCappedLaunch", "capped attention output", uint64(len(queryValues)*4), len(queryValues))
+	core.RequireNoError(t, err)
+	defer output.Close()
+
+	core.RequireNoError(t, hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernel(context.Background(), hipRuntime.driver, hipAttentionHeadsBatchCausalDeviceRequest{
+		Key: keys, Value: values, VisibleTokenCaps: caps,
+		Dim: 2, TokenCount: 3, HeadCount: 1, QueryCount: 2, Scale: 1,
+	}, query, output))
+	got, err := hipReadFloat32DeviceOutput(output, "rocm.hip.AttentionHeadsBatchCappedLaunch", "capped attention output", len(queryValues))
+	core.RequireNoError(t, err)
+
+	keyRows, err := splitHIPReferenceVectors(keyValues, 2)
+	core.RequireNoError(t, err)
+	valueRows, err := splitHIPReferenceVectors(valueValues, 2)
+	core.RequireNoError(t, err)
+	want := make([]float32, 0, len(queryValues))
+	for row := range 2 {
+		rowOutput, _, err := hipReferenceSingleHeadAttentionWithScale(queryValues[row*2:(row+1)*2], keyRows[:2], valueRows[:2], 1)
+		core.RequireNoError(t, err)
+		want = append(want, rowOutput...)
+	}
+	assertFloat32SlicesNear(t, want, got, 0.0001)
+}
+
 func TestHIPHardwarePackedTopKSamplerMatchesHostReference_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")

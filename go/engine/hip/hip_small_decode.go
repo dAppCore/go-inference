@@ -2343,18 +2343,19 @@ func hipRunAttentionHeadsOutputFromDeviceQueryToDeviceKernel(ctx context.Context
 }
 
 type hipAttentionHeadsBatchCausalDeviceRequest struct {
-	Key             *hipDeviceByteBuffer
-	Value           *hipDeviceByteBuffer
-	DeviceKV        *rocmDeviceKVCache
-	DescriptorTable *rocmDeviceKVDescriptorTable
-	Dim             int
-	TokenCount      int
-	HeadCount       int
-	KeyHeads        int
-	QueryCount      int
-	QueryStartToken int
-	WindowSize      int
-	Scale           float32
+	Key              *hipDeviceByteBuffer
+	Value            *hipDeviceByteBuffer
+	DeviceKV         *rocmDeviceKVCache
+	DescriptorTable  *rocmDeviceKVDescriptorTable
+	VisibleTokenCaps *hipDeviceTokenBuffer
+	Dim              int
+	TokenCount       int
+	HeadCount        int
+	KeyHeads         int
+	QueryCount       int
+	QueryStartToken  int
+	WindowSize       int
+	Scale            float32
 }
 
 type hipAttentionHeadsLaneBatchLane struct {
@@ -2712,6 +2713,13 @@ func hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernelWorkspace
 		OutputBytes:     output.SizeBytes(),
 		Scale:           req.Scale,
 	}
+	if req.VisibleTokenCaps != nil {
+		if req.VisibleTokenCaps.Pointer() == 0 || req.VisibleTokenCaps.Count() != req.QueryCount || req.VisibleTokenCaps.SizeBytes() != uint64(req.QueryCount*4) {
+			return core.E("rocm.hip.AttentionHeadsBatchCausalLaunch", "visible-token cap device buffer shape mismatch", nil)
+		}
+		launch.VisibleCapPointer = req.VisibleTokenCaps.Pointer()
+		launch.VisibleCapBytes = req.VisibleTokenCaps.SizeBytes()
+	}
 	if req.DeviceKV == nil {
 		if req.DescriptorTable != nil {
 			return core.E("rocm.hip.AttentionHeadsBatchCausalLaunch", "descriptor table requires device KV cache", nil)
@@ -2787,8 +2795,12 @@ func hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernelWorkspace
 	if err != nil {
 		return err
 	}
+	kernelName := hipKernelNameAttentionHeadsBatchCausal
+	if req.VisibleTokenCaps != nil {
+		kernelName = hipKernelNameAttentionHeadsBatchCapped
+	}
 	config := hipKernelLaunchConfig{
-		Name:           hipKernelNameAttentionHeadsBatchCausal,
+		Name:           kernelName,
 		Args:           launchBytes,
 		GridX:          uint32(req.HeadCount),
 		GridY:          uint32(req.QueryCount),
@@ -2887,9 +2899,13 @@ const (
 	hipAttentionHeadsBatchChunkedEligibilityBelowTokenThreshold
 	hipAttentionHeadsBatchChunkedEligibilityUnsupportedKVMode
 	hipAttentionHeadsBatchChunkedEligibilityTokenCountMismatch
+	hipAttentionHeadsBatchChunkedEligibilityVisibleCaps
 )
 
 func hipAttentionHeadsBatchChunkedEligibilityReasonFor(req hipAttentionHeadsBatchCausalDeviceRequest, workspace *hipAttentionHeadsChunkedWorkspace) hipAttentionHeadsBatchChunkedEligibilityReason {
+	if req.VisibleTokenCaps != nil {
+		return hipAttentionHeadsBatchChunkedEligibilityVisibleCaps
+	}
 	keyHeads := firstPositiveInt(req.KeyHeads, 1)
 	if keyHeads <= 0 || keyHeads > req.HeadCount || req.HeadCount%keyHeads != 0 {
 		return hipAttentionHeadsBatchChunkedEligibilityInvalidHeads

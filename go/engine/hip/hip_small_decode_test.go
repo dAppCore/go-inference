@@ -571,6 +571,20 @@ func TestHIPGemma4Q4GenerateTokenSeq_UsesBatchedPrefill_Good(t *testing.T) {
 	wantGreedySlots := hipProjectionGreedyRoundFirstSlabSlots(hipProjectionGreedyReserveSlots + 4)
 	core.AssertEqual(t, 1, countUint64Value(driver.allocations[allocStart:], uint64(wantGreedySlots*hipMLXQ4ProjectionBestBytes)))
 
+	engineConfig.BidirectionalSpanTokens = [2]int32{1, 0}
+	start = len(driver.launches)
+	stream, streamErr = hipGemma4Q4GenerateTokenSeqWithEngineConfig(context.Background(), &hipLoadedModel{driver: driver}, cfg, []int32{0, 1, 1, 0}, inference.GenerateConfig{MaxTokens: 1}, engineConfig)
+	generated = nil
+	for token := range stream {
+		generated = append(generated, token)
+	}
+	core.RequireNoError(t, streamErr())
+	core.AssertEqual(t, 1, len(generated))
+	launches = driver.launches[start:]
+	core.AssertEqual(t, len(cfg.Layers), countLaunchName(launches, hipKernelNameAttentionHeadsBatchCapped))
+
+	engineConfig.BidirectionalSpanTokens = [2]int32{}
+
 	engineConfig.DisableBatchedPrefill = true
 	start = len(driver.launches)
 	stream, streamErr = hipGemma4Q4GenerateTokenSeqWithEngineConfig(context.Background(), &hipLoadedModel{driver: driver}, cfg, []int32{0, 1, 0}, inference.GenerateConfig{MaxTokens: 2}, engineConfig)
@@ -887,6 +901,36 @@ func TestHIPGemma4Q4PrefillPlanInto_ReusesScratch_Good(t *testing.T) {
 	core.AssertEqual(t, 1, single.LenBatches())
 	core.AssertEqual(t, 0, len(single.Batches))
 	core.AssertEqual(t, 0, len(returned))
+}
+
+func TestHIPGemma4Q4PrefillPlanBidirectionalSpans_Good(t *testing.T) {
+	tokens := []int32{1, 22, 22, 22, 2, 23, 23, 3}
+	spans := hipGemma4Q4BidirectionalTokenSpans(tokens, [2]int32{22, 23})
+	core.AssertEqual(t, [][2]int{{1, 4}, {5, 7}}, spans)
+
+	plan, _, err := hipGemma4Q4PlanPromptPrefillBidirectionalInto(tokens, 5, 3, spans, nil)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 4, plan.LenBatches())
+
+	wantRanges := [][2]int{{0, 1}, {1, 4}, {4, 7}, {7, 8}}
+	wantCaps := [][]int32{nil, {9, 9, 9}, {10, 12, 12}, nil}
+	for index := range wantRanges {
+		batch := plan.Batch(index)
+		core.AssertEqual(t, wantRanges[index][0], batch.Start)
+		core.AssertEqual(t, wantRanges[index][1], batch.End)
+		core.AssertEqual(t, wantCaps[index], batch.AttentionCaps)
+	}
+	core.AssertEqual(t, 0, plan.Batch(plan.LenBatches()-1).OutputRow)
+}
+
+func TestHIPGemma4Q4PrefillPlanBidirectionalSpans_Ugly(t *testing.T) {
+	tokens := []int32{22, 22, 22, 22, 7}
+	spans := hipGemma4Q4BidirectionalTokenSpans(tokens, [2]int32{22, 23})
+	plan, _, err := hipGemma4Q4PlanPromptPrefillBidirectionalInto(tokens, 0, 2, spans, nil)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 2, plan.LenBatches())
+	core.AssertEqual(t, 4, len(plan.Batch(0).Tokens))
+	core.AssertEqual(t, []int32{4, 4, 4, 4}, plan.Batch(0).AttentionCaps)
 }
 
 func BenchmarkHIPGemma4Q4PlanPromptPrefill_29K(b *testing.B) {
@@ -2467,7 +2511,7 @@ func TestHIPGemma4Q4PrefillForwardBatchInitialHidden_Good(t *testing.T) {
 	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(
 		context.Background(), driver, cfg, tokens, 0, 1e-6, rocmKVCacheModeKQ8VQ4,
 		nil, nil, []*hipDeviceByteBuffer{perLayerInput}, nil, -1, nil, nil,
-		defaultHIPGemma4Q4EngineConfig(), initialHidden,
+		defaultHIPGemma4Q4EngineConfig(), initialHidden, nil,
 	)
 	core.RequireNoError(t, err)
 	defer forward.Close()
@@ -2475,6 +2519,44 @@ func TestHIPGemma4Q4PrefillForwardBatchInitialHidden_Good(t *testing.T) {
 	launches := driver.launches[start:]
 	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameEmbedLookup))
 	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameVectorScale))
+}
+
+func TestHIPGemma4Q4PrefillForwardBatchBidirectionalCaps_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	layer, cleanup := hipGemma4Q4FixtureConfig(t, driver, 0, 4, 2, 8)
+	defer cleanup()
+	tokens := []int32{22, 22}
+	cfg := hipGemma4Q4ForwardConfig{Layers: []hipGemma4Q4Layer0Config{layer}}
+
+	initialValues := make([]float32, len(tokens)*layer.HiddenSize)
+	for index := range initialValues {
+		initialValues[index] = float32(index + 1)
+	}
+	initialPayload, err := hipFloat32Payload(initialValues)
+	core.RequireNoError(t, err)
+	initialHidden, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "bidir initial hidden", initialPayload, len(initialPayload)/4)
+	core.RequireNoError(t, err)
+	defer initialHidden.Close()
+	perLayerPayload, err := hipFloat32Payload(make([]float32, len(tokens)*layer.PerLayerInput.InputSize))
+	core.RequireNoError(t, err)
+	perLayerInput, err := hipUploadByteBuffer(driver, hipGemma4Q4Layer0Operation, "bidir per-layer input", perLayerPayload, len(perLayerPayload)/4)
+	core.RequireNoError(t, err)
+	defer perLayerInput.Close()
+	rowCaps, err := hipUploadTokenIDs(driver, []int32{2, 2})
+	core.RequireNoError(t, err)
+	defer rowCaps.Close()
+
+	start := len(driver.launches)
+	forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(
+		context.Background(), driver, cfg, tokens, 0, 1e-6, rocmKVCacheModeKQ8VQ4,
+		nil, nil, []*hipDeviceByteBuffer{perLayerInput}, nil, -1, nil, nil,
+		defaultHIPGemma4Q4EngineConfig(), initialHidden, rowCaps,
+	)
+	core.RequireNoError(t, err)
+	defer forward.Close()
+	launches := driver.launches[start:]
+	core.AssertEqual(t, 1, countLaunchName(launches, hipKernelNameAttentionHeadsBatchCapped))
+	core.AssertEqual(t, 0, countLaunchName(launches, hipKernelNameAttentionHeadsBatchCausal))
 }
 
 func TestHIPGemma4Q4PrefillForwardBatchWithPrior_Good(t *testing.T) {

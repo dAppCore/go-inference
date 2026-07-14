@@ -72,6 +72,7 @@ const (
 	hipKernelNameAttention                                  = "rocm_attention"
 	hipKernelNameAttentionHeads                             = "rocm_attention_heads"
 	hipKernelNameAttentionHeadsBatchCausal                  = "rocm_attention_heads_batch_causal"
+	hipKernelNameAttentionHeadsBatchCapped                  = "rocm_attention_heads_batch_capped"
 	hipKernelNameAttentionHeadsLaneBatch                    = "rocm_attention_heads_lane_batch"
 	hipKernelNameAttentionHeadsBatchCausalQueryRMSRoPE      = "rocm_attention_heads_batch_causal_query_rms_rope"
 	hipKernelNameAttentionHeadsChunkedStage1                = "rocm_attention_heads_chunked_stage1"

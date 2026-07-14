@@ -1142,11 +1142,30 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 			runErr = err
 			return
 		}
-		prefillPlanBatches := hipBorrowGemma4Q4PrefillUBatches(hipGemma4Q4PrefillBatchCount(len(promptTokens), ubatchTokens))
+		bidirSpans := hipGemma4Q4BidirectionalTokenSpans(promptTokens, engineConfig.BidirectionalSpanTokens)
+		if len(bidirSpans) > 0 {
+			if !hipGemma4Q4CanUseBatchedGeneratePrefill(cfg) || engineConfig.DisableBatchedPrefill {
+				runErr = core.E(hipGemma4Q4Layer0Operation, "bidirectional media spans require batched prefill", nil)
+				return
+			}
+			for _, layer := range cfg.Layers {
+				if layer.SlidingWindow > 0 && req.Position+len(promptTokens) > layer.SlidingWindow {
+					runErr = core.E(hipGemma4Q4Layer0Operation, "bidirectional media spans require the prompt to fit the sliding window", nil)
+					return
+				}
+			}
+		}
+		prefillBatchCapacity := hipGemma4Q4PrefillBatchCount(len(promptTokens), ubatchTokens) + len(bidirSpans)
+		prefillPlanBatches := hipBorrowGemma4Q4PrefillUBatches(prefillBatchCapacity)
 		defer func() {
 			hipReleaseGemma4Q4PrefillUBatches(prefillPlanBatches)
 		}()
-		prefillPlan, prefillPlanBatches, err := hipGemma4Q4PlanPromptPrefillInto(promptTokens, req.Position, ubatchTokens, prefillPlanBatches)
+		var prefillPlan hipGemma4Q4PrefillPlan
+		if len(bidirSpans) > 0 {
+			prefillPlan, prefillPlanBatches, err = hipGemma4Q4PlanPromptPrefillBidirectionalInto(promptTokens, req.Position, ubatchTokens, bidirSpans, prefillPlanBatches)
+		} else {
+			prefillPlan, prefillPlanBatches, err = hipGemma4Q4PlanPromptPrefillInto(promptTokens, req.Position, ubatchTokens, prefillPlanBatches)
+		}
 		if err != nil {
 			runErr = err
 			return
@@ -1316,7 +1335,21 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 				view := hipBorrowDeviceByteBufferValue(model.driver, "custom prefill embedding ubatch", customEmbeddingBuffer.Pointer()+nativeDevicePointer(byteOffset), uint64(byteCount), len(ubatch.Tokens)*hidden)
 				initialHidden = &view
 			}
-			forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(ctx, model.driver, cfg, ubatch.Tokens, ubatch.Position, req.Epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, ubatch.OutputTokens, ubatch.OutputRow, finalGreedyBuffer, attentionWorkspace, engineConfig, initialHidden)
+			var visibleTokenCaps *hipDeviceTokenBuffer
+			if len(ubatch.AttentionCaps) > 0 {
+				visibleTokenCaps, err = hipUploadTokenIDs(model.driver, ubatch.AttentionCaps)
+				if err != nil {
+					runErr = err
+					return
+				}
+			}
+			forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(ctx, model.driver, cfg, ubatch.Tokens, ubatch.Position, req.Epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, ubatch.OutputTokens, ubatch.OutputRow, finalGreedyBuffer, attentionWorkspace, engineConfig, initialHidden, visibleTokenCaps)
+			if visibleTokenCaps != nil {
+				closeErr := visibleTokenCaps.Close()
+				if err == nil && closeErr != nil {
+					err = closeErr
+				}
+			}
 			if err != nil {
 				runErr = err
 				return

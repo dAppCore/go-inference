@@ -4067,6 +4067,13 @@ __device__ bool rocm_valid_attention_heads_batch_causal_args(const rocm_attentio
 	return rocm_valid_device_kv_attention_descriptor_header(single);
 }
 
+__device__ bool rocm_valid_attention_heads_batch_capped_args(const rocm_attention_heads_batch_causal_launch_args &args)
+{
+	return rocm_valid_attention_heads_batch_causal_args(args) &&
+		args.reserved1 != 0 &&
+		args.reserved2 == static_cast<uint64_t>(args.query_count) * sizeof(uint32_t);
+}
+
 __device__ bool rocm_valid_attention_heads_lane_batch_args(const rocm_attention_heads_lane_batch_launch_args &args)
 {
 	const float scale = rocm_float_from_bits(args.scale_bits);
@@ -12342,6 +12349,76 @@ extern "C" __global__ void rocm_attention_heads_batch_causal(const unsigned char
 	// the full token_count in scope. The visible-count fast paths below reduce single.token_count to
 	// the window, which would divide the full buffer by the window and mis-stride every query row that
 	// sees fewer than all tokens. The device KV path addresses via descriptors and is unaffected.
+	if (window_start > 0u || args.kv_source == ROCM_ATTENTION_KV_SOURCE_CONTIGUOUS) {
+		single.token_count = args.token_count;
+		single.weight_bytes = args.token_count * sizeof(float);
+		rocm_run_single_head_attention_range_token_parallel(single, window_start, visible_tokens);
+		return;
+	}
+	if (blockDim.x <= 1) {
+		if (threadIdx.x == 0) {
+			rocm_run_single_head_attention(single);
+		}
+		return;
+	}
+	if (args.weight_pointer == 0 || visible_tokens >= 16) {
+		rocm_run_single_head_attention_token_parallel(single, args.shared_mem_bytes);
+		return;
+	}
+	rocm_run_single_head_attention_parallel(single);
+}
+
+// rocm_attention_heads_batch_capped is the multimodal sibling of causal batch
+// attention. reserved1 points at one absolute visible-token count per query
+// row and reserved2 carries its byte size. The whole K/V microbatch is landed
+// before this kernel, so image/video rows may safely see through to their span
+// end while ordinary rows retain their causal cap.
+extern "C" __global__ void rocm_attention_heads_batch_capped(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_attention_heads_batch_causal_launch_args &args = *reinterpret_cast<const rocm_attention_heads_batch_causal_launch_args *>(packet);
+	if (!rocm_valid_attention_heads_batch_capped_args(args) ||
+		blockIdx.x >= args.head_count ||
+		blockIdx.y >= args.query_count) {
+		return;
+	}
+	const uint64_t head = blockIdx.x;
+	const uint64_t query_row = blockIdx.y;
+	const uint32_t *visible_caps = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.reserved1));
+	const uint32_t visible_tokens = visible_caps[query_row];
+	if (visible_tokens == 0 || visible_tokens > args.token_count) {
+		return;
+	}
+	const uint32_t kv_head_count = rocm_attention_kv_head_count(args.reserved0, args.head_count);
+	const uint32_t kv_head = rocm_attention_kv_head_for_query(static_cast<uint32_t>(head), args.head_count, kv_head_count);
+	const uint64_t kv_pointer_offset = static_cast<uint64_t>(kv_head) * args.dim * sizeof(float);
+	const uint32_t window_start = args.window_size > 0u && visible_tokens > args.window_size
+		? visible_tokens - args.window_size
+		: 0u;
+	const uint64_t batch_head_index = query_row * args.head_count + head;
+	rocm_attention_launch_args single = {};
+	single.version = ROCM_ATTENTION_LAUNCH_ARGS_VERSION;
+	single.total_bytes = ROCM_ATTENTION_LAUNCH_ARGS_BYTES;
+	single.query_pointer = args.query_pointer + batch_head_index * args.dim * sizeof(float);
+	single.key_pointer = args.kv_source == ROCM_ATTENTION_KV_SOURCE_CONTIGUOUS ? args.key_pointer + kv_pointer_offset : 0u;
+	single.value_pointer = args.kv_source == ROCM_ATTENTION_KV_SOURCE_CONTIGUOUS ? args.value_pointer + kv_pointer_offset : 0u;
+	single.output_pointer = args.output_pointer + batch_head_index * args.dim * sizeof(float);
+	single.weight_pointer = args.weight_pointer == 0
+		? 0
+		: args.weight_pointer + batch_head_index * args.token_count * sizeof(float);
+	single.dim = args.dim;
+	single.token_count = visible_tokens;
+	single.query_bytes = args.dim * sizeof(float);
+	single.key_bytes = args.kv_source == ROCM_ATTENTION_KV_SOURCE_DEVICE ? kv_head * args.dim : args.key_bytes;
+	single.value_bytes = args.kv_source == ROCM_ATTENTION_KV_SOURCE_DEVICE ? kv_head * args.dim : args.value_bytes;
+	single.output_bytes = args.dim * sizeof(float);
+	single.weight_bytes = visible_tokens * sizeof(float);
+	single.kv_source = args.kv_source;
+	single.scale_bits = args.scale_bits;
+	single.descriptor_pointer = args.descriptor_pointer;
+	single.descriptor_bytes = args.descriptor_bytes;
 	if (window_start > 0u || args.kv_source == ROCM_ATTENTION_KV_SOURCE_CONTIGUOUS) {
 		single.token_count = args.token_count;
 		single.weight_bytes = args.token_count * sizeof(float);

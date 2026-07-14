@@ -438,6 +438,8 @@ type hipAttentionHeadsBatchCausalLaunchArgs struct {
 	DescriptorBytes   uint64
 	SharedMemBytes    uint64
 	WindowSize        int
+	VisibleCapPointer nativeDevicePointer
+	VisibleCapBytes   uint64
 }
 
 type hipAttentionHeadsLaneBatchLaunchArgs struct {
@@ -2595,6 +2597,13 @@ func (args hipAttentionHeadsBatchCausalLaunchArgs) BinaryInto(payload []byte) ([
 	if uint64(queryStartToken)+uint64(queryCount) > uint64(tokenCount) {
 		return nil, core.E("rocm.hip.AttentionHeadsBatchCausalLaunch", "causal query window exceeds token count", nil)
 	}
+	if args.VisibleCapPointer == 0 {
+		if args.VisibleCapBytes != 0 {
+			return nil, core.E("rocm.hip.AttentionHeadsBatchCausalLaunch", "visible-token cap bytes require a cap pointer", nil)
+		}
+	} else if args.VisibleCapBytes != uint64(queryCount)*4 {
+		return nil, core.E("rocm.hip.AttentionHeadsBatchCausalLaunch", "visible-token cap byte count mismatch", nil)
+	}
 	queryElements := uint64(dim) * uint64(headCount) * uint64(queryCount)
 	queryBytes, err := hipExactUint32Bytes("query", args.QueryBytes, queryElements*4)
 	if err != nil {
@@ -2664,6 +2673,8 @@ func (args hipAttentionHeadsBatchCausalLaunchArgs) BinaryInto(payload []byte) ([
 	binary.LittleEndian.PutUint64(payload[112:], args.SharedMemBytes)
 	binary.LittleEndian.PutUint32(payload[120:], windowSize)
 	binary.LittleEndian.PutUint32(payload[124:], keyHeads)
+	binary.LittleEndian.PutUint64(payload[128:], uint64(args.VisibleCapPointer))
+	binary.LittleEndian.PutUint64(payload[136:], args.VisibleCapBytes)
 	return payload, nil
 }
 

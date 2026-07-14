@@ -27,6 +27,10 @@ type hipGemma4Q4EngineConfig struct {
 	DisableBatchedDecode             bool
 	PrefillUBatchTokens              int
 	PrefillAttentionQueryChunkTokens int
+	// BidirectionalSpanTokens marks image/video placeholder IDs whose
+	// contiguous runs may see through to the end of their run during prefill.
+	// Zero IDs leave ordinary text prefill strictly causal.
+	BidirectionalSpanTokens [2]int32
 	// ForceBatchedProjection makes the prefill body launch the batched
 	// projection kernel even for a single-token ubatch, instead of the
 	// single-row fast path. The attached-drafter target prefill sets this so a

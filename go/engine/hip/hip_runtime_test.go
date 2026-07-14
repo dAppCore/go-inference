@@ -2991,6 +2991,8 @@ func (driver *fakeHIPDriver) LaunchKernel(config hipKernelLaunchConfig) error {
 		return driver.launchAttentionHeads(config.Args)
 	case hipKernelNameAttentionHeadsBatchCausal:
 		return driver.launchAttentionHeadsBatchCausal(config.Args)
+	case hipKernelNameAttentionHeadsBatchCapped:
+		return driver.launchAttentionHeadsBatchCausal(config.Args)
 	case hipKernelNameAttentionHeadsLaneBatch:
 		return driver.launchAttentionHeadsLaneBatch(config.Args)
 	case hipKernelNameAttentionHeadsBatchCausalQueryRMSRoPE:
@@ -7226,12 +7228,17 @@ func (driver *fakeHIPDriver) launchAttentionHeadsBatchCausal(args []byte) error 
 	descriptorBytes := int(binary.LittleEndian.Uint64(args[104:]))
 	windowSize := int(binary.LittleEndian.Uint32(args[120:]))
 	keyHeads := int(binary.LittleEndian.Uint32(args[124:]))
+	visibleCapPointer := nativeDevicePointer(binary.LittleEndian.Uint64(args[128:]))
+	visibleCapBytes := int(binary.LittleEndian.Uint64(args[136:]))
 	if dim <= 0 || tokenCount <= 0 || headCount <= 0 || queryCount <= 0 ||
 		keyHeads <= 0 || keyHeads > headCount || headCount%keyHeads != 0 ||
 		queryStartToken < 0 || windowSize < 0 || uint64(queryStartToken)+uint64(queryCount) > uint64(tokenCount) ||
 		queryBytes != queryCount*headCount*dim*4 ||
 		outputBytes != queryCount*headCount*dim*4 {
 		return core.E("rocm.hip.FakeLaunch", "attention heads batch causal shape metadata mismatch", nil)
+	}
+	if (visibleCapPointer == 0) != (visibleCapBytes == 0) || (visibleCapPointer != 0 && visibleCapBytes != queryCount*4) {
+		return core.E("rocm.hip.FakeLaunch", "attention heads batch visible cap metadata mismatch", nil)
 	}
 	useSharedWeights := weightPointer == 0
 	if useSharedWeights {
@@ -7263,7 +7270,18 @@ func (driver *fakeHIPDriver) launchAttentionHeadsBatchCausal(args []byte) error 
 	}
 	var keyFlat []float32
 	var valueFlat []float32
+	var visibleCaps []int32
 	var err error
+	if visibleCapPointer != 0 {
+		capData, capOffset, ok := driver.memoryForPointer(visibleCapPointer, visibleCapBytes)
+		if !ok {
+			return core.E("rocm.hip.FakeLaunch", "attention heads batch visible cap buffer is missing", nil)
+		}
+		visibleCaps = make([]int32, queryCount)
+		for index := range visibleCaps {
+			visibleCaps[index] = int32(binary.LittleEndian.Uint32(capData[capOffset+index*4:]))
+		}
+	}
 	switch kvSource {
 	case hipAttentionKVSourceContiguous:
 		if keyBytes != dim*tokenCount*keyHeads*4 || valueBytes != dim*tokenCount*keyHeads*4 {
@@ -7298,6 +7316,12 @@ func (driver *fakeHIPDriver) launchAttentionHeadsBatchCausal(args []byte) error 
 	}
 	for queryIndex := 0; queryIndex < queryCount; queryIndex++ {
 		visibleTokens := queryStartToken + queryIndex + 1
+		if len(visibleCaps) > 0 {
+			visibleTokens = int(visibleCaps[queryIndex])
+		}
+		if visibleTokens <= 0 || visibleTokens > tokenCount {
+			return core.E("rocm.hip.FakeLaunch", "attention heads batch visible cap is out of range", nil)
+		}
 		windowStart := 0
 		if windowSize > 0 && visibleTokens > windowSize {
 			windowStart = visibleTokens - windowSize

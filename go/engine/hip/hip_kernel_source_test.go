@@ -85,6 +85,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_attention`,
 		`extern "C" __global__ void rocm_attention_heads`,
 		`extern "C" __global__ void rocm_attention_heads_batch_causal`,
+		`extern "C" __global__ void rocm_attention_heads_batch_capped`,
 		`extern "C" __global__ void rocm_attention_heads_lane_batch`,
 		`extern "C" __global__ void rocm_attention_heads_batch_causal_query_rms_rope`,
 		`extern "C" __global__ void rocm_attention_heads_chunked_stage1`,

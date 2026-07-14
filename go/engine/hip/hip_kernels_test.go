@@ -3933,6 +3933,77 @@ func TestHIPKernels_AttentionHeadsBatchCausalLaunchArgs_Good(t *testing.T) {
 	assertFloat32SlicesNear(t, wantOutput(t), deviceGot, 0.0001)
 }
 
+func TestHIPKernels_AttentionHeadsBatchCappedLaunchArgs_Good(t *testing.T) {
+	const (
+		dim        = 2
+		tokenCount = 3
+		headCount  = 1
+		queryCount = 2
+	)
+	queryValues := []float32{1, 0, 0, 1}
+	keyValues := []float32{1, 0, 0, 1, 1, 1}
+	valueValues := []float32{2, 0, 0, 4, 8, 8}
+	caps := []int32{2, 2}
+
+	driver := &fakeHIPDriver{available: true}
+	queryPayload, err := hipFloat32Payload(queryValues)
+	core.RequireNoError(t, err)
+	query, err := hipUploadByteBuffer(driver, "rocm.hip.AttentionHeadsBatchCappedLaunch", "capped attention query", queryPayload, len(queryValues))
+	core.RequireNoError(t, err)
+	defer query.Close()
+	keyPayload, err := hipFloat32Payload(keyValues)
+	core.RequireNoError(t, err)
+	keys, err := hipUploadByteBuffer(driver, "rocm.hip.AttentionHeadsBatchCappedLaunch", "capped attention keys", keyPayload, len(keyValues))
+	core.RequireNoError(t, err)
+	defer keys.Close()
+	valuePayload, err := hipFloat32Payload(valueValues)
+	core.RequireNoError(t, err)
+	values, err := hipUploadByteBuffer(driver, "rocm.hip.AttentionHeadsBatchCappedLaunch", "capped attention values", valuePayload, len(valueValues))
+	core.RequireNoError(t, err)
+	defer values.Close()
+	visibleCaps, err := hipUploadTokenIDs(driver, caps)
+	core.RequireNoError(t, err)
+	defer visibleCaps.Close()
+	output, err := hipAllocateByteBuffer(driver, "rocm.hip.AttentionHeadsBatchCappedLaunch", "capped attention output", uint64(len(queryValues)*4), len(queryValues))
+	core.RequireNoError(t, err)
+	defer output.Close()
+
+	start := len(driver.launches)
+	err = hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernel(context.Background(), driver, hipAttentionHeadsBatchCausalDeviceRequest{
+		Key:              keys,
+		Value:            values,
+		VisibleTokenCaps: visibleCaps,
+		Dim:              dim,
+		TokenCount:       tokenCount,
+		HeadCount:        headCount,
+		QueryCount:       queryCount,
+		QueryStartToken:  0,
+		Scale:            1,
+	}, query, output)
+	core.RequireNoError(t, err)
+
+	keyRows, err := splitHIPReferenceVectors(keyValues, dim)
+	core.RequireNoError(t, err)
+	valueRows, err := splitHIPReferenceVectors(valueValues, dim)
+	core.RequireNoError(t, err)
+	want := make([]float32, 0, len(queryValues))
+	for row, cap := range caps {
+		gotRow, _, err := hipReferenceSingleHeadAttentionWithScale(queryValues[row*dim:(row+1)*dim], keyRows[:cap], valueRows[:cap], 1)
+		core.RequireNoError(t, err)
+		want = append(want, gotRow...)
+	}
+	got, err := hipReadFloat32DeviceOutput(output, "rocm.hip.AttentionHeadsBatchCappedLaunch", "capped attention output", len(queryValues))
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, want, got, 0.0001)
+
+	launches := driver.launches[start:]
+	core.AssertEqual(t, 1, len(launches))
+	launch := launches[0]
+	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchCapped, launch.Name)
+	core.AssertEqual(t, uint64(visibleCaps.Pointer()), binary.LittleEndian.Uint64(launch.Args[128:]))
+	core.AssertEqual(t, uint64(len(caps)*4), binary.LittleEndian.Uint64(launch.Args[136:]))
+}
+
 func TestHIPKernels_AttentionHeadsLaneBatchLaunchArgs_Good(t *testing.T) {
 	const (
 		dim       = 2
