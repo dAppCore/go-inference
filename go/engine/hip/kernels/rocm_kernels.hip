@@ -194,6 +194,8 @@ constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_ROWS_PER_BLOCK = 8;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_THREADS_PER_ROW = ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE / ROCM_GGUF_Q4_0_PROJECTION_ROWS_PER_BLOCK;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_ROWS_PER_BLOCK = 16;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW = ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE / ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_ROWS_PER_BLOCK;
+constexpr uint32_t ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_ROWS_PER_BLOCK = 2;
+constexpr uint32_t ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_EXPERTS = 8;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERTS_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERTS_LAUNCH_ARGS_BYTES = 240;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERTS_MAX_TOP_K = 8;
@@ -6288,6 +6290,46 @@ extern "C" __global__ void rocm_gguf_q5_1_selected_expert_down_pair16(const unsi
 		}
 	}
 	if (col_lane == 0u && row < args.hidden_size) {
+		output[row] = combined;
+	}
+}
+
+extern "C" __global__ void rocm_gguf_q5_1_selected_expert_down_expert8_pair16(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_gguf_q4_0_selected_experts_launch_args &args = *reinterpret_cast<const rocm_gguf_q4_0_selected_experts_launch_args *>(packet);
+	if (!rocm_valid_gguf_q4_0_selected_experts_args(args) ||
+		args.down_format != ROCM_GGUF_EXPERT_FORMAT_Q5_1 ||
+		args.top_k != ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_EXPERTS ||
+		blockDim.x != ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+	const uint32_t col_lane = threadIdx.x & (ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW - 1u);
+	const uint32_t group = threadIdx.x / ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW;
+	const uint32_t row_lane = group / ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_EXPERTS;
+	const uint32_t expert = group - row_lane * ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_EXPERTS;
+	const uint32_t row = blockIdx.x * ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_ROWS_PER_BLOCK + row_lane;
+	const float *activation = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.activation_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	float low_sum = 0.0f;
+	float high_sum = 0.0f;
+	if (row < args.hidden_size) {
+		const unsigned char *weights = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(args.down_pointers[expert]));
+		rocm_gguf_q5_1_projection_row_pair16_sums(activation + expert * args.expert_ff, weights, row, args.expert_ff, col_lane, low_sum, high_sum);
+	}
+	const float expert_sum = rocm_gguf_q4_0_projection_row_pair16_reduce(low_sum, high_sum);
+	__shared__ float expert_sums[ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_ROWS_PER_BLOCK * ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_EXPERTS];
+	if (col_lane == 0u) {
+		expert_sums[group] = expert_sum;
+	}
+	__syncthreads();
+	if (col_lane == 0u && expert == 0u && row < args.hidden_size) {
+		float combined = 0.0f;
+		for (uint32_t selected = 0; selected < ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_EXPERTS; ++selected) {
+			combined += args.route_weights[selected] * expert_sums[row_lane * ROCM_GGUF_Q5_1_SELECTED_EXPERT_DOWN_EXPERT8_EXPERTS + selected];
+		}
 		output[row] = combined;
 	}
 }

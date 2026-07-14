@@ -111,6 +111,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_gguf_q8_0_selected_expert_down`,
 		`extern "C" __global__ void rocm_gguf_q4_k_selected_expert_gate_up_pair16`,
 		`extern "C" __global__ void rocm_gguf_q5_1_selected_expert_down_pair16`,
+		`extern "C" __global__ void rocm_gguf_q5_1_selected_expert_down_expert8_pair16`,
 		`extern "C" __global__ void rocm_gguf_q8_0_selected_expert_down_pair16`,
 		`extern "C" __global__ void rocm_jangtq_projection`,
 		`extern "C" __global__ void rocm_codebook_lookup`,

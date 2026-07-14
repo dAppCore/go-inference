@@ -221,9 +221,10 @@ func TestHIPGGUFMixedSelectedExpertsLaunch_Good_Pair16ProductionShape(t *testing
 		downFormat uint32
 		downBlock  int
 		downKernel string
+		downGrid   uint32
 	}{
-		{name: "Q5_1", downFormat: hipGGUFExpertFormatQ5_1, downBlock: hipGGUFQ5_1BlockBytes, downKernel: "rocm_gguf_q5_1_selected_expert_down_pair16"},
-		{name: "Q8_0", downFormat: hipGGUFExpertFormatQ8_0, downBlock: hipGGUFQ8_0BlockBytes, downKernel: "rocm_gguf_q8_0_selected_expert_down_pair16"},
+		{name: "Q5_1", downFormat: hipGGUFExpertFormatQ5_1, downBlock: hipGGUFQ5_1BlockBytes, downKernel: "rocm_gguf_q5_1_selected_expert_down_expert8_pair16", downGrid: 1408},
+		{name: "Q8_0", downFormat: hipGGUFExpertFormatQ8_0, downBlock: hipGGUFQ8_0BlockBytes, downKernel: "rocm_gguf_q8_0_selected_expert_down_pair16", downGrid: 176},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			driver := &fakeHIPDriver{available: true}
@@ -251,7 +252,7 @@ func TestHIPGGUFMixedSelectedExpertsLaunch_Good_Pair16ProductionShape(t *testing
 			core.AssertEqual(t, "rocm_gguf_q4_k_selected_expert_gate_up_pair16", driver.launches[0].Name)
 			core.AssertEqual(t, test.downKernel, driver.launches[1].Name)
 			core.AssertEqual(t, uint32(352), driver.launches[0].GridX)
-			core.AssertEqual(t, uint32(176), driver.launches[1].GridX)
+			core.AssertEqual(t, test.downGrid, driver.launches[1].GridX)
 			core.AssertEqual(t, uint32(256), driver.launches[0].BlockX)
 			core.AssertEqual(t, uint32(256), driver.launches[1].BlockX)
 		})

@@ -15,21 +15,25 @@ import (
 )
 
 const (
-	hipGGUFQ4_0ProjectionLaunchArgsVersion       uint32 = 1
-	hipGGUFQ4_0ProjectionLaunchArgsBytes                = 64
-	hipGGUFQ4_0ProjectionBlockSize               uint32 = 256
-	hipGGUFQ4_0ProjectionRowsPerBlock            uint32 = 8
-	hipGGUFQ4_0SelectedExpertsLaunchArgsVersion  uint32 = 1
-	hipGGUFQ4_0SelectedExpertsLaunchArgsBytes           = 240
-	hipGGUFQ4_0SelectedExpertsMaxTopK                   = 8
-	hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock uint32 = 16
-	hipGGUFExpertFormatQ4_0                      uint32 = 1
-	hipGGUFExpertFormatQ4K                       uint32 = 2
-	hipGGUFExpertFormatQ5_1                      uint32 = 3
-	hipGGUFExpertFormatQ8_0                      uint32 = 4
+	hipGGUFQ4_0ProjectionLaunchArgsVersion        uint32 = 1
+	hipGGUFQ4_0ProjectionLaunchArgsBytes                 = 64
+	hipGGUFQ4_0ProjectionBlockSize                uint32 = 256
+	hipGGUFQ4_0ProjectionRowsPerBlock             uint32 = 8
+	hipGGUFQ4_0SelectedExpertsLaunchArgsVersion   uint32 = 1
+	hipGGUFQ4_0SelectedExpertsLaunchArgsBytes            = 240
+	hipGGUFQ4_0SelectedExpertsMaxTopK                    = 8
+	hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock  uint32 = 16
+	hipGGUFQ5_1SelectedExpertsExpert8RowsPerBlock uint32 = 2
+	hipGGUFExpertFormatQ4_0                       uint32 = 1
+	hipGGUFExpertFormatQ4K                        uint32 = 2
+	hipGGUFExpertFormatQ5_1                       uint32 = 3
+	hipGGUFExpertFormatQ8_0                       uint32 = 4
 )
 
-const hipGemma4SelectedExpertPair16Env = "GO_ROCM_GEMMA4_Q4_SELECTED_EXPERT_PAIR16"
+const (
+	hipGemma4SelectedExpertPair16Env      = "GO_ROCM_GEMMA4_Q4_SELECTED_EXPERT_PAIR16"
+	hipGemma4SelectedExpertDownExpert8Env = "GO_ROCM_GEMMA4_Q5_1_DOWN_EXPERT8"
+)
 
 type hipGGUFQ4_0ProjectionLaunchArgs struct {
 	InputPointer  nativeDevicePointer
@@ -1341,21 +1345,28 @@ func hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(ctx c
 	}
 	gateRows := uint32(len(entries) * expertFF)
 	downRows := uint32(hidden)
-	rowsPerBlock := hipGGUFQ4_0ProjectionRowsPerBlock
+	gateRowsPerBlock := hipGGUFQ4_0ProjectionRowsPerBlock
+	downRowsPerBlock := hipGGUFQ4_0ProjectionRowsPerBlock
 	gateKernel, downKernel := hipKernelNameGGUFQ4_0SelectedExpertGateUp, hipKernelNameGGUFQ4_0SelectedExpertDown
 	if args.GateUpFormat == hipGGUFExpertFormatQ4_0 && args.DownFormat == hipGGUFExpertFormatQ4_0 && core.Env(hipGemma4SelectedExpertPair16Env) != "0" {
 		gateKernel = hipKernelNameGGUFQ4_0SelectedExpertGateUpPair16
 		downKernel = hipKernelNameGGUFQ4_0SelectedExpertDownPair16
-		rowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
+		gateRowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
+		downRowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
 	} else if args.GateUpFormat == hipGGUFExpertFormatQ4K && (args.DownFormat == hipGGUFExpertFormatQ5_1 || args.DownFormat == hipGGUFExpertFormatQ8_0) {
 		if core.Env(hipGemma4SelectedExpertPair16Env) != "0" {
 			gateKernel = hipKernelNameGGUFQ4KSelectedExpertGateUpPair16
+			gateRowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
+			downRowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
 			if args.DownFormat == hipGGUFExpertFormatQ5_1 {
 				downKernel = hipKernelNameGGUFQ5_1SelectedExpertDownPair16
+				if args.TopK == hipGGUFQ4_0SelectedExpertsMaxTopK && core.Env(hipGemma4SelectedExpertDownExpert8Env) != "0" {
+					downKernel = hipKernelNameGGUFQ5_1SelectedExpertDownExpert8Pair16
+					downRowsPerBlock = hipGGUFQ5_1SelectedExpertsExpert8RowsPerBlock
+				}
 			} else {
 				downKernel = hipKernelNameGGUFQ8_0SelectedExpertDownPair16
 			}
-			rowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
 		} else {
 			gateKernel = hipKernelNameGGUFQ4KSelectedExpertGateUp
 			if args.DownFormat == hipGGUFExpertFormatQ5_1 {
@@ -1368,8 +1379,8 @@ func hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(ctx c
 		return core.E("rocm.hip.GGUFQ4_0SelectedExpertsLaunch", "selected expert format pair is unsupported", nil)
 	}
 	for _, config := range []hipKernelLaunchConfig{
-		{Name: gateKernel, Args: launchBytes, GridX: (gateRows + rowsPerBlock - 1) / rowsPerBlock, GridY: 1, GridZ: 1, BlockX: hipGGUFQ4_0ProjectionBlockSize, BlockY: 1, BlockZ: 1},
-		{Name: downKernel, Args: launchBytes, GridX: (downRows + rowsPerBlock - 1) / rowsPerBlock, GridY: 1, GridZ: 1, BlockX: hipGGUFQ4_0ProjectionBlockSize, BlockY: 1, BlockZ: 1},
+		{Name: gateKernel, Args: launchBytes, GridX: (gateRows + gateRowsPerBlock - 1) / gateRowsPerBlock, GridY: 1, GridZ: 1, BlockX: hipGGUFQ4_0ProjectionBlockSize, BlockY: 1, BlockZ: 1},
+		{Name: downKernel, Args: launchBytes, GridX: (downRows + downRowsPerBlock - 1) / downRowsPerBlock, GridY: 1, GridZ: 1, BlockX: hipGGUFQ4_0ProjectionBlockSize, BlockY: 1, BlockZ: 1},
 	} {
 		if err := hipLaunchKernel(driver, config); err != nil {
 			return err
