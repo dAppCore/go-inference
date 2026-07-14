@@ -5,6 +5,7 @@ package gemma3
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	_ "dappco.re/go/inference/model/gemma3/gguf" // registers the gemma-3 GGUF export lane (model/gguf.RegisterQuantizeLane)
 )
 
 // init registers gemma3's ArchSpec for the gemma3 model_type ids, so the reactive loader (model.Load)
