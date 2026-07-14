@@ -375,3 +375,30 @@ func assertAutoRoundFloat32SliceClose(t *testing.T, got, want []float32, epsilon
 		}
 	}
 }
+
+// TestAutoround_QuantizeWeights_FloatSchemesRefuse pins the family gate: the
+// integer-affine quantiser must REFUSE float-element schemes rather than
+// silently rounding them to INT — an MXFP4 request once produced a plain INT4
+// tensor. Each refusal names its real home where one exists.
+func TestAutoround_QuantizeWeights_FloatSchemesRefuse(t *testing.T) {
+	weights := []float32{0.1, -0.2, 0.3, -0.4}
+	for _, tc := range []struct {
+		scheme Scheme
+		want   string
+	}{
+		{SchemeMXFP4, "float-element quantiser"},
+		{SchemeNVFP4, "float-element quantiser"},
+		{SchemeFP8Static, "model/quant/fp8"},
+		{SchemeGGUFQ4KM, "model/gguf"},
+	} {
+		if _, err := QuantizeWeights(weights, QuantizeConfig{Scheme: tc.scheme}); err == nil {
+			t.Fatalf("QuantizeWeights(%s) = nil error, want refusal", tc.scheme)
+		} else if !core.Contains(err.Error(), tc.want) {
+			t.Fatalf("QuantizeWeights(%s) error %q, want mention of %q", tc.scheme, err.Error(), tc.want)
+		}
+	}
+	// The integer family still quantises.
+	if _, err := QuantizeWeights(weights, QuantizeConfig{Scheme: SchemeW4A16}); err != nil {
+		t.Fatalf("QuantizeWeights(W4A16): %v", err)
+	}
+}

@@ -254,6 +254,13 @@ func runQuantGGUF(ctx context.Context, src, out, format string, stdout, stderr i
 	weightFiles := core.PathGlob(core.PathJoin(src, "*.safetensors"))
 	core.SliceSort(weightFiles)
 	arch, _, _ := model.ProbeDirArch(src) // best-effort architecture for GGUF metadata
+	// GGUF names architectures its own way (HF "gemma3_text" is GGUF "gemma3");
+	// an HF spelling in general.architecture is refused by llama.cpp at load.
+	if canonical, ok := model.GGUFArchitecture(arch); ok {
+		arch = canonical
+	} else if core.Trim(arch) != "" {
+		core.Print(stderr, "note: model_type %q has no verified GGUF architecture mapping — emitting it verbatim; llama.cpp may refuse the file", arch)
+	}
 
 	core.Print(stdout, "quant (GGUF %s): %s -> %s", core.Lower(core.Trim(format)), src, outDir)
 	res, err := gguf.QuantizeModelPack(ctx, gguf.QuantizeOptions{

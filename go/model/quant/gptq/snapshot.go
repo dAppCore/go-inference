@@ -103,7 +103,7 @@ func plan(idx safetensors.Index, opts Options) ([]item, *Result, error) {
 	for _, name := range names {
 		ref := idx.Tensors[name]
 		result.SourceBytes += ref.ByteLen
-		eligible := core.HasSuffix(name, ".weight") && len(ref.Shape) == 2 && isFloat(ref.DType)
+		eligible := core.HasSuffix(name, ".weight") && len(ref.Shape) == 2 && isFloat(ref.DType) && isGPTQLinearWeight(name)
 		if eligible {
 			rows, columns := int(ref.Shape[0]), int(ref.Shape[1])
 			eligible = rows%pack == 0 && columns%pack == 0 && columns%opts.GroupSize == 0
@@ -135,6 +135,17 @@ func plan(idx safetensors.Index, opts Options) ([]item, *Result, error) {
 		result.TensorCount++
 	}
 	return items, result, nil
+}
+
+// isGPTQLinearWeight reports whether a weight is a transformer linear the
+// AutoGPTQ/GPTQModel ecosystem quantises. Embeddings and the LM head stay
+// passthrough: GPTQ's qweight packing is a GEMM layout — an embedding lookup
+// is a gather, and no ecosystem consumer carries a dequant-gather kernel, so
+// packing them produced checkpoints real loaders refuse (lm_head quantisation
+// is an explicit opt-in in GPTQModel, not the default this writer targets).
+func isGPTQLinearWeight(name string) bool {
+	lower := core.Lower(name)
+	return !core.Contains(lower, "embed") && !core.Contains(lower, "lm_head")
 }
 
 func writeSnapshot(ctx context.Context, path string, items []item, opts Options, progress func(string, bool, int, int)) error {

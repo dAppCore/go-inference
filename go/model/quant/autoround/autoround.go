@@ -224,6 +224,19 @@ func normaliseQuantizeConfig(cfg QuantizeConfig) (QuantizeConfig, error) {
 		if !ok {
 			return cfg, core.NewError("autoround: unsupported scheme: " + string(cfg.Scheme))
 		}
+		// QuantizeWeights produces integer group-affine codes ONLY. A float-element
+		// scheme resolving here used to fall through to affine rounding — an MXFP4
+		// request silently produced an INT4 tensor, not an E2M1/E8M0 MX one. Refuse
+		// every non-integer family and name the real home for those that have one.
+		switch info.Family {
+		case "int_woq":
+		case "fp8":
+			return cfg, core.NewError("autoround: " + string(cfg.Scheme) + " is float8, not integer affine — use model/quant/fp8 (lem quant --fp8)")
+		case "gguf":
+			return cfg, core.NewError("autoround: " + string(cfg.Scheme) + " is a GGUF k-quant recipe — use model/gguf QuantizeModelPack (lem quant --gguf)")
+		default:
+			return cfg, core.NewError("autoround: " + string(cfg.Scheme) + " needs a float-element quantiser this package does not implement — integer affine schemes only")
+		}
 		if cfg.Bits == 0 {
 			cfg.Bits = info.Bits
 		}

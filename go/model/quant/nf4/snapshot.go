@@ -47,7 +47,7 @@ func ConvertSnapshot(ctx context.Context, srcDir, outDir string, progress func(s
 			return nil, err
 		}
 		ref := idx.Tensors[name]
-		eligible := core.HasSuffix(name, ".weight") && len(ref.Shape) == 2 && isFloat(ref.DType)
+		eligible := core.HasSuffix(name, ".weight") && len(ref.Shape) == 2 && isFloat(ref.DType) && isNF4LinearWeight(name)
 		if progress != nil {
 			progress(name, eligible, i+1, len(names))
 		}
@@ -153,4 +153,14 @@ func writeModelConfig(path string, quantConfig map[string]any) error {
 		return write.Err()
 	}
 	return nil
+}
+
+// isNF4LinearWeight reports whether a weight is a transformer linear
+// bitsandbytes quantises. Embeddings and the LM head stay passthrough —
+// bnb's Linear4bit replaces nn.Linear modules only, and its default skip set
+// (llm_int8_skip_modules) carries lm_head; a checkpoint with NF4 embeddings
+// has no loader on the consumer side.
+func isNF4LinearWeight(name string) bool {
+	lower := core.Lower(name)
+	return !core.Contains(lower, "embed") && !core.Contains(lower, "lm_head")
 }

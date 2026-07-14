@@ -47,7 +47,7 @@ func ConvertSnapshot(ctx context.Context, srcDir, outDir string, progress func(s
 			return nil, err
 		}
 		ref := idx.Tensors[name]
-		eligible := core.HasSuffix(name, ".weight") && len(ref.Shape) == 2 && isFloat(ref.DType)
+		eligible := core.HasSuffix(name, ".weight") && len(ref.Shape) == 2 && isFloat(ref.DType) && isFP8LinearWeight(name)
 		if progress != nil {
 			progress(name, eligible, i+1, len(names))
 		}
@@ -150,4 +150,13 @@ func writeModelConfig(path string, quantConfig map[string]any) error {
 		return write.Err()
 	}
 	return nil
+}
+
+// isFP8LinearWeight reports whether a weight is a transformer linear the
+// compressed-tensors fp8 convention quantises. Embeddings and the LM head are
+// the standard ignore set (vLLM-consumed checkpoints list them under
+// quantization_config.ignore) — casting them costs quality for no serving win.
+func isFP8LinearWeight(name string) bool {
+	lower := core.Lower(name)
+	return !core.Contains(lower, "embed") && !core.Contains(lower, "lm_head")
 }
