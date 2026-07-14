@@ -1,0 +1,6 @@
+generatorName: bash
+additionalProperties:
+  scriptName: lem-cli.sh
+  generateBashCompletion: true
+  processMarkdown: true
+  curlOptions: "-sS --max-time 180"

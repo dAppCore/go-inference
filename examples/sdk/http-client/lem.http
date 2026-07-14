@@ -1,0 +1,65 @@
+# SPDX-Licence-Identifier: EUPL-1.2
+#
+# Use Gemma 4 from your IDE — JetBrains HTTP Client requests for a local
+# lem serve (go-inference). Open this file in IntelliJ/GoLand/PyCharm (or run
+# with the `ijhttp` CLI) and click the ▶ beside each request.
+#
+# The `jetbrains-http-client` generator can emit a full .http suite from the
+# OpenAPI spec (task sdk with a config naming that generator); this file is
+# the curated tour: models, a two-turn conversation, the thinking toggle.
+
+### List the served models
+GET {{base}}/v1/models
+
+### Chat — thinking OFF for a crisp answer
+POST {{base}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "gemma4",
+  "max_tokens": 192,
+  "chat_template_kwargs": {"enable_thinking": false},
+  "messages": [
+    {"role": "user", "content": "My favourite colour is teal. Reply with one short sentence."}
+  ]
+}
+
+### Chat turn 2 — resend the history; the model recalls the fact
+POST {{base}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "gemma4",
+  "max_tokens": 192,
+  "chat_template_kwargs": {"enable_thinking": false},
+  "messages": [
+    {"role": "user", "content": "My favourite colour is teal. Reply with one short sentence."},
+    {"role": "assistant", "content": "Teal is a beautiful and vibrant colour."},
+    {"role": "user", "content": "What is my favourite colour? Answer with just the colour."}
+  ]
+}
+
+### Chat — thinking ON (the gemma4 default): the reasoning arrives as a
+### separate `thought` field, the answer stays clean
+POST {{base}}/v1/chat/completions
+Content-Type: application/json
+
+{
+  "model": "gemma4",
+  "max_tokens": 512,
+  "messages": [
+    {"role": "user", "content": "Is 17 prime? One word."}
+  ]
+}
+
+### Anthropic-style route, same serve
+POST {{base}}/v1/messages
+Content-Type: application/json
+
+{
+  "model": "gemma4",
+  "max_tokens": 192,
+  "messages": [
+    {"role": "user", "content": "Say hello in exactly two words."}
+  ]
+}
