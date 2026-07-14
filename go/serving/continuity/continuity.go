@@ -174,9 +174,30 @@ type Stats struct {
 	SharedGrafts       int // woken from ANOTHER conversation's shared prefix
 	Sleeps             int // turns slept to the store
 	StatelessFallbacks int // requests declined to the stateless path
+	CutTurns           int // turns cancelled mid-generation (evict-and-refresh)
 }
 
 // Manager keeps conversations resident across stateless chat requests.
+//
+// Cancelled turns (a serving/scheduler Cancel, or a client disconnect surfaced
+// as ctx cancellation) ship the EVICT-AND-REFRESH contract, not
+// continue-from-partial. When a turn is cut mid-generation the client has
+// received exactly the tokens streamed so far, but the engine's retained KV
+// cache does NOT faithfully match that stream: the decode loop's per-token ctx
+// check drops the in-flight token from the emitted stream (engine.SessionHandle
+// .Generate's emit returns at ctx.Err() BEFORE yielding it) while the loop's
+// trailing cache-advance has already committed that same token — so the cache
+// ends one token AHEAD of what the client saw (verified on the greedy decode
+// path, the default serving lane). Waking that cache on the next turn would
+// carry a phantom token the client's re-sent transcript omits: a position drift
+// that diverges from a stateless re-prefill. So a cut turn is DISCARDED rather
+// than slept — the conversation drops out of residency and its next turn
+// re-prefills from the client's transcript, which is always correct, only slower
+// (the same honesty the stateless-fallback path already trades speed for). No
+// store entry is evicted: a cut precedes finishTurn's sleep, so nothing drifted
+// was ever persisted, and the prior turn's slept state (if any) stays clean and
+// is correctly woken should the client retry the same turn. CutTurns counts
+// these so operators can see cut turns.
 type Manager struct {
 	factory   inference.SessionFactory
 	formatter chatFormatter
@@ -328,14 +349,28 @@ func (m *Manager) Chat(ctx context.Context, messages []inference.Message, opts .
 				DecodeDuration:  time.Since(decodeStart),
 			})
 		}
-		if err := conv.handle.Err(); err != nil {
-			core.Error("continuity generation failed", "error", err)
-			conv.dead = true
+		// Distinguish the three ways a turn ends. ctx cancellation (a scheduler
+		// Cancel or a client disconnect surfaced as ctx cancel) is checked FIRST
+		// because the engine reports it through Err too (engine.SessionHandle sets
+		// s.err = ctx.Err() on a clean-stop cancel), so an Err-first test would
+		// misfile a cut turn as a generation failure.
+		switch {
+		case ctx.Err() != nil:
+			// Cut turn — the client received exactly reply's tokens, but the
+			// retained cache may hold one more. It is DISCARDED, not slept: see the
+			// Manager doc's "Cancelled turns" contract (evict-and-refresh).
+			m.cutTurn(conv)
+		default:
+			if err := conv.handle.Err(); err != nil {
+				core.Error("continuity generation failed", "error", err)
+				conv.dead = true
+			}
+			// A client that disconnected mid-stream by ceasing to consume (its
+			// downstream yield returned false while ctx stayed live) received
+			// exactly the tokens generated so far, so its next request's prefix
+			// matches the partial state — sleeping it is correct, not a compromise.
+			m.finishTurn(ctx, conv, messages, reply.String(), cfg.EnableThinking, publishable)
 		}
-		// A client that disconnected mid-stream received exactly the tokens
-		// generated so far, so its next request's prefix matches the partial
-		// state — sleeping it is correct, not a compromise.
-		m.finishTurn(ctx, conv, messages, reply.String(), cfg.EnableThinking, publishable)
 	}, true
 }
 
@@ -576,6 +611,21 @@ func (m *Manager) publishShareablePrefix(messages []inference.Message, enableThi
 		BlockSize:  report.BlockSize,
 		TokenCount: len(tokens),
 	})
+}
+
+// cutTurn discards a turn cancelled mid-generation: it closes the session
+// (dropping the conversation out of residency) and counts the cut. It does NOT
+// sleep the retained state — see the Manager doc's "Cancelled turns" contract
+// for why the partial cache is not a faithful continuation point. busy needs no
+// clearing: acquire already removed conv from the resident map for the turn's
+// duration, so a closed, un-re-added conv simply ceases to exist and the next
+// turn re-prefills from the client's transcript.
+func (m *Manager) cutTurn(conv *residentConversation) {
+	conv.close()
+	core.Info("continuity turn cancelled mid-generation; state discarded, next turn re-prefills")
+	m.mu.Lock()
+	m.stats.CutTurns++
+	m.mu.Unlock()
 }
 
 func (m *Manager) removeOrderLocked(key string) {
