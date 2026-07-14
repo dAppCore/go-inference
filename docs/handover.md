@@ -1,3 +1,50 @@
+# NEXT WAKE (2026-07-17 — examples tree shipped (27, all-backend Makefile); #1841/#1842 FIXED+closed; the REAL residual = #1845 reuse parity)
+
+## 2026-07-17 (afternoon — the examples campaign + the defect-cluster resolution)
+
+- EXAMPLES (snider's wails-style ask, v0.12.0 pre-release tagged; module tag
+  go/v0.12.0 pushed — the root tag alone doesn't resolve the go/ module):
+  examples/ is its own module in go.work; 27 examples, one folder + main.go +
+  generated README each (gen-readmes.py — main.go doc comment is the source
+  of truth; rerun after adding examples). internal/engine = the 3-file
+  platform composition consumers copy (metal | hip | none) — model/builtin
+  blank import is the non-obvious half. examples/Makefile builds
+  <example>-{mlx,amd,cuda,cpu}; pkg/README.md documents the lanes (apple =
+  Taskfile; linux = root Makefile lthn-* recipes; cpu lane cross-compiles
+  no-cgo). Fan-out was 3 Sonnet worktree lanes (chat surface / model ops /
+  integration) — all landed first pass; live-smoked 10 structurally-distinct
+  examples on e2b (state: 28ms no-replay wake; embedded serve answers HTTP;
+  registry prints cpu/cuda/metal/rocm honestly).
+- EXAMPLES FOUND 3 PUBLIC-SURFACE BUGS (the tree pays for itself): Metrics()
+  never derived prefill/decode split or rates (fixed 464582e + spec-model
+  variant 57655ad); PeakMemoryBytes never populated (#1843, needs an engine
+  memory-reporter seam); BatchGenerate on raw complete-sentence prompts
+  yields instant turn-close (example prompts reshaped — behavioural, doc'd).
+- #1842 MTP×CB SIGSEGV: CLOSED. Opus lane shipped inference.SerialModel
+  (declared capability) + scheduler capacity-1 decorator w/ Unwrap; crash
+  repro now completes 8/8 streams (135.6 aggregate, serialised semantics
+  logged at boot). Non-scheduler concurrent HTTP on a pair remains the
+  flagged fork (capability exists for the serve mux to adopt).
+- #1841 CONTINUITY: CLOSED — and the plot resolved. The decline-on-thinking-
+  override was genuinely missing (fixed continuity.go:250 + 3 regression
+  tests, decline verified firing on the wire). The REMAINING cross-serve
+  divergence was NOT continuity: LTHN_PROMPT_REUSE=0 discriminator proves
+  cont-on == reuse-off == fresh bytes (4d69638d refusal on the 31B counting
+  repro); the "compliant" 292fbb10 arm was the REUSE ARTIFACT. → #1845
+  (major): prompt-reuse (#377) breaks byte-parity vs fresh prefill on real
+  31B at -context 6144 (context-sensitive: default-context replay showed
+  parity; synthetic-model parity tests passed throughout — real-model logit
+  capture is the first artifact). Also #1844: continuity decode skips
+  applyDeclaredSampling (lane sampling divergence for non-deterministic
+  requests).
+- METHOD NOTE for future benches: "-state-conversations=false" is NOT enough
+  for clean stateless numbers — prompt-reuse arms exactly when the
+  continuity interceptor is absent (engine/prompt_reuse.go:57 gate), so
+  salted prompts sharing long literal prefixes can ride reuse. Add
+  LTHN_PROMPT_REUSE=0 to bench serves until #1845 closes.
+- Open cluster: #1843 (memory counters), #1844 (declared sampling), #1845
+  (reuse parity — the big one). #392's dense-CB fold + #390 + #382 unchanged.
+
 # NEXT WAKE (2026-07-17 — tg512 fleet matrix @6k: two serving defects found + filed; MTP is content-dependent)
 
 ## 2026-07-17 (the fleet matrix — e2b/e4b/12b/26b/31b × {plain, MTP} × {K=1, CB-8} @ -context 6144)
