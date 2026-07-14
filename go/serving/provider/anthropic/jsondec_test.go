@@ -259,3 +259,31 @@ func TestJsondec_MessageResponse_UnmarshalJSON_Ugly(t *testing.T) {
 		t.Fatalf("resp.Content[0] = %+v", block)
 	}
 }
+
+// TestJsondec_MessageRequest_ContentStringShorthand pins the Anthropic
+// string-content shorthand ("content": "hi") landing as one text block —
+// the real API accepts both forms; rejecting the shorthand broke live
+// clients with a misleading "invalid JSON" (found by the SDK fleet).
+func TestJsondec_MessageRequest_ContentStringShorthand(t *testing.T) {
+	var r MessageRequest
+	in := `{"model":"gemma4","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`
+	if err := r.UnmarshalJSON([]byte(in)); err != nil {
+		t.Fatalf("string shorthand rejected: %v", err)
+	}
+	if len(r.Messages) != 1 || len(r.Messages[0].Content) != 1 {
+		t.Fatalf("shorthand did not land as one block: %+v", r.Messages)
+	}
+	block := r.Messages[0].Content[0]
+	if block.Type != "text" || block.Text != "hi" {
+		t.Fatalf("shorthand block = %+v, want text/hi", block)
+	}
+	// The block form stays byte-compatible alongside the shorthand.
+	in2 := `{"model":"gemma4","max_tokens":64,"messages":[{"role":"user","content":"first"},{"role":"assistant","content":[{"type":"text","text":"second"}]}]}`
+	var r2 MessageRequest
+	if err := r2.UnmarshalJSON([]byte(in2)); err != nil {
+		t.Fatalf("mixed forms rejected: %v", err)
+	}
+	if r2.Messages[0].Content[0].Text != "first" || r2.Messages[1].Content[0].Text != "second" {
+		t.Fatalf("mixed forms mis-parsed: %+v", r2.Messages)
+	}
+}

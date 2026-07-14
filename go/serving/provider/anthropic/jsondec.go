@@ -412,6 +412,19 @@ func parseMessage(data []byte, i int) (Message, int, error) {
 			msg.Role = s
 			i = vnext
 		case "content":
+			// Anthropic accepts BOTH forms: the string shorthand
+			// ("content": "hi") and an array of typed blocks. The shorthand
+			// lands as one text block — rejecting it broke real clients with
+			// a misleading "invalid JSON" (found live by the SDK fleet).
+			if i < len(data) && data[i] == '"' {
+				s, vnext, verr := jsonenc.ParseJSONString(data, i)
+				if verr != nil {
+					return msg, vnext, verr
+				}
+				msg.Content = []ContentBlock{{Type: "text", Text: s}}
+				i = vnext
+				break
+			}
 			blocks, vnext, verr := parseContentBlockArray(data, i)
 			if verr != nil {
 				return msg, vnext, verr
