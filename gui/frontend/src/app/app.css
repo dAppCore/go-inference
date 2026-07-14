@@ -36,3 +36,5 @@
 .statusbar { height: 26px; display: flex; align-items: center; gap: 8px; padding: 0 14px; border-top: 1px solid var(--line-1); background: var(--ink-2); font-size: 11px; color: var(--fg-3); }
 .statusbar .v { margin-left: auto; font-family: var(--font-mono); }
 .statusbar .warn { color: var(--warning-400, #d9a03f); }
+.chatview { display: flex; flex-direction: column; }
+.chatview lem-chat { flex: 1; min-height: 0; }

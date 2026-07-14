@@ -7,11 +7,19 @@
   </div>
   <div class="winbody">
     <nav class="rail">
-      <a class="on" title="Lab"><lthn-icon name="cube" size="15"></lthn-icon></a>
-      <a title="Runs"><lthn-icon name="play" size="15"></lthn-icon></a>
-      <a title="Throughput"><lthn-icon name="wave-square" size="15"></lthn-icon></a>
+      <a [class.on]="view() === 'lab'" title="Lab" (click)="view.set('lab')"><lthn-icon name="cube" size="15"></lthn-icon></a>
+      <a [class.on]="view() === 'chat'" title="Chat" (click)="view.set('chat')"><lthn-icon name="comments" size="15"></lthn-icon></a>
       <a class="last" title="Settings"><lthn-icon name="gear" size="15"></lthn-icon></a>
     </nav>
+    @if (view() === 'chat') {
+      <div class="content chatview">
+        <div class="ctoolbar">
+          <h1>Chat</h1>
+          <span class="updated">streaming via resource() · thought channel live</span>
+        </div>
+        <lem-chat></lem-chat>
+      </div>
+    } @else {
     <div class="content">
       <div class="ctoolbar">
         <h1>LEM lab</h1>
@@ -72,6 +80,7 @@
         </div>
       }
     </div>
+    }
   </div>
   <div class="statusbar">
     <lthn-status-dot [attr.variant]="snap().stackRunning ? 'ok' : 'idle'" [attr.pulse]="snap().stackRunning ? '' : null"></lthn-status-dot>

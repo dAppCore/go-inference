@@ -62,7 +62,10 @@ func (m *Manager) Start(modelPath, embedModelPath, scheduler string) core.Result
 		return core.Ok(nil) // already managing a live process
 	}
 
-	args := []string{"serve", "--addr", m.addr}
+	// The desktop's webview is a different origin from the serve, so the
+	// browser side of the app can only call it with CORS armed. Any-origin is
+	// the right scope for a loopback serve the app itself manages.
+	args := []string{"serve", "--addr", m.addr, "--cors", "*"}
 	if modelPath != "" {
 		args = append(args, "--model", modelPath)
 	}

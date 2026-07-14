@@ -1,6 +1,7 @@
 // SPDX-Licence-Identifier: EUPL-1.2
 
-import { Component, CUSTOM_ELEMENTS_SCHEMA, computed, inject } from '@angular/core';
+import { Component, CUSTOM_ELEMENTS_SCHEMA, computed, inject, signal } from '@angular/core';
+import { ChatComponent } from './chat.component';
 import { LemService } from './lem.service';
 
 /**
@@ -13,12 +14,15 @@ import { LemService } from './lem.service';
 @Component({
   selector: 'lem-root',
   standalone: true,
+  imports: [ChatComponent],
   schemas: [CUSTOM_ELEMENTS_SCHEMA],
   templateUrl: './app.html',
   styleUrl: './app.css',
 })
 export class App {
   readonly lem = inject(LemService);
+
+  readonly view = signal<'lab' | 'chat'>('lab');
 
   readonly snap = this.lem.snapshot;
 
