@@ -1,0 +1,3 @@
+generatorName: c
+additionalProperties:
+  projectName: lem-sdk-c
