@@ -25,9 +25,21 @@ import (
 func runSpecCommand(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(cliCommandName("spec"), flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	output := fs.String("o", "build/sdk/openapi.json", "output path for the OpenAPI document")
+	output := fs.String("output", "build/sdk/openapi.json", "output path for the OpenAPI document")
 	format := fs.String("format", "json", "spec format: json or yaml")
+	fs.Usage = func() {
+		core.WriteString(stderr, core.Sprintf("Usage: %s spec [flags]\n", cliCommandName("spec")))
+		core.WriteString(stderr, "\n")
+		core.WriteString(stderr, "Export the OpenAPI 3.1 document for lem's HTTP surface (no model loaded,\n")
+		core.WriteString(stderr, "no server started) — the machine-readable definition the SDKs generate from.\n")
+		core.WriteString(stderr, "\n")
+		core.WriteString(stderr, "Flags:\n")
+		printFlagBlock(stderr, fs)
+	}
 	if err := fs.Parse(args); err != nil {
+		if core.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 

@@ -20,9 +20,9 @@ func TestRunTuneCommand_Rejects(t *testing.T) {
 		wantCode int
 	}{
 		{"no flags (missing model)", nil, 2},
-		{"unexpected positional", []string{"-model", "/some/model", "stray-arg"}, 2},
-		{"unknown flag", []string{"-nonsense"}, 2},
-		{"help", []string{"-h"}, 0},
+		{"unexpected positional", []string{"--model", "/some/model", "stray-arg"}, 2},
+		{"unknown flag", []string{"--nonsense"}, 2},
+		{"help", []string{"--help"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

@@ -123,7 +123,7 @@ tasks:
         LTHN_GPU_CAPTURE={{.TRACE}}
         LTHN_GPU_CAPTURE_TRIGGER={{.TRIGGER}}
         LTHN_GPU_CAPTURE_CBS={{.CBS}}
-        bin/lem serve -model {{.MODEL}} -addr {{.ADDR}} -context {{.CONTEXT}}
+        bin/lem serve --model {{.MODEL}} --addr {{.ADDR}} --context {{.CONTEXT}}
 
   capture:fire:
     desc: "Fire the one-shot capture on the running capture:serve — the NEXT request's round lands in the trace."
@@ -186,7 +186,7 @@ tasks:
     desc: "Export lem's OpenAPI 3.1 document to build/sdk/openapi.json (the machine-readable API definition the SDKs generate from)."
     cmds:
       - mkdir -p build/sdk
-      - go run ./cli spec -o build/sdk/openapi.json
+      - go run ./cli spec --output build/sdk/openapi.json
 
   sdk:
     desc: "Generate typed client SDKs from lem's OpenAPI spec into build/sdk/<lang>/. Add a language by dropping a sdk-config/<lang>.yaml. Needs openapi-generator-cli."

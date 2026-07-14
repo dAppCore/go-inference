@@ -20,7 +20,7 @@ import (
 // Describe) fails here.
 func TestRunSpecCommand_WritesFullSurface(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "openapi.json")
-	if code := runSpecCommand(context.Background(), []string{"-o", out}, io.Discard, io.Discard); code != 0 {
+	if code := runSpecCommand(context.Background(), []string{"--output", out}, io.Discard, io.Discard); code != 0 {
 		t.Fatalf("runSpecCommand exit = %d, want 0", code)
 	}
 	data, err := os.ReadFile(out)
@@ -47,7 +47,7 @@ func TestRunSpecCommand_WritesFullSurface(t *testing.T) {
 func TestRunSpecCommand_BadFormat(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "openapi.invalid")
 	var stdout, stderr bytes.Buffer
-	if code := runSpecCommand(context.Background(), []string{"-format", "invalid", "-o", out}, &stdout, &stderr); code != 1 {
+	if code := runSpecCommand(context.Background(), []string{"--format", "invalid", "--output", out}, &stdout, &stderr); code != 1 {
 		t.Fatalf("runSpecCommand invalid format exit = %d, want 1; stderr=%s", code, stderr.String())
 	}
 	if _, err := os.Stat(out); !os.IsNotExist(err) {

@@ -41,13 +41,7 @@ func runEbookCommand(_ context.Context, args []string, stdout, stderr io.Writer)
 		core.WriteString(stderr, "book is protected speech — the PGP playbook, applied to weights.\n")
 		core.WriteString(stderr, "\n")
 		core.WriteString(stderr, "Flags:\n")
-		fs.VisitAll(func(f *flag.Flag) {
-			if f.DefValue == "" {
-				core.WriteString(stderr, core.Sprintf("  -%s\n\t%s\n", f.Name, f.Usage))
-				return
-			}
-			core.WriteString(stderr, core.Sprintf("  -%s\n\t%s (default %q)\n", f.Name, f.Usage, f.DefValue))
-		})
+		printFlagBlock(stderr, fs)
 		core.WriteString(stderr, "\n")
 		core.WriteString(stderr, "Example:\n")
 		core.WriteString(stderr, core.Sprintf("  %s ebook --model ~/Code/lthn/LEM-Gemma3-1B --out LEM-Gemma3-1B.epub\n", name))

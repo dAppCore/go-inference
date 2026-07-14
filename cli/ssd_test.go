@@ -20,10 +20,10 @@ func TestRunSSDCommand_Rejects(t *testing.T) {
 		wantCode int
 	}{
 		{"no flags", nil, 2},
-		{"model without data", []string{"-model", "/some/base"}, 2},
-		{"data without model", []string{"-data", "/some/prompts.jsonl"}, 2},
-		{"unknown flag", []string{"-nonsense"}, 2},
-		{"help", []string{"-h"}, 0},
+		{"model without data", []string{"--model", "/some/base"}, 2},
+		{"data without model", []string{"--data", "/some/prompts.jsonl"}, 2},
+		{"unknown flag", []string{"--nonsense"}, 2},
+		{"help", []string{"--help"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer

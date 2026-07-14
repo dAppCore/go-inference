@@ -128,5 +128,5 @@ func printUsage(w io.Writer) {
 	core.WriteString(w, core.Sprintf("  %s serve --model ~/models/gemma-4-e2b-it-4bit         # OpenAI HTTP on :36911\n", name))
 	core.WriteString(w, core.Sprintf("  %s serve --model ~/models/gemma-4-e2b-it-4bit --context 8192\n", name))
 	core.WriteString(w, "\n")
-	core.WriteString(w, core.Sprintf("Run \"%s <command> -h\" for command-specific flags.\n", name))
+	core.WriteString(w, core.Sprintf("Run \"%s <command> --help\" for command-specific flags.\n", name))
 }

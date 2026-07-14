@@ -20,8 +20,8 @@ func TestRunServeCommand_Rejects(t *testing.T) {
 		args     []string
 		wantCode int
 	}{
-		{"help", []string{"-h"}, 0},
-		{"unknown flag", []string{"-nonsense"}, 2},
+		{"help", []string{"--help"}, 0},
+		{"unknown flag", []string{"--nonsense"}, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -48,7 +48,7 @@ func TestRunServeCommand_AdminToken(t *testing.T) {
 
 	// First print generates the token (the file did not exist).
 	var stdout, stderr bytes.Buffer
-	if code := runServeCommand(context.Background(), []string{"-print-admin-token"}, &stdout, &stderr); code != 0 {
+	if code := runServeCommand(context.Background(), []string{"--print-admin-token"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("print exit %d; stderr=%s", code, stderr.String())
 	}
 	first := readToken(t, tokenFile)
@@ -61,7 +61,7 @@ func TestRunServeCommand_AdminToken(t *testing.T) {
 
 	// A second print reads the existing token — same value, no regeneration.
 	var out2, err2 bytes.Buffer
-	if code := runServeCommand(context.Background(), []string{"-print-admin-token"}, &out2, &err2); code != 0 {
+	if code := runServeCommand(context.Background(), []string{"--print-admin-token"}, &out2, &err2); code != 0 {
 		t.Fatalf("second print exit %d; stderr=%s", code, err2.String())
 	}
 	if again := readToken(t, tokenFile); again != first {
@@ -70,7 +70,7 @@ func TestRunServeCommand_AdminToken(t *testing.T) {
 
 	// Rotate replaces it with a fresh, different token.
 	var out3, err3 bytes.Buffer
-	if code := runServeCommand(context.Background(), []string{"-rotate-admin-token"}, &out3, &err3); code != 0 {
+	if code := runServeCommand(context.Background(), []string{"--rotate-admin-token"}, &out3, &err3); code != 0 {
 		t.Fatalf("rotate exit %d; stderr=%s", code, err3.String())
 	}
 	rotated := readToken(t, tokenFile)
@@ -93,7 +93,7 @@ func TestRunServeCommand_AdminTokenFailClosed(t *testing.T) {
 	t.Setenv("HOME", blocker)
 
 	var stdout, stderr bytes.Buffer
-	if code := runServeCommand(context.Background(), []string{"-print-admin-token"}, &stdout, &stderr); code != 1 {
+	if code := runServeCommand(context.Background(), []string{"--print-admin-token"}, &stdout, &stderr); code != 1 {
 		t.Fatalf("exit %d, want 1 (fail-closed); stderr=%s", code, stderr.String())
 	}
 }

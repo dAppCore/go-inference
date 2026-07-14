@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -32,9 +33,9 @@ func TestRunCommand_Dispatch(t *testing.T) {
 	}{
 		{"no args", nil, 0, true},
 		{"help word", []string{"help"}, 0, true},
-		{"help flag", []string{"-h"}, 0, true},
+		{"help flag", []string{"--help"}, 0, true},
 		{"unknown command", []string{"frobnicate"}, 2, true},
-		{"serve route", []string{"serve", "-h"}, 0, false},
+		{"serve route", []string{"serve", "--help"}, 0, false},
 		{"generate route", []string{"generate"}, 2, false},
 		{"ssd route", []string{"ssd"}, 2, false},
 		{"sft route", []string{"sft"}, 2, false},
@@ -42,7 +43,7 @@ func TestRunCommand_Dispatch(t *testing.T) {
 		{"pack route", []string{"pack"}, 2, false},
 		{"quant route", []string{"quant"}, 2, false},
 		{"ebook route", []string{"ebook"}, 2, false},
-		{"spec route", []string{"spec", "-o", specOut}, 0, false},
+		{"spec route", []string{"spec", "--output", specOut}, 0, false},
 		{"version route", []string{"version"}, 0, false},
 		{"version flag", []string{"--version"}, 0, false},
 	} {
@@ -54,6 +55,45 @@ func TestRunCommand_Dispatch(t *testing.T) {
 			}
 			if tc.wantHelp && !core.Contains(stdout.String()+stderr.String(), "Usage:") {
 				t.Errorf("usage banner missing; stdout=%q stderr=%q", stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+// TestHelpPresentsLongFlagsOnly locks the presentation contract: every verb's
+// help renders GNU-style --long options only — no single-dash flag may appear
+// in a flag listing or in prose. (Go's flag parser still accepts one dash for
+// the same names; what this pins is what we PRESENT.)
+func TestHelpPresentsLongFlagsOnly(t *testing.T) {
+	singleDash := regexp.MustCompile(`(^|[\s("` + "`" + `])-[a-z][a-z0-9-]*`)
+	for _, argv := range [][]string{
+		{"--help"},
+		{"serve", "--help"},
+		{"generate", "--help"},
+		{"ssd", "--help"},
+		{"sft", "--help"},
+		{"tune", "--help"},
+		{"pack", "--help"},
+		{"pack", "create", "--help"},
+		{"pack", "inspect", "--help"},
+		{"pack", "list", "--help"},
+		{"pack", "extract", "--help"},
+		{"quant", "--help"},
+		{"spec", "--help"},
+		{"ebook", "--help"},
+		{"tui", "--help"},
+	} {
+		t.Run(strings.Join(argv, "_"), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			if code := runCommand(context.Background(), argv, &stdout, &stderr); code != 0 {
+				t.Fatalf("exit %d; stderr=%s", code, stderr.String())
+			}
+			help := stdout.String() + stderr.String()
+			if help == "" {
+				t.Fatal("no help output")
+			}
+			if m := singleDash.FindString(help); m != "" {
+				t.Fatalf("single-dash flag %q leaked into help:\n%s", strings.TrimSpace(m), help)
 			}
 		})
 	}

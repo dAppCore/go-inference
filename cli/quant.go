@@ -28,14 +28,14 @@ import (
 //     (gguf.QuantizeModelPack): q4_k_m, q8_0, q5_k, q6_k, …
 //
 //     lem quant ~/models/gemma-4-12B-it-bf16                       # → …-4bit (MLX affine)
-//     lem quant ~/models/gemma-4-12B-it-bf16 -bits 8 -group-size 32
-//     lem quant ~/models/gemma-4-12B-it-bf16 -gguf q4_k_m          # → …-gguf-q4_k_m
+//     lem quant ~/models/gemma-4-12B-it-bf16 --bits 8 --group-size 32
+//     lem quant ~/models/gemma-4-12B-it-bf16 --gguf q4_k_m          # → …-gguf-q4_k_m
 func runQuantCommand(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet(cliCommandName("quant"), flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	bits := fs.Int("bits", 4, "affine quantisation bit-width (2, 4, or 8) — MLX lane")
 	groupSize := fs.Int("group-size", 64, "affine quantisation group size — MLX lane")
-	out := fs.String("o", "", "output model directory (default: <src>-<bits>bit, or <src>-gguf-<format>)")
+	out := fs.String("output", "", "output model directory (default: <src>-<bits>bit, or <src>-gguf-<format>)")
 	ggufFormat := fs.String("gguf", "", "instead of MLX affine, run the GGUF lane in this format (q4_k_m, q8_0, q5_k, q6_k, …)")
 	gptqFormat := fs.Bool("gptq", false, "instead of MLX affine, write HF GPTQ qweight/qzeros/scales/g_idx tensors")
 	awqFormat := fs.Bool("awq", false, "instead of MLX affine, write HF AutoAWQ GEMM qweight/qzeros/scales tensors (data-free approximation)")
@@ -45,7 +45,7 @@ func runQuantCommand(ctx context.Context, args []string, stdout, stderr io.Write
 	// Two-phase parse so the <src-model-dir> positional may appear before OR after the
 	// flags (Go's flag stops at the first non-flag): the first Parse consumes any
 	// leading flags and stops at the positional; a second Parse over the remainder picks
-	// up trailing flags. Matches the documented `quant <src> [-flags]` shape.
+	// up trailing flags. Matches the documented `quant <src> [--flags]` shape.
 	src, err := parseWithPositional(fs, args)
 	if err != nil {
 		if core.Is(err, flag.ErrHelp) {
@@ -70,7 +70,7 @@ func runQuantCommand(ctx context.Context, args []string, stdout, stderr io.Write
 		}
 	}
 	if formats > 1 {
-		core.Print(stderr, "%s quant: -gptq, -awq, -fp8, -nf4, and -gguf are mutually exclusive", cliName())
+		core.Print(stderr, "%s quant: --gptq, --awq, --fp8, --nf4, and --gguf are mutually exclusive", cliName())
 		return 2
 	}
 
@@ -208,15 +208,9 @@ func quantUsage(fs *flag.FlagSet, w io.Writer) func() {
 		core.WriteString(w, core.Sprintf("Usage: %s quant [flags] <src-model-dir>\n\n", cliName()))
 		core.WriteString(w, "Quantise a dense (bf16/f32) safetensors model directory into a quantised model\n")
 		core.WriteString(w, "directory. Default lane writes the MLX group-affine format the engine loads\n")
-		core.WriteString(w, "natively; -gguf switches to the GGUF whole-model pipeline.\n\n")
+		core.WriteString(w, "natively; --gguf switches to the GGUF whole-model pipeline.\n\n")
 		core.WriteString(w, "Flags:\n")
-		fs.VisitAll(func(f *flag.Flag) {
-			if f.DefValue == "" {
-				core.WriteString(w, core.Sprintf("  -%s\n\t%s\n", f.Name, f.Usage))
-				return
-			}
-			core.WriteString(w, core.Sprintf("  -%s\n\t%s (default %q)\n", f.Name, f.Usage, f.DefValue))
-		})
+		printFlagBlock(w, fs)
 	}
 }
 
@@ -224,7 +218,7 @@ func quantUsage(fs *flag.FlagSet, w io.Writer) func() {
 // final before→after summary.
 func runQuantMLXAffine(ctx context.Context, src, out string, bits, groupSize int, stdout, stderr io.Writer) int {
 	if !mlxaffine.SupportedBits(bits) {
-		core.Print(stderr, "%s quant: unsupported -bits %d (want 2, 4, or 8)", cliName(), bits)
+		core.Print(stderr, "%s quant: unsupported --bits %d (want 2, 4, or 8)", cliName(), bits)
 		return 1
 	}
 	outDir := out

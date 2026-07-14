@@ -40,13 +40,7 @@ func runTuneCommand(ctx context.Context, args []string, stdout, stderr io.Writer
 		core.WriteString(stderr, "without measuring (it lights up when the engine seam lands).\n")
 		core.WriteString(stderr, "\n")
 		core.WriteString(stderr, "Flags:\n")
-		fs.VisitAll(func(f *flag.Flag) {
-			if f.DefValue == "" {
-				core.WriteString(stderr, core.Sprintf("  -%s\n\t%s\n", f.Name, f.Usage))
-				return
-			}
-			core.WriteString(stderr, core.Sprintf("  -%s\n\t%s (default %q)\n", f.Name, f.Usage, f.DefValue))
-		})
+		printFlagBlock(stderr, fs)
 	}
 	if err := fs.Parse(args); err != nil {
 		if core.Is(err, flag.ErrHelp) {

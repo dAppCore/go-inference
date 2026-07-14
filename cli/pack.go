@@ -19,7 +19,7 @@ import (
 // verb is flag parsing + one library call per sub-action.
 //
 //	lem pack inspect model.model
-//	lem pack create ~/models/gemma-4-e2b-it-4bit gemma.model -arch gemma4 -quant 4
+//	lem pack create ~/models/gemma-4-e2b-it-4bit gemma.model --arch gemma4 --quant 4
 func runPackCommand(_ context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		printPackUsage(stderr)
@@ -59,7 +59,7 @@ func printPackUsage(w io.Writer) {
 	core.WriteString(w, "  extract  <file.model> <dest-dir>  unpack the container back to a directory\n")
 	core.WriteString(w, "  hash     <src-dir>                print the canonical model-pack hash of a directory\n")
 	core.WriteString(w, "\n")
-	core.WriteString(w, core.Sprintf("Run \"%s pack <subcommand> -h\" for sub-action flags.\n", name))
+	core.WriteString(w, core.Sprintf("Run \"%s pack <subcommand> --help\" for sub-action flags.\n", name))
 }
 
 // packSubUsage returns a Usage function that prints a synopsis, an optional
@@ -74,13 +74,7 @@ func packSubUsage(fs *flag.FlagSet, w io.Writer, synopsis, desc string) func() {
 			core.WriteString(w, "\n\n")
 		}
 		core.WriteString(w, "Flags:\n")
-		fs.VisitAll(func(f *flag.Flag) {
-			if f.DefValue == "" {
-				core.WriteString(w, core.Sprintf("  -%s\n\t%s\n", f.Name, f.Usage))
-				return
-			}
-			core.WriteString(w, core.Sprintf("  -%s\n\t%s (default %q)\n", f.Name, f.Usage, f.DefValue))
-		})
+		printFlagBlock(w, fs)
 	}
 }
 
@@ -207,7 +201,7 @@ func runPackExtract(args []string, stdout, stderr io.Writer) int {
 	overwrite := fs.Bool("overwrite", false, "allow extraction into a non-empty destination directory")
 	fs.Usage = packSubUsage(fs, stderr, "pack extract [flags] <file.model> <dest-dir>",
 		"Unpack a .model container's payload into a directory. Refuses a non-empty\n"+
-			"destination unless -overwrite is set.")
+			"destination unless --overwrite is set.")
 	if err := fs.Parse(args); err != nil {
 		if core.Is(err, flag.ErrHelp) {
 			return 0

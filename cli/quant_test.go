@@ -51,9 +51,11 @@ func TestRunQuantCommand_PositionalOrder(t *testing.T) {
 		name string
 		args func(src, out string) []string
 	}{
-		{"dir then flags", func(src, out string) []string { return []string{src, "-bits", "4", "-o", out} }},
-		{"flags then dir", func(src, out string) []string { return []string{"-bits", "4", "-o", out, src} }},
-		{"flags around dir", func(src, out string) []string { return []string{"-bits", "4", src, "-group-size", "64", "-o", out} }},
+		{"dir then flags", func(src, out string) []string { return []string{src, "--bits", "4", "--output", out} }},
+		{"flags then dir", func(src, out string) []string { return []string{"--bits", "4", "--output", out, src} }},
+		{"flags around dir", func(src, out string) []string {
+			return []string{"--bits", "4", src, "--group-size", "64", "--output", out}
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src := writeToyModel(t)
@@ -117,14 +119,14 @@ func writeGGUFToy(t *testing.T) string {
 
 // TestRunQuantGGUF covers the -gguf lane: a block-size-valid model quantises to
 // a model.gguf (Good), the default output dir carries the gguf-<format> suffix
-// when -o is omitted (Good), and a tensor whose width is not divisible by the
+// when --output is omitted (Good), and a tensor whose width is not divisible by the
 // GGUF block size falls back to raw F32 storage rather than failing (Good).
 func TestRunQuantGGUF(t *testing.T) {
 	t.Run("Good/explicit out", func(t *testing.T) {
 		src := writeGGUFToy(t)
 		out := filepath.Join(t.TempDir(), "gguf-out")
 		var stdout, stderr bytes.Buffer
-		if code := runQuantCommand(context.Background(), []string{src, "-gguf", "q8_0", "-o", out}, &stdout, &stderr); code != 0 {
+		if code := runQuantCommand(context.Background(), []string{src, "--gguf", "q8_0", "--output", out}, &stdout, &stderr); code != 0 {
 			t.Fatalf("exit %d; stderr=%s", code, stderr.String())
 		}
 		if _, err := os.Stat(filepath.Join(out, "model.gguf")); err != nil {
@@ -134,7 +136,7 @@ func TestRunQuantGGUF(t *testing.T) {
 	t.Run("Good/default out dir", func(t *testing.T) {
 		src := writeGGUFToy(t)
 		var stdout, stderr bytes.Buffer
-		if code := runQuantCommand(context.Background(), []string{src, "-gguf", "q8_0"}, &stdout, &stderr); code != 0 {
+		if code := runQuantCommand(context.Background(), []string{src, "--gguf", "q8_0"}, &stdout, &stderr); code != 0 {
 			t.Fatalf("exit %d; stderr=%s", code, stderr.String())
 		}
 		// defaultOutDir tags the source basename with -gguf-<format> in its parent.
@@ -150,7 +152,7 @@ func TestRunQuantGGUF(t *testing.T) {
 		src := writeToyModel(t) // 8-wide norm, not divisible by 32
 		out := filepath.Join(t.TempDir(), "gguf-out")
 		var stdout, stderr bytes.Buffer
-		if code := runQuantCommand(context.Background(), []string{src, "-gguf", "q8_0", "-o", out}, &stdout, &stderr); code != 0 {
+		if code := runQuantCommand(context.Background(), []string{src, "--gguf", "q8_0", "--output", out}, &stdout, &stderr); code != 0 {
 			t.Fatalf("exit %d, want 0 (F32 fallback); stderr=%s", code, stderr.String())
 		}
 		if _, err := os.Stat(filepath.Join(out, "model.gguf")); err != nil {
@@ -164,7 +166,7 @@ func TestRunQuantGPTQ(t *testing.T) {
 		src := writeToyModel(t)
 		out := filepath.Join(t.TempDir(), "gptq-out")
 		var stdout, stderr bytes.Buffer
-		if code := runQuantCommand(context.Background(), []string{src, "-gptq", "-group-size", "32", "-o", out}, &stdout, &stderr); code != 0 {
+		if code := runQuantCommand(context.Background(), []string{src, "--gptq", "--group-size", "32", "--output", out}, &stdout, &stderr); code != 0 {
 			t.Fatalf("exit %d; stderr=%s", code, stderr.String())
 		}
 		idx, err := safetensors.IndexFiles([]string{filepath.Join(out, "model.safetensors")})
@@ -178,7 +180,7 @@ func TestRunQuantGPTQ(t *testing.T) {
 	t.Run("Bad/mutually exclusive formats", func(t *testing.T) {
 		src := writeToyModel(t)
 		var stdout, stderr bytes.Buffer
-		if code := runQuantCommand(context.Background(), []string{src, "-gptq", "-gguf", "q8_0"}, &stdout, &stderr); code != 2 {
+		if code := runQuantCommand(context.Background(), []string{src, "--gptq", "--gguf", "q8_0"}, &stdout, &stderr); code != 2 {
 			t.Fatalf("exit %d, want 2; stderr=%s", code, stderr.String())
 		}
 	})
@@ -187,7 +189,7 @@ func TestRunQuantGPTQ(t *testing.T) {
 func TestRunQuantFP8(t *testing.T) {
 	src, out := writeToyModel(t), filepath.Join(t.TempDir(), "fp8-out")
 	var stdout, stderr bytes.Buffer
-	if code := runQuantCommand(context.Background(), []string{src, "-fp8", "-o", out}, &stdout, &stderr); code != 0 {
+	if code := runQuantCommand(context.Background(), []string{src, "--fp8", "--output", out}, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit %d; stderr=%s", code, stderr.String())
 	}
 	idx, err := safetensors.IndexFiles([]string{filepath.Join(out, "model.safetensors")})
@@ -202,7 +204,7 @@ func TestRunQuantFP8(t *testing.T) {
 func TestRunQuantNF4(t *testing.T) {
 	src, out := writeToyModel(t), filepath.Join(t.TempDir(), "nf4-out")
 	var stdout, stderr bytes.Buffer
-	if code := runQuantCommand(context.Background(), []string{src, "-nf4", "-o", out}, &stdout, &stderr); code != 0 {
+	if code := runQuantCommand(context.Background(), []string{src, "--nf4", "--output", out}, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit %d; stderr=%s", code, stderr.String())
 	}
 	idx, err := safetensors.IndexFiles([]string{filepath.Join(out, "model.safetensors")})
@@ -271,9 +273,9 @@ func TestRunQuantCommand_Rejects(t *testing.T) {
 		args     []string
 		wantCode int
 	}{
-		{"no positional", []string{"-bits", "4"}, 2},
-		{"help", []string{"-h"}, 0},
-		{"unsupported bits", []string{src, "-bits", "3"}, 1},
+		{"no positional", []string{"--bits", "4"}, 2},
+		{"help", []string{"--help"}, 0},
+		{"unsupported bits", []string{src, "--bits", "3"}, 1},
 		{"no shards", []string{filepath.Join(t.TempDir(), "empty")}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -290,7 +292,7 @@ func TestRunQuantAWQ(t *testing.T) {
 		src := writeToyModel(t)
 		out := filepath.Join(t.TempDir(), "awq-out")
 		var stdout, stderr bytes.Buffer
-		if code := runQuantCommand(context.Background(), []string{src, "-awq", "-group-size", "32", "-o", out}, &stdout, &stderr); code != 0 {
+		if code := runQuantCommand(context.Background(), []string{src, "--awq", "--group-size", "32", "--output", out}, &stdout, &stderr); code != 0 {
 			t.Fatalf("exit %d; stderr=%s", code, stderr.String())
 		}
 		idx, err := safetensors.IndexFiles([]string{filepath.Join(out, "model.safetensors")})
@@ -309,7 +311,7 @@ func TestRunQuantAWQ(t *testing.T) {
 	t.Run("Bad/mutually exclusive formats", func(t *testing.T) {
 		src := writeToyModel(t)
 		var stdout, stderr bytes.Buffer
-		if code := runQuantCommand(context.Background(), []string{src, "-awq", "-gptq"}, &stdout, &stderr); code != 2 {
+		if code := runQuantCommand(context.Background(), []string{src, "--awq", "--gptq"}, &stdout, &stderr); code != 2 {
 			t.Fatalf("exit %d, want 2; stderr=%s", code, stderr.String())
 		}
 	})

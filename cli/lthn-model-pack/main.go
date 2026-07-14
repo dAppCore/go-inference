@@ -4,7 +4,7 @@
 // .model Trix containers can be built, extracted, and inspected from the
 // terminal without going through a service.
 //
-//	lthn-model-pack pack /models/gemma-3-4b-it /out/gemma-3-4b-it.model -arch gemma -quant 4
+//	lthn-model-pack pack /models/gemma-3-4b-it /out/gemma-3-4b-it.model --arch gemma --quant 4
 //	lthn-model-pack inspect /out/gemma-3-4b-it.model
 //	lthn-model-pack unpack  /out/gemma-3-4b-it.model /tmp/extracted
 package main
@@ -19,10 +19,10 @@ import (
 )
 
 const usage = `Usage:
-  lthn-model-pack pack    [-arch X] [-quant N] [-source safetensors|gguf] [-producer X] <srcDir> <out.model>
-  lthn-model-pack unpack  [-overwrite]                                                   <src.model> <destDir>
-  lthn-model-pack list                                                                   <src.model>
-  lthn-model-pack inspect                                                                <src.model>
+  lthn-model-pack pack    [--arch X] [--quant N] [--source safetensors|gguf] [--producer X] <srcDir> <out.model>
+  lthn-model-pack unpack  [--overwrite]                                                      <src.model> <destDir>
+  lthn-model-pack list                                                                       <src.model>
+  lthn-model-pack inspect                                                                    <src.model>
 
 Flags must come before positional arguments.`
 

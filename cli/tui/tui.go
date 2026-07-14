@@ -22,7 +22,26 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	ctxLen := fs.Int("context", 0, "context length override; 0 uses the model default")
 	maxTokens := fs.Int("max-tokens", 4096, "per-reply token budget (thinking spends from it)")
 	check := fs.Bool("check", false, "render one frame to stdout and exit (no TTY needed — the smoke receipt)")
+	fs.Usage = func() {
+		core.WriteString(stderr, "Usage: tui [flags]\n")
+		core.WriteString(stderr, "\n")
+		core.WriteString(stderr, "Chat with a model in the terminal: tabs for Chat, Models, Service (host the\n")
+		core.WriteString(stderr, "HTTP API on the loaded model), Settings, Tools and Modes.\n")
+		core.WriteString(stderr, "\n")
+		core.WriteString(stderr, "Flags:\n")
+		// the same GNU-style block the lem verbs print (long options only)
+		fs.VisitAll(func(f *flag.Flag) {
+			if f.DefValue == "" {
+				core.WriteString(stderr, core.Sprintf("  --%s\n\t%s\n", f.Name, f.Usage))
+				return
+			}
+			core.WriteString(stderr, core.Sprintf("  --%s\n\t%s (default %q)\n", f.Name, f.Usage, f.DefValue))
+		})
+	}
 	if err := fs.Parse(args); err != nil {
+		if core.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 2
 	}
 

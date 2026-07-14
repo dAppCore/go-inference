@@ -11,7 +11,7 @@ renamed copy introduces itself correctly.
 task build          # bin/lem for this machine (Apple: metal engine embedded)
 ./bin/lem serve --model ~/models/gemma-4-e2b-it-4bit   # OpenAI/Anthropic/Ollama API on :36911
 ./bin/lem tui       # chat with a model in the terminal
-./bin/lem -h        # the full verb list
+./bin/lem --help    # the full verb list
 ```
 
 Each verb is thin flag-parsing over a go-inference library — the business

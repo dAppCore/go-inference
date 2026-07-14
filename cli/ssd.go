@@ -42,9 +42,7 @@ func runSSDCommand(ctx context.Context, args []string, stdout, stderr io.Writer)
 		core.WriteString(stderr, "--kernel rides generation as KV state but never enters the captured rows (#97).\n")
 		core.WriteString(stderr, "\n")
 		core.WriteString(stderr, "Flags:\n")
-		fs.VisitAll(func(f *flag.Flag) {
-			core.WriteString(stderr, core.Sprintf("  -%s\n\t%s (default %q)\n", f.Name, f.Usage, f.DefValue))
-		})
+		printFlagBlock(stderr, fs)
 	}
 	if err := fs.Parse(args); err != nil {
 		if core.Is(err, flag.ErrHelp) {

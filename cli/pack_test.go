@@ -24,7 +24,7 @@ func packFixtureModel(t *testing.T) (srcDir, modelPath string) {
 	modelPath = filepath.Join(t.TempDir(), "toy.model")
 	var stdout, stderr bytes.Buffer
 	if code := runPackCommand(context.Background(),
-		[]string{"create", "-arch", "gemma4", "-quant", "4", srcDir, modelPath},
+		[]string{"create", "--arch", "gemma4", "--quant", "4", srcDir, modelPath},
 		&stdout, &stderr); code != 0 {
 		t.Fatalf("fixture create exit %d; stderr=%s", code, stderr.String())
 	}
@@ -42,7 +42,7 @@ func TestRunPackCommand_Dispatch(t *testing.T) {
 	}{
 		{"no args", nil, 2, true},
 		{"unknown subcommand", []string{"frobnicate"}, 2, true},
-		{"help flag", []string{"-h"}, 0, true},
+		{"help flag", []string{"--help"}, 0, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -64,7 +64,7 @@ func TestRunPackCommand_HelpSubcommands(t *testing.T) {
 	for _, subcommand := range []string{"create", "inspect", "list", "extract", "hash"} {
 		t.Run(subcommand, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
-			if code := runPackCommand(context.Background(), []string{subcommand, "-h"}, &stdout, &stderr); code != 0 {
+			if code := runPackCommand(context.Background(), []string{subcommand, "--help"}, &stdout, &stderr); code != 0 {
 				t.Fatalf("%s help exit %d, want 0; stderr=%s", subcommand, code, stderr.String())
 			}
 			if !core.Contains(stdout.String()+stderr.String(), "Usage:") {
@@ -82,7 +82,7 @@ func TestRunPackCreate(t *testing.T) {
 		src := writeToyModel(t)
 		out := filepath.Join(t.TempDir(), "created.model")
 		var stdout, stderr bytes.Buffer
-		if code := runPackCreate([]string{"-arch", "gemma4", "-quant", "4", src, out}, &stdout, &stderr); code != 0 {
+		if code := runPackCreate([]string{"--arch", "gemma4", "--quant", "4", src, out}, &stdout, &stderr); code != 0 {
 			t.Fatalf("exit %d; stderr=%s", code, stderr.String())
 		}
 		if _, err := os.Stat(out); err != nil {
@@ -134,7 +134,7 @@ func TestRunPackInspect(t *testing.T) {
 	})
 	t.Run("Good/json", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		if code := runPackInspect([]string{"-json", modelPath}, &stdout, &stderr); code != 0 {
+		if code := runPackInspect([]string{"--json", modelPath}, &stdout, &stderr); code != 0 {
 			t.Fatalf("exit %d; stderr=%s", code, stderr.String())
 		}
 		out := stdout.String()
@@ -172,7 +172,7 @@ func TestRunPackList(t *testing.T) {
 	})
 	t.Run("Good/json", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		if code := runPackList([]string{"-json", modelPath}, &stdout, &stderr); code != 0 {
+		if code := runPackList([]string{"--json", modelPath}, &stdout, &stderr); code != 0 {
 			t.Fatalf("exit %d; stderr=%s", code, stderr.String())
 		}
 		if !core.Contains(stdout.String(), "config.json") {
@@ -238,7 +238,7 @@ func TestRunPackExtract(t *testing.T) {
 			t.Fatalf("blocked extract exit %d, want 1; stderr=%s", code, stderr.String())
 		}
 		var out2, err2 bytes.Buffer
-		if code := runPackExtract([]string{"-overwrite", modelPath, dest}, &out2, &err2); code != 0 {
+		if code := runPackExtract([]string{"--overwrite", modelPath, dest}, &out2, &err2); code != 0 {
 			t.Fatalf("forced extract exit %d, want 0; stderr=%s", code, err2.String())
 		}
 	})

@@ -21,8 +21,8 @@ func TestRunEbookCommand_Good(t *testing.T) {
 		name string
 		args func(model, out string) []string
 	}{
-		{"with weights", func(model, out string) []string { return []string{"-model", model, "-out", out} }},
-		{"no weights", func(model, out string) []string { return []string{"-model", model, "-out", out, "-weights=false"} }},
+		{"with weights", func(model, out string) []string { return []string{"--model", model, "--out", out} }},
+		{"no weights", func(model, out string) []string { return []string{"--model", model, "--out", out, "--weights=false"} }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			model := writeToyModel(t)
@@ -54,8 +54,8 @@ func TestRunEbookCommand_Bad(t *testing.T) {
 		wantCode int
 	}{
 		{"missing model", nil, 2},
-		{"unknown flag", []string{"-nonsense"}, 2},
-		{"help", []string{"-h"}, 0},
+		{"unknown flag", []string{"--nonsense"}, 2},
+		{"help", []string{"--help"}, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -72,7 +72,7 @@ func TestRunEbookCommand_Ugly(t *testing.T) {
 	empty := t.TempDir()
 	out := filepath.Join(t.TempDir(), "book.epub")
 	var stdout, stderr bytes.Buffer
-	if code := runEbookCommand(context.Background(), []string{"-model", empty, "-out", out}, &stdout, &stderr); code != 1 {
+	if code := runEbookCommand(context.Background(), []string{"--model", empty, "--out", out}, &stdout, &stderr); code != 1 {
 		t.Fatalf("exit %d, want 1; stderr=%s", code, stderr.String())
 	}
 	if _, err := os.Stat(out); err == nil {
