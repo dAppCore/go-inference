@@ -203,6 +203,24 @@ func TestHIPInferenceModel_DeclaredGemma4ChatTemplate_Good(t *testing.T) {
 	core.AssertEqual(t, "", embeddedTemplate.Thinking.OffSuffix)
 }
 
+func TestHIPInferenceModel_DeclaredQwenChatTemplate_Good(t *testing.T) {
+	tokenModel := newHipTokenModel(
+		&hipLoadedModel{modelInfo: inference.ModelInfo{Architecture: "qwen3_6"}},
+		hipInferenceModelFixtureTokenizer(),
+		"qwen3_6",
+	)
+	template, ok := tokenModel.DeclaredChatTemplate()
+	core.RequireTrue(t, ok)
+	core.AssertEqual(t, "<|im_start|>", template.Open)
+	core.AssertEqual(t, "<|im_end|>", template.Close)
+	core.AssertEqual(t, "assistant", template.AssistantRole)
+	core.AssertEqual(t, []string{"<|im_end|>"}, template.Stops)
+	if template.Thinking == nil {
+		t.Fatal("Qwen chat template missing thinking-channel declaration")
+	}
+	core.AssertEqual(t, "<think>\n\n</think>\n\n", template.Thinking.OffSuffix)
+}
+
 func TestHIPInferenceModel_ROCmProductionBridge_Good(t *testing.T) {
 	decoder := hipInferenceModelFixtureTokenizer()
 	loaded := &hipLoadedModel{

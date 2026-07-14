@@ -86,7 +86,42 @@ func (m *hipTokenModel) DeclaredChatTemplate() (engine.ChatTemplate, bool) {
 	if m == nil || m.tokenizer == nil {
 		return engine.ChatTemplate{}, false
 	}
+	architecture := m.modelType
+	if m.loaded != nil && m.loaded.modelInfo.Architecture != "" {
+		architecture = m.loaded.modelInfo.Architecture
+	}
+	if template, ok := hipArchitectureChatTemplate(architecture); ok {
+		return template, true
+	}
 	return engine.GemmaChatTemplate(engine.DetectTurnTokens(m.tokenizer), m.NeedsThoughtChannelSuppressor()), true
+}
+
+func hipArchitectureChatTemplate(architecture string) (engine.ChatTemplate, bool) {
+	templateID, ok := ROCmChatTemplateID(architecture)
+	if !ok || templateID != "qwen" {
+		return engine.ChatTemplate{}, false
+	}
+	return engine.ChatTemplate{
+		Open:          "<|im_start|>",
+		Close:         "<|im_end|>",
+		UserRole:      "user",
+		AssistantRole: "assistant",
+		SystemRole:    "system",
+		Thinking:      &engine.ChatThinking{OffSuffix: "<think>\n\n</think>\n\n"},
+		Stops:         []string{"<|im_end|>"},
+	}, true
+}
+
+func formatHIPArchitectureChatTemplate(messages []inference.Message, architecture string, enableThinking *bool) (string, bool) {
+	template, ok := hipArchitectureChatTemplate(architecture)
+	if !ok {
+		return "", false
+	}
+	prompt := engine.RenderChatTurns(template, messages)
+	if template.Thinking != nil && !template.ResolveThinking(enableThinking) {
+		prompt += template.Thinking.OffSuffix
+	}
+	return prompt, true
 }
 
 // OpenEngineSession opens a fresh retained Gemma4-Q4 decode session as the

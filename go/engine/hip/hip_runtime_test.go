@@ -16,6 +16,39 @@ import (
 	"dappco.re/go/inference"
 )
 
+func TestHIPRuntime_ApplyChatTemplateUsesQwenChatML_Good(t *testing.T) {
+	model := &hipLoadedModel{modelInfo: inference.ModelInfo{Architecture: "qwen3_6"}}
+	messages := []inference.Message{
+		{Role: "system", Content: "Be terse."},
+		{Role: "user", Content: "Hi"},
+	}
+
+	prompt, err := model.ApplyChatTemplate(messages)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t,
+		"<|im_start|>system\nBe terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+		prompt,
+	)
+}
+
+func TestHIPRuntime_ApplyChatTemplateHonorsQwenThinking_Bad(t *testing.T) {
+	model := &hipLoadedModel{modelInfo: inference.ModelInfo{Architecture: "qwen3_6"}}
+	enabled := true
+	prompt, err := model.applyChatTemplateWithGenerateConfig(
+		[]inference.Message{{Role: "user", Content: "Hi"}},
+		inference.GenerateConfig{EnableThinking: &enabled},
+	)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n", prompt)
+}
+
+func TestHIPRuntime_ApplyChatTemplateKeepsUnknownFallback_Ugly(t *testing.T) {
+	model := &hipLoadedModel{modelInfo: inference.ModelInfo{Architecture: "unknown"}}
+	prompt, err := model.ApplyChatTemplate([]inference.Message{{Role: "user", Content: "Hi"}})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, "user: Hi\n", prompt)
+}
+
 func TestHIPRuntime_LoadModelAllocatesAndCopiesGGUFTensors_Good(t *testing.T) {
 	variant := "Good"
 	core.AssertNotEmpty(t, variant)

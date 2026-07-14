@@ -997,12 +997,22 @@ func (model *hipLoadedModel) ApplyChatTemplate(messages []inference.Message) (st
 	if model != nil && isROCmGemma4Architecture(model.modelInfo.Architecture) {
 		return formatGemma4ChatTemplate(messages), nil
 	}
+	if model != nil {
+		if prompt, ok := formatHIPArchitectureChatTemplate(messages, model.modelInfo.Architecture, nil); ok {
+			return prompt, nil
+		}
+	}
 	return formatFallbackChatTemplate(messages), nil
 }
 
 func (model *hipLoadedModel) applyChatTemplateWithGenerateConfig(messages []inference.Message, cfg inference.GenerateConfig) (string, error) {
 	if model != nil && isROCmGemma4Architecture(model.modelInfo.Architecture) {
 		return formatGemma4ChatTemplateWithConfig(messages, model.gemma4ChatTemplateConfig(cfg, false)), nil
+	}
+	if model != nil {
+		if prompt, ok := formatHIPArchitectureChatTemplate(messages, model.modelInfo.Architecture, cfg.EnableThinking); ok {
+			return prompt, nil
+		}
 	}
 	return formatFallbackChatTemplate(messages), nil
 }
