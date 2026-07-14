@@ -151,6 +151,7 @@ func Assemble(tensors map[string]safetensors.Tensor, arch Arch, names WeightName
 		m.Arch.Layer[i].AttentionQNorm = len(L.QNorm) > 0
 		m.Arch.Layer[i].AttentionKNorm = len(L.KNorm) > 0
 		m.Arch.Layer[i].PostAttnNorm = len(L.PostAttnNorm) > 0
+		m.Arch.Layer[i].LayerScalar = len(L.LayerScalar) > 0
 		L.O = lin(p+names.O, qDim)
 
 		if spec.MoE {

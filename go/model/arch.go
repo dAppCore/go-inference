@@ -67,6 +67,11 @@ type LayerSpec struct {
 	AttentionKNorm bool // self_attn.k_norm present
 	PostAttnNorm   bool // post_attention_layernorm present
 	PostFFNorm     bool // post feed-forward norm present (dense MLP layers)
+	// LayerScalar declares a per-layer output scalar (one op multiplying the layer's
+	// residual output — gemma4 diffusion's .layer_scalar). Same contract as the norm
+	// selections above: resolved once in model.Assemble from checkpoint weight
+	// presence, bound by backends instead of re-probed from weight buffers.
+	LayerScalar bool
 }
 
 // OwnsCache reports whether this layer holds its own KV cache (vs sharing).

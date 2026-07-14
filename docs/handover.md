@@ -1,3 +1,52 @@
+# NEXT WAKE (2026-07-17 — #386 slice 4: op layout + PLE hooks — the ICB record path is family-clean)
+
+## 2026-07-17 (ops-homes slice 4 — opsPerLayer layout + per-layer-input hooks)
+
+- THE REMAINDER: the ops/icb ledger's last "still engine-inferred" line —
+  the per-layer op LAYOUT (a 40-line hand-arithmetic mirror of the record
+  loop's emit sequence, flags read from a mix of declared specs and buffer
+  presence) and the PLE record hooks (recordGate/recordProj closures handed
+  to the neutral core — the same arch-supplied-hook shape slice 2 killed
+  for vProjIdxOf). Unblocked by #385 closing (the batching seam churn is
+  done).
+- THE FIX (three moves):
+  * projIndex gains projPLEGate/projPLEProj — the per-layer-input matmuls
+    ride the ONE per-layer projection seam; both record boundaries (bf16
+    whole-seq + quant) serve them from their existing recordProj switch;
+    archICBPLEPlan is pure DATA now (runtime, pliDim, norms, residents).
+  * LayerSpec.LayerScalar declared (model.Assemble, .layer_scalar weight
+    presence — may sit on a SUBSET of layers, gemma4 diffusion; absent
+    layers bind the ×1.0 identity so the layout stays uniform); the record
+    boundary binds declared||buffer-presence, the slice-2/3 self-heal.
+  * resolveArchICBOpLayout (new decode_forward_arch_icb_layout.go): the
+    layout's ONE home — declared selections × engine fused-kernel caps →
+    opsPerLayer + kRopeBindIdx; consumed by both the ICB sizing and the
+    record loop; pure Go, unit-tested without a GPU; the recorded-count
+    guard in decodeForwardArchICBCore stays as the honesty check. The
+    layout is ENGINE-OWNED BY DESIGN (fusion availability is engine
+    capability, not family knowledge) — the ledger now says so explicitly,
+    and nothing family-specific remains engine-inferred on the record path.
+- GATES: 4 layout tests (E2B fused full-feature stride = 21; plain
+  hand-built = 24 @ bind 1; declared ≡ buffer-healed identical layout;
+  capability-without-selection inert) + 3 Assemble LayerScalar
+  declaration tests (Good/Bad/Ugly — the Ugly is the subset-of-layers
+  shape); ICB fixtures 155/155 (incl. the quant PLE recording test
+  asserting hasPLE on the recorded replay); metal+model suites 2599/0;
+  module-wide build+vet clean.
+- LIVE (byte-identity, greedy 64 tok, temp 0, same prompt, plain serve):
+  E2B qat-4bit (the PLE model — the exact re-plumbed seam) pre ≡ post
+  IDENTICAL; 12B-it-4bit (K==V + QK norms, no PLE) pre ≡ post IDENTICAL.
+  Pre-slice binary preserved as /private/tmp/lem-dev/bin/lem-slice4-base.
+- #386 REMAINDER: bf16-as-op-option (operator-gated) not started; the
+  family-catalogue survey refresh (design-family-roadmap.md's covered/
+  in-flight sections are stale — the family lanes landed ~26 packages
+  since the 12 Jul survey: gpt2/opt/falcon/bloom/gptneox/phi/granite/
+  cohere/olmo/olmoe/dbrx/jetmoe/granitemoe/qwenmoe/mixtral/deepseek/
+  llama4/starcoder2/qwen2/glm4/exaone4/ernie45/hunyuan/mpt/stablelm/
+  smollm3 + neutral model/alibi.go); still-unlanded backlog rows
+  (recurrent-state ABI, vision/audio tower contracts, BLT/DiffLlama
+  exotics) are future lanes, not this task.
+
 # NEXT WAKE (2026-07-16 — EnableThinking seam closed: #385 / goinf #35 COMPLETE)
 
 ## 2026-07-16 (the EnableThinking seam — the batching task's last item)

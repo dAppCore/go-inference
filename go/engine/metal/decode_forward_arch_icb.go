@@ -19,12 +19,16 @@ import (
 	"github.com/tmc/apple/objc"
 )
 
+// archICBPLEPlan carries the per-layer-input replay DATA only. The PLE gate/proj
+// matmuls record through the caller's recordProj hook at projPLEGate/projPLEProj —
+// the same seam every other per-layer matmul rides — so the plan hands the neutral
+// record core no architecture closures (#57: the family declares the per-layer-input
+// dims on model.Arch; the engine binds the weights it built for them).
 type archICBPLEPlan struct {
-	runtime                *archDecodePLEInputs
-	pliDim                 int
-	postNormBufs           []metal.MTLBuffer
-	resident               []metal.MTLBuffer
-	recordGate, recordProj func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer)
+	runtime      *archDecodePLEInputs
+	pliDim       int
+	postNormBufs []metal.MTLBuffer
+	resident     []metal.MTLBuffer
 }
 
 func (p *archICBPLEPlan) enabled() bool {
@@ -1204,11 +1208,24 @@ func recordArchICB(
 			return nil, core.NewError("native.recordArchICB: PLE post norm count must equal layers")
 		}
 	}
+	// Layer-scalar op selection is family-declared (LayerSpec.LayerScalar, resolved in
+	// model.Assemble from .layer_scalar weight presence) with the buffer-presence
+	// self-heal for hand-built callers — the slice-2/3 pattern. Any() across layers:
+	// unlike the norms, the scalar may sit on a subset of layers; absent layers bind
+	// the ×1.0 identity weight so the layout stays uniform.
 	hasLayerScalar := false
-	for _, b := range layerScalarBufs {
-		if b != nil {
+	for li := range specs {
+		if specs[li].LayerScalar {
 			hasLayerScalar = true
 			break
+		}
+	}
+	for _, b := range layerScalarBufs {
+		if hasLayerScalar {
+			break
+		}
+		if b != nil {
+			hasLayerScalar = true
 		}
 	}
 	maxGelu := maxDFF
@@ -1644,67 +1661,29 @@ func recordArchICB(
 		}
 		resident = append(resident, hBufs...)
 
-		// Norm-op selection is family-declared (LayerSpec.Attention{Q,K}Norm /
-		// Post{Attn,FF}Norm, resolved once in model.Assemble) with a buffer-presence
-		// self-heal for hand-built callers that do not declare — the slice-2 K==V
-		// pattern. Uniform across layers by contract (layer 0 speaks for the stack);
-		// each present norm adds one op per layer, so the layout grows but stays
-		// uniform → a single running op counter.
-		hasQN := specs[0].AttentionQNorm || (len(qNormBufs) > 0 && qNormBufs[0] != nil)
-		hasKN := specs[0].AttentionKNorm || (len(kNormBufs) > 0 && kNormBufs[0] != nil)
-		hasPA := specs[0].PostAttnNorm || (len(postAttnBufs) > 0 && postAttnBufs[0] != nil)
-		hasPF := specs[0].PostFFNorm || (len(postFFBufs) > 0 && postFFBufs[0] != nil)
-		extra := 0
-		for _, h := range []bool{hasQN, hasKN, hasPA, hasPF} {
-			if h {
-				extra++
-			}
-		}
-		if valueNormOnes != nil { // gemma4 value-norm adds one op/layer (owner: the V row; sharer: discarded)
-			extra++
-		}
-		opsPerLayer := 24 + extra
-		if hasFusedGELU { // fused gelu is 1 command vs the composed chain's 10
-			opsPerLayer -= 9
-		}
-		// fused QK-norm+rope collapses (qNorm + ropeQ) and (kNorm + ropeK) from 2 ops to 1 each when the
-		// layer has QK-norm. The fused K op writes the cache at buffer index 2 (its `out`), not the plain
-		// rope's index 1 — so the per-token kRopeIdx rebind (prepareStep) uses kRopeBindIdx.
-		kRopeBindIdx := uint(1)
-		if useFusedQKRope && hasQN {
-			opsPerLayer-- // qNorm+ropeQ
-		}
-		if useFusedQKRope && hasKN {
-			opsPerLayer-- // kNorm+ropeK
-			kRopeBindIdx = 2
-		}
-		if hasPLE {
-			if hasFusedGELU {
-				opsPerLayer += 5 // qmv gate, fused gelu*pli, qmv proj, rms, residual add
-			} else {
-				opsPerLayer += 14 // qmv gate, 10-op gelu*pli chain, qmv proj, rms, residual add
-			}
-		}
-		if hasLayerScalar {
-			opsPerLayer++
-		}
-		// fused input-RMSNorm+qmv folds the attn-input rms and the mlp-input rms INTO their following
-		// projections (Q/K/V read inBuf+attnNormW; gate/up read hBuf+mlpNormW), removing both setRMS ops.
-		if recordFusedRMSProj != nil {
-			opsPerLayer -= 2
-		}
-		// fused residual-RMSNorm folds each post-norm + its residual add into one op (out = res + rms(branch)).
-		if useFusedResRMS {
-			if hasPA {
-				opsPerLayer--
-			}
-			if hasPF {
-				opsPerLayer--
-			}
-		}
-		// GLOBAL layers' 2-pass SDPA is pass-1 + pass-2 where the single-pass was one op;
-		// q8 owner layers add two quantise-store ops (K row, V row).
-		total := opsPerLayer*nLayers + nGlobal2Pass + nQ8Store
+		// The per-layer op layout — family-DECLARED selections (norm ops per the slice-3
+		// contract: uniform across layers, layer 0 speaks for the stack; buffer-presence
+		// self-heals for hand-built callers) × engine kernel capabilities — resolved in
+		// ONE home (resolveArchICBOpLayout) consumed by both this ICB sizing and the
+		// record loop below. The recorded-count guard after the loop keeps the layout's
+		// arithmetic and the loop's emit sequence honest with each other.
+		lay := resolveArchICBOpLayout(specs, archICBOpCaps{
+			qNormBuf:     len(qNormBufs) > 0 && qNormBufs[0] != nil,
+			kNormBuf:     len(kNormBufs) > 0 && kNormBufs[0] != nil,
+			postAttnBuf:  len(postAttnBufs) > 0 && postAttnBufs[0] != nil,
+			postFFBuf:    len(postFFBufs) > 0 && postFFBufs[0] != nil,
+			valueNorm:    valueNormOnes != nil,
+			ple:          hasPLE,
+			layerScalar:  hasLayerScalar,
+			fusedGELU:    hasFusedGELU,
+			fusedQKRope:  useFusedQKRope,
+			fusedRMSProj: recordFusedRMSProj != nil,
+			fusedResRMS:  useFusedResRMS,
+		})
+		hasQN, hasKN, hasPA, hasPF := lay.hasQN, lay.hasKN, lay.hasPA, lay.hasPF
+		kRopeBindIdx := lay.kRopeBindIdx
+		opsPerLayer := lay.opsPerLayer
+		total := lay.total(nLayers, nGlobal2Pass, nQ8Store)
 		recorder := icbop.New(device, uint(total), 16)
 		icb := recorder.Buffer
 
@@ -2022,10 +2001,10 @@ func recordArchICB(
 			if hasPLE {
 				pleOff := uint(li * ple.pliDim * bf16Size)
 				if hasFusedGELU { // fused gelu(pleGate)·pleInput — the binary-op ABI with the gelu pipeline (pleInput at offset)
-					ple.recordGate(li, emit(), outBuf, pleGate)
+					recordProj(li, emit(), outBuf, pleGate, 0, projPLEGate)
 					setBinOffsets(emit(), geluICBPSO, pleGate, 0, pleInput, pleOff, pleGated, 0, ple.pliDim)
 				} else {
-					ple.recordGate(li, emit(), outBuf, pleGate)
+					recordProj(li, emit(), outBuf, pleGate, 0, projPLEGate)
 					setBin(emit(), mulPSO, pleGate, pleGate, x2, ple.pliDim)
 					setBin(emit(), mulPSO, x2, pleGate, x3, ple.pliDim)
 					setBin(emit(), mulPSO, x3, c044, x3s, ple.pliDim)
@@ -2042,7 +2021,7 @@ func recordArchICB(
 					setBin(emit(), mulPSO, halfG, onePlus, gelu, ple.pliDim)
 					setBinOffsets(emit(), mulPSO, gelu, 0, pleInput, pleOff, pleGated, 0, ple.pliDim)
 				}
-				ple.recordProj(li, emit(), pleGated, pleProj)
+				recordProj(li, emit(), pleGated, pleProj, 0, projPLEProj)
 				// (the PLE post-norm residual stays un-fused: the fused kernel diverges ~2 ULP from the
 				// PerLayerInputGate* re-encode / its CPU reference on the dModel axis — byte-parity-hostile.)
 				setRMS(emit(), pleProj, ple.postNormBufs[li], pleNorm)
@@ -2459,16 +2438,18 @@ func decodeForwardArchICBInto(
 			plePlan = &archICBPLEPlan{
 				runtime: pleRuntime, pliDim: pliDim, postNormBufs: plePostNorms, resident: pleResident,
 			}
-			plePlan.recordGate = func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer) {
-				g := pleGateShape
-				setGemv(c, g.pso, pleLB[li].gate, vec, out, 0, dModel, pliDim, g.bm, g.bn, g.sm, g.tm)
-			}
-			plePlan.recordProj = func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer) {
-				g := pleProjShape
-				setGemv(c, g.pso, pleLB[li].proj, vec, out, 0, pliDim, dModel, g.bm, g.bn, g.sm, g.tm)
-			}
 		}
 		recordProj := func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer, outOff uint, p projIndex) {
+			if p == projPLEGate { // per-layer-input matmuls: reachable only when plePlan is set
+				g := pleGateShape
+				setGemv(c, g.pso, pleLB[li].gate, vec, out, outOff, dModel, pliDim, g.bm, g.bn, g.sm, g.tm)
+				return
+			}
+			if p == projPLEProj {
+				g := pleProjShape
+				setGemv(c, g.pso, pleLB[li].proj, vec, out, outOff, pliDim, dModel, g.bm, g.bn, g.sm, g.tm)
+				return
+			}
 			l := lb[li]
 			switch p {
 			case projQ:
