@@ -791,6 +791,51 @@ func TestScheduler_Good_EmitsProbeEvents(t *testing.T) {
 	}
 }
 
+func TestScheduler_Good_RoutesRequestsThroughHIPLaneSet(t *testing.T) {
+	release := make(chan struct{})
+	barrier := &sync.WaitGroup{}
+	barrier.Add(2)
+	executor := &schedulerContinuousLaneExecutor{
+		prepareStarted: make(chan struct{}, 2),
+		releasePrepare: release,
+		prepareBarrier: barrier,
+	}
+	fake := &schedulerFakeTextModel{
+		batchStepAvailable: true,
+		laneExecutor:       executor,
+	}
+	model, err := NewScheduledModel(fake, SchedulerConfig{QueueSize: 2, MaxConcurrent: 2})
+	core.RequireNoError(t, err)
+	defer model.Close()
+
+	_, first, err := model.Schedule(context.Background(), inference.ScheduledRequest{ID: "first", Prompt: "a", Sampler: inference.SamplerConfig{MaxTokens: 2}})
+	core.RequireNoError(t, err)
+	_, second, err := model.Schedule(context.Background(), inference.ScheduledRequest{ID: "second", Prompt: "b c", Sampler: inference.SamplerConfig{MaxTokens: 2}})
+	core.RequireNoError(t, err)
+	<-executor.prepareStarted
+	<-executor.prepareStarted
+
+	firstTokens := make(chan []string, 1)
+	secondTokens := make(chan []string, 1)
+	go func() { firstTokens <- collectScheduledTokenText(first) }()
+	go func() { secondTokens <- collectScheduledTokenText(second) }()
+	close(release)
+
+	core.AssertEqual(t, []string{"11", "12"}, <-firstTokens)
+	core.AssertEqual(t, []string{"12", "13"}, <-secondTokens)
+	core.AssertEqual(t, 1, fake.openLaneSets)
+	if fake.laneSet.BatchForwardCount() == 0 {
+		t.Fatal("scheduled requests did not advance through the HIP lane set")
+	}
+	forwarded := 0
+	for _, call := range executor.forwardCalls {
+		forwarded += len(call)
+	}
+	if forwarded != 2 {
+		t.Fatalf("lane forward inputs = %d, want both scheduled requests", forwarded)
+	}
+}
+
 type schedulerFakeTextModel struct {
 	architecture       string
 	identity           inference.ModelIdentity
@@ -816,6 +861,10 @@ type schedulerFakeTextModel struct {
 	batchResults       []inference.BatchResult
 	batchErr           error
 	mutatePromptInputs bool
+	batchStepAvailable bool
+	laneExecutor       hipLaneExecutor
+	laneSet            *hipLaneSet
+	openLaneSets       int
 }
 
 func (m *schedulerFakeTextModel) Generate(ctx context.Context, prompt string, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
@@ -905,6 +954,29 @@ func (m *schedulerFakeTextModel) Encode(prompt string) []int32 {
 	}
 	return ids
 }
+func (m *schedulerFakeTextModel) Decode(ids []int32) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	return core.Sprintf("%d", ids[0])
+}
+func (m *schedulerFakeTextModel) ApplyChatTemplate(messages []inference.Message) (string, error) {
+	if len(messages) == 0 {
+		return "", nil
+	}
+	return messages[len(messages)-1].Content, nil
+}
+func (m *schedulerFakeTextModel) BatchStepAvailable() bool {
+	return m.batchStepAvailable
+}
+func (m *schedulerFakeTextModel) OpenLaneSet(cfg inference.LaneSetConfig) (inference.LaneSet, error) {
+	if !m.batchStepAvailable || m.laneExecutor == nil {
+		return nil, core.NewError("fake lane set is unavailable")
+	}
+	m.openLaneSets++
+	m.laneSet = newHIPLaneSetWithExecutor(cfg.MaxLanes, m.laneExecutor)
+	return m.laneSet, nil
+}
 func (m *schedulerFakeTextModel) ContextLength() int {
 	return m.contextLength
 }
@@ -958,6 +1030,48 @@ func (m *schedulerFakeTextModel) lastEncodeInput() string {
 	}
 	return m.encodeInputs[len(m.encodeInputs)-1]
 }
+
+type schedulerContinuousLaneExecutor struct {
+	prepareStarted chan struct{}
+	releasePrepare <-chan struct{}
+	prepareBarrier *sync.WaitGroup
+	forwardCalls   [][]hipLaneForwardInput
+}
+
+func (e *schedulerContinuousLaneExecutor) Prepare(ctx context.Context, spec inference.LaneSpec) (hipPreparedLane, error) {
+	e.prepareStarted <- struct{}{}
+	select {
+	case <-e.releasePrepare:
+	case <-ctx.Done():
+		return hipPreparedLane{}, ctx.Err()
+	}
+	if e.prepareBarrier != nil {
+		e.prepareBarrier.Done()
+		e.prepareBarrier.Wait()
+	}
+	return hipPreparedLane{
+		PendingToken: spec.PromptIDs[len(spec.PromptIDs)-1] + 10,
+		Position:     len(spec.PromptIDs),
+		Sample:       hipNewLaneSampleState(spec.Sampler, spec.SampleSeed),
+	}, nil
+}
+
+func (e *schedulerContinuousLaneExecutor) Forward(_ context.Context, inputs []hipLaneForwardInput) ([]hipLaneForwardOutput, error) {
+	e.forwardCalls = append(e.forwardCalls, append([]hipLaneForwardInput(nil), inputs...))
+	outputs := make([]hipLaneForwardOutput, len(inputs))
+	for index, input := range inputs {
+		outputs[index] = hipLaneForwardOutput{
+			PendingToken: input.PendingToken + 1,
+			Position:     input.Position + 1,
+			DeviceState:  input.DeviceState,
+			Sample:       input.Sample,
+		}
+	}
+	return outputs, nil
+}
+
+func (e *schedulerContinuousLaneExecutor) UsesSharedBatchForward() bool { return true }
+func (e *schedulerContinuousLaneExecutor) Close() error                 { return nil }
 
 func collectScheduledTokenText(stream <-chan inference.ScheduledToken) []string {
 	out := []string{}
