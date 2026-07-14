@@ -579,7 +579,9 @@ func TestHIPLaneSet26BMoEHardwareMatchesSingleLanes_Good(t *testing.T) {
 		handle, err := set.Prepare(context.Background(), spec)
 		core.RequireNoError(t, err)
 		serial[index] = hipDrainLaneSet(t, set)[handle.ID]
-		core.AssertEqual(t, uint64(0), set.BatchForwardCount())
+		if set.BatchForwardCount() == 0 {
+			t.Fatal("single-lane MoE decode did not use the shared batch forward route")
+		}
 		core.RequireNoError(t, set.Close())
 	}
 
@@ -594,7 +596,9 @@ func TestHIPLaneSet26BMoEHardwareMatchesSingleLanes_Good(t *testing.T) {
 	for index, handle := range handles {
 		core.AssertEqual(t, serial[index], batched[handle.ID])
 	}
-	core.AssertEqual(t, uint64(0), set.BatchForwardCount())
+	if set.BatchForwardCount() == 0 {
+		t.Fatal("multi-lane MoE decode did not use the shared batch forward route")
+	}
 	core.RequireNoError(t, set.Close())
 }
 

@@ -74,6 +74,30 @@ func TestHipEngineSession_RestoreFromKV_Good_PreservesRawDevicePageState(t *test
 	}
 }
 
+func TestHipEngineSession_RestoreFromKV_Good_PreservesMultiHeadRawDevicePageState(t *testing.T) {
+	source := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
+	defer func() { _ = source.Close() }()
+	source.cfg.Layers[0].HeadDim = 1
+	source.cfg.Layers[0].KeyHeads = 2
+
+	snapshot, err := source.CaptureKVWithOptions(kv.CaptureOptions{})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 2, snapshot.NumHeads)
+	core.AssertEqual(t, 2, snapshot.SeqLen)
+
+	restored := &hipEngineSession{cfg: source.cfg, mode: source.mode, driver: source.driver}
+	defer func() { _ = restored.Close() }()
+	core.RequireNoError(t, restored.RestoreFromKV(context.Background(), snapshot))
+
+	got, err := restored.CaptureKVWithOptions(kv.CaptureOptions{})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, snapshot.NumHeads, got.NumHeads)
+	core.AssertEqual(t, snapshot.SeqLen, got.SeqLen)
+	if !bytes.Equal(snapshot.Layers[0].TurboQuantPayloads[0], got.Layers[0].TurboQuantPayloads[0]) {
+		t.Fatal("multi-head raw device KV page changed across capture and restore")
+	}
+}
+
 func TestHipEngineSession_Generate_Good_KeepsUnforwardedFinalTokenPending(t *testing.T) {
 	session := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
 	defer func() { _ = session.Close() }()

@@ -229,9 +229,6 @@ func hipValidateGemma4Q4LaneForward(driver nativeHIPDriver, cfg hipGemma4Q4Forwa
 		return core.E(hipGemma4Q4LaneForwardOperation, "epsilon must be non-negative and finite", nil)
 	}
 	for _, layer := range cfg.Layers {
-		if layer.MoE != nil {
-			return core.E(hipGemma4Q4LaneForwardOperation, "MoE lane forwarding is not implemented", nil)
-		}
 		if layer.PerLayerInput.hasLayerApply() && !cfg.Layers[0].PerLayerInput.hasGlobalPrecompute() {
 			return core.E(hipGemma4Q4LaneForwardOperation, "lane forwarding requires global per-layer input precompute", nil)
 		}

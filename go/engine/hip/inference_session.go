@@ -630,7 +630,8 @@ func hipSnapshotHasDeviceKVPayloads(snapshot *kv.Snapshot) bool {
 }
 
 func hipRestoreGemma4Q4DeviceLayer(snapshot *kv.Snapshot, layerSnapshot kv.LayerSnapshot, driver nativeHIPDriver, cfg hipGemma4Q4Layer0Config, engineConfig hipGemma4Q4EngineConfig, mode string, index int) (hipGemma4Q4DeviceLayerKVState, error) {
-	if index >= len(snapshot.Layers) || cfg.HeadDim <= 0 {
+	kvWidth := cfg.keyValueDim()
+	if index >= len(snapshot.Layers) || kvWidth <= 0 {
 		return hipGemma4Q4DeviceLayerKVState{}, core.E("rocm.hip.KVSnapshot.Restore", "raw device KV layer configuration is invalid", nil)
 	}
 	pages := make([]rocmDeviceKVPage, 0, len(layerSnapshot.TurboQuantPayloads))
@@ -649,7 +650,7 @@ func hipRestoreGemma4Q4DeviceLayer(snapshot *kv.Snapshot, layerSnapshot kv.Layer
 		if err != nil {
 			return hipGemma4Q4DeviceLayerKVState{}, core.E("rocm.hip.KVSnapshot.Restore", core.Sprintf("restore raw device KV layer %d", index), err)
 		}
-		if page.tokenStart != nextStart || page.tokenCount <= 0 || page.keyWidth != cfg.HeadDim || page.valueWidth != cfg.HeadDim {
+		if page.tokenStart != nextStart || page.tokenCount <= 0 || page.keyWidth != kvWidth || page.valueWidth != kvWidth {
 			_ = rocmDeviceKVTensorFreePair(driver, page.key, page.value)
 			return hipGemma4Q4DeviceLayerKVState{}, core.E("rocm.hip.KVSnapshot.Restore", "raw device KV page geometry is invalid", nil)
 		}
@@ -693,19 +694,19 @@ func hipDecodeStatesEqual(left, right hipGemma4Q4DecodeState) bool {
 }
 
 // hipSliceDecodeStateTokens returns a host decode state holding only the
-// [start, start+count) token window of each layer (float32 rows, HeadDim wide).
+// [start, start+count) token window of each layer (float32 KV rows).
 func hipSliceDecodeStateTokens(host hipGemma4Q4DecodeState, cfg hipGemma4Q4ForwardConfig, start, count int) hipGemma4Q4DecodeState {
 	sliced := hipGemma4Q4DecodeState{Layers: make([]hipGemma4Q4LayerKVState, len(host.Layers))}
 	for index, layer := range host.Layers {
-		headDim := 0
+		rowWidth := 0
 		if index < len(cfg.Layers) {
-			headDim = cfg.Layers[index].HeadDim
+			rowWidth = cfg.Layers[index].keyValueDim()
 		}
-		if headDim <= 0 {
+		if rowWidth <= 0 {
 			continue
 		}
-		from := start * headDim
-		to := (start + count) * headDim
+		from := start * rowWidth
+		to := (start + count) * rowWidth
 		if from < 0 {
 			from = 0
 		}

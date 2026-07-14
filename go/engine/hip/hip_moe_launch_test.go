@@ -8,9 +8,12 @@ import (
 	"context"
 	"encoding/binary"
 	"math"
+	"os"
+	"strings"
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference"
 )
 
 func TestHIPMoERouterLaunchArgs_Good(t *testing.T) {
@@ -554,66 +557,11 @@ func TestHIPMoERouterLaunch_Good_DeviceInputWorkspaceReusesPackedOutput(t *testi
 }
 
 func TestHIPGemma4MoEWorkspace_Good_WarmForwardReusesDeviceBuffers(t *testing.T) {
-	const (
-		hidden   = 32
-		localFF  = 32
-		experts  = 2
-		topK     = 2
-		expertFF = 32
-	)
 	driver := &hipGemma4MoEWorkspaceTestDriver{fakeHIPDriver: &fakeHIPDriver{available: true}}
 	workspace := hipNewAttentionHeadsChunkedWorkspace()
 	defer workspace.Close()
-	attentionResidual, err := hipAllocateByteBuffer(driver, "test", "attention residual", hidden*4, hidden)
-	core.RequireNoError(t, err)
-	defer attentionResidual.Close()
-	localInput, err := hipAllocateByteBuffer(driver, "test", "local input", hidden*4, hidden)
-	core.RequireNoError(t, err)
-	defer localInput.Close()
-
-	expertCache := newHIPGemma4ExpertCache(driver, 1<<20)
-	defer expertCache.Close()
-	gateUpBytes := uint64(2 * expertFF * (hidden / hipGGUFQ4_0BlockSize) * hipGGUFQ4_0BlockBytes)
-	downBytes := uint64(hidden * (expertFF / hipGGUFQ4_0BlockSize) * hipGGUFQ4_0BlockBytes)
-	for expert := 0; expert < experts; expert++ {
-		gateUp, allocErr := hipAllocateByteBuffer(driver, "test", "expert gate/up", gateUpBytes, int(gateUpBytes))
-		core.RequireNoError(t, allocErr)
-		down, allocErr := hipAllocateByteBuffer(driver, "test", "expert down", downBytes, int(downBytes))
-		core.RequireNoError(t, allocErr)
-		expertCache.entries[hipGemma4ExpertCacheKey{Layer: 0, Expert: expert}] = &hipGemma4ExpertCacheEntry{
-			GateUp: gateUp, Down: down,
-			GateUpRows: 2 * expertFF, GateUpCols: hidden,
-			DownRows: hidden, DownCols: expertFF,
-			GateUpFormat: hipGGUFExpertFormatQ4_0, DownFormat: hipGGUFExpertFormatQ4_0,
-			bytes: gateUpBytes + downBytes,
-		}
-	}
-	norm := hipRMSNormDeviceWeightConfig{
-		WeightPointer: 0x4000, WeightBytes: hidden * 4, Count: hidden,
-		Epsilon: 1e-6, WeightEncoding: hipRMSNormWeightEncodingF32,
-	}
-	projection := func(rows, cols int, pointer nativeDevicePointer) hipMLXQ4DeviceWeightConfig {
-		groups := rows * (cols / 32)
-		return hipMLXQ4DeviceWeightConfig{
-			WeightPointer: pointer, ScalePointer: pointer + 0x100, BiasPointer: pointer + 0x200,
-			WeightBytes: uint64(rows * cols / 2), ScaleBytes: uint64(groups * 2), BiasBytes: uint64(groups * 2),
-			Rows: rows, Cols: cols, GroupSize: 32, Bits: 4,
-		}
-	}
-	layer := hipGemma4Q4Layer0Config{
-		HiddenSize:     hidden,
-		GateProjection: projection(localFF, hidden, 0x10000),
-		UpProjection:   projection(localFF, hidden, 0x20000),
-		DownProjection: projection(hidden, localFF, 0x30000),
-		MoE: &hipGemma4MoELayerConfig{
-			Layer: 0, NumExperts: experts, TopKExperts: topK, ExpertIntermediateSize: expertFF,
-			PreFeedForwardNorm2: norm, PostFeedForwardNorm1: norm, PostFeedForwardNorm2: norm, RouterNorm: norm,
-			RouterProjection: hipGemma4MoERouterProjectionConfig{WeightPointer: 0x50000, WeightBytes: experts * hidden * 4, Rows: experts, Cols: hidden},
-			PerExpertScale:   []float32{1, 1}, ExpertCache: expertCache,
-			GateUpInfo: nativeTensorInfo{Type: hipGGUFQ4_0TensorType, TypeName: "Q4_0", Dimensions: []uint64{hidden, 2 * expertFF, experts}, ByteSize: uint64(experts) * gateUpBytes},
-			DownInfo:   nativeTensorInfo{Type: hipGGUFQ4_0TensorType, TypeName: "Q4_0", Dimensions: []uint64{expertFF, hidden, experts}, ByteSize: uint64(experts) * downBytes},
-		},
-	}
+	attentionResidual, localInput, layer, cleanup := hipGemma4MoEWorkspaceFixture(t, driver, 1)
+	defer cleanup()
 
 	first, err := hipRunGemma4MoEDeviceMLPWithWorkspace(context.Background(), driver, attentionResidual, localInput, layer, 1e-6, workspace)
 	if err != nil {
@@ -647,8 +595,189 @@ func TestHIPGemma4MoEWorkspace_Good_WarmForwardReusesDeviceBuffers(t *testing.T)
 	core.AssertEqual(t, 0, vectorAddLaunches)
 }
 
+func TestHIPGemma4MoEWorkspace_Good_BatchRowsUseDistinctOutput(t *testing.T) {
+	const rows = 2
+	driver := &hipGemma4MoEWorkspaceTestDriver{fakeHIPDriver: &fakeHIPDriver{available: true}}
+	workspace := hipNewAttentionHeadsChunkedWorkspace()
+	defer workspace.Close()
+	attentionResidual, localInput, layer, cleanup := hipGemma4MoEWorkspaceFixture(t, driver, rows)
+	defer cleanup()
+
+	first, err := hipRunGemma4MoEDeviceMLPBatchWithWorkspace(
+		context.Background(), driver, attentionResidual, localInput, layer, 1e-6, rows, workspace,
+	)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, rows*layer.HiddenSize, first.Count())
+	core.AssertEqual(t, uint64(rows*layer.HiddenSize*4), first.SizeBytes())
+	firstPointer := first.Pointer()
+	allocationsAfterWarm := len(driver.allocations)
+	driver.launches = driver.launches[:0]
+
+	second, err := hipRunGemma4MoEDeviceMLPBatchWithWorkspace(
+		context.Background(), driver, attentionResidual, localInput, layer, 1e-6, rows, workspace,
+	)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, firstPointer, second.Pointer())
+	core.AssertEqual(t, allocationsAfterWarm, len(driver.allocations))
+	core.AssertEqual(t, rows, countLaunchName(driver.launches, hipKernelNameMoECombineNorms))
+}
+
+func TestHIPGemma4MoEBatchHardwareMatchesSerial_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MOE_LANE_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MOE_LANE_TESTS=1 to run the HIP MoE batch receipt")
+	}
+	modelPath := strings.TrimSpace(os.Getenv("GO_ROCM_MODEL_PATH"))
+	if modelPath == "" {
+		t.Skip("set GO_ROCM_MODEL_PATH to a linked Gemma-4 26B-A4B Q4 GGUF")
+	}
+	if strings.TrimSpace(os.Getenv("GO_ROCM_KERNEL_HSACO")) == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to the linked ROCm kernels HSACO")
+	}
+	if !ROCmAvailable() {
+		t.Skip("ROCm runtime is not available on this host")
+	}
+
+	loadedResult := (&rocmBackend{}).LoadModel(modelPath, inference.WithContextLen(64))
+	if !loadedResult.OK {
+		t.Fatalf("production ROCm LoadModel(%q): %v", modelPath, loadedResult.Value)
+	}
+	model, ok := loadedResult.Value.(*rocmModel)
+	if !ok {
+		t.Fatalf("production ROCm LoadModel returned %T, want *rocmModel", loadedResult.Value)
+	}
+	defer func() {
+		if result := model.Close(); !result.OK {
+			t.Errorf("Close model: %v", result.Value)
+		}
+	}()
+	loaded, ok := model.native.(*hipLoadedModel)
+	if !ok || loaded == nil {
+		t.Fatalf("production ROCm native model is %T, want *hipLoadedModel", model.native)
+	}
+	forward, err := loaded.cachedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	core.RequireNoError(t, err)
+	var layer *hipGemma4Q4Layer0Config
+	for index := range forward.Layers {
+		if forward.Layers[index].MoE != nil {
+			layer = &forward.Layers[index]
+			break
+		}
+	}
+	if layer == nil {
+		t.Fatal("production model has no sparse layer")
+	}
+
+	const rows = 2
+	hidden := layer.HiddenSize
+	attentionValues := make([]float32, rows*hidden)
+	localValues := make([]float32, rows*hidden)
+	for row := 0; row < rows; row++ {
+		for column := 0; column < hidden; column++ {
+			index := row*hidden + column
+			attentionValues[index] = float32(column%29-14)/64 + float32(row)/32
+			localValues[index] = float32(column%17-8)/32 - float32(row)/64
+		}
+	}
+	attentionPayload, err := hipFloat32Payload(attentionValues)
+	core.RequireNoError(t, err)
+	attention, err := hipUploadByteBuffer(loaded.driver, "rocm.hip.Gemma4MoEBatchHardware", "attention rows", attentionPayload, len(attentionValues))
+	core.RequireNoError(t, err)
+	defer attention.Close()
+	localPayload, err := hipFloat32Payload(localValues)
+	core.RequireNoError(t, err)
+	local, err := hipUploadByteBuffer(loaded.driver, "rocm.hip.Gemma4MoEBatchHardware", "local rows", localPayload, len(localValues))
+	core.RequireNoError(t, err)
+	defer local.Close()
+
+	batchWorkspace := hipNewAttentionHeadsChunkedWorkspace()
+	defer batchWorkspace.Close()
+	batch, err := hipRunGemma4MoEDeviceMLPBatchWithWorkspace(context.Background(), loaded.driver, attention, local, *layer, 1e-6, rows, batchWorkspace)
+	core.RequireNoError(t, err)
+	got, err := hipReadFloat32DeviceOutput(batch, "rocm.hip.Gemma4MoEBatchHardware", "batch output", rows*hidden)
+	core.RequireNoError(t, err)
+
+	want := make([]float32, 0, rows*hidden)
+	rowBytes := uint64(hidden * 4)
+	for row := 0; row < rows; row++ {
+		offset := nativeDevicePointer(uint64(row) * rowBytes)
+		attentionRow := hipBorrowDeviceByteBufferValue(loaded.driver, "serial attention row", attention.Pointer()+offset, rowBytes, hidden)
+		localRow := hipBorrowDeviceByteBufferValue(loaded.driver, "serial local row", local.Pointer()+offset, rowBytes, hidden)
+		workspace := hipNewAttentionHeadsChunkedWorkspace()
+		serial, runErr := hipRunGemma4MoEDeviceMLPBatchWithWorkspace(context.Background(), loaded.driver, &attentionRow, &localRow, *layer, 1e-6, 1, workspace)
+		core.RequireNoError(t, runErr)
+		values, readErr := hipReadFloat32DeviceOutput(serial, "rocm.hip.Gemma4MoEBatchHardware", "serial output", hidden)
+		core.RequireNoError(t, readErr)
+		want = append(want, values...)
+		core.RequireNoError(t, workspace.Close())
+	}
+	assertFloat32SlicesNear(t, want, got, 1e-4)
+}
+
 type hipGemma4MoEWorkspaceTestDriver struct {
 	*fakeHIPDriver
+}
+
+func hipGemma4MoEWorkspaceFixture(t *testing.T, driver nativeHIPDriver, rows int) (*hipDeviceByteBuffer, *hipDeviceByteBuffer, hipGemma4Q4Layer0Config, func()) {
+	t.Helper()
+	const (
+		hidden   = 32
+		localFF  = 32
+		experts  = 2
+		topK     = 2
+		expertFF = 32
+	)
+	attentionResidual, err := hipAllocateByteBuffer(driver, "test", "attention residual", uint64(rows*hidden*4), rows*hidden)
+	core.RequireNoError(t, err)
+	localInput, err := hipAllocateByteBuffer(driver, "test", "local input", uint64(rows*hidden*4), rows*hidden)
+	core.RequireNoError(t, err)
+	expertCache := newHIPGemma4ExpertCache(driver, 1<<20)
+	gateUpBytes := uint64(2 * expertFF * (hidden / hipGGUFQ4_0BlockSize) * hipGGUFQ4_0BlockBytes)
+	downBytes := uint64(hidden * (expertFF / hipGGUFQ4_0BlockSize) * hipGGUFQ4_0BlockBytes)
+	for expert := 0; expert < experts; expert++ {
+		gateUp, allocErr := hipAllocateByteBuffer(driver, "test", "expert gate/up", gateUpBytes, int(gateUpBytes))
+		core.RequireNoError(t, allocErr)
+		down, allocErr := hipAllocateByteBuffer(driver, "test", "expert down", downBytes, int(downBytes))
+		core.RequireNoError(t, allocErr)
+		expertCache.entries[hipGemma4ExpertCacheKey{Layer: 0, Expert: expert}] = &hipGemma4ExpertCacheEntry{
+			GateUp: gateUp, Down: down,
+			GateUpRows: 2 * expertFF, GateUpCols: hidden,
+			DownRows: hidden, DownCols: expertFF,
+			GateUpFormat: hipGGUFExpertFormatQ4_0, DownFormat: hipGGUFExpertFormatQ4_0,
+			bytes: gateUpBytes + downBytes,
+		}
+	}
+	norm := hipRMSNormDeviceWeightConfig{
+		WeightPointer: 0x4000, WeightBytes: hidden * 4, Count: hidden,
+		Epsilon: 1e-6, WeightEncoding: hipRMSNormWeightEncodingF32,
+	}
+	projection := func(outputRows, cols int, pointer nativeDevicePointer) hipMLXQ4DeviceWeightConfig {
+		groups := outputRows * (cols / 32)
+		return hipMLXQ4DeviceWeightConfig{
+			WeightPointer: pointer, ScalePointer: pointer + 0x100, BiasPointer: pointer + 0x200,
+			WeightBytes: uint64(outputRows * cols / 2), ScaleBytes: uint64(groups * 2), BiasBytes: uint64(groups * 2),
+			Rows: outputRows, Cols: cols, GroupSize: 32, Bits: 4,
+		}
+	}
+	layer := hipGemma4Q4Layer0Config{
+		HiddenSize:     hidden,
+		GateProjection: projection(localFF, hidden, 0x10000),
+		UpProjection:   projection(localFF, hidden, 0x20000),
+		DownProjection: projection(hidden, localFF, 0x30000),
+		MoE: &hipGemma4MoELayerConfig{
+			Layer: 0, NumExperts: experts, TopKExperts: topK, ExpertIntermediateSize: expertFF,
+			PreFeedForwardNorm2: norm, PostFeedForwardNorm1: norm, PostFeedForwardNorm2: norm, RouterNorm: norm,
+			RouterProjection: hipGemma4MoERouterProjectionConfig{WeightPointer: 0x50000, WeightBytes: experts * hidden * 4, Rows: experts, Cols: hidden},
+			PerExpertScale:   []float32{1, 1}, ExpertCache: expertCache,
+			GateUpInfo: nativeTensorInfo{Type: hipGGUFQ4_0TensorType, TypeName: "Q4_0", Dimensions: []uint64{hidden, 2 * expertFF, experts}, ByteSize: uint64(experts) * gateUpBytes},
+			DownInfo:   nativeTensorInfo{Type: hipGGUFQ4_0TensorType, TypeName: "Q4_0", Dimensions: []uint64{expertFF, hidden, experts}, ByteSize: uint64(experts) * downBytes},
+		},
+	}
+	cleanup := func() {
+		_ = attentionResidual.Close()
+		_ = localInput.Close()
+		_ = expertCache.Close()
+	}
+	return attentionResidual, localInput, layer, cleanup
 }
 
 func (driver *hipGemma4MoEWorkspaceTestDriver) LaunchKernel(config hipKernelLaunchConfig) error {

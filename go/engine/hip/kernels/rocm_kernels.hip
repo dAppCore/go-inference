@@ -12395,8 +12395,6 @@ extern "C" __global__ void rocm_attention_heads_lane_batch(const unsigned char *
 	single.dim = args.dim;
 	single.token_count = lane.token_count;
 	single.query_bytes = args.dim * sizeof(float);
-	single.key_bytes = kv_head * args.dim;
-	single.value_bytes = kv_head * args.dim;
 	single.output_bytes = args.dim * sizeof(float);
 	single.weight_bytes = lane.token_count * sizeof(float);
 	single.kv_source = ROCM_ATTENTION_KV_SOURCE_DEVICE;
@@ -12406,6 +12404,10 @@ extern "C" __global__ void rocm_attention_heads_lane_batch(const unsigned char *
 	if (!rocm_valid_device_kv_attention_descriptor_header(single)) {
 		return;
 	}
+	// Device-KV attention reuses these fields as element offsets after the
+	// descriptor header has been validated with the canonical zero values.
+	single.key_bytes = kv_head * args.dim;
+	single.value_bytes = kv_head * args.dim;
 	const uint32_t window_start = lane.window_size > 0u && lane.token_count > lane.window_size
 		? lane.token_count - lane.window_size
 		: 0u;

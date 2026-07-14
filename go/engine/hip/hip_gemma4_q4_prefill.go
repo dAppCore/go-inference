@@ -3026,7 +3026,11 @@ func hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx context.Co
 	if err != nil {
 		return nil, err
 	}
-	out.MLPOutput, err = hipRunGemma4Q4PrefillMLPBatchWorkspaceView(ctx, driver, cfg, out.PreFeedForward, tokenCount, workspace, &out.mlpOutputView, forceBatchedProjection)
+	if cfg.MoE != nil {
+		out.MLPOutput, err = hipRunGemma4MoEDeviceMLPBatchWithWorkspace(ctx, driver, out.AttentionResidual, out.PreFeedForward, cfg, epsilon, tokenCount, workspace)
+	} else {
+		out.MLPOutput, err = hipRunGemma4Q4PrefillMLPBatchWorkspaceView(ctx, driver, cfg, out.PreFeedForward, tokenCount, workspace, &out.mlpOutputView, forceBatchedProjection)
+	}
 	if err != nil {
 		return nil, err
 	}

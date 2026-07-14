@@ -2576,7 +2576,7 @@ func (state hipGemma4Q4DecodeState) validate(cfg hipGemma4Q4ForwardConfig) error
 	}
 	for index, layerState := range state.Layers {
 		layerCfg := cfg.Layers[index]
-		if err := hipGemma4Q4ValidateKVState(layerState.Keys, layerState.Values, layerCfg.HeadDim); err != nil {
+		if err := hipGemma4Q4ValidateKVState(layerState.Keys, layerState.Values, layerCfg.keyValueDim()); err != nil {
 			return core.E(hipGemma4Q4Layer0Operation, core.Sprintf("decode state layer %d", index), err)
 		}
 	}
@@ -2603,14 +2603,14 @@ func (state hipGemma4Q4DecodeState) tokenCountForConfig(cfg hipGemma4Q4ForwardCo
 	}
 	maxTokens := 0
 	for index, layerState := range state.Layers {
-		headDim := cfg.Layers[0].HeadDim
-		if index < len(cfg.Layers) && cfg.Layers[index].HeadDim > 0 {
-			headDim = cfg.Layers[index].HeadDim
+		rowWidth := cfg.Layers[0].keyValueDim()
+		if index < len(cfg.Layers) && cfg.Layers[index].keyValueDim() > 0 {
+			rowWidth = cfg.Layers[index].keyValueDim()
 		}
-		if headDim <= 0 || len(layerState.Keys) == 0 {
+		if rowWidth <= 0 || len(layerState.Keys) == 0 {
 			continue
 		}
-		tokens := len(layerState.Keys) / headDim
+		tokens := len(layerState.Keys) / rowWidth
 		if tokens > maxTokens {
 			maxTokens = tokens
 		}

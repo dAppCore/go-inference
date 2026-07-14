@@ -982,6 +982,96 @@ func TestHIPHardwareAttentionHeadsLaneBatchIndependentKV_Good(t *testing.T) {
 	assertFloat32SlicesNear(t, want, got, 0.005)
 }
 
+func TestHIPHardwareAttentionHeadsLaneBatchMultiKVHead_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		dim        = 2
+		headCount  = 4
+		keyHeads   = 2
+		keyWidth   = dim * keyHeads
+		tokenCount = 3
+	)
+	laneKeys := [][]float32{
+		{1, 0, 0, 1, 0, 1, 1, 0, 1, 1, -1, 1},
+		{1, 1, 1, -1, 2, 0, 0, 2, 0, 1, 1, 0},
+	}
+	laneValues := [][]float32{
+		{2, 0, 0, 4, 4, 0, 0, 8, 6, 2, 3, 9},
+		{8, 8, 6, 0, 2, 6, 4, 4, 0, 10, 12, 2},
+	}
+	queryValues := []float32{
+		1, 0, 0, 1, 1, 1, -1, 1,
+		1, 1, -1, 1, 0, 1, 1, 0,
+	}
+	queryPayload, err := hipFloat32Payload(queryValues)
+	core.RequireNoError(t, err)
+	query, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsLaneBatchLaunch", "hardware multi-head lane batch query", queryPayload, len(queryValues))
+	core.RequireNoError(t, err)
+	defer query.Close()
+	output, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsLaneBatchLaunch", "hardware multi-head lane batch output", uint64(len(queryValues)*4), len(queryValues))
+	core.RequireNoError(t, err)
+	defer output.Close()
+
+	lanes := make([]hipAttentionHeadsLaneBatchLane, 0, len(laneKeys))
+	deviceCaches := make([]*rocmDeviceKVCache, 0, len(laneKeys))
+	tables := make([]*rocmDeviceKVDescriptorTable, 0, len(laneKeys))
+	defer func() {
+		for _, table := range tables {
+			_ = table.Close()
+		}
+		for _, cache := range deviceCaches {
+			_ = cache.Close()
+		}
+	}()
+	for lane := range laneKeys {
+		cache, err := newROCmKVCache(rocmKVCacheModeFP16, defaultROCmKVBlockSize)
+		core.RequireNoError(t, err)
+		core.RequireNoError(t, cache.AppendVectors(0, keyWidth, keyWidth, laneKeys[lane], laneValues[lane]))
+		deviceKV, err := cache.MirrorToDevice(hipRuntime.driver)
+		core.RequireNoError(t, err)
+		deviceCaches = append(deviceCaches, deviceKV)
+		table, err := deviceKV.KernelDescriptorTable()
+		core.RequireNoError(t, err)
+		tables = append(tables, table)
+		lanes = append(lanes, hipAttentionHeadsLaneBatchLane{DeviceKV: deviceKV, DescriptorTable: table})
+	}
+
+	core.RequireNoError(t, hipRunAttentionHeadsLaneBatchOutputFromDeviceQueryToDeviceKernel(context.Background(), hipRuntime.driver, hipAttentionHeadsLaneBatchDeviceRequest{
+		Lanes: lanes, Dim: dim, HeadCount: headCount, KeyHeads: keyHeads, Scale: 1,
+	}, query, output))
+	got, err := hipReadFloat32DeviceOutput(output, "rocm.hip.AttentionHeadsLaneBatchLaunch", "hardware multi-head lane batch output", len(queryValues))
+	core.RequireNoError(t, err)
+
+	want := make([]float32, 0, len(queryValues))
+	for lane := range laneKeys {
+		for head := 0; head < headCount; head++ {
+			keys, err := fakeROCmAttentionHeadVectors(laneKeys[lane], tokenCount, keyHeads, dim, headCount, head)
+			core.RequireNoError(t, err)
+			values, err := fakeROCmAttentionHeadVectors(laneValues[lane], tokenCount, keyHeads, dim, headCount, head)
+			core.RequireNoError(t, err)
+			queryBase := (lane*headCount + head) * dim
+			headOutput, _, err := hipReferenceSingleHeadAttentionWithScale(queryValues[queryBase:queryBase+dim], keys, values, 1)
+			core.RequireNoError(t, err)
+			want = append(want, headOutput...)
+		}
+	}
+	assertFloat32SlicesNear(t, want, got, 0.005)
+}
+
 func TestHIPHardwareRMSNormRoPEHeadsPairMatchesSeparateKernels_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
