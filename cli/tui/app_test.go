@@ -21,26 +21,48 @@ func TestAppUpdateTransitions(t *testing.T) {
 	if !a.ready {
 		t.Fatal("window size did not ready the app")
 	}
-	m, _ = a.Update(discoveredMsg{items: nil})
-	a = m.(app)
-	if a.state != statePick {
-		t.Fatalf("state = %d, want picker", a.state)
+	if a.activeTab != tabModels {
+		t.Fatalf("activeTab = %d, want Models on a pickerless start", a.activeTab)
 	}
-	// a load failure lands back on the picker with the error surfaced
+	// a load failure lands back on Models with the error surfaced
 	m, _ = a.Update(loadErrMsg{err: errFor("no backends")})
 	a = m.(app)
-	if a.state != statePick || a.errText == "" {
-		t.Fatalf("loadErr: state=%d err=%q, want picker + message", a.state, a.errText)
+	if a.activeTab != tabModels || a.errText == "" {
+		t.Fatalf("loadErr: tab=%d err=%q, want Models + message", a.activeTab, a.errText)
 	}
-	// chat-state key handling: ctrl+t flips the thinking opt-out
-	a.state = stateChat
+	// tab cycles through every pane and wraps
+	for i := 0; i < int(tabCount); i++ {
+		m, _ = a.Update(tea.KeyMsg{Type: tea.KeyTab})
+		a = m.(app)
+	}
+	if a.activeTab != tabModels {
+		t.Fatalf("tab cycle did not wrap: %d", a.activeTab)
+	}
+	// ctrl+t flips the thinking override to an explicit state
 	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
 	a = m.(app)
-	if !a.thinkingOff {
-		t.Fatal("ctrl+t did not toggle thinking off")
+	if a.cfg.thinking() == nil {
+		t.Fatal("ctrl+t left thinking on the model default")
 	}
-	if v := a.View(); !strings.Contains(v, "thinking off") {
+	if v := a.View(); !strings.Contains(v, "thinking") {
 		t.Fatalf("status line missing thinking state: %q", v)
+	}
+	// settings adjust: move to max tokens and bump it
+	a.activeTab = tabSettings
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyDown})
+	a = m.(app)
+	before := a.cfg.maxTokens()
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyRight})
+	a = m.(app)
+	if a.cfg.maxTokens() == before {
+		t.Fatal("settings right-adjust did not change max tokens")
+	}
+	// tools toggle arms declarations
+	a.activeTab = tabTools
+	m, _ = a.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	a = m.(app)
+	if !a.tools.enabled || a.tools.declarations() == "" {
+		t.Fatal("tools enter did not arm declarations")
 	}
 }
 
@@ -64,12 +86,12 @@ func TestAppLiveChatDrive(t *testing.T) {
 	}
 	m, _ = a.Update(loaded)
 	a = m.(app)
-	if a.state != stateChat {
-		t.Fatalf("state = %d, want chat", a.state)
+	if a.activeTab != tabChat || a.model == nil {
+		t.Fatalf("tab = %d model=%v, want chat + loaded", a.activeTab, a.model != nil)
 	}
 	defer a.model.Close()
 
-	a.thinkingOff = true // deterministic short answers for the drive
+	a.cfg.thinkIdx = 2 // thinking off — deterministic short answers for the drive
 	a.input.SetValue("Say hello in exactly two words.")
 	m, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	a = m.(app)

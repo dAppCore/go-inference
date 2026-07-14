@@ -33,10 +33,9 @@ type generation struct {
 
 // startGeneration launches m.Chat on its own goroutine, splitting the raw
 // stream through the family-aware reasoning parser (thinking → thought deltas,
-// the rest → visible deltas). Fully greedy is NOT forced — the TUI serves the
-// model's declared sampling defaults; thinkingOff opts the turn out of the
-// gemma4 thinking default (#1847).
-func startGeneration(model inference.TextModel, history []inference.Message, maxTokens int, thinkingOff bool) *generation {
+// the rest → visible deltas). genOpts carries the Modes preset + Settings
+// overrides; the metrics sink is appended here so every turn reports tok/s.
+func startGeneration(model inference.TextModel, history []inference.Message, genOpts []inference.GenerateOption) *generation {
 	ctx, cancel := context.WithCancel(context.Background())
 	g := &generation{cancel: cancel, events: make(chan streamEvent, 64)}
 
@@ -47,17 +46,11 @@ func startGeneration(model inference.TextModel, history []inference.Message, max
 		parser.HintFromInference(model.Info()),
 	)
 
-	opts := []inference.GenerateOption{
-		inference.WithMaxTokens(maxTokens),
-		inference.WithMetricsSink(func(gm inference.GenerateMetrics) {
-			m := gm
-			g.events <- streamEvent{metrics: &m}
-		}),
-	}
-	if thinkingOff {
-		off := false
-		opts = append(opts, inference.WithEnableThinking(&off))
-	}
+	opts := append([]inference.GenerateOption{}, genOpts...)
+	opts = append(opts, inference.WithMetricsSink(func(gm inference.GenerateMetrics) {
+		m := gm
+		g.events <- streamEvent{metrics: &m}
+	}))
 
 	go func() {
 		defer close(g.events)

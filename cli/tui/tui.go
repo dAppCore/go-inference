@@ -33,11 +33,9 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		// (or loading) view straight to stdout. Proves the UI constructs and
 		// renders without a display — the CI-shaped receipt.
 		frame, _ := a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
-		if a.state == statePick {
-			// run the discover pass synchronously so the receipt shows the
-			// real picker content, not an empty list
-			frame, _ = frame.Update(discoverModels())
-		}
+		// run the discover pass synchronously so the receipt shows the real
+		// Models tab content, not an empty list
+		frame, _ = frame.Update(discoverModels())
 		core.WriteString(stdout, frame.View()+"\n")
 		return 0
 	}
