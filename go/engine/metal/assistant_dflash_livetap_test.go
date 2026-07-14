@@ -91,6 +91,45 @@ func wantAuxRows(t testing.TB, mk func() *ArchSession, ids []int32, auxLayers []
 	return want
 }
 
+// wantAuxRowsReencode is the same reference on the RE-ENCODE route: a fresh session
+// forwards ids token by token through StepWithID (which drives stepToken under
+// icbDisabledForTest) with the per-layer capture armed — exactly ForwardCaptureHiddens'
+// non-ICB branch — and returns the boundary token's hidden at each aux layer. The
+// caller must have icbDisabledForTest set.
+func wantAuxRowsReencode(t testing.TB, mk func() *ArchSession, ids []int32, auxLayers []int) [][]byte {
+	t.Helper()
+	s := mk()
+	defer func() { _ = s.Close() }()
+	prevFlag, prevCap := captureLayerHiddens, capturedLayerHiddens
+	captureLayerHiddens = true
+	capturedLayerHiddens = nil
+	defer func() { captureLayerHiddens = prevFlag; capturedLayerHiddens = prevCap }()
+	for _, id := range ids {
+		emb, err := s.embedID(id)
+		if err != nil {
+			t.Fatalf("embedID(%d): %v", id, err)
+		}
+		if _, err := s.StepWithID(id, emb); err != nil {
+			t.Fatalf("StepWithID(%d): %v", id, err)
+		}
+	}
+	N, T := dfltLayers, len(ids)
+	if len(capturedLayerHiddens) != T*N {
+		t.Fatalf("re-encode reference captured %d entries, want %d (T=%d × N=%d)", len(capturedLayerHiddens), T*N, T, N)
+	}
+	rowBytes := dfltDModel * bf16Size
+	last := T - 1
+	want := make([][]byte, len(auxLayers))
+	for i, layer := range auxLayers {
+		row := capturedLayerHiddens[last*N+layer]
+		if len(row) != rowBytes {
+			t.Fatalf("re-encode reference row for layer %d is %d bytes, want %d", layer, len(row), rowBytes)
+		}
+		want[i] = append([]byte(nil), row...)
+	}
+	return want
+}
+
 // TestExtractAuxHiddensLiveParityICB gates the live tap on the recorded-ICB replay
 // path (the serving default for non-MoE targets): the tapped boundary hiddens are
 // byte-identical to ForwardCaptureHiddens' capture of the same token.
@@ -117,8 +156,15 @@ func TestExtractAuxHiddensLiveParityICB(t *testing.T) {
 	}
 }
 
-// TestExtractAuxHiddensLiveParityReencode gates the same parity on the re-encode
-// path (stepToken + captureLayerHiddens) by disabling the ICB replay.
+// TestExtractAuxHiddensLiveParityReencode gates parity on the re-encode path
+// (stepToken + captureLayerHiddens) by disabling the ICB replay. The reference
+// must be captured on the SAME route: ForwardCaptureHiddens picks its route by
+// s.state.icb != nil ALONE (it ignores icbDisabledForTest), so it would stay on
+// the ICB route while this decode is re-encode — a cross-route comparison that
+// diverges whenever ICB != re-encode for the model (metallib-dependent). In
+// production the two never diverge (icbDisabledForTest is always false, so the tap
+// and ForwardCaptureHiddens always agree on route); the flag is a test-only lever,
+// so the reference here re-encodes too — a full-sequence stepToken capture.
 func TestExtractAuxHiddensLiveParityReencode(t *testing.T) {
 	requireNativeRuntime(t)
 	prev := icbDisabledForTest
@@ -137,9 +183,9 @@ func TestExtractAuxHiddensLiveParityReencode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ExtractAuxHiddensLive: %v", err)
 	}
-	want := wantAuxRows(t, mk, ids, auxLayers)
+	want := wantAuxRowsReencode(t, mk, ids, auxLayers)
 	for i := range want {
-		eqBytes(t, "re-encode live tap aux hidden vs ForwardCaptureHiddens", got[i], want[i])
+		eqBytes(t, "re-encode live tap aux hidden vs re-encode capture", got[i], want[i])
 	}
 }
 
