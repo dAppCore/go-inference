@@ -167,6 +167,33 @@ func (p *InferenceProvider) Describe() []coreapi.RouteDescription {
 			"usage": usageSchema,
 		},
 	}
+	messagesBody := map[string]any{
+		"type":     "object",
+		"required": []string{"model", "messages"},
+		"properties": map[string]any{
+			"model": map[string]any{"type": "string", "description": "cosmetic on a single-model serve — the loaded model answers every name"},
+			"messages": map[string]any{"type": "array", "items": map[string]any{
+				"type":     "object",
+				"required": []string{"role"},
+				"properties": map[string]any{
+					"role":    map[string]any{"type": "string"},
+					"content": map[string]any{"description": "string shorthand, or an array of typed content blocks"},
+				},
+			}},
+			"max_tokens":  map[string]any{"type": "integer"},
+			"temperature": map[string]any{"type": "number"},
+			"top_p":       map[string]any{"type": "number"},
+			"stream":      map[string]any{"type": "boolean"},
+			"thinking": map[string]any{
+				"type":        "object",
+				"description": "extended-thinking control: {\"type\":\"enabled\",\"budget_tokens\":N} or {\"type\":\"disabled\"}",
+				"properties": map[string]any{
+					"type":          map[string]any{"type": "string"},
+					"budget_tokens": map[string]any{"type": "integer"},
+				},
+			},
+		},
+	}
 	messagesResponse := map[string]any{
 		"type":     "object",
 		"required": []string{"id", "type", "role", "content"},
@@ -177,8 +204,9 @@ func (p *InferenceProvider) Describe() []coreapi.RouteDescription {
 			"content": map[string]any{"type": "array", "items": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"type": map[string]any{"type": "string"},
-					"text": map[string]any{"type": "string"},
+					"type":     map[string]any{"type": "string"},
+					"text":     map[string]any{"type": "string"},
+					"thinking": map[string]any{"type": "string", "description": "the reasoning channel — a typed thinking block precedes the text block on thinking models"},
 				},
 			}},
 			"model":       map[string]any{"type": "string"},
@@ -236,7 +264,7 @@ func (p *InferenceProvider) Describe() []coreapi.RouteDescription {
 			Summary:     "Create a messages completion",
 			Description: "Capacity-gated Anthropic-style messages completion, proxied to the active driver.",
 			Tags:        []string{"inference"},
-			RequestBody: chatBody,
+			RequestBody: messagesBody,
 			Response:    messagesResponse,
 			ResponseRaw: true,
 		},

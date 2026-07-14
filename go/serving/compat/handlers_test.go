@@ -449,3 +449,88 @@ func TestOpenAIResponsesHandler_Streaming_Good(t *testing.T) {
 		t.Fatalf("stream /v1/responses body = %s, want SSE data frames with content", body)
 	}
 }
+
+// thinkingFakeModel streams a gemma4 thought channel ahead of the answer —
+// the fixture for the typed thinking-block shape on /v1/messages.
+func thinkingFakeModel() *fakeTextModel {
+	m := newFakeTextModel()
+	m.tokens = []inference.Token{
+		{ID: 1, Text: "<|channel>thought\nponder deeply<channel|>"},
+		{ID: 2, Text: "The answer."},
+	}
+	return m
+}
+
+// doWith issues one request against a mux holding the given model.
+func doWith(t *testing.T, model inference.TextModel, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	NewMux(openaicompat.NewStaticResolver(map[string]inference.TextModel{"test-model": model})).ServeHTTP(rec, req)
+	return rec
+}
+
+// TestAnthropicMessagesHandler_Good_ThinkingBlock pins the typed reasoning
+// shape on non-streaming /v1/messages: the thought channel arrives as a
+// leading {"type":"thinking"} content block and the text block carries ONLY
+// the visible answer — it used to leak the reasoning into the text block
+// (handover 2026-07-18b follow-up).
+func TestAnthropicMessagesHandler_Good_ThinkingBlock(t *testing.T) {
+	rec := doWith(t, thinkingFakeModel(), http.MethodPost, "/v1/messages",
+		`{"model":"test-model","max_tokens":128,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /v1/messages = %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Content []struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			Thinking string `json:"thinking"`
+		} `json:"content"`
+	}
+	if res := core.JSONUnmarshal(rec.Body.Bytes(), &resp); !res.OK {
+		t.Fatalf("decode: %v (body: %s)", res.Error(), rec.Body.String())
+	}
+	if len(resp.Content) != 2 {
+		t.Fatalf("content blocks = %d, want thinking + text (body: %s)", len(resp.Content), rec.Body.String())
+	}
+	if resp.Content[0].Type != "thinking" || !core.Contains(resp.Content[0].Thinking, "ponder deeply") {
+		t.Fatalf("block 0 = %+v, want the thinking block", resp.Content[0])
+	}
+	if resp.Content[1].Type != "text" || resp.Content[1].Text != "The answer." {
+		t.Fatalf("block 1 = %+v, want the clean text answer", resp.Content[1])
+	}
+	if core.Contains(resp.Content[1].Text, "ponder") {
+		t.Fatal("reasoning leaked into the text block")
+	}
+}
+
+// TestAnthropicMessagesHandler_Good_ThinkingStream pins the streamed shape:
+// a thinking block opens at index 0 (thinking_delta events), closes when the
+// answer begins, and the text block takes index 1 — the real Anthropic
+// extended-thinking event sequence.
+func TestAnthropicMessagesHandler_Good_ThinkingStream(t *testing.T) {
+	rec := doWith(t, thinkingFakeModel(), http.MethodPost, "/v1/messages",
+		`{"model":"test-model","max_tokens":128,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stream /v1/messages = %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		`"content_block":{"type":"thinking","thinking":""}`,
+		`"type":"thinking_delta"`,
+		`"index":1,"content_block":{"type":"text","text":""}`,
+		`"type":"text_delta"`,
+	} {
+		if !core.Contains(body, want) {
+			t.Fatalf("stream missing %q:\n%s", want, body)
+		}
+	}
+	if core.Index(body, "thinking_delta") > core.Index(body, "text_delta") {
+		t.Fatal("thinking must stream before the text block")
+	}
+	if core.Contains(body, `"type":"text_delta","text":"`+"\\n"+`ponder`) || core.Contains(body, `text_delta","text":"ponder`) {
+		t.Fatal("reasoning leaked into text deltas")
+	}
+}

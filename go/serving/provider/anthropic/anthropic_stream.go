@@ -58,6 +58,33 @@ func AppendContentBlockStartEvent(buf []byte, index int) []byte {
 	return append(buf, '}')
 }
 
+// AppendContentBlockStartThinkingEvent opens a thinking content block at
+// index — the typed reasoning channel, streamed BEFORE the text block exactly
+// as the real Anthropic API shapes extended thinking:
+//
+//	{"type":"content_block_start","index":N,"content_block":{"type":"thinking","thinking":""}}
+func AppendContentBlockStartThinkingEvent(buf []byte, index int) []byte {
+	buf = append(buf, '{')
+	buf = jsonenc.AppendStringField(buf, "type", "content_block_start", false)
+	buf = jsonenc.AppendIntField(buf, "index", index, true)
+	buf = append(buf, `,"content_block":{"type":"thinking","thinking":""}`...)
+	return append(buf, '}')
+}
+
+// AppendThinkingDeltaEvent emits one reasoning delta on the thinking block —
+// the per-token hot path while the model thinks:
+//
+//	{"type":"content_block_delta","index":N,"delta":{"type":"thinking_delta","thinking":"…"}}
+func AppendThinkingDeltaEvent(buf []byte, index int, thinking string) []byte {
+	buf = append(buf, '{')
+	buf = jsonenc.AppendStringField(buf, "type", "content_block_delta", false)
+	buf = jsonenc.AppendIntField(buf, "index", index, true)
+	buf = append(buf, `,"delta":{`...)
+	buf = jsonenc.AppendStringField(buf, "type", "thinking_delta", false)
+	buf = jsonenc.AppendStringField(buf, "thinking", thinking, true)
+	return append(buf, '}', '}')
+}
+
 // AppendContentBlockDeltaEvent emits one `content_block_delta` payload — the
 // per-token hot path:
 //

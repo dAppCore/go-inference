@@ -20,10 +20,18 @@ const DefaultMessagesPath = "/v1/messages"
 type ContentBlock struct {
 	Type      string         `json:"type"`
 	Text      string         `json:"text,omitempty"`
+	Thinking  string         `json:"thinking,omitempty"` // thinking -> the reasoning channel, split from text
 	ID        string         `json:"id,omitempty"`
 	Name      string         `json:"name,omitempty"`
 	Input     map[string]any `json:"input,omitempty"`
 	ToolUseID string         `json:"tool_use_id,omitempty"` // tool_result -> the tool_use it answers
+}
+
+// ThinkingBlock builds one Anthropic thinking content block — the typed home
+// for the reasoning channel, emitted BEFORE the text/tool_use blocks exactly
+// as the real Anthropic API shapes extended thinking.
+func ThinkingBlock(thinking string) ContentBlock {
+	return ContentBlock{Type: "thinking", Thinking: thinking}
 }
 
 // ToolUseBlock builds one Anthropic tool_use content block from a parsed call.
@@ -80,6 +88,16 @@ type MessageRequest struct {
 	// ToolChoice controls whether/which of Tools the model is offered this turn
 	// — see toolchoice.go.
 	ToolChoice *ToolChoice `json:"tool_choice,omitempty"`
+	// Thinking is the Anthropic extended-thinking control:
+	// {"type":"enabled","budget_tokens":N} or {"type":"disabled"}. Mapped to
+	// the engine's thinking override + budget by GenerateOptions.
+	Thinking *ThinkingConfig `json:"thinking,omitempty"`
+}
+
+// ThinkingConfig is the Anthropic `thinking` request object.
+type ThinkingConfig struct {
+	Type         string `json:"type"` // "enabled" | "disabled"
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
 }
 
 // Usage records Anthropic-style token accounting.
@@ -178,6 +196,9 @@ func MessageResponseSize(r MessageResponse) int {
 		if b.Text != "" {
 			size += 6 + 4 + len(b.Text) // ,"text":"X"
 		}
+		if b.Thinking != "" {
+			size += 6 + 8 + len(b.Thinking) // ,"thinking":"X"
+		}
 		size += 1 // closing brace }
 		if i > 0 {
 			size += 1 // , separator between blocks
@@ -205,6 +226,9 @@ func appendContentBlock(buf []byte, b ContentBlock) []byte {
 	buf = jsonenc.AppendStringField(buf, "type", b.Type, false)
 	if b.Text != "" {
 		buf = jsonenc.AppendStringField(buf, "text", b.Text, true)
+	}
+	if b.Thinking != "" {
+		buf = jsonenc.AppendStringField(buf, "thinking", b.Thinking, true)
 	}
 	return append(buf, '}')
 }
@@ -406,18 +430,42 @@ func GenerateOptions(req MessageRequest) []inference.GenerateOption {
 	if req.TopK != nil {
 		opts = append(opts, inference.WithTopK(*req.TopK))
 	}
+	// The Anthropic thinking object maps onto the engine's reasoning override:
+	// enabled/disabled → WithEnableThinking, and an enabled budget bounds the
+	// thought channel — real Anthropic clients cannot send vendor kwargs, so
+	// this field is their only thinking control.
+	if req.Thinking != nil {
+		switch req.Thinking.Type {
+		case "enabled":
+			on := true
+			opts = append(opts, inference.WithEnableThinking(&on))
+			if req.Thinking.BudgetTokens > 0 {
+				opts = append(opts, inference.WithThinkingBudget(req.Thinking.BudgetTokens))
+			}
+		case "disabled":
+			off := false
+			opts = append(opts, inference.WithEnableThinking(&off))
+		}
+	}
 	return opts
 }
 
 // NewTextResponse builds a text response from shared inference metrics.
 func NewTextResponse(id, model, text string, metrics inference.GenerateMetrics) MessageResponse {
+	return NewContentResponse(id, model, []ContentBlock{{Type: "text", Text: text}}, "end_turn", metrics)
+}
+
+// NewContentResponse builds a response around caller-assembled content blocks
+// (thinking + text, thinking + tool_use, …) — the general constructor the
+// text/tool wrappers delegate to.
+func NewContentResponse(id, model string, blocks []ContentBlock, stopReason string, metrics inference.GenerateMetrics) MessageResponse {
 	return MessageResponse{
 		ID:         id,
 		Type:       "message",
 		Role:       "assistant",
 		Model:      model,
-		Content:    []ContentBlock{{Type: "text", Text: text}},
-		StopReason: "end_turn",
+		Content:    blocks,
+		StopReason: stopReason,
 		Usage: Usage{
 			InputTokens:  metrics.PromptTokens,
 			OutputTokens: metrics.GeneratedTokens,

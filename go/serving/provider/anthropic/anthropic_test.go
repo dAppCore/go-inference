@@ -382,3 +382,65 @@ func TestAnthropic_MessageRequestSize_Ugly(t *testing.T) {
 		t.Fatalf("MessageRequestSize=%d < actual %d", predicted, actual)
 	}
 }
+
+// TestGenerateOptions_Thinking pins the Anthropic thinking-object mapping:
+// enabled arms the engine override (+ budget), disabled forces it off, and an
+// absent object leaves the model default in charge — the only thinking
+// control a real Anthropic client has.
+func TestGenerateOptions_Thinking(t *testing.T) {
+	on := inference.ApplyGenerateOpts(GenerateOptions(MessageRequest{
+		MaxTokens: 8, Thinking: &ThinkingConfig{Type: "enabled", BudgetTokens: 512},
+	}))
+	if on.EnableThinking == nil || !*on.EnableThinking {
+		t.Fatalf("enabled: EnableThinking = %v, want true", on.EnableThinking)
+	}
+	if on.ThinkingBudget != 512 {
+		t.Fatalf("enabled: ThinkingBudget = %d, want 512", on.ThinkingBudget)
+	}
+	off := inference.ApplyGenerateOpts(GenerateOptions(MessageRequest{
+		MaxTokens: 8, Thinking: &ThinkingConfig{Type: "disabled"},
+	}))
+	if off.EnableThinking == nil || *off.EnableThinking {
+		t.Fatalf("disabled: EnableThinking = %v, want false", off.EnableThinking)
+	}
+	unset := inference.ApplyGenerateOpts(GenerateOptions(MessageRequest{MaxTokens: 8}))
+	if unset.EnableThinking != nil {
+		t.Fatalf("absent: EnableThinking = %v, want nil (model default)", unset.EnableThinking)
+	}
+}
+
+// TestJsondec_MessageRequest_Thinking pins the request decode of the
+// extended-thinking object through the hand-rolled decoder.
+func TestJsondec_MessageRequest_Thinking(t *testing.T) {
+	var r MessageRequest
+	in := `{"model":"gemma4","max_tokens":64,"thinking":{"type":"enabled","budget_tokens":2048},"messages":[{"role":"user","content":"hi"}]}`
+	if err := r.UnmarshalJSON([]byte(in)); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if r.Thinking == nil || r.Thinking.Type != "enabled" || r.Thinking.BudgetTokens != 2048 {
+		t.Fatalf("Thinking = %+v, want enabled/2048", r.Thinking)
+	}
+}
+
+// TestAppendMessageResponse_ThinkingBlock pins the hand-rolled encoder on a
+// thinking + text response: the thinking field survives the round trip and
+// the pre-sized buffer holds it in one allocation-class estimate.
+func TestAppendMessageResponse_ThinkingBlock(t *testing.T) {
+	resp := NewContentResponse("msg_1", "gemma4",
+		[]ContentBlock{ThinkingBlock("ponder"), {Type: "text", Text: "answer"}},
+		"end_turn", inference.GenerateMetrics{PromptTokens: 3, GeneratedTokens: 5})
+	buf := AppendMessageResponse(make([]byte, 0, MessageResponseSize(resp)), resp)
+	var back MessageResponse
+	if res := core.JSONUnmarshal(buf, &back); !res.OK {
+		t.Fatalf("round trip: %v (%s)", res.Error(), buf)
+	}
+	if len(back.Content) != 2 || back.Content[0].Type != "thinking" || back.Content[0].Thinking != "ponder" {
+		t.Fatalf("content = %+v, want the thinking block first", back.Content)
+	}
+	if back.Content[1].Text != "answer" {
+		t.Fatalf("text block = %+v", back.Content[1])
+	}
+	if len(buf) > MessageResponseSize(resp) {
+		t.Fatalf("encoded %d bytes exceeds the size estimate %d", len(buf), MessageResponseSize(resp))
+	}
+}

@@ -267,3 +267,16 @@ func TestStaticStreamPayloads_Good(t *testing.T) {
 		t.Fatalf("PingPayload decode = %+v, err %v", ping, err)
 	}
 }
+
+// TestAppendThinkingStreamEvents pins the two extended-thinking SSE payloads:
+// the thinking block open and the per-token thinking_delta.
+func TestAppendThinkingStreamEvents(t *testing.T) {
+	start := string(AppendContentBlockStartThinkingEvent(nil, 0))
+	if start != `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}` {
+		t.Fatalf("thinking start payload = %s", start)
+	}
+	delta := string(AppendThinkingDeltaEvent(nil, 0, `he said "why?"`))
+	if delta != `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"he said \"why?\""}}` {
+		t.Fatalf("thinking delta payload = %s", delta)
+	}
+}

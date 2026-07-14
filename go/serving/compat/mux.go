@@ -694,12 +694,19 @@ func (h *anthropicMessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		writeOpenAIError(w, http.StatusInternalServerError, result.Error(), "model")
 		return
 	}
-	visible, _ := parseOpenAIModelOutput(model, tokens, openAITokensText(tokens))
+	visible, thought := parseOpenAIModelOutput(model, tokens, openAITokensText(tokens))
+	// The reasoning channel becomes a typed thinking block AHEAD of the
+	// text/tool blocks — the real Anthropic extended-thinking shape (it used
+	// to leak into the text block; handover 2026-07-18b follow-up).
+	var leading []anthropiccompat.ContentBlock
+	if thought = core.Trim(thought); thought != "" {
+		leading = append(leading, anthropiccompat.ThinkingBlock(thought))
+	}
 	// A turn that emitted <|tool_call> spans returns tool_use blocks +
 	// stop_reason:"tool_use" — the shape Claude Code reads to run the tools and
 	// reply with tool_result. Any leading prose becomes a text block first.
 	if calls, clean := parser.ParseGemmaToolCalls(visible); len(calls) > 0 {
-		var blocks []anthropiccompat.ContentBlock
+		blocks := leading
 		if clean = core.Trim(clean); clean != "" {
 			blocks = append(blocks, anthropiccompat.ContentBlock{Type: "text", Text: clean})
 		}
@@ -709,7 +716,8 @@ func (h *anthropicMessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		writeOpenAIJSON(w, http.StatusOK, anthropiccompat.NewToolUseResponse(anthropicMessageID(), req.Model, blocks, model.Metrics()))
 		return
 	}
-	response := anthropiccompat.NewTextResponse(anthropicMessageID(), req.Model, openaicompat.TruncateAtStopSequence(visible, stops), model.Metrics())
+	blocks := append(leading, anthropiccompat.ContentBlock{Type: "text", Text: openaicompat.TruncateAtStopSequence(visible, stops)})
+	response := anthropiccompat.NewContentResponse(anthropicMessageID(), req.Model, blocks, "end_turn", model.Metrics())
 	writeOpenAIJSON(w, http.StatusOK, response)
 }
 
@@ -743,29 +751,66 @@ func serveAnthropicMessageStream(w http.ResponseWriter, ctx context.Context, mod
 			flusher.Flush()
 		}
 	}
-	// The text block (index 0) opens lazily on the first visible delta, so a turn
-	// that is purely a tool call emits no empty text block and its tool_use lands
-	// at index 0 (matching the Anthropic API). writeDelta opens it on demand.
-	textBlockOpen := false
-	writeDelta := func(text string) {
-		if !textBlockOpen {
+	// Content blocks open lazily and take the next free index: a thinking
+	// block first when the model reasons (the typed channel — real Anthropic
+	// extended-thinking shape), then the text block on the first visible
+	// delta, so a purely-tool turn still lands its tool_use at index 0.
+	nextBlock := 0
+	thinkingIdx, textIdx := -1, -1
+	thinkingOpen := false
+	writeThinkingDelta := func(text string) {
+		if textIdx >= 0 {
+			return // the answer already started — never reopen the channel behind it
+		}
+		if thinkingIdx < 0 {
+			thinkingIdx = nextBlock
+			nextBlock++
 			writeEventBytes("content_block_start", func(b []byte) []byte {
-				return anthropiccompat.AppendContentBlockStartEvent(b, 0)
+				return anthropiccompat.AppendContentBlockStartThinkingEvent(b, thinkingIdx)
 			})
-			textBlockOpen = true
+			thinkingOpen = true
 		}
 		writeEventBytes("content_block_delta", func(b []byte) []byte {
-			return anthropiccompat.AppendContentBlockDeltaEvent(b, 0, text)
+			return anthropiccompat.AppendThinkingDeltaEvent(b, thinkingIdx, text)
+		})
+	}
+	closeThinking := func() {
+		if thinkingOpen {
+			writeEventBytes("content_block_stop", func(b []byte) []byte {
+				return anthropiccompat.AppendContentBlockStopEvent(b, thinkingIdx)
+			})
+			thinkingOpen = false
+		}
+	}
+	writeDelta := func(text string) {
+		if textIdx < 0 {
+			closeThinking() // the reasoning channel ends where the answer begins
+			textIdx = nextBlock
+			nextBlock++
+			writeEventBytes("content_block_start", func(b []byte) []byte {
+				return anthropiccompat.AppendContentBlockStartEvent(b, textIdx)
+			})
+		}
+		writeEventBytes("content_block_delta", func(b []byte) []byte {
+			return anthropiccompat.AppendContentBlockDeltaEvent(b, textIdx, text)
 		})
 	}
 	// Full Anthropic streaming sequence — Claude Code's parser requires it:
-	// message_start → [content_block_start(text) content_block_delta*
+	// message_start → [content_block_start(thinking) thinking_delta*
+	// content_block_stop] → [content_block_start(text) content_block_delta*
 	// content_block_stop] → [content_block_start(tool_use) input_json_delta
 	// content_block_stop]* → message_delta (stop_reason + usage) → message_stop.
 	writeEventBytes("message_start", func(b []byte) []byte {
 		return anthropiccompat.AppendMessageStartEvent(b, anthropiccompat.MessageResponse{ID: messageID, Type: "message", Role: "assistant", Model: req.Model})
 	})
-	processor := parser.NewProcessor(parser.Config{Mode: parser.Capture}, parser.HintFromInference(model.Info()))
+	processor := parser.NewProcessor(parser.Config{
+		Mode: parser.Capture,
+		Capture: func(c inference.ThinkingChunk) {
+			if c.Text != "" {
+				writeThinkingDelta(c.Text)
+			}
+		},
+	}, parser.HintFromInference(model.Info()))
 	stopReason := "end_turn"
 	// raw accumulates every processed delta so a <|tool_call> span can be lifted
 	// into tool_use blocks after generation; once the open marker appears the
@@ -840,24 +885,22 @@ func serveAnthropicMessageStream(w http.ResponseWriter, ctx context.Context, mod
 			writeDelta(tail)
 		}
 	}
-	if textBlockOpen {
+	closeThinking() // a pure-thought turn (budget exhausted mid-reasoning) still closes its block
+	if textIdx >= 0 {
 		writeEventBytes("content_block_stop", func(b []byte) []byte {
-			return anthropiccompat.AppendContentBlockStopEvent(b, 0)
+			return anthropiccompat.AppendContentBlockStopEvent(b, textIdx)
 		})
 	}
 	// Lift any <|tool_call> spans into tool_use blocks — content_block_start
 	// (tool_use) → input_json_delta (the whole arguments object) →
-	// content_block_stop — indexed after the text block, or at 0 for a pure
-	// tool-call turn. stop_reason flips to tool_use so Claude Code runs the tools.
+	// content_block_stop — indexed after the thinking/text blocks, or at 0 for
+	// a pure tool-call turn. stop_reason flips to tool_use so Claude Code runs
+	// the tools.
 	switch calls, _ := parser.ParseGemmaToolCalls(rawOut.String()); {
 	case len(calls) > 0:
 		stopReason = "tool_use"
-		toolIndex := 0
-		if textBlockOpen {
-			toolIndex = 1
-		}
 		for i, c := range calls {
-			idx, id, name, args := toolIndex+i, idWithPrefix("toolu"), c.Name, c.ArgumentsJSON
+			idx, id, name, args := nextBlock+i, idWithPrefix("toolu"), c.Name, c.ArgumentsJSON
 			writeEventBytes("content_block_start", func(b []byte) []byte {
 				return anthropiccompat.AppendContentBlockStartToolUseEvent(b, idx, id, name)
 			})
@@ -868,14 +911,15 @@ func serveAnthropicMessageStream(w http.ResponseWriter, ctx context.Context, mod
 				return anthropiccompat.AppendContentBlockStopEvent(b, idx)
 			})
 		}
-	case !textBlockOpen:
+	case textIdx < 0:
 		// Empty completion — emit a well-formed empty text block so the sequence
 		// still carries one content block.
+		emptyIdx := nextBlock
 		writeEventBytes("content_block_start", func(b []byte) []byte {
-			return anthropiccompat.AppendContentBlockStartEvent(b, 0)
+			return anthropiccompat.AppendContentBlockStartEvent(b, emptyIdx)
 		})
 		writeEventBytes("content_block_stop", func(b []byte) []byte {
-			return anthropiccompat.AppendContentBlockStopEvent(b, 0)
+			return anthropiccompat.AppendContentBlockStopEvent(b, emptyIdx)
 		})
 	}
 	generatedTokens := model.Metrics().GeneratedTokens

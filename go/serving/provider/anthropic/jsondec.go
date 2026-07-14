@@ -151,6 +151,23 @@ func (r *MessageRequest) unmarshalField(data []byte, i int, key []byte) (int, er
 		}
 		r.ToolChoice = &choice
 		return end, nil
+	case "thinking":
+		// The extended-thinking control ({"type":"enabled","budget_tokens":N} |
+		// {"type":"disabled"}) — a small, cold object; reflect-decode the span
+		// like tools/tool_choice.
+		if jsonenc.IsJSONNull(data, i) {
+			return i + 4, nil
+		}
+		end, err := jsonenc.SkipJSONValue(data, i)
+		if err != nil {
+			return end, err
+		}
+		var thinking ThinkingConfig
+		if res := core.JSONUnmarshal(data[i:end], &thinking); !res.OK {
+			return end, res.Err()
+		}
+		r.Thinking = &thinking
+		return end, nil
 	case "max_tokens":
 		n, next, err := jsonenc.ParseJSONInt(data, i)
 		if err != nil {
@@ -553,6 +570,16 @@ func parseContentBlock(data []byte, i int) (ContentBlock, int, error) {
 				return block, vnext, verr
 			}
 			block.Text = s
+			i = vnext
+		case "thinking":
+			// thinking -> the typed reasoning channel (round-trips the block
+			// the response encoder emits; requests replaying history may carry
+			// it too).
+			s, vnext, verr := jsonenc.ParseJSONString(data, i)
+			if verr != nil {
+				return block, vnext, verr
+			}
+			block.Thinking = s
 			i = vnext
 		case "tool_use_id":
 			// tool_result -> the id of the tool_use it answers.
