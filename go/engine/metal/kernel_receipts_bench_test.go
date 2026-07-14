@@ -111,8 +111,8 @@ func qmvWeightBytes(outDim, inDim, groupSize int) (wq, scales, biases int64) {
 func BenchmarkKernelReceipt_QMV(b *testing.B) {
 	const gs, bits = 64, 4
 	shapes := []struct {
-		name           string
-		inDim, outDim  int
+		name          string
+		inDim, outDim int
 	}{
 		{"attnQ_2816x4096", 2816, 4096},
 		{"attnKV_2816x2048", 2816, 2048},
