@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>LemExample</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The client is GENERATED locally by `task sdk` (build/sdk is
+         gitignored) — a published SDK would be a normal PackageReference. -->
+    <ProjectReference Include="../../../build/sdk/csharp/src/Lethean.LemSdk/Lethean.LemSdk.csproj" />
+  </ItemGroup>
+</Project>

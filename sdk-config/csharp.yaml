@@ -1,0 +1,6 @@
+generatorName: csharp
+additionalProperties:
+  packageName: Lethean.LemSdk
+  library: httpclient
+  targetFramework: net8.0
+  nullableReferenceTypes: true

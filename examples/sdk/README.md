@@ -3,7 +3,7 @@
 `lem spec` exports go-inference's HTTP surface as an OpenAPI 3.1 document, and
 [openapi-generator](https://openapi-generator.tech/docs/generators) turns that
 document into a typed client in **any of its ~90 languages** — SDKs for free,
-no hand-written client code. The fifteen lanes here are the proof: the same
+no hand-written client code. The sixteen lanes here are the proof: the same
 API driven past hello world (models, a two-turn conversation that proves
 memory, the thinking toggle, token usage, friendly errors) through one
 generated client per language, each run LIVE against a local `lem serve`.
@@ -48,6 +48,7 @@ Every example reads `LEM_BASE_URL` (default `http://localhost:36911`).
 | Ruby | [`ruby/`](ruby/) | `bundle install --path vendor/bundle && bundle exec ruby main.rb` |
 | Perl | [`perl/`](perl/) | `cpanm -l local Log::Any URI::Query && perl main.pl` |
 | C | [`c/`](c/) | see its README — the generator's output needs `postgen-fix.sh` first |
+| C# | [`csharp/`](csharp/) | `DOTNET_ROLL_FORWARD=LatestMajor dotnet run` — typed `response.Thought` end to end |
 | Bash | [`bash/`](bash/) | `./chat.sh` — the generated curl client, no runtime at all |
 | IDE (.http) | [`http-client/`](http-client/) | open `lem.http` in an IntelliJ-family IDE, or `ijhttp` |
 
@@ -59,6 +60,7 @@ override, `/v1/messages` rejecting Anthropic's string-content shorthand,
 the spec mis-placing `thought` under `message` when the wire puts it on the
 response root, and multi-tagged routes generating duplicate Go types.
 
-Deferred: **C#** (`dotnet-sdk` needs an interactive install on this machine) —
-drop a `sdk-config/csharp.yaml` and follow the pattern when the toolchain is
-present.
+All sixteen planned lanes are live — the C# lane joined once `dotnet-sdk`
+was installed, and being generated after the spec fixes it was the first
+with the thinking channel fully typed (`response.Thought`), no raw-JSON
+workaround.
