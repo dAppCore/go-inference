@@ -103,10 +103,19 @@ func TestStateWakeLanding_Q8(t *testing.T) {
 }
 
 // TestProbeStateWakeParity (LTHN_PROBE_MODEL-gated) is the real-model decider
-// for handover item 3: does the woken-append flow flip tokens against the
-// stateless whole prefill on a q8-armed checkpoint, and does canonical landing
-// on the woken session restore parity — the same instrument shape as
-// TestProbePromptReuseParity, driven through the sleep/wake path.
+// for the -state q8 fix (#1846). The woken flow is now canonical END TO END: a
+// q8 session's captured snapshot carries the store's RAW int8 codes + scales
+// (kv.KVNativeDTypeQ8), so restore is bit-exact (no double-quantise), and the
+// restore AUTO-ARMS canonical landing so the woken append lands through the
+// position-invariant per-token lane. Its ground truth is therefore a CANONICAL
+// whole prefill — the same shape TestProbePromptReuseParity compares its reuse
+// arms against — and parity means sleep/wake did not change the conversation.
+//
+// The batched arm below is now a pure DIAGNOSTIC (logged, non-fatal): it
+// explicitly disarms the auto-armed canonical landing to force a batched append
+// and shows it still wobbles against a batched whole prefill even with a
+// bit-exact restore — which is exactly why the canonical auto-arm is
+// load-bearing rather than cosmetic.
 //
 //	LTHN_PROBE_MODEL=<snapshot dir> go test -tags metal_runtime \
 //	  ./engine/metal/ -run TestProbeStateWakeParity -v
@@ -131,6 +140,7 @@ func TestProbeStateWakeParity(t *testing.T) {
 	prefix := tok.Encode("Write the integers from 1 to 800 separated by single spaces.")
 	suffix := tok.Encode(" Output only the numbers, nothing else. Begin now:")
 	gen := 48
+	all := append(append([]int32(nil), prefix...), suffix...)
 
 	open := func() *ArchSession {
 		stepper, oerr := ntm.OpenSession()
@@ -140,43 +150,6 @@ func TestProbeStateWakeParity(t *testing.T) {
 		s := stepper.(*ArchSession)
 		t.Cleanup(func() { s.Close() })
 		return s
-	}
-
-	// Stateless reference: one whole prefill.
-	stateless := open()
-	all := append(append([]int32(nil), prefix...), suffix...)
-	if err := stateless.PrefillTokens(all); err != nil {
-		t.Fatalf("stateless PrefillTokens: %v", err)
-	}
-	want, err := stateless.GenerateFromCache(gen, -1)
-	if err != nil {
-		t.Fatalf("stateless GenerateFromCache: %v", err)
-	}
-
-	wakeArm := func(label string, canonical bool) []int32 {
-		src := open()
-		if err := src.PrefillTokens(prefix); err != nil {
-			t.Fatalf("%s PrefillTokens: %v", label, err)
-		}
-		snap, cerr := src.CaptureKVWithOptions(kv.CaptureOptions{})
-		if cerr != nil {
-			t.Fatalf("%s CaptureKVWithOptions: %v", label, cerr)
-		}
-		woken := open()
-		if err := woken.RestoreFromKV(context.Background(), snap); err != nil {
-			t.Fatalf("%s RestoreFromKV: %v", label, err)
-		}
-		if canonical {
-			woken.SetReuseCanonicalLanding(true)
-		}
-		if err := woken.AppendTokens(suffix); err != nil {
-			t.Fatalf("%s AppendTokens: %v", label, err)
-		}
-		got, gerr := woken.GenerateFromCache(gen, -1)
-		if gerr != nil {
-			t.Fatalf("%s GenerateFromCache: %v", label, gerr)
-		}
-		return got
 	}
 
 	diverge := func(a, b []int32) int {
@@ -195,19 +168,87 @@ func TestProbeStateWakeParity(t *testing.T) {
 		return -1
 	}
 
-	// Arm 1 (diagnostic): default batched append after wake vs stateless.
-	batched := wakeArm("batched", false)
-	if i := diverge(want, batched); i >= 0 {
-		t.Logf("batched wake DIVERGES from stateless at token %d (the q8 wobble, item-3 confirmed)", i)
-	} else {
-		t.Logf("batched wake matched stateless over %d tokens on this prompt", gen)
+	// Canonical stateless reference — the ground truth for the woken flow, which
+	// is canonical throughout (canonical sleeper prefix + auto-armed woken
+	// append). Same reference shape as TestProbePromptReuseParity's fresh-canonical.
+	statelessCanon := open()
+	statelessCanon.SetReuseCanonicalLanding(true)
+	if err := statelessCanon.PrefillTokens(all); err != nil {
+		t.Fatalf("stateless-canonical PrefillTokens: %v", err)
+	}
+	wantCanon, err := statelessCanon.GenerateFromCache(gen, -1)
+	if err != nil {
+		t.Fatalf("stateless-canonical GenerateFromCache: %v", err)
 	}
 
-	// Arm 2 (the gate): canonical landing on the woken session → parity.
-	canonical := wakeArm("canonical", true)
-	if i := diverge(want, canonical); i >= 0 {
-		t.Errorf("canonical wake diverges from stateless at token %d — the fix does not hold", i)
+	// THE GATE: a canonical sleeper prefills the prefix and sleeps; the woken
+	// session restores it bit-exactly and — auto-armed canonical by the restore —
+	// appends the turn through the same position-invariant lane.
+	srcCanon := open()
+	srcCanon.SetReuseCanonicalLanding(true)
+	if err := srcCanon.PrefillTokens(prefix); err != nil {
+		t.Fatalf("canonical sleeper PrefillTokens: %v", err)
+	}
+	snapCanon, cerr := srcCanon.CaptureKVWithOptions(kv.CaptureOptions{})
+	if cerr != nil {
+		t.Fatalf("canonical CaptureKVWithOptions: %v", cerr)
+	}
+	wokenCanon := open()
+	if err := wokenCanon.RestoreFromKV(context.Background(), snapCanon); err != nil {
+		t.Fatalf("canonical RestoreFromKV: %v", err)
+	}
+	if !wokenCanon.reuseCanonicalLanding {
+		t.Fatalf("restore into a q8 session must auto-arm canonical wake landing (#1846)")
+	}
+	if err := wokenCanon.AppendTokens(suffix); err != nil {
+		t.Fatalf("canonical AppendTokens: %v", err)
+	}
+	gotCanon, gerr := wokenCanon.GenerateFromCache(gen, -1)
+	if gerr != nil {
+		t.Fatalf("canonical GenerateFromCache: %v", gerr)
+	}
+	if i := diverge(wantCanon, gotCanon); i >= 0 {
+		t.Errorf("canonical wake diverges from stateless at token %d — the q8 state fix does not hold", i)
 	} else {
 		t.Logf("canonical wake: TOKEN PARITY with stateless over %d tokens", gen)
+	}
+
+	// DIAGNOSTIC (logged, non-fatal): even with a bit-exact restore, a BATCHED
+	// append still wobbles against a batched whole prefill — the append lands at a
+	// different tile position than the whole. This is why the canonical auto-arm
+	// is load-bearing. Its own batched ground truth (batched and canonical decode
+	// paths are not numerically identical, so cross-mode comparison would confound).
+	statelessBatched := open()
+	if err := statelessBatched.PrefillTokens(all); err != nil {
+		t.Fatalf("stateless-batched PrefillTokens: %v", err)
+	}
+	wantBatched, err := statelessBatched.GenerateFromCache(gen, -1)
+	if err != nil {
+		t.Fatalf("stateless-batched GenerateFromCache: %v", err)
+	}
+	srcBatched := open()
+	if err := srcBatched.PrefillTokens(prefix); err != nil {
+		t.Fatalf("batched sleeper PrefillTokens: %v", err)
+	}
+	snapBatched, cerr := srcBatched.CaptureKVWithOptions(kv.CaptureOptions{})
+	if cerr != nil {
+		t.Fatalf("batched CaptureKVWithOptions: %v", cerr)
+	}
+	wokenBatched := open()
+	if err := wokenBatched.RestoreFromKV(context.Background(), snapBatched); err != nil {
+		t.Fatalf("batched RestoreFromKV: %v", err)
+	}
+	wokenBatched.SetReuseCanonicalLanding(false) // disarm the auto-arm to force the batched append
+	if err := wokenBatched.AppendTokens(suffix); err != nil {
+		t.Fatalf("batched AppendTokens: %v", err)
+	}
+	gotBatched, gerr := wokenBatched.GenerateFromCache(gen, -1)
+	if gerr != nil {
+		t.Fatalf("batched GenerateFromCache: %v", gerr)
+	}
+	if i := diverge(wantBatched, gotBatched); i >= 0 {
+		t.Logf("batched wake DIVERGES from batched stateless at token %d (the append-landing wobble; #1846 confirmed, non-fatal)", i)
+	} else {
+		t.Logf("batched wake matched batched stateless over %d tokens on this prompt", gen)
 	}
 }

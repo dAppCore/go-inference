@@ -51,6 +51,19 @@ const (
 	EncodingNative Encoding = "native"
 )
 
+// KVNativeDTypeQ8 tags a layer K or V tensor whose KeyBytes/ValueBytes are the
+// engine's RAW q8 KV block — int8 codes immediately followed by their f32 group
+// scales (little-endian), token-major, exactly as the q8 store holds them. It
+// lets a q8 KV store round-trip a sleep/wake BIT-EXACT: a double-quantise pass
+// (dequantise to bf16 on capture, re-quantise to int8 on restore) perturbs every
+// prefix row, so the raw block is carried verbatim instead. The portable float32
+// Heads still carry the dequantised view for non-q8 consumers, so this is
+// additive — the snapshot codec treats the block as opaque bytes and pre-existing
+// bf16 snapshots (which never carry this dtype) decode and restore unchanged. The
+// codes+scales split is the engine's concern (group size is an engine constant);
+// kv only round-trips the bytes.
+const KVNativeDTypeQ8 = "q8-native"
+
 // SaveOptions controls the portable binary snapshot encoding.
 type SaveOptions struct {
 	KVEncoding Encoding

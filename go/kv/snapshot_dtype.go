@@ -116,6 +116,15 @@ func quantizeKVSnapshotQ8WithMaxAbs(values []float32, maxAbs float32) (float32, 
 }
 
 func validateKVSnapshotNativeTensor(dtype string, raw []byte, elements int) (string, error) {
+	if dtype == KVNativeDTypeQ8 {
+		// Opaque q8 block (int8 codes + f32 group scales) — the engine owns the
+		// codes/scales split, so kv round-trips the bytes verbatim (one byte per
+		// "element"). Only ever decoded RawKVOnly at the layer level.
+		if elements < 0 || len(raw) != elements {
+			return "", errNativeByteLenMismatch
+		}
+		return KVNativeDTypeQ8, nil
+	}
 	dtype, bytesPerValue := normalizeKVSnapshotTensorDType(dtype)
 	if dtype == "" || bytesPerValue <= 0 {
 		return "", errUnsupportedNativeDtype

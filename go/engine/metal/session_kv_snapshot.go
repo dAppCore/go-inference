@@ -95,6 +95,21 @@ func (s *ArchSession) CaptureKVWithOptions(opts kv.CaptureOptions) (*kv.Snapshot
 		if !opts.RawKVOnly {
 			layer.Heads = nativeKVLayerSlabHeads(keySlab, valueSlab, tokenCount, view.kvHeads, view.headDim)
 		}
+		// q8 layers carry the store's RAW int8 codes + f32 scales verbatim under
+		// kv.KVNativeDTypeQ8 so a q8→q8 sleep/wake is bit-exact (the bf16 slab
+		// above would double-quantise on restore, perturbing every prefix row —
+		// #1846). The bf16-derived Heads stay populated for portable (non-q8)
+		// consumers; only the layer-level K/V bytes+dtype switch to the raw block.
+		if s.state.icb != nil && s.state.icb.kvQ8.on(view.layer) {
+			kPacked, vPacked, err := s.state.icb.captureQ8LayerRaw(view.layer, start, tokenCount)
+			if err != nil {
+				return nil, err
+			}
+			layer.KeyDType = kv.KVNativeDTypeQ8
+			layer.KeyBytes = kPacked
+			layer.ValueDType = kv.KVNativeDTypeQ8
+			layer.ValueBytes = vPacked
+		}
 		layers[view.layer] = layer
 	}
 	logits, logitShape, err := s.captureKVLogits()
@@ -178,8 +193,18 @@ func (s *ArchSession) RestoreKV(snapshot *kv.Snapshot) error {
 	if s == nil {
 		return core.NewError("native.RestoreKV: nil session")
 	}
+	// A bf16 snapshot restored into a q8 session lands its rows through the
+	// bf16 mirror and requantises them here (today's behaviour, honestly lossy).
+	// A q8-NATIVE snapshot instead writes the int8 codes straight into the store
+	// (bit-exact) and sets rawQ8Restore, so this flush is skipped — flushing
+	// would clobber the just-written codes with a requantise of the stale mirror.
+	var rawQ8Restore bool
 	if s.state.icb != nil {
-		defer func() { s.state.icb.flushQ8Mirrors(s.pos) }() // requantise the restored rows (pos set by the restore)
+		defer func() {
+			if !rawQ8Restore {
+				s.state.icb.flushQ8Mirrors(s.pos) // requantise the restored rows (pos set by the restore)
+			}
+		}()
 	}
 	if snapshot == nil {
 		return core.NewError("native.RestoreKV: nil snapshot")
@@ -212,6 +237,50 @@ func (s *ArchSession) RestoreKV(snapshot *kv.Snapshot) error {
 		wantTokens := position
 		if view.maxSize > 0 && position > view.cacheRows {
 			wantTokens = view.cacheRows
+		}
+		if nativeKVLayerIsQ8Native(layer) {
+			tokenCount, kvd, err := nativeKVQ8NativeWindow(layer, view)
+			if err != nil {
+				return err
+			}
+			if tokenCount != wantTokens {
+				return core.NewError("native.RestoreKV: q8-native layer window length mismatch")
+			}
+			start := position - tokenCount
+			if s.state.icb != nil && s.state.icb.kvQ8.on(view.layer) {
+				// q8 target: land the captured int8 codes + scales verbatim.
+				if err := s.state.icb.restoreQ8LayerRaw(view.layer, start, tokenCount, layer.KeyBytes, layer.ValueBytes); err != nil {
+					return err
+				}
+				rawQ8Restore = true
+				continue
+			}
+			// Non-q8 target: a bf16 (or other) store cannot hold int8 codes, so
+			// dequantise the q8 block into bf16 token rows. Documented lossy — the
+			// bytes match a live q8 read, but the store keeps the bf16 view.
+			keyRows, err := q8NativeToTokenRowsBF16(layer.KeyBytes, tokenCount, kvd)
+			if err != nil {
+				return err
+			}
+			valueRows, err := q8NativeToTokenRowsBF16(layer.ValueBytes, tokenCount, kvd)
+			if err != nil {
+				return err
+			}
+			block := SessionStateLayerBlock{
+				Layer:      view.layer,
+				CacheIndex: view.cacheIndex,
+				CacheMode:  view.cacheMode,
+				MaxSize:    view.maxSize,
+				KVHeads:    view.kvHeads,
+				HeadDim:    view.headDim,
+				RowBytes:   view.rowBytes,
+				KeyBytes:   keyRows,
+				ValueBytes: valueRows,
+			}
+			if err := restoreStateBlockLayer(view, start, tokenCount, position, block); err != nil {
+				return err
+			}
+			continue
 		}
 		if keySlab, valueSlab, tokenCount, ok, err := nativeKVLayerSnapshotDirectBF16Slabs("native.RestoreKV", layer, view); err != nil {
 			return err
@@ -255,6 +324,16 @@ func (s *ArchSession) RestoreKV(snapshot *kv.Snapshot) error {
 	}
 	if err := s.restoreKVSnapshotMetadata(snapshot, position); err != nil {
 		return err
+	}
+	// #1846 wake landing: a woken q8 session lands its appended turns through the
+	// position-invariant per-token lane, so a resident prefix + appended suffix is
+	// byte-identical to a fresh whole prefill (the batched append is tile-position
+	// sensitive and the q8 store amplifies that wobble into token flips). Auto-
+	// armed here — the restore is the engine-owned seam — so a woken session is
+	// answer-stable without the caller opting in. Appends are short turns, so the
+	// per-token landing there is decode-speed and negligible.
+	if s.state.icb != nil && s.state.icb.hasKVQ8() {
+		s.reuseCanonicalLanding = true
 	}
 	return nil
 }
