@@ -13,8 +13,8 @@ import (
 	"dappco.re/go/inference/engine"
 )
 
-// hipLoRATrainer is HIP's retained output-head LoRA session. The quantized
-// Gemma base remains frozen; only the packed A/B factors are updated.
+// hipLoRATrainer is HIP's retained output-head LoRA session. The Gemma base
+// remains frozen; only the packed A/B factors are updated.
 type hipLoRATrainer struct {
 	loaded *hipLoadedModel
 	state  *NativeAdamWState
@@ -29,7 +29,7 @@ var _ engine.Trainer = (*hipLoRATrainer)(nil)
 
 func newHIPLoRATrainer(loaded *hipLoadedModel, cfg inference.TrainingConfig) (*hipLoRATrainer, error) {
 	if loaded == nil || !hipLoadedGemma4Q4GenerateLinked(loaded) {
-		return nil, core.NewError("hip.LoRATrainer: trainer needs a Gemma4-Q4 linked runtime")
+		return nil, core.NewError("hip.LoRATrainer: trainer needs a linked Gemma4 runtime")
 	}
 	rows, cols := loaded.modelInfo.VocabSize, loaded.modelInfo.HiddenSize
 	if rows <= 0 || cols <= 0 {

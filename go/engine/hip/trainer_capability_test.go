@@ -28,7 +28,7 @@ func TestHIPTrainerCapabilityBoundary_Good(t *testing.T) {
 	core.RequireNoError(t, err)
 	_, err = shared.OpenTrainer(inference.TrainingConfig{LoRA: inference.LoRAConfig{Rank: 8, Alpha: 16}})
 	core.AssertError(t, err)
-	core.AssertContains(t, err.Error(), "Gemma4-Q4 linked runtime")
+	core.AssertContains(t, err.Error(), "linked Gemma4 runtime")
 
 	report := rocmCapabilityReport(nativeDeviceInfo{}, inference.ModelIdentity{
 		Path:          "/models/lmstudio-community-gemma-4-e2b-it-4bit",

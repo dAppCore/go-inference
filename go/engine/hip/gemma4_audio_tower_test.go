@@ -120,6 +120,29 @@ func TestHipAudioProjectorF32_Good(t *testing.T) {
 	}
 }
 
+func TestHipLoadAudioProjectorBF16_Good(t *testing.T) {
+	values := []float32{1, -2, 3, -4, 5, -6}
+	weight := make([]byte, len(values)*2)
+	for index, value := range values {
+		binary.LittleEndian.PutUint16(weight[index*2:], uint16(math.Float32bits(value)>>16))
+	}
+	projector := model.LoadedAudioLinear{Weight: weight, OutDim: 2, InDim: 3}
+
+	got, err := hipLoadAudioProjector(projector)
+
+	if err != nil {
+		t.Fatalf("hipLoadAudioProjector: %v", err)
+	}
+	if len(got) != len(values) {
+		t.Fatalf("decoded weights=%d, want %d", len(got), len(values))
+	}
+	for index := range values {
+		if got[index] != values[index] {
+			t.Fatalf("decoded weight[%d]=%g, want %g", index, got[index], values[index])
+		}
+	}
+}
+
 func TestAudioTower_ProjectEmbeddings_Bad(t *testing.T) {
 	if _, _, err := (*AudioTower)(nil).ProjectEmbeddings([]float32{1}); err == nil {
 		t.Fatal("ProjectEmbeddings on a nil tower must error")

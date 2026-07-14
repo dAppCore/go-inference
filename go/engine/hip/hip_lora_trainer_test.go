@@ -79,6 +79,22 @@ func TestHIPLoRATrainer_E2BHardware_Good(t *testing.T) {
 	if modelPath == "" || strings.TrimSpace(os.Getenv("GO_ROCM_KERNEL_HSACO")) == "" || !ROCmAvailable() {
 		t.Skip("a linked Gemma4 model, HSACO, and ROCm device are required")
 	}
+	testHIPLoRATrainerE2BHardware(t, modelPath, -1)
+}
+
+func TestHIPLoRATrainer_E2BBF16Hardware_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_LORA_TRAINER_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_LORA_TRAINER_TESTS=1 to run the HIP BF16 LoRA lifecycle receipt")
+	}
+	modelPath := strings.TrimSpace(os.Getenv("GO_ROCM_BF16_MODEL_PATH"))
+	if modelPath == "" || strings.TrimSpace(os.Getenv("GO_ROCM_KERNEL_HSACO")) == "" || !ROCmAvailable() {
+		t.Skip("a linked Gemma4 BF16 model, HSACO, and ROCm device are required")
+	}
+	testHIPLoRATrainerE2BHardware(t, modelPath, 16)
+}
+
+func testHIPLoRATrainerE2BHardware(t *testing.T, modelPath string, expectedQuantBits int) {
+	t.Helper()
 
 	result := (&rocmBackend{}).LoadModel(modelPath, inference.WithContextLen(64))
 	if !result.OK {
@@ -89,6 +105,13 @@ func TestHIPLoRATrainer_E2BHardware_Good(t *testing.T) {
 		t.Fatalf("LoadModel returned %T without the shared engine model", result.Value)
 	}
 	defer model.Close()
+	loaded, ok := model.native.(*hipLoadedModel)
+	if !ok || loaded == nil {
+		t.Fatalf("LoadModel native runtime = %T, want *hipLoadedModel", model.native)
+	}
+	if expectedQuantBits >= 0 && loaded.modelInfo.QuantBits != expectedQuantBits {
+		t.Fatalf("LoadModel quant bits = %d, want %d", loaded.modelInfo.QuantBits, expectedQuantBits)
+	}
 
 	trainerValue, err := model.engineModel.OpenTrainer(inference.TrainingConfig{
 		LearningRate: 0.01,

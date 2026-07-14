@@ -20,7 +20,7 @@ import (
 // soft-token policy so E2B/E4B audio is reachable through the hip build. hip previously had audio policy
 // + labels only and no path to the tower weights (its text load is GGUF); this is that first path.
 //
-// The tower forward and embed_audio affine-q4 projector are implemented here; inference_model.go binds
+// The tower forward and embed_audio projector are implemented here; inference_model.go binds
 // them to the shared audio serving contract and retained HIP prefill.
 
 // AudioTower holds the assembled Gemma 4 audio tower payload and the mel feature extractor, plus the
@@ -71,7 +71,7 @@ func loadAudioTowerWithGEMM(dir string, gemm audio.GEMM) (*AudioTower, error) {
 		}
 		return nil, core.E("hip.LoadAudioTower", "build mel feature extractor", err)
 	}
-	projectorWeights, err := hipLoadAudioProjectorQ4(loaded.Audio.Projector)
+	projectorWeights, err := hipLoadAudioProjector(loaded.Audio.Projector)
 	if err != nil {
 		if mapping != nil {
 			_ = mapping.Close()
@@ -101,21 +101,37 @@ func (a *AudioTower) Project(waveform []float32) (features []float32, softTokens
 }
 
 // ProjectEmbeddings runs the audio tower and then embed_audio's no-scale RMS normalisation plus its
-// MLX-affine 4-bit projection. LoadAudioTower dequantises the projector once into host float32; this
-// keeps the binding portable while matching the same affine q*scale+bias convention as HIP's q4 kernels.
+// dense-BF16 or MLX-affine 4-bit projection. LoadAudioTower widens the projector once into host
+// float32; this keeps the binding portable while matching the same affine q*scale+bias convention as
+// HIP's q4 kernels.
 func (a *AudioTower) ProjectEmbeddings(waveform []float32) (embeddings []float32, softTokens int, err error) {
 	features, softTokens, err := a.Project(waveform)
 	if err != nil {
 		return nil, 0, err
 	}
 	if len(a.projectorWeights) == 0 {
-		return nil, 0, core.NewError("hip.AudioTower.ProjectEmbeddings: q4 projector not loaded")
+		return nil, 0, core.NewError("hip.AudioTower.ProjectEmbeddings: projector not loaded")
 	}
 	embeddings, err = hipAudioProjectorF32(features, softTokens, a.loaded.Projector, a.projectorWeights, 1e-6)
 	if err != nil {
 		return nil, 0, core.E("hip.AudioTower.ProjectEmbeddings", "embed_audio projection", err)
 	}
 	return embeddings, softTokens, nil
+}
+
+func hipLoadAudioProjector(projector model.LoadedAudioLinear) ([]float32, error) {
+	count := projector.OutDim * projector.InDim
+	if projector.OutDim <= 0 || projector.InDim <= 0 || len(projector.Weight) == 0 {
+		return nil, core.NewError("hip.embed_audio: projector geometry and weight are required")
+	}
+	if len(projector.Scales) == 0 && len(projector.Biases) == 0 && projector.Kind == "" && projector.Bits == 0 && projector.GroupSize == 0 {
+		weights, err := safetensors.DecodeFloat32("BF16", projector.Weight, count)
+		if err != nil {
+			return nil, core.E("hip.embed_audio", "decode dense BF16 projector", err)
+		}
+		return weights, nil
+	}
+	return hipLoadAudioProjectorQ4(projector)
 }
 
 func hipLoadAudioProjectorQ4(projector model.LoadedAudioLinear) ([]float32, error) {

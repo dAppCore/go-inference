@@ -137,7 +137,7 @@ func (m *hipTokenModel) OpenEngineSession() (engine.Session, error) {
 	return newHipEngineSession(m.loaded)
 }
 
-// OpenTrainer opens a retained Gemma4 output-head LoRA lifecycle through the
+// OpenTrainer opens a retained Gemma4 BF16 or quantized output-head LoRA lifecycle through the
 // shared engine.TrainerModel contract.
 func (m *hipTokenModel) OpenTrainer(cfg inference.TrainingConfig) (engine.Trainer, error) {
 	if m == nil {
