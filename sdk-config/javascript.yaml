@@ -1,0 +1,6 @@
+generatorName: javascript
+additionalProperties:
+  projectName: lem-sdk-js
+  moduleName: LemSdk
+  projectVersion: "0.1.0"
+  usePromises: true
