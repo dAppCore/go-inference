@@ -104,8 +104,14 @@ func TestComposedLongPromptPrefillAB(t *testing.T) {
 	if !slices.Equal(onTokens, offTokens) {
 		t.Fatalf("greedy output tokens differ: hooks-on=%v OPROJ_FUSE=0=%v", onTokens, offTokens)
 	}
-	if onCounts.AttentionInput.Prefill+onCounts.GatedDeltaFold.Prefill == 0 || onCounts.Head.Prefill == 0 {
-		t.Fatalf("hooks-on prefill did not engage composed folds: %+v", onCounts)
+	// A PACKED checkpoint serves every projection through the quant matvec seam — the f32 fold ladder is
+	// bypassed by design (it takes f32 weights; quant fused tails are a later slice), so disabling the fold
+	// hooks is a no-op and both arms are identical. The engagement assertion then targets the quant seam;
+	// for a dense checkpoint the f32 folds must engage as before.
+	if onCounts.QuantProjection.Prefill == 0 {
+		if onCounts.AttentionInput.Prefill+onCounts.GatedDeltaFold.Prefill == 0 || onCounts.Head.Prefill == 0 {
+			t.Fatalf("hooks-on prefill did not engage composed folds: %+v", onCounts)
+		}
 	}
 	if offCounts.ProjectionTail.Prefill+offCounts.AttentionInput.Prefill+offCounts.GatedDeltaFold.Prefill+offCounts.Head.Prefill != 0 {
 		t.Fatalf("OPROJ_FUSE=0 arm engaged a disabled fold: %+v", offCounts)

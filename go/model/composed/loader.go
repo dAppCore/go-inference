@@ -16,9 +16,17 @@ import (
 // composed.buildComposed: parse the config, dispatch each layer by layer_type to its mixer (linear_attn →
 // gated-delta, self_attn → attention), wire the SwiGLU MLP + the two norms, and resolve the wrapper
 // prefixes (model.language_model. via the prefix probe; the language_model.model. nesting real Qwen 3.6
-// packs ship via model.NormalizeWrapperNames). Quantised checkpoints (mlx affine packed-uint32 weights
-// with .scales/.biases siblings) dequantise host-side to f32 at load. The gated-delta geometry is derived
-// from the weight shapes (as metal does); the attention geometry from the config.
+// packs ship via model.NormalizeWrapperNames). The gated-delta geometry is derived from the weight shapes
+// (as metal does); the attention geometry from the config.
+//
+// Quantised checkpoints (mlx affine packed-uint32 weights with .scales/.biases siblings) keep their 2-D
+// PROJECTION weights PACKED — carried as model.QuantWeight to the engine's quant matvec seam rather than
+// widened (a 27B checkpoint dequantised to f32 is ~110 GB, dead on arrival). The small tensors (norms,
+// conv kernels, delta/gating params, biases) stay host f32 as before — the mixers' state math is exact
+// host f32. The embedding table stays packed too (dequantised one row per token at gather time). Bonsai's
+// 1-bit packs are widened to 2-bit at load (RepackB1ToB2, exact) so the engine dispatches stock kernels.
+// This lane is TEXT-ONLY: vision_tower.* tensors are never looked up (skipped by name), so a multimodal
+// wrapper's image tower is dropped at load and image input keeps refusing through the text-only machinery.
 
 // The loaderConfig type + its effective()/ropeTheta()/partialRotary() helpers live in config.go.
 
@@ -32,6 +40,12 @@ func tensorF32(t safetensors.Tensor) ([]float32, error) {
 			out[i] = math.Float32frombits(uint32(b) << 16)
 		}
 		return out, nil
+	case "F16", "float16":
+		out := make([]float32, len(t.Data)/2)
+		for i := range out {
+			out[i] = f16ToF32(uint16(t.Data[2*i]) | uint16(t.Data[2*i+1])<<8)
+		}
+		return out, nil
 	case "F32", "float32":
 		out := make([]float32, len(t.Data)/4)
 		for i := range out {
@@ -40,6 +54,62 @@ func tensorF32(t safetensors.Tensor) ([]float32, error) {
 		return out, nil
 	}
 	return nil, core.NewError("composed.tensorF32: unsupported dtype " + t.Dtype)
+}
+
+// f16ToF32 decodes an IEEE-754 half (F16: sign 1, exp 5, mantissa 10) to float32. mlx 1-bit packs (e.g.
+// prism-ml Bonsai) store their norms + quant scales/biases as F16 where the 4-bit packs use BF16.
+func f16ToF32(h uint16) float32 {
+	sign := uint32(h&0x8000) << 16
+	exp := uint32(h>>10) & 0x1f
+	man := uint32(h & 0x3ff)
+	switch exp {
+	case 0:
+		if man == 0 {
+			return math.Float32frombits(sign) // ±0
+		}
+		exp = 1 // subnormal: normalise into a f32 normal
+		for man&0x400 == 0 {
+			man <<= 1
+			exp--
+		}
+		man &= 0x3ff
+		return math.Float32frombits(sign | (exp+112)<<23 | man<<13)
+	case 0x1f:
+		return math.Float32frombits(sign | 0x7f800000 | man<<13) // inf/nan
+	default:
+		return math.Float32frombits(sign | (exp+112)<<23 | man<<13)
+	}
+}
+
+// bf16Bytes returns t's data as BF16 bytes — the tier the engine's affine_qmv/qmm_t kernels and
+// mlxaffine.DequantizeTensor read quant scales/biases at. A BF16 tensor passes verbatim; an F16 tensor
+// (Bonsai's sidecars) is decoded to f32 and re-rounded to bf16 (round-to-nearest-even); an F32 tensor is
+// rounded down. The F16→BF16 step drops 3 mantissa bits of the per-group scale — negligible against a
+// 1-bit weight's own error, and it normalises the whole lane onto one scale dtype.
+func bf16Bytes(t safetensors.Tensor) ([]byte, error) {
+	f32ToBF16 := func(b uint32) (byte, byte) {
+		r := uint16((b + 0x7fff + ((b >> 16) & 1)) >> 16)
+		return byte(r), byte(r >> 8)
+	}
+	switch t.Dtype {
+	case "BF16", "bfloat16":
+		return append([]byte(nil), t.Data...), nil
+	case "F16", "float16":
+		out := make([]byte, len(t.Data))
+		for i := 0; i < len(t.Data)/2; i++ {
+			f := f16ToF32(uint16(t.Data[2*i]) | uint16(t.Data[2*i+1])<<8)
+			out[2*i], out[2*i+1] = f32ToBF16(math.Float32bits(f))
+		}
+		return out, nil
+	case "F32", "float32":
+		out := make([]byte, len(t.Data)/2)
+		for i := 0; i < len(t.Data)/4; i++ {
+			b := uint32(t.Data[4*i]) | uint32(t.Data[4*i+1])<<8 | uint32(t.Data[4*i+2])<<16 | uint32(t.Data[4*i+3])<<24
+			out[2*i], out[2*i+1] = f32ToBF16(b)
+		}
+		return out, nil
+	}
+	return nil, core.NewError("composed.bf16Bytes: unsupported scales/biases dtype " + t.Dtype)
 }
 
 // quantBlock extracts the checkpoint's mlx quantization block (top-level, else nested under
@@ -87,6 +157,53 @@ func tensorAsF32(tensors map[string]safetensors.Tensor, name string, t safetenso
 		return nil, core.NewError(core.Sprintf("composed.tensorAsF32: %s packed cols %d ≠ inDim %d·bits %d/32 (groupSize %d)", name, packedCols, inDim, bits, gs))
 	}
 	return mlxaffine.DequantizeTensor(t.Data, scalesT.Data, biasesT.Data, outDim, inDim, bits, gs)
+}
+
+// tensorAsQuant returns name's projection weight kept PACKED when it is an mlx affine quantised tensor
+// (a packed-uint32 weight with .scales/.biases siblings), else (nil, nil) so the caller widens the dense
+// tensor. The (groupSize, bits) come from the quantization block and are cross-checked against the packed
+// shape so a mismatched config/checkpoint pairing fails loudly. Bonsai's 1-bit packs are widened to 2-bit
+// here (RepackB1ToB2 — exact: w = scale·q + bias unchanged) so the engine dispatches the stock b_2 kernels
+// rather than a b_1 kernel that does not ship. Every returned QuantWeight OWNS its bytes (copied out of the
+// mmap, which LoadComposedDir closes after the build), so the model outlives the mapping.
+func tensorAsQuant(tensors map[string]safetensors.Tensor, name string, t safetensors.Tensor, quant *model.QuantConfig) (*model.QuantWeight, error) {
+	base := name
+	if core.HasSuffix(base, ".weight") {
+		base = base[:len(base)-len(".weight")]
+	}
+	scalesT, sOK := tensors[base+".scales"]
+	biasesT, bOK := tensors[base+".biases"]
+	if !sOK || !bOK {
+		return nil, nil // dense tensor — caller widens with tensorF32
+	}
+	if quant == nil {
+		return nil, core.NewError("composed.tensorAsQuant: " + name + " carries .scales/.biases but the config has no quantization block")
+	}
+	if len(t.Shape) != 2 || len(scalesT.Shape) != 2 {
+		return nil, core.NewError("composed.tensorAsQuant: quantised " + name + " is not 2-D")
+	}
+	gs, bits := quant.For(base)
+	outDim, packedCols := t.Shape[0], t.Shape[1]
+	inDim := scalesT.Shape[1] * gs
+	if packedCols*32 != inDim*bits {
+		return nil, core.NewError(core.Sprintf("composed.tensorAsQuant: %s packed cols %d ≠ inDim %d·bits %d/32 (groupSize %d)", name, packedCols, inDim, bits, gs))
+	}
+	packed := append([]byte(nil), t.Data...)
+	scales, err := bf16Bytes(scalesT) // normalise F16 sidecars (Bonsai) to the bf16 tier the kernels read
+	if err != nil {
+		return nil, core.E("composed.tensorAsQuant", name+" scales", err)
+	}
+	biases, err := bf16Bytes(biasesT)
+	if err != nil {
+		return nil, core.E("composed.tensorAsQuant", name+" biases", err)
+	}
+	if bits == 1 {
+		if packed, scales, biases, err = mlxaffine.RepackB1ToB2(packed, scales, biases, outDim, inDim, gs); err != nil {
+			return nil, core.E("composed.tensorAsQuant", name+" b1→b2 repack", err)
+		}
+		bits = 2
+	}
+	return &model.QuantWeight{Packed: packed, Scales: scales, Biases: biases, Bits: bits, GroupSize: gs, OutDim: outDim, InDim: inDim}, nil
 }
 
 // LoadComposed assembles a ComposedModel from a hybrid checkpoint's tensors + its config.json bytes.
@@ -137,24 +254,56 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 		}
 		return nil
 	}
+	// proj resolves a 2-D projection weight: PACKED (quant checkpoint) or widened to f32 — exactly one of
+	// the two returns is non-nil. Small unquantised tensors (norms, conv, biases) keep the f32/f32opt path.
+	proj := func(name string) ([]float32, *model.QuantWeight, error) {
+		t, ok := get(name)
+		if !ok {
+			return nil, nil, core.NewError("composed.LoadComposed: missing " + name)
+		}
+		qw, err := tensorAsQuant(tensors, name, t, quant)
+		if err != nil {
+			return nil, nil, err
+		}
+		if qw != nil {
+			return nil, qw, nil
+		}
+		f, err := tensorF32(t)
+		return f, nil, err
+	}
+	projOpt := func(name string) ([]float32, *model.QuantWeight) {
+		if _, ok := get(name); !ok {
+			return nil, nil
+		}
+		f, qw, err := proj(name)
+		if err != nil {
+			return nil, nil
+		}
+		return f, qw
+	}
 
 	embedT, ok := get(prefix + "embed_tokens.weight")
 	if !ok || len(embedT.Shape) != 2 {
 		return nil, core.NewError("composed.LoadComposed: missing/!2D embed_tokens.weight")
 	}
-	embed, err := tensorAsF32(tensors, prefix+"embed_tokens.weight", embedT, quant)
+	vocab := embedT.Shape[0]
+	embed, embedQ, err := proj(prefix + "embed_tokens.weight")
 	if err != nil {
 		return nil, err
 	}
-	vocab := embedT.Shape[0]
-	// Logical width from the dequantised length — a quantised embed's Shape[1] is the
-	// bits-compressed packed-word count, not the hidden size.
-	D := len(embed) / vocab
+	// Logical width: a dense embed's dequantised length / vocab; a packed embed's InDim (its Shape[1] is
+	// the bits-compressed packed-word count, not the hidden size).
+	D := 0
+	if embedQ != nil {
+		D = embedQ.InDim
+	} else {
+		D = len(embed) / vocab
+	}
 	normF, err := f32(prefix + "norm.weight")
 	if err != nil {
 		return nil, err
 	}
-	output := f32opt("lm_head.weight") // untied; nil ⇒ tied to embed
+	output, outputQ := projOpt("lm_head.weight") // untied; nil/nil ⇒ tied to embed
 
 	kinds, err := resolveKinds(cfg)
 	if err != nil {
@@ -162,7 +311,7 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 	}
 
 	isCohere := cfg.ModelType == "cohere" || cfg.ModelType == "cohere2"
-	m := &ComposedModel{Embed: embed, NormF: normF, Output: output, D: D, Vocab: vocab, Eps: cfg.RMSNormEps, LayerNorm: isCohere || cfg.UseLayerNorm, ParallelResidual: isCohere, LogitScale: cfg.LogitScale}
+	m := &ComposedModel{Embed: embed, EmbedQ: embedQ, NormF: normF, Output: output, OutputQ: outputQ, D: D, Vocab: vocab, Eps: cfg.RMSNormEps, LayerNorm: isCohere || cfg.UseLayerNorm, ParallelResidual: isCohere, LogitScale: cfg.LogitScale, Quantised: quant != nil}
 	if arch != nil {
 		m.EmbedScale = arch.EmbedScale
 		m.LogitsScaling = arch.LogitsScaling
@@ -193,16 +342,16 @@ func loadComposed(tensors map[string]safetensors.Tensor, configJSON []byte, arch
 				return nil, err
 			}
 		}
-		ffn, err := buildFFN(get, f32, lp+"mlp.", cfg, arch, D)
+		ffn, err := buildFFN(get, proj, f32, lp+"mlp.", cfg, arch, D)
 		if err != nil {
 			return nil, core.E("composed.LoadComposed", core.Sprintf("layer %d ffn", i), err)
 		}
 
 		var mixer Mixer
 		if kinds[i] == "full_attention" || kinds[i] == "sliding_attention" {
-			mixer, err = buildAttn(f32, f32opt, lp+"self_attn.", cfg, arch, i, D, kinds[i])
+			mixer, err = buildAttn(proj, f32opt, lp+"self_attn.", cfg, arch, i, D, kinds[i])
 		} else {
-			mixer, err = buildGatedDelta(get, f32, f32opt, lp+"linear_attn.", cfg, D)
+			mixer, err = buildGatedDelta(get, proj, f32opt, lp+"linear_attn.", cfg, D)
 		}
 		if err != nil {
 			return nil, core.E("composed.LoadComposed", core.Sprintf("layer %d (%s)", i, kinds[i]), err)
@@ -254,28 +403,37 @@ func resolveKinds(cfg *loaderConfig) ([]string, error) {
 	return out, nil
 }
 
+// projFn resolves a 2-D projection weight to either its widened f32 slice OR a packed
+// model.QuantWeight (exactly one non-nil) — the closure the loader threads into the mixer/FFN
+// builders so a quant checkpoint keeps its projections packed while a dense one widens.
+type projFn func(string) ([]float32, *model.QuantWeight, error)
+
 // buildAttn builds a full-attention mixer; geometry from the config.
-func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, cfg *loaderConfig, arch *model.Arch, layer, D int, kind string) (Mixer, error) {
-	q, err := f32(sp + "q_proj.weight")
+func buildAttn(proj projFn, f32opt func(string) []float32, sp string, cfg *loaderConfig, arch *model.Arch, layer, D int, kind string) (Mixer, error) {
+	qF, qQ, err := proj(sp + "q_proj.weight")
 	if err != nil {
 		return nil, err
 	}
-	k, err := f32(sp + "k_proj.weight")
+	kF, kQ, err := proj(sp + "k_proj.weight")
 	if err != nil {
 		return nil, err
 	}
-	v, err := f32(sp + "v_proj.weight")
+	vF, vQ, err := proj(sp + "v_proj.weight")
 	if err != nil {
 		return nil, err
 	}
-	o, err := f32(sp + "o_proj.weight")
+	oF, oQ, err := proj(sp + "o_proj.weight")
 	if err != nil {
 		return nil, err
 	}
 	heads := cfg.NumAttentionHeads
 	headDim := cfg.HeadDim
 	if headDim == 0 && heads > 0 {
-		headDim = (len(q) / D) / heads
+		qCols := len(qF) / D // rows of q_proj = heads·headDim (2× when gated); a packed q_proj reads it from OutDim
+		if qQ != nil {
+			qCols = qQ.OutDim
+		}
+		headDim = qCols / heads
 		if cfg.AttnOutputGate {
 			headDim /= 2 // gated q_proj emits [q ; gate], so its rows are 2·heads·headDim
 		}
@@ -310,7 +468,8 @@ func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float3
 		qkvClip = arch.QKVClip
 	}
 	return NewAttnMixer(&AttnWeights{
-		QProj: q, KProj: k, VProj: v, OProj: o,
+		QProj: qF, KProj: kF, VProj: vF, OProj: oF,
+		QProjQ: qQ, KProjQ: kQ, VProjQ: vQ, OProjQ: oQ,
 		QNorm: f32opt(sp + "q_norm.weight"), KNorm: f32opt(sp + "k_norm.weight"),
 	}, AttnConfig{Heads: heads, KVHeads: kvHeads, HeadDim: headDim, RotaryDim: rd, RopeTheta: cfg.ropeTheta(), QKVClip: qkvClip, NormEps: func() float32 {
 		if cfg.LayerNormEps > 0 {
@@ -323,7 +482,7 @@ func buildAttn(f32 func(string) ([]float32, error), f32opt func(string) []float3
 // buildGatedDelta builds a gated-delta mixer; geometry derived from the weight shapes (as metal does):
 // ValueHeads = len(A_log), HeadDim = len(norm), convDim/K from conv1d.weight, qDim = (convDim−vDim)/2,
 // KeyHeads = qDim/HeadDim.
-func buildGatedDelta(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]float32, error), f32opt func(string) []float32, sp string, lcfg *loaderConfig, D int) (Mixer, error) {
+func buildGatedDelta(get func(string) (safetensors.Tensor, bool), proj projFn, f32opt func(string) []float32, sp string, lcfg *loaderConfig, D int) (Mixer, error) {
 	aLogT, ok := get(sp + "A_log")
 	if !ok || len(aLogT.Shape) != 1 {
 		return nil, core.NewError("missing/!1D A_log")
@@ -358,7 +517,7 @@ func buildGatedDelta(get func(string) (safetensors.Tensor, bool), f32 func(strin
 		return nil, err
 	}
 
-	qkv, err := f32(sp + "in_proj_qkv.weight")
+	qkvF, qkvQ, err := proj(sp + "in_proj_qkv.weight")
 	if err != nil {
 		return nil, err
 	}
@@ -374,26 +533,26 @@ func buildGatedDelta(get func(string) (safetensors.Tensor, bool), f32 func(strin
 	if err != nil {
 		return nil, err
 	}
-	inA, err := f32(sp + "in_proj_a.weight")
+	inAF, inAQ, err := proj(sp + "in_proj_a.weight")
 	if err != nil {
 		return nil, err
 	}
-	inB, err := f32(sp + "in_proj_b.weight")
+	inBF, inBQ, err := proj(sp + "in_proj_b.weight")
 	if err != nil {
 		return nil, err
 	}
-	inZ, err := f32(sp + "in_proj_z.weight")
+	inZF, inZQ, err := proj(sp + "in_proj_z.weight")
 	if err != nil {
 		return nil, err
 	}
-	outP, err := f32(sp + "out_proj.weight")
+	outPF, outPQ, err := proj(sp + "out_proj.weight")
 	if err != nil {
 		return nil, err
 	}
 	w := &qwen3.GatedDeltaWeights{
-		InProjQKV: qkv, ConvWeight: convW, ConvBias: f32opt(sp + "conv1d.bias"),
-		InProjA: inA, ALog: aLog, DtBias: f32opt(sp + "dt_bias"),
-		InProjB: inB, InProjZ: inZ, Norm: norm, OutProj: outP,
+		InProjQKV: qkvF, InProjQKVQ: qkvQ, ConvWeight: convW, ConvBias: f32opt(sp + "conv1d.bias"),
+		InProjA: inAF, InProjAQ: inAQ, ALog: aLog, DtBias: f32opt(sp + "dt_bias"),
+		InProjB: inBF, InProjBQ: inBQ, InProjZ: inZF, InProjZQ: inZQ, Norm: norm, OutProj: outPF, OutProjQ: outPQ,
 	}
 	cfg := qwen3.GatedDeltaConfig{KeyHeads: keyHeads, ValueHeads: valueHeads, HeadDim: headDim, ConvKernel: convK, Eps: 1e-6}
 	return NewGatedDeltaMixer(w, cfg), nil
@@ -401,23 +560,28 @@ func buildGatedDelta(get func(string) (safetensors.Tensor, bool), f32 func(strin
 
 // buildFFN builds a layer's feed-forward: a MoE (qwen3_6_moe) when expert weights are present, else a
 // dense SwiGLU MLP. sp is the "…mlp." prefix.
-func buildFFN(get func(string) (safetensors.Tensor, bool), f32 func(string) ([]float32, error), sp string, cfg *loaderConfig, arch *model.Arch, D int) (FFN, error) {
+func buildFFN(get func(string) (safetensors.Tensor, bool), proj projFn, f32 func(string) ([]float32, error), sp string, cfg *loaderConfig, arch *model.Arch, D int) (FFN, error) {
 	if _, ok := get(sp + "experts.0.gate_proj.weight"); ok {
+		// MoE stays on the dequant path (quant MoE is a later slice; the dense acceptance models never reach here).
 		return buildMoE(get, f32, sp, cfg, arch, D)
 	}
-	gate, err := f32(sp + "gate_proj.weight")
+	gateF, gateQ, err := proj(sp + "gate_proj.weight")
 	if err != nil {
 		return nil, err
 	}
-	up, err := f32(sp + "up_proj.weight")
+	upF, upQ, err := proj(sp + "up_proj.weight")
 	if err != nil {
 		return nil, err
 	}
-	down, err := f32(sp + "down_proj.weight")
+	downF, downQ, err := proj(sp + "down_proj.weight")
 	if err != nil {
 		return nil, err
 	}
-	return &MLP{Gate: gate, Up: up, Down: down, FF: len(gate) / D}, nil
+	ff := len(gateF) / D // gate_proj rows = FF; a packed gate reads it from OutDim
+	if gateQ != nil {
+		ff = gateQ.OutDim
+	}
+	return &MLP{Gate: gateF, Up: upF, Down: downF, GateQ: gateQ, UpQ: upQ, DownQ: downQ, FF: ff}, nil
 }
 
 // buildMoE loads the MoE FFN: router (mlp.gate.weight), the experts (mlp.experts.E.*), and the optional

@@ -33,7 +33,10 @@ type AttnConfig struct {
 // QNorm/KNorm [HeadDim] (per-head RMSNorm, plain — qwen is not gemma).
 type AttnWeights struct {
 	QProj, KProj, VProj, OProj []float32
-	QNorm, KNorm               []float32
+	// Packed forms in a quant checkpoint (nil ⇒ the dense f32 field is used). When set, the mixer
+	// dispatches q/k/v/o to the quant matvec seam instead of the f32 matNT + the f32 AttnQKVDevice fuse.
+	QProjQ, KProjQ, VProjQ, OProjQ *model.QuantWeight
+	QNorm, KNorm                   []float32
 }
 
 type attnMixer struct {
@@ -163,7 +166,11 @@ func (m *attnMixer) Forward(h []float32, L, D int, prior any) ([]float32, any, e
 		return nil, nil, err
 	}
 	st := next.(attnState)
-	st.sc.o = matNTInto(st.sc.o, attnOut, oProj, L, mixCols, D)
+	if m.w.OProjQ != nil { // packed o_proj — oProj (m.w.OProj) is nil in a quant checkpoint
+		st.sc.o = matNTQuant(st.sc.o, attnOut, m.w.OProjQ, L, mixCols, D)
+	} else {
+		st.sc.o = matNTInto(st.sc.o, attnOut, oProj, L, mixCols, D)
+	}
 	return st.sc.o, st, nil
 }
 
@@ -179,7 +186,11 @@ func (m *attnMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidden
 	if cfg.OutputGate {
 		qCols = 2 * H * cfg.HeadDim // q_proj emits [q ; gate] per head
 	}
-	if len(m.w.QProj) != qCols*D {
+	qLen := len(m.w.QProj)
+	if m.w.QProjQ != nil {
+		qLen = m.w.QProjQ.OutDim * D // packed q_proj: rows·D
+	}
+	if qLen != qCols*D {
 		return nil, nil, 0, nil, core.NewError("composed.attnMixer: q_proj size mismatch (OutputGate?)")
 	}
 	var st attnState
@@ -191,25 +202,36 @@ func (m *attnMixer) forwardNoProj(h []float32, L, D int, prior any) (mixerHidden
 		sc = &attnScratch{} // throwaway: nil buffers ⇒ every projection allocates, the legacy path
 	}
 
-	// q/k/v all read the hidden h [L,D]. When the backend supplies the fused hook and the q projection
-	// crosses the device floor, q_raw/k/v are computed in ONE command buffer (k/v ride free — sub-floor
-	// standalone, their host matmul is serial); otherwise the per-projection matNTInto path runs (the
-	// device hook for q, host below the floor for k/v). k/v feed the KV cache either way; deterministic.
+	// q/k/v all read the hidden h [L,D]. A packed checkpoint dispatches each projection to the quant matvec
+	// seam (the f32 AttnQKVDevice fuse takes f32 weights — bypassed). Otherwise, when the backend supplies
+	// the fused hook and the q projection crosses the device floor, q_raw/k/v are computed in ONE command
+	// buffer (k/v ride free — sub-floor standalone); else the per-projection matNTInto path runs. k/v feed
+	// the KV cache either way; deterministic.
 	var qRaw, k, v []float32
-	qkvFused := false
-	if AttnQKVDevice != nil && L*D*qCols >= deviceMinWork {
-		if fq, fk, fv, ferr := AttnQKVDevice(h, m.w.QProj, m.w.KProj, m.w.VProj, L, D, qCols, KVH*cfg.HeadDim); ferr == nil {
-			qRaw, k, v = fq, fk, fv
-			qkvFused = true
-		}
-	}
-	if !qkvFused {
-		sc.qRaw = matNTInto(sc.qRaw, h, m.w.QProj, L, D, qCols) // [L, qCols]
+	kvCols := KVH * cfg.HeadDim
+	if m.w.QProjQ != nil {
+		sc.qRaw = matNTQuant(sc.qRaw, h, m.w.QProjQ, L, D, qCols) // [L, qCols]
 		qRaw = sc.qRaw
-		sc.k = matNTInto(sc.k, h, m.w.KProj, L, D, KVH*cfg.HeadDim) // [L, KVH*HD]
+		sc.k = matNTQuant(sc.k, h, m.w.KProjQ, L, D, kvCols) // [L, KVH*HD]
 		k = sc.k
-		sc.v = matNTInto(sc.v, h, m.w.VProj, L, D, KVH*cfg.HeadDim) // [L, KVH*HD]
+		sc.v = matNTQuant(sc.v, h, m.w.VProjQ, L, D, kvCols) // [L, KVH*HD]
 		v = sc.v
+	} else {
+		qkvFused := false
+		if AttnQKVDevice != nil && L*D*qCols >= deviceMinWork {
+			if fq, fk, fv, ferr := AttnQKVDevice(h, m.w.QProj, m.w.KProj, m.w.VProj, L, D, qCols, kvCols); ferr == nil {
+				qRaw, k, v = fq, fk, fv
+				qkvFused = true
+			}
+		}
+		if !qkvFused {
+			sc.qRaw = matNTInto(sc.qRaw, h, m.w.QProj, L, D, qCols) // [L, qCols]
+			qRaw = sc.qRaw
+			sc.k = matNTInto(sc.k, h, m.w.KProj, L, D, kvCols) // [L, KVH*HD]
+			k = sc.k
+			sc.v = matNTInto(sc.v, h, m.w.VProj, L, D, kvCols) // [L, KVH*HD]
+			v = sc.v
+		}
 	}
 	if cfg.QKVClip > 0 {
 		for _, values := range [][]float32{qRaw, k, v} {

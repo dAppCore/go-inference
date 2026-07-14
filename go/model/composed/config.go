@@ -12,6 +12,27 @@ import core "dappco.re/go"
 // shapes by the loader; when the config declares the linear_* fields they are validated against that
 // derivation (a mismatched config/checkpoint pairing fails loudly rather than mis-loading).
 
+// tokenID parses a HF token-id config field that ships as EITHER a scalar or a list (a multimodal
+// wrapper's eos_token_id is [id, …] while the nested text_config's is a plain int) — keeping the first id.
+// Carried only (the composed serve reads its stop tokens from the tokenizer / generation config, not from
+// here), so first-of-list is a faithful scalar reduction; an absent/null field stays 0.
+type tokenID int
+
+// UnmarshalJSON accepts a JSON number or the first element of a JSON array. core.JSONUnmarshal so no
+// encoding/json import is needed; a shape it cannot read leaves the id 0 rather than failing the parse.
+func (t *tokenID) UnmarshalJSON(b []byte) error {
+	var n float64
+	if r := core.JSONUnmarshal(b, &n); r.OK {
+		*t = tokenID(n)
+		return nil
+	}
+	var arr []float64
+	if r := core.JSONUnmarshal(b, &arr); r.OK && len(arr) > 0 {
+		*t = tokenID(arr[0])
+	}
+	return nil
+}
+
 // ropeParams is the rope_parameters block (Qwen 3.6 nests rope config here, not under rope_scaling). For
 // pure-text decode the mRoPE collapses to standard partial rotary (all three position dims share the text
 // position), so mrope_interleaved / mrope_section are carried for completeness + the rotary reduction
@@ -85,9 +106,11 @@ type loaderConfig struct {
 	// The in-checkpoint multi-token-prediction head depth. Carried; the speculative wiring is out of scope.
 	MTPNumHiddenLayers int `json:"mtp_num_hidden_layers"`
 
-	// Token ids (Qwen 3.6: bos == eos == 248044).
-	BosTokenID int `json:"bos_token_id"`
-	EosTokenID int `json:"eos_token_id"`
+	// Token ids (Qwen 3.6: bos == eos == 248044). tokenID because HF ships eos_token_id polymorphically:
+	// the multimodal wrapper's top-level key is a LIST ([248046, 248044]) while the nested text_config's is
+	// a scalar — a plain int field would fail the whole parse on the list form.
+	BosTokenID tokenID `json:"bos_token_id"`
+	EosTokenID tokenID `json:"eos_token_id"`
 
 	RopeParameters *ropeParams   `json:"rope_parameters"`
 	VisionConfig   *visionConfig `json:"vision_config"`

@@ -5,6 +5,7 @@ package composed
 import (
 	"strings"
 
+	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/safetensors"
 )
@@ -38,6 +39,19 @@ func init() {
 				return nil, err
 			}
 			return NewTokenModel(cm), nil
+		},
+	})
+
+	// The multi-token-prediction drafter (qwen3_5_mtp) is a REGISTERED model_type with a clean refusal, not
+	// an "unknown model architecture": it is the small speculative head trained alongside a Qwen 3.6 base,
+	// served as that base's drafter — it has no standalone forward. Pairing it to its base is a later slice;
+	// today it must load-fail with a message that says WHY, so a user who points lem at the MTP submodule
+	// alone gets direction rather than a mystery. Registered separately from the base hybrid so the refusal
+	// message is distinct from a real load failure.
+	model.RegisterArch(model.ArchSpec{
+		ModelTypes: []string{"qwen3_5_mtp", "qwen3_5_mtp_text", "qwen3_6_mtp"},
+		Composed: func(map[string]safetensors.Tensor, []byte) (model.TokenModel, error) {
+			return nil, core.NewError("composed: qwen3_5_mtp is an MTP drafter — serve paired with its base model")
 		},
 	})
 }

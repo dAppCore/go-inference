@@ -6,6 +6,7 @@ import (
 	"math"
 	"testing"
 
+	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/quant/mlxaffine"
 	"dappco.re/go/inference/model/safetensors"
 )
@@ -383,11 +384,12 @@ func quantiseInPlace(t *testing.T, ts map[string]safetensors.Tensor, name string
 	return want
 }
 
-// TestLoadComposedQuantised pins the mlx-affine quantised path: packed-uint32 weights with
-// .scales/.biases siblings dequantise to EXACTLY mlxaffine.DequantizeTensor's output, the
-// per-module override (8-bit embed, language_model.-prefixed key) is honoured over the 4-bit
-// default, and the logical hidden width is recovered from the dequantised length (a packed
-// embed's Shape[1] is the compressed word count, not D).
+// TestLoadComposedQuantised pins the mlx-affine quantised path kept PACKED: the projection weights stay
+// packed (m.Embed/MLP.Gate nil, the QuantWeight carried instead), the per-module override (8-bit embed,
+// language_model.-prefixed key) is honoured over the 4-bit default, and the logical hidden width is
+// recovered from the packed embed's InDim (its Shape[1] is the compressed word count, not D). The packed
+// bytes must dequantise back to EXACTLY mlxaffine.DequantizeTensor's output — proof the loader carried the
+// weight through untouched rather than mis-copying it.
 func TestLoadComposedQuantised(t *testing.T) {
 	ts, config := mkHybridCheckpoint()
 	wantEmbed := quantiseInPlace(t, ts, "model.embed_tokens.weight", 8, 8)
@@ -399,24 +401,46 @@ func TestLoadComposedQuantised(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadComposed: %v", err)
 	}
+	if !m.Quantised {
+		t.Fatal("Quantised flag not set for a checkpoint with a quantization block")
+	}
 	if m.D != 8 || m.Vocab != 32 {
 		t.Fatalf("logical dims: got D=%d vocab=%d, want 8/32", m.D, m.Vocab)
 	}
-	if len(m.Embed) != len(wantEmbed) {
-		t.Fatalf("embed length: got %d want %d", len(m.Embed), len(wantEmbed))
+	// Embed kept packed (not widened), 8-bit override honoured; dequantises back to the reference.
+	if m.Embed != nil || m.EmbedQ == nil {
+		t.Fatalf("embed not kept packed: Embed=%d EmbedQ=%v", len(m.Embed), m.EmbedQ != nil)
 	}
-	for i := range wantEmbed {
-		if m.Embed[i] != wantEmbed[i] {
-			t.Fatalf("embed[%d]: got %v want %v (8-bit override not honoured?)", i, m.Embed[i], wantEmbed[i])
-		}
+	if m.EmbedQ.Bits != 8 || m.EmbedQ.GroupSize != 8 {
+		t.Fatalf("embed override: got bits=%d gs=%d, want 8/8 (per-module override not honoured?)", m.EmbedQ.Bits, m.EmbedQ.GroupSize)
 	}
-	gate := m.Layers[0].MLP.(*MLP).Gate
-	if len(gate) != len(wantGate) {
-		t.Fatalf("gate length: got %d want %d", len(gate), len(wantGate))
+	assertQuantDequantises(t, "embed", m.EmbedQ, wantEmbed)
+
+	// Gate kept packed at the 4-bit default; dequantises back to the reference.
+	mlp := m.Layers[0].MLP.(*MLP)
+	if mlp.Gate != nil || mlp.GateQ == nil {
+		t.Fatalf("gate not kept packed: Gate=%d GateQ=%v", len(mlp.Gate), mlp.GateQ != nil)
 	}
-	for i := range wantGate {
-		if gate[i] != wantGate[i] {
-			t.Fatalf("gate[%d]: got %v want %v", i, gate[i], wantGate[i])
+	if mlp.GateQ.Bits != 4 {
+		t.Fatalf("gate bits: got %d, want 4 (default)", mlp.GateQ.Bits)
+	}
+	assertQuantDequantises(t, "gate", mlp.GateQ, wantGate)
+}
+
+// assertQuantDequantises checks a packed QuantWeight dequantises byte-for-byte to want — the loader must
+// carry the checkpoint bytes through untouched (a mis-slice or a stale mmap alias would diverge here).
+func assertQuantDequantises(t *testing.T, label string, qw *model.QuantWeight, want []float32) {
+	t.Helper()
+	got, err := mlxaffine.DequantizeTensor(qw.Packed, qw.Scales, qw.Biases, qw.OutDim, qw.InDim, qw.Bits, qw.GroupSize)
+	if err != nil {
+		t.Fatalf("%s: dequantise packed: %v", label, err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%s: dequant length %d != %d", label, len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s[%d]: packed dequant %v != reference %v", label, i, got[i], want[i])
 		}
 	}
 }

@@ -56,7 +56,10 @@ func (tm *ComposedTokenModel) Embed(id int32) ([]byte, error) {
 	if int(id) < 0 || int(id) >= tm.m.Vocab {
 		return nil, core.NewError("composed.Embed: id out of range")
 	}
-	embed := append([]float32(nil), tm.m.Embed[int(id)*tm.m.D:int(id)*tm.m.D+tm.m.D]...)
+	embed := make([]float32, tm.m.D)
+	if err := tm.m.embedRow(embed, int(id)); err != nil {
+		return nil, err
+	}
 	if tm.m.EmbedScale != 0 && tm.m.EmbedScale != 1 {
 		for i := range embed {
 			embed[i] *= tm.m.EmbedScale

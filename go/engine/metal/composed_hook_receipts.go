@@ -34,6 +34,11 @@ type ComposedHookCounts struct {
 	Mamba2Input     ComposedHookPhaseCounts
 	RWKV7Input      ComposedHookPhaseCounts
 	Head            ComposedHookPhaseCounts
+	// QuantProjection counts the PACKED-weight matvec seam (composed/qwen3.ProjQuantMatMulInto). A
+	// quantised composed model serves through this per-projection quant path — the f32 fold ladder above
+	// is bypassed (it takes f32 weights; quant fused tails are a later slice), so for a packed checkpoint
+	// this is the seam that engages while every f32 fold seam stays zero.
+	QuantProjection ComposedHookPhaseCounts
 }
 
 const (
@@ -48,6 +53,7 @@ const (
 	hookMamba2Input
 	hookRWKV7Input
 	hookHead
+	hookQuantProjection
 	hookCount
 )
 
@@ -88,6 +94,7 @@ func (g *ComposedHookReceiptGuard) Snapshot() ComposedHookCounts {
 		ProjectionTail: phase(hookProjectionTail), AttentionInput: phase(hookAttentionInput),
 		GatedDeltaFold: phase(hookGatedDeltaFold), Mamba2Input: phase(hookMamba2Input),
 		RWKV7Input: phase(hookRWKV7Input), Head: phase(hookHead),
+		QuantProjection: phase(hookQuantProjection),
 	}
 }
 
@@ -100,11 +107,13 @@ func EnableComposedHookReceipts() *ComposedHookReceiptGuard {
 	resTail, projTail := composed.ResidualNormMLPDevice, composed.ResidualNormMLPProjDevice
 	attnIn, gdFold := composed.ResidualNormMLPProjAttnInputDevice, composed.ResidualNormMLPProjGatedDeltaInputDevice
 	mambaIn, rwkvIn, head := composed.ResidualNormMLPProjMamba2InputDevice, composed.ResidualNormMLPProjRWKV7InputDevice, composed.ResidualNormMLPProjHeadDevice
+	quantProj, quantProjGD := composed.ProjQuantMatMulInto, qwen3.ProjQuantMatMulInto
 	g.restore = func() {
 		composed.ProjMatMulInto, composed.MLPDevice, composed.AttnQKVDevice, qwen3.GatedDeltaInputDevice = proj, mlp, aqkv, gdInput
 		composed.ResidualNormMLPDevice, composed.ResidualNormMLPProjDevice = resTail, projTail
 		composed.ResidualNormMLPProjAttnInputDevice, composed.ResidualNormMLPProjGatedDeltaInputDevice = attnIn, gdFold
 		composed.ResidualNormMLPProjMamba2InputDevice, composed.ResidualNormMLPProjRWKV7InputDevice, composed.ResidualNormMLPProjHeadDevice = mambaIn, rwkvIn, head
+		composed.ProjQuantMatMulInto, qwen3.ProjQuantMatMulInto = quantProj, quantProjGD
 	}
 	if proj != nil {
 		composed.ProjMatMulInto = func(out, x, w []float32, M, K, N int) ([]float32, error) {
@@ -170,6 +179,18 @@ func EnableComposedHookReceipts() *ComposedHookReceiptGuard {
 		composed.ResidualNormMLPProjHeadDevice = func(mh, pw, h, nw, gate, up, down []float32, L, D, mc, FF int, eps float32, nf, hw []float32, vocab int) ([]float32, []float32, error) {
 			g.hit(hookHead, L)
 			return head(mh, pw, h, nw, gate, up, down, L, D, mc, FF, eps, nf, hw, vocab)
+		}
+	}
+	if quantProj != nil {
+		composed.ProjQuantMatMulInto = func(out, x []float32, packed, scales, biases []byte, M, K, N, gs, bits int) ([]float32, error) {
+			g.hit(hookQuantProjection, M)
+			return quantProj(out, x, packed, scales, biases, M, K, N, gs, bits)
+		}
+	}
+	if quantProjGD != nil {
+		qwen3.ProjQuantMatMulInto = func(out, x []float32, packed, scales, biases []byte, M, K, N, gs, bits int) ([]float32, error) {
+			g.hit(hookQuantProjection, M)
+			return quantProjGD(out, x, packed, scales, biases, M, K, N, gs, bits)
 		}
 	}
 	return g

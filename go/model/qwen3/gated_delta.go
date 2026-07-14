@@ -7,8 +7,10 @@ import (
 	"runtime"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/deltanet"
 	"dappco.re/go/inference/model/mamba2"
+	"dappco.re/go/inference/model/quant/mlxaffine"
 )
 
 // gated_delta.go is the Qwen 3.6 GatedDeltaNet linear-attention block (the "linear_attention" layers of
@@ -56,6 +58,14 @@ type GatedDeltaWeights struct {
 	InProjZ    []float32
 	Norm       []float32
 	OutProj    []float32
+	// Packed forms in a quant checkpoint (nil ⇒ the dense f32 field is used). The five projections
+	// (in_proj_qkv/a/b/z + out_proj) dispatch to the quant matvec seam; the conv/A_log/norm/dt_bias stay
+	// host f32 (small, unquantised) so the recurrent state math is exact.
+	InProjQKVQ *model.QuantWeight
+	InProjAQ   *model.QuantWeight
+	InProjBQ   *model.QuantWeight
+	InProjZQ   *model.QuantWeight
+	OutProjQ   *model.QuantWeight
 }
 
 // ProjMatMul is the device-GEMM seam for the gated-delta projections (host matNT default; native injects
@@ -68,6 +78,57 @@ var ProjMatMul func(x, w []float32, M, K, N int) ([]float32, error)
 // host matNTInto. AX-8: the lib declares the hook, the backend sets it. Into is preferred when set and
 // the legacy ProjMatMul stays the fallback, so a backend that wired only the old hook keeps working.
 var ProjMatMulInto func(out, x, w []float32, M, K, N int) ([]float32, error)
+
+// ProjQuantMatMulInto is the quant twin of ProjMatMulInto: out[M,N] = x[M,K] @ dequant(w)ᵀ for an MLX
+// affine-packed weight (packed uint32 codes + bf16 scales/biases). N=outDim, K=inDim, groupSize divides K,
+// bits a shipped kernel width. Same AX-8 shape: qwen3 declares the hook and runs the host dequant-row
+// fallback (matNTQuantHost); the native backend binds it to the metallib's affine_qmv / affine_qmm_t float
+// kernels. nil, or a device error, falls to the host path — correct on any build, not memory-heavy.
+var ProjQuantMatMulInto func(out, x []float32, packed, scales, biases []byte, M, K, N, groupSize, bits int) ([]float32, error)
+
+// matNTQuant computes out[M,N] = x[M,K] @ dequant(qw)ᵀ for a packed gated-delta projection, preferring the
+// device quant seam and falling back to the host dequant-row path — the gated-delta counterpart of
+// composed.matNTQuant, with the same deterministic-on-device-failure contract.
+func matNTQuant(out, x []float32, qw *model.QuantWeight, M, K, N int) []float32 {
+	if ProjQuantMatMulInto != nil {
+		if res, err := ProjQuantMatMulInto(out, x, qw.Packed, qw.Scales, qw.Biases, M, K, N, qw.GroupSize, qw.Bits); err == nil {
+			return res
+		}
+	}
+	return matNTQuantHost(out, x, qw, M, K, N)
+}
+
+// matNTQuantHost dequantises each output row [K] of the packed weight and dots it with every input row —
+// never widening the whole [N,K] weight. The host reference for a non-metal build / a device error; f64
+// accumulation in ascending-k order so it matches matNTCols' tier.
+func matNTQuantHost(out, x []float32, qw *model.QuantWeight, M, K, N int) []float32 {
+	if cap(out) < M*N {
+		out = make([]float32, M*N)
+	} else {
+		out = out[:M*N]
+	}
+	wordsPerRow := mlxaffine.PackedWords(K, qw.Bits)
+	groupsPerRow := K / qw.GroupSize
+	for n := range N {
+		wr, err := mlxaffine.DequantizeTensor(
+			qw.Packed[n*wordsPerRow*4:(n+1)*wordsPerRow*4],
+			qw.Scales[n*groupsPerRow*2:(n+1)*groupsPerRow*2],
+			qw.Biases[n*groupsPerRow*2:(n+1)*groupsPerRow*2],
+			1, K, qw.Bits, qw.GroupSize)
+		if err != nil {
+			return out
+		}
+		for m := range M {
+			xr := x[m*K : m*K+K]
+			var acc float64
+			for k := range K {
+				acc += float64(xr[k]) * float64(wr[k])
+			}
+			out[m*N+n] = float32(acc)
+		}
+	}
+	return out
+}
 
 // GatedDeltaInputDevice fuses the four x-reading input projections — in_proj_qkv, in_proj_z,
 // in_proj_a, in_proj_b — into ONE command buffer. They all read the same x [L,D], so the GEMMs are
@@ -210,9 +271,13 @@ func GatedDeltaForwardScratchF32(x []float32, w *GatedDeltaWeights, cfg GatedDel
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	out, err = projMatMulInto(sc.out, gated, w.OutProj, L, vDim, D)
-	if err != nil {
-		return nil, nil, nil, err
+	if w.OutProjQ != nil { // packed out_proj through the quant matvec seam
+		out = matNTQuant(sc.out, gated, w.OutProjQ, L, vDim, D)
+	} else {
+		out, err = projMatMulInto(sc.out, gated, w.OutProj, L, vDim, D)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 	}
 	sc.out = out
 	return out, newConv, newDelta, nil
@@ -247,34 +312,48 @@ func GatedDeltaForwardScratchNoProjF32(x []float32, w *GatedDeltaWeights, cfg Ga
 	// conv/recurrence that consume it downstream — is identical to computing it at its use site. A nil
 	// hook or a device error leaves inputFused false and each projection runs at its per-call site below.
 	var qkv, alpha, beta, zProj []float32
-	inputFused := false
-	if GatedDeltaInputDevice != nil && L*D*convDim >= deviceMinWork {
-		if fqkv, fz, fa, fb, ferr := GatedDeltaInputDevice(x, w.InProjQKV, w.InProjZ, w.InProjA, w.InProjB, L, D, convDim, vDim, VH); ferr == nil {
-			qkv, zProj, alpha, beta = fqkv, fz, fa, fb
-			inputFused = true
+	if w.InProjQKVQ != nil {
+		// Packed input projections: each dispatches to the quant matvec seam (the f32 GatedDeltaInputDevice
+		// fuse takes f32 weights — bypassed). z is computed here before the conv/recurrence exactly as the
+		// dense per-projection path does; identical downstream.
+		sc.qkv = matNTQuant(sc.qkv, x, w.InProjQKVQ, L, D, convDim)
+		qkv = sc.qkv
+		sc.aProj = matNTQuant(sc.aProj, x, w.InProjAQ, L, D, VH)
+		alpha = sc.aProj
+		sc.bProj = matNTQuant(sc.bProj, x, w.InProjBQ, L, D, VH)
+		beta = sc.bProj
+		sc.zProj = matNTQuant(sc.zProj, x, w.InProjZQ, L, D, vDim)
+		zProj = sc.zProj
+	} else {
+		inputFused := false
+		if GatedDeltaInputDevice != nil && L*D*convDim >= deviceMinWork {
+			if fqkv, fz, fa, fb, ferr := GatedDeltaInputDevice(x, w.InProjQKV, w.InProjZ, w.InProjA, w.InProjB, L, D, convDim, vDim, VH); ferr == nil {
+				qkv, zProj, alpha, beta = fqkv, fz, fa, fb
+				inputFused = true
+			}
 		}
-	}
-	if !inputFused {
-		qkv, err = projMatMulInto(sc.qkv, x, w.InProjQKV, L, D, convDim)
-		if err != nil {
-			return nil, 0, nil, nil, err
+		if !inputFused {
+			qkv, err = projMatMulInto(sc.qkv, x, w.InProjQKV, L, D, convDim)
+			if err != nil {
+				return nil, 0, nil, nil, err
+			}
+			sc.qkv = qkv
+			alpha, err = projMatMulInto(sc.aProj, x, w.InProjA, L, D, VH)
+			if err != nil {
+				return nil, 0, nil, nil, err
+			}
+			sc.aProj = alpha
+			beta, err = projMatMulInto(sc.bProj, x, w.InProjB, L, D, VH)
+			if err != nil {
+				return nil, 0, nil, nil, err
+			}
+			sc.bProj = beta
+			zProj, err = projMatMulInto(sc.zProj, x, w.InProjZ, L, D, vDim)
+			if err != nil {
+				return nil, 0, nil, nil, err
+			}
+			sc.zProj = zProj
 		}
-		sc.qkv = qkv
-		alpha, err = projMatMulInto(sc.aProj, x, w.InProjA, L, D, VH)
-		if err != nil {
-			return nil, 0, nil, nil, err
-		}
-		sc.aProj = alpha
-		beta, err = projMatMulInto(sc.bProj, x, w.InProjB, L, D, VH)
-		if err != nil {
-			return nil, 0, nil, nil, err
-		}
-		sc.bProj = beta
-		zProj, err = projMatMulInto(sc.zProj, x, w.InProjZ, L, D, vDim)
-		if err != nil {
-			return nil, 0, nil, nil, err
-		}
-		sc.zProj = zProj
 	}
 	return GatedDeltaForwardScratchFromInputF32(qkv, zProj, alpha, beta, w, cfg, priorConv, priorDelta, L, D, sc)
 }
