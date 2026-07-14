@@ -85,6 +85,9 @@ func TestInferenceKVSnapshot_Roundtrip_Good(t *testing.T) {
 		t.Fatalf("snapshot geometry = layers %d headDim %d seqLen %d, want %d %d %d",
 			snapshot.NumLayers, snapshot.HeadDim, snapshot.SeqLen, layers, headDim, tokens)
 	}
+	if snapshot.Architecture != "gemma4_text" {
+		t.Fatalf("snapshot Architecture = %q, want dtype-neutral gemma4_text", snapshot.Architecture)
+	}
 	if snapshot.NumHeads != 1 {
 		t.Fatalf("snapshot NumHeads = %d, want 1 (single KV row per token)", snapshot.NumHeads)
 	}

@@ -49,6 +49,7 @@ func TestHipEngineSession_RangeKVBlocks_Good_HonoursBlockStartToken(t *testing.T
 func TestHipEngineSession_RestoreFromKV_Good_PreservesRawDevicePageState(t *testing.T) {
 	source := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
 	defer func() { _ = source.Close() }()
+	source.generated = []int32{8}
 
 	snapshot, err := source.CaptureKVWithOptions(kv.CaptureOptions{})
 	core.RequireNoError(t, err)
@@ -60,6 +61,7 @@ func TestHipEngineSession_RestoreFromKV_Good_PreservesRawDevicePageState(t *test
 	restored := &hipEngineSession{cfg: source.cfg, mode: source.mode, driver: source.driver}
 	defer func() { _ = restored.Close() }()
 	core.RequireNoError(t, restored.RestoreFromKV(context.Background(), snapshot))
+	core.AssertEqual(t, []int32{8}, restored.generated)
 
 	got, err := restored.CaptureKVWithOptions(kv.CaptureOptions{})
 	core.RequireNoError(t, err)
@@ -74,6 +76,139 @@ func TestHipEngineSession_RestoreFromKV_Good_PreservesRawDevicePageState(t *test
 		!bytes.Equal(snapshot.Layers[0].ValueBytes, got.Layers[0].ValueBytes) {
 		t.Fatal("CaptureKV -> RestoreFromKV -> CaptureKV changed the encoded device KV state")
 	}
+}
+
+// TestHipEngineSession_GenerateFromCacheEach_Good_ReplaysMaterializedBoundary
+// proves that a portable snapshot whose K/V already includes every token can
+// still continue. HIP's combined entry point needs one seed token, so the
+// session rolls back exactly the final row and forwards only that token.
+func TestHipEngineSession_GenerateFromCacheEach_Good_ReplaysMaterializedBoundary(t *testing.T) {
+	source := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
+	defer func() { _ = source.Close() }()
+	layer, cleanup := hipGemma4Q4FixtureConfig(t, source.driver, 0, 2, 4, 8)
+	defer cleanup()
+	source.cfg = hipGemma4Q4ForwardConfig{Layers: []hipGemma4Q4Layer0Config{layer}}
+	source.generated = []int32{8}
+	snapshot, err := source.CaptureKVWithOptions(kv.CaptureOptions{})
+	core.RequireNoError(t, err)
+
+	restored := &hipEngineSession{
+		cfg:    source.cfg,
+		mode:   source.mode,
+		driver: source.driver,
+		loaded: &hipLoadedModel{contextSize: 32},
+	}
+	defer func() { _ = restored.Close() }()
+	core.RequireNoError(t, restored.RestoreFromKV(context.Background(), snapshot))
+	core.AssertEqual(t, []int32(nil), restored.pending)
+
+	var gotPrompt []int32
+	gotInitialTokens := -1
+	restored.drive = func(_ context.Context, prompt []int32, _ []byte, _ inference.GenerateConfig, _ *model.Sampler, state *hipGemma4Q4DeviceDecodeState, emit func(int32) bool) ([]int32, *hipGemma4Q4DeviceDecodeState, error) {
+		gotPrompt = append([]int32(nil), prompt...)
+		if state != nil {
+			gotInitialTokens = state.maxLayerTokenCount()
+		}
+		if emit != nil {
+			emit(9)
+		}
+		return []int32{9}, state, nil
+	}
+
+	generated, err := restored.GenerateFromCacheEach(1, -1, nil)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, []int32{9}, generated)
+	core.AssertEqual(t, []int32{2}, gotPrompt)
+	core.AssertEqual(t, 1, gotInitialTokens)
+	core.AssertEqual(t, []int32{8, 9}, restored.generated)
+}
+
+func TestHipEngineSession_GenerateFromCacheEach_Good_UsesRestoredBoundaryLogits(t *testing.T) {
+	source := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
+	defer func() { _ = source.Close() }()
+	layer, cleanup := hipGemma4Q4FixtureConfig(t, source.driver, 0, 2, 4, 8)
+	defer cleanup()
+	source.cfg = hipGemma4Q4ForwardConfig{Layers: []hipGemma4Q4Layer0Config{layer}}
+	source.generated = []int32{8}
+	snapshot, err := source.CaptureKVWithOptions(kv.CaptureOptions{})
+	core.RequireNoError(t, err)
+	snapshot.LogitShape = []int32{1, 2}
+	snapshot.Logits = []float32{-4, 6}
+
+	restored := &hipEngineSession{
+		cfg:    source.cfg,
+		mode:   source.mode,
+		driver: source.driver,
+		loaded: &hipLoadedModel{contextSize: 32},
+	}
+	defer func() { _ = restored.Close() }()
+	core.RequireNoError(t, restored.RestoreFromKV(context.Background(), snapshot))
+
+	var gotPrompt []int32
+	gotInitialTokens := -1
+	gotMaxTokens := -1
+	restored.drive = func(_ context.Context, prompt []int32, _ []byte, generate inference.GenerateConfig, _ *model.Sampler, state *hipGemma4Q4DeviceDecodeState, emit func(int32) bool) ([]int32, *hipGemma4Q4DeviceDecodeState, error) {
+		gotPrompt = append([]int32(nil), prompt...)
+		gotMaxTokens = generate.MaxTokens
+		if state != nil {
+			gotInitialTokens = state.maxLayerTokenCount()
+		}
+		if emit != nil {
+			emit(0)
+		}
+		return []int32{0}, state, nil
+	}
+	var yielded []int32
+
+	generated, err := restored.GenerateFromCacheEach(2, -1, func(id int32) bool {
+		yielded = append(yielded, id)
+		return true
+	})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, []int32{1, 0}, generated)
+	core.AssertEqual(t, []int32{1, 0}, yielded)
+	core.AssertEqual(t, []int32{1}, gotPrompt)
+	core.AssertEqual(t, 2, gotInitialTokens)
+	core.AssertEqual(t, 1, gotMaxTokens)
+	core.AssertEqual(t, []int32{8, 1, 0}, restored.generated)
+}
+
+func TestHipEngineSession_CaptureKVWithOptions_Good_PreservesRestoredBoundaryLogits(t *testing.T) {
+	source := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
+	defer func() { _ = source.Close() }()
+	layer, cleanup := hipGemma4Q4FixtureConfig(t, source.driver, 0, 2, 4, 8)
+	defer cleanup()
+	source.cfg = hipGemma4Q4ForwardConfig{Layers: []hipGemma4Q4Layer0Config{layer}}
+	snapshot, err := source.CaptureKVWithOptions(kv.CaptureOptions{})
+	core.RequireNoError(t, err)
+	snapshot.LogitShape = []int32{1, 1, 2}
+	snapshot.Logits = []float32{-4, 6}
+
+	restored := &hipEngineSession{cfg: source.cfg, mode: source.mode, driver: source.driver}
+	defer func() { _ = restored.Close() }()
+	core.RequireNoError(t, restored.RestoreFromKV(context.Background(), snapshot))
+
+	roundTrip, err := restored.CaptureKVWithOptions(kv.CaptureOptions{})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, []int32{1, 1, 2}, roundTrip.LogitShape)
+	core.AssertEqual(t, []float32{-4, 6}, roundTrip.Logits)
+
+	var blocks []kv.Block
+	core.RequireNoError(t, restored.RangeKVBlocks(1, kv.CaptureOptions{}, func(block kv.Block) (bool, error) {
+		blocks = append(blocks, block)
+		return true, nil
+	}))
+	core.AssertEqual(t, 2, len(blocks))
+	core.AssertEqual(t, []float32(nil), blocks[0].Snapshot.Logits)
+	core.AssertEqual(t, []int32{1, 1, 2}, blocks[1].Snapshot.LogitShape)
+	core.AssertEqual(t, []float32{-4, 6}, blocks[1].Snapshot.Logits)
+
+	state, err := restored.StateBlockSource(1)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 2, len(state.Blocks))
+	core.AssertEqual(t, []float32(nil), state.Blocks[0].Snapshot.Logits)
+	core.AssertEqual(t, []int32{1, 1, 2}, state.Blocks[1].Snapshot.LogitShape)
+	core.AssertEqual(t, []float32{-4, 6}, state.Blocks[1].Snapshot.Logits)
 }
 
 func TestHipEngineSession_RestoreFromKV_Good_PreservesMultiHeadRawDevicePageState(t *testing.T) {
@@ -323,6 +458,30 @@ func TestHipEngineSession_PrefillTokensCached_Good_ExactHitKeepsDecodeSeed(t *te
 	core.AssertEqual(t, []int32{1, 2, 3}, session.pending)
 }
 
+func TestHipEngineSession_PrefillTokensCached_Good_ExactHitKeepsBoundaryLogits(t *testing.T) {
+	session := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
+	defer func() { _ = session.Close() }()
+	layer, cleanup := hipGemma4Q4FixtureConfig(t, session.driver, 0, 2, 4, 8)
+	defer cleanup()
+	session.cfg = hipGemma4Q4ForwardConfig{Layers: []hipGemma4Q4Layer0Config{layer}}
+	session.generated = []int32{8}
+	session.boundaryLogitShape = []int32{1, 2}
+	session.boundaryLogits = []float32{-4, 6}
+	device := session.device
+
+	reused, err := session.PrefillTokensCached([]int32{1, 2})
+
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 2, reused)
+	core.AssertEqual(t, []int32(nil), session.pending)
+	core.AssertEqual(t, []int32(nil), session.generated)
+	core.AssertEqual(t, []int32{1, 2}, session.boundaryLogitShape)
+	core.AssertEqual(t, []float32{-4, 6}, session.boundaryLogits)
+	if session.device != device {
+		t.Fatal("exact boundary hit replaced the fully resident device cache")
+	}
+}
+
 func TestHipEngineSession_PrefillTokensCached_Good_DivergenceResetsCold(t *testing.T) {
 	session := hipEngineSessionForTest([]int32{1, 2, 3, 4})
 
@@ -340,7 +499,9 @@ func TestHipEngineSession_PrefillTokensCached_Bad_RejectsContextOverflow(t *test
 
 	_, err := session.PrefillTokensCached([]int32{1, 2, 3, 4})
 
-	core.AssertError(t, err)
+	if err == nil {
+		t.Fatal("PrefillTokensCached accepted a prompt beyond the context window")
+	}
 	core.AssertContains(t, err.Error(), "context window")
 	core.AssertEqual(t, []int32{1}, session.tokens)
 }
@@ -389,6 +550,26 @@ func TestHipEngineSession_AppendTokens_Bad_ContextOverflowPreservesRetainedState
 		t.Fatal("AppendTokens overflow replaced retained device state")
 	}
 	core.AssertFalse(t, device.closed)
+}
+
+func TestHipEngineSession_GenerateFromCacheEach_Bad_ContextOverflowPreservesRetainedState(t *testing.T) {
+	session := hipEngineSessionForTest([]int32{1, 2})
+	session.loaded.contextSize = 2
+	called := false
+	session.drive = func(_ context.Context, _ []int32, _ []byte, _ inference.GenerateConfig, _ *model.Sampler, state *hipGemma4Q4DeviceDecodeState, _ func(int32) bool) ([]int32, *hipGemma4Q4DeviceDecodeState, error) {
+		called = true
+		return []int32{9}, state, nil
+	}
+
+	_, err := session.GenerateFromCacheEach(1, -1, nil)
+
+	if err == nil {
+		t.Fatal("GenerateFromCacheEach accepted a generation budget beyond the context window")
+	}
+	core.AssertContains(t, err.Error(), "context window")
+	core.AssertFalse(t, called)
+	core.AssertEqual(t, []int32{1, 2}, session.tokens)
+	core.AssertEqual(t, []int32{1, 2}, session.pending)
 }
 
 func TestHipEngineSession_AppendTokens_Bad_RejectsEmptyInputWithoutMutation(t *testing.T) {

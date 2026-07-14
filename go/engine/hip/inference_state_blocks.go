@@ -130,6 +130,7 @@ func (s *hipEngineSession) RestoreStateBlocks(source HIPSessionStateBlockSource)
 		s.pendingEmbeddings = nil
 		s.tokens = nil
 		s.generated = nil
+		s.clearBoundaryLogitsLocked()
 		return nil
 	}
 	if len(source.Blocks) == 0 {
@@ -218,6 +219,9 @@ func (s *hipEngineSession) stateBlocksLocked(blockSize, startToken int) ([]kv.Bl
 			if err := hipAttachDeviceKVPayloadRange(snapshot, s.device, start, kvCount); err != nil {
 				return nil, err
 			}
+		}
+		if start+count == len(s.tokens) {
+			s.attachBoundaryLogitsLocked(snapshot)
 		}
 		snapshot.TokenOffset = start + count
 		blocks = append(blocks, kv.Block{Index: index, TokenStart: start, TokenCount: count, Snapshot: snapshot})

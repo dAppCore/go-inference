@@ -35,9 +35,13 @@ import (
 	"dappco.re/go/inference/kv"
 )
 
-// hipKVSnapshotArchitecture tags snapshots captured from the retained Gemma4-Q4
-// engine so a restore can reject a snapshot from a different engine family.
-const hipKVSnapshotArchitecture = "gemma4-q4"
+// hipKVSnapshotArchitecture tags the Gemma4 text cache independently of weight
+// dtype. The retained runtime serves both MLX Q4 and dense BF16 models.
+const hipKVSnapshotArchitecture = "gemma4_text"
+
+// hipKVSnapshotLegacyQ4Architecture remains readable for snapshots emitted
+// before the dense BF16 retained lane was linked.
+const hipKVSnapshotLegacyQ4Architecture = "gemma4-q4"
 
 // hipKVSnapshotFloat32DType is the K/V element dtype at hip's host boundary —
 // HostState always returns float32 (the device FP16 cache is widened on copy).
@@ -132,8 +136,8 @@ func hipSnapshotToDecodeState(snapshot *kv.Snapshot, cfg hipGemma4Q4ForwardConfi
 	if snapshot == nil {
 		return hipGemma4Q4DecodeState{}, core.E("rocm.hip.KVSnapshot.Restore", "snapshot is nil", nil)
 	}
-	if snapshot.Architecture != "" && snapshot.Architecture != hipKVSnapshotArchitecture {
-		return hipGemma4Q4DecodeState{}, core.E("rocm.hip.KVSnapshot.Restore", "snapshot architecture is not gemma4-q4", nil)
+	if snapshot.Architecture != "" && snapshot.Architecture != hipKVSnapshotArchitecture && snapshot.Architecture != hipKVSnapshotLegacyQ4Architecture {
+		return hipGemma4Q4DecodeState{}, core.E("rocm.hip.KVSnapshot.Restore", "snapshot architecture is not Gemma4 text", nil)
 	}
 	if len(snapshot.Layers) != len(cfg.Layers) {
 		return hipGemma4Q4DecodeState{}, core.E("rocm.hip.KVSnapshot.Restore", "snapshot layer count must match forward config", nil)
