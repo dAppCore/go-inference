@@ -658,6 +658,43 @@ func TestHipLoadedGemma4Q4GenerateLinkedAcceptsIntegratedMoEGGUF(t *testing.T) {
 	core.AssertEqual(t, true, hipLoadedGemma4Q4GenerateLinked(model))
 }
 
+func TestROCmCapabilityReportGemma4MoEUsesProductionIntegration_Good(t *testing.T) {
+	labels := linkedGemma4TestLabels("26B-A4B", "q4")
+	labels["gemma4_source_format"] = "gguf"
+	labels["gemma4_enable_moe_block"] = "true"
+	labels["gemma4_num_experts"] = "16"
+	labels["gemma4_top_k_experts"] = "4"
+	identity := inference.ModelIdentity{
+		Path:         "/models/gemma-4-26b-a4b-q4_k_m.gguf",
+		Architecture: "gemma4",
+		QuantBits:    4,
+		NumLayers:    30,
+		HiddenSize:   2816,
+		Labels:       labels,
+	}
+	report := rocmCapabilityReport(nativeDeviceInfo{}, identity, inference.AdapterIdentity{}, true, defaultHIPKernelStatus(), rocmCapabilityReportOption{Gemma4Q4GenerateLinked: true})
+	for id, wantKernel := range map[inference.CapabilityID]string{
+		inference.CapabilityMoERouting:     hipKernelNameMoERouter,
+		inference.CapabilityMoELazyExperts: "adaptive_lru",
+	} {
+		capability, ok := report.Capability(id)
+		if !ok {
+			t.Fatalf("capability %s is missing", id)
+		}
+		if capability.Labels["production_integration"] != hipKernelStatusLinked ||
+			capability.Labels["model_scope"] != "gemma4_moe_gguf" ||
+			capability.Labels["runtime_status"] != string(inference.FeatureRuntimeExperimental) {
+			t.Fatalf("capability %s = %+v, want linked Gemma4 MoE production integration", id, capability)
+		}
+		if id == inference.CapabilityMoERouting && capability.Labels["kernel_name"] != wantKernel {
+			t.Fatalf("MoE routing labels = %+v, want kernel %q", capability.Labels, wantKernel)
+		}
+		if id == inference.CapabilityMoELazyExperts && capability.Labels["expert_residency"] != wantKernel {
+			t.Fatalf("MoE residency labels = %+v, want %q", capability.Labels, wantKernel)
+		}
+	}
+}
+
 func TestHipLoadedGemma4Q4GenerateLinkedUsesEngineProfile(t *testing.T) {
 	info := inference.ModelInfo{Architecture: "gemma4_text", QuantBits: 6, NumLayers: 26, HiddenSize: 2304}
 	model := &hipLoadedModel{

@@ -2233,7 +2233,9 @@ func rocmCapabilityReport(device nativeDeviceInfo, model inference.ModelIdentity
 	gemma4Features := Gemma4EngineFeaturesForIdentity(model)
 	gemma4DeclaredFeatures := Gemma4DeclaredFeaturesForIdentity(model)
 	gemma4Model := isROCmGemma4Architecture(model.Architecture)
-	gemma4GenerateLinked := gemma4Features.GenerateLinked()
+	loadedGemma4MoEGenerateLinked := option.Gemma4Q4GenerateLinked &&
+		gemma4DeclaredFeatures.Mixture && rocmGemma4ModelSourceFormatGGUF(model)
+	gemma4GenerateLinked := gemma4Features.GenerateLinked() || loadedGemma4MoEGenerateLinked
 	if option.Gemma4Q4GenerateLinked && !gemma4GenerateLinked {
 		option.Gemma4Q4GenerateLinked = false
 	}
@@ -2487,6 +2489,28 @@ func rocmCapabilityReport(device nativeDeviceInfo, model inference.ModelIdentity
 	agentMemoryCapability := rocmAgentMemoryCapability()
 	quantizationCapability := inference.ExperimentalCapability(inference.CapabilityQuantization, inference.CapabilityGroupRuntime, "TurboQuant KV-cache compression has a CPU reference codec for research validation; model weight quantisation remains owned by model-pack metadata and production HIP KV compression is pending")
 	quantizationCapability.Labels = rocmQuantizationCapabilityLabels()
+	moeRoutingCapability := rocmFixtureKernelCapability(inference.CapabilityMoERouting, inference.CapabilityGroupModel, "MoE router top-k fixture kernel is linked; full model router integration remains pending")
+	moeLazyExpertsCapability := rocmFixtureKernelCapability(inference.CapabilityMoELazyExperts, inference.CapabilityGroupRuntime, "MoE lazy expert residency fixture kernel is linked; production expert paging remains pending")
+	if option.Gemma4Q4GenerateLinked && gemma4DeclaredFeatures.Mixture {
+		moeRoutingCapability = inference.ExperimentalCapability(inference.CapabilityMoERouting, inference.CapabilityGroupModel, "loaded Gemma4 sparse routing, top-k selection, selected-expert dispatch, and shared lane batching are linked")
+		moeRoutingCapability.Labels = map[string]string{
+			"kernel_name":                    hipKernelNameMoERouter,
+			"model_scope":                    "gemma4_moe_gguf",
+			"production_integration":         hipKernelStatusLinked,
+			"router_kernel":                  hipKernelStatusLinked,
+			"runtime_status":                 string(inference.FeatureRuntimeExperimental),
+			"selected_expert_down_kernel":    hipKernelNameGGUFQ4_0SelectedExpertDown,
+			"selected_expert_gate_up_kernel": hipKernelNameGGUFQ4_0SelectedExpertGateUp,
+		}
+		moeLazyExpertsCapability = inference.ExperimentalCapability(inference.CapabilityMoELazyExperts, inference.CapabilityGroupRuntime, "loaded Gemma4 GGUF experts use adaptive VRAM-aware LRU residency backed by mapped host weights")
+		moeLazyExpertsCapability.Labels = map[string]string{
+			"expert_residency":       "adaptive_lru",
+			"host_weight_source":     "mapped_gguf",
+			"model_scope":            "gemma4_moe_gguf",
+			"production_integration": hipKernelStatusLinked,
+			"runtime_status":         string(inference.FeatureRuntimeExperimental),
+		}
+	}
 	report := inference.CapabilityReport{
 		Runtime: inference.RuntimeIdentity{
 			Backend:       "rocm",
@@ -2540,8 +2564,8 @@ func rocmCapabilityReport(device nativeDeviceInfo, model inference.ModelIdentity
 			reasoningParseCapability,
 			speculativeCapability,
 			promptLookupCapability,
-			rocmFixtureKernelCapability(inference.CapabilityMoERouting, inference.CapabilityGroupModel, "MoE router top-k fixture kernel is linked; full model router integration remains pending"),
-			rocmFixtureKernelCapability(inference.CapabilityMoELazyExperts, inference.CapabilityGroupRuntime, "MoE lazy expert residency fixture kernel is linked; production expert paging remains pending"),
+			moeRoutingCapability,
+			moeLazyExpertsCapability,
 			rocmFixtureKernelCapability(inference.CapabilityJANGTQ, inference.CapabilityGroupRuntime, "JANG/JANGTQ projection fixture kernel is linked; packed-weight model integration remains pending"),
 			rocmFixtureKernelCapability(inference.CapabilityCodebookVQ, inference.CapabilityGroupRuntime, "codebook/VQ lookup fixture kernel is linked; codebook-weight model integration remains pending"),
 			agentMemoryCapability,
