@@ -78,8 +78,8 @@ type AttachedDrafterPlan struct {
 }
 
 // AttachedDrafterAttachment records a native target+assistant attachment.
-// Current ROCm HIP builds validate the pair but report native attachment as
-// not_linked until packed assistant kernels are available.
+// HIP records native attachment as linked only after the retained target decode
+// and the assistant draft-step serving primitives are both ready.
 type AttachedDrafterAttachment struct {
 	Plan             AttachedDrafterPlan
 	Target           inference.ModelInfo

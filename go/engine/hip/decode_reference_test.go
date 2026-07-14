@@ -325,7 +325,7 @@ func TestDecodeHelpers_Good_AttachNativeDrafterReportsAssistantVerifierTensorRea
 	core.AssertEqual(t, attachedDrafterAssistantVerifierTensorsComplete, attachment.Labels["attached_drafter_assistant_verifier_tensors"])
 	core.AssertEqual(t, "", attachment.Labels["attached_drafter_assistant_verifier_missing"])
 	core.AssertEqual(t, attachedDrafterAssistantVerifierPlanTensorBound, attachment.Labels["attached_drafter_assistant_verifier_plan"])
-	core.AssertEqual(t, "not_linked", attachment.Labels["attached_drafter_assistant_verifier_kernel"])
+	core.AssertEqual(t, hipKernelStatusLinked, attachment.Labels["attached_drafter_assistant_verifier_kernel"])
 	core.AssertEqual(t, "bf16", attachment.Labels["attached_drafter_assistant_verifier_projection_encoding"])
 	core.AssertEqual(t, "4", attachment.Labels["attached_drafter_assistant_verifier_layers"])
 	core.AssertContains(t, attachment.Labels["attached_drafter_assistant_verifier_kernel_families"], hipKernelNameEmbedLookup)
@@ -335,6 +335,17 @@ func TestDecodeHelpers_Good_AttachNativeDrafterReportsAssistantVerifierTensorRea
 	core.AssertContains(t, attachment.Labels["attached_drafter_assistant_verifier_kernel_families"], hipKernelNamePackedTopK)
 	core.AssertEqual(t, hipKernelStatusNotLinked, attachment.Labels["attached_drafter_assistant_verify"])
 	core.AssertEqual(t, hipKernelStatusNotLinked, attachment.Labels["attached_drafter_assistant_state_verify"])
+}
+
+func TestHIPAttachedDrafterVerifierPlan_Good_AdvertisesLinkedServingKernel(t *testing.T) {
+	plan := hipAttachedDrafterAssistantVerifierPlan{
+		Status: attachedDrafterAssistantVerifierPlanTensorBound,
+		Reason: "assistant verifier tensors are shaped for existing HIP launch families; execution loop is linked",
+	}
+
+	labels := plan.Labels()
+
+	core.AssertEqual(t, hipKernelStatusLinked, labels["attached_drafter_assistant_verifier_kernel"])
 }
 
 func TestDecodeHelpers_Bad_AttachNativeDrafterReportsAssistantVerifierBadShape(t *testing.T) {
