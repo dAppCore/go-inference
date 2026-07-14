@@ -221,16 +221,17 @@ type hipMLXQ4ProjectionDeviceBuffers struct {
 }
 
 type hipMLXQ4DeviceWeightConfig struct {
-	WeightPointer nativeDevicePointer
-	ScalePointer  nativeDevicePointer
-	BiasPointer   nativeDevicePointer
-	WeightBytes   uint64
-	ScaleBytes    uint64
-	BiasBytes     uint64
-	Rows          int
-	Cols          int
-	GroupSize     int
-	Bits          int
+	WeightPointer  nativeDevicePointer
+	ScalePointer   nativeDevicePointer
+	BiasPointer    nativeDevicePointer
+	WeightBytes    uint64
+	ScaleBytes     uint64
+	BiasBytes      uint64
+	Rows           int
+	Cols           int
+	GroupSize      int
+	Bits           int
+	WeightEncoding uint32
 }
 
 type hipMLXQ4ProjectionLaunchArgs struct {
@@ -606,11 +607,46 @@ func (cfg hipMLXQ4DeviceWeightConfig) quantBits() int {
 	return hipMLXQ4ProjectionBitsOrDefault(cfg.Bits)
 }
 
+func (cfg hipMLXQ4DeviceWeightConfig) denseWeightEncoding() (uint32, bool) {
+	switch cfg.WeightEncoding {
+	case hipProjectionWeightEncodingBF16:
+		return cfg.WeightEncoding, true
+	default:
+		return 0, false
+	}
+}
+
+func (cfg hipMLXQ4DeviceWeightConfig) hasCompleteWeightStorage() bool {
+	if _, dense := cfg.denseWeightEncoding(); dense {
+		return cfg.WeightPointer != 0
+	}
+	return cfg.WeightPointer != 0 && cfg.ScalePointer != 0 && cfg.BiasPointer != 0
+}
+
+func (cfg hipMLXQ4DeviceWeightConfig) validateDenseInputCount(inputCount int) error {
+	encoding, ok := cfg.denseWeightEncoding()
+	if !ok {
+		return core.E("rocm.hip.ProjectionLaunch", core.Sprintf("unsupported dense projection weight encoding %d", cfg.WeightEncoding), nil)
+	}
+	if inputCount != cfg.Cols {
+		return core.E("rocm.hip.ProjectionLaunch", "dense projection input count must match cols", nil)
+	}
+	return (hipBF16DeviceWeightConfig{
+		WeightPointer: cfg.WeightPointer,
+		WeightBytes:   cfg.WeightBytes,
+		Rows:          cfg.Rows,
+		Cols:          cfg.Cols,
+	}).validate(encoding)
+}
+
 func (cfg hipMLXQ4DeviceWeightConfig) validate(input []float32) error {
 	return cfg.validateInputCount(len(input))
 }
 
 func (cfg hipMLXQ4DeviceWeightConfig) validateInputCount(inputCount int) error {
+	if cfg.WeightEncoding != 0 {
+		return cfg.validateDenseInputCount(inputCount)
+	}
 	if cfg.WeightPointer == 0 || cfg.ScalePointer == 0 || cfg.BiasPointer == 0 {
 		return core.E("rocm.hip.MLXQ4ProjectionLaunch", "MLX q4 projection device weight, scale, and bias pointers are required", nil)
 	}
@@ -634,6 +670,9 @@ func (cfg hipMLXQ4DeviceWeightConfig) validateBatchInputCount(inputCount int, ba
 	}
 	if inputCount != cfg.Cols*batch {
 		return core.E("rocm.hip.MLXQ4ProjectionBatchLaunch", "MLX q4 projection batch input count mismatch", nil)
+	}
+	if cfg.WeightEncoding != 0 {
+		return cfg.validateDenseInputCount(cfg.Cols)
 	}
 	if cfg.WeightPointer == 0 || cfg.ScalePointer == 0 || cfg.BiasPointer == 0 {
 		return core.E("rocm.hip.MLXQ4ProjectionBatchLaunch", "MLX q4 projection device weight, scale, and bias pointers are required", nil)
@@ -2498,6 +2537,9 @@ func hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx context.C
 	if output == nil || output.Pointer() == 0 || output.Count() != cfg.Rows || output.SizeBytes() != uint64(cfg.Rows*4) {
 		return core.E("rocm.hip.MLXQ4ProjectionLaunch", "MLX q4 projection output shape mismatch", nil)
 	}
+	if encoding, dense := cfg.denseWeightEncoding(); dense {
+		return hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(ctx, driver, input, cfg.WeightPointer, cfg.WeightBytes, cfg.Rows, cfg.Cols, encoding, output, workspace)
+	}
 	launchArgs := hipMLXQ4ProjectionLaunchArgs{
 		InputPointer:  input.Pointer(),
 		WeightPointer: cfg.WeightPointer,
@@ -2581,6 +2623,9 @@ func hipRunMLXQ4ProjectionBatchKernelWithDeviceInputOutput(ctx context.Context, 
 	outputCount := batch * cfg.Rows
 	if output == nil || output.Pointer() == 0 || output.Count() != outputCount || output.SizeBytes() != uint64(outputCount*4) {
 		return core.E("rocm.hip.MLXQ4ProjectionBatchLaunch", "MLX q4 projection batch output shape mismatch", nil)
+	}
+	if encoding, dense := cfg.denseWeightEncoding(); dense {
+		return hipRunProjectionBatchKernelWithDeviceInputWeightEncodingOutput(ctx, driver, input, cfg.WeightPointer, cfg.WeightBytes, cfg.Rows, cfg.Cols, encoding, batch, output)
 	}
 	launchBytes, err := (hipMLXQ4ProjectionBatchLaunchArgs{
 		InputPointer:  input.Pointer(),
@@ -2917,6 +2962,66 @@ func hipRunMLXQ4PairProjectionKernelWithDeviceInputViewsOutputWithWorkspace(ctx 
 	return first, second, nil
 }
 
+func hipRunDenseGELUTanhMultiplyKernelWithDeviceInputOutput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, gateCfg, upCfg hipMLXQ4DeviceWeightConfig, batch int, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	count := batch * gateCfg.Rows
+	gate, err := hipAllocateByteBuffer(driver, "rocm.hip.GELUTanhMultiplyLaunch", "dense gate projection output", uint64(count*4), count)
+	if err != nil {
+		return err
+	}
+	defer gate.Close()
+	up, err := hipAllocateByteBuffer(driver, "rocm.hip.GELUTanhMultiplyLaunch", "dense up projection output", uint64(count*4), count)
+	if err != nil {
+		return err
+	}
+	defer up.Close()
+	gateEncoding, _ := gateCfg.denseWeightEncoding()
+	upEncoding, _ := upCfg.denseWeightEncoding()
+	if batch == 1 {
+		err = hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(ctx, driver, input, gateCfg.WeightPointer, gateCfg.WeightBytes, gateCfg.Rows, gateCfg.Cols, gateEncoding, gate, workspace)
+		if err == nil {
+			err = hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(ctx, driver, input, upCfg.WeightPointer, upCfg.WeightBytes, upCfg.Rows, upCfg.Cols, upEncoding, up, workspace)
+		}
+	} else {
+		err = hipRunProjectionBatchKernelWithDeviceInputWeightEncodingOutput(ctx, driver, input, gateCfg.WeightPointer, gateCfg.WeightBytes, gateCfg.Rows, gateCfg.Cols, gateEncoding, batch, gate)
+		if err == nil {
+			err = hipRunProjectionBatchKernelWithDeviceInputWeightEncodingOutput(ctx, driver, input, upCfg.WeightPointer, upCfg.WeightBytes, upCfg.Rows, upCfg.Cols, upEncoding, batch, up)
+		}
+	}
+	if err != nil {
+		return err
+	}
+	return hipLaunchGELUTanhMultiplyDeviceBuffers(driver, &hipGELUTanhMultiplyDeviceBuffers{
+		Gate:   gate,
+		Up:     up,
+		Output: output,
+		Count:  count,
+	})
+}
+
+func hipRunDenseGELUTanhProjectionKernelWithDeviceMultiplierOutput(ctx context.Context, driver nativeHIPDriver, input, multiplier *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig, batch int, output *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) error {
+	count := batch * cfg.Rows
+	projected, err := hipAllocateByteBuffer(driver, "rocm.hip.GELUTanhProjectionLaunch", "dense gated projection output", uint64(count*4), count)
+	if err != nil {
+		return err
+	}
+	defer projected.Close()
+	encoding, _ := cfg.denseWeightEncoding()
+	if batch == 1 {
+		err = hipRunProjectionKernelWithDeviceInputWeightEncodingOutputWithWorkspace(ctx, driver, input, cfg.WeightPointer, cfg.WeightBytes, cfg.Rows, cfg.Cols, encoding, projected, workspace)
+	} else {
+		err = hipRunProjectionBatchKernelWithDeviceInputWeightEncodingOutput(ctx, driver, input, cfg.WeightPointer, cfg.WeightBytes, cfg.Rows, cfg.Cols, encoding, batch, projected)
+	}
+	if err != nil {
+		return err
+	}
+	return hipLaunchGELUTanhMultiplyDeviceBuffers(driver, &hipGELUTanhMultiplyDeviceBuffers{
+		Gate:   projected,
+		Up:     multiplier,
+		Output: output,
+		Count:  count,
+	})
+}
+
 func hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, gateCfg, upCfg hipMLXQ4DeviceWeightConfig) (*hipDeviceByteBuffer, error) {
 	if err := hipContextErr(ctx); err != nil {
 		return nil, err
@@ -2985,6 +3090,13 @@ func hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInputOutputWithWorkspace(ctx con
 	if output == nil || output.Pointer() == 0 || output.Count() != gateCfg.Rows || output.SizeBytes() != uint64(gateCfg.Rows*4) {
 		return core.E("rocm.hip.MLXQ4GELUTanhMultiplyLaunch", "MLX q4 GELU tanh multiply output shape mismatch", nil)
 	}
+	if gateEncoding, dense := gateCfg.denseWeightEncoding(); dense {
+		upEncoding, upDense := upCfg.denseWeightEncoding()
+		if !upDense || upEncoding != gateEncoding {
+			return core.E("rocm.hip.MLXQ4GELUTanhMultiplyLaunch", "gate and up dense projection encodings must match", nil)
+		}
+		return hipRunDenseGELUTanhMultiplyKernelWithDeviceInputOutput(ctx, driver, input, gateCfg, upCfg, 1, output, workspace)
+	}
 	launchArgs := hipMLXQ4GELUTanhMulLaunchArgs{
 		InputPointer:      input.Pointer(),
 		GateWeightPointer: gateCfg.WeightPointer,
@@ -3030,6 +3142,9 @@ func hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInputOutputWithWorkspace(ctx con
 func hipMLXQ4GELUTanhMLPPersistentCompatible(input *hipDeviceByteBuffer, gateCfg, upCfg, downCfg hipMLXQ4DeviceWeightConfig) bool {
 	return input != nil &&
 		input.Pointer() != 0 &&
+		gateCfg.WeightEncoding == 0 &&
+		upCfg.WeightEncoding == 0 &&
+		downCfg.WeightEncoding == 0 &&
 		input.Count() == 1536 &&
 		input.SizeBytes() == uint64(1536*4) &&
 		gateCfg.Rows > 0 &&
@@ -3221,6 +3336,13 @@ func hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInputOutput(ctx context.Con
 	if output == nil || output.Pointer() == 0 || output.Count() != outputCount || output.SizeBytes() != uint64(outputCount*4) {
 		return core.E("rocm.hip.MLXQ4GELUTanhMultiplyBatchLaunch", "MLX q4 GELU tanh multiply batch output shape mismatch", nil)
 	}
+	if gateEncoding, dense := gateCfg.denseWeightEncoding(); dense {
+		upEncoding, upDense := upCfg.denseWeightEncoding()
+		if !upDense || upEncoding != gateEncoding {
+			return core.E("rocm.hip.MLXQ4GELUTanhMultiplyBatchLaunch", "gate and up dense projection encodings must match", nil)
+		}
+		return hipRunDenseGELUTanhMultiplyKernelWithDeviceInputOutput(ctx, driver, input, gateCfg, upCfg, batch, output, nil)
+	}
 	launchBytes, err := (hipMLXQ4GELUTanhMulBatchLaunchArgs{
 		InputPointer:      input.Pointer(),
 		GateWeightPointer: gateCfg.WeightPointer,
@@ -3315,6 +3437,9 @@ func hipRunMLXQ4GELUTanhProjectionKernelWithDeviceMultiplierOutputWithWorkspace(
 	}
 	if output == nil || output.Pointer() == 0 || output.Count() != cfg.Rows || output.SizeBytes() != uint64(cfg.Rows*4) {
 		return core.E("rocm.hip.MLXQ4GELUTanhProjectionLaunch", "MLX q4 GELU tanh projection output shape mismatch", nil)
+	}
+	if _, dense := cfg.denseWeightEncoding(); dense {
+		return hipRunDenseGELUTanhProjectionKernelWithDeviceMultiplierOutput(ctx, driver, input, multiplier, cfg, 1, output, workspace)
 	}
 	launchArgs := hipMLXQ4GELUTanhProjLaunchArgs{
 		InputPointer:      input.Pointer(),
@@ -3419,6 +3544,9 @@ func hipRunMLXQ4GELUTanhProjectionBatchKernelWithDeviceMultiplierOutput(ctx cont
 	outputCount := batch * cfg.Rows
 	if output == nil || output.Pointer() == 0 || output.Count() != outputCount || output.SizeBytes() != uint64(outputCount*4) {
 		return core.E("rocm.hip.MLXQ4GELUTanhProjectionBatchLaunch", "MLX q4 GELU tanh projection batch output shape mismatch", nil)
+	}
+	if _, dense := cfg.denseWeightEncoding(); dense {
+		return hipRunDenseGELUTanhProjectionKernelWithDeviceMultiplierOutput(ctx, driver, input, multiplier, cfg, batch, output, nil)
 	}
 	launchBytes, err := (hipMLXQ4GELUTanhProjBatchLaunchArgs{
 		InputPointer:      input.Pointer(),

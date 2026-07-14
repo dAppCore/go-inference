@@ -120,7 +120,7 @@ func applyROCmGemma4ModelPackSupportCapability(inspection *inference.ModelPackIn
 	}
 	switch support.GenerateStatus {
 	case Gemma4GenerateLinked:
-		capability := inference.ExperimentalCapability(inference.CapabilityGenerate, inference.CapabilityGroupModel, "Gemma4 "+size+" "+mode+" model-pack metadata matches the linked MLX-affine generation path")
+		capability := inference.ExperimentalCapability(inference.CapabilityGenerate, inference.CapabilityGroupModel, "Gemma4 "+size+" "+mode+" model-pack metadata matches the linked native generation path")
 		capability.Labels = labels
 		rocmApplyGemma4CapabilitySupportLabels(&capability, model)
 		appendROCmInspectionCapability(inspection, capability)

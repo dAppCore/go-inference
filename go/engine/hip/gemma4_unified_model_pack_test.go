@@ -160,13 +160,13 @@ func TestModelPackInspectorGemma4PathOnlyQuantSupport(t *testing.T) {
 		supported   bool
 		hasGenerate bool
 	}{
-		{name: "e2b-bf16", path: "lmstudio-community-gemma-4-e2b-it-bf16", size: "E2B", hiddenSize: 1536, layers: 35, quantMode: "bf16", quantBits: 16, status: Gemma4GenerateLoadOnly, runtime: Gemma4RuntimeBF16, supported: true},
+		{name: "e2b-bf16", path: "lmstudio-community-gemma-4-e2b-it-bf16", size: "E2B", hiddenSize: 1536, layers: 35, quantMode: "bf16", quantBits: 16, status: Gemma4GenerateLinked, runtime: Gemma4RuntimeBF16, supported: true, hasGenerate: true},
 		{name: "e2b-8bit", path: "lmstudio-community-gemma-4-e2b-it-8bit", size: "E2B", hiddenSize: 1536, layers: 35, quantMode: "q8", quantBits: 8, quantGroup: 64, status: Gemma4GenerateLinked, runtime: Gemma4RuntimeMLXAffine, supported: true, hasGenerate: true},
 		{name: "e2b-6bit", path: "lmstudio-community-gemma-4-e2b-it-6bit", size: "E2B", hiddenSize: 1536, layers: 35, quantMode: "q6", quantBits: 6, quantGroup: 64, status: Gemma4GenerateLinked, runtime: Gemma4RuntimeMLXAffine, supported: true, hasGenerate: true},
 		{name: "e2b-4bit", path: "lmstudio-community-gemma-4-e2b-it-4bit", size: "E2B", hiddenSize: 1536, layers: 35, quantMode: "q4", quantBits: 4, quantGroup: 64, status: Gemma4GenerateLinked, runtime: Gemma4RuntimeMLXAffine, supported: true, hasGenerate: true},
 		{name: "e2b-mxfp8", path: "lmstudio-community-gemma-4-e2b-it-mxfp8", size: "E2B", hiddenSize: 1536, layers: 35, quantMode: "mxfp8", quantBits: 8, quantGroup: 32, status: Gemma4GeneratePlannedOnly, runtime: Gemma4RuntimePlanned},
 		{name: "e2b-mxfp4", path: "lmstudio-community-gemma-4-e2b-it-mxfp4", size: "E2B", hiddenSize: 1536, layers: 35, quantMode: "mxfp4", quantBits: 4, quantGroup: 32, status: Gemma4GeneratePlannedOnly, runtime: Gemma4RuntimePlanned},
-		{name: "e4b-bf16", path: "lmstudio-community-gemma-4-e4b-it-bf16", size: "E4B", hiddenSize: 2304, layers: 26, quantMode: "bf16", quantBits: 16, status: Gemma4GenerateLoadOnly, runtime: Gemma4RuntimeBF16, supported: true},
+		{name: "e4b-bf16", path: "lmstudio-community-gemma-4-e4b-it-bf16", size: "E4B", hiddenSize: 2304, layers: 26, quantMode: "bf16", quantBits: 16, status: Gemma4GenerateLinked, runtime: Gemma4RuntimeBF16, supported: true, hasGenerate: true},
 		{name: "e4b-8bit", path: "lmstudio-community-gemma-4-e4b-it-8bit", size: "E4B", hiddenSize: 2304, layers: 26, quantMode: "q8", quantBits: 8, quantGroup: 64, status: Gemma4GenerateLinked, runtime: Gemma4RuntimeMLXAffine, supported: true, hasGenerate: true},
 		{name: "e4b-6bit", path: "lmstudio-community-gemma-4-e4b-it-6bit", size: "E4B", hiddenSize: 2304, layers: 26, quantMode: "q6", quantBits: 6, quantGroup: 64, status: Gemma4GenerateLinked, runtime: Gemma4RuntimeMLXAffine, supported: true, hasGenerate: true},
 		{name: "e4b-4bit", path: "lmstudio-community-gemma-4-e4b-it-4bit", size: "E4B", hiddenSize: 2304, layers: 26, quantMode: "q4", quantBits: 4, quantGroup: 64, status: Gemma4GenerateLinked, runtime: Gemma4RuntimeMLXAffine, supported: true, hasGenerate: true},
@@ -321,7 +321,7 @@ func TestModelPackInspectorGemma4GGUFLoadOnlySupport(t *testing.T) {
 	}
 }
 
-func TestModelPackInspectorGemma4BF16LoadOnlySupport(t *testing.T) {
+func TestModelPackInspectorGemma4BF16LinkedSupport(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		path   string
@@ -383,15 +383,8 @@ func TestModelPackInspectorGemma4BF16LoadOnlySupport(t *testing.T) {
 				inspection.Labels["gemma4_quant_mode"] != "bf16" ||
 				inspection.Labels["gemma4_pack_supported"] != "true" ||
 				inspection.Labels["gemma4_runtime"] != Gemma4RuntimeBF16 ||
-				inspection.Labels["gemma4_generate_status"] != Gemma4GenerateLoadOnly {
-				t.Fatalf("inspection = %+v labels=%+v, want %s BF16 load-only support", inspection, inspection.Labels, tc.size)
-			}
-			modelLoad, ok := nativeInspectionCapability(inspection, inference.CapabilityModelLoad)
-			if !ok ||
-				modelLoad.Labels["gemma4_generate_status"] != Gemma4GenerateLoadOnly ||
-				modelLoad.Labels["production_quant_runtime"] != Gemma4RuntimeBF16 ||
-				modelLoad.Labels["production_quant_generate_status"] != Gemma4GenerateLoadOnly {
-				t.Fatalf("model-load capability = %+v ok=%v, want BF16 load-only capability metadata", modelLoad, ok)
+				inspection.Labels["gemma4_generate_status"] != Gemma4GenerateLinked {
+				t.Fatalf("inspection = %+v labels=%+v, want %s BF16 linked support", inspection, inspection.Labels, tc.size)
 			}
 			for _, id := range []inference.CapabilityID{
 				inference.CapabilityChatTemplate,
@@ -403,11 +396,11 @@ func TestModelPackInspectorGemma4BF16LoadOnlySupport(t *testing.T) {
 				if !ok ||
 					capability.Labels["gemma4_size"] != tc.size ||
 					capability.Labels["gemma4_quant_mode"] != "bf16" ||
-					capability.Labels["gemma4_generate_status"] != Gemma4GenerateLoadOnly ||
+					capability.Labels["gemma4_generate_status"] != Gemma4GenerateLinked ||
 					capability.Labels["production_quant_policy"] != "gemma4_mlx_affine" ||
 					capability.Labels["production_quant_runtime"] != Gemma4RuntimeBF16 ||
-					capability.Labels["production_quant_generate_status"] != Gemma4GenerateLoadOnly {
-					t.Fatalf("capability %s = %+v ok=%v, want %s BF16 load-only metadata", id, capability, ok, tc.size)
+					capability.Labels["production_quant_generate_status"] != Gemma4GenerateLinked {
+					t.Fatalf("capability %s = %+v ok=%v, want %s BF16 linked metadata", id, capability, ok, tc.size)
 				}
 				if id == inference.CapabilityChatTemplate &&
 					(capability.Labels["engine_tokenizer_route_contract"] != ROCmModelTokenizerRegistryContract ||
@@ -415,8 +408,8 @@ func TestModelPackInspectorGemma4BF16LoadOnlySupport(t *testing.T) {
 					t.Fatalf("chat-template capability = %+v ok=%v, want %s BF16 tokenizer route labels", capability, ok, tc.size)
 				}
 			}
-			if generate, ok := nativeInspectionCapability(inspection, inference.CapabilityGenerate); ok {
-				t.Fatalf("generate capability = %+v, BF16 load-only pack must not claim linked generation", generate)
+			if generate, ok := nativeInspectionCapability(inspection, inference.CapabilityGenerate); !ok || generate.Labels["gemma4_generate_status"] != Gemma4GenerateLinked {
+				t.Fatalf("generate capability = %+v ok=%v, BF16 pack must claim linked generation", generate, ok)
 			}
 		})
 	}

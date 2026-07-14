@@ -824,7 +824,7 @@ func TestNativeContract_RocmGemma4Q4ExperimentalGenerateCapability_Good(t *testi
 		generate.Labels["production_quant_pack_sizes"] != "E2B,E4B,12B,26B-A4B,31B" ||
 		!strings.Contains(generate.Labels["production_quant_linked_generate_packs"], "E4B:q6") ||
 		!strings.Contains(generate.Labels["production_quant_linked_generate_packs"], "12B:q6") ||
-		!strings.Contains(generate.Labels["production_quant_load_only_packs"], "E2B:bf16") ||
+		!strings.Contains(generate.Labels["production_quant_linked_generate_packs"], "E2B:bf16") ||
 		!strings.Contains(generate.Labels["production_quant_planned_packs"], "E4B:mxfp4") ||
 		generate.Labels["production_quant_active_weight_read_bytes_per_token"] == "" ||
 		generate.Labels["decode_layers"] != "35" ||
@@ -1133,7 +1133,7 @@ func TestNativeContract_RocmGemma4Q6CapabilityLabels_Good(t *testing.T) {
 		generate.Labels["production_quant_model"] != ProductionLaneCurrentModelID ||
 		generate.Labels["production_quant_min_visible_tokens_per_sec"] != "100" ||
 		generate.Labels["production_quant_runnable_pack_count"] != "14" ||
-		!strings.Contains(generate.Labels["production_quant_load_only_packs"], "E4B:bf16") ||
+		!strings.Contains(generate.Labels["production_quant_linked_generate_packs"], "E4B:bf16") ||
 		!strings.Contains(generate.Labels["production_quant_planned_packs"], "E2B:mxfp8") ||
 		!strings.Contains(generate.Labels["production_quant_planned_packs"], "E4B:mxfp8") {
 		t.Fatalf("generate capability = %+v ok=%v, want Gemma4 q6 MLX affine labels", generate, ok)

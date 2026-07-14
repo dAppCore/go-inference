@@ -1998,6 +1998,67 @@ func TestNativeDecodeSmokeKernelStatus_Good(t *testing.T) {
 	}
 }
 
+func TestHIPHardwareGemma4BF16Generate_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_GEMMA4_BF16_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_GEMMA4_BF16_TESTS=1 to run Gemma4 BF16 generation tests")
+	}
+	modelPath := strings.TrimSpace(os.Getenv("GO_ROCM_GEMMA4_BF16_MODEL_PATH"))
+	if modelPath == "" {
+		t.Fatal("GO_ROCM_GEMMA4_BF16_MODEL_PATH is required")
+	}
+
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(newSystemNativeRuntime()).LoadModel(modelPath, inference.WithContextLen(128)))
+	if err != nil {
+		t.Fatalf("LoadModel: %v", err)
+	}
+	defer model.Close()
+
+	rocmLoaded, ok := model.(*rocmModel)
+	if !ok {
+		t.Fatalf("loaded model = %T, want *rocmModel", model)
+	}
+	loaded, ok := rocmLoaded.native.(*hipLoadedModel)
+	if !ok || loaded == nil {
+		t.Fatalf("native model = %T, want *hipLoadedModel", rocmLoaded.native)
+	}
+	if !hipLoadedGemma4Q4GenerateLinked(loaded) {
+		t.Fatalf("Gemma4 BF16 model is not linked for generation: labels=%v", loaded.modelLabels)
+	}
+	forward, err := loaded.loadedGemma4Q4ForwardConfig(loaded.modelInfo.NumLayers)
+	core.RequireNoError(t, err)
+	if len(forward.Layers) != loaded.modelInfo.NumLayers {
+		t.Fatalf("BF16 forward layers = %d, want %d", len(forward.Layers), loaded.modelInfo.NumLayers)
+	}
+	for index, layer := range forward.Layers {
+		for label, projection := range map[string]hipMLXQ4DeviceWeightConfig{
+			"q_proj":        layer.QueryProjection,
+			"k_proj":        layer.KeyProjection,
+			"v_proj":        layer.ValueProjection,
+			"o_proj":        layer.OutputProjection,
+			"mlp.gate_proj": layer.GateProjection,
+			"mlp.up_proj":   layer.UpProjection,
+			"mlp.down_proj": layer.DownProjection,
+			"lm_head":       layer.LMHeadProjection,
+		} {
+			if projection.WeightEncoding != hipProjectionWeightEncodingBF16 {
+				t.Fatalf("layer %d %s encoding = %d, want BF16", index, label, projection.WeightEncoding)
+			}
+		}
+	}
+
+	generated := 0
+	for token := range model.Generate(context.Background(), "hello", inference.WithMaxTokens(2)) {
+		if token.ID < 0 {
+			t.Fatalf("generated token = %+v, want non-negative ID", token)
+		}
+		generated++
+	}
+	core.RequireNoError(t, resultError(model.Err()))
+	if generated != 2 {
+		t.Fatalf("generated tokens = %d, want 2", generated)
+	}
+}
+
 func TestHIPHardwareAttentionHeadsBatchCausalKQ8VQ4FutureRowsInvariant_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_CACHE_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_CACHE_TESTS=1 to run ROCm cache hardware tests")

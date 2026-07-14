@@ -109,15 +109,19 @@ func TestGemma4EngineFeaturesForIdentityUsesLabels(t *testing.T) {
 		t.Fatalf("Gemma4 GGUF identity features = %+v, want native HIP generation", gguf)
 	}
 
-	for name, identity := range map[string]inference.ModelIdentity{
-		"bf16": {
-			Architecture: "gemma4_text",
-			QuantBits:    16,
-			Labels: map[string]string{
-				"gemma4_size":       "E2B",
-				"gemma4_quant_mode": "bf16",
-			},
+	bf16 := Gemma4EngineFeaturesForIdentity(inference.ModelIdentity{
+		Architecture: "gemma4_text",
+		QuantBits:    16,
+		Labels: map[string]string{
+			"gemma4_size":       "E2B",
+			"gemma4_quant_mode": "bf16",
 		},
+	})
+	if !bf16.GenerateLinked() || !bf16.DenseBF16Decode || bf16.MLXAffineDecode || bf16.DirectGreedyToken || bf16.NativeQ6BitstreamMatVec || bf16.AsyncDecodePrefetch || !bf16.DeviceKVState || !bf16.ModelContextWindow {
+		t.Fatalf("Gemma4 E2B BF16 identity features = %+v, want linked generation", bf16)
+	}
+
+	for name, identity := range map[string]inference.ModelIdentity{
 		"status_only": {
 			Architecture: "gemma4_text",
 			QuantBits:    6,
@@ -928,7 +932,7 @@ func TestPlanModelFitGemma4UsesSizeQuantMatrix(t *testing.T) {
 		wantStatus  string
 	}{
 		{
-			name: "bf16_load_only",
+			name: "bf16_linked",
 			model: inference.ModelIdentity{
 				Architecture:  "gemma4_text",
 				QuantBits:     16,
@@ -942,7 +946,7 @@ func TestPlanModelFitGemma4UsesSizeQuantMatrix(t *testing.T) {
 			},
 			wantFit:     true,
 			wantQuantOK: true,
-			wantStatus:  Gemma4GenerateLoadOnly,
+			wantStatus:  Gemma4GenerateLinked,
 		},
 		{
 			name: "status_only",
@@ -1003,7 +1007,7 @@ func TestPlanModelFitGemma4InfersPathOnlyQuantMatrix(t *testing.T) {
 		{name: "e4b_q4", path: "/models/lmstudio-community-gemma-4-e4b-it-4bit", hiddenSize: 2304, layers: 26, wantQuantType: "q4", wantQuantBits: 4, wantQuantGroup: 64, wantMode: "q4", wantStatus: Gemma4GenerateLinked, wantQuantOK: true, wantTrainingOK: true},
 		{name: "e4b_mxfp8", path: "/models/lmstudio-community-gemma-4-e4b-it-mxfp8", hiddenSize: 2304, layers: 26, wantQuantType: "mxfp8", wantQuantBits: 8, wantQuantGroup: 32, wantMode: "mxfp8", wantStatus: Gemma4GeneratePlannedOnly},
 		{name: "e4b_mxfp4", path: "/models/lmstudio-community-gemma-4-e4b-it-mxfp4", hiddenSize: 2304, layers: 26, wantQuantType: "mxfp4", wantQuantBits: 4, wantQuantGroup: 32, wantMode: "mxfp4", wantStatus: Gemma4GeneratePlannedOnly},
-		{name: "e4b_bf16", path: "/models/lmstudio-community-gemma-4-e4b-it-bf16", hiddenSize: 2304, layers: 26, wantQuantType: "bf16", wantQuantBits: 16, wantMode: "bf16", wantStatus: Gemma4GenerateLoadOnly, wantQuantOK: true},
+		{name: "e4b_bf16", path: "/models/lmstudio-community-gemma-4-e4b-it-bf16", hiddenSize: 2304, layers: 26, wantQuantType: "bf16", wantQuantBits: 16, wantMode: "bf16", wantStatus: Gemma4GenerateLinked, wantQuantOK: true},
 		{name: "12b_q6", path: "/models/lmstudio-community-gemma-4-12b-it-6bit", hiddenSize: 3840, layers: 48, wantQuantType: "q6", wantQuantBits: 6, wantQuantGroup: 64, wantMode: "q6", wantStatus: Gemma4GenerateLinked, wantQuantOK: true, wantTrainingOK: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1252,6 +1252,9 @@ func hipRunGemma4Q4PrefillQKVProjectionBatchWorkspaceTransient(ctx context.Conte
 
 func hipGemma4Q4PrefillQKVProjectionBatchTripleCompatible(cfg hipGemma4Q4Layer0Config) bool {
 	return !cfg.AttentionKEqV &&
+		cfg.QueryProjection.WeightEncoding == 0 &&
+		cfg.KeyProjection.WeightEncoding == 0 &&
+		cfg.ValueProjection.WeightEncoding == 0 &&
 		cfg.QueryProjection.Cols == cfg.KeyProjection.Cols &&
 		cfg.QueryProjection.Cols == cfg.ValueProjection.Cols &&
 		cfg.QueryProjection.GroupSize == cfg.KeyProjection.GroupSize &&
@@ -1262,6 +1265,8 @@ func hipGemma4Q4PrefillQKVProjectionBatchTripleCompatible(cfg hipGemma4Q4Layer0C
 
 func hipGemma4Q4PrefillQKVProjectionBatchPairCompatible(cfg hipGemma4Q4Layer0Config) bool {
 	return cfg.AttentionKEqV &&
+		cfg.QueryProjection.WeightEncoding == 0 &&
+		cfg.KeyProjection.WeightEncoding == 0 &&
 		cfg.QueryProjection.Cols == cfg.KeyProjection.Cols &&
 		cfg.QueryProjection.GroupSize == cfg.KeyProjection.GroupSize &&
 		cfg.QueryProjection.quantBits() == cfg.KeyProjection.quantBits()
@@ -3242,7 +3247,7 @@ func hipRunGemma4Q4PrefillLayerBodyBatchWithPerLayerInputInternal(ctx context.Co
 		}
 	} else {
 		fusedPerLayerInputGate := false
-		if workspace != nil && tokenCount == 1 {
+		if workspace != nil && tokenCount == 1 && cfg.PerLayerInput.InputGate.WeightEncoding == 0 {
 			activatedOutput, workspaceErr := workspace.EnsureActivationOutput(driver, cfg.PerLayerInput.InputGate.Rows)
 			if workspaceErr != nil {
 				return nil, workspaceErr

@@ -121,6 +121,29 @@ type hipGemma4Q4ForwardConfig struct {
 	SharedKVSources []int
 }
 
+func (cfg hipGemma4Q4ForwardConfig) usesDenseProjectionWeights() bool {
+	for _, layer := range cfg.Layers {
+		projections := [...]hipMLXQ4DeviceWeightConfig{
+			layer.QueryProjection,
+			layer.KeyProjection,
+			layer.ValueProjection,
+			layer.OutputProjection,
+			layer.GateProjection,
+			layer.UpProjection,
+			layer.DownProjection,
+			layer.LMHeadProjection,
+			layer.PerLayerInput.InputGate,
+			layer.PerLayerInput.Projection,
+		}
+		for _, projection := range projections {
+			if projection.WeightEncoding != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 type hipGemma4Q4ForwardRequest struct {
 	TokenID                 int32
 	Position                int
@@ -1386,6 +1409,7 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 	projectLocalKV := req.SharedDeviceKV == nil && len(req.SharedKeys) == 0
 	if projectLocalKV &&
 		!cfg.AttentionKEqV &&
+		cfg.QueryProjection.WeightEncoding == 0 && cfg.KeyProjection.WeightEncoding == 0 && cfg.ValueProjection.WeightEncoding == 0 &&
 		cfg.QueryProjection.Cols == cfg.KeyProjection.Cols && cfg.QueryProjection.Cols == cfg.ValueProjection.Cols &&
 		cfg.QueryProjection.GroupSize == cfg.KeyProjection.GroupSize && cfg.QueryProjection.GroupSize == cfg.ValueProjection.GroupSize {
 		if req.AttentionWorkspace != nil && req.OmitDebugTensors {
@@ -1410,6 +1434,7 @@ func hipRunGemma4Q4DecoderLayerInternalWithDeviceInput(ctx context.Context, driv
 		valueBuffer = &valueBufferView
 	} else if projectLocalKV &&
 		cfg.AttentionKEqV &&
+		cfg.QueryProjection.WeightEncoding == 0 && cfg.KeyProjection.WeightEncoding == 0 &&
 		cfg.QueryProjection.Cols == cfg.KeyProjection.Cols &&
 		cfg.QueryProjection.GroupSize == cfg.KeyProjection.GroupSize {
 		if req.AttentionWorkspace != nil && req.OmitDebugTensors {
@@ -2258,11 +2283,11 @@ func (cfg hipGemma4Q4Layer0Config) validate() error {
 	if scalar := cfg.effectiveLayerScalar(); math.IsNaN(float64(scalar)) || math.IsInf(float64(scalar), 0) {
 		return core.E(hipGemma4Q4Layer0Operation, "layer scalar must be finite", nil)
 	}
-	if cfg.Embedding.TableEncoding != hipEmbeddingTableEncodingMLXQ4 ||
+	if (cfg.Embedding.TableEncoding != hipEmbeddingTableEncodingMLXQ4 && cfg.Embedding.TableEncoding != hipEmbeddingTableEncodingBF16) ||
 		cfg.Embedding.VocabSize != cfg.VocabSize ||
 		cfg.Embedding.HiddenSize != cfg.HiddenSize ||
 		cfg.Embedding.GroupSize != cfg.GroupSize {
-		return core.E(hipGemma4Q4Layer0Operation, "embedding config must match Gemma4 q4 dimensions", nil)
+		return core.E(hipGemma4Q4Layer0Operation, "embedding config must match Gemma4 dimensions", nil)
 	}
 	if err := cfg.Embedding.validate([]int32{0}); err != nil {
 		return core.E(hipGemma4Q4Layer0Operation, "embedding config", err)
@@ -2403,12 +2428,8 @@ func (cfg hipGemma4Q4PerLayerInputConfig) layerApplyConfigured() bool {
 
 func (cfg hipGemma4Q4PerLayerInputConfig) hasLayerApply() bool {
 	return cfg.InputSize > 0 &&
-		cfg.InputGate.WeightPointer != 0 &&
-		cfg.InputGate.ScalePointer != 0 &&
-		cfg.InputGate.BiasPointer != 0 &&
-		cfg.Projection.WeightPointer != 0 &&
-		cfg.Projection.ScalePointer != 0 &&
-		cfg.Projection.BiasPointer != 0 &&
+		cfg.InputGate.hasCompleteWeightStorage() &&
+		cfg.Projection.hasCompleteWeightStorage() &&
 		cfg.PostInputNorm.WeightPointer != 0
 }
 
@@ -2424,9 +2445,11 @@ func (cfg hipGemma4Q4PerLayerInputConfig) globalPrecomputeConfigured() bool {
 }
 
 func (cfg hipGemma4Q4PerLayerInputConfig) hasGlobalPrecompute() bool {
-	return cfg.Embedding.EmbeddingPointer != 0 &&
-		cfg.Embedding.ScalePointer != 0 &&
-		cfg.Embedding.BiasPointer != 0 &&
+	embeddingConfigured := cfg.Embedding.EmbeddingPointer != 0
+	if cfg.Embedding.TableEncoding == hipEmbeddingTableEncodingMLXQ4 {
+		embeddingConfigured = embeddingConfigured && cfg.Embedding.ScalePointer != 0 && cfg.Embedding.BiasPointer != 0
+	}
+	return embeddingConfigured &&
 		cfg.modelProjectionConfigured() &&
 		cfg.ProjectionNorm.WeightPointer != 0
 }
@@ -3338,6 +3361,9 @@ func hipGemma4Q4HostMultiply(left, right []float32) ([]float32, error) {
 }
 
 func hipGemma4Q4DecodeQuantLabel(cfg hipGemma4Q4Layer0Config) string {
+	if cfg.Embedding.TableEncoding == hipEmbeddingTableEncodingBF16 || cfg.QueryProjection.WeightEncoding == hipProjectionWeightEncodingBF16 {
+		return "bf16"
+	}
 	bits := cfg.Embedding.QuantBits
 	if bits == 0 {
 		bits = cfg.QueryProjection.Bits
@@ -3475,6 +3501,21 @@ func (model *hipLoadedModel) loadedGemma4Q4EmbeddingConfig(groupSize int) (hipDe
 	if err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, err
 	}
+	vocab := model.modelInfo.VocabSize
+	hidden := model.modelInfo.HiddenSize
+	if core.Upper(weight.info.TypeName) == "BF16" {
+		if err := hipValidateGemma4Q4Tensor(weight, "embed_tokens weight", "BF16", vocab, hidden, uint64(vocab)*uint64(hidden)*2); err != nil {
+			return hipDeviceEmbeddingLookupConfig{}, err
+		}
+		return hipDeviceEmbeddingLookupConfig{
+			EmbeddingPointer: weight.pointer,
+			EmbeddingBytes:   weight.info.ByteSize,
+			TableEncoding:    hipEmbeddingTableEncodingBF16,
+			VocabSize:        vocab,
+			HiddenSize:       hidden,
+			GroupSize:        groupSize,
+		}, nil
+	}
 	scales, err := model.requiredHIPTensor("language_model.model.embed_tokens.scales", "embed_tokens scales")
 	if err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, err
@@ -3483,8 +3524,6 @@ func (model *hipLoadedModel) loadedGemma4Q4EmbeddingConfig(groupSize int) (hipDe
 	if err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, err
 	}
-	vocab := model.modelInfo.VocabSize
-	hidden := model.modelInfo.HiddenSize
 	bits, rows, cols, effectiveGroupSize, groups, packedCols, err := hipInferMLXAffineBitsFromTensorShapes(weight, scales, biases, groupSize, model.modelInfo.QuantBits, "embed_tokens")
 	if err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, err
@@ -3607,6 +3646,34 @@ func (model *hipLoadedModel) loadedGemma4Q4PerLayerEmbeddingConfig(groupSize, nu
 	if err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, 0, err
 	}
+	if core.Upper(weight.info.TypeName) == "BF16" {
+		if len(weight.info.Dimensions) != 2 {
+			return hipDeviceEmbeddingLookupConfig{}, 0, core.E(hipGemma4Q4Layer0Operation, "embed_tokens_per_layer BF16 weight must be rank 2", nil)
+		}
+		vocab := int(weight.info.Dimensions[0])
+		hiddenTotal := int(weight.info.Dimensions[1])
+		if vocab <= 0 || hiddenTotal <= 0 || numLayers <= 0 || hiddenTotal%numLayers != 0 {
+			return hipDeviceEmbeddingLookupConfig{}, 0, core.E(hipGemma4Q4Layer0Operation, "embed_tokens_per_layer dimensions must align with layer count", nil)
+		}
+		inputSize := hiddenTotal / numLayers
+		if model.gemma4TextConfig.HiddenSizePerLayerInput > 0 && inputSize != model.gemma4TextConfig.HiddenSizePerLayerInput {
+			return hipDeviceEmbeddingLookupConfig{}, 0, core.E(hipGemma4Q4Layer0Operation, "embed_tokens_per_layer hidden size does not match Gemma4 config", nil)
+		}
+		if model.gemma4TextConfig.VocabSizePerLayerInput > 0 && vocab != model.gemma4TextConfig.VocabSizePerLayerInput {
+			return hipDeviceEmbeddingLookupConfig{}, 0, core.E(hipGemma4Q4Layer0Operation, "embed_tokens_per_layer vocab size does not match Gemma4 config", nil)
+		}
+		if err := hipValidateGemma4Q4Tensor(weight, "embed_tokens_per_layer weight", "BF16", vocab, hiddenTotal, uint64(vocab)*uint64(hiddenTotal)*2); err != nil {
+			return hipDeviceEmbeddingLookupConfig{}, 0, err
+		}
+		return hipDeviceEmbeddingLookupConfig{
+			EmbeddingPointer: weight.pointer,
+			EmbeddingBytes:   weight.info.ByteSize,
+			TableEncoding:    hipEmbeddingTableEncodingBF16,
+			VocabSize:        vocab,
+			HiddenSize:       hiddenTotal,
+			GroupSize:        groupSize,
+		}, inputSize, nil
+	}
 	scales, err := model.requiredHIPTensor("language_model.model.embed_tokens_per_layer.scales", "embed_tokens_per_layer scales")
 	if err != nil {
 		return hipDeviceEmbeddingLookupConfig{}, 0, err
@@ -3684,6 +3751,29 @@ func (model *hipLoadedModel) loadedGemma4Q4ProjectionConfig(baseName, label stri
 	weight, err := model.requiredHIPTensor(baseName+".weight", label+" weight")
 	if err != nil {
 		return hipMLXQ4DeviceWeightConfig{}, 0, 0, err
+	}
+	if core.Upper(weight.info.TypeName) == "BF16" {
+		if weight.pointer == 0 || len(weight.info.Dimensions) != 2 {
+			return hipMLXQ4DeviceWeightConfig{}, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" BF16 weight must have a device pointer and rank-2 shape", nil)
+		}
+		rows := int(weight.info.Dimensions[0])
+		cols := int(weight.info.Dimensions[1])
+		if rows <= 0 || cols <= 0 || weight.info.ByteSize != uint64(rows)*uint64(cols)*2 {
+			return hipMLXQ4DeviceWeightConfig{}, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" BF16 tensor shape/type mismatch", nil)
+		}
+		cfg := hipMLXQ4DeviceWeightConfig{
+			WeightPointer:  weight.pointer,
+			WeightBytes:    weight.info.ByteSize,
+			Rows:           rows,
+			Cols:           cols,
+			GroupSize:      groupSize,
+			Bits:           16,
+			WeightEncoding: hipProjectionWeightEncodingBF16,
+		}
+		if err := cfg.validateInputCount(cols); err != nil {
+			return hipMLXQ4DeviceWeightConfig{}, 0, 0, core.E(hipGemma4Q4Layer0Operation, label+" BF16 config", err)
+		}
+		return cfg, rows, cols, nil
 	}
 	scales, err := model.requiredHIPTensor(baseName+".scales", label+" scales")
 	if err != nil {

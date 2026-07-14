@@ -92,7 +92,7 @@ func CloneSizeQuantSupport(entry SizeQuantSupport) SizeQuantSupport {
 
 func smallQuantModeSupport() []QuantModeSupport {
 	return []QuantModeSupport{
-		{Mode: "bf16", Runtime: RuntimeBF16, GenerateStatus: GenerateLoadOnly, Notes: "load and correctness anchor; linked text generation remains separate"},
+		{Mode: "bf16", Runtime: RuntimeBF16, GenerateStatus: GenerateLinked, Notes: "native dense BF16 text generation"},
 		{Mode: "q8", Runtime: RuntimeMLXAffine, GenerateStatus: GenerateLinked, Notes: "quality MLX-affine generate path"},
 		{Mode: "q6", Runtime: RuntimeMLXAffine, GenerateStatus: GenerateLinked, Notes: "production MLX-affine generate path"},
 		{Mode: "q4", Runtime: RuntimeMLXAffine, GenerateStatus: GenerateLinked, Notes: "constrained MLX-affine generate path"},

@@ -1132,7 +1132,8 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 			}
 		}
 		suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(model, generate.StopTokens)
-		hostSampling := hipGemma4Q4HostSamplingRequested(generate)
+		denseProjectionWeights := cfg.usesDenseProjectionWeights()
+		hostSampling := hipGemma4Q4HostSamplingRequested(generate) || denseProjectionWeights
 		if err := req.validate(cfg); err != nil {
 			runErr = err
 			return
@@ -1175,8 +1176,8 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 			runErr = err
 			return
 		}
-		deviceTopKSampling := hipGemma4Q4DeviceTopKSamplingRequested(generate)
-		deviceCandidateSampling := hipGemma4Q4DeviceCandidateSamplingRequested(generate)
+		deviceTopKSampling := !denseProjectionWeights && hipGemma4Q4DeviceTopKSamplingRequested(generate)
+		deviceCandidateSampling := !denseProjectionWeights && hipGemma4Q4DeviceCandidateSamplingRequested(generate)
 		var attentionWorkspace *hipAttentionHeadsChunkedWorkspace
 		if engineConfig.attentionWorkspaceNeeded(len(promptTokens), generate) {
 			attentionWorkspace = hipBorrowAttentionHeadsChunkedWorkspace()
@@ -1225,7 +1226,7 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 		// flattening 12B logits while preserving many argmaxes. Batched prefill
 		// owns every compatible prompt; the selected sampler consumes its last row.
 		useBatchedPrefill := hipGemma4Q4CanUseBatchedGeneratePrefill(cfg) && !engineConfig.DisableBatchedPrefill
-		disableBatchedDecode := engineConfig.DisableBatchedDecode || core.Env("GO_ROCM_GEMMA4_Q4_DISABLE_BATCHED_DECODE") == "1"
+		disableBatchedDecode := denseProjectionWeights || engineConfig.DisableBatchedDecode || core.Env("GO_ROCM_GEMMA4_Q4_DISABLE_BATCHED_DECODE") == "1"
 		useBatchedDecode := useBatchedPrefill && !disableBatchedDecode && !deviceCandidateSampling
 		if attentionWorkspace != nil {
 			if err := hipGemma4Q4EnsureAttentionWorkspacePrefillCapacity(model.driver, attentionWorkspace, cfg, prefillPlan, useBatchedPrefill); err != nil {
@@ -1343,7 +1344,13 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 					return
 				}
 			}
-			forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(ctx, model.driver, cfg, ubatch.Tokens, ubatch.Position, req.Epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, ubatch.OutputTokens, ubatch.OutputRow, finalGreedyBuffer, attentionWorkspace, engineConfig, initialHidden, visibleTokenCaps)
+			outputTokens := ubatch.OutputTokens
+			outputRow := ubatch.OutputRow
+			if denseProjectionWeights {
+				outputTokens = nil
+				outputRow = -1
+			}
+			forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowInitialHiddenWithEngineConfig(ctx, model.driver, cfg, ubatch.Tokens, ubatch.Position, req.Epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, outputTokens, outputRow, finalGreedyBuffer, attentionWorkspace, engineConfig, initialHidden, visibleTokenCaps)
 			if visibleTokenCaps != nil {
 				closeErr := visibleTokenCaps.Close()
 				if err == nil && closeErr != nil {

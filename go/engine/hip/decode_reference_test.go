@@ -1331,19 +1331,6 @@ func TestDecodeHelpers_Bad_PlanAttachedDrafterRejectsGemma4NonLinkedTargetPack(t
 		want   string
 	}{
 		{
-			name: "bf16_load_only",
-			target: &rocmModel{
-				modelPath: "/models/lmstudio-community-gemma-4-e2b-it-bf16",
-				modelInfo: inference.ModelInfo{
-					Architecture: "gemma4_text",
-					NumLayers:    productionLaneGemma4E2BLayers,
-					HiddenSize:   productionLaneGemma4E2BHiddenSize,
-					VocabSize:    ProductionMTPAssistantTokenOrderingVocabSize,
-				},
-			},
-			want: "target Gemma4 pack is not linked for generation",
-		},
-		{
 			name: "e4b_mxfp8_planned_only",
 			target: &rocmModel{
 				modelPath: "/models/lmstudio-community-gemma-4-e4b-it-mxfp8",
