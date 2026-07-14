@@ -1,0 +1,6 @@
+source "https://rubygems.org"
+
+# The client is GENERATED locally by `task sdk` (build/sdk is gitignored) —
+# the path dep points this demo at that output; a published SDK would be a
+# normal rubygems.org dependency.
+gem "lem_sdk", path: "../../../build/sdk/ruby"
