@@ -91,6 +91,43 @@ tasks:
       - env GOCACHE={{.GO_BUILD_CACHE}} CGO_ENABLED=1 go build -trimpath -o bin/lem{{if eq OS "windows"}}.exe{{end}} ./go/cmd/lem
       - 'echo "  lem -> bin/lem"'
 
+  # --- GPU capture (the kernel instrument) ------------------------------------
+  # One .gputrace of a REAL decode round, openable in Xcode's Metal Debugger for
+  # per-dispatch occupancy / limiter / per-line shader costs. Workflow: terminal 1
+  # `task capture:serve MODEL=<snapshot dir>`, warm it with a request, terminal 2
+  # `task capture:fire`, ask again — the trace lands at TRACE. The capture is
+  # one-shot per serve process (restart capture:serve to take another).
+  capture:serve:
+    desc: "Boot a capture-ARMED lem serve (foreground). Vars: MODEL (required snapshot dir), TRACE (default ~/Desktop/round.gputrace — replaced on boot), CBS (submissions to trace, default 8), ADDR (default 127.0.0.1:8199), CONTEXT (default 4096)."
+    vars:
+      TRACE: '{{default "$HOME/Desktop/round.gputrace" .TRACE}}'
+      TRIGGER: '{{default "/tmp/lthn-capture" .TRIGGER}}'
+      CBS: '{{default "8" .CBS}}'
+      ADDR: '{{default "127.0.0.1:8199" .ADDR}}'
+      CONTEXT: '{{default "4096" .CONTEXT}}'
+    preconditions:
+      - sh: test -n "{{.MODEL}}"
+        msg: "MODEL is required: task capture:serve MODEL=~/.cache/huggingface/hub/models--…/snapshots/<hash>"
+      - sh: test -x bin/lem
+        msg: "bin/lem missing — run: task build (and task metallib first)"
+    cmds:
+      - rm -rf {{.TRACE}} {{.TRIGGER}}
+      - 'echo "  capture armed: fire with «task capture:fire», then send a request — trace -> {{.TRACE}}"'
+      - >-
+        env MTL_CAPTURE_ENABLED=1
+        LTHN_GPU_CAPTURE={{.TRACE}}
+        LTHN_GPU_CAPTURE_TRIGGER={{.TRIGGER}}
+        LTHN_GPU_CAPTURE_CBS={{.CBS}}
+        bin/lem serve -model {{.MODEL}} -addr {{.ADDR}} -context {{.CONTEXT}}
+
+  capture:fire:
+    desc: "Fire the one-shot capture on the running capture:serve — the NEXT request's round lands in the trace."
+    vars:
+      TRIGGER: '{{default "/tmp/lthn-capture" .TRIGGER}}'
+    cmds:
+      - touch {{.TRIGGER}}
+      - 'echo "  armed — send the server a request; watch capture:serve''s log for the gpu-capture lines, then open the trace in Xcode"'
+
   # --- Test / coverage / benchmark ------------------------------------------
   # The portable lanes (test, cover) compile under the default build tags, so
   # they run on any OS — engine/metal (darwin/arm64, //go:build metal_runtime)

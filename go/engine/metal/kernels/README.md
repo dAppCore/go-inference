@@ -12,27 +12,29 @@ primitives, so a checkout without the metallib still builds and runs.
 
 ## Building `lthn_kernels.metallib`
 
-go-inference has no Taskfile yet, so the build is documented here rather than
-ported as a task (no new build infrastructure invented). The pipeline compiles
-every `*.metal` in this directory to an `.air` and links them into one
-`metallib` — the same steps go-mlx's `task build:kernels` runs, retargeted at
-this directory:
+The repo Taskfile owns the build — from the repo root:
 
 ```sh
-# Run from the module root (go/). MLX_HEADERS points at the mlx headers the
-# kernels #include (e.g. the go-mlx checkout's lib/mlx); OUT is the dist dir
-# the engine will find via MLX_METALLIB_PATH's sibling lookup.
-MLX_HEADERS=../../../go-mlx/lib/mlx
-OUT=dist/lib
-mkdir -p "$OUT"
-airs=""
-for m in engine/metal/kernels/*.metal; do
-  air="/tmp/$(basename "${m%.metal}").air"
-  xcrun -sdk macosx metal -std=metal4.0 -I "$MLX_HEADERS" -c "$m" -o "$air"
-  airs="$airs $air"
-done
-xcrun -sdk macosx metallib $airs -o "$OUT/lthn_kernels.metallib"
+task metallib:kernels   # this directory's *.metal → build/dist/lib/lthn_kernels.metallib
+task metallib           # both libraries (MLX's mlx.metallib + ours)
 ```
+
+The pipeline compiles every `*.metal` here to an `.air` and links them into
+one `metallib` (headers come from the pinned `external/mlx` submodule).
+
+## Profiling a kernel in flight
+
+The engine ships a one-shot programmatic GPU capture (`gpu_capture.go`) — the
+per-dispatch occupancy / limiter / per-line view no Go-side clock can see:
+
+```sh
+task capture:serve MODEL=<snapshot dir>   # boots a capture-armed serve (foreground)
+# warm it with a request, then in another terminal:
+task capture:fire                          # the NEXT request's round → ~/Desktop/round.gputrace
+```
+
+Open the `.gputrace` in Xcode (Metal Debugger). One capture per serve process;
+restart `capture:serve` to take another.
 
 ## Running the engine + its tests
 
