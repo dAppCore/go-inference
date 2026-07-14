@@ -2799,6 +2799,7 @@ func BenchmarkInferenceGemma4Q4RetainedDepthDecode(b *testing.B) {
 	b.StopTimer()
 	var decodeDuration time.Duration
 	var decodeKernelStats inferenceBenchmarkHIPKernelStatsSnapshot
+	var decodeExpertCacheStats hipGemma4ExpertCacheStats
 	var decodedTokenIDs []int32
 	routeProbeMetrics := make(map[hipDecodeRouteMetricKey]hipDecodeRouteMetric)
 	for iteration := 0; iteration < b.N; iteration++ {
@@ -2828,6 +2829,7 @@ func BenchmarkInferenceGemma4Q4RetainedDepthDecode(b *testing.B) {
 			inferenceBenchmarkAccumulateHIPDecodeRouteMetrics(routeProbeMetrics, snapshot)
 		}
 
+		expertCacheBefore, _, _ := inferenceBenchmarkGemma4ExpertCacheSnapshot(loaded)
 		kernelCounter.ResetKernelStats()
 		b.StartTimer()
 		decodeStart := time.Now()
@@ -2849,6 +2851,8 @@ func BenchmarkInferenceGemma4Q4RetainedDepthDecode(b *testing.B) {
 			b.Fatalf("decode retained state token IDs changed across iterations: got %v, want %v", decoded, decodedTokenIDs)
 		}
 		inferenceBenchmarkAccumulateHIPKernelStats(&decodeKernelStats, inferenceBenchmarkBookKernelSnapshot(kernelCounter))
+		expertCacheAfter, _, _ := inferenceBenchmarkGemma4ExpertCacheSnapshot(loaded)
+		inferenceBenchmarkAccumulateGemma4ExpertCacheDelta(&decodeExpertCacheStats, expertCacheBefore, expertCacheAfter)
 		if err := session.Close(); err != nil {
 			b.Fatal(err)
 		}
@@ -2864,6 +2868,15 @@ func BenchmarkInferenceGemma4Q4RetainedDepthDecode(b *testing.B) {
 	b.ReportMetric(float64(config.ContextTokens), "context_len")
 	b.ReportMetric(1, "retained_state_materialized")
 	b.ReportMetric(0, "mtp_enabled")
+	expertCacheFinal, expertCacheResidentBytes, expertCacheResidentEntries := inferenceBenchmarkGemma4ExpertCacheSnapshot(loaded)
+	b.ReportMetric(float64(decodeExpertCacheStats.Hits)/float64(b.N), "expert_cache_decode_hits/op")
+	b.ReportMetric(float64(decodeExpertCacheStats.Misses)/float64(b.N), "expert_cache_decode_misses/op")
+	b.ReportMetric(float64(decodeExpertCacheStats.Evictions)/float64(b.N), "expert_cache_decode_evictions/op")
+	b.ReportMetric(float64(decodeExpertCacheStats.H2DBytes)/float64(b.N), "expert_cache_decode_h2d_bytes/op")
+	b.ReportMetric(float64(expertCacheFinal.HostMappings), "expert_cache_host_mappings")
+	b.ReportMetric(float64(expertCacheFinal.HostMappedBytes), "expert_cache_host_mapped_bytes")
+	b.ReportMetric(float64(expertCacheResidentEntries), "expert_cache_resident_entries")
+	b.ReportMetric(float64(expertCacheResidentBytes), "expert_cache_resident_bytes")
 	if routeProbeEnabled {
 		b.ReportMetric(1, "retained_depth_route_probe_enabled")
 		inferenceBenchmarkReportHIPDecodeRouteProbeMetrics(b, routeProbeMetrics)
@@ -2871,6 +2884,33 @@ func BenchmarkInferenceGemma4Q4RetainedDepthDecode(b *testing.B) {
 		b.ReportMetric(0, "retained_depth_route_probe_enabled")
 	}
 	inferenceBenchmarkReportHIPKernelRouteMetrics(b, kernelCounter)
+}
+
+func inferenceBenchmarkGemma4ExpertCacheSnapshot(loaded *hipLoadedModel) (hipGemma4ExpertCacheStats, uint64, int) {
+	if loaded == nil {
+		return hipGemma4ExpertCacheStats{}, 0, 0
+	}
+	loaded.expertCacheMu.Lock()
+	cache := loaded.expertCache
+	loaded.expertCacheMu.Unlock()
+	if cache == nil {
+		return hipGemma4ExpertCacheStats{}, 0, 0
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return cache.stats, cache.bytes, len(cache.entries)
+}
+
+func inferenceBenchmarkAccumulateGemma4ExpertCacheDelta(total *hipGemma4ExpertCacheStats, before, after hipGemma4ExpertCacheStats) {
+	if total == nil {
+		return
+	}
+	total.Hits += after.Hits - before.Hits
+	total.Misses += after.Misses - before.Misses
+	total.Evictions += after.Evictions - before.Evictions
+	total.HostMappings += after.HostMappings - before.HostMappings
+	total.HostMappedBytes += after.HostMappedBytes - before.HostMappedBytes
+	total.H2DBytes += after.H2DBytes - before.H2DBytes
 }
 
 func BenchmarkInferenceGemma4Q4Book10Turn_ReplayBaseline(b *testing.B) {

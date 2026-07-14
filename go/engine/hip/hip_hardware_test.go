@@ -367,9 +367,21 @@ func TestHIPHardwareGGUFQ4_0ProjectionAndGateUp_Good(t *testing.T) {
 	core.RequireNoError(t, err)
 	defer selectedOutput.Close()
 	routeWeights := []float32{0.75, 0.25}
-	core.RequireNoError(t, hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(context.Background(), runtime.(*hipRuntime).driver, inputBuffer, entries, routeWeights, cols, cols, selectedActivation, selectedOutput))
-	selected, err := hipReadFloat32DeviceOutput(selectedOutput, "rocm.hip.GGUFQ4_0SelectedExpertsLaunch", "hardware selected output", cols)
-	core.RequireNoError(t, err)
+	runSelected := func(pair16 string) []float32 {
+		t.Helper()
+		t.Setenv(hipGemma4SelectedExpertPair16Env, pair16)
+		core.RequireNoError(t, hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(context.Background(), runtime.(*hipRuntime).driver, inputBuffer, entries, routeWeights, cols, cols, selectedActivation, selectedOutput))
+		selected, readErr := hipReadFloat32DeviceOutput(selectedOutput, "rocm.hip.GGUFQ4_0SelectedExpertsLaunch", "hardware selected output", cols)
+		core.RequireNoError(t, readErr)
+		return selected
+	}
+	selectedBaseline := runSelected("0")
+	selectedPair16 := runSelected("1")
+	for index := range selectedBaseline {
+		if math.Float32bits(selectedBaseline[index]) != math.Float32bits(selectedPair16[index]) {
+			t.Fatalf("pair16 selected output[%d] = %08x, baseline = %08x", index, math.Float32bits(selectedPair16[index]), math.Float32bits(selectedBaseline[index]))
+		}
+	}
 	wantSelected := make([]float32, cols)
 	for expert := 0; expert < selectedExperts; expert++ {
 		activationValues := make([]float32, cols)
@@ -382,7 +394,7 @@ func TestHIPHardwareGGUFQ4_0ProjectionAndGateUp_Good(t *testing.T) {
 			wantSelected[row] += routeWeights[expert] * hipHardwareGGUFQ4_0Dot(activationValues, expertDownRows[expert][row])
 		}
 	}
-	assertFloat32SlicesNear(t, wantSelected, selected, 1e-4)
+	assertFloat32SlicesNear(t, wantSelected, selectedPair16, 1e-4)
 }
 
 func TestHIPHardwareGGUFMixedSelectedExperts_Good(t *testing.T) {

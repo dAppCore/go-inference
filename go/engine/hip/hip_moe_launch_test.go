@@ -109,6 +109,7 @@ func TestHIPGGUFQ4_0SelectedExpertsLaunchArgs_Good(t *testing.T) {
 }
 
 func TestHIPGGUFQ4_0SelectedExpertsLaunch_Good(t *testing.T) {
+	t.Setenv(hipGemma4SelectedExpertPair16Env, "0")
 	driver := &fakeHIPDriver{available: true}
 	input := hipBorrowDeviceByteBufferValue(driver, "input", 11, 32*4, 32)
 	activation := hipBorrowDeviceByteBufferValue(driver, "activation", 22, 2*32*4, 2*32)
@@ -126,6 +127,44 @@ func TestHIPGGUFQ4_0SelectedExpertsLaunch_Good(t *testing.T) {
 	core.AssertEqual(t, 2, len(driver.launches))
 	core.AssertEqual(t, hipKernelNameGGUFQ4_0SelectedExpertGateUp, driver.launches[0].Name)
 	core.AssertEqual(t, hipKernelNameGGUFQ4_0SelectedExpertDown, driver.launches[1].Name)
+	core.AssertEqual(t, uint32(8), driver.launches[0].GridX)
+	core.AssertEqual(t, uint32(4), driver.launches[1].GridX)
+}
+
+func TestHIPGGUFQ4_0SelectedExpertsLaunch_Good_Pair16ProductionShape(t *testing.T) {
+	t.Setenv(hipGemma4SelectedExpertPair16Env, "")
+	const (
+		topK     = 8
+		hidden   = 2816
+		expertFF = 704
+	)
+	driver := &fakeHIPDriver{available: true}
+	input := hipBorrowDeviceByteBufferValue(driver, "input", 11, hidden*4, hidden)
+	activation := hipBorrowDeviceByteBufferValue(driver, "activation", 22, topK*expertFF*4, topK*expertFF)
+	output := hipBorrowDeviceByteBufferValue(driver, "output", 33, hidden*4, hidden)
+	gateUpBytes := uint64(2 * expertFF * (hidden / hipGGUFQ4_0BlockSize) * hipGGUFQ4_0BlockBytes)
+	downBytes := uint64(hidden * (expertFF / hipGGUFQ4_0BlockSize) * hipGGUFQ4_0BlockBytes)
+	entries := make([]*hipGemma4ExpertCacheEntry, topK)
+	routeWeights := make([]float32, topK)
+	for index := range entries {
+		gateUp := hipBorrowDeviceByteBufferValue(driver, "gate up", nativeDevicePointer(101+index), gateUpBytes, int(gateUpBytes))
+		down := hipBorrowDeviceByteBufferValue(driver, "down", nativeDevicePointer(201+index), downBytes, int(downBytes))
+		entries[index] = &hipGemma4ExpertCacheEntry{
+			GateUp: &gateUp, Down: &down,
+			GateUpRows: 2 * expertFF, GateUpCols: hidden,
+			DownRows: hidden, DownCols: expertFF,
+		}
+		routeWeights[index] = 1 / float32(topK)
+	}
+
+	core.RequireNoError(t, hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutput(context.Background(), driver, &input, entries, routeWeights, hidden, expertFF, &activation, &output))
+	core.AssertEqual(t, 2, len(driver.launches))
+	core.AssertEqual(t, hipKernelNameGGUFQ4_0SelectedExpertGateUpPair16, driver.launches[0].Name)
+	core.AssertEqual(t, hipKernelNameGGUFQ4_0SelectedExpertDownPair16, driver.launches[1].Name)
+	core.AssertEqual(t, uint32(352), driver.launches[0].GridX)
+	core.AssertEqual(t, uint32(176), driver.launches[1].GridX)
+	core.AssertEqual(t, uint32(256), driver.launches[0].BlockX)
+	core.AssertEqual(t, uint32(256), driver.launches[1].BlockX)
 }
 
 func TestHIPGGUFMixedSelectedExpertsLaunch_Good(t *testing.T) {
@@ -235,20 +274,41 @@ func TestHIPGemma4ExpertCache_Good(t *testing.T) {
 	entry0, err := model.gemma4ExpertCacheEntry(0, 0)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, 2, len(driver.copies))
+	core.AssertEqual(t, uint64(1), model.expertCache.stats.Misses)
+	core.AssertEqual(t, uint64(1), model.expertCache.stats.HostMappings)
+	core.AssertEqual(t, uint64(len(filePayload)), model.expertCache.stats.HostMappedBytes)
+	core.AssertEqual(t, uint64(gateUpSliceBytes+downSliceBytes), model.expertCache.stats.H2DBytes)
+	core.AssertEqual(t, 1, len(model.expertCache.sources))
 	entry0Again, err := model.gemma4ExpertCacheEntry(0, 0)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, entry0, entry0Again)
 	core.AssertEqual(t, 2, len(driver.copies))
+	core.AssertEqual(t, uint64(1), model.expertCache.stats.Hits)
 
 	entry1, err := model.gemma4ExpertCacheEntry(0, 1)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, 4, len(driver.copies))
 	core.AssertNotEqual(t, entry0, entry1)
 	core.AssertEqual(t, 1, len(model.expertCache.entries))
+	core.AssertEqual(t, uint64(2), model.expertCache.stats.Misses)
+	core.AssertEqual(t, uint64(1), model.expertCache.stats.Evictions)
+	core.AssertEqual(t, uint64(1), model.expertCache.stats.HostMappings)
 	core.AssertEqual(t, gateUpPayload[gateUpSliceBytes:], driver.memory[entry1.GateUp.Pointer()])
 	core.AssertEqual(t, downPayload[downSliceBytes:], driver.memory[entry1.Down.Pointer()])
+
+	entry0Reloaded, err := model.gemma4ExpertCacheEntry(0, 0)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 6, len(driver.copies))
+	core.AssertNotEqual(t, entry0, entry0Reloaded)
+	core.AssertEqual(t, uint64(3), model.expertCache.stats.Misses)
+	core.AssertEqual(t, uint64(2), model.expertCache.stats.Evictions)
+	core.AssertEqual(t, uint64(1), model.expertCache.stats.HostMappings)
+	core.AssertEqual(t, uint64(3*(gateUpSliceBytes+downSliceBytes)), model.expertCache.stats.H2DBytes)
+	core.AssertEqual(t, gateUpPayload[:gateUpSliceBytes], driver.memory[entry0Reloaded.GateUp.Pointer()])
+	core.AssertEqual(t, downPayload[:downSliceBytes], driver.memory[entry0Reloaded.Down.Pointer()])
 	core.RequireNoError(t, model.expertCache.Close())
 	core.AssertEqual(t, 0, len(model.expertCache.entries))
+	core.AssertEqual(t, 0, len(model.expertCache.sources))
 	core.AssertEqual(t, uint64(0), model.expertCache.bytes)
 }
 

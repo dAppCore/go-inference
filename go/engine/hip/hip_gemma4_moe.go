@@ -9,23 +9,27 @@ import (
 	"encoding/binary"
 	"math"
 	"sync"
+	"syscall"
 
 	core "dappco.re/go"
 )
 
 const (
-	hipGGUFQ4_0ProjectionLaunchArgsVersion      uint32 = 1
-	hipGGUFQ4_0ProjectionLaunchArgsBytes               = 64
-	hipGGUFQ4_0ProjectionBlockSize              uint32 = 256
-	hipGGUFQ4_0ProjectionRowsPerBlock           uint32 = 8
-	hipGGUFQ4_0SelectedExpertsLaunchArgsVersion uint32 = 1
-	hipGGUFQ4_0SelectedExpertsLaunchArgsBytes          = 240
-	hipGGUFQ4_0SelectedExpertsMaxTopK                  = 8
-	hipGGUFExpertFormatQ4_0                     uint32 = 1
-	hipGGUFExpertFormatQ4K                      uint32 = 2
-	hipGGUFExpertFormatQ5_1                     uint32 = 3
-	hipGGUFExpertFormatQ8_0                     uint32 = 4
+	hipGGUFQ4_0ProjectionLaunchArgsVersion       uint32 = 1
+	hipGGUFQ4_0ProjectionLaunchArgsBytes                = 64
+	hipGGUFQ4_0ProjectionBlockSize               uint32 = 256
+	hipGGUFQ4_0ProjectionRowsPerBlock            uint32 = 8
+	hipGGUFQ4_0SelectedExpertsLaunchArgsVersion  uint32 = 1
+	hipGGUFQ4_0SelectedExpertsLaunchArgsBytes           = 240
+	hipGGUFQ4_0SelectedExpertsMaxTopK                   = 8
+	hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock uint32 = 16
+	hipGGUFExpertFormatQ4_0                      uint32 = 1
+	hipGGUFExpertFormatQ4K                       uint32 = 2
+	hipGGUFExpertFormatQ5_1                      uint32 = 3
+	hipGGUFExpertFormatQ8_0                      uint32 = 4
 )
+
+const hipGemma4SelectedExpertPair16Env = "GO_ROCM_GEMMA4_Q4_SELECTED_EXPERT_PAIR16"
 
 type hipGGUFQ4_0ProjectionLaunchArgs struct {
 	InputPointer  nativeDevicePointer
@@ -85,6 +89,20 @@ type hipGemma4ExpertCacheEntry struct {
 	lastUse      uint64
 }
 
+type hipGemma4MappedExpertSource struct {
+	file *core.OSFile
+	data []byte
+}
+
+type hipGemma4ExpertCacheStats struct {
+	Hits            uint64
+	Misses          uint64
+	Evictions       uint64
+	HostMappings    uint64
+	HostMappedBytes uint64
+	H2DBytes        uint64
+}
+
 type hipGemma4MoERouterProjectionConfig struct {
 	WeightPointer nativeDevicePointer
 	WeightBytes   uint64
@@ -114,7 +132,8 @@ type hipGemma4ExpertCache struct {
 	bytes    uint64
 	clock    uint64
 	entries  map[hipGemma4ExpertCacheKey]*hipGemma4ExpertCacheEntry
-	files    map[string]*core.OSFile
+	sources  map[string]*hipGemma4MappedExpertSource
+	stats    hipGemma4ExpertCacheStats
 	mu       sync.Mutex
 }
 
@@ -761,7 +780,7 @@ func newHIPGemma4ExpertCache(driver nativeHIPDriver, maxBytes uint64) *hipGemma4
 		driver:   driver,
 		maxBytes: maxBytes,
 		entries:  map[hipGemma4ExpertCacheKey]*hipGemma4ExpertCacheEntry{},
-		files:    map[string]*core.OSFile{},
+		sources:  map[string]*hipGemma4MappedExpertSource{},
 	}
 }
 
@@ -812,9 +831,11 @@ func (cache *hipGemma4ExpertCache) entry(key hipGemma4ExpertCacheKey, gateUpInfo
 	defer cache.mu.Unlock()
 	cache.clock++
 	if entry := cache.entries[key]; entry != nil {
+		cache.stats.Hits++
 		entry.lastUse = cache.clock
 		return entry, nil
 	}
+	cache.stats.Misses++
 	gateUpSlice, gateUpRows, gateUpCols, gateUpFormat, err := cache.expertTensorSlice(gateUpInfo, key.Expert, expectedExperts)
 	if err != nil {
 		return nil, core.E("rocm.hip.Gemma4ExpertCache", "resolve expert gate/up slice", err)
@@ -836,11 +857,13 @@ func (cache *hipGemma4ExpertCache) entry(key hipGemma4ExpertCacheKey, gateUpInfo
 	if err != nil {
 		return nil, err
 	}
+	cache.stats.H2DBytes += uint64(len(gateUpSlice))
 	downBuffer, err := hipUploadByteBuffer(cache.driver, "rocm.hip.Gemma4ExpertCache", "expert down", downSlice, len(downSlice))
 	if err != nil {
 		_ = gateUpBuffer.Close()
 		return nil, err
 	}
+	cache.stats.H2DBytes += uint64(len(downSlice))
 	entry := &hipGemma4ExpertCacheEntry{
 		GateUp: gateUpBuffer, Down: downBuffer,
 		GateUpRows: gateUpRows, GateUpCols: gateUpCols,
@@ -870,6 +893,7 @@ func (cache *hipGemma4ExpertCache) evictOldest() error {
 	}
 	delete(cache.entries, oldestKey)
 	cache.bytes -= oldest.bytes
+	cache.stats.Evictions++
 	return nil
 }
 
@@ -902,14 +926,65 @@ func (cache *hipGemma4ExpertCache) Close() error {
 		}
 		delete(cache.entries, key)
 	}
-	for path, file := range cache.files {
-		if err := file.Close(); err != nil {
+	for path, source := range cache.sources {
+		if err := source.Close(); err != nil {
 			lastErr = err
 		}
-		delete(cache.files, path)
+		delete(cache.sources, path)
 	}
 	cache.bytes = 0
 	return lastErr
+}
+
+func (source *hipGemma4MappedExpertSource) Close() error {
+	if source == nil {
+		return nil
+	}
+	var lastErr error
+	if len(source.data) > 0 {
+		if err := syscall.Munmap(source.data); err != nil {
+			lastErr = err
+		}
+		source.data = nil
+	}
+	if source.file != nil {
+		if err := source.file.Close(); err != nil {
+			lastErr = err
+		}
+		source.file = nil
+	}
+	return lastErr
+}
+
+func (cache *hipGemma4ExpertCache) mappedExpertSource(path string) (*hipGemma4MappedExpertSource, error) {
+	if source := cache.sources[path]; source != nil {
+		return source, nil
+	}
+	fileResult := core.Open(path)
+	if !fileResult.OK {
+		return nil, fileResult.Value.(error)
+	}
+	file := fileResult.Value.(*core.OSFile)
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	size := info.Size()
+	if size <= 0 || uint64(size) > uint64(^uint(0)>>1) {
+		_ = file.Close()
+		return nil, core.E("rocm.hip.Gemma4ExpertCache", "expert tensor source size is invalid", nil)
+	}
+	mapping, err := syscall.Mmap(int(file.Fd()), 0, int(size), syscall.PROT_READ, syscall.MAP_SHARED)
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	source := &hipGemma4MappedExpertSource{file: file, data: mapping}
+	cache.sources[path] = source
+	cache.stats.HostMappings++
+	cache.stats.HostMappedBytes += uint64(size)
+	return source, nil
 }
 
 func (cache *hipGemma4ExpertCache) expertTensorSlice(info nativeTensorInfo, expert, expectedExperts int) ([]byte, int, int, uint32, error) {
@@ -939,24 +1014,31 @@ func (cache *hipGemma4ExpertCache) expertTensorSlice(info nativeTensorInfo, expe
 	if path == "" {
 		return nil, 0, 0, 0, core.E("rocm.hip.Gemma4ExpertCache", "expert tensor source path is required", nil)
 	}
-	file := cache.files[path]
-	if file == nil {
-		fileResult := core.Open(path)
-		if !fileResult.OK {
-			return nil, 0, 0, 0, fileResult.Value.(error)
-		}
-		file = fileResult.Value.(*core.OSFile)
-		cache.files[path] = file
-	}
-	payload := make([]byte, int(sliceBytes))
-	start := info.DataOffset + int64(info.Offset) + int64(uint64(expert)*sliceBytes)
-	n, err := file.ReadAt(payload, start)
+	source, err := cache.mappedExpertSource(path)
 	if err != nil {
 		return nil, 0, 0, 0, err
 	}
-	if n != len(payload) {
+	if info.DataOffset < 0 {
+		return nil, 0, 0, 0, core.E("rocm.hip.Gemma4ExpertCache", "expert tensor data offset is invalid", nil)
+	}
+	start := uint64(info.DataOffset)
+	if info.Offset > ^uint64(0)-start {
+		return nil, 0, 0, 0, core.E("rocm.hip.Gemma4ExpertCache", "expert tensor slice offset overflows", nil)
+	}
+	start += info.Offset
+	expertOffset := uint64(expert) * sliceBytes
+	if expertOffset > ^uint64(0)-start {
+		return nil, 0, 0, 0, core.E("rocm.hip.Gemma4ExpertCache", "expert tensor slice offset overflows", nil)
+	}
+	start += expertOffset
+	if sliceBytes > ^uint64(0)-start {
+		return nil, 0, 0, 0, core.E("rocm.hip.Gemma4ExpertCache", "expert tensor slice range overflows", nil)
+	}
+	end := start + sliceBytes
+	if end > uint64(len(source.data)) {
 		return nil, 0, 0, 0, core.E("rocm.hip.Gemma4ExpertCache", "expert tensor slice is truncated", nil)
 	}
+	payload := source.data[int(start):int(end)]
 	return payload, rows, cols, format, nil
 }
 
@@ -1160,8 +1242,13 @@ func hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(ctx c
 	}
 	gateRows := uint32(len(entries) * expertFF)
 	downRows := uint32(hidden)
+	rowsPerBlock := hipGGUFQ4_0ProjectionRowsPerBlock
 	gateKernel, downKernel := hipKernelNameGGUFQ4_0SelectedExpertGateUp, hipKernelNameGGUFQ4_0SelectedExpertDown
-	if args.GateUpFormat == hipGGUFExpertFormatQ4K && (args.DownFormat == hipGGUFExpertFormatQ5_1 || args.DownFormat == hipGGUFExpertFormatQ8_0) {
+	if args.GateUpFormat == hipGGUFExpertFormatQ4_0 && args.DownFormat == hipGGUFExpertFormatQ4_0 && core.Env(hipGemma4SelectedExpertPair16Env) != "0" {
+		gateKernel = hipKernelNameGGUFQ4_0SelectedExpertGateUpPair16
+		downKernel = hipKernelNameGGUFQ4_0SelectedExpertDownPair16
+		rowsPerBlock = hipGGUFQ4_0SelectedExpertsPair16RowsPerBlock
+	} else if args.GateUpFormat == hipGGUFExpertFormatQ4K && (args.DownFormat == hipGGUFExpertFormatQ5_1 || args.DownFormat == hipGGUFExpertFormatQ8_0) {
 		gateKernel = hipKernelNameGGUFQ4KSelectedExpertGateUp
 		if args.DownFormat == hipGGUFExpertFormatQ5_1 {
 			downKernel = hipKernelNameGGUFQ5_1SelectedExpertDown
@@ -1172,8 +1259,8 @@ func hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(ctx c
 		return core.E("rocm.hip.GGUFQ4_0SelectedExpertsLaunch", "selected expert format pair is unsupported", nil)
 	}
 	for _, config := range []hipKernelLaunchConfig{
-		{Name: gateKernel, Args: launchBytes, GridX: (gateRows + hipGGUFQ4_0ProjectionRowsPerBlock - 1) / hipGGUFQ4_0ProjectionRowsPerBlock, GridY: 1, GridZ: 1, BlockX: hipGGUFQ4_0ProjectionBlockSize, BlockY: 1, BlockZ: 1},
-		{Name: downKernel, Args: launchBytes, GridX: (downRows + hipGGUFQ4_0ProjectionRowsPerBlock - 1) / hipGGUFQ4_0ProjectionRowsPerBlock, GridY: 1, GridZ: 1, BlockX: hipGGUFQ4_0ProjectionBlockSize, BlockY: 1, BlockZ: 1},
+		{Name: gateKernel, Args: launchBytes, GridX: (gateRows + rowsPerBlock - 1) / rowsPerBlock, GridY: 1, GridZ: 1, BlockX: hipGGUFQ4_0ProjectionBlockSize, BlockY: 1, BlockZ: 1},
+		{Name: downKernel, Args: launchBytes, GridX: (downRows + rowsPerBlock - 1) / rowsPerBlock, GridY: 1, GridZ: 1, BlockX: hipGGUFQ4_0ProjectionBlockSize, BlockY: 1, BlockZ: 1},
 	} {
 		if err := hipLaunchKernel(driver, config); err != nil {
 			return err
