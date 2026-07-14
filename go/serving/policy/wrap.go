@@ -38,15 +38,26 @@ func WrapResolverMediated(inner openai.Resolver, pol *Policy, log io.Writer, med
 }
 
 // wrapResolver is the shared decorator: it resolves via inner, then wraps the
-// model so its Chat stream runs through the outbound policy, carrying mediate
-// (nil for the redact/refuse-only path).
+// model so its OUTPUT runs through the outbound policy, carrying mediate (nil for
+// the redact/refuse-only path).
+//
+// A model that routes through a request scheduler (inference.SchedulerModel — the
+// -scheduler serve modes) is wrapped as a policySchedulerModel so the policy runs
+// at the Schedule boundary; a model with no scheduler keeps the plain Chat-only
+// wrapper (byte-for-byte unchanged). See policySchedulerModel for why a plain
+// Chat decorator alone would be bypassed under the scheduler (inference.As would
+// unwrap past it to the scheduler beneath).
 func wrapResolver(inner openai.Resolver, pol *Policy, log io.Writer, mediate Mediator) openai.Resolver {
 	return openai.ResolverFunc(func(ctx context.Context, name string) (inference.TextModel, error) {
 		model, err := inner.ResolveModel(ctx, name)
 		if err != nil {
 			return nil, err
 		}
-		return &policyTextModel{TextModel: model, pol: pol, log: log, mediate: mediate}, nil
+		wrapped := &policyTextModel{TextModel: model, pol: pol, log: log, mediate: mediate}
+		if sched, ok := inference.As[inference.SchedulerModel](model); ok {
+			return &policySchedulerModel{policyTextModel: wrapped, inner: sched}, nil
+		}
+		return wrapped, nil
 	})
 }
 
