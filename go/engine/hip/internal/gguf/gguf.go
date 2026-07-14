@@ -66,6 +66,18 @@ type Metadata struct {
 	RopeDimensionCount            uint32
 	RopeDimensionCountSWA         uint32
 	FinalLogitSoftcap             float64
+	TokenizerModel                string
+	TokenizerTokens               []string
+	TokenizerMerges               []string
+	TokenizerTokenTypes           []int32
+	TokenizerBOSID                uint32
+	TokenizerBOSIDSet             bool
+	TokenizerEOSID                uint32
+	TokenizerEOSIDSet             bool
+	TokenizerUnknownID            uint32
+	TokenizerUnknownIDSet         bool
+	TokenizerAddBOS               bool
+	TokenizerAddSpacePrefix       bool
 }
 
 // TensorInfo describes one GGUF tensor entry without loading tensor bytes.
@@ -292,6 +304,80 @@ func readInfo(path string, includeTensors bool) (
 			if s, ok := value.(string); ok {
 				meta.SizeLabel = s
 			}
+
+		case key == "tokenizer.ggml.model":
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if s, ok := value.(string); ok {
+				meta.TokenizerModel = s
+			}
+
+		case key == "tokenizer.ggml.tokens":
+			values, err := readStringArray(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			meta.TokenizerTokens = values
+
+		case key == "tokenizer.ggml.merges":
+			values, err := readStringArray(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			meta.TokenizerMerges = values
+
+		case key == "tokenizer.ggml.token_type":
+			values, err := readInt32Array(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			meta.TokenizerTokenTypes = values
+
+		case key == "tokenizer.ggml.bos_token_id":
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if id, ok := metadataUint32(value); ok {
+				meta.TokenizerBOSID = id
+				meta.TokenizerBOSIDSet = true
+			}
+
+		case key == "tokenizer.ggml.eos_token_id":
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if id, ok := metadataUint32(value); ok {
+				meta.TokenizerEOSID = id
+				meta.TokenizerEOSIDSet = true
+			}
+
+		case key == "tokenizer.ggml.unknown_token_id":
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			if id, ok := metadataUint32(value); ok {
+				meta.TokenizerUnknownID = id
+				meta.TokenizerUnknownIDSet = true
+			}
+
+		case key == "tokenizer.ggml.add_bos_token":
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			meta.TokenizerAddBOS, _ = value.(bool)
+
+		case key == "tokenizer.ggml.add_space_prefix":
+			value, err := readTypedValue(reader, valType)
+			if err != nil {
+				return Info{}, core.E("gguf.ReadInfo", core.Sprintf("reading value for key %q", key), err)
+			}
+			meta.TokenizerAddSpacePrefix, _ = value.(bool)
 
 		case core.HasSuffix(key, ".context_length"):
 			value, err := readTypedValue(reader, valType)
@@ -557,6 +643,8 @@ func readInfo(path string, includeTensors bool) (
 // should ever approach 1 MiB; this prevents memory exhaustion from malformed files.
 const maxStringLength = 1 << 20
 
+const maxTokenizerEntries = 1 << 20
+
 type ggufFailure interface {
 	Error() string
 }
@@ -639,6 +727,54 @@ func readTypedValue(r io.Reader, valType uint32) (
 		err := skipValue(r, valType)
 		return nil, err
 	}
+}
+
+func readStringArray(r io.Reader, valType uint32) ([]string, error) {
+	count, err := readArrayHeader(r, valType, typeString)
+	if err != nil {
+		return nil, err
+	}
+	values := make([]string, count)
+	for i := range values {
+		values[i], err = readString(r)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return values, nil
+}
+
+func readInt32Array(r io.Reader, valType uint32) ([]int32, error) {
+	count, err := readArrayHeader(r, valType, typeInt32)
+	if err != nil {
+		return nil, err
+	}
+	values := make([]int32, count)
+	if err := binary.Read(r, binary.LittleEndian, values); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func readArrayHeader(r io.Reader, valType, wantElementType uint32) (int, error) {
+	if valType != typeArray {
+		return 0, core.E("gguf.readArrayHeader", core.Sprintf("value type %d is not an array", valType), nil)
+	}
+	var elementType uint32
+	if err := binary.Read(r, binary.LittleEndian, &elementType); err != nil {
+		return 0, err
+	}
+	if elementType != wantElementType {
+		return 0, core.E("gguf.readArrayHeader", core.Sprintf("array element type %d, want %d", elementType, wantElementType), nil)
+	}
+	var count uint64
+	if err := binary.Read(r, binary.LittleEndian, &count); err != nil {
+		return 0, err
+	}
+	if count > maxTokenizerEntries {
+		return 0, core.E("gguf.readArrayHeader", core.Sprintf("array length %d exceeds maximum %d", count, maxTokenizerEntries), nil)
+	}
+	return int(count), nil
 }
 
 func metadataUint32(value any) (uint32, bool) {

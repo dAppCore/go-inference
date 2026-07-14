@@ -680,13 +680,15 @@ var cgoHIPAvailability = struct {
 }{}
 
 const (
-	cgoHIPPoolMaxBufferBytes = 8 << 20
-	cgoHIPPoolMaxTotalBytes  = 512 << 20
-	cgoHIPPoolMaxPerSize     = 512
-	cgoHIPPoolInitialPerSize = 8
-	cgoHIPLaunchArgRingSize  = 16384
-	cgoHIPAsyncCopyRingSize  = 8192
-	cgoHIPAsyncCopyMaxBytes  = 1 << 20
+	cgoHIPPoolMaxBufferBytes  = 8 << 20
+	cgoHIPPoolMaxTotalBytes   = 512 << 20
+	cgoHIPPoolMaxPerSize      = 512
+	cgoHIPPoolInitialPerSize  = 8
+	cgoHIPLaunchArgRingSize   = 16384
+	cgoHIPLaunchArgSlotBytes  = 256
+	cgoHIPLaunchArgArenaBytes = cgoHIPLaunchArgRingSize * cgoHIPLaunchArgSlotBytes
+	cgoHIPAsyncCopyRingSize   = 8192
+	cgoHIPAsyncCopyMaxBytes   = 1 << 20
 )
 
 type cgoHIPCachedModule struct {
@@ -724,6 +726,7 @@ type cgoHIPLaunchArgSlot struct {
 	event    C.uintptr_t
 	bytes    uint64
 	mapped   bool
+	arena    bool
 	recorded bool
 }
 
@@ -747,9 +750,12 @@ var cgoHIPLaunchArgModeCache = struct {
 
 var cgoHIPLaunchArgRing = struct {
 	sync.Mutex
-	next    int
-	wrapped bool
-	slots   []cgoHIPLaunchArgSlot
+	next             int
+	wrapped          bool
+	arenaHost        unsafe.Pointer
+	arenaPointer     nativeDevicePointer
+	arenaUnavailable bool
+	slots            []cgoHIPLaunchArgSlot
 }{
 	slots: make([]cgoHIPLaunchArgSlot, cgoHIPLaunchArgRingSize),
 }
@@ -1189,14 +1195,21 @@ func (driver cgoHIPDriver) launchArgPointerAsync(args []byte) (cgoHIPLaunchArgLe
 		}
 		slot.recorded = false
 	}
-	want := uint64(len(args))
-	if want < 256 {
-		want = 256
+	usingArena, err := driver.useLaunchArgArenaSlot(slot, slotIndex, len(args))
+	if err != nil {
+		cgoHIPLaunchArgRing.Unlock()
+		return cgoHIPLaunchArgLease{}, core.E("rocm.hip.LaunchKernel", "allocate async kernel argument packet", err)
 	}
-	if slot.pointer == 0 || slot.bytes < want {
-		if err := driver.resizeLaunchArgSlot(slot, want); err != nil {
-			cgoHIPLaunchArgRing.Unlock()
-			return cgoHIPLaunchArgLease{}, core.E("rocm.hip.LaunchKernel", "allocate async kernel argument packet", err)
+	if !usingArena {
+		want := uint64(len(args))
+		if want < cgoHIPLaunchArgSlotBytes {
+			want = cgoHIPLaunchArgSlotBytes
+		}
+		if slot.pointer == 0 || slot.bytes < want {
+			if err := driver.resizeLaunchArgSlot(slot, want); err != nil {
+				cgoHIPLaunchArgRing.Unlock()
+				return cgoHIPLaunchArgLease{}, core.E("rocm.hip.LaunchKernel", "allocate async kernel argument packet", err)
+			}
 		}
 	}
 	hostBytes := unsafe.Slice((*byte)(slot.host), int(slot.bytes))
@@ -1208,6 +1221,56 @@ func (driver cgoHIPDriver) launchArgPointerAsync(args []byte) (cgoHIPLaunchArgLe
 		}
 	}
 	return cgoHIPLaunchArgLease{pointer: slot.pointer, asyncSlot: slot, noEvent: syncOnWrap}, nil
+}
+
+func (driver cgoHIPDriver) useLaunchArgArenaSlot(slot *cgoHIPLaunchArgSlot, slotIndex, packetBytes int) (bool, error) {
+	if !cgoHIPLaunchArgModeConfig().mapped || packetBytes > cgoHIPLaunchArgSlotBytes {
+		return false, nil
+	}
+	if cgoHIPLaunchArgRing.arenaPointer == 0 && !cgoHIPLaunchArgRing.arenaUnavailable {
+		result := C.core_rocm_hip_host_malloc_mapped_result(C.size_t(cgoHIPLaunchArgArenaBytes))
+		if result.rc != 0 {
+			cgoHIPLaunchArgRing.arenaUnavailable = true
+			return false, nil
+		}
+		cgoHIPLaunchArgRing.arenaHost = unsafe.Pointer(uintptr(result.first))
+		cgoHIPLaunchArgRing.arenaPointer = nativeDevicePointer(result.second)
+	}
+	pointer, ok := cgoHIPLaunchArgArenaSlotPointer(cgoHIPLaunchArgRing.arenaPointer, slotIndex, packetBytes)
+	if !ok {
+		return false, nil
+	}
+	if !slot.arena && slot.pointer != 0 {
+		if err := driver.freeLaunchArgSlot(slot); err != nil {
+			return false, err
+		}
+	}
+	if !slot.arena {
+		slot.host = unsafe.Add(cgoHIPLaunchArgRing.arenaHost, slotIndex*cgoHIPLaunchArgSlotBytes)
+		slot.pointer = pointer
+		slot.bytes = cgoHIPLaunchArgSlotBytes
+		slot.mapped = true
+		slot.arena = true
+	}
+	if cgoHIPLaunchArgEventsEnabled() && slot.event == 0 {
+		eventResult := C.core_rocm_hip_event_create_result()
+		if eventResult.rc != 0 {
+			return false, hipReturnError("hipEventCreateWithFlags", int(eventResult.rc))
+		}
+		slot.event = eventResult.first
+	}
+	return true, nil
+}
+
+func cgoHIPLaunchArgArenaSlotPointer(base nativeDevicePointer, slotIndex, packetBytes int) (nativeDevicePointer, bool) {
+	if base == 0 || slotIndex < 0 || slotIndex >= cgoHIPLaunchArgRingSize || packetBytes < 0 || packetBytes > cgoHIPLaunchArgSlotBytes {
+		return 0, false
+	}
+	offset := uintptr(slotIndex * cgoHIPLaunchArgSlotBytes)
+	if uintptr(base) > ^uintptr(0)-offset {
+		return 0, false
+	}
+	return base + nativeDevicePointer(offset), true
 }
 
 func cgoHIPLaunchArgEventsEnabled() bool {
@@ -1292,6 +1355,7 @@ func (driver cgoHIPDriver) resizeLaunchArgSlot(slot *cgoHIPLaunchArgSlot, size u
 			slot.event = event
 			slot.bytes = size
 			slot.mapped = true
+			slot.arena = false
 			return nil
 		}
 	}
@@ -1319,6 +1383,7 @@ func (driver cgoHIPDriver) resizeLaunchArgSlot(slot *cgoHIPLaunchArgSlot, size u
 	slot.event = event
 	slot.bytes = size
 	slot.mapped = false
+	slot.arena = false
 	return nil
 }
 
@@ -1339,19 +1404,20 @@ func (driver cgoHIPDriver) freeLaunchArgSlot(slot *cgoHIPLaunchArgSlot) error {
 		}
 		slot.event = 0
 	}
-	if slot.host != nil {
+	if slot.host != nil && !slot.arena {
 		if rc := C.core_rocm_hip_host_free(C.uintptr_t(uintptr(slot.host))); rc != 0 {
 			lastErr = hipReturnError("hipHostFree", int(rc))
 		}
-		slot.host = nil
 	}
-	if slot.pointer != 0 && !slot.mapped {
+	slot.host = nil
+	if slot.pointer != 0 && !slot.mapped && !slot.arena {
 		if err := driver.Free(slot.pointer); err != nil {
 			lastErr = err
 		}
 	}
 	slot.pointer = 0
 	slot.mapped = false
+	slot.arena = false
 	slot.bytes = 0
 	return lastErr
 }

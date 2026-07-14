@@ -969,6 +969,32 @@ func TestHIPKernels_MLXAffineQ6ProjectionCols256LaunchConfig_Good(t *testing.T) 
 	core.AssertEqual(t, uint32(48), q8GGUF.GridX)
 }
 
+func TestHIPKernels_MLXAffineQ4G32Projection12BDownLaunchConfig_Good(t *testing.T) {
+	previous := hipMLXQ4Projection12BDownRouteEnabled
+	hipMLXQ4Projection12BDownRouteEnabled = true
+	t.Cleanup(func() {
+		hipMLXQ4Projection12BDownRouteEnabled = previous
+	})
+
+	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionLaunchArgsBytes)
+	defer hipReleaseLaunchPacket(packet)
+
+	exact, err := hipMLXQ4ProjectionLaunchConfigForShape(packet, 3840, 15360, 32, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360, exact.Name)
+	core.AssertEqual(t, uint32(480), exact.GridX)
+	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, exact.BlockX)
+
+	nearby, err := hipMLXQ4ProjectionLaunchConfigForShape(packet, 3840, 15328, 32, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4Proj, nearby.Name)
+
+	hipMLXQ4Projection12BDownRouteEnabled = false
+	disabled, err := hipMLXQ4ProjectionLaunchConfigForShape(packet, 3840, 15360, 32, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4Proj, disabled.Name)
+}
+
 func TestHIPKernels_MLXAffineQ6ProjectionRow64LaunchConfig_Good(t *testing.T) {
 	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionLaunchArgsBytes)
 	defer hipReleaseLaunchPacket(packet)
@@ -992,6 +1018,38 @@ func TestHIPKernels_MLXAffineQ6ProjectionRow64LaunchConfig_Good(t *testing.T) {
 	q6Cols256, err := hipMLXQ4ProjectionLaunchConfigForShape(packet, 1536, 256, 64, 6)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, hipKernelNameMLXQ4ProjCols256, q6Cols256.Name)
+}
+
+func TestHIPKernels_MLXAffineQ4G16Projection12BHeadGridConfig_Good(t *testing.T) {
+	core.AssertEqual(t, hipExperimentalProjectionGridBlocks(hipMLXQ4Projection12BHeadGridEnv), hipMLXQ4Projection12BHeadGridBlocks)
+
+	previous := hipMLXQ4Projection12BHeadGridBlocks
+	hipMLXQ4Projection12BHeadGridBlocks = 2048
+	t.Cleanup(func() {
+		hipMLXQ4Projection12BHeadGridBlocks = previous
+	})
+
+	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionLaunchArgsBytes)
+	defer hipReleaseLaunchPacket(packet)
+
+	exact, err := hipMLXQ4ProjectionGreedyLaunchConfigForShape(packet, 262144, 3840, 16, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4ProjGreedy, exact.Name)
+	core.AssertEqual(t, uint32(2048), exact.GridX)
+	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, exact.BlockX)
+
+	eightBit, err := hipMLXQ4ProjectionGreedyLaunchConfigForShape(packet, 262144, 3840, 16, 8)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, uint32(2048), eightBit.GridX)
+
+	nearby, err := hipMLXQ4ProjectionGreedyLaunchConfigForShape(packet, 262112, 3840, 16, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, uint32(8191), nearby.GridX)
+
+	hipMLXQ4Projection12BHeadGridBlocks = 0
+	disabled, err := hipMLXQ4ProjectionGreedyLaunchConfigForShape(packet, 262144, 3840, 16, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, uint32(8192), disabled.GridX)
 }
 
 func TestHIPKernels_MLXAffineQ6Group16ProjectionRow16LaunchConfig_Good(t *testing.T) {
@@ -1065,6 +1123,57 @@ func TestHIPKernels_MLXAffineQ6GELUTanhCols1536LaunchConfig_Good(t *testing.T) {
 	core.AssertEqual(t, uint32(640), q4Group32E4B.GridX)
 }
 
+func TestHIPKernels_MLXAffineQ4G32GELUTanh12BGateUpLaunchConfig_Good(t *testing.T) {
+	previous := hipMLXQ4GELUTanh12BGateUpRouteEnabled
+	hipMLXQ4GELUTanh12BGateUpRouteEnabled = true
+	t.Cleanup(func() {
+		hipMLXQ4GELUTanh12BGateUpRouteEnabled = previous
+	})
+
+	packet := hipBorrowLaunchPacket(hipMLXQ4GELUTanhMulLaunchArgsBytes)
+	defer hipReleaseLaunchPacket(packet)
+
+	exact, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 15360, 3840, 32, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, exact.Name)
+	core.AssertEqual(t, uint32(960), exact.GridX)
+	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, exact.BlockX)
+
+	nearby, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 15344, 3840, 32, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, nearby.Name)
+
+	hipMLXQ4GELUTanh12BGateUpRouteEnabled = false
+	disabled, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 15360, 3840, 32, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, disabled.Name)
+}
+
+func TestHIPKernels_MLXAffineQ4G32GELUTanh12BGateUpRow8LaunchConfig_Good(t *testing.T) {
+	previousRoute := hipMLXQ4GELUTanh12BGateUpRouteEnabled
+	previousGeometry := hipMLXQ4GELUTanh12BGateUpGeometry
+	hipMLXQ4GELUTanh12BGateUpRouteEnabled = true
+	hipMLXQ4GELUTanh12BGateUpGeometry = "row8"
+	t.Cleanup(func() {
+		hipMLXQ4GELUTanh12BGateUpRouteEnabled = previousRoute
+		hipMLXQ4GELUTanh12BGateUpGeometry = previousGeometry
+	})
+
+	packet := hipBorrowLaunchPacket(hipMLXQ4GELUTanhMulLaunchArgsBytes)
+	defer hipReleaseLaunchPacket(packet)
+
+	exact, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 15360, 3840, 32, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8, exact.Name)
+	core.AssertEqual(t, uint32(1920), exact.GridX)
+	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, exact.BlockX)
+
+	hipMLXQ4GELUTanh12BGateUpGeometry = ""
+	baseline, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 15360, 3840, 32, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, baseline.Name)
+}
+
 func TestHIPKernels_MLXAffineQ6GELUTanhCols1536Row64SmallLaunchConfig_Good(t *testing.T) {
 	packet := hipBorrowLaunchPacket(hipMLXQ4GELUTanhMulLaunchArgsBytes)
 	defer hipReleaseLaunchPacket(packet)
@@ -1100,6 +1209,11 @@ func TestHIPKernels_MLXAffineQ6GELUTanhProjectionRow16LaunchConfig_Good(t *testi
 func TestHIPKernels_MLXAffineQ6ProjectionGreedyRow64LaunchConfig_Good(t *testing.T) {
 	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionLaunchArgsBytes)
 	defer hipReleaseLaunchPacket(packet)
+
+	q4Small, err := hipMLXQ4ProjectionGreedyLaunchConfigForShape(packet, 64, 1536, 64, 4)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4ProjGreedy, q4Small.Name)
+	core.AssertEqual(t, uint32(2), q4Small.GridX)
 
 	q6, err := hipMLXQ4ProjectionGreedyLaunchConfigForShape(packet, 262144, 1536, 64, 6)
 	core.RequireNoError(t, err)
@@ -3067,6 +3181,98 @@ func TestHIPKernels_RMSNormRoPEHeadsBatchLaunchArgs_Good(t *testing.T) {
 	assertFloat32Near(t, 0.25, math.Float32frombits(binary.LittleEndian.Uint32(launchBytes[84:])))
 }
 
+func TestHIPKernels_RMSNormRoPEHeadsPairLaneBatchLaunchArgs_Good(t *testing.T) {
+	driver := &fakeHIPDriver{available: true}
+	queryValues := []float32{
+		1, 0, 3, 4,
+		0, 2, 5, 12,
+		2, 0, 1, 1,
+		0, 3, 4, 3,
+	}
+	keyValues := []float32{
+		1, 2, 3, 4,
+		4, 3, 2, 1,
+	}
+	queryPayload, err := hipFloat32Payload(queryValues)
+	core.RequireNoError(t, err)
+	query, err := hipUploadByteBuffer(driver, "rocm.hip.RMSNormRoPEHeadsPairLaneBatchLaunch", "query input", queryPayload, len(queryValues))
+	core.RequireNoError(t, err)
+	defer query.Close()
+	keyPayload, err := hipFloat32Payload(keyValues)
+	core.RequireNoError(t, err)
+	key, err := hipUploadByteBuffer(driver, "rocm.hip.RMSNormRoPEHeadsPairLaneBatchLaunch", "key input", keyPayload, len(keyValues))
+	core.RequireNoError(t, err)
+	defer key.Close()
+	positions, err := hipUploadTokenIDs(driver, []int32{2, 11})
+	core.RequireNoError(t, err)
+	defer positions.Close()
+	queryOutput, err := hipAllocateByteBuffer(driver, "rocm.hip.RMSNormRoPEHeadsPairLaneBatchLaunch", "query output", query.SizeBytes(), query.Count())
+	core.RequireNoError(t, err)
+	defer queryOutput.Close()
+	keyOutput, err := hipAllocateByteBuffer(driver, "rocm.hip.RMSNormRoPEHeadsPairLaneBatchLaunch", "key output", key.SizeBytes(), key.Count())
+	core.RequireNoError(t, err)
+	defer keyOutput.Close()
+
+	queryCfg := hipRMSNormDeviceWeightConfig{
+		Count:          4,
+		WeightEncoding: hipRMSNormWeightEncodingNone,
+		Flags:          hipRMSNormLaunchFlagRoPENeoX,
+	}
+	keyCfg := hipRMSNormDeviceWeightConfig{
+		Count:          4,
+		WeightEncoding: hipRMSNormWeightEncodingNone,
+	}
+	err = hipRunRMSNormRoPEHeadsPairLaneBatchKernelWithDeviceInputWeightConfigFrequencyScaleOutput(context.Background(), driver, query, key, queryCfg, keyCfg, 2, 1, positions, 8, 8, 2, 0.5, queryOutput, keyOutput)
+	core.RequireNoError(t, err)
+
+	gotQuery, err := hipReadFloat32DeviceOutput(queryOutput, "rocm.hip.RMSNormRoPEHeadsPairLaneBatchLaunch", "query output", len(queryValues))
+	core.RequireNoError(t, err)
+	gotKey, err := hipReadFloat32DeviceOutput(keyOutput, "rocm.hip.RMSNormRoPEHeadsPairLaneBatchLaunch", "key output", len(keyValues))
+	core.RequireNoError(t, err)
+
+	var wantQuery []float32
+	var wantKey []float32
+	unitWeight := []float32{1, 1, 1, 1}
+	for batch, position := range []int{2, 11} {
+		for head := 0; head < 2; head++ {
+			start := (batch*2 + head) * 4
+			normalized, err := hipReferenceRMSNorm(queryValues[start:start+4], unitWeight, 0)
+			core.RequireNoError(t, err)
+			rotated, err := hipReferenceRoPENeoXWithFrequencyDimScale(normalized, position, 8, 8, 2, 0.5)
+			core.RequireNoError(t, err)
+			wantQuery = append(wantQuery, rotated...)
+		}
+		start := batch * 4
+		normalized, err := hipReferenceRMSNorm(keyValues[start:start+4], unitWeight, 0)
+		core.RequireNoError(t, err)
+		rotary, err := hipReferenceRoPEWithFrequencyDimScale(normalized[:2], position, 8, 8, 0.5)
+		core.RequireNoError(t, err)
+		normalized[0] = rotary[0]
+		normalized[1] = rotary[1]
+		wantKey = append(wantKey, normalized...)
+	}
+	assertFloat32SlicesNear(t, wantQuery, gotQuery, 0.0001)
+	assertFloat32SlicesNear(t, wantKey, gotKey, 0.0001)
+
+	core.AssertEqual(t, 1, len(driver.launches))
+	launch := driver.launches[0]
+	core.AssertEqual(t, hipKernelNameRMSNormRoPEHeadsPairLaneBatch, launch.Name)
+	core.AssertEqual(t, uint32(2), launch.GridX)
+	core.AssertEqual(t, uint32(2), launch.GridY)
+	core.AssertEqual(t, hipRMSNormRoPEHeadsPairLaneBatchLaunchArgsBytes, len(launch.Args))
+	core.AssertEqual(t, hipRMSNormRoPEHeadsPairLaneBatchLaunchArgsVersion, binary.LittleEndian.Uint32(launch.Args[0:]))
+	core.AssertEqual(t, uint32(4), binary.LittleEndian.Uint32(launch.Args[64:]))
+	core.AssertEqual(t, uint32(2), binary.LittleEndian.Uint32(launch.Args[68:]))
+	core.AssertEqual(t, uint32(1), binary.LittleEndian.Uint32(launch.Args[72:]))
+	core.AssertEqual(t, uint64(positions.Pointer()), binary.LittleEndian.Uint64(launch.Args[56:]))
+	core.AssertEqual(t, uint32(2), binary.LittleEndian.Uint32(launch.Args[76:]))
+	core.AssertEqual(t, uint32(positions.SizeBytes()), binary.LittleEndian.Uint32(launch.Args[128:]))
+	assertFloat32Near(t, 8, math.Float32frombits(binary.LittleEndian.Uint32(launch.Args[132:])))
+	core.AssertEqual(t, uint32(8), binary.LittleEndian.Uint32(launch.Args[136:]))
+	core.AssertEqual(t, uint32(2), binary.LittleEndian.Uint32(launch.Args[140:]))
+	assertFloat32Near(t, 0.5, math.Float32frombits(binary.LittleEndian.Uint32(launch.Args[144:])))
+}
+
 func TestHIPKernels_RMSNormRoPEHeadsBatchLaunchArgs_Bad(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	inputPayload, err := hipFloat32Payload([]float32{1, 0, 3, 4})
@@ -3719,6 +3925,114 @@ func TestHIPKernels_AttentionHeadsBatchCausalLaunchArgs_Good(t *testing.T) {
 	assertFloat32SlicesNear(t, wantOutput(t), deviceGot, 0.0001)
 }
 
+func TestHIPKernels_AttentionHeadsLaneBatchLaunchArgs_Good(t *testing.T) {
+	const (
+		dim       = 2
+		headCount = 2
+	)
+	laneKeys := [][]float32{
+		{1, 0, 0, 1},
+		{1, 1, 1, 0, 0, 1},
+	}
+	laneValues := [][]float32{
+		{2, 0, 0, 4},
+		{8, 8, 6, 0, 0, 10},
+	}
+	queryValues := []float32{
+		1, 0,
+		0, 1,
+		1, 1,
+		-1, 1,
+	}
+
+	driver := &fakeHIPDriver{available: true}
+	queryPayload, err := hipFloat32Payload(queryValues)
+	core.RequireNoError(t, err)
+	query, err := hipUploadByteBuffer(driver, "rocm.hip.AttentionHeadsLaneBatchLaunch", "attention lane batch query", queryPayload, len(queryValues))
+	core.RequireNoError(t, err)
+	defer query.Close()
+	output, err := hipAllocateByteBuffer(driver, "rocm.hip.AttentionHeadsLaneBatchLaunch", "attention lane batch output", uint64(len(queryValues)*4), len(queryValues))
+	core.RequireNoError(t, err)
+	defer output.Close()
+
+	lanes := make([]hipAttentionHeadsLaneBatchLane, 0, len(laneKeys))
+	deviceCaches := make([]*rocmDeviceKVCache, 0, len(laneKeys))
+	tables := make([]*rocmDeviceKVDescriptorTable, 0, len(laneKeys))
+	defer func() {
+		for _, table := range tables {
+			_ = table.Close()
+		}
+		for _, cache := range deviceCaches {
+			_ = cache.Close()
+		}
+	}()
+	for lane := range laneKeys {
+		cache, err := newROCmKVCache(rocmKVCacheModeFP16, defaultROCmKVBlockSize)
+		core.RequireNoError(t, err)
+		core.RequireNoError(t, cache.AppendVectors(0, dim, dim, laneKeys[lane], laneValues[lane]))
+		deviceKV, err := cache.MirrorToDevice(driver)
+		core.RequireNoError(t, err)
+		deviceCaches = append(deviceCaches, deviceKV)
+		table, err := deviceKV.KernelDescriptorTable()
+		core.RequireNoError(t, err)
+		tables = append(tables, table)
+		lanes = append(lanes, hipAttentionHeadsLaneBatchLane{
+			DeviceKV:        deviceKV,
+			DescriptorTable: table,
+		})
+	}
+
+	start := len(driver.launches)
+	err = hipRunAttentionHeadsLaneBatchOutputFromDeviceQueryToDeviceKernel(context.Background(), driver, hipAttentionHeadsLaneBatchDeviceRequest{
+		Lanes:     lanes,
+		Dim:       dim,
+		HeadCount: headCount,
+		Scale:     1,
+	}, query, output)
+	core.RequireNoError(t, err)
+	got, err := hipReadFloat32DeviceOutput(output, "rocm.hip.AttentionHeadsLaneBatchLaunch", "attention lane batch output", len(queryValues))
+	core.RequireNoError(t, err)
+
+	want := make([]float32, 0, len(queryValues))
+	for lane := range laneKeys {
+		keys, err := splitHIPReferenceVectors(laneKeys[lane], dim)
+		core.RequireNoError(t, err)
+		values, err := splitHIPReferenceVectors(laneValues[lane], dim)
+		core.RequireNoError(t, err)
+		for head := 0; head < headCount; head++ {
+			queryBase := (lane*headCount + head) * dim
+			headOutput, _, err := hipReferenceSingleHeadAttentionWithScale(queryValues[queryBase:queryBase+dim], keys, values, 1)
+			core.RequireNoError(t, err)
+			want = append(want, headOutput...)
+		}
+	}
+	assertFloat32SlicesNear(t, want, got, 0.0001)
+
+	launches := driver.launches[start:]
+	core.AssertEqual(t, 1, len(launches))
+	launch := launches[0]
+	core.AssertEqual(t, hipKernelNameAttentionHeadsLaneBatch, launch.Name)
+	core.AssertEqual(t, uint32(headCount), launch.GridX)
+	core.AssertEqual(t, uint32(len(lanes)), launch.GridY)
+	core.AssertEqual(t, hipAttentionHeadsBlockSize(3), launch.BlockX)
+	core.AssertEqual(t, hipAttentionHeadsLaneBatchLaunchArgsBytes, len(launch.Args))
+	core.AssertEqual(t, hipAttentionHeadsLaneBatchLaunchArgsVersion, binary.LittleEndian.Uint32(launch.Args[0:]))
+	core.AssertEqual(t, uint32(hipAttentionHeadsLaneBatchLaunchArgsBytes), binary.LittleEndian.Uint32(launch.Args[4:]))
+	core.AssertEqual(t, uint64(query.Pointer()), binary.LittleEndian.Uint64(launch.Args[8:]))
+	core.AssertEqual(t, uint64(output.Pointer()), binary.LittleEndian.Uint64(launch.Args[16:]))
+	core.AssertTrue(t, binary.LittleEndian.Uint64(launch.Args[32:]) != 0, "lane descriptor table pointer must be present")
+	core.AssertEqual(t, uint32(dim), binary.LittleEndian.Uint32(launch.Args[40:]))
+	core.AssertEqual(t, uint32(len(lanes)), binary.LittleEndian.Uint32(launch.Args[44:]))
+	core.AssertEqual(t, uint32(headCount), binary.LittleEndian.Uint32(launch.Args[48:]))
+	core.AssertEqual(t, uint32(1), binary.LittleEndian.Uint32(launch.Args[52:]))
+	core.AssertEqual(t, uint32(3), binary.LittleEndian.Uint32(launch.Args[56:]))
+	core.AssertEqual(t, uint32(len(queryValues)*4), binary.LittleEndian.Uint32(launch.Args[60:]))
+	core.AssertEqual(t, uint32(len(queryValues)*4), binary.LittleEndian.Uint32(launch.Args[64:]))
+	core.AssertEqual(t, uint32(0), binary.LittleEndian.Uint32(launch.Args[68:]))
+	core.AssertEqual(t, uint32(len(lanes)*hipAttentionHeadsLaneDescriptorBytes), binary.LittleEndian.Uint32(launch.Args[72:]))
+	core.AssertEqual(t, math.Float32bits(1), binary.LittleEndian.Uint32(launch.Args[76:]))
+}
+
 func TestHIPKernels_AttentionHeadsBatchCausalQueryRMSRoPELaunchArgs_Good(t *testing.T) {
 	const (
 		dim             = 2
@@ -3994,9 +4308,13 @@ func TestHIPKernels_AttentionHeadsBatchChunkedLaunchArgs_Good(t *testing.T) {
 	}
 	assertFloat32SlicesNear(t, want, got, 0.0001)
 	launches := driver.launches[start:]
-	core.AssertEqual(t, 2, len(launches))
+	if len(launches) != 2 {
+		t.Fatalf("chunked launches = %d, want 2: %+v", len(launches), launches)
+	}
 	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage1, launches[0].Name)
 	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage2, launches[1].Name)
+	core.AssertEqual(t, "rocm_attention_heads_batch_chunked_stage1_v2", hipKernelNameAttentionHeadsBatchChunkedStage1)
+	core.AssertEqual(t, uint32(2), hipAttentionHeadsBatchChunkedLaunchArgsVersion)
 	chunkStartToken, chunkCount := hipAttentionHeadsBatchChunkedActiveRange(queryStartToken, queryCount, tokenCount, 0, hipAttentionHeadsChunkSize)
 	core.AssertEqual(t, uint32(headCount*queryCount*chunkCount), launches[0].GridX)
 	core.AssertEqual(t, uint32(headCount*queryCount), launches[1].GridX)
@@ -4024,6 +4342,114 @@ func TestHIPKernels_AttentionHeadsBatchChunkedLaunchArgs_Good(t *testing.T) {
 	if workspace.BatchAttentionWeight != nil {
 		t.Fatalf("batch chunked attention allocated materialized weights")
 	}
+}
+
+func TestHIPKernels_AttentionHeadsBatchChunkedGQA2Stage1LaunchConfig_Good(t *testing.T) {
+	previous := hipAttentionHeadsBatchChunkedGQA2Enabled
+	hipAttentionHeadsBatchChunkedGQA2Enabled = true
+	t.Cleanup(func() {
+		hipAttentionHeadsBatchChunkedGQA2Enabled = previous
+	})
+
+	args := make([]byte, hipAttentionHeadsBatchChunkedLaunchArgsBytes)
+	gqa2, err := hipAttentionHeadsBatchChunkedStage1LaunchConfig(args, 1, 16, 1, 9, hipAttentionHeadsChunkSize, 512)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage1GQA2, gqa2.Name)
+	core.AssertEqual(t, uint32(72), gqa2.GridX)
+	core.AssertEqual(t, uint32(hipAttentionHeadsChunkedBlockSize), gqa2.BlockX)
+	core.AssertEqual(t, uint32(5376), gqa2.SharedMemBytes)
+
+	hipAttentionHeadsBatchChunkedGQA2Enabled = false
+	v2, err := hipAttentionHeadsBatchChunkedStage1LaunchConfig(args, 1, 16, 1, 9, hipAttentionHeadsChunkSize, 512)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage1, v2.Name)
+	core.AssertEqual(t, uint32(144), v2.GridX)
+	core.AssertEqual(t, uint32(3072), v2.SharedMemBytes)
+}
+
+func TestHIPKernels_AttentionHeadsBatchChunkedMultiKVHeads_Good(t *testing.T) {
+	const (
+		dim             = 4
+		tokenCount      = hipAttentionHeadsSharedMaxTokens + 1
+		headCount       = 4
+		keyHeads        = 2
+		queryCount      = 1
+		queryStartToken = tokenCount - 1
+	)
+	queryValues := []float32{
+		0.75, -0.25, 0.5, -0.125,
+		-0.5, 0.5, -0.375, 0.25,
+		0.125, 0.25, -0.5, 0.75,
+		-0.25, -0.375, 0.625, 0.5,
+	}
+	keyValues := make([]float32, tokenCount*keyHeads*dim)
+	valueValues := make([]float32, tokenCount*keyHeads*dim)
+	for token := 0; token < tokenCount; token++ {
+		for kvHead := 0; kvHead < keyHeads; kvHead++ {
+			for dimIndex := 0; dimIndex < dim; dimIndex++ {
+				index := (token*keyHeads+kvHead)*dim + dimIndex
+				keyValues[index] = float32((token+kvHead*7+dimIndex*3)%23-11) * 0.0125
+				valueValues[index] = float32((token+kvHead*11+dimIndex*5)%29-14) * 0.01
+			}
+		}
+	}
+
+	driver := &fakeHIPDriver{available: true}
+	cache, err := newROCmKVCache(rocmKVCacheModeKQ8VQ4, hipGemma4Q4DeviceKVBlockSize())
+	core.RequireNoError(t, err)
+	core.RequireNoError(t, cache.AppendVectors(0, keyHeads*dim, keyHeads*dim, keyValues, valueValues))
+	deviceKV, err := cache.MirrorToDevice(driver)
+	core.RequireNoError(t, err)
+	defer deviceKV.Close()
+	table, err := deviceKV.KernelDescriptorTable()
+	core.RequireNoError(t, err)
+	defer table.Close()
+	queryPayload, err := hipFloat32Payload(queryValues)
+	core.RequireNoError(t, err)
+	query, err := hipUploadByteBuffer(driver, "rocm.hip.AttentionHeadsBatchChunkedLaunch", "multi-KV attention batch chunked query", queryPayload, len(queryValues))
+	core.RequireNoError(t, err)
+	defer query.Close()
+	output, err := hipAllocateByteBuffer(driver, "rocm.hip.AttentionHeadsBatchChunkedLaunch", "multi-KV attention batch chunked output", uint64(len(queryValues)*4), len(queryValues))
+	core.RequireNoError(t, err)
+	defer output.Close()
+	workspace := &hipAttentionHeadsChunkedWorkspace{}
+	defer workspace.Close()
+
+	start := len(driver.launches)
+	err = hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernelWorkspace(context.Background(), driver, hipAttentionHeadsBatchCausalDeviceRequest{
+		DeviceKV:        deviceKV,
+		DescriptorTable: table,
+		Dim:             dim,
+		TokenCount:      tokenCount,
+		HeadCount:       headCount,
+		KeyHeads:        keyHeads,
+		QueryCount:      queryCount,
+		QueryStartToken: queryStartToken,
+		Scale:           1,
+	}, query, output, workspace)
+	core.RequireNoError(t, err)
+	got, err := hipReadFloat32DeviceOutput(output, "rocm.hip.AttentionHeadsBatchChunkedLaunch", "multi-KV attention batch chunked output", len(queryValues))
+	core.RequireNoError(t, err)
+	quantKeys, quantValues, err := driver.readDeviceKVDescriptorForAttention(table.Pointer(), int(table.SizeBytes()), tokenCount, keyHeads*dim)
+	core.RequireNoError(t, err)
+	want := make([]float32, 0, len(queryValues))
+	for head := 0; head < headCount; head++ {
+		keys, err := fakeROCmAttentionHeadVectors(quantKeys, tokenCount, keyHeads, dim, headCount, head)
+		core.RequireNoError(t, err)
+		values, err := fakeROCmAttentionHeadVectors(quantValues, tokenCount, keyHeads, dim, headCount, head)
+		core.RequireNoError(t, err)
+		headOutput, _, err := hipReferenceSingleHeadAttentionWithScale(queryValues[head*dim:(head+1)*dim], keys, values, 1)
+		core.RequireNoError(t, err)
+		want = append(want, headOutput...)
+	}
+	assertFloat32SlicesNear(t, want, got, 0.0001)
+	launches := driver.launches[start:]
+	if len(launches) != 2 {
+		t.Fatalf("multi-KV chunked launches = %d, want 2: %+v", len(launches), launches)
+	}
+	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage1, launches[0].Name)
+	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage2, launches[1].Name)
+	core.AssertEqual(t, uint32(keyHeads), binary.LittleEndian.Uint32(launches[0].Args[112:]))
 }
 
 func TestHIPKernels_AttentionHeadsBatchChunkedLaunchArgs_WindowStartsAtActiveChunk(t *testing.T) {

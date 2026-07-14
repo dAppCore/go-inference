@@ -22,10 +22,118 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	inferengine "dappco.re/go/inference/engine"
+	"dappco.re/go/inference/kv"
 )
 
 const inferenceBenchmarkKernelRouteMetricsEnv = "GO_ROCM_BENCH_KERNEL_ROUTE_METRICS"
 const inferenceBenchmarkCopySizeMetricLimitEnv = "GO_ROCM_BENCH_COPY_SIZE_LIMIT"
+
+const (
+	inferenceBenchmarkGemma4RetainedDepthRunEnv          = "GO_ROCM_RUN_RETAINED_DEPTH_BENCHMARK"
+	inferenceBenchmarkGemma4RetainedDepthTokensEnv       = "GO_ROCM_RETAINED_DEPTH_TOKENS"
+	inferenceBenchmarkGemma4RetainedDepthDecodeTokensEnv = "GO_ROCM_RETAINED_DEPTH_DECODE_TOKENS"
+	inferenceBenchmarkGemma4RetainedDepthContextEnv      = "GO_ROCM_RETAINED_DEPTH_CONTEXT_LEN"
+	inferenceBenchmarkGemma4RetainedDepthTokenIDsEnv     = "GO_ROCM_RETAINED_DEPTH_TOKEN_IDS"
+	inferenceBenchmarkGemma4RetainedDepthRouteProbeEnv   = "GO_ROCM_RETAINED_DEPTH_ROUTE_PROBE"
+
+	inferenceBenchmarkGemma4SweepRunEnv       = "GO_ROCM_RUN_GEMMA4_SWEEP_RECEIPT"
+	inferenceBenchmarkGemma4SweepModelPathEnv = "GO_ROCM_GEMMA4_SWEEP_MODEL_PATH"
+	inferenceBenchmarkGemma4SweepContextEnv   = "GO_ROCM_GEMMA4_SWEEP_CONTEXT"
+	inferenceBenchmarkGemma4SweepMaxTokensEnv = "GO_ROCM_GEMMA4_SWEEP_MAX_TOKENS"
+	inferenceBenchmarkGemma4SweepOutputEnv    = "GO_ROCM_GEMMA4_SWEEP_OUTPUT"
+	inferenceBenchmarkGemma4SweepFormatEnv    = "GO_ROCM_GEMMA4_SWEEP_FORMAT"
+	inferenceBenchmarkGemma4SweepDeviceEnv    = "GO_ROCM_GEMMA4_SWEEP_DEVICE"
+)
+
+type inferenceBenchmarkGemma4RetainedDepthConfig struct {
+	RetainedTokens int
+	DecodeTokens   int
+	ContextTokens  int
+	TokenIDs       []int
+}
+
+type inferenceBenchmarkGemma4SweepConfig struct {
+	ModelPath     string
+	ContextTokens int
+	MaxTokens     int
+	OutputPath    string
+	Format        string
+	Device        string
+}
+
+type inferenceBenchmarkGemma4SweepModelIdentity struct {
+	Architecture string `json:"architecture"`
+	Path         string `json:"path"`
+	VocabSize    int    `json:"vocab_size"`
+	NumLayers    int    `json:"num_layers"`
+	HiddenSize   int    `json:"hidden_size"`
+	QuantBits    int    `json:"quant_bits"`
+	QuantGroup   int    `json:"quant_group"`
+}
+
+type inferenceBenchmarkGemma4SweepReceipt struct {
+	SchemaVersion        int                                        `json:"schema_version"`
+	ModelPath            string                                     `json:"model_path"`
+	ModelIdentity        inferenceBenchmarkGemma4SweepModelIdentity `json:"model_identity"`
+	Gemma4Size           string                                     `json:"gemma4_size"`
+	Quantization         string                                     `json:"quantization"`
+	QATClassification    string                                     `json:"qat_classification"`
+	ContextTokens        int                                        `json:"context_tokens"`
+	PromptTokens         int                                        `json:"prompt_tokens"`
+	MaxTokens            int                                        `json:"max_tokens"`
+	Device               string                                     `json:"device"`
+	VRAMTotalBytes       uint64                                     `json:"vram_total_bytes"`
+	VRAMUsedBytes        uint64                                     `json:"vram_used_bytes"`
+	VRAMFreeBytes        uint64                                     `json:"vram_free_bytes"`
+	DeviceKVMode         string                                     `json:"device_kv_mode"`
+	KVSnapshotBytes      uint64                                     `json:"kv_snapshot_bytes"`
+	KVBlockTokens        int                                        `json:"kv_block_tokens"`
+	KVBlockEstimate      int                                        `json:"kv_block_estimate"`
+	ColdPrefillMillis    float64                                    `json:"cold_prefill_ms"`
+	FirstTokenMillis     float64                                    `json:"first_token_ms"`
+	DecodeMillis         float64                                    `json:"decode_ms"`
+	StateCaptureMillis   float64                                    `json:"state_capture_ms"`
+	StateRestoreMillis   float64                                    `json:"state_restore_ms"`
+	ColdContinuationMS   float64                                    `json:"cold_continuation_ms"`
+	ReusedContinuationMS float64                                    `json:"reused_continuation_ms"`
+	ContinuationExact    bool                                       `json:"continuation_exact"`
+}
+
+type inferenceBenchmarkGemma4SweepTokenizer struct {
+	base      inferengine.TextTokenizer
+	vocabSize int
+}
+
+func (tokenizer inferenceBenchmarkGemma4SweepTokenizer) Encode(text string) []int32 {
+	if ids, matched, err := hipGemma4Q4TokenPromptIDs(text, tokenizer.vocabSize); matched {
+		if err != nil {
+			return nil
+		}
+		return ids
+	}
+	return tokenizer.base.Encode(text)
+}
+
+func (tokenizer inferenceBenchmarkGemma4SweepTokenizer) Decode(ids []int32) string {
+	return tokenizer.base.Decode(ids)
+}
+
+func (tokenizer inferenceBenchmarkGemma4SweepTokenizer) DecodeToken(id int32) string {
+	return tokenizer.base.DecodeToken(id)
+}
+
+func (tokenizer inferenceBenchmarkGemma4SweepTokenizer) DecodeOne(id int32) string {
+	return tokenizer.base.DecodeOne(id)
+}
+
+func (tokenizer inferenceBenchmarkGemma4SweepTokenizer) TokenID(text string) (int32, bool) {
+	return tokenizer.base.TokenID(text)
+}
+
+func (tokenizer inferenceBenchmarkGemma4SweepTokenizer) EOS() int32 {
+	return tokenizer.base.EOS()
+}
 
 type inferenceBenchmarkHIPKernelStats struct {
 	Launches uint64
@@ -597,6 +705,174 @@ func inferenceBenchmarkBookKernelDelta(driver *inferenceBenchmarkHIPKernelCounti
 	return delta
 }
 
+func inferenceBenchmarkAccumulateHIPKernelStats(total *inferenceBenchmarkHIPKernelStatsSnapshot, next inferenceBenchmarkHIPKernelStatsSnapshot) {
+	if total == nil {
+		return
+	}
+	if total.Kernel == nil {
+		total.Kernel = make(map[string]inferenceBenchmarkHIPKernelStats, len(next.Kernel))
+	}
+	if total.Shape == nil {
+		total.Shape = make(map[inferenceBenchmarkHIPKernelShapeKey]inferenceBenchmarkHIPKernelStats, len(next.Shape))
+	}
+	for name, stats := range next.Kernel {
+		total.Kernel[name] = inferenceBenchmarkHIPKernelStats{
+			Launches: total.Kernel[name].Launches + stats.Launches,
+			Blocks:   total.Kernel[name].Blocks + stats.Blocks,
+		}
+	}
+	for key, stats := range next.Shape {
+		total.Shape[key] = inferenceBenchmarkHIPKernelStats{
+			Launches: total.Shape[key].Launches + stats.Launches,
+			Blocks:   total.Shape[key].Blocks + stats.Blocks,
+		}
+	}
+	total.Total.Launches += next.Total.Launches
+	total.Total.Blocks += next.Total.Blocks
+}
+
+func inferenceBenchmarkRestoreHIPKernelStats(driver *inferenceBenchmarkHIPKernelCountingDriver, snapshot inferenceBenchmarkHIPKernelStatsSnapshot) {
+	if driver == nil {
+		return
+	}
+	driver.ResetKernelStats()
+	driver.mu.Lock()
+	for name, stats := range snapshot.Kernel {
+		driver.kernel[name] = stats
+	}
+	for key, stats := range snapshot.Shape {
+		driver.shape[key] = stats
+	}
+	driver.total = snapshot.Total
+	driver.mu.Unlock()
+}
+
+func inferenceBenchmarkRunGemma4RetainedDepthRouteProbe(session *hipEngineSession) ([]hipDecodeRouteMetric, error) {
+	if session == nil {
+		return nil, fmt.Errorf("retained-depth route probe session is nil")
+	}
+	metrics := newHIPDecodeRouteMetrics()
+	if !hipDecodeRouteMetricsActive.CompareAndSwap(nil, metrics) {
+		return nil, fmt.Errorf("retained-depth route probe metrics are already active")
+	}
+	decoded, decodeErr := session.GenerateFromCacheEach(1, -1, func(int32) bool { return true })
+	cleared := hipDecodeRouteMetricsActive.CompareAndSwap(metrics, nil)
+	if !cleared {
+		return nil, fmt.Errorf("retained-depth route probe metrics were replaced before the probe completed")
+	}
+	if decodeErr != nil {
+		return nil, decodeErr
+	}
+	if len(decoded) != 1 {
+		return nil, fmt.Errorf("retained-depth route probe decoded %d tokens, want 1", len(decoded))
+	}
+	return metrics.snapshot(), nil
+}
+
+func inferenceBenchmarkAccumulateHIPDecodeRouteMetrics(total map[hipDecodeRouteMetricKey]hipDecodeRouteMetric, snapshot []hipDecodeRouteMetric) {
+	for _, entry := range snapshot {
+		key := hipDecodeRouteMetricKey{
+			op:        entry.Op,
+			layer:     entry.Layer,
+			layerType: entry.LayerType,
+			route:     entry.Route,
+		}
+		previous := total[key]
+		previous.Op = entry.Op
+		previous.Layer = entry.Layer
+		previous.LayerType = entry.LayerType
+		previous.Route = entry.Route
+		previous.Calls += entry.Calls
+		previous.WallTime += entry.WallTime
+		total[key] = previous
+	}
+}
+
+type inferenceBenchmarkHIPDecodeRouteAggregateKey struct {
+	op    string
+	route hipDecodeRoute
+}
+
+func inferenceBenchmarkAggregateHIPDecodeRouteMetrics(metrics map[hipDecodeRouteMetricKey]hipDecodeRouteMetric) map[inferenceBenchmarkHIPDecodeRouteAggregateKey]hipDecodeRouteMetric {
+	totals := make(map[inferenceBenchmarkHIPDecodeRouteAggregateKey]hipDecodeRouteMetric)
+	for _, entry := range metrics {
+		key := inferenceBenchmarkHIPDecodeRouteAggregateKey{op: entry.Op, route: entry.Route}
+		total := totals[key]
+		total.Op = entry.Op
+		total.Layer = -1
+		total.Route = entry.Route
+		total.Calls += entry.Calls
+		total.WallTime += entry.WallTime
+		totals[key] = total
+	}
+	return totals
+}
+
+func TestInferenceBenchmarkAggregateHIPDecodeRouteMetrics_Good(t *testing.T) {
+	metrics := map[hipDecodeRouteMetricKey]hipDecodeRouteMetric{
+		{op: "projection", layer: 0, layerType: "sliding_attention", route: hipDecodeRouteDevice}: {
+			Op: "projection", Layer: 0, LayerType: "sliding_attention", Route: hipDecodeRouteDevice, Calls: 2, WallTime: 3 * time.Millisecond,
+		},
+		{op: "projection", layer: 1, layerType: "full_attention", route: hipDecodeRouteDevice}: {
+			Op: "projection", Layer: 1, LayerType: "full_attention", Route: hipDecodeRouteDevice, Calls: 4, WallTime: 5 * time.Millisecond,
+		},
+		{op: "projection", layer: 1, layerType: "full_attention", route: hipDecodeRouteHost}: {
+			Op: "projection", Layer: 1, LayerType: "full_attention", Route: hipDecodeRouteHost, Calls: 1, WallTime: time.Millisecond,
+		},
+	}
+
+	totals := inferenceBenchmarkAggregateHIPDecodeRouteMetrics(metrics)
+	device := totals[inferenceBenchmarkHIPDecodeRouteAggregateKey{op: "projection", route: hipDecodeRouteDevice}]
+	core.AssertEqual(t, uint64(6), device.Calls)
+	core.AssertEqual(t, 8*time.Millisecond, device.WallTime)
+	host := totals[inferenceBenchmarkHIPDecodeRouteAggregateKey{op: "projection", route: hipDecodeRouteHost}]
+	core.AssertEqual(t, uint64(1), host.Calls)
+	core.AssertEqual(t, time.Millisecond, host.WallTime)
+}
+
+func inferenceBenchmarkReportHIPDecodeRouteProbeMetrics(b *testing.B, metrics map[hipDecodeRouteMetricKey]hipDecodeRouteMetric) {
+	b.Helper()
+	if b.N <= 0 {
+		return
+	}
+	b.ReportMetric(float64(len(metrics))/float64(b.N), "retained_depth_route_probe_entries/op")
+	for _, entry := range inferenceBenchmarkAggregateHIPDecodeRouteMetrics(metrics) {
+		prefix := "retained_depth_route_probe_total_" +
+			inferenceBenchmarkRouteMetricName(string(entry.Route)) + "_" +
+			inferenceBenchmarkRouteMetricName(entry.Op)
+		b.ReportMetric(float64(entry.Calls)/float64(b.N), prefix+"_calls/op")
+		b.ReportMetric(float64(entry.WallTime)/float64(time.Millisecond)/float64(b.N), prefix+"_wall_ms/op")
+	}
+	for _, entry := range metrics {
+		layer := "global"
+		if entry.Layer >= 0 {
+			layer = strconv.Itoa(entry.Layer)
+		}
+		prefix := "retained_depth_route_probe_layer_" + layer + "_" +
+			inferenceBenchmarkRouteMetricName(entry.LayerType) + "_" +
+			inferenceBenchmarkRouteMetricName(string(entry.Route)) + "_" +
+			inferenceBenchmarkRouteMetricName(entry.Op)
+		b.ReportMetric(float64(entry.Calls)/float64(b.N), prefix+"_calls/op")
+		b.ReportMetric(float64(entry.WallTime)/float64(time.Millisecond)/float64(b.N), prefix+"_wall_ms/op")
+	}
+}
+
+func inferenceBenchmarkRouteMetricName(value string) string {
+	if value == "" {
+		return "unknown"
+	}
+	var builder strings.Builder
+	builder.Grow(len(value))
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
+			builder.WriteRune(char)
+			continue
+		}
+		builder.WriteByte('_')
+	}
+	return builder.String()
+}
+
 func inferenceBenchmarkHIPKernelStatsDelta(after, before inferenceBenchmarkHIPKernelStats) inferenceBenchmarkHIPKernelStats {
 	return inferenceBenchmarkHIPKernelStats{
 		Launches: inferenceBenchmarkUint64Delta(after.Launches, before.Launches),
@@ -626,12 +902,14 @@ func inferenceBenchmarkReportHIPKernelRouteMetrics(b *testing.B, driver *inferen
 	b.ReportMetric(float64(total.Blocks)/float64(b.N), "kernel_total_blocks/op")
 	report(hipKernelNameAttentionHeadsBatchCausal, "kernel_attention_batch_causal")
 	report(hipKernelNameAttentionHeadsBatchChunkedStage1, "kernel_attention_batch_chunked_stage1")
+	report(hipKernelNameAttentionHeadsBatchChunkedStage1GQA2, "kernel_attention_batch_chunked_stage1_gqa2")
 	report(hipKernelNameAttentionHeadsBatchChunkedStage2, "kernel_attention_batch_chunked_stage2")
 	report(hipKernelNameAttentionHeadsChunkedStage1, "kernel_attention_decode_chunked_stage1")
 	report(hipKernelNameAttentionHeadsChunkedStage2, "kernel_attention_decode_chunked_stage2")
 	report(hipKernelNameKVEncodeTokenValueNorm, "kernel_rocm_kv_encode_token_value_norm")
 	report(hipKernelNameKVDescriptorAppend, "kernel_rocm_kv_descriptor_append")
 	report(hipKernelNameMLXQ4Proj, "kernel_mlx_q4_projection")
+	report(hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360, "kernel_mlx_q4_projection_q4_g32_rows3840_cols15360")
 	report(hipKernelNameMLXQ4ProjCols256, "kernel_mlx_q4_projection_cols256")
 	report(hipKernelNameMLXQ4ProjQ6G16Row16, "kernel_mlx_q4_projection_q6_g16_row16")
 	report(hipKernelNameMLXQ4ProjQ6Row16, "kernel_mlx_q4_projection_q6_row16")
@@ -652,6 +930,8 @@ func inferenceBenchmarkReportHIPKernelRouteMetrics(b *testing.B, driver *inferen
 	report(hipKernelNameMLXQ4PairProj, "kernel_mlx_q4_pair_projection")
 	report(hipKernelNameMLXQ4GELUTanhMul, "kernel_mlx_q4_gelu_tanh_multiply")
 	report(hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, "kernel_mlx_q4_gelu_tanh_multiply_q4_g32_cols1536_row16")
+	report(hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, "kernel_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840")
+	report(hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8, "kernel_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840_row8")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536_row32")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536_row64")
@@ -1174,7 +1454,7 @@ func inferenceBenchmarkHIPKernelShapeLabel(entry inferenceBenchmarkHIPKernelShap
 func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows, cols, group, batch uint32) {
 	args := config.Args
 	switch config.Name {
-	case hipKernelNameMLXQ4Proj, hipKernelNameMLXQ4ProjCols256, hipKernelNameMLXQ4ProjQ6G16Row16, hipKernelNameMLXQ4ProjQ6Row16, hipKernelNameMLXQ4ProjQ6Row32, hipKernelNameMLXQ4ProjQ6Row64, hipKernelNameMLXQ4ProjGreedy, hipKernelNameMLXQ4ProjGreedyQ6Row64, hipKernelNameMLXQ4ProjScores, hipKernelNameMLXQ4ProjScoresQ6Row64:
+	case hipKernelNameMLXQ4Proj, hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360, hipKernelNameMLXQ4ProjCols256, hipKernelNameMLXQ4ProjQ6G16Row16, hipKernelNameMLXQ4ProjQ6Row16, hipKernelNameMLXQ4ProjQ6Row32, hipKernelNameMLXQ4ProjQ6Row64, hipKernelNameMLXQ4ProjGreedy, hipKernelNameMLXQ4ProjGreedyQ6Row64, hipKernelNameMLXQ4ProjScores, hipKernelNameMLXQ4ProjScoresQ6Row64:
 		return inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 52), inferenceBenchmarkU32At(args, 56), 0
 	case hipKernelNameMLXQ4ProjGreedyBatch, hipKernelNameMLXQ4ProjGreedyBatchQ6Row64:
 		return inferenceBenchmarkU32At(args, 56), inferenceBenchmarkU32At(args, 60), inferenceBenchmarkU32At(args, 68), inferenceBenchmarkU32At(args, 64)
@@ -1185,7 +1465,7 @@ func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows,
 		secondRows := inferenceBenchmarkU32At(args, 100)
 		thirdRows := inferenceBenchmarkU32At(args, 104)
 		return firstRows + secondRows + thirdRows, inferenceBenchmarkU32At(args, 108), inferenceBenchmarkU32At(args, 112), 0
-	case hipKernelNameMLXQ4GELUTanhMul, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
+	case hipKernelNameMLXQ4GELUTanhMul, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), 0
 	case hipKernelNameMLXQ4GELUTanhMulBatch:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), inferenceBenchmarkU32At(args, 120)
@@ -1199,7 +1479,7 @@ func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows,
 		return inferenceBenchmarkU32At(args, 36), inferenceBenchmarkU32At(args, 32), inferenceBenchmarkU32At(args, 80), inferenceBenchmarkU32At(args, 40)
 	case hipKernelNameAttentionHeadsChunkedStage1, hipKernelNameAttentionHeadsChunkedStage2:
 		return inferenceBenchmarkU32At(args, 64), inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 60), 0
-	case hipKernelNameAttentionHeadsBatchChunkedStage1, hipKernelNameAttentionHeadsBatchChunkedStage2:
+	case hipKernelNameAttentionHeadsBatchChunkedStage1, hipKernelNameAttentionHeadsBatchChunkedStage1GQA2, hipKernelNameAttentionHeadsBatchChunkedStage2:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 68), inferenceBenchmarkU32At(args, 60)
 	default:
 		return 0, 0, 0, 0
@@ -2236,6 +2516,96 @@ func TestInferenceBenchmarkHIPKernelTensorShape_AttentionUsesChunkCount(t *testi
 	}
 }
 
+func TestInferenceBenchmarkHIPKernelTensorShape_Experimental12BProjectionKernels(t *testing.T) {
+	projectionArgs, err := (hipMLXQ4ProjectionLaunchArgs{
+		InputPointer:  1,
+		WeightPointer: 2,
+		ScalePointer:  3,
+		BiasPointer:   4,
+		OutputPointer: 5,
+		Rows:          3840,
+		Cols:          15360,
+		GroupSize:     32,
+		Bits:          4,
+		InputBytes:    15360 * 4,
+		WeightBytes:   3840 * (15360 / 8) * 4,
+		ScaleBytes:    3840 * (15360 / 32) * 2,
+		BiasBytes:     3840 * (15360 / 32) * 2,
+		OutputBytes:   3840 * 4,
+	}).Binary()
+	if err != nil {
+		t.Fatalf("12B down projection args: %v", err)
+	}
+	rows, cols, group, batch := inferenceBenchmarkHIPKernelTensorShape(hipKernelLaunchConfig{
+		Name: hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360,
+		Args: projectionArgs,
+	})
+	if rows != 3840 || cols != 15360 || group != 32 || batch != 0 {
+		t.Fatalf("12B down projection shape = %dx%d qg%d batch%d, want 3840x15360 qg32", rows, cols, group, batch)
+	}
+
+	gateUpArgs, err := (hipMLXQ4GELUTanhMulLaunchArgs{
+		InputPointer:      1,
+		GateWeightPointer: 2,
+		GateScalePointer:  3,
+		GateBiasPointer:   4,
+		UpWeightPointer:   5,
+		UpScalePointer:    6,
+		UpBiasPointer:     7,
+		OutputPointer:     8,
+		Rows:              15360,
+		Cols:              3840,
+		GroupSize:         32,
+		Bits:              4,
+		InputBytes:        3840 * 4,
+		GateWeightBytes:   15360 * (3840 / 8) * 4,
+		GateScaleBytes:    15360 * (3840 / 32) * 2,
+		GateBiasBytes:     15360 * (3840 / 32) * 2,
+		UpWeightBytes:     15360 * (3840 / 8) * 4,
+		UpScaleBytes:      15360 * (3840 / 32) * 2,
+		UpBiasBytes:       15360 * (3840 / 32) * 2,
+		OutputBytes:       15360 * 4,
+	}).Binary()
+	if err != nil {
+		t.Fatalf("12B gate/up args: %v", err)
+	}
+	rows, cols, group, batch = inferenceBenchmarkHIPKernelTensorShape(hipKernelLaunchConfig{
+		Name: hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840,
+		Args: gateUpArgs,
+	})
+	if rows != 15360 || cols != 3840 || group != 32 || batch != 0 {
+		t.Fatalf("12B gate/up shape = %dx%d qg%d batch%d, want 15360x3840 qg32", rows, cols, group, batch)
+	}
+
+	names := inferenceBenchmarkSelectedHIPKernelNames()
+	if !slices.Contains(names, hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360) ||
+		!slices.Contains(names, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840) {
+		t.Fatalf("selected kernels = %v, want experimental 12B projection kernels", names)
+	}
+
+	var builder strings.Builder
+	inferenceBenchmarkWriteHIPKernelShapeRouteTable(&builder, "Durable Shapes", []inferenceBenchmarkHIPKernelShapeEntry{
+		{inferenceBenchmarkHIPKernelShapeKey: inferenceBenchmarkHIPKernelShapeKey{
+			name:        hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360,
+			tensorRows:  3840,
+			tensorCols:  15360,
+			tensorGroup: 32,
+		}, stats: inferenceBenchmarkHIPKernelStats{Launches: 1, Blocks: 120}},
+		{inferenceBenchmarkHIPKernelShapeKey: inferenceBenchmarkHIPKernelShapeKey{
+			name:        hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840,
+			tensorRows:  15360,
+			tensorCols:  3840,
+			tensorGroup: 32,
+		}, stats: inferenceBenchmarkHIPKernelStats{Launches: 2, Blocks: 240}},
+	}, 0)
+	if got := builder.String(); !strings.Contains(got, hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360) ||
+		!strings.Contains(got, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840) ||
+		!strings.Contains(got, "3840x15360 qg32") ||
+		!strings.Contains(got, "15360x3840 qg32") {
+		t.Fatalf("durable shape receipt = %q, want experimental kernel names and shapes", got)
+	}
+}
+
 func BenchmarkInferenceBenchmarkTopHIPKernelShapeEntries_SixtyFourShapes(b *testing.B) {
 	names := inferenceBenchmarkSelectedHIPKernelNames()
 	entries := make([]inferenceBenchmarkHIPKernelShapeEntry, 64)
@@ -2262,7 +2632,6 @@ func BenchmarkInferenceBenchmarkTopHIPKernelShapeEntries_SixtyFourShapes(b *test
 		}
 	}
 	scratch := make([]inferenceBenchmarkHIPKernelShapeEntry, len(entries))
-	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		copy(scratch, entries)
@@ -2389,6 +2758,159 @@ func BenchmarkInferenceGemma4Q4Generate_OpencodeSessionStart29K(b *testing.B) {
 	b.Setenv("GO_ROCM_BENCH_PROMPT_TOKEN_COUNT", "29000")
 	b.Setenv("GO_ROCM_BENCH_TOKENS", "1")
 	benchmarkInferenceGemma4Q4Generate(b)
+}
+
+// BenchmarkInferenceGemma4Q4RetainedDepthDecode measures only non-MTP decode
+// after materialising exactly the configured numeric-token retained prefix.
+func BenchmarkInferenceGemma4Q4RetainedDepthDecode(b *testing.B) {
+	if os.Getenv(inferenceBenchmarkGemma4RetainedDepthRunEnv) != "1" {
+		b.Skipf("set %s=1 to run the retained-depth HIP decode diagnostic", inferenceBenchmarkGemma4RetainedDepthRunEnv)
+	}
+	config, err := inferenceBenchmarkGemma4RetainedDepthConfigFromEnv(os.Getenv)
+	if err != nil {
+		b.Fatal(err)
+	}
+	routeProbeEnabled := os.Getenv(inferenceBenchmarkGemma4RetainedDepthRouteProbeEnv) == "1"
+	b.Setenv(inferenceBenchmarkKernelRouteMetricsEnv, "1")
+	b.Setenv(hipDecodeRouteMetricsEnv, "")
+	model, loaded, _, kernelCounter := inferenceBenchmarkLoadGemma4Q4ModelWithKernelCounter(b, config.ContextTokens, 0)
+	defer inferenceBenchmarkCloseModel(b, model)
+	if loaded == nil || !hipLoadedGemma4Q4GenerateLinked(loaded) {
+		b.Fatal("retained-depth benchmark requires a linked Gemma4 q4 runtime")
+	}
+	if isROCmGemma4AssistantArchitecture(loaded.modelInfo.Architecture) {
+		b.Fatalf("retained-depth benchmark model architecture %q is an MTP assistant, want a Gemma4 target", loaded.modelInfo.Architecture)
+	}
+	if kernelCounter == nil {
+		b.Fatal("retained-depth benchmark kernel counting driver is unavailable")
+	}
+	for _, tokenID := range config.TokenIDs {
+		if tokenID < 0 || (loaded.modelInfo.VocabSize > 0 && tokenID >= loaded.modelInfo.VocabSize) {
+			b.Fatalf("retained-depth token ID %d is outside model vocabulary size %d", tokenID, loaded.modelInfo.VocabSize)
+		}
+	}
+	promptIDs := inferenceBenchmarkPromptTokenSlice(config.RetainedTokens, config.TokenIDs)
+	if len(promptIDs) != config.RetainedTokens {
+		b.Fatalf("retained-depth prompt IDs = %d, want %d", len(promptIDs), config.RetainedTokens)
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.StopTimer()
+	var decodeDuration time.Duration
+	var decodeKernelStats inferenceBenchmarkHIPKernelStatsSnapshot
+	var decodeExpertCacheStats hipGemma4ExpertCacheStats
+	var decodedTokenIDs []int32
+	routeProbeMetrics := make(map[hipDecodeRouteMetricKey]hipDecodeRouteMetric)
+	for iteration := 0; iteration < b.N; iteration++ {
+		session, err := newHipEngineSession(loaded)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if err := session.PrefillTokens(promptIDs); err != nil {
+			_ = session.Close()
+			b.Fatalf("PrefillTokens(%d): %v", config.RetainedTokens, err)
+		}
+		materialized, err := session.GenerateFromCacheEach(1, -1, func(int32) bool { return true })
+		if err != nil {
+			_ = session.Close()
+			b.Fatalf("materialize retained state: %v", err)
+		}
+		if len(materialized) != 1 || session.Pos() != config.RetainedTokens+1 {
+			_ = session.Close()
+			b.Fatalf("materialized retained state = %d tokens at position %d, want 1 materialized token at position %d", len(materialized), session.Pos(), config.RetainedTokens+1)
+		}
+		if routeProbeEnabled {
+			snapshot, err := inferenceBenchmarkRunGemma4RetainedDepthRouteProbe(session)
+			if err != nil {
+				_ = session.Close()
+				b.Fatalf("retained-depth route probe: %v", err)
+			}
+			inferenceBenchmarkAccumulateHIPDecodeRouteMetrics(routeProbeMetrics, snapshot)
+		}
+
+		expertCacheBefore, _, _ := inferenceBenchmarkGemma4ExpertCacheSnapshot(loaded)
+		kernelCounter.ResetKernelStats()
+		b.StartTimer()
+		decodeStart := time.Now()
+		decoded, decodeErr := session.GenerateFromCacheEach(config.DecodeTokens, -1, func(int32) bool { return true })
+		decodeDuration += time.Since(decodeStart)
+		b.StopTimer()
+		if decodeErr != nil {
+			_ = session.Close()
+			b.Fatalf("decode retained state: %v", decodeErr)
+		}
+		if len(decoded) != config.DecodeTokens {
+			_ = session.Close()
+			b.Fatalf("decode retained state produced %d tokens, want %d", len(decoded), config.DecodeTokens)
+		}
+		if decodedTokenIDs == nil {
+			decodedTokenIDs = slices.Clone(decoded)
+		} else if !slices.Equal(decodedTokenIDs, decoded) {
+			_ = session.Close()
+			b.Fatalf("decode retained state token IDs changed across iterations: got %v, want %v", decoded, decodedTokenIDs)
+		}
+		inferenceBenchmarkAccumulateHIPKernelStats(&decodeKernelStats, inferenceBenchmarkBookKernelSnapshot(kernelCounter))
+		expertCacheAfter, _, _ := inferenceBenchmarkGemma4ExpertCacheSnapshot(loaded)
+		inferenceBenchmarkAccumulateGemma4ExpertCacheDelta(&decodeExpertCacheStats, expertCacheBefore, expertCacheAfter)
+		if err := session.Close(); err != nil {
+			b.Fatal(err)
+		}
+	}
+	inferenceBenchmarkRestoreHIPKernelStats(kernelCounter, decodeKernelStats)
+	b.Logf("retained_depth_decoded_token_ids=%v", decodedTokenIDs)
+
+	if decodeDuration > 0 {
+		b.ReportMetric(float64(config.DecodeTokens*b.N)/decodeDuration.Seconds(), "decode_tok/s")
+	}
+	b.ReportMetric(float64(config.RetainedTokens), "retained_depth_tokens")
+	b.ReportMetric(float64(config.DecodeTokens), "decode_tokens/op")
+	b.ReportMetric(float64(config.ContextTokens), "context_len")
+	b.ReportMetric(1, "retained_state_materialized")
+	b.ReportMetric(0, "mtp_enabled")
+	expertCacheFinal, expertCacheResidentBytes, expertCacheResidentEntries := inferenceBenchmarkGemma4ExpertCacheSnapshot(loaded)
+	b.ReportMetric(float64(decodeExpertCacheStats.Hits)/float64(b.N), "expert_cache_decode_hits/op")
+	b.ReportMetric(float64(decodeExpertCacheStats.Misses)/float64(b.N), "expert_cache_decode_misses/op")
+	b.ReportMetric(float64(decodeExpertCacheStats.Evictions)/float64(b.N), "expert_cache_decode_evictions/op")
+	b.ReportMetric(float64(decodeExpertCacheStats.H2DBytes)/float64(b.N), "expert_cache_decode_h2d_bytes/op")
+	b.ReportMetric(float64(expertCacheFinal.HostMappings), "expert_cache_host_mappings")
+	b.ReportMetric(float64(expertCacheFinal.HostMappedBytes), "expert_cache_host_mapped_bytes")
+	b.ReportMetric(float64(expertCacheResidentEntries), "expert_cache_resident_entries")
+	b.ReportMetric(float64(expertCacheResidentBytes), "expert_cache_resident_bytes")
+	if routeProbeEnabled {
+		b.ReportMetric(1, "retained_depth_route_probe_enabled")
+		inferenceBenchmarkReportHIPDecodeRouteProbeMetrics(b, routeProbeMetrics)
+	} else {
+		b.ReportMetric(0, "retained_depth_route_probe_enabled")
+	}
+	inferenceBenchmarkReportHIPKernelRouteMetrics(b, kernelCounter)
+}
+
+func inferenceBenchmarkGemma4ExpertCacheSnapshot(loaded *hipLoadedModel) (hipGemma4ExpertCacheStats, uint64, int) {
+	if loaded == nil {
+		return hipGemma4ExpertCacheStats{}, 0, 0
+	}
+	loaded.expertCacheMu.Lock()
+	cache := loaded.expertCache
+	loaded.expertCacheMu.Unlock()
+	if cache == nil {
+		return hipGemma4ExpertCacheStats{}, 0, 0
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return cache.stats, cache.bytes, len(cache.entries)
+}
+
+func inferenceBenchmarkAccumulateGemma4ExpertCacheDelta(total *hipGemma4ExpertCacheStats, before, after hipGemma4ExpertCacheStats) {
+	if total == nil {
+		return
+	}
+	total.Hits += after.Hits - before.Hits
+	total.Misses += after.Misses - before.Misses
+	total.Evictions += after.Evictions - before.Evictions
+	total.HostMappings += after.HostMappings - before.HostMappings
+	total.HostMappedBytes += after.HostMappedBytes - before.HostMappedBytes
+	total.H2DBytes += after.H2DBytes - before.H2DBytes
 }
 
 func BenchmarkInferenceGemma4Q4Book10Turn_ReplayBaseline(b *testing.B) {
@@ -4063,6 +4585,7 @@ func inferenceBenchmarkIsAttentionKernelName(name string) bool {
 		hipKernelNameAttentionHeadsChunkedStage2,
 		hipKernelNameAttentionHeadsBatchCausal,
 		hipKernelNameAttentionHeadsBatchChunkedStage1,
+		hipKernelNameAttentionHeadsBatchChunkedStage1GQA2,
 		hipKernelNameAttentionHeadsBatchChunkedStage2:
 		return true
 	default:
@@ -4073,6 +4596,7 @@ func inferenceBenchmarkIsAttentionKernelName(name string) bool {
 func inferenceBenchmarkSelectedHIPKernelNames() []string {
 	return []string{
 		hipKernelNameMLXQ4Proj,
+		hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360,
 		hipKernelNameMLXQ4ProjCols256,
 		hipKernelNameMLXQ4ProjQ6G16Row16,
 		hipKernelNameMLXQ4ProjQ6Row16,
@@ -4085,6 +4609,7 @@ func inferenceBenchmarkSelectedHIPKernelNames() []string {
 		hipKernelNameMLXQ4PairProj,
 		hipKernelNameMLXQ4GELUTanhMul,
 		hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16,
+		hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840,
 		hipKernelNameMLXQ4GELUTanhMulQ6Cols1536,
 		hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32,
 		hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64,
@@ -4104,6 +4629,7 @@ func inferenceBenchmarkSelectedHIPKernelNames() []string {
 		hipKernelNameAttentionHeadsChunkedStage2,
 		hipKernelNameAttentionHeadsBatchCausal,
 		hipKernelNameAttentionHeadsBatchChunkedStage1,
+		hipKernelNameAttentionHeadsBatchChunkedStage1GQA2,
 		hipKernelNameAttentionHeadsBatchChunkedStage2,
 		hipKernelNameRMSNormRoPEHeads,
 		hipKernelNameRMSNormRoPEHeadsBatch,
@@ -4741,6 +5267,7 @@ func inferenceBenchmarkLoadGemma4Q4ModelWithKernelCounter(b *testing.B, contextL
 		_ = model.Close()
 		b.Fatalf("loadedGemma4Q4ForwardConfig(%d): %v", layerCount, err)
 	}
+	inferenceBenchmarkReportGemma4LMHeadAffine(b, cfg.Layers[0].LMHeadProjection)
 	return model, loaded, cfg, kernelCounter
 }
 
@@ -4777,6 +5304,15 @@ func inferenceBenchmarkReportGemma4ProductionQuant(b *testing.B, info inference.
 			b.ReportMetric(1, "production_quant_constrained")
 		}
 	}
+}
+
+func inferenceBenchmarkReportGemma4LMHeadAffine(b *testing.B, projection hipMLXQ4DeviceWeightConfig) {
+	b.Helper()
+	b.Logf("lm_head_affine bits=%d group=%d rows=%d cols=%d", projection.Bits, projection.GroupSize, projection.Rows, projection.Cols)
+	b.ReportMetric(float64(projection.Bits), "lm_head_affine_bits")
+	b.ReportMetric(float64(projection.GroupSize), "lm_head_affine_group")
+	b.ReportMetric(float64(projection.Rows), "lm_head_affine_rows")
+	b.ReportMetric(float64(projection.Cols), "lm_head_affine_cols")
 }
 
 func inferenceBenchmarkReportGemma4ProductionQuantPack(b *testing.B, pack ProductionQuantizationPackSupport) {
@@ -5118,6 +5654,71 @@ type inferenceBenchmarkPrompt struct {
 	source       string
 }
 
+func inferenceBenchmarkGemma4RetainedDepthConfigFromEnv(getenv func(string) string) (inferenceBenchmarkGemma4RetainedDepthConfig, error) {
+	if getenv == nil {
+		return inferenceBenchmarkGemma4RetainedDepthConfig{}, fmt.Errorf("retained-depth benchmark environment is nil")
+	}
+	parsePositive := func(name string, fallback int) (int, error) {
+		value := strings.TrimSpace(getenv(name))
+		if value == "" {
+			return fallback, nil
+		}
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed <= 0 {
+			return 0, fmt.Errorf("%s=%q, want positive integer", name, value)
+		}
+		return parsed, nil
+	}
+	retainedTokens, err := parsePositive(inferenceBenchmarkGemma4RetainedDepthTokensEnv, 4096)
+	if err != nil {
+		return inferenceBenchmarkGemma4RetainedDepthConfig{}, err
+	}
+	decodeTokens, err := parsePositive(inferenceBenchmarkGemma4RetainedDepthDecodeTokensEnv, 4)
+	if err != nil {
+		return inferenceBenchmarkGemma4RetainedDepthConfig{}, err
+	}
+	extraContextTokens := 1
+	contextSuffix := "plus materialization token"
+	if getenv(inferenceBenchmarkGemma4RetainedDepthRouteProbeEnv) == "1" {
+		extraContextTokens++
+		contextSuffix += " plus route probe token"
+	}
+	maxInt := int(^uint(0) >> 1)
+	if retainedTokens > maxInt-decodeTokens-extraContextTokens {
+		return inferenceBenchmarkGemma4RetainedDepthConfig{}, fmt.Errorf("retained-depth token count %d with decode count %d overflows context bound", retainedTokens, decodeTokens)
+	}
+	minimumContext := retainedTokens + decodeTokens + extraContextTokens
+	contextTokens, err := parsePositive(inferenceBenchmarkGemma4RetainedDepthContextEnv, minimumContext)
+	if err != nil {
+		return inferenceBenchmarkGemma4RetainedDepthConfig{}, err
+	}
+	if contextTokens < minimumContext {
+		return inferenceBenchmarkGemma4RetainedDepthConfig{}, fmt.Errorf("%s=%d, want at least retained depth %d plus decode tokens %d %s", inferenceBenchmarkGemma4RetainedDepthContextEnv, contextTokens, retainedTokens, decodeTokens, contextSuffix)
+	}
+	rawTokenIDs := strings.TrimSpace(getenv(inferenceBenchmarkGemma4RetainedDepthTokenIDsEnv))
+	if rawTokenIDs == "" {
+		rawTokenIDs = strings.TrimSpace(getenv("GO_ROCM_BENCH_PROMPT_TOKEN_IDS"))
+	}
+	if rawTokenIDs == "" {
+		rawTokenIDs = "2,10979"
+	}
+	tokenIDs, err := inferenceBenchmarkPromptTokenIDs(rawTokenIDs)
+	if err != nil {
+		return inferenceBenchmarkGemma4RetainedDepthConfig{}, fmt.Errorf("%s: %w", inferenceBenchmarkGemma4RetainedDepthTokenIDsEnv, err)
+	}
+	for _, tokenID := range tokenIDs {
+		if tokenID < 0 {
+			return inferenceBenchmarkGemma4RetainedDepthConfig{}, fmt.Errorf("%s=%q contains negative token ID %d", inferenceBenchmarkGemma4RetainedDepthTokenIDsEnv, rawTokenIDs, tokenID)
+		}
+	}
+	return inferenceBenchmarkGemma4RetainedDepthConfig{
+		RetainedTokens: retainedTokens,
+		DecodeTokens:   decodeTokens,
+		ContextTokens:  contextTokens,
+		TokenIDs:       tokenIDs,
+	}, nil
+}
+
 func inferenceBenchmarkPositiveEnv(name string, fallback int) (int, error) {
 	if fallback <= 0 {
 		return 0, fmt.Errorf("%s fallback=%d, want positive integer", name, fallback)
@@ -5457,6 +6058,497 @@ func inferenceBenchmarkTokenPrompt(count int, ids []int) string {
 		builder.WriteString(strconv.Itoa(ids[i%len(ids)]))
 	}
 	return builder.String()
+}
+
+func inferenceBenchmarkGemma4SweepConfigFromEnv(getenv func(string) string) (inferenceBenchmarkGemma4SweepConfig, error) {
+	if getenv == nil {
+		return inferenceBenchmarkGemma4SweepConfig{}, fmt.Errorf("Gemma4 sweep getenv is nil")
+	}
+	config := inferenceBenchmarkGemma4SweepConfig{
+		ModelPath:  strings.TrimSpace(getenv(inferenceBenchmarkGemma4SweepModelPathEnv)),
+		OutputPath: strings.TrimSpace(getenv(inferenceBenchmarkGemma4SweepOutputEnv)),
+		Format:     strings.ToLower(strings.TrimSpace(getenv(inferenceBenchmarkGemma4SweepFormatEnv))),
+		Device:     strings.TrimSpace(getenv(inferenceBenchmarkGemma4SweepDeviceEnv)),
+		MaxTokens:  512,
+	}
+	if config.ModelPath == "" {
+		return inferenceBenchmarkGemma4SweepConfig{}, fmt.Errorf("%s is required", inferenceBenchmarkGemma4SweepModelPathEnv)
+	}
+	if config.OutputPath == "" {
+		return inferenceBenchmarkGemma4SweepConfig{}, fmt.Errorf("%s is required", inferenceBenchmarkGemma4SweepOutputEnv)
+	}
+	contextValue := strings.TrimSpace(getenv(inferenceBenchmarkGemma4SweepContextEnv))
+	contextTokens, err := strconv.Atoi(contextValue)
+	if err != nil || !inferenceBenchmarkGemma4SweepContextAllowed(contextTokens) {
+		return inferenceBenchmarkGemma4SweepConfig{}, fmt.Errorf("%s=%q, want one of 2048, 4096, 8192, 12288, 32768", inferenceBenchmarkGemma4SweepContextEnv, contextValue)
+	}
+	config.ContextTokens = contextTokens
+	if value := strings.TrimSpace(getenv(inferenceBenchmarkGemma4SweepMaxTokensEnv)); value != "" {
+		maxTokens, err := strconv.Atoi(value)
+		if err != nil || maxTokens <= 0 {
+			return inferenceBenchmarkGemma4SweepConfig{}, fmt.Errorf("%s=%q, want positive integer", inferenceBenchmarkGemma4SweepMaxTokensEnv, value)
+		}
+		config.MaxTokens = maxTokens
+	}
+	if config.MaxTokens >= config.ContextTokens {
+		return inferenceBenchmarkGemma4SweepConfig{}, fmt.Errorf("%s=%d, want less than %s=%d", inferenceBenchmarkGemma4SweepMaxTokensEnv, config.MaxTokens, inferenceBenchmarkGemma4SweepContextEnv, config.ContextTokens)
+	}
+	if config.Format == "" {
+		config.Format = "json"
+	}
+	if config.Format != "json" && config.Format != "csv" {
+		return inferenceBenchmarkGemma4SweepConfig{}, fmt.Errorf("%s=%q, want json or csv", inferenceBenchmarkGemma4SweepFormatEnv, config.Format)
+	}
+	if config.Device == "" {
+		config.Device = "rocm"
+	}
+	return config, nil
+}
+
+func inferenceBenchmarkGemma4SweepContextAllowed(contextTokens int) bool {
+	switch contextTokens {
+	case 2048, 4096, 8192, 12288, 32768:
+		return true
+	default:
+		return false
+	}
+}
+
+func inferenceBenchmarkGemma4SweepReceiptBytes(receipt inferenceBenchmarkGemma4SweepReceipt, format string) ([]byte, error) {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "json":
+		result := core.JSONMarshal(receipt)
+		if !result.OK {
+			return nil, resultError(result)
+		}
+		data, ok := result.Value.([]byte)
+		if !ok {
+			return nil, fmt.Errorf("Gemma4 sweep JSON receipt has type %T, want []byte", result.Value)
+		}
+		return append(data, '\n'), nil
+	case "csv":
+		var builder strings.Builder
+		builder.WriteString("schema_version,model_path,architecture,model_identity_path,gemma4_size,quantization,qat_classification,context_tokens,prompt_tokens,max_tokens,device,vram_total_bytes,vram_used_bytes,vram_free_bytes,device_kv_mode,kv_snapshot_bytes,kv_block_tokens,kv_block_estimate,cold_prefill_ms,first_token_ms,decode_ms,state_capture_ms,state_restore_ms,cold_continuation_ms,reused_continuation_ms,continuation_exact\n")
+		values := []string{
+			strconv.Itoa(receipt.SchemaVersion),
+			receipt.ModelPath,
+			receipt.ModelIdentity.Architecture,
+			receipt.ModelIdentity.Path,
+			receipt.Gemma4Size,
+			receipt.Quantization,
+			receipt.QATClassification,
+			strconv.Itoa(receipt.ContextTokens),
+			strconv.Itoa(receipt.PromptTokens),
+			strconv.Itoa(receipt.MaxTokens),
+			receipt.Device,
+			strconv.FormatUint(receipt.VRAMTotalBytes, 10),
+			strconv.FormatUint(receipt.VRAMUsedBytes, 10),
+			strconv.FormatUint(receipt.VRAMFreeBytes, 10),
+			receipt.DeviceKVMode,
+			strconv.FormatUint(receipt.KVSnapshotBytes, 10),
+			strconv.Itoa(receipt.KVBlockTokens),
+			strconv.Itoa(receipt.KVBlockEstimate),
+			strconv.FormatFloat(receipt.ColdPrefillMillis, 'f', -1, 64),
+			strconv.FormatFloat(receipt.FirstTokenMillis, 'f', -1, 64),
+			strconv.FormatFloat(receipt.DecodeMillis, 'f', -1, 64),
+			strconv.FormatFloat(receipt.StateCaptureMillis, 'f', -1, 64),
+			strconv.FormatFloat(receipt.StateRestoreMillis, 'f', -1, 64),
+			strconv.FormatFloat(receipt.ColdContinuationMS, 'f', -1, 64),
+			strconv.FormatFloat(receipt.ReusedContinuationMS, 'f', -1, 64),
+			strconv.FormatBool(receipt.ContinuationExact),
+		}
+		for index, value := range values {
+			if index > 0 {
+				builder.WriteByte(',')
+			}
+			builder.WriteString(inferenceBenchmarkGemma4SweepCSVValue(value))
+		}
+		builder.WriteByte('\n')
+		return []byte(builder.String()), nil
+	default:
+		return nil, fmt.Errorf("Gemma4 sweep receipt format %q, want json or csv", format)
+	}
+}
+
+func inferenceBenchmarkGemma4SweepCSVValue(value string) string {
+	if !strings.ContainsAny(value, ",\"\n\r") {
+		return value
+	}
+	return "\"" + strings.ReplaceAll(value, "\"", "\"\"") + "\""
+}
+
+// TestInferenceBenchmarkGemma4SweepReceipt runs exactly one non-MTP Gemma4
+// model per invocation. Matrix runners vary only its env inputs: model path,
+// the supported context length, and receipt destination/format.
+func TestInferenceBenchmarkGemma4SweepReceipt(t *testing.T) {
+	if os.Getenv(inferenceBenchmarkGemma4SweepRunEnv) != "1" {
+		t.Skipf("set %s=1 with model/context/output env to emit a Gemma4 sweep receipt", inferenceBenchmarkGemma4SweepRunEnv)
+	}
+	config, err := inferenceBenchmarkGemma4SweepConfigFromEnv(os.Getenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ROCmAvailable() {
+		t.Skip("ROCm runtime is not available on this host")
+	}
+
+	loaded := (&rocmBackend{}).LoadModel(config.ModelPath, inference.WithContextLen(config.ContextTokens))
+	if !loaded.OK {
+		t.Fatalf("LoadModel(%q): %v", config.ModelPath, loaded.Value)
+	}
+	model, ok := loaded.Value.(*rocmModel)
+	if !ok {
+		t.Fatalf("LoadModel(%q) = %T, want *rocmModel", config.ModelPath, loaded.Value)
+	}
+	defer func() { _ = model.Close() }()
+
+	identity := model.modelIdentity()
+	if !isROCmGemma4Architecture(identity.Architecture) || isROCmGemma4AssistantArchitecture(identity.Architecture) {
+		t.Fatalf("model architecture %q is not a non-MTP Gemma4 target", identity.Architecture)
+	}
+
+	benchmarkPrompt := inferenceBenchmarkTokenPrompt(config.ContextTokens-config.MaxTokens, []int{2, 10979})
+	benchReport, err := model.Benchmark(context.Background(), inference.BenchConfig{
+		Prompts:      []string{benchmarkPrompt},
+		MaxTokens:    config.MaxTokens,
+		MeasuredRuns: 1,
+	})
+	if err != nil {
+		t.Fatalf("Benchmark: %v", err)
+	}
+	if benchReport == nil {
+		t.Fatal("Benchmark returned nil report")
+	}
+
+	stateContinuationTokens := min(8, config.MaxTokens)
+	statePromptTokens := config.ContextTokens - stateContinuationTokens - 1
+	statePrompt := inferenceBenchmarkTokenPrompt(statePromptTokens, []int{2, 10979})
+	coldSession, err := inferenceBenchmarkGemma4SweepSession(model)
+	if err != nil {
+		t.Fatalf("NewSession(cold): %v", err)
+	}
+	defer func() { _ = coldSession.Close() }()
+	if err := coldSession.Prefill(context.Background(), statePrompt); err != nil {
+		t.Fatalf("cold Prefill: %v", err)
+	}
+	if warmed, err := inferenceBenchmarkGemma4SweepGenerate(coldSession, 1); err != nil {
+		t.Fatalf("cold state materialization: %v", err)
+	} else if len(warmed) == 0 {
+		t.Fatal("cold state materialization generated no token")
+	}
+
+	captureStart := time.Now()
+	snapshot, err := coldSession.CaptureKV(context.Background())
+	captureMillis := float64(time.Since(captureStart)) / float64(time.Millisecond)
+	if err != nil {
+		t.Fatalf("CaptureKV: %v", err)
+	}
+	if snapshot == nil || snapshot.SeqLen == 0 {
+		t.Fatalf("CaptureKV returned an empty state: %+v", snapshot)
+	}
+
+	coldStart := time.Now()
+	coldContinuation, err := inferenceBenchmarkGemma4SweepGenerate(coldSession, stateContinuationTokens)
+	coldContinuationMillis := float64(time.Since(coldStart)) / float64(time.Millisecond)
+	if err != nil {
+		t.Fatalf("cold continuation: %v", err)
+	}
+
+	reusedSession, err := inferenceBenchmarkGemma4SweepSession(model)
+	if err != nil {
+		t.Fatalf("NewSession(reused): %v", err)
+	}
+	defer func() { _ = reusedSession.Close() }()
+	restorer, ok := reusedSession.(inference.KVRestorer)
+	if !ok {
+		t.Fatalf("reused session %T does not implement inference.KVRestorer", reusedSession)
+	}
+	restoreStart := time.Now()
+	if err := restorer.RestoreFromKV(context.Background(), snapshot); err != nil {
+		t.Fatalf("RestoreFromKV: %v", err)
+	}
+	restoreMillis := float64(time.Since(restoreStart)) / float64(time.Millisecond)
+	reusedStart := time.Now()
+	reusedContinuation, err := inferenceBenchmarkGemma4SweepGenerate(reusedSession, stateContinuationTokens)
+	reusedContinuationMillis := float64(time.Since(reusedStart)) / float64(time.Millisecond)
+	if err != nil {
+		t.Fatalf("reused continuation: %v", err)
+	}
+	continuationExact := slices.Equal(coldContinuation, reusedContinuation)
+	if !continuationExact {
+		t.Fatalf("restored continuation differs: cold=%+v reused=%+v", coldContinuation, reusedContinuation)
+	}
+
+	prefillMillis, err := inferenceBenchmarkGemma4SweepReportMillis(benchReport, "prefill_duration_ms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstTokenMillis, err := inferenceBenchmarkGemma4SweepReportMillis(benchReport, "first_token_latency_ms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decodeMillis, err := inferenceBenchmarkGemma4SweepReportMillis(benchReport, "decode_duration_ms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vram, _ := GetVRAMInfo()
+	deviceKVMode, deviceKVBlockTokens := inferenceBenchmarkGemma4SweepKVGeometry(model, identity)
+	receipt := inferenceBenchmarkGemma4SweepReceipt{
+		SchemaVersion:        1,
+		ModelPath:            config.ModelPath,
+		ModelIdentity:        inferenceBenchmarkGemma4SweepIdentity(identity),
+		Gemma4Size:           firstNonEmptyString(identity.Labels["gemma4_size"], rocmGemma4ModelPackSize(identity, config.ModelPath)),
+		Quantization:         inferenceBenchmarkGemma4SweepQuantization(identity),
+		QATClassification:    inferenceBenchmarkGemma4SweepQATClassification(identity),
+		ContextTokens:        config.ContextTokens,
+		PromptTokens:         benchReport.PromptTokens,
+		MaxTokens:            config.MaxTokens,
+		Device:               config.Device,
+		VRAMTotalBytes:       vram.Total,
+		VRAMUsedBytes:        vram.Used,
+		VRAMFreeBytes:        vram.Free,
+		DeviceKVMode:         deviceKVMode,
+		KVSnapshotBytes:      inferenceBenchmarkGemma4SweepKVSnapshotBytes(snapshot),
+		KVBlockTokens:        deviceKVBlockTokens,
+		KVBlockEstimate:      (snapshot.SeqLen + deviceKVBlockTokens - 1) / deviceKVBlockTokens,
+		ColdPrefillMillis:    prefillMillis,
+		FirstTokenMillis:     firstTokenMillis,
+		DecodeMillis:         decodeMillis,
+		StateCaptureMillis:   captureMillis,
+		StateRestoreMillis:   restoreMillis,
+		ColdContinuationMS:   coldContinuationMillis,
+		ReusedContinuationMS: reusedContinuationMillis,
+		ContinuationExact:    continuationExact,
+	}
+	data, err := inferenceBenchmarkGemma4SweepReceiptBytes(receipt, config.Format)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := core.WriteFile(config.OutputPath, data, 0o644); !result.OK {
+		t.Fatalf("write %s: %v", config.OutputPath, result.Value)
+	}
+}
+
+func inferenceBenchmarkGemma4SweepGenerate(session inference.SessionHandle, maxTokens int) ([]inference.Token, error) {
+	var tokens []inference.Token
+	for token := range session.Generate(context.Background(), inference.GenerateConfig{MaxTokens: maxTokens}) {
+		tokens = append(tokens, token)
+	}
+	return tokens, session.Err()
+}
+
+func inferenceBenchmarkGemma4SweepSession(model *rocmModel) (inference.SessionHandle, error) {
+	if model == nil {
+		return nil, fmt.Errorf("Gemma4 sweep model is nil")
+	}
+	loaded, ok := model.native.(*hipLoadedModel)
+	if !ok || loaded == nil {
+		return nil, fmt.Errorf("Gemma4 sweep native model is %T, want *hipLoadedModel", model.native)
+	}
+	if loaded.tokenText == nil {
+		return nil, fmt.Errorf("Gemma4 sweep tokenizer is unavailable")
+	}
+	tokenizer := inferenceBenchmarkGemma4SweepTokenizer{
+		base:      loaded.tokenText,
+		vocabSize: loaded.modelInfo.VocabSize,
+	}
+	textModel, err := newHipEngineTextModel(loaded, tokenizer, model.modelType)
+	if err != nil {
+		return nil, err
+	}
+	session := textModel.NewSession()
+	if session == nil {
+		return nil, fmt.Errorf("Gemma4 sweep model does not expose a retained session")
+	}
+	return session, nil
+}
+
+func inferenceBenchmarkGemma4SweepReportMillis(report *inference.BenchReport, key string) (float64, error) {
+	if report == nil || report.Labels == nil {
+		return 0, fmt.Errorf("Gemma4 sweep benchmark report has no %s label", key)
+	}
+	value, ok := report.Labels[key]
+	if !ok {
+		return 0, fmt.Errorf("Gemma4 sweep benchmark report has no %s label", key)
+	}
+	millis, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, fmt.Errorf("Gemma4 sweep benchmark %s=%q: %w", key, value, err)
+	}
+	return millis, nil
+}
+
+func inferenceBenchmarkGemma4SweepIdentity(identity inference.ModelIdentity) inferenceBenchmarkGemma4SweepModelIdentity {
+	return inferenceBenchmarkGemma4SweepModelIdentity{
+		Architecture: identity.Architecture,
+		Path:         identity.Path,
+		VocabSize:    identity.VocabSize,
+		NumLayers:    identity.NumLayers,
+		HiddenSize:   identity.HiddenSize,
+		QuantBits:    identity.QuantBits,
+		QuantGroup:   identity.QuantGroup,
+	}
+}
+
+func inferenceBenchmarkGemma4SweepQuantization(identity inference.ModelIdentity) string {
+	if mode := firstNonEmptyString(identity.Labels["gemma4_quant_mode"], identity.QuantType, rocmGemma4ModelPackQuantModeForPath(identity, identity.Path)); mode != "" {
+		return mode
+	}
+	if identity.QuantBits > 0 {
+		return core.Sprintf("q%d", identity.QuantBits)
+	}
+	return "unknown"
+}
+
+func inferenceBenchmarkGemma4SweepQATClassification(identity inference.ModelIdentity) string {
+	if identity.Labels["gemma4_qat_collection"] != "" || strings.Contains(strings.ToLower(identity.Path), "qat") {
+		return "qat"
+	}
+	return "non_qat"
+}
+
+func inferenceBenchmarkGemma4SweepKVGeometry(model *rocmModel, identity inference.ModelIdentity) (string, int) {
+	mode := firstNonEmptyString(identity.Labels["device_kv_mode"], identity.Labels["kv_cache_mode"])
+	blockTokens := defaultROCmKVBlockSize
+	if loaded, ok := model.native.(*hipLoadedModel); ok && loaded != nil {
+		config := loaded.gemma4Q4EngineConfig()
+		if configuredMode, err := config.deviceKVMode(); err == nil {
+			mode = firstNonEmptyString(mode, configuredMode)
+		}
+		blockTokens = config.deviceKVBlockSize()
+	}
+	return firstNonEmptyString(mode, "unknown"), blockTokens
+}
+
+func inferenceBenchmarkGemma4SweepKVSnapshotBytes(snapshot *kv.Snapshot) uint64 {
+	if snapshot == nil {
+		return 0
+	}
+	var bytes uint64
+	for _, layer := range snapshot.Layers {
+		bytes += uint64(len(layer.KeyBytes) + len(layer.ValueBytes))
+		for _, payload := range layer.TurboQuantPayloads {
+			bytes += uint64(len(payload))
+		}
+		for _, head := range layer.Heads {
+			bytes += uint64(len(head.KeyBytes) + len(head.ValueBytes))
+			bytes += uint64(4 * (len(head.Key) + len(head.Value)))
+		}
+	}
+	return bytes
+}
+
+func TestInferenceBenchmarkGemma4SweepConfigFromEnv_Good(t *testing.T) {
+	config, err := inferenceBenchmarkGemma4SweepConfigFromEnv(func(name string) string {
+		return map[string]string{
+			"GO_ROCM_GEMMA4_SWEEP_MODEL_PATH": "/models/gemma-4-12b-it-qat-q4",
+			"GO_ROCM_GEMMA4_SWEEP_CONTEXT":    "8192",
+			"GO_ROCM_GEMMA4_SWEEP_OUTPUT":     "/tmp/receipt.json",
+		}[name]
+	})
+	if err != nil {
+		t.Fatalf("inferenceBenchmarkGemma4SweepConfigFromEnv: %v", err)
+	}
+	if config.ModelPath != "/models/gemma-4-12b-it-qat-q4" || config.ContextTokens != 8192 || config.MaxTokens != 512 || config.Format != "json" || config.OutputPath != "/tmp/receipt.json" {
+		t.Fatalf("sweep config = %+v, want model/context/default max tokens/JSON output", config)
+	}
+}
+
+func TestInferenceBenchmarkGemma4SweepConfigFromEnv_Bad(t *testing.T) {
+	_, err := inferenceBenchmarkGemma4SweepConfigFromEnv(func(name string) string {
+		return map[string]string{
+			"GO_ROCM_GEMMA4_SWEEP_MODEL_PATH": "/models/gemma-4-e2b-q4",
+			"GO_ROCM_GEMMA4_SWEEP_CONTEXT":    "1024",
+			"GO_ROCM_GEMMA4_SWEEP_OUTPUT":     "/tmp/receipt.json",
+		}[name]
+	})
+	if err == nil || !strings.Contains(err.Error(), "GO_ROCM_GEMMA4_SWEEP_CONTEXT") {
+		t.Fatalf("unsupported sweep context error = %v, want context matrix validation", err)
+	}
+}
+
+func TestInferenceBenchmarkGemma4SweepConfigFromEnv_Ugly(t *testing.T) {
+	_, err := inferenceBenchmarkGemma4SweepConfigFromEnv(func(name string) string {
+		return map[string]string{
+			"GO_ROCM_GEMMA4_SWEEP_CONTEXT": "2048",
+			"GO_ROCM_GEMMA4_SWEEP_OUTPUT":  "/tmp/receipt.json",
+			"GO_ROCM_GEMMA4_SWEEP_FORMAT":  "yaml",
+		}[name]
+	})
+	if err == nil || !strings.Contains(err.Error(), "GO_ROCM_GEMMA4_SWEEP_MODEL_PATH") {
+		t.Fatalf("missing model path error = %v, want required model path", err)
+	}
+}
+
+func TestInferenceBenchmarkGemma4SweepTokenizer_Encode_Good(t *testing.T) {
+	tokenizer := inferenceBenchmarkGemma4SweepTokenizer{vocabSize: 16}
+
+	got := tokenizer.Encode("tokens:2,7,2,9")
+
+	core.AssertEqual(t, []int32{2, 7, 2, 9}, got)
+}
+
+func TestInferenceBenchmarkGemma4SweepTokenizer_Encode_Bad(t *testing.T) {
+	tokenizer := inferenceBenchmarkGemma4SweepTokenizer{vocabSize: 16}
+
+	got := tokenizer.Encode("tokens:2,,9")
+
+	core.AssertEqual(t, []int32(nil), got)
+}
+
+func TestInferenceBenchmarkGemma4SweepTokenizer_Encode_Ugly(t *testing.T) {
+	tokenizer := inferenceBenchmarkGemma4SweepTokenizer{vocabSize: 16}
+
+	got := tokenizer.Encode("tokens:16")
+
+	core.AssertEqual(t, []int32(nil), got)
+}
+
+func TestInferenceBenchmarkGemma4SweepReceiptJSON_Good(t *testing.T) {
+	receipt := inferenceBenchmarkGemma4SweepReceipt{
+		SchemaVersion:     1,
+		ModelPath:         "/models/gemma-4-e4b-q4",
+		Gemma4Size:        "E4B",
+		Quantization:      "q4",
+		QATClassification: "non_qat",
+		ContextTokens:     4096,
+		PromptTokens:      4000,
+		MaxTokens:         512,
+		DeviceKVMode:      "k-q8-v-q4",
+		KVBlockTokens:     256,
+		KVBlockEstimate:   16,
+		ContinuationExact: true,
+	}
+	got, err := inferenceBenchmarkGemma4SweepReceiptBytes(receipt, "json")
+	if err != nil {
+		t.Fatalf("inferenceBenchmarkGemma4SweepReceiptBytes(json): %v", err)
+	}
+	want := "{\"schema_version\":1,\"model_path\":\"/models/gemma-4-e4b-q4\",\"model_identity\":{\"architecture\":\"\",\"path\":\"\",\"vocab_size\":0,\"num_layers\":0,\"hidden_size\":0,\"quant_bits\":0,\"quant_group\":0},\"gemma4_size\":\"E4B\",\"quantization\":\"q4\",\"qat_classification\":\"non_qat\",\"context_tokens\":4096,\"prompt_tokens\":4000,\"max_tokens\":512,\"device\":\"\",\"vram_total_bytes\":0,\"vram_used_bytes\":0,\"vram_free_bytes\":0,\"device_kv_mode\":\"k-q8-v-q4\",\"kv_snapshot_bytes\":0,\"kv_block_tokens\":256,\"kv_block_estimate\":16,\"cold_prefill_ms\":0,\"first_token_ms\":0,\"decode_ms\":0,\"state_capture_ms\":0,\"state_restore_ms\":0,\"cold_continuation_ms\":0,\"reused_continuation_ms\":0,\"continuation_exact\":true}\n"
+	if string(got) != want {
+		t.Fatalf("JSON receipt = %q, want %q", got, want)
+	}
+}
+
+func TestInferenceBenchmarkGemma4SweepReceiptCSV_Good(t *testing.T) {
+	receipt := inferenceBenchmarkGemma4SweepReceipt{
+		SchemaVersion:     1,
+		ModelPath:         "/models/gemma-4-e4b,qat",
+		Gemma4Size:        "E4B",
+		Quantization:      "q4",
+		QATClassification: "qat",
+		ContextTokens:     2048,
+		PromptTokens:      32,
+		MaxTokens:         512,
+		ContinuationExact: true,
+	}
+	got, err := inferenceBenchmarkGemma4SweepReceiptBytes(receipt, "csv")
+	if err != nil {
+		t.Fatalf("inferenceBenchmarkGemma4SweepReceiptBytes(csv): %v", err)
+	}
+	want := "schema_version,model_path,architecture,model_identity_path,gemma4_size,quantization,qat_classification,context_tokens,prompt_tokens,max_tokens,device,vram_total_bytes,vram_used_bytes,vram_free_bytes,device_kv_mode,kv_snapshot_bytes,kv_block_tokens,kv_block_estimate,cold_prefill_ms,first_token_ms,decode_ms,state_capture_ms,state_restore_ms,cold_continuation_ms,reused_continuation_ms,continuation_exact\n1,\"/models/gemma-4-e4b,qat\",,,E4B,q4,qat,2048,32,512,,0,0,0,,0,0,0,0,0,0,0,0,0,0,true\n"
+	if string(got) != want {
+		t.Fatalf("CSV receipt = %q, want %q", got, want)
+	}
 }
 
 func inferenceBenchmarkTokenPromptCount(prompt string) int {
@@ -5805,4 +6897,67 @@ func TestInferenceBenchmarkPromptFromEnv_BadTokenID(t *testing.T) {
 	if _, err := inferenceBenchmarkPromptFromEnv(); err == nil {
 		t.Fatalf("inferenceBenchmarkPromptFromEnv succeeded, want empty token ID error")
 	}
+}
+
+func TestInferenceBenchmarkGemma4RetainedDepthConfigFromEnv_Good(t *testing.T) {
+	values := map[string]string{
+		inferenceBenchmarkGemma4RetainedDepthTokensEnv:       "4096",
+		inferenceBenchmarkGemma4RetainedDepthDecodeTokensEnv: "4",
+		inferenceBenchmarkGemma4RetainedDepthContextEnv:      "4101",
+		inferenceBenchmarkGemma4RetainedDepthTokenIDsEnv:     "2, 10979",
+	}
+	config, err := inferenceBenchmarkGemma4RetainedDepthConfigFromEnv(func(name string) string {
+		return values[name]
+	})
+	if err != nil {
+		t.Fatalf("inferenceBenchmarkGemma4RetainedDepthConfigFromEnv: %v", err)
+	}
+	if config.RetainedTokens != 4096 || config.DecodeTokens != 4 || config.ContextTokens != 4101 || fmt.Sprint(config.TokenIDs) != "[2 10979]" {
+		t.Fatalf("retained depth config = %+v, want 4096 retained, 4 decode, 4101 context, [2 10979]", config)
+	}
+}
+
+func TestInferenceBenchmarkGemma4RetainedDepthConfigFromEnv_Bad(t *testing.T) {
+	values := map[string]string{
+		inferenceBenchmarkGemma4RetainedDepthDecodeTokensEnv: "0",
+	}
+	_, err := inferenceBenchmarkGemma4RetainedDepthConfigFromEnv(func(name string) string {
+		return values[name]
+	})
+	if err == nil {
+		t.Fatal("inferenceBenchmarkGemma4RetainedDepthConfigFromEnv succeeded for zero decode tokens")
+	}
+	core.AssertContains(t, err.Error(), inferenceBenchmarkGemma4RetainedDepthDecodeTokensEnv)
+}
+
+func TestInferenceBenchmarkGemma4RetainedDepthConfigFromEnv_RouteProbeContextBad(t *testing.T) {
+	values := map[string]string{
+		inferenceBenchmarkGemma4RetainedDepthTokensEnv:       "16",
+		inferenceBenchmarkGemma4RetainedDepthDecodeTokensEnv: "4",
+		inferenceBenchmarkGemma4RetainedDepthContextEnv:      "21",
+		inferenceBenchmarkGemma4RetainedDepthRouteProbeEnv:   "1",
+	}
+	_, err := inferenceBenchmarkGemma4RetainedDepthConfigFromEnv(func(name string) string {
+		return values[name]
+	})
+	if err == nil {
+		t.Fatal("inferenceBenchmarkGemma4RetainedDepthConfigFromEnv accepted context without room for the route probe")
+	}
+	core.AssertContains(t, err.Error(), "route probe")
+}
+
+func TestInferenceBenchmarkGemma4RetainedDepthConfigFromEnv_Ugly(t *testing.T) {
+	values := map[string]string{
+		inferenceBenchmarkGemma4RetainedDepthTokensEnv:       "16",
+		inferenceBenchmarkGemma4RetainedDepthDecodeTokensEnv: "4",
+		inferenceBenchmarkGemma4RetainedDepthContextEnv:      "21",
+		inferenceBenchmarkGemma4RetainedDepthTokenIDsEnv:     "2,,10979",
+	}
+	_, err := inferenceBenchmarkGemma4RetainedDepthConfigFromEnv(func(name string) string {
+		return values[name]
+	})
+	if err == nil {
+		t.Fatal("inferenceBenchmarkGemma4RetainedDepthConfigFromEnv succeeded for malformed token IDs")
+	}
+	core.AssertContains(t, err.Error(), inferenceBenchmarkGemma4RetainedDepthTokenIDsEnv)
 }

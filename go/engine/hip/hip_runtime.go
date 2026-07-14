@@ -162,21 +162,26 @@ func loadHIPDefaultNativeModel(runtime *hipRuntime, path string, cfg nativeLoadC
 	if isROCmGemma4Architecture(cfg.ModelInfo.Architecture) {
 		modelLabels = rocmApplyGemma4NativeConfigFeatureLabels(modelLabels, cfg.Gemma4TextConfig)
 	}
+	tokenText := cfg.TokenText
+	if tokenText == nil {
+		tokenText = loadHIPTokenTextDecoderIfPresent(cfg.TokenizerPath)
+	}
 	model := &hipLoadedModel{
-		driver:            runtime.driver,
-		kernels:           newHIPRuntimeKernelSet(runtime.driver),
-		modelPath:         path,
-		modelInfo:         cfg.ModelInfo,
-		modelLabels:       modelLabels,
-		engineProfile:     cfg.EngineProfile.clone(),
-		gemma4Q4Config:    engineConfig,
-		sequenceMixerPlan: cloneSequenceMixerLoadPlan(cfg.SequenceMixerPlan),
-		contextSize:       cfg.ContextSize,
-		gemma4TextConfig:  cloneNativeGemma4TextConfig(cfg.Gemma4TextConfig),
-		tensors:           make(map[string]hipTensor, len(cfg.Tensors)),
-		hostTensors:       make(map[string]nativeTensorInfo),
-		tokenText:         loadHIPTokenTextDecoderIfPresent(cfg.TokenizerPath),
-		createdAt:         time.Now(),
+		driver:             runtime.driver,
+		kernels:            newHIPRuntimeKernelSet(runtime.driver),
+		modelPath:          path,
+		modelInfo:          cfg.ModelInfo,
+		modelLabels:        modelLabels,
+		engineProfile:      cfg.EngineProfile.clone(),
+		gemma4Q4Config:     engineConfig,
+		sequenceMixerPlan:  cloneSequenceMixerLoadPlan(cfg.SequenceMixerPlan),
+		contextSize:        cfg.ContextSize,
+		gemma4TextConfig:   cloneNativeGemma4TextConfig(cfg.Gemma4TextConfig),
+		gemma4Architecture: cloneGemma4ArchitectureDeclaration(cfg.Gemma4Architecture),
+		tensors:            make(map[string]hipTensor, len(cfg.Tensors)),
+		hostTensors:        make(map[string]nativeTensorInfo),
+		tokenText:          tokenText,
+		createdAt:          time.Now(),
 	}
 	var tensorCopyBuffer []byte
 	tensorFiles := map[string]*core.OSFile{}
@@ -243,6 +248,7 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameProjection,
 	hipKernelNameProjectionBatch,
 	hipKernelNameMLXQ4Proj,
+	hipKernelNameMLXQ4ProjQ4G32Rows3840Cols15360,
 	hipKernelNameMLXQ4ProjCols256,
 	hipKernelNameMLXQ4ProjQ6G16Row16,
 	hipKernelNameMLXQ4ProjQ6Row16,
@@ -264,6 +270,8 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameMLXQ4TripleProjQ6Row64,
 	hipKernelNameMLXQ4GELUTanhMul,
 	hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16,
+	hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840,
+	hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8,
 	hipKernelNameMLXQ4GELUTanhMLPQ4G32Cols1536Persistent,
 	hipKernelNameMLXQ4GELUTanhMulQ6Cols1536,
 	hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64,
@@ -279,12 +287,16 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameRMSNormRoPEHeads,
 	hipKernelNameRMSNormRoPEHeadsPair,
 	hipKernelNameRMSNormRoPEHeadsBatch,
+	hipKernelNameRMSNormRoPEHeadsPairLaneBatch,
+	hipKernelNameMoECombineNorms,
 	hipKernelNameAttentionHeads,
 	hipKernelNameAttentionHeadsBatchCausal,
+	hipKernelNameAttentionHeadsLaneBatch,
 	hipKernelNameAttentionHeadsBatchCausalQueryRMSRoPE,
 	hipKernelNameAttentionHeadsChunkedStage1,
 	hipKernelNameAttentionHeadsChunkedStage2,
 	hipKernelNameAttentionHeadsBatchChunkedStage1,
+	hipKernelNameAttentionHeadsBatchChunkedStage1GQA2,
 	hipKernelNameAttentionHeadsBatchChunkedStage2,
 	hipKernelNameVectorAddScaled,
 	hipKernelNameVectorScale,
@@ -331,8 +343,11 @@ var hipGemma4Q4WarmLaunchPacketSizes = []int{
 	hipRMSNormRoPEHeadsLaunchArgsBytes,
 	hipRMSNormRoPEHeadsPairLaunchArgsBytes,
 	hipRMSNormRoPEHeadsBatchLaunchArgsBytes,
+	hipRMSNormRoPEHeadsPairLaneBatchLaunchArgsBytes,
+	hipMoECombineNormsLaunchArgsBytes,
 	hipAttentionHeadsLaunchArgsBytes,
 	hipAttentionHeadsBatchCausalLaunchArgsBytes,
+	hipAttentionHeadsLaneBatchLaunchArgsBytes,
 	hipAttentionHeadsBatchCausalQueryRMSRoPELaunchArgsBytes,
 	hipAttentionHeadsChunkedLaunchArgsBytes,
 	hipAttentionHeadsBatchChunkedLaunchArgsBytes,
@@ -605,6 +620,7 @@ type hipLoadedModel struct {
 	sequenceMixerBindings *hipSequenceMixerBindings
 	contextSize           int
 	gemma4TextConfig      nativeGemma4TextConfig
+	gemma4Architecture    Gemma4ArchitectureDeclaration
 	tensors               map[string]hipTensor
 	hostTensors           map[string]nativeTensorInfo
 	expertCacheMu         sync.Mutex

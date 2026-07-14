@@ -9,12 +9,12 @@ import (
 	"encoding/binary"
 	"iter"
 	"math"
-	"math/rand"
 	"strconv"
 	"strings"
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	sharedmodel "dappco.re/go/inference/model"
 )
 
 type hipLoadedTinyLMConfig struct {
@@ -1046,6 +1046,10 @@ func hipGemma4Q4GenerateTokenSeqWithEngineConfig(ctx context.Context, model *hip
 }
 
 func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens []int32, generate inference.GenerateConfig, engineConfig hipGemma4Q4EngineConfig, initialDeviceState *hipGemma4Q4DeviceDecodeState, retainDeviceState func(*hipGemma4Q4DeviceDecodeState) error) (iter.Seq[inference.Token], func() error) {
+	return hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx, model, cfg, promptTokens, generate, engineConfig, initialDeviceState, retainDeviceState, nil)
+}
+
+func hipGemma4Q4GenerateTokenSeqWithStateSampler(ctx context.Context, model *hipLoadedModel, cfg hipGemma4Q4ForwardConfig, promptTokens []int32, generate inference.GenerateConfig, engineConfig hipGemma4Q4EngineConfig, initialDeviceState *hipGemma4Q4DeviceDecodeState, retainDeviceState func(*hipGemma4Q4DeviceDecodeState) error, sampler *sharedmodel.Sampler) (iter.Seq[inference.Token], func() error) {
 	var runErr error
 	return func(yield func(inference.Token) bool) {
 		feedbackReceipts := hipBeginFeedbackReceipts()
@@ -1079,6 +1083,9 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 			return
 		}
 		generate = resolvedGenerate
+		if sampler == nil {
+			sampler = sharedmodel.NewSampler(generate.Seed)
+		}
 		if model == nil {
 			runErr = core.E(hipGemma4Q4Layer0Operation, "loaded model is required", nil)
 			return
@@ -1201,7 +1208,7 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 					outputToken := ubatch.OutputToken(index)
 					sampleDraw := 0.0
 					if outputToken && deviceTopKSampling {
-						sampleDraw = rand.Float64()
+						sampleDraw = float64(sampler.Draw())
 					}
 					var err error
 					current, state, err = hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx, model.driver, cfg, state, hipGemma4Q4ForwardRequest{
@@ -1243,9 +1250,9 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 					if outputToken {
 						if hostSampling && !deviceTopKSampling {
 							if len(current.Candidates) > 0 {
-								current.Greedy, err = hipGemma4Q4HostSampleSortedCandidateResultWorkspace(current.Candidates, generate, history, rand.Float64(), attentionWorkspace)
+								current.Greedy, err = hipGemma4Q4HostSampleSortedCandidateResultWorkspace(current.Candidates, generate, history, float64(sampler.Draw()), attentionWorkspace)
 							} else {
-								current.Greedy, err = hipGemma4Q4HostSampleResult(current.Logits, generate, suppressTokens, history, rand.Float64())
+								current.Greedy, err = hipGemma4Q4HostSampleResult(current.Logits, generate, suppressTokens, history, float64(sampler.Draw()))
 							}
 							if err != nil {
 								runErr = err
@@ -1295,7 +1302,7 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 				if outputRow < 0 {
 					outputRow = len(ubatch.Tokens) - 1
 				}
-				current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], forward.FinalHidden, len(ubatch.Tokens), outputRow, req.Epsilon, generate, suppressTokens, history, rand.Float64(), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
+				current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], forward.FinalHidden, len(ubatch.Tokens), outputRow, req.Epsilon, generate, suppressTokens, history, float64(sampler.Draw()), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
 				if err != nil {
 					_ = forward.Close()
 					runErr = err
@@ -1388,7 +1395,7 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 				deviceState = advanced.DeviceState
 				advanced.DeviceState = nil
 				if hostSampling {
-					current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], advanced.Current.DeviceFinalHidden, 1, 0, req.Epsilon, generate, suppressTokens, history, rand.Float64(), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
+					current, err = hipGemma4Q4SampleBatchedPrefillRow(ctx, model.driver, cfg.Layers[len(cfg.Layers)-1], advanced.Current.DeviceFinalHidden, 1, 0, req.Epsilon, generate, suppressTokens, history, float64(sampler.Draw()), finalGreedyBuffer, attentionWorkspace, deviceTopKSampling)
 					if err != nil {
 						_ = advanced.Close()
 						runErr = err
@@ -1411,7 +1418,7 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 			}
 			sampleDraw := 0.0
 			if deviceTopKSampling {
-				sampleDraw = rand.Float64()
+				sampleDraw = float64(sampler.Draw())
 			}
 			var err error
 			current, state, err = hipRunGemma4Q4SingleTokenForwardWithStateInternal(ctx, model.driver, cfg, state, hipGemma4Q4ForwardRequest{
@@ -1452,9 +1459,9 @@ func hipGemma4Q4GenerateTokenSeqWithState(ctx context.Context, model *hipLoadedM
 			hipReleaseClosedGemma4Q4DeviceDecodeState(previousDeviceState)
 			if hostSampling && !deviceTopKSampling {
 				if len(current.Candidates) > 0 {
-					current.Greedy, err = hipGemma4Q4HostSampleSortedCandidateResultWorkspace(current.Candidates, generate, history, rand.Float64(), attentionWorkspace)
+					current.Greedy, err = hipGemma4Q4HostSampleSortedCandidateResultWorkspace(current.Candidates, generate, history, float64(sampler.Draw()), attentionWorkspace)
 				} else {
-					current.Greedy, err = hipGemma4Q4HostSampleResult(current.Logits, generate, suppressTokens, history, rand.Float64())
+					current.Greedy, err = hipGemma4Q4HostSampleResult(current.Logits, generate, suppressTokens, history, float64(sampler.Draw()))
 				}
 				if err != nil {
 					runErr = err

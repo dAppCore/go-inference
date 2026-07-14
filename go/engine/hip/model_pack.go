@@ -380,6 +380,12 @@ func (b *rocmBackend) InspectModelPack(ctx context.Context, path string) (*infer
 		}
 		weightMetadataValid = weightMetadataValid && valid
 	}
+	if inspection.Format == "safetensors" && weightMetadataValid {
+		if err := rocmApplySequenceMixerSafetensorsPackPlanLabels(inspection, weights); err != nil {
+			inspection.Notes = append(inspection.Notes, "sequence mixer safetensors plan could not be validated: "+err.Error())
+			weightMetadataValid = false
+		}
+	}
 	if indexValid, err := applyROCmSafetensorsIndexInspection(inspection, root, weights); err != nil {
 		inspection.Notes = append(inspection.Notes, "safetensors index could not be parsed: "+err.Error())
 		weightMetadataValid = false
@@ -1339,10 +1345,6 @@ func applyROCmSafetensorsInspection(inspection *inference.ModelPackInspection, p
 		inspection.Notes = append(inspection.Notes, "Qwen3 safetensors staged plan could not be validated: "+err.Error())
 		return false
 	}
-	if err := rocmApplySequenceMixerSafetensorsPlanLabels(inspection, path); err != nil {
-		inspection.Notes = append(inspection.Notes, "sequence mixer safetensors plan could not be validated: "+err.Error())
-		return false
-	}
 	return true
 }
 
@@ -1571,6 +1573,12 @@ func (b *rocmBackend) safetensorsNativeLoadConfig(ctx context.Context, path stri
 		Gemma4TextConfig:   rocmNativeGemma4TextConfig(path),
 		Tensors:            tensors,
 		TiedWordEmbeddings: inspection.Labels["tied_word_embeddings"] == "true",
+	}
+	if isROCmGemma4Architecture(inspection.Model.Architecture) {
+		cfg.Gemma4Architecture, err = resolveGemma4ModelPackArchitectureDeclaration(path)
+		if err != nil {
+			return "", nativeLoadConfig{}, core.E("rocm.safetensorsNativeLoadConfig", "resolve shared Gemma4 architecture", err)
+		}
 	}
 	if len(weightPaths) == 1 && len(tensors) > 0 {
 		cfg.DataOffset = tensors[0].DataOffset

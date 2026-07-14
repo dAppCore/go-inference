@@ -13,7 +13,6 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/decode/tokenizer"
 	"dappco.re/go/inference/model"
 )
 
@@ -31,6 +30,19 @@ type TokenModel interface {
 	Close() error
 }
 
+// TextTokenizer is the text/id behavior the shared serving adapter needs.
+// Backends may satisfy it with the Hugging Face tokenizer implementation or
+// with an equivalent tokenizer carried inside another checkpoint format such
+// as GGUF; the engine contract does not require a tokenizer.json sidecar.
+type TextTokenizer interface {
+	Encode(text string) []int32
+	Decode(ids []int32) string
+	DecodeToken(id int32) string
+	DecodeOne(id int32) string
+	TokenID(text string) (int32, bool)
+	EOS() int32
+}
+
 // TextModel adapts a loaded engine [TokenModel] (+ its tokenizer) to
 // inference.TextModel and inference.SessionFactory — the contract surface
 // serving.NewMLXBackend and state/session.Session resolve against a registered
@@ -38,7 +50,7 @@ type TokenModel interface {
 // call); NewSession hands out a retained one for multi-turn conversation state.
 type TextModel struct {
 	tm        TokenModel
-	tok       *tokenizer.Tokenizer
+	tok       TextTokenizer
 	modelType string
 	info      inference.ModelInfo
 	maxLen    int
@@ -112,7 +124,7 @@ type TurnTokens struct {
 // DetectTurnTokens picks the chat-turn dialect from the tokenizer's vocab: a
 // checkpoint that carries <|turn> as a token is gemma4-templated; anything
 // else keeps the legacy <start_of_turn> template.
-func DetectTurnTokens(tok *tokenizer.Tokenizer) TurnTokens {
+func DetectTurnTokens(tok TextTokenizer) TurnTokens {
 	if tok != nil {
 		if _, ok := tok.TokenID("<|turn>"); ok {
 			return TurnTokens{Open: "<|turn>", Close: "<turn|>"}
@@ -163,7 +175,7 @@ type ThoughtSuppressorDeclarer interface {
 // once loaded); info + maxLen are the engine-built model metadata + context
 // window; modelType is the architecture selector reported by ModelType. The
 // chat-turn dialect is detected from the tokenizer's vocab.
-func NewTextModel(tm TokenModel, tok *tokenizer.Tokenizer, modelType string, info inference.ModelInfo, maxLen int) *TextModel {
+func NewTextModel(tm TokenModel, tok TextTokenizer, modelType string, info inference.ModelInfo, maxLen int) *TextModel {
 	suppressor := false
 	if d, ok := tm.(ThoughtSuppressorDeclarer); ok {
 		suppressor = d.NeedsThoughtChannelSuppressor()
@@ -537,11 +549,11 @@ func (m *TextModel) decodeFromPrefilled(ctx context.Context, sess Session, promp
 	}
 	var gerr error
 	if cfg.Temperature > 0 || cfg.MinP > 0 || cfg.RepeatPenalty > 1 {
-		_, gerr = sess.GenerateSampledFromCacheEach(maxNew, stop, model.NewSampler(cfg.Seed), modelSampleParams(cfg), nil, emit)
+		_, gerr = generateSampledFromCacheEach(ctx, sess, maxNew, stop, model.NewSampler(cfg.Seed), modelSampleParams(cfg), nil, emit)
 	} else {
 		// eosID -1: emit owns the stop decision (after yielding), so a stop token
 		// is always surfaced and generation is bounded by maxNew.
-		_, gerr = sess.GenerateFromCacheEach(maxNew, -1, emit)
+		_, gerr = generateFromCacheEach(ctx, sess, maxNew, -1, emit)
 	}
 	m.setMetrics(promptLen, count, time.Since(start), decodeStart)
 	if stopTrace != nil {

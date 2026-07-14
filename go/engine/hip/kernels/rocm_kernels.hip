@@ -72,6 +72,11 @@ constexpr uint32_t ROCM_MLX_Q4_PROJECTION_BITS = 4;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE = 256;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK = 8;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW = ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE / ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK;
+constexpr uint32_t ROCM_MLX_Q4_PROJECTION_12B_DOWN_ROWS = 3840;
+constexpr uint32_t ROCM_MLX_Q4_PROJECTION_12B_DOWN_COLS = 15360;
+constexpr uint32_t ROCM_MLX_Q4_PROJECTION_12B_DOWN_GROUP_SIZE = 32;
+constexpr uint32_t ROCM_MLX_Q4_PROJECTION_12B_DOWN_GROUPS_PER_ROW = ROCM_MLX_Q4_PROJECTION_12B_DOWN_COLS / ROCM_MLX_Q4_PROJECTION_12B_DOWN_GROUP_SIZE;
+constexpr uint32_t ROCM_MLX_Q4_PROJECTION_12B_DOWN_PACKED_PER_ROW = ROCM_MLX_Q4_PROJECTION_12B_DOWN_COLS / 8;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_COLS256_ROWS_PER_BLOCK = 32;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_COLS256_THREADS_PER_ROW = ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE / ROCM_MLX_Q4_PROJECTION_COLS256_ROWS_PER_BLOCK;
 constexpr uint32_t ROCM_MLX_Q4_PROJECTION_Q6_ROW16_ROWS_PER_BLOCK = 16;
@@ -84,6 +89,13 @@ constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_Q6_COLS1536_ROWS_PER_BLOCK = 16;
 constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_Q6_COLS1536_THREADS_PER_ROW = ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE / ROCM_MLX_Q4_GELU_TANH_Q6_COLS1536_ROWS_PER_BLOCK;
 constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_Q4_G32_COLS1536_ROW16_ROWS_PER_BLOCK = 16;
 constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_Q4_G32_COLS1536_ROW16_THREADS_PER_ROW = ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE / ROCM_MLX_Q4_GELU_TANH_Q4_G32_COLS1536_ROW16_ROWS_PER_BLOCK;
+constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_12B_ROWS = 15360;
+constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_12B_COLS = 3840;
+constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_12B_GROUP_SIZE = 32;
+constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_12B_GROUPS_PER_ROW = ROCM_MLX_Q4_GELU_TANH_12B_COLS / ROCM_MLX_Q4_GELU_TANH_12B_GROUP_SIZE;
+constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_12B_PACKED_PER_ROW = ROCM_MLX_Q4_GELU_TANH_12B_COLS / 8;
+constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_12B_ROW8_ROWS_PER_BLOCK = 8;
+constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_12B_ROW8_THREADS_PER_ROW = ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE / ROCM_MLX_Q4_GELU_TANH_12B_ROW8_ROWS_PER_BLOCK;
 constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_MLP_PERSISTENT_BLOCKS = 120;
 constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_Q6_COLS1536_ROW32_ROWS_PER_BLOCK = 32;
 constexpr uint32_t ROCM_MLX_Q4_GELU_TANH_Q6_COLS1536_ROW32_THREADS_PER_ROW = ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE / ROCM_MLX_Q4_GELU_TANH_Q6_COLS1536_ROW32_ROWS_PER_BLOCK;
@@ -119,6 +131,10 @@ constexpr uint32_t ROCM_RMS_NORM_ROPE_HEADS_PAIR_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_RMS_NORM_ROPE_HEADS_PAIR_LAUNCH_ARGS_BYTES = 144;
 constexpr uint32_t ROCM_RMS_NORM_ROPE_HEADS_BATCH_LAUNCH_ARGS_VERSION = 2;
 constexpr uint32_t ROCM_RMS_NORM_ROPE_HEADS_BATCH_LAUNCH_ARGS_BYTES = 96;
+constexpr uint32_t ROCM_RMS_NORM_ROPE_HEADS_PAIR_LANE_BATCH_LAUNCH_ARGS_VERSION = 1;
+constexpr uint32_t ROCM_RMS_NORM_ROPE_HEADS_PAIR_LANE_BATCH_LAUNCH_ARGS_BYTES = 152;
+constexpr uint32_t ROCM_MOE_COMBINE_NORMS_LAUNCH_ARGS_VERSION = 1;
+constexpr uint32_t ROCM_MOE_COMBINE_NORMS_LAUNCH_ARGS_BYTES = 96;
 constexpr uint32_t ROCM_RMS_NORM_WEIGHT_ENCODING_NONE = 0;
 constexpr uint32_t ROCM_RMS_NORM_WEIGHT_ENCODING_F32 = 1;
 constexpr uint32_t ROCM_RMS_NORM_WEIGHT_ENCODING_BF16 = 2;
@@ -140,12 +156,15 @@ constexpr uint32_t ROCM_ATTENTION_HEADS_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_ATTENTION_HEADS_LAUNCH_ARGS_BYTES = 128;
 constexpr uint32_t ROCM_ATTENTION_HEADS_BATCH_CAUSAL_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_ATTENTION_HEADS_BATCH_CAUSAL_LAUNCH_ARGS_BYTES = 144;
+constexpr uint32_t ROCM_ATTENTION_HEADS_LANE_BATCH_LAUNCH_ARGS_VERSION = 1;
+constexpr uint32_t ROCM_ATTENTION_HEADS_LANE_BATCH_LAUNCH_ARGS_BYTES = 112;
+constexpr uint32_t ROCM_ATTENTION_HEADS_LANE_DESCRIPTOR_BYTES = 32;
 constexpr uint32_t ROCM_ATTENTION_HEADS_BATCH_CAUSAL_QUERY_RMS_ROPE_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_ATTENTION_HEADS_BATCH_CAUSAL_QUERY_RMS_ROPE_LAUNCH_ARGS_BYTES = 184;
 constexpr uint32_t ROCM_ATTENTION_HEADS_SHARED_MAX_TOKENS = 2048;
 constexpr uint32_t ROCM_ATTENTION_HEADS_CHUNKED_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_ATTENTION_HEADS_CHUNKED_LAUNCH_ARGS_BYTES = 128;
-constexpr uint32_t ROCM_ATTENTION_HEADS_BATCH_CHUNKED_LAUNCH_ARGS_VERSION = 1;
+constexpr uint32_t ROCM_ATTENTION_HEADS_BATCH_CHUNKED_LAUNCH_ARGS_VERSION = 2;
 constexpr uint32_t ROCM_ATTENTION_HEADS_BATCH_CHUNKED_LAUNCH_ARGS_BYTES = 136;
 constexpr uint32_t ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE = 512;
 constexpr uint32_t ROCM_ATTENTION_HEADS_CHUNK_SIZE = 64;
@@ -173,6 +192,8 @@ constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_LAUNCH_ARGS_BYTES = 64;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE = 256;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_ROWS_PER_BLOCK = 8;
 constexpr uint32_t ROCM_GGUF_Q4_0_PROJECTION_THREADS_PER_ROW = ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE / ROCM_GGUF_Q4_0_PROJECTION_ROWS_PER_BLOCK;
+constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_ROWS_PER_BLOCK = 16;
+constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW = ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE / ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_ROWS_PER_BLOCK;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERTS_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERTS_LAUNCH_ARGS_BYTES = 240;
 constexpr uint32_t ROCM_GGUF_Q4_0_SELECTED_EXPERTS_MAX_TOP_K = 8;
@@ -808,6 +829,28 @@ struct rocm_rms_norm_launch_args {
 	uint32_t output_scale_bits;
 };
 
+struct rocm_moe_combine_norms_launch_args {
+	uint32_t version;
+	uint32_t total_bytes;
+	uint64_t local_input_pointer;
+	uint64_t local_weight_pointer;
+	uint64_t expert_input_pointer;
+	uint64_t expert_weight_pointer;
+	uint64_t output_pointer;
+	uint32_t count;
+	uint32_t local_input_bytes;
+	uint32_t local_weight_bytes;
+	uint32_t expert_input_bytes;
+	uint32_t expert_weight_bytes;
+	uint32_t output_bytes;
+	uint32_t local_epsilon_bits;
+	uint32_t local_weight_encoding;
+	uint32_t local_flags;
+	uint32_t expert_epsilon_bits;
+	uint32_t expert_weight_encoding;
+	uint32_t expert_flags;
+};
+
 struct rocm_rms_norm_residual_add_launch_args {
 	uint32_t version;
 	uint32_t total_bytes;
@@ -948,6 +991,40 @@ struct rocm_rms_norm_rope_heads_batch_launch_args {
 	uint32_t reserved2;
 };
 
+struct rocm_rms_norm_rope_heads_pair_lane_batch_launch_args {
+	uint32_t version;
+	uint32_t total_bytes;
+	uint64_t query_input_pointer;
+	uint64_t query_weight_pointer;
+	uint64_t query_output_pointer;
+	uint64_t key_input_pointer;
+	uint64_t key_weight_pointer;
+	uint64_t key_output_pointer;
+	uint64_t positions_pointer;
+	uint32_t head_dim;
+	uint32_t query_head_count;
+	uint32_t key_head_count;
+	uint32_t batch;
+	uint32_t query_input_bytes;
+	uint32_t query_weight_bytes;
+	uint32_t query_output_bytes;
+	uint32_t key_input_bytes;
+	uint32_t key_weight_bytes;
+	uint32_t key_output_bytes;
+	uint32_t query_epsilon_bits;
+	uint32_t query_weight_encoding;
+	uint32_t query_flags;
+	uint32_t key_epsilon_bits;
+	uint32_t key_weight_encoding;
+	uint32_t key_flags;
+	uint32_t positions_bytes;
+	uint32_t base_bits;
+	uint32_t frequency_dim;
+	uint32_t rotary_count;
+	uint32_t frequency_scale_bits;
+	uint32_t reserved;
+};
+
 struct rocm_rope_launch_args {
 	uint32_t version;
 	uint32_t total_bytes;
@@ -1083,6 +1160,37 @@ struct rocm_attention_heads_batch_causal_launch_args {
 	uint64_t reserved2;
 };
 
+struct rocm_attention_heads_lane_descriptor {
+	uint64_t descriptor_pointer;
+	uint64_t descriptor_bytes;
+	uint32_t token_count;
+	uint32_t window_size;
+	uint64_t reserved0;
+};
+
+struct rocm_attention_heads_lane_batch_launch_args {
+	uint32_t version;
+	uint32_t total_bytes;
+	uint64_t query_pointer;
+	uint64_t output_pointer;
+	uint64_t weight_pointer;
+	uint64_t lane_pointer;
+	uint32_t dim;
+	uint32_t lane_count;
+	uint32_t head_count;
+	uint32_t key_heads;
+	uint32_t max_token_count;
+	uint32_t query_bytes;
+	uint32_t output_bytes;
+	uint32_t weight_bytes;
+	uint32_t lane_bytes;
+	uint32_t scale_bits;
+	uint64_t shared_mem_bytes;
+	uint64_t reserved0;
+	uint64_t reserved1;
+	uint64_t reserved2;
+};
+
 struct rocm_attention_heads_batch_causal_query_rms_rope_launch_args {
 	uint32_t version;
 	uint32_t total_bytes;
@@ -1142,7 +1250,7 @@ struct rocm_attention_heads_chunked_launch_args {
 	uint32_t output_bytes;
 	uint32_t scale_bits;
 	uint32_t window_size;
-	uint32_t reserved0;
+	uint32_t key_heads;
 	uint64_t reserved1;
 	uint64_t reserved2;
 	uint64_t reserved3;
@@ -1171,7 +1279,8 @@ struct rocm_attention_heads_batch_chunked_launch_args {
 	uint32_t scale_bits;
 	uint32_t window_size;
 	uint32_t chunk_start_token;
-	uint64_t reserved1;
+	uint32_t key_heads;
+	uint32_t reserved0;
 	uint64_t reserved2;
 	uint64_t reserved3;
 };
@@ -1517,12 +1626,14 @@ static_assert(sizeof(rocm_rms_norm_residual_add_gelu_tanh_proj_launch_args) == R
 static_assert(sizeof(rocm_packed_topk_sample_launch_args) == ROCM_PACKED_TOPK_SAMPLE_LAUNCH_ARGS_BYTES, "packed top-k sample launch ABI drift");
 static_assert(sizeof(rocm_ordered_embedding_candidates_launch_args) == ROCM_ORDERED_EMBEDDING_CANDIDATES_LAUNCH_ARGS_BYTES, "ordered embedding candidates launch ABI drift");
 static_assert(sizeof(rocm_rms_norm_launch_args) == ROCM_RMS_NORM_LAUNCH_ARGS_BYTES, "RMSNorm launch ABI drift");
+static_assert(sizeof(rocm_moe_combine_norms_launch_args) == ROCM_MOE_COMBINE_NORMS_LAUNCH_ARGS_BYTES, "MoE combine norms launch ABI drift");
 static_assert(sizeof(rocm_rms_norm_residual_add_launch_args) == ROCM_RMS_NORM_RESIDUAL_ADD_LAUNCH_ARGS_BYTES, "RMSNorm residual-add launch ABI drift");
 static_assert(sizeof(rocm_rms_norm_residual_add_norm_launch_args) == ROCM_RMS_NORM_RESIDUAL_ADD_NORM_LAUNCH_ARGS_BYTES, "RMSNorm residual-add-norm launch ABI drift");
 static_assert(sizeof(rocm_rms_norm_heads_launch_args) == ROCM_RMS_NORM_HEADS_LAUNCH_ARGS_BYTES, "RMSNorm heads launch ABI drift");
 static_assert(sizeof(rocm_rms_norm_rope_heads_launch_args) == ROCM_RMS_NORM_ROPE_HEADS_LAUNCH_ARGS_BYTES, "RMSNorm RoPE heads launch ABI drift");
 static_assert(sizeof(rocm_rms_norm_rope_heads_pair_launch_args) == ROCM_RMS_NORM_ROPE_HEADS_PAIR_LAUNCH_ARGS_BYTES, "RMSNorm RoPE heads pair launch ABI drift");
 static_assert(sizeof(rocm_rms_norm_rope_heads_batch_launch_args) == ROCM_RMS_NORM_ROPE_HEADS_BATCH_LAUNCH_ARGS_BYTES, "RMSNorm RoPE heads batch launch ABI drift");
+static_assert(sizeof(rocm_rms_norm_rope_heads_pair_lane_batch_launch_args) == ROCM_RMS_NORM_ROPE_HEADS_PAIR_LANE_BATCH_LAUNCH_ARGS_BYTES, "RMSNorm RoPE heads pair lane batch launch ABI drift");
 static_assert(sizeof(rocm_rope_launch_args) == ROCM_ROPE_LAUNCH_ARGS_BYTES, "RoPE launch ABI drift");
 static_assert(sizeof(rocm_rope_heads_launch_args) == ROCM_ROPE_HEADS_LAUNCH_ARGS_BYTES, "RoPE heads launch ABI drift");
 static_assert(sizeof(rocm_greedy_launch_args) == ROCM_GREEDY_LAUNCH_ARGS_BYTES, "greedy launch ABI drift");
@@ -1530,6 +1641,8 @@ static_assert(sizeof(rocm_softcap_greedy_launch_args) == ROCM_SOFTCAP_GREEDY_LAU
 static_assert(sizeof(rocm_attention_launch_args) == ROCM_ATTENTION_LAUNCH_ARGS_BYTES, "attention launch ABI drift");
 static_assert(sizeof(rocm_attention_heads_launch_args) == ROCM_ATTENTION_HEADS_LAUNCH_ARGS_BYTES, "attention heads launch ABI drift");
 static_assert(sizeof(rocm_attention_heads_batch_causal_launch_args) == ROCM_ATTENTION_HEADS_BATCH_CAUSAL_LAUNCH_ARGS_BYTES, "attention heads batch causal launch ABI drift");
+static_assert(sizeof(rocm_attention_heads_lane_descriptor) == ROCM_ATTENTION_HEADS_LANE_DESCRIPTOR_BYTES, "attention heads lane descriptor ABI drift");
+static_assert(sizeof(rocm_attention_heads_lane_batch_launch_args) == ROCM_ATTENTION_HEADS_LANE_BATCH_LAUNCH_ARGS_BYTES, "attention heads lane batch launch ABI drift");
 static_assert(sizeof(rocm_attention_heads_batch_causal_query_rms_rope_launch_args) == ROCM_ATTENTION_HEADS_BATCH_CAUSAL_QUERY_RMS_ROPE_LAUNCH_ARGS_BYTES, "attention heads batch causal query RMS RoPE launch ABI drift");
 static_assert(sizeof(rocm_attention_heads_chunked_launch_args) == ROCM_ATTENTION_HEADS_CHUNKED_LAUNCH_ARGS_BYTES, "attention heads chunked launch ABI drift");
 static_assert(sizeof(rocm_attention_heads_batch_chunked_launch_args) == ROCM_ATTENTION_HEADS_BATCH_CHUNKED_LAUNCH_ARGS_BYTES, "attention heads batch chunked launch ABI drift");
@@ -1650,6 +1763,12 @@ __device__ float rocm_score_from_ordered_key(uint32_t key)
 		return rocm_float_from_bits(key ^ 0x80000000u);
 	}
 	return rocm_float_from_bits(~key);
+}
+
+__device__ double rocm_packed_topk_sample_score(unsigned long long packed, double softcap)
+{
+	const double score = static_cast<double>(rocm_score_from_ordered_key(static_cast<uint32_t>(packed >> 32)));
+	return softcap > 0.0 ? tanh(score / softcap) * softcap : score;
 }
 
 __device__ bool rocm_supported_kv_mode(uint32_t mode_code)
@@ -2339,6 +2458,36 @@ __device__ bool rocm_valid_rms_norm_args(const rocm_rms_norm_launch_args &args)
 	return false;
 }
 
+__device__ bool rocm_valid_moe_combine_norms_args(const rocm_moe_combine_norms_launch_args &args)
+{
+	const float local_epsilon = rocm_float_from_bits(args.local_epsilon_bits);
+	const float expert_epsilon = rocm_float_from_bits(args.expert_epsilon_bits);
+	if (args.version != ROCM_MOE_COMBINE_NORMS_LAUNCH_ARGS_VERSION ||
+		args.total_bytes != ROCM_MOE_COMBINE_NORMS_LAUNCH_ARGS_BYTES ||
+		args.local_input_pointer == 0 ||
+		args.expert_input_pointer == 0 ||
+		args.output_pointer == 0 ||
+		args.count == 0 ||
+		args.local_input_bytes != args.count * sizeof(float) ||
+		args.expert_input_bytes != args.count * sizeof(float) ||
+		args.output_bytes != args.count * sizeof(float) ||
+		!(local_epsilon >= 0.0f) ||
+		!(expert_epsilon >= 0.0f) ||
+		(args.local_flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0 ||
+		(args.expert_flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
+		return false;
+	}
+	const bool local_weight_ok =
+		(args.local_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_NONE && args.local_weight_pointer == 0 && args.local_weight_bytes == 0 && args.local_flags == 0) ||
+		(args.local_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_F32 && args.local_weight_pointer != 0 && args.local_weight_bytes == args.count * sizeof(float)) ||
+		(args.local_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16 && args.local_weight_pointer != 0 && args.local_weight_bytes == args.count * sizeof(uint16_t));
+	const bool expert_weight_ok =
+		(args.expert_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_NONE && args.expert_weight_pointer == 0 && args.expert_weight_bytes == 0 && args.expert_flags == 0) ||
+		(args.expert_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_F32 && args.expert_weight_pointer != 0 && args.expert_weight_bytes == args.count * sizeof(float)) ||
+		(args.expert_weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16 && args.expert_weight_pointer != 0 && args.expert_weight_bytes == args.count * sizeof(uint16_t));
+	return local_weight_ok && expert_weight_ok;
+}
+
 __device__ bool rocm_valid_rms_norm_weight_config(uint64_t weight_pointer, uint32_t weight_bytes, uint32_t count, uint32_t weight_encoding, uint32_t flags)
 {
 	if ((flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_MASK) != 0) {
@@ -2539,6 +2688,51 @@ __device__ bool rocm_valid_rms_norm_rope_heads_batch_args(const rocm_rms_norm_ro
 		(rotary_count % 2u) == 0u &&
 		rotary_count <= args.head_dim &&
 		rocm_valid_rms_norm_weight_config(args.weight_pointer, args.weight_bytes, args.head_dim, args.weight_encoding, args.flags);
+}
+
+__device__ bool rocm_valid_rms_norm_rope_heads_pair_lane_batch_args(const rocm_rms_norm_rope_heads_pair_lane_batch_launch_args &args)
+{
+	const float query_epsilon = rocm_float_from_bits(args.query_epsilon_bits);
+	const float key_epsilon = rocm_float_from_bits(args.key_epsilon_bits);
+	const float base = rocm_float_from_bits(args.base_bits);
+	const float frequency_scale = rocm_float_from_bits(args.frequency_scale_bits);
+	const uint32_t rotary_count = args.rotary_count == 0u ? args.head_dim : args.rotary_count;
+	const uint64_t query_count = static_cast<uint64_t>(args.head_dim) * static_cast<uint64_t>(args.query_head_count) * static_cast<uint64_t>(args.batch);
+	const uint64_t key_count = static_cast<uint64_t>(args.head_dim) * static_cast<uint64_t>(args.key_head_count) * static_cast<uint64_t>(args.batch);
+	return args.version == ROCM_RMS_NORM_ROPE_HEADS_PAIR_LANE_BATCH_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_RMS_NORM_ROPE_HEADS_PAIR_LANE_BATCH_LAUNCH_ARGS_BYTES &&
+		args.query_input_pointer != 0 &&
+		args.query_output_pointer != 0 &&
+		args.key_input_pointer != 0 &&
+		args.key_output_pointer != 0 &&
+		args.positions_pointer != 0 &&
+		args.head_dim > 0 &&
+		(args.head_dim % 2u) == 0u &&
+		args.query_head_count > 0 &&
+		args.key_head_count > 0 &&
+		args.batch > 0 &&
+		query_count <= 0xffffffffu &&
+		key_count <= 0xffffffffu &&
+		args.query_input_bytes == query_count * sizeof(float) &&
+		args.query_output_bytes == query_count * sizeof(float) &&
+		args.key_input_bytes == key_count * sizeof(float) &&
+		args.key_output_bytes == key_count * sizeof(float) &&
+		args.positions_bytes == args.batch * sizeof(uint32_t) &&
+		(query_epsilon >= 0.0f) &&
+		isfinite(query_epsilon) &&
+		(key_epsilon >= 0.0f) &&
+		isfinite(key_epsilon) &&
+		base > 0.0f &&
+		isfinite(base) &&
+		frequency_scale > 0.0f &&
+		isfinite(frequency_scale) &&
+		(args.query_flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_MASK) == 0u &&
+		(args.key_flags & ~ROCM_RMS_NORM_LAUNCH_FLAG_MASK) == 0u &&
+		(args.frequency_dim == 0u || args.frequency_dim >= args.head_dim) &&
+		(rotary_count % 2u) == 0u &&
+		rotary_count <= args.head_dim &&
+		rocm_valid_rms_norm_weight_config(args.query_weight_pointer, args.query_weight_bytes, args.head_dim, args.query_weight_encoding, args.query_flags) &&
+		rocm_valid_rms_norm_weight_config(args.key_weight_pointer, args.key_weight_bytes, args.head_dim, args.key_weight_encoding, args.key_flags);
 }
 
 __device__ bool rocm_valid_rope_args(const rocm_rope_launch_args &args)
@@ -3854,6 +4048,35 @@ __device__ bool rocm_valid_attention_heads_batch_causal_args(const rocm_attentio
 	return rocm_valid_device_kv_attention_descriptor_header(single);
 }
 
+__device__ bool rocm_valid_attention_heads_lane_batch_args(const rocm_attention_heads_lane_batch_launch_args &args)
+{
+	const float scale = rocm_float_from_bits(args.scale_bits);
+	const uint64_t query_elements = static_cast<uint64_t>(args.lane_count) * args.head_count * args.dim;
+	const bool global_weights = args.weight_pointer != 0 &&
+		static_cast<uint64_t>(args.weight_bytes) == static_cast<uint64_t>(args.lane_count) * args.head_count * args.max_token_count * sizeof(float);
+	const bool shared_weights = args.weight_pointer == 0 &&
+		args.weight_bytes == 0 &&
+		args.max_token_count <= ROCM_ATTENTION_HEADS_SHARED_MAX_TOKENS;
+	return args.version == ROCM_ATTENTION_HEADS_LANE_BATCH_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_ATTENTION_HEADS_LANE_BATCH_LAUNCH_ARGS_BYTES &&
+		args.query_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.lane_pointer != 0 &&
+		args.dim > 0 &&
+		args.lane_count > 0 &&
+		args.head_count > 0 &&
+		args.key_heads > 0 &&
+		args.key_heads <= args.head_count &&
+		args.head_count % args.key_heads == 0 &&
+		args.max_token_count > 0 &&
+		static_cast<uint64_t>(args.query_bytes) == query_elements * sizeof(float) &&
+		static_cast<uint64_t>(args.output_bytes) == query_elements * sizeof(float) &&
+		static_cast<uint64_t>(args.lane_bytes) == static_cast<uint64_t>(args.lane_count) * ROCM_ATTENTION_HEADS_LANE_DESCRIPTOR_BYTES &&
+		(global_weights || shared_weights) &&
+		(scale >= 0.0f) &&
+		isfinite(scale);
+}
+
 __device__ bool rocm_valid_attention_heads_batch_causal_query_rms_rope_args(const rocm_attention_heads_batch_causal_query_rms_rope_launch_args &args)
 {
 	const float scale = rocm_float_from_bits(args.scale_bits);
@@ -3960,13 +4183,18 @@ __device__ bool rocm_valid_attention_heads_chunked_args(const rocm_attention_hea
 		args.dim > ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE ||
 		args.token_count == 0 ||
 		args.head_count == 0 ||
+		args.key_heads == 0 ||
+		args.key_heads > args.head_count ||
+		args.head_count % args.key_heads != 0 ||
+		args.dim > (~0u) / args.key_heads ||
+		(args.key_heads > 1u && (args.dim & 1u) != 0u) ||
 		args.chunk_size == 0 ||
 		args.chunk_count == 0 ||
 		args.chunk_count != (args.token_count + args.chunk_size - 1u) / args.chunk_size ||
-		args.query_bytes != args.head_count * args.dim * sizeof(float) ||
+		static_cast<uint64_t>(args.query_bytes) != static_cast<uint64_t>(args.head_count) * args.dim * sizeof(float) ||
 		static_cast<uint64_t>(args.partial_bytes) != static_cast<uint64_t>(args.head_count) * args.chunk_count * args.dim * sizeof(float) ||
 		static_cast<uint64_t>(args.stats_bytes) != static_cast<uint64_t>(args.head_count) * args.chunk_count * 2u * sizeof(float) ||
-		args.output_bytes != args.head_count * args.dim * sizeof(float) ||
+		static_cast<uint64_t>(args.output_bytes) != static_cast<uint64_t>(args.head_count) * args.dim * sizeof(float) ||
 		!(scale >= 0.0f) ||
 		!isfinite(scale)) {
 		return false;
@@ -4004,6 +4232,11 @@ __device__ bool rocm_valid_attention_heads_batch_chunked_args(const rocm_attenti
 		args.dim > ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE ||
 		args.token_count == 0 ||
 		args.head_count == 0 ||
+		args.key_heads == 0 ||
+		args.key_heads > args.head_count ||
+		args.head_count % args.key_heads != 0 ||
+		args.dim > (~0u) / args.key_heads ||
+		(args.key_heads > 1u && (args.dim & 1u) != 0u) ||
 		args.query_count == 0 ||
 		!causal_window_ok ||
 		args.chunk_size == 0 ||
@@ -5318,6 +5551,83 @@ extern "C" __global__ void rocm_mlx_q4_projection(const unsigned char *packet)
 	}
 }
 
+__device__ float rocm_mlx_q4_projection_q4_g32_rows3840_cols15360_row_sum(
+	const float *input,
+	const uint32_t *weights,
+	const uint16_t *scales,
+	const uint16_t *biases,
+	uint32_t row,
+	uint32_t col_lane)
+{
+	const uint64_t row_packed_base = static_cast<uint64_t>(row) * ROCM_MLX_Q4_PROJECTION_12B_DOWN_PACKED_PER_ROW;
+	const uint32_t row_group_base = row * ROCM_MLX_Q4_PROJECTION_12B_DOWN_GROUPS_PER_ROW;
+	float sum = 0.0f;
+	for (uint32_t group_col = col_lane; group_col < ROCM_MLX_Q4_PROJECTION_12B_DOWN_GROUPS_PER_ROW; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+		const uint32_t group = row_group_base + group_col;
+		const float scale = rocm_bfloat16_to_float(scales[group]);
+		const float bias = rocm_bfloat16_to_float(biases[group]);
+		const uint32_t first_packed = group_col * 4u;
+		float q_dot_sum = 0.0f;
+		float input_sum = 0.0f;
+#pragma unroll
+		for (uint32_t group_packed = 0; group_packed < 4u; ++group_packed) {
+			const uint32_t packed = first_packed + group_packed;
+			const uint32_t word = weights[row_packed_base + packed];
+			const uint32_t col = packed << 3u;
+			const float in0 = input[col];
+			const float in1 = input[col + 1u];
+			const float in2 = input[col + 2u];
+			const float in3 = input[col + 3u];
+			const float in4 = input[col + 4u];
+			const float in5 = input[col + 5u];
+			const float in6 = input[col + 6u];
+			const float in7 = input[col + 7u];
+			input_sum += in0 + in1 + in2 + in3 + in4 + in5 + in6 + in7;
+			q_dot_sum +=
+				static_cast<float>(word & 0x0fu) * in0 +
+				static_cast<float>((word >> 4) & 0x0fu) * in1 +
+				static_cast<float>((word >> 8) & 0x0fu) * in2 +
+				static_cast<float>((word >> 12) & 0x0fu) * in3 +
+				static_cast<float>((word >> 16) & 0x0fu) * in4 +
+				static_cast<float>((word >> 20) & 0x0fu) * in5 +
+				static_cast<float>((word >> 24) & 0x0fu) * in6 +
+				static_cast<float>((word >> 28) & 0x0fu) * in7;
+		}
+		sum += scale * q_dot_sum + bias * input_sum;
+	}
+	return sum;
+}
+
+extern "C" __global__ void rocm_mlx_q4_projection_q4_g32_rows3840_cols15360(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_mlx_q4_projection_launch_args &args = *reinterpret_cast<const rocm_mlx_q4_projection_launch_args *>(packet);
+	if (!rocm_valid_mlx_q4_projection_args(args) ||
+		args.rows != ROCM_MLX_Q4_PROJECTION_12B_DOWN_ROWS ||
+		args.cols != ROCM_MLX_Q4_PROJECTION_12B_DOWN_COLS ||
+		args.group_size != ROCM_MLX_Q4_PROJECTION_12B_DOWN_GROUP_SIZE ||
+		args.bits != 4u ||
+		blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+
+	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK + row_lane;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	const uint32_t *weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.weight_pointer));
+	const uint16_t *scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.scale_pointer));
+	const uint16_t *biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.bias_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	float sum = rocm_mlx_q4_projection_q4_g32_rows3840_cols15360_row_sum(input, weights, scales, biases, row, col_lane);
+	sum = rocm_mlx_q4_row_reduce(sum);
+	if (col_lane == 0u) {
+		output[row] = sum;
+	}
+}
+
 __device__ float rocm_gguf_q4_0_projection_row_sum(
 	const float *input,
 	const unsigned char *weights,
@@ -5338,6 +5648,39 @@ __device__ float rocm_gguf_q4_0_projection_row_sum(
 		sum += input[col] * rocm_half_to_float(scale_bits) * (static_cast<float>(quant) - 8.0f);
 	}
 	return sum;
+}
+
+__device__ void rocm_gguf_q4_0_projection_row_pair16_sums(
+	const float *input,
+	const unsigned char *weights,
+	uint32_t row,
+	uint32_t cols,
+	uint32_t col_lane,
+	float &low_sum,
+	float &high_sum)
+{
+	const uint32_t blocks_per_row = cols >> 5u;
+	const uint64_t row_base = static_cast<uint64_t>(row) * blocks_per_row * 18u;
+	low_sum = 0.0f;
+	high_sum = 0.0f;
+	for (uint32_t block_index = 0; block_index < blocks_per_row; ++block_index) {
+		const unsigned char *block = weights + row_base + static_cast<uint64_t>(block_index) * 18u;
+		const uint16_t scale_bits = static_cast<uint16_t>(block[0]) | (static_cast<uint16_t>(block[1]) << 8u);
+		const unsigned char packed = block[2u + col_lane];
+		const float scale = rocm_half_to_float(scale_bits);
+		const uint32_t col_base = block_index << 5u;
+		low_sum += input[col_base + col_lane] * scale * (static_cast<float>(packed & 0x0fu) - 8.0f);
+		high_sum += input[col_base + 16u + col_lane] * scale * (static_cast<float>(packed >> 4u) - 8.0f);
+	}
+}
+
+__device__ float rocm_gguf_q4_0_projection_row_pair16_reduce(float low_sum, float high_sum)
+{
+	float value = low_sum + high_sum;
+	for (uint32_t stride = ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW / 2u; stride > 0u; stride >>= 1u) {
+		value += rocm_shfl_down(value, stride, ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW);
+	}
+	return value;
 }
 
 __device__ void rocm_gguf_q4_k_scale_min(const unsigned char *scales, uint32_t group, uint32_t &scale, uint32_t &minimum)
@@ -5537,6 +5880,71 @@ extern "C" __global__ void rocm_gguf_q4_0_selected_expert_down(const unsigned ch
 			sum = rocm_gguf_q4_0_projection_row_sum(activation + expert * args.expert_ff, weights, row, args.expert_ff, col_lane);
 		}
 		sum = rocm_mlx_q4_row_reduce(sum);
+		if (col_lane == 0u) {
+			combined += args.route_weights[expert] * sum;
+		}
+	}
+	if (col_lane == 0u && row < args.hidden_size) {
+		output[row] = combined;
+	}
+}
+
+extern "C" __global__ void rocm_gguf_q4_0_selected_expert_gate_up_pair16(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_gguf_q4_0_selected_experts_launch_args &args = *reinterpret_cast<const rocm_gguf_q4_0_selected_experts_launch_args *>(packet);
+	if (!rocm_valid_gguf_q4_0_selected_experts_args(args) || args.gate_up_format != ROCM_GGUF_EXPERT_FORMAT_Q4_0 || blockDim.x != ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+	const uint32_t row_lane = threadIdx.x / ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW;
+	const uint32_t selected_row = blockIdx.x * ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_ROWS_PER_BLOCK + row_lane;
+	const uint32_t selected_rows = args.top_k * args.expert_ff;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	float *activation = reinterpret_cast<float *>(static_cast<uintptr_t>(args.activation_pointer));
+	float gate_low = 0.0f;
+	float gate_high = 0.0f;
+	float up_low = 0.0f;
+	float up_high = 0.0f;
+	if (selected_row < selected_rows) {
+		const uint32_t expert = selected_row / args.expert_ff;
+		const uint32_t row = selected_row - expert * args.expert_ff;
+		const unsigned char *weights = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(args.gate_up_pointers[expert]));
+		rocm_gguf_q4_0_projection_row_pair16_sums(input, weights, row, args.hidden_size, col_lane, gate_low, gate_high);
+		rocm_gguf_q4_0_projection_row_pair16_sums(input, weights, args.expert_ff + row, args.hidden_size, col_lane, up_low, up_high);
+	}
+	const float gate_sum = rocm_gguf_q4_0_projection_row_pair16_reduce(gate_low, gate_high);
+	const float up_sum = rocm_gguf_q4_0_projection_row_pair16_reduce(up_low, up_high);
+	if (col_lane == 0u && selected_row < selected_rows) {
+		activation[selected_row] = rocm_gelu_tanh_value(gate_sum) * up_sum;
+	}
+}
+
+extern "C" __global__ void rocm_gguf_q4_0_selected_expert_down_pair16(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_gguf_q4_0_selected_experts_launch_args &args = *reinterpret_cast<const rocm_gguf_q4_0_selected_experts_launch_args *>(packet);
+	if (!rocm_valid_gguf_q4_0_selected_experts_args(args) || args.down_format != ROCM_GGUF_EXPERT_FORMAT_Q4_0 || blockDim.x != ROCM_GGUF_Q4_0_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+	const uint32_t row_lane = threadIdx.x / ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_GGUF_Q4_0_SELECTED_EXPERT_PAIR16_ROWS_PER_BLOCK + row_lane;
+	const float *activation = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.activation_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	float combined = 0.0f;
+	for (uint32_t expert = 0; expert < args.top_k; ++expert) {
+		float low_sum = 0.0f;
+		float high_sum = 0.0f;
+		if (row < args.hidden_size) {
+			const unsigned char *weights = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(args.down_pointers[expert]));
+			rocm_gguf_q4_0_projection_row_pair16_sums(activation + expert * args.expert_ff, weights, row, args.expert_ff, col_lane, low_sum, high_sum);
+		}
+		const float sum = rocm_gguf_q4_0_projection_row_pair16_reduce(low_sum, high_sum);
 		if (col_lane == 0u) {
 			combined += args.route_weights[expert] * sum;
 		}
@@ -6187,7 +6595,7 @@ extern "C" __global__ void rocm_mlx_q4_projection_greedy(const unsigned char *pa
 	}
 	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_PROJECTION_GREEDY_THREADS_PER_ROW;
 	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_PROJECTION_GREEDY_THREADS_PER_ROW;
-	const uint32_t row = blockIdx.x * ROCM_MLX_Q4_PROJECTION_GREEDY_ROWS_PER_BLOCK + row_lane;
+	const uint32_t row_stride = gridDim.x * ROCM_MLX_Q4_PROJECTION_GREEDY_ROWS_PER_BLOCK;
 	__shared__ unsigned long long block_best[ROCM_MLX_Q4_PROJECTION_GREEDY_ROWS_PER_BLOCK];
 
 	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
@@ -6195,17 +6603,26 @@ extern "C" __global__ void rocm_mlx_q4_projection_greedy(const unsigned char *pa
 	const uint16_t *scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.scale_pointer));
 	const uint16_t *biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.bias_pointer));
 	const int32_t *suppress_tokens = reinterpret_cast<const int32_t *>(static_cast<uintptr_t>(args.suppress_pointer));
-	float sum = 0.0f;
-	if (row < args.rows) {
-		sum = rocm_mlx_q4_projection_row_sum(input, weights, scales, biases, row, args.cols, args.group_size, args.bits, col_lane, ROCM_MLX_Q4_PROJECTION_GREEDY_THREADS_PER_ROW);
-	}
-	sum = rocm_mlx_q4_greedy_row_reduce(sum);
-	if (col_lane == 0) {
-		unsigned long long packed = 0;
-		if (row < args.rows && isfinite(sum) && !rocm_mlx_q4_token_suppressed(row, suppress_tokens, args.suppress_count)) {
-			packed = static_cast<unsigned long long>(rocm_pack_score_index(sum, row));
+	unsigned long long persistent_best = 0;
+	for (uint32_t row_base = blockIdx.x * ROCM_MLX_Q4_PROJECTION_GREEDY_ROWS_PER_BLOCK; row_base < args.rows; row_base += row_stride) {
+		const uint32_t row = row_base + row_lane;
+		float sum = 0.0f;
+		if (row < args.rows) {
+			sum = rocm_mlx_q4_projection_row_sum(input, weights, scales, biases, row, args.cols, args.group_size, args.bits, col_lane, ROCM_MLX_Q4_PROJECTION_GREEDY_THREADS_PER_ROW);
 		}
-		block_best[row_lane] = packed;
+		sum = rocm_mlx_q4_greedy_row_reduce(sum);
+		if (col_lane == 0) {
+			unsigned long long packed = 0;
+			if (row < args.rows && isfinite(sum) && !rocm_mlx_q4_token_suppressed(row, suppress_tokens, args.suppress_count)) {
+				packed = static_cast<unsigned long long>(rocm_pack_score_index(sum, row));
+			}
+			if (packed > persistent_best) {
+				persistent_best = packed;
+			}
+		}
+	}
+	if (col_lane == 0) {
+		block_best[row_lane] = persistent_best;
 	}
 	__syncthreads();
 	if (threadIdx.x == 0) {
@@ -6688,18 +7105,14 @@ extern "C" __global__ void rocm_packed_topk_sample(const unsigned char *packet)
 		return;
 	}
 	const double softcap = static_cast<double>(rocm_float_from_bits(args.softcap_bits));
-	const auto sample_score = [softcap] __device__ (unsigned long long packed) {
-		double score = static_cast<double>(rocm_score_from_ordered_key(static_cast<uint32_t>(packed >> 32)));
-		return softcap > 0.0 ? tanh(score / softcap) * softcap : score;
-	};
-	const double max_value = sample_score(input[first_valid]) / temperature;
+	const double max_value = rocm_packed_topk_sample_score(input[first_valid], softcap) / temperature;
 	double total = 0.0;
 	for (uint32_t index = first_valid; index < args.top_k; ++index) {
 		const unsigned long long packed = input[index];
 		if (packed == 0ull) {
 			continue;
 		}
-		const double score = sample_score(packed);
+		const double score = rocm_packed_topk_sample_score(packed, softcap);
 		const double weight = exp(score / temperature - max_value);
 		if (!isfinite(weight)) {
 			return;
@@ -6717,7 +7130,7 @@ extern "C" __global__ void rocm_packed_topk_sample(const unsigned char *packet)
 			if (packed == 0ull) {
 				continue;
 			}
-			const double score = sample_score(packed);
+			const double score = rocm_packed_topk_sample_score(packed, softcap);
 			cumulative += exp(score / temperature - max_value);
 			if (cumulative / total >= top_p) {
 				limit = index + 1u;
@@ -6733,7 +7146,7 @@ extern "C" __global__ void rocm_packed_topk_sample(const unsigned char *packet)
 			continue;
 		}
 		fallback = packed;
-		const double score = sample_score(packed);
+		const double score = rocm_packed_topk_sample_score(packed, softcap);
 		selected_total += exp(score / temperature - max_value);
 	}
 	if (!(selected_total > 0.0) || !isfinite(selected_total)) {
@@ -6753,7 +7166,7 @@ extern "C" __global__ void rocm_packed_topk_sample(const unsigned char *packet)
 		if (packed == 0ull) {
 			continue;
 		}
-		const double score = sample_score(packed);
+		const double score = rocm_packed_topk_sample_score(packed, softcap);
 		cumulative += exp(score / temperature - max_value);
 		if (target <= cumulative) {
 			output[0] = packed;
@@ -6995,6 +7408,174 @@ extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_cols1536_row16(
 	gate_sum = rocm_mlx_q4_gelu_tanh_q4_g32_cols1536_row16_reduce(gate_sum);
 	up_sum = rocm_mlx_q4_gelu_tanh_q4_g32_cols1536_row16_reduce(up_sum);
 	if (col_lane == 0 && row < args.rows) {
+		output[row] = rocm_gelu_tanh_value(gate_sum) * up_sum;
+	}
+}
+
+extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_mlx_q4_gelu_tanh_mul_launch_args &args = *reinterpret_cast<const rocm_mlx_q4_gelu_tanh_mul_launch_args *>(packet);
+	if (!rocm_valid_mlx_q4_gelu_tanh_mul_args(args) ||
+		args.rows != ROCM_MLX_Q4_GELU_TANH_12B_ROWS ||
+		args.cols != ROCM_MLX_Q4_GELU_TANH_12B_COLS ||
+		args.group_size != ROCM_MLX_Q4_GELU_TANH_12B_GROUP_SIZE ||
+		args.bits != 4u ||
+		blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+
+	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_GELU_TANH_Q4_G32_COLS1536_ROW16_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_GELU_TANH_Q4_G32_COLS1536_ROW16_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_MLX_Q4_GELU_TANH_Q4_G32_COLS1536_ROW16_ROWS_PER_BLOCK + row_lane;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	const uint32_t *gate_weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.gate_weight_pointer));
+	const uint16_t *gate_scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.gate_scale_pointer));
+	const uint16_t *gate_biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.gate_bias_pointer));
+	const uint32_t *up_weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.up_weight_pointer));
+	const uint16_t *up_scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.up_scale_pointer));
+	const uint16_t *up_biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.up_bias_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const uint64_t row_packed_base = static_cast<uint64_t>(row) * ROCM_MLX_Q4_GELU_TANH_12B_PACKED_PER_ROW;
+	const uint32_t row_group_base = row * ROCM_MLX_Q4_GELU_TANH_12B_GROUPS_PER_ROW;
+	float gate_sum = 0.0f;
+	float up_sum = 0.0f;
+	for (uint32_t group_col = col_lane; group_col < ROCM_MLX_Q4_GELU_TANH_12B_GROUPS_PER_ROW; group_col += ROCM_MLX_Q4_GELU_TANH_Q4_G32_COLS1536_ROW16_THREADS_PER_ROW) {
+		const uint32_t group = row_group_base + group_col;
+		const float gate_scale = rocm_bfloat16_to_float(gate_scales[group]);
+		const float gate_bias = rocm_bfloat16_to_float(gate_biases[group]);
+		const float up_scale = rocm_bfloat16_to_float(up_scales[group]);
+		const float up_bias = rocm_bfloat16_to_float(up_biases[group]);
+		const uint32_t first_packed = group_col << 2u;
+		float gate_q_dot = 0.0f;
+		float up_q_dot = 0.0f;
+		float input_sum = 0.0f;
+#pragma unroll
+		for (uint32_t group_packed = 0; group_packed < 4u; ++group_packed) {
+			const uint32_t packed = first_packed + group_packed;
+			const uint32_t gate_word = gate_weights[row_packed_base + packed];
+			const uint32_t up_word = up_weights[row_packed_base + packed];
+			const uint32_t col = packed << 3u;
+			const float in0 = input[col];
+			const float in1 = input[col + 1u];
+			const float in2 = input[col + 2u];
+			const float in3 = input[col + 3u];
+			const float in4 = input[col + 4u];
+			const float in5 = input[col + 5u];
+			const float in6 = input[col + 6u];
+			const float in7 = input[col + 7u];
+			input_sum += in0 + in1 + in2 + in3 + in4 + in5 + in6 + in7;
+			gate_q_dot +=
+				static_cast<float>(gate_word & 0x0fu) * in0 +
+				static_cast<float>((gate_word >> 4) & 0x0fu) * in1 +
+				static_cast<float>((gate_word >> 8) & 0x0fu) * in2 +
+				static_cast<float>((gate_word >> 12) & 0x0fu) * in3 +
+				static_cast<float>((gate_word >> 16) & 0x0fu) * in4 +
+				static_cast<float>((gate_word >> 20) & 0x0fu) * in5 +
+				static_cast<float>((gate_word >> 24) & 0x0fu) * in6 +
+				static_cast<float>((gate_word >> 28) & 0x0fu) * in7;
+			up_q_dot +=
+				static_cast<float>(up_word & 0x0fu) * in0 +
+				static_cast<float>((up_word >> 4) & 0x0fu) * in1 +
+				static_cast<float>((up_word >> 8) & 0x0fu) * in2 +
+				static_cast<float>((up_word >> 12) & 0x0fu) * in3 +
+				static_cast<float>((up_word >> 16) & 0x0fu) * in4 +
+				static_cast<float>((up_word >> 20) & 0x0fu) * in5 +
+				static_cast<float>((up_word >> 24) & 0x0fu) * in6 +
+				static_cast<float>((up_word >> 28) & 0x0fu) * in7;
+		}
+		gate_sum += gate_scale * gate_q_dot + gate_bias * input_sum;
+		up_sum += up_scale * up_q_dot + up_bias * input_sum;
+	}
+	gate_sum = rocm_mlx_q4_gelu_tanh_q4_g32_cols1536_row16_reduce(gate_sum);
+	up_sum = rocm_mlx_q4_gelu_tanh_q4_g32_cols1536_row16_reduce(up_sum);
+	if (col_lane == 0u) {
+		output[row] = rocm_gelu_tanh_value(gate_sum) * up_sum;
+	}
+}
+
+extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840_row8(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_mlx_q4_gelu_tanh_mul_launch_args &args = *reinterpret_cast<const rocm_mlx_q4_gelu_tanh_mul_launch_args *>(packet);
+	if (!rocm_valid_mlx_q4_gelu_tanh_mul_args(args) ||
+		args.rows != ROCM_MLX_Q4_GELU_TANH_12B_ROWS ||
+		args.cols != ROCM_MLX_Q4_GELU_TANH_12B_COLS ||
+		args.group_size != ROCM_MLX_Q4_GELU_TANH_12B_GROUP_SIZE ||
+		args.bits != 4u ||
+		blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+
+	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_GELU_TANH_12B_ROW8_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_GELU_TANH_12B_ROW8_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_MLX_Q4_GELU_TANH_12B_ROW8_ROWS_PER_BLOCK + row_lane;
+	const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
+	const uint32_t *gate_weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.gate_weight_pointer));
+	const uint16_t *gate_scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.gate_scale_pointer));
+	const uint16_t *gate_biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.gate_bias_pointer));
+	const uint32_t *up_weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.up_weight_pointer));
+	const uint16_t *up_scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.up_scale_pointer));
+	const uint16_t *up_biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.up_bias_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const uint64_t row_packed_base = static_cast<uint64_t>(row) * ROCM_MLX_Q4_GELU_TANH_12B_PACKED_PER_ROW;
+	const uint32_t row_group_base = row * ROCM_MLX_Q4_GELU_TANH_12B_GROUPS_PER_ROW;
+	float gate_sum = 0.0f;
+	float up_sum = 0.0f;
+	for (uint32_t group_col = col_lane; group_col < ROCM_MLX_Q4_GELU_TANH_12B_GROUPS_PER_ROW; group_col += ROCM_MLX_Q4_GELU_TANH_12B_ROW8_THREADS_PER_ROW) {
+		const uint32_t group = row_group_base + group_col;
+		const float gate_scale = rocm_bfloat16_to_float(gate_scales[group]);
+		const float gate_bias = rocm_bfloat16_to_float(gate_biases[group]);
+		const float up_scale = rocm_bfloat16_to_float(up_scales[group]);
+		const float up_bias = rocm_bfloat16_to_float(up_biases[group]);
+		const uint32_t first_packed = group_col << 2u;
+		float gate_q_dot = 0.0f;
+		float up_q_dot = 0.0f;
+		float input_sum = 0.0f;
+#pragma unroll
+		for (uint32_t group_packed = 0; group_packed < 4u; ++group_packed) {
+			const uint32_t packed = first_packed + group_packed;
+			const uint32_t gate_word = gate_weights[row_packed_base + packed];
+			const uint32_t up_word = up_weights[row_packed_base + packed];
+			const uint32_t col = packed << 3u;
+			const float in0 = input[col];
+			const float in1 = input[col + 1u];
+			const float in2 = input[col + 2u];
+			const float in3 = input[col + 3u];
+			const float in4 = input[col + 4u];
+			const float in5 = input[col + 5u];
+			const float in6 = input[col + 6u];
+			const float in7 = input[col + 7u];
+			input_sum += in0 + in1 + in2 + in3 + in4 + in5 + in6 + in7;
+			gate_q_dot +=
+				static_cast<float>(gate_word & 0x0fu) * in0 +
+				static_cast<float>((gate_word >> 4) & 0x0fu) * in1 +
+				static_cast<float>((gate_word >> 8) & 0x0fu) * in2 +
+				static_cast<float>((gate_word >> 12) & 0x0fu) * in3 +
+				static_cast<float>((gate_word >> 16) & 0x0fu) * in4 +
+				static_cast<float>((gate_word >> 20) & 0x0fu) * in5 +
+				static_cast<float>((gate_word >> 24) & 0x0fu) * in6 +
+				static_cast<float>((gate_word >> 28) & 0x0fu) * in7;
+			up_q_dot +=
+				static_cast<float>(up_word & 0x0fu) * in0 +
+				static_cast<float>((up_word >> 4) & 0x0fu) * in1 +
+				static_cast<float>((up_word >> 8) & 0x0fu) * in2 +
+				static_cast<float>((up_word >> 12) & 0x0fu) * in3 +
+				static_cast<float>((up_word >> 16) & 0x0fu) * in4 +
+				static_cast<float>((up_word >> 20) & 0x0fu) * in5 +
+				static_cast<float>((up_word >> 24) & 0x0fu) * in6 +
+				static_cast<float>((up_word >> 28) & 0x0fu) * in7;
+		}
+		gate_sum += gate_scale * gate_q_dot + gate_bias * input_sum;
+		up_sum += up_scale * up_q_dot + up_bias * input_sum;
+	}
+	gate_sum = rocm_mlx_q4_row_reduce(gate_sum);
+	up_sum = rocm_mlx_q4_row_reduce(up_sum);
+	if (col_lane == 0u) {
 		output[row] = rocm_gelu_tanh_value(gate_sum) * up_sum;
 	}
 }
@@ -7964,6 +8545,41 @@ __device__ float rocm_rms_norm_weight_value(uint64_t pointer, uint32_t encoding,
 	return weight_value;
 }
 
+extern "C" __global__ void rocm_moe_combine_norms(const unsigned char *packet)
+{
+	if (blockIdx.x != 0 || packet == nullptr) {
+		return;
+	}
+	const rocm_moe_combine_norms_launch_args &args = *reinterpret_cast<const rocm_moe_combine_norms_launch_args *>(packet);
+	if (!rocm_valid_moe_combine_norms_args(args)) {
+		return;
+	}
+	const float *local_input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.local_input_pointer));
+	const float *expert_input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.expert_input_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	__shared__ float partial[32];
+	float local_sum_squares = 0.0f;
+	float expert_sum_squares = 0.0f;
+	for (uint32_t index = threadIdx.x; index < args.count; index += blockDim.x) {
+		const float local_value = local_input[index];
+		const float expert_value = expert_input[index];
+		local_sum_squares += local_value * local_value;
+		expert_sum_squares += expert_value * expert_value;
+	}
+	const float local_total = rocm_block_reduce_sum(local_sum_squares, partial);
+	const float expert_total = rocm_block_reduce_sum(expert_sum_squares, partial);
+	const float local_rms = sqrtf(local_total / static_cast<float>(args.count) + rocm_float_from_bits(args.local_epsilon_bits));
+	const float expert_rms = sqrtf(expert_total / static_cast<float>(args.count) + rocm_float_from_bits(args.expert_epsilon_bits));
+	if (local_rms == 0.0f || expert_rms == 0.0f) {
+		return;
+	}
+	for (uint32_t index = threadIdx.x; index < args.count; index += blockDim.x) {
+		const float local_weight = rocm_rms_norm_weight_value(args.local_weight_pointer, args.local_weight_encoding, args.local_flags, index);
+		const float expert_weight = rocm_rms_norm_weight_value(args.expert_weight_pointer, args.expert_weight_encoding, args.expert_flags, index);
+		output[index] = local_input[index] / local_rms * local_weight + expert_input[index] / expert_rms * expert_weight;
+	}
+}
+
 extern "C" __global__ void rocm_rms_norm_residual_add_norm(const unsigned char *packet)
 {
 	if (blockIdx.x != 0 || packet == nullptr) {
@@ -8204,6 +8820,112 @@ extern "C" __global__ void rocm_rms_norm_rope_heads_pair(const unsigned char *pa
 			output[i] = x;
 			output[i + 1u] = y;
 		}
+	}
+}
+
+__device__ void rocm_rms_norm_rope_heads_pair_lane_batch_execute(
+	const float *input,
+	float *output,
+	uint64_t weight_pointer,
+	uint32_t weight_encoding,
+	uint32_t flags,
+	uint32_t epsilon_bits,
+	uint32_t head_dim,
+	uint32_t position,
+	float base,
+	uint32_t frequency_dim,
+	uint32_t rotary_count,
+	float frequency_scale,
+	float *partial)
+{
+	float sum_squares = 0.0f;
+	for (uint32_t i = threadIdx.x; i < head_dim; i += blockDim.x) {
+		sum_squares += input[i] * input[i];
+	}
+	const float total = rocm_block_reduce_sum(sum_squares, partial);
+	const float rms = sqrtf(total / static_cast<float>(head_dim) + rocm_float_from_bits(epsilon_bits));
+	if (rms == 0.0f) {
+		return;
+	}
+	const uint32_t effective_frequency_dim = frequency_dim == 0u ? head_dim : frequency_dim;
+	const uint32_t effective_rotary_count = rotary_count == 0u ? head_dim : rotary_count;
+	const float dim = static_cast<float>(effective_frequency_dim);
+	const uint32_t half_head_dim = head_dim >> 1u;
+	const bool neox = (flags & ROCM_RMS_NORM_LAUNCH_FLAG_ROPE_NEOX) != 0u;
+	if (neox) {
+		const uint32_t active_pairs = effective_rotary_count >> 1u;
+		for (uint32_t pair = threadIdx.x; pair < half_head_dim; pair += blockDim.x) {
+			const uint32_t i = pair;
+			const uint32_t j = pair + half_head_dim;
+			const float weight_x = rocm_rms_norm_weight_value(weight_pointer, weight_encoding, flags, i);
+			const float weight_y = rocm_rms_norm_weight_value(weight_pointer, weight_encoding, flags, j);
+			const float x = input[i] / rms * weight_x;
+			const float y = input[j] / rms * weight_y;
+			if (pair < active_pairs) {
+				const float frequency = 1.0f / powf(base, static_cast<float>(pair << 1u) / dim);
+				const float angle = static_cast<float>(position) * frequency * frequency_scale;
+				const float cosine = cosf(angle);
+				const float sine = sinf(angle);
+				output[i] = x * cosine - y * sine;
+				output[j] = x * sine + y * cosine;
+			} else {
+				output[i] = x;
+				output[j] = y;
+			}
+		}
+		return;
+	}
+	for (uint32_t pair = threadIdx.x; pair < half_head_dim; pair += blockDim.x) {
+		const uint32_t i = pair << 1u;
+		const float weight_x = rocm_rms_norm_weight_value(weight_pointer, weight_encoding, flags, i);
+		const float weight_y = rocm_rms_norm_weight_value(weight_pointer, weight_encoding, flags, i + 1u);
+		const float x = input[i] / rms * weight_x;
+		const float y = input[i + 1u] / rms * weight_y;
+		if (i < effective_rotary_count) {
+			const float frequency = 1.0f / powf(base, static_cast<float>(i) / dim);
+			const float angle = static_cast<float>(position) * frequency * frequency_scale;
+			const float cosine = cosf(angle);
+			const float sine = sinf(angle);
+			output[i] = x * cosine - y * sine;
+			output[i + 1u] = x * sine + y * cosine;
+		} else {
+			output[i] = x;
+			output[i + 1u] = y;
+		}
+	}
+}
+
+extern "C" __global__ void rocm_rms_norm_rope_heads_pair_lane_batch(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_rms_norm_rope_heads_pair_lane_batch_launch_args &args = *reinterpret_cast<const rocm_rms_norm_rope_heads_pair_lane_batch_launch_args *>(packet);
+	if (!rocm_valid_rms_norm_rope_heads_pair_lane_batch_args(args) || blockIdx.y >= args.batch) {
+		return;
+	}
+	const uint32_t head = blockIdx.x;
+	if (head >= args.query_head_count && head >= args.key_head_count) {
+		return;
+	}
+	const uint32_t batch = blockIdx.y;
+	const uint32_t *positions = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.positions_pointer));
+	const uint32_t position = positions[batch];
+	const float base = rocm_float_from_bits(args.base_bits);
+	const float frequency_scale = rocm_float_from_bits(args.frequency_scale_bits);
+	__shared__ float partial[32];
+	if (head < args.query_head_count) {
+		const uint64_t offset = (static_cast<uint64_t>(batch) * args.query_head_count + head) * args.head_dim;
+		const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.query_input_pointer)) + offset;
+		float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.query_output_pointer)) + offset;
+		rocm_rms_norm_rope_heads_pair_lane_batch_execute(input, output, args.query_weight_pointer, args.query_weight_encoding, args.query_flags, args.query_epsilon_bits, args.head_dim, position, base, args.frequency_dim, args.rotary_count, frequency_scale, partial);
+	}
+	__syncthreads();
+	if (head < args.key_head_count) {
+		const uint64_t offset = (static_cast<uint64_t>(batch) * args.key_head_count + head) * args.head_dim;
+		const float *input = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.key_input_pointer)) + offset;
+		float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.key_output_pointer)) + offset;
+		rocm_rms_norm_rope_heads_pair_lane_batch_execute(input, output, args.key_weight_pointer, args.key_weight_encoding, args.key_flags, args.key_epsilon_bits, args.head_dim, position, base, args.frequency_dim, args.rotary_count, frequency_scale, partial);
 	}
 }
 
@@ -9417,6 +10139,12 @@ __device__ void rocm_run_single_head_attention_token_parallel(const rocm_attenti
 		device_kv_header != nullptr &&
 		device_kv_header->block_size == 1u &&
 		device_kv_header->page_count == args.token_count;
+	const rocm_device_kv_page_descriptor *first_device_kv_page = device_kv_header != nullptr && device_kv_header->page_count > 0u
+		? reinterpret_cast<const rocm_device_kv_page_descriptor *>(device_kv_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES)
+		: nullptr;
+	const bool single_head_device_kv_width = first_device_kv_page != nullptr &&
+		first_device_kv_page->key_width == args.dim &&
+		first_device_kv_page->value_width == args.dim;
 	const uint64_t shared_weight_bytes = args.weight_pointer == 0 ? static_cast<uint64_t>(args.token_count) * sizeof(float) : 0u;
 	uint64_t shared_offset = rocm_attention_align_shared_offset(shared_weight_bytes, sizeof(uint64_t));
 	const uint64_t pointer_bytes = static_cast<uint64_t>(args.token_count) * sizeof(uint64_t);
@@ -9425,6 +10153,7 @@ __device__ void rocm_run_single_head_attention_token_parallel(const rocm_attenti
 	const bool cache_value_metadata =
 		device_kv &&
 		device_kv_dim_offset == 0u &&
+		single_head_device_kv_width &&
 		args.token_count >= 16u &&
 		dynamic_shared_bytes >= scale_offset + scale_bytes;
 	unsigned char *shared_bytes = reinterpret_cast<unsigned char *>(shared_attention_weights);
@@ -9433,6 +10162,7 @@ __device__ void rocm_run_single_head_attention_token_parallel(const rocm_attenti
 	const bool kq8vq4_direct_token_pages =
 		direct_token_pages &&
 		device_kv_dim_offset == 0u &&
+		single_head_device_kv_width &&
 		device_kv_header != nullptr &&
 		device_kv_header->mode_code == ROCM_DEVICE_KV_DESCRIPTOR_MODE_KQ8VQ4;
 	const bool q4_direct_value_pages = cache_value_metadata && kq8vq4_direct_token_pages;
@@ -9996,6 +10726,9 @@ extern "C" __global__ void rocm_attention_heads_chunked_stage1(const unsigned ch
 	if (threads != ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE) {
 		return;
 	}
+	const uint32_t kv_head = rocm_attention_kv_head_for_query(head, args.head_count, args.key_heads);
+	const uint32_t kv_dim_offset = kv_head * args.dim;
+	const uint32_t kv_width = args.key_heads * args.dim;
 
 	extern __shared__ unsigned char shared_bytes[];
 	float *scores = reinterpret_cast<float *>(shared_bytes);
@@ -10069,17 +10802,17 @@ extern "C" __global__ void rocm_attention_heads_chunked_stage1(const unsigned ch
 			if (direct_kq8vq4_token_pages) {
 				page_valid = page != nullptr && page->key_pointer != 0 && page->value_pointer != 0 ? 1u : 0u;
 			} else {
-				page_valid = rocm_attention_kq8vq4_page_valid(page, token, args.dim) ? 1u : 0u;
+				page_valid = rocm_attention_kq8vq4_page_valid(page, token, kv_width) ? 1u : 0u;
 			}
 			if (page_valid) {
 				const uint64_t local_token = direct_kq8vq4_token_pages ? 0u : static_cast<uint64_t>(token) - page->token_start;
 				const unsigned char *key_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->key_pointer));
 				const uint64_t key_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->key_encoding)) ? 0u : local_token * page->key_width;
-				key_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(key_bytes, page->key_encoding, page->token_count, page->key_width, local_token))) + key_base;
+				key_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(key_bytes, page->key_encoding, page->token_count, page->key_width, local_token))) + key_base + kv_dim_offset;
 				key_scale = rocm_device_kv_row_scale(key_bytes, page->key_encoding, local_token, page->key_width);
 				const unsigned char *value_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->value_pointer));
 				const uint64_t value_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->value_encoding)) ? 0u : local_token * page->value_width;
-				value_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(value_bytes, page->value_encoding, page->token_count, page->value_width, local_token))) + (value_base >> 1u);
+				value_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(value_bytes, page->value_encoding, page->token_count, page->value_width, local_token))) + ((value_base + kv_dim_offset) >> 1u);
 				value_scale = rocm_device_kv_row_scale(value_bytes, page->value_encoding, local_token, page->value_width);
 			}
 		}
@@ -10120,7 +10853,7 @@ extern "C" __global__ void rocm_attention_heads_chunked_stage1(const unsigned ch
 			if (direct_kq8vq4_token_pages) {
 				page_valid = page != nullptr && page->key_pointer != 0 && page->value_pointer != 0;
 			} else {
-				page_valid = rocm_attention_kq8vq4_page_valid(page, token, args.dim);
+				page_valid = rocm_attention_kq8vq4_page_valid(page, token, kv_width);
 			}
 			float score = -FLT_MAX;
 			uint64_t value_pointer = 0;
@@ -10129,9 +10862,9 @@ extern "C" __global__ void rocm_attention_heads_chunked_stage1(const unsigned ch
 				const uint64_t local_token = direct_kq8vq4_token_pages ? 0u : static_cast<uint64_t>(token) - page->token_start;
 				const unsigned char *value_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->value_pointer));
 				const uint64_t value_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->value_encoding)) ? 0u : local_token * page->value_width;
-				value_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(value_bytes, page->value_encoding, page->token_count, page->value_width, local_token))) + (value_base >> 1u);
+				value_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(value_bytes, page->value_encoding, page->token_count, page->value_width, local_token))) + ((value_base + kv_dim_offset) >> 1u);
 				value_scale = rocm_device_kv_row_scale(value_bytes, page->value_encoding, local_token, page->value_width);
-				const float dot = rocm_attention_device_kv_dot_from_page(page, true, token, query_values, args.dim);
+				const float dot = rocm_attention_device_kv_dot_from_page_offset(page, true, token, query_values, args.dim, kv_dim_offset);
 				score = dot * scale;
 				if (score > local_max) {
 					local_max = score;
@@ -10304,7 +11037,7 @@ extern "C" __global__ void rocm_attention_heads_chunked_stage2(const unsigned ch
 	}
 }
 
-extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1(const unsigned char *packet)
+extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_v2(const unsigned char *packet)
 {
 	if (packet == nullptr) {
 		return;
@@ -10326,6 +11059,10 @@ extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1(const unsig
 	if (threads != ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE) {
 		return;
 	}
+	const uint32_t kv_head_count = args.key_heads;
+	const uint32_t kv_head = rocm_attention_kv_head_for_query(head, args.head_count, kv_head_count);
+	const uint32_t kv_dim_offset = kv_head * args.dim;
+	const uint32_t kv_width = kv_head_count * args.dim;
 
 	float *partials = reinterpret_cast<float *>(static_cast<uintptr_t>(args.partial_pointer)) + (static_cast<uint64_t>(row) * chunk_count + chunk) * args.dim;
 	float *stats = reinterpret_cast<float *>(static_cast<uintptr_t>(args.stats_pointer)) + (static_cast<uint64_t>(row) * chunk_count + chunk) * 2u;
@@ -10400,17 +11137,17 @@ extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1(const unsig
 			if (direct_kq8vq4_token_pages) {
 				page_valid = page != nullptr && page->key_pointer != 0 && page->value_pointer != 0 ? 1u : 0u;
 			} else {
-				page_valid = rocm_attention_kq8vq4_page_valid(page, token, args.dim) ? 1u : 0u;
+				page_valid = rocm_attention_kq8vq4_page_valid(page, token, kv_width) ? 1u : 0u;
 			}
 			if (page_valid) {
 				const uint64_t local_token = direct_kq8vq4_token_pages ? 0u : static_cast<uint64_t>(token) - page->token_start;
 				const unsigned char *key_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->key_pointer));
 				const uint64_t key_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->key_encoding)) ? 0u : local_token * page->key_width;
-				key_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(key_bytes, page->key_encoding, page->token_count, page->key_width, local_token))) + key_base;
+				key_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(key_bytes, page->key_encoding, page->token_count, page->key_width, local_token))) + key_base + kv_dim_offset;
 				key_scale = rocm_device_kv_row_scale(key_bytes, page->key_encoding, local_token, page->key_width);
 				const unsigned char *value_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->value_pointer));
 				const uint64_t value_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->value_encoding)) ? 0u : local_token * page->value_width;
-				value_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(value_bytes, page->value_encoding, page->token_count, page->value_width, local_token))) + (value_base >> 1u);
+				value_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(value_bytes, page->value_encoding, page->token_count, page->value_width, local_token))) + ((value_base + kv_dim_offset) >> 1u);
 				value_scale = rocm_device_kv_row_scale(value_bytes, page->value_encoding, local_token, page->value_width);
 			}
 		}
@@ -10451,7 +11188,7 @@ extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1(const unsig
 			if (direct_kq8vq4_token_pages) {
 				page_valid = page != nullptr && page->key_pointer != 0 && page->value_pointer != 0;
 			} else {
-				page_valid = rocm_attention_kq8vq4_page_valid(page, token, args.dim);
+				page_valid = rocm_attention_kq8vq4_page_valid(page, token, kv_width);
 			}
 			float score = -FLT_MAX;
 			uint64_t value_pointer = 0;
@@ -10460,9 +11197,9 @@ extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1(const unsig
 				const uint64_t local_token = direct_kq8vq4_token_pages ? 0u : static_cast<uint64_t>(token) - page->token_start;
 				const unsigned char *value_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->value_pointer));
 				const uint64_t value_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->value_encoding)) ? 0u : local_token * page->value_width;
-				value_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(value_bytes, page->value_encoding, page->token_count, page->value_width, local_token))) + (value_base >> 1u);
+				value_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(value_bytes, page->value_encoding, page->token_count, page->value_width, local_token))) + ((value_base + kv_dim_offset) >> 1u);
 				value_scale = rocm_device_kv_row_scale(value_bytes, page->value_encoding, local_token, page->value_width);
-				const float dot = rocm_attention_device_kv_dot_from_page(page, true, token, query_values, args.dim);
+				const float dot = rocm_attention_device_kv_dot_from_page_offset(page, true, token, query_values, args.dim, kv_dim_offset);
 				score = dot * scale;
 				if (score > local_max) {
 					local_max = score;
@@ -10545,6 +11282,361 @@ extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1(const unsig
 				out1 += value_scratch1[value_group * pair_count + tid];
 			}
 			partials[output_dim] = out1;
+		}
+	}
+}
+
+extern "C" __global__ void rocm_attention_heads_batch_chunked_stage1_gqa2(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_attention_heads_batch_chunked_launch_args &args = *reinterpret_cast<const rocm_attention_heads_batch_chunked_launch_args *>(packet);
+	if (!rocm_valid_attention_heads_batch_chunked_args(args) || args.head_count < 2u || (args.head_count & 1u) != 0u) {
+		return;
+	}
+	const uint32_t query_heads_per_kv = args.head_count / args.key_heads;
+	if (query_heads_per_kv < 2u || (query_heads_per_kv & 1u) != 0u) {
+		return;
+	}
+	const uint32_t chunk_count = args.chunk_count;
+	const uint32_t pairs_per_query = args.head_count >> 1u;
+	const uint32_t pair_row = blockIdx.x / chunk_count;
+	const uint32_t chunk = blockIdx.x - pair_row * chunk_count;
+	const uint32_t query_row = pair_row / pairs_per_query;
+	const uint32_t pair_index = pair_row - query_row * pairs_per_query;
+	const uint32_t head0 = pair_index << 1u;
+	const uint32_t head1 = head0 + 1u;
+	if (query_row >= args.query_count || head1 >= args.head_count || chunk >= chunk_count) {
+		return;
+	}
+	const uint32_t tid = threadIdx.x;
+	const uint32_t threads = blockDim.x;
+	if (threads != ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE) {
+		return;
+	}
+	const uint32_t kv_head0 = rocm_attention_kv_head_for_query(head0, args.head_count, args.key_heads);
+	const uint32_t kv_head1 = rocm_attention_kv_head_for_query(head1, args.head_count, args.key_heads);
+	if (kv_head0 != kv_head1) {
+		return;
+	}
+	const uint32_t kv_dim_offset = kv_head0 * args.dim;
+	const uint32_t kv_width = args.key_heads * args.dim;
+	const uint32_t row0 = query_row * args.head_count + head0;
+	const uint32_t row1 = row0 + 1u;
+
+	float *partials0 = reinterpret_cast<float *>(static_cast<uintptr_t>(args.partial_pointer)) + (static_cast<uint64_t>(row0) * chunk_count + chunk) * args.dim;
+	float *partials1 = reinterpret_cast<float *>(static_cast<uintptr_t>(args.partial_pointer)) + (static_cast<uint64_t>(row1) * chunk_count + chunk) * args.dim;
+	float *stats0 = reinterpret_cast<float *>(static_cast<uintptr_t>(args.stats_pointer)) + (static_cast<uint64_t>(row0) * chunk_count + chunk) * 2u;
+	float *stats1 = reinterpret_cast<float *>(static_cast<uintptr_t>(args.stats_pointer)) + (static_cast<uint64_t>(row1) * chunk_count + chunk) * 2u;
+	const uint32_t visible_tokens = args.query_start_token + query_row + 1u;
+	const uint32_t window_start = args.window_size > 0u && visible_tokens > args.window_size
+		? visible_tokens - args.window_size
+		: 0u;
+	const uint32_t chunk_start = args.chunk_start_token + chunk * args.chunk_size;
+	const uint32_t chunk_end = chunk_start + args.chunk_size < visible_tokens
+		? chunk_start + args.chunk_size
+		: visible_tokens;
+	const uint32_t effective_start = chunk_start < window_start ? window_start : chunk_start;
+	if (chunk_start >= visible_tokens || chunk_end <= window_start || effective_start >= chunk_end) {
+		if (tid == 0u) {
+			stats0[0] = -FLT_MAX;
+			stats0[1] = 0.0f;
+			stats1[0] = -FLT_MAX;
+			stats1[1] = 0.0f;
+		}
+		for (uint32_t dim = tid; dim < args.dim; dim += threads) {
+			partials0[dim] = 0.0f;
+			partials1[dim] = 0.0f;
+		}
+		return;
+	}
+
+	extern __shared__ unsigned char shared_bytes[];
+	float *scores0 = reinterpret_cast<float *>(shared_bytes);
+	const uint64_t scores1_offset = rocm_attention_align_shared_offset(static_cast<uint64_t>(args.chunk_size) * sizeof(float), sizeof(float));
+	const uint64_t value_pointer_offset = rocm_attention_align_shared_offset(scores1_offset + static_cast<uint64_t>(args.chunk_size) * sizeof(float), sizeof(uint64_t));
+	const uint64_t value_scale_offset = rocm_attention_align_shared_offset(value_pointer_offset + static_cast<uint64_t>(args.chunk_size) * sizeof(uint64_t), sizeof(float));
+	const uint64_t query0_cache_offset = rocm_attention_align_shared_offset(value_scale_offset + static_cast<uint64_t>(args.chunk_size) * sizeof(float), sizeof(float));
+	const uint64_t query1_cache_offset = rocm_attention_align_shared_offset(query0_cache_offset + static_cast<uint64_t>(args.dim) * sizeof(float), sizeof(float));
+	float *scores1 = reinterpret_cast<float *>(shared_bytes + scores1_offset);
+	uint64_t *value_pointers = reinterpret_cast<uint64_t *>(shared_bytes + value_pointer_offset);
+	float *value_scales = reinterpret_cast<float *>(shared_bytes + value_scale_offset);
+	float *query_values0 = reinterpret_cast<float *>(shared_bytes + query0_cache_offset);
+	float *query_values1 = reinterpret_cast<float *>(shared_bytes + query1_cache_offset);
+	__shared__ float scratch[ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE];
+	__shared__ float value_scratch1[ROCM_ATTENTION_HEADS_CHUNKED_BLOCK_SIZE];
+	__shared__ float shared_max_score0;
+	__shared__ float shared_max_score1;
+	__shared__ float shared_sum0;
+	__shared__ float shared_sum1;
+
+	const float *query0 = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.query_pointer)) + static_cast<uint64_t>(row0) * args.dim;
+	const float *query1 = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.query_pointer)) + static_cast<uint64_t>(row1) * args.dim;
+	const float requested_scale = rocm_float_from_bits(args.scale_bits);
+	const float scale = requested_scale == 0.0f ? 1.0f / sqrtf(static_cast<float>(args.dim)) : requested_scale;
+	const rocm_device_kv_descriptor_header *device_kv_header = reinterpret_cast<const rocm_device_kv_descriptor_header *>(static_cast<uintptr_t>(args.descriptor_pointer));
+	const unsigned char *device_kv_base = reinterpret_cast<const unsigned char *>(device_kv_header);
+	const bool direct_kq8vq4_token_pages =
+		device_kv_header != nullptr &&
+		device_kv_header->block_size == 1u &&
+		device_kv_header->page_count == args.token_count &&
+		device_kv_header->mode_code == ROCM_DEVICE_KV_DESCRIPTOR_MODE_KQ8VQ4;
+
+	if (tid < args.dim) {
+		query_values0[tid] = query0[tid];
+		query_values1[tid] = query1[tid];
+	}
+	__syncthreads();
+
+	float local_max0 = -FLT_MAX;
+	float local_max1 = -FLT_MAX;
+	const uint32_t local_count = chunk_end - effective_start;
+	const uint32_t score_lanes = args.chunk_size <= threads && (threads % args.chunk_size) == 0u
+		? threads / args.chunk_size
+		: 1u;
+	if (score_lanes > 1u && score_lanes <= 8u && (score_lanes & (score_lanes - 1u)) == 0u && args.dim >= score_lanes) {
+		const uint32_t local = tid / score_lanes;
+		const uint32_t lane = tid - local * score_lanes;
+		float partial_dot0 = 0.0f;
+		float partial_dot1 = 0.0f;
+		uint64_t key_pointer = 0u;
+		float key_scale = 0.0f;
+		uint64_t value_pointer = 0u;
+		float value_scale = 0.0f;
+		uint32_t page_valid = 0u;
+		if (local < local_count && lane == 0u) {
+			const uint32_t token = effective_start + local;
+			const rocm_device_kv_page_descriptor *page = direct_kq8vq4_token_pages
+				? reinterpret_cast<const rocm_device_kv_page_descriptor *>(device_kv_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + token * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES)
+				: rocm_attention_heads_batch_chunked_device_kv_page(args, token);
+			if (direct_kq8vq4_token_pages) {
+				page_valid = page != nullptr && page->key_pointer != 0u && page->value_pointer != 0u ? 1u : 0u;
+			} else {
+				page_valid = rocm_attention_kq8vq4_page_valid(page, token, kv_width) ? 1u : 0u;
+			}
+			if (page_valid != 0u) {
+				const uint64_t local_token = direct_kq8vq4_token_pages ? 0u : static_cast<uint64_t>(token) - page->token_start;
+				const unsigned char *key_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->key_pointer));
+				const uint64_t key_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->key_encoding)) ? 0u : local_token * page->key_width;
+				key_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(key_bytes, page->key_encoding, page->token_count, page->key_width, local_token))) + key_base + kv_dim_offset;
+				key_scale = rocm_device_kv_row_scale(key_bytes, page->key_encoding, local_token, page->key_width);
+				const unsigned char *value_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->value_pointer));
+				const uint64_t value_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->value_encoding)) ? 0u : local_token * page->value_width;
+				value_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(value_bytes, page->value_encoding, page->token_count, page->value_width, local_token))) + ((value_base + kv_dim_offset) >> 1u);
+				value_scale = rocm_device_kv_row_scale(value_bytes, page->value_encoding, local_token, page->value_width);
+			}
+		}
+		page_valid = rocm_shfl_u32(page_valid, 0, static_cast<int>(score_lanes));
+		key_pointer = rocm_shfl_u64(key_pointer, 0, static_cast<int>(score_lanes));
+		key_scale = rocm_shfl_float(key_scale, 0, static_cast<int>(score_lanes));
+		if (local < local_count && page_valid != 0u) {
+			const int8_t *key_values = reinterpret_cast<const int8_t *>(static_cast<uintptr_t>(key_pointer));
+			float quantized_dot0 = 0.0f;
+			float quantized_dot1 = 0.0f;
+			for (uint32_t dim = lane; dim < args.dim; dim += score_lanes) {
+				const float quantized_key = static_cast<float>(key_values[dim]);
+				quantized_dot0 += query_values0[dim] * quantized_key;
+				quantized_dot1 += query_values1[dim] * quantized_key;
+			}
+			partial_dot0 = quantized_dot0 * key_scale;
+			partial_dot1 = quantized_dot1 * key_scale;
+		}
+		float dot0 = partial_dot0;
+		float dot1 = partial_dot1;
+		for (uint32_t score_lane = 1u; score_lane < score_lanes; ++score_lane) {
+			dot0 += rocm_shfl_down(partial_dot0, score_lane, static_cast<int>(score_lanes));
+			dot1 += rocm_shfl_down(partial_dot1, score_lane, static_cast<int>(score_lanes));
+		}
+		if (lane == 0u && local < local_count) {
+			float score0 = -FLT_MAX;
+			float score1 = -FLT_MAX;
+			if (page_valid != 0u) {
+				score0 = dot0 * scale;
+				score1 = dot1 * scale;
+				if (score0 > local_max0) {
+					local_max0 = score0;
+				}
+				if (score1 > local_max1) {
+					local_max1 = score1;
+				}
+			}
+			scores0[local] = score0;
+			scores1[local] = score1;
+			value_pointers[local] = value_pointer;
+			value_scales[local] = value_scale;
+		}
+	} else {
+		for (uint32_t local = tid; local < local_count; local += threads) {
+			const uint32_t token = effective_start + local;
+			const rocm_device_kv_page_descriptor *page = direct_kq8vq4_token_pages
+				? reinterpret_cast<const rocm_device_kv_page_descriptor *>(device_kv_base + ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES + token * ROCM_DEVICE_KV_DESCRIPTOR_PAGE_BYTES)
+				: rocm_attention_heads_batch_chunked_device_kv_page(args, token);
+			bool page_valid = false;
+			if (direct_kq8vq4_token_pages) {
+				page_valid = page != nullptr && page->key_pointer != 0u && page->value_pointer != 0u;
+			} else {
+				page_valid = rocm_attention_kq8vq4_page_valid(page, token, kv_width);
+			}
+			float score0 = -FLT_MAX;
+			float score1 = -FLT_MAX;
+			uint64_t value_pointer = 0u;
+			float value_scale = 0.0f;
+			if (page_valid) {
+				const uint64_t local_token = direct_kq8vq4_token_pages ? 0u : static_cast<uint64_t>(token) - page->token_start;
+				const unsigned char *key_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->key_pointer));
+				const uint64_t key_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->key_encoding)) ? 0u : local_token * page->key_width;
+				const int8_t *key_values = reinterpret_cast<const int8_t *>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(key_bytes, page->key_encoding, page->token_count, page->key_width, local_token)) + key_base + kv_dim_offset);
+				const float key_scale = rocm_device_kv_row_scale(key_bytes, page->key_encoding, local_token, page->key_width);
+				float quantized_dot0 = 0.0f;
+				float quantized_dot1 = 0.0f;
+				for (uint32_t dim = 0u; dim < args.dim; ++dim) {
+					const float quantized_key = static_cast<float>(key_values[dim]);
+					quantized_dot0 += query_values0[dim] * quantized_key;
+					quantized_dot1 += query_values1[dim] * quantized_key;
+				}
+				score0 = quantized_dot0 * key_scale * scale;
+				score1 = quantized_dot1 * key_scale * scale;
+				if (score0 > local_max0) {
+					local_max0 = score0;
+				}
+				if (score1 > local_max1) {
+					local_max1 = score1;
+				}
+				const unsigned char *value_bytes = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(page->value_pointer));
+				const uint64_t value_base = (direct_kq8vq4_token_pages || rocm_device_kv_encoding_is_row_interleaved(page->value_encoding)) ? 0u : local_token * page->value_width;
+				value_pointer = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(rocm_device_kv_row_payload_pointer(value_bytes, page->value_encoding, page->token_count, page->value_width, local_token))) + ((value_base + kv_dim_offset) >> 1u);
+				value_scale = rocm_device_kv_row_scale(value_bytes, page->value_encoding, local_token, page->value_width);
+			}
+			scores0[local] = score0;
+			scores1[local] = score1;
+			value_pointers[local] = value_pointer;
+			value_scales[local] = value_scale;
+		}
+	}
+	__syncthreads();
+
+	const float max_score0 = rocm_attention_block_reduce_max(local_max0, scratch);
+	if (tid == 0u) {
+		shared_max_score0 = max_score0;
+	}
+	__syncthreads();
+	const float max_score1 = rocm_attention_block_reduce_max(local_max1, scratch);
+	if (tid == 0u) {
+		shared_max_score1 = max_score1;
+	}
+	__syncthreads();
+
+	float local_sum0 = 0.0f;
+	for (uint32_t local = tid; local < local_count; local += threads) {
+		float value = 0.0f;
+		if (shared_max_score0 > -FLT_MAX && scores0[local] > -FLT_MAX) {
+			value = rocm_fast_expf(scores0[local] - shared_max_score0);
+			local_sum0 += value;
+		}
+		scores0[local] = value;
+	}
+	const float sum0 = rocm_attention_block_reduce_sum(local_sum0, scratch);
+	if (tid == 0u) {
+		shared_sum0 = sum0;
+		stats0[0] = shared_max_score0;
+		stats0[1] = sum0;
+	}
+	__syncthreads();
+
+	float local_sum1 = 0.0f;
+	for (uint32_t local = tid; local < local_count; local += threads) {
+		float value = 0.0f;
+		if (shared_max_score1 > -FLT_MAX && scores1[local] > -FLT_MAX) {
+			value = rocm_fast_expf(scores1[local] - shared_max_score1);
+			local_sum1 += value;
+		}
+		scores1[local] = value;
+	}
+	const float sum1 = rocm_attention_block_reduce_sum(local_sum1, scratch);
+	if (tid == 0u) {
+		shared_sum1 = sum1;
+		stats1[0] = shared_max_score1;
+		stats1[1] = sum1;
+	}
+	__syncthreads();
+
+	const uint32_t dim_pair_count = (args.dim + 1u) >> 1u;
+	const uint32_t value_groups = dim_pair_count == 0u ? 0u : threads / dim_pair_count;
+	const uint32_t dim_pair = dim_pair_count == 0u ? 0u : tid % dim_pair_count;
+	const uint32_t group = dim_pair_count == 0u ? 0u : tid / dim_pair_count;
+	const uint32_t dim0 = dim_pair << 1u;
+	const uint32_t dim1 = dim0 + 1u;
+	float head0_partial0 = 0.0f;
+	float head0_partial1 = 0.0f;
+	float head1_partial0 = 0.0f;
+	float head1_partial1 = 0.0f;
+	if (value_groups > 0u && group < value_groups && dim0 < args.dim && (shared_sum0 > 0.0f || shared_sum1 > 0.0f)) {
+		for (uint32_t local = group; local < local_count; local += value_groups) {
+			const uint64_t value_pointer = value_pointers[local];
+			if (value_pointer == 0u) {
+				continue;
+			}
+			const unsigned char *values = reinterpret_cast<const unsigned char *>(static_cast<uintptr_t>(value_pointer));
+			const unsigned char packed = values[dim0 >> 1u];
+			int quantized0 = static_cast<int>(packed & 0x0fu);
+			if (quantized0 >= 8) {
+				quantized0 -= 16;
+			}
+			int quantized1 = static_cast<int>((packed >> 4) & 0x0fu);
+			if (quantized1 >= 8) {
+				quantized1 -= 16;
+			}
+			const float value_scale = value_scales[local];
+			const float weighted_scale0 = scores0[local] * value_scale;
+			const float weighted_scale1 = scores1[local] * value_scale;
+			if (shared_sum0 > 0.0f) {
+				head0_partial0 += weighted_scale0 * static_cast<float>(quantized0);
+				if (dim1 < args.dim) {
+					head0_partial1 += weighted_scale0 * static_cast<float>(quantized1);
+				}
+			}
+			if (shared_sum1 > 0.0f) {
+				head1_partial0 += weighted_scale1 * static_cast<float>(quantized0);
+				if (dim1 < args.dim) {
+					head1_partial1 += weighted_scale1 * static_cast<float>(quantized1);
+				}
+			}
+		}
+	}
+
+	scratch[tid] = head0_partial0;
+	value_scratch1[tid] = head0_partial1;
+	__syncthreads();
+	if (tid < dim_pair_count) {
+		float out0 = 0.0f;
+		float out1 = 0.0f;
+		for (uint32_t value_group = 0u; value_group < value_groups; ++value_group) {
+			out0 += scratch[value_group * dim_pair_count + tid];
+			out1 += value_scratch1[value_group * dim_pair_count + tid];
+		}
+		partials0[tid << 1u] = out0;
+		const uint32_t output_dim = (tid << 1u) + 1u;
+		if (output_dim < args.dim) {
+			partials0[output_dim] = out1;
+		}
+	}
+	__syncthreads();
+
+	scratch[tid] = head1_partial0;
+	value_scratch1[tid] = head1_partial1;
+	__syncthreads();
+	if (tid < dim_pair_count) {
+		float out0 = 0.0f;
+		float out1 = 0.0f;
+		for (uint32_t value_group = 0u; value_group < value_groups; ++value_group) {
+			out0 += scratch[value_group * dim_pair_count + tid];
+			out1 += value_scratch1[value_group * dim_pair_count + tid];
+		}
+		partials1[tid << 1u] = out0;
+		const uint32_t output_dim = (tid << 1u) + 1u;
+		if (output_dim < args.dim) {
+			partials1[output_dim] = out1;
 		}
 	}
 }
@@ -10752,6 +11844,71 @@ extern "C" __global__ void rocm_attention_heads_batch_causal(const unsigned char
 		return;
 	}
 	if (args.weight_pointer == 0 || visible_tokens >= 16) {
+		rocm_run_single_head_attention_token_parallel(single, args.shared_mem_bytes);
+		return;
+	}
+	rocm_run_single_head_attention_parallel(single);
+}
+
+extern "C" __global__ void rocm_attention_heads_lane_batch(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_attention_heads_lane_batch_launch_args &args = *reinterpret_cast<const rocm_attention_heads_lane_batch_launch_args *>(packet);
+	if (!rocm_valid_attention_heads_lane_batch_args(args) ||
+		blockIdx.x >= args.head_count ||
+		blockIdx.y >= args.lane_count) {
+		return;
+	}
+	const uint64_t head = blockIdx.x;
+	const uint64_t lane_index = blockIdx.y;
+	const rocm_attention_heads_lane_descriptor *lanes = reinterpret_cast<const rocm_attention_heads_lane_descriptor *>(static_cast<uintptr_t>(args.lane_pointer));
+	const rocm_attention_heads_lane_descriptor lane = lanes[lane_index];
+	if (lane.descriptor_pointer == 0 ||
+		lane.descriptor_bytes < ROCM_DEVICE_KV_DESCRIPTOR_HEADER_BYTES ||
+		lane.token_count == 0 ||
+		lane.token_count > args.max_token_count) {
+		return;
+	}
+	const uint32_t kv_head = rocm_attention_kv_head_for_query(static_cast<uint32_t>(head), args.head_count, args.key_heads);
+	const uint64_t batch_head_index = lane_index * args.head_count + head;
+	rocm_attention_launch_args single = {};
+	single.version = ROCM_ATTENTION_LAUNCH_ARGS_VERSION;
+	single.total_bytes = ROCM_ATTENTION_LAUNCH_ARGS_BYTES;
+	single.query_pointer = args.query_pointer + batch_head_index * args.dim * sizeof(float);
+	single.output_pointer = args.output_pointer + batch_head_index * args.dim * sizeof(float);
+	single.weight_pointer = args.weight_pointer == 0
+		? 0
+		: args.weight_pointer + batch_head_index * args.max_token_count * sizeof(float);
+	single.dim = args.dim;
+	single.token_count = lane.token_count;
+	single.query_bytes = args.dim * sizeof(float);
+	single.key_bytes = kv_head * args.dim;
+	single.value_bytes = kv_head * args.dim;
+	single.output_bytes = args.dim * sizeof(float);
+	single.weight_bytes = lane.token_count * sizeof(float);
+	single.kv_source = ROCM_ATTENTION_KV_SOURCE_DEVICE;
+	single.scale_bits = args.scale_bits;
+	single.descriptor_pointer = lane.descriptor_pointer;
+	single.descriptor_bytes = lane.descriptor_bytes;
+	if (!rocm_valid_device_kv_attention_descriptor_header(single)) {
+		return;
+	}
+	const uint32_t window_start = lane.window_size > 0u && lane.token_count > lane.window_size
+		? lane.token_count - lane.window_size
+		: 0u;
+	if (window_start > 0u) {
+		rocm_run_single_head_attention_range_token_parallel(single, window_start, lane.token_count);
+		return;
+	}
+	if (blockDim.x <= 1) {
+		if (threadIdx.x == 0) {
+			rocm_run_single_head_attention(single);
+		}
+		return;
+	}
+	if (args.weight_pointer == 0 || lane.token_count >= 16) {
 		rocm_run_single_head_attention_token_parallel(single, args.shared_mem_bytes);
 		return;
 	}

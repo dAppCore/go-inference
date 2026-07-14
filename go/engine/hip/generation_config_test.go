@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference"
 	"dappco.re/go/inference/engine"
 )
 
@@ -19,6 +20,35 @@ func writeHipGenerationConfig(t *testing.T, dir, body string) {
 	write := core.WriteFile(core.PathJoin(dir, "generation_config.json"), []byte(body), 0o644)
 	if !write.OK {
 		t.Fatalf("write generation_config.json fixture: %v", write.Value)
+	}
+}
+
+func TestGenerationConfigStops_Good(t *testing.T) {
+	got := generationConfigStops([]byte(`{"eos_token_id":[1,106,50],"temperature":1.0}`))
+	core.AssertEqual(t, []int32{1, 106, 50}, got)
+}
+
+func TestGenerationConfigStops_Bad(t *testing.T) {
+	for _, data := range []string{`not json`, `{}`, `{"eos_token_id":["x"]}`, `{"eos_token_id":null}`} {
+		if got := generationConfigStops([]byte(data)); got != nil {
+			t.Fatalf("generationConfigStops(%q) = %v, want nil", data, got)
+		}
+	}
+}
+
+func TestGenerationConfigStops_Ugly(t *testing.T) {
+	core.AssertEqual(t, []int32{1}, generationConfigStops([]byte(`{"eos_token_id":1}`)))
+}
+
+func TestLoadGenerationConfigStops_Good(t *testing.T) {
+	dir := t.TempDir()
+	writeHipGenerationConfig(t, dir, `{"eos_token_id":[1,106,50]}`)
+	core.AssertEqual(t, []int32{1, 106, 50}, loadGenerationConfigStops(dir))
+}
+
+func TestLoadGenerationConfigStops_Bad(t *testing.T) {
+	if got := loadGenerationConfigStops(t.TempDir()); got != nil {
+		t.Fatalf("absent generation config stops = %v, want nil", got)
 	}
 }
 
@@ -82,4 +112,31 @@ func TestHipTokenModel_DeclaredSamplingDefaults(t *testing.T) {
 	if len(got.SuppressTokens) != 1 || got.SuppressTokens[0] != 5 {
 		t.Fatalf("SuppressTokens = %v, want [5]", got.SuppressTokens)
 	}
+}
+
+func TestHipTokenModel_DeclaredStopTokens_Good(t *testing.T) {
+	var nilModel *hipTokenModel
+	if got := nilModel.DeclaredStopTokens(); got != nil {
+		t.Fatalf("nil receiver stops = %v, want nil", got)
+	}
+	model := &hipTokenModel{declaredStops: []int32{1, 106, 50}}
+	got := model.DeclaredStopTokens()
+	core.AssertEqual(t, []int32{1, 106, 50}, got)
+	got[0] = 9
+	core.AssertEqual(t, []int32{1, 106, 50}, model.DeclaredStopTokens())
+}
+
+func TestHipTokenModel_DeclaredStopTokens_GGUFTokenizer_Good(t *testing.T) {
+	decoder := hipInferenceModelFixtureTokenizer()
+	decoder.vocab["<|tool_response>"] = 50
+	decoder.pieces[50] = "<|tool_response>"
+	decoder.special[50] = true
+	decoder.specialText["<|tool_response>"] = 50
+	loaded := &hipLoadedModel{
+		modelPath: "/models/gemma-4-e2b-it-q4.gguf",
+		modelInfo: inference.ModelInfo{Architecture: "gemma4"},
+		tokenText: decoder,
+	}
+	model := newHipTokenModel(loaded, decoder, "gemma4")
+	core.AssertEqual(t, []int32{106, 50}, model.DeclaredStopTokens())
 }

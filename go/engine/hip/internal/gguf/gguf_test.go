@@ -52,6 +52,23 @@ func TestGguf_ReadMetadata_Good_Gemma4MoE(t *testing.T) {
 	core.AssertEqual(t, uint32(8), meta.ExpertUsedCount)
 	core.AssertEqual(t, uint32(704), meta.ExpertFeedForwardLength)
 }
+
+func TestGguf_ReadMetadata_Good_Tokenizer(t *testing.T) {
+	meta, err := ReadMetadata(tokenizerMetadataGGUF(t))
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, "gemma4", meta.TokenizerModel)
+	core.AssertEqual(t, []string{"<pad>", "<eos>", "<bos>", "▁hello", "<turn|>"}, meta.TokenizerTokens)
+	core.AssertEqual(t, []string{"▁ h", "h ello"}, meta.TokenizerMerges)
+	core.AssertEqual(t, []int32{3, 3, 3, 1, 3}, meta.TokenizerTokenTypes)
+	core.AssertEqual(t, uint32(2), meta.TokenizerBOSID)
+	core.AssertEqual(t, uint32(4), meta.TokenizerEOSID)
+	core.AssertEqual(t, uint32(1), meta.TokenizerUnknownID)
+	core.AssertTrue(t, meta.TokenizerBOSIDSet)
+	core.AssertTrue(t, meta.TokenizerEOSIDSet)
+	core.AssertTrue(t, meta.TokenizerUnknownIDSet)
+	core.AssertTrue(t, meta.TokenizerAddBOS)
+	core.AssertFalse(t, meta.TokenizerAddSpacePrefix)
+}
 func TestGguf_ReadMetadata_Bad(t *testing.T) {
 	variant := "Bad"
 	core.AssertNotEmpty(t, variant)
@@ -241,6 +258,75 @@ func gemma4MoEMetadataGGUF(t *testing.T) string {
 	writeKVUint32("gemma4.expert_count", 128)
 	writeKVUint32("gemma4.expert_used_count", 8)
 	writeKVUint32("gemma4.expert_feed_forward_length", 704)
+
+	result := core.WriteFile(path, buf.Bytes(), 0o644)
+	core.RequireTrue(t, result.OK)
+	return path
+}
+
+func tokenizerMetadataGGUF(t *testing.T) string {
+	t.Helper()
+	path := core.PathJoin(t.TempDir(), "tokenizer.gguf")
+	buf := core.NewBuffer()
+	writeUint32 := func(v uint32) { core.RequireNoError(t, binary.Write(buf, binary.LittleEndian, v)) }
+	writeUint64 := func(v uint64) { core.RequireNoError(t, binary.Write(buf, binary.LittleEndian, v)) }
+	writeString := func(v string) {
+		writeUint64(uint64(len(v)))
+		_, err := buf.Write([]byte(v))
+		core.RequireNoError(t, err)
+	}
+	writeKVString := func(key, value string) {
+		writeString(key)
+		writeUint32(typeString)
+		writeString(value)
+	}
+	writeKVUint32 := func(key string, value uint32) {
+		writeString(key)
+		writeUint32(typeUint32)
+		writeUint32(value)
+	}
+	writeKVBool := func(key string, value bool) {
+		writeString(key)
+		writeUint32(typeBool)
+		if value {
+			buf.WriteByte(1)
+		} else {
+			buf.WriteByte(0)
+		}
+	}
+	writeKVStrings := func(key string, values []string) {
+		writeString(key)
+		writeUint32(typeArray)
+		writeUint32(typeString)
+		writeUint64(uint64(len(values)))
+		for _, value := range values {
+			writeString(value)
+		}
+	}
+	writeKVInt32s := func(key string, values []int32) {
+		writeString(key)
+		writeUint32(typeArray)
+		writeUint32(typeInt32)
+		writeUint64(uint64(len(values)))
+		for _, value := range values {
+			core.RequireNoError(t, binary.Write(buf, binary.LittleEndian, value))
+		}
+	}
+
+	writeUint32(ggufMagic)
+	writeUint32(3)
+	writeUint64(0)
+	writeUint64(10)
+	writeKVString("general.architecture", "gemma4")
+	writeKVString("tokenizer.ggml.model", "gemma4")
+	writeKVStrings("tokenizer.ggml.tokens", []string{"<pad>", "<eos>", "<bos>", "▁hello", "<turn|>"})
+	writeKVStrings("tokenizer.ggml.merges", []string{"▁ h", "h ello"})
+	writeKVInt32s("tokenizer.ggml.token_type", []int32{3, 3, 3, 1, 3})
+	writeKVUint32("tokenizer.ggml.bos_token_id", 2)
+	writeKVUint32("tokenizer.ggml.eos_token_id", 4)
+	writeKVUint32("tokenizer.ggml.unknown_token_id", 1)
+	writeKVBool("tokenizer.ggml.add_bos_token", true)
+	writeKVBool("tokenizer.ggml.add_space_prefix", false)
 
 	result := core.WriteFile(path, buf.Bytes(), 0o644)
 	core.RequireTrue(t, result.OK)

@@ -215,6 +215,7 @@ type hipGemma4Q4PrefillLayerKVBatch struct {
 	QK                    *hipGemma4Q4PrefillRoPEQKBatch
 	Value                 *hipDeviceByteBuffer
 	DeviceKV              *hipGemma4Q4PrefillDeviceKVBatch
+	AttentionOverride     *hipDeviceByteBuffer
 	SharedKey             *hipDeviceByteBuffer
 	SharedVal             *hipDeviceByteBuffer
 	QueryRMSRoPEAttention hipGemma4Q4QueryRMSRoPEAttention
@@ -233,7 +234,7 @@ func (batch *hipGemma4Q4PrefillLayerKVBatch) Close() error {
 	if err := batch.DeviceKV.Close(); err != nil {
 		lastErr = err
 	}
-	for _, buffer := range []*hipDeviceByteBuffer{batch.Value, batch.InputNorm} {
+	for _, buffer := range []*hipDeviceByteBuffer{batch.AttentionOverride, batch.Value, batch.InputNorm} {
 		if err := buffer.Close(); err != nil {
 			lastErr = err
 		}
@@ -1887,10 +1888,24 @@ func hipRunGemma4Q4PrefillAttentionBatchWorkspaceView(ctx context.Context, drive
 	if cfg.HeadDim <= 0 || cfg.QueryHeads <= 0 || firstPositiveInt(cfg.KeyHeads, 1) <= 0 {
 		return nil, core.E(hipGemma4Q4Layer0Operation, "prefill attention layer geometry mismatch", nil)
 	}
-	if layer == nil || layer.DeviceKV == nil || layer.DeviceKV.Cache == nil || layer.DeviceKV.DescriptorTable == nil {
-		return nil, core.E(hipGemma4Q4Layer0Operation, "prefill attention Q/K/V device buffers are required", nil)
+	if layer == nil {
+		return nil, core.E(hipGemma4Q4Layer0Operation, "prefill attention layer is required", nil)
 	}
 	queryCount := tokenCount * cfg.QueryHeads * cfg.HeadDim
+	if layer.AttentionOverride != nil {
+		override := layer.AttentionOverride
+		if override.Pointer() == 0 || override.Count() != queryCount || override.SizeBytes() != uint64(queryCount*4) {
+			return nil, core.E(hipGemma4Q4Layer0Operation, "prefill attention override buffer shape mismatch", nil)
+		}
+		if view != nil {
+			*view = hipBorrowDeviceByteBufferValue(driver, "prefill attention override view", override.Pointer(), override.SizeBytes(), override.Count())
+			return view, nil
+		}
+		return hipBorrowDeviceByteBuffer(driver, "prefill attention override view", override.Pointer(), override.SizeBytes(), override.Count()), nil
+	}
+	if layer.DeviceKV == nil || layer.DeviceKV.Cache == nil || layer.DeviceKV.DescriptorTable == nil {
+		return nil, core.E(hipGemma4Q4Layer0Operation, "prefill attention Q/K/V device buffers are required", nil)
+	}
 	query := (*hipDeviceByteBuffer)(nil)
 	fusedQueryAttention := layer.QueryRMSRoPEAttention.Enabled
 	if fusedQueryAttention {
@@ -1954,6 +1969,19 @@ func hipRunGemma4Q4PrefillAttentionBatchWorkspaceView(ctx context.Context, drive
 	} else {
 		attentionReq.DeviceKV = layer.DeviceKV.Cache
 		attentionReq.DescriptorTable = layer.DeviceKV.DescriptorTable
+	}
+	if fusedQueryAttention && hipAttentionHeadsBatchChunkedEligible(attentionReq, workspace) {
+		queryOutput, workspaceErr := workspace.EnsureRMSRoPEOutput(driver, query.Count())
+		if workspaceErr != nil {
+			return nil, workspaceErr
+		}
+		fused := layer.QueryRMSRoPEAttention
+		err = hipRunRMSNormRoPEHeadsBatchKernelWithDeviceInputWeightConfigFrequencyScaleOutput(ctx, driver, query, fused.NormConfig, cfg.QueryHeads, tokenCount, fused.StartPosition, fused.Base, fused.FrequencyDim, fused.RotaryCount, fused.FrequencyScale, queryOutput)
+		if err != nil {
+			return nil, err
+		}
+		query = queryOutput
+		fusedQueryAttention = false
 	}
 	queryChunkTokens := hipGemma4Q4PrefillAttentionQueryChunkTokens()
 	if workspace != nil && queryChunkTokens > 0 && tokenCount > queryChunkTokens {
@@ -3162,11 +3190,8 @@ func hipRunGemma4Q4PrefillFinalGreedyBatchSuppressWorkspace(ctx context.Context,
 	if ownsFinalNorm {
 		defer finalNorm.Close()
 	}
-	for row := 0; row < tokenCount; row++ {
-		offset := nativeDevicePointer(row * cfg.HiddenSize * 4)
-		if err := hipRunRMSNormDeviceToDeviceKernelWithWorkspace(ctx, driver, hidden.Pointer()+offset, uint64(cfg.HiddenSize*4), finalNorm.Pointer()+offset, uint64(cfg.HiddenSize*4), finalNormCfg, workspace); err != nil {
-			return nil, err
-		}
+	if err := hipRunRMSNormHeadsKernelWithDeviceInputWeightConfigOutput(ctx, driver, hidden, finalNormCfg, tokenCount, finalNorm); err != nil {
+		return nil, err
 	}
 	var best *hipDeviceByteBuffer
 	if workspace != nil {

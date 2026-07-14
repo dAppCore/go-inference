@@ -10,6 +10,9 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
+	"dappco.re/go/inference/engine"
+	internalgguf "dappco.re/go/inference/engine/hip/internal/gguf"
+	modelgguf "dappco.re/go/inference/model/gguf"
 )
 
 func TestHIPTokenTextDecoder_Good_LoadEncodeDecode(t *testing.T) {
@@ -43,6 +46,97 @@ func TestHIPTokenTextDecoder_Good_LoadEncodeDecode(t *testing.T) {
 	core.AssertNotNil(t, loadHIPTokenTextDecoderIfPresent(path))
 	core.AssertNil(t, loadHIPTokenTextDecoderIfPresent(" "))
 	core.AssertNil(t, loadHIPTokenTextDecoderIfPresent(core.PathJoin(t.TempDir(), "missing.json")))
+}
+
+func TestHIPTokenTextDecoder_EngineTextTokenizer_Good(t *testing.T) {
+	decoder := &hipTokenTextDecoder{
+		vocab: map[string]int32{
+			"<turn|>":    106,
+			"<|channel>": 105,
+			"<channel|>": 107,
+			"▁world":     8,
+		},
+		pieces: map[int32]string{
+			106: "<turn|>",
+			105: "<|channel>",
+			107: "<channel|>",
+			8:   "▁world",
+		},
+		special: map[int32]bool{105: true, 106: true, 107: true},
+		specialText: map[string]int32{
+			"<turn|>":    106,
+			"<|channel>": 105,
+			"<channel|>": 107,
+		},
+		eosID:  106,
+		hasEOS: true,
+	}
+	decoder.precomputeDecodedPieces()
+
+	var tok engine.TextTokenizer = decoder
+	id, ok := tok.TokenID("<turn|>")
+	core.AssertTrue(t, ok)
+	core.AssertEqual(t, int32(106), id)
+	core.AssertEqual(t, int32(106), tok.EOS())
+	core.AssertEqual(t, "world", tok.DecodeOne(8))
+	core.AssertEqual(t, "<|channel>", tok.DecodeToken(105))
+	core.AssertEqual(t, "<channel|>", tok.DecodeToken(107))
+	core.AssertEqual(t, "", tok.DecodeToken(106))
+}
+
+func TestHIPTokenTextDecoder_GGUFMetadata_Good(t *testing.T) {
+	decoder, err := newHIPTokenTextDecoderFromGGUF(internalgguf.Metadata{
+		TokenizerModel:          "gemma4",
+		TokenizerTokens:         []string{"<pad>", "<eos>", "<bos>", "hello", "<turn|>", "<|channel>"},
+		TokenizerMerges:         []string{"h e", "he l", "hel l", "hell o"},
+		TokenizerTokenTypes:     []int32{3, 3, 3, 1, 3, 3},
+		TokenizerBOSID:          2,
+		TokenizerBOSIDSet:       true,
+		TokenizerEOSID:          4,
+		TokenizerEOSIDSet:       true,
+		TokenizerUnknownID:      1,
+		TokenizerUnknownIDSet:   true,
+		TokenizerAddBOS:         true,
+		TokenizerAddSpacePrefix: false,
+	})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, []int32{2, 3}, decoder.Encode("hello"))
+	core.AssertEqual(t, int32(4), decoder.EOS())
+	core.AssertEqual(t, "hello", decoder.DecodeOne(3))
+	core.AssertEqual(t, "<|channel>", decoder.DecodeToken(5))
+	core.AssertEqual(t, "", decoder.DecodeToken(4))
+}
+
+func TestHIPTokenTextDecoder_GGUFMetadata_Bad(t *testing.T) {
+	_, err := newHIPTokenTextDecoderFromGGUF(internalgguf.Metadata{
+		TokenizerTokens:     []string{"<bos>", "hello"},
+		TokenizerTokenTypes: []int32{3},
+	})
+	core.AssertError(t, err)
+	core.AssertContains(t, err.Error(), "token type count")
+}
+
+func TestHIPTokenTextDecoder_GGUFLoadConfig_Good(t *testing.T) {
+	path := core.PathJoin(t.TempDir(), "tokenizer.gguf")
+	metadata := []modelgguf.MetadataEntry{
+		{Key: "general.architecture", ValueType: modelgguf.ValueTypeString, Value: "gemma4"},
+		{Key: "gemma4.block_count", ValueType: modelgguf.ValueTypeUint32, Value: uint32(1)},
+		{Key: "tokenizer.ggml.model", ValueType: modelgguf.ValueTypeString, Value: "gemma4"},
+		{Key: "tokenizer.ggml.tokens", ValueType: modelgguf.ValueTypeArray, Value: []string{"<pad>", "<eos>", "<bos>", "hello", "<turn|>"}},
+		{Key: "tokenizer.ggml.merges", ValueType: modelgguf.ValueTypeArray, Value: []string{"h e", "he l", "hel l", "hell o"}},
+		{Key: "tokenizer.ggml.token_type", ValueType: modelgguf.ValueTypeArray, Value: []int32{3, 3, 3, 1, 3}},
+		{Key: "tokenizer.ggml.bos_token_id", ValueType: modelgguf.ValueTypeUint32, Value: uint32(2)},
+		{Key: "tokenizer.ggml.eos_token_id", ValueType: modelgguf.ValueTypeUint32, Value: uint32(4)},
+		{Key: "tokenizer.ggml.unknown_token_id", ValueType: modelgguf.ValueTypeUint32, Value: uint32(1)},
+		{Key: "tokenizer.ggml.add_bos_token", ValueType: modelgguf.ValueTypeBool, Value: true},
+	}
+	core.RequireNoError(t, modelgguf.WriteFile(path, metadata, nil))
+	runtime := &fakeNativeRuntime{available: true, model: &fakeNativeModel{}}
+	model, err := resultValue[inference.TextModel](newROCmBackendWithRuntime(runtime).LoadModel(path))
+	core.RequireNoError(t, err)
+	defer model.Close()
+	core.AssertNotNil(t, runtime.loadConfig.TokenText)
+	core.AssertEqual(t, []int32{2, 3}, runtime.loadConfig.TokenText.Encode("hello"))
 }
 
 func TestHIPTokenTextDecoder_Gemma4TextPromptPreservesGenerationNewline(t *testing.T) {

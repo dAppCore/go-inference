@@ -366,7 +366,7 @@ func DiscoverSequenceMixerSubpaths(names []string, numLayers int) SequenceMixerS
 	return rocmmodel.DiscoverSequenceMixerSubpaths(names, numLayers)
 }
 
-func rocmApplySequenceMixerSafetensorsPlanLabels(inspection *inference.ModelPackInspection, path string) error {
+func rocmApplySequenceMixerSafetensorsPackPlanLabels(inspection *inference.ModelPackInspection, paths []string) error {
 	if inspection == nil {
 		return nil
 	}
@@ -376,13 +376,18 @@ func rocmApplySequenceMixerSafetensorsPlanLabels(inspection *inference.ModelPack
 	if inspection.Labels["sequence_mixer_load_plan_candidate"] != "true" {
 		return nil
 	}
-	tensors, err := readROCmSafetensorsNativeTensors(path)
-	if err != nil {
-		return err
-	}
-	names := make([]string, 0, len(tensors))
-	for _, tensor := range tensors {
-		names = append(names, tensor.Name)
+	names := []string{}
+	for _, path := range paths {
+		if core.Lower(core.PathExt(path)) != ".safetensors" {
+			continue
+		}
+		tensors, err := readROCmSafetensorsNativeTensors(path)
+		if err != nil {
+			return err
+		}
+		for _, tensor := range tensors {
+			names = append(names, tensor.Name)
+		}
 	}
 	layerTypes := sequenceMixerLayerTypesFromLabels(inspection.Labels)
 	loadPlan, err := BuildSequenceMixerLoadPlan(layerTypes, names, inspection.Model.NumLayers)

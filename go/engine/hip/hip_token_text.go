@@ -12,6 +12,8 @@ import (
 	"unicode/utf8"
 
 	core "dappco.re/go"
+	"dappco.re/go/inference/decode/parser"
+	internalgguf "dappco.re/go/inference/engine/hip/internal/gguf"
 )
 
 type hipTokenTextDecoder struct {
@@ -24,6 +26,8 @@ type hipTokenTextDecoder struct {
 	specialText    map[string]int32
 	bosID          int32
 	hasBOS         bool
+	eosID          int32
+	hasEOS         bool
 	unknownID      int32
 	hasUnknown     bool
 }
@@ -32,6 +36,11 @@ type hipTokenTextMergePair struct {
 	left  string
 	right string
 }
+
+const (
+	hipGGUFTokenTypeControl     int32 = 3
+	hipGGUFTokenTypeUserDefined int32 = 4
+)
 
 type hipTokenTextDecoderJSON struct {
 	Model struct {
@@ -93,6 +102,75 @@ func loadHIPTokenTextDecoder(path string) (*hipTokenTextDecoder, error) {
 	if bosID, ok := decoder.vocab["<bos>"]; ok {
 		decoder.bosID = bosID
 		decoder.hasBOS = true
+	}
+	if eosID, ok := decoder.vocab["<turn|>"]; ok {
+		decoder.eosID = eosID
+		decoder.hasEOS = true
+	} else if eosID, ok := decoder.vocab["<eos>"]; ok {
+		decoder.eosID = eosID
+		decoder.hasEOS = true
+	}
+	decoder.precomputeDecodedPieces()
+	return decoder, nil
+}
+
+func newHIPTokenTextDecoderFromGGUF(metadata internalgguf.Metadata) (*hipTokenTextDecoder, error) {
+	if len(metadata.TokenizerTokens) == 0 {
+		return nil, core.NewError("hip.TokenText.GGUF: tokenizer token table is empty")
+	}
+	if len(metadata.TokenizerTokenTypes) != 0 && len(metadata.TokenizerTokenTypes) != len(metadata.TokenizerTokens) {
+		return nil, core.Errorf("hip.TokenText.GGUF: token type count %d does not match token count %d", len(metadata.TokenizerTokenTypes), len(metadata.TokenizerTokens))
+	}
+	decoder := &hipTokenTextDecoder{
+		vocab:       make(map[string]int32, len(metadata.TokenizerTokens)),
+		pieces:      make(map[int32]string, len(metadata.TokenizerTokens)),
+		mergeRanks:  make(map[string]int, len(metadata.TokenizerMerges)),
+		special:     make(map[int32]bool),
+		specialText: make(map[string]int32),
+	}
+	for id, piece := range metadata.TokenizerTokens {
+		tokenID := int32(id)
+		decoder.vocab[piece] = tokenID
+		decoder.pieces[tokenID] = piece
+		if len(metadata.TokenizerTokenTypes) == 0 {
+			continue
+		}
+		switch metadata.TokenizerTokenTypes[id] {
+		case hipGGUFTokenTypeControl:
+			decoder.special[tokenID] = true
+			decoder.specialText[piece] = tokenID
+		case hipGGUFTokenTypeUserDefined:
+			decoder.specialText[piece] = tokenID
+		}
+	}
+	for rank, merge := range metadata.TokenizerMerges {
+		left, right, ok := strings.Cut(merge, " ")
+		if !ok || left == "" || right == "" {
+			return nil, core.Errorf("hip.TokenText.GGUF: malformed merge %d", rank)
+		}
+		decoder.mergeRanks[left+" "+right] = rank
+	}
+	decoder.mergePairRanks = hipTokenTextMergePairRanks(decoder.mergeRanks)
+	if metadata.TokenizerBOSIDSet {
+		if int(metadata.TokenizerBOSID) >= len(metadata.TokenizerTokens) {
+			return nil, core.NewError("hip.TokenText.GGUF: BOS token id is outside the token table")
+		}
+		decoder.bosID = int32(metadata.TokenizerBOSID)
+		decoder.hasBOS = metadata.TokenizerAddBOS
+	}
+	if metadata.TokenizerEOSIDSet {
+		if int(metadata.TokenizerEOSID) >= len(metadata.TokenizerTokens) {
+			return nil, core.NewError("hip.TokenText.GGUF: EOS token id is outside the token table")
+		}
+		decoder.eosID = int32(metadata.TokenizerEOSID)
+		decoder.hasEOS = true
+	}
+	if metadata.TokenizerUnknownIDSet {
+		if int(metadata.TokenizerUnknownID) >= len(metadata.TokenizerTokens) {
+			return nil, core.NewError("hip.TokenText.GGUF: unknown token id is outside the token table")
+		}
+		decoder.unknownID = int32(metadata.TokenizerUnknownID)
+		decoder.hasUnknown = true
 	}
 	decoder.precomputeDecodedPieces()
 	return decoder, nil
@@ -467,7 +545,14 @@ func (decoder *hipTokenTextDecoder) Decode(ids []int32) string {
 }
 
 func (decoder *hipTokenTextDecoder) DecodeToken(id int32) string {
-	if decoder == nil || decoder.special[id] {
+	if decoder == nil {
+		return ""
+	}
+	if decoder.special[id] {
+		piece := decoder.pieces[id]
+		if hipTokenTextStreamingSpecial(piece) {
+			return piece
+		}
 		return ""
 	}
 	if id >= 0 && int(id) < len(decoder.decodedPieces) {
@@ -480,6 +565,40 @@ func (decoder *hipTokenTextDecoder) DecodeToken(id int32) string {
 		return ""
 	}
 	return hipDecodeTokenTextRaw(piece)
+}
+
+func hipTokenTextStreamingSpecial(piece string) bool {
+	switch piece {
+	case parser.ChannelOpenMarker,
+		parser.ChannelCloseMarker,
+		parser.ToolCallOpenMarker,
+		parser.ToolCallCloseMarker,
+		parser.ToolArgQuoteMarker:
+		return true
+	}
+	return false
+}
+
+func (decoder *hipTokenTextDecoder) DecodeOne(id int32) string {
+	if decoder == nil || decoder.special[id] {
+		return ""
+	}
+	return strings.TrimPrefix(decoder.DecodeToken(id), " ")
+}
+
+func (decoder *hipTokenTextDecoder) TokenID(text string) (int32, bool) {
+	if decoder == nil {
+		return 0, false
+	}
+	id, ok := decoder.vocab[text]
+	return id, ok
+}
+
+func (decoder *hipTokenTextDecoder) EOS() int32 {
+	if decoder == nil || !decoder.hasEOS {
+		return -1
+	}
+	return decoder.eosID
 }
 
 func hipDecodeTokenTextRaw(raw string) string {

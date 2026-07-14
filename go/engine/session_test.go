@@ -26,6 +26,60 @@ type stateRestorer interface {
 
 var _ stateRestorer = (*SessionHandle)(nil)
 
+type contextAwareFakeSession struct {
+	fakeSession
+	greedyCtx  context.Context
+	sampledCtx context.Context
+}
+
+type multiBlockFakeSession struct{ fakeSession }
+
+func (s *multiBlockFakeSession) RangeKVBlocks(_ int, _ kv.CaptureOptions, yield func(kv.Block) (bool, error)) error {
+	for index := 0; index < 2; index++ {
+		cont, err := yield(kv.Block{Index: index, TokenStart: index})
+		if err != nil || !cont {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *contextAwareFakeSession) GenerateFromCacheEachContext(ctx context.Context, maxNew, eosID int, yield func(int32) bool) ([]int32, error) {
+	s.greedyCtx = ctx
+	return s.fakeSession.GenerateFromCacheEach(maxNew, eosID, yield)
+}
+
+func (s *contextAwareFakeSession) GenerateSampledFromCacheEachContext(ctx context.Context, maxNew int, stopTokens []int32, sampler *model.Sampler, params model.SampleParams, transform model.TokenTransform, yield func(int32) bool) ([]int32, error) {
+	s.sampledCtx = ctx
+	return s.fakeSession.GenerateSampledFromCacheEach(maxNew, stopTokens, sampler, params, transform, yield)
+}
+
+func TestSession_ContextAwareDecode_Good(t *testing.T) {
+	ctx := context.WithValue(context.Background(), struct{}{}, "decode")
+	sess := &contextAwareFakeSession{fakeSession: fakeSession{genIDs: []int32{7}}}
+	_, err := generateFromCacheEach(ctx, sess, 1, -1, func(int32) bool { return true })
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, ctx, sess.greedyCtx)
+
+	_, err = generateSampledFromCacheEach(ctx, sess, 1, nil, model.NewSampler(1), model.SampleParams{Temperature: 1}, nil, func(int32) bool { return true })
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, ctx, sess.sampledCtx)
+}
+
+func TestSession_RangeKVBlocks_Cancellation_Good(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sess := &multiBlockFakeSession{fakeSession: fakeSession{pos: 2}}
+	handle := NewSessionHandle(newTestModel(t, &fakeTokenModel{}), sess)
+	blocks := 0
+	err := handle.RangeKVBlocks(ctx, 1, kv.CaptureOptions{}, func(kv.Block) (bool, error) {
+		blocks++
+		cancel()
+		return true, nil
+	})
+	core.AssertErrorIs(t, err, context.Canceled)
+	core.AssertEqual(t, 1, blocks)
+}
+
 // --- conformance -----------------------------------------------------------
 
 // TestSession_SessionHandle_Conformance runs the shared enginetest.SessionHandle

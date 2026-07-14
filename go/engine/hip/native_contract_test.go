@@ -1618,12 +1618,18 @@ func TestNativeContract_LoadModelSafetensorsGemma4UsesNativeRuntime_Good(t *test
 			"model_type":"gemma4_text",
 			"hidden_size":16,
 			"num_hidden_layers":1,
+			"intermediate_size":32,
+			"num_attention_heads":2,
+			"num_key_value_heads":1,
+			"head_dim":8,
+			"sliding_window":512,
 			"max_position_embeddings":8192,
+			"layer_types":["full_attention"],
 			"vocab_size":8
 		}
 	}`)
-	header := `{"language_model.model.embed_tokens.weight":{"dtype":"U32","shape":[8,2],"data_offsets":[0,64]},"language_model.model.layers.0.input_layernorm.weight":{"dtype":"BF16","shape":[16],"data_offsets":[64,96]}}`
-	writeNativeContractSafetensorsHeaderWithPayload(t, core.PathJoin(dir, "model.safetensors"), header, 96)
+	header := `{"language_model.model.embed_tokens.weight":{"dtype":"U32","shape":[8,2],"data_offsets":[0,64]},"language_model.model.layers.0.input_layernorm.weight":{"dtype":"BF16","shape":[16],"data_offsets":[64,96]},"model.layers.0.self_attn.q_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[96,608]},"model.layers.0.self_attn.k_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[608,1120]},"model.layers.0.self_attn.v_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1120,1632]},"model.layers.0.self_attn.o_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[1632,2144]}}`
+	writeNativeContractSafetensorsHeaderWithPayload(t, core.PathJoin(dir, "model.safetensors"), header, 2144)
 	runtime := &fakeNativeRuntime{
 		available: true,
 		device:    nativeDeviceInfo{Name: "AMD Radeon RX 7800 XT", MemoryBytes: 16 * memoryGiB, FreeBytes: 12 * memoryGiB, Driver: "hip-test"},
@@ -1647,8 +1653,11 @@ func TestNativeContract_LoadModelSafetensorsGemma4UsesNativeRuntime_Good(t *test
 		runtime.loadConfig.ModelInfo.QuantGroup != 64 {
 		t.Fatalf("load config model = %+v, want Gemma4 text_config identity", runtime.loadConfig.ModelInfo)
 	}
-	if !runtime.loadConfig.TiedWordEmbeddings || runtime.loadConfig.ContextSize != 128 || len(runtime.loadConfig.Tensors) != 2 {
+	if !runtime.loadConfig.TiedWordEmbeddings || runtime.loadConfig.ContextSize != 128 || len(runtime.loadConfig.Tensors) != 6 {
 		t.Fatalf("load config = %+v, want tied Gemma4 safetensors tensor plan", runtime.loadConfig)
+	}
+	if !runtime.loadConfig.Gemma4Architecture.Matched() {
+		t.Fatalf("shared architecture = %+v, want matched Gemma4 declaration", runtime.loadConfig.Gemma4Architecture)
 	}
 	if runtime.loadConfig.DataOffset != int64(8+len(header)) {
 		t.Fatalf("data offset = %d, want %d", runtime.loadConfig.DataOffset, 8+len(header))
@@ -1671,6 +1680,7 @@ func TestNativeContract_LoadModelSafetensorsGemma4PropagatesTextRuntimeConfig_Go
 			"model_type":"gemma4_text",
 			"hidden_size":16,
 			"num_hidden_layers":6,
+			"intermediate_size":32,
 			"num_attention_heads":8,
 			"num_key_value_heads":1,
 			"num_global_key_value_heads":1,
@@ -1689,7 +1699,7 @@ func TestNativeContract_LoadModelSafetensorsGemma4PropagatesTextRuntimeConfig_Go
 			"max_position_embeddings":131072,
 			"sliding_window":1024,
 			"sliding_window_pattern":5,
-			"layer_types":["sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","sliding_attention"],
+			"layer_types":["sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","full_attention"],
 			"rope_parameters":{
 				"sliding_attention":{"rope_theta":10000.0,"rope_type":"default"},
 				"full_attention":{"partial_rotary_factor":0.25,"rope_theta":1000000.0,"rope_type":"proportional"}
@@ -1711,6 +1721,9 @@ func TestNativeContract_LoadModelSafetensorsGemma4PropagatesTextRuntimeConfig_Go
 	defer model.Close()
 
 	cfg := runtime.loadConfig.Gemma4TextConfig
+	if !runtime.loadConfig.Gemma4Architecture.Matched() {
+		t.Fatalf("shared architecture = %+v, want matched Gemma4 declaration", runtime.loadConfig.Gemma4Architecture)
+	}
 	core.AssertEqual(t, 6, cfg.NumLayers)
 	core.AssertEqual(t, []string{"sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention", "full_attention"}, cfg.LayerTypes)
 	core.AssertEqual(t, true, cfg.KVSharedLayersSet)
@@ -1943,10 +1956,21 @@ func TestNativeContract_LoadModelSafetensorsShardedPackUsesNativeRuntime_Good(t 
 		"model_type":"gemma4",
 		"tie_word_embeddings":true,
 		"quantization_config":{"bits":4,"group_size":64},
-		"text_config":{"hidden_size":16,"num_hidden_layers":1,"vocab_size":8}
+		"text_config":{
+			"hidden_size":16,
+			"num_hidden_layers":1,
+			"intermediate_size":32,
+			"num_attention_heads":2,
+			"num_key_value_heads":1,
+			"head_dim":8,
+			"sliding_window":512,
+			"max_position_embeddings":8192,
+			"layer_types":["full_attention"],
+			"vocab_size":8
+		}
 	}`)
-	writeNativeContractSafetensorsHeaderWithPayload(t, core.PathJoin(dir, "model-00001-of-00002.safetensors"), `{"language_model.model.embed_tokens.weight":{"dtype":"U32","shape":[8,2],"data_offsets":[0,64]}}`, 64)
-	writeNativeContractSafetensorsHeaderWithPayload(t, core.PathJoin(dir, "model-00002-of-00002.safetensors"), `{"language_model.model.layers.0.input_layernorm.weight":{"dtype":"BF16","shape":[16],"data_offsets":[0,32]}}`, 32)
+	writeNativeContractSafetensorsHeaderWithPayload(t, core.PathJoin(dir, "model-00001-of-00002.safetensors"), `{"language_model.model.embed_tokens.weight":{"dtype":"U32","shape":[8,2],"data_offsets":[0,64]},"model.layers.0.self_attn.q_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[64,576]},"model.layers.0.self_attn.k_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[576,1088]}}`, 1088)
+	writeNativeContractSafetensorsHeaderWithPayload(t, core.PathJoin(dir, "model-00002-of-00002.safetensors"), `{"language_model.model.layers.0.input_layernorm.weight":{"dtype":"BF16","shape":[16],"data_offsets":[0,32]},"model.layers.0.self_attn.v_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[32,544]},"model.layers.0.self_attn.o_proj.weight":{"dtype":"BF16","shape":[16,16],"data_offsets":[544,1056]}}`, 1056)
 	runtime := &fakeNativeRuntime{
 		available: true,
 		device:    nativeDeviceInfo{Name: "AMD Radeon RX 7800 XT", MemoryBytes: 16 * memoryGiB, FreeBytes: 12 * memoryGiB, Driver: "hip-test"},
@@ -1962,8 +1986,11 @@ func TestNativeContract_LoadModelSafetensorsShardedPackUsesNativeRuntime_Good(t 
 	if runtime.loadPath != dir {
 		t.Fatalf("loadPath = %q, want sharded model-pack dir", runtime.loadPath)
 	}
-	if runtime.loadConfig.DataOffset != 0 || !runtime.loadConfig.TiedWordEmbeddings || len(runtime.loadConfig.Tensors) != 2 {
+	if runtime.loadConfig.DataOffset != 0 || !runtime.loadConfig.TiedWordEmbeddings || len(runtime.loadConfig.Tensors) != 6 {
 		t.Fatalf("load config = %+v, want sharded safetensors tensor plan", runtime.loadConfig)
+	}
+	if !runtime.loadConfig.Gemma4Architecture.Matched() {
+		t.Fatalf("shared architecture = %+v, want matched Gemma4 declaration", runtime.loadConfig.Gemma4Architecture)
 	}
 	sourcePaths := map[string]bool{}
 	for _, tensor := range runtime.loadConfig.Tensors {

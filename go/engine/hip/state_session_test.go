@@ -420,6 +420,119 @@ func TestStateSession_Good_SleepWakeRuntimeOwnedKVBlockBundle(t *testing.T) {
 	assertFloat32SlicesNear(t, []float32{3, 2, 1, 0, -1, -2}, values, 0.02)
 }
 
+func TestStateSession_Good_SleepStateReusesParentPrefixBlocks(t *testing.T) {
+	store := state.NewInMemoryStore(nil)
+	model := inference.ModelIdentity{Hash: "model-a"}
+	parentCache, err := newROCmKVCache(rocmKVCacheModeQ8, 2)
+	core.RequireNoError(t, err)
+	core.RequireNoError(t, parentCache.AppendVectors(
+		0,
+		1,
+		1,
+		[]float32{1, 2, 3},
+		[]float32{3, 2, 1},
+	))
+	parentSession := newStateSessionWithRuntime(model, inference.TokenizerIdentity{}, nil, parentCache)
+	parent, err := parentSession.SleepState(context.Background(), inference.AgentMemorySleepRequest{
+		Store:    store,
+		EntryURI: "state://entry/reuse-parent",
+		Model:    model,
+		Encoding: rocmKVBlockBundleEncoding,
+	})
+	core.RequireNoError(t, err)
+
+	childCache, err := newROCmKVCache(rocmKVCacheModeQ8, 2)
+	core.RequireNoError(t, err)
+	core.RequireNoError(t, childCache.AppendVectors(
+		0,
+		1,
+		1,
+		[]float32{1, 2, 3, 4},
+		[]float32{3, 2, 1, 0},
+	))
+	childSession := newStateSessionWithRuntime(model, inference.TokenizerIdentity{}, nil, childCache)
+	child, err := childSession.SleepState(context.Background(), inference.AgentMemorySleepRequest{
+		Store:             store,
+		EntryURI:          "state://entry/reuse-child",
+		ParentEntryURI:    parent.Entry.URI,
+		ParentBundleURI:   parent.Bundle.URI,
+		ParentIndexURI:    parent.Index.URI,
+		ReuseParentPrefix: true,
+		Model:             model,
+		Encoding:          rocmKVBlockBundleEncoding,
+	})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 2, child.BlocksWritten)
+	core.AssertEqual(t, 1, child.BlocksReused)
+	core.AssertEqual(t, parent.Bundle.URI, child.Parent.BundleURI)
+
+	parentChunk, err := store.ResolveURI(context.Background(), parent.Bundle.URI)
+	core.RequireNoError(t, err)
+	childChunk, err := store.ResolveURI(context.Background(), child.Bundle.URI)
+	core.RequireNoError(t, err)
+	var parentManifest rocmKVBlockBundleSnapshot
+	var childManifest rocmKVBlockBundleSnapshot
+	core.RequireNoError(t, json.Unmarshal(parentChunk.Data, &parentManifest))
+	core.RequireNoError(t, json.Unmarshal(childChunk.Data, &childManifest))
+	core.AssertEqual(t, parentManifest.Blocks[0].State.ChunkID, childManifest.Blocks[0].State.ChunkID)
+	core.RequireTrue(t, parentManifest.Blocks[1].State.ChunkID != childManifest.Blocks[1].State.ChunkID)
+
+	woken := NewStateSession(model, inference.TokenizerIdentity{}, nil)
+	wake, err := woken.WakeState(context.Background(), inference.AgentMemoryWakeRequest{
+		Store:    store,
+		EntryURI: child.Entry.URI,
+		Model:    model,
+	})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 4, wake.PrefixTokens)
+	cache, ok := woken.runtime.(*rocmKVCache)
+	core.RequireTrue(t, ok)
+	core.RequireNoError(t, cache.AppendVectors(4, 1, 1, []float32{5}, []float32{-1}))
+	keys, values, err := cache.Restore(0, 5)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, []float32{1, 2, 3, 4, 5}, keys, 0.02)
+	assertFloat32SlicesNear(t, []float32{3, 2, 1, 0, -1}, values, 0.02)
+}
+
+func TestStateSession_Ugly_SleepStateReuseParentPrefixSkipsChangedBlocks(t *testing.T) {
+	store := state.NewInMemoryStore(nil)
+	model := inference.ModelIdentity{Hash: "model-a"}
+	parent := seedStateSessionKV(t, store, "state://entry/reuse-changed-parent", model, inference.TokenizerIdentity{})
+	childCache, err := newROCmKVCache(rocmKVCacheModeQ8, defaultROCmStateBlockSize)
+	core.RequireNoError(t, err)
+	core.RequireNoError(t, childCache.AppendVectors(0, 1, 1, []float32{4, 5, 6}, []float32{6, 5, 4}))
+	child, err := newStateSessionWithRuntime(model, inference.TokenizerIdentity{}, nil, childCache).SleepState(context.Background(), inference.AgentMemorySleepRequest{
+		Store:             store,
+		EntryURI:          "state://entry/reuse-changed-child",
+		ParentBundleURI:   parent.Bundle.URI,
+		ReuseParentPrefix: true,
+		Model:             model,
+		Encoding:          rocmKVBlockBundleEncoding,
+	})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 0, child.BlocksReused)
+
+	parentChunk, err := store.ResolveURI(context.Background(), parent.Bundle.URI)
+	core.RequireNoError(t, err)
+	childChunk, err := store.ResolveURI(context.Background(), child.Bundle.URI)
+	core.RequireNoError(t, err)
+	var parentManifest rocmKVBlockBundleSnapshot
+	var childManifest rocmKVBlockBundleSnapshot
+	core.RequireNoError(t, json.Unmarshal(parentChunk.Data, &parentManifest))
+	core.RequireNoError(t, json.Unmarshal(childChunk.Data, &childManifest))
+	core.RequireTrue(t, parentManifest.Blocks[0].State.ChunkID != childManifest.Blocks[0].State.ChunkID)
+
+	woken := NewStateSession(model, inference.TokenizerIdentity{}, nil)
+	_, err = woken.WakeState(context.Background(), inference.AgentMemoryWakeRequest{Store: store, EntryURI: child.Entry.URI, Model: model})
+	core.RequireNoError(t, err)
+	cache, ok := woken.runtime.(*rocmKVCache)
+	core.RequireTrue(t, ok)
+	keys, values, err := cache.Restore(0, 3)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, []float32{4, 5, 6}, keys, 0.02)
+	assertFloat32SlicesNear(t, []float32{6, 5, 4}, values, 0.02)
+}
+
 func TestStateSession_Good_Gemma4Q6ProductionLabelsSurviveSleepWake(t *testing.T) {
 	store := state.NewInMemoryStore(nil)
 	model := inference.ModelIdentity{
