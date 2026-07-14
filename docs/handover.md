@@ -1,3 +1,33 @@
+# NEXT WAKE (2026-07-17 — #393 slice 2: per-kernel receipts — the roofline is 792, the gap has numbers)
+
+## 2026-07-17 (#393 slice 2 — the in-tree kernel receipts)
+
+- THE HARNESS (kernel_receipts_bench_test.go): BenchmarkKernelReceipt_* —
+  one kernel per command buffer, N barriered dispatches at the REAL engine
+  shapes, GPU span from the cb's own GPUStart/EndTime ÷ N, ReportMetric
+  gpu-ns/op + GB/s. Deliberately NOT MTLCounterSampleBuffer (no counter
+  resolution/timestamp calibration needed for an isolated cb; counters
+  stay reserved for per-dispatch splits inside MIXED rounds — the
+  dappcore/apple fork is the likely home for those APIs).
+- FIRST RECEIPTS (M3 Ultra, -benchtime 3x):
+  * bf16 head gemv 262k×2048: 1.36ms, 792 GB/s — the REAL roofline
+    (the ~650 napkin was low; fat dispatches saturate the box).
+  * qmv attn 2816→4096 4bit: 11.5µs, 567 GB/s — fat qmv healthy.
+  * qmv expert down 704→2816: 6.3µs, 178 GB/s — the thin MoE dispatch
+    runs at ¼ the fat qmv's rate: #392's occupancy suspicion CONFIRMED
+    at kernel level.
+  * sdpa_vector kv=4096 (16h/8kv/hd256): 103µs, 326 GB/s.
+  * rmsnorm 2816: 3.8µs/op — the serialisation floor each thin barriered
+    op pays; the round is ~700 of them.
+- THE READ FOR #392: K=1 streams ~2.2GB/9.3ms ≈ 237 GB/s ≈ 30% of the
+  MEASURED roofline. The gap = thin-dispatch occupancy (expert downs at
+  178) + the ~4µs/op floor. Levers, evidence-ranked: MTP rows (fatten
+  every dispatch), expert-dispatch overlap (independent until the
+  weighted sum), and only then fusion (the floor share says which chains
+  pay). The Desktop .gputrace shows the same story in-situ.
+- Run: MLX_METALLIB_PATH=… go test -tags metal_runtime -run '^$'
+  -bench BenchmarkKernelReceipt -benchtime 3x ./engine/metal/
+
 # NEXT WAKE (2026-07-17 — #393 slice 1: the GPU capture trigger — kernel-level sight, first 26B trace on the Desktop)
 
 ## 2026-07-17 (#393 — the kernel instrument, slice 1: programmatic Metal capture)
