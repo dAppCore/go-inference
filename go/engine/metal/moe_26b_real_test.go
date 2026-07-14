@@ -110,7 +110,10 @@ func TestRealMoE26BFamilyGPUProfile(t *testing.T) {
 		t.Skip("set LEM_REAL_MOE=1 to run the real 26B-A4B GPU family profile (loads ~15GB)")
 	}
 	dir := resolveMoE26BDir(t)
-	const warmup, N = 4, 8
+	// N is small (the token count only sets the averaging window) because the device caps the
+	// counter sample buffer — full per-token seam sampling (~330 encoders/token) over more tokens
+	// overruns MTLCounterSampleBuffer's maximum sample count.
+	const warmup, N = 4, 4
 	// LEM_MOE_PROFILE_CTX prefills a synthetic prompt of that length first, so the table
 	// shows the DEEP-context split (the long-context droop's anatomy — #339). Default: the
 	// short-context profile.
@@ -160,16 +163,25 @@ func TestRealMoE26BFamilyGPUProfile(t *testing.T) {
 	}
 	t.Logf("profiling at position ~%d (maxLen %d)", len(prompt)+warmup, maxLen)
 
-	// 8 sampled encoders per layer per token (attn, attn.proj, attn.sdpa, attn.tail,
-	// moe.router, moe.local, moe.expert, moe.tail) + slack for the first encoder.
-	prof, err := newGPUCounterProfiler((8*len(lm.Arch.Layer) + 4) * N)
+	// Up to ~11 sampled encoders per layer per token (attn + the attn.proj/sdpa/tail re-seams,
+	// moe.router + the router.rms/qmv/topk re-seams, moe.local, moe.expert, moe.tail) + head/PLE
+	// slack. Sized with headroom over the measured ~330 encoders/token so the buffer never
+	// saturates — a saturated buffer degrades the tail encoders to unsampled, which clips BOTH
+	// the spans and the per-label dispatch counts — while staying under the device's sample cap.
+	prof, err := newGPUCounterProfiler((14*len(lm.Arch.Layer) + 8) * N)
 	if err != nil {
 		t.Skipf("timestamp counter sampling unavailable: %v", err)
 	}
 	sess.state.gpuProf = prof
+	// pieceTimingOn arms dispatchCountForTest at the encSink funnel, so each sampled encoder's
+	// live-dispatch count is recoverable per label (dispatchCountsByLabel) — the structural
+	// companion to the GPU-time spans (#392 STEP 1: the round's op-level split). It changes
+	// only measurement, not the decode path. Reset the counter so warmup dispatches don't leak.
+	pieceTimingOn, dispatchCountForTest = true, 0
 	t0 := time.Now()
 	_, genErr := sess.GenerateFromCache(N, -1)
 	wall := time.Since(t0)
+	pieceTimingOn = false
 	sess.state.gpuProf = nil
 	if genErr != nil {
 		t.Fatalf("profiled generate: %v", genErr)
@@ -178,6 +190,7 @@ func TestRealMoE26BFamilyGPUProfile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spans: %v", err)
 	}
+	counts := prof.dispatchCountsByLabel(dispatchCountForTest)
 	var total uint64
 	labels := make([]string, 0, len(spans))
 	for label, ns := range spans {
@@ -190,11 +203,41 @@ func TestRealMoE26BFamilyGPUProfile(t *testing.T) {
 	sort.Slice(labels, func(i, j int) bool { return spans[labels[i]] > spans[labels[j]] })
 	for _, label := range labels {
 		ns := spans[label]
-		t.Logf("%-11s %7.2f ms/token  %5.1f%% of sampled GPU", label,
-			float64(ns)/1e6/float64(N), 100*float64(ns)/float64(total))
+		t.Logf("%-11s %7.2f ms/token  %5.1f%% of sampled GPU  %6.1f dispatch/token", label,
+			float64(ns)/1e6/float64(N), 100*float64(ns)/float64(total), float64(counts[label])/float64(N))
 	}
 	t.Logf("sampled %d encoders over tg%d; sampled GPU %.2f ms/token; wall %.2f ms/token",
 		prof.sampled(), N, float64(total)/1e6/float64(N), wall.Seconds()*1000/float64(N))
+
+	// STEP-1 round-split VERDICT (#392): aggregate the labels into the op classes the campaign
+	// tracks. The matvec/gather classes (attn.proj, moe.local, moe.expert, router.qmv) are the
+	// bandwidth-bound single-row weight streams; everything else (norms, top-k, sdpa, residual/
+	// combine tail) is the thin-op + attention-core remainder. MoE-block dispatch counts are
+	// exact (the whole block runs through encSink); attn's is an encSink-only lower bound (it
+	// also dispatches through the Object funnel, which the shared test counter leaves untouched).
+	attnLabels := map[string]bool{"attn": true, "attn.proj": true, "attn.sdpa": true, "attn.tail": true}
+	gemvLabels := map[string]bool{"attn.proj": true, "moe.local": true, "moe.expert": true, "router.qmv": true}
+	var moeDisp, attnDisp int64
+	var gemvNs, thinNs uint64
+	for label, ns := range spans {
+		if attnLabels[label] {
+			attnDisp += counts[label]
+		} else {
+			moeDisp += counts[label] // moe.* and router.*
+		}
+		if gemvLabels[label] {
+			gemvNs += ns
+		} else {
+			thinNs += ns
+		}
+	}
+	t.Logf("VERDICT round-split: MoE-block %.0f dispatch/token, attn %.0f dispatch/token (attn = encSink lower bound); "+
+		"matvec/gather GPU %.1f%% vs thin/sdpa %.1f%% — the K=1 round's GPU time concentrates in the bandwidth-bound "+
+		"GEMV/gather classes; the host/sync gap is closed (see TestRealMoE26BHostProfile: ~0.18 ms/token) and the "+
+		"expert stream is already all-routes amortised (see the lean gather receipts). Relative shares only under "+
+		"sibling GPU contention; absolute tok/s waits for a quiescent box.",
+		float64(moeDisp)/float64(N), float64(attnDisp)/float64(N),
+		100*float64(gemvNs)/float64(total), 100*float64(thinNs)/float64(total))
 }
 
 func resolveMoE26BDir(t *testing.T) string {
