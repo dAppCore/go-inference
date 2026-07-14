@@ -36,6 +36,19 @@ costing time when forgotten.
 - **Prompt reuse under q8** works via the canonical per-token landing
   (engine.CanonicalLandingSession, resident reuse lane only) — byte-identical
   receipts; tile-position sensitivity is the root cause, upstream of q8.
+- **q8 sleep/wake is bit-exact:** snapshots carry the store's raw int8
+  codes + f32 scales (kv.KVNativeDTypeQ8 — additive, no version bump, bf16
+  snapshots unchanged); restore lands them verbatim AND auto-arms canonical
+  landing, so a woken session appends like the resident reuse lane. 31B
+  probe: canonical wake == stateless over 48 tokens
+  (TestProbeStateWakeParity; the batched arm keeps the wobble diagnostic).
+- **Composed lane is complete, not parked:** trusted-prefix block tiling,
+  multi-turn `-state` (honest-replay contract — the hybrid's resumable
+  state IS the token prefix), graceful degrade both halves, live multi-turn
+  serve gate (serving/continuity/live_gate_metal_test.go), and the fuse
+  ladder fully climbed — 25 CBs per decode token, 24 fused + 1 structurally
+  irreducible (layer-0 input; census + L=1 hermetic engagement guard in
+  composed_decode_census_test.go).
 - **Training:** GPU cross-entropy (lthn_softmax_xent_rows_f32) — host 457ms
   → GPU 28.6ms at T=128; full SFT step 356ms (was 3.64s). **Coupling: a new
   Metal kernel needs BOTH `task metallib:kernels` AND `task build:embed`** or
@@ -77,23 +90,23 @@ costing time when forgotten.
    and the proxy's io v0.14.0 content differs from the repo's go/v0.14.0
    tag (divergence noticed while re-pinning core/gui submodules). Cut a
    fresh tag and re-pin consumers.
-3. **`-state` persistent-session lane:** adopt SetReuseCanonicalLanding IF
-   it shows the q8 tile-position wobble (#397 left deliberately unwired).
-4. **Welfare mediator output is emitted verbatim** — add a formatting pass
+3. **Welfare mediator output is emitted verbatim** — add a formatting pass
    when welfare is next touched (#376 era).
-5. **#378 plans-repo spec write** (docs debt; deferred with snider's ok).
-6. **Codex-lane flags (engine/hip, raise at next contact, do not fix
+4. **#378 plans-repo spec write** (docs debt; deferred with snider's ok).
+5. **Codex-lane flags (engine/hip, raise at next contact, do not fix
    cross-fence):** `go vet ./engine/hip` exits 1 — unsafe.Pointer ×5 in
    hip_driver_cgo.go (4 pre-existing + 1 from the 2026-07 stint); the
    vision/bidir pooling forward is UNARMED pending a real unified-vision
    receipt; hip now carries `internal/gguf` (minimal reader — fine as
    engine-internal, watch drift vs the shared gguf home).
-7. **Parked (composed lane — only if it returns to the hot path):**
-   RangeKVBlocks sleep-lane block tiling + live multi-turn serve gate;
-   composed multi-turn `-state`; graceful degrade when composed sleep
-   declines; the composed fuse ladder (gated-delta/attention/whole-layer).
-   The ArchSession mainline superseded this lane; #391 declared the
-   chained-vs-host ≤3-ulp residual as accumulation-order noise.
+6. **Block/disk lane still double-quantises q8:** the bit-exact raw-q8
+   snapshot fix covers CaptureKVWithOptions/RestoreKV (the -state
+   sleep/wake path); RangeKVBlocks/RestoreKVBlocks/SaveStateBlocks have
+   their own bf16/TurboQuant machinery and were deliberately left — fix as
+   a separate unit if the disk/block lane needs bit-exact q8.
+7. **Composed live serve gate has only run on gemma4** — no composed-arch
+   (Qwen-hybrid) checkpoint is on this Mac; the gate is engine-agnostic,
+   point LTHN_PROBE_MODEL at one when it lands.
 
 ## Operational notes (the ones that keep costing time)
 
