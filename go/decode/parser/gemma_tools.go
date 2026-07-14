@@ -168,6 +168,14 @@ func RenderGemmaToolCall(name, argumentsJSON string) string {
 	return b.String()
 }
 
+// RenderGemmaToolResponse wraps a tool's result as the <|tool_response> span a
+// gemma4 model reads to continue after its call — the wire form the OpenAI
+// (role "tool") and Anthropic (tool_result) handlers hand back. content is the
+// tool's output, verbatim.
+func RenderGemmaToolResponse(content string) string {
+	return ToolResponseOpenMarker + content + ToolResponseCloseMarker
+}
+
 // writeGemmaObject writes a decoded JSON object as a gemma tool-arg body {k:v,…}
 // into b; keys are sorted so the render is deterministic. The recursion threads
 // the single caller builder rather than each level allocating its own builder +

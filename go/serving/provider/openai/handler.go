@@ -517,7 +517,7 @@ func renderOpenAITools(tools []Tool, architecture ...string) string {
 // re-rendered.
 func openAIMessageContent(msg ChatMessage) string {
 	if msg.Role == "tool" {
-		return "<|tool_response>" + msg.Content + "<tool_response|>"
+		return parser.RenderGemmaToolResponse(msg.Content)
 	}
 	// A prior assistant turn that made tool calls: re-render each call into its
 	// <|tool_call> span so a STATELESS client replaying full history keeps the

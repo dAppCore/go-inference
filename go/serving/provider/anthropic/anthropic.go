@@ -453,7 +453,7 @@ func renderBlock(b ContentBlock) string {
 	case "", "text":
 		return b.Text
 	case "tool_result":
-		return "<|tool_response>" + b.Text + "<tool_response|>"
+		return parser.RenderGemmaToolResponse(b.Text)
 	case "tool_use":
 		return parser.RenderGemmaToolCall(b.Name, string(core.AsBytes(core.JSONMarshalString(b.Input))))
 	default:

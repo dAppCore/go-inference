@@ -91,14 +91,14 @@ func main() {
 	fmt.Printf("model called %s(%s) -> %s\n", call.Name, call.ArgumentsJSON, result)
 
 	// Re-render the model's own call into its wire form (RenderGemmaToolCall)
-	// and answer it with a role:"tool" message wrapped in <|tool_response> —
+	// and answer it with a role:"tool" message via RenderGemmaToolResponse —
 	// the exact convention serving/provider/openai and /anthropic use to reply
 	// to a tool_result turn. This example is a stateless client replaying full
 	// history, so both turns are appended rather than relying on server-side
 	// KV continuity.
 	messages = append(messages,
 		inference.Message{Role: "assistant", Content: visible + parser.RenderGemmaToolCall(call.Name, call.ArgumentsJSON)},
-		inference.Message{Role: "tool", Content: "<|tool_response>" + result + "<tool_response|>"},
+		inference.Message{Role: "tool", Content: parser.RenderGemmaToolResponse(result)},
 	)
 	final := chat(m, messages)
 	if er := m.Err(); !er.OK {

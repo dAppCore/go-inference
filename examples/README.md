@@ -30,10 +30,16 @@ library; the comments in each file are the documentation.
 | `pkg/trace` | per-token decode phase timing (`DecodePhases`) |
 | `pkg/metrics-sink` | request-scoped usage under concurrent generations |
 | `pkg/adapter` | load a LoRA adapter produced by `train/sft` |
+| `pkg/tools` | function calling — declare, parse, execute, respond |
+| `pkg/embed` | text embeddings via the host BERT encoder (no GPU) |
+| `pkg/rerank` | query-vs-documents scoring (RAG's second half) |
+| `pkg/tokenizer` | encode/decode and token counting (no GPU) |
+| `pkg/quantise` | programmatic quantisation to GGUF recipes |
 | `pkg/benchmark` | `Metrics()` — prefill/decode tok/s, token counts, peak GPU memory |
 | `pkg/eval` | `Classify()` — batched one-token labels as a minimal eval harness |
 | `pkg/backends` | the backend registry; pinning with `WithBackend` |
 | `pkg/serve` | embed the OpenAI-compatible server in your own app |
+| `pkg/serve/multimodel` | several resident models, aliases, memory ceiling |
 | `pkg/state` | durable KV-state turns — the no-prompt-replay loop |
 | `pkg/train/ssd` | self-distillation sampling: capture a trace (no training) |
 | `pkg/train/sft` | LoRA fine-tuning on `{"messages"}` rows, adapter out |

@@ -234,3 +234,17 @@ func TestGemmaTools_SupportsToolSyntax_Ugly(t *testing.T) {
 		t.Fatal(`SupportsToolSyntax("prefix_gemma4_suffix") = false, want true (contiguous "gemma4" run anywhere in the string)`)
 	}
 }
+
+// TestRenderGemmaToolResponse pins the tool-result wire form: the content
+// wrapped verbatim in the response markers — the span the compat handlers
+// (OpenAI role "tool", Anthropic tool_result) hand back to the model.
+func TestRenderGemmaToolResponse(t *testing.T) {
+	got := RenderGemmaToolResponse(`{"temp": "12C"}`)
+	want := ToolResponseOpenMarker + `{"temp": "12C"}` + ToolResponseCloseMarker
+	if got != want {
+		t.Fatalf("RenderGemmaToolResponse = %q, want %q", got, want)
+	}
+	if empty := RenderGemmaToolResponse(""); empty != ToolResponseOpenMarker+ToolResponseCloseMarker {
+		t.Fatalf("empty content = %q, want bare markers", empty)
+	}
+}

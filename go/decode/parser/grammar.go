@@ -35,6 +35,12 @@ const (
 	// arguments (a single vocab token, not a literal quote), so a value carrying
 	// a comma or brace doesn't break the argument scan.
 	ToolArgQuoteMarker = "<|\"|>"
+	// ToolResponseOpenMarker / ToolResponseCloseMarker wrap a tool's RESULT fed
+	// back to the model — the span a gemma4 model reads to continue after its
+	// call. RenderGemmaToolResponse builds it; the OpenAI (role "tool") and
+	// Anthropic (tool_result) handlers hand it back through that helper.
+	ToolResponseOpenMarker  = "<|tool_response>"
+	ToolResponseCloseMarker = "<tool_response|>"
 )
 
 // PairedMarker is an explicit open/close reasoning span (`<think>…</think>`).

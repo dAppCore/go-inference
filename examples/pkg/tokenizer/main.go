@@ -45,5 +45,7 @@ func main() {
 
 	// DecodeToken renders a single id — the per-token path a streaming
 	// generation loop calls once for every emitted token.
-	fmt.Printf("token %d decodes to %q\n", ids[0], tok.DecodeToken(ids[0]))
+	// ids[0] is usually BOS (decodes empty), so demo a content token.
+	mid := ids[len(ids)/2]
+	fmt.Printf("token %d decodes to %q\n", mid, tok.DecodeToken(mid))
 }
