@@ -402,6 +402,40 @@ func TestSession_SessionHandle_CaptureKV_Ugly(t *testing.T) {
 	}
 }
 
+func TestSession_SessionHandle_CaptureKVWithOptions_Good(t *testing.T) {
+	m := newTestModel(t, &fakeTokenModel{})
+	sess := &fakeSession{pos: 3}
+	handle := NewSessionHandle(m, sess)
+	opts := kv.CaptureOptions{RawKVOnly: true, BlockStartToken: 2}
+	snapshot, err := handle.CaptureKVWithOptions(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("CaptureKVWithOptions: %v", err)
+	}
+	if snapshot == nil || snapshot.SeqLen != 3 {
+		t.Fatalf("CaptureKVWithOptions snapshot = %+v, want 3 retained tokens", snapshot)
+	}
+	if sess.captureOpts != opts {
+		t.Fatalf("CaptureKVWithOptions forwarded %+v, want %+v", sess.captureOpts, opts)
+	}
+}
+
+func TestSession_SessionHandle_CaptureKVWithOptions_Bad(t *testing.T) {
+	m := newTestModel(t, &fakeTokenModel{})
+	handle := NewSessionHandle(m, &fakeSession{pos: 1})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := handle.CaptureKVWithOptions(ctx, kv.CaptureOptions{})
+	core.AssertErrorIs(t, err, context.Canceled)
+}
+
+func TestSession_SessionHandle_CaptureKVWithOptions_Ugly(t *testing.T) {
+	m := newTestModel(t, &fakeTokenModel{})
+	handle := NewSessionHandle(m, &fakeSession{pos: 1, captureErr: core.NewError("capture failed")})
+	if _, err := handle.CaptureKVWithOptions(context.Background(), kv.CaptureOptions{}); err == nil {
+		t.Fatal("CaptureKVWithOptions must propagate the engine capture failure")
+	}
+}
+
 // --- RangeKVBlocks ---------------------------------------------------------
 
 // TestSession_SessionHandle_RangeKVBlocks_Good pins the streaming path: at

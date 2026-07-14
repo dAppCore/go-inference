@@ -490,6 +490,9 @@ func (s *hipEngineSession) CaptureKVWithOptions(opts kv.CaptureOptions) (*kv.Sna
 	if s.closed {
 		return nil, core.NewError("hip.EngineSession.CaptureKVWithOptions: session is closed")
 	}
+	if opts.BlockStartToken < 0 {
+		return nil, core.NewError("hip.EngineSession.CaptureKVWithOptions: block start token must be non-negative")
+	}
 	if len(s.pendingEmbeddings) > 0 {
 		return nil, core.NewError("hip.EngineSession.CaptureKVWithOptions: custom embeddings must be forwarded before state capture")
 	}

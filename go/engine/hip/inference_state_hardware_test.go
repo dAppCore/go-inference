@@ -55,6 +55,46 @@ func TestHIPGemma4ExactStateContinuityHardware_Good(t *testing.T) {
 
 	ctx := context.Background()
 	prompt := "Answer with one word: what color is a clear daytime sky?"
+	snapshotter, ok := any(model).(inference.KVSnapshotter)
+	if !ok {
+		t.Fatal("production ROCm model does not expose model-level KV capture")
+	}
+	modelSnapshot, err := snapshotter.CaptureKV(ctx, prompt, inference.KVSnapshotCaptureOptions{RawKVOnly: true})
+	if err != nil {
+		t.Fatalf("model CaptureKV: %v", err)
+	}
+	if len(modelSnapshot.Tokens) == 0 || len(modelSnapshot.Layers) == 0 {
+		t.Fatalf("model CaptureKV produced incomplete retained state: %+v", modelSnapshot)
+	}
+	modelRestored := model.NewSession()
+	coldPrefill := model.NewSession()
+	if modelRestored == nil || coldPrefill == nil {
+		t.Fatal("production ROCm model returned nil model-capture receipt sessions")
+	}
+	defer func() { _ = modelRestored.Close() }()
+	defer func() { _ = coldPrefill.Close() }()
+	modelRestorer, ok := modelRestored.(inference.KVRestorer)
+	if !ok {
+		t.Fatal("model-capture receipt session does not implement KV restore")
+	}
+	if err := modelRestorer.RestoreFromKV(ctx, modelSnapshot); err != nil {
+		t.Fatalf("restore model-level KV capture: %v", err)
+	}
+	if err := coldPrefill.Prefill(ctx, prompt); err != nil {
+		t.Fatalf("cold receipt Prefill: %v", err)
+	}
+	modelCaptureTokens := collectHIPHardwareTokens(modelRestored.Generate(ctx, inference.GenerateConfig{MaxTokens: 2}))
+	coldTokens := collectHIPHardwareTokens(coldPrefill.Generate(ctx, inference.GenerateConfig{MaxTokens: 2}))
+	if err := modelRestored.Err(); err != nil {
+		t.Fatalf("model-capture receipt Generate: %v", err)
+	}
+	if err := coldPrefill.Err(); err != nil {
+		t.Fatalf("cold receipt Generate: %v", err)
+	}
+	if len(modelCaptureTokens) == 0 || !slices.Equal(modelCaptureTokens, coldTokens) {
+		t.Fatalf("model-level KV continuation = %v, want cold prefill %v", modelCaptureTokens, coldTokens)
+	}
+
 	appendPrompt := "\nNow answer with one word: what follows Monday?"
 	appendIDs, err := model.Tokenize(appendPrompt)
 	if err != nil {

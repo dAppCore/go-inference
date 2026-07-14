@@ -229,6 +229,12 @@ func TestHipEngineSession_CaptureKVWithOptions_Bad_RejectsUnforwardedEmbeddings(
 	core.AssertContains(t, err.Error(), "custom embeddings")
 }
 
+func TestHipEngineSession_CaptureKVWithOptions_Bad_RejectsNegativeBlockStart(t *testing.T) {
+	session := hipEngineSessionForTest([]int32{1})
+	_, err := session.CaptureKVWithOptions(kv.CaptureOptions{BlockStartToken: -1})
+	core.AssertError(t, err)
+}
+
 func hipEngineSessionWithNonCanonicalDeviceKVForTest(t testing.TB) *hipEngineSession {
 	t.Helper()
 	driver := &fakeHIPDriver{available: true}

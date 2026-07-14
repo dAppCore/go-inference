@@ -16,6 +16,20 @@ import (
 	sharedmodel "dappco.re/go/inference/model"
 )
 
+type hipKVCaptureTokenModel struct{}
+
+func (hipKVCaptureTokenModel) OpenEngineSession() (engine.Session, error) {
+	return hipEngineSessionForTest(nil), nil
+}
+
+func (hipKVCaptureTokenModel) Close() error { return nil }
+
+func hipKVCaptureModelForTest() *rocmModel {
+	tok := hipInferenceModelFixtureTokenizer()
+	shared := engine.NewTextModel(hipKVCaptureTokenModel{}, tok, "gemma4", inference.ModelInfo{Architecture: "gemma4"}, 32)
+	return &rocmModel{engineModel: shared}
+}
+
 func hipInferenceModelFixtureTokenizer() *hipTokenTextDecoder {
 	decoder := &hipTokenTextDecoder{
 		vocab:       map[string]int32{"<bos>": 2, "<|turn>": 105, "<turn|>": 106, "hello": 7},
@@ -218,4 +232,54 @@ func TestHIPInferenceModel_ROCmProductionBridge_Good(t *testing.T) {
 		"<|turn>system\n<|think|>\n<turn|>\n<|turn>user\nhello<turn|>\n<|turn>model\n",
 		model.FormatChatPromptWithThinking([]inference.Message{{Role: "user", Content: "hello"}}, nil),
 	)
+}
+
+func TestHIPInferenceModel_CaptureKV_Good(t *testing.T) {
+	model := hipKVCaptureModelForTest()
+	var _ inference.KVSnapshotter = model
+	snapshot, err := model.CaptureKV(context.Background(), "hello", inference.KVSnapshotCaptureOptions{RawKVOnly: true})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, []int32{2, 7}, snapshot.Tokens)
+	core.AssertEqual(t, 0, snapshot.SeqLen)
+	core.AssertEqual(t, 1, len(snapshot.Layers))
+	core.AssertEqual(t, 0, len(snapshot.Layers[0].Heads))
+}
+
+func TestHIPInferenceModel_CaptureKV_Bad(t *testing.T) {
+	model := hipKVCaptureModelForTest()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := model.CaptureKV(ctx, "hello", inference.KVSnapshotCaptureOptions{})
+	core.AssertErrorIs(t, err, context.Canceled)
+}
+
+func TestHIPInferenceModel_CaptureKV_Ugly(t *testing.T) {
+	var model *rocmModel
+	_, err := model.CaptureKV(context.Background(), "hello", inference.KVSnapshotCaptureOptions{})
+	core.AssertError(t, err)
+}
+
+func TestHIPInferenceModel_CaptureKVChunks_Good(t *testing.T) {
+	model := hipKVCaptureModelForTest()
+	var _ inference.KVChunkSnapshotter = model
+	chunks := func(yield func(string) bool) {
+		yield("hello")
+		yield("hello")
+	}
+	snapshot, err := model.CaptureKVChunks(context.Background(), chunks, inference.KVSnapshotCaptureOptions{})
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, []int32{2, 7, 2, 7}, snapshot.Tokens)
+	core.AssertEqual(t, 0, snapshot.SeqLen)
+}
+
+func TestHIPInferenceModel_CaptureKVChunks_Bad(t *testing.T) {
+	model := hipKVCaptureModelForTest()
+	_, err := model.CaptureKVChunks(context.Background(), nil, inference.KVSnapshotCaptureOptions{})
+	core.AssertError(t, err)
+}
+
+func TestHIPInferenceModel_CaptureKVChunks_Ugly(t *testing.T) {
+	var model *rocmModel
+	_, err := model.CaptureKVChunks(context.Background(), func(func(string) bool) {}, inference.KVSnapshotCaptureOptions{})
+	core.AssertError(t, err)
 }
