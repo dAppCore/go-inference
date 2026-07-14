@@ -1,3 +1,38 @@
+# NEXT WAKE (2026-07-17 — #1845 CLOSED by evidence: the q8 store amplifies the batch-shape numeric tier; reuse declines on q8 sessions)
+
+## 2026-07-17 (evening — #1845 root-caused with a five-hypothesis elimination chain)
+
+- THE INSTRUMENT (TestProbePromptReuseParity, LTHN_PROBE_MODEL-gated, now the
+  regression gate): real-checkpoint session-level arms — fresh vs
+  reuse(±warm-decode) HARD-gated, plus the diagnostics that walked the
+  mechanism: split-prefill (diverges token 1, NO reuse machinery involved —
+  reuse bookkeeping exonerated), icb-vs-host prefill (PARITY — hard-gated),
+  chunked-vs-whole (PARITY — hard-gated; the chunk loop is NOT the split),
+  flash-append (diverges IDENTICALLY to batchedDense append — lane choice
+  exonerated), per-layer KV row diff (row 0 onward — the SHORT FIRST CALL
+  lands differently), and the LTHN_KV_Q8_ICB=0 kill-switch run (EVERY arm
+  token-PARITY → q8 named).
+- ROOT CAUSE, two factors compounding: (1) batch-shape-dependent projection
+  numerics at the kernel knees (the tier the house already trades at) leave
+  same-row KV a few bf16 ulps apart between a 6-row and 25-row landing —
+  K max|Δ| ~0.004-0.016, V ~0.06-0.13 on 31B, PRESENT WITH q8 OFF TOO;
+  (2) the q8-ICB store (#367, default on dense) quantises that wobble
+  DISCONTINUOUSLY — boundary hidden max|Δ| 0.078 bf16 → 0.3125 q8 (~4×) —
+  and knife-edge tokens flip. bf16 margins absorb the tier; q8 doesn't.
+- FIX (8a39b54): PrefillTokensCached declines to the cold prefill when
+  s.state.icb.hasKVQ8() — request-deterministic, just uncached. bf16
+  sessions keep reuse. TestPrefillTokensCached_Q8Declines_Ugly pins it.
+- RECEIPTS: probe passes 31B + E2B; metal suite 2290 green; LIVE 31B @6144
+  default vs LTHN_PROMPT_REUSE=0 byte-identical (266e1ed7/4d69638d×2),
+  matching the continuity lane. Mantis #1845 closed with the pack.
+- SCOPE: the decline covers the q8 fleet (31B AND E2B probed q8-armed).
+  Default serves unaffected (continuity owns caching, never used the slot);
+  only -state-conversations=false serves pay cold prefills. Restoring reuse
+  under q8 = #1846 (canonical KV landing across batch shapes; fix directions
+  + acceptance instrument in the ticket).
+- The morning's bench-method rule ("add LTHN_PROMPT_REUSE=0 to bench
+  serves") is now REDUNDANT on q8 models but harmless — keep it for bf16.
+
 # NEXT WAKE (2026-07-17 — examples tree shipped (27, all-backend Makefile); #1841/#1842 FIXED+closed; the REAL residual = #1845 reuse parity)
 
 ## 2026-07-17 (afternoon — the examples campaign + the defect-cluster resolution)
