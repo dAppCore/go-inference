@@ -10,14 +10,15 @@
 // (LaneSet.Step). Per-request tokens stream on per-request channels exactly as
 // interleave's do.
 //
-// This coordinator serves the requests the slice-1 owner can serve
-// byte-identically: a raw prompt (tokenised via the model's Encode) decoded
-// greedily. A chat request (needs template rendering the neutral inference.
-// TextModel surface does not expose) or a non-greedy sampler falls back to the
-// plain interleave engine, which is unchanged — so nothing regresses and no
-// request is served on a path that was not proven byte-identical. See
-// docs/design-continuous-batching.md for the pinned serve-integration rungs
-// (chat rendering, incremental detokenisation, per-request sampler state).
+// This coordinator serves every request the lane owner can serve
+// byte-identically: a raw prompt OR a text-only chat turn (rendered through the
+// model's own chat template — see scheduler.cbEligible / scheduleCBStep),
+// decoded greedily OR with the request's own per-lane sampler. Streaming detok
+// runs the model's DecodeToken, byte-identical to the plain path (stop tokens
+// blanked the same way). A request the owner cannot serve byte-identically — a
+// multimodal turn, a continuity-backed continuation, a renderer-less model —
+// declines to the plain interleave engine, which is unchanged, so nothing is
+// ever served on an unproven path.
 //
 // Backpressure is GLOBAL (a single shared drive loop), the same trade batch
 // mode makes: one slow consumer stalls the round. Cancellation is per-request
