@@ -531,10 +531,10 @@ func ArchitectureProfileGeneration(id string) bool {
 		return profile.Generation
 	}
 	switch id {
-	case "bert", "bert_rerank", "composed", "hybrid",
+	case "bert", "bert_rerank",
 		"deltanet", "gla", "gsa", "mla", "moba", "nsa", "retnet", "rwkv7",
 		"deepseek", "deepseek_r1", "gpt-oss", "kimi", "minimax_m2",
-		"mixtral", "qwen3_6", "qwen3_6_moe", "qwen3_moe":
+		"mixtral", "qwen3_moe":
 		return false
 	default:
 		return true

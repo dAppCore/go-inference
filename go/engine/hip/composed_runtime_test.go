@@ -197,4 +197,11 @@ func TestReactiveSequenceMixerReport_ComposedRunnerLinked_Good(t *testing.T) {
 		[]string{"portable composed incremental runner is linked; projection hooks remain available for HIP++ acceleration"},
 		rocmprofile.ArchitectureProfileNotes("qwen3_6"),
 	)
+	for _, architecture := range []string{"composed", "hybrid", "qwen3_6", "qwen3_6_moe"} {
+		profile, ok := rocmprofile.LookupArchitectureProfile(architecture)
+		core.RequireTrue(t, ok)
+		core.RequireTrue(t, profile.NativeRuntime)
+		core.RequireTrue(t, profile.Generation)
+		core.RequireTrue(t, profile.Chat)
+	}
 }
