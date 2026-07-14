@@ -218,8 +218,8 @@ func TestParseHybridConfig(t *testing.T) {
 				t.Errorf("linear key/value head dim + conv kernel = %d/%d/%d, want 128/128/%d",
 					eff.LinearKeyHeadDim, eff.LinearValueHeadDim, eff.LinearConvKernelDim, w.convKernel)
 			}
-			if eff.VocabSize != w.vocab || eff.BosTokenID != w.bos || eff.EosTokenID != w.eos {
-				t.Errorf("vocab/bos/eos = %d/%d/%d, want %d/%d/%d", eff.VocabSize, eff.BosTokenID, eff.EosTokenID, w.vocab, w.bos, w.eos)
+			if eff.VocabSize != w.vocab || int(eff.BosTokenID) != w.bos || int(eff.EosTokenID) != w.eos {
+				t.Errorf("vocab/bos/eos = %d/%d/%d, want %d/%d/%d", eff.VocabSize, int(eff.BosTokenID), int(eff.EosTokenID), w.vocab, w.bos, w.eos)
 			}
 			if eff.MTPNumHiddenLayers != w.mtp {
 				t.Errorf("mtp_num_hidden_layers = %d, want %d", eff.MTPNumHiddenLayers, w.mtp)
