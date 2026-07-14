@@ -37,7 +37,16 @@ import (
 // engine serves on the PLE arch (the loss shift 15.15 → 10.10 at B=0 is the trainer
 // finally seeing the served model's true CE). The remaining step wall is the HOST half
 // (~91%): the f32 head matmul against [vocab,dModel], the [T,vocab] softmax backward and
-// the LoRA grads — the GPU head/loss rung.
+// the LoRA grads — the GPU head/loss rung (#390).
+//
+// #391 ROOT CAUSE + FIX (same day): stepBodyCapture carved the recorded ICB at a uniform
+// li·opsPerLayer stride, but global layers' 2-pass SDPA records an INLINE extra op (E2B @
+// maxLen 1024: 7 of them), so every layer after the first global executed a misaligned
+// range and the stream's last 7 ops never ran. Carving by the recorded layerOpStarts
+// boundaries dropped the serial-vs-serving delta 34 → 0.094 (and serial-vs-batched worst
+// to 0.75 ≈ 3 bf16 ULP) — the residual is cross-route accumulation-order noise, present
+// on any serial-replay-vs-batched-fold comparison, not a defect. Regression gate:
+// TestForwardCaptureHiddens2PassBoundaries.
 func TestProbeTrainForwardWallSplit(t *testing.T) {
 	if os.Getenv(MetallibPathEnv) == "" {
 		t.Skip("metallib not set")

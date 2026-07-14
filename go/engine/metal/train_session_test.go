@@ -307,3 +307,73 @@ func TestForwardCaptureFinalHidden(t *testing.T) {
 	}
 	eqBytes(t, "final hidden (re-prefill rerun)", got2, want)
 }
+
+// TestForwardCaptureHiddens2PassBoundaries is the #391 regression gate: on a session whose
+// recorded ICB carries INLINE extras (global layers' 2-pass SDPA — recorded whenever
+// maxLen ≥ the 2-pass knee), the per-layer capture must carve the stream by the RECORDED
+// layer boundaries. The old uniform li·opsPerLayer stride misaligned every layer after the
+// first global and skipped the stream's tail — captured hiddens diverged from the serving
+// forward on real E2B (|Δ|≈34) while fixture stacks without extras stayed byte-identical,
+// which is why no existing gate caught it. Serial plain-path capture is the truth arm.
+func TestForwardCaptureHiddens2PassBoundaries(t *testing.T) {
+	requireNativeRuntime(t)
+	const dModel, nHeads, nKV, headDim, dFF = 256, 4, 2, 64, 512
+	const vocab, nL = 64, 4
+	const maxLen = sdpa2PassMinKV // ≥ the knee: global layers record the 2-pass pair
+	layers := make([]DecodeLayerWeights, nL)
+	types := []string{"sliding_attention", "full_attention", "sliding_attention", "full_attention"}
+	for li := range layers {
+		layers[li] = forwardLayer(dModel, nHeads, nKV, headDim, dFF, (li+1)*100)
+	}
+	specs := model.DeriveLayers(types, 0)
+	embed := toBF16Bytes(syntheticFloat32(vocab*dModel, 21))
+	g := &BF16Model{Layers: layers, Embed: embed, FinalNorm: toBF16Bytes(syntheticFloat32(dModel, 22)), LMHead: embed, Tied: true}
+	arch := model.Arch{
+		Hidden: dModel, Heads: nHeads, KVHeads: nKV, HeadDim: headDim, FF: dFF, Vocab: vocab,
+		GlobalHeadDim: headDim, GlobalKVHeads: nKV, SlidingWindow: 128,
+		Eps: 1e-5, AttnScale: 0.125, RopeBase: 10000, RopeScale: 1, RopeLocalBase: 10000,
+		RotaryDim: headDim, RotaryDimLocal: headDim, Layer: specs,
+	}
+	ids := make([]int32, 12)
+	for i := range ids {
+		ids[i] = int32(1 + i%vocab)
+	}
+
+	icbSess, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession(icb): %v", err)
+	}
+	defer icbSess.Close()
+	if icbSess.state.icb == nil {
+		t.Skip("session did not record an ICB — the carve path is unreachable here")
+	}
+	r := icbSess.state.icb
+	if len(r.layerOpStarts) != nL+1 {
+		t.Fatalf("layerOpStarts = %d entries, want %d", len(r.layerOpStarts), nL+1)
+	}
+	if r.layerOpStarts[nL] == uint(nL)*r.opsPerLayer {
+		t.Fatal("fixture recorded a UNIFORM stream (no 2-pass extras) — it no longer exercises the #391 carve; raise maxLen past the 2-pass knee or add a global layer")
+	}
+
+	plainSess, err := NewArchSession(g, arch, maxLen)
+	if err != nil {
+		t.Fatalf("NewArchSession(plain): %v", err)
+	}
+	defer plainSess.Close()
+	plainSess.state.icb = nil // force the per-token plain capture — the truth arm
+
+	_, wantLayers, err := plainSess.ForwardCaptureHiddens(ids)
+	if err != nil {
+		t.Fatalf("ForwardCaptureHiddens(plain): %v", err)
+	}
+	_, gotLayers, err := icbSess.ForwardCaptureHiddens(ids)
+	if err != nil {
+		t.Fatalf("ForwardCaptureHiddens(icb): %v", err)
+	}
+	if len(gotLayers) != len(wantLayers) {
+		t.Fatalf("layer count %d != %d", len(gotLayers), len(wantLayers))
+	}
+	for l := range wantLayers {
+		eqBytes(t, "captured layer (icb 2-pass carve vs plain)", gotLayers[l], wantLayers[l])
+	}
+}
