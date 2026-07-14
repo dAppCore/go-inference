@@ -36,9 +36,14 @@
   installed first (worse than the TS gate); perl's CPAN reputation
   unearned here (2 missing deps, seconds); typescript-axios keeps
   snake_case where fetch camelCases the SAME spec.
-- FOLLOW-UP MATERIAL: the Anthropic route does not split thinking into
-  content blocks (reasoning rides the text block; real Anthropic has
-  thinking blocks). csharp JOINED after snider installed dotnet (c386aff
+- FOLLOW-UP MATERIAL: ~~Anthropic thinking blocks~~ DONE at 3a7763b —
+  typed {"type":"thinking"} blocks precede text/tool_use on
+  /v1/messages (non-streaming + the real streaming event sequence,
+  indices generalised), and the Anthropic `thinking` request control
+  ({"type":"enabled","budget_tokens":N}|{"type":"disabled"}) maps to
+  the engine override + budget. #1843 (memory counters, e39bbe8) and
+  #1844 (continuity declared sampling, 15451a8) also CLOSED — the
+  example-found mantis backlog is clear. csharp JOINED after snider installed dotnet (c386aff
   — first lane with response.Thought fully TYPED, proving the spec fix;
   DOTNET_ROLL_FORWARD=LatestMajor needed on runtime-10-only machines).
   typescript-angular JOINED on request for the next area (d297d5e):
