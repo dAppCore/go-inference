@@ -5268,6 +5268,7 @@ func inferenceBenchmarkLoadGemma4Q4ModelWithKernelCounter(b *testing.B, contextL
 		b.Fatalf("loadedGemma4Q4ForwardConfig(%d): %v", layerCount, err)
 	}
 	inferenceBenchmarkReportGemma4LMHeadAffine(b, cfg.Layers[0].LMHeadProjection)
+	inferenceBenchmarkReportGemma4LayerAffine(b, cfg.Layers[0])
 	return model, loaded, cfg, kernelCounter
 }
 
@@ -5313,6 +5314,25 @@ func inferenceBenchmarkReportGemma4LMHeadAffine(b *testing.B, projection hipMLXQ
 	b.ReportMetric(float64(projection.GroupSize), "lm_head_affine_group")
 	b.ReportMetric(float64(projection.Rows), "lm_head_affine_rows")
 	b.ReportMetric(float64(projection.Cols), "lm_head_affine_cols")
+}
+
+func inferenceBenchmarkReportGemma4LayerAffine(b *testing.B, layer hipGemma4Q4Layer0Config) {
+	b.Helper()
+	for _, projection := range []struct {
+		name   string
+		config hipMLXQ4DeviceWeightConfig
+	}{
+		{name: "query", config: layer.QueryProjection},
+		{name: "key", config: layer.KeyProjection},
+		{name: "value", config: layer.ValueProjection},
+		{name: "output", config: layer.OutputProjection},
+		{name: "gate", config: layer.GateProjection},
+		{name: "up", config: layer.UpProjection},
+		{name: "down", config: layer.DownProjection},
+	} {
+		config := projection.config
+		b.Logf("layer0_%s_affine bits=%d group=%d rows=%d cols=%d", projection.name, config.Bits, config.GroupSize, config.Rows, config.Cols)
+	}
 }
 
 func inferenceBenchmarkReportGemma4ProductionQuantPack(b *testing.B, pack ProductionQuantizationPackSupport) {

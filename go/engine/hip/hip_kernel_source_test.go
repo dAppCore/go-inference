@@ -528,6 +528,23 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 	core.AssertTrue(t, strings.Contains(topK, `output[blockIdx.x * args.top_k + threadIdx.x] = scratch[threadIdx.x]`), "packed top-k writes chunk-local candidates")
 }
 
+func TestHIPKernelSource_MLXQ8Group32UsesPackedDot_Good(t *testing.T) {
+	source, err := os.ReadFile("kernels/rocm_kernels.hip")
+	core.RequireNoError(t, err)
+	text := string(source)
+	core.AssertContains(t, text, "rocm_mlx_affine_q8_32_dot")
+	core.AssertContains(t, text, "if (bits == 8u && group_size == 32u)")
+}
+
+func TestHIPKernelSource_MLXQ8Group32FusedGELUUsesPackedPairDot_Good(t *testing.T) {
+	source, err := os.ReadFile("kernels/rocm_kernels.hip")
+	core.RequireNoError(t, err)
+	text := string(source)
+	core.AssertContains(t, text, "rocm_mlx_affine_q8_32_pair_dot")
+	gelu := hipKernelSourceFunctionBodyForTest(t, text, `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply`)
+	core.AssertContains(t, gelu, "args.bits == 8u && args.group_size == 32u")
+}
+
 func TestHIPKernelSource_AutoRoundQuantizeGroupPacking_Good(t *testing.T) {
 	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
