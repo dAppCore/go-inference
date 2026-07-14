@@ -202,6 +202,26 @@ func (s *shardBuffers) bufFor(weight []byte) (bufView, error) {
 	return s.bufForAligned(weight, bf16Size)
 }
 
+// bufForNorm resolves a NORM weight: a no-copy shard view when the weight IS a view into a mapped
+// shard (the qwen/gemma4 path — norms bind zero-copy like the projections), or a small resident copy
+// when it is SYNTHESISED. A gemma-family checkpoint folds the "(1 + weight)" RMSNorm convention into
+// every norm at load (ArchSpec.NormBiasOne → foldNormBiasOne), producing a FRESH heap buffer that is
+// not a view into any mapped shard — so the strict projection resolver (bufFor/mustBufFor) rightly
+// errors on it ("weight is not a view"), because a PROJECTION that is not a shard view is a wrong-
+// mapping bug and must stay zero-copy. A folded norm is legitimate and, unlike the tied head or a
+// projection, is a tiny vector bound ONCE per session, so the resident copy carries no per-token
+// balloon. This mirrors the MoE router-norm treatment (RouterNormWScaled, itself a RootSize-folded
+// synthesis, already binds resident). Empty weight (an absent optional norm) yields the zero bufView.
+func (s *shardBuffers) bufForNorm(weight []byte) bufView {
+	if len(weight) == 0 {
+		return bufView{}
+	}
+	if v, err := s.bufForAligned(weight, bf16Size); err == nil {
+		return v
+	}
+	return bufView{buf: residentBytes(weight)}
+}
+
 // mustBufForAligned is bufForAligned with the error folded into a shared ferr — the assembler/build
 // pattern so a long sequence of resolutions short-circuits on the first failure. A nil receiver (the
 // copy path: no shardBuffers) returns the zero bufView so callers branch on s == nil once.
