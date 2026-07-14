@@ -1,0 +1,19 @@
+generatorName: java
+library: okhttp-gson
+additionalProperties:
+  groupId: re.dappco
+  artifactId: lem-sdk
+  artifactVersion: "0.1.0"
+  apiPackage: re.dappco.lem.api
+  modelPackage: re.dappco.lem.model
+  invokerPackage: re.dappco.lem.invoker
+  licenseName: "EUPL-1.2"
+  licenseUrl: "https://joinup.ec.europa.eu/collection/eupl/eupl-text-eupl-12"
+  hideGenerationTimestamp: true
+  # The generator's default (true) rejects any JSON field the spec doesn't
+  # declare on that object -- lem's live /v1/chat/completions response puts
+  # `thought` at the top level while the exported spec nests it under
+  # choices[].message, so the strict default throws on every thinking
+  # response. false is also the OAS/JSON-Schema-compliant behaviour per the
+  # generator's own docs, not just a workaround. See examples/sdk/java/README.md Friction.
+  disallowAdditionalPropertiesIfNotPresent: false
