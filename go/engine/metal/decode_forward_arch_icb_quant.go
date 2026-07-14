@@ -586,23 +586,25 @@ func recordArchICBQuant(
 			plePlan = &archICBPLEPlan{
 				runtime: pleRuntime, pliDim: pliDim, postNormBufs: plePostNorms, resident: pleResident,
 			}
-			plePlan.recordGate = func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer) {
-				setQMV(c, psoFor(pleLB[li].gate, pliDim, dModel), pleLB[li].gate, vec, out, 0, dModel, pliDim)
-			}
-			// The fused gate+gelu·pli op (lthn_ple_gate_gelu_qmv, #373) is NOT
-			// recorded here: it is byte-identical to the composed pair in every
-			// standalone context (both PSO builds, every real e2b layer's weights
-			// — the kernel parity test), but IN THE RECORDED REPLAY it drifted
-			// the session off the PerLayerInputGate interleave from the second
-			// sequential step onward (#371, TestRealQuantVerifyBatchedHiddensParity;
-			// first bad d00c526, in-situ cause unresolved). Its receipt was ~3µs
-			// (thin-stage), so the composed two-stage path stays — the parity
-			// spine outranks a free-but-unproven op.
-			plePlan.recordProj = func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer) {
-				setQMV(c, psoFor(pleLB[li].proj, dModel, pliDim), pleLB[li].proj, vec, out, 0, pliDim, dModel)
-			}
 		}
+		// The fused gate+gelu·pli op (lthn_ple_gate_gelu_qmv, #373) is NOT
+		// recorded for projPLEGate: it is byte-identical to the composed pair in
+		// every standalone context (both PSO builds, every real e2b layer's weights
+		// — the kernel parity test), but IN THE RECORDED REPLAY it drifted
+		// the session off the PerLayerInputGate interleave from the second
+		// sequential step onward (#371, TestRealQuantVerifyBatchedHiddensParity;
+		// first bad d00c526, in-situ cause unresolved). Its receipt was ~3µs
+		// (thin-stage), so the composed two-stage path stays — the parity
+		// spine outranks a free-but-unproven op.
 		recordProj := func(li int, c metal.MTLIndirectComputeCommand, vec, out metal.MTLBuffer, outOff uint, p projIndex) {
+			if p == projPLEGate { // per-layer-input matmuls: reachable only when plePlan is set
+				setQMV(c, psoFor(pleLB[li].gate, pliDim, dModel), pleLB[li].gate, vec, out, outOff, dModel, pliDim)
+				return
+			}
+			if p == projPLEProj {
+				setQMV(c, psoFor(pleLB[li].proj, dModel, pliDim), pleLB[li].proj, vec, out, outOff, pliDim, dModel)
+				return
+			}
 			l := lb[li]
 			hd := headDimOf(specs[li], headDim)
 			switch p {

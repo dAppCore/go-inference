@@ -28,10 +28,21 @@
 //     through Assemble (gemma4, qwen-class QK-norm, exaone4/gptneox sandwich norms) declares for
 //     free; the record boundary reads the declared selections with the same buffer-presence
 //     self-heal for hand-built callers. Declaring a norm without its weight is a caller bug.
+//   - per-layer output scalar (LayerSpec.LayerScalar) — slice 4: same contract; the scalar may
+//     sit on a SUBSET of layers (gemma4 diffusion), absent layers bind the ×1.0 identity so the
+//     op layout stays uniform.
+//   - the per-layer-input matmuls — slice 4: the PLE gate/proj record through the caller's ONE
+//     projection seam (projIndex: projPLEGate/projPLEProj) instead of arch-supplied record
+//     hooks; the PLE plan hands the neutral core pure data (runtime, dims, norm buffers,
+//     residents).
 //
-// STILL ENGINE-INFERRED (candidates for later slices — inferred from weight-buffer presence at the
-// record boundary, shared across families):
-//   - the fixed per-layer op LAYOUT (opsPerLayer) and the per-layer-input record hooks
+// ENGINE-OWNED BY DESIGN (not family knowledge — deliberately never declared):
+//   - the per-layer op LAYOUT: resolveArchICBOpLayout (package native) derives each layer's ICB
+//     command count from the declared selections × the engine's fused-kernel availability, in
+//     ONE home consumed by both the ICB sizing and the record loop. Kernel fusion is engine
+//     capability, not family knowledge, so the count arithmetic lives with the engine; the
+//     recorded-count guard in decodeForwardArchICBCore fails loud if it ever diverges from the
+//     loop's emit sequence.
 package icb
 
 import (

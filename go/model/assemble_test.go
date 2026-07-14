@@ -3,6 +3,7 @@
 package model
 
 import (
+	"strings"
 	"testing"
 
 	"dappco.re/go/inference/model/safetensors"
@@ -360,6 +361,64 @@ func TestAssemble_NormOpSelections_Bad(t *testing.T) {
 	spec := m.Arch.Layer[0]
 	if spec.AttentionQNorm || spec.AttentionKNorm || spec.PostAttnNorm || spec.PostFFNorm {
 		t.Fatalf("norm-op selections = %+v, want all false", spec)
+	}
+}
+
+// TestAssemble_LayerScalar_Good: a checkpoint carrying a per-layer output scalar weight
+// (gemma4 diffusion's .layer_scalar) has the op selection declared true — backends bind
+// the declared selection (#57) instead of re-probing weight buffers.
+func TestAssemble_LayerScalar_Good(t *testing.T) {
+	tensors := minimalDenseTensors("BF16")
+	tensors["layer.0.layer_scalar"] = safetensors.Tensor{Shape: []int{1}, Data: make([]byte, 2), Dtype: "BF16"}
+	names := minimalDenseNames()
+	names.LayerScalar = ".layer_scalar"
+	m, err := Assemble(tensors, minimalDenseArch(), names)
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if !m.Arch.Layer[0].LayerScalar {
+		t.Fatal("layer_scalar weight present, selection must be declared")
+	}
+}
+
+// TestAssemble_LayerScalar_Bad: a checkpoint with NO layer-scalar weight declares the
+// selection false — an absent weight can never select an op.
+func TestAssemble_LayerScalar_Bad(t *testing.T) {
+	names := minimalDenseNames()
+	names.LayerScalar = ".layer_scalar"
+	m, err := Assemble(minimalDenseTensors("BF16"), minimalDenseArch(), names)
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if m.Arch.Layer[0].LayerScalar {
+		t.Fatal("no layer_scalar weight, selection must not be declared")
+	}
+}
+
+// TestAssemble_LayerScalar_Ugly: unlike the stack-uniform norm selections, the scalar may
+// sit on a SUBSET of layers — declaration is per layer, exactly following weight presence
+// (backends bind the ×1.0 identity for undeclared layers to keep the op layout uniform).
+func TestAssemble_LayerScalar_Ugly(t *testing.T) {
+	tensors := minimalDenseTensors("BF16")
+	for name, tt := range tensors { // clone layer.0's weights as layer.1
+		if after, ok := strings.CutPrefix(name, "layer.0."); ok {
+			tensors["layer.1."+after] = tt
+		}
+	}
+	tensors["layer.1.layer_scalar"] = safetensors.Tensor{Shape: []int{1}, Data: make([]byte, 2), Dtype: "BF16"}
+	arch := minimalDenseArch()
+	arch.Layer = append(arch.Layer, LayerSpec{Attention: GlobalAttention, CacheIndex: 1, KVShareFrom: 1, HeadDim: 2, KVHeads: 2})
+	names := minimalDenseNames()
+	names.LayerScalar = ".layer_scalar"
+	m, err := Assemble(tensors, arch, names)
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if m.Arch.Layer[0].LayerScalar {
+		t.Fatal("layer 0 carries no scalar weight, must not declare")
+	}
+	if !m.Arch.Layer[1].LayerScalar {
+		t.Fatal("layer 1 carries the scalar weight, must declare")
 	}
 }
 

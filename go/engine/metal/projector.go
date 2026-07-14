@@ -27,6 +27,14 @@ const (
 	projGate                  // dModel → dFF
 	projUp                    // dModel → dFF
 	projDown                  // dFF → dModel
+
+	// The per-layer-input (PLE) matmuls ride the SAME per-layer projection seam as the seven
+	// decode projections, so the ICB record path has ONE polymorphism point (the recordProj
+	// hook) for every per-layer matmul — bf16 gemv, 4-bit qmv and dense-in-quant all plug in
+	// there. They are ICB-record-path values only: the projector interface below serves the
+	// seven decode projections and is never called with these.
+	projPLEGate // dModel → pliDim (per-layer-input gate)
+	projPLEProj // pliDim → dModel (per-layer-input projection)
 )
 
 // projector encodes one projection — out[outOff:] = W_p · vec — into enc. outOff
