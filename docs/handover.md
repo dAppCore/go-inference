@@ -1,3 +1,33 @@
+# NEXT WAKE (2026-07-17 — #391 closed: the capture carve was the bug — 2-pass extras misaligned it)
+
+## 2026-07-17 (#391 — serial ICB capture divergence: root-caused + fixed)
+
+- ROOT CAUSE: stepBodyCapture carved the recorded ICB at the uniform
+  li·opsPerLayer stride, but the stream carries INLINE extras — one 2-pass
+  SDPA op per GLOBAL layer (recorded whenever maxLen ≥ sdpa2PassMinKV=1024;
+  E2B: 7 globals) and two store ops per q8 owner. Every layer after the
+  first extra executed a misaligned range and the stream's last ops never
+  ran. Serving replays the WHOLE range (never carves) → only training
+  capture was wrong; small fixtures (maxLen < the knee) recorded no extras
+  → uniform stream → no gate ever saw it.
+- THE FIX: the recorder saves the TRUE boundaries (layerOpStarts,
+  nLayers+1 with the total as sentinel) and stepBodyCapture carves by
+  them; capture also re-binds the final op to its recorded ping target
+  first (a second latent hazard: capture-after-decode read a stale ping
+  because a prior stepBody had rebound the final op to lastOut).
+- RECEIPTS: E2B bf16 serial-capture vs SERVING boundary |Δ| 34 → 0.094
+  (batched stays 0); serial-vs-batched worst 0.75 ≈ 3 bf16 ULP — the
+  residual is cross-route accumulation-order noise (serial replay vs
+  batched fold), present on any such comparison, NOT a defect. Regression
+  gate TestForwardCaptureHiddens2PassBoundaries: a fixture that actually
+  records 2-pass extras (asserts the stream is non-uniform) — ICB capture
+  ≡ plain per-token capture byte-for-byte. Suites 2601/0.
+- CONSEQUENCE: per-layer hiddens from ForwardCaptureHiddens are now
+  trustworthy on PLE archs — the full-stack backward is unblocked. The
+  probe VERDICT comment + the note on ForwardCaptureHiddens record the
+  whole story. #390 (GPU head/loss ops — the step's remaining 91% host
+  half) is the next training-speed lever.
+
 # NEXT WAKE (2026-07-17 — bf16-as-op = the batched training forward: SFT 4.8×, and the serial capture was WRONG)
 
 ## 2026-07-17 (ops-homes final item — the bf16 training forward)

@@ -14,13 +14,18 @@ import core "dappco.re/go"
 // already wires into stepToken (captureLayerHiddens), so the captured hiddens are exactly the engine's
 // real layer outputs, not a re-derivation. Single-goroutine (the ArchSession contract).
 
-// KNOWN DIVERGENCE (2026-07-14, probe_train_forward_split_test.go): on a real PLE arch
-// (E2B bf16) this serial capture's hiddens DISAGREE with the engine's serving forward —
-// against the batched prefill's boundary hidden the serial ICB capture was off by |Δ|≈34
-// while ForwardCaptureFinalHidden matched byte-for-byte. Until that is root-caused, the
-// per-layer hiddens below are NOT serving-exact on PLE archs; the head-LoRA trainer rides
-// ForwardCaptureFinalHidden instead, and the full-stack backward must re-verify this
-// capture against the batched route before trusting per-layer hiddens on a PLE model.
+// #391 (RESOLVED 2026-07-14): this capture's ICB walk used to carve the recorded stream
+// at a uniform li·opsPerLayer stride — but global layers' 2-pass SDPA and q8 owners'
+// store ops are INLINE extras, so on any session recording them (maxLen ≥ the 2-pass
+// knee) every layer after the first extra executed a misaligned range and the stream's
+// tail never ran: captured hiddens diverged from the serving forward by |Δ|≈34 on real
+// E2B bf16. stepBodyCapture now carves by the RECORDED layerOpStarts boundaries (and
+// re-binds the final op to its recorded ping target, closing the capture-after-decode
+// stale-read hazard); post-fix the serial capture agrees with serving to |Δ|≈0.09 —
+// ordinary cross-route bf16 accumulation noise (serial replay vs batched fold), not a
+// defect. Gates: TestForwardCaptureHiddens2PassBoundaries (fixture records real 2-pass
+// extras; ICB capture ≡ plain per-token capture byte-for-byte) + the wall-split probe's
+// serving-truth check.
 //
 // ForwardCaptureHiddens forwards ids[0:T] over a FRESH session (it resets pos to 0, overwriting the
 // cache, so a training loop can re-run it each step) and returns the residual stream:

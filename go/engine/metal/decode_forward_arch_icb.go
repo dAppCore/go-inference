@@ -223,8 +223,14 @@ type archICBReplay struct {
 	plePliDim                       int
 	pleRuntime                      *archDecodePLEInputs
 	opsPerLayer                     uint
-	rowBytes                        []int // per-layer KV cache row stride (nKVHeads·hd·bf16Size) — gemma4 global layers are wider
-	cacheRows                       []int // per-layer physical row CAPACITY of kCaches[li]/vCaches[li] (bufferLength/rowBytes).
+	// layerOpStarts[li] is layer li's FIRST op index in the recorded stream; the final
+	// entry (index nLayers) is the total op count. The stream is not uniform at the
+	// opsPerLayer stride — a global layer's 2-pass SDPA adds one inline op and a q8
+	// owner adds two store ops — so any per-layer carve (stepBodyCapture) must use
+	// these recorded boundaries, never li·opsPerLayer (#391).
+	layerOpStarts []uint
+	rowBytes      []int // per-layer KV cache row stride (nKVHeads·hd·bf16Size) — gemma4 global layers are wider
+	cacheRows     []int // per-layer physical row CAPACITY of kCaches[li]/vCaches[li] (bufferLength/rowBytes).
 	// A sliding owner allocated at slidingWindow rows (the bounded-memory fix) makes this a
 	// ring; a global (or not-yet-bounded) owner allocated at maxLen makes pos%cacheRows a
 	// no-op (pos < maxLen always), so prepareStepRebind is byte-identical to the old
@@ -711,15 +717,29 @@ func (r *archICBReplay) stepBodyResultWithResources(inputEmb []byte, pos int, pl
 }
 
 func (r *archICBReplay) stepBodyCapture(inputEmb []byte, pos int, pli []byte) (final []byte, perLayer [][]byte) {
+	// Carve by the RECORDED per-layer boundaries, never the uniform stride: a global
+	// layer's 2-pass SDPA and a q8 owner's store ops are inline extras, so li·opsPerLayer
+	// misaligns every layer after the first extra and skips the stream's tail entirely —
+	// the #391 divergence (E2B bf16 @ maxLen≥1024 records 7 global 2-pass extras; the
+	// captured hiddens disagreed with the serving forward by |Δ|≈34 while the batched
+	// capture matched byte-for-byte).
+	if len(r.layerOpStarts) != r.nLayers+1 {
+		return nil, nil // recorded boundaries missing — a recorder bug; fail empty, loud upstream
+	}
+	// The final op's output may have been rebound to lastOut (or a direct-output view) by a
+	// prior decode step on this session; capture reads the ping-pong, so restore the
+	// recorded target first.
+	r.bindStepOutput(r.ping[r.nLayers%2])
 	r.prepareStep(inputEmb, pos, pli)
 	perLayer = make([][]byte, r.nLayers)
 	for li := 0; li < r.nLayers; li++ {
+		start, end := r.layerOpStarts[li], r.layerOpStarts[li+1]
 		cb := commandBufferFast(queue)
 		enc := computeCommandEncoderFast(cb)
 		useResourcesIDsFastObject(enc, r.residentRes, r.residentResIDs, metal.MTLResourceUsageRead|metal.MTLResourceUsageWrite)
 		executeCommandsInBufferWithRangeObjectFast(enc, r.icb, foundation.NSRange{
-			Location: uint(li) * r.opsPerLayer,
-			Length:   r.opsPerLayer,
+			Location: start,
+			Length:   end - start,
 		})
 		endEncodingFast(enc)
 		commitCommandBufferFast(cb)
@@ -1821,7 +1841,14 @@ func recordArchICB(
 			}
 		}
 
+		// The TRUE per-layer op boundaries. The stream is NOT uniform at the opsPerLayer
+		// stride: a global layer's 2-pass SDPA records one extra op and a q8 owner records
+		// two store ops, all inline, so any per-layer carve of the recorded ICB must use
+		// these boundaries (stepBodyCapture — the #391 bug class: the uniform stride
+		// misaligned every layer after the first global and skipped the stream's tail).
+		layerOpStarts := make([]uint, 0, nLayers+1)
 		for li := range nLayers {
+			layerOpStarts = append(layerOpStarts, uint(opIdx))
 			owns := specs[li].OwnsCache()
 			ownerIdx := specs[li].KVShareFrom
 			sliding := specs[li].Attention == model.SlidingAttention
@@ -2039,6 +2066,7 @@ func recordArchICB(
 				}
 			}
 		}
+		layerOpStarts = append(layerOpStarts, uint(opIdx)) // sentinel: one past the last layer
 		// the per-layer op-count is invariant to dFF (the gelu/no-gelu + owner/sharer branches
 		// are fixed-count), so the running index must land exactly on `total`. A mismatch means
 		// the recorded layout diverged from opsPerLayer·nLayers — a recorder bug, not a numeric
@@ -2101,8 +2129,9 @@ func recordArchICB(
 			ping: ping, ping0: ping[0], lastOut: lastOut, pleInput: pleInput,
 			finalOutIdx: finalOutIdx, finalOutBind: finalOutBind, hasFinalOut: hasFinalOut,
 			hasPLE: hasPLE, plePliDim: plePliDim, pleRuntime: pleRuntime,
-			opsPerLayer: uint(opsPerLayer),
-			rowBytes:    rowBytesByLayer, cacheRows: cacheRowsByLayer, slidingWindow: slidingWindow, dModel: dModel,
+			opsPerLayer:   uint(opsPerLayer),
+			layerOpStarts: layerOpStarts,
+			rowBytes:      rowBytesByLayer, cacheRows: cacheRowsByLayer, slidingWindow: slidingWindow, dModel: dModel,
 		}
 		r.cacheKVContents()
 		r.cacheStepContents()
