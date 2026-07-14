@@ -38,6 +38,15 @@ import (
 // just uncached — until the landing is canonicalised. The full evidence pack
 // lives in TestProbePromptReuseParity (probe_prompt_reuse_parity_test.go).
 
+// SetReuseCanonicalLanding opts the session into position-invariant landing
+// (#1846) — the engine.CanonicalLandingSession capability the resident reuse
+// lane sets. On a q8-KV session every prefill/append then lands through the
+// per-token lane so a reused prefix+suffix is byte-identical to a fresh whole
+// prefill, which is what lets PrefillTokensCached engage instead of decline.
+// Non-q8 sessions are unaffected (their batched reuse is already answer-stable).
+// It must be set before the first prefill so the whole session lands uniformly.
+func (s *ArchSession) SetReuseCanonicalLanding(on bool) { s.reuseCanonicalLanding = on }
+
 // PrefillTokensCached is PrefillTokens with automatic prefix reuse: it finds
 // the longest prefix of ids already resident from prior calls on this session,
 // re-prefills only the divergent suffix, and reports how many prompt rows were
@@ -51,11 +60,16 @@ func (s *ArchSession) PrefillTokensCached(ids []int32) (int, error) {
 	if len(ids) > s.maxLen {
 		return 0, core.NewError("native.ArchSession.PrefillTokensCached: sequence would exceed maxLen cache rows")
 	}
-	// q8-ICB sessions decline reuse (#1845): the q8 store amplifies the
-	// batch-shape numeric tier into token flips, so a cached prefix+suffix
-	// landing is not answer-stable against the whole-prompt landing. Cold
-	// prefill keeps every request deterministic.
-	if s.state.icb.hasKVQ8() {
+	// q8-ICB sessions decline reuse UNLESS canonical landing is armed (#1846).
+	// The batched landing forward is intra-batch tile-position sensitive, so a
+	// cached prefix+suffix landing lands a few bf16 ulps off the whole-prompt
+	// landing; the q8 store quantises that wobble DISCONTINUOUSLY and flips
+	// knife-edge tokens (the #1845 evidence pack). reuseCanonicalLanding routes
+	// every landing through the position-invariant per-token lane, making the
+	// reused landing byte-identical to a fresh whole prefill — reuse is then
+	// answer-stable and engages. Without it (throughput-first q8 prefill) the
+	// cold path still keeps every request deterministic.
+	if s.state.icb.hasKVQ8() && !s.reuseCanonicalLanding {
 		return 0, s.PrefillTokens(ids)
 	}
 	n := s.pos

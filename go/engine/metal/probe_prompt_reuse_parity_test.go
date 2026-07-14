@@ -22,18 +22,25 @@ import (
 //
 // VERDICT (2026-07-14, gemma-4-31B-it-4bit @ context 6144): the divergence was
 // never the reuse bookkeeping — a plain PrefillTokens(prefix)+AppendTokens
-// (suffix) split diverges identically with NO reuse machinery involved, and
-// icb-vs-host + chunked-vs-whole prefills hold parity (both hard-gated here).
-// Landing the same rows in different batch shapes leaves KV a few bf16 ulps
-// apart (the known projection-kernel-knee token-identity tier; K max|Δ|
-// ~0.004-0.016, V ~0.06-0.13 on 31B, ROW 0 onward — the SHORT FIRST CALL is
-// what lands differently); bf16 caches absorb that inside greedy margins
-// (LTHN_KV_Q8_ICB=0 run: every arm token-PARITY), but the q8 store quantises
-// the wobble discontinuously and amplifies it ~4× (boundary hidden max|Δ|
-// 0.078→0.3125), flipping knife-edge tokens. Fix: PrefillTokensCached
-// DECLINES on q8-ICB sessions (session_prompt_reuse.go) — the reuse arms
-// here then pass via the cold path; the split/flash diagnostics still show
-// the tier (expected, documented, non-fatal).
+// (suffix) split diverges identically with NO reuse machinery involved. The
+// batched landing forward is intra-batch TILE-POSITION sensitive: the same
+// absolute row lands a few bf16 ulps apart depending on its offset within the
+// projection/rope/norm batch (both fresh and reuse take qmm_t — it is not a
+// kernel-choice mismatch; K max|Δ| ~0.004-0.016, V ~0.06-0.13 on 31B, from the
+// APPEND boundary onward). bf16 caches absorb that inside greedy margins, but
+// the q8 store quantises the wobble discontinuously and amplifies it ~4×,
+// flipping knife-edge tokens (the #1845 decline).
+//
+// FIX (#1846): reuseCanonicalLanding routes every prefill/append through the
+// POSITION-INVARIANT per-token lane, landing each row at batch offset 0 — the
+// only shape whose reused prefix+suffix is byte-identical to a fresh whole
+// prefill (TestProbeCanonicalLanding is the KV-level receipt; the batched
+// forward cannot be block-anchored to byte-identity on sliding-window models).
+// The reuse arms below arm it and REQUIRE engagement (reused>0) + token parity
+// against a canonical fresh; the split-canonical arm shows the same mechanism
+// makes the raw split go parity. The cost is a decode-speed (per-token) prefill,
+// so the mode is opt-in — the batched diagnostics below keep their own batched
+// ground truth and still log the tier (expected, non-fatal).
 //
 //	LTHN_PROBE_MODEL=<snapshot dir> [LTHN_PROBE_CONTEXT=6144] \
 //	  go test -tags metal_runtime ./engine/metal/ -run TestProbePromptReuseParity -v
@@ -93,20 +100,36 @@ func TestProbePromptReuseParity(t *testing.T) {
 		return bf16BytesToF32(s.retainedLogits)
 	}
 
-	// FRESH — the ground truth.
+	// FRESH — the ground truth (batched landing) for the mechanism diagnostics.
 	fresh := openArch("fresh")
 	defer fresh.Close()
 	if err := fresh.PrefillTokens(aIDs); err != nil {
 		t.Fatalf("fresh PrefillTokens: %v", err)
 	}
-	freshLogits := boundaryLogits(fresh)
 	freshToks, err := fresh.GenerateFromCache(parityGen, -1)
 	if err != nil {
 		t.Fatalf("fresh GenerateFromCache: %v", err)
 	}
 
+	// FRESH-CANONICAL — the ground truth for the REUSE arms (#1846). Reuse now
+	// engages under position-invariant canonical landing, so its reference is a
+	// whole prefill in the SAME landing mode; the reused cache is byte-identical
+	// to it (TestProbeCanonicalLanding is the KV-level receipt).
+	freshCanon := openArch("fresh-canonical")
+	freshCanon.reuseCanonicalLanding = true
+	defer freshCanon.Close()
+	if err := freshCanon.PrefillTokens(aIDs); err != nil {
+		t.Fatalf("fresh-canonical PrefillTokens: %v", err)
+	}
+	freshCanonLogits := boundaryLogits(freshCanon)
+	freshCanonToks, err := freshCanon.GenerateFromCache(parityGen, -1)
+	if err != nil {
+		t.Fatalf("fresh-canonical GenerateFromCache: %v", err)
+	}
+
 	run := func(label string, decodeWarm bool) {
 		s := openArch(label)
+		s.reuseCanonicalLanding = true // #1846: reuse engages under canonical landing
 		defer s.Close()
 		if err := s.PrefillTokens(warmIDs); err != nil {
 			t.Fatalf("%s PrefillTokens(warm): %v", label, err)
@@ -121,7 +144,8 @@ func TestProbePromptReuseParity(t *testing.T) {
 			t.Fatalf("%s PrefillTokensCached: %v", label, err)
 		}
 		if reused == 0 {
-			t.Logf("%s: cached path declined (reused=0) — expected on q8-ICB sessions (#1845 decline)", label)
+			t.Errorf("%s: reuse DECLINED (reused=0) — canonical landing must ENGAGE q8 reuse (#1846)", label)
+			return
 		}
 		gotLogits := boundaryLogits(s)
 		got, err := s.GenerateFromCache(parityGen, -1)
@@ -131,31 +155,31 @@ func TestProbePromptReuseParity(t *testing.T) {
 
 		div := -1
 		n := len(got)
-		if len(freshToks) < n {
-			n = len(freshToks)
+		if len(freshCanonToks) < n {
+			n = len(freshCanonToks)
 		}
 		for i := 0; i < n; i++ {
-			if got[i] != freshToks[i] {
+			if got[i] != freshCanonToks[i] {
 				div = i
 				break
 			}
 		}
-		if div < 0 && len(got) != len(freshToks) {
+		if div < 0 && len(got) != len(freshCanonToks) {
 			div = n
 		}
 		if div < 0 {
-			t.Logf("%s: PARITY over %d tokens (reused=%d)", label, len(got), reused)
+			t.Logf("%s: PARITY over %d tokens (reused=%d, ENGAGED)", label, len(got), reused)
 			return
 		}
 		// Divergence: characterise it. The boundary logits cover step 0 only;
 		// a later divergence still reports the max boundary delta (the drift
 		// indicator) plus the token ids either side.
 		maxD, at := float32(0), -1
-		for i := range freshLogits {
+		for i := range freshCanonLogits {
 			if i >= len(gotLogits) {
 				break
 			}
-			d := freshLogits[i] - gotLogits[i]
+			d := freshCanonLogits[i] - gotLogits[i]
 			if d < 0 {
 				d = -d
 			}
@@ -164,7 +188,7 @@ func TestProbePromptReuseParity(t *testing.T) {
 			}
 		}
 		t.Errorf("%s: DIVERGED at token %d (fresh=%d got=%d, reused=%d); boundary-logit max|Δ|=%g at vocab %d",
-			label, div, tokAt(freshToks, div), tokAt(got, div), reused, maxD, at)
+			label, div, tokAt(freshCanonToks, div), tokAt(got, div), reused, maxD, at)
 	}
 
 	run("reuse-after-decode", true)
@@ -222,6 +246,28 @@ func TestProbePromptReuseParity(t *testing.T) {
 		t.Logf("%s: PARITY over %d tokens", label, len(got))
 	}
 	compare("baseline", false, freshToks, splitArm("split-prefill"))
+
+	// CANONICAL SPLIT — the same split prefill under position-invariant landing
+	// (#1846). This is the SAME mechanism the reuse arms use: byte-identical
+	// landing regardless of batch shape, so the split diagnostic goes PARITY
+	// (hard) rather than the batched tier the baseline arm logs.
+	canonSplit := func() []int32 {
+		s := openArch("split-canonical")
+		s.reuseCanonicalLanding = true
+		defer s.Close()
+		if err := s.PrefillTokens(aIDs[:lcp]); err != nil {
+			t.Fatalf("split-canonical PrefillTokens(prefix): %v", err)
+		}
+		if err := s.AppendTokens(aIDs[lcp:]); err != nil {
+			t.Fatalf("split-canonical AppendTokens(suffix): %v", err)
+		}
+		toks, gerr := s.GenerateFromCache(parityGen, -1)
+		if gerr != nil {
+			t.Fatalf("split-canonical GenerateFromCache: %v", gerr)
+		}
+		return toks
+	}
+	compare("split-canonical", true, freshCanonToks, canonSplit())
 
 	icbDisabledForTest = true
 	compare("noicb", false, freshArm("fresh-noicb"), splitArm("split-noicb"))

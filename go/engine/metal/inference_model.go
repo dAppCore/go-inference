@@ -23,6 +23,7 @@ var (
 	_ engine.PromptReuseCapableModel  = (*NativeTokenModel)(nil)
 	_ engine.Session                  = (*ArchSession)(nil)
 	_ engine.PromptReuseSession       = (*ArchSession)(nil)
+	_ engine.CanonicalLandingSession  = (*ArchSession)(nil)
 	_ engine.TrainerModel             = (*NativeTokenModel)(nil)
 	_ engine.Trainer                  = (*LoRATrainer)(nil)
 	_ engine.CacheModeReporter        = (*NativeTokenModel)(nil)
