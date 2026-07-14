@@ -222,9 +222,9 @@ type archDecodeState struct {
 	// Each step encode claims the next ring slot, so a committed link's
 	// offset is immutable for its lifetime. Slots are lazily built; index 0
 	// is the coreScratch's own offBuf.
-	offRingBufs [4]metal.MTLBuffer
-	offRingPtrs [4]*int32
-	offRingIdx  int
+	offRingBufs  [4]metal.MTLBuffer
+	offRingPtrs  [4]*int32
+	offRingIdx   int
 	hBufPtr      *byte
 	xAPtr, xBPtr *byte
 	// verifyFoldSmallK lets the MTP verify take the batched fold on a
