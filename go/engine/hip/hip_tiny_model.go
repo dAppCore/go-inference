@@ -1126,6 +1126,10 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 				runErr = core.E(hipGemma4Q4Layer0Operation, "custom prefill embeddings require the batched Gemma4 path", nil)
 				return
 			}
+			if engineConfig.DisableBatchedPrefill {
+				runErr = core.E(hipGemma4Q4Layer0Operation, "custom prefill embeddings cannot use canonical serial landing", nil)
+				return
+			}
 		}
 		suppressTokens := hipGemma4Q4GenerationSuppressTokenIDs(model, generate.StopTokens)
 		hostSampling := hipGemma4Q4HostSamplingRequested(generate)
@@ -1201,7 +1205,7 @@ func hipGemma4Q4GenerateTokenSeqWithStateSamplerEmbeddings(ctx context.Context, 
 		// sampled. Sampling used to force the token-at-a-time prefill producer,
 		// flattening 12B logits while preserving many argmaxes. Batched prefill
 		// owns every compatible prompt; the selected sampler consumes its last row.
-		useBatchedPrefill := hipGemma4Q4CanUseBatchedGeneratePrefill(cfg)
+		useBatchedPrefill := hipGemma4Q4CanUseBatchedGeneratePrefill(cfg) && !engineConfig.DisableBatchedPrefill
 		disableBatchedDecode := engineConfig.DisableBatchedDecode || core.Env("GO_ROCM_GEMMA4_Q4_DISABLE_BATCHED_DECODE") == "1"
 		useBatchedDecode := useBatchedPrefill && !disableBatchedDecode && !deviceCandidateSampling
 		if attentionWorkspace != nil {

@@ -125,6 +125,30 @@ func TestHipEngineSession_PrefillTokenEmbeddings_Good(t *testing.T) {
 	core.AssertEqual(t, byte(1), session.pendingEmbeddings[0])
 }
 
+func TestHipEngineSession_SetReuseCanonicalLanding_Good(t *testing.T) {
+	session := hipEngineSessionForTest(nil)
+	var _ engine.PromptReuseSession = session
+	var _ engine.CanonicalLandingSession = session
+	var _ engine.ContextDecodeSession = session
+
+	session.SetReuseCanonicalLanding(true)
+	core.AssertTrue(t, session.engine.DisableBatchedPrefill)
+	session.SetReuseCanonicalLanding(false)
+	core.AssertFalse(t, session.engine.DisableBatchedPrefill)
+}
+
+func TestHipEngineSession_RestoreFromKV_Good_ArmsCanonicalLandingForQuantizedKV(t *testing.T) {
+	source := hipEngineSessionWithNonCanonicalDeviceKVForTest(t)
+	defer func() { _ = source.Close() }()
+	snapshot, err := source.CaptureKVWithOptions(kv.CaptureOptions{})
+	core.RequireNoError(t, err)
+
+	restored := &hipEngineSession{cfg: source.cfg, mode: rocmKVCacheModeKQ8VQ4, driver: source.driver}
+	defer func() { _ = restored.Close() }()
+	core.RequireNoError(t, restored.RestoreFromKV(context.Background(), snapshot))
+	core.AssertTrue(t, restored.engine.DisableBatchedPrefill)
+}
+
 func TestHipEngineSession_PrefillTokenEmbeddings_Bad(t *testing.T) {
 	session := &hipEngineSession{
 		loaded: &hipLoadedModel{modelInfo: inference.ModelInfo{HiddenSize: 2}, contextSize: 8},

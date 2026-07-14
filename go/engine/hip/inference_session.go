@@ -54,8 +54,11 @@ import (
 )
 
 var (
-	_ engine.Session       = (*hipEngineSession)(nil)
-	_ engine.VisionSession = (*hipEngineSession)(nil)
+	_ engine.Session                 = (*hipEngineSession)(nil)
+	_ engine.ContextDecodeSession    = (*hipEngineSession)(nil)
+	_ engine.PromptReuseSession      = (*hipEngineSession)(nil)
+	_ engine.CanonicalLandingSession = (*hipEngineSession)(nil)
+	_ engine.VisionSession           = (*hipEngineSession)(nil)
 )
 
 // hipKVSnapshotDevicePayloadMode marks the opaque per-layer payloads that
@@ -206,6 +209,18 @@ func (s *hipEngineSession) Pos() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.tokens)
+}
+
+// SetReuseCanonicalLanding makes prompt landing independent of ubatch splits.
+// The shared resident-reuse lane enables it before first prefill; quantized KV
+// restores also auto-arm it before any appended suffix is forwarded.
+func (s *hipEngineSession) SetReuseCanonicalLanding(on bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.engine.DisableBatchedPrefill = on
+	s.mu.Unlock()
 }
 
 // GenerateFromCacheEach greedily decodes up to maxNew tokens, forwarding the
@@ -593,6 +608,9 @@ func (s *hipEngineSession) RestoreFromKV(ctx context.Context, snapshot *kv.Snaps
 		s.pending = nil
 	}
 	s.generated = nil
+	if s.mode == rocmKVCacheModeQ8 || s.mode == rocmKVCacheModeKQ8VQ4 {
+		s.engine.DisableBatchedPrefill = true
+	}
 	return ctx.Err()
 }
 

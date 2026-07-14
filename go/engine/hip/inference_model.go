@@ -35,6 +35,7 @@ var (
 	_ engine.TokenModel                = (*hipTokenModel)(nil)
 	_ engine.VisionTokenModel          = (*hipTokenModel)(nil)
 	_ engine.AudioInputTokenModel      = (*hipTokenModel)(nil)
+	_ engine.CacheModeReporter         = (*hipTokenModel)(nil)
 	_ engine.PromptReuseCapableModel   = (*hipTokenModel)(nil)
 	_ engine.StopTokenDeclarer         = (*hipTokenModel)(nil)
 	_ engine.SamplingDefaultsDeclarer  = (*hipTokenModel)(nil)
@@ -115,6 +116,10 @@ func (m *hipTokenModel) Close() error {
 }
 
 func (m *hipTokenModel) SessionsReusePrompts() bool { return true }
+
+func (m *hipTokenModel) SupportedCacheModes() []string {
+	return []string{rocmKVCacheModeFP16, rocmKVCacheModeQ8, rocmKVCacheModeKQ8VQ4}
+}
 
 func (m *hipTokenModel) AcceptsImageInput() bool { return false }
 

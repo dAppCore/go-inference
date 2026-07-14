@@ -15,12 +15,15 @@ const (
 )
 
 type hipGemma4Q4EngineConfig struct {
-	DeviceKVMode                     string
-	DeviceKVBlockSize                int
-	GlobalDeviceKVBlockSize          int
-	ChunkedAttention                 bool
-	PageAlignedLocalKV               bool
-	DisableInterleavedRowPages       bool
+	DeviceKVMode               string
+	DeviceKVBlockSize          int
+	GlobalDeviceKVBlockSize    int
+	ChunkedAttention           bool
+	PageAlignedLocalKV         bool
+	DisableInterleavedRowPages bool
+	// DisableBatchedPrefill forces position-invariant token-at-a-time prompt
+	// landing for quantized-KV prompt reuse and restored-state appends.
+	DisableBatchedPrefill            bool
 	DisableBatchedDecode             bool
 	PrefillUBatchTokens              int
 	PrefillAttentionQueryChunkTokens int

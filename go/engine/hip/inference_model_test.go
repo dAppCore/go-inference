@@ -55,6 +55,12 @@ func TestHIPInferenceModel_PromptReuseDeclaration_Good(t *testing.T) {
 	core.AssertTrue(t, declaration.SessionsReusePrompts())
 }
 
+func TestHIPInferenceModel_CacheModes_Good(t *testing.T) {
+	tokenModel := newHipTokenModel(&hipLoadedModel{}, hipInferenceModelFixtureTokenizer(), "gemma4")
+	var reporter engine.CacheModeReporter = tokenModel
+	core.AssertEqual(t, []string{rocmKVCacheModeFP16, rocmKVCacheModeQ8, rocmKVCacheModeKQ8VQ4}, reporter.SupportedCacheModes())
+}
+
 func TestHIPInferenceModel_AudioContract_Good(t *testing.T) {
 	tokenModel := newHipTokenModel(&hipLoadedModel{}, hipInferenceModelFixtureTokenizer(), "gemma4")
 	var _ engine.AudioInputTokenModel = tokenModel
