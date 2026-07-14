@@ -112,9 +112,6 @@ func (m *hipTokenModel) OpenLaneSet(cfg inference.LaneSetConfig) (inference.Lane
 	if !hipLoadedGemma4Q4GenerateLinked(m.loaded) || m.loaded.modelInfo.NumLayers <= 0 {
 		return nil, core.NewError("hip.TokenModel.OpenLaneSet: model is not a linked Gemma4 runtime")
 	}
-	if m.loaded.gemma4LoRA != nil {
-		return nil, core.NewError("hip.TokenModel.OpenLaneSet: Gemma4 head LoRA currently requires the serial host-sampling lane")
-	}
 	forward, err := m.loaded.cachedGemma4Q4ForwardConfig(m.loaded.modelInfo.NumLayers)
 	if err != nil {
 		return nil, err
@@ -460,6 +457,13 @@ func (executor *hipGemma4Q4LaneExecutor) Prepare(ctx context.Context, spec infer
 			return hipPreparedLane{}, sampleErr
 		}
 		pending = picked
+	} else if executor.forward.HeadLoRA != nil {
+		picked, sampleErr := executor.greedyHeadLoRAHiddenRowWithWorkspace(ctx, prefill.Current.DeviceFinalHidden, 1, 0, workspace)
+		if sampleErr != nil {
+			_ = prefill.DeviceState.Close()
+			return hipPreparedLane{}, sampleErr
+		}
+		pending = picked
 	}
 	return hipPreparedLane{PendingToken: pending, Position: prefill.Position, DeviceState: prefill.DeviceState, Sample: sample}, nil
 }
@@ -514,6 +518,14 @@ func (executor *hipGemma4Q4LaneExecutor) Forward(ctx context.Context, inputs []h
 				}
 				return nil, err
 			}
+		} else if executor.forward.HeadLoRA != nil {
+			pending, err = executor.greedyHeadLoRAHiddenRow(ctx, batch.FinalHidden, len(inputs), index)
+			if err != nil {
+				for _, state := range batch.DeviceStates {
+					_ = state.Close()
+				}
+				return nil, err
+			}
 		}
 		outputs[index] = hipLaneForwardOutput{
 			PendingToken: pending,
@@ -527,6 +539,25 @@ func (executor *hipGemma4Q4LaneExecutor) Forward(ctx context.Context, inputs []h
 
 func (executor *hipGemma4Q4LaneExecutor) sampleHiddenRow(ctx context.Context, hidden *hipDeviceByteBuffer, rows, row int, sample *hipLaneSampleState) (int32, error) {
 	return executor.sampleHiddenRowWithWorkspace(ctx, hidden, rows, row, sample, executor.workspace)
+}
+
+func (executor *hipGemma4Q4LaneExecutor) greedyHeadLoRAHiddenRow(ctx context.Context, hidden *hipDeviceByteBuffer, rows, row int) (int32, error) {
+	return executor.greedyHeadLoRAHiddenRowWithWorkspace(ctx, hidden, rows, row, executor.workspace)
+}
+
+func (executor *hipGemma4Q4LaneExecutor) greedyHeadLoRAHiddenRowWithWorkspace(ctx context.Context, hidden *hipDeviceByteBuffer, rows, row int, workspace *hipAttentionHeadsChunkedWorkspace) (int32, error) {
+	if executor == nil || executor.forward.HeadLoRA == nil || workspace == nil {
+		return 0, core.NewError("hip.LaneSet.HeadLoRA: adapter and attention workspace are required")
+	}
+	last := executor.forward.Layers[len(executor.forward.Layers)-1]
+	result, err := hipGemma4Q4SampleBatchedPrefillRow(
+		ctx, executor.loaded.driver, last, executor.forward.HeadLoRA, hidden, rows, row, 1e-6,
+		inference.GenerateConfig{}, nil, nil, 0, nil, workspace, false,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return int32(result.Greedy.TokenID), nil
 }
 
 func (executor *hipGemma4Q4LaneExecutor) sampleHiddenRowWithWorkspace(ctx context.Context, hidden *hipDeviceByteBuffer, rows, row int, sample *hipLaneSampleState, workspace *hipAttentionHeadsChunkedWorkspace) (int32, error) {

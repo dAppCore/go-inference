@@ -361,6 +361,80 @@ func TestHIPLaneSetE2BHardwareMatchesSingleLanes_Good(t *testing.T) {
 	core.RequireNoError(t, set.Close())
 }
 
+func TestHIPLaneSetE2BHardwareHeadLoRAMatchesSerial_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run the HIP head-LoRA lane-set receipt")
+	}
+	modelPath := strings.TrimSpace(os.Getenv("GO_ROCM_MODEL_PATH"))
+	if modelPath == "" {
+		t.Skip("set GO_ROCM_MODEL_PATH to a linked Gemma-4 model")
+	}
+	if strings.TrimSpace(os.Getenv("GO_ROCM_KERNEL_HSACO")) == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to the linked ROCm kernels HSACO")
+	}
+	if !ROCmAvailable() {
+		t.Skip("ROCm runtime is not available on this host")
+	}
+
+	loadedResult := (&rocmBackend{}).LoadModel(modelPath, inference.WithContextLen(256))
+	if !loadedResult.OK {
+		t.Fatalf("production ROCm LoadModel(%q): %v", modelPath, loadedResult.Value)
+	}
+	textModel, ok := loadedResult.Value.(*rocmModel)
+	if !ok {
+		t.Fatalf("production ROCm LoadModel returned %T, want *rocmModel", loadedResult.Value)
+	}
+	defer func() {
+		if result := textModel.Close(); !result.OK {
+			t.Errorf("Close model: %v", result.Value)
+		}
+	}()
+	loaded, ok := textModel.native.(*hipLoadedModel)
+	if !ok || loaded == nil {
+		t.Fatalf("production ROCm native model is %T, want *hipLoadedModel", textModel.native)
+	}
+
+	const rank = 2
+	hidden, vocab := loaded.modelInfo.HiddenSize, loaded.modelInfo.VocabSize
+	a := make([]float32, rank*hidden)
+	for index := 0; index < hidden; index++ {
+		a[index] = float32(index%7-3) * 0.001
+		a[hidden+index] = float32(index%5-2) * 0.001
+	}
+	b := make([]float32, vocab*rank)
+	for index, signs := range [][2]float32{{1, 1}, {1, -1}, {-1, 1}, {-1, -1}} {
+		token := 100 + index
+		b[token*rank] = signs[0] * 0.01
+		b[token*rank+1] = signs[1] * 0.01
+	}
+	adapterPath := t.TempDir()
+	core.RequireNoError(t, saveMetalHeadLoRAAdapter(adapterPath, a, b, vocab, hidden, rank, rank))
+	_, err := textModel.LoadAdapter(adapterPath)
+	core.RequireNoError(t, err)
+	if !textModel.BatchStepAvailable() {
+		t.Fatal("head-LoRA model did not expose BatchStepAvailable")
+	}
+
+	const prompt = "Hello"
+	serialTokens := collectInferenceTokens(textModel.Generate(context.Background(), prompt, inference.WithMaxTokens(3), inference.WithTemperature(0)))
+	core.RequireNoError(t, resultError(textModel.Err()))
+	serial := inferenceTokenIDs(serialTokens)
+	if len(serial) != 3 {
+		t.Fatalf("adapter serial tokens = %v, want three tokens", serial)
+	}
+	promptIDs, err := textModel.Tokenize(prompt)
+	core.RequireNoError(t, err)
+	set, err := textModel.OpenLaneSet(inference.LaneSetConfig{MaxLanes: 1})
+	core.RequireNoError(t, err)
+	executor := set.(*hipLaneSet).executor.(*hipGemma4Q4LaneExecutor)
+	core.AssertTrue(t, executor.forward.HeadLoRA == loaded.gemma4LoRA)
+	handle, err := set.Prepare(context.Background(), inference.LaneSpec{PromptIDs: promptIDs, MaxNew: 3})
+	core.RequireNoError(t, err)
+	lane := hipDrainLaneSet(t, set)[handle.ID]
+	core.RequireNoError(t, set.Close())
+	core.AssertEqual(t, serial, lane)
+}
+
 func TestHIPLaneSetE2BHardwareSampledMatchesSingleLanes_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run the HIP sampled lane-set receipt")

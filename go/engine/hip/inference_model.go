@@ -483,11 +483,6 @@ func (m *rocmModel) ResolvedStopTokens(requestStops []int32) []int32 {
 }
 
 func (m *rocmModel) BatchStepAvailable() bool {
-	if m != nil {
-		if loaded, ok := m.native.(*hipLoadedModel); ok && loaded.gemma4LoRA != nil {
-			return false
-		}
-	}
 	return m != nil && m.engineModel != nil && m.engineModel.BatchStepAvailable()
 }
 
