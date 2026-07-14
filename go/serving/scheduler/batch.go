@@ -114,6 +114,11 @@ func (m *Model) scheduleBatch(ctx context.Context, req inference.ScheduledReques
 		// fold — the base engine delivers this request's own final metrics.
 		opts = append(opts, inference.WithMetricsSink(req.MetricsSink))
 	}
+	if req.EnableThinking != nil {
+		// Re-arm the thinking override the fold cannot hold — engine Chat
+		// frames the turn with it (and continuity keys the conversation by it).
+		opts = append(opts, inference.WithEnableThinking(req.EnableThinking))
+	}
 	messages := append([]inference.Message(nil), req.Messages...)
 	prompt := req.Prompt
 	src := func(rc context.Context) stream {

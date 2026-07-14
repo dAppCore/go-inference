@@ -808,6 +808,11 @@ func (m *Model) baseTokens(j *job) iter.Seq[inference.Token] {
 		// fold — the base engine delivers this request's own final metrics.
 		opts = append(opts, inference.WithMetricsSink(j.req.MetricsSink))
 	}
+	if j.req.EnableThinking != nil {
+		// Re-arm the thinking override the fold cannot hold — engine Chat
+		// frames the turn with it (and continuity keys the conversation by it).
+		opts = append(opts, inference.WithEnableThinking(j.req.EnableThinking))
+	}
 	if len(j.req.Messages) > 0 {
 		messages := append([]inference.Message(nil), j.req.Messages...)
 		return m.base.Chat(j.ctx, messages, opts...)
