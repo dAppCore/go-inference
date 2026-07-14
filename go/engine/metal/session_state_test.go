@@ -2686,12 +2686,12 @@ func TestArchSessionRestoreKVBlocksNativeLayerSlabsAllocationBudget(t *testing.T
 	if err != nil {
 		t.Fatalf("stateLayerViews: %v", err)
 	}
-	if err := restored.restoreKVSnapshotBlockLayers(block, len(prompt), views); err != nil {
+	if _, err := restored.restoreKVSnapshotBlockLayers(block, len(prompt), views); err != nil {
 		t.Fatalf("restoreKVSnapshotBlockLayers warmup: %v", err)
 	}
 	var restoreErr error
 	allocs := testing.AllocsPerRun(10, func() {
-		restoreErr = restored.restoreKVSnapshotBlockLayers(block, len(prompt), views)
+		_, restoreErr = restored.restoreKVSnapshotBlockLayers(block, len(prompt), views)
 	})
 	if restoreErr != nil {
 		t.Fatalf("restoreKVSnapshotBlockLayers: %v", restoreErr)
