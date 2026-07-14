@@ -281,6 +281,10 @@ func (s *hipEngineSession) generate(ctx context.Context, generate inference.Gene
 	if len(s.pending) == 0 {
 		return nil, core.NewError("hip.EngineSession.Generate: no buffered tokens to seed decode (hip decodes from a forwarded prompt, not a bare cache — append a prompt first)")
 	}
+	// HIP materialises its buffered prefill inside this combined operation, so
+	// this is the operation boundary for the shared memory watermark.
+	hipMemoryWatermarkReset(s.driver)
+	defer hipMemoryWatermarkSample(s.driver)
 	prompt := s.pending
 	promptEmbeddings := s.pendingEmbeddings
 	s.pending = nil
