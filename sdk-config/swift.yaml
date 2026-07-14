@@ -1,0 +1,6 @@
+generatorName: swift6
+additionalProperties:
+  projectName: LemSDK
+  useSPMFileStructure: true
+  library: urlsession
+  responseAs: AsyncAwait
