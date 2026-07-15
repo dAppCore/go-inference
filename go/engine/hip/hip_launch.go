@@ -122,6 +122,7 @@ const (
 	hipKernelNameDiffusionExpectedEmbedding                 = "rocm_diffusion_expected_embedding"
 	hipKernelNameDiffusionExpectedEmbeddingAffineG64Rows16  = "rocm_diffusion_expected_embedding_affine_g64_rows16"
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64Dims4Rows4  = "rocm_diffusion_expected_embedding_q8_g64_dims4_rows4"
+	hipKernelNameDiffusionSampleProbabilities               = "rocm_diffusion_sample_probabilities"
 	hipKernelNameEmbedMean                                  = "rocm_embedding_mean_pool"
 	hipKernelNameRerank                                     = "rocm_rerank_cosine"
 	hipKernelNameTinyPrefill                                = "rocm_tiny_prefill"

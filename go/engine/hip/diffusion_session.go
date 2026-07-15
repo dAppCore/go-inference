@@ -359,11 +359,7 @@ func rocmDiffusionSampleDenoiseStep(logits []float32, canvas []int32, vocab, hid
 		return ROCmDiffusionStepResult{Canvas: []int32{}, Greedy: []int32{}, SCEmb: []byte{}}, nil
 	}
 
-	fraction := 1 - float32(math.Pow(float64(1-noiseProportion), float64(cfg.Exponent)))
-	temperature := cfg.MinTemperature + fraction*(cfg.MaxTemperature-cfg.MinTemperature)
-	if temperature <= 0 {
-		temperature = 1e-6
-	}
+	temperature := rocmDiffusionDenoiseTemperature(noiseProportion, cfg)
 	shaped := make([]float32, len(logits))
 	shapedBF16 := make([]byte, len(logits)*2)
 	for index, logit := range logits {
@@ -375,11 +371,9 @@ func rocmDiffusionSampleDenoiseStep(logits []float32, canvas []int32, vocab, hid
 
 	probabilities := make([]float32, len(shaped))
 	categorical := model.NewSampler(cfg.Seed ^ (uint64(step)*2 + 1))
-	renoiseSampler := model.NewSampler(cfg.Seed ^ (uint64(step)*2 + 2))
 	sampled := make([]int32, length)
 	greedy := make([]int32, length)
 	entropies := make([]float32, length)
-	var entropySum float32
 	for row := 0; row < length; row++ {
 		rowBytes := shapedBF16[row*vocab*2 : (row+1)*vocab*2]
 		id, err := categorical.Sample(rowBytes, vocab, model.SampleParams{Temperature: 1})
@@ -399,17 +393,50 @@ func rocmDiffusionSampleDenoiseStep(logits []float32, canvas []int32, vocab, hid
 			return ROCmDiffusionStepResult{}, err
 		}
 		entropies[row] = entropy
-		entropySum += entropy
 	}
 
 	scEmb, err := encode(probabilities)
 	if err != nil {
 		return ROCmDiffusionStepResult{}, err
 	}
+	return rocmDiffusionFinalizeDenoiseStep(canvas, sampled, greedy, entropies, scEmb, hidden, step, cfg)
+}
+
+func rocmDiffusionDenoiseTemperature(noiseProportion float32, cfg ROCmDiffusionStepConfig) float32 {
+	fraction := 1 - float32(math.Pow(float64(1-noiseProportion), float64(cfg.Exponent)))
+	temperature := cfg.MinTemperature + fraction*(cfg.MaxTemperature-cfg.MinTemperature)
+	if temperature <= 0 {
+		return 1e-6
+	}
+	return temperature
+}
+
+func rocmDiffusionCategoricalDraws(seed uint64, step, count int) []float32 {
+	sampler := model.NewSampler(seed ^ (uint64(step)*2 + 1))
+	draws := make([]float32, count)
+	for index := range draws {
+		draws[index] = sampler.Draw()
+	}
+	return draws
+}
+
+func rocmDiffusionFinalizeDenoiseStep(canvas, sampled, greedy []int32, entropies []float32, scEmb []byte, hidden, step int, cfg ROCmDiffusionStepConfig) (ROCmDiffusionStepResult, error) {
+	const op = "hip.rocmDiffusionSampleDenoiseStep"
+	length := len(canvas)
+	if hidden <= 0 || cfg.TextVocabSize <= 0 {
+		return ROCmDiffusionStepResult{}, core.NewError(op + ": hidden and text vocabulary sizes must be positive")
+	}
+	if len(sampled) != length || len(greedy) != length || len(entropies) != length {
+		return ROCmDiffusionStepResult{}, core.NewError(op + ": sampled row geometry mismatch")
+	}
 	if len(scEmb) != length*hidden*2 {
 		return ROCmDiffusionStepResult{}, core.NewError(op + ": self-conditioning embedding byte count mismatch")
 	}
+	if length == 0 {
+		return ROCmDiffusionStepResult{Canvas: []int32{}, Greedy: []int32{}, SCEmb: []byte{}}, nil
+	}
 
+	renoiseSampler := model.NewSampler(cfg.Seed ^ (uint64(step)*2 + 2))
 	renoise := make([]int32, length)
 	for index := range renoise {
 		id := int32(renoiseSampler.Draw() * float32(cfg.TextVocabSize))
@@ -417,6 +444,13 @@ func rocmDiffusionSampleDenoiseStep(logits []float32, canvas []int32, vocab, hid
 			id = cfg.TextVocabSize - 1
 		}
 		renoise[index] = id
+	}
+	var entropySum float32
+	for _, entropy := range entropies {
+		if math.IsNaN(float64(entropy)) || math.IsInf(float64(entropy), 0) {
+			return ROCmDiffusionStepResult{}, core.NewError(op + ": entropy must be finite")
+		}
+		entropySum += entropy
 	}
 	order := make([]int, length)
 	for index := range order {

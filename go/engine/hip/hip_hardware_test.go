@@ -21,6 +21,7 @@ import (
 	"dappco.re/go/inference"
 	inferdecode "dappco.re/go/inference/decode"
 	"dappco.re/go/inference/engine/hip/internal/gguf"
+	"dappco.re/go/inference/model"
 )
 
 func TestHIPHardwareAvailabilitySmoke_Good(t *testing.T) {
@@ -160,6 +161,72 @@ func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
 			}
 		}
 		assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion expected embedding "+label+" group64", want, got, 0.00001, 0.00001)
+	}
+}
+
+func TestHIPHardwareDiffusionSampleProbabilities_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || !runtime.Available() || hipRuntime.driver == nil {
+		t.Fatal("native ROCm runtime is not available")
+	}
+
+	const rows, vocab = 3, 67
+	const temperature, softcap = float32(0.73), float32(30)
+	raw := make([]float32, rows*vocab)
+	for index := range raw {
+		raw[index] = float32(math.Sin(float64(index)*0.37))*19 + float32(index%11-5)*0.625
+	}
+	raw[4] = 58
+	raw[vocab+17] = 42
+	raw[2*vocab+66] = 37
+
+	hostShaped, err := hipGemma4Q4SoftcapLogits(append([]float32(nil), raw...), softcap)
+	core.RequireNoError(t, err)
+	shapedBF16 := make([]byte, len(hostShaped)*2)
+	for index, value := range hostShaped {
+		bf16 := hipFloat32ToBFloat16(value / temperature)
+		binary.LittleEndian.PutUint16(shapedBF16[index*2:], bf16)
+		hostShaped[index] = hipBFloat16ToFloat32(bf16)
+	}
+
+	const seed = uint64(0x4d595df4d0f33173)
+	drawSampler := model.NewSampler(seed)
+	hostSampler := model.NewSampler(seed)
+	draws := make([]float32, rows)
+	wantSampled := make([]int32, rows)
+	wantGreedy := make([]int32, rows)
+	wantEntropy := make([]float32, rows)
+	wantProbabilities := make([]float32, len(raw))
+	for row := range rows {
+		draws[row] = drawSampler.Draw()
+		rowBytes := shapedBF16[row*vocab*2 : (row+1)*vocab*2]
+		wantSampled[row], err = hostSampler.Sample(rowBytes, vocab, model.SampleParams{Temperature: 1})
+		core.RequireNoError(t, err)
+		wantGreedy[row], err = model.Greedy(rowBytes, vocab)
+		core.RequireNoError(t, err)
+		wantEntropy[row], err = rocmDiffusionSoftmaxEntropy(hostShaped[row*vocab:(row+1)*vocab], wantProbabilities[row*vocab:(row+1)*vocab])
+		core.RequireNoError(t, err)
+	}
+
+	logits, err := hipUploadGemma4Q4Float32Input(hipRuntime.driver, "diffusion sample hardware logits", raw)
+	core.RequireNoError(t, err)
+	defer logits.Close()
+	got, err := hipRunDiffusionSampleKernel(context.Background(), hipRuntime.driver, logits, rows, vocab, temperature, softcap, draws)
+	core.RequireNoError(t, err)
+	gotProbabilities, err := hipReadFloat32DeviceOutput(logits, "rocm.hip.DiffusionSampleHardware", "probabilities", len(raw))
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion sample probabilities", wantProbabilities, gotProbabilities, 0.00001, 0.00001)
+	for row := range rows {
+		core.AssertEqual(t, wantSampled[row], got[row].Sampled)
+		core.AssertEqual(t, wantGreedy[row], got[row].Greedy)
+		assertFloat32Near(t, wantEntropy[row], got[row].Entropy)
 	}
 }
 

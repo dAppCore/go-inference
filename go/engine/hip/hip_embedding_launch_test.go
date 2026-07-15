@@ -61,6 +61,29 @@ func TestHIPDiffusionExpectedEmbeddingLaunch_Good_SelectsQ8Group64Dims4Rows4(t *
 	core.AssertEqual(t, uint32(256), driver.launches[0].BlockX)
 }
 
+func TestHIPDiffusionExpectedEmbeddingLaunch_Good_KeepsProbabilitiesOnDevice(t *testing.T) {
+	const rows, vocab, hidden = 2, 3, 4
+	driver := &fakeHIPDriver{available: true}
+	probabilities, err := hipUploadGemma4Q4Float32Input(driver, "resident diffusion probabilities", make([]float32, rows*vocab))
+	core.RequireNoError(t, err)
+	defer probabilities.Close()
+	driver.copies = nil
+
+	output, err := hipRunDiffusionExpectedEmbeddingDeviceKernel(context.Background(), driver, probabilities, rows, hipDeviceEmbeddingLookupConfig{
+		EmbeddingPointer: 0x9000,
+		EmbeddingBytes:   vocab * hidden * 4,
+		TableEncoding:    hipEmbeddingTableEncodingF32,
+		VocabSize:        vocab,
+		HiddenSize:       hidden,
+	}, 1)
+	core.RequireNoError(t, err)
+	defer output.Close()
+
+	core.AssertEqual(t, 1, len(driver.launches))
+	core.AssertEqual(t, hipKernelNameDiffusionExpectedEmbedding, driver.launches[0].Name)
+	core.AssertEqual(t, 0, len(driver.copies))
+}
+
 func TestHIPEmbeddingMeanPoolLaunchArgs_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	req := hipEmbeddingMeanPoolRequest{Tokens: []float32{1, 3, 3, 5}, TokenCount: 2, Dim: 2, Normalize: true}

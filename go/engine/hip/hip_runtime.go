@@ -394,6 +394,7 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameEmbedLookupGreedyToken,
 	hipKernelNameDiffusionExpectedEmbeddingAffineG64Rows16,
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64Dims4Rows4,
+	hipKernelNameDiffusionSampleProbabilities,
 }
 
 func hipPrewarmGemma4Q4KernelFunctions(driver nativeHIPDriver) {
@@ -450,6 +451,7 @@ var hipGemma4Q4WarmLaunchPacketSizes = []int{
 	hipPerLayerInputTransposeLaunchArgsBytes,
 	hipEmbeddingLookupLaunchArgsBytes,
 	hipSoftcapGreedyLaunchArgsBytes,
+	hipDiffusionSampleLaunchArgsBytes,
 }
 
 func hipPrewarmGemma4Q4LaunchPacketPools() {

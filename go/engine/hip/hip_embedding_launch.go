@@ -683,12 +683,33 @@ func hipRunDiffusionExpectedEmbeddingKernel(ctx context.Context, driver nativeHI
 		return nil, err
 	}
 	defer probabilityBuffer.Close()
+	output, err := hipRunDiffusionExpectedEmbeddingDeviceKernel(ctx, driver, probabilityBuffer, rows, cfg, outputScale)
+	if err != nil {
+		return nil, err
+	}
+	defer output.Close()
+	return hipReadFloat32DeviceOutput(output, op, "diffusion expected embedding output", rows*cfg.HiddenSize)
+}
+
+func hipRunDiffusionExpectedEmbeddingDeviceKernel(ctx context.Context, driver nativeHIPDriver, probabilityBuffer *hipDeviceByteBuffer, rows int, cfg hipDeviceEmbeddingLookupConfig, outputScale float32) (*hipDeviceByteBuffer, error) {
+	const op = "rocm.hip.DiffusionExpectedEmbeddingLaunch"
+	if err := hipContextErr(ctx); err != nil {
+		return nil, err
+	}
+	if driver == nil || !driver.Available() {
+		return nil, core.E(op, "HIP driver is not available", nil)
+	}
+	if probabilityBuffer == nil || probabilityBuffer.Pointer() == 0 || rows <= 0 || cfg.VocabSize <= 0 || cfg.HiddenSize <= 0 {
+		return nil, core.E(op, "probability and embedding geometry mismatch", nil)
+	}
+	if probabilityBuffer.SizeBytes() != uint64(rows)*uint64(cfg.VocabSize)*4 {
+		return nil, core.E(op, "probability byte count mismatch", nil)
+	}
 	outputCount := rows * cfg.HiddenSize
 	output, err := hipAllocateByteBuffer(driver, op, "diffusion expected embedding output", uint64(outputCount*4), outputCount)
 	if err != nil {
 		return nil, err
 	}
-	defer output.Close()
 	args, err := (hipDiffusionExpectedEmbeddingLaunchArgs{
 		ProbabilityPointer: probabilityBuffer.Pointer(),
 		EmbeddingPointer:   cfg.EmbeddingPointer,
@@ -709,6 +730,7 @@ func hipRunDiffusionExpectedEmbeddingKernel(ctx context.Context, driver nativeHI
 		OutputScale:        outputScale,
 	}).Binary()
 	if err != nil {
+		_ = output.Close()
 		return nil, err
 	}
 	kernelName := hipKernelNameDiffusionExpectedEmbedding
@@ -731,10 +753,12 @@ func hipRunDiffusionExpectedEmbeddingKernel(ctx context.Context, driver nativeHI
 	}
 	gridX, err := rocmDeviceKVPositiveUint32("diffusion expected embedding hidden blocks", (gridHidden+255)/256)
 	if err != nil {
+		_ = output.Close()
 		return nil, err
 	}
 	gridY, err := rocmDeviceKVPositiveUint32("diffusion expected embedding rows", gridRows)
 	if err != nil {
+		_ = output.Close()
 		return nil, err
 	}
 	if err := hipLaunchKernel(driver, hipKernelLaunchConfig{
@@ -747,9 +771,10 @@ func hipRunDiffusionExpectedEmbeddingKernel(ctx context.Context, driver nativeHI
 		BlockY: 1,
 		BlockZ: 1,
 	}); err != nil {
+		_ = output.Close()
 		return nil, err
 	}
-	return hipReadFloat32DeviceOutput(output, op, "diffusion expected embedding output", outputCount)
+	return output, nil
 }
 
 func (args hipEmbeddingLookupLaunchArgs) BinaryInto(payload []byte) ([]byte, error) {

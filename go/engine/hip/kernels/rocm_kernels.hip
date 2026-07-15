@@ -234,6 +234,11 @@ constexpr uint32_t ROCM_EMBEDDING_LOOKUP_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_EMBEDDING_LOOKUP_LAUNCH_ARGS_BYTES = 104;
 constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_LAUNCH_ARGS_BYTES = 120;
+constexpr uint32_t ROCM_DIFFUSION_SAMPLE_LAUNCH_ARGS_VERSION = 1;
+constexpr uint32_t ROCM_DIFFUSION_SAMPLE_LAUNCH_ARGS_BYTES = 72;
+constexpr uint32_t ROCM_DIFFUSION_SAMPLE_RESULT_BYTES = 16;
+constexpr uint32_t ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE = 32;
+constexpr uint32_t ROCM_DIFFUSION_SAMPLE_STATUS_OK = 0x44534653u;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_F32 = 1;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_BF16 = 2;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_MLX_Q4 = 3;
@@ -830,6 +835,28 @@ struct rocm_diffusion_expected_embedding_launch_args {
 	uint64_t output_bytes;
 	uint32_t output_scale_bits;
 	uint32_t reserved;
+};
+
+struct rocm_diffusion_sample_launch_args {
+	uint32_t version;
+	uint32_t total_bytes;
+	uint64_t logits_pointer;
+	uint64_t draws_pointer;
+	uint64_t output_pointer;
+	uint32_t rows;
+	uint32_t vocab_size;
+	uint32_t temperature_bits;
+	uint32_t softcap_bits;
+	uint64_t logits_bytes;
+	uint64_t draws_bytes;
+	uint64_t output_bytes;
+};
+
+struct rocm_diffusion_sample_result {
+	int32_t sampled;
+	int32_t greedy;
+	float entropy;
+	uint32_t status;
 };
 
 struct rocm_embedding_mean_pool_launch_args {
@@ -1797,6 +1824,8 @@ static_assert(sizeof(rocm_codebook_launch_args) == ROCM_CODEBOOK_LAUNCH_ARGS_BYT
 static_assert(sizeof(rocm_lora_launch_args) == ROCM_LORA_LAUNCH_ARGS_BYTES, "LoRA launch ABI drift");
 static_assert(sizeof(rocm_embedding_lookup_launch_args) == ROCM_EMBEDDING_LOOKUP_LAUNCH_ARGS_BYTES, "embedding lookup launch ABI drift");
 static_assert(sizeof(rocm_diffusion_expected_embedding_launch_args) == ROCM_DIFFUSION_EXPECTED_EMBEDDING_LAUNCH_ARGS_BYTES, "diffusion expected embedding launch ABI drift");
+static_assert(sizeof(rocm_diffusion_sample_launch_args) == ROCM_DIFFUSION_SAMPLE_LAUNCH_ARGS_BYTES, "diffusion sample launch ABI drift");
+static_assert(sizeof(rocm_diffusion_sample_result) == ROCM_DIFFUSION_SAMPLE_RESULT_BYTES, "diffusion sample result ABI drift");
 static_assert(sizeof(rocm_embedding_mean_pool_launch_args) == ROCM_EMBEDDING_MEAN_POOL_LAUNCH_ARGS_BYTES, "embedding mean-pool launch ABI drift");
 static_assert(sizeof(rocm_rerank_cosine_launch_args) == ROCM_RERANK_COSINE_LAUNCH_ARGS_BYTES, "rerank cosine launch ABI drift");
 static_assert(sizeof(rocm_tiny_prefill_launch_args) == ROCM_TINY_PREFILL_LAUNCH_ARGS_BYTES, "tiny prefill launch ABI drift");
@@ -1878,6 +1907,13 @@ __device__ uint16_t rocm_float_to_half(float value)
 __device__ float rocm_bfloat16_to_float(uint16_t value)
 {
 	return rocm_float_from_bits(static_cast<uint32_t>(value) << 16);
+}
+
+__device__ uint16_t rocm_float_to_bfloat16(float value)
+{
+	uint32_t bits = rocm_float_bits(value);
+	bits += 0x7fffu + ((bits >> 16u) & 1u);
+	return static_cast<uint16_t>(bits >> 16u);
 }
 
 __device__ uint32_t rocm_ordered_float_key(float value)
@@ -2584,6 +2620,26 @@ __device__ bool rocm_valid_diffusion_expected_embedding_args(const rocm_diffusio
 			rocm_mlx_affine_shape_valid(args.vocab_size, args.hidden_size, args.group_size, bits, args.embedding_bytes, args.scale_bytes, args.bias_bytes);
 	}
 	return false;
+}
+
+__device__ bool rocm_valid_diffusion_sample_args(const rocm_diffusion_sample_launch_args &args)
+{
+	const float temperature = rocm_float_from_bits(args.temperature_bits);
+	const float softcap = rocm_float_from_bits(args.softcap_bits);
+	return args.version == ROCM_DIFFUSION_SAMPLE_LAUNCH_ARGS_VERSION &&
+		args.total_bytes == ROCM_DIFFUSION_SAMPLE_LAUNCH_ARGS_BYTES &&
+		args.logits_pointer != 0 &&
+		args.draws_pointer != 0 &&
+		args.output_pointer != 0 &&
+		args.rows > 0 &&
+		args.vocab_size > 0 &&
+		args.logits_bytes == static_cast<uint64_t>(args.rows) * args.vocab_size * sizeof(float) &&
+		args.draws_bytes == static_cast<uint64_t>(args.rows) * sizeof(float) &&
+		args.output_bytes == static_cast<uint64_t>(args.rows) * ROCM_DIFFUSION_SAMPLE_RESULT_BYTES &&
+		temperature > 0.0f &&
+		isfinite(temperature) &&
+		softcap >= 0.0f &&
+		isfinite(softcap);
 }
 
 __device__ bool rocm_valid_rerank_cosine_args(const rocm_rerank_cosine_launch_args &args)
@@ -9576,6 +9632,121 @@ extern "C" __global__ void rocm_diffusion_expected_embedding(const unsigned char
 	}
 	const float output_scale = args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
 	output[static_cast<uint64_t>(row) * args.hidden_size + dim] = sum * output_scale;
+}
+
+extern "C" __global__ void rocm_diffusion_sample_probabilities(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_diffusion_sample_launch_args &args = *reinterpret_cast<const rocm_diffusion_sample_launch_args *>(packet);
+	if (!rocm_valid_diffusion_sample_args(args) ||
+		blockDim.x != ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE ||
+		blockIdx.x >= args.rows) {
+		return;
+	}
+
+	const uint32_t lane = threadIdx.x;
+	const uint32_t row = blockIdx.x;
+	float *logits = reinterpret_cast<float *>(static_cast<uintptr_t>(args.logits_pointer)) + static_cast<uint64_t>(row) * args.vocab_size;
+	const float *draws = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.draws_pointer));
+	rocm_diffusion_sample_result *results = reinterpret_cast<rocm_diffusion_sample_result *>(static_cast<uintptr_t>(args.output_pointer));
+	const float temperature = rocm_float_from_bits(args.temperature_bits);
+	const float softcap = rocm_float_from_bits(args.softcap_bits);
+
+	float local_maximum = -FLT_MAX;
+	uint32_t local_greedy = args.vocab_size;
+	uint32_t local_valid = 1u;
+	for (uint32_t col = lane; col < args.vocab_size; col += ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE) {
+		float value = logits[col];
+		if (softcap > 0.0f) {
+			value = tanhf(value / softcap) * softcap;
+		}
+		value = rocm_bfloat16_to_float(rocm_float_to_bfloat16(value / temperature));
+		logits[col] = value;
+		if (!isfinite(value)) {
+			local_valid = 0u;
+		}
+		if (value > local_maximum || (value == local_maximum && col < local_greedy)) {
+			local_maximum = value;
+			local_greedy = col;
+		}
+	}
+
+	float maximum = local_maximum;
+	uint32_t greedy = local_greedy;
+	uint32_t valid = local_valid;
+	for (uint32_t source = 0; source < ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE; ++source) {
+		const float candidate = rocm_shfl_float(local_maximum, static_cast<int>(source), ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE);
+		const uint32_t candidate_index = rocm_shfl_u32(local_greedy, static_cast<int>(source), ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE);
+		const uint32_t candidate_valid = rocm_shfl_u32(local_valid, static_cast<int>(source), ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE);
+		if (lane == 0u) {
+			valid &= candidate_valid;
+			if (candidate_index < args.vocab_size &&
+				(candidate > maximum || (candidate == maximum && candidate_index < greedy))) {
+				maximum = candidate;
+				greedy = candidate_index;
+			}
+		}
+	}
+	maximum = rocm_shfl_float(maximum, 0, ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE);
+	greedy = rocm_shfl_u32(greedy, 0, ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE);
+	valid = rocm_shfl_u32(valid, 0, ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE);
+
+	float total = 0.0f;
+	float weighted = 0.0f;
+	for (uint32_t base = 0; base < args.vocab_size; base += ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE) {
+		const uint32_t col = base + lane;
+		const float value = col < args.vocab_size ? logits[col] : 0.0f;
+		const float probability = col < args.vocab_size ? expf(value - maximum) : 0.0f;
+		if (col < args.vocab_size) {
+			logits[col] = probability;
+		}
+		for (uint32_t source = 0; source < ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE; ++source) {
+			const float ordered_probability = rocm_shfl_float(probability, static_cast<int>(source), ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE);
+			const float ordered_value = rocm_shfl_float(value, static_cast<int>(source), ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE);
+			if (lane == 0u && base + source < args.vocab_size) {
+				total += ordered_probability;
+				weighted += ordered_probability * ordered_value;
+			}
+		}
+	}
+	total = rocm_shfl_float(total, 0, ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE);
+	weighted = rocm_shfl_float(weighted, 0, ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE);
+
+	const float draw = draws[row];
+	const float target = draw * total;
+	float accumulated = 0.0f;
+	uint32_t sampled = args.vocab_size - 1u;
+	uint32_t found = 0u;
+	for (uint32_t base = 0; base < args.vocab_size; base += ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE) {
+		const uint32_t col = base + lane;
+		const float probability = col < args.vocab_size ? logits[col] : 0.0f;
+		if (col < args.vocab_size) {
+			logits[col] = probability / total;
+		}
+		for (uint32_t source = 0; source < ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE; ++source) {
+			const float ordered_probability = rocm_shfl_float(probability, static_cast<int>(source), ROCM_DIFFUSION_SAMPLE_BLOCK_SIZE);
+			if (lane == 0u && found == 0u && base + source < args.vocab_size) {
+				accumulated += ordered_probability;
+				if (accumulated >= target) {
+					sampled = base + source;
+					found = 1u;
+				}
+			}
+		}
+	}
+
+	if (lane == 0u) {
+		rocm_diffusion_sample_result result = {};
+		result.sampled = static_cast<int32_t>(sampled);
+		result.greedy = static_cast<int32_t>(greedy);
+		result.entropy = maximum + static_cast<float>(log(static_cast<double>(total))) - weighted / total;
+		if (valid != 0u && draw >= 0.0f && draw < 1.0f && isfinite(draw) && total > 0.0f && isfinite(total) && isfinite(result.entropy)) {
+			result.status = ROCM_DIFFUSION_SAMPLE_STATUS_OK;
+		}
+		results[row] = result;
+	}
 }
 
 extern "C" __global__ void rocm_diffusion_expected_embedding_affine_g64_rows16(const unsigned char *packet)

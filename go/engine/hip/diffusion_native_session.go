@@ -259,26 +259,35 @@ func (session *hipROCmNativeDiffusionSession) Denoise(ctx context.Context, req R
 		_ = forward.Close()
 		return ROCmDiffusionStepResult{}, core.E(hipDiffusionGemmaOperation, "project denoise logits", err)
 	}
-	logits, err := hipReadFloat32DeviceOutput(logitsDevice, hipDiffusionGemmaOperation, "denoise logits", len(req.Canvas)*last.VocabSize)
-	_ = logitsDevice.Close()
+	defer logitsDevice.Close()
 	closeErr := forward.Close()
-	if err != nil {
-		return ROCmDiffusionStepResult{}, err
-	}
 	if closeErr != nil {
 		return ROCmDiffusionStepResult{}, closeErr
 	}
-	logits, err = hipGemma4Q4SoftcapLogits(logits, last.FinalLogitSoftcap)
+	temperature := rocmDiffusionDenoiseTemperature(req.NoiseProportion, req.StepConfig)
+	draws := rocmDiffusionCategoricalDraws(req.StepConfig.Seed, req.Step, len(req.Canvas))
+	samples, err := hipRunDiffusionSampleKernel(ctx, session.driver, logitsDevice, len(req.Canvas), last.VocabSize, temperature, last.FinalLogitSoftcap, draws)
 	if err != nil {
 		return ROCmDiffusionStepResult{}, err
 	}
-	return rocmDiffusionSampleDenoiseStep(logits, req.Canvas, last.VocabSize, last.HiddenSize, req.Step, req.NoiseProportion, req.StepConfig, func(probabilities []float32) ([]byte, error) {
-		expected, err := hipRunDiffusionExpectedEmbeddingKernel(ctx, session.driver, probabilities, len(req.Canvas), config.Layers[0].Embedding, float32(math.Sqrt(float64(last.HiddenSize))))
-		if err != nil {
-			return nil, err
-		}
-		return hipDiffusionFloat32ToBF16(expected), nil
-	})
+	expectedDevice, err := hipRunDiffusionExpectedEmbeddingDeviceKernel(ctx, session.driver, logitsDevice, len(req.Canvas), config.Layers[0].Embedding, float32(math.Sqrt(float64(last.HiddenSize))))
+	if err != nil {
+		return ROCmDiffusionStepResult{}, err
+	}
+	defer expectedDevice.Close()
+	expected, err := hipReadFloat32DeviceOutput(expectedDevice, hipDiffusionGemmaOperation, "denoise expected embedding", len(req.Canvas)*last.HiddenSize)
+	if err != nil {
+		return ROCmDiffusionStepResult{}, err
+	}
+	sampled := make([]int32, len(samples))
+	greedy := make([]int32, len(samples))
+	entropies := make([]float32, len(samples))
+	for index, sample := range samples {
+		sampled[index] = sample.Sampled
+		greedy[index] = sample.Greedy
+		entropies[index] = sample.Entropy
+	}
+	return rocmDiffusionFinalizeDenoiseStep(req.Canvas, sampled, greedy, entropies, hipDiffusionFloat32ToBF16(expected), last.HiddenSize, req.Step, req.StepConfig)
 }
 
 func (session *hipROCmNativeDiffusionSession) TruncateTo(position int) error {
