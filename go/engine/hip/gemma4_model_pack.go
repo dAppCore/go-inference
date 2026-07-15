@@ -84,6 +84,7 @@ func applyROCmGemma4ModelPackSupportLabels(inspection *inference.ModelPackInspec
 		effectiveSupport.GenerateStatus = Gemma4GenerateLoadOnly
 		inspection.Labels["gemma4_source_format"] = "gguf"
 	}
+	sizeSupport.RunnableOnCard = sizeSupport.RunnableOnCard && effectiveSupport.GenerateStatus != Gemma4GeneratePlannedOnly
 	inspection.Labels["gemma4_pack_supported"] = "true"
 	inspection.Labels["gemma4_runtime"] = effectiveSupport.Runtime
 	inspection.Labels["gemma4_generate_status"] = effectiveSupport.GenerateStatus
@@ -257,6 +258,7 @@ func rocmApplyGemma4SizeQuantSupportLabels(labels map[string]string, model infer
 		sizeSupport.RunnableOnCard = qatEntry.RunnableOnCard
 		labels["gemma4_qat_collection"] = qatEntry.CollectionID
 	}
+	sizeSupport.RunnableOnCard = sizeSupport.RunnableOnCard && support.GenerateStatus != Gemma4GeneratePlannedOnly
 	if explicitSupported == "false" {
 		labels["gemma4_pack_supported"] = "false"
 	} else {

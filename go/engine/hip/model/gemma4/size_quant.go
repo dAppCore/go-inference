@@ -37,7 +37,7 @@ var sizeQuantMatrix = []SizeQuantSupport{
 	{Size: "E2B", ModelIDPrefix: "gemma-4-E2B-it", Runtime: RuntimeMLXAffine, QuantModes: []string{"bf16", "q8", "q6", "q4", "mxfp8", "mxfp4"}, QuantModeSupport: smallQuantModeSupport(), RunnableOnCard: true, Notes: "primary production size"},
 	{Size: "E4B", ModelIDPrefix: "gemma-4-E4B-it", Runtime: RuntimeMLXAffine, QuantModes: []string{"bf16", "q8", "q6", "q4", "mxfp8", "mxfp4"}, QuantModeSupport: smallQuantModeSupport(), RunnableOnCard: true, Notes: "same quant ladder as E2B"},
 	{Size: "12B", ModelIDPrefix: "gemma-4-12B-it", Runtime: RuntimeMLXAffine, QuantModes: []string{"q6", "q4"}, QuantModeSupport: []QuantModeSupport{{Mode: "q6", Runtime: RuntimeMLXAffine, GenerateStatus: GenerateLinked, Notes: "q6 target on this card"}, {Mode: "q4", Runtime: RuntimeMLXAffine, GenerateStatus: GenerateLinked, Notes: "QAT constrained 12B target on this card"}}, RunnableOnCard: true, Notes: "q6 and QAT q4 targets on this card"},
-	{Size: "26B-A4B", ModelIDPrefix: "gemma-4-26B-A4B-it", Runtime: RuntimePlanned, QuantModes: []string{"q8-status", "q6-status", "q4-status"}, QuantModeSupport: largeStatusQuantModeSupport(), RunnableOnCard: false, Notes: "too large for this RX 7800 XT target"},
+	{Size: "26B-A4B", ModelIDPrefix: "gemma-4-26B-A4B-it", Runtime: RuntimeMLXAffine, QuantModes: []string{"q8-status", "q6-status", "q4"}, QuantModeSupport: a4b26QuantModeSupport(), RunnableOnCard: true, Notes: "q4 runs on 16GB-class cards with host-resident expert tensors and bounded VRAM caching"},
 	{Size: "31B", ModelIDPrefix: "gemma-4-31B-it", Runtime: RuntimePlanned, QuantModes: []string{"q8-status", "q6-status", "q4-status"}, QuantModeSupport: largeStatusQuantModeSupport(), RunnableOnCard: false, Notes: "too large for this RX 7800 XT target"},
 }
 
@@ -106,5 +106,13 @@ func largeStatusQuantModeSupport() []QuantModeSupport {
 		{Mode: "q8-status", Runtime: RuntimePlanned, GenerateStatus: GeneratePlannedOnly, Notes: "recognized status-only pack; too large for this RX 7800 XT target"},
 		{Mode: "q6-status", Runtime: RuntimePlanned, GenerateStatus: GeneratePlannedOnly, Notes: "recognized status-only pack; too large for this RX 7800 XT target"},
 		{Mode: "q4-status", Runtime: RuntimePlanned, GenerateStatus: GeneratePlannedOnly, Notes: "recognized status-only pack; too large for this RX 7800 XT target"},
+	}
+}
+
+func a4b26QuantModeSupport() []QuantModeSupport {
+	return []QuantModeSupport{
+		{Mode: "q8-status", Runtime: RuntimePlanned, GenerateStatus: GeneratePlannedOnly, Notes: "recognized status-only pack; native generate is not yet promoted on this card"},
+		{Mode: "q6-status", Runtime: RuntimePlanned, GenerateStatus: GeneratePlannedOnly, Notes: "recognized status-only pack; native generate is not yet promoted on this card"},
+		{Mode: "q4", Runtime: RuntimeMLXAffine, GenerateStatus: GenerateLinked, Notes: "host-resident MLX-affine experts with bounded device cache"},
 	}
 }

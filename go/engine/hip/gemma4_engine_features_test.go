@@ -12,12 +12,36 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference"
 	"dappco.re/go/inference/engine/hip/internal/gguf"
+	modelgemma4 "dappco.re/go/inference/engine/hip/model/gemma4"
 )
 
 func linkedGemma4TestLabels(size, mode string) map[string]string {
 	return map[string]string{
 		"gemma4_size":       size,
 		"gemma4_quant_mode": mode,
+	}
+}
+
+func TestGemma4ProductionSelectionPromotes26BA4BQ4_Good(t *testing.T) {
+	size, ok := Gemma4SizeQuantSupportBySize("26B-A4B")
+	if !ok || !size.RunnableOnCard {
+		t.Fatalf("26B-A4B size support = %+v/%v, want runnable through host-resident experts", size, ok)
+	}
+	q4, ok := Gemma4QuantModeSupportBySize("26B-A4B", "q4")
+	if !ok || q4.Runtime != Gemma4RuntimeMLXAffine || q4.GenerateStatus != Gemma4GenerateLinked {
+		t.Fatalf("26B-A4B q4 support = %+v/%v, want linked MLX-affine generation", q4, ok)
+	}
+	q6, ok := Gemma4QuantModeSupportBySize("26B-A4B", "q6-status")
+	if !ok || q6.GenerateStatus != Gemma4GeneratePlannedOnly {
+		t.Fatalf("26B-A4B q6 support = %+v/%v, want unpromoted status-only lane", q6, ok)
+	}
+	pack, ok := ProductionQuantizationPackByName("26b-a4b-4bit")
+	if !ok || pack.QuantMode != "q4" || !pack.RunnableOnCard || pack.GenerateStatus != Gemma4GenerateLinked {
+		t.Fatalf("26B-A4B q4 production pack = %+v/%v, want runnable linked lane", pack, ok)
+	}
+	qat, ok := modelgemma4.QATCollectionEntryFor("26B-A4B", "q4", false)
+	if !ok || !qat.RunnableOnCard || qat.GenerateStatus != Gemma4GenerateLinked {
+		t.Fatalf("26B-A4B QAT q4 = %+v/%v, want runnable linked lane", qat, ok)
 	}
 }
 

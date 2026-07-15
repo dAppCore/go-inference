@@ -297,6 +297,93 @@ func (k rocmDiffusionKernelTestDouble) OpenROCmDiffusionSession(context.Context,
 	return k.session, nil
 }
 
+func TestROCmModelBlockDiffusionCapable_Good(t *testing.T) {
+	linked := &rocmModel{native: &hipLoadedModel{
+		kernels: rocmDiffusionKernelTestDouble{session: &rocmDiffusionSessionTestDouble{}},
+		modelInfo: inference.ModelInfo{
+			Architecture: "diffusion_gemma",
+		},
+	}}
+	if !linked.BlockDiffusionCapable() {
+		t.Fatal("BlockDiffusionCapable = false for linked DiffusionGemma runtime")
+	}
+	if (&rocmModel{native: &hipLoadedModel{modelInfo: inference.ModelInfo{Architecture: "gemma4"}}}).BlockDiffusionCapable() {
+		t.Fatal("BlockDiffusionCapable = true for autoregressive Gemma4")
+	}
+	if (*rocmModel)(nil).BlockDiffusionCapable() {
+		t.Fatal("BlockDiffusionCapable = true for nil model")
+	}
+}
+
+func TestROCmModelCapabilities_BlockDiffusionLinked_Good(t *testing.T) {
+	loaded := &hipLoadedModel{
+		kernels: rocmDiffusionKernelTestDouble{session: &rocmDiffusionSessionTestDouble{}},
+		modelInfo: inference.ModelInfo{
+			Architecture: "diffusion_gemma",
+		},
+	}
+	model := &rocmModel{
+		native:      loaded,
+		modelInfo:   loaded.modelInfo,
+		modelLabels: map[string]string{"diffusion_runtime": hipKernelStatusLinked, "diffusion_sampler_runtime": hipKernelStatusLinked},
+	}
+
+	report := model.Capabilities()
+	generate, ok := report.Capability(inference.CapabilityGenerate)
+	if !ok || !generate.Usable() || generate.Labels["generation_mode"] != "block_diffusion" {
+		t.Fatalf("generate capability = %+v/%v, want linked block-diffusion API", generate, ok)
+	}
+	if chat, ok := report.Capability(inference.CapabilityChat); !ok || chat.Usable() {
+		t.Fatalf("chat capability = %+v/%v, want planned until DiffusionGemma chat routing is linked", chat, ok)
+	}
+	if batch, ok := report.Capability(inference.CapabilityBatchGenerate); !ok || batch.Usable() {
+		t.Fatalf("batch capability = %+v/%v, want planned until block-diffusion lane batching is linked", batch, ok)
+	}
+}
+
+func TestApplyROCmDiffusionGemmaConfigLabels_Linked_Good(t *testing.T) {
+	inspection := &inference.ModelPackInspection{
+		Model:  inference.ModelIdentity{Architecture: "diffusion_gemma"},
+		Labels: map[string]string{},
+	}
+	applyROCmDiffusionGemmaConfigLabels(inspection, rocmModelPackConfigProbe{
+		ModelType:    "diffusion_gemma",
+		CanvasLength: 64,
+	})
+
+	if inspection.Labels["diffusion_runtime"] != hipKernelStatusLinked ||
+		inspection.Labels["diffusion_sampler_runtime"] != hipKernelStatusLinked ||
+		inspection.Labels["diffusion_trunk_runtime"] != hipKernelStatusLinked {
+		t.Fatalf("diffusion labels = %+v, want linked runtime/sampler/trunk", inspection.Labels)
+	}
+	generate, ok := nativeInspectionCapability(inspection, inference.CapabilityGenerate)
+	if !ok || !generate.Usable() || generate.Labels["generation_mode"] != "block_diffusion" {
+		t.Fatalf("generate capability = %+v/%v, want usable block-diffusion generation", generate, ok)
+	}
+	route, ok := ROCmDiffusionSamplerRouteForArchitecture("diffusion_gemma")
+	if !ok {
+		t.Fatal("DiffusionGemma sampler route missing")
+	}
+	route = route.WithLabels(inspection.Labels)
+	if !route.NativeRuntime || route.Runtime != rocmDiffusionSamplerRuntimeHIP || route.ExecutionStatus != "ready" {
+		t.Fatalf("diffusion route = %+v, want ready native HIP runtime", route)
+	}
+}
+
+func TestApplyROCmArchitectureInspection_DiffusionGemmaMoELinked_Good(t *testing.T) {
+	inspection := &inference.ModelPackInspection{
+		Format: "safetensors",
+		Model:  inference.ModelIdentity{Architecture: "diffusion_gemma", QuantBits: 4},
+		Labels: map[string]string{"moe_experts": "128", "moe_top_k": "8"},
+	}
+	applyROCmArchitectureInspection(inspection, true)
+
+	if inspection.Labels["moe_text_runtime"] != hipKernelStatusLinked ||
+		inspection.Labels["moe_selected_expert_dispatch"] != hipKernelStatusLinked {
+		t.Fatalf("MoE labels = %+v, want linked DiffusionGemma expert runtime", inspection.Labels)
+	}
+}
+
 func TestROCmModelGenerateBlockDiffusionTokens_Good(t *testing.T) {
 	session := &rocmDiffusionSessionTestDouble{}
 	loaded := &hipLoadedModel{

@@ -563,6 +563,24 @@ func (model *hipLoadedModel) OpenROCmDiffusionSession(ctx context.Context) (ROCm
 	return session, nil
 }
 
+func (model *hipLoadedModel) BlockDiffusionCapable() bool {
+	if model == nil || normalizeROCmArchitecture(model.modelIdentity().Architecture) != "diffusion_gemma" {
+		return false
+	}
+	_, ok := model.kernelSet().(hipROCmDiffusionSessionProvider)
+	return ok
+}
+
+// BlockDiffusionCapable mirrors Metal's loaded-model capability predicate.
+// It reports executable payload state, not architecture metadata alone.
+func (model *rocmModel) BlockDiffusionCapable() bool {
+	if model == nil || model.native == nil {
+		return false
+	}
+	loaded, ok := model.native.(*hipLoadedModel)
+	return ok && loaded.BlockDiffusionCapable()
+}
+
 // GenerateBlockDiffusionTokens reaches the runtime-owned DiffusionGemma
 // session directly, without falling back to autoregressive generation.
 func (model *rocmModel) GenerateBlockDiffusionTokens(ctx context.Context, prompt []int32, opts ROCmBlockDiffusionOptions, yield func(int32) bool) (ROCmDiffusionMetrics, error) {

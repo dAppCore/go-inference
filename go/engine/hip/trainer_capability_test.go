@@ -47,3 +47,23 @@ func TestHIPTrainerCapabilityBoundary_Good(t *testing.T) {
 	core.AssertEqual(t, "engine.TrainerModel", capability.Labels["training_interface"])
 	core.AssertEqual(t, hipKernelStatusLinked, capability.Labels["training_kernel"])
 }
+
+func TestROCmModelOpenTrainerForwardsSharedEngine_Good(t *testing.T) {
+	loaded := &hipLoadedModel{
+		modelInfo:   inference.ModelInfo{Architecture: "gemma4", VocabSize: 107, NumLayers: 1, HiddenSize: 8, QuantBits: 4},
+		contextSize: 4096,
+	}
+	shared, err := newHipEngineTextModel(loaded, nil, "gemma4")
+	core.RequireNoError(t, err)
+	model := &rocmModel{native: loaded, engineModel: shared}
+	if _, ok := any(model).(engine.TrainerModel); !ok {
+		t.Fatal("rocmModel must expose the shared engine.TrainerModel contract")
+	}
+
+	_, err = model.OpenTrainer(inference.TrainingConfig{LoRA: inference.LoRAConfig{Rank: 8, Alpha: 16}})
+	core.AssertError(t, err)
+	core.AssertContains(t, err.Error(), "linked Gemma4 runtime")
+	_, err = (*rocmModel)(nil).OpenTrainer(inference.TrainingConfig{})
+	core.AssertError(t, err)
+	core.AssertContains(t, err.Error(), "shared engine model is not available")
+}

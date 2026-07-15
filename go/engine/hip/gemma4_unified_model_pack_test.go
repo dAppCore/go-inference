@@ -611,7 +611,6 @@ func TestModelPackInspectorGemma4LargestPacksStatusOnly(t *testing.T) {
 	}{
 		{name: "26b-a4b-q8", path: "gemma-4-26b-a4b-it-8bit", size: "26B-A4B", mode: "q8-status", bits: 8},
 		{name: "26b-a4b-q6", path: "gemma-4-26b-a4b-it-6bit", size: "26B-A4B", mode: "q6-status", bits: 6},
-		{name: "26b-a4b-q4", path: "gemma-4-26b-a4b-it-4bit", size: "26B-A4B", mode: "q4-status", bits: 4},
 		{name: "31b-q8", path: "gemma-4-31b-it-8bit", size: "31B", mode: "q8-status", bits: 8},
 		{name: "31b-q6", path: "gemma-4-31b-it-6bit", size: "31B", mode: "q6-status", bits: 6},
 		{name: "31b-q4", path: "gemma-4-31b-it-4bit", size: "31B", mode: "q4-status", bits: 4},
@@ -661,5 +660,44 @@ func TestModelPackInspectorGemma4LargestPacksStatusOnly(t *testing.T) {
 				t.Fatalf("generate capability = %+v, %s status-only pack must not claim linked generation", generate, tc.size)
 			}
 		})
+	}
+}
+
+func TestModelPackInspectorGemma426BA4BQ4Linked(t *testing.T) {
+	root := core.PathJoin(t.TempDir(), "gemma-4-26b-a4b-it-4bit")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", root, err)
+	}
+	writeNativeContractFile(t, core.PathJoin(root, "config.json"), `{
+		"architectures":["Gemma4ForCausalLM"],
+		"model_type":"gemma4_text",
+		"hidden_size":4096,
+		"num_hidden_layers":64,
+		"num_attention_heads":16,
+		"num_key_value_heads":8,
+		"head_dim":256,
+		"vocab_size":262144,
+		"max_position_embeddings":131072,
+		"quantization":{"bits":4,"group_size":64}
+	}`)
+	writeNativeContractSafetensors(t, core.PathJoin(root, "model.safetensors"))
+
+	inspection, err := newROCmBackendWithRuntime(&fakeNativeRuntime{}).InspectModelPack(context.Background(), root)
+	if err != nil {
+		t.Fatalf("InspectModelPack: %v", err)
+	}
+	if !inspection.Supported ||
+		inspection.Labels["gemma4_size"] != "26B-A4B" ||
+		inspection.Labels["gemma4_quant_mode"] != "q4" ||
+		inspection.Labels["gemma4_runtime"] != Gemma4RuntimeMLXAffine ||
+		inspection.Labels["gemma4_generate_status"] != Gemma4GenerateLinked ||
+		inspection.Labels["gemma4_runnable_on_card"] != "true" {
+		t.Fatalf("inspection = %+v labels=%+v, want linked 26B-A4B q4 host-offload pack", inspection, inspection.Labels)
+	}
+	generate, ok := nativeInspectionCapability(inspection, inference.CapabilityGenerate)
+	if !ok || generate.Status != inference.CapabilityStatusExperimental ||
+		generate.Labels["gemma4_generate_status"] != Gemma4GenerateLinked ||
+		generate.Labels["gemma4_runnable_on_card"] != "true" {
+		t.Fatalf("generate capability = %+v ok=%v, want linked 26B-A4B q4 generation metadata", generate, ok)
 	}
 }

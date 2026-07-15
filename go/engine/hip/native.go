@@ -387,7 +387,17 @@ type rocmModel struct {
 var (
 	_ inference.AudioModel  = (*rocmModel)(nil)
 	_ inference.VisionModel = (*rocmModel)(nil)
+	_ engine.TrainerModel   = (*rocmModel)(nil)
 )
+
+// OpenTrainer exposes the retained HIP LoRA trainer through the same loaded
+// model object callers receive from the backend.
+func (m *rocmModel) OpenTrainer(cfg inference.TrainingConfig) (engine.Trainer, error) {
+	if m == nil || m.engineModel == nil {
+		return nil, core.NewError("rocm.OpenTrainer: shared engine model is not available")
+	}
+	return m.engineModel.OpenTrainer(cfg)
+}
 
 // AcceptsImages reports whether the loaded HIP payload carries a usable image
 // projector. Video frames use the same projector and capability gate.
@@ -796,6 +806,7 @@ func (m *rocmModel) Capabilities() inference.CapabilityReport {
 	report := rocmCapabilityReport(nativeDeviceInfo{}, m.modelIdentity(), m.ActiveAdapter(), m.native != nil, m.kernelStatus(), rocmCapabilityReportOption{
 		ClassifyLinked:         m.classifyLinked(),
 		Gemma4Q4GenerateLinked: m.gemma4Q4GenerateLinked(),
+		BlockDiffusionLinked:   m.BlockDiffusionCapable(),
 	})
 	lastErr := m.currentError()
 	report = rocmCapabilityReportWithReactiveProfile(report, m)
@@ -2269,6 +2280,7 @@ func (m *rocmModel) resolvedModelLabels() map[string]string {
 type rocmCapabilityReportOption struct {
 	ClassifyLinked         bool
 	Gemma4Q4GenerateLinked bool
+	BlockDiffusionLinked   bool
 }
 
 func rocmCapabilityReport(device nativeDeviceInfo, model inference.ModelIdentity, adapter inference.AdapterIdentity, available bool, kernelStatus hipKernelStatus, options ...rocmCapabilityReportOption) inference.CapabilityReport {
@@ -2282,6 +2294,7 @@ func rocmCapabilityReport(device nativeDeviceInfo, model inference.ModelIdentity
 	gemma4Features := Gemma4EngineFeaturesForIdentity(model)
 	gemma4DeclaredFeatures := Gemma4DeclaredFeaturesForIdentity(model)
 	gemma4Model := isROCmGemma4Architecture(model.Architecture)
+	blockDiffusionModel := normalizeROCmArchitecture(model.Architecture) == "diffusion_gemma"
 	loadedGemma4MoEGenerateLinked := option.Gemma4Q4GenerateLinked &&
 		gemma4DeclaredFeatures.Mixture && rocmGemma4ModelSourceFormatGGUF(model)
 	gemma4GenerateLinked := gemma4Features.GenerateLinked() || loadedGemma4MoEGenerateLinked
@@ -2289,8 +2302,8 @@ func rocmCapabilityReport(device nativeDeviceInfo, model inference.ModelIdentity
 		option.Gemma4Q4GenerateLinked = false
 	}
 	kernelStatus = normalizeHIPKernelStatus(kernelStatus)
-	decodeLinked := kernelStatus.Decode == hipKernelStatusLinked && (!gemma4Model || gemma4GenerateLinked)
-	prefillLinked := kernelStatus.Prefill == hipKernelStatusLinked && (!gemma4Model || gemma4GenerateLinked)
+	decodeLinked := !blockDiffusionModel && kernelStatus.Decode == hipKernelStatusLinked && (!gemma4Model || gemma4GenerateLinked)
+	prefillLinked := !blockDiffusionModel && kernelStatus.Prefill == hipKernelStatusLinked && (!gemma4Model || gemma4GenerateLinked)
 	reportKernelStatus := rocmReportKernelStatusForModel(kernelStatus, model)
 	labels := map[string]string{
 		"library":         "go-rocm",
@@ -2352,6 +2365,16 @@ func rocmCapabilityReport(device nativeDeviceInfo, model inference.ModelIdentity
 		batchCapability = inference.ExperimentalCapability(inference.CapabilityBatchGenerate, inference.CapabilityGroupModel, "loaded Gemma4 MLX affine 4/6/8-bit batch generation is linked; production native prefill/decode remain pending")
 		batchCapability.Labels = rocmGemma4Q4BatchGenerateCapabilityLabels(model)
 	}
+	if option.BlockDiffusionLinked {
+		generateCapability = inference.ExperimentalCapability(inference.CapabilityGenerate, inference.CapabilityGroupModel, "DiffusionGemma block-diffusion generation is linked through the native HIP denoising session")
+		generateCapability.Labels = map[string]string{
+			"generation_mode":            "block_diffusion",
+			"diffusion_runtime":          hipKernelStatusLinked,
+			"diffusion_sampler_runtime":  hipKernelStatusLinked,
+			"diffusion_execution_status": "ready",
+			"runtime_status":             string(inference.FeatureRuntimeExperimental),
+		}
+	}
 	classifyCapability := inference.PlannedCapability(inference.CapabilityClassify, inference.CapabilityGroupModel, "native prefill kernels are not linked yet")
 	rocmApplyGemma4CapabilitySupportLabels(&classifyCapability, model)
 	classifyLinked := (prefillLinked || option.ClassifyLinked) && (!gemma4Model || gemma4GenerateLinked)
@@ -2386,6 +2409,13 @@ func rocmCapabilityReport(device nativeDeviceInfo, model inference.ModelIdentity
 	if option.Gemma4Q4GenerateLinked {
 		benchmarkCapability = inference.ExperimentalCapability(inference.CapabilityBenchmark, inference.CapabilityGroupRuntime, "benchmark wrapper can exercise the experimental Gemma4 MLX affine 4/6/8-bit generation path and retained-state 10-turn book gate with prompt replay forbidden; production native prefill/decode remain pending")
 		benchmarkCapability.Labels = rocmGemma4Q4BenchmarkCapabilityLabels(model)
+	}
+	if option.BlockDiffusionLinked {
+		benchmarkCapability = inference.ExperimentalCapability(inference.CapabilityBenchmark, inference.CapabilityGroupRuntime, "benchmark callers can exercise the linked DiffusionGemma block-denoising token generator")
+		benchmarkCapability.Labels = map[string]string{
+			"generation_mode": "block_diffusion",
+			"runtime_status":  string(inference.FeatureRuntimeExperimental),
+		}
 	}
 	evaluationCapability := inference.ExperimentalCapability(inference.CapabilityEvaluation, inference.CapabilityGroupRuntime, "token-count eval is available before prefill kernels are linked")
 	evaluationCapability.Labels = rocmEvaluationCapabilityLabels(kernelStatus, nil)

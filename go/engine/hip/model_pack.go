@@ -421,7 +421,9 @@ func (b *rocmBackend) InspectModelPack(ctx context.Context, path string) (*infer
 	appendROCmInspectionCapability(inspection, inference.SupportedCapability(inference.CapabilityMemoryPlanning, inference.CapabilityGroupRuntime))
 	appendROCmInspectionCapability(inspection, inference.SupportedCapability(inference.CapabilityKVCachePlanning, inference.CapabilityGroupRuntime))
 	applyROCmGemma4ModelPackInspectionCapabilities(inspection)
-	inspection.Notes = append(inspection.Notes, "native ROCm decode kernels are not linked yet")
+	if normalizeROCmArchitecture(inspection.Model.Architecture) != "diffusion_gemma" {
+		inspection.Notes = append(inspection.Notes, "native ROCm decode kernels are not linked yet")
+	}
 	return inspection, nil
 }
 
@@ -888,9 +890,10 @@ func applyROCmDiffusionGemmaConfigLabels(inspection *inference.ModelPackInspecti
 	}
 	labels := inspection.Labels
 	labels["block_diffusion_model"] = "true"
-	labels["diffusion_runtime"] = hipKernelStatusNotLinked
-	labels["diffusion_sampler_runtime"] = hipKernelStatusNotLinked
-	labels["diffusion_trunk_runtime"] = "model_pack_metadata"
+	labels["diffusion_runtime"] = hipKernelStatusLinked
+	labels["diffusion_sampler_runtime"] = hipKernelStatusLinked
+	labels["diffusion_trunk_runtime"] = hipKernelStatusLinked
+	labels["diffusion_execution_status"] = "ready"
 	labels["diffusion_reference"] = "go_mlx_diffusion_gemma"
 	labels["diffusion_fallback"] = "refused"
 	labels["reactive_diffusion_fallback"] = "refused"
@@ -898,7 +901,15 @@ func applyROCmDiffusionGemmaConfigLabels(inspection *inference.ModelPackInspecti
 		labels["diffusion_canvas_length"] = core.Sprintf("%d", canvasLength)
 	}
 	modelgemma4.ApplyDiffusionPolicyLabels(labels, rocmGemma4DiffusionPolicyFromProbe(cfg))
-	inspection.Notes = append(inspection.Notes, "DiffusionGemma block-diffusion metadata is recognised; native ROCm canvas denoising sampler is not linked yet")
+	capability := inference.ExperimentalCapability(inference.CapabilityGenerate, inference.CapabilityGroupModel, "DiffusionGemma block-diffusion generation is linked through the native HIP denoising session")
+	capability.Labels = map[string]string{
+		"generation_mode":            "block_diffusion",
+		"diffusion_runtime":          hipKernelStatusLinked,
+		"diffusion_sampler_runtime":  hipKernelStatusLinked,
+		"diffusion_execution_status": "ready",
+	}
+	appendROCmInspectionCapability(inspection, capability)
+	inspection.Notes = append(inspection.Notes, "DiffusionGemma block-diffusion metadata and native ROCm canvas denoising sampler are linked")
 }
 
 func applyROCmVisionTowerLabels(labels map[string]string, cfg rocmModelPackVisionConfigProbe) {
@@ -2242,13 +2253,25 @@ func applyROCmArchitectureInspection(inspection *inference.ModelPackInspection, 
 	}
 	inspection.Supported = inspection.Format != "missing" && weightMetadataValid && architectureDetected && architectureOK && quantizationOK
 	if isROCmMoEArchitecture(inspection.Model.Architecture) || inspection.Labels["moe_experts"] != "" || inspection.Labels["gemma4_enable_moe_block"] == "true" {
-		inspection.Labels["moe_text_runtime"] = hipKernelStatusNotLinked
+		gemma4Linked := isROCmGemma4BackboneArchitecture(inspection.Model.Architecture)
+		moeRuntime := hipKernelStatusNotLinked
+		if gemma4Linked {
+			moeRuntime = hipKernelStatusLinked
+		}
+		inspection.Labels["moe_text_runtime"] = moeRuntime
 		inspection.Labels["moe_text_decode_family"] = rocmMoETextDecodeFamily(inspection.Model.Architecture)
-		inspection.Labels["moe_selected_expert_dispatch"] = hipKernelStatusNotLinked
-		inspection.Capabilities = append(inspection.Capabilities,
-			rocmFixtureKernelCapability(inference.CapabilityMoERouting, inference.CapabilityGroupModel, "MoE architecture metadata is recognised and the HIP router fixture kernel is linked; model integration is pending"),
-			rocmFixtureKernelCapability(inference.CapabilityMoELazyExperts, inference.CapabilityGroupRuntime, "MoE lazy expert residency is required for 16GB-class ROCm devices and the HIP residency fixture kernel is linked; expert paging integration is pending"),
-		)
+		inspection.Labels["moe_selected_expert_dispatch"] = moeRuntime
+		if gemma4Linked {
+			routing := inference.ExperimentalCapability(inference.CapabilityMoERouting, inference.CapabilityGroupModel, "Gemma4 top-k routing and selected-expert dispatch are linked in the native HIP decoder")
+			routing.Labels = map[string]string{"moe_text_runtime": moeRuntime, "moe_selected_expert_dispatch": moeRuntime}
+			lazy := inference.ExperimentalCapability(inference.CapabilityMoELazyExperts, inference.CapabilityGroupRuntime, "Gemma4 expert tensors can remain host-resident and materialize through the bounded HIP expert cache")
+			lazy.Labels = map[string]string{"moe_expert_residency": "host_cached", "moe_text_runtime": moeRuntime}
+			appendROCmInspectionCapability(inspection, routing)
+			appendROCmInspectionCapability(inspection, lazy)
+		} else {
+			appendROCmInspectionCapability(inspection, rocmFixtureKernelCapability(inference.CapabilityMoERouting, inference.CapabilityGroupModel, "MoE architecture metadata is recognised and the HIP router fixture kernel is linked; model integration is pending"))
+			appendROCmInspectionCapability(inspection, rocmFixtureKernelCapability(inference.CapabilityMoELazyExperts, inference.CapabilityGroupRuntime, "MoE lazy expert residency is required for 16GB-class ROCm devices and the HIP residency fixture kernel is linked; expert paging integration is pending"))
+		}
 	}
 	if !architectureOK {
 		inspection.Notes = append(inspection.Notes, "architecture is not in the native ROCm allow-list yet")
