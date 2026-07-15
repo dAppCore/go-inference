@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	"dappco.re/go/inference/model/qwen3"
+	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 )
 
 func syn(n, seed int) []float32 {

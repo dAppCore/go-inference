@@ -2,7 +2,7 @@
 
 package composed
 
-import "dappco.re/go/inference/model/qwen3"
+import "dappco.re/go/inference/model/arch/Qwen/qwen3"
 
 // mixers.go adapts the concrete sequence mixers to the composed Mixer interface. Each wraps a family's
 // block forward and carries that family's state shape; the session threads the state opaquely. Cut 1 wires

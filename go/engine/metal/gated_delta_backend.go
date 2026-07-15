@@ -4,7 +4,7 @@
 
 package native
 
-import "dappco.re/go/inference/model/qwen3"
+import "dappco.re/go/inference/model/arch/Qwen/qwen3"
 
 // gated_delta_backend.go wires native's device GEMM into the engine-neutral Qwen 3.6 gated-delta
 // block's projections (in_proj_qkv/a/b/z + out_proj — its compute hot spot; the delta recurrence + conv

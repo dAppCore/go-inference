@@ -5,7 +5,7 @@ package composed
 import (
 	"testing"
 
-	"dappco.re/go/inference/model/qwen3"
+	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 )
 
 // The mixers bench baselines the gated-delta Mixer adapter (AX-11): gatedDeltaMixer.Forward

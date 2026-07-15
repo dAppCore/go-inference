@@ -10,7 +10,7 @@ import (
 
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/composed"
-	"dappco.re/go/inference/model/qwen3"
+	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 )
 
 // TestComposedDecodeRoundTripCensus is the item-1 instrument for the parked composed fuse ladder: it

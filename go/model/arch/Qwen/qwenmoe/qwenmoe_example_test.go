@@ -4,7 +4,7 @@ package qwenmoe_test
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/model/qwenmoe"
+	"dappco.re/go/inference/model/arch/Qwen/qwenmoe"
 )
 
 func ExampleConfig_Arch() {

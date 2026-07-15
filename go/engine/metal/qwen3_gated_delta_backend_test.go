@@ -8,7 +8,7 @@ import (
 	"math"
 	"testing"
 
-	"dappco.re/go/inference/model/qwen3"
+	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 )
 
 func gdbSyn(n, seed int) []float32 {

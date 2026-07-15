@@ -9,7 +9,7 @@ import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/composed"
-	_ "dappco.re/go/inference/model/qwen2"
+	_ "dappco.re/go/inference/model/arch/Qwen/qwen2"
 	"dappco.re/go/inference/model/safetensors"
 	coreio "dappco.re/go/io"
 )

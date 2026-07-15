@@ -8,7 +8,7 @@ import (
 
 	"dappco.re/go/inference/model"
 	"dappco.re/go/inference/model/mamba2"
-	"dappco.re/go/inference/model/qwen3"
+	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"dappco.re/go/inference/model/rwkv7"
 )
 

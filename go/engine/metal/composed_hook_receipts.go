@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 
 	"dappco.re/go/inference/model/composed"
-	"dappco.re/go/inference/model/qwen3"
+	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 )
 
 // ComposedHookPhaseCounts separates batched prefill (L>1) from single-token

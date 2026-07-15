@@ -9,7 +9,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model/composed"
-	"dappco.re/go/inference/model/qwen3"
+	"dappco.re/go/inference/model/arch/Qwen/qwen3"
 	"github.com/tmc/apple/metal"
 )
 
