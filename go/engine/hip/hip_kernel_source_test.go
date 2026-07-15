@@ -554,6 +554,24 @@ func TestHIPKernelSource_MLXQ8Group32FusedGELUUsesPackedPairDot_Good(t *testing.
 	core.AssertContains(t, gelu, "args.bits == 8u && args.group_size == 32u")
 }
 
+func TestHIPKernelSource_MLXQ8Group64UsesPackedDot_Good(t *testing.T) {
+	source, err := os.ReadFile("kernels/rocm_kernels.hip")
+	core.RequireNoError(t, err)
+	text := string(source)
+	projection := hipKernelSourceFunctionBodyForTest(t, text, `__device__ float rocm_mlx_q4_projection_row_sum(`)
+	core.AssertContains(t, projection, "if (bits == 8u && group_size == 64u)")
+	core.AssertContains(t, projection, "rocm_mlx_affine_q8_32_dot")
+}
+
+func TestHIPKernelSource_MLXQ8Group64FusedGELUUsesPackedPairDot_Good(t *testing.T) {
+	source, err := os.ReadFile("kernels/rocm_kernels.hip")
+	core.RequireNoError(t, err)
+	text := string(source)
+	gelu := hipKernelSourceFunctionBodyForTest(t, text, `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply`)
+	core.AssertContains(t, gelu, "args.bits == 8u && args.group_size == 64u")
+	core.AssertContains(t, gelu, "rocm_mlx_affine_q8_32_pair_dot")
+}
+
 func TestHIPKernelSource_ProjectionUsesCoalescedBlockPerRow_Good(t *testing.T) {
 	source, err := os.ReadFile(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)

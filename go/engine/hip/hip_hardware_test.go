@@ -1645,6 +1645,153 @@ func TestHIPHardwareMLXAffineQ8ProjectionCols3072Group32_Good(t *testing.T) {
 	assertFloat32SlicesNear(t, want, got, 0.03)
 }
 
+func TestHIPHardwareMLXAffineQ8ProjectionCols2560Group64_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		rows      = 5
+		cols      = 2560
+		groupSize = 64
+		bits      = 8
+		groups    = cols / groupSize
+	)
+	input := make([]float32, cols)
+	values := make([]uint32, rows*cols)
+	scales := make([]uint16, rows*groups)
+	biases := make([]uint16, rows*groups)
+	for col := range input {
+		input[col] = float32((col%29)-14) / 128
+	}
+	for row := 0; row < rows; row++ {
+		for col := 0; col < cols; col++ {
+			values[row*cols+col] = uint32((row*31 + col*13) & 0xff)
+		}
+		for group := 0; group < groups; group++ {
+			scales[row*groups+group] = hipFloat32ToBFloat16(float32((row+group)%7+1) / 4096)
+			biases[row*groups+group] = hipFloat32ToBFloat16(-float32(row+1) / 512)
+		}
+	}
+	req := hipMLXQ4ProjectionRequest{
+		Input:     input,
+		Weight:    hipPackMLXAffineValuesForTest(values, cols, bits),
+		Scales:    scales,
+		Biases:    biases,
+		Rows:      rows,
+		Cols:      cols,
+		GroupSize: groupSize,
+		Bits:      bits,
+	}
+	want, err := hipReferenceMLXAffineProjection(req.Input, req.Weight, req.Scales, req.Biases, req.Rows, req.Cols, req.GroupSize, req.Bits)
+	core.RequireNoError(t, err)
+	got, err := hipRunMLXQ4ProjectionKernel(context.Background(), hipRuntime.driver, req)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, want, got, 0.05)
+}
+
+func TestHIPHardwareMLXAffineQ8GELUTanhCols2560Group64_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		t.Fatalf("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		rows      = 8
+		cols      = 2560
+		groupSize = 64
+		bits      = 8
+	)
+	input := make([]float32, cols)
+	for col := range input {
+		input[col] = float32((col%23)-11) / 128
+	}
+	makeReq := func(valueStride int, scaleBase float32) hipMLXQ4ProjectionRequest {
+		groups := cols / groupSize
+		values := make([]uint32, rows*cols)
+		scales := make([]uint16, rows*groups)
+		biases := make([]uint16, rows*groups)
+		for row := 0; row < rows; row++ {
+			for col := 0; col < cols; col++ {
+				values[row*cols+col] = uint32((row*valueStride + col*(valueStride+2)) & 0xff)
+			}
+			for group := 0; group < groups; group++ {
+				scales[row*groups+group] = hipFloat32ToBFloat16(scaleBase * float32((row+group)%7+1))
+				biases[row*groups+group] = hipFloat32ToBFloat16(-scaleBase * float32((row+group)%3+1))
+			}
+		}
+		return hipMLXQ4ProjectionRequest{
+			Input:     input,
+			Weight:    hipPackMLXAffineValuesForTest(values, cols, bits),
+			Scales:    scales,
+			Biases:    biases,
+			Rows:      rows,
+			Cols:      cols,
+			GroupSize: groupSize,
+			Bits:      bits,
+		}
+	}
+	gateReq := makeReq(5, 0.0001220703125)
+	upReq := makeReq(7, 0.000091552734375)
+	gate, err := hipReferenceMLXAffineProjection(gateReq.Input, gateReq.Weight, gateReq.Scales, gateReq.Biases, gateReq.Rows, gateReq.Cols, gateReq.GroupSize, gateReq.Bits)
+	core.RequireNoError(t, err)
+	up, err := hipReferenceMLXAffineProjection(upReq.Input, upReq.Weight, upReq.Scales, upReq.Biases, upReq.Rows, upReq.Cols, upReq.GroupSize, upReq.Bits)
+	core.RequireNoError(t, err)
+	want := expectedGELUTanhMultiply(gate, up)
+	inputPayload, err := hipFloat32Payload(input)
+	core.RequireNoError(t, err)
+	inputBuffer, err := hipUploadByteBuffer(hipRuntime.driver, hipGemma4Q4Layer0Operation, "hardware q8 group64 GELU input", inputPayload, len(input))
+	core.RequireNoError(t, err)
+	defer inputBuffer.Close()
+	gateBuffers, err := gateReq.deviceBuffers(hipRuntime.driver)
+	core.RequireNoError(t, err)
+	defer gateBuffers.Close()
+	upBuffers, err := upReq.deviceBuffers(hipRuntime.driver)
+	core.RequireNoError(t, err)
+	defer upBuffers.Close()
+	deviceConfig := func(req hipMLXQ4ProjectionRequest, buffers *hipMLXQ4ProjectionDeviceBuffers) hipMLXQ4DeviceWeightConfig {
+		return hipMLXQ4DeviceWeightConfig{
+			WeightPointer: buffers.Weight.Pointer(),
+			ScalePointer:  buffers.Scales.Pointer(),
+			BiasPointer:   buffers.Biases.Pointer(),
+			WeightBytes:   buffers.Weight.SizeBytes(),
+			ScaleBytes:    buffers.Scales.SizeBytes(),
+			BiasBytes:     buffers.Biases.SizeBytes(),
+			Rows:          req.Rows,
+			Cols:          req.Cols,
+			GroupSize:     req.GroupSize,
+			Bits:          req.Bits,
+		}
+	}
+	output, err := hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInput(context.Background(), hipRuntime.driver, inputBuffer, deviceConfig(gateReq, gateBuffers), deviceConfig(upReq, upBuffers))
+	core.RequireNoError(t, err)
+	defer output.Close()
+	got, err := hipReadFloat32DeviceOutput(output, hipGemma4Q4Layer0Operation, "hardware q8 group64 GELU output", rows)
+	core.RequireNoError(t, err)
+	assertFloat32SlicesNear(t, want, got, 0.05)
+}
+
 func TestHIPHardwareMLXAffineQ4ProjectionCols2560Group32_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")

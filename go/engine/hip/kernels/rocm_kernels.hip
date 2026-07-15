@@ -5546,6 +5546,21 @@ __device__ float rocm_mlx_q4_projection_row_sum(
 		}
 		return sum;
 	}
+	if (bits == 8u && group_size == 64u) {
+		for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += threads_per_row) {
+			const uint32_t group = row_group_base + group_col;
+			const float scale = rocm_bfloat16_to_float(scales[group]);
+			const float bias = rocm_bfloat16_to_float(biases[group]);
+			const uint32_t first_packed = group_col << 4u;
+			const uint32_t first_col = group_col << 6u;
+			float q_dot_sum = 0.0f;
+			float input_sum = 0.0f;
+			rocm_mlx_affine_q8_32_dot(input, weights, row_packed_base, first_packed, first_col, &q_dot_sum, &input_sum);
+			rocm_mlx_affine_q8_32_dot(input, weights, row_packed_base, first_packed + 8u, first_col + 32u, &q_dot_sum, &input_sum);
+			sum += scale * q_dot_sum + bias * input_sum;
+		}
+		return sum;
+	}
 	if (bits == 6u && group_size == 16u) {
 		for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += threads_per_row) {
 			const uint32_t group = row_group_base + group_col;
@@ -7861,6 +7876,23 @@ extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply(const unsigned char *p
 			float up_q_dot = 0.0f;
 			float input_sum = 0.0f;
 			rocm_mlx_affine_q8_32_pair_dot(input, gate_weights, up_weights, row_packed_base, group_col << 3u, group_col << 5u, &gate_q_dot, &up_q_dot, &input_sum);
+			gate_sum += gate_scale * gate_q_dot + gate_bias * input_sum;
+			up_sum += up_scale * up_q_dot + up_bias * input_sum;
+		}
+	} else if (row < args.rows && args.bits == 8u && args.group_size == 64u) {
+		for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+			const uint32_t group = row_group_base + group_col;
+			const float gate_scale = rocm_bfloat16_to_float(gate_scales[group]);
+			const float gate_bias = rocm_bfloat16_to_float(gate_biases[group]);
+			const float up_scale = rocm_bfloat16_to_float(up_scales[group]);
+			const float up_bias = rocm_bfloat16_to_float(up_biases[group]);
+			const uint32_t first_packed = group_col << 4u;
+			const uint32_t first_col = group_col << 6u;
+			float gate_q_dot = 0.0f;
+			float up_q_dot = 0.0f;
+			float input_sum = 0.0f;
+			rocm_mlx_affine_q8_32_pair_dot(input, gate_weights, up_weights, row_packed_base, first_packed, first_col, &gate_q_dot, &up_q_dot, &input_sum);
+			rocm_mlx_affine_q8_32_pair_dot(input, gate_weights, up_weights, row_packed_base, first_packed + 8u, first_col + 32u, &gate_q_dot, &up_q_dot, &input_sum);
 			gate_sum += gate_scale * gate_q_dot + gate_bias * input_sum;
 			up_sum += up_scale * up_q_dot + up_bias * input_sum;
 		}
