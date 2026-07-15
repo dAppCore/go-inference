@@ -2,8 +2,9 @@
 
 Measures joules per conversation turn, same binary, same traffic, one flag.
 
-1. In your own terminal (sudo needs a TTY):
-   `sudo powermetrics --samplers cpu_power,gpu_power -i 500 -o /tmp/pm.txt`
+1. `mkdir -p ~/Lethean/lem/bench/energy-ab` once, then in your own terminal
+   (sudo needs a TTY):
+   `sudo powermetrics --samplers cpu_power,gpu_power -i 500 -o ~/Lethean/lem/bench/energy-ab/pm.txt`
 2. 60s idle window (markers via the driver's clock).
 3. Arm A: `LTHN_PROMPT_REUSE=0 lem serve --model <snapshot>
    -state-conversations=false`, then

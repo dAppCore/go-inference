@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Integrate powermetrics Combined Power over the marked experiment windows."""
+import os
 import re
 from datetime import datetime
 
-PM = "/private/tmp/lem-dev/pm.txt"
-MARKERS = "/private/tmp/lem-dev/pm_markers.txt"
+# Must match energy_turns.py's STATE_DIR and the `-o` path given to the
+# manually-run `powermetrics` (see README) — NOT under /tmp, which is
+# world-writable and subject to symlink/race attacks on a predictable path
+# (sonar python:S5443).
+STATE_DIR = os.path.join(os.path.expanduser("~"), "Lethean", "lem", "bench", "energy-ab")
+PM = os.path.join(STATE_DIR, "pm.txt")
+MARKERS = os.path.join(STATE_DIR, "pm_markers.txt")
 
 samples = []  # (epoch_ts, watts, dt_seconds)
 ts = None

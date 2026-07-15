@@ -9,7 +9,14 @@ import os
 import urllib.request
 
 LABEL = sys.argv[1]
-MARKERS = "/private/tmp/lem-dev/pm_markers.txt"
+# Fixed, predictable location shared with pm_integrate.py and the manually-run
+# `powermetrics` (see README) — NOT under /tmp, which is world-writable and
+# subject to symlink/race attacks on a predictable path (sonar python:S5443).
+# ~/Lethean/lem/<subdir> is this repo's established home for lem's own runtime
+# state (models/, tuning/, welfare/, ai/ — see go/serving, go/agent/ai).
+STATE_DIR = os.path.join(os.path.expanduser("~"), "Lethean", "lem", "bench", "energy-ab")
+os.makedirs(STATE_DIR, exist_ok=True)
+MARKERS = os.path.join(STATE_DIR, "pm_markers.txt")
 TOPICS = [
     "the frozen ridge at dawn", "the crevasse field crossing",
     "the supply cache dilemma", "the aurora over base camp",
