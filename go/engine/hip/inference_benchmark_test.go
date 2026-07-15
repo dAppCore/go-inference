@@ -1497,7 +1497,7 @@ func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows,
 		return inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 52), inferenceBenchmarkU32At(args, 56), 0
 	case hipKernelNameMLXQ4ProjGreedyBatch, hipKernelNameMLXQ4ProjGreedyBatchQ6Row64:
 		return inferenceBenchmarkU32At(args, 56), inferenceBenchmarkU32At(args, 60), inferenceBenchmarkU32At(args, 68), inferenceBenchmarkU32At(args, 64)
-	case hipKernelNameMLXQ4ProjBatch, hipKernelNameMLXQ4ProjBatchQ4G64Tokens16, hipKernelNameMLXQ4ProjBatchQ4G64Row16Tokens16Shared, hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16, hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16Shared, hipKernelNameMLXQ4ProjBatchQ6Row16:
+	case hipKernelNameMLXQ4ProjBatch, hipKernelNameMLXQ4ProjBatchQ4G64Tokens16, hipKernelNameMLXQ4ProjBatchQ4G64Row16Tokens16Shared, hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16, hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16Shared, hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens64Shared, hipKernelNameMLXQ4ProjBatchQ6Row16:
 		return inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 52), inferenceBenchmarkU32At(args, 60), inferenceBenchmarkU32At(args, 56)
 	case hipKernelNameMLXQ4TripleProj, hipKernelNameMLXQ4TripleProjQ6Row16, hipKernelNameMLXQ4TripleProjQ6Row64, hipKernelNameMLXQ4PairProj:
 		firstRows := inferenceBenchmarkU32At(args, 96)
@@ -2598,6 +2598,7 @@ func TestInferenceBenchmarkHIPKernelTensorShape_SpecializedAffineBatchProjection
 		hipKernelNameMLXQ4ProjBatchQ4G64Row16Tokens16Shared,
 		hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16,
 		hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16Shared,
+		hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens64Shared,
 	} {
 		rows, cols, group, batch := inferenceBenchmarkHIPKernelTensorShape(hipKernelLaunchConfig{Name: name, Args: args})
 		if rows != 4096 || cols != 2816 || group != 64 || batch != 256 {
