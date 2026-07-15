@@ -4,7 +4,7 @@ package glm4_test
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	_ "dappco.re/go/inference/model/glm4"
+	_ "dappco.re/go/inference/model/arch/zai-org/glm4"
 )
 
 func ExampleConfig() {

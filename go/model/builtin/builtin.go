@@ -52,7 +52,7 @@ import (
 	_ "dappco.re/go/inference/model/gemma4"     // gemma4 / gemma4_text / gemma4_unified (+ assistant)
 	_ "dappco.re/go/inference/model/gemma4"     // gemma4 / gemma4_text / gemma4_unified (+ assistant)
 	_ "dappco.re/go/inference/model/gemma4"     // gemma4 / gemma4_text / gemma4_unified (+ assistant)
-	_ "dappco.re/go/inference/model/glm4"       // GLM-4 dense text
+	_ "dappco.re/go/inference/model/arch/zai-org/glm4"       // GLM-4 dense text
 	_ "dappco.re/go/inference/model/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
 	_ "dappco.re/go/inference/model/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
 	_ "dappco.re/go/inference/model/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
