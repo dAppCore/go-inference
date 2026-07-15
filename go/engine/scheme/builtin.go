@@ -99,9 +99,27 @@ func init() {
 	// width probe misses it and it is not a KV-cache mode.
 	RegisterCache(cacheInfo{"recurrent", StateRecurrent})
 
-	// Weight quant every engine implements today: group-affine. Bits 0 = the
-	// model's config declares the width (4/6/8); the affine scheme reads it.
-	RegisterQuant(quantInfo{"affine", 0})
+	// Weight quant: group-affine is the one this engine computes today (bits 0 =
+	// the model's config declares the width 4/6/8; the affine scheme reads it).
+	// The rest mirror the hip fork's catalogue (engine/hip/scheme/builtin.go) as
+	// IDENTITY ONLY, registered ahead of compute — the same shape as the
+	// "recurrent" cache above (registered so the contract exists before the
+	// first driver lands it). Without this, scheme.QuantKinds() answers "what
+	// quant kinds exist" differently depending on which engine happens to be
+	// loaded (design-rocm.md #14); mirroring the catalogue here makes it
+	// engine-neutral, even though only "affine" has a registered MatVec
+	// (model.RegisterBackendQuant) on this engine today.
+	for _, quant := range []quantInfo{
+		{"affine", 0},
+		{"bf16", 16},
+		{"mxfp4", 4},
+		{"mxfp8", 8},
+		{"nvfp4", 4},
+		{"q4_0", 4},
+		{"jangtq", 2},
+	} {
+		RegisterQuant(quant)
+	}
 
 	// Activation/compute dtypes the engine's op layer moves tensors in. Registered
 	// so the elementwise kernels resolve their dtype through the scheme (the
