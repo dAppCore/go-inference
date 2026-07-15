@@ -549,6 +549,42 @@ func (driver *inferenceBenchmarkHIPKernelCountingDriver) MemsetAsync(pointer nat
 }
 
 func (driver *inferenceBenchmarkHIPKernelCountingDriver) LaunchKernel(config hipKernelLaunchConfig) error {
+	blocks, shapeKey := inferenceBenchmarkHIPKernelLaunchShape(config)
+	if err := hipLaunchKernel(driver.nativeHIPDriver, config); err != nil {
+		return err
+	}
+	driver.mu.Lock()
+	driver.recordKernelLaunchLocked(config.Name, blocks, shapeKey)
+	driver.mu.Unlock()
+	return nil
+}
+
+func (driver *inferenceBenchmarkHIPKernelCountingDriver) LaunchKernelBatch(configs []hipKernelLaunchConfig) error {
+	if launcher, ok := driver.nativeHIPDriver.(nativeHIPKernelBatchLauncher); ok {
+		if err := launcher.LaunchKernelBatch(configs); err != nil {
+			return err
+		}
+		driver.mu.Lock()
+		for index := range configs {
+			blocks, shapeKey := inferenceBenchmarkHIPKernelLaunchShape(configs[index])
+			driver.recordKernelLaunchLocked(configs[index].Name, blocks, shapeKey)
+		}
+		driver.mu.Unlock()
+		return nil
+	}
+	for index := range configs {
+		blocks, shapeKey := inferenceBenchmarkHIPKernelLaunchShape(configs[index])
+		if err := hipLaunchKernel(driver.nativeHIPDriver, configs[index]); err != nil {
+			return err
+		}
+		driver.mu.Lock()
+		driver.recordKernelLaunchLocked(configs[index].Name, blocks, shapeKey)
+		driver.mu.Unlock()
+	}
+	return nil
+}
+
+func inferenceBenchmarkHIPKernelLaunchShape(config hipKernelLaunchConfig) (uint64, inferenceBenchmarkHIPKernelShapeKey) {
 	blocks := uint64(config.GridX)
 	if config.GridY > 0 {
 		blocks *= uint64(config.GridY)
@@ -567,22 +603,20 @@ func (driver *inferenceBenchmarkHIPKernelCountingDriver) LaunchKernel(config hip
 		sharedMemBytes: config.SharedMemBytes,
 	}
 	shapeKey.tensorRows, shapeKey.tensorCols, shapeKey.tensorGroup, shapeKey.tensorBatch = inferenceBenchmarkHIPKernelTensorShape(config)
-	if err := hipLaunchKernel(driver.nativeHIPDriver, config); err != nil {
-		return err
-	}
-	driver.mu.Lock()
-	stats := driver.kernel[config.Name]
+	return blocks, shapeKey
+}
+
+func (driver *inferenceBenchmarkHIPKernelCountingDriver) recordKernelLaunchLocked(name string, blocks uint64, shapeKey inferenceBenchmarkHIPKernelShapeKey) {
+	stats := driver.kernel[name]
 	stats.Launches++
 	stats.Blocks += blocks
-	driver.kernel[config.Name] = stats
+	driver.kernel[name] = stats
 	shapeStats := driver.shape[shapeKey]
 	shapeStats.Launches++
 	shapeStats.Blocks += blocks
 	driver.shape[shapeKey] = shapeStats
 	driver.total.Launches++
 	driver.total.Blocks += blocks
-	driver.mu.Unlock()
-	return nil
 }
 
 func (driver *inferenceBenchmarkHIPKernelCountingDriver) ResetKernelStats() {
@@ -1555,6 +1589,37 @@ func (inferenceBenchmarkHIPKernelCountingStubDriver) CopyDeviceToHost(nativeDevi
 
 func (inferenceBenchmarkHIPKernelCountingStubDriver) LaunchKernel(hipKernelLaunchConfig) error {
 	return nil
+}
+
+type inferenceBenchmarkHIPKernelBatchCountingStubDriver struct {
+	inferenceBenchmarkHIPKernelCountingStubDriver
+	batches [][]hipKernelLaunchConfig
+}
+
+func (driver *inferenceBenchmarkHIPKernelBatchCountingStubDriver) LaunchKernelBatch(configs []hipKernelLaunchConfig) error {
+	driver.batches = append(driver.batches, append([]hipKernelLaunchConfig(nil), configs...))
+	return nil
+}
+
+func TestInferenceBenchmarkHIPKernelCountingDriver_LaunchKernelBatch_Good(t *testing.T) {
+	underlying := &inferenceBenchmarkHIPKernelBatchCountingStubDriver{}
+	driver := newInferenceBenchmarkHIPKernelCountingDriver(underlying)
+	configs := []hipKernelLaunchConfig{
+		{Name: "first", Args: []byte{1}, GridX: 2, GridY: 3, GridZ: 1, BlockX: 1, BlockY: 1, BlockZ: 1},
+		{Name: "second", Args: []byte{2}, GridX: 4, GridY: 1, GridZ: 1, BlockX: 1, BlockY: 1, BlockZ: 1},
+	}
+	if err := driver.LaunchKernelBatch(configs); err != nil {
+		t.Fatalf("LaunchKernelBatch: %v", err)
+	}
+	if len(underlying.batches) != 1 || len(underlying.batches[0]) != 2 {
+		t.Fatalf("underlying batches = %v, want one two-kernel batch", underlying.batches)
+	}
+	if got := driver.KernelStats("first"); got.Launches != 1 || got.Blocks != 6 {
+		t.Fatalf("first kernel stats = %+v, want 1 launch and 6 blocks", got)
+	}
+	if got := driver.KernelStats("second"); got.Launches != 1 || got.Blocks != 4 {
+		t.Fatalf("second kernel stats = %+v, want 1 launch and 4 blocks", got)
+	}
 }
 
 func TestInferenceBenchmarkHIPKernelCountingDriver_Good(t *testing.T) {
