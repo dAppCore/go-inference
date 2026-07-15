@@ -91,7 +91,10 @@ const (
 	hipPackedTopKChunkSize                                = 4096
 )
 
-const hipMLXQ4ProjectionBatchQ8Row64AlignedDisableEnv = "GO_ROCM_DISABLE_Q8_BATCH_ROW64_ALIGNED"
+const (
+	hipMLXQ4ProjectionBatch26BDownDisableEnv        = "GO_ROCM_DISABLE_Q4_BATCH_26B_DOWN"
+	hipMLXQ4ProjectionBatchQ8Row64AlignedDisableEnv = "GO_ROCM_DISABLE_Q8_BATCH_ROW64_ALIGNED"
+)
 
 var (
 	hipMLXQ4GELUTanhMLPPersistentRouteEnabled = os.Getenv(hipMLXQ4GELUTanhMLPPersistentRouteEnv) == "1"
@@ -5178,6 +5181,8 @@ func hipMLXQ4ProjectionBatchLaunchConfigForShape(args []byte, rows, cols, groupS
 		if core.Env(hipMLXQ4ProjectionBatchQ4SharedDisableEnv) == "1" {
 			kernelName = hipKernelNameMLXQ4ProjBatchQ4G64Tokens16
 			rowsPerBlock = hipMLXQ4ProjectionRowsPerBlock
+		} else if rows == 2816 && cols == 704 && core.Env(hipMLXQ4ProjectionBatch26BDownDisableEnv) != "1" {
+			kernelName = hipKernelNameMLXQ4ProjBatchQ4G64Rows2816Cols704
 		}
 		gridX, err := rocmDeviceKVPositiveUint32("MLX q4 group64 tokens16 projection batch row blocks", (rows+rowsPerBlock-1)/rowsPerBlock)
 		if err != nil {

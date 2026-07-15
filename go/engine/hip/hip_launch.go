@@ -151,6 +151,7 @@ const (
 )
 
 const (
+	hipKernelNameMLXQ4ProjBatchQ4G64Rows2816Cols704                        = "rocm_mlx_q4_projection_batch_q4_g64_rows2816_cols704_row16_tokens16_shared"
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64             = "rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64"
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64Probability4 = "rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64_prob4"
 )

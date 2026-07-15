@@ -44,6 +44,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q4_g64_tokens16`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q4_g64_row16_tokens16_shared`,
+		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q4_g64_rows2816_cols704_row16_tokens16_shared`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16_shared`,
 		`extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens64_shared`,
@@ -572,6 +573,13 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 	core.AssertTrue(t, strings.Contains(batchQ4G64Shared, `__shared__ float input_tile`), "shared q4 batch projection must reuse a 64-column input tile across output rows")
 	core.AssertTrue(t, strings.Contains(batchQ4G64Shared, `ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW`), "shared q4 batch projection must use row16 lane geometry")
 	core.AssertTrue(t, strings.Contains(batchQ4G64Shared, `rocm_mlx_q4_projection_row16_reduce`), "shared q4 batch projection must preserve portable row16 reduction")
+	batchQ4G6426BDown := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_batch_q4_g64_rows2816_cols704_row16_tokens16_shared`)
+	core.AssertTrue(t, strings.Contains(batchQ4G6426BDown, `args.rows != ROCM_MLX_Q4_PROJECTION_BATCH_26B_DOWN_ROWS`), "26B q4 down projection must guard its exact output rows")
+	core.AssertTrue(t, strings.Contains(batchQ4G6426BDown, `args.cols != ROCM_MLX_Q4_PROJECTION_BATCH_26B_DOWN_COLS`), "26B q4 down projection must guard its exact input columns")
+	core.AssertTrue(t, strings.Contains(batchQ4G6426BDown, `ROCM_MLX_Q4_PROJECTION_BATCH_26B_DOWN_GROUPS_PER_ROW`), "26B q4 down projection must use its fixed group count")
+	core.AssertTrue(t, !strings.Contains(batchQ4G6426BDown, `row < args.rows`), "26B q4 down projection must remove impossible row tails")
+	core.AssertTrue(t, strings.Contains(batchQ4G6426BDown, `batch < args.batch`), "26B q4 down projection must retain token-tail handling")
+	core.AssertTrue(t, strings.Contains(batchQ4G6426BDown, `rocm_mlx_q4_projection_row16_reduce`), "26B q4 down projection must preserve portable row16 reduction")
 
 	batchQ8G64Tokens16 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16`)
 	core.AssertTrue(t, strings.Contains(batchQ8G64Tokens16, `args.bits != 8u || args.group_size != 64u`), "q8 group64 tokens16 batch projection must guard its quantization shape")
