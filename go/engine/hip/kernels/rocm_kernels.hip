@@ -7242,7 +7242,7 @@ extern "C" __global__ void rocm_mlx_q4_projection_batch_q4_g64_tokens16(const un
 	}
 }
 
-extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_tokens16(const unsigned char *packet)
+extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_row16_tokens16(const unsigned char *packet)
 {
 	if (packet == nullptr) {
 		return;
@@ -7256,9 +7256,9 @@ extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_tokens16(const un
 		return;
 	}
 
-	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
-	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW;
-	const uint32_t row = blockIdx.x * ROCM_MLX_Q4_PROJECTION_ROWS_PER_BLOCK + row_lane;
+	const uint32_t row_lane = threadIdx.x / ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW;
+	const uint32_t col_lane = threadIdx.x - row_lane * ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW;
+	const uint32_t row = blockIdx.x * ROCM_MLX_Q4_PROJECTION_ROW16_ROWS_PER_BLOCK + row_lane;
 	const uint32_t batch_base = blockIdx.y * ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK;
 	const float *input_base = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.input_pointer));
 	const uint32_t *weights = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.weight_pointer));
@@ -7270,7 +7270,7 @@ extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_tokens16(const un
 		const uint64_t packed_per_row = rocm_mlx_affine_packed_per_row(args.cols, args.bits);
 		const uint32_t groups_per_row = args.cols >> 6u;
 		const uint64_t row_packed_base = static_cast<uint64_t>(row) * packed_per_row;
-		for (uint32_t col = col_lane; col < args.cols; col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+		for (uint32_t col = col_lane; col < args.cols; col += ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW) {
 			const uint32_t quantized = rocm_mlx_affine_q8_quantized_value(weights, row_packed_base, col);
 			const uint32_t group = row * groups_per_row + (col >> 6u);
 			const float value = static_cast<float>(quantized) * rocm_bfloat16_to_float(scales[group]) +
@@ -7288,7 +7288,7 @@ extern "C" __global__ void rocm_mlx_q4_projection_batch_q8_g64_tokens16(const un
 #pragma unroll
 	for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_PROJECTION_BATCH_WIDE_TOKENS_PER_BLOCK; ++token_lane) {
 		const uint32_t batch = batch_base + token_lane;
-		const float sum = rocm_mlx_q4_row_reduce(sums[token_lane]);
+		const float sum = rocm_mlx_q4_projection_row16_reduce(sums[token_lane]);
 		if (col_lane == 0 && row < args.rows && batch < args.batch) {
 			float *output = output_base + batch * args.rows;
 			output[row] = sum;

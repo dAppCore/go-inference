@@ -1356,14 +1356,14 @@ func TestHIPKernels_MLXAffineQ4ProjectionBatchTokens16LaunchConfig_Good(t *testi
 	core.AssertEqual(t, uint32(1), q4Small.GridY)
 }
 
-func TestHIPKernels_MLXAffineQ8ProjectionBatchTokens16LaunchConfig_Good(t *testing.T) {
+func TestHIPKernels_MLXAffineQ8ProjectionBatchRow16Tokens16LaunchConfig_Good(t *testing.T) {
 	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionBatchLaunchArgsBytes)
 	defer hipReleaseLaunchPacket(packet)
 
 	q8, err := hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 4096, 2816, 64, 8, 256)
 	core.RequireNoError(t, err)
-	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatchQ8G64Tokens16, q8.Name)
-	core.AssertEqual(t, uint32(512), q8.GridX)
+	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens16, q8.Name)
+	core.AssertEqual(t, uint32(256), q8.GridX)
 	core.AssertEqual(t, uint32(16), q8.GridY)
 	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, q8.BlockX)
 
