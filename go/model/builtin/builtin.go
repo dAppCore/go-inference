@@ -81,10 +81,10 @@ import (
 	_ "dappco.re/go/inference/model/olmo"       // OLMo / OLMo 2
 	_ "dappco.re/go/inference/model/olmoe"      // AllenAI OLMoE sparse transformer
 	_ "dappco.re/go/inference/model/opt"        // OPT learned-position transformer
-	_ "dappco.re/go/inference/model/phi"        // phi / phi3
-	_ "dappco.re/go/inference/model/phi"        // phi / phi3
-	_ "dappco.re/go/inference/model/phi"        // phi / phi3
-	_ "dappco.re/go/inference/model/phi"        // phi / phi3
+	_ "dappco.re/go/inference/model/arch/microsoft/phi"        // phi / phi3
+	_ "dappco.re/go/inference/model/arch/microsoft/phi"        // phi / phi3
+	_ "dappco.re/go/inference/model/arch/microsoft/phi"        // phi / phi3
+	_ "dappco.re/go/inference/model/arch/microsoft/phi"        // phi / phi3
 	_ "dappco.re/go/inference/model/arch/Qwen/qwen2"      // qwen2 / qwen2.5 dense text
 	_ "dappco.re/go/inference/model/arch/Qwen/qwen2"      // qwen2 / qwen2.5 dense text
 	_ "dappco.re/go/inference/model/arch/Qwen/qwen2"      // qwen2 / qwen2.5 dense text
