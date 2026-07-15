@@ -4634,6 +4634,15 @@ func TestHIPKernels_AttentionHeadsBatchChunkedGQA2Stage1LaunchConfig_Good(t *tes
 }
 
 func TestHIPKernels_AttentionHeadsBatchChunkedMultiKVHeads_Good(t *testing.T) {
+	previousGQA2 := hipAttentionHeadsBatchChunkedGQA2Enabled
+	previousIncremental := hipAttentionHeadsIncrementalGQA2Enabled
+	hipAttentionHeadsBatchChunkedGQA2Enabled = true
+	hipAttentionHeadsIncrementalGQA2Enabled = true
+	t.Cleanup(func() {
+		hipAttentionHeadsBatchChunkedGQA2Enabled = previousGQA2
+		hipAttentionHeadsIncrementalGQA2Enabled = previousIncremental
+	})
+
 	const (
 		dim             = 4
 		tokenCount      = hipAttentionHeadsSharedMaxTokens + 1
@@ -4713,9 +4722,25 @@ func TestHIPKernels_AttentionHeadsBatchChunkedMultiKVHeads_Good(t *testing.T) {
 	if len(launches) != 2 {
 		t.Fatalf("multi-KV chunked launches = %d, want 2: %+v", len(launches), launches)
 	}
-	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage1, launches[0].Name)
+	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage1GQA2, launches[0].Name)
 	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage2, launches[1].Name)
 	core.AssertEqual(t, uint32(keyHeads), binary.LittleEndian.Uint32(launches[0].Args[112:]))
+
+	start = len(driver.launches)
+	err = hipRunAttentionHeadsOutputFromDeviceQueryToDeviceKernelWithWorkspace(context.Background(), driver, hipAttentionRequest{
+		QueryDim:        dim,
+		KeyHeads:        keyHeads,
+		DeviceKV:        deviceKV,
+		DescriptorTable: table,
+		Scale:           1,
+	}, query, headCount, output, workspace)
+	core.RequireNoError(t, err)
+	incremental := driver.launches[start:]
+	if len(incremental) != 2 {
+		t.Fatalf("incremental GQA2 launches = %d, want 2: %+v", len(incremental), incremental)
+	}
+	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage1GQA2, incremental[0].Name)
+	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage2, incremental[1].Name)
 }
 
 func TestHIPKernels_AttentionHeadsBatchChunkedLaunchArgs_WindowStartsAtActiveChunk(t *testing.T) {

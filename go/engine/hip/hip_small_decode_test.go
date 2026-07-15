@@ -3047,6 +3047,28 @@ func TestHIPAttentionHeadsBatchChunkedGQA2Eligible_Good(t *testing.T) {
 	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA2Eligible(16, 1), "disabled route must stay on v2")
 }
 
+func TestHIPAttentionHeadsIncrementalGQA2Eligible_Good(t *testing.T) {
+	previous := hipAttentionHeadsIncrementalGQA2Enabled
+	previousBatch := hipAttentionHeadsBatchChunkedGQA2Enabled
+	hipAttentionHeadsIncrementalGQA2Enabled = true
+	hipAttentionHeadsBatchChunkedGQA2Enabled = true
+	t.Cleanup(func() {
+		hipAttentionHeadsIncrementalGQA2Enabled = previous
+		hipAttentionHeadsBatchChunkedGQA2Enabled = previousBatch
+	})
+
+	core.AssertTrue(t, hipAttentionHeadsIncrementalGQA2Eligible(4, 2), "two query heads per KV head must share the incremental scan")
+	core.AssertTrue(t, !hipAttentionHeadsIncrementalGQA2Eligible(8, 2), "wider GQA groups must stay on their existing route")
+	core.AssertTrue(t, !hipAttentionHeadsIncrementalGQA2Eligible(2, 2), "MHA must stay on its existing route")
+	core.AssertTrue(t, !hipAttentionHeadsIncrementalGQA2Eligible(4, 3), "invalid GQA topology must stay on its existing route")
+
+	hipAttentionHeadsIncrementalGQA2Enabled = false
+	core.AssertTrue(t, !hipAttentionHeadsIncrementalGQA2Eligible(4, 2), "disabled incremental GQA2 must stay on its existing route")
+	hipAttentionHeadsIncrementalGQA2Enabled = true
+	hipAttentionHeadsBatchChunkedGQA2Enabled = false
+	core.AssertTrue(t, !hipAttentionHeadsIncrementalGQA2Eligible(4, 2), "disabled shared GQA2 kernel must stay on its existing route")
+}
+
 func TestHIPAttentionHeadsBatchChunkedGQA4Eligible_Good(t *testing.T) {
 	previous := hipAttentionHeadsBatchChunkedGQA4Enabled
 	hipAttentionHeadsBatchChunkedGQA4Enabled = true
