@@ -132,3 +132,15 @@ func TestBuiltinRegistersOCRArches(t *testing.T) {
 		}
 	}
 }
+
+func TestBuiltinRegistersOpenAI(t *testing.T) {
+	for _, mt := range []string{"openai_privacy_filter", "whisper", "gpt_oss"} {
+		spec, ok := model.LookupArch(mt)
+		if !ok || spec.Composed != nil {
+			t.Fatalf("model_type %q = registered %v composed %v, want a registered Parse-based arch through builtin", mt, ok, spec.Composed != nil)
+		}
+		if spec.Parse == nil {
+			t.Fatalf("model_type %q registered through builtin without a Parse func", mt)
+		}
+	}
+}

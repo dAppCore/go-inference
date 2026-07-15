@@ -49,6 +49,9 @@ import (
 	_ "dappco.re/go/inference/model/arch/mistralai/mistral"       // mistral
 	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"       // mixtral sparse MoE
 	_ "dappco.re/go/inference/model/arch/mpt"                     // MPT ALiBi / learned-position decoder
+	_ "dappco.re/go/inference/model/arch/openai/gptoss"           // gpt_oss — generative MoE causal-LM, recognised + configured (forward not yet validated)
+	_ "dappco.re/go/inference/model/arch/openai/privacyfilter"    // openai_privacy_filter — PII token-classifier (MoE), not generative; recognised for direction
+	_ "dappco.re/go/inference/model/arch/openai/whisper"          // whisper — ASR encoder-decoder (speech-to-text); recognised, forward not yet implemented
 	_ "dappco.re/go/inference/model/arch/opt"                     // OPT learned-position transformer
 	_ "dappco.re/go/inference/model/arch/rednote-hilab/dotsocr"   // dots_ocr / dots_ocr_1_5 (DOTS-OCR arch; recognised, forward refused)
 	_ "dappco.re/go/inference/model/arch/stabilityai/stablelm"    // StableLM partial-RoPE decoder
