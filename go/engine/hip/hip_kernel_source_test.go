@@ -78,6 +78,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_batch`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_batch_q4_g64_cols2816_row8`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_batch_q8_g64_row16`,
+		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_batch_q8_g64_rows2112_cols2816_row16_tokens32_shared`,
 		`extern "C" __global__ void rocm_moe_mlx_affine_routes`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_projection`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_projection_q6_row16`,
@@ -670,6 +671,14 @@ func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *test
 	core.AssertTrue(t, strings.Contains(geluBatchQ8G64Row16, `ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW`), "q8 group64 row16 batch GELU multiply must use row16 lane geometry")
 	core.AssertTrue(t, strings.Contains(geluBatchQ8G64Row16, `for (uint32_t packed = col_lane; packed < packed_per_row; packed += ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW)`), "q8 group64 row16 batch GELU multiply must distribute packed words across row16 lanes")
 	core.AssertTrue(t, strings.Contains(geluBatchQ8G64Row16, `rocm_mlx_q4_projection_row16_reduce`), "q8 group64 row16 batch GELU multiply must use matching row16 reduction")
+
+	geluBatchQ8G64Rows2112T32 := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_batch_q8_g64_rows2112_cols2816_row16_tokens32_shared`)
+	core.AssertTrue(t, strings.Contains(geluBatchQ8G64Rows2112T32, `args.bits != 8u || args.group_size != 64u || args.cols != ROCM_MLX_Q4_GELU_TANH_Q8_G64_COLS2816`), "26B q8 tokens32 GELU multiply must guard its quantization and input width")
+	core.AssertTrue(t, strings.Contains(geluBatchQ8G64Rows2112T32, `__shared__ float input_tile[ROCM_MLX_Q4_GELU_TANH_BATCH_Q8_G64_TOKENS32_PER_BLOCK][ROCM_MLX_Q4_PROJECTION_BATCH_Q8_G64_COLS_PER_TILE]`), "26B q8 tokens32 GELU multiply must share its input tile across output rows")
+	core.AssertTrue(t, strings.Contains(geluBatchQ8G64Rows2112T32, `ROCM_MLX_Q4_PROJECTION_ROW16_THREADS_PER_ROW`), "26B q8 tokens32 GELU multiply must preserve row16 lane geometry")
+	core.AssertTrue(t, strings.Contains(geluBatchQ8G64Rows2112T32, `blockIdx.y * ROCM_MLX_Q4_GELU_TANH_BATCH_Q8_G64_TOKENS32_PER_BLOCK`), "26B q8 tokens32 GELU multiply must advance by 32-token tiles")
+	core.AssertTrue(t, strings.Contains(geluBatchQ8G64Rows2112T32, `for (uint32_t token_lane = 0; token_lane < ROCM_MLX_Q4_GELU_TANH_BATCH_Q8_G64_TOKENS32_PER_BLOCK; ++token_lane)`), "26B q8 tokens32 GELU multiply must retain one gate and up sum per token")
+	core.AssertTrue(t, strings.Count(geluBatchQ8G64Rows2112T32, `rocm_mlx_q4_projection_row16_reduce`) == 2, "26B q8 tokens32 GELU multiply must reduce both gate and up sums with row16 order")
 
 	geluProjBatch := hipKernelSourceFunctionBodyForTest(t, source, `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_projection_batch`)
 	core.AssertTrue(t, strings.Contains(geluProjBatch, `blockIdx.y * ROCM_MLX_Q4_PROJECTION_BATCH_TOKENS_PER_BLOCK`), "batch GELU projection must use grid Y for token blocks")

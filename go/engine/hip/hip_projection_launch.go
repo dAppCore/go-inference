@@ -45,6 +45,7 @@ const (
 	hipMLXQ4ProjectionBatchQ8Row32DisableEnv              = "GO_ROCM_DISABLE_Q8_BATCH_ROW32"
 	hipMLXQ4ProjectionBatchQ8Row64DisableEnv              = "GO_ROCM_DISABLE_Q8_BATCH_ROW64"
 	hipMLXQ4GELUTanhBatch26BQ4DisableEnv                  = "GO_ROCM_DISABLE_Q4_GELU_BATCH_26B_Q4"
+	hipMLXQ4GELUTanhBatchQ8Tokens32DisableEnv             = "GO_ROCM_DISABLE_Q8_GELU_BATCH_TOKENS32"
 	hipMLXQ4GELUTanh12BGateUpGeometryEnv                  = "GO_ROCM_EXPERIMENTAL_12B_GATE_UP_GEOMETRY"
 	hipMLXQ4Projection12BHeadGridEnv                      = "GO_ROCM_EXPERIMENTAL_12B_HEAD_GRID"
 	hipMLXQ4GELUTanhProjLaunchArgsVersion          uint32 = 1
@@ -77,6 +78,7 @@ const (
 	hipMLXQ4GELUTanhQ6Cols1536Row32RowsPerBlock           = 32
 	hipMLXQ4GELUTanhQ6Cols1536Row64RowsPerBlock           = 64
 	hipMLXQ4ProjectionBatchTokensPerBlock                 = 8
+	hipMLXQ4GELUTanhBatchQ8Tokens32PerBlock               = 32
 	hipMLXQ4ProjectionBatchWideTokensPerBlock             = 16
 	hipMLXQ4ProjectionBatchQ8Tokens64PerBlock             = 64
 	hipMLXQ4ProjectionBatchQ8Row32MinRows                 = 32
@@ -5646,8 +5648,13 @@ func hipMLXQ4GELUTanhMLPPersistentLaunchConfig(args []byte) (hipKernelLaunchConf
 func hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(args []byte, rows, cols, groupSize, bits, batch int) (hipKernelLaunchConfig, error) {
 	kernelName := hipKernelNameMLXQ4GELUTanhMulBatch
 	rowsPerBlock := hipMLXQ4ProjectionRowsPerBlock
+	tokensPerBlock := hipMLXQ4ProjectionBatchTokensPerBlock
 	if rows == 704 && cols == 2816 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 && core.Env(hipMLXQ4GELUTanhBatch26BQ4DisableEnv) != "1" {
 		kernelName = hipKernelNameMLXQ4GELUTanhMulBatchQ4G64Cols2816Row8
+	} else if rows == 2112 && cols == 2816 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 8 && batch >= hipMLXQ4GELUTanhBatchQ8Tokens32PerBlock && core.Env(hipMLXQ4GELUTanhBatchQ8Tokens32DisableEnv) != "1" {
+		kernelName = hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Rows2112T32
+		rowsPerBlock = hipMLXQ4ProjectionRow16RowsPerBlock
+		tokensPerBlock = hipMLXQ4GELUTanhBatchQ8Tokens32PerBlock
 	} else if groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 8 {
 		kernelName = hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16
 		rowsPerBlock = hipMLXQ4ProjectionRow16RowsPerBlock
@@ -5656,7 +5663,7 @@ func hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(args []byte, rows, cols, groupSiz
 	if err != nil {
 		return hipKernelLaunchConfig{}, err
 	}
-	gridY, err := rocmDeviceKVPositiveUint32("MLX q4 GELU tanh multiply batch token blocks", (batch+hipMLXQ4ProjectionBatchTokensPerBlock-1)/hipMLXQ4ProjectionBatchTokensPerBlock)
+	gridY, err := rocmDeviceKVPositiveUint32("MLX q4 GELU tanh multiply batch token blocks", (batch+tokensPerBlock-1)/tokensPerBlock)
 	if err != nil {
 		return hipKernelLaunchConfig{}, err
 	}

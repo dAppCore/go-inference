@@ -1455,6 +1455,31 @@ func TestHIPKernels_MLXAffineQ4GELUTanhMultiplyBatch26BQ4LaunchConfig_Good(t *te
 	core.AssertEqual(t, uint32(2), config.GridY)
 }
 
+func TestHIPKernels_MLXAffineQ8GELUTanhMultiplyBatch26BTokens32LaunchConfig_Good(t *testing.T) {
+	packet := hipBorrowLaunchPacket(hipMLXQ4GELUTanhMulBatchLaunchArgsBytes)
+	defer hipReleaseLaunchPacket(packet)
+
+	config, err := hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(packet, 2112, 2816, 64, 8, 256)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Rows2112T32, config.Name)
+	core.AssertEqual(t, uint32(132), config.GridX)
+	core.AssertEqual(t, uint32(8), config.GridY)
+	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, config.BlockX)
+
+	t.Setenv("GO_ROCM_DISABLE_Q8_GELU_BATCH_TOKENS32", "1")
+	config, err = hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(packet, 2112, 2816, 64, 8, 256)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16, config.Name)
+	core.AssertEqual(t, uint32(132), config.GridX)
+	core.AssertEqual(t, uint32(32), config.GridY)
+
+	t.Setenv("GO_ROCM_DISABLE_Q8_GELU_BATCH_TOKENS32", "0")
+	config, err = hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(packet, 2112, 2816, 64, 8, 16)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16, config.Name)
+	core.AssertEqual(t, uint32(2), config.GridY)
+}
+
 func TestHIPKernels_MLXAffineQ8ProjectionBatchRow16Tokens16LaunchConfig_Good(t *testing.T) {
 	t.Setenv("GO_ROCM_DISABLE_Q8_BATCH_SHARED", "1")
 	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionBatchLaunchArgsBytes)

@@ -2673,18 +2673,64 @@ func TestHIPHardwareMLXAffineQ8GELUTanhBatchPackedProductionShape_Good(t *testin
 			Bits:          req.Bits,
 		}
 	}
+	gateConfig := deviceConfig(gateReq, gateBuffers)
+	upConfig := deviceConfig(upReq, upBuffers)
 	output, err := hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInput(
 		context.Background(),
 		hipRuntime.driver,
 		inputBuffer,
-		deviceConfig(gateReq, gateBuffers),
-		deviceConfig(upReq, upBuffers),
+		gateConfig,
+		upConfig,
 		batch,
 	)
 	core.RequireNoError(t, err)
 	defer output.Close()
 	got, err := hipReadFloat32DeviceOutput(output, "rocm.hip.MLXQ8GELUPackedHardware", "packed q8 GELU output", rows*batch)
 	core.RequireNoError(t, err)
+	tokens32Output, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.MLXQ8GELUPackedHardware", "tokens32 packed q8 GELU output", uint64(rows*batch*4), rows*batch)
+	core.RequireNoError(t, err)
+	defer tokens32Output.Close()
+	tokens32Args, err := (hipMLXQ4GELUTanhMulBatchLaunchArgs{
+		InputPointer:      inputBuffer.Pointer(),
+		GateWeightPointer: gateConfig.WeightPointer,
+		GateScalePointer:  gateConfig.ScalePointer,
+		GateBiasPointer:   gateConfig.BiasPointer,
+		UpWeightPointer:   upConfig.WeightPointer,
+		UpScalePointer:    upConfig.ScalePointer,
+		UpBiasPointer:     upConfig.BiasPointer,
+		OutputPointer:     tokens32Output.Pointer(),
+		Rows:              rows,
+		Cols:              cols,
+		GroupSize:         groupSize,
+		Bits:              bits,
+		InputBytes:        inputBuffer.SizeBytes(),
+		GateWeightBytes:   gateConfig.WeightBytes,
+		GateScaleBytes:    gateConfig.ScaleBytes,
+		GateBiasBytes:     gateConfig.BiasBytes,
+		UpWeightBytes:     upConfig.WeightBytes,
+		UpScaleBytes:      upConfig.ScaleBytes,
+		UpBiasBytes:       upConfig.BiasBytes,
+		OutputBytes:       tokens32Output.SizeBytes(),
+		Batch:             batch,
+	}).Binary()
+	core.RequireNoError(t, err)
+	core.RequireNoError(t, hipLaunchKernel(hipRuntime.driver, hipKernelLaunchConfig{
+		Name:   hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Rows2112T32,
+		Args:   tokens32Args,
+		GridX:  (rows + hipMLXQ4ProjectionRow16RowsPerBlock - 1) / hipMLXQ4ProjectionRow16RowsPerBlock,
+		GridY:  (batch + hipMLXQ4GELUTanhBatchQ8Tokens32PerBlock - 1) / hipMLXQ4GELUTanhBatchQ8Tokens32PerBlock,
+		GridZ:  1,
+		BlockX: hipMLXQ4ProjectionBlockSize,
+		BlockY: 1,
+		BlockZ: 1,
+	}))
+	tokens32Got, err := hipReadFloat32DeviceOutput(tokens32Output, "rocm.hip.MLXQ8GELUPackedHardware", "tokens32 packed q8 GELU output", rows*batch)
+	core.RequireNoError(t, err)
+	for index := range got {
+		if math.Float32bits(tokens32Got[index]) != math.Float32bits(got[index]) {
+			t.Fatalf("tokens32 output[%d] = %g, row16 = %g", index, tokens32Got[index], got[index])
+		}
+	}
 	want := make([]float32, 0, rows*batch)
 	for token := 0; token < batch; token++ {
 		gateToken := gateReq
