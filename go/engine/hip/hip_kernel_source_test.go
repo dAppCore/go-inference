@@ -372,8 +372,10 @@ func TestHIPKernelSource_MLXAffineQ8G64GELUTanhRow8_Good(t *testing.T) {
 
 	core.AssertTrue(t, strings.Contains(kernel, `args.bits != 8u || args.group_size != 64u || args.cols < 2560u`), "q8 group64 row8 gate-up must reject other affine shapes")
 	core.AssertTrue(t, strings.Contains(kernel, `ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW`), "q8 group64 row8 gate-up must preserve thirty-two lanes per output row")
-	core.AssertTrue(t, strings.Contains(kernel, `for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW)`), "q8 group64 row8 gate-up must distribute whole affine groups")
-	core.AssertEqual(t, 2, strings.Count(kernel, `rocm_mlx_affine_q8_32_pair_dot`), "q8 group64 row8 gate-up must consume both halves of each group")
+	core.AssertTrue(t, strings.Contains(kernel, `const uint32_t half_groups_per_row = groups_per_row << 1u`), "q8 group64 row8 gate-up must expose two packed halves per affine group")
+	core.AssertTrue(t, strings.Contains(kernel, `for (uint32_t half_group = col_lane; half_group < half_groups_per_row; half_group += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW)`), "q8 group64 row8 gate-up must balance packed half-groups across row lanes")
+	core.AssertTrue(t, strings.Contains(kernel, `const uint32_t group_col = half_group >> 1u`), "q8 group64 row8 gate-up must share affine metadata between adjacent halves")
+	core.AssertEqual(t, 1, strings.Count(kernel, `rocm_mlx_affine_q8_32_pair_dot`), "q8 group64 row8 gate-up must consume one packed half per lane iteration")
 	core.AssertEqual(t, 2, strings.Count(kernel, `rocm_mlx_q4_row_reduce`), "q8 group64 row8 gate-up must reduce gate and up within portable thirty-two-lane groups")
 }
 

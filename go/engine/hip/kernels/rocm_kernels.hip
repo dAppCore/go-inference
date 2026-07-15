@@ -8459,21 +8459,22 @@ extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q8_g64_row8(const unsi
 	if (row < args.rows) {
 		const uint64_t packed_per_row = rocm_mlx_affine_packed_per_row(args.cols, args.bits);
 		const uint32_t groups_per_row = args.cols >> 6u;
+		const uint32_t half_groups_per_row = groups_per_row << 1u;
 		const uint64_t row_packed_base = static_cast<uint64_t>(row) * packed_per_row;
 		const uint32_t row_group_base = row * groups_per_row;
-		for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+		for (uint32_t half_group = col_lane; half_group < half_groups_per_row; half_group += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW) {
+			const uint32_t group_col = half_group >> 1u;
 			const uint32_t group = row_group_base + group_col;
 			const float gate_scale = rocm_bfloat16_to_float(gate_scales[group]);
 			const float gate_bias = rocm_bfloat16_to_float(gate_biases[group]);
 			const float up_scale = rocm_bfloat16_to_float(up_scales[group]);
 			const float up_bias = rocm_bfloat16_to_float(up_biases[group]);
-			const uint32_t first_packed = group_col << 4u;
-			const uint32_t first_col = group_col << 6u;
+			const uint32_t first_packed = half_group << 3u;
+			const uint32_t first_col = half_group << 5u;
 			float gate_q_dot = 0.0f;
 			float up_q_dot = 0.0f;
 			float input_sum = 0.0f;
 			rocm_mlx_affine_q8_32_pair_dot(input, gate_weights, up_weights, row_packed_base, first_packed, first_col, &gate_q_dot, &up_q_dot, &input_sum);
-			rocm_mlx_affine_q8_32_pair_dot(input, gate_weights, up_weights, row_packed_base, first_packed + 8u, first_col + 32u, &gate_q_dot, &up_q_dot, &input_sum);
 			gate_sum += gate_scale * gate_q_dot + gate_bias * input_sum;
 			up_sum += up_scale * up_q_dot + up_bias * input_sum;
 		}
