@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/model/bert"
+	"dappco.re/go/inference/model/arch/bert"
 )
 
 // referenceFixture is the sentence-transformers gold dumped by

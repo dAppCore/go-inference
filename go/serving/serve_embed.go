@@ -15,7 +15,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/model/bert"
+	"dappco.re/go/inference/model/arch/bert"
 	openai "dappco.re/go/inference/serving/provider/openai"
 )
 

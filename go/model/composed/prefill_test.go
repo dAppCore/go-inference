@@ -7,9 +7,9 @@ import (
 	"testing"
 
 	"dappco.re/go/inference/model"
-	"dappco.re/go/inference/model/mamba2"
+	"dappco.re/go/inference/model/arch/mamba2"
 	"dappco.re/go/inference/model/arch/Qwen/qwen3"
-	"dappco.re/go/inference/model/rwkv7"
+	"dappco.re/go/inference/model/arch/rwkv7"
 )
 
 // prefill_test.go proves model.BatchPrefillStepper's core invariant across EVERY mixer kind composed

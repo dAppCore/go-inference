@@ -4,7 +4,7 @@
 
 package native
 
-import "dappco.re/go/inference/model/rwkv7"
+import "dappco.re/go/inference/model/arch/rwkv7"
 
 // rwkv7_backend.go wires native's device GEMM into the engine-neutral RWKV-7 block's projections (its
 // compute hot spot; the WKV7 recurrence is cheap), the same seam as mamba2_backend.go. rwkv7 declares the

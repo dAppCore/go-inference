@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"dappco.re/go/inference"
-	"dappco.re/go/inference/model/bert"
+	"dappco.re/go/inference/model/arch/bert"
 )
 
 // benchSentences is a realistic small batch — short queries through

@@ -2,7 +2,7 @@
 
 package composed
 
-import "dappco.re/go/inference/model/mamba2"
+import "dappco.re/go/inference/model/arch/mamba2"
 
 // ResidualNormMLPProjMamba2InputDevice folds a predecessor's projection-fused tail together with this
 // layer's input RMSNorm and single Mamba-2 InProj GEMM. A nil hook or error keeps the ordinary path.

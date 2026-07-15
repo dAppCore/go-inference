@@ -2,7 +2,7 @@
 
 package composed
 
-import "dappco.re/go/inference/model/rwkv7"
+import "dappco.re/go/inference/model/arch/rwkv7"
 
 // ResidualNormMLPProjRWKV7InputDevice folds a predecessor's projection-fused tail together with this
 // layer's input RMSNorm and six RWKV-7 projection GEMMs. A nil hook or error keeps the ordinary path.

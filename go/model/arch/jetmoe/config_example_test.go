@@ -4,7 +4,7 @@ package jetmoe_test
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/model/jetmoe"
+	"dappco.re/go/inference/model/arch/jetmoe"
 )
 
 func ExampleConfig_Arch() {

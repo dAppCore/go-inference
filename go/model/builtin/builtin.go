@@ -24,10 +24,10 @@
 package builtin
 
 import (
-	_ "dappco.re/go/inference/model/bloom"      // bloom
-	_ "dappco.re/go/inference/model/bloom"      // bloom
-	_ "dappco.re/go/inference/model/bloom"      // bloom
-	_ "dappco.re/go/inference/model/bloom"      // bloom
+	_ "dappco.re/go/inference/model/arch/bloom"      // bloom
+	_ "dappco.re/go/inference/model/arch/bloom"      // bloom
+	_ "dappco.re/go/inference/model/arch/bloom"      // bloom
+	_ "dappco.re/go/inference/model/arch/bloom"      // bloom
 	_ "dappco.re/go/inference/model/arch/CohereForAI/cohere"     // cohere / cohere2 dense text
 	_ "dappco.re/go/inference/model/composed"   // qwen3_5 / qwen3_5_moe / qwen3_next hybrids (ArchSpec.Composed)
 	_ "dappco.re/go/inference/model/composed"   // qwen3_5 / qwen3_5_moe / qwen3_next hybrids (ArchSpec.Composed)
@@ -53,18 +53,18 @@ import (
 	_ "dappco.re/go/inference/model/gemma4"     // gemma4 / gemma4_text / gemma4_unified (+ assistant)
 	_ "dappco.re/go/inference/model/gemma4"     // gemma4 / gemma4_text / gemma4_unified (+ assistant)
 	_ "dappco.re/go/inference/model/arch/zai-org/glm4"       // GLM-4 dense text
-	_ "dappco.re/go/inference/model/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
-	_ "dappco.re/go/inference/model/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
-	_ "dappco.re/go/inference/model/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
-	_ "dappco.re/go/inference/model/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
-	_ "dappco.re/go/inference/model/gptneox"    // gpt_neox / gptj / gpt_neo
-	_ "dappco.re/go/inference/model/gptneox"    // gpt_neox / gptj / gpt_neo
-	_ "dappco.re/go/inference/model/gptneox"    // gpt_neox / gptj / gpt_neo
-	_ "dappco.re/go/inference/model/gptneox"    // gpt_neox / gptj / gpt_neo
+	_ "dappco.re/go/inference/model/arch/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
+	_ "dappco.re/go/inference/model/arch/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
+	_ "dappco.re/go/inference/model/arch/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
+	_ "dappco.re/go/inference/model/arch/gpt2"       // GPT-2 / GPT-SW3 / GPT-BigCode-StarCoder
+	_ "dappco.re/go/inference/model/arch/gptneox"    // gpt_neox / gptj / gpt_neo
+	_ "dappco.re/go/inference/model/arch/gptneox"    // gpt_neox / gptj / gpt_neo
+	_ "dappco.re/go/inference/model/arch/gptneox"    // gpt_neox / gptj / gpt_neo
+	_ "dappco.re/go/inference/model/arch/gptneox"    // gpt_neox / gptj / gpt_neo
 	_ "dappco.re/go/inference/model/arch/ibm-granite/granite"    // IBM Granite dense (excludes Granite MoE/hybrid)
 	_ "dappco.re/go/inference/model/arch/ibm-granite/granitemoe" // IBM Granite sparse MoE
 	_ "dappco.re/go/inference/model/arch/tencent/hunyuan"    // HunYuan v1 dense text
-	_ "dappco.re/go/inference/model/jetmoe"     // JetMoE routed FFN (MoA gap reported explicitly)
+	_ "dappco.re/go/inference/model/arch/jetmoe"     // JetMoE routed FFN (MoA gap reported explicitly)
 	_ "dappco.re/go/inference/model/arch/meta-llama/llama"      // llama (dense text)
 	_ "dappco.re/go/inference/model/arch/meta-llama/llama"      // llama (dense text)
 	_ "dappco.re/go/inference/model/arch/meta-llama/llama"      // llama (dense text)
@@ -77,10 +77,10 @@ import (
 	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"    // mixtral sparse MoE
 	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"    // mixtral sparse MoE
 	_ "dappco.re/go/inference/model/arch/mistralai/mixtral"    // mixtral sparse MoE
-	_ "dappco.re/go/inference/model/mpt"        // MPT ALiBi / learned-position decoder
+	_ "dappco.re/go/inference/model/arch/mpt"        // MPT ALiBi / learned-position decoder
 	_ "dappco.re/go/inference/model/arch/allenai/olmo"       // OLMo / OLMo 2
 	_ "dappco.re/go/inference/model/arch/allenai/olmoe"      // AllenAI OLMoE sparse transformer
-	_ "dappco.re/go/inference/model/opt"        // OPT learned-position transformer
+	_ "dappco.re/go/inference/model/arch/opt"        // OPT learned-position transformer
 	_ "dappco.re/go/inference/model/arch/microsoft/phi"        // phi / phi3
 	_ "dappco.re/go/inference/model/arch/microsoft/phi"        // phi / phi3
 	_ "dappco.re/go/inference/model/arch/microsoft/phi"        // phi / phi3

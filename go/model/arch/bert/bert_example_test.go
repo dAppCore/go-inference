@@ -4,7 +4,7 @@ package bert_test
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/model/bert"
+	"dappco.re/go/inference/model/arch/bert"
 )
 
 // ExampleParseConfig decodes a BertModel config.json and reports the derived

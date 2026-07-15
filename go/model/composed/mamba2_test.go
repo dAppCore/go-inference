@@ -5,7 +5,7 @@ package composed
 import (
 	"testing"
 
-	"dappco.re/go/inference/model/mamba2"
+	"dappco.re/go/inference/model/arch/mamba2"
 )
 
 // mkMamba2Weights builds synthetic Mamba-2 block weights shaped for cfg/D. The projDim/convDim/dInner

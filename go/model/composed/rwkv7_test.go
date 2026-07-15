@@ -5,7 +5,7 @@ package composed
 import (
 	"testing"
 
-	"dappco.re/go/inference/model/rwkv7"
+	"dappco.re/go/inference/model/arch/rwkv7"
 )
 
 // mkRWKV7Weights builds synthetic RWKV-7 block weights shaped for cfg/D. hk/hv mirror rwkv7.BlockConfig's
