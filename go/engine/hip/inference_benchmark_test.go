@@ -974,6 +974,7 @@ func inferenceBenchmarkReportHIPKernelRouteMetrics(b *testing.B, driver *inferen
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536_row32")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536_row64")
+	report(hipKernelNameMLXQ4GELUTanhMulBatchQ4G64Cols2816Row8, "kernel_mlx_q4_gelu_tanh_multiply_batch_q4_g64_cols2816_row8")
 	report(hipKernelNameMLXQ4GELUTanhProj, "kernel_mlx_q4_gelu_tanh_projection")
 	report(hipKernelNameMLXQ4GELUTanhProjQ6Row16, "kernel_mlx_q4_gelu_tanh_projection_q6_row16")
 	inferenceBenchmarkReportHIPDriverTrafficMetrics(b, driver)
@@ -1506,7 +1507,7 @@ func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows,
 		return firstRows + secondRows + thirdRows, inferenceBenchmarkU32At(args, 108), inferenceBenchmarkU32At(args, 112), 0
 	case hipKernelNameMLXQ4GELUTanhMul, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ4G64Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ8G64Row8, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), 0
-	case hipKernelNameMLXQ4GELUTanhMulBatch, hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16:
+	case hipKernelNameMLXQ4GELUTanhMulBatch, hipKernelNameMLXQ4GELUTanhMulBatchQ4G64Cols2816Row8, hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), inferenceBenchmarkU32At(args, 120)
 	case hipKernelNameMLXQ4GELUTanhProj, hipKernelNameMLXQ4GELUTanhProjQ6Row16:
 		return inferenceBenchmarkU32At(args, 56), inferenceBenchmarkU32At(args, 60), inferenceBenchmarkU32At(args, 64), 0
@@ -2606,6 +2607,47 @@ func TestInferenceBenchmarkHIPKernelTensorShape_SpecializedAffineBatchProjection
 		if rows != 4096 || cols != 2816 || group != 64 || batch != 256 {
 			t.Fatalf("%s shape = %dx%d qg%d batch%d, want 4096x2816 qg64 batch256", name, rows, cols, group, batch)
 		}
+	}
+}
+
+func TestInferenceBenchmarkHIPKernelTensorShape_SpecializedAffineBatchGELUTanh(t *testing.T) {
+	const rows, cols, groupSize, batch = 704, 2816, 64, 16
+	const weightBytes = rows * cols / 2
+	const affineBytes = rows * (cols / groupSize) * 2
+	args, err := (hipMLXQ4GELUTanhMulBatchLaunchArgs{
+		InputPointer:      1,
+		GateWeightPointer: 2,
+		GateScalePointer:  3,
+		GateBiasPointer:   4,
+		UpWeightPointer:   5,
+		UpScalePointer:    6,
+		UpBiasPointer:     7,
+		OutputPointer:     8,
+		Rows:              rows,
+		Cols:              cols,
+		GroupSize:         groupSize,
+		Bits:              4,
+		InputBytes:        batch * cols * 4,
+		GateWeightBytes:   weightBytes,
+		GateScaleBytes:    affineBytes,
+		GateBiasBytes:     affineBytes,
+		UpWeightBytes:     weightBytes,
+		UpScaleBytes:      affineBytes,
+		UpBiasBytes:       affineBytes,
+		OutputBytes:       batch * rows * 4,
+		Batch:             batch,
+	}).Binary()
+	if err != nil {
+		t.Fatalf("q4 batch GELU args: %v", err)
+	}
+	defer hipReleaseLaunchPacket(args)
+
+	gotRows, gotCols, gotGroup, gotBatch := inferenceBenchmarkHIPKernelTensorShape(hipKernelLaunchConfig{
+		Name: hipKernelNameMLXQ4GELUTanhMulBatchQ4G64Cols2816Row8,
+		Args: args,
+	})
+	if gotRows != rows || gotCols != cols || gotGroup != groupSize || gotBatch != batch {
+		t.Fatalf("q4 batch GELU shape = %dx%d qg%d batch%d, want %dx%d qg%d batch%d", gotRows, gotCols, gotGroup, gotBatch, rows, cols, groupSize, batch)
 	}
 }
 

@@ -44,6 +44,7 @@ const (
 	hipMLXQ4ProjectionBatchQ8Tokens64DisableEnv           = "GO_ROCM_DISABLE_Q8_BATCH_TOKENS64"
 	hipMLXQ4ProjectionBatchQ8Row32DisableEnv              = "GO_ROCM_DISABLE_Q8_BATCH_ROW32"
 	hipMLXQ4ProjectionBatchQ8Row64DisableEnv              = "GO_ROCM_DISABLE_Q8_BATCH_ROW64"
+	hipMLXQ4GELUTanhBatch26BQ4DisableEnv                  = "GO_ROCM_DISABLE_Q4_GELU_BATCH_26B_Q4"
 	hipMLXQ4GELUTanh12BGateUpGeometryEnv                  = "GO_ROCM_EXPERIMENTAL_12B_GATE_UP_GEOMETRY"
 	hipMLXQ4Projection12BHeadGridEnv                      = "GO_ROCM_EXPERIMENTAL_12B_HEAD_GRID"
 	hipMLXQ4GELUTanhProjLaunchArgsVersion          uint32 = 1
@@ -3337,7 +3338,7 @@ func hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInput(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
-	config, err := hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(launchBytes, gateCfg.Rows, gateCfg.GroupSize, gateCfg.Bits, batch)
+	config, err := hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(launchBytes, gateCfg.Rows, gateCfg.Cols, gateCfg.GroupSize, gateCfg.Bits, batch)
 	if err != nil {
 		return nil, err
 	}
@@ -3407,7 +3408,7 @@ func hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInputOutput(ctx context.Con
 	if err != nil {
 		return err
 	}
-	config, err := hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(launchBytes, gateCfg.Rows, gateCfg.GroupSize, gateCfg.Bits, batch)
+	config, err := hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(launchBytes, gateCfg.Rows, gateCfg.Cols, gateCfg.GroupSize, gateCfg.Bits, batch)
 	if err != nil {
 		return err
 	}
@@ -5642,10 +5643,12 @@ func hipMLXQ4GELUTanhMLPPersistentLaunchConfig(args []byte) (hipKernelLaunchConf
 	return config, config.Validate()
 }
 
-func hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(args []byte, rows, groupSize, bits, batch int) (hipKernelLaunchConfig, error) {
+func hipMLXQ4GELUTanhMultiplyBatchLaunchConfig(args []byte, rows, cols, groupSize, bits, batch int) (hipKernelLaunchConfig, error) {
 	kernelName := hipKernelNameMLXQ4GELUTanhMulBatch
 	rowsPerBlock := hipMLXQ4ProjectionRowsPerBlock
-	if groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 8 {
+	if rows == 704 && cols == 2816 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 && core.Env(hipMLXQ4GELUTanhBatch26BQ4DisableEnv) != "1" {
+		kernelName = hipKernelNameMLXQ4GELUTanhMulBatchQ4G64Cols2816Row8
+	} else if groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 8 {
 		kernelName = hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16
 		rowsPerBlock = hipMLXQ4ProjectionRow16RowsPerBlock
 	}

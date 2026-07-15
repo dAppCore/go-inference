@@ -2705,6 +2705,121 @@ func TestHIPHardwareMLXAffineQ8GELUTanhBatchPackedProductionShape_Good(t *testin
 	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "q8 packed GELU production-width", want, got, 0.000001, 0.000001)
 }
 
+func TestHIPHardwareMLXAffineQ4GELUTanhBatch26BQ4_Good(t *testing.T) {
+	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
+		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		t.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || !runtime.Available() || hipRuntime.driver == nil {
+		t.Fatal("native ROCm runtime is not available")
+	}
+
+	const rows, cols, batch, groupSize, bits = 704, 2816, 2, 64, 4
+	input := make([]float32, batch*cols)
+	gateValues := make([]uint32, rows*cols)
+	upValues := make([]uint32, rows*cols)
+	gateScales := make([]uint16, rows*(cols/groupSize))
+	gateBiases := make([]uint16, len(gateScales))
+	upScales := make([]uint16, len(gateScales))
+	upBiases := make([]uint16, len(gateScales))
+	for index := range input {
+		input[index] = float32((index*17)%251-125) / 251
+	}
+	for index := range gateValues {
+		gateValues[index] = uint32((index*29 + 11) % 16)
+		upValues[index] = uint32((index*43 + 7) % 16)
+	}
+	for index := range gateScales {
+		gateScales[index] = hipFloat32ToBFloat16(float32(index%7+1) / 2048)
+		gateBiases[index] = hipFloat32ToBFloat16(float32(index%7-3) / 1024)
+		upScales[index] = hipFloat32ToBFloat16(float32(index%5+1) / 2048)
+		upBiases[index] = hipFloat32ToBFloat16(float32(index%5-2) / 1024)
+	}
+	gateReq := hipMLXQ4ProjectionRequest{
+		Input:     input[:cols],
+		Weight:    hipPackMLXAffineValuesForTest(gateValues, cols, bits),
+		Scales:    gateScales,
+		Biases:    gateBiases,
+		Rows:      rows,
+		Cols:      cols,
+		GroupSize: groupSize,
+		Bits:      bits,
+	}
+	upReq := hipMLXQ4ProjectionRequest{
+		Input:     input[:cols],
+		Weight:    hipPackMLXAffineValuesForTest(upValues, cols, bits),
+		Scales:    upScales,
+		Biases:    upBiases,
+		Rows:      rows,
+		Cols:      cols,
+		GroupSize: groupSize,
+		Bits:      bits,
+	}
+	gateBuffers, err := gateReq.deviceBuffers(hipRuntime.driver)
+	core.RequireNoError(t, err)
+	defer gateBuffers.Close()
+	upBuffers, err := upReq.deviceBuffers(hipRuntime.driver)
+	core.RequireNoError(t, err)
+	defer upBuffers.Close()
+	inputPayload, err := hipFloat32Payload(input)
+	core.RequireNoError(t, err)
+	inputBuffer, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.MLXQ4GELU26BHardware", "production-shape input", inputPayload, len(input))
+	core.RequireNoError(t, err)
+	defer inputBuffer.Close()
+	deviceConfig := func(req hipMLXQ4ProjectionRequest, buffers *hipMLXQ4ProjectionDeviceBuffers) hipMLXQ4DeviceWeightConfig {
+		return hipMLXQ4DeviceWeightConfig{
+			WeightPointer: buffers.Weight.Pointer(),
+			ScalePointer:  buffers.Scales.Pointer(),
+			BiasPointer:   buffers.Biases.Pointer(),
+			WeightBytes:   buffers.Weight.SizeBytes(),
+			ScaleBytes:    buffers.Scales.SizeBytes(),
+			BiasBytes:     buffers.Biases.SizeBytes(),
+			Rows:          req.Rows,
+			Cols:          req.Cols,
+			GroupSize:     req.GroupSize,
+			Bits:          req.Bits,
+		}
+	}
+	run := func(label string) []float32 {
+		t.Helper()
+		output, runErr := hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInput(
+			context.Background(),
+			hipRuntime.driver,
+			inputBuffer,
+			deviceConfig(gateReq, gateBuffers),
+			deviceConfig(upReq, upBuffers),
+			batch,
+		)
+		core.RequireNoError(t, runErr)
+		defer output.Close()
+		values, readErr := hipReadFloat32DeviceOutput(output, "rocm.hip.MLXQ4GELU26BHardware", label, rows*batch)
+		core.RequireNoError(t, readErr)
+		return values
+	}
+	q4Only := run("q4-only output")
+	t.Setenv(hipMLXQ4GELUTanhBatch26BQ4DisableEnv, "1")
+	generic := run("generic output")
+	want := make([]float32, 0, rows*batch)
+	for token := 0; token < batch; token++ {
+		gateToken := gateReq
+		gateToken.Input = input[token*cols : (token+1)*cols]
+		upToken := upReq
+		upToken.Input = gateToken.Input
+		want = append(want, expectedGELUTanhMultiplyFromMLXAffine(t, gateToken, upToken, bits)...)
+	}
+	for index := range generic {
+		if math.Float32bits(q4Only[index]) != math.Float32bits(generic[index]) {
+			t.Fatalf("q4-only output[%d] = %g, generic = %g", index, q4Only[index], generic[index])
+		}
+	}
+	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "q4-only 26B GELU", want, q4Only, 0.000001, 0.000001)
+	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "generic 26B GELU", want, generic, 0.000001, 0.000001)
+}
+
 func TestNativeDecodeSmokeKernelStatus_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_MODEL_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_MODEL_TESTS=1 to run ROCm model smoke tests")
