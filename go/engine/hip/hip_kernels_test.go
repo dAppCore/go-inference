@@ -1146,6 +1146,25 @@ func TestHIPKernels_MLXAffineQ6GELUTanhCols1536LaunchConfig_Good(t *testing.T) {
 	core.AssertEqual(t, uint32(640), q4Group32E4B.GridX)
 }
 
+func TestHIPKernels_MLXAffineQ8G64GELUTanhRow8LaunchConfig_Good(t *testing.T) {
+	packet := hipBorrowLaunchPacket(hipMLXQ4GELUTanhMulLaunchArgsBytes)
+	defer hipReleaseLaunchPacket(packet)
+
+	e4b, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 10240, 2560, 64, 8)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMulQ8G64Row8, e4b.Name)
+	core.AssertEqual(t, uint32(1280), e4b.GridX)
+	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, e4b.BlockX)
+
+	short, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 10240, 2048, 64, 8)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMul, short.Name)
+
+	group32, err := hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(packet, 10240, 2560, 32, 8)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameMLXQ4GELUTanhMul, group32.Name)
+}
+
 func TestHIPKernels_MLXAffineQ4G32GELUTanh12BGateUpLaunchConfig_Good(t *testing.T) {
 	previous := hipMLXQ4GELUTanh12BGateUpRouteEnabled
 	hipMLXQ4GELUTanh12BGateUpRouteEnabled = true

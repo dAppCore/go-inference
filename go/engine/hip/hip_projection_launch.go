@@ -5449,6 +5449,23 @@ func hipMLXQ4GELUTanhMultiplyLaunchConfigForShape(args []byte, rows, cols, group
 		}
 		return config, config.Validate()
 	}
+	if cols >= 2560 && groupSize == 64 && hipMLXQ4ProjectionBitsOrDefault(bits) == 8 {
+		gridX, err := rocmDeviceKVPositiveUint32("MLX q8 group64 GELU tanh multiply row8 blocks", (rows+hipMLXQ4ProjectionRowsPerBlock-1)/hipMLXQ4ProjectionRowsPerBlock)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+		config := hipKernelLaunchConfig{
+			Name:   hipKernelNameMLXQ4GELUTanhMulQ8G64Row8,
+			Args:   args,
+			GridX:  gridX,
+			GridY:  1,
+			GridZ:  1,
+			BlockX: hipMLXQ4ProjectionBlockSize,
+			BlockY: 1,
+			BlockZ: 1,
+		}
+		return config, config.Validate()
+	}
 	if hipMLXQ4GELUTanh12BGateUpRouteEnabled && rows == 15360 && cols == 3840 && groupSize == 32 && hipMLXQ4ProjectionBitsOrDefault(bits) == 4 {
 		rowsPerBlock := hipMLXQ4GELUTanhQ4G32Cols1536Row16RowsPerBlock
 		name := hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840

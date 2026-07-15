@@ -1853,7 +1853,7 @@ func TestHIPHardwareMLXAffineQ8GELUTanhCols2560Group64_Good(t *testing.T) {
 	}
 
 	const (
-		rows      = 8
+		rows      = 9
 		cols      = 2560
 		groupSize = 64
 		bits      = 8

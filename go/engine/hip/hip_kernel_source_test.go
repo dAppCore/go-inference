@@ -62,6 +62,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_cols1536_row16`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840_row8`,
+		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q8_g64_row8`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_mlp_q4_g32_cols1536_persistent`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536`,
 		`extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q6_cols1536_row32`,
@@ -361,6 +362,18 @@ func TestHIPKernelSource_DiffusionExpectedEmbeddingAffineG64Rows16_Good(t *testi
 	core.AssertTrue(t, strings.Contains(kernel, `for (uint32_t token = 0; token < args.vocab_size; ++token)`), "row-batched expected embedding must preserve vocabulary accumulation order")
 	core.AssertTrue(t, !strings.Contains(kernel, `__shared__`), "row-batched expected embedding must not stage the vocabulary through shared memory")
 	core.AssertTrue(t, !strings.Contains(kernel, `__syncthreads()`), "row-batched expected embedding must not add tile barriers")
+}
+
+func TestHIPKernelSource_MLXAffineQ8G64GELUTanhRow8_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_mlx_q4_gelu_tanh_multiply_q8_g64_row8`)
+
+	core.AssertTrue(t, strings.Contains(kernel, `args.bits != 8u || args.group_size != 64u || args.cols < 2560u`), "q8 group64 row8 gate-up must reject other affine shapes")
+	core.AssertTrue(t, strings.Contains(kernel, `ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW`), "q8 group64 row8 gate-up must preserve thirty-two lanes per output row")
+	core.AssertTrue(t, strings.Contains(kernel, `for (uint32_t group_col = col_lane; group_col < groups_per_row; group_col += ROCM_MLX_Q4_PROJECTION_THREADS_PER_ROW)`), "q8 group64 row8 gate-up must distribute whole affine groups")
+	core.AssertEqual(t, 2, strings.Count(kernel, `rocm_mlx_affine_q8_32_pair_dot`), "q8 group64 row8 gate-up must consume both halves of each group")
+	core.AssertEqual(t, 2, strings.Count(kernel, `rocm_mlx_q4_row_reduce`), "q8 group64 row8 gate-up must reduce gate and up within portable thirty-two-lane groups")
 }
 
 func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64Dims4Rows4_Good(t *testing.T) {

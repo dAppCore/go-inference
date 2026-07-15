@@ -934,6 +934,7 @@ func inferenceBenchmarkReportHIPKernelRouteMetrics(b *testing.B, driver *inferen
 	report(hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, "kernel_mlx_q4_gelu_tanh_multiply_q4_g32_cols1536_row16")
 	report(hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, "kernel_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840")
 	report(hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8, "kernel_mlx_q4_gelu_tanh_multiply_q4_g32_rows15360_cols3840_row8")
+	report(hipKernelNameMLXQ4GELUTanhMulQ8G64Row8, "kernel_mlx_q4_gelu_tanh_multiply_q8_g64_row8")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536_row32")
 	report(hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64, "kernel_mlx_q4_gelu_tanh_multiply_q6_cols1536_row64")
@@ -1467,7 +1468,7 @@ func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows,
 		secondRows := inferenceBenchmarkU32At(args, 100)
 		thirdRows := inferenceBenchmarkU32At(args, 104)
 		return firstRows + secondRows + thirdRows, inferenceBenchmarkU32At(args, 108), inferenceBenchmarkU32At(args, 112), 0
-	case hipKernelNameMLXQ4GELUTanhMul, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ4G64Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
+	case hipKernelNameMLXQ4GELUTanhMul, hipKernelNameMLXQ4GELUTanhMulQ4G32Cols1536Row16, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840, hipKernelNameMLXQ4GELUTanhMulQ4G32Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ4G64Rows15360Cols3840Row8, hipKernelNameMLXQ4GELUTanhMulQ8G64Row8, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row32, hipKernelNameMLXQ4GELUTanhMulQ6Cols1536Row64:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), 0
 	case hipKernelNameMLXQ4GELUTanhMulBatch, hipKernelNameMLXQ4GELUTanhMulBatchQ8G64Row16:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 76), inferenceBenchmarkU32At(args, 80), inferenceBenchmarkU32At(args, 120)
