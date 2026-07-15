@@ -95,7 +95,7 @@ func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
 	}
 	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion expected embedding", want, got, 0.00001, 0.00001)
 
-	const affineVocab, affineHidden, affineRows, affineGroupSize = 3, 2816, 17, 64
+	const affineVocab, affineHidden, affineGroupSize = 3, 2816, 64
 	for _, bits := range []int{4, 8} {
 		values := make([]uint32, affineVocab*affineHidden)
 		dense := make([]float32, len(values))
@@ -132,35 +132,38 @@ func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
 		biasBuffer, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.DiffusionExpectedEmbeddingHardware", label+" biases", biasPayload, len(biases))
 		core.RequireNoError(t, err)
 		defer biasBuffer.Close()
-		probabilities := make([]float32, affineRows*affineVocab)
-		for row := 0; row < affineRows; row++ {
-			for token := 0; token < affineVocab; token++ {
-				probabilities[row*affineVocab+token] = float32((row+1)*(token+2)) / 37
-			}
-		}
-		got, err := hipRunDiffusionExpectedEmbeddingKernel(context.Background(), hipRuntime.driver, probabilities, affineRows, hipDeviceEmbeddingLookupConfig{
-			EmbeddingPointer: embedding.Pointer(),
-			EmbeddingBytes:   embedding.SizeBytes(),
-			ScalePointer:     scaleBuffer.Pointer(),
-			ScaleBytes:       scaleBuffer.SizeBytes(),
-			BiasPointer:      biasBuffer.Pointer(),
-			BiasBytes:        biasBuffer.SizeBytes(),
-			TableEncoding:    hipEmbeddingTableEncodingMLXQ4,
-			GroupSize:        affineGroupSize,
-			QuantBits:        bits,
-			VocabSize:        affineVocab,
-			HiddenSize:       affineHidden,
-		}, 2)
-		core.RequireNoError(t, err)
-		want := make([]float32, affineRows*affineHidden)
-		for row := 0; row < affineRows; row++ {
-			for dim := 0; dim < affineHidden; dim++ {
+		rowCounts := []int{33}
+		for _, affineRows := range rowCounts {
+			probabilities := make([]float32, affineRows*affineVocab)
+			for row := 0; row < affineRows; row++ {
 				for token := 0; token < affineVocab; token++ {
-					want[row*affineHidden+dim] += probabilities[row*affineVocab+token] * dense[token*affineHidden+dim] * 2
+					probabilities[row*affineVocab+token] = float32((row+1)*(token+2)) / 37
 				}
 			}
+			got, err := hipRunDiffusionExpectedEmbeddingKernel(context.Background(), hipRuntime.driver, probabilities, affineRows, hipDeviceEmbeddingLookupConfig{
+				EmbeddingPointer: embedding.Pointer(),
+				EmbeddingBytes:   embedding.SizeBytes(),
+				ScalePointer:     scaleBuffer.Pointer(),
+				ScaleBytes:       scaleBuffer.SizeBytes(),
+				BiasPointer:      biasBuffer.Pointer(),
+				BiasBytes:        biasBuffer.SizeBytes(),
+				TableEncoding:    hipEmbeddingTableEncodingMLXQ4,
+				GroupSize:        affineGroupSize,
+				QuantBits:        bits,
+				VocabSize:        affineVocab,
+				HiddenSize:       affineHidden,
+			}, 2)
+			core.RequireNoError(t, err)
+			want := make([]float32, affineRows*affineHidden)
+			for row := 0; row < affineRows; row++ {
+				for dim := 0; dim < affineHidden; dim++ {
+					for token := 0; token < affineVocab; token++ {
+						want[row*affineHidden+dim] += probabilities[row*affineVocab+token] * dense[token*affineHidden+dim] * 2
+					}
+				}
+			}
+			assertFloat32SlicesNearRelativeNamedForHardwareTest(t, core.Sprintf("diffusion expected embedding %s group64 rows%d", label, affineRows), want, got, 0.00001, 0.00001)
 		}
-		assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion expected embedding "+label+" group64", want, got, 0.00001, 0.00001)
 	}
 }
 

@@ -137,6 +137,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_diffusion_expected_embedding`,
 		`extern "C" __global__ void rocm_diffusion_expected_embedding_affine_g64_rows16`,
 		`extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_dims4_rows4`,
+		`extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_tile32x64`,
 		`extern "C" __global__ void rocm_diffusion_sample_probabilities`,
 		`extern "C" __global__ void rocm_embedding_mean_pool`,
 		`extern "C" __global__ void rocm_rerank_cosine`,
@@ -404,6 +405,18 @@ func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64Dims4Rows4_Good(t *testi
 	core.AssertTrue(t, strings.Contains(kernel, `for (uint32_t token = 0; token < args.vocab_size; ++token)`), "q8 expected embedding must preserve vocabulary accumulation order")
 	core.AssertTrue(t, !strings.Contains(kernel, `__shared__`), "q8 expected embedding must not stage the vocabulary through shared memory")
 	core.AssertTrue(t, !strings.Contains(kernel, `__syncthreads()`), "q8 expected embedding must not add tile barriers")
+}
+
+func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64Tile32x64_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_tile32x64`)
+
+	core.AssertTrue(t, strings.Contains(kernel, `__shared__ float probability_tile`), "q8 tile must share each row probability across hidden dimensions")
+	core.AssertTrue(t, strings.Contains(kernel, `__shared__ float embedding_tile`), "q8 tile must dequantize each embedding value once per row tile")
+	core.AssertTrue(t, strings.Contains(kernel, `for (uint32_t token_base = 0; token_base < args.vocab_size; token_base += ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_TOKEN_TILE)`), "q8 tile must preserve ordered vocabulary tiles")
+	core.AssertTrue(t, strings.Contains(kernel, `sums[dim_lane] = fmaf(probability, embedding_tile[token_lane][dim_lane_global], sums[dim_lane])`), "q8 tile must preserve ordered accumulation within each output cell")
+	core.AssertTrue(t, strings.Contains(kernel, `__syncthreads()`), "q8 tile must synchronize shared probability and embedding tiles")
 }
 
 func TestHIPKernelSource_DiffusionSampleProbabilitiesKeepsLogitsOnDevice_Good(t *testing.T) {

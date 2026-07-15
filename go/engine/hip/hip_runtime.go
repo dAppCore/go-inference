@@ -398,6 +398,7 @@ var hipGemma4Q4WarmKernelNames = []string{
 	hipKernelNameEmbedLookupGreedyToken,
 	hipKernelNameDiffusionExpectedEmbeddingAffineG64Rows16,
 	hipKernelNameDiffusionExpectedEmbeddingQ8G64Dims4Rows4,
+	hipKernelNameDiffusionExpectedEmbeddingQ8G64Tile32x64,
 	hipKernelNameDiffusionSampleProbabilities,
 }
 

@@ -35,7 +35,11 @@ const (
 	hipDiffusionExpectedEmbeddingAffineG64RowsPerBlock = 16
 	hipDiffusionExpectedEmbeddingQ8G64DimsPerThread    = 4
 	hipDiffusionExpectedEmbeddingQ8G64RowsPerBlock     = 4
+	hipDiffusionExpectedEmbeddingQ8G64TileRows         = 32
+	hipDiffusionExpectedEmbeddingQ8G64TileDims         = 64
 )
+
+const hipDisableDiffusionExpectedEmbeddingTileEnv = "GO_ROCM_DISABLE_DIFFUSION_EXPECTED_EMBEDDING_TILE"
 
 type hipEmbeddingMeanPoolRequest struct {
 	Tokens     []float32
@@ -737,7 +741,16 @@ func hipRunDiffusionExpectedEmbeddingDeviceKernel(ctx context.Context, driver na
 	gridRows := rows
 	gridHidden := cfg.HiddenSize
 	bits := hipMLXQ4ProjectionBitsOrDefault(cfg.QuantBits)
-	if rows >= hipDiffusionExpectedEmbeddingQ8G64RowsPerBlock &&
+	if rows >= hipDiffusionExpectedEmbeddingQ8G64TileRows &&
+		rows <= 2*hipDiffusionExpectedEmbeddingQ8G64TileRows &&
+		cfg.TableEncoding == hipEmbeddingTableEncodingMLXQ4 &&
+		cfg.GroupSize == 64 &&
+		bits == 8 &&
+		core.Env(hipDisableDiffusionExpectedEmbeddingTileEnv) != "1" {
+		kernelName = hipKernelNameDiffusionExpectedEmbeddingQ8G64Tile32x64
+		gridRows = (rows + hipDiffusionExpectedEmbeddingQ8G64TileRows - 1) / hipDiffusionExpectedEmbeddingQ8G64TileRows
+		gridHidden = ((cfg.HiddenSize + hipDiffusionExpectedEmbeddingQ8G64TileDims - 1) / hipDiffusionExpectedEmbeddingQ8G64TileDims) * 256
+	} else if rows >= hipDiffusionExpectedEmbeddingQ8G64RowsPerBlock &&
 		cfg.TableEncoding == hipEmbeddingTableEncodingMLXQ4 &&
 		cfg.GroupSize == 64 &&
 		bits == 8 {

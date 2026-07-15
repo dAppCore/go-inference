@@ -38,6 +38,7 @@ func TestHIPDiffusionExpectedEmbeddingLaunch_Good_SelectsAffineGroup64Rows16(t *
 }
 
 func TestHIPDiffusionExpectedEmbeddingLaunch_Good_SelectsQ8Group64Dims4Rows4(t *testing.T) {
+	t.Setenv("GO_ROCM_DISABLE_DIFFUSION_EXPECTED_EMBEDDING_TILE", "1")
 	const rows, vocab, hidden, groupSize = 32, 3, 64, 64
 	driver := &fakeHIPDriver{available: true}
 	_, err := hipRunDiffusionExpectedEmbeddingKernel(context.Background(), driver, make([]float32, rows*vocab), rows, hipDeviceEmbeddingLookupConfig{
@@ -58,6 +59,30 @@ func TestHIPDiffusionExpectedEmbeddingLaunch_Good_SelectsQ8Group64Dims4Rows4(t *
 	core.AssertEqual(t, hipKernelNameDiffusionExpectedEmbeddingQ8G64Dims4Rows4, driver.launches[0].Name)
 	core.AssertEqual(t, uint32(1), driver.launches[0].GridX)
 	core.AssertEqual(t, uint32(8), driver.launches[0].GridY)
+	core.AssertEqual(t, uint32(256), driver.launches[0].BlockX)
+}
+
+func TestHIPDiffusionExpectedEmbeddingLaunch_Good_SelectsQ8Group64Tile32x64(t *testing.T) {
+	const rows, vocab, hidden, groupSize = 64, 3, 64, 64
+	driver := &fakeHIPDriver{available: true}
+	_, err := hipRunDiffusionExpectedEmbeddingKernel(context.Background(), driver, make([]float32, rows*vocab), rows, hipDeviceEmbeddingLookupConfig{
+		EmbeddingPointer: 0x9000,
+		EmbeddingBytes:   vocab * hidden,
+		ScalePointer:     0xa000,
+		ScaleBytes:       vocab * (hidden / groupSize) * 2,
+		BiasPointer:      0xb000,
+		BiasBytes:        vocab * (hidden / groupSize) * 2,
+		TableEncoding:    hipEmbeddingTableEncodingMLXQ4,
+		GroupSize:        groupSize,
+		QuantBits:        8,
+		VocabSize:        vocab,
+		HiddenSize:       hidden,
+	}, 1)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, 1, len(driver.launches))
+	core.AssertEqual(t, "rocm_diffusion_expected_embedding_q8_g64_tile32x64", driver.launches[0].Name)
+	core.AssertEqual(t, uint32(1), driver.launches[0].GridX)
+	core.AssertEqual(t, uint32(2), driver.launches[0].GridY)
 	core.AssertEqual(t, uint32(256), driver.launches[0].BlockX)
 }
 
