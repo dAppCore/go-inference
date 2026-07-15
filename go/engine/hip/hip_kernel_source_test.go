@@ -434,6 +434,18 @@ func TestHIPKernelSource_MoECombineNormsFusesIndependentRMSNorms_Good(t *testing
 	core.AssertTrue(t, strings.Contains(kernel, `args.expert_weight_pointer`), "fused kernel must use expert RMS weights")
 }
 
+func TestHIPKernelSource_RMSNormResidualAddNormUsesInverseRMS_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_rms_norm_residual_add_norm`)
+
+	core.AssertEqual(t, 2, strings.Count(kernel, `rocm_rsqrtf(`), "fused residual-add-norm must compute one inverse RMS per reduction")
+	core.AssertTrue(t, strings.Contains(kernel, `input[i] * inv_rms * weight`), "first normalization must multiply by its shared inverse RMS")
+	core.AssertTrue(t, strings.Contains(kernel, `residual_output[i] * norm_inv_rms * weight`), "next-layer normalization must multiply by its shared inverse RMS")
+	core.AssertTrue(t, !strings.Contains(kernel, `input[i] / rms`), "first normalization must not repeat division in its vector pass")
+	core.AssertTrue(t, !strings.Contains(kernel, `residual_output[i] / norm_rms`), "next-layer normalization must not repeat division in its vector pass")
+}
+
 func TestHIPKernelSource_MLXQ4ProjectionGeometryMatchesLaunchConfig_Good(t *testing.T) {
 	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)

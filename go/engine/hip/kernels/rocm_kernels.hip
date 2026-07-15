@@ -10224,27 +10224,29 @@ extern "C" __global__ void rocm_rms_norm_residual_add_norm(const unsigned char *
 		sum_squares += input[i] * input[i];
 	}
 	const float total = rocm_block_reduce_sum(sum_squares, partial);
-	const float rms = sqrtf(total / static_cast<float>(args.count) + rocm_float_from_bits(args.epsilon_bits));
-	if (rms == 0.0f) {
+	const float mean_square = total / static_cast<float>(args.count) + rocm_float_from_bits(args.epsilon_bits);
+	if (mean_square == 0.0f) {
 		return;
 	}
+	const float inv_rms = rocm_rsqrtf(mean_square);
 
 	const float output_scale = args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
 	float residual_sum_squares = 0.0f;
 	for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
 		const float weight = rocm_rms_norm_weight_value(args.weight_pointer, args.weight_encoding, args.flags, i);
-		const float value = (residual[i] + input[i] / rms * weight) * output_scale;
+		const float value = (residual[i] + input[i] * inv_rms * weight) * output_scale;
 		residual_output[i] = value;
 		residual_sum_squares += value * value;
 	}
 	const float residual_total = rocm_block_reduce_sum(residual_sum_squares, partial);
-	const float norm_rms = sqrtf(residual_total / static_cast<float>(args.count) + rocm_float_from_bits(args.norm_epsilon_bits));
-	if (norm_rms == 0.0f) {
+	const float norm_mean_square = residual_total / static_cast<float>(args.count) + rocm_float_from_bits(args.norm_epsilon_bits);
+	if (norm_mean_square == 0.0f) {
 		return;
 	}
+	const float norm_inv_rms = rocm_rsqrtf(norm_mean_square);
 	for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
 		const float weight = rocm_rms_norm_weight_value(args.norm_weight_pointer, args.norm_weight_encoding, args.norm_flags, i);
-		norm_output[i] = residual_output[i] / norm_rms * weight;
+		norm_output[i] = residual_output[i] * norm_inv_rms * weight;
 	}
 }
 
