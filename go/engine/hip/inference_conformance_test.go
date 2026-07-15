@@ -106,9 +106,8 @@ func TestHipEngineConformanceSessionHandle(t *testing.T) {
 // TestHipEngineConformanceTextModel runs the shared enginetest.TextModel suite
 // against hip's engine.TextModel.
 func TestHipEngineConformanceTextModel(t *testing.T) {
-	tm := hipRequireEngineTextModel(t)
 	enginetest.TextModel(t, func(t *testing.T) inference.TextModel {
-		return tm
+		return hipRequireEngineTextModel(t)
 	})
 }
 
