@@ -34,10 +34,10 @@ import (
 	_ "dappco.re/go/inference/model/composed"   // qwen3_5 / qwen3_5_moe / qwen3_next hybrids (ArchSpec.Composed)
 	_ "dappco.re/go/inference/model/composed"   // qwen3_5 / qwen3_5_moe / qwen3_next hybrids (ArchSpec.Composed)
 	_ "dappco.re/go/inference/model/dbrx"       // Databricks DBRX sparse MoE
-	_ "dappco.re/go/inference/model/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
-	_ "dappco.re/go/inference/model/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
-	_ "dappco.re/go/inference/model/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
-	_ "dappco.re/go/inference/model/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
+	_ "dappco.re/go/inference/model/arch/deepseek-ai/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
+	_ "dappco.re/go/inference/model/arch/deepseek-ai/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
+	_ "dappco.re/go/inference/model/arch/deepseek-ai/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
+	_ "dappco.re/go/inference/model/arch/deepseek-ai/deepseek"   // deepseek_v2 / deepseek_v3 (MLA declaration)
 	_ "dappco.re/go/inference/model/ernie45"    // ERNIE 4.5 dense text
 	_ "dappco.re/go/inference/model/exaone4"    // EXAONE 4 dense text
 	_ "dappco.re/go/inference/model/falcon"     // falcon (ALiBi transformer; excludes Falcon-H1)
