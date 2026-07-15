@@ -1305,6 +1305,8 @@ func bufMaxAbsNaN(buf metal.MTLBuffer, dModel int) (maxAbs float32, bad int) {
 	b := unsafe.Slice((*byte)(buf.Contents()), dModel*bf16Size)
 	for i := range dModel {
 		v := bf16ToF32(b[i*bf16Size], b[i*bf16Size+1])
+		// v != v is the branch-free NaN test (IEEE 754: NaN != NaN — the same identity
+		// math.IsNaN is defined by); an intentional self-compare, not a copy-paste slip.
 		if v != v || v > 3.0e38 || v < -3.0e38 { // NaN or Inf-scale
 			bad++
 			continue

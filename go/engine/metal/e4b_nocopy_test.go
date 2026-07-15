@@ -105,6 +105,8 @@ func TestNoCopyMisalignedWeightReadsCorrectly(t *testing.T) {
 	})
 	nan := 0
 	for i := 0; i+1 < len(outFix); i += 2 {
+		// v != v is the branch-free NaN test (IEEE 754: NaN != NaN) — an intentional
+		// self-compare, not a copy-paste slip.
 		if v := bf16ToF32(outFix[i], outFix[i+1]); v != v {
 			nan++
 		}

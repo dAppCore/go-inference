@@ -58,6 +58,8 @@ func seedModel(t *testing.T, name string) string {
 // the reload confirm gate depends on GET /machine and the gate computing the
 // same value.
 func TestMachineHash_Stable_Good(t *testing.T) {
+	// Two separate calls compared for equality — the thing under test is
+	// call-to-call stability, so this must stay two calls, not a copy-paste dupe.
 	if MachineHash() != MachineHash() {
 		t.Fatal("MachineHash is not stable across calls")
 	}

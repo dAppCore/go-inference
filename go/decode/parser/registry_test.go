@@ -133,6 +133,9 @@ func TestRegistry_Default_Bad(t *testing.T) {
 // TestRegistry_Default_Ugly pins the singleton contract: Default() is built
 // once via core.Once, so repeated calls return the identical pointer.
 func TestRegistry_Default_Ugly(t *testing.T) {
+	// Two separate calls compared for pointer identity — deliberately not hoisted
+	// to a single variable, since the thing under test is whether repeated calls
+	// return the SAME instance. Not a copy-paste dupe.
 	if Default() != Default() {
 		t.Fatal("Default() must return the same shared instance on every call")
 	}

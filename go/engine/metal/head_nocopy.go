@@ -1032,6 +1032,8 @@ func (h *headEncoder) argmaxInvalidDiag(scratch *headGreedyScratch, hiddenBuf me
 		firstBad := -1
 		for i := 0; i < tileCount; i++ {
 			v := tv[i]
+			// v != v is the branch-free NaN test (IEEE 754: NaN != NaN) — an intentional
+			// self-compare, not a copy-paste slip.
 			if v != v {
 				tnan++
 				if firstBad < 0 {
