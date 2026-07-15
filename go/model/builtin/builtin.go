@@ -44,10 +44,10 @@ import (
 	_ "dappco.re/go/inference/model/falcon"     // falcon (ALiBi transformer; excludes Falcon-H1)
 	_ "dappco.re/go/inference/model/falcon"     // falcon (ALiBi transformer; excludes Falcon-H1)
 	_ "dappco.re/go/inference/model/falcon"     // falcon (ALiBi transformer; excludes Falcon-H1)
-	_ "dappco.re/go/inference/model/gemma3"     // gemma3
-	_ "dappco.re/go/inference/model/gemma3"     // gemma3
-	_ "dappco.re/go/inference/model/gemma3"     // gemma3
-	_ "dappco.re/go/inference/model/gemma3"     // gemma3
+	_ "dappco.re/go/inference/model/arch/google/gemma3"     // gemma3
+	_ "dappco.re/go/inference/model/arch/google/gemma3"     // gemma3
+	_ "dappco.re/go/inference/model/arch/google/gemma3"     // gemma3
+	_ "dappco.re/go/inference/model/arch/google/gemma3"     // gemma3
 	_ "dappco.re/go/inference/model/gemma4"     // gemma4 / gemma4_text / gemma4_unified (+ assistant)
 	_ "dappco.re/go/inference/model/gemma4"     // gemma4 / gemma4_text / gemma4_unified (+ assistant)
 	_ "dappco.re/go/inference/model/gemma4"     // gemma4 / gemma4_text / gemma4_unified (+ assistant)
