@@ -10123,14 +10123,15 @@ extern "C" __global__ void rocm_rms_norm_residual_add(const unsigned char *packe
 		sum_squares += input[i] * input[i];
 	}
 	const float total = rocm_block_reduce_sum(sum_squares, partial);
-	const float rms = sqrtf(total / static_cast<float>(args.count) + rocm_float_from_bits(args.epsilon_bits));
-	if (rms == 0.0f) {
+	const float mean_square = total / static_cast<float>(args.count) + rocm_float_from_bits(args.epsilon_bits);
+	if (mean_square == 0.0f) {
 		return;
 	}
+	const float inv_rms = rocm_rsqrtf(mean_square);
 	const float output_scale = args.output_scale_bits == 0 ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
 	if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_NONE) {
 		for (uint32_t i = threadIdx.x; i < args.count; i += blockDim.x) {
-			output[i] = (residual[i] + input[i] / rms) * output_scale;
+			output[i] = (residual[i] + input[i] * inv_rms) * output_scale;
 		}
 	} else if (args.weight_encoding == ROCM_RMS_NORM_WEIGHT_ENCODING_BF16) {
 		const uint16_t *weight = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.weight_pointer));
@@ -10139,7 +10140,7 @@ extern "C" __global__ void rocm_rms_norm_residual_add(const unsigned char *packe
 			if ((args.flags & ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
 				w += 1.0f;
 			}
-			output[i] = (residual[i] + input[i] / rms * w) * output_scale;
+			output[i] = (residual[i] + input[i] * inv_rms * w) * output_scale;
 		}
 	} else {
 		const float *weight = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.weight_pointer));
@@ -10148,7 +10149,7 @@ extern "C" __global__ void rocm_rms_norm_residual_add(const unsigned char *packe
 			if ((args.flags & ROCM_RMS_NORM_LAUNCH_FLAG_ADD_UNIT_WEIGHT) != 0) {
 				w += 1.0f;
 			}
-			output[i] = (residual[i] + input[i] / rms * w) * output_scale;
+			output[i] = (residual[i] + input[i] * inv_rms * w) * output_scale;
 		}
 	}
 }
