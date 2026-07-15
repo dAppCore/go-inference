@@ -1,0 +1,22 @@
+/* SPDX-Licence-Identifier: EUPL-1.2
+   Chat surface on the foundations tokens — hairlines, calm dark, colour only
+   where it means something. */
+:host { display: block; }
+.chat { display: flex; flex-direction: column; height: 100%; min-height: 420px; }
+.scroll { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; padding: 4px 2px 14px; }
+.turn { max-width: 82%; align-self: flex-start; }
+.turn.user { align-self: flex-end; }
+.bubble { background: var(--ink-2); border: 1px solid var(--line-1); border-radius: 10px; padding: 9px 12px; font-size: 13.5px; line-height: 1.5; color: var(--fg-1); white-space: pre-wrap; }
+.turn.user .bubble { background: color-mix(in oklch, var(--brand-500) 14%, var(--ink-2)); border-color: color-mix(in oklch, var(--brand-500) 30%, var(--line-1)); color: var(--fg-0); }
+.thought { font-family: var(--font-mono); font-size: 11px; color: var(--fg-3); border-left: 2px solid var(--line-2); padding: 4px 10px; margin: 0 0 6px 2px; white-space: pre-wrap; max-height: 130px; overflow-y: auto; }
+.bubble.live .caret { display: inline-block; width: 7px; height: 14px; margin-left: 3px; vertical-align: text-bottom; background: var(--brand-400); animation: lem-caret 1s steps(2) infinite; }
+@keyframes lem-caret { 50% { opacity: 0; } }
+.err { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--fg-2); background: var(--ink-2); border: 1px solid var(--line-1); border-radius: 8px; padding: 8px 12px; }
+.retry { margin-left: auto; font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 6px; background: var(--ink-3); color: var(--fg-1); border: 1px solid var(--line-2); cursor: pointer; }
+.empty { margin: auto; text-align: center; color: var(--fg-3); font-size: 13px; display: grid; gap: 10px; justify-items: center; padding: 40px 0; }
+.composer { display: flex; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line-1); }
+.composer input { flex: 1; font: inherit; font-size: 13.5px; padding: 8px 12px; border-radius: 8px; background: var(--ink-2); border: 1px solid var(--line-2); color: var(--fg-0); outline: none; }
+.composer input:focus { border-color: var(--brand-400); }
+.composer input::placeholder { color: var(--fg-4); }
+.nbtn { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; border-radius: 8px; font-size: 12.5px; font-weight: 500; background: var(--brand-500); color: var(--fg-0); border: 1px solid var(--brand-400); cursor: pointer; }
+.nbtn[disabled] { opacity: 0.5; cursor: default; }

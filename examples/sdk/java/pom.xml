@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>re.dappco.lem.example</groupId>
+  <artifactId>lem-sdk-example</artifactId>
+  <version>0.1.0</version>
+  <packaging>jar</packaging>
+
+  <!--
+    The client is GENERATED locally by `task sdk` (build/sdk is gitignored),
+    then installed into the local Maven repo — this demo depends on its
+    published coordinates like a normal artefact would. See README.md for
+    the full generate -> install -> run flow.
+  -->
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <exec.mainClass>re.dappco.lem.example.Main</exec.mainClass>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>re.dappco</groupId>
+      <artifactId>lem-sdk</artifactId>
+      <version>0.1.0</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.6.3</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>

@@ -1,0 +1,19 @@
+*.log
+.core/
+.idea/
+.vscode/
+# build / test artefacts
+*.test
+*.out
+.DS_Store
+*.bak
+go.work.sum
+/build/
+*.air
+cmd/lem/*.metallib.gz
+
+# compiled lem binary (build artefact — built via Taskfile/go build)
+go/lem
+
+# task build:embed output
+/bin/

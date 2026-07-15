@@ -1,0 +1,7 @@
+/* SPDX-Licence-Identifier: EUPL-1.2
+   Design tokens + base atoms from the Lethean design pack (fonts → tokens →
+   base.css). Native surface: foundations/styles.css + class="surface" on body,
+   data-brand="lethean" + data-platform="darwin" on <html>. */
+@import '../foundations/styles.css';
+
+html, body { margin: 0; min-height: 100%; background: var(--ink-0); }

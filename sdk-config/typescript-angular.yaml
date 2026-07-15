@@ -1,0 +1,6 @@
+generatorName: typescript-angular
+additionalProperties:
+  npmName: "@lethean/lem-sdk-angular"
+  ngVersion: "21.0.0"
+  providedIn: root
+  useSingleRequestParameter: true

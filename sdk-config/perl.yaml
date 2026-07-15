@@ -1,0 +1,4 @@
+generatorName: perl
+additionalProperties:
+  moduleName: LemSDK
+  moduleVersion: "0.1.0"

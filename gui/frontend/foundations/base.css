@@ -1,0 +1,123 @@
+/* ─────────────────────────────────────────────────────────
+   Base + atoms. Everything is scoped to a `.surface` ancestor so
+   these rules never fight a host canvas. Put class="surface" (and
+   optionally data-brand / data-mode / data-platform) on the root
+   of any screen. The atoms below (.btn, .card, .input, .pill, …)
+   are the raw CSS the components wrap.
+   ───────────────────────────────────────────────────────── */
+.surface {
+  background: var(--ink-1);
+  color: var(--fg-1);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.55;
+  letter-spacing: -0.005em;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+.surface *, .surface *::before, .surface *::after { box-sizing: border-box; }
+.surface h1, .surface h2, .surface h3, .surface h4 {
+  color: var(--fg-0);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  line-height: 1.1;
+  margin: 0;
+}
+.surface p { margin: 0; }
+.surface a { color: inherit; text-decoration: none; }
+.surface a:hover { color: var(--brand-200); }
+.surface button { font: inherit; color: inherit; cursor: pointer; }
+.surface .num, .surface code, .surface kbd { font-family: var(--font-mono); font-feature-settings: "tnum","ss01"; }
+.surface .editorial { font-family: var(--font-serif); font-weight: 400; letter-spacing: -0.015em; }
+
+/* ── Buttons ── */
+.surface .btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: 8px; height: 40px; padding: 0 16px;
+  border-radius: var(--r-md);
+  font-weight: 500; font-size: 14px; letter-spacing: -0.005em;
+  border: 1px solid transparent;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+  white-space: nowrap;
+}
+.surface .btn-primary {
+  background: var(--brand-500); color: var(--fg-0);
+  border-color: var(--brand-400);
+  box-shadow: inset 0 1px 0 var(--line-2), 0 1px 2px rgba(0,0,0,.35);
+}
+.surface .btn-primary:hover { background: var(--brand-400); }
+.surface .btn-secondary { background: var(--ink-3); color: var(--fg-0); border-color: var(--line-2); }
+.surface .btn-secondary:hover { background: var(--ink-4); border-color: var(--line-3); }
+.surface .btn-ghost { background: transparent; color: var(--fg-1); }
+.surface .btn-ghost:hover { background: var(--ink-3); color: var(--fg-0); }
+.surface .btn-lg { height: 48px; padding: 0 22px; font-size: 15px; border-radius: var(--r-lg); }
+.surface .btn-sm { height: 32px; padding: 0 12px; font-size: 13px; border-radius: var(--r-sm); }
+
+/* ── Cards ── */
+.surface .card { background: var(--ink-2); border: 1px solid var(--line-1); border-radius: var(--r-lg); }
+.surface .card-elev { background: var(--ink-2); border: 1px solid var(--line-2); border-radius: var(--r-lg); box-shadow: var(--shadow-2); }
+
+/* ── Inputs ── */
+.surface .input {
+  width: 100%; height: 40px; padding: 0 12px;
+  background: var(--ink-1); border: 1px solid var(--line-2); border-radius: var(--r-md);
+  color: var(--fg-0); font: inherit;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+.surface .input:focus { outline: none; border-color: var(--brand-400); background: var(--ink-2); }
+.surface .input::placeholder { color: var(--fg-4); }
+.surface .label {
+  display: block; font-size: 12px; font-weight: 500; color: var(--fg-2);
+  margin-bottom: 6px; letter-spacing: 0.01em;
+}
+
+/* ── Pills ── */
+.surface .pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 22px; padding: 0 10px; border-radius: var(--r-pill);
+  font-size: 11.5px; font-weight: 500;
+  background: var(--ink-3); color: var(--fg-2); border: 1px solid var(--line-1);
+  letter-spacing: 0.005em;
+}
+.surface .pill-brand { background: color-mix(in oklch, var(--brand-500) 22%, var(--ink-2)); color: var(--brand-200); border-color: color-mix(in oklch, var(--brand-500) 35%, transparent); }
+.surface .pill-success { background: color-mix(in oklch, var(--success-500) 22%, var(--ink-2)); color: var(--success-400); border-color: color-mix(in oklch, var(--success-500) 35%, transparent); }
+.surface .pill-warn { background: color-mix(in oklch, var(--warning-500) 22%, var(--ink-2)); color: var(--warning-400); border-color: color-mix(in oklch, var(--warning-500) 35%, transparent); }
+
+.surface .divider { height: 1px; background: var(--line-1); width: 100%; }
+
+/* ── Textures + moments (use sparingly) ── */
+.surface .dot-grid {
+  background-image: radial-gradient(circle at 1px 1px, var(--line-2) 1px, transparent 0);
+  background-size: 24px 24px;
+}
+.surface .brand-glow {
+  background:
+    radial-gradient(ellipse 60% 80% at 70% 20%, color-mix(in oklch, var(--brand-500) 22%, transparent), transparent 60%),
+    radial-gradient(ellipse 50% 60% at 10% 90%, color-mix(in oklch, var(--brand-700) 18%, transparent), transparent 60%);
+}
+.surface .img-placeholder {
+  background: repeating-linear-gradient(135deg, var(--ink-3) 0 12px, var(--ink-2) 12px 24px);
+  border: 1px solid var(--line-1); border-radius: var(--r-md);
+  display: grid; place-items: center;
+  color: var(--fg-3); font-family: var(--font-mono); font-size: 11px; text-align: center;
+}
+.surface .tnum { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+/* Keyframes used by status dots + generation cursor in app surfaces. */
+@keyframes lthn-pulse { 0%,100%{opacity:1;transform:scale(1);} 50%{opacity:0.55;transform:scale(1.18);} }
+@keyframes lthn-cursor { 0%,100%{opacity:1;} 50%{opacity:0;} }
+@keyframes lthn-spin { to { transform: rotate(360deg); } }
+@keyframes lthn-shimmer { 0%{background-position:-200% 0;} 100%{background-position:200% 0;} }
+
+/* Accessibility — a visible keyboard-only focus ring (calm: brand, offset). */
+.surface :focus-visible { outline: 2px solid var(--brand-400); outline-offset: 2px; border-radius: var(--r-xs); }
+.surface :focus:not(:focus-visible) { outline: none; }
+
+/* Skeleton — loading placeholder. */
+.lthn-skeleton { background: linear-gradient(100deg, var(--ink-3) 30%, var(--ink-4) 50%, var(--ink-3) 70%); background-size: 200% 100%; animation: lthn-shimmer 1.4s ease-in-out infinite; border-radius: var(--r-sm); }
+
+/* Respect reduced motion — kill loops (pulse, spin, shimmer, cursor). */
+@media (prefers-reduced-motion: reduce) {
+  .surface *, .surface *::before, .surface *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; }
+  .lthn-skeleton { animation: none; }
+}

@@ -1,0 +1,29 @@
+/* ─────────────────────────────────────────────────────────
+   Light mode — opt-in via [data-mode="light"]. Lethean only;
+   Host UK stays dark. Same colour maths (relative chroma, hue
+   anchored to --brand-hue) so the system stays one design.
+   Accessibility-first, not a marketing default.
+   ───────────────────────────────────────────────────────── */
+[data-mode="light"] {
+  --ink-0:   oklch(0.99 0.003 285);   /* page bg — barely-warm paper */
+  --ink-1:   oklch(0.985 0.004 285);  /* canvas / app bg             */
+  --ink-2:   oklch(0.97 0.005 285);   /* card / surface 1            */
+  --ink-3:   oklch(0.94 0.006 285);   /* surface 2                   */
+  --ink-4:   oklch(0.90 0.007 285);   /* hover / popover             */
+  --ink-5:   oklch(0.84 0.008 285);   /* subtle border               */
+  --ink-6:   oklch(0.62 0.010 285);   /* muted icon / divider        */
+
+  --fg-0:    oklch(0.18 0.012 285);
+  --fg-1:    oklch(0.28 0.012 285);
+  --fg-2:    oklch(0.42 0.010 285);
+  --fg-3:    oklch(0.54 0.010 285);
+  --fg-4:    oklch(0.66 0.010 285);
+
+  --line-1:  color-mix(in oklch, var(--fg-0) 6%, transparent);
+  --line-2:  color-mix(in oklch, var(--fg-0) 12%, transparent);
+  --line-3:  color-mix(in oklch, var(--fg-0) 22%, transparent);
+
+  --shadow-1: 0 1px 0 0 rgba(255,255,255,.6) inset, 0 1px 2px rgba(20,18,30,.06);
+  --shadow-2: 0 1px 0 0 rgba(255,255,255,.6) inset, 0 4px 14px rgba(20,18,30,.08);
+  --shadow-3: 0 1px 0 0 rgba(255,255,255,.6) inset, 0 12px 40px rgba(20,18,30,.12);
+}

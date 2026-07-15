@@ -1,0 +1,1011 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+// Package scheduler is the driver-neutral request scheduler for
+// inference.TextModel. It is the ONE scheduling home for lem serve: one
+// constructor, one submission surface (inference.SchedulerModel.Schedule),
+// and a Mode that selects the discipline —
+//
+//   - ModeSerial: a bounded-queue worker pool wrapping a TextModel with
+//     cancellation, streaming backpressure, and scheduler probe events
+//     (today's scheduler semantics — the most-tested base).
+//   - ModeBatch: continuous in-flight batching — a running set advanced one
+//     decode step per iteration under a dual concurrency + token budget
+//     (the throughput core, lifted from the former serving/schedule).
+//   - ModeInterleave: a live admission-budget scheduler — requests Submit at
+//     any time, each admitted onto its own goroutine for per-request
+//     backpressure + cancellation isolation (from the former serving/interleave).
+//
+// Mode-specific engine requirements are probed at construction: batch mode
+// (and interleave configured with a token budget) needs the model to expose
+// inference.TokenizerModel so prompt tokens can be counted for the
+// MaxBatchTokens budget — a model that lacks it fails CLOSED at New rather
+// than silently degrading the budget to a no-op. Serial mode needs only a
+// TextModel and accepts a nil model (Schedule then reports the nil).
+//
+//	m, err := scheduler.New(backend, scheduler.Config{
+//	    Mode: scheduler.ModeInterleave, MaxConcurrent: 4, MaxQueue: 16, StreamBuffer: 8,
+//	})
+//	if err != nil { return err }
+//	handle, tokens, err := m.Schedule(ctx, request)
+package scheduler
+
+import (
+	"context"
+	"iter"
+	"maps"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	core "dappco.re/go"
+	"dappco.re/go/inference"
+)
+
+// Mode selects the scheduling discipline. The zero value ("") is treated as
+// ModeSerial so existing single-mode constructions keep their behaviour.
+type Mode string
+
+const (
+	// ModeSerial wraps a TextModel with a bounded-queue worker pool.
+	ModeSerial Mode = "serial"
+	// ModeBatch runs continuous in-flight batching over a running set.
+	ModeBatch Mode = "batch"
+	// ModeInterleave admits requests live, each on its own goroutine.
+	ModeInterleave Mode = "interleave"
+)
+
+// Config configures the unified request scheduler. Not every field is
+// meaningful in every mode: MaxBatchTokens gates admission only in batch and
+// interleave; RequestIDPrefix/ProbeSink drive serial's request IDs and probe
+// stream. Non-positive sizings are clamped per mode so the scheduler always
+// makes progress.
+type Config struct {
+	Mode            Mode                // scheduling discipline; "" = ModeSerial
+	MaxConcurrent   int                 // serial workers / batch+interleave running-set cap
+	MaxQueue        int                 // bounded queue depth / admission backpressure room
+	MaxBatchTokens  int                 // batch+interleave running prompt-token budget; <= 0 = uncapped (batch requires > 0)
+	StreamBuffer    int                 // per-request output channel buffer
+	RequestIDPrefix string              // serial request-ID prefix (default "scheduler")
+	ProbeSink       inference.ProbeSink // serial scheduler-probe sink (nil = no probes)
+}
+
+// Stats is a mode-neutral snapshot of a scheduler's counters, safe to read
+// concurrently with Schedule/CancelRequest. Not every counter is populated in
+// every mode (serial reports Submitted/Completed/Cancelled/Queued; batch adds
+// Admitted/Active/MaxRunning; interleave populates all but MaxRunning).
+type Stats struct {
+	Submitted  int64 // total accepted submissions
+	Admitted   int64 // total moved from queue into the running set (batch/interleave)
+	Completed  int64 // total that ran to completion
+	Cancelled  int64 // total retired by cancellation (queued or active)
+	Active     int64 // requests currently running
+	Queued     int64 // requests currently waiting for a slot
+	MaxRunning int64 // largest running-set ever co-resident (batch witness)
+}
+
+// Model wraps an inference.TextModel and schedules requests through the mode
+// selected at New. In serial mode it owns a bounded-queue worker pool; in
+// batch/interleave mode it delegates Schedule/CancelRequest to the mode engine
+// while still presenting the full TextModel surface (Generate/Chat/... route
+// through Schedule; the accessors delegate to the wrapped model).
+type Model struct {
+	base inference.TextModel
+	mode Mode
+
+	// --- serial-mode state (owned by the worker pool) ---
+	queue           chan *job
+	maxConcurrent   int
+	streamBuffer    int
+	requestIDPrefix string
+	nextID          atomic.Uint64
+
+	// probeSink is read on every scheduler event (queued / start /
+	// first_token / cancel / cancelled / complete) and updated only
+	// via SetProbeSink. An atomic.Pointer lets emitProbe load the
+	// sink without contending m.mu — under burst dispatch we used to
+	// pay one mu.Lock per probe event per producer (4 events × 64
+	// producers = 256 lock acquisitions per bench iteration even
+	// when no sink was attached).
+	probeSink atomic.Pointer[probeSinkBox]
+
+	// active holds in-flight jobs keyed by request ID. sync.Map fits
+	// the access shape: CancelRequest's lookup is the contended
+	// hot-path (32-goroutine parallel cancel-poll measured 4 orders
+	// of magnitude slowdown vs the serial bench under a plain Mutex,
+	// and ~2x worse under RWMutex due to its accounting overhead),
+	// while register/unregister fire exactly twice per request and
+	// are tolerant of sync.Map's slightly higher write cost.
+	active sync.Map
+
+	mu      sync.Mutex
+	lastErr error
+
+	// serial-mode counters for Stats (off the per-token hot path).
+	submitted atomic.Int64
+	completed atomic.Int64
+	cancelled atomic.Int64
+
+	// serial-mode shutdown: closeCh signals "stop admitting / stop working"
+	// without ever closing m.queue itself (a send to a closed channel would
+	// panic a racing Schedule call — batch/interleave avoid this the same way,
+	// see batchEngine.closeCh/interleaveEngine.closeCh). workerWG lets
+	// CloseEngine block until every worker goroutine started at New has
+	// actually returned, the same synchronous-join guarantee batch.close and
+	// interleave.close already give (needed so a per-resident-model scheduler
+	// — serving.multiModelResolver's eviction — can reclaim serial's worker
+	// pool exactly as reliably as the other two modes).
+	closeCh   chan struct{}
+	closeOnce sync.Once
+	workerWG  sync.WaitGroup
+
+	// --- non-serial engines (exactly one is non-nil off serial) ---
+	batch *batchEngine
+	inter *interleaveEngine
+
+	// cbMu guards the lazy continuous-batching bind below; cbCfg is the New-time
+	// config the rebind reuses; cbClosed stops rebinding after CloseEngine.
+	cbMu     sync.Mutex
+	cbCfg    Config
+	cbClosed bool
+
+	// cbEngine is interleave mode's continuous-batching fast path — non-nil only
+	// when the base model exposes an AVAILABLE inference.BatchStepModel (metal's
+	// multi-session owner) AND an inference.TokenizerModel to tokenise prompts.
+	// When nil (the common case, and whenever LTHN_CB_STEP=0), interleave mode is
+	// byte-for-byte the plain per-request engine below. Raw-prompt requests
+	// (greedy or sampled) route here; a text-only chat turn routes here too when
+	// the model exposes cbChatRenderer; everything else falls to m.inter.
+	cbEngine *cbStepEngine
+
+	// cbRender renders a chat turn to the model's own template string (the
+	// engine TextModel's FormatChatPrompt — byte-identical to what Chat itself
+	// encodes for a request with no thinking override). nil = chat turns keep
+	// the plain interleave path.
+	cbRender cbChatRenderer
+	// cbRenderThinking is cbRender's thinking-aware twin (the engine
+	// TextModel's FormatChatPromptWithThinking): a chat carrying an
+	// EnableThinking override rides CB only through this renderer — absent
+	// it, the override keeps the plain path, where engine Chat honours it.
+	cbRenderThinking cbThinkingRenderer
+	// cbDecode is the streaming per-token decode for CB stream text; nil falls
+	// back to Decode-of-one on the tokenizer.
+	cbDecode cbStreamDecoder
+	// cbIntercept sees whether a serve-layer chat interceptor (conversation
+	// continuity) is installed on the base engine — consulted per request so a
+	// continuity attach that lands AFTER the CB engine binds still routes. nil =
+	// the model exposes no interceptor seam; chats route as if none is installed.
+	cbIntercept cbChatInterceptProbe
+
+	// lastMetrics is the most recent completed scheduled stream's final
+	// metrics, stored by the route that OWNS the correct numbers at stream end
+	// (CB: the scheduler's own per-request counts; plain: the engine's fresh
+	// post-generation snapshot) — what Metrics() reports, the engine's own
+	// last-generation semantics. Per-REQUEST usage under CONCURRENT streams is
+	// served race-free through GenerateConfig.MetricsSink (lifted onto
+	// ScheduledRequest.MetricsSink across the sampler fold, re-armed at
+	// dispatch; the openai handler installs one per request); this global
+	// readback stays last-writer-wins as the fallback for callers without a
+	// sink, exactly the bare engine's semantics.
+	lastMetrics atomic.Pointer[inference.GenerateMetrics]
+	// cbStops resolves the FULL per-generation stop set (request stops + EOS +
+	// turn-close + template + checkpoint-declared — engine
+	// TextModel.ResolvedStopTokens) so a lane terminates exactly where the
+	// plain path would. nil = lanes see only the request's own stop tokens.
+	cbStops cbStopResolver
+}
+
+// cbChatRenderer is the optional chat-template capability the CB path probes
+// (engine.TextModel.FormatChatPrompt satisfies it).
+type cbChatRenderer interface {
+	FormatChatPrompt(messages []inference.Message) string
+}
+
+// cbThinkingRenderer is the optional THINKING-AWARE chat-template capability
+// (engine.TextModel.FormatChatPromptWithThinking satisfies it): the same
+// framing as cbChatRenderer for a nil flag, the request's reasoning override
+// applied otherwise — byte-identical to what engine Chat itself encodes for
+// that flag.
+type cbThinkingRenderer interface {
+	FormatChatPromptWithThinking(messages []inference.Message, enableThinking *bool) string
+}
+
+// cbStopResolver is the optional stop-resolution capability the CB path probes
+// (engine.TextModel.ResolvedStopTokens satisfies it).
+type cbStopResolver interface {
+	ResolvedStopTokens(requestStops []int32) []int32
+}
+
+// cbStreamDecoder is the optional STREAMING per-token decode the CB path
+// prefers for stream text (engine.TextModel.DecodeToken satisfies it): the
+// word boundary survives as a leading space, so concatenated chunks reassemble
+// "hello world" — Decode-of-one strips it (label semantics).
+type cbStreamDecoder interface {
+	DecodeToken(id int32) string
+}
+
+// cbChatInterceptProbe is the optional chat-interceptor visibility the CB
+// router probes (engine.TextModel.ChatInterceptorInstalled satisfies it).
+// Installed means conversation continuity holds the engine's Chat seam: a
+// continuation-shaped chat then declines the lane path so the interceptor can
+// wake its slept KV (append-only prefill) instead of the lane re-paying the
+// whole conversation's prefill.
+type cbChatInterceptProbe interface {
+	ChatInterceptorInstalled() bool
+}
+
+// probeSinkBox wraps the sink interface so it can be stored in an
+// atomic.Pointer (atomic.Value rejects nil-typed interface stores;
+// boxing avoids that constraint and keeps the load path branchless).
+type probeSinkBox struct {
+	sink inference.ProbeSink
+}
+
+type job struct {
+	req      inference.ScheduledRequest
+	ctx      context.Context
+	cancel   context.CancelFunc
+	out      chan inference.ScheduledToken
+	queuedAt time.Time
+}
+
+// New returns a scheduler for model in cfg.Mode, or an error when the mode is
+// unknown or the model lacks a capability the mode requires. Serial mode
+// accepts a nil model so callers can construct package surfaces before a
+// backend loads; batch/interleave-with-budget require an inference.TokenizerModel.
+//
+//	m, err := scheduler.New(model, scheduler.Config{Mode: scheduler.ModeBatch, MaxConcurrent: 4, MaxBatchTokens: 8192})
+func New(model inference.TextModel, cfg Config) (*Model, error) {
+	mode := cfg.Mode
+	if mode == "" {
+		mode = ModeSerial
+	}
+	switch mode {
+	case ModeSerial, ModeBatch, ModeInterleave:
+	default:
+		return nil, core.E("scheduler.New", "unknown scheduler mode "+string(mode)+" (want serial|batch|interleave)", nil)
+	}
+
+	// Mode-specific capability probe — fail closed, never a silent downgrade.
+	// Batch's identity is its dual concurrency+token budget; interleave's
+	// budget is optional. Either that needs the token budget must be able to
+	// count a request's prompt tokens, which is the model's own tokeniser.
+	needsTokenBudget := mode == ModeBatch || (mode == ModeInterleave && cfg.MaxBatchTokens > 0)
+	if needsTokenBudget {
+		if _, ok := model.(inference.TokenizerModel); !ok {
+			return nil, core.E("scheduler.New", string(mode)+" mode with a token budget needs an inference.TokenizerModel to count prompt tokens; the model does not expose Encode — refusing to serve a budget that cannot engage", nil)
+		}
+	}
+
+	// A single-session base model (one KV cache / one drafter command buffer —
+	// the MTP speculative pair) cannot run concurrent generations: every mode
+	// below drives requests in parallel (interleave drive goroutines, batch
+	// lanes, serial workers), which would race the shared GPU scratch and crash
+	// (#1842). Wrap it so its generation lane serialises. inference.As reaches
+	// the SerialModel declaration past any welfare/policy decorator, and the
+	// wrapper's own Unwrap keeps the base's other capabilities reachable.
+	if sm, ok := inference.As[inference.SerialModel](model); ok && sm.SerialGeneration() {
+		model = newSerialModel(model)
+	}
+
+	m := &Model{
+		base:            model,
+		mode:            mode,
+		maxConcurrent:   maxOrDefault(cfg.MaxConcurrent, 1),
+		streamBuffer:    max(cfg.StreamBuffer, 0),
+		requestIDPrefix: schedulerPrefix(cfg.RequestIDPrefix),
+	}
+	if cfg.ProbeSink != nil {
+		m.probeSink.Store(&probeSinkBox{sink: cfg.ProbeSink})
+	}
+
+	switch mode {
+	case ModeBatch:
+		m.batch = newBatchEngine(m, cfg)
+	case ModeInterleave:
+		m.inter = newInterleaveEngine(cfg)
+		// Probe the continuous-batching capability (optional-interface shape,
+		// like StepWithID/LMHead). Present + available + tokenisable ⇒ build the
+		// shared-lane-set coordinator; anything else leaves cbEngine nil and
+		// Schedule RE-PROBES cheaply per eligible request (ensureCBEngine) — a
+		// model resolved mid-load reports the capability unavailable at New and
+		// flips available once loaded; without the rebind that first racing
+		// probe would pin the whole server to the plain path (observed live:
+		// a cold boot whose first traffic was 4 concurrent chats served plain
+		// forever, while a warmed boot served CB — 2026-07-13).
+		m.cbCfg = cfg
+		m.ensureCBEngine()
+	default: // serial
+		m.queue = make(chan *job, max(cfg.MaxQueue, 0))
+		m.closeCh = make(chan struct{})
+		m.workerWG.Add(m.maxConcurrent)
+		for worker := range m.maxConcurrent {
+			go m.worker(worker)
+		}
+	}
+	return m, nil
+}
+
+func maxOrDefault(v, def int) int {
+	if v <= 0 {
+		return def
+	}
+	return v
+}
+
+func schedulerPrefix(prefix string) string {
+	prefix = core.Trim(prefix)
+	if prefix == "" {
+		return "scheduler"
+	}
+	return prefix
+}
+
+// Schedule enqueues a generation request and returns its streamed tokens,
+// routing through the mode selected at New.
+//
+//	handle, tokens, err := model.Schedule(ctx, request)
+func (m *Model) Schedule(ctx context.Context, req inference.ScheduledRequest) (inference.RequestHandle, <-chan inference.ScheduledToken, error) {
+	if m == nil || m.base == nil {
+		return inference.RequestHandle{}, nil, core.NewError("scheduler: model is nil")
+	}
+	switch m.mode {
+	case ModeBatch:
+		return m.scheduleBatch(ctx, req)
+	case ModeInterleave:
+		if m.ensureCBEngine() != nil && m.cbEligible(req) {
+			return m.scheduleCBStep(ctx, req)
+		}
+		return m.scheduleInterleave(ctx, req)
+	}
+	// serial
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return inference.RequestHandle{}, nil, err
+	}
+	if core.Trim(req.ID) == "" {
+		req.ID = m.nextRequestID()
+	}
+	// Up-front check makes rejection deterministic for the common case
+	// (Schedule called after CloseEngine returned); the main select's own
+	// closeCh case below still catches the narrow window where a close races
+	// concurrently with this call — mirrors batch.submit/interleave.submit's
+	// identical up-front-plus-select closeCh pattern.
+	select {
+	case <-m.closeCh:
+		return inference.RequestHandle{}, nil, core.E("scheduler.Schedule", "engine is closed", nil)
+	default:
+	}
+	reqCtx, cancel := context.WithCancel(ctx)
+	j := &job{
+		req:      req,
+		ctx:      reqCtx,
+		cancel:   cancel,
+		out:      make(chan inference.ScheduledToken, m.streamBuffer),
+		queuedAt: time.Now(),
+	}
+	m.register(j)
+	select {
+	case m.queue <- j:
+		m.submitted.Add(1)
+		m.emitProbe(j, "queued", 0, 0, false)
+		// handle.Labels mirrors the request's caller-supplied Labels —
+		// skip the map clone when the request has none. Saves one alloc
+		// per Schedule in the burst-fan-out path where most producers
+		// arrive without custom labels. When labels ARE present, we
+		// still clone so callers can't mutate our run-loop view.
+		var handleLabels map[string]string
+		if len(req.Labels) > 0 {
+			handleLabels = cloneLabels(req.Labels)
+		}
+		return inference.RequestHandle{ID: req.ID, Model: inference.ModelIdentity{ID: req.Model}, Labels: handleLabels}, j.out, nil
+	case <-ctx.Done():
+		m.unregister(req.ID)
+		cancel()
+		close(j.out)
+		return inference.RequestHandle{}, nil, ctx.Err()
+	case <-m.closeCh:
+		m.unregister(req.ID)
+		cancel()
+		close(j.out)
+		return inference.RequestHandle{}, nil, core.E("scheduler.Schedule", "engine is closed", nil)
+	default:
+		m.unregister(req.ID)
+		cancel()
+		close(j.out)
+		return inference.RequestHandle{}, nil, core.NewError("scheduler: queue is full")
+	}
+}
+
+// CancelRequest cancels a queued or running request by ID, routing through the
+// active mode.
+//
+//	result, err := model.CancelRequest(ctx, id)
+func (m *Model) CancelRequest(_ context.Context, id string) (inference.RequestCancelResult, error) {
+	if m == nil {
+		return inference.RequestCancelResult{ID: id, Reason: "scheduler_nil"}, nil
+	}
+	if core.Trim(id) == "" {
+		return inference.RequestCancelResult{Reason: "missing_id"}, nil
+	}
+	switch m.mode {
+	case ModeBatch:
+		return m.batch.cancel(id), nil
+	case ModeInterleave:
+		// The id lives in exactly one engine; cancel is an idempotent no-op in
+		// the other, so cancelling both reaches a CB-step or a plain request.
+		if m.cbEngine != nil {
+			m.cbEngine.cancel(id)
+		}
+		return m.inter.cancel(id), nil
+	}
+	// serial
+	value, ok := m.active.Load(id)
+	if !ok {
+		// inference.As reaches past a welfare/policy/profile decorator to the
+		// base model's cancellation capability — see inference.WrappedModel.
+		if cancellable, ok := inference.As[inference.CancellableModel](m.base); ok {
+			return cancellable.CancelRequest(context.Background(), id)
+		}
+		return inference.RequestCancelResult{ID: id, Reason: "not_found"}, nil
+	}
+	j := value.(*job)
+	j.cancel()
+	m.cancelled.Add(1)
+	m.emitProbe(j, "cancel", time.Since(j.queuedAt), 0, true)
+	return inference.RequestCancelResult{ID: id, Cancelled: true, Reason: "cancelled"}, nil
+}
+
+// Stats returns a mode-neutral snapshot of the scheduler's counters.
+//
+//	if s := model.Stats(); s.Submitted > 0 { … }
+func (m *Model) Stats() Stats {
+	if m == nil {
+		return Stats{}
+	}
+	switch m.mode {
+	case ModeBatch:
+		return m.batch.stats()
+	case ModeInterleave:
+		s := m.inter.stats()
+		if m.cbEngine != nil {
+			c := m.cbEngine.stats()
+			s.Submitted += c.Submitted
+			s.Admitted += c.Admitted
+			s.Completed += c.Completed
+			s.Cancelled += c.Cancelled
+			s.Active += c.Active
+			s.Queued += c.Queued
+		}
+		return s
+	}
+	queued := int64(0)
+	if m.queue != nil {
+		queued = int64(len(m.queue))
+	}
+	return Stats{
+		Submitted: m.submitted.Load(),
+		Completed: m.completed.Load(),
+		Cancelled: m.cancelled.Load(),
+		Queued:    queued,
+	}
+}
+
+// Generate schedules a prompt request and yields tokens with scheduler
+// backpressure semantics.
+//
+//	for token := range model.Generate(ctx, prompt) { … }
+func (m *Model) Generate(ctx context.Context, prompt string, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return func(yield func(inference.Token) bool) {
+		// Skip the opts→SamplerConfig conversion when the caller supplied
+		// none. ApplyGenerateOpts forces &cfg to escape (one heap alloc for
+		// the DefaultGenerateConfig it builds) and its RepeatPenalty:1.0
+		// default lands in req.Sampler, which then misses generateOptions'
+		// zero-value greedy cache and pays a closure + slice (two more
+		// allocs) in baseTokens. Leaving Sampler zero-valued routes the
+		// no-opts case through the same cached greedy path Schedule(zero
+		// request) already uses — byte-identical at the base because its
+		// DefaultGenerateConfig re-applies RepeatPenalty:1.0 either way.
+		req := inference.ScheduledRequest{Prompt: prompt}
+		if len(opts) > 0 {
+			cfg := inference.ApplyGenerateOpts(opts)
+			req.Sampler = inference.SamplerConfigFromGenerateConfig(cfg)
+			// The opts→SamplerConfig fold cannot hold a func; the sink rides
+			// the request and is re-armed at dispatch (baseTokens et al).
+			req.MetricsSink = cfg.MetricsSink
+		}
+		_, tokens, err := m.Schedule(ctx, req)
+		if err != nil {
+			m.setErr(err)
+			return
+		}
+		for scheduled := range tokens {
+			if !yield(scheduled.Token) {
+				_, _ = m.CancelRequest(ctx, scheduled.RequestID)
+				return
+			}
+		}
+	}
+}
+
+// Chat schedules a chat request and yields tokens with scheduler
+// backpressure semantics.
+//
+//	for token := range model.Chat(ctx, messages) { … }
+func (m *Model) Chat(ctx context.Context, messages []inference.Message, opts ...inference.GenerateOption) iter.Seq[inference.Token] {
+	return func(yield func(inference.Token) bool) {
+		// See Generate: the opts→SamplerConfig conversion is skipped when no
+		// opts are supplied so the no-opts case keeps generateOptions on its
+		// zero-value greedy cache (saves three allocs, byte-identical config
+		// at the base).
+		req := inference.ScheduledRequest{Messages: append([]inference.Message(nil), messages...)}
+		if len(opts) > 0 {
+			cfg := inference.ApplyGenerateOpts(opts)
+			req.Sampler = inference.SamplerConfigFromGenerateConfig(cfg)
+			// See Generate: the sink rides the request across the fold — and so
+			// does the thinking override (the fold cannot hold either).
+			req.MetricsSink = cfg.MetricsSink
+			req.EnableThinking = cfg.EnableThinking
+		}
+		_, tokens, err := m.Schedule(ctx, req)
+		if err != nil {
+			m.setErr(err)
+			return
+		}
+		for scheduled := range tokens {
+			if !yield(scheduled.Token) {
+				_, _ = m.CancelRequest(ctx, scheduled.RequestID)
+				return
+			}
+		}
+	}
+}
+
+// Classify delegates classification to the wrapped model.
+//
+//	cr := model.Classify(ctx, prompts)
+//	if !cr.OK { return cr }
+//	results := cr.Value.([]inference.ClassifyResult)
+func (m *Model) Classify(ctx context.Context, prompts []string, opts ...inference.GenerateOption) core.Result {
+	if m == nil || m.base == nil {
+		return core.Fail(core.E("scheduler.Classify", "model is nil", nil))
+	}
+	return m.base.Classify(ctx, prompts, opts...)
+}
+
+// BatchGenerate delegates batch generation to the wrapped model.
+//
+//	br := model.BatchGenerate(ctx, prompts)
+//	if !br.OK { return br }
+//	batches := br.Value.([]inference.BatchResult)
+func (m *Model) BatchGenerate(ctx context.Context, prompts []string, opts ...inference.GenerateOption) core.Result {
+	if m == nil || m.base == nil {
+		return core.Fail(core.E("scheduler.BatchGenerate", "model is nil", nil))
+	}
+	return m.base.BatchGenerate(ctx, prompts, opts...)
+}
+
+// ModelType returns the wrapped model's type name.
+//
+//	t := model.ModelType()
+func (m *Model) ModelType() string {
+	if m == nil || m.base == nil {
+		return ""
+	}
+	return m.base.ModelType()
+}
+
+// Info returns the wrapped model's identity.
+//
+//	info := model.Info()
+func (m *Model) Info() inference.ModelInfo {
+	if m == nil || m.base == nil {
+		return inference.ModelInfo{}
+	}
+	return m.base.Info()
+}
+
+// Metrics returns the last completed scheduled stream's metrics (the same
+// last-generation semantics the engine's own Metrics carries — the openai
+// handler reads it after consuming a stream). The scheduler records them
+// itself because a CB-served lane never updates the base model's global
+// snapshot; before any stream completes, the wrapped model's metrics answer.
+//
+//	metrics := model.Metrics()
+func (m *Model) Metrics() inference.GenerateMetrics {
+	if m == nil || m.base == nil {
+		return inference.GenerateMetrics{}
+	}
+	if p := m.lastMetrics.Load(); p != nil {
+		return *p
+	}
+	return m.base.Metrics()
+}
+
+// Err reports the most recent error from the scheduler or the wrapped model.
+// The Result is OK with a nil Value when there is no error.
+//
+//	if r := model.Err(); !r.OK { … }
+func (m *Model) Err() core.Result {
+	if m == nil {
+		return core.Ok(nil)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastErr != nil {
+		return core.Fail(m.lastErr)
+	}
+	if m.base == nil {
+		return core.Ok(nil)
+	}
+	return m.base.Err()
+}
+
+// CloseEngine releases the mode engine's goroutines WITHOUT closing the wrapped
+// model — for callers (e.g. the serve resolver) that own the model's lifecycle
+// separately and only want the scheduler layer torn down.
+//
+//	model.CloseEngine()
+func (m *Model) CloseEngine() {
+	if m == nil {
+		return
+	}
+	switch m.mode {
+	case ModeBatch:
+		if m.batch != nil {
+			m.batch.close()
+		}
+	case ModeInterleave:
+		m.cbMu.Lock()
+		m.cbClosed = true // no rebind after close (ensureCBEngine checks this)
+		cb := m.cbEngine
+		m.cbMu.Unlock()
+		if cb != nil {
+			cb.close()
+		}
+		if m.inter != nil {
+			m.inter.close()
+		}
+	default: // serial
+		m.closeSerialEngine()
+	}
+}
+
+// closeSerialEngine stops the serial worker pool, synchronously: it signals
+// closeCh, cancels every job still tracked in active (queued or running) so
+// run() unblocks promptly rather than waiting on the model's own stream to
+// end naturally, waits for every worker goroutine started at New to actually
+// return, then drains anything left sitting in the queue's buffer — a job
+// that raced the close and landed in the buffer with no worker left to read
+// it would otherwise wait forever on a channel nobody will ever service
+// again. This gives serial the same synchronous-join, no-leaked-goroutine,
+// no-orphaned-request contract batch.close/interleave.close already hold —
+// required so a per-resident-model scheduler (serving.multiModelResolver's
+// load/evict lifecycle) can reclaim ANY mode's goroutines on eviction, serial
+// included (serial is the default -scheduler value). Idempotent (closeOnce)
+// and nil-safe when New built no worker pool.
+func (m *Model) closeSerialEngine() {
+	if m.queue == nil {
+		return
+	}
+	m.closeOnce.Do(func() { close(m.closeCh) })
+	m.active.Range(func(_, value any) bool {
+		value.(*job).cancel()
+		return true
+	})
+	m.workerWG.Wait()
+	for {
+		select {
+		case j := <-m.queue:
+			m.unregister(j.req.ID)
+			j.cancel()
+			close(j.out)
+			m.cancelled.Add(1)
+		default:
+			return
+		}
+	}
+}
+
+// Close releases the mode engine and the wrapped model. The Result is OK with
+// a nil Value on success, or a failure carrying the error.
+//
+//	model.Close()
+func (m *Model) Close() core.Result {
+	if m == nil {
+		return core.Ok(nil)
+	}
+	m.CloseEngine()
+	if m.base == nil {
+		return core.Ok(nil)
+	}
+	return m.base.Close()
+}
+
+// SetProbeSink updates the scheduler probe sink.
+//
+//	model.SetProbeSink(sink)
+func (m *Model) SetProbeSink(sink inference.ProbeSink) {
+	if m == nil {
+		return
+	}
+	if sink == nil {
+		m.probeSink.Store(nil)
+		return
+	}
+	m.probeSink.Store(&probeSinkBox{sink: sink})
+}
+
+func (m *Model) worker(_ int) {
+	defer m.workerWG.Done()
+	for {
+		select {
+		case j := <-m.queue:
+			m.run(j)
+		case <-m.closeCh:
+			return
+		}
+	}
+}
+
+func (m *Model) run(j *job) {
+	defer close(j.out)
+	defer m.unregister(j.req.ID)
+	queueLatency := time.Since(j.queuedAt)
+	if err := j.ctx.Err(); err != nil {
+		m.emitProbe(j, "cancelled", queueLatency, 0, true)
+		return
+	}
+	startedAt := time.Now()
+	m.emitProbe(j, "start", queueLatency, 0, false)
+	// Build the per-request label map once. queue_latency_ms is fixed
+	// at run() entry; first_token_latency_ms lands on first token and
+	// is observability metadata about the request (not the individual
+	// token), so we leave it in the shared map for the remainder of
+	// the stream. Hoisting cloneLabels + millisString out of the
+	// per-token loop is the biggest streaming alloc lift — 256-token
+	// generates went from ~3 allocs/token to ~1.
+	labels := cloneLabels(j.req.Labels)
+	labels["queue_latency_ms"] = millisString(queueLatency)
+	firstToken := true
+	var firstLatency time.Duration
+	for token := range m.baseTokens(j) {
+		if firstToken {
+			firstLatency = time.Since(startedAt)
+			firstToken = false
+			labels["first_token_latency_ms"] = millisString(firstLatency)
+			m.emitProbe(j, "first_token", queueLatency, firstLatency, false)
+		}
+		select {
+		case <-j.ctx.Done():
+			m.emitProbe(j, "cancelled", queueLatency, firstLatency, true)
+			return
+		case j.out <- inference.ScheduledToken{
+			RequestID: j.req.ID,
+			Token:     token,
+			Metrics:   m.base.Metrics(),
+			Labels:    labels,
+		}:
+		}
+	}
+	if r := m.base.Err(); !r.OK {
+		if err, ok := r.Value.(error); ok {
+			m.setErr(err)
+		} else {
+			m.setErr(core.NewError(r.Error()))
+		}
+	}
+	m.completed.Add(1)
+	m.emitProbe(j, "complete", queueLatency, 0, false)
+}
+
+func (m *Model) baseTokens(j *job) iter.Seq[inference.Token] {
+	opts := generateOptions(j.req.Sampler)
+	if j.req.MetricsSink != nil {
+		// Re-arm the request-scoped metrics sink dropped by the SamplerConfig
+		// fold — the base engine delivers this request's own final metrics.
+		opts = append(opts, inference.WithMetricsSink(j.req.MetricsSink))
+	}
+	if j.req.EnableThinking != nil {
+		// Re-arm the thinking override the fold cannot hold — engine Chat
+		// frames the turn with it (and continuity keys the conversation by it).
+		opts = append(opts, inference.WithEnableThinking(j.req.EnableThinking))
+	}
+	if len(j.req.Messages) > 0 {
+		messages := append([]inference.Message(nil), j.req.Messages...)
+		return m.base.Chat(j.ctx, messages, opts...)
+	}
+	return m.base.Generate(j.ctx, j.req.Prompt, opts...)
+}
+
+func (m *Model) register(j *job) {
+	m.active.Store(j.req.ID, j)
+}
+
+func (m *Model) unregister(id string) {
+	m.active.Delete(id)
+}
+
+func (m *Model) emitProbe(j *job, event string, queueLatency, firstTokenLatency time.Duration, cancelled bool) {
+	if j == nil {
+		return
+	}
+	// Lock-free fast path — burst-dispatch typically runs with no
+	// sink attached; the atomic load + nil check returns in nanoseconds
+	// and never contends the mutex that guards lastErr.
+	box := m.probeSink.Load()
+	if box == nil {
+		return
+	}
+	sink := box.sink
+	if sink == nil {
+		return
+	}
+	// Channel len is internally atomic — safe to read without a lock.
+	queueDepth := len(m.queue)
+	sink.EmitProbe(inference.ProbeEvent{
+		Kind:  inference.ProbeEventScheduler,
+		Phase: inference.ProbePhaseQueue,
+		Labels: map[string]string{
+			"request_id": j.req.ID,
+			"event":      event,
+			"model":      j.req.Model,
+		},
+		Scheduler: &inference.ProbeScheduler{
+			RequestID:               j.req.ID,
+			Event:                   event,
+			QueueDepth:              queueDepth,
+			QueueLatencyMillis:      millis(queueLatency),
+			FirstTokenLatencyMillis: millis(firstTokenLatency),
+			TotalLatencyMillis:      millis(time.Since(j.queuedAt)),
+			Cancelled:               cancelled,
+		},
+	})
+}
+
+func (m *Model) setErr(err error) {
+	if m == nil || err == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastErr = err
+}
+
+func (m *Model) nextRequestID() string {
+	// Fires per scheduled request. Hand-built via strconv.AppendInt
+	// instead of Sprintf — Sprintf walks the fmt formatter pipeline
+	// (~2 allocs); AppendInt into a pre-sized buffer + AsString is 1.
+	id := m.nextID.Add(1)
+	buf := make([]byte, 0, len(m.requestIDPrefix)+21)
+	buf = append(buf, m.requestIDPrefix...)
+	buf = append(buf, '-')
+	buf = strconv.AppendUint(buf, id, 10)
+	return core.AsString(buf)
+}
+
+// schedGreedyOpts is the cached single-option slice for the zero-value
+// (greedy) sampler — the burst-dispatch case where callers leave
+// Sampler unset. The closure forces Temperature to 0 (explicit greedy)
+// and touches nothing else, so the base defaults survive. Caching the
+// whole slice keeps that hot path at zero per-call allocation. The
+// closure must never mutate cfg-derived state since it is shared.
+var schedGreedyOpts = []inference.GenerateOption{func(c *inference.GenerateConfig) { c.Temperature = 0 }}
+
+func generateOptions(cfg inference.SamplerConfig) []inference.GenerateOption {
+	// Zero-value sampler (greedy, no overrides) is the burst-dispatch
+	// default — serve it from the cached slice so it stays allocation-
+	// free, exactly the old schedTempZeroOpt fast path. SamplerConfig
+	// holds slice fields so it is not == comparable; check the fields
+	// the applier would act on.
+	if cfg.MaxTokens == 0 && cfg.Temperature == 0 && cfg.TopK == 0 &&
+		cfg.TopP == 0 && cfg.MinP == 0 && cfg.RepeatPenalty == 0 && len(cfg.StopTokens) == 0 &&
+		!cfg.ReturnLogits {
+		return schedGreedyOpts
+	}
+	// One closure capturing the whole SamplerConfig instead of up to
+	// seven separate WithX closures + a 7-cap slice. Each inference.WithX
+	// returns a fresh func value that captures one field — heap-allocated
+	// per call — so the previous shape paid 1-7 closure allocs plus the
+	// backing-array alloc on every Schedule. The single applier preserves
+	// the exact conditional semantics (only override a base default when
+	// the sampler carries a meaningful value; Temperature is always set so
+	// greedy/zero survives the base default), in one closure alloc + a
+	// len-1 slice. Fires once per scheduled request.
+	return []inference.GenerateOption{func(c *inference.GenerateConfig) {
+		if cfg.MaxTokens > 0 {
+			c.MaxTokens = cfg.MaxTokens
+		}
+		c.Temperature = cfg.Temperature
+		if cfg.TopK > 0 {
+			c.TopK = cfg.TopK
+		}
+		if cfg.TopP > 0 {
+			c.TopP = cfg.TopP
+		}
+		if cfg.MinP > 0 {
+			c.MinP = cfg.MinP
+		}
+		if cfg.RepeatPenalty > 0 {
+			c.RepeatPenalty = cfg.RepeatPenalty
+		}
+		if len(cfg.StopTokens) > 0 {
+			c.StopTokens = core.SliceClone(cfg.StopTokens)
+		}
+		if cfg.ReturnLogits {
+			c.ReturnLogits = true
+		}
+	}}
+}
+
+func cloneLabels(labels map[string]string) map[string]string {
+	if len(labels) == 0 {
+		// Preserve the original "empty/nil → fresh empty map" contract
+		// callers relied on, but skip the unnecessary make+copy.
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(labels))
+	maps.Copy(out, labels)
+	return out
+}
+
+func millisString(duration time.Duration) string {
+	// Sprintf("%.3f") was 2 allocs; FormatFloat returns the result
+	// string directly without the formatter pipeline.
+	return strconv.FormatFloat(millis(duration), 'f', 3, 64)
+}
+
+func millis(duration time.Duration) float64 {
+	if duration <= 0 {
+		return 0
+	}
+	return float64(duration) / float64(time.Millisecond)
+}
+
+// ensureCBEngine returns the continuous-batching coordinator, binding it
+// lazily when the New-time probe raced a model load. The retry is cheap for
+// models that will never bind (two interface asserts + an availability bool);
+// OpenLaneSet runs only when availability actually flips true, and a
+// successful bind is permanent. Nil off interleave mode and after CloseEngine.
+func (m *Model) ensureCBEngine() *cbStepEngine {
+	if m == nil || m.mode != ModeInterleave {
+		return nil
+	}
+	m.cbMu.Lock()
+	defer m.cbMu.Unlock()
+	if m.cbEngine != nil || m.cbClosed {
+		return m.cbEngine
+	}
+	// Probe through inference.As, not a direct assert: a welfare/policy
+	// decorator embeds the TextModel interface, which hides every optional
+	// capability from a type assertion; As walks Unwrap to the model that
+	// really carries it.
+	bsm, ok := inference.As[inference.BatchStepModel](m.base)
+	if !ok {
+		return nil
+	}
+	if _, hasTok := inference.As[inference.TokenizerModel](m.base); !hasTok {
+		return nil
+	}
+	if e := newCBStepEngine(bsm, m.cbCfg); e != nil {
+		m.cbEngine = e
+		if r, ok := inference.As[cbChatRenderer](m.base); ok {
+			m.cbRender = r
+		}
+		if r, ok := inference.As[cbThinkingRenderer](m.base); ok {
+			m.cbRenderThinking = r
+		}
+		if s, ok := inference.As[cbStopResolver](m.base); ok {
+			m.cbStops = s
+		}
+		if d, ok := inference.As[cbStreamDecoder](m.base); ok {
+			m.cbDecode = d
+		}
+		if p, ok := inference.As[cbChatInterceptProbe](m.base); ok {
+			m.cbIntercept = p
+		}
+	}
+	return m.cbEngine
+}

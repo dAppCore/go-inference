@@ -1,0 +1,216 @@
+---
+version: '3'
+# go-inference build — the sovereign `lem` binary + its two Metal kernel libraries.
+# Since the go-mlx/go-rocm retirement, go-inference owns the whole metal build chain:
+#   external/mlx           — Apple's canonical MLX (github.com/ml-explore/mlx) pinned at v0.32.0.
+#   patches/mlx/      — the 10 lthn patches applied ON TOP at build time (decode-replay,
+#                       MLX_METALLIB_PATH override, 512-dim sdpa_vector). Patch-not-vendor:
+#                       track upstream MLX + pull updates by bumping the pin + rebasing patches.
+#   build/dist/lib/mlx.metallib          — MLX's own compiled kernels (steel_gemm, affine_qmv,
+#                                    vv_*, rms, rope) the engine dispatches. Built by CMake.
+#   build/dist/lib/lthn_kernels.metallib — go-inference's OWN fused kernels (engine/metal/kernels/
+#                                    *.metal), loaded beside mlx.metallib.
+vars:
+  GO_BUILD_CACHE: '{{default "/private/tmp/lem-dev/gocache" .GOCACHE}}'
+  # BIN_NAME names every produced binary and VERSION stamps main.version —
+  # both overridable per invocation: task build BIN_NAME=mybrand VERSION=1.2.3
+  BIN_NAME: lem
+  VERSION: dev
+  GO_VERSION_LDFLAGS: '-X main.version={{.VERSION}}'
+  GO_DARWIN_LDFLAGS: '-extldflags=-mmacosx-version-min=26.0'
+  NCPU:
+    sh: getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || sysctl -n hw.ncpu
+env:
+  MLX_METALLIB_PATH: '{{.ROOT_DIR}}/build/dist/lib/mlx.metallib'
+
+tasks:
+  metallib:
+    desc: "Build BOTH Metal libraries into build/dist/lib (mlx.metallib + lthn_kernels.metallib)."
+    cmds:
+      - task: metallib:mlx
+      - task: metallib:kernels
+
+  metallib:mlx:
+    desc: "Build MLX's kernels (build/dist/lib/mlx.metallib) from Apple MLX (external/mlx @ v0.32.0) + the lthn patches."
+    cmds:
+      - mkdir -p build/dist/lib build
+      - |-
+        set -e
+        # start from pristine pinned Apple MLX, apply the lthn patch set (absolute paths)
+        git -C external/mlx checkout -q -- . && git -C external/mlx clean -fdq
+        for p in "$PWD"/patches/mlx/*.patch; do git -C external/mlx apply "$p"; done
+        cmake -S external/mlx -B build/mlx-metal -DCMAKE_BUILD_TYPE=Release -DMLX_BUILD_METAL=ON \
+          -DMLX_BUILD_TESTS=OFF -DMLX_BUILD_BENCHMARKS=OFF -DMLX_BUILD_EXAMPLES=OFF \
+          -DMLX_BUILD_PYTHON_BINDINGS=OFF -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0
+        cmake --build build/mlx-metal --target mlx --parallel {{.NCPU}}
+        cp build/mlx-metal/mlx/backend/metal/kernels/mlx.metallib build/dist/lib/mlx.metallib
+        # restore external/mlx to pristine so the submodule stays clean in git status
+        git -C external/mlx checkout -q -- . && git -C external/mlx clean -fdq
+        echo "  mlx.metallib: $(du -h build/dist/lib/mlx.metallib | cut -f1) (Apple MLX $(git -C external/mlx describe --tags) + $(ls patches/mlx/*.patch | wc -l | tr -d ' ') lthn patches)"
+
+  metallib:kernels:
+    desc: "Compile go-inference's OWN Metal kernels (engine/metal/kernels/*.metal) into build/dist/lib/lthn_kernels.metallib (needs external/mlx headers)."
+    cmds:
+      - mkdir -p build/dist/lib
+      - |-
+        set -e
+        airdir="$(mktemp -d)"
+        # -fno-fast-math matches MLX's own kernel build (external/mlx .../kernels/CMakeLists.txt):
+        # the byte-identity twins (lthn_qmv_rows et al) must not let the compiler reassociate
+        # fp chains the oracle kernels keep in source order (M=4 drift receipt, 2026-07-13).
+        for m in go/engine/metal/kernels/*.metal; do
+          xcrun -sdk macosx metal -std=metal4.0 -fno-fast-math -I external/mlx -c "$m" -o "$airdir/$(basename "${m%.metal}").air"
+        done
+        xcrun -sdk macosx metallib "$airdir"/*.air -o build/dist/lib/lthn_kernels.metallib
+        rm -rf "$airdir"
+        echo "  lthn_kernels.metallib: $(ls -1 go/engine/metal/kernels/*.metal | wc -l | tr -d ' ') kernel(s) -> build/dist/lib/lthn_kernels.metallib"
+
+  build:
+    desc: "Build the sovereign lem binary (engine/metal, -tags metal_runtime) to bin/lem."
+    cmds:
+      - mkdir -p bin {{.GO_BUILD_CACHE}}
+      - >-
+        env GOCACHE={{.GO_BUILD_CACHE}} go build -tags metal_runtime -trimpath
+        -ldflags "{{.GO_DARWIN_LDFLAGS}} {{.GO_VERSION_LDFLAGS}}" -o bin/{{.BIN_NAME}} ./cli
+      - 'echo "  lem -> bin/lem (needs build/dist/lib/*.metallib at runtime via MLX_METALLIB_PATH; run task metallib first)"'
+
+  build:embed:
+    desc: "Build a SELF-CONTAINED lem (bin/lem) with BOTH metallibs baked in (-tags embed_metallib) — runs from any path, no external MLX_METALLIB_PATH. Needs build/dist/lib/*.metallib (run task metallib first)."
+    cmds:
+      - |-
+        set -e
+        for m in mlx lthn_kernels; do
+          [ -f build/dist/lib/$m.metallib ] || { echo "missing build/dist/lib/$m.metallib — run: task metallib"; exit 1; }
+          gzip -9 -c build/dist/lib/$m.metallib > cli/$m.metallib.gz
+        done
+      - mkdir -p bin {{.GO_BUILD_CACHE}}
+      - >-
+        env GOCACHE={{.GO_BUILD_CACHE}} go build -tags "metal_runtime embed_metallib" -trimpath
+        -ldflags "{{.GO_DARWIN_LDFLAGS}} {{.GO_VERSION_LDFLAGS}}" -o bin/{{.BIN_NAME}} ./cli
+      - 'echo "  lem (self-contained): bin/lem — $(du -h bin/lem | cut -f1), embeds mlx + lthn_kernels metallibs; run from anywhere"'
+
+  build:native:
+    desc: "Build lem to bin/lem for the host platform WITHOUT the metal engine (CGO for the duckdb store) — the linux/windows/arm build. One binary; the GPU backend loads its kernel sidecar at runtime."
+    cmds:
+      - mkdir -p bin {{.GO_BUILD_CACHE}}
+      - env GOCACHE={{.GO_BUILD_CACHE}} CGO_ENABLED=1 go build -trimpath -ldflags "{{.GO_VERSION_LDFLAGS}}" -o bin/{{.BIN_NAME}}{{if eq OS "windows"}}.exe{{end}} ./cli
+      - 'echo "  lem -> bin/lem"'
+
+  # --- GPU capture (the kernel instrument) ------------------------------------
+  # One .gputrace of a REAL decode round, openable in Xcode's Metal Debugger for
+  # per-dispatch occupancy / limiter / per-line shader costs. Workflow: terminal 1
+  # `task capture:serve MODEL=<snapshot dir>`, warm it with a request, terminal 2
+  # `task capture:fire`, ask again — the trace lands at TRACE. The capture is
+  # one-shot per serve process (restart capture:serve to take another).
+  capture:serve:
+    desc: "Boot a capture-ARMED lem serve (foreground). Vars: MODEL (required snapshot dir), TRACE (default ~/Desktop/round.gputrace — replaced on boot), CBS (submissions to trace, default 8), ADDR (default 127.0.0.1:8199), CONTEXT (default 4096)."
+    vars:
+      TRACE: '{{default "$HOME/Desktop/round.gputrace" .TRACE}}'
+      TRIGGER: '{{default "/tmp/lthn-capture" .TRIGGER}}'
+      CBS: '{{default "8" .CBS}}'
+      ADDR: '{{default "127.0.0.1:8199" .ADDR}}'
+      CONTEXT: '{{default "4096" .CONTEXT}}'
+    preconditions:
+      - sh: test -n "{{.MODEL}}"
+        msg: "MODEL is required: task capture:serve MODEL=~/.cache/huggingface/hub/models--…/snapshots/<hash>"
+      - sh: test -x bin/lem
+        msg: "bin/lem missing — run: task build (and task metallib first)"
+    cmds:
+      - rm -rf {{.TRACE}} {{.TRIGGER}}
+      - 'echo "  capture armed: fire with «task capture:fire», then send a request — trace -> {{.TRACE}}"'
+      - >-
+        env MTL_CAPTURE_ENABLED=1
+        LTHN_GPU_CAPTURE={{.TRACE}}
+        LTHN_GPU_CAPTURE_TRIGGER={{.TRIGGER}}
+        LTHN_GPU_CAPTURE_CBS={{.CBS}}
+        bin/lem serve --model {{.MODEL}} --addr {{.ADDR}} --context {{.CONTEXT}}
+
+  capture:fire:
+    desc: "Fire the one-shot capture on the running capture:serve — the NEXT request's round lands in the trace."
+    vars:
+      TRIGGER: '{{default "/tmp/lthn-capture" .TRIGGER}}'
+    cmds:
+      - touch {{.TRIGGER}}
+      - 'echo "  armed — send the server a request; watch capture:serve''s log for the gpu-capture lines, then open the trace in Xcode"'
+
+  # --- Test / coverage / benchmark ------------------------------------------
+  # The portable lanes (test, cover) compile under the default build tags, so
+  # they run on any OS — engine/metal (darwin/arm64, //go:build metal_runtime)
+  # is excluded there and exercised by the *:metal lanes below. cover writes the
+  # profile codecov.yml consumes (95% target). See AGENTS.md for how to WRITE
+  # the {file}_test.go / _example_test.go / _bench_test.go each source ships.
+
+  test:
+    desc: "Run the portable Go test suite (default tags — no GPU, runs anywhere; the CI + codecov lane)."
+    dir: go
+    cmds:
+      - go test -count=1 ./...
+
+  test:metal:
+    desc: "Run the Darwin engine test suite (-tags metal_runtime). Needs build/dist/lib/*.metallib — run task metallib first."
+    dir: go
+    cmds:
+      - go test -tags metal_runtime -count=1 ./...
+
+  cover:
+    desc: "Portable coverage -> coverage.out (the profile codecov.yml reads; 95% target). Prints the total on the last line."
+    dir: go
+    cmds:
+      - go test -count=1 -covermode=atomic -coverprofile={{.ROOT_DIR}}/coverage.out ./...
+      - go tool cover -func={{.ROOT_DIR}}/coverage.out | tail -1
+
+  bench:
+    desc: "Run every benchmark with allocation stats (the lethean-perf instrument: -benchmem, 20x for steady-state allocs/op). Metal benches need build/dist/lib/*.metallib (task metallib)."
+    dir: go
+    cmds:
+      - go test -tags metal_runtime -run='^$' -bench=. -benchmem -benchtime=20x ./...
+
+  bench:hip:gemma4-sweep:
+    desc: "Emit one env-selected non-MTP Gemma4 HIP sweep receipt. Required: GO_ROCM_GEMMA4_SWEEP_MODEL_PATH, GO_ROCM_GEMMA4_SWEEP_CONTEXT (2K/4K/8K/12K/32K), GO_ROCM_GEMMA4_SWEEP_OUTPUT. Optional: MAX_TOKENS (512), FORMAT (json|csv), DEVICE."
+    dir: go
+    cmds:
+      - GO_ROCM_RUN_GEMMA4_SWEEP_RECEIPT=1 go test -count=1 ./engine/hip -run '^TestInferenceBenchmarkGemma4SweepReceipt$' -v
+
+  qa:
+    desc: "Pre-handback gate: gofmt check + vet + portable tests."
+    dir: go
+    cmds:
+      - test -z "$(gofmt -l .)"
+      - go vet ./...
+      - go test -count=1 ./...
+
+  # --- SDK generation -------------------------------------------------------
+  # lem's whole HTTP surface is a core/api definition: every route group
+  # (serving/api AIProvider + ml Routes, engine/driver Provider +
+  # InferenceProvider, kv/sessionkv) implements Describable, so `lem spec` emits
+  # one complete OpenAPI 3.1 document and openapi-generator turns it into typed
+  # clients — SDKs for free, no hand-written client code. Regenerate whenever a
+  # route or a request/response schema changes. Output lands under build/sdk/
+  # (gitignored): the spec + one client dir per sdk-config/<lang>.yaml.
+
+  sdk:spec:
+    desc: "Export lem's OpenAPI 3.1 document to build/sdk/openapi.json (the machine-readable API definition the SDKs generate from)."
+    cmds:
+      - mkdir -p build/sdk
+      - go run ./cli spec --output build/sdk/openapi.json
+
+  sdk:
+    desc: "Generate typed client SDKs from lem's OpenAPI spec into build/sdk/<lang>/. Add a language by dropping a sdk-config/<lang>.yaml. Needs openapi-generator-cli."
+    deps: [sdk:spec]
+    cmds:
+      - |-
+        set -e
+        command -v openapi-generator-cli >/dev/null || { echo "openapi-generator-cli not found — install it (brew install openapi-generator) or: npx @openapitools/openapi-generator-cli@7.22.0"; exit 1; }
+        # openapi-generator runs a JAR, so it needs a JRE. brew's openjdk is
+        # keg-only (not on PATH), so point at it when the system java is absent.
+        if ! java -version >/dev/null 2>&1; then
+          JH="$(brew --prefix openjdk 2>/dev/null)"
+          [ -x "$JH/bin/java" ] && { export JAVA_HOME="$JH"; export PATH="$JH/bin:$PATH"; }
+        fi
+        java -version >/dev/null 2>&1 || { echo "no Java runtime for openapi-generator — brew install openjdk"; exit 1; }
+        for cfg in sdk-config/*.yaml; do
+          lang="$(basename "${cfg%.yaml}")"
+          echo "Generating ${lang} SDK -> build/sdk/${lang}"
+          openapi-generator-cli generate -i build/sdk/openapi.json -c "${cfg}" -o "build/sdk/${lang}" >/dev/null
+        done
+      - 'echo "  SDKs -> build/sdk/<lang>/ ($(ls sdk-config/*.yaml | wc -l | tr -d " ") languages; spec: build/sdk/openapi.json)"'

@@ -1,0 +1,20 @@
+/* ─────────────────────────────────────────────────────────
+   Radii + elevation. There is no separate spacing scale — the
+   system spaces on an informal 4px rhythm inline. Radii step
+   4 → 6 → 8 → 12 → 16 → 22, base radius is 8px (--r-md).
+   Native platform profiles tighten these (see platforms.css).
+   ───────────────────────────────────────────────────────── */
+:root {
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;    /* base */
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --r-2xl: 22px;
+  --r-pill: 999px;
+
+  /* Elevation — an inset top hairline + a soft drop. Dark-tuned. */
+  --shadow-1: 0 1px 0 0 var(--line-1) inset, 0 1px 2px rgba(0,0,0,.25);
+  --shadow-2: 0 1px 0 0 var(--line-1) inset, 0 4px 14px rgba(0,0,0,.35);
+  --shadow-3: 0 1px 0 0 var(--line-2) inset, 0 12px 40px rgba(0,0,0,.5);
+}

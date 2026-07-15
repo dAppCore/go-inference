@@ -1,0 +1,8 @@
+generatorName: go
+gitHost: dappco.re
+gitUserId: go
+gitRepoId: inference
+additionalProperties:
+  packageName: lemsdk
+  isGoSubmodule: true
+  withGoMod: true

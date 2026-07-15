@@ -1,0 +1,92 @@
+<!-- LEM Desktop — the design pack's native shell over the live tray state. -->
+<div class="win">
+  <div class="titlebar">
+    <span class="lights"><i></i><i></i><i></i></span>
+    <span class="wtitle">LEM Desktop</span>
+    <span class="wtools"><lthn-icon name="magnifying-glass" size="13"></lthn-icon><lthn-icon name="sliders" size="13"></lthn-icon></span>
+  </div>
+  <div class="winbody">
+    <nav class="rail">
+      <a [class.on]="view() === 'lab'" title="Lab" (click)="view.set('lab')"><lthn-icon name="cube" size="15"></lthn-icon></a>
+      <a [class.on]="view() === 'chat'" title="Chat" (click)="view.set('chat')"><lthn-icon name="comments" size="15"></lthn-icon></a>
+      <a class="last" title="Settings"><lthn-icon name="gear" size="15"></lthn-icon></a>
+    </nav>
+    @if (view() === 'chat') {
+      <div class="content chatview">
+        <div class="ctoolbar">
+          <h1>Chat</h1>
+          <span class="updated">streaming via resource() · thought channel live</span>
+        </div>
+        <lem-chat></lem-chat>
+      </div>
+    } @else {
+    <div class="content">
+      <div class="ctoolbar">
+        <h1>LEM lab</h1>
+        @if (lem.updatedAt()) {
+          <span class="updated">updated {{ lem.updatedAt() }}</span>
+        }
+        <span class="sp"></span>
+        <button class="nbtn" [class.danger]="snap().agentRunning" (click)="lem.toggleAgent()">
+          <lthn-icon [attr.name]="snap().agentRunning ? 'stop' : 'play'" size="10"></lthn-icon>
+          {{ snap().agentRunning ? 'Stop agent' : 'Start agent' }}
+        </button>
+        <button class="nbtn" [class.danger]="snap().stackRunning" (click)="lem.toggleStack()">
+          <lthn-icon [attr.name]="snap().stackRunning ? 'stop' : 'play'" size="10"></lthn-icon>
+          {{ snap().stackRunning ? 'Stop services' : 'Start services' }}
+        </button>
+      </div>
+
+      <div class="tiles">
+        <lthn-card pad="11"><lthn-stat [attr.value]="activeTraining()" label="Training runs" mono></lthn-stat></lthn-card>
+        <lthn-card pad="11"><lthn-stat [attr.value]="snap().generation.goldenPct.toFixed(1) + '%'" [attr.label]="'Golden ' + snap().generation.goldenCompleted + '/' + snap().generation.goldenTarget" mono></lthn-stat></lthn-card>
+        <lthn-card pad="11"><lthn-stat [attr.value]="snap().generation.expansionPct.toFixed(1) + '%'" [attr.label]="'Expansion ' + snap().generation.expansionCompleted + '/' + snap().generation.expansionTarget" mono></lthn-stat></lthn-card>
+        <lthn-card pad="11"><lthn-stat [attr.value]="snap().models.length" label="Models" mono></lthn-stat></lthn-card>
+      </div>
+
+      @if (snap().training.length > 0) {
+        <div class="panel">
+          <div class="h"><b>Training</b>
+            @if (firstRun(); as run) {
+              <span>{{ run.model }} · iter {{ run.iteration }}/{{ run.totalIters }} · loss {{ run.loss.toFixed(3) }}</span>
+            }
+          </div>
+          <lthn-datatable [attr.columns]="trainingColumns" [attr.rows]="trainingRows()"></lthn-datatable>
+        </div>
+      }
+
+      <div class="panel">
+        <div class="h"><b>Model scoreboard</b><span>{{ snap().models.length }} checkpoints</span></div>
+        <lthn-datatable [attr.columns]="modelColumns" [attr.rows]="modelRows()"></lthn-datatable>
+      </div>
+
+      <div class="panel">
+        <div class="h"><b>Agent</b>
+          <span><lthn-status-dot [attr.variant]="snap().agentRunning ? 'active' : 'idle'" [attr.pulse]="snap().agentRunning ? '' : null"></lthn-status-dot>
+          {{ snap().agentRunning ? (snap().agentTask || 'running') : 'stopped' }}</span>
+        </div>
+      </div>
+
+      @if (lem.services().length > 0) {
+        <div class="list">
+          @for (svc of lem.services(); track svc.name) {
+            <div class="mrow">
+              <lthn-status-dot [attr.variant]="serviceVariant(svc.running)"></lthn-status-dot>
+              <span class="nm">{{ svc.name }}</span>
+              <span class="meta">{{ svc.status }}@if (svc.health) { · {{ svc.health }}}</span>
+              <span class="rate">{{ svc.ports }}</span>
+            </div>
+          }
+        </div>
+      }
+    </div>
+    }
+  </div>
+  <div class="statusbar">
+    <lthn-status-dot [attr.variant]="snap().stackRunning ? 'ok' : 'idle'" [attr.pulse]="snap().stackRunning ? '' : null"></lthn-status-dot>
+    {{ snap().stackRunning ? 'Services running' : 'Services stopped' }}
+    @if (lem.bridge() === 'absent') { <span class="warn">· no Wails bridge (browser preview)</span> }
+    @if (lem.error()) { <span class="warn">· {{ lem.error() }}</span> }
+    <span class="v">LEM v0.1.0</span>
+  </div>
+</div>

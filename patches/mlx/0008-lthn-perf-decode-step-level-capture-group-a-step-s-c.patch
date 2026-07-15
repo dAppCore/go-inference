@@ -1,0 +1,87 @@
+From 22dbec40f084ecbec27cad6a8d9e429b77ce5cde Mon Sep 17 00:00:00 2001
+From: Snider <snider@host.uk.com>
+Date: Tue, 16 Jun 2026 18:34:24 +0100
+Subject: [PATCH 08/10] =?UTF-8?q?lthn(perf):=20decode=20step-level=20captu?=
+ =?UTF-8?q?re=20=E2=80=94=20group=20a=20step's=20command=20buffers=20into?=
+ =?UTF-8?q?=20one=20replay=20program?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A decode step spans 2 command buffers (47-cmd + 27/28-cmd cycle). lthn_decode_step_begin/end capture the whole step into lthn_step_program (a list of per-CB command streams in order), so replay can re-issue the full step, not a single CB. Compiles; driven via the upcoming replay-eval + decode-loop hook.
+
+Co-Authored-By: Virgil <virgil@lethean.io>
+---
+ mlx/backend/metal/device.cpp | 28 +++++++++++++++++++++++++++-
+ mlx/backend/metal/device.h   |  2 ++
+ 2 files changed, 29 insertions(+), 1 deletion(-)
+
+diff --git a/mlx/backend/metal/device.cpp b/mlx/backend/metal/device.cpp
+index ffbfa0a0..8360b2cb 100644
+--- a/mlx/backend/metal/device.cpp
++++ b/mlx/backend/metal/device.cpp
+@@ -385,6 +385,11 @@ thread_local bool lthn_pending_barrier = false;
+ // guard so re-issuing it doesn't recursively re-record.
+ thread_local std::vector<LthnRecCmd> lthn_replay_program;
+ thread_local bool lthn_decode_replaying = false;
++// Step-level capture: a decode step spans multiple command buffers (12B = 2: a
++// 47-cmd CB + a 27/28-cmd CB). While capturing, end_encoding appends each
++// finished CB to lthn_step_program in order, building the whole step's program.
++thread_local std::vector<std::vector<LthnRecCmd>> lthn_step_program;
++thread_local bool lthn_step_capturing = false;
+ } // namespace
+ 
+ bool lthn_decode_recording() {
+@@ -450,6 +455,22 @@ void lthn_decode_replay(MTL::ComputeCommandEncoder* raw) {
+   lthn_decode_replaying = false;
+ }
+ 
++// Begin capturing a full decode STEP — its command buffers grouped in order into
++// lthn_step_program. The recorder hooks must be armed (env or future programmatic
++// arm) for the CBs to populate.
++void lthn_decode_step_begin() {
++  lthn_rec_flush_cur();
++  lthn_step_program.clear();
++  lthn_rec_cmds.clear();
++  lthn_step_capturing = true;
++}
++// End step capture; returns the number of command buffers captured for the step.
++size_t lthn_decode_step_end() {
++  lthn_rec_flush_cur();
++  lthn_step_capturing = false;
++  return lthn_step_program.size();
++}
++
+ void CommandEncoder::set_buffer(
+     const MTL::Buffer* buf,
+     int idx,
+@@ -569,7 +590,12 @@ void CommandEncoder::barrier() {
+ }
+ 
+ void CommandEncoder::end_encoding() {
+-  if (lthn_capture_env()) {
++  if (lthn_step_capturing) {
++    // Capturing a full decode step: append this command buffer's stream in order.
++    lthn_rec_flush_cur();
++    lthn_step_program.push_back(std::move(lthn_rec_cmds));
++    lthn_rec_cmds.clear();
++  } else if (lthn_capture_env()) {
+     lthn_rec_flush_cur();
+     if (!lthn_rec_cmds.empty()) {
+       size_t binds = 0, byteSets = 0;
+diff --git a/mlx/backend/metal/device.h b/mlx/backend/metal/device.h
+index d0ac6b8c..fc8f181f 100644
+--- a/mlx/backend/metal/device.h
++++ b/mlx/backend/metal/device.h
+@@ -32,6 +32,8 @@ size_t lthn_decode_finalize();
+ void lthn_decode_replay(MTL::ComputeCommandEncoder* raw);
+ void lthn_decode_pin_begin();
+ void lthn_decode_pin_release();
++void lthn_decode_step_begin();
++size_t lthn_decode_step_end();
+ 
+ class Device;
+ class EventImpl;
+-- 
+2.50.1 (Apple Git-155)
+

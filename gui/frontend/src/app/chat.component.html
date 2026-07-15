@@ -1,0 +1,50 @@
+<!-- Chat with the local model — streaming via resource({stream}). -->
+<div class="chat">
+  <div class="scroll">
+    @for (turn of history(); track $index) {
+      <div class="turn" [class.user]="turn.role === 'user'">
+        @if (turn.thought) {
+          <div class="thought">{{ turn.thought }}</div>
+        }
+        <div class="bubble">{{ turn.content }}</div>
+      </div>
+    }
+
+    @if (reply.isLoading()) {
+      <div class="turn">
+        @if (liveTurn().thought) {
+          <div class="thought">{{ liveTurn().thought }}</div>
+        }
+        <div class="bubble live">{{ liveTurn().content }}<span class="caret"></span></div>
+      </div>
+    }
+
+    @if (reply.error()) {
+      <div class="err">
+        <lthn-status-dot variant="err"></lthn-status-dot>
+        {{ reply.error() }}
+        <button class="retry" (click)="retry()">Retry</button>
+      </div>
+    }
+
+    @if (history().length === 0 && !reply.isLoading()) {
+      <div class="empty">
+        <lthn-brand-mark size="sm"></lthn-brand-mark>
+        <p>Chat with the loaded model — reasoning streams in the dim channel, the answer below it.</p>
+      </div>
+    }
+  </div>
+
+  <form class="composer" (ngSubmit)="send()">
+    <input
+      name="draft"
+      [(ngModel)]="draft"
+      [disabled]="reply.isLoading()"
+      placeholder="Ask the local model…"
+      autocomplete="off"
+    />
+    <button type="submit" class="nbtn" [disabled]="reply.isLoading()">
+      <lthn-icon name="paper-plane" size="11"></lthn-icon> Send
+    </button>
+  </form>
+</div>

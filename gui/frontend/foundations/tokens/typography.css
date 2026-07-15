@@ -1,0 +1,17 @@
+/* ─────────────────────────────────────────────────────────
+   Type tokens. Three families:
+   · sans   — Geist. All UI.
+   · mono   — Geist Mono. Numerals, timestamps, code, subdomains, stats.
+   · serif  — Instrument Serif. Editorial italics ONLY (hero emphasis,
+              pull-quotes). Never body copy.
+   Native profiles override --font-sans / --font-mono / --font-display
+   to SF Pro (see platforms.css).
+   ───────────────────────────────────────────────────────── */
+:root {
+  --font-sans:  "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono:  "Geist Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --font-serif: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+
+  /* Brand identity string — set per [data-brand] on an ancestor. */
+  --brand-name: "Host UK";
+}

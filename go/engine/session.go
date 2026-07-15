@@ -1,0 +1,573 @@
+// SPDX-Licence-Identifier: EUPL-1.2
+
+// Package engine holds the engine-neutral serving adapters that turn a concrete
+// decode engine (the Apple-GPU "metal" engine, the AMD "hip" engine, ...) into
+// the inference contract surface. A concrete engine supplies a [Session] (its
+// retained decode session) and a [TokenModel] (its loaded decode model); this
+// package wraps them as [SessionHandle] (inference.SessionHandle +
+// inference.KVRestorer) and [TextModel] (inference.TextModel +
+// inference.SessionFactory) with the tokenise / generate / capture / restore /
+// fork logic that is identical across engines.
+//
+// The wrapper logic is engine-agnostic: Prefill = tokenise + PrefillTokens;
+// AppendPrompt = tokenise + AppendTokens; Generate streams via the engine's
+// stepper; CaptureKV / RangeKVBlocks / RestoreFromKV delegate straight through
+// (the engine already speaks [kv.Snapshot]); Fork = CaptureKV → open new →
+// RestoreFromKV. Only the concrete [Session] / [TokenModel] are engine-specific.
+//
+// This package imports only the inference contracts (inference, inference/kv,
+// inference/model, inference/tokenizer) and core — never a concrete engine — so
+// each engine implements the same interfaces and shares this machinery.
+package engine
+
+import (
+	"context"
+	"iter"
+	"sync"
+	"time"
+
+	core "dappco.re/go"
+	"dappco.re/go/inference"
+	"dappco.re/go/inference/kv"
+	"dappco.re/go/inference/model"
+)
+
+// Session is the retained-decode-session surface a concrete engine must provide
+// for [SessionHandle] to drive it. Every method is expressed in inference/kv and
+// inference/model terms only — the metal engine's *ArchSession and the hip
+// engine's session both satisfy it. The method set is exactly the primitives
+// [SessionHandle] calls; add nothing an engine is not asked for.
+type Session interface {
+	// PrefillTokens stores the prompt tokens' KV/logit state, replacing any prior state.
+	PrefillTokens(ids []int32) error
+	// AppendTokens extends the retained state without replaying the prefix.
+	AppendTokens(ids []int32) error
+	// Pos is the number of tokens currently in the retained cache.
+	Pos() int
+	// GenerateFromCacheEach greedily decodes up to maxNew tokens from the retained
+	// cache, yielding each; eosID < 0 lets the caller own the stop decision.
+	GenerateFromCacheEach(maxNew, eosID int, yield func(int32) bool) ([]int32, error)
+	// GenerateSampledFromCacheEach decodes up to maxNew tokens with the sampler and
+	// params, honouring stopTokens; transform is an optional per-token remap (nil = none).
+	GenerateSampledFromCacheEach(maxNew int, stopTokens []int32, sampler *model.Sampler, params model.SampleParams, transform model.TokenTransform, yield func(int32) bool) ([]int32, error)
+	// CaptureKVWithOptions copies the retained KV cache to a portable snapshot.
+	CaptureKVWithOptions(opts kv.CaptureOptions) (*kv.Snapshot, error)
+	// RangeKVBlocks streams the retained KV state as contiguous token blocks of blockSize.
+	RangeKVBlocks(blockSize int, opts kv.CaptureOptions, yield func(kv.Block) (bool, error)) error
+	// RestoreFromKV loads a portable snapshot into the retained cache.
+	RestoreFromKV(ctx context.Context, snapshot *kv.Snapshot) error
+	// Close releases the retained session state.
+	Close() error
+}
+
+// ContextDecodeSession is the optional cancellation-aware decode extension.
+// Engines whose driver can observe a caller context implement it; the shared
+// adapter falls back to Session's legacy methods for engines that cannot.
+type ContextDecodeSession interface {
+	Session
+	GenerateFromCacheEachContext(ctx context.Context, maxNew, eosID int, yield func(int32) bool) ([]int32, error)
+	GenerateSampledFromCacheEachContext(ctx context.Context, maxNew int, stopTokens []int32, sampler *model.Sampler, params model.SampleParams, transform model.TokenTransform, yield func(int32) bool) ([]int32, error)
+}
+
+func generateFromCacheEach(ctx context.Context, sess Session, maxNew, eosID int, yield func(int32) bool) ([]int32, error) {
+	if contextual, ok := sess.(ContextDecodeSession); ok {
+		return contextual.GenerateFromCacheEachContext(ctx, maxNew, eosID, yield)
+	}
+	return sess.GenerateFromCacheEach(maxNew, eosID, yield)
+}
+
+func generateSampledFromCacheEach(ctx context.Context, sess Session, maxNew int, stopTokens []int32, sampler *model.Sampler, params model.SampleParams, transform model.TokenTransform, yield func(int32) bool) ([]int32, error) {
+	if contextual, ok := sess.(ContextDecodeSession); ok {
+		return contextual.GenerateSampledFromCacheEachContext(ctx, maxNew, stopTokens, sampler, params, transform, yield)
+	}
+	return sess.GenerateSampledFromCacheEach(maxNew, stopTokens, sampler, params, transform, yield)
+}
+
+// DecodePhaseTracer is the optional [Session] seam a concrete engine implements
+// to report where the per-token decode wall goes. When GenerateConfig
+// .TraceTokenPhases is set, [TextModel] begins a trace before decoding and folds
+// the returned budget into GenerateMetrics.DecodePhases. An engine without phase
+// timing simply does not implement it (the flag then leaves DecodePhases nil).
+type DecodePhaseTracer interface {
+	// BeginDecodePhaseTrace turns per-token phase timing on for the next
+	// generation on this session and returns a stop function that turns it off and
+	// returns the aggregate budget. The engine owns thread-safety; tracing is a
+	// single-flight diagnostic (a bench / one-shot generate), not a concurrent
+	// serving path.
+	BeginDecodePhaseTrace() func() inference.DecodePhaseBudget
+}
+
+// SessionHandle adapts a retained engine [Session] (+ the model's tokenizer,
+// reached through its parent [TextModel]) to inference.SessionHandle — the
+// engine-neutral persistent conversation-state surface state/session.Session
+// holds. It additionally satisfies inference.KVRestorer so the session package
+// (and Fork) can restore a captured kv.Snapshot into it.
+type SessionHandle struct {
+	mu              sync.Mutex
+	model           *TextModel
+	sess            Session
+	tokens          []int32
+	generated       []int32
+	prefillDuration time.Duration
+	err             error
+	closed          bool
+	// budget-triggered context-fold bookkeeping (session_fold.go)
+	contextFolds                  int
+	lastFoldKept, lastFoldDropped int
+}
+
+var (
+	_ inference.SessionHandle = (*SessionHandle)(nil)
+	_ inference.KVRestorer    = (*SessionHandle)(nil)
+)
+
+// NewSessionHandle wraps a fresh engine Session (opened over model) as the
+// 9-method inference.SessionHandle + inference.KVRestorer. model supplies the
+// tokenizer, context window, and stop tokens, and is the factory Fork/Reset
+// reopen a session through.
+func NewSessionHandle(model *TextModel, sess Session) *SessionHandle {
+	return &SessionHandle{model: model, sess: sess}
+}
+
+// Prefill tokenises prompt and stores its KV/logit state, replacing any prior
+// retained state.
+func (s *SessionHandle) Prefill(ctx context.Context, prompt string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.readyLocked("engine.SessionHandle.Prefill"); err != nil {
+		s.err = err
+		return err
+	}
+	if s.model == nil || s.model.tok == nil {
+		err := core.NewError("engine.SessionHandle.Prefill: tokenizer is nil")
+		s.err = err
+		return err
+	}
+	return s.prefillTokensLocked(ctx, s.model.tok.Encode(prompt))
+}
+
+func (s *SessionHandle) prefillTokensLocked(ctx context.Context, tokens []int32) error {
+	if len(tokens) == 0 {
+		err := core.NewError("engine.SessionHandle.Prefill: empty prompt tokens")
+		s.err = err
+		return err
+	}
+	start := time.Now()
+	ids := append([]int32(nil), tokens...)
+	if err := s.sess.PrefillTokens(ids); err != nil {
+		s.err = err
+		return err
+	}
+	s.tokens = ids
+	s.generated = nil
+	s.prefillDuration = time.Since(start)
+	s.err = nil
+	return ctx.Err()
+}
+
+// AppendPrompt appends prompt to the retained state without replaying the prefix.
+func (s *SessionHandle) AppendPrompt(ctx context.Context, prompt string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.readyLocked("engine.SessionHandle.AppendPrompt"); err != nil {
+		s.err = err
+		return err
+	}
+	if len(s.tokens) == 0 {
+		err := core.NewError("engine.SessionHandle.AppendPrompt: no retained prefix")
+		s.err = err
+		return err
+	}
+	if s.model == nil || s.model.tok == nil {
+		err := core.NewError("engine.SessionHandle.AppendPrompt: tokenizer is nil")
+		s.err = err
+		return err
+	}
+	ids := s.model.tok.Encode(prompt)
+	if len(ids) == 0 {
+		s.err = nil
+		return nil
+	}
+	// Budget-triggered context fold: when this turn would leave less than the reply
+	// headroom, keep BOS + the newest transcript suffix and re-prefill kept+turn in one
+	// engine call instead of dying on the maxLen wall (session_fold.go; LTHN_CONTEXT_FOLD=0
+	// restores the hard error).
+	if len(s.tokens)+len(ids)+foldHeadroom(s.model.maxLen) > s.model.maxLen && !contextFoldDisabled() {
+		if folded, err := s.foldForAppendLocked(ids); err != nil {
+			return err
+		} else if folded {
+			s.err = nil
+			return ctx.Err()
+		}
+	}
+	if err := s.sess.AppendTokens(ids); err != nil {
+		s.err = err
+		return err
+	}
+	s.tokens = append(s.tokens, ids...)
+	s.err = nil
+	return ctx.Err()
+}
+
+// Generate streams tokens from the retained session state, bounded by the token
+// budget and the context window, honouring stop tokens after each yield.
+func (s *SessionHandle) Generate(ctx context.Context, cfg inference.GenerateConfig) iter.Seq[inference.Token] {
+	return func(yield func(inference.Token) bool) {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if err := s.readyForGenerateLocked("engine.SessionHandle.Generate"); err != nil {
+			s.err = err
+			return
+		}
+		// The same declares-discipline fold the stateless decode applies
+		// (request-set > model-declared > engine fallback), before the
+		// sample-vs-greedy branch below reads cfg.Temperature/MinP — without
+		// it a continuity-woken turn decoded GREEDY where the stateless lane
+		// sampled at the checkpoint's declared temperature (#1844).
+		cfg = s.model.applyDeclaredSampling(cfg)
+		maxNew := cfg.MaxTokens
+		if maxNew <= 0 || s.sess.Pos()+maxNew > s.model.maxLen {
+			maxNew = s.model.maxLen - s.sess.Pos()
+		}
+		if maxNew <= 0 {
+			s.err = core.NewError("engine.SessionHandle.Generate: no room to generate in the context window")
+			return
+		}
+		stop := s.model.stopTokens(cfg)
+		emit := func(id int32) bool {
+			if ctx.Err() != nil {
+				return false
+			}
+			inStop := tokenInSet(id, stop)
+			text := s.model.decode(id)
+			if inStop {
+				text = "" // terminator text is never content (see TextModel.decodeFromPrefilled)
+			}
+			if yield != nil && !yield(inference.Token{ID: id, Text: text}) {
+				return false
+			}
+			return !inStop
+		}
+		var (
+			out  []int32
+			gerr error
+		)
+		if cfg.Temperature > 0 || cfg.MinP > 0 || cfg.RepeatPenalty > 1 {
+			params := model.SampleParams{
+				Temperature:    cfg.Temperature,
+				TopK:           cfg.TopK,
+				TopP:           cfg.TopP,
+				MinP:           cfg.MinP,
+				RepeatPenalty:  cfg.RepeatPenalty,
+				SuppressTokens: cfg.SuppressTokens,
+			}
+			out, gerr = generateSampledFromCacheEach(ctx, s.sess, maxNew, stop, model.NewSampler(cfg.Seed), params, nil, emit)
+		} else {
+			out, gerr = generateFromCacheEach(ctx, s.sess, maxNew, -1, emit)
+		}
+		if gerr != nil {
+			s.err = gerr
+			return
+		}
+		s.tokens = append(s.tokens, out...)
+		s.generated = append(s.generated, out...)
+		s.err = ctx.Err()
+	}
+}
+
+// CaptureKV copies the retained KV cache to a portable kv.Snapshot.
+func (s *SessionHandle) CaptureKV(ctx context.Context) (*kv.Snapshot, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.readyForGenerateLocked("engine.SessionHandle.CaptureKV"); err != nil {
+		s.err = err
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		s.err = err
+		return nil, err
+	}
+	snap, err := s.sess.CaptureKVWithOptions(kv.CaptureOptions{})
+	if err != nil {
+		s.err = err
+		return nil, err
+	}
+	s.err = nil
+	return snap, ctx.Err()
+}
+
+// RangeKVBlocks streams the retained KV state as contiguous token blocks.
+func (s *SessionHandle) RangeKVBlocks(ctx context.Context, blockSize int, opts kv.CaptureOptions, yield func(kv.Block) (bool, error)) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if yield == nil {
+		return core.NewError("engine.SessionHandle.RangeKVBlocks: nil yield")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.readyForGenerateLocked("engine.SessionHandle.RangeKVBlocks"); err != nil {
+		s.err = err
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		s.err = err
+		return err
+	}
+	contextYield := func(block kv.Block) (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		cont, err := yield(block)
+		if err != nil {
+			return false, err
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return cont, nil
+	}
+	if err := s.sess.RangeKVBlocks(blockSize, opts, contextYield); err != nil {
+		s.err = err
+		return err
+	}
+	s.err = nil
+	return nil
+}
+
+// RestoreKV is the durable-state alias for RestoreFromKV. The conversation-state
+// session (model/state/session) probes its wrapped handle for a
+// RestoreKV(ctx, *kv.Snapshot) method — its own nativeSessionRestorer seam, named
+// before the inference.KVRestorer contract settled on RestoreFromKV — to wake a
+// stored KV prefix (WakeAgentMemory's snapshot-restore strategy). Without this
+// alias the wrapper satisfied only inference.KVRestorer, so `lem generate -state`
+// wake fell through to "native model session does not support KV restore" for
+// every encoding. Delegating keeps one restore implementation behind both names.
+func (s *SessionHandle) RestoreKV(ctx context.Context, snapshot *kv.Snapshot) error {
+	return s.RestoreFromKV(ctx, snapshot)
+}
+
+// RestoreFromKV loads a portable kv.Snapshot into the retained cache so the next
+// generation continues from it (inference.KVRestorer). The engine consumes the
+// snapshot in kv.Snapshot terms directly (Session.RestoreFromKV).
+func (s *SessionHandle) RestoreFromKV(ctx context.Context, snapshot *kv.Snapshot) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if snapshot == nil {
+		return core.NewError("engine.SessionHandle.RestoreFromKV: nil snapshot")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.readyLocked("engine.SessionHandle.RestoreFromKV"); err != nil {
+		s.err = err
+		return err
+	}
+	if err := s.sess.RestoreFromKV(ctx, snapshot); err != nil {
+		s.err = err
+		return err
+	}
+	s.tokens = append([]int32(nil), snapshot.Tokens...)
+	s.generated = nil
+	s.prefillDuration = 0
+	s.err = nil
+	return ctx.Err()
+}
+
+// sessionKVBlockRestorer is the optional engine-session capability behind
+// [SessionHandle.RestoreKVBlocks] — the streamed per-block wake. engine/metal's
+// ArchSession implements it; an engine session without it keeps the
+// assembled-snapshot fallback.
+type sessionKVBlockRestorer interface {
+	RestoreKVBlockSource(ctx context.Context, source kv.BlockSource) error
+}
+
+// RestoreKVBlocks streams a durable block source into the retained cache — the
+// per-block wake path (model/state/session probes this exact shape on the
+// handle). It exists so the engine's own block restorer is reachable THROUGH
+// the handle: without it the durable wake fell back to a CPU-assembled whole
+// snapshot, which cannot carry raw-q8 block payloads (kv.KVNativeDTypeQ8) —
+// every store-slept q8 conversation then declined its wake and re-prefilled.
+func (s *SessionHandle) RestoreKVBlocks(ctx context.Context, source kv.BlockSource) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if source.Load == nil {
+		return core.NewError("engine.SessionHandle.RestoreKVBlocks: nil block loader")
+	}
+	restorer, ok := s.sess.(sessionKVBlockRestorer)
+	if !ok {
+		return core.NewError("engine.SessionHandle.RestoreKVBlocks: engine session does not stream block restores")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.readyLocked("engine.SessionHandle.RestoreKVBlocks"); err != nil {
+		s.err = err
+		return err
+	}
+	prefix := source.PrefixTokens
+	if prefix <= 0 || prefix > source.TokenCount {
+		prefix = source.TokenCount
+	}
+	// Collect the woken ids as blocks stream (the handle's token mirror is what
+	// AppendPrompt continues from); the engine may trim the final block to the
+	// prefix, so the collector caps at prefix rather than trusting block sizes.
+	tokens := make([]int32, 0, prefix)
+	inner := source.Load
+	source.Load = func(loadCtx context.Context, index int) (kv.Block, error) {
+		block, err := inner(loadCtx, index)
+		if err == nil && block.Snapshot != nil && len(tokens) < prefix {
+			tokens = append(tokens, block.Snapshot.Tokens...)
+		}
+		return block, err
+	}
+	if err := restorer.RestoreKVBlockSource(ctx, source); err != nil {
+		s.err = err
+		return err
+	}
+	if len(tokens) > prefix {
+		tokens = tokens[:prefix]
+	}
+	s.tokens = tokens
+	s.generated = nil
+	s.prefillDuration = 0
+	s.err = nil
+	return ctx.Err()
+}
+
+// Fork creates an independent session from the same retained state by capturing
+// this session's KV and restoring it into a fresh one.
+func (s *SessionHandle) Fork(ctx context.Context) (inference.SessionHandle, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	snapshot, err := s.CaptureKV(ctx)
+	if err != nil {
+		return nil, err
+	}
+	fork := s.model.NewSession()
+	if fork == nil {
+		return nil, core.NewError("engine.SessionHandle.Fork: model returned nil session")
+	}
+	restorer, ok := fork.(inference.KVRestorer)
+	if !ok {
+		_ = fork.Close()
+		return nil, core.NewError("engine.SessionHandle.Fork: forked session cannot restore KV")
+	}
+	if err := restorer.RestoreFromKV(ctx, snapshot); err != nil {
+		_ = fork.Close()
+		return nil, err
+	}
+	return fork, nil
+}
+
+// Reset releases the retained state and reopens a fresh session ready for
+// another prefill.
+func (s *SessionHandle) Reset() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokens = nil
+	s.generated = nil
+	s.prefillDuration = 0
+	if s.model == nil || s.closed {
+		return
+	}
+	next, err := s.model.openSession()
+	if err != nil {
+		s.err = err
+		return
+	}
+	old := s.sess
+	s.sess = next
+	s.err = nil
+	if old != nil {
+		_ = old.Close()
+	}
+}
+
+// Close releases the retained session state.
+func (s *SessionHandle) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return s.err
+	}
+	s.closed = true
+	s.tokens = nil
+	s.generated = nil
+	if s.sess == nil {
+		return s.err
+	}
+	err := s.sess.Close()
+	if err != nil {
+		s.err = err
+	}
+	s.sess = nil
+	return err
+}
+
+// Pos reports the session's retained token position — the continuity layer
+// measures per-turn prefill (prompt tokens actually processed, no replay) as
+// the position delta across its append.
+func (s *SessionHandle) Pos() int {
+	if s == nil || s.sess == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sess.Pos()
+}
+
+// Err returns the last session error.
+func (s *SessionHandle) Err() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err
+}
+
+func (s *SessionHandle) readyLocked(scope string) error {
+	if s == nil || s.model == nil || s.sess == nil {
+		return core.NewError(scope + ": nil session")
+	}
+	if s.closed {
+		return core.NewError(scope + ": session is closed")
+	}
+	return nil
+}
+
+func (s *SessionHandle) readyForGenerateLocked(scope string) error {
+	if err := s.readyLocked(scope); err != nil {
+		return err
+	}
+	if s.sess.Pos() <= 0 {
+		return core.NewError(scope + ": no retained prefill state")
+	}
+	return nil
+}

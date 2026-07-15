@@ -1,0 +1,6 @@
+generatorName: typescript-fetch
+additionalProperties:
+  npmName: "@lethean/lem-sdk"
+  npmVersion: "0.1.0"
+  supportsES6: true
+  typescriptThreePlus: true

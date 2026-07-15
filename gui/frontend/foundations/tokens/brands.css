@@ -1,0 +1,50 @@
+/* ─────────────────────────────────────────────────────────
+   Brand variants. One engine, three skins. Set [data-brand] on
+   an ancestor (usually the .surface root) to swap the accent ramp
+   and identity string. Neutrals, type and states stay shared.
+
+   · hostuk  — Vi royal purple (default). Warm, human, British.
+   · lethean — teal/cyan #40c1c5. Cool, technical, sovereign.
+   · ofm     — reserved rose-amber slot (creator-agency). Placeholder.
+   ───────────────────────────────────────────────────────── */
+
+[data-brand="hostuk"] {
+  --brand-name: "Host UK";
+  --brand-hue: 305;
+  --brand-secondary: var(--ember-500);
+}
+
+[data-brand="lethean"] {
+  /* Hue ~195 calibrated so --brand-400 lands on the canonical #40c1c5.
+     Lethe = Greek river of oblivion. Spartan-helmet (hoplite) mark. */
+  --brand-50:  oklch(0.97 0.020 195);
+  --brand-100: oklch(0.91 0.038 195);
+  --brand-200: oklch(0.84 0.060 195);
+  --brand-300: oklch(0.78 0.085 195);
+  --brand-400: oklch(0.74 0.105 195);  /* canonical #40c1c5 */
+  --brand-500: oklch(0.66 0.115 195);
+  --brand-600: oklch(0.56 0.110 195);
+  --brand-700: oklch(0.46 0.090 195);
+  --brand-800: oklch(0.36 0.070 195);
+  --brand-900: oklch(0.26 0.050 195);
+  --brand-name: "Lethean";
+  --brand-hue: 195;
+  --brand-secondary: var(--info-500);
+}
+
+[data-brand="ofm"] {
+  /* Reserved slot — warm rose-amber for creator-agency vibe. */
+  --brand-50:  oklch(0.96 0.022 28);
+  --brand-100: oklch(0.90 0.050 28);
+  --brand-200: oklch(0.82 0.085 28);
+  --brand-300: oklch(0.74 0.120 28);
+  --brand-400: oklch(0.66 0.145 28);
+  --brand-500: oklch(0.58 0.160 28);
+  --brand-600: oklch(0.50 0.150 28);
+  --brand-700: oklch(0.42 0.125 28);
+  --brand-800: oklch(0.34 0.100 28);
+  --brand-900: oklch(0.26 0.075 28);
+  --brand-name: "OFM";
+  --brand-hue: 28;
+  --brand-secondary: var(--gold-500);
+}

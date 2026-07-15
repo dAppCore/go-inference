@@ -1,0 +1,5 @@
+generatorName: rust
+additionalProperties:
+  packageName: lem-sdk
+  packageVersion: "0.1.0"
+  library: reqwest

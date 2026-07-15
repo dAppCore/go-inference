@@ -1,0 +1,112 @@
+From 721f73290368a6987c93bfccc9dfe84d7fe2f92a Mon Sep 17 00:00:00 2001
+From: Snider <snider@host.uk.com>
+Date: Tue, 16 Jun 2026 18:06:34 +0100
+Subject: [PATCH 06/10] =?UTF-8?q?lthn(perf):=20decode=20buffer=20pin=20?=
+ =?UTF-8?q?=E2=80=94=20free-deferral=20keeps=20a=20recorded=20step's=20buf?=
+ =?UTF-8?q?fers=20address-stable=20for=20replay?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+MetalAllocator::lthn_pin_begin/release: while pinning, free() defers buffers (keeps them alive + same address) instead of recycling, so the recorded decode-step command stream — which references specific MTL::Buffer* — stays valid for verbatim replay. lthn_pin_release() frees them via the normal path. Driver entry points lthn_decode_pin_begin/release. Third of the three replay primitives (recorder, replay, pin); wiring into the decode loop is next.
+
+Co-Authored-By: Virgil <virgil@lethean.io>
+---
+ mlx/backend/metal/allocator.cpp | 33 +++++++++++++++++++++++++++++++++
+ mlx/backend/metal/allocator.h   |  9 +++++++++
+ mlx/backend/metal/device.h      |  2 ++
+ 3 files changed, 44 insertions(+)
+
+diff --git a/mlx/backend/metal/allocator.cpp b/mlx/backend/metal/allocator.cpp
+index 60459c67..f72f38a6 100644
+--- a/mlx/backend/metal/allocator.cpp
++++ b/mlx/backend/metal/allocator.cpp
+@@ -180,12 +180,45 @@ void MetalAllocator::clear_cache() {
+   num_resources_ -= buffer_cache_.clear();
+ }
+ 
++void MetalAllocator::lthn_pin_begin() {
++  std::unique_lock lk(mutex_);
++  lthn_pin_active_ = true;
++}
++
++void MetalAllocator::lthn_pin_release() {
++  std::vector<MTL::Buffer*> pinned;
++  {
++    std::unique_lock lk(mutex_);
++    lthn_pin_active_ = false;
++    pinned.swap(lthn_pinned_);
++  }
++  // Pinning is off now, so free() takes the normal recycle/release path.
++  for (auto* buf : pinned) {
++    free(Buffer{static_cast<void*>(buf)});
++  }
++}
++
++// Driver entry points (decode record/replay): see device.cpp.
++void lthn_decode_pin_begin() {
++  allocator().lthn_pin_begin();
++}
++void lthn_decode_pin_release() {
++  allocator().lthn_pin_release();
++}
++
+ void MetalAllocator::free(Buffer buffer) {
+   auto buf = static_cast<MTL::Buffer*>(buffer.ptr());
+   if (buf == nullptr) {
+     return;
+   }
+   std::unique_lock lk(mutex_);
++  if (lthn_pin_active_) {
++    // Decode record in progress: keep the buffer alive + address-stable so the
++    // recorded command stream replays against it. Released by lthn_pin_release().
++    // The buffer stays "active" (still allocated), so accounting is untouched.
++    lthn_pinned_.push_back(buf);
++    return;
++  }
+   active_memory_ -= buf->length();
+   if (get_cache_memory() < max_pool_size_) {
+     buffer_cache_.recycle_to_cache(buf);
+diff --git a/mlx/backend/metal/allocator.h b/mlx/backend/metal/allocator.h
+index 4cbbfb0a..1f8c1afc 100644
+--- a/mlx/backend/metal/allocator.h
++++ b/mlx/backend/metal/allocator.h
+@@ -42,6 +42,12 @@ class MetalAllocator : public allocator::Allocator {
+   size_t set_wired_limit(size_t limit);
+   void clear_cache();
+ 
++  // lthn decode pin (#perf): while active, free() defers buffers (keeps them
++  // alive + address-stable) instead of recycling, so a recorded decode step's
++  // buffers stay valid for verbatim replay. lthn_pin_release() frees them all.
++  void lthn_pin_begin();
++  void lthn_pin_release();
++
+  private:
+   MTL::Device* device_;
+ 
+@@ -72,6 +78,9 @@ class MetalAllocator : public allocator::Allocator {
+   size_t num_resources_{0};
+   size_t resource_limit_{0};
+ 
++  bool lthn_pin_active_{false};
++  std::vector<MTL::Buffer*> lthn_pinned_;
++
+   std::mutex mutex_;
+ };
+ 
+diff --git a/mlx/backend/metal/device.h b/mlx/backend/metal/device.h
+index 34c797fe..d0ac6b8c 100644
+--- a/mlx/backend/metal/device.h
++++ b/mlx/backend/metal/device.h
+@@ -30,6 +30,8 @@ void lthn_decode_rec_bytes(const void* data, size_t nbytes, int idx);
+ void lthn_decode_rec_tgmem(size_t length, int idx);
+ size_t lthn_decode_finalize();
+ void lthn_decode_replay(MTL::ComputeCommandEncoder* raw);
++void lthn_decode_pin_begin();
++void lthn_decode_pin_release();
+ 
+ class Device;
+ class EventImpl;
+-- 
+2.50.1 (Apple Git-155)
+
