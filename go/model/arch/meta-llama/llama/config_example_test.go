@@ -4,7 +4,7 @@ package llama_test
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/model/llama"
+	"dappco.re/go/inference/model/arch/meta-llama/llama"
 	"dappco.re/go/inference/model/safetensors"
 )
 

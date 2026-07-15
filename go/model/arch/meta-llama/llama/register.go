@@ -5,7 +5,7 @@ package llama
 import (
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	_ "dappco.re/go/inference/model/llama/gguf"
+	_ "dappco.re/go/inference/model/arch/meta-llama/llama/gguf"
 )
 
 // init registers dense Hugging Face Llama checkpoints with the reactive loader.

@@ -7,7 +7,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
-	_ "dappco.re/go/inference/model/llama4"
+	_ "dappco.re/go/inference/model/arch/meta-llama/llama4"
 	"dappco.re/go/inference/model/safetensors"
 )
 
