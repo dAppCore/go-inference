@@ -1,0 +1,13 @@
+# .graphifyignore — scope the go-inference knowledge graph to OUR code.
+#
+# Same syntax as .gitignore (incl. ! negation). graphify already auto-respects
+# .gitignore, so /build/, /bin/, .core/, *.test etc. are skipped. This file
+# only ADDS exclusions.
+#
+# external/ is vendored mlx + ROCm C/C++ (git submodules — therefore NOT in
+# .gitignore). It's a dependency, not go-inference's own code; indexing it
+# roughly doubled the graph with headers like amd_hip_fp6.h / OCLBuffer*.h.
+external/
+
+# JS deps under the GUI (normally gitignored already; explicit for safety).
+gui/node_modules/
