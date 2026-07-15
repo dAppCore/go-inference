@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	core "dappco.re/go"
-	_ "dappco.re/go/inference/model/cohere"
+	_ "dappco.re/go/inference/model/arch/CohereForAI/cohere"
 	"dappco.re/go/inference/model/composed"
 	"dappco.re/go/inference/model/safetensors"
 )

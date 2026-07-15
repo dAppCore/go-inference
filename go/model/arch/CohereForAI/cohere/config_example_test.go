@@ -4,7 +4,7 @@ package cohere_test
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/model/cohere"
+	"dappco.re/go/inference/model/arch/CohereForAI/cohere"
 )
 
 func ExampleConfig() {

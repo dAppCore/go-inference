@@ -28,7 +28,7 @@ import (
 	_ "dappco.re/go/inference/model/bloom"      // bloom
 	_ "dappco.re/go/inference/model/bloom"      // bloom
 	_ "dappco.re/go/inference/model/bloom"      // bloom
-	_ "dappco.re/go/inference/model/cohere"     // cohere / cohere2 dense text
+	_ "dappco.re/go/inference/model/arch/CohereForAI/cohere"     // cohere / cohere2 dense text
 	_ "dappco.re/go/inference/model/composed"   // qwen3_5 / qwen3_5_moe / qwen3_next hybrids (ArchSpec.Composed)
 	_ "dappco.re/go/inference/model/composed"   // qwen3_5 / qwen3_5_moe / qwen3_next hybrids (ArchSpec.Composed)
 	_ "dappco.re/go/inference/model/composed"   // qwen3_5 / qwen3_5_moe / qwen3_next hybrids (ArchSpec.Composed)
