@@ -45,6 +45,27 @@ Path `engine/hip`, package `hip`. The default `linux && amd64` build is native-f
 
 Registers as `"rocm"`. GGUF loading works; safetensors model-pack loading is **not yet available** in the current quarantine landing (blocked on a missing upstream package — the load fails with an explicit message rather than guessing).
 
+#### Quantisation lanes on AMD
+
+Not every quantisation format is equally "native" on ROCm, and this shapes
+what a ROCm quant contribution should target. The AMD-native lanes are:
+
+- **GGUF** (`q4_0`, `q4_K`, `q8_0`) — MLX-style group-affine quantisation;
+  `engine/hip`'s existing `rocm_mlx_q4_projection` kernel family already
+  serves this.
+- **FP8** (W8A8, via llm-compressor / AMD Quark) — 8-bit weight+activation.
+- **MXFP4** (via AMD Quark) — OCP microscaled 4-bit (`model/quant/mxfp4`),
+  hardware-accelerated from CDNA4/MI350 onward.
+
+**GPTQ, AWQ, and Marlin are unsupported on AMD** — this is not a gap to
+close by porting a kernel, it is the ecosystem's own shape: Marlin, the fast
+kernel both GPTQ and AWQ lean on, is hand-written Nvidia tensor-core PTX with
+no ROCm equivalent. Scoping ROCm quant work as "port GPTQ to HIP" swims
+against that grain; the native-feeling targets are GGUF, FP8, and MXFP4
+above. See `docs/design-rocm.md` §A.2 and the
+[vLLM ROCm quantization compatibility matrix](https://docs.vllm.ai/en/latest/features/quantization/)
+for the full picture.
+
 ### About `llama_cpp`
 
 `llama_cpp` is still a slot in the preference order, but **no package in this repository registers it** as an `inference.Backend`. The serving layer provides `serving.HTTPBackend` (name `"http"`) and `serving.LlamaBackend` (name `"llama"`) that wrap an external llama.cpp HTTP server as a `TextModel` — but these are serving-level adapters, not registered inference backends.
