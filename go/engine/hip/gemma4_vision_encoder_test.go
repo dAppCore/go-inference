@@ -14,6 +14,7 @@ import (
 
 	core "dappco.re/go"
 	"dappco.re/go/inference/model"
+	"dappco.re/go/inference/model/quant/mlxaffine"
 )
 
 func TestHIPVisionSDPA_Good(t *testing.T) {
@@ -114,6 +115,56 @@ func TestHIPVisionEncoderTowerProjectPatches_Good(t *testing.T) {
 	hipVisionTestRMSRows(pooled, nil, 1, hidden, 1e-6)
 	want := hipUnifiedVisionTestMatMul(pooled, projection, 1, hidden, textHidden, nil)
 	assertFloat32SlicesNear(t, want, got, 0.0001)
+}
+
+func TestHIPVisionEncoderTowerQuantizedLinears_Good(t *testing.T) {
+	const patchDim, hidden, ffDim, textHidden, groupSize, bits = 8, 8, 8, 4, 8, 4
+	quantized := func(values []float32, outDim, inDim int) model.LoadedVisionLinear {
+		packed, scales, biases, err := mlxaffine.QuantizeTensor(values, outDim, inDim, bits, groupSize)
+		core.RequireNoError(t, err)
+		return model.LoadedVisionLinear{
+			Weight: packed, Scales: scales, Biases: biases,
+			OutDim: outDim, InDim: inDim, GroupSize: groupSize, Bits: bits, Kind: mlxaffine.Mode,
+		}
+	}
+	ones := hipUnifiedVisionTestBF16(hipUnifiedVisionTestValues(hidden, 0, 1))
+	patchValues := hipUnifiedVisionTestValues(hidden*patchDim, 0.025, -0.5)
+	hiddenValues := hipUnifiedVisionTestValues(hidden*hidden, 0.02, -0.4)
+	ffValues := hipUnifiedVisionTestValues(ffDim*hidden, 0.015, -0.3)
+	projectionValues := hipUnifiedVisionTestValues(textHidden*hidden, 0.03, -0.4)
+	loaded := &model.LoadedVision{
+		PatchProjection: quantized(patchValues, hidden, patchDim),
+		Layers: []model.LoadedVisionLayer{{
+			InputNorm: ones, PostAttnNorm: ones, PreFFNorm: ones, PostFFNorm: ones,
+			Q: quantized(hiddenValues, hidden, hidden), K: quantized(hiddenValues, hidden, hidden),
+			V: quantized(hiddenValues, hidden, hidden), O: quantized(hiddenValues, hidden, hidden),
+			QNorm: ones, KNorm: ones,
+			Gate: quantized(ffValues, ffDim, hidden), Up: quantized(ffValues, ffDim, hidden),
+			Down: quantized(hiddenValues, hidden, ffDim),
+		}},
+		Projector: model.LoadedVisionProjector{Projection: quantized(projectionValues, textHidden, hidden)},
+		Cfg: model.LoadedVisionConfig{
+			Hidden: hidden, PatchDim: patchDim, NumLayers: 1,
+			NumHeads: 1, NumKVHeads: 1, HeadDim: hidden,
+			RMSNormEps: 1e-6, PoolKernel: 1, EmbeddingScale: 1,
+		},
+	}
+
+	tower, err := newHIPVisionEncoderTowerFromLoaded(loaded, nil, nil, nil)
+	core.RequireNoError(t, err)
+	if len(tower.patchWeight) != hidden*patchDim {
+		t.Fatalf("decoded patch values = %d, want %d", len(tower.patchWeight), hidden*patchDim)
+	}
+	features, err := tower.ProjectPatches(hipUnifiedVisionTestValues(patchDim, 0.05, 0.1), 1, 1)
+	core.RequireNoError(t, err)
+	if len(features) != textHidden {
+		t.Fatalf("projected values = %d, want %d", len(features), textHidden)
+	}
+	for _, value := range features {
+		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			t.Fatalf("quantized vision output contains non-finite value %v", value)
+		}
+	}
 }
 
 func TestHIPHardwareVisionEncoderProjectImage_Good(t *testing.T) {

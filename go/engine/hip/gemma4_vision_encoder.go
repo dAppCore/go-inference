@@ -45,6 +45,7 @@ type HIPVisionEncoderTower struct {
 	gemm        audio.GEMM
 
 	patchWeight []float32
+	patchBias   []float32
 	positions   []float32
 	postNorm    []float32
 	stdBias     []float32
@@ -111,14 +112,21 @@ func newHIPVisionEncoderTowerFromLoaded(loaded *model.LoadedVision, mapping *saf
 		imageConfig: hipNormalizeVisionImageFeatureConfig(imageConfig),
 		layers:      make([]hipVisionEncoderLayer, len(loaded.Layers)),
 	}
-	patch := loaded.PatchConvWeight
-	if len(patch) == 0 {
-		patch = loaded.PatchEmbedding
-	}
 	var err error
-	if tower.patchWeight, err = hipUnifiedVisionBF16Vector(patch, cfg.Hidden*cfg.PatchDim, "vision patch weight"); err != nil {
+	patch := loaded.PatchProjection
+	if len(patch.Weight) == 0 {
+		payload := loaded.PatchConvWeight
+		if len(payload) == 0 {
+			payload = loaded.PatchEmbedding
+		}
+		patch = model.LoadedVisionLinear{Weight: payload, OutDim: cfg.Hidden, InDim: cfg.PatchDim}
+	}
+	decodedPatch, err := hipVisionDecodeLinear(patch, cfg.Hidden, cfg.PatchDim, "vision patch projection")
+	if err != nil {
 		return nil, err
 	}
+	tower.patchWeight = decodedPatch.weight
+	tower.patchBias = decodedPatch.bias
 	if tower.positions, err = hipVisionOptionalBF16Values(loaded.PositionEmbeddings, "vision positions"); err != nil {
 		return nil, err
 	}
@@ -298,6 +306,7 @@ func (tower *HIPVisionEncoderTower) ProjectPatches(patches []float32, gridHeight
 		scaled[index] = (value - 0.5) * 2
 	}
 	hidden := hipVisionMatMul(tower.gemm, scaled, tower.patchWeight, rows, cfg.PatchDim, cfg.Hidden, true)
+	hipUnifiedVisionAddBias(hidden, tower.patchBias, rows, cfg.Hidden)
 	if err := tower.addPositions(hidden, rows, gridHeight, gridWidth); err != nil {
 		return nil, err
 	}

@@ -161,6 +161,82 @@ func TestVisionLinearWithInputDimQuantMetadata(t *testing.T) {
 	}
 }
 
+func TestAssembleVisionQuantizedEncoderWeightsGood(t *testing.T) {
+	const hidden, patchDim, ffDim, groupSize, bits = 64, 48, 128, 16, 4
+	weights := make(map[string]safetensors.Tensor)
+	addAffine := func(prefix string, outDim, inDim int, linearSuffix bool) {
+		if linearSuffix {
+			prefix += ".linear"
+		}
+		weights[prefix+".weight"] = safetensors.Tensor{
+			Dtype: "U32", Shape: []int{outDim, inDim * bits / 32},
+			Data: make([]byte, outDim*(inDim*bits/32)*4),
+		}
+		weights[prefix+".scales"] = safetensors.Tensor{
+			Dtype: "BF16", Shape: []int{outDim, inDim / groupSize},
+			Data: make([]byte, outDim*(inDim/groupSize)*2),
+		}
+		weights[prefix+".biases"] = safetensors.Tensor{
+			Dtype: "BF16", Shape: []int{outDim, inDim / groupSize},
+			Data: make([]byte, outDim*(inDim/groupSize)*2),
+		}
+	}
+	vec := func(n int) safetensors.Tensor {
+		return safetensors.Tensor{Dtype: "BF16", Shape: []int{n}, Data: make([]byte, n*2)}
+	}
+
+	addAffine("patch_embedder.input_proj", hidden, patchDim, false)
+	prefix := "encoder.layers.0"
+	for _, name := range []string{"input_layernorm", "post_attention_layernorm", "pre_feedforward_layernorm", "post_feedforward_layernorm", "self_attn.q_norm", "self_attn.k_norm"} {
+		weights[prefix+"."+name+".weight"] = vec(hidden)
+	}
+	for _, name := range []string{"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj"} {
+		addAffine(prefix+"."+name, hidden, hidden, true)
+	}
+	addAffine(prefix+".mlp.gate_proj", ffDim, hidden, true)
+	addAffine(prefix+".mlp.up_proj", ffDim, hidden, true)
+	addAffine(prefix+".mlp.down_proj", hidden, ffDim, true)
+	addAffine("embed_vision.embedding_projection", hidden, hidden, false)
+
+	tc := &Gemma4TextConfig{}
+	tc.ModelType = "gemma4"
+	tc.VisionConfig = &Gemma4VisionConfig{}
+	tc.VisionConfig.HiddenSize = hidden
+	tc.VisionConfig.IntermediateSize = ffDim
+	tc.VisionConfig.NumHiddenLayers = 1
+	tc.VisionConfig.NumAttentionHeads = 1
+	tc.VisionConfig.NumKeyValueHeads = 1
+	tc.VisionConfig.HeadDim = hidden
+	tc.VisionConfig.PatchSize = 4
+	tc.VisionConfig.NumChannels = 3
+
+	vision, err := AssembleVision(weights, tc)
+	if err != nil {
+		t.Fatalf("AssembleVision quantized encoder: %v", err)
+	}
+	if vision == nil {
+		t.Fatal("expected a quantized vision tower")
+	}
+	assertAffine := func(label string, linear LoadedVisionLinear, outDim, inDim int) {
+		t.Helper()
+		if len(linear.Scales) == 0 || len(linear.Biases) == 0 {
+			t.Fatalf("%s affine metadata missing: %+v", label, linear)
+		}
+		if linear.OutDim != outDim || linear.InDim != inDim || linear.GroupSize != groupSize || linear.Bits != bits || linear.Kind != "affine" {
+			t.Fatalf("%s geometry = out:%d in:%d group:%d bits:%d kind:%q", label, linear.OutDim, linear.InDim, linear.GroupSize, linear.Bits, linear.Kind)
+		}
+	}
+	assertAffine("patch", vision.PatchProjection, hidden, patchDim)
+	assertAffine("q", vision.Layers[0].Q, hidden, hidden)
+	assertAffine("k", vision.Layers[0].K, hidden, hidden)
+	assertAffine("v", vision.Layers[0].V, hidden, hidden)
+	assertAffine("o", vision.Layers[0].O, hidden, hidden)
+	assertAffine("gate", vision.Layers[0].Gate, ffDim, hidden)
+	assertAffine("up", vision.Layers[0].Up, ffDim, hidden)
+	assertAffine("down", vision.Layers[0].Down, hidden, ffDim)
+	assertAffine("projector", vision.Projector.Projection, hidden, hidden)
+}
+
 // TestAssembleVisionTextOnly pins that a pack with no vision tower yields (nil, nil).
 func TestAssembleVisionTextOnly(t *testing.T) {
 	tc := &Gemma4TextConfig{}

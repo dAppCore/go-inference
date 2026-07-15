@@ -91,6 +91,7 @@ type LoadedVisionConfig struct {
 
 // LoadedVision is the neutral vision payload a backend can upload/build.
 type LoadedVision struct {
+	PatchProjection    LoadedVisionLinear
 	PatchEmbedding     []byte
 	PatchConvWeight    []byte
 	PositionEmbeddings []byte
