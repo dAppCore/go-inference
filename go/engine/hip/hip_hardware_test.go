@@ -94,7 +94,7 @@ func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
 	}
 	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion expected embedding", want, got, 0.00001, 0.00001)
 
-	const affineVocab, affineHidden, affineRows, affineGroupSize = 3, 64, 9, 64
+	const affineVocab, affineHidden, affineRows, affineGroupSize = 3, 64, 17, 64
 	for _, bits := range []int{4, 8} {
 		values := make([]uint32, affineVocab*affineHidden)
 		dense := make([]float32, len(values))

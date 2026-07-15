@@ -119,7 +119,7 @@ const (
 	hipKernelNameEmbedLookup                                = "rocm_embedding_lookup"
 	hipKernelNameEmbedLookupGreedyToken                     = "rocm_embedding_lookup_greedy_token"
 	hipKernelNameDiffusionExpectedEmbedding                 = "rocm_diffusion_expected_embedding"
-	hipKernelNameDiffusionExpectedEmbeddingAffineG64Rows8   = "rocm_diffusion_expected_embedding_affine_g64_rows8"
+	hipKernelNameDiffusionExpectedEmbeddingAffineG64Rows16  = "rocm_diffusion_expected_embedding_affine_g64_rows16"
 	hipKernelNameEmbedMean                                  = "rocm_embedding_mean_pool"
 	hipKernelNameRerank                                     = "rocm_rerank_cosine"
 	hipKernelNameTinyPrefill                                = "rocm_tiny_prefill"

@@ -237,7 +237,7 @@ constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_LAUNCH_ARGS_BYTES = 120;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_F32 = 1;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_BF16 = 2;
 constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_MLX_Q4 = 3;
-constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_AFFINE_G64_ROWS_PER_BLOCK = 8;
+constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_AFFINE_G64_ROWS_PER_BLOCK = 16;
 constexpr uint32_t ROCM_EMBEDDING_MEAN_POOL_LAUNCH_ARGS_VERSION = 1;
 constexpr uint32_t ROCM_EMBEDDING_MEAN_POOL_LAUNCH_ARGS_BYTES = 64;
 constexpr uint32_t ROCM_EMBEDDING_MEAN_POOL_LAUNCH_FLAG_NORMALIZE = 1;
@@ -9447,7 +9447,7 @@ extern "C" __global__ void rocm_diffusion_expected_embedding(const unsigned char
 	output[static_cast<uint64_t>(row) * args.hidden_size + dim] = sum * output_scale;
 }
 
-extern "C" __global__ void rocm_diffusion_expected_embedding_affine_g64_rows8(const unsigned char *packet)
+extern "C" __global__ void rocm_diffusion_expected_embedding_affine_g64_rows16(const unsigned char *packet)
 {
 	if (packet == nullptr) {
 		return;

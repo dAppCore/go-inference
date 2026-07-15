@@ -129,7 +129,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_embedding_lookup`,
 		`extern "C" __global__ void rocm_embedding_lookup_greedy_token`,
 		`extern "C" __global__ void rocm_diffusion_expected_embedding`,
-		`extern "C" __global__ void rocm_diffusion_expected_embedding_affine_g64_rows8`,
+		`extern "C" __global__ void rocm_diffusion_expected_embedding_affine_g64_rows16`,
 		`extern "C" __global__ void rocm_embedding_mean_pool`,
 		`extern "C" __global__ void rocm_rerank_cosine`,
 		`extern "C" __global__ void rocm_tiny_prefill`,
@@ -347,10 +347,10 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 	}
 }
 
-func TestHIPKernelSource_DiffusionExpectedEmbeddingAffineG64Rows8_Good(t *testing.T) {
+func TestHIPKernelSource_DiffusionExpectedEmbeddingAffineG64Rows16_Good(t *testing.T) {
 	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
 	core.RequireNoError(t, err)
-	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_expected_embedding_affine_g64_rows8`)
+	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_expected_embedding_affine_g64_rows16`)
 
 	core.AssertTrue(t, strings.Contains(kernel, `float sums[ROCM_DIFFUSION_EXPECTED_EMBEDDING_AFFINE_G64_ROWS_PER_BLOCK]`), "row-batched expected embedding must retain one ordered sum per row")
 	core.AssertTrue(t, strings.Contains(kernel, `args.bits != 4u && args.bits != 8u`), "row-batched expected embedding must accept the production Q8 table and Q4 tables")
