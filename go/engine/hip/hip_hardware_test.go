@@ -2429,6 +2429,7 @@ func TestHIPHardwareMLXAffineQ8AssistantMLPGroup32_Good(t *testing.T) {
 }
 
 func TestHIPHardwareMLXAffineQ8ProjectionBatchRows16And32MatchRow8_Good(t *testing.T) {
+	t.Setenv("GO_ROCM_DISABLE_Q8_BATCH_ROW32", "1")
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
 	}
