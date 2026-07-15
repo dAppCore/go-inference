@@ -149,7 +149,10 @@ const (
 	hipKernelNameAutoRoundQuantize                          = "rocm_autoround_quantize"
 )
 
-const hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64 = "rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64"
+const (
+	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64             = "rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64"
+	hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64Probability4 = "rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64_prob4"
+)
 
 func hipDecodeKernelBatchEnabled() bool {
 	return core.Env(hipDisableDecodeKernelBatchEnv) != "1"

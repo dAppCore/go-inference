@@ -145,6 +145,7 @@ func TestHIPKernelSource_ExportsLaunchABI_Good(t *testing.T) {
 		`extern "C" __global__ void rocm_diffusion_expected_embedding_affine_g64_rows16`,
 		`extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_dims4_rows4`,
 		`extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64`,
+		`extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64_prob4`,
 		`extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_tile32x64`,
 		`extern "C" __global__ void rocm_diffusion_sample_probabilities`,
 		`extern "C" __global__ void rocm_embedding_mean_pool`,
@@ -425,6 +426,19 @@ func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64SubgroupRows64_Good(t *t
 	core.AssertTrue(t, strings.Contains(kernel, `rocm_shfl_float(probability_source, static_cast<int>(row_lane), ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUP_WIDTH)`), "subgroup kernel must broadcast each probability portably")
 	core.AssertTrue(t, !strings.Contains(kernel, `__shared__`), "subgroup kernel must not consume shared memory")
 	core.AssertTrue(t, !strings.Contains(kernel, `__syncthreads()`), "subgroup kernel must not serialize token tiles with block barriers")
+}
+
+func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64SubgroupRows64Probability4_Good(t *testing.T) {
+	sourceBytes, err := os.ReadFile(hipKernelSourcePathForTest)
+	core.RequireNoError(t, err)
+	kernel := hipKernelSourceFunctionBodyForTest(t, string(sourceBytes), `extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64_prob4`)
+
+	core.AssertTrue(t, strings.Contains(kernel, `token_base += ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_PROBABILITY_TOKENS`), "probability-tiled subgroup kernel must advance one coalesced token tile")
+	core.AssertTrue(t, strings.Contains(kernel, `const uint32_t probability_row = lane / ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_PROBABILITY_TOKENS`), "probability-tiled subgroup kernel must spread each row's consecutive probabilities across adjacent lanes")
+	core.AssertTrue(t, strings.Contains(kernel, `row_lane * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_PROBABILITY_TOKENS + token_lane`), "probability-tiled subgroup kernel must broadcast from the coalesced source lane")
+	core.AssertTrue(t, strings.Contains(kernel, `sums[row_lane][dim_lane] = fmaf(probability, values[dim_lane], sums[row_lane][dim_lane])`), "probability-tiled subgroup kernel must preserve ordered accumulation")
+	core.AssertTrue(t, !strings.Contains(kernel, `__shared__`), "probability-tiled subgroup kernel must not consume shared memory")
+	core.AssertTrue(t, !strings.Contains(kernel, `__syncthreads()`), "probability-tiled subgroup kernel must not add block barriers")
 }
 
 func TestHIPKernelSource_DiffusionExpectedEmbeddingQ8G64Tile32x64_Good(t *testing.T) {

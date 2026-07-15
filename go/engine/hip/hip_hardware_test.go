@@ -95,12 +95,12 @@ func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
 	}
 	assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion expected embedding", want, got, 0.00001, 0.00001)
 
-	const affineVocab, affineHidden, affineGroupSize = 3, 2816, 64
+	const affineVocab, affineHidden, affineGroupSize = 7, 2816, 64
 	for _, bits := range []int{4, 8} {
 		values := make([]uint32, affineVocab*affineHidden)
 		dense := make([]float32, len(values))
-		scaleValues := []float32{1, 0.5, 0.25}
-		biasValues := []float32{0, -1, 2}
+		scaleValues := []float32{1, 0.5, 0.25, 2, 0.75, 1.5, 0.125}
+		biasValues := []float32{0, -1, 2, -0.5, 1.25, -2, 0.75}
 		groupsPerRow := affineHidden / affineGroupSize
 		scales := make([]uint16, affineVocab*groupsPerRow)
 		biases := make([]uint16, affineVocab*groupsPerRow)
@@ -163,6 +163,24 @@ func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
 				}
 			}
 			assertFloat32SlicesNearRelativeNamedForHardwareTest(t, core.Sprintf("diffusion expected embedding %s group64 rows%d", label, affineRows), want, got, 0.00001, 0.00001)
+			if bits == 8 && affineRows == 256 {
+				t.Setenv(hipDisableDiffusionExpectedEmbeddingProbability4Env, "1")
+				control, err := hipRunDiffusionExpectedEmbeddingKernel(context.Background(), hipRuntime.driver, probabilities, affineRows, hipDeviceEmbeddingLookupConfig{
+					EmbeddingPointer: embedding.Pointer(),
+					EmbeddingBytes:   embedding.SizeBytes(),
+					ScalePointer:     scaleBuffer.Pointer(),
+					ScaleBytes:       scaleBuffer.SizeBytes(),
+					BiasPointer:      biasBuffer.Pointer(),
+					BiasBytes:        biasBuffer.SizeBytes(),
+					TableEncoding:    hipEmbeddingTableEncodingMLXQ4,
+					GroupSize:        affineGroupSize,
+					QuantBits:        bits,
+					VocabSize:        affineVocab,
+					HiddenSize:       affineHidden,
+				}, 2)
+				core.RequireNoError(t, err)
+				assertFloat32SlicesNearRelativeNamedForHardwareTest(t, "diffusion expected embedding q8 probability4 control", control, got, 0, 0)
+			}
 		}
 	}
 }

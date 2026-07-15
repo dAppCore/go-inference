@@ -46,8 +46,9 @@ const (
 )
 
 const (
-	hipDisableDiffusionExpectedEmbeddingSubgroupEnv = "GO_ROCM_DISABLE_DIFFUSION_EXPECTED_EMBEDDING_SUBGROUP"
-	hipDisableDiffusionExpectedEmbeddingTileEnv     = "GO_ROCM_DISABLE_DIFFUSION_EXPECTED_EMBEDDING_TILE"
+	hipDisableDiffusionExpectedEmbeddingProbability4Env = "GO_ROCM_DISABLE_DIFFUSION_EXPECTED_EMBEDDING_PROBABILITY4"
+	hipDisableDiffusionExpectedEmbeddingSubgroupEnv     = "GO_ROCM_DISABLE_DIFFUSION_EXPECTED_EMBEDDING_SUBGROUP"
+	hipDisableDiffusionExpectedEmbeddingTileEnv         = "GO_ROCM_DISABLE_DIFFUSION_EXPECTED_EMBEDDING_TILE"
 )
 
 type hipEmbeddingMeanPoolRequest struct {
@@ -755,7 +756,10 @@ func hipRunDiffusionExpectedEmbeddingDeviceKernel(ctx context.Context, driver na
 		cfg.GroupSize == 64 &&
 		bits == 8 &&
 		core.Env(hipDisableDiffusionExpectedEmbeddingSubgroupEnv) != "1" {
-		kernelName = hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64
+		kernelName = hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64Probability4
+		if core.Env(hipDisableDiffusionExpectedEmbeddingProbability4Env) == "1" {
+			kernelName = hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64
+		}
 		gridRows = (rows + hipDiffusionExpectedEmbeddingQ8G64SubgroupRows - 1) / hipDiffusionExpectedEmbeddingQ8G64SubgroupRows
 		gridHidden = ((cfg.HiddenSize + hipDiffusionExpectedEmbeddingQ8G64SubgroupDims - 1) / hipDiffusionExpectedEmbeddingQ8G64SubgroupDims) * 256
 	} else if rows >= hipDiffusionExpectedEmbeddingQ8G64TileRows &&
