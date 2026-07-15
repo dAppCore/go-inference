@@ -939,6 +939,7 @@ func inferenceBenchmarkReportHIPKernelRouteMetrics(b *testing.B, driver *inferen
 	report(hipKernelNameAttentionHeadsBatchCausal, "kernel_attention_batch_causal")
 	report(hipKernelNameAttentionHeadsBatchChunkedStage1, "kernel_attention_batch_chunked_stage1")
 	report(hipKernelNameAttentionHeadsBatchChunkedStage1GQA2, "kernel_attention_batch_chunked_stage1_gqa2")
+	report(hipKernelNameAttentionHeadsBatchChunkedStage1GQA4, "kernel_attention_batch_chunked_stage1_gqa4")
 	report(hipKernelNameAttentionHeadsBatchChunkedStage2, "kernel_attention_batch_chunked_stage2")
 	report(hipKernelNameAttentionHeadsChunkedStage1, "kernel_attention_decode_chunked_stage1")
 	report(hipKernelNameAttentionHeadsChunkedStage2, "kernel_attention_decode_chunked_stage2")
@@ -1517,7 +1518,7 @@ func inferenceBenchmarkHIPKernelTensorShape(config hipKernelLaunchConfig) (rows,
 		return inferenceBenchmarkU32At(args, 36), inferenceBenchmarkU32At(args, 32), inferenceBenchmarkU32At(args, 80), inferenceBenchmarkU32At(args, 40)
 	case hipKernelNameAttentionHeadsChunkedStage1, hipKernelNameAttentionHeadsChunkedStage2:
 		return inferenceBenchmarkU32At(args, 64), inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 60), 0
-	case hipKernelNameAttentionHeadsBatchChunkedStage1, hipKernelNameAttentionHeadsBatchChunkedStage1GQA2, hipKernelNameAttentionHeadsBatchChunkedStage2:
+	case hipKernelNameAttentionHeadsBatchChunkedStage1, hipKernelNameAttentionHeadsBatchChunkedStage1GQA2, hipKernelNameAttentionHeadsBatchChunkedStage1GQA4, hipKernelNameAttentionHeadsBatchChunkedStage2:
 		return inferenceBenchmarkU32At(args, 72), inferenceBenchmarkU32At(args, 48), inferenceBenchmarkU32At(args, 68), inferenceBenchmarkU32At(args, 60)
 	default:
 		return 0, 0, 0, 0
@@ -4783,6 +4784,7 @@ func inferenceBenchmarkIsAttentionKernelName(name string) bool {
 		hipKernelNameAttentionHeadsBatchCausal,
 		hipKernelNameAttentionHeadsBatchChunkedStage1,
 		hipKernelNameAttentionHeadsBatchChunkedStage1GQA2,
+		hipKernelNameAttentionHeadsBatchChunkedStage1GQA4,
 		hipKernelNameAttentionHeadsBatchChunkedStage2:
 		return true
 	default:
@@ -4827,6 +4829,7 @@ func inferenceBenchmarkSelectedHIPKernelNames() []string {
 		hipKernelNameAttentionHeadsBatchCausal,
 		hipKernelNameAttentionHeadsBatchChunkedStage1,
 		hipKernelNameAttentionHeadsBatchChunkedStage1GQA2,
+		hipKernelNameAttentionHeadsBatchChunkedStage1GQA4,
 		hipKernelNameAttentionHeadsBatchChunkedStage2,
 		hipKernelNameRMSNormRoPEHeads,
 		hipKernelNameRMSNormRoPEHeadsBatch,

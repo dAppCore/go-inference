@@ -4601,12 +4601,23 @@ func TestHIPKernels_AttentionHeadsBatchChunkedLaunchArgs_Good(t *testing.T) {
 
 func TestHIPKernels_AttentionHeadsBatchChunkedGQA2Stage1LaunchConfig_Good(t *testing.T) {
 	previous := hipAttentionHeadsBatchChunkedGQA2Enabled
+	previousGQA4 := hipAttentionHeadsBatchChunkedGQA4Enabled
 	hipAttentionHeadsBatchChunkedGQA2Enabled = true
+	hipAttentionHeadsBatchChunkedGQA4Enabled = true
 	t.Cleanup(func() {
 		hipAttentionHeadsBatchChunkedGQA2Enabled = previous
+		hipAttentionHeadsBatchChunkedGQA4Enabled = previousGQA4
 	})
 
 	args := make([]byte, hipAttentionHeadsBatchChunkedLaunchArgsBytes)
+	gqa4, err := hipAttentionHeadsBatchChunkedStage1LaunchConfig(args, 1, 16, 1, hipAttentionHeadsBatchChunkedGQA4MinChunks, hipAttentionHeadsChunkSize, 512)
+	core.RequireNoError(t, err)
+	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage1GQA4, gqa4.Name)
+	core.AssertEqual(t, uint32(128), gqa4.GridX)
+	core.AssertEqual(t, uint32(hipAttentionHeadsChunkedBlockSize), gqa4.BlockX)
+	core.AssertEqual(t, uint32(9984), gqa4.SharedMemBytes)
+
+	hipAttentionHeadsBatchChunkedGQA4Enabled = false
 	gqa2, err := hipAttentionHeadsBatchChunkedStage1LaunchConfig(args, 1, 16, 1, 9, hipAttentionHeadsChunkSize, 512)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, hipKernelNameAttentionHeadsBatchChunkedStage1GQA2, gqa2.Name)

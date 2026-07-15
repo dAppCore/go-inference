@@ -54,7 +54,7 @@ const (
 	hipAttentionHeadsBatchChunkedLaunchArgsVersion            uint32 = 2
 	hipAttentionHeadsBatchChunkedLaunchArgsBytes                     = 136
 	hipAttentionHeadsChunkedBlockSize                                = 512
-	hipAttentionHeadsChunkSize                                       = 64
+	hipAttentionHeadsDefaultChunkSize                                = 64
 	hipAttentionKVSourceContiguous                            uint32 = 0
 	hipAttentionKVSourceDevice                                uint32 = 1
 	hipVectorAddLaunchArgsVersion                             uint32 = 1

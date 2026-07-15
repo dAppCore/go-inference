@@ -7477,7 +7477,7 @@ func TestHIPHardwareEmbeddingKernelSource_Good(t *testing.T) {
 	})
 }
 
-func TestHIPHardwareAttentionHeadsBatchChunkedGQA2MatchesV2_Good(t *testing.T) {
+func TestHIPHardwareAttentionHeadsBatchChunkedGQASharedMatchesV2_Good(t *testing.T) {
 	if os.Getenv("GO_ROCM_RUN_HIP_TESTS") != "1" {
 		t.Skip("set GO_ROCM_RUN_HIP_TESTS=1 to run ROCm hardware smoke tests")
 	}
@@ -7493,8 +7493,10 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQA2MatchesV2_Good(t *testing.T) {
 		t.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
 	}
 	previousGQA2 := hipAttentionHeadsBatchChunkedGQA2Enabled
+	previousGQA4 := hipAttentionHeadsBatchChunkedGQA4Enabled
 	t.Cleanup(func() {
 		hipAttentionHeadsBatchChunkedGQA2Enabled = previousGQA2
+		hipAttentionHeadsBatchChunkedGQA4Enabled = previousGQA4
 	})
 
 	cases := []struct {
@@ -7507,6 +7509,15 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQA2MatchesV2_Good(t *testing.T) {
 		blockSize  int
 		windowSize int
 	}{
+		{
+			name:       "descriptor-pages-e2b-global-dim512-gqa4",
+			dim:        512,
+			tokenCount: hipAttentionHeadsBatchChunkedGQA4MinChunks*hipAttentionHeadsDefaultChunkSize + 5,
+			headCount:  8,
+			keyHeads:   1,
+			queryCount: 2,
+			blockSize:  hipGemma4Q4DeviceKVBlockSize(),
+		},
 		{
 			name:       "descriptor-pages-12b-global-dim512-gqa2",
 			dim:        512,
@@ -7558,7 +7569,8 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQA2MatchesV2_Good(t *testing.T) {
 			defer table.Close()
 			queryPayload, err := hipFloat32Payload(queryValues)
 			core.RequireNoError(t, err)
-			query, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsBatchChunkedGQA2", "GQA2 hardware query", queryPayload, len(queryValues))
+			const operation = "rocm.hip.AttentionHeadsBatchChunkedGQAShared"
+			query, err := hipUploadByteBuffer(hipRuntime.driver, operation, "GQA shared hardware query", queryPayload, len(queryValues))
 			core.RequireNoError(t, err)
 			defer query.Close()
 
@@ -7574,21 +7586,28 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQA2MatchesV2_Good(t *testing.T) {
 				WindowSize:      tc.windowSize,
 				Scale:           1,
 			}
-			run := func(enableGQA2 bool, label string) []float32 {
+			run := func(enableGQA2, enableGQA4 bool, label string) []float32 {
 				hipAttentionHeadsBatchChunkedGQA2Enabled = enableGQA2
-				output, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsBatchChunkedGQA2", label, uint64(len(queryValues)*4), len(queryValues))
+				hipAttentionHeadsBatchChunkedGQA4Enabled = enableGQA4
+				output, err := hipAllocateByteBuffer(hipRuntime.driver, operation, label, uint64(len(queryValues)*4), len(queryValues))
 				core.RequireNoError(t, err)
 				defer output.Close()
 				workspace := &hipAttentionHeadsChunkedWorkspace{}
 				defer workspace.Close()
 				core.RequireNoError(t, hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernelWorkspace(context.Background(), hipRuntime.driver, req, query, output, workspace))
-				got, err := hipReadFloat32DeviceOutput(output, "rocm.hip.AttentionHeadsBatchChunkedGQA2", label, len(queryValues))
+				got, err := hipReadFloat32DeviceOutput(output, operation, label, len(queryValues))
 				core.RequireNoError(t, err)
 				return got
 			}
-			v2 := run(false, "v2 hardware output")
-			gqa2 := run(true, "GQA2 hardware output")
+			v2 := run(false, false, "v2 hardware output")
+			gqa2 := run(true, false, "GQA2 hardware output")
 			assertFloat32SlicesNear(t, v2, gqa2, 0.0001)
+			candidate := gqa2
+			if tc.headCount%tc.keyHeads == 0 && (tc.headCount/tc.keyHeads)%4 == 0 {
+				gqa4 := run(false, true, "GQA4 hardware output")
+				assertFloat32SlicesNear(t, v2, gqa4, 0.0001)
+				candidate = gqa4
+			}
 
 			restoredKeys, restoredValues, err := cache.Restore(0, tc.tokenCount)
 			core.RequireNoError(t, err)
@@ -7610,8 +7629,92 @@ func TestHIPHardwareAttentionHeadsBatchChunkedGQA2MatchesV2_Good(t *testing.T) {
 					want = append(want, headOutput...)
 				}
 			}
-			assertFloat32SlicesNear(t, want, gqa2, 0.005)
+			assertFloat32SlicesNear(t, want, candidate, 0.005)
 		})
+	}
+}
+
+func BenchmarkHIPHardwareAttentionHeadsBatchChunked_E2B32K(b *testing.B) {
+	if os.Getenv("GO_ROCM_RUN_HIP_ATTENTION_BENCHMARK") != "1" {
+		b.Skip("set GO_ROCM_RUN_HIP_ATTENTION_BENCHMARK=1 to run the deep attention benchmark")
+	}
+	if os.Getenv("GO_ROCM_KERNEL_HSACO") == "" {
+		b.Skip("set GO_ROCM_KERNEL_HSACO to a compiled kernels/rocm_kernels.hip HSACO")
+	}
+	runtime := newSystemNativeRuntime()
+	if !runtime.Available() {
+		b.Fatal("native ROCm runtime is not available")
+	}
+	hipRuntime, ok := runtime.(*hipRuntime)
+	if !ok || hipRuntime.driver == nil {
+		b.Fatalf("runtime = %T, want HIP runtime with driver", runtime)
+	}
+
+	const (
+		dim        = 512
+		tokenCount = 32 * 1024
+		headCount  = 8
+		keyHeads   = 1
+	)
+	kvWidth := keyHeads * dim
+	keyValues := make([]float32, tokenCount*kvWidth)
+	valueValues := make([]float32, tokenCount*kvWidth)
+	for token := 0; token < tokenCount; token++ {
+		for dimIndex := 0; dimIndex < dim; dimIndex++ {
+			index := token*dim + dimIndex
+			keyValues[index] = float32(math.Sin(float64(token*3+dimIndex)*0.007) * 0.25)
+			valueValues[index] = float32(math.Cos(float64(token*5+dimIndex*2)*0.009) * 0.5)
+		}
+	}
+	queryValues := make([]float32, headCount*dim)
+	for index := range queryValues {
+		queryValues[index] = float32(math.Sin(float64(index)*0.013) * 0.125)
+	}
+
+	cache, err := newROCmKVCache(rocmKVCacheModeKQ8VQ4, hipGemma4Q4DeviceKVBlockSize())
+	core.RequireNoError(b, err)
+	core.RequireNoError(b, cache.AppendVectors(0, kvWidth, kvWidth, keyValues, valueValues))
+	deviceKV, err := cache.MirrorToDevice(hipRuntime.driver)
+	core.RequireNoError(b, err)
+	defer deviceKV.Close()
+	table, err := deviceKV.KernelDescriptorTable()
+	core.RequireNoError(b, err)
+	defer table.Close()
+	queryPayload, err := hipFloat32Payload(queryValues)
+	core.RequireNoError(b, err)
+	query, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsBatchChunkedBenchmark", "deep attention query", queryPayload, len(queryValues))
+	core.RequireNoError(b, err)
+	defer query.Close()
+	output, err := hipAllocateByteBuffer(hipRuntime.driver, "rocm.hip.AttentionHeadsBatchChunkedBenchmark", "deep attention output", uint64(len(queryValues)*4), len(queryValues))
+	core.RequireNoError(b, err)
+	defer output.Close()
+	workspace := &hipAttentionHeadsChunkedWorkspace{}
+	defer workspace.Close()
+	req := hipAttentionHeadsBatchCausalDeviceRequest{
+		DeviceKV:        deviceKV,
+		DescriptorTable: table,
+		Dim:             dim,
+		TokenCount:      tokenCount,
+		HeadCount:       headCount,
+		KeyHeads:        keyHeads,
+		QueryCount:      1,
+		QueryStartToken: tokenCount - 1,
+		Scale:           1,
+	}
+	core.RequireNoError(b, hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernelWorkspace(context.Background(), hipRuntime.driver, req, query, output, workspace))
+	_, err = hipReadFloat32DeviceOutput(output, "rocm.hip.AttentionHeadsBatchChunkedBenchmark", "deep attention warmup output", len(queryValues))
+	core.RequireNoError(b, err)
+
+	b.ReportAllocs()
+	b.ReportMetric(tokenCount, "context_tokens/op")
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		core.RequireNoError(b, hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernelWorkspace(context.Background(), hipRuntime.driver, req, query, output, workspace))
+	}
+	got, err := hipReadFloat32DeviceOutput(output, "rocm.hip.AttentionHeadsBatchChunkedBenchmark", "deep attention timed output", len(queryValues))
+	core.RequireNoError(b, err)
+	if len(got) != len(queryValues) || math.IsNaN(float64(got[0])) {
+		b.Fatalf("deep attention output is invalid: len=%d first=%v", len(got), got[0])
 	}
 }
 

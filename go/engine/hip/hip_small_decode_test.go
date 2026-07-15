@@ -2949,9 +2949,12 @@ func TestHIPGemma4Q4PrefillAttentionSharedQueryDeepUsesGQA2ChunkedKernel_Good(t 
 func testHIPGemma4Q4PrefillAttentionSharedQueryDeepUsesChunkedKernels(t *testing.T, enableGQA2 bool, expectedStage1 string) {
 	t.Helper()
 	previous := hipAttentionHeadsBatchChunkedGQA2Enabled
+	previousGQA4 := hipAttentionHeadsBatchChunkedGQA4Enabled
 	hipAttentionHeadsBatchChunkedGQA2Enabled = enableGQA2
+	hipAttentionHeadsBatchChunkedGQA4Enabled = false
 	t.Cleanup(func() {
 		hipAttentionHeadsBatchChunkedGQA2Enabled = previous
+		hipAttentionHeadsBatchChunkedGQA4Enabled = previousGQA4
 	})
 	const (
 		dim             = 512
@@ -3041,7 +3044,83 @@ func TestHIPAttentionHeadsBatchChunkedGQA2Eligible_Good(t *testing.T) {
 	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA2Eligible(4, 3), "invalid GQA topology must stay on v2")
 
 	hipAttentionHeadsBatchChunkedGQA2Enabled = false
-	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA2Eligible(16, 1), "disabled experimental route must stay on v2")
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA2Eligible(16, 1), "disabled route must stay on v2")
+}
+
+func TestHIPAttentionHeadsBatchChunkedGQA4Eligible_Good(t *testing.T) {
+	previous := hipAttentionHeadsBatchChunkedGQA4Enabled
+	hipAttentionHeadsBatchChunkedGQA4Enabled = true
+	t.Cleanup(func() {
+		hipAttentionHeadsBatchChunkedGQA4Enabled = previous
+	})
+
+	core.AssertTrue(t, hipAttentionHeadsBatchChunkedGQA4Eligible(8, 1, hipAttentionHeadsBatchChunkedGQA4MinChunks), "eight query heads sharing one KV head must group by four")
+	core.AssertTrue(t, hipAttentionHeadsBatchChunkedGQA4Eligible(16, 4, hipAttentionHeadsBatchChunkedGQA4MinChunks), "four query heads per KV head must group by four")
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA4Eligible(8, 1, hipAttentionHeadsBatchChunkedGQA4MinChunks-1), "short scans must stay on GQA2")
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA4Eligible(12, 4, hipAttentionHeadsBatchChunkedGQA4MinChunks), "three query heads per KV head must stay on GQA2 or v2")
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA4Eligible(4, 2, hipAttentionHeadsBatchChunkedGQA4MinChunks), "two query heads per KV head must stay on GQA2")
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA4Eligible(4, 3, hipAttentionHeadsBatchChunkedGQA4MinChunks), "invalid GQA topology must stay on v2")
+
+	hipAttentionHeadsBatchChunkedGQA4Enabled = false
+	core.AssertTrue(t, !hipAttentionHeadsBatchChunkedGQA4Eligible(8, 1, hipAttentionHeadsBatchChunkedGQA4MinChunks), "disabled route must stay on GQA2 or v2")
+}
+
+func TestHIPAttentionHeadsConfiguredChunkSize_Good(t *testing.T) {
+	for _, test := range []struct {
+		value string
+		want  int
+	}{
+		{value: "32", want: 32},
+		{value: "64", want: 64},
+		{value: "128", want: 128},
+		{value: "256", want: 256},
+		{value: "512", want: 512},
+	} {
+		core.AssertEqual(t, test.want, hipAttentionHeadsConfiguredChunkSize(test.value))
+	}
+}
+
+func TestHIPAttentionHeadsConfiguredChunkSize_Bad(t *testing.T) {
+	for _, value := range []string{"0", "63", "96", "513", "invalid"} {
+		core.AssertEqual(t, hipAttentionHeadsDefaultChunkSize, hipAttentionHeadsConfiguredChunkSize(value))
+	}
+}
+
+func TestHIPAttentionHeadsConfiguredChunkSize_Ugly(t *testing.T) {
+	core.AssertEqual(t, hipAttentionHeadsDefaultChunkSize, hipAttentionHeadsConfiguredChunkSize(""))
+}
+
+func TestHIPAttentionHeadsChunkSizeForRequest_Good(t *testing.T) {
+	previousExplicit := hipAttentionHeadsChunkSizeExplicit
+	previousSize := hipAttentionHeadsChunkSize
+	hipAttentionHeadsChunkSizeExplicit = false
+	hipAttentionHeadsChunkSize = hipAttentionHeadsDefaultChunkSize
+	t.Cleanup(func() {
+		hipAttentionHeadsChunkSizeExplicit = previousExplicit
+		hipAttentionHeadsChunkSize = previousSize
+	})
+	req := hipAttentionHeadsBatchCausalDeviceRequest{TokenCount: hipAttentionHeadsDeepChunkMinTokens, WindowSize: 0}
+	core.AssertEqual(t, hipAttentionHeadsDeepChunkSize, hipAttentionHeadsChunkSizeForRequest(req))
+}
+
+func TestHIPAttentionHeadsChunkSizeForRequest_Bad(t *testing.T) {
+	previousExplicit := hipAttentionHeadsChunkSizeExplicit
+	hipAttentionHeadsChunkSizeExplicit = false
+	t.Cleanup(func() { hipAttentionHeadsChunkSizeExplicit = previousExplicit })
+	core.AssertEqual(t, hipAttentionHeadsDefaultChunkSize, hipAttentionHeadsChunkSizeForRequest(hipAttentionHeadsBatchCausalDeviceRequest{TokenCount: hipAttentionHeadsDeepChunkMinTokens - 1}))
+	core.AssertEqual(t, hipAttentionHeadsDefaultChunkSize, hipAttentionHeadsChunkSizeForRequest(hipAttentionHeadsBatchCausalDeviceRequest{TokenCount: hipAttentionHeadsDeepChunkMinTokens, WindowSize: 512}))
+}
+
+func TestHIPAttentionHeadsChunkSizeForRequest_Ugly(t *testing.T) {
+	previousExplicit := hipAttentionHeadsChunkSizeExplicit
+	previousSize := hipAttentionHeadsChunkSize
+	hipAttentionHeadsChunkSizeExplicit = true
+	hipAttentionHeadsChunkSize = 32
+	t.Cleanup(func() {
+		hipAttentionHeadsChunkSizeExplicit = previousExplicit
+		hipAttentionHeadsChunkSize = previousSize
+	})
+	core.AssertEqual(t, 32, hipAttentionHeadsChunkSizeForRequest(hipAttentionHeadsBatchCausalDeviceRequest{TokenCount: hipAttentionHeadsDeepChunkMinTokens, WindowSize: 0}))
 }
 
 func hipGemma4Q4PrefillForwardTestPerLayerInputs(t *testing.T, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, tokens []int32, label string) []*hipDeviceByteBuffer {
@@ -7461,8 +7540,8 @@ func benchmarkHIPAttentionHeadsChunkedLaunchArgs() hipAttentionHeadsChunkedLaunc
 		dim        = 256
 		tokenCount = 4096
 		headCount  = 8
-		chunkSize  = hipAttentionHeadsChunkSize
 	)
+	chunkSize := hipAttentionHeadsChunkSize
 	chunkCount := (tokenCount + chunkSize - 1) / chunkSize
 	queryElements := dim * headCount
 	return hipAttentionHeadsChunkedLaunchArgs{
@@ -7491,8 +7570,8 @@ func benchmarkHIPAttentionHeadsBatchChunkedLaunchArgs() hipAttentionHeadsBatchCh
 		tokenCount = 4096
 		headCount  = 8
 		queryCount = 16
-		chunkSize  = hipAttentionHeadsChunkSize
 	)
+	chunkSize := hipAttentionHeadsChunkSize
 	chunkCount := (tokenCount + chunkSize - 1) / chunkSize
 	queryElements := dim * headCount * queryCount
 	return hipAttentionHeadsBatchChunkedLaunchArgs{

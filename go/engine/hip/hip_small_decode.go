@@ -2832,9 +2832,31 @@ func hipRunAttentionHeadsBatchCausalOutputFromDeviceQueryToDeviceKernelWorkspace
 
 type hipAttentionHeadsBatchChunkedEligibilityReason uint8
 
-const hipAttentionHeadsBatchChunkedGQA2Env = "GO_ROCM_ENABLE_EXPERIMENTAL_GQA2_CHUNKED_ATTENTION"
+const (
+	hipAttentionHeadsBatchChunkedGQA2DisableEnv = "GO_ROCM_DISABLE_GQA2_CHUNKED_ATTENTION"
+	hipAttentionHeadsBatchChunkedGQA4DisableEnv = "GO_ROCM_DISABLE_GQA4_CHUNKED_ATTENTION"
+	hipAttentionHeadsChunkSizeEnv               = "GO_ROCM_ATTENTION_CHUNK_SIZE"
+	hipAttentionHeadsBatchChunkedGQA4MinChunks  = 32
+	hipAttentionHeadsDeepChunkMinTokens         = 16 * 1024
+	hipAttentionHeadsDeepChunkSize              = 128
+)
 
-var hipAttentionHeadsBatchChunkedGQA2Enabled = os.Getenv(hipAttentionHeadsBatchChunkedGQA2Env) == "1"
+var hipAttentionHeadsBatchChunkedGQA2Enabled = os.Getenv(hipAttentionHeadsBatchChunkedGQA2DisableEnv) != "1"
+var hipAttentionHeadsBatchChunkedGQA4Enabled = os.Getenv(hipAttentionHeadsBatchChunkedGQA4DisableEnv) != "1"
+var hipAttentionHeadsChunkSize = hipAttentionHeadsConfiguredChunkSize(os.Getenv(hipAttentionHeadsChunkSizeEnv))
+var hipAttentionHeadsChunkSizeExplicit = os.Getenv(hipAttentionHeadsChunkSizeEnv) != ""
+
+func hipAttentionHeadsConfiguredChunkSize(value string) int {
+	parsed := core.ParseInt(value, 10, 32)
+	if !parsed.OK {
+		return hipAttentionHeadsDefaultChunkSize
+	}
+	size := int(parsed.Value.(int64))
+	if size < 32 || size > hipAttentionHeadsChunkedBlockSize || size&(size-1) != 0 || hipAttentionHeadsChunkedBlockSize%size != 0 {
+		return hipAttentionHeadsDefaultChunkSize
+	}
+	return size
+}
 
 func hipAttentionHeadsBatchChunkedGQA2Eligible(headCount, keyHeads int) bool {
 	if !hipAttentionHeadsBatchChunkedGQA2Enabled || headCount <= 0 || keyHeads <= 0 || headCount%keyHeads != 0 {
@@ -2844,6 +2866,14 @@ func hipAttentionHeadsBatchChunkedGQA2Eligible(headCount, keyHeads int) bool {
 	return queryHeadsPerKV >= 2 && queryHeadsPerKV%2 == 0
 }
 
+func hipAttentionHeadsBatchChunkedGQA4Eligible(headCount, keyHeads, chunkCount int) bool {
+	if !hipAttentionHeadsBatchChunkedGQA4Enabled || headCount <= 0 || keyHeads <= 0 || headCount%keyHeads != 0 || chunkCount < hipAttentionHeadsBatchChunkedGQA4MinChunks {
+		return false
+	}
+	queryHeadsPerKV := headCount / keyHeads
+	return queryHeadsPerKV >= 4 && queryHeadsPerKV%4 == 0
+}
+
 func hipAttentionHeadsBatchChunkedStage1LaunchConfig(args []byte, queryCount, headCount, keyHeads, chunkCount, chunkSize, dim int) (hipKernelLaunchConfig, error) {
 	name := hipKernelNameAttentionHeadsBatchChunkedStage1
 	stage1HeadRows := queryCount * headCount
@@ -2851,7 +2881,14 @@ func hipAttentionHeadsBatchChunkedStage1LaunchConfig(args []byte, queryCount, he
 	if err != nil {
 		return hipKernelLaunchConfig{}, err
 	}
-	if hipAttentionHeadsBatchChunkedGQA2Eligible(headCount, keyHeads) {
+	if hipAttentionHeadsBatchChunkedGQA4Eligible(headCount, keyHeads, chunkCount) {
+		name = hipKernelNameAttentionHeadsBatchChunkedStage1GQA4
+		stage1HeadRows = queryCount * (headCount / 4)
+		sharedMemBytes, err = hipAttentionHeadsBatchChunkedGQA4SharedMemBytes(chunkSize, dim)
+		if err != nil {
+			return hipKernelLaunchConfig{}, err
+		}
+	} else if hipAttentionHeadsBatchChunkedGQA2Eligible(headCount, keyHeads) {
 		name = hipKernelNameAttentionHeadsBatchChunkedStage1GQA2
 		stage1HeadRows = queryCount * (headCount / 2)
 		sharedMemBytes, err = hipAttentionHeadsBatchChunkedGQA2SharedMemBytes(chunkSize, dim)
@@ -2875,6 +2912,40 @@ func hipAttentionHeadsBatchChunkedStage1LaunchConfig(args []byte, queryCount, he
 		SharedMemBytes: sharedMemBytes,
 	}
 	return config, config.Validate()
+}
+
+func hipAttentionHeadsChunkSizeForRequest(req hipAttentionHeadsBatchCausalDeviceRequest) int {
+	if hipAttentionHeadsChunkSizeExplicit {
+		return hipAttentionHeadsChunkSize
+	}
+	if req.WindowSize == 0 && req.TokenCount >= hipAttentionHeadsDeepChunkMinTokens {
+		return hipAttentionHeadsDeepChunkSize
+	}
+	return hipAttentionHeadsDefaultChunkSize
+}
+
+func hipAttentionHeadsBatchChunkedGQA4SharedMemBytes(chunkSize, dim int) (uint32, error) {
+	chunk, err := rocmDeviceKVPositiveUint32("attention GQA4 chunked chunk size", chunkSize)
+	if err != nil {
+		return 0, err
+	}
+	width, err := rocmDeviceKVPositiveUint32("attention GQA4 chunked query dim", dim)
+	if err != nil {
+		return 0, err
+	}
+	bytes := uint64(chunk) * 4 * 4
+	bytes = hipAttentionHeadsAlignSharedBytes(bytes, 8)
+	bytes += uint64(chunk) * 8
+	bytes = hipAttentionHeadsAlignSharedBytes(bytes, 4)
+	bytes += uint64(chunk) * 4
+	for index := 0; index < 4; index++ {
+		bytes = hipAttentionHeadsAlignSharedBytes(bytes, 4)
+		bytes += uint64(width) * 4
+	}
+	if bytes > math.MaxUint32 {
+		return 0, core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "attention GQA4 chunked shared memory byte count is out of uint32 range", nil)
+	}
+	return uint32(bytes), nil
 }
 
 func hipAttentionHeadsBatchChunkedGQA2SharedMemBytes(chunkSize, dim int) (uint32, error) {
@@ -3005,7 +3076,7 @@ func hipRunAttentionHeadsBatchChunkedOutputFromDeviceQueryToDeviceKernelWorkspac
 		return core.E("rocm.hip.AttentionHeadsBatchChunkedLaunch", "device KV cache shape is unsupported", nil)
 	}
 
-	chunkSize := hipAttentionHeadsChunkSize
+	chunkSize := hipAttentionHeadsChunkSizeForRequest(req)
 	chunkStartToken, chunkCount := hipAttentionHeadsBatchChunkedActiveRange(req.QueryStartToken, req.QueryCount, req.TokenCount, req.WindowSize, chunkSize)
 	workspaceHeadRows := req.HeadCount * req.QueryCount
 	workspaceTokens := chunkCount * chunkSize
