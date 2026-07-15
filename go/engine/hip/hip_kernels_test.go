@@ -1455,6 +1455,7 @@ func TestHIPKernels_MLXAffineQ8ProjectionBatchRow16Tokens16LaunchConfig_Good(t *
 }
 
 func TestHIPKernels_MLXAffineQ8ProjectionBatchSharedLaunchConfig_Good(t *testing.T) {
+	t.Setenv("GO_ROCM_DISABLE_Q8_BATCH_ROW32", "1")
 	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionBatchLaunchArgsBytes)
 	defer hipReleaseLaunchPacket(packet)
 
@@ -1476,18 +1477,18 @@ func TestHIPKernels_MLXAffineQ8ProjectionBatchRow32Tokens64LaunchConfig_Good(t *
 	packet := hipBorrowLaunchPacket(hipMLXQ4ProjectionBatchLaunchArgsBytes)
 	defer hipReleaseLaunchPacket(packet)
 
-	config, err := hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 262144, 2816, 64, 8, 256)
+	config, err := hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 4096, 2816, 64, 8, 256)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, "rocm_mlx_q4_projection_batch_q8_g64_row32_tokens64_shared", config.Name)
-	core.AssertEqual(t, uint32(8192), config.GridX)
+	core.AssertEqual(t, uint32(128), config.GridX)
 	core.AssertEqual(t, uint32(4), config.GridY)
 	core.AssertEqual(t, hipMLXQ4ProjectionBlockSize, config.BlockX)
 
 	t.Setenv("GO_ROCM_DISABLE_Q8_BATCH_ROW32", "1")
-	config, err = hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 262144, 2816, 64, 8, 256)
+	config, err = hipMLXQ4ProjectionBatchLaunchConfigForShape(packet, 4096, 2816, 64, 8, 256)
 	core.RequireNoError(t, err)
 	core.AssertEqual(t, hipKernelNameMLXQ4ProjBatchQ8G64Row16Tokens64Shared, config.Name)
-	core.AssertEqual(t, uint32(16384), config.GridX)
+	core.AssertEqual(t, uint32(256), config.GridX)
 }
 
 func TestHIPKernels_MLXQ4ProjectionGreedyBatch_Good(t *testing.T) {
