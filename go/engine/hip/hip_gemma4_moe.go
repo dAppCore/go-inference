@@ -2659,7 +2659,7 @@ func hipRunGGUFQ4KExpandMetadataKernel(ctx context.Context, driver nativeHIPDriv
 	if err != nil {
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func (args hipGGUFQ4_0ProjectionLaunchArgs) Binary() ([]byte, error) {
@@ -2975,7 +2975,7 @@ func hipRunGGUFQ4_0SelectedExpertsKernelWithDeviceInputOutputWithWorkspace(ctx c
 		{Name: gateKernel, Args: launchBytes, GridX: (gateRows + gateRowsPerBlock - 1) / gateRowsPerBlock, GridY: 1, GridZ: 1, BlockX: hipGGUFQ4_0ProjectionBlockSize, BlockY: 1, BlockZ: 1},
 		{Name: downKernel, Args: launchBytes, GridX: (downRows + downRowsPerBlock - 1) / downRowsPerBlock, GridY: 1, GridZ: 1, BlockX: hipGGUFQ4_0ProjectionBlockSize, BlockY: 1, BlockZ: 1},
 	} {
-		if err := hipLaunchKernel(driver, config); err != nil {
+		if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 			return err
 		}
 	}
@@ -3033,5 +3033,5 @@ func hipRunGGUFQ4_0KernelWithDeviceInputOutput(ctx context.Context, driver nativ
 		BlockY: 1,
 		BlockZ: 1,
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }

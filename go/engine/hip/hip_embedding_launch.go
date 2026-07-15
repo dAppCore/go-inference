@@ -395,7 +395,7 @@ func hipRunEmbeddingMeanPoolKernel(ctx context.Context, driver nativeHIPDriver, 
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	return buffers.ReadOutput()
@@ -761,7 +761,7 @@ func hipRunDiffusionExpectedEmbeddingDeviceKernel(ctx context.Context, driver na
 		_ = output.Close()
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, hipKernelLaunchConfig{
+	if err := hipLaunchKernelContext(ctx, driver, hipKernelLaunchConfig{
 		Name:   kernelName,
 		Args:   args,
 		GridX:  gridX,
@@ -962,7 +962,7 @@ func hipRunEmbeddingLookupKernel(ctx context.Context, driver nativeHIPDriver, re
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	return buffers.ReadOutput()
@@ -1088,7 +1088,7 @@ func hipRunEmbeddingLookupKernelWithDeviceTableTokenBatchScaledOutput(ctx contex
 	if err != nil {
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunEmbeddingLookupKernelWithDeviceTableSingleTokenBuffer(ctx context.Context, driver nativeHIPDriver, tokenID int32, cfg hipDeviceEmbeddingLookupConfig, tokenBuffer *hipDeviceByteBuffer) (*hipDeviceByteBuffer, error) {
@@ -1191,7 +1191,7 @@ func hipRunEmbeddingLookupKernelWithDeviceTableTokenBufferScaledOutputWithWorksp
 	if err != nil {
 		return err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return err
 	}
 	return nil
@@ -1251,7 +1251,7 @@ func hipRunEmbeddingLookupKernelWithDeviceTableGreedyTokenScaledOutputWithWorksp
 	if err != nil {
 		return err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return err
 	}
 	return nil
@@ -1440,7 +1440,7 @@ func hipRunRerankCosineKernel(ctx context.Context, driver nativeHIPDriver, req h
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	return buffers.ReadOutput()

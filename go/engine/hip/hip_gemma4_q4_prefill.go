@@ -903,7 +903,7 @@ func hipRunPerLayerInputTransposeKernel(ctx context.Context, driver nativeHIPDri
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	success = true
@@ -950,7 +950,7 @@ func hipRunPerLayerInputTransposeKernelOutput(ctx context.Context, driver native
 	if err != nil {
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunGemma4Q4PrefillPerLayerInputDeviceSetBatchWorkspace(ctx context.Context, driver nativeHIPDriver, cfg hipGemma4Q4ForwardConfig, tokens []int32, hidden *hipDeviceByteBuffer, epsilon float32, workspace *hipAttentionHeadsChunkedWorkspace) (*hipGemma4Q4PerLayerInputDeviceSet, error) {

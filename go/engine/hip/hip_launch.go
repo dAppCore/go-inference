@@ -5,6 +5,7 @@
 package hip
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 )
 
 const (
+	hipDisableDecodeKernelBatchEnv                          = "GO_ROCM_DISABLE_DECODE_KERNEL_BATCH"
 	hipKernelNamePrefill                                    = "rocm_prefill"
 	hipKernelNameDecode                                     = "rocm_decode"
 	hipKernelNameKVEncodeToken                              = "rocm_kv_encode_token"
@@ -138,6 +140,10 @@ const (
 	hipKernelNameAutoRoundQuantize                          = "rocm_autoround_quantize"
 )
 
+func hipDecodeKernelBatchEnabled() bool {
+	return core.Env(hipDisableDecodeKernelBatchEnv) != "1"
+}
+
 type hipKernelLaunchConfig struct {
 	Name           string
 	Args           []byte
@@ -154,8 +160,135 @@ type nativeHIPKernelLauncher interface {
 	LaunchKernel(config hipKernelLaunchConfig) error
 }
 
+type nativeHIPKernelBatchLauncher interface {
+	LaunchKernelBatch(configs []hipKernelLaunchConfig) error
+}
+
 type nativeHIPDeviceSynchronizer interface {
 	DeviceSynchronize() error
+}
+
+type hipKernelLaunchBatchContextKey struct{}
+
+const (
+	hipKernelLaunchBatchAlign        = 16
+	hipKernelLaunchBatchInitialBytes = 128 << 10
+)
+
+type hipKernelLaunchBatchBuffer struct {
+	configs []hipKernelLaunchConfig
+	offsets []int
+	lengths []int
+	payload []byte
+}
+
+var hipKernelLaunchBatchBuffers = sync.Pool{
+	New: func() any {
+		return &hipKernelLaunchBatchBuffer{
+			configs: make([]hipKernelLaunchConfig, 0, 512),
+			offsets: make([]int, 0, 512),
+			lengths: make([]int, 0, 512),
+			payload: make([]byte, 0, hipKernelLaunchBatchInitialBytes),
+		}
+	},
+}
+
+type hipKernelLaunchBatch struct {
+	driver   nativeHIPDriver
+	launcher nativeHIPKernelBatchLauncher
+	buffer   *hipKernelLaunchBatchBuffer
+	closed   bool
+}
+
+func hipBeginKernelLaunchBatch(ctx context.Context, driver nativeHIPDriver) (context.Context, *hipKernelLaunchBatch) {
+	if ctx == nil || driver == nil || hipActiveDecodeRouteMetrics() != nil {
+		return ctx, nil
+	}
+	launcher, ok := driver.(nativeHIPKernelBatchLauncher)
+	if !ok {
+		return ctx, nil
+	}
+	batch := &hipKernelLaunchBatch{
+		driver:   driver,
+		launcher: launcher,
+		buffer:   hipKernelLaunchBatchBuffers.Get().(*hipKernelLaunchBatchBuffer),
+	}
+	return context.WithValue(ctx, hipKernelLaunchBatchContextKey{}, batch), batch
+}
+
+func hipLaunchKernelContext(ctx context.Context, driver nativeHIPDriver, config hipKernelLaunchConfig) error {
+	if ctx != nil {
+		if batch, ok := ctx.Value(hipKernelLaunchBatchContextKey{}).(*hipKernelLaunchBatch); ok && batch != nil && batch.driver == driver {
+			if batch.closed {
+				return core.E("rocm.hip.LaunchKernelBatch", "kernel launch batch is closed", nil)
+			}
+			if err := config.Validate(); err != nil {
+				return err
+			}
+			batch.append(config)
+			return nil
+		}
+	}
+	return hipLaunchKernel(driver, config)
+}
+
+func (batch *hipKernelLaunchBatch) Flush() error {
+	if batch == nil || batch.closed {
+		return nil
+	}
+	batch.closed = true
+	buffer := batch.buffer
+	batch.buffer = nil
+	defer hipReleaseKernelLaunchBatchBuffer(buffer)
+	configs := buffer.configs
+	if len(configs) == 0 {
+		return nil
+	}
+	for index := range configs {
+		offset := buffer.offsets[index]
+		end := offset + buffer.lengths[index]
+		configs[index].Args = buffer.payload[offset:end:end]
+	}
+	return batch.launcher.LaunchKernelBatch(configs)
+}
+
+func (batch *hipKernelLaunchBatch) Discard() {
+	if batch == nil || batch.closed {
+		return
+	}
+	batch.closed = true
+	buffer := batch.buffer
+	batch.buffer = nil
+	hipReleaseKernelLaunchBatchBuffer(buffer)
+}
+
+func (batch *hipKernelLaunchBatch) append(config hipKernelLaunchConfig) {
+	buffer := batch.buffer
+	offset := (len(buffer.payload) + hipKernelLaunchBatchAlign - 1) &^ (hipKernelLaunchBatchAlign - 1)
+	end := offset + len(config.Args)
+	if end > len(buffer.payload) {
+		buffer.payload = append(buffer.payload, make([]byte, end-len(buffer.payload))...)
+	}
+	copy(buffer.payload[offset:end], config.Args)
+	hipReleaseLaunchPacket(config.Args)
+	config.Args = nil
+	buffer.configs = append(buffer.configs, config)
+	buffer.offsets = append(buffer.offsets, offset)
+	buffer.lengths = append(buffer.lengths, end-offset)
+}
+
+func hipReleaseKernelLaunchBatchBuffer(buffer *hipKernelLaunchBatchBuffer) {
+	if buffer == nil {
+		return
+	}
+	for index := range buffer.configs {
+		buffer.configs[index] = hipKernelLaunchConfig{}
+	}
+	buffer.configs = buffer.configs[:0]
+	buffer.offsets = buffer.offsets[:0]
+	buffer.lengths = buffer.lengths[:0]
+	buffer.payload = buffer.payload[:0]
+	hipKernelLaunchBatchBuffers.Put(buffer)
 }
 
 type hipLaunchPacketPool struct {

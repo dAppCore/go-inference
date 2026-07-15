@@ -350,7 +350,7 @@ func hipRunMoEMLXAffineRoutesKernelWithArgs(ctx context.Context, driver nativeHI
 	if gridX == 0 || gridX > uint64(^uint32(0)) || uint64(chunkCount) > uint64(^uint32(0)) {
 		return core.E(operation, "MLX affine route grid exceeds uint32", nil)
 	}
-	return hipLaunchKernel(driver, hipKernelLaunchConfig{
+	return hipLaunchKernelContext(ctx, driver, hipKernelLaunchConfig{
 		Name: hipKernelNameMoEMLXAffineRoutes, Args: args,
 		GridX: uint32(gridX), GridY: uint32(chunkCount), GridZ: 1,
 		BlockX: hipMoEBatchRouteBlockSize, BlockY: 1, BlockZ: 1,
@@ -858,7 +858,7 @@ func hipRunMoERouterKernel(ctx context.Context, driver nativeHIPDriver, req hipM
 	if err != nil {
 		return hipMoERouterResult{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipMoERouterResult{}, err
 	}
 	return buffers.ReadOutput()
@@ -923,7 +923,7 @@ func hipRunMoERouterKernelWithDeviceInputWorkspace(ctx context.Context, driver n
 	if err != nil {
 		return hipMoERouterResult{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipMoERouterResult{}, err
 	}
 	if workspace != nil {
@@ -1109,7 +1109,7 @@ func hipRunMoELazyExpertKernel(ctx context.Context, driver nativeHIPDriver, req 
 	if err != nil {
 		return hipMoELazyExpertResult{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipMoELazyExpertResult{}, err
 	}
 	return buffers.ReadOutput()

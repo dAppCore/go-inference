@@ -155,7 +155,7 @@ func hipRunDiffusionSampleKernel(ctx context.Context, driver nativeHIPDriver, lo
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	payload := make([]byte, rows*hipDiffusionSampleResultBytes)

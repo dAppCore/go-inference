@@ -2434,7 +2434,7 @@ func hipRunMLXQ4ProjectionKernel(ctx context.Context, driver nativeHIPDriver, re
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	output, err := buffers.ReadOutput()
@@ -2598,7 +2598,7 @@ func hipRunMLXQ4ProjectionKernelWithDeviceInputOutputWithWorkspace(ctx context.C
 	if err != nil {
 		return err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return err
 	}
 	return nil
@@ -2679,7 +2679,7 @@ func hipRunMLXQ4ProjectionBatchKernelWithDeviceInputOutput(ctx context.Context, 
 	if err != nil {
 		return err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return err
 	}
 	return nil
@@ -2827,7 +2827,7 @@ func hipRunMLXQ4TripleProjectionKernelWithDeviceInputViewsOutputWithWorkspace(ct
 	if err != nil {
 		return hipDeviceByteBuffer{}, hipDeviceByteBuffer{}, hipDeviceByteBuffer{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipDeviceByteBuffer{}, hipDeviceByteBuffer{}, hipDeviceByteBuffer{}, err
 	}
 	first := hipDeviceByteBuffer{
@@ -2967,7 +2967,7 @@ func hipRunMLXQ4PairProjectionKernelWithDeviceInputViewsOutputWithWorkspace(ctx 
 	if err != nil {
 		return hipDeviceByteBuffer{}, hipDeviceByteBuffer{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipDeviceByteBuffer{}, hipDeviceByteBuffer{}, err
 	}
 	first := hipDeviceByteBuffer{
@@ -3161,7 +3161,7 @@ func hipRunMLXQ4GELUTanhMultiplyKernelWithDeviceInputOutputWithWorkspace(ctx con
 	if err != nil {
 		return err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return err
 	}
 	return nil
@@ -3265,7 +3265,7 @@ func hipRunMLXQ4GELUTanhMLPPersistentKernelWithDeviceInputOutputWithWorkspace(ct
 	if err != nil {
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, gateCfg, upCfg hipMLXQ4DeviceWeightConfig, batch int) (*hipDeviceByteBuffer, error) {
@@ -3331,7 +3331,7 @@ func hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInput(ctx context.Context, 
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	success = true
@@ -3401,7 +3401,7 @@ func hipRunMLXQ4GELUTanhMultiplyBatchKernelWithDeviceInputOutput(ctx context.Con
 	if err != nil {
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunMLXQ4GELUTanhProjectionKernelWithDeviceMultiplier(ctx context.Context, driver nativeHIPDriver, input, multiplier *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig) (*hipDeviceByteBuffer, error) {
@@ -3501,7 +3501,7 @@ func hipRunMLXQ4GELUTanhProjectionKernelWithDeviceMultiplierOutputWithWorkspace(
 	if err != nil {
 		return err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return err
 	}
 	return nil
@@ -3602,7 +3602,7 @@ func hipRunMLXQ4GELUTanhProjectionBatchKernelWithDeviceMultiplierOutput(ctx cont
 	if err != nil {
 		return err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return err
 	}
 	return nil
@@ -3685,7 +3685,7 @@ func hipRunRMSNormResidualAddGELUTanhProjectionKernelWithDeviceMultiplierOutputW
 	if err != nil {
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunMLXQ4ProjectionSoftcapGreedyKernelWithDeviceInput(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig, softcap float32) (hipGreedySampleResult, error) {
@@ -3785,7 +3785,7 @@ func hipRunMLXQ4ProjectionSoftcapGreedyKernelWithDeviceInputBufferSuppressBuffer
 	if err != nil {
 		return hipGreedySampleResult{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipGreedySampleResult{}, err
 	}
 	packed, err := hipReadDeviceUint64(driver, best.Pointer())
@@ -3893,7 +3893,7 @@ func hipRunMLXQ4ProjectionSoftcapGreedyBatchKernelWithDeviceInputBufferSuppressB
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	packed, err := hipReadUint64DeviceOutput(best, "rocm.hip.MLXQ4ProjectionGreedyBatchLaunch", "MLX q4 projection greedy batch best", batch)
@@ -4193,7 +4193,7 @@ func hipLaunchMLXQ4ProjectionSoftcapGreedyKernelWithDeviceInputBufferSuppressBuf
 	if err != nil {
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunMLXQ4ProjectionSoftcapSelectedGreedyTokenKernelWithDeviceInputBufferResult(ctx context.Context, driver nativeHIPDriver, input *hipDeviceByteBuffer, cfg hipMLXQ4DeviceWeightConfig, softcap float32, selected *hipDeviceTokenBuffer, best *hipDeviceByteBuffer, workspace *hipAttentionHeadsChunkedWorkspace) (hipGreedySampleResult, *hipDeviceByteBuffer, error) {
@@ -4298,7 +4298,7 @@ func hipLaunchMLXQ4ProjectionSoftcapSelectedGreedyKernelWithDeviceInputBufferIni
 	if err != nil {
 		return err
 	}
-	return hipLaunchKernel(driver, config)
+	return hipLaunchKernelContext(ctx, driver, config)
 }
 
 func hipRunOrderedEmbeddingCandidatesKernel(ctx context.Context, driver nativeHIPDriver, topK *hipDeviceByteBuffer, topKCount int, tokenOrderingPointer nativeDevicePointer, tokenOrderingBytes uint64, tokenOrderingElementBytes, numCentroids, tokensPerCentroid int, suppress *hipDeviceTokenBuffer, workspace *hipAttentionHeadsChunkedWorkspace) (*hipDeviceTokenBuffer, error) {
@@ -4361,7 +4361,7 @@ func hipRunOrderedEmbeddingCandidatesKernel(ctx context.Context, driver nativeHI
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	return output, nil
@@ -4413,7 +4413,7 @@ func hipRunPackedTopKKernelWithWorkspaceOutput(ctx context.Context, driver nativ
 	if err != nil {
 		return nil, 0, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, 0, err
 	}
 	return output, outputCount, nil
@@ -4496,7 +4496,7 @@ func hipRunMLXQ4ProjectionSoftcapScoreTopKDeviceWithDeviceInputBufferSuppress(ct
 	if err != nil {
 		return nil, 0, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, 0, err
 	}
 	return hipRunPackedTopKReduceKernelWithWorkspace(ctx, driver, scores, cfg.Rows, topK, workspace)
@@ -4550,7 +4550,7 @@ func hipRunPackedTopKSampleKernel(ctx context.Context, driver nativeHIPDriver, i
 		BlockY: 1,
 		BlockZ: 1,
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipGreedySampleResult{}, nil, err
 	}
 	packed, err := hipReadDeviceUint64(driver, output.Pointer())
@@ -4641,7 +4641,7 @@ func hipRunMLXQ4ProjectionSoftcapScoreKernelWithDeviceInputBufferSuppress(ctx co
 	if err != nil {
 		return nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return nil, err
 	}
 	var top []uint64
@@ -4750,7 +4750,7 @@ func hipRunMLXQ4ProjectionSoftcapSampleKernelWithDeviceInputBufferSuppress(ctx c
 	if err != nil {
 		return hipGreedySampleResult{}, nil, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipGreedySampleResult{}, nil, err
 	}
 	var receiptHostSample hipGreedySampleResult

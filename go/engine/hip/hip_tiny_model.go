@@ -462,7 +462,7 @@ func hipRunLoadedTinyPrefill(ctx context.Context, driver nativeHIPDriver, cfg hi
 	if err != nil {
 		return hipTinyPrefillResult{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipTinyPrefillResult{}, err
 	}
 	output, err := buffers.ReadOutput()
@@ -572,7 +572,7 @@ func hipRunLoadedTinyDecode(ctx context.Context, driver nativeHIPDriver, cfg hip
 	if err != nil {
 		return hipTinyDecodeResult{}, err
 	}
-	if err := hipLaunchKernel(driver, config); err != nil {
+	if err := hipLaunchKernelContext(ctx, driver, config); err != nil {
 		return hipTinyDecodeResult{}, err
 	}
 	output, err := buffers.ReadOutput()
@@ -1698,6 +1698,7 @@ func hipGemma4Q4GenerateBatchDeviceGreedyUnrolled(ctx context.Context, model *hi
 	var priorLayerKVScratch []*rocmDeviceKVCache
 	var priorLayerDescriptorScratch []*rocmDeviceKVDescriptorTable
 	tokens := []int32{0}
+	batchKernelLaunches := hipDecodeKernelBatchEnabled()
 	for generated := 1; generated < generate.MaxTokens; generated++ {
 		if err := hipContextErr(ctx); err != nil {
 			return deviceState, position, err
@@ -1715,9 +1716,21 @@ func hipGemma4Q4GenerateBatchDeviceGreedyUnrolled(ctx context.Context, model *hi
 			priorLayerDescriptorScratch = hipGemma4Q4DeviceLayerDescriptorTables(deviceState, priorLayerDescriptorScratch, len(cfg.Layers))
 			priorLayerDescriptorTables = priorLayerDescriptorScratch
 		}
-		forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowGreedyTokenWithEngineConfig(ctx, model.driver, cfg, tokens, position, epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, nil, -1, nil, workspace, engineConfig, greedyToken)
+		forwardCtx := ctx
+		var launchBatch *hipKernelLaunchBatch
+		if batchKernelLaunches {
+			forwardCtx, launchBatch = hipBeginKernelLaunchBatch(ctx, model.driver)
+		}
+		forward, err := hipRunGemma4Q4PrefillForwardBatchWithPriorDescriptorWorkspaceOutputRowGreedyTokenWithEngineConfig(forwardCtx, model.driver, cfg, tokens, position, epsilon, deviceKVMode, priorLayerKV, priorLayerDescriptorTables, nil, nil, -1, nil, workspace, engineConfig, greedyToken)
 		if err != nil {
+			launchBatch.Discard()
 			return deviceState, position, err
+		}
+		if launchBatch != nil {
+			if err := launchBatch.Flush(); err != nil {
+				_ = forward.Close()
+				return deviceState, position, err
+			}
 		}
 		nextDeviceState, stateErr := hipGemma4Q4DeviceDecodeStateFromPrefillForward(forward, deviceKVMode)
 		if stateErr != nil {

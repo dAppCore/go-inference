@@ -6856,6 +6856,54 @@ func TestHIPAttentionHeadsBatchChunkedEligibilityReason_Good(t *testing.T) {
 	core.AssertEqual(t, hipAttentionHeadsBatchChunkedEligibilityTokenCountMismatch, hipAttentionHeadsBatchChunkedEligibilityReasonFor(req, workspace))
 }
 
+func TestHIPAttentionHeadsBatchChunkedEligibilityReason_SlidingWindowCrossover_Good(t *testing.T) {
+	cache := &rocmDeviceKVCache{
+		mode:       rocmKVCacheModeKQ8VQ4,
+		blockSize:  1,
+		pages:      []rocmDeviceKVPage{{tokenStart: 0, tokenCount: 129, keyWidth: 256, valueWidth: 256}},
+		tokenCount: 129,
+	}
+	req := hipAttentionHeadsBatchCausalDeviceRequest{
+		DeviceKV:        cache,
+		DescriptorTable: &rocmDeviceKVDescriptorTable{},
+		Dim:             256,
+		TokenCount:      129,
+		HeadCount:       8,
+		KeyHeads:        1,
+		QueryCount:      1,
+		QueryStartToken: 128,
+		WindowSize:      512,
+	}
+
+	core.AssertEqual(t, hipAttentionHeadsBatchChunkedEligibilityEligible, hipAttentionHeadsBatchChunkedEligibilityReasonFor(req, &hipAttentionHeadsChunkedWorkspace{}))
+	req.TokenCount = 128
+	req.QueryStartToken = 127
+	cache.tokenCount = 128
+	cache.pages[0].tokenCount = 128
+	core.AssertEqual(t, hipAttentionHeadsBatchChunkedEligibilityBelowTokenThreshold, hipAttentionHeadsBatchChunkedEligibilityReasonFor(req, &hipAttentionHeadsChunkedWorkspace{}))
+}
+
+func TestHIPAttentionHeadsBatchChunkedEligibilityReason_HeadDim512Crossover_Good(t *testing.T) {
+	cache := &rocmDeviceKVCache{
+		mode:       rocmKVCacheModeKQ8VQ4,
+		blockSize:  1,
+		pages:      []rocmDeviceKVPage{{tokenStart: 0, tokenCount: 129, keyWidth: 512, valueWidth: 512}},
+		tokenCount: 129,
+	}
+	req := hipAttentionHeadsBatchCausalDeviceRequest{
+		DeviceKV:        cache,
+		DescriptorTable: &rocmDeviceKVDescriptorTable{},
+		Dim:             512,
+		TokenCount:      129,
+		HeadCount:       8,
+		KeyHeads:        1,
+		QueryCount:      1,
+		QueryStartToken: 128,
+	}
+
+	core.AssertEqual(t, hipAttentionHeadsBatchChunkedEligibilityEligible, hipAttentionHeadsBatchChunkedEligibilityReasonFor(req, &hipAttentionHeadsChunkedWorkspace{}))
+}
+
 func BenchmarkHIPDeviceByteBufferPool_ReusedSize(b *testing.B) {
 	driver := &fakeHIPDriver{available: true}
 	const sizeBytes uint64 = 4096
