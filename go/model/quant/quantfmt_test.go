@@ -102,6 +102,71 @@ const fp8Bare = `{
 	"fmt": "e4m3"
 }`
 
+// AMD Quark's native "quark" quant_method, trimmed from a real checkpoint's
+// quantization_config: FP8-KV, per-tensor E4M3
+// (amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test/blob/main/config.json).
+const quarkFP8Bare = `{
+	"quant_method": "quark",
+	"quant_mode": "eager_mode",
+	"global_quant_config": {
+		"weight": {
+			"dtype": "fp8_e4m3",
+			"qscheme": "per_tensor",
+			"group_size": null,
+			"is_dynamic": false,
+			"symmetric": null
+		},
+		"input_tensors": {
+			"dtype": "fp8_e4m3",
+			"qscheme": "per_tensor",
+			"is_dynamic": false
+		},
+		"output_tensors": null
+	}
+}`
+
+// AMD Quark's native "quark" quant_method, trimmed from a real checkpoint's
+// quantization_config: the OCP-microscaled MXFP4/MX lane (dtype fp4,
+// per_group, group_size 32, scale_format e8m0)
+// (amd/Qwen3.5-397B-A17B-MXFP4/blob/main/config.json).
+const quarkMXFP4Bare = `{
+	"quant_method": "quark",
+	"quant_mode": "eager_mode",
+	"global_quant_config": {
+		"weight": {
+			"dtype": "fp4",
+			"qscheme": "per_group",
+			"group_size": 32,
+			"is_dynamic": false,
+			"scale_format": "e8m0",
+			"symmetric": null
+		},
+		"input_tensors": {
+			"dtype": "fp4",
+			"qscheme": "per_group",
+			"group_size": 32,
+			"is_dynamic": true,
+			"scale_format": "e8m0"
+		},
+		"output_tensors": null
+	}
+}`
+
+// quark nested in a full config.json, using int8 per-channel weights with
+// dynamic per-token activations — exercises the Symmetric/Activation paths
+// the two bare fixtures above leave untouched.
+const quarkNested = `{
+	"architectures": ["LlamaForCausalLM"],
+	"hidden_size": 4096,
+	"quantization_config": {
+		"quant_method": "quark",
+		"global_quant_config": {
+			"weight": {"dtype": "int8", "qscheme": "per_channel", "symmetric": true},
+			"input_tensors": {"dtype": "int8", "is_dynamic": true}
+		}
+	}
+}`
+
 const bitsandbytesBare = `{
 	"quant_method": "bitsandbytes",
 	"load_in_4bit": true,
@@ -273,6 +338,66 @@ func TestQuantFmt_Parse_Good(t *testing.T) {
 		}
 		if qi.Bits != 8 {
 			t.Errorf("bits: got %d, want 8", qi.Bits)
+		}
+	})
+
+	t.Run("quark fp8", func(t *testing.T) {
+		qi, err := Parse(quarkFP8Bare)
+		if err != nil {
+			t.Fatalf("parse quark fp8: %v", err)
+		}
+		if qi.Method != MethodQuark {
+			t.Errorf("method: got %q, want %q", qi.Method, MethodQuark)
+		}
+		if qi.Bits != 8 {
+			t.Errorf("bits: got %d, want 8", qi.Bits)
+		}
+		if qi.Scheme != "fp8_e4m3" {
+			t.Errorf("scheme: got %q, want fp8_e4m3", qi.Scheme)
+		}
+		if qi.Activation != "static" {
+			t.Errorf("activation: got %q, want static", qi.Activation)
+		}
+		if qi.GroupSize != 0 {
+			t.Errorf("group_size: got %d, want 0 (per-tensor)", qi.GroupSize)
+		}
+	})
+
+	t.Run("quark mxfp4", func(t *testing.T) {
+		qi, err := Parse(quarkMXFP4Bare)
+		if err != nil {
+			t.Fatalf("parse quark mxfp4: %v", err)
+		}
+		if qi.Method != MethodQuark {
+			t.Errorf("method: got %q, want %q", qi.Method, MethodQuark)
+		}
+		if qi.Bits != 4 {
+			t.Errorf("bits: got %d, want 4", qi.Bits)
+		}
+		if qi.GroupSize != 32 {
+			t.Errorf("group_size: got %d, want 32", qi.GroupSize)
+		}
+		if qi.Scheme != "fp4" {
+			t.Errorf("scheme: got %q, want fp4", qi.Scheme)
+		}
+		if qi.Activation != "dynamic" {
+			t.Errorf("activation: got %q, want dynamic", qi.Activation)
+		}
+	})
+
+	t.Run("quark nested in config.json", func(t *testing.T) {
+		qi, err := Parse(quarkNested)
+		if err != nil {
+			t.Fatalf("parse quark nested: %v", err)
+		}
+		if qi.Bits != 8 {
+			t.Errorf("bits: got %d, want 8", qi.Bits)
+		}
+		if !qi.Symmetric {
+			t.Errorf("symmetric: got false, want true")
+		}
+		if qi.Activation != "dynamic" {
+			t.Errorf("activation: got %q, want dynamic", qi.Activation)
 		}
 	})
 }
@@ -589,6 +714,28 @@ func TestQuantFmt_String_Good(t *testing.T) {
 			t.Errorf("string: got %q, want compressed-tensors:4bit:g128:W4A16", got)
 		}
 	})
+
+	t.Run("quark mxfp4 includes group size and dtype scheme", func(t *testing.T) {
+		qi, err := Parse(quarkMXFP4Bare)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		got := qi.String()
+		if got != "quark:4bit:g32:fp4" {
+			t.Errorf("string: got %q, want quark:4bit:g32:fp4", got)
+		}
+	})
+
+	t.Run("quark fp8 has no group size", func(t *testing.T) {
+		qi, err := Parse(quarkFP8Bare)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		got := qi.String()
+		if got != "quark:8bit:fp8_e4m3" {
+			t.Errorf("string: got %q, want quark:8bit:fp8_e4m3", got)
+		}
+	})
 }
 
 // TestQuantFmt_String_Bad — degenerate infos render without panicking and omit
@@ -719,6 +866,25 @@ func TestQuantFmt_GPTQ_NoBits_EmptyScheme(t *testing.T) {
 	}
 	if qi.Scheme != "" {
 		t.Errorf("scheme: got %q, want empty (no bits)", qi.Scheme)
+	}
+}
+
+// TestQuarkDtypeBits — every documented AMD Quark dtype string maps to its
+// own sign+exponent+mantissa (or integer) bit width; an unrecognised or bare
+// "OCP MX" tag stays unmapped (0) rather than guessed.
+func TestQuarkDtypeBits(t *testing.T) {
+	cases := map[string]int{
+		"int2": 2, "int4": 4, "fp4": 4,
+		"fp6_e3m2": 6, "fp6_e2m3": 6, "MX6": 6,
+		"int8": 8, "fp8_e4m3": 8, "fp8_e5m2": 8,
+		"MX9":      9,
+		"bfloat16": 16, "float16": 16, "bfp16": 16,
+		"OCP MX": 0, "": 0, "nf4": 0,
+	}
+	for dtype, want := range cases {
+		if got := quarkDtypeBits(dtype); got != want {
+			t.Errorf("quarkDtypeBits(%q): got %d, want %d", dtype, got, want)
+		}
 	}
 }
 
