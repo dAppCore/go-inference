@@ -1428,7 +1428,7 @@ func hipRunRMSNormResidualAddNormScaledKernelWithDeviceInputWeightConfigOutputWi
 	if err != nil {
 		return err
 	}
-	config, err := hipSingleBlockLaunchConfig(hipKernelNameRMSNormResAddNorm, launchBytes, 256)
+	config, err := hipSingleBlockLaunchConfig(hipKernelNameRMSNormResAddNorm, launchBytes, hipRMSNormResidualAddNormBlockSize(residualCfg.Count))
 	if err != nil {
 		return err
 	}
@@ -1436,6 +1436,13 @@ func hipRunRMSNormResidualAddNormScaledKernelWithDeviceInputWeightConfigOutputWi
 		return err
 	}
 	return nil
+}
+
+func hipRMSNormResidualAddNormBlockSize(count int) uint32 {
+	if count == 2560 {
+		return 512
+	}
+	return 256
 }
 
 func hipValidateRMSNormDeviceWeightConfig(operation string, cfg hipRMSNormDeviceWeightConfig) error {

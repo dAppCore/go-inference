@@ -50,6 +50,14 @@ func TestHIPSmallDecode_Good_QwenGemmaSmoke(t *testing.T) {
 	}
 }
 
+func TestHIPRMSNormResidualAddNormBlockSize_E4B_Good(t *testing.T) {
+	core.AssertEqual(t, uint32(512), hipRMSNormResidualAddNormBlockSize(2560))
+}
+
+func TestHIPRMSNormResidualAddNormBlockSize_Default_Good(t *testing.T) {
+	core.AssertEqual(t, uint32(256), hipRMSNormResidualAddNormBlockSize(1536))
+}
+
 func TestHIPGemma4Q4Layer0_Good(t *testing.T) {
 	driver := &fakeHIPDriver{available: true}
 	cfg, cleanup := hipGemma4Q4Layer0FixtureConfig(t, driver)
