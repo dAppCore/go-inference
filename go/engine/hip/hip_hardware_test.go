@@ -132,7 +132,7 @@ func TestHIPHardwareDiffusionExpectedEmbedding_Good(t *testing.T) {
 		biasBuffer, err := hipUploadByteBuffer(hipRuntime.driver, "rocm.hip.DiffusionExpectedEmbeddingHardware", label+" biases", biasPayload, len(biases))
 		core.RequireNoError(t, err)
 		defer biasBuffer.Close()
-		rowCounts := []int{33}
+		rowCounts := []int{33, 256}
 		for _, affineRows := range rowCounts {
 			probabilities := make([]float32, affineRows*affineVocab)
 			for row := 0; row < affineRows; row++ {

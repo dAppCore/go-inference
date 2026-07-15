@@ -35,11 +35,20 @@ const (
 	hipDiffusionExpectedEmbeddingAffineG64RowsPerBlock = 16
 	hipDiffusionExpectedEmbeddingQ8G64DimsPerThread    = 4
 	hipDiffusionExpectedEmbeddingQ8G64RowsPerBlock     = 4
+	hipDiffusionExpectedEmbeddingQ8G64SubgroupWidth    = 32
+	hipDiffusionExpectedEmbeddingQ8G64RowsPerSubgroup  = 8
+	hipDiffusionExpectedEmbeddingQ8G64Subgroups        = 8
+	hipDiffusionExpectedEmbeddingQ8G64SubgroupRows     = hipDiffusionExpectedEmbeddingQ8G64RowsPerSubgroup * hipDiffusionExpectedEmbeddingQ8G64Subgroups
+	hipDiffusionExpectedEmbeddingQ8G64SubgroupDims     = hipDiffusionExpectedEmbeddingQ8G64SubgroupWidth * hipDiffusionExpectedEmbeddingQ8G64DimsPerThread
+	hipDiffusionExpectedEmbeddingQ8G64SubgroupMinRows  = 128
 	hipDiffusionExpectedEmbeddingQ8G64TileRows         = 32
 	hipDiffusionExpectedEmbeddingQ8G64TileDims         = 64
 )
 
-const hipDisableDiffusionExpectedEmbeddingTileEnv = "GO_ROCM_DISABLE_DIFFUSION_EXPECTED_EMBEDDING_TILE"
+const (
+	hipDisableDiffusionExpectedEmbeddingSubgroupEnv = "GO_ROCM_DISABLE_DIFFUSION_EXPECTED_EMBEDDING_SUBGROUP"
+	hipDisableDiffusionExpectedEmbeddingTileEnv     = "GO_ROCM_DISABLE_DIFFUSION_EXPECTED_EMBEDDING_TILE"
+)
 
 type hipEmbeddingMeanPoolRequest struct {
 	Tokens     []float32
@@ -741,7 +750,15 @@ func hipRunDiffusionExpectedEmbeddingDeviceKernel(ctx context.Context, driver na
 	gridRows := rows
 	gridHidden := cfg.HiddenSize
 	bits := hipMLXQ4ProjectionBitsOrDefault(cfg.QuantBits)
-	if rows >= hipDiffusionExpectedEmbeddingQ8G64TileRows &&
+	if rows >= hipDiffusionExpectedEmbeddingQ8G64SubgroupMinRows &&
+		cfg.TableEncoding == hipEmbeddingTableEncodingMLXQ4 &&
+		cfg.GroupSize == 64 &&
+		bits == 8 &&
+		core.Env(hipDisableDiffusionExpectedEmbeddingSubgroupEnv) != "1" {
+		kernelName = hipKernelNameDiffusionExpectedEmbeddingQ8G64SubgroupRows64
+		gridRows = (rows + hipDiffusionExpectedEmbeddingQ8G64SubgroupRows - 1) / hipDiffusionExpectedEmbeddingQ8G64SubgroupRows
+		gridHidden = ((cfg.HiddenSize + hipDiffusionExpectedEmbeddingQ8G64SubgroupDims - 1) / hipDiffusionExpectedEmbeddingQ8G64SubgroupDims) * 256
+	} else if rows >= hipDiffusionExpectedEmbeddingQ8G64TileRows &&
 		rows <= 2*hipDiffusionExpectedEmbeddingQ8G64TileRows &&
 		cfg.TableEncoding == hipEmbeddingTableEncodingMLXQ4 &&
 		cfg.GroupSize == 64 &&

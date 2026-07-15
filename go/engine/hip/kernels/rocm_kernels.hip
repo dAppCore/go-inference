@@ -246,6 +246,11 @@ constexpr uint32_t ROCM_EMBEDDING_TABLE_ENCODING_MLX_Q4 = 3;
 constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_AFFINE_G64_ROWS_PER_BLOCK = 16;
 constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_DIMS_PER_THREAD = 4;
 constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_ROWS_PER_THREAD = 4;
+constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUP_WIDTH = 32;
+constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_ROWS_PER_SUBGROUP = 8;
+constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUPS_PER_BLOCK = ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE / ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUP_WIDTH;
+constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUP_ROWS_PER_BLOCK = ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_ROWS_PER_SUBGROUP * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUPS_PER_BLOCK;
+constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUP_DIMS_PER_BLOCK = ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUP_WIDTH * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_DIMS_PER_THREAD;
 constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_TILE_ROWS = 32;
 constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_TILE_DIMS = 64;
 constexpr uint32_t ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_TOKEN_TILE = 64;
@@ -10192,6 +10197,89 @@ extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_dims4_rows4(
 			if (dim < args.hidden_size) {
 				output[static_cast<uint64_t>(row) * args.hidden_size + dim] = sums[row_lane][dim_lane] * output_scale;
 			}
+		}
+	}
+}
+
+extern "C" __global__ void rocm_diffusion_expected_embedding_q8_g64_subgroup32_rows64(const unsigned char *packet)
+{
+	if (packet == nullptr) {
+		return;
+	}
+	const rocm_diffusion_expected_embedding_launch_args &args = *reinterpret_cast<const rocm_diffusion_expected_embedding_launch_args *>(packet);
+	if (!rocm_valid_diffusion_expected_embedding_args(args) ||
+		args.table_encoding != ROCM_EMBEDDING_TABLE_ENCODING_MLX_Q4 ||
+		args.group_size != 64u ||
+		args.bits != 8u ||
+		blockDim.x != ROCM_MLX_Q4_PROJECTION_BLOCK_SIZE) {
+		return;
+	}
+
+	const uint32_t thread = threadIdx.x;
+	const uint32_t subgroup = thread / ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUP_WIDTH;
+	const uint32_t lane = thread - subgroup * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUP_WIDTH;
+	const uint32_t row_base = blockIdx.y * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUP_ROWS_PER_BLOCK + subgroup * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_ROWS_PER_SUBGROUP;
+	const uint32_t dim_base = blockIdx.x * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUP_DIMS_PER_BLOCK + lane * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_DIMS_PER_THREAD;
+	if (blockIdx.y * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUP_ROWS_PER_BLOCK >= args.rows ||
+		blockIdx.x * ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUP_DIMS_PER_BLOCK >= args.hidden_size) {
+		return;
+	}
+
+	const float *probabilities = reinterpret_cast<const float *>(static_cast<uintptr_t>(args.probability_pointer));
+	const uint32_t *embedding = reinterpret_cast<const uint32_t *>(static_cast<uintptr_t>(args.embedding_pointer));
+	const uint16_t *scales = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.scale_pointer));
+	const uint16_t *biases = reinterpret_cast<const uint16_t *>(static_cast<uintptr_t>(args.bias_pointer));
+	float *output = reinterpret_cast<float *>(static_cast<uintptr_t>(args.output_pointer));
+	const uint64_t packed_per_row = rocm_mlx_affine_packed_per_row(args.hidden_size, args.bits);
+	const uint32_t groups_per_row = args.hidden_size / args.group_size;
+	const bool dim_valid = dim_base < args.hidden_size;
+	float sums[ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_ROWS_PER_SUBGROUP][ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_DIMS_PER_THREAD] = {};
+	for (uint32_t token = 0u; token < args.vocab_size; ++token) {
+		uint32_t word = 0u;
+		float scale = 0.0f;
+		float bias = 0.0f;
+		if (dim_valid) {
+			word = embedding[static_cast<uint64_t>(token) * packed_per_row + dim_base / ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_DIMS_PER_THREAD];
+			const uint64_t group = static_cast<uint64_t>(token) * groups_per_row + dim_base / args.group_size;
+			scale = rocm_bfloat16_to_float(scales[group]);
+			bias = rocm_bfloat16_to_float(biases[group]);
+		}
+		const float values[ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_DIMS_PER_THREAD] = {
+			static_cast<float>(word & 0xffu) * scale + bias,
+			static_cast<float>((word >> 8u) & 0xffu) * scale + bias,
+			static_cast<float>((word >> 16u) & 0xffu) * scale + bias,
+			static_cast<float>(word >> 24u) * scale + bias,
+		};
+		float probability_source = 0.0f;
+		if (lane < ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_ROWS_PER_SUBGROUP) {
+			const uint32_t row = row_base + lane;
+			if (row < args.rows) {
+				probability_source = probabilities[static_cast<uint64_t>(row) * args.vocab_size + token];
+			}
+		}
+#pragma unroll
+		for (uint32_t row_lane = 0u; row_lane < ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_ROWS_PER_SUBGROUP; ++row_lane) {
+			const float probability = rocm_shfl_float(probability_source, static_cast<int>(row_lane), ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_SUBGROUP_WIDTH);
+#pragma unroll
+			for (uint32_t dim_lane = 0u; dim_lane < ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_DIMS_PER_THREAD; ++dim_lane) {
+				sums[row_lane][dim_lane] = fmaf(probability, values[dim_lane], sums[row_lane][dim_lane]);
+			}
+		}
+	}
+
+	if (!dim_valid) {
+		return;
+	}
+	const float output_scale = args.output_scale_bits == 0u ? 1.0f : rocm_float_from_bits(args.output_scale_bits);
+#pragma unroll
+	for (uint32_t row_lane = 0u; row_lane < ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_ROWS_PER_SUBGROUP; ++row_lane) {
+		const uint32_t row = row_base + row_lane;
+		if (row >= args.rows) {
+			continue;
+		}
+#pragma unroll
+		for (uint32_t dim_lane = 0u; dim_lane < ROCM_DIFFUSION_EXPECTED_EMBEDDING_Q8_G64_DIMS_PER_THREAD; ++dim_lane) {
+			output[static_cast<uint64_t>(row) * args.hidden_size + dim_base + dim_lane] = sums[row_lane][dim_lane] * output_scale;
 		}
 	}
 }
