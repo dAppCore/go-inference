@@ -1,24 +1,9 @@
-# Keeps the go-inference knowledge graph fresh on the homelab graphify server.
-#
-# On each push to dev/main the shell runner re-extracts go-inference (AST-only —
-# no LLM, no API cost) into the central store at /srv/graphify and merges it
-# into the global graph. graphify-mcp (systemd on the box) serves that graph at
-# https://graphify.lthn.sh and hot-reloads on file change, so a green run here
-# is a fresh graph with no restart.
-#
-# external/ (vendored mlx + ROCm C/C++) is excluded via .graphifyignore, and
-# submodules aren't fetched at all — the graph is go-inference's OWN code.
-graphify:
-  stage: build
-  tags: [homelab]
-  interruptible: true
-  allow_failure: true          # the graph is auxiliary — never gate go-inference CI on it
-  variables:
-    GIT_SUBMODULE_STRATEGY: none
-    HOME: /srv/graphify        # → global graph at /srv/graphify/.graphify/global-graph.json
-  script:
-    - /usr/local/bin/graphify extract "$CI_PROJECT_DIR" --code-only --out "/srv/graphify/graphs/$CI_PROJECT_NAME" --global --as "$CI_PROJECT_NAME"
-    - /usr/local/bin/graphify global list
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "dev"'
-    - if: '$CI_COMMIT_BRANCH == "main"'
+# graphify code-graph job — shared from dappcore/devops/build.
+# Keeps go-inference's slice of the fleet knowledge graph fresh on
+# https://graphify.lthn.sh. external/ (vendored mlx/ROCm) is excluded via
+# .graphifyignore. The job + the flock-serialised global merge live in the
+# shared template, so the fix is in one place for the whole fleet.
+include:
+  - project: 'dappcore/devops/build'
+    file: '/gitlab/graphify.yml'
+    ref: dev
