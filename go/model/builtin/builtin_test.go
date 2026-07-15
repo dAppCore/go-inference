@@ -114,3 +114,21 @@ func TestBuiltinRegistersMoEFamilies(t *testing.T) {
 		}
 	}
 }
+
+// TestBuiltinRegistersOCRArches confirms the blank-import wiring alone (no other package import)
+// carries all three OCR vision-language arches' registrations: deepseek_vl_v2 (DeepSeek-OCR),
+// dots_ocr / dots_ocr_1_5 (DOTS-OCR), and glm_ocr / glm_ocr_text (GLM-OCR). Each is recognised
+// with both a Parse and a Composed refusal hook — a checkpoint resolves to a named architecture,
+// not "unknown model architecture" — though neither loader path implements the forward yet (see
+// each package's own Registered_Good test for the refusal-message contract).
+func TestBuiltinRegistersOCRArches(t *testing.T) {
+	for _, mt := range []string{"deepseek_vl_v2", "dots_ocr", "dots_ocr_1_5", "glm_ocr", "glm_ocr_text"} {
+		spec, ok := model.LookupArch(mt)
+		if !ok {
+			t.Fatalf("model_type %q not registered through builtin — an OCR arch must be recognised, not fall to \"unknown model architecture\"", mt)
+		}
+		if spec.Parse == nil || spec.Composed == nil {
+			t.Fatalf("model_type %q registered without both a Parse and a Composed refusal hook", mt)
+		}
+	}
+}
