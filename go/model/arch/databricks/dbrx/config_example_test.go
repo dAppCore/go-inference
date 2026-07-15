@@ -4,7 +4,7 @@ package dbrx_test
 
 import (
 	core "dappco.re/go"
-	"dappco.re/go/inference/model/dbrx"
+	"dappco.re/go/inference/model/arch/databricks/dbrx"
 )
 
 func ExampleConfig() {
